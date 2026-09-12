@@ -7,8 +7,9 @@
 #include "base/functional/bind.h"
 #include "chrome/browser/lifetime/application_lifetime_desktop.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/tabs/pinned_tab_codec.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 
@@ -17,19 +18,21 @@ PinnedTabService::PinnedTabService(Profile* profile) : profile_(profile) {
       base::BindRepeating(&PinnedTabService::OnClosingAllBrowsersChanged,
                           base::Unretained(this)));
 
-  for (Browser* browser : *BrowserList::GetInstance())
-    OnBrowserAdded(browser);
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [this](BrowserWindowInterface* browser) {
+        OnBrowserCreated(browser);
+        return true;
+      });
 
-  BrowserList::AddObserver(this);
+  browser_collection_observation_.Observe(
+      GlobalBrowserCollection::GetInstance());
 }
 
-PinnedTabService::~PinnedTabService() {
-  BrowserList::RemoveObserver(this);
-}
+PinnedTabService::~PinnedTabService() = default;
 
 void PinnedTabService::OnClosingAllBrowsersChanged(bool closing) {
   // Saving of tabs happens when the user exits the application or closes the
-  // last browser window. After saving, |need_to_write_pinned_tabs_| is set to
+  // last browser window. After saving, `need_to_write_pinned_tabs_` is set to
   // false to make sure subsequent window closures don't overwrite the pinned
   // tab state. Saving is re-enabled when a browser window or tab is opened
   // again. Note, cancelling a shutdown (via onbeforeunload) will not re-enable
@@ -43,51 +46,63 @@ void PinnedTabService::OnClosingAllBrowsersChanged(bool closing) {
   //   * pinned tabs are saved, without the window with the pinned tabs,
   //     over-writing the correct state.
   // Saving is re-enabled if a new tab or window is opened.
-  if (closing && TabStripModelObserver::IsObservingAny(this))
+  if (closing && TabStripModelObserver::IsObservingAny(this)) {
     WritePinnedTabsIfNecessary();
+  }
 }
 
-void PinnedTabService::OnBrowserAdded(Browser* browser) {
-  if (browser->profile() != profile_ || !browser->is_type_normal())
+void PinnedTabService::OnBrowserCreated(BrowserWindowInterface* browser) {
+  if (browser->GetProfile() != profile_ ||
+      browser->GetType() != BrowserWindowInterface::TYPE_NORMAL) {
     return;
+  }
 
   need_to_write_pinned_tabs_ = true;
-  browser->tab_strip_model()->AddObserver(this);
+  // TODO(crbug.com/452120900): TabStripModel auto-unregistered by dtor
+  browser->GetTabStripModel()->AddObserver(this);
 }
 
-void PinnedTabService::OnBrowserClosing(Browser* browser) {
-  if (browser->profile() != profile_ || !browser->is_type_normal())
+void PinnedTabService::OnBrowserClosed(BrowserWindowInterface* browser) {
+  if (browser->GetProfile() != profile_ ||
+      browser->GetType() != BrowserWindowInterface::TYPE_NORMAL) {
     return;
+  }
 
-  if (TabStripModelObserver::CountObservedModels(this) == 1)
+  browser->GetTabStripModel()->RemoveObserver(this);
+
+  // This happens when user closes each tab manually via the close button. In
+  // this case WillCloseAllTabs() with closing_all() is not called. This causes
+  // pinned tabs to reopen on the next startup. So we should call
+  // WritePinnedTabsIfNecessary() to clear the data. See crbug.com/543307904.
+  if (!TabStripModelObserver::IsObservingAny(this)) {
     WritePinnedTabsIfNecessary();
-}
-
-void PinnedTabService::OnBrowserRemoved(Browser* browser) {
-  if (browser->profile() != profile_ || !browser->is_type_normal())
-    return;
-
-  browser->tab_strip_model()->RemoveObserver(this);
-
-  // This happens when user closes each tabs manually via the close button on
-  // them. In this case OnBrowserClosing() above is not called. This causes
-  // pinned tabs to repopen on the next startup. So we should call
-  // WritePinnedTab() to clear the data.
-  // http://crbug.com/71939
-  if (!TabStripModelObserver::IsObservingAny(this))
-    WritePinnedTabsIfNecessary();
+  }
 }
 
 void PinnedTabService::OnTabStripModelChanged(
     TabStripModel* tab_strip_model,
     const TabStripModelChange& change,
     const TabStripSelectionChange& selection) {
-  if (change.type() == TabStripModelChange::kInserted)
+  if (change.type() == TabStripModelChange::kInserted) {
     need_to_write_pinned_tabs_ = true;
+  }
+}
+
+void PinnedTabService::OnTabPinnedStateChanged(tabs::TabInterface* tab,
+                                               int index) {
+  need_to_write_pinned_tabs_ = true;
+}
+
+void PinnedTabService::WillCloseAllTabs(TabStripModel* tab_strip_model) {
+  if (tab_strip_model->closing_all() &&
+      TabStripModelObserver::CountObservedModels(this) == 1) {
+    WritePinnedTabsIfNecessary();
+  }
 }
 
 void PinnedTabService::WritePinnedTabsIfNecessary() {
-  if (need_to_write_pinned_tabs_)
+  if (need_to_write_pinned_tabs_) {
     PinnedTabCodec::WritePinnedTabs(profile_);
+  }
   need_to_write_pinned_tabs_ = false;
 }

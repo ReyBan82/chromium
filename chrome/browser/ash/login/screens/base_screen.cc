@@ -8,6 +8,7 @@
 #include "base/check_op.h"
 #include "base/command_line.h"
 #include "base/logging.h"
+#include "base/notimplemented.h"
 #include "base/notreached.h"
 #include "base/values.h"
 #include "chrome/browser/ash/login/wizard_context.h"
@@ -43,7 +44,7 @@ bool BaseScreen::ShouldBeSkipped(const WizardContext& context) const {
   return false;
 }
 
-void BaseScreen::HandleUserAction(const base::Value::List& args) {
+void BaseScreen::HandleUserAction(const base::ListValue& args) {
   CHECK(!args.empty());
   if (is_hidden_) {
     LOG(WARNING) << "User action came when screen is hidden: action_id="
@@ -64,9 +65,14 @@ bool BaseScreen::HandleAccelerator(LoginAcceleratorAction action) {
   return false;
 }
 
-void BaseScreen::OnUserAction(const base::Value::List& args) {
+void BaseScreen::OnUserAction(const base::ListValue& args) {
   CHECK_GE(args.size(), 1u);
   NOTREACHED() << "Unhandled user action: action_id=" << args[0];
+}
+
+ScreenSummary BaseScreen::GetScreenSummary() {
+  NOTIMPLEMENTED();
+  return {};
 }
 
 }  // namespace ash

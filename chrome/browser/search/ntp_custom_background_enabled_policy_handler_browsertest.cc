@@ -7,7 +7,8 @@
 #include "base/run_loop.h"
 #include "base/values.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/themes/theme_syncable_service.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/policy/core/browser/browser_policy_connector.h"
@@ -39,7 +40,7 @@ class NtpCustomBackgroundEnabledPolicyHandlerTest
 };
 
 IN_PROC_BROWSER_TEST_F(NtpCustomBackgroundEnabledPolicyHandlerTest, Override) {
-  PrefService* prefs = browser()->profile()->GetPrefs();
+  PrefService* prefs = browser()->GetProfile()->GetPrefs();
 
   // Check initial states.
   EXPECT_FALSE(prefs->GetDict(prefs::kNtpCustomBackgroundDict).empty());

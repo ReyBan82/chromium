@@ -10,6 +10,7 @@
 
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "chromeos/ash/components/dbus/media_analytics/fake_media_analytics_client.h"
@@ -143,7 +144,7 @@ class MediaAnalyticsClientImpl : public MediaAnalyticsClient {
                dbus::Response* response) {
     if (!response) {
       LOG(ERROR) << "Call to State failed to get response.";
-      std::move(callback).Run(absl::nullopt);
+      std::move(callback).Run(std::nullopt);
       return;
     }
 
@@ -151,7 +152,7 @@ class MediaAnalyticsClientImpl : public MediaAnalyticsClient {
     dbus::MessageReader reader(response);
     if (!reader.PopArrayOfBytesAsProto(&state)) {
       LOG(ERROR) << "Invalid D-Bus response: " << response->ToString();
-      std::move(callback).Run(absl::nullopt);
+      std::move(callback).Run(std::nullopt);
       return;
     }
 
@@ -162,7 +163,7 @@ class MediaAnalyticsClientImpl : public MediaAnalyticsClient {
                         dbus::Response* response) {
     if (!response) {
       LOG(ERROR) << "Call to GetDiagnostics failed to get response.";
-      std::move(callback).Run(absl::nullopt);
+      std::move(callback).Run(std::nullopt);
       return;
     }
 
@@ -170,15 +171,15 @@ class MediaAnalyticsClientImpl : public MediaAnalyticsClient {
     dbus::MessageReader reader(response);
     if (!reader.PopArrayOfBytesAsProto(&diagnostics)) {
       LOG(ERROR) << "Invalid GetDiagnostics response: " << response->ToString();
-      std::move(callback).Run(absl::nullopt);
+      std::move(callback).Run(std::nullopt);
       return;
     }
 
     std::move(callback).Run(std::move(diagnostics));
   }
 
-  dbus::ObjectProxy* dbus_proxy_ = nullptr;
-  base::ObserverList<Observer>::Unchecked observer_list_;
+  raw_ptr<dbus::ObjectProxy> dbus_proxy_ = nullptr;
+  base::ObserverList<Observer> observer_list_;
   base::WeakPtrFactory<MediaAnalyticsClientImpl> weak_ptr_factory_{this};
 };
 

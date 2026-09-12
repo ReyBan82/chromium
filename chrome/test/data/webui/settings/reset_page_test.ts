@@ -5,11 +5,10 @@
 // clang-format off
 import 'chrome://settings/lazy_load.js';
 
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
-import {CrCheckboxElement, SettingsResetPageElement, SettingsResetProfileDialogElement} from 'chrome://settings/lazy_load.js';
+import type {CrCheckboxElement, SettingsResetPageElement, SettingsResetProfileDialogElement} from 'chrome://settings/lazy_load.js';
 import {ResetBrowserProxyImpl, Router, routes} from 'chrome://settings/settings.js';
 import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
-import {eventToPromise} from 'chrome://webui-test/test_util.js';
+import {eventToPromise, isVisible, microtasksFinished} from 'chrome://webui-test/test_util.js';
 
 import {TestResetBrowserProxy} from './test_reset_browser_proxy.js';
 
@@ -51,16 +50,16 @@ suite('DialogTests', function() {
 
     // Open reset profile dialog.
     resetPage.$.resetProfile.click();
-    flush();
+    await microtasksFinished();
     const dialog =
-        resetPage.shadowRoot!.querySelector('settings-reset-profile-dialog');
+        resetPage.shadowRoot.querySelector('settings-reset-profile-dialog');
     assertTrue(!!dialog);
-    assertTrue(dialog!.$.dialog.open);
+    assertTrue(dialog.$.dialog.open);
 
-    const whenDialogClosed = eventToPromise('close', dialog!);
+    const whenDialogClosed = eventToPromise('close', dialog);
 
     await resetPageBrowserProxy.whenCalled('onShowResetProfileDialog');
-    closeDialogFn(dialog!);
+    closeDialogFn(dialog);
     await Promise.all([
       whenDialogClosed,
       resetPageBrowserProxy.whenCalled('onHideResetProfileDialog'),
@@ -83,39 +82,46 @@ suite('DialogTests', function() {
   // Tests that when user request to reset the profile the appropriate
   // message is sent to the browser.
   test(TestNames.ResetProfileDialogAction, async function() {
+    resetPageBrowserProxy.setPerformResetProfileSettingsPromise();
     // Open reset profile dialog.
     resetPage.$.resetProfile.click();
-    flush();
+    await microtasksFinished();
     const dialog =
-        resetPage.shadowRoot!.querySelector('settings-reset-profile-dialog');
+        resetPage.shadowRoot.querySelector('settings-reset-profile-dialog');
     assertTrue(!!dialog);
 
-    const checkbox = dialog!.shadowRoot!.querySelector<CrCheckboxElement>(
+    const checkbox = dialog.shadowRoot.querySelector<CrCheckboxElement>(
         '[slot=footer] cr-checkbox')!;
     assertTrue(checkbox.checked);
     const showReportedSettingsLink =
-        dialog!.shadowRoot!.querySelector<HTMLElement>('[slot=footer] a');
+        dialog.shadowRoot.querySelector<HTMLElement>('[slot=footer] a');
     assertTrue(!!showReportedSettingsLink);
-    showReportedSettingsLink!.click();
+    showReportedSettingsLink.click();
 
     await resetPageBrowserProxy.whenCalled('showReportedSettings');
     // Ensure that the checkbox was not toggled as a result of
     // clicking the link.
     assertTrue(checkbox.checked);
-    assertFalse(dialog!.$.reset.disabled);
-    assertFalse(dialog!.$.resetSpinner.active);
-    dialog!.$.reset.click();
-    assertTrue(dialog!.$.reset.disabled);
-    assertTrue(dialog!.$.cancel.disabled);
-    assertTrue(dialog!.$.resetSpinner.active);
+    assertFalse(dialog.$.reset.disabled);
+    const spinner = dialog.shadowRoot.querySelector('.spinner');
+    assertTrue(!!spinner);
+    assertFalse(isVisible(spinner));
+    dialog.$.reset.click();
+    await microtasksFinished();
+    assertTrue(dialog.$.reset.disabled);
+    assertTrue(dialog.$.cancel.disabled);
+    assertTrue(isVisible(spinner));
+
+    resetPageBrowserProxy.resolvePerformResetProfileSettings();
     await resetPageBrowserProxy.whenCalled('performResetProfileSettings');
   });
 
   async function testResetRequestOrigin(expectedOrigin: string) {
     const dialog =
-        resetPage.shadowRoot!.querySelector('settings-reset-profile-dialog');
+        resetPage.shadowRoot.querySelector('settings-reset-profile-dialog');
     assertTrue(!!dialog);
-    dialog!.$.reset.click();
+    await microtasksFinished();
+    dialog.$.reset.click();
     const resetRequest =
         await resetPageBrowserProxy.whenCalled('performResetProfileSettings');
     assertEquals(expectedOrigin, resetRequest);
@@ -137,5 +143,22 @@ suite('DialogTests', function() {
     Router.getInstance().navigateTo(routes.TRIGGERED_RESET_DIALOG);
     await resetPageBrowserProxy.whenCalled('onShowResetProfileDialog');
     await testResetRequestOrigin('triggeredreset');
+  });
+
+  test('searchContents', async function() {
+    let result = await resetPage.searchContents('restore');
+    assertFalse(result.canceled);
+    assertEquals(1, result.matchCount);
+    assertFalse(result.wasClearSearch);
+
+    result = await resetPage.searchContents('non-existing-text');
+    assertFalse(result.canceled);
+    assertEquals(0, result.matchCount);
+    assertFalse(result.wasClearSearch);
+
+    result = await resetPage.searchContents('');
+    assertFalse(result.canceled);
+    assertEquals(0, result.matchCount);
+    assertTrue(result.wasClearSearch);
   });
 });

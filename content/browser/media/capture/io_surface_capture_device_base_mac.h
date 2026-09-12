@@ -37,7 +37,9 @@ class CONTENT_EXPORT IOSurfaceCaptureDeviceBase
   void OnReceivedIOSurfaceFromStream(
       gfx::ScopedInUseIOSurface io_surface,
       const media::VideoCaptureFormat& capture_format,
-      const gfx::Rect& visible_rect);
+      const gfx::Rect& visible_rect,
+      std::optional<gfx::Size> content_size = std::nullopt,
+      std::optional<float> scale_factor = std::nullopt);
   void SendLastReceivedIOSurfaceToClient();
 
   // Given a source frame size `source_size`, and `capture_params_`, compute the
@@ -56,6 +58,7 @@ class CONTENT_EXPORT IOSurfaceCaptureDeviceBase
   void AllocateAndStart(const media::VideoCaptureParams& params,
                         std::unique_ptr<Client> client) final;
   void StopAndDeAllocate() final;
+  void InvalidateBuffers() final;
 
   // This class assumes single threaded access.
   THREAD_CHECKER(thread_checker_);
@@ -74,6 +77,7 @@ class CONTENT_EXPORT IOSurfaceCaptureDeviceBase
   gfx::ScopedInUseIOSurface last_received_io_surface_;
   media::VideoCaptureFormat last_received_capture_format_;
   gfx::Rect last_visible_rect_;
+  media::VideoFrameMetadata last_received_metadata_;
 
   base::WeakPtrFactory<IOSurfaceCaptureDeviceBase> weak_factory_base_{this};
 };

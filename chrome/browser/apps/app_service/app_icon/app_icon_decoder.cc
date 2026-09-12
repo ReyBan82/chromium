@@ -4,31 +4,25 @@
 
 #include "chrome/browser/apps/app_service/app_icon/app_icon_decoder.h"
 
+#include <functional>
+
+#include "base/functional/bind.h"
 #include "base/task/thread_pool.h"
+#include "base/trace_event/trace_event.h"
 #include "chrome/browser/apps/app_service/app_icon/app_icon_factory.h"
+#include "chrome/browser/apps/app_service/app_icon/app_icon_util.h"
 #include "chrome/browser/image_decoder/image_decoder.h"
-#include "chrome/browser/profiles/profile.h"
 #include "extensions/grit/extensions_browser_resources.h"
 #include "services/data_decoder/public/cpp/data_decoder.h"
+#include "services/data_decoder/public/cpp/decode_image.h"
+#include "services/data_decoder/public/mojom/image_decoder.mojom.h"
 #include "third_party/skia/include/core/SkBitmap.h"
-#include "ui/base/layout.h"
-#include "ui/base/resource/resource_bundle.h"
+#include "ui/base/resource/resource_scale_factor.h"
 #include "ui/gfx/codec/png_codec.h"
 #include "ui/gfx/image/image_skia_operations.h"
 #include "ui/gfx/image/image_skia_rep.h"
 
-namespace {
-
-data_decoder::DataDecoder& GetDataDecoder() {
-  static base::NoDestructor<data_decoder::DataDecoder> data_decoder;
-  return *data_decoder;
-}
-
-}  // namespace
-
 namespace apps {
-
-bool g_decode_request_for_testing = false;
 
 AppIconDecoder::ImageSource::ImageSource(int32_t size_in_dip)
     : size_in_dip_(size_in_dip) {}
@@ -36,69 +30,13 @@ AppIconDecoder::ImageSource::ImageSource(int32_t size_in_dip)
 AppIconDecoder::ImageSource::~ImageSource() = default;
 
 gfx::ImageSkiaRep AppIconDecoder::ImageSource::GetImageForScale(float scale) {
+  TRACE_EVENT0("ui", "AppIconDecoder::ImageSource::GetImageForScale");
   // Host loads icon asynchronously, so use default icon so far.
 
   // Get the ImageSkia for the resource IDR_APP_DEFAULT_ICON and the size
   // `size_in_dip_`.
   return CreateResizedResourceImage(IDR_APP_DEFAULT_ICON, size_in_dip_)
       .GetRepresentation(scale);
-}
-
-AppIconDecoder::DecodeRequest::DecodeRequest(
-    ui::ResourceScaleFactor scale_factor,
-    AppIconDecoder& host,
-    gfx::ImageSkia& image_skia,
-    std::set<ui::ResourceScaleFactor>& incomplete_scale_factors)
-    : ImageRequest(&GetDataDecoder()),
-      scale_factor_(scale_factor),
-      host_(host),
-      image_skia_(image_skia),
-      incomplete_scale_factors_(incomplete_scale_factors) {}
-
-AppIconDecoder::DecodeRequest::~DecodeRequest() {
-  ImageDecoder::Cancel(this);
-}
-
-void AppIconDecoder::DecodeRequest::OnImageDecoded(const SkBitmap& bitmap) {
-  DCHECK(!bitmap.isNull() && !bitmap.empty());
-  host_.UpdateImageSkia(scale_factor_, bitmap, image_skia_,
-                        incomplete_scale_factors_);
-}
-
-void AppIconDecoder::DecodeRequest::OnDecodeImageFailed() {
-  host_.DiscardDecodeRequest();
-}
-
-AppIconDecoder::FakeDecodeRequestForTesting::FakeDecodeRequestForTesting(
-    ui::ResourceScaleFactor scale_factor,
-    AppIconDecoder& host,
-    gfx::ImageSkia& image_skia,
-    std::set<ui::ResourceScaleFactor>& incomplete_scale_factors)
-    : scale_factor_(scale_factor),
-      host_(host),
-      image_skia_(image_skia),
-      incomplete_scale_factors_(incomplete_scale_factors) {}
-
-void AppIconDecoder::FakeDecodeRequestForTesting::Start(
-    std::vector<uint8_t> icon_data) {
-  CompressedDataToSkBitmap(
-      std::move(icon_data),
-      base::BindOnce(
-          &AppIconDecoder::FakeDecodeRequestForTesting::DecodeRequestReply,
-          weak_ptr_factory_.GetWeakPtr()));
-}
-
-AppIconDecoder::FakeDecodeRequestForTesting::~FakeDecodeRequestForTesting() =
-    default;
-
-void AppIconDecoder::FakeDecodeRequestForTesting::DecodeRequestReply(
-    SkBitmap bitmap) {
-  if (!bitmap.isNull()) {
-    host_.UpdateImageSkia(scale_factor_, bitmap, image_skia_,
-                          incomplete_scale_factors_);
-  } else {
-    host_.DiscardDecodeRequest();
-  }
 }
 
 AppIconDecoder::AppIconDecoder(
@@ -124,6 +62,7 @@ void AppIconDecoder::Start() {
 
 bool AppIconDecoder::SetScaleFactors(
     const std::map<ui::ResourceScaleFactor, IconValuePtr>& icon_datas) {
+  TRACE_EVENT0("ui", "AppIconDecoder::SetScaleFactors");
   for (const auto& [scale_factor, iv] : icon_datas) {
     if (!iv || iv->icon_type != IconType::kCompressed) {
       return false;
@@ -168,6 +107,7 @@ bool AppIconDecoder::SetScaleFactors(
 
 void AppIconDecoder::OnIconRead(
     std::map<ui::ResourceScaleFactor, IconValuePtr> icon_datas) {
+  TRACE_EVENT0("ui", "AppIconDecoder::OnIconRead");
   // Check `icon_datas` to set scale factors.
   if (!SetScaleFactors(icon_datas)) {
     DiscardDecodeRequest();
@@ -205,28 +145,31 @@ void AppIconDecoder::DecodeImage(
     std::vector<uint8_t> icon_data,
     gfx::ImageSkia& image_skia,
     std::set<ui::ResourceScaleFactor>& incomplete_scale_factors) {
-  if (g_decode_request_for_testing) {
-    fake_decode_requests_for_testing_.emplace_back(
-        std::make_unique<FakeDecodeRequestForTesting>(
-            scale_factor, *this, image_skia, incomplete_scale_factors));
-    fake_decode_requests_for_testing_.back().get()->Start(std::move(icon_data));
-    return;
-  }
-
-  decode_requests_.emplace_back(std::make_unique<DecodeRequest>(
-      scale_factor, *this, image_skia, incomplete_scale_factors));
-  ImageDecoder::Start(decode_requests_.back().get(), std::move(icon_data));
+  data_decoder::DecodeImage(
+      &GetIconDataDecoder(), std::move(icon_data),
+      data_decoder::mojom::ImageCodec::kDefault,
+      /*shrink_to_fit=*/false, data_decoder::kDefaultMaxSizeInBytes,
+      /*desired_image_frame_size=*/gfx::Size(),
+      base::BindOnce(&AppIconDecoder::UpdateImageSkia,
+                     weak_ptr_factory_.GetWeakPtr(), scale_factor,
+                     std::ref(image_skia), std::ref(incomplete_scale_factors)));
 }
 
 void AppIconDecoder::UpdateImageSkia(
     ui::ResourceScaleFactor scale_factor,
-    const SkBitmap& bitmap,
     gfx::ImageSkia& image_skia,
-    std::set<ui::ResourceScaleFactor>& incomplete_scale_factors) {
+    std::set<ui::ResourceScaleFactor>& incomplete_scale_factors,
+    const SkBitmap& bitmap) {
+  TRACE_EVENT0("ui", "AppIconDecoder::UpdateImageSkia");
+  // If decoding any scale factor fails, discard the entire decode request.
+  if (bitmap.drawsNothing()) {
+    DiscardDecodeRequest();
+    return;
+  }
+
+  CHECK(ui::IsScaleFactorSupported(scale_factor));
   gfx::ImageSkiaRep image_rep(bitmap,
                               ui::GetScaleForResourceScaleFactor(scale_factor));
-  DCHECK(ui::IsSupportedScale(image_rep.scale()));
-
   image_skia.RemoveRepresentation(image_rep.scale());
   image_skia.AddRepresentation(image_rep);
   image_skia.RemoveUnsupportedRepresentationsForScale(image_rep.scale());
@@ -252,9 +195,8 @@ void AppIconDecoder::UpdateImageSkia(
 }
 
 void AppIconDecoder::DiscardDecodeRequest() {
-  // 'callback_' is responsible to remove this AppIconDecoder object, then
-  // all decode requests saved in `decode_requests_` can be destroyed, so we
-  // don't need to free  DecodeRequest's objects in `decode_requests_`.
+  // `callback_` is responsible for removing this AppIconDecoder object, which
+  // will cause all pending decode results to be dropped.
   //
   // Return an empty icon value, because the callers assume the icon value
   // should never be nullptr.
@@ -262,22 +204,13 @@ void AppIconDecoder::DiscardDecodeRequest() {
 }
 
 void AppIconDecoder::CompleteWithImageSkia(const gfx::ImageSkia& image_skia) {
-  // 'callback_' is responsible to remove this AppIconDecoder object, then
-  // all decode requests saved in `decode_requests_` can be destroyed, so we
-  // don't need to free  DecodeRequest's objects in `decode_requests_`.
+  TRACE_EVENT0("ui", "AppIconDecoder::CompleteWithImageSkia");
+  // `callback_` is responsible for removing this AppIconDecoder object.
   auto iv = std::make_unique<apps::IconValue>();
   iv->icon_type = IconType::kUncompressed;
   iv->uncompressed = image_skia;
   iv->is_maskable_icon = is_maskable_icon_;
   std::move(callback_).Run(this, std::move(iv));
-}
-
-ScopedDecodeRequestForTesting::ScopedDecodeRequestForTesting() {
-  g_decode_request_for_testing = true;
-}
-
-ScopedDecodeRequestForTesting::~ScopedDecodeRequestForTesting() {
-  g_decode_request_for_testing = false;
 }
 
 }  // namespace apps

@@ -10,12 +10,14 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
-#include "base/ranges/algorithm.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/current_thread.h"
 #include "base/trace_event/trace_event.h"
 #include "base/trace_event/traced_value.h"
@@ -49,20 +51,19 @@ bool ProcessDrmEvent(int fd, const DrmEventHandler& callback) {
   while (idx < len) {
     DCHECK_LE(static_cast<int>(sizeof(drm_event)), len - idx);
     drm_event event;
-    memcpy(&event, &buffer[idx], sizeof(event));
+    UNSAFE_TODO(memcpy(&event, &buffer[idx], sizeof(event)));
     switch (event.type) {
       case DRM_EVENT_FLIP_COMPLETE: {
         DCHECK_LE(static_cast<int>(sizeof(drm_event_vblank)), len - idx);
         drm_event_vblank vblank;
-        memcpy(&vblank, &buffer[idx], sizeof(vblank));
+        UNSAFE_TODO(memcpy(&vblank, &buffer[idx], sizeof(vblank)));
         std::unique_ptr<base::trace_event::TracedValue> drm_data(
             new base::trace_event::TracedValue());
         drm_data->SetInteger("frame_count", 1);
         drm_data->SetInteger("vblank.tv_sec", vblank.tv_sec);
         drm_data->SetInteger("vblank.tv_usec", vblank.tv_usec);
-        TRACE_EVENT_INSTANT1("benchmark,drm", "DrmEventFlipComplete",
-                             TRACE_EVENT_SCOPE_THREAD, "data",
-                             std::move(drm_data));
+        TRACE_EVENT_INSTANT("benchmark,drm", "DrmEventFlipComplete", "data",
+                            std::move(drm_data));
         // Warning: It is generally unsafe to manufacture TimeTicks values; but
         // here it is required for interfacing with libdrm. Assumption: libdrm
         // is providing the timestamp from the CLOCK_MONOTONIC POSIX clock.
@@ -79,7 +80,6 @@ bool ProcessDrmEvent(int fd, const DrmEventHandler& callback) {
         break;
       default:
         NOTREACHED();
-        break;
     }
 
     idx += event.length;
@@ -100,7 +100,7 @@ class DrmDevice::PageFlipManager {
   ~PageFlipManager() = default;
 
   void OnPageFlip(uint32_t frame, base::TimeTicks timestamp, uint64_t id) {
-    auto it = base::ranges::find(callbacks_, id, &PageFlip::id);
+    auto it = std::ranges::find(callbacks_, id, &PageFlip::id);
     if (it == callbacks_.end()) {
       LOG(WARNING) << "Could not find callback for page flip id=" << id;
       return;
@@ -136,7 +136,7 @@ class DrmDevice::PageFlipManager {
   std::vector<PageFlip> callbacks_;
 };
 
-class DrmDevice::IOWatcher : public base::MessagePumpLibevent::FdWatcher {
+class DrmDevice::IOWatcher : public base::MessagePumpEpoll::FdWatcher {
  public:
   IOWatcher(int fd, DrmDevice::PageFlipManager* page_flip_manager)
       : page_flip_manager_(page_flip_manager), controller_(FROM_HERE), fd_(fd) {
@@ -160,7 +160,7 @@ class DrmDevice::IOWatcher : public base::MessagePumpLibevent::FdWatcher {
     controller_.StopWatchingFileDescriptor();
   }
 
-  // base::MessagePumpLibevent::FdWatcher overrides:
+  // base::MessagePumpEpoll::FdWatcher overrides:
   void OnFileCanReadWithoutBlocking(int fd) override {
     DCHECK(base::CurrentIOThread::IsSet());
     TRACE_EVENT1("drm", "OnDrmEvent", "socket", fd);
@@ -173,9 +173,9 @@ class DrmDevice::IOWatcher : public base::MessagePumpLibevent::FdWatcher {
 
   void OnFileCanWriteWithoutBlocking(int fd) override { NOTREACHED(); }
 
-  DrmDevice::PageFlipManager* page_flip_manager_;
+  raw_ptr<DrmDevice::PageFlipManager> page_flip_manager_;
 
-  base::MessagePumpLibevent::FdWatchController controller_;
+  base::MessagePumpEpoll::FdWatchController controller_;
 
   int fd_;
 };
@@ -196,7 +196,7 @@ bool DrmDevice::Initialize() {
   }
 
   // Use atomic only if kernel allows it.
-  if (is_atomic_) {
+  if (is_atomic()) {
     plane_manager_ = std::make_unique<HardwareDisplayPlaneManagerAtomic>(this);
   } else {
     plane_manager_ = std::make_unique<HardwareDisplayPlaneManagerLegacy>(this);
@@ -204,36 +204,37 @@ bool DrmDevice::Initialize() {
 
   if (!plane_manager_->Initialize()) {
     LOG(ERROR) << "Failed to initialize the plane manager for "
-               << device_path_.value();
+               << device_path().value();
     plane_manager_.reset();
     return false;
   }
 
-  watcher_ =
-      std::make_unique<IOWatcher>(drm_fd_.get(), page_flip_manager_.get());
+  watcher_ = std::make_unique<IOWatcher>(GetFd(), page_flip_manager_.get());
 
+  return true;
+}
+
+bool DrmDevice::SetCrtc(uint32_t crtc_id,
+                        uint32_t framebuffer,
+                        std::vector<uint32_t> connectors,
+                        const drmModeModeInfo& mode) {
+  if (!DrmWrapper::SetCrtc(crtc_id, framebuffer, connectors, mode))
+    return false;
+
+  ++modeset_sequence_id_;
   return true;
 }
 
 bool DrmDevice::PageFlip(uint32_t crtc_id,
                          uint32_t framebuffer,
                          scoped_refptr<PageFlipRequest> page_flip_request) {
-  DCHECK(drm_fd_.is_valid());
-  TRACE_EVENT2("drm", "DrmDevice::PageFlip", "crtc", crtc_id, "framebuffer",
-               framebuffer);
+  const uint64_t id = page_flip_manager_->GetNextId();
+  if (!DrmWrapper::PageFlip(crtc_id, framebuffer, id))
+    return false;
 
-  // NOTE: Calling drmModeSetCrtc will immediately update the state, though
-  // callbacks to already scheduled page flips will be honored by the kernel.
-  uint64_t id = page_flip_manager_->GetNextId();
-  if (!drmModePageFlip(drm_fd_.get(), crtc_id, framebuffer,
-                       DRM_MODE_PAGE_FLIP_EVENT, reinterpret_cast<void*>(id))) {
-    // If successful the payload will be removed by a PageFlip event.
-    page_flip_manager_->RegisterCallback(id, 1,
-                                         page_flip_request->AddPageFlip());
-    return true;
-  }
-
-  return false;
+  // If successful the payload will be removed by a PageFlip event.
+  page_flip_manager_->RegisterCallback(id, 1, page_flip_request->AddPageFlip());
+  return true;
 }
 
 bool DrmDevice::CommitProperties(
@@ -241,58 +242,42 @@ bool DrmDevice::CommitProperties(
     uint32_t flags,
     uint32_t crtc_count,
     scoped_refptr<PageFlipRequest> page_flip_request) {
-  bool success = CommitPropertiesInternal(properties, flags, crtc_count,
-                                          page_flip_request);
-
-  if (success && flags == DRM_MODE_ATOMIC_ALLOW_MODESET)
-    ++modeset_sequence_id_;
-
-  return success;
-}
-
-bool DrmDevice::CommitPropertiesInternal(
-    drmModeAtomicReq* properties,
-    uint32_t flags,
-    uint32_t crtc_count,
-    scoped_refptr<PageFlipRequest> page_flip_request) {
   uint64_t id = 0;
-
   if (page_flip_request) {
     flags |= DRM_MODE_PAGE_FLIP_EVENT;
     id = page_flip_manager_->GetNextId();
   }
 
-  int result = drmModeAtomicCommit(drm_fd_.get(), properties, flags,
-                                   reinterpret_cast<void*>(id));
-  if (result && errno == EBUSY && (flags & DRM_MODE_ATOMIC_NONBLOCK)) {
-    VLOG(1) << "Nonblocking atomic commit failed with EBUSY, retry without "
-               "nonblock";
-    // There have been cases where we get back EBUSY when attempting a
-    // non-blocking atomic commit. If we return false from here, that will cause
-    // the GPU process to CHECK itself. These are likely due to kernel bugs,
-    // which should be fixed, but rather than crashing we should retry the
-    // commit without the non-blocking flag and then it should work. This will
-    // cause a slight delay, but that should be imperceptible and better than
-    // crashing. We still do want the underlying driver bugs fixed, but this
-    // provide a better user experience.
-    flags &= ~DRM_MODE_ATOMIC_NONBLOCK;
-    result = drmModeAtomicCommit(drm_fd_.get(), properties, flags,
-                                 reinterpret_cast<void*>(id));
-  }
-  if (!result) {
-    if (page_flip_request) {
-      page_flip_manager_->RegisterCallback(id, crtc_count,
-                                           page_flip_request->AddPageFlip());
-    }
+  if (!DrmWrapper::CommitProperties(properties, flags, id))
+    return false;
 
-    return true;
+  if (page_flip_request) {
+    page_flip_manager_->RegisterCallback(id, crtc_count,
+                                         page_flip_request->AddPageFlip());
   }
-  return false;
+
+  if (flags == DRM_MODE_ATOMIC_ALLOW_MODESET)
+    ++modeset_sequence_id_;
+
+  return true;
 }
 
 void DrmDevice::WriteIntoTrace(perfetto::TracedDictionary dict) const {
   dict.Add("planes", plane_manager_->planes());
   DrmWrapper::WriteIntoTrace(std::move(dict));
 }
+
+display::DrmFormatsAndModifiers DrmDevice::GetFormatsAndModifiersForCrtc(
+    uint32_t crtc_id) const {
+  display::DrmFormatsAndModifiers drm_formats_and_modifiers;
+  for (uint32_t format : plane_manager_->GetSupportedFormats()) {
+    std::vector<uint64_t> modifiers =
+        plane_manager_->GetFormatModifiers(crtc_id, format);
+    drm_formats_and_modifiers.emplace(format, modifiers);
+  }
+  return drm_formats_and_modifiers;
+}
+
+int DrmDevice::modeset_sequence_id() const { return modeset_sequence_id_; }
 
 }  // namespace ui

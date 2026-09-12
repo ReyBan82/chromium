@@ -11,6 +11,7 @@
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
 #include "content/browser/web_contents/web_contents_impl.h"
 #include "content/public/browser/browser_context.h"
+#include "content/public/browser/security_principal.h"
 #include "content/public/browser/storage_partition.h"
 #include "content/public/common/content_client.h"
 #include "content/public/common/content_features.h"
@@ -28,6 +29,44 @@
 // This file has tests involving render process selection for service workers.
 
 namespace content {
+
+// An observer that waits for the service worker to be running.
+class WorkerRunningStatusObserver : public ServiceWorkerContextObserver {
+ public:
+  explicit WorkerRunningStatusObserver(ServiceWorkerContext* context) {
+    scoped_context_observation_.Observe(context);
+  }
+
+  WorkerRunningStatusObserver(const WorkerRunningStatusObserver&) = delete;
+  WorkerRunningStatusObserver& operator=(const WorkerRunningStatusObserver&) =
+      delete;
+
+  ~WorkerRunningStatusObserver() override = default;
+
+  int64_t version_id() { return version_id_; }
+
+  void WaitUntilRunning() {
+    if (version_id_ == blink::mojom::kInvalidServiceWorkerVersionId) {
+      run_loop_.Run();
+    }
+  }
+
+  void OnVersionStartedRunning(
+      int64_t version_id,
+      const ServiceWorkerRunningInfo& running_info) override {
+    version_id_ = version_id;
+
+    if (run_loop_.running()) {
+      run_loop_.Quit();
+    }
+  }
+
+ private:
+  base::RunLoop run_loop_;
+  base::ScopedObservation<ServiceWorkerContext, ServiceWorkerContextObserver>
+      scoped_context_observation_{this};
+  int64_t version_id_ = blink::mojom::kInvalidServiceWorkerVersionId;
+};
 
 class ServiceWorkerProcessBrowserTest
     : public ContentBrowserTest,
@@ -99,7 +138,7 @@ class ServiceWorkerProcessBrowserTest
 
   // Returns the process id of the running service worker. There must be exactly
   // one service worker running.
-  int GetServiceWorkerProcessId() {
+  ChildProcessId GetServiceWorkerProcessId() {
     const base::flat_map<int64_t, ServiceWorkerRunningInfo>& infos =
         wrapper()->GetRunningServiceWorkerInfos();
     DCHECK_EQ(infos.size(), 1u);
@@ -108,6 +147,7 @@ class ServiceWorkerProcessBrowserTest
   }
 
   ServiceWorkerContextWrapper* wrapper() { return wrapper_.get(); }
+  ServiceWorkerContext* public_context() { return wrapper(); }
 
   WebContentsImpl* web_contents() {
     return static_cast<WebContentsImpl*>(shell()->web_contents());
@@ -125,7 +165,10 @@ class ServiceWorkerProcessBrowserTest
 // Tests that a service worker started due to a navigation shares the same
 // process as the navigation.
 // Flaky on Android; see https://crbug.com/1320972.
-#if BUILDFLAG(IS_ANDROID)
+// Flaky on TSan Linux; see https://crbug.com/349316554.
+#if BUILDFLAG(IS_ANDROID) ||                            \
+    ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && \
+     defined(THREAD_SANITIZER))
 #define MAYBE_ServiceWorkerAndPageShareProcess \
   DISABLED_ServiceWorkerAndPageShareProcess
 #else
@@ -137,45 +180,18 @@ IN_PROC_BROWSER_TEST_P(ServiceWorkerProcessBrowserTest,
   RegisterServiceWorker();
 
   // Navigate to a page in the service worker's scope.
+  WorkerRunningStatusObserver observer(public_context());
   ASSERT_TRUE(NavigateToURL(
       shell(), embedded_test_server()->GetURL("/service_worker/empty.html")));
+  observer.WaitUntilRunning();
 
   // The page and service worker should be in the same process.
-  int page_process_id = current_frame_host()->GetProcess()->GetID();
-  EXPECT_NE(page_process_id, ChildProcessHost::kInvalidUniqueID);
+  ChildProcessId page_process_id = current_frame_host()->GetProcess()->GetID();
+  EXPECT_TRUE(page_process_id);
   ASSERT_EQ(GetRunningServiceWorkerCount(), 1u);
-  int worker_process_id = GetServiceWorkerProcessId();
+  ChildProcessId worker_process_id = GetServiceWorkerProcessId();
   EXPECT_EQ(page_process_id, worker_process_id);
 }
-
-namespace {
-
-// ContentBrowserClient that skips assigning a site URL for a given scheme.
-class DontAssignSiteContentBrowserClient
-    : public ContentBrowserTestContentBrowserClient {
- public:
-  // Any visit to |scheme_to_skip| will not cause the site to be assigned to the
-  // SiteInstance. This requires setting it as an empty document scheme.
-  explicit DontAssignSiteContentBrowserClient(const std::string& scheme_to_skip)
-      : scheme_to_skip_(scheme_to_skip) {
-    url::AddEmptyDocumentScheme(scheme_to_skip.c_str());
-  }
-
-  DontAssignSiteContentBrowserClient(
-      const DontAssignSiteContentBrowserClient&) = delete;
-  DontAssignSiteContentBrowserClient& operator=(
-      const DontAssignSiteContentBrowserClient&) = delete;
-
-  bool ShouldAssignSiteForURL(const GURL& url) override {
-    return url.scheme() != scheme_to_skip_;
-  }
-
- private:
-  std::string scheme_to_skip_;
-  url::ScopedSchemeRegistryForTests scheme_registry_;
-};
-
-}  // namespace
 
 // Tests whether a service worker and navigation share the same process in the
 // special case where the service worker starts before the navigation starts,
@@ -186,9 +202,13 @@ class DontAssignSiteContentBrowserClient
 // https://crbug.com/1012143.
 IN_PROC_BROWSER_TEST_P(ServiceWorkerProcessBrowserTest,
                        NavigateFromUnassignedSiteInstance) {
-  // Set up an empty page scheme whose URLs will have no site assigned.
-  DontAssignSiteContentBrowserClient content_browser_client("siteless");
+  // Set up an empty page scheme whose URLs will have no site assigned. This
+  // requires setting it as an empty document scheme.
+  url::ScopedSchemeRegistryForTests scheme_registry;
+  url::AddEmptyDocumentScheme("siteless");
+
   GURL empty_site_url = GURL("siteless://test");
+  EXPECT_FALSE(SiteInstance::ShouldAssignSiteForURL(empty_site_url));
 
   // Register the service worker.
   RegisterServiceWorker();
@@ -198,26 +218,27 @@ IN_PROC_BROWSER_TEST_P(ServiceWorkerProcessBrowserTest,
   EXPECT_EQ(web_contents()->GetLastCommittedURL(), empty_site_url);
   scoped_refptr<SiteInstanceImpl> site_instance =
       web_contents()->GetPrimaryMainFrame()->GetSiteInstance();
-  EXPECT_EQ(GURL(), site_instance->GetSiteURL());
-  int page_process_id = current_frame_host()->GetProcess()->GetID();
-  EXPECT_NE(page_process_id, ChildProcessHost::kInvalidUniqueID);
+  EXPECT_EQ(GURL(),
+            site_instance->GetSecurityPrincipal().GetDeprecatedSiteURL());
+  ChildProcessId page_process_id = current_frame_host()->GetProcess()->GetID();
+  EXPECT_TRUE(page_process_id);
 
   // Start the service worker.
   base::RunLoop loop;
   GURL scope = embedded_test_server()->GetURL("/service_worker/");
-  int worker_process_id;
+  ChildProcessId worker_process_id;
   wrapper()->ServiceWorkerContextWrapper::StartWorkerForScope(
       scope, blink::StorageKey::CreateFirstParty(url::Origin::Create(scope)),
-      base::BindLambdaForTesting(
-          [&](int64_t version_id, int process_id, int thread_id) {
-            worker_process_id = process_id;
-            loop.Quit();
-          }),
-      base::BindLambdaForTesting(
-          [&loop](blink::ServiceWorkerStatusCode status_code) {
-            ASSERT_FALSE(true) << "start worker failed";
-            loop.Quit();
-          }));
+      base::BindLambdaForTesting([&](int64_t version_id,
+                                     ChildProcessId process_id, int thread_id,
+                                     const blink::ServiceWorkerToken& token) {
+        worker_process_id = process_id;
+        loop.Quit();
+      }),
+      base::BindLambdaForTesting([&loop](StatusCodeResponse status) {
+        ASSERT_FALSE(true) << "start worker failed";
+        loop.Quit();
+      }));
   loop.Run();
 
   // The page and service worker are in different processes. (This is not

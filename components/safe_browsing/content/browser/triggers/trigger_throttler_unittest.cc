@@ -180,7 +180,7 @@ TEST_F(TriggerThrottlerTest, TriggerQuotaPersistence) {
 
   // Check the pref directly, it should reflect the events for each trigger.
   PrefService* prefs = get_pref_service();
-  const base::Value::Dict& event_dict =
+  const base::DictValue& event_dict =
       prefs->GetDict(prefs::kSafeBrowsingTriggerEventTimestamps);
 
   const std::string kAdSampleKey = "2";
@@ -243,7 +243,7 @@ class TriggerThrottlerTestFinch : public ::testing::Test {
   std::string GetQuotaParamValueForTrigger(const TriggerType trigger_type,
                                            int quota) {
     if (trigger_type == TriggerType::AD_SAMPLE)
-      return base::StringPrintf("%d,%d", trigger_type, quota);
+      return base::StringPrintf("%d,%d", static_cast<int>(trigger_type), quota);
     else
       return base::StringPrintf("%d", quota);
   }

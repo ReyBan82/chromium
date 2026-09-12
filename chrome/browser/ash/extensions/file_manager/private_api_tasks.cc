@@ -21,8 +21,10 @@
 #include "chrome/browser/ash/file_manager/filesystem_api_util.h"
 #include "chrome/browser/ash/fileapi/file_system_backend.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
 #include "chrome/common/extensions/api/file_manager_private.h"
 #include "chrome/common/extensions/api/file_manager_private_internal.h"
+#include "chromeos/ash/components/system_web_apps/system_web_app_type.h"
 #include "extensions/browser/api/file_handlers/directory_util.h"
 #include "extensions/browser/api/file_handlers/mime_util.h"
 #include "extensions/browser/entry_info.h"
@@ -35,8 +37,6 @@ namespace {
 // Error messages.
 constexpr char kInvalidTaskType[] = "Invalid task type: ";
 constexpr char kInvalidFileUrl[] = "Invalid file URL";
-constexpr char kInvalidAssignmentPolicyConflict[] =
-    "Invalid assignment (conflicts with policy): ";
 
 // Make a set of unique filename suffixes out of the list of file URLs.
 std::set<std::string> GetUniqueSuffixes(
@@ -46,11 +46,13 @@ std::set<std::string> GetUniqueSuffixes(
   for (const auto& file_url : file_urls) {
     const storage::FileSystemURL url =
         context->CrackURLInFirstPartyContext(GURL{file_url});
-    if (!url.is_valid() || url.path().empty())
+    if (!url.is_valid() || url.path().empty()) {
       return {};
+    }
     // We'll skip empty suffixes.
-    if (!url.path().Extension().empty())
+    if (!url.path().Extension().empty()) {
       suffixes.insert(url.path().Extension());
+    }
   }
   return suffixes;
 }
@@ -61,8 +63,9 @@ std::set<std::string> GetUniqueMimeTypes(
   std::set<std::string> mime_types;
   for (const auto& mime_type : mime_type_list) {
     // We'll skip empty MIME types and existing MIME types.
-    if (!mime_type.empty())
+    if (!mime_type.empty()) {
       mime_types.insert(mime_type);
+    }
   }
   return mime_types;
 }
@@ -70,9 +73,9 @@ std::set<std::string> GetUniqueMimeTypes(
 namespace api_fmp = extensions::api::file_manager_private;
 namespace api_fmp_internal = extensions::api::file_manager_private_internal;
 
-absl::optional<api_fmp::PolicyDefaultHandlerStatus>
+std::optional<api_fmp::PolicyDefaultHandlerStatus>
 RemapPolicyDefaultHandlerStatus(
-    const absl::optional<file_manager::file_tasks::PolicyDefaultHandlerStatus>&
+    const std::optional<file_manager::file_tasks::PolicyDefaultHandlerStatus>&
         status) {
   if (!status) {
     return {};
@@ -82,10 +85,10 @@ RemapPolicyDefaultHandlerStatus(
     case file_manager::file_tasks::PolicyDefaultHandlerStatus::
         kDefaultHandlerAssignedByPolicy:
       return api_fmp::PolicyDefaultHandlerStatus::
-          POLICY_DEFAULT_HANDLER_STATUS_DEFAULT_HANDLER_ASSIGNED_BY_POLICY;
+          kDefaultHandlerAssignedByPolicy;
     case file_manager::file_tasks::PolicyDefaultHandlerStatus::
         kIncorrectAssignment:
-      return api_fmp::POLICY_DEFAULT_HANDLER_STATUS_INCORRECT_ASSIGNMENT;
+      return api_fmp::PolicyDefaultHandlerStatus::kIncorrectAssignment;
   }
 }
 
@@ -98,7 +101,7 @@ ExtensionFunction::ResponseAction
 FileManagerPrivateInternalExecuteTaskFunction::Run() {
   using api_fmp_internal::ExecuteTask::Params;
   using api_fmp_internal::ExecuteTask::Results::Create;
-  const std::unique_ptr<Params> params(Params::Create(args()));
+  const std::optional<Params> params = Params::Create(args());
   EXTENSION_FUNCTION_VALIDATE(params);
 
   file_manager::file_tasks::TaskType task_type =
@@ -110,7 +113,7 @@ FileManagerPrivateInternalExecuteTaskFunction::Run() {
       params->descriptor.app_id, task_type, params->descriptor.action_id);
 
   if (params->urls.empty()) {
-    return RespondNow(ArgumentList(Create(api_fmp::TASK_RESULT_EMPTY)));
+    return RespondNow(ArgumentList(Create(api_fmp::TaskResult::kEmpty)));
   }
 
   Profile* const profile = Profile::FromBrowserContext(browser_context());
@@ -143,7 +146,7 @@ void FileManagerPrivateInternalExecuteTaskFunction::OnTaskExecuted(
     api_fmp::TaskResult result,
     std::string failure_reason) {
   auto result_list = api_fmp_internal::ExecuteTask::Results::Create(result);
-  if (result == api_fmp::TASK_RESULT_FAILED) {
+  if (result == api_fmp::TaskResult::kFailed) {
     Respond(Error("Task result failed: " + failure_reason));
   } else {
     Respond(ArgumentList(std::move(result_list)));
@@ -159,11 +162,12 @@ FileManagerPrivateInternalGetFileTasksFunction::
 ExtensionFunction::ResponseAction
 FileManagerPrivateInternalGetFileTasksFunction::Run() {
   using api_fmp_internal::GetFileTasks::Params;
-  const std::unique_ptr<Params> params(Params::Create(args()));
+  const std::optional<Params> params = Params::Create(args());
   EXTENSION_FUNCTION_VALIDATE(params);
 
-  if (params->urls.empty())
+  if (params->urls.empty()) {
     return RespondNow(Error("No URLs provided"));
+  }
 
   if (params->dlp_source_urls.size() != params->urls.size()) {
     return RespondNow(Error("Mismatching URLs and DLP source URLs provided"));
@@ -180,8 +184,9 @@ FileManagerPrivateInternalGetFileTasksFunction::Run() {
     const GURL url{url_param};
     storage::FileSystemURL file_system_url(
         file_system_context->CrackURLInFirstPartyContext(url));
-    if (!ash::FileSystemBackend::CanHandleURL(file_system_url))
+    if (!ash::FileSystemBackend::CanHandleURL(file_system_url)) {
       continue;
+    }
     urls_.push_back(url);
     local_paths_.push_back(file_system_url.path());
   }
@@ -240,8 +245,9 @@ void FileManagerPrivateInternalGetFileTasksFunction::OnFileTasksListed(
     converted.descriptor.task_type =
         TaskTypeToString(task.task_descriptor.task_type);
     converted.descriptor.action_id = task.task_descriptor.action_id;
-    if (!task.icon_url.is_empty())
+    if (!task.icon_url.is_empty()) {
       converted.icon_url = task.icon_url.spec();
+    }
     converted.title = task.task_title;
     converted.is_default = task.is_default;
     converted.is_generic_file_handler = task.is_generic_file_handler;
@@ -264,7 +270,7 @@ void FileManagerPrivateInternalGetFileTasksFunction::OnFileTasksListed(
 ExtensionFunction::ResponseAction
 FileManagerPrivateInternalSetDefaultTaskFunction::Run() {
   using api_fmp_internal::SetDefaultTask::Params;
-  const std::unique_ptr<Params> params(Params::Create(args()));
+  const std::optional<Params> params = Params::Create(args());
   EXTENSION_FUNCTION_VALIDATE(params);
 
   Profile* profile = Profile::FromBrowserContext(browser_context());
@@ -287,14 +293,6 @@ FileManagerPrivateInternalSetDefaultTaskFunction::Run() {
     return RespondNow(WithArguments(true));
   }
 
-  // Check that there are no conflicts with policy-assigned defaults.
-  for (const auto& suffix : suffixes) {
-    if (file_manager::file_tasks::GetPolicyDefaultHandlerForFileExtension(
-            profile, suffix)) {
-      return RespondNow(Error(kInvalidAssignmentPolicyConflict + suffix));
-    }
-  }
-
   file_manager::file_tasks::TaskType task_type =
       file_manager::file_tasks::StringToTaskType(params->descriptor.task_type);
   if (task_type == file_manager::file_tasks::TASK_TYPE_UNKNOWN) {
@@ -305,7 +303,7 @@ FileManagerPrivateInternalSetDefaultTaskFunction::Run() {
 
   file_manager::file_tasks::UpdateDefaultTask(profile, descriptor, suffixes,
                                               mime_types);
-  return RespondNow(WithArguments());
+  return RespondNow(NoArguments());
 }
 
 }  // namespace extensions

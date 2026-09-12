@@ -6,9 +6,12 @@
 
 #include <string>
 
+#include "base/i18n/tag_converters.h"
+#include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
-#include "components/translate/core/common/translate_constants.h"
+#include "components/language_detection/core/constants.h"
+#include "components/translate/core/common/translate_language_matcher.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace translate {
@@ -63,27 +66,6 @@ TEST(LanguageDetectionUtilTest, IsValidLanguageCode) {
   EXPECT_FALSE(translate::IsValidLanguageCode(language));
 }
 
-// Tests that similar language table works.
-TEST(LanguageDetectionUtilTest, SimilarLanguageCode) {
-  EXPECT_TRUE(translate::IsSameOrSimilarLanguages("en", "en"));
-  EXPECT_FALSE(translate::IsSameOrSimilarLanguages("en", "ja"));
-
-  // Language codes are same if the main parts are same. The synonyms should be
-  // took into account (ex: 'iw' and 'he').
-  EXPECT_TRUE(translate::IsSameOrSimilarLanguages("sr-ME", "sr"));
-  EXPECT_TRUE(translate::IsSameOrSimilarLanguages("sr", "sr-ME"));
-  EXPECT_TRUE(translate::IsSameOrSimilarLanguages("he", "he-IL"));
-  EXPECT_TRUE(translate::IsSameOrSimilarLanguages("eng", "eng-US"));
-  EXPECT_TRUE(translate::IsSameOrSimilarLanguages("eng-US", "eng"));
-  EXPECT_FALSE(translate::IsSameOrSimilarLanguages("eng", "enm"));
-
-  // Even though the main parts are different, some special language pairs are
-  // recognized as same languages.
-  EXPECT_TRUE(translate::IsSameOrSimilarLanguages("bs", "hr"));
-  EXPECT_TRUE(translate::IsSameOrSimilarLanguages("ne", "hi"));
-  EXPECT_FALSE(translate::IsSameOrSimilarLanguages("bs", "hi"));
-}
-
 // Tests that well-known languages which often have wrong server configuration
 // are handles.
 TEST(LanguageDetectionUtilTest, WellKnownWrongConfiguration) {
@@ -109,12 +91,10 @@ TEST(LanguageDetectionUtilTest, CLDDisagreeWithWrongLanguageCode) {
   std::string language = translate::DeterminePageLanguage(
       std::string("ja"), std::string(), contents, &model_detected_language,
       &is_model_reliable, model_reliability_score);
-  EXPECT_EQ(translate::kUnknownLanguageCode, language);
+  EXPECT_EQ(language_detection::kUnknownLanguageCode, language);
   EXPECT_EQ("en", model_detected_language);
   EXPECT_TRUE(is_model_reliable);
   EXPECT_GT(model_reliability_score, 0.5);
-  histogram_tester.ExpectTotalCount(
-      "Translate.CLD3.TopLanguageEvaluationDuration", 1);
 }
 
 // Tests that the language meta tag providing "en-US" style information is
@@ -136,8 +116,6 @@ TEST(LanguageDetectionUtilTest, CLDAgreeWithLanguageCodeHavingCountryCode) {
   EXPECT_EQ("en", model_detected_language);
   EXPECT_TRUE(is_model_reliable);
   EXPECT_GT(model_reliability_score, 0.5);
-  histogram_tester.ExpectTotalCount(
-      "Translate.CLD3.TopLanguageEvaluationDuration", 1);
 }
 
 // Tests that the language meta tag providing wrong information is ignored and
@@ -160,8 +138,6 @@ TEST(LanguageDetectionUtilTest, InvalidLanguageMetaTagProviding) {
   EXPECT_EQ("en", model_detected_language);
   EXPECT_TRUE(is_model_reliable);
   EXPECT_GT(model_reliability_score, 0.5);
-  histogram_tester.ExpectTotalCount(
-      "Translate.CLD3.TopLanguageEvaluationDuration", 1);
 }
 
 // Tests that the language meta tag providing wrong information is ignored
@@ -183,8 +159,6 @@ TEST(LanguageDetectionUtilTest, AdoptHtmlLang) {
   EXPECT_EQ("en", model_detected_language);
   EXPECT_TRUE(is_model_reliable);
   EXPECT_GT(model_reliability_score, 0.5);
-  histogram_tester.ExpectTotalCount(
-      "Translate.CLD3.TopLanguageEvaluationDuration", 1);
 }
 
 // Tests that languages that often have the wrong server configuration are
@@ -206,6 +180,17 @@ TEST(LanguageDetectionUtilTest, IsServerWrongConfigurationLanguage) {
   for (const char* const language : right_languages) {
     EXPECT_FALSE(translate::IsServerWrongConfigurationLanguage(language));
   }
+}
+
+TEST(LanguageDetectionUtilTest, ShortContentHttpLanguage) {
+  std::string model_detected_language;
+  bool is_model_reliable = false;
+  float model_reliability_score = 0.0;
+  std::string language = translate::DeterminePageLanguage(
+      "fr", "", u"123456", &model_detected_language, &is_model_reliable,
+      model_reliability_score);
+  EXPECT_EQ("fr", language);
+  EXPECT_EQ("und", model_detected_language);
 }
 
 }  // namespace

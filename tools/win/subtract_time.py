@@ -6,8 +6,6 @@ This script converts two %time% compatible strings passed to it into seconds,
 subtracts them, and prints the difference. That's it. It's used by timeit.bat.
 """
 
-from __future__ import print_function
-
 import re
 import sys
 
@@ -15,14 +13,16 @@ import sys
 def ParseTime(time_string):
     # Time looks like 15:19:30.32 or 15:19:30,32 depending on locale
     # (and there might be other variants as well)
-    match = re.match("(.*):(.*):(.*)[\.,](.*)", time_string)
+    match = re.match("(\d+)\D*(\d+)\D*(\d+)\D*(\d+)", time_string.strip())
     hours, minutes, seconds, fraction = map(int, match.groups())
-    result = hours * 3600 + minutes * 60 + seconds + fraction * .01
+    result = hours * 3600 + minutes * 60 + seconds + fraction * 0.01
     if result < 0:
         # Handle test runs that go past midnight.
         result += 3600 * 24
     return result
 
 
-print("%1.2f seconds elapsed time" %
-      (ParseTime(sys.argv[1]) - ParseTime(sys.argv[2])))
+print(
+    "%1.2f seconds elapsed time"
+    % (ParseTime(sys.argv[1]) - ParseTime(sys.argv[2]))
+)

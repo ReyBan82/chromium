@@ -12,12 +12,10 @@
 
 #if BUILDFLAG(IS_ANDROID)
 #include "device/bluetooth/test/bluetooth_test_android.h"
-#elif BUILDFLAG(IS_MAC)
+#elif BUILDFLAG(IS_APPLE)
 #include "device/bluetooth/test/bluetooth_test_mac.h"
 #elif BUILDFLAG(IS_WIN)
 #include "device/bluetooth/test/bluetooth_test_win.h"
-#elif defined(USE_CAST_BLUETOOTH_ADAPTER)
-#include "device/bluetooth/test/bluetooth_test_cast.h"
 #elif BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX)
 #include "device/bluetooth/test/bluetooth_test_bluez.h"
 #elif BUILDFLAG(IS_FUCHSIA)
@@ -39,9 +37,6 @@ class BluetoothRemoteGattServiceTest :
 #else
     BluetoothTest::SetUp();
 #endif
-    if (!PlatformSupportsLowEnergy()) {
-      GTEST_SKIP() << "Bluetooth Low Energy unavailable.";
-    }
   }
 };
 
@@ -50,7 +45,7 @@ using BluetoothRemoteGattServiceTestWinrt = BluetoothRemoteGattServiceTest;
 #endif
 
 // Android is excluded because it fires a single discovery event per device.
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
 #define MAYBE_IsDiscoveryComplete IsDiscoveryComplete
 #else
 #define MAYBE_IsDiscoveryComplete DISABLED_IsDiscoveryComplete
@@ -75,7 +70,7 @@ TEST_F(BluetoothRemoteGattServiceTest, MAYBE_IsDiscoveryComplete) {
   EXPECT_TRUE(service->IsDiscoveryComplete());
 }
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_APPLE)
 #define MAYBE_GetIdentifier GetIdentifier
 #else
 #define MAYBE_GetIdentifier DISABLED_GetIdentifier
@@ -122,7 +117,7 @@ TEST_F(BluetoothRemoteGattServiceTest, MAYBE_GetIdentifier) {
   EXPECT_NE(service3->GetIdentifier(), service4->GetIdentifier());
 }
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_APPLE)
 #define MAYBE_GetUUID GetUUID
 #else
 #define MAYBE_GetUUID DISABLED_GetUUID
@@ -153,7 +148,7 @@ TEST_F(BluetoothRemoteGattServiceTest, MAYBE_GetUUID) {
   EXPECT_EQ(uuid, device->GetGattServices()[1]->GetUUID());
 }
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_APPLE)
 #define MAYBE_GetCharacteristics_FindNone GetCharacteristics_FindNone
 #else
 #define MAYBE_GetCharacteristics_FindNone DISABLED_GetCharacteristics_FindNone
@@ -180,7 +175,7 @@ TEST_F(BluetoothRemoteGattServiceTest, MAYBE_GetCharacteristics_FindNone) {
   EXPECT_EQ(0u, service->GetCharacteristics().size());
 }
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_APPLE)
 #define MAYBE_GetCharacteristics_and_GetCharacteristic \
   GetCharacteristics_and_GetCharacteristic
 #else
@@ -241,7 +236,7 @@ TEST_F(BluetoothRemoteGattServiceTest,
             service->GetCharacteristic(char_id1));
 }
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_APPLE)
 #define MAYBE_GetCharacteristicsByUUID GetCharacteristicsByUUID
 #else
 #define MAYBE_GetCharacteristicsByUUID DISABLED_GetCharacteristicsByUUID
@@ -306,7 +301,7 @@ TEST_F(BluetoothRemoteGattServiceTest, MAYBE_GetCharacteristicsByUUID) {
           .empty());
 }
 
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
 #define MAYBE_GattCharacteristics_ObserversCalls \
   GattCharacteristics_ObserversCalls
 #else
@@ -368,7 +363,7 @@ TEST_F(BluetoothRemoteGattServiceTest,
   EXPECT_EQ(0u, service->GetCharacteristics().size());
 }
 
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
 #define MAYBE_SimulateGattServiceRemove SimulateGattServiceRemove
 #else
 #define MAYBE_SimulateGattServiceRemove DISABLED_SimulateGattServiceRemove
@@ -407,7 +402,7 @@ TEST_F(BluetoothRemoteGattServiceTest, MAYBE_SimulateGattServiceRemove) {
   EXPECT_EQ(device->GetGattServices()[0], service2);
 }
 
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
 // Tests to receive a services changed notification from macOS, while
 // discovering characteristics. The gatt device should scan again for services
 // and characteristics, before scanning for descriptors. Only after the gatt
@@ -470,9 +465,9 @@ TEST_F(BluetoothRemoteGattServiceTest,
   SimulateDidDiscoverDescriptorsMac(characteristic2);
   EXPECT_EQ(1, observer.gatt_service_changed_count());
 }
-#endif  // BUILDFLAG(IS_MAC)
+#endif  // BUILDFLAG(IS_APPLE)
 
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
 // Simulates to receive an extra discovery characteristic notifications from
 // macOS. Those notifications should be ignored.
 // Android: This test doesn't apply to Android because there is no services
@@ -517,9 +512,9 @@ TEST_F(BluetoothRemoteGattServiceTest, ExtraDidDiscoverServicesCall) {
   SimulateDidDiscoverServicesMac(device);  // Extra system call.
   EXPECT_EQ(2, observer.device_changed_count());
 }
-#endif  // BUILDFLAG(IS_MAC)
+#endif  // BUILDFLAG(IS_APPLE)
 
-#if BUILDFLAG(IS_MAC)
+#if BUILDFLAG(IS_APPLE)
 // Simulates to receive an extra discovery characteristic notifications from
 // macOS. Those notifications should be ignored.
 // Android: This test doesn't apply to Android because there is no services
@@ -564,7 +559,7 @@ TEST_F(BluetoothRemoteGattServiceTest, ExtraDidDiscoverCharacteristicsCall) {
   SimulateDidDiscoverCharacteristicsMac(service);  // Extra system call.
   EXPECT_EQ(2, observer.device_changed_count());
 }
-#endif  // BUILDFLAG(IS_MAC)
+#endif  // BUILDFLAG(IS_APPLE)
 
 #if BUILDFLAG(IS_WIN)
 INSTANTIATE_TEST_SUITE_P(All,

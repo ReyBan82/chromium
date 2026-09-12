@@ -2,48 +2,30 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {
-  assert,
-  assertExists,
-  assertInstanceof,
-} from '../../assert.js';
+import {assert, assertExists, assertInstanceof} from '../../assert.js';
 import * as expert from '../../expert.js';
 import {DeviceOperator} from '../../mojo/device_operator.js';
 import {CaptureIntent} from '../../mojo/type.js';
 import * as state from '../../state.js';
-import {
-  Mode,
-  Resolution,
-} from '../../type.js';
-import {StreamConstraints} from '../stream_constraints.js';
+import {Mode, Resolution} from '../../type.js';
+import {getFpsRangeFromConstraints} from '../../util.js';
+import type {StreamConstraints} from '../stream_constraints.js';
 
-import {
-  ModeBase,
-  ModeFactory,
-} from './mode_base.js';
-import {
-  PhotoFactory,
-  PhotoHandler,
-} from './photo.js';
-import {PortraitFactory, PortraitHandler} from './portrait.js';
-import {
-  ScanFactory,
-  ScanHandler,
-} from './scan.js';
-import {
-  VideoFactory,
-  VideoHandler,
-} from './video.js';
+import type {ModeBase, ModeFactory} from './mode_base.js';
+import type {PhotoHandler} from './photo.js';
+import {PhotoFactory} from './photo.js';
+import type {PortraitHandler} from './portrait.js';
+import {PortraitFactory} from './portrait.js';
+import type {ScanHandler} from './scan.js';
+import {ScanFactory} from './scan.js';
+import type {VideoHandler} from './video.js';
+import {VideoFactory} from './video.js';
 
-export {PhotoHandler, PhotoResult} from './photo.js';
-export {getDefaultScanCorners, ScanHandler} from './scan.js';
-export {
-  GifResult,
-  setAvc1Parameters,
-  Video,
-  VideoHandler,
-  VideoResult,
-} from './video.js';
+export type{PhotoHandler, PhotoResult} from './photo.js';
+export {getDefaultScanCorners} from './scan.js';
+export type{ScanHandler} from './scan.js';
+export {setAvc1Parameters, Video} from './video.js';
+export type{GifResult, VideoHandler, VideoResult} from './video.js';
 
 /**
  * Callback to trigger mode switching. Should return whether mode switching
@@ -70,11 +52,11 @@ interface CaptureParams {
 interface ModeConfig {
   /**
    * @return Resolves to boolean indicating whether the mode is supported by
-   *     video device with specified device id.
+   *     video device with specified `deviceId`.
    */
   isSupported(deviceId: string|null): Promise<boolean>;
 
-  isSupportPTZ(captureResolution: Resolution, previewResolution: Resolution):
+  isSupportPtz(captureResolution: Resolution, previewResolution: Resolution):
       boolean;
 
   /**
@@ -113,20 +95,20 @@ export class Modes {
   /**
    * Mode classname and related functions and attributes.
    */
-  private readonly allModes: {[mode in Mode]: ModeConfig};
+  private readonly allModes: Record<Mode, ModeConfig>;
 
   private handler: CaptureHandler|null = null;
 
   constructor() {
     // Workaround for b/184089334 on PTZ camera to use preview frame as photo
     // result.
-    function checkSupportPTZForPhotoMode(
+    function checkSupportPtzForPhotoMode(
         captureResolution: Resolution, previewResolution: Resolution) {
       return captureResolution.equals(previewResolution);
     }
 
     /**
-     * Prepare the device for the specific resolution and capture intent.
+     * Prepares the device for the specific `resolution` and `captureIntent`.
      */
     async function prepareDeviceForPhoto(
         constraints: StreamConstraints, resolution: Resolution,
@@ -149,7 +131,7 @@ export class Modes {
               params.videoSnapshotResolution, assertExists(this.handler));
         },
         isSupported: () => Promise.resolve(true),
-        isSupportPTZ: () => true,
+        isSupportPtz: () => true,
         prepareDevice: async (constraints) => {
           const deviceOperator = DeviceOperator.getInstance();
           if (deviceOperator === null) {
@@ -157,12 +139,7 @@ export class Modes {
           }
           const deviceId = constraints.deviceId;
           await deviceOperator.setCaptureIntent(
-              deviceId, CaptureIntent.VIDEO_RECORD);
-          await deviceOperator.setMultipleStreamsEnabled(
-              deviceId,
-              expert.isEnabled(
-                  expert.ExpertOption.ENABLE_MULTISTREAM_RECORDING),
-          );
+              deviceId, CaptureIntent.kVideoRecord);
 
           if (await deviceOperator.isBlobVideoSnapshotEnabled(deviceId)) {
             await deviceOperator.setStillCaptureResolution(
@@ -170,26 +147,12 @@ export class Modes {
                 assertExists(this.getCaptureParams().videoSnapshotResolution));
           }
 
-          let minFrameRate = 0;
-          let maxFrameRate = 0;
-          if (constraints.video?.frameRate) {
-            const frameRate = constraints.video.frameRate;
-            if (typeof frameRate === 'number') {
-              minFrameRate = frameRate;
-              maxFrameRate = frameRate;
-            } else if (frameRate.exact) {
-              minFrameRate = frameRate.exact;
-              maxFrameRate = frameRate.exact;
-            } else if (frameRate.min && frameRate.max) {
-              minFrameRate = frameRate.min;
-              maxFrameRate = frameRate.max;
-            }
-            // TODO(wtlee): To set the fps range to the default value, we should
-            // remove the frameRate from constraints instead of using incomplete
-            // range.
-          }
-          await deviceOperator.setFpsRange(
-              deviceId, minFrameRate, maxFrameRate);
+          // TODO(wtlee): To set the fps range to the default value, we should
+          // remove the frameRate from constraints instead of using incomplete
+          // range.
+          const {minFps, maxFps} =
+              getFpsRangeFromConstraints(constraints.video?.frameRate);
+          await deviceOperator.setFpsRange(deviceId, minFps, maxFps);
         },
         fallbackMode: Mode.PHOTO,
       },
@@ -201,9 +164,9 @@ export class Modes {
               assertExists(this.handler));
         },
         isSupported: () => Promise.resolve(true),
-        isSupportPTZ: checkSupportPTZForPhotoMode,
+        isSupportPtz: checkSupportPtzForPhotoMode,
         prepareDevice: async (constraints, resolution) => prepareDeviceForPhoto(
-            constraints, resolution, CaptureIntent.STILL_CAPTURE),
+            constraints, resolution, CaptureIntent.kStillCapture),
         fallbackMode: Mode.SCAN,
       },
       [Mode.PORTRAIT]: {
@@ -223,9 +186,9 @@ export class Modes {
           }
           return deviceOperator.isPortraitModeSupported(deviceId);
         },
-        isSupportPTZ: checkSupportPTZForPhotoMode,
+        isSupportPtz: checkSupportPtzForPhotoMode,
         prepareDevice: async (constraints, resolution) => prepareDeviceForPhoto(
-            constraints, resolution, CaptureIntent.STILL_CAPTURE),
+            constraints, resolution, CaptureIntent.kPortraitCapture),
         fallbackMode: Mode.PHOTO,
       },
       [Mode.SCAN]: {
@@ -236,9 +199,9 @@ export class Modes {
               assertExists(this.handler));
         },
         isSupported: async () => Promise.resolve(true),
-        isSupportPTZ: checkSupportPTZForPhotoMode,
+        isSupportPtz: checkSupportPtzForPhotoMode,
         prepareDevice: async (constraints, resolution) => prepareDeviceForPhoto(
-            constraints, resolution, CaptureIntent.STILL_CAPTURE),
+            constraints, resolution, CaptureIntent.kStillCapture),
         fallbackMode: Mode.PHOTO,
       },
     };
@@ -276,7 +239,7 @@ export class Modes {
   }
 
   /**
-   * Gets factory to create mode capture object.
+   * Gets factory to create `mode` capture object.
    */
   getModeFactory(mode: Mode): ModeFactory {
     return this.allModes[mode].getCaptureFactory();
@@ -314,10 +277,10 @@ export class Modes {
     return this.allModes[mode].isSupported(deviceId);
   }
 
-  isSupportPTZ(
+  isSupportPtz(
       mode: Mode, captureResolution: Resolution,
       previewResolution: Resolution): boolean {
-    return this.allModes[mode].isSupportPTZ(
+    return this.allModes[mode].isSupportPtz(
         captureResolution, previewResolution);
   }
 
@@ -329,7 +292,7 @@ export class Modes {
   async updateMode(factory: ModeFactory): Promise<void> {
     if (this.current !== null) {
       await this.current.clear();
-      await this.disableSaveMetadata();
+      this.disableSaveMetadata();
     }
     this.current = factory.produce();
     await this.updateSaveMetadata();
@@ -341,7 +304,7 @@ export class Modes {
   async clear(): Promise<void> {
     if (this.current !== null) {
       await this.current.clear();
-      await this.disableSaveMetadata();
+      this.disableSaveMetadata();
     }
     this.captureParams = null;
     this.current = null;
@@ -349,21 +312,17 @@ export class Modes {
 
   /**
    * Checks whether to save image metadata or not.
-   *
-   * @return Promise for the operation.
    */
   private async updateSaveMetadata(): Promise<void> {
     if (expert.isEnabled(expert.ExpertOption.SAVE_METADATA)) {
       await this.enableSaveMetadata();
     } else {
-      await this.disableSaveMetadata();
+      this.disableSaveMetadata();
     }
   }
 
   /**
    * Enables save metadata of subsequent photos in the current mode.
-   *
-   * @return Promise for the operation.
    */
   private async enableSaveMetadata(): Promise<void> {
     if (this.current !== null) {
@@ -373,12 +332,10 @@ export class Modes {
 
   /**
    * Disables save metadata of subsequent photos in the current mode.
-   *
-   * @return Promise for the operation.
    */
-  private async disableSaveMetadata(): Promise<void> {
+  private disableSaveMetadata(): void {
     if (this.current !== null) {
-      await this.current.removeMetadataObserver();
+      this.current.removeMetadataObserver();
     }
   }
 }

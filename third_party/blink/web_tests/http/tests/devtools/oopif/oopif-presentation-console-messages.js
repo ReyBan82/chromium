@@ -2,11 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {SourcesTestRunner} from 'sources_test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
+import * as Common from 'devtools/core/common/common.js';
+import * as SDK from 'devtools/core/sdk/sdk.js';
+import * as Workspace from 'devtools/models/workspace/workspace.js';
+import * as Main from 'devtools/entrypoints/main/main.js';
+
 (async function() {
   TestRunner.addResult(`Test that links to UISourceCode work correctly when navigating OOPIF`);
 
-  await TestRunner.loadLegacyModule('sources'); await TestRunner.loadTestModule('sources_test_runner');
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
 
   const messages = new Map();
@@ -19,11 +26,11 @@
     }
   }
   TestRunner.addSniffer(
-      Workspace.UISourceCode.prototype, 'addMessage', function(message) {
+      Workspace.UISourceCode.UISourceCode.prototype, 'addMessage', function(message) {
         messages.set(message, this.url());
       }, true);
   TestRunner.addSniffer(
-      Workspace.UISourceCode.prototype, 'removeMessage', function(message) {
+      Workspace.UISourceCode.UISourceCode.prototype, 'removeMessage', function(message) {
         messages.delete(message, this.url());
       }, true);
 
@@ -31,12 +38,12 @@
   await TestRunner.navigatePromise('resources/error.html');
   dumpMessages();
   TestRunner.addResult('Revealing main frame source');
-  await Common.Revealer.reveal(Workspace.workspace.uiSourceCodeForURL('http://127.0.0.1:8000/devtools/oopif/resources/error.html'));
+  await Common.Revealer.reveal(Workspace.Workspace.WorkspaceImpl.instance().uiSourceCodeForURL('http://127.0.0.1:8000/devtools/oopif/resources/error.html'));
   TestRunner.addResult('\nCreating iframe');
   await TestRunner.addIframe('http://devtools.oopif.test:8000/devtools/oopif/resources/error.html', {id: 'myframe'});
   dumpMessages();
   TestRunner.addResult('Revealing iframe source');
-  await Common.Revealer.reveal(Workspace.workspace.uiSourceCodeForURL('http://devtools.oopif.test:8000/devtools/oopif/resources/error.html'));
+  await Common.Revealer.reveal(Workspace.Workspace.WorkspaceImpl.instance().uiSourceCodeForURL('http://devtools.oopif.test:8000/devtools/oopif/resources/error.html'));
   TestRunner.addResult('\nNavigating iframe');
   await TestRunner.evaluateInPageAsync(`
     (function() {
@@ -47,9 +54,9 @@
   `);
   dumpMessages();
   TestRunner.addResult('Revealing iframe source');
-  await Common.Revealer.reveal(Workspace.workspace.uiSourceCodeForURL('http://devtools.oopif.test:8000/devtools/oopif/resources/empty.html'));
+  await Common.Revealer.reveal(Workspace.Workspace.WorkspaceImpl.instance().uiSourceCodeForURL('http://devtools.oopif.test:8000/devtools/oopif/resources/empty.html'));
   TestRunner.addResult('\nClearing console');
-  SDK.consoleModel.requestClearMessages();
+  SDK.ConsoleModel.ConsoleModel.requestClearMessages(Main.MainImpl.MainImpl.universeForTest.targetManager);
   dumpMessages();
   TestRunner.completeTest();
 })();

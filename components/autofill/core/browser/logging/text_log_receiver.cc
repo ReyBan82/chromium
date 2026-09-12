@@ -4,21 +4,27 @@
 
 #include "components/autofill/core/browser/logging/text_log_receiver.h"
 
+#include <algorithm>
+#include <iterator>
+#include <string>
+#include <vector>
+
+#include "base/check.h"
 #include "base/logging.h"
 #include "base/notreached.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/strcat.h"
+#include "base/values.h"
 
 namespace autofill {
 
 namespace {
 
-std::vector<std::string> RenderEntries(const base::Value::List& entries);
+std::vector<std::string> RenderEntries(const base::ListValue& entries);
 
 // Renders an HTML element to text at a best effort basis.
 // This is a bit like calling Element.textContent on a DOM node and not super
 // fancy but sufficient for debugging.
-std::vector<std::string> RenderElement(const base::Value::Dict& entry) {
+std::vector<std::string> RenderElement(const base::DictValue& entry) {
   const std::string* type = entry.FindString("type");
   DCHECK(type && *type == "element");
 
@@ -26,8 +32,9 @@ std::vector<std::string> RenderElement(const base::Value::Dict& entry) {
   DCHECK(value);
 
   std::vector<std::string> result;
-  if (const base::Value::List* children = entry.FindList("children"))
+  if (const base::ListValue* children = entry.FindList("children")) {
     result = RenderEntries(*children);
+  }
 
   // Elements that should cause line wrapping.
   if (*value == "br" || *value == "div" || *value == "tr")
@@ -42,7 +49,7 @@ std::vector<std::string> RenderElement(const base::Value::Dict& entry) {
 }
 
 // Returns a text node to a vector with a single element representing the text.
-std::vector<std::string> RenderText(const base::Value::Dict& entry) {
+std::vector<std::string> RenderText(const base::DictValue& entry) {
   const std::string* type = entry.FindString("type");
   DCHECK(type && *type == "text");
 
@@ -54,13 +61,13 @@ std::vector<std::string> RenderText(const base::Value::Dict& entry) {
 
 // Concatenates the rendered contents of a document fragment into a vector of
 // strings.
-std::vector<std::string> RenderFragment(const base::Value::Dict& entry) {
+std::vector<std::string> RenderFragment(const base::DictValue& entry) {
   const std::string* type = entry.FindString("type");
   DCHECK(type && *type == "fragment");
 
   DCHECK(!entry.FindString("value"));
 
-  const base::Value::List* children = entry.FindList("children");
+  const base::ListValue* children = entry.FindList("children");
   DCHECK(children);
 
   return RenderEntries(*children);
@@ -70,7 +77,7 @@ std::vector<std::string> RenderFragment(const base::Value::Dict& entry) {
 // by the log buffer and it will dispatch the rendering to the correct
 // functions.
 // The output is a vector of strings that can be concatenated.
-std::vector<std::string> RenderEntry(const base::Value::Dict& entry) {
+std::vector<std::string> RenderEntry(const base::DictValue& entry) {
   const std::string* type = entry.FindString("type");
   if (!type) {
     NOTREACHED();
@@ -83,16 +90,15 @@ std::vector<std::string> RenderEntry(const base::Value::Dict& entry) {
   } else {
     NOTREACHED();
   }
-  return {};
 }
 
 // Concatenates the rendered contents of a list of log entries.
-std::vector<std::string> RenderEntries(const base::Value::List& entries) {
+std::vector<std::string> RenderEntries(const base::ListValue& entries) {
   std::vector<std::string> result;
   for (const base::Value& entry : entries) {
     DCHECK(entry.is_dict());
     std::vector<std::string> rendered_entry = RenderEntry(entry.GetDict());
-    base::ranges::move(rendered_entry, std::back_inserter(result));
+    std::ranges::move(rendered_entry, std::back_inserter(result));
   }
   return result;
 }
@@ -100,16 +106,12 @@ std::vector<std::string> RenderEntries(const base::Value::List& entries) {
 }  // namespace
 
 std::string TextLogReceiver::LogEntryToText(
-    const base::Value::Dict& entry) const {
+    const base::DictValue& entry) const {
   return base::StrCat(RenderEntry(entry));
 }
 
-void TextLogReceiver::LogEntry(const base::Value::Dict& entry) {
-  // This is a cheap workaround because the presubmit scripts don't want us
-  // to log to INFO. Given that this is gated by a command line flag, it should
-  // be fine.
-#define DESTINATION INFO
-  LOG(DESTINATION) << LogEntryToText(entry);
+void TextLogReceiver::LogEntry(const base::DictValue& entry) {
+  LOG(ERROR) << LogEntryToText(entry);
 }
 
 }  // namespace autofill

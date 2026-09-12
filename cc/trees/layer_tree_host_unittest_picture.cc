@@ -2,22 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "cc/trees/layer_tree_host.h"
-
+#include "base/cfi_buildflags.h"
 #include "base/functional/bind.h"
 #include "base/time/time.h"
+#include "build/build_config.h"
 #include "cc/test/fake_content_layer_client.h"
 #include "cc/test/fake_picture_layer.h"
 #include "cc/test/fake_picture_layer_impl.h"
 #include "cc/test/layer_tree_test.h"
 #include "cc/test/property_tree_test_utils.h"
+#include "cc/trees/layer_tree_host.h"
 #include "cc/trees/layer_tree_impl.h"
 #include "components/viz/test/test_context_provider.h"
-#include "components/viz/test/test_gles2_interface.h"
 #include "components/viz/test/test_raster_interface.h"
 
 namespace cc {
 namespace {
+
+bool TreesInViz() {
+  return base::FeatureList::IsEnabled(features::kTreesInViz);
+}
 
 // These tests deal with picture layers.
 class LayerTreeHostPictureTest : public LayerTreeTest {
@@ -149,13 +153,24 @@ class LayerTreeHostPictureTestTwinLayer
 // There is no pending layers in single thread mode.
 MULTI_THREAD_TEST_F(LayerTreeHostPictureTestTwinLayer);
 
+// TODO(crbug.com/): Flaky on MSAN, ASAN, TSAN, Linux CFI, and ARM64 Debug
+// builds.
+#if !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER) && \
+    !defined(MEMORY_SANITIZER) &&                                \
+    !(BUILDFLAG(CFI_ICALL_CHECK) && BUILDFLAG(IS_LINUX)) &&      \
+    !(defined(ARCH_CPU_ARM64) && !defined(NDEBUG))
+
 class LayerTreeHostPictureTestResizeViewportWithGpuRaster
     : public LayerTreeHostPictureTest {
   void SetUpUnboundContextProviders(
       viz::TestContextProvider* context_provider,
       viz::TestContextProvider* worker_provider) override {
-    context_provider->UnboundTestContextGL()->set_gpu_rasterization(true);
-    worker_provider->UnboundTestRasterInterface()->set_gpu_rasterization(true);
+    context_provider->GetWritableGpuFeatureInfo()
+        .status_values[gpu::GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION] =
+        gpu::kGpuFeatureStatusEnabled;
+    worker_provider->GetWritableGpuFeatureInfo()
+        .status_values[gpu::GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION] =
+        gpu::kGpuFeatureStatusEnabled;
   }
 
   void SetupTree() override {
@@ -193,7 +208,7 @@ class LayerTreeHostPictureTestResizeViewportWithGpuRaster
     }
   }
 
-  void DidCommit() override {
+  void DidCommitAndDrawFrame() override {
     switch (layer_tree_host()->SourceFrameNumber()) {
       case 1:
         // Change the picture layer's size along with the viewport, so it will
@@ -215,6 +230,11 @@ class LayerTreeHostPictureTestResizeViewportWithGpuRaster
 
 SINGLE_AND_MULTI_THREAD_TEST_F(
     LayerTreeHostPictureTestResizeViewportWithGpuRaster);
+
+#endif  // !defined(ADDRESS_SANITIZER) && !defined(THREAD_SANITIZER) &&
+        // !defined(MEMORY_SANITIZER) &&
+        // !(BUILDFLAG(CFI_ICALL_CHECK) && BUILDFLAG(IS_LINUX)) &&
+        // !(defined(ARCH_CPU_ARM64) && !defined(NDEBUG))
 
 class LayerTreeHostPictureTestChangeLiveTilesRectWithRecycleTree
     : public LayerTreeHostPictureTest {
@@ -261,7 +281,8 @@ class LayerTreeHostPictureTestChangeLiveTilesRectWithRecycleTree
         transform.Translate(0.f, -100000.f + 100.f);
         impl->active_tree()->SetTransformMutated(picture_impl->element_id(),
                                                  transform);
-        impl->SetNeedsRedraw();
+        impl->SetNeedsRedraw(/*animation_only=*/false,
+                             /*skip_if_inside_draw=*/false);
         break;
       }
       case 2: {
@@ -273,7 +294,8 @@ class LayerTreeHostPictureTestChangeLiveTilesRectWithRecycleTree
         // Make the top of the layer visible again.
         impl->active_tree()->SetTransformMutated(picture_impl->element_id(),
                                                  gfx::Transform());
-        impl->SetNeedsRedraw();
+        impl->SetNeedsRedraw(/*animation_only=*/false,
+                             /*skip_if_inside_draw=*/false);
         break;
       }
       case 3: {
@@ -555,7 +577,8 @@ class LayerTreeHostPictureTestRSLLMembershipWithScale
       // The ready to draw can race with a draw in which everything is
       // actually ready.  Therefore, just issue one more extra draw
       // here to force notify->draw ordering.
-      impl->SetNeedsRedraw();
+      impl->SetNeedsRedraw(/*animation_only=*/false,
+                           /*skip_if_inside_draw=*/false);
     }
   }
 
@@ -570,7 +593,7 @@ class LayerTreeHostPictureTestRSLLMembershipWithScale
 
 // Multi-thread only because in single thread you can't pinch zoom on the
 // compositor thread.
-// TODO(https://crbug.com/997866): Flaky on several platforms.
+// TODO(crbug.com/41478255): Flaky on several platforms.
 // MULTI_THREAD_TEST_F(LayerTreeHostPictureTestRSLLMembershipWithScale);
 
 class LayerTreeHostPictureTestForceRecalculateScales
@@ -634,14 +657,18 @@ class LayerTreeHostPictureTestForceRecalculateScales
         break;
       case 1:
         // On 2nd commit after scaling up to 2, the normal layer will adjust its
-        // scale and the will change layer should not (as it is will change.
+        // scale and the will change layer should not (as it is will change).
         ASSERT_EQ(1u, will_change_layer->tilings()->num_tilings());
         EXPECT_EQ(
             gfx::AxisTransform2d(),
             will_change_layer->tilings()->tiling_at(0)->raster_transform());
-        ASSERT_EQ(1u, normal_layer->tilings()->num_tilings());
+        // Now we delay tiling removal (or proposal to remove) to DidDraw(),
+        // so in DrawLayers, in both modes, tiling removal hasn't happened.
+        ASSERT_EQ(2u, normal_layer->tilings()->num_tilings());
         EXPECT_EQ(gfx::AxisTransform2d(2.f, gfx::Vector2dF()),
                   normal_layer->tilings()->tiling_at(0)->raster_transform());
+        EXPECT_EQ(gfx::AxisTransform2d(),
+                  normal_layer->tilings()->tiling_at(1)->raster_transform());
 
         MainThreadTaskRunner()->PostTask(
             FROM_HERE,
@@ -652,13 +679,32 @@ class LayerTreeHostPictureTestForceRecalculateScales
       case 2:
         // On 3rd commit, both layers should adjust scales due to forced
         // recalculating.
-        ASSERT_EQ(1u, will_change_layer->tilings()->num_tilings());
+        ASSERT_EQ(2u, will_change_layer->tilings()->num_tilings());
         EXPECT_EQ(
             gfx::AxisTransform2d(4.f, gfx::Vector2dF()),
             will_change_layer->tilings()->tiling_at(0)->raster_transform());
-        ASSERT_EQ(1u, normal_layer->tilings()->num_tilings());
-        EXPECT_EQ(gfx::AxisTransform2d(4.f, gfx::Vector2dF()),
-                  normal_layer->tilings()->tiling_at(0)->raster_transform());
+        EXPECT_EQ(
+            gfx::AxisTransform2d(),
+            will_change_layer->tilings()->tiling_at(1)->raster_transform());
+
+        if (TreesInViz()) {
+          // In TreesInViz mode, we query viz before deleting a tiling, so its
+          // removal is delayed comparing with non TreesInViz mode.
+          ASSERT_EQ(3u, normal_layer->tilings()->num_tilings());
+          EXPECT_EQ(gfx::AxisTransform2d(4.f, gfx::Vector2dF()),
+                    normal_layer->tilings()->tiling_at(0)->raster_transform());
+          EXPECT_EQ(gfx::AxisTransform2d(2.f, gfx::Vector2dF()),
+                    normal_layer->tilings()->tiling_at(1)->raster_transform());
+          EXPECT_EQ(gfx::AxisTransform2d(),
+                    normal_layer->tilings()->tiling_at(2)->raster_transform());
+        } else {
+          ASSERT_EQ(2u, normal_layer->tilings()->num_tilings());
+          EXPECT_EQ(gfx::AxisTransform2d(4.f, gfx::Vector2dF()),
+                    normal_layer->tilings()->tiling_at(0)->raster_transform());
+          EXPECT_EQ(gfx::AxisTransform2d(2.f, gfx::Vector2dF()),
+                    normal_layer->tilings()->tiling_at(1)->raster_transform());
+        }
+
         EndTest();
         break;
     }
@@ -683,7 +729,8 @@ class LayerTreeHostPictureTestForceRecalculateScales
   scoped_refptr<FakePictureLayer> normal_layer_;
 };
 
-SINGLE_THREAD_TEST_F(LayerTreeHostPictureTestForceRecalculateScales);
+// TODO(crbug.com/473556590): Test is flaky; disabling for now.
+// SINGLE_THREAD_TEST_F(LayerTreeHostPictureTestForceRecalculateScales);
 
 }  // namespace
 }  // namespace cc

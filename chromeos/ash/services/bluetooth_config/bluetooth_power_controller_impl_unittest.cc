@@ -5,13 +5,13 @@
 #include "chromeos/ash/services/bluetooth_config/bluetooth_power_controller_impl.h"
 
 #include "ash/constants/ash_pref_names.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/task_environment.h"
 #include "chromeos/ash/services/bluetooth_config/fake_adapter_state_controller.h"
-#include "components/session_manager/core/session_manager.h"
+#include "components/account_id/account_id.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
-#include "components/user_manager/fake_user_manager.h"
-#include "components/user_manager/scoped_user_manager.h"
-#include "testing/gmock/include/gmock/gmock.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace ash::bluetooth_config {
@@ -19,6 +19,9 @@ namespace ash::bluetooth_config {
 namespace {
 
 constexpr char kUser1Email[] = "user1@bluetooth";
+constexpr GaiaId::Literal kFakeGaia1("fakegaia1");
+
+constexpr char kKioskEmail[] = "example@kiosk-apps.device-local.localhost";
 
 }  // namespace
 
@@ -35,15 +38,17 @@ class BluetoothPowerControllerImplTest : public testing::Test {
   void SetUp() override {
     BluetoothPowerControllerImpl::RegisterLocalStatePrefs(
         local_state()->registry());
+    ash::test::UserSessionTestEnvironment::RegisterLocalStatePrefs(
+        local_state()->registry());
+
     BluetoothPowerControllerImpl::RegisterProfilePrefs(
         active_user_prefs()->registry());
 
-    auto fake_user_manager = std::make_unique<user_manager::FakeUserManager>();
-    fake_user_manager_ = fake_user_manager.get();
-    scoped_user_manager_ = std::make_unique<user_manager::ScopedUserManager>(
-        std::move(fake_user_manager));
-    session_manager_ = std::make_unique<session_manager::SessionManager>();
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(&local_state_);
   }
+
+  void TearDown() override { user_session_test_environment_.reset(); }
 
   void Init() {
     bluetooth_power_controller_ =
@@ -54,27 +59,17 @@ class BluetoothPowerControllerImplTest : public testing::Test {
   }
 
   void AddUserSession(const std::string& display_email,
+                      const GaiaId& gaia_id,
                       bool is_user_kiosk = false,
-                      bool is_new_profile = false) {
-    const AccountId account_id = AccountId::FromUserEmail(display_email);
-    const user_manager::User* user;
-    if (is_user_kiosk) {
-      user = fake_user_manager_->AddKioskAppUser(account_id);
-    } else {
-      user = fake_user_manager_->AddUser(account_id);
-    }
-    fake_user_manager_->set_is_current_user_new(is_new_profile);
+                      bool new_user = false) {
+    const user_manager::User* user =
+        is_user_kiosk
+            ? user_session_test_environment_->AddKioskChromeAppUser(
+                  display_email)
+            : user_session_test_environment_->AddRegularUser(
+                  AccountId::FromUserEmailGaiaId(display_email, gaia_id));
 
-    // Create a session in SessionManager. This will also login the user in
-    // UserManager.
-    session_manager_->CreateSession(user->GetAccountId(), user->username_hash(),
-                                    /*is_child=*/false);
-    session_manager_->SessionStarted();
-
-    // Logging in doesn't set the user in UserManager as the active user if
-    // there already is an active user, do so manually.
-    fake_user_manager_->SwitchActiveUser(account_id);
-
+    user_session_test_environment_->LogIn(user->GetAccountId(), new_user);
     bluetooth_power_controller_->SetPrefs(&active_user_prefs_, local_state());
   }
 
@@ -90,8 +85,8 @@ class BluetoothPowerControllerImplTest : public testing::Test {
     bluetooth_power_controller_->SetBluetoothEnabledState(enabled);
   }
 
-  void SetBluetoothHidDetectionActive() {
-    bluetooth_power_controller_->SetBluetoothHidDetectionActive();
+  void SetBluetoothEnabledWithoutPersistence() {
+    bluetooth_power_controller_->SetBluetoothEnabledWithoutPersistence();
   }
 
   void SetBluetoothHidDetectionInactive(bool is_using_bluetooth) {
@@ -108,13 +103,11 @@ class BluetoothPowerControllerImplTest : public testing::Test {
 
  private:
   base::test::TaskEnvironment task_environment_;
-  std::unique_ptr<session_manager::SessionManager> session_manager_;
-  user_manager::FakeUserManager* fake_user_manager_;
-  std::unique_ptr<user_manager::ScopedUserManager> scoped_user_manager_;
+  sync_preferences::TestingPrefServiceSyncable local_state_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
 
   sync_preferences::TestingPrefServiceSyncable active_user_prefs_;
-  sync_preferences::TestingPrefServiceSyncable local_state_;
-
   FakeAdapterStateController fake_adapter_state_controller_;
 
   std::unique_ptr<BluetoothPowerController> bluetooth_power_controller_;
@@ -141,7 +134,7 @@ TEST_F(BluetoothPowerControllerImplTest, ToggleBluetoothEnabled) {
 
   // Toggling Bluetooth off/on when there is user session should affect
   // user prefs.
-  AddUserSession(kUser1Email);
+  AddUserSession(kUser1Email, kFakeGaia1);
   EXPECT_TRUE(
       active_user_prefs()->GetBoolean(prefs::kUserBluetoothAdapterEnabled));
 
@@ -240,7 +233,7 @@ TEST_F(BluetoothPowerControllerImplTest, ApplyBluetoothPrimaryUserPrefDefault) {
                   ->IsDefaultValue());
   EXPECT_EQ(GetAdapterState(), mojom::BluetoothSystemState::kEnabled);
 
-  AddUserSession(kUser1Email);
+  AddUserSession(kUser1Email, kFakeGaia1);
 
   // Pref should now contain the current Bluetooth adapter state (on).
   EXPECT_FALSE(active_user_prefs()
@@ -265,7 +258,8 @@ TEST_F(BluetoothPowerControllerImplTest,
                   ->IsDefaultValue());
   EXPECT_EQ(GetAdapterState(), mojom::BluetoothSystemState::kDisabled);
 
-  AddUserSession(kUser1Email, /*is_user_kiosk=*/false, /*is_new_profile=*/true);
+  AddUserSession(kUser1Email, kFakeGaia1,
+                 /*is_user_kiosk=*/false, /*is_new_profile=*/true);
 
   // Pref should be set to true for first-login users, and this will also
   // trigger the Bluetooth power on.
@@ -291,7 +285,7 @@ TEST_F(BluetoothPowerControllerImplTest, ApplyBluetoothKioskUserPrefDefault) {
                   ->IsDefaultValue());
   EXPECT_EQ(GetAdapterState(), mojom::BluetoothSystemState::kDisabled);
 
-  AddUserSession(kUser1Email, /*is_user_kiosk=*/true);
+  AddUserSession(kKioskEmail, GaiaId(), /*is_user_kiosk=*/true);
 
   // For non-regular user, the Bluetooth setting should not be applied and pref
   // not set.
@@ -319,7 +313,7 @@ TEST_F(BluetoothPowerControllerImplTest, ApplyBluetoothPrimaryUserPrefOn) {
                    ->IsDefaultValue());
   EXPECT_EQ(GetAdapterState(), mojom::BluetoothSystemState::kDisabled);
 
-  AddUserSession(kUser1Email);
+  AddUserSession(kUser1Email, kFakeGaia1);
 
   // Pref should be applied to trigger the Bluetooth power on, and the pref
   // value should be unchanged.
@@ -329,15 +323,15 @@ TEST_F(BluetoothPowerControllerImplTest, ApplyBluetoothPrimaryUserPrefOn) {
 }
 
 TEST_F(BluetoothPowerControllerImplTest,
-       SetHidDetectionActive_LocalStatePrefOn) {
+       EnableBluetoothWithoutPersistence_LocalStatePrefOn) {
   Init();
 
   // Pref should be set to enabled.
   EXPECT_TRUE(local_state()->GetBoolean(prefs::kSystemBluetoothAdapterEnabled));
   EXPECT_EQ(GetAdapterState(), mojom::BluetoothSystemState::kEnabled);
 
-  // Set HID detection active.
-  SetBluetoothHidDetectionActive();
+  // Set Bluetooth enabled.
+  SetBluetoothEnabledWithoutPersistence();
 
   // The pref and adapter state should remain unchanged.
   EXPECT_TRUE(local_state()->GetBoolean(prefs::kSystemBluetoothAdapterEnabled));
@@ -352,7 +346,7 @@ TEST_F(BluetoothPowerControllerImplTest,
 }
 
 TEST_F(BluetoothPowerControllerImplTest,
-       SetHidDetectionActive_LocalStatePrefOff_BluetoothUnused) {
+       EnableBluetoothWithoutPersistence_LocalStatePrefOff_BluetoothUnused) {
   Init();
 
   // Turn Bluetooth off.
@@ -363,8 +357,8 @@ TEST_F(BluetoothPowerControllerImplTest,
   EXPECT_FALSE(
       local_state()->GetBoolean(prefs::kSystemBluetoothAdapterEnabled));
 
-  // Set HID detection active.
-  SetBluetoothHidDetectionActive();
+  // Set Bluetooth enabled.
+  SetBluetoothEnabledWithoutPersistence();
 
   // The adapter should enable but the pref remain unchanged.
   EXPECT_EQ(GetAdapterState(), mojom::BluetoothSystemState::kEnabling);
@@ -381,7 +375,7 @@ TEST_F(BluetoothPowerControllerImplTest,
 }
 
 TEST_F(BluetoothPowerControllerImplTest,
-       SetHidDetectionActive_LocalStatePrefOff_BluetoothUsed) {
+       EnableBluetoothWithoutPersistence_LocalStatePrefOff_BluetoothUsed) {
   Init();
 
   // Turn Bluetooth off.
@@ -392,8 +386,8 @@ TEST_F(BluetoothPowerControllerImplTest,
   EXPECT_FALSE(
       local_state()->GetBoolean(prefs::kSystemBluetoothAdapterEnabled));
 
-  // Set HID detection active.
-  SetBluetoothHidDetectionActive();
+  // Set Bluetooth enabled.
+  SetBluetoothEnabledWithoutPersistence();
 
   // The adapter should enable but the pref remain unchanged.
   EXPECT_EQ(GetAdapterState(), mojom::BluetoothSystemState::kEnabling);

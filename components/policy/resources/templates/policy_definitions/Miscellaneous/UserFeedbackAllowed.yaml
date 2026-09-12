@@ -16,11 +16,11 @@ items:
 - caption: Prevent users from filing feedback
   value: false
 owners:
-- apotapchuk@chromium.org
-- emaxx@chromium.org
+- file://components/policy/OWNERS
 schema:
   type: boolean
 supported_on:
+- android:153-
 - chrome.*:77-
 - chrome_os:77-
 tags: []

@@ -5,14 +5,15 @@
 #include "chrome/browser/sessions/exit_type_service_factory.h"
 
 #include "base/no_destructor.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/sessions/exit_type_service.h"
+#include "chrome/browser/ui/browser_manager_service_factory.h"
 #include "chrome/common/buildflags.h"
 #include "chrome/common/pref_names.h"
 #include "components/prefs/pref_service.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #endif
 
@@ -29,20 +30,30 @@ ExitTypeServiceFactory* ExitTypeServiceFactory::GetInstance() {
 }
 
 ExitTypeServiceFactory::ExitTypeServiceFactory()
-    : ProfileKeyedServiceFactory("ExitTypeServiceFactory",
-                                 ProfileSelections::BuildForRegularProfile()) {}
+    : ProfileKeyedServiceFactory(
+          "ExitTypeServiceFactory",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOriginalOnly)
+              .Build()) {
+  DependsOn(BrowserManagerServiceFactory::GetInstance());
+}
 
 ExitTypeServiceFactory::~ExitTypeServiceFactory() = default;
 
-KeyedService* ExitTypeServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+ExitTypeServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
   Profile* profile = Profile::FromBrowserContext(context);
   // TODO(sky): is this necessary?
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  if (ash::ProfileHelper::IsSigninProfile(profile))
+#if BUILDFLAG(IS_CHROMEOS)
+  if (ash::ProfileHelper::IsSigninProfile(profile)) {
     return nullptr;
+  }
 #endif
-  return new ExitTypeService(profile);
+  return std::make_unique<ExitTypeService>(profile);
 }
 
 bool ExitTypeServiceFactory::ServiceIsCreatedWithBrowserContext() const {

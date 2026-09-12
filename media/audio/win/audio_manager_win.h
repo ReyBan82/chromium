@@ -31,13 +31,13 @@ class MEDIA_EXPORT AudioManagerWin : public AudioManagerBase {
   // Implementation of AudioManager.
   bool HasAudioOutputDevices() override;
   bool HasAudioInputDevices() override;
-  void GetAudioInputDeviceNames(AudioDeviceNames* device_names) override;
-  void GetAudioOutputDeviceNames(AudioDeviceNames* device_names) override;
+  bool GetAudioInputDeviceNames(AudioDeviceNames* device_names) override;
+  bool GetAudioOutputDeviceNames(AudioDeviceNames* device_names) override;
   AudioParameters GetInputStreamParameters(
       const std::string& device_id) override;
   std::string GetAssociatedOutputDeviceID(
       const std::string& input_device_id) override;
-  const char* GetName() override;
+  const std::string_view GetName() override;
 
   // Implementation of AudioManagerBase.
   AudioOutputStream* MakeLinearOutputStream(
@@ -55,10 +55,12 @@ class MEDIA_EXPORT AudioManagerWin : public AudioManagerBase {
       const AudioParameters& params,
       const std::string& device_id,
       const LogCallback& log_callback) override;
+#if BUILDFLAG(ENABLE_PASSTHROUGH_AUDIO_CODECS)
   AudioOutputStream* MakeBitstreamOutputStream(
       const AudioParameters& params,
       const std::string& device_id,
       const LogCallback& log_callback) override;
+#endif
   std::string GetDefaultInputDeviceID() override;
   std::string GetDefaultOutputDeviceID() override;
   std::string GetCommunicationsInputDeviceID() override;
@@ -78,7 +80,7 @@ class MEDIA_EXPORT AudioManagerWin : public AudioManagerBase {
   // thread instead of on the UI thread which AudioManager is constructed on.
   void InitializeOnAudioThread();
 
-  void GetAudioDeviceNamesImpl(bool input, AudioDeviceNames* device_names);
+  bool GetAudioDeviceNamesImpl(bool input, AudioDeviceNames* device_names);
 
   AudioOutputStream* MakeOutputStream(const AudioParameters& params,
                                       const std::string& device_id,
@@ -86,6 +88,12 @@ class MEDIA_EXPORT AudioManagerWin : public AudioManagerBase {
 
   // Listen for output device changes.
   std::unique_ptr<AudioDeviceListenerWin> output_device_listener_;
+
+  // Used to invalidate pending `output_device_listener_` callbacks on shutdow.
+  // `audio_weak_factory_` must be invalidated on the audio thread as part of
+  // shutdown, before it is destroyed on whichever thread owns `this`.
+  base::WeakPtr<AudioManagerWin> weak_this_on_audio_thread_;
+  base::WeakPtrFactory<AudioManagerWin> weak_factory_on_audio_thread_{this};
 };
 
 }  // namespace media

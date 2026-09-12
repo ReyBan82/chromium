@@ -47,7 +47,7 @@ class APIBindingsSystemTest : public APIBindingTest {
 
   // Returns the object to be used as the parent for the `lastError`, and,
   // optionally, the secondary parent. The default returns an empty JS object
-  // and does not populate |secondary_parent| (assumes no last errors will be
+  // and does not populate `secondary_parent` (assumes no last errors will be
   // set).
   virtual v8::Local<v8::Object> GetLastErrorParent(
       v8::Local<v8::Context> context,
@@ -57,29 +57,29 @@ class APIBindingsSystemTest : public APIBindingTest {
   void AddConsoleError(v8::Local<v8::Context> context,
                        const std::string& error);
 
-  // Returns the base::Value::Dict representing the schema with the given API
+  // Returns the base::DictValue representing the schema with the given API
   // name.
-  const base::Value::Dict& GetAPISchema(const std::string& api_name);
+  const base::DictValue& GetAPISchema(const std::string& api_name);
 
   // Callback for event listeners changing.
   void OnEventListenersChanged(const std::string& event_name,
                                binding::EventListenersChanged changed,
-                               const base::Value::Dict* filter,
+                               const base::DictValue* filter,
                                bool was_manual,
                                v8::Local<v8::Context> context);
 
   // Callback for an API request being made. Stores the request in
-  // |last_request_|.
+  // `last_request_`.
   void OnAPIRequest(std::unique_ptr<APIRequestHandler::Request> request,
                     v8::Local<v8::Context> context);
 
-  // Checks that |last_request_| exists and was provided with the
-  // |expected_name| and |expected_arguments|.
+  // Checks that `last_request_` exists and was provided with the
+  // `expected_name` and `expected_arguments`.
   void ValidateLastRequest(const std::string& expected_name,
                            const std::string& expected_arguments);
 
   // Wraps the given |script source| in (function(obj) { ... }) and executes
-  // the result function, passing in |object| for an argument. Returns the
+  // the result function, passing in `object` for an argument. Returns the
   // result of calling the function.
   v8::Local<v8::Value> CallFunctionOnObject(v8::Local<v8::Context> context,
                                             v8::Local<v8::Object> object,
@@ -96,7 +96,7 @@ class APIBindingsSystemTest : public APIBindingTest {
 
  private:
   // The API schemas for the fake APIs.
-  std::map<std::string, base::Value::Dict> api_schemas_;
+  std::map<std::string, base::DictValue> api_schemas_;
 
   // The APIBindingsSystem associated with the test. Safe to use across multiple
   // contexts.

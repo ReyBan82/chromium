@@ -7,12 +7,12 @@
 #include <string>
 
 #include "base/functional/bind.h"
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "build/chromeos_buildflags.h"
+#include "chrome/browser/enterprise/browser_management/management_identity.h"
 #include "chrome/browser/policy/profile_policy_connector.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_selections.h"
-#include "chrome/browser/ui/managed_ui.h"
 #include "components/bookmarks/managed/managed_bookmark_service.h"
 #include "components/policy/policy_constants.h"
 #include "google_apis/gaia/gaia_auth_util.h"
@@ -40,7 +40,8 @@ bookmarks::ManagedBookmarkService* ManagedBookmarkServiceFactory::GetForProfile(
 
 // static
 ManagedBookmarkServiceFactory* ManagedBookmarkServiceFactory::GetInstance() {
-  return base::Singleton<ManagedBookmarkServiceFactory>::get();
+  static base::NoDestructor<ManagedBookmarkServiceFactory> instance;
+  return instance.get();
 }
 
 // static
@@ -56,8 +57,8 @@ std::string ManagedBookmarkServiceFactory::GetManagedBookmarksManager(
       profile->GetProfilePolicyConnector();
   if (connector->IsManaged() &&
       connector->IsProfilePolicy(policy::key::kManagedBookmarks)) {
-    absl::optional<std::string> account_manager =
-        chrome::GetAccountManagerIdentity(profile);
+    std::optional<std::string> account_manager =
+        GetAccountManagerIdentity(profile);
     if (account_manager)
       return *account_manager;
   }
@@ -80,11 +81,12 @@ ManagedBookmarkServiceFactory::ManagedBookmarkServiceFactory()
               .WithAshInternals(ProfileSelection::kNone)
               .Build()) {}
 
-ManagedBookmarkServiceFactory::~ManagedBookmarkServiceFactory() {}
+ManagedBookmarkServiceFactory::~ManagedBookmarkServiceFactory() = default;
 
-KeyedService* ManagedBookmarkServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+ManagedBookmarkServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return BuildManagedBookmarkService(context).release();
+  return BuildManagedBookmarkService(context);
 }
 
 bool ManagedBookmarkServiceFactory::ServiceIsNULLWhileTesting() const {

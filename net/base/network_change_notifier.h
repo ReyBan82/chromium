@@ -13,10 +13,16 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/observer_list_threadsafe.h"
+#include "base/strings/cstring_view.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "net/base/net_export.h"
 #include "net/base/network_handle.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+#include "net/base/address_map_linux.h"
+#endif
 
 namespace net {
 
@@ -26,10 +32,6 @@ class SystemDnsConfigChangeNotifier;
 typedef std::vector<NetworkInterface> NetworkInterfaceList;
 
 namespace internal {
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-class AddressTrackerLinux;
-#endif
-
 #if BUILDFLAG(IS_FUCHSIA)
 class NetworkInterfaceCache;
 #endif
@@ -50,6 +52,17 @@ class NET_EXPORT NetworkChangeNotifier {
   //
   // New enum values should only be added to the end of the enum and no values
   // should be modified or reused, as this is reported via UMA.
+  //
+  // ***********************************************************
+  // * NOTE THAT CONNECTION TYPE DETECTION IS BEST-EFFORT ONLY *
+  // ***********************************************************
+  //
+  // Most importantly, a value of kNone should never be interpreted to mean that
+  // we are definitively offline, but rather as a hint to mean that it may be a
+  // good idea to retry failed network actions again when the status switches to
+  // online. This is a result of platform APIs often being ambiguous, not having
+  // well-defined transition points from online to offline, and there being a
+  // lot of different possible network configurations.
   enum ConnectionType {
     CONNECTION_UNKNOWN = 0,  // A connection exists, but its type is unknown.
                              // Also used as a default value.
@@ -70,7 +83,7 @@ class NET_EXPORT NetworkChangeNotifier {
   // A Java counterpart will be generated for this enum.
   // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.net
   //
-  // TODO(crbug.com/1127134): Introduce subtypes for 5G networks once they can
+  // TODO(crbug.com/40148439): Introduce subtypes for 5G networks once they can
   // be detected.
   enum ConnectionSubtype {
     SUBTYPE_UNKNOWN = 0,
@@ -121,6 +134,13 @@ class NET_EXPORT NetworkChangeNotifier {
     CONNECTION_COST_LAST
   };
 
+  enum IPAddressChangeType {
+    IP_ADDRESS_CHANGE_NONE = 0,
+    IP_ADDRESS_CHANGE_NORMAL,
+    IP_ADDRESS_CHANGE_IPV6_TEMPADDR,
+    IP_ADDRESS_CHANGE_LAST = IP_ADDRESS_CHANGE_IPV6_TEMPADDR
+  };
+
   // DEPRECATED. Please use NetworkChangeObserver instead. crbug.com/754695.
   class NET_EXPORT IPAddressObserver {
    public:
@@ -129,7 +149,7 @@ class NET_EXPORT NetworkChangeNotifier {
 
     // Will be called when the IP address of the primary interface changes.
     // This includes when the primary interface itself changes.
-    virtual void OnIPAddressChanged() = 0;
+    virtual void OnIPAddressChanged(IPAddressChangeType change_type) = 0;
 
    protected:
     IPAddressObserver();
@@ -218,6 +238,35 @@ class NET_EXPORT NetworkChangeNotifier {
    private:
     friend NetworkChangeNotifier;
     scoped_refptr<base::ObserverListThreadSafe<NetworkChangeObserver>>
+        observer_list_;
+  };
+
+  class NET_EXPORT LowLatencyNetworkChangeObserver {
+   public:
+    LowLatencyNetworkChangeObserver(const LowLatencyNetworkChangeObserver&) =
+        delete;
+    LowLatencyNetworkChangeObserver& operator=(
+        const LowLatencyNetworkChangeObserver&) = delete;
+
+    // OnLowLatencyNetworkChanged will be called as soon as the OS provides an
+    // update about network changes affecting connectivity, link state, or IP
+    // addresses.
+    //
+    // Unlike NetworkChangeObserver, no attempt is made to debounce, coalesce,
+    // delay, or filter redundant or spurious notifications. Callers should
+    // avoid triggering heavy operations (such as tearing down or
+    // re-establishing connections) from this callback, and should instead use
+    // it for lightweight actions like flushing caches of network information
+    // that must not be used on a changed network.
+    virtual void OnLowLatencyNetworkChanged() = 0;
+
+   protected:
+    LowLatencyNetworkChangeObserver();
+    virtual ~LowLatencyNetworkChangeObserver();
+
+   private:
+    friend NetworkChangeNotifier;
+    scoped_refptr<base::ObserverListThreadSafe<LowLatencyNetworkChangeObserver>>
         observer_list_;
   };
 
@@ -331,6 +380,11 @@ class NET_EXPORT NetworkChangeNotifier {
         observer_list_;
   };
 
+  static constexpr ConnectionType kDefaultInitialConnectionType =
+      CONNECTION_NONE;
+  static constexpr ConnectionSubtype kDefaultInitialConnectionSubtype =
+      SUBTYPE_NONE;
+
   NetworkChangeNotifier(const NetworkChangeNotifier&) = delete;
   NetworkChangeNotifier& operator=(const NetworkChangeNotifier&) = delete;
   virtual ~NetworkChangeNotifier();
@@ -351,16 +405,8 @@ class NET_EXPORT NetworkChangeNotifier {
   // must do so before any other threads try to access the API below, and it
   // must outlive all other threads which might try to use it.
   static std::unique_ptr<NetworkChangeNotifier> CreateIfNeeded(
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-      // TODO(crbug.com/1347382): Remove this section and align the behavior
-      // with other platforms or confirm that Lacros needs to be separated.
-      NetworkChangeNotifier::ConnectionType initial_type = CONNECTION_UNKNOWN,
-      NetworkChangeNotifier::ConnectionSubtype initial_subtype =
-          SUBTYPE_UNKNOWN);
-#else
-      NetworkChangeNotifier::ConnectionType initial_type = CONNECTION_NONE,
-      NetworkChangeNotifier::ConnectionSubtype initial_subtype = SUBTYPE_NONE);
-#endif
+      ConnectionType initial_type = kDefaultInitialConnectionType,
+      ConnectionSubtype initial_subtype = kDefaultInitialConnectionSubtype);
 
   // Returns the most likely cost attribute for the default network connection.
   // The value does not indicate with absolute certainty if using the connection
@@ -455,7 +501,7 @@ class NET_EXPORT NetworkChangeNotifier {
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
   // Returns the AddressTrackerLinux if present.
-  static const internal::AddressTrackerLinux* GetAddressTracker();
+  static AddressMapOwnerLinux* GetAddressMapOwner();
 #endif
 
 #if BUILDFLAG(IS_FUCHSIA)
@@ -480,12 +526,20 @@ class NET_EXPORT NetworkChangeNotifier {
   // current connection is cellular.
   static bool IsConnectionCellular(ConnectionType type);
 
+#if !BUILDFLAG(IS_IOS)
   // Gets the current connection type based on |interfaces|. Returns
   // CONNECTION_NONE if there are no interfaces, CONNECTION_UNKNOWN if two
   // interfaces have different connection types or the connection type of all
   // interfaces if they have the same interface type.
+  //
+  // On iOS, it is possible to list all the available interfaces using the
+  // same API (net::GetNetworkList()) but the connection type is missing,
+  // meaning that method would always return CONNECTION_UNKNOWN. For this
+  // reason the method is marked as unavailable on iOS to prevents using it
+  // in cross-platform code.
   static ConnectionType ConnectionTypeFromInterfaceList(
       const NetworkInterfaceList& interfaces);
+#endif
 
   // Like CreateIfNeeded(), but for use in tests. The mock object doesn't
   // monitor any events, it merely rebroadcasts notifications when requested.
@@ -506,6 +560,8 @@ class NET_EXPORT NetworkChangeNotifier {
   static void AddConnectionTypeObserver(ConnectionTypeObserver* observer);
   static void AddDNSObserver(DNSObserver* observer);
   static void AddNetworkChangeObserver(NetworkChangeObserver* observer);
+  static void AddLowLatencyNetworkChangeObserver(
+      LowLatencyNetworkChangeObserver* observer);
   static void AddMaxBandwidthObserver(MaxBandwidthObserver* observer);
   static void AddNetworkObserver(NetworkObserver* observer);
   static void AddConnectionCostObserver(ConnectionCostObserver* observer);
@@ -528,6 +584,8 @@ class NET_EXPORT NetworkChangeNotifier {
   static void RemoveConnectionTypeObserver(ConnectionTypeObserver* observer);
   static void RemoveDNSObserver(DNSObserver* observer);
   static void RemoveNetworkChangeObserver(NetworkChangeObserver* observer);
+  static void RemoveLowLatencyNetworkChangeObserver(
+      LowLatencyNetworkChangeObserver* observer);
   static void RemoveMaxBandwidthObserver(MaxBandwidthObserver* observer);
   static void RemoveNetworkObserver(NetworkObserver* observer);
   static void RemoveConnectionCostObserver(ConnectionCostObserver* observer);
@@ -538,11 +596,13 @@ class NET_EXPORT NetworkChangeNotifier {
   static void TriggerNonSystemDnsChange();
 
   // Allows unit tests to trigger notifications.
-  static void NotifyObserversOfIPAddressChangeForTests();
+  static void NotifyObserversOfIPAddressChangeForTests(
+      IPAddressChangeType = IP_ADDRESS_CHANGE_NORMAL);
   static void NotifyObserversOfConnectionTypeChangeForTests(
       ConnectionType type);
   static void NotifyObserversOfDNSChangeForTests();
   static void NotifyObserversOfNetworkChangeForTests(ConnectionType type);
+  static void NotifyObserversOfLowLatencyNetworkChangeForTests();
   static void NotifyObserversOfMaxBandwidthChangeForTests(
       double max_bandwidth_mbps,
       ConnectionType type);
@@ -560,7 +620,11 @@ class NET_EXPORT NetworkChangeNotifier {
   static bool IsTestNotificationsOnly() { return test_notifications_only_; }
 
   // Returns a string equivalent to |type|.
-  static const char* ConnectionTypeToString(ConnectionType type);
+  static base::cstring_view ConnectionTypeToString(ConnectionType type);
+
+  // Returns a string equivalent to |type|.
+  static base::cstring_view IPAddressChangeTypeToString(
+      IPAddressChangeType type);
 
   // Allows a second NetworkChangeNotifier to be created for unit testing, so
   // the test suite can create a MockNetworkChangeNotifier, but platform
@@ -624,10 +688,8 @@ class NET_EXPORT NetworkChangeNotifier {
       bool omit_observers_in_constructor_for_testing = false);
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-  // Returns the AddressTrackerLinux if present.
-  // TODO(szym): Retrieve AddressMap from NetworkState. http://crbug.com/144212
-  virtual const internal::AddressTrackerLinux*
-      GetAddressTrackerInternal() const;
+  // Returns the AddressMapOwnerLinux if present.
+  virtual AddressMapOwnerLinux* GetAddressMapOwnerInternal();
 #endif
 
 #if BUILDFLAG(IS_FUCHSIA)
@@ -657,10 +719,12 @@ class NET_EXPORT NetworkChangeNotifier {
   // Broadcasts a notification to all registered observers.  Note that this
   // happens asynchronously, even for observers on the current thread, even in
   // tests.
-  static void NotifyObserversOfIPAddressChange();
+  static void NotifyObserversOfIPAddressChange(
+      IPAddressChangeType change_type = IP_ADDRESS_CHANGE_NORMAL);
   static void NotifyObserversOfConnectionTypeChange();
   static void NotifyObserversOfDNSChange();
   static void NotifyObserversOfNetworkChange(ConnectionType type);
+  static void NotifyObserversOfLowLatencyNetworkChange();
   static void NotifyObserversOfMaxBandwidthChange(double max_bandwidth_mbps,
                                                   ConnectionType type);
   static void NotifyObserversOfSpecificNetworkChange(
@@ -669,9 +733,17 @@ class NET_EXPORT NetworkChangeNotifier {
   static void NotifyObserversOfConnectionCostChange();
   static void NotifyObserversOfDefaultNetworkActive();
 
+#if !BUILDFLAG(IS_IOS)
   // Infer connection type from |GetNetworkList|. If all network interfaces
   // have the same type, return it, otherwise return CONNECTION_UNKNOWN.
+  //
+  // On iOS, it is possible to list all the available interfaces using the
+  // same API (net::GetNetworkList()) but the connection type is missing,
+  // meaning that method would always return CONNECTION_UNKNOWN. For this
+  // reason the method is marked as unavailable on iOS to prevents using it
+  // in cross-platform code.
   static ConnectionType ConnectionTypeFromInterfaces();
+#endif
 
   // Unregisters and clears |system_dns_config_notifier_|. Useful if a subclass
   // owns the notifier and is destroying it before |this|'s destructor is called
@@ -680,13 +752,6 @@ class NET_EXPORT NetworkChangeNotifier {
   // Clears the global NetworkChangeNotifier pointer.  This should be called
   // as early as possible in the destructor to prevent races.
   void ClearGlobalPointer();
-
-  // Called whenever a new ConnectionCostObserver is added. This method is
-  // needed so that the implementation class can be notified and
-  // potentially take action when an observer gets added. Since the act of
-  // adding an observer and the observer list itself are both static, the
-  // implementation class has no direct capability to watch for changes.
-  virtual void ConnectionCostObserverAdded() {}
 
   // Listening for notifications of this type is expensive as they happen
   // frequently. For this reason, we report {de}registration to the
@@ -707,10 +772,11 @@ class NET_EXPORT NetworkChangeNotifier {
 
   static ObserverList& GetObserverList();
 
-  void NotifyObserversOfIPAddressChangeImpl();
+  void NotifyObserversOfIPAddressChangeImpl(IPAddressChangeType change_type);
   void NotifyObserversOfConnectionTypeChangeImpl(ConnectionType type);
   void NotifyObserversOfDNSChangeImpl();
   void NotifyObserversOfNetworkChangeImpl(ConnectionType type);
+  void NotifyObserversOfLowLatencyNetworkChangeImpl();
   void NotifyObserversOfMaxBandwidthChangeImpl(double max_bandwidth_mbps,
                                                ConnectionType type);
   void NotifyObserversOfSpecificNetworkChangeImpl(
@@ -718,6 +784,8 @@ class NET_EXPORT NetworkChangeNotifier {
       handles::NetworkHandle network);
   void NotifyObserversOfConnectionCostChangeImpl(ConnectionCost cost);
   void NotifyObserversOfDefaultNetworkActiveImpl();
+
+  const perfetto::NamedTrack track_;
 
   raw_ptr<SystemDnsConfigChangeNotifier> system_dns_config_notifier_;
   std::unique_ptr<SystemDnsConfigObserver> system_dns_config_observer_;

@@ -23,10 +23,13 @@
 #include "components/signin/core/browser/signin_internals_util.h"
 #include "components/signin/public/base/signin_client.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
-#include "components/signin/public/identity_manager/scope_set.h"
 
 namespace signin {
-struct AccountsInCookieJarInfo;
+class AccountsInCookieJarInfo;
+}
+
+namespace version_info {
+enum class Channel;
 }
 
 class PrefRegistrySimple;
@@ -49,10 +52,10 @@ class AboutSigninInternals : public KeyedService,
    public:
     // |info| will contain the dictionary of signin_status_ values as indicated
     // in the comments for GetSigninStatus() below.
-    virtual void OnSigninStateChanged(const base::Value::Dict& info) = 0;
+    virtual void OnSigninStateChanged(const base::DictValue& info) = 0;
 
     // Notification that the cookie accounts are ready to be displayed.
-    virtual void OnCookieAccountsFetched(const base::Value::Dict& info) = 0;
+    virtual void OnCookieAccountsFetched(const base::DictValue& info) = 0;
   };
 
   AboutSigninInternals(signin::IdentityManager* identity_manager,
@@ -71,8 +74,8 @@ class AboutSigninInternals : public KeyedService,
 
   // Each instance of SigninInternalsUI adds itself as an observer to be
   // notified of all updates that AboutSigninInternals receives.
-  void AddSigninObserver(Observer* observer);
-  void RemoveSigninObserver(Observer* observer);
+  void AddObserver(Observer* observer);
+  void RemoveObserver(Observer* observer);
 
   // Pulls all signin values that have been persisted in the user prefs.
   void RefreshSigninPrefs();
@@ -97,7 +100,13 @@ class AboutSigninInternals : public KeyedService,
   //     [ List of {"name": "foo-name", "token" : "foo-token",
   //                 "status": "foo_stat", "time" : "foo_time"} elems]
   //  }
-  base::Value::Dict GetSigninStatus();
+  base::DictValue GetSigninStatus();
+
+  // Returns whether capability override is allowed for the given account and
+  // capability on the given channel.
+  bool CanOverrideAccountCapability(const CoreAccountId& account_id,
+                                    std::string_view capability_name,
+                                    version_info::Channel channel) const;
 
   // signin::IdentityManager::Observer implementations.
   void OnAccountsInCookieUpdated(
@@ -109,7 +118,7 @@ class AboutSigninInternals : public KeyedService,
   struct TokenInfo {
     TokenInfo(const std::string& consumer_id, const signin::ScopeSet& scopes);
     ~TokenInfo();
-    base::Value::Dict ToValue() const;
+    base::DictValue ToValue() const;
 
     static bool LessThan(const std::unique_ptr<TokenInfo>& a,
                          const std::unique_ptr<TokenInfo>& b);
@@ -117,8 +126,8 @@ class AboutSigninInternals : public KeyedService,
     // Called when the token is invalidated.
     void Invalidate();
 
-    std::string consumer_id;    // service that requested the token.
-    signin::ScopeSet scopes;    // Scoped that are requested.
+    std::string consumer_id;  // service that requested the token.
+    signin::ScopeSet scopes;  // Scoped that are requested.
     base::Time request_time;
     base::Time receive_time;
     base::Time expiration_time;
@@ -182,7 +191,7 @@ class AboutSigninInternals : public KeyedService,
     //                           "status" : request status} elems]
     //       }],
     //  }
-    base::Value::Dict ToValue(
+    base::DictValue ToValue(
         signin::IdentityManager* identity_manager,
         SigninErrorController* signin_error_controller,
         SigninClient* signin_client,
@@ -197,7 +206,7 @@ class AboutSigninInternals : public KeyedService,
   void OnAccessTokenRequestCompleted(const CoreAccountId& account_id,
                                      const std::string& consumer_id,
                                      const signin::ScopeSet& scopes,
-                                     GoogleServiceAuthError error,
+                                     const GoogleServiceAuthError& error,
                                      base::Time expiration_time) override;
   void OnAccessTokenRemovedFromCache(const CoreAccountId& account_id,
                                      const signin::ScopeSet& scopes) override;
@@ -215,6 +224,11 @@ class AboutSigninInternals : public KeyedService,
   void OnPrimaryAccountChanged(
       const signin::PrimaryAccountChangeEvent& event) override;
 
+  // Notifies that the value of `field` is changed. This function will update
+  // the corresponding field in `signin_status_` and the underlying prefs.
+  //
+  // If `value` is empty, then this function will clear the prefs and reset
+  // the corresponding entry in `signin_status_`.
   void NotifyTimedSigninFieldValueChanged(
       const signin_internals_util::TimedSigninStatusField& field,
       const std::string& value);
@@ -245,7 +259,7 @@ class AboutSigninInternals : public KeyedService,
   raw_ptr<SigninErrorController> signin_error_controller_;
 
   // Weak pointer to the AccountReconcilor.
-  raw_ptr<AccountReconcilor> account_reconcilor_;
+  raw_ptr<AccountReconcilor, DanglingUntriaged> account_reconcilor_;
 
   // Encapsulates the actual signin and token related values.
   // Most of the values are mirrored in the prefs for persistence.
@@ -254,6 +268,25 @@ class AboutSigninInternals : public KeyedService,
   signin::AccountConsistencyMethod account_consistency_;
 
   base::ObserverList<Observer>::Unchecked signin_observers_;
+
+  // Used to keep track of observerations.
+  base::ScopedObservation<signin::IdentityManager,
+                          signin::IdentityManager::Observer>
+      identity_manager_observeration_{this};
+
+  base::ScopedObservation<signin::IdentityManager,
+                          signin::IdentityManager::DiagnosticsObserver>
+      diganostics_observeration_{this};
+
+  base::ScopedObservation<SigninClient, content_settings::Observer>
+      client_observeration_{this};
+
+  base::ScopedObservation<SigninErrorController,
+                          SigninErrorController::Observer>
+      signin_error_observeration_{this};
+
+  base::ScopedObservation<AccountReconcilor, AccountReconcilor::Observer>
+      account_reconcilor_observeration_{this};
 };
 
 #endif  // COMPONENTS_SIGNIN_CORE_BROWSER_ABOUT_SIGNIN_INTERNALS_H_

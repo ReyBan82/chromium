@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 package org.chromium.net.test;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+
+import static com.google.common.truth.Truth.assertThat;
+
+import static org.junit.Assert.assertThrows;
 
 import android.content.Context;
 
@@ -18,20 +18,24 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.test.util.Batch;
 import org.chromium.net.CronetException;
+import org.chromium.net.ExperimentalUrlRequest;
+import org.chromium.net.RequestFinishedInfo;
+import org.chromium.net.TestRequestFinishedListener;
 import org.chromium.net.UrlRequest;
 import org.chromium.net.UrlResponseInfo;
 import org.chromium.net.impl.ImplVersion;
 
+import java.lang.reflect.Field;
 import java.net.Proxy;
 import java.nio.ByteBuffer;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/**
- * Test functionality of {@link FakeCronetEngine}.
- */
+/** Test functionality of {@link FakeCronetEngine}. */
 @RunWith(AndroidJUnit4.class)
+@Batch(Batch.UNIT_TESTS)
 public class FakeCronetEngineTest {
     Context mContext;
     FakeCronetEngine mFakeCronetEngine;
@@ -43,27 +47,31 @@ public class FakeCronetEngineTest {
         mContext = ApplicationProvider.getApplicationContext();
         mFakeCronetEngine =
                 (FakeCronetEngine) new FakeCronetProvider(mContext).createBuilder().build();
-        mCallback = new UrlRequest.Callback() {
-            @Override
-            public void onRedirectReceived(
-                    UrlRequest request, UrlResponseInfo info, String newLocationUrl) {}
+        mCallback =
+                new UrlRequest.Callback() {
+                    @Override
+                    public void onRedirectReceived(
+                            UrlRequest request, UrlResponseInfo info, String newLocationUrl) {}
 
-            @Override
-            public void onResponseStarted(UrlRequest request, UrlResponseInfo info) {}
+                    @Override
+                    public void onResponseStarted(UrlRequest request, UrlResponseInfo info) {
+                        request.read(ByteBuffer.allocate(0));
+                    }
 
-            @Override
-            public void onReadCompleted(
-                    UrlRequest request, UrlResponseInfo info, ByteBuffer byteBuffer) {}
+                    @Override
+                    public void onReadCompleted(
+                            UrlRequest request, UrlResponseInfo info, ByteBuffer byteBuffer) {}
 
-            @Override
-            public void onSucceeded(UrlRequest request, UrlResponseInfo info) {}
+                    @Override
+                    public void onSucceeded(UrlRequest request, UrlResponseInfo info) {}
 
-            @Override
-            public void onFailed(UrlRequest request, UrlResponseInfo info, CronetException error) {}
+                    @Override
+                    public void onFailed(
+                            UrlRequest request, UrlResponseInfo info, CronetException error) {}
 
-            @Override
-            public void onCanceled(UrlRequest request, UrlResponseInfo info) {}
-        };
+                    @Override
+                    public void onCanceled(UrlRequest request, UrlResponseInfo info) {}
+                };
         mExecutor = Executors.newSingleThreadExecutor();
     }
 
@@ -72,14 +80,14 @@ public class FakeCronetEngineTest {
     public void testShutdownEngineThrowsExceptionWhenApiCalled() {
         mFakeCronetEngine.shutdown();
 
-        try {
-            mFakeCronetEngine.newUrlRequestBuilder("", mCallback, mExecutor).build();
-            fail("newUrlRequestBuilder API not checked for shutdown engine.");
-        } catch (IllegalStateException e) {
-            assertEquals(
-                    "This instance of CronetEngine has been shutdown and can no longer be used.",
-                    e.getMessage());
-        }
+        ExperimentalUrlRequest.Builder builder =
+                mFakeCronetEngine.newUrlRequestBuilder("", mCallback, mExecutor);
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> builder.build());
+        assertThat(e)
+                .hasMessageThat()
+                .isEqualTo(
+                        "This instance of CronetEngine has been shutdown and can no longer be"
+                                + " used.");
     }
 
     @Test
@@ -87,74 +95,75 @@ public class FakeCronetEngineTest {
     public void testShutdownEngineThrowsExceptionWhenBidirectionalStreamApiCalled() {
         mFakeCronetEngine.shutdown();
 
-        try {
-            mFakeCronetEngine.newBidirectionalStreamBuilder("", null, null);
-            fail("newBidirectionalStreamBuilder API not checked for shutdown engine.");
-        } catch (IllegalStateException e) {
-            assertEquals(
-                    "This instance of CronetEngine has been shutdown and can no longer be used.",
-                    e.getMessage());
-        }
+        IllegalStateException e =
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> mFakeCronetEngine.newBidirectionalStreamBuilder("", null, null));
+        assertThat(e)
+                .hasMessageThat()
+                .isEqualTo(
+                        "This instance of CronetEngine has been shutdown and can no longer be"
+                                + " used.");
     }
 
     @Test
     @SmallTest
     public void testExceptionForNewBidirectionalStreamApi() {
-        try {
-            mFakeCronetEngine.newBidirectionalStreamBuilder("", null, null);
-            fail("newBidirectionalStreamBuilder API should not be available.");
-        } catch (UnsupportedOperationException e) {
-            assertEquals("The bidirectional stream API is not supported by the Fake implementation "
-                            + "of CronetEngine.",
-                    e.getMessage());
-        }
+        UnsupportedOperationException e =
+                assertThrows(
+                        UnsupportedOperationException.class,
+                        () -> mFakeCronetEngine.newBidirectionalStreamBuilder("", null, null));
+        assertThat(e)
+                .hasMessageThat()
+                .isEqualTo(
+                        "The bidirectional stream API is not supported by the Fake implementation "
+                                + "of CronetEngine.");
     }
 
     @Test
     @SmallTest
     public void testExceptionForOpenConnectionApi() {
-        try {
-            mFakeCronetEngine.openConnection(null);
-            fail("openConnection API should not be available.");
-        } catch (Exception e) {
-            assertEquals("The openConnection API is not supported by the Fake implementation of "
-                            + "CronetEngine.",
-                    e.getMessage());
-        }
+        Exception e = assertThrows(Exception.class, () -> mFakeCronetEngine.openConnection(null));
+        assertThat(e)
+                .hasMessageThat()
+                .isEqualTo(
+                        "The openConnection API is not supported by the Fake implementation of "
+                                + "CronetEngine.");
     }
 
     @Test
     @SmallTest
     public void testExceptionForOpenConnectionApiWithProxy() {
-        try {
-            mFakeCronetEngine.openConnection(null, Proxy.NO_PROXY);
-            fail("openConnection API  should not be available.");
-        } catch (Exception e) {
-            assertEquals("The openConnection API is not supported by the Fake implementation of "
-                            + "CronetEngine.",
-                    e.getMessage());
-        }
+        Exception e =
+                assertThrows(
+                        Exception.class,
+                        () -> mFakeCronetEngine.openConnection(null, Proxy.NO_PROXY));
+        assertThat(e)
+                .hasMessageThat()
+                .isEqualTo(
+                        "The openConnection API is not supported by the Fake implementation of "
+                                + "CronetEngine.");
     }
 
     @Test
     @SmallTest
     public void testExceptionForCreateStreamHandlerFactoryApi() {
-        try {
-            mFakeCronetEngine.createURLStreamHandlerFactory();
-            fail("createURLStreamHandlerFactory API  should not be available.");
-        } catch (UnsupportedOperationException e) {
-            assertEquals(
-                    "The URLStreamHandlerFactory API is not supported by the Fake implementation of"
-                            + " CronetEngine.",
-                    e.getMessage());
-        }
+        UnsupportedOperationException e =
+                assertThrows(
+                        UnsupportedOperationException.class,
+                        () -> mFakeCronetEngine.createURLStreamHandlerFactory());
+        assertThat(e)
+                .hasMessageThat()
+                .isEqualTo(
+                        "The URLStreamHandlerFactory API is not supported by the Fake"
+                                + " implementation of CronetEngine.");
     }
 
     @Test
     @SmallTest
     public void testGetVersionString() {
-        assertEquals("FakeCronet/" + ImplVersion.getCronetVersionWithLastChange(),
-                mFakeCronetEngine.getVersionString());
+        assertThat(mFakeCronetEngine.getVersionString())
+                .isEqualTo("FakeCronet/" + ImplVersion.getCronetVersionWithLastChange());
     }
 
     @Test
@@ -178,34 +187,35 @@ public class FakeCronetEngineTest {
     @Test
     @SmallTest
     public void testGetGlobalMetricsDeltas() {
-        assertTrue(mFakeCronetEngine.getGlobalMetricsDeltas().length == 0);
+        assertThat(mFakeCronetEngine.getGlobalMetricsDeltas()).isEmpty();
     }
 
     @Test
     @SmallTest
     public void testGetEffectiveConnectionType() {
-        assertEquals(FakeCronetEngine.EFFECTIVE_CONNECTION_TYPE_UNKNOWN,
-                mFakeCronetEngine.getEffectiveConnectionType());
+        assertThat(mFakeCronetEngine.getEffectiveConnectionType())
+                .isEqualTo(FakeCronetEngine.EFFECTIVE_CONNECTION_TYPE_UNKNOWN);
     }
 
     @Test
     @SmallTest
     public void testGetHttpRttMs() {
-        assertEquals(FakeCronetEngine.CONNECTION_METRIC_UNKNOWN, mFakeCronetEngine.getHttpRttMs());
+        assertThat(mFakeCronetEngine.getHttpRttMs())
+                .isEqualTo(FakeCronetEngine.CONNECTION_METRIC_UNKNOWN);
     }
 
     @Test
     @SmallTest
     public void testGetTransportRttMs() {
-        assertEquals(
-                FakeCronetEngine.CONNECTION_METRIC_UNKNOWN, mFakeCronetEngine.getTransportRttMs());
+        assertThat(mFakeCronetEngine.getTransportRttMs())
+                .isEqualTo(FakeCronetEngine.CONNECTION_METRIC_UNKNOWN);
     }
 
     @Test
     @SmallTest
     public void testGetDownstreamThroughputKbps() {
-        assertEquals(FakeCronetEngine.CONNECTION_METRIC_UNKNOWN,
-                mFakeCronetEngine.getDownstreamThroughputKbps());
+        assertThat(mFakeCronetEngine.getDownstreamThroughputKbps())
+                .isEqualTo(FakeCronetEngine.CONNECTION_METRIC_UNKNOWN);
     }
 
     @Test
@@ -240,27 +250,12 @@ public class FakeCronetEngineTest {
 
     @Test
     @SmallTest
-    public void testAddRequestFinishedListener() {
-        mFakeCronetEngine.addRequestFinishedListener(null);
-    }
-
-    @Test
-    @SmallTest
-    public void testRemoveRequestFinishedListener() {
-        mFakeCronetEngine.removeRequestFinishedListener(null);
-    }
-
-    @Test
-    @SmallTest
     public void testShutdownBlockedWhenRequestCountNotZero() {
         // Start a request and verify the engine can't be shutdown.
-        assertTrue(mFakeCronetEngine.startRequest());
-        try {
-            mFakeCronetEngine.shutdown();
-            fail("Shutdown not checked for active requests.");
-        } catch (IllegalStateException e) {
-            assertEquals("Cannot shutdown with active requests.", e.getMessage());
-        }
+        assertThat(mFakeCronetEngine.startRequest()).isTrue();
+        IllegalStateException e =
+                assertThrows(IllegalStateException.class, () -> mFakeCronetEngine.shutdown());
+        assertThat(e).hasMessageThat().isEqualTo("Cannot shutdown with running requests.");
 
         // Finish the request and verify the engine can be shutdown.
         mFakeCronetEngine.onRequestDestroyed();
@@ -269,9 +264,101 @@ public class FakeCronetEngineTest {
 
     @Test
     @SmallTest
+    public void testAddRequestFinishedListenerShouldAffectSize() {
+        mFakeCronetEngine.addRequestFinishedListener(
+                new RequestFinishedInfo.Listener(mExecutor) {
+                    @Override
+                    public void onRequestFinished(RequestFinishedInfo requestInfo) {}
+                });
+        assertThat(mFakeCronetEngine.hasRequestFinishedListeners()).isTrue();
+    }
+
+    @Test
+    @SmallTest
+    public void testRemoveRequestFinishedListenerShouldAffectSize() {
+        RequestFinishedInfo.Listener listener =
+                new RequestFinishedInfo.Listener(mExecutor) {
+                    @Override
+                    public void onRequestFinished(RequestFinishedInfo requestInfo) {}
+                };
+        mFakeCronetEngine.addRequestFinishedListener(listener);
+        assertThat(mFakeCronetEngine.hasRequestFinishedListeners()).isTrue();
+        mFakeCronetEngine.removeRequestFinishedListener(listener);
+        assertThat(mFakeCronetEngine.hasRequestFinishedListeners()).isFalse();
+    }
+
+    @Test
+    @SmallTest
+    public void testAddNullRequestFinishedListenerShouldThrowException() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> mFakeCronetEngine.addRequestFinishedListener(null));
+    }
+
+    @Test
+    @SmallTest
+    public void testRemoveNullRequestFinishedListenerShouldThrowException() {
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> mFakeCronetEngine.removeRequestFinishedListener(null));
+    }
+
+    @Test
+    @SmallTest
+    public void testFinishedRequestListener() {
+        String url = "broken_url";
+        String annotation = "some_annotation";
+        TestRequestFinishedListener listener =
+                new TestRequestFinishedListener(mExecutor) {
+                    @Override
+                    public void onRequestFinished(RequestFinishedInfo requestInfo) {
+                        super.onRequestFinished(requestInfo);
+                        assertThat(requestInfo.getUrl()).isEqualTo(url);
+                        assertThat(requestInfo.getAnnotations()).contains(annotation);
+                    }
+                };
+        mFakeCronetEngine.addRequestFinishedListener(listener);
+        UrlRequest urlRequest =
+                mFakeCronetEngine
+                        .newUrlRequestBuilder(url, mCallback, mExecutor)
+                        .addRequestAnnotation(annotation)
+                        .build();
+        urlRequest.start();
+        listener.blockUntilDone();
+    }
+
+    @Test
+    @SmallTest
+    public void testFinishedRequestListenerFailWithException() {
+        UrlRequest.Callback exceptionCallBack =
+                new FakeUrlRequestTest.StubCallback() {
+                    @Override
+                    public void onResponseStarted(UrlRequest request, UrlResponseInfo info) {
+                        throw new IllegalStateException("Throwing an exception");
+                    }
+                };
+        TestRequestFinishedListener listener =
+                new TestRequestFinishedListener(mExecutor) {
+                    @Override
+                    public void onRequestFinished(RequestFinishedInfo requestInfo) {
+                        super.onRequestFinished(requestInfo);
+                        assertThat(requestInfo.getException())
+                                .hasMessageThat()
+                                .isEqualTo("Exception received from UrlRequest.Callback");
+                    }
+                };
+        mFakeCronetEngine.addRequestFinishedListener(listener);
+        UrlRequest urlRequest =
+                mFakeCronetEngine.newUrlRequestBuilder("", exceptionCallBack, mExecutor).build();
+        urlRequest.start();
+        listener.blockUntilDone();
+    }
+
+    @Test
+    @SmallTest
     public void testCantStartRequestAfterEngineShutdown() {
         mFakeCronetEngine.shutdown();
-        assertFalse(mFakeCronetEngine.startRequest());
+        assertThat(mFakeCronetEngine.startRequest()).isFalse();
     }
 
     @Test
@@ -279,13 +366,68 @@ public class FakeCronetEngineTest {
     public void testCantDecrementOnceShutdown() {
         mFakeCronetEngine.shutdown();
 
-        try {
-            mFakeCronetEngine.onRequestDestroyed();
-            fail("onRequestDestroyed not checked for shutdown engine");
-        } catch (IllegalStateException e) {
-            assertEquals("This instance of CronetEngine was shutdown. All requests must have been "
-                            + "complete.",
-                    e.getMessage());
-        }
+        IllegalStateException e =
+                assertThrows(
+                        IllegalStateException.class, () -> mFakeCronetEngine.onRequestDestroyed());
+        assertThat(e)
+                .hasMessageThat()
+                .isEqualTo(
+                        "This instance of CronetEngine was shutdown. All requests must have been "
+                                + "complete.");
+    }
+
+    @Test
+    @SmallTest
+    public void testShutdownDoesNotCloseCustomExecutor() {
+        ExecutorService customExecutor = Executors.newSingleThreadExecutor();
+        FakeCronetController controller = new FakeCronetController();
+        FakeCronetEngine engine =
+                (FakeCronetEngine)
+                        controller.newFakeCronetEngineBuilder(mContext, customExecutor).build();
+
+        engine.shutdown();
+
+        // The custom executor should remain active
+        assertThat(customExecutor.isShutdown()).isFalse();
+        customExecutor.shutdown();
+    }
+
+    @Test
+    @SmallTest
+    public void testShutdownClosesInternalExecutor() throws Exception {
+        FakeCronetController controller = new FakeCronetController();
+        FakeCronetEngine engine =
+                (FakeCronetEngine) controller.newFakeCronetEngineBuilder(mContext).build();
+
+        // Access the internal executor via reflection for verification
+        Field field = engine.getClass().getDeclaredField("mExecutorService");
+        field.setAccessible(true);
+        ExecutorService internalExecutor = (ExecutorService) field.get(engine);
+
+        engine.shutdown();
+
+        // The internally created executor must be shut down
+        assertThat(internalExecutor.isShutdown()).isTrue();
+    }
+
+    @Test
+    @SmallTest
+    public void testProvidingNullExecutorUsesInternalOne() throws Exception {
+        FakeCronetController controller = new FakeCronetController();
+        FakeCronetEngine engine =
+                (FakeCronetEngine) controller.newFakeCronetEngineBuilder(mContext, null).build();
+
+        // Access the internal executor via reflection for verification
+        Field field = engine.getClass().getDeclaredField("mExecutorService");
+        field.setAccessible(true);
+        ExecutorService internalExecutor = (ExecutorService) field.get(engine);
+
+        assertThat(internalExecutor).isNotNull();
+
+        engine.shutdown();
+
+        // Because null was provided, the engine should recognize it owns the internal
+        // executor and shut it down.
+        assertThat(internalExecutor.isShutdown()).isTrue();
     }
 }

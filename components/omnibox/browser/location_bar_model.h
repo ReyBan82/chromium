@@ -41,6 +41,13 @@ class LocationBarModel {
   // Returns the URL of the current navigation entry.
   virtual GURL GetURL() const = 0;
 
+  // Returns true if the current page is a contextual tasks UI page (i.e.
+  // chrome://contextual-tasks/).
+  virtual bool IsContextualTasksPage() const = 0;
+
+  // Returns the URL for the current contextual tasks page.
+  virtual GURL GetContextualTasksInnerFrameURL() const = 0;
+
   // Returns the security level that the toolbar should display.
   virtual security_state::SecurityLevel GetSecurityLevel() const = 0;
 
@@ -52,8 +59,10 @@ class LocationBarModel {
   // UMA opted-in users.  Examines the user's profile to determine if the
   // current page is the user's home page.
   virtual metrics::OmniboxEventProto::PageClassification GetPageClassification(
-      OmniboxFocusSource focus_source,
-      bool is_prefetch = false) = 0;
+      bool is_prefetch = false) const = 0;
+
+  // Classify the current page for the omnibox composebox.
+  virtual metrics::OmniboxEventProto::PageClassification GetOmniboxComposeboxPageClassification() const = 0;
 
   // Returns the id of the icon to show to the left of the address, based on the
   // current URL.  When search term replacement is active, this returns a search
@@ -79,10 +88,6 @@ class LocationBarModel {
   // user has a specified extension or pref enabled. If true, the only elisions
   // should be username/password and trailing slash on bare hostname.
   virtual bool ShouldPreventElision() const = 0;
-
-  // Returns whether the omnibox should use the new security indicators for
-  // secure HTTPS connections.
-  virtual bool ShouldUseUpdatedConnectionSecurityIndicators() const = 0;
 
  protected:
   LocationBarModel() = default;

@@ -27,25 +27,26 @@ SettingsPrivateDelegate::SettingsPrivateDelegate(Profile* profile)
   prefs_util_ = std::make_unique<PrefsUtil>(profile);
 }
 
-SettingsPrivateDelegate::~SettingsPrivateDelegate() {
-}
+SettingsPrivateDelegate::~SettingsPrivateDelegate() = default;
 
-base::Value SettingsPrivateDelegate::GetPref(const std::string& name) {
-  absl::optional<api::settings_private::PrefObject> pref =
+std::optional<base::DictValue> SettingsPrivateDelegate::GetPref(
+    const std::string& name) {
+  std::optional<api::settings_private::PrefObject> pref =
       prefs_util_->GetPref(name);
-  if (!pref)
-    return base::Value();
-  return base::Value(pref->ToValue());
+  if (!pref) {
+    return std::nullopt;
+  }
+  return pref->ToValue();
 }
 
-base::Value::List SettingsPrivateDelegate::GetAllPrefs() {
-  base::Value::List prefs;
+base::ListValue SettingsPrivateDelegate::GetAllPrefs() {
+  base::ListValue prefs;
 
   const TypedPrefMap& keys = prefs_util_->GetAllowlistedKeys();
   for (const auto& it : keys) {
-    base::Value pref = GetPref(it.first);
-    if (!pref.is_none())
-      prefs.Append(std::move(pref));
+    if (std::optional<base::DictValue> pref = GetPref(it.first); pref) {
+      prefs.Append(std::move(*pref));
+    }
   }
 
   return prefs;
@@ -57,23 +58,25 @@ settings_private::SetPrefResult SettingsPrivateDelegate::SetPref(
   return prefs_util_->SetPref(pref_name, value);
 }
 
-std::unique_ptr<base::Value> SettingsPrivateDelegate::GetDefaultZoom() {
+base::Value SettingsPrivateDelegate::GetDefaultZoom() {
   // Zoom level prefs aren't available for off-the-record profiles (like guest
   // mode on Chrome OS). The setting isn't visible to users anyway, so return a
   // default value.
-  if (profile_->IsOffTheRecord())
-    return std::make_unique<base::Value>(0.0);
-  double zoom = blink::PageZoomLevelToZoomFactor(
+  if (profile_->IsOffTheRecord()) {
+    return base::Value(0.0);
+  }
+  double zoom = blink::ZoomLevelToZoomFactor(
       profile_->GetZoomLevelPrefs()->GetDefaultZoomLevelPref());
-  return std::make_unique<base::Value>(zoom);
+  return base::Value(zoom);
 }
 
 settings_private::SetPrefResult SettingsPrivateDelegate::SetDefaultZoom(
     double zoom) {
   // See comment in GetDefaultZoom().
-  if (profile_->IsOffTheRecord())
+  if (profile_->IsOffTheRecord()) {
     return settings_private::SetPrefResult::PREF_NOT_MODIFIABLE;
-  double zoom_factor = blink::PageZoomFactorToZoomLevel(zoom);
+  }
+  double zoom_factor = blink::ZoomFactorToZoomLevel(zoom);
   profile_->GetZoomLevelPrefs()->SetDefaultZoomLevelPref(zoom_factor);
   return settings_private::SetPrefResult::SUCCESS;
 }

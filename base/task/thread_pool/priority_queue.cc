@@ -7,11 +7,10 @@
 #include <utility>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/memory/ptr_util.h"
-#include "base/types/cxx23_to_underlying.h"
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
 // A class combining a TaskSource and the TaskSourceSortKey that determines its
 // position in a PriorityQueue. Instances are only mutable via
@@ -61,21 +60,25 @@ class PriorityQueue::TaskSourceAndSortKey {
   void ClearHeapHandle() {
     // Ensure |task_source_| is not nullptr, which may be the case if
     // take_task_source() was called before this.
-    if (task_source_)
+    if (task_source_) {
       task_source_->ClearImmediateHeapHandle();
+    }
   }
 
   // Required by IntrusiveHeap.
   HeapHandle GetHeapHandle() const {
-    if (task_source_)
+    if (task_source_) {
       return task_source_->GetImmediateHeapHandle();
+    }
     return HeapHandle::Invalid();
   }
 
-  const RegisteredTaskSource& task_source() const { return task_source_; }
-  RegisteredTaskSource& task_source() { return task_source_; }
+  const RegisteredTaskSource& task_source() const LIFETIME_BOUND {
+    return task_source_;
+  }
+  RegisteredTaskSource& task_source() LIFETIME_BOUND { return task_source_; }
 
-  const TaskSourceSortKey& sort_key() const { return sort_key_; }
+  const TaskSourceSortKey& sort_key() const LIFETIME_BOUND { return sort_key_; }
 
  private:
   RegisteredTaskSource task_source_;
@@ -85,13 +88,16 @@ class PriorityQueue::TaskSourceAndSortKey {
 PriorityQueue::PriorityQueue() = default;
 
 PriorityQueue::~PriorityQueue() {
-  if (!is_flush_task_sources_on_destroy_enabled_)
+  if (!is_flush_task_sources_on_destroy_enabled_) {
     return;
+  }
 
   while (!container_.empty()) {
     auto task_source = PopTaskSource();
     auto task = task_source.Clear();
-    std::move(task.task).Run();
+    if (task) {
+      std::move(task->task).Run();
+    }
   }
 }
 
@@ -101,7 +107,7 @@ void PriorityQueue::Push(RegisteredTaskSource task_source,
                          TaskSourceSortKey task_source_sort_key) {
   container_.insert(
       TaskSourceAndSortKey(std::move(task_source), task_source_sort_key));
-  IncrementNumTaskSourcesForPriority(task_source_sort_key.priority());
+  IncrementNumTaskSourcesForThreadType(task_source_sort_key.thread_type());
 }
 
 const TaskSourceSortKey& PriorityQueue::PeekSortKey() const {
@@ -127,8 +133,8 @@ RegisteredTaskSource PriorityQueue::PopTaskSource() {
   // TaskSource does not alter its sort order.
   auto& task_source_and_sort_key =
       const_cast<TaskSourceAndSortKey&>(container_.top());
-  DecrementNumTaskSourcesForPriority(
-      task_source_and_sort_key.sort_key().priority());
+  DecrementNumTaskSourcesForThreadType(
+      task_source_and_sort_key.sort_key().thread_type());
   RegisteredTaskSource task_source =
       task_source_and_sort_key.take_task_source();
   container_.pop();
@@ -137,12 +143,14 @@ RegisteredTaskSource PriorityQueue::PopTaskSource() {
 
 RegisteredTaskSource PriorityQueue::RemoveTaskSource(
     const TaskSource& task_source) {
-  if (IsEmpty())
+  if (IsEmpty()) {
     return nullptr;
+  }
 
   const HeapHandle heap_handle = task_source.immediate_heap_handle();
-  if (!heap_handle.IsValid())
+  if (!heap_handle.IsValid()) {
     return nullptr;
+  }
 
   TaskSourceAndSortKey& task_source_and_sort_key =
       const_cast<PriorityQueue::TaskSourceAndSortKey&>(
@@ -151,20 +159,22 @@ RegisteredTaskSource PriorityQueue::RemoveTaskSource(
   RegisteredTaskSource registered_task_source =
       task_source_and_sort_key.take_task_source();
 
-  DecrementNumTaskSourcesForPriority(
-      task_source_and_sort_key.sort_key().priority());
+  DecrementNumTaskSourcesForThreadType(
+      task_source_and_sort_key.sort_key().thread_type());
   container_.erase(heap_handle);
   return registered_task_source;
 }
 
 void PriorityQueue::UpdateSortKey(const TaskSource& task_source,
                                   TaskSourceSortKey sort_key) {
-  if (IsEmpty())
+  if (IsEmpty()) {
     return;
+  }
 
   const HeapHandle heap_handle = task_source.immediate_heap_handle();
-  if (!heap_handle.IsValid())
+  if (!heap_handle.IsValid()) {
     return;
+  }
 
   auto old_sort_key = container_.at(heap_handle).sort_key();
   auto registered_task_source =
@@ -172,8 +182,8 @@ void PriorityQueue::UpdateSortKey(const TaskSource& task_source,
           container_.at(heap_handle))
           .take_task_source();
 
-  DecrementNumTaskSourcesForPriority(old_sort_key.priority());
-  IncrementNumTaskSourcesForPriority(sort_key.priority());
+  DecrementNumTaskSourcesForThreadType(old_sort_key.thread_type());
+  IncrementNumTaskSourcesForThreadType(sort_key.thread_type());
 
   container_.Replace(
       heap_handle,
@@ -193,14 +203,32 @@ void PriorityQueue::EnableFlushTaskSourcesOnDestroyForTesting() {
   is_flush_task_sources_on_destroy_enabled_ = true;
 }
 
-void PriorityQueue::DecrementNumTaskSourcesForPriority(TaskPriority priority) {
-  DCHECK_GT(num_task_sources_per_priority_[base::to_underlying(priority)], 0U);
-  --num_task_sources_per_priority_[base::to_underlying(priority)];
+void PriorityQueue::swap(PriorityQueue& other) {
+  container_.swap(other.container_);
+  std::swap(num_foreground_task_sources_, other.num_foreground_task_sources_);
+  std::swap(num_background_task_sources_, other.num_background_task_sources_);
+  std::swap(is_flush_task_sources_on_destroy_enabled_,
+            other.is_flush_task_sources_on_destroy_enabled_);
 }
 
-void PriorityQueue::IncrementNumTaskSourcesForPriority(TaskPriority priority) {
-  ++num_task_sources_per_priority_[base::to_underlying(priority)];
+void PriorityQueue::DecrementNumTaskSourcesForThreadType(
+    ThreadType thread_type) {
+  if (thread_type != ThreadType::kBackground) {
+    DCHECK_GT(num_foreground_task_sources_, 0U);
+    --num_foreground_task_sources_;
+  } else {
+    DCHECK_GT(num_background_task_sources_, 0U);
+    --num_background_task_sources_;
+  }
 }
 
-}  // namespace internal
-}  // namespace base
+void PriorityQueue::IncrementNumTaskSourcesForThreadType(
+    ThreadType thread_type) {
+  if (thread_type != ThreadType::kBackground) {
+    ++num_foreground_task_sources_;
+  } else {
+    ++num_background_task_sources_;
+  }
+}
+
+}  // namespace base::internal

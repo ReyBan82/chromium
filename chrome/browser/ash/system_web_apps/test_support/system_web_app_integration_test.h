@@ -18,7 +18,8 @@ enum class SystemWebAppType;
 
 // Test harness for how ChromeOS System Web Apps integrate with the System Web
 // App platform.
-class SystemWebAppIntegrationTest : public SystemWebAppManagerBrowserTest {
+class SystemWebAppIntegrationTest
+    : public TestProfileTypeMixin<SystemWebAppBrowserTestBase> {
  public:
   SystemWebAppIntegrationTest();
   SystemWebAppIntegrationTest(const SystemWebAppIntegrationTest&) = delete;
@@ -32,7 +33,7 @@ class SystemWebAppIntegrationTest : public SystemWebAppManagerBrowserTest {
                                const GURL& url,
                                const std::string& title);
 
-  // Helper to obtain browser()->profile().
+  // Helper to obtain browser()->GetProfile().
   Profile* profile();
 
   // Launch the given System App |type| with the given |file_path| as a launch

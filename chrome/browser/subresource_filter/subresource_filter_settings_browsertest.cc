@@ -11,7 +11,6 @@
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
@@ -37,8 +36,11 @@
 namespace subresource_filter {
 
 class SubresourceFilterSettingsBrowserTest
-    : public SubresourceFilterBrowserTest {
+    : public SubresourceFilterBrowserTest,
+      public ::testing::WithParamInterface<bool> {
  public:
+  std::optional<bool> UseV5() const override { return GetParam(); }
+
   void SetUp() override {
     provider_.SetDefaultReturns(
         /*is_initialization_complete_return=*/true,
@@ -56,7 +58,7 @@ class SubresourceFilterSettingsBrowserTest
   ::testing::NiceMock<policy::MockConfigurationPolicyProvider> provider_;
 };
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSettingsBrowserTest,
                        ContentSettingsAllowlist_DoNotActivate) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
@@ -72,7 +74,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
 
   // Simulate an explicitly allowlisting via content settings.
   HostContentSettingsMap* settings_map =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+      HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
   settings_map->SetContentSettingDefaultScope(
       url, url, ContentSettingsType::ADS, CONTENT_SETTING_ALLOW);
 
@@ -84,7 +86,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
   EXPECT_TRUE(console_observer.messages().empty());
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSettingsBrowserTest,
                        ContentSettingsAllowlistGlobal_DoNotActivate) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
@@ -100,7 +102,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
 
   // Simulate globally allowing ads via content settings.
   HostContentSettingsMap* settings_map =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+      HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
   settings_map->SetDefaultContentSetting(ContentSettingsType::ADS,
                                          CONTENT_SETTING_ALLOW);
 
@@ -112,7 +114,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
   EXPECT_TRUE(console_observer.messages().empty());
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSettingsBrowserTest,
                        DrivenByEnterprisePolicy) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
@@ -154,7 +156,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
       WasParsedScriptElementLoaded(web_contents()->GetPrimaryMainFrame()));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSettingsBrowserTest,
                        ContentSettingsAllowWithNoPageActivation_DoNotActivate) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
@@ -168,7 +170,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
 
   // Simulate allowing the subresource filter via content settings.
   HostContentSettingsMap* settings_map =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+      HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
   settings_map->SetContentSettingDefaultScope(
       url, url, ContentSettingsType::ADS, CONTENT_SETTING_BLOCK);
 
@@ -178,7 +180,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
       WasParsedScriptElementLoaded(web_contents()->GetPrimaryMainFrame()));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSettingsBrowserTest,
                        ContentSettingsAllowlistViaReload_DoNotActivate) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
@@ -200,7 +202,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
       WasParsedScriptElementLoaded(web_contents()->GetPrimaryMainFrame()));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSettingsBrowserTest,
                        ContentSettingsAllowlistViaReload_AllowlistIsByDomain) {
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
@@ -240,7 +242,7 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
 // Test the "smart" UI, aka the logic to hide the UI on subsequent same-domain
 // navigations, until a certain time threshold has been reached. This is an
 // android-only feature.
-IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
+IN_PROC_BROWSER_TEST_P(SubresourceFilterSettingsBrowserTest,
                        DoNotShowUIUntilThresholdReached) {
   settings_manager()->set_should_use_smart_ui_for_testing(true);
   ASSERT_NO_FATAL_FAILURE(
@@ -311,5 +313,9 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterSettingsBrowserTest,
       kSubresourceFilterActionsHistogram,
       subresource_filter::SubresourceFilterAction::kUISuppressed, 1);
 }
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         SubresourceFilterSettingsBrowserTest,
+                         ::testing::Bool());
 
 }  // namespace subresource_filter

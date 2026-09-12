@@ -4,14 +4,11 @@
 
 #include "device/bluetooth/bluetooth_discovery_manager_mac.h"
 
-#include "base/memory/raw_ptr.h"
-
-#import <IOBluetooth/objc/IOBluetoothDevice.h>
-#import <IOBluetooth/objc/IOBluetoothDeviceInquiry.h>
+#import <IOBluetooth/IOBluetooth.h>
 
 #include "base/check_op.h"
 #include "base/logging.h"
-#include "base/mac/scoped_nsobject.h"
+#include "base/memory/raw_ptr.h"
 
 namespace device {
 
@@ -24,10 +21,15 @@ class BluetoothDiscoveryManagerMacClassic;
     : NSObject<IOBluetoothDeviceInquiryDelegate> {
  @private
   raw_ptr<device::BluetoothDiscoveryManagerMacClassic> _manager;  // weak
+  __strong BluetoothDeviceInquiryDelegate* _strongSelf;
 }
 
 - (instancetype)initWithManager:
     (device::BluetoothDiscoveryManagerMacClassic*)manager;
+
+- (void)resetOwner;
+- (void)armSelfRetain;
+- (void)cleanUpAndRelease;
 
 @end
 
@@ -40,8 +42,6 @@ class BluetoothDiscoveryManagerMacClassic
  public:
   explicit BluetoothDiscoveryManagerMacClassic(Observer* observer)
       : BluetoothDiscoveryManagerMac(observer),
-        should_do_discovery_(false),
-        inquiry_running_(false),
         inquiry_delegate_(
             [[BluetoothDeviceInquiryDelegate alloc] initWithManager:this]),
         inquiry_([[IOBluetoothDeviceInquiry alloc]
@@ -52,7 +52,20 @@ class BluetoothDiscoveryManagerMacClassic
   BluetoothDiscoveryManagerMacClassic& operator=(
       const BluetoothDiscoveryManagerMacClassic&) = delete;
 
-  ~BluetoothDiscoveryManagerMacClassic() override {}
+  ~BluetoothDiscoveryManagerMacClassic() override {
+    // Reset owner first so delegate knows we are gone.
+    [inquiry_delegate_ resetOwner];
+    [inquiry_ stop];
+
+    // IOBluetoothDeviceInquiry's delegate property is configured as "assign"
+    // rather than "weak". If it is not manually reset then our delegate could be
+    // accessed after we drop our strong reference and the object is freed.
+    inquiry_.delegate = nil;
+
+    // Safely release the self-retain with a one-turn keep-alive if it was
+    // active. See FB13705522.
+    [inquiry_delegate_ cleanUpAndRelease];
+  }
 
   // BluetoothDiscoveryManagerMac override.
   bool IsDiscovering() const override { return should_do_discovery_; }
@@ -74,10 +87,13 @@ class BluetoothDiscoveryManagerMacClassic
       return true;
     }
 
+    // Re-set delegate in case it was cleared in previous completion.
+    inquiry_.delegate = inquiry_delegate_;
+
     DVLOG(1) << "Requesting to start device inquiry";
     if ([inquiry_ start] != kIOReturnSuccess) {
       DVLOG(1) << "Failed to start device inquiry";
-
+      inquiry_.delegate = nil;  // Clear delegate if failed to start
       // Set |should_do_discovery_| to false here. Since we're reporting an
       // error, we're indicating that the adapter call StartDiscovery again
       // if needed.
@@ -85,6 +101,7 @@ class BluetoothDiscoveryManagerMacClassic
       return false;
     }
 
+    [inquiry_delegate_ armSelfRetain];  // Arm self-retain on success
     DVLOG(1) << "Device inquiry start was successful";
     return true;
   }
@@ -167,6 +184,7 @@ class BluetoothDiscoveryManagerMacClassic
 
     if ([inquiry_ start] == kIOReturnSuccess) {
       DVLOG(1) << "Device inquiry restart was successful";
+      [inquiry_delegate_ armSelfRetain];  // Re-arm self-retain
       return;
     }
 
@@ -178,14 +196,14 @@ class BluetoothDiscoveryManagerMacClassic
 
  private:
   // The requested discovery state.
-  bool should_do_discovery_;
+  bool should_do_discovery_ = false;
 
   // The current inquiry state.
-  bool inquiry_running_;
+  bool inquiry_running_ = false;
 
   // Objective-C objects for running and tracking device inquiry.
-  base::scoped_nsobject<BluetoothDeviceInquiryDelegate> inquiry_delegate_;
-  base::scoped_nsobject<IOBluetoothDeviceInquiry> inquiry_;
+  BluetoothDeviceInquiryDelegate* __strong inquiry_delegate_;
+  IOBluetoothDeviceInquiry* __strong inquiry_;
 };
 
 BluetoothDiscoveryManagerMac::BluetoothDiscoveryManagerMac(
@@ -193,8 +211,7 @@ BluetoothDiscoveryManagerMac::BluetoothDiscoveryManagerMac(
   DCHECK(observer);
 }
 
-BluetoothDiscoveryManagerMac::~BluetoothDiscoveryManagerMac() {
-}
+BluetoothDiscoveryManagerMac::~BluetoothDiscoveryManagerMac() = default;
 
 // static
 BluetoothDiscoveryManagerMac* BluetoothDiscoveryManagerMac::CreateClassic(
@@ -214,19 +231,61 @@ BluetoothDiscoveryManagerMac* BluetoothDiscoveryManagerMac::CreateClassic(
   return self;
 }
 
+- (void)resetOwner {
+  _manager = nullptr;
+}
+
+- (void)armSelfRetain {
+  _strongSelf = self;
+}
+
+- (void)cleanUpAndRelease {
+  // Take ownership of the self-retain.
+  BluetoothDeviceInquiryDelegate* __strong keepAlive = _strongSelf;
+  _strongSelf = nil;
+
+  // If it was active (keepAlive is not nil), keep it alive for one more turn
+  // of the main run loop to allow any already-enqueued callbacks to fire
+  // safely. See FB13705522.
+  if (keepAlive) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      (void)keepAlive;
+    });
+  }
+}
+
 - (void)deviceInquiryStarted:(IOBluetoothDeviceInquiry*)sender {
+  if (!_manager) {
+    return;
+  }
   _manager->DeviceInquiryStarted(sender);
 }
 
 - (void)deviceInquiryDeviceFound:(IOBluetoothDeviceInquiry*)sender
                           device:(IOBluetoothDevice*)device {
+  if (!_manager) {
+    return;
+  }
   _manager->DeviceFound(sender, device);
 }
 
 - (void)deviceInquiryComplete:(IOBluetoothDeviceInquiry*)sender
                         error:(IOReturn)error
                       aborted:(BOOL)aborted {
-  _manager->DeviceInquiryComplete(sender, error, aborted);
+  // Take ownership of the self-retain to release it at the end of this scope.
+  [[maybe_unused]] NS_VALID_UNTIL_END_OF_SCOPE BluetoothDeviceInquiryDelegate*
+      strongSelf = _strongSelf;
+  _strongSelf = nil;
+
+  if (_manager) {
+    _manager->DeviceInquiryComplete(sender, error, aborted);
+  }
+
+  // If manager is gone (null) or didn't restart the inquiry (which would have
+  // re-armed _strongSelf), clear the delegate to avoid further callbacks.
+  if (!_manager || !_strongSelf) {
+    [sender setDelegate:nil];
+  }
 }
 
 @end

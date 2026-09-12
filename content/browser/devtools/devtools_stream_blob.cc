@@ -4,9 +4,10 @@
 
 #include "content/browser/devtools/devtools_stream_blob.h"
 
+#include <string_view>
+
 #include "base/base64.h"
 #include "base/functional/bind.h"
-#include "base/strings/string_piece.h"
 #include "content/browser/blob_storage/chrome_blob_storage_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
@@ -92,7 +93,7 @@ void DevToolsStreamBlob::OpenOnIO(
     scoped_refptr<ChromeBlobStorageContext> blob_context,
     const std::string& uuid,
     OpenCallback callback) {
-  DCHECK(!blob_handle_);
+  CHECK(!blob_handle_, base::NotFatalUntil::M159);
 
   storage::BlobStorageContext* bsc = blob_context->context();
   blob_handle_ = bsc->GetBlobDataFromUUID(uuid);
@@ -109,7 +110,7 @@ void DevToolsStreamBlob::OpenOnIO(
 
 void DevToolsStreamBlob::OnBlobConstructionComplete(
     storage::BlobStatus status) {
-  DCHECK(!BlobStatusIsPending(status));
+  CHECK(!BlobStatusIsPending(status), base::NotFatalUntil::M159);
   if (BlobStatusIsError(status)) {
     LOG(ERROR) << "Blob building failed: " << static_cast<int>(status);
     FailOnIO(std::move(open_callback_));
@@ -147,9 +148,9 @@ void DevToolsStreamBlob::FailOnIO(OpenCallback callback) {
 }
 
 void DevToolsStreamBlob::StartReadRequest() {
-  DCHECK_GE(pending_reads_.size(), 1UL);
-  DCHECK(blob_handle_);
-  DCHECK(!failed_);
+  CHECK_GE(pending_reads_.size(), 1UL, base::NotFatalUntil::M159);
+  CHECK(blob_handle_, base::NotFatalUntil::M159);
+  CHECK(!failed_, base::NotFatalUntil::M159);
 
   ReadRequest& request = *pending_reads_.front();
   if (request.position < 0)
@@ -163,7 +164,7 @@ void DevToolsStreamBlob::StartReadRequest() {
 }
 
 void DevToolsStreamBlob::BeginRead() {
-  DCHECK_GE(pending_reads_.size(), 1UL);
+  CHECK_GE(pending_reads_.size(), 1UL, base::NotFatalUntil::M159);
   ReadRequest& request = *pending_reads_.front();
   if (!io_buf_ || static_cast<size_t>(io_buf_->size()) < request.max_size)
     io_buf_ = base::MakeRefCounted<net::IOBufferWithSize>(request.max_size);
@@ -176,7 +177,7 @@ void DevToolsStreamBlob::BeginRead() {
   // This is for uniformity with the asynchronous case.
   if (status == BlobReader::Status::NET_ERROR) {
     bytes_read = blob_reader_->net_error();
-    DCHECK_LT(0, bytes_read);
+    CHECK_LT(0, bytes_read, base::NotFatalUntil::M159);
   }
   GetIOThreadTaskRunner({})->PostTask(
       FROM_HERE,
@@ -201,8 +202,7 @@ void DevToolsStreamBlob::OnReadComplete(int bytes_read) {
     status = blob_reader_->remaining_bytes() ? StatusSuccess : StatusEOF;
     if (is_binary_) {
       base64_encoded = true;
-      base::Base64Encode(base::StringPiece(io_buf_->data(), bytes_read),
-                         data.get());
+      *data = base::Base64Encode(std::string_view(io_buf_->data(), bytes_read));
     } else {
       // TODO(caseq): truncate at UTF8 boundary.
       *data = std::string(io_buf_->data(), bytes_read);
@@ -216,7 +216,7 @@ void DevToolsStreamBlob::OnReadComplete(int bytes_read) {
 }
 
 void DevToolsStreamBlob::CreateReader() {
-  DCHECK(!blob_reader_);
+  CHECK(!blob_reader_, base::NotFatalUntil::M159);
   blob_reader_ = blob_handle_->CreateReader();
   BlobReader::Status status = blob_reader_->CalculateSize(
       base::BindOnce(&DevToolsStreamBlob::OnCalculateSizeComplete, this));

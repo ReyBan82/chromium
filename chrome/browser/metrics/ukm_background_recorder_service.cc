@@ -6,6 +6,7 @@
 
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
+#include "base/no_destructor.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "components/history/core/browser/history_service.h"
@@ -44,7 +45,7 @@ void UkmBackgroundRecorderService::DidGetVisibleVisitCount(
     GetBackgroundSourceIdCallback callback,
     history::VisibleVisitCountToHostResult result) {
   if (!result.success || !result.count) {
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
@@ -59,7 +60,8 @@ void UkmBackgroundRecorderService::DidGetVisibleVisitCount(
 
 // static
 UkmBackgroundRecorderFactory* UkmBackgroundRecorderFactory::GetInstance() {
-  return base::Singleton<UkmBackgroundRecorderFactory>::get();
+  static base::NoDestructor<UkmBackgroundRecorderFactory> instance;
+  return instance.get();
 }
 
 // static
@@ -72,15 +74,25 @@ UkmBackgroundRecorderService* UkmBackgroundRecorderFactory::GetForProfile(
 UkmBackgroundRecorderFactory::UkmBackgroundRecorderFactory()
     : ProfileKeyedServiceFactory(
           "UkmBackgroundRecorderService",
-          ProfileSelections::BuildForRegularAndIncognito()) {
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOwnInstance)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kOwnInstance)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOwnInstance)
+              .Build()) {
   DependsOn(HistoryServiceFactory::GetInstance());
 }
 
 UkmBackgroundRecorderFactory::~UkmBackgroundRecorderFactory() = default;
 
-KeyedService* UkmBackgroundRecorderFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+UkmBackgroundRecorderFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new UkmBackgroundRecorderService(Profile::FromBrowserContext(context));
+  return std::make_unique<UkmBackgroundRecorderService>(
+      Profile::FromBrowserContext(context));
 }
 
 }  // namespace ukm

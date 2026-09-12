@@ -47,7 +47,7 @@ class CONTENT_EXPORT URLDataManager : public base::SupportsUserData::Data {
   void AddDataSource(URLDataSourceImpl* source);
 
   void UpdateWebUIDataSource(const std::string& source_name,
-                             const base::Value::Dict& update);
+                             const base::DictValue& update);
 
   // Deletes any data sources no longer referenced. This is normally invoked
   // for you, but can be invoked to force deletion (such as during shutdown).
@@ -66,23 +66,24 @@ class CONTENT_EXPORT URLDataManager : public base::SupportsUserData::Data {
   // Updates an existing WebUI data source.
   static void UpdateWebUIDataSource(BrowserContext* browser_context,
                                     const std::string& source_name,
-                                    const base::Value::Dict& update);
+                                    const base::DictValue& update);
 
  private:
   friend class URLDataSourceImpl;
   friend struct DeleteURLDataSource;
   typedef std::vector<const URLDataSourceImpl*> URLDataSources;
 
-  // If invoked on the UI thread the DataSource is deleted immediatlye,
+  // If invoked on the UI thread the DataSource is deleted immediately,
   // otherwise it is added to |data_sources_| and a task is scheduled to handle
-  // deletion on the UI thread. See note abouve DeleteDataSource for more info.
+  // deletion on the UI thread. See note above the |DeleteURLDataSource| struct
+  // in url_data_source_impl.h for more info.
   static void DeleteDataSource(const URLDataSourceImpl* data_source);
 
   // Returns true if |data_source| is scheduled for deletion (|DeleteDataSource|
   // was invoked).
   static bool IsScheduledForDeletion(const URLDataSourceImpl* data_source);
 
-  raw_ptr<BrowserContext, DanglingUntriaged> browser_context_;
+  raw_ptr<BrowserContext> browser_context_;
 
   // |data_sources_| that are no longer referenced and scheduled for deletion.
   // Protected by g_delete_lock in the .cc file.

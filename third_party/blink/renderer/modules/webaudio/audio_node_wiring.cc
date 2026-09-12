@@ -4,9 +4,9 @@
 
 #include "third_party/blink/renderer/modules/webaudio/audio_node_wiring.h"
 
+#include "base/memory/raw_ref.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_input.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_output.h"
-#include "third_party/blink/renderer/modules/webaudio/deferred_task_handler.h"
 #include "third_party/blink/renderer/platform/wtf/hash_set.h"
 
 namespace blink {
@@ -16,7 +16,7 @@ namespace {
 using AudioNodeOutputSet = HashSet<AudioNodeOutput*>;
 
 struct FindOutputResult {
-  AudioNodeOutputSet& output_set;
+  const raw_ref<AudioNodeOutputSet> output_set;
   AudioNodeOutputSet::const_iterator iterator;
   bool is_disabled;
 };
@@ -33,22 +33,21 @@ FindOutputResult FindOutput(AudioNodeOutput& output,
                             AudioNodeOutputSet& disabled_outputs) {
   auto it = outputs.find(&output);
   if (it != outputs.end()) {
-    return {outputs, it, false};
+    return {raw_ref(outputs), it, false};
   }
 
   it = disabled_outputs.find(&output);
   if (it != disabled_outputs.end()) {
-    return {disabled_outputs, it, true};
+    return {raw_ref(disabled_outputs), it, true};
   }
 
   NOTREACHED() << "The output must be connected to the input.";
-  return {outputs, {}, false};
 }
 
 }  // namespace
 
 void AudioNodeWiring::Connect(AudioNodeOutput& output, AudioNodeInput& input) {
-  input.GetDeferredTaskHandler().AssertGraphOwner();
+  input.AssertGraphOwner();
 
   const bool input_connected_to_output =
       input.outputs_.Contains(&output) ||
@@ -78,7 +77,7 @@ void AudioNodeWiring::Connect(AudioNodeOutput& output, AudioNodeInput& input) {
 
 void AudioNodeWiring::Connect(AudioNodeOutput& output,
                               AudioParamHandler& param) {
-  param.GetDeferredTaskHandler().AssertGraphOwner();
+  param.AssertGraphOwner();
 
   const bool param_connected_to_output = param.outputs_.Contains(&output);
   const bool output_connected_to_param = output.params_.Contains(&param);
@@ -98,7 +97,7 @@ void AudioNodeWiring::Connect(AudioNodeOutput& output,
 
 void AudioNodeWiring::Disconnect(AudioNodeOutput& output,
                                  AudioNodeInput& input) {
-  input.GetDeferredTaskHandler().AssertGraphOwner();
+  input.AssertGraphOwner();
 
   // These must be connected.
   DCHECK(output.inputs_.Contains(&input));
@@ -109,7 +108,7 @@ void AudioNodeWiring::Disconnect(AudioNodeOutput& output,
   auto result = FindOutput(output, input.outputs_, input.disabled_outputs_);
 
   // Erase the pointers from both sets.
-  result.output_set.erase(result.iterator);
+  result.output_set->erase(result.iterator);
   output.inputs_.erase(&input);
 
   // If an active connection was disconnected, the input may need to have its
@@ -126,7 +125,7 @@ void AudioNodeWiring::Disconnect(AudioNodeOutput& output,
 
 void AudioNodeWiring::Disconnect(AudioNodeOutput& output,
                                  AudioParamHandler& param) {
-  param.GetDeferredTaskHandler().AssertGraphOwner();
+  param.AssertGraphOwner();
 
   DCHECK(param.outputs_.Contains(&output));
   DCHECK(output.params_.Contains(&param));
@@ -139,8 +138,9 @@ void AudioNodeWiring::Disconnect(AudioNodeOutput& output,
   param.ChangedOutputs();
 }
 
-void AudioNodeWiring::Disable(AudioNodeOutput& output, AudioNodeInput& input) {
-  input.GetDeferredTaskHandler().AssertGraphOwner();
+scoped_refptr<AudioHandler> AudioNodeWiring::Disable(AudioNodeOutput& output,
+                                                     AudioNodeInput& input) {
+  input.AssertGraphOwner();
 
   // These must be connected.
   DCHECK(output.inputs_.Contains(&input));
@@ -153,7 +153,7 @@ void AudioNodeWiring::Disable(AudioNodeOutput& output, AudioNodeInput& input) {
   // Move from the active list to the disabled list.
   // Do nothing if this is the current state.
   if (!input.disabled_outputs_.insert(&output).is_new_entry) {
-    return;
+    return nullptr;
   }
   input.outputs_.erase(&output);
 
@@ -161,14 +161,16 @@ void AudioNodeWiring::Disable(AudioNodeOutput& output, AudioNodeInput& input) {
   // rendering state updated.
   input.ChangedOutputs();
 
-  // Propagate disabled state downstream. This must happen after the set
-  // manipulations above, or the disabling logic could observe an inconsistent
-  // state.
-  input.Handler().DisableOutputsIfNecessary();
+  // Return the downstream handler so the caller can propagate the disabled
+  // state downstream (e.g. via a worklist) to avoid deep recursion.
+  // This must happen after the set manipulations above, or the disabling
+  // logic could observe an inconsistent state.
+  return base::WrapRefCounted(&input.Handler());
 }
 
-void AudioNodeWiring::Enable(AudioNodeOutput& output, AudioNodeInput& input) {
-  input.GetDeferredTaskHandler().AssertGraphOwner();
+scoped_refptr<AudioHandler> AudioNodeWiring::Enable(AudioNodeOutput& output,
+                                                    AudioNodeInput& input) {
+  input.AssertGraphOwner();
 
   // These must be connected.
   DCHECK(output.inputs_.Contains(&input));
@@ -181,7 +183,7 @@ void AudioNodeWiring::Enable(AudioNodeOutput& output, AudioNodeInput& input) {
   // Move from the disabled list to the active list.
   // Do nothing if this is the current state.
   if (!input.outputs_.insert(&output).is_new_entry) {
-    return;
+    return nullptr;
   }
   input.disabled_outputs_.erase(&output);
 
@@ -189,15 +191,16 @@ void AudioNodeWiring::Enable(AudioNodeOutput& output, AudioNodeInput& input) {
   // rendering state updated.
   input.ChangedOutputs();
 
-  // Propagate enabled state downstream. This must happen after the set
-  // manipulations above, or the disabling logic could observe an inconsistent
-  // state.
-  input.Handler().EnableOutputsIfNecessary();
+  // Return the downstream handler so the caller can propagate the enabled
+  // state downstream (e.g. via a worklist) to avoid deep recursion.
+  // This must happen after the set manipulations above, or the enabling
+  // logic could observe an inconsistent state.
+  return base::WrapRefCounted(&input.Handler());
 }
 
 bool AudioNodeWiring::IsConnected(AudioNodeOutput& output,
                                   AudioNodeInput& input) {
-  input.GetDeferredTaskHandler().AssertGraphOwner();
+  input.AssertGraphOwner();
 
   bool is_connected = output.inputs_.Contains(&input);
   DCHECK_EQ(is_connected, input.outputs_.Contains(&output) ||
@@ -207,7 +210,7 @@ bool AudioNodeWiring::IsConnected(AudioNodeOutput& output,
 
 bool AudioNodeWiring::IsConnected(AudioNodeOutput& output,
                                   AudioParamHandler& param) {
-  param.GetDeferredTaskHandler().AssertGraphOwner();
+  param.AssertGraphOwner();
 
   bool is_connected = output.params_.Contains(&param);
   DCHECK_EQ(is_connected, param.outputs_.Contains(&output));
@@ -223,7 +226,7 @@ void AudioNodeWiring::WillBeDestroyed(AudioNodeInput& input) {
   // What does matter, however, is ensuring that no AudioNodeOutput holds a
   // dangling pointer to `input`.
 
-  input.GetDeferredTaskHandler().AssertGraphOwner();
+  input.AssertGraphOwner();
 
   for (AudioNodeOutput* output : input.outputs_) {
     output->inputs_.erase(&input);

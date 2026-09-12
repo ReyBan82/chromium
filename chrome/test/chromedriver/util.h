@@ -6,6 +6,7 @@
 #define CHROME_TEST_CHROMEDRIVER_UTIL_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/values.h"
 
@@ -22,7 +23,7 @@ std::string GenerateId();
 
 // Send a sequence of key strokes to the active Element in window.
 Status SendKeysOnWindow(WebView* web_view,
-                        const base::Value::List* key_list,
+                        const base::ListValue* key_list,
                         bool release_modifiers,
                         int* sticky_modifiers);
 
@@ -65,39 +66,39 @@ double ConvertCentimeterToInch(double centimeter);
 //   thus 2.0 is an integer. Also, the spec sometimes uses "safe integer"
 //   (https://www.w3.org/TR/webdriver/#dfn-maximum-safe-integer), whose
 //   absolute value can occupy up to 53 bits.
-bool GetOptionalBool(const base::Value::Dict& dict,
-                     base::StringPiece path,
+bool GetOptionalBool(const base::DictValue& dict,
+                     std::string_view path,
                      bool* out_value,
                      bool* has_value = nullptr);
-bool GetOptionalInt(const base::Value::Dict& dict,
-                    base::StringPiece path,
+bool GetOptionalInt(const base::DictValue& dict,
+                    std::string_view path,
                     int* out_value,
                     bool* has_value = nullptr);
-bool GetOptionalDouble(const base::Value::Dict& dict,
-                       base::StringPiece path,
+bool GetOptionalDouble(const base::DictValue& dict,
+                       std::string_view path,
                        double* out_value,
                        bool* has_value = nullptr);
-bool GetOptionalString(const base::Value::Dict& dict,
-                       base::StringPiece path,
+bool GetOptionalString(const base::DictValue& dict,
+                       std::string_view path,
                        std::string* out_value,
                        bool* has_value = nullptr);
-bool GetOptionalDictionary(const base::Value::Dict& dict,
-                           base::StringPiece path,
-                           const base::Value::Dict** out_value,
+bool GetOptionalDictionary(const base::DictValue& dict,
+                           std::string_view path,
+                           const base::DictValue** out_value,
                            bool* has_value = nullptr);
-bool GetOptionalList(const base::Value::Dict& dict,
-                     base::StringPiece path,
-                     const base::Value::List** out_value,
+bool GetOptionalList(const base::DictValue& dict,
+                     std::string_view path,
+                     const base::ListValue** out_value,
                      bool* has_value = nullptr);
 // Handles "safe integer" mentioned in W3C spec,
 // https://www.w3.org/TR/webdriver/#dfn-maximum-safe-integer.
-bool GetOptionalSafeInt(const base::Value::Dict& dict,
-                        base::StringPiece path,
+bool GetOptionalSafeInt(const base::DictValue& dict,
+                        std::string_view path,
                         int64_t* out_value,
                         bool* has_value = nullptr);
 
-bool SetSafeInt(base::Value::Dict& dict,
-                const base::StringPiece path,
+bool SetSafeInt(base::DictValue& dict,
+                std::string_view path,
                 int64_t in_value_64);
 
 #endif  // CHROME_TEST_CHROMEDRIVER_UTIL_H_

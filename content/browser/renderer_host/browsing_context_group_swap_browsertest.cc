@@ -4,10 +4,14 @@
 
 #include "content/browser/renderer_host/browsing_context_group_swap.h"
 
+#include <optional>
+
+#include "base/strings/stringprintf.h"
 #include "base/test/scoped_feature_list.h"
 #include "content/browser/renderer_host/navigation_request.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/common/content_features.h"
+#include "content/public/test/back_forward_cache_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
@@ -18,7 +22,6 @@
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/default_handlers.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace content {
 
@@ -36,11 +39,9 @@ class BrowsingContextGroupSwapBrowserTest
     // Enable BackForwardCache:
     if (IsBackForwardCacheEnabled()) {
       feature_list_for_back_forward_cache_.InitWithFeaturesAndParameters(
-          {{features::kBackForwardCache, {{}}},
-           {features::kBackForwardCacheTimeToLiveControl,
-            {{"time_to_live_seconds", "3600"}}}},
-          // Allow BackForwardCache for all devices regardless of their memory.
-          {features::kBackForwardCacheMemoryControls});
+          GetDefaultEnabledBackForwardCacheFeaturesForTesting(
+              /*ignore_outstanding_network_request=*/false),
+          GetDefaultDisabledBackForwardCacheFeaturesForTesting());
     } else {
       feature_list_for_back_forward_cache_.InitWithFeatures(
           {}, {features::kBackForwardCache});
@@ -74,7 +75,6 @@ class BrowsingContextGroupSwapBrowserTest
 
  private:
   void SetUpCommandLine(base::CommandLine* command_line) override {
-    ContentBrowserTest::SetUpCommandLine(command_line);
     mock_cert_verifier_.SetUpCommandLine(command_line);
   }
 
@@ -97,7 +97,7 @@ class BrowsingContextGroupSwapBrowserTest
 class BrowsingContextGroupSwapObserver : public WebContentsObserver {
  public:
   explicit BrowsingContextGroupSwapObserver(WebContents* web_contents)
-      : WebContentsObserver(web_contents), latest_swap_(absl::nullopt) {}
+      : WebContentsObserver(web_contents), latest_swap_(std::nullopt) {}
 
   void DidFinishNavigation(NavigationHandle* navigation_handle) override {
     latest_swap_ = NavigationRequest::From(navigation_handle)
@@ -109,7 +109,7 @@ class BrowsingContextGroupSwapObserver : public WebContentsObserver {
   }
 
  private:
-  absl::optional<BrowsingContextGroupSwap> latest_swap_;
+  std::optional<BrowsingContextGroupSwap> latest_swap_;
 };
 
 IN_PROC_BROWSER_TEST_P(BrowsingContextGroupSwapBrowserTest, Basic_Navigation) {

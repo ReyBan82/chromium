@@ -43,10 +43,12 @@ void CookieStore::SetCookieAccessDelegate(
   cookie_access_delegate_ = std::move(delegate);
 }
 
-absl::optional<bool> CookieStore::SiteHasCookieInOtherPartition(
+std::optional<bool> CookieStore::SiteHasCookieInOtherPartition(
     const net::SchemefulSite& site,
-    const absl::optional<CookiePartitionKey>& partition_key) const {
-  return absl::nullopt;
+    const CookiePartitionKey& partition_key) const {
+  return std::nullopt;
 }
+
+void CookieStore::OnPreconnect(const GURL& url) {}
 
 }  // namespace net

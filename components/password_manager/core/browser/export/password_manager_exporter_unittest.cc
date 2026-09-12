@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -14,12 +15,14 @@
 #include "base/test/mock_callback.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
-#include "components/password_manager/core/browser/affiliation/mock_affiliation_service.h"
+#include "components/affiliations/core/browser/fake_affiliation_service.h"
+#include "components/password_manager/core/browser/export/export_progress_status.h"
 #include "components/password_manager/core/browser/export/password_csv_writer.h"
 #include "components/password_manager/core/browser/password_manager_metrics_util.h"
-#include "components/password_manager/core/browser/test_password_store.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/test_password_store.h"
+#include "components/password_manager/core/browser/password_string.h"
 #include "components/password_manager/core/browser/ui/credential_ui_entry.h"
-#include "components/password_manager/core/browser/ui/export_progress_status.h"
 #include "components/password_manager/core/browser/ui/saved_passwords_presenter.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -38,10 +41,10 @@ using ::testing::SaveArg;
 using ::testing::StrEq;
 using ::testing::StrictMock;
 
-// A callback that matches the signature of the StringPiece variant of
+// A callback that matches the signature of the std::string_view variant of
 // base::WriteFile().
 using WriteCallback =
-    base::RepeatingCallback<bool(const base::FilePath&, base::StringPiece)>;
+    base::RepeatingCallback<bool(const base::FilePath&, std::string_view)>;
 using DeleteCallback = PasswordManagerExporter::DeleteCallback;
 using SetPosixFilePermissionsCallback =
     PasswordManagerExporter::SetPosixFilePermissionsCallback;
@@ -57,40 +60,40 @@ PasswordForm CreateTestPassword() {
   PasswordForm password_form;
   password_form.url = GURL("http://accounts.google.com/a/LoginAuth");
   password_form.username_value = u"test@gmail.com";
-  password_form.password_value = u"test1";
+  password_form.password_value = PasswordString(u"test1");
   password_form.in_store = PasswordForm::Store::kProfileStore;
   return password_form;
 }
 
 PasswordExportInfo CreateExportInProgressInfo() {
-  return {.status = ExportProgressStatus::IN_PROGRESS};
+  return {.status = ExportProgressStatus::kInProgress};
 }
 
 PasswordExportInfo CreateSuccessfulExportInfo(const base::FilePath& path) {
   return {
-    .status = ExportProgressStatus::SUCCEEDED,
+      .status = ExportProgressStatus::kSucceeded,
 #if !BUILDFLAG(IS_WIN)
-    .file_path = path.value(),
+      .file_path = path.value(),
 #else
-    .file_path = base::WideToUTF8(path.value()),
+      .file_path = base::WideToUTF8(path.value()),
 #endif
   };
 }
 
 PasswordExportInfo CreateFailedExportInfo(const base::FilePath& path) {
-  return {.status = ExportProgressStatus::FAILED_WRITE_FAILED,
+  return {.status = ExportProgressStatus::kFailedWrite,
           .folder_name = path.DirName().BaseName().AsUTF8Unsafe()};
 }
 
 PasswordExportInfo CreateCancelledExportInfo() {
-  return {.status = ExportProgressStatus::FAILED_CANCELLED};
+  return {.status = ExportProgressStatus::kFailedCancelled};
 }
 
 class PasswordManagerExporterTest : public testing::Test {
  public:
   PasswordManagerExporterTest()
       : task_environment_(base::test::TaskEnvironment::MainThreadType::UI),
-        exporter_(&presenter_,
+        exporter_(presenter_,
                   mock_on_progress_.Get(),
                   mock_completion_callback_.Get()),
         destination_path_(kNullFileName) {
@@ -98,7 +101,7 @@ class PasswordManagerExporterTest : public testing::Test {
     exporter_.SetDeleteForTesting(mock_delete_file_.Get());
     exporter_.SetSetPosixFilePermissionsForTesting(
         mock_set_posix_file_permissions_.Get());
-    store_->Init(/*prefs=*/nullptr, /*affiliated_match_helper=*/nullptr);
+    store_->Init();
     presenter_.Init();
     task_environment_.RunUntilIdle();
   }
@@ -114,7 +117,7 @@ class PasswordManagerExporterTest : public testing::Test {
 
   void SetPasswordList(const std::vector<PasswordForm>& forms) {
     for (const auto& form : forms) {
-      store_->AddLogin(form);
+      store_->AddLogin(password_manager::FromPasswordForm(form));
     }
     task_environment_.RunUntilIdle();
   }
@@ -123,7 +126,7 @@ class PasswordManagerExporterTest : public testing::Test {
   base::test::TaskEnvironment task_environment_;
   scoped_refptr<TestPasswordStore> store_ =
       base::MakeRefCounted<TestPasswordStore>();
-  MockAffiliationService affiliation_service_;
+  affiliations::FakeAffiliationService affiliation_service_;
   SavedPasswordsPresenter presenter_{&affiliation_service_, store_,
                                      /*account_store=*/nullptr};
   base::MockCallback<base::RepeatingCallback<void(const PasswordExportInfo&)>>
@@ -182,7 +185,7 @@ TEST_F(PasswordManagerExporterTest, GetProgressReturnsLastCallbackStatus) {
   SetPasswordList({form});
 
   // The last status seen in the callback.
-  PasswordExportInfo export_info({.status = ExportProgressStatus::NOT_STARTED});
+  PasswordExportInfo export_info({.status = ExportProgressStatus::kNotStarted});
 
   EXPECT_CALL(mock_write_file_, Run).WillOnce(Return(true));
   EXPECT_CALL(mock_on_progress_, Run).WillRepeatedly(SaveArg<0>(&export_info));
@@ -262,7 +265,7 @@ TEST_F(PasswordManagerExporterTest, DeduplicatesAcrossPasswordStores) {
   password.in_store = PasswordForm::Store::kProfileStore;
   password.url = GURL("http://g.com/auth");
   password.username_value = u"user";
-  password.password_value = u"password";
+  password.password_value = PasswordString(u"password");
 
   PasswordForm password_duplicate = password;
   password_duplicate.in_store = PasswordForm::Store::kAccountStore;

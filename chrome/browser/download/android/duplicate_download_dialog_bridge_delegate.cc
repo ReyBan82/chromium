@@ -4,26 +4,24 @@
 
 #include "chrome/browser/download/android/duplicate_download_dialog_bridge_delegate.h"
 
+#include <algorithm>
 #include <string>
 
 #include "base/android/path_utils.h"
-#include "base/containers/contains.h"
 #include "base/files/file_path.h"
 #include "base/memory/singleton.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/android/android_theme_resources.h"
 #include "chrome/browser/download/android/download_dialog_utils.h"
 #include "chrome/browser/download/android/duplicate_download_dialog_bridge.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/grit/generated_resources.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/download_item_utils.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/android/window_android.h"
 #include "ui/base/l10n/l10n_util.h"
 
-using base::android::JavaParamRef;
+using base::android::JavaRef;
 
 // static
 DuplicateDownloadDialogBridgeDelegate*
@@ -36,8 +34,9 @@ DuplicateDownloadDialogBridgeDelegate::DuplicateDownloadDialogBridgeDelegate() =
 
 DuplicateDownloadDialogBridgeDelegate::
     ~DuplicateDownloadDialogBridgeDelegate() {
-  for (auto* download_item : download_items_)
+  for (download::DownloadItem* download_item : download_items_) {
     download_item->RemoveObserver(this);
+  }
 }
 
 void DuplicateDownloadDialogBridgeDelegate::CreateDialog(
@@ -48,7 +47,7 @@ void DuplicateDownloadDialogBridgeDelegate::CreateDialog(
         file_selected_callback) {
   DCHECK(web_contents);
   // Don't shown duplicate dialog again if it is already showing.
-  if (base::Contains(download_items_, download_item)) {
+  if (std::ranges::contains(download_items_, download_item)) {
     return;
   }
   download_item->AddObserver(this);
@@ -87,13 +86,13 @@ void DuplicateDownloadDialogBridgeDelegate::OnConfirmed(
                        std::move(callback)));
   } else {
     std::move(callback).Run(DownloadConfirmationResult::CANCELED,
-                            base::FilePath());
+                            ui::SelectedFileInfo());
   }
 }
 
 void DuplicateDownloadDialogBridgeDelegate::OnDownloadDestroyed(
     download::DownloadItem* download_item) {
-  auto iter = base::ranges::find(download_items_, download_item);
+  auto iter = std::ranges::find(download_items_, download_item);
   if (iter != download_items_.end())
     download_items_.erase(iter);
 }

@@ -5,23 +5,29 @@
 #include "third_party/blink/renderer/core/html/forms/html_form_control_element.h"
 
 #include <memory>
+
+#include "base/strings/stringprintf.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
+#include "third_party/blink/renderer/core/loader/empty_clients.h"
 #include "third_party/blink/renderer/core/page/scoped_page_pauser.h"
 #include "third_party/blink/renderer/core/page/validation_message_client.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 namespace blink {
+
+using mojom::blink::FormControlType;
 
 namespace {
 class MockFormValidationMessageClient
     : public GarbageCollected<MockFormValidationMessageClient>,
       public ValidationMessageClient {
  public:
-  void ShowValidationMessage(const Element& anchor,
+  void ShowValidationMessage(Element& anchor,
                              const String&,
                              TextDirection,
                              const String&,
@@ -64,7 +70,7 @@ class HTMLFormControlElementTest : public PageTestBase {
 
 void HTMLFormControlElementTest::SetUp() {
   PageTestBase::SetUp();
-  GetDocument().SetMimeType("text/html");
+  GetDocument().SetMimeType(AtomicString("text/html"));
 }
 
 TEST_F(HTMLFormControlElementTest, customValidationMessageTextDirection) {
@@ -72,10 +78,10 @@ TEST_F(HTMLFormControlElementTest, customValidationMessageTextDirection) {
 
   auto* input = To<HTMLInputElement>(GetElementById("input"));
   input->setCustomValidity(
-      String::FromUTF8("\xD8\xB9\xD8\xB1\xD8\xA8\xD9\x89"));
+      String::FromUtf8("\xD8\xB9\xD8\xB1\xD8\xA8\xD9\x89"));
   input->setAttribute(
       html_names::kTitleAttr,
-      AtomicString::FromUTF8("\xD8\xB9\xD8\xB1\xD8\xA8\xD9\x89"));
+      AtomicString::FromUtf8("\xD8\xB9\xD8\xB1\xD8\xA8\xD9\x89"));
 
   String message = input->validationMessage().StripWhiteSpace();
   String sub_message = input->ValidationSubMessage().StripWhiteSpace();
@@ -89,13 +95,13 @@ TEST_F(HTMLFormControlElementTest, customValidationMessageTextDirection) {
 
   ComputedStyleBuilder rtl_style_builder(input->GetLayoutObject()->StyleRef());
   rtl_style_builder.SetDirection(TextDirection::kRtl);
-  input->GetLayoutObject()->SetStyle(rtl_style_builder.TakeStyle());
+  input->GetLayoutObject()->SetStyle(*rtl_style_builder.TakeStyle());
   input->FindCustomValidationMessageTextDirection(message, message_dir,
                                                   sub_message, sub_message_dir);
   EXPECT_EQ(TextDirection::kRtl, message_dir);
   EXPECT_EQ(TextDirection::kLtr, sub_message_dir);
 
-  input->setCustomValidity(String::FromUTF8("Main message."));
+  input->setCustomValidity("Main message.");
   message = input->validationMessage().StripWhiteSpace();
   sub_message = input->ValidationSubMessage().StripWhiteSpace();
   input->FindCustomValidationMessageTextDirection(message, message_dir,
@@ -130,9 +136,10 @@ TEST_F(HTMLFormControlElementTest, DoNotUpdateLayoutDuringDOMMutation) {
   // ShowValidationMessage(). So calling it during DOM mutation is
   // dangerous. This test ensures ShowValidationMessage() is NOT called in
   // appendChild(). crbug.com/756408
-  GetDocument().documentElement()->setInnerHTML("<select></select>");
-  auto* const select =
-      To<HTMLFormControlElement>(GetDocument().QuerySelector("select"));
+  GetDocument().documentElement()->SetInnerHTMLWithoutTrustedTypes(
+      "<select></select>");
+  auto* const select = To<HTMLFormControlElement>(
+      GetDocument().QuerySelector(AtomicString("select")));
   auto* const optgroup =
       GetDocument().CreateRawElement(html_names::kOptgroupTag);
   auto* validation_client =
@@ -148,15 +155,141 @@ TEST_F(HTMLFormControlElementTest, DoNotUpdateLayoutDuringDOMMutation) {
       << "DOM mutation should not handle validation message UI in it.";
 }
 
-TEST_F(HTMLFormControlElementTest, UniqueRendererFormControlId) {
-  SetHtmlInnerHTML("<body><input id=input1><input id=input2></body>");
-  auto* form_control1 = To<HTMLFormControlElement>(GetElementById("input1"));
-  uint64_t first_id = form_control1->UniqueRendererFormControlId();
-  auto* form_control2 = To<HTMLFormControlElement>(GetElementById("input2"));
-  EXPECT_EQ(first_id + 1, form_control2->UniqueRendererFormControlId());
-  SetHtmlInnerHTML("<body><select id=select1></body>");
-  auto* form_control3 = To<HTMLFormControlElement>(GetElementById("select1"));
-  EXPECT_EQ(first_id + 2, form_control3->UniqueRendererFormControlId());
+class HTMLFormControlElementFormControlTypeTest
+    : public HTMLFormControlElementTest,
+      public testing::WithParamInterface<
+          std::tuple<const char*, const char*, FormControlType>> {
+ protected:
+  const char* tag_name() const { return std::get<0>(GetParam()); }
+  const char* attributes() const { return std::get<1>(GetParam()); }
+  FormControlType expected_type() const { return std::get<2>(GetParam()); }
+};
+
+TEST_P(HTMLFormControlElementFormControlTypeTest, FormControlType) {
+  std::string html =
+      base::StringPrintf("<%s %s id=x>", tag_name(), attributes());
+  if (tag_name() != std::string_view("input")) {
+    html += base::StringPrintf("</%s>", tag_name());
+  }
+  SCOPED_TRACE(testing::Message() << html);
+  GetDocument().documentElement()->SetInnerHTMLWithoutTrustedTypes(
+      html.c_str());
+  auto* form_control = To<HTMLFormControlElement>(
+      GetDocument().getElementById(AtomicString("x")));
+  EXPECT_EQ(form_control->FormControlType(), expected_type())
+      << form_control->type().Ascii();
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    HTMLFormControlElementTest,
+    HTMLFormControlElementFormControlTypeTest,
+    testing::Values(
+        std::make_tuple("button", "", FormControlType::kButtonSubmit),
+        std::make_tuple("button",
+                        "type=button",
+                        FormControlType::kButtonButton),
+        std::make_tuple("button",
+                        "type=submit",
+                        FormControlType::kButtonSubmit),
+        std::make_tuple("button", "type=reset", FormControlType::kButtonReset),
+        std::make_tuple("fieldset", "", FormControlType::kFieldset),
+        std::make_tuple("input", "", FormControlType::kInputText),
+        std::make_tuple("input", "type=button", FormControlType::kInputButton),
+        std::make_tuple("input",
+                        "type=checkbox",
+                        FormControlType::kInputCheckbox),
+        std::make_tuple("input", "type=color", FormControlType::kInputColor),
+        std::make_tuple("input", "type=date", FormControlType::kInputDate),
+        // While there is a blink::input_type_names::kDatetime, <input
+        // type=datetime> is just a text field.
+        std::make_tuple("input", "type=datetime", FormControlType::kInputText),
+        std::make_tuple("input",
+                        "type=datetime-local",
+                        FormControlType::kInputDatetimeLocal),
+        std::make_tuple("input", "type=email", FormControlType::kInputEmail),
+        std::make_tuple("input", "type=file", FormControlType::kInputFile),
+        std::make_tuple("input", "type=hidden", FormControlType::kInputHidden),
+        std::make_tuple("input", "type=image", FormControlType::kInputImage),
+        std::make_tuple("input", "type=month", FormControlType::kInputMonth),
+        std::make_tuple("input", "type=number", FormControlType::kInputNumber),
+        std::make_tuple("input",
+                        "type=password",
+                        FormControlType::kInputPassword),
+        std::make_tuple("input", "type=radio", FormControlType::kInputRadio),
+        std::make_tuple("input", "type=range", FormControlType::kInputRange),
+        std::make_tuple("input", "type=reset", FormControlType::kInputReset),
+        std::make_tuple("input", "type=search", FormControlType::kInputSearch),
+        std::make_tuple("input", "type=submit", FormControlType::kInputSubmit),
+        std::make_tuple("input", "type=tel", FormControlType::kInputTelephone),
+        std::make_tuple("input", "type=text", FormControlType::kInputText),
+        std::make_tuple("input", "type=time", FormControlType::kInputTime),
+        std::make_tuple("input", "type=url", FormControlType::kInputUrl),
+        std::make_tuple("input", "type=week", FormControlType::kInputWeek),
+        std::make_tuple("output", "", FormControlType::kOutput),
+        std::make_tuple("select", "", FormControlType::kSelectOne),
+        std::make_tuple("select", "multiple", FormControlType::kSelectMultiple),
+        std::make_tuple("textarea", "", FormControlType::kTextArea)));
+
+TEST_F(HTMLFormControlElementTest, IsReadOnly) {
+  ScopedFixHTMLFormControlElementIsReadOnlyForTest scoped_feature(
+      /*enabled=*/true);
+
+  SetHtmlInnerHTML(
+      "<body>"
+      "<button id=btn readonly>Click Me</button>"
+      "<select id=sel readonly><option>Option</option></select>"
+      "<input id=text type=text readonly>"
+      "<input id=checkbox type=checkbox readonly>"
+      "<textarea id=textarea readonly></textarea>"
+      "</body>");
+
+  auto* btn = To<HTMLFormControlElement>(GetElementById("btn"));
+  auto* sel = To<HTMLFormControlElement>(GetElementById("sel"));
+  auto* text = To<HTMLFormControlElement>(GetElementById("text"));
+  auto* checkbox = To<HTMLFormControlElement>(GetElementById("checkbox"));
+  auto* textarea = To<HTMLFormControlElement>(GetElementById("textarea"));
+
+  EXPECT_FALSE(btn->IsReadOnly());
+  EXPECT_FALSE(sel->IsReadOnly());
+  EXPECT_TRUE(text->IsReadOnly());
+  EXPECT_FALSE(checkbox->IsReadOnly());
+  EXPECT_TRUE(textarea->IsReadOnly());
+}
+
+class AutofillTestChromeClient : public EmptyChromeClient {
+ public:
+  bool IsAutofillableElement(const HTMLFormControlElement& element) override {
+    return is_autofillable_;
+  }
+  void SetIsAutofillable(bool is_autofillable) {
+    is_autofillable_ = is_autofillable;
+  }
+
+ private:
+  bool is_autofillable_ = false;
+};
+
+class HTMLFormControlElementAutofillTest : public PageTestBase {
+ protected:
+  void SetUp() override {
+    chrome_client_ = MakeGarbageCollected<AutofillTestChromeClient>();
+    SetupPageWithClients(chrome_client_);
+    GetDocument().SetMimeType(AtomicString("text/html"));
+  }
+
+  Persistent<AutofillTestChromeClient> chrome_client_;
+};
+
+TEST_F(HTMLFormControlElementAutofillTest, IsAutofillable) {
+  SetHtmlInnerHTML("<body><input id=input></body>");
+  auto* input = To<HTMLFormControlElement>(GetElementById("input"));
+  ASSERT_NE(input, nullptr);
+
+  chrome_client_->SetIsAutofillable(false);
+  EXPECT_FALSE(input->IsAutofillable());
+
+  chrome_client_->SetIsAutofillable(true);
+  EXPECT_TRUE(input->IsAutofillable());
 }
 
 }  // namespace blink

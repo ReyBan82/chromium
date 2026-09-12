@@ -3,10 +3,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include "base/files/memory_mapped_file.h"
-#include "base/strings/string_piece.h"
+#include "base/memory/ref_counted.h"
 #include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/abseil-cpp/absl/types/variant.h"
 
@@ -55,7 +56,7 @@ class RankedDicts {
   };
 
   explicit RankedDicts(
-      const std::vector<std::vector<base::StringPiece>>& ordered_dicts);
+      const std::vector<std::vector<std::string_view>>& ordered_dicts);
   explicit RankedDicts(std::unique_ptr<base::MemoryMappedFile>);
   RankedDicts() = default;
   RankedDicts(RankedDicts&&) = default;
@@ -64,17 +65,37 @@ class RankedDicts {
   RankedDicts& operator=(RankedDicts&&) = default;
   RankedDicts& operator=(const RankedDicts&) = delete;
 
-  absl::optional<rank_t> Find(base::StringPiece needle) const;
+  absl::optional<rank_t> Find(std::string_view needle) const;
+
+  std::string_view DataForTesting() const {
+    return std::string_view(data_.data(), data_.size());
+  }
 
  private:
   bool IsRealMarker(size_t offset) const;
 
   Datawrapper data_;
 };
+// Wrapper around `RankedDicts` to allow it to be ref-counted. This is used in a
+// read-copy-update (RCU) pattern to prevent a data race where a background
+// thread might read from the dictionary via `omnimatch()` while the UI thread
+// is simultaneously replacing the dictionary via `SetRankedDicts()`.
+class RefCountedRankedDicts
+    : public base::RefCountedThreadSafe<RefCountedRankedDicts> {
+ public:
+  explicit RefCountedRankedDicts(RankedDicts dicts)
+      : dicts_(std::move(dicts)) {}
+  const RankedDicts& Data() const { return dicts_; }
+
+ private:
+  friend class base::RefCountedThreadSafe<RefCountedRankedDicts>;
+  ~RefCountedRankedDicts() = default;
+  RankedDicts dicts_;
+};
 
 void SetRankedDicts(RankedDicts dicts);
 
-RankedDicts& default_ranked_dicts();
+scoped_refptr<RefCountedRankedDicts> default_ranked_dicts();
 
 } // namespace zxcvbn
 

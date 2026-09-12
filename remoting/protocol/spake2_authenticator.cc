@@ -7,16 +7,18 @@
 #include <utility>
 
 #include "base/base64.h"
+#include "base/containers/span.h"
+#include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "base/sys_byteorder.h"
+#include "base/numerics/byte_conversions.h"
+#include "base/strings/string_view_util.h"
 #include "crypto/hmac.h"
 #include "crypto/secure_util.h"
 #include "remoting/base/constants.h"
 #include "remoting/base/rsa_key_pair.h"
-#include "remoting/protocol/ssl_hmac_channel_authenticator.h"
+#include "remoting/protocol/authenticator.h"
 #include "third_party/boringssl/src/include/openssl/curve25519.h"
-#include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
 
 namespace remoting::protocol {
 
@@ -32,52 +34,6 @@ namespace {
 //    HMAC_SHA256(auth_key, ("host"|"client") + local_jid.length() + local_jid +
 //                remote_jid.length() + remote_jid)
 // where auth_key is the key produced by SPAKE2.
-
-const jingle_xmpp::StaticQName kSpakeMessageTag = {kChromotingXmlNamespace,
-                                                   "spake-message"};
-const jingle_xmpp::StaticQName kVerificationHashTag = {kChromotingXmlNamespace,
-                                                       "verification-hash"};
-const jingle_xmpp::StaticQName kCertificateTag = {kChromotingXmlNamespace,
-                                                  "certificate"};
-
-std::unique_ptr<jingle_xmpp::XmlElement> EncodeBinaryValueToXml(
-    const jingle_xmpp::StaticQName& qname,
-    const std::string& content) {
-  std::string content_base64;
-  base::Base64Encode(content, &content_base64);
-
-  std::unique_ptr<jingle_xmpp::XmlElement> result(
-      new jingle_xmpp::XmlElement(qname));
-  result->SetBodyText(content_base64);
-  return result;
-}
-
-// Finds tag named |qname| in base_message and decodes it from base64 and stores
-// in |data|. If the element is not present then found is set to false otherwise
-// it's set to true. If the element is there and it's content couldn't be
-// decoded then false is returned.
-bool DecodeBinaryValueFromXml(const jingle_xmpp::XmlElement* message,
-                              const jingle_xmpp::QName& qname,
-                              bool* found,
-                              std::string* data) {
-  const jingle_xmpp::XmlElement* element = message->FirstNamed(qname);
-  *found = element != nullptr;
-  if (!*found) {
-    return true;
-  }
-
-  if (!base::Base64Decode(element->BodyText(), data)) {
-    LOG(WARNING) << "Failed to parse " << qname.LocalPart();
-    return false;
-  }
-
-  return !data->empty();
-}
-
-std::string PrefixWithLength(const std::string& str) {
-  uint32_t length = base::HostToNet32(str.size());
-  return std::string(reinterpret_cast<char*>(&length), sizeof(length)) + str;
-}
 
 }  // namespace
 
@@ -136,6 +92,14 @@ Spake2Authenticator::~Spake2Authenticator() {
   SPAKE2_CTX_free(spake2_context_);
 }
 
+CredentialsType Spake2Authenticator::credentials_type() const {
+  return CredentialsType::SHARED_SECRET;
+}
+
+const Authenticator& Spake2Authenticator::implementing_authenticator() const {
+  return *this;
+}
+
 Authenticator::State Spake2Authenticator::state() const {
   if (state_ == ACCEPTED && !outgoing_verification_hash_.empty()) {
     return MESSAGE_READY;
@@ -152,53 +116,45 @@ Authenticator::RejectionReason Spake2Authenticator::rejection_reason() const {
   return rejection_reason_;
 }
 
-void Spake2Authenticator::ProcessMessage(const jingle_xmpp::XmlElement* message,
+Authenticator::RejectionDetails Spake2Authenticator::rejection_details() const {
+  DCHECK_EQ(state(), REJECTED);
+  return rejection_details_;
+}
+
+void Spake2Authenticator::ProcessMessage(const JingleAuthentication& message,
                                          base::OnceClosure resume_callback) {
   ProcessMessageInternal(message);
   std::move(resume_callback).Run();
 }
 
 void Spake2Authenticator::ProcessMessageInternal(
-    const jingle_xmpp::XmlElement* message) {
+    const JingleAuthentication& message) {
   DCHECK_EQ(state(), WAITING_MESSAGE);
 
-  // Parse the certificate.
-  bool cert_present;
-  if (!DecodeBinaryValueFromXml(message, kCertificateTag, &cert_present,
-                                &remote_cert_)) {
-    state_ = REJECTED;
-    rejection_reason_ = RejectionReason::PROTOCOL_ERROR;
-    return;
+  // Only update |remote_cert_| if a certificate is provided in the message.
+  // This prevents overwriting a valid certificate with an empty value in
+  // multi-step exchanges where the certificate is only provided in the first
+  // message.
+  if (!message.certificate.empty()) {
+    remote_cert_.assign(
+        reinterpret_cast<const char*>(message.certificate.data()),
+        message.certificate.size());
   }
 
   // Client always expects certificate in the first message.
   if (!is_host_ && remote_cert_.empty()) {
-    LOG(WARNING) << "No valid host certificate.";
     state_ = REJECTED;
-    rejection_reason_ = RejectionReason::PROTOCOL_ERROR;
-    return;
-  }
-
-  bool spake_message_present = false;
-  std::string spake_message;
-  bool verification_hash_present = false;
-  std::string verification_hash;
-  if (!DecodeBinaryValueFromXml(message, kSpakeMessageTag,
-                                &spake_message_present, &spake_message) ||
-      !DecodeBinaryValueFromXml(message, kVerificationHashTag,
-                                &verification_hash_present,
-                                &verification_hash)) {
-    state_ = REJECTED;
-    rejection_reason_ = RejectionReason::PROTOCOL_ERROR;
+    rejection_reason_ = RejectionReason::INVALID_STATE;
+    rejection_details_ = RejectionDetails("No valid host certificate.");
     return;
   }
 
   // |auth_key_| is generated when <spake-message> is received.
   if (auth_key_.empty()) {
-    if (!spake_message_present) {
-      LOG(WARNING) << "<spake-message> not found.";
+    if (message.spake_message.empty()) {
       state_ = REJECTED;
-      rejection_reason_ = RejectionReason::PROTOCOL_ERROR;
+      rejection_reason_ = RejectionReason::INVALID_ARGUMENT;
+      rejection_details_ = RejectionDetails("<spake-message> not found.");
       return;
     }
     uint8_t key[SPAKE2_MAX_KEY_SIZE];
@@ -206,11 +162,13 @@ void Spake2Authenticator::ProcessMessageInternal(
     started_ = true;
     int result = SPAKE2_process_msg(
         spake2_context_, key, &key_size, sizeof(key),
-        reinterpret_cast<const uint8_t*>(spake_message.data()),
-        spake_message.size());
+        reinterpret_cast<const uint8_t*>(message.spake_message.data()),
+        message.spake_message.size());
     if (!result) {
       state_ = REJECTED;
       rejection_reason_ = RejectionReason::INVALID_CREDENTIALS;
+      rejection_details_ =
+          RejectionDetails("Failed to process SPAKE2 message.");
       return;
     }
     CHECK(key_size);
@@ -220,27 +178,29 @@ void Spake2Authenticator::ProcessMessageInternal(
         CalculateVerificationHash(is_host_, local_id_, remote_id_);
     expected_verification_hash_ =
         CalculateVerificationHash(!is_host_, remote_id_, local_id_);
-  } else if (spake_message_present) {
-    LOG(WARNING) << "Received duplicate <spake-message>.";
+  } else if (!message.spake_message.empty()) {
     state_ = REJECTED;
-    rejection_reason_ = RejectionReason::PROTOCOL_ERROR;
+    rejection_reason_ = RejectionReason::INVALID_STATE;
+    rejection_details_ =
+        RejectionDetails("Received duplicate <spake-message>.");
     return;
   }
 
-  if (spake_message_sent_ && !verification_hash_present) {
-    LOG(WARNING) << "Didn't receive <verification-hash> when expected.";
+  if (spake_message_sent_ && message.verification_hash.empty()) {
     state_ = REJECTED;
-    rejection_reason_ = RejectionReason::PROTOCOL_ERROR;
+    rejection_reason_ = RejectionReason::INVALID_STATE;
+    rejection_details_ =
+        RejectionDetails("Didn't receive <verification-hash> when expected.");
     return;
   }
 
-  if (verification_hash_present) {
-    if (verification_hash.size() != expected_verification_hash_.size() ||
-        !crypto::SecureMemEqual(verification_hash.data(),
-                                expected_verification_hash_.data(),
-                                verification_hash.size())) {
+  if (!message.verification_hash.empty()) {
+    if (!crypto::SecureMemEqual(
+            base::as_byte_span(message.verification_hash),
+            base::as_byte_span(expected_verification_hash_))) {
       state_ = REJECTED;
       rejection_reason_ = RejectionReason::INVALID_CREDENTIALS;
+      rejection_details_ = RejectionDetails("Verification hash mismatched.");
       return;
     }
     state_ = ACCEPTED;
@@ -250,29 +210,25 @@ void Spake2Authenticator::ProcessMessageInternal(
   state_ = MESSAGE_READY;
 }
 
-std::unique_ptr<jingle_xmpp::XmlElement> Spake2Authenticator::GetNextMessage() {
+JingleAuthentication Spake2Authenticator::GetNextMessage() {
   DCHECK_EQ(state(), MESSAGE_READY);
 
-  std::unique_ptr<jingle_xmpp::XmlElement> message =
-      CreateEmptyAuthenticatorMessage();
+  JingleAuthentication message;
 
   if (!spake_message_sent_) {
     if (!local_cert_.empty()) {
-      message->AddElement(
-          EncodeBinaryValueToXml(kCertificateTag, local_cert_).release());
+      message.certificate.assign(local_cert_.begin(), local_cert_.end());
     }
 
-    message->AddElement(
-        EncodeBinaryValueToXml(kSpakeMessageTag, local_spake_message_)
-            .release());
+    message.spake_message.assign(local_spake_message_.begin(),
+                                 local_spake_message_.end());
 
     spake_message_sent_ = true;
   }
 
   if (!outgoing_verification_hash_.empty()) {
-    message->AddElement(EncodeBinaryValueToXml(kVerificationHashTag,
-                                               outgoing_verification_hash_)
-                            .release());
+    message.verification_hash.assign(outgoing_verification_hash_.begin(),
+                                     outgoing_verification_hash_.end());
     outgoing_verification_hash_.clear();
   }
 
@@ -286,35 +242,25 @@ const std::string& Spake2Authenticator::GetAuthKey() const {
   return auth_key_;
 }
 
-std::unique_ptr<ChannelAuthenticator>
-Spake2Authenticator::CreateChannelAuthenticator() const {
-  DCHECK_EQ(state(), ACCEPTED);
-  CHECK(!auth_key_.empty());
-
-  if (is_host_) {
-    return SslHmacChannelAuthenticator::CreateForHost(
-        local_cert_, local_key_pair_, auth_key_);
-  } else {
-    return SslHmacChannelAuthenticator::CreateForClient(remote_cert_,
-                                                        auth_key_);
-  }
+const SessionPolicies* Spake2Authenticator::GetSessionPolicies() const {
+  return nullptr;
 }
 
 std::string Spake2Authenticator::CalculateVerificationHash(
     bool from_host,
     const std::string& local_id,
     const std::string& remote_id) {
-  std::string message = (from_host ? "host" : "client") +
-                        PrefixWithLength(local_id) +
-                        PrefixWithLength(remote_id);
-  crypto::HMAC hmac(crypto::HMAC::SHA256);
-  std::string result(hmac.DigestLength(), '\0');
-  if (!hmac.Init(auth_key_) ||
-      !hmac.Sign(message, reinterpret_cast<uint8_t*>(&result[0]),
-                 result.length())) {
-    LOG(FATAL) << "Failed to calculate HMAC.";
-  }
-  return result;
+  crypto::hmac::HmacSigner signer(crypto::hash::kSha256,
+                                  base::as_byte_span(auth_key_));
+  std::string_view direction = from_host ? "host" : "client";
+  signer.Update(base::as_byte_span(direction));
+  signer.Update(base::U32ToBigEndian(local_id.size()));
+  signer.Update(base::as_byte_span(local_id));
+  signer.Update(base::U32ToBigEndian(remote_id.size()));
+  signer.Update(base::as_byte_span(remote_id));
+  std::array<uint8_t, crypto::hash::kSha256Size> result;
+  signer.Finish(result);
+  return std::string(base::as_string_view(result));
 }
 
 }  // namespace remoting::protocol

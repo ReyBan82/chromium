@@ -5,13 +5,16 @@
 #include "components/viz/service/frame_sinks/frame_counter.h"
 
 #include <limits>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "base/check.h"
-#include "base/containers/contains.h"
+#include "base/logging.h"
 #include "base/time/time.h"
 #include "services/viz/privileged/mojom/compositing/frame_sink_manager.mojom.h"
+#include "services/viz/privileged/mojom/compositing/frame_sinks_metrics_recorder.mojom.h"
 
 namespace viz {
 namespace {
@@ -29,12 +32,13 @@ FrameCounter::FrameCounter(base::TimeTicks start_time,
 FrameCounter::~FrameCounter() = default;
 
 void FrameCounter::AddFrameSink(const FrameSinkId& frame_sink_id,
-                                mojom::CompositorFrameSinkType type,
-                                bool is_root) {
-  DCHECK(!base::Contains(frame_sink_data_, frame_sink_id));
+                                bool is_root,
+                                std::string_view debug_label) {
+  CHECK(!frame_sink_data_.contains(frame_sink_id));
 
   auto per_sink_data = mojom::FrameCountingPerSinkData::New(
-      type, is_root, 0, std::vector<uint16_t>());
+      is_root, static_cast<std::string>(debug_label), 0,
+      std::vector<uint16_t>());
   per_sink_data->presented_frames.reserve(kMaxFrameRecords);
 
   frame_sink_data_[frame_sink_id] = std::move(per_sink_data);
@@ -78,9 +82,17 @@ mojom::FrameCountingDataPtr FrameCounter::TakeData() {
   return data;
 }
 
-void FrameCounter::SetFrameSinkType(const FrameSinkId& frame_sink_id,
-                                    mojom::CompositorFrameSinkType type) {
-  frame_sink_data_[frame_sink_id]->type = type;
+void FrameCounter::SetFrameSinkDebugLabel(const FrameSinkId& frame_sink_id,
+                                          std::string_view debug_label) {
+  // SetFrameSinkDebugLabel could happen before a frame sink is created. Ignore
+  // the call and the debug label info will be added when AddFrameSink is
+  // called.
+  auto it = frame_sink_data_.find(frame_sink_id);
+  if (it == frame_sink_data_.end()) {
+    return;
+  }
+
+  it->second->debug_label = static_cast<std::string>(debug_label);
 }
 
 }  // namespace viz

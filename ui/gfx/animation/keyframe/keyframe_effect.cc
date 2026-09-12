@@ -5,8 +5,8 @@
 #include "ui/gfx/animation/keyframe/keyframe_effect.h"
 
 #include <algorithm>
+#include <vector>
 
-#include "base/containers/cxx20_erase.h"
 #include "ui/gfx/animation/keyframe/animation_curve.h"
 #include "ui/gfx/animation/keyframe/keyframed_animation_curve.h"
 
@@ -19,47 +19,7 @@ static int s_next_group_id = 1;
 
 void ReverseKeyframeModel(base::TimeTicks monotonic_time,
                           KeyframeModel* keyframe_model) {
-  keyframe_model->set_direction(keyframe_model->direction() ==
-                                        KeyframeModel::Direction::NORMAL
-                                    ? KeyframeModel::Direction::REVERSE
-                                    : KeyframeModel::Direction::NORMAL);
-  // Our goal here is to reverse the given keyframe_model. That is, if
-  // we're 20% of the way through the keyframe_model in the forward direction,
-  // we'd like to be 80% of the way of the reversed keyframe model (so it will
-  // end quickly).
-  //
-  // We can modify our "progress" through an animation by modifying the "time
-  // offset", a value added to the current time by the animation system before
-  // applying any other adjustments.
-  //
-  // Let our start time be s, our current time be t, and our final time (or
-  // duration) be d. After reversing the keyframe_model, we would like to start
-  // sampling from d - t as depicted below.
-  //
-  //  Forward:
-  //  s    t                         d
-  //  |----|-------------------------|
-  //
-  //  Reversed:
-  //  s                         t    d
-  //  |----|--------------------|----|
-  //       -----time-offset----->
-  //
-  // Now, if we let o represent our desired offset, we need to ensure that
-  //   t = d - (o + t)
-  //
-  // That is, sampling at the current time in either the forward or reverse
-  // curves must result in the same value, otherwise we'll get jank.
-  //
-  // This implies that,
-  //   0 = d - o - 2t
-  //   o = d - 2t
-  //
-  // Now if there was a previous offset, we must adjust d by that offset before
-  // performing this computation, so it becomes d - o_old - 2t:
-  keyframe_model->set_time_offset(
-      keyframe_model->curve()->Duration() - keyframe_model->time_offset() -
-      (2 * (monotonic_time - keyframe_model->start_time())));
+  keyframe_model->Reverse(monotonic_time);
 }
 
 std::unique_ptr<CubicBezierTimingFunction> CreateTransitionTimingFunction() {
@@ -106,14 +66,20 @@ void TransitionValueTo(KeyframeEffect* animator,
         running_keyframe_model->curve());
 
     if (running_keyframe_model->IsFinishedAt(monotonic_time)) {
-      effective_current = curve->GetValue(GetEndTime(running_keyframe_model));
+      effective_current = curve->GetTransformedValue(
+          GetEndTime(running_keyframe_model),
+          gfx::TimingFunction::LimitDirection::RIGHT);
     } else {
-      if (SufficientlyEqual(
-              to, curve->GetValue(GetEndTime(running_keyframe_model)))) {
+      if (SufficientlyEqual(to,
+                            curve->GetTransformedValue(
+                                GetEndTime(running_keyframe_model),
+                                gfx::TimingFunction::LimitDirection::RIGHT))) {
         return;
       }
-      if (SufficientlyEqual(
-              to, curve->GetValue(GetStartTime(running_keyframe_model)))) {
+      if (SufficientlyEqual(to,
+                            curve->GetTransformedValue(
+                                GetStartTime(running_keyframe_model),
+                                gfx::TimingFunction::LimitDirection::RIGHT))) {
         ReverseKeyframeModel(monotonic_time, running_keyframe_model);
         return;
       }
@@ -187,8 +153,8 @@ void KeyframeEffect::RemoveAllKeyframeModels() {
   RemoveKeyframeModelRange(keyframe_models_.begin(), keyframe_models_.end());
 }
 
-void KeyframeEffect::Tick(base::TimeTicks monotonic_time) {
-  TickInternal(monotonic_time, true);
+bool KeyframeEffect::Tick(base::TimeTicks monotonic_time) {
+  return TickInternal(monotonic_time, true);
 }
 
 void KeyframeEffect::RemoveKeyframeModelRange(
@@ -201,30 +167,35 @@ void KeyframeEffect::TickKeyframeModel(base::TimeTicks monotonic_time,
                                        KeyframeModel* keyframe_model) {
   if ((keyframe_model->run_state() != KeyframeModel::STARTING &&
        keyframe_model->run_state() != KeyframeModel::RUNNING &&
-       keyframe_model->run_state() != KeyframeModel::PAUSED) ||
+       !KeyframeModel::IsPaused(keyframe_model->run_state()) &&
+       keyframe_model->run_state() != KeyframeModel::WAITING_FOR_DELETION) ||
       !keyframe_model->HasActiveTime(monotonic_time)) {
     return;
   }
 
   AnimationCurve* curve = keyframe_model->curve();
-  base::TimeDelta trimmed =
-      keyframe_model->TrimTimeToCurrentIteration(monotonic_time);
-  curve->Tick(trimmed, keyframe_model->TargetProperty(), keyframe_model);
+  TimingFunction::LimitDirection limit_direction;
+  base::TimeDelta trimmed = keyframe_model->TrimTimeToCurrentIteration(
+      monotonic_time, &limit_direction);
+  curve->Tick(trimmed, keyframe_model->TargetProperty(), keyframe_model,
+              limit_direction);
 }
 
-void KeyframeEffect::TickInternal(base::TimeTicks monotonic_time,
+bool KeyframeEffect::TickInternal(base::TimeTicks monotonic_time,
                                   bool include_infinite_animations) {
   StartKeyframeModels(monotonic_time, include_infinite_animations);
 
+  bool active = false;
   for (auto& keyframe_model : keyframe_models_) {
     if (!include_infinite_animations &&
         keyframe_model->iterations() == std::numeric_limits<double>::infinity())
       continue;
     TickKeyframeModel(monotonic_time, keyframe_model.get());
+    active = true;
   }
 
   // Remove finished keyframe_models.
-  base::EraseIf(
+  std::erase_if(
       keyframe_models_,
       [monotonic_time](const std::unique_ptr<KeyframeModel>& keyframe_model) {
         return !keyframe_model->is_finished() &&
@@ -232,6 +203,7 @@ void KeyframeEffect::TickInternal(base::TimeTicks monotonic_time,
       });
 
   StartKeyframeModels(monotonic_time, include_infinite_animations);
+  return active;
 }
 
 void KeyframeEffect::FinishAll() {
@@ -336,7 +308,7 @@ void KeyframeEffect::StartKeyframeModels(base::TimeTicks monotonic_time,
         keyframe_model->iterations() == std::numeric_limits<double>::infinity())
       continue;
     if (keyframe_model->run_state() == KeyframeModel::RUNNING ||
-        keyframe_model->run_state() == KeyframeModel::PAUSED) {
+        KeyframeModel::IsPaused(keyframe_model->run_state())) {
       animated_properties[keyframe_model->TargetProperty()] = true;
     }
   }
@@ -348,8 +320,12 @@ void KeyframeEffect::StartKeyframeModels(base::TimeTicks monotonic_time,
         keyframe_model->run_state() ==
             KeyframeModel::WAITING_FOR_TARGET_AVAILABILITY) {
       animated_properties[keyframe_model->TargetProperty()] = true;
-      keyframe_model->SetRunState(KeyframeModel::RUNNING, monotonic_time);
-      keyframe_model->set_start_time(monotonic_time);
+      keyframe_model->SetRunState(KeyframeModel::RUNNING);
+      keyframe_model->set_start_time(
+          monotonic_time -
+          keyframe_model->hold_time().value_or(base::TimeDelta()) /
+              keyframe_model->playback_rate());
+      keyframe_model->set_hold_time(std::nullopt);
     }
   }
 }
@@ -358,7 +334,7 @@ KeyframeModel* KeyframeEffect::GetRunningKeyframeModelForProperty(
     int target_property) const {
   for (auto& keyframe_model : keyframe_models_) {
     if ((keyframe_model->run_state() == KeyframeModel::RUNNING ||
-         keyframe_model->run_state() == KeyframeModel::PAUSED) &&
+         KeyframeModel::IsPaused(keyframe_model->run_state())) &&
         keyframe_model->TargetProperty() == target_property) {
       return keyframe_model.get();
     }
@@ -391,7 +367,8 @@ ValueType KeyframeEffect::GetTargetValue(int target_property,
   }
   const auto* curve = AnimationTraits<ValueType>::ToDerivedCurve(
       running_keyframe_model->curve());
-  return curve->GetValue(GetEndTime(running_keyframe_model));
+  return curve->GetTransformedValue(GetEndTime(running_keyframe_model),
+                                    gfx::TimingFunction::LimitDirection::RIGHT);
 }
 
 }  // namespace gfx

@@ -4,9 +4,10 @@
 
 #include "chromeos/ash/services/bluetooth_config/public/cpp/device_image_info.h"
 
+#include <optional>
+
 #include "base/values.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash::bluetooth_config {
 
@@ -23,8 +24,8 @@ TEST(DeviceImageInfoTest, ToAndFromDictionaryValueValid) {
   DeviceImageInfo image_info(kTestDefaultImage, kTestLeftBudImage,
                              kTestRightBudImage, kTestCaseImage);
 
-  base::Value::Dict image_info_dict = image_info.ToDictionaryValue();
-  absl::optional<DeviceImageInfo> image_info_copy =
+  base::DictValue image_info_dict = image_info.ToDictionaryValue();
+  std::optional<DeviceImageInfo> image_info_copy =
       DeviceImageInfo::FromDictionaryValue(image_info_dict);
   EXPECT_TRUE(image_info_copy);
 
@@ -39,8 +40,8 @@ TEST(DeviceImageInfoTest, ToAndFromDictionaryValueValidDefaultConstructor) {
   // to/from dictionary methods.
   DeviceImageInfo image_info;
 
-  base::Value::Dict image_info_dict = image_info.ToDictionaryValue();
-  absl::optional<DeviceImageInfo> image_info_copy =
+  base::DictValue image_info_dict = image_info.ToDictionaryValue();
+  std::optional<DeviceImageInfo> image_info_copy =
       DeviceImageInfo::FromDictionaryValue(image_info_dict);
   EXPECT_TRUE(image_info_copy);
 
@@ -52,7 +53,7 @@ TEST(DeviceImageInfoTest, ToAndFromDictionaryValueValidDefaultConstructor) {
 
 TEST(DeviceImageInfoTest, FromDictionaryValueInvalid) {
   // Should correctly handle dictionaries with missing fields.
-  base::Value::Dict invalid_dict;
+  base::DictValue invalid_dict;
   EXPECT_FALSE(DeviceImageInfo::FromDictionaryValue(invalid_dict));
 }
 

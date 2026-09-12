@@ -20,15 +20,14 @@
 namespace settings {
 
 StartupPagesHandler::StartupPagesHandler(content::WebUI* webui)
-    : startup_custom_pages_table_model_(Profile::FromWebUI(webui)) {
-}
+    : startup_custom_pages_table_model_(Profile::FromWebUI(webui)) {}
 
-StartupPagesHandler::~StartupPagesHandler() {
-}
+StartupPagesHandler::~StartupPagesHandler() = default;
 
 void StartupPagesHandler::RegisterMessages() {
-  if (Profile::FromWebUI(web_ui())->IsOffTheRecord())
+  if (Profile::FromWebUI(web_ui())->IsOffTheRecord()) {
     return;
+  }
 
   web_ui()->RegisterMessageCallback(
       "addStartupPage",
@@ -60,8 +59,9 @@ void StartupPagesHandler::OnJavascriptAllowed() {
   SessionStartupPref pref = SessionStartupPref::GetStartupPref(prefService);
   startup_custom_pages_table_model_.SetURLs(pref.urls);
 
-  if (pref.urls.empty())
+  if (pref.urls.empty()) {
     pref.type = SessionStartupPref::DEFAULT;
+  }
 
   pref_change_registrar_.Init(prefService);
   pref_change_registrar_.Add(
@@ -76,13 +76,17 @@ void StartupPagesHandler::OnJavascriptDisallowed() {
 }
 
 void StartupPagesHandler::OnModelChanged() {
-  base::Value::List startup_pages;
+  base::ListValue startup_pages;
   size_t page_count = startup_custom_pages_table_model_.RowCount();
   std::vector<GURL> urls = startup_custom_pages_table_model_.GetURLs();
   for (size_t i = 0; i < page_count; ++i) {
-    base::Value::Dict entry;
+    base::DictValue entry;
     entry.Set("title", startup_custom_pages_table_model_.GetText(i, 0));
-    entry.Set("url", urls[i].spec());
+    std::string spec;
+    if (urls[i].is_valid()) {
+      spec = urls[i].spec();
+    }
+    entry.Set("url", std::move(spec));
     entry.Set("tooltip", startup_custom_pages_table_model_.GetTooltip(i));
     entry.Set("modelIndex", base::checked_cast<int>(i));
     startup_pages.Append(std::move(entry));
@@ -104,16 +108,15 @@ void StartupPagesHandler::OnItemsRemoved(size_t start, size_t length) {
   OnModelChanged();
 }
 
-void StartupPagesHandler::HandleAddStartupPage(const base::Value::List& args) {
+void StartupPagesHandler::HandleAddStartupPage(const base::ListValue& args) {
   CHECK_EQ(2U, args.size());
   const base::Value& callback_id = args[0];
 
   if (!args[1].is_string()) {
     NOTREACHED();
-    return;
   }
 
-  std::string url_string = args[1].GetString();
+  const std::string& url_string = args[1].GetString();
 
   GURL url;
   if (!settings_utils::FixupAndValidateStartupPage(url_string, &url)) {
@@ -127,7 +130,7 @@ void StartupPagesHandler::HandleAddStartupPage(const base::Value::List& args) {
   ResolveJavascriptCallback(callback_id, base::Value(true));
 }
 
-void StartupPagesHandler::HandleEditStartupPage(const base::Value::List& args) {
+void StartupPagesHandler::HandleEditStartupPage(const base::ListValue& args) {
   CHECK_EQ(args.size(), 3U);
   const base::Value& callback_id = args[0];
   int index = args[1].GetInt();
@@ -136,10 +139,9 @@ void StartupPagesHandler::HandleEditStartupPage(const base::Value::List& args) {
                        startup_custom_pages_table_model_.RowCount()) {
     RejectJavascriptCallback(callback_id, base::Value());
     NOTREACHED();
-    return;
   }
 
-  std::string url_string = args[2].GetString();
+  const std::string& url_string = args[2].GetString();
 
   GURL fixed_url;
   if (settings_utils::FixupAndValidateStartupPage(url_string, &fixed_url)) {
@@ -154,23 +156,27 @@ void StartupPagesHandler::HandleEditStartupPage(const base::Value::List& args) {
 }
 
 void StartupPagesHandler::HandleOnStartupPrefsPageLoad(
-    const base::Value::List& args) {
-  AllowJavascript();
+    const base::ListValue& args) {
+  if (IsJavascriptAllowed()) {
+    // Triggers 'update-startup-pages' event directly.
+    OnModelChanged();
+  } else {
+    // Triggers 'update-startup-pages' event indirectly as a result of the
+    // observers adedd in OnJavascriptAllowed.
+    AllowJavascript();
+  }
 }
 
-void StartupPagesHandler::HandleRemoveStartupPage(
-    const base::Value::List& args) {
+void StartupPagesHandler::HandleRemoveStartupPage(const base::ListValue& args) {
   CHECK_EQ(args.size(), 1u);
   if (!args[0].is_int()) {
     NOTREACHED();
-    return;
   }
   int selected_index = args[0].GetInt();
 
   if (selected_index < 0 || static_cast<size_t>(selected_index) >=
                                 startup_custom_pages_table_model_.RowCount()) {
     NOTREACHED();
-    return;
   }
 
   startup_custom_pages_table_model_.Remove(selected_index);
@@ -178,7 +184,7 @@ void StartupPagesHandler::HandleRemoveStartupPage(
 }
 
 void StartupPagesHandler::HandleSetStartupPagesToCurrentPages(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   startup_custom_pages_table_model_.SetToCurrentlyOpenPages(
       web_ui()->GetWebContents());
   SaveStartupPagesPref();
@@ -190,8 +196,9 @@ void StartupPagesHandler::SaveStartupPagesPref() {
   SessionStartupPref pref = SessionStartupPref::GetStartupPref(prefs);
   pref.urls = startup_custom_pages_table_model_.GetURLs();
 
-  if (pref.urls.empty())
+  if (pref.urls.empty()) {
     pref.type = SessionStartupPref::DEFAULT;
+  }
 
   SessionStartupPref::SetStartupPref(prefs, pref);
 }

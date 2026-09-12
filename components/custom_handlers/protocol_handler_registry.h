@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
@@ -81,14 +82,17 @@ class ProtocolHandlerRegistry : public KeyedService {
     virtual void OnProtocolHandlerRegistryChanged() = 0;
   };
 
-  // Intended for testing use only.
+  // Intended for testing use only. `is_off_the_record` defaults to false so
+  // tests that don't care about the OTR/incognito invariant can omit it.
   ProtocolHandlerRegistry(PrefService* prefs,
-                          std::unique_ptr<Delegate> delegate);
+                          std::unique_ptr<Delegate> delegate,
+                          bool is_off_the_record = false);
 
   // Creates a new instance and performs initialization.
   static std::unique_ptr<ProtocolHandlerRegistry> Create(
       PrefService* prefs,
-      std::unique_ptr<Delegate> delegate);
+      std::unique_ptr<Delegate> delegate,
+      bool is_off_the_record = false);
 
   ProtocolHandlerRegistry(const ProtocolHandlerRegistry&) = delete;
   ProtocolHandlerRegistry& operator=(const ProtocolHandlerRegistry&) = delete;
@@ -97,6 +101,8 @@ class ProtocolHandlerRegistry : public KeyedService {
 
   void AddObserver(Observer* observer);
   void RemoveObserver(Observer* observer);
+
+  void SetDelegateForTesting(std::unique_ptr<Delegate> delegate);
 
   // Called when a site tries to register as a protocol handler. If the request
   // can be handled silently by the registry - either to ignore the request
@@ -136,10 +142,10 @@ class ProtocolHandlerRegistry : public KeyedService {
 
   // Returns the offset in the list of handlers for a protocol of the default
   // handler for that protocol.
-  int GetHandlerIndex(base::StringPiece scheme) const;
+  int GetHandlerIndex(std::string_view scheme) const;
 
   // Get the list of protocol handlers for the given scheme.
-  ProtocolHandlerList GetHandlersFor(base::StringPiece scheme) const;
+  ProtocolHandlerList GetHandlersFor(std::string_view scheme) const;
 
   // Get a list of protocol handlers registered in [begin, end).
   // Does not include predefined or policy installed handlers.
@@ -148,10 +154,22 @@ class ProtocolHandlerRegistry : public KeyedService {
 
   // Clear all protocol handlers registered in [begin, end).
   // Does not delete predefined or policy installed handlers.
-  void ClearUserDefinedHandlers(base::Time begin, base::Time end);
+  void ClearUserDefinedHandlers(base::Time begin,
+                                base::Time end,
+                                bool save = false);
 
   // Get the list of ignored protocol handlers.
   ProtocolHandlerList GetIgnoredHandlers();
+
+  // Get all the handlers registered by extensions, or if passed as argument,
+  // the ones associated to an ExtensionId. In OTR registries the result is
+  // already restricted to handlers usable in incognito because the insertion
+  // guard in RegisterProtocolHandler rejects disallowed ones; no per-call
+  // filtering is needed. ProtocolHandlersSanityCheck() relies on this view of
+  // the registry's actual storage to clean up handlers for extensions that
+  // are no longer enabled in this context.
+  ProtocolHandlerList GetExtensionProtocolHandlers(
+      std::optional<std::string> extension_id = std::nullopt);
 
   // Yields a list of the protocols that have handlers registered in this
   // registry.
@@ -159,7 +177,7 @@ class ProtocolHandlerRegistry : public KeyedService {
 
   // Returns true if we allow websites to register handlers for the given
   // scheme.
-  bool CanSchemeBeOverridden(base::StringPiece scheme) const;
+  bool CanSchemeBeOverridden(std::string_view scheme) const;
 
   // Returns true if an identical protocol handler has already been registered.
   bool IsRegistered(const ProtocolHandler& handler) const;
@@ -170,7 +188,7 @@ class ProtocolHandlerRegistry : public KeyedService {
 
   // Returns true if the scheme has at least one handler that is registered by
   // policy.
-  bool HasPolicyRegisteredHandler(base::StringPiece scheme);
+  bool HasPolicyRegisteredHandler(std::string_view scheme);
 
   // Returns true if an identical protocol handler is being ignored.
   bool IsIgnored(const ProtocolHandler& handler) const;
@@ -182,20 +200,35 @@ class ProtocolHandlerRegistry : public KeyedService {
   bool HasIgnoredEquivalent(const ProtocolHandler& handler) const;
 
   // Causes the given protocol handler to not be ignored anymore.
-  void RemoveIgnoredHandler(const ProtocolHandler& handler);
+  void RemoveIgnoredHandler(const ProtocolHandler& handler, bool save = true);
 
   // Returns true if the protocol has a default protocol handler.
-  bool IsHandledProtocol(base::StringPiece scheme) const;
+  bool HasDefaultHandler(std::string_view scheme) const;
+
+  // Returns true if the protocol has a confirmed default protocol handler.
+  bool IsHandledProtocol(std::string_view scheme) const;
+
+  // Mark the scheme's default handler as confirmed by the user.
+  void ConfirmProtocolHandler(std::string_view scheme, bool save);
+
+  // Assumes the scheme has a default handler; it returns true if the user has
+  // granted permission to use it.
+  bool IsProtocolHandlerConfirmed(std::string_view scheme) const;
+
+  // If the scheme is handled, it checks whether the user needs to grant
+  // permission to use the handler.
+  bool ProtocolHandlerNeedsConfirmation(std::string_view scheme) const;
 
   // Removes the given protocol handler from the registry.
-  void RemoveHandler(const ProtocolHandler& handler);
+  void RemoveHandler(const ProtocolHandler& handler, bool save = true);
 
   // Remove the default handler for the given protocol.
-  void RemoveDefaultHandler(base::StringPiece scheme);
+  void RemoveDefaultHandler(std::string_view scheme);
 
-  // Returns the default handler for this protocol, or an empty handler if none
-  // exists.
-  const ProtocolHandler& GetHandlerFor(base::StringPiece scheme) const;
+  // Returns the default handler for this protocol, or an empty handler if the
+  // registry is disabled, none exists or if users is using an "off-the-record"
+  // profile and the handler is not allowed to operate under incognito mode
+  const ProtocolHandler& GetHandlerFor(std::string_view scheme) const;
 
   // Returns a translated URL if |url| is handled by a protocol handler,
   // otherwise it returns an empty URL.
@@ -238,6 +271,18 @@ class ProtocolHandlerRegistry : public KeyedService {
 
   friend class ProtocolHandlerRegistryTest;
 
+  // Returns whether `handler` may be stored in this registry's context.
+  // Always true for a regular-profile registry; for an OTR registry the
+  // handler must be marked as allowed in incognito. Used by the insertion
+  // guard in RegisterProtocolHandler.
+  bool IsHandlerAccessible(const ProtocolHandler& handler) const;
+
+  // Returns the default handler for this protocol, or an empty handler if none
+  // exists.
+  // Unlike GetHandlerFor, it returns the handler independently of the enabled_
+  // value and it doesn't run the ProtocolHandler integrity checks.
+  const ProtocolHandler& GetHandlerForInternal(std::string_view scheme) const;
+
   // Install default protocol handlers for chromeos which must be done
   // prior to calling InitProtocolSettings.
   void InstallPredefinedHandlers();
@@ -251,21 +296,25 @@ class ProtocolHandlerRegistry : public KeyedService {
 
   // Returns a pointer to the list of handlers registered for the given scheme,
   // or NULL if there are none.
-  const ProtocolHandlerList* GetHandlerList(base::StringPiece scheme) const;
+  const ProtocolHandlerList* GetHandlerList(std::string_view scheme) const;
 
   // Makes this ProtocolHandler the default handler for its protocol.
   void SetDefault(const ProtocolHandler& handler);
+
+  // Determines whether the handler should be promoted to default, in order to
+  // resolve conflicts with registrations performed through different APIs.
+  bool ShouldPromoteToDefault(const ProtocolHandler& handler) const;
 
   // Insert the given ProtocolHandler into the registry.
   void InsertHandler(const ProtocolHandler& handler);
 
   // Returns a JSON list of protocol handlers. The caller is responsible for
   // deleting this Value.
-  base::Value::List EncodeRegisteredHandlers();
+  base::ListValue EncodeRegisteredHandlers();
 
   // Returns a JSON list of ignored protocol handlers. The caller is
   // responsible for deleting this Value.
-  base::Value::List EncodeIgnoredHandlers();
+  base::ListValue EncodeIgnoredHandlers();
 
   // Notifies observers of a change to the registry.
   void NotifyChanged();
@@ -293,7 +342,7 @@ class ProtocolHandlerRegistry : public KeyedService {
   // These pointers may be invalidated by other changes in the preferences
   // storage, hence they must not be stored in a way that outlives the current
   // stack frame.
-  std::vector<const base::Value::Dict*> GetHandlersFromPref(
+  std::vector<const base::DictValue*> GetHandlersFromPref(
       const char* pref_name) const;
 
   // Ignores future requests to register the given protocol handler.
@@ -372,6 +421,12 @@ class ProtocolHandlerRegistry : public KeyedService {
   // When the table gets loaded this flag will be set and any further calls to
   // AddPredefinedHandler will be rejected.
   bool is_loaded_;
+
+  // Indicates whether the BrowserContext associated to this service is
+  // off-the-record. Fixed at construction; the OTR invariant in
+  // RegisterProtocolHandler depends on this flag never changing during the
+  // registry's lifetime.
+  const bool is_off_the_record_;
 
   base::ObserverList<Observer> observers_;
 

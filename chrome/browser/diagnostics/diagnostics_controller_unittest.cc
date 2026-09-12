@@ -5,14 +5,15 @@
 #include "chrome/browser/diagnostics/diagnostics_controller.h"
 
 #include <memory>
+#include <optional>
 
 #include "base/base_paths.h"
 #include "base/command_line.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/path_service.h"
+#include "base/test/scoped_path_override.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/diagnostics/diagnostics_model.h"
 #include "chrome/browser/diagnostics/diagnostics_writer.h"
 #include "chrome/browser/diagnostics/sqlite_diagnostics.h"
@@ -20,9 +21,9 @@
 #include "chrome/common/chrome_switches.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/constants/ash_constants.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace diagnostics {
 
@@ -37,7 +38,7 @@ class DiagnosticsControllerTest : public testing::Test {
  protected:
   DiagnosticsControllerTest() : cmdline_(base::CommandLine::NO_PROGRAM) {}
 
-  ~DiagnosticsControllerTest() override {}
+  ~DiagnosticsControllerTest() override = default;
 
   void SetUp() override {
     ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
@@ -46,18 +47,23 @@ class DiagnosticsControllerTest : public testing::Test {
     test_data = test_data.Append(FILE_PATH_LITERAL("diagnostics"));
     test_data = test_data.Append(FILE_PATH_LITERAL("user"));
     base::CopyDirectory(test_data, temp_dir_.GetPath(), true);
-    profile_dir_ = temp_dir_.GetPath().Append(FILE_PATH_LITERAL("user"));
+    user_data_dir_ = temp_dir_.GetPath().Append(FILE_PATH_LITERAL("user"));
+    // `MakeDiagnosticsModel` overrides DIR_USER_DATA and never restores it.
+    // Using a ScopedPathOverride makes these tests restore USER_DATA_DIR and
+    // avoid leaving DIR_USER_DATA set to a deleted temp dir when other tests
+    // in the process run.
+    user_data_dir_override_.emplace(chrome::DIR_USER_DATA, user_data_dir_);
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     // Redirect the home dir to the profile directory. We have to do this
     // because NSS uses the HOME directory to find where to store it's database,
     // so that's where the diagnostics and recovery code looks for it.
     base::PathService::Get(base::DIR_HOME, &old_home_dir_);
-    base::PathService::Override(base::DIR_HOME, profile_dir_);
+    base::PathService::Override(base::DIR_HOME, user_data_dir_);
 #endif
 
     cmdline_ = base::CommandLine(base::CommandLine::NO_PROGRAM);
-    cmdline_.AppendSwitchPath(switches::kUserDataDir, profile_dir_);
+    cmdline_.AppendSwitchPath(switches::kUserDataDir, user_data_dir_);
     cmdline_.AppendSwitch(switches::kDiagnostics);
     cmdline_.AppendSwitch(switches::kDiagnosticsRecovery);
     writer_.reset();
@@ -67,7 +73,7 @@ class DiagnosticsControllerTest : public testing::Test {
 
   void TearDown() override {
     DiagnosticsController::GetInstance()->ClearResults();
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     base::PathService::Override(base::DIR_HOME, old_home_dir_);
     old_home_dir_.clear();
 #endif
@@ -77,16 +83,17 @@ class DiagnosticsControllerTest : public testing::Test {
     // Just write some random characters into the file tInvaludUsero "corrupt"
     // it.
     const char bogus_data[] = "wwZ2uNYNuyUVzFbDm3DL";
-    base::WriteFile(path, bogus_data, std::size(bogus_data));
+    base::WriteFile(path, bogus_data);
   }
 
   std::unique_ptr<DiagnosticsModel> model_;
   base::CommandLine cmdline_;
   base::ScopedTempDir temp_dir_;
   std::unique_ptr<DiagnosticsWriter> writer_;
-  base::FilePath profile_dir_;
+  base::FilePath user_data_dir_;
+  std::optional<base::ScopedPathOverride> user_data_dir_override_;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   base::FilePath old_home_dir_;
 #endif
 };
@@ -120,9 +127,9 @@ TEST_F(DiagnosticsControllerTest, RecoverAllOK) {
   }
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 TEST_F(DiagnosticsControllerTest, RecoverFromNssCertDbFailure) {
-  base::FilePath db_path = profile_dir_.Append(ash::kNssCertDbPath);
+  base::FilePath db_path = user_data_dir_.Append(ash::kNssCertDbPath);
   EXPECT_TRUE(base::PathExists(db_path));
   CorruptDataFile(db_path);
   DiagnosticsController::GetInstance()->Run(cmdline_, writer_.get());
@@ -136,7 +143,7 @@ TEST_F(DiagnosticsControllerTest, RecoverFromNssCertDbFailure) {
   EXPECT_TRUE(
       results.GetTestInfo(DIAGNOSTICS_SQLITE_INTEGRITY_NSS_CERT_TEST, &info));
   EXPECT_EQ(DiagnosticsModel::TEST_FAIL_CONTINUE, info->GetResult());
-  EXPECT_EQ(DIAG_SQLITE_ERROR_HANDLER_CALLED, info->GetOutcomeCode());
+  EXPECT_EQ(DIAG_SQLITE_CANNOT_OPEN_DB, info->GetOutcomeCode());
 
   DiagnosticsController::GetInstance()->RunRecovery(cmdline_, writer_.get());
   EXPECT_EQ(DiagnosticsModel::RECOVERY_OK, info->GetResult());
@@ -144,7 +151,7 @@ TEST_F(DiagnosticsControllerTest, RecoverFromNssCertDbFailure) {
 }
 
 TEST_F(DiagnosticsControllerTest, RecoverFromNssKeyDbFailure) {
-  base::FilePath db_path = profile_dir_.Append(ash::kNssKeyDbPath);
+  base::FilePath db_path = user_data_dir_.Append(ash::kNssKeyDbPath);
   EXPECT_TRUE(base::PathExists(db_path));
   CorruptDataFile(db_path);
   DiagnosticsController::GetInstance()->Run(cmdline_, writer_.get());
@@ -158,7 +165,7 @@ TEST_F(DiagnosticsControllerTest, RecoverFromNssKeyDbFailure) {
   EXPECT_TRUE(
       results.GetTestInfo(DIAGNOSTICS_SQLITE_INTEGRITY_NSS_KEY_TEST, &info));
   EXPECT_EQ(DiagnosticsModel::TEST_FAIL_CONTINUE, info->GetResult());
-  EXPECT_EQ(DIAG_SQLITE_ERROR_HANDLER_CALLED, info->GetOutcomeCode());
+  EXPECT_EQ(DIAG_SQLITE_CANNOT_OPEN_DB, info->GetOutcomeCode());
 
   DiagnosticsController::GetInstance()->RunRecovery(cmdline_, writer_.get());
   EXPECT_EQ(DiagnosticsModel::RECOVERY_OK, info->GetResult());

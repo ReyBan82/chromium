@@ -6,27 +6,54 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include "base/feature_list.h"
-#include "base/strings/stringprintf.h"
+#include "base/byte_size.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_util.h"
+#include "base/strings/to_string.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+#include "net/http/http_response_headers.h"
 #include "net/http/http_util.h"
 #include "net/url_request/redirect_info.h"
 #include "net/url_request/redirect_util.h"
+#include "services/network/public/cpp/cors/cors.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/resource_request_body.h"
 #include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "third_party/blink/public/common/blob/blob_utils.h"
-#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/loader/resource_type_util.h"
 #include "ui/base/page_transition_types.h"
 
 namespace blink {
 namespace {
+
+bool IsCorsExposedResponseHeader(
+    std::string_view name,
+    const std::vector<std::string>& cors_exposed_header_names) {
+  if (network::cors::IsCorsSafelistedResponseHeaderName(name)) {
+    return true;
+  }
+  // "content-range" is not a standard CORS-safelisted response header, but it
+  // is required by C++ media loaders (e.g. WebMediaPlayer) to process "206
+  // Partial Content" range responses. We permit it in URLResponseHead to avoid
+  // breaking media playback, while it remains filtered out and hidden from
+  // JavaScript's view in the renderer.
+  if (base::EqualsCaseInsensitiveASCII(name, "content-range")) {
+    return true;
+  }
+  for (const auto& exposed : cors_exposed_header_names) {
+    if (base::EqualsCaseInsensitiveASCII(name, exposed)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // Calls |callback| when Blob reading is complete.
 class BlobCompleteCaller : public mojom::BlobReaderClient {
@@ -49,20 +76,8 @@ class BlobCompleteCaller : public mojom::BlobReaderClient {
 
 void SaveResponseHeaders(const mojom::FetchAPIResponse& response,
                          network::mojom::URLResponseHead* out_head) {
-  // Build a string instead of using HttpResponseHeaders::AddHeader on
-  // each header, since AddHeader has O(n^2) performance.
-  std::string buf(base::StringPrintf("HTTP/1.1 %d %s\r\n", response.status_code,
-                                     response.status_text.c_str()));
-  for (const auto& item : response.headers) {
-    buf.append(item.first);
-    buf.append(": ");
-    buf.append(item.second);
-    buf.append("\r\n");
-  }
-  buf.append("\r\n");
-
-  out_head->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
-      net::HttpUtil::AssembleRawHeaders(buf));
+  out_head->headers =
+      ServiceWorkerLoaderHelpers::GetHttpResponseHeaders(response);
 
   // Populate |out_head|'s MIME type with the value from the HTTP response
   // headers.
@@ -76,14 +91,39 @@ void SaveResponseHeaders(const mojom::FetchAPIResponse& response,
   // headers.
   if (out_head->charset.empty()) {
     std::string charset;
-    if (out_head->headers->GetCharset(&charset))
+    if (out_head->headers->GetCharset(&charset)) {
       out_head->charset = charset;
+    }
   }
 
   // Populate |out_head|'s content length with the value from the HTTP response
   // headers.
-  if (out_head->content_length == -1)
-    out_head->content_length = out_head->headers->GetContentLength();
+  if (out_head->content_length == -1) {
+    std::optional<base::ByteSize> content_length =
+        out_head->headers->GetContentLength();
+    out_head->content_length = content_length ? content_length->InBytes() : -1;
+  }
+
+  // Populate |out_head|'s encoded data length by checking the response source.
+  // If the response is not from network, we store 0 since no data is
+  // transferred over network.
+  // This aligns with the behavior of when SW does not intercept, and the
+  // response is from HTTP cache. In non-SW paths, |encoded_data_length| is
+  // updated inside |URLLoader::BuildResponseHead()| using
+  // |net::URLRequest::GetTotalReceivedBytes()|. This method returns total
+  // amount of data received from network after SSL decoding and proxy handling,
+  // and returns 0 when no data is received from network.
+  if (out_head->encoded_data_length == -1) {
+    if (response.response_source ==
+        network::mojom::FetchResponseSource::kNetwork) {
+      std::optional<base::ByteSize> content_length =
+          out_head->headers->GetContentLength();
+      out_head->encoded_data_length =
+          content_length ? content_length->InBytes() : -1;
+    } else {
+      out_head->encoded_data_length = 0;
+    }
+  }
 }
 
 }  // namespace
@@ -119,17 +159,18 @@ void ServiceWorkerLoaderHelpers::SaveResponseInfo(
   out_head->was_fetched_via_spdy = response.was_fetched_via_spdy;
   out_head->has_range_requested = response.has_range_requested;
   out_head->auth_challenge_info = response.auth_challenge_info;
+  out_head->timing_allow_passed = false;
   SaveResponseHeaders(response, out_head);
 }
 
 // static
-absl::optional<net::RedirectInfo>
+std::optional<net::RedirectInfo>
 ServiceWorkerLoaderHelpers::ComputeRedirectInfo(
     const network::ResourceRequest& original_request,
     const network::mojom::URLResponseHead& response_head) {
   std::string new_location;
   if (!response_head.headers->IsRedirect(&new_location))
-    return absl::nullopt;
+    return std::nullopt;
 
   // If the request is a MAIN_FRAME request, the first-party URL gets
   // updated on redirects.
@@ -143,6 +184,7 @@ ServiceWorkerLoaderHelpers::ComputeRedirectInfo(
       original_request.site_for_cookies, first_party_url_policy,
       original_request.referrer_policy,
       original_request.referrer.GetAsReferrer().spec(),
+      original_request.request_initiator,
       response_head.headers->response_code(),
       original_request.url.Resolve(new_location),
       net::RedirectUtil::GetReferrerPolicyHeader(response_head.headers.get()),
@@ -177,11 +219,10 @@ int ServiceWorkerLoaderHelpers::ReadBlobResponseBody(
 // static
 bool ServiceWorkerLoaderHelpers::IsMainRequestDestination(
     network::mojom::RequestDestination destination) {
-  // When PlzDedicatedWorker is enabled, a dedicated worker script is considered
-  // to be a main resource.
-  if (destination == network::mojom::RequestDestination::kWorker)
-    return base::FeatureList::IsEnabled(features::kPlzDedicatedWorker);
   return IsRequestDestinationFrame(destination) ||
+         // A dedicated worker or shared worker script is considered to be a
+         // main resource.
+         destination == network::mojom::RequestDestination::kWorker ||
          destination == network::mojom::RequestDestination::kSharedWorker;
 }
 
@@ -200,7 +241,36 @@ const char* ServiceWorkerLoaderHelpers::FetchResponseSourceToSuffix(
       return "CacheStorage";
   }
   NOTREACHED();
-  return "Unknown";
+}
+
+// static
+scoped_refptr<net::HttpResponseHeaders>
+ServiceWorkerLoaderHelpers::GetHttpResponseHeaders(
+    const blink::mojom::FetchAPIResponse& response) {
+  // To avoid O(n^2) performance of net::HttpResponseHeaders::AddHeader(), we
+  // use net::HttpResponseHeaders::Builder here, which provides O(n) performance
+  // by taking all headers at once upon Build().
+  //
+  // We don't use net::HttpUtil::AssembleRawHeaders() because net::HttpUtil is
+  // disallowed in this directory.
+  std::string status = base::StrCat(
+      {base::ToString(response.status_code), " ", response.status_text});
+  net::HttpResponseHeaders::Builder builder({1, 1}, status);
+  // |response.headers| holds the header list of the internal response. For a
+  // CORS filtered response, restrict the resulting header list to the
+  // CORS-safelisted response headers and any explicitly exposed names.
+  // https://fetch.spec.whatwg.org/#concept-filtered-response-cors
+  const bool is_cors_filtered =
+      response.response_type == network::mojom::FetchResponseType::kCors;
+  for (const auto& item : response.headers) {
+    if (is_cors_filtered &&
+        !IsCorsExposedResponseHeader(item.first,
+                                     response.cors_exposed_header_names)) {
+      continue;
+    }
+    builder.AddHeader(item.first, item.second);
+  }
+  return builder.Build();
 }
 
 }  // namespace blink

@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var assertEq = chrome.test.assertEq;
-var assertTrue = chrome.test.assertTrue;
-var fail = chrome.test.fail;
-var succeed = chrome.test.succeed;
+const assertEq = chrome.test.assertEq;
+const assertTrue = chrome.test.assertTrue;
+const fail = chrome.test.fail;
+const succeed = chrome.test.succeed;
 
 function checkIsDefined(prop) {
   if (!chrome.identity) {
@@ -13,46 +13,49 @@ function checkIsDefined(prop) {
     return false;
   }
   if (!chrome.identity[prop]) {
-    fail('chrome.identity.' + prop + ' is not undefined');
+    fail(`chrome.identity.${prop} is not undefined`);
     return false;
   }
   return true;
 }
 
-var id = 'mnkdjmfihjjihdfnnoiojdccnnfkajpd';
-var host = 'https://' + id + '.chromiumapp.org';
+const id = 'mnkdjmfihjjihdfnnoiojdccnnfkajpd';
+const host = `https://${id}.chromiumapp.org`;
 
 chrome.test.runTests([
 
   function testGenerateRedirectURLWithPath() {
-    if (!checkIsDefined('getRedirectURL'))
+    if (!checkIsDefined('getRedirectURL')) {
       return;
+    }
 
-    var url = chrome.identity.getRedirectURL('slashless/path');
-    assertEq(host + '/slashless/path', url);
+    let url = chrome.identity.getRedirectURL('slashless/path');
+    assertEq(`${host}/slashless/path`, url);
 
-    var url = chrome.identity.getRedirectURL('/slash/path');
-    assertEq(host + '/slash/path', url);
+    url = chrome.identity.getRedirectURL('/slash/path');
+    assertEq(`${host}/slash/path`, url);
 
     succeed();
   },
 
   function testGenerateRedirectURLNoPath() {
-    if (!checkIsDefined('getRedirectURL'))
+    if (!checkIsDefined('getRedirectURL')) {
       return;
+    }
 
-    var url = chrome.identity.getRedirectURL();
-    assertEq(host + '/', url);
+    const url = chrome.identity.getRedirectURL();
+    assertEq(`${host}/`, url);
 
     succeed();
   },
 
   function testGenerateRedirectURLemptyPath() {
-    if (!checkIsDefined('getRedirectURL'))
+    if (!checkIsDefined('getRedirectURL')) {
       return;
+    }
 
-    var url = chrome.identity.getRedirectURL('');
-    assertEq(host + '/', url);
+    const url = chrome.identity.getRedirectURL('');
+    assertEq(`${host}/`, url);
 
     succeed();
   },

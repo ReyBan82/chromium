@@ -5,15 +5,17 @@
 #ifndef CHROME_BROWSER_ASH_PRINTING_PRINTER_EVENT_TRACKER_H_
 #define CHROME_BROWSER_ASH_PRINTING_PRINTER_EVENT_TRACKER_H_
 
+#include <string>
 #include <vector>
 
 #include "base/synchronization/lock.h"
-#include "chrome/browser/ash/printing/printer_detector.h"
+#include "chromeos/printing/printer_configuration.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "third_party/metrics_proto/printer_event.pb.h"
 
 namespace chromeos {
 class Printer;
+struct PrinterSearchData;
 }  // namespace chromeos
 
 namespace ash {
@@ -41,22 +43,28 @@ class PrinterEventTracker : public KeyedService {
   // disabled and the Record* functions are nops.
   void set_logging(bool logging);
 
-  // Store a succesful USB printer installation. |mode| indicates if
+  // Store a successful USB printer installation. |mode| indicates if
   // the PPD was selected automatically or chosen by the user.
   void RecordUsbPrinterInstalled(
-      const PrinterDetector::DetectedPrinter& printer,
-      SetupMode mode);
+      const chromeos::Printer::PpdReference& ppd_reference,
+      const chromeos::PrinterSearchData& ppd_search_data,
+      SetupMode mode,
+      const std::string& ppd_filename);
 
-  // Store a succesful network printer installation. |mode| indicates if
+  // Store a successful network printer installation. |mode| indicates if
   // the PPD was selected automatically or chosen by the user.
-  void RecordIppPrinterInstalled(const chromeos::Printer& printer,
-                                 SetupMode mode);
+  void RecordIppPrinterInstalled(
+      const chromeos::Printer& printer,
+      SetupMode mode,
+      const std::optional<chromeos::IppPrinterInfo>& ipp_printer_info,
+      const std::string& ppd_filename);
 
   // Record an abandoned setup.
   void RecordSetupAbandoned(const chromeos::Printer& printer);
 
   // Record an abandoned setup for a USB printer.
-  void RecordUsbSetupAbandoned(const PrinterDetector::DetectedPrinter& printer);
+  void RecordUsbSetupAbandoned(
+      const chromeos::PrinterSearchData& ppd_search_data);
 
   // Store a printer removal.
   void RecordPrinterRemoved(const chromeos::Printer& printer);

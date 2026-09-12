@@ -6,8 +6,12 @@
 #define CHROME_BROWSER_INTERSTITIALS_ENTERPRISE_UTIL_H_
 
 #include "chrome/browser/safe_browsing/cloud_content_scanning/deep_scanning_utils.h"
+#include "components/safe_browsing/buildflags.h"
+
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
 #include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
 #include "components/safe_browsing/core/common/proto/realtimeapi.pb.h"
+#endif
 
 namespace content {
 class WebContents;
@@ -19,7 +23,8 @@ void MaybeTriggerSecurityInterstitialShownEvent(
     content::WebContents* web_contents,
     const GURL& page_url,
     const std::string& reason,
-    int net_error_code);
+    int net_error_code,
+    const std::string& tab_title);
 
 // If user is not in incognito mode, triggers
 // "safeBrowsingPrivate.onSecurityInterstitialProceeded" extension event.
@@ -27,16 +32,18 @@ void MaybeTriggerSecurityInterstitialProceededEvent(
     content::WebContents* web_contents,
     const GURL& page_url,
     const std::string& reason,
-    int net_error_code);
+    int net_error_code,
+    const std::string& tab_title);
 
-#if !BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(SAFE_BROWSING_AVAILABLE)
 // If user is not in incognito mode, triggers
 // "safeBrowsingPrivate.onUrlFilteringInterstitial" extension event.
 void MaybeTriggerUrlFilteringInterstitialEvent(
     content::WebContents* web_contents,
     const GURL& page_url,
     const std::string& threat_type,
-    safe_browsing::RTLookupResponse rt_lookup_response);
+    safe_browsing::RTLookupResponse rt_lookup_response,
+    const std::string& tab_title);
 #endif
 
 #endif  // CHROME_BROWSER_INTERSTITIALS_ENTERPRISE_UTIL_H_

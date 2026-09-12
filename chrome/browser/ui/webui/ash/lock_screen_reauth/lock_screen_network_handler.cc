@@ -14,12 +14,9 @@
 #include "base/values.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/extensions/tab_helper.h"
-#include "chrome/browser/ui/webui/ash/internet_config_dialog.h"
-#include "chrome/browser/ui/webui/ash/internet_detail_dialog.h"
+#include "chrome/browser/ui/webui/ash/internet/internet_config_dialog.h"
+#include "chrome/browser/ui/webui/ash/internet/internet_detail_dialog.h"
 #include "chrome/browser/ui/webui/ash/lock_screen_reauth/lock_screen_reauth_dialogs.h"
-#include "chrome/common/url_constants.h"
-#include "chrome/grit/browser_resources.h"
-#include "chrome/grit/generated_resources.h"
 #include "chromeos/strings/grit/chromeos_strings.h"
 #include "components/user_manager/user_manager.h"
 #include "content/public/browser/browser_context.h"
@@ -44,7 +41,7 @@ constexpr char kGetHostname[] = "getHostname";
 
 }  // namespace
 
-NetworkConfigMessageHandler::NetworkConfigMessageHandler() {}
+NetworkConfigMessageHandler::NetworkConfigMessageHandler() = default;
 
 NetworkConfigMessageHandler::~NetworkConfigMessageHandler() = default;
 
@@ -69,44 +66,45 @@ void NetworkConfigMessageHandler::RegisterMessages() {
                           weak_ptr_factory_.GetWeakPtr()));
 }
 
-void NetworkConfigMessageHandler::Initialize(const base::Value::List& args) {
+void NetworkConfigMessageHandler::Initialize(const base::ListValue& args) {
   AllowJavascript();
 
   // Check if the main dialog exists and notify that the network dialog has
   // been loaded.
   LockScreenStartReauthDialog* start_reauth_dialog =
       LockScreenStartReauthDialog::GetInstance();
-  if (!start_reauth_dialog)
+  if (!start_reauth_dialog) {
     return;
+  }
   start_reauth_dialog->OnNetworkDialogReadyForTesting();
 }
 
 void NetworkConfigMessageHandler::ShowNetworkDetails(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   CHECK_EQ(1u, args.size());
-  std::string guid = args[0].GetString();
+  const std::string& guid = args[0].GetString();
 
   InternetDetailDialog::ShowDialog(guid);
 }
 
 void NetworkConfigMessageHandler::ShowNetworkConfig(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   CHECK_EQ(1u, args.size());
-  std::string guid = args[0].GetString();
+  const std::string& guid = args[0].GetString();
 
   InternetConfigDialog::ShowDialogForNetworkId(guid);
 }
 
-void NetworkConfigMessageHandler::AddNetwork(const base::Value::List& args) {
+void NetworkConfigMessageHandler::AddNetwork(const base::ListValue& args) {
   CHECK_EQ(1u, args.size());
-  std::string onc_type = args[0].GetString();
+  const std::string& onc_type = args[0].GetString();
 
   InternetConfigDialog::ShowDialogForNetworkType(onc_type);
 }
 
-void NetworkConfigMessageHandler::GetHostname(const base::Value::List& args) {
+void NetworkConfigMessageHandler::GetHostname(const base::ListValue& args) {
   CHECK_EQ(1u, args.size());
-  std::string callback_id = args[0].GetString();
+  const std::string& callback_id = args[0].GetString();
   std::string hostname =
       NetworkHandler::Get()->network_state_handler()->hostname();
   Respond(callback_id, hostname);

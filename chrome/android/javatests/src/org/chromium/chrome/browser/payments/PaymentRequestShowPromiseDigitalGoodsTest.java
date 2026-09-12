@@ -11,20 +11,21 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 
 import org.chromium.base.test.util.CommandLineFlags;
+import org.chromium.base.test.util.DisableIf;
 import org.chromium.base.test.util.Feature;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.payments.PaymentRequestTestRule.AppPresence;
 import org.chromium.chrome.browser.payments.PaymentRequestTestRule.AppSpeed;
 import org.chromium.chrome.browser.payments.PaymentRequestTestRule.FactorySpeed;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
+import org.chromium.ui.base.DeviceFormFactor;
 
 import java.util.concurrent.TimeoutException;
 
-/**
- * A payment integration test for the show promise with digital goods.
- */
+/** A payment integration test for the show promise with digital goods. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
+@DisableIf.Device(DeviceFormFactor.DESKTOP) // https://crbug.com/376100658
 public class PaymentRequestShowPromiseDigitalGoodsTest {
     @Rule
     public PaymentRequestTestRule mRule =
@@ -37,7 +38,7 @@ public class PaymentRequestShowPromiseDigitalGoodsTest {
         mRule.addPaymentAppFactory(
                 "https://bobpay.test", AppPresence.HAVE_APPS, FactorySpeed.FAST_FACTORY);
         mRule.executeJavaScriptAndWaitForResult("create('https://bobpay.test');");
-        mRule.triggerUIAndWait("buy", mRule.getResultReady());
+        mRule.triggerUiAndWait("buy", mRule.getResultReady());
 
         mRule.expectResultContains(new String[] {"\"total\":\"1.00\""});
     }
@@ -46,10 +47,13 @@ public class PaymentRequestShowPromiseDigitalGoodsTest {
     @MediumTest
     @Feature({"Payments"})
     public void testDigitalGoodsSlowApp() throws TimeoutException {
-        mRule.addPaymentAppFactory("https://bobpay.test", AppPresence.HAVE_APPS,
-                FactorySpeed.SLOW_FACTORY, AppSpeed.SLOW_APP);
+        mRule.addPaymentAppFactory(
+                "https://bobpay.test",
+                AppPresence.HAVE_APPS,
+                FactorySpeed.SLOW_FACTORY,
+                AppSpeed.SLOW_APP);
         mRule.executeJavaScriptAndWaitForResult("create('https://bobpay.test');");
-        mRule.triggerUIAndWait("buy", mRule.getResultReady());
+        mRule.triggerUiAndWait("buy", mRule.getResultReady());
 
         mRule.expectResultContains(new String[] {"\"total\":\"1.00\""});
     }
@@ -57,7 +61,7 @@ public class PaymentRequestShowPromiseDigitalGoodsTest {
     @Test
     @MediumTest
     @Feature({"Payments"})
-    public void testSkipUIFastApp() throws TimeoutException {
+    public void testSkipUiFastApp() throws TimeoutException {
         mRule.addPaymentAppFactory(
                 "https://bobpay.test", AppPresence.HAVE_APPS, FactorySpeed.FAST_FACTORY);
         mRule.executeJavaScriptAndWaitForResult("create('https://bobpay.test');");
@@ -69,9 +73,12 @@ public class PaymentRequestShowPromiseDigitalGoodsTest {
     @Test
     @MediumTest
     @Feature({"Payments"})
-    public void testSkipUISlowApp() throws TimeoutException {
-        mRule.addPaymentAppFactory("https://bobpay.test", AppPresence.HAVE_APPS,
-                FactorySpeed.SLOW_FACTORY, AppSpeed.SLOW_APP);
+    public void testSkipUiSlowApp() throws TimeoutException {
+        mRule.addPaymentAppFactory(
+                "https://bobpay.test",
+                AppPresence.HAVE_APPS,
+                FactorySpeed.SLOW_FACTORY,
+                AppSpeed.SLOW_APP);
         mRule.executeJavaScriptAndWaitForResult("create('https://bobpay.test');");
         mRule.clickNodeAndWait("buy", mRule.getDismissed());
 

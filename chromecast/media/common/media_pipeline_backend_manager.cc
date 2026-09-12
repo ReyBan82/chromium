@@ -8,6 +8,7 @@
 #include <limits>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -69,10 +70,10 @@ MediaPipelineBackendManager::MediaPipelineBackendManager(
   DCHECK_EQ(playing_noneffects_audio_streams_count_.size(),
             static_cast<size_t>(AudioContentType::kNumTypes));
   for (int i = 0; i < NUM_DECODER_TYPES; ++i) {
-    decoder_count_[i] = 0;
+    UNSAFE_TODO(decoder_count_[i]) = 0;
   }
 
-  RUN_ON_MEDIA_THREAD(CreateMixerConnection);
+
 }
 
 MediaPipelineBackendManager::~MediaPipelineBackendManager() {
@@ -82,8 +83,8 @@ MediaPipelineBackendManager::~MediaPipelineBackendManager() {
 std::unique_ptr<CmaBackend> MediaPipelineBackendManager::CreateBackend(
     const media::MediaPipelineDeviceParams& params) {
   DCHECK(media_task_runner_->BelongsToCurrentThread());
-  return std::make_unique<MediaPipelineBackendWrapper>(params, this,
-                                                       media_resource_tracker_);
+  return std::make_unique<MediaPipelineBackendWrapper>(
+      params, weak_factory_.GetWeakPtr(), media_resource_tracker_);
 }
 
 scoped_refptr<base::SequencedTaskRunner>
@@ -117,21 +118,21 @@ bool MediaPipelineBackendManager::IncrementDecoderCount(DecoderType type) {
   DCHECK(type < NUM_DECODER_TYPES);
   const int limit =
       (type == VIDEO_DECODER) ? kVideoDecoderLimit : kAudioDecoderLimit;
-  if (decoder_count_[type] >= limit) {
+  if (UNSAFE_TODO(decoder_count_[type]) >= limit) {
     LOG(WARNING) << "Decoder limit reached for type " << type;
     return false;
   }
 
-  ++decoder_count_[type];
+  UNSAFE_TODO(++decoder_count_[type]);
   return true;
 }
 
 void MediaPipelineBackendManager::DecrementDecoderCount(DecoderType type) {
   DCHECK(media_task_runner_->BelongsToCurrentThread());
   DCHECK(type < NUM_DECODER_TYPES);
-  DCHECK_GT(decoder_count_[type], 0);
+  UNSAFE_TODO(DCHECK_GT(decoder_count_[type], 0));
 
-  decoder_count_[type]--;
+  UNSAFE_TODO(decoder_count_[type])--;
 }
 
 void MediaPipelineBackendManager::UpdatePlayingAudioCount(
@@ -157,19 +158,7 @@ void MediaPipelineBackendManager::UpdatePlayingAudioCount(
                                   had_playing_primary_streams);
 }
 
-void MediaPipelineBackendManager::OnMixerStreamCountChange(int primary_streams,
-                                                           int sfx_streams) {
-  DCHECK(media_task_runner_->BelongsToCurrentThread());
-  bool had_playing_audio_streams = (TotalPlayingAudioStreamsCount() > 0);
-  bool had_playing_primary_streams =
-      (TotalPlayingNoneffectsAudioStreamsCount() > 0);
 
-  mixer_primary_stream_count_ = primary_streams;
-  mixer_sfx_stream_count_ = sfx_streams;
-
-  HandlePlayingAudioStreamsChange(had_playing_audio_streams,
-                                  had_playing_primary_streams);
-}
 
 void MediaPipelineBackendManager::HandlePlayingAudioStreamsChange(
     bool had_playing_audio_streams,
@@ -206,7 +195,7 @@ int MediaPipelineBackendManager::TotalPlayingAudioStreamsCount() {
   for (auto entry : playing_audio_streams_count_) {
     total += entry.second;
   }
-  return std::max(total, mixer_primary_stream_count_ + mixer_sfx_stream_count_);
+  return total;
 }
 
 int MediaPipelineBackendManager::TotalPlayingNoneffectsAudioStreamsCount() {
@@ -214,7 +203,7 @@ int MediaPipelineBackendManager::TotalPlayingNoneffectsAudioStreamsCount() {
   for (auto entry : playing_noneffects_audio_streams_count_) {
     total += entry.second;
   }
-  return std::max(total, mixer_primary_stream_count_);
+  return total;
 }
 
 void MediaPipelineBackendManager::EnterPowerSaveMode() {

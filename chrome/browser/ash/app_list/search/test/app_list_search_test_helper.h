@@ -12,8 +12,8 @@
 #include "ash/public/cpp/app_list/app_list_features.h"
 #include "ash/public/cpp/app_list/app_list_metrics.h"
 #include "ash/public/cpp/app_list/app_list_types.h"
-#include "base/files/file_util.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/notreached.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
@@ -28,9 +28,6 @@
 #include "chrome/browser/ash/app_list/test/chrome_app_list_test_support.h"
 #include "chrome/browser/ash/file_manager/path_util.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/test/browser_test.h"
@@ -66,7 +63,7 @@ class AppListSearchBrowserTest : public InProcessBrowserTest {
   using ResultType = ash::AppListSearchResultType;
   using DisplayType = ash::SearchResultDisplayType;
 
-  AppListSearchBrowserTest();
+  AppListSearchBrowserTest() = default;
   ~AppListSearchBrowserTest() override = default;
 
   AppListSearchBrowserTest(const AppListSearchBrowserTest&) = delete;
@@ -87,9 +84,10 @@ class AppListSearchBrowserTest : public InProcessBrowserTest {
   void StartSearch(const std::string& query);
 
   void SearchAndWaitForProviders(const std::string& query,
-                                 const std::set<ResultType> providers);
+                                 const std::set<ResultType>& providers);
 
-  std::vector<ChromeSearchResult*> PublishedResults();
+  std::vector<raw_ptr<ChromeSearchResult, VectorExperimental>>
+  PublishedResults();
 
   std::vector<ChromeSearchResult*> PublishedResultsForProvider(
       const ResultType provider);

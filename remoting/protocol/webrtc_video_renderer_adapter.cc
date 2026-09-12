@@ -22,7 +22,9 @@
 #include "remoting/protocol/webrtc_transport.h"
 #include "third_party/libyuv/include/libyuv/convert.h"
 #include "third_party/libyuv/include/libyuv/convert_from.h"
+#include "third_party/webrtc/api/scoped_refptr.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_frame.h"
+#include "third_party/webrtc/rtc_base/time_utils.h"
 
 namespace remoting::protocol {
 
@@ -37,10 +39,11 @@ std::unique_ptr<webrtc::DesktopFrame> ConvertYuvToRgb(
     FrameConsumer::PixelFormat pixel_format) {
   DCHECK(rgb_frame->size().equals(
       webrtc::DesktopSize(yuv_frame->width(), yuv_frame->height())));
+  CHECK_EQ(rgb_frame->pixel_format(), webrtc::FOURCC_ARGB);
   auto yuv_to_rgb_function = (pixel_format == FrameConsumer::FORMAT_BGRA)
                                  ? &libyuv::I420ToARGB
                                  : &libyuv::I420ToABGR;
-  rtc::scoped_refptr<const webrtc::I420BufferInterface> i420_frame =
+  webrtc::scoped_refptr<const webrtc::I420BufferInterface> i420_frame =
       yuv_frame->ToI420();
   yuv_to_rgb_function(i420_frame->DataY(), i420_frame->StrideY(),
                       i420_frame->DataU(), i420_frame->StrideU(),
@@ -68,31 +71,30 @@ WebrtcVideoRendererAdapter::~WebrtcVideoRendererAdapter() {
   // Needed for ConnectionTest unittests which set up a fake connection without
   // starting any video. This video adapter is instantiated when the incoming
   // video-stats data channel is created.
-  if (!media_stream_) {
-    return;
+  if (video_track_) {
+    video_track_->RemoveSink(this);
   }
-
-  webrtc::VideoTrackVector video_tracks = media_stream_->GetVideoTracks();
-  DCHECK(!video_tracks.empty());
-  video_tracks[0]->RemoveSink(this);
 }
 
 void WebrtcVideoRendererAdapter::SetMediaStream(
-    rtc::scoped_refptr<webrtc::MediaStreamInterface> media_stream) {
+    webrtc::scoped_refptr<webrtc::MediaStreamInterface> media_stream) {
   DCHECK_EQ(media_stream->id(), label());
 
-  media_stream_ = std::move(media_stream);
+  if (video_track_) {
+    video_track_->RemoveSink(this);
+  }
 
-  webrtc::VideoTrackVector video_tracks = media_stream_->GetVideoTracks();
+  webrtc::VideoTrackVector video_tracks = media_stream->GetVideoTracks();
 
   // Caller must verify that the media stream contains video tracks.
-  DCHECK(!video_tracks.empty());
+  CHECK(!video_tracks.empty());
 
   if (video_tracks.size() > 1U) {
     LOG(WARNING) << "Received media stream with multiple video tracks.";
   }
 
-  video_tracks[0]->AddOrUpdateSink(this, rtc::VideoSinkWants());
+  video_track_ = video_tracks[0];
+  video_track_->AddOrUpdateSink(this, webrtc::VideoSinkWants());
 }
 
 void WebrtcVideoRendererAdapter::SetVideoStatsChannel(
@@ -104,7 +106,7 @@ void WebrtcVideoRendererAdapter::SetVideoStatsChannel(
 }
 
 void WebrtcVideoRendererAdapter::OnFrame(const webrtc::VideoFrame& frame) {
-  if (frame.timestamp_us() > rtc::TimeMicros()) {
+  if (frame.timestamp_us() > webrtc::TimeMicros()) {
     // The host sets playout delay to 0, so all incoming frames are expected to
     // be rendered as so as they are received.
     NOTREACHED() << "Received frame with playout delay greater than 0.";
@@ -113,7 +115,7 @@ void WebrtcVideoRendererAdapter::OnFrame(const webrtc::VideoFrame& frame) {
   task_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(&WebrtcVideoRendererAdapter::HandleFrameOnMainThread,
-                     weak_factory_.GetWeakPtr(), frame.timestamp(),
+                     weak_factory_.GetWeakPtr(), frame.rtp_timestamp(),
                      base::TimeTicks::Now(),
                      scoped_refptr<webrtc::VideoFrameBuffer>(
                          frame.video_frame_buffer().get())));

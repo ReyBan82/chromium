@@ -6,6 +6,7 @@ include_rules = [
   "+components/sessions",
   "+components/signin/public/identity_manager",
   "+components/url_formatter",
+  "+components/viz/common",
   "+components/zoom",
   "+content/public/test",
   "+net",
@@ -17,7 +18,7 @@ include_rules = [
 ]
 
 specific_include_rules = {
-  ".*_(unit|pixel|perf)?test.*\.(cc|h)": [
+  ".*_(unit|pixel|perf)?test.*\\.(cc|h)": [
     "+components/sync_preferences/testing_pref_service_syncable.h",
     "+content/public/test",
     "+services/network/test",

@@ -15,23 +15,23 @@ import androidx.test.core.app.ApplicationProvider;
 import androidx.test.filters.SmallTest;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.Robolectric;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
 /** Unit tests for {@link FeedPlaceholderLayout}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class FeedPlaceholderLayoutTest {
-    @Mock
-    AnimatorSet mAnimatorSet;
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock AnimatorSet mAnimatorSet;
 
-    private class TestFeedPlaceholderLayout extends FeedPlaceholderLayout {
+    private static class TestFeedPlaceholderLayout extends FeedPlaceholderLayout {
         // FeedPlaceholderLayout regards itself as visible if both isShown() and
         // isAttachedToWindow() are true. In order to reduce the number of test cases we will
         // control both at the same time with this variable.
@@ -56,7 +56,6 @@ public class FeedPlaceholderLayoutTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mLayout = new TestFeedPlaceholderLayout(ApplicationProvider.getApplicationContext());
         mLayout.setAnimatorSetForTesting(mAnimatorSet);
     }

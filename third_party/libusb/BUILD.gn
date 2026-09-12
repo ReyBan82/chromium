@@ -5,23 +5,10 @@
 # libusb is only used by //services/device/usb on macOS.
 assert(is_mac)
 
-import("//build/config/chromeos/ui_mode.gni")
 import("//build/config/features.gni")
 
 config("libusb_config") {
   include_dirs = [ "src/libusb" ]
-}
-
-config("libusb_linker_config") {
-  if (is_win) {
-    ldflags = [
-      "/DELAYLOAD:advapi32.dll",
-      "/DELAYLOAD:cfgmgr32.dll",
-      "/DELAYLOAD:ole32.dll",
-      "/DELAYLOAD:setupapi.dll",
-      "/DELAYLOAD:winusb.dll",
-    ]
-  }
 }
 
 config("libusb_warnings") {
@@ -84,7 +71,6 @@ static_library("libusb") {
   ]
 
   public_configs = [ ":libusb_config" ]
-  all_dependent_configs = [ ":libusb_linker_config" ]
 
   if (is_posix) {
     defines = [
@@ -127,7 +113,7 @@ static_library("libusb") {
     ]
   }
 
-  if (is_chromeos_ash) {
+  if (is_chromeos) {
     defines += [ "USBI_TIMERFD_AVAILABLE" ]
   }
 

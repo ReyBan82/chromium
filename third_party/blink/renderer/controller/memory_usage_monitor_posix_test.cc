@@ -10,36 +10,38 @@
 #include "base/files/file_util.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace blink {
 
 TEST(MemoryUsageMonitorPosixTest, CalculateProcessFootprint) {
+  test::TaskEnvironment task_environment_;
   MemoryUsageMonitorPosix monitor;
 
   const char kStatusFile[] =
       "First:    1\n"
       "Second:  2 kB\n"
       "VmSwap: 10 kB\n"
+      "RssAnon: 60 kB\n"
       "Third:  10 kB\n"
       "VmHWM:  72 kB\n"
       "Last:     8";
   const char kStatmFile[] = "100 40 25 0 0";
   uint64_t expected_swap_kb = 10;
+  uint64_t expected_rss_anon_kb = 60;
   uint64_t expected_private_footprint_kb =
-      (40 - 25) * getpagesize() / 1024 + expected_swap_kb;
+      expected_rss_anon_kb + expected_swap_kb;
   uint64_t expected_vm_size_kb = 100 * getpagesize() / 1024;
   uint64_t expected_peak_resident_kb = 72;
 
   base::FilePath statm_path;
   EXPECT_TRUE(base::CreateTemporaryFile(&statm_path));
-  EXPECT_EQ(static_cast<int>(sizeof(kStatmFile)),
-            base::WriteFile(statm_path, kStatmFile, sizeof(kStatmFile)));
+  EXPECT_TRUE(base::WriteFile(statm_path, kStatmFile));
   base::File statm_file(statm_path,
                         base::File::FLAG_OPEN | base::File::FLAG_READ);
   base::FilePath status_path;
   EXPECT_TRUE(base::CreateTemporaryFile(&status_path));
-  EXPECT_EQ(static_cast<int>(sizeof(kStatusFile)),
-            base::WriteFile(status_path, kStatusFile, sizeof(kStatusFile)));
+  EXPECT_TRUE(base::WriteFile(status_path, kStatusFile));
   base::File status_file(status_path,
                          base::File::FLAG_OPEN | base::File::FLAG_READ);
 

@@ -4,9 +4,9 @@
 
 // For complex connect tests.
 chrome.runtime.onConnect.addListener(function onConnect(port) {
-  console.log('connected');
+  console.info('connected');
   port.onMessage.addListener(function(msg) {
-    console.log('got ' + msg);
+    console.info(`got ${JSON.stringify(msg)}`);
     if (msg.testPostMessage) {
       port.postMessage({success: true});
     } else if (msg.testPostMessageFromTab) {
@@ -40,7 +40,7 @@ chrome.runtime.onConnect.addListener(function onConnect(port) {
       //    background script (test.js) to confirm that these ports
       //    that are opened before navigating away are still
       //    available.
-      let portFromTab = chrome.runtime.connect();
+      const portFromTab = chrome.runtime.connect();
       portFromTab.onMessage.addListener(function(msg) {
         window.addEventListener('pageshow', function(event) {
           if (event.persisted) {
@@ -57,7 +57,7 @@ chrome.runtime.onConnect.addListener(function onConnect(port) {
         window.location = 'about:blank';
       });
     } else if (msg.testPortName) {
-      port.postMessage({portName:port.name});
+      port.postMessage({portName: port.name});
     } else if (msg.testSendMessageFromTabError) {
       testSendMessageFromTabError();
     } else if (msg.testConnectFromTabError) {
@@ -68,12 +68,13 @@ chrome.runtime.onConnect.addListener(function onConnect(port) {
 
 // Tests that postMessage to the extension and its response works.
 function testPostMessageFromTab(origPort) {
-  var portName = "peter";
-  var port = chrome.runtime.connect({name: portName});
+  const portName = 'peter';
+  const port = chrome.runtime.connect({name: portName});
   port.postMessage({testPostMessageFromTab: true});
   port.onMessage.addListener(function(msg) {
-    origPort.postMessage({success: (msg.success && (msg.portName == portName))});
-    console.log('testPostMessageFromTab sent ' + msg.success);
+    origPort.postMessage(
+        {success: (msg.success && (msg.portName === portName))});
+    console.info(`testPostMessageFromTab sent ${msg.success}`);
     port.disconnect();
   });
 }
@@ -82,7 +83,7 @@ function testPostMessageFromTab(origPort) {
 function testSendMessageFromTab() {
   chrome.runtime.sendMessage({step: 1}, function(response) {
     if (response.nextStep) {
-      console.log('testSendMessageFromTab sent');
+      console.info('testSendMessageFromTab sent');
       chrome.runtime.sendMessage({step: 2});
     }
   });
@@ -93,9 +94,9 @@ function testSendMessageFromFrame() {
   // runs in frames whose URL matches ?testSendMessageFromFrame.
   // frame.js sends a message to the background page, which checks that the
   // sender has the expected frameId, url, origin, tab and runtime id.
-  for (var i = 0; i < 2; ++i) {
-    var f = document.createElement('iframe');
-    f.src = '?testSendMessageFromFrame' + i;
+  for (let i = 0; i < 2; ++i) {
+    const f = document.createElement('iframe');
+    f.src = `?testSendMessageFromFrame${i}`;
     document.body.appendChild(f);
   }
 }
@@ -105,48 +106,55 @@ function testSendMessageFromSandboxedFrame() {
   // runs in frames whose URL matches ?testSendMessageFromSandboxFrame.
   // frame.js sends a message to the background page, which checks that the
   // sender has the expected frameId, url, origin, tab and runtime id.
-  for (var i = 2; i < 4; ++i) {
-    var f = document.createElement('iframe');
+  for (let i = 2; i < 4; ++i) {
+    const f = document.createElement('iframe');
     f.sandbox = 'allow-scripts';
-    f.src = '?testSendMessageFromSandboxedFrame' + i;
+    f.src = `?testSendMessageFromSandboxedFrame${i}`;
     document.body.appendChild(f);
   }
 }
 
 function testConnectChildFrameAndNavigateSetup() {
-  var frames = document.querySelectorAll('iframe');
-  for (var i = 0; i < frames.length; ++i) {
+  const frames = document.querySelectorAll('iframe');
+  for (let i = 0; i < frames.length; ++i) {
     frames[i].remove();
   }
-  var f = document.createElement('iframe');
+  const f = document.createElement('iframe');
   f.src = '?testConnectChildFrameAndNavigateSetup';
   document.body.appendChild(f);
   // Test will continue in frame.js
 }
 
 // Use a potentially-valid extension id.
-var fakeExtensionId = 'c'.repeat(32);
+const fakeExtensionId = 'c'.repeat(32);
 
 // Tests sendMessage to an invalid extension.
 function testSendMessageFromTabError() {
   // try sending a request to a bad extension id
   chrome.runtime.sendMessage(fakeExtensionId, {m: 1}, function(response) {
-    var success = (response === undefined && chrome.runtime.lastError);
+    const success = (response === undefined && chrome.runtime.lastError);
     chrome.runtime.sendMessage({success: success});
   });
 }
 
 // Tests connecting to an invalid extension.
 function testConnectFromTabError() {
-  var port = chrome.runtime.connect(fakeExtensionId);
+  const port = chrome.runtime.connect(fakeExtensionId);
   port.onDisconnect.addListener(function() {
-    var success = (chrome.runtime.lastError ? true : false);
+    const success = (chrome.runtime.lastError ? true : false);
     chrome.runtime.sendMessage({success: success});
   });
 }
 
 // For test sendMessage.
 chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
-  chrome.test.assertEq({id: chrome.runtime.id, origin: 'null'}, sender);
-  sendResponse({success: (request.step2 == 1)});
+  const extensionOrigin = new URL(chrome.runtime.getURL('')).origin;
+  chrome.test.assertEq(
+      {
+        id: chrome.runtime.id,
+        url: chrome.runtime.getURL('_generated_background_page.html'),
+        origin: extensionOrigin,
+      },
+      sender);
+  sendResponse({success: (request.step2 === 1)});
 });

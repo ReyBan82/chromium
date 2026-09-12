@@ -245,7 +245,7 @@ TEST_F(SynchronizedMinidumpManagerTest,
 TEST_F(SynchronizedMinidumpManagerTest,
        AddEntryToLockFile_FailsWithInvalidEntry) {
   // Create invalid dump info value
-  base::Value val{base::Value::Dict()};
+  base::Value val{base::DictValue()};
 
   // Test that the manager tried to log the entry and failed.
   SynchronizedMinidumpManagerSimple manager;
@@ -488,8 +488,7 @@ TEST_F(SynchronizedMinidumpManagerTest, HasDumpsNotInLockFile) {
   const base::FilePath path =
       base::FilePath(manager.dump_path()).Append("hello123");
   const char kFileContents[] = "foobar";
-  ASSERT_EQ(static_cast<int>(sizeof(kFileContents)),
-            WriteFile(path, kFileContents, sizeof(kFileContents)));
+  ASSERT_TRUE(WriteFile(path, kFileContents));
 
   ASSERT_TRUE(manager.HasDumps());
 }

@@ -8,7 +8,17 @@
 #include <string>
 
 #include "extensions/browser/extension_function.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/api/system_display.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/memory/raw_ptr.h"
+#include "extensions/browser/browser_context_keyed_api_factory.h"
+#include "extensions/browser/event_router.h"
+#include "extensions/browser/event_router_factory.h"
+#endif
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -60,8 +70,6 @@ class SystemDisplayGetDisplayLayoutFunction
   ~SystemDisplayGetDisplayLayoutFunction() override = default;
   ResponseAction Run() override;
   bool ShouldRestrictToKioskAndWebUI() override;
-
-  void Response(std::vector<api::system_display::DisplayLayout> display_layout);
 };
 
 class SystemDisplaySetDisplayPropertiesFunction
@@ -74,7 +82,7 @@ class SystemDisplaySetDisplayPropertiesFunction
   ~SystemDisplaySetDisplayPropertiesFunction() override = default;
   ResponseAction Run() override;
 
-  void Response(absl::optional<std::string> error);
+  void Response(std::optional<std::string> error);
 };
 
 class SystemDisplaySetDisplayLayoutFunction
@@ -86,8 +94,6 @@ class SystemDisplaySetDisplayLayoutFunction
  protected:
   ~SystemDisplaySetDisplayLayoutFunction() override = default;
   ResponseAction Run() override;
-
-  void Response(absl::optional<std::string> error);
 };
 
 class SystemDisplayEnableUnifiedDesktopFunction
@@ -155,7 +161,7 @@ class SystemDisplayShowNativeTouchCalibrationFunction
   ~SystemDisplayShowNativeTouchCalibrationFunction() override = default;
   ResponseAction Run() override;
 
-  void OnCalibrationComplete(absl::optional<std::string> error);
+  void OnCalibrationComplete(std::optional<std::string> error);
 };
 
 class SystemDisplayStartCustomTouchCalibrationFunction
@@ -201,8 +207,47 @@ class SystemDisplaySetMirrorModeFunction
   ~SystemDisplaySetMirrorModeFunction() override = default;
   ResponseAction Run() override;
 
-  void Response(absl::optional<std::string> error);
+  void Response(std::optional<std::string> error);
 };
+
+// This keyed service is currently only needed on Android, where
+// ENABLE_EXTENSIONS_CORE can be enabled without full ENABLE_EXTENSIONS, so
+// onDisplayChanged still needs explicit listener-lifecycle wiring.
+#if BUILDFLAG(IS_ANDROID)
+class SystemDisplayAPI : public BrowserContextKeyedAPI,
+                         public EventRouter::Observer {
+ public:
+  static BrowserContextKeyedAPIFactory<SystemDisplayAPI>* GetFactoryInstance();
+
+  explicit SystemDisplayAPI(content::BrowserContext* context);
+  SystemDisplayAPI(const SystemDisplayAPI&) = delete;
+  SystemDisplayAPI& operator=(const SystemDisplayAPI&) = delete;
+  ~SystemDisplayAPI() override;
+
+  // BrowserContextKeyedAPI:
+  void Shutdown() override;
+
+  // EventRouter::Observer:
+  void OnListenerAdded(const EventListenerInfo& details) override;
+  void OnListenerRemoved(const EventListenerInfo& details) override;
+
+ private:
+  friend class BrowserContextKeyedAPIFactory<SystemDisplayAPI>;
+
+  static const char* service_name() { return "SystemDisplayAPI"; }
+  static const bool kServiceIsNULLWhileTesting = true;
+
+  raw_ptr<content::BrowserContext> browser_context_;
+};
+
+template <>
+struct BrowserContextFactoryDependencies<SystemDisplayAPI> {
+  static void DeclareFactoryDependencies(
+      BrowserContextKeyedAPIFactory<SystemDisplayAPI>* factory) {
+    factory->DependsOn(EventRouterFactory::GetInstance());
+  }
+};
+#endif  // BUILDFLAG(IS_ANDROID)
 
 }  // namespace extensions
 

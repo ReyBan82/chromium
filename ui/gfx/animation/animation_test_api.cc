@@ -13,10 +13,24 @@ namespace gfx {
 std::unique_ptr<base::AutoReset<Animation::RichAnimationRenderMode>>
 AnimationTestApi::SetRichAnimationRenderMode(
     Animation::RichAnimationRenderMode mode) {
-  DCHECK(Animation::rich_animation_rendering_mode_ ==
-         Animation::RichAnimationRenderMode::PLATFORM);
+  // If the mode has already been forced, don't update it further; this prevents
+  // overlapping-but-not-nested scopers from having surprising effects. In
+  // theory we could support this case robustly, but in practice it seems
+  // unnecessary.
+  if (Animation::rich_animation_rendering_mode_ !=
+      Animation::RichAnimationRenderMode::PLATFORM) {
+    return nullptr;
+  }
   return std::make_unique<base::AutoReset<Animation::RichAnimationRenderMode>>(
       &Animation::rich_animation_rendering_mode_, mode);
+}
+
+// static
+AnimationTestApi::PrefersReducedMotionResetter
+AnimationTestApi::SetPrefersReducedMotionForTesting(
+    bool prefers_reduced_motion) {
+  return std::make_unique<base::AutoReset<std::optional<bool>>>(
+      &Animation::prefers_reduced_motion_, prefers_reduced_motion);
 }
 
 AnimationTestApi::AnimationTestApi(Animation* animation)

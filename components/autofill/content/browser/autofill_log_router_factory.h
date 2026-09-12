@@ -5,7 +5,7 @@
 #ifndef COMPONENTS_AUTOFILL_CONTENT_BROWSER_AUTOFILL_LOG_ROUTER_FACTORY_H_
 #define COMPONENTS_AUTOFILL_CONTENT_BROWSER_AUTOFILL_LOG_ROUTER_FACTORY_H_
 
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 
 namespace content {
@@ -29,13 +29,13 @@ class AutofillLogRouterFactory : public BrowserContextKeyedServiceFactory {
   AutofillLogRouterFactory& operator=(const AutofillLogRouterFactory&) = delete;
 
  private:
-  friend struct base::DefaultSingletonTraits<AutofillLogRouterFactory>;
+  friend base::NoDestructor<AutofillLogRouterFactory>;
 
   AutofillLogRouterFactory();
   ~AutofillLogRouterFactory() override;
 
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
 };
 

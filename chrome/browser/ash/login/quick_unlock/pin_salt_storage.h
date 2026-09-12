@@ -7,7 +7,10 @@
 
 #include <string>
 
+#include "base/memory/raw_ref.h"
+
 class AccountId;
+class PrefService;
 
 namespace ash {
 namespace quick_unlock {
@@ -15,15 +18,26 @@ namespace quick_unlock {
 // PinSaltStorage is in charge of writing and getting the salt for accounts.
 class PinSaltStorage {
  public:
-  PinSaltStorage();
+  virtual ~PinSaltStorage() = default;
+  virtual std::string GetSalt(const AccountId& account_id) const = 0;
+  virtual void WriteSalt(const AccountId& account_id,
+                         const std::string& salt) = 0;
+};
 
-  PinSaltStorage(const PinSaltStorage&) = delete;
-  PinSaltStorage& operator=(const PinSaltStorage&) = delete;
+class PinSaltStorageImpl : public PinSaltStorage {
+ public:
+  // `local_state` must be non-null and must outlive `this`.
+  explicit PinSaltStorageImpl(PrefService* local_state);
+  PinSaltStorageImpl(const PinSaltStorageImpl&) = delete;
+  PinSaltStorageImpl& operator=(const PinSaltStorageImpl&) = delete;
+  ~PinSaltStorageImpl() override;
 
-  virtual ~PinSaltStorage();
+  // PinSaltStorage overrides:
+  std::string GetSalt(const AccountId& account_id) const override;
+  void WriteSalt(const AccountId& account_id, const std::string& salt) override;
 
-  virtual std::string GetSalt(const AccountId& account_id) const;
-  virtual void WriteSalt(const AccountId& account_id, const std::string& salt);
+ private:
+  const raw_ref<PrefService> local_state_;
 };
 
 }  // namespace quick_unlock

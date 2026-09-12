@@ -16,8 +16,7 @@
 #include "ui/events/platform/platform_event_source.h"
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-#include "ui/aura/env.h"
-#include "ui/events/event.h"
+#include "ui/events/platform/platform_event_source.h"
 #endif
 
 #if BUILDFLAG(IS_WIN)
@@ -27,7 +26,7 @@
 namespace content {
 namespace responsiveness {
 
-NativeEventObserver::NativeEventObserver(
+BrowserUINativeEventObserver::BrowserUINativeEventObserver(
     WillRunEventCallback will_run_event_callback,
     DidRunEventCallback did_run_event_callback)
     : will_run_event_callback_(will_run_event_callback),
@@ -35,53 +34,66 @@ NativeEventObserver::NativeEventObserver(
   RegisterObserver();
 }
 
-NativeEventObserver::~NativeEventObserver() {
-  DeregisterObserver();
+BrowserUINativeEventObserver::~BrowserUINativeEventObserver() {
+  UnregisterObserver();
 }
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-void NativeEventObserver::RegisterObserver() {
-  aura::Env::GetInstance()->AddWindowEventDispatcherObserver(this);
-}
-void NativeEventObserver::DeregisterObserver() {
-  aura::Env::GetInstance()->RemoveWindowEventDispatcherObserver(this);
+void BrowserUINativeEventObserver::RegisterObserver() {
+  CHECK(ui::PlatformEventSource::GetInstance());
+  ui::PlatformEventSource::GetInstance()->AddPlatformEventObserver(this);
 }
 
-void NativeEventObserver::OnWindowEventDispatcherStartedProcessing(
-    aura::WindowEventDispatcher* dispatcher,
-    const ui::Event& event) {
-  EventInfo info{&event};
+void BrowserUINativeEventObserver::UnregisterObserver() {
+  if (ui::PlatformEventSource::GetInstance()) {
+    ui::PlatformEventSource::GetInstance()->RemovePlatformEventObserver(this);
+  }
+}
+
+void BrowserUINativeEventObserver::WillProcessEvent(
+    const ui::PlatformEvent& event) {
+  uintptr_t id = reinterpret_cast<uintptr_t>(&event);
+  EventInfo info{id};
   events_being_processed_.push_back(info);
-  will_run_event_callback_.Run(&event);
+  will_run_event_callback_.Run(id);
 }
 
-void NativeEventObserver::OnWindowEventDispatcherFinishedProcessingEvent(
-    aura::WindowEventDispatcher* dispatcher) {
+void BrowserUINativeEventObserver::DidProcessEvent(
+    const ui::PlatformEvent& event) {
   EventInfo& info = events_being_processed_.back();
-  did_run_event_callback_.Run(info.unique_id.get());
+  did_run_event_callback_.Run(info.unique_id);
   events_being_processed_.pop_back();
 }
+
+void BrowserUINativeEventObserver::PlatformEventSourceDestroying() {
+  CHECK(ui::PlatformEventSource::GetInstance());
+  UnregisterObserver();
+}
+
 #endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(IS_WIN)
-void NativeEventObserver::RegisterObserver() {
-  base::CurrentUIThread::Get()->AddMessagePumpObserver(this);
+void BrowserUINativeEventObserver::RegisterObserver() {
+  base::CurrentUIThread::Get()->RegisterNativeEventObserver(this);
 }
-void NativeEventObserver::DeregisterObserver() {
-  base::CurrentUIThread::Get()->RemoveMessagePumpObserver(this);
+
+void BrowserUINativeEventObserver::UnregisterObserver() {
+  base::CurrentUIThread::Get()->UnregisterNativeEventObserver(this);
 }
-void NativeEventObserver::WillDispatchMSG(const MSG& msg) {
-  will_run_event_callback_.Run(&msg);
+
+void BrowserUINativeEventObserver::WillRunNativeEvent(uintptr_t identifier) {
+  will_run_event_callback_.Run(identifier);
 }
-void NativeEventObserver::DidDispatchMSG(const MSG& msg) {
-  did_run_event_callback_.Run(&msg);
+
+void BrowserUINativeEventObserver::DidRunNativeEvent(uintptr_t identifier) {
+  did_run_event_callback_.Run(identifier);
 }
 #endif  // BUILDFLAG(IS_WIN)
 
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_IOS)
-void NativeEventObserver::RegisterObserver() {}
-void NativeEventObserver::DeregisterObserver() {}
-#endif  // BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FUCHSIA)
+void BrowserUINativeEventObserver::RegisterObserver() {}
+void BrowserUINativeEventObserver::UnregisterObserver() {}
+#endif
 
 }  // namespace responsiveness
 }  // namespace content

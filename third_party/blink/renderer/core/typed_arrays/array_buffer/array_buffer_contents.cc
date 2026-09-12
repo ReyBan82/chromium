@@ -27,15 +27,20 @@
 #include "third_party/blink/renderer/core/typed_arrays/array_buffer/array_buffer_contents.h"
 
 #include <cstring>
+#include <limits>
 
-#include "base/allocator/partition_allocator/partition_alloc.h"
 #include "base/bits.h"
+#include "base/memory/platform_shared_memory_region.h"
 #include "base/system/sys_info.h"
 #include "gin/array_buffer.h"
+#include "partition_alloc/oom.h"
+#include "partition_alloc/partition_alloc.h"
 #include "third_party/blink/renderer/platform/instrumentation/instance_counters.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/partitions.h"
+#include "third_party/blink/renderer/platform/wtf/functional.h"
 
 namespace blink {
+
 
 ArrayBufferContents::ArrayBufferContents(
     const base::subtle::PlatformSharedMemoryRegion& region,
@@ -48,7 +53,7 @@ ArrayBufferContents::ArrayBufferContents(
   uint64_t real_offset = offset - offset_rounding;
   size_t real_length = length + offset_rounding;
 
-  absl::optional<base::span<uint8_t>> result = region.MapAt(
+  std::optional<base::span<uint8_t>> result = region.MapAt(
       real_offset, real_length, gin::GetSharedMemoryMapperForArrayBuffers());
   if (!result.has_value()) {
     return;
@@ -57,26 +62,33 @@ ArrayBufferContents::ArrayBufferContents(
   auto deleter = [](void* buffer, size_t length, void* data) {
     size_t offset = reinterpret_cast<uintptr_t>(buffer) %
                     base::SysInfo::VMAllocationGranularity();
-    uint8_t* base = static_cast<uint8_t*>(buffer) - offset;
-    base::span<uint8_t> mapping = base::make_span(base, length + offset);
-    gin::GetSharedMemoryMapperForArrayBuffers()->Unmap(mapping);
+    // SAFETY: Memory that was allocated is VMAllocationGranularity() aligned.
+    // the overallocated bytes are at the beginning of the buffer.
+    uint8_t* base = UNSAFE_BUFFERS(static_cast<uint8_t*>(buffer) - offset);
+    auto mapping =
+        UNSAFE_BUFFERS(base::span(base::unchecked, base, length + offset));
+    auto* mapper = gin::GetSharedMemoryMapperForArrayBuffers();
+    base::subtle::PlatformSharedMemoryRegion::Unmap(mapping, mapper);
   };
-  void* base = result.value().data() + offset_rounding;
+  uint8_t* base = &result.value()[offset_rounding];
   backing_store_ =
       v8::ArrayBuffer::NewBackingStore(base, length, deleter, nullptr);
 }
 
 ArrayBufferContents::ArrayBufferContents(
     size_t num_elements,
-    absl::optional<size_t> max_num_elements,
+    std::optional<size_t> max_num_elements,
     size_t element_byte_size,
     SharingType is_shared,
-    ArrayBufferContents::InitializationPolicy policy) {
+    ArrayBufferContents::InitializationPolicy policy,
+    AllocationFailureBehavior allocation_failure_behavior) {
   auto checked_length =
       base::CheckedNumeric<size_t>(num_elements) * element_byte_size;
   if (!checked_length.IsValid()) {
-    // The requested size is too big, we cannot allocate the memory and
-    // therefore just return.
+    // The requested size is too big.
+    if (allocation_failure_behavior == AllocationFailureBehavior::kCrash) {
+      OOM_CRASH(std::numeric_limits<size_t>::max());
+    }
     return;
   }
   size_t length = checked_length.ValueOrDie();
@@ -84,6 +96,16 @@ ArrayBufferContents::ArrayBufferContents(
   if (!max_num_elements) {
     // Create a fixed-length ArrayBuffer.
     void* data = AllocateMemoryOrNull(length, policy);
+    if (!data && v8::Isolate::TryGetCurrent() != nullptr) {
+      v8::Isolate::GetCurrent()->RetryCustomAllocate([&]() {
+        return (data = AllocateMemoryOrNull(length, policy)) != nullptr;
+      });
+    }
+    if (!data &&
+        allocation_failure_behavior == AllocationFailureBehavior::kCrash) {
+      data = AllocateMemory<partition_alloc::AllocFlags::kNone>(length, policy);
+    }
+
     if (!data) {
       return;
     }
@@ -110,6 +132,14 @@ ArrayBufferContents::ArrayBufferContents(
     size_t max_length = max_checked_length.ValueOrDie();
     backing_store_ =
         v8::ArrayBuffer::NewResizableBackingStore(length, max_length);
+  }
+
+  if (allocation_failure_behavior == AllocationFailureBehavior::kCrash &&
+      !IsValid()) {
+    // All code paths that fail to allocate memory should crash. This is added
+    // as an extra precaution.
+    // TODO(crbug.com/369653504): Remove in March 2025 if there are no crashes.
+    OOM_CRASH(length);
   }
 }
 
@@ -148,12 +178,12 @@ void ArrayBufferContents::CopyTo(ArrayBufferContents& other) {
       DataLength(), 1, IsShared() ? kShared : kNotShared, kDontInitialize);
   if (!IsValid() || !other.IsValid())
     return;
-  std::memcpy(other.Data(), Data(), DataLength());
+  other.ByteSpan().copy_from(ByteSpan());
 }
 
-void* ArrayBufferContents::AllocateMemoryWithFlags(size_t size,
-                                                   InitializationPolicy policy,
-                                                   unsigned int flags) {
+template <partition_alloc::AllocFlags flags>
+void* ArrayBufferContents::AllocateMemory(size_t size,
+                                          InitializationPolicy policy) {
   // The array buffer contents are sometimes expected to be 16-byte aligned in
   // order to get the best optimization of SSE, especially in case of audio and
   // video buffers.  Hence, align the given size up to 16-byte boundary.
@@ -180,14 +210,22 @@ void* ArrayBufferContents::AllocateMemoryWithFlags(size_t size,
   // hooks (which are e.g. used by the heap profiler) should still be invoked.
   // Using the kNoOverrideHooks and kNoMemoryToolOverride flags with
   // accomplishes this.
-  flags |= partition_alloc::AllocFlags::kNoOverrideHooks;
-  flags |= partition_alloc::AllocFlags::kNoMemoryToolOverride;
+  constexpr auto new_flags = flags |
+                             partition_alloc::AllocFlags::kNoOverrideHooks |
+                             partition_alloc::AllocFlags::kNoMemoryToolOverride;
+#else
+  constexpr auto new_flags = flags;
 #endif
+  void* data;
   if (policy == kZeroInitialize) {
-    flags |= partition_alloc::AllocFlags::kZeroFill;
+    data = Partitions::ArrayBufferPartition()
+               ->Alloc<new_flags | partition_alloc::AllocFlags::kZeroFill>(
+                   size, WTF_HEAP_PROFILER_TYPE_NAME(ArrayBufferContents));
+  } else {
+    data = Partitions::ArrayBufferPartition()->Alloc<new_flags>(
+        size, WTF_HEAP_PROFILER_TYPE_NAME(ArrayBufferContents));
   }
-  void* data = WTF::Partitions::ArrayBufferPartition()->AllocWithFlags(
-      flags, size, WTF_HEAP_PROFILER_TYPE_NAME(ArrayBufferContents));
+
   if (partition_alloc::internal::kAlignment < 16) {
     char* ptr = reinterpret_cast<char*>(data);
     DCHECK_EQ(base::bits::AlignUp(ptr, 16), ptr)
@@ -200,19 +238,19 @@ void* ArrayBufferContents::AllocateMemoryWithFlags(size_t size,
 
 void* ArrayBufferContents::AllocateMemoryOrNull(size_t size,
                                                 InitializationPolicy policy) {
-  return AllocateMemoryWithFlags(size, policy,
-                                 partition_alloc::AllocFlags::kReturnNull);
+  return AllocateMemory<partition_alloc::AllocFlags::kReturnNull>(size, policy);
 }
 
 void ArrayBufferContents::FreeMemory(void* data) {
   InstanceCounters::DecrementCounter(
       InstanceCounters::kArrayBufferContentsCounter);
-  unsigned int flags = 0;
 #ifdef V8_ENABLE_SANDBOX
-  // See |AllocateMemoryWithFlags|.
-  flags |= partition_alloc::FreeFlags::kNoMemoryToolOverride;
+  // See |AllocateMemory|.
+  Partitions::ArrayBufferPartition()
+      ->Free<partition_alloc::FreeFlags::kNoMemoryToolOverride>(data);
+#else
+  Partitions::ArrayBufferPartition()->Free(data);
 #endif
-  WTF::Partitions::ArrayBufferPartition()->FreeWithFlags(flags, data);
 }
 
 }  // namespace blink

@@ -6,17 +6,29 @@
 
 #include <memory>
 
+#include "ash/strings/grit/ash_strings.h"
+#include "base/memory/raw_ptr.h"
+#include "base/run_loop.h"
 #include "base/test/bind.h"
+#include "base/test/values_test_util.h"
 #include "chrome/browser/ash/bruschetta/bruschetta_installer.h"
+#include "chrome/browser/ash/bruschetta/bruschetta_pref_names.h"
 #include "chrome/browser/ash/bruschetta/bruschetta_util.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
-#include "chrome/grit/generated_resources.h"
+#include "components/prefs/pref_service.h"
+#include "components/prefs/scoped_user_pref_update.h"
+#include "components/strings/grit/components_strings.h"
 #include "content/public/test/browser_test.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/accessibility/ax_node_data.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/views/accessibility/ax_update_notifier.h"
+#include "ui/views/accessibility/view_accessibility.h"
+#include "ui/views/test/ax_event_counter.h"
 
 using testing::AnyNumber;
 using testing::AtLeast;
@@ -30,17 +42,6 @@ class BruschettaInstallerMock : public bruschetta::BruschettaInstaller {
   MOCK_METHOD(void, Install, (std::string, std::string));
   MOCK_METHOD(void, AddObserver, (Observer*));
   MOCK_METHOD(void, RemoveObserver, (Observer*));
-
-  MOCK_METHOD(const base::GUID&, GetDownloadGuid, (), (const));
-
-  MOCK_METHOD(void,
-              DownloadStarted,
-              (const std::string& guid,
-               download::DownloadParams::StartResult result));
-  MOCK_METHOD(void, DownloadFailed, ());
-  MOCK_METHOD(void,
-              DownloadSucceeded,
-              (const download::CompletionInfo& completion_info));
 };
 
 class BruschettaInstallerViewBrowserTest : public DialogBrowserTest {
@@ -53,10 +54,38 @@ class BruschettaInstallerViewBrowserTest : public DialogBrowserTest {
   BruschettaInstallerViewBrowserTest& operator=(
       const BruschettaInstallerViewBrowserTest&) = delete;
 
-  void SetUpOnMainThread() override {}
+  void SetBruschettaVMConfigurationPref() {
+    base::DictValue pref;
+
+    base::DictValue config;
+    config.Set(prefs::kPolicyEnabledKey,
+               static_cast<int>(prefs::PolicyEnabledState::INSTALL_ALLOWED));
+    config.Set(prefs::kPolicyNameKey, "Config name");
+
+    pref.Set("test-config", std::move(config));
+    browser()->GetProfile()->GetPrefs()->SetDict(
+        prefs::kBruschettaVMConfiguration, std::move(pref));
+  }
+
+  void SetBruschettaInstallerConfigurationPref() {
+    browser()->GetProfile()->GetPrefs()->SetDict(
+        prefs::kBruschettaInstallerConfiguration, base::test::ParseJsonDict(R"(
+      {
+        "display_name": "Display name",
+        "learn_more_url": "https://example.com/learn_more"
+      }
+    )"));
+  }
+
+  void SetUpOnMainThread() override {
+    SetBruschettaVMConfigurationPref();
+    SetBruschettaInstallerConfigurationPref();
+  }
 
   void ShowUi(const std::string& name) override {
-    BruschettaInstallerView::Show(browser()->profile(), GetBruschettaAlphaId());
+    BruschettaInstallerView::Show(browser()->GetProfile(),
+                                  *g_browser_process->local_state(),
+                                  GetBruschettaAlphaId());
     view_ = BruschettaInstallerView::GetActiveViewForTesting();
 
     ASSERT_NE(nullptr, view_);
@@ -79,7 +108,7 @@ class BruschettaInstallerViewBrowserTest : public DialogBrowserTest {
         }));
   }
 
-  BruschettaInstallerView* view_;
+  raw_ptr<BruschettaInstallerView, DanglingUntriaged> view_;
   std::unique_ptr<bruschetta::BruschettaInstallerMock> installer_;
 };
 
@@ -87,6 +116,29 @@ IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest, Show) {
   ShowUi("default");
   EXPECT_NE(nullptr, view_->GetOkButton());
   EXPECT_NE(nullptr, view_->GetCancelButton());
+  EXPECT_NE(std::u16string::npos,
+            view_->GetWindowTitle().find(u"Display name"));
+
+  EXPECT_EQ(view_->GetLinkLabelForTesting()->GetDisplayTextForTesting(),
+            l10n_util::GetStringUTF16(IDS_LEARN_MORE));
+  EXPECT_EQ(
+      view_->GetPrimaryMessage(),
+      l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_CONFIRMATION_TITLE));
+}
+
+IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest,
+                       ShowWithNoLearnMoreUrl) {
+  // We set the learn_more link for test cases by default as that's the most
+  // common case, but unset it here for this specific test.
+  browser()->GetProfile()->GetPrefs()->SetDict(
+      prefs::kBruschettaInstallerConfiguration, base::DictValue());
+  ShowUi("default");
+  EXPECT_NE(nullptr, view_->GetOkButton());
+  EXPECT_NE(nullptr, view_->GetCancelButton());
+  EXPECT_NE(std::u16string::npos, view_->GetWindowTitle().find(u"Config name"));
+
+  // No text, because it's invisible.
+  EXPECT_EQ(view_->GetLinkLabelForTesting()->GetDisplayTextForTesting(), u"");
   EXPECT_EQ(
       view_->GetPrimaryMessage(),
       l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_CONFIRMATION_TITLE));
@@ -116,20 +168,40 @@ IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest, InstallThenCancel) {
 
 IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest, InstallThenError) {
   ShowUi("default");
+  base::RunLoop run_loop;
   EXPECT_CALL(*installer_, Install);
   EXPECT_CALL(*installer_, Cancel).Times(AtLeast(1));
+  EXPECT_FALSE(view_->progress_bar_for_testing()->GetVisible());
 
+  // Accept, then we're in the installing state.
   view_->AcceptDialog();
   EXPECT_EQ(nullptr, view_->GetOkButton());
   EXPECT_NE(nullptr, view_->GetCancelButton());
+  EXPECT_TRUE(view_->progress_bar_for_testing()->GetVisible());
   EXPECT_EQ(view_->GetPrimaryMessage(),
             l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_ONGOING_TITLE));
 
+  // Fail, then we're in the cleaning up state.
   view_->Error(BruschettaInstallResult::kStartVmFailed);
-  EXPECT_NE(nullptr, view_->GetOkButton());
-  EXPECT_NE(nullptr, view_->GetCancelButton());
+  EXPECT_EQ(nullptr, view_->GetOkButton());
+  EXPECT_EQ(nullptr, view_->GetCancelButton());
+  EXPECT_TRUE(view_->progress_bar_for_testing()->GetVisible());
   EXPECT_EQ(view_->GetPrimaryMessage(),
             l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_ERROR_TITLE));
+  EXPECT_EQ(
+      view_->GetSecondaryMessage(),
+      l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_CLEANING_UP_MESSAGE));
+
+  // Run cleanup to completion, now we're in the error state.
+  run_loop.RunUntilIdle();
+  EXPECT_NE(nullptr, view_->GetOkButton());
+  EXPECT_NE(nullptr, view_->GetCancelButton());
+  EXPECT_FALSE(view_->progress_bar_for_testing()->GetVisible());
+  EXPECT_EQ(view_->GetPrimaryMessage(),
+            l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_ERROR_TITLE));
+  EXPECT_NE(
+      view_->GetSecondaryMessage(),
+      l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_CLEANING_UP_MESSAGE));
 
   view_->CancelDialog();
   ASSERT_TRUE(view_->GetWidget()->IsClosed());
@@ -164,6 +236,7 @@ IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest, InstallThenSuccess) {
 
 IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest, InstallWithRetry) {
   ShowUi("default");
+  base::RunLoop run_loop;
   EXPECT_CALL(*installer_, Install);
   EXPECT_CALL(*installer_, Cancel).Times(0);
 
@@ -171,13 +244,17 @@ IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest, InstallWithRetry) {
   view_->AcceptDialog();
   EXPECT_EQ(nullptr, view_->GetOkButton());
   EXPECT_NE(nullptr, view_->GetCancelButton());
+  EXPECT_TRUE(view_->progress_bar_for_testing()->GetVisible());
   EXPECT_EQ(view_->GetPrimaryMessage(),
             l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_ONGOING_TITLE));
 
   // An error happened
   view_->Error(BruschettaInstallResult::kStartVmFailed);
+  // Let the cleanup step complete.
+  run_loop.RunUntilIdle();
   EXPECT_NE(nullptr, view_->GetOkButton());
   EXPECT_NE(nullptr, view_->GetCancelButton());
+  EXPECT_FALSE(view_->progress_bar_for_testing()->GetVisible());
   EXPECT_EQ(view_->GetPrimaryMessage(),
             l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_ERROR_TITLE));
 
@@ -188,8 +265,67 @@ IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest, InstallWithRetry) {
   view_->AcceptDialog();
   EXPECT_EQ(nullptr, view_->GetOkButton());
   EXPECT_NE(nullptr, view_->GetCancelButton());
+  EXPECT_TRUE(view_->progress_bar_for_testing()->GetVisible());
   EXPECT_EQ(view_->GetPrimaryMessage(),
             l10n_util::GetStringUTF16(IDS_BRUSCHETTA_INSTALLER_ONGOING_TITLE));
+}
+
+IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest,
+                       A11yProgressBarDescription) {
+  ShowUi("default");
+
+  // Start installing
+  view_->AcceptDialog();
+  EXPECT_TRUE(view_->progress_bar_for_testing()->GetVisible());
+  EXPECT_EQ(view_->progress_bar_for_testing()
+                ->GetViewAccessibility()
+                .GetCachedDescription(),
+            view_->GetSecondaryMessage());
+
+  // InstallThenSuccess already checks that the secondary message changes
+  // between states, so we just check that the new progress bar description
+  // matches the new message.
+  view_->StateChanged(bruschetta::BruschettaInstaller::State::kStartVm);
+  EXPECT_EQ(view_->progress_bar_for_testing()
+                ->GetViewAccessibility()
+                .GetCachedDescription(),
+            view_->GetSecondaryMessage());
+}
+
+IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest,
+                       A11yPrimaryMessageLabelLiveRegionAttributes) {
+  ShowUi("default");
+
+  auto* label = view_->primary_message_label_for_testing();
+  ASSERT_NE(label, nullptr);
+
+  ui::AXNodeData data;
+  label->GetViewAccessibility().GetAccessibleNodeData(&data);
+  EXPECT_EQ("polite",
+            data.GetStringAttribute(ax::mojom::StringAttribute::kLiveStatus));
+  EXPECT_EQ("polite", data.GetStringAttribute(
+                          ax::mojom::StringAttribute::kContainerLiveStatus));
+  EXPECT_EQ("additions text",
+            data.GetStringAttribute(ax::mojom::StringAttribute::kLiveRelevant));
+  EXPECT_TRUE(data.GetBoolAttribute(ax::mojom::BoolAttribute::kLiveAtomic));
+}
+
+IN_PROC_BROWSER_TEST_F(BruschettaInstallerViewBrowserTest,
+                       A11yLiveRegionChangedOnStateChange) {
+  ShowUi("default");
+  EXPECT_CALL(*installer_, Install);
+  EXPECT_CALL(*installer_, Cancel).Times(AtLeast(1));
+
+  auto* label = view_->primary_message_label_for_testing();
+  ASSERT_NE(label, nullptr);
+
+  views::test::AXEventCounter counter(views::AXUpdateNotifier::Get());
+
+  // Accept to start installing, which changes the primary message text and
+  // should trigger a kLiveRegionChanged event on the live region root.
+  view_->AcceptDialog();
+
+  EXPECT_GE(counter.GetCount(ax::mojom::Event::kLiveRegionChanged, label), 1);
 }
 
 }  // namespace

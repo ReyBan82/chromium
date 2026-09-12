@@ -6,6 +6,8 @@
 
 #include <stddef.h>
 
+#include <algorithm>
+#include <array>
 #include <vector>
 
 #include "base/notreached.h"
@@ -14,6 +16,9 @@
 #include "build/build_config.h"
 #include "components/content_settings/core/browser/content_settings_registry.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
+#include "components/content_settings/core/browser/permission_settings_info.h"
+#include "components/content_settings/core/browser/permission_settings_registry.h"
+#include "components/content_settings/core/browser/website_settings_registry.h"
 #include "components/content_settings/core/common/content_settings.h"
 #include "components/content_settings/core/common/content_settings_types.h"
 #include "components/content_settings/core/common/content_settings_utils.h"
@@ -27,14 +32,14 @@ struct ContentSettingsStringMapping {
   ContentSetting content_setting;
   const char* content_setting_str;
 };
-const ContentSettingsStringMapping kContentSettingsStringMapping[] = {
-    {CONTENT_SETTING_DEFAULT, "default"},
-    {CONTENT_SETTING_ALLOW, "allow"},
-    {CONTENT_SETTING_BLOCK, "block"},
-    {CONTENT_SETTING_ASK, "ask"},
-    {CONTENT_SETTING_SESSION_ONLY, "session_only"},
-    {CONTENT_SETTING_DETECT_IMPORTANT_CONTENT, "detect_important_content"},
-};
+const auto kContentSettingsStringMapping =
+    std::to_array<ContentSettingsStringMapping>({
+        {CONTENT_SETTING_DEFAULT, "default"},
+        {CONTENT_SETTING_ALLOW, "allow"},
+        {CONTENT_SETTING_BLOCK, "block"},
+        {CONTENT_SETTING_ASK, "ask"},
+        {CONTENT_SETTING_SESSION_ONLY, "session_only"},
+    });
 static_assert(std::size(kContentSettingsStringMapping) ==
                   CONTENT_SETTING_NUM_SETTINGS,
               "kContentSettingsToFromString should have "
@@ -42,17 +47,23 @@ static_assert(std::size(kContentSettingsStringMapping) ==
 
 // Content settings sorted from most to least permissive. The order is chosen
 // to check if a permission grants more rights than another. This is intuitive
-// for ALLOW, ASK and BLOCK. SESSION_ONLY and DETECT_IMPORTANT_CONTENT are never
-// used in the same setting so their respective order is not important but both
-// belong between ALLOW and ASK. DEFAULT should never be used and is therefore
-// not part of this array.
+// for ALLOW, ASK and BLOCK. SESSION_ONLY belongs between ALLOW and ASK.
+// DEFAULT should never be used and is therefore not part of this array.
 const ContentSetting kContentSettingOrder[] = {
     // clang-format off
     CONTENT_SETTING_ALLOW,
     CONTENT_SETTING_SESSION_ONLY,
-    CONTENT_SETTING_DETECT_IMPORTANT_CONTENT,
     CONTENT_SETTING_ASK,
     CONTENT_SETTING_BLOCK
+    // clang-format on
+};
+
+// PermissionOptions sorted from most to least permissive.
+const PermissionOption kPermissionOptionOrder[] = {
+    // clang-format off
+    PermissionOption::kAllowed,
+    PermissionOption::kAsk,
+    PermissionOption::kDenied,
     // clang-format on
 };
 
@@ -122,80 +133,60 @@ PatternPair ParsePatternString(const std::string& pattern_str) {
 
 void GetRendererContentSettingRules(const HostContentSettingsMap* map,
                                     RendererContentSettingRules* rules) {
-#if !BUILDFLAG(IS_ANDROID)
-  map->GetSettingsForOneType(ContentSettingsType::IMAGES,
-                             &(rules->image_rules));
-  map->GetSettingsForOneType(ContentSettingsType::MIXEDSCRIPT,
-                             &(rules->mixed_content_rules));
-  // Auto dark web content settings is available only for Android, so ALLOW rule
-  // is added for all origins.
-  rules->auto_dark_content_rules.push_back(ContentSettingPatternSource(
-      ContentSettingsPattern::Wildcard(), ContentSettingsPattern::Wildcard(),
-      ContentSettingToValue(CONTENT_SETTING_ALLOW), std::string(),
-      map->IsOffTheRecord()));
+#if !BUILDFLAG(IS_IOS)
+  rules->mixed_content_rules =
+      map->GetSettingsForOneType(ContentSettingsType::MIXEDSCRIPT);
 #else
-  // Android doesn't use image content settings, so ALLOW rule is added for
-  // all origins.
-  rules->image_rules.push_back(ContentSettingPatternSource(
-      ContentSettingsPattern::Wildcard(), ContentSettingsPattern::Wildcard(),
-      ContentSettingToValue(CONTENT_SETTING_ALLOW), std::string(),
-      map->IsOffTheRecord()));
   // In Android active mixed content is hard blocked, with no option to allow
   // it.
   rules->mixed_content_rules.push_back(ContentSettingPatternSource(
       ContentSettingsPattern::Wildcard(), ContentSettingsPattern::Wildcard(),
-      ContentSettingToValue(CONTENT_SETTING_BLOCK), std::string(),
+      ContentSettingToValue(CONTENT_SETTING_BLOCK), ProviderType::kNone,
       map->IsOffTheRecord()));
-  map->GetSettingsForOneType(ContentSettingsType::AUTO_DARK_WEB_CONTENT,
-                             &(rules->auto_dark_content_rules));
 #endif
-  map->GetSettingsForOneType(ContentSettingsType::JAVASCRIPT,
-                             &(rules->script_rules));
-  map->GetSettingsForOneType(ContentSettingsType::POPUPS,
-                             &(rules->popup_redirect_rules));
 }
 
 bool IsMorePermissive(ContentSetting a, ContentSetting b) {
   // Check whether |a| or |b| is reached first in kContentSettingOrder.
   // If |a| is first, it means that |a| is more permissive than |b|.
   for (ContentSetting setting : kContentSettingOrder) {
-    if (setting == b)
+    if (setting == b) {
       return false;
-    if (setting == a)
+    }
+    if (setting == a) {
       return true;
+    }
   }
   NOTREACHED();
-  return true;
 }
 
-// Currently only SessionModel::Durable constraints need to be persistent
+bool IsMorePermissive(PermissionOption a, PermissionOption b) {
+  // Check whether |a| or |b| is reached first in
+  // kPermissionOptionOrder. If |a| is first, it means that |a| is more
+  // permissive than |b|.
+  for (PermissionOption setting : kPermissionOptionOrder) {
+    if (setting == b) {
+      return false;
+    }
+    if (setting == a) {
+      return true;
+    }
+  }
+  NOTREACHED();
+}
+
+// Currently only mojom::SessionModel::DURABLE constraints need to be persistent
 // as they are only bounded by time and can persist through multiple browser
 // sessions.
 bool IsConstraintPersistent(const ContentSettingConstraints& constraints) {
-  return constraints.session_model == SessionModel::Durable;
-}
-
-// Convenience helper to calculate the expiration time of a constraint given a
-// desired |duration|
-base::Time GetConstraintExpiration(const base::TimeDelta duration) {
-  DCHECK(!duration.is_zero());
-  return base::Time::Now() + duration;
+  return constraints.session_model() == mojom::SessionModel::DURABLE;
 }
 
 bool CanTrackLastVisit(ContentSettingsType type) {
-  // Last visit is not tracked for notification permission as it shouldn't be
-  // auto-revoked.
-  if (type == ContentSettingsType::NOTIFICATIONS)
-    return false;
+  DCHECK(WebsiteSettingsRegistry::GetInstance()->Get(type)) << type;
 
-  // Protocol handler don't actually use their content setting and don't have
-  // a valid "initial default" value.
-  if (type == ContentSettingsType::PROTOCOL_HANDLERS)
-    return false;
-
-  auto* info =
-      content_settings::ContentSettingsRegistry::GetInstance()->Get(type);
-  return info && info->GetInitialDefaultSetting() == CONTENT_SETTING_ASK;
+  auto* info = PermissionSettingsRegistry::GetInstance()->Get(type);
+  return info && info->delegate().CanTrackLastVisit();
 }
 
 base::Time GetCoarseVisitedTime(base::Time time) {
@@ -212,28 +203,105 @@ base::TimeDelta GetCoarseVisitedTimePrecision() {
   return base::Days(7);
 }
 
-bool CanBeAutoRevoked(ContentSettingsType type,
-                      ContentSetting setting,
-                      bool is_one_time) {
+bool IsPermissionEligibleForAutoRevocation(ContentSettingsType type) {
+  DCHECK(WebsiteSettingsRegistry::GetInstance()->Get(type)) << type;
+
+  auto* permission_settings_info =
+      PermissionSettingsRegistry::GetInstance()->Get(type);
+  return permission_settings_info && CanTrackLastVisit(type);
+}
+
+bool CanBeAutoRevokedAsUnusedPermission(ContentSettingsType type,
+                                        const PermissionSetting& setting,
+                                        bool is_one_time) {
+  DCHECK(WebsiteSettingsRegistry::GetInstance()->Get(type)) << type;
+
   // The Permissions module in Safety check will revoke permissions after
   // a finite amount of time.
-  // We're only interested in expiring permissions that:
-  // 1. Are ALLOWed.
-  // 2. Fall back to ASK.
-  // 3. Are not already a one-time grant.
-  if (setting != CONTENT_SETTING_ALLOW) {
-    return false;
-  }
-
-  if (!CanTrackLastVisit(type)) {
-    return false;
-  }
-
+  // We're only interested in expiring permissions that are either
+  // A. permission settings (= PermissionSettingsRegistry-based), which
+  //    1. Are ALLOWed.
+  //    2. Are of eligible ContentSettingsType.
+  //      (That includes the default value being ASK. By definition, all
+  //      Permissions are ASK by default. If that changes in the future,
+  //      consider whether revocation for such permission makes sense. If not,
+  //      make sure last_visited is not unnecessarily tracked for them.)
+  //    3. Are not already a one-time grant.
+  // B. chooser permissions (= WebsiteSettingsRegistry-based), which
+  //    1. Are allowlisted.
+  //    2. Have a non-empty value.
   if (is_one_time) {
     return false;
   }
 
-  return true;
+  auto* permission_settings_info =
+      PermissionSettingsRegistry::GetInstance()->Get(type);
+  if (permission_settings_info) {
+    return permission_settings_info->delegate().IsAnyPermissionAllowed(
+               setting) &&
+           CanTrackLastVisit(type);
+  } else {
+    return false;
+  }
+}
+
+const std::vector<ContentSettingsType>& GetTypesWithTemporaryGrants() {
+  static base::NoDestructor<const std::vector<ContentSettingsType>> types{{
+#if !BUILDFLAG(IS_ANDROID)
+      ContentSettingsType::CAMERA_PAN_TILT_ZOOM,
+      ContentSettingsType::CAPTURED_SURFACE_CONTROL,
+#endif
+      ContentSettingsType::KEYBOARD_LOCK,
+      ContentSettingsType::GEOLOCATION,
+      ContentSettingsType::GEOLOCATION_WITH_OPTIONS,
+      ContentSettingsType::MEDIASTREAM_MIC,
+      ContentSettingsType::MEDIASTREAM_CAMERA,
+      ContentSettingsType::SENSORS,
+      ContentSettingsType::HAND_TRACKING,
+      ContentSettingsType::SMART_CARD_DATA,
+      ContentSettingsType::AR,
+      ContentSettingsType::VR,
+  }};
+  return *types;
+}
+
+const std::vector<ContentSettingsType>& GetTypesWithTemporaryGrantsInHcsm() {
+  static base::NoDestructor<const std::vector<ContentSettingsType>> types{{
+#if !BUILDFLAG(IS_ANDROID)
+      ContentSettingsType::CAMERA_PAN_TILT_ZOOM,
+      ContentSettingsType::CAPTURED_SURFACE_CONTROL,
+#endif
+      ContentSettingsType::KEYBOARD_LOCK,
+      ContentSettingsType::GEOLOCATION,
+      ContentSettingsType::GEOLOCATION_WITH_OPTIONS,
+      ContentSettingsType::MEDIASTREAM_MIC,
+      ContentSettingsType::MEDIASTREAM_CAMERA,
+      ContentSettingsType::SENSORS,
+      ContentSettingsType::HAND_TRACKING,
+      ContentSettingsType::AR,
+      ContentSettingsType::VR,
+  }};
+  return *types;
+}
+
+bool ShouldTypeExpireActively(ContentSettingsType type) {
+  return base::FeatureList::IsEnabled(features::kActiveContentSettingExpiry) &&
+         std::ranges::contains(GetTypesWithTemporaryGrantsInHcsm(), type);
+}
+
+PermissionSetting ValueToPermissionSetting(const PermissionSettingsInfo* info,
+                                           const base::Value& value) {
+  auto setting = info->delegate().FromValue(value);
+  DCHECK(setting.has_value()) << value.DebugString();
+  DCHECK(info->delegate().IsValid(*setting)) << value.DebugString();
+  return setting.value_or(info->GetInitialDefaultSetting());
+}
+
+base::Value PermissionSettingToValue(const PermissionSettingsInfo* info,
+                                     const PermissionSetting& setting) {
+  DCHECK(info->delegate().IsValid(setting));
+  auto value = info->delegate().ToValue(setting);
+  return value;
 }
 
 }  // namespace content_settings

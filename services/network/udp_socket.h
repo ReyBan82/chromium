@@ -5,7 +5,6 @@
 #ifndef SERVICES_NETWORK_UDP_SOCKET_H_
 #define SERVICES_NETWORK_UDP_SOCKET_H_
 
-#include <deque>
 #include <memory>
 #include <vector>
 
@@ -25,7 +24,6 @@
 
 namespace net {
 class IOBuffer;
-class IOBufferWithSize;
 class NetLog;
 }  // namespace net
 
@@ -65,8 +63,12 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) UDPSocket : public mojom::UDPSocket {
     virtual int SetBroadcast(bool broadcast) = 0;
     virtual int SetSendBufferSize(int send_buffer_size) = 0;
     virtual int SetReceiveBufferSize(int receive_buffer_size) = 0;
-    virtual int JoinGroup(const net::IPAddress& group_address) = 0;
-    virtual int LeaveGroup(const net::IPAddress& group_address) = 0;
+    virtual int JoinGroup(
+        const net::IPAddress& group_address,
+        const std::optional<net::IPAddress>& source_address) = 0;
+    virtual int LeaveGroup(
+        const net::IPAddress& group_address,
+        const std::optional<net::IPAddress>& source_address) = 0;
     virtual int RecvFrom(net::IOBuffer* buf,
                          int buf_len,
                          net::IPEndPoint* address,
@@ -94,8 +96,10 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) UDPSocket : public mojom::UDPSocket {
   void SetReceiveBufferSize(int32_t receive_buffer_size,
                             SetSendBufferSizeCallback callback) override;
   void JoinGroup(const net::IPAddress& group_address,
+                 const std::optional<net::IPAddress>& source_address,
                  JoinGroupCallback callback) override;
   void LeaveGroup(const net::IPAddress& group_address,
+                  const std::optional<net::IPAddress>& source_address,
                   LeaveGroupCallback callback) override;
   void ReceiveMore(uint32_t num_additional_datagrams) override;
   void ReceiveMoreWithBufferSize(uint32_t num_additional_datagrams,
@@ -120,7 +124,7 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) UDPSocket : public mojom::UDPSocket {
 
     std::unique_ptr<net::IPEndPoint> addr;
     net::MutableNetworkTrafficAnnotationTag traffic_annotation;
-    scoped_refptr<net::IOBufferWithSize> data;
+    scoped_refptr<net::IOBuffer> data;
     SendToCallback callback;
   };
 
@@ -138,7 +142,7 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) UDPSocket : public mojom::UDPSocket {
       SendToCallback callback);
   void DoSendToOrWriteBuffer(
       const net::IPEndPoint* dest_addr,
-      scoped_refptr<net::IOBufferWithSize> buffer,
+      scoped_refptr<net::IOBuffer> buffer,
       const net::NetworkTrafficAnnotationTag& traffic_annotation,
       SendToCallback callback);
 
@@ -162,7 +166,7 @@ class COMPONENT_EXPORT(NETWORK_SERVICE) UDPSocket : public mojom::UDPSocket {
   scoped_refptr<net::IOBuffer> recvfrom_buffer_;
 
   // Non-null when there is a pending Send/SendTo operation on socket.
-  scoped_refptr<net::IOBufferWithSize> send_buffer_;
+  scoped_refptr<net::IOBuffer> send_buffer_;
   SendToCallback send_callback_;
 
   // The address of the sender of a received packet. This address might not be

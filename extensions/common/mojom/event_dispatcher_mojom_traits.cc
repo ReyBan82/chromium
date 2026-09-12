@@ -1,28 +1,28 @@
-// Copyright 2021 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "extensions/common/mojom/event_dispatcher_mojom_traits.h"
 
-#include "url/mojom/url_gurl_mojom_traits.h"
+#include <utility>
+
+#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/values.h"
+#include "extensions/common/mojom/event_dispatcher.mojom-shared.h"
+#include "mojo/public/cpp/base/values_mojom_traits.h"
 
 namespace mojo {
 
-bool StructTraits<extensions::mojom::EventFilteringInfoDataView,
-                  extensions::EventFilteringInfo>::
-    Read(extensions::mojom::EventFilteringInfoDataView data,
-         extensions::EventFilteringInfo* out) {
-  *out = extensions::EventFilteringInfo();
-  if (!data.ReadUrl(&out->url))
+bool StructTraits<extensions::mojom::EventArgsDataView,
+                  scoped_refptr<const extensions::EventArgs>>::
+    Read(extensions::mojom::EventArgsDataView data,
+         scoped_refptr<const extensions::EventArgs>* out) {
+  base::ListValue list;
+  if (!data.ReadData(&list)) {
     return false;
-  if (!data.ReadServiceType(&out->service_type))
-    return false;
-  if (data.has_instance_id())
-    out->instance_id = data.instance_id();
-  if (!data.ReadWindowType(&out->window_type))
-    return false;
-  if (data.has_window_exposed_by_default())
-    out->window_exposed_by_default = data.window_exposed_by_default();
+  }
+  *out = base::MakeRefCounted<extensions::EventArgs>(std::move(list));
   return true;
 }
 

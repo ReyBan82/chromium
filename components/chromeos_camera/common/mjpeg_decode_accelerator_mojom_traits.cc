@@ -36,36 +36,28 @@ EnumTraits<chromeos_camera::mojom::DecodeError,
       return chromeos_camera::mojom::DecodeError::PLATFORM_FAILURE;
   }
   NOTREACHED();
-  return chromeos_camera::mojom::DecodeError::NO_ERRORS;
 }
 
 // static
-bool EnumTraits<chromeos_camera::mojom::DecodeError,
-                chromeos_camera::MjpegDecodeAccelerator::Error>::
-    FromMojom(chromeos_camera::mojom::DecodeError error,
-              chromeos_camera::MjpegDecodeAccelerator::Error* out) {
+chromeos_camera::MjpegDecodeAccelerator::Error
+EnumTraits<chromeos_camera::mojom::DecodeError,
+           chromeos_camera::MjpegDecodeAccelerator::Error>::
+    FromMojom(chromeos_camera::mojom::DecodeError error) {
   switch (error) {
     case chromeos_camera::mojom::DecodeError::NO_ERRORS:
-      *out = chromeos_camera::MjpegDecodeAccelerator::Error::NO_ERRORS;
-      return true;
+      return chromeos_camera::MjpegDecodeAccelerator::Error::NO_ERRORS;
     case chromeos_camera::mojom::DecodeError::INVALID_ARGUMENT:
-      *out = chromeos_camera::MjpegDecodeAccelerator::Error::INVALID_ARGUMENT;
-      return true;
+      return chromeos_camera::MjpegDecodeAccelerator::Error::INVALID_ARGUMENT;
     case chromeos_camera::mojom::DecodeError::UNREADABLE_INPUT:
-      *out = chromeos_camera::MjpegDecodeAccelerator::Error::UNREADABLE_INPUT;
-      return true;
+      return chromeos_camera::MjpegDecodeAccelerator::Error::UNREADABLE_INPUT;
     case chromeos_camera::mojom::DecodeError::PARSE_JPEG_FAILED:
-      *out = chromeos_camera::MjpegDecodeAccelerator::Error::PARSE_JPEG_FAILED;
-      return true;
+      return chromeos_camera::MjpegDecodeAccelerator::Error::PARSE_JPEG_FAILED;
     case chromeos_camera::mojom::DecodeError::UNSUPPORTED_JPEG:
-      *out = chromeos_camera::MjpegDecodeAccelerator::Error::UNSUPPORTED_JPEG;
-      return true;
+      return chromeos_camera::MjpegDecodeAccelerator::Error::UNSUPPORTED_JPEG;
     case chromeos_camera::mojom::DecodeError::PLATFORM_FAILURE:
-      *out = chromeos_camera::MjpegDecodeAccelerator::Error::PLATFORM_FAILURE;
-      return true;
+      return chromeos_camera::MjpegDecodeAccelerator::Error::PLATFORM_FAILURE;
   }
   NOTREACHED();
-  return false;
 }
 
 // static
@@ -77,7 +69,7 @@ mojo::ScopedSharedBufferHandle StructTraits<
           input.TakeRegion());
   DCHECK(input_region.IsValid()) << "Bad BitstreamBuffer handle";
 
-  // TODO(https://crbug.com/793446): Split BitstreamBuffers into ReadOnly and
+  // TODO(crbug.com/40553989): Split BitstreamBuffers into ReadOnly and
   // Unsafe versions corresponding to usage, eg video encode accelerators will
   // use writable mappings but audio uses are readonly (see
   // android_video_encode_accelerator.cc and
@@ -115,7 +107,7 @@ bool StructTraits<chromeos_camera::mojom::BitstreamBufferDataView,
   if (!region.IsValid())
     return false;
 
-  auto offset = base::MakeCheckedNum(input.offset()).Cast<uint64_t>();
+  auto offset = base::CheckedNumeric(input.offset()).Cast<uint64_t>();
   if (!offset.IsValid())
     return false;
 

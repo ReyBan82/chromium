@@ -5,8 +5,9 @@
 #include "chrome/browser/ui/views/file_system_access/file_system_access_usage_bubble_view.h"
 
 #include "base/files/file_path.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
+#include "components/tabs/public/tab_interface.h"
 #include "content/public/test/browser_test.h"
 
 class FileSystemAccessUsageBubbleViewTest : public DialogBrowserTest {
@@ -78,7 +79,25 @@ class FileSystemAccessUsageBubbleViewTest : public DialogBrowserTest {
       origin = url::Origin::Create(GURL(
           "https://"
           "some-really-long-origin-chrome-test-foo-bar-sample.appspot.com"));
-    } else if (name == "default") {
+    } else if (name == "VeryLongMultiple") {
+      usage.writable_files.emplace_back(FILE_PATH_LITERAL(
+          "/foo/bar/"
+          "some_incredibly_long_filename_that_will_definitely_be_truncated_"
+          "because_it_exceeds_the_normal_width_of_a_dialog_bubble_view_by_"
+          "a_wide_margin_to_force_middle_elision_verification.sketch"));
+      usage.writable_files.emplace_back(FILE_PATH_LITERAL(
+          "/foo/bar/"
+          "some_incredibly_long_filename_that_will_definitely_be_truncated_"
+          "because_it_exceeds_the_normal_width_of_a_dialog_bubble_view_by_"
+          "a_wide_margin_to_force_middle_elision_verification.txt"));
+    } else if (name == "VeryLongSingle") {
+      usage.writable_files.emplace_back(FILE_PATH_LITERAL(
+          "/foo/bar/"
+          "some_incredibly_long_filename_that_will_definitely_be_truncated_"
+          "because_it_exceeds_the_normal_width_of_a_dialog_bubble_view_by_"
+          "a_wide_margin_to_force_middle_elision_verification.sketch"));
+    } else {
+      CHECK_EQ(name, "default");
       usage.readable_directories.emplace_back(
           FILE_PATH_LITERAL("/home/me/Images"));
       usage.readable_directories.emplace_back(
@@ -90,12 +109,10 @@ class FileSystemAccessUsageBubbleViewTest : public DialogBrowserTest {
       usage.writable_files.emplace_back(FILE_PATH_LITERAL("README.md"));
       usage.writable_directories.emplace_back(
           FILE_PATH_LITERAL("/foo/bar/Code"));
-    } else {
-      NOTREACHED() << "Unimplemented test: " << name;
     }
 
     FileSystemAccessUsageBubbleView::ShowBubble(
-        browser()->tab_strip_model()->GetActiveWebContents(), origin,
+        browser()->GetActiveTabInterface()->GetContents(), origin,
         std::move(usage));
   }
 
@@ -165,5 +182,15 @@ IN_PROC_BROWSER_TEST_F(FileSystemAccessUsageBubbleViewTest,
 
 IN_PROC_BROWSER_TEST_F(FileSystemAccessUsageBubbleViewTest,
                        InvokeUi_LongOrigin) {
+  ShowAndVerifyUi();
+}
+
+IN_PROC_BROWSER_TEST_F(FileSystemAccessUsageBubbleViewTest,
+                       InvokeUi_VeryLongMultiple) {
+  ShowAndVerifyUi();
+}
+
+IN_PROC_BROWSER_TEST_F(FileSystemAccessUsageBubbleViewTest,
+                       InvokeUi_VeryLongSingle) {
   ShowAndVerifyUi();
 }

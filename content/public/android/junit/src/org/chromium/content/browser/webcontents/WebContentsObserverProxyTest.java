@@ -14,38 +14,26 @@ import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.MockitoAnnotations;
 import org.mockito.invocation.InvocationOnMock;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.mockito.stubbing.Answer;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
-import org.chromium.base.test.util.JniMocker;
 import org.chromium.content_public.browser.WebContentsObserver;
 
-/**
- * Unit tests for {@link WebContentsObserverProxy}.
- */
+/** Unit tests for {@link WebContentsObserverProxy}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class WebContentsObserverProxyTest {
-    @Mock
-    private WebContentsObserver mWebContentsObserver;
-    @Mock
-    private WebContentsObserver mWebContentsObserver2;
-    @Mock
-    private WebContentsObserverProxy.Natives mWebContentsObserverProxyJni;
-    @Rule
-    public JniMocker mJniMocker = new JniMocker();
-
-    private WebContentsImpl mWebContentsImpl;
-    private final long mNativeWebContentsAndroid = 1;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private WebContentsObserver mWebContentsObserver;
+    @Mock private WebContentsObserver mWebContentsObserver2;
+    @Mock private WebContentsObserverProxy.Natives mWebContentsObserverProxyJni;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
-        mJniMocker.mock(WebContentsObserverProxyJni.TEST_HOOKS, mWebContentsObserverProxyJni);
-        when(mWebContentsObserverProxyJni.init(any(), any())).thenReturn(1L);
+        WebContentsObserverProxyJni.setInstanceForTesting(mWebContentsObserverProxyJni);
+        when(mWebContentsObserverProxyJni.init(any())).thenReturn(1L);
     }
 
     @Test
@@ -54,13 +42,14 @@ public class WebContentsObserverProxyTest {
         final WebContentsObserverProxy proxy = new WebContentsObserverProxy(null);
         proxy.addObserver(mWebContentsObserver);
         proxy.addObserver(mWebContentsObserver2);
-        Mockito.doAnswer(new Answer<Void>() {
-                   @Override
-                   public Void answer(InvocationOnMock invocation) {
-                       proxy.navigationEntriesChanged();
-                       return null;
-                   }
-               })
+        Mockito.doAnswer(
+                        new Answer<Void>() {
+                            @Override
+                            public Void answer(InvocationOnMock invocation) {
+                                proxy.navigationEntriesChanged();
+                                return null;
+                            }
+                        })
                 .when(mWebContentsObserver)
                 .navigationEntriesDeleted();
         proxy.navigationEntriesDeleted();

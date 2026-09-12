@@ -5,9 +5,8 @@
 #ifndef SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_SHARED_IMAGE_FORMAT_MOJOM_TRAITS_H_
 #define SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_SHARED_IMAGE_FORMAT_MOJOM_TRAITS_H_
 
-#include "components/viz/common/resources/resource_format.h"
+#include "build/build_config.h"
 #include "components/viz/common/resources/shared_image_format.h"
-#include "services/viz/public/cpp/compositing/resource_format_mojom_traits.h"
 #include "services/viz/public/mojom/compositing/shared_image_format.mojom-shared.h"
 
 namespace mojo {
@@ -18,8 +17,8 @@ struct EnumTraits<viz::mojom::PlaneConfig,
   static viz::mojom::PlaneConfig ToMojom(
       viz::SharedImageFormat::PlaneConfig plane_config);
 
-  static bool FromMojom(viz::mojom::PlaneConfig input,
-                        viz::SharedImageFormat::PlaneConfig* out);
+  static viz::SharedImageFormat::PlaneConfig FromMojom(
+      viz::mojom::PlaneConfig input);
 };
 
 template <>
@@ -28,8 +27,8 @@ struct EnumTraits<viz::mojom::Subsampling,
   static viz::mojom::Subsampling ToMojom(
       viz::SharedImageFormat::Subsampling subsampling);
 
-  static bool FromMojom(viz::mojom::Subsampling input,
-                        viz::SharedImageFormat::Subsampling* out);
+  static viz::SharedImageFormat::Subsampling FromMojom(
+      viz::mojom::Subsampling input);
 };
 
 template <>
@@ -38,8 +37,8 @@ struct EnumTraits<viz::mojom::ChannelFormat,
   static viz::mojom::ChannelFormat ToMojom(
       viz::SharedImageFormat::ChannelFormat channel_format);
 
-  static bool FromMojom(viz::mojom::ChannelFormat input,
-                        viz::SharedImageFormat::ChannelFormat* out);
+  static viz::SharedImageFormat::ChannelFormat FromMojom(
+      viz::mojom::ChannelFormat input);
 };
 
 template <>
@@ -64,6 +63,14 @@ struct StructTraits<
     return format.channel_format;
   }
 
+#if BUILDFLAG(IS_OZONE) || BUILDFLAG(IS_ANDROID)
+  static bool prefers_external_sampler(
+      viz::SharedImageFormat::SharedImageFormatUnion::MultiplanarFormat
+          format) {
+    return format.prefers_external_sampler;
+  }
+#endif
+
   static bool Read(
       viz::mojom::MultiplanarFormatDataView data,
       viz::SharedImageFormat::SharedImageFormatUnion::MultiplanarFormat* out);
@@ -76,15 +83,16 @@ struct UnionTraits<viz::mojom::SharedImageFormatDataView,
   static viz::mojom::SharedImageFormatDataView::Tag GetTag(
       const viz::SharedImageFormat& format) {
     CHECK_NE(format.plane_type(), viz::SharedImageFormat::PlaneType::kUnknown);
-    if (format.is_multi_plane())
+    if (format.is_multi_plane()) {
       return viz::mojom::SharedImageFormatDataView::Tag::kMultiplanarFormat;
-    else
-      return viz::mojom::SharedImageFormatDataView::Tag::kResourceFormat;
+    } else {
+      return viz::mojom::SharedImageFormatDataView::Tag::kSingleplanarFormat;
+    }
   }
 
-  static viz::ResourceFormat resource_format(
+  static viz::mojom::SingleplanarFormat singleplanar_format(
       const viz::SharedImageFormat& format) {
-    return format.resource_format();
+    return format.singleplanar_format();
   }
   static viz::SharedImageFormat::SharedImageFormatUnion::MultiplanarFormat
   multiplanar_format(const viz::SharedImageFormat& format) {

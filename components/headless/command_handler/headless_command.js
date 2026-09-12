@@ -171,15 +171,11 @@ class TargetPage {
     this._session;
   }
 
-  static async createAndNavigate(browserSession, url) {
+  static async create(browserSession) {
     const targetPage = new TargetPage(browserSession);
 
     const dp = browserSession.protocol();
-    const params = {url: 'about:blank', width: 800, height: 600};
-    const createContextOptions = {};
-    params.browserContextId =
-        (await dp.Target.createBrowserContext(createContextOptions))
-            .result.browserContextId;
+    const params = {url: 'about:blank'};
     targetPage._targetId =
         (await dp.Target.createTarget(params)).result.targetId;
 
@@ -188,8 +184,6 @@ class TargetPage {
                         flatten: true,
                       })).result.sessionId;
     targetPage._session = browserSession.createSession(sessionId);
-
-    await targetPage._navigate(url);
 
     return targetPage;
   }
@@ -202,19 +196,23 @@ class TargetPage {
     return this._session;
   }
 
-  async close() {
-    const dp = this._session.protocol();
-    dp.Target.closeTarget({targetId: this._targetId});
-  }
-
-  async _navigate(url) {
+  async load(url) {
     const dp = this._session.protocol();
     await dp.Page.enable();
     await dp.Page.setLifecycleEventsEnabled({enabled: true});
-    const frameId = (await dp.Page.navigate({url})).result.frameId;
+    const {frameId, errorText, isDownload} =
+        (await dp.Page.navigate({url})).result;
+    if (errorText || isDownload) {
+      return errorText || 'net::ERR_ABORTED (download)';
+    }
     await dp.Page.onceLifecycleEvent(
         event =>
             event.params.name === 'load' && event.params.frameId === frameId);
+  }
+
+  close() {
+    const dp = this._browserSession.protocol();
+    return dp.Target.closeTarget({targetId: this._targetId});
   }
 }
 
@@ -232,9 +230,13 @@ async function dumpDOM(dp) {
 
 async function printToPDF(dp, params) {
   const displayHeaderFooter = !params.noHeaderFooter;
+  const generateTaggedPDF = !params.disablePDFTagging;
+  const generateDocumentOutline = params.generateDocumentOutline;
 
   const printToPDFParams = {
     displayHeaderFooter,
+    generateTaggedPDF,
+    generateDocumentOutline,
     printBackground: true,
     preferCSSPageSize: true,
   };
@@ -248,6 +250,23 @@ async function screenshot(dp, params) {
   const screenshotParams = {
     format,
   };
+
+  if (params.width > 0 && params.height > 0) {
+    screenshotParams.clip = {
+      x: 0,
+      y: 0,
+      width: params.width,
+      height: params.height,
+      scale: 1.0,
+    };
+
+    // Ensure the contents window has exactly the size requested, see
+    // http://crbug.com/405165895.
+    const {windowId} = (await dp.Browser.getWindowForTarget()).result;
+    await dp.Browser.setContentsSize(
+        {windowId, width: params.width, height: params.height});
+  }
+
   const response = await dp.Page.captureScreenshot(screenshotParams);
   return response.result.data;
 }
@@ -272,11 +291,6 @@ async function handleCommands(dp, commands) {
 //
 // Target.exposeDevToolsProtocol() communication functions.
 //
-window.cdp.onmessage = json => {
-  // console.log('[recv] ' + json);
-  cdpClient.dispatchMessage(json);
-};
-
 function sendDevToolsMessage(json) {
   // console.log('[send] ' + json);
   window.cdp.send(json);
@@ -286,38 +300,67 @@ function sendDevToolsMessage(json) {
 // This is called from the host.
 //
 async function executeCommands(commands) {
+  window.cdp.onmessage = json => {
+    // console.log('[recv] ' + json);
+    cdpClient.dispatchMessage(json);
+  };
+
   const browserSession = new CDPSession();
-  const targetPage =
-      await TargetPage.createAndNavigate(browserSession, commands.targetUrl);
+  const targetPage = await TargetPage.create(browserSession);
   const dp = targetPage.session().protocol();
+
+  let domContentEventFired = false;
+  dp.Page.onceDomContentEventFired(() => {
+    domContentEventFired = true;
+  });
+
+  const promises = [];
+  let pageLoadTimedOut;
+  if ('timeout' in commands) {
+    const timeoutPromise = new Promise(resolve => {
+      setTimeout(() => {
+        if (pageLoadTimedOut === undefined) {
+          pageLoadTimedOut = true;
+          dp.Page.stopLoading();
+        }
+        resolve();
+      }, commands.timeout);
+    });
+    promises.push(timeoutPromise);
+  }
+
+  promises.push(targetPage.load(commands.targetUrl));
+  const pageLoadError = await Promise.race(promises);
+
+  if (pageLoadError) {
+    await targetPage.close();
+    return {pageLoadError};
+  }
+
+  if (pageLoadTimedOut === undefined) {
+    pageLoadTimedOut = false;
+  }
 
   if ('defaultBackgroundColor' in commands) {
     await dp.Emulation.setDefaultBackgroundColorOverride(
         {color: commands.defaultBackgroundColor});
   }
 
-  const promises = [];
-  if ('timeout' in commands) {
-    const timeoutPromise = new Promise(resolve => {
-      setTimeout(resolve, commands.timeout);
-    });
-    promises.push(timeoutPromise);
-  }
-
-  if ('virtualTimeBudget' in commands) {
+  if ('virtualTimeBudget' in commands && !pageLoadTimedOut) {
     await dp.Emulation.setVirtualTimePolicy({
       budget: commands.virtualTimeBudget,
       maxVirtualTimeTaskStarvationCount: 9999,
       policy: 'pauseIfNetworkFetchesPending',
     });
-    promises.push(dp.Emulation.onceVirtualTimeBudgetExpired());
-  }
-
-  if (promises.length > 0) {
-    await Promise.race(promises);
+    await dp.Emulation.onceVirtualTimeBudgetExpired();
   }
 
   const result = await handleCommands(dp, commands);
+
+  // Report timeouts only if we received no content at all.
+  if (pageLoadTimedOut && !domContentEventFired) {
+    result.pageLoadTimedOut = true;
+  }
 
   await targetPage.close();
 

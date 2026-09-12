@@ -4,12 +4,12 @@
 
 #include "content/browser/browser_thread_impl.h"
 
+#include <array>
+#include <atomic>
 #include <string>
 #include <utility>
 
-#include "base/atomicops.h"
 #include "base/check_op.h"
-#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/no_destructor.h"
@@ -17,12 +17,10 @@
 #include "base/sequence_checker.h"
 #include "base/task/current_thread.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/task/task_executor.h"
 #include "base/threading/platform_thread.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "content/browser/scheduler/browser_task_executor.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/content_browser_client.h"
 
 namespace content {
@@ -61,8 +59,9 @@ struct BrowserThreadGlobals {
   // |task_runners[id]| is safe to access on |main_thread_checker_| as
   // well as on any thread once it's read-only after initialization
   // (i.e. while |states[id] >= RUNNING|).
-  scoped_refptr<base::SingleThreadTaskRunner>
-      task_runners[BrowserThread::ID_COUNT];
+  std::array<scoped_refptr<base::SingleThreadTaskRunner>,
+             BrowserThread::ID_COUNT>
+      task_runners;
 
   // Tracks the runtime state of BrowserThreadImpls. Atomic because a few
   // methods below read this value outside |main_thread_checker_| to
@@ -74,7 +73,8 @@ struct BrowserThreadGlobals {
   // be used to establish happens-after relationships but rather checking the
   // runtime state of various threads (once again: it's only atomic to support
   // reading while transitioning from RUNNING=>SHUTDOWN).
-  base::subtle::Atomic32 states[BrowserThread::ID_COUNT] = {};
+  std::array<std::atomic<BrowserThreadState>, BrowserThread::ID_COUNT> states =
+      {};
 };
 
 BrowserThreadGlobals& GetBrowserThreadGlobals() {
@@ -98,20 +98,20 @@ BrowserThreadImpl::BrowserThreadImpl(
     ID identifier,
     scoped_refptr<base::SingleThreadTaskRunner> task_runner)
     : identifier_(identifier) {
-  DCHECK_GE(identifier_, 0);
-  DCHECK_LT(identifier_, ID_COUNT);
-  DCHECK(task_runner);
+  CHECK_GE(identifier_, 0, base::NotFatalUntil::M158);
+  CHECK_LT(identifier_, ID_COUNT, base::NotFatalUntil::M158);
+  CHECK(task_runner, base::NotFatalUntil::M158);
 
   BrowserThreadGlobals& globals = GetBrowserThreadGlobals();
 
   DCHECK_CALLED_ON_VALID_THREAD(globals.main_thread_checker_);
 
-  DCHECK_EQ(base::subtle::NoBarrier_Load(&globals.states[identifier_]),
-            BrowserThreadState::UNINITIALIZED);
-  base::subtle::NoBarrier_Store(&globals.states[identifier_],
-                                BrowserThreadState::RUNNING);
+  CHECK_EQ(globals.states[identifier_].load(std::memory_order_relaxed),
+           BrowserThreadState::UNINITIALIZED, base::NotFatalUntil::M158);
+  globals.states[identifier_].store(BrowserThreadState::RUNNING,
+                                    std::memory_order_relaxed);
 
-  DCHECK(!globals.task_runners[identifier_]);
+  CHECK(!globals.task_runners[identifier_], base::NotFatalUntil::M158);
   globals.task_runners[identifier_] = std::move(task_runner);
 
   if (identifier_ == BrowserThread::ID::UI) {
@@ -133,15 +133,15 @@ BrowserThreadImpl::~BrowserThreadImpl() {
   BrowserThreadGlobals& globals = GetBrowserThreadGlobals();
   DCHECK_CALLED_ON_VALID_THREAD(globals.main_thread_checker_);
 
-  DCHECK_EQ(base::subtle::NoBarrier_Load(&globals.states[identifier_]),
-            BrowserThreadState::RUNNING);
-  base::subtle::NoBarrier_Store(&globals.states[identifier_],
-                                BrowserThreadState::SHUTDOWN);
+  CHECK_EQ(globals.states[identifier_].load(std::memory_order_relaxed),
+           BrowserThreadState::RUNNING, base::NotFatalUntil::M158);
+  globals.states[identifier_].store(BrowserThreadState::SHUTDOWN,
+                                    std::memory_order_relaxed);
 
   // The mapping is kept alive after shutdown to avoid requiring a lock only for
   // shutdown (the SingleThreadTaskRunner itself may stop accepting tasks at any
   // point -- usually soon before/after destroying the BrowserThreadImpl).
-  DCHECK(globals.task_runners[identifier_]);
+  CHECK(globals.task_runners[identifier_], base::NotFatalUntil::M158);
 }
 
 // static
@@ -149,20 +149,21 @@ void BrowserThreadImpl::ResetGlobalsForTesting(BrowserThread::ID identifier) {
   BrowserThreadGlobals& globals = GetBrowserThreadGlobals();
   DCHECK_CALLED_ON_VALID_THREAD(globals.main_thread_checker_);
 
-  DCHECK_EQ(base::subtle::NoBarrier_Load(&globals.states[identifier]),
-            BrowserThreadState::SHUTDOWN);
-  base::subtle::NoBarrier_Store(&globals.states[identifier],
-                                BrowserThreadState::UNINITIALIZED);
+  CHECK_EQ(globals.states[identifier].load(std::memory_order_relaxed),
+           BrowserThreadState::SHUTDOWN, base::NotFatalUntil::M158);
+  globals.states[identifier].store(BrowserThreadState::UNINITIALIZED,
+                                   std::memory_order_relaxed);
 
   globals.task_runners[identifier] = nullptr;
 }
 
 // static
 const char* BrowserThreadImpl::GetThreadName(BrowserThread::ID thread) {
-  static const char* const kBrowserThreadNames[BrowserThread::ID_COUNT] = {
-      "",                 // UI (name assembled in browser_main_loop.cc).
-      "Chrome_IOThread",  // IO
-  };
+  static const std::array<const char* const, BrowserThread::ID_COUNT>
+      kBrowserThreadNames = {
+          "",                 // UI (name assembled in browser_main_loop.cc).
+          "Chrome_IOThread",  // IO
+      };
 
   if (BrowserThread::UI < thread && thread < BrowserThread::ID_COUNT)
     return kBrowserThreadNames[thread];
@@ -173,18 +174,18 @@ const char* BrowserThreadImpl::GetThreadName(BrowserThread::ID thread) {
 
 // static
 bool BrowserThread::IsThreadInitialized(ID identifier) {
-  DCHECK_GE(identifier, 0);
-  DCHECK_LT(identifier, ID_COUNT);
+  CHECK_GE(identifier, 0, base::NotFatalUntil::M158);
+  CHECK_LT(identifier, ID_COUNT, base::NotFatalUntil::M158);
 
   BrowserThreadGlobals& globals = GetBrowserThreadGlobals();
-  return base::subtle::NoBarrier_Load(&globals.states[identifier]) ==
+  return globals.states[identifier].load(std::memory_order_relaxed) ==
          BrowserThreadState::RUNNING;
 }
 
 // static
 bool BrowserThread::CurrentlyOn(ID identifier) {
-  DCHECK_GE(identifier, 0);
-  DCHECK_LT(identifier, ID_COUNT);
+  CHECK_GE(identifier, 0, base::NotFatalUntil::M158);
+  CHECK_LT(identifier, ID_COUNT, base::NotFatalUntil::M158);
 
   BrowserThreadGlobals& globals = GetBrowserThreadGlobals();
 
@@ -193,11 +194,12 @@ bool BrowserThread::CurrentlyOn(ID identifier) {
   // are kicked off and enabled to call the BrowserThread API from other
   // threads).
   return globals.task_runners[identifier] &&
+
          globals.task_runners[identifier]->RunsTasksInCurrentSequence();
 }
 
 // static
-std::string BrowserThread::GetDCheckCurrentlyOnErrorMessage(ID expected) {
+std::string BrowserThread::GetCurrentlyOnErrorMessage(ID expected) {
   std::string actual_name = base::PlatformThread::GetName();
   if (actual_name.empty())
     actual_name = "Unknown Thread";
@@ -232,8 +234,8 @@ bool BrowserThread::GetCurrentThreadIdentifier(ID* identifier) {
 // static
 scoped_refptr<base::SingleThreadTaskRunner>
 BrowserThread::GetTaskRunnerForThread(ID identifier) {
-  DCHECK_GE(identifier, 0);
-  DCHECK_LT(identifier, ID_COUNT);
+  CHECK_GE(identifier, 0, base::NotFatalUntil::M158);
+  CHECK_LT(identifier, ID_COUNT, base::NotFatalUntil::M158);
   switch (identifier) {
     case UI:
       return GetUIThreadTaskRunner({});
@@ -241,7 +243,6 @@ BrowserThread::GetTaskRunnerForThread(ID identifier) {
       return GetIOThreadTaskRunner({});
     case ID_COUNT:
       NOTREACHED();
-      return nullptr;
   }
 }
 
@@ -261,5 +262,42 @@ void BrowserThread::PostBestEffortTask(
           base::BindOnce(base::IgnoreResult(&base::TaskRunner::PostTask),
                          std::move(task_runner), from_here, std::move(task)));
 }
+
+namespace internal {
+
+bool BrowserThreadChecker::CalledOnValidBrowserThread(
+    BrowserThread::ID thread_identifier) const {
+  return BrowserThread::CurrentlyOn(thread_identifier);
+}
+
+const BrowserThreadChecker& GetBrowserThreadChecker(
+    BrowserThread::ID thread_identifier) {
+  static std::array<BrowserThreadChecker, BrowserThread::ID_COUNT>
+      browser_thread_checkers;
+  return browser_thread_checkers[thread_identifier];
+}
+
+ScopedValidateBrowserThreadChecker::ScopedValidateBrowserThreadChecker(
+    BrowserThread::ID thread_identifier,
+    base::NotFatalUntil fatal_milestone) {
+  const auto& checker = GetBrowserThreadChecker(thread_identifier);
+  CHECK(checker.CalledOnValidBrowserThread(thread_identifier), fatal_milestone)
+      << BrowserThread::GetCurrentlyOnErrorMessage(thread_identifier);
+}
+
+ScopedValidateBrowserThreadChecker::~ScopedValidateBrowserThreadChecker() =
+    default;
+
+#if DCHECK_IS_ON()
+ScopedValidateBrowserThreadDebugChecker::
+    ScopedValidateBrowserThreadDebugChecker(
+        BrowserThread::ID thread_identifier) {
+  const auto& checker = GetBrowserThreadChecker(thread_identifier);
+  DCHECK(checker.CalledOnValidBrowserThread(thread_identifier))
+      << BrowserThread::GetCurrentlyOnErrorMessage(thread_identifier);
+}
+#endif  // DCHECK_IS_ON()
+
+}  // namespace internal
 
 }  // namespace content

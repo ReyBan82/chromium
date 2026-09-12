@@ -16,11 +16,25 @@
 
 #include "absl/debugging/failure_signal_handler.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <csignal>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+
+#include "absl/base/attributes.h"
 #include "absl/base/config.h"
+#include "absl/base/internal/raw_logging.h"
+#include "absl/base/internal/sysinfo.h"
+#include "absl/debugging/internal/examine_stack.h"
+#include "absl/debugging/stacktrace.h"
 
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <pthread.h>
 #include <sched.h>
 #include <unistd.h>
 #endif
@@ -31,23 +45,16 @@
 
 #ifdef ABSL_HAVE_MMAP
 #include <sys/mman.h>
+#if defined(MAP_ANON) && !defined(MAP_ANONYMOUS)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 #endif
 
-#include <algorithm>
-#include <atomic>
-#include <cerrno>
-#include <csignal>
-#include <cstdio>
-#include <cstring>
-#include <ctime>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
-#include "absl/base/attributes.h"
-#include "absl/base/internal/raw_logging.h"
-#include "absl/base/internal/sysinfo.h"
-#include "absl/debugging/internal/examine_stack.h"
-#include "absl/debugging/stacktrace.h"
-
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__wasi__)
 #define ABSL_HAVE_SIGACTION
 // Apple WatchOS and TVOS don't allow sigaltstack
 // Apple macOS has sigaltstack, but using it makes backtrace() unusable.
@@ -56,6 +63,23 @@
     !(defined(TARGET_OS_TV) && TARGET_OS_TV) && !defined(__QNX__)
 #define ABSL_HAVE_SIGALTSTACK
 #endif
+#endif
+
+// ABSL_HAVE_PTHREAD_CPU_NUMBER_NP
+//
+// Checks whether pthread_cpu_number_np is available.
+#ifdef ABSL_HAVE_PTHREAD_CPU_NUMBER_NP
+#error ABSL_HAVE_PTHREAD_CPU_NUMBER_NP cannot be directly set
+#elif defined(__APPLE__) &&                                        \
+    ((defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__) &&    \
+      __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ >= 110000) ||  \
+     (defined(__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__) &&   \
+      __ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__ >= 140200) || \
+     (defined(__ENVIRONMENT_WATCH_OS_VERSION_MIN_REQUIRED__) &&    \
+      __ENVIRONMENT_WATCH_OS_VERSION_MIN_REQUIRED__ >= 70100) ||   \
+     (defined(__ENVIRONMENT_TV_OS_VERSION_MIN_REQUIRED__) &&       \
+      __ENVIRONMENT_TV_OS_VERSION_MIN_REQUIRED__ >= 140200))
+#define ABSL_HAVE_PTHREAD_CPU_NUMBER_NP 1
 #endif
 
 namespace absl {
@@ -77,10 +101,10 @@ struct FailureSignalData {
   struct sigaction previous_action;
   // StructSigaction is used to silence -Wmissing-field-initializers.
   using StructSigaction = struct sigaction;
-  #define FSD_PREVIOUS_INIT FailureSignalData::StructSigaction()
+#define FSD_PREVIOUS_INIT FailureSignalData::StructSigaction()
 #else
   void (*previous_handler)(int);
-  #define FSD_PREVIOUS_INIT SIG_DFL
+#define FSD_PREVIOUS_INIT SIG_DFL
 #endif
 };
 
@@ -132,8 +156,8 @@ const char* FailureSignalToString(int signo) {
 #ifdef ABSL_HAVE_SIGALTSTACK
 
 static bool SetupAlternateStackOnce() {
-#if defined(__wasm__) || defined (__asjms__)
-  const size_t page_mask = getpagesize() - 1;
+#if defined(__wasm__) || defined(__asmjs__)
+  const size_t page_mask = static_cast<size_t>(getpagesize()) - 1;
 #else
   const size_t page_mask = static_cast<size_t>(sysconf(_SC_PAGESIZE)) - 1;
 #endif
@@ -154,9 +178,6 @@ static bool SetupAlternateStackOnce() {
 #ifndef MAP_STACK
 #define MAP_STACK 0
 #endif
-#if defined(MAP_ANON) && !defined(MAP_ANONYMOUS)
-#define MAP_ANONYMOUS MAP_ANON
-#endif
   sigstk.ss_sp = mmap(nullptr, sigstk.ss_size, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
   if (sigstk.ss_sp == MAP_FAILED) {
@@ -172,6 +193,20 @@ static bool SetupAlternateStackOnce() {
   if (sigaltstack(&sigstk, nullptr) != 0) {
     ABSL_RAW_LOG(FATAL, "sigaltstack() failed with errno=%d", errno);
   }
+
+#ifdef __linux__
+#if defined(PR_SET_VMA) && defined(PR_SET_VMA_ANON_NAME)
+  // Make a best-effort attempt to name the allocated region in
+  // /proc/$PID/smaps.
+  //
+  // The call to prctl() may fail if the kernel was not configured with the
+  // CONFIG_ANON_VMA_NAME kernel option.  This is OK since the call is
+  // primarily a debugging aid.
+  prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, sigstk.ss_sp, sigstk.ss_size,
+        "absl-signalstack");
+#endif
+#endif  // __linux__
+
   return true;
 }
 
@@ -184,7 +219,7 @@ static bool SetupAlternateStackOnce() {
 // if the system supports using an alternate stack.
 static int MaybeSetupAlternateStack() {
 #ifdef ABSL_HAVE_SIGALTSTACK
-  ABSL_ATTRIBUTE_UNUSED static const bool kOnce = SetupAlternateStackOnce();
+  [[maybe_unused]] static const bool kOnce = SetupAlternateStackOnce();
   return SA_ONSTACK;
 #else
   return 0;
@@ -218,10 +253,6 @@ static void InstallOneFailureHandler(FailureSignalData* data,
 
 #endif
 
-static void WriteToStderr(const char* data) {
-  absl::raw_log_internal::AsyncSignalSafeWriteToStderr(data, strlen(data));
-}
-
 static void WriteSignalMessage(int signo, int cpu,
                                void (*writerfn)(const char*)) {
   char buf[96];
@@ -234,7 +265,7 @@ static void WriteSignalMessage(int signo, int cpu,
   if (signal_string != nullptr && signal_string[0] != '\0') {
     snprintf(buf, sizeof(buf), "*** %s received at time=%ld%s ***\n",
              signal_string,
-             static_cast<long>(time(nullptr)),   // NOLINT(runtime/int)
+             static_cast<long>(time(nullptr)),  // NOLINT(runtime/int)
              on_cpu);
   } else {
     snprintf(buf, sizeof(buf), "*** Signal %d received at time=%ld%s ***\n",
@@ -297,7 +328,8 @@ static void PortableSleepForSeconds(int seconds) {
   struct timespec sleep_time;
   sleep_time.tv_sec = seconds;
   sleep_time.tv_nsec = 0;
-  while (nanosleep(&sleep_time, &sleep_time) != 0 && errno == EINTR) {}
+  while (nanosleep(&sleep_time, &sleep_time) != 0 && errno == EINTR) {
+  }
 #endif
 }
 
@@ -307,15 +339,27 @@ static void PortableSleepForSeconds(int seconds) {
 // set amount of time. If AbslFailureSignalHandler() hangs for more than
 // the alarm timeout, ImmediateAbortSignalHandler() will abort the
 // program.
-static void ImmediateAbortSignalHandler(int) {
-  RaiseToDefaultHandler(SIGABRT);
-}
+static void ImmediateAbortSignalHandler(int) { RaiseToDefaultHandler(SIGABRT); }
 #endif
 
 // absl::base_internal::GetTID() returns pid_t on most platforms, but
 // returns absl::base_internal::pid_t on Windows.
 using GetTidType = decltype(absl::base_internal::GetTID());
 ABSL_CONST_INIT static std::atomic<GetTidType> failed_tid(0);
+
+static int GetCpuNumber() {
+#ifdef ABSL_HAVE_SCHED_GETCPU
+  return sched_getcpu();
+#elif defined(ABSL_HAVE_PTHREAD_CPU_NUMBER_NP)
+  size_t cpu_num;
+  if (pthread_cpu_number_np(&cpu_num) == 0) {
+    return static_cast<int>(cpu_num);
+  }
+  return -1;
+#else
+  return -1;
+#endif
+}
 
 #ifndef ABSL_HAVE_SIGACTION
 static void AbslFailureSignalHandler(int signo) {
@@ -338,19 +382,22 @@ static void AbslFailureSignalHandler(int signo, siginfo_t*, void* ucontext) {
       // a bit for it to finish. If the other thread doesn't kill us,
       // we do so after sleeping.
       PortableSleepForSeconds(3);
-      RaiseToDefaultHandler(signo);
-      // The recursively raised signal may be blocked until we return.
-      return;
+    } else {
+      // Same thread re-entered: the handler itself faulted. Do NOT fall through
+      // and re-run the body (which would recurse under SA_NODEFER, resetting
+      // the alarm each time and consuming the unguarded altstack). Instead,
+      // terminate now.
     }
+
+    RaiseToDefaultHandler(signo);
+    // The recursively raised signal may be blocked until we return.
+    return;
   }
 
   // Increase the chance that the CPU we report was the same CPU on which the
   // signal was received by doing this as early as possible, i.e. after
   // verifying that this is not a recursive signal handler invocation.
-  int my_cpu = -1;
-#ifdef ABSL_HAVE_SCHED_GETCPU
-  my_cpu = sched_getcpu();
-#endif
+  int my_cpu = GetCpuNumber();
 
 #ifdef ABSL_HAVE_ALARM
   // Set an alarm to abort the program in case this code hangs or deadlocks.
@@ -362,7 +409,10 @@ static void AbslFailureSignalHandler(int signo, siginfo_t*, void* ucontext) {
 #endif
 
   // First write to stderr.
-  WriteFailureInfo(signo, ucontext, my_cpu, WriteToStderr);
+  WriteFailureInfo(
+      signo, ucontext, my_cpu, +[](const char* data) {
+        absl::raw_log_internal::AsyncSignalSafeWriteError(data, strlen(data));
+      });
 
   // Riskier code (because it is less likely to be async-signal-safe)
   // goes after this point.

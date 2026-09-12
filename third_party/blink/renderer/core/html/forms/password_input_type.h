@@ -44,7 +44,6 @@ class PasswordInputType final : public BaseTextInputType {
 
  private:
   void CountUsage() override;
-  const AtomicString& FormControlType() const override;
   bool ShouldSaveAndRestoreFormControlState() const override;
   FormControlState SaveFormControlState() const override;
   void RestoreFormControlState(const FormControlState&) override;
@@ -63,6 +62,7 @@ class PasswordInputType final : public BaseTextInputType {
   void ForwardEvent(Event& event) override;
   void HandleKeydownEvent(KeyboardEvent&) override;
   void HandleBeforeTextInsertedEvent(BeforeTextInsertedEvent&) override;
+  String FilterBeforeTextInserted(const String& text) override;
 
   void HandleBlurEvent() override;
   bool SupportsInputModeAttribute() const override;

@@ -14,6 +14,10 @@
 
 namespace extensions {
 
+// static
+const char* UsbPrinterManifestData::kManifestDataKey =
+    manifest_keys::kUsbPrinters;
+
 UsbPrinterManifestData::UsbPrinterManifestData() {
 }
 
@@ -23,17 +27,17 @@ UsbPrinterManifestData::~UsbPrinterManifestData() {
 // static
 const UsbPrinterManifestData* UsbPrinterManifestData::Get(
     const Extension* extension) {
-  return static_cast<UsbPrinterManifestData*>(
-      extension->GetManifestData(manifest_keys::kUsbPrinters));
+  return extension->GetManifestData<UsbPrinterManifestData>();
 }
 
 // static
 std::unique_ptr<UsbPrinterManifestData> UsbPrinterManifestData::FromValue(
     const base::Value& value,
     std::u16string* error) {
-  std::unique_ptr<api::extensions_manifest_types::UsbPrinters> usb_printers =
-      api::extensions_manifest_types::UsbPrinters::FromValue(value, error);
-  if (!usb_printers) {
+  auto usb_printers =
+      api::extensions_manifest_types::UsbPrinters::FromValue(value);
+  if (!usb_printers.has_value()) {
+    *error = std::move(usb_printers).error();
     return nullptr;
   }
 
@@ -45,22 +49,17 @@ std::unique_ptr<UsbPrinterManifestData> UsbPrinterManifestData::FromValue(
     }
 
     auto output = device::mojom::UsbDeviceFilter::New();
-    output->has_vendor_id = true;
     output->vendor_id = input.vendor_id;
 
     if (input.product_id) {
-      output->has_product_id = true;
       output->product_id = *input.product_id;
     }
 
     if (input.interface_class) {
-      output->has_class_code = true;
       output->class_code = *input.interface_class;
       if (input.interface_subclass) {
-        output->has_subclass_code = true;
         output->subclass_code = *input.interface_subclass;
         if (input.interface_protocol) {
-          output->has_protocol_code = true;
           output->protocol_code = *input.interface_protocol;
         }
       }

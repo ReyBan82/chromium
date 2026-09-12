@@ -5,7 +5,6 @@
 #ifndef CHROME_COMMON_APPS_PLATFORM_APPS_MEDIA_GALLERIES_PERMISSION_DATA_H_
 #define CHROME_COMMON_APPS_PLATFORM_APPS_MEDIA_GALLERIES_PERMISSION_DATA_H_
 
-#include <memory>
 #include <string>
 
 #include "extensions/common/permissions/api_permission.h"
@@ -27,13 +26,15 @@ class MediaGalleriesPermissionData {
   bool Check(const extensions::APIPermission::CheckParam* param) const;
 
   // Convert |this| into a base::Value.
-  std::unique_ptr<base::Value> ToValue() const;
+  base::Value ToValue() const;
 
   // Populate |this| from a base::Value.
-  bool FromValue(const base::Value* value);
+  bool FromValue(const base::Value& value);
 
-  bool operator<(const MediaGalleriesPermissionData& rhs) const;
-  bool operator==(const MediaGalleriesPermissionData& rhs) const;
+  friend auto operator<=>(const MediaGalleriesPermissionData&,
+                          const MediaGalleriesPermissionData&) = default;
+  friend bool operator==(const MediaGalleriesPermissionData&,
+                         const MediaGalleriesPermissionData&) = default;
 
   std::string permission() const { return permission_; }
 

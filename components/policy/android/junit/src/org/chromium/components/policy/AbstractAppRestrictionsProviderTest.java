@@ -24,27 +24,19 @@ import androidx.test.core.app.ApplicationProvider;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.Robolectric;
 import org.robolectric.RuntimeEnvironment;
-import org.robolectric.annotation.Config;
-import org.robolectric.annotation.LooperMode;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Robolectric test for AbstractAppRestrictionsProvider.
- */
+/** Robolectric test for AbstractAppRestrictionsProvider. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
-@LooperMode(LooperMode.Mode.LEGACY)
 public class AbstractAppRestrictionsProviderTest {
-    /**
-     * Minimal concrete class implementing AbstractAppRestrictionsProvider.
-     */
-    private class DummyAppRestrictionsProvider extends AbstractAppRestrictionsProvider {
+    /** Minimal concrete class implementing AbstractAppRestrictionsProvider. */
+    private static class DummyAppRestrictionsProvider extends AbstractAppRestrictionsProvider {
         public DummyAppRestrictionsProvider(Context context) {
             super(context);
         }
@@ -60,7 +52,7 @@ public class AbstractAppRestrictionsProviderTest {
         }
     }
 
-    private class DummyContext extends ContextWrapper {
+    private static class DummyContext extends ContextWrapper {
         public DummyContext(Context baseContext) {
             super(baseContext);
             mReceiverCount = new AtomicInteger(0);
@@ -68,8 +60,12 @@ public class AbstractAppRestrictionsProviderTest {
         }
 
         @Override
-        public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter,
-                String broadcastPermission, Handler scheduler, int flags) {
+        public Intent registerReceiver(
+                BroadcastReceiver receiver,
+                IntentFilter filter,
+                String broadcastPermission,
+                Handler scheduler,
+                int flags) {
             Intent intent =
                     super.registerReceiver(receiver, filter, broadcastPermission, scheduler, flags);
             mReceiverCount.getAndIncrement();
@@ -93,8 +89,11 @@ public class AbstractAppRestrictionsProviderTest {
         }
 
         @Override
-        public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter,
-                String broadcastPermission, Handler scheduler) {
+        public Intent registerReceiver(
+                BroadcastReceiver receiver,
+                IntentFilter filter,
+                String broadcastPermission,
+                Handler scheduler) {
             Intent intent =
                     super.registerReceiver(receiver, filter, broadcastPermission, scheduler);
             mReceiverCount.getAndIncrement();
@@ -119,18 +118,13 @@ public class AbstractAppRestrictionsProviderTest {
             return mLastRegisteredReceiverFlags.get();
         }
 
-        private AtomicInteger mReceiverCount;
-        private AtomicInteger mLastRegisteredReceiverFlags;
+        private final AtomicInteger mReceiverCount;
+        private final AtomicInteger mLastRegisteredReceiverFlags;
     }
 
-    /**
-     * Test method for {@link AbstractAppRestrictionsProvider#refresh()}.
-     */
+    /** Test method for {@link AbstractAppRestrictionsProvider#refresh()}. */
     @Test
     public void testRefresh() {
-        // We want to control precisely when background tasks run
-        Robolectric.getBackgroundThreadScheduler().pause();
-
         Context context = RuntimeEnvironment.application;
 
         // Clear the preferences
@@ -156,60 +150,65 @@ public class AbstractAppRestrictionsProviderTest {
         verify(combinedProvider).onSettingsAvailable(0, b1);
     }
 
-    /**
-     * Test method for {@link AbstractAppRestrictionsProvider#startListeningForPolicyChanges()}.
-     */
+    /** Test method for {@link AbstractAppRestrictionsProvider#startListeningForPolicyChanges()}. */
     @Test
     public void testStartListeningForPolicyChanges() {
         DummyContext dummyContext = new DummyContext(ApplicationProvider.getApplicationContext());
         AbstractAppRestrictionsProvider provider =
                 spy(new DummyAppRestrictionsProvider(dummyContext));
-        Intent intent = new Intent("org.chromium.test.policy.Hello");
+        // The catch-up refresh() that runs after the async registerReceiver() call ends up in
+        // notifySettingsAvailable(), which dereferences the CombinedPolicyProvider.
+        provider.setManagerAndSource(mock(CombinedPolicyProvider.class), 0);
+        RobolectricUtil.runAllBackgroundAndUi();
 
         // If getRestrictionsChangeIntentAction returns null then we should not start a broadcast
         // receiver.
         provider.startListeningForPolicyChanges();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertEquals(0, dummyContext.getReceiverCount());
 
         // If it returns a string then we should.
         when(provider.getRestrictionChangeIntentAction())
                 .thenReturn("org.chromium.test.policy.Hello");
         provider.startListeningForPolicyChanges();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertEquals(1, dummyContext.getReceiverCount());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             // Ensure that neither RECEIVER_EXPORTED nor RECEIVER_NOT_EXPORTED flags are set,
             // asserting that the receiver was only registered for protected broadcasts.
-            final int badMask = ContextUtils.RECEIVER_EXPORTED | ContextUtils.RECEIVER_NOT_EXPORTED;
+            final int badMask = Context.RECEIVER_EXPORTED | Context.RECEIVER_NOT_EXPORTED;
             Assert.assertEquals(0, dummyContext.getLastRegisteredReceiverFlags() & badMask);
         }
     }
 
-    /**
-     * Test method for {@link AbstractAppRestrictionsProvider#stopListening()}.
-     */
+    /** Test method for {@link AbstractAppRestrictionsProvider#stopListening()}. */
     @Test
     public void testStopListening() {
         DummyContext dummyContext = new DummyContext(ApplicationProvider.getApplicationContext());
         AbstractAppRestrictionsProvider provider =
                 spy(new DummyAppRestrictionsProvider(dummyContext));
-        Intent intent = new Intent("org.chromium.test.policy.Hello");
+        provider.setManagerAndSource(mock(CombinedPolicyProvider.class), 0);
+        RobolectricUtil.runAllBackgroundAndUi();
 
         // First try with null result from getRestrictionsChangeIntentAction, only test here is no
         // crash.
         provider.stopListening();
+        RobolectricUtil.runAllBackgroundAndUi();
 
         // Now try starting and stopping listening properly.
         when(provider.getRestrictionChangeIntentAction())
                 .thenReturn("org.chromium.test.policy.Hello");
         provider.startListeningForPolicyChanges();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertEquals(1, dummyContext.getReceiverCount());
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             // Ensure that neither RECEIVER_EXPORTED nor RECEIVER_NOT_EXPORTED flags are set,
             // asserting that the receiver was only registered for protected broadcasts.
-            final int badMask = ContextUtils.RECEIVER_EXPORTED | ContextUtils.RECEIVER_NOT_EXPORTED;
+            final int badMask = Context.RECEIVER_EXPORTED | Context.RECEIVER_NOT_EXPORTED;
             Assert.assertEquals(0, dummyContext.getLastRegisteredReceiverFlags() & badMask);
         }
         provider.stopListening();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertEquals(0, dummyContext.getReceiverCount());
     }
 }

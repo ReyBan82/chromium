@@ -11,19 +11,20 @@
 
 namespace mirroring {
 namespace features {
-
-// TODO(crbug.com/1363512): Remove support for sender side letterboxing.
-COMPONENT_EXPORT(MIRRORING_SERVICE)
-BASE_DECLARE_FEATURE(kCastDisableLetterboxing);
-
-// TODO(crbug.com/1198616): Remove model name checks for querying receiver
-// capabilities.
-COMPONENT_EXPORT(MIRRORING_SERVICE)
-BASE_DECLARE_FEATURE(kCastDisableModelNameCheck);
-
-// TODO(crbug.com/1412589): Should be removed once working properly.
+// TODO(crbug.com/40255351): Should be removed once working properly.
 COMPONENT_EXPORT(MIRRORING_SERVICE)
 BASE_DECLARE_FEATURE(kCastEnableStreamingWithHiDPI);
+
+COMPONENT_EXPORT(MIRRORING_SERVICE)
+BASE_DECLARE_FEATURE(kCastStreaming60fps);
+
+// Killswitch for two stage offer change.
+// crbug.com/510476629
+COMPONENT_EXPORT(MIRRORING_SERVICE)
+BASE_DECLARE_FEATURE(kCastStreamingOfferHardwareFirst);
+
+COMPONENT_EXPORT(MIRRORING_SERVICE)
+BASE_DECLARE_FEATURE(kCastMirroringNativeNV12);
 
 }  // namespace features
 }  // namespace mirroring

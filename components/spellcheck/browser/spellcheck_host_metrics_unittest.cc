@@ -6,8 +6,10 @@
 
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/metrics/histogram_samples.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/metrics/histogram_tester.h"
@@ -33,7 +35,7 @@ class SpellcheckHostMetricsTest : public testing::Test {
 };
 
 TEST_F(SpellcheckHostMetricsTest, RecordEnabledStats) {
-  const char kMetricName[] = "SpellCheck.Enabled";
+  const char kMetricName[] = "SpellCheck.Enabled2";
   base::HistogramTester histogram_tester1;
 
   metrics()->RecordEnabledStats(false);
@@ -49,29 +51,15 @@ TEST_F(SpellcheckHostMetricsTest, RecordEnabledStats) {
   histogram_tester2.ExpectBucketCount(kMetricName, 1, 1);
 }
 
-#if BUILDFLAG(IS_WIN)
-// Failing consistently on Win7. See crbug.com/230534.
-#define MAYBE_CustomWordStats DISABLED_CustomWordStats
-#else
-#define MAYBE_CustomWordStats CustomWordStats
-#endif
-
-TEST_F(SpellcheckHostMetricsTest, MAYBE_CustomWordStats) {
-  SpellCheckHostMetrics::RecordCustomWordCountStats(123);
-
-  base::HistogramTester histogram_tester;
-
-  SpellCheckHostMetrics::RecordCustomWordCountStats(23);
-  histogram_tester.ExpectBucketCount("SpellCheck.CustomWords", 23, 1);
-}
-
 TEST_F(SpellcheckHostMetricsTest, RecordWordCountsDiscardsDuplicates) {
   // This test ensures that RecordWordCounts only records metrics if they
   // have changed from the last invocation.
-  const char* const histogram_names[] = {
-      "SpellCheck.CheckedWords", "SpellCheck.MisspelledWords",
-      "SpellCheck.ReplacedWords", "SpellCheck.UniqueWords",
-      "SpellCheck.ShownSuggestions"};
+  const auto histogram_names = std::to_array<const char*>({
+      "SpellCheck.CheckedWords",
+      "SpellCheck.MisspelledWords",
+      "SpellCheck.ReplacedWords",
+      "SpellCheck.ShownSuggestions",
+  });
 
   // Ensure all histograms exist.
   metrics()->RecordCheckedWordStats(u"test", false);
@@ -89,7 +77,7 @@ TEST_F(SpellcheckHostMetricsTest, RecordWordCountsDiscardsDuplicates) {
 }
 
 TEST_F(SpellcheckHostMetricsTest, RecordSpellingServiceStats) {
-  const char kMetricName[] = "SpellCheck.SpellingService.Enabled";
+  const char kMetricName[] = "SpellCheck.SpellingService.Enabled2";
   base::HistogramTester histogram_tester1;
 
   metrics()->RecordSpellingServiceStats(false);
@@ -107,10 +95,10 @@ TEST_F(SpellcheckHostMetricsTest, RecordSpellingServiceStats) {
 #if BUILDFLAG(IS_WIN)
 TEST_F(SpellcheckHostMetricsTest, RecordAcceptLanguageStats) {
   const char* const histogram_names[] = {
-      "Spellcheck.Windows.ChromeLocalesSupport.Both",
-      "Spellcheck.Windows.ChromeLocalesSupport.HunspellOnly",
-      "Spellcheck.Windows.ChromeLocalesSupport.NativeOnly",
-      "Spellcheck.Windows.ChromeLocalesSupport.NoSupport"};
+      "Spellcheck.Windows.ChromeLocalesSupport2.Both",
+      "Spellcheck.Windows.ChromeLocalesSupport2.HunspellOnly",
+      "Spellcheck.Windows.ChromeLocalesSupport2.NativeOnly",
+      "Spellcheck.Windows.ChromeLocalesSupport2.NoSupport"};
   const size_t expected_counts[] = {1, 2, 3, 4};
   base::HistogramTester histogram_tester;
 
@@ -122,17 +110,18 @@ TEST_F(SpellcheckHostMetricsTest, RecordAcceptLanguageStats) {
   });
 
   for (size_t i = 0; i < std::size(histogram_names); ++i) {
-    histogram_tester.ExpectTotalCount(histogram_names[i], 1);
-    histogram_tester.ExpectBucketCount(histogram_names[i],
-                                       static_cast<int>(expected_counts[i]), 1);
+    histogram_tester.ExpectTotalCount(UNSAFE_TODO(histogram_names[i]), 1);
+    histogram_tester.ExpectBucketCount(
+        UNSAFE_TODO(histogram_names[i]),
+        static_cast<int>(UNSAFE_TODO(expected_counts[i])), 1);
   }
 }
 
 TEST_F(SpellcheckHostMetricsTest, RecordSpellcheckLanguageStats) {
   const char* const histogram_names[] = {
-      "Spellcheck.Windows.SpellcheckLocalesSupport.Both",
-      "Spellcheck.Windows.SpellcheckLocalesSupport.HunspellOnly",
-      "Spellcheck.Windows.SpellcheckLocalesSupport.NativeOnly"};
+      "Spellcheck.Windows.SpellcheckLocalesSupport2.Both",
+      "Spellcheck.Windows.SpellcheckLocalesSupport2.HunspellOnly",
+      "Spellcheck.Windows.SpellcheckLocalesSupport2.NativeOnly"};
   const size_t expected_counts[] = {1, 2, 3};
   base::HistogramTester histogram_tester;
 
@@ -144,9 +133,10 @@ TEST_F(SpellcheckHostMetricsTest, RecordSpellcheckLanguageStats) {
   });
 
   for (size_t i = 0; i < std::size(histogram_names); ++i) {
-    histogram_tester.ExpectTotalCount(histogram_names[i], 1);
-    histogram_tester.ExpectBucketCount(histogram_names[i],
-                                       static_cast<int>(expected_counts[i]), 1);
+    histogram_tester.ExpectTotalCount(UNSAFE_TODO(histogram_names[i]), 1);
+    histogram_tester.ExpectBucketCount(
+        UNSAFE_TODO(histogram_names[i]),
+        static_cast<int>(UNSAFE_TODO(expected_counts[i])), 1);
   }
 }
 #endif  // BUILDFLAG(IS_WIN)

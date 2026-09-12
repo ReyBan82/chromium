@@ -4,20 +4,24 @@
 
 #include "chrome/common/chrome_result_codes.h"
 
-namespace chrome {
-
 bool IsNormalResultCode(ResultCode code) {
   // These result codes are normal exit, but are needed to signal to content
   // that the process should terminate early. These result codes should be
   // translated back to the normal exit code to indicate nothing went wrong
   // here.
-  if (code == RESULT_CODE_NORMAL_EXIT_UPGRADE_RELAUNCHED ||
-      code == RESULT_CODE_NORMAL_EXIT_PACK_EXTENSION_SUCCESS ||
-      code == RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED) {
+  if (code == CHROME_RESULT_CODE_NORMAL_EXIT_UPGRADE_RELAUNCHED ||
+      code == CHROME_RESULT_CODE_NORMAL_EXIT_PACK_EXTENSION_SUCCESS ||
+      code == CHROME_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED ||
+      code == CHROME_RESULT_CODE_NORMAL_EXIT_AUTO_DE_ELEVATED) {
     return true;
   }
 
   return false;
 }
 
-}  // namespace chrome
+bool IsRelaunchResultCode(int code) {
+  return code == CHROME_RESULT_CODE_NORMAL_EXIT_UPGRADE_RELAUNCHED ||
+         code == CHROME_RESULT_CODE_DOWNGRADE_AND_RELAUNCH ||
+         code == CHROME_RESULT_CODE_NORMAL_EXIT_RELAUNCH_REQUESTED ||
+         code == CHROME_RESULT_CODE_NORMAL_EXIT_RELAUNCH_BACKGROUND;
+}

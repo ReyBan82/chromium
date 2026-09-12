@@ -19,17 +19,21 @@ class _V8LoadingBenchmark(v8_helper.V8PerfMixin, perf_benchmark.PerfBenchmark):
     return page_sets.SystemHealthStorySet(platform=self.PLATFORM, case='load')
 
 
-@benchmark.Info(emails=[
-    'cbruni@chromium.org', 'tmrts@chromium.org', 'almuthanna@chromium.org'
-],
-                component='Blink>JavaScript',
-                documentation_url='https://bit.ly/system-health-v8-benchmarks')
+@benchmark.Info(
+  emails=[
+    'cbruni@chromium.org',
+    'vahl@chromium.org',
+    'almuthanna@chromium.org',
+  ],
+  component='Blink>JavaScript',
+  documentation_url='https://bit.ly/system-health-v8-benchmarks',
+)
 class V8DesktopLoadingBenchmark(_V8LoadingBenchmark):
   """See _V8BrowsingBenchmark."""
+
   PLATFORM = 'desktop'
-  # TODO(rmhasan): Remove the SUPPORTED_PLATFORMS lists.
-  # SUPPORTED_PLATFORMS is deprecated, please put system specifier tags
-  # from expectations.config in SUPPORTED_PLATFORM_TAGS.
+  # TODO(johnchen): Remove either the SUPPORTED_PLATFORMS or
+  # SUPPORTED_PLATFORMS_TAGS lists. Only one is necessary.
   SUPPORTED_PLATFORMS = [story.expectations.ALL_DESKTOP]
   SUPPORTED_PLATFORM_TAGS = [platforms.DESKTOP]
 
@@ -41,17 +45,17 @@ class V8DesktopLoadingBenchmark(_V8LoadingBenchmark):
     return 'UNSCHEDULED_v8.loading_desktop'
 
 
-@benchmark.Info(emails=[
-    'cbruni@chromium.org', 'leszeks@chromium.org', 'tmrts@chromium.org'
-],
-                component='Blink>JavaScript',
-                documentation_url='https://bit.ly/system-health-v8-benchmarks')
+@benchmark.Info(
+  emails=['cbruni@chromium.org', 'leszeks@chromium.org'],
+  component='Blink>JavaScript',
+  documentation_url='https://bit.ly/system-health-v8-benchmarks',
+)
 class V8MobileLoadingBenchmark(_V8LoadingBenchmark):
   """See _V8BrowsingBenchmark."""
+
   PLATFORM = 'mobile'
-  # TODO(rmhasan): Remove the SUPPORTED_PLATFORMS lists.
-  # SUPPORTED_PLATFORMS is deprecated, please put system specifier tags
-  # from expectations.config in SUPPORTED_PLATFORM_TAGS.
+  # TODO(johnchen): Remove either the SUPPORTED_PLATFORMS or
+  # SUPPORTED_PLATFORMS_TAGS lists. Only one is necessary.
   SUPPORTED_PLATFORMS = [story.expectations.ALL_MOBILE]
   SUPPORTED_PLATFORM_TAGS = [platforms.MOBILE]
 

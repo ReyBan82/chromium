@@ -16,11 +16,9 @@
 #include "base/functional/callback_forward.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "base/scoped_observation.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "chromeos/ash/components/drivefs/drivefs_host.h"
-#include "chromeos/ash/components/drivefs/drivefs_host_observer.h"
 #include "chromeos/ash/components/drivefs/mojom/drivefs.mojom-forward.h"
 #include "components/account_id/account_id.h"
 #include "components/drive/file_errors.h"
@@ -32,7 +30,7 @@ namespace ash {
 // Observes DriveFs file updates and calls `callback` when the wallpaper file
 // changes. `callback` is called immediately if unable to set up an observer on
 // DriveFs file changes.
-class WallpaperChangeWaiter : public drivefs::DriveFsHostObserver {
+class WallpaperChangeWaiter : drivefs::DriveFsHost::Observer {
  public:
   WallpaperChangeWaiter(
       const AccountId& account_id,
@@ -43,7 +41,7 @@ class WallpaperChangeWaiter : public drivefs::DriveFsHostObserver {
 
   ~WallpaperChangeWaiter() override;
 
-  // drivefs::DriveFsHostObserver:
+  // DriveFsHost::Observer implementation.
   void OnUnmounted() override;
   void OnError(const drivefs::mojom::DriveError& error) override;
   void OnFilesChanged(
@@ -52,8 +50,6 @@ class WallpaperChangeWaiter : public drivefs::DriveFsHostObserver {
  private:
   const AccountId account_id_;
   const base::FilePath path_to_watch_;
-  base::ScopedObservation<drivefs::DriveFsHost, drivefs::DriveFsHostObserver>
-      drivefs_host_observation_{this};
   WallpaperDriveFsDelegate::WaitForWallpaperChangeCallback callback_;
 };
 
@@ -94,6 +90,7 @@ class WallpaperDriveFsDelegateImpl : public WallpaperDriveFsDelegate {
   // Drive authentication token. Can now attempt to download the wallpaper image
   // because `download_url` and `authentication_token` are both present.
   void OnGetDownloadUrlAndAuthentication(
+      const AccountId& account_id,
       ImageDownloader::DownloadCallback callback,
       const GURL& download_url,
       google_apis::ApiErrorCode error_code,

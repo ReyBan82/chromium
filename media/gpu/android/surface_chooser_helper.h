@@ -6,6 +6,7 @@
 #define MEDIA_GPU_ANDROID_SURFACE_CHOOSER_HELPER_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
@@ -13,7 +14,6 @@
 #include "media/gpu/android/android_video_surface_chooser.h"
 #include "media/gpu/android/promotion_hint_aggregator.h"
 #include "media/gpu/media_gpu_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class TickClock;
@@ -59,20 +59,6 @@ class MEDIA_GPU_EXPORT SurfaceChooserHelper {
     kRequired,
   };
 
-  // Must match AVDAFrameInformation UMA enum.  Please do not remove or re-order
-  // values, only append new ones.
-  enum class FrameInformation {
-    NON_OVERLAY_INSECURE = 0,
-    NON_OVERLAY_L3 = 1,
-    OVERLAY_L3 = 2,
-    OVERLAY_L1 = 3,
-    OVERLAY_INSECURE_PLAYER_ELEMENT_FULLSCREEN = 4,
-    OVERLAY_INSECURE_NON_PLAYER_ELEMENT_FULLSCREEN = 5,
-
-    // Max enum value.
-    FRAME_INFORMATION_MAX = OVERLAY_INSECURE_NON_PLAYER_ELEMENT_FULLSCREEN
-  };
-
   // The setters do not update the chooser state, since pre-M requires us to be
   // careful about the first update, since we can't change it later.
 
@@ -90,7 +76,7 @@ class MEDIA_GPU_EXPORT SurfaceChooserHelper {
   void SetIsPersistentVideo(bool is_persistent_video);
 
   // Update the chooser state using the given factory.
-  void UpdateChooserState(absl::optional<AndroidOverlayFactoryCB> new_factory);
+  void UpdateChooserState(std::optional<AndroidOverlayFactoryCB> new_factory);
 
   // Notify us about a promotion hint.  This will update the chooser state
   // if needed.
@@ -99,11 +85,6 @@ class MEDIA_GPU_EXPORT SurfaceChooserHelper {
       bool is_using_overlay);
 
   AndroidVideoSurfaceChooser* chooser() const { return surface_chooser_.get(); }
-
-  // Return the FrameInformation bucket number that the config reflects, given
-  // that |is_using_overlay| reflects whether we're currently using an overlay
-  // or not.
-  FrameInformation ComputeFrameInformation(bool is_using_overlay);
 
  private:
   AndroidVideoSurfaceChooser::State surface_chooser_state_;

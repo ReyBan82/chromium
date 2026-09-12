@@ -5,11 +5,14 @@
 #ifndef ASH_QUICK_PAIR_PAIRING_FAST_PAIR_FAST_PAIR_PAIRER_IMPL_H_
 #define ASH_QUICK_PAIR_PAIRING_FAST_PAIR_FAST_PAIR_PAIRER_IMPL_H_
 
+#include <optional>
+
 #include "ash/quick_pair/common/pair_failure.h"
 #include "ash/quick_pair/fast_pair_handshake/fast_pair_gatt_service_client.h"
 #include "ash/quick_pair/pairing/fast_pair/fast_pair_pairer.h"
 #include "ash/quick_pair/proto/fastpair.pb.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
@@ -18,7 +21,6 @@
 #include "chromeos/ash/services/quick_pair/public/cpp/decrypted_passkey.h"
 #include "chromeos/ash/services/quick_pair/public/cpp/decrypted_response.h"
 #include "device/bluetooth/bluetooth_device.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace device {
 
@@ -26,8 +28,7 @@ class BluetoothAdapter;
 
 }  // namespace device
 
-namespace ash {
-namespace quick_pair {
+namespace ash::quick_pair {
 
 class Device;
 enum class AccountKeyFailure;
@@ -49,6 +50,7 @@ class FastPairPairerImpl : public FastPairPairer,
             pair_failed_callback,
         base::OnceCallback<void(scoped_refptr<Device>, AccountKeyFailure)>
             account_key_failure_callback,
+        base::OnceCallback<void(std::u16string, uint32_t)> display_passkey,
         base::OnceCallback<void(scoped_refptr<Device>)>
             pairing_procedure_complete);
 
@@ -65,6 +67,7 @@ class FastPairPairerImpl : public FastPairPairer,
             pair_failed_callback,
         base::OnceCallback<void(scoped_refptr<Device>, AccountKeyFailure)>
             account_key_failure_callback,
+        base::OnceCallback<void(std::u16string, uint32_t)> display_passkey,
         base::OnceCallback<void(scoped_refptr<Device>)>
             pairing_procedure_complete) = 0;
 
@@ -80,6 +83,7 @@ class FastPairPairerImpl : public FastPairPairer,
           pair_failed_callback,
       base::OnceCallback<void(scoped_refptr<Device>, AccountKeyFailure)>
           account_key_failure_callback,
+      base::OnceCallback<void(std::u16string, uint32_t)> display_passkey,
       base::OnceCallback<void(scoped_refptr<Device>)>
           pairing_procedure_complete);
   FastPairPairerImpl(const FastPairPairerImpl&) = delete;
@@ -134,11 +138,11 @@ class FastPairPairerImpl : public FastPairPairer,
 
   // device::BluetoothDevice::Pair callback
   void OnPairConnected(
-      absl::optional<device::BluetoothDevice::ConnectErrorCode> error);
+      std::optional<device::BluetoothDevice::ConnectErrorCode> error);
 
   // device::BluetoothDevice::Connect callback
   void OnConnected(
-      absl::optional<device::BluetoothDevice::ConnectErrorCode> error);
+      std::optional<device::BluetoothDevice::ConnectErrorCode> error);
 
   // device::BluetoothAdapter::ConnectDevice callbacks
   void OnConnectDevice(device::BluetoothDevice* device);
@@ -150,21 +154,19 @@ class FastPairPairerImpl : public FastPairPairer,
 
   //  FastPairHandshakeLookup::Create callback
   void OnHandshakeComplete(scoped_refptr<Device> device,
-                           absl::optional<PairFailure> failure);
+                           std::optional<PairFailure> failure);
 
   // FastPairGattServiceClient::WritePasskey callback
   void OnPasskeyResponse(std::vector<uint8_t> response_bytes,
-                         absl::optional<PairFailure> failure);
+                         std::optional<PairFailure> failure);
 
   // FastPairDataEncryptor::ParseDecryptedPasskey callback
   void OnParseDecryptedPasskey(base::TimeTicks decrypt_start_time,
-                               const absl::optional<DecryptedPasskey>& passkey);
+                               const std::optional<DecryptedPasskey>& passkey);
 
   // FastPairRepository::IsDeviceSavedToAccount callback
   void OnIsDeviceSavedToAccount(bool is_device_saved_to_account);
 
-  // FastPairRepository::CheckOptInStatus callback
-  void OnCheckOptInStatus(nearby::fastpair::OptInStatus status);
 
   // FastPairRepository::UpdateOptInStatus callback
   void OnUpdateOptInStatus(bool success);
@@ -175,7 +177,7 @@ class FastPairPairerImpl : public FastPairPairer,
 
   // FastPairDataEncryptor::WriteAccountKey callback
   void OnWriteAccountKey(std::array<uint8_t, 16> account_key,
-                         absl::optional<AccountKeyFailure> error);
+                         std::optional<AccountKeyFailure> error);
 
   void StartPairing();
 
@@ -185,15 +187,15 @@ class FastPairPairerImpl : public FastPairPairer,
   uint32_t expected_passkey_;
   scoped_refptr<device::BluetoothAdapter> adapter_;
   scoped_refptr<Device> device_;
-  FastPairGattServiceClient* fast_pair_gatt_service_client_;
   std::string pairing_device_address_;
   base::OnceCallback<void(scoped_refptr<Device>)> paired_callback_;
   base::OnceCallback<void(scoped_refptr<Device>, PairFailure)>
       pair_failed_callback_;
   base::OnceCallback<void(scoped_refptr<Device>, AccountKeyFailure)>
       account_key_failure_callback_;
+  base::OnceCallback<void(std::u16string, uint32_t)> display_passkey_;
   base::OnceCallback<void(scoped_refptr<Device>)> pairing_procedure_complete_;
-  FastPairHandshake* fast_pair_handshake_ = nullptr;
+  raw_ptr<FastPairHandshake, DanglingUntriaged> fast_pair_handshake_ = nullptr;
   base::ScopedObservation<device::BluetoothAdapter,
                           device::BluetoothAdapter::Observer>
       adapter_observation_{this};
@@ -206,7 +208,6 @@ class FastPairPairerImpl : public FastPairPairer,
   base::WeakPtrFactory<FastPairPairerImpl> weak_ptr_factory_{this};
 };
 
-}  // namespace quick_pair
-}  // namespace ash
+}  // namespace ash::quick_pair
 
 #endif  // ASH_QUICK_PAIR_PAIRING_FAST_PAIR_FAST_PAIR_PAIRER_IMPL_H_

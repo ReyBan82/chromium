@@ -15,9 +15,18 @@
 #include "base/values.h"
 #include "chrome/common/extensions/api/tabs.h"
 #include "chrome/common/extensions/api/windows.h"
+#include "extensions/buildflags/buildflags.h"
+#include "extensions/common/mojom/context_type.mojom-forward.h"
 
-class Browser;  // TODO(stevenjb) eliminate this dependency.
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
+
+class BrowserWindowInterface;
+class GURL;
 class Profile;
+
+namespace content {
+class WebContents;
+}
 
 namespace ui {
 class BaseWindow;
@@ -26,18 +35,20 @@ class BaseWindow;
 namespace extensions {
 class Extension;
 
-// This API needs to be implemented by any window that might be accessed
-// through various extension APIs for modifying or finding the window.
-// Subclasses must add/remove themselves from the WindowControllerList
-// upon construction/destruction.
+// This API provides a way for the extension system to talk "up" to the
+// enclosing window (the `Browser` object on desktop builds) without depending
+// on the implementation details of the exact object.
+//
+// Subclasses must add/remove themselves from the WindowControllerList upon
+// construction/destruction.
 class WindowController {
  public:
-  enum Reason {
-    REASON_NONE,
-    REASON_NOT_EDITABLE,
+  enum PopulateTabBehavior {
+    kPopulateTabs,
+    kDontPopulateTabs,
   };
 
-  // A bitmaks used as filter on window types.
+  // A bitmask used as filter on window types.
   using TypeFilter = uint32_t;
 
   // Represents the lack of any window filter, implying
@@ -53,7 +64,7 @@ class WindowController {
       const std::vector<api::windows::WindowType>& types);
 
   static TypeFilter GetFilterFromWindowTypesValues(
-      const base::Value::List* types);
+      const base::ListValue* types);
 
   WindowController(ui::BaseWindow* window, Profile* profile);
   WindowController(const WindowController&) = delete;
@@ -71,28 +82,78 @@ class WindowController {
   // TODO(devlin): Remove this in favor of the method on ExtensionTabUtil.
   virtual std::string GetWindowTypeText() const = 0;
 
-  // Returns false if the window is in a state where closing the window is not
-  // permitted and sets |reason| if not NULL.
-  virtual bool CanClose(Reason* reason) const = 0;
+  // Sets the window's fullscreen state. `extension_url` provides the url
+  // associated with the extension (used by FullscreenController).
+  virtual void SetFullscreenMode(bool is_fullscreen,
+                                 const GURL& extension_url) const = 0;
 
+  // Returns the BrowserWindowInterface associated with this window controller,
+  // if any. Defaults to returning null.
+  virtual BrowserWindowInterface* GetBrowserWindowInterface();
+
+#if !BUILDFLAG(IS_ANDROID)
   // Returns a Browser if available. Defaults to returning NULL.
   // TODO(stevenjb): Temporary workaround. Eliminate this.
-  virtual Browser* GetBrowser() const;
+  virtual BrowserWindowInterface* GetBrowser() const;
+#endif
+
+  // Returns the WebContents associated with the active tab, if any. Returns
+  // null if there is no active tab.
+  virtual content::WebContents* GetActiveTab() const = 0;
+
+  // Returns the number of tabs in this window.
+  virtual int GetTabCount() const = 0;
+
+  // Returns the web contents at the given tab index, or null if it's off the
+  // end of the tab strip.
+  virtual content::WebContents* GetWebContentsAt(int i) const = 0;
 
   // Returns true if the window is visible to the tabs API, when used by the
-  // given |extension|.
-  // |allow_dev_tools_windows| indicates whether dev tools windows should be
+  // given `extension`.
+  // `allow_dev_tools_windows` indicates whether dev tools windows should be
   // treated as visible.
   // TODO(devlin): Remove include_dev_tools_windows.
   virtual bool IsVisibleToTabsAPIForExtension(
       const Extension* extension,
       bool include_dev_tools_windows) const = 0;
 
-  // Returns true if the window type of the controller matches the |filter|.
+  // Returns true if the window type of the controller matches the `filter`.
   bool MatchesFilter(TypeFilter filter) const;
 
   // Notifies that a window's bounds are changed.
   void NotifyWindowBoundsChanged();
+
+  // Notifies that a window's focus is changed.
+  //
+  // As of Sep 23, 2025, this API was only used on desktop Android.
+  // TODO(http://crbug.com/446925633): Use this API on non-Android OSes.
+  void NotifyWindowFocusChanged(bool has_focus);
+
+  // Creates a base::DictValue representing the window for the browser and
+  // scrubs any privacy-sensitive data that `extension` does not have access to.
+  // `populate_tab_behavior` determines whether tabs will be populated in the
+  // result. `context` is used to determine the ScrubTabBehavior for the
+  // populated tabs data.
+  // TODO(devlin): Convert this to a api::Windows::Window object.
+  virtual base::DictValue CreateWindowValueForExtension(
+      const Extension* extension,
+      PopulateTabBehavior populate_tab_behavior,
+      mojom::ContextType context) const = 0;
+
+  // Returns the JSON tab information for all tabs in this window. See the
+  // chrome.tabs.getAllInWindow() extensions API.
+  virtual base::ListValue CreateTabList(const Extension* extension,
+                                        mojom::ContextType context) const = 0;
+
+  // Open the extension's options page as instructed. Returns true if an options
+  // page was successfully opened (though it may not necessarily *load*, e.g. if
+  // the URL does not exist).
+  virtual bool OpenOptionsPage(const Extension* extension,
+                               const GURL& url,
+                               bool open_in_tab) = 0;
+
+  ui::BaseWindow* window() { return window_.get(); }
+  Profile* profile() { return profile_.get(); }
 
  private:
   raw_ptr<ui::BaseWindow, DanglingUntriaged> window_;

@@ -2,26 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var allTests = [
+const allTests = [
   async function testTwoWindows() {
-    const url1 = 'data:text/html,' +
-        encodeURI('<div>Don\'t Click Me</div>' +
-                  '<button>Click Me</button>');
-    const url2 = 'data:text/html,' +
-        encodeURI('<div>Don\'t Click Me too</div>' +
-                  '<button>Click Me too</button>');
+    const url1 = `data:text/html,${
+        encodeURI(`<div>Don't Click Me</div><button>Click Me</button>`)}`;
+    const url2 = `data:text/html,${
+        encodeURI(
+            `<div>Don't Click Me too</div><button>Click Me too</button>`)}`;
     const desktop =
         await new Promise(resolve => chrome.automation.getDesktop(resolve));
     chrome.windows.create({url: url1, focused: true});
-    const button1 = await new Promise(
-        resolve => {desktop.addEventListener(
-            chrome.automation.EventType.LOAD_COMPLETE, (event) => {
-              const button = desktop.find(
-                  {attributes: {name: 'Click Me', role: 'button'}});
-              if (button) {
-                resolve(button);
-              }
-            })});
+    const button1 = await new Promise(resolve => {
+      desktop.addEventListener(
+          chrome.automation.EventType.LOAD_COMPLETE, (event) => {
+            const button =
+                desktop.find({attributes: {name: 'Click Me', role: 'button'}});
+            if (button) {
+              resolve(button);
+            }
+          });
+    });
 
     const hitButton1 = await new Promise(
         resolve => desktop.hitTestWithReply(
@@ -54,8 +54,8 @@ var allTests = [
 
     // Note that the hit test might return either a static text or the button.
     chrome.test.assertTrue(
-        hitButton2.role == chrome.automation.RoleType.BUTTON ||
-        hitButton2.role == chrome.automation.RoleType.STATIC_TEXT);
+        hitButton2.role === chrome.automation.RoleType.BUTTON ||
+        hitButton2.role === chrome.automation.RoleType.STATIC_TEXT);
     chrome.test.succeed();
   },
 ];

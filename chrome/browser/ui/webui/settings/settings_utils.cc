@@ -5,33 +5,19 @@
 #include "chrome/browser/ui/webui/settings/settings_utils.h"
 
 #include "chrome/browser/extensions/extension_tab_util.h"
-#include "chrome/grit/theme_resources.h"
-#include "components/grit/components_scaled_resources.h"
 #include "components/url_formatter/url_fixer.h"
-#include "ui/base/resource/resource_bundle.h"
 #include "url/gurl.h"
 
 namespace settings_utils {
 
 bool FixupAndValidateStartupPage(const std::string& url_string,
                                  GURL* fixed_url) {
-  GURL url = url_formatter::FixupURL(url_string, std::string());
+  GURL url = url_formatter::FixupURL(url_string);
   bool valid = url.is_valid() && !extensions::ExtensionTabUtil::IsKillURL(url);
-  if (valid && fixed_url)
+  if (valid && fixed_url) {
     fixed_url->Swap(&url);
+  }
   return valid;
-}
-
-base::RefCountedMemory* GetFaviconResourceBytes(
-    ui::ResourceScaleFactor scale_factor) {
-  return ui::ResourceBundle::GetSharedInstance().LoadDataResourceBytesForScale(
-      IDR_SETTINGS_FAVICON, scale_factor);
-}
-
-base::RefCountedMemory* GetPrivacySandboxFaviconResourceBytes(
-    ui::ResourceScaleFactor scale_factor) {
-  return ui::ResourceBundle::GetSharedInstance().LoadDataResourceBytesForScale(
-      IDR_FLAGS_FAVICON, scale_factor);
 }
 
 }  // namespace settings_utils

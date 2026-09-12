@@ -2,11 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {assert, assertNotReached} from 'chrome://resources/js/assert_ts.js';
-import {InsetsF} from 'chrome://resources/mojo/ui/gfx/geometry/mojom/geometry.mojom-webui.js';
+import {assert, assertNotReached} from '//resources/js/assert.js';
+import type {Options as TrackedElementOptions} from '//resources/js/tracked_element/tracked_element_manager.js';
+import type {InsetsF, RectF} from '//resources/mojo/ui/gfx/geometry/mojom/geometry.mojom-webui.js';
 
-import {HelpBubbleElement} from './help_bubble.js';
-import {HelpBubbleParams} from './help_bubble.mojom-webui.js';
+import type {HelpBubbleElement} from './help_bubble.js';
+import {HELP_BUBBLE_SCROLL_ANCHOR_OPTIONS} from './help_bubble.js';
+import type {HelpBubbleParams} from './help_bubble.mojom-webui.js';
+import {HelpBubbleArrowPosition} from './help_bubble.mojom-webui.js';
 
 type Root = HTMLElement|ShadowRoot&{shadowRoot?: ShadowRoot};
 
@@ -14,11 +17,58 @@ export type Trackable = string|string[]|HTMLElement|Element;
 
 export const ANCHOR_HIGHLIGHT_CLASS = 'help-anchor-highlight';
 
-interface Options {
-  padding: InsetsF;
-  fixed: boolean;
+export interface HelpBubbleOptions extends TrackedElementOptions {
+  containerElement?: HTMLElement;
+  onHelpBubbleShown?: () => void;
+  onHelpBubbleHidden?: () => void;
 }
 
+function clampPadding(n: number = 0) {
+  return Math.max(0, Math.min(20, n));
+}
+
+// Return whether the current language is right-to-left
+function isRtlLang(element: HTMLElement) {
+  return window.getComputedStyle(element).direction === 'rtl';
+}
+
+// Reflect arrow position across y-axis
+function reflectArrowPosition(position: HelpBubbleArrowPosition) {
+  switch (position) {
+    case HelpBubbleArrowPosition.TOP_LEFT:
+      return HelpBubbleArrowPosition.TOP_RIGHT;
+
+    case HelpBubbleArrowPosition.TOP_RIGHT:
+      return HelpBubbleArrowPosition.TOP_LEFT;
+
+    case HelpBubbleArrowPosition.BOTTOM_LEFT:
+      return HelpBubbleArrowPosition.BOTTOM_RIGHT;
+
+    case HelpBubbleArrowPosition.BOTTOM_RIGHT:
+      return HelpBubbleArrowPosition.BOTTOM_LEFT;
+
+    case HelpBubbleArrowPosition.LEFT_TOP:
+      return HelpBubbleArrowPosition.RIGHT_TOP;
+
+    case HelpBubbleArrowPosition.LEFT_CENTER:
+      return HelpBubbleArrowPosition.RIGHT_CENTER;
+
+    case HelpBubbleArrowPosition.LEFT_BOTTOM:
+      return HelpBubbleArrowPosition.RIGHT_BOTTOM;
+
+    case HelpBubbleArrowPosition.RIGHT_TOP:
+      return HelpBubbleArrowPosition.LEFT_TOP;
+
+    case HelpBubbleArrowPosition.RIGHT_CENTER:
+      return HelpBubbleArrowPosition.LEFT_CENTER;
+
+    case HelpBubbleArrowPosition.RIGHT_BOTTOM:
+      return HelpBubbleArrowPosition.LEFT_BOTTOM;
+
+    default:
+      return position;
+  }
+}
 
 /**
  * HelpBubble controller class
@@ -31,15 +81,7 @@ export class HelpBubbleController {
   private root_: ShadowRoot;
   private anchor_: HTMLElement|null = null;
   private bubble_: HelpBubbleElement|null = null;
-  private options_: Options = {padding: new InsetsF(), fixed: false};
-
-  /**
-   * Whether the anchor element is contained in an element that is scrollable
-   * but is not the document body. These elements require different visibility
-   * handling as they will not technically intersect the document body when
-   * they're scrolled out of view.
-   */
-  private isNonBodyScrollable_: boolean = false;
+  private options_: HelpBubbleOptions = {};
 
   /**
    * Whether a help bubble (webui or external) is being shown for this
@@ -47,8 +89,11 @@ export class HelpBubbleController {
    */
   private isBubbleShowing_: boolean = false;
 
-  // Keep track of last-known anchor visibility status
+  /** Keep track of last known anchor visibility status. */
   private isAnchorVisible_: boolean = false;
+
+  /** Keep track of last known anchor bounds. */
+  private lastAnchorBounds_: RectF = {x: 0, y: 0, width: 0, height: 0};
 
   /*
    * This flag is used to know whether to send position updates for
@@ -96,24 +141,44 @@ export class HelpBubbleController {
     return this.nativeId_;
   }
 
+  /** Returns the original options passed during registration. */
+  getOptions() {
+    return this.options_;
+  }
+
   getPadding() {
-    return this.options_.padding;
+    const padding: InsetsF = {top: 0, bottom: 0, left: 0, right: 0};
+    padding.top = clampPadding(this.options_.paddingTop);
+    padding.left = clampPadding(this.options_.paddingLeft);
+    padding.bottom = clampPadding(this.options_.paddingBottom);
+    padding.right = clampPadding(this.options_.paddingRight);
+    return padding;
   }
 
   getAnchorVisibility() {
     return this.isAnchorVisible_;
   }
 
-  cacheAnchorVisibility(isVisible: boolean) {
+  getLastAnchorBounds() {
+    return this.lastAnchorBounds_;
+  }
+
+  updateAnchorVisibility(isVisible: boolean, bounds: RectF): boolean {
+    const changed = isVisible !== this.isAnchorVisible_ ||
+        bounds.x !== this.lastAnchorBounds_.x ||
+        bounds.y !== this.lastAnchorBounds_.y ||
+        bounds.width !== this.lastAnchorBounds_.width ||
+        bounds.height !== this.lastAnchorBounds_.height;
     this.isAnchorVisible_ = isVisible;
+    this.lastAnchorBounds_ = bounds;
+    if (changed && this.bubble_ && isVisible) {
+      this.bubble_.updatePosition();
+    }
+    return changed;
   }
 
   isAnchorFixed(): boolean {
-    return this.options_.fixed;
-  }
-
-  isNonBodyScrollable(): boolean {
-    return this.isNonBodyScrollable_;
+    return !!this.options_.fixed;
   }
 
   isExternal() {
@@ -124,9 +189,14 @@ export class HelpBubbleController {
     this.isExternal_ = true;
     this.isBubbleShowing_ = isShowing;
     this.setAnchorHighlight_(isShowing);
+    if (isShowing) {
+      this.options_.onHelpBubbleShown?.();
+    } else {
+      this.options_.onHelpBubbleHidden?.();
+    }
   }
 
-  track(trackable: Trackable, options: Options): boolean {
+  track(trackable: Trackable, options: HelpBubbleOptions): boolean {
     assert(!this.anchor_);
 
     let anchor: HTMLElement|null = null;
@@ -146,11 +216,8 @@ export class HelpBubbleController {
       return false;
     }
 
-    anchor.dataset['nativeId'] = this.nativeId_;
     this.anchor_ = anchor;
     this.options_ = options;
-    this.isNonBodyScrollable_ =
-        !options.fixed && HelpBubbleController.getIsNonBodyScrollable_(anchor);
     return true;
   }
 
@@ -176,9 +243,9 @@ export class HelpBubbleController {
       return;
     }
     this.bubble_.show(this.anchor_);
-    this.anchor_.focus();
     this.isBubbleShowing_ = true;
     this.setAnchorHighlight_(true);
+    this.options_.onHelpBubbleShown?.();
   }
 
   hide() {
@@ -190,28 +257,33 @@ export class HelpBubbleController {
     this.bubble_ = null;
     this.isBubbleShowing_ = false;
     this.setAnchorHighlight_(false);
+    this.options_.onHelpBubbleHidden?.();
   }
 
   createBubble(params: HelpBubbleParams): HelpBubbleElement {
     assert(
         this.anchor_,
         'HelpBubble: anchor was not defined when showing help bubble');
+    assert(this.anchor_.parentNode, 'HelpBubble: anchor element not in DOM');
 
     this.bubble_ = document.createElement('help-bubble');
     this.bubble_.nativeId = this.nativeId_;
-    this.bubble_.position = params.position;
+    this.bubble_.secondaryId = params.id.secondaryIdentifier;
+    this.bubble_.position = isRtlLang(this.anchor_) ?
+        reflectArrowPosition(params.position) :
+        params.position;
     this.bubble_.closeButtonAltText = params.closeButtonAltText;
     this.bubble_.bodyText = params.bodyText;
     this.bubble_.bodyIconName = params.bodyIconName || null;
     this.bubble_.bodyIconAltText = params.bodyIconAltText;
-    this.bubble_.forceCloseButton = params.forceCloseButton;
     this.bubble_.titleText = params.titleText || '';
     this.bubble_.progress = params.progress || null;
     this.bubble_.buttons = params.buttons;
-    this.bubble_.padding = this.options_.padding;
+    this.bubble_.padding = this.getPadding();
+    this.bubble_.focusAnchor = params.focusOnShowHint === false;
 
     if (params.timeout) {
-      this.bubble_.timeoutMs = Number(params.timeout!.microseconds / 1000n);
+      this.bubble_.timeoutMs = Number(params.timeout.microseconds / 1000n);
       assert(this.bubble_.timeoutMs > 0);
     }
 
@@ -221,31 +293,23 @@ export class HelpBubbleController {
 
     assert(this.root_);
 
-    // The bubble must be placed in the same coordinate system as the anchor.
-    // The `offsetParent` of an element is the element which provides its
-    // coordinate reference frame. The help bubble must also be a descendant of
-    // the host (want to avoid placing the help bubble outside the mixin
-    // element). This provides three possible cases:
-    //  - Fixed anchor. `offsetParent` is null, coordinates are relative to the
-    //    viewport. The help bubble must also be fixed.
-    //  - `offsetParent` is the host or an enclosing element. The help bubble is
-    //    placed in the host's shadow DOM, ensuring it shares a coordinate
-    //    system (the only way this wouldn't work would be if the anchor were
-    //    outside the host, which is a misuse of the help bubble system).
-    //  - `offsetParent` is inside the host. The help bubble is parented to the
-    //    `offsetParent`, guaranteeing that the coordinate systems are the same.
-    const offsetParent = this.anchor_.offsetParent;
-    const bubbleParent = (offsetParent && this.root_.contains(offsetParent)) ?
-        offsetParent :
-        this.root_;
+    // Because the help bubble uses either absolute or fixed positioning, it
+    // need only be placed within the offset parent of the anchor. However it is
+    // placed as a sibling to the anchor because that guarantees proper tab
+    // order.
     if (getComputedStyle(this.anchor_).getPropertyValue('position') ===
         'fixed') {
       this.bubble_.fixed = true;
     }
-    bubbleParent.appendChild(this.bubble_);
+
+    const container = this.options_.containerElement;
+    if (container) {
+      container.appendChild(this.bubble_);
+    } else {
+      this.anchor_.parentNode.insertBefore(this.bubble_, this.anchor_);
+    }
     return this.bubble_;
   }
-
 
   /**
    * Styles the anchor element to appear highlighted while the bubble is open,
@@ -255,39 +319,9 @@ export class HelpBubbleController {
     assert(
         this.anchor_, 'Set anchor highlight: expected valid anchor element.');
     this.anchor_.classList.toggle(ANCHOR_HIGHLIGHT_CLASS, highlight);
-  }
-
-  /**
-   * Gets the immediate ancestor element of `element` in the DOM, or null if
-   * none. This steps out of shadow DOMs as it finds them.
-   */
-  private static getImmediateAncestor(element: Element): Element|null {
-    if (element.parentElement) {
-      return element.parentElement;
+    if (highlight) {
+      (this.bubble_ || this.anchor_).focus();
+      this.anchor_.scrollIntoView(HELP_BUBBLE_SCROLL_ANCHOR_OPTIONS);
     }
-    if (element.parentNode instanceof ShadowRoot) {
-      return (element.parentNode as ShadowRoot).host;
-    }
-    return null;
-  }
-
-  /**
-   * Returns whether `element` has an ancestor in the document that is
-   * scrollable and that is not the document body. These elements require
-   * special visibility handling.
-   */
-  private static getIsNonBodyScrollable_(element: Element): boolean {
-    const scrollableOverflow = ['scroll', 'auto', 'overlay'];
-    for (let parent = HelpBubbleController.getImmediateAncestor(element);
-         parent && parent !== document.body;
-         parent = HelpBubbleController.getImmediateAncestor(parent)) {
-      const style = getComputedStyle(parent);
-      if (scrollableOverflow.includes(style.overflow) ||
-          scrollableOverflow.includes(style.overflowX) ||
-          scrollableOverflow.includes(style.overflowY)) {
-        return true;
-      }
-    }
-    return false;
   }
 }

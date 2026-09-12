@@ -8,10 +8,10 @@ Inspector issue: {
                     frameId : <string>
                 }
                 sourceCodeLocation : {
-                    columnNumber : 11
+                    columnNumber : 10
                     lineNumber : 0
                     scriptId : <string>
-                    url : 
+                    url :
                 }
                 type : PersistentQuotaType
             }

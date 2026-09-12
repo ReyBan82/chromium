@@ -6,15 +6,15 @@
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_FONT_ACCESS_FONT_METADATA_H_
 
 #include "third_party/blink/public/platform/web_common.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
-
+class Blob;
 class ScriptState;
-class ScriptPromise;
-class ScriptPromiseResolver;
 
 struct FontEnumerationEntry {
   String postscript_name;
@@ -28,8 +28,6 @@ class BLINK_EXPORT FontMetadata final : public ScriptWrappable {
 
  public:
   explicit FontMetadata(const FontEnumerationEntry& entry);
-
-  static FontMetadata* Create(const FontEnumerationEntry& entry);
 
   // The tables below represent the properties made available via the API.
   //
@@ -51,20 +49,18 @@ class BLINK_EXPORT FontMetadata final : public ScriptWrappable {
   //  | fullName       |       4 | Yes       |
   //  +----------------+---------+-----------+
 
-  String postscriptName() const { return postscriptName_; }
-  String fullName() const { return fullName_; }
+  String postscriptName() const { return postscript_name_; }
+  String fullName() const { return full_name_; }
   String family() const { return family_; }
   String style() const { return style_; }
 
-  ScriptPromise blob(ScriptState*);
-
-  void Trace(Visitor*) const override;
+  ScriptPromise<Blob> blob(ScriptState*);
 
  private:
-  static void BlobImpl(ScriptPromiseResolver* resolver,
-                       const String& postscriptName);
-  String postscriptName_;
-  String fullName_;
+  static void BlobImpl(ScriptPromiseResolver<Blob>* resolver,
+                       const String& postscript_name);
+  String postscript_name_;
+  String full_name_;
   String family_;
   String style_;
 };

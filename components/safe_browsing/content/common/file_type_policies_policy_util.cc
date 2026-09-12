@@ -5,7 +5,7 @@
 #include "components/safe_browsing/content/common/file_type_policies_policy_util.h"
 
 #include "base/strings/string_util.h"
-#include "components/policy/core/browser/url_blocklist_manager.h"
+#include "components/policy/core/browser/url_list/url_blocklist_manager.h"
 #include "components/prefs/pref_service.h"
 #include "components/safe_browsing/content/common/file_type_policies_prefs.h"
 #include "components/url_matcher/url_matcher.h"
@@ -22,34 +22,42 @@ constexpr char kDomainListKey[] = "domains";
 
 }  // namespace
 
-bool IsInNotDangerousOverrideList(const std::string& extension,
-                                  const GURL& url,
-                                  const PrefService* prefs) {
-  GURL normalized_url = url;
-  if (normalized_url.SchemeIsBlob()) {
-    normalized_url = url::Origin::Create(normalized_url).GetURL();
+FileTypePoliciesOverrideResult ShouldOverrideFileTypePolicies(
+    const std::string& extension,
+    const GURL& url,
+    const PrefService* prefs) {
+  if (!url.is_valid()) {
+    return FileTypePoliciesOverrideResult::kDoNotOverride;
   }
 
-  // no overrides if we don't have this policy set or the url is invalid.
-  if (!prefs || !normalized_url.is_valid() ||
+  // If the download is a local file, suppress "dangerous file" warnings because
+  // they are not helpful at this point; the file is already on disk.
+  if (url.SchemeIsFile() && url.host().empty()) {
+    return FileTypePoliciesOverrideResult::kOverrideAsNotDangerous;
+  }
+
+  // Check for a match on the list of exempt URL pattern and filetype pairs.
+  // The list is supplied as a pref/policy.
+  if (!prefs ||
       !prefs->HasPrefPath(
           file_type::prefs::
               kExemptDomainFileTypePairsFromFileTypeDownloadWarnings)) {
-    return false;
+    return FileTypePoliciesOverrideResult::kDoNotOverride;
   }
-  const base::Value::List& heuristic_overrides = prefs->GetList(
+  const base::ListValue& heuristic_overrides = prefs->GetList(
       file_type::prefs::kExemptDomainFileTypePairsFromFileTypeDownloadWarnings);
 
   const std::string lower_extension = base::ToLowerASCII(extension);
 
-  base::Value::List domains_for_extension;
+  base::ListValue domains_for_extension;
   for (const base::Value& entry : heuristic_overrides) {
-    const base::Value::Dict& extension_domain_patterns_dict = entry.GetDict();
+    const base::DictValue& extension_domain_patterns_dict = entry.GetDict();
     const std::string* extension_for_this_entry =
         extension_domain_patterns_dict.FindString(kFileExtensionNameKey);
     if (extension_for_this_entry &&
-        base::ToLowerASCII(*extension_for_this_entry) == lower_extension) {
-      const base::Value::List* domains_for_this_entry =
+        base::EqualsCaseInsensitiveASCII(*extension_for_this_entry,
+                                         lower_extension)) {
+      const base::ListValue* domains_for_this_entry =
           extension_domain_patterns_dict.FindList(kDomainListKey);
       if (domains_for_this_entry) {
         for (const base::Value& domain : *domains_for_this_entry) {
@@ -62,12 +70,16 @@ bool IsInNotDangerousOverrideList(const std::string& extension,
   if (!domains_for_extension.empty()) {
     url_matcher::URLMatcher matcher;
     base::MatcherStringPattern::ID id(0);
-    url_matcher::util::AddFilters(&matcher, true, &id, domains_for_extension);
-    auto matching_set_size = matcher.MatchURL(normalized_url).size();
-    return matching_set_size > 0;
+    url_matcher::util::AddFiltersWithLimit(&matcher, true, &id,
+                                           domains_for_extension);
+    GURL normalized_url =
+        url.SchemeIsBlob() ? url::Origin::Create(url).GetURL() : url;
+    if (!matcher.MatchURL(normalized_url).empty()) {
+      return FileTypePoliciesOverrideResult::kOverrideAsNotDangerous;
+    }
   }
 
-  return false;
+  return FileTypePoliciesOverrideResult::kDoNotOverride;
 }
 
 }  // namespace safe_browsing

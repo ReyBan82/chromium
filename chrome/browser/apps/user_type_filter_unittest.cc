@@ -13,7 +13,6 @@
 #include "chrome/browser/policy/profile_policy_connector.h"
 #include "chrome/browser/profiles/profile_test_util.h"
 #include "chrome/test/base/testing_profile.h"
-#include "components/supervised_user/core/common/buildflags.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -22,12 +21,12 @@ namespace apps {
 namespace {
 
 // Helper that simulates Json file with embedded user type filter.
-base::Value::Dict CreateJsonWithFilter(
+base::DictValue CreateJsonWithFilter(
     const std::vector<std::string>& user_types) {
-  base::Value::List filter;
+  base::ListValue filter;
   for (const auto& user_type : user_types)
     filter.Append(base::Value(user_type));
-  base::Value::Dict root;
+  base::DictValue root;
   root.Set(kKeyUserType, std::move(filter));
   return root;
 }
@@ -56,15 +55,15 @@ class UserTypeFilterTest : public testing::Test {
   }
 
   bool Match(const std::unique_ptr<TestingProfile>& profile,
-             const base::Value::Dict& json_root) {
+             const base::DictValue& json_root) {
     return UserTypeMatchesJsonUserType(DetermineUserType(profile.get()),
                                        std::string() /* app_id */, json_root,
                                        nullptr /* default_user_types */);
   }
 
   bool MatchDefault(const std::unique_ptr<TestingProfile>& profile,
-                    const base::Value::List& default_user_types) {
-    base::Value::Dict json_root;
+                    const base::ListValue& default_user_types) {
+    base::DictValue json_root;
     return UserTypeMatchesJsonUserType(DetermineUserType(profile.get()),
                                        std::string() /* app_id */, json_root,
                                        &default_user_types);
@@ -75,7 +74,6 @@ class UserTypeFilterTest : public testing::Test {
   content::BrowserTaskEnvironment task_environment_;
 };
 
-#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
 TEST_F(UserTypeFilterTest, ChildUser) {
   const auto profile = CreateProfile();
   profile->SetIsSupervisedProfile();
@@ -84,7 +82,6 @@ TEST_F(UserTypeFilterTest, ChildUser) {
   EXPECT_TRUE(Match(
       profile, CreateJsonWithFilter({kUserTypeUnmanaged, kUserTypeChild})));
 }
-#endif  // BUILDFLAG(ENABLE_SUPERVISED_USERS)
 
 TEST_F(UserTypeFilterTest, GuestUser) {
   auto profile = CreateGuestProfile();
@@ -126,7 +123,7 @@ TEST_F(UserTypeFilterTest, EmptyFilter) {
 
 TEST_F(UserTypeFilterTest, DefaultFilter) {
   auto profile = CreateProfile();
-  base::Value::List default_filter;
+  base::ListValue default_filter;
   default_filter.Append(base::Value(kUserTypeUnmanaged));
   default_filter.Append(base::Value(kUserTypeGuest));
 
@@ -134,11 +131,9 @@ TEST_F(UserTypeFilterTest, DefaultFilter) {
   EXPECT_TRUE(MatchDefault(profile, default_filter));
   // Guest user.
   EXPECT_TRUE(MatchDefault(CreateGuestProfile(), default_filter));
-#if BUILDFLAG(ENABLE_SUPERVISED_USERS)
   // Child user.
   profile->SetIsSupervisedProfile();
   EXPECT_FALSE(MatchDefault(profile, default_filter));
-#endif  // BUILDFLAG(ENABLE_SUPERVISED_USERS)
   // Managed user.
   profile = CreateProfile();
   profile->GetProfilePolicyConnector()->OverrideIsManagedForTesting(true);

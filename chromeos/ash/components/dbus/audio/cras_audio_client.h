@@ -14,9 +14,11 @@
 #include "base/component_export.h"
 #include "base/containers/flat_map.h"
 #include "base/functional/callback.h"
+#include "base/observer_list_types.h"
 #include "chromeos/ash/components/dbus/audio/audio_node.h"
+#include "chromeos/ash/components/dbus/audio/voice_isolation_ui_appearance.h"
 #include "chromeos/ash/components/dbus/audio/volume_state.h"
-#include "chromeos/dbus/common/dbus_method_call_status.h"
+#include "chromeos/dbus/common/dbus_callback.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 
 namespace dbus {
@@ -29,57 +31,74 @@ namespace ash {
 class COMPONENT_EXPORT(DBUS_AUDIO) CrasAudioClient {
  public:
   // Interface for observing changes from the cras audio changes.
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
     // Called when cras audio client starts or re-starts, which happens when
     // cros device powers up or restarted.
-    virtual void AudioClientRestarted();
+    virtual void AudioClientRestarted() {}
 
     // Called when audio output mute state changed to new state of |mute_on|.
-    virtual void OutputMuteChanged(bool mute_on);
+    virtual void OutputMuteChanged(bool mute_on) {}
 
     // Called when audio input mute state changed to new state of |mute_on|.
-    virtual void InputMuteChanged(bool mute_on);
+    virtual void InputMuteChanged(bool mute_on) {}
 
     // Called when audio nodes change.
-    virtual void NodesChanged();
+    virtual void NodesChanged() {}
 
     // Called when active audio output node changed to new node with |node_id|.
-    virtual void ActiveOutputNodeChanged(uint64_t node_id);
+    virtual void ActiveOutputNodeChanged(uint64_t node_id) {}
 
     // Called when active audio input node changed to new node with |node_id|.
-    virtual void ActiveInputNodeChanged(uint64_t node_id);
+    virtual void ActiveInputNodeChanged(uint64_t node_id) {}
 
     // Called when output node's volume changed.
-    virtual void OutputNodeVolumeChanged(uint64_t node_id, int volume);
+    virtual void OutputNodeVolumeChanged(uint64_t node_id, int volume) {}
 
     // Called when input node's gain changed.
-    virtual void InputNodeGainChanged(uint64_t node_id, int volume);
+    virtual void InputNodeGainChanged(uint64_t node_id, int volume) {}
 
     // Called when hotword is triggered.
-    virtual void HotwordTriggered(uint64_t tv_sec, uint64_t tv_nsec);
+    virtual void HotwordTriggered(uint64_t tv_sec, uint64_t tv_nsec) {}
 
     // Called when the number of active output streams has changed.
-    virtual void NumberOfActiveStreamsChanged();
+    virtual void NumberOfActiveStreamsChanged() {}
 
     // Called when the battery level for a Bluetooth headset changed.
     virtual void BluetoothBatteryChanged(const std::string& address,
-                                         uint32_t level);
+                                         uint32_t level) {}
 
     // Called when the number of input streams with permission per client type
     // changed.
     virtual void NumberOfInputStreamsWithPermissionChanged(
-        const base::flat_map<std::string, uint32_t>& num_input_streams);
+        const base::flat_map<std::string, uint32_t>& num_input_streams) {}
 
     // Called when an audio survey should be triggered.
     virtual void SurveyTriggered(
-        const base::flat_map<std::string, std::string>& survey_specific_data);
+        const base::flat_map<std::string, std::string>& survey_specific_data) {}
 
     // Called when a new speak-on-mute signal is detected.
-    virtual void SpeakOnMuteDetected();
+    virtual void SpeakOnMuteDetected() {}
 
-   protected:
-    virtual ~Observer();
+    // Called when ewma power reported by cras.
+    virtual void EwmaPowerReported(double power) {}
+
+    // Called when NumberOfNonChromeOutputStreamsChanged is detected.
+    virtual void NumberOfNonChromeOutputStreamsChanged() {}
+
+    // Called when num-stream-ignore-ui-gains is changed.
+    virtual void NumStreamIgnoreUiGains(int32_t num) {}
+
+    // Called when NumberOfArcStreamsChanged is detected.
+    virtual void NumberOfArcStreamsChanged() {}
+
+    // Called when there is a new active node to indicate whether sidetone is
+    // supported.
+    virtual void SidetoneSupportedChanged(bool supported) {}
+
+    // Called when there is a new audio effect ui appearance to render.
+    virtual void AudioEffectUIAppearanceChanged(
+        VoiceIsolationUIAppearance appearance) {}
   };
 
   // Creates and initializes the global instance. |bus| must not be null.
@@ -147,11 +166,9 @@ class COMPONENT_EXPORT(DBUS_AUDIO) CrasAudioClient {
   virtual void GetNumberOfInputStreamsWithPermission(
       chromeos::DBusMethodCallback<base::flat_map<std::string, uint32_t>>) = 0;
 
-  // Gets the DeprioritzeBtWbsMic flag. On a few platforms CRAS may
-  // report to deprioritize Bluetooth WBS mic's node priority because
-  // WBS feature is still working to be stabilized.
-  virtual void GetDeprioritizeBtWbsMic(
-      chromeos::DBusMethodCallback<bool> callback) = 0;
+  // Get the number of active non-chrome output streams.
+  virtual void GetNumberOfNonChromeOutputStreams(
+      chromeos::DBusMethodCallback<int32_t> callback) = 0;
 
   // Gets if speak-on-mute detection is enabled.
   virtual void GetSpeakOnMuteDetectionEnabled(
@@ -171,11 +188,37 @@ class COMPONENT_EXPORT(DBUS_AUDIO) CrasAudioClient {
   // Sets input mute state to |mute_on| value.
   virtual void SetInputMute(bool mute_on) = 0;
 
+  // Gets the DLC IDs of the audio effects supported by the device.
+  virtual void GetAudioEffectDlcs(
+      chromeos::DBusMethodCallback<std::string> callback) = 0;
+
+  // Gets the appearance of the voice isolation UI.
+  virtual void GetVoiceIsolationUIAppearance(
+      chromeos::DBusMethodCallback<VoiceIsolationUIAppearance> callback) = 0;
+
+  // Sets input voice isolation state to |voice_isolation_on| value.
+  virtual void SetVoiceIsolationUIEnabled(bool voice_isolation_on) = 0;
+
+  // Sets the preferred effect mode of voice isolation.
+  virtual void SetVoiceIsolationUIPreferredEffect(uint32_t effect_mode) = 0;
+
+  // Sets input krisp noise cancellation state to |krisp_noise_cancellation_on|
+  // value.
+  virtual void SetKrispNoiseCancellationEnabled(
+      bool krisp_noise_cancellation_on) = 0;
+
   // Sets input noise cancellation state to |noise_cancellation_on| value.
   virtual void SetNoiseCancellationEnabled(bool noise_cancellation_on) = 0;
 
   // Gets if Noise Cancellation is supported.
   virtual void GetNoiseCancellationSupported(
+      chromeos::DBusMethodCallback<bool> callback) = 0;
+
+  // Sets input style transfer state to |style_transfer_on| value.
+  virtual void SetStyleTransferEnabled(bool style_transfer_on) = 0;
+
+  // Gets if style transfer is supported.
+  virtual void GetStyleTransferSupported(
       chromeos::DBusMethodCallback<bool> callback) = 0;
 
   // Sets the active output node to |node_id|.
@@ -201,6 +244,14 @@ class COMPONENT_EXPORT(DBUS_AUDIO) CrasAudioClient {
 
   // Enables or disables CRAS to use speak-on-mute detection.
   virtual void SetSpeakOnMuteDetection(bool enabled) = 0;
+
+  virtual void SetEwmaPowerReportEnabled(bool enabled) = 0;
+
+  virtual void SetSidetoneEnabled(bool enabled) = 0;
+
+  // Gets the number of active output streams.
+  virtual void GetSidetoneSupported(
+      chromeos::DBusMethodCallback<bool> callback) = 0;
 
   // Adds input node |node_id| to the active input list. This is used to add
   // an additional active input node besides the one set by SetActiveInputNode.
@@ -264,6 +315,31 @@ class COMPONENT_EXPORT(DBUS_AUDIO) CrasAudioClient {
   // Runs the callback as soon as the service becomes available.
   virtual void WaitForServiceToBeAvailable(
       chromeos::WaitForServiceToBeAvailableCallback callback) = 0;
+
+  // Sets input force respect ui gains state to |force_repsect_ui_gains| value.
+  virtual void SetForceRespectUiGains(bool force_respect_ui_gains) = 0;
+
+  // Gets the number of streams ignoring UI Gains.
+  virtual void GetNumStreamIgnoreUiGains(
+      chromeos::DBusMethodCallback<int> callback) = 0;
+
+  // Sets hfp_mic_sr state to |hfp_mic_sr_on| value.
+  virtual void SetHfpMicSrEnabled(bool hfp_mic_sr_on) = 0;
+
+  // Gets if hfp_mic_sr is supported.
+  virtual void GetHfpMicSrSupported(
+      chromeos::DBusMethodCallback<bool> callback) = 0;
+
+  // Gets the number of active ARC streams.
+  virtual void GetNumberOfArcStreams(
+      chromeos::DBusMethodCallback<int32_t> callback) = 0;
+
+  // Sets spatial audio state to |spatial_audio| value.
+  virtual void SetSpatialAudio(bool spatial_audio) = 0;
+
+  // Gets if spatial audio is supported.
+  virtual void GetSpatialAudioSupported(
+      chromeos::DBusMethodCallback<bool> callback) = 0;
 
  protected:
   friend class CrasAudioClientTest;

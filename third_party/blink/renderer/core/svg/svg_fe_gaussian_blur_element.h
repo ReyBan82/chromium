@@ -35,6 +35,9 @@ class SVGFEGaussianBlurElement final
 
  public:
   explicit SVGFEGaussianBlurElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFEGaussianBlurElement;
+  }
 
   void setStdDeviation(float std_deviation_x, float std_deviation_y);
 
@@ -48,6 +51,10 @@ class SVGFEGaussianBlurElement final
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override { return false; }
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumberOptionalNumber> std_deviation_;
   Member<SVGAnimatedString> in1_;

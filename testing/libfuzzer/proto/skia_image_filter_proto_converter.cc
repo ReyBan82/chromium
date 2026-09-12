@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
+#include <array>
+
 // Converts an Input protobuf Message to a string that can be successfully read
 // by SkImageFilter::Deserialize and used as an image filter. The string
 // is essentially a valid flattened skia image filter. Note: We will sometimes
@@ -26,9 +29,6 @@
 // moving target, not everything is finished. Many of these parts of the code
 // are #defined out if DEVELOPMENT is not defined.
 
-#include "testing/libfuzzer/proto/skia_image_filter_proto_converter.h"
-
-#include <ctype.h>
 #include <stdlib.h>
 
 #include <algorithm>
@@ -37,12 +37,17 @@
 #include <random>
 #include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
-#include <unordered_map>
 #include <vector>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/notreached.h"
+#include "base/numerics/byte_conversions.h"
+#include "base/numerics/safe_conversions.h"
+#include "testing/libfuzzer/proto/skia_image_filter_proto_converter.h"
 #include "third_party/protobuf/src/google/protobuf/descriptor.h"
 #include "third_party/protobuf/src/google/protobuf/message.h"
 #include "third_party/protobuf/src/google/protobuf/repeated_field.h"
@@ -196,75 +201,8 @@ const uint8_t Converter::kCountNibBits[] = {0, 1, 1, 2, 1, 2, 2, 3,
 
 // The rest of the Converter attributes are not copied from skia.
 const int Converter::kFlattenableDepthLimit = 3;
-const int Converter::kColorTableBufferLength = 256;
-uint8_t Converter::kColorTableBuffer[kColorTableBufferLength];
 const int Converter::kNumBound = 20;
 const uint8_t Converter::kMutateEnumDenominator = 40;
-
-// Does not include SkSumPathEffect, SkComposePathEffect or SkRegion
-// since they don't use the VISIT FLATTENABLE macros.
-const string_map_t Converter::kFieldToFlattenableName = {
-    {"path_1d_path_effect", "SkPath1DPathEffect"},
-    {"path_2d_path_effect", "SkPath2DPathEffect"},
-    {"alpha_threshold_filter_impl", "SkAlphaThresholdFilterImpl"},
-    {"arithmetic_image_filter", "SkArithmeticImageFilter"},
-    {"blur_image_filter_impl", "SkBlurImageFilterImpl"},
-    {"blur_mask_filter_impl", "SkBlurMaskFilterImpl"},
-    {"color_4_shader", "SkColor4Shader"},
-    {"color_filter_image_filter", "SkColorFilterImageFilter"},
-    {"color_filter_shader", "SkColorFilterShader"},
-    {"color_matrix_filter_row_major_255", "SkColorMatrixFilterRowMajor255"},
-    {"color_shader", "SkColorShader"},
-    {"compose_color_filter", "SkComposeColorFilter"},
-    {"compose_image_filter", "SkComposeImageFilter"},
-    {"compose_shader", "SkComposeShader"},
-    {"corner_path_effect", "SkCornerPathEffect"},
-    {"dash_impl", "SkDashImpl"},
-    {"diffuse_lighting_image_filter", "SkDiffuseLightingImageFilter"},
-    {"dilate_image_filter", "SkDilateImageFilter"},
-    {"discrete_path_effect", "SkDiscretePathEffect"},
-    {"displacement_map_effect", "SkDisplacementMapEffect"},
-    {"drop_shadow_image_filter", "SkDropShadowImageFilter"},
-    {"emboss_mask_filter", "SkEmbossMaskFilter"},
-    {"empty_shader", "SkEmptyShader"},
-    {"image_shader", "SkImageShader"},
-    {"image_source", "SkImageSource"},
-    {"line_2d_path_effect", "SkLine2DPathEffect"},
-    {"linear_gradient", "SkLinearGradient"},
-    {"local_matrix_image_filter", "SkLocalMatrixImageFilter"},
-    {"local_matrix_shader", "SkLocalMatrixShader"},
-    {"luma_color_filter", "SkLumaColorFilter"},
-    {"magnifier_image_filter", "SkMagnifierImageFilter"},
-    {"matrix_convolution_image_filter", "SkMatrixConvolutionImageFilter"},
-    {"matrix_image_filter", "SkMatrixImageFilter"},
-    {"merge_image_filter", "SkMergeImageFilter"},
-    {"mode_color_filter", "SkModeColorFilter"},
-    {"offset_image_filter", "SkOffsetImageFilter"},
-    {"overdraw_color_filter", "SkOverdrawColorFilter"},
-    {"paint_image_filter", "SkPaintImageFilter"},
-    {"picture_image_filter", "SkPictureImageFilter"},
-    {"picture_shader", "SkPictureShader"},
-    {"radial_gradient", "SkRadialGradient"},
-    {"specular_lighting_image_filter", "SkSpecularLightingImageFilter"},
-    {"sweep_gradient", "SkSweepGradient"},
-    {"tile_image_filter", "SkTileImageFilter"},
-    {"two_point_conical_gradient", "SkTwoPointConicalGradient"},
-    {"xfermode_image_filter", "SkXfermodeImageFilter"},
-    {"xfermode_image_filter__base", "SkXfermodeImageFilter_Base"},
-    {"srgb_gamma_color_filter", "SkSRGBGammaColorFilter"},
-    {"high_contrast__filter", "SkHighContrast_Filter"},
-    {"table__color_filter", "SkTable_ColorFilter"},
-    {"to_srgb_color_filter", "SkToSRGBColorFilter"},
-    {"layer_draw_looper", "SkLayerDrawLooper"},
-    {"perlin_noise_shader_impl", "SkPerlinNoiseShaderImpl"},
-    {"erode_image_filter", "SkErodeImageFilter"},
-};
-
-const std::set<std::string> Converter::kMisbehavedFlattenableBlacklist = {
-    "matrix_image_filter",   // Causes OOMs.
-    "discrete_path_effect",  // Causes timeouts.
-    "path_1d_path_effect",   // Causes timeouts.
-};
 
 // We don't care about default values of attributes because Reset() sets them to
 // correct values and is called by Convert(), the only important public
@@ -277,10 +215,9 @@ Converter::~Converter() {}
 
 Converter::Converter(const Converter& other) {}
 
-std::string Converter::FieldToFlattenableName(
-    const std::string& field_name) const {
-  CHECK(kFieldToFlattenableName.find(field_name) !=
-        kFieldToFlattenableName.end());
+std::string_view Converter::FieldToFlattenableName(
+    std::string_view field_name) const {
+  CHECK(kFieldToFlattenableName.contains(field_name));
 
   return kFieldToFlattenableName.at(field_name);
 }
@@ -686,7 +623,7 @@ void Converter::Visit(const Region& region) {
 }
 
 void Converter::Visit(const PictureInfo& picture_info) {
-  WriteArray(kPictureMagicString, sizeof(kPictureMagicString));
+  WriteArray(kPictureMagicString);
   WriteNum(picture_info.version());
   Visit(picture_info.rectangle());
   if (picture_info.version() < PictureInfo::kRemoveHeaderFlags_Version)
@@ -755,30 +692,21 @@ size_t Converter::PopStartSize() {
 
 template <typename T>
 void Converter::WriteNum(const T num) {
-  if (sizeof(T) > 4) {
-    CHECK(num <= UINT32_MAX);
-    uint32_t four_byte_num = static_cast<uint32_t>(num);
-    char num_arr[sizeof(four_byte_num)];
-    memcpy(num_arr, &four_byte_num, sizeof(four_byte_num));
-    for (size_t idx = 0; idx < sizeof(four_byte_num); idx++)
-      output_.push_back(num_arr[idx]);
-    return;
+  if constexpr (sizeof(T) > 4) {
+    WriteNum(base::checked_cast<uint32_t>(num));
+  } else if constexpr (std::has_unique_object_representations_v<T>) {
+    output_.append_range(base::as_chars(base::byte_span_from_ref(num)));
+  } else {
+    output_.append_range(base::as_chars(
+        base::byte_span_from_ref(base::allow_nonunique_obj, num)));
   }
-  char num_arr[sizeof(T)];
-  memcpy(num_arr, &num, sizeof(T));
-  for (size_t idx = 0; idx < sizeof(T); idx++)
-    output_.push_back(num_arr[idx]);
 }
 
 void Converter::InsertSize(const size_t size, const uint32_t position) {
-  char size_arr[sizeof(uint32_t)];
-  memcpy(size_arr, &size, sizeof(uint32_t));
-
-  for (size_t idx = 0; idx < sizeof(uint32_t); idx++) {
-    const size_t output__idx = position + idx - sizeof(uint32_t);
-    CHECK_LT(output__idx, output_.size());
-    output_[output__idx] = size_arr[idx];
-  }
+  const uint32_t size_32 = base::checked_cast<uint32_t>(size);
+  base::span(output_)
+      .subspan(position - sizeof(uint32_t), sizeof(uint32_t))
+      .copy_from(base::as_chars(base::byte_span_from_ref(size_32)));
 }
 
 void Converter::WriteBytesWritten() {
@@ -791,33 +719,27 @@ void Converter::WriteBytesWritten() {
   InsertSize(bytes_written, start_size);
 }
 
-void Converter::WriteString(const std::string str) {
+void Converter::WriteString(std::string_view str) {
   WriteNum(str.size());
-  const char* c_str = str.c_str();
-  for (size_t idx = 0; idx < str.size(); idx++)
-    output_.push_back(c_str[idx]);
-
+  output_.append_range(str);
   output_.push_back('\0');  // Add trailing NULL.
-
   Pad(str.size() + 1);
 }
 
 void Converter::WriteArray(
-    const google::protobuf::RepeatedField<uint32_t>& repeated_field,
-    const size_t size) {
-  WriteNum(size * sizeof(uint32_t));  // Array size.
-  for (uint32_t element : repeated_field)
+    const google::protobuf::RepeatedField<uint32_t>& repeated_field) {
+  WriteNum(base::checked_cast<size_t>(repeated_field.size()) *
+           sizeof(uint32_t));  // Array size.
+  for (uint32_t element : repeated_field) {
     WriteNum(element);
+  }
   // Padding is not a concern because uint32_ts are 4 bytes.
 }
 
-void Converter::WriteArray(const char* arr, const size_t size) {
-  WriteNum(size);
-  for (size_t idx = 0; idx < size; idx++)
-    output_.push_back(arr[idx]);
-
-  for (unsigned idx = 0; idx < size % 4; idx++)
-    output_.push_back('\0');
+void Converter::WriteArray(base::span<const char> arr) {
+  WriteNum(arr.size());
+  output_.append_range(arr);
+  Pad(arr.size());
 }
 
 void Converter::WriteBool(const bool bool_val) {
@@ -826,8 +748,7 @@ void Converter::WriteBool(const bool bool_val) {
 }
 
 void Converter::WriteNum(const char (&num_arr)[4]) {
-  for (size_t idx = 0; idx < 4; idx++)
-    output_.push_back(num_arr[idx]);
+  output_.append_range(num_arr);
 }
 
 void Converter::Visit(const PictureShader& picture_shader) {
@@ -1063,10 +984,10 @@ void Converter::Visit(const LooperChild& looper) {
 static uint8_t* flush_diff8(uint8_t* dst, const uint8_t* src, size_t count) {
   while (count > 0) {
     size_t n = count > 128 ? 128 : count;
-    *dst++ = (uint8_t)(n + 127);
-    memcpy(dst, src, n);
-    src += n;
-    dst += n;
+    UNSAFE_TODO(*dst++ = (uint8_t)(n + 127));
+    UNSAFE_TODO(memcpy(dst, src, n));
+    UNSAFE_TODO(src += n);
+    UNSAFE_TODO(dst += n);
     count -= n;
   }
   return dst;
@@ -1076,8 +997,8 @@ static uint8_t* flush_diff8(uint8_t* dst, const uint8_t* src, size_t count) {
 static uint8_t* flush_same8(uint8_t dst[], uint8_t value, size_t count) {
   while (count > 0) {
     size_t n = count > 128 ? 128 : count;
-    *dst++ = (uint8_t)(n - 1);
-    *dst++ = (uint8_t)value;
+    UNSAFE_TODO(*dst++ = (uint8_t)(n - 1));
+    UNSAFE_TODO(*dst++ = (uint8_t)value);
     count -= n;
   }
   return dst;
@@ -1099,21 +1020,21 @@ static size_t pack8(const uint8_t* src,
   }
 
   uint8_t* const origDst = dst;
-  const uint8_t* stop = src + srcSize;
+  const uint8_t* stop = UNSAFE_TODO(src + srcSize);
 
   for (intptr_t count = stop - src; count > 0; count = stop - src) {
     if (1 == count) {
-      *dst++ = 0;
-      *dst++ = *src;
+      UNSAFE_TODO(*dst++ = 0);
+      UNSAFE_TODO(*dst++ = *src);
       break;
     }
 
     unsigned value = *src;
-    const uint8_t* s = src + 1;
+    const uint8_t* s = UNSAFE_TODO(src + 1);
 
     if (*s == value) {  // accumulate same values...
       do {
-        s++;
+        UNSAFE_TODO(s++);
         if (s == stop) {
           break;
         }
@@ -1121,13 +1042,14 @@ static size_t pack8(const uint8_t* src,
       dst = flush_same8(dst, value, (size_t)(s - src));
     } else {  // accumulate diff values...
       do {
-        if (++s == stop) {
+        if (UNSAFE_TODO(++s) == stop) {
           goto FLUSH_DIFF;
         }
         // only stop if we hit 3 in a row,
         // otherwise we get bigger than compuatemax
-      } while (*s != s[-1] || s[-1] != s[-2]);
-      s -= 2;  // back up so we don't grab the "same" values that follow
+      } while (UNSAFE_TODO(*s != s[-1] || s[-1] != s[-2]));
+      // Back up so we don't grab the "same" values that follow.
+      UNSAFE_TODO(s -= 2);
     FLUSH_DIFF:
       dst = flush_diff8(dst, src, (size_t)(s - src));
     }
@@ -1136,21 +1058,21 @@ static size_t pack8(const uint8_t* src,
   return dst - origDst;
 }
 
-const uint8_t* Converter::ColorTableToArray(const ColorTable& color_table) {
-  float* dst = reinterpret_cast<float*>(kColorTableBuffer);
-  const int array_size = 64;
-  // Now write the 256 fields.
+std::array<float, Converter::kColorTableEntries> Converter::ColorTableToArray(
+    const ColorTable& color_table) {
+  std::array<float, kColorTableEntries> color_table_buffer;
   const Descriptor* descriptor = color_table.GetDescriptor();
   CHECK(descriptor);
   const Reflection* reflection = color_table.GetReflection();
   CHECK(reflection);
-  for (int field_num = 1; field_num <= array_size; field_num++, dst++) {
+  for (size_t i = 0; i < color_table_buffer.size(); ++i) {
     const FieldDescriptor* field_descriptor =
-        descriptor->FindFieldByNumber(field_num);
+        descriptor->FindFieldByNumber(base::checked_cast<int>(i + 1));
     CHECK(field_descriptor);
-    *dst = BoundFloat(reflection->GetFloat(color_table, field_descriptor));
+    color_table_buffer[i] =
+        BoundFloat(reflection->GetFloat(color_table, field_descriptor));
   }
-  return kColorTableBuffer;
+  return color_table_buffer;
 }
 
 void Converter::Visit(const Table_ColorFilter& table__color_filter) {
@@ -1161,49 +1083,37 @@ void Converter::Visit(const Table_ColorFilter& table__color_filter) {
     kG_Flag = 1 << 2,
     kB_Flag = 1 << 3,
   };
-  unsigned flags = 0;
-  uint8_t f_storage[4 * kColorTableBufferLength];
-  uint8_t* dst = f_storage;
+  uint32_t flags = 0;
+  std::array<uint8_t, 4 * kColorTableByteSize> f_storage{};
+  base::span<uint8_t> dst = f_storage;
+
+  auto append_table = [&dst, &flags, this](const ColorTable& table,
+                                           uint32_t flag) {
+    dst.take_first<kColorTableByteSize>().copy_from(base::as_byte_span(
+        base::allow_nonunique_obj, ColorTableToArray(table)));
+    flags |= flag;
+  };
 
   if (table__color_filter.has_table_a()) {
-    memcpy(dst, ColorTableToArray(table__color_filter.table_a()),
-           kColorTableBufferLength);
-
-    dst += kColorTableBufferLength;
-    flags |= kA_Flag;
+    append_table(table__color_filter.table_a(), kA_Flag);
   }
   if (table__color_filter.has_table_r()) {
-    memcpy(dst, ColorTableToArray(table__color_filter.table_r()),
-           kColorTableBufferLength);
-
-    dst += kColorTableBufferLength;
-    flags |= kR_Flag;
+    append_table(table__color_filter.table_r(), kR_Flag);
   }
   if (table__color_filter.has_table_g()) {
-    memcpy(dst, ColorTableToArray(table__color_filter.table_g()),
-           kColorTableBufferLength);
-
-    dst += kColorTableBufferLength;
-    flags |= kG_Flag;
+    append_table(table__color_filter.table_g(), kG_Flag);
   }
   if (table__color_filter.has_table_b()) {
-    memcpy(dst, ColorTableToArray(table__color_filter.table_b()),
-           kColorTableBufferLength);
-
-    dst += kColorTableBufferLength;
-    flags |= kB_Flag;
+    append_table(table__color_filter.table_b(), kB_Flag);
   }
-  uint8_t storage[5 * kColorTableBufferLength];
+  std::array<uint8_t, 5 * kColorTableByteSize> storage{};
   const int count = kCountNibBits[flags & 0xF];
-  const size_t size = pack8(f_storage, count * kColorTableBufferLength, storage,
-                            sizeof(storage));
+  const size_t size = pack8(f_storage.data(), count * kColorTableByteSize,
+                            storage.data(), storage.size());
 
-  CHECK_LE(flags, UINT32_MAX);
-  const uint32_t flags_32 = (uint32_t)flags;
-  WriteNum(flags_32);
-  WriteNum((uint32_t)size);
-  for (size_t idx = 0; idx < size; idx++)
-    output_.push_back(storage[idx]);
+  WriteNum(flags);
+  WriteNum(size);
+  output_.append_range(base::as_chars(base::span(storage).first(size)));
   Pad(output_.size());
 }
 
@@ -1238,7 +1148,7 @@ void Converter::Visit(const LayerDrawLooper& layer_draw_looper) {
   WriteNum(layer_draw_looper.layer_infos_size());
   int n = layer_draw_looper.layer_infos_size();
 #ifdef AVOID_MISBEHAVIOR
-  n = 1;  // Only write 1 to avoid timeouts.
+  n = std::min(n, 1);  // Write at most 1 to avoid timeouts.
 #endif
   for (int i = 0; i < n; ++i)
     Visit(layer_draw_looper.layer_infos(i));
@@ -1374,8 +1284,8 @@ void Converter::Visit(const PathRef& path_ref) {
       WriteNum(verb.conic_weight());
   }
 
-  SkRect skrect;
-  skrect.setBoundsCheck(&points[0], points.size());
+  SkRect skrect = SkRect::BoundsOrEmpty(points);
+
   WriteNum(skrect.fLeft);
   WriteNum(skrect.fTop);
   WriteNum(skrect.fRight);
@@ -1539,23 +1449,9 @@ void Converter::WriteTagSize(const char (&tag)[4], const size_t size) {
 }
 
 // Writes num as a big endian number.
-template <typename T>
-void Converter::WriteBigEndian(const T num) {
-  CHECK_LE(sizeof(T), static_cast<size_t>(4));
-  uint8_t num_arr[sizeof(T)];
-  memcpy(num_arr, &num, sizeof(T));
-  uint8_t tmp1 = num_arr[0];
-  uint8_t tmp2 = num_arr[3];
-  num_arr[3] = tmp1;
-  num_arr[0] = tmp2;
-
-  tmp1 = num_arr[1];
-  tmp2 = num_arr[2];
-  num_arr[2] = tmp1;
-  num_arr[1] = tmp2;
-
-  for (size_t idx = 0; idx < sizeof(uint32_t); idx++)
-    output_.push_back(num_arr[idx]);
+void Converter::WriteBigEndian(base::StrictNumeric<uint32_t> num) {
+  auto arr = base::U32ToBigEndian(num);
+  output_.insert(output_.end(), arr.begin(), arr.end());
 }
 
 void Converter::Visit(const ICCColorSpace& icc_color_space) {
@@ -1787,10 +1683,7 @@ void Converter::WriteUInt8(T num) {
 }
 
 void Converter::WriteUInt16(uint16_t num) {
-  char num_arr[2];
-  memcpy(num_arr, &num, 2);
-  for (size_t idx = 0; idx < 2; idx++)
-    output_.push_back(num_arr[idx]);
+  WriteNum(num);
 }
 
 void Converter::Visit(const TransferFn& transfer_fn) {
@@ -1903,7 +1796,7 @@ void Converter::Visit(const Path1DPathEffect& path_1d_path_effect) {
   }
 }
 
-bool Converter::PreVisitFlattenable(const std::string& name) {
+bool Converter::PreVisitFlattenable(std::string_view name) {
   if (flattenable_depth_ > kFlattenableDepthLimit)
     return false;
   flattenable_depth_ += 1;
@@ -2120,11 +2013,17 @@ void Converter::WriteFields(const Message& msg,
           break;
         }
         case FieldDescriptor::CPPTYPE_MESSAGE: {
+// TODO(crbug.com/393557657): update this.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
           Visit(reflection->GetRepeatedPtrField<google::protobuf::Message>(
               msg, field_descriptor));
+#pragma clang diagnostic pop
           break;
         }
-        default: { NOTREACHED(); }
+        default: {
+          NOTREACHED();
+        }
       }
       continue;
       // Skip field if it is optional and it is unset.
@@ -2322,7 +2221,7 @@ void Converter::Visit(const TextBlob& text_blob) {
         break;
       WriteNum(glyph_pos_cluster.cluster());
     }
-    WriteArray(text_blob.text(), text_blob.text_size());
+    WriteArray(text_blob.text());
   }
 
   // No more glyphs.
@@ -2334,9 +2233,7 @@ bool Converter::IsBlacklisted(const std::string& field_name) const {
   // Don't blacklist misbehaving flattenables.
   return false;
 #else
-
-  return kMisbehavedFlattenableBlacklist.find(field_name) !=
-         kMisbehavedFlattenableBlacklist.end();
+  return kMisbehavedFlattenableBlacklist.contains(field_name);
 #endif  // AVOID_MISBEHAVIOR
 }
 }  // namespace skia_image_filter_proto_converter

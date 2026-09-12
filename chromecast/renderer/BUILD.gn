@@ -3,14 +3,13 @@
 # found in the LICENSE file.
 
 import("//chromecast/chromecast.gni")
+import("//testing/test.gni")
 import("//tools/grit/grit_rule.gni")
 
 cast_source_set("renderer") {
   sources = [
     "activity_filtering_websocket_handshake_throttle.cc",
     "activity_filtering_websocket_handshake_throttle.h",
-    "assistant_bindings.cc",
-    "assistant_bindings.h",
     "cast_activity_url_filter_manager.cc",
     "cast_activity_url_filter_manager.h",
     "cast_content_renderer_client.cc",
@@ -63,6 +62,7 @@ cast_source_set("renderer") {
     "//chromecast/media",
     "//chromecast/media/base:media_codec_support",
     "//chromecast/renderer/media",
+    "//components/cdm/renderer",
     "//components/media_control/renderer",
     "//components/network_hints/renderer",
     "//components/on_load_script_injector/renderer",
@@ -71,21 +71,28 @@ cast_source_set("renderer") {
     "//crypto",
     "//gin",
     "//ipc",
-    "//media/remoting:remoting_constants",
     "//media/remoting:remoting_renderer",
     "//net",
-    "//services/network/public/cpp:cpp",
+    "//services/network/public/cpp",
     "//services/service_manager/public/cpp",
   ]
 
-  if (!is_android) {
-    sources += [
-      "memory_pressure_observer_impl.cc",
-      "memory_pressure_observer_impl.h",
-    ]
-  } else {
+  if (is_android) {
     deps += [ "//chromecast/media/audio:cast_audio_device_factory" ]
   }
+}
+
+test("cast_renderer_unittests") {
+  sources = [ "cast_activity_url_filter_manager_unittest.cc" ]
+
+  deps = [
+    ":renderer",
+    "//base",
+    "//base/test:run_all_unittests",
+    "//base/test:test_support",
+    "//testing/gtest",
+    "//third_party/blink/public/common",
+  ]
 }
 
 cast_source_set("simple_client") {

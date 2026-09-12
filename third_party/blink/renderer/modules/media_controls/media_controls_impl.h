@@ -27,10 +27,13 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_MEDIA_CONTROLS_MEDIA_CONTROLS_IMPL_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_MEDIA_CONTROLS_MEDIA_CONTROLS_IMPL_H_
 
+#include "third_party/blink/public/platform/web_media_player.h"
 #include "third_party/blink/renderer/core/geometry/dom_rect_read_only.h"
 #include "third_party/blink/renderer/core/html/html_div_element.h"
 #include "third_party/blink/renderer/core/html/media/media_controls.h"
+#include "third_party/blink/renderer/modules/media_controls/elements/media_control_track_selector_list_element.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/timer.h"
 
 namespace blink {
@@ -66,6 +69,7 @@ class MediaControlScrubbingMessageElement;
 class MediaControlTextTrackListElement;
 class MediaControlsTextTrackManager;
 class MediaControlTimelineElement;
+class MediaControlTrackSelectorMenuButtonElement;
 class MediaControlToggleClosedCaptionsButtonElement;
 class MediaControlVolumeControlContainerElement;
 class MediaControlVolumeSliderElement;
@@ -136,6 +140,9 @@ class MODULES_EXPORT MediaControlsImpl final : public HTMLDivElement,
   // Methods related to the playback speed menu.
   void TogglePlaybackSpeedList();
   bool PlaybackSpeedListIsWanted();
+
+  // Methods related to the track selection menu.
+  void ToggleTrackSelectionList(WebMediaPlayer::TrackType);
 
   // Methods related to the overflow menu.
   void OpenOverflowMenu();
@@ -242,7 +249,7 @@ class MODULES_EXPORT MediaControlsImpl final : public HTMLDivElement,
   void UpdateCSSClassFromState();
 
   // Sets/removes a CSS class from this element based on |should_have_class|.
-  void SetClass(const AtomicString& class_name, bool should_have_class);
+  void SetClass(const String& class_name, bool should_have_class);
 
   // Get the HTMLVideoElement that the controls are attached to. The caller must
   // check that the element is a video element first.
@@ -259,8 +266,10 @@ class MODULES_EXPORT MediaControlsImpl final : public HTMLDivElement,
   void MakeTransparent();
   bool IsVisible() const;
 
-  // If the overlay play button is present then make sure it is displayed.
+  // If the overlay play/cast buttons are present then make
+  // sure they are displayed.
   void MaybeShowOverlayPlayButton();
+  void MaybeShowOverlayCastButton();
 
   void UpdatePlayState();
 
@@ -317,6 +326,10 @@ class MODULES_EXPORT MediaControlsImpl final : public HTMLDivElement,
   // Returns true/false based on which set of controls to display.
   bool ShouldShowVideoControls() const;
 
+  // Returns true/false based on whether this player is showing live content,
+  // and should have no seek bar or timestamp.
+  bool IsLivePlayback() const;
+
   // Node
   bool IsMediaControls() const override { return true; }
   bool WillRespondToMouseMoveEvents() const override { return true; }
@@ -331,6 +344,11 @@ class MODULES_EXPORT MediaControlsImpl final : public HTMLDivElement,
   void MaybeJump(int);
   bool IsOnLeftSide(Event*);
   void TapTimerFired(TimerBase*);
+
+  // Hides or shows the container depending on whether the native controls
+  // or the overlay cast button need to be shown, to prevent shadow DOM paint
+  // layers from interfering with hit-test ordering.
+  void UpdateContainerDisplay();
 
   // Internal cast related methods.
   void RemotePlaybackStateChanged();
@@ -355,7 +373,12 @@ class MODULES_EXPORT MediaControlsImpl final : public HTMLDivElement,
   void OnExitedFullscreen();
   void OnPictureInPictureChanged();
   void OnPanelKeypress();
-  void OnMediaKeyboardEvent(Event* event) { DefaultEventHandler(*event); }
+  void OnMediaKeyboardEvent(Event* event) {
+    DCHECK(!RuntimeEnabledFeatures::CleanUpActivationBehaviorEnabled());
+    DefaultEventHandler(*event);
+  }
+  void HandlePointerEventFromMediaElement(Event*);
+  void HandleKeyboardEventFromMediaElement(Event*);
   void OnWaiting();
   void OnLoadingProgress();
   void OnLoadedData();
@@ -377,6 +400,13 @@ class MODULES_EXPORT MediaControlsImpl final : public HTMLDivElement,
   Member<MediaControlToggleClosedCaptionsButtonElement>
       toggle_closed_captions_button_;
   Member<MediaControlTextTrackListElement> text_track_list_;
+  Member<MediaControlTrackSelectorMenuButtonElement>
+      audio_track_selector_button_;
+  Member<MediaControlTrackSelectorMenuButtonElement>
+      video_track_selector_button_;
+  Member<MediaControlTrackSelectorListElement> video_track_selector_list_;
+  Member<MediaControlTrackSelectorListElement> audio_track_selector_list_;
+
   Member<MediaControlPlaybackSpeedButtonElement> playback_speed_button_;
   Member<MediaControlPlaybackSpeedListElement> playback_speed_list_;
   Member<MediaControlOverflowMenuButtonElement> overflow_menu_;

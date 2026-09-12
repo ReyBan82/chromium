@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load(
     "//absl:copts/configure_copts.bzl",
     "ABSL_DEFAULT_COPTS",
@@ -19,7 +21,14 @@ load(
     "ABSL_TEST_COPTS",
 )
 
-package(default_visibility = ["//visibility:public"])
+package(
+    default_visibility = ["//visibility:private"],
+    features = [
+        "header_modules",
+        "layering_check",
+        "parse_headers",
+    ],
+)
 
 licenses(["notice"])
 
@@ -28,9 +37,11 @@ cc_library(
     hdrs = ["internal/cleanup.h"],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
+    visibility = ["//visibility:public"],  # Should be private, but cleanup is required.
     deps = [
-        "//absl/base:base_internal",
+        "//absl/base:config",
         "//absl/base:core_headers",
+        "//absl/base:hardening",
         "//absl/utility",
     ],
 )
@@ -42,10 +53,12 @@ cc_library(
     ],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
+    visibility = ["//visibility:public"],
     deps = [
         ":cleanup_internal",
         "//absl/base:config",
         "//absl/base:core_headers",
+        "//absl/base:hardening",
     ],
 )
 
@@ -58,8 +71,10 @@ cc_test(
     copts = ABSL_TEST_COPTS,
     deps = [
         ":cleanup",
+        ":cleanup_internal",
         "//absl/base:config",
         "//absl/utility",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )

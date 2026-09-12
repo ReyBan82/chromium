@@ -5,25 +5,33 @@
 #ifndef UI_GFX_MAC_IO_SURFACE_H_
 #define UI_GFX_MAC_IO_SURFACE_H_
 
-#include <IOKit/IOReturn.h>
 #include <IOSurface/IOSurfaceRef.h>
 #include <mach/mach.h>
 
-#include "base/mac/scoped_cftyperef.h"
+#include <optional>
+
+#include "base/apple/scoped_cftyperef.h"
+#include "base/component_export.h"
+#include "base/memory/unsafe_shared_memory_region.h"
 #include "ui/gfx/buffer_types.h"
 #include "ui/gfx/color_space.h"
 #include "ui/gfx/generic_shared_memory_id.h"
 #include "ui/gfx/geometry/size.h"
-#include "ui/gfx/gfx_export.h"
+
+namespace viz {
+class SharedImageFormat;
+}
 
 namespace gfx {
 
 namespace internal {
 
 struct IOSurfaceMachPortTraits {
-  GFX_EXPORT static mach_port_t InvalidValue() { return MACH_PORT_NULL; }
-  GFX_EXPORT static mach_port_t Retain(mach_port_t);
-  GFX_EXPORT static void Release(mach_port_t);
+  COMPONENT_EXPORT(GFX) static mach_port_t InvalidValue() {
+    return MACH_PORT_NULL;
+  }
+  COMPONENT_EXPORT(GFX) static mach_port_t Retain(mach_port_t);
+  COMPONENT_EXPORT(GFX) static void Release(mach_port_t);
 };
 
 struct ScopedInUseIOSurfaceTraits {
@@ -43,46 +51,117 @@ struct ScopedInUseIOSurfaceTraits {
 
 using IOSurfaceId = GenericSharedMemoryId;
 
-// Helper function to create an IOSurface with a specified size and format.
-// The surface is zero-initialized if |should_clear| is true. This is not
-// necessary for anonymous surfaces that are not exported to renderers and used
-// as render targets only.
-GFX_EXPORT IOSurfaceRef CreateIOSurface(const Size& size,
-                                        BufferFormat format,
-                                        bool should_clear = true);
-
 // A scoper for handling Mach port names that are send rights for IOSurfaces.
 // This scoper is both copyable and assignable, which will increase the kernel
 // reference count of the right. On destruction, the reference count is
 // decremented.
 using ScopedRefCountedIOSurfaceMachPort =
-    base::ScopedTypeRef<mach_port_t, internal::IOSurfaceMachPortTraits>;
+    base::apple::ScopedTypeRef<mach_port_t, internal::IOSurfaceMachPortTraits>;
 
 // A scoper for holding a reference to an IOSurface and also incrementing its
 // in-use counter while the scoper exists.
 using ScopedInUseIOSurface =
-    base::ScopedTypeRef<IOSurfaceRef, internal::ScopedInUseIOSurfaceTraits>;
+    base::apple::ScopedTypeRef<IOSurfaceRef,
+                               internal::ScopedInUseIOSurfaceTraits>;
 
 // A scoper for holding a reference to an IOSurface.
-using ScopedIOSurface = base::ScopedCFTypeRef<IOSurfaceRef>;
+using ScopedIOSurface = base::apple::ScopedCFTypeRef<IOSurfaceRef>;
+
+static constexpr size_t kMaxIOSurfacePlanes = 3;
+
+// Helper function to create an IOSurface with a specified size and format.
+// The surface is zero-initialized if |should_clear| is true. This is not
+// necessary for anonymous surfaces that are not exported to renderers and used
+// as render targets only. If |override_rgba_to_bgra| is true (default) a BGRA
+// IOSurface is created for RGBA/X_8888 format. This is needed for GL
+// usage since neither ANGLE Metal nor CGL support importing RGBA IOSurfaces,
+// whereas for non-GL backends (Dawn and Metal) we want the formats to match.
+// TODO(sunnyps): Revisit this when we switch to ANGLE Metal completely since
+// wrapping RGBA_8888 can be implemented with Metal quite easily.
+COMPONENT_EXPORT(GFX)
+ScopedIOSurface CreateIOSurface(const Size& size,
+                                viz::SharedImageFormat format,
+                                bool should_clear = true,
+#if BUILDFLAG(IS_IOS)
+                                bool override_rgba_to_bgra = false
+#else
+                                bool override_rgba_to_bgra = true
+#endif
+);
+
+#if BUILDFLAG(IS_IOS)
+COMPONENT_EXPORT(GFX)
+void ExportIOSurfaceSharedMemoryRegion(
+    IOSurfaceRef io_surface,
+    base::UnsafeSharedMemoryRegion& shared_memory_region,
+    std::array<uint32_t, kMaxIOSurfacePlanes>& plane_strides,
+    std::array<uint32_t, kMaxIOSurfacePlanes>& plane_offsets);
+#endif
 
 // Return true if there exists a value for IOSurfaceColorSpace or
 // IOSurfaceICCProfile that will make CoreAnimation render using |color_space|.
-GFX_EXPORT bool IOSurfaceCanSetColorSpace(const gfx::ColorSpace& color_space);
+COMPONENT_EXPORT(GFX)
+bool IOSurfaceCanSetColorSpace(const gfx::ColorSpace& color_space);
 
 // Set color space for given IOSurface. IOSurfaceCanSetColorSpace must return
 // true for |color_space| otherwise this does nothing.
-GFX_EXPORT void IOSurfaceSetColorSpace(IOSurfaceRef io_surface,
-                                       const gfx::ColorSpace& color_space);
-
-// Return the expected four character code pixel format for an IOSurface with
-// the specified gfx::BufferFormat.
-GFX_EXPORT uint32_t
-BufferFormatToIOSurfacePixelFormat(gfx::BufferFormat format);
+COMPONENT_EXPORT(GFX)
+void IOSurfaceSetColorSpace(IOSurfaceRef io_surface,
+                            const gfx::ColorSpace& color_space);
 
 // Return an IOSurface consuming |io_surface_mach_port|.
-GFX_EXPORT base::ScopedCFTypeRef<IOSurfaceRef> IOSurfaceMachPortToIOSurface(
+COMPONENT_EXPORT(GFX)
+ScopedIOSurface IOSurfaceMachPortToIOSurface(
     ScopedRefCountedIOSurfaceMachPort io_surface_mach_port);
+
+// Return true if IOSurface pixel format is supported by WebGPU and
+// can be imported in WebGPU.
+COMPONENT_EXPORT(GFX)
+bool IOSurfacePixelFormatIsWebGPUCompatible(uint32_t pixel_format);
+
+// Return true if IOSurface pixel format can be accessed by the CPU.
+COMPONENT_EXPORT(GFX)
+bool IOSurfacePixelFormatSupportsCpuAccess(uint32_t pixel_format);
+
+// Return true if the specified IOSurface pixel format can be displayed using
+// an AVSampleBufferDisplayLayer.
+COMPONENT_EXPORT(GFX)
+bool IOSurfacePixelFormatCanDisplayAsAVSampleBuffer(uint32_t pixel_format);
+
+// Return the maximum bit depth across all components for the specified
+// IOSurface pixel format, or 0 if the format is not recognized. For pixel
+// formats with non-uniform component sizes (such as 10-10-10-2 or 5-6-5),
+// this returns the maximum bit depth among the components (for example,
+// 10 for 10-10-10-2).
+COMPONENT_EXPORT(GFX)
+uint32_t IOSurfacePixelFormatMaxBitsPerComponent(uint32_t pixel_format);
+
+// Return the color space range ID for the specified IOSurface pixel format,
+// or INVALID if the format is not recognized.
+COMPONENT_EXPORT(GFX)
+gfx::ColorSpace::RangeID IOSurfacePixelFormatRangeID(uint32_t pixel_format);
+
+// Return true if the specified IOSurface pixel format can be used with the
+// specified viz::SharedImageFormat. If `match_rgba_and_bgra` is true, then
+// allow matching BGRA to RGBA formats and vice-versa.
+COMPONENT_EXPORT(GFX)
+bool IOSurfacePixelFormatMatchesSharedImageFormat(uint32_t pixel_format,
+                                                  viz::SharedImageFormat format,
+                                                  bool match_rgba_and_bgra);
+
+// Return the expected CVPixelFormatType for an IOSurface with the specified
+// viz::SharedImageFormat. If `override_rgba_to_bgra` is true then map RGBA and
+// RGBX to BGRA.
+COMPONENT_EXPORT(GFX)
+std::optional<uint32_t> SharedImageFormatToIOSurfacePixelFormat(
+    viz::SharedImageFormat format,
+    bool override_rgba_to_bgra);
+
+// Return the viz::SharedImageFormat for an IOSurface with the specified
+// CVPixelFormatType.
+COMPONENT_EXPORT(GFX)
+std::optional<viz::SharedImageFormat> IOSurfacePixelFormatToSharedImageFormat(
+    uint32_t pixel_format);
 
 }  // namespace gfx
 

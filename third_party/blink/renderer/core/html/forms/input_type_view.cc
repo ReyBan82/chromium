@@ -30,13 +30,14 @@
 
 #include "third_party/blink/renderer/core/dom/events/simulated_click_options.h"
 #include "third_party/blink/renderer/core/dom/focus_params.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
+#include "third_party/blink/renderer/core/events/before_text_inserted_event.h"
 #include "third_party/blink/renderer/core/events/keyboard_event.h"
 #include "third_party/blink/renderer/core/html/forms/form_controller.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
-#include "third_party/blink/renderer/core/layout/layout_object.h"
+#include "third_party/blink/renderer/core/layout/layout_block_flow.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
@@ -50,8 +51,7 @@ void InputTypeView::Trace(Visitor* visitor) const {
   visitor->Trace(element_);
 }
 
-bool InputTypeView::SizeShouldIncludeDecoration(int,
-                                                int& preferred_size) const {
+bool InputTypeView::GetSizeWithDecoration(int, int& preferred_size) const {
   preferred_size = GetElement().size();
   return false;
 }
@@ -66,7 +66,14 @@ void InputTypeView::HandleKeypressEvent(KeyboardEvent&) {}
 
 void InputTypeView::HandleKeyupEvent(KeyboardEvent&) {}
 
-void InputTypeView::HandleBeforeTextInsertedEvent(BeforeTextInsertedEvent&) {}
+void InputTypeView::HandleBeforeTextInsertedEvent(BeforeTextInsertedEvent&) {
+  DCHECK(!RuntimeEnabledFeatures::CleanUpActivationBehaviorEnabled());
+}
+
+String InputTypeView::FilterBeforeTextInserted(const String& text) {
+  CHECK(RuntimeEnabledFeatures::CleanUpActivationBehaviorEnabled());
+  return text;
+}
 
 void InputTypeView::HandleDOMActivateEvent(Event&) {}
 
@@ -78,9 +85,12 @@ void InputTypeView::DispatchSimulatedClickIfActive(KeyboardEvent& event) const {
   event.SetDefaultHandled();
 }
 
-void InputTypeView::AccessKeyAction(SimulatedClickCreationScope) {
-  GetElement().Focus(FocusParams(SelectionBehaviorOnFocus::kReset,
-                                 mojom::blink::FocusType::kNone, nullptr));
+void InputTypeView::AccessKeyAction(
+    SimulatedClickCreationScope creation_scope) {
+  GetElement().Focus(FocusParams(
+      SelectionBehaviorOnFocus::kReset, mojom::blink::FocusType::kNone, nullptr,
+      FocusOptions::Create(), FocusTrigger::kUserGesture));
+  GetElement().DispatchSimulatedClick(nullptr, creation_scope);
 }
 
 bool InputTypeView::ShouldSubmitImplicitly(const Event& event) {
@@ -93,13 +103,17 @@ HTMLFormElement* InputTypeView::FormForSubmission() const {
   return GetElement().Form();
 }
 
-LayoutObject* InputTypeView::CreateLayoutObject(const ComputedStyle& style,
-                                                LegacyLayout legacy) const {
-  return LayoutObject::CreateObject(&GetElement(), style, legacy);
+LayoutObject* InputTypeView::CreateLayoutObject(
+    const ComputedStyle& style) const {
+  // Avoid LayoutInline, which can be split to multiple lines.
+  if (style.IsNonAtomicInlineDisplayType()) {
+    return MakeGarbageCollected<LayoutBlockFlow>(&GetElement());
+  }
+  return LayoutObject::CreateObject(&GetElement(), style);
 }
 
-ControlPart InputTypeView::AutoAppearance() const {
-  return kNoControlPart;
+AppearanceValue InputTypeView::AutoAppearance() const {
+  return AppearanceValue::kNone;
 }
 
 TextDirection InputTypeView::ComputedTextDirection() {
@@ -126,11 +140,42 @@ bool InputTypeView::HasOpenedPopup() const {
   return false;
 }
 
+bool InputTypeView::IsPickerVisible() const {
+  return false;
+}
+
 bool InputTypeView::NeedsShadowSubtree() const {
   return true;
 }
 
 void InputTypeView::CreateShadowSubtree() {}
+
+void InputTypeView::CreateShadowSubtreeIfNeeded(bool is_type_changing) {
+  if (has_created_shadow_subtree_ || !NeedsShadowSubtree()) {
+    return;
+  }
+  GetElement().EnsureUserAgentShadowRoot();
+  has_created_shadow_subtree_ = true;
+  CreateShadowSubtree();
+  // When called and the type is changing, HTMLInputElement's internal state may
+  // not fully be up to date, so that it's problematic to do the following.
+  // Additionally the following is not necessary when the type is changing,
+  // because HTMLInputElement effectively has similar logic.
+  if (!is_type_changing) {
+    if (needs_update_view_in_create_shadow_subtree_) {
+      UpdateView();
+    }
+    // Placeholder updates are ignored. Update now if needed.
+    if (!GetElement().SuggestedValue().empty() ||
+        GetElement().FastHasAttribute(html_names::kPlaceholderAttr)) {
+      GetElement().UpdatePlaceholderVisibility();
+      if (auto* placeholder = GetElement().PlaceholderElement()) {
+        GetElement().UpdatePlaceholderShadowPseudoId(*placeholder);
+      }
+    }
+  }
+  needs_update_view_in_create_shadow_subtree_ = false;
+}
 
 void InputTypeView::DestroyShadowSubtree() {
   if (ShadowRoot* root = GetElement().UserAgentShadowRoot())
@@ -153,17 +198,18 @@ void InputTypeView::MinOrMaxAttributeChanged() {}
 
 void InputTypeView::StepAttributeChanged() {}
 
-ClickHandlingState* InputTypeView::WillDispatchClick() {
+ClickHandlingState* InputTypeView::LegacyPreActivationBehavior() {
   return nullptr;
 }
 
-void InputTypeView::DidDispatchClick(Event&, const ClickHandlingState&) {}
+void InputTypeView::RunInputActivationBehavior(Event&,
+                                               const ClickHandlingState&) {}
 
 void InputTypeView::UpdateView() {}
 
 void InputTypeView::MultipleAttributeChanged() {}
 
-void InputTypeView::DisabledAttributeChanged() {}
+void InputTypeView::DisabledAttributeChanged(DisabledChangedReason) {}
 
 void InputTypeView::ReadonlyAttributeChanged() {}
 
@@ -187,7 +233,9 @@ bool InputTypeView::ShouldDrawCapsLockIndicator() const {
 
 void InputTypeView::UpdateClearButtonVisibility() {}
 
-void InputTypeView::UpdatePlaceholderText(bool) {}
+HTMLElement* InputTypeView::UpdatePlaceholderText(bool) {
+  return nullptr;
+}
 
 AXObject* InputTypeView::PopupRootAXObject() {
   return nullptr;

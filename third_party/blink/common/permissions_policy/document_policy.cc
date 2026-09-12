@@ -7,7 +7,7 @@
 #include "base/memory/ptr_util.h"
 #include "base/no_destructor.h"
 #include "net/http/structured_headers.h"
-#include "third_party/blink/public/mojom/permissions_policy/permissions_policy_feature.mojom.h"
+#include "third_party/blink/public/common/permissions_policy/document_policy_enum_values.h"
 
 namespace blink {
 
@@ -36,31 +36,58 @@ std::unique_ptr<DocumentPolicy> DocumentPolicy::CopyStateFrom(
   return new_policy;
 }
 
+DocumentPolicy::ParsedDocumentPolicy DocumentPolicy::GetParsedPolicy() const {
+  DocumentPolicyFeatureState feature_state;
+  FeatureEndpointMap endpoint_map;
+  for (const auto& entry : GetDocumentPolicyFeatureInfoMap()) {
+    PolicyValue current_value =
+        internal_feature_state_[static_cast<size_t>(entry.first)];
+    if (current_value != entry.second.default_value) {
+      feature_state.emplace(entry.first, current_value);
+      auto endpoint = endpoint_map_.find(entry.first);
+      if (endpoint != endpoint_map_.end()) {
+        endpoint_map.insert(*endpoint);
+      }
+    }
+  }
+  return ParsedDocumentPolicy{std::move(feature_state),
+                              std::move(endpoint_map)};
+}
+
 namespace {
-net::structured_headers::Item PolicyValueToItem(const PolicyValue& value) {
+
+net::structured_headers::Item PolicyValueToItem(
+    mojom::DocumentPolicyFeature feature,
+    const PolicyValue& value) {
   switch (value.Type()) {
     case mojom::PolicyValueType::kBool:
       return net::structured_headers::Item{value.BoolValue()};
     case mojom::PolicyValueType::kDecDouble:
       return net::structured_headers::Item{value.DoubleValue()};
+    case mojom::PolicyValueType::kEnum: {
+      std::optional<std::string_view> token =
+          DocumentPolicyEnumValueToToken(feature, value.IntValue());
+      CHECK(token);
+      return net::structured_headers::Item{
+          std::string(*token),
+          net::structured_headers::Item::ItemType::kTokenType};
+    }
     default:
       NOTREACHED();
-      return net::structured_headers::Item{
-          nullptr, net::structured_headers::Item::ItemType::kNullType};
   }
 }
 
 }  // namespace
 
 // static
-absl::optional<std::string> DocumentPolicy::Serialize(
+std::optional<std::string> DocumentPolicy::Serialize(
     const DocumentPolicyFeatureState& policy) {
   return DocumentPolicy::SerializeInternal(policy,
                                            GetDocumentPolicyFeatureInfoMap());
 }
 
 // static
-absl::optional<std::string> DocumentPolicy::SerializeInternal(
+std::optional<std::string> DocumentPolicy::SerializeInternal(
     const DocumentPolicyFeatureState& policy,
     const DocumentPolicyFeatureInfoMap& feature_info_map) {
   net::structured_headers::Dictionary root;
@@ -81,8 +108,16 @@ absl::optional<std::string> DocumentPolicy::SerializeInternal(
     const std::string& feature_name = feature_info_map.at(feature).feature_name;
     const PolicyValue& value = policy_entry.second;
 
+    // Skip enum features whose value has no token representation — this covers
+    // the sentinel default (value out of valid token range) meaning "not
+    // explicitly set in the header".
+    if (value.Type() == mojom::PolicyValueType::kEnum &&
+        !DocumentPolicyEnumValueToToken(feature, value.IntValue())) {
+      continue;
+    }
+
     root[feature_name] = net::structured_headers::ParameterizedMember(
-        PolicyValueToItem(value), /* parameters */ {});
+        PolicyValueToItem(feature, value), /* parameters */ {});
   }
 
   return net::structured_headers::SerializeDictionary(root);
@@ -154,13 +189,13 @@ PolicyValue DocumentPolicy::GetFeatureValue(
   return internal_feature_state_[static_cast<size_t>(feature)];
 }
 
-const absl::optional<std::string> DocumentPolicy::GetFeatureEndpoint(
+const std::optional<std::string> DocumentPolicy::GetFeatureEndpoint(
     mojom::DocumentPolicyFeature feature) const {
   auto endpoint_it = endpoint_map_.find(feature);
   if (endpoint_it != endpoint_map_.end()) {
     return endpoint_it->second;
   } else {
-    return absl::nullopt;
+    return std::nullopt;
   }
 }
 

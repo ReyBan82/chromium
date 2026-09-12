@@ -4,19 +4,16 @@
 
 package org.chromium.chrome.browser.suggestions;
 
-import android.text.TextUtils;
-
 import androidx.annotation.IntDef;
 
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.components.browser_ui.widget.displaystyle.UiConfig;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 
-/**
- * Provides configuration details for suggestions.
- */
+/** Provides configuration details for suggestions. */
+@NullMarked
 public final class SuggestionsConfig {
     @IntDef({TileStyle.MODERN, TileStyle.MODERN_CONDENSED})
     @Retention(RetentionPolicy.SOURCE)
@@ -26,14 +23,23 @@ public final class SuggestionsConfig {
     }
 
     /**
-     * Field trial parameter for referrer URL.
-     * It must be kept in sync with //components/ntp_suggestions/features.cc
+     * Maximum number of tiles that is explicitly supported. UMA relies on this value, so even if
+     * the UI supports it, getting more can raise unexpected issues.
      */
-    private static final String REFERRER_URL_PARAM = "referrer_url";
+    public static final int MAX_TILE_COUNT = 8;
+
+    /** Maximum number of custom tiles supported. In C++ backend this is `kMaxNumCustomLinks`. */
+    public static final int MAX_NUM_CUSTOM_LINKS = 8;
+
+    /** Maximum length of Custom Tiles name. */
+    public static final int MAX_CUSTOM_TILES_NAME_LENGTH = 50;
+
+    /** Maximum length of Custom Tiles URL. */
+    public static final int MAX_CUSTOM_TILES_URL_LENGTH = 2083;
 
     /**
-     * Default value of referrer URL for content suggestions.
-     * It must be kept in sync with //components/ntp_suggestions/features.cc
+     * Default value of referrer URL for content suggestions. It must be kept in sync with
+     * //components/feed/feed_feature_list.cc.
      */
     private static final String DEFAULT_CONTENT_SUGGESTIONS_REFERRER_URL =
             "https://www.google.com/";
@@ -41,40 +47,21 @@ public final class SuggestionsConfig {
     private SuggestionsConfig() {}
 
     /**
-     * Returns the current tile style, that depends on the enabled features and the screen size.
+     * Returns the current tile style. This depends on the enabled features, the screen size, and
+     * whether the device is a large form factor (LFF) device. LFF and small screens use the
+     * condensed style to improve density.
+     *
+     * @param uiConfig The UiConfig containing display style information.
+     * @param isLff Whether the device is a large form factor (LFF) device.
      */
-    @TileStyle
-    public static int getTileStyle(UiConfig uiConfig) {
-        return uiConfig.getCurrentDisplayStyle().isSmall() ? TileStyle.MODERN_CONDENSED
-                                                           : TileStyle.MODERN;
+    public static @TileStyle int getTileStyle(UiConfig uiConfig, boolean isLff) {
+        return (isLff || uiConfig.getCurrentDisplayStyle().isSmall())
+                ? TileStyle.MODERN_CONDENSED
+                : TileStyle.MODERN;
     }
 
-    private static boolean useCondensedTileLayout(boolean isScreenSmall) {
-        if (isScreenSmall) return true;
-
-        return false;
-    }
-
-    /**
-     * @param featureName The feature from {@link ChromeFeatureList}, which provides the referrer
-     *                    URL parameter.
-     * @return The value of referrer URL to use with content suggestions.
-     */
-    public static String getReferrerUrl(String featureName) {
-        assert ChromeFeatureList.INTEREST_FEED_CONTENT_SUGGESTIONS.equals(featureName)
-                || ChromeFeatureList.INTEREST_FEED_V2.equals(featureName);
-
-        return getReferrerUrlParamOrDefault(featureName, DEFAULT_CONTENT_SUGGESTIONS_REFERRER_URL);
-    }
-
-    private static String getReferrerUrlParamOrDefault(String featureName, String defaultValue) {
-        String referrerParamValue =
-                ChromeFeatureList.getFieldTrialParamByFeature(featureName, REFERRER_URL_PARAM);
-
-        if (!TextUtils.isEmpty(referrerParamValue)) {
-            return referrerParamValue;
-        }
-
-        return defaultValue;
+    /** Returns the value of referrer URL to use with content suggestions. */
+    public static String getReferrerUrl() {
+        return DEFAULT_CONTENT_SUGGESTIONS_REFERRER_URL;
     }
 }

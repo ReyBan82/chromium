@@ -1,4 +1,7 @@
 include_rules = [
-    "+components/digital_asset_links/android/java",
-    "+content/public/test/android/javatests/src/org/chromium/content_public/browser/test/util/TestThreadUtils.java",
+    "+components/android_autofill",
+    "+components/crash/android/java/src/org/chromium/components/crash/browser/ProcessExitReasonFromSystem.java",
+    "+components/safe_browsing/android/java/src/org/chromium/components/safe_browsing/OsAdditionalSecurityProvider.java",
+    "+components/safe_browsing/android/java/src/org/chromium/components/safe_browsing/OsAdditionalSecurityUtil.java",
+    "+content/public/android/java/src/org/chromium/content_public/browser/SelectionMenuItem.java",
 ]

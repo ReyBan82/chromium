@@ -32,36 +32,27 @@
 
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace WTF {
+namespace blink {
 
 namespace {
 
-TEST(TextCodec, HTMLEntityEncoding) {
-  UnencodableReplacementArray replacement;
-  int size = TextCodec::GetUnencodableReplacement(
-      0xE003, kEntitiesForUnencodables, replacement);
-  EXPECT_EQ(size, 8);
-  EXPECT_EQ(std::string(replacement), "&#57347;");
-  EXPECT_EQ(replacement[8], 0);
+TEST(TextCodec, XmlCharRef) {
+  std::string replacement = TextCodec::GetUnencodableReplacement(
+      0xE003, UnencodableHandling::kXmlCharRef);
+  EXPECT_EQ(replacement, "&#57347;");
 }
 
-TEST(TextCodec, URLEntityEncoding) {
-  UnencodableReplacementArray replacement;
-  int size = TextCodec::GetUnencodableReplacement(
-      0xE003, kURLEncodedEntitiesForUnencodables, replacement);
-  EXPECT_EQ(size, 14);
-  EXPECT_EQ(std::string(replacement), "%26%2357347%3B");
-  EXPECT_EQ(replacement[14], 0);
+TEST(TextCodec, UrlEncodedCharRef) {
+  std::string replacement = TextCodec::GetUnencodableReplacement(
+      0xE003, UnencodableHandling::kUrlEncodedCharRef);
+  EXPECT_EQ(replacement, "%26%2357347%3B");
 }
 
-TEST(TextCodec, CSSEntityEncoding) {
-  UnencodableReplacementArray replacement;
-  int size = TextCodec::GetUnencodableReplacement(
-      0xE003, kCSSEncodedEntitiesForUnencodables, replacement);
-  EXPECT_EQ(size, 6);
-  EXPECT_EQ(std::string(replacement), "\\e003 ");
-  EXPECT_EQ(replacement[6], 0);
+TEST(TextCodec, CssEscape) {
+  std::string replacement = TextCodec::GetUnencodableReplacement(
+      0xE003, UnencodableHandling::kCssEscape);
+  EXPECT_EQ(replacement, "\\e003 ");
 }
 
 }  // anonymous namespace
-}  // namespace WTF
+}  // namespace blink

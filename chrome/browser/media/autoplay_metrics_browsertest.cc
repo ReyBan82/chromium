@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 #include "build/build_config.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/ukm/test_ukm_recorder.h"
 #include "content/public/browser/navigation_controller.h"
@@ -13,8 +13,7 @@
 #include "net/dns/mock_host_resolver.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
 #include "services/metrics/public/cpp/ukm_source.h"
-
-namespace chrome {
+#include "ui/base/page_transition_types.h"
 
 namespace {
 
@@ -34,8 +33,8 @@ class AutoplayMetricsBrowserTest : public InProcessBrowserTest {
     base::RunLoop run_loop;
     ukm_recorder.SetOnAddEntryCallback(Entry::kEntryName,
                                        run_loop.QuitClosure());
-    EXPECT_TRUE(ExecuteScriptWithoutUserGesture(adapter.render_frame_host(),
-                                                "tryPlayback();"));
+    EXPECT_TRUE(ExecJs(adapter.render_frame_host(), "tryPlayback();",
+                       content::EXECUTE_SCRIPT_NO_USER_GESTURE));
     run_loop.Run();
   }
 
@@ -63,7 +62,7 @@ class AutoplayMetricsBrowserTest : public InProcessBrowserTest {
   }
 };
 
-// Flaky on various platforms. https://crbug.com/1101841
+// Flaky on various platforms. https://crbug.com/40703784
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_RecordAutoplayAttemptUkm DISABLED_RecordAutoplayAttemptUkm
 #else
@@ -163,5 +162,3 @@ IN_PROC_BROWSER_TEST_F(AutoplayMetricsBrowserTest,
 }
 
 }  // namespace
-
-}  // namespace chrome

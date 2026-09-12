@@ -3,20 +3,20 @@
 // found in the LICENSE file.
 
 function getImageData() {
-  var canvas = new OffscreenCanvas(10, 100);
-  var ctx = canvas.getContext("2d");
+  const canvas = new OffscreenCanvas(10, 100);
+  const ctx = canvas.getContext('2d');
 
-  ctx.fillStyle = "green";
+  ctx.fillStyle = 'green';
   ctx.fillRect(10, 10, 100, 100);
 
   return ctx.getImageData(50, 50, 100, 100);
 }
 
-chrome.tabs.getSelected(null, function(tab) {
+chrome.tabs.query({active: true}, function(tabs) {
   // When the browser action is clicked, add an icon.
   chrome.browserAction.onClicked.addListener(function(tab) {
     chrome.browserAction.setIcon({
-      imageData: getImageData()
+      imageData: getImageData(),
     });
     chrome.test.notifyPass();
   });

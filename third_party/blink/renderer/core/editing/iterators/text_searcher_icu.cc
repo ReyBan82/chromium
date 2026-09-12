@@ -28,12 +28,15 @@
 #include "third_party/blink/renderer/core/editing/iterators/text_searcher_icu.h"
 
 #include <unicode/usearch.h>
+
+#include "base/numerics/safe_conversions.h"
 #include "third_party/blink/renderer/platform/text/character.h"
 #include "third_party/blink/renderer/platform/text/text_boundaries.h"
 #include "third_party/blink/renderer/platform/text/text_break_iterator_internal_icu.h"
 #include "third_party/blink/renderer/platform/text/unicode_utilities.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
+#include "third_party/blink/renderer/platform/wtf/text/utf16.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
@@ -46,44 +49,64 @@ UStringSearch* CreateSearcher() {
   // searches without setting both the pattern and the text.
   UErrorCode status = U_ZERO_ERROR;
   String search_collator_name =
-      CurrentSearchLocaleID() + String("@collation=search");
+      StrCat({CurrentSearchLocaleID(), "@collation=search"});
   UStringSearch* searcher =
-      usearch_open(&kNewlineCharacter, 1, &kNewlineCharacter, 1,
+      usearch_open(&uchar::kLineFeed, 1, &uchar::kLineFeed, 1,
                    search_collator_name.Utf8().c_str(), nullptr, &status);
   DCHECK(U_SUCCESS(status)) << status;
   return searcher;
 }
 
-class ICULockableSearcher {
+class SearcherFactory {
   STACK_ALLOCATED();
 
  public:
-  ICULockableSearcher(const ICULockableSearcher&) = delete;
-  ICULockableSearcher& operator=(const ICULockableSearcher&) = delete;
+  SearcherFactory(const SearcherFactory&) = delete;
+  SearcherFactory& operator=(const SearcherFactory&) = delete;
 
+  // Returns the global instance. If this is called again before calling
+  // ReleaseSearcher(), this function crashes.
   static UStringSearch* AcquireSearcher() {
-    Instance().lock();
+    Instance().Lock();
     return Instance().searcher_;
   }
+  // Creates a normal instance. We may create instances multiple times with
+  // this function.  A returned pointer should be destructed by
+  // ReleaseSearcher().
+  static UStringSearch* CreateLocal() { return CreateSearcher(); }
 
-  static void ReleaseSearcher() { Instance().unlock(); }
-
- private:
-  static ICULockableSearcher& Instance() {
-    static ICULockableSearcher searcher(CreateSearcher());
-    return searcher;
+  static void ReleaseSearcher(UStringSearch* searcher) {
+    if (searcher == Instance().searcher_) {
+      // Leave the static object pointing to valid strings (pattern=target,
+      // text=buffer). Otherwise, usearch_reset() will results in
+      // 'use-after-free' error.
+      UErrorCode status = U_ZERO_ERROR;
+      usearch_setPattern(searcher, &uchar::kLineFeed, 1, &status);
+      DCHECK(U_SUCCESS(status));
+      usearch_setText(searcher, &uchar::kLineFeed, 1, &status);
+      DCHECK(U_SUCCESS(status));
+      Instance().Unlock();
+    } else {
+      usearch_close(searcher);
+    }
   }
 
-  explicit ICULockableSearcher(UStringSearch* searcher) : searcher_(searcher) {}
+ private:
+  static SearcherFactory& Instance() {
+    static SearcherFactory factory(CreateSearcher());
+    return factory;
+  }
 
-  void lock() {
+  explicit SearcherFactory(UStringSearch* searcher) : searcher_(searcher) {}
+
+  void Lock() {
 #if DCHECK_IS_ON()
     DCHECK(!locked_);
     locked_ = true;
 #endif
   }
 
-  void unlock() {
+  void Unlock() {
 #if DCHECK_IS_ON()
     DCHECK(locked_);
     locked_ = false;
@@ -99,80 +122,76 @@ class ICULockableSearcher {
 
 }  // namespace
 
-static bool IsWholeWordMatch(const UChar* text,
-                             unsigned text_length,
-                             MatchResultICU& result) {
+static bool IsWholeWordMatch(base::span<const UChar> text,
+                             const MatchResultIcu& result) {
   const wtf_size_t result_end = result.start + result.length;
-  DCHECK_LE(result_end, text_length);
-  UChar32 first_character;
-  U16_GET(text, 0, result.start, result_end, first_character);
+  DCHECK_LE(result_end, text.size());
+  UChar32 first_character = CodePointAt(text, result.start);
 
   // Chinese and Japanese lack word boundary marks, and there is no clear
   // agreement on what constitutes a word, so treat the position before any CJK
   // character as a word start.
-  if (Character::IsCJKIdeographOrSymbol(first_character))
+  if (Character::IsCjkIdeographOrSymbol(first_character)) {
     return true;
+  }
 
   wtf_size_t word_break_search_start = result_end;
   while (word_break_search_start > result.start) {
     word_break_search_start =
-        FindNextWordBackward(text, text_length, word_break_search_start);
+        FindNextWordBackward(text, word_break_search_start);
   }
   if (word_break_search_start != result.start)
     return false;
-  return result_end == static_cast<wtf_size_t>(FindWordEndBoundary(
-                           text, text_length, word_break_search_start));
+  return result_end == FindWordEndBoundary(text, word_break_search_start);
 }
 
 // Grab the single global searcher.
-// If we ever have a reason to do more than once search buffer at once, we'll
-// have to move to multiple searchers.
-TextSearcherICU::TextSearcherICU()
-    : searcher_(ICULockableSearcher::AcquireSearcher()) {}
+TextSearcherIcu::TextSearcherIcu()
+    : searcher_(SearcherFactory::AcquireSearcher()) {}
 
-TextSearcherICU::~TextSearcherICU() {
-  // Leave the static object pointing to valid strings (pattern=target,
-  // text=buffer). Otheriwse, usearch_reset() will results in 'use-after-free'
-  // error.
-  SetPattern(&kNewlineCharacter, 1);
-  SetText(&kNewlineCharacter, 1);
-  ICULockableSearcher::ReleaseSearcher();
+TextSearcherIcu::TextSearcherIcu(ConstructLocalTag)
+    : searcher_(SearcherFactory::CreateLocal()) {}
+
+TextSearcherIcu::~TextSearcherIcu() {
+  SearcherFactory::ReleaseSearcher(searcher_);
 }
 
-void TextSearcherICU::SetPattern(const StringView& pattern,
+void TextSearcherIcu::SetPattern(const StringView& pattern,
                                  FindOptions options) {
   DCHECK_GT(pattern.length(), 0u);
   options_ = options;
-  SetCaseSensitivity(!(options & kCaseInsensitive));
-  SetPattern(pattern.Characters16(), pattern.length());
+  SetCaseSensitivity(!options.IsCaseInsensitive());
+  SetPattern(pattern.Span16());
+  SetAllowOverlapMatches(options.AllowOverlapMatches());
   if (ContainsKanaLetters(pattern.ToString())) {
-    NormalizeCharactersIntoNFCForm(pattern.Characters16(), pattern.length(),
-                                   normalized_search_text_);
+    normalized_search_text_ = NormalizeCharactersIntoNfc(pattern.Span16());
   }
 }
 
-void TextSearcherICU::SetText(const UChar* text, wtf_size_t length) {
+void TextSearcherIcu::SetText(base::span<const UChar> text) {
   UErrorCode status = U_ZERO_ERROR;
-  usearch_setText(searcher_, text, length, &status);
+  usearch_setText(searcher_, text.data(),
+                  base::checked_cast<int32_t>(text.size()), &status);
   DCHECK_EQ(status, U_ZERO_ERROR);
-  text_length_ = length;
+  text_length_ = base::checked_cast<wtf_size_t>(text.size());
 }
 
-void TextSearcherICU::SetOffset(wtf_size_t offset) {
+void TextSearcherIcu::SetOffset(wtf_size_t offset) {
   UErrorCode status = U_ZERO_ERROR;
   usearch_setOffset(searcher_, offset, &status);
   DCHECK_EQ(status, U_ZERO_ERROR);
 }
 
-bool TextSearcherICU::NextMatchResult(MatchResultICU& result) {
-  while (NextMatchResultInternal(result)) {
-    if (!ShouldSkipCurrentMatch(result))
-      return true;
+std::optional<MatchResultIcu> TextSearcherIcu::NextMatchResult() {
+  while (std::optional<MatchResultIcu> result = NextMatchResultInternal()) {
+    if (!ShouldSkipCurrentMatch(*result)) {
+      return result;
+    }
   }
-  return false;
+  return std::nullopt;
 }
 
-bool TextSearcherICU::NextMatchResultInternal(MatchResultICU& result) {
+std::optional<MatchResultIcu> TextSearcherIcu::NextMatchResultInternal() {
   UErrorCode status = U_ZERO_ERROR;
   const int match_start = usearch_next(searcher_, &status);
   DCHECK(U_SUCCESS(status));
@@ -182,54 +201,67 @@ bool TextSearcherICU::NextMatchResultInternal(MatchResultICU& result) {
   if (!(match_start >= 0 &&
         static_cast<wtf_size_t>(match_start) < text_length_)) {
     DCHECK_EQ(match_start, USEARCH_DONE);
-    result.start = 0;
-    result.length = 0;
-    return false;
+    return std::nullopt;
   }
 
-  result.start = static_cast<wtf_size_t>(match_start);
-  result.length = usearch_getMatchedLength(searcher_);
+  MatchResultIcu result = {
+      static_cast<wtf_size_t>(match_start),
+      base::checked_cast<wtf_size_t>(usearch_getMatchedLength(searcher_))};
   // Might be possible to get zero-length result with some Unicode characters
   // that shouldn't actually match but is matched by ICU such as \u0080.
   if (result.length == 0u) {
-    result.start = 0;
-    return false;
+    return std::nullopt;
   }
-  return true;
+  return result;
 }
 
-bool TextSearcherICU::ShouldSkipCurrentMatch(MatchResultICU& result) const {
+bool TextSearcherIcu::ShouldSkipCurrentMatch(
+    const MatchResultIcu& result) const {
   int32_t text_length_i32;
   const UChar* text = usearch_getText(searcher_, &text_length_i32);
-  unsigned text_length = text_length_i32;
+  wtf_size_t text_length = text_length_i32;
   DCHECK_LE(result.start + result.length, text_length);
   DCHECK_GT(result.length, 0u);
+  // SAFETY: Making a span same as the SetText() argument.
+  auto text_span = UNSAFE_BUFFERS(
+      base::span<const UChar>(base::unchecked, text, text_length));
 
-  if (!normalized_search_text_.empty() && !IsCorrectKanaMatch(text, result))
+  if (!normalized_search_text_.empty() &&
+      !IsCorrectKanaMatch(text_span, result)) {
     return true;
+  }
 
-  if ((options_ & kWholeWord) && !IsWholeWordMatch(text, text_length, result))
+  if (options_.RequireWordBoundedStart() &&
+      FindWordStartBoundary(text_span, result.start) != result.start) {
     return true;
-  return false;
+  }
+
+  if (options_.RequireWordBoundedEnd()) {
+    const wtf_size_t last_char_pos = result.start + result.length - 1;
+    if (FindWordEndBoundary(text_span, last_char_pos) != last_char_pos + 1) {
+      return true;
+    }
+  }
+
+  return options_.IsWholeWord() && !IsWholeWordMatch(text_span, result);
 }
 
-bool TextSearcherICU::IsCorrectKanaMatch(const UChar* text,
-                                         MatchResultICU& result) const {
-  Vector<UChar> normalized_match;
-  NormalizeCharactersIntoNFCForm(text + result.start, result.length,
-                                 normalized_match);
-  return CheckOnlyKanaLettersInStrings(
-      normalized_search_text_.data(), normalized_search_text_.size(),
-      normalized_match.begin(), normalized_match.size());
+bool TextSearcherIcu::IsCorrectKanaMatch(base::span<const UChar> text,
+                                         const MatchResultIcu& result) const {
+  Vector<UChar> normalized_match =
+      NormalizeCharactersIntoNfc(text.subspan(result.start, result.length));
+  return CheckOnlyKanaLettersInStrings(base::span(normalized_search_text_),
+                                       base::span(normalized_match));
 }
 
-void TextSearcherICU::SetPattern(const UChar* pattern, wtf_size_t length) {
+void TextSearcherIcu::SetPattern(base::span<const UChar> pattern) {
   UErrorCode status = U_ZERO_ERROR;
-  usearch_setPattern(searcher_, pattern, length, &status);
+  usearch_setPattern(searcher_, pattern.data(),
+                     base::checked_cast<int32_t>(pattern.size()), &status);
   DCHECK(U_SUCCESS(status));
 }
 
-void TextSearcherICU::SetCaseSensitivity(bool case_sensitive) {
+void TextSearcherIcu::SetCaseSensitivity(bool case_sensitive) {
   const UCollationStrength strength =
       case_sensitive ? UCOL_TERTIARY : UCOL_PRIMARY;
 
@@ -239,6 +271,13 @@ void TextSearcherICU::SetCaseSensitivity(bool case_sensitive) {
 
   ucol_setStrength(collator, strength);
   usearch_reset(searcher_);
+}
+
+void TextSearcherIcu::SetAllowOverlapMatches(bool overlap) {
+  UErrorCode status = U_ZERO_ERROR;
+  usearch_setAttribute(searcher_, USEARCH_OVERLAP,
+                       overlap ? USEARCH_ON : USEARCH_OFF, &status);
+  DCHECK_EQ(status, U_ZERO_ERROR);
 }
 
 }  // namespace blink

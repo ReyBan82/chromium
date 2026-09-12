@@ -18,8 +18,7 @@
 #include "base/time/time.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace base {
-namespace internal {
+namespace base::internal {
 
 namespace {
 
@@ -28,12 +27,9 @@ class PriorityQueueWithSequencesTest : public testing::Test {
   void ExpectNumSequences(size_t num_best_effort,
                           size_t num_user_visible,
                           size_t num_user_blocking) {
-    EXPECT_EQ(pq.GetNumTaskSourcesWithPriority(TaskPriority::BEST_EFFORT),
-              num_best_effort);
-    EXPECT_EQ(pq.GetNumTaskSourcesWithPriority(TaskPriority::USER_VISIBLE),
-              num_user_visible);
-    EXPECT_EQ(pq.GetNumTaskSourcesWithPriority(TaskPriority::USER_BLOCKING),
-              num_user_blocking);
+    EXPECT_EQ(pq.GetNumBackgroundTaskSources(), num_best_effort);
+    EXPECT_EQ(pq.GetNumForegroundTaskSources(),
+              num_user_visible + num_user_blocking);
   }
 
   scoped_refptr<TaskSource> MakeSequenceWithTraitsAndTask(
@@ -42,7 +38,8 @@ class PriorityQueueWithSequencesTest : public testing::Test {
     // defined.
     task_environment.FastForwardBy(Microseconds(1));
     scoped_refptr<Sequence> sequence = MakeRefCounted<Sequence>(
-        traits, nullptr, TaskSourceExecutionMode::kParallel);
+        traits, nullptr, TaskSourceExecutionMode::kParallel,
+        ThreadType::kDefault);
     auto transaction = sequence->BeginTransaction();
     transaction.WillPushImmediateTask();
     transaction.PushImmediateTask(
@@ -253,5 +250,4 @@ TEST_F(PriorityQueueWithSequencesTest, UpdateSortKey) {
   }
 }
 
-}  // namespace internal
-}  // namespace base
+}  // namespace base::internal

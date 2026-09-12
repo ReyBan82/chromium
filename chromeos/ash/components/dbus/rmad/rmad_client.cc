@@ -4,13 +4,14 @@
 
 #include "chromeos/ash/components/dbus/rmad/rmad_client.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_forward.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/path_service.h"
 #include "base/task/thread_pool.h"
@@ -19,7 +20,6 @@
 #include "dbus/bus.h"
 #include "dbus/message.h"
 #include "dbus/object_proxy.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 
 namespace ash {
@@ -43,22 +43,26 @@ class RmadClientImpl : public RmadClient {
       chromeos::DBusMethodCallback<rmad::GetStateReply> callback) override;
   void TransitionPreviousState(
       chromeos::DBusMethodCallback<rmad::GetStateReply> callback) override;
-
   void AbortRma(
       chromeos::DBusMethodCallback<rmad::AbortRmaReply> callback) override;
-
   void GetLog(
       chromeos::DBusMethodCallback<rmad::GetLogReply> callback) override;
-
   void SaveLog(
       const std::string& diagnostics_log_text,
       chromeos::DBusMethodCallback<rmad::SaveLogReply> callback) override;
-
   void RecordBrowserActionMetric(
       const rmad::RecordBrowserActionMetricRequest request,
       chromeos::DBusMethodCallback<rmad::RecordBrowserActionMetricReply>
           callback) override;
-
+  void ExtractExternalDiagnosticsApp(
+      chromeos::DBusMethodCallback<rmad::ExtractExternalDiagnosticsAppReply>
+          callback) override;
+  void InstallExtractedDiagnosticsApp(
+      chromeos::DBusMethodCallback<rmad::InstallExtractedDiagnosticsAppReply>
+          callback) override;
+  void GetInstalledDiagnosticsApp(
+      chromeos::DBusMethodCallback<rmad::GetInstalledDiagnosticsAppReply>
+          callback) override;
   void AddObserver(Observer* observer) override;
   void RemoveObserver(Observer* observer) override;
   bool HasObserver(const Observer* observer) const override;
@@ -100,15 +104,17 @@ class RmadClientImpl : public RmadClient {
   // Sends out the requests to verify if RMAD files exist on device.
   void StartCheckForRmadFiles();
 
-  dbus::ObjectProxy* rmad_proxy_ = nullptr;
-  base::ObserverList<Observer, /*check_empty=*/true, /*allow_reentrancy=*/false>
+  raw_ptr<dbus::ObjectProxy> rmad_proxy_ = nullptr;
+  base::ObserverList<Observer,
+                     /*check_empty=*/true,
+                     base::ObserverListReentrancyPolicy::kDisallowReentrancy>
       observers_;
 
   // True if the RMAD executable exists.
-  absl::optional<bool> rma_executable_exists_;
+  std::optional<bool> rma_executable_exists_;
 
   // True if the RMAD state file exists.
-  absl::optional<bool> rma_state_file_exists_;
+  std::optional<bool> rma_state_file_exists_;
 
   // Set from the response to the RMA daemon D-Bus call.
   bool is_rma_required_ = false;
@@ -358,8 +364,10 @@ void RmadClientImpl::HardwareVerificationResultReceived(dbus::Signal* signal) {
   }
   DCHECK(!reader.HasMoreData());
   bool is_compliant = true;
+  bool is_skipped = false;
   std::string error_str = "";
-  if (!sub_reader.PopBool(&is_compliant) || !sub_reader.PopString(&error_str)) {
+  if (!sub_reader.PopBool(&is_compliant) || !sub_reader.PopString(&error_str) ||
+      !sub_reader.PopBool(&is_skipped)) {
     LOG(ERROR) << "Unable to decode signal for " << signal->GetMember();
     return;
   }
@@ -367,6 +375,7 @@ void RmadClientImpl::HardwareVerificationResultReceived(dbus::Signal* signal) {
   rmad::HardwareVerificationResult signal_proto;
   signal_proto.set_is_compliant(is_compliant);
   signal_proto.set_error_str(error_str);
+  signal_proto.set_is_skipped(is_skipped);
   for (auto& observer : observers_) {
     observer.HardwareVerificationResult(signal_proto);
   }
@@ -438,7 +447,7 @@ void RmadClientImpl::TransitionNextState(
   if (!writer.AppendProtoAsArrayOfBytes(protobuf_request)) {
     LOG(ERROR) << "Error constructing message for "
                << rmad::kTransitionNextStateMethod;
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
   rmad_proxy_->CallMethod(
@@ -500,7 +509,7 @@ void RmadClientImpl::RecordBrowserActionMetric(
   if (!writer.AppendProtoAsArrayOfBytes(request)) {
     LOG(ERROR) << "Error constructing message for "
                << rmad::kRecordBrowserActionMetricMethod;
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
@@ -508,6 +517,45 @@ void RmadClientImpl::RecordBrowserActionMetric(
       &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
       base::BindOnce(
           &RmadClientImpl::OnProtoReply<rmad::RecordBrowserActionMetricReply>,
+          weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
+}
+
+void RmadClientImpl::ExtractExternalDiagnosticsApp(
+    chromeos::DBusMethodCallback<rmad::ExtractExternalDiagnosticsAppReply>
+        callback) {
+  dbus::MethodCall method_call(rmad::kRmadInterfaceName,
+                               rmad::kExtractExternalDiagnosticsAppMethod);
+  dbus::MessageWriter writer(&method_call);
+  rmad_proxy_->CallMethod(
+      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
+      base::BindOnce(&RmadClientImpl::OnProtoReply<
+                         rmad::ExtractExternalDiagnosticsAppReply>,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
+}
+
+void RmadClientImpl::InstallExtractedDiagnosticsApp(
+    chromeos::DBusMethodCallback<rmad::InstallExtractedDiagnosticsAppReply>
+        callback) {
+  dbus::MethodCall method_call(rmad::kRmadInterfaceName,
+                               rmad::kInstallExtractedDiagnosticsAppMethod);
+  dbus::MessageWriter writer(&method_call);
+  rmad_proxy_->CallMethod(
+      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
+      base::BindOnce(&RmadClientImpl::OnProtoReply<
+                         rmad::InstallExtractedDiagnosticsAppReply>,
+                     weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
+}
+
+void RmadClientImpl::GetInstalledDiagnosticsApp(
+    chromeos::DBusMethodCallback<rmad::GetInstalledDiagnosticsAppReply>
+        callback) {
+  dbus::MethodCall method_call(rmad::kRmadInterfaceName,
+                               rmad::kGetInstalledDiagnosticsAppMethod);
+  dbus::MessageWriter writer(&method_call);
+  rmad_proxy_->CallMethod(
+      &method_call, dbus::ObjectProxy::TIMEOUT_USE_DEFAULT,
+      base::BindOnce(
+          &RmadClientImpl::OnProtoReply<rmad::GetInstalledDiagnosticsAppReply>,
           weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
@@ -532,7 +580,7 @@ void RmadClientImpl::OnProtoReply(chromeos::DBusMethodCallback<T> callback,
                                   dbus::Response* response) {
   if (!response) {
     LOG(ERROR) << "Error calling rmad function";
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
@@ -540,7 +588,7 @@ void RmadClientImpl::OnProtoReply(chromeos::DBusMethodCallback<T> callback,
   T response_proto;
   if (!reader.PopArrayOfBytesAsProto(&response_proto)) {
     LOG(ERROR) << "Unable to decode response for " << response->GetMember();
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
   DCHECK(!reader.HasMoreData());

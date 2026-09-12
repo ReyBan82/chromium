@@ -14,6 +14,7 @@
 
 #include "util/misc/capture_context_test_util.h"
 
+#include "build/build_config.h"
 #include "gtest/gtest.h"
 #include "util/misc/from_pointer_cast.h"
 
@@ -35,6 +36,9 @@ void SanityCheckContext(const NativeCPUContext& context) {
   EXPECT_EQ(context.uc_mcontext.regs[0], FromPointerCast<uintptr_t>(&context));
 #elif defined(ARCH_CPU_MIPS_FAMILY)
   EXPECT_EQ(context.uc_mcontext.gregs[4], FromPointerCast<uintptr_t>(&context));
+#elif defined(ARCH_CPU_RISCV64)
+  EXPECT_EQ(context.uc_mcontext.__gregs[10],
+            FromPointerCast<uintptr_t>(&context));
 #endif
 }
 
@@ -49,6 +53,8 @@ uintptr_t ProgramCounterFromContext(const NativeCPUContext& context) {
   return context.uc_mcontext.pc;
 #elif defined(ARCH_CPU_MIPS_FAMILY)
   return context.uc_mcontext.pc;
+#elif defined(ARCH_CPU_RISCV64)
+  return context.uc_mcontext.__gregs[0];
 #endif
 }
 
@@ -63,6 +69,8 @@ uintptr_t StackPointerFromContext(const NativeCPUContext& context) {
   return context.uc_mcontext.sp;
 #elif defined(ARCH_CPU_MIPS_FAMILY)
   return context.uc_mcontext.gregs[29];
+#elif defined(ARCH_CPU_RISCV64)
+  return context.uc_mcontext.__gregs[2];
 #endif
 }
 

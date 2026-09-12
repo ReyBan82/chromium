@@ -42,9 +42,13 @@ class CONTENT_EXPORT RenderFrameMetadataProvider {
     // to pass in Viz.
     virtual void OnLocalSurfaceIdChanged(
         const cc::RenderFrameMetadata& metadata) = 0;
-#if BUILDFLAG(IS_ANDROID)
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
     virtual void OnRootScrollOffsetChanged(
         const gfx::PointF& root_scroll_offset) {}
+#endif
+#if BUILDFLAG(IS_ANDROID)
+    virtual void OnReportScrollJankStats(uint32_t total_frames,
+                                         uint32_t janky_frames) {}
 #endif
   };
 

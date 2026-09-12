@@ -5,8 +5,6 @@
 #ifndef CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_PASSWORD_MANAGER_ERROR_MESSAGE_HELPER_BRIDGE_IMPL_H_
 #define CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_PASSWORD_MANAGER_ERROR_MESSAGE_HELPER_BRIDGE_IMPL_H_
 
-#include <jni.h>
-
 #include "chrome/browser/password_manager/android/password_manager_error_message_helper_bridge.h"
 #include "content/public/browser/web_contents.h"
 
@@ -15,8 +13,12 @@ class PasswordManagerErrorMessageHelperBridgeImpl
  public:
   void StartUpdateAccountCredentialsFlow(
       content::WebContents* web_contents) override;
-  bool ShouldShowErrorUI() override;
-  void SaveErrorUIShownTimestamp() override;
+  void StartTrustedVaultKeyRetrievalFlow(
+      content::WebContents* web_contents,
+      trusted_vault::TrustedVaultUserActionTriggerForUMA user_action_trigger,
+      base::OnceClosure completion_callback) override;
+  bool ShouldShowSignInErrorUI(content::WebContents* web_contents) override;
+  void SaveErrorUIShownTimestamp(content::WebContents* web_contents) override;
 };
 
 #endif  // CHROME_BROWSER_PASSWORD_MANAGER_ANDROID_PASSWORD_MANAGER_ERROR_MESSAGE_HELPER_BRIDGE_IMPL_H_

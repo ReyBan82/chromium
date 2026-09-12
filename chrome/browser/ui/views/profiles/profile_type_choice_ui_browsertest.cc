@@ -2,30 +2,32 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <memory>
-#include "base/functional/callback_helpers.h"
-#include "base/scoped_environment_variable_override.h"
 #include "base/strings/strcat.h"
 #include "base/test/bind.h"
 #include "base/test/scoped_feature_list.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/enterprise/browser_management/management_service_factory.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/test/test_browser_ui.h"
 #include "chrome/browser/ui/views/profiles/profile_management_step_controller.h"
 #include "chrome/browser/ui/views/profiles/profile_picker_view_test_utils.h"
 #include "chrome/browser/ui/views/profiles/profiles_pixel_test_utils.h"
-#include "components/signin/public/base/signin_buildflags.h"
+#include "components/policy/core/common/management/scoped_management_service_override_for_testing.h"
 #include "components/signin/public/base/signin_switches.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 
 // Tests for the chrome://profile-picker/new-profile WebUI page. They live here
 // and not in the webui directory because they manipulate views.
 namespace {
+
 struct ProfileTypeChoiceTestParam {
   PixelTestParam pixel_test_param;
-  bool use_tangible_sync_flow = false;
+  bool decline_signin_cta_experiment_enabled = false;
+
+  bool use_refreshed_ui = false;
 };
 
 // To be passed as 4th argument to `INSTANTIATE_TEST_SUITE_P()`, allows the test
@@ -38,17 +40,19 @@ std::string ParamToTestSuffix(
 
 // Permutations of supported parameters.
 const ProfileTypeChoiceTestParam kTestParams[] = {
-    {.pixel_test_param = {.test_suffix = "Default"}},
+    {.pixel_test_param = {.test_suffix = "Regular"}},
+    {.pixel_test_param = {.test_suffix = "RegularRefreshedUI"},
+     .use_refreshed_ui = true},
+    {.pixel_test_param = {.test_suffix = "RegularRefreshedUIDarkMode",
+                          .use_dark_theme = true},
+     .use_refreshed_ui = true},
     {.pixel_test_param = {.test_suffix = "DarkRtlSmall",
                           .use_dark_theme = true,
                           .use_right_to_left_language = true,
-                          .use_small_window = true}},
-    {.pixel_test_param = {.test_suffix = "TS"}, .use_tangible_sync_flow = true},
-    {.pixel_test_param = {.test_suffix = "DarkRtlSmallTS",
-                          .use_dark_theme = true,
-                          .use_right_to_left_language = true,
-                          .use_small_window = true},
-     .use_tangible_sync_flow = true},
+                          .window_size = PixelTestParam::kSmallWindowSize}},
+    {.pixel_test_param = {.test_suffix = "DarkDeclineSigninCTAExperiment",
+                          .use_dark_theme = true},
+     .decline_signin_cta_experiment_enabled = true},
 };
 
 const char kRemoveAvatarIconJS[] =
@@ -63,30 +67,25 @@ const char kRemoveAvatarIconJS[] =
 }  // namespace
 
 class ProfileTypeChoiceUIPixelTest
-    : public UiBrowserTest,
+    : public ProfilesPixelTestBaseT<UiBrowserTest>,
       public testing::WithParamInterface<ProfileTypeChoiceTestParam> {
  public:
-  ProfileTypeChoiceUIPixelTest() {
-    std::vector<base::test::FeatureRef> enabled_features = {};
-    std::vector<base::test::FeatureRef> disabled_features = {};
-    if (GetParam().use_tangible_sync_flow) {
-      enabled_features.push_back(switches::kTangibleSync);
-    } else {
-      disabled_features.push_back(switches::kTangibleSync);
-    }
+  ProfileTypeChoiceUIPixelTest()
+      : ProfilesPixelTestBaseT<UiBrowserTest>(GetParam().pixel_test_param) {
+    scoped_feature_list_.InitWithFeatureStates(
+        {{switches::kProfileCreationDeclineSigninCTAExperiment,
+          GetParam().decline_signin_cta_experiment_enabled},
 
-    InitPixelTestFeatures(GetParam().pixel_test_param, scoped_feature_list_,
-                          enabled_features, disabled_features);
-  }
-
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    SetUpPixelTestCommandLine(GetParam().pixel_test_param, scoped_env_override_,
-                              command_line);
+         {switches::kFirstRunDesktopRefresh, GetParam().use_refreshed_ui}});
   }
 
   void ShowUi(const std::string& name) override {
-    ui::ScopedAnimationDurationScaleMode disable_animation(
-        ui::ScopedAnimationDurationScaleMode::ZERO_DURATION);
+    gfx::ScopedAnimationDurationScaleMode disable_animation(
+        gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION);
+    policy::ScopedManagementServiceOverrideForTesting browser_management(
+        policy::ManagementServiceFactory::GetForPlatform(),
+        policy::EnterpriseManagementAuthority::NONE);
+
     DCHECK(browser());
     const GURL profile_type_choice_url =
         GURL("chrome://profile-picker/new-profile");
@@ -94,10 +93,9 @@ class ProfileTypeChoiceUIPixelTest
     observer.StartWatchingNewWebContents();
 
     profile_picker_view_ = new ProfileManagementStepTestView(
-        // We use `ProfilePicker::Params::ForFirstRun` here because it is the
-        // only constructor that lets us force a profile to use.
-        ProfilePicker::Params::ForFirstRun(browser()->profile()->GetPath(),
-                                           base::DoNothing()),
+        ProfilePicker::Params::ForTesting(
+            ProfilePicker::EntryPoint::kProfileMenuAddNewProfile,
+            browser()->GetProfile()->GetPath()),
         ProfileManagementFlowController::Step::kProfilePicker,
         /*step_controller_factory=*/
         base::BindLambdaForTesting(
@@ -106,9 +104,7 @@ class ProfileTypeChoiceUIPixelTest
                   host, profile_type_choice_url);
             }));
     profile_picker_view_->ShowAndWait(
-        GetParam().pixel_test_param.use_small_window
-            ? absl::optional<gfx::Size>(gfx::Size(750, 590))
-            : absl::nullopt);
+        GetParam().pixel_test_param.window_size);
     observer.Wait();
 
     // We need to remove the avatar icon because it will be generated
@@ -123,10 +119,10 @@ class ProfileTypeChoiceUIPixelTest
 
     auto* test_info = testing::UnitTest::GetInstance()->current_test_info();
     const std::string screenshot_name =
-        base::StrCat({test_info->test_case_name(), "_", test_info->name()});
+        base::StrCat({test_info->test_suite_name(), "_", test_info->name()});
 
     return VerifyPixelUi(widget, "ProfileTypeChoiceUIPixelTest",
-                         screenshot_name);
+                         screenshot_name) != ui::test::ActionResult::kFailed;
   }
 
   void WaitForUserDismissal() override {
@@ -139,10 +135,9 @@ class ProfileTypeChoiceUIPixelTest
     return profile_picker_view_->GetWidget();
   }
 
-  base::test::ScopedFeatureList scoped_feature_list_;
-  std::unique_ptr<base::ScopedEnvironmentVariableOverride> scoped_env_override_;
   raw_ptr<ProfileManagementStepTestView, DanglingUntriaged>
       profile_picker_view_;
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
 
 IN_PROC_BROWSER_TEST_P(ProfileTypeChoiceUIPixelTest, InvokeUi_default) {

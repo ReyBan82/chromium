@@ -18,6 +18,10 @@ TestURLLoaderNetworkObserver::Bind() {
   return remote;
 }
 
+void TestURLLoaderNetworkObserver::FlushReceivers() {
+  receivers_.FlushForTesting();
+}
+
 void TestURLLoaderNetworkObserver::OnSSLCertificateError(
     const GURL& url,
     int net_error,
@@ -28,14 +32,14 @@ void TestURLLoaderNetworkObserver::OnSSLCertificateError(
 }
 
 void TestURLLoaderNetworkObserver::OnCertificateRequested(
-    const absl::optional<base::UnguessableToken>& window_id,
+    const std::optional<base::UnguessableToken>& window_id,
     const scoped_refptr<net::SSLCertRequestInfo>& cert_info,
     mojo::PendingRemote<mojom::ClientCertificateResponder>
         client_cert_responder) {}
 
 void TestURLLoaderNetworkObserver::OnAuthRequired(
-    const absl::optional<base::UnguessableToken>& window_id,
-    uint32_t request_id,
+    const std::optional<base::UnguessableToken>& window_id,
+    int32_t request_id,
     const GURL& url,
     bool first_auth_attempt,
     const net::AuthChallengeInfo& auth_info,
@@ -43,11 +47,24 @@ void TestURLLoaderNetworkObserver::OnAuthRequired(
     mojo::PendingRemote<mojom::AuthChallengeResponder>
         auth_challenge_responder) {}
 
+void TestURLLoaderNetworkObserver::OnLocalNetworkAccessPermissionRequired(
+    mojom::TransportType type,
+    network::mojom::IPAddressSpace ip_address_space,
+    OnLocalNetworkAccessPermissionRequiredCallback callback) {
+  std::move(callback).Run(mojom::LocalNetworkAccessResult::kDenied);
+}
+
+void TestURLLoaderNetworkObserver::OnPlatformLocalNetworkPermissionRequired(
+    OnPlatformLocalNetworkPermissionRequiredCallback callback) {
+  std::move(callback).Run(platform_local_network_permission_response_);
+}
+
 void TestURLLoaderNetworkObserver::OnClearSiteData(
     const GURL& url,
     const std::string& header_value,
     int32_t load_flags,
-    const absl::optional<net::CookiePartitionKey>& cookie_partition_key,
+    const std::optional<net::CookiePartitionKey>& cookie_partition_key,
+    bool partitioned_state_allowed_only,
     OnClearSiteDataCallback callback) {
   std::move(callback).Run();
 }
@@ -60,12 +77,23 @@ void TestURLLoaderNetworkObserver::OnLoadingStateUpdate(
 
 void TestURLLoaderNetworkObserver::OnDataUseUpdate(
     int32_t network_traffic_annotation_id_hash,
-    int64_t recv_bytes,
-    int64_t sent_bytes) {}
+    base::ByteSize recv_bytes,
+    base::ByteSize sent_bytes) {}
+
 
 void TestURLLoaderNetworkObserver::Clone(
     mojo::PendingReceiver<URLLoaderNetworkServiceObserver> observer) {
   receivers_.Add(this, std::move(observer));
 }
+
+void TestURLLoaderNetworkObserver::OnWebSocketConnectedToLocalNetwork(
+    const GURL& request_url,
+    network::mojom::IPAddressSpace ip_address_space) {}
+
+void TestURLLoaderNetworkObserver::OnUrlLoaderConnectedToLocalNetwork(
+    const GURL& request_url,
+    network::mojom::IPAddressSpace response_address_space,
+    network::mojom::IPAddressSpace client_address_space,
+    network::mojom::IPAddressSpace target_address_space) {}
 
 }  // namespace network

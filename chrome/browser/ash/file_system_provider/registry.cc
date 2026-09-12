@@ -4,8 +4,10 @@
 
 #include "chrome/browser/ash/file_system_provider/registry.h"
 
+#include <optional>
 #include <utility>
 
+#include "ash/constants/ash_pref_names.h"
 #include "base/files/file_path.h"
 #include "base/memory/ptr_util.h"
 #include "base/values.h"
@@ -15,17 +17,14 @@
 #include "chrome/browser/ash/file_system_provider/provided_file_system_info.h"
 #include "chrome/browser/ash/file_system_provider/service_factory.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/pref_names.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_system.h"
 #include "storage/browser/file_system/external_mount_points.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
-namespace ash {
-namespace file_system_provider {
+namespace ash::file_system_provider {
 
 const char kPrefKeyFileSystemId[] = "file-system-id";
 const char kPrefKeyDisplayName[] = "display-name";
@@ -39,19 +38,18 @@ const char kPrefKeyWatcherPersistentOrigins[] = "persistent-origins";
 const char kPrefKeyOpenedFilesLimit[] = "opened-files-limit";
 
 void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry) {
-  registry->RegisterDictionaryPref(prefs::kFileSystemProviderMounted);
+  registry->RegisterDictionaryPref(ash::prefs::kFileSystemProviderMounted);
 }
 
 Registry::Registry(Profile* profile) : profile_(profile) {
 }
 
-Registry::~Registry() {
-}
+Registry::~Registry() = default;
 
 void Registry::RememberFileSystem(
     const ProvidedFileSystemInfo& file_system_info,
     const Watchers& watchers) {
-  base::Value::Dict file_system;
+  base::DictValue file_system;
   file_system.Set(kPrefKeyFileSystemId, file_system_info.file_system_id());
   file_system.Set(kPrefKeyDisplayName, file_system_info.display_name());
   file_system.Set(kPrefKeyWritable, file_system_info.writable());
@@ -63,14 +61,14 @@ void Registry::RememberFileSystem(
   // and from preference because all filesystems which are remembered must be
   // persistent.
 
-  base::Value::Dict watchers_dict;
+  base::DictValue watchers_dict;
 
   for (const auto& it : watchers) {
-    base::Value::Dict watcher;
+    base::DictValue watcher;
     watcher.Set(kPrefKeyWatcherEntryPath, it.second.entry_path.value());
     watcher.Set(kPrefKeyWatcherRecursive, it.second.recursive);
     watcher.Set(kPrefKeyWatcherLastTag, it.second.last_tag);
-    base::Value::List persistent_origins_value;
+    base::ListValue persistent_origins_value;
     for (const auto& subscriber_it : it.second.subscribers) {
       // Only persistent subscribers should be stored in persistent storage.
       // Other ones should not be restired after a restart.
@@ -88,9 +86,9 @@ void Registry::RememberFileSystem(
   DCHECK(pref_service);
 
   ScopedDictPrefUpdate dict_update(pref_service,
-                                   prefs::kFileSystemProviderMounted);
+                                   ash::prefs::kFileSystemProviderMounted);
 
-  base::Value::Dict* file_systems_per_extension =
+  base::DictValue* file_systems_per_extension =
       dict_update->EnsureDict(file_system_info.provider_id().ToString());
   file_systems_per_extension->Set(file_system_info.file_system_id(),
                                   std::move(file_system));
@@ -102,9 +100,9 @@ void Registry::ForgetFileSystem(const ProviderId& provider_id,
   DCHECK(pref_service);
 
   ScopedDictPrefUpdate dict_update(pref_service,
-                                   prefs::kFileSystemProviderMounted);
+                                   ash::prefs::kFileSystemProviderMounted);
 
-  base::Value::Dict* file_systems_per_extension =
+  base::DictValue* file_systems_per_extension =
       dict_update->FindDict(provider_id.ToString());
   if (!file_systems_per_extension)
     return;  // Nothing to forget.
@@ -119,10 +117,10 @@ std::unique_ptr<Registry::RestoredFileSystems> Registry::RestoreFileSystems(
   PrefService* const pref_service = profile_->GetPrefs();
   DCHECK(pref_service);
 
-  const base::Value::Dict& file_systems =
-      pref_service->GetDict(prefs::kFileSystemProviderMounted);
+  const base::DictValue& file_systems =
+      pref_service->GetDict(ash::prefs::kFileSystemProviderMounted);
 
-  const base::Value::Dict* file_systems_per_extension =
+  const base::DictValue* file_systems_per_extension =
       file_systems.FindDict(provider_id.ToString());
   if (!file_systems_per_extension) {
     return base::WrapUnique(new RestoredFileSystems);  // Nothing to restore.
@@ -138,16 +136,16 @@ std::unique_ptr<Registry::RestoredFileSystems> Registry::RestoreFileSystems(
       continue;
     }
 
-    const base::Value::Dict& file_system = file_system_it.second.GetDict();
+    const base::DictValue& file_system = file_system_it.second.GetDict();
 
     const std::string* file_system_id =
         file_system.FindString(kPrefKeyFileSystemId);
     const std::string* display_name =
         file_system.FindString(kPrefKeyDisplayName);
-    absl::optional<bool> writable = file_system.FindBool(kPrefKeyWritable);
-    absl::optional<bool> supports_notify_tag =
+    std::optional<bool> writable = file_system.FindBool(kPrefKeyWritable);
+    std::optional<bool> supports_notify_tag =
         file_system.FindBool(kPrefKeySupportsNotifyTag);
-    absl::optional<int> opened_files_limit =
+    std::optional<int> opened_files_limit =
         file_system.FindInt(kPrefKeyOpenedFilesLimit);
 
     // TODO(mtomasz): Move opened files limit to the mandatory list above in
@@ -174,7 +172,7 @@ std::unique_ptr<Registry::RestoredFileSystems> Registry::RestoreFileSystems(
     restored_file_system.options = options;
 
     // Restore watchers. It's optional, since this field is new.
-    const base::Value::Dict* watchers = file_system.FindDict(kPrefKeyWatchers);
+    const base::DictValue* watchers = file_system.FindDict(kPrefKeyWatchers);
     if (watchers) {
       for (const auto watcher_it : *watchers) {
         if (!watcher_it.second.is_dict()) {
@@ -182,15 +180,15 @@ std::unique_ptr<Registry::RestoredFileSystems> Registry::RestoreFileSystems(
           continue;
         }
 
-        const base::Value::Dict& watcher = watcher_it.second.GetDict();
+        const base::DictValue& watcher = watcher_it.second.GetDict();
 
         const std::string* entry_path =
             watcher.FindString(kPrefKeyWatcherEntryPath);
-        absl::optional<bool> recursive =
+        std::optional<bool> recursive =
             watcher.FindBool(kPrefKeyWatcherRecursive);
         const std::string* last_tag =
             watcher.FindString(kPrefKeyWatcherLastTag);
-        const base::Value::List* persistent_origins =
+        const base::ListValue* persistent_origins =
             watcher.FindList(kPrefKeyWatcherPersistentOrigins);
 
         if (!entry_path || !recursive || !last_tag || !persistent_origins ||
@@ -234,15 +232,15 @@ void Registry::UpdateWatcherTag(const ProvidedFileSystemInfo& file_system_info,
   // TODO(mtomasz): Consider optimizing it by moving information about watchers
   // or even file systems to leveldb.
   ScopedDictPrefUpdate dict_update(pref_service,
-                                   prefs::kFileSystemProviderMounted);
+                                   ash::prefs::kFileSystemProviderMounted);
 
   // All of the following checks should not happen in healthy environment.
   // However, since they rely on storage, DCHECKs can't be used.
-  base::Value::Dict* file_systems_per_extension =
+  base::DictValue* file_systems_per_extension =
       dict_update->FindDict(file_system_info.provider_id().ToString());
-  base::Value::Dict* file_system = nullptr;
-  base::Value::Dict* watchers = nullptr;
-  base::Value::Dict* watcher_value = nullptr;
+  base::DictValue* file_system = nullptr;
+  base::DictValue* watchers = nullptr;
+  base::DictValue* watcher_value = nullptr;
 
   if (file_systems_per_extension) {
     file_system =
@@ -262,5 +260,4 @@ void Registry::UpdateWatcherTag(const ProvidedFileSystemInfo& file_system_info,
   watcher_value->Set(kPrefKeyWatcherLastTag, watcher.last_tag);
 }
 
-}  // namespace file_system_provider
-}  // namespace ash
+}  // namespace ash::file_system_provider

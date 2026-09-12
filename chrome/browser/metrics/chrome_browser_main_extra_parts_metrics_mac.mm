@@ -6,8 +6,6 @@
 
 #import <AppKit/AppKit.h>
 
-#include "base/metrics/histogram_macros.h"
-
 namespace {
 
 // The possible values of the setting "Screens Have Separate Spaces".
@@ -19,12 +17,3 @@ enum ScreenSpacesConfiguration {
 };
 
 }  // namespace
-
-void ChromeBrowserMainExtraPartsMetrics::RecordMacMetrics() {
-  ScreenSpacesConfiguration separate_spaces =
-      [NSScreen screensHaveSeparateSpaces] ? SCREENS_HAVE_SEPARATE_SPACES
-                                           : SCREENS_HAVE_SHARED_SPACES;
-  UMA_HISTOGRAM_ENUMERATION("OSX.Settings.ScreensHaveSeparateSpaces",
-                            separate_spaces,
-                            SCREEN_SPACES_CONFIGURATION_COUNT);
-}

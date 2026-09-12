@@ -4,29 +4,37 @@
 
 #include "chrome/browser/after_startup_task_utils.h"
 
+#include <utility>
+
+#include "base/check.h"
+#include "base/check_op.h"
 #include "base/containers/circular_deque.h"
-#include "base/lazy_instance.h"
+#include "base/feature_list.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/memory/ptr_util.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
+#include "base/no_destructor.h"
 #include "base/process/process.h"
 #include "base/synchronization/atomic_flag.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
+#include "base/timer/timer.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "components/performance_manager/performance_manager_impl.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+#include "chrome/common/chrome_features.h"
 #include "components/performance_manager/public/graph/graph.h"
 #include "components/performance_manager/public/graph/page_node.h"
+#include "components/performance_manager/public/performance_manager.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
+#include "url/gurl.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ash/login/ui/login_display_host.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/ui/ash/login/login_display_host.h"
 #endif
-
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#include "chromeos/startup/browser_params_proxy.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
 
 using content::BrowserThread;
 
@@ -37,7 +45,7 @@ struct AfterStartupTask {
                    const scoped_refptr<base::SequencedTaskRunner>& task_runner,
                    base::OnceClosure task)
       : from_here(from_here), task_runner(task_runner), task(std::move(task)) {}
-  ~AfterStartupTask() {}
+  ~AfterStartupTask() = default;
 
   const base::Location from_here;
   const scoped_refptr<base::SequencedTaskRunner> task_runner;
@@ -45,18 +53,20 @@ struct AfterStartupTask {
 };
 
 // The flag may be read on any thread, but must only be set on the UI thread.
-base::LazyInstance<base::AtomicFlag>::Leaky g_startup_complete_flag;
+base::AtomicFlag& GetStartupCompleteFlag() {
+  static base::NoDestructor<base::AtomicFlag> startup_complete_flag;
+  return *startup_complete_flag;
+}
 
 // The queue may only be accessed on the UI thread.
-base::LazyInstance<base::circular_deque<AfterStartupTask*>>::Leaky
-    g_after_startup_tasks;
+base::circular_deque<AfterStartupTask*>& GetAfterStartupTasks() {
+  static base::NoDestructor<base::circular_deque<AfterStartupTask*>>
+      after_startup_tasks;
+  return *after_startup_tasks;
+}
 
 bool IsBrowserStartupComplete() {
-  // Be sure to initialize the LazyInstance on the main thread since the flag
-  // may only be set on it's initializing thread.
-  if (!g_startup_complete_flag.IsCreated())
-    return false;
-  return g_startup_complete_flag.Get().IsSet();
+  return GetStartupCompleteFlag().IsSet();
 }
 
 void RunTask(std::unique_ptr<AfterStartupTask> queued_task) {
@@ -76,7 +86,7 @@ void ScheduleTask(std::unique_ptr<AfterStartupTask> queued_task) {
 void QueueTask(std::unique_ptr<AfterStartupTask> queued_task) {
   DCHECK(queued_task);
 
-  // Use CHECK instead of DCHECK to crash earlier. See http://crbug.com/711167
+  // Use CHECK instead of DCHECK to crash earlier. See http://crbug.com/40515428
   // for details.
   CHECK(queued_task->task);
 
@@ -95,17 +105,23 @@ void QueueTask(std::unique_ptr<AfterStartupTask> queued_task) {
     ScheduleTask(std::move(queued_task));
     return;
   }
-  g_after_startup_tasks.Get().push_back(queued_task.release());
+  GetAfterStartupTasks().push_back(queued_task.release());
 }
 
-void SetBrowserStartupIsComplete() {
+void SetBrowserStartupIsComplete(StartupIsCompleteReason reason) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
 
   if (IsBrowserStartupComplete())
     return;
 
-  TRACE_EVENT0("startup", "SetBrowserStartupIsComplete");
-  g_startup_complete_flag.Get().Set();
+  size_t browser_count = 0;
+#if !BUILDFLAG(IS_ANDROID)
+  browser_count = GlobalBrowserCollection::GetInstance()->GetSize();
+#endif  // !BUILDFLAG(IS_ANDROID)
+  TRACE_EVENT_INSTANT1("startup", "Startup.StartupComplete",
+                       TRACE_EVENT_SCOPE_GLOBAL, "BrowserCount", browser_count);
+  GetStartupCompleteFlag().Set();
+  base::UmaHistogramEnumeration("Startup.BrowserStartupCompleteReason", reason);
 #if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) || \
     BUILDFLAG(IS_CHROMEOS)
   // Process::Current().CreationTime() is not available on all platforms.
@@ -118,49 +134,123 @@ void SetBrowserStartupIsComplete() {
 #endif  // BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_LINUX) ||
         // BUILDFLAG(IS_CHROMEOS)
   UMA_HISTOGRAM_COUNTS_10000("Startup.AfterStartupTaskCount",
-                             g_after_startup_tasks.Get().size());
-  for (AfterStartupTask* queued_task : g_after_startup_tasks.Get())
+                             GetAfterStartupTasks().size());
+  for (AfterStartupTask* queued_task : GetAfterStartupTasks()) {
     ScheduleTask(base::WrapUnique(queued_task));
-  g_after_startup_tasks.Get().clear();
-  g_after_startup_tasks.Get().shrink_to_fit();
+  }
+  GetAfterStartupTasks().clear();
+  GetAfterStartupTasks().shrink_to_fit();
 }
 
-// Observes the first visible page load and sets the startup complete
-// flag accordingly. Ownership is passed to the Performance Manager
-// after creation.
-class StartupObserver
-    : public performance_manager::GraphOwned,
-      public performance_manager::PageNode::ObserverDefaultImpl {
+bool g_is_monitoring_started = false;
+
+// For Android, startup completion is signaled via AfterStartupTaskUtils.java.
+// We do not use the StartupObserver or startup refs on Android.
+#if !BUILDFLAG(IS_ANDROID)
+// We initialize `g_ref_count` to 1 to represent the startup sequence itself.
+// This implicit reference is released in `BeginMonitoringStartupCompletion()`
+// when the startup sequence finishes registering its initial tasks. This
+// prevents startup from being marked complete prematurely if a registered
+// reference is acquired and released synchronously before all references are
+// registered.
+int g_ref_count = 1;
+
+void MaybeSignalStartupComplete(StartupIsCompleteReason reason) {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  if (g_ref_count > 0) {
+    return;
+  }
+  // Don't signal startup complete if shutdown has already started. Posting a
+  // task is a convenient way to ensure this: if the UI thread is no longer
+  // accepting tasks, this won't run.
+  content::GetUIThreadTaskRunner({})->PostTask(
+      FROM_HERE, base::BindOnce(&SetBrowserStartupIsComplete, reason));
+}
+
+void ReleaseRef(StartupIsCompleteReason reason) {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_GT(g_ref_count, 0);
+  g_ref_count--;
+  MaybeSignalStartupComplete(reason);
+}
+
+// Observes the first visible page load and releases the page load reference.
+//
+// This is useful even though we have `FirstWebContentsProfiler` (which tracks
+// the first paint) for cases where `FirstWebContents` observation is abandoned
+// (e.g., early paint or if paint tracking is disabled). It serves as the second
+// best proxy for having loaded, or at least attempted to load, something in the
+// foreground.
+//
+// In most cases, this won't be the last reference released (since paint or
+// session restore will usually finish later), and that's okay.
+//
+// Ownership is passed to the Performance Manager after creation.
+class StartupObserver : public performance_manager::GraphOwned,
+                        public performance_manager::PageNodeObserver {
  public:
   StartupObserver(const StartupObserver&) = delete;
   StartupObserver& operator=(const StartupObserver&) = delete;
 
   ~StartupObserver() override = default;
 
-  static void Start();
+  static void Start(performance_manager::Graph* graph);
 
  private:
-  StartupObserver() = default;
+  using LoadingState = performance_manager::PageNode::LoadingState;
 
-  void OnStartupComplete() {
-    if (!performance_manager::PerformanceManagerImpl::IsAvailable()) {
-      // Already shutting down before startup finished. Do not notify.
-      return;
-    }
+  StartupObserver() {
+    // If this is destroyed before a visible page is observed, log
+    // kNoVisiblePageFound.
+    startup_ref_ = AfterStartupTaskUtils::RegisterStartupInProgressRef(
+        StartupIsCompleteReason::kNoVisiblePageFound);
+  }
 
-    // This should only be called once.
-    if (!startup_complete_) {
-      startup_complete_ = true;
-      content::GetUIThreadTaskRunner({})->PostTask(
-          FROM_HERE, base::BindOnce(&SetBrowserStartupIsComplete));
-      // This will result in delete getting called.
-      TakeFromGraph();
+  void StopObserving() {
+    startup_ref_.reset();
+    // This will result in delete getting called.
+    GetOwningGraph()->TakeFromGraph(this);
+  }
+
+  bool CheckIfPageIsInteresting(
+      const performance_manager::PageNode* page_node) {
+    // Only interested in visible tabs when feature is enabled, or any visible
+    // page node when disabled.
+    if (!page_node->IsVisible()) {
+      return false;
     }
+    if (page_node->GetType() != performance_manager::PageType::kTab &&
+        base::FeatureList::IsEnabled(
+            features::kImprovedStartupBestEffortDelay)) {
+      return false;
+    }
+    // A visible page has been observed, so don't report kNoVisiblePageFound.
+    no_visible_tab_timer_.Stop();
+    startup_ref_->SetStartupIsCompleteReason(
+        StartupIsCompleteReason::kVisiblePageLoadingFinished);
+    return true;
   }
 
   // GraphOwned overrides
   void OnPassedToGraph(performance_manager::Graph* graph) override {
     graph->AddPageNodeObserver(this);
+    if (base::FeatureList::IsEnabled(
+            features::kImprovedStartupBestEffortDelay)) {
+      // The observer will only watch for pages of type kTab, so also add a
+      // timeout in case none appear (eg. first-run dialog or profile picker).
+      // First check if any were added before the observer was created.
+      for (const performance_manager::PageNode* page_node :
+           graph->GetAllPageNodes()) {
+        if (CheckIfPageIsInteresting(page_node)) {
+          return;
+        }
+      }
+      const base::TimeDelta timeout =
+          features::kStartupDelayVisibleTabTimeout.Get();
+      CHECK(timeout.is_positive());
+      no_visible_tab_timer_.Start(FROM_HERE, timeout, this,
+                                  &StartupObserver::StopObserving);
+    }
   }
 
   void OnTakenFromGraph(performance_manager::Graph* graph) override {
@@ -168,86 +258,144 @@ class StartupObserver
   }
 
   // PageNodeObserver overrides
-  void OnLoadingStateChanged(
-      const performance_manager::PageNode* page_node,
-      performance_manager::PageNode::LoadingState previous_state) override {
-    // Only interested in visible PageNodes
-    if (page_node->IsVisible()) {
-      if (page_node->GetLoadingState() ==
-              performance_manager::PageNode::LoadingState::kLoadedIdle ||
-          page_node->GetLoadingState() ==
-              performance_manager::PageNode::LoadingState::kLoadingTimedOut)
-        OnStartupComplete();
+  void OnPageNodeAdded(
+      const performance_manager::PageNode* page_node) override {
+    CheckIfPageIsInteresting(page_node);
+  }
+
+  void OnTypeChanged(const performance_manager::PageNode* page_node,
+                     performance_manager::PageType previous_type) override {
+    CheckIfPageIsInteresting(page_node);
+  }
+
+  void OnIsVisibleChanged(
+      const performance_manager::PageNode* page_node) override {
+    CheckIfPageIsInteresting(page_node);
+  }
+
+  void OnLoadingStateChanged(const performance_manager::PageNode* page_node,
+                             LoadingState previous_state) override {
+    if (!CheckIfPageIsInteresting(page_node)) {
+      return;
+    }
+
+    LoadingState state = page_node->GetLoadingState();
+    if (state == LoadingState::kLoadedIdle) {
+      StopObserving();
+    } else if (state == LoadingState::kLoadingTimedOut &&
+               (!base::FeatureList::IsEnabled(
+                    features::kImprovedStartupBestEffortDelay) ||
+                features::kStartupDelayStopOnLoadingTimedOut.Get())) {
+      startup_ref_->SetStartupIsCompleteReason(
+          StartupIsCompleteReason::kVisiblePageLoadingTimedOut);
+      StopObserving();
     }
   }
 
-  void PassToGraph() {
-    // Pass to the performance manager so we can get notified when
-    // loading completes.  Ownership of this object is passed to the
-    // performance manager.
-    DCHECK(performance_manager::PerformanceManagerImpl::IsAvailable());
-    performance_manager::PerformanceManagerImpl::PassToGraph(
-        FROM_HERE, base::WrapUnique(this));
-  }
-
-  void TakeFromGraph() {
-    // Remove this object from the performance manager.  This will
-    // cause the object to be deleted.
-    DCHECK(performance_manager::PerformanceManagerImpl::IsAvailable());
-    performance_manager::PerformanceManager::CallOnGraph(
-        FROM_HERE, base::BindOnce(
-                       [](performance_manager::GraphOwned* observer,
-                          performance_manager::Graph* graph) {
-                         graph->TakeFromGraph(observer);
-                       },
-                       base::Unretained(this)));
-  }
-
-  bool startup_complete_ = false;
+  std::unique_ptr<AfterStartupTaskUtils::StartupInProgressRef> startup_ref_;
+  base::OneShotTimer no_visible_tab_timer_;
 };
 
 // static
-void StartupObserver::Start() {
-  // Create the StartupObserver and pass it to the Performance Manager which
-  // will own it going forward.
-  (new StartupObserver)->PassToGraph();
+void StartupObserver::Start(performance_manager::Graph* graph) {
+  // Tests can pass a null `graph` to disable the StartupObserver.
+  if (!graph) {
+    return;
+  }
+
+  if (base::FeatureList::IsEnabled(features::kImprovedStartupBestEffortDelay) &&
+      features::kStartupDelayVisibleTabTimeout.Get().is_zero()) {
+    // Zero means don't observe visible tabs.
+    return;
+  }
+
+  // Pass a new StartupObserver to the performance manager so we can get
+  // notified when loading completes. The performance manager takes ownership.
+  graph->PassToGraph(base::WrapUnique(new StartupObserver()));
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 }  // namespace
 
-void AfterStartupTaskUtils::StartMonitoringStartup() {
-  // For Android, startup completion is signaled via
-  // AfterStartupTaskUtils.java. We do not use the StartupObserver.
+// static
+void AfterStartupTaskUtils::BeginMonitoringStartupCompletion() {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK(!g_is_monitoring_started);
+  performance_manager::Graph* graph = nullptr;
 #if !BUILDFLAG(IS_ANDROID)
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  // For Lacros, there may not be a Browser created at startup.
-  if (chromeos::BrowserParamsProxy::Get()->InitialBrowserAction() ==
-      crosapi::mojom::InitialBrowserAction::kDoNotOpenWindow) {
-    content::GetUIThreadTaskRunner({})->PostTask(
-        FROM_HERE, base::BindOnce(&SetBrowserStartupIsComplete));
+  // StartupObserver isn't used on Android, so no need for PerformanceManager.
+  CHECK(performance_manager::PerformanceManager::IsAvailable());
+  graph = performance_manager::PerformanceManager::GetGraph();
+#endif  // !BUILDFLAG(IS_ANDROID)
+  AfterStartupTaskUtils::FinishStartupRegistration(graph);
+}
+
+// static
+void AfterStartupTaskUtils::BeginMonitoringStartupCompletionForTesting(
+    performance_manager::Graph* graph) {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  if (g_is_monitoring_started) {
     return;
   }
-#endif
+  AfterStartupTaskUtils::FinishStartupRegistration(graph);
+}
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+// static
+void AfterStartupTaskUtils::FinishStartupRegistration(
+    performance_manager::Graph* graph) {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  g_is_monitoring_started = true;
+#if BUILDFLAG(IS_CHROMEOS)
   // If we are on a login screen which does not expect WebUI to be loaded,
   // Browser won't be created at startup.
   if (ash::LoginDisplayHost::default_host() &&
       !ash::LoginDisplayHost::default_host()->IsWebUIStarted()) {
     content::GetUIThreadTaskRunner({})->PostTask(
-        FROM_HERE, base::BindOnce(&SetBrowserStartupIsComplete));
+        FROM_HERE,
+        base::BindOnce(&SetBrowserStartupIsComplete,
+                       StartupIsCompleteReason::kChromeOSLoginScreen));
     return;
   }
 #endif
 
-  StartupObserver::Start();
+#if !BUILDFLAG(IS_ANDROID)
+  StartupObserver::Start(graph);
+
+  // Release the implicit reference representing the startup sequence. This
+  // enables considering startup complete once all other registered references
+  // (e.g., paint, idle, restore) are released.
+  ReleaseRef(StartupIsCompleteReason::kStartupRegistrationDone);
 #endif  // !BUILDFLAG(IS_ANDROID)
 
   // Add failsafe timeout
   content::GetUIThreadTaskRunner({})->PostDelayedTask(
-      FROM_HERE, base::BindOnce(&SetBrowserStartupIsComplete),
-      base::Minutes(3));
+      FROM_HERE,
+      base::BindOnce(&SetBrowserStartupIsComplete,
+                     StartupIsCompleteReason::kFailsafeTimeout),
+      GetFailsafeTimeout());
 }
+
+#if !BUILDFLAG(IS_ANDROID)
+AfterStartupTaskUtils::StartupInProgressRef::StartupInProgressRef(
+    StartupIsCompleteReason reason)
+    : reason_(reason) {}
+
+AfterStartupTaskUtils::StartupInProgressRef::~StartupInProgressRef() {
+  ReleaseRef(reason_);
+}
+
+// static
+std::unique_ptr<AfterStartupTaskUtils::StartupInProgressRef>
+AfterStartupTaskUtils::RegisterStartupInProgressRef(
+    StartupIsCompleteReason reason) {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  if (IsBrowserStartupComplete()) {
+    return nullptr;
+  }
+  g_ref_count++;
+  return std::make_unique<AfterStartupTaskUtils::StartupInProgressRef>(reason);
+}
+#endif  // !BUILDFLAG(IS_ANDROID)
 
 void AfterStartupTaskUtils::PostTask(
     const base::Location& from_here,
@@ -263,12 +411,14 @@ void AfterStartupTaskUtils::PostTask(
   QueueTask(std::move(queued_task));
 }
 
-void AfterStartupTaskUtils::SetBrowserStartupIsCompleteForTesting() {
-  ::SetBrowserStartupIsComplete();
+void AfterStartupTaskUtils::SetBrowserStartupIsCompleteForTesting(
+    StartupIsCompleteReason reason) {
+  ::SetBrowserStartupIsComplete(reason);
 }
 
-void AfterStartupTaskUtils::SetBrowserStartupIsComplete() {
-  ::SetBrowserStartupIsComplete();
+void AfterStartupTaskUtils::SetBrowserStartupIsComplete(
+    StartupIsCompleteReason reason) {
+  ::SetBrowserStartupIsComplete(reason);
 }
 
 bool AfterStartupTaskUtils::IsBrowserStartupComplete() {
@@ -276,9 +426,21 @@ bool AfterStartupTaskUtils::IsBrowserStartupComplete() {
 }
 
 void AfterStartupTaskUtils::UnsafeResetForTesting() {
-  DCHECK(g_after_startup_tasks.Get().empty());
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  DCHECK(GetAfterStartupTasks().empty());
   if (!IsBrowserStartupComplete())
     return;
-  g_startup_complete_flag.Get().UnsafeResetForTesting();
+  GetStartupCompleteFlag().UnsafeResetForTesting();  // IN-TEST
+#if !BUILDFLAG(IS_ANDROID)
+  g_ref_count = 1;
+#endif
+  g_is_monitoring_started = false;
   DCHECK(!IsBrowserStartupComplete());
+}
+
+// static
+base::TimeDelta AfterStartupTaskUtils::GetFailsafeTimeout() {
+  return base::FeatureList::IsEnabled(features::kImprovedStartupBestEffortDelay)
+             ? features::kStartupDelayFailsafeTimeout.Get()
+             : base::Minutes(3);
 }

@@ -1,8 +1,9 @@
 include_rules = [
-  "+ash/constants",
-  "+components/invalidation",
+  "+components/os_crypt/async/browser",
+  "+components/os_crypt/async/common",
   "+components/pref_registry",
   "+components/prefs",
+  "+components/signin/public/base",
   "+components/sync/protocol",
   "+third_party/zlib",  # For UniquePosition compression
   "+net/base/net_errors.h",

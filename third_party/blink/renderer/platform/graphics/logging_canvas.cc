@@ -32,12 +32,13 @@
 
 #include <unicode/unistr.h>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
-#include "base/sys_byteorder.h"
 #include "build/build_config.h"
 #include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
 #include "third_party/blink/renderer/platform/image-encoders/image_encoder.h"
 #include "third_party/blink/renderer/platform/wtf/text/base64.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
@@ -82,7 +83,6 @@ String PointModeName(SkCanvas::PointMode mode) {
       return "Polygon";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -97,7 +97,7 @@ std::unique_ptr<JSONArray> ArrayForSkPoints(size_t count,
                                             const SkPoint points[]) {
   auto points_array_item = std::make_unique<JSONArray>();
   for (size_t i = 0; i < count; ++i)
-    points_array_item->PushObject(ObjectForSkPoint(points[i]));
+    points_array_item->PushObject(ObjectForSkPoint(UNSAFE_TODO(points[i])));
   return points_array_item;
 }
 
@@ -126,7 +126,6 @@ String RrectTypeName(SkRRect::Type type) {
       return "Complex";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -142,7 +141,6 @@ String RadiusName(SkRRect::Corner corner) {
       return "lowerLeftRadius";
     default:
       NOTREACHED();
-      return "?";
   }
 }
 
@@ -171,7 +169,6 @@ String FillTypeName(SkPathFillType type) {
       return "InverseEvenOdd";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -193,7 +190,6 @@ VerbParams SegmentParams(SkPath::Verb verb) {
       return VerbParams("Done", 0, 0);
     default:
       NOTREACHED();
-      return VerbParams("?", 0, 0);
   };
 }
 
@@ -213,8 +209,9 @@ std::unique_ptr<JSONObject> ObjectForSkPath(const SkPath& path) {
     DCHECK_LE(verb_params.point_count + verb_params.point_offset,
               std::size(points));
     path_point_item->SetArray(
-        "points", ArrayForSkPoints(verb_params.point_count,
-                                   points + verb_params.point_offset));
+        "points",
+        ArrayForSkPoints(verb_params.point_count,
+                         UNSAFE_TODO(points + verb_params.point_offset)));
     if (SkPath::kConic_Verb == verb)
       path_point_item->SetDouble("conicWeight", iter.conicWeight());
     path_points_array->PushObject(std::move(path_point_item));
@@ -237,7 +234,7 @@ std::unique_ptr<JSONArray> ArrayForSkScalars(size_t count,
                                              const SkScalar array[]) {
   auto points_array_item = std::make_unique<JSONArray>();
   for (size_t i = 0; i < count; ++i)
-    points_array_item->PushDouble(array[i]);
+    points_array_item->PushDouble(UNSAFE_TODO(array[i]));
   return points_array_item;
 }
 
@@ -247,7 +244,7 @@ std::unique_ptr<JSONObject> ObjectForSkShader(const SkShader& shader) {
 
 String StringForSkColor(SkColor color) {
   // #AARRGGBB.
-  return String::Format("#%08X", color);
+  return Format("#{:08X}", color);
 }
 
 void AppendFlagToString(StringBuilder* flags_string,
@@ -279,7 +276,6 @@ String StrokeCapName(SkPaint::Cap cap) {
       return "Square";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -293,7 +289,6 @@ String StrokeJoinName(SkPaint::Join join) {
       return "Bevel";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 
@@ -305,7 +300,6 @@ String StyleName(SkPaint::Style style) {
       return "Stroke";
     default:
       NOTREACHED();
-      return "?";
   };
 }
 

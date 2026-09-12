@@ -2,25 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var pass = chrome.test.callbackPass;
-var fail = chrome.test.callbackFail;
-var assertEq = chrome.test.assertEq;
-var assertTrue = chrome.test.assertTrue;
+const pass = chrome.test.callbackPass;
+const fail = chrome.test.callbackFail;
+const assertEq = chrome.test.assertEq;
+const assertTrue = chrome.test.assertTrue;
 
-var GOOGLE_URL = 'http://www.google.com/';
-var PICASA_URL = 'http://www.picasa.com/';
-
-// PORT will be changed to the port of the test server.
-var A_RELATIVE_URL =
-    'http://www.a.com:PORT/extensions/api_test/history/a.html';
-var B_RELATIVE_URL =
-    'http://www.b.com:PORT/extensions/api_test/history/b.html';
+const GOOGLE_URL = 'http://www.google.com/';
+const PICASA_URL = 'http://www.picasa.com/';
 
 /**
  * Object used for listening to the chrome.history.onVisited events.  The
  * global object 'itemVisitedCallback' stores the last item received.
  */
-var itemVisitedCallback = null;
+let itemVisitedCallback = null;
 function itemVisitedListener(visited) {
   if (null != itemVisitedCallback) {
     itemVisitedCallback(visited);
@@ -42,12 +36,12 @@ function setItemVisitedListener(callback) {
  * The global object 'itemRemovedInfo' stores the information from the last
  * callback.
  */
-var itemRemovedCallback = null;
+let itemRemovedCallback = null;
 function itemRemovedListener(removed) {
   if (null != itemRemovedCallback) {
     itemRemovedCallback(removed);
-  };
-};
+  }
+}
 
 function removeItemRemovedListener() {
   chrome.history.onVisited.removeListener(itemRemovedListener);
@@ -65,16 +59,16 @@ function setItemRemovedListener(callback) {
  * callback.  The global object 'tabsCompleteData' contains a list of the
  * last known state of every tab.
  */
-var tabCompleteCallback = null;
-var tabsCompleteData = {};
+const tabCompleteCallback = null;
+const tabsCompleteData = {};
 function tabsCompleteListener(tabId, changeInfo) {
   if (changeInfo && changeInfo.status) {
     tabsCompleteData[tabId] = changeInfo.status;
-  };
+  }
   if (null != tabCompleteCallback) {
     tabCompleteCallback();
-  };
-};
+  }
+}
 
 /**
  * Queries the entire history for items, calling the closure with an argument
@@ -82,7 +76,7 @@ function tabsCompleteListener(tabId, changeInfo) {
  * @param {function(number)} callback The closure.
  */
 function countItemsInHistory(callback) {
-  var query = {'text': ''};
+  const query = {text: ''};
   chrome.history.search(query, function(results) {
     callback(results.length);
   });
@@ -94,11 +88,12 @@ function countItemsInHistory(callback) {
  * @param {function} callback Closure.
  */
 function populateHistory(urls, callback) {
-  var num_urls_added = 0;
+  let numUrlsAdded = 0;
   urls.forEach(function(url) {
-    chrome.history.addUrl({ 'url': url }, function() {
-      if (++num_urls_added == urls.length)
-        callback()
+    chrome.history.addUrl({url: url}, function() {
+      if (++numUrlsAdded === urls.length) {
+        callback();
+      }
     });
   });
 }
@@ -108,15 +103,7 @@ function populateHistory(urls, callback) {
  * @param {Array<function>} testFns The tests to run.
  */
 function runHistoryTestFns(testFns) {
-  chrome.test.getConfig(function(config) {
-    var fixPort = function(url) {
-      return url.replace(/PORT/, config.testServer.port);
-    };
-    A_RELATIVE_URL = fixPort(A_RELATIVE_URL);
-    B_RELATIVE_URL = fixPort(B_RELATIVE_URL);
-
-    chrome.test.runTests(testFns);
-  });
+  chrome.test.runTests(testFns);
 }
 
 /**
@@ -143,15 +130,15 @@ function addUrlsWithTimeline(urls, callback) {
 
         // Don't assume anything about the order of history records in
         // |historyItems|.
-        var firstUrlTime = Math.min(historyItems[0].lastVisitTime,
-                                    historyItems[1].lastVisitTime);
-        var secondUrlTime = Math.max(historyItems[0].lastVisitTime,
-                                     historyItems[1].lastVisitTime);
+        const firstUrlTime = Math.min(
+            historyItems[0].lastVisitTime, historyItems[1].lastVisitTime);
+        const secondUrlTime = Math.max(
+            historyItems[0].lastVisitTime, historyItems[1].lastVisitTime);
 
         callback({
           before: firstUrlTime - 100.0,
           between: (firstUrlTime + secondUrlTime) / 2.0,
-          after: secondUrlTime + 100.0
+          after: secondUrlTime + 100.0,
         });
       });
     });

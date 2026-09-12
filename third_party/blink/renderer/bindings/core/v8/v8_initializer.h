@@ -33,6 +33,8 @@
 
 namespace blink {
 
+class ExecutionContext;
+
 // Specifies how the near V8 heap limit event was handled by the callback.
 // This enum is also used for UMA histogram recording. It must be kept in sync
 // with the corresponding enum in tools/metrics/histograms/enums.xml. See that
@@ -60,18 +62,31 @@ class CORE_EXPORT V8Initializer {
   static void SetNearV8HeapLimitOnMainThreadCallback(
       NearV8HeapLimitCallback callback);
 
-  static void InitializeMainThread(const intptr_t* reference_table,
-                                   const std::string js_command_line_flag);
+  static v8::Isolate* InitializeMainThread();
   static void InitializeWorker(v8::Isolate*);
 
-  static void ReportRejectedPromisesOnMainThread();
+  static void InitializeIsolateHolder(const intptr_t* reference_table,
+                                      const std::string& js_command_line_flag);
+  static void InitializeInSandboxAllocator();
+  static void InitializeV8Common(v8::Isolate*);
+  static void InitializeContext(v8::Local<v8::Context>, ExecutionContext&);
+
   static void MessageHandlerInMainThread(v8::Local<v8::Message>,
                                          v8::Local<v8::Value>);
   static void MessageHandlerInWorker(v8::Local<v8::Message>,
                                      v8::Local<v8::Value>);
-  static bool WasmCodeGenerationCheckCallbackInMainThread(
-      v8::Local<v8::Context> context,
-      v8::Local<v8::String> source);
+  static v8::ModifyCodeGenerationFromStringsResult
+  CodeGenerationCheckCallbackInMainThread(v8::Local<v8::Context> context,
+                                          v8::Local<v8::Value> source,
+                                          bool is_code_like);
+  static bool WasmCodeGenerationCheckCallback(v8::Local<v8::Context> context,
+                                              v8::Local<v8::String> source);
+  static void FailedAccessCheckCallbackInMainThread(
+      v8::Local<v8::Object> holder,
+      v8::AccessType type,
+      v8::Local<v8::Value> data);
+  static void PromiseRejectHandlerInMainThread(v8::PromiseRejectMessage data);
+  static void ExceptionPropagationCallback(v8::ExceptionPropagationMessage);
 
   static void WasmAsyncResolvePromiseCallback(
       v8::Isolate* isolate,

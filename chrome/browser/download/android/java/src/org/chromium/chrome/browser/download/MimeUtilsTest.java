@@ -14,9 +14,7 @@ import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.Feature;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
 
-/**
- * Tests for MimeUtils class.
- */
+/** Tests for MimeUtils class. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @Batch(Batch.UNIT_TESTS)
 public class MimeUtilsTest {
@@ -31,8 +29,8 @@ public class MimeUtilsTest {
     }
 
     /**
-     * Test to make sure {@link DownloadUtils#shouldAutoOpenDownload}
-     * returns the right result for varying MIME types and Content-Dispositions.
+     * Test to make sure {@link DownloadUtils#shouldAutoOpenDownload} returns the right result for
+     * varying MIME types and Content-Dispositions.
      */
     @Test
     @SmallTest
@@ -46,5 +44,24 @@ public class MimeUtilsTest {
         Assert.assertTrue(MimeUtils.canAutoOpenMimeType("application/x-x509-server-cert"));
         Assert.assertTrue(MimeUtils.canAutoOpenMimeType("application/x-wifi-config"));
         Assert.assertTrue(MimeUtils.canAutoOpenMimeType("application/pkix-cert"));
+    }
+
+    /**
+     * Test to make sure {@link MimeUtils#remapGenericMimeType} preserves non-generic MIME types
+     * (such as application/x-wifi-config) regardless of file extension.
+     */
+    @Test
+    @SmallTest
+    @Feature({"Download"})
+    public void testRemapGenericMimeType() {
+        Assert.assertEquals(
+                "image/jpeg",
+                MimeUtils.remapGenericMimeType("application/octet-stream", "http://file.jpg", ""));
+        Assert.assertEquals(
+                "image/jpeg", MimeUtils.remapGenericMimeType("binary/data", "http://file.jpg", ""));
+        Assert.assertEquals(
+                "application/x-wifi-config",
+                MimeUtils.remapGenericMimeType(
+                        "application/x-wifi-config", "http://file.xml", "file.xml"));
     }
 }

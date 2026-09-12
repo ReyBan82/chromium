@@ -6,10 +6,11 @@
 #define MOJO_PUBLIC_CPP_BASE_STRING16_MOJOM_TRAITS_H_
 
 #include <cstdint>
+#include <string_view>
 
+#include "base/compiler_specific.h"
 #include "base/component_export.h"
 #include "base/containers/span.h"
-#include "base/strings/string_piece.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
 #include "mojo/public/mojom/base/string16.mojom-shared.h"
@@ -18,10 +19,10 @@ namespace mojo {
 
 template <>
 struct COMPONENT_EXPORT(MOJO_BASE_TRAITS)
-    StructTraits<mojo_base::mojom::String16DataView, base::StringPiece16> {
-  static base::span<const uint16_t> data(base::StringPiece16 str) {
-    return base::make_span(reinterpret_cast<const uint16_t*>(str.data()),
-                           str.size());
+    StructTraits<mojo_base::mojom::String16DataView, std::u16string_view> {
+  static base::span<const uint16_t> data(std::u16string_view str) {
+    return UNSAFE_TODO(
+        base::span(reinterpret_cast<const uint16_t*>(str.data()), str.size()));
   }
 };
 
@@ -30,7 +31,7 @@ struct COMPONENT_EXPORT(MOJO_BASE_TRAITS)
     StructTraits<mojo_base::mojom::String16DataView, std::u16string> {
   static base::span<const uint16_t> data(const std::u16string& str) {
     return StructTraits<mojo_base::mojom::String16DataView,
-                        base::StringPiece16>::data(str);
+                        std::u16string_view>::data(str);
   }
 
   static bool Read(mojo_base::mojom::String16DataView data,

@@ -20,20 +20,20 @@ inline bool IsExcludedAttribute(const AtomicString& name) {
          name == html_names::kStyleAttr.LocalName();
 }
 
-inline unsigned GetTagHash(const AtomicString& tag_name) {
-  return tag_name.Impl()->ExistingHash() * kTagNameSalt;
+inline uint32_t GetTagHash(const AtomicString& tag_name) {
+  return tag_name.Hash() * kTagNameSalt;
 }
 
-inline unsigned GetClassHash(const AtomicString& class_name) {
-  return class_name.Impl()->ExistingHash() * kClassSalt;
+inline uint32_t GetClassHash(const AtomicString& class_name) {
+  return class_name.Hash() * kClassSalt;
 }
 
-inline unsigned GetIdHash(const AtomicString& id) {
-  return id.Impl()->ExistingHash() * kIdSalt;
+inline uint32_t GetIdHash(const AtomicString& id) {
+  return id.Hash() * kIdSalt;
 }
 
-inline unsigned GetAttributeHash(const AtomicString& attribute_name) {
-  return attribute_name.Impl()->ExistingHash() * kAttributeSalt;
+inline uint32_t GetAttributeHash(const AtomicString& attribute_name) {
+  return attribute_name.Hash() * kAttributeSalt;
 }
 
 }  // namespace
@@ -58,8 +58,7 @@ void CheckPseudoHasFastRejectFilter::AddElementIdentifierHashes(
     if (IsExcludedAttribute(attribute_name)) {
       continue;
     }
-    auto lower = attribute_name.IsLowerASCII() ? attribute_name
-                                               : attribute_name.LowerASCII();
+    auto lower = attribute_name.ToAsciiLower();
     filter_->Add(GetAttributeHash(lower));
   }
 }
@@ -98,11 +97,8 @@ void CheckPseudoHasFastRejectFilter::CollectPseudoHasArgumentHashes(
           GetClassHash(simple_selector->Value()));
       break;
     case CSSSelector::kTag:
-      if (simple_selector->TagQName().LocalName() !=
-          CSSSelector::UniversalSelectorAtom()) {
-        pseudo_has_argument_hashes.push_back(
-            GetTagHash(simple_selector->TagQName().LocalName()));
-      }
+      pseudo_has_argument_hashes.push_back(
+          GetTagHash(simple_selector->TagQName().LocalName()));
       break;
     case CSSSelector::kAttributeExact:
     case CSSSelector::kAttributeSet:
@@ -115,9 +111,7 @@ void CheckPseudoHasFastRejectFilter::CollectPseudoHasArgumentHashes(
       if (IsExcludedAttribute(attribute_name)) {
         break;
       }
-      auto lower_name = attribute_name.IsLowerASCII()
-                            ? attribute_name
-                            : attribute_name.LowerASCII();
+      auto lower_name = attribute_name.ToAsciiLower();
       pseudo_has_argument_hashes.push_back(GetAttributeHash(lower_name));
     } break;
     default:

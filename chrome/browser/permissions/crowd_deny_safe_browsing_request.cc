@@ -15,13 +15,12 @@
 #include "base/time/clock.h"
 #include "base/timer/timer.h"
 #include "components/safe_browsing/core/browser/db/database_manager.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "components/safe_browsing/core/browser/db/v5_get_hash_protocol_manager.h"
+#include "components/safe_browsing/core/common/features.h"
+#include "content/public/browser/browser_thread.h"
 #include "url/origin.h"
 
 namespace {
-
-// The permission identifier string used by Safe Browsing for notifications.
-constexpr char kSafeBrowsingNotificationPermissionName[] = "NOTIFICATIONS";
 
 // The maximum amount of time to wait for the Safe Browsing response.
 constexpr base::TimeDelta kSafeBrowsingCheckTimeout = base::Seconds(2);
@@ -33,29 +32,41 @@ constexpr base::TimeDelta kSafeBrowsingCheckTimeout = base::Seconds(2);
 class CrowdDenySafeBrowsingRequest::SafeBrowsingClient
     : public safe_browsing::SafeBrowsingDatabaseManager::Client {
  public:
-  SafeBrowsingClient(scoped_refptr<safe_browsing::SafeBrowsingDatabaseManager>
-                         database_manager,
-                     base::WeakPtr<CrowdDenySafeBrowsingRequest> handler,
-                     scoped_refptr<base::TaskRunner> handler_task_runner)
-      : database_manager_(database_manager),
+  SafeBrowsingClient(
+      base::PassKey<safe_browsing::SafeBrowsingDatabaseManager::Client>
+          pass_key,
+      scoped_refptr<safe_browsing::SafeBrowsingDatabaseManager>
+          database_manager,
+      base::WeakPtr<safe_browsing::V5GetHashProtocolManager>
+          v5_get_hash_protocol_manager,
+      base::WeakPtr<CrowdDenySafeBrowsingRequest> handler,
+      scoped_refptr<base::TaskRunner> handler_task_runner)
+      : safe_browsing::SafeBrowsingDatabaseManager::Client(std::move(pass_key)),
+        database_manager_(database_manager),
+        v5_get_hash_protocol_manager_(v5_get_hash_protocol_manager),
         handler_(handler),
         handler_task_runner_(handler_task_runner) {}
 
   ~SafeBrowsingClient() override {
     if (timeout_.IsRunning())
-      database_manager_->CancelApiCheck(this);
+      database_manager_->CancelNotificationAbuseCheck(this);
+  }
+
+  base::WeakPtr<safe_browsing::V5GetHashProtocolManager>
+  GetV5GetHashProtocolManager() override {
+    return v5_get_hash_protocol_manager_;
   }
 
   void CheckOrigin(const url::Origin& origin) {
-    DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
-    // Start the timer before the call to CheckApiBlocklistUrl(), as it may
-    // call back into OnCheckApiBlocklistUrlResult() synchronously.
+    // Start the timer before the call to CheckNotificationAbuseUrl(), as it may
+    // call back into OnCheckNotificationAbuseUrlResult() synchronously.
     timeout_.Start(FROM_HERE, kSafeBrowsingCheckTimeout, this,
                    &SafeBrowsingClient::OnTimeout);
 
-    if (database_manager_->CheckApiBlocklistUrl(origin.GetURL(), this)) {
-      timeout_.AbandonAndStop();
+    if (database_manager_->CheckNotificationAbuseUrl(origin.GetURL(), this)) {
+      timeout_.Stop();
       SendResultToHandler(Verdict::kAcceptable);
     }
   }
@@ -64,16 +75,9 @@ class CrowdDenySafeBrowsingRequest::SafeBrowsingClient
   SafeBrowsingClient(const SafeBrowsingClient&) = delete;
   SafeBrowsingClient& operator=(const SafeBrowsingClient&) = delete;
 
-  static Verdict ExtractVerdictFromMetadata(
-      const safe_browsing::ThreatMetadata& metadata) {
-    return metadata.api_permissions.count(
-               kSafeBrowsingNotificationPermissionName)
-               ? Verdict::kUnacceptable
-               : Verdict::kAcceptable;
-  }
 
   void OnTimeout() {
-    database_manager_->CancelApiCheck(this);
+    database_manager_->CancelNotificationAbuseCheck(this);
     SendResultToHandler(Verdict::kAcceptable);
   }
 
@@ -85,15 +89,16 @@ class CrowdDenySafeBrowsingRequest::SafeBrowsingClient
   }
 
   // SafeBrowsingDatabaseManager::Client:
-  void OnCheckApiBlocklistUrlResult(
-      const GURL& url,
-      const safe_browsing::ThreatMetadata& metadata) override {
-    timeout_.AbandonAndStop();
-    SendResultToHandler(ExtractVerdictFromMetadata(metadata));
+  void OnCheckNotificationAbuseUrlResult(bool is_abusive) override {
+    timeout_.Stop();
+    SendResultToHandler(is_abusive ? Verdict::kUnacceptable
+                                   : Verdict::kAcceptable);
   }
 
   base::OneShotTimer timeout_;
   scoped_refptr<safe_browsing::SafeBrowsingDatabaseManager> database_manager_;
+  base::WeakPtr<safe_browsing::V5GetHashProtocolManager>
+      v5_get_hash_protocol_manager_;
   base::WeakPtr<CrowdDenySafeBrowsingRequest> handler_;
   scoped_refptr<base::TaskRunner> handler_task_runner_;
 };
@@ -102,6 +107,8 @@ class CrowdDenySafeBrowsingRequest::SafeBrowsingClient
 
 CrowdDenySafeBrowsingRequest::CrowdDenySafeBrowsingRequest(
     scoped_refptr<safe_browsing::SafeBrowsingDatabaseManager> database_manager,
+    base::WeakPtr<safe_browsing::V5GetHashProtocolManager>
+        v5_get_hash_protocol_manager,
     const base::Clock* clock,
     const url::Origin& origin,
     VerdictCallback callback)
@@ -109,17 +116,14 @@ CrowdDenySafeBrowsingRequest::CrowdDenySafeBrowsingRequest(
       clock_(clock),
       request_start_time_(clock->Now()) {
   client_ = std::make_unique<SafeBrowsingClient>(
-      database_manager, weak_factory_.GetWeakPtr(),
+      safe_browsing::SafeBrowsingDatabaseManager::Client::GetPassKey(),
+      database_manager, v5_get_hash_protocol_manager,
+      weak_factory_.GetWeakPtr(),
       base::SequencedTaskRunner::GetCurrentDefault());
-  content::GetIOThreadTaskRunner({})->PostTask(
-      FROM_HERE, base::BindOnce(&SafeBrowsingClient::CheckOrigin,
-                                base::Unretained(client_.get()), origin));
+  client_->CheckOrigin(origin);
 }
 
-CrowdDenySafeBrowsingRequest::~CrowdDenySafeBrowsingRequest() {
-  content::BrowserThread::DeleteSoon(content::BrowserThread::IO, FROM_HERE,
-                                     client_.release());
-}
+CrowdDenySafeBrowsingRequest::~CrowdDenySafeBrowsingRequest() = default;
 
 void CrowdDenySafeBrowsingRequest::OnReceivedResult(Verdict verdict) {
   base::UmaHistogramTimes("Permissions.CrowdDeny.SafeBrowsing.RequestDuration",

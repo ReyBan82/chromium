@@ -11,6 +11,8 @@
 #include <memory>
 #include <string>
 
+#include "base/containers/span.h"
+
 namespace chrome_pdf {
 
 class URLLoaderWrapper;
@@ -38,8 +40,9 @@ class DocumentLoader {
   virtual bool Init(std::unique_ptr<URLLoaderWrapper> loader,
                     const std::string& url) = 0;
 
-  // Data access interface. Return true if successful.
-  virtual bool GetBlock(uint32_t position, uint32_t size, void* buf) const = 0;
+  // Data access interface for writing the data at offset `position` into `buf`.
+  // Return true if successful.
+  virtual bool GetBlock(uint32_t position, base::span<uint8_t> buf) const = 0;
 
   // Data availability interface. Return true if data is available.
   virtual bool IsDataAvailable(uint32_t position, uint32_t size) const = 0;
@@ -53,6 +56,9 @@ class DocumentLoader {
 
   // Clear pending requests from the queue.
   virtual void ClearPendingRequests() = 0;
+
+  // Returns the filename from the response Content-Disposition header, if any.
+  virtual std::string GetFileNameFromContentDisposition() const = 0;
 };
 
 }  // namespace chrome_pdf

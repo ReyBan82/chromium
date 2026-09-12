@@ -4,27 +4,21 @@
 
 #include "components/sync/engine/cycle/sync_cycle_snapshot.h"
 
-#include "base/i18n/rtl.h"
 #include "base/test/icu_test_util.h"
 #include "base/test/values_test_util.h"
 #include "base/values.h"
+#include "components/sync/protocol/sync_enums.pb.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace syncer {
 namespace {
-
-using base::ExpectDictBooleanValue;
-using base::ExpectDictIntegerValue;
-using base::ExpectDictStringValue;
-using base::ExpectDictValue;
 
 class SyncCycleSnapshotTest : public testing::Test {};
 
 TEST_F(SyncCycleSnapshotTest, SyncCycleSnapshotToValue) {
   // Formatting of "poll_interval" value depends on the current locale.
   // Expectations below use English (US) formatting.
-  base::test::ScopedRestoreICUDefaultLocale restore_locale;
-  base::i18n::SetICUDefaultLocale("en_US");
+  base::test::ScopedRestoreICUDefaultLocale restore_locale("en_US");
 
   ModelNeutralState model_neutral;
   model_neutral.num_successful_commits = 5;
@@ -35,7 +29,7 @@ TEST_F(SyncCycleSnapshotTest, SyncCycleSnapshotToValue) {
   ProgressMarkerMap download_progress_markers;
   download_progress_markers[BOOKMARKS] = "\xef\xb7\xa4";
   download_progress_markers[APPS] = "apps";
-  base::Value::Dict expected_download_progress_markers_value =
+  base::DictValue expected_download_progress_markers_value =
       ProgressMarkerMapToValueDict(download_progress_markers);
 
   const std::string kBirthday = "test_birthday";
@@ -48,26 +42,31 @@ TEST_F(SyncCycleSnapshotTest, SyncCycleSnapshotToValue) {
       base::Time::Now(), sync_pb::SyncEnums::UNKNOWN_ORIGIN,
       /*poll_interval=*/base::Minutes(30),
       /*has_remaining_local_changes=*/false);
-  base::Value::Dict dict(snapshot.ToValue());
+  base::DictValue dict(snapshot.ToValue());
   EXPECT_EQ(14u, dict.size());
-  ExpectDictStringValue(kBirthday, dict, "birthday");
-  // Base64-encoded version of |kBagOfChips|.
-  ExpectDictStringValue("YmFnb2ZjaGlwcwE=", dict, "bagOfChips");
-  ExpectDictIntegerValue(model_neutral.num_successful_commits, dict,
-                         "numSuccessfulCommits");
-  ExpectDictIntegerValue(model_neutral.num_successful_bookmark_commits, dict,
-                         "numSuccessfulBookmarkCommits");
-  ExpectDictIntegerValue(model_neutral.num_updates_downloaded_total, dict,
-                         "numUpdatesDownloadedTotal");
-  ExpectDictIntegerValue(model_neutral.num_tombstone_updates_downloaded_total,
-                         dict, "numTombstoneUpdatesDownloadedTotal");
-  ExpectDictValue(expected_download_progress_markers_value, dict,
-                  "downloadProgressMarkers");
-  ExpectDictBooleanValue(kIsSilenced, dict, "isSilenced");
-  ExpectDictIntegerValue(kNumServerConflicts, dict, "numServerConflicts");
-  ExpectDictBooleanValue(false, dict, "notificationsEnabled");
-  ExpectDictBooleanValue(false, dict, "hasRemainingLocalChanges");
-  ExpectDictStringValue("0h 30m", dict, "poll_interval");
+
+  EXPECT_THAT(
+      dict,
+      base::test::DictionaryHasValues(
+          base::DictValue()
+              .Set("birthday", kBirthday)
+              // Base64-encoded version of `kBagOfChips`.
+              .Set("bagOfChips", "YmFnb2ZjaGlwcwE=")
+              .Set("numSuccessfulCommits", model_neutral.num_successful_commits)
+              .Set("numSuccessfulBookmarkCommits",
+                   model_neutral.num_successful_bookmark_commits)
+              .Set("numUpdatesDownloadedTotal",
+                   model_neutral.num_updates_downloaded_total)
+              .Set("numTombstoneUpdatesDownloadedTotal",
+                   model_neutral.num_tombstone_updates_downloaded_total)
+              .Set("downloadProgressMarkers",
+                   expected_download_progress_markers_value.Clone())
+              .Set("isSilenced", kIsSilenced)
+              .Set("numServerConflicts", kNumServerConflicts)
+              .Set("notificationsEnabled", false)
+              .Set("hasRemainingLocalChanges", false)
+              .Set("poll_interval", "0h 30m")));
+
   // poll_finish_time includes the local time zone, so simply verify its
   // existence.
   EXPECT_TRUE(dict.FindString("poll_finish_time"));

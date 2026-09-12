@@ -8,6 +8,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/posix/eintr_wrapper.h"
 #include "ui/events/ozone/evdev/input_device_settings_evdev.h"
@@ -225,8 +226,7 @@ void HapticTouchpadHandler::DestroyFfEffect(int effect_id) {
 }
 
 void HapticTouchpadHandler::PlayFfEffect(int effect_id) {
-  struct input_event event;
-  memset(&event, 0, sizeof(event));
+  struct input_event event{};
   event.type = EV_FF;
   event.code = effect_id;
   event.value = 1;
@@ -240,8 +240,7 @@ void HapticTouchpadHandler::PlayFfEffect(int effect_id) {
 
 int HapticTouchpadHandler::UploadFfEffect(uint16_t hid_usage,
                                           uint8_t intensity) {
-  local_ff_effect effect;
-  memset(&effect, 0, sizeof(effect));
+  local_ff_effect effect{};
 
   effect.id = kInvalidEffectId;
   effect.type = FF_HID;

@@ -9,7 +9,9 @@
 
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
+#include "build/build_config.h"
 #include "media/base/mock_media_log.h"
 #include "media/formats/mp4/box_definitions.h"
 #include "media/formats/mp4/parse_result.h"
@@ -22,20 +24,6 @@ using ::testing::StrictMock;
 
 namespace media {
 namespace mp4 {
-
-static const uint8_t kSkipBox[] = {
-    // Top-level test box containing three children
-    0x00, 0x00, 0x00, 0x40, 's', 'k', 'i', 'p', 0x01, 0x02, 0x03, 0x04, 0x05,
-    0x06, 0x07, 0x08, 0xf9, 0x0a, 0x0b, 0x0c, 0xfd, 0x0e, 0x0f, 0x10,
-    // Ordinary (8-byte header) child box
-    0x00, 0x00, 0x00, 0x0c, 'p', 's', 's', 'h', 0xde, 0xad, 0xbe, 0xef,
-    // Extended-size header child box
-    0x00, 0x00, 0x00, 0x01, 'p', 's', 's', 'h', 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x14, 0xfa, 0xce, 0xca, 0xfe,
-    // Empty free box
-    0x00, 0x00, 0x00, 0x08, 'f', 'r', 'e', 'e',
-    // Trailing garbage
-    0x00};
 
 struct FreeBox : Box {
   bool Parse(BoxReader* reader) override {
@@ -88,25 +76,36 @@ class BoxReaderTest : public testing::Test {
 
  protected:
   std::vector<uint8_t> GetBuf() {
-    return std::vector<uint8_t>(kSkipBox, kSkipBox + sizeof(kSkipBox));
+    return {// Top-level test box containing three children
+            0x00, 0x00, 0x00, 0x40, 's', 'k', 'i', 'p', 0x01, 0x02, 0x03, 0x04,
+            0x05, 0x06, 0x07, 0x08, 0xf9, 0x0a, 0x0b, 0x0c, 0xfd, 0x0e, 0x0f,
+            0x10,
+            // Ordinary (8-byte header) child box
+            0x00, 0x00, 0x00, 0x0c, 'p', 's', 's', 'h', 0xde, 0xad, 0xbe, 0xef,
+            // Extended-size header child box
+            0x00, 0x00, 0x00, 0x01, 'p', 's', 's', 'h', 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x14, 0xfa, 0xce, 0xca, 0xfe,
+            // Empty free box
+            0x00, 0x00, 0x00, 0x08, 'f', 'r', 'e', 'e',
+            // Trailing garbage
+            0x00};
   }
 
-  void TestTopLevelBox(const uint8_t* data, size_t data_size, uint32_t fourCC) {
-    std::vector<uint8_t> buf(data, data + data_size);
+  void TestTopLevelBox(base::span<const uint8_t> data, uint32_t fourCC) {
+    std::vector<uint8_t> buf(data.size());
+    buf.assign(data.begin(), data.end());
 
     std::unique_ptr<BoxReader> reader;
-    ParseResult result =
-        BoxReader::ReadTopLevelBox(&buf[0], buf.size(), &media_log_, &reader);
+    ParseResult result = BoxReader::ReadTopLevelBox(buf, &media_log_, &reader);
 
     EXPECT_EQ(result, ParseResult::kOk);
     EXPECT_TRUE(reader);
     EXPECT_EQ(fourCC, static_cast<uint32_t>(reader->type()));
-    EXPECT_EQ(reader->box_size(), data_size);
+    EXPECT_EQ(reader->box_size(), data.size());
   }
 
   template <typename ChildType>
-  void TestParsing32bitOverflow(const uint8_t* buffer,
-                                size_t size,
+  void TestParsing32bitOverflow(base::span<const uint8_t> data,
                                 const std::string& overflow_error) {
     // Wrap whatever we're passed in a dummy EMSG so we can satisfy requirements
     // for ReadTopLevelBox and to kick off parsing.
@@ -114,12 +113,12 @@ class BoxReaderTest : public testing::Test {
         0x00, 0x00, 0x00, 0x00,  // dummy size
         'e',  'm',  's',  'g',   // fourcc
     };
-    buffer_wrapper.insert(buffer_wrapper.end(), buffer, buffer + size);
+    buffer_wrapper.insert(buffer_wrapper.end(), data.begin(), data.end());
 
     // Basic check of the nested buffer size. If box_size > buffer size the test
     // will exit early (waiting for more bytes to be appended).
-    ASSERT_TRUE(base::IsValueInRangeForNumericType<uint8_t>(size));
-    ASSERT_LE(buffer[3], size);
+    ASSERT_TRUE(base::IsValueInRangeForNumericType<uint8_t>(data.size()));
+    ASSERT_LE(data[3], data.size());
 
     // Update the size (keep it simple).
     ASSERT_TRUE(
@@ -127,8 +126,8 @@ class BoxReaderTest : public testing::Test {
     buffer_wrapper[3] = buffer_wrapper.size();
 
     std::unique_ptr<BoxReader> reader;
-    ParseResult result = BoxReader::ReadTopLevelBox(
-        &buffer_wrapper[0], buffer_wrapper.size(), &media_log_, &reader);
+    ParseResult result =
+        BoxReader::ReadTopLevelBox(buffer_wrapper, &media_log_, &reader);
     EXPECT_EQ(result, ParseResult::kOk);
     EXPECT_TRUE(reader);
     EXPECT_EQ(FOURCC_EMSG, reader->type());
@@ -155,8 +154,7 @@ class BoxReaderTest : public testing::Test {
 TEST_F(BoxReaderTest, ExpectedOperationTest) {
   std::vector<uint8_t> buf = GetBuf();
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(&buf[0], buf.size(), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(buf, &media_log_, &reader);
   EXPECT_EQ(result, ParseResult::kOk);
   EXPECT_TRUE(reader);
 
@@ -183,8 +181,8 @@ TEST_F(BoxReaderTest, OuterTooShortTest) {
 
   // Create a soft failure by truncating the outer box.
   std::unique_ptr<BoxReader> r;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(&buf[0], buf.size() - 2, &media_log_, &r);
+  ParseResult result = BoxReader::ReadTopLevelBox(
+      base::span(buf).first(buf.size() - 2), &media_log_, &r);
 
   EXPECT_EQ(result, ParseResult::kNeedMoreData);
   EXPECT_FALSE(r);
@@ -196,8 +194,7 @@ TEST_F(BoxReaderTest, InnerTooLongTest) {
   // Make an inner box too big for its outer box.
   buf[25] = 1;
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(&buf[0], buf.size(), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(buf, &media_log_, &reader);
   EXPECT_EQ(result, ParseResult::kOk);
 
   SkipBox box;
@@ -219,8 +216,7 @@ TEST_F(BoxReaderTest, WrongFourCCTest) {
             HasSubstr("Invalid top-level ISO BMFF box type DALE")));
 
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(&buf[0], buf.size(), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(buf, &media_log_, &reader);
   EXPECT_FALSE(reader);
   EXPECT_EQ(result, ParseResult::kError);
 }
@@ -228,8 +224,7 @@ TEST_F(BoxReaderTest, WrongFourCCTest) {
 TEST_F(BoxReaderTest, ScanChildrenTest) {
   std::vector<uint8_t> buf = GetBuf();
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(&buf[0], buf.size(), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(buf, &media_log_, &reader);
 
   EXPECT_EQ(result, ParseResult::kOk);
   EXPECT_TRUE(reader->SkipBytes(16) && reader->ScanChildren());
@@ -253,8 +248,7 @@ TEST_F(BoxReaderTest, ReadAllChildrenTest) {
   // Modify buffer to exclude its last 'free' box
   buf[3] = 0x38;
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(&buf[0], buf.size(), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(buf, &media_log_, &reader);
   EXPECT_EQ(result, ParseResult::kOk);
 
   std::vector<PsshBox> kids;
@@ -267,7 +261,7 @@ TEST_F(BoxReaderTest, SkippingBloc) {
   static const uint8_t kData[] = {0x00, 0x00, 0x00, 0x09, 'b',
                                   'l',  'o',  'c',  0x00};
 
-  TestTopLevelBox(kData, sizeof(kData), FOURCC_BLOC);
+  TestTopLevelBox(kData, FOURCC_BLOC);
 }
 
 TEST_F(BoxReaderTest, SkippingEmsg) {
@@ -284,7 +278,7 @@ TEST_F(BoxReaderTest, SkippingEmsg) {
       0x05, 0x06, 0x07, 0x08,  // message_data[4] = 0x05060708
   };
 
-  TestTopLevelBox(kData, sizeof(kData), FOURCC_EMSG);
+  TestTopLevelBox(kData, FOURCC_EMSG);
 }
 
 TEST_F(BoxReaderTest, SkippingUuid) {
@@ -295,7 +289,7 @@ TEST_F(BoxReaderTest, SkippingUuid) {
       0x00,
   };
 
-  TestTopLevelBox(kData, sizeof(kData), FOURCC_UUID);
+  TestTopLevelBox(kData, FOURCC_UUID);
 }
 
 TEST_F(BoxReaderTest, NestedBoxWithHugeSize) {
@@ -312,8 +306,7 @@ TEST_F(BoxReaderTest, NestedBoxWithHugeSize) {
       0x00, 0x01, 0x00, 0x03, 0x00, 0x03, 0x00, 0x04, 0x05, 0x06, 0x07, 0x08};
 
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(kData, sizeof(kData), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(kData, &media_log_, &reader);
 
   EXPECT_EQ(result, ParseResult::kOk);
   EXPECT_TRUE(reader);
@@ -337,8 +330,7 @@ TEST_F(BoxReaderTest, ScanChildrenWithInvalidChild) {
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(kData, sizeof(kData), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(kData, &media_log_, &reader);
 
   EXPECT_EQ(result, ParseResult::kOk);
   EXPECT_TRUE(reader);
@@ -358,8 +350,7 @@ TEST_F(BoxReaderTest, ReadAllChildrenWithChildLargerThanParent) {
   };
 
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(kData, sizeof(kData), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(kData, &media_log_, &reader);
 
   EXPECT_EQ(result, ParseResult::kOk);
   EXPECT_TRUE(reader);
@@ -385,8 +376,7 @@ TEST_F(BoxReaderTest, TrunSampleCount32bitOverflow) {
 
   // Verify we catch the overflow to avoid OOB reads/writes.
   TestParsing32bitOverflow<TrackFragmentRun>(
-      kData, sizeof(kData),
-      "Extreme TRUN sample count exceeds implementation limit.");
+      kData, "Extreme TRUN sample count exceeds implementation limit.");
 }
 
 TEST_F(BoxReaderTest, SaioCount32bitOverflow) {
@@ -405,7 +395,7 @@ TEST_F(BoxReaderTest, SaioCount32bitOverflow) {
 
   // Verify we catch the overflow to avoid OOB reads/writes.
   TestParsing32bitOverflow<SampleAuxiliaryInformationOffset>(
-      kData, sizeof(kData), "Extreme SAIO count exceeds implementation limit.");
+      kData, "Extreme SAIO count exceeds implementation limit.");
 }
 
 TEST_F(BoxReaderTest, ElstCount32bitOverflow) {
@@ -426,7 +416,7 @@ TEST_F(BoxReaderTest, ElstCount32bitOverflow) {
 
   // Verify we catch the overflow to avoid OOB reads/writes.
   TestParsing32bitOverflow<EditList>(
-      kData, sizeof(kData), "Extreme ELST count exceeds implementation limit.");
+      kData, "Extreme ELST count exceeds implementation limit.");
 }
 
 TEST_F(BoxReaderTest, SbgpCount32bitOverflow) {
@@ -445,7 +435,7 @@ TEST_F(BoxReaderTest, SbgpCount32bitOverflow) {
 
   // Verify we catch the overflow to avoid OOB reads/writes.
   TestParsing32bitOverflow<SampleToGroup>(
-      kData, sizeof(kData), "Extreme SBGP count exceeds implementation limit.");
+      kData, "Extreme SBGP count exceeds implementation limit.");
 }
 
 TEST_F(BoxReaderTest, SgpdCount32bitOverflow) {
@@ -464,7 +454,7 @@ TEST_F(BoxReaderTest, SgpdCount32bitOverflow) {
 
   // Verify we catch the overflow to avoid OOB reads/writes.
   TestParsing32bitOverflow<SampleGroupDescription>(
-      kData, sizeof(kData), "Extreme SGPD count exceeds implementation limit.");
+      kData, "Extreme SGPD count exceeds implementation limit.");
 }
 
 TEST_F(BoxReaderTest, OutsideOfBoxRead) {
@@ -475,8 +465,7 @@ TEST_F(BoxReaderTest, OutsideOfBoxRead) {
   };
 
   std::unique_ptr<BoxReader> reader;
-  ParseResult result =
-      BoxReader::ReadTopLevelBox(kData, sizeof(kData), &media_log_, &reader);
+  ParseResult result = BoxReader::ReadTopLevelBox(kData, &media_log_, &reader);
   EXPECT_EQ(result, ParseResult::kOk);
   EXPECT_TRUE(reader);
 
@@ -489,11 +478,11 @@ TEST_F(BoxReaderTest, OutsideOfBoxRead) {
 #if BUILDFLAG(USE_PROPRIETARY_CODECS)
 TEST_F(BoxReaderTest, AVCDecoderConfigurationRecordTakenFromMp4) {
   std::vector<uint8_t> test_data{
-      0x1,        // configurationVersion
-      0x64,       // AVCProfileIndication
-      0x0,        // profile_compatibility
-      0xc,        // AVCLevelIndication
-      0xff,       // lengthSizeMinusOne
+      0x1,        // configurationVersion = 1
+      0x64,       // AVCProfileIndication = 100
+      0x0,        // profile_compatibility = 0
+      0xc,        // AVCLevelIndication = 10
+      0xff,       // lengthSizeMinusOne = 3
       0xe1,       // numOfSequenceParameterSets = 1
       0x0, 0x19,  // sequenceParameterSetLength = 25
 
@@ -505,12 +494,14 @@ TEST_F(BoxReaderTest, AVCDecoderConfigurationRecordTakenFromMp4) {
       0x0, 0x6,  // pictureParameterSetLength = 6
       0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0,
 
-      // Profile specific params are not supported yet, skip last bytes
-      // 0xfd, 0xf8, 0xf8, 0x0
+      0xfd,  // chroma_format = 1
+      0xf8,  // bit_depth_luma_minus8 = 0
+      0xf8,  // bit_depth_chroma_minus8 = 0
+      0x0,   // numOfSequanceParameterSetExt = 0
   };
 
   AVCDecoderConfigurationRecord record;
-  EXPECT_TRUE(record.Parse(test_data.data(), test_data.size()));
+  EXPECT_TRUE(record.Parse(test_data));
 
   EXPECT_EQ(record.version, 1);
   EXPECT_EQ(record.profile_indication, 0x64);
@@ -521,11 +512,49 @@ TEST_F(BoxReaderTest, AVCDecoderConfigurationRecordTakenFromMp4) {
   EXPECT_EQ(record.sps_list[0].size(), 25ull);
   EXPECT_EQ(record.pps_list.size(), 1ull);
   EXPECT_EQ(record.pps_list[0].size(), 6ull);
+  EXPECT_EQ(record.chroma_format, 1);
+  EXPECT_EQ(record.bit_depth_luma_minus8, 0);
+  EXPECT_EQ(record.bit_depth_chroma_minus8, 0);
+  EXPECT_EQ(record.sps_ext_list.size(), 0ull);
 
   std::vector<uint8_t> output;
   EXPECT_TRUE(record.Serialize(output));
   EXPECT_EQ(output.size(), test_data.size());
   ASSERT_THAT(output, testing::ElementsAreArray(test_data));
+}
+
+TEST_F(BoxReaderTest, AVCDecoderConfigurationRecordInvalidREXT) {
+  std::vector<uint8_t> test_data{
+      0x1,        // configurationVersion = 1
+      0x64,       // AVCProfileIndication = 100
+      0x0,        // profile_compatibility = 0
+      0xc,        // AVCLevelIndication = 10
+      0xff,       // lengthSizeMinusOne = 3
+      0xe1,       // numOfSequenceParameterSets = 1
+      0x0, 0x19,  // sequenceParameterSetLength = 25
+
+      // sequenceParameterSet
+      0x67, 0x64, 0x0, 0xc, 0xac, 0xd9, 0x41, 0x41, 0xfb, 0x1, 0x10, 0x0, 0x0,
+      0x3, 0x0, 0x10, 0x0, 0x0, 0x3, 0x1, 0x40, 0xf1, 0x42, 0x99, 0x60,
+
+      0x1,       // numOfPictureParameterSets
+      0x0, 0x6,  // pictureParameterSetLength = 6
+      0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0,
+
+      0xfe,  // chroma_format = 2
+      0xfc,  // bit_depth_luma_minus8 = 4
+      0xfe,  // bit_depth_chroma_minus8 = 6
+      0x0,   // numOfSequanceParameterSetExt = 0
+  };
+
+  AVCDecoderConfigurationRecord record;
+  EXPECT_TRUE(record.Parse(test_data));
+
+  // Default values should be used.
+  EXPECT_EQ(record.chroma_format, 0);
+  EXPECT_EQ(record.bit_depth_luma_minus8, 0);
+  EXPECT_EQ(record.bit_depth_chroma_minus8, 0);
+  EXPECT_EQ(record.sps_ext_list.size(), 0ull);
 }
 
 TEST_F(BoxReaderTest, AVCDecoderConfigurationRecordTakenFromStream) {
@@ -537,10 +566,91 @@ TEST_F(BoxReaderTest, AVCDecoderConfigurationRecordTakenFromStream) {
       0x00, 0x02, 0x49, 0xF3, 0xF8, 0xC7, 0x0E, 0xD0, 0xB1, 0x68, 0x90,
       0x01, 0x00, 0x04, 0x68, 0xEB, 0x73, 0x52};
   AVCDecoderConfigurationRecord record;
-  EXPECT_TRUE(record.Parse(test_data.data(), test_data.size()));
+  EXPECT_TRUE(record.Parse(test_data));
   std::vector<uint8_t> output;
   EXPECT_TRUE(record.Serialize(output));
   ASSERT_THAT(output, testing::ElementsAreArray(test_data));
+}
+
+TEST_F(BoxReaderTest, AVCDecoderConfigurationRecordAllowsShortSpsEntry) {
+  // Real-world malformed avcC:
+  // - num_sps = 2
+  // - second "SPS" is actually a PPS (NAL type 8), length 4.
+  std::vector<uint8_t> test_data{
+      0x01,       // configurationVersion = 1
+      0x64,       // AVCProfileIndication = 100
+      0x00,       // profile_compatibility = 0
+      0x1f,       // AVCLevelIndication = 31
+      0xff,       // lengthSizeMinusOne = 3
+      0xe2,       // numOfSequenceParameterSets = 2
+      0x00, 0x14, // sequenceParameterSetLength = 20
+
+      // sequenceParameterSet
+      0x67, 0x64, 0x00,
+      0x1f, 0xac, 0x1b, 0x1a, 0x80, 0x90, 0x0a, 0x1e, 0xf9, 0xb8, 0x08,
+      0x08, 0x08, 0x3c, 0x22, 0x11, 0xa8,
+
+      0x00, 0x04,  // sequenceParameterSetLength = 4
+
+      // sequenceParameterSet
+      0x68, 0xea, 0x43, 0xcb,
+
+      0x01,        // numOfPictureParameterSets
+      0x00, 0x04,  // pictureParameterSetLength = 4
+      0x68, 0xea, 0x43, 0xcb};
+
+  AVCDecoderConfigurationRecord record;
+  EXPECT_TRUE(record.Parse(test_data));
+
+  ASSERT_EQ(record.sps_list.size(), 2ull);
+  ASSERT_FALSE(record.sps_list[0].empty());
+  EXPECT_EQ(record.sps_list[0][0] & 0x1f, 7);  // H264 SPS NAL type.
+  ASSERT_FALSE(record.sps_list[1].empty());
+  EXPECT_EQ(record.sps_list[1][0] & 0x1f, 8);  // H264 PPS NAL type.
+
+  ASSERT_EQ(record.pps_list.size(), 1ull);
+  ASSERT_FALSE(record.pps_list[0].empty());
+  EXPECT_EQ(record.pps_list[0][0] & 0x1f, 8);  // H264 PPS NAL type.
+}
+
+TEST_F(BoxReaderTest, AVCDecoderConfigurationRecordRejectsEmptySpsEntry) {
+  // Malformed avcC where the only SPS entry is empty.
+  std::vector<uint8_t> test_data{
+      0x01,       // configurationVersion = 1
+      0x64,       // AVCProfileIndication = 100
+      0x00,       // profile_compatibility = 0
+      0x0c,       // AVCLevelIndication = 12
+      0xff,       // lengthSizeMinusOne = 3
+      0xe1,       // numOfSequenceParameterSets = 1
+      0x00, 0x00, // sequenceParameterSetLength = 0
+
+      0x01,        // numOfPictureParameterSets
+      0x00, 0x04,  // pictureParameterSetLength = 4
+      0x68, 0xea, 0x43, 0xcb};
+
+  AVCDecoderConfigurationRecord record;
+  EXPECT_FALSE(record.Parse(test_data));
+}
+
+TEST_F(BoxReaderTest, MovieFragmentWithZeroTracks) {
+  static const uint8_t kData[] = {
+      0x00, 0x00, 0x00, 0x18, 'm', 'o', 'o', 'f',  // moof box
+      0x00, 0x00, 0x00, 0x10, 'm', 'f', 'h', 'd',  // mfhd box
+      0x00, 0x00, 0x00, 0x00,                      // version = 0, flags = 0
+      0x00, 0x00, 0x00, 0x01                       // sequence_number = 1
+  };
+
+  std::unique_ptr<BoxReader> reader;
+  ParseResult result = BoxReader::ReadTopLevelBox(kData, &media_log_, &reader);
+
+  EXPECT_EQ(result, ParseResult::kOk);
+  EXPECT_TRUE(reader);
+  EXPECT_EQ(FOURCC_MOOF, reader->type());
+
+  MovieFragment moof;
+  EXPECT_TRUE(moof.Parse(reader.get()));
+  EXPECT_EQ(moof.header.sequence_number, 1u);
+  EXPECT_TRUE(moof.tracks.empty());
 }
 #endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
 

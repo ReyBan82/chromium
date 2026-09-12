@@ -12,33 +12,31 @@ import android.view.ViewGroup;
 import android.widget.RadioButton;
 import android.widget.TextView;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
-
 import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.download.DirectoryOption;
-import org.chromium.chrome.browser.download.DownloadDialogBridge;
 import org.chromium.chrome.browser.download.R;
 import org.chromium.chrome.browser.download.StringUtils;
 
 /**
  * Class used to provide data shown in the download location preference in download settings page.
  */
-public class DownloadLocationPreferenceAdapter
-        extends DownloadDirectoryAdapter implements OnClickListener {
-    /**
-     * Constructor of DownloadLocationPreferenceAdapter.
-     */
+@NullMarked
+public class DownloadLocationPreferenceAdapter extends DownloadDirectoryAdapter
+        implements OnClickListener {
+    /** Constructor of DownloadLocationPreferenceAdapter. */
     public DownloadLocationPreferenceAdapter(Context context, Delegate delegate) {
         super(context, delegate);
     }
 
     @Override
-    public View getView(int position, @Nullable View convertView, @NonNull ViewGroup parent) {
+    public View getView(int position, @Nullable View convertView, ViewGroup parent) {
         View view = convertView;
         if (view == null) {
-            view = LayoutInflater.from(getContext())
-                           .inflate(R.layout.download_location_preference_item, null);
+            view =
+                    LayoutInflater.from(getContext())
+                            .inflate(R.layout.download_location_preference_item, null);
         }
 
         view.setTag(position);
@@ -57,13 +55,14 @@ public class DownloadLocationPreferenceAdapter
         DirectoryOption directoryOption = (DirectoryOption) getItem(position);
         if (directoryOption == null) return view;
 
-        TextView titleText = (TextView) view.findViewById(R.id.title);
+        TextView titleText = view.findViewById(R.id.title);
         titleText.setText(directoryOption.name);
 
-        TextView summaryText = (TextView) view.findViewById(R.id.description);
+        TextView summaryText = view.findViewById(R.id.description);
         if (isEnabled(position)) {
-            String summary = StringUtils.getAvailableBytesForUi(
-                    getContext(), directoryOption.availableSpace);
+            String summary =
+                    StringUtils.getAvailableBytesForUi(
+                            getContext(), directoryOption.availableSpace);
             summaryText.setText(summary);
 
             // Build description for accessibility.
@@ -95,15 +94,20 @@ public class DownloadLocationPreferenceAdapter
         if (option == null) return;
 
         // Update the native pref, which persists the download directory selected by the user.
-        DownloadDialogBridge.setDownloadAndSaveFileDefaultDirectory(option.location);
+        DownloadLocationHelper helper = mDelegate.getDownloadLocationHelper();
+        if (helper != null) {
+            helper.setDownloadAndSaveFileDefaultDirectory(option.location);
+        }
 
         mSelectedPosition = selectedId;
 
         // Update the preference after selected position is updated.
-        if (mDelegate != null) mDelegate.onDirectorySelectionChanged();
+        mDelegate.onDirectorySelectionChanged();
 
-        RecordHistogram.recordEnumeratedHistogram("MobileDownload.Location.Setting.DirectoryType",
-                option.type, DirectoryOption.DownloadLocationDirectoryType.NUM_ENTRIES);
+        RecordHistogram.recordEnumeratedHistogram(
+                "MobileDownload.Location.Setting.DirectoryType",
+                option.type,
+                DirectoryOption.DownloadLocationDirectoryType.NUM_ENTRIES);
 
         // Refresh the list of download directories UI.
         notifyDataSetChanged();

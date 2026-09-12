@@ -2,11 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/download/public/common/download_path_reservation_tracker.h"
+
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
@@ -19,8 +23,6 @@
 #include "base/test/test_file_util.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "components/download/public/common/download_path_reservation_tracker.h"
 #include "components/download/public/common/mock_download_item.h"
 #include "net/base/filename_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -58,7 +60,8 @@ class DownloadPathReservationTrackerTest : public testing::Test {
       bool create_directory,
       DownloadPathReservationTracker::FilenameConflictAction conflict_action,
       base::FilePath* return_path,
-      PathValidationResult* return_result);
+      PathValidationResult* return_result,
+      const base::FilePath& containment_directory = base::FilePath());
   void CreateReservation(
       MockDownloadItem* item,
       const base::FilePath& path,
@@ -123,20 +126,24 @@ DownloadPathReservationTrackerTest::CreateDownloadItem(int32_t id) {
   EXPECT_CALL(*item, GetState())
       .WillRepeatedly(Return(DownloadItem::IN_PROGRESS));
   EXPECT_CALL(*item, GetURL()).WillRepeatedly(ReturnRefOfCopy(GURL()));
+  EXPECT_CALL(*item, IsTransient()).WillRepeatedly(Return(false));
+  EXPECT_CALL(*item, GetForcedFilePath())
+      .WillRepeatedly(ReturnRefOfCopy(base::FilePath()));
+  EXPECT_CALL(*item, GetLastReason())
+      .WillRepeatedly(Return(DOWNLOAD_INTERRUPT_REASON_NONE));
+  EXPECT_CALL(*item, GetTargetDisposition())
+      .WillRepeatedly(Return(DownloadItem::TARGET_DISPOSITION_OVERWRITE));
 
-  base::Time::Exploded exploded_reference_time;
-  exploded_reference_time.year = 2019;
-  exploded_reference_time.month = 1;
-  exploded_reference_time.day_of_month = 23;
-  exploded_reference_time.day_of_week = 3;
-  exploded_reference_time.hour = 16;
-  exploded_reference_time.minute = 35;
-  exploded_reference_time.second = 30;
-  exploded_reference_time.millisecond = 20;
-
+  static constexpr base::Time::Exploded kReferenceTime = {.year = 2019,
+                                                          .month = 1,
+                                                          .day_of_week = 3,
+                                                          .day_of_month = 23,
+                                                          .hour = 16,
+                                                          .minute = 35,
+                                                          .second = 30,
+                                                          .millisecond = 20};
   base::Time test_time;
-  EXPECT_TRUE(
-      base::Time::FromLocalExploded(exploded_reference_time, &test_time));
+  EXPECT_TRUE(base::Time::FromLocalExploded(kReferenceTime, &test_time));
 
   EXPECT_CALL(*item, GetStartTime()).WillRepeatedly(Return(test_time));
   return item;
@@ -163,7 +170,8 @@ void DownloadPathReservationTrackerTest::CallGetReservedPath(
     bool create_directory,
     DownloadPathReservationTracker::FilenameConflictAction conflict_action,
     base::FilePath* return_path,
-    PathValidationResult* return_result) {
+    PathValidationResult* return_result,
+    const base::FilePath& containment_directory) {
   // Weak pointer factory to prevent the callback from running after this
   // function has returned.
   base::WeakPtrFactory<DownloadPathReservationTrackerTest> weak_ptr_factory(
@@ -173,7 +181,8 @@ void DownloadPathReservationTrackerTest::CallGetReservedPath(
       create_directory, conflict_action,
       base::BindOnce(
           &DownloadPathReservationTrackerTest::TestReservedPathCallback,
-          weak_ptr_factory.GetWeakPtr(), return_path, return_result));
+          weak_ptr_factory.GetWeakPtr(), return_path, return_result),
+      containment_directory);
   task_environment_.RunUntilIdle();
 }
 
@@ -288,17 +297,56 @@ TEST_F(DownloadPathReservationTrackerTest, ConflictingFiles) {
 #endif  // BUILDFLAG(IS_ANDROID)
   if (!use_download_collection) {
     // Create a file at |path|, and a .crdownload file at |path1|.
-    ASSERT_EQ(0, base::WriteFile(path, "", 0));
-    ASSERT_EQ(
-        0, base::WriteFile(
-               base::FilePath(path1.value() + FILE_PATH_LITERAL(".crdownload")),
-               "", 0));
+    ASSERT_TRUE(base::WriteFile(path, ""));
+    ASSERT_TRUE(base::WriteFile(
+        base::FilePath(path1.value() + FILE_PATH_LITERAL(".crdownload")), ""));
   }
 
   ASSERT_TRUE(IsPathInUse(path));
 
   CreateReservation(item.get(), path, DownloadPathReservationTracker::UNIQUIFY,
                     PathValidationResult::SUCCESS_RESOLVED_CONFLICT, path1);
+
+  SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
+  item.reset();
+  RunUntilIdle();
+  EXPECT_TRUE(IsPathInUse(path));
+  EXPECT_FALSE(IsPathInUse(path1));
+}
+
+// As above, but checks for existing files that differ only by case.
+TEST_F(DownloadPathReservationTrackerTest, CaseConflictingFiles) {
+  std::unique_ptr<MockDownloadItem> item = CreateDownloadItem(1);
+
+  base::FilePath path(
+      GetPathInDownloadsDirectory(FILE_PATH_LITERAL("foo.txt")));
+  base::FilePath target_path(
+      GetPathInDownloadsDirectory(FILE_PATH_LITERAL("FOO.txt")));
+  base::FilePath path1(
+      GetPathInDownloadsDirectory(FILE_PATH_LITERAL("FOO (1).txt")));
+  bool use_download_collection = false;
+#if BUILDFLAG(IS_ANDROID)
+  if (DownloadCollectionBridge::ShouldPublishDownload(path)) {
+    use_download_collection = true;
+    DownloadCollectionBridge::AddExistingFileNameForTesting(path.BaseName());
+  }
+#endif  // BUILDFLAG(IS_ANDROID)
+  if (!use_download_collection) {
+    // Create a file at |path|, and a .crdownload file at |path1|.
+    ASSERT_TRUE(base::WriteFile(path, ""));
+    ASSERT_TRUE(base::WriteFile(
+        base::FilePath(path1.value() + FILE_PATH_LITERAL(".crdownload")), ""));
+  }
+
+  ASSERT_TRUE(IsPathInUse(path));
+
+  // Whether this counts as a conflict depends on whether the filesystem is
+  // actually case-sensitive.
+  CreateReservation(
+      item.get(), target_path, DownloadPathReservationTracker::UNIQUIFY,
+      IsPathInUse(target_path) ? PathValidationResult::SUCCESS_RESOLVED_CONFLICT
+                               : PathValidationResult::SUCCESS,
+      IsPathInUse(target_path) ? path1 : target_path);
 
   SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
   item.reset();
@@ -322,12 +370,44 @@ TEST_F(DownloadPathReservationTrackerTest, ConflictingFiles_Overwrite) {
 #endif  // BUILDFLAG(IS_ANDROID)
   if (!use_download_collection) {
     // Create a file at |path|.
-    ASSERT_EQ(0, base::WriteFile(path, "", 0));
+    ASSERT_TRUE(base::WriteFile(path, ""));
   }
   ASSERT_TRUE(IsPathInUse(path));
 
   CreateReservation(item.get(), path, DownloadPathReservationTracker::OVERWRITE,
                     PathValidationResult::SUCCESS, path);
+
+  SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
+  item.reset();
+  RunUntilIdle();
+}
+
+// As above, but checks for existing files that differ only by case. On a
+// case-sensitive filesystem this is redundant, since the files won't actually
+// conflict, but it's easier to run the test everywhere than to check the
+// filesystem type.
+TEST_F(DownloadPathReservationTrackerTest, CaseConflictingFiles_Overwrite) {
+  std::unique_ptr<MockDownloadItem> item = CreateDownloadItem(1);
+  base::FilePath path(
+      GetPathInDownloadsDirectory(FILE_PATH_LITERAL("foo.txt")));
+  base::FilePath target_path(
+      GetPathInDownloadsDirectory(FILE_PATH_LITERAL("FOO.txt")));
+  bool use_download_collection = false;
+#if BUILDFLAG(IS_ANDROID)
+  if (DownloadCollectionBridge::ShouldPublishDownload(path)) {
+    use_download_collection = true;
+    DownloadCollectionBridge::AddExistingFileNameForTesting(path.BaseName());
+  }
+#endif  // BUILDFLAG(IS_ANDROID)
+  if (!use_download_collection) {
+    // Create a file at |path|.
+    ASSERT_TRUE(base::WriteFile(path, ""));
+  }
+  ASSERT_TRUE(IsPathInUse(path));
+
+  CreateReservation(item.get(), target_path,
+                    DownloadPathReservationTracker::OVERWRITE,
+                    PathValidationResult::SUCCESS, target_path);
 
   SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
   item.reset();
@@ -348,7 +428,7 @@ TEST_F(DownloadPathReservationTrackerTest, ConflictWithSource) {
   }
 #endif  // BUILDFLAG(IS_ANDROID)
   if (!use_download_collection) {
-    ASSERT_EQ(0, base::WriteFile(path, "", 0));
+    ASSERT_TRUE(base::WriteFile(path, ""));
   }
   ASSERT_TRUE(IsPathInUse(path));
   EXPECT_CALL(*item, GetURL())
@@ -356,6 +436,37 @@ TEST_F(DownloadPathReservationTrackerTest, ConflictWithSource) {
 
   CreateReservation(item.get(), path, DownloadPathReservationTracker::UNIQUIFY,
                     PathValidationResult::SAME_AS_SOURCE, path);
+
+  SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
+  item.reset();
+  RunUntilIdle();
+}
+
+// As above, but check for a file:// URL that differs only by case. This should
+// be flagged on all file systems, even case-sensitive ones, for safety.
+TEST_F(DownloadPathReservationTrackerTest, CaseConflictWithSource) {
+  std::unique_ptr<MockDownloadItem> item = CreateDownloadItem(1);
+  base::FilePath path(
+      GetPathInDownloadsDirectory(FILE_PATH_LITERAL("foo.txt")));
+  base::FilePath target_path(
+      GetPathInDownloadsDirectory(FILE_PATH_LITERAL("FOO.txt")));
+  bool use_download_collection = false;
+#if BUILDFLAG(IS_ANDROID)
+  if (DownloadCollectionBridge::ShouldPublishDownload(path)) {
+    use_download_collection = true;
+    DownloadCollectionBridge::AddExistingFileNameForTesting(path.BaseName());
+  }
+#endif  // BUILDFLAG(IS_ANDROID)
+  if (!use_download_collection) {
+    ASSERT_TRUE(base::WriteFile(path, ""));
+  }
+  ASSERT_TRUE(IsPathInUse(path));
+  EXPECT_CALL(*item, GetURL())
+      .WillRepeatedly(ReturnRefOfCopy(net::FilePathToFileURL(path)));
+
+  CreateReservation(item.get(), target_path,
+                    DownloadPathReservationTracker::UNIQUIFY,
+                    PathValidationResult::SAME_AS_SOURCE, target_path);
 
   SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
   item.reset();
@@ -467,8 +578,9 @@ TEST_F(DownloadPathReservationTrackerTest, UnresolvedConflicts) {
   // Make room for the path with no uniquifier, the |kMaxUniqueFiles|
   // numerically uniquified paths, and then one more for the timestamp
   // uniquified path.
-  std::unique_ptr<MockDownloadItem>
-      items[DownloadPathReservationTracker::kMaxUniqueFiles + 2];
+  std::array<std::unique_ptr<MockDownloadItem>,
+             DownloadPathReservationTracker::kMaxUniqueFiles + 2>
+      items;
 
   // Create |kMaxUniqueFiles + 2| reservations for |path|. The first reservation
   // will have no uniquifier. Then |kMaxUniqueFiles| paths have numeric
@@ -509,7 +621,7 @@ TEST_F(DownloadPathReservationTrackerTest, UnresolvedConflicts) {
 }
 
 #if BUILDFLAG(IS_FUCHSIA)
-// TODO(crbug.com/1314073): Re-enable when UnwriteableDirectory works on
+// TODO(crbug.com/40221275): Re-enable when UnwriteableDirectory works on
 // Fuchsia.
 #define MAYBE_UnwriteableDirectory DISABLED_UnwriteableDirectory
 #else
@@ -625,7 +737,7 @@ TEST_F(DownloadPathReservationTrackerTest, UpdatesToTargetPath) {
 
 // Tests for long name truncation. On other platforms automatic truncation
 // is not performed (yet).
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_CHROMEOS)
 
 TEST_F(DownloadPathReservationTrackerTest, BasicTruncation) {
   int real_max_length =
@@ -684,8 +796,8 @@ TEST_F(DownloadPathReservationTrackerTest, TruncationConflict) {
   // "aaa...aaaaaaa.txt" (truncated path) and
   // "aaa...aaa (1).txt" (truncated and first uniquification try) exists.
   // "aaa...aaa (2).txt" should be used.
-  ASSERT_EQ(0, base::WriteFile(path0, "", 0));
-  ASSERT_EQ(0, base::WriteFile(path1, "", 0));
+  ASSERT_TRUE(base::WriteFile(path0, ""));
+  ASSERT_TRUE(base::WriteFile(path1, ""));
 
   base::FilePath reserved_path;
   PathValidationResult result = PathValidationResult::NAME_TOO_LONG;
@@ -729,5 +841,138 @@ TEST_F(DownloadPathReservationTrackerTest, TruncationFail) {
 }
 
 #endif  // Platforms that support filename truncation.
+
+#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_ANDROID)
+TEST_F(DownloadPathReservationTrackerTest, SymlinkTraversingPath) {
+  std::unique_ptr<MockDownloadItem> item = CreateDownloadItem(1);
+  base::ScopedTempDir external_dir;
+  ASSERT_TRUE(external_dir.CreateUniqueTempDir());
+
+  base::FilePath symlink_path =
+      GetPathInDownloadsDirectory(FILE_PATH_LITERAL("symlink_dir"));
+  ASSERT_TRUE(base::CreateSymbolicLink(external_dir.GetPath(), symlink_path));
+
+  base::FilePath target_path =
+      symlink_path.Append(FILE_PATH_LITERAL("payload.txt"));
+  ASSERT_FALSE(IsPathInUse(target_path));
+
+  CreateReservation(
+      item.get(), target_path, DownloadPathReservationTracker::OVERWRITE,
+      PathValidationResult::PATH_NOT_WRITABLE,
+      default_download_path().Append(FILE_PATH_LITERAL("payload.txt")));
+
+  SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
+}
+#endif
+
+TEST_F(DownloadPathReservationTrackerTest,
+       ConfirmedPathOutsideDownloadsResumption) {
+  std::unique_ptr<MockDownloadItem> item = CreateDownloadItem(1);
+  EXPECT_CALL(*item, GetTargetDisposition())
+      .WillRepeatedly(Return(DownloadItem::TARGET_DISPOSITION_PROMPT));
+
+  base::ScopedTempDir external_dir;
+  ASSERT_TRUE(external_dir.CreateUniqueTempDir());
+
+  base::FilePath target_path =
+      external_dir.GetPath().Append(FILE_PATH_LITERAL("payload.txt"));
+  ASSERT_FALSE(IsPathInUse(target_path));
+
+  base::FilePath reserved_path;
+  PathValidationResult result = PathValidationResult::SUCCESS;
+  DownloadPathReservationTracker::FilenameConflictAction conflict_action =
+      DownloadPathReservationTracker::OVERWRITE;
+  bool create_directory = false;
+  CallGetReservedPath(item.get(), target_path, create_directory,
+                      conflict_action, &reserved_path, &result);
+  EXPECT_EQ(PathValidationResult::SUCCESS, result);
+  EXPECT_EQ(target_path, reserved_path);
+
+  SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
+}
+
+TEST_F(DownloadPathReservationTrackerTest,
+       ResumedPathOutsideDownloadsAfterRestart) {
+  std::unique_ptr<MockDownloadItem> item = CreateDownloadItem(1);
+  // Simulate a restart where TargetDisposition defaults to OVERWRITE,
+  // but the download is recognized as resumed due to a non-zero interrupt
+  // reason.
+  EXPECT_CALL(*item, GetTargetDisposition())
+      .WillRepeatedly(Return(DownloadItem::TARGET_DISPOSITION_OVERWRITE));
+  EXPECT_CALL(*item, GetLastReason())
+      .WillRepeatedly(Return(download::DOWNLOAD_INTERRUPT_REASON_CRASH));
+
+  base::ScopedTempDir external_dir;
+  ASSERT_TRUE(external_dir.CreateUniqueTempDir());
+
+  base::FilePath target_path =
+      external_dir.GetPath().Append(FILE_PATH_LITERAL("payload.txt"));
+  ASSERT_FALSE(IsPathInUse(target_path));
+
+  base::FilePath reserved_path;
+  PathValidationResult result = PathValidationResult::SUCCESS;
+  DownloadPathReservationTracker::FilenameConflictAction conflict_action =
+      DownloadPathReservationTracker::OVERWRITE;
+  bool create_directory = false;
+  CallGetReservedPath(item.get(), target_path, create_directory,
+                      conflict_action, &reserved_path, &result);
+  EXPECT_EQ(PathValidationResult::SUCCESS, result);
+  EXPECT_EQ(target_path, reserved_path);
+
+  SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
+}
+
+TEST_F(DownloadPathReservationTrackerTest,
+       PathOutsideDownloadsButInsideContainment) {
+  std::unique_ptr<MockDownloadItem> item = CreateDownloadItem(1);
+
+  base::ScopedTempDir external_dir;
+  ASSERT_TRUE(external_dir.CreateUniqueTempDir());
+
+  base::FilePath target_path =
+      external_dir.GetPath().Append(FILE_PATH_LITERAL("payload.txt"));
+  ASSERT_FALSE(IsPathInUse(target_path));
+
+  base::FilePath reserved_path;
+  PathValidationResult result = PathValidationResult::SUCCESS;
+  DownloadPathReservationTracker::FilenameConflictAction conflict_action =
+      DownloadPathReservationTracker::OVERWRITE;
+  bool create_directory = false;
+
+  CallGetReservedPath(item.get(), target_path, create_directory,
+                      conflict_action, &reserved_path, &result,
+                      external_dir.GetPath());
+  EXPECT_EQ(PathValidationResult::SUCCESS, result);
+  EXPECT_EQ(target_path, reserved_path);
+
+  SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
+}
+
+#if BUILDFLAG(IS_ANDROID)
+TEST_F(DownloadPathReservationTrackerTest,
+       AndroidPathOutsideDownloadsDirectory) {
+  std::unique_ptr<MockDownloadItem> item = CreateDownloadItem(1);
+
+  base::ScopedTempDir external_dir;
+  ASSERT_TRUE(external_dir.CreateUniqueTempDir());
+
+  base::FilePath target_path =
+      external_dir.GetPath().Append(FILE_PATH_LITERAL("payload.txt"));
+  ASSERT_FALSE(IsPathInUse(target_path));
+
+  base::FilePath reserved_path;
+  PathValidationResult result = PathValidationResult::SUCCESS;
+  DownloadPathReservationTracker::FilenameConflictAction conflict_action =
+      DownloadPathReservationTracker::OVERWRITE;
+  bool create_directory = false;
+
+  CallGetReservedPath(item.get(), target_path, create_directory,
+                      conflict_action, &reserved_path, &result);
+  EXPECT_EQ(PathValidationResult::SUCCESS, result);
+  EXPECT_EQ(target_path, reserved_path);
+
+  SetDownloadItemState(item.get(), DownloadItem::COMPLETE);
+}
+#endif
 
 }  // namespace download

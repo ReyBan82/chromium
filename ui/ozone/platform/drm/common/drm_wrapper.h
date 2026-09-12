@@ -7,14 +7,16 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/files/file_path.h"
 #include "base/files/scoped_file.h"
-#include "base/functional/callback.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/memory/raw_ptr.h"
 #include "third_party/perfetto/include/perfetto/tracing/traced_value_forward.h"
+#include "ui/display/types/display_constants.h"
 #include "ui/display/types/gamma_ramp_rgb_entry.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/size.h"
@@ -25,7 +27,7 @@ typedef struct _drmModeModeInfo drmModeModeInfo;
 struct SkImageInfo;
 
 namespace display {
-struct GammaRampRGBEntry;
+class GammaCurve;
 }  // namespace display
 
 namespace ui {
@@ -44,7 +46,7 @@ class DrmPropertyBlobMetadata {
   uint32_t id() const { return id_; }
 
  private:
-  DrmWrapper* drm_;  // Not owned;
+  raw_ptr<DrmWrapper> drm_;  // Not owned;
   uint32_t id_;
 };
 
@@ -132,6 +134,7 @@ class DrmWrapper {
 
   virtual bool SetMaster();
   virtual bool DropMaster();
+  virtual bool has_master() const;
 
   /**************
    * Dumb Buffers
@@ -179,8 +182,7 @@ class DrmWrapper {
    * Gamma
    *******/
 
-  virtual bool SetGammaRamp(uint32_t crtc_id,
-                            const std::vector<display::GammaRampRGBEntry>& lut);
+  virtual bool SetGammaRamp(uint32_t crtc_id, const display::GammaCurve& lut);
 
   /********
    * Planes
@@ -232,6 +234,11 @@ class DrmWrapper {
   // Creates a property blob with data |blob| of size |size|.
   virtual ScopedDrmPropertyBlob CreatePropertyBlob(const void* blob,
                                                    size_t size);
+  // Creates a property blob with |size| for data |blob| which user space
+  // can't read back.
+  virtual ScopedDrmPropertyBlob CreatePropertyBlobWithFlags(const void* blob,
+                                                            size_t size,
+                                                            uint32_t flags);
   virtual void DestroyPropertyBlob(uint32_t id);
 
   // Returns a binary blob associated with |property_id|. May be nullptr if the
@@ -260,33 +267,53 @@ class DrmWrapper {
   // Adds trace records to |context|.
   virtual void WriteIntoTrace(perfetto::TracedDictionary dict) const;
 
-  virtual absl::optional<std::string> GetDriverName() const;
+  virtual std::optional<std::string> GetDriverName() const;
+
+  // TODO(gildekel): remove once DrmWrapper and DrmDevice are completely
+  // decoupled.
+  // Returns a list of supported drm formats and modifiers for |crtc_id|. Note:
+  // implementation in wrapper is a stub. Full implementation is in
+  // DrmDevice::GetFormatsAndModifiersForCrtc().
+  virtual display::DrmFormatsAndModifiers GetFormatsAndModifiersForCrtc(
+      uint32_t crtc_id) const;
 
   // Extracts the FD from the given |drm|. The |drm| object will be invalidated.
   static base::ScopedFD ToScopedFD(std::unique_ptr<DrmWrapper> drm);
 
   base::FilePath device_path() const { return device_path_; }
-  bool allow_addfb2_modifiers() const { return allow_addfb2_modifiers_; }
-  int modeset_sequence_id() const { return modeset_sequence_id_; }
   bool is_atomic() const { return is_atomic_; }
   bool is_primary_device() const { return is_primary_device_; }
 
  protected:
+  // TODO(gildekel): move CommitProperties() and PageFlip() to the public API
+  // once DrmWrapper and DrmDevice are completely decoupled. Consider changing
+  // the signature to `void* user_data` instead of |page_flip_id|, which is too
+  // specific.
+  bool CommitProperties(drmModeAtomicReq* properties,
+                        uint32_t flags,
+                        uint64_t page_flip_id);
+
+  bool PageFlip(uint32_t crtc_id, uint32_t framebuffer, uint64_t page_flip_id);
+
+  const int& GetFd() const { return drm_fd_.get(); }
+
+ private:
   // Path to the DRM device (in sysfs).
   const base::FilePath device_path_;
+
   // DRM device FD.
   base::ScopedFD drm_fd_;
 
+  // Whether or not DRM was successfully set to atomic during the initialization
+  // of this DRM device.
   bool is_atomic_ = false;
-  bool allow_addfb2_modifiers_ = false;
 
-  // Sequence ID incremented at each modeset.
-  // Currently used by DRM Framebuffer to indicate when was the fb initialized
-  // wrt the preceding modeset.
-  int modeset_sequence_id_ = 0;
-
- private:
   const bool is_primary_device_;
+
+  // DRM master for a device is initially acquired implicitly in Chrome by
+  // opening the device node when no one else is holding the master, not through
+  // set master ioctl.
+  bool has_master_ = true;
 };
 
 }  // namespace ui

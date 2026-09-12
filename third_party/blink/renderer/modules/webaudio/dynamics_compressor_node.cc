@@ -25,6 +25,7 @@
 
 #include "third_party/blink/renderer/modules/webaudio/dynamics_compressor_node.h"
 
+#include "third_party/blink/renderer/bindings/modules/v8/v8_automation_rate.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_dynamics_compressor_options.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node_input.h"
@@ -63,51 +64,52 @@ constexpr float kMaxReleaseValue = 1.0f;
 
 DynamicsCompressorNode::DynamicsCompressorNode(BaseAudioContext& context)
     : AudioNode(context),
-      threshold_(AudioParam::Create(
-          context,
-          Uuid(),
-          AudioParamHandler::kParamTypeDynamicsCompressorThreshold,
-          kDefaultThresholdValue,
-          AudioParamHandler::AutomationRate::kControl,
-          AudioParamHandler::AutomationRateMode::kFixed,
-          kMinThresholdValue,
-          kMaxThresholdValue)),
+      threshold_(
+          AudioParam::Create(context,
+                             Uuid(),
+                             AudioParamHandler::AudioParamType::
+                                 kParamTypeDynamicsCompressorThreshold,
+                             kDefaultThresholdValue,
+                             V8AutomationRate::Enum::kKRate,
+                             AudioParamHandler::AutomationRateMode::kFixed,
+                             kMinThresholdValue,
+                             kMaxThresholdValue)),
       knee_(AudioParam::Create(
           context,
           Uuid(),
-          AudioParamHandler::kParamTypeDynamicsCompressorKnee,
+          AudioParamHandler::AudioParamType::kParamTypeDynamicsCompressorKnee,
           kDefaultKneeValue,
-          AudioParamHandler::AutomationRate::kControl,
+          V8AutomationRate::Enum::kKRate,
           AudioParamHandler::AutomationRateMode::kFixed,
           kMinKneeValue,
           kMaxKneeValue)),
       ratio_(AudioParam::Create(
           context,
           Uuid(),
-          AudioParamHandler::kParamTypeDynamicsCompressorRatio,
+          AudioParamHandler::AudioParamType::kParamTypeDynamicsCompressorRatio,
           kDefaultRatioValue,
-          AudioParamHandler::AutomationRate::kControl,
+          V8AutomationRate::Enum::kKRate,
           AudioParamHandler::AutomationRateMode::kFixed,
           kMinRatioValue,
           kMaxRatioValue)),
       attack_(AudioParam::Create(
           context,
           Uuid(),
-          AudioParamHandler::kParamTypeDynamicsCompressorAttack,
+          AudioParamHandler::AudioParamType::kParamTypeDynamicsCompressorAttack,
           kDefaultAttackValue,
-          AudioParamHandler::AutomationRate::kControl,
+          V8AutomationRate::Enum::kKRate,
           AudioParamHandler::AutomationRateMode::kFixed,
           kMinAttackValue,
           kMaxAttackValue)),
-      release_(AudioParam::Create(
-          context,
-          Uuid(),
-          AudioParamHandler::kParamTypeDynamicsCompressorRelease,
-          kDefaultReleaseValue,
-          AudioParamHandler::AutomationRate::kControl,
-          AudioParamHandler::AutomationRateMode::kFixed,
-          kMinReleaseValue,
-          kMaxReleaseValue)) {
+      release_(AudioParam::Create(context,
+                                  Uuid(),
+                                  AudioParamHandler::AudioParamType::
+                                      kParamTypeDynamicsCompressorRelease,
+                                  kDefaultReleaseValue,
+                                  V8AutomationRate::Enum::kKRate,
+                                  AudioParamHandler::AutomationRateMode::kFixed,
+                                  kMinReleaseValue,
+                                  kMaxReleaseValue)) {
   SetHandler(DynamicsCompressorHandler::Create(
       *this, context.sampleRate(), threshold_->Handler(), knee_->Handler(),
       ratio_->Handler(), attack_->Handler(), release_->Handler()));
@@ -157,15 +159,15 @@ DynamicsCompressorNode::GetDynamicsCompressorHandler() const {
 }
 
 AudioParam* DynamicsCompressorNode::threshold() const {
-  return threshold_;
+  return threshold_.Get();
 }
 
 AudioParam* DynamicsCompressorNode::knee() const {
-  return knee_;
+  return knee_.Get();
 }
 
 AudioParam* DynamicsCompressorNode::ratio() const {
-  return ratio_;
+  return ratio_.Get();
 }
 
 float DynamicsCompressorNode::reduction() const {
@@ -173,11 +175,11 @@ float DynamicsCompressorNode::reduction() const {
 }
 
 AudioParam* DynamicsCompressorNode::attack() const {
-  return attack_;
+  return attack_.Get();
 }
 
 AudioParam* DynamicsCompressorNode::release() const {
-  return release_;
+  return release_.Get();
 }
 
 void DynamicsCompressorNode::ReportDidCreate() {

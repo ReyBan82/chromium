@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ui/webui/ash/login/auto_enrollment_check_screen_handler.h"
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "chrome/browser/ash/login/oobe_screen.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
@@ -13,6 +14,8 @@ namespace ash {
 AutoEnrollmentCheckScreenHandler::AutoEnrollmentCheckScreenHandler()
     : BaseScreenHandler(kScreenId) {}
 
+AutoEnrollmentCheckScreenHandler::~AutoEnrollmentCheckScreenHandler() = default;
+
 void AutoEnrollmentCheckScreenHandler::Show() {
   ShowInWebUI();
 }
@@ -21,6 +24,12 @@ void AutoEnrollmentCheckScreenHandler::DeclareLocalizedValues(
     ::login::LocalizedValuesBuilder* builder) {
   builder->Add("autoEnrollmentCheckMessage",
                IDS_AUTO_ENROLLMENT_CHECK_SCREEN_MESSAGE);
+  builder->Add("gettingDeviceReadyTitle", IDS_GETTING_DEVICE_READY);
+}
+
+base::WeakPtr<AutoEnrollmentCheckScreenView>
+AutoEnrollmentCheckScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace ash

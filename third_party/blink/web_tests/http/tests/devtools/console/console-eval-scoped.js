@@ -2,13 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
+import * as Console from 'devtools/panels/console/console.js';
+
 (async function() {
   'use strict';
   TestRunner.addResult(
     `Tests that evaluating 'console.log()' in the console will have access to its outer scope variables. Bug 60547.\n`
   );
 
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
 
   await TestRunner.evaluateInPagePromise(`
@@ -54,40 +58,49 @@
     return text.substring(begin);
   }
 
-  function dumpAndClearConsoleMessages(next) {
-    TestRunner.deprecatedRunAfterPendingDispatches(async function() {
-      await ConsoleTestRunner.dumpConsoleMessages();
-      Console.ConsoleView.clearConsole();
-      TestRunner.deprecatedRunAfterPendingDispatches(next);
-    });
+  async function dumpAndClearConsoleMessages(next) {
+    await ConsoleTestRunner.waitForPendingViewportUpdates();
+    await ConsoleTestRunner.dumpConsoleMessages();
+    Console.ConsoleView.ConsoleView.instance().clearConsole();
+    await ConsoleTestRunner.waitForPendingViewportUpdates();
+    next();
   }
 
   TestRunner.runTestSuite([
-    function testSnippet1(next) {
-      TestRunner.evaluateInPage(bodyText(snippet1), dumpAndClearConsoleMessages.bind(null, next));
+    async function testSnippet1(next) {
+      const messagesPromise =
+          ConsoleTestRunner.waitUntilNthMessageReceivedPromise(2);
+      await TestRunner.evaluateInPagePromise(bodyText(snippet1));
+      await messagesPromise;
+      await dumpAndClearConsoleMessages(next);
     },
 
-    function testSnippet2(next) {
-      TestRunner.evaluateInPage(bodyText(snippet2), dumpAndClearConsoleMessages.bind(null, next));
+    async function testSnippet2(next) {
+      const messagePromise =
+          ConsoleTestRunner.waitUntilMessageReceivedPromise();
+      await TestRunner.evaluateInPagePromise(bodyText(snippet2));
+      await messagePromise;
+      await dumpAndClearConsoleMessages(next);
     },
 
-    function testConsoleEvalPrimitiveValue(next) {
-      ConsoleTestRunner.evaluateInConsole('foo', dumpAndClearConsoleMessages.bind(null, next));
+    async function testConsoleEvalPrimitiveValue(next) {
+      await ConsoleTestRunner.evaluateInConsolePromise('foo');
+      await dumpAndClearConsoleMessages(next);
     },
 
     async function testConsoleEvalObject(next) {
-      var result = await TestRunner.RuntimeAgent.evaluate('testObj');
-      var properties = await TestRunner.RuntimeAgent.getProperties(result.objectId, /* isOwnProperty */ true);
+      var {result} = await TestRunner.RuntimeAgent.invoke_evaluate({expression: 'testObj'});
+      var {result: properties} =
+          await TestRunner.RuntimeAgent.invoke_getProperties({objectId: result.objectId, ownProperties: true});
       for (var p of properties)
-        TestRunner.dump(p, { objectId: 'formatAsTypeName', description: 'formatAsDescription' });
+        TestRunner.dump(p, {objectId: 'formatAsTypeName', description: 'formatAsDescription'});
       next();
     },
 
-    function testGetEventListenersDoesNotThrow(next) {
-      ConsoleTestRunner.evaluateInConsole(
-        'getEventListeners(document.body.firstChild)',
-        dumpAndClearConsoleMessages.bind(null, next)
-      );
+    async function testGetEventListenersDoesNotThrow(next) {
+      await ConsoleTestRunner.evaluateInConsolePromise(
+          'getEventListeners(document.body.firstChild)');
+      await dumpAndClearConsoleMessages(next);
     }
   ]);
 })();

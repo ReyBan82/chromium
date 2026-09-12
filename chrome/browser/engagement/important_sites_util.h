@@ -5,13 +5,14 @@
 #ifndef CHROME_BROWSER_ENGAGEMENT_IMPORTANT_SITES_UTIL_H_
 #define CHROME_BROWSER_ENGAGEMENT_IMPORTANT_SITES_UTIL_H_
 
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "build/build_config.h"
 #include "components/browsing_data/core/browsing_data_utils.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 class Profile;
@@ -44,13 +45,13 @@ class ImportantSitesUtil {
     double engagement_score = 0;
     int32_t reason_bitfield = 0;
     // Only set if the domain belongs to an installed app.
-    absl::optional<std::string> app_name;
+    std::optional<std::string> app_name;
   };
 
   // Do not change the values here, as they are used for UMA histograms.
   enum ImportantReason {
     ENGAGEMENT = 0,
-    DURABLE = 1,
+    PERSISTENT = 1,
     BOOKMARKS = 2,
     HOME_SCREEN = 3,
     NOTIFICATIONS = 4,
@@ -63,7 +64,7 @@ class ImportantSitesUtil {
 
   static std::string GetRegisterableDomainOrIP(const GURL& url);
 
-  static std::string GetRegisterableDomainOrIPFromHost(base::StringPiece host);
+  static std::string GetRegisterableDomainOrIPFromHost(std::string_view host);
 
   static bool IsDialogDisabled(Profile* profile);
 
@@ -90,9 +91,7 @@ class ImportantSitesUtil {
   static void RecordExcludedAndIgnoredImportantSites(
       Profile* profile,
       const std::vector<std::string>& excluded_sites,
-      const std::vector<int32_t>& excluded_sites_reason_bitfield,
-      const std::vector<std::string>& ignored_sites,
-      const std::vector<int32_t>& ignored_sites_reason_bitfield);
+      const std::vector<std::string>& ignored_sites);
 
   // This marks the given origin as important for testing. Note: This changes
   // the score requirements for the Site Engagement Service, so ONLY call for

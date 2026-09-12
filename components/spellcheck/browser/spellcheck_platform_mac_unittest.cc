@@ -25,9 +25,7 @@ class SpellcheckPlatformMacTest: public testing::Test {
                                  base::Unretained(this))),
         callback_finished_(false) {}
 
-  void WaitForCallback() {
-    content::RunMessageLoop();
-  }
+  void WaitForCallback() { loop_.Run(); }
 
   std::vector<SpellCheckResult> results_;
   spellcheck_platform::TextCheckCompleteCallback callback_;
@@ -37,7 +35,7 @@ class SpellcheckPlatformMacTest: public testing::Test {
   void QuitMessageLoop() {
     ASSERT_TRUE(
         task_environment_.GetMainThreadTaskRunner()->BelongsToCurrentThread());
-    base::RunLoop::QuitCurrentWhenIdleDeprecated();
+    loop_.Quit();
   }
 
   void CompletionCallback(const std::vector<SpellCheckResult>& results) {
@@ -51,6 +49,7 @@ class SpellcheckPlatformMacTest: public testing::Test {
   base::test::SingleThreadTaskEnvironment task_environment_{
       base::test::SingleThreadTaskEnvironment::MainThreadType::UI};
   spellcheck_platform::ScopedEnglishLanguageForTest scoped_language_;
+  base::RunLoop loop_;
 };
 
 // Tests that words are properly ignored. Currently only enabled on OS X as it
@@ -65,8 +64,8 @@ TEST_F(SpellcheckPlatformMacTest, IgnoreWords_EN_US) {
     "noooen",
   };
 
-  for (size_t i = 0; i < std::size(kTestCases); ++i) {
-    const std::u16string word(base::ASCIIToUTF16(kTestCases[i]));
+  for (const char* test_case : kTestCases) {
+    const std::u16string word(base::ASCIIToUTF16(test_case));
     const int doc_tag = spellcheck_platform::GetDocumentTag();
 
     // The word should show up as misspelled.
@@ -363,8 +362,8 @@ TEST_F(SpellcheckPlatformMacTest, SpellCheckSuggestions_EN_US) {
     {"writting", "writing"},
   };
 
-  for (size_t i = 0; i < std::size(kTestCases); ++i) {
-    const std::u16string word(base::ASCIIToUTF16(kTestCases[i].input));
+  for (const auto& test_case : kTestCases) {
+    const std::u16string word(base::ASCIIToUTF16(test_case.input));
     EXPECT_FALSE(spellcheck_platform::CheckSpelling(word, 0)) << word;
 
     // Check if the suggested words occur.
@@ -372,7 +371,7 @@ TEST_F(SpellcheckPlatformMacTest, SpellCheckSuggestions_EN_US) {
     spellcheck_platform::FillSuggestionList(word, &suggestions);
     bool suggested_word_is_present = false;
     const std::u16string suggested_word(
-        base::ASCIIToUTF16(kTestCases[i].suggested_word));
+        base::ASCIIToUTF16(test_case.suggested_word));
     for (size_t j = 0; j < suggestions.size(); j++) {
       if (suggestions[j].compare(suggested_word) == 0) {
         suggested_word_is_present = true;

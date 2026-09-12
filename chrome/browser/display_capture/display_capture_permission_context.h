@@ -5,10 +5,12 @@
 #ifndef CHROME_BROWSER_DISPLAY_CAPTURE_DISPLAY_CAPTURE_PERMISSION_CONTEXT_H_
 #define CHROME_BROWSER_DISPLAY_CAPTURE_DISPLAY_CAPTURE_PERMISSION_CONTEXT_H_
 
-#include "components/permissions/permission_context_base.h"
+#include "components/content_settings/core/common/content_settings.h"
+#include "components/permissions/content_setting_permission_context_base.h"
+#include "url/gurl.h"
 
 class DisplayCapturePermissionContext
-    : public permissions::PermissionContextBase {
+    : public permissions::ContentSettingPermissionContextBase {
  public:
   explicit DisplayCapturePermissionContext(
       content::BrowserContext* browser_context);
@@ -20,22 +22,21 @@ class DisplayCapturePermissionContext
       const DisplayCapturePermissionContext&) = delete;
 
  protected:
-  ContentSetting GetPermissionStatusInternal(
+  // PermissionContextBase
+  void DecidePermission(
+      std::unique_ptr<permissions::PermissionRequestData> request_data,
+      permissions::BrowserPermissionCallback callback) override;
+
+  // ContentSettingPermissionContextBase
+  ContentSetting GetContentSettingStatusInternal(
       content::RenderFrameHost* render_frame_host,
       const GURL& requesting_origin,
       const GURL& embedding_origin) const override;
 
-  void DecidePermission(
-      const permissions::PermissionRequestID& id,
-      const GURL& requesting_origin,
-      const GURL& embedding_origin,
-      bool user_gesture,
-      permissions::BrowserPermissionCallback callback) override;
-
-  void UpdateContentSetting(const GURL& requesting_origin,
-                            const GURL& embedding_origin,
-                            ContentSetting content_setting,
-                            bool is_one_time) override;
+  // PermissionContextBase
+  void UpdateSetting(const permissions::PermissionRequestData& request_data,
+                     const PermissionSetting& setting,
+                     bool is_one_time) override;
 };
 
 #endif  // CHROME_BROWSER_DISPLAY_CAPTURE_DISPLAY_CAPTURE_PERMISSION_CONTEXT_H_

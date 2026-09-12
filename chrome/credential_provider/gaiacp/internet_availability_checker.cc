@@ -7,7 +7,6 @@
 #include <netlistmgr.h>  // For CLSID_NetworkListManager
 #include <wrl/client.h>
 
-#include "base/win/atl.h"
 #include "chrome/credential_provider/gaiacp/gcp_utils.h"
 #include "chrome/credential_provider/gaiacp/logging.h"
 
@@ -46,6 +45,12 @@ bool InternetConnectionAvailable() {
 // static
 InternetAvailabilityChecker* InternetAvailabilityChecker::Get() {
   return *GetInstanceStorage();
+}
+
+// static
+void InternetAvailabilityChecker::SetInstanceForTesting(
+    InternetAvailabilityChecker* instance) {
+  *GetInstanceStorage() = instance;
 }
 
 // static

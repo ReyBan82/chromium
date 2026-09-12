@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 // clang-format off
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
-import {loadTimeData, Route, Router, SettingsRoutes} from 'chrome://settings/settings.js';
+import type {SettingsRoutes} from 'chrome://settings/settings.js';
+import {loadTimeData, Route, Router} from 'chrome://settings/settings.js';
 import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
-import {eventToPromise} from 'chrome://webui-test/test_util.js';
+import {eventToPromise, microtasksFinished} from 'chrome://webui-test/test_util.js';
 import {flushTasks} from 'chrome://webui-test/polymer_test_util.js';
 
 import {setupPopstateListener} from './test_util.js';
@@ -66,60 +66,64 @@ suite('SettingsSubpage', function() {
     return subpage;
   }
 
-  test('help icon', function() {
+  test('help icon', async function() {
     const subpage = document.createElement('settings-subpage');
     document.body.appendChild(subpage);
-    flush();
+    await microtasksFinished();
 
     // Check that the help icon only shows up when a |learnMoreUrl| is
     // specified.
-    assertFalse(
-        !!subpage.shadowRoot!.querySelector('[iron-icon="cr:help-outline"]'));
+    assertFalse(!!subpage.shadowRoot.querySelector(
+        'cr-icon-button[iron-icon="cr:help"]'));
     subpage.learnMoreUrl = 'https://www.chromium.org';
-    flush();
-    const icon = subpage.shadowRoot!.querySelector<HTMLElement>(
-        '[iron-icon="cr:help-outline"]');
-    assertTrue(!!icon);
+    await microtasksFinished();
+    const iconButton = subpage.shadowRoot.querySelector<HTMLElement>(
+        'cr-icon-button[iron-icon="cr:help"]');
+    assertTrue(!!iconButton);
     // Check that the icon is forced to always use 'ltr' mode.
-    assertEquals('ltr', icon!.getAttribute('dir'));
+    assertTrue(iconButton.hasAttribute('suppress-rtl-flip'));
     // Check that the icon has proper a11y label.
     subpage.pageTitle = 'Title';
-    flush();
+    await microtasksFinished();
     assertEquals(
-        subpage.i18n('subpageLearnMoreAriaLabel', subpage.pageTitle),
-        icon.ariaLabel);
+        iconButton.getAttribute('aria-label'),
+        loadTimeData.getStringF(
+            'subpageLearnMoreAriaLabel', subpage.pageTitle));
+    assertEquals(
+        iconButton.getAttribute('aria-description'),
+        loadTimeData.getString('opensInNewTab'));
   });
 
-  test('favicon', function() {
+  test('favicon', async function() {
     const subpage = document.createElement('settings-subpage');
     document.body.appendChild(subpage);
-    flush();
+    await microtasksFinished();
 
     // No favicon is shown when the URL is not given.
-    assertFalse(!!subpage.shadowRoot!.querySelector('site-favicon'));
+    assertFalse(!!subpage.shadowRoot.querySelector('site-favicon'));
 
     subpage.faviconSiteUrl = 'https://www.chromium.org';
-    flush();
+    await microtasksFinished();
 
     // Favicon is shown when the URL is specified.
-    const favicon = subpage.shadowRoot!.querySelector('site-favicon');
+    const favicon = subpage.shadowRoot.querySelector('site-favicon');
     assertTrue(!!favicon);
     assertEquals(subpage.faviconSiteUrl, favicon.url);
   });
 
-  test('clear search (event)', function() {
+  test('clear search (event)', async function() {
     const subpage = document.createElement('settings-subpage');
     // Having a searchLabel will create the cr-search-field.
     subpage.searchLabel = 'test';
     document.body.appendChild(subpage);
-    flush();
-    const search = subpage.shadowRoot!.querySelector('cr-search-field');
+    await microtasksFinished();
+    const search = subpage.shadowRoot.querySelector('cr-search-field');
     assertTrue(!!search);
-    search!.setValue('Hello');
+    search.setValue('Hello');
     subpage.dispatchEvent(new CustomEvent(
         'clear-subpage-search', {bubbles: true, composed: true}));
-    flush();
-    assertEquals('', search!.getValue());
+    await microtasksFinished();
+    assertEquals('', search.getValue());
   });
 
   test('clear search (click)', async () => {
@@ -127,28 +131,28 @@ suite('SettingsSubpage', function() {
     // Having a searchLabel will create the cr-search-field.
     subpage.searchLabel = 'test';
     document.body.appendChild(subpage);
-    flush();
-    const search = subpage.shadowRoot!.querySelector('cr-search-field');
+    await microtasksFinished();
+    const search = subpage.shadowRoot.querySelector('cr-search-field');
     assertTrue(!!search);
-    search!.setValue('Hello');
-    assertEquals(null, search!.shadowRoot!.activeElement);
-    search!.$.clearSearch.click();
+    search.setValue('Hello');
+    assertEquals(null, search.shadowRoot.activeElement);
+    search.$.clearSearch.click();
     await flushTasks();
-    assertEquals('', search!.getValue());
-    assertEquals(search!.$.searchInput, search!.shadowRoot!.activeElement);
+    assertEquals('', search.getValue());
+    assertEquals(search.$.searchInput, search.shadowRoot.activeElement);
   });
 
   test('preserve search result when back button is clicked', async () => {
     // Load settings subpage.
     Router.getInstance().navigateTo(testRoutes.SITE_DATA);
     let subpage = createSettingsSubpageWithPreserveSearchTerm();
-    flush();
+    await microtasksFinished();
 
     // Set search field.
-    let search = subpage.shadowRoot!.querySelector('cr-search-field');
+    let search = subpage.shadowRoot.querySelector('cr-search-field');
     assertTrue(!!search);
-    search!.setValue('test');
-    assertEquals('test', search!.getValue());
+    search.setValue('test');
+    assertEquals('test', search.getValue());
 
     // Navigate to another subpage.
     Router.getInstance().navigateTo(testRoutes.COOKIE_DETAILS);
@@ -158,17 +162,17 @@ suite('SettingsSubpage', function() {
     Router.getInstance().navigateToPreviousRoute();
     subpage = createSettingsSubpageWithPreserveSearchTerm();
     await eventToPromise('popstate', window);
-    search = subpage.shadowRoot!.querySelector('cr-search-field');
+    search = subpage.shadowRoot.querySelector('cr-search-field');
     assertTrue(!!search);
-    assertEquals('test', search!.getValue());
+    assertEquals('test', search.getValue());
 
     // Go back to settings subpage, verify search field is empty
     Router.getInstance().navigateToPreviousRoute();
     subpage = createSettingsSubpageWithPreserveSearchTerm();
     await eventToPromise('popstate', window);
-    search = subpage.shadowRoot!.querySelector('cr-search-field');
+    search = subpage.shadowRoot.querySelector('cr-search-field');
     assertTrue(!!search);
-    assertEquals('', search!.getValue());
+    assertEquals('', search.getValue());
   });
 
   test('preserve search result from URL input', async function() {
@@ -177,12 +181,12 @@ suite('SettingsSubpage', function() {
     Router.getInstance().navigateTo(testRoutes.SITE_DATA, params);
     const subpage = createSettingsSubpageWithPreserveSearchTerm();
     await flushTasks();
-    const search = subpage.shadowRoot!.querySelector('cr-search-field');
+    const search = subpage.shadowRoot.querySelector('cr-search-field');
     assertTrue(!!search);
-    assertEquals('test', search!.getValue());
+    assertEquals('test', search.getValue());
   });
 
-  test('navigates to parent when there is no history', function() {
+  test('navigates to parent when there is no history', async function() {
     // Pretend that we initially started on the CERTIFICATES route.
     window.history.replaceState(undefined, '', testRoutes.CERTIFICATES.path);
     Router.getInstance().initializeRouteFromUrl();
@@ -191,8 +195,9 @@ suite('SettingsSubpage', function() {
 
     const subpage = document.createElement('settings-subpage');
     document.body.appendChild(subpage);
+    await microtasksFinished();
 
-    subpage.shadowRoot!.querySelector('cr-icon-button')!.click();
+    subpage.shadowRoot.querySelector('cr-icon-button')!.click();
     assertEquals(testRoutes.PRIVACY, Router.getInstance().getCurrentRoute());
   });
 
@@ -203,40 +208,44 @@ suite('SettingsSubpage', function() {
 
     const subpage = document.createElement('settings-subpage');
     document.body.appendChild(subpage);
+    await microtasksFinished();
 
-    subpage.shadowRoot!.querySelector('cr-icon-button')!.click();
+    subpage.shadowRoot.querySelector('cr-icon-button')!.click();
 
     await eventToPromise('popstate', window);
     assertEquals(testRoutes.BASIC, Router.getInstance().getCurrentRoute());
   });
 
-  test('updates the title of the document when active', function() {
+  test('updates the title of the document when active', async function() {
     const expectedTitle = 'My Subpage Title';
     Router.getInstance().navigateTo(testRoutes.SEARCH);
     const subpage = document.createElement('settings-subpage');
     subpage.setAttribute('route-path', testRoutes.SEARCH_ENGINES.path);
     subpage.setAttribute('page-title', expectedTitle);
     document.body.appendChild(subpage);
+    await microtasksFinished();
 
     Router.getInstance().navigateTo(testRoutes.SEARCH_ENGINES);
+    await microtasksFinished();
     assertEquals(
-        document.title,
-        loadTimeData.getStringF('settingsAltPageTitle', expectedTitle));
+        loadTimeData.getStringF('settingsAltPageTitle', expectedTitle),
+        document.title);
   });
 });
 
 suite('SettingsSubpageSearch', function() {
-  test('host autofocus propagates to <cr-input>', function() {
+  test('host autofocus propagates to <cr-input>', async function() {
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
     const element = document.createElement('cr-search-field');
     element.toggleAttribute('autofocus', true);
     document.body.appendChild(element);
 
-    assertTrue(element.shadowRoot!.querySelector('cr-input')!.hasAttribute(
+    assertTrue(element.shadowRoot.querySelector('cr-input')!.hasAttribute(
         'autofocus'));
 
     element.removeAttribute('autofocus');
-    assertFalse(element.shadowRoot!.querySelector('cr-input')!.hasAttribute(
+    await element.updateComplete;
+    assertFalse(element.shadowRoot.querySelector('cr-input')!.hasAttribute(
         'autofocus'));
   });
 });

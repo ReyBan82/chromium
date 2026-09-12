@@ -32,9 +32,17 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_PLUGIN_H_
 #define THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_PLUGIN_H_
 
+#include <optional>
+#include <vector>
+
+#include "base/containers/span.h"
+#include "base/i18n/rtl.h"
 #include "cc/paint/paint_canvas.h"
+#include "components/viz/common/surfaces/frame_sink_id.h"
 #include "third_party/blink/public/common/page/drag_operation.h"
+#include "third_party/blink/public/mojom/annotation/annotation.mojom-shared.h"
 #include "third_party/blink/public/mojom/input/focus_type.mojom-shared.h"
+#include "third_party/blink/public/platform/cross_variant_mojo_util.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/public/web/web_drag_status.h"
@@ -61,8 +69,6 @@ class WebURLResponse;
 struct WebPrintParams;
 struct WebPrintPresetOptions;
 struct WebURLError;
-template <typename T>
-class WebVector;
 
 class WebPlugin {
  public:
@@ -113,6 +119,10 @@ class WebPlugin {
   virtual void UpdateAllLifecyclePhases(blink::DocumentUpdateReason) = 0;
   virtual void Paint(cc::PaintCanvas*, const gfx::Rect&) = 0;
 
+  // If this plugin uses cc::SurfaceLayer for painting, returns the FrameSinkId
+  // used by that Layer. Otherwise, returns an empty FrameSinkId.
+  virtual viz::FrameSinkId GetFrameSinkId() { return viz::FrameSinkId(); }
+
   // Coordinates are relative to the containing window.
   virtual void UpdateGeometry(const gfx::Rect& window_rect,
                               const gfx::Rect& clip_rect,
@@ -122,6 +132,10 @@ class WebPlugin {
   virtual void UpdateFocus(bool focused, mojom::FocusType) = 0;
 
   virtual void UpdateVisibility(bool) = 0;
+
+  virtual void UpdateRenderThrottlingStatus(bool is_throttled,
+                                            bool subtree_throttled,
+                                            bool display_locked) {}
 
   virtual WebInputEventResult HandleInputEvent(const WebCoalescedInputEvent&,
                                                ui::Cursor*) = 0;
@@ -135,7 +149,7 @@ class WebPlugin {
   }
 
   virtual void DidReceiveResponse(const WebURLResponse&) = 0;
-  virtual void DidReceiveData(const char* data, size_t data_length) = 0;
+  virtual void DidReceiveData(base::span<const char> data) = 0;
   virtual void DidFinishLoading() = 0;
   virtual void DidFailLoading(const WebURLError&) = 0;
 
@@ -155,9 +169,9 @@ class WebPlugin {
   // A returned value of 0 indicates failure.
   virtual int PrintBegin(const WebPrintParams& print_params) { return 0; }
 
-  // Prints the page specified by `page_number`, using the parameters passed to
+  // Prints the page specified by `page_index`, using the parameters passed to
   // `PrintBegin()`, into `canvas`.
-  virtual void PrintPage(int page_number, cc::PaintCanvas* canvas) {}
+  virtual void PrintPage(int page_index, cc::PaintCanvas* canvas) {}
 
   // Ends the print session. Further calls to `PrintPages()` will fail.
   virtual void PrintEnd() {}
@@ -173,6 +187,14 @@ class WebPlugin {
   virtual bool CanRedo() const { return false; }
   virtual bool CanCopy() const { return true; }
 
+  // Returns the text direction of the focused text input or editing area in
+  // the plugin. Returns `std::nullopt` if there is no focused text area, or
+  // if the plugin does not support text direction.
+  virtual std::optional<base::i18n::TextDirection> GetFocusedFormTextDirection()
+      const {
+    return std::nullopt;
+  }
+
   virtual bool ExecuteEditCommand(const WebString& name,
                                   const WebString& value) {
     return false;
@@ -181,11 +203,12 @@ class WebPlugin {
   // Sets composition text from input method, and returns true if the
   // composition is set successfully. If |replacementRange| is not null, the
   // text inside |replacementRange| will be replaced by |text|
-  virtual bool SetComposition(const WebString& text,
-                              const WebVector<ui::ImeTextSpan>& ime_text_spans,
-                              const WebRange& replacement_range,
-                              int selection_start,
-                              int selection_end) {
+  virtual bool SetComposition(
+      const WebString& text,
+      const std::vector<ui::ImeTextSpan>& ime_text_spans,
+      const WebRange& replacement_range,
+      int selection_start,
+      int selection_end) {
     return false;
   }
 
@@ -193,7 +216,7 @@ class WebPlugin {
   // moves the caret according to relativeCaretPosition. If |replacementRange|
   // is not null, the text inside |replacementRange| will be replaced by |text|.
   virtual bool CommitText(const WebString& text,
-                          const WebVector<ui::ImeTextSpan>& ime_text_spans,
+                          const std::vector<ui::ImeTextSpan>& ime_text_spans,
                           const WebRange& replacement_range,
                           int relative_caret_position) {
     return false;
@@ -247,10 +270,6 @@ class WebPlugin {
   virtual bool CanRotateView() { return false; }
   // Rotates the plugin's view of its content.
   virtual void RotateView(RotationType type) {}
-  // Check whether a plugin can be interacted with. A positive return value
-  // means the plugin has not loaded and hence cannot be interacted with.
-  // The plugin could, however, load successfully later.
-  virtual bool IsPlaceholder() { return true; }
   // Check whether a plugin failed to load, with there being no possibility of
   // it loading later.
   virtual bool IsErrorPlaceholder() { return false; }
@@ -294,6 +313,15 @@ class WebPlugin {
 
   // Indicate composition is complete to plugin.
   virtual void ImeFinishComposingTextForPlugin(bool keep_selection) {}
+
+  // Returns if this plugin supports Blink's annotation. See annotation.mojom.
+  virtual bool SupportsAnnotation() const { return false; }
+
+  // Binds the pending receiver of the `AnnotationAgentContainer`. No-op if
+  // `SupportsAnnotation()` is false.
+  virtual void BindAnnotationAgentContainer(
+      CrossVariantMojoReceiver<mojom::AnnotationAgentContainerInterfaceBase>
+          pending_receiver) {}
 
  protected:
   virtual ~WebPlugin() = default;

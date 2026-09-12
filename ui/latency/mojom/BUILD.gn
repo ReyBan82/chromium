@@ -19,6 +19,7 @@ component("shared_mojom_traits") {
 }
 
 mojom("mojom") {
+  generate_blink = true
   generate_java = true
   sources = [ "latency_info.mojom" ]
 
@@ -44,12 +45,15 @@ mojom("mojom") {
     },
   ]
   blink_cpp_typemaps = cpp_typemaps
+
+  # Generate WebUI bindings in TypeScript and legacy bindings in JS (for Blink)
   webui_module_path = "chrome://resources/mojo/ui/latency/mojom"
+  generate_legacy_js_bindings = true
 }
 
 mojom("test_interfaces") {
   testonly = true
-  sources = [ "traits_test_service.mojom" ]
+  sources = [ "traits_test_service.test-mojom" ]
 
   public_deps = [ ":mojom" ]
 }

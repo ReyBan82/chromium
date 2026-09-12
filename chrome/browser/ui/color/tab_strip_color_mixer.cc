@@ -17,7 +17,9 @@
 #include "ui/gfx/color_utils.h"
 
 void AddTabStripColorMixer(ui::ColorProvider* provider,
-                           const ui::ColorProviderManager::Key& key) {
+                           const ui::ColorProviderKey& key) {
+  const bool dark_mode =
+      key.color_mode == ui::ColorProviderKey::ColorMode::kDark;
   using TP = ThemeProperties;
   struct ColorPropertiesMapEntry {
     int property_id;
@@ -131,27 +133,89 @@ void AddTabStripColorMixer(ui::ColorProvider* provider,
     }
   }
 
-  /* WebUI Tab Strip colors. */
-  // TODO(https://crbug.com/1060398): Update the tab strip color to respond
-  // appopriately to activation changes.
-  mixer[kColorWebUiTabStripBackground] = {ui::kColorFrameActive};
-  mixer[kColorWebUiTabStripFocusOutline] = {ui::kColorFocusableBorderFocused};
-  mixer[kColorWebUiTabStripIndicatorRecording] = {ui::kColorAlertHighSeverity};
-  mixer[kColorWebUiTabStripIndicatorPip] = {kColorTabThrobber};
-  mixer[kColorWebUiTabStripIndicatorCapturing] = {kColorTabThrobber};
-  mixer[kColorWebUiTabStripScrollbarThumb] =
-      ui::SetAlpha(ui::GetColorWithMaxContrast(ui::kColorFrameActive),
-                   /* 70% opacity */ 0.7 * 255);
-  mixer[kColorWebUiTabStripTabActiveTitleBackground] = {
-      kColorThumbnailTabBackground};
-  mixer[kColorWebUiTabStripTabActiveTitleContent] = {
-      kColorThumbnailTabForeground};
-  mixer[kColorWebUiTabStripTabBackground] = {kColorToolbar};
-  mixer[kColorWebUiTabStripTabBlocked] = {ui::kColorButtonBackgroundProminent};
-  mixer[kColorWebUiTabStripTabLoadingSpinning] = {kColorTabThrobber};
-  mixer[kColorWebUiTabStripTabSeparator] =
-      ui::SetAlpha(kColorTabForegroundActiveFrameActive,
-                   /* 16% opacity */ 0.16 * 255);
-  mixer[kColorWebUiTabStripTabText] = {kColorTabForegroundActiveFrameActive};
-  mixer[kColorWebUiTabStripTabWaitingSpinning] = {kColorTabThrobberPreconnect};
+  // Fallbacks for ChromeRefresh2023, these colors dont exist in the
+  // GM2TabStyleViews version of the tabstrip. They approximately replicate GM2
+  // behavior. The main difference is that the tab hover color in GM2 depends on
+  // the tab width - narrower tabs have more opacity. We must chooses a single
+  // opacity, so we go with one towards the more opaque end of the GM2 range.
+  mixer[kColorTabBackgroundInactiveHoverFrameActive] = {
+      ui::AlphaBlend(kColorTabBackgroundActiveFrameActive,
+                     kColorTabBackgroundInactiveFrameActive,
+                     /* 40% opacity */ 0.4 * SK_AlphaOPAQUE)};
+  mixer[kColorTabBackgroundInactiveHoverFrameInactive] = {
+      ui::AlphaBlend(kColorTabBackgroundActiveFrameInactive,
+                     kColorTabBackgroundInactiveFrameInactive,
+                     /* 40% opacity */ 0.4 * SK_AlphaOPAQUE)};
+  mixer[kColorTabBackgroundSelectedFrameActive] = {
+      ui::AlphaBlend(kColorTabBackgroundActiveFrameActive,
+                     kColorTabBackgroundInactiveFrameActive,
+                     /* 75% opacity */ 0.75 * SK_AlphaOPAQUE)};
+  mixer[kColorTabBackgroundSelectedFrameInactive] = {
+      ui::AlphaBlend(kColorTabBackgroundActiveFrameInactive,
+                     kColorTabBackgroundInactiveFrameInactive,
+                     /* 75% opacity */ 0.75 * SK_AlphaOPAQUE)};
+  mixer[kColorTabBackgroundSelectedHoverFrameActive] = {
+      ui::AlphaBlend(kColorTabBackgroundActiveFrameActive,
+                     kColorTabBackgroundInactiveFrameActive,
+                     /* 85% opacity */ 0.85 * SK_AlphaOPAQUE)};
+  mixer[kColorTabBackgroundSelectedHoverFrameInactive] = {
+      ui::AlphaBlend(kColorTabBackgroundActiveFrameInactive,
+                     kColorTabBackgroundInactiveFrameInactive,
+                     /* 85% opacity */ 0.85 * SK_AlphaOPAQUE)};
+
+  mixer[kColorTabDividerFrameActive] = {kColorToolbar};
+  mixer[kColorTabDividerFrameInactive] = {kColorToolbar};
+
+#if !BUILDFLAG(IS_ANDROID)
+  mixer[kColorTabDiscardRingFrameActive] = ui::BlendForMinContrastWithSelf(
+      kColorTabBackgroundInactiveFrameActive,
+      color_utils::kMinimumVisibleContrastRatio);
+  mixer[kColorTabDiscardRingFrameInactive] = ui::BlendForMinContrastWithSelf(
+      kColorTabBackgroundInactiveFrameInactive,
+      color_utils::kMinimumVisibleContrastRatio);
+#endif
+
+  mixer[kColorNewTabButtonForegroundFrameActive] = {
+      kColorTabForegroundActiveFrameActive};
+  mixer[kColorNewTabButtonForegroundFrameInactive] = {
+      kColorTabForegroundActiveFrameInactive};
+  mixer[kColorNewTabButtonBackgroundFrameActive] = {
+      kColorTabBackgroundInactiveFrameActive};
+  mixer[kColorNewTabButtonBackgroundFrameInactive] = {
+      kColorTabBackgroundInactiveFrameInactive};
+  mixer[kColorNewTabButtonFocusRing] = ui::PickGoogleColorTwoBackgrounds(
+      ui::kColorFocusableBorderFocused,
+      ui::GetResultingPaintColor(kColorNewTabButtonBackgroundFrameActive,
+                                 ui::kColorFrameActive),
+      ui::kColorFrameActive, color_utils::kMinimumVisibleContrastRatio);
+  mixer[kColorNewTabButtonInkDropFrameActive] =
+      ui::GetColorWithMaxContrast(kColorNewTabButtonBackgroundFrameActive);
+  mixer[kColorNewTabButtonInkDropFrameInactive] =
+      ui::GetColorWithMaxContrast(kColorNewTabButtonBackgroundFrameInactive);
+
+  // TODO (crbug.com/40883407): consolidate the new tab button color ids once
+  // the refresh flag is enabled by default.
+  mixer[kColorNewTabButtonCRForegroundFrameActive] = {
+      kColorTabForegroundInactiveFrameActive};
+  mixer[kColorNewTabButtonCRForegroundFrameInactive] = {
+      kColorToolbarButtonIconInactive};
+  mixer[kColorNewTabButtonCRBackgroundFrameActive] = {
+      kColorTabBackgroundInactiveFrameActive};
+  mixer[kColorNewTabButtonCRBackgroundFrameInactive] = {
+      kColorTabBackgroundInactiveFrameInactive};
+  mixer[kColorTabSearchButtonCRForegroundFrameActive] = {
+      kColorNewTabButtonCRForegroundFrameActive};
+  mixer[kColorTabSearchButtonCRForegroundFrameInactive] = {
+      kColorNewTabButtonCRForegroundFrameInactive};
+  mixer[kColorTabStripComboButtonSeparator] = {ui::kColorSeparator};
+  mixer[kColorTabStripControlButtonInkDrop] = ui::SetAlpha(
+      kColorNewTabButtonInkDropFrameActive, std::ceil(0.16f * 255.0f));
+  mixer[kColorTabStripControlButtonInkDropRipple] = ui::SetAlpha(
+      kColorNewTabButtonInkDropFrameActive, std::ceil(0.14f * 255.0f));
+
+  /* Vertical Tab Strip colors. */
+  mixer[kColorVerticalTabStripShadow] =
+      SetAlpha(ui::kColorSysNeutralOutline, std::ceil(0.60f * 255.0f));
+  mixer[kColorVerticalTabPinnedOutline] = {
+      dark_mode ? kColorVerticalTabStripShadow : kColorTabDividerFrameActive};
 }

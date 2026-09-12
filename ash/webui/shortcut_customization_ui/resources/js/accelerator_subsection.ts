@@ -4,14 +4,17 @@
 
 import './accelerator_row.js';
 
-import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
-import {DomRepeat, PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {DomRepeat} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {AcceleratorLookupManager} from './accelerator_lookup_manager.js';
 import {getTemplate} from './accelerator_subsection.html.js';
-import {AcceleratorCategory, AcceleratorInfo, AcceleratorState, AcceleratorSubcategory, AcceleratorType, LayoutInfo} from './shortcut_types.js';
-import {getSubcategoryNameStringId} from './shortcut_utils.js';
+import type {AcceleratorCategory, AcceleratorInfo, AcceleratorSubcategory, LayoutInfo} from './shortcut_types.js';
+import {AcceleratorState, AcceleratorType} from './shortcut_types.js';
+import {compareAcceleratorInfos, getSubcategoryNameStringId, isCustomizationAllowed} from './shortcut_utils.js';
 
 /**
  * This interface is used to hold all the data needed by an
@@ -58,31 +61,21 @@ export class AcceleratorSubsectionElement extends
         observer: AcceleratorSubsectionElement.prototype.onCategoryUpdated,
       },
 
-      /**
-       * TODO(jimmyxgong): Fetch the shortcuts and it accelerators with the
-       * mojom::source_id and mojom::subsection_id. This serves as a
-       * temporary way to populate a subsection.
-       */
-      acceleratorContainer: {
+      accelRowDataArray: {
         type: Array,
-        value: [],
-      },
+        value: () => [],
+      }
     };
   }
 
-  override title: string;
-  category: AcceleratorCategory;
-  subcategory: AcceleratorSubcategory;
-  accelRowDataArray: AcceleratorRowData[];
+  declare title: string;
+  declare category: AcceleratorCategory;
+  declare subcategory: AcceleratorSubcategory;
+  declare accelRowDataArray: AcceleratorRowData[];
   private lookupManager: AcceleratorLookupManager =
       AcceleratorLookupManager.getInstance();
 
   updateSubsection(): void {
-    // Force the rendered list to reset, Polymer's dom-repeat does not perform
-    // a deep check on objects so it won't detect changes to same size length
-    // array of objects.
-    this.set('acceleratorContainer', []);
-    this.$.list.render();
     this.onCategoryUpdated();
   }
 
@@ -104,19 +97,27 @@ export class AcceleratorSubsectionElement extends
     // individual subsections. An atomic replacement makes ensures each
     // subsection's accelerators are kept distinct from each other.
     const tempAccelRowData: AcceleratorRowData[] = [];
-    layoutInfos!.forEach((layoutInfo) => {
-      if (this.lookupManager.isStandardAccelerator(
-              layoutInfo.source, layoutInfo.action)) {
-        const acceleratorInfos = this.lookupManager.getStandardAcceleratorInfos(
-            layoutInfo.source, layoutInfo.action);
-        acceleratorInfos.filter((accel) => {
-          // Hide accelerators that are default and disabled.
-          // TODO(michaelcheco): Confirm that this is the intended
-          // behavior for accelerators that are default and disabled.
-          return !(
-              accel.type === AcceleratorType.kDefault &&
-              accel.state === AcceleratorState.kDisabledByUser);
-        });
+    layoutInfos.forEach((layoutInfo) => {
+      if (this.lookupManager.isStandardAccelerator(layoutInfo.style)) {
+        const acceleratorInfos =
+            this.lookupManager
+                .getStandardAcceleratorInfos(
+                    layoutInfo.source, layoutInfo.action)
+                .filter((accel) => {
+                  // Hide accelerators that are default and disabled because the
+                  // necessary keys aren't available on the keyboard.
+                  return !(
+                      accel.type === AcceleratorType.kDefault &&
+                      (accel.state === AcceleratorState.kDisabledByUser ||
+                       accel.state ===
+                           AcceleratorState.kDisabledByUnavailableKeys));
+                });
+        // Do not hide empty accelerator rows if customization is enabled.
+        if (!isCustomizationAllowed()) {
+          if (acceleratorInfos.length === 0) {
+            return;
+          }
+        }
         const accelRowData: AcceleratorRowData = {
           layoutInfo,
           acceleratorInfos,
@@ -133,8 +134,41 @@ export class AcceleratorSubsectionElement extends
     this.accelRowDataArray = tempAccelRowData;
   }
 
+  // Sorts the accelerators so that they are displayed based off of a heuristic.
+  protected getSortedAccelerators(accelerators: AcceleratorInfo[]):
+      AcceleratorInfo[] {
+    return accelerators.sort(compareAcceleratorInfos);
+  }
+
   static get template(): HTMLTemplateElement {
     return getTemplate();
+  }
+
+  // Show lock icon next to subcategory if customization is enabled and the
+  // category is locked.
+  private shouldShowLockIcon(): boolean {
+    if (!isCustomizationAllowed()) {
+      return false;
+    }
+    return this.lookupManager.isSubcategoryLocked(this.subcategory);
+  }
+
+  // Normalize the description by converting it to lowercase and removing
+  // special characters.
+  accelDescriptionToId(description: string): string {
+    assert(description.trim() !== '');
+    const normalizedDescription =
+        description.toLowerCase()
+            .replace(/[^a-z0-9 /]/g, '')  // Keep slashes for now
+            .replace(/\//g, '-');         // Replace slashes with hyphens
+
+    // Split the description into individual words using the spaces as
+    // delimiters.
+    const tokens = normalizedDescription.split(' ');
+
+    const id = tokens.join('-');
+
+    return id;
   }
 }
 

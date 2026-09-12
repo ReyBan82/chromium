@@ -6,7 +6,7 @@
 
 #include "base/command_line.h"
 #include "base/functional/callback.h"
-#include "base/notreached.h"
+#include "base/notimplemented.h"
 #include "components/spellcheck/common/spellcheck_features.h"
 
 class PlatformSpellChecker;
@@ -77,6 +77,11 @@ void AddWord(PlatformSpellChecker* spell_checker_instance,
 
 void RemoveWord(PlatformSpellChecker* spell_checker_instance,
                 const std::u16string& word) {}
+
+bool IsUserAddedWord(PlatformSpellChecker* spell_checker_instance,
+                     const std::u16string& word) {
+  return false;
+}
 
 int GetDocumentTag() {
   return 1;

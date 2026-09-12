@@ -46,17 +46,6 @@ NOTE: Expected to run under a native win32 python, NOT cygwin.  All paths are
 dealt with as win32 paths, since we have to interact with the Microsoft tools.
 """
 
-from __future__ import print_function
-
-try:
-  # Python 3.x
-  from urllib.parse import urlparse
-  # Replace the Python 2 unicode function with str when running Python 3.
-  unicode = str
-except ImportError:
-  # Python 2.x
-  from urlparse import urlparse
-
 import optparse
 import os
 import re
@@ -67,6 +56,7 @@ import time
 import win32api
 
 from collections import namedtuple
+from urllib.parse import urlparse
 
 # Map that associates Git repository URLs with the URL that should be used to
 # retrieve individual files from this repo. Entries in this map should have the
@@ -102,9 +92,12 @@ REPO_MAP = {}
 # for a leading '\??\' on the junction target:
 #
 #   07/23/2015  06:42 PM <JUNCTION>     b [\??\C:\real_a\b]
-_DIR_JUNCTION_RE = re.compile(r"""
+_DIR_JUNCTION_RE = re.compile(
+  r"""
     .*<JUNCTION\>\s+(?P<dirname>[^ ]+)\s+\[(\\\?\?\\)?(?P<real_path>.*)\]
-""", re.VERBOSE)
+""",
+  re.VERBOSE,
+)
 
 
 # A named tuple used to store the information about a repository.
@@ -116,13 +109,14 @@ _DIR_JUNCTION_RE = re.compile(r"""
 #     - root_path: The root path of this checkout.
 #     - path_prefix: A prefix to apply to the filename of the files coming from
 #         this repository.
-RevisionInfo = namedtuple('RevisionInfo',
-                          ['repo', 'rev', 'files', 'root_path', 'path_prefix'])
+RevisionInfo = namedtuple(
+  'RevisionInfo', ['repo', 'rev', 'files', 'root_path', 'path_prefix']
+)
 
 
 def GetCasedFilePath(filename):
   """Return the correctly cased path for a given filename"""
-  return win32api.GetLongPathName(win32api.GetShortPathName(unicode(filename)))
+  return win32api.GetLongPathName(win32api.GetShortPathName(str(filename)))
 
 
 def FindSrcSrvFile(filename, toolchain_dir):
@@ -131,12 +125,14 @@ def FindSrcSrvFile(filename, toolchain_dir):
   If |toolchain_dir| is null then this will assume that the file is in this
   script's directory.
   """
-  bin_dir = os.path.join(toolchain_dir, 'Windows Kits', '10', 'Debuggers',
-                         'x64', 'srcsrv')
+  bin_dir = os.path.join(
+    toolchain_dir, 'Windows Kits', '10', 'Debuggers', 'x64', 'srcsrv'
+  )
   if not os.path.exists(bin_dir):
-    bin_dir = os.path.join(toolchain_dir, 'win_sdk', 'Debuggers', 'x64',
-                           'srcsrv')
-  assert(os.path.exists(bin_dir))
+    bin_dir = os.path.join(
+      toolchain_dir, 'win_sdk', 'Debuggers', 'x64', 'srcsrv'
+    )
+  assert os.path.exists(bin_dir)
   return os.path.abspath(os.path.join(bin_dir, filename))
 
 
@@ -153,6 +149,7 @@ def RunCommand(*cmd, **kwargs):
   kwargs.setdefault('stdout', subprocess.PIPE)
   kwargs.setdefault('stderr', subprocess.PIPE)
   kwargs.setdefault('universal_newlines', True)
+  kwargs.setdefault('encoding', 'utf-8')
   raise_on_failure = kwargs.pop('raise_on_failure', True)
 
   proc = subprocess.Popen(cmd, **kwargs)
@@ -172,32 +169,45 @@ def ExtractSourceFiles(pdb_filename, toolchain_dir):
 
   # Don't use |RunCommand| as it expect the return code to be 0 on success but
   # srctool returns the number of files instead.
-  srctool = subprocess.Popen([FindSrcSrvFile('srctool.exe', toolchain_dir),
-                              '-r', pdb_filename],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                             universal_newlines=True)
+  srctool = subprocess.Popen(
+    [FindSrcSrvFile('srctool.exe', toolchain_dir), '-r', pdb_filename],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    universal_newlines=True,
+  )
   src_files, _ = srctool.communicate()
 
-  if (not src_files or src_files.startswith("srctool: ") or
-      srctool.returncode <= 0):
+  if (
+    not src_files
+    or src_files.startswith("srctool: ")
+    or srctool.returncode <= 0
+  ):
     raise Exception("srctool failed: " + src_files)
   return set(
-      x.rstrip('\n').lower() for x in src_files.split('\n') if len(x) != 0)
+    x.rstrip('\n').lower() for x in src_files.split('\n') if len(x) != 0
+  )
 
 
 def ReadSourceStream(pdb_filename, toolchain_dir):
   """Read the contents of the source information stream from a PDB."""
-  pdbstr = subprocess.Popen([FindSrcSrvFile('pdbstr.exe', toolchain_dir),
-                              '-r', '-s:srcsrv',
-                              '-p:%s' % pdb_filename],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  pdbstr = subprocess.Popen(
+    [
+      FindSrcSrvFile('pdbstr.exe', toolchain_dir),
+      '-r',
+      '-s:srcsrv',
+      '-p:%s' % pdb_filename,
+    ],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+  )
   data, _ = pdbstr.communicate()
   data = data.decode('utf-8')
 
   # Old version of pdbstr.exe return -1 when the source requested stream is
   # missing, while more recent ones return 1, use |abs| to workaround this.
-  if (((pdbstr.returncode != 0 and abs(pdbstr.returncode) != 1) or
-      data.startswith("pdbstr: "))):
+  if (
+    pdbstr.returncode != 0 and abs(pdbstr.returncode) != 1
+  ) or data.startswith("pdbstr: "):
     raise Exception("pdbstr failed: " + data)
   return data
 
@@ -210,16 +220,23 @@ def WriteSourceStream(pdb_filename, data, toolchain_dir):
   f.write(data.encode('utf-8'))
   f.close()
 
-  srctool = subprocess.Popen([FindSrcSrvFile('pdbstr.exe', toolchain_dir),
-                              '-w', '-s:srcsrv',
-                              '-i:%s' % fname,
-                              '-p:%s' % pdb_filename],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+  srctool = subprocess.Popen(
+    [
+      FindSrcSrvFile('pdbstr.exe', toolchain_dir),
+      '-w',
+      '-s:srcsrv',
+      '-i:%s' % fname,
+      '-p:%s' % pdb_filename,
+    ],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+  )
   data, _ = srctool.communicate()
   data = data.decode('utf-8')
 
-  if ((srctool.returncode != 0 and srctool.returncode != -1) or
-      data.startswith("pdbstr: ")):
+  if (srctool.returncode != 0 and srctool.returncode != -1) or data.startswith(
+    "pdbstr: "
+  ):
     raise Exception("pdbstr failed: " + data)
 
   os.unlink(fname)
@@ -248,30 +265,53 @@ def ExtractGitInfo(local_filename):
   local_filename = GetCasedFilePath(local_filename)
   local_file_basename = os.path.basename(local_filename)
   local_file_dir = os.path.dirname(local_filename)
-  file_info = RunCommand('git.bat', 'log', '-n', '1', local_file_basename,
-                          cwd=local_file_dir, raise_on_failure=False)
+  file_info = RunCommand(
+    'git.bat',
+    'log',
+    '-n',
+    '1',
+    local_file_basename,
+    cwd=local_file_dir,
+    raise_on_failure=False,
+  )
 
   if not file_info:
+    # If this message is being printed then it may be necessary to add a new
+    # entry to tools/symsrc/indexing-exclusions.txt to prevent the expensive
+    # calls from happening.
+    print(
+      'No results from running git log %s in %s. This can be expensive.'
+      % (local_file_basename, local_file_dir)
+    )
     return
 
   # Get the revision of the master branch.
   rev = RunCommand('git.bat', 'rev-parse', 'HEAD', cwd=local_file_dir)
 
   # Get the url of the remote repository.
-  repo = RunCommand('git.bat', 'config', '--get', 'remote.origin.url',
-      cwd=local_file_dir)
+  repo = RunCommand(
+    'git.bat', 'config', '--get', 'remote.origin.url', cwd=local_file_dir
+  )
   # If the repository point to a local directory then we need to run this
   # command one more time from this directory to get the repository url.
   if os.path.isdir(repo):
-    repo = RunCommand('git.bat', 'config', '--get', 'remote.origin.url',
-        cwd=repo)
+    repo = RunCommand(
+      'git.bat', 'config', '--get', 'remote.origin.url', cwd=repo
+    )
 
   # Don't use the authenticated path.
   repo = repo.replace('googlesource.com/a/', 'googlesource.com/')
 
   # Get the relative file path for this file in the git repository.
-  git_path = RunCommand('git.bat', 'ls-tree', '--full-name', '--name-only',
-      'HEAD', local_file_basename, cwd=local_file_dir).replace('/','\\')
+  git_path = RunCommand(
+    'git.bat',
+    'ls-tree',
+    '--full-name',
+    '--name-only',
+    'HEAD',
+    local_file_basename,
+    cwd=local_file_dir,
+  ).replace('/', '\\')
 
   if not git_path:
     return
@@ -285,25 +325,35 @@ def ExtractGitInfo(local_filename):
       # The files from these repositories are accessible via gitiles in a
       # base64 encoded format.
       REPO_MAP[repo] = {
-          'url': '%s/+/{revision}/{file_path}?format=TEXT' % repo,
-          'base64': True
+        'url': '%s/+/{revision}/{file_path}?format=TEXT' % repo,
+        'base64': True,
       }
     elif urlparse(repo).netloc.endswith('github.com'):
       raw_url = '%s/{revision}/{file_path}' % repo.replace('.git', '').replace(
-          'github.com', 'raw.githubusercontent.com')
-      REPO_MAP[repo] = {
-          'url': raw_url,
-          'base64': False
-      }
+        'github.com', 'raw.githubusercontent.com'
+      )
+      REPO_MAP[repo] = {'url': raw_url, 'base64': False}
 
   # Get the list of files coming from this repository.
-  git_file_list = RunCommand('git.bat', 'ls-tree', '--full-name', '--name-only',
-      'HEAD', '-r', cwd=git_root_path)
+  git_file_list = RunCommand(
+    'git.bat',
+    'ls-tree',
+    '--full-name',
+    '--name-only',
+    'HEAD',
+    '-r',
+    cwd=git_root_path,
+  )
 
   file_list = [x for x in git_file_list.splitlines() if len(x) != 0]
 
-  return RevisionInfo(repo=repo, rev=rev, files=file_list,
-      root_path=git_root_path, path_prefix=None)
+  return RevisionInfo(
+    repo=repo,
+    rev=rev,
+    files=file_list,
+    root_path=git_root_path,
+    path_prefix=None,
+  )
 
 
 def CheckForJunction(filename):
@@ -343,22 +393,26 @@ def CheckForJunction(filename):
         continue
       if not m.group('dirname') == cur_leaf:
         continue
-      real_path = filename.replace(os.path.join(cur_root, cur_leaf),
-                                    m.group('real_path'))
+      real_path = filename.replace(
+        os.path.join(cur_root, cur_leaf), m.group('real_path')
+      )
       # This should always be the case.
       # TODO(sebmarchand): Remove this check if it proves to be useless.
       if os.path.exists(real_path):
         return real_path, cur_root, cur_leaf
       else:
-        print('Source indexing: error: Unexpected non existing file \'%s\'' %
-              real_path)
+        print(
+          'Source indexing: error: Unexpected non existing file \'%s\''
+          % real_path
+        )
         return None, None, None
     cur_root, cur_leaf = os.path.split(cur_root)
   return None, None, None
 
 
 def IndexFilesFromRepo(
-    local_filename, file_list, output_lines, follow_junctions):
+  local_filename, file_list, output_lines, follow_junctions
+):
   """Checks if a given file is a part of a Git repository  and index all the
   files from this repository if it's the case.
 
@@ -423,17 +477,32 @@ def IndexFilesFromRepo(
         # Prefix the filename with the prefix for this repository if needed.
         if info.path_prefix:
           current_file = os.path.join(info.path_prefix, current_file)
-        source_url = REPO_MAP[repo].get('url').format(revision=rev,
-            file_path=os.path.normpath(current_file).replace('\\', '/'))
-        output_lines.append('%s*%s*%s*%s*%s' % (full_file_path, current_file,
-            rev, source_url, 'base64.b64decode' if base_64 else ''))
+        source_url = (
+          REPO_MAP[repo]
+          .get('url')
+          .format(
+            revision=rev,
+            file_path=os.path.normpath(current_file).replace('\\', '/'),
+          )
+        )
+        output_lines.append(
+          '%s*%s*%s*%s*%s'
+          % (
+            full_file_path,
+            current_file,
+            rev,
+            source_url,
+            'base64.b64decode' if base_64 else '',
+          )
+        )
         indexed_files += 1
         file_list.remove(full_file_path)
 
   # The input file should have been removed from the list of files to index.
   if indexed_files and local_filename in file_list:
-    print('%s shouldn\'t be in the list of files to index anymore.' % \
-        local_filename)
+    print(
+      '%s shouldn\'t be in the list of files to index anymore.' % local_filename
+    )
     # TODO(sebmarchand): Turn this into an exception once I've confirmed that
     #     this doesn't happen on the official builder.
     file_list.remove(local_filename)
@@ -443,8 +512,14 @@ def IndexFilesFromRepo(
 
 def DirectoryIsPartOfPublicGitRepository(local_dir):
   # Checks if this directory is from a public Git checkout.
-  info = RunCommand('git.bat', 'config', '--get', 'remote.origin.url',
-      cwd=local_dir, raise_on_failure=False)
+  info = RunCommand(
+    'git.bat',
+    'config',
+    '--get',
+    'remote.origin.url',
+    cwd=local_dir,
+    raise_on_failure=False,
+  )
   if info:
     if 'internal.googlesource.com' in info:
       return False
@@ -453,26 +528,31 @@ def DirectoryIsPartOfPublicGitRepository(local_dir):
   return False
 
 
-def UpdatePDB(pdb_filename, verbose=True, build_dir=None, toolchain_dir=None,
-              follow_junctions=False):
+def UpdatePDB(
+  pdb_filename,
+  verbose=True,
+  build_dir=None,
+  toolchain_dir=None,
+  exclusion_dirs=None,
+  follow_junctions=False,
+):
   """Update a pdb file with source information."""
-  dir_exclusion_list = { }
+  dir_exclusion_list = {}
 
-  if build_dir:
-    # Excluding the build directory allows skipping the generated files, for
-    # Chromium this makes the indexing ~10x faster.
-    build_dir = (os.path.normpath(build_dir)).lower()
-    for directory, _, _ in os.walk(build_dir):
-      dir_exclusion_list[directory.lower()] = True
-    dir_exclusion_list[build_dir.lower()] = True
+  # We want to exclude files that aren't in git repos. This includes generated
+  # files, toolchain files, and possibly others.
 
-  if toolchain_dir:
-    # Exclude the directories from the toolchain as we don't have revision info
-    # for them.
-    toolchain_dir = (os.path.normpath(toolchain_dir)).lower()
-    for directory, _, _ in os.walk(toolchain_dir):
-      dir_exclusion_list[directory.lower()] = True
-    dir_exclusion_list[toolchain_dir.lower()] = True
+  dirs = [build_dir, toolchain_dir]
+  if exclusion_dirs:
+    dirs.extend(exclusion_dirs.split(';'))
+  for dir in dirs:
+    if dir:
+      if not os.path.exists(dir):
+        print('Warning: Exclusion directory %s does not exist.' % dir)
+      dir = (os.path.abspath(dir)).lower()
+      for directory, _, _ in os.walk(dir):
+        dir_exclusion_list[directory.lower()] = True
+      dir_exclusion_list[dir.lower()] = True
 
   # Writes the header of the source index stream.
   #
@@ -494,11 +574,11 @@ def UpdatePDB(pdb_filename, verbose=True, build_dir=None, toolchain_dir=None,
     'SRC_EXTRACT_TARGET_DIR=%targ%\\%fnbksl%(%var2%)\\%var3%',
     'SRC_EXTRACT_TARGET=%SRC_EXTRACT_TARGET_DIR%\\%fnfile%(%var1%)',
     'SRC_EXTRACT_CMD=cmd /c "mkdir "%SRC_EXTRACT_TARGET_DIR%" & python3 -c '
-        '"import urllib.request, base64;'
-        'url = \\\"%var4%\\\";'
-        'u = urllib.request.urlopen(url);'
-        'open(r\\\"%SRC_EXTRACT_TARGET%\\\", \\\"wb\\\").write(%var5%('
-            'u.read()))"',
+    '"import urllib.request, base64;'
+    'url = \\"%var4%\\";'
+    'u = urllib.request.urlopen(url);'
+    'open(r\\"%SRC_EXTRACT_TARGET%\\", \\"wb\\").write(%var5%('
+    'u.read()))"',
     'SRCSRVTRG=%SRC_EXTRACT_TARGET%',
     'SRCSRVCMD=%SRC_EXTRACT_CMD%',
     'SRCSRV: source files ---------------------------------------',
@@ -517,15 +597,19 @@ def UpdatePDB(pdb_filename, verbose=True, build_dir=None, toolchain_dir=None,
     filename = next(iter(filelist))
     filedir = os.path.dirname(filename)
     if verbose:
-      print("[%d / %d] Processing: %s" % (number_of_files - len(filelist),
-                                          number_of_files, filename))
+      print(
+        "[%d / %d] Processing: %s"
+        % (number_of_files - len(filelist), number_of_files, filename)
+      )
 
     # Print a message every 60 seconds to make sure that the process doesn't
     # time out.
     if time.time() - t1 > 60:
       t1 = time.time()
-      print("Still working, %d / %d files have been processed." %
-            (number_of_files - len(filelist), number_of_files))
+      print(
+        "Still working, %d / %d files have been processed."
+        % (number_of_files - len(filelist), number_of_files)
+      )
 
     # This directory is in the exclusion listed, either because it's not part of
     # a repository, or from one we're not interested in indexing.
@@ -543,7 +627,8 @@ def UpdatePDB(pdb_filename, verbose=True, build_dir=None, toolchain_dir=None,
     # Try to index the current file and all the ones coming from the same
     # repository.
     indexed_files = IndexFilesFromRepo(
-        filename, filelist, lines, follow_junctions)
+      filename, filelist, lines, follow_junctions
+    )
     if not indexed_files:
       if not DirectoryIsPartOfPublicGitRepository(filedir):
         dir_exclusion_list[filedir] = True
@@ -564,22 +649,41 @@ def UpdatePDB(pdb_filename, verbose=True, build_dir=None, toolchain_dir=None,
   WriteSourceStream(pdb_filename, '\r\n'.join(lines), toolchain_dir)
 
   if verbose:
-    print("%d / %d files have been indexed." % (indexed_files_total,
-                                                number_of_files))
+    print(
+      "%d / %d files have been indexed."
+      % (indexed_files_total, number_of_files)
+    )
 
 
 def main():
   parser = optparse.OptionParser()
   parser.add_option('-v', '--verbose', action='store_true', default=False)
-  parser.add_option('--build-dir', help='The original build directory, if set '
-      'all the files present in this directory (or one of its subdirectories) '
-      'will be skipped.')
-  parser.add_option('--toolchain-dir', help='The directory containing the VS '
-      'toolchain that has been used for this build. All the files present in '
-      'this directory (or one of its subdirectories) will be skipped.')
-  parser.add_option('--follow-junctions', action='store_true',help='Indicates '
-      'if the junctions should be followed while doing the indexing.',
-      default=False)
+  parser.add_option(
+    '--build-dir',
+    help='The original build directory, if set '
+    'all the files present in this directory (or one of its subdirectories) '
+    'will be skipped.',
+  )
+  parser.add_option(
+    '--toolchain-dir',
+    help='The directory containing the VS '
+    'toolchain that has been used for this build. All the files present in '
+    'this directory (or one of its subdirectories) will be skipped.',
+  )
+  parser.add_option(
+    '--exclusion-dirs',
+    help='A semicolon separated list of '
+    'directories containing files that should be excluded from looking up '
+    'source control information. Note that the build-dir and toolchain-dir '
+    'are automatically excluded.',
+  )
+  parser.add_option(
+    '--follow-junctions',
+    action='store_true',
+    help='Indicates '
+    'if the junctions should be followed while doing the indexing.',
+    default=False,
+  )
   options, args = parser.parse_args()
 
   if not args:
@@ -589,8 +693,14 @@ def main():
     parser.error('The toolchain directory should be specified.')
 
   for pdb in args:
-    UpdatePDB(pdb, options.verbose, options.build_dir, options.toolchain_dir,
-        options.follow_junctions)
+    UpdatePDB(
+      pdb,
+      options.verbose,
+      options.build_dir,
+      options.toolchain_dir,
+      options.exclusion_dirs,
+      options.follow_junctions,
+    )
 
   return 0
 

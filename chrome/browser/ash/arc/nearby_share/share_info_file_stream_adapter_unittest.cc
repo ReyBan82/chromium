@@ -68,15 +68,22 @@ class ShareInfoFileStreamAdapterTest : public testing::Test {
     file_system_context_ = storage::CreateFileSystemContextForTesting(
         quota_manager_proxy_.get(), temp_path);
 
+    base::File::Error open_file_system_result = base::File::FILE_ERROR_FAILED;
+    base::RunLoop open_file_system_loop;
     file_system_context_->OpenFileSystem(
         blink::StorageKey::CreateFromStringForTesting(kURLOrigin),
-        /*bucket=*/absl::nullopt, storage::kFileSystemTypeTemporary,
+        /*bucket=*/std::nullopt, storage::kFileSystemTypeTemporary,
         storage::OPEN_FILE_SYSTEM_CREATE_IF_NONEXISTENT,
-        base::BindOnce([](const storage::FileSystemURL& root_url,
-                          const std::string& name, base::File::Error result) {
-          ASSERT_EQ(base::File::FILE_OK, result);
-        }));
-    base::RunLoop().RunUntilIdle();
+        base::BindOnce(
+            [](base::File::Error* open_file_system_result,
+               base::RunLoop* run_loop, const storage::FileSystemURL&,
+               const std::string&, base::File::Error result) {
+              *open_file_system_result = result;
+              run_loop->Quit();
+            },
+            &open_file_system_result, &open_file_system_loop));
+    open_file_system_loop.Run();
+    ASSERT_EQ(base::File::FILE_OK, open_file_system_result);
 
     // Setup a test file in the file system with random data.
     url_ = file_system_context_->CreateCrackedFileSystemURL(
@@ -87,8 +94,7 @@ class ShareInfoFileStreamAdapterTest : public testing::Test {
 
     ASSERT_EQ(base::File::FILE_OK,
               storage::AsyncFileTestHelper::CreateFileWithData(
-                  file_system_context_.get(), url_, test_data_.data(),
-                  test_data_.size()));
+                  file_system_context_.get(), url_, test_data_));
   }
 
   void TearDown() override { stream_adapter_.reset(); }
@@ -178,9 +184,7 @@ TEST_F(ShareInfoFileStreamAdapterTest, ReadMidStreamAndWriteFile) {
 
   std::string contents;
   ASSERT_TRUE(base::ReadFileToString(test_file_path_, &contents));
-  EXPECT_EQ(std::string(test_data_.begin() + kOffset,
-                        test_data_.begin() + kOffset + kSize),
-            contents);
+  EXPECT_EQ(test_data_.substr(kOffset, kSize), contents);
 }
 
 }  // namespace arc

@@ -12,18 +12,19 @@ AccessibilityExtensionRecoveryStrategyTest = class extends CommonE2ETestBase {
   /** @override */
   async setUpDeferred() {
     await super.setUpDeferred();
-    await importModule(
-        [
-          'RecoveryStrategy',
-          'AncestryRecoveryStrategy',
-          'TreePathRecoveryStrategy',
-        ],
-        '/common/cursors/recovery_strategy.js');
+
+    const imports = TestImportManager.getImports();
+    globalThis.RecoveryStrategy = imports.RecoveryStrategy;
+    globalThis.AncestryRecoveryStrategy = imports.AncestryRecoveryStrategy;
+    globalThis.TreePathRecoveryStrategy = imports.TreePathRecoveryStrategy;
+
     globalThis.RoleType = chrome.automation.RoleType;
   }
 };
 
 
+// TODO(https://issuetracker.google.com/issues/263127143) Recovery can likely be
+// simplified now that most ids are stable.
 AX_TEST_F(
     'AccessibilityExtensionRecoveryStrategyTest', 'ReparentedRecovery',
     async function() {
@@ -54,30 +55,21 @@ AX_TEST_F(
       assertFalse(
           bAncestryRecovery.requiresRecovery(),
           'bAncestryRecovery.requiresRecovery');
-      assertTrue(
+      assertFalse(
           pAncestryRecovery.requiresRecovery(),
           'pAncestryRecovery.requiresRecovery()');
-      assertTrue(
+      assertFalse(
           sAncestryRecovery.requiresRecovery(),
           'sAncestryRecovery.requiresRecovery()');
       assertFalse(
           bTreePathRecovery.requiresRecovery(),
           'bTreePathRecovery.requiresRecovery()');
-      assertTrue(
+      assertFalse(
           pTreePathRecovery.requiresRecovery(),
           'pTreePathRecovery.requiresRecovery()');
-      assertTrue(
+      assertFalse(
           sTreePathRecovery.requiresRecovery(),
           'sTreePathRecovery.requiresRecovery()');
-
-      assertEquals(RoleType.BUTTON, bAncestryRecovery.node.role);
-      assertEquals(root, pAncestryRecovery.node);
-      assertEquals(root, sAncestryRecovery.node);
-
-      assertEquals(b, bTreePathRecovery.node);
-      assertEquals(b, pTreePathRecovery.node);
-      assertEquals(b, sTreePathRecovery.node);
-
       assertFalse(
           bAncestryRecovery.requiresRecovery(),
           'bAncestryRecovery.requiresRecovery()');

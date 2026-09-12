@@ -4,58 +4,85 @@
 
 #include "components/segmentation_platform/internal/database/ukm_database_backend.h"
 
+#include <vector>
+
+#include "base/check_is_test.h"
+#include "base/feature_list.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/rand_util.h"
-#include "base/task/sequenced_task_runner.h"
+#include "base/strings/stringprintf.h"
 #include "components/segmentation_platform/internal/database/ukm_metrics_table.h"
 #include "components/segmentation_platform/internal/database/ukm_types.h"
 #include "components/segmentation_platform/internal/database/ukm_url_table.h"
+#include "components/segmentation_platform/internal/database/uma_metrics_table.h"
 #include "sql/database.h"
 #include "sql/statement.h"
+#include "sql/transaction.h"
 
 namespace segmentation_platform {
 
+BASE_FEATURE(kInhibitTransactionFromSegmentationDB,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
 namespace {
+
+// Up to 10 updates are batched, because ~10 UKM metrics recorded in db per
+// page load and approximately a commit every page load. This might need update
+// if the metric count increases in the future.
+static constexpr int kChangeCountToCommit = 10;
 
 bool SanityCheckUrl(const GURL& url, UrlId url_id) {
   return url.is_valid() && !url.is_empty() && !url_id.is_null();
 }
 
-void BindValuesToStatement(
+std::string BindValuesToStatement(
     const std::vector<processing::ProcessedValue>& bind_values,
     sql::Statement& statement) {
+  std::stringstream debug_string;
   for (unsigned i = 0; i < bind_values.size(); ++i) {
     const processing::ProcessedValue& value = bind_values[i];
     switch (value.type) {
       case processing::ProcessedValue::Type::BOOL:
+        debug_string << i << ":" << value.bool_val << " ";
         statement.BindBool(i, value.bool_val);
         break;
       case processing::ProcessedValue::Type::INT:
+        debug_string << i << ":" << value.int_val << " ";
         statement.BindInt(i, value.int_val);
         break;
       case processing::ProcessedValue::Type::FLOAT:
+        debug_string << i << ":" << value.float_val << " ";
         statement.BindDouble(i, value.float_val);
         break;
       case processing::ProcessedValue::Type::DOUBLE:
+        debug_string << i << ":" << value.double_val << " ";
         statement.BindDouble(i, value.double_val);
         break;
       case processing::ProcessedValue::Type::STRING:
+        debug_string << i << ":" << value.str_val << " ";
         statement.BindString(i, value.str_val);
         break;
       case processing::ProcessedValue::Type::TIME:
+        debug_string << i << ":" << value.time_val << " ";
         statement.BindTime(i, value.time_val);
         break;
       case processing::ProcessedValue::Type::INT64:
+        debug_string << i << ":" << value.int64_val << " ";
         statement.BindInt64(i, value.int64_val);
         break;
       case processing::ProcessedValue::Type::URL:
+        debug_string << i << ":"
+                     << UkmUrlTable::GetDatabaseUrlString(*value.url) << " ";
         statement.BindString(i, UkmUrlTable::GetDatabaseUrlString(*value.url));
         break;
       case processing::ProcessedValue::Type::UNKNOWN:
         NOTREACHED();
     }
   }
+  return debug_string.str();
 }
 
 float GetSingleFloatOutput(sql::Statement& statement) {
@@ -64,7 +91,6 @@ float GetSingleFloatOutput(sql::Statement& statement) {
     case sql::ColumnType::kBlob:
     case sql::ColumnType::kText:
       NOTREACHED();
-      return 0;
     case sql::ColumnType::kFloat:
       return statement.ColumnDouble(0);
     case sql::ColumnType::kInteger:
@@ -74,27 +100,43 @@ float GetSingleFloatOutput(sql::Statement& statement) {
   }
 }
 
-}  // namespace
-
-UkmDatabaseBackend::UkmDatabaseBackend(
-    const base::FilePath& database_path,
-    scoped_refptr<base::SequencedTaskRunner> callback_task_runner)
-    : database_path_(database_path),
-      callback_task_runner_(callback_task_runner),
-      db_(sql::DatabaseOptions()),
-      metrics_table_(&db_),
-      url_table_(&db_) {
-  DETACH_FROM_SEQUENCE(sequence_checker_);
+void ErrorCallback(int code, sql::Statement* stmt) {
+  VLOG(1) << "SQL run error " << code;
 }
 
-UkmDatabaseBackend::~UkmDatabaseBackend() = default;
+}  // namespace
 
-void UkmDatabaseBackend::InitDatabase(SuccessCallback callback) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+UkmDatabaseBackend::UkmDatabaseBackend(const base::FilePath& database_path,
+                                       bool in_memory)
+    : database_path_(database_path),
+      in_memory_(in_memory),
+      db_(sql::DatabaseOptions().set_wal_mode(true),
+          /*tag=*/"UKMMetrics"),
+      inhibit_transaction_(
+          base::FeatureList::IsEnabled(kInhibitTransactionFromSegmentationDB)),
+      metrics_table_(&db_),
+      url_table_(&db_),
+      uma_metrics_table_(&db_) {
+  db_.set_error_callback(base::BindRepeating(&ErrorCallback));
+}
+
+UkmDatabaseBackend::~UkmDatabaseBackend() {
+  if (current_transaction_) {
+    current_transaction_->Commit();
+    current_transaction_.reset();
+  }
+}
+
+bool UkmDatabaseBackend::InitDatabase() {
+  SCOPED_UMA_HISTOGRAM_TIMER("SegmentationPlatform.Database.InitDatabase");
   base::File::Error error{};
   bool result = true;
-  if (!base::CreateDirectoryAndGetError(database_path_.DirName(), &error) ||
-      !db_.Open(database_path_)) {
+  if (in_memory_) {
+    CHECK_IS_TEST();
+    result = db_.OpenInMemory();
+  } else if (!base::CreateDirectoryAndGetError(database_path_.DirName(),
+                                               &error) ||
+             !db_.Open(database_path_)) {
     // TODO(ssid): On failure retry opening the database or delete backend or
     // open in memory for session.
     LOG(ERROR) << "Failed to open UKM database: " << error << " "
@@ -102,16 +144,33 @@ void UkmDatabaseBackend::InitDatabase(SuccessCallback callback) {
     result = false;
   }
   if (result) {
-    result = metrics_table_.InitTable() && url_table_.InitTable();
+    std::optional<sql::Transaction> transaction;
+    if (inhibit_transaction_ && !transaction.emplace(&db_).Begin()) {
+      status_ = Status::INIT_FAILED;
+      return false;
+    }
+    result = metrics_table_.InitTable() && url_table_.InitTable() &&
+             uma_metrics_table_.InitTable();
+    if (transaction && result) {
+      result = transaction->Commit();
+    }
   }
   status_ = result ? Status::INIT_SUCCESS : Status::INIT_FAILED;
-  callback_task_runner_->PostTask(FROM_HERE,
-                                  base::BindOnce(std::move(callback), result));
+
+  if (status_ == Status::INIT_SUCCESS) {
+    RestartTransaction(/*purge_stale_data=*/false);
+  }
+  return result;
 }
 
 void UkmDatabaseBackend::StoreUkmEntry(ukm::mojom::UkmEntryPtr entry) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  SCOPED_UMA_HISTOGRAM_TIMER("SegmentationPlatform.Database.StoreUkmEntry");
   if (status_ != Status::INIT_SUCCESS) {
+    return;
+  }
+
+  std::optional<sql::Transaction> transaction;
+  if (inhibit_transaction_ && !transaction.emplace(&db_).Begin()) {
     return;
   }
 
@@ -135,13 +194,26 @@ void UkmDatabaseBackend::StoreUkmEntry(ukm::mojom::UkmEntryPtr entry) {
     row.metric_value = metric_and_value.second;
     metrics_table_.AddUkmEvent(row);
   }
+
+  if (transaction) {
+    transaction->Commit();
+  }
+
+  TrackChangesInTransaction(entry->metrics.size());
 }
 
 void UkmDatabaseBackend::UpdateUrlForUkmSource(ukm::SourceId source_id,
                                                const GURL& url,
-                                               bool is_validated) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+                                               bool is_validated,
+                                               const std::string& profile_id) {
+  SCOPED_UMA_HISTOGRAM_TIMER(
+      "SegmentationPlatform.Database.UpdateUrlForUkmSource");
   if (status_ != Status::INIT_SUCCESS) {
+    return;
+  }
+
+  std::optional<sql::Transaction> transaction;
+  if (inhibit_transaction_ && !transaction.emplace(&db_).Begin()) {
     return;
   }
 
@@ -152,7 +224,7 @@ void UkmDatabaseBackend::UpdateUrlForUkmSource(ukm::SourceId source_id,
 
   if (!url_table_.IsUrlInTable(url_id)) {
     if (is_validated) {
-      url_table_.WriteUrl(url, url_id, base::Time::Now());
+      url_table_.WriteUrl(url, url_id, base::Time::Now(), profile_id);
       // Remove from list so we don't add the URL again to table later.
       urls_not_validated_.erase(url_id);
     } else {
@@ -165,10 +237,17 @@ void UkmDatabaseBackend::UpdateUrlForUkmSource(ukm::SourceId source_id,
   source_to_url_[source_id] = url_id;
   // Update all entries in metrics table with the URL ID.
   metrics_table_.UpdateUrlIdForSource(source_id, url_id);
+
+  if (transaction) {
+    transaction->Commit();
+  }
+
+  TrackChangesInTransaction(2);  // 2 updates above.
 }
 
-void UkmDatabaseBackend::OnUrlValidated(const GURL& url) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+void UkmDatabaseBackend::OnUrlValidated(const GURL& url,
+                                        const std::string& profile_id) {
+  SCOPED_UMA_HISTOGRAM_TIMER("SegmentationPlatform.Database.OnUrlValidated");
   if (status_ != Status::INIT_SUCCESS) {
     return;
   }
@@ -176,20 +255,26 @@ void UkmDatabaseBackend::OnUrlValidated(const GURL& url) {
   UrlId url_id = UkmUrlTable::GenerateUrlId(url);
   // Write URL to table only if it's needed and it's not already added.
   if (urls_not_validated_.count(url_id) && SanityCheckUrl(url, url_id)) {
-    url_table_.WriteUrl(url, url_id, base::Time::Now());
+    url_table_.WriteUrl(url, url_id, base::Time::Now(), profile_id);
     urls_not_validated_.erase(url_id);
   }
+  TrackChangesInTransaction(1);
 }
 
 void UkmDatabaseBackend::RemoveUrls(const std::vector<GURL>& urls,
                                     bool all_urls) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  SCOPED_UMA_HISTOGRAM_TIMER("SegmentationPlatform.Database.RemoveUrls");
   if (status_ != Status::INIT_SUCCESS) {
     return;
   }
 
   if (all_urls) {
     DeleteAllUrls();
+    return;
+  }
+
+  std::optional<sql::Transaction> transaction;
+  if (inhibit_transaction_ && !transaction.emplace(&db_).Begin()) {
     return;
   }
 
@@ -204,52 +289,149 @@ void UkmDatabaseBackend::RemoveUrls(const std::vector<GURL>& urls,
   }
   url_table_.RemoveUrls(url_ids);
   metrics_table_.DeleteEventsForUrls(url_ids);
-}
 
-void UkmDatabaseBackend::RunReadonlyQueries(QueryList&& queries,
-                                            QueryCallback callback) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (status_ != Status::INIT_SUCCESS) {
-    callback_task_runner_->PostTask(
-        FROM_HERE, base::BindOnce(std::move(callback), false,
-                                  processing::IndexedTensors()));
-    return;
+  if (transaction) {
+    transaction->Commit();
   }
 
-  bool success = true;
+  // Force commit and truncate the WAL to physically remove deleted data
+  // from disk to satisfy privacy requirements.
+  RestartTransaction(/*purge_stale_data=*/true);
+}
+
+void UkmDatabaseBackend::AddUmaMetric(const std::string& profile_id,
+                                      const UmaMetricEntry& row) {
+  SCOPED_UMA_HISTOGRAM_TIMER("SegmentationPlatform.Database.AddUmaMetric");
+  if (status_ != Status::INIT_SUCCESS) {
+    return;
+  }
+  uma_metrics_table_.AddUmaMetric(profile_id, row);
+  TrackChangesInTransaction(/*change_count=*/1);
+}
+
+std::optional<processing::IndexedTensors>
+UkmDatabaseBackend::RunReadOnlyQueries(UkmDatabase::QueryList queries) {
+  SCOPED_UMA_HISTOGRAM_TIMER(
+      "SegmentationPlatform.Database.RunReadOnlyQueries");
+
+  if (status_ != Status::INIT_SUCCESS) {
+    return std::nullopt;
+  }
+
+  // This function is read-only and therefore doesn't require a transaction.
+  // Since the database was opened in exclusive locking mode and the database
+  // operations are sequence-bound, the table cannot be modified concurrently
+  // while this function runs.
+
   processing::IndexedTensors result;
   for (const auto& index_and_query : queries) {
     const processing::FeatureIndex index = index_and_query.first;
     const UkmDatabase::CustomSqlQuery& query = index_and_query.second;
+    std::string debug_query = query.query;
 
-    sql::Statement statement(db_.GetReadonlyStatement(query.query.c_str()));
-    BindValuesToStatement(query.bind_values, statement);
+    sql::Statement statement(db_.GetReadonlyStatement(query.query));
+    debug_query +=
+        " Bind values: " + BindValuesToStatement(query.bind_values, statement);
 
-    if (!statement.is_valid() || !statement.Step()) {
-      VLOG(1) << "Failed to run SQL query " << query.query;
-      success = false;
-      break;
+    if (!statement.is_valid()) {
+      VLOG(1) << "Failed to run SQL query " << debug_query;
+      return std::nullopt;
+    }
+    while (statement.Step()) {
+      float output = GetSingleFloatOutput(statement);
+      result[index].push_back(processing::ProcessedValue::FromFloat(output));
+    }
+    if (!result.count(index) || result.at(index).empty() ||
+        !statement.Succeeded()) {
+      VLOG(1) << "Failed to run SQL query " << debug_query;
+      return std::nullopt;
     }
 
-    float output = GetSingleFloatOutput(statement);
-    VLOG(1) << "Output from SQL query " << query.query << " Result: " << output;
-    result[index].push_back(processing::ProcessedValue(output));
+    if (VLOG_IS_ON(1)) {
+      std::string outputs;
+      for (const auto& val : result[index]) {
+        outputs.append(base::StringPrintf("%f,", val.float_val));
+      }
+      VLOG(1) << "Output from SQL query " << debug_query
+              << " Result: " << outputs;
+    }
   }
-  callback_task_runner_->PostTask(
-      FROM_HERE,
-      base::BindOnce(std::move(callback), success, std::move(result)));
+
+  return result;
 }
 
-void UkmDatabaseBackend::DeleteEntriesOlderThan(base::Time time) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+void UkmDatabaseBackend::CleanupOldEntries(base::Time ukm_time_limit,
+                                           base::Time uma_time_limit) {
+  SCOPED_UMA_HISTOGRAM_TIMER("SegmentationPlatform.Database.CleanupOldEntries");
+  if (status_ != Status::INIT_SUCCESS) {
+    return;
+  }
+
+  std::optional<sql::Transaction> transaction;
+  if (inhibit_transaction_ && !transaction.emplace(&db_).Begin()) {
+    return;
+  }
+
   std::vector<UrlId> deleted_urls =
-      metrics_table_.DeleteEventsBeforeTimestamp(time);
+      metrics_table_.DeleteEventsBeforeTimestamp(ukm_time_limit);
   url_table_.RemoveUrls(deleted_urls);
-  url_table_.DeleteUrlsBeforeTimestamp(time);
+  url_table_.DeleteUrlsBeforeTimestamp(ukm_time_limit);
+  uma_metrics_table_.DeleteEventsBeforeTimestamp(uma_time_limit);
+
+  if (transaction) {
+    transaction->Commit();
+  }
+
+  // Force commit and truncate the WAL to physically remove deleted data
+  // from disk to satisfy privacy requirements.
+  RestartTransaction(/*purge_stale_data=*/true);
+}
+
+void UkmDatabaseBackend::CleanupItems(const std::string& profile_id,
+                                      std::vector<CleanupItem> cleanup_items) {
+  SCOPED_UMA_HISTOGRAM_TIMER("SegmentationPlatform.Database.CleanupItems");
+  if (status_ != Status::INIT_SUCCESS) {
+    return;
+  }
+
+  std::optional<sql::Transaction> transaction;
+  if (inhibit_transaction_ && !transaction.emplace(&db_).Begin()) {
+    return;
+  }
+
+  // This needs to support clean up for UKM data.
+  // Only `cleanup_items` with uma types should be sent to uma table.
+  std::erase_if(cleanup_items,
+                [](const CleanupItem& item) { return !item.IsUma(); });
+  uma_metrics_table_.CleanupItems(profile_id, cleanup_items);
+
+  if (transaction) {
+    transaction->Commit();
+  }
+
+  // Force commit and truncate the WAL to physically remove deleted data
+  // from disk to satisfy privacy requirements.
+  RestartTransaction(/*purge_stale_data=*/true);
+}
+
+void UkmDatabaseBackend::CommitTransactionForTesting() {
+  RestartTransaction(/*purge_stale_data=*/false);
+}
+
+void UkmDatabaseBackend::RollbackTransactionForTesting() {
+  CHECK(current_transaction_);
+  current_transaction_->Rollback();
+  current_transaction_.reset();
 }
 
 void UkmDatabaseBackend::DeleteAllUrls() {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  SCOPED_UMA_HISTOGRAM_TIMER("SegmentationPlatform.Database.DeleteAllUrls");
+  CHECK_EQ(status_, Status::INIT_SUCCESS);
+
+  std::optional<sql::Transaction> transaction;
+  if (inhibit_transaction_ && !transaction.emplace(&db_).Begin()) {
+    return;
+  }
 
   // Remove all metrics associated with any URL, but retain the metrics that are
   // not keyed on URL.
@@ -260,6 +442,56 @@ void UkmDatabaseBackend::DeleteAllUrls() {
   success = success && db_.Execute("DROP TABLE urls");
   success = success && url_table_.InitTable();
   DCHECK(success);
+
+  if (transaction && success) {
+    transaction->Commit();
+  }
+
+  // Force commit and truncate the WAL to physically remove deleted data
+  // from disk to satisfy privacy requirements.
+  RestartTransaction(/*purge_stale_data=*/true);
+}
+
+void UkmDatabaseBackend::TrackChangesInTransaction(int change_count) {
+  if (inhibit_transaction_) {
+    return;
+  }
+
+  // No transaction has begun, begin one.
+  if (!current_transaction_) {
+    RestartTransaction(/*purge_stale_data=*/false);
+    // Ignore change_count since no transaction has begun yet.
+    return;
+  }
+
+  change_count_ += change_count;
+
+  // If enough changes are made, commit them and begin a new transaction.
+  if (change_count_ > kChangeCountToCommit) {
+    RestartTransaction(/*purge_stale_data=*/false);
+  }
+}
+
+void UkmDatabaseBackend::RestartTransaction(bool purge_stale_data) {
+  if (current_transaction_) {
+    current_transaction_->Commit();
+    current_transaction_.reset();
+  }
+
+  change_count_ = 0;
+
+  if (purge_stale_data) {
+    // Truncate the WAL file so that stale data is removed from disk
+    // immediately.
+    db_.CheckpointDatabase(/*truncate=*/true);
+  }
+
+  if (!inhibit_transaction_) {
+    current_transaction_ = std::make_unique<sql::Transaction>(&db_);
+    if (!current_transaction_->Begin()) {
+      current_transaction_.reset();
+    }
+  }
 }
 
 }  // namespace segmentation_platform

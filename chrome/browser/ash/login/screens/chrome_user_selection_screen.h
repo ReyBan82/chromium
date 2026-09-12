@@ -9,11 +9,25 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/login/screens/user_selection_screen.h"
 #include "chrome/browser/ash/policy/core/device_local_account_policy_service.h"
 
 class AccountId;
+
+namespace network {
+class SharedURLLoaderFactory;
+}  // namespace network
+
+namespace policy {
+class BrowserPolicyConnectorAsh;
+}  // namespace policy
+
+namespace user_manager {
+class MultiUserSignInPolicyController;
+}  // namespace user_manager
 
 namespace ash {
 
@@ -21,7 +35,19 @@ class ChromeUserSelectionScreen
     : public UserSelectionScreen,
       public policy::DeviceLocalAccountPolicyService::Observer {
  public:
-  explicit ChromeUserSelectionScreen(DisplayedScreen display_type);
+  // `local_state`, `application_locale_storage`,
+  // `browser_policy_connector_ash`, `multi_user_sign_in_policy_controller`,
+  // and `system_clock` must be non-null and must outlive `this`.
+  // `shared_url_loader_factory` must be non-null.
+  ChromeUserSelectionScreen(
+      PrefService* local_state,
+      const ApplicationLocaleStorage* application_locale_storage,
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      const policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
+      const user_manager::MultiUserSignInPolicyController*
+          multi_user_sign_in_policy_controller,
+      system::SystemClock* system_clock,
+      DisplayedScreen display_type);
 
   ChromeUserSelectionScreen(const ChromeUserSelectionScreen&) = delete;
   ChromeUserSelectionScreen& operator=(const ChromeUserSelectionScreen&) =
@@ -67,7 +93,8 @@ class ChromeUserSelectionScreen
   void SetPublicSessionShowFullManagementDisclosure(
       bool show_full_management_disclosure);
 
-  policy::DeviceLocalAccountPolicyService* device_local_account_policy_service_;
+  raw_ptr<policy::DeviceLocalAccountPolicyService>
+      device_local_account_policy_service_;
 
   // Map from public session account IDs to their display names set by policy.
   typedef std::map<AccountId, std::string> DisplayNamesMap;

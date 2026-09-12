@@ -21,12 +21,15 @@
 #include "base/functional/callback.h"
 #endif
 
-class AccountCapabilitiesFetcherFactory;
+class AccountFetcherFactory;
 class PrefService;
 class SigninClient;
 
 #if BUILDFLAG(ENABLE_DICE_SUPPORT)
 class TokenWebData;
+namespace unexportable_keys {
+class UnexportableKeyService;
+}  // namespace unexportable_keys
 #endif
 
 #if BUILDFLAG(IS_IOS)
@@ -35,11 +38,15 @@ class DeviceAccountsProvider;
 
 namespace image_fetcher {
 class ImageDecoder;
-}
+}  // namespace image_fetcher
+
+namespace metrics {
+class ProfileMetricsService;
+}  // namespace metrics
 
 namespace network {
 class NetworkConnectionTracker;
-}
+}  // namespace network
 
 #if BUILDFLAG(IS_CHROMEOS)
 namespace account_manager {
@@ -48,34 +55,35 @@ class AccountManagerFacade;
 #endif
 
 namespace signin {
-enum class AccountConsistencyMethod;
 
 struct IdentityManagerBuildParams {
   IdentityManagerBuildParams();
   ~IdentityManagerBuildParams();
 
-  AccountConsistencyMethod account_consistency =
-      AccountConsistencyMethod::kDisabled;
   std::unique_ptr<image_fetcher::ImageDecoder> image_decoder;
   raw_ptr<PrefService> local_state = nullptr;
   raw_ptr<network::NetworkConnectionTracker> network_connection_tracker;
   raw_ptr<PrefService> pref_service = nullptr;
   base::FilePath profile_path;
   raw_ptr<SigninClient> signin_client = nullptr;
-  std::unique_ptr<AccountCapabilitiesFetcherFactory>
-      account_capabilities_fetcher_factory;
+  raw_ptr<metrics::ProfileMetricsService> profile_metrics_service = nullptr;
+  std::unique_ptr<AccountFetcherFactory> account_fetcher_factory;
+  std::unique_ptr<ProfileOAuth2TokenService> token_service;
+  std::unique_ptr<AccountTrackerService> account_tracker_service;
 
-#if BUILDFLAG(ENABLE_DICE_SUPPORT) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
   bool delete_signin_cookies_on_exit = false;
 #endif
 
 #if BUILDFLAG(ENABLE_DICE_SUPPORT)
   scoped_refptr<TokenWebData> token_web_data;
+  raw_ptr<unexportable_keys::UnexportableKeyService> unexportable_key_service =
+      nullptr;
 #endif
 
 #if BUILDFLAG(IS_CHROMEOS)
-  raw_ptr<account_manager::AccountManagerFacade> account_manager_facade =
-      nullptr;
+  raw_ptr<account_manager::AccountManagerFacade, DanglingUntriaged>
+      account_manager_facade = nullptr;
   bool is_regular_profile = false;
 #endif
 

@@ -2,9 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "ui/accessibility/ax_node_position.h"
+
 #include <stdint.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
 #include <utility>
@@ -18,14 +21,13 @@
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/accessibility/ax_node.h"
 #include "ui/accessibility/ax_node_data.h"
-#include "ui/accessibility/ax_node_position.h"
 #include "ui/accessibility/ax_range.h"
 #include "ui/accessibility/ax_selection.h"
 #include "ui/accessibility/ax_tree.h"
 #include "ui/accessibility/ax_tree_data.h"
 #include "ui/accessibility/ax_tree_id.h"
 #include "ui/accessibility/ax_tree_update.h"
-#include "ui/accessibility/test_ax_tree_manager.h"
+#include "ui/accessibility/test_single_ax_tree_manager.h"
 
 namespace ui {
 
@@ -45,7 +47,7 @@ constexpr AXNodeID STATIC_TEXT2_ID = 8;
 constexpr AXNodeID INLINE_BOX2_ID = 9;
 
 // A group of basic and extended characters.
-constexpr const wchar_t* kGraphemeClusters[] = {
+constexpr const auto kGraphemeClusters = std::to_array<const wchar_t*>({
     // The English word "hey" consisting of four ASCII characters.
     L"h",
     L"e",
@@ -59,9 +61,9 @@ constexpr const wchar_t* kGraphemeClusters[] = {
     L"\x0E23\x0E39\x0E49",
     L"\x0E2A\x0E36",
     L"\x0E01",
-};
+});
 
-class AXPositionTest : public ::testing::Test, public TestAXTreeManager {
+class AXPositionTest : public ::testing::Test, public TestSingleAXTreeManager {
  public:
   AXPositionTest();
 
@@ -91,14 +93,15 @@ class AXPositionTest : public ::testing::Test, public TestAXTreeManager {
   // additional tree representing an out-of-process iframe. Returns a vector
   // containing the three managers for the trees in an out argument. (Note that
   // fatal assertions can only be propagated from a `void` method.)
-  void CreateBrowserWindow(AXNodeData& window,
-                           AXNodeData& back_button,
-                           AXNodeData& web_view,
-                           AXNodeData& root_web_area,
-                           AXNodeData& iframe_root,
-                           AXNodeData& paragraph,
-                           AXNodeData& address_bar,
-                           std::vector<TestAXTreeManager>& out_managers) const;
+  void CreateBrowserWindow(
+      AXNodeData& window,
+      AXNodeData& back_button,
+      AXNodeData& web_view,
+      AXNodeData& root_web_area,
+      AXNodeData& iframe_root,
+      AXNodeData& paragraph,
+      AXNodeData& address_bar,
+      std::vector<TestSingleAXTreeManager>& out_managers) const;
 
   // Creates a document with three static text objects each containing text in a
   // different language.
@@ -127,7 +130,7 @@ class AXPositionTest : public ::testing::Test, public TestAXTreeManager {
  private:
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behaviour_;
   // Manages a minimalistic Views tree that is hosting the test webpage.
-  TestAXTreeManager views_tree_manager_;
+  TestSingleAXTreeManager views_tree_manager_;
 };
 
 // Used by AXPositionExpandToEnclosingTextBoundaryTestWithParam.
@@ -225,6 +228,9 @@ struct TextNavigationTestParam {
   // A list of positions that should be returned from the method being tested,
   // in stringified form.
   std::vector<std::string> expectations;
+
+  // Optional; if true, checks that upstream positions are not moved.
+  bool upstream_is_not_moved = false;
 };
 
 // This is a fixture for a set of parameterized tests that ensure that text
@@ -254,6 +260,13 @@ AXPositionTest::AXPositionTest()
           AXEmbeddedObjectBehavior::kSuppressCharacter) {}
 
 const char* AXPositionTest::TEXT_VALUE = "Line 1\nLine 2";
+
+// Lengths derived from TEXT_VALUE for use in assertions. Avoids magic numbers
+// that require mentally computing string lengths.
+constexpr int kLine1Length = 6;          // strlen("Line 1")
+constexpr int kLineBreakLength = 1;      // strlen("\n")
+constexpr int kLine1AndBreakLength = 7;  // kLine1Length + kLineBreakLength
+constexpr int kTextValueLength = 13;     // strlen("Line 1\nLine 2")
 
 void AXPositionTest::SetUp() {
   // First create a minimalistic Views tree that would host the test webpage.
@@ -406,15 +419,15 @@ void AXPositionTest::SetUp() {
   initial_state.tree_data.parent_tree_id = views_tree->GetAXTreeID();
   initial_state.tree_data.title = "Dialog title";
 
-  // "SetTree" is defined in "TestAXTreeManager" and it passes ownership of the
-  // created AXTree to the manager.
+  // "SetTree" is defined in "TestSingleAXTreeManager" and it passes ownership
+  // of the created AXTree to the manager.
   SetTree(std::make_unique<AXTree>(initial_state));
 
   AXTreeUpdate views_tree_update;
   web_view.AddChildTreeId(GetTreeID());
   views_tree_update.nodes = {web_view};
   ASSERT_TRUE(views_tree->Unserialize(views_tree_update));
-  views_tree_manager_ = TestAXTreeManager(std::move(views_tree));
+  views_tree_manager_ = TestSingleAXTreeManager(std::move(views_tree));
 }
 
 std::unique_ptr<AXTree> AXPositionTest::CreateMultipageDocument(
@@ -425,6 +438,13 @@ std::unique_ptr<AXTree> AXPositionTest::CreateMultipageDocument(
     AXNodeData& page_2_text_data,
     AXNodeData& page_3_data,
     AXNodeData& page_3_text_data) const {
+  // ++1 kPdfRoot
+  // ++++2 kRegion (page 1)
+  // ++++++3 kStaticText "some text on page 1"
+  // ++++4 kRegion (page 2)
+  // ++++++5 kStaticText "some text on page 2" (bold)
+  // ++++6 kRegion (page 3)
+  // ++++++7 kStaticText "some more text on page 3"
   root_data.id = 1;
   root_data.role = ax::mojom::Role::kPdfRoot;
 
@@ -477,7 +497,26 @@ void AXPositionTest::CreateBrowserWindow(
     AXNodeData& iframe_root,
     AXNodeData& paragraph,
     AXNodeData& address_bar,
-    std::vector<TestAXTreeManager>& out_managers) const {
+    std::vector<TestSingleAXTreeManager>& out_managers) const {
+  // Creates three accessibility trees:
+  //
+  // Views tree:
+  // ++1 kWindow "Test page - Google Chrome"
+  // ++++2 kClient "Google Chrome" (NonClientView)
+  // ++++++3 kClient (BrowserView)
+  // ++++++++4 kPane (ToolbarView)
+  // ++++++++++5 kButton "Back"
+  // ++++++6 kWebView [child tree: webpage]
+  // ++++++7 kTextField "Address and search bar"
+  //
+  // Webpage tree:
+  // ++1 kRootWebArea "Test page"
+  // ++++2 kIframe [child tree: iframe]
+  // ++++3 kParagraph "After iframe"
+  //
+  // Iframe tree:
+  // ++1 kRootWebArea "Inside iframe"
+
   // First tree: Views.
   window.id = 1;
   window.role = ax::mojom::Role::kWindow;
@@ -680,7 +719,7 @@ std::unique_ptr<AXTree> AXPositionTest::CreateAXTree(
 
 }  // namespace
 
-// TODO(crbug.com/1370069): Re-enable this test
+// TODO(crbug.com/40869528): Re-enable this test
 TEST_F(AXPositionTest, DISABLED_Clone) {
   TestPositionType null_position = AXNodePosition::CreateNullPosition();
   ASSERT_NE(nullptr, null_position);
@@ -904,7 +943,7 @@ TEST_F(AXPositionTest, ToString) {
       text_position_10->ToString());
 }
 
-// TODO(crbug.com/1370069): Re-enable this test
+// TODO(crbug.com/40869528): Re-enable this test
 TEST_F(AXPositionTest, DISABLED_IsIgnored) {
   EXPECT_FALSE(AXNodePosition::CreateNullPosition()->IsIgnored());
 
@@ -1216,7 +1255,7 @@ TEST_F(AXPositionTest, GetMaxTextOffsetFromRoot) {
       root_, 0 /* text_offset */, ax::mojom::TextAffinity::kUpstream);
   ASSERT_NE(nullptr, text_position);
   ASSERT_TRUE(text_position->IsTextPosition());
-  ASSERT_EQ(13, text_position->MaxTextOffset());
+  ASSERT_EQ(kTextValueLength, text_position->MaxTextOffset());
 }
 
 TEST_F(AXPositionTest, GetMaxTextOffsetFromButton) {
@@ -1240,7 +1279,7 @@ TEST_F(AXPositionTest, GetMaxTextOffsetFromTextfield) {
       text_field_, 0 /* text_offset */, ax::mojom::TextAffinity::kUpstream);
   ASSERT_NE(nullptr, text_position);
   ASSERT_TRUE(text_position->IsTextPosition());
-  ASSERT_EQ(13, text_position->MaxTextOffset());
+  ASSERT_EQ(kTextValueLength, text_position->MaxTextOffset());
 }
 
 TEST_F(AXPositionTest, GetMaxTextOffsetFromStaticText) {
@@ -1248,7 +1287,7 @@ TEST_F(AXPositionTest, GetMaxTextOffsetFromStaticText) {
       static_text1_, 0 /* text_offset */, ax::mojom::TextAffinity::kUpstream);
   ASSERT_NE(nullptr, text_position);
   ASSERT_TRUE(text_position->IsTextPosition());
-  ASSERT_EQ(6, text_position->MaxTextOffset());
+  ASSERT_EQ(kLine1Length, text_position->MaxTextOffset());
 }
 
 TEST_F(AXPositionTest, GetMaxTextOffsetFromInlineTextBox) {
@@ -1256,7 +1295,7 @@ TEST_F(AXPositionTest, GetMaxTextOffsetFromInlineTextBox) {
       inline_box1_, 0 /* text_offset */, ax::mojom::TextAffinity::kUpstream);
   ASSERT_NE(nullptr, text_position);
   ASSERT_TRUE(text_position->IsTextPosition());
-  ASSERT_EQ(6, text_position->MaxTextOffset());
+  ASSERT_EQ(kLine1Length, text_position->MaxTextOffset());
 }
 
 TEST_F(AXPositionTest, GetMaxTextOffsetFromLineBreak) {
@@ -1264,7 +1303,7 @@ TEST_F(AXPositionTest, GetMaxTextOffsetFromLineBreak) {
       line_break_, 0 /* text_offset */, ax::mojom::TextAffinity::kUpstream);
   ASSERT_NE(nullptr, text_position);
   ASSERT_TRUE(text_position->IsTextPosition());
-  ASSERT_EQ(1, text_position->MaxTextOffset());
+  ASSERT_EQ(kLineBreakLength, text_position->MaxTextOffset());
 }
 
 TEST_F(AXPositionTest, GetMaxTextOffsetUpdate) {
@@ -1793,6 +1832,18 @@ TEST_F(AXPositionTest, AtStartAndEndOfLineInsideTextField) {
   // text, and the second one three. There are inline text boxes containing only
   // white space at the start and end of both text fields, which is a valid
   // AXTree that might be generated by our renderer.
+  //
+  // ++1 kRootWebArea
+  // ++++2 kTextField " Text field one "
+  // ++++++3 kStaticText " Text field one "
+  // ++++++++4 kInlineTextBox " "
+  // ++++++++5 kInlineTextBox "Text field one"
+  // ++++++++6 kInlineTextBox " "
+  // ++++7 kTextField " Text field two "
+  // ++++++8 kStaticText " Text field two "
+  // ++++++++9  kInlineTextBox " "
+  // ++++++++10 kInlineTextBox "Text field two"
+  // ++++++++11 kInlineTextBox " "
   AXNodeData root_data;
   root_data.id = 1;
   root_data.role = ax::mojom::Role::kRootWebArea;
@@ -2901,7 +2952,7 @@ TEST_F(AXPositionTest, AtStartOrEndOfParagraphWithIgnoredNodes) {
 
 TEST_F(AXPositionTest, AtStartOrEndOfParagraphWithEmbeddedObjectCharacter) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // This test ensures that "At{Start|End}OfParagraph" work correctly when there
   // are embedded objects present near a paragraph boundary.
@@ -3343,7 +3394,7 @@ TEST_F(AXPositionTest, LowestCommonAncestor) {
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(text_field_.id, test_position->anchor_id());
   // The text offset should point to the second line.
-  EXPECT_EQ(7, test_position->text_offset());
+  EXPECT_EQ(kLine1AndBreakLength, test_position->text_offset());
 }
 
 TEST_F(AXPositionTest, AsTreePositionWithNullPosition) {
@@ -3408,7 +3459,7 @@ TEST_F(AXPositionTest, AsTreePositionWithTextPosition) {
   EXPECT_EQ(GetTreeID(), test_position->tree_id());
   EXPECT_EQ(inline_box2_.id, test_position->anchor_id());
   EXPECT_EQ(0, test_position->child_index());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
 }
 
 TEST_F(AXPositionTest, AsTextPositionWithNullPosition) {
@@ -3432,7 +3483,7 @@ TEST_F(AXPositionTest, AsTextPositionWithTreePosition) {
   EXPECT_EQ(text_field_.id, test_position->anchor_id());
   // The created text position should point to the 6th character inside the text
   // field, i.e. the line break.
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   // But its child index should be unchanged.
   EXPECT_EQ(1, test_position->child_index());
   // And the affinity cannot be anything other than downstream because we
@@ -3460,7 +3511,7 @@ TEST_F(AXPositionTest, AsTextPositionWithTreePosition) {
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(GetTreeID(), test_position->tree_id());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   EXPECT_EQ(0, test_position->child_index());
   EXPECT_EQ(ax::mojom::TextAffinity::kDownstream, test_position->affinity());
 }
@@ -3812,7 +3863,7 @@ TEST_F(AXPositionTest, AsLeafTextPositionWithTextPosition) {
   EXPECT_TRUE(test_position->IsLeafTextPosition());
   EXPECT_EQ(GetTreeID(), test_position->tree_id());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   EXPECT_EQ(ax::mojom::TextAffinity::kDownstream, test_position->affinity());
 
   // Create a text position pointing to the line break character inside the text
@@ -3826,7 +3877,7 @@ TEST_F(AXPositionTest, AsLeafTextPositionWithTextPosition) {
   EXPECT_TRUE(test_position->IsLeafTextPosition());
   EXPECT_EQ(GetTreeID(), test_position->tree_id());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   EXPECT_EQ(ax::mojom::TextAffinity::kDownstream, test_position->affinity());
 
   // Create a text position on the root, pointing to the line break character
@@ -3956,7 +4007,7 @@ TEST_F(AXPositionTest, AsLeafTextPositionWithTextPositionAndEmptyTextSandwich) {
 
 TEST_F(AXPositionTest, AsLeafTextPositionWithTextPositionAndEmbeddedObject) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++1 kRootWebArea "<embedded_object><embedded_object>"
   // ++++2 kImage alt="Test image"
@@ -4510,6 +4561,176 @@ TEST_F(AXPositionTest, CreatePositionAtTextBoundaryContentStartEndIsIgnored) {
   EXPECT_EQ(ax::mojom::TextAffinity::kDownstream, test_position->affinity());
 }
 
+TEST_F(AXPositionTest, CreatePositionAtLineBoundaryWithTrailingIgnoredContent) {
+  // A block whose text is immediately followed by an ignored leaf, e.g. a
+  // <code> element ending in an aria-hidden gutter.
+  // +-root_data
+  //   +-code_data           "L1\nL2"
+  //   | +-static_text_data_1 "L1"
+  //   | | +-inline_box_data_1 "L1"
+  //   | +-line_break_data    "\n"
+  //   | +-static_text_data_2 "L2"
+  //   | | +-inline_box_data_2 "L2"
+  //   | +-gutter_data IGNORED
+  //   |   +-gutter_text_data IGNORED "12"
+  constexpr AXNodeID kRootId = 1;
+  constexpr AXNodeID kCodeId = 2;
+  constexpr AXNodeID kStaticText1Id = 3;
+  constexpr AXNodeID kInlineBox1Id = 4;
+  constexpr AXNodeID kLineBreakId = 5;
+  constexpr AXNodeID kStaticText2Id = 6;
+  constexpr AXNodeID kInlineBox2Id = 7;
+  constexpr AXNodeID kGutterId = 8;
+  constexpr AXNodeID kGutterTextId = 9;
+
+  AXNodeData root_data;
+  root_data.id = kRootId;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData code_data;
+  code_data.id = kCodeId;
+  code_data.role = ax::mojom::Role::kGenericContainer;
+  code_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+
+  AXNodeData static_text_data_1;
+  static_text_data_1.id = kStaticText1Id;
+  static_text_data_1.role = ax::mojom::Role::kStaticText;
+  static_text_data_1.SetName("L1");
+
+  AXNodeData inline_box_data_1;
+  inline_box_data_1.id = kInlineBox1Id;
+  inline_box_data_1.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_data_1.SetName("L1");
+  inline_box_data_1.AddIntAttribute(ax::mojom::IntAttribute::kNextOnLineId,
+                                    kLineBreakId);
+
+  AXNodeData line_break_data;
+  line_break_data.id = kLineBreakId;
+  line_break_data.role = ax::mojom::Role::kLineBreak;
+  line_break_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+  line_break_data.SetName("\n");
+  line_break_data.AddIntAttribute(ax::mojom::IntAttribute::kPreviousOnLineId,
+                                  kInlineBox1Id);
+
+  AXNodeData static_text_data_2;
+  static_text_data_2.id = kStaticText2Id;
+  static_text_data_2.role = ax::mojom::Role::kStaticText;
+  static_text_data_2.SetName("L2");
+
+  AXNodeData inline_box_data_2;
+  inline_box_data_2.id = kInlineBox2Id;
+  inline_box_data_2.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_data_2.SetName("L2");
+
+  AXNodeData gutter_data;
+  gutter_data.id = kGutterId;
+  gutter_data.role = ax::mojom::Role::kGenericContainer;
+  gutter_data.AddState(ax::mojom::State::kIgnored);
+
+  AXNodeData gutter_text_data;
+  gutter_text_data.id = kGutterTextId;
+  gutter_text_data.role = ax::mojom::Role::kStaticText;
+  gutter_text_data.AddState(ax::mojom::State::kIgnored);
+  gutter_text_data.SetName("12");
+
+  root_data.child_ids = {code_data.id};
+  code_data.child_ids = {static_text_data_1.id, line_break_data.id,
+                         static_text_data_2.id, gutter_data.id};
+  static_text_data_1.child_ids = {inline_box_data_1.id};
+  static_text_data_2.child_ids = {inline_box_data_2.id};
+  gutter_data.child_ids = {gutter_text_data.id};
+
+  SetTree(CreateAXTree({root_data, code_data, static_text_data_1,
+                        inline_box_data_1, line_break_data, static_text_data_2,
+                        inline_box_data_2, gutter_data, gutter_text_data}));
+
+  // The block's unignored text is "L1\nL2". The first line's forward line start
+  // is the second line, confirming the block has two distinct lines.
+  TestPositionType text_position = CreateTextPosition(
+      code_data, 0 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
+  ASSERT_NE(nullptr, text_position);
+  ASSERT_FALSE(text_position->IsIgnored());
+  TestPositionType line_position = text_position->CreatePositionAtTextBoundary(
+      ax::mojom::TextBoundary::kLineStart, ax::mojom::MoveDirection::kForward,
+      {AXBoundaryBehavior::kStopAtAnchorBoundary,
+       AXBoundaryDetection::kDontCheckInitialPosition});
+  ASSERT_NE(nullptr, line_position);
+  EXPECT_TRUE(line_position->IsTextPosition());
+  EXPECT_EQ(code_data.id, line_position->anchor_id());
+  EXPECT_EQ(3, line_position->text_offset());
+
+  // The last line ("L2") starts at offset 3. Its forward line start runs off
+  // the end into the ignored gutter. The end of the block is a valid boundary
+  // rooted on the block, so this must not be null.
+  text_position = CreateTextPosition(code_data, 3 /* text_offset */,
+                                     ax::mojom::TextAffinity::kDownstream);
+  line_position = text_position->CreatePositionAtTextBoundary(
+      ax::mojom::TextBoundary::kLineStart, ax::mojom::MoveDirection::kForward,
+      {AXBoundaryBehavior::kStopAtAnchorBoundary,
+       AXBoundaryDetection::kDontCheckInitialPosition});
+  ASSERT_NE(nullptr, line_position);
+  EXPECT_TRUE(line_position->IsTextPosition());
+  EXPECT_EQ(code_data.id, line_position->anchor_id());
+  EXPECT_EQ(5, line_position->text_offset());
+}
+
+TEST_F(AXPositionTest, CreateLineStartBoundaryStaysOnAnchorForEmptyObjectLeaf) {
+  // A container whose only content is an empty-object leaf: a node with a
+  // single ignored child, such as an icon whose graphic is ignored. Its
+  // accessible text is a single embedded object character. The line-start
+  // boundary at the start of the container must stay on the container, not
+  // descend into the empty-object leaf.
+  // +-root_data
+  //   +-container_data       "[OBJ]"
+  //     +-icon_data          "[OBJ]" (leaf, because its only child is ignored)
+  //       +-graphic_data     IGNORED
+  constexpr AXNodeID kRootId = 1;
+  constexpr AXNodeID kContainerId = 2;
+  constexpr AXNodeID kIconId = 3;
+  constexpr AXNodeID kGraphicId = 4;
+
+  AXNodeData root_data;
+  root_data.id = kRootId;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData container_data;
+  container_data.id = kContainerId;
+  container_data.role = ax::mojom::Role::kGenericContainer;
+  container_data.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData icon_data;
+  icon_data.id = kIconId;
+  icon_data.role = ax::mojom::Role::kGenericContainer;
+
+  AXNodeData graphic_data;
+  graphic_data.id = kGraphicId;
+  graphic_data.role = ax::mojom::Role::kNone;
+  graphic_data.AddState(ax::mojom::State::kIgnored);
+
+  root_data.child_ids = {container_data.id};
+  container_data.child_ids = {icon_data.id};
+  icon_data.child_ids = {graphic_data.id};
+
+  SetTree(CreateAXTree({root_data, container_data, icon_data, graphic_data}));
+
+  // A backward line-start search from the start of the container, stopping at
+  // its boundary. The result must remain rooted on the container.
+  TestPositionType text_position =
+      CreateTextPosition(container_data, 0 /* text_offset */,
+                         ax::mojom::TextAffinity::kDownstream);
+  ASSERT_NE(nullptr, text_position);
+  TestPositionType line_position = text_position->CreatePositionAtTextBoundary(
+      ax::mojom::TextBoundary::kLineStart, ax::mojom::MoveDirection::kBackward,
+      {AXBoundaryBehavior::kStopAtAnchorBoundary,
+       AXBoundaryDetection::kCheckInitialPosition});
+  ASSERT_NE(nullptr, line_position);
+  ASSERT_FALSE(line_position->IsNullPosition());
+  EXPECT_EQ(container_data.id, line_position->anchor_id());
+}
+
 TEST_F(AXPositionTest, CreatePositionAtInvalidGraphemeBoundary) {
   std::vector<int> text_offsets;
   SetTree(CreateMultilingualDocument(&text_offsets));
@@ -4632,7 +4853,7 @@ TEST_F(AXPositionTest, CreatePositionAtEndOfAnchorWithTextPosition) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   EXPECT_EQ(ax::mojom::TextAffinity::kDownstream, test_position->affinity());
 
   text_position = CreateTextPosition(inline_box1_, 5 /* text_offset */,
@@ -4643,7 +4864,7 @@ TEST_F(AXPositionTest, CreatePositionAtEndOfAnchorWithTextPosition) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   // Affinity should have been reset to the default value.
   EXPECT_EQ(ax::mojom::TextAffinity::kDownstream, test_position->affinity());
 }
@@ -4671,7 +4892,7 @@ TEST_F(AXPositionTest, CreatePositionAtPreviousFormatStartWithNullPosition) {
 
 TEST_F(AXPositionTest, CreatePositionAtPreviousFormatStartWithTreePosition) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
   TestPositionType tree_position =
       CreateTreePosition(static_text1_, 1 /* child_index */);
   ASSERT_NE(nullptr, tree_position);
@@ -4731,7 +4952,7 @@ TEST_F(AXPositionTest, CreatePositionAtPreviousFormatStartWithTreePosition) {
 
 TEST_F(AXPositionTest, CreatePositionAtPreviousFormatStartWithTextPosition) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
   TestPositionType text_position = CreateTextPosition(
       inline_box1_, 2 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
   ASSERT_NE(nullptr, text_position);
@@ -4807,7 +5028,7 @@ TEST_F(AXPositionTest, CreatePositionAtNextFormatEndWithNullPosition) {
 
 TEST_F(AXPositionTest, CreatePositionAtNextFormatEndWithTreePosition) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
   TestPositionType tree_position =
       CreateTreePosition(button_, 0 /* child_index */);
   ASSERT_NE(nullptr, tree_position);
@@ -4874,7 +5095,7 @@ TEST_F(AXPositionTest, CreatePositionAtNextFormatEndWithTreePosition) {
 
 TEST_F(AXPositionTest, CreatePositionAtNextFormatEndWithTextPosition) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
   TestPositionType text_position = CreateTextPosition(
       button_, 0 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
   ASSERT_NE(nullptr, text_position);
@@ -4902,7 +5123,7 @@ TEST_F(AXPositionTest, CreatePositionAtNextFormatEndWithTextPosition) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
 
   test_position = test_position->CreateNextFormatEndPosition(
       {AXBoundaryBehavior::kStopAtLastAnchorBoundary,
@@ -4949,7 +5170,7 @@ TEST_F(AXPositionTest, CreatePositionAtNextFormatEndWithTextPosition) {
 
 TEST_F(AXPositionTest, CreatePositionAtNextFormatEndOnEmbeddedObject) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
   // ++root_1
   // ++++heading_2
   // ++++++static_text_3 "heading 1"
@@ -5945,7 +6166,7 @@ TEST_F(AXPositionTest, CreatePositionAtStartOfAXTreeWithNullPosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -5975,7 +6196,7 @@ TEST_F(AXPositionTest, CreatePositionAtStartOfAXTreeWithTreePosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -6135,7 +6356,7 @@ TEST_F(AXPositionTest, CreatePositionAtStartOfAXTreeWithTextPosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -6307,7 +6528,7 @@ TEST_F(AXPositionTest, CreatePositionAtEndOfAXTreeWithNullPosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -6336,7 +6557,7 @@ TEST_F(AXPositionTest, CreatePositionAtEndOfAXTreeWithTreePosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -6495,7 +6716,7 @@ TEST_F(AXPositionTest, CreatePositionAtEndOfAXTreeWithTextPosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -6665,7 +6886,7 @@ TEST_F(AXPositionTest, CreatePositionAtStartOfContentWithNullPosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -6694,7 +6915,7 @@ TEST_F(AXPositionTest, CreatePositionAtStartOfContentWithTreePosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -6853,7 +7074,7 @@ TEST_F(AXPositionTest, CreatePositionAtStartOfContentWithTextPosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -7024,7 +7245,7 @@ TEST_F(AXPositionTest, CreatePositionAtEndOfContentWithNullPosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -7053,7 +7274,7 @@ TEST_F(AXPositionTest, CreatePositionAtEndOfContentWithTreePosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -7212,7 +7433,7 @@ TEST_F(AXPositionTest, CreatePositionAtEndOfContentWithTextPosition) {
   // ++++TextField (Address bar - part of first tree.)
   AXNodeData window, back_button, web_view, root_web_area, iframe_root,
       paragraph, address_bar;
-  std::vector<TestAXTreeManager> trees;
+  std::vector<TestSingleAXTreeManager> trees;
   ASSERT_NO_FATAL_FAILURE(CreateBrowserWindow(window, back_button, web_view,
                                               root_web_area, iframe_root,
                                               paragraph, address_bar, trees));
@@ -7540,7 +7761,7 @@ TEST_F(AXPositionTest, CreateParentPositionWithMoveDirection) {
   // accessibility tree, e.g., in IAccessible2, UI Automation and Linux ATK
   // APIs.
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // This test ensures that "CreateParentPosition" (and by extension
   // "CreateAncestorPosition") works correctly when it is given either a tree or
@@ -8358,7 +8579,7 @@ TEST_F(AXPositionTest, CreateParentAndLeafPositionWithEmptyNodes) {
 
 TEST_F(AXPositionTest, CreateParentAndLeafPositionWithEmbeddedObjects) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++kRootWebArea "<embedded>Hello<embedded>"
   // ++++kParagraph "Paragraph"
@@ -8890,7 +9111,7 @@ TEST_F(AXPositionTest,
   EXPECT_TRUE(test_position->IsNullPosition());
 }
 
-// TODO(crbug.com/1333970) It is not legal to call
+// TODO(crbug.com/40059879) It is not legal to call
 // AsLeafTextPositionBeforeCharacter or AsLeafTextPositionAfterCharacter with
 // a text position using out-of-range offsets. It's necessary to call
 // AsValidPosition() first. Therefore, this test currently triggers a DCHECK.
@@ -9073,7 +9294,7 @@ TEST_F(AXPositionTest, AsLeafTextPositionAfterCharacterNoAdjustment) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   EXPECT_EQ(ax::mojom::TextAffinity::kDownstream, test_position->affinity());
 
   text_position = CreateTextPosition(text_field_, 13 /* text_offset */,
@@ -9094,7 +9315,7 @@ TEST_F(AXPositionTest, AsLeafTextPositionAfterCharacterNoAdjustment) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
 
   text_position = CreateTextPosition(line_break_, 1 /* text_offset */,
                                      ax::mojom::TextAffinity::kDownstream);
@@ -9169,7 +9390,7 @@ TEST_F(AXPositionTest, AsLeafTextPositionBeforeCharacter) {
 TEST_F(AXPositionTest,
        AsLeafTextPositionBeforeCharacterIncludingGeneratedNewlines) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   TestPositionType text_position = CreateTextPosition(
       button_, 1 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
@@ -9293,7 +9514,7 @@ TEST_F(AXPositionTest, AsLeafTextPositionAfterCharacter) {
 TEST_F(AXPositionTest,
        AsLeafTextPositionAfterCharacterIncludingGeneratedNewlines) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   TestPositionType text_position = CreateTextPosition(
       button_, 0 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
@@ -9352,7 +9573,7 @@ TEST_F(AXPositionTest,
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
 
   text_position = CreateTextPosition(inline_box2_, 0 /* text_offset */,
                                      ax::mojom::TextAffinity::kUpstream);
@@ -9478,7 +9699,7 @@ TEST_F(AXPositionTest, AsValidPosition) {
 
 TEST_F(AXPositionTest, AsValidPositionInDescendantOfEmptyObject) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++1 kRootWebArea
   // ++++2 kButton
@@ -9610,21 +9831,21 @@ TEST_F(AXPositionTest, CreateNextCharacterPosition) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   test_position = text_position->CreateNextCharacterPosition(
       {AXBoundaryBehavior::kStopAtAnchorBoundary,
        AXBoundaryDetection::kDontCheckInitialPosition});
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   test_position = text_position->CreateNextCharacterPosition(
       {AXBoundaryBehavior::kStopAtLastAnchorBoundary,
        AXBoundaryDetection::kDontCheckInitialPosition});
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
 
   text_position = CreateTextPosition(inline_box1_, 6 /* text_offset */,
                                      ax::mojom::TextAffinity::kDownstream);
@@ -9637,7 +9858,7 @@ TEST_F(AXPositionTest, CreateNextCharacterPosition) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   test_position = text_position->CreateNextCharacterPosition(
       {AXBoundaryBehavior::kCrossBoundary,
        AXBoundaryDetection::kDontCheckInitialPosition});
@@ -9651,7 +9872,7 @@ TEST_F(AXPositionTest, CreateNextCharacterPosition) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   test_position = text_position->CreateNextCharacterPosition(
       {AXBoundaryBehavior::kStopAtLastAnchorBoundary,
        AXBoundaryDetection::kDontCheckInitialPosition});
@@ -9752,14 +9973,14 @@ TEST_F(AXPositionTest, CreateNextCharacterPosition) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(text_field_.id, test_position->anchor_id());
-  EXPECT_EQ(13, test_position->text_offset());
+  EXPECT_EQ(kTextValueLength, test_position->text_offset());
   // Affinity should have been reset to downstream.
   EXPECT_EQ(ax::mojom::TextAffinity::kDownstream, test_position->affinity());
 }
 
 TEST_F(AXPositionTest, CreateNextCharacterPositionIncludingGeneratedNewlines) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   TestPositionType text_position = CreateTextPosition(
       inline_box1_, 6 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
@@ -9772,7 +9993,7 @@ TEST_F(AXPositionTest, CreateNextCharacterPositionIncludingGeneratedNewlines) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   test_position = text_position->CreateNextCharacterPosition(
       {AXBoundaryBehavior::kCrossBoundary,
        AXBoundaryDetection::kDontCheckInitialPosition});
@@ -9786,7 +10007,7 @@ TEST_F(AXPositionTest, CreateNextCharacterPositionIncludingGeneratedNewlines) {
   EXPECT_NE(nullptr, test_position);
   EXPECT_TRUE(test_position->IsTextPosition());
   EXPECT_EQ(inline_box1_.id, test_position->anchor_id());
-  EXPECT_EQ(6, test_position->text_offset());
+  EXPECT_EQ(kLine1Length, test_position->text_offset());
   test_position = text_position->CreateNextCharacterPosition(
       {AXBoundaryBehavior::kStopAtLastAnchorBoundary,
        AXBoundaryDetection::kDontCheckInitialPosition});
@@ -10083,7 +10304,7 @@ TEST_F(AXPositionTest, CreatePreviousCharacterPosition) {
 TEST_F(AXPositionTest,
        CreatePreviousCharacterPositionIncludingGeneratedNewlines) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   TestPositionType text_position = CreateTextPosition(
       inline_box2_, 0 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
@@ -10615,7 +10836,7 @@ TEST_F(AXPositionTest, OperatorEqualsSameTextOffsetDifferentAnchorIdLeaf) {
 
 TEST_F(AXPositionTest, OperatorEqualsTextPositionsInTextField) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++1 kRootWebArea
   // ++++2 kTextField editable
@@ -10678,7 +10899,7 @@ TEST_F(AXPositionTest, OperatorEqualsTextPositionsInTextField) {
 
 TEST_F(AXPositionTest, OperatorEqualsTextPositionsInSearchBox) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++1 kRootWebArea
   // ++++2 kSearchBox editable
@@ -10776,7 +10997,7 @@ TEST_F(AXPositionTest, OperatorEqualsTextPositionsInSearchBox) {
 
 TEST_F(AXPositionTest, OperatorsTreePositionsAroundEmbeddedCharacter) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++1 kRootWebArea "<embedded_object><embedded_object>"
   // ++++2 kParagraph "<embedded_object>"
@@ -10908,7 +11129,7 @@ TEST_F(AXPositionTest, OperatorsTreePositionsAroundEmbeddedCharacter) {
 
 TEST_F(AXPositionTest, OperatorsTextPositionsAroundEmbeddedCharacter) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++1 kRootWebArea "<embedded_object><embedded_object>"
   // ++++2 kParagraph "<embedded_object>"
@@ -11802,7 +12023,7 @@ TEST_F(AXPositionTest, CreatePreviousWordPositionInList) {
 
 TEST_F(AXPositionTest, EmptyObjectReplacedByCharacterTextNavigation) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++1 kRootWebArea
   // ++++2 kStaticText
@@ -12131,7 +12352,7 @@ TEST_F(AXPositionTest, EmptyObjectReplacedByCharacterTextNavigation) {
 
 TEST_F(AXPositionTest, EmptyObjectReplacedByCharacterEmbedObject) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // Parent Tree
   // ++1 kRootWebArea
@@ -12139,7 +12360,7 @@ TEST_F(AXPositionTest, EmptyObjectReplacedByCharacterEmbedObject) {
   //
   // Child Tree
   // ++1 kDocument
-  ui::AXTreeID child_tree_id = ui::AXTreeID::CreateNewAXTreeID();
+  AXTreeID child_tree_id = AXTreeID::CreateNewAXTreeID();
 
   // Create tree manager for parent tree.
   AXNodeData root;
@@ -12166,7 +12387,7 @@ TEST_F(AXPositionTest, EmptyObjectReplacedByCharacterEmbedObject) {
   update.has_tree_data = true;
   update.root_id = child_root.id;
   update.nodes.push_back(child_root);
-  TestAXTreeManager child_tree_manager(std::make_unique<AXTree>(update));
+  TestSingleAXTreeManager child_tree_manager(std::make_unique<AXTree>(update));
 
   // Verify that kEmbeddedObject node with child tree is not treated as an
   // empty object.
@@ -12183,7 +12404,7 @@ TEST_F(AXPositionTest, TextNavigationWithCollapsedCombobox) {
   // expanded, it must be accessible in the tree. This test ensures we can't
   // navigate into the options of a collapsed menu list popup.
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   // ++1 kRootWebArea
   // ++++2 kStaticText "Hi"
@@ -12343,9 +12564,146 @@ TEST_F(AXPositionTest, TextNavigationWithCollapsedCombobox) {
   EXPECT_EQ(2, position->text_offset());
 }
 
+TEST_F(AXPositionTest, CreatePositionAtTextBoundaryWithHiddenLineBreak) {
+  // This test simulates a contenteditable div with three lines, where the
+  // middle line has a hidden <br> element. Structure: rootWebArea
+  // ++genericContainer editable
+  // ++++div "first"
+  // ++++div id="parent"
+  // ++++++span (contenteditable=false)
+  // ++++++span "second"
+  // ++++++br (style="display: none")
+  // ++++div "third"
+
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData editable_container;
+  editable_container.id = 12;
+  editable_container.role = ax::mojom::Role::kGenericContainer;
+  editable_container.AddState(ax::mojom::State::kEditable);
+  editable_container.AddState(ax::mojom::State::kFocusable);
+  editable_container.AddState(ax::mojom::State::kMultiline);
+  editable_container.AddState(ax::mojom::State::kRichlyEditable);
+  editable_container.AddBoolAttribute(
+      ax::mojom::BoolAttribute::kIsLineBreakingObject, true);
+
+  AXNodeData first_div;
+  first_div.id = 3;
+  first_div.role = ax::mojom::Role::kGenericContainer;
+  first_div.AddState(ax::mojom::State::kEditable);
+  first_div.AddState(ax::mojom::State::kRichlyEditable);
+  first_div.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+
+  AXNodeData first_static_text;
+  first_static_text.id = 8;
+  first_static_text.role = ax::mojom::Role::kStaticText;
+  first_static_text.AddState(ax::mojom::State::kEditable);
+  first_static_text.AddState(ax::mojom::State::kRichlyEditable);
+  first_static_text.SetName("first");
+
+  AXNodeData parent_div;
+  parent_div.id = 4;
+  parent_div.role = ax::mojom::Role::kGenericContainer;
+  parent_div.AddState(ax::mojom::State::kEditable);
+  parent_div.AddState(ax::mojom::State::kRichlyEditable);
+  parent_div.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                              true);
+
+  AXNodeData span_noneditable;
+  span_noneditable.id = 13;
+  span_noneditable.role = ax::mojom::Role::kGenericContainer;
+
+  AXNodeData second_static_text;
+  second_static_text.id = 9;
+  second_static_text.role = ax::mojom::Role::kStaticText;
+  second_static_text.AddState(ax::mojom::State::kEditable);
+  second_static_text.AddState(ax::mojom::State::kRichlyEditable);
+  second_static_text.SetName("second");
+
+  AXNodeData hidden_br;
+  hidden_br.id = 15;
+  hidden_br.role = ax::mojom::Role::kGenericContainer;
+  hidden_br.AddState(ax::mojom::State::kIgnored);
+  hidden_br.AddState(ax::mojom::State::kInvisible);
+  hidden_br.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+
+  AXNodeData third_div;
+  third_div.id = 5;
+  third_div.role = ax::mojom::Role::kGenericContainer;
+  third_div.AddState(ax::mojom::State::kEditable);
+  third_div.AddState(ax::mojom::State::kRichlyEditable);
+  third_div.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+
+  AXNodeData third_static_text;
+  third_static_text.id = 10;
+  third_static_text.role = ax::mojom::Role::kStaticText;
+  third_static_text.AddState(ax::mojom::State::kEditable);
+  third_static_text.AddState(ax::mojom::State::kRichlyEditable);
+  third_static_text.SetName("third");
+
+  root_data.child_ids = {editable_container.id};
+  editable_container.child_ids = {first_div.id, parent_div.id, third_div.id};
+  first_div.child_ids = {first_static_text.id};
+  parent_div.child_ids = {span_noneditable.id, second_static_text.id,
+                          hidden_br.id};
+  third_div.child_ids = {third_static_text.id};
+
+  SetTree(
+      CreateAXTree({root_data, editable_container, first_div, first_static_text,
+                    parent_div, span_noneditable, second_static_text, hidden_br,
+                    third_div, third_static_text}));
+
+  TestPositionType text_position =
+      CreateTextPosition(parent_div, 0, ax::mojom::TextAffinity::kDownstream);
+  ASSERT_NE(nullptr, text_position);
+  ASSERT_TRUE(text_position->IsTextPosition());
+
+  // Navigate to the next line start boundary.
+  TestPositionType line_position = text_position->CreatePositionAtTextBoundary(
+      ax::mojom::TextBoundary::kLineStart, ax::mojom::MoveDirection::kForward,
+      {AXBoundaryBehavior::kStopAtAnchorBoundary,
+       AXBoundaryDetection::kDontCheckInitialPosition});
+
+  ASSERT_NE(nullptr, line_position);
+  EXPECT_TRUE(line_position->IsTextPosition());
+  EXPECT_EQ(parent_div.id, line_position->anchor_id());
+  EXPECT_EQ(6, line_position->text_offset());
+
+  line_position = text_position->CreatePositionAtTextBoundary(
+      ax::mojom::TextBoundary::kLineStart, ax::mojom::MoveDirection::kBackward,
+      {AXBoundaryBehavior::kStopAtAnchorBoundary,
+       AXBoundaryDetection::kDontCheckInitialPosition});
+
+  ASSERT_NE(nullptr, line_position);
+  EXPECT_TRUE(line_position->IsTextPosition());
+  EXPECT_EQ(parent_div.id, line_position->anchor_id());
+  EXPECT_EQ(0, line_position->text_offset());
+
+  text_position =
+      CreateTextPosition(third_div, 4, ax::mojom::TextAffinity::kDownstream);
+  ASSERT_NE(nullptr, text_position);
+  ASSERT_TRUE(text_position->IsTextPosition());
+
+  // Navigate to the next line start boundary.
+  line_position = text_position->CreatePositionAtTextBoundary(
+      ax::mojom::TextBoundary::kLineStart, ax::mojom::MoveDirection::kBackward,
+      {AXBoundaryBehavior::kStopAtAnchorBoundary,
+       AXBoundaryDetection::kDontCheckInitialPosition});
+
+  ASSERT_NE(nullptr, line_position);
+  EXPECT_TRUE(line_position->IsTextPosition());
+  EXPECT_EQ(third_div.id, line_position->anchor_id());
+  EXPECT_EQ(0, line_position->text_offset());
+}
+
 TEST_F(AXPositionTest, GetUnignoredSelectionWithLeafNodes) {
   ScopedAXEmbeddedObjectBehaviorSetter ax_embedded_object_behavior(
-      AXEmbeddedObjectBehavior::kExposeCharacter);
+      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext);
 
   AXNodeData root_data;
   root_data.id = 1;
@@ -12497,10 +12855,18 @@ TEST_P(AXPositionTextNavigationTestWithParam,
       CreateTextPosition(GetParam().start_node_id, GetParam().start_offset,
                          ax::mojom::TextAffinity::kUpstream);
   ASSERT_TRUE(text_position->IsTextPosition());
+
+  bool upstream_is_not_moved = GetParam().upstream_is_not_moved;
   for (const std::string& expectation : GetParam().expectations) {
+    auto prev_position = text_position->Clone();
     text_position = GetParam().TestMethod.Run(text_position);
     EXPECT_NE(nullptr, text_position);
-    EXPECT_EQ(expectation, text_position->ToString());
+
+    if (upstream_is_not_moved) {
+      EXPECT_EQ(*prev_position, *text_position);
+    } else {
+      EXPECT_EQ(expectation, text_position->ToString());
+    }
   }
 }
 
@@ -14877,7 +15243,8 @@ INSTANTIATE_TEST_SUITE_P(
             0 /* text_offset */,
             {"TextPosition anchor_id=1 text_offset=7 "
              "affinity=downstream annotated_text=Line 1\n<L>ine 2",
-             "NullPosition"}},
+             "NullPosition"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -14888,7 +15255,8 @@ INSTANTIATE_TEST_SUITE_P(
             0 /* text_offset */,
             {"TextPosition anchor_id=4 text_offset=7 "
              "affinity=downstream annotated_text=Line 1\n<L>ine 2",
-             "NullPosition"}},
+             "NullPosition"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -14899,7 +15267,8 @@ INSTANTIATE_TEST_SUITE_P(
             1 /* text_offset */,
             {"TextPosition anchor_id=9 text_offset=0 "
              "affinity=downstream annotated_text=<L>ine 2",
-             "NullPosition"}},
+             "NullPosition"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -14908,7 +15277,8 @@ INSTANTIATE_TEST_SUITE_P(
             }),
             INLINE_BOX2_ID,
             4 /* text_offset */,
-            {"NullPosition"}}));
+            {"NullPosition"},
+            /* upstream_is_not_moved = */ true}));
 
 INSTANTIATE_TEST_SUITE_P(
     CreateNextLineStartPositionWithBoundaryBehaviorStopAtAnchorBoundary,
@@ -14925,7 +15295,8 @@ INSTANTIATE_TEST_SUITE_P(
             {"TextPosition anchor_id=1 text_offset=7 "
              "affinity=downstream annotated_text=Line 1\n<L>ine 2",
              "TextPosition anchor_id=1 text_offset=13 "
-             "affinity=downstream annotated_text=Line 1\nLine 2<>"}},
+             "affinity=downstream annotated_text=Line 1\nLine 2<>"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -14937,7 +15308,8 @@ INSTANTIATE_TEST_SUITE_P(
             {"TextPosition anchor_id=4 text_offset=7 "
              "affinity=downstream annotated_text=Line 1\n<L>ine 2",
              "TextPosition anchor_id=4 text_offset=13 "
-             "affinity=downstream annotated_text=Line 1\nLine 2<>"}},
+             "affinity=downstream annotated_text=Line 1\nLine 2<>"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -14947,7 +15319,8 @@ INSTANTIATE_TEST_SUITE_P(
             STATIC_TEXT1_ID,
             1 /* text_offset */,
             {"TextPosition anchor_id=5 text_offset=6 "
-             "affinity=downstream annotated_text=Line 1<>"}},
+             "affinity=downstream annotated_text=Line 1<>"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -14957,7 +15330,8 @@ INSTANTIATE_TEST_SUITE_P(
             INLINE_BOX2_ID,
             4 /* text_offset */,
             {"TextPosition anchor_id=9 text_offset=6 "
-             "affinity=downstream annotated_text=Line 2<>"}}));
+             "affinity=downstream annotated_text=Line 2<>"},
+            /* upstream_is_not_moved = */ true}));
 
 INSTANTIATE_TEST_SUITE_P(
     CreateNextLineStartPositionWithBoundaryBehaviorStopAtAnchorBoundaryOrIfAlreadyAtBoundary,
@@ -14975,7 +15349,8 @@ INSTANTIATE_TEST_SUITE_P(
             {"TextPosition anchor_id=1 text_offset=0 "
              "affinity=downstream annotated_text=<L>ine 1\nLine 2",
              "TextPosition anchor_id=1 text_offset=0 "
-             "affinity=downstream annotated_text=<L>ine 1\nLine 2"}},
+             "affinity=downstream annotated_text=<L>ine 1\nLine 2"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -14988,7 +15363,8 @@ INSTANTIATE_TEST_SUITE_P(
             {"TextPosition anchor_id=4 text_offset=0 "
              "affinity=downstream annotated_text=<L>ine 1\nLine 2",
              "TextPosition anchor_id=4 text_offset=0 "
-             "affinity=downstream annotated_text=<L>ine 1\nLine 2"}},
+             "affinity=downstream annotated_text=<L>ine 1\nLine 2"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -15001,7 +15377,8 @@ INSTANTIATE_TEST_SUITE_P(
             {"TextPosition anchor_id=5 text_offset=6 affinity=downstream "
              "annotated_text=Line 1<>",
              "TextPosition anchor_id=5 text_offset=6 affinity=downstream "
-             "annotated_text=Line 1<>"}},
+             "annotated_text=Line 1<>"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -15012,7 +15389,8 @@ INSTANTIATE_TEST_SUITE_P(
             INLINE_BOX2_ID,
             4 /* text_offset */,
             {"TextPosition anchor_id=9 text_offset=6 affinity=downstream "
-             "annotated_text=Line 2<>"}}));
+             "annotated_text=Line 2<>"},
+            /* upstream_is_not_moved = */ true}));
 
 INSTANTIATE_TEST_SUITE_P(
     CreateNextLineStartPositionWithBoundaryBehaviorStopAtLastAnchorBoundary,
@@ -15031,7 +15409,8 @@ INSTANTIATE_TEST_SUITE_P(
              "TextPosition anchor_id=1 text_offset=13 "
              "affinity=downstream annotated_text=Line 1\nLine 2<>",
              "TextPosition anchor_id=1 text_offset=13 "
-             "affinity=downstream annotated_text=Line 1\nLine 2<>"}},
+             "affinity=downstream annotated_text=Line 1\nLine 2<>"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -15045,7 +15424,8 @@ INSTANTIATE_TEST_SUITE_P(
              "TextPosition anchor_id=4 text_offset=13 "
              "affinity=downstream annotated_text=Line 1\nLine 2<>",
              "TextPosition anchor_id=4 text_offset=13 "
-             "affinity=downstream annotated_text=Line 1\nLine 2<>"}},
+             "affinity=downstream annotated_text=Line 1\nLine 2<>"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -15059,7 +15439,8 @@ INSTANTIATE_TEST_SUITE_P(
              "TextPosition anchor_id=9 text_offset=6 "
              "affinity=downstream annotated_text=Line 2<>",
              "TextPosition anchor_id=9 text_offset=6 "
-             "affinity=downstream annotated_text=Line 2<>"}},
+             "affinity=downstream annotated_text=Line 2<>"},
+            /* upstream_is_not_moved = */ true},
         TextNavigationTestParam{
             base::BindRepeating([](const TestPositionType& position) {
               return position->CreateNextLineStartPosition(
@@ -15071,7 +15452,8 @@ INSTANTIATE_TEST_SUITE_P(
             {"TextPosition anchor_id=9 text_offset=6 "
              "affinity=downstream annotated_text=Line 2<>",
              "TextPosition anchor_id=9 text_offset=6 "
-             "affinity=downstream annotated_text=Line 2<>"}}));
+             "affinity=downstream annotated_text=Line 2<>"},
+            /* upstream_is_not_moved = */ true}));
 
 INSTANTIATE_TEST_SUITE_P(
     CreatePreviousLineStartPositionWithBoundaryBehaviorCrossBoundary,
@@ -16868,5 +17250,162 @@ INSTANTIATE_TEST_SUITE_P(
              "affinity=downstream annotated_text=<>",
              "TextPosition anchor_id=3 text_offset=0 "
              "affinity=downstream annotated_text=<>"}}));
+
+// Tests for ComputeTextStartOfChildInParent, exercised indirectly through
+// format navigation (CreateNextFormatStartPosition). This creates a StaticText
+// with two InlineTextBoxes (simulating a line wrap), and a spelling marker on
+// the parent that partially overlaps the boxes. Format navigation should stop
+// at marker boundaries within an InlineTextBox, which requires correct
+// box-start computation via ComputeTextStartOfChildInParent.
+//
+// Tree structure:
+// ++1 kRootWebArea
+// ++++2 kStaticText "HelloWorld" (markers: spelling at [3,8])
+// ++++++3 kInlineTextBox "Hello" (box range [0,5) in parent)
+// ++++++4 kInlineTextBox "World" (box range [5,10) in parent)
+//
+// The spelling marker [3,8] clips to:
+//   Box 1 ("Hello"): local [3,5) — format boundary at offset 3
+//   Box 2 ("World"): local [0,3) — format boundary at offset 3
+TEST_F(AXPositionTest, ComputeTextStartOfChildInParent_FormatNavigation) {
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+
+  AXNodeData static_text_data;
+  static_text_data.id = 2;
+  static_text_data.role = ax::mojom::Role::kStaticText;
+  static_text_data.SetName("HelloWorld");
+  // Spelling marker crossing the box boundary: parent offsets [3,8).
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling)});
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerStarts, {3});
+  static_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                       {8});
+
+  AXNodeData inline_box_1;
+  inline_box_1.id = 3;
+  inline_box_1.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_1.SetName("Hello");
+  inline_box_1.AddIntListAttribute(ax::mojom::IntListAttribute::kWordStarts,
+                                   {0});
+  inline_box_1.AddIntListAttribute(ax::mojom::IntListAttribute::kWordEnds, {5});
+
+  AXNodeData inline_box_2;
+  inline_box_2.id = 4;
+  inline_box_2.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_2.SetName("World");
+  inline_box_2.AddIntListAttribute(ax::mojom::IntListAttribute::kWordStarts,
+                                   {0});
+  inline_box_2.AddIntListAttribute(ax::mojom::IntListAttribute::kWordEnds, {5});
+
+  static_text_data.child_ids = {inline_box_1.id, inline_box_2.id};
+  root_data.child_ids = {static_text_data.id};
+
+  SetTree(
+      CreateAXTree({root_data, static_text_data, inline_box_1, inline_box_2}));
+
+  // Start at position 0 of box 1 ("Hello"). Navigate forward by format.
+  // The spelling marker starts at local offset 3 in box 1, so the next
+  // format start should be at offset 3 in inline_box_1.
+  TestPositionType pos = CreateTextPosition(
+      inline_box_1, 0 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
+  ASSERT_TRUE(pos->IsTextPosition());
+
+  TestPositionType next_format = pos->CreateNextFormatStartPosition(
+      {AXBoundaryBehavior::kStopAtAnchorBoundary,
+       AXBoundaryDetection::kDontCheckInitialPosition});
+  ASSERT_TRUE(next_format->IsTextPosition());
+  // Should stop at the marker boundary at offset 3 in the first box.
+  EXPECT_EQ(next_format->text_offset(), 3);
+  EXPECT_EQ(next_format->GetAnchor()->GetRole(),
+            ax::mojom::Role::kInlineTextBox);
+}
+
+// Tests ComputeTextStartOfChildInParent with three InlineTextBoxes to verify
+// the offset accumulation across multiple siblings. Format navigation on the
+// third box should correctly compute box_start = 6 (3 + 3).
+//
+// Tree structure:
+// ++1 kRootWebArea
+// ++++2 kStaticText "AAABBBCCC" (markers: spelling at [7,9])
+// ++++++3 kInlineTextBox "AAA" (box range [0,3) in parent)
+// ++++++4 kInlineTextBox "BBB" (box range [3,6) in parent)
+// ++++++5 kInlineTextBox "CCC" (box range [6,9) in parent)
+//
+// The spelling marker [7,9] clips to box 3 ("CCC") as local [1,3).
+TEST_F(AXPositionTest,
+       ComputeTextStartOfChildInParent_ThreeBoxesFormatNavigation) {
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.AddBoolAttribute(ax::mojom::BoolAttribute::kIsLineBreakingObject,
+                             true);
+
+  AXNodeData static_text_data;
+  static_text_data.id = 2;
+  static_text_data.role = ax::mojom::Role::kStaticText;
+  static_text_data.SetName("AAABBBCCC");
+  // Spelling marker at parent offsets [7,9) — only overlaps the third box.
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerTypes,
+      {static_cast<int32_t>(ax::mojom::MarkerType::kSpelling)});
+  static_text_data.AddIntListAttribute(
+      ax::mojom::IntListAttribute::kMarkerStarts, {7});
+  static_text_data.AddIntListAttribute(ax::mojom::IntListAttribute::kMarkerEnds,
+                                       {9});
+
+  AXNodeData inline_box_1;
+  inline_box_1.id = 3;
+  inline_box_1.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_1.SetName("AAA");
+  inline_box_1.AddIntListAttribute(ax::mojom::IntListAttribute::kWordStarts,
+                                   {0});
+  inline_box_1.AddIntListAttribute(ax::mojom::IntListAttribute::kWordEnds, {3});
+
+  AXNodeData inline_box_2;
+  inline_box_2.id = 4;
+  inline_box_2.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_2.SetName("BBB");
+  inline_box_2.AddIntListAttribute(ax::mojom::IntListAttribute::kWordStarts,
+                                   {0});
+  inline_box_2.AddIntListAttribute(ax::mojom::IntListAttribute::kWordEnds, {3});
+
+  AXNodeData inline_box_3;
+  inline_box_3.id = 5;
+  inline_box_3.role = ax::mojom::Role::kInlineTextBox;
+  inline_box_3.SetName("CCC");
+  inline_box_3.AddIntListAttribute(ax::mojom::IntListAttribute::kWordStarts,
+                                   {0});
+  inline_box_3.AddIntListAttribute(ax::mojom::IntListAttribute::kWordEnds, {3});
+
+  static_text_data.child_ids = {inline_box_1.id, inline_box_2.id,
+                                inline_box_3.id};
+  root_data.child_ids = {static_text_data.id};
+
+  SetTree(CreateAXTree(
+      {root_data, static_text_data, inline_box_1, inline_box_2, inline_box_3}));
+
+  // Start at position 0 of box 3 ("CCC"). Navigate forward by format.
+  // Marker [7,9] clips to local [1,3) in box 3. The next format start
+  // from offset 0 should be at offset 1 (start of the misspelled region).
+  TestPositionType pos = CreateTextPosition(
+      inline_box_3, 0 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
+  ASSERT_TRUE(pos->IsTextPosition());
+
+  TestPositionType next_format = pos->CreateNextFormatStartPosition(
+      {AXBoundaryBehavior::kStopAtAnchorBoundary,
+       AXBoundaryDetection::kDontCheckInitialPosition});
+  ASSERT_TRUE(next_format->IsTextPosition());
+  // Should stop at the marker boundary at local offset 1, which requires
+  // ComputeTextStartOfChildInParent to correctly compute box_start = 6.
+  EXPECT_EQ(next_format->text_offset(), 1);
+  EXPECT_EQ(next_format->GetAnchor()->GetRole(),
+            ax::mojom::Role::kInlineTextBox);
+}
 
 }  // namespace ui

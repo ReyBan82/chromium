@@ -15,7 +15,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
-#include "base/strings/string_util.h"
+#include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/threading/thread_checker.h"
 #include "components/leveldb_proto/internal/proto_leveldb_wrapper_metrics.h"
@@ -141,8 +141,6 @@ class COMPONENT_EXPORT(LEVELDB_PROTO) ProtoLevelDBWrapper {
 
   void SetMetricsId(const std::string& id);
 
-  bool GetApproximateMemoryUse(uint64_t* approx_mem_use);
-
   const scoped_refptr<base::SequencedTaskRunner>& task_runner();
 
  private:
@@ -151,7 +149,7 @@ class COMPONENT_EXPORT(LEVELDB_PROTO) ProtoLevelDBWrapper {
   // Used to run blocking tasks in-order, must be the TaskRunner that |db_|
   // relies on.
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
-  raw_ptr<LevelDB, DanglingUntriaged> db_ = nullptr;
+  raw_ptr<LevelDB, AcrossTasksDanglingUntriaged> db_ = nullptr;
 
   // The identifier used when recording metrics to determine the source of the
   // LevelDB calls, likely the database client name.

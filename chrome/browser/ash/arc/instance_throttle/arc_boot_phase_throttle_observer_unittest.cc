@@ -6,29 +6,33 @@
 
 #include <memory>
 
-#include "ash/components/arc/arc_prefs.h"
-#include "ash/components/arc/session/arc_bridge_service.h"
-#include "ash/components/arc/session/arc_service_manager.h"
-#include "ash/components/arc/session/arc_session_runner.h"
-#include "ash/components/arc/test/arc_util_test_support.h"
-#include "ash/components/arc/test/connection_holder_util.h"
-#include "ash/components/arc/test/fake_app_host.h"
-#include "ash/components/arc/test/fake_app_instance.h"
-#include "ash/components/arc/test/fake_arc_session.h"
 #include "base/command_line.h"
-#include "base/run_loop.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "chrome/browser/ash/arc/session/arc_session_manager.h"
 #include "chrome/browser/ash/arc/test/test_arc_session_manager.h"
-#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
+#include "chrome/browser/ash/login/users/scoped_account_id_annotator.h"
+#include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
+#include "chrome/test/base/testing_profile_manager.h"
 #include "chromeos/ash/components/dbus/concierge/concierge_client.h"
-#include "components/arc/test/fake_intent_helper_host.h"
-#include "components/arc/test/fake_intent_helper_instance.h"
+#include "chromeos/ash/components/dbus/dlcservice/dlcservice_client.h"
+#include "chromeos/ash/experiences/arc/arc_prefs.h"
+#include "chromeos/ash/experiences/arc/dlc_installer/arc_dlc_installer.h"
+#include "chromeos/ash/experiences/arc/session/arc_bridge_service.h"
+#include "chromeos/ash/experiences/arc/session/arc_service_manager.h"
+#include "chromeos/ash/experiences/arc/session/arc_session_runner.h"
+#include "chromeos/ash/experiences/arc/test/arc_util_test_support.h"
+#include "chromeos/ash/experiences/arc/test/connection_holder_util.h"
+#include "chromeos/ash/experiences/arc/test/fake_app_host.h"
+#include "chromeos/ash/experiences/arc/test/fake_app_instance.h"
+#include "chromeos/ash/experiences/arc/test/fake_arc_session.h"
+#include "chromeos/ash/experiences/arc/test/fake_intent_helper_host.h"
+#include "chromeos/ash/experiences/arc/test/fake_intent_helper_instance.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
-#include "components/user_manager/scoped_user_manager.h"
 #include "content/public/test/browser_task_environment.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace arc {
@@ -36,23 +40,43 @@ namespace {
 
 class ArcBootPhaseThrottleObserverTest : public testing::Test {
  public:
-  ArcBootPhaseThrottleObserverTest()
-      : scoped_user_manager_(std::make_unique<ash::FakeChromeUserManager>()) {
-    ash::ConciergeClient::InitializeFake(/*fake_cicerone_client=*/nullptr);
-    arc_session_manager_ =
-        CreateTestArcSessionManager(std::make_unique<ArcSessionRunner>(
-            base::BindRepeating(FakeArcSession::Create)));
-    testing_profile_ = std::make_unique<TestingProfile>();
+  ArcBootPhaseThrottleObserverTest() = default;
 
-    // Setup and login profile
+  ArcBootPhaseThrottleObserverTest(const ArcBootPhaseThrottleObserverTest&) =
+      delete;
+  ArcBootPhaseThrottleObserverTest& operator=(
+      const ArcBootPhaseThrottleObserverTest&) = delete;
+
+  void SetUp() override {
     SetArcAvailableCommandLineForTesting(
         base::CommandLine::ForCurrentProcess());
+
+    // Setup and login user session before profile manager.
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            TestingBrowserProcess::GetGlobal()->local_state());
     const AccountId account_id(AccountId::FromUserEmailGaiaId(
-        testing_profile_->GetProfileUserName(), ""));
-    auto* user_manager = static_cast<ash::FakeChromeUserManager*>(
-        user_manager::UserManager::Get());
-    user_manager->AddUser(account_id);
-    user_manager->LoginUser(account_id);
+        TestingProfile::kDefaultProfileUserName, GaiaId("1234567890")));
+    ASSERT_TRUE(user_session_test_environment_->AddRegularUser(account_id));
+
+    profile_manager_ = std::make_unique<TestingProfileManager>(
+        TestingBrowserProcess::GetGlobal());
+    ASSERT_TRUE(profile_manager_->SetUp());
+
+    ash::ConciergeClient::InitializeFake(/*fake_cicerone_client=*/nullptr);
+    ash::DlcserviceClient::InitializeFake();
+    arc_dlc_installer_ = std::make_unique<ArcDlcInstaller>();
+    arc_session_manager_ = CreateTestArcSessionManager(
+        std::make_unique<ArcSessionRunner>(
+            base::BindRepeating(FakeArcSession::Create)),
+        arc_dlc_installer_.get());
+
+    user_session_test_environment_->LogIn(account_id);
+
+    ash::ScopedAccountIdAnnotator annotator(profile_manager_->profile_manager(),
+                                            account_id);
+    testing_profile_ = profile_manager_->CreateTestingProfile(
+        TestingProfile::kDefaultProfileUserName);
 
     // By default, ARC is not started for opt-in.
     arc_session_manager()->set_skipped_terms_of_service_negotiation_for_testing(
@@ -70,15 +94,17 @@ class ArcBootPhaseThrottleObserverTest : public testing::Test {
     intent_helper_instance_ = std::make_unique<FakeIntentHelperInstance>();
   }
 
-  ArcBootPhaseThrottleObserverTest(const ArcBootPhaseThrottleObserverTest&) =
-      delete;
-  ArcBootPhaseThrottleObserverTest& operator=(
-      const ArcBootPhaseThrottleObserverTest&) = delete;
-
   void TearDown() override {
     observer()->StopObserving();
-    testing_profile_.reset();
+
+    testing_profile_ = nullptr;
+    profile_manager_->DeleteAllTestingProfiles();
+    profile_manager_.reset();
+    user_session_test_environment_.reset();
+
     arc_session_manager_.reset();
+    arc_dlc_installer_.reset();
+    ash::DlcserviceClient::Shutdown();
     ash::ConciergeClient::Shutdown();
   }
 
@@ -94,9 +120,10 @@ class ArcBootPhaseThrottleObserverTest : public testing::Test {
   }
 
   void DisconnectAppMojo() {
-    arc_service_manager_.arc_bridge_service()->app()->CloseInstance(
-        app_instance_.get());
-    base::RunLoop().RunUntilIdle();
+    auto* app = arc_service_manager_.arc_bridge_service()->app();
+    InstanceClosedWaiter app_closed_waiter(app);
+    app->CloseInstance(app_instance_.get());
+    app_closed_waiter.Wait();
   }
 
   void ConnectIntentHelperMojo() {
@@ -123,11 +150,14 @@ class ArcBootPhaseThrottleObserverTest : public testing::Test {
  private:
   content::BrowserTaskEnvironment task_environment_{
       base::test::TaskEnvironment::TimeSource::MOCK_TIME};
-  user_manager::ScopedUserManager scoped_user_manager_;
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
+  std::unique_ptr<TestingProfileManager> profile_manager_;
   ArcServiceManager arc_service_manager_;
+  std::unique_ptr<ArcDlcInstaller> arc_dlc_installer_;
   std::unique_ptr<ArcSessionManager> arc_session_manager_;
   ArcBootPhaseThrottleObserver observer_;
-  std::unique_ptr<TestingProfile> testing_profile_;
+  raw_ptr<TestingProfile> testing_profile_ = nullptr;
 
   std::unique_ptr<FakeAppHost> app_host_;
   std::unique_ptr<FakeAppInstance> app_instance_;

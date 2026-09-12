@@ -7,13 +7,19 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/power_monitor/power_monitor.h"
 #include "base/power_monitor/power_observer.h"
+#include "base/scoped_observation.h"
 #include "chromeos/ash/services/device_sync/public/cpp/device_sync_client.h"
 #include "components/session_manager/core/session_manager_observer.h"
 
 class PrefRegistrySimple;
 class PrefService;
+namespace session_manager {
+class SessionManager;
+}
 
 namespace ash {
 
@@ -81,13 +87,17 @@ class WifiSyncNotificationController
   void ShowAnnouncementNotificationIfEligible();
   bool IsWifiSyncSupported();
 
-  GlobalStateFeatureManager* wifi_sync_feature_manager_;
-  HostStatusProvider* host_status_provider_;
-  PrefService* pref_service_;
-  device_sync::DeviceSyncClient* device_sync_client_;
-  AccountStatusChangeDelegateNotifier* delegate_notifier_;
+  raw_ptr<GlobalStateFeatureManager> wifi_sync_feature_manager_;
+  raw_ptr<HostStatusProvider> host_status_provider_;
+  raw_ptr<PrefService> pref_service_;
+  raw_ptr<device_sync::DeviceSyncClient> device_sync_client_;
+  raw_ptr<AccountStatusChangeDelegateNotifier> delegate_notifier_;
 
-  bool did_register_session_observers_ = false;
+  base::ScopedObservation<session_manager::SessionManager,
+                          session_manager::SessionManagerObserver>
+      session_manager_observation_{this};
+  base::ScopedObservation<base::PowerMonitor, base::PowerSuspendObserver>
+      power_monitor_observation_{this};
 
   base::WeakPtrFactory<WifiSyncNotificationController> weak_ptr_factory_{this};
 };
@@ -95,5 +105,19 @@ class WifiSyncNotificationController
 }  // namespace multidevice_setup
 
 }  // namespace ash
+
+namespace base {
+template <>
+struct ScopedObservationTraits<PowerMonitor, PowerSuspendObserver> {
+  static void AddObserver(PowerMonitor* source,
+                          PowerSuspendObserver* observer) {
+    source->AddPowerSuspendObserver(observer);
+  }
+  static void RemoveObserver(PowerMonitor* source,
+                             PowerSuspendObserver* observer) {
+    source->RemovePowerSuspendObserver(observer);
+  }
+};
+}  // namespace base
 
 #endif  // CHROMEOS_ASH_SERVICES_MULTIDEVICE_SETUP_WIFI_SYNC_NOTIFICATION_CONTROLLER_H_

@@ -11,8 +11,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
 import android.app.Activity;
-import android.graphics.Bitmap;
 import android.text.SpannableString;
+import android.text.style.ImageSpan;
 import android.view.View;
 import android.widget.TextView;
 
@@ -30,33 +30,39 @@ import org.robolectric.Robolectric;
 
 import org.chromium.base.Callback;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.util.Features.DisableFeatures;
+import org.chromium.base.test.util.Features.EnableFeatures;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ChromeStringConstants;
-import org.chromium.chrome.browser.autofill.LegalMessageLine;
+import org.chromium.chrome.browser.autofill.AutofillImageFetcher;
+import org.chromium.components.autofill.AutofillFeatures;
 import org.chromium.components.autofill.VirtualCardEnrollmentLinkType;
+import org.chromium.components.autofill.payments.LegalMessageLine;
 import org.chromium.ui.modaldialog.DialogDismissalCause;
 import org.chromium.ui.modaldialog.ModalDialogManager.ModalDialogType;
 import org.chromium.ui.modaldialog.ModalDialogProperties;
 import org.chromium.ui.test.util.modaldialog.FakeModalDialogManager;
-import org.chromium.ui.text.NoUnderlineClickableSpan;
+import org.chromium.ui.text.ChromeClickableSpan;
+import org.chromium.url.GURL;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /** Unit tests for {@link AutofillVirtualCardEnrollmentDialog}. */
 @RunWith(BaseRobolectricTestRunner.class)
+@DisableFeatures({
+    AutofillFeatures.AUTOFILL_ENABLE_WALLET_BRANDING_V2,
+})
 public class AutofillVirtualCardEnrollmentDialogTest {
     private static final String LEGAL_MESSAGE_URL = "http://www.google.com";
     private static final String ACCEPT_BUTTON_TEXT = "Yes";
     private static final String DECLINE_BUTTON_TEXT = "No thanks";
 
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
 
-    @Mock
-    private Callback<Integer> mResultHandlerMock;
-    @Mock
-    private AutofillVirtualCardEnrollmentDialog.LinkClickCallback mOnLinkClickedMock;
+    @Mock private Callback<Integer> mResultHandlerMock;
+    @Mock private AutofillVirtualCardEnrollmentDialog.LinkClickCallback mOnLinkClickedMock;
+    @Mock private AutofillImageFetcher mImageFetcher;
     private FakeModalDialogManager mModalDialogManager;
     private AutofillVirtualCardEnrollmentDialog mDialog;
     private VirtualCardEnrollmentFields mVirtualCardEnrollmentFields;
@@ -64,14 +70,20 @@ public class AutofillVirtualCardEnrollmentDialogTest {
     @Before
     public void setUp() {
         mModalDialogManager = new FakeModalDialogManager(ModalDialogType.APP);
-        mVirtualCardEnrollmentFields = VirtualCardEnrollmentFields.create(
-                "card label", Bitmap.createBitmap(100, 100, Bitmap.Config.ALPHA_8));
+        mVirtualCardEnrollmentFields =
+                VirtualCardEnrollmentFields.create("Visa", "1234", 0, new GURL(""));
         mVirtualCardEnrollmentFields.mGoogleLegalMessages.add(createLegalMessageLine("google"));
         mVirtualCardEnrollmentFields.mIssuerLegalMessages.add(createLegalMessageLine("issuer"));
         mDialog =
-                new AutofillVirtualCardEnrollmentDialog(ApplicationProvider.getApplicationContext(),
-                        mModalDialogManager, mVirtualCardEnrollmentFields, ACCEPT_BUTTON_TEXT,
-                        DECLINE_BUTTON_TEXT, mOnLinkClickedMock, mResultHandlerMock);
+                new AutofillVirtualCardEnrollmentDialog(
+                        ApplicationProvider.getApplicationContext(),
+                        mModalDialogManager,
+                        mImageFetcher,
+                        mVirtualCardEnrollmentFields,
+                        ACCEPT_BUTTON_TEXT,
+                        DECLINE_BUTTON_TEXT,
+                        mOnLinkClickedMock,
+                        mResultHandlerMock);
         mDialog.show();
     }
 
@@ -105,24 +117,20 @@ public class AutofillVirtualCardEnrollmentDialogTest {
 
     @Test
     @SmallTest
-    public void dialogDismissed() {
-        assertThat(mModalDialogManager.getShownDialogModel()).isNotNull();
-        // Simulate dialog dismissal by native.
-        mDialog.dismiss(DialogDismissalCause.DISMISSED_BY_NATIVE);
-        assertThat(mModalDialogManager.getShownDialogModel()).isNull();
-        // Check that callback was called with dismissed by native as the dismissal cause.
-        verify(mResultHandlerMock).onResult(DialogDismissalCause.DISMISSED_BY_NATIVE);
-    }
-
-    @Test
-    @SmallTest
     public void learnMoreTextClicked() {
         // Create activity.
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         // Create a new AutofillVirtualCardEnrollmentDialog with Activity as the context instead.
-        mDialog = new AutofillVirtualCardEnrollmentDialog(activity, mModalDialogManager,
-                mVirtualCardEnrollmentFields, ACCEPT_BUTTON_TEXT, DECLINE_BUTTON_TEXT,
-                mOnLinkClickedMock, mResultHandlerMock);
+        mDialog =
+                new AutofillVirtualCardEnrollmentDialog(
+                        activity,
+                        mModalDialogManager,
+                        mImageFetcher,
+                        mVirtualCardEnrollmentFields,
+                        ACCEPT_BUTTON_TEXT,
+                        DECLINE_BUTTON_TEXT,
+                        mOnLinkClickedMock,
+                        mResultHandlerMock);
         mDialog.show();
         // Make sure that the dialog was shown properly.
         assertThat(mModalDialogManager.getShownDialogModel()).isNotNull();
@@ -133,7 +141,7 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         assertThat(virtualCardEducationText.length()).isGreaterThan(0);
 
         // Assert that the text of this span is correct.
-        NoUnderlineClickableSpan learnMoreSpan =
+        ChromeClickableSpan learnMoreSpan =
                 getOnlyClickableSpanFromString(virtualCardEducationText);
         assertThat(getHighlightedTextFromSpannableString(virtualCardEducationText, learnMoreSpan))
                 .isEqualTo("Learn more about virtual cards");
@@ -142,7 +150,8 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         // Verify that the callback is called with url for learn more page and enum type
         // corresponding to the learn more link.
         verify(mOnLinkClickedMock)
-                .call(ChromeStringConstants.AUTOFILL_VIRTUAL_CARD_ENROLLMENT_SUPPORT_URL,
+                .call(
+                        ChromeStringConstants.AUTOFILL_VIRTUAL_CARD_ENROLLMENT_SUPPORT_URL,
                         VirtualCardEnrollmentLinkType.VIRTUAL_CARD_ENROLLMENT_LEARN_MORE_LINK);
     }
 
@@ -152,9 +161,16 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         // Create activity.
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         // Create a new AutofillVirtualCardEnrollmentDialog with Activity as the context instead.
-        mDialog = new AutofillVirtualCardEnrollmentDialog(activity, mModalDialogManager,
-                mVirtualCardEnrollmentFields, ACCEPT_BUTTON_TEXT, DECLINE_BUTTON_TEXT,
-                mOnLinkClickedMock, mResultHandlerMock);
+        mDialog =
+                new AutofillVirtualCardEnrollmentDialog(
+                        activity,
+                        mModalDialogManager,
+                        mImageFetcher,
+                        mVirtualCardEnrollmentFields,
+                        ACCEPT_BUTTON_TEXT,
+                        DECLINE_BUTTON_TEXT,
+                        mOnLinkClickedMock,
+                        mResultHandlerMock);
         mDialog.show();
         // Make sure that the dialog was shown properly.
         assertThat(mModalDialogManager.getShownDialogModel()).isNotNull();
@@ -165,8 +181,7 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         assertThat(googleLegalMessageText.length()).isGreaterThan(0);
 
         // Assert that the text of this span is correct.
-        NoUnderlineClickableSpan googleSpan =
-                getOnlyClickableSpanFromString(googleLegalMessageText);
+        ChromeClickableSpan googleSpan = getOnlyClickableSpanFromString(googleLegalMessageText);
         assertThat(getHighlightedTextFromSpannableString(googleLegalMessageText, googleSpan))
                 .isEqualTo("oo");
         // Click on the link. The callback doesn't use the view so it can be null.
@@ -174,7 +189,8 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         // Verify that the callback is called with LEGAL_MESSAGE_URL and enum type corresponding to
         // Google legal message lines.
         verify(mOnLinkClickedMock)
-                .call(LEGAL_MESSAGE_URL,
+                .call(
+                        LEGAL_MESSAGE_URL,
                         VirtualCardEnrollmentLinkType
                                 .VIRTUAL_CARD_ENROLLMENT_GOOGLE_PAYMENTS_TOS_LINK);
     }
@@ -185,9 +201,16 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         // Create activity.
         Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
         // Create a new AutofillVirtualCardEnrollmentDialog with Activity as the context instead.
-        mDialog = new AutofillVirtualCardEnrollmentDialog(activity, mModalDialogManager,
-                mVirtualCardEnrollmentFields, ACCEPT_BUTTON_TEXT, DECLINE_BUTTON_TEXT,
-                mOnLinkClickedMock, mResultHandlerMock);
+        mDialog =
+                new AutofillVirtualCardEnrollmentDialog(
+                        activity,
+                        mModalDialogManager,
+                        mImageFetcher,
+                        mVirtualCardEnrollmentFields,
+                        ACCEPT_BUTTON_TEXT,
+                        DECLINE_BUTTON_TEXT,
+                        mOnLinkClickedMock,
+                        mResultHandlerMock);
         mDialog.show();
         // Make sure that the dialog was shown properly.
         assertThat(mModalDialogManager.getShownDialogModel()).isNotNull();
@@ -198,8 +221,7 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         assertThat(issuerLegalMessageText.length()).isGreaterThan(0);
 
         // Assert that the text of this span is correct.
-        NoUnderlineClickableSpan issuerSpan =
-                getOnlyClickableSpanFromString(issuerLegalMessageText);
+        ChromeClickableSpan issuerSpan = getOnlyClickableSpanFromString(issuerLegalMessageText);
         assertThat(getHighlightedTextFromSpannableString(issuerLegalMessageText, issuerSpan))
                 .isEqualTo("ss");
         // Click on the link. The callback doesn't use the view so it can be null.
@@ -207,8 +229,158 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         // Verify that the callback is called with LEGAL_MESSAGE_URL and enum type corresponding to
         // issuer legal message lines.
         verify(mOnLinkClickedMock)
-                .call(LEGAL_MESSAGE_URL,
+                .call(
+                        LEGAL_MESSAGE_URL,
                         VirtualCardEnrollmentLinkType.VIRTUAL_CARD_ENROLLMENT_ISSUER_TOS_LINK);
+    }
+
+    @Test
+    @SmallTest
+    @EnableFeatures({AutofillFeatures.AUTOFILL_ENABLE_WALLET_BRANDING_V2})
+    public void dialogTitle() {
+        // Create activity.
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        // Create a new AutofillVirtualCardEnrollmentDialog with Activity as the context instead.
+        mDialog =
+                new AutofillVirtualCardEnrollmentDialog(
+                        activity,
+                        mModalDialogManager,
+                        mImageFetcher,
+                        mVirtualCardEnrollmentFields,
+                        ACCEPT_BUTTON_TEXT,
+                        DECLINE_BUTTON_TEXT,
+                        mOnLinkClickedMock,
+                        mResultHandlerMock);
+        mDialog.show();
+        // Make sure that the dialog was shown properly.
+        assertThat(mModalDialogManager.getShownDialogModel()).isNotNull();
+        // Assert that the text of the title is correct.
+        assertThat(getTitleTextFromCurrentDialog().toString())
+                .isEqualTo("Turn on a virtual card for autofill");
+    }
+
+    @Test
+    @SmallTest
+    @DisableFeatures({AutofillFeatures.AUTOFILL_ENABLE_WALLET_BRANDING_V2})
+    public void dialogTitle_WalletBrandingV2Disabled() {
+        // Create activity.
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        // Create a new AutofillVirtualCardEnrollmentDialog with Activity as the context instead.
+        mDialog =
+                new AutofillVirtualCardEnrollmentDialog(
+                        activity,
+                        mModalDialogManager,
+                        mImageFetcher,
+                        mVirtualCardEnrollmentFields,
+                        ACCEPT_BUTTON_TEXT,
+                        DECLINE_BUTTON_TEXT,
+                        mOnLinkClickedMock,
+                        mResultHandlerMock);
+        mDialog.show();
+        // Make sure that the dialog was shown properly.
+        assertThat(mModalDialogManager.getShownDialogModel()).isNotNull();
+        // Assert that the text of the title is correct.
+        CharSequence titleText = getTitleTextFromCurrentDialog();
+        assertThat(titleText.toString())
+                .contains("Make it more secure with a virtual card next time?");
+        // Assert that the title contains an image.
+        assertThat(titleText).isInstanceOf(SpannableString.class);
+        SpannableString spannableTitle = (SpannableString) titleText;
+        ImageSpan[] imageSpans = spannableTitle.getSpans(0, 1, ImageSpan.class);
+        assertThat(imageSpans).hasLength(1);
+    }
+
+    @Test
+    @SmallTest
+    @EnableFeatures({AutofillFeatures.AUTOFILL_ENABLE_WALLET_BRANDING_V2})
+    public void dialogSubtitle() {
+        // Create activity.
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        // Create a new AutofillVirtualCardEnrollmentDialog with Activity as the context instead.
+        mDialog =
+                new AutofillVirtualCardEnrollmentDialog(
+                        activity,
+                        mModalDialogManager,
+                        mImageFetcher,
+                        mVirtualCardEnrollmentFields,
+                        ACCEPT_BUTTON_TEXT,
+                        DECLINE_BUTTON_TEXT,
+                        mOnLinkClickedMock,
+                        mResultHandlerMock);
+        mDialog.show();
+        // Make sure that the dialog was shown properly.
+        assertThat(mModalDialogManager.getShownDialogModel()).isNotNull();
+        // Get the clickable span.
+        SpannableString virtualCardEducationText =
+                getSpannableStringForViewFromCurrentDialog(R.id.virtual_card_education);
+        // Assert that the text of the subtitle is correct.
+        assertThat(virtualCardEducationText.toString())
+                .isEqualTo(
+                        "A virtual card number will be filled when you check out with this card to"
+                            + " protect your actual details. Manage in Google Wallet. Learn more"
+                            + " about virtual cards");
+        // Assert that the link text of the subtitle is correct.
+        ChromeClickableSpan learnMoreSpan =
+                getOnlyClickableSpanFromString(virtualCardEducationText);
+        assertThat(getHighlightedTextFromSpannableString(virtualCardEducationText, learnMoreSpan))
+                .isEqualTo("Learn more about virtual cards");
+        // Click on the link. The callback doesn't use the view so it can be null.
+        learnMoreSpan.onClick(null);
+        // Verify that the callback is called with url for learn more page and enum type
+        // corresponding to the learn more link.
+        verify(mOnLinkClickedMock)
+                .call(
+                        ChromeStringConstants.AUTOFILL_VIRTUAL_CARD_ENROLLMENT_SUPPORT_URL,
+                        VirtualCardEnrollmentLinkType.VIRTUAL_CARD_ENROLLMENT_LEARN_MORE_LINK);
+    }
+
+    @Test
+    @SmallTest
+    @DisableFeatures({AutofillFeatures.AUTOFILL_ENABLE_WALLET_BRANDING_V2})
+    public void dialogSubtitle_WalletBrandingV2Disabled() {
+        // Create activity.
+        Activity activity = Robolectric.buildActivity(Activity.class).setup().get();
+        // Create a new AutofillVirtualCardEnrollmentDialog with Activity as the context instead.
+        mDialog =
+                new AutofillVirtualCardEnrollmentDialog(
+                        activity,
+                        mModalDialogManager,
+                        mImageFetcher,
+                        mVirtualCardEnrollmentFields,
+                        ACCEPT_BUTTON_TEXT,
+                        DECLINE_BUTTON_TEXT,
+                        mOnLinkClickedMock,
+                        mResultHandlerMock);
+        mDialog.show();
+        // Make sure that the dialog was shown properly.
+        assertThat(mModalDialogManager.getShownDialogModel()).isNotNull();
+        // Get the clickable span.
+        SpannableString virtualCardEducationText =
+                getSpannableStringForViewFromCurrentDialog(R.id.virtual_card_education);
+        // Assert that the text of the subtitle is correct.
+        assertThat(virtualCardEducationText.toString())
+                .isEqualTo(
+                        "A virtual card hides your actual card to help protect you from potential"
+                                + " fraud. Learn more about virtual cards");
+        // Assert that the link text of the subtitle is correct.
+        ChromeClickableSpan learnMoreSpan =
+                getOnlyClickableSpanFromString(virtualCardEducationText);
+        assertThat(getHighlightedTextFromSpannableString(virtualCardEducationText, learnMoreSpan))
+                .isEqualTo("Learn more about virtual cards");
+        // Click on the link. The callback doesn't use the view so it can be null.
+        learnMoreSpan.onClick(null);
+        // Verify that the callback is called with url for learn more page and enum type
+        // corresponding to the learn more link.
+        verify(mOnLinkClickedMock)
+                .call(
+                        ChromeStringConstants.AUTOFILL_VIRTUAL_CARD_ENROLLMENT_SUPPORT_URL,
+                        VirtualCardEnrollmentLinkType.VIRTUAL_CARD_ENROLLMENT_LEARN_MORE_LINK);
+    }
+
+    private CharSequence getTitleTextFromCurrentDialog() {
+        View customView =
+                mModalDialogManager.getShownDialogModel().get(ModalDialogProperties.CUSTOM_VIEW);
+        return ((TextView) customView.findViewById(R.id.dialog_title)).getText();
     }
 
     private SpannableString getSpannableStringForViewFromCurrentDialog(int textViewId) {
@@ -217,16 +389,16 @@ public class AutofillVirtualCardEnrollmentDialogTest {
         return (SpannableString) ((TextView) customView.findViewById(textViewId)).getText();
     }
 
-    private NoUnderlineClickableSpan getOnlyClickableSpanFromString(SpannableString string) {
-        NoUnderlineClickableSpan[] spans =
-                string.getSpans(0, string.length(), NoUnderlineClickableSpan.class);
-        // Assert that there is only one NoUnderlineClickableSpan.
+    private ChromeClickableSpan getOnlyClickableSpanFromString(SpannableString string) {
+        ChromeClickableSpan[] spans =
+                string.getSpans(0, string.length(), ChromeClickableSpan.class);
+        // Assert that there is only one ChromeClickableSpan.
         assertThat(spans.length).isEqualTo(1);
         return spans[0];
     }
 
     private String getHighlightedTextFromSpannableString(
-            SpannableString spannableString, NoUnderlineClickableSpan clickableSpan) {
+            SpannableString spannableString, ChromeClickableSpan clickableSpan) {
         int start = spannableString.getSpanStart(clickableSpan);
         int end = spannableString.getSpanEnd(clickableSpan);
         return spannableString.subSequence(start, end).toString();

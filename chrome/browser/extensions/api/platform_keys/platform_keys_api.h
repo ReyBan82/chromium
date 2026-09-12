@@ -11,28 +11,17 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "build/chromeos_buildflags.h"
-#include "chrome/browser/chromeos/platform_keys/platform_keys.h"
-#include "chromeos/crosapi/mojom/keystore_service.mojom.h"
+#include "chrome/browser/extensions/api/platform_keys_core/platform_keys_utils.h"
+#include "chromeos/ash/components/platform_keys/keystore_types.h"
 #include "extensions/browser/extension_function.h"
 #include "extensions/browser/extension_function_histogram_value.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace extensions {
-namespace platform_keys {
-
-extern const char kErrorInvalidToken[];
-extern const char kErrorInvalidX509Cert[];
-
-// Returns a known token if |token_id| is valid and returns nullopt for both
-// empty or unknown |token_id|.
-absl::optional<chromeos::platform_keys::TokenId> ApiIdToPlatformKeysTokenId(
-    const std::string& token_id);
-
-}  // namespace platform_keys
 
 class PlatformKeysInternalSelectClientCertificatesFunction
     : public ExtensionFunction {
@@ -50,9 +39,8 @@ class PlatformKeysInternalSelectClientCertificatesFunction
 
   // Called when the certificates were selected. If an error occurred, |certs|
   // will be null.
-  void OnSelectedCertificates(
-      std::unique_ptr<net::CertificateList> matches,
-      absl::optional<crosapi::mojom::KeystoreError> error);
+  void OnSelectedCertificates(std::unique_ptr<net::CertificateList> matches,
+                              std::optional<chromeos::KeystoreError> error);
 
   DECLARE_EXTENSION_FUNCTION("platformKeysInternal.selectClientCertificates",
                              PLATFORMKEYSINTERNAL_SELECTCLIENTCERTIFICATES)
@@ -63,7 +51,7 @@ class PlatformKeysInternalGetPublicKeyFunction : public ExtensionFunction {
   ~PlatformKeysInternalGetPublicKeyFunction() override;
   ResponseAction Run() override;
 
-  void OnGetPublicKey(crosapi::mojom::GetPublicKeyResultPtr result_ptr);
+  void OnGetPublicKey(chromeos::GetPublicKeyResult result);
 
   DECLARE_EXTENSION_FUNCTION("platformKeysInternal.getPublicKey",
                              PLATFORMKEYSINTERNAL_GETPUBLICKEY)
@@ -87,7 +75,7 @@ class PlatformKeysInternalSignFunction : public ExtensionFunction {
   // Called when the signature was generated. If an error occurred,
   // |signature| will be empty.
   void OnSigned(std::vector<uint8_t> signature,
-                absl::optional<crosapi::mojom::KeystoreError> error);
+                std::optional<chromeos::KeystoreError> error);
 
   DECLARE_EXTENSION_FUNCTION("platformKeysInternal.sign",
                              PLATFORMKEYSINTERNAL_SIGN)

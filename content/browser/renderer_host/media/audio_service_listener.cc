@@ -7,7 +7,6 @@
 #include <utility>
 
 #include "base/feature_list.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/process/process.h"
 #include "base/time/default_tick_clock.h"
 #include "content/browser/media/audio_log_factory.h"
@@ -22,13 +21,12 @@
 namespace content {
 
 AudioServiceListener::AudioServiceListener() {
-  ServiceProcessHost::AddObserver(this);
-  Init(ServiceProcessHost::GetRunningProcessInfo());
+  AddAudioServiceProcessObserver(this);
 }
 
 AudioServiceListener::~AudioServiceListener() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(owning_sequence_);
-  ServiceProcessHost::RemoveObserver(this);
+  RemoveAudioServiceProcessObserver(this);
 }
 
 base::Process AudioServiceListener::GetProcess() const {
@@ -38,43 +36,21 @@ base::Process AudioServiceListener::GetProcess() const {
   return audio_process_.Duplicate();
 }
 
-void AudioServiceListener::Init(
-    std::vector<ServiceProcessInfo> running_service_processes) {
-  for (const auto& info : running_service_processes) {
-    if (info.IsService<audio::mojom::AudioService>()) {
-      audio_process_ = info.GetProcess().Duplicate();
-      MaybeSetLogFactory();
-      break;
-    }
-  }
-}
-
-void AudioServiceListener::OnServiceProcessLaunched(
-    const ServiceProcessInfo& info) {
+void AudioServiceListener::OnServiceLaunched(const ServiceProcessInfo& info) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(owning_sequence_);
-  if (!info.IsService<audio::mojom::AudioService>())
-    return;
-
   audio_process_ = info.GetProcess().Duplicate();
   MaybeSetLogFactory();
 }
 
-void AudioServiceListener::OnServiceProcessTerminatedNormally(
+void AudioServiceListener::OnServiceTerminatedNormally(
     const ServiceProcessInfo& info) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(owning_sequence_);
-  if (!info.IsService<audio::mojom::AudioService>())
-    return;
-
   audio_process_ = base::Process();
   log_factory_is_set_ = false;
 }
 
-void AudioServiceListener::OnServiceProcessCrashed(
-    const ServiceProcessInfo& info) {
+void AudioServiceListener::OnServiceCrashed(const ServiceProcessInfo& info) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(owning_sequence_);
-  if (!info.IsService<audio::mojom::AudioService>())
-    return;
-
   audio_process_ = base::Process();
   log_factory_is_set_ = false;
 }
@@ -94,6 +70,12 @@ void AudioServiceListener::MaybeSetLogFactory() {
       log_factory_manager.BindNewPipeAndPassReceiver());
   log_factory_manager->SetLogFactory(std::move(audio_log_factory));
   log_factory_is_set_ = true;
+}
+
+void AudioServiceListener::ResetForTesting() {  // IN-TEST
+  audio_process_ = base::Process();
+  log_factory_is_set_ = false;
+  DETACH_FROM_SEQUENCE(owning_sequence_);
 }
 
 }  // namespace content

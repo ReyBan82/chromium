@@ -2,17 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {CameraManager} from '../../device/index.js';
-import {
-  SUPPORTED_CONSTANT_FPS,
-  VideoResolutionOption,
-  VideoResolutionOptionGroup,
-} from '../../device/type.js';
+import {assert, assertExists} from '../../assert.js';
+import type {CameraManager} from '../../device/index.js';
+import type {VideoResolutionOption, VideoResolutionOptionGroup} from '../../device/type.js';
+import {SUPPORTED_CONSTANT_FPS} from '../../device/type.js';
 import * as dom from '../../dom.js';
 import * as expert from '../../expert.js';
 import {I18nString} from '../../i18n_string.js';
 import * as loadTimeData from '../../models/load_time_data.js';
-import {Facing, Resolution, ViewName} from '../../type.js';
+import type {Resolution} from '../../type.js';
+import {Facing, ViewName} from '../../type.js';
 import {instantiateTemplate, setupI18nElements} from '../../util.js';
 
 import {BaseSettings} from './base.js';
@@ -32,7 +31,7 @@ export class VideoResolutionSettings extends BaseSettings {
     super(ViewName.VIDEO_RESOLUTION_SETTINGS);
 
     this.menu = dom.getFrom(this.root, 'div.menu', HTMLDivElement);
-    cameraManager.registerCameraUI({
+    cameraManager.registerCameraUi({
       onCameraUnavailable: () => {
         for (const input of dom.getAllFrom(
                  this.menu, 'input', HTMLInputElement)) {
@@ -52,7 +51,7 @@ export class VideoResolutionSettings extends BaseSettings {
 
     expert.addObserver(
         expert.ExpertOption.ENABLE_FPS_PICKER_FOR_BUILTIN,
-        () => this.toggleFPSPickerVisiblity);
+        () => this.toggleFpsPickerVisiblity);
   }
 
   private onOptionsUpdate(groups: VideoResolutionOptionGroup[]): void {
@@ -62,7 +61,8 @@ export class VideoResolutionSettings extends BaseSettings {
           this.menu, '#resolution-label-template',
           util.getLabelFromFacing(facing));
 
-      if (options.length === 1) {
+      if (options.length === 1 &&
+          this.getSupportedConstFpsOptionsLength(options[0]) <= 1) {
         util.addTextItemToMenu(
             this.menu, '#resolution-text-template',
             I18nString.LABEL_NO_RESOLUTION_OPTION);
@@ -76,6 +76,15 @@ export class VideoResolutionSettings extends BaseSettings {
     this.menu.scrollTop = this.menuScrollTop;
   }
 
+  private getSupportedConstFpsOptionsLength(option: VideoResolutionOption):
+      number {
+    return option.fpsOptions
+        .filter(
+            (fpsOption) => fpsOption.constFps !== null &&
+                SUPPORTED_CONSTANT_FPS.includes(fpsOption.constFps))
+        .length;
+  }
+
   private addResolutionItem(
       deviceId: string, facing: Facing, option: VideoResolutionOption): void {
     const optionElement =
@@ -83,7 +92,7 @@ export class VideoResolutionSettings extends BaseSettings {
     const span = dom.getFrom(optionElement, 'span', HTMLSpanElement);
 
     let text;
-    const label = util.toVideoResoloutionOptionLabel(option.resolutionLevel);
+    const label = util.toVideoResolutionOptionLabel(option.resolutionLevel);
     if (expert.isEnabled(expert.ExpertOption.SHOW_ALL_RESOLUTIONS)) {
       const mpInfo = loadTimeData.getI18nMessage(
           I18nString.LABEL_RESOLUTION_MP,
@@ -98,23 +107,21 @@ export class VideoResolutionSettings extends BaseSettings {
     span.setAttribute('aria-label', `${deviceName} ${text}`);
 
     // Currently FPS buttons are only supported on external cameras.
-    const constFpsOptions = option.fpsOptions.filter(
-        (fpsOption) =>
-            SUPPORTED_CONSTANT_FPS.some((fps) => fps === fpsOption.constFps));
-    const showFpsButton =
-        constFpsOptions.length > 1 && facing === Facing.EXTERNAL;
-    const isFPSEnabled =
-        expert.isEnabled(expert.ExpertOption.ENABLE_FPS_PICKER_FOR_BUILTIN);
-    let resolution = new Resolution();
+    const constFpsOptionsLength =
+        this.getSupportedConstFpsOptionsLength(option);
+    let resolution: Resolution|null = null;
     for (const fps of SUPPORTED_CONSTANT_FPS) {
       const fpsButton =
           dom.getFrom(optionElement, `.fps-${fps}`, HTMLButtonElement);
-      if (!isFPSEnabled) {
-        fpsButton.hidden = true;
-      } else if (!showFpsButton) {
+      if (constFpsOptionsLength <= 1) {
         fpsButton.classList.add('invisible');
+        fpsButton.hidden = true;
+      } else if (facing === Facing.EXTERNAL) {
+        fpsButton.hidden = false;
+      } else {
+        fpsButton.hidden = !expert.isEnabled(
+            expert.ExpertOption.ENABLE_FPS_PICKER_FOR_BUILTIN);
       }
-
       const fpsOption =
           option.fpsOptions.find((fpsOption) => fpsOption.constFps === fps);
       const checked = fpsOption?.checked ?? false;
@@ -129,8 +136,17 @@ export class VideoResolutionSettings extends BaseSettings {
               deviceId, option.resolutionLevel, fps, shouldReconfigure);
         });
       } else {
-        resolution = fpsOption?.resolutions[0] ?? new Resolution();
+        resolution = fpsOption?.resolutions[0] ?? null;
       }
+    }
+    // For cases that constant frame rate is not supported on the device
+    // (e.g. Betty or legacy devices migrated from camera HAL v1), use the
+    // resolution from the non-constant fps option.
+    if (resolution === null) {
+      const nonConstantFpsOption =
+          option.fpsOptions.find((fpsOption) => fpsOption.constFps === null);
+      resolution = nonConstantFpsOption?.resolutions[0] ?? null;
+      assert(resolution !== null);
     }
 
     const input = dom.getFrom(optionElement, 'input', HTMLInputElement);
@@ -141,20 +157,19 @@ export class VideoResolutionSettings extends BaseSettings {
     input.checked = option.checked;
 
     if (!input.checked) {
-      input.addEventListener('click', (event) => {
+      input.addEventListener('click', async (event) => {
+        event.preventDefault();
         this.focusedDeviceId = deviceId;
         this.menuScrollTop = this.menu.scrollTop;
         if (expert.isEnabled(expert.ExpertOption.SHOW_ALL_RESOLUTIONS)) {
-          this.cameraManager.setPrefVideoResolution(deviceId, resolution);
+          await this.cameraManager.setPrefVideoResolution(
+              deviceId, assertExists(resolution));
         } else {
-          this.cameraManager.setPrefVideoResolutionLevel(
+          await this.cameraManager.setPrefVideoResolutionLevel(
               deviceId, option.resolutionLevel);
         }
-        event.preventDefault();
       });
     }
-
-    // TODO(b/215484798): Moves FPS toggle into video resolution settings.
     this.menu.appendChild(optionElement);
 
     if (input.checked && this.focusedDeviceId === deviceId) {
@@ -162,13 +177,13 @@ export class VideoResolutionSettings extends BaseSettings {
     }
   }
 
-  private toggleFPSPickerVisiblity(): void {
-    const isFPSEnabled =
+  private toggleFpsPickerVisiblity(): void {
+    const isFpsEnabled =
         expert.isEnabled(expert.ExpertOption.ENABLE_FPS_PICKER_FOR_BUILTIN);
     const fpsButtons =
         dom.getAllFrom(this.menu, '.fps-buttons button', HTMLButtonElement);
     for (const fpsButton of fpsButtons) {
-      fpsButton.hidden = !isFPSEnabled;
+      fpsButton.hidden = !isFpsEnabled;
     }
   }
 }

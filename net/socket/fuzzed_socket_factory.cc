@@ -6,6 +6,8 @@
 
 #include <fuzzer/FuzzedDataProvider.h>
 
+#include <string_view>
+
 #include "base/notreached.h"
 #include "net/base/address_list.h"
 #include "net/base/ip_endpoint.h"
@@ -39,7 +41,6 @@ class FailingSSLClientSocket : public SSLClientSocket {
            int buf_len,
            CompletionOnceCallback callback) override {
     NOTREACHED();
-    return ERR_UNEXPECTED;
   }
 
   int Write(IOBuffer* buf,
@@ -47,7 +48,6 @@ class FailingSSLClientSocket : public SSLClientSocket {
             CompletionOnceCallback callback,
             const NetworkTrafficAnnotationTag& traffic_annotation) override {
     NOTREACHED();
-    return ERR_UNEXPECTED;
   }
 
   int SetReceiveBufferSize(int32_t size) override { return OK; }
@@ -71,9 +71,9 @@ class FailingSSLClientSocket : public SSLClientSocket {
 
   bool WasEverUsed() const override { return false; }
 
-  bool WasAlpnNegotiated() const override { return false; }
-
-  NextProto GetNegotiatedProtocol() const override { return kProtoUnknown; }
+  NextProto GetNegotiatedProtocol() const override {
+    return NextProto::kProtoUnknown;
+  }
 
   bool GetSSLInfo(SSLInfo* ssl_info) override { return false; }
 
@@ -85,19 +85,16 @@ class FailingSSLClientSocket : public SSLClientSocket {
   void ApplySocketTag(const net::SocketTag& tag) override {}
 
   // SSLSocket implementation:
-  int ExportKeyingMaterial(base::StringPiece label,
-                           bool has_context,
-                           base::StringPiece context,
-                           unsigned char* out,
-                           unsigned int outlen) override {
+  int ExportKeyingMaterial(std::string_view label,
+                           std::optional<base::span<const uint8_t>> context,
+                           base::span<uint8_t> out) override {
     NOTREACHED();
-    return 0;
   }
 
   // SSLClientSocket implementation:
-  std::vector<uint8_t> GetECHRetryConfigs() override {
+  std::vector<uint8_t> GetECHRetryConfigs() override { NOTREACHED(); }
+  std::vector<std::vector<uint8_t>> GetServerTrustAnchorIDs() override {
     NOTREACHED();
-    return {};
   }
 
  private:
@@ -114,18 +111,24 @@ FuzzedSocketFactory::~FuzzedSocketFactory() = default;
 std::unique_ptr<DatagramClientSocket>
 FuzzedSocketFactory::CreateDatagramClientSocket(
     DatagramSocket::BindType bind_type,
+    handles::NetworkHandle target_network,
     NetLog* net_log,
     const NetLogSource& source) {
+  // Currently this is not used to test any multi-network scenarios. This means
+  // that it is safe to always ignore `target_network`.
   return std::make_unique<FuzzedDatagramClientSocket>(data_provider_);
 }
 
 std::unique_ptr<TransportClientSocket>
 FuzzedSocketFactory::CreateTransportClientSocket(
     const AddressList& addresses,
+    handles::NetworkHandle target_network,
     std::unique_ptr<SocketPerformanceWatcher> socket_performance_watcher,
     NetworkQualityEstimator* network_quality_estimator,
     NetLog* net_log,
     const NetLogSource& source) {
+  // Currently this is not used to test any multi-network scenarios. This means
+  // that it is safe to always ignore `target_network`.
   auto socket = std::make_unique<FuzzedSocket>(data_provider_, net_log);
   socket->set_fuzz_connect_result(fuzz_connect_result_);
   // Just use the first address.

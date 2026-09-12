@@ -8,6 +8,7 @@
 
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "content/browser/loader/response_head_update_params.h"
 #include "content/browser/web_package/signed_exchange_devtools_proxy.h"
 #include "content/browser/web_package/signed_exchange_loader.h"
 #include "content/browser/web_package/signed_exchange_reporter.h"
@@ -32,7 +33,7 @@ bool SignedExchangeRequestHandler::IsSupportedMimeType(
 
 SignedExchangeRequestHandler::SignedExchangeRequestHandler(
     uint32_t url_loader_options,
-    int frame_tree_node_id,
+    FrameTreeNodeId frame_tree_node_id,
     const base::UnguessableToken& devtools_navigation_token,
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
     URLLoaderThrottlesGetter url_loader_throttles_getter,
@@ -52,25 +53,29 @@ void SignedExchangeRequestHandler::MaybeCreateLoader(
     LoaderCallback callback,
     FallbackCallback fallback_callback) {
   if (!signed_exchange_loader_) {
-    std::move(callback).Run({});
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
   if (signed_exchange_loader_->fallback_url()) {
-    DCHECK(tentative_resource_request.url.EqualsIgnoringRef(
-        *signed_exchange_loader_->fallback_url()));
+    CHECK(tentative_resource_request.url.EqualsIgnoringRef(
+              *signed_exchange_loader_->fallback_url()),
+          base::NotFatalUntil::M159);
     signed_exchange_loader_ = nullptr;
-    std::move(fallback_callback)
-        .Run(false /* reset_subresource_loader_params */);
+    // Skip subsequent interceptors and fallback to the network.
+    std::move(callback).Run(NavigationLoaderInterceptor::Result(
+        /*factory=*/nullptr, /*subresource_loader_params=*/{}));
     return;
   }
 
-  DCHECK(tentative_resource_request.url.EqualsIgnoringRef(
-      *signed_exchange_loader_->inner_request_url()));
-  std::move(callback).Run(
+  CHECK(tentative_resource_request.url.EqualsIgnoringRef(
+            *signed_exchange_loader_->inner_request_url()),
+        base::NotFatalUntil::M159);
+  std::move(callback).Run(NavigationLoaderInterceptor::Result(
       base::MakeRefCounted<network::SingleRequestURLLoaderFactory>(
           base::BindOnce(&SignedExchangeRequestHandler::StartResponse,
-                         weak_factory_.GetWeakPtr())));
+                         weak_factory_.GetWeakPtr())),
+      /*subresource_loader_params=*/{}));
 }
 
 bool SignedExchangeRequestHandler::MaybeCreateLoaderForResponse(
@@ -78,15 +83,13 @@ bool SignedExchangeRequestHandler::MaybeCreateLoaderForResponse(
     const network::ResourceRequest& request,
     network::mojom::URLResponseHeadPtr* response_head,
     mojo::ScopedDataPipeConsumerHandle* response_body,
-    mojo::PendingRemote<network::mojom::URLLoader>* loader,
     mojo::PendingReceiver<network::mojom::URLLoaderClient>* client_receiver,
     blink::ThrottlingURLLoader* url_loader,
-    bool* skip_other_interceptors,
-    bool* will_return_unsafe_redirect) {
-  DCHECK(!signed_exchange_loader_);
+    bool* skip_other_interceptors) {
+  CHECK(!signed_exchange_loader_, base::NotFatalUntil::M159);
 
-  // Navigation ResourceRequests always have non-empty |trusted_params|.
-  DCHECK(request.trusted_params);
+  // Navigation ResourceRequests always have non-empty trusted_params.
+  CHECK(request.trusted_params);
 
   if (!signed_exchange_utils::ShouldHandleAsSignedHTTPExchange(
           request.url, **response_head)) {
@@ -114,7 +117,7 @@ bool SignedExchangeRequestHandler::MaybeCreateLoaderForResponse(
       std::move(client), url_loader->Unbind(), url_loader_options_,
       true /* should_redirect_to_fallback */, std::move(devtools_proxy),
       std::move(reporter), url_loader_factory_, url_loader_throttles_getter_,
-      network_anonymization_key, frame_tree_node_id_, accept_langs_,
+      frame_tree_node_id_, accept_langs_,
       false /* keep_entry_for_prefetch_cache */);
 
   *skip_other_interceptors = true;

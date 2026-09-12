@@ -6,9 +6,11 @@ package org.chromium.chrome.browser.payments;
 
 import android.app.Activity;
 
-import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
 
+import org.chromium.base.ResettersForTesting;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.ActivityUtils;
 import org.chromium.chrome.browser.customtabs.CustomTabActivity;
 import org.chromium.chrome.browser.preferences.Pref;
@@ -23,6 +25,7 @@ import org.chromium.components.payments.PaymentRequestService;
 import org.chromium.components.payments.PaymentRequestServiceUtil;
 import org.chromium.components.payments.SslValidityChecker;
 import org.chromium.components.user_prefs.UserPrefs;
+import org.chromium.content_public.browser.LifecycleState;
 import org.chromium.content_public.browser.PermissionsPolicyFeature;
 import org.chromium.content_public.browser.RenderFrameHost;
 import org.chromium.content_public.browser.WebContents;
@@ -30,14 +33,12 @@ import org.chromium.content_public.browser.WebContentsStatics;
 import org.chromium.payments.mojom.PaymentRequest;
 import org.chromium.services.service_manager.InterfaceFactory;
 
-/**
- * Creates an instance of PaymentRequest for use in Chrome.
- */
-public class ChromePaymentRequestFactory implements InterfaceFactory<PaymentRequest> {
+/** Creates an instance of PaymentRequest for use in Chrome. */
+@NullMarked
+public class ChromePaymentRequestFactory implements InterfaceFactory<@Nullable PaymentRequest> {
     // Tests can inject behaviour on future PaymentRequests via these objects.
-    public static ChromePaymentRequestService.Delegate sDelegateForTest;
-    @Nullable
-    private static ChromePaymentRequestDelegateImplObserverForTest sObserverForTest;
+    public static ChromePaymentRequestService.@Nullable Delegate sDelegateForTest;
+    private static @Nullable ChromePaymentRequestDelegateImplObserverForTest sObserverForTest;
     private final RenderFrameHost mRenderFrameHost;
 
     /** Observes the {@link ChromePaymentRequestDelegateImpl} for testing. */
@@ -82,12 +83,12 @@ public class ChromePaymentRequestFactory implements InterfaceFactory<PaymentRequ
         }
 
         @Override
-        public String getInvalidSslCertificateErrorMessage() {
+        public @Nullable String getInvalidSslCertificateErrorMessage() {
             WebContents liveWebContents =
                     PaymentRequestServiceUtil.getLiveWebContents(mRenderFrameHost);
             if (liveWebContents == null) return null;
             if (!OriginSecurityChecker.isSchemeCryptographic(
-                        liveWebContents.getLastCommittedUrl())) {
+                    liveWebContents.getLastCommittedUrl())) {
                 return null;
             }
             return SslValidityChecker.getInvalidSslCertificateErrorMessage(liveWebContents);
@@ -99,19 +100,17 @@ public class ChromePaymentRequestFactory implements InterfaceFactory<PaymentRequ
                     PaymentRequestServiceUtil.getLiveWebContents(mRenderFrameHost);
             return liveWebContents != null
                     && UserPrefs.get(Profile.fromWebContents(liveWebContents))
-                               .getBoolean(Pref.CAN_MAKE_PAYMENT_ENABLED);
+                            .getBoolean(Pref.CAN_MAKE_PAYMENT_ENABLED);
         }
 
         @Override
-        @Nullable
-        public String getTwaPackageName() {
+        public @Nullable String getTwaPackageName() {
             WebContents liveWebContents =
                     PaymentRequestServiceUtil.getLiveWebContents(mRenderFrameHost);
             if (liveWebContents == null) return null;
             Activity activity = ActivityUtils.getActivityFromWebContents(liveWebContents);
-            if (!(activity instanceof CustomTabActivity)) return null;
+            if (!(activity instanceof CustomTabActivity customTabActivity)) return null;
 
-            CustomTabActivity customTabActivity = ((CustomTabActivity) activity);
             if (!customTabActivity.isInTwaMode()) return null;
             return customTabActivity.getTwaPackage();
         }
@@ -127,18 +126,26 @@ public class ChromePaymentRequestFactory implements InterfaceFactory<PaymentRequ
     }
 
     /** Set an observer for the payment request service, cannot be null. */
-    @VisibleForTesting
     public static void setChromePaymentRequestDelegateImplObserverForTest(
             ChromePaymentRequestDelegateImplObserverForTest observer) {
         assert observer != null;
         sObserverForTest = observer;
+        ResettersForTesting.register(() -> sObserverForTest = null);
     }
 
     @Override
-    public PaymentRequest createImpl() {
-        if (mRenderFrameHost == null) return new InvalidPaymentRequest();
+    public @Nullable PaymentRequest createImpl() {
+        if (mRenderFrameHost == null
+                || mRenderFrameHost.getLifecycleState() != LifecycleState.ACTIVE) {
+            // This happens when the page has navigated away, which would cause the
+            // blink PaymentRequest to be released shortly, or when the iframe is being
+            // removed from the page.
+            return new InvalidPaymentRequest();
+        }
+
         if (!mRenderFrameHost.isFeatureEnabled(PermissionsPolicyFeature.PAYMENT)) {
-            mRenderFrameHost.terminateRendererDueToBadMessage(241 /*PAYMENTS_WITHOUT_PERMISSION*/);
+            // PAYMENTS_WITHOUT_PERMISSION = 241
+            mRenderFrameHost.terminateRendererDueToBadMessage(241);
             return null;
         }
 
@@ -153,8 +160,8 @@ public class ChromePaymentRequestFactory implements InterfaceFactory<PaymentRequ
             ChromePaymentRequestDelegateImpl delegateImpl =
                     new ChromePaymentRequestDelegateImpl(mRenderFrameHost);
             if (sObserverForTest != null) {
-                sObserverForTest.onCreatedChromePaymentRequestDelegateImpl(/*delegateImpl=*/
-                        delegateImpl);
+                sObserverForTest.onCreatedChromePaymentRequestDelegateImpl(
+                        /* delegateImpl= */ delegateImpl);
             }
             delegate = delegateImpl;
         }
@@ -163,8 +170,12 @@ public class ChromePaymentRequestFactory implements InterfaceFactory<PaymentRequ
         if (webContents == null || webContents.isDestroyed()) return new InvalidPaymentRequest();
 
         return new MojoPaymentRequestGateKeeper(
-                (client, onClosed)
-                        -> new PaymentRequestService(mRenderFrameHost, client, onClosed, delegate,
+                (client, onClosed) ->
+                        new PaymentRequestService(
+                                mRenderFrameHost,
+                                client,
+                                onClosed,
+                                delegate,
                                 PaymentAppServiceBridge::new));
     }
 }

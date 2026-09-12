@@ -5,9 +5,8 @@
 #ifndef CHROMEOS_ASH_SERVICES_SECURE_CHANNEL_BLE_SYNCHRONIZER_H_
 #define CHROMEOS_ASH_SERVICES_SECURE_CHANNEL_BLE_SYNCHRONIZER_H_
 
-#include <deque>
-
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/clock.h"
 #include "base/time/time.h"
@@ -98,7 +97,7 @@ class BleSynchronizer : public BleSynchronizerBase {
 
   std::unique_ptr<Command> current_command_;
   std::unique_ptr<base::OneShotTimer> timer_;
-  base::Clock* clock_;
+  raw_ptr<base::Clock> clock_;
   scoped_refptr<base::TaskRunner> task_runner_;
   base::Time last_command_end_timestamp_;
   base::WeakPtrFactory<BleSynchronizer> weak_ptr_factory_{this};

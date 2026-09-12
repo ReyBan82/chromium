@@ -6,7 +6,6 @@
 
 #include "ash/public/cpp/app_list/app_list_types.h"
 #include "chrome/browser/ash/app_list/search/chrome_search_result.h"
-#include "chromeos/crosapi/mojom/launcher_search.mojom.h"
 #include "components/omnibox/browser/autocomplete_match.h"
 #include "components/omnibox/browser/autocomplete_match_classification.h"
 
@@ -14,7 +13,6 @@ namespace app_list {
 namespace {
 
 using TextVector = std::vector<ash::SearchResultTextItem>;
-using CrosApiSearchResult = crosapi::mojom::SearchResult;
 
 int ACMatchStyleToTagStyle(int styles) {
   int tag_styles = 0;
@@ -83,8 +81,7 @@ QueryHighlighter::QueryHighlighter() = default;
 QueryHighlighter::~QueryHighlighter() = default;
 
 void QueryHighlighter::Start(const std::u16string& query,
-                             ResultsMap& results,
-                             CategoriesList& categories) {
+                             const CategoriesList& categories) {
   last_query_ = query;
 }
 

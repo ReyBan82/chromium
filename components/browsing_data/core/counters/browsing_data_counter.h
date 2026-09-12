@@ -14,7 +14,6 @@
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
-#include "components/browsing_data/core/clear_browsing_data_tab.h"
 #include "components/prefs/pref_member.h"
 
 class PrefService;
@@ -110,12 +109,28 @@ class BrowsingDataCounter {
   virtual ~BrowsingDataCounter();
 
   // Should be called once to initialize this class.
+  //
+  // TODO(crbug.com/331925113): Since the Clear Browsing Data dialog no longer
+  // updates preferences in real time, this method should be deprecated in favor
+  // of |InitWithoutPeriodPref()| and |InitWithoutPref()|. Counters should
+  // be explicitly restarted from the UI when needed instead of observing
+  // preference changes.
   void Init(PrefService* pref_service,
-            ClearBrowsingDataTab clear_browsing_data_tab,
             ResultCallback callback);
 
   // Can be called instead of |Init()|, to create a counter that doesn't
-  // observe pref changes and counts data that was changed since |begin_time|.
+  // observe pref changes for the time range period - instead, the period is
+  // specified explicitly through |begin_time|.
+  void InitWithoutPeriodPref(PrefService* pref_service,
+                             base::Time begin_time,
+                             ResultCallback callback);
+
+  // Can be called instead of |Init()|, to create a counter that doesn't
+  // observe pref changes for the time range period - instead, the period is
+  // specified explicitly through |begin_time|. Additionally, this counter is
+  // also not associated with any datatype preference of the Clear Browsing
+  // Data dialog.
+  //
   // This mode doesn't use delayed responses.
   void InitWithoutPref(base::Time begin_time, ResultCallback callback);
 
@@ -126,6 +141,15 @@ class BrowsingDataCounter {
   // to be restarted, e.g. when the deletion preference changes state or when
   // we are notified of data changes.
   void Restart();
+
+  // Changes the |begin_time| for this counter. May only be used if the counter
+  // is not associated with a time period pref, i.e. if it was initialized
+  // through |InitWithoutPeriodPref()| or |InitWithoutPeriodPref()|.
+  //
+  // This forces a restart, as changing the time range while the counter is
+  // running could cause the already running calculation to start using the
+  // new time.
+  virtual void SetBeginTime(base::Time begin_time);
 
   // Returns the state transition of this counter since past restart.
   // Used only for testing.
@@ -152,10 +176,6 @@ class BrowsingDataCounter {
   // Calculates the ending of the counting period.
   base::Time GetPeriodEnd();
 
-  // Returns if this counter belongs to a preference on the default, basic or
-  // advanced CBD tab.
-  ClearBrowsingDataTab GetTab() const;
-
  private:
   // Called after the class is initialized by calling |Init|.
   virtual void OnInitialized();
@@ -167,9 +187,6 @@ class BrowsingDataCounter {
   // State transition methods.
   void TransitionToShowCalculating();
   void TransitionToReadyToReportResult();
-
-  // Indicates if this counter belongs to a preference on the basic CBD tab.
-  ClearBrowsingDataTab clear_browsing_data_tab_;
 
   // The callback that will be called when the UI should be updated with a new
   // counter value.

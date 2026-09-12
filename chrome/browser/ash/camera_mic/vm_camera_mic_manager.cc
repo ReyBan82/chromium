@@ -13,9 +13,13 @@
 #include "ash/constants/notifier_catalogs.h"
 #include "ash/public/cpp/notification_utils.h"
 #include "ash/public/cpp/vm_camera_mic_constants.h"
+#include "ash/strings/grit/ash_strings.h"
 #include "ash/system/privacy/privacy_indicators_controller.h"
+#include "ash/webui/settings/public/constants/routes.mojom.h"
+#include "base/check_deref.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
 #include "base/notreached.h"
 #include "base/system/sys_info.h"
@@ -24,19 +28,20 @@
 #include "base/timer/timer.h"
 #include "chrome/app/vector_icons/vector_icons.h"
 #include "chrome/browser/ash/borealis/borealis_util.h"
-#include "chrome/browser/ash/plugin_vm/plugin_vm_util.h"
+#include "chrome/browser/ash/video_conference/video_conference_ash_feature_client.h"
 #include "chrome/browser/notifications/notification_display_service.h"
-#include "chrome/browser/ui/chrome_pages.h"
-#include "chrome/browser/ui/settings_window_manager_chromeos.h"
-#include "chrome/browser/ui/webui/settings/ash/app_management/app_management_uma.h"
-#include "chrome/browser/ui/webui/settings/chromeos/constants/routes.mojom.h"
+#include "chrome/browser/notifications/notification_display_service_factory.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/grit/generated_resources.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
+#include "chromeos/ash/experiences/settings_ui/settings_app_manager.h"
 #include "components/vector_icons/vector_icons.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "media/capture/video/chromeos/mojom/cros_camera_service.mojom-shared.h"
 #include "media/capture/video/chromeos/public/cros_features.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/message_center/public/cpp/message_center_constants.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/message_center/public/cpp/notification_delegate.h"
@@ -65,10 +70,9 @@ constexpr base::TimeDelta VmCameraMicManager::kDebounceTime;
 // display a single notification, which can be a "camera", "mic", or a "camera
 // and mic" notification.
 //
-// Some apps will quickly turn on and off devices multiple times (e.g. skype in
-// Parallels does this about 5 times when starting a meeting). To avoid flashing
-// multiple notifications, we implement a debounce algorithm here. The debounce
-// algorithm needs to handle the following situations:
+// Some apps will quickly turn devices on and off multiple times when starting
+// a meeting. To avoid flashing multiple notifications, we implement a debounce
+// algorithm here. The debounce algorithm needs to handle these situations:
 //
 // * when a VM opens the camera and mic subsequently with a small delay
 //   in-between, we should only show the "camera and mic" notification, instead
@@ -157,11 +161,37 @@ class VmCameraMicManager::VmInfo : public message_center::NotificationObserver {
   int name_id() const { return name_id_; }
   NotificationType notification_type() const { return notifications_.active; }
 
-  void SetMicActive(bool active) { OnDeviceUpdated(DeviceType::kMic, active); }
+  void SetMicActive(bool active) {
+    OnDeviceUpdated(DeviceType::kMic, active);
+
+    if (features::IsVideoConferenceEnabled()) {
+      VideoConferenceAshFeatureClient* vc_ash_feature_client =
+          VideoConferenceAshFeatureClient::Get();
+      // Only calls `OnVmDeviceUpdated()` if `VideoConferenceAshFeatureClient`
+      // has initialized, otherwise it will be handled at
+      // `VideoConferenceAshFeatureClient` initialization.
+      if (vc_ash_feature_client) {
+        vc_ash_feature_client->OnVmDeviceUpdated(vm_type_, DeviceType::kMic,
+                                                 active);
+      }
+    }
+  }
 
   void SetCameraAccessing(bool accessing) {
     camera_accessing_ = accessing;
     OnCameraUpdated();
+
+    if (features::IsVideoConferenceEnabled()) {
+      VideoConferenceAshFeatureClient* vc_ash_feature_client =
+          VideoConferenceAshFeatureClient::Get();
+      // Only calls `OnVmDeviceUpdated()` if `VideoConferenceAshFeatureClient`
+      // has initialized, otherwise it will be handled at
+      // `VideoConferenceAshFeatureClient` initialization.
+      if (vc_ash_feature_client) {
+        vc_ash_feature_client->OnVmDeviceUpdated(vm_type_, DeviceType::kCamera,
+                                                 accessing);
+      }
+    }
   }
   void SetCameraPrivacyIsOn(bool on) {
     camera_privacy_is_on_ = on;
@@ -207,24 +237,38 @@ class VmCameraMicManager::VmInfo : public message_center::NotificationObserver {
       NotificationType new_notification) {
     DCHECK_NE(notifications_.active, new_notification);
 
+    auto app_name = l10n_util::GetStringUTF16(name_id_);
+    auto delegate = base::MakeRefCounted<PrivacyIndicatorsNotificationDelegate>(
+        /*launch_settings=*/base::BindRepeating(
+            &VmCameraMicManager::VmInfo::OpenSettings,
+            weak_ptr_factory_.GetWeakPtr()));
+
+    // Privacy indicators is only enabled when Video Conference is disabled.
+    bool privacy_indicators_enabled = !features::IsVideoConferenceEnabled();
+
     if (notifications_.active != kNoNotification) {
-      CloseNotification(notifications_.active);
-      if (features::IsPrivacyIndicatorsEnabled()) {
-        UpdatePrivacyIndicatorsView(
+      if (privacy_indicators_enabled) {
+        PrivacyIndicatorsController::Get()->UpdatePrivacyIndicators(
             /*app_id=*/GetNotificationId(vm_type_, notifications_.active),
-            /*is_camera_used=*/false, /*is_microphone_used=*/false);
+            app_name, /*is_camera_used=*/false, /*is_microphone_used=*/false,
+            delegate, PrivacyIndicatorsSource::kLinuxVm);
+      } else {
+        CloseNotification(notifications_.active);
       }
     }
 
     if (new_notification != kNoNotification) {
-      OpenNotification(new_notification);
-      if (features::IsPrivacyIndicatorsEnabled()) {
-        UpdatePrivacyIndicatorsView(
-            /*app_id=*/GetNotificationId(vm_type_, new_notification),
+      // Privacy indicator is only enabled when Video Conference is disabled.
+      if (privacy_indicators_enabled) {
+        PrivacyIndicatorsController::Get()->UpdatePrivacyIndicators(
+            /*app_id=*/GetNotificationId(vm_type_, new_notification), app_name,
             /*is_camera_used=*/
             new_notification[static_cast<size_t>(DeviceType::kCamera)],
             /*is_microphone_used=*/
-            new_notification[static_cast<size_t>(DeviceType::kMic)]);
+            new_notification[static_cast<size_t>(DeviceType::kMic)], delegate,
+            PrivacyIndicatorsSource::kLinuxVm);
+      } else {
+        OpenNotification(new_notification);
       }
     }
 
@@ -256,12 +300,15 @@ class VmCameraMicManager::VmInfo : public message_center::NotificationObserver {
   }
 
   void OpenNotification(NotificationType type) const {
-    DCHECK_NE(type, kNoNotification);
+    CHECK(features::IsVideoConferenceEnabled());
+    CHECK_NE(type, kNoNotification);
 
     const gfx::VectorIcon* source_icon = nullptr;
     int message_id;
     if (type[static_cast<size_t>(DeviceType::kCamera)]) {
-      source_icon = &::vector_icons::kVideocamIcon;
+      source_icon = ::features::IsRoundedIconsEnabled()
+                        ? &vector_icons::kVideocamFilledIcon
+                        : &vector_icons::kVideocamOldIcon;
       if (type[static_cast<size_t>(DeviceType::kMic)]) {
         message_id = IDS_APP_USING_CAMERA_MIC_NOTIFICATION_MESSAGE;
       } else {
@@ -269,7 +316,9 @@ class VmCameraMicManager::VmInfo : public message_center::NotificationObserver {
       }
     } else {
       DCHECK_EQ(type, kMicNotification);
-      source_icon = &::vector_icons::kMicIcon;
+      source_icon = ::features::IsRoundedIconsEnabled()
+                        ? &vector_icons::kMicFilledIcon
+                        : &vector_icons::kMicOldIcon;
       message_id = IDS_APP_USING_MIC_NOTIFICATION_MESSAGE;
     }
 
@@ -280,27 +329,6 @@ class VmCameraMicManager::VmInfo : public message_center::NotificationObserver {
         l10n_util::GetStringUTF16(IDS_INTERNAL_APP_SETTINGS));
     rich_notification_data.fullscreen_visibility =
         message_center::FullscreenVisibility::OVER_USER;
-
-    if (features::IsPrivacyIndicatorsEnabled()) {
-      // We will use the notification id's logic here for `app_id`
-      auto notification = CreatePrivacyIndicatorsNotification(
-          GetNotificationId(vm_type_, type),
-          l10n_util::GetStringUTF16(name_id_),
-          type[static_cast<size_t>(DeviceType::kCamera)],
-          type[static_cast<size_t>(DeviceType::kMic)],
-          base::MakeRefCounted<PrivacyIndicatorsNotificationDelegate>(
-              /*launch_app=*/absl::nullopt,
-              /*launch_settings=*/base::BindRepeating(
-                  &VmCameraMicManager::VmInfo::OpenSettings,
-                  weak_ptr_factory_.GetMutableWeakPtr())));
-      notification->set_fullscreen_visibility(
-          message_center::FullscreenVisibility::OVER_USER);
-
-      NotificationDisplayService::GetForProfile(profile_)->Display(
-          NotificationHandler::Type::TRANSIENT, *notification,
-          /*metadata=*/nullptr);
-      return;
-    }
 
     message_center::Notification notification(
         message_center::NOTIFICATION_TYPE_SIMPLE,
@@ -320,53 +348,56 @@ class VmCameraMicManager::VmInfo : public message_center::NotificationObserver {
         base::MakeRefCounted<message_center::ThunkNotificationDelegate>(
             weak_ptr_factory_.GetMutableWeakPtr()));
 
-    NotificationDisplayService::GetForProfile(profile_)->Display(
+    NotificationDisplayServiceFactory::GetForProfile(profile_)->Display(
         NotificationHandler::Type::TRANSIENT, notification,
         /*metadata=*/nullptr);
   }
 
   void CloseNotification(NotificationType type) const {
-    DCHECK_NE(type, kNoNotification);
+    CHECK(features::IsVideoConferenceEnabled());
+    CHECK_NE(type, kNoNotification);
 
-    auto notification_id = GetNotificationId(vm_type_, type);
-    if (ash::features::IsPrivacyIndicatorsEnabled()) {
-      notification_id =
-          ash::GetPrivacyIndicatorsNotificationId(notification_id);
-    }
-
-    NotificationDisplayService::GetForProfile(profile_)->Close(
-        NotificationHandler::Type::TRANSIENT, notification_id);
+    NotificationDisplayServiceFactory::GetForProfile(profile_)->Close(
+        NotificationHandler::Type::TRANSIENT,
+        GetNotificationId(vm_type_, type));
   }
 
   // message_center::NotificationObserver:
   //
   // This open the settings page if the button is clicked on the notification.
-  void Click(const absl::optional<int>& button_index,
-             const absl::optional<std::u16string>& reply) override {
+  void Click(const std::optional<int>& button_index,
+             const std::optional<std::u16string>& reply) override {
     OpenSettings();
   }
 
   // Opens the settings page.
-  void OpenSettings() {
+  void OpenSettings() const {
+    std::string sub_page;
+    std::optional<ash::SettingsAppManager::EntryPoint> entry_point;
     switch (vm_type_) {
       case VmType::kCrostiniVm:
-        chrome::SettingsWindowManager::GetInstance()->ShowOSSettings(
-            profile_, chromeos::settings::mojom::kCrostiniDetailsSubpagePath);
-        break;
-      case VmType::kPluginVm:
-        chrome::ShowAppManagementPage(
-            profile_, plugin_vm::kPluginVmShelfAppId,
-            settings::AppManagementEntryPoint::kNotificationPluginVm);
+        sub_page = chromeos::settings::mojom::kCrostiniDetailsSubpagePath;
         break;
       case VmType::kBorealis:
-        chrome::ShowAppManagementPage(
-            profile_, borealis::kClientAppId,
-            settings::AppManagementEntryPoint::kAppManagementMainViewBorealis);
+        sub_page = ash::SettingsAppManager::CreateAppManagementPagePath(
+            borealis::kClientAppId);
+        entry_point =
+            ash::SettingsAppManager::EntryPoint::kAppManagementMainViewBorealis;
         break;
+      default:
+        return;
     }
+
+    const user_manager::User* user =
+        ash::BrowserContextHelper::Get()->GetUserByBrowserContext(
+            profile_.get());
+    ash::SettingsAppManager::Get()->Open(
+        CHECK_DEREF(user),
+        ash::SettingsAppManager::OpenParams{.sub_page = sub_page,
+                                            .entry_point = entry_point});
   }
 
-  Profile* const profile_;
+  const raw_ptr<Profile, LeakedDanglingUntriaged> profile_;
   const VmType vm_type_;
   const int name_id_;
   base::RepeatingClosure notification_changed_callback_;
@@ -410,7 +441,6 @@ void VmCameraMicManager::OnPrimaryUserSessionStarted(Profile* primary_profile) {
   };
 
   emplace_vm_info(VmType::kCrostiniVm, IDS_CROSTINI_LINUX);
-  emplace_vm_info(VmType::kPluginVm, IDS_PLUGIN_VM_APP_NAME);
   emplace_vm_info(VmType::kBorealis, IDS_BOREALIS_APP_NAME);
 
   // Only do the subscription in real ChromeOS environment.
@@ -431,8 +461,8 @@ void VmCameraMicManager::OnPrimaryUserSessionStarted(Profile* primary_profile) {
   }
 }
 
-// The class is supposed to be used as a singleton with `base::NoDestructor`, so
-// we do not do clean up (e.g. deregister as observers) here.
+// The class is supposed to be used as a singleton with `base::NoDestructor`,
+// so we do not do clean up (e.g. deregister as observers) here.
 VmCameraMicManager::~VmCameraMicManager() = default;
 
 void VmCameraMicManager::MaybeSubscribeToCameraService(
@@ -444,13 +474,11 @@ void VmCameraMicManager::MaybeSubscribeToCameraService(
   }
 
   auto* camera = media::CameraHalDispatcherImpl::GetInstance();
-  // OnActiveClientChange() will be called automatically after the
-  // subscription, so there is no need to get the current status here.
-  camera->AddActiveClientObserver(this);
   auto privacy_switch_state = cros::mojom::CameraPrivacySwitchState::UNKNOWN;
   auto device_id_to_privacy_switch_state =
       camera->AddCameraPrivacySwitchObserver(this);
-  // TODO(b/255249223): Handle multiple cameras with privacy controls properly.
+  // TODO(b/255249223): Handle multiple cameras with privacy controls
+  // properly.
   for (const auto& it : device_id_to_privacy_switch_state) {
     cros::mojom::CameraPrivacySwitchState state = it.second;
     if (state == cros::mojom::CameraPrivacySwitchState::ON) {
@@ -485,6 +513,18 @@ bool VmCameraMicManager::IsDeviceActive(DeviceType device) const {
   return false;
 }
 
+bool VmCameraMicManager::IsDeviceActive(VmType vm, DeviceType device) const {
+  auto it = vm_info_map_.find(vm);
+  if (it == vm_info_map_.end()) {
+    return false;
+  }
+  const NotificationType& notification_type = it->second.notification_type();
+  if (notification_type[static_cast<size_t>(device)]) {
+    return true;
+  }
+  return false;
+}
+
 bool VmCameraMicManager::IsNotificationActive(
     NotificationType notification) const {
   for (const auto& vm_info : vm_info_map_) {
@@ -493,23 +533,6 @@ bool VmCameraMicManager::IsNotificationActive(
     }
   }
   return false;
-}
-
-void VmCameraMicManager::OnActiveClientChange(
-    cros::mojom::CameraClientType type,
-    bool is_new_active_client,
-    const base::flat_set<std::string>& active_device_ids) {
-  // Crostini does not support camera yet.
-  bool client_active_state_changed =
-      is_new_active_client || active_device_ids.empty();
-
-  if (client_active_state_changed &&
-      type == cros::mojom::CameraClientType::PLUGINVM) {
-    content::GetUIThreadTaskRunner({})->PostTask(
-        FROM_HERE, base::BindOnce(&VmCameraMicManager::SetCameraAccessing,
-                                  base::Unretained(this), VmType::kPluginVm,
-                                  !active_device_ids.empty()));
-  }
 }
 
 void VmCameraMicManager::SetCameraAccessing(VmType vm, bool accessing) {
@@ -566,9 +589,6 @@ std::string VmCameraMicManager::GetNotificationId(VmType vm,
     case VmType::kCrostiniVm:
       id.append("-crostini");
       break;
-    case VmType::kPluginVm:
-      id.append("-pluginvm");
-      break;
     case VmType::kBorealis:
       id.append("-borealis");
       break;
@@ -593,7 +613,6 @@ void VmCameraMicManager::OnNumberOfInputStreamsWithPermissionChanged() {
   };
 
   update(CrasAudioHandler::ClientType::VM_TERMINA, VmType::kCrostiniVm);
-  update(CrasAudioHandler::ClientType::VM_PLUGIN, VmType::kPluginVm);
   update(CrasAudioHandler::ClientType::VM_BOREALIS, VmType::kBorealis);
 }
 

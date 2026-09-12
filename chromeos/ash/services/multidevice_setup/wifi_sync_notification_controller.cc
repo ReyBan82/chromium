@@ -5,9 +5,11 @@
 #include "chromeos/ash/services/multidevice_setup/wifi_sync_notification_controller.h"
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/ptr_util.h"
 #include "base/power_monitor/power_monitor.h"
+#include "base/trace_event/trace_event.h"
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/ash/components/multidevice/remote_device_ref.h"
 #include "chromeos/ash/components/multidevice/software_feature.h"
@@ -21,7 +23,6 @@
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
 #include "components/session_manager/core/session_manager.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -78,20 +79,17 @@ WifiSyncNotificationController::WifiSyncNotificationController(
       device_sync_client_(device_sync_client),
       delegate_notifier_(delegate_notifier) {
   if (pref_service_->GetBoolean(kCanShowWifiSyncAnnouncementPrefName)) {
-    session_manager::SessionManager::Get()->AddObserver(this);
-    base::PowerMonitor::AddPowerSuspendObserver(this);
-    did_register_session_observers_ = true;
+    session_manager_observation_.Observe(
+        session_manager::SessionManager::Get());
+    power_monitor_observation_.Observe(base::PowerMonitor::GetInstance());
   }
 }
 
-WifiSyncNotificationController::~WifiSyncNotificationController() {
-  if (did_register_session_observers_) {
-    session_manager::SessionManager::Get()->RemoveObserver(this);
-    base::PowerMonitor::RemovePowerSuspendObserver(this);
-  }
-}
+WifiSyncNotificationController::~WifiSyncNotificationController() = default;
 
 void WifiSyncNotificationController::OnSessionStateChanged() {
+  TRACE_EVENT0("login",
+               "WifiSyncNotificationController::OnSessionStateChanged");
   ShowAnnouncementNotificationIfEligible();
 }
 
@@ -100,6 +98,9 @@ void WifiSyncNotificationController::OnResume() {
 }
 
 void WifiSyncNotificationController::ShowAnnouncementNotificationIfEligible() {
+  TRACE_EVENT0(
+      "ui",
+      "WifiSyncNotificationController::ShowAnnouncementNotificationIfEligible");
   // Show the announcement notification when the device is unlocked and
   // eligible for wi-fi sync.  This is done on unlock/resume to avoid showing
   // it on the first sign-in when it would distract from showoff and other
@@ -143,7 +144,7 @@ bool WifiSyncNotificationController::IsWifiSyncSupported() {
     return false;
   }
 
-  absl::optional<multidevice::RemoteDeviceRef> host_device =
+  std::optional<multidevice::RemoteDeviceRef> host_device =
       host_with_status.host_device();
   if (!host_device) {
     PA_LOG(ERROR) << "WifiSyncNotificationController::" << __func__
@@ -157,7 +158,7 @@ bool WifiSyncNotificationController::IsWifiSyncSupported() {
     return false;
   }
 
-  absl::optional<multidevice::RemoteDeviceRef> local_device =
+  std::optional<multidevice::RemoteDeviceRef> local_device =
       device_sync_client_->GetLocalDeviceMetadata();
   if (!local_device) {
     PA_LOG(ERROR) << "WifiSyncNotificationController::" << __func__

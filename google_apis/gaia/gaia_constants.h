@@ -7,68 +7,92 @@
 #ifndef GOOGLE_APIS_GAIA_GAIA_CONSTANTS_H_
 #define GOOGLE_APIS_GAIA_GAIA_CONSTANTS_H_
 
+#include <string_view>
+
+#include "base/component_export.h"
+
 namespace GaiaConstants {
 
 // Gaia sources for accounting
-extern const char kChromeOSSource[];
-extern const char kChromeSource[];
+inline constexpr char kChromeOSSource[] = "chromeos";
+inline constexpr char kChromeSource[] = "ChromiumBrowser";
 // Used as Gaia source suffix to detect retry requests because of
 // |GoogleServiceAuthError::UNEXPECTED_SERVICE_RESPONSE|.
-extern const char kUnexpectedServiceResponse[];
+inline constexpr char kUnexpectedServiceResponse[] =
+    "UnexpectedServiceResponse";
 
 // OAuth2 scopes.
-extern const char kOAuth1LoginScope[];
-extern const char kDeviceManagementServiceOAuth[];
-extern const char kAnyApiOAuth2Scope[];
-extern const char kChromeSyncOAuth2Scope[];
-extern const char kChromeSyncSupervisedOAuth2Scope[];
-extern const char kKidManagementPrivilegedOAuth2Scope[];
-extern const char kKidsSupervisionSetupChildOAuth2Scope[];
-extern const char kGoogleTalkOAuth2Scope[];
-extern const char kGoogleUserInfoEmail[];
-extern const char kGoogleUserInfoProfile[];
-extern const char kParentApprovalOAuth2Scope[];
-extern const char kPeopleApiReadOnlyOAuth2Scope[];
-extern const char kProgrammaticChallengeOAuth2Scope[];
-extern const char kAccountsReauthOAuth2Scope[];
-extern const char kAuditRecordingOAuth2Scope[];
-extern const char kClearCutOAuth2Scope[];
-extern const char kFCMOAuthScope[];
-extern const char kTachyonOAuthScope[];
-extern const char kPhotosOAuth2Scope[];
-extern const char kCastBackdropOAuth2Scope[];
-extern const char kCloudTranslationOAuth2Scope[];
-extern const char kPasswordsLeakCheckOAuth2Scope[];
-extern const char kChromeSafeBrowsingOAuth2Scope[];
-extern const char kClassifyUrlKidPermissionOAuth2Scope[];
-extern const char kKidFamilyReadonlyOAuth2Scope[];
-extern const char kPaymentsOAuth2Scope[];
-extern const char kCryptAuthOAuth2Scope[];
-extern const char kDriveOAuth2Scope[];
-extern const char kDriveReadOnlyOAuth2Scope[];
-extern const char kAssistantOAuth2Scope[];
-extern const char kCloudPlatformProjectsOAuth2Scope[];
-extern const char kNearbyShareOAuth2Scope[];
-extern const char kGCMGroupServerOAuth2Scope[];
-extern const char kGCMCheckinServerOAuth2Scope[];
-extern const char kChromeWebstoreOAuth2Scope[];
-extern const char kAccountCapabilitiesOAuth2Scope[];
-extern const char kSupportContentOAuth2Scope[];
-extern const char kPhotosModuleOAuth2Scope[];
-extern const char kPhotosModuleImageOAuth2Scope[];
-extern const char kSecureConnectOAuth2Scope[];
-extern const char kFeedOAuth2Scope[];
-extern const char kKAnonymityServiceOAuth2Scope[];
-extern const char kCalendarReadOnlyOAuth2Scope[];
+// Keep the list of OAuth2 scopes sorted alphabetically.
+// keep-sorted start case=no
 
-// Used by wallet sign in helper.
-extern const char kClientOAuthEmailKey[];
+// OAuth2 scope for access to Account Capabilities API.
+inline constexpr char kAccountCapabilitiesOAuth2Scope[] =
+    "https://www.googleapis.com/auth/account.capabilities";
+// OAuth2 scope for access to all Google APIs.
+inline constexpr char kAnyApiOAuth2Scope[] =
+    "https://www.googleapis.com/auth/any-api";
+// OAuth2 scope for access to Chrome sync APIs
+inline constexpr char kChromeSyncOAuth2Scope[] =
+    "https://www.googleapis.com/auth/chromesync";
+// OAuth2 scope for access to Chrome sync preview APIs.
+inline constexpr char kChromeSyncPreviewOAuth2Scope[] =
+    "https://www.googleapis.com/auth/chromesync.preview";
+// OAuth2 scope for access to clear cut logs.
+inline constexpr char kClearCutOAuth2Scope[] =
+    "https://www.googleapis.com/auth/cclog";
+// Service/scope names for device management (cloud-based policy) server.
+inline constexpr char kDeviceManagementServiceOAuth[] =
+    "https://www.googleapis.com/auth/chromeosdevicemanagement";
+// OAuth2 scope for access to Drive.
+inline constexpr char kDriveOAuth2Scope[] =
+    "https://www.googleapis.com/auth/drive";
+// OAuth2 scope for FCM, the Firebase Cloud Messaging service.
+inline constexpr char kFCMOAuthScope[] =
+    "https://www.googleapis.com/auth/firebase.messaging";
+// OAuth2 scope for access to Google account information.
+inline constexpr char kGoogleUserInfoEmail[] =
+    "https://www.googleapis.com/auth/userinfo.email";
+inline constexpr char kGoogleUserInfoProfile[] =
+    "https://www.googleapis.com/auth/userinfo.profile";
+// OAuth2 scope for Lens.
+inline constexpr char kLensOAuth2Scope[] =
+    "https://www.googleapis.com/auth/lens";
+inline constexpr char kOAuth1LoginScope[] =
+    "https://www.google.com/accounts/OAuthLogin";
+// OAuth2 scope for search results.
+inline constexpr char kSearchResultsOAuth2Scope[] =
+    "https://www.googleapis.com/auth/searchresults";
+// OAuth2 scope for access to the SecureConnect API.
+inline constexpr char kSecureConnectOAuth2Scope[] =
+    "https://www.googleapis.com/auth/bce.secureconnect";
+// OAuth2 scope for access to the Secure Gateway API.
+inline constexpr char kSecureGatewayOAuth2Scope[] =
+    "https://www.googleapis.com/auth/cloud-secure-gateway-users.access";
+// OAuth2 scope for support content API.
+inline constexpr char kSupportContentOAuth2Scope[] =
+    "https://www.googleapis.com/auth/supportcontent";
+// keep-sorted end
+
+// Used to build ClientOAuth requests.  These are the names of keys used when
+// building base::DictionaryValue that represent the json data that makes up
+// the ClientOAuth endpoint protocol.  The comment above each constant explains
+// what value is associated with that key.
+//
+// Canonical email of the account to sign in.
+inline constexpr char kClientOAuthEmailKey[] = "email";
 
 // Refresh token that is guaranteed to be invalid.
-extern const char kInvalidRefreshToken[];
+inline constexpr char kInvalidRefreshToken[] = "invalid_refresh_token";
 
 // Name of the Google authentication cookie.
-extern const char kGaiaSigninCookieName[];
+inline constexpr char kGaiaSigninCookieName[] = "SAPISID";
+
+// Constants for the Chrome Refresh Token Binding.
+inline constexpr std::string_view kTokenBindingAssertionSentinel =
+    "DBSC_CHALLENGE_IF_REQUIRED";
+inline constexpr std::string_view kTokenBindingAssertionFailedPlaceholder =
+    "SIGNATURE_FAILED";
+
 }  // namespace GaiaConstants
 
 #endif  // GOOGLE_APIS_GAIA_GAIA_CONSTANTS_H_

@@ -4,23 +4,25 @@
 
 package org.chromium.content.browser.input;
 
+
 import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
 
-import androidx.annotation.VisibleForTesting;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.NativeMethods;
 
 import org.chromium.base.UserData;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.content.browser.PopupController;
 import org.chromium.content.browser.PopupController.HideablePopup;
 import org.chromium.content.browser.WindowEventObserver;
 import org.chromium.content.browser.WindowEventObserverManager;
 import org.chromium.content.browser.webcontents.WebContentsImpl;
-import org.chromium.content.browser.webcontents.WebContentsImpl.UserDataFactory;
 import org.chromium.content_public.browser.WebContents;
+import org.chromium.content_public.browser.WebContents.UserDataFactory;
 import org.chromium.ui.accessibility.AccessibilityState;
 import org.chromium.ui.base.DeviceFormFactor;
 import org.chromium.ui.base.ViewAndroidDelegate;
@@ -29,28 +31,30 @@ import org.chromium.ui.base.WindowAndroid;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Handles the popup UI for the lt&;select&gt; HTML tag support.
- */
+/** Handles the popup UI for the lt&;select&gt; HTML tag support. */
 @JNINamespace("content")
-public class SelectPopup implements HideablePopup, ViewAndroidDelegate.ContainerViewObserver,
-                                    WindowEventObserver, UserData {
+@NullMarked
+public class SelectPopup
+        implements HideablePopup,
+                ViewAndroidDelegate.ContainerViewObserver,
+                WindowEventObserver,
+                UserData {
     /** UI for Select popup. */
     public interface Ui {
-        /**
-         * Shows the popup.
-         */
-        public void show();
+        /** Shows the popup. */
+        void show();
+
         /**
          * Hides the popup.
+         *
          * @param sendsCancelMessage Sends cancel message before hiding if true.
          */
-        public void hide(boolean sendsCancelMessage);
+        void hide(boolean sendsCancelMessage);
     }
 
     private final WebContentsImpl mWebContents;
-    private View mContainerView;
-    private Ui mPopupView;
+    private @Nullable View mContainerView;
+    private @Nullable Ui mPopupView;
     private long mNativeSelectPopup;
     private long mNativeSelectPopupSourceFrame;
 
@@ -60,12 +64,15 @@ public class SelectPopup implements HideablePopup, ViewAndroidDelegate.Container
 
     /**
      * Get {@link SelectPopup} object used for the give WebContents.
+     *
      * @param webContents {@link WebContents} object.
      * @return {@link SelectPopup} object.
      */
     public static SelectPopup fromWebContents(WebContents webContents) {
-        return ((WebContentsImpl) webContents)
-                .getOrSetUserData(SelectPopup.class, UserDataFactoryLazyHolder.INSTANCE);
+        SelectPopup ret =
+                webContents.getOrSetUserData(SelectPopup.class, UserDataFactoryLazyHolder.INSTANCE);
+        assert ret != null;
+        return ret;
     }
 
     @CalledByNative
@@ -89,13 +96,6 @@ public class SelectPopup implements HideablePopup, ViewAndroidDelegate.Container
         WindowEventObserverManager.from(mWebContents).addObserver(this);
     }
 
-    /**
-     * Close popup. Called when {@link WindowAndroid} is updated.
-     */
-    public void close() {
-        mPopupView = null;
-    }
-
     // HideablePopup
 
     @Override
@@ -108,7 +108,7 @@ public class SelectPopup implements HideablePopup, ViewAndroidDelegate.Container
     // ViewAndroidDelegate.ContainerViewObserver
 
     @Override
-    public void onUpdateContainerView(ViewGroup view) {
+    public void onUpdateContainerView(@Nullable ViewGroup view) {
         mContainerView = view;
         hide();
     }
@@ -116,24 +116,41 @@ public class SelectPopup implements HideablePopup, ViewAndroidDelegate.Container
     // WindowEventObserver
 
     @Override
-    public void onWindowAndroidChanged(WindowAndroid windowAndroid) {
-        close();
+    public void onWindowAndroidChanged(@Nullable WindowAndroid windowAndroid) {
+        if (mPopupView == null) return;
+        mPopupView.hide(true);
+        mPopupView = null;
+        assert mNativeSelectPopupSourceFrame == 0;
     }
 
     /**
-     * Called (from native) when the lt&;select&gt; popup needs to be shown.
+     * Called (from native) when the &lt;select&gt; popup needs to be shown.
+     *
      * @param anchorView View anchored for popup.
      * @param nativeSelectPopupSourceFrame The native RenderFrameHost that owns the popup.
-     * @param items           Items to show.
-     * @param enabled         POPUP_ITEM_TYPEs for items.
-     * @param multiple        Whether the popup menu should support multi-select.
+     * @param items Items to show.
+     * @param enabled POPUP_ITEM_TYPEs for items.
+     * @param multiple Whether the popup menu should support multi-select.
      * @param selectedIndices Indices of selected items.
+     * @param rightAligned Whether the popup menu should be right aligned.
+     * @param itemHeight The height of each item in the dropdown in pixels.
+     * @param fontSize The font size of the label text in pixels.
      */
     @SuppressWarnings("unused")
     @CalledByNative
-    private void show(View anchorView, long nativeSelectPopupSourceFrame, String[] items,
-            int[] enabled, boolean multiple, int[] selectedIndices, boolean rightAligned) {
-        if (mContainerView.getParent() == null || mContainerView.getVisibility() != View.VISIBLE) {
+    private void show(
+            View anchorView,
+            long nativeSelectPopupSourceFrame,
+            String[] items,
+            int[] enabled,
+            boolean multiple,
+            int[] selectedIndices,
+            boolean rightAligned,
+            int itemHeight,
+            double fontSize) {
+        if (mContainerView == null
+                || mContainerView.getParent() == null
+                || mContainerView.getVisibility() != View.VISIBLE) {
             mNativeSelectPopupSourceFrame = nativeSelectPopupSourceFrame;
             selectMenuItems(null);
             return;
@@ -150,21 +167,30 @@ public class SelectPopup implements HideablePopup, ViewAndroidDelegate.Container
         for (int i = 0; i < items.length; i++) {
             popupItems.add(new SelectPopupItem(items[i], enabled[i]));
         }
-        if (DeviceFormFactor.isTablet() && !multiple
+        if (DeviceFormFactor.isNonMultiDisplayContextOnTablet(context)
+                && !multiple
                 && !AccessibilityState.isTouchExplorationEnabled()) {
-            mPopupView = new SelectPopupDropdown(context, this::selectMenuItems, anchorView,
-                    popupItems, selectedIndices, rightAligned, mWebContents);
+            mPopupView =
+                    new SelectPopupDropdown(
+                            context,
+                            this::selectMenuItems,
+                            anchorView,
+                            popupItems,
+                            selectedIndices,
+                            rightAligned,
+                            itemHeight,
+                            fontSize,
+                            mWebContents);
         } else {
-            mPopupView = new SelectPopupDialog(
-                    context, this::selectMenuItems, popupItems, multiple, selectedIndices);
+            mPopupView =
+                    new SelectPopupDialog(
+                            context, this::selectMenuItems, popupItems, multiple, selectedIndices);
         }
         mNativeSelectPopupSourceFrame = nativeSelectPopupSourceFrame;
         mPopupView.show();
     }
 
-    /**
-     * Called when the &lt;select&gt; popup needs to be hidden.
-     */
+    /** Called when the &lt;select&gt; popup needs to be hidden. */
     @CalledByNative
     public void hideWithoutCancel() {
         if (mPopupView == null) return;
@@ -181,7 +207,6 @@ public class SelectPopup implements HideablePopup, ViewAndroidDelegate.Container
     /**
      * @return {@code true} if select popup is being shown.
      */
-    @VisibleForTesting
     public boolean isVisibleForTesting() {
         return mPopupView != null;
     }
@@ -190,10 +215,10 @@ public class SelectPopup implements HideablePopup, ViewAndroidDelegate.Container
      * Notifies that items were selected in the currently showing select popup.
      * @param indices Array of indices of the selected items.
      */
-    public void selectMenuItems(int[] indices) {
+    public void selectMenuItems(int @Nullable [] indices) {
         if (mNativeSelectPopup != 0) {
-            SelectPopupJni.get().selectMenuItems(
-                    mNativeSelectPopup, SelectPopup.this, mNativeSelectPopupSourceFrame, indices);
+            SelectPopupJni.get()
+                    .selectMenuItems(mNativeSelectPopup, mNativeSelectPopupSourceFrame, indices);
         }
         mNativeSelectPopupSourceFrame = 0;
         mPopupView = null;
@@ -201,7 +226,9 @@ public class SelectPopup implements HideablePopup, ViewAndroidDelegate.Container
 
     @NativeMethods
     interface Natives {
-        void selectMenuItems(long nativeSelectPopup, SelectPopup caller,
-                long nativeSelectPopupSourceFrame, int[] indices);
+        void selectMenuItems(
+                long nativeSelectPopup,
+                long nativeSelectPopupSourceFrame,
+                int @Nullable [] indices);
     }
 }

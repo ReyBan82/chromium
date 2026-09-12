@@ -6,8 +6,10 @@
 
 #include "base/memory/read_only_shared_memory_region.h"
 #include "chrome/browser/enterprise/connectors/common.h"
-#include "chrome/browser/safe_browsing/cloud_content_scanning/binary_upload_service.h"
 #include "chrome/browser/safe_browsing/cloud_content_scanning/deep_scanning_utils.h"
+#include "components/enterprise/connectors/core/cloud_content_scanning/binary_upload_service.h"
+#include "components/enterprise/connectors/core/cloud_content_scanning/common.h"
+#include "components/enterprise/connectors/core/cloud_content_scanning/deep_scanning_utils.h"
 
 namespace enterprise_connectors {
 
@@ -20,36 +22,31 @@ constexpr size_t kMaxPageSize = 50 * 1024 * 1024;
 PagePrintAnalysisRequest::PagePrintAnalysisRequest(
     const AnalysisSettings& analysis_settings,
     base::ReadOnlySharedMemoryRegion page,
-    safe_browsing::BinaryUploadService::ContentAnalysisCallback callback)
-    : safe_browsing::BinaryUploadService::Request(
-          std::move(callback),
-          analysis_settings.cloud_or_local_settings),
+    BinaryUploadRequest::ContentAnalysisCallback callback)
+    : BinaryUploadRequest(std::move(callback),
+                          analysis_settings.cloud_or_local_settings,
+                          base::BindRepeating(&GetBrowserPolicyConnector)),
       page_(std::move(page)) {
-  safe_browsing::IncrementCrashKey(
-      safe_browsing::ScanningCrashKey::PENDING_PRINTS);
-  safe_browsing::IncrementCrashKey(
-      safe_browsing::ScanningCrashKey::TOTAL_PRINTS);
+  DCHECK(page_.IsValid());
+  IncrementCrashKey(ScanningCrashKey::PENDING_PRINTS);
+  IncrementCrashKey(ScanningCrashKey::TOTAL_PRINTS);
 }
 
 PagePrintAnalysisRequest::~PagePrintAnalysisRequest() {
-  safe_browsing::DecrementCrashKey(
-      safe_browsing::ScanningCrashKey::PENDING_PRINTS);
+  DecrementCrashKey(ScanningCrashKey::PENDING_PRINTS);
 }
 
 void PagePrintAnalysisRequest::GetRequestData(DataCallback callback) {
   Data data;
   data.size = page_.GetSize();
-
-  if (data.size >= kMaxPageSize) {
-    std::move(callback).Run(
-        safe_browsing::BinaryUploadService::Result::FILE_TOO_LARGE,
-        std::move(data));
-    return;
-  }
-
   data.page = page_.Duplicate();
-  std::move(callback).Run(safe_browsing::BinaryUploadService::Result::SUCCESS,
-                          std::move(data));
+
+  std::move(callback).Run(
+      // Only enforce a max size for cloud scans.
+      data.size >= kMaxPageSize && cloud_or_local_settings().is_cloud_analysis()
+          ? ScanRequestUploadResult::kFileTooLarge
+          : ScanRequestUploadResult::kSuccess,
+      std::move(data));
 }
 
 }  // namespace enterprise_connectors

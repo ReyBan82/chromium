@@ -7,8 +7,10 @@
 
 #include <stdint.h>
 
+#include <array>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -19,7 +21,6 @@
 #include "net/nqe/network_quality_estimator_util.h"
 #include "net/nqe/network_quality_observation.h"
 #include "net/nqe/network_quality_observation_source.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 
@@ -30,6 +31,9 @@ class TimeTicks;
 namespace net {
 
 class NetworkQualityEstimatorParams;
+
+using DeletedObservationSources =
+    std::array<bool, NETWORK_QUALITY_OBSERVATION_SOURCE_MAX>;
 
 namespace nqe::internal {
 
@@ -44,18 +48,19 @@ class NET_EXPORT_PRIVATE ObservationBuffer {
                     double weight_multiplier_per_second,
                     double weight_multiplier_per_signal_level);
 
-  //  This constructor does not copy the |observations_| from |other| to |this|.
+  //  This constructor does not copy the `observations_` from `other` to `this`.
   //  As such, this constructor should only be called before adding any
-  //  observations to |other|.
+  //  observations to `other`.
   ObservationBuffer(const ObservationBuffer& other);
 
   ObservationBuffer& operator=(const ObservationBuffer&) = delete;
 
   ~ObservationBuffer();
 
-  // Adds |observation| to the buffer. The oldest observation in the buffer
+  // Adds `observation` to the buffer. The oldest observation in the buffer
   // will be evicted to make room if the buffer is already full.
-  void AddObservation(const Observation& observation);
+  // In that case, an evicted observation will be returned.
+  std::optional<Observation> AddObservation(const Observation& observation);
 
   // Returns the number of observations in this buffer.
   size_t Size() const { return static_cast<size_t>(observations_.size()); }
@@ -66,37 +71,45 @@ class NET_EXPORT_PRIVATE ObservationBuffer {
   // Clears the observations stored in this buffer.
   void Clear() { observations_.clear(); }
 
-  // Returns true iff the |percentile| value of the observations in this
-  // buffer is available. Sets |result| to the computed |percentile|
-  // value of all observations made on or after |begin_timestamp|. If the
-  // value is unavailable, false is returned and |result| is not modified.
+  // Returns true iff the `percentile` value of the observations in this
+  // buffer is available. Sets `result` to the computed `percentile`
+  // value of all observations made on or after `begin_timestamp`. If the
+  // value is unavailable, false is returned and `result` is not modified.
   // Percentile value is unavailable if all the values in observation buffer are
-  // older than |begin_timestamp|. |current_signal_strength| is the current
-  // signal strength. |result| must not be null. If |observations_count| is not
+  // older than `begin_timestamp`. `current_signal_strength` is the current
+  // signal strength. `result` must not be null. If `observations_count` is not
   // null, then it is set to the number of observations that were available
   // in the observation buffer for computing the percentile.
-  absl::optional<int32_t> GetPercentile(base::TimeTicks begin_timestamp,
-                                        int32_t current_signal_strength,
-                                        int percentile,
-                                        size_t* observations_count) const;
+  std::optional<int32_t> GetPercentile(base::TimeTicks begin_timestamp,
+                                       int32_t current_signal_strength,
+                                       int percentile,
+                                       size_t* observations_count) const;
 
   void SetTickClockForTesting(const base::TickClock* tick_clock) {
     tick_clock_ = tick_clock;
   }
 
   // Removes all observations from the buffer whose corresponding entry in
-  // |deleted_observation_sources| is set to true. For example, if index 1 and
-  // 3 in |deleted_observation_sources| are set to true, then all observations
+  // `deleted_observation_sources` is set to true. For example, if index 1 and
+  // 3 in `deleted_observation_sources` are set to true, then all observations
   // in the buffer that have source set to either 1 or 3 would be removed.
   void RemoveObservationsWithSource(
-      bool deleted_observation_sources[NETWORK_QUALITY_OBSERVATION_SOURCE_MAX]);
+      const DeletedObservationSources& deleted_observation_sources);
 
  private:
+  // Adds `observation` to `observations_`, maintaining the invariant that
+  // Observations are stored in non-decreasing order of their timestamps.
+  // This operation is O(n) in time and space, so this should only be called
+  // when `observation` has arrived asynchronously and would violate the
+  // invariant if naively added to the back of the deque. Assumes that
+  // `observations_` is in non-decreasing order before adding `observation`.
+  void AddObservationOutOfOrder(const Observation& observation);
+
   // Computes the weighted observations and stores them in
-  // |weighted_observations| sorted by ascending |WeightedObservation.value|.
-  // Only the observations with timestamp later than |begin_timestamp| are
-  // considered. |current_signal_strength| is the current signal strength
-  // when the observation was taken. This method also sets |total_weight| to
+  // `weighted_observations` sorted by ascending `WeightedObservation.value`.
+  // Only the observations with timestamp later than `begin_timestamp` are
+  // considered. `current_signal_strength` is the current signal strength
+  // when the observation was taken. This method also sets `total_weight` to
   // the total weight of all observations. Should be called only when there is
   // at least one observation in the buffer.
   void ComputeWeightedObservations(
@@ -114,7 +127,7 @@ class NET_EXPORT_PRIVATE ObservationBuffer {
   // The factor by which the weight of an observation reduces every second.
   // For example, if an observation is 6 seconds old, its weight would be:
   //     weight_multiplier_per_second_ ^ 6
-  // Calculated from |kHalfLifeSeconds| by solving the following equation:
+  // Calculated from `kHalfLifeSeconds` by solving the following equation:
   //     weight_multiplier_per_second_ ^ kHalfLifeSeconds = 0.5
   const double weight_multiplier_per_second_;
 
@@ -123,7 +136,7 @@ class NET_EXPORT_PRIVATE ObservationBuffer {
   // which the observation was taken.
   // For example, if the observation was taken at 1 unit, and current signal
   // strength is 4 units, the weight of the observation would be:
-  // |weight_multiplier_per_signal_level_| ^ 3.
+  // `weight_multiplier_per_signal_level_` ^ 3.
   const double weight_multiplier_per_signal_level_;
 
   raw_ptr<const base::TickClock> tick_clock_;

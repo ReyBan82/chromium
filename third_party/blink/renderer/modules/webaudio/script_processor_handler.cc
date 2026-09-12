@@ -6,8 +6,10 @@
 
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/trace_event/trace_event.h"
+#include "media/base/audio_bus.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
@@ -25,6 +27,7 @@
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_copier_base.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
@@ -36,23 +39,21 @@ ScriptProcessorHandler::ScriptProcessorHandler(
     uint32_t number_of_output_channels,
     const HeapVector<Member<AudioBuffer>>& input_buffers,
     const HeapVector<Member<AudioBuffer>>& output_buffers)
-    : AudioHandler(kNodeTypeScriptProcessor, node, sample_rate),
+    : AudioHandler(NodeType::kNodeTypeScriptProcessor, node, sample_rate),
       buffer_size_(buffer_size),
       number_of_input_channels_(number_of_input_channels),
       number_of_output_channels_(number_of_output_channels),
-      internal_input_bus_(AudioBus::Create(
-          number_of_input_channels,
-          node.context()->GetDeferredTaskHandler().RenderQuantumFrames(),
-          false)) {
-  DCHECK_GE(buffer_size_,
-            node.context()->GetDeferredTaskHandler().RenderQuantumFrames());
-  DCHECK_LE(number_of_input_channels, BaseAudioContext::MaxNumberOfChannels());
+      internal_input_bus_(AudioBus::Create(number_of_input_channels,
+                                           node.context()->renderQuantumSize(),
+                                           false)) {
+  CHECK_GE(buffer_size_, node.context()->renderQuantumSize());
+  CHECK_LE(number_of_input_channels, BaseAudioContext::MaxNumberOfChannels());
 
   AddInput();
   AddOutput(number_of_output_channels);
 
   channel_count_ = number_of_input_channels;
-  SetInternalChannelCountMode(kExplicit);
+  SetInternalChannelCountMode(V8ChannelCountMode::Enum::kExplicit);
 
   if (Context()->GetExecutionContext()) {
     task_runner_ = Context()->GetExecutionContext()->GetTaskRunner(
@@ -105,8 +106,8 @@ void ScriptProcessorHandler::Initialize() {
 }
 
 void ScriptProcessorHandler::Process(uint32_t frames_to_process) {
-  TRACE_EVENT_BEGIN0(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
-                     "ScriptProcessorHandler::Process");
+  TRACE_EVENT_BEGIN(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
+                    "ScriptProcessorHandler::Process");
 
   // As in other AudioNodes, ScriptProcessorNode uses an AudioBus for its input
   // and output (i.e. `input_bus` and `output_bus`). Additionally, there is a
@@ -123,12 +124,10 @@ void ScriptProcessorHandler::Process(uint32_t frames_to_process) {
     base::AutoTryLock try_locker(buffer_lock_);
     if (!try_locker.is_acquired()) {
       // Failed to acquire the output buffer, so output silence.
-      TRACE_EVENT_INSTANT0(
+      TRACE_EVENT_INSTANT(
           TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
-          "ScriptProcessorHandler::Process - tryLock failed (output)",
-          TRACE_EVENT_SCOPE_THREAD);
-      TRACE_EVENT_END0(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
-                       "ScriptProcessorHandler::Process");
+          "ScriptProcessorHandler::Process - tryLock failed (output)");
+      TRACE_EVENT_END(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"));
       Output(0).Bus()->Zero();
       return;
     }
@@ -143,29 +142,22 @@ void ScriptProcessorHandler::Process(uint32_t frames_to_process) {
     SharedAudioBuffer* shared_output_buffer =
         shared_output_buffers_.at(double_buffer_index).get();
 
-    bool buffers_are_good =
-        shared_output_buffer &&
-        BufferSize() == shared_output_buffer->length() &&
-        buffer_read_write_index_ + frames_to_process <= BufferSize();
-
+    DCHECK(shared_output_buffer);
+    DCHECK_EQ(BufferSize(), shared_output_buffer->length());
+    DCHECK_LE(buffer_read_write_index_ + frames_to_process, BufferSize());
     if (internal_input_bus_->NumberOfChannels()) {
       // If the number of input channels is zero, the zero length input buffer
       // is fine.
-      buffers_are_good = buffers_are_good && shared_input_buffer &&
-                         BufferSize() == shared_input_buffer->length();
+      DCHECK(shared_input_buffer);
+      DCHECK_EQ(BufferSize(), shared_input_buffer->length());
     }
-
-    DCHECK(buffers_are_good);
-
     // `BufferSize()` should be evenly divisible by `frames_to_process`.
     DCHECK_GT(frames_to_process, 0u);
     DCHECK_GE(BufferSize(), frames_to_process);
     DCHECK_EQ(BufferSize() % frames_to_process, 0u);
-
-    uint32_t number_of_input_channels = internal_input_bus_->NumberOfChannels();
-    uint32_t number_of_output_channels = output_bus->NumberOfChannels();
-    DCHECK_EQ(number_of_input_channels, number_of_input_channels_);
-    DCHECK_EQ(number_of_output_channels, number_of_output_channels_);
+    DCHECK_EQ(internal_input_bus_->NumberOfChannels(),
+              number_of_input_channels_);
+    DCHECK_EQ(output_bus->NumberOfChannels(), number_of_output_channels_);
 
     TRACE_EVENT1(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
                  "ScriptProcessorHandler::Process - data copy under lock",
@@ -173,34 +165,32 @@ void ScriptProcessorHandler::Process(uint32_t frames_to_process) {
 
     // It is possible that the length of `internal_input_bus_` and
     // `input_bus` can be different. See crbug.com/1189528.
-    for (uint32_t i = 0; i < number_of_input_channels; ++i) {
+    for (uint32_t i = 0; i < number_of_input_channels_; ++i) {
       internal_input_bus_->SetChannelMemory(
-          i,
-          static_cast<float*>(shared_input_buffer->channels()[i].Data()) +
-              buffer_read_write_index_,
-          frames_to_process);
+          i, shared_input_buffer->ChannelSpan(i).subspan(
+                 buffer_read_write_index_, frames_to_process));
     }
 
-    if (number_of_input_channels) {
+    if (number_of_input_channels_) {
       internal_input_bus_->CopyFrom(*input_bus);
     }
 
-    for (uint32_t i = 0; i < number_of_output_channels; ++i) {
-      float* destination = output_bus->Channel(i)->MutableData();
-      const float* source =
-          static_cast<float*>(shared_output_buffer->channels()[i].Data()) +
-          buffer_read_write_index_;
-      memcpy(destination, source, sizeof(float) * frames_to_process);
+    for (uint32_t i = 0; i < number_of_output_channels_; ++i) {
+      as_writable_bytes(
+          base::allow_nonunique_obj,
+          output_bus->Channel(i)->MutableSpan().first(frames_to_process))
+          .copy_from(shared_output_buffer->channels()[i].ByteSpan().subspan(
+              buffer_read_write_index_ * sizeof(float),
+              frames_to_process * sizeof(float)));
     }
   }
 
   // Update the buffer index for wrap-around.
   buffer_read_write_index_ =
       (buffer_read_write_index_ + frames_to_process) % BufferSize();
-  TRACE_EVENT_INSTANT1(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
-                       "ScriptProcessorHandler::Process",
-                       TRACE_EVENT_SCOPE_THREAD, "buffer_read_write_index_",
-                       buffer_read_write_index_);
+  TRACE_EVENT_INSTANT(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
+                      "ScriptProcessorHandler::Process",
+                      "buffer_read_write_index_", buffer_read_write_index_);
 
   // Fire an event and swap buffers when `buffer_read_write_index_` wraps back
   // around to 0. It means the current input and output buffers are full.
@@ -210,7 +200,8 @@ void ScriptProcessorHandler::Process(uint32_t frames_to_process) {
       PostCrossThreadTask(
           *task_runner_, FROM_HERE,
           CrossThreadBindOnce(&ScriptProcessorHandler::FireProcessEvent,
-                              AsWeakPtr(), double_buffer_index_));
+                              weak_ptr_factory_.GetWeakPtr(),
+                              double_buffer_index_));
     } else {
       // For an offline context, wait until the script execution is finished.
       std::unique_ptr<base::WaitableEvent> waitable_event =
@@ -219,7 +210,7 @@ void ScriptProcessorHandler::Process(uint32_t frames_to_process) {
           *task_runner_, FROM_HERE,
           CrossThreadBindOnce(
               &ScriptProcessorHandler::FireProcessEventForOfflineAudioContext,
-              AsWeakPtr(), double_buffer_index_,
+              weak_ptr_factory_.GetWeakPtr(), double_buffer_index_,
               CrossThreadUnretained(waitable_event.get())));
       waitable_event->Wait();
     }
@@ -228,18 +219,17 @@ void ScriptProcessorHandler::Process(uint32_t frames_to_process) {
     SwapBuffers();
   }
 
-  TRACE_EVENT_END0(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
-                   "ScriptProcessorHandler::Process");
+  TRACE_EVENT_END(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"));
 }
 
 void ScriptProcessorHandler::FireProcessEvent(uint32_t double_buffer_index) {
-  DCHECK(IsMainThread());
+  CHECK(IsMainThread());
 
   if (!Context() || !Context()->GetExecutionContext()) {
     return;
   }
 
-  DCHECK_LT(double_buffer_index, 2u);
+  CHECK_LT(double_buffer_index, 2u);
 
   // Avoid firing the event if the document has already gone away.
   if (GetNode()) {
@@ -257,13 +247,13 @@ void ScriptProcessorHandler::FireProcessEvent(uint32_t double_buffer_index) {
 void ScriptProcessorHandler::FireProcessEventForOfflineAudioContext(
     uint32_t double_buffer_index,
     base::WaitableEvent* waitable_event) {
-  DCHECK(IsMainThread());
+  CHECK(IsMainThread());
 
   if (!Context() || !Context()->GetExecutionContext()) {
     return;
   }
 
-  DCHECK_LT(double_buffer_index, 2u);
+  CHECK_LT(double_buffer_index, 2u);
   if (double_buffer_index > 1) {
     waitable_event->Signal();
     return;
@@ -296,28 +286,32 @@ double ScriptProcessorHandler::LatencyTime() const {
 
 void ScriptProcessorHandler::SetChannelCount(uint32_t channel_count,
                                              ExceptionState& exception_state) {
-  DCHECK(IsMainThread());
-  BaseAudioContext::GraphAutoLocker locker(Context());
+  CHECK(IsMainThread());
+  DeferredTaskHandler::GraphAutoLocker locker(
+      Context()->GetDeferredTaskHandler());
 
   if (channel_count != channel_count_) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kNotSupportedError,
-                                      "channelCount cannot be changed from " +
-                                          String::Number(channel_count_) +
-                                          " to " +
-                                          String::Number(channel_count));
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kNotSupportedError,
+        StrCat({"channelCount cannot be changed from ",
+                String::Number(channel_count_), " to ",
+                String::Number(channel_count)}));
   }
 }
 
 void ScriptProcessorHandler::SetChannelCountMode(
-    const String& mode,
+    V8ChannelCountMode::Enum mode,
     ExceptionState& exception_state) {
-  DCHECK(IsMainThread());
-  BaseAudioContext::GraphAutoLocker locker(Context());
+  CHECK(IsMainThread());
+  DeferredTaskHandler::GraphAutoLocker locker(
+      Context()->GetDeferredTaskHandler());
 
-  if ((mode == "max") || (mode == "clamped-max")) {
+  if ((mode == V8ChannelCountMode::Enum::kMax) ||
+      (mode == V8ChannelCountMode::Enum::kClampedMax)) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kNotSupportedError,
-        "channelCountMode cannot be changed from 'explicit' to '" + mode + "'");
+        StrCat({"channelCountMode cannot be changed from 'explicit' to '",
+                V8ChannelCountMode(mode).AsStringView(), "'"}));
   }
 }
 

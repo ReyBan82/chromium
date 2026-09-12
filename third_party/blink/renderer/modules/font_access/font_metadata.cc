@@ -7,10 +7,8 @@
 #include <memory>
 #include <utility>
 
-#include "base/big_endian.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/numerics/safe_conversions.h"
-#include "base/sys_byteorder.h"
 #include "build/build_config.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/core/fileapi/blob.h"
@@ -41,51 +39,42 @@ void SetUpFontUniqueLookupIfNecessary() {
 }  // namespace
 
 FontMetadata::FontMetadata(const FontEnumerationEntry& entry)
-    : postscriptName_(entry.postscript_name),
-      fullName_(entry.full_name),
+    : postscript_name_(entry.postscript_name),
+      full_name_(entry.full_name),
       family_(entry.family),
       style_(entry.style) {}
 
-FontMetadata* FontMetadata::Create(const FontEnumerationEntry& entry) {
-  return MakeGarbageCollected<FontMetadata>(entry);
-}
-
-ScriptPromise FontMetadata::blob(ScriptState* script_state) {
-  ScriptPromiseResolver* resolver =
-      MakeGarbageCollected<ScriptPromiseResolver>(script_state);
-  ScriptPromise promise = resolver->Promise();
+ScriptPromise<Blob> FontMetadata::blob(ScriptState* script_state) {
+  auto* resolver =
+      MakeGarbageCollected<ScriptPromiseResolver<Blob>>(script_state);
+  auto promise = resolver->Promise();
 
   ExecutionContext::From(script_state)
       ->GetTaskRunner(TaskType::kFontLoading)
       ->PostTask(FROM_HERE,
-                 WTF::BindOnce(&FontMetadata::BlobImpl,
-                               WrapPersistent(resolver), postscriptName_));
+                 BindOnce(&FontMetadata::BlobImpl, WrapPersistent(resolver),
+                          postscript_name_));
 
   return promise;
 }
 
-void FontMetadata::Trace(blink::Visitor* visitor) const {
-  ScriptWrappable::Trace(visitor);
-}
-
 // static
-void FontMetadata::BlobImpl(ScriptPromiseResolver* resolver,
-                            const String& postscriptName) {
+void FontMetadata::BlobImpl(ScriptPromiseResolver<Blob>* resolver,
+                            const String& postscript_name) {
   if (!resolver->GetScriptState()->ContextIsValid())
     return;
 
   SetUpFontUniqueLookupIfNecessary();
 
   FontDescription description;
-  scoped_refptr<SimpleFontData> font_data =
-      FontCache::Get().GetFontData(description, AtomicString(postscriptName),
+  const SimpleFontData* font_data =
+      FontCache::Get().GetFontData(description, AtomicString(postscript_name),
                                    AlternateFontName::kLocalUniqueFace);
   if (!font_data) {
-    auto message = String::Format("The font %s could not be accessed.",
-                                  postscriptName.Latin1().c_str());
     ScriptState::Scope scope(resolver->GetScriptState());
     resolver->Reject(V8ThrowException::CreateTypeError(
-        resolver->GetScriptState()->GetIsolate(), message));
+        resolver->GetScriptState()->GetIsolate(),
+        StrCat({"The font ", postscript_name, " could not be accessed."})));
     return;
   }
 
@@ -101,11 +90,11 @@ void FontMetadata::BlobImpl(ScriptPromiseResolver* resolver,
     // TODO(https://crbug.com/1086840): openStream rarely fails, but it happens
     // sometimes. A potential remediation is to synthesize a font from tables
     // at the cost of memory and throughput.
-    auto message = String::Format("Font data for %s could not be accessed.",
-                                  postscriptName.Latin1().c_str());
     ScriptState::Scope scope(resolver->GetScriptState());
     resolver->Reject(V8ThrowException::CreateTypeError(
-        resolver->GetScriptState()->GetIsolate(), message));
+        resolver->GetScriptState()->GetIsolate(),
+        StrCat(
+            {"Font data for ", postscript_name, " could not be accessed."})));
     return;
   }
 
@@ -114,12 +103,12 @@ void FontMetadata::BlobImpl(ScriptPromiseResolver* resolver,
 
   // TODO(https://crbug.com/1069900): This copies the font bytes. Lazy load and
   // stream the data instead.
-  Vector<char> bytes(font_byte_size);
+  Vector<uint8_t> bytes(font_byte_size);
   size_t returned_size = stream->read(bytes.data(), font_byte_size);
   DCHECK_EQ(returned_size, font_byte_size);
 
   scoped_refptr<RawData> raw_data = RawData::Create();
-  bytes.swap(*raw_data->MutableData());
+  bytes.swap(raw_data->MutableData());
   auto blob_data = std::make_unique<BlobData>();
   blob_data->AppendData(std::move(raw_data));
   blob_data->SetContentType("application/octet-stream");

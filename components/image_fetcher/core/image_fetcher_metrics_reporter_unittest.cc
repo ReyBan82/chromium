@@ -18,6 +18,7 @@ const char kUmaClientName[] = "foo";
 const char kUmaClientNameOther[] = "bar";
 
 const char kImageFetcherEventHistogramName[] = "ImageFetcher.Events";
+const char kImageFetcherClientEventHistogramName[] = "ImageFetcher.Events2";
 const char kCacheLoadHistogramName[] = "ImageFetcher.ImageLoadFromCacheTime";
 const char kCacheLoadHistogramNameJava[] =
     "ImageFetcher.ImageLoadFromCacheTimeJava";
@@ -35,7 +36,7 @@ constexpr char kNetworkRequestStatusCodes[] = "ImageFetcher.RequestStatusCode";
 
 class ImageFetcherMetricsReporterTest : public testing::Test {
  public:
-  ImageFetcherMetricsReporterTest() {}
+  ImageFetcherMetricsReporterTest() = default;
 
   ImageFetcherMetricsReporterTest(const ImageFetcherMetricsReporterTest&) =
       delete;
@@ -58,12 +59,12 @@ TEST_F(ImageFetcherMetricsReporterTest, TestReportEvent) {
   histogram_tester().ExpectBucketCount(kImageFetcherEventHistogramName,
                                        ImageFetcherEvent::kCacheHit, 2);
   histogram_tester().ExpectBucketCount(
-      std::string(kImageFetcherEventHistogramName)
+      std::string(kImageFetcherClientEventHistogramName)
           .append(".")
           .append(kUmaClientName),
       ImageFetcherEvent::kCacheHit, 1);
   histogram_tester().ExpectBucketCount(
-      std::string(kImageFetcherEventHistogramName)
+      std::string(kImageFetcherClientEventHistogramName)
           .append(".")
           .append(kUmaClientNameOther),
       ImageFetcherEvent::kCacheHit, 1);

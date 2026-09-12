@@ -8,7 +8,11 @@
 #include <string>
 #include <vector>
 
+#include "base/auto_reset.h"
+#include "components/content_settings/core/common/content_settings.h"
 #include "components/content_settings/core/common/content_settings_types.h"
+
+class GURL;
 
 namespace content {
 class WebContents;
@@ -19,6 +23,20 @@ class WindowAndroid;
 }
 
 namespace permissions {
+
+namespace internal {
+
+// Resolves an ongoing notification permission request, if there is one and its
+// requesting origin matches `requesting_origin`. Returns false if no ongoing
+// notification permission request was found or if the origin does not match.
+bool ResolveNotificationsPermissionRequest(content::WebContents* web_contents,
+                                           const GURL& requesting_origin,
+                                           ContentSetting content_setting);
+
+void DismissNotificationsPermissionRequest(content::WebContents* web_contents,
+                                           const GURL& requesting_origin);
+
+}  // namespace internal
 
 // Appends to `out` the required Android permissions associated with
 // `content_settings_type`.
@@ -38,6 +56,7 @@ bool HasRequiredAndroidPermissionsForContentSetting(
     ui::WindowAndroid* window_android,
     ContentSettingsType content_settings_type);
 
+// LINT.IfChange(PermissionRepromptState)
 // The states that indicate if the user should/can be re-nudged to accept
 // permissions. In Chrome this correlates to the PermissionUpdateInfoBar.
 enum class PermissionRepromptState {
@@ -48,7 +67,9 @@ enum class PermissionRepromptState {
   // Can't show the permission infobar due to an internal state issue like
   // the WebContents or the AndroidWindow are not available.
   kCannotShow,
+  kMaxValue = kCannotShow,
 };
+// LINT.ThenChange(//tools/metrics/histograms/enums.xml:PermissionRepromptState)
 
 PermissionRepromptState ShouldRepromptUserForPermissions(
     content::WebContents* web_contents,
@@ -73,10 +94,6 @@ void AppendRequiredAndOptionalAndroidPermissionsForContentSettings(
 // level notification permission.
 bool DoesAppLevelSettingsAllowSiteNotifications();
 
-// Called to check whether Chrome has enabled app-level Notifications
-// permission.
-bool AreAppLevelNotificationsEnabled();
-
 // Checks if Chrome needs Location permission for using Bluetooth.
 bool NeedsLocationPermissionForBluetooth(content::WebContents* web_contents);
 
@@ -92,11 +109,33 @@ bool NeedsLocationServicesForBluetooth();
 bool CanRequestSystemPermissionsForBluetooth(
     content::WebContents* web_contents);
 
+// Checks if Chrome has system permission for `content_settings_type`
+bool HasSystemPermission(ContentSettingsType type,
+                         content::WebContents* web_contents);
+
+// Checks if Chrome can request system permissions for `content_settings_type`
+bool CanRequestSystemPermission(ContentSettingsType type,
+                                content::WebContents* web_contents);
+
 // Request the needed system permissions for using Bluetooth.
 void RequestSystemPermissionsForBluetooth(content::WebContents* web_contents);
 
 // Starts an activity for showing the Location Services setting page.
 void RequestLocationServices(content::WebContents* web_contents);
+
+// Called from tests to temporarily set system location settings enabled.
+base::AutoReset<bool> EnableSystemLocationSettingForTesting();
+
+// Called from tests to temporarily set all android OS level permissions as
+// enabled.
+base::AutoReset<bool> EnableAllAndroidPermissionsForTesting();
+
+// Resolves a permission request by first checking/requesting the Android
+// system permission. If granted, it accepts the request; otherwise, it
+// dismisses it.
+void ResolvePermissionWithOSPrompt(content::WebContents* web_contents,
+                                   ContentSettingsType content_settings_type,
+                                   const GURL& requesting_origin);
 
 }  // namespace permissions
 

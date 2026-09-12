@@ -9,8 +9,10 @@
 #define COMPONENTS_PREFS_SCOPED_USER_PREF_UPDATE_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/sequence_checker.h"
 #include "base/values.h"
 #include "components/prefs/pref_service.h"
@@ -32,32 +34,35 @@ class COMPONENTS_PREFS_EXPORT ScopedUserPrefUpdateBase {
   ScopedUserPrefUpdateBase& operator=(const ScopedUserPrefUpdateBase&) = delete;
 
  protected:
-  ScopedUserPrefUpdateBase(PrefService* service, const std::string& path);
+  ScopedUserPrefUpdateBase(PrefService& service, std::string_view path);
+  ScopedUserPrefUpdateBase(PrefService* service, std::string_view path);
 
   // Calls Notify().
-  ~ScopedUserPrefUpdateBase();
+  virtual ~ScopedUserPrefUpdateBase();
 
-  // Sets |value_| to |service_|->GetMutableUserPref and returns it.
+  // Sets `value_` to `service_`->GetMutableUserPref and returns it.
   base::Value* GetValueOfType(base::Value::Type type);
 
  private:
-  // If |value_| is not null, triggers a notification of PrefObservers and
-  // resets |value_|.
+  // If `value_` is not null, triggers a notification of PrefObservers and
+  // resets `value_`.
   void Notify();
 
   // Weak pointer.
-  raw_ptr<PrefService> service_;
+  const raw_ref<PrefService> service_;
   // Path of the preference being updated.
-  std::string path_;
+  const std::string path_;
   // Cache of value from user pref store (set between Get() and Notify() calls).
-  raw_ptr<base::Value> value_;
+  raw_ptr<base::Value> value_ = nullptr;
+  // Fallback value used when `GetMutableUserPref` returns null.
+  std::optional<base::Value> fallback_value_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 };
 
 }  // namespace subtle
 
-// Class to support modifications to base::Value::Dicts while guaranteeing
+// Class to support modifications to base::DictValues while guaranteeing
 // that PrefObservers are notified of changed values.
 //
 // This class may only be used on the UI thread as it requires access to the
@@ -67,16 +72,18 @@ class COMPONENTS_PREFS_EXPORT ScopedDictPrefUpdate
  public:
   // The underlying dictionary must not be removed from `service` during
   // the lifetime of the created ScopedDictPrefUpdate.
-  ScopedDictPrefUpdate(PrefService* service, const std::string& path)
+  ScopedDictPrefUpdate(PrefService& service, std::string_view path)
+      : ScopedUserPrefUpdateBase(service, path) {}
+  ScopedDictPrefUpdate(PrefService* service, std::string_view path)
       : ScopedUserPrefUpdateBase(service, path) {}
 
   ScopedDictPrefUpdate(const ScopedDictPrefUpdate&) = delete;
   ScopedDictPrefUpdate& operator=(const ScopedDictPrefUpdate&) = delete;
 
   // Triggers an update notification if Get() was called.
-  virtual ~ScopedDictPrefUpdate() = default;
+  ~ScopedDictPrefUpdate() override = default;
 
-  // Returns a mutable `base::Value::Dict` instance that
+  // Returns a mutable `base::DictValue` instance that
   // - is already in the user pref store, or
   // - is (silently) created and written to the user pref store if none existed
   //   before.
@@ -85,14 +92,14 @@ class COMPONENTS_PREFS_EXPORT ScopedDictPrefUpdate
   // being triggered at destruction time.
   //
   // The ownership of the return value remains with the user pref store.
-  base::Value::Dict& Get();
+  base::DictValue& Get();
 
-  base::Value::Dict& operator*() { return Get(); }
+  base::DictValue& operator*() { return Get(); }
 
-  base::Value::Dict* operator->() { return &Get(); }
+  base::DictValue* operator->() { return &Get(); }
 };
 
-// Class to support modifications to base::Value::Lists while guaranteeing
+// Class to support modifications to base::ListValues while guaranteeing
 // that PrefObservers are notified of changed values.
 //
 // This class may only be used on the UI thread as it requires access to the
@@ -102,16 +109,18 @@ class COMPONENTS_PREFS_EXPORT ScopedListPrefUpdate
  public:
   // The underlying list must not be removed from `service` during
   // the lifetime of the created ScopedListPrefUpdate.
-  ScopedListPrefUpdate(PrefService* service, const std::string& path)
+  ScopedListPrefUpdate(PrefService& service, std::string_view path)
+      : ScopedUserPrefUpdateBase(service, path) {}
+  ScopedListPrefUpdate(PrefService* service, std::string_view path)
       : ScopedUserPrefUpdateBase(service, path) {}
 
   ScopedListPrefUpdate(const ScopedListPrefUpdate&) = delete;
   ScopedListPrefUpdate& operator=(const ScopedListPrefUpdate&) = delete;
 
   // Triggers an update notification if Get() was called.
-  virtual ~ScopedListPrefUpdate() = default;
+  ~ScopedListPrefUpdate() override = default;
 
-  // Returns a mutable `base::Value::List` instance that
+  // Returns a mutable `base::ListValue` instance that
   // - is already in the user pref store, or
   // - is (silently) created and written to the user pref store if none existed
   //   before.
@@ -120,11 +129,11 @@ class COMPONENTS_PREFS_EXPORT ScopedListPrefUpdate
   // being triggered at destruction time.
   //
   // The ownership of the return value remains with the user pref store.
-  base::Value::List& Get();
+  base::ListValue& Get();
 
-  base::Value::List& operator*() { return Get(); }
+  base::ListValue& operator*() { return Get(); }
 
-  base::Value::List* operator->() { return &Get(); }
+  base::ListValue* operator->() { return &Get(); }
 };
 
 #endif  // COMPONENTS_PREFS_SCOPED_USER_PREF_UPDATE_H_

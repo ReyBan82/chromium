@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/dom_distiller/test_distillation_observers.h"
+
 #include "components/dom_distiller/core/url_constants.h"
+#include "content/public/browser/navigation_entry.h"
 #include "url/gurl.h"
 
 namespace dom_distiller {
@@ -19,7 +21,7 @@ void DistilledPageObserver::DidFinishLoad(
     content::RenderFrameHost* render_frame_host,
     const GURL& validated_url) {
   if (!render_frame_host->GetParent() &&
-      validated_url.scheme() == kDomDistillerScheme) {
+      validated_url.GetScheme() == kDomDistillerScheme) {
     loaded_distiller_page_ = true;
     MaybeNotifyLoaded();
   }

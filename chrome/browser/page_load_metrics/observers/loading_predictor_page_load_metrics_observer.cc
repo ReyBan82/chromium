@@ -52,7 +52,7 @@ LoadingPredictorPageLoadMetricsObserver::
 }
 
 LoadingPredictorPageLoadMetricsObserver::
-    ~LoadingPredictorPageLoadMetricsObserver() {}
+    ~LoadingPredictorPageLoadMetricsObserver() = default;
 
 page_load_metrics::PageLoadMetricsObserver::ObservePolicy
 LoadingPredictorPageLoadMetricsObserver::OnStart(
@@ -101,19 +101,10 @@ LoadingPredictorPageLoadMetricsObserver::OnHidden(
 
 void LoadingPredictorPageLoadMetricsObserver::OnFirstContentfulPaintInPage(
     const page_load_metrics::mojom::PageLoadTiming& timing) {
-  // TODO(https://crbug.com/1190112): The code uses the primary FrameTree, but
-  // this event may have been dispatched for a non-primary FrameTree.
-  auto* web_contents = GetDelegate().GetWebContents();
-  auto* frame = web_contents->GetPrimaryMainFrame();
-
-  predictor_tab_helper_->RecordFirstContentfulPaint(
-      frame, GetDelegate().GetNavigationStart() +
-                 timing.paint_timing->first_contentful_paint.value());
   if (record_histogram_preconnectable_) {
     base::TimeDelta corrected =
         page_load_metrics::CorrectEventAsNavigationOrActivationOrigined(
-            GetDelegate(), timing,
-            timing.paint_timing->first_contentful_paint.value());
+            GetDelegate(), timing.paint_timing->first_contentful_paint.value());
     PAGE_LOAD_HISTOGRAM(
         internal::kHistogramLoadingPredictorFirstContentfulPaintPreconnectable,
         corrected);
@@ -126,8 +117,7 @@ void LoadingPredictorPageLoadMetricsObserver::
   if (record_histogram_preconnectable_) {
     base::TimeDelta corrected =
         page_load_metrics::CorrectEventAsNavigationOrActivationOrigined(
-            GetDelegate(), timing,
-            timing.paint_timing->first_meaningful_paint.value());
+            GetDelegate(), timing.paint_timing->first_meaningful_paint.value());
     PAGE_LOAD_HISTOGRAM(
         internal::kHistogramLoadingPredictorFirstMeaningfulPaintPreconnectable,
         corrected);

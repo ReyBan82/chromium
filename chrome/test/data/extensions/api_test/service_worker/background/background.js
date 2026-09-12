@@ -9,7 +9,7 @@
 // ServiceWorkerTest (service_worker_apitest.cc).
 
 // Namespace for all testing utilities and state.
-var test = {
+const test = {
   // The service worker that was registered.
   registeredServiceWorker: null,
   // The last message's data fired on window.onmessage.
@@ -17,25 +17,29 @@ var test = {
 };
 
 // Registers a service worker and stores it in registeredServiceWorker.
-// Intended to be called from content::ExecuteScript.
+// Intended to be called from content::ExecJs.
 test.registerServiceWorker = function(path) {
-  navigator.serviceWorker.register(path).then(function() {
-    // Wait until the service worker is active.
-    return navigator.serviceWorker.ready;
-  }).then(function(r) {
-    test.registeredServiceWorker = r.active;
-    window.domAutomationController.send('');
-  }).catch(function(err) {
-    window.domAutomationController.send(err.message);
-  });
+  return navigator.serviceWorker.register(path)
+      .then(function() {
+        // Wait until the service worker is active.
+        return navigator.serviceWorker.ready;
+      })
+      .then(function(r) {
+        test.registeredServiceWorker = r.active;
+        return '';
+      })
+      .catch(function(err) {
+        return err.message;
+      });
 };
 
 // Watch for messages.
 navigator.serviceWorker.addEventListener('message', function(e) {
   test.lastMessageFromServiceWorker = e.data;
   // Echo message if requested.
-  if (e.data.echo)
+  if (e.data.echo) {
     e.data.echo.port.postMessage(e.data.echo.message);
+  }
 });
 
 // Returns a Promise for the next message's data sent to |endpoint|.

@@ -8,9 +8,9 @@
 #include <type_traits>
 #include <utility>
 
+#include "base/dcheck_is_on.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/lazy_instance.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
@@ -21,18 +21,17 @@
 #include "base/task/current_thread.h"
 #include "base/task/sequence_manager/sequence_manager_impl.h"
 #include "base/task/sequence_manager/task_queue.h"
-#include "base/task/simple_task_executor.h"
 #include "base/task/single_thread_task_runner.h"
-#include "base/third_party/dynamic_annotations/dynamic_annotations.h"
 #include "base/threading/thread_id_name_manager.h"
-#include "base/threading/thread_local.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/types/pass_key.h"
 #include "build/build_config.h"
+#include "third_party/abseil-cpp/absl/base/dynamic_annotations.h"
 
-#if (BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_NACL)) || BUILDFLAG(IS_FUCHSIA)
+#if BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
+#include <optional>
+
 #include "base/files/file_descriptor_watcher_posix.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #endif
 
 #if BUILDFLAG(IS_WIN)
@@ -41,16 +40,17 @@
 
 namespace base {
 
+#if DCHECK_IS_ON()
 namespace {
 
 // We use this thread-local variable to record whether or not a thread exited
 // because its Stop method was called.  This allows us to catch cases where
 // MessageLoop::QuitWhenIdle() is called directly, which is unexpected when
 // using a Thread to setup and run a MessageLoop.
-LazyInstance<ThreadLocalBoolean>::Leaky lazy_tls_bool =
-    LAZY_INSTANCE_INITIALIZER;
+constinit thread_local bool was_quit_properly = false;
 
 }  // namespace
+#endif
 
 namespace internal {
 
@@ -58,18 +58,22 @@ class SequenceManagerThreadDelegate : public Thread::Delegate {
  public:
   explicit SequenceManagerThreadDelegate(
       MessagePumpType message_pump_type,
-      OnceCallback<std::unique_ptr<MessagePump>()> message_pump_factory)
+      OnceCallback<std::unique_ptr<MessagePump>()> message_pump_factory,
+      std::unique_ptr<base::sequence_manager::SequenceManagerSettings>
+          sequence_manager_settings)
       : sequence_manager_(
             sequence_manager::internal::CreateUnboundSequenceManagerImpl(
                 PassKey<base::internal::SequenceManagerThreadDelegate>(),
-                sequence_manager::SequenceManager::Settings::Builder()
-                    .SetMessagePumpType(message_pump_type)
-                    .Build())),
+                sequence_manager_settings
+                    ? std::move(sequence_manager_settings->settings)
+                    : sequence_manager::SequenceManager::Settings::Builder()
+                          .SetMessagePumpType(message_pump_type)
+                          .Build())),
         default_task_queue_(sequence_manager_->CreateTaskQueue(
             sequence_manager::TaskQueue::Spec(
                 sequence_manager::QueueName::DEFAULT_TQ))),
         message_pump_factory_(std::move(message_pump_factory)) {
-    sequence_manager_->SetDefaultTaskRunner(default_task_queue_->task_runner());
+    sequence_manager_->SetDefaultTaskQueue(default_task_queue_.get());
   }
 
   ~SequenceManagerThreadDelegate() override = default;
@@ -90,22 +94,19 @@ class SequenceManagerThreadDelegate : public Thread::Delegate {
     // could happen far away from where the Thread is created. We should
     // consider getting rid of StartWithOptions, and pass them as a constructor
     // argument instead.
-    return sequence_manager_->GetTaskRunner();
+    return sequence_manager_->GetDefaultTaskRunner();
   }
 
-  void BindToCurrentThread(TimerSlack timer_slack) override {
+  void BindToCurrentThread() override {
     sequence_manager_->BindToMessagePump(
         std::move(message_pump_factory_).Run());
-    sequence_manager_->SetTimerSlack(timer_slack);
-    simple_task_executor_.emplace(GetDefaultTaskRunner());
   }
 
  private:
   std::unique_ptr<sequence_manager::internal::SequenceManagerImpl>
       sequence_manager_;
-  scoped_refptr<sequence_manager::TaskQueue> default_task_queue_;
+  sequence_manager::TaskQueue::Handle default_task_queue_;
   OnceCallback<std::unique_ptr<MessagePump>()> message_pump_factory_;
-  absl::optional<SimpleTaskExecutor> simple_task_executor_;
 };
 
 }  // namespace internal
@@ -119,12 +120,11 @@ Thread::Options::Options(ThreadType thread_type) : thread_type(thread_type) {}
 
 Thread::Options::Options(Options&& other)
     : message_pump_type(std::move(other.message_pump_type)),
-      delegate(std::move(other.delegate)),
-      timer_slack(std::move(other.timer_slack)),
       message_pump_factory(std::move(other.message_pump_factory)),
       stack_size(std::move(other.stack_size)),
       thread_type(std::move(other.thread_type)),
-      joinable(std::move(other.joinable)) {
+      joinable(std::move(other.joinable)),
+      sequence_manager_settings(std::move(other.sequence_manager_settings)) {
   other.moved_from = true;
 }
 
@@ -132,12 +132,11 @@ Thread::Options& Thread::Options::operator=(Thread::Options&& other) {
   DCHECK_NE(this, &other);
 
   message_pump_type = std::move(other.message_pump_type);
-  delegate = std::move(other.delegate);
-  timer_slack = std::move(other.timer_slack);
   message_pump_factory = std::move(other.message_pump_factory);
   stack_size = std::move(other.stack_size);
   thread_type = std::move(other.thread_type);
   joinable = std::move(other.joinable);
+  sequence_manager_settings = std::move(other.sequence_manager_settings);
   other.moved_from = true;
 
   return *this;
@@ -145,12 +144,23 @@ Thread::Options& Thread::Options::operator=(Thread::Options&& other) {
 
 Thread::Options::~Options() = default;
 
-Thread::Thread(const std::string& name)
-    : id_event_(WaitableEvent::ResetPolicy::MANUAL,
+Thread::Thread(const std::string& name, Restartable)
+    : Thread(std::move(name), nullptr, true) {}
+
+Thread::Thread(const std::string& name, std::unique_ptr<Delegate> delegate)
+    : Thread(std::move(name), std::move(delegate), false) {}
+
+Thread::Thread(const std::string& name,
+               std::unique_ptr<Delegate> delegate,
+               bool restartable)
+    : restartable_(restartable),
+      id_event_(WaitableEvent::ResetPolicy::MANUAL,
                 WaitableEvent::InitialState::NOT_SIGNALED),
+      delegate_(std::move(delegate)),
       name_(name),
       start_event_(WaitableEvent::ResetPolicy::MANUAL,
                    WaitableEvent::InitialState::NOT_SIGNALED) {
+  DCHECK(!delegate_ || !restartable_);
   // Only bind the sequence on Start(): the state is constant between
   // construction and Start() and it's thus valid for Start() to be called on
   // another sequence as long as every other operation is then performed on that
@@ -167,8 +177,9 @@ bool Thread::Start() {
 
   Options options;
 #if BUILDFLAG(IS_WIN)
-  if (com_status_ == STA)
+  if (com_status_ == STA) {
     options.message_pump_type = MessagePumpType::UI;
+  }
 #endif
   return StartWithOptions(std::move(options));
 }
@@ -176,10 +187,12 @@ bool Thread::Start() {
 bool Thread::StartWithOptions(Options options) {
   DCHECK(options.IsValid());
   DCHECK(owning_sequence_checker_.CalledOnValidSequence());
-  DCHECK(!delegate_);
-  DCHECK(!IsRunning());
-  DCHECK(!stopping_) << "Starting a non-joinable thread a second time? That's "
-                     << "not allowed!";
+  DCHECK_NE(state_, State::kStopping)
+      << "Can't restart a thread which wasn't fully Stop()'ed.";
+  DCHECK_NE(state_, State::kRunning)
+      << "Trying to start a thread that's already running.";
+  DCHECK(state_ == State::kInitial || restartable_)
+      << "Trying to restart a thread that doesn't support restarting.";
 #if BUILDFLAG(IS_WIN)
   DCHECK((com_status_ != STA) ||
          (options.message_pump_type == MessagePumpType::UI));
@@ -191,22 +204,24 @@ bool Thread::StartWithOptions(Options options) {
 
   SetThreadWasQuitProperly(false);
 
-  timer_slack_ = options.timer_slack;
-
-  if (options.delegate) {
-    DCHECK(!options.message_pump_factory);
-    delegate_ = std::move(options.delegate);
-  } else if (options.message_pump_factory) {
-    delegate_ = std::make_unique<internal::SequenceManagerThreadDelegate>(
-        MessagePumpType::CUSTOM, options.message_pump_factory);
-  } else {
-    delegate_ = std::make_unique<internal::SequenceManagerThreadDelegate>(
-        options.message_pump_type,
-        BindOnce([](MessagePumpType type) { return MessagePump::Create(type); },
-                 options.message_pump_type));
+  DCHECK(!(delegate_ && options.message_pump_factory));
+  if (!delegate_) {
+    if (options.message_pump_factory) {
+      delegate_ = std::make_unique<internal::SequenceManagerThreadDelegate>(
+          MessagePumpType::CUSTOM, options.message_pump_factory,
+          std::move(options.sequence_manager_settings));
+    } else {
+      delegate_ = std::make_unique<internal::SequenceManagerThreadDelegate>(
+          options.message_pump_type,
+          BindOnce(
+              [](MessagePumpType type) { return MessagePump::Create(type); },
+              options.message_pump_type),
+          std::move(options.sequence_manager_settings));
+    }
   }
 
   start_event_.Reset();
+  state_ = State::kRunning;
 
   // Hold |thread_lock_| while starting the new thread to synchronize with
   // Stop() while it's not guaranteed to be sequenced (until crbug/629139 is
@@ -234,16 +249,18 @@ bool Thread::StartWithOptions(Options options) {
 bool Thread::StartAndWaitForTesting() {
   DCHECK(owning_sequence_checker_.CalledOnValidSequence());
   bool result = Start();
-  if (!result)
+  if (!result) {
     return false;
+  }
   WaitUntilThreadStarted();
   return true;
 }
 
 bool Thread::WaitUntilThreadStarted() const {
   DCHECK(owning_sequence_checker_.CalledOnValidSequence());
-  if (!delegate_)
+  if (!delegate_) {
     return false;
+  }
   // https://crbug.com/918039
   base::ScopedAllowBaseSyncPrimitivesOutsideBlockingScope allow_wait;
   start_event_.Wait();
@@ -252,8 +269,9 @@ bool Thread::WaitUntilThreadStarted() const {
 
 void Thread::FlushForTesting() {
   DCHECK(owning_sequence_checker_.CalledOnValidSequence());
-  if (!delegate_)
+  if (!delegate_) {
     return;
+  }
 
   WaitableEvent done(WaitableEvent::ResetPolicy::AUTOMATIC,
                      WaitableEvent::InitialState::NOT_SIGNALED);
@@ -274,8 +292,9 @@ void Thread::Stop() {
   StopSoon();
 
   // Can't join if the |thread_| is either already gone or is non-joinable.
-  if (thread_.is_null())
+  if (thread_.is_null()) {
     return;
+  }
 
   // Wait for the thread to exit.
   //
@@ -288,7 +307,7 @@ void Thread::Stop() {
   // an implicit memory barrier and no lock is thus required for this check).
   DCHECK(!delegate_);
 
-  stopping_ = false;
+  state_ = State::kStopped;
 }
 
 void Thread::StopSoon() {
@@ -296,10 +315,10 @@ void Thread::StopSoon() {
   // enable this check.
   // DCHECK(owning_sequence_checker_.CalledOnValidSequence());
 
-  if (stopping_ || !delegate_)
+  if (state_ != State::kRunning) {
     return;
-
-  stopping_ = true;
+  }
+  state_ = State::kStopping;
 
   task_runner()->PostTask(
       FROM_HERE, base::BindOnce(&Thread::ThreadQuitHelper, Unretained(this)));
@@ -324,16 +343,9 @@ bool Thread::IsRunning() const {
   // enable this check.
   // DCHECK(owning_sequence_checker_.CalledOnValidSequence());
 
-  // If the thread's already started (i.e. |delegate_| is non-null) and
-  // not yet requested to stop (i.e. |stopping_| is false) we can just return
-  // true. (Note that |stopping_| is touched only on the same sequence that
-  // starts / started the new thread so we need no locking here.)
-  if (delegate_ && !stopping_)
-    return true;
-  // Otherwise check the |running_| flag, which is set to true by the new thread
-  // only while it is inside Run().
-  AutoLock lock(running_lock_);
-  return running_;
+  // Note that |state_| is touched only on the same sequence that
+  // starts / started the new thread so we need no locking here.
+  return state_ == State::kRunning || state_ == State::kStopping;
 }
 
 void Thread::Run(RunLoop* run_loop) {
@@ -346,21 +358,30 @@ void Thread::Run(RunLoop* run_loop) {
 
 // static
 void Thread::SetThreadWasQuitProperly(bool flag) {
-  lazy_tls_bool.Pointer()->Set(flag);
+#if DCHECK_IS_ON()
+  was_quit_properly = flag;
+#endif
 }
 
 // static
 bool Thread::GetThreadWasQuitProperly() {
-  bool quit_properly = true;
 #if DCHECK_IS_ON()
-  quit_properly = lazy_tls_bool.Pointer()->Get();
+  return was_quit_properly;
+#else
+  return true;
 #endif
-  return quit_properly;
 }
 
 void Thread::ThreadMain() {
-  // First, make GetThreadId() available to avoid deadlocks. It could be called
-  // any place in the following thread initialization code.
+  // First, set the thread name. It is important to do this first because some
+  // of the code below may end up storing/caching the thread name. One example
+  // is Perfetto being triggered by a TRACE_EVENT call from id_event_.Signal().
+  // See https://crbug.com/333597498.
+  PlatformThread::SetName(name_.c_str());
+  ABSL_ANNOTATE_THREAD_NAME(name_.c_str());  // Tell the name to race detector.
+
+  // Make GetThreadId() available to avoid deadlocks. It could be called any
+  // place in the following thread initialization code.
   DCHECK(!id_event_.IsSignaled());
   // Note: this read of |id_| while |id_event_| isn't signaled is exceptionally
   // okay because ThreadMain has a happens-after relationship with the other
@@ -370,24 +391,20 @@ void Thread::ThreadMain() {
   DCHECK_NE(kInvalidThreadId, id_);
   id_event_.Signal();
 
-  // Complete the initialization of our Thread object.
-  PlatformThread::SetName(name_.c_str());
-  ANNOTATE_THREAD_NAME(name_.c_str());  // Tell the name to race detector.
-
   // Lazily initialize the |message_loop| so that it can run on this thread.
   DCHECK(delegate_);
   // This binds CurrentThread and SingleThreadTaskRunner::CurrentDefaultHandle.
-  delegate_->BindToCurrentThread(timer_slack_);
+  delegate_->BindToCurrentThread();
   DCHECK(CurrentThread::Get());
   DCHECK(SingleThreadTaskRunner::HasCurrentDefault());
-#if (BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_NACL)) || BUILDFLAG(IS_FUCHSIA)
+#if BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
   // Allow threads running a MessageLoopForIO to use FileDescriptorWatcher API.
   std::unique_ptr<FileDescriptorWatcher> file_descriptor_watcher;
   if (CurrentIOThread::IsSet()) {
     file_descriptor_watcher = std::make_unique<FileDescriptorWatcher>(
         delegate_->GetDefaultTaskRunner());
   }
-#endif  // (BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_NACL)) || BUILDFLAG(IS_FUCHSIA)
+#endif  // BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
 
 #if BUILDFLAG(IS_WIN)
   std::unique_ptr<win::ScopedCOMInitializer> com_initializer;
@@ -402,21 +419,11 @@ void Thread::ThreadMain() {
   // Let the thread do extra initialization.
   Init();
 
-  {
-    AutoLock lock(running_lock_);
-    running_ = true;
-  }
-
   start_event_.Signal();
 
   RunLoop run_loop;
   run_loop_ = &run_loop;
   Run(run_loop_);
-
-  {
-    AutoLock lock(running_lock_);
-    running_ = false;
-  }
 
   // Let the thread do extra cleanup.
   CleanUp();

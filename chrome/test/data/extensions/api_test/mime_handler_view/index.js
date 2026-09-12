@@ -7,7 +7,7 @@
 // Tests don't start running until an async call to
 // chrome.mimeHandlerPrivate.getStreamInfo() completes, so queue any messages
 // received until that point.
-var queuedMessages = [];
+const queuedMessages = [];
 
 function queueMessage(event) {
   queuedMessages.push(event);
@@ -15,11 +15,11 @@ function queueMessage(event) {
 
 window.addEventListener('message', queueMessage, false);
 
-var streamDetails;
+let streamDetails;
 
 function fetchUrl(url) {
   return new Promise(function(resolve, reject) {
-    var request = new XMLHttpRequest();
+    const request = new XMLHttpRequest();
     request.onload = function() {
       resolve({
         status: request.status,
@@ -48,29 +48,28 @@ function expectSuccessfulReadLong(response) {
 function checkStreamDetails(name, embedded) {
   checkStreamDetailsNoFile();
   chrome.test.assertEq(embedded, streamDetails.embedded);
-  chrome.test.assertTrue(streamDetails.originalUrl.indexOf(name) != -1);
-  chrome.test.assertEq('text/csv',
-                       streamDetails.responseHeaders['Content-Type']);
+  chrome.test.assertNe(-1, streamDetails.originalUrl.indexOf(name));
+  chrome.test.assertEq(
+      'text/csv', streamDetails.responseHeaders['Content-Type']);
 }
 
 function checkStreamDetailsNoFile() {
   chrome.test.assertEq('text/csv', streamDetails.mimeType);
-  chrome.test.assertTrue(streamDetails.tabId != -1);
+  chrome.test.assertNe(-1, streamDetails.tabId);
 }
 
 // The following helper methods are used in BrowserPlugin-specific tests.
-function dummyTouchStartHandler(e) {
-}
+function dummyTouchStartHandler(e) {}
 
 function ensurePageIsScrollable() {
-  document.body.style = " width: 100%; height: 100%; overflow: scroll;";
-  let div = document.createElement("div");
-  div.style = "width: 1000px; height: 500px; margin: 50%;";
+  document.body.style = ' width: 100%; height: 100%; overflow: scroll;';
+  const div = document.createElement('div');
+  div.style = 'width: 1000px; height: 500px; margin: 50%;';
   document.body.appendChild(div);
   window.scrollTo(0, 0);
 }
 
-var tests = [
+const tests = [
   function testBasic() {
     checkStreamDetails('testBasic.csv', false);
     fetchUrl(streamDetails.streamUrl)
@@ -87,14 +86,14 @@ var tests = [
 
   function testIframe() {
     checkStreamDetails('testIframe.csv', true);
-    var printMessageArrived = new Promise(function(resolve, reject) {
+    const printMessageArrived = new Promise(function(resolve, reject) {
       window.addEventListener('message', function(event) {
         chrome.test.assertEq('print', event.data.type);
         resolve();
       }, false);
     });
-    var contentRead = fetchUrl(streamDetails.streamUrl)
-        .then(expectSuccessfulRead);
+    const contentRead =
+        fetchUrl(streamDetails.streamUrl).then(expectSuccessfulRead);
     Promise.all([printMessageArrived, contentRead]).then(chrome.test.succeed);
   },
 
@@ -107,27 +106,26 @@ var tests = [
 
   function testNonAsciiHeaders() {
     checkStreamDetails('testNonAsciiHeaders.csv', false);
-    chrome.test.assertEq(undefined,
-                         streamDetails.responseHeaders['Content-Disposition']);
-    chrome.test.assertEq(undefined,
-                         streamDetails.responseHeaders['ü']);
+    chrome.test.assertEq(
+        undefined, streamDetails.responseHeaders['Content-Disposition']);
+    chrome.test.assertEq(undefined, streamDetails.responseHeaders['ü']);
     chrome.test.succeed();
   },
 
   function testPostMessage() {
-    var expectedMessages = ['hey', 100, 25.0];
-    var messagesReceived = 0;
+    const expectedMessages = ['hey', 100, 25.0];
+    let messagesReceived = 0;
     function handleMessage(event) {
-      if (event.data == 'succeed' &&
-          messagesReceived == expectedMessages.length) {
+      if (event.data === 'succeed' &&
+          messagesReceived === expectedMessages.length) {
         chrome.test.succeed();
-      } else if (event.data == 'fail') {
+      } else if (event.data === 'fail') {
         chrome.test.fail();
-      } else if (event.data == expectedMessages[messagesReceived]) {
+      } else if (event.data === expectedMessages[messagesReceived]) {
         event.source.postMessage(event.data, '*');
         messagesReceived++;
-      } else if (event.data != 'initBeforeUnload') {
-        chrome.test.fail('unexpected message ' + event.data);
+      } else if (event.data !== 'initBeforeUnload') {
+        chrome.test.fail(`unexpected message ${event.data}`);
       }
     }
     window.addEventListener('message', handleMessage, false);
@@ -160,7 +158,7 @@ var tests = [
     function waitForFullscreenAnimation() {
       return new Promise(resolve => {
         chrome.runtime.getPlatformInfo(info => {
-          if (info.os != 'mac') {
+          if (info.os !== 'mac') {
             resolve();
             return;
           }
@@ -171,8 +169,8 @@ var tests = [
       });
     }
     checkStreamDetails('testFullscreen.csv', false);
-    var calls = 0;
-    var windowId;
+    let calls = 0;
+    let windowId;
     window.addEventListener('webkitfullscreenchange', async e => {
       switch (calls) {
         case 0:  // On fullscreen entered.
@@ -180,7 +178,7 @@ var tests = [
           chrome.test.assertEq(document.body, document.webkitFullscreenElement);
           await waitForFullscreenAnimation();
           chrome.tabs.get(streamDetails.tabId, tab => {
-            chrome.test.assertTrue(tab != null);
+            chrome.test.assertNe(null, tab);
             windowId = tab.windowId;
             chrome.windows.get(windowId, currentWindow => {
               chrome.test.assertEq('fullscreen', currentWindow.state);
@@ -194,8 +192,8 @@ var tests = [
           chrome.test.assertEq(null, document.webkitFullscreenElement);
           await waitForFullscreenAnimation();
           chrome.windows.get(windowId, currentWindow => {
-            chrome.test.assertFalse('fullscreen' == currentWindow.state,
-                                    currentWindow.state);
+            chrome.test.assertFalse(
+                'fullscreen' === currentWindow.state, currentWindow.state);
             chrome.test.runWithUserGesture(
                 () => document.body.webkitRequestFullscreen());
           });
@@ -219,6 +217,8 @@ var tests = [
             chrome.test.succeed();
           });
           break;
+        default:
+          // Unexpected, but nothing we can do -- the test already passed.
       }
       calls++;
     });
@@ -228,19 +228,21 @@ var tests = [
 
   function testFullscreenEscape() {
     checkStreamDetails('testFullscreenEscape.csv', false);
-    var calls = 0;
-    var windowId;
+    let calls = 0;
+    let windowId;
     window.addEventListener('webkitfullscreenchange', async e => {
-      switch(calls) {
-        case 0: // On fullscreen entered.
+      switch (calls) {
+        case 0:  // On fullscreen entered.
           chrome.test.assertTrue(document.webkitIsFullScreen);
           chrome.test.assertEq(document.body, document.webkitFullscreenElement);
           break;
-        case 1: // On fullscreen exited.
+        case 1:  // On fullscreen exited.
           chrome.test.assertFalse(document.webkitIsFullScreen);
           chrome.test.assertEq(null, document.webkitFullscreenElement);
           chrome.test.succeed();
           break;
+        default:
+          // Unexpected, but nothing we can do -- the test already passed.
       }
       calls++;
     });
@@ -260,7 +262,7 @@ var tests = [
       window.setTimeout(() => {
         // If the background page has shut down, its window.localStorage will be
         // null.
-        chrome.test.assertTrue(backgroundPage.window.localStorage != null);
+        chrome.test.assertNe(null, backgroundPage.window.localStorage);
         backgroundPage.endBackgroundPageTest();
         chrome.test.succeed();
       }, 100);
@@ -269,7 +271,7 @@ var tests = [
 
   function testTargetBlankAnchor() {
     checkStreamDetails('testTargetBlankAnchor.csv', false);
-    var anchor = document.createElement('a');
+    const anchor = document.createElement('a');
     anchor.href = 'about:blank';
     anchor.target = '_blank';
     document.body.appendChild(anchor);
@@ -298,19 +300,20 @@ var tests = [
   },
 ];
 
-var testsByName = {};
+const testsByName = {};
 for (let i = 0; i < tests.length; i++) {
   testsByName[tests[i].name] = tests[i];
 }
 
 chrome.mimeHandlerPrivate.getStreamInfo(function(streamInfo) {
-  if (!streamInfo)
+  if (!streamInfo) {
     return;
+  }
 
   // If the name of the file we're handling matches the name of a test, run that
   // test.
-  var urlComponents = streamInfo.originalUrl.split('/');
-  var test = urlComponents[urlComponents.length - 1].split('.')[0];
+  const urlComponents = streamInfo.originalUrl.split('/');
+  const test = urlComponents[urlComponents.length - 1].split('.')[0];
   streamDetails = streamInfo;
   if (testsByName[test]) {
     window.removeEventListener('message', queueMessage);
@@ -318,7 +321,7 @@ chrome.mimeHandlerPrivate.getStreamInfo(function(streamInfo) {
   }
 
   // Run the test for data URLs.
-  if (streamInfo.originalUrl.startsWith("data:")) {
+  if (streamInfo.originalUrl.startsWith('data:')) {
     window.removeEventListener('message', queueMessage);
     chrome.test.runTests([testsByName['testDataUrlLong']]);
   }

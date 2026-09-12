@@ -7,10 +7,9 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 
-#include "base/strings/string_piece_forward.h"
-
-namespace ui::ClipboardUtil::internal {
+namespace ui::clipboard_util::internal {
 
 // A completely arbitrary cut-off size (16kB), above which
 // `ExtractURLFromURLFileContents` will refuse to parse. Because parsing
@@ -24,9 +23,8 @@ constexpr size_t kMaximumParsableFileSize = 16'384;
 // Implementation note: This function does not do full validation of the file
 // contents. If a malformed file is passed in, this function may or may not
 // manage to find any URLs within.
-std::string ExtractURLFromURLFileContents(
-    const base::StringPiece& file_contents);
+std::string ExtractURLFromURLFileContents(std::string_view file_contents);
 
-}  // namespace ui::ClipboardUtil::internal
+}  // namespace ui::clipboard_util::internal
 
 #endif  // UI_BASE_CLIPBOARD_URL_FILE_PARSER_H_

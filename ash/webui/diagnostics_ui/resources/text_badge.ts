@@ -4,7 +4,7 @@
 
 import './diagnostics_shared.css.js';
 
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {getTemplate} from './text_badge.html.js';
@@ -48,17 +48,11 @@ export class TextBadgeElement extends PolymerElement {
         type: String,
         value: '',
       },
-
-      hidden: {
-        type: Boolean,
-        value: false,
-      },
     };
   }
 
-  badgeType: BadgeType;
-  value: string;
-  override hidden: boolean;
+  declare badgeType: BadgeType;
+  declare value: string;
 }
 
 declare global {

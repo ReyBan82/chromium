@@ -1,12 +1,13 @@
 AXWebArea
-++AXGroup
+++AXGroup AXSubrole=AXEmptyGroup
 ++AXGroup
 ++++AXStaticText AXValue='<newline>    '
 ++++AXStaticText AXValue='child'
 ++++AXStaticText AXValue='<newline>    '
 ++++AXGroup
-++++++AXStaticText AXValue='nested locked element!'
+++++++AXStaticText AXValue='<newline>      nested locked element!<newline>      '
+++++++AXButton AXTitle='locked button'
+++++++AXStaticText AXValue='<newline>    '
 ++++AXStaticText AXValue='<newline>    '
-++++AXGroup
-++++++AXStaticText AXValue='nested non activatable locked element'
+++++AXGroup AXSubrole=AXEmptyGroup
 ++++AXStaticText AXValue='<newline>  '

@@ -4,10 +4,14 @@
 
 #include "components/tab_groups/tab_group_color.h"
 
+#include <map>
+
 #include "base/containers/flat_map.h"
 #include "base/no_destructor.h"
+#include "base/notreached.h"
 #include "base/strings/utf_string_conversions.h"
 #include "components/strings/grit/components_strings.h"
+#include "components/tab_groups/tab_group_id.h"
 #include "ui/base/l10n/l10n_util.h"
 
 namespace tab_groups {

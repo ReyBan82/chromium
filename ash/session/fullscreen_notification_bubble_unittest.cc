@@ -7,10 +7,12 @@
 #include <memory>
 
 #include "ash/test/ash_test_base.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/aura/client/aura_constants.h"
 #include "ui/aura/window.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 #include "ui/views/widget/widget.h"
 
 namespace ash {
@@ -35,10 +37,9 @@ class FullscreenNotificationBubbleTest : public AshTestBase {
     AshTestBase::SetUp();
 
     // Create a test window in full screen mode.
-    window_ = CreateTestWindow();
+    window_ = CreateWindowWithAppType();
     window_->SetProperty(aura::client::kShowStateKey,
-                         ui::SHOW_STATE_FULLSCREEN);
-    window_state_ = WindowState::Get(window_.get());
+                         ui::mojom::WindowShowState::kFullscreen);
 
     bubble_ = std::make_unique<FullscreenNotificationBubble>();
   }
@@ -49,18 +50,18 @@ class FullscreenNotificationBubbleTest : public AshTestBase {
     AshTestBase::TearDown();
   }
 
+  WindowState* window_state() { return WindowState::Get(window_.get()); }
+
  protected:
   std::unique_ptr<aura::Window> window_;
   std::unique_ptr<FullscreenNotificationBubble> bubble_;
-
-  WindowState* window_state_ = nullptr;
 };
 
 TEST_F(FullscreenNotificationBubbleTest, AutoHideBubbleAfterDelay) {
   views::Widget* widget = bubble_->widget_for_test();
   EXPECT_FALSE(widget->IsVisible());
 
-  bubble_->ShowForWindowState(window_state_);
+  bubble_->ShowForWindowState(window_state());
   EXPECT_TRUE(widget->IsVisible());
 
   // The bubble is still visible if the timer has not yet elapsed.
@@ -77,7 +78,7 @@ TEST_F(FullscreenNotificationBubbleTest, HideBubbleOnExitFullscreen) {
   views::Widget* widget = bubble_->widget_for_test();
   EXPECT_FALSE(widget->IsVisible());
 
-  bubble_->ShowForWindowState(window_state_);
+  bubble_->ShowForWindowState(window_state());
   EXPECT_TRUE(widget->IsVisible());
 
   // The bubble is hidden early if the user exits full screen mode via full
@@ -90,7 +91,7 @@ TEST_F(FullscreenNotificationBubbleTest, HandleWindowDestruction) {
   views::Widget* widget = bubble_->widget_for_test();
   EXPECT_FALSE(widget->IsVisible());
 
-  bubble_->ShowForWindowState(window_state_);
+  bubble_->ShowForWindowState(window_state());
   EXPECT_TRUE(widget->IsVisible());
 
   // Destroy the window before the timer is elapsed.

@@ -7,7 +7,7 @@ import {eventToPromise} from 'chrome://webui-test/test_util.js';
 const viewer = document.body.querySelector('pdf-viewer')!;
 
 function getPasswordDialog() {
-  return viewer.shadowRoot!.querySelector('viewer-password-dialog')!;
+  return viewer.shadowRoot.querySelector('viewer-password-dialog')!;
 }
 
 function getPasswordInput() {
@@ -71,6 +71,9 @@ const tests = [
 
     await tryIncorrectPassword('incorrect');
     await tryCorrectPassword('ownerpass');
+
+    const toolbar = viewer.shadowRoot.querySelector('viewer-toolbar')!;
+    chrome.test.assertFalse(toolbar.annotationAvailable);
     chrome.test.succeed();
   },
 ];

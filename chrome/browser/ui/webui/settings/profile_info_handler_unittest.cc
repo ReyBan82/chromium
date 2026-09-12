@@ -6,10 +6,10 @@
 
 #include <memory>
 
+#include "base/containers/span.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/common/pref_names.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
@@ -24,7 +24,7 @@
 #include "ui/gfx/codec/png_codec.h"
 #include "url/gurl.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "components/user_manager/scoped_user_manager.h"
 #endif
@@ -33,7 +33,7 @@ namespace settings {
 
 namespace {
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 constexpr char fake_id[] = "fake_id";
 constexpr char fake_email[] = "fake_id@gmail.com";
 #endif
@@ -57,7 +57,7 @@ class ProfileInfoHandlerTest : public testing::Test {
   void SetUp() override {
     ASSERT_TRUE(profile_manager_.SetUp());
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     auto* fake_user_manager = new ash::FakeChromeUserManager;
     user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
         base::WrapUnique(fake_user_manager));
@@ -73,14 +73,14 @@ class ProfileInfoHandlerTest : public testing::Test {
 
   void VerifyProfileInfo(const base::Value* call_argument) {
     ASSERT_TRUE(call_argument->is_dict());
-    const base::Value::Dict& dict = call_argument->GetDict();
+    const base::DictValue& dict = call_argument->GetDict();
 
     const std::string* name = dict.FindString("name");
     const std::string* icon_url = dict.FindString("iconUrl");
     ASSERT_TRUE(name);
     ASSERT_TRUE(icon_url);
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     EXPECT_EQ(fake_id, *name);
     EXPECT_FALSE(icon_url->empty());
 #else
@@ -90,10 +90,8 @@ class ProfileInfoHandlerTest : public testing::Test {
     EXPECT_TRUE(net::DataURL::Parse(GURL(*icon_url), &mime, &charset, &data));
 
     EXPECT_EQ("image/png", mime);
-    SkBitmap bitmap;
-    EXPECT_TRUE(gfx::PNGCodec::Decode(
-        reinterpret_cast<const unsigned char*>(data.data()), data.size(),
-        &bitmap));
+    SkBitmap bitmap = gfx::PNGCodec::Decode(base::as_byte_span(data));
+    EXPECT_FALSE(bitmap.isNull());
 #endif
   }
 
@@ -106,7 +104,7 @@ class ProfileInfoHandlerTest : public testing::Test {
   TestingProfileManager profile_manager_;
   content::TestWebUI web_ui_;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<user_manager::ScopedUserManager> user_manager_enabler_;
 #endif
 
@@ -115,7 +113,7 @@ class ProfileInfoHandlerTest : public testing::Test {
 };
 
 TEST_F(ProfileInfoHandlerTest, GetProfileInfo) {
-  base::Value::List list_args;
+  base::ListValue list_args;
   list_args.Append("get-profile-info-callback-id");
   handler()->HandleGetProfileInfo(list_args);
 

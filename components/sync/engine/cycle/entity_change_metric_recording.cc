@@ -5,24 +5,25 @@
 #include "components/sync/engine/cycle/entity_change_metric_recording.h"
 
 #include "base/metrics/histogram_functions.h"
+#include "base/strings/strcat.h"
 
 namespace syncer {
 
 namespace {
 
-const char kEntityChangeHistogramPrefix[] = "Sync.ModelTypeEntityChange3.";
+constexpr char kEntityChangeHistogramPrefix[] = "Sync.DataTypeEntityChange.";
 
 }  // namespace
 
-void RecordEntityChangeMetrics(ModelType type, ModelTypeEntityChange change) {
-  std::string histogram_name = std::string(kEntityChangeHistogramPrefix) +
-                               ModelTypeToHistogramSuffix(type);
-  base::UmaHistogramEnumeration(histogram_name, change);
+void RecordEntityChangeMetrics(DataType type, DataTypeEntityChange change) {
+  base::UmaHistogramEnumeration(base::StrCat({kEntityChangeHistogramPrefix,
+                                              DataTypeToHistogramSuffix(type)}),
+                                change);
 }
 
-std::string GetEntityChangeHistogramNameForTest(ModelType type) {
-  return std::string(kEntityChangeHistogramPrefix) +
-         ModelTypeToHistogramSuffix(type);
+std::string GetEntityChangeHistogramNameForTest(DataType type) {
+  return base::StrCat(
+      {kEntityChangeHistogramPrefix, DataTypeToHistogramSuffix(type)});
 }
 
 }  // namespace syncer

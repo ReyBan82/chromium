@@ -7,6 +7,8 @@
 
 #include <vector>
 
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "gpu/gpu_gles2_export.h"
 
 // Forwardly declare a few GL types to avoid including GL header files.
@@ -37,7 +39,11 @@ class GPU_GLES2_EXPORT MultiDrawManager {
     std::vector<GLint> firsts;
     std::vector<GLsizei> counts;
     std::vector<GLsizei> offsets;
-    std::vector<const void*> indices;
+    // RAW_PTR_EXCLUSION is used here because the `.data()` of this vector is
+    // passed directly to the C API `glMultiDrawElementsANGLEFn`, which expects
+    // a `const void* const*`. Using `raw_ptr` changes the type signature and
+    // breaks compilation.
+    RAW_PTR_EXCLUSION std::vector<const void*> indices;
     std::vector<GLsizei> instance_counts;
     std::vector<GLint> basevertices;
     std::vector<GLuint> baseinstances;
@@ -58,40 +64,35 @@ class GPU_GLES2_EXPORT MultiDrawManager {
   bool Begin(GLsizei drawcount);
   bool End(ResultData* result);
   bool MultiDrawArrays(GLenum mode,
-                       const GLint* firsts,
-                       const GLsizei* counts,
-                       GLsizei drawcount);
+                       base::span<const GLint> firsts,
+                       base::span<const GLsizei> counts);
   bool MultiDrawArraysInstanced(GLenum mode,
-                                const GLint* firsts,
-                                const GLsizei* counts,
-                                const GLsizei* instance_counts,
-                                GLsizei drawcount);
-  bool MultiDrawArraysInstancedBaseInstance(GLenum mode,
-                                            const GLint* firsts,
-                                            const GLsizei* counts,
-                                            const GLsizei* instance_counts,
-                                            const GLuint* baseinstances,
-                                            GLsizei drawcount);
+                                base::span<const GLint> firsts,
+                                base::span<const GLsizei> counts,
+                                base::span<const GLsizei> instance_counts);
+  bool MultiDrawArraysInstancedBaseInstance(
+      GLenum mode,
+      base::span<const GLint> firsts,
+      base::span<const GLsizei> counts,
+      base::span<const GLsizei> instance_counts,
+      base::span<const GLuint> baseinstances);
   bool MultiDrawElements(GLenum mode,
-                         const GLsizei* counts,
+                         base::span<const GLsizei> counts,
                          GLenum type,
-                         const GLsizei* offsets,
-                         GLsizei drawcount);
+                         base::span<const GLsizei> offsets);
   bool MultiDrawElementsInstanced(GLenum mode,
-                                  const GLsizei* counts,
+                                  base::span<const GLsizei> counts,
                                   GLenum type,
-                                  const GLsizei* offsets,
-                                  const GLsizei* instance_counts,
-                                  GLsizei drawcount);
+                                  base::span<const GLsizei> offsets,
+                                  base::span<const GLsizei> instance_counts);
   bool MultiDrawElementsInstancedBaseVertexBaseInstance(
       GLenum mode,
-      const GLsizei* counts,
+      base::span<const GLsizei> counts,
       GLenum type,
-      const GLsizei* offsets,
-      const GLsizei* instance_counts,
-      const GLint* basevertices,
-      const GLuint* baseinstances,
-      GLsizei drawcount);
+      base::span<const GLsizei> offsets,
+      base::span<const GLsizei> instance_counts,
+      base::span<const GLint> basevertices,
+      base::span<const GLuint> baseinstances);
 
  private:
   void ResizeArrays();
@@ -104,12 +105,12 @@ class GPU_GLES2_EXPORT MultiDrawManager {
                                   GLenum type,
                                   GLsizei drawcount);
   void CopyArraysHelper(GLsizei drawcount,
-                        const GLint* firsts,
-                        const GLsizei* counts,
-                        const GLsizei* offsets,
-                        const GLsizei* instance_counts,
-                        const GLint* basevertices,
-                        const GLuint* baseinstances);
+                        base::span<const GLint> firsts,
+                        base::span<const GLsizei> counts,
+                        base::span<const GLsizei> offsets,
+                        base::span<const GLsizei> instance_counts,
+                        base::span<const GLint> basevertices,
+                        base::span<const GLuint> baseinstances);
 
   enum class DrawState {
     Begin,

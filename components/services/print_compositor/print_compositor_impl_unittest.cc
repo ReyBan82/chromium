@@ -2,19 +2,29 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/services/print_compositor/print_compositor_impl.h"
+
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/run_loop.h"
-#include "base/test/gtest_util.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_future.h"
+#include "cc/test/pixel_test_utils.h"
 #include "components/crash/core/common/crash_key.h"
-#include "components/services/print_compositor/print_compositor_impl.h"
 #include "components/services/print_compositor/public/cpp/print_service_mojo_types.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/skia/include/core/SkCanvas.h"
+#include "third_party/skia/include/core/SkColor.h"
+#include "third_party/skia/include/core/SkDocument.h"
+#include "third_party/skia/include/core/SkPaint.h"
+#include "third_party/skia/include/core/SkRect.h"
+#include "third_party/skia/include/core/SkStream.h"
+#include "third_party/skia/include/docs/SkMultiPictureDocument.h"
 
 namespace printing {
 
@@ -27,16 +37,18 @@ class MockPrintCompositorImpl : public PrintCompositorImpl {
  public:
   MockPrintCompositorImpl()
       : PrintCompositorImpl(mojo::NullReceiver(),
-                            false /* initialize_environment */,
-                            nullptr /* io_task_runner */) {}
+                            /*initialize_environment=*/false,
+                            /*io_task_runner=*/nullptr) {}
   ~MockPrintCompositorImpl() override = default;
+
+  using PrintCompositorImpl::DrawPage;
 
   MOCK_METHOD2(OnFulfillRequest, void(uint64_t, int));
 
  protected:
   void FulfillRequest(base::span<const uint8_t> serialized_content,
                       const ContentToFrameMap& subframe_content_map,
-                      CompositeToPdfCallback callback) override {
+                      CompositePageCallback callback) override {
     const auto* data =
         reinterpret_cast<const TestRequestData*>(serialized_content.data());
     OnFulfillRequest(data->frame_guid, data->page_num);
@@ -49,29 +61,48 @@ class MockCompletionPrintCompositorImpl : public PrintCompositorImpl {
  public:
   MockCompletionPrintCompositorImpl()
       : PrintCompositorImpl(mojo::NullReceiver(),
-                            false /* initialize_environment */,
-                            nullptr /* io_task_runner */) {}
+                            /*initialize_environment=*/false,
+                            /*io_task_runner=*/nullptr) {}
   ~MockCompletionPrintCompositorImpl() override = default;
 
-  MOCK_CONST_METHOD0(OnCompleteDocumentRequest, void());
-  MOCK_METHOD2(OnCompositeToPdf, void(uint64_t, int));
+  MOCK_CONST_METHOD0(OnFinishDocumentRequest, void());
+  MOCK_METHOD2(OnCompositePage, void(uint64_t, int));
 
  protected:
-  mojom::PrintCompositor::Status CompositeToPdf(
+  mojom::PrintCompositor::Status CompositePages(
       base::span<const uint8_t> serialized_content,
       const ContentToFrameMap& subframe_content_map,
       base::ReadOnlySharedMemoryRegion* region) override {
     const auto* data =
         reinterpret_cast<const TestRequestData*>(serialized_content.data());
-    if (docinfo_)
-      docinfo_->pages_written++;
-    OnCompositeToPdf(data->frame_guid, data->page_num);
+    if (doc_info_) {
+      doc_info_->pages_written++;
+    }
+    OnCompositePage(data->frame_guid, data->page_num);
     return mojom::PrintCompositor::Status::kSuccess;
   }
 
-  void CompleteDocumentRequest(
-      CompleteDocumentToPdfCallback callback) override {
-    OnCompleteDocumentRequest();
+  void FinishDocumentRequest(
+      FinishDocumentCompositionCallback callback) override {
+    OnFinishDocumentRequest();
+  }
+};
+
+class TestBlueSquareAddon : public PrintCompositorImpl::Addon {
+ public:
+  void OnDrawPage(SkCanvas* canvas, const SkSize& size) override {
+    SkPaint paint;
+    paint.setColor(SK_ColorBLUE);
+    paint.setStyle(SkPaint::kFill_Style);
+    canvas->drawRect(SkRect::MakeSize(size), paint);
+  }
+};
+
+class TestFailingPdfAddon : public PrintCompositorImpl::Addon {
+ public:
+  base::ReadOnlySharedMemoryRegion OnOverlayPdf(
+      base::ReadOnlySharedMemoryRegion pdf_region) override {
+    return base::ReadOnlySharedMemoryRegion();
   }
 };
 
@@ -93,18 +124,17 @@ class PrintCompositorImplTest : public testing::Test {
     return is_ready_;
   }
 
-  static void OnCompositeToPdfCallback(
-      mojom::PrintCompositor::Status status,
-      base::ReadOnlySharedMemoryRegion region) {
+  static void OnCompositePageCallback(mojom::PrintCompositor::Status status,
+                                      base::ReadOnlySharedMemoryRegion region) {
     // A stub for testing, no implementation.
   }
 
-  static void OnPrepareForDocumentToPdfCallback(
+  static void OnPrepareToCompositeDocumentCallback(
       mojom::PrintCompositor::Status status) {
     // A stub for testing, no implementation.
   }
 
-  void OnCompositeOrCompleteDocumentToPdfCallback(
+  void OnCompositeDocumentDoneCallback(
       mojom::PrintCompositor::Status status,
       base::ReadOnlySharedMemoryRegion region) {
     // A stub for testing, only care about status.
@@ -133,14 +163,14 @@ class PrintCompositorImplTest : public testing::Test {
 
 class PrintCompositorImplCrashKeyTest : public PrintCompositorImplTest {
  public:
-  PrintCompositorImplCrashKeyTest() {}
+  PrintCompositorImplCrashKeyTest() = default;
 
   PrintCompositorImplCrashKeyTest(const PrintCompositorImplCrashKeyTest&) =
       delete;
   PrintCompositorImplCrashKeyTest& operator=(
       const PrintCompositorImplCrashKeyTest&) = delete;
 
-  ~PrintCompositorImplCrashKeyTest() override {}
+  ~PrintCompositorImplCrashKeyTest() override = default;
 
   void SetUp() override {
     crash_reporter::ResetCrashKeysForTesting();
@@ -152,8 +182,8 @@ class PrintCompositorImplCrashKeyTest : public PrintCompositorImplTest {
 
 TEST_F(PrintCompositorImplTest, IsReadyToComposite) {
   PrintCompositorImpl impl(mojo::NullReceiver(),
-                           false /* initialize_environment */,
-                           nullptr /* io_task_runner */);
+                           /*initialize_environment=*/false,
+                           /*io_task_runner=*/nullptr);
   // Frame 2 and 3 are painted.
   impl.AddSubframeContent(2, CreateTestData(2, -1), ContentToFrameMap());
   impl.AddSubframeContent(3, CreateTestData(3, -1), ContentToFrameMap());
@@ -190,8 +220,8 @@ TEST_F(PrintCompositorImplTest, IsReadyToComposite) {
 
 TEST_F(PrintCompositorImplTest, MultiLayerDependency) {
   PrintCompositorImpl impl(mojo::NullReceiver(),
-                           false /* initialize_environment */,
-                           nullptr /* io_task_runner */);
+                           /*initialize_environment=*/false,
+                           /*io_task_runner=*/nullptr);
   // Frame 3 has content 1 which refers to subframe 1.
   ContentToFrameMap subframe_content_map = {{1, 1}};
   impl.AddSubframeContent(3, CreateTestData(3, -1), subframe_content_map);
@@ -232,8 +262,8 @@ TEST_F(PrintCompositorImplTest, MultiLayerDependency) {
 
 TEST_F(PrintCompositorImplTest, DependencyLoop) {
   PrintCompositorImpl impl(mojo::NullReceiver(),
-                           false /* initialize_environment */,
-                           nullptr /* io_task_runner */);
+                           /*initialize_environment=*/false,
+                           /*io_task_runner=*/nullptr);
   // Frame 3 has content 1, which refers to frame 1.
   // Frame 1 has content 3, which refers to frame 3.
   ContentToFrameMap subframe_content_map = {{3, 3}};
@@ -266,9 +296,9 @@ TEST_F(PrintCompositorImplTest, MultiRequestsBasic) {
   // When the content is not available, the request is not fulfilled.
   const ContentToFrameMap subframe_content_map = {{1, 8}};
   EXPECT_CALL(impl, OnFulfillRequest(testing::_, testing::_)).Times(0);
-  impl.CompositePageToPdf(
+  impl.CompositePage(
       3, CreateTestData(3, 0), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
   testing::Mock::VerifyAndClearExpectations(&impl);
 
   // When frame 8's content is ready, the previous request should be fulfilled.
@@ -280,13 +310,13 @@ TEST_F(PrintCompositorImplTest, MultiRequestsBasic) {
   // immediately fulfilled.
   EXPECT_CALL(impl, OnFulfillRequest(3, 1)).Times(1);
   EXPECT_CALL(impl, OnFulfillRequest(3, -1)).Times(1);
-  impl.CompositePageToPdf(
+  impl.CompositePage(
       3, CreateTestData(3, 1), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
 
-  impl.CompositeDocumentToPdf(
-      3, CreateTestData(3, -1), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+  impl.CompositeDocument(
+      3, CreateTestData(3, -1), /*is_pdf=*/false, subframe_content_map,
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
 }
 
 TEST_F(PrintCompositorImplTest, MultiRequestsOrder) {
@@ -295,19 +325,19 @@ TEST_F(PrintCompositorImplTest, MultiRequestsOrder) {
   // When the content is not available, the request is not fulfilled.
   const ContentToFrameMap subframe_content_map = {{1, 8}};
   EXPECT_CALL(impl, OnFulfillRequest(testing::_, testing::_)).Times(0);
-  impl.CompositePageToPdf(
+  impl.CompositePage(
       3, CreateTestData(3, 0), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
 
   // The following requests which only depends on frame 8 should be
   // immediately fulfilled.
-  impl.CompositePageToPdf(
+  impl.CompositePage(
       3, CreateTestData(3, 1), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
 
-  impl.CompositeDocumentToPdf(
-      3, CreateTestData(3, -1), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+  impl.CompositeDocument(
+      3, CreateTestData(3, -1), /*is_pdf=*/false, subframe_content_map,
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
   testing::Mock::VerifyAndClearExpectations(&impl);
 
   // When frame 8's content is ready, the previous request should be
@@ -325,17 +355,17 @@ TEST_F(PrintCompositorImplTest, MultiRequestsDepOrder) {
   // fulfilled.
   EXPECT_CALL(impl, OnFulfillRequest(testing::_, testing::_)).Times(0);
   ContentToFrameMap subframe_content_map = {{1, 2}};
-  impl.CompositePageToPdf(
+  impl.CompositePage(
       1, CreateTestData(1, 0), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
 
   // Page 1 with frame 1 has content 1, which refers to frame
   // 3. When the content is not available, the request is not
   // fulfilled either.
   subframe_content_map = {{1, 3}};
-  impl.CompositePageToPdf(
+  impl.CompositePage(
       1, CreateTestData(1, 1), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
   testing::Mock::VerifyAndClearExpectations(&impl);
 
   // When frame 3 and 2 become available, the pending requests should be
@@ -353,9 +383,9 @@ TEST_F(PrintCompositorImplTest, NotifyUnavailableSubframe) {
   // When the content is not available, the request is not fulfilled.
   const ContentToFrameMap subframe_content_map = {{1, 8}};
   EXPECT_CALL(impl, OnFulfillRequest(testing::_, testing::_)).Times(0);
-  impl.CompositePageToPdf(
+  impl.CompositePage(
       3, CreateTestData(3, 0), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
   testing::Mock::VerifyAndClearExpectations(&impl);
 
   // Notifies that frame 8's unavailable, the previous request should be
@@ -366,15 +396,15 @@ TEST_F(PrintCompositorImplTest, NotifyUnavailableSubframe) {
 }
 
 #if BUILDFLAG(IS_FUCHSIA)
-// TODO(crbug.com/1186718): Enable this test once CrashKeys are supported.
+// TODO(crbug.com/40172607): Enable this test once CrashKeys are supported.
 #define MAYBE_SetCrashKey DISABLED_SetCrashKey
 #else
 #define MAYBE_SetCrashKey SetCrashKey
 #endif
 TEST_F(PrintCompositorImplCrashKeyTest, MAYBE_SetCrashKey) {
   PrintCompositorImpl impl(mojo::NullReceiver(),
-                           false /* initialize_environment */,
-                           nullptr /* io_task_runner */);
+                           /*initialize_environment=*/false,
+                           /*io_task_runner=*/nullptr);
   std::string url_str("https://www.example.com/");
   GURL url(url_str);
   impl.SetWebContentsURL(url);
@@ -382,39 +412,214 @@ TEST_F(PrintCompositorImplCrashKeyTest, MAYBE_SetCrashKey) {
   EXPECT_EQ(crash_reporter::GetCrashKeyValue("main-frame-url"), url_str);
 }
 
-TEST_F(PrintCompositorImplTest, MultiRequestsBasicCompleteDocument) {
+TEST_F(PrintCompositorImplTest, MultiRequestsBasicFinishDocument) {
   MockCompletionPrintCompositorImpl impl;
   // Page 0 with frame 3 has content 1, which refers to frame 8.
   // When the content is not available, the request is not fulfilled.
   const ContentToFrameMap subframe_content_map = {{1, 8}};
-  impl.PrepareForDocumentToPdf(base::BindOnce(
-      &PrintCompositorImplTest::OnPrepareForDocumentToPdfCallback));
-  EXPECT_CALL(impl, OnCompositeToPdf(testing::_, testing::_)).Times(0);
-  impl.CompositePageToPdf(
+  impl.PrepareToCompositeDocument(
+      base::BindOnce(
+          &PrintCompositorImplTest::OnPrepareToCompositeDocumentCallback));
+  EXPECT_CALL(impl, OnCompositePage(testing::_, testing::_)).Times(0);
+  impl.CompositePage(
       3, CreateTestData(3, 0), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
   testing::Mock::VerifyAndClearExpectations(&impl);
 
   // When frame 8's content is ready, the previous request should be fulfilled.
-  EXPECT_CALL(impl, OnCompositeToPdf(testing::_, testing::_)).Times(1);
+  EXPECT_CALL(impl, OnCompositePage(testing::_, testing::_)).Times(1);
   impl.AddSubframeContent(8, CreateTestData(8, -1), ContentToFrameMap());
   testing::Mock::VerifyAndClearExpectations(&impl);
 
   // The following requests which only depends on frame 8 should be
   // immediately fulfilled.
-  EXPECT_CALL(impl, OnCompositeToPdf(testing::_, testing::_)).Times(1);
-  impl.CompositePageToPdf(
+  EXPECT_CALL(impl, OnCompositePage(testing::_, testing::_)).Times(1);
+  impl.CompositePage(
       3, CreateTestData(3, 1), subframe_content_map,
-      base::BindOnce(&PrintCompositorImplTest::OnCompositeToPdfCallback));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositePageCallback));
   testing::Mock::VerifyAndClearExpectations(&impl);
 
-  EXPECT_CALL(impl, OnCompleteDocumentRequest()).Times(1);
-  impl.CompleteDocumentToPdf(
+  EXPECT_CALL(impl, OnFinishDocumentRequest()).Times(1);
+  impl.FinishDocumentComposition(
       2,
-      base::BindOnce(
-          &PrintCompositorImplTest::OnCompositeOrCompleteDocumentToPdfCallback,
-          base::Unretained(this)));
+      base::BindOnce(&PrintCompositorImplTest::OnCompositeDocumentDoneCallback,
+                     base::Unretained(this)));
   EXPECT_EQ(GetStatus(), mojom::PrintCompositor::Status::kSuccess);
+}
+
+TEST_F(PrintCompositorImplTest, PDFDocumentPassThrough) {
+  PrintCompositorImpl impl(mojo::NullReceiver(),
+                           /*initialize_environment=*/false,
+                           /*io_task_runner=*/nullptr);
+
+  // Create dummy PDF data. A valid PDF starts with "%PDF-" and must be >= 50
+  // bytes.
+  constexpr std::string_view kPdfData =
+      "%PDF-1.5 dummy content that is long enough to satisfy LooksLikePdf size "
+      "requirement of 50 bytes";
+  base::MappedReadOnlyRegion region_mapping =
+      base::ReadOnlySharedMemoryRegion::Create(kPdfData.size());
+  ASSERT_TRUE(region_mapping.IsValid());
+  region_mapping.mapping.GetMemoryAsSpan<uint8_t>()
+      .first(kPdfData.size())
+      .copy_from(base::as_byte_span(kPdfData));
+
+  base::test::TestFuture<mojom::PrintCompositor::Status,
+                         base::ReadOnlySharedMemoryRegion>
+      future;
+
+  impl.CompositeDocument(1, std::move(region_mapping.region),
+                         /*is_pdf=*/true, ContentToFrameMap(),
+                         future.GetCallback());
+
+  EXPECT_EQ(future.Get<0>(), mojom::PrintCompositor::Status::kSuccess);
+  ASSERT_TRUE(future.Get<1>().IsValid());
+  EXPECT_EQ(future.Get<1>().GetSize(), kPdfData.size());
+
+  base::ReadOnlySharedMemoryMapping result_mapping = future.Get<1>().Map();
+  ASSERT_TRUE(result_mapping.IsValid());
+  EXPECT_EQ(
+      result_mapping.GetMemoryAsSpan<const uint8_t>().first(kPdfData.size()),
+      base::as_byte_span(kPdfData));
+}
+
+TEST_F(PrintCompositorImplTest, PDFDocumentPassThroughWithDefaultAddon) {
+  PrintCompositorImpl impl(mojo::NullReceiver(),
+                           /*initialize_environment=*/false,
+                           /*io_task_runner=*/nullptr);
+  impl.SetAddonForTesting(std::make_unique<TestBlueSquareAddon>());
+
+  constexpr std::string_view kPdfData =
+      "%PDF-1.5 dummy content that is long enough to satisfy LooksLikePdf size "
+      "requirement of 50 bytes";
+  base::MappedReadOnlyRegion region_mapping =
+      base::ReadOnlySharedMemoryRegion::Create(kPdfData.size());
+  ASSERT_TRUE(region_mapping.IsValid());
+  region_mapping.mapping.GetMemoryAsSpan<uint8_t>()
+      .first(kPdfData.size())
+      .copy_from(base::as_byte_span(kPdfData));
+
+  base::test::TestFuture<mojom::PrintCompositor::Status,
+                         base::ReadOnlySharedMemoryRegion>
+      future;
+
+  impl.CompositeDocument(1, std::move(region_mapping.region),
+                         /*is_pdf=*/true, ContentToFrameMap(),
+                         future.GetCallback());
+
+  EXPECT_EQ(future.Get<0>(), mojom::PrintCompositor::Status::kSuccess);
+  ASSERT_TRUE(future.Get<1>().IsValid());
+  EXPECT_EQ(future.Get<1>().GetSize(), kPdfData.size());
+
+  base::ReadOnlySharedMemoryMapping result_mapping = future.Get<1>().Map();
+  ASSERT_TRUE(result_mapping.IsValid());
+  EXPECT_EQ(
+      result_mapping.GetMemoryAsSpan<const uint8_t>().first(kPdfData.size()),
+      base::as_byte_span(kPdfData));
+}
+
+TEST_F(PrintCompositorImplTest, PDFDocumentFailsWithInvalidAddon) {
+  PrintCompositorImpl impl(mojo::NullReceiver(),
+                           /*initialize_environment=*/false,
+                           /*io_task_runner=*/nullptr);
+  impl.SetAddonForTesting(std::make_unique<TestFailingPdfAddon>());
+
+  constexpr std::string_view kPdfData =
+      "%PDF-1.5 dummy content that is long enough to satisfy...";
+  base::MappedReadOnlyRegion region_mapping =
+      base::ReadOnlySharedMemoryRegion::Create(kPdfData.size());
+  ASSERT_TRUE(region_mapping.IsValid());
+  region_mapping.mapping.GetMemoryAsSpan<uint8_t>()
+      .first(kPdfData.size())
+      .copy_from(base::as_byte_span(kPdfData));
+
+  base::test::TestFuture<mojom::PrintCompositor::Status,
+                         base::ReadOnlySharedMemoryRegion>
+      future;
+
+  impl.CompositeDocument(1, std::move(region_mapping.region),
+                         /*is_pdf=*/true, ContentToFrameMap(),
+                         future.GetCallback());
+
+  EXPECT_EQ(future.Get<0>(),
+            mojom::PrintCompositor::Status::kContentFormatError);
+  EXPECT_FALSE(future.Get<1>().IsValid());
+}
+
+TEST_F(PrintCompositorImplTest, InvalidContentFormat) {
+  PrintCompositorImpl impl(mojo::NullReceiver(),
+                           /*initialize_environment=*/false,
+                           /*io_task_runner=*/nullptr);
+
+  // When is_pdf is false, non-Skia garbage payload should fail deserialization
+  // with kContentFormatError.
+  constexpr std::string_view kGarbageData =
+      "this is neither pdf nor valid skia picture";
+  base::MappedReadOnlyRegion region_mapping =
+      base::ReadOnlySharedMemoryRegion::Create(kGarbageData.size());
+  ASSERT_TRUE(region_mapping.IsValid());
+  region_mapping.mapping.GetMemoryAsSpan<uint8_t>()
+      .first(kGarbageData.size())
+      .copy_from(base::as_byte_span(kGarbageData));
+
+  base::test::TestFuture<mojom::PrintCompositor::Status,
+                         base::ReadOnlySharedMemoryRegion>
+      future;
+
+  impl.CompositeDocument(1, std::move(region_mapping.region),
+                         /*is_pdf=*/false, ContentToFrameMap(),
+                         future.GetCallback());
+
+  EXPECT_EQ(future.Get<0>(), mojom::PrintCompositor::Status::kContentFormatError);
+  EXPECT_FALSE(future.Get<1>().IsValid());
+}
+
+class PrintCompositorImplRenderTest : public PrintCompositorImplTest {
+ public:
+  void RenderPageAndCheckBitmap(MockPrintCompositorImpl& impl,
+                                SkColor expected_color) {
+    constexpr SkSize kPageSize(100, 100);
+    SkDynamicMemoryWStream stream;
+    sk_sp<SkDocument> doc = SkMultiPictureDocument::Make(&stream);
+    SkDocumentPage page;
+    page.fSize = kPageSize;
+
+    impl.DrawPage(doc.get(), page);
+    doc->close();
+
+    sk_sp<SkData> data = stream.detachAsData();
+    SkMemoryStream read_stream(data);
+    int page_count = SkMultiPictureDocument::ReadPageCount(&read_stream);
+    ASSERT_EQ(page_count, 1);
+
+    std::vector<SkDocumentPage> pages(1);
+    ASSERT_TRUE(
+        SkMultiPictureDocument::Read(&read_stream, pages.data(), pages.size()));
+
+    SkBitmap bitmap;
+    bitmap.allocN32Pixels(kPageSize.width(), kPageSize.height());
+    SkCanvas canvas(bitmap);
+    canvas.clear(SK_ColorWHITE);
+    pages[0].fPicture->playback(&canvas);
+
+    SkBitmap reference_bitmap;
+    reference_bitmap.allocN32Pixels(kPageSize.width(), kPageSize.height());
+    reference_bitmap.eraseColor(expected_color);
+
+    EXPECT_TRUE(cc::MatchesBitmap(bitmap, reference_bitmap,
+                                  cc::ExactPixelComparator()));
+  }
+};
+
+TEST_F(PrintCompositorImplRenderTest, WithoutAddon) {
+  MockPrintCompositorImpl impl;
+  RenderPageAndCheckBitmap(impl, /*expected_color=*/SK_ColorWHITE);
+}
+
+TEST_F(PrintCompositorImplRenderTest, WithBlueSquareAddon) {
+  MockPrintCompositorImpl impl;
+  impl.SetAddonForTesting(std::make_unique<TestBlueSquareAddon>());
+  RenderPageAndCheckBitmap(impl, /*expected_color=*/SK_ColorBLUE);
 }
 
 }  // namespace printing

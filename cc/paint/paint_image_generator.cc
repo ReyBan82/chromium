@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <utility>
 #include <vector>
 
 #include "cc/paint/paint_image_generator.h"
@@ -13,8 +14,10 @@
 namespace cc {
 
 PaintImageGenerator::PaintImageGenerator(const SkImageInfo& info,
+                                         const gfx::HDRMetadata& hdr_metadata,
                                          std::vector<FrameMetadata> frames)
     : info_(info),
+      hdr_metadata_(hdr_metadata),
       generator_content_id_(PaintImage::GetNextContentId()),
       frames_(std::move(frames)) {}
 

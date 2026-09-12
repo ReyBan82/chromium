@@ -8,13 +8,11 @@
 
 #include "ash/constants/notifier_catalogs.h"
 #include "ash/public/cpp/notification_utils.h"
-#include "base/functional/bind.h"
-#include "chrome/browser/notifications/system_notification_helper.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/grit/generated_resources.h"
-#include "components/prefs/pref_service.h"
 #include "components/vector_icons/vector_icons.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
+#include "ui/message_center/message_center.h"
 
 namespace ash {
 
@@ -33,7 +31,6 @@ void ShowAutoUpdateNotification(
   switch (notification_type) {
     case TpmAutoUpdateUserNotification::kNone:
       NOTREACHED();
-      return;
     case TpmAutoUpdateUserNotification::kPlanned:
       title = l10n_util::GetStringUTF16(
           IDS_TPM_AUTO_UPDATE_PLANNED_NOTIFICATION_TITLE);
@@ -53,17 +50,20 @@ void ShowAutoUpdateNotification(
       break;
   }
 
-  message_center::Notification notification = ash::CreateSystemNotification(
+  auto notification = ash::CreateSystemNotificationPtr(
       message_center::NOTIFICATION_TYPE_SIMPLE, notification_id, title, text,
-      std::u16string() /*display_source*/, GURL(),
+      std::u16string() /*display_source*/,
       message_center::NotifierId(message_center::NotifierType::SYSTEM_COMPONENT,
                                  notification_id, catalog_name),
       message_center::RichNotificationData(),
-      new message_center::NotificationDelegate(), vector_icons::kBusinessIcon,
+      base::MakeRefCounted<message_center::NotificationDelegate>(),
+      ::features::IsRoundedIconsEnabled() ? vector_icons::kDomainIcon
+                                          : vector_icons::kBusinessOldIcon,
       message_center::SystemNotificationWarningLevel::NORMAL);
-  notification.set_priority(message_center::SYSTEM_PRIORITY);
-  notification.set_pinned(pinned);
+  notification->set_priority(message_center::SYSTEM_PRIORITY);
+  notification->set_pinned(pinned);
 
-  SystemNotificationHelper::GetInstance()->Display(notification);
+  message_center::MessageCenter::Get()->AddNotification(
+      std::move(notification));
 }
 }  // namespace ash

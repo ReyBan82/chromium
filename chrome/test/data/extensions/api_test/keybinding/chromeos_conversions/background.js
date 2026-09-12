@@ -3,19 +3,21 @@
 // found in the LICENSE file.
 
 // A list of all commands sorted in expected order.
-var expectedCommands = [
+const expectedCommands = [
   'Search-Shift-Left',
   'Search-Shift-Up',
   'Search-Shift-Right',
-  'Search-Shift-Down'
+  'Search-Shift-Down',
 ];
 
-chrome.commands.onCommand.addListener(function (command) {
-  if (expectedCommands[0] != command)
-    chrome.test.notifyFail('Unexpected command: ' + command);
+chrome.commands.onCommand.addListener(function(command) {
+  if (expectedCommands[0] !== command) {
+    chrome.test.notifyFail(`Unexpected command: ${command}`);
+  }
   expectedCommands.splice(0, 1);
-  if (expectedCommands.length == 0)
+  if (expectedCommands.length === 0) {
     chrome.test.notifyPass();
+  }
 });
 
 chrome.test.notifyPass();

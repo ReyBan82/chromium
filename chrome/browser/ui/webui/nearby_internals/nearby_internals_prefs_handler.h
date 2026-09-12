@@ -4,6 +4,7 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_NEARBY_INTERNALS_NEARBY_INTERNALS_PREFS_HANDLER_H_
 #define CHROME_BROWSER_UI_WEBUI_NEARBY_INTERNALS_NEARBY_INTERNALS_PREFS_HANDLER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/web_ui_message_handler.h"
@@ -30,9 +31,9 @@ class NearbyInternalsPrefsHandler : public content::WebUIMessageHandler {
  private:
   // Message handler callback that clears Nearby prefs in order to put the user
   // back into a state of before they have touched the feature.
-  void HandleClearNearbyPrefs(const base::Value::List& args);
+  void HandleClearNearbyPrefs(const base::ListValue& args);
 
-  PrefService* pref_service_ = nullptr;
+  raw_ptr<PrefService> pref_service_ = nullptr;
 
   base::WeakPtrFactory<NearbyInternalsPrefsHandler> weak_ptr_factory_{this};
 };

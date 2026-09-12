@@ -4,7 +4,6 @@
 
 #include "extensions/browser/api/declarative_webrequest/webrequest_condition.h"
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/strings/stringprintf.h"
 #include "base/values.h"
@@ -95,23 +94,23 @@ bool WebRequestCondition::IsFulfilled(
 
   // Check URL attributes if present.
   if (url_matcher_conditions_.get() &&
-      !base::Contains(request_data.url_match_ids,
-                      url_matcher_conditions_->id()))
+      !request_data.url_match_ids.contains(url_matcher_conditions_->id()))
     return false;
 
   // All condition attributes must be fulfilled for a fulfilled condition.
-  for (auto i = condition_attributes_.cbegin();
-       i != condition_attributes_.cend(); ++i) {
-    if (!(*i)->IsFulfilled(*(request_data.data)))
+  for (const auto& condition_attribute : condition_attributes_) {
+    if (!condition_attribute->IsFulfilled(*(request_data.data))) {
       return false;
+    }
   }
   return true;
 }
 
 void WebRequestCondition::GetURLMatcherConditionSets(
     URLMatcherConditionSet::Vector* condition_sets) const {
-  if (url_matcher_conditions_.get())
+  if (url_matcher_conditions_.get()) {
     condition_sets->push_back(url_matcher_conditions_);
+  }
 }
 
 // static
@@ -120,7 +119,7 @@ std::unique_ptr<WebRequestCondition> WebRequestCondition::Create(
     URLMatcherConditionFactory* url_matcher_condition_factory,
     const base::Value& condition,
     std::string* error) {
-  const base::Value::Dict* condition_dict = condition.GetIfDict();
+  const base::DictValue* condition_dict = condition.GetIfDict();
   if (!condition_dict) {
     *error = kExpectedDictionary;
     return nullptr;
@@ -150,7 +149,7 @@ std::unique_ptr<WebRequestCondition> WebRequestCondition::Create(
         condition_attribute_name == keys::kDeprecatedThirdPartyKey) {
       // Skip this.
     } else if (condition_attribute_name == keys::kUrlKey) {
-      const base::Value::Dict* dict = condition_attribute_value.GetIfDict();
+      const base::DictValue* dict = condition_attribute_value.GetIfDict();
       if (!dict) {
         *error = base::StringPrintf(kInvalidTypeOfParamter,
                                     condition_attribute_name.c_str());
@@ -165,11 +164,13 @@ std::unique_ptr<WebRequestCondition> WebRequestCondition::Create(
               condition_attribute_name,
               &condition_attribute_value,
               error);
-      if (attribute.get())
+      if (attribute.get()) {
         attributes.push_back(attribute);
+      }
     }
-    if (!error->empty())
+    if (!error->empty()) {
       return nullptr;
+    }
   }
 
   auto result = std::make_unique<WebRequestCondition>(url_matcher_condition_set,

@@ -13,8 +13,8 @@
 #include <utility>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
-#include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/threading/platform_thread.h"
@@ -63,8 +63,8 @@ base::ScopedFD ConnectToServiceManagerUnixSocket() {
   };
   static_assert(sizeof(kServiceManagerSocketPath) <=
                 sizeof(unix_addr.sun_path));
-  strncpy(unix_addr.sun_path, kServiceManagerSocketPath,
-          sizeof(kServiceManagerSocketPath));
+  UNSAFE_TODO(strncpy(unix_addr.sun_path, kServiceManagerSocketPath,
+                      sizeof(kServiceManagerSocketPath)));
 
   int rc = HANDLE_EINTR(connect(sock.get(),
                                 reinterpret_cast<const sockaddr*>(&unix_addr),
@@ -92,23 +92,7 @@ mojo::Remote<mojom::ServiceManager>& GetRemote() {
   return *instance;
 }
 
-// Sends the histogram to record the retry times of bootstrap.
-void SendBootsrapRetryTimesHistogram(int retry_times) {
-  // Note that sample will be 0 if didn't retry, and it will be in the underflow
-  // bucket.
-  base::UmaHistogramCustomCounts("Ash.MojoServiceManager.BootstrapRetryTimes",
-                                 retry_times, 1, 5000, 50);
-}
-
-// Sends the histogram to record whether the connection is lost during ash
-// running.
-void SendIsConnectionLostHistogram(bool is_connection_lost) {
-  base::UmaHistogramBoolean("Ash.MojoServiceManager.IsConnectionLost",
-                            is_connection_lost);
-}
-
 void OnDisconnect(uint32_t reason, const std::string& message) {
-  SendIsConnectionLostHistogram(true);
   LOG(FATAL) << "Disconnecting from ChromeOS mojo service manager is "
                 "unexpected. Reason: "
              << reason << ", message: " << message;
@@ -121,20 +105,17 @@ bool BootstrapServiceManagerConnection() {
 
   // We block and sleep here because we assume that it doesn't need to retry at
   // all.
-  int retry_times = 0;
   for (base::ElapsedTimer timer; timer.Elapsed() < kRetryTimeout;
-       base::PlatformThread::Sleep(kRetryInterval), ++retry_times) {
+       base::PlatformThread::Sleep(kRetryInterval)) {
     mojo::PendingRemote<mojom::ServiceManager> remote =
         ConnectToMojoServiceManager();
     if (!remote.is_valid())
       continue;
-    SendBootsrapRetryTimesHistogram(retry_times);
     GetRemote().Bind(std::move(remote));
     GetRemote().set_disconnect_with_reason_handler(
         base::BindOnce(&OnDisconnect));
     return true;
   }
-  SendBootsrapRetryTimesHistogram(retry_times);
   return false;
 }
 
@@ -143,7 +124,6 @@ bool IsServiceManagerBound() {
 }
 
 void ResetServiceManagerConnection() {
-  SendIsConnectionLostHistogram(false);
   GetRemote().reset();
 }
 
@@ -156,6 +136,11 @@ void SetServiceManagerRemoteForTesting(  // IN-TEST
   CHECK(remote.is_valid());
   GetRemote().Bind(std::move(remote));
   GetRemote().set_disconnect_with_reason_handler(base::BindOnce(&OnDisconnect));
+}
+
+mojo::PendingReceiver<chromeos::mojo_service_manager::mojom::ServiceManager>
+BootstrapServiceManagerInUtilityProcess() {
+  return GetRemote().BindNewPipeAndPassReceiver();
 }
 
 }  // namespace ash::mojo_service_manager

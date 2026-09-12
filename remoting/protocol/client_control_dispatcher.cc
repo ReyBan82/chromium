@@ -128,6 +128,13 @@ void ClientControlDispatcher::SetVideoLayout(const VideoLayout& video_layout) {
   message_pipe()->Send(&message, {});
 }
 
+void ClientControlDispatcher::ControlTerminal(const TerminalControl& terminal_control) {
+  ControlMessage message;
+  message.mutable_terminal_control()->CopyFrom(terminal_control);
+  message_pipe()->Send(&message, {});
+}
+
+
 void ClientControlDispatcher::OnIncomingMessage(
     std::unique_ptr<CompoundBuffer> buffer) {
   DCHECK(client_stub_);
@@ -153,7 +160,12 @@ void ClientControlDispatcher::OnIncomingMessage(
     client_stub_->DeliverHostMessage(message->extension_message());
   } else if (message->has_video_layout()) {
     client_stub_->SetVideoLayout(message->video_layout());
-  } else {
+  } else if (message->has_microphone_control()) {
+    client_stub_->ControlMicrophone(message->microphone_control());
+  } else if (message->has_terminal_control()) {
+    client_stub_->DeliverTerminalControl(message->terminal_control());
+  }
+  else {
     LOG(WARNING) << "Unknown control message received.";
   }
 }

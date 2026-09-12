@@ -8,13 +8,14 @@
 #include <memory>
 
 #include "base/android/jni_android.h"
-#include "base/android/jni_int_wrapper.h"
 #include "base/android/jni_string.h"
 #include "base/android/scoped_java_ref.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
+#include "components/permissions/android/jni_headers/BluetoothChooserDialog_shared_jni.h"
 #include "content/public/browser/bluetooth_chooser.h"
 #include "content/public/browser/web_contents.h"
+#include "third_party/jni_zero/jni_zero.h"
 
 namespace permissions {
 
@@ -29,10 +30,10 @@ class BluetoothChooserAndroid : public content::BluetoothChooser {
       base::OnceCallback<base::android::ScopedJavaLocalRef<jobject>(
           JNIEnv*,
           const base::android::JavaRef<jobject>&,
-          const base::android::JavaRef<jstring>&,
+          const std::u16string&,
           JniIntWrapper,
           const base::android::JavaRef<jobject>&,
-          jlong)>;
+          int64_t)>;
 
   // Both frame and event_handler must outlive the BluetoothChooserAndroid.
   BluetoothChooserAndroid(
@@ -53,29 +54,23 @@ class BluetoothChooserAndroid : public content::BluetoothChooser {
                          int signal_strength_level) override;
 
   // Report the dialog's result.
-  void OnDialogFinished(JNIEnv* env,
-                        jint event_type,
-                        const base::android::JavaParamRef<jstring>& device_id);
+  void OnDialogFinished(content::BluetoothChooserEvent event,
+                        const std::string& device_id);
 
   // Notify bluetooth stack that the search needs to be re-issued.
   void RestartSearch();
   // Calls RestartSearch(). Unused JNI parameters enable calls from Java.
   void RestartSearch(JNIEnv*);
 
-  void ShowBluetoothOverviewLink(JNIEnv* env);
-  void ShowBluetoothAdapterOffLink(JNIEnv* env);
-  void ShowNeedLocationPermissionLink(JNIEnv* env);
+  void ShowBluetoothOverviewLink();
+  void ShowBluetoothAdapterOffLink();
+  void ShowNeedLocationPermissionLink();
 
   static std::unique_ptr<BluetoothChooserAndroid> CreateForTesting(
       content::RenderFrameHost* frame,
       const EventHandler& event_handler,
       std::unique_ptr<BluetoothChooserAndroidDelegate> delegate,
-      CreateJavaDialogCallback create_java_dialog_callback) {
-    // Using `new` to access a non-public constructor.
-    return base::WrapUnique(
-        new BluetoothChooserAndroid(frame, event_handler, std::move(delegate),
-                                    std::move(create_java_dialog_callback)));
-  }
+      CreateJavaDialogCallback create_java_dialog_callback);
 
  private:
   BluetoothChooserAndroid(

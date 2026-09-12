@@ -3,14 +3,14 @@
 // found in the LICENSE file.
 
 import 'chrome://personalization/strings.m.js';
-import 'chrome://webui-test/mojo_webui_test_support.js';
 
-import {DismissErrorAction, PersonalizationActionName, PersonalizationToastElement} from 'chrome://personalization/js/personalization_app.js';
-import {assertEquals, assertNotEquals, assertTrue} from 'chrome://webui-test/chai_assert.js';
+import type {DismissErrorAction} from 'chrome://personalization/js/personalization_app.js';
+import {PersonalizationActionName, PersonalizationToastElement} from 'chrome://personalization/js/personalization_app.js';
+import {assertEquals, assertFalse, assertNotEquals, assertTrue} from 'chrome://webui-test/chai_assert.js';
 import {flushTasks, waitAfterNextRender} from 'chrome://webui-test/polymer_test_util.js';
 
 import {baseSetup, initElement, teardownElement} from './personalization_app_test_utils.js';
-import {TestPersonalizationStore} from './test_personalization_store.js';
+import type {TestPersonalizationStore} from './test_personalization_store.js';
 
 suite('PersonalizationToastTest', function() {
   let personalizationToastElement: PersonalizationToastElement;
@@ -28,7 +28,7 @@ suite('PersonalizationToastTest', function() {
     await flushTasks();
   });
 
-  test('hidden when no error is present', async () => {
+  test('hidden when no error is present', () => {
     assertEquals('', personalizationToastElement.innerHTML);
   });
 
@@ -63,7 +63,7 @@ suite('PersonalizationToastTest', function() {
     const dismissErrorAction =
         await personalizationStore.waitForAction(
             PersonalizationActionName.DISMISS_ERROR) as DismissErrorAction;
-    assertEquals(dismissErrorAction.fromUser, true);
+    assertTrue(dismissErrorAction.fromUser);
   });
 
   test('invokes callback when dismiss is clicked', async () => {
@@ -81,7 +81,7 @@ suite('PersonalizationToastTest', function() {
 
     personalizationStore.setReducersEnabled(true);
     personalizationToastElement.shadowRoot!.querySelector('cr-button')!.click();
-    assertEquals(await dismissCallbackPromise, /*fromUser=*/ true);
+    assertTrue(await dismissCallbackPromise);
   });
 
   test('automatically dismisses after ten seconds', async () => {
@@ -114,6 +114,6 @@ suite('PersonalizationToastTest', function() {
     const dismissErrorAction =
         await personalizationStore.waitForAction(
             PersonalizationActionName.DISMISS_ERROR) as DismissErrorAction;
-    assertEquals(dismissErrorAction.fromUser, false);
+    assertFalse(dismissErrorAction.fromUser);
   });
 });

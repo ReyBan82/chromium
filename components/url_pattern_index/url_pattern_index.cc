@@ -4,26 +4,26 @@
 
 #include "components/url_pattern_index/url_pattern_index.h"
 
+#include <algorithm>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/check_op.h"
-#include "base/containers/contains.h"
 #include "base/containers/flat_map.h"
 #include "base/functional/callback.h"
+#include "base/logging.h"
 #include "base/memory/raw_ref.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/no_destructor.h"
 #include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
-#include "base/ranges/algorithm.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/trace_event/trace_event.h"
 #include "components/url_pattern_index/ngram_extractor.h"
 #include "components/url_pattern_index/url_pattern.h"
 #include "components/url_pattern_index/url_rule_util.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 #include "url/url_constants.h"
@@ -84,23 +84,23 @@ const ElementTypeMap& GetElementTypeMap() {
 
 flat::ActivationType ProtoToFlatActivationType(proto::ActivationType type) {
   const auto it = GetActivationTypeMap().find(type);
-  DCHECK(it != GetActivationTypeMap().end());
+  CHECK(it != GetActivationTypeMap().end());
   return it->second;
 }
 
 flat::ElementType ProtoToFlatElementType(proto::ElementType type) {
   const auto it = GetElementTypeMap().find(type);
-  DCHECK(it != GetElementTypeMap().end());
+  CHECK(it != GetElementTypeMap().end());
   return it->second;
 }
 
-base::StringPiece ToStringPiece(const flatbuffers::String* string) {
+std::string_view ToStringView(const flatbuffers::String* string) {
   DCHECK(string);
-  return base::StringPiece(string->c_str(), string->size());
+  return std::string_view(string->c_str(), string->size());
 }
 
-bool HasNoUpperAscii(base::StringPiece string) {
-  return base::ranges::none_of(string, base::IsAsciiUpper<char>);
+bool HasNoUpperAscii(std::string_view string) {
+  return std::ranges::none_of(string, base::IsAsciiUpper<char>);
 }
 
 // Comparator to sort UrlRule. Sorts rules by descending order of rule priority.
@@ -172,9 +172,14 @@ class UrlRuleFlatBufferConverter {
     if (!base::IsStringASCII(rule_->url_pattern()))
       return UrlRuleOffset();
 
-    // TODO(crbug.com/884063): Lower case case-insensitive patterns here if we
-    // want to support case-insensitive rules for subresource filter.
-    auto url_pattern_offset = builder->CreateSharedString(rule_->url_pattern());
+    // Lower case case-insensitive patterns.
+    flatbuffers::Offset<flatbuffers::String> url_pattern_offset;
+    if (rule_->match_case() || HasNoUpperAscii(rule_->url_pattern())) {
+      url_pattern_offset = builder->CreateSharedString(rule_->url_pattern());
+    } else {
+      url_pattern_offset =
+          builder->CreateSharedString(base::ToLowerASCII(rule_->url_pattern()));
+    }
 
     return flat::CreateUrlRule(
         *builder, options_, element_types_, flat::RequestMethod_ANY,
@@ -191,8 +196,8 @@ class UrlRuleFlatBufferConverter {
     // The comparator ensuring the domains order necessary for fast matching.
     auto precedes = [&builder](FlatStringOffset lhs, FlatStringOffset rhs) {
       return CompareDomains(
-                 ToStringPiece(flatbuffers::GetTemporaryPointer(*builder, lhs)),
-                 ToStringPiece(
+                 ToStringView(flatbuffers::GetTemporaryPointer(*builder, lhs)),
+                 ToStringView(
                      flatbuffers::GetTemporaryPointer(*builder, rhs))) < 0;
     };
     if (domains.empty())
@@ -230,17 +235,24 @@ class UrlRuleFlatBufferConverter {
     domains_included.reserve(domains_size);
 
     for (const auto& domain_list_item : domain_list_items) {
-      const std::string& domain = domain_list_item.domain();
+      std::string_view domain = domain_list_item.domain();
 
       // Non-ascii characters in domains are unsupported.
       if (!base::IsStringASCII(domain))
         return false;
 
+      // Trimming trailing dots from the domain.
+      while (domain.length() > 1 && domain.back() == '.') {
+        domain.remove_suffix(1);
+      }
+
       // Note: This is not always correct. Chrome's URL parser uses upper-case
       // for percent encoded hosts. E.g. https://,.com is encoded as
       // https://%2C.com.
-      auto offset = builder->CreateSharedString(
-          HasNoUpperAscii(domain) ? domain : base::ToLowerASCII(domain));
+      std::string domain_lower = HasNoUpperAscii(domain)
+                                     ? std::string(domain)
+                                     : base::ToLowerASCII(domain);
+      auto offset = builder->CreateSharedString(domain_lower);
 
       if (domain_list_item.exclude())
         domains_excluded.push_back(offset);
@@ -302,8 +314,10 @@ class UrlRuleFlatBufferConverter {
         return false;  // Unsupported source type.
     }
 
-    // TODO(crbug.com/884063): Consider setting IS_CASE_INSENSITIVE here if we
-    // want to support case insensitive rules for subresource_filter.
+    if (rule_->match_case()) {
+      options_ |= flat::OptionFlag_IS_MATCH_CASE;
+    }
+
     return true;
   }
 
@@ -434,7 +448,7 @@ UrlRuleOffset SerializeUrlRule(const proto::UrlRule& rule,
   return converter.SerializeConvertedRule(builder, domain_map);
 }
 
-int CompareDomains(base::StringPiece lhs_domain, base::StringPiece rhs_domain) {
+int CompareDomains(std::string_view lhs_domain, std::string_view rhs_domain) {
   if (lhs_domain.size() != rhs_domain.size())
     return lhs_domain.size() > rhs_domain.size() ? -1 : 1;
   return lhs_domain.compare(rhs_domain);
@@ -458,30 +472,31 @@ void UrlPatternIndexBuilder::IndexUrlRule(UrlRuleOffset offset) {
 
 #if DCHECK_IS_ON()
   // Sanity check that the rule does not have fields with non-ascii characters.
-  DCHECK(base::IsStringASCII(ToStringPiece(rule->url_pattern())));
+  DCHECK(base::IsStringASCII(ToStringView(rule->url_pattern())));
   if (rule->initiator_domains_included()) {
     for (auto* domain : *rule->initiator_domains_included())
-      DCHECK(base::IsStringASCII(ToStringPiece(domain)));
+      DCHECK(base::IsStringASCII(ToStringView(domain)));
   }
   if (rule->initiator_domains_excluded()) {
     for (auto* domain : *rule->initiator_domains_excluded())
-      DCHECK(base::IsStringASCII(ToStringPiece(domain)));
+      DCHECK(base::IsStringASCII(ToStringView(domain)));
   }
   if (rule->request_domains_included()) {
     for (auto* domain : *rule->request_domains_included())
-      DCHECK(base::IsStringASCII(ToStringPiece(domain)));
+      DCHECK(base::IsStringASCII(ToStringView(domain)));
   }
   if (rule->request_domains_excluded()) {
     for (auto* domain : *rule->request_domains_excluded())
-      DCHECK(base::IsStringASCII(ToStringPiece(domain)));
+      DCHECK(base::IsStringASCII(ToStringView(domain)));
   }
 
   // Case-insensitive patterns should be lower-cased.
-  if (rule->options() & flat::OptionFlag_IS_CASE_INSENSITIVE)
-    DCHECK(HasNoUpperAscii(ToStringPiece(rule->url_pattern())));
+  if (!(rule->options() & flat::OptionFlag_IS_MATCH_CASE)) {
+    DCHECK(HasNoUpperAscii(ToStringView(rule->url_pattern())));
+  }
 #endif
 
-  NGram ngram = GetMostDistinctiveNGram(ToStringPiece(rule->url_pattern()));
+  NGram ngram = GetMostDistinctiveNGram(ToStringView(rule->url_pattern()));
 
   if (ngram) {
     ngram_index_[ngram].push_back(offset);
@@ -533,7 +548,7 @@ UrlPatternIndexOffset UrlPatternIndexBuilder::Finish() {
 }
 
 NGram UrlPatternIndexBuilder::GetMostDistinctiveNGram(
-    base::StringPiece pattern) {
+    std::string_view pattern) {
   size_t min_list_size = std::numeric_limits<size_t>::max();
   NGram best_ngram = 0;
 
@@ -571,51 +586,55 @@ using FlatNGramIndex =
 //
 // The `domains` should be sorted in descending order of their length, and
 // ascending alphabetical order within the groups of same-length domains.
-size_t GetLongestMatchingSubdomain(base::StringPiece host,
+size_t GetLongestMatchingSubdomain(std::string_view host,
                                    const FlatDomains& domains) {
   if (host.empty())
     return 0;
 
+  // If the host name ends with dots, then ignore them.
+  while (host.length() > 1 && host.back() == '.') {
+    host.remove_suffix(1);
+  }
+
   // If the |domains| list is short, then the simple strategy is usually faster.
   if (domains.size() <= 5) {
     for (auto* domain : domains) {
-      const base::StringPiece domain_piece = ToStringPiece(domain);
-      if (url::DomainIs(host, domain_piece))
+      const std::string_view domain_piece = ToStringView(domain);
+      if (url::DomainIs(host, domain_piece)) {
         return domain_piece.size();
+      }
     }
     return 0;
   }
 
   // Otherwise look for each subdomain of the `host` using binary search.
 
-  // If the host name ends with a dot, then ignore it.
-  if (host.back() == '.')
-    host.remove_suffix(1);
-
   // The |left| bound of the search is shared between iterations, because
   // subdomains are considered in decreasing order of their lengths, therefore
   // each consecutive lower_bound will be at least as far as the previous.
   flatbuffers::uoffset_t left = 0;
   for (size_t position = 0;; ++position) {
-    const base::StringPiece subdomain = host.substr(position);
+    const std::string_view subdomain = host.substr(position);
 
     flatbuffers::uoffset_t right = domains.size();
     while (left + 1 < right) {
       auto middle = left + (right - left) / 2;
       DCHECK_LT(middle, domains.size());
-      if (CompareDomains(ToStringPiece(domains[middle]), subdomain) <= 0)
+      if (CompareDomains(ToStringView(domains[middle]), subdomain) <= 0) {
         left = middle;
-      else
+      } else
         right = middle;
     }
 
     DCHECK_LT(left, domains.size());
-    if (ToStringPiece(domains[left]) == subdomain)
+    if (ToStringView(domains[left]) == subdomain) {
       return subdomain.size();
+    }
 
     position = host.find('.', position);
-    if (position == base::StringPiece::npos)
+    if (position == std::string_view::npos) {
       break;
+    }
   }
 
   return 0;
@@ -666,7 +685,7 @@ const flat::UrlRule* FindMatchAmongCandidates(
     if (!DoesURLMatchRequestDomainList(url, *rule))
       continue;
 
-    if (base::Contains(disabled_rule_ids, rule->id()))
+    if (disabled_rule_ids.contains(rule->id()))
       continue;
 
     if (matched_rules)
@@ -705,7 +724,16 @@ const flat::UrlRule* FindMatchInFlatUrlPatternIndex(
 
   const FlatNGramIndex* hash_table = index.ngram_index();
   const flat::NGramToRules* empty_slot = index.ngram_index_empty_slot();
-  DCHECK_NE(hash_table, nullptr);
+
+  if (!hash_table || hash_table->size() == 0 || !empty_slot) {
+    static bool logged_missing_index_fields = false;
+    if (!logged_missing_index_fields) {
+      logged_missing_index_fields = true;
+      base::UmaHistogramBoolean(
+          "SubresourceFilter.UrlPatternIndex.CorruptedIndexFields", true);
+    }
+    return nullptr;
+  }
 
   NGramHashTableProber prober;
 
@@ -725,19 +753,48 @@ const flat::UrlRule* FindMatchInFlatUrlPatternIndex(
   };
   const flat::UrlRule* max_priority_rule = nullptr;
 
+  const uint32_t table_size = hash_table->size();
   for (uint64_t ngram : ngrams) {
+    // Track probe count to guard against runaway probing caused by corrupted
+    // hash table data. In a well-formed table with open addressing, probing
+    // always terminates within table_size iterations.
+    uint32_t probe_count = 0;
     const uint32_t slot_index = prober.FindSlot(
-        ngram, hash_table->size(),
-        [hash_table, empty_slot](NGram ngram, uint32_t slot_index) {
+        ngram, table_size,
+        [hash_table, empty_slot, &probe_count, table_size](
+            NGram ngram, uint32_t slot_index) {
+          if (++probe_count >= table_size) {
+            // Exhausted all slots without finding a match or empty slot.
+            // The hash table data is likely corrupted.
+            return true;
+          }
           const flat::NGramToRules* entry = hash_table->Get(slot_index);
-          DCHECK_NE(entry, nullptr);
-          return entry == empty_slot || entry->ngram() == ngram;
+          if (!entry || entry == empty_slot) {
+            return true;  // Treat null or empty slot as empty.
+          }
+          // Only dereference entry if it is not empty_slot and is valid.
+          return entry->ngram() == ngram;
         });
-    DCHECK_LT(slot_index, hash_table->size());
+
+    // If probing was exhausted due to corrupted data, the index is likely
+    // corrupted. Early return to avoid further undefined behavior.
+    if (probe_count >= table_size) {
+      DVLOG(1) << "UrlPatternIndex: hash table probe exhausted; index is "
+               << "likely corrupted; aborting match";
+      static bool logged_probe_exhaustion = false;
+      if (!logged_probe_exhaustion) {
+        logged_probe_exhaustion = true;
+        base::UmaHistogramBoolean(
+            "SubresourceFilter.UrlPatternIndex.HashTableProbeExhausted", true);
+      }
+      return nullptr;
+    }
+    DCHECK_LT(slot_index, table_size);
 
     const flat::NGramToRules* entry = hash_table->Get(slot_index);
-    if (entry == empty_slot)
+    if (!entry || entry == empty_slot) {
       continue;
+    }
     const flat::UrlRule* rule = FindMatchAmongCandidates(
         entry->rule_list(), url, document_origin, element_type, activation_type,
         request_method, is_third_party, disable_generic_rules,
@@ -773,7 +830,6 @@ const flat::UrlRule* FindMatchInFlatUrlPatternIndex(
   }
 
   NOTREACHED();
-  return nullptr;
 }
 
 }  // namespace
@@ -782,15 +838,8 @@ bool IsRuleGeneric(const flat::UrlRule& rule) {
   return !rule.initiator_domains_included();
 }
 
-// Returns whether the `host` matches the domain conditions. It's considered a
-// match if both:
-//  1. An included domain matches the `host`, or `domains_included` is omitted
-//     entirely (since rules match all domains by default).
-//  2. No excluded domain match the `host`, or the longest matching excluded
-//     domain is shorter than the longest matching included domain (since
-//     longer, more specific domain matches take precedence).
 bool DoesHostMatchDomainLists(
-    base::StringPiece host,
+    std::string_view host,
     const flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>>*
         domains_included,
     const flatbuffers::Vector<flatbuffers::Offset<flatbuffers::String>>*
@@ -869,12 +918,17 @@ bool DoesRuleFlagsMatch(const flat::UrlRule& rule,
 
 UrlPatternIndexMatcher::UrlPatternIndexMatcher(
     const flat::UrlPatternIndex* flat_index)
-    : flat_index_(flat_index) {
-  DCHECK(!flat_index || flat_index->n() == kNGramSize);
-  // Speculative investigation for crash (see crbug.com/1286207): check that we
-  // can access the ngram_index on each UrlPatternIndexMatcher without failure.
-  if (flat_index) {
-    CHECK_GT(flat_index->ngram_index()->size(), 0u);
+    : flat_index_(nullptr) {
+  // Validate that the flatbuffer data is structurally sound before use.
+  // If any critical field is missing or inaccessible, leave the index
+  // disabled (nullptr) to prevent access violations during matching
+  // (see crbug.com/1286207).
+  if (flat_index && flat_index->n() == kNGramSize) {
+    const auto* ngram_index = flat_index->ngram_index();
+    if (ngram_index && ngram_index->size() > 0 &&
+        flat_index->ngram_index_empty_slot() && flat_index->fallback_rules()) {
+      flat_index_ = flat_index;
+    }
   }
 }
 

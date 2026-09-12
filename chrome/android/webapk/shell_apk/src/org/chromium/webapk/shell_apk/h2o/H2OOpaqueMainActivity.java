@@ -5,13 +5,17 @@
 package org.chromium.webapk.shell_apk.h2o;
 
 import android.app.Activity;
+import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.util.Log;
 
-import org.chromium.webapk.shell_apk.R;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.webapk.lib.common.WebApkConstants;
 
 /**
  * Launches {@link SplashActivity}. SplashActivity does not handle android.intent.action.MAIN
@@ -20,7 +24,10 @@ import org.chromium.webapk.shell_apk.R;
  * singleTask activity when a user taps the app icon in the app drawer. This bad behavior does not
  * occur if a non-root activity is singleTask.
  */
+@NullMarked
 public class H2OOpaqueMainActivity extends Activity {
+    private static final String TAG = "H2OOpaqueMainActivity";
+
     /** Returns whether {@link InitialSplashActivity} is enabled. */
     public static boolean checkComponentEnabled(Context context, boolean isNewStyleWebApk) {
         PackageManager pm = context.getPackageManager();
@@ -29,22 +36,51 @@ public class H2OOpaqueMainActivity extends Activity {
 
         if (enabledSetting == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT) {
             // H2OOpaqueMainActivity is disabled by default for old-style WebAPKs.
-            // R.bool.opaque_main_activity_enabled_default is inaccurate for old-style WebAPKs.
-            return isNewStyleWebApk
-                    && context.getResources().getBoolean(
-                            R.bool.opaque_main_activity_enabled_default);
+            return isNewStyleWebApk;
         }
         return enabledSetting == PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
     }
 
     @Override
-    public void onCreate(Bundle savedInstanceState) {
+    public void onCreate(@Nullable Bundle savedInstanceState) {
+        if (getIntent().getBooleanExtra(WebApkConstants.EXTRA_BRING_TO_FRONT, false)) {
+            // If this intent is fired solely to restore the WebAPK task to the foreground,
+            // bring the task to front and finish immediately to keep the transition transparent.
+            super.onCreate(savedInstanceState);
+            overridePendingTransition(0, 0);
+            bringExistingTaskToFront();
+            finish();
+            return;
+        }
         final long launchTimeMs = SystemClock.elapsedRealtime();
         super.onCreate(savedInstanceState);
         Context appContext = getApplicationContext();
         overridePendingTransition(0, 0);
-        H2OLauncher.copyIntentExtrasAndLaunch(appContext, getIntent(), null, launchTimeMs,
+        H2OLauncher.copyIntentExtrasAndLaunch(
+                appContext,
+                getIntent(),
+                null,
+                launchTimeMs,
                 new ComponentName(appContext, SplashActivity.class));
         finish();
+    }
+
+    /**
+     * Explicitly moves the current task to the front using {@link ActivityManager#moveTaskToFront}.
+     *
+     * <p>When this activity is started and {@link WebApkConstants#EXTRA_BRING_TO_FRONT} is present,
+     * this method ensures that the entire task stack is reordered to the front before this activity
+     * finishes.
+     */
+    @SuppressWarnings("NoMoveTaskToFront")
+    private void bringExistingTaskToFront() {
+        ActivityManager manager = (ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        if (manager != null) {
+            try {
+                manager.moveTaskToFront(getTaskId(), 0);
+            } catch (NullPointerException e) {
+                Log.w(TAG, "Caught expected NPE from Android API, see crbug.com/471434499", e);
+            }
+        }
     }
 }

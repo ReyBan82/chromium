@@ -214,6 +214,7 @@ template("cast_test_group") {
   # data directories, and shared libraries that a test needs in order to run.
   foreach(_test, invoker.tests) {
     _test_name = get_label_info(_test, "name")
+
     group(_test_name + "_cast_runtime_deps") {
       testonly = true
       data_deps = [ _test ]
@@ -428,7 +429,8 @@ template("cast_test_group_list") {
       args += invoker.additional_options
     }
 
-    # Depend first on the "pack_build" step, so that the build lists are created.
+    # Depend first on the "pack_build" step, so that the build lists are
+    # created.
     deps = [ ":$_pack_build_action" ]
 
     # Next, depend on the filter steps, such that they are created before this
@@ -439,10 +441,6 @@ template("cast_test_group_list") {
     # so that the tests are built.
     if (_build_cast_tests) {
       deps += _build_test_targets
-    }
-
-    if (chromecast_branding != "public") {
-      deps += [ "//chromecast/internal:cast_test_checker" ]
     }
   }
 }

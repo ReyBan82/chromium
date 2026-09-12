@@ -26,10 +26,11 @@
 #include <string>
 
 #include "base/memory/raw_ptr.h"
-#include "base/memory/raw_ptr_exclusion.h"
 #include "base/threading/thread_checker.h"
+#include "base/unguessable_token.h"
 #include "media/audio/audio_io.h"
 #include "media/audio/audio_manager.h"
+#include "media/base/amplitude_peak_detector.h"
 #include "media/base/audio_parameters.h"
 
 struct pa_context;
@@ -61,8 +62,10 @@ class PulseAudioOutputStream : public AudioOutputStream {
   void GetVolume(double* volume) override;
 
  private:
+  bool ShouldLog() const { return !log_callback_.is_null(); }
+
   // Helper method used for sending native logs to the registered client.
-  void SendLogMessage(const char* format, ...) PRINTF_FORMAT(2, 3);
+  void SendLogMessage(const std::string& message);
 
   // Called by PulseAudio when |pa_stream_| change state.  If an unexpected
   // failure state change happens and |source_callback_| is set
@@ -79,6 +82,8 @@ class PulseAudioOutputStream : public AudioOutputStream {
   // Close() helper function to free internal structs.
   void Reset();
 
+  const base::UnguessableToken id_;
+
   // AudioParameters from the constructor.
   const AudioParameters params_;
 
@@ -92,15 +97,9 @@ class PulseAudioOutputStream : public AudioOutputStream {
   AudioManager::LogCallback log_callback_;
 
   // PulseAudio API structs.
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #addr-of
-  RAW_PTR_EXCLUSION pa_context* pa_context_;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #addr-of
-  RAW_PTR_EXCLUSION pa_threaded_mainloop* pa_mainloop_;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #addr-of
-  RAW_PTR_EXCLUSION pa_stream* pa_stream_;
+  raw_ptr<pa_context> pa_context_;
+  raw_ptr<pa_threaded_mainloop> pa_mainloop_;
+  raw_ptr<pa_stream> pa_stream_;
 
   // Float representation of volume from 0.0 to 1.0.
   float volume_;
@@ -113,6 +112,8 @@ class PulseAudioOutputStream : public AudioOutputStream {
   std::unique_ptr<AudioBus> audio_bus_;
 
   const size_t buffer_size_;
+
+  AmplitudePeakDetector peak_detector_;
 
   base::ThreadChecker thread_checker_;
 };

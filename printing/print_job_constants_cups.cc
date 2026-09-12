@@ -17,8 +17,10 @@ const char kCUPSBrotherMonoColor[] = "BRMonoColor";
 const char kCUPSBrotherPrintQuality[] = "BRPrintQuality";
 const char kCUPSCanonCNColorMode[] = "CNColorMode";
 const char kCUPSCanonCNIJGrayScale[] = "CNIJGrayScale";
+const char kCUPSEpsonEPIJInk[] = "EPIJ_Ink_";
 const char kCUPSEpsonInk[] = "Ink";
 const char kCUPSHpColorMode[] = "HPColorMode";
+const char kCUPSHpPjlColorAsGray[] = "HPPJLColorAsGray";
 const char kCUPSKonicaMinoltaSelectColor[] = "SelectColor";
 const char kCUPSLexmarkBLW[] = "BLW";
 const char kCUPSOkiControl[] = "OKControl";
@@ -44,6 +46,8 @@ const char kGreyscale[] = "Greyscale";
 const char kHighGray[] = "High.Gray";
 const char kHpColorPrint[] = "ColorPrint";
 const char kHpGrayscalePrint[] = "GrayscalePrint";
+const char kHpPjlColorAsGrayNo[] = "no";
+const char kHpPjlColorAsGrayYes[] = "yes";
 const char kLexmarkBLWFalse[] = "FalseM";
 const char kLexmarkBLWTrue[] = "TrueM";
 const char kMono[] = "Mono";
@@ -73,8 +77,10 @@ base::span<const PpdColorSetting> GetKnownPpdColorSettings() {
       {kCUPSCanonCNIJGrayScale, kOne, kZero},                // Canon
       {kCUPSColorMode, kMonochrome, kColor},                 // Samsung
       {kCUPSColorModel, kGray, kColor},                      // Generic
+      {kCUPSEpsonEPIJInk, kZero, kOne},                      // Epson
       {kCUPSEpsonInk, kEpsonMono, kEpsonColor},              // Epson
       {kCUPSHpColorMode, kHpGrayscalePrint, kHpColorPrint},  // HP
+      {kCUPSHpPjlColorAsGray, kHpPjlColorAsGrayYes, kHpPjlColorAsGrayNo},  // HP
       {kCUPSKonicaMinoltaSelectColor, kGrayscale, kColor},   // Konica Minolta
       {kCUPSLexmarkBLW, kLexmarkBLWTrue, kLexmarkBLWFalse},  // Lexmark
       {kCUPSOkiControl, kGray, kAuto},                       // Oki
@@ -83,7 +89,7 @@ base::span<const PpdColorSetting> GetKnownPpdColorSettings() {
       {kCUPSXeroxXROutputColor, kPrintAsGrayscale, kPrintAsColor},  // Xerox
       {kCUPSXeroxXRXColor, kXeroxBW, kXeroxAutomatic},              // Xerox
   };
-  return base::make_span(kKnownPpdColorSettings);
+  return base::span(kKnownPpdColorSettings);
 }
 #endif
 

@@ -9,8 +9,11 @@
 #include <string>
 #include <vector>
 
+#include "base/containers/circular_deque.h"
+#include "base/containers/flat_map.h"
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/threading/thread_checker.h"
 #include "base/time/time.h"
@@ -84,7 +87,8 @@ class GCMDriver {
   // Max number of sender IDs that can be passed to |Register| on desktop.
   constexpr static size_t kMaxSenders = 100;
 
-  using GCMAppHandlerMap = std::map<std::string, GCMAppHandler*>;
+  using GCMAppHandlerMap =
+      std::map<std::string, raw_ptr<GCMAppHandler, CtnExperimental>>;
   using RegisterCallback =
       base::OnceCallback<void(const std::string& registration_id,
                               GCMClient::Result result)>;
@@ -190,7 +194,7 @@ class GCMDriver {
   // |callback| will be called asynchronously when |message| has been decrypted.
   // A dispatchable message will be used in case of success, an empty message in
   // case of failure.
-  // TODO(crbug/1045907): Decouple this from GCMDriver.
+  // TODO(crbug.com/40116239): Decouple this from GCMDriver.
   virtual void DecryptMessage(const std::string& app_id,
                               const std::string& authorized_entity,
                               const std::string& message,
@@ -201,10 +205,6 @@ class GCMDriver {
   // This method must be called before destroying the GCMDriver. Once it has
   // been called, no other GCMDriver methods may be used.
   virtual void Shutdown();
-
-  // Called when the user signs in to or out of a GAIA account.
-  virtual void OnSignedIn() = 0;
-  virtual void OnSignedOut() = 0;
 
   // Adds a handler for a given app.
   virtual void AddAppHandler(const std::string& app_id, GCMAppHandler* handler);
@@ -224,6 +224,14 @@ class GCMDriver {
 
   // For testing purpose. Always NULL on Android.
   virtual GCMClient* GetGCMClientForTesting() const = 0;
+
+  // Simulates incoming message dispatch for testing message routing and
+  // buffering.
+  void DispatchMessageForTesting(const std::string& app_id,
+                                 const IncomingMessage& message);
+
+  // Returns the number of unhandled messages currently buffered for `app_id`.
+  size_t GetBufferedMessagesCountForTesting(const std::string& app_id) const;
 
   // Returns true if the service was started.
   virtual bool IsStarted() const = 0;
@@ -312,6 +320,9 @@ class GCMDriver {
   virtual void RecordDecryptionFailure(const std::string& app_id,
                                        GCMDecryptionResult result) = 0;
 
+  static void LogDeliveredToAppHandler(const std::string& app_id,
+                                       bool has_app_handler);
+
   // Runs the Register callback.
   void RegisterFinished(const std::string& app_id,
                         const std::string& registration_id,
@@ -343,6 +354,25 @@ class GCMDriver {
                        const IncomingMessage& message);
 
  private:
+  // Stores unhandled incoming messages and receipt timestamps for TTL pruning.
+  struct BufferedMessage {
+    IncomingMessage message;
+    base::TimeTicks receive_time;
+  };
+
+  // Prunes unhandled messages whose age exceeds `GetGCMMessageBufferingTTL()`
+  // across all buffered apps.
+  void PruneExpiredBufferedMessages();
+
+  // Logs drop telemetry for `count` unhandled messages.
+  void LogMessagesDropped(const std::string& app_id, size_t count);
+
+  // Clears all buffered messages across all apps and logs drop telemetry.
+  void ClearBufferedMessages();
+
+  // Delivers matching buffered messages to `handler` upon registration.
+  void DeliverBufferedMessagesForHandler(GCMAppHandler* handler);
+
   // Common code shared by Unregister and UnregisterWithSenderId.
   void UnregisterInternal(const std::string& app_id,
                           const std::string* sender_id,
@@ -354,6 +384,11 @@ class GCMDriver {
   void DispatchMessageInternal(const std::string& app_id,
                                GCMDecryptionResult result,
                                IncomingMessage message);
+
+  // Buffers an unhandled message when no app handler is registered for
+  // `app_id`.
+  void BufferUnhandledMessage(const std::string& app_id,
+                              IncomingMessage message);
 
   // Called after unregistration completes in order to trigger the pending
   // registration.
@@ -386,6 +421,8 @@ class GCMDriver {
 
   // App handler map (from app_id to handler pointer). The handler is not owned.
   GCMAppHandlerMap app_handlers_;
+  base::flat_map<std::string, base::circular_deque<BufferedMessage>>
+      buffered_messages_;
 
   base::WeakPtrFactory<GCMDriver> weak_ptr_factory_{this};
 };

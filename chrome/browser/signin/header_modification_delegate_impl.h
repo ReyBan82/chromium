@@ -10,7 +10,6 @@
 #include "build/buildflag.h"
 #include "chrome/browser/signin/header_modification_delegate.h"
 #include "components/content_settings/core/browser/cookie_settings.h"
-#include "content/public/browser/browser_thread.h"
 #include "extensions/buildflags/buildflags.h"
 
 class Profile;
@@ -49,7 +48,7 @@ class HeaderModificationDelegateImpl : public HeaderModificationDelegate {
   // Returns false if the request does not come from a web view.
   // Requests coming from most guest web views are ignored. In particular the
   // requests coming from the InlineLoginUI are not intercepted (see
-  // http://crbug.com/428396). Requests coming from the chrome identity
+  // http://crbug.com/40391545). Requests coming from the chrome identity
   // extension consent flow are not ignored.
   static bool ShouldIgnoreGuestWebViewRequest(content::WebContents* contents);
 #endif

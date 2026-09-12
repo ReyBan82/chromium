@@ -40,9 +40,13 @@
 #include <utility>
 
 #include "base/auto_reset.h"
+#include "base/notreached.h"
+#include "base/strings/strcat.h"
+#include "base/time/time.h"
 #include "base/trace_event/typed_macros.h"
 #include "base/unguessable_token.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
+#include "services/metrics/public/cpp/metrics_utils.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
 #include "services/metrics/public/cpp/ukm_recorder.h"
 #include "services/network/public/cpp/features.h"
@@ -54,7 +58,7 @@
 #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/mojom/frame/frame.mojom-blink.h"
 #include "third_party/blink/public/mojom/loader/request_context_frame_type.mojom-blink.h"
-#include "third_party/blink/public/mojom/runtime_feature_state/runtime_feature_state.mojom-blink.h"
+#include "third_party/blink/public/mojom/navigation/navigation_params.mojom-blink.h"
 #include "third_party/blink/public/platform/modules/service_worker/web_service_worker_network_provider.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/public/platform/web_content_settings_client.h"
@@ -65,11 +69,16 @@
 #include "third_party/blink/public/web/web_navigation_type.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
 #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value.h"
+#include "third_party/blink/renderer/core/ad_tracker/extension_script_tracker.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/document_init.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/ignore_opens_during_unload_count_incrementer.h"
 #include "third_party/blink/renderer/core/events/page_transition_event.h"
 #include "third_party/blink/renderer/core/exported/web_plugin_container_impl.h"
+#include "third_party/blink/renderer/core/fetch/fetch_later_util.h"
+#include "third_party/blink/renderer/core/fragment_directive/fragment_directive.h"
+#include "third_party/blink/renderer/core/fragment_directive/text_directive.h"
 #include "third_party/blink/renderer/core/fragment_directive/text_fragment_anchor.h"
 #include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
 #include "third_party/blink/renderer/core/frame/csp/csp_source.h"
@@ -92,11 +101,14 @@
 #include "third_party/blink/renderer/core/loader/form_submission.h"
 #include "third_party/blink/renderer/core/loader/frame_load_request.h"
 #include "third_party/blink/renderer/core/loader/frame_loader_types.h"
-#include "third_party/blink/renderer/core/loader/idna_util.h"
+#include "third_party/blink/renderer/core/loader/idleness_detector.h"
 #include "third_party/blink/renderer/core/loader/mixed_content_checker.h"
+#include "third_party/blink/renderer/core/loader/navigation_policy.h"
+#include "third_party/blink/renderer/core/loader/old_document_info_for_commit.h"
 #include "third_party/blink/renderer/core/loader/progress_tracker.h"
 #include "third_party/blink/renderer/core/navigation_api/navigation_api.h"
 #include "third_party/blink/renderer/core/page/chrome_client.h"
+#include "third_party/blink/renderer/core/page/focus_controller.h"
 #include "third_party/blink/renderer/core/page/frame_tree.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/page/plugin_data.h"
@@ -109,6 +121,7 @@
 #include "third_party/blink/renderer/core/scroll/scroll_animator_base.h"
 #include "third_party/blink/renderer/core/svg/graphics/svg_image.h"
 #include "third_party/blink/renderer/core/xml/parser/xml_document_parser.h"
+#include "third_party/blink/renderer/core/xml/xslt_processor.h"
 #include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"
 #include "third_party/blink/renderer/platform/bindings/script_forbidden_scope.h"
 #include "third_party/blink/renderer/platform/bindings/v8_dom_activity_logger.h"
@@ -116,6 +129,7 @@
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/instance_counters.h"
 #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
+#include "third_party/blink/renderer/platform/loader/fetch/memory_cache.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher_properties.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_request.h"
@@ -130,11 +144,39 @@
 #include "third_party/blink/renderer/platform/weborigin/security_policy.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_utf8_adaptor.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
+#include "url/url_features.h"
 
 namespace blink {
 
+namespace {
+
+void LogJavaScriptUrlHistogram(LocalDOMWindow* origin_window,
+                               const StringView& script) {
+  origin_window->CountUse(WebFeature::kExecutedJavaScriptURLFromFrame);
+  if (script.length() > 6) {
+    return;
+  }
+
+  String stripped_script = script.ToString().StripWhiteSpace().Replace(";", "");
+  if (stripped_script == "''" || stripped_script == "\"\"") {
+    origin_window->CountUse(WebFeature::kExecutedEmptyJavaScriptURLFromFrame);
+  }
+}
+
+}  // namespace
+
 bool IsBackForwardLoadType(WebFrameLoadType type) {
   return type == WebFrameLoadType::kBackForward;
+}
+
+bool IsBackForwardOrRestore(WebFrameLoadType type) {
+  return type == WebFrameLoadType::kBackForward ||
+         type == WebFrameLoadType::kRestore;
+}
+
+bool IsRestoreLoadType(WebFrameLoadType type) {
+  return type == WebFrameLoadType::kRestore;
 }
 
 bool IsReloadLoadType(WebFrameLoadType type) {
@@ -143,7 +185,7 @@ bool IsReloadLoadType(WebFrameLoadType type) {
 }
 
 bool FrameLoader::NeedsHistoryItemRestore(WebFrameLoadType type) {
-  return type == WebFrameLoadType::kBackForward || IsReloadLoadType(type);
+  return IsBackForwardOrRestore(type) || IsReloadLoadType(type);
 }
 
 ResourceRequest FrameLoader::ResourceRequestForReload(
@@ -162,16 +204,19 @@ ResourceRequest FrameLoader::ResourceRequestForReload(
 
   // ClientRedirectPolicy is an indication that this load was triggered by some
   // direct interaction with the page. If this reload is not a client redirect,
-  // we should reuse the referrer from the original load of the current
-  // document. If this reload is a client redirect (e.g., location.reload()), it
-  // was initiated by something in the current document and should therefore
-  // show the current document's url as the referrer.
+  // we should reuse the referrer and (if applicable) `Origin` header from the
+  // original load of the current document. If this reload is a client redirect
+  // (e.g., location.reload()), it was initiated by something in the current
+  // document and should therefore show the current document's url as the
+  // referrer, and, when applicable (i.e., non-HEAD or -GET request), use its
+  // current origin as the `Origin` header.
   if (client_redirect_policy == ClientRedirectPolicy::kClientRedirect) {
     LocalDOMWindow* window = frame_->DomWindow();
     Referrer referrer = SecurityPolicy::GenerateReferrer(
         window->GetReferrerPolicy(), window->Url(), window->OutgoingReferrer());
     request.SetReferrerString(referrer.referrer);
     request.SetReferrerPolicy(referrer.referrer_policy);
+    request.ClearHTTPOrigin();
   }
 
   request.SetSkipServiceWorker(frame_load_type ==
@@ -189,7 +234,8 @@ FrameLoader::FrameLoader(LocalFrame* frame)
               WebScopedVirtualTimePauser::VirtualTaskDuration::kInstant)) {
   DCHECK(frame_);
 
-  TRACE_EVENT_OBJECT_CREATED_WITH_ID("loading", "FrameLoader", this);
+  TRACE_EVENT_INSTANT("loading", "FrameLoader:created",
+                      perfetto::Flow::FromPointer(this, "FrameLoader"));
   TakeObjectSnapshot();
 }
 
@@ -201,23 +247,41 @@ void FrameLoader::Trace(Visitor* visitor) const {
   visitor->Trace(frame_);
   visitor->Trace(progress_tracker_);
   visitor->Trace(document_loader_);
+  visitor->Trace(previous_document_loader_for_xslt_);
 }
 
-void FrameLoader::Init(const DocumentToken& document_token,
-                       std::unique_ptr<PolicyContainer> policy_container,
-                       const StorageKey& storage_key,
-                       ukm::SourceId document_ukm_source_id) {
+void FrameLoader::Init(
+    const DocumentToken& document_token,
+    const InitiatorStateToken& initiator_state_token,
+    std::unique_ptr<PolicyContainer> policy_container,
+    const StorageKey& storage_key,
+    ukm::SourceId document_ukm_source_id,
+    const KURL& creator_base_url,
+    std::unique_ptr<base::UnguessableToken> sandbox_origin_token) {
   DCHECK(policy_container);
   ScriptForbiddenScope forbid_scripts;
 
   // Load the initial empty document:
   auto navigation_params = std::make_unique<WebNavigationParams>();
   navigation_params->url = KURL(g_empty_string);
+  if (!creator_base_url.IsEmpty()) {
+    navigation_params->fallback_base_url = creator_base_url;
+  }
   navigation_params->storage_key = storage_key;
   navigation_params->document_token = document_token;
+  navigation_params->initiator_state_token = initiator_state_token;
   navigation_params->frame_policy =
       frame_->Owner() ? frame_->Owner()->GetFramePolicy() : FramePolicy();
   navigation_params->document_ukm_source_id = document_ukm_source_id;
+  if (base::FeatureList::IsEnabled(
+          blink::features::kUseSandboxTokenForOriginDerivation)) {
+    if ((policy_container->GetPolicies().sandbox_flags &
+         network::mojom::blink::WebSandboxFlags::kOrigin) !=
+        network::mojom::blink::WebSandboxFlags::kNone) {
+      CHECK(sandbox_origin_token);
+      navigation_params->sandbox_origin_token = std::move(sandbox_origin_token);
+    }
+  }
 
   DocumentLoader* new_document_loader = MakeGarbageCollected<DocumentLoader>(
       frame_, kWebNavigationTypeOther, std::move(navigation_params),
@@ -249,6 +313,8 @@ ClientRedirectPolicy CalculateClientRedirectPolicy(
     bool is_on_initial_empty_document) {
   if (is_on_initial_empty_document ||
       client_navigation_reason == ClientNavigationReason::kNone ||
+      client_navigation_reason ==
+          ClientNavigationReason::kInitialFrameNavigation ||
       client_navigation_reason == ClientNavigationReason::kFormSubmissionGet ||
       client_navigation_reason == ClientNavigationReason::kFormSubmissionPost ||
       client_navigation_reason == ClientNavigationReason::kAnchorClick) {
@@ -297,11 +363,10 @@ void FrameLoader::SaveScrollAnchor() {
     const SerializedAnchor& serialized_anchor =
         scroll_anchor->GetSerializedAnchor();
     if (serialized_anchor.IsValid()) {
-      history_item->SetScrollAnchorData(
-          {serialized_anchor.selector,
-           gfx::PointF(serialized_anchor.relative_offset.X(),
-                       serialized_anchor.relative_offset.Y()),
-           serialized_anchor.simhash});
+      auto offset = serialized_anchor.GetScrollOffset(*layout_scrollable_area);
+      history_item->SetScrollAnchorData({serialized_anchor.selector,
+                                         gfx::PointF(offset.x(), offset.y()),
+                                         serialized_anchor.simhash});
     }
   }
 }
@@ -336,6 +401,13 @@ void FrameLoader::SaveScrollState() {
 
 void FrameLoader::DispatchUnloadEventAndFillOldDocumentInfoIfNeeded(
     bool will_commit_new_document_in_this_frame) {
+  TRACE_EVENT0("navigation",
+               "FrameLoader::DispatchUnloadEventAndFillOldDocInfo");
+  const std::string_view histogram_suffix =
+      will_commit_new_document_in_this_frame ? "CommitInFrame" : "Other";
+  base::ScopedUmaHistogramTimer histogram_timer(base::StrCat(
+      {"Navigation.FrameLoader.DispatchUnloadEventAndFillOldDocInfo.",
+       histogram_suffix}));
   FrameNavigationDisabler navigation_disabler(*frame_);
   SaveScrollState();
 
@@ -351,20 +423,33 @@ void FrameLoader::DispatchUnloadEventAndFillOldDocumentInfoIfNeeded(
   // frame needs should fill in the info.
   OldDocumentInfoForCommit* old_document_info =
       ScopedOldDocumentInfoForCommitCapturer::CurrentInfo();
-  if (!old_document_info || !will_commit_new_document_in_this_frame) {
-    frame_->GetDocument()->DispatchUnloadEvents(nullptr);
+  if (!old_document_info || !will_commit_new_document_in_this_frame ||
+      !GetDocumentLoader()) {
+    frame_->GetDocument()->DispatchUnloadEvents(
+        nullptr, will_commit_new_document_in_this_frame);
     return;
   }
   old_document_info->history_item = GetDocumentLoader()->GetHistoryItem();
-  old_document_info->had_sticky_activation_before_navigation =
-      frame_->HadStickyUserActivationBeforeNavigation();
+  if (auto* scheduler = frame_->GetFrameScheduler()) {
+    old_document_info->frame_scheduler_unreported_task_time =
+        scheduler->UnreportedTaskTime();
+  }
+  old_document_info->was_focused_frame =
+      (frame_->GetPage()->GetFocusController().FocusedFrame() == frame_);
+  old_document_info->overlay_color = frame_->GetFrameOverlayColor();
 
+  base::ElapsedTimer elapsed_timer;
   frame_->GetDocument()->DispatchUnloadEvents(
-      &old_document_info->unload_timing_info);
+      &old_document_info->unload_timing_info,
+      will_commit_new_document_in_this_frame);
+  old_document_info->total_lifecycle_events_processing_time_on_commit =
+      std::max(
+          old_document_info->total_lifecycle_events_processing_time_on_commit,
+          elapsed_timer.Elapsed());
 }
 
 void FrameLoader::DidExplicitOpen() {
-  probe::DidOpenDocument(frame_, GetDocumentLoader());
+  probe::DidOpenDocument(frame_.Get(), GetDocumentLoader());
   if (initial_empty_document_status_ ==
       InitialEmptyDocumentStatus::kInitialOrSynchronousAboutBlank) {
     initial_empty_document_status_ = InitialEmptyDocumentStatus::
@@ -398,12 +483,29 @@ void FrameLoader::FinishedParsing() {
 
   if (Client()) {
     Client()->RunScriptsAtDocumentReady(
-        document_loader_ ? document_loader_->IsCommittedButEmpty() : true);
+        !document_loader_ || document_loader_->IsCommittedButEmpty());
   }
 
-  if (frame_->View()) {
+  bool has_text_fragment = false;
+  if (frame_->GetDocument()) {
+    has_text_fragment = !frame_->GetDocument()
+                             ->fragmentDirective()
+                             .GetDirectives<TextDirective>()
+                             .empty();
+    if (!has_text_fragment && document_loader_) {
+      has_text_fragment = document_loader_->HasInternalScrollToTextFragment();
+    }
+  }
+
+  if (!has_text_fragment ||
+      (frame_->View() && frame_->GetPage() &&
+       frame_->GetPage()->RelatedPagesMutationFromPreviousPageFinalized())) {
     ProcessFragment(frame_->GetDocument()->Url(), document_loader_->LoadType(),
                     kNavigationToDifferentDocument);
+  } else {
+    // TODO(crbug.com/509527381): Consider adding a timeout to reset this back
+    // to false.
+    has_pending_cross_document_fragment_ = true;
   }
 
   frame_->GetDocument()->CheckCompleted();
@@ -447,15 +549,6 @@ void FrameLoader::DidFinishNavigation(NavigationFinishState state) {
     parent->CheckCompleted();
 }
 
-Frame* FrameLoader::Opener() {
-  return frame_->Opener();
-}
-
-void FrameLoader::SetOpener(LocalFrame* opener) {
-  // If the frame is already detached, the opener has already been cleared.
-  frame_->SetOpener(opener);
-}
-
 bool FrameLoader::AllowPlugins() {
   // With Oilpan, a FrameLoader might be accessed after the Page has been
   // detached. FrameClient will not be accessible, so bail early.
@@ -478,16 +571,31 @@ void FrameLoader::DetachDocumentLoader(Member<DocumentLoader>& loader,
 void FrameLoader::ProcessScrollForSameDocumentNavigation(
     const KURL& url,
     WebFrameLoadType frame_load_type,
-    absl::optional<HistoryItem::ViewState> view_state,
-    mojom::blink::ScrollRestorationType scroll_restoration_type) {
+    std::optional<HistoryItem::ViewState> view_state,
+    mojom::blink::ScrollRestorationType scroll_restoration_type,
+    mojom::blink::ScrollBehavior scroll_behavior) {
   if (view_state) {
     RestoreScrollPositionAndViewState(frame_load_type, *view_state,
-                                      scroll_restoration_type);
+                                      scroll_restoration_type, scroll_behavior);
   }
 
   // We need to scroll to the fragment whether or not a hash change occurred,
   // since the user might have scrolled since the previous navigation.
-  ProcessFragment(url, frame_load_type, kNavigationWithinSameDocument);
+  if (url.HasFragmentIdentifier()) {
+    // If the same-document navigation explicitly navigates to a fragment, abort
+    // any pending cross-document text fragment and process the new fragment
+    // immediately.
+    has_pending_cross_document_fragment_ = false;
+    ProcessFragment(url, frame_load_type, kNavigationWithinSameDocument);
+  } else if (!has_pending_cross_document_fragment_ ||
+             (frame_->View() && frame_->GetPage() &&
+              frame_->GetPage()
+                  ->RelatedPagesMutationFromPreviousPageFinalized())) {
+    // Avoid prematurely processing a deferred cross-document text fragment
+    // until related pages state is finalized.
+    ProcessFragment(url, frame_load_type, kNavigationWithinSameDocument);
+    has_pending_cross_document_fragment_ = false;
+  }
 
   TakeObjectSnapshot();
 }
@@ -500,13 +608,10 @@ bool FrameLoader::AllowRequestForThisFrame(const FrameLoadRequest& request) {
 
   const KURL& url = request.GetResourceRequest().Url();
   if (url.ProtocolIsJavaScript()) {
-    if (request.GetOriginWindow()
-            ->CheckAndGetJavascriptUrl(request.JavascriptWorld().get(), url,
-                                       frame_->DeprecatedLocalOwner())
-            .empty()) {
+    if (!request.GetOriginWindow()->AllowInlineJavascriptUrl(
+            request.JavascriptWorld(), url, frame_->DeprecatedLocalOwner())) {
       return false;
     }
-
     if (frame_->Owner() && ((frame_->Owner()->GetFramePolicy().sandbox_flags &
                              network::mojom::blink::WebSandboxFlags::kOrigin) !=
                             network::mojom::blink::WebSandboxFlags::kNone)) {
@@ -519,7 +624,8 @@ bool FrameLoader::AllowRequestForThisFrame(const FrameLoadRequest& request) {
         MakeGarbageCollected<ConsoleMessage>(
             mojom::ConsoleMessageSource::kSecurity,
             mojom::ConsoleMessageLevel::kError,
-            "Not allowed to load local resource: " + url.ElidedString()));
+            StrCat(
+                {"Not allowed to load local resource: ", url.ElidedString()})));
     return false;
   }
   return true;
@@ -531,6 +637,7 @@ static WebNavigationType DetermineNavigationType(
     bool have_event) {
   bool is_reload = IsReloadLoadType(frame_load_type);
   bool is_back_forward = IsBackForwardLoadType(frame_load_type);
+  bool is_restore = IsRestoreLoadType(frame_load_type);
   if (is_form_submission) {
     if (is_reload)
       return kWebNavigationTypeFormResubmittedReload;
@@ -544,6 +651,9 @@ static WebNavigationType DetermineNavigationType(
     return kWebNavigationTypeReload;
   if (is_back_forward)
     return kWebNavigationTypeBackForward;
+  if (is_restore) {
+    return kWebNavigationTypeRestore;
+  }
   return kWebNavigationTypeOther;
 }
 
@@ -564,10 +674,10 @@ DetermineRequestContextFromNavigationType(
 
     case kWebNavigationTypeBackForward:
     case kWebNavigationTypeReload:
+    case kWebNavigationTypeRestore:
       return mojom::blink::RequestContextType::INTERNAL;
   }
   NOTREACHED();
-  return mojom::blink::RequestContextType::HYPERLINK;
 }
 
 static network::mojom::RequestDestination
@@ -582,15 +692,15 @@ DetermineRequestDestinationFromNavigationType(
       return network::mojom::RequestDestination::kDocument;
     case kWebNavigationTypeBackForward:
     case kWebNavigationTypeReload:
+    case kWebNavigationTypeRestore:
       return network::mojom::RequestDestination::kEmpty;
   }
   NOTREACHED();
-  return network::mojom::RequestDestination::kDocument;
 }
 
 void FrameLoader::StartNavigation(FrameLoadRequest& request,
                                   WebFrameLoadType frame_load_type) {
-  CHECK(!IsBackForwardLoadType(frame_load_type));
+  CHECK(!IsBackForwardOrRestore(frame_load_type));
   DCHECK(request.GetTriggeringEventInfo() !=
          mojom::blink::TriggeringEventInfo::kUnknown);
   DCHECK(frame_->GetDocument());
@@ -598,32 +708,38 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
     element->CancelPendingLazyLoad();
 
   ResourceRequest& resource_request = request.GetResourceRequest();
+  String script_injector_host;
+  if (GetDocumentLoader() &&
+      GetDocumentLoader()->GetScriptInjectionPolicy() ==
+          mojom::blink::ScriptInjectionPolicy::kNavigationProtection) {
+    if (auto* extension_script_tracker = frame_->GetExtensionScriptTracker()) {
+      script_injector_host = extension_script_tracker->ExtensionScriptInStack();
+    }
+  }
   const KURL& url = resource_request.Url();
   LocalDOMWindow* origin_window = request.GetOriginWindow();
+
+  if (SchemeRegistry::IsDirectLaunchScheme(url.Protocol())) {
+    // TODO(crbug.com/517967197): Explore stripping the direct launch scheme
+    // prefix and continuing as a standard renderer-initiated navigation for web
+    // compatibility.
+    if (frame_->GetDocument()) {
+      frame_->GetDocument()->AddConsoleMessage(
+          MakeGarbageCollected<ConsoleMessage>(
+              mojom::blink::ConsoleMessageSource::kSecurity,
+              mojom::blink::ConsoleMessageLevel::kError,
+              StrCat({"Not allowed to navigate to direct-launch scheme '",
+                      url.Protocol(), "' from web contexts."})));
+    }
+    return;
+  }
 
   TRACE_EVENT2("navigation", "FrameLoader::StartNavigation", "url",
                url.GetString().Utf8(), "load_type",
                static_cast<int>(frame_load_type));
 
-  resource_request.SetHasUserGesture(
-      LocalFrame::HasTransientUserActivation(frame_));
-
   if (!AllowRequestForThisFrame(request))
     return;
-
-  // Block renderer-initiated loads of filesystem: URLs not in a Chrome App.
-  if (!base::FeatureList::IsEnabled(
-          features::kFileSystemUrlNavigationForChromeAppsOnly) &&
-      url.ProtocolIs("filesystem") &&
-      !base::FeatureList::IsEnabled(features::kFileSystemUrlNavigation)) {
-    frame_->GetDocument()->AddConsoleMessage(
-        MakeGarbageCollected<ConsoleMessage>(
-            mojom::blink::ConsoleMessageSource::kSecurity,
-            mojom::blink::ConsoleMessageLevel::kError,
-            "Not allowed to navigate to " + url.Protocol() +
-                " URL: " + url.ElidedString()));
-    return;
-  }
 
   // Block renderer-initiated loads of data: and filesystem: URLs in the top
   // frame (unless they are reload requests).
@@ -634,7 +750,7 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
   // embedder figure out what to do with it. Navigations to filesystem URLs are
   // always blocked here.
   if (frame_->IsMainFrame() && origin_window &&
-      request.ClientRedirectReason() != ClientNavigationReason::kReload &&
+      request.GetClientNavigationReason() != ClientNavigationReason::kReload &&
       !frame_->Client()->AllowContentInitiatedDataUrlNavigations(
           origin_window->Url()) &&
       (url.ProtocolIs("filesystem") ||
@@ -644,8 +760,8 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
         MakeGarbageCollected<ConsoleMessage>(
             mojom::blink::ConsoleMessageSource::kSecurity,
             mojom::blink::ConsoleMessageLevel::kError,
-            "Not allowed to navigate top frame to " + url.Protocol() +
-                " URL: " + url.ElidedString()));
+            StrCat({"Not allowed to navigate top frame to ", url.Protocol(),
+                    " URL: ", url.ElidedString()})));
     return;
   }
 
@@ -674,18 +790,42 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
       ShouldPerformFragmentNavigation(
           request.Form(), resource_request.HttpMethod(), frame_load_type, url);
 
+  if (RuntimeEnabledFeatures::
+          TreatMhtmlInitialDocumentLoadsAsCrossDocumentEnabled()) {
+    if (auto* parent = DynamicTo<LocalFrame>(frame_->Tree().Parent())) {
+      // Within MHTML archives, treat the initial about:blank#fragment
+      // navigation as cross-document. Although it appears to be a same-document
+      // fragment navigation, it actually commits a new document with a new
+      // opaque origin.
+      //
+      // TODO(crbug.com/423663315): Consider refining this logic to only treat
+      // the initial about:blank#fragment navigation in MHTML as cross-document
+      // if the MHTML archive actually overrides the about:blank resource. If it
+      // doesn't, the navigation may be better treated as same-document,
+      // matching non-MHTML behavior.
+      if (parent->Loader().GetDocumentLoader()->HasBeenLoadedAsWebArchive()) {
+        if (url.HasFragmentIdentifier() &&
+            frame_->GetDocument()->IsInitialEmptyDocument()) {
+          same_document_navigation = false;
+        }
+      }
+    }
+  }
+
   // Perform same document navigation.
   if (same_document_navigation) {
     DCHECK(origin_window);
     document_loader_->CommitSameDocumentNavigation(
         url, frame_load_type, nullptr,
-        CalculateClientRedirectPolicy(request.ClientRedirectReason(),
+        CalculateClientRedirectPolicy(request.GetClientNavigationReason(),
                                       frame_load_type,
                                       IsOnInitialEmptyDocument()),
         resource_request.HasUserGesture(), origin_window->GetSecurityOrigin(),
-        /*is_synchronously_committed=*/true, request.GetTriggeringEventInfo(),
-        /*is_browser_initiated=*/false,
-        /*soft_navigation_heuristics_task_id=*/absl::nullopt);
+        /*is_synchronously_committed=*/true, request.GetSourceElement(),
+        request.GetTriggeringEventInfo(), /*is_browser_initiated=*/false,
+        /*has_ua_visual_transition*/ false,
+        /*soft_navigation_heuristics_task_id=*/std::nullopt,
+        /*should_skip_screenshot=*/false);
     return;
   }
 
@@ -741,18 +881,54 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
 
   DCHECK(Client()->HasWebView());
   // Check for non-escaped new lines in the url.
-  if (url.PotentiallyDanglingMarkup() && url.ProtocolIsInHTTPFamily()) {
+  if (url.PotentiallyDanglingMarkup() && url.ProtocolIsInHttpFamily()) {
     Deprecation::CountDeprecation(
         origin_window, WebFeature::kCanRequestURLHTTPContainingNewline);
     return;
   }
 
   if (url.ProtocolIsJavaScript()) {
-    if (!origin_window ||
-        origin_window->CanExecuteScripts(kAboutToExecuteScript)) {
-      frame_->GetDocument()->ProcessJavaScriptUrl(url,
-                                                  request.JavascriptWorld());
+    // If the navigation policy does not target the current frame (for example,
+    // a navigation initiated by Ctrl/Cmd+Click on an anchor element),
+    // `FindOrCreateFrameForNavigation()` returns the initiator frame, expecting
+    // the navigation to end up in the browser process so the browser process
+    // can handle the navigation policy accordingly.
+    //
+    // However, before this navigation is sent to the browser process, Blink
+    // checks if it's a javascript: URL, since that is always supposed to be
+    // handled internally in the renderer. It is certainly not correct to
+    // evaluate the javascript: URL in the initiator frame if the navigation is
+    // not targeting the current frame.
+    if (request.GetNavigationPolicy() == kNavigationPolicyCurrentTab) {
+      if (!origin_window ||
+          origin_window->CanExecuteScripts(kAboutToExecuteScript)) {
+        if (origin_window &&
+            request.GetFrameType() ==
+                mojom::blink::RequestContextFrameType::kNested) {
+          LogJavaScriptUrlHistogram(origin_window, url.GetPath());
+        }
+
+        frame_->GetDocument()->ProcessJavaScriptUrl(url,
+                                                    request.JavascriptWorld());
+      } else {
+        // Any possible navigation policy that ends up creating a new browsing
+        // context will create a browsing context with no opener relation. The
+        // new browsing context will always be cross-origin because the new
+        // window starts at the initial empty document—and since it does have an
+        // opener, it will not inherit an origin and will have a new unique
+        // opaque origin. It would be incorrect to execute the javascript: URL
+        // in a cross-origin context, so intentionally do nothing.
+      }
     }
+    return;
+  }
+
+  // Do not navigate to an invalid "javascript:" scheme URL under the standard
+  // compliant non special scheme url parsing.
+  //
+  // See wpt/url/javascript-urls.window.js test for the standard compliant
+  // behaviors.
+  if (ProtocolIsJavaScript(url.GetString()) && !url.IsValid()) {
     return;
   }
 
@@ -761,7 +937,7 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
                              frame_->DomWindow()->GetSecurityOrigin()))) {
     auto* params = MakeGarbageCollected<NavigateEventDispatchParams>(
         url, NavigateEventType::kCrossDocument, frame_load_type);
-    params->form = request.Form();
+    params->source_element = request.GetSourceElement();
     if (request.GetTriggeringEventInfo() ==
         mojom::blink::TriggeringEventInfo::kFromTrustedEvent) {
       params->involvement = UserNavigationInvolvement::kActivation;
@@ -769,6 +945,30 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
     if (frame_->DomWindow()->navigation()->DispatchNavigateEvent(params) !=
         NavigationApi::DispatchResult::kContinue) {
       return;
+    }
+
+    request.SetResumeDeferredCommitListener(
+        std::move(params->resume_deferred_commit_listener));
+  }
+
+  // https://whatpr.org/html/10903/d1c086a...0e0afb3/browsing-the-web.html#beginning-navigation
+  // If sourceDocument is navigable's container document, then reserve deferred
+  // fetch quota for navigable's container given url's origin.
+  if (IsFetchLaterUseDeferredFetchPolicyEnabled() && origin_window &&
+      origin_window->GetFrame() == frame_->Parent()) {
+    if (auto* owner = DynamicTo<HTMLFrameOwnerElement>(frame_->Owner());
+        owner) {
+      // Determine the origin of the navigation target `url`.
+      // This is not available from `frame` security context yet as navigation
+      // is just starting. It has to take frame's sandbox flags into account.
+      scoped_refptr<const SecurityOrigin> to_origin =
+          SecurityOrigin::Create(url);
+      if ((owner->GetFramePolicy().sandbox_flags &
+           network::mojom::blink::WebSandboxFlags::kOrigin) !=
+          network::mojom::blink::WebSandboxFlags::kNone) {
+        to_origin = to_origin->DeriveNewOpaqueOrigin();
+      }
+      owner->UpdateDeferredFetchPolicy(std::move(to_origin));
     }
   }
 
@@ -779,19 +979,26 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
   // is looked up based on the current v8::Context. When the request actually
   // begins, the v8::Context may no longer be on the stack.
   if (V8DOMActivityLogger* activity_logger =
-          V8DOMActivityLogger::CurrentActivityLoggerIfIsolatedWorld()) {
+          V8DOMActivityLogger::CurrentActivityLoggerIfIsolatedWorld(
+              frame_->DomWindow()->GetIsolate())) {
     if (!DocumentLoader::WillLoadUrlAsEmpty(url)) {
       Vector<String> argv;
       argv.push_back("Main resource");
       argv.push_back(url.GetString());
-      activity_logger->LogEvent("blinkRequestResource", argv.size(),
-                                argv.data());
+      activity_logger->LogEvent(frame_->DomWindow(), "blinkRequestResource",
+                                argv);
     }
   }
 
-  if (request.ClientRedirectReason() != ClientNavigationReason::kNone) {
-    probe::FrameRequestedNavigation(frame_, frame_, url,
-                                    request.ClientRedirectReason(),
+  bool is_form_submission = request.GetClientNavigationReason() ==
+                                ClientNavigationReason::kFormSubmissionGet ||
+                            request.GetClientNavigationReason() ==
+                                ClientNavigationReason::kFormSubmissionPost;
+  if (!is_form_submission) {
+    // This signal for form submissions is issued earlier when scheduling
+    // the form submission task. See Frame::ScheduleFormSubmission.
+    probe::FrameRequestedNavigation(frame_.Get(), frame_.Get(), url,
+                                    request.GetClientNavigationReason(),
                                     request.GetNavigationPolicy());
   }
 
@@ -801,43 +1008,9 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
   using CSPDisposition = network::mojom::CSPDisposition;
   CSPDisposition should_check_main_world_csp =
       ContentSecurityPolicy::ShouldBypassMainWorldDeprecated(
-          request.JavascriptWorld().get())
+          request.JavascriptWorld())
           ? CSPDisposition::DO_NOT_CHECK
           : CSPDisposition::CHECK;
-
-  // If this is a subframe load to a uuid-in-package: URL, allow loading from a
-  // Web Bundle attached to the parent document.
-  if (url.Protocol() == "uuid-in-package") {
-    auto* parent_local_frame = DynamicTo<LocalFrame>(frame_->Tree().Parent());
-    if (parent_local_frame &&
-        parent_local_frame->DomWindow() == origin_window &&
-        origin_window->Fetcher()) {
-      origin_window->Fetcher()->AttachWebBundleTokenIfNeeded(resource_request);
-      // Report to the UseCounter of the parent frame (i.e. the frame that
-      // loaded a WebBundle).
-      origin_window->CountUse(
-          mojom::blink::WebFeature::kUuidInPackageUrlNavigation);
-    }
-  }
-
-  // Warn if the resource URL's hostname contains IDNA deviation characters.
-  // Only warn if the resource URL's origin is different than its requestor
-  // (we don't want to warn for <img src="faß.de/image.img"> on faß.de).
-  // TODO(crbug.com/1396475): Remove once Non-Transitional mode is shipped.
-  if (resource_request.RequestorOrigin() &&
-      !resource_request.RequestorOrigin()->IsSameOriginWith(
-          SecurityOrigin::Create(url).get()) &&
-      url.HasIDNA2008DeviationCharacter()) {
-    String message = GetConsoleWarningForIDNADeviationCharacters(url);
-    if (!message.empty()) {
-      request.GetOriginWindow()->AddConsoleMessage(
-          MakeGarbageCollected<ConsoleMessage>(
-              mojom::ConsoleMessageSource::kSecurity,
-              mojom::ConsoleMessageLevel::kWarning, message));
-      origin_window->CountUse(
-          WebFeature::kIDNA2008DeviationCharacterInHostnameOfIFrame);
-    }
-  }
 
   Client()->BeginNavigation(
       resource_request, request.GetRequestorBaseURL(), request.GetFrameType(),
@@ -845,14 +1018,19 @@ void FrameLoader::StartNavigation(FrameLoadRequest& request,
       request.GetNavigationPolicy(), frame_load_type,
       request.ForceHistoryPush(),
       CalculateClientRedirectPolicy(
-          request.ClientRedirectReason(), frame_load_type,
+          request.GetClientNavigationReason(), frame_load_type,
           IsOnInitialEmptyDocument()) == ClientRedirectPolicy::kClientRedirect,
       request.IsUnfencedTopNavigation(), request.GetTriggeringEventInfo(),
       request.Form(), should_check_main_world_csp, request.GetBlobURLToken(),
-      request.GetInputStartTime(), request.HrefTranslate().GetString(),
-      request.Impression(), request.GetInitiatorFrameToken(),
-      request.TakeSourceLocation(),
-      request.TakeInitiatorPolicyContainerKeepAliveHandle());
+      request.GetInputStartTime(), request.GetCreationTime(),
+      request.HrefTranslate().GetString(), request.GetInitiatorFrameToken(),
+      request.GetInitiatorStateToken(), request.GetInitiatorDocumentToken(),
+      request.GetSourceLocation(),
+      request.TakeInitiatorNavigationStateKeepAliveHandle(),
+      request.IsContainerInitiated(),
+      request.GetWindowFeatures().explicit_opener,
+      request.TakeResumeDeferredCommitListener(),
+      request.GetScriptToolInvocationId(), script_injector_host);
 }
 
 static void FillStaticResponseIfNeeded(WebNavigationParams* params,
@@ -862,7 +1040,7 @@ static void FillStaticResponseIfNeeded(WebNavigationParams* params,
 
   const KURL& url = params->url;
   // See WebNavigationParams for special case explanations.
-  if (url.IsAboutSrcdocURL()) {
+  if (url.IsAboutSrcdocUrl()) {
     CHECK(params->body_loader);
     // Originally, this branch was responsible for retrieving the value of the
     // srcdoc attribute and turning it into a body loader when committing a
@@ -885,11 +1063,9 @@ static void FillStaticResponseIfNeeded(WebNavigationParams* params,
     params->body_loader.reset();
     ArchiveResource* archive_resource = archive->SubresourceForURL(url);
     if (archive_resource) {
-      SharedBuffer* archive_data = archive_resource->Data();
       WebNavigationParams::FillStaticResponse(
           params, archive_resource->MimeType(),
-          archive_resource->TextEncoding(),
-          base::make_span(archive_data->Data(), archive_data->size()));
+          archive_resource->TextEncoding(), archive_resource->Data());
     } else {
       // The requested archive resource does not exist. In an ideal world, this
       // would commit as a failed navigation, but the browser doesn't know
@@ -899,9 +1075,10 @@ static void FillStaticResponseIfNeeded(WebNavigationParams* params,
       // an URLLoaderFactory implementation for MHTML archives.
       WebNavigationParams::FillStaticResponse(
           params, "text/html", "UTF-8",
-          "<html><body>"
-          "<!-- failed to find resource in MHTML archive -->"
-          "</body></html>");
+          base::span_from_cstring(
+              "<html><body>"
+              "<!-- failed to find resource in MHTML archive -->"
+              "</body></html>"));
     }
   }
 
@@ -944,9 +1121,10 @@ static void FillStaticResponseIfNeeded(WebNavigationParams* params,
   params->url = params->response.CurrentRequestUrl();
   WebNavigationParams::FillStaticResponse(
       params, "text/html", "UTF-8",
-      "<html><body>"
-      "<!-- no enabled plugin supports this MIME type -->"
-      "</body></html>");
+      base::span_from_cstring(
+          "<html><body>"
+          "<!-- no enabled plugin supports this MIME type -->"
+          "</body></html>"));
 }
 
 // The browser navigation code should never send a `CommitNavigation()` request
@@ -962,26 +1140,28 @@ static void AssertCanNavigate(WebNavigationParams* params, LocalFrame* frame) {
   // If the server sends 204 or 205, this means the server does not want to
   // replace the page contents. However, PlzNavigate should have handled it
   // browser-side and never sent a commit request to the renderer.
-  if (status_code == 204 || status_code == 205)
-    CHECK(false);
+  CHECK_NE(status_code, 204);
+  CHECK_NE(status_code, 205);
 
   // If the server attached a Content-Disposition indicating that the resource
   // is an attachment, this is actually a download. However, PlzNavigate should
   // have handled it browser-side and never sent a commit request to the
   // renderer.
-  if (IsContentDispositionAttachment(
-          params->response.HttpHeaderField(http_names::kContentDisposition))) {
-    CHECK(false);
-  }
+  CHECK(!IsContentDispositionAttachment(
+      params->response.HttpHeaderField(http_names::kContentDisposition)));
 }
 
 void FrameLoader::CommitNavigation(
     std::unique_ptr<WebNavigationParams> navigation_params,
     std::unique_ptr<WebDocumentLoader::ExtraData> extra_data,
     CommitReason commit_reason) {
+  TRACE_EVENT0("navigation", "FrameLoader::CommitNavigation");
+  base::ScopedUmaHistogramTimer histogram_timer(
+      "Navigation.FrameLoader.CommitNavigation");
   DCHECK(document_loader_);
   DCHECK(frame_->GetDocument());
   DCHECK(Client()->HasWebView());
+
   if (!frame_->IsNavigationAllowed() ||
       frame_->GetDocument()->PageDismissalEventBeingDispatched() !=
           Document::kNoDismissal) {
@@ -1004,8 +1184,8 @@ void FrameLoader::CommitNavigation(
   if (!response.TextEncodingName().empty() ||
       !IsA<LocalFrame>(frame_->Tree().Parent())) {
     DocumentLoader::MaybeStartLoadingBodyInBackground(
-        navigation_params->body_loader.get(), frame_, navigation_params->url,
-        response);
+        navigation_params->body_loader.get(), frame_.Get(),
+        navigation_params->url, response);
   }
 
   // TODO(dgozman): figure out the better place for this check
@@ -1027,41 +1207,45 @@ void FrameLoader::CommitNavigation(
   if (!CancelProvisionalLoaderForNewNavigation())
     return;
 
-  auto url_origin = SecurityOrigin::Create(navigation_params->url);
-  if (navigation_params->frame_load_type == WebFrameLoadType::kBackForward &&
-      frame_->DomWindow()->GetSecurityOrigin()->IsSameOriginWith(
-          url_origin.get())) {
-    auto* params = MakeGarbageCollected<NavigateEventDispatchParams>(
-        navigation_params->url, NavigateEventType::kCrossDocument,
-        WebFrameLoadType::kBackForward);
-    if (navigation_params->is_browser_initiated)
-      params->involvement = UserNavigationInvolvement::kBrowserUI;
-    params->destination_item = navigation_params->history_item;
-    auto result =
-        frame_->DomWindow()->navigation()->DispatchNavigateEvent(params);
-    DCHECK_EQ(result, NavigationApi::DispatchResult::kContinue);
-    if (!document_loader_)
-      return;
-  }
-
   FillStaticResponseIfNeeded(navigation_params.get(), frame_);
   AssertCanNavigate(navigation_params.get(), frame_);
 
-  // If this is a javascript: URL or XSLT commit, we must copy the ExtraData
-  // from the previous DocumentLoader to ensure the new DocumentLoader behaves
-  // the same way as the previous one.
+  // If this is a javascript: URL, XSLT commit or discard we must copy the
+  // ExtraData from the previous DocumentLoader to ensure the new DocumentLoader
+  // behaves the same way as the previous one.
   if (commit_reason == CommitReason::kXSLT ||
-      commit_reason == CommitReason::kJavascriptUrl) {
+      commit_reason == CommitReason::kJavascriptUrl ||
+      commit_reason == CommitReason::kDiscard) {
+    // It is important to clone the previous loader's ExtraData instead of
+    // extracting it since it may be needed to handle operations in the
+    // document's unload handler (such as same-site navigation, see
+    // crbug.com/361658816).
     DCHECK(!extra_data);
-    extra_data = document_loader_->TakeExtraData();
+    extra_data = document_loader_->CloneExtraData();
   }
 
   // Create the OldDocumentInfoForCommit for the old document (that might be in
   // another FrameLoader) and save it in ScopedOldDocumentInfoForCommitCapturer,
   // so that the old document can access it and fill in the information as it
   // is being unloaded/swapped out.
-  ScopedOldDocumentInfoForCommitCapturer scoped_old_document_info(
-      MakeGarbageCollected<OldDocumentInfoForCommit>(url_origin));
+  auto url_origin = SecurityOrigin::Create(navigation_params->url);
+  auto* info = MakeGarbageCollected<OldDocumentInfoForCommit>(url_origin);
+  if (RuntimeEnabledFeatures::ResponsiveIframesEnabled()) {
+    if (frame_->IsProvisional()) {
+      if (const Frame* prev_frame = frame_->GetProvisionalOwnerFrame()) {
+        info->old_document_origin =
+            prev_frame->GetSecurityContext()->GetSecurityOrigin();
+      }
+    } else {
+      info->old_document_origin =
+          frame_->GetSecurityContext()->GetSecurityOrigin();
+    }
+  }
+  ScopedOldDocumentInfoForCommitCapturer scoped_old_document_info(info);
+  scoped_old_document_info.CurrentInfo()
+      ->total_lifecycle_events_processing_time_on_commit =
+      navigation_params->navigation_timings
+          .total_lifecycle_events_processing_time_on_commit;
 
   FrameSwapScope frame_swap_scope(frame_owner);
   {
@@ -1073,7 +1257,7 @@ void FrameLoader::CommitNavigation(
     // start/commit message pairs.
     if (commit_reason == CommitReason::kRegular) {
       frame_->GetFrameScheduler()->DidStartProvisionalLoad();
-      probe::DidStartProvisionalLoad(frame_);
+      probe::DidStartProvisionalLoad(frame_.Get());
     }
 
     DCHECK(Client()->HasWebView());
@@ -1087,8 +1271,12 @@ void FrameLoader::CommitNavigation(
     // For an XSLT document, set SentDidFinishLoad now to prevent the
     // DocumentLoader from reporting an error when detaching the pre-XSLT
     // document.
-    if (commit_reason == CommitReason::kXSLT && document_loader_)
+    if (commit_reason == CommitReason::kXSLT && document_loader_) {
+      DCHECK(
+          XSLTProcessor::IsXSLTEnabled(frame_ ? frame_->DomWindow() : nullptr));
       document_loader_->SetSentDidFinishLoad();
+      previous_document_loader_for_xslt_ = document_loader_.Get();
+    }
     if (!DetachDocument()) {
       DCHECK(!is_provisional);
       return;
@@ -1110,7 +1298,7 @@ void FrameLoader::CommitNavigation(
 
   if (!navigation_params->is_synchronous_commit_for_bug_778318 ||
       (!navigation_params->url.IsEmpty() &&
-       !KURL(navigation_params->url).IsAboutBlankURL())) {
+       !KURL(navigation_params->url).IsAboutBlankUrl())) {
     // The new document is not the synchronously committed about:blank document,
     // so lose the initial empty document status.
     // Note 1: The actual initial empty document commit (with commit_reason set
@@ -1146,29 +1334,37 @@ void FrameLoader::CommitNavigation(
         std::move(navigation_params->policy_container));
   }
 
-  base::flat_map<mojom::blink::RuntimeFeatureState, bool> override_values =
-      navigation_params->modified_runtime_features;
-
   // TODO(dgozman): get rid of provisional document loader and most of the code
   // below. We should probably call DocumentLoader::CommitNavigation directly.
   DocumentLoader* new_document_loader = MakeGarbageCollected<DocumentLoader>(
       frame_, navigation_type, std::move(navigation_params),
       std::move(policy_container), std::move(extra_data));
 
+  if (previous_document_loader_for_xslt_) {
+    DCHECK(
+        XSLTProcessor::IsXSLTEnabled(frame_ ? frame_->DomWindow() : nullptr));
+    new_document_loader->InheritXsltUseCountersFrom(
+        previous_document_loader_for_xslt_);
+    previous_document_loader_for_xslt_ = nullptr;
+  }
+
   CommitDocumentLoader(
       new_document_loader,
-      ScopedOldDocumentInfoForCommitCapturer::CurrentInfo()->history_item,
+      ScopedOldDocumentInfoForCommitCapturer::CurrentInfo()->history_item.Get(),
       commit_reason);
 
-  // Now that the RuntimeFeatureStateOverrideContext has been created, set the
-  // override values.
-  // TODO(crbug.com/1377000): Move this inside CommitNavigation() and put it
-  // alongside the other state initialization.
-  frame_->DomWindow()
-      ->GetRuntimeFeatureStateOverrideContext()
-      ->ApplyOverrideValuesFromParams(override_values);
-
   RestoreScrollPositionAndViewState();
+
+  if (!frame_->IsDetached() && frame_->IsOutermostMainFrame()) {
+    ukm::builders::PageLifecycleMetricsOnNewPageCommit(
+        frame_->GetDocument()->UkmSourceID())
+        .SetPageLifecycleEventsTotalProcessingTime(
+            ukm::GetExponentialBucketMinForFineUserTiming(
+                scoped_old_document_info.CurrentInfo()
+                    ->total_lifecycle_events_processing_time_on_commit
+                    .InMilliseconds()))
+        .Record(frame_->GetDocument()->UkmRecorder());
+  }
 
   TakeObjectSnapshot();
 }
@@ -1181,7 +1377,7 @@ bool FrameLoader::WillStartNavigation(const WebNavigationInfo& info) {
   client_navigation_ = std::make_unique<ClientNavigationState>();
   client_navigation_->url = info.url_request.Url();
   frame_->GetFrameScheduler()->DidStartProvisionalLoad();
-  probe::DidStartProvisionalLoad(frame_);
+  probe::DidStartProvisionalLoad(frame_.Get());
   virtual_time_pauser_.PauseVirtualTime();
   TakeObjectSnapshot();
   return true;
@@ -1205,7 +1401,17 @@ void FrameLoader::StopAllLoaders(bool abort_client) {
   }
 
   frame_->GetDocument()->CancelParsing();
-  frame_->DomWindow()->navigation()->InformAboutCanceledNavigation();
+
+  // `abort_client` is false only when we are stopping all loading in
+  // preparation for a frame swap. When a swap occurs, we're stopping all
+  // loading in this particular LocalFrame, but the conceptual frame is
+  // committing and continuing loading. We shouldn't treat this as a navigation
+  // cancellation in web-observable ways, so the navigation API should not do
+  // its cancelled navigation steps (e.g., firing a navigateerror event).
+  if (abort_client) {
+    frame_->DomWindow()->navigation()->InformAboutCanceledNavigation();
+  }
+
   if (document_loader_)
     document_loader_->StopLoading();
   if (abort_client)
@@ -1229,6 +1435,9 @@ void FrameLoader::DidAccessInitialDocument() {
 }
 
 bool FrameLoader::DetachDocument() {
+  TRACE_EVENT0("navigation", "FrameLoader::DetachDocument");
+  base::ScopedUmaHistogramTimer histogram_timer(
+      "Navigation.FrameLoader.DetachDocument");
   DCHECK(frame_->GetDocument());
   DCHECK(document_loader_);
 
@@ -1286,15 +1495,15 @@ bool FrameLoader::DetachDocument() {
 void FrameLoader::CommitDocumentLoader(DocumentLoader* document_loader,
                                        HistoryItem* previous_history_item,
                                        CommitReason commit_reason) {
-  TRACE_EVENT("blink", "FrameLoader::CommitDocumentLoader");
+  TRACE_EVENT0("navigation", "FrameLoader::CommitDocumentLoader");
+  base::ScopedUmaHistogramTimer histogram_timer(
+      "Navigation.FrameLoader.CommitDocumentLoader");
+  base::ElapsedTimer timer;
   document_loader_ = document_loader;
   CHECK(document_loader_);
 
   document_loader_->SetCommitReason(commit_reason);
-
-  virtual_time_pauser_.PauseVirtualTime();
   document_loader_->StartLoading();
-  virtual_time_pauser_.UnpauseVirtualTime();
 
   if (commit_reason != CommitReason::kInitialization) {
     // Following the call to StartLoading, the DocumentLoader state has taken
@@ -1328,6 +1537,12 @@ void FrameLoader::CommitDocumentLoader(DocumentLoader* document_loader,
   Client()->TransitionToCommittedForNewPage();
 
   document_loader_->CommitNavigation();
+
+  base::UmaHistogramTimes("Blink.CommitDocumentLoaderTime", timer.Elapsed());
+  ukm::builders::Blink_FrameLoader(frame_->GetDocument()->UkmSourceID())
+      .SetCommitDocumentLoaderTime(ukm::GetExponentialBucketMinForUserTiming(
+          timer.Elapsed().InMicroseconds()))
+      .Record(frame_->GetDocument()->UkmRecorder());
 }
 
 void FrameLoader::RestoreScrollPositionAndViewState() {
@@ -1337,16 +1552,25 @@ void FrameLoader::RestoreScrollPositionAndViewState() {
       !GetDocumentLoader()->NavigationScrollAllowed()) {
     return;
   }
+
+  // We need to suppress scroll restoration animations for navigations with
+  // visual transitions for the same-document case only. This is done in
+  // ProcessScrollForSameDocumentNavigation.
+  //
+  // For cross-document navigations (which take this path) the animation is
+  // suppressed by default.
   RestoreScrollPositionAndViewState(
       GetDocumentLoader()->LoadType(),
       *GetDocumentLoader()->GetHistoryItem()->GetViewState(),
-      GetDocumentLoader()->GetHistoryItem()->ScrollRestorationType());
+      GetDocumentLoader()->GetHistoryItem()->ScrollRestorationType(),
+      mojom::blink::ScrollBehavior::kAuto);
 }
 
 void FrameLoader::RestoreScrollPositionAndViewState(
     WebFrameLoadType load_type,
     const HistoryItem::ViewState& view_state,
-    mojom::blink::ScrollRestorationType scroll_restoration_type) {
+    mojom::blink::ScrollRestorationType scroll_restoration_type,
+    mojom::blink::ScrollBehavior scroll_behavior) {
   LocalFrameView* view = frame_->View();
   if (!view || !view->LayoutViewport() || !frame_->IsAttached() ||
       frame_->GetDocument()->IsInitialEmptyDocument()) {
@@ -1357,10 +1581,12 @@ void FrameLoader::RestoreScrollPositionAndViewState(
 
   view->LayoutViewport()->SetPendingHistoryRestoreScrollOffset(
       view_state,
-      scroll_restoration_type != mojom::blink::ScrollRestorationType::kManual);
+      scroll_restoration_type != mojom::blink::ScrollRestorationType::kManual,
+      scroll_behavior);
   view->GetScrollableArea()->SetPendingHistoryRestoreScrollOffset(
       view_state,
-      scroll_restoration_type != mojom::blink::ScrollRestorationType::kManual);
+      scroll_restoration_type != mojom::blink::ScrollRestorationType::kManual,
+      scroll_behavior);
 
   view->ScheduleAnimation();
 }
@@ -1385,16 +1611,7 @@ String FrameLoader::UserAgent() const {
   return ApplyUserAgentOverride(Client()->UserAgent());
 }
 
-String FrameLoader::FullUserAgent() const {
-  return ApplyUserAgentOverride(Client()->FullUserAgent());
-}
-
-String FrameLoader::ReducedUserAgent() const {
-  return ApplyUserAgentOverride(Client()->ReducedUserAgent());
-}
-
-absl::optional<blink::UserAgentMetadata> FrameLoader::UserAgentMetadata()
-    const {
+std::optional<blink::UserAgentMetadata> FrameLoader::UserAgentMetadata() const {
   return Client()->UserAgentMetadata();
 }
 
@@ -1410,7 +1627,9 @@ void FrameLoader::Detach() {
     progress_tracker_.Clear();
   }
 
-  TRACE_EVENT_OBJECT_DELETED_WITH_ID("loading", "FrameLoader", this);
+  TRACE_EVENT_INSTANT(
+      "loading", "FrameLoader:deleted",
+      perfetto::TerminatingFlow::FromPointer(this, "FrameLoader"));
   state_ = State::kDetached;
   virtual_time_pauser_.UnpauseVirtualTime();
 }
@@ -1422,9 +1641,8 @@ bool FrameLoader::ShouldPerformFragmentNavigation(bool is_form_submission,
   // We don't do this if we are submitting a form with method other than "GET",
   // explicitly reloading, currently displaying a frameset, or if the URL does
   // not have a fragment.
-  return EqualIgnoringASCIICase(http_method, http_names::kGET) &&
-         !IsReloadLoadType(load_type) &&
-         load_type != WebFrameLoadType::kBackForward &&
+  return EqualIgnoringAsciiCase(http_method, http_names::kGET) &&
+         !IsReloadLoadType(load_type) && !IsBackForwardOrRestore(load_type) &&
          url.HasFragmentIdentifier() &&
          // For provisional LocalFrame, there is no real document loaded and
          // the initial empty document should not be considered, so there is
@@ -1450,7 +1668,7 @@ void FrameLoader::ProcessFragment(const KURL& url,
   // restoring the past scroll offset during a history navigation. In these
   // cases we assume the scroll was restored from history (by the page).
   const bool uses_manual_scroll_restoration =
-      frame_load_type == WebFrameLoadType::kBackForward &&
+      IsBackForwardOrRestore(frame_load_type) &&
       GetDocumentLoader()->GetHistoryItem() &&
       GetDocumentLoader()->GetHistoryItem()->ScrollRestorationType() ==
           mojom::blink::ScrollRestorationType::kManual;
@@ -1473,7 +1691,7 @@ void FrameLoader::ProcessFragment(const KURL& url,
   // should still be able to click on a same-document fragment link and have it
   // jump to the anchor).
   const bool is_same_document_non_history_nav =
-      is_same_document_navigation && !IsBackForwardLoadType(frame_load_type);
+      is_same_document_navigation && !IsBackForwardOrRestore(frame_load_type);
 
   const bool block_fragment_scroll =
       blocked_by_policy ||
@@ -1483,8 +1701,13 @@ void FrameLoader::ProcessFragment(const KURL& url,
                            !block_fragment_scroll);
 }
 
-bool FrameLoader::ShouldClose(bool is_reload) {
-  TRACE_EVENT1("loading", "FrameLoader::ShouldClose", "is_reload", is_reload);
+bool FrameLoader::ShouldClose(
+    bool is_reload,
+    bool force_to_proceed,
+    base::TimeTicks& out_before_unload_dialog_opened_time,
+    base::TimeTicks& out_before_unload_dialog_closed_time) {
+  TRACE_EVENT("loading", "FrameLoader::ShouldClose", "is_reload", is_reload,
+              "force_to_proceed", force_to_proceed);
   const base::TimeTicks before_unload_events_start = base::TimeTicks::Now();
 
   Page* page = frame_->GetPage();
@@ -1493,7 +1716,7 @@ bool FrameLoader::ShouldClose(bool is_reload) {
 
   HeapVector<Member<LocalFrame>> descendant_frames;
   for (Frame* child = frame_->Tree().FirstChild(); child;
-       child = child->Tree().TraverseNext(frame_)) {
+       child = child->Tree().TraverseNext(frame_.Get())) {
     // FIXME: There is not yet any way to dispatch events to out-of-process
     // frames.
     if (auto* child_local_frame = DynamicTo<LocalFrame>(child))
@@ -1510,15 +1733,18 @@ bool FrameLoader::ShouldClose(bool is_reload) {
     IgnoreOpensDuringUnloadCountIncrementer ignore_opens_during_unload(
         frame_->GetDocument());
     if (!frame_->GetDocument()->DispatchBeforeUnloadEvent(
-            &page->GetChromeClient(), is_reload, did_allow_navigation)) {
+            &page->GetChromeClient(), is_reload, force_to_proceed,
+            did_allow_navigation, out_before_unload_dialog_opened_time,
+            out_before_unload_dialog_closed_time)) {
       frame_->DomWindow()->navigation()->InformAboutCanceledNavigation();
       return false;
     }
 
     // Then deal with descendent frames.
     for (Member<LocalFrame>& descendant_frame : descendant_frames) {
-      if (!descendant_frame->Tree().IsDescendantOf(frame_))
+      if (!descendant_frame->Tree().IsDescendantOf(frame_.Get())) {
         continue;
+      }
 
       // There is some confusion in the spec around what counters should be
       // incremented for a descendant browsing context:
@@ -1533,7 +1759,9 @@ bool FrameLoader::ShouldClose(bool is_reload) {
           ignore_opens_during_unload_descendant(
               descendant_frame->GetDocument());
       if (!descendant_frame->GetDocument()->DispatchBeforeUnloadEvent(
-              &page->GetChromeClient(), is_reload, did_allow_navigation)) {
+              &page->GetChromeClient(), is_reload, force_to_proceed,
+              did_allow_navigation, out_before_unload_dialog_opened_time,
+              out_before_unload_dialog_closed_time)) {
         frame_->DomWindow()->navigation()->InformAboutCanceledNavigation();
         return false;
       }
@@ -1544,8 +1772,9 @@ bool FrameLoader::ShouldClose(bool is_reload) {
   // of them so they can advance to the appropriate load state.
   frame_->GetDocument()->BeforeUnloadDoneWillUnload();
   for (Member<LocalFrame>& descendant_frame : descendant_frames) {
-    if (!descendant_frame->Tree().IsDescendantOf(frame_))
+    if (!descendant_frame->Tree().IsDescendantOf(frame_.Get())) {
       continue;
+    }
     descendant_frame->GetDocument()->BeforeUnloadDoneWillUnload();
   }
 
@@ -1575,10 +1804,12 @@ void FrameLoader::DidDropNavigation() {
   // and relying on the number of created window proxies.
   Settings* settings = frame_->GetSettings();
   if (settings && settings->GetForceMainWorldInitialization()) {
+    auto* window = frame_->DomWindow();
     // Forcibly instantiate WindowProxy.
-    frame_->DomWindow()->GetScriptController().WindowProxy(
-        DOMWrapperWorld::MainWorld());
+    window->GetScriptController().WindowProxy(
+        DOMWrapperWorld::MainWorld(window->GetIsolate()));
   }
+  frame_->GetIdlenessDetector()->DidDropNavigation();
 }
 
 bool FrameLoader::CancelProvisionalLoaderForNewNavigation() {
@@ -1606,7 +1837,7 @@ void FrameLoader::ClearClientNavigation() {
   if (!client_navigation_)
     return;
   client_navigation_.reset();
-  probe::DidFailProvisionalLoad(frame_);
+  probe::DidFailProvisionalLoad(frame_.Get());
   virtual_time_pauser_.UnpauseVirtualTime();
 }
 
@@ -1620,22 +1851,20 @@ void FrameLoader::CancelClientNavigation(CancelNavigationReason reason) {
   ClearClientNavigation();
   if (WebPluginContainerImpl* plugin = frame_->GetWebPluginContainer())
     plugin->DidFailLoading(error);
-  Client()->AbortClientNavigation();
+  Client()->AbortClientNavigation(reason ==
+                                  CancelNavigationReason::kNewNavigation);
 }
 
 void FrameLoader::DispatchDocumentElementAvailable() {
   ScriptForbiddenScope forbid_scripts;
 
-  // Notify the browser about non-blank documents loading in the top frame.
-  KURL url = frame_->GetDocument()->Url();
-  if (url.IsValid() && !url.IsAboutBlankURL()) {
-    if (frame_->IsMainFrame()) {
-      // For now, don't remember plugin zoom values.  We don't want to mix them
-      // with normal web content (i.e. a fixed layout plugin would usually want
-      // them different).
-      frame_->GetLocalFrameHostRemote().MainDocumentElementAvailable(
-          frame_->GetDocument()->IsPluginDocument());
-    }
+  // Notify the browser about documents loading in the top frame.
+  if (frame_->GetDocument()->Url().IsValid() && frame_->IsMainFrame()) {
+    // For now, don't remember plugin zoom values.  We don't want to mix them
+    // with normal web content (i.e. a fixed layout plugin would usually want
+    // them different).
+    frame_->GetLocalFrameHostRemote().MainDocumentElementAvailable(
+        frame_->GetDocument()->IsPluginDocument());
   }
 
   Client()->DocumentElementAvailable();
@@ -1654,9 +1883,10 @@ void FrameLoader::DispatchDidClearDocumentOfWindowObject() {
   LocalDOMWindow* window = frame_->DomWindow();
   if (settings && settings->GetForceMainWorldInitialization()) {
     // Forcibly instantiate WindowProxy, even if script is disabled.
-    window->GetScriptController().WindowProxy(DOMWrapperWorld::MainWorld());
+    window->GetScriptController().WindowProxy(
+        DOMWrapperWorld::MainWorld(window->GetIsolate()));
   }
-  probe::DidClearDocumentOfWindowObject(frame_);
+  probe::DidClearDocumentOfWindowObject(frame_.Get());
   if (!window->CanExecuteScripts(kNotAboutToExecuteScript))
     return;
 
@@ -1666,8 +1896,7 @@ void FrameLoader::DispatchDidClearDocumentOfWindowObject() {
       &dispatching_did_clear_window_object_in_main_world_, true);
   // We just cleared the document, not the entire window object, but for the
   // embedder that's close enough.
-  Client()->DispatchDidClearWindowObjectInMainWorld(
-      window->GetIsolate(), window->GetMicrotaskQueue());
+  Client()->DispatchDidClearWindowObjectInMainWorld(window);
 }
 
 void FrameLoader::DispatchDidClearWindowObjectInMainWorld() {
@@ -1679,8 +1908,7 @@ void FrameLoader::DispatchDidClearWindowObjectInMainWorld() {
     return;
   base::AutoReset<bool> in_did_clear_window_object(
       &dispatching_did_clear_window_object_in_main_world_, true);
-  Client()->DispatchDidClearWindowObjectInMainWorld(
-      window->GetIsolate(), window->GetMicrotaskQueue());
+  Client()->DispatchDidClearWindowObjectInMainWorld(window);
 }
 
 network::mojom::blink::WebSandboxFlags
@@ -1709,12 +1937,12 @@ void FrameLoader::ModifyRequestForCSP(
     }
 
     resource_request.SetHttpHeaderField(http_names::kUpgradeInsecureRequests,
-                                        "1");
+                                        AtomicString("1"));
   }
 
   MixedContentChecker::UpgradeInsecureRequest(
       resource_request, fetch_client_settings_object, window_for_logging,
-      frame_type, frame_->GetContentSettingsClient());
+      frame_type, frame_->GetContentSettingsClient(), frame_);
 }
 
 void FrameLoader::WriteIntoTrace(perfetto::TracedValue context) const {
@@ -1734,14 +1962,25 @@ inline void FrameLoader::TakeObjectSnapshot() const {
     // We already logged TRACE_EVENT_OBJECT_DELETED_WITH_ID in detach().
     return;
   }
-  TRACE_EVENT_OBJECT_SNAPSHOT_WITH_ID("loading", "FrameLoader", this, this);
+  TRACE_EVENT_INSTANT("loading", "FrameLoader:state_snapshot",
+                      perfetto::Flow::FromPointer(this, "FrameLoader"),
+                      "snapshot", *this);
 }
 
 mojo::PendingRemote<mojom::blink::CodeCacheHost>
 FrameLoader::CreateWorkerCodeCacheHost() {
   if (!document_loader_)
     return mojo::NullRemote();
-  return document_loader_->CreateWorkerCodeCacheHost();
+  return document_loader_->CreateCodeCacheHost();
+}
+
+void FrameLoader::ProcessPendingCrossDocumentFragment() {
+  if (!has_pending_cross_document_fragment_) {
+    return;
+  }
+  has_pending_cross_document_fragment_ = false;
+  ProcessFragment(frame_->GetDocument()->Url(), document_loader_->LoadType(),
+                  kNavigationToDifferentDocument);
 }
 
 }  // namespace blink

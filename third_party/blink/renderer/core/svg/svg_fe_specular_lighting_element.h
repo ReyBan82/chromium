@@ -37,6 +37,9 @@ class SVGFESpecularLightingElement final
 
  public:
   explicit SVGFESpecularLightingElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFESpecularLightingElement;
+  }
 
   void LightElementAttributeChanged(const SVGFELightElement*,
                                     const QualifiedName&);
@@ -55,6 +58,10 @@ class SVGFESpecularLightingElement final
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumber> specular_constant_;
   Member<SVGAnimatedNumber> specular_exponent_;

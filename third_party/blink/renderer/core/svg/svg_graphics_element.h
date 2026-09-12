@@ -23,18 +23,15 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_GRAPHICS_ELEMENT_H_
 
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/core/svg/svg_element.h"
 #include "third_party/blink/renderer/core/svg/svg_tests.h"
-#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/core/svg/svg_transformable_element.h"
 
 namespace blink {
 
-class AffineTransform;
-class SVGAnimatedTransformList;
 class SVGMatrixTearOff;
 class SVGRectTearOff;
 
-class CORE_EXPORT SVGGraphicsElement : public SVGElement, public SVGTests {
+class CORE_EXPORT SVGGraphicsElement : public SVGTransformableElement {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
@@ -46,16 +43,14 @@ class CORE_EXPORT SVGGraphicsElement : public SVGElement, public SVGTests {
   SVGElement* nearestViewportElement() const;
   SVGElement* farthestViewportElement() const;
 
-  AffineTransform LocalCoordinateSpaceTransform(CTMScope) const override;
-  AffineTransform* AnimateMotionTransform() override;
-
   virtual gfx::RectF GetBBox();
   SVGRectTearOff* getBBoxFromJavascript();
 
-  bool IsValid() const final { return SVGTests::IsValid(); }
+  bool IsValid() const final { return !tests_ || tests_->IsValid(); }
 
-  SVGAnimatedTransformList* transform() { return transform_.Get(); }
-  const SVGAnimatedTransformList* transform() const { return transform_.Get(); }
+  // SVGTests mixin forwarders.
+  SVGStringListTearOff* requiredExtensions();
+  SVGStringListTearOff* systemLanguage();
 
   AffineTransform ComputeCTM(
       CTMScope mode,
@@ -63,31 +58,38 @@ class CORE_EXPORT SVGGraphicsElement : public SVGElement, public SVGTests {
 
   void Trace(Visitor*) const override;
 
+  bool IsNonRendered(const LayoutObject* object) const;
+
  protected:
   SVGGraphicsElement(const QualifiedName&,
                      Document&,
                      ConstructionType = kCreateSVGElement);
 
-  bool SupportsFocus() const override {
-    return Element::SupportsFocus() || HasFocusEventListeners();
+  FocusableState SupportsFocus(UpdateBehavior update_behavior) const override {
+    if (IsNonRendered(GetLayoutObject())) {
+      return FocusableState::kNotFocusable;
+    }
+
+    if (HasFocusEventListeners()) {
+      return FocusableState::kFocusable;
+    }
+    return Element::SupportsFocus(update_behavior);
   }
 
-  void CollectStyleForPresentationAttribute(
-      const QualifiedName&,
-      const AtomicString&,
-      MutableCSSPropertyValueSet*) override;
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
 
-  Member<SVGAnimatedTransformList> transform_;
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
  private:
   bool IsSVGGraphicsElement() const final { return true; }
+
+  SVGTests& EnsureSvgTests() const;
+
+  mutable Member<SVGTests> tests_;
 };
 
-template <>
-inline bool IsElementOfType<const SVGGraphicsElement>(const Node& node) {
-  return IsA<SVGGraphicsElement>(node);
-}
 template <>
 struct DowncastTraits<SVGGraphicsElement> {
   static bool AllowFrom(const Node& node) {

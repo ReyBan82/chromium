@@ -5,6 +5,9 @@
 #ifndef COMPONENTS_MEDIA_ROUTER_BROWSER_ANDROID_MEDIA_ROUTER_ANDROID_BRIDGE_H_
 #define COMPONENTS_MEDIA_ROUTER_BROWSER_ANDROID_MEDIA_ROUTER_ANDROID_BRIDGE_H_
 
+#include <optional>
+#include <string>
+
 #include "base/android/scoped_java_ref.h"
 #include "base/memory/raw_ptr.h"
 #include "components/media_router/common/media_route.h"
@@ -48,44 +51,37 @@ class MediaRouterAndroidBridge {
   virtual void SendRouteMessage(const MediaRoute::Id& route_id,
                                 const std::string& message);
   virtual void DetachRoute(const MediaRoute::Id& route_id);
-  virtual bool StartObservingMediaSinks(const MediaSource::Id& source_id);
+  virtual bool StartObservingMediaSinks(const MediaSource::Id& source_id,
+                                        const url::Origin& origin);
   virtual void StopObservingMediaSinks(const MediaSource::Id& source_id);
   virtual std::unique_ptr<media::FlingingController> GetFlingingController(
       const MediaRoute::Id& route_id);
 
   // Methods called by the Java counterpart.
   void OnSinksReceived(JNIEnv* env,
-                       const base::android::JavaRef<jobject>& obj,
-                       const base::android::JavaRef<jstring>& jsource_urn,
-                       jint jcount);
+                       const std::string& source_urn,
+                       int32_t count);
   void OnRouteCreated(JNIEnv* env,
-                      const base::android::JavaRef<jobject>& obj,
-                      const base::android::JavaRef<jstring>& jmedia_route_id,
-                      const base::android::JavaRef<jstring>& jmedia_sink_id,
-                      jint jroute_request_id,
-                      jboolean jis_local);
-  void OnCreateRouteRequestError(
-      JNIEnv* env,
-      const base::android::JavaRef<jobject>& obj,
-      const base::android::JavaRef<jstring>& jerror_text,
-      jint jroute_request_id);
-  void OnJoinRouteRequestError(
-      JNIEnv* env,
-      const base::android::JavaRef<jobject>& obj,
-      const base::android::JavaRef<jstring>& jerror_text,
-      jint jroute_request_id);
-  void OnRouteTerminated(
-      JNIEnv* env,
-      const base::android::JavaRef<jobject>& obj,
-      const base::android::JavaRef<jstring>& jmedia_route_id);
+                      const std::string& media_route_id,
+                      const std::string& media_sink_id,
+                      int32_t route_request_id,
+                      bool is_local);
+  void OnCreateRouteRequestError(JNIEnv* env,
+                                 const std::string& error_text,
+                                 int32_t route_request_id);
+  void OnJoinRouteRequestError(JNIEnv* env,
+                               const std::string& error_text,
+                               int32_t route_request_id);
+  void OnRouteTerminated(JNIEnv* env, const std::string& media_route_id);
   void OnRouteClosed(JNIEnv* env,
-                     const base::android::JavaRef<jobject>& obj,
-                     const base::android::JavaRef<jstring>& jmedia_route_id,
-                     const base::android::JavaRef<jstring>& jerror);
+                     const std::string& media_route_id,
+                     const std::optional<std::string>& error);
   void OnMessage(JNIEnv* env,
-                 const base::android::JavaRef<jobject>& obj,
-                 const base::android::JavaRef<jstring>& jmedia_route_id,
-                 const base::android::JavaRef<jstring>& jmessage);
+                 const std::string& media_route_id,
+                 const std::string& message);
+  void OnRouteMediaSourceUpdated(JNIEnv* env,
+                                 const std::string& media_route_id,
+                                 const std::string& media_source_id);
 
  private:
   raw_ptr<MediaRouterAndroid> native_media_router_;

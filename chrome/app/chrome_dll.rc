@@ -89,9 +89,9 @@ BEGIN
     VK_NEXT,        IDC_MOVE_TAB_NEXT,          VIRTKEY, CONTROL, SHIFT
     VK_PRIOR,       IDC_MOVE_TAB_PREVIOUS,      VIRTKEY, CONTROL, SHIFT
     VK_NEXT,        IDC_SELECT_NEXT_TAB,        VIRTKEY, CONTROL
-    VK_TAB,         IDC_SELECT_NEXT_TAB,        VIRTKEY, CONTROL
+    VK_TAB,         IDC_CYCLE_TO_NEXT_TAB,      VIRTKEY, CONTROL
     VK_PRIOR,       IDC_SELECT_PREVIOUS_TAB,    VIRTKEY, CONTROL
-    VK_TAB,         IDC_SELECT_PREVIOUS_TAB,    VIRTKEY, CONTROL, SHIFT
+    VK_TAB,         IDC_CYCLE_TO_PREV_TAB,      VIRTKEY, CONTROL, SHIFT
     // NOTE: IDC_SELECT_TAB_N is bound to the key ctrl-(N+1), and selects the
     // tab at index N. For example, IDC_SELECT_TAB_0 is bound to ctrl-1, and
     // selects the tab at index 0.
@@ -119,7 +119,7 @@ BEGIN
     "J",            IDC_SHOW_DOWNLOADS,         VIRTKEY, CONTROL
     "H",            IDC_SHOW_HISTORY,           VIRTKEY, CONTROL
     VK_ESCAPE,      IDC_CLOSE_FIND_OR_STOP,     VIRTKEY
-    VK_ESCAPE,      IDC_TASK_MANAGER,           VIRTKEY, SHIFT
+    VK_ESCAPE,      IDC_TASK_MANAGER_SHORTCUT,  VIRTKEY, SHIFT
     "U",            IDC_VIEW_SOURCE,            VIRTKEY, CONTROL
     VK_OEM_MINUS,   IDC_ZOOM_MINUS,             VIRTKEY, CONTROL
     VK_OEM_MINUS,   IDC_ZOOM_MINUS,             VIRTKEY, CONTROL, SHIFT
@@ -171,6 +171,8 @@ IDR_MAINFRAME       ICON                        "theme\google_chrome\win\chrome.
 IDR_SXS             ICON                        "theme\google_chrome\win\chrome_sxs.ico"
 IDR_X004_DEV        ICON                        "theme\google_chrome\win\chrome_dev.ico"
 IDR_X005_BETA       ICON                        "theme\google_chrome\win\chrome_beta.ico"
+#elif BUILDFLAG(GOOGLE_CHROME_FOR_TESTING_BRANDING)
+IDR_MAINFRAME       ICON                        "theme\google_chrome\google_chrome_for_testing\win\chrome.ico"
 #else
 IDR_MAINFRAME       ICON                        "theme\chromium\win\chromium.ico"
 #endif

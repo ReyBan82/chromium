@@ -4,10 +4,13 @@
 
 #include "ash/quick_pair/repository/fast_pair_repository_impl.h"
 
+#include <optional>
+
 #include "ash/quick_pair/common/device.h"
 #include "ash/quick_pair/common/fast_pair/fast_pair_metrics.h"
 #include "ash/quick_pair/common/mock_quick_pair_browser_delegate.h"
 #include "ash/quick_pair/common/protocol.h"
+#include "ash/quick_pair/common/quick_pair_browser_delegate.h"
 #include "ash/quick_pair/repository/fake_device_metadata_http_fetcher.h"
 #include "ash/quick_pair/repository/fast_pair/device_address_map.h"
 #include "ash/quick_pair/repository/fast_pair/device_image_store.h"
@@ -18,13 +21,16 @@
 #include "ash/quick_pair/repository/fast_pair/pending_write_store.h"
 #include "ash/quick_pair/repository/fast_pair/proto_conversions.h"
 #include "ash/quick_pair/repository/fast_pair/saved_device_registry.h"
+#include "ash/quick_pair/repository/fast_pair_repository.h"
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
 #include "base/base64.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/gmock_callback_support.h"
 #include "base/test/metrics/histogram_tester.h"
@@ -35,14 +41,13 @@
 #include "chromeos/ash/components/network/network_state_test_helper.h"
 #include "chromeos/ash/services/quick_pair/public/cpp/account_key_filter.h"
 #include "components/prefs/testing_pref_service.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 #include "device/bluetooth/bluetooth_adapter_factory.h"
 #include "device/bluetooth/public/cpp/bluetooth_address.h"
 #include "device/bluetooth/test/mock_bluetooth_adapter.h"
 #include "device/bluetooth/test/mock_bluetooth_device.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/image/image_unittest_util.h"
 
 namespace {
@@ -51,6 +56,7 @@ constexpr int kBluetoothAddressSize = 6;
 constexpr char kValidModelId[] = "abc";
 constexpr char kInvalidModelId[] = "666";
 constexpr char kDeviceDisplayName[] = "test_nickname";
+constexpr char kDeviceDisplayName2[] = "second_test_nickname";
 constexpr char kTestModelId[] = "test_model_id";
 constexpr char kTestDeviceId[] = "test_ble_device_id";
 constexpr char kTestBLEAddress[] = "00:11:22:33:45:11";
@@ -88,10 +94,8 @@ std::string GenerateSha256AccountKeyMacAddress(const std::string& account_key,
 
   concat_bytes.insert(concat_bytes.end(), mac_address_bytes.begin(),
                       mac_address_bytes.end());
-  std::array<uint8_t, crypto::kSHA256Length> hashed =
-      crypto::SHA256Hash(concat_bytes);
 
-  return std::string(hashed.begin(), hashed.end());
+  return std::string(base::as_string_view(crypto::hash::Sha256(concat_bytes)));
 }
 
 std::string Base64Decode(const std::string& encoded) {
@@ -163,7 +167,7 @@ class FastPairRepositoryImplTest : public AshTestBase {
     image_decoder_ = image_decoder.get();
     test_image_ = gfx::test::CreateImage(100, 100);
     ON_CALL(*image_decoder_, DecodeImage(_, _, _))
-        .WillByDefault(RunOnceCallback<2>(test_image_));
+        .WillByDefault(base::test::RunOnceCallbackRepeatedly<2>(test_image_));
 
     auto device_address_map = std::make_unique<DeviceAddressMap>();
     device_address_map_ = device_address_map.get();
@@ -184,16 +188,20 @@ class FastPairRepositoryImplTest : public AshTestBase {
         std::move(footprints_fetcher), std::move(image_decoder),
         std::move(device_address_map), std::move(device_image_store),
         std::move(saved_device_registry), std::move(pending_write_store));
-
-    pref_service_ = std::make_unique<TestingPrefServiceSimple>();
-    ON_CALL(browser_delegate_, GetActivePrefService())
-        .WillByDefault(testing::Return(pref_service_.get()));
-    PendingWriteStore::RegisterProfilePrefs(pref_service_->registry());
-    SavedDeviceRegistry::RegisterProfilePrefs(pref_service_->registry());
-    DeviceAddressMap::RegisterLocalStatePrefs(pref_service_->registry());
+    FastPairRepository::SetInstanceForTesting(fast_pair_repository_.get());
   }
 
   void TearDown() override {
+    saved_device_registry_ = nullptr;
+    pending_write_store_ = nullptr;
+    device_image_store_ = nullptr;
+    device_address_map_ = nullptr;
+    image_decoder_ = nullptr;
+    footprints_fetcher_ = nullptr;
+    device_metadata_fetcher_ = nullptr;
+    metadata_http_fetcher_ = nullptr;
+    device_.reset();
+    // reset last due to dependency to above
     fast_pair_repository_.reset();
     NetworkHandler::Shutdown();
     AshTestBase::TearDown();
@@ -217,11 +225,11 @@ class FastPairRepositoryImplTest : public AshTestBase {
 
   void VerifyAccountKeyCheck(base::OnceClosure on_complete,
                              bool expected_result,
-                             absl::optional<PairingMetadata> pairing_metadata) {
+                             std::optional<PairingMetadata> pairing_metadata) {
     if (expected_result) {
-      EXPECT_NE(absl::nullopt, pairing_metadata);
+      EXPECT_NE(std::nullopt, pairing_metadata);
     } else {
-      EXPECT_EQ(absl::nullopt, pairing_metadata);
+      EXPECT_EQ(std::nullopt, pairing_metadata);
     }
     std::move(on_complete).Run();
   }
@@ -248,17 +256,15 @@ class FastPairRepositoryImplTest : public AshTestBase {
       &ble_bluetooth_device_, &classic_bluetooth_device_};
   scoped_refptr<Device> device_;
   gfx::Image test_image_;
-  std::unique_ptr<TestingPrefServiceSimple> pref_service_;
-  MockQuickPairBrowserDelegate browser_delegate_;
 
-  DeviceMetadataFetcher* device_metadata_fetcher_;
-  FakeDeviceMetadataHttpFetcher* metadata_http_fetcher_;
-  FakeFootprintsFetcher* footprints_fetcher_;
-  MockFastPairImageDecoder* image_decoder_;
-  DeviceAddressMap* device_address_map_;
-  DeviceImageStore* device_image_store_;
-  PendingWriteStore* pending_write_store_;
-  SavedDeviceRegistry* saved_device_registry_;
+  raw_ptr<DeviceMetadataFetcher> device_metadata_fetcher_;
+  raw_ptr<FakeDeviceMetadataHttpFetcher> metadata_http_fetcher_;
+  raw_ptr<FakeFootprintsFetcher> footprints_fetcher_;
+  raw_ptr<MockFastPairImageDecoder> image_decoder_;
+  raw_ptr<DeviceAddressMap> device_address_map_;
+  raw_ptr<DeviceImageStore> device_image_store_;
+  raw_ptr<PendingWriteStore> pending_write_store_;
+  raw_ptr<SavedDeviceRegistry> saved_device_registry_;
 
   base::WeakPtrFactory<FastPairRepositoryImplTest> weak_ptr_factory_{this};
 };
@@ -401,8 +407,6 @@ TEST_F(FastPairRepositoryImplTest, UpdateStaleUserDeviceCache) {
                                                              kAccountKey1);
   base::RunLoop().RunUntilIdle();
   ASSERT_TRUE(footprints_fetcher_->ContainsKey(kAccountKey1));
-  ASSERT_TRUE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
 
   auto run_loop = base::RunLoop();
 
@@ -448,27 +452,25 @@ TEST_F(FastPairRepositoryImplTest, UseStaleCache) {
                                                              kAccountKey1);
   base::RunLoop().RunUntilIdle();
   ASSERT_TRUE(footprints_fetcher_->ContainsKey(kAccountKey1));
-  ASSERT_TRUE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
 
   auto run_loop = base::RunLoop();
 
-  // Check for the device, this will also load the device into the cache
+  // Check for the device, this will also load the device into the cache.
   fast_pair_repository_->CheckAccountKeys(
       filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
                              base::Unretained(this), run_loop.QuitClosure(),
                              /*expected_result=*/true));
 
   // Remove the device directly from footprints. This is equivalent to the
-  // device being removed on an Android phone or another Chromebook
+  // device being removed on an Android phone or another Chromebook.
   footprints_fetcher_->DeleteUserDevice(base::HexEncode(kAccountKey1),
                                         base::DoNothing());
 
-  // Set the response to replicate an error getting devices from the server
-  footprints_fetcher_->SetGetUserDevicesResponse(absl::nullopt);
+  // Set the response to replicate an error getting devices from the server.
+  footprints_fetcher_->SetGetUserDevicesResponse(std::nullopt);
 
   // After >30 minutes, cache is stale but we will fail to get devices from
-  // the server so we use the stale cache with the device still present
+  // the server so we use the stale cache with the device still present.
   task_environment()->FastForwardBy(base::Minutes(31));
   fast_pair_repository_->CheckAccountKeys(
       filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
@@ -487,6 +489,37 @@ TEST_F(FastPairRepositoryImplTest, GetDeviceNameFromCache) {
   device->set_classic_address(kTestClassicAddress1);
   device->set_account_key(kAccountKey1);
   device->set_display_name(kDeviceDisplayName);
+  fast_pair_repository_->WriteAccountAssociationToLocalRegistry(device);
+  fast_pair_repository_->WriteAccountAssociationToFootprints(device,
+                                                             kAccountKey1);
+  base::RunLoop().RunUntilIdle();
+  ASSERT_TRUE(footprints_fetcher_->ContainsKey(kAccountKey1));
+
+  auto run_loop = base::RunLoop();
+
+  // Check for the device, this will load the device into the cache.
+  fast_pair_repository_->CheckAccountKeys(
+      filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
+                             base::Unretained(this), run_loop.QuitClosure(),
+                             /*expected_result=*/true));
+  run_loop.Run();
+
+  device->set_display_name(fast_pair_repository_->GetDeviceDisplayNameFromCache(
+      device->account_key().value()));
+  ASSERT_EQ(kDeviceDisplayName, device->display_name());
+}
+
+TEST_F(FastPairRepositoryImplTest, ChangeDeviceNameFromCache) {
+  AccountKeyFilter filter(kFilterBytes1, {salt});
+  nearby::fastpair::GetObservedDeviceResponse response;
+  DeviceMetadata metadata(response, gfx::Image());
+
+  auto device = base::MakeRefCounted<Device>(kValidModelId, kTestBLEAddress,
+                                             Protocol::kFastPairInitial);
+  device->set_classic_address(kTestClassicAddress1);
+  device->set_account_key(kAccountKey1);
+  device->set_display_name(kDeviceDisplayName);
+  fast_pair_repository_->WriteAccountAssociationToLocalRegistry(device);
   fast_pair_repository_->WriteAccountAssociationToFootprints(device,
                                                              kAccountKey1);
   base::RunLoop().RunUntilIdle();
@@ -501,11 +534,82 @@ TEST_F(FastPairRepositoryImplTest, GetDeviceNameFromCache) {
       filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
                              base::Unretained(this), run_loop.QuitClosure(),
                              /*expected_result=*/true));
-  run_loop.Run();
 
   device->set_display_name(fast_pair_repository_->GetDeviceDisplayNameFromCache(
       device->account_key().value()));
-  ASSERT_EQ(kDeviceDisplayName, device->display_name());
+  ASSERT_EQ(device->display_name(), kDeviceDisplayName);
+
+  fast_pair_repository_->UpdateAssociatedDeviceFootprintsName(
+      kTestClassicAddress1, kDeviceDisplayName2, /*cache_may_be_stale=*/true);
+
+  // Check for the device, this will load the device into the cache.
+  fast_pair_repository_->CheckAccountKeys(
+      filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
+                             base::Unretained(this), run_loop.QuitClosure(),
+                             /*expected_result=*/true));
+
+  device->set_display_name(fast_pair_repository_->GetDeviceDisplayNameFromCache(
+      device->account_key().value()));
+  ASSERT_EQ(device->display_name(), kDeviceDisplayName2);
+}
+
+TEST_F(FastPairRepositoryImplTest, ChangeDeviceNameNotInCache) {
+  AccountKeyFilter filter(kFilterBytes1, {salt});
+  nearby::fastpair::GetObservedDeviceResponse response;
+  DeviceMetadata metadata(response, gfx::Image());
+
+  auto device = base::MakeRefCounted<Device>(kValidModelId, kTestBLEAddress,
+                                             Protocol::kFastPairInitial);
+  device->set_classic_address(kTestClassicAddress1);
+  device->set_account_key(kAccountKey1);
+  device->set_display_name(kDeviceDisplayName);
+  fast_pair_repository_->WriteAccountAssociationToLocalRegistry(device);
+  fast_pair_repository_->WriteAccountAssociationToFootprints(device,
+                                                             kAccountKey1);
+  base::RunLoop().RunUntilIdle();
+  ASSERT_TRUE(footprints_fetcher_->ContainsKey(kAccountKey1));
+  ASSERT_TRUE(
+      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
+
+  auto run_loop = base::RunLoop();
+
+  fast_pair_repository_->UpdateAssociatedDeviceFootprintsName(
+      kTestClassicAddress1, kDeviceDisplayName2, /*cache_may_be_stale=*/true);
+  base::RunLoop().RunUntilIdle();
+
+  // Check for the device, this will load the device into the cache.
+  fast_pair_repository_->CheckAccountKeys(
+      filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
+                             base::Unretained(this), run_loop.QuitClosure(),
+                             /*expected_result=*/true));
+  base::RunLoop().RunUntilIdle();
+  device->set_display_name(fast_pair_repository_->GetDeviceDisplayNameFromCache(
+      device->account_key().value()));
+  ASSERT_EQ(device->display_name(), kDeviceDisplayName2);
+}
+
+TEST_F(FastPairRepositoryImplTest,
+       UpdateAssociatedDeviceFootprintsName_No_Matching_Account_key) {
+  AccountKeyFilter filter(kFilterBytes1, {salt});
+
+  auto device = base::MakeRefCounted<Device>(kValidModelId, kTestBLEAddress,
+                                             Protocol::kFastPairInitial);
+  device->set_classic_address(kTestClassicAddress1);
+  device->set_account_key(kAccountKey1);
+  fast_pair_repository_->UpdateAssociatedDeviceFootprintsName(
+      kTestClassicAddress1, kDeviceDisplayName2, /*cache_may_be_stale=*/true);
+  base::RunLoop().RunUntilIdle();
+
+  auto run_loop = base::RunLoop();
+
+  // Check for the device, this will load the device into the cache.
+  fast_pair_repository_->CheckAccountKeys(
+      filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
+                             base::Unretained(this), run_loop.QuitClosure(),
+                             /*expected_result=*/false));
+
+  device->set_display_name(fast_pair_repository_->GetDeviceDisplayNameFromCache(
+      device->account_key().value()));
 }
 
 TEST_F(FastPairRepositoryImplTest, LocalRemoveDeviceUpdatesCache) {
@@ -528,7 +632,7 @@ TEST_F(FastPairRepositoryImplTest, LocalRemoveDeviceUpdatesCache) {
 
   auto run_loop = base::RunLoop();
 
-  // Check for the device, this will also load the device into the cache
+  // Check for the device, this will also load the device into the cache.
   fast_pair_repository_->CheckAccountKeys(
       filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
                              base::Unretained(this), run_loop.QuitClosure(),
@@ -607,14 +711,14 @@ TEST_F(FastPairRepositoryImplTest, AssociateAccountKeyAndCheckName) {
 
   auto run_loop = base::RunLoop();
 
-  // Check for the device, this will load the device into the cache
+  // Check for the device, this will load the device into the cache.
   fast_pair_repository_->CheckAccountKeys(
       filter, base::BindOnce(&FastPairRepositoryImplTest::VerifyAccountKeyCheck,
                              base::Unretained(this), run_loop.QuitClosure(),
                              /*expected_result=*/true));
   run_loop.Run();
 
-  // Device Account Key is set for testing purposes only
+  // Device Account Key is set for testing purposes only.
   device->set_account_key(kAccountKey1);
   device->set_display_name(fast_pair_repository_->GetDeviceDisplayNameFromCache(
       device->account_key().value()));
@@ -735,6 +839,7 @@ TEST_F(FastPairRepositoryImplTest, RetriesForgetDevice_AfterNetworkAvailable) {
 
   base::MockCallback<base::OnceCallback<void(bool)>> callback;
   EXPECT_CALL(callback, Run(testing::Eq(false))).Times(1);
+
   // Mock an error due to Network failure.
   footprints_fetcher_->SetDeleteUserDeviceResult(false);
   fast_pair_repository_->DeleteAssociatedDevice(
@@ -788,7 +893,15 @@ TEST_F(FastPairRepositoryImplTest, RetriesForgetDevice_AfterNetworkAvailable) {
   ASSERT_EQ(0u, pending_write_store_->GetPendingDeletes().size());
 }
 
-TEST_F(FastPairRepositoryImplTest, RetriesForgetDevice_AlreadyDeleted) {
+// TODO(crbug.com/40264951): Re-enable this test
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_RetriesForgetDevice_AlreadyDeleted \
+  DISABLED_RetriesForgetDevice_AlreadyDeleted
+#else
+#define MAYBE_RetriesForgetDevice_AlreadyDeleted \
+  RetriesForgetDevice_AlreadyDeleted
+#endif
+TEST_F(FastPairRepositoryImplTest, MAYBE_RetriesForgetDevice_AlreadyDeleted) {
   auto device = base::MakeRefCounted<Device>(kValidModelId, kTestBLEAddress,
                                              Protocol::kFastPairInitial);
   device->set_classic_address(kTestClassicAddress1);
@@ -806,6 +919,7 @@ TEST_F(FastPairRepositoryImplTest, RetriesForgetDevice_AlreadyDeleted) {
 
   base::MockCallback<base::OnceCallback<void(bool)>> callback;
   EXPECT_CALL(callback, Run(testing::Eq(false))).Times(1);
+
   // Mock an error due to Network failure.
   footprints_fetcher_->SetDeleteUserDeviceResult(false);
   fast_pair_repository_->DeleteAssociatedDevice(
@@ -875,6 +989,7 @@ TEST_F(FastPairRepositoryImplTest, RetriesForgetDevice_MultipleDevices) {
 
   base::MockCallback<base::OnceCallback<void(bool)>> callback1;
   EXPECT_CALL(callback1, Run(testing::Eq(false))).Times(1);
+
   // Mock an error due to Network failure for device1.
   footprints_fetcher_->SetDeleteUserDeviceResult(false);
   fast_pair_repository_->DeleteAssociatedDevice(kTestClassicAddress1,
@@ -889,6 +1004,7 @@ TEST_F(FastPairRepositoryImplTest, RetriesForgetDevice_MultipleDevices) {
 
   base::MockCallback<base::OnceCallback<void(bool)>> callback2;
   EXPECT_CALL(callback2, Run(testing::Eq(false))).Times(1);
+
   // Mock an error due to Network failure for device2.
   footprints_fetcher_->SetDeleteUserDeviceResult(false);
   fast_pair_repository_->DeleteAssociatedDevice(kTestClassicAddress2,
@@ -1062,7 +1178,13 @@ TEST_F(FastPairRepositoryImplTest, EvictDeviceImages) {
   ASSERT_FALSE(device_image_store_->GetImagesForDeviceModel(kValidModelId));
 }
 
-TEST_F(FastPairRepositoryImplTest, UpdateOptInStatus_OptedIn) {
+// TODO(crbug.com/40264951): Re-enable this test
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_UpdateOptInStatus_OptedIn DISABLED_UpdateOptInStatus_OptedIn
+#else
+#define MAYBE_UpdateOptInStatus_OptedIn UpdateOptInStatus_OptedIn
+#endif
+TEST_F(FastPairRepositoryImplTest, MAYBE_UpdateOptInStatus_OptedIn) {
   base::MockCallback<base::OnceCallback<void(bool)>> callback1;
   EXPECT_CALL(callback1, Run(true)).Times(1);
   fast_pair_repository_->UpdateOptInStatus(
@@ -1092,7 +1214,14 @@ TEST_F(FastPairRepositoryImplTest, UpdateOptInStatus_OptedOut) {
   fast_pair_repository_->CheckOptInStatus(callback2.Get());
 }
 
-TEST_F(FastPairRepositoryImplTest, UpdateOptInStatus_StatusUnknown) {
+// TODO(crbug.com/40264951): Re-enable this test
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_UpdateOptInStatus_StatusUnknown \
+  DISABLED_UpdateOptInStatus_StatusUnknown
+#else
+#define MAYBE_UpdateOptInStatus_StatusUnknown UpdateOptInStatus_StatusUnknown
+#endif
+TEST_F(FastPairRepositoryImplTest, MAYBE_UpdateOptInStatus_StatusUnknown) {
   base::MockCallback<base::OnceCallback<void(bool)>> callback1;
   EXPECT_CALL(callback1, Run(true)).Times(1);
   fast_pair_repository_->UpdateOptInStatus(
@@ -1108,7 +1237,7 @@ TEST_F(FastPairRepositoryImplTest, UpdateOptInStatus_StatusUnknown) {
 }
 
 TEST_F(FastPairRepositoryImplTest, UpdateOptInStatus_NoFootprintsResponse) {
-  footprints_fetcher_->SetGetUserDevicesResponse(absl::nullopt);
+  footprints_fetcher_->SetGetUserDevicesResponse(std::nullopt);
   base::MockCallback<base::OnceCallback<void(nearby::fastpair::OptInStatus)>>
       callback;
   EXPECT_CALL(callback,
@@ -1117,7 +1246,16 @@ TEST_F(FastPairRepositoryImplTest, UpdateOptInStatus_NoFootprintsResponse) {
   fast_pair_repository_->CheckOptInStatus(callback.Get());
 }
 
-TEST_F(FastPairRepositoryImplTest, UpdateOptInStatus_OptedInUpdateFailed) {
+// TODO(crbug.com/40264951): Re-enable this test
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_UpdateOptInStatus_OptedInUpdateFailed \
+  DISABLED_UpdateOptInStatus_OptedInUpdateFailed
+#else
+#define MAYBE_UpdateOptInStatus_OptedInUpdateFailed \
+  UpdateOptInStatus_OptedInUpdateFailed
+#endif
+TEST_F(FastPairRepositoryImplTest,
+       MAYBE_UpdateOptInStatus_OptedInUpdateFailed) {
   footprints_fetcher_->SetAddUserFastPairInfoResult(/*add_user_result=*/false);
   base::MockCallback<base::OnceCallback<void(bool)>> callback1;
   EXPECT_CALL(callback1, Run(false)).Times(1);
@@ -1215,7 +1353,7 @@ TEST_F(FastPairRepositoryImplTest, GetSavedDevices_MissingResponse) {
                                        /*success=*/true, 0);
   histogram_tester().ExpectBucketCount(kSavedDeviceGetDevicesResultMetricName,
                                        /*success=*/false, 0);
-  footprints_fetcher_->SetGetUserDevicesResponse(absl::nullopt);
+  footprints_fetcher_->SetGetUserDevicesResponse(std::nullopt);
   fast_pair_repository_->GetSavedDevices(
       base::BindOnce(&FastPairRepositoryImplTest::GetSavedDevicesCallback,
                      weak_ptr_factory_.GetWeakPtr()));
@@ -1247,8 +1385,16 @@ TEST_F(FastPairRepositoryImplTest,
   EXPECT_FALSE(fast_pair_repository_->IsAccountKeyPairedLocally(kAccountKey2));
 }
 
+// TODO(crbug.com/40264951): Re-enable this test
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_IsAccountKeyPairedLocally_PairedNotSavedLocally \
+  DISABLED_IsAccountKeyPairedLocally_PairedNotSavedLocally
+#else
+#define MAYBE_IsAccountKeyPairedLocally_PairedNotSavedLocally \
+  IsAccountKeyPairedLocally_PairedNotSavedLocally
+#endif
 TEST_F(FastPairRepositoryImplTest,
-       IsAccountKeyPairedLocally_PairedNotSavedLocally) {
+       MAYBE_IsAccountKeyPairedLocally_PairedNotSavedLocally) {
   // Simulate a device saved to a user's account that matches a device paired
   // with devices |adapter_| is loaded with. In the init of the |adapter_|, we
   // mocked `GetDevices` with |device_list_|.
@@ -1322,7 +1468,16 @@ TEST_F(FastPairRepositoryImplTest,
   base::RunLoop().RunUntilIdle();
 }
 
-TEST_F(FastPairRepositoryImplTest, IsDeviceSavedToAccount_IgnoreForgetPattern) {
+// TODO(crbug.com/40264951): Re-enable this test
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_IsDeviceSavedToAccount_IgnoreForgetPattern \
+  DISABLED_IsDeviceSavedToAccount_IgnoreForgetPattern
+#else
+#define MAYBE_IsDeviceSavedToAccount_IgnoreForgetPattern \
+  IsDeviceSavedToAccount_IgnoreForgetPattern
+#endif
+TEST_F(FastPairRepositoryImplTest,
+       MAYBE_IsDeviceSavedToAccount_IgnoreForgetPattern) {
   // In this test, we use a known "marked as forgotten" hash
   // from Android. Note that Android also leaves the account key
   // blank; however, we add an account key here to test the logic
@@ -1366,7 +1521,7 @@ TEST_F(FastPairRepositoryImplTest, IsDeviceSavedToAccount_NoMatch) {
 }
 
 TEST_F(FastPairRepositoryImplTest, IsDeviceSavedToAccount_MissingResponse) {
-  footprints_fetcher_->SetGetUserDevicesResponse(absl::nullopt);
+  footprints_fetcher_->SetGetUserDevicesResponse(std::nullopt);
 
   base::MockCallback<base::OnceCallback<void(bool)>> callback;
   EXPECT_CALL(callback, Run(testing::Eq(false))).Times(1);
@@ -1395,7 +1550,15 @@ TEST_F(FastPairRepositoryImplTest, IsDeviceSavedToAccount_MissingAccountKey) {
   base::RunLoop().RunUntilIdle();
 }
 
-TEST_F(FastPairRepositoryImplTest, IsDeviceSavedToAccount_MissingSha) {
+// TODO(crbug.com/40264951): Re-enable this test
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_IsDeviceSavedToAccount_MissingSha \
+  DISABLED_IsDeviceSavedToAccount_MissingSha
+#else
+#define MAYBE_IsDeviceSavedToAccount_MissingSha \
+  IsDeviceSavedToAccount_MissingSha
+#endif
+TEST_F(FastPairRepositoryImplTest, MAYBE_IsDeviceSavedToAccount_MissingSha) {
   nearby::fastpair::FastPairInfo info;
   auto* device = info.mutable_device();
   device->set_account_key(
@@ -1458,14 +1621,21 @@ TEST_F(FastPairRepositoryImplTest,
                                                              kAccountKey1);
   base::RunLoop().RunUntilIdle();
   ASSERT_TRUE(footprints_fetcher_->ContainsKey(kAccountKey1));
-  ASSERT_TRUE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
 
   // After a successful Footprints write, pending writes list should be empty.
   ASSERT_EQ(0u, pending_write_store_->GetPendingWrites().size());
 }
 
-TEST_F(FastPairRepositoryImplTest, RetriesWriteDevice_AfterNetworkAvailable) {
+// TODO(crbug.com/40264951): Re-enable this test
+#if defined(MEMORY_SANITIZER)
+#define MAYBE_RetriesWriteDevice_AfterNetworkAvailable \
+  DISABLED_RetriesWriteDevice_AfterNetworkAvailable
+#else
+#define MAYBE_RetriesWriteDevice_AfterNetworkAvailable \
+  RetriesWriteDevice_AfterNetworkAvailable
+#endif
+TEST_F(FastPairRepositoryImplTest,
+       MAYBE_RetriesWriteDevice_AfterNetworkAvailable) {
   auto device = base::MakeRefCounted<Device>(kValidModelId, kTestBLEAddress,
                                              Protocol::kFastPairInitial);
   device->set_classic_address(kTestClassicAddress1);
@@ -1479,11 +1649,10 @@ TEST_F(FastPairRepositoryImplTest, RetriesWriteDevice_AfterNetworkAvailable) {
   base::RunLoop().RunUntilIdle();
 
   // The failed write should save as pending write.
-  ASSERT_FALSE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
   std::vector<PendingWriteStore::PendingWrite> pending_writes =
       pending_write_store_->GetPendingWrites();
   ASSERT_EQ(1u, pending_writes.size());
+  ASSERT_FALSE(footprints_fetcher_->ContainsKey(kAccountKey1));
 
   // Parse device account key from device fast pair info.
   const std::string& account_key_str =
@@ -1502,9 +1671,8 @@ TEST_F(FastPairRepositoryImplTest, RetriesWriteDevice_AfterNetworkAvailable) {
   base::RunLoop().RunUntilIdle();
 
   // The write should still be pending after a failed retry.
-  ASSERT_FALSE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
   ASSERT_EQ(1u, pending_write_store_->GetPendingWrites().size());
+  ASSERT_FALSE(footprints_fetcher_->ContainsKey(kAccountKey1));
 
   // Reconnect to the Network, but within the 1 minute timeout.
   footprints_fetcher_->SetAddUserFastPairInfoResult(true);
@@ -1513,9 +1681,8 @@ TEST_F(FastPairRepositoryImplTest, RetriesWriteDevice_AfterNetworkAvailable) {
   base::RunLoop().RunUntilIdle();
 
   // Since we don't try within 1 minute, the write should still be pending.
-  ASSERT_FALSE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
   ASSERT_EQ(1u, pending_write_store_->GetPendingWrites().size());
+  ASSERT_FALSE(footprints_fetcher_->ContainsKey(kAccountKey1));
 
   // Mock waiting out the 1 minute timeout.
   task_environment()->FastForwardBy(base::Minutes(1));
@@ -1528,9 +1695,8 @@ TEST_F(FastPairRepositoryImplTest, RetriesWriteDevice_AfterNetworkAvailable) {
   base::RunLoop().RunUntilIdle();
 
   // The write, after a successful retry, should no longer be pending.
-  ASSERT_TRUE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
   ASSERT_EQ(0u, pending_write_store_->GetPendingWrites().size());
+  ASSERT_TRUE(footprints_fetcher_->ContainsKey(kAccountKey1));
 }
 
 TEST_F(FastPairRepositoryImplTest,
@@ -1548,11 +1714,10 @@ TEST_F(FastPairRepositoryImplTest,
   base::RunLoop().RunUntilIdle();
 
   // The failed write should save as pending write.
-  ASSERT_FALSE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
   std::vector<PendingWriteStore::PendingWrite> pending_writes =
       pending_write_store_->GetPendingWrites();
   ASSERT_EQ(1u, pending_writes.size());
+  ASSERT_FALSE(footprints_fetcher_->ContainsKey(kAccountKey1));
 
   // Mock waiting out the 1 minute timeout.
   task_environment()->FastForwardBy(base::Minutes(1));
@@ -1565,8 +1730,6 @@ TEST_F(FastPairRepositoryImplTest,
   base::RunLoop().RunUntilIdle();
 
   // The write, after a successful retry, should no longer be pending.
-  ASSERT_TRUE(
-      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
   ASSERT_EQ(0u, pending_write_store_->GetPendingWrites().size());
   ASSERT_TRUE(footprints_fetcher_->ContainsKey(kAccountKey1));
 
@@ -1576,6 +1739,21 @@ TEST_F(FastPairRepositoryImplTest,
                 kRetroactiveSuccessFunnelMetric,
                 FastPairRetroactiveSuccessFunnelEvent::kSaveComplete),
             0);
+}
+
+// `WriteAccountAssociationToFootprints()` previously wrote the association
+// locally as well. This unit test ensures it does not anymore.
+TEST_F(FastPairRepositoryImplTest,
+       AccountAssociationWriteToFootprints_NoLocalWrite) {
+  auto device = base::MakeRefCounted<Device>(kValidModelId, kTestBLEAddress,
+                                             Protocol::kFastPairRetroactive);
+  device->set_classic_address(kTestClassicAddress1);
+  device->set_display_name(kDeviceDisplayName);
+  fast_pair_repository_->WriteAccountAssociationToFootprints(device,
+                                                             kAccountKey1);
+  ASSERT_TRUE(footprints_fetcher_->ContainsKey(kAccountKey1));
+  ASSERT_FALSE(
+      saved_device_registry_->IsAccountKeySavedToRegistry(kAccountKey1));
 }
 
 }  // namespace quick_pair

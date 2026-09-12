@@ -8,38 +8,31 @@
 #include <utility>
 
 #include "base/memory/unsafe_shared_memory_region.h"
+#include "base/memory/weak_ptr.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
 #include "gpu/command_buffer/common/constants.h"
-#include "gpu/command_buffer/common/gpu_memory_buffer_support.h"
 #include "gpu/command_buffer/common/mailbox.h"
 #include "gpu/command_buffer/service/gl_context_virtual.h"
 #include "gpu/command_buffer/service/logger.h"
-#include "gpu/command_buffer/service/mailbox_manager.h"
 #include "gpu/command_buffer/service/memory_tracking.h"
 #include "gpu/command_buffer/service/raster_decoder.h"
+#include "gpu/command_buffer/service/scheduler.h"
 #include "gpu/command_buffer/service/service_utils.h"
-#include "gpu/command_buffer/service/sync_point_manager.h"
 #include "gpu/command_buffer/service/transfer_buffer_manager.h"
 #include "gpu/config/gpu_crash_keys.h"
 #include "gpu/ipc/service/gpu_channel.h"
 #include "gpu/ipc/service/gpu_channel_manager.h"
 #include "gpu/ipc/service/gpu_channel_manager_delegate.h"
-#include "gpu/ipc/service/gpu_memory_buffer_factory.h"
 #include "gpu/ipc/service/gpu_watchdog_thread.h"
 #include "ui/gl/gl_bindings.h"
 #include "ui/gl/gl_context.h"
 #include "ui/gl/gl_implementation.h"
 #include "ui/gl/gl_switches.h"
-#include "ui/gl/gl_workarounds.h"
 #include "ui/gl/init/gl_factory.h"
 
 #if BUILDFLAG(IS_WIN)
 #include "base/win/win_util.h"
-#endif
-
-#if BUILDFLAG(IS_ANDROID)
-#include "gpu/ipc/service/stream_texture_android.h"
 #endif
 
 namespace gpu {
@@ -61,7 +54,6 @@ RasterCommandBufferStub::RasterCommandBufferStub(
 RasterCommandBufferStub::~RasterCommandBufferStub() {}
 
 gpu::ContextResult RasterCommandBufferStub::Initialize(
-    CommandBufferStub* share_command_buffer_stub,
     const mojom::CreateCommandBufferParams& init_params,
     base::UnsafeSharedMemoryRegion shared_state_shm) {
   TRACE_EVENT0("gpu", "RasterBufferStub::Initialize");
@@ -69,25 +61,6 @@ gpu::ContextResult RasterCommandBufferStub::Initialize(
 
   GpuChannelManager* manager = channel_->gpu_channel_manager();
   DCHECK(manager);
-
-  if (share_command_buffer_stub) {
-    LOG(ERROR) << "Using a share group is not supported with RasterDecoder";
-    return ContextResult::kFatalFailure;
-  }
-
-  if (surface_handle_ != kNullSurfaceHandle) {
-    LOG(ERROR) << "ContextResult::kFatalFailure: "
-                  "RasterInterface clients must render offscreen.";
-    return ContextResult::kFatalFailure;
-  }
-
-  if (init_params.attribs.gpu_preference != gl::GpuPreference::kLowPower ||
-      init_params.attribs.context_type != CONTEXT_TYPE_OPENGLES2 ||
-      init_params.attribs.bind_generates_resource) {
-    LOG(ERROR) << "ContextResult::kFatalFailure: Incompatible creation attribs "
-                  "used with RasterDecoder";
-    return ContextResult::kFatalFailure;
-  }
 
   ContextResult result;
   auto shared_context_state = manager->GetSharedContextState(&result);
@@ -102,26 +75,21 @@ gpu::ContextResult RasterCommandBufferStub::Initialize(
 
   surface_ = shared_context_state->surface();
   share_group_ = shared_context_state->share_group();
-  use_virtualized_gl_context_ =
-      shared_context_state->use_virtualized_gl_contexts();
 
   memory_tracker_ = CreateMemoryTracker();
 
   command_buffer_ =
       std::make_unique<CommandBufferService>(this, memory_tracker_.get());
-  std::unique_ptr<raster::RasterDecoder> decoder(raster::RasterDecoder::Create(
-      this, command_buffer_.get(), manager->outputter(),
-      manager->gpu_feature_info(), manager->gpu_preferences(),
-      memory_tracker_.get(), manager->shared_image_manager(),
-      shared_context_state, channel()->is_gpu_host()));
+  std::unique_ptr<raster::RasterDecoder> decoder =
+      raster::RasterDecoder::Create(
+          this, command_buffer_.get(), manager->outputter(),
+          manager->gpu_feature_info(), manager->gpu_preferences(),
+          memory_tracker_, manager->shared_image_manager(),
+          shared_context_state, channel()->is_gpu_host());
 
-  sync_point_client_state_ =
-      channel_->sync_point_manager()->CreateSyncPointClientState(
-          CommandBufferNamespace::GPU_IO, command_buffer_id_, sequence_id_);
-
-  // TODO(sunnyps): Should this use ScopedCrashKey instead?
-  crash_keys::gpu_gl_context_is_virtual.Set(use_virtualized_gl_context_ ? "1"
-                                                                        : "0");
+  scoped_sync_point_client_state_ =
+      channel_->scheduler()->CreateSyncPointClientState(
+          sequence_id_, CommandBufferNamespace::GPU_IO, command_buffer_id_);
 
   scoped_refptr<gl::GLContext> context = shared_context_state->context();
   if (!shared_context_state->MakeCurrent(nullptr, false /* needs_gl */)) {
@@ -131,9 +99,7 @@ gpu::ContextResult RasterCommandBufferStub::Initialize(
   }
 
   // Initialize the decoder with either the view or pbuffer GLContext.
-  result = decoder->Initialize(surface_, context, true /* offscreen */,
-                               gpu::gles2::DisallowedFeatures(),
-                               init_params.attribs);
+  result = decoder->Initialize(/*lose_context_when_out_of_memory=*/true);
   if (result != gpu::ContextResult::kSuccess) {
     DLOG(ERROR) << "Failed to initialize decoder.";
     return result;
@@ -163,11 +129,9 @@ gpu::ContextResult RasterCommandBufferStub::Initialize(
   return gpu::ContextResult::kSuccess;
 }
 
-MemoryTracker* RasterCommandBufferStub::GetContextGroupMemoryTracker() const {
-  return nullptr;
+base::WeakPtr<CommandBufferStub> RasterCommandBufferStub::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
-
-void RasterCommandBufferStub::OnSwapBuffers(uint64_t swap_id, uint32_t flags) {}
 
 void RasterCommandBufferStub::SetActiveURL(GURL url) {
   active_url_ = ContextUrl(std::move(url));

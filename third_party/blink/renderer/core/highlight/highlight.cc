@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/core/highlight/highlight.h"
 
+#include "base/notimplemented.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -24,8 +25,9 @@ Highlight::~Highlight() = default;
 
 void Highlight::Trace(blink::Visitor* visitor) const {
   visitor->Trace(highlight_ranges_);
+  visitor->Trace(active_iterators_);
   visitor->Trace(containing_highlight_registries_);
-  EventTargetWithInlineData::Trace(visitor);
+  ScriptWrappable::Trace(visitor);
 }
 
 void Highlight::ScheduleRepaintsInContainingHighlightRegistries() const {
@@ -39,12 +41,14 @@ void Highlight::ScheduleRepaintsInContainingHighlightRegistries() const {
 Highlight* Highlight::addForBinding(ScriptState*,
                                     AbstractRange* range,
                                     ExceptionState&) {
-  if (highlight_ranges_.insert(range).is_new_entry)
+  if (highlight_ranges_.insert(range).is_new_entry) {
     ScheduleRepaintsInContainingHighlightRegistries();
+  }
   return this;
 }
 
 void Highlight::clearForBinding(ScriptState*, ExceptionState&) {
+  NotifyIteratorsWillClear();
   highlight_ranges_.clear();
   ScheduleRepaintsInContainingHighlightRegistries();
 }
@@ -54,6 +58,7 @@ bool Highlight::deleteForBinding(ScriptState*,
                                  ExceptionState&) {
   auto iterator = highlight_ranges_.find(range);
   if (iterator != highlight_ranges_.end()) {
+    NotifyIteratorsWillRemoveItem(range);
     highlight_ranges_.erase(iterator);
     ScheduleRepaintsInContainingHighlightRegistries();
     return true;
@@ -80,18 +85,6 @@ bool Highlight::Contains(AbstractRange* range) const {
   return highlight_ranges_.Contains(range);
 }
 
-const AtomicString& Highlight::InterfaceName() const {
-  // TODO(crbug.com/1346693)
-  NOTIMPLEMENTED();
-  return g_null_atom;
-}
-
-ExecutionContext* Highlight::GetExecutionContext() const {
-  // TODO(crbug.com/1346693)
-  NOTIMPLEMENTED();
-  return nullptr;
-}
-
 void Highlight::RegisterIn(HighlightRegistry* highlight_registry) {
   auto map_iterator = containing_highlight_registries_.find(highlight_registry);
   if (map_iterator == containing_highlight_registries_.end()) {
@@ -104,38 +97,52 @@ void Highlight::RegisterIn(HighlightRegistry* highlight_registry) {
 
 void Highlight::DeregisterFrom(HighlightRegistry* highlight_registry) {
   auto map_iterator = containing_highlight_registries_.find(highlight_registry);
-  DCHECK_NE(map_iterator, containing_highlight_registries_.end());
+  CHECK_NE(map_iterator, containing_highlight_registries_.end());
   DCHECK_GT(map_iterator->value, 0u);
   if (--map_iterator->value == 0)
     containing_highlight_registries_.erase(map_iterator);
 }
 
-Highlight::IterationSource::IterationSource(const Highlight& highlight)
-    : index_(0) {
-  highlight_ranges_snapshot_.ReserveInitialCapacity(
-      highlight.highlight_ranges_.size());
-  for (const auto& range : highlight.highlight_ranges_) {
-    highlight_ranges_snapshot_.push_back(range);
-  }
+Highlight::IterationSource::IterationSource(Highlight& highlight)
+    : highlight_(&highlight) {
+  highlight.active_iterators_.insert(this);
 }
 
 bool Highlight::IterationSource::FetchNextItem(ScriptState*,
-                                               AbstractRange*& value,
-                                               ExceptionState&) {
-  if (index_ >= highlight_ranges_snapshot_.size())
+                                               AbstractRange*& value) {
+  AbstractRange* entry = AdvanceAndGetNext(highlight_->highlight_ranges_,
+                                           highlight_->active_iterators_);
+  if (!entry) {
     return false;
-  value = highlight_ranges_snapshot_[index_++];
+  }
+  value = entry;
   return true;
 }
 
 void Highlight::IterationSource::Trace(blink::Visitor* visitor) const {
-  visitor->Trace(highlight_ranges_snapshot_);
+  visitor->Trace(highlight_);
+  HighlightLiveIterator::Trace(visitor);
   HighlightSetIterable::IterationSource::Trace(visitor);
 }
 
+void Highlight::NotifyIteratorsWillRemoveItem(AbstractRange* range) {
+  for (auto& iter : active_iterators_) {
+    if (iter) {
+      iter->WillRemoveEntry(range, highlight_ranges_);
+    }
+  }
+}
+
+void Highlight::NotifyIteratorsWillClear() {
+  for (auto& iter : active_iterators_) {
+    if (iter) {
+      iter->WillClear();
+    }
+  }
+}
+
 HighlightSetIterable::IterationSource* Highlight::CreateIterationSource(
-    ScriptState*,
-    ExceptionState&) {
+    ScriptState*) {
   return MakeGarbageCollected<IterationSource>(*this);
 }
 

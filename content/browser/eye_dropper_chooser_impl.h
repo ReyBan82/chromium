@@ -7,6 +7,8 @@
 
 #include <memory>
 
+#include "base/memory/weak_ptr.h"
+#include "content/common/content_export.h"
 #include "content/public/browser/document_service.h"
 #include "content/public/browser/eye_dropper_listener.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
@@ -17,7 +19,7 @@ namespace content {
 class EyeDropper;
 class EyeDropperListener;
 
-class EyeDropperChooserImpl final
+class CONTENT_EXPORT EyeDropperChooserImpl final
     : public DocumentService<blink::mojom::EyeDropperChooser>,
       public EyeDropperListener {
  public:
@@ -40,8 +42,13 @@ class EyeDropperChooserImpl final
 
   ~EyeDropperChooserImpl() override;
 
+  // Clears this instance as its WebContents' active eye dropper, if it is the
+  // active one.
+  void ClearActiveEyeDropper();
+
   ChooseCallback callback_;
   std::unique_ptr<EyeDropper> eye_dropper_;
+  base::WeakPtrFactory<EyeDropperChooserImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace content

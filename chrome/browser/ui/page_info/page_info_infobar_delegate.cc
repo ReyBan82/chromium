@@ -12,19 +12,22 @@
 #include "components/infobars/core/infobar.h"
 #include "components/strings/grit/components_strings.h"
 #include "components/vector_icons/vector_icons.h"
+#include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/reload_type.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
 
 // static
 void PageInfoInfoBarDelegate::Create(
     infobars::ContentInfoBarManager* infobar_manager) {
   infobar_manager->AddInfoBar(CreateConfirmInfoBar(
-      std::unique_ptr<ConfirmInfoBarDelegate>(new PageInfoInfoBarDelegate())));
+      base::WrapUnique<ConfirmInfoBarDelegate>(new PageInfoInfoBarDelegate())));
 }
 
-PageInfoInfoBarDelegate::PageInfoInfoBarDelegate() : ConfirmInfoBarDelegate() {}
+PageInfoInfoBarDelegate::PageInfoInfoBarDelegate() = default;
 
-PageInfoInfoBarDelegate::~PageInfoInfoBarDelegate() {}
+PageInfoInfoBarDelegate::~PageInfoInfoBarDelegate() = default;
 
 infobars::InfoBarDelegate::InfoBarIdentifier
 PageInfoInfoBarDelegate::GetIdentifier() const {
@@ -32,7 +35,9 @@ PageInfoInfoBarDelegate::GetIdentifier() const {
 }
 
 const gfx::VectorIcon& PageInfoInfoBarDelegate::GetVectorIcon() const {
-  return vector_icons::kSettingsIcon;
+  return features::IsRoundedIconsEnabled()
+             ? vector_icons::kSettingsIcon
+             : vector_icons::kSettingsChromeRefreshOldIcon;
 }
 
 std::u16string PageInfoInfoBarDelegate::GetMessageText() const {

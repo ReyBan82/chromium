@@ -2,24 +2,31 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "media/cdm/win/media_foundation_cdm.h"
 
 #include <mferror.h>
-
+#include <mfmediaengine.h>
 #include <stdlib.h>
+
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/notimplemented.h"
 #include "base/rand_util.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
+#include "base/synchronization/lock.h"
+#include "base/win/scoped_bstr.h"
 #include "base/win/scoped_co_mem.h"
 #include "base/win/scoped_propvariant.h"
 #include "base/win/win_util.h"
 #include "base/win/windows_version.h"
 #include "media/base/cdm_promise.h"
+#include "media/base/media_switches.h"
 #include "media/base/win/hresults.h"
 #include "media/base/win/media_foundation_cdm_proxy.h"
 #include "media/base/win/mf_helpers.h"
@@ -36,6 +43,30 @@ using Microsoft::WRL::Make;
 using Microsoft::WRL::RuntimeClass;
 using Microsoft::WRL::RuntimeClassFlags;
 using Exception = CdmPromise::Exception;
+
+// Content type and key system used by SetContentProtectionWindow to set
+// the content protection HWND via IsTypeSupportedEx for PlayReady HWDRM.
+// The `.3000` (HWDRM) suffix is required. Media Foundation only stores
+// the HWND when the key system identifies a HWDRM pipeline.
+constexpr wchar_t kAdapterSelectionContentType[] =
+    L"video/mp4;codecs=\"av01.0.04M.08\"";
+constexpr wchar_t kAdapterSelectionKeySystem[] =
+    L"com.microsoft.playready.recommendation.3000";
+
+// The HDCP value follows the feature value in
+// https://docs.microsoft.com/en-us/uwp/api/windows.media.protection.protectioncapabilities.istypesupported?view=winrt-19041
+// Note that the public document says "HDCP 2.2 Type 1" but it should be
+// "HDCP 2.1 Type 1" instead.
+// - 0 (off)
+// - 1 (on without HDCP 2.1 Type 1 restriction; HDCP < 2.1)
+// - 2 (on with HDCP 2.1 Type 1 restriction; HDCP >= 2.1)
+enum class HdcpValue {
+  kHdcpNotSupported = -1,
+  kHdcpAlawaysSupported = 0,
+  kHdcp1 = 1,
+  kHdcp2 = 2,
+  kMaxValue = kHdcp2
+};
 
 HRESULT CreatePolicySetEvent(ComPtr<IMFMediaEvent>& policy_set_event) {
   base::win::ScopedPropVariant policy_set_prop;
@@ -91,26 +122,27 @@ HRESULT RefreshDecryptor(IMFTransform* decryptor,
   return S_OK;
 }
 
-// The HDCP value follows the feature value in
-// https://docs.microsoft.com/en-us/uwp/api/windows.media.protection.protectioncapabilities.istypesupported?view=winrt-19041
-// - 0 (off)
-// - 1 (on without HDCP 2.2 Type 1 restriction)
-// - 2 (on with HDCP 2.2 Type 1 restriction)
-int GetHdcpValue(HdcpVersion hdcp_version) {
+HdcpValue GetHdcpValue(HdcpVersion hdcp_version) {
   switch (hdcp_version) {
     case HdcpVersion::kHdcpVersionNone:
-      return 0;
+      // Keys should be always usable since there is no HDCP requirement.
+      return HdcpValue::kHdcpAlawaysSupported;
     case HdcpVersion::kHdcpVersion1_0:
+      // HDCP Type 0 (HDCP version < 2.2): Minimum HDCP version is 1.0
+      return HdcpValue::kHdcp1;
     case HdcpVersion::kHdcpVersion1_1:
     case HdcpVersion::kHdcpVersion1_2:
     case HdcpVersion::kHdcpVersion1_3:
     case HdcpVersion::kHdcpVersion1_4:
     case HdcpVersion::kHdcpVersion2_0:
     case HdcpVersion::kHdcpVersion2_1:
-      return 1;
     case HdcpVersion::kHdcpVersion2_2:
+      // HDCP Type 1 (HDCP version >= 2.2): Minimum HDCP version is 2.2
+      return HdcpValue::kHdcp2;
     case HdcpVersion::kHdcpVersion2_3:
-      return 2;
+      // IsTypeSupported cannot differentiate between HDCP 2.2 and 2.3. For now,
+      // we treat HDCP 2.3 as not supported.
+      return HdcpValue::kHdcpNotSupported;
   }
 }
 
@@ -119,8 +151,50 @@ int GetHdcpValue(HdcpVersion hdcp_version) {
 // the generated session ID is `DUMMY_9F656F4D76BE30D4`.
 std::string GenerateDummySessionId() {
   uint8_t random_bytes[8];
-  base::RandBytes(random_bytes, sizeof(random_bytes));
-  return "DUMMY_" + base::HexEncode(random_bytes, sizeof(random_bytes));
+  base::RandBytes(random_bytes);
+  return "DUMMY_" + base::HexEncode(random_bytes);
+}
+
+// Sets the content protection window for Media Foundation PlayReady
+// HWDRM GPU adapter selection so the crypto sessions are created on
+// the correct adapter.
+//
+// By setting `MF_MEDIA_ENGINE_COREWINDOW` on `IMFExtendedDRMTypeSupport`
+// and calling `IsTypeSupportedEx()` with a PlayReady hardware DRM key system,
+// this function provides Media Foundation with an HWND that it stores
+// in a process-global. When the crypto session is later created, Media
+// Foundation resolves this HWND to a monitor and GPU adapter to determine
+// which D3D device to use. Safe to call repeatedly (e.g. on hardware context
+// reset) with the same `virtual_core_window`.
+HRESULT SetContentProtectionWindow(
+    ComPtr<VirtualCoreWindowImpl> virtual_core_window) {
+  ComPtr<IMFExtendedDRMTypeSupport> mf_type_support;
+  RETURN_IF_FAILED(CoCreateInstance(CLSID_MFMediaEngineClassFactory, nullptr,
+                                    CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&mf_type_support)));
+
+  ComPtr<IMFAttributes> mf_type_support_attributes;
+  RETURN_IF_FAILED(mf_type_support.As(&mf_type_support_attributes));
+
+  ComPtr<IUnknown> core_window_unknown;
+  RETURN_IF_FAILED(virtual_core_window.As(&core_window_unknown));
+
+  RETURN_IF_FAILED(mf_type_support_attributes->SetUnknown(
+      MF_MEDIA_ENGINE_COREWINDOW, core_window_unknown.Get()));
+
+  base::win::ScopedBstr content_type_bstr(kAdapterSelectionContentType);
+  base::win::ScopedBstr key_system_bstr(kAdapterSelectionKeySystem);
+  MF_MEDIA_ENGINE_CANPLAY answer = MF_MEDIA_ENGINE_CANPLAY_NOT_SUPPORTED;
+
+  // Call IsTypeSupportedEx to store the HWND for adapter selection.
+  // The answer value doesn't matter; the goal is the side effect of MF
+  // storing the HWND internally for later adapter resolution.
+  RETURN_IF_FAILED(mf_type_support->IsTypeSupportedEx(
+      content_type_bstr.Get(), key_system_bstr.Get(), &answer));
+
+  DVLOG(1) << "SetContentProtectionWindow: "
+           << "IsTypeSupportedEx succeeded, answer=" << answer;
+  return S_OK;
 }
 
 class CdmProxyImpl : public MediaFoundationCdmProxy {
@@ -150,6 +224,7 @@ class CdmProxyImpl : public MediaFoundationCdmProxy {
                                  REFIID riid,
                                  IUnknown** object_out) override {
     DVLOG_FUNC(1);
+    base::AutoLock lock(lock_);
 
     if (input_trust_authorities_.count(stream_id)) {
       RETURN_IF_FAILED(input_trust_authorities_[stream_id].CopyTo(object_out));
@@ -179,12 +254,14 @@ class CdmProxyImpl : public MediaFoundationCdmProxy {
 
   HRESULT SetLastKeyId(uint32_t stream_id, REFGUID key_id) override {
     DVLOG_FUNC(1);
+    base::AutoLock lock(lock_);
     last_key_ids_[stream_id] = key_id;
     return S_OK;
   }
 
   HRESULT RefreshTrustedInput() override {
     DVLOG_FUNC(1);
+    base::AutoLock lock(lock_);
 
     // Refresh all decryptors of the last key IDs.
     for (const auto& entry : input_trust_authorities_) {
@@ -218,12 +295,18 @@ class CdmProxyImpl : public MediaFoundationCdmProxy {
   }
 
   void OnHardwareContextReset() override {
-    // Hardware context reset happens, all the crypto sessions are in invalid
-    // states. So drop everything here.
-    // TODO(xhwang): Keep the `last_key_ids_` here for faster resume.
-    trusted_input_.Reset();
-    input_trust_authorities_.clear();
-    last_key_ids_.clear();
+    {
+      base::AutoLock lock(lock_);
+      // Hardware context reset happens, all the crypto sessions are in invalid
+      // states. So drop everything here.
+      // TODO(xhwang): Keep the `last_key_ids_` here for faster resume.
+      trusted_input_.Reset();
+      input_trust_authorities_.clear();
+      last_key_ids_.clear();
+    }
+
+    // `CdmEvent::kHardwareContextReset` will be reported in
+    // `hardware_context_reset_cb_` below.
 
     // Must be the last call because `this` could be destructed when running
     // the callback. We are not certain because `this` is ref-counted.
@@ -234,8 +317,8 @@ class CdmProxyImpl : public MediaFoundationCdmProxy {
     cdm_event_cb_.Run(CdmEvent::kSignificantPlayback, S_OK);
   }
 
-  void OnPlaybackError(HRESULT hresult) override {
-    cdm_event_cb_.Run(CdmEvent::kPlaybackError, hresult);
+  void OnPlaybackError(HRESULT hr) override {
+    cdm_event_cb_.Run(CdmEvent::kPlaybackError, hr);
   }
 
  private:
@@ -264,17 +347,22 @@ class CdmProxyImpl : public MediaFoundationCdmProxy {
   base::RepeatingClosure hardware_context_reset_cb_;
   MediaFoundationCdm::CdmEventCB cdm_event_cb_;
 
+  // Lock to protect the mutable members. The data can be accessed from Chromium
+  // thread and MF thread pool threads.
+  base::Lock lock_;
+
   // Store IMFTrustedInput to avoid potential performance cost.
-  ComPtr<IMFTrustedInput> trusted_input_;
+  ComPtr<IMFTrustedInput> trusted_input_ GUARDED_BY(lock_);
 
   // |stream_id| to IMFInputTrustAuthority (ITA) mapping. Serves two purposes:
   // 1. The same ITA should always be returned in GetInputTrustAuthority() for
   // the same |stream_id|.
   // 2. The ITA must keep alive for decryptors to work.
-  std::map<uint32_t, ComPtr<IMFInputTrustAuthority>> input_trust_authorities_;
+  absl::flat_hash_map<uint32_t, ComPtr<IMFInputTrustAuthority>>
+      input_trust_authorities_ GUARDED_BY(lock_);
 
   // |stream_id| to last used key ID mapping.
-  std::map<uint32_t, GUID> last_key_ids_;
+  absl::flat_hash_map<uint32_t, GUID> last_key_ids_ GUARDED_BY(lock_);
 };
 
 }  // namespace
@@ -286,6 +374,7 @@ bool MediaFoundationCdm::IsAvailable() {
 
 MediaFoundationCdm::MediaFoundationCdm(
     const std::string& uma_prefix,
+    HWND content_protection_hwnd,
     const CreateMFCdmCB& create_mf_cdm_cb,
     const IsTypeSupportedCB& is_type_supported_cb,
     const StoreClientTokenCB& store_client_token_cb,
@@ -304,13 +393,25 @@ MediaFoundationCdm::MediaFoundationCdm(
       session_keys_change_cb_(session_keys_change_cb),
       session_expiration_update_cb_(session_expiration_update_cb) {
   DVLOG_FUNC(1);
-  DCHECK(!uma_prefix_.empty());
-  DCHECK(create_mf_cdm_cb_);
-  DCHECK(is_type_supported_cb_);
-  DCHECK(session_message_cb_);
-  DCHECK(session_closed_cb_);
-  DCHECK(session_keys_change_cb_);
-  DCHECK(session_expiration_update_cb_);
+  CHECK(!uma_prefix_.empty());
+  CHECK(create_mf_cdm_cb_);
+  CHECK(is_type_supported_cb_);
+  CHECK(session_message_cb_);
+  CHECK(session_closed_cb_);
+  CHECK(session_keys_change_cb_);
+  CHECK(session_expiration_update_cb_);
+
+  if (content_protection_hwnd &&
+      base::FeatureList::IsEnabled(kMediaFoundationMultiGpuAdapterSelection)) {
+    HRESULT hr = Microsoft::WRL::MakeAndInitialize<VirtualCoreWindowImpl>(
+        &virtual_core_window_, content_protection_hwnd);
+    if (FAILED(hr)) {
+      DVLOG(1) << __func__
+               << ": MakeAndInitialize<VirtualCoreWindowImpl> failed "
+                  "(non-fatal): "
+               << PrintHr(hr);
+    }
+  }
 }
 
 MediaFoundationCdm::~MediaFoundationCdm() {
@@ -318,16 +419,29 @@ MediaFoundationCdm::~MediaFoundationCdm() {
 }
 
 HRESULT MediaFoundationCdm::Initialize() {
-  HRESULT hresult = E_FAIL;
+  if (MediaFoundationCdmModule::GetInstance()->IsOsCdm() &&
+      virtual_core_window_) {
+    // Set the content protection window so the crypto session is created on
+    // the correct GPU adapter on multi-GPU systems. This is a best effort
+    // operation. Failures are logged but should not block CDM creation.
+    HRESULT cpw_hr = SetContentProtectionWindow(virtual_core_window_);
+    base::UmaHistogramSparse(uma_prefix_ + "SetContentProtectionWindow",
+                             cpw_hr);
+  }
+
+  HRESULT hr = E_FAIL;
   ComPtr<IMFContentDecryptionModule> mf_cdm;
-  create_mf_cdm_cb_.Run(hresult, mf_cdm);
+  create_mf_cdm_cb_.Run(hr, mf_cdm);
   if (!mf_cdm) {
-    DCHECK(FAILED(hresult));
-    // Only report CdmEvent::kCdmError here as this is where most failures
-    // happen, and other errors can be easily triggered by sites, e.g. a bad
-    // server certificate or a bad license.
-    OnCdmEvent(CdmEvent::kCdmError, hresult);
-    return hresult;
+    CHECK(FAILED(hr));
+
+    if (hr == DRM_E_TEE_INVALID_HWDRM_STATE) {
+      OnCdmEvent(CdmEvent::kHardwareContextReset, hr);
+    } else {
+      OnCdmEvent(CdmEvent::kCdmError, hr);
+    }
+
+    return hr;
   }
 
   mf_cdm_.Swap(mf_cdm);
@@ -357,6 +471,7 @@ void MediaFoundationCdm::SetServerCertificate(
     return;
   }
 
+  server_certificate_set_ = true;
   promise->resolve();
 }
 
@@ -368,21 +483,24 @@ void MediaFoundationCdm::GetStatusForPolicy(
     return;
   }
 
-  // Keys should be always usable when there is no HDCP requirement.
-  if (min_hdcp_version == HdcpVersion::kHdcpVersionNone) {
+  const auto hdcp_value = GetHdcpValue(min_hdcp_version);
+  if (hdcp_value == HdcpValue::kHdcpAlawaysSupported) {
     promise->resolve(CdmKeyInformation::KeyStatus::USABLE);
+    return;
+  }
+  if (hdcp_value == HdcpValue::kHdcpNotSupported) {
+    promise->resolve(CdmKeyInformation::KeyStatus::OUTPUT_RESTRICTED);
     return;
   }
 
   // HDCP is independent to the codec. So query H.264, which is always supported
   // by MFCDM.
-  const std::string content_type =
-      base::StringPrintf("video/mp4;codecs=\"avc1\";features=\"hdcp=%d\"",
-                         GetHdcpValue(min_hdcp_version));
+  const std::string content_type = base::StringPrintf(
+      "video/mp4;codecs=\"avc1\";features=\"hdcp=%d\"", hdcp_value);
 
   is_type_supported_cb_.Run(
       content_type,
-      base::BindOnce(&MediaFoundationCdm::OnIsTypeSupportedResult,
+      base::BindOnce(&MediaFoundationCdm::OnGetStatusForPolicyResult,
                      weak_factory_.GetWeakPtr(), std::move(promise)));
 }
 
@@ -395,6 +513,17 @@ void MediaFoundationCdm::CreateSessionAndGenerateRequest(
 
   if (!mf_cdm_) {
     promise->reject(Exception::INVALID_STATE_ERROR, 0, "CDM Unavailable");
+    return;
+  }
+
+  // Check if server certificate requirement is enforced
+  if (base::FeatureList::IsEnabled(
+          kHardwareSecureDecryptionRequireServerCert) &&
+      MediaFoundationCdmModule::GetInstance()->IsOsCdm() &&
+      !server_certificate_set_) {
+    promise->reject(Exception::INVALID_STATE_ERROR, 0,
+                    "setServerCertificate must be called before "
+                    "generateRequest");
     return;
   }
 
@@ -511,7 +640,7 @@ void MediaFoundationCdm::CloseSession(
     std::unique_ptr<SimpleCdmPromise> promise) {
   DVLOG_FUNC(1);
 
-  // TODO(crbug.com/1298192): Handle DRM_E_TEE_INVALID_HWDRM_STATE. Right now
+  // TODO(crbug.com/40215444): Handle DRM_E_TEE_INVALID_HWDRM_STATE. Right now
   // DRM_E_TEE_INVALID_HWDRM_STATE is very rare in CloseSession() and there's
   // an open discussion on how this should behave in EME spec discussion.
   CloseSessionInternal(session_id, CdmSessionClosedReason::kClose,
@@ -587,9 +716,9 @@ bool MediaFoundationCdm::OnSessionId(
                 << ", session_id=" << session_id;
 
   auto itr = pending_sessions_.find(session_token);
-  DCHECK(itr != pending_sessions_.end());
+  CHECK(itr != pending_sessions_.end());
   auto session = std::move(itr->second);
-  DCHECK(session);
+  CHECK(session);
   pending_sessions_.erase(itr);
 
   if (session_id.empty() || sessions_.count(session_id)) {
@@ -659,6 +788,8 @@ void MediaFoundationCdm::CloseSessionInternal(
 void MediaFoundationCdm::OnHardwareContextReset() {
   DVLOG_FUNC(1);
 
+  OnCdmEvent(CdmEvent::kHardwareContextReset, DRM_E_TEE_INVALID_HWDRM_STATE);
+
   // Collect all the session IDs to avoid iterating the map while we delete
   // entries in the map (in `CloseSession()`).
   std::vector<std::string> session_ids;
@@ -676,21 +807,31 @@ void MediaFoundationCdm::OnHardwareContextReset() {
   // Reset IMFContentDecryptionModule which also holds the old ITA.
   mf_cdm_.Reset();
 
+  // Reset server certificate flag since the CDM is being recreated
+  server_certificate_set_ = false;
+
   // Recreates IMFContentDecryptionModule so we can create new sessions.
   if (FAILED(Initialize())) {
     DLOG(ERROR) << __func__ << ": Re-initialization failed";
-    DCHECK(!mf_cdm_);
+    CHECK(!mf_cdm_);
   }
 }
 
-void MediaFoundationCdm::OnCdmEvent(CdmEvent event, HRESULT hresult) {
-  DVLOG_FUNC(1);
-  cdm_event_cb_.Run(event, hresult);
+void MediaFoundationCdm::OnCdmEvent(CdmEvent event, HRESULT hr) {
+  DVLOG_FUNC(1) << "event=" << static_cast<int>(event) << ": " << PrintHr(hr);
+  cdm_event_cb_.Run(event, hr);
 }
 
-void MediaFoundationCdm::OnIsTypeSupportedResult(
+void MediaFoundationCdm::OnGetStatusForPolicyResult(
     std::unique_ptr<KeyStatusCdmPromise> promise,
-    bool is_supported) {
+    IsTypeSupportedValueOrError value_or_error) {
+  if (!value_or_error.has_value()) {
+    base::UmaHistogramSparse(uma_prefix_ + "GetStatusForPolicy",
+                             value_or_error.error());
+  }
+
+  auto is_supported = value_or_error.value_or(false);
+
   if (is_supported) {
     promise->resolve(CdmKeyInformation::KeyStatus::USABLE);
   } else {
@@ -722,8 +863,8 @@ void MediaFoundationCdm::StoreClientTokenIfNeeded() {
   DVLOG(2) << "Got client token of size " << client_token_size;
 
   std::vector<uint8_t> client_token_vector;
-  client_token_vector.assign(client_token.get(),
-                             client_token.get() + client_token_size);
+  client_token_vector.assign(
+      client_token.get(), UNSAFE_TODO(client_token.get() + client_token_size));
 
   // The store operation is cross-process so only run it if we have a new
   // client token.

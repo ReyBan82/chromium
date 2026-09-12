@@ -4,32 +4,42 @@
 
 package org.chromium.chrome.browser.services.gcm;
 
+import static org.chromium.build.NullUtil.assertNonNull;
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
-import android.text.TextUtils;
+
+import androidx.collection.ArrayMap;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
 import org.chromium.base.ThreadUtils;
 import org.chromium.base.task.PostTask;
+import org.chromium.base.task.TaskTraits;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.base.SplitCompatGcmListenerService;
 import org.chromium.chrome.browser.device.DeviceConditions;
 import org.chromium.chrome.browser.init.ChromeBrowserInitializer;
 import org.chromium.chrome.browser.init.ProcessInitializationHandler;
 import org.chromium.components.background_task_scheduler.BackgroundTaskSchedulerFactory;
 import org.chromium.components.background_task_scheduler.TaskIds;
 import org.chromium.components.background_task_scheduler.TaskInfo;
+import org.chromium.components.fcm.FcmBridge;
+import org.chromium.components.fcm.FcmManager;
 import org.chromium.components.gcm_driver.GCMDriver;
 import org.chromium.components.gcm_driver.GCMMessage;
 import org.chromium.components.gcm_driver.InstanceIDFlags;
 import org.chromium.components.gcm_driver.LazySubscriptionsManager;
 import org.chromium.components.gcm_driver.SubscriptionFlagManager;
-import org.chromium.content_public.browser.UiThreadTaskTraits;
 
-/**
- * Receives Downstream messages and status of upstream messages from GCM.
- */
-public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl {
+import java.util.Map;
+
+/** Receives Downstream messages and status of upstream messages from GCM. */
+@NullMarked
+public class ChromeGcmListenerServiceImpl extends SplitCompatGcmListenerService.Impl {
     private static final String TAG = "ChromeGcmListener";
 
     @Override
@@ -39,22 +49,22 @@ public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl 
     }
 
     @Override
-    public void onMessageReceived(final String from, final Bundle data) {
-        boolean hasCollapseKey = !TextUtils.isEmpty(data.getString("collapse_key"));
-        GcmUma.recordDataMessageReceived(ContextUtils.getApplicationContext(), hasCollapseKey);
-
+    public void onMessageReceived(final @Nullable String from, final @Nullable Bundle data) {
+        Log.d(TAG, "ChromeGcmListenerServiceImpl: onMessageReceived");
         // Dispatch the message to the GCM Driver for native features.
-        PostTask.runOrPostTask(UiThreadTaskTraits.DEFAULT, () -> {
-            GCMMessage message = null;
-            try {
-                message = new GCMMessage(from, data);
-            } catch (IllegalArgumentException e) {
-                Log.e(TAG, "Received an invalid GCM Message", e);
-                return;
-            }
+        PostTask.runOrPostTask(
+                TaskTraits.UI_DEFAULT,
+                () -> {
+                    GCMMessage message = null;
+                    try {
+                        message = new GCMMessage(from, data);
+                    } catch (IllegalArgumentException e) {
+                        Log.e(TAG, "Received an invalid GCM Message", e);
+                        return;
+                    }
 
-            scheduleOrDispatchMessageToDriver(message);
-        });
+                    scheduleOrDispatchMessageToDriver(message);
+                });
     }
 
     @Override
@@ -70,15 +80,19 @@ public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl 
     @Override
     public void onDeletedMessages() {
         // TODO(johnme): Ask GCM to include the subtype in this event.
-        Log.w(TAG,
+        Log.w(
+                TAG,
                 "Push messages were deleted, but we can't tell the Service Worker as we don't"
                         + "know what subtype (app ID) it occurred for.");
-        GcmUma.recordDeletedMessages(ContextUtils.getApplicationContext());
+        FcmBridge fcmBridge = FcmBridge.getInstance();
+        if (fcmBridge != null) {
+            fcmBridge.onMessagesDeleted();
+        }
     }
 
     @Override
     public void onNewToken(String token) {
-        // TODO(crbug.com/1138706): Figure out if we can use this method or if
+        // TODO(crbug.com/40725597): Figure out if we can use this method or if
         // we need another mechanism that supports multiple FirebaseApp
         // instances.
         Log.d(TAG, "New FCM Token: %s", token);
@@ -92,16 +106,33 @@ public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl 
     private static boolean maybeBypassScheduler(GCMMessage message) {
         // Android only puts us on an allowlist for high priority messages.
         if (message.getOriginalPriority() != GCMMessage.Priority.HIGH) {
+            Log.d(
+                    TAG,
+                    "maybeBypassScheduler: NOT bypassing job scheduler. AppId=%s,"
+                            + " Priority=%s. FCM priority downgrade likely occurred.",
+                    message.getAppId(),
+                    message.getOriginalPriority());
             return false;
         }
 
-        final String subscriptionId = SubscriptionFlagManager.buildSubscriptionUniqueId(
-                message.getAppId(), message.getSenderId());
+        final String subscriptionId =
+                SubscriptionFlagManager.buildSubscriptionUniqueId(
+                        assertNonNull(message.getAppId()), assertNonNull(message.getSenderId()));
         if (!SubscriptionFlagManager.hasFlags(subscriptionId, InstanceIDFlags.BYPASS_SCHEDULER)) {
+            Log.d(
+                    TAG,
+                    "maybeBypassScheduler: NOT bypassing. BYPASS_SCHEDULER flag not"
+                            + " found for %s",
+                    subscriptionId);
             return false;
         }
 
         try {
+            Log.d(
+                    TAG,
+                    "maybeBypassScheduler: Bypassing Job Scheduler. Starting"
+                            + " GCMBackgroundService for AppId=%s",
+                    message.getAppId());
             Context context = ContextUtils.getApplicationContext();
             Intent intent = new Intent(context, GCMBackgroundService.class);
             intent.putExtras(message.toBundle());
@@ -124,12 +155,12 @@ public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl 
             return false;
         }
 
-        final String subscriptionId = LazySubscriptionsManager.buildSubscriptionUniqueId(
-                message.getAppId(), message.getSenderId());
+        final String subscriptionId =
+                LazySubscriptionsManager.buildSubscriptionUniqueId(
+                        assertNonNull(message.getAppId()), assertNonNull(message.getSenderId()));
 
         boolean isSubscriptionLazy = LazySubscriptionsManager.isSubscriptionLazy(subscriptionId);
         boolean isHighPriority = message.getOriginalPriority() == GCMMessage.Priority.HIGH;
-        // TODO(crbug.com/945402): Add metrics for the new high priority message logic.
         boolean shouldPersistMessage = isSubscriptionLazy && !isHighPriority;
         if (shouldPersistMessage) {
             LazySubscriptionsManager.persistMessage(subscriptionId, message);
@@ -143,21 +174,18 @@ public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl 
      * delayed by Android if the device is currently in doze mode.
      */
     private static void scheduleBackgroundTask(GCMMessage message) {
-        BundleToPersistableBundleConverter.Result convertedData =
-                BundleToPersistableBundleConverter.convert(message.toBundle());
-        if (convertedData.hasErrors()) {
-            Log.w(TAG,
-                    "Failed converting extras to PersistableBundle: "
-                            + convertedData.getFailedKeysErrorString());
-        }
-
+        Log.d(
+                TAG,
+                "scheduleBackgroundTask: Falling back to JobScheduler for AppId=%s",
+                message.getAppId());
         // TODO(peter): Add UMA for measuring latency introduced by the BackgroundTaskScheduler.
         TaskInfo backgroundTask =
-                TaskInfo.createOneOffTask(TaskIds.GCM_BACKGROUND_TASK_JOB_ID, 0 /* immediately */)
-                        .setExtras(convertedData.getPersistableBundle())
+                TaskInfo.createOneOffTask(
+                                TaskIds.GCM_BACKGROUND_TASK_JOB_ID, /* windowEndTimeMs= */ 0)
+                        .setExtras(message.toPersistableBundle())
                         .build();
-        BackgroundTaskSchedulerFactory.getScheduler().schedule(
-                ContextUtils.getApplicationContext(), backgroundTask);
+        BackgroundTaskSchedulerFactory.getScheduler()
+                .schedule(ContextUtils.getApplicationContext(), backgroundTask);
     }
 
     private static void recordWebPushMetrics(GCMMessage message) {
@@ -165,14 +193,17 @@ public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl 
         boolean inIdleMode = DeviceConditions.isCurrentlyInIdleMode(context);
         boolean isHighPriority = message.getOriginalPriority() == GCMMessage.Priority.HIGH;
 
-        @GcmUma.WebPushDeviceState
-        int state;
+        @GcmUma.WebPushDeviceState int state;
         if (inIdleMode) {
-            state = isHighPriority ? GcmUma.WebPushDeviceState.IDLE_HIGH_PRIORITY
-                                   : GcmUma.WebPushDeviceState.IDLE_NOT_HIGH_PRIORITY;
+            state =
+                    isHighPriority
+                            ? GcmUma.WebPushDeviceState.IDLE_HIGH_PRIORITY
+                            : GcmUma.WebPushDeviceState.IDLE_NOT_HIGH_PRIORITY;
         } else {
-            state = isHighPriority ? GcmUma.WebPushDeviceState.NOT_IDLE_HIGH_PRIORITY
-                                   : GcmUma.WebPushDeviceState.NOT_IDLE_NOT_HIGH_PRIORITY;
+            state =
+                    isHighPriority
+                            ? GcmUma.WebPushDeviceState.NOT_IDLE_HIGH_PRIORITY
+                            : GcmUma.WebPushDeviceState.NOT_IDLE_NOT_HIGH_PRIORITY;
         }
         GcmUma.recordWebPushReceivedDeviceState(state);
     }
@@ -191,7 +222,7 @@ public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl 
         ThreadUtils.assertOnUiThread();
 
         // GCMMessage#getAppId never returns null.
-        if (message.getAppId().startsWith("wp:")) {
+        if (assumeNonNull(message.getAppId()).startsWith("wp:")) {
             recordWebPushMetrics(message);
         }
 
@@ -207,14 +238,43 @@ public class ChromeGcmListenerServiceImpl extends ChromeGcmListenerService.Impl 
     }
 
     /**
-     * To be called when a GCM message is ready to be dispatched. Will initialise the native code
-     * of the browser process, and forward the message to the GCM Driver. Must be called on the UI
+     * To be called when a GCM message is ready to be dispatched. Will initialise the native code of
+     * the browser process, and forward the message to the GCM Driver. Must be called on the UI
      * thread.
      */
     static void dispatchMessageToDriver(GCMMessage message) {
         ThreadUtils.assertOnUiThread();
+        Log.d(TAG, "dispatchMessageToDriver: Native Library Init begin");
         ChromeBrowserInitializer.getInstance().handleSynchronousStartup();
-        GCMDriver.dispatchMessage(message);
+        Log.d(TAG, "dispatchMessageToDriver: Native Library Init complete");
+        FcmBridge fcmBridge = FcmBridge.getInstance();
+        // TODO(b/545119100): Resolve sender ID routing vs app ID (subtype) routing for push
+        // messages.
+        if (fcmBridge != null && FcmManager.isFcmSenderId(message.getSenderId())) {
+            String messageId = message.getMessageId() != null ? message.getMessageId() : "";
+            byte[] rawData = message.getRawData() != null ? message.getRawData() : new byte[0];
+            fcmBridge.onMessageReceived(messageId, createDataMapWithSubtype(message), rawData);
+        } else {
+            GCMDriver.dispatchMessage(message);
+        }
+    }
+
+    private static Map<String, String> createDataMapWithSubtype(GCMMessage message) {
+        Map<String, String> data = new ArrayMap<>();
+        if (message.getAppId() != null) {
+            data.put("subtype", message.getAppId());
+        }
+        if (message.getDataKeysAndValuesArray() != null) {
+            String[] keysAndValues = message.getDataKeysAndValuesArray();
+            for (int i = 0; i < keysAndValues.length; i += 2) {
+                if (i + 1 < keysAndValues.length) {
+                    assert !"subtype".equals(keysAndValues[i])
+                            : "GCMMessage data should not contain subtype key";
+                    data.put(keysAndValues[i], keysAndValues[i + 1]);
+                }
+            }
+        }
+        return data;
     }
 
     private static boolean isFullBrowserLoaded() {

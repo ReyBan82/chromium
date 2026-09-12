@@ -13,33 +13,31 @@
 #include "base/test/simple_test_clock.h"
 #include "base/time/clock.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/./ui/tabs/tab_enums.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/notifications/notification_interactive_uitest_support.h"
 #include "chrome/browser/notifications/notification_test_util.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_context.h"
 #include "chrome/browser/ui/exclusive_access/exclusive_access_manager.h"
+#include "chrome/browser/ui/tabs/tab_enums.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/interactive_test_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "components/content_settings/core/browser/content_settings_uma_util.h"
 #include "components/content_settings/core/common/content_settings_pattern.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/infobars/content/content_infobar_manager.h"
 #include "components/permissions/permission_uma_util.h"
 #include "components/permissions/permission_util.h"
 #include "components/ukm/test_ukm_recorder.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_source.h"
-#include "content/public/browser/notification_types.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
@@ -72,7 +70,7 @@ class ToggledNotificationBlocker : public message_center::NotificationBlocker {
   ToggledNotificationBlocker(const ToggledNotificationBlocker&) = delete;
   ToggledNotificationBlocker& operator=(const ToggledNotificationBlocker&) =
       delete;
-  ~ToggledNotificationBlocker() override {}
+  ~ToggledNotificationBlocker() override = default;
 
   void SetNotificationsEnabled(bool enabled) {
     if (notifications_enabled_ != enabled) {
@@ -119,7 +117,7 @@ const char kExpectedIconUrl[] = "/notifications/no_such_file.png";
 
 }  // namespace
 
-// Flaky on Windows, Mac, Linux: http://crbug.com/437414.
+// Flaky on Windows, Mac, Linux: http://crbug.com/40395983.
 IN_PROC_BROWSER_TEST_F(NotificationsTest, DISABLED_TestUserGestureInfobar) {
   ASSERT_TRUE(embedded_test_server()->Start());
 
@@ -129,16 +127,13 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, DISABLED_TestUserGestureInfobar) {
 
   // Request permission by calling request() while eval'ing an inline script;
   // That's considered a user gesture to webkit, and should produce an infobar.
-  bool result;
-  ASSERT_TRUE(content::ExecuteScriptAndExtractBool(
-      GetActiveWebContents(browser()),
-      "window.domAutomationController.send(request());", &result));
-  EXPECT_TRUE(result);
+  EXPECT_EQ(true,
+            content::EvalJs(GetActiveWebContents(browser()), "request();"));
 
   infobars::ContentInfoBarManager* infobar_manager =
       infobars::ContentInfoBarManager::FromWebContents(
-          browser()->tab_strip_model()->GetWebContentsAt(0));
-  EXPECT_EQ(1U, infobar_manager->infobar_count());
+          browser()->GetTabStripModel()->GetWebContentsAt(0));
+  EXPECT_EQ(1U, infobar_manager->infobars().size());
 }
 
 IN_PROC_BROWSER_TEST_F(NotificationsTest, TestCreateSimpleNotification) {
@@ -161,6 +156,7 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, TestCreateSimpleNotification) {
 
 IN_PROC_BROWSER_TEST_F(NotificationsTest, NotificationBlockerTest) {
   ToggledNotificationBlocker blocker;
+  blocker.Init();
   TestMessageCenterObserver observer;
 
   ASSERT_TRUE(embedded_test_server()->Start());
@@ -410,17 +406,16 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, InlinePermissionRevokeUkm) {
 
   auto entries = ukm_recorder.GetEntriesByName("Permission");
   EXPECT_EQ(1u, entries.size());
-  auto* entry = entries.front();
+  auto* entry = entries.front().get();
 
   ukm_recorder.ExpectEntrySourceHasUrl(entry,
                                        embedded_test_server()->base_url());
   EXPECT_EQ(
       *ukm_recorder.GetEntryMetric(entry, "Source"),
       static_cast<int64_t>(permissions::PermissionSourceUI::INLINE_SETTINGS));
-  size_t num_values = 0;
   EXPECT_EQ(*ukm_recorder.GetEntryMetric(entry, "PermissionType"),
-            ContentSettingTypeToHistogramValue(
-                ContentSettingsType::NOTIFICATIONS, &num_values));
+            content_settings_uma_util::ContentSettingTypeToHistogramValue(
+                ContentSettingsType::NOTIFICATIONS));
   EXPECT_EQ(*ukm_recorder.GetEntryMetric(entry, "Action"),
             static_cast<int64_t>(permissions::PermissionAction::REVOKED));
 }
@@ -456,9 +451,9 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, TestCloseTabWithPermissionRequestUI) {
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GetTestPageURL()));
   EXPECT_TRUE(RequestPermissionAndWait(browser()));
   content::WebContentsDestroyedWatcher destroyed_watcher(
-      browser()->tab_strip_model()->GetWebContentsAt(0));
-  browser()->tab_strip_model()->CloseWebContentsAt(0,
-                                                   TabCloseTypes::CLOSE_NONE);
+      browser()->GetTabStripModel()->GetWebContentsAt(0));
+  browser()->GetTabStripModel()->CloseWebContentsAt(0,
+                                                    TabCloseTypes::CLOSE_NONE);
   destroyed_watcher.Wait();
 }
 
@@ -470,7 +465,7 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, TestCrashRendererNotificationRemain) {
   ui_test_utils::NavigateToURLWithDisposition(
       browser(), GURL("about:blank"), WindowOpenDisposition::NEW_BACKGROUND_TAB,
       ui_test_utils::BROWSER_TEST_WAIT_FOR_TAB);
-  browser()->tab_strip_model()->ActivateTabAt(
+  browser()->GetTabStripModel()->ActivateTabAt(
       0, TabStripUserGestureDetails(
              TabStripUserGestureDetails::GestureType::kOther));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GetTestPageURL()));
@@ -649,18 +644,12 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, TestShouldDisplayFullscreen) {
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GetTestPageURL()));
 
   // Set the page fullscreen
-  browser()->exclusive_access_manager()->fullscreen_controller()->
-      ToggleBrowserFullscreenMode();
-
-  {
-    FullscreenStateWaiter fs_state(browser(), true);
-    fs_state.Wait();
-  }
+  ui_test_utils::ToggleFullscreenModeAndWait(browser());
 
   ASSERT_TRUE(ui_test_utils::ShowAndFocusNativeWindow(
-      browser()->window()->GetNativeWindow()));
+      browser()->GetWindow()->GetNativeWindow()));
 
-  ASSERT_TRUE(browser()->window()->IsActive());
+  ASSERT_TRUE(browser()->GetWindow()->IsActive());
 
   // Creates a simple notification.
   std::string result = CreateSimpleNotification(browser(), true);
@@ -683,36 +672,26 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, TestShouldDisplayMultiFullscreen) {
 
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GetTestPageURL()));
 
-  Browser* other_browser = CreateBrowser(browser()->profile());
+  BrowserWindowInterface* other_browser =
+      CreateBrowser(browser()->GetProfile());
   ASSERT_TRUE(ui_test_utils::NavigateToURL(other_browser, GURL("about:blank")));
 
   std::string result = CreateSimpleNotification(browser(), true);
   EXPECT_NE("-1", result);
 
   // Set the notification page fullscreen
-  browser()->exclusive_access_manager()->fullscreen_controller()->
-      ToggleBrowserFullscreenMode();
-  {
-    FullscreenStateWaiter fs_state(browser(), true);
-    fs_state.Wait();
-  }
+  ui_test_utils::ToggleFullscreenModeAndWait(browser());
 
   // Set the other browser fullscreen
-  other_browser->exclusive_access_manager()->fullscreen_controller()->
-      ToggleBrowserFullscreenMode();
-  {
-    FullscreenStateWaiter fs_state(other_browser, true);
-    fs_state.Wait();
-  }
+  ui_test_utils::ToggleFullscreenModeAndWait(other_browser);
 
-  ASSERT_TRUE(browser()->exclusive_access_manager()->context()->IsFullscreen());
-  ASSERT_TRUE(
-      other_browser->exclusive_access_manager()->context()->IsFullscreen());
+  ASSERT_TRUE(browser()->GetWindow()->IsFullscreen());
+  ASSERT_TRUE(other_browser->GetWindow()->IsFullscreen());
 
   ui_test_utils::BrowserActivationWaiter waiter(other_browser);
   waiter.WaitForActivation();
-  ASSERT_FALSE(browser()->window()->IsActive());
-  ASSERT_TRUE(other_browser->window()->IsActive());
+  ASSERT_FALSE(browser()->GetWindow()->IsActive());
+  ASSERT_TRUE(other_browser->GetWindow()->IsActive());
 
   ASSERT_EQ(1, GetNotificationCount());
   message_center::NotificationList::Notifications notifications =
@@ -737,16 +716,10 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, TestShouldDisplayPopupNotification) {
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GetTestPageURL()));
 
   // Set the page fullscreen
-  browser()->exclusive_access_manager()->fullscreen_controller()->
-      ToggleBrowserFullscreenMode();
-
-  {
-    FullscreenStateWaiter fs_state(browser(), true);
-    fs_state.Wait();
-  }
+  ui_test_utils::ToggleFullscreenModeAndWait(browser());
 
   ASSERT_TRUE(ui_test_utils::ShowAndFocusNativeWindow(
-      browser()->window()->GetNativeWindow()));
+      browser()->GetWindow()->GetNativeWindow()));
 
   std::string result = CreateSimpleNotification(browser(), true);
   EXPECT_NE("-1", result);
@@ -758,11 +731,10 @@ IN_PROC_BROWSER_TEST_F(NotificationsTest, TestShouldDisplayPopupNotification) {
 }
 
 #if !BUILDFLAG(IS_ANDROID)
-// TODO(crbug.com/1132058): Test fails on Windows and macOS on the bots as there
-// is no real display to test with. Need to find a way to run these without a
-// display and figure out why Lacros is timing out. Tests pass locally with a
-// real display.
-#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS_LACROS)
+// TODO(crbug.com/40721738): Test fails on Windows and macOS on the bots as
+// there is no real display to test with. Need to find a way to run these
+// without a display. Tests pass locally with a real display.
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
 #define MAYBE_ShouldQueueDuringScreenPresent \
   DISABLED_ShouldQueueDuringScreenPresent
 #else
@@ -778,7 +750,7 @@ IN_PROC_BROWSER_TEST_F(NotificationsTestWithFakeMediaStream,
 
   AllowAllOrigins();
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GetTestPageURL()));
-  const int notification_tab = browser()->tab_strip_model()->active_index();
+  const int notification_tab = browser()->GetTabStripModel()->active_index();
 
   // We should see displayed notifications by default.
   std::string result = CreateSimpleNotification(browser(), /*wait=*/false);
@@ -790,21 +762,19 @@ IN_PROC_BROWSER_TEST_F(NotificationsTestWithFakeMediaStream,
   EXPECT_EQ(u"My Body", (*notifications.begin())->message());
 
   // Open a new tab to a diffent origin from the one that shows notifications.
-  chrome::NewTab(browser());
+  chrome::NewTab(browser(), NewTabTypes::kNoUserAction);
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser(),
       https_server.GetURL("/notifications/notification_tester.html")));
-  const int screen_capture_tab = browser()->tab_strip_model()->active_index();
+  const int screen_capture_tab = browser()->GetTabStripModel()->active_index();
 
   // Start a screen capture session.
   content::WebContents* web_contents = GetActiveWebContents(browser());
-  EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-      web_contents, "startScreenCapture();", &result));
-  ASSERT_EQ("success", result);
+  ASSERT_EQ("success", content::EvalJs(web_contents, "startScreenCapture();"));
 
   // Showing a notification during the screen capture session should show the
   // "Notifications muted" notification.
-  browser()->tab_strip_model()->ActivateTabAt(notification_tab);
+  browser()->GetTabStripModel()->ActivateTabAt(notification_tab);
   result = CreateSimpleNotification(browser(), /*wait=*/false);
   EXPECT_NE("-1", result);
   notifications =
@@ -830,17 +800,15 @@ IN_PROC_BROWSER_TEST_F(NotificationsTestWithFakeMediaStream,
             (*notifications.begin())->message());
 
   // Stop the screen capture session.
-  browser()->tab_strip_model()->ActivateTabAt(screen_capture_tab);
-  EXPECT_TRUE(content::ExecuteScriptAndExtractString(
-      web_contents, "stopScreenCapture();", &result));
-  ASSERT_EQ("success", result);
+  browser()->GetTabStripModel()->ActivateTabAt(screen_capture_tab);
+  ASSERT_EQ("success", content::EvalJs(web_contents, "stopScreenCapture();"));
 
   // Stopping the screen capture session should display the queued notifications
   // and close the "Notifications muted" notification.
   notifications =
       message_center::MessageCenter::Get()->GetVisibleNotifications();
   ASSERT_EQ(3u, notifications.size());
-  for (const auto* notification : notifications) {
+  for (const message_center::Notification* notification : notifications) {
     EXPECT_EQ(u"My Title", notification->title());
     EXPECT_EQ(u"My Body", notification->message());
   }

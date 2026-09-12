@@ -8,8 +8,9 @@ import 'chrome://resources/js/ios/web_ui.js';
 
 // </if>
 
+import {assertNotReached} from 'chrome://resources/js/assert.js';
 import {addWebUiListener} from 'chrome://resources/js/cr.js';
-import {$} from 'chrome://resources/js/util_ts.js';
+import {$} from 'chrome://resources/js/util.js';
 
 /**
  * Main entry point called once the page has loaded.
@@ -30,8 +31,10 @@ const kIdStopLoggingButton = 'stop-logging';
 const kIdEmailLogButton = 'mobile-email';
 const kIdShowFileButton = 'show-file';
 const kIdCaptureModeLogging = 'capture-mode-logging';
+const kIdFileFormatLogging = 'file-format-logging';
 const kIdFilePathLogging = 'file-path-logging';
 const kIdCaptureModeStopped = 'capture-mode-stopped';
+const kIdFileFormatStopped = 'file-format-stopped';
 const kIdFilePathStoppedLogging = 'file-path-stopped';
 const kIdStartOverButton = 'startover';
 const kIdPrivacyReadMoreLink = 'privacy-read-more-link';
@@ -65,6 +68,10 @@ class NetExportView {
     const logMode =
         document.querySelector('input[name="log-mode"]:checked').value;
 
+    // Determine the file format to use.
+    const fileFormat =
+        document.querySelector('input[name="log-file-format"]:checked').value;
+
     // Determine the maximum file size, as the number of bytes (or -1 to mean
     // no limit)
     let maxLogFileSizeBytes = -1;
@@ -75,7 +82,7 @@ class NetExportView {
       maxLogFileSizeBytes = Math.round(numMegabytes * 1024 * 1024);
     }
 
-    chrome.send('startNetLog', [logMode, maxLogFileSizeBytes]);
+    chrome.send('startNetLog', [logMode, maxLogFileSizeBytes, fileFormat]);
   }
 
   /**
@@ -186,6 +193,8 @@ class NetExportView {
         // This is a short-lived state, no need to do anything special.
         this.renderLogging_(info);
         break;
+      default:
+        assertNotReached(`Unknown state: ${info.state}`);
     }
   }
 
@@ -220,6 +229,7 @@ class NetExportView {
         '<circle cx="16" cy="16" r="14" fill="red" stroke="black" /></svg>');
     $(kIdStopLoggingButton).onclick = this.onStopLogging_.bind(this);
     $(kIdCaptureModeLogging).textContent = this.getCaptureModeText_(info);
+    $(kIdFileFormatLogging).textContent = this.getFileFormatText_(info);
     $(kIdFilePathLogging).textContent = info.file;
   }
 
@@ -243,6 +253,7 @@ class NetExportView {
     $(kIdFilePathStoppedLogging).textContent = info.file;
 
     $(kIdCaptureModeStopped).textContent = this.getCaptureModeText_(info);
+    $(kIdFileFormatStopped).textContent = this.getFileFormatText_(info);
 
     // Hook up the "read more..." link for privacy information.
     $(kIdPrivacyReadMoreLink).onclick =
@@ -267,6 +278,22 @@ class NetExportView {
 
     const radioButton = document.querySelector(
         'input[name="log-mode"][value="' + info.captureMode + '"]');
+    if (!radioButton) {
+      return 'Unknown';
+    }
+    return radioButton.parentElement.textContent;
+  }
+
+  /**
+   * Gets the textual label for a file format from the HTML.
+   */
+  getFileFormatText_(info) {
+    if (!info.logFileFormatKnown) {
+      return 'Unknown';
+    }
+
+    const radioButton = document.querySelector(
+        'input[name="log-file-format"][value="' + info.fileFormat + '"]');
     if (!radioButton) {
       return 'Unknown';
     }

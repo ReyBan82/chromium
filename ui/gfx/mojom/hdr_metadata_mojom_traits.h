@@ -5,68 +5,59 @@
 #ifndef UI_GFX_MOJOM_HDR_METADATA_MOJOM_TRAITS_H_
 #define UI_GFX_MOJOM_HDR_METADATA_MOJOM_TRAITS_H_
 
+#include "skia/public/mojom/hdr_metadata_mojom_traits.h"
+#include "third_party/skia/include/private/SkHdrMetadata.h"
 #include "ui/gfx/hdr_metadata.h"
 #include "ui/gfx/mojom/hdr_metadata.mojom.h"
 
 namespace mojo {
 
 template <>
-struct EnumTraits<gfx::mojom::HDRMode, gfx::HDRMode> {
-  static gfx::mojom::HDRMode ToMojom(gfx::HDRMode input) {
-    switch (input) {
-      case gfx::HDRMode::kDefault:
-        return gfx::mojom::HDRMode::kDefault;
-      case gfx::HDRMode::kExtended:
-        return gfx::mojom::HDRMode::kExtended;
-    }
-    NOTREACHED();
-    return gfx::mojom::HDRMode::kDefault;
+struct StructTraits<gfx::mojom::HdrMetadataExtendedRangeDataView,
+                    gfx::HdrMetadataExtendedRange> {
+  static float current_headroom(const gfx::HdrMetadataExtendedRange& input) {
+    return input.current_headroom;
+  }
+  static float desired_headroom(const gfx::HdrMetadataExtendedRange& input) {
+    return input.desired_headroom;
   }
 
-  static bool FromMojom(gfx::mojom::HDRMode input, gfx::HDRMode* out) {
-    switch (input) {
-      case gfx::mojom::HDRMode::kDefault:
-        *out = gfx::HDRMode::kDefault;
-        return true;
-      case gfx::mojom::HDRMode::kExtended:
-        *out = gfx::HDRMode::kExtended;
-        return true;
-    }
-    NOTREACHED();
-    return false;
-  }
-};
-
-template <>
-struct StructTraits<gfx::mojom::ColorVolumeMetadataDataView,
-                    gfx::ColorVolumeMetadata> {
-  static const SkColorSpacePrimaries& primaries(
-      const gfx::ColorVolumeMetadata& input) {
-    return input.primaries;
-  }
-  static float luminance_max(const gfx::ColorVolumeMetadata& input) {
-    return input.luminance_max;
-  }
-  static float luminance_min(const gfx::ColorVolumeMetadata& input) {
-    return input.luminance_min;
-  }
-
-  static bool Read(gfx::mojom::ColorVolumeMetadataDataView data,
-                   gfx::ColorVolumeMetadata* output);
+  static bool Read(gfx::mojom::HdrMetadataExtendedRangeDataView data,
+                   gfx::HdrMetadataExtendedRange* output);
 };
 
 template <>
 struct StructTraits<gfx::mojom::HDRMetadataDataView, gfx::HDRMetadata> {
-  static unsigned max_content_light_level(const gfx::HDRMetadata& input) {
-    return input.max_content_light_level;
+  static mojo::OptionalAsPointer<const skhdr::ContentLightLevelInformation>
+  clli(const gfx::HDRMetadata& input) {
+    return mojo::OptionalAsPointer(input.HasCLLI() ? &input.GetCLLI()
+                                                   : nullptr);
   }
-  static unsigned max_frame_average_light_level(const gfx::HDRMetadata& input) {
-    return input.max_frame_average_light_level;
-  }
-  static const gfx::ColorVolumeMetadata& color_volume_metadata(
+
+  static mojo::OptionalAsPointer<const skhdr::MasteringDisplayColorVolume> mdcv(
       const gfx::HDRMetadata& input) {
-    return input.color_volume_metadata;
+    return mojo::OptionalAsPointer(input.HasMDCV() ? &input.GetMDCV()
+                                                   : nullptr);
   }
+
+  static std::optional<float> ndwl(const gfx::HDRMetadata& input) {
+    if (input.HasNDWL()) {
+      return input.GetNDWL();
+    }
+    return std::nullopt;
+  }
+
+  static mojo::OptionalAsPointer<const skhdr::AdaptiveGlobalToneMap> agtm(
+      const gfx::HDRMetadata& input) {
+    return mojo::OptionalAsPointer(input.HasAgtm() ? &input.GetAgtm()
+                                                   : nullptr);
+  }
+
+  static const std::optional<gfx::HdrMetadataExtendedRange>& extended_range(
+      const gfx::HDRMetadata& input) {
+    return input.extended_range;
+  }
+
 
   static bool Read(gfx::mojom::HDRMetadataDataView data,
                    gfx::HDRMetadata* output);

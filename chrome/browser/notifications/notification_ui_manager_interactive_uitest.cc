@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/notifications/notification_ui_manager.h"
+
 #include <string>
 
 #include "base/files/file_path.h"
@@ -11,15 +13,13 @@
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/notifications/notification_common.h"
 #include "chrome/browser/notifications/notification_permission_context.h"
-#include "chrome/browser/notifications/notification_ui_manager.h"
 #include "chrome/browser/notifications/profile_notification.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_features.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "components/permissions/permission_result.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
@@ -64,15 +64,17 @@ class NotificationUIManagerInteractiveUITest : public InProcessBrowserTest {
   // page that's being used in this browser test.
   void GrantNotificationPermissionForTest() const {
     NotificationPermissionContext::UpdatePermission(
-        browser()->profile(), TestPageUrl().DeprecatedGetOriginAsURL(),
+        browser()->GetProfile(), TestPageUrl().DeprecatedGetOriginAsURL(),
         CONTENT_SETTING_ALLOW);
   }
 
   // Executes |script| and stores the result as a string in |result|. A boolean
   // will be returned, indicating whether the script was executed successfully.
   bool RunScript(const std::string& script, std::string* result) const {
-    return content::ExecuteScriptAndExtractString(
-        GetActiveWebContents()->GetPrimaryMainFrame(), script, result);
+    *result =
+        content::EvalJs(GetActiveWebContents()->GetPrimaryMainFrame(), script)
+            .ExtractString();
+    return true;
   }
 
   GURL TestPageUrl() const {
@@ -80,7 +82,7 @@ class NotificationUIManagerInteractiveUITest : public InProcessBrowserTest {
   }
 
   content::WebContents* GetActiveWebContents() const {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
   NotificationUIManager* manager() {
@@ -95,7 +97,7 @@ class NotificationUIManagerInteractiveUITest : public InProcessBrowserTest {
 };
 
 // Make sure that clicks go through on web notifications. Regression test for
-// crbug.com/767868
+// crbug.com/41346105
 IN_PROC_BROWSER_TEST_F(NotificationUIManagerInteractiveUITest,
                        CloseDisplayedPersistentNotification) {
   GrantNotificationPermissionForTest();
@@ -106,14 +108,14 @@ IN_PROC_BROWSER_TEST_F(NotificationUIManagerInteractiveUITest,
   EXPECT_EQ("ok", script_result);
 
   ProfileNotification::ProfileID profile_id =
-      ProfileNotification::GetProfileID(browser()->profile());
+      ProfileNotification::GetProfileID(browser()->GetProfile());
   std::set<std::string> ids = manager()->GetAllIdsByProfile(profile_id);
   ASSERT_EQ(1u, ids.size());
   const message_center::Notification* notification =
       manager()->FindById(*ids.begin(), profile_id);
   ASSERT_TRUE(notification);
-  notification->delegate()->Click(/*button_index=*/absl::nullopt,
-                                  /*reply=*/absl::nullopt);
+  notification->delegate()->Click(/*button_index=*/std::nullopt,
+                                  /*reply=*/std::nullopt);
 
   ASSERT_TRUE(RunScript("GetMessageFromWorker()", &script_result));
   EXPECT_EQ("action_close", script_result);

@@ -20,17 +20,9 @@ namespace {
 
 PeripheralNotificationManager* g_instance = nullptr;
 
-const int kBillboardDeviceClassCode = 17;
-constexpr char thunderbolt_file_path[] = "/sys/bus/thunderbolt/devices/0-0";
-
 void RecordConnectivityMetric(
     PeripheralNotificationManager::PeripheralConnectivityResults results) {
   base::UmaHistogramEnumeration("Ash.Peripheral.ConnectivityResults", results);
-}
-
-// Checks if the board supports Thunderbolt.
-bool CheckIfThunderboltFilepathExists(std::string root_prefix) {
-  return base::PathExists(base::FilePath(root_prefix + thunderbolt_file_path));
 }
 
 }  // namespace
@@ -42,14 +34,11 @@ PeripheralNotificationManager::PeripheralNotificationManager(
       is_pcie_tunneling_allowed_(is_pcie_tunneling_allowed) {
   DCHECK(TypecdClient::Get());
   DCHECK(PciguardClient::Get());
-  TypecdClient::Get()->AddObserver(this);
-  PciguardClient::Get()->AddObserver(this);
+  typecd_client_observation_.Observe(TypecdClient::Get());
+  pciguard_client_observation_.Observe(PciguardClient::Get());
 }
 
 PeripheralNotificationManager::~PeripheralNotificationManager() {
-  TypecdClient::Get()->RemoveObserver(this);
-  PciguardClient::Get()->RemoveObserver(this);
-
   CHECK_EQ(this, g_instance);
   g_instance = nullptr;
 }
@@ -81,20 +70,6 @@ void PeripheralNotificationManager::NotifyGuestModeNotificationReceived(
 void PeripheralNotificationManager::NotifyPeripheralBlockedReceived() {
   for (auto& observer : observer_list_)
     observer.OnPeripheralBlockedReceived();
-}
-
-void PeripheralNotificationManager::OnBillboardDeviceConnected(
-    bool billboard_is_supported) {
-  if (!features::IsPcieBillboardNotificationEnabled()) {
-    return;
-  }
-
-  if (!billboard_is_supported) {
-    for (auto& observer : observer_list_)
-      observer.OnBillboardDeviceConnected();
-
-    RecordConnectivityMetric(PeripheralConnectivityResults::kBillboardDevice);
-  }
 }
 
 void PeripheralNotificationManager::OnThunderboltDeviceConnected(
@@ -187,27 +162,28 @@ void PeripheralNotificationManager::NotifySpeedLimitingCableWarning() {
     observer.OnSpeedLimitingCableWarning();
 }
 
-void PeripheralNotificationManager::OnDeviceConnected(
-    device::mojom::UsbDeviceInfo* device) {
-  if (device->class_code == kBillboardDeviceClassCode) {
-    // PathExist is a blocking call. PostTask it and wait on the result.
-    base::ThreadPool::PostTaskAndReplyWithResult(
-        FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
-        base::BindOnce(&CheckIfThunderboltFilepathExists, root_prefix_),
-        base::BindOnce(
-            &PeripheralNotificationManager::OnBillboardDeviceConnected,
-            weak_ptr_factory_.GetWeakPtr()));
+void PeripheralNotificationManager::OnUsbLimit(
+    typecd::UsbLimitType usb_limit_type) {
+  if (usb_limit_type == typecd::UsbLimitType::kDeviceLimit ||
+      usb_limit_type == typecd::UsbLimitType::kEndpointLimit) {
+    NotifyUsbDeviceOrEndpointLimit();
+    RecordConnectivityMetric(
+        PeripheralConnectivityResults::kUsbDeviceOrEndpointLimit);
   }
 }
+
+void PeripheralNotificationManager::NotifyUsbDeviceOrEndpointLimit() {
+  for (auto& observer : observer_list_) {
+    observer.OnUsbDeviceOrEndpointLimit();
+  }
+}
+
+void PeripheralNotificationManager::OnDeviceConnected(
+    device::mojom::UsbDeviceInfo* device) {}
 
 void PeripheralNotificationManager::SetPcieTunnelingAllowedState(
     bool is_pcie_tunneling_allowed) {
   is_pcie_tunneling_allowed_ = is_pcie_tunneling_allowed;
-}
-
-void PeripheralNotificationManager::SetRootPrefixForTesting(
-    const std::string& prefix) {
-  root_prefix_ = prefix;
 }
 
 // static

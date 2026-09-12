@@ -23,20 +23,19 @@ class ChromeFeedbackPrivateDelegate : public FeedbackPrivateDelegate {
   ~ChromeFeedbackPrivateDelegate() override;
 
   // FeedbackPrivateDelegate:
-  base::Value::Dict GetStrings(content::BrowserContext* browser_context,
-                               bool from_crash) const override;
+  base::DictValue GetStrings(content::BrowserContext* browser_context,
+                             bool from_crash) const override;
   void FetchSystemInformation(
       content::BrowserContext* context,
       system_logs::SysLogsFetcherCallback callback) const override;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<system_logs::SystemLogsSource> CreateSingleLogSource(
       api::feedback_private::LogSource source_type) const override;
   void FetchExtraLogs(scoped_refptr<feedback::FeedbackData> feedback_data,
                       FetchExtraLogsCallback callback) const override;
   api::feedback_private::LandingPageType GetLandingPageType(
       const feedback::FeedbackData& feedback_data) const override;
-  void GetLacrosHistograms(GetHistogramsCallback callback) override;
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
   std::string GetSignedInUserEmail(
       content::BrowserContext* context) const override;
   void NotifyFeedbackDelayed() const override;

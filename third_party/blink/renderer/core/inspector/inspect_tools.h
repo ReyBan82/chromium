@@ -5,12 +5,16 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_INSPECT_TOOLS_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_INSPECTOR_INSPECT_TOOLS_H_
 
+#include <v8-inspector.h>
+
 #include <vector>
 
-#include <v8-inspector.h>
+#include "base/memory/raw_ptr.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
 #include "third_party/blink/renderer/core/inspector/inspector_overlay_agent.h"
 #include "third_party/blink/renderer/core/inspector/node_content_visibility_state.h"
+#include "third_party/blink/renderer/core/inspector/v8_session_holder.h"
+#include "third_party/blink/renderer/platform/heap/weak_cell.h"
 
 namespace blink {
 
@@ -197,27 +201,6 @@ class PersistentTool : public InspectTool {
 
 // -----------------------------------------------------------------------------
 
-class NearbyDistanceTool : public InspectTool {
- public:
-  NearbyDistanceTool(const NearbyDistanceTool&) = delete;
-  NearbyDistanceTool& operator=(const NearbyDistanceTool&) = delete;
-  void Trace(Visitor* visitor) const override;
-
- private:
-  using InspectTool::InspectTool;
-
-  bool HandleMouseDown(const WebMouseEvent& event,
-                       bool* swallow_next_mouse_up) override;
-  bool HandleMouseMove(const WebMouseEvent& event) override;
-  bool HandleMouseUp(const WebMouseEvent& event) override;
-  void Draw(float scale) override;
-  String GetOverlayName() override;
-
-  Member<Node> hovered_node_;
-};
-
-// -----------------------------------------------------------------------------
-
 class ShowViewSizeTool : public InspectTool {
   using InspectTool::InspectTool;
 
@@ -251,21 +234,47 @@ class PausedInDebuggerTool : public InspectTool {
  public:
   PausedInDebuggerTool(InspectorOverlayAgent* overlay,
                        OverlayFrontend* frontend,
-                       v8_inspector::V8InspectorSession* v8_session,
+                       V8SessionHolder v8_session,
                        const String& message)
       : InspectTool(overlay, frontend),
-        v8_session_(v8_session),
+        v8_session_(std::move(v8_session)),
         message_(message) {}
   PausedInDebuggerTool(const PausedInDebuggerTool&) = delete;
   PausedInDebuggerTool& operator=(const PausedInDebuggerTool&) = delete;
+  void Trace(Visitor* visitor) const override;
 
  private:
+  enum class Action { kResume, kStepOver };
+
   void Draw(float scale) override;
   void Dispatch(const ScriptValue& message,
                 ExceptionState& exception_state) override;
   String GetOverlayName() override;
-  v8_inspector::V8InspectorSession* v8_session_;
+  void Dispose() override;
+  void ExecuteOnV8Session(Action action);
+
+  V8SessionHolder v8_session_;
   String message_;
+  WeakCellFactory<PausedInDebuggerTool> weak_factory_{this};
+};
+
+// -----------------------------------------------------------------------------
+
+class WindowControlsOverlayTool : public InspectTool {
+ public:
+  WindowControlsOverlayTool(
+      InspectorOverlayAgent* overlay,
+      OverlayFrontend* frontend,
+      std::unique_ptr<protocol::DictionaryValue> wco_config);
+  WindowControlsOverlayTool(const WindowControlsOverlayTool&) = delete;
+  WindowControlsOverlayTool& operator=(const WindowControlsOverlayTool&) =
+      delete;
+
+ private:
+  void Draw(float scale) override;
+  String GetOverlayName() override;
+
+  std::unique_ptr<protocol::DictionaryValue> wco_config_;
 };
 
 }  // namespace blink

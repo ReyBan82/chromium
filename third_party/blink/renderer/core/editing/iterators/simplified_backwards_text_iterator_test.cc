@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/core/editing/iterators/simplified_backwards_text_iterator.h"
 
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/editing/ephemeral_range.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
 #include "third_party/blink/renderer/core/editing/testing/editing_test_base.h"
@@ -25,18 +26,18 @@ class SimplifiedBackwardsTextIteratorTest : public EditingTestBase {
   std::string ExtractStringInRange(
       const std::string selection_text,
       const TextIteratorBehavior& behavior = TextIteratorBehavior()) {
-    const SelectionInDOMTree selection = SetSelectionTextToBody(selection_text);
+    const SelectionInDomTree selection = SetSelectionTextToBody(selection_text);
     StringBuilder builder;
     bool is_first = true;
     for (SimplifiedBackwardsTextIterator iterator(selection.ComputeRange(),
                                                   behavior);
          !iterator.AtEnd(); iterator.Advance()) {
       if (!is_first)
-        builder.Append(", ", 2);
+        builder.Append(base::byte_span_from_cstring(", "));
       is_first = false;
       builder.Append(iterator.GetTextState().GetTextForTesting());
     }
-    return builder.ToString().Utf8();
+    return builder.Utf8();
   }
 };
 
@@ -86,7 +87,7 @@ TEST_F(SimplifiedBackwardsTextIteratorTest, IterateWithFirstLetterPart) {
 
 TEST_F(SimplifiedBackwardsTextIteratorTest, Basic) {
   SetBodyContent("<p> [(3)]678</p>");
-  const Element* const sample = GetDocument().QuerySelector("p");
+  const Element* const sample = QuerySelector("p");
   SimplifiedBackwardsTextIterator iterator(EphemeralRange(
       Position(sample->firstChild(), 0), Position(sample->firstChild(), 9)));
   // TODO(editing-dev): |SimplifiedBackwardsTextIterator| should not account
@@ -115,7 +116,7 @@ TEST_F(SimplifiedBackwardsTextIteratorTest, Basic) {
 
 TEST_F(SimplifiedBackwardsTextIteratorTest, NbspCharacter) {
   SetBodyContent("<p>123 456&nbsp;789</p>");
-  const Element* const p = GetDocument().QuerySelector("p");
+  const Element* const p = QuerySelector("p");
   SimplifiedBackwardsTextIteratorInFlatTree iterator(
       EphemeralRangeInFlatTree(PositionInFlatTree(p->firstChild(), 0),
                                PositionInFlatTree(p->firstChild(), 11)));
@@ -123,7 +124,7 @@ TEST_F(SimplifiedBackwardsTextIteratorTest, NbspCharacter) {
   EXPECT_EQ('9', iterator.CharacterAt(0));
   EXPECT_EQ('8', iterator.CharacterAt(1));
   EXPECT_EQ('7', iterator.CharacterAt(2));
-  EXPECT_EQ(kNoBreakSpaceCharacter, iterator.CharacterAt(3));
+  EXPECT_EQ(uchar::kNoBreakSpace, iterator.CharacterAt(3));
   EXPECT_EQ('6', iterator.CharacterAt(4));
   EXPECT_EQ('5', iterator.CharacterAt(5));
   EXPECT_EQ('4', iterator.CharacterAt(6));
@@ -162,8 +163,8 @@ TEST_F(SimplifiedBackwardsTextIteratorTest, NbspCharacter) {
 
 TEST_F(SimplifiedBackwardsTextIteratorTest, EmitsPunctuationForImage) {
   SetBodyContent("<img id='img'><p>1</p>");
-  const Element* const p = GetDocument().QuerySelector("p");
-  const Element* const img = GetDocument().QuerySelector("img");
+  const Element* const p = QuerySelector("p");
+  const Element* const img = QuerySelector("img");
   SimplifiedBackwardsTextIteratorInFlatTree iterator(EphemeralRangeInFlatTree(
       PositionInFlatTree(img, 0), PositionInFlatTree(p->firstChild(), 1)));
   EXPECT_EQ(1, iterator.length());
@@ -202,7 +203,7 @@ TEST_F(SimplifiedBackwardsTextIteratorTest, FirstLetter) {
   SetBodyContent(
       "<style>p::first-letter {font-size: 200%}</style>"
       "<p> [(3)]678</p>");
-  const Element* const sample = GetDocument().QuerySelector("p");
+  const Element* const sample = QuerySelector("p");
   SimplifiedBackwardsTextIterator iterator(EphemeralRange(
       Position(sample->firstChild(), 0), Position(sample->firstChild(), 9)));
   EXPECT_EQ(3, iterator.length());
@@ -247,7 +248,7 @@ TEST_F(SimplifiedBackwardsTextIteratorTest, SubrangeWithReplacedElements) {
   SetBodyContent(body_content);
   SetShadowContent(shadow_content, "host");
 
-  Element* host = GetDocument().getElementById("host");
+  Element* host = GetDocument().getElementById(AtomicString("host"));
 
   // We should not apply DOM tree version to containing shadow tree in
   // general. To record current behavior, we have this test. even if it
@@ -267,7 +268,7 @@ TEST_F(SimplifiedBackwardsTextIteratorTest, characterAt) {
   SetBodyContent(body_content);
   SetShadowContent(shadow_content, "host");
 
-  Element* host = GetDocument().getElementById("host");
+  Element* host = GetDocument().getElementById(AtomicString("host"));
 
   EphemeralRangeTemplate<EditingStrategy> range1(
       EphemeralRangeTemplate<EditingStrategy>::RangeOfContents(*host));
@@ -322,6 +323,17 @@ TEST_F(SimplifiedBackwardsTextIteratorTest, TextSecurity) {
   // E2 80 A2 is U+2022 BULLET
   EXPECT_EQ("baz, \xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2, abc",
             ExtractStringInRange("^abc<s>foo</s>baz|", TextIteratorBehavior()));
+
+  // Grapheme cluster with combining marks U+0305 & U+322.
+  EXPECT_EQ("x",
+            ExtractStringInRange(
+                "123<s>^A&#x305;&#x332;|B&#x305;&#x332;C&#x305;&#x332;</s>",
+                EmitsSmallXForTextSecurityBehavior()));
+
+  EXPECT_EQ("xx",
+            ExtractStringInRange(
+                "123<s>A&#x305;&#x332;^B&#x305;&#x332;C&#x305;|&#x332;</s>",
+                EmitsSmallXForTextSecurityBehavior()));
 }
 
 }  // namespace simplified_backwards_text_iterator_test

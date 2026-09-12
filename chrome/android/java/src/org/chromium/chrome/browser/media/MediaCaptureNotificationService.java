@@ -4,13 +4,15 @@
 
 package org.chromium.chrome.browser.media;
 
+import org.chromium.base.SplitCompatService;
 import org.chromium.build.annotations.IdentifierNameString;
-import org.chromium.chrome.browser.base.SplitCompatService;
+import org.chromium.build.annotations.NullMarked;
 
 /** See {@link MediaCaptureNotificationServiceImpl}. */
+@NullMarked
 public class MediaCaptureNotificationService extends SplitCompatService {
-    @IdentifierNameString
-    private static String sImplClassName =
+    @SuppressWarnings("FieldCanBeFinal") // @IdentifierNameString requires non-final
+    private static @IdentifierNameString String sImplClassName =
             "org.chromium.chrome.browser.media.MediaCaptureNotificationServiceImpl";
 
     public MediaCaptureNotificationService() {

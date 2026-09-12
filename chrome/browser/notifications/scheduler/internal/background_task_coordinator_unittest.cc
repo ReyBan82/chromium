@@ -13,9 +13,9 @@
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
 #include "base/test/task_environment.h"
-#include "chrome/browser/notifications/scheduler/internal/notification_entry.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduler_config.h"
 #include "chrome/browser/notifications/scheduler/public/notification_background_task_scheduler.h"
+#include "chrome/browser/notifications/scheduler/public/notification_entry.h"
 #include "chrome/browser/notifications/scheduler/test/fake_clock.h"
 #include "chrome/browser/notifications/scheduler/test/mock_notification_background_task_scheduler.h"
 #include "chrome/browser/notifications/scheduler/test/test_utils.h"
@@ -39,10 +39,10 @@ const std::vector<test::ImpressionTestData> kSingleClientImpressionTestData = {{
     SchedulerClientType::kTest1,
     1 /* current_max_daily_show */,
     {} /* impressions */,
-    absl::nullopt /* suppression_info */,
+    std::nullopt /* suppression_info */,
     0 /* negative_events_count */,
-    absl::nullopt /* negative_event_ts */,
-    absl::nullopt /* last_shown_ts */
+    std::nullopt /* negative_event_ts */,
+    std::nullopt /* last_shown_ts */
 }
 
 };
@@ -51,18 +51,18 @@ const std::vector<test::ImpressionTestData> kClientsImpressionTestData = {
     {SchedulerClientType::kTest1,
      1 /* current_max_daily_show */,
      {} /* impressions */,
-     absl::nullopt /* suppression_info */,
+     std::nullopt /* suppression_info */,
      0 /* negative_events_count */,
-     absl::nullopt /* negative_event_ts */,
-     absl::nullopt /* last_shown_ts */},
+     std::nullopt /* negative_event_ts */,
+     std::nullopt /* last_shown_ts */},
     {
         SchedulerClientType::kTest2,
         2 /* current_max_daily_show */,
         {} /* impressions */,
-        absl::nullopt /* suppression_info */,
+        std::nullopt /* suppression_info */,
         0 /* negative_events_count */,
-        absl::nullopt /* negative_event_ts */,
-        absl::nullopt /* last_shown_ts */,
+        std::nullopt /* negative_event_ts */,
+        std::nullopt /* last_shown_ts */,
 
     }};
 

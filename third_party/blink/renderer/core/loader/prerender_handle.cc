@@ -31,7 +31,7 @@
 #include "third_party/blink/renderer/core/loader/prerender_handle.h"
 
 #include "services/network/public/mojom/referrer_policy.mojom-blink.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -75,7 +75,7 @@ PrerenderHandle* PrerenderHandle::Create(
   attributes->url = url;
   attributes->trigger_type = trigger_type;
   attributes->referrer = mojom::blink::Referrer::New(
-      KURL(NullURL(), referrer.referrer), referrer.referrer_policy);
+      KURL(NullUrl(), referrer.referrer), referrer.referrer_policy);
   // TODO(bokan): This is the _frame_ size, which is affected by the viewport
   // <meta> tag, and is likely not what we want to use here. For example, if a
   // page sets <meta name="viewport" content="width=42"> the frame size will

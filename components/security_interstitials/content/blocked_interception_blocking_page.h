@@ -6,7 +6,6 @@
 #define COMPONENTS_SECURITY_INTERSTITIALS_CONTENT_BLOCKED_INTERCEPTION_BLOCKING_PAGE_H_
 
 #include "components/security_interstitials/content/ssl_blocking_page_base.h"
-#include "components/security_interstitials/content/ssl_cert_reporter.h"
 #include "components/security_interstitials/core/blocked_interception_ui.h"
 #include "net/ssl/ssl_info.h"
 
@@ -18,9 +17,8 @@ class BlockedInterceptionBlockingPage : public SSLBlockingPageBase {
 
   BlockedInterceptionBlockingPage(
       content::WebContents* web_contents,
-      int cert_error,
+      net::Error cert_error,
       const GURL& request_url,
-      std::unique_ptr<SSLCertReporter> ssl_cert_reporter,
       bool can_show_enhanced_protection_message,
       const net::SSLInfo& ssl_info,
       std::unique_ptr<
@@ -41,7 +39,7 @@ class BlockedInterceptionBlockingPage : public SSLBlockingPageBase {
  protected:
   // SecurityInterstitialPage implementation:
   void CommandReceived(const std::string& command) override;
-  void PopulateInterstitialStrings(base::Value::Dict& load_time_data) override;
+  void PopulateInterstitialStrings(base::DictValue& load_time_data) override;
 
  private:
   const net::SSLInfo ssl_info_;

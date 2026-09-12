@@ -12,9 +12,11 @@
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_destroyer.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "components/media_router/browser/presentation/presentation_navigation_policy.h"
 #include "components/media_router/browser/presentation/receiver_presentation_service_delegate_impl.h"  // nogncheck
 #include "content/public/browser/keyboard_event_processing_result.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/presentation_receiver_flags.h"
 #include "content/public/browser/render_widget_host_view.h"
@@ -22,11 +24,10 @@
 #include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
 
 #if defined(USE_AURA)
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
-#include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_observer.h"
+#include "ui/base/base_window.h"
 #endif  // defined(USE_AURA)
 
 using content::WebContents;
@@ -99,11 +100,9 @@ class OffscreenTab::WindowAdoptionAgent final : protected aura::WindowObserver {
     // necessary to find a new parent.
     if (content_window_->GetRootWindow())
       return;
-    BrowserList* const browsers = BrowserList::GetInstance();
-    Browser* const active_browser =
-        browsers ? browsers->GetLastActive() : nullptr;
-    BrowserWindow* const active_window =
-        active_browser ? active_browser->window() : nullptr;
+    BrowserWindowInterface* const bwi =
+        GetLastActiveBrowserWindowInterfaceWithAnyProfile();
+    ui::BaseWindow* const active_window = bwi ? bwi->GetWindow() : nullptr;
     aura::Window* const native_window =
         active_window ? active_window->GetNativeWindow() : nullptr;
     aura::Window* const root_window =
@@ -157,6 +156,7 @@ void OffscreenTab::Start(const GURL& start_url,
     params.starting_sandbox_flags = content::kPresentationReceiverSandboxFlags;
 
   offscreen_tab_web_contents_ = WebContents::Create(params);
+  offscreen_tab_web_contents_->SetOwnerLocationForDebug(FROM_HERE);
   offscreen_tab_web_contents_->SetDelegate(this);
   WebContentsObserver::Observe(offscreen_tab_web_contents_.get());
 
@@ -221,7 +221,7 @@ bool OffscreenTab::ShouldSuppressDialogs(WebContents* source) {
   DCHECK_EQ(offscreen_tab_web_contents_.get(), source);
   // Suppress all because there is no possible direct user interaction with
   // dialogs.
-  // TODO(crbug.com/734191): This does not suppress window.print().
+  // TODO(crbug.com/40526231): This does not suppress window.print().
   return true;
 }
 
@@ -234,7 +234,7 @@ bool OffscreenTab::ShouldFocusLocationBarByDefault(WebContents* source) {
   return true;
 }
 
-bool OffscreenTab::ShouldFocusPageAfterCrash() {
+bool OffscreenTab::ShouldFocusPageAfterCrash(content::WebContents* source) {
   // Never focus the page.  Not even after a crash.
   return false;
 }
@@ -257,7 +257,7 @@ bool OffscreenTab::HandleContextMenu(
 
 content::KeyboardEventProcessingResult OffscreenTab::PreHandleKeyboardEvent(
     WebContents* source,
-    const content::NativeWebKeyboardEvent& event) {
+    const input::NativeWebKeyboardEvent& event) {
   DCHECK_EQ(offscreen_tab_web_contents_.get(), source);
   // Intercept and silence all keyboard events before they can be sent to the
   // renderer.
@@ -282,6 +282,7 @@ bool OffscreenTab::CanDragEnter(WebContents* source,
 }
 
 bool OffscreenTab::IsWebContentsCreationOverridden(
+    content::RenderFrameHost* opener,
     content::SiteInstance* source_site_instance,
     content::mojom::WindowContainerType window_container_type,
     const GURL& opener_url,
@@ -341,7 +342,7 @@ void OffscreenTab::RequestMediaAccessPermission(
 
 bool OffscreenTab::CheckMediaAccessPermission(
     content::RenderFrameHost* render_frame_host,
-    const GURL& security_origin,
+    const url::Origin& security_origin,
     blink::mojom::MediaStreamType type) {
   return false;
 }

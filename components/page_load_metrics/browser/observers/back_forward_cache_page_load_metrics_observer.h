@@ -5,7 +5,8 @@
 #ifndef COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_BACK_FORWARD_CACHE_PAGE_LOAD_METRICS_OBSERVER_H_
 #define COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_BACK_FORWARD_CACHE_PAGE_LOAD_METRICS_OBSERVER_H_
 
-#include "base/feature_list.h"
+#include <vector>
+
 #include "components/page_load_metrics/browser/page_load_metrics_observer.h"
 
 class BackForwardCachePageLoadMetricsObserverTest;
@@ -41,10 +42,6 @@ extern const char
     kHistogramThirdRequestAnimationFrameAfterBackForwardCacheRestore[];
 extern const char kHistogramFirstInputDelayAfterBackForwardCacheRestore[];
 extern const char kHistogramCumulativeShiftScoreAfterBackForwardCacheRestore[];
-extern const char
-    kHistogramCumulativeShiftScoreMainFrameAfterBackForwardCacheRestore[];
-extern const char kHistogramCumulativeShiftScoreAfterBackForwardCacheRestore[];
-BASE_DECLARE_FEATURE(kBackForwardCacheEmitZeroSamplesForKeyMetrics);
 
 }  // namespace internal
 
@@ -90,6 +87,9 @@ class BackForwardCachePageLoadMetricsObserver
   void OnFirstInputAfterBackForwardCacheRestoreInPage(
       const page_load_metrics::mojom::BackForwardCacheTiming& timing,
       size_t index) override;
+  void OnSoftNavigationFirstContentfulPaint(
+      const page_load_metrics::mojom::SoftNavigationMetrics&
+          soft_navigation_metrics) override;
   ObservePolicy FlushMetricsOnAppEnterBackground(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnComplete(
@@ -97,6 +97,11 @@ class BackForwardCachePageLoadMetricsObserver
 
  private:
   friend class ::BackForwardCachePageLoadMetricsObserverTest;
+
+  // Records INP before the first soft navigation arrives.
+  void RecordResponsivenessMetricsBeforeSoftNavigation();
+  // Records CLS before the first soft navigation arrives.
+  void RecordLayoutShiftBeforeSoftNavigation();
 
   // Records metrics related to the end of a page visit. This occurs either
   // when the observed page enters (or re-enters) the back-forward cache, or
@@ -158,18 +163,21 @@ class BackForwardCachePageLoadMetricsObserver
   // from the BFCache.
   bool page_metrics_logged_due_to_backgrounding_ = false;
 
-  // TODO(crbug.com/1265307): Remove this when removing the DCHECK for lack of
+  // TODO(crbug.com/40203717): Remove this when removing the DCHECK for lack of
   // page end metrics logging from the back forward page load metrics observer.
   bool logged_page_end_metrics_ = false;
 
   // The layout shift score. These are updated whenever the page is restored
   // from the back-forward cache.
-  absl::optional<double> restored_main_frame_layout_shift_score_;
-  absl::optional<double> restored_layout_shift_score_;
+  std::optional<double> restored_main_frame_layout_shift_score_;
+  std::optional<double> restored_layout_shift_score_;
 
   // IDs for the navigations when the page is restored from the back-forward
   // cache.
   std::vector<ukm::SourceId> back_forward_cache_navigation_ids_;
+
+  // Counts the soft navigations after each back-forward cache restore.
+  int64_t soft_navigation_count_ = 0;
 };
 
 #endif  // COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_BACK_FORWARD_CACHE_PAGE_LOAD_METRICS_OBSERVER_H_

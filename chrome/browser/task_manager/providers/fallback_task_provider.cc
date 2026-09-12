@@ -4,10 +4,12 @@
 
 #include "chrome/browser/task_manager/providers/fallback_task_provider.h"
 
-#include "base/containers/contains.h"
-#include "base/containers/cxx20_erase.h"
+#include <algorithm>
+#include <vector>
+
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/process/process.h"
 #include "base/task/single_thread_task_runner.h"
@@ -25,8 +27,9 @@ constexpr base::TimeDelta kTimeDelayForPendingTask = base::Milliseconds(750);
 
 // Returns a task that is in the vector if the task in the vector shares a Pid
 // with the other task.
-Task* GetTaskByPidFromVector(base::ProcessId process_id,
-                             std::vector<Task*>* which_vector) {
+Task* GetTaskByPidFromVector(
+    base::ProcessId process_id,
+    std::vector<raw_ptr<Task, VectorExperimental>>* which_vector) {
   for (Task* candidate : *which_vector) {
     if (candidate->process_id() == process_id)
       return candidate;
@@ -50,7 +53,7 @@ FallbackTaskProvider::FallbackTaskProvider(
   }
 }
 
-FallbackTaskProvider::~FallbackTaskProvider() {}
+FallbackTaskProvider::~FallbackTaskProvider() = default;
 
 Task* FallbackTaskProvider::GetTaskOfUrlRequest(int child_id, int route_id) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
@@ -101,7 +104,6 @@ void FallbackTaskProvider::ShowTaskLater(Task* task) {
                                            std::forward_as_tuple(this));
   } else {
     NOTREACHED();
-    it->second.InvalidateWeakPtrs();
   }
 
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
@@ -118,14 +120,14 @@ void FallbackTaskProvider::ShowPendingTask(Task* task) {
     // Log when we use the secondary task provider, to help drive this count to
     // zero and have providers for all known processes.
     // TODO(avi): Turn this into a DCHECK and remove the log once there are
-    // providers for all known processes. See https://crbug.com/1083509.
+    // providers for all known processes. See https://crbug.com/40131424.
     base::UmaHistogramBoolean("BrowserRenderProcessHost.LabeledInTaskManager",
                               false);
     LOG(ERROR)
         << "Every renderer should have at least one task provided by a primary "
         << "task provider. If a \"Renderer\" fallback task is shown, it is a "
         << "bug. If you have repro steps, please file a new bug and tag it as "
-        << "a dependency of crbug.com/739782.";
+        << "a dependency of crbug.com/40528867.";
   }
 
   pending_shown_tasks_.erase(task);
@@ -138,10 +140,8 @@ void FallbackTaskProvider::ShowTask(Task* task) {
 }
 
 void FallbackTaskProvider::HideTask(Task* task) {
-  auto it = std::remove(shown_tasks_.begin(), shown_tasks_.end(), task);
   pending_shown_tasks_.erase(task);
-  if (it != shown_tasks_.end()) {
-    shown_tasks_.erase(it, shown_tasks_.end());
+  if (std::erase(shown_tasks_, task) > 0) {
     NotifyObserverTaskRemoved(task);
   }
 }
@@ -164,7 +164,7 @@ void FallbackTaskProvider::OnTaskAddedBySource(Task* task,
 
   // Log when a primary task is shown instead, to provide a point of comparison
   // for cases the secondary task is shown. Remove when there are providers for
-  // for all known processes. See https://crbug.com/1083509.
+  // for all known processes. See https://crbug.com/40131424.
   base::UmaHistogramBoolean("BrowserRenderProcessHost.LabeledInTaskManager",
                             true);
 
@@ -199,8 +199,9 @@ void FallbackTaskProvider::OnTaskRemovedBySource(Task* task,
 
 void FallbackTaskProvider::OnTaskUnresponsive(Task* task) {
   DCHECK(task);
-  if (base::Contains(shown_tasks_, task))
+  if (std::ranges::contains(shown_tasks_, task)) {
     NotifyObserverTaskUnresponsive(task);
+  }
 }
 
 FallbackTaskProvider::SubproviderSource::SubproviderSource(
@@ -209,7 +210,7 @@ FallbackTaskProvider::SubproviderSource::SubproviderSource(
     : fallback_task_provider_(fallback_task_provider),
       subprovider_(std::move(subprovider)) {}
 
-FallbackTaskProvider::SubproviderSource::~SubproviderSource() {}
+FallbackTaskProvider::SubproviderSource::~SubproviderSource() = default;
 
 void FallbackTaskProvider::SubproviderSource::TaskAdded(Task* task) {
   DCHECK(task);
@@ -220,7 +221,7 @@ void FallbackTaskProvider::SubproviderSource::TaskAdded(Task* task) {
 void FallbackTaskProvider::SubproviderSource::TaskRemoved(Task* task) {
   DCHECK(task);
 
-  base::Erase(tasks_, task);
+  std::erase(tasks_, task);
   fallback_task_provider_->OnTaskRemovedBySource(task, this);
 }
 

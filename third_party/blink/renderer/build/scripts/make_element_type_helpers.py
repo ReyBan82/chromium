@@ -5,7 +5,6 @@
 
 from collections import defaultdict
 
-import hasher
 import json5_generator
 import template_expander
 
@@ -27,6 +26,7 @@ class MakeElementTypeHelpersWriter(json5_generator.Writer):
         'noConstructor': {},
         'noTypeHelpers': {},
         'runtimeEnabled': {},
+        'runtimeFlagHasOriginTrial': {},
     }
     default_metadata = {
         'attrsNullNamespace': None,
@@ -38,7 +38,6 @@ class MakeElementTypeHelpersWriter(json5_generator.Writer):
         'namespaceURI': '',
     }
     filters = {
-        'hash': hasher.hash,
         'symbol': _symbol,
     }
 
@@ -52,10 +51,10 @@ class MakeElementTypeHelpersWriter(json5_generator.Writer):
 
         assert self.namespace, 'A namespace is required.'
 
-        basename = self.namespace.lower() + '_element_type_helpers'
+        basename = self.namespace.lower() + '_element_type'
         self._outputs = {
-            (basename + '.h'): self.generate_helper_header,
-            (basename + '.cc'): self.generate_helper_implementation,
+            (basename + '_helpers.h'): self.generate_helper_header,
+            (basename + '_helpers.cc'): self.generate_helper_implementation,
         }
 
         base_element_header = 'third_party/blink/renderer/core/{}/{}_element.h'.format(
@@ -79,7 +78,7 @@ class MakeElementTypeHelpersWriter(json5_generator.Writer):
             tag['js_interface'] = tag['interface']
             if tag['JSInterfaceName']:
                 tag['js_interface'] = tag['JSInterfaceName']
-            elements.add(tag['js_interface'])
+            elements.add(tag['interface'])
 
         for tag in tags:
             tag['multipleTagNames'] = (

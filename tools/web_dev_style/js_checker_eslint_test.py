@@ -38,16 +38,13 @@ class JsCheckerEsLintTest(unittest.TestCase):
 
     checker = js_checker.JSChecker(input_api, MockOutputApi())
 
-    output = checker.RunEsLintChecks(input_api.AffectedFiles(),
-                                     format='json')[0]
+    output = checker.RunEsLintChecks(input_api.AffectedFiles(), format='json')[
+      0
+    ]
 
-    # Extract ESLint's error from the PresubmitError. This is added in
-    # third_party/node/node.py.
-    search_token = '\' failed\n'
-    json_start_index = output.message.index(search_token)
-    json_error_str = output.message[json_start_index + len(search_token):]
+    # Extract ESLint's error from the PresubmitError.
     # ESLint's errors are in JSON format.
-    return json.loads(json_error_str)[0].get('messages')
+    return json.loads(output.message)[0].get('messages')
 
   def _assertError(self, results, rule_id, line):
     self.assertEqual(1, len(results))
@@ -56,18 +53,20 @@ class JsCheckerEsLintTest(unittest.TestCase):
     self.assertEqual(line, message.get('line'))
 
   def testPrimitiveWrappersCheck(self):
-    results = self._runChecks('const a = new Number(1);', 'js')
+    results = self._runChecks('const a = new Number(1);\n', 'js')
     self._assertError(results, 'no-new-wrappers', 1)
 
     results = self._runChecks(
-        '''
+      '''
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const a: number = new Number(1);
-''', 'ts')
+''',
+      'ts',
+    )
     self._assertError(results, 'no-new-wrappers', 3)
 
   def testTypeScriptEslintPluginCheck(self):
-    results = self._runChecks('const a: number = 1;', 'ts')
+    results = self._runChecks('const a: number = 1;\n', 'ts')
     self._assertError(results, '@typescript-eslint/no-unused-vars', 1)
 
 

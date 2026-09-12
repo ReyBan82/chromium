@@ -32,10 +32,13 @@ class ChromeVariationsServiceClient
   scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory() override;
   network_time::NetworkTimeTracker* GetNetworkTimeTracker() override;
   bool OverridesRestrictParameter(std::string* parameter) override;
-  variations::Study::FormFactor GetCurrentFormFactor() override;
-  bool IsEnterprise() override;
+  base::FilePath GetVariationsSeedFileDir() override;
   std::unique_ptr<variations::SeedResponse>
   TakeSeedFromNativeVariationsSeedStore() override;
+  bool IsEnterprise() override;
+  std::optional<base::flat_set<std::string>> GetAllProfilesKeys(
+      PrefService* local_state) override;
+  bool IsChromeEnterpriseCoreSupported() override;
 
  private:
   // variations::VariationsServiceClient:

@@ -20,7 +20,8 @@ namespace bruschetta {
 // - Reduce the enable level if necessary to match what we can actually offer
 //   i.e. we don't mark a config as installable if we can't actually install it.
 //
-// For concrete examples, see //chrome/test/data/policy/policy_test_cases.json
+// For concrete examples, see
+// //components/policy/test/data/policy_test_cases.json
 class BruschettaPolicyHandler
     : public policy::SimpleSchemaValidatingPolicyHandler {
  public:
@@ -37,7 +38,7 @@ class BruschettaPolicyHandler
   bool CheckDownloadableObject(policy::PolicyErrorMap* errors,
                                const std::string& id,
                                const std::string& key,
-                               const base::Value::Dict& dict);
+                               const base::DictValue& dict);
 
   // The set of configurations that have been downgraded from installable to
   // runnable due to an error in their config. Filled by CheckPolicySettings and

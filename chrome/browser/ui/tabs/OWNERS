@@ -1,6 +1,8 @@
-bsep@chromium.org
-dfried@chromium.org
 dpenning@chromium.org
-sky@chromium.org
-tbergquist@chromium.org
-per-file tab_group.cc, tab_group.h=dljames@chromium.org
+dljames@chromium.org
+agale@chromium.org
+corising@chromium.org
+
+per-file tab_dialog_manager*=kylixrd@chromium.org
+per-file tab_dialog_manager*=kerenzhu@chromium.org
+per-file glic_actor*=file://chrome/browser/actor/ui/OWNERS

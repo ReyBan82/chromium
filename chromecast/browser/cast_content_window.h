@@ -33,6 +33,7 @@ class CastContentWindow : public mojom::CastContentWindow,
   class Observer : public base::CheckedObserver {
    public:
     virtual void OnVisibilityChange(VisibilityType visibility_type) = 0;
+    virtual void OnWindowDestroyed() = 0;
   };
 
   explicit CastContentWindow(mojom::CastWebViewParamsPtr params);
@@ -58,8 +59,6 @@ class CastContentWindow : public mojom::CastContentWindow,
   void RevokeScreenAccess() override = 0;
   void RequestVisibility(VisibilityPriority visibility_priority) override = 0;
   void EnableTouchInput(bool enabled) override = 0;
-  void SetActivityContext(base::Value activity_context) override = 0;
-  void SetHostContext(base::Value host_context) override = 0;
 
   // mojom::ActivityWindow implementation:
   void Show() override;

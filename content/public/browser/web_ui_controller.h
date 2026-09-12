@@ -12,13 +12,14 @@
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "content/common/content_export.h"
-#include "content/public/browser/page.h"
-#include "content/public/browser/per_web_ui_browser_interface_broker.h"
+#include "third_party/blink/public/mojom/loader/local_resource_loader_config.mojom-forward.h"
+#include "url/origin.h"
 
 class GURL;
 
 namespace content {
 
+class Page;
 class RenderFrameHost;
 class WebUI;
 class WebUIBrowserInterfaceBrokerRegistry;
@@ -31,14 +32,29 @@ class CONTENT_EXPORT WebUIController {
   // This is used for safe downcasting.
   typedef const void* Type;
 
+  enum TrustPolicy {
+    kTrusted,
+    kUntrusted,
+  };
+
+  enum class DisplayDisposition {
+    kRegularPage,
+    kUIElement,
+  };
+
   explicit WebUIController(WebUI* web_ui);
   virtual ~WebUIController();
+
+  // Returns the intended context for this WebUI. By default, WebUIs are regular
+  // pages (e.g. settings, history). Some WebUIs are intended to be rendered as
+  // UI elements embedded within the browser interface.
+  virtual DisplayDisposition GetDisplayDisposition() const;
 
   // Allows the controller to override handling all messages from the page.
   // Return true if the message handling was overridden.
   virtual bool OverrideHandleWebUIMessage(const GURL& source_url,
                                           const std::string& message,
-                                          const base::Value::List& args);
+                                          const base::ListValue& args);
 
   // Called when a WebUI RenderFrame is created.  This is *not* called for every
   // page load because in some cases a RenderFrame will be reused, for example
@@ -51,9 +67,16 @@ class CONTENT_EXPORT WebUIController {
   // its state if necessary.
   virtual void WebUIPrimaryPageChanged(Page& page) {}
 
-  // Called when a WebUI page load is about to be committed, even if RenderFrame
-  // is reused. This sets up MojoJS interface broker.
-  void WebUIReadyToCommitNavigation(RenderFrameHost* render_frame_host);
+  // Allows the controller to directly populate the local resource loader
+  // config. This is used to add shared resources or dynamically generated
+  // content, e.g. theme colors, without creating a full WebUIDataSource.
+  //
+  // `requesting_origin` is the origin of the WebUI page that is requesting the
+  // resources, e.g. "chrome://webui-toolbar.top-chrome". It matches the origin
+  // that the `config` will be sent to.
+  virtual void PopulateLocalResourceLoaderConfig(
+      blink::mojom::LocalResourceLoaderConfig* config,
+      const url::Origin& requesting_origin) {}
 
   WebUI* web_ui() const { return web_ui_; }
 
@@ -84,15 +107,10 @@ class CONTENT_EXPORT WebUIController {
 
   // TODO(calamity): Make this abstract once all subclasses implement GetType().
   virtual Type GetType();
-
-  PerWebUIBrowserInterfaceBroker* broker_for_testing() { return broker_.get(); }
+  virtual TrustPolicy GetTrustPolicy();
 
  private:
   raw_ptr<WebUI> web_ui_;
-
-  // The interface broker that handles Mojo.bindInterface requests from the
-  // renderer.
-  std::unique_ptr<PerWebUIBrowserInterfaceBroker> broker_;
 };
 
 // This macro declares a static variable inside the class that inherits from

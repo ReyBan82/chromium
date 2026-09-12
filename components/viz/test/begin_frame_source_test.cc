@@ -27,7 +27,7 @@ MockBeginFrameObserver::MockBeginFrameObserver()
       .WillByDefault(::testing::Return(false));
 }
 
-MockBeginFrameObserver::~MockBeginFrameObserver() {}
+MockBeginFrameObserver::~MockBeginFrameObserver() = default;
 
 const BeginFrameArgs MockBeginFrameObserver::kDefaultBeginFrameArgs =
     CreateBeginFrameArgsForTesting(
@@ -41,5 +41,8 @@ const BeginFrameArgs MockBeginFrameObserver::kDefaultBeginFrameArgs =
         -1,
         -1,
         -1);
+
+MockInputClient::MockInputClient() = default;
+MockInputClient::~MockInputClient() = default;
 
 }  // namespace viz

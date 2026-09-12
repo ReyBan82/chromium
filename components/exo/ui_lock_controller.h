@@ -7,21 +7,16 @@
 
 #include "ash/shell.h"
 #include "base/containers/flat_set.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
-#include "base/timer/timer.h"
 #include "components/exo/seat_observer.h"
 #include "components/exo/wm_helper.h"
 #include "ui/base/user_activity/user_activity_observer.h"
-#include "ui/events/event_handler.h"
-
-class FullscreenControlPopup;
 
 namespace exo {
 
 class Pointer;
 class Seat;
-
-extern const base::TimeDelta kLongPressEscapeDuration;
 
 // Helps users to break out of various kinds of "locks" that a window may hold
 // (fullscreen, pointer lock).
@@ -30,8 +25,7 @@ extern const base::TimeDelta kLongPressEscapeDuration;
 // Chromium's Keyboard Lock feature
 // (see https://chromestatus.com/feature/5642959835889664). In other cases we
 // nudge the user to use Overview.
-class UILockController : public ui::EventHandler,
-                         public SeatObserver,
+class UILockController : public SeatObserver,
                          public ash::SessionObserver,
                          public WMHelper::PowerObserver,
                          public ui::UserActivityObserver {
@@ -53,9 +47,6 @@ class UILockController : public ui::EventHandler,
   UILockController(const UILockController&) = delete;
   UILockController& operator=(const UILockController&) = delete;
   ~UILockController() override;
-
-  // Overridden from ui::EventHandler:
-  void OnKeyEvent(ui::KeyEvent* event) override;
 
   // Overridden from WMHelper::PowerObserver:
   void SuspendDone() override;
@@ -79,7 +70,6 @@ class UILockController : public ui::EventHandler,
 
   views::Widget* GetEscNotificationForTesting(aura::Window* window);
   views::Widget* GetPointerCaptureNotificationForTesting(aura::Window* window);
-  FullscreenControlPopup* GetExitPopupForTesting(aura::Window* window);
 
   void AddObserver(Notifier* notifier);
   void RemoveObserver(Notifier* notifier);
@@ -87,24 +77,13 @@ class UILockController : public ui::EventHandler,
  private:
   void ReshowAllNotifications();
 
-  void OnEscapeKey(bool pressed);
-  void OnEscapeHeld();
-  void StopTimer();
-
-  Seat* seat_;
-  base::OneShotTimer exit_fullscreen_timer_;
+  raw_ptr<Seat> seat_;
 
   // Whether the screen brightness is low enough to make the display dark.
   bool device_in_dark_ = false;
 
-  // The surface which was focused when |exit_fullscreen_timer_| started
-  // running, or nullptr if the timer isn't running. Do not dereference; may
-  // dangle if the Surface is destroyed while the timer is running. Valid only
-  // for comparison purposes.
-  Surface* focused_surface_to_unlock_ = nullptr;
-
   // Pointers currently being captured.
-  base::flat_set<base::raw_ptr<Pointer>> captured_pointers_;
+  base::flat_set<raw_ptr<Pointer>> captured_pointers_;
 
   base::ObserverList<Notifier> notifiers_;
 

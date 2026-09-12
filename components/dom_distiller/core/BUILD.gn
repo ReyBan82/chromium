@@ -2,6 +2,46 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+source_set("prefs") {
+  sources = [ "pref_names.h" ]
+}
+
+component("dom_distiller_features") {
+  defines = [ "IS_DOM_DISTILLER_FEATURES_IMPL" ]
+
+  sources = [
+    "dom_distiller_features.cc",
+    "dom_distiller_features.h",
+    "dom_distiller_switches.cc",
+    "dom_distiller_switches.h",
+  ]
+
+  deps = [
+    ":prefs",
+    "//base",
+  ]
+
+  if (is_android) {
+    deps += [ "//components/dom_distiller/core/android:jni_headers" ]
+  }
+}
+
+action("dom_distiller_viewer_js") {
+  script = "//mojo/public/tools/bindings/concatenate-files.py"
+  sources = [
+    "javascript/content_processing.js",
+    "javascript/dom_distiller_viewer_main.js",
+    "javascript/font_size_slider.js",
+    "javascript/image_classifier.js",
+    "javascript/list_classifier.js",
+    "javascript/pinch_handler.js",
+    "javascript/settings_dialog.js",
+  ]
+  outputs = [ "$target_gen_dir/javascript/dom_distiller_viewer.js" ]
+  args = rebase_path(sources, root_build_dir) +
+         rebase_path(outputs, root_build_dir)
+}
+
 static_library("core") {
   sources = [
     "article_distillation_update.cc",
@@ -16,6 +56,8 @@ static_library("core") {
     "distilled_page_prefs.h",
     "distiller.cc",
     "distiller.h",
+    "distiller_options.cc",
+    "distiller_options.h",
     "distiller_page.cc",
     "distiller_page.h",
     "distiller_ui_handle.h",
@@ -23,23 +65,19 @@ static_library("core") {
     "distiller_url_fetcher.h",
     "dom_distiller_constants.cc",
     "dom_distiller_constants.h",
-    "dom_distiller_features.cc",
-    "dom_distiller_features.h",
     "dom_distiller_request_view_base.cc",
     "dom_distiller_request_view_base.h",
     "dom_distiller_service.cc",
     "dom_distiller_service.h",
-    "dom_distiller_switches.cc",
-    "dom_distiller_switches.h",
     "experiments.cc",
     "experiments.h",
+    "extraction_utils.cc",
+    "extraction_utils.h",
     "page_features.cc",
     "page_features.h",
-    "pref_names.cc",
-    "pref_names.h",
+    "readability_options.h",
     "task_tracker.cc",
     "task_tracker.h",
-    "url_constants.cc",
     "url_constants.h",
     "url_utils.cc",
     "url_utils.h",
@@ -48,25 +86,29 @@ static_library("core") {
   ]
 
   public_deps = [
+    ":prefs",
+    "//components/dom_distiller/core:dom_distiller_features",
     "//components/dom_distiller/core/proto",
     "//net",
     "//third_party/dom_distiller_js:proto",
   ]
   deps = [
+    ":dom_distiller_viewer_js",
     "//base",
+    "//build:blink_buildflags",
     "//components/dom_distiller/core/mojom",
     "//components/leveldb_proto",
-    "//components/pref_registry",
     "//components/prefs",
     "//components/resources",
     "//components/strings",
     "//components/variations",
-    "//services/network/public/cpp:cpp",
+    "//services/network/public/cpp",
     "//skia",
     "//third_party/re2",
     "//ui/base",
     "//url",
   ]
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
 
   if (is_android) {
     sources += [
@@ -76,10 +118,7 @@ static_library("core") {
       "dom_distiller_service_android.h",
       "url_utils_android.cc",
     ]
-    deps += [
-      ":jni_headers",
-      "//url:gurl_android",
-    ]
+    deps += [ "//components/dom_distiller/core/android:jni_headers" ]
   }
 }
 
@@ -120,11 +159,13 @@ source_set("unit_tests") {
     "article_entry_unittest.cc",
     "distillable_page_detector_unittest.cc",
     "distilled_content_store_unittest.cc",
-    "distilled_page_prefs_unittests.cc",
+    "distilled_page_prefs_unittest.cc",
+    "distiller_page_unittest.cc",
     "distiller_unittest.cc",
     "distiller_url_fetcher_unittest.cc",
     "dom_distiller_request_view_base_unittest.cc",
     "dom_distiller_service_unittest.cc",
+    "extraction_utils_unittest.cc",
     "page_features_unittest.cc",
     "task_tracker_unittest.cc",
     "url_utils_unittest.cc",
@@ -142,7 +183,7 @@ source_set("unit_tests") {
     "//components/sync_preferences:test_support",
     "//net:test_support",
     "//services/network:test_support",
-    "//services/network/public/cpp:cpp",
+    "//services/network/public/cpp",
     "//testing/gmock",
     "//testing/gtest",
     "//ui/base",
@@ -152,14 +193,6 @@ source_set("unit_tests") {
 
 if (is_android) {
   import("//build/config/android/rules.gni")
-
-  generate_jni("jni_headers") {
-    sources = [
-      "android/java/src/org/chromium/components/dom_distiller/core/DistilledPagePrefs.java",
-      "android/java/src/org/chromium/components/dom_distiller/core/DomDistillerService.java",
-      "android/java/src/org/chromium/components/dom_distiller/core/DomDistillerUrlUtils.java",
-    ]
-  }
 
   java_cpp_enum("distiller_type_java") {
     sources = [ "experiments.h" ]

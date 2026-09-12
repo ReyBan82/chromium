@@ -27,23 +27,32 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_GRAPHICS_SVG_IMAGE_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_GRAPHICS_SVG_IMAGE_H_
 
+#include <optional>
+
 #include "base/gtest_prod_util.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/memory/weak_ptr.h"
+#include "base/types/pass_key.h"
 #include "third_party/blink/public/mojom/css/preferred_color_scheme.mojom-blink-forward.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/platform/geometry/layout_size.h"
+#include "third_party/blink/renderer/platform/geometry/physical_size.h"
 #include "third_party/blink/renderer/platform/graphics/image.h"
 #include "third_party/blink/renderer/platform/graphics/paint/paint_record.h"
+#include "third_party/blink/renderer/platform/heap/member.h"
+#include "third_party/blink/renderer/platform/heap/persistent.h"
 #include "third_party/blink/renderer/platform/scheduler/public/agent_group_scheduler.h"
-#include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/casting.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/geometry/size_f.h"
+#include "ui/gfx/geometry/vector2d_f.h"
 
 namespace blink {
 
 class Document;
+class SVGImageAnimationsToReset;
+class Element;
+class ExternalSVGResourceImageContent;
+class IsolatedSVGDocumentHost;
 class LayoutSVGRoot;
 class LocalFrame;
 class Node;
@@ -51,12 +60,29 @@ class Page;
 class SVGImageChromeClient;
 class SVGImageForContainer;
 class SVGSVGElement;
-struct IntrinsicSizingInfo;
+class SVGViewSpec;
+struct NaturalSizingInfo;
+
+// A collection of "viewport defining" parameters for an SVGImage.
+class SVGImageViewInfo final : public GarbageCollected<SVGImageViewInfo> {
+ public:
+  SVGImageViewInfo(const SVGViewSpec* view_spec, Element* target)
+      : view_spec_(view_spec), target_(target) {}
+
+  const SVGViewSpec* ViewSpec() const { return view_spec_; }
+  Element* Target() const { return target_; }
+
+  void Trace(Visitor*) const;
+
+ private:
+  Member<const SVGViewSpec> view_spec_;
+  Member<Element> target_;
+};
 
 // SVGImage does not use Skia to draw images (as BitmapImage does) but instead
-// handles drawing itself. Internally, SVGImage creates a detached & sandboxed
-// Page containing an SVGDocument and reuses the existing paint code in Blink to
-// draw the image. Because a single SVGImage can be referenced by multiple
+// handles drawing itself. Internally, SVGImage creates a
+// IsolatedSVGDocumentHost and reuses the existing paint code in Blink to draw
+// the image. Because a single SVGImage can be referenced by multiple
 // containers (see: SVGImageForContainer.h), each call to SVGImage::draw() may
 // require (re-)laying out the inner SVGDocument.
 //
@@ -77,14 +103,19 @@ class CORE_EXPORT SVGImage final : public Image {
   gfx::Size SizeWithConfig(SizeConfig) const override;
 
   void CheckLoaded() const;
-  bool CurrentFrameHasSingleSecurityOrigin() const override;
+  bool HasSingleSecurityOrigin() const override;
 
   void StartAnimation() override;
   void ResetAnimation() override;
   void RestoreAnimation();
 
+  void SetDidEncounterXSL() { did_encounter_xsl_ = true; }
+  bool GetDidEncounterXSL() { return did_encounter_xsl_; }
+
   // Does the SVG image/document contain any animations?
   bool MaybeAnimated() override;
+
+  bool HasSVGForeignObject() const;
 
   // Advances an animated image. This will trigger an animation update for CSS
   // and advance the SMIL timeline by one frame.
@@ -97,39 +128,55 @@ class CORE_EXPORT SVGImage final : public Image {
   // Service CSS and SMIL animations.
   void ServiceAnimations(base::TimeTicks monotonic_animation_start_time);
 
-  void UpdateUseCounters(const Document&) const;
-
-  // The defaultObjectSize is assumed to be unzoomed, i.e. it should
-  // not have the effective zoom level applied. The returned size is
-  // thus also independent of current zoom level.
-  gfx::SizeF ConcreteObjectSize(const gfx::SizeF& default_object_size) const;
-
-  // Get the intrinsic dimensions (width, height and aspect ratio) from this
-  // SVGImage. Returns true if successful.
-  bool GetIntrinsicSizingInfo(IntrinsicSizingInfo&) const;
-
-  // Returns true if intrinsic dimensions can be extracted. (Essentially
-  // returns true if GetIntrinsicSizingInfo would.)
-  bool HasIntrinsicSizingInfo() const;
+  // Update use counters for the given document after an image finishes loading
+  // in that document.
+  void UpdateUseCountersAfterLoad(const Document&) const;
 
   PaintImage PaintImageForCurrentFrame() override;
 
   void SetPreferredColorScheme(
       mojom::blink::PreferredColorScheme preferred_color_scheme);
 
+  // Specialized interface for mask-image (via ExternalSVGResourceImageContent).
+  Element* GetResourceElement(base::PassKey<ExternalSVGResourceImageContent>,
+                              const AtomicString& id) const;
+  void UpdateLifecycleForUse(base::PassKey<ExternalSVGResourceImageContent>);
+
  protected:
   // Whether or not size is available yet.
   bool IsSizeAvailable() override;
 
  private:
-  // Accesses m_page.
+  enum class AnimationState : uint8_t {
+    kUnknown,
+    kUnknownRewindPending,
+    kNotAnimated,
+    kAnimated,
+    kAnimatedRewindPending,
+  };
+
+  // Accesses |document_host_|.
   friend class SVGImageChromeClient;
   // Forwards calls to the various *ForContainer methods and other parts of
   // the the Image interface.
   friend class SVGImageForContainer;
+  // Forwards calls to the sizing methods.
+  friend class SVGImageView;
 
   SVGImage(ImageObserver*, bool is_multipart);
   ~SVGImage() override;
+
+  // Parse and create an SVGImageViewInfo from the provided fragment string.
+  // Returns nullptr if no valid view specifier is found.
+  const SVGImageViewInfo* CreateViewInfo(const String& fragment) const;
+
+  // Apply a view specifier.
+  void ApplyViewInfo(const SVGImageViewInfo*);
+
+  // Get the intrinsic dimensions (width, height and aspect ratio) from this
+  // SVGImage. Returns true if successful.
+  std::optional<NaturalSizingInfo> GetNaturalDimensions(
+      const SVGViewSpec*) const;
 
   String FilenameExtension() const override;
 
@@ -141,8 +188,7 @@ class CORE_EXPORT SVGImage final : public Image {
   // to prune because these functions are not implemented yet.
   void DestroyDecodedData() override {}
 
-  // FIXME: Implement this to be less conservative.
-  bool CurrentFrameKnownToBeOpaque() override { return false; }
+  bool IsOpaque() override { return false; }
 
   class DrawInfo {
     STACK_ALLOCATED();
@@ -150,7 +196,7 @@ class CORE_EXPORT SVGImage final : public Image {
    public:
     DrawInfo(const gfx::SizeF& container_size,
              float zoom,
-             const KURL& url,
+             const SVGImageViewInfo* viewinfo,
              bool is_dark_mode_enabled);
 
     gfx::SizeF CalculateResidualScale() const;
@@ -159,14 +205,14 @@ class CORE_EXPORT SVGImage final : public Image {
     const gfx::Size& RoundedContainerSize() const {
       return rounded_container_size_;
     }
-    const KURL& Url() const { return url_; }
+    const SVGImageViewInfo* View() const { return viewinfo_; }
     bool IsDarkModeEnabled() const { return is_dark_mode_enabled_; }
 
    private:
     const gfx::SizeF container_size_;
     const gfx::Size rounded_container_size_;
     const float zoom_;
-    const KURL& url_;
+    const SVGImageViewInfo* viewinfo_;
     const bool is_dark_mode_enabled_;
   };
 
@@ -190,8 +236,9 @@ class CORE_EXPORT SVGImage final : public Image {
 
   // Paints the current frame. Returns new PaintRecord. |cull_rect| is an
   // optional additional cull rect.
-  absl::optional<PaintRecord> PaintRecordForCurrentFrame(
+  std::optional<PaintRecord> PaintRecordForCurrentFrame(
       const DrawInfo&,
+      const gfx::Vector2dF& container_scale,
       const gfx::Rect* cull_rect);
 
   void DrawInternal(const DrawInfo&,
@@ -205,47 +252,40 @@ class CORE_EXPORT SVGImage final : public Image {
                    const ImageDrawOptions&) override;
   bool ApplyShaderForContainer(const DrawInfo&,
                                cc::PaintFlags&,
+                               const gfx::RectF& src_rect,
                                const SkMatrix& local_matrix);
   bool ApplyShaderInternal(const DrawInfo&,
                            cc::PaintFlags&,
+                           const gfx::RectF& unzoomed_src_rect,
                            const SkMatrix& local_matrix);
 
   void StopAnimation();
   void ScheduleTimelineRewind();
   void FlushPendingTimelineRewind();
 
-  Page* GetPageForTesting() { return page_; }
-  void LoadCompleted();
   void NotifyAsyncLoadCompleted();
 
   LocalFrame* GetFrame() const;
+  bool DetectAnimatedContent() const;
+  bool HasPendingTimelineRewind() const;
+  void UpdateCachedAnimationState();
   SVGSVGElement* RootElement() const;
   LayoutSVGRoot* LayoutRoot() const;
 
-  class SVGImageLocalFrameClient;
+  Page* GetPageForTesting();
 
   Persistent<SVGImageChromeClient> chrome_client_;
-  Persistent<Page> page_;
+  Persistent<IsolatedSVGDocumentHost> document_host_;
   Persistent<AgentGroupScheduler> agent_group_scheduler_;
+  Persistent<SVGImageAnimationsToReset> css_animations_to_reset_;
 
-  // When an SVG image has no intrinsic size, the size depends on the default
-  // object size, which in turn depends on the container. One SVGImage may
-  // belong to multiple containers so the final image size can't be known in
-  // SVGImage. SVGImageForContainer carries the final image size, also called
-  // the "concrete object size". For more, see: SVGImageForContainer.h
-  LayoutSize intrinsic_size_;
+  PhysicalSize intrinsic_size_;
   bool has_pending_timeline_rewind_;
+  mutable AnimationState animation_state_ = AnimationState::kUnknown;
 
-  enum LoadState {
-    kDataChangedNotStarted,
-    kInDataChanged,
-    kWaitingForAsyncLoadCompletion,
-    kLoadCompleted,
-  };
+  bool did_encounter_xsl_ = false;
 
-  LoadState load_state_ = kDataChangedNotStarted;
-
-  Persistent<SVGImageLocalFrameClient> frame_client_;
+  base::WeakPtrFactory<SVGImage> weak_ptr_factory_{this};
   FRIEND_TEST_ALL_PREFIXES(ElementFragmentAnchorTest,
                            SVGDocumentDoesntCreateFragment);
   FRIEND_TEST_ALL_PREFIXES(SVGImageTest, SupportsSubsequenceCaching);
@@ -253,6 +293,20 @@ class CORE_EXPORT SVGImage final : public Image {
   FRIEND_TEST_ALL_PREFIXES(SVGImageTest, SetSizeOnVisualViewport);
   FRIEND_TEST_ALL_PREFIXES(SVGImageTest, IsSizeAvailable);
   FRIEND_TEST_ALL_PREFIXES(SVGImageTest, DisablesSMILEvents);
+  FRIEND_TEST_ALL_PREFIXES(SVGImageTest,
+                           ResetAnimationRewindsRunningFiniteCssAnimation);
+  FRIEND_TEST_ALL_PREFIXES(SVGImageTest,
+                           FinishedFiniteCssAnimationStillMaybeAnimated);
+  FRIEND_TEST_ALL_PREFIXES(SVGImageTest,
+                           ResetAnimationPreservesPausedFiniteCssAnimation);
+  FRIEND_TEST_ALL_PREFIXES(
+      SVGImageTest,
+      ResetAnimationRestoresPlaybackForFinishedFiniteCssAnimation);
+  FRIEND_TEST_ALL_PREFIXES(SVGImageTest,
+                           ContainerScaleChangeNoLayoutWithoutNSS);
+  FRIEND_TEST_ALL_PREFIXES(SVGImageTest, ContainerScaleChangeLayoutWithNSS);
+  FRIEND_TEST_ALL_PREFIXES(SVGImageSimTest,
+                           CachedFiniteCssAnimationResetWhileDetached);
 };
 
 template <>
@@ -264,7 +318,7 @@ class ImageObserverDisabler {
   STACK_ALLOCATED();
 
  public:
-  ImageObserverDisabler(Image* image) : image_(image) {
+  explicit ImageObserverDisabler(Image* image) : image_(image) {
     image_->SetImageObserverDisabled(true);
   }
 

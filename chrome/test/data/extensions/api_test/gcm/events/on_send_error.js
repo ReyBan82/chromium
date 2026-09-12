@@ -5,29 +5,30 @@
 onload = function() {
   chrome.test.runTests([
     function onSendError() {
-      var currentError = 0;
-      var totalMessages = 0;
-      var eventHandler = function(error) {
+      let currentError = 0;
+      let totalMessages = 0;
+      const eventHandler = function(error) {
         chrome.test.assertEq(3, Object.keys(error.details).length);
         chrome.test.assertTrue(
-            error.details.hasOwnProperty("expectedMessageId"));
+            error.details.hasOwnProperty('expectedMessageId'));
         chrome.test.assertTrue(
-            error.details.hasOwnProperty("expectedErrorMessage"));
+            error.details.hasOwnProperty('expectedErrorMessage'));
         chrome.test.assertEq(error.details.expectedMessageId, error.messageId);
-        chrome.test.assertEq(error.details.expectedErrorMessage,
-                             error.errorMessage);
+        chrome.test.assertEq(
+            error.details.expectedErrorMessage, error.errorMessage);
         currentError += 1;
-        var tempTotalMessages = +error.details.totalMessages;
-        if (totalMessages == 0)
+        const tempTotalMessages = +error.details.totalMessages;
+        if (totalMessages === 0) {
           totalMessages = tempTotalMessages;
-        else
+        } else {
           chrome.test.assertEq(totalMessages, tempTotalMessages);
-        if (currentError == totalMessages) {
+        }
+        if (currentError === totalMessages) {
           chrome.gcm.onSendError.removeListener(eventHandler);
           chrome.test.succeed();
         }
       };
       chrome.gcm.onSendError.addListener(eventHandler);
-    }
+    },
   ]);
 };

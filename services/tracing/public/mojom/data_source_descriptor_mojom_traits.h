@@ -22,6 +22,9 @@ class StructTraits<tracing::mojom::DataSourceRegistrationDataView,
   static const std::string& name(const perfetto::DataSourceDescriptor& src) {
     return src.name();
   }
+  static uint64_t id(const perfetto::DataSourceDescriptor& src) {
+    return src.id();
+  }
   static bool will_notify_on_start(const perfetto::DataSourceDescriptor& src) {
     return src.will_notify_on_start();
   }
@@ -31,6 +34,10 @@ class StructTraits<tracing::mojom::DataSourceRegistrationDataView,
   static bool handles_incremental_state_clear(
       const perfetto::DataSourceDescriptor& src) {
     return src.handles_incremental_state_clear();
+  }
+  static const std::string& track_event_descriptor_raw(
+      const perfetto::DataSourceDescriptor& src) {
+    return src.track_event_descriptor_raw();
   }
 
   static bool Read(tracing::mojom::DataSourceRegistrationDataView data,

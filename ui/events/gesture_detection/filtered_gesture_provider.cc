@@ -7,7 +7,8 @@
 #include "base/auto_reset.h"
 #include "base/check.h"
 #include "base/notreached.h"
-#include "ui/events/gesture_detection/motion_event.h"
+#include "ui/events/gesture_detection/gesture_detector.h"
+#include "ui/events/velocity_tracker/motion_event.h"
 
 namespace ui {
 
@@ -25,6 +26,11 @@ FilteredGestureProvider::FilteredGestureProvider(
       any_touch_moved_beyond_slop_region_(false) {}
 
 FilteredGestureProvider::~FilteredGestureProvider() = default;
+
+void FilteredGestureProvider::Shutdown() {
+  client_ = nullptr;
+  gesture_filter_.Shutdown();
+}
 
 void FilteredGestureProvider::UpdateConfig(
     const GestureProvider::Config& config) {
@@ -47,7 +53,9 @@ FilteredGestureProvider::OnTouchEvent(const MotionEvent& event) {
   TouchDispositionGestureFilter::PacketResult filter_result =
       gesture_filter_.OnGesturePacket(pending_gesture_packet_);
   if (filter_result != TouchDispositionGestureFilter::SUCCESS) {
-    NOTREACHED() << "Invalid touch gesture sequence detected.";
+    DCHECK_EQ(filter_result,
+              TouchDispositionGestureFilter::EMPTY_GESTURE_SEQUENCE)
+        << "Invalid touch gesture sequence detected.";
     return TouchHandlingResult();
   }
 
@@ -60,9 +68,11 @@ FilteredGestureProvider::OnTouchEvent(const MotionEvent& event) {
 void FilteredGestureProvider::OnTouchEventAck(
     uint32_t unique_event_id,
     bool event_consumed,
-    bool is_source_touch_event_set_blocking) {
+    bool is_source_touch_event_set_blocking,
+    const std::optional<EventLatencyMetadata>& event_latency_metadata) {
   gesture_filter_.OnTouchEventAck(unique_event_id, event_consumed,
-                                  is_source_touch_event_set_blocking);
+                                  is_source_touch_event_set_blocking,
+                                  event_latency_metadata);
 }
 
 void FilteredGestureProvider::ResetGestureHandlingState() {
@@ -95,10 +105,24 @@ const ui::MotionEvent* FilteredGestureProvider::GetCurrentDownEvent() const {
   return gesture_provider_->current_down_event();
 }
 
+const ui::MotionEvent* FilteredGestureProvider::GetLastEventWithoutHistory()
+    const {
+  return gesture_provider_->last_event_without_history();
+}
+
+void FilteredGestureProvider::OnUnconfirmedTapConvertedToTap() {
+  gesture_provider_->OnUnconfirmedTapConvertedToTap();
+}
+
+GestureDetector* FilteredGestureProvider::GetGestureDetectorForTesting() {
+  return gesture_provider_->GetGestureDetectorForTesting();  // IN-TEST
+}
+
 void FilteredGestureProvider::OnGestureEvent(const GestureEventData& event) {
   if (handling_event_) {
-    if (event.details.type() == ui::ET_GESTURE_SCROLL_BEGIN)
+    if (event.details.type() == ui::EventType::kGestureScrollBegin) {
       any_touch_moved_beyond_slop_region_ = true;
+    }
 
     pending_gesture_packet_.Push(event);
     return;
@@ -109,12 +133,18 @@ void FilteredGestureProvider::OnGestureEvent(const GestureEventData& event) {
 }
 
 bool FilteredGestureProvider::RequiresDoubleTapGestureEvents() const {
-  return client_->RequiresDoubleTapGestureEvents();
+  return client_ ? client_->RequiresDoubleTapGestureEvents() : false;
 }
 
 void FilteredGestureProvider::ForwardGestureEvent(
     const GestureEventData& event) {
-  client_->OnGestureEvent(event);
+  if (client_) {
+    client_->OnGestureEvent(event);
+  }
+}
+
+void FilteredGestureProvider::DisableScrollUpdateCompensation() {
+  gesture_filter_.DisableScrollUpdateCompensation();
 }
 
 }  // namespace ui

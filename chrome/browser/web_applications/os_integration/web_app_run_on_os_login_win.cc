@@ -15,14 +15,18 @@ namespace web_app {
 
 namespace internals {
 
-bool RegisterRunOnOsLogin(const ShortcutInfo& shortcut_info) {
+void RegisterRunOnOsLogin(const ShortcutInfo& shortcut_info,
+                          ResultCallback callback) {
   base::FilePath shortcut_data_dir = GetShortcutDataDir(shortcut_info);
 
   ShortcutLocations locations;
   locations.in_startup = true;
 
-  return CreatePlatformShortcuts(shortcut_data_dir, locations,
-                                 SHORTCUT_CREATION_AUTOMATED, shortcut_info);
+  CreatePlatformShortcuts(
+      shortcut_data_dir, locations, SHORTCUT_CREATION_AUTOMATED, shortcut_info,
+      base::BindOnce([](bool shortcut_created) {
+        return shortcut_created ? Result::kOk : Result::kError;
+      }).Then(std::move(callback)));
 }
 
 Result UnregisterRunOnOsLogin(const std::string& app_id,
@@ -37,7 +41,8 @@ Result UnregisterRunOnOsLogin(const std::string& app_id,
   for (const auto& path : all_paths) {
     // Find all app's shortcuts in Startup folder to delete.
     std::vector<base::FilePath> shortcut_files =
-        FindAppShortcutsByProfileAndTitle(path, profile_path, shortcut_title);
+        FindAppShortcutsByProfileAppIdAndTitle(path, profile_path,
+                                               shortcut_title, app_id);
     for (const auto& shortcut_file : shortcut_files) {
       if (!base::DeleteFile(shortcut_file))
         result = Result::kError;

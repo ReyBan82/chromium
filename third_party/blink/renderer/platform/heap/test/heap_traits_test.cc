@@ -6,6 +6,8 @@
 
 #include <type_traits>
 #include <utility>
+
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector_backing.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/heap/member.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
@@ -50,8 +52,9 @@ static_assert(
 
 static_assert(
     std::is_same<AddMemberIfNeeded<HeapVector<Member<GarbageCollectedStruct>>>,
-                 Member<HeapVector<Member<GarbageCollectedStruct>>>>::value,
-    "AddMemberIfNeeded on a HeapVector<Member<T>> must wrap it in a Member<>");
+                 HeapVector<Member<GarbageCollectedStruct>>>::value,
+    "AddMemberIfNeeded on a HeapVector<Member<T>> must not wrap it in a "
+    "Member<>");
 
 // VectorOf<T>
 static_assert(std::is_same<VectorOf<double>, Vector<double>>::value,
@@ -74,12 +77,11 @@ static_assert(
     "Nested Vectors must not add HeapVectors");
 static_assert(
     std::is_same<VectorOf<HeapVector<StructWithTraceMethod>>,
-                 HeapVector<Member<HeapVector<StructWithTraceMethod>>>>::value,
+                 HeapVector<HeapVector<StructWithTraceMethod>>>::value,
     "Nested HeapVector<StructWithTraceMethod> must add a HeapVector");
 static_assert(
-    std::is_same<
-        VectorOf<HeapVector<Member<GarbageCollectedStruct>>>,
-        HeapVector<Member<HeapVector<Member<GarbageCollectedStruct>>>>>::value,
+    std::is_same<VectorOf<HeapVector<Member<GarbageCollectedStruct>>>,
+                 HeapVector<HeapVector<Member<GarbageCollectedStruct>>>>::value,
     "Nested HeapVectors must not add Vectors");
 
 // VectorOfPairs<T, U>
@@ -119,6 +121,30 @@ static_assert(
                  HeapVector<std::pair<Member<GarbageCollectedStruct>,
                                       Member<GarbageCollectedStruct>>>>::value,
     "GarbageCollectedStruct causes a HeapVector to be used");
+
+// HeapVectorBacking alignment inheritance
+struct alignas(8) AlignedStruct8 {
+  int a;
+};
+static_assert(alignof(HeapVectorBacking<AlignedStruct8>) == 8,
+              "HeapVectorBacking must inherit element alignment (8 bytes)");
+
+struct alignas(16) AlignedStruct16 {
+  int a;
+};
+static_assert(alignof(HeapVectorBacking<AlignedStruct16>) == 16,
+              "HeapVectorBacking must inherit element alignment (16 bytes)");
+
+static_assert(
+    std::is_same_v<cppgc::SpaceTrait<HeapVectorBacking<AlignedStruct8>>::Space,
+                   std::conditional_t<sizeof(void*) == 8,
+                                      CompactableHeapVectorBackingSpace,
+                                      void>>,
+    "8-byte aligned backings only use compactable space on 64-bit targets");
+static_assert(
+    std::is_same_v<cppgc::SpaceTrait<HeapVectorBacking<AlignedStruct16>>::Space,
+                   void>,
+    "16-byte aligned backings must fall back to default non-compactable space");
 
 }  // namespace
 

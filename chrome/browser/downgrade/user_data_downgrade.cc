@@ -13,10 +13,7 @@
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "chrome/browser/browser_process.h"
 #include "chrome/browser/downgrade/snapshot_manager.h"
-#include "chrome/common/pref_names.h"
-#include "components/prefs/pref_service.h"
 
 namespace downgrade {
 
@@ -27,7 +24,7 @@ base::Version GetVersionFromFileName(const base::FilePath& path) {
   // On Windows, for Unicode-aware applications, native pathnames are wchar_t
   // arrays encoded in UTF-16.
   return base::Version(base::WideToUTF8(path.BaseName().value()));
-#elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
+#elif BUILDFLAG(IS_POSIX)
   // On most platforms, native pathnames are char arrays, and the encoding
   // may or may not be specified.  On Mac OS X, native pathnames are encoded
   // in UTF-8.
@@ -43,12 +40,12 @@ bool IsValidSnapshotDirectory(const base::FilePath& path) {
 
 }  // namespace
 
-const base::FilePath::StringPieceType kDowngradeLastVersionFile(
+const base::FilePath::StringViewType kDowngradeLastVersionFile(
     FILE_PATH_LITERAL("Last Version"));
-const base::FilePath::StringPieceType kDowngradeDeleteSuffix(
+const base::FilePath::StringViewType kDowngradeDeleteSuffix(
     FILE_PATH_LITERAL(".CHROME_DELETE"));
 
-const base::FilePath::StringPieceType kSnapshotsDir(
+const base::FilePath::StringViewType kSnapshotsDir(
     FILE_PATH_LITERAL("Snapshots"));
 
 base::FilePath GetLastVersionFile(const base::FilePath& user_data_dir) {
@@ -56,7 +53,7 @@ base::FilePath GetLastVersionFile(const base::FilePath& user_data_dir) {
   return user_data_dir.Append(kDowngradeLastVersionFile);
 }
 
-absl::optional<base::Version> GetLastVersion(
+std::optional<base::Version> GetLastVersion(
     const base::FilePath& user_data_dir) {
   DCHECK(!user_data_dir.empty());
   std::string last_version_str;
@@ -67,15 +64,7 @@ absl::optional<base::Version> GetLastVersion(
     if (version.IsValid())
       return version;
   }
-  return absl::nullopt;
-}
-
-base::FilePath GetDiskCacheDir() {
-  base::FilePath disk_cache_dir =
-      g_browser_process->local_state()->GetFilePath(prefs::kDiskCacheDir);
-  if (disk_cache_dir.ReferencesParent())
-    return base::MakeAbsoluteFilePath(disk_cache_dir);
-  return disk_cache_dir;
+  return std::nullopt;
 }
 
 base::flat_set<base::Version> GetAvailableSnapshots(
@@ -108,7 +97,7 @@ std::vector<base::FilePath> GetInvalidSnapshots(
   return result;
 }
 
-absl::optional<base::Version> GetSnapshotToRestore(
+std::optional<base::Version> GetSnapshotToRestore(
     const base::Version& version,
     const base::FilePath& user_data_dir) {
   DCHECK(version.IsValid());
@@ -118,15 +107,16 @@ absl::optional<base::Version> GetSnapshotToRestore(
   auto upper_bound = available_snapshots.upper_bound(version);
   if (upper_bound != available_snapshots.begin())
     return *--upper_bound;
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-void RemoveDataForProfile(base::Time delete_begin,
-                          const base::FilePath& profile_path,
-                          uint64_t remove_mask) {
-  SnapshotManager snapshot_manager(profile_path.DirName());
+void RemoveDataForProfile(
+    base::Time delete_begin,
+    const base::FilePath& profile_path,
+    std::optional<std::vector<base::FilePath>> files_to_delete) {
+  SnapshotManager snapshot_manager(profile_path.DirName(), nullptr);
   snapshot_manager.DeleteSnapshotDataForProfile(
-      delete_begin, profile_path.BaseName(), remove_mask);
+      delete_begin, profile_path.BaseName(), std::move(files_to_delete));
 }
 
 }  // namespace downgrade

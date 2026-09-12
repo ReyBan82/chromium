@@ -6,16 +6,16 @@
 
 #include <utility>
 
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/display/types/display_constants.h"
 #include "ui/gfx/image/image_skia.h"
 
 namespace test {
 
-TestAppListControllerDelegate::TestAppListControllerDelegate() {
-}
+TestAppListControllerDelegate::TestAppListControllerDelegate() = default;
 
-TestAppListControllerDelegate::~TestAppListControllerDelegate() {
-}
+TestAppListControllerDelegate::~TestAppListControllerDelegate() = default;
 
 int64_t TestAppListControllerDelegate::GetAppListDisplayId() {
   return display::kInvalidDisplayId;

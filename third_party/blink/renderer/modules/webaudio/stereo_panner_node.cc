@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/modules/webaudio/stereo_panner_node.h"
 
+#include "third_party/blink/renderer/bindings/modules/v8/v8_automation_rate.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_stereo_panner_options.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
@@ -27,14 +28,15 @@ constexpr float kMaxPanValue = 1.0f;
 
 StereoPannerNode::StereoPannerNode(BaseAudioContext& context)
     : AudioNode(context),
-      pan_(AudioParam::Create(context,
-                              Uuid(),
-                              AudioParamHandler::kParamTypeStereoPannerPan,
-                              kDefaultPanValue,
-                              AudioParamHandler::AutomationRate::kAudio,
-                              AudioParamHandler::AutomationRateMode::kVariable,
-                              kMinPanValue,
-                              kMaxPanValue)) {
+      pan_(AudioParam::Create(
+          context,
+          Uuid(),
+          AudioParamHandler::AudioParamType::kParamTypeStereoPannerPan,
+          kDefaultPanValue,
+          V8AutomationRate::Enum::kARate,
+          AudioParamHandler::AutomationRateMode::kVariable,
+          kMinPanValue,
+          kMaxPanValue)) {
   SetHandler(StereoPannerHandler::Create(*this, context.sampleRate(),
                                          pan_->Handler()));
 }
@@ -68,7 +70,7 @@ void StereoPannerNode::Trace(Visitor* visitor) const {
 }
 
 AudioParam* StereoPannerNode::pan() const {
-  return pan_;
+  return pan_.Get();
 }
 
 void StereoPannerNode::ReportDidCreate() {

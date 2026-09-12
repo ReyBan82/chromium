@@ -9,9 +9,9 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.anyInt;
-import static org.mockito.Mockito.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
@@ -31,12 +31,14 @@ import com.google.android.gms.cast.framework.media.RemoteMediaClient;
 
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 
@@ -50,35 +52,25 @@ import org.chromium.components.media_router.TestMediaRouterClient;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Robolectric tests for BaseSessionController.
- */
+/** Robolectric tests for BaseSessionController. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, shadows = {ShadowMediaRouter.class, ShadowCastContext.class})
+@Config(shadows = {ShadowMediaRouter.class, ShadowCastContext.class})
 public class BaseSessionControllerTest {
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
     private static final String PRESENTATION_ID = "presentation-id";
     private static final String ORIGIN = "https://example.com/";
     private static final int TAB_ID = 1;
     private static final String APP_ID = "12345678";
 
-    @Mock
-    private CastDevice mCastDevice;
-    @Mock
-    private CafBaseMediaRouteProvider mProvider;
-    @Mock
-    private BaseNotificationController mNotificationController;
-    @Mock
-    private MediaSource mSource;
-    @Mock
-    private MediaSink mSink;
-    @Mock
-    private CastContext mCastContext;
-    @Mock
-    private CastSession mCastSession;
-    @Mock
-    private SessionManager mSessionManager;
-    @Mock
-    private RemoteMediaClient mRemoteMediaClient;
+    @Mock private CastDevice mCastDevice;
+    @Mock private CafBaseMediaRouteProvider mProvider;
+    @Mock private BaseNotificationController mNotificationController;
+    @Mock private MediaSource mSource;
+    @Mock private MediaSink mSink;
+    @Mock private CastContext mCastContext;
+    @Mock private CastSession mCastSession;
+    @Mock private SessionManager mSessionManager;
+    @Mock private RemoteMediaClient mRemoteMediaClient;
     private BaseSessionController mController;
     private CreateRouteRequestInfo mRequestInfo;
     private MediaRouterTestHelper mMediaRouterHelper;
@@ -87,7 +79,6 @@ public class BaseSessionControllerTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mContext = RuntimeEnvironment.application;
         mMediaRouterHelper = new MediaRouterTestHelper();
         MediaRouterClient.setInstance(new TestMediaRouterClient());
@@ -98,8 +89,16 @@ public class BaseSessionControllerTest {
                         .build();
         mController = new TestSessionController(mProvider, mNotificationController);
         mController.addCallback(mNotificationController);
-        mRequestInfo = new CreateRouteRequestInfo(mSource, mSink, PRESENTATION_ID, ORIGIN, TAB_ID,
-                false, 1, mMediaRouterHelper.getCastRoute());
+        mRequestInfo =
+                new CreateRouteRequestInfo(
+                        mSource,
+                        mSink,
+                        PRESENTATION_ID,
+                        ORIGIN,
+                        TAB_ID,
+                        false,
+                        1,
+                        mMediaRouterHelper.getCastRoute());
 
         doReturn(mSessionManager).when(mCastContext).getSessionManager();
         doReturn(mRemoteMediaClient).when(mCastSession).getRemoteMediaClient();
@@ -197,7 +196,7 @@ public class BaseSessionControllerTest {
         // Test that everything is supported.
         doReturn(true).when(mCastDevice).hasCapability(anyInt());
         List<String> capabilities = mController.getCapabilities();
-        assertEquals(capabilities.size(), 4);
+        assertEquals(4, capabilities.size());
         assertTrue(capabilities.contains("audio_in"));
         assertTrue(capabilities.contains("audio_out"));
         assertTrue(capabilities.contains("video_in"));
@@ -235,9 +234,10 @@ public class BaseSessionControllerTest {
     }
 
     private static class TestSessionController extends BaseSessionController {
-        public BaseNotificationController mNotificationController;
+        public final BaseNotificationController mNotificationController;
 
-        public TestSessionController(CafBaseMediaRouteProvider provider,
+        public TestSessionController(
+                CafBaseMediaRouteProvider provider,
                 BaseNotificationController notificationController) {
             super(provider);
             mNotificationController = notificationController;

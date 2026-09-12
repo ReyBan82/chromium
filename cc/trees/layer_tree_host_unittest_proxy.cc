@@ -4,6 +4,8 @@
 
 #include "base/compiler_specific.h"
 #include "base/functional/bind.h"
+#include "base/test/scoped_feature_list.h"
+#include "cc/base/features.h"
 #include "cc/test/fake_content_layer_client.h"
 #include "cc/test/fake_picture_layer.h"
 #include "cc/test/layer_tree_test.h"
@@ -73,6 +75,102 @@ class LayerTreeHostProxyTestSetNeedsCommit : public LayerTreeHostProxyTest {
 };
 
 MULTI_THREAD_TEST_F(LayerTreeHostProxyTestSetNeedsCommit);
+
+class LayerTreeHostProxyTestSetNeedsCommitUrgent
+    : public LayerTreeHostProxyTest {
+ protected:
+  LayerTreeHostProxyTestSetNeedsCommitUrgent() = default;
+  LayerTreeHostProxyTestSetNeedsCommitUrgent(
+      const LayerTreeHostProxyTestSetNeedsCommitUrgent&) = delete;
+  ~LayerTreeHostProxyTestSetNeedsCommitUrgent() override = default;
+
+  LayerTreeHostProxyTestSetNeedsCommitUrgent& operator=(
+      const LayerTreeHostProxyTestSetNeedsCommitUrgent&) = delete;
+
+  void BeginTest() override {
+    EXPECT_EQ(ProxyMain::NO_PIPELINE_STAGE,
+              GetProxyMain()->max_requested_pipeline_stage());
+    EXPECT_FALSE(GetProxyMain()->has_sent_urgent_commit_request());
+
+    proxy()->SetNeedsCommit(/*urgent=*/false);
+    EXPECT_EQ(ProxyMain::COMMIT_PIPELINE_STAGE,
+              GetProxyMain()->max_requested_pipeline_stage());
+    proxy()->SetNeedsCommit(/*urgent=*/true);
+    EXPECT_TRUE(GetProxyMain()->has_sent_urgent_commit_request());
+  }
+
+  void DidBeginMainFrame() override {
+    EXPECT_EQ(ProxyMain::NO_PIPELINE_STAGE,
+              GetProxyMain()->max_requested_pipeline_stage());
+    EXPECT_EQ(ProxyMain::NO_PIPELINE_STAGE,
+              GetProxyMain()->current_pipeline_stage());
+  }
+
+  void DidCommit() override {
+    EXPECT_EQ(1, update_check_layer()->update_count());
+    EXPECT_EQ(ProxyMain::NO_PIPELINE_STAGE,
+              GetProxyMain()->current_pipeline_stage());
+    EndTest();
+  }
+};
+
+MULTI_THREAD_TEST_F(LayerTreeHostProxyTestSetNeedsCommitUrgent);
+
+class LayerTreeHostProxyTestSetNeedsCommitUnthrottled
+    : public LayerTreeHostProxyTest {
+ public:
+  LayerTreeHostProxyTestSetNeedsCommitUnthrottled() = default;
+  LayerTreeHostProxyTestSetNeedsCommitUnthrottled(
+      const LayerTreeHostProxyTestSetNeedsCommitUnthrottled&) = delete;
+  ~LayerTreeHostProxyTestSetNeedsCommitUnthrottled() override = default;
+
+  LayerTreeHostProxyTestSetNeedsCommitUnthrottled& operator=(
+      const LayerTreeHostProxyTestSetNeedsCommitUnthrottled&) = delete;
+
+ protected:
+  void InitializeSettings(LayerTreeSettings* settings) override {
+    LayerTreeHostProxyTest::InitializeSettings(settings);
+    scoped_feature_list_.InitAndEnableFeature(
+        features::kThrottleRepeatedNoDamageFrames);
+  }
+
+  void BeginTest() override {
+    EXPECT_EQ(ProxyMain::NO_PIPELINE_STAGE,
+              GetProxyMain()->max_requested_pipeline_stage());
+    EXPECT_FALSE(GetProxyMain()->has_sent_unthrottled_commit_request());
+
+    // Simulate being in throttled state.
+    GetProxyMain()->set_consecutive_no_damage_main_frames_for_testing(360);
+
+    // Requesting a rAF commit should NOT set
+    // has_sent_unthrottled_commit_request.
+    proxy()->SetNeedsAnimate(BeginMainFrameReason::kRAF);
+    EXPECT_EQ(ProxyMain::ANIMATE_PIPELINE_STAGE,
+              GetProxyMain()->max_requested_pipeline_stage());
+    EXPECT_FALSE(GetProxyMain()->has_sent_unthrottled_commit_request());
+
+    // Requesting a non-rAF commit while throttled SHOULD set
+    // has_sent_unthrottled_commit_request.
+    proxy()->SetNeedsCommit();
+    EXPECT_EQ(ProxyMain::COMMIT_PIPELINE_STAGE,
+              GetProxyMain()->max_requested_pipeline_stage());
+    EXPECT_TRUE(GetProxyMain()->has_sent_unthrottled_commit_request());
+  }
+
+  void DidBeginMainFrame() override {
+    EXPECT_EQ(ProxyMain::NO_PIPELINE_STAGE,
+              GetProxyMain()->max_requested_pipeline_stage());
+    EXPECT_EQ(ProxyMain::NO_PIPELINE_STAGE,
+              GetProxyMain()->current_pipeline_stage());
+  }
+
+  void DidCommit() override { EndTest(); }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+MULTI_THREAD_TEST_F(LayerTreeHostProxyTestSetNeedsCommitUnthrottled);
 
 class LayerTreeHostProxyTestSetNeedsAnimate : public LayerTreeHostProxyTest {
  protected:
@@ -492,7 +590,9 @@ class LayerTreeHostProxyTestImplFrameCausesAnimatePending
         EndTest();
         break;
       }
-      default: { NOTREACHED(); }
+      default: {
+        NOTREACHED();
+      }
     }
   }
 };
@@ -531,7 +631,9 @@ class LayerTreeHostProxyTestNeedsCommitFromImpl
                            base::Unretained(this)));
         break;
       }
-      default: { NOTREACHED(); }
+      default: {
+        NOTREACHED();
+      }
     }
   }
 
@@ -572,7 +674,7 @@ class LayerTreeHostProxyTestDelayedCommitDueToVisibility
       LayerTreeHostImpl*,
       CommitEarlyOutReason reason,
       bool /* did_sync_scroll_and_viewport */) override {
-    EXPECT_EQ(CommitEarlyOutReason::ABORTED_NOT_VISIBLE, reason);
+    EXPECT_EQ(CommitEarlyOutReason::kAbortedNotVisible, reason);
     PostSetVisibleToMainThread(true);
   }
 
@@ -584,5 +686,84 @@ class LayerTreeHostProxyTestDelayedCommitDueToVisibility
 
 SINGLE_AND_MULTI_THREAD_TEST_F(
     LayerTreeHostProxyTestDelayedCommitDueToVisibility);
+
+class LayerTreeHostProxyTestRequestImmediateBeginMainFrame
+    : public LayerTreeHostProxyTest {
+ protected:
+  LayerTreeHostProxyTestRequestImmediateBeginMainFrame() = default;
+  ~LayerTreeHostProxyTestRequestImmediateBeginMainFrame() override = default;
+
+  void BeginTest() override { PostSetNeedsCommitToMainThread(); }
+
+  void WillSendBeginMainFrameOnThread(LayerTreeHostImpl* host_impl) override {
+    if (!requested_) {
+      requested_ = true;
+      MainThreadTaskRunner()->PostTask(
+          FROM_HERE,
+          base::BindOnce(&LayerTreeHost::RequestImmediateBeginMainFrame,
+                         base::Unretained(layer_tree_host())));
+    }
+  }
+
+  void DidSendEarlyFinalBeginMainFrameOnThread(
+      LayerTreeHostImpl* host_impl) override {
+    received_ = true;
+  }
+
+  void DidCommit() override {
+    if (received_) {
+      EndTest();
+    }
+  }
+
+  void AfterTest() override { EXPECT_TRUE(received_); }
+
+ private:
+  bool requested_ = false;
+  bool received_ = false;
+};
+
+MULTI_THREAD_TEST_F(LayerTreeHostProxyTestRequestImmediateBeginMainFrame);
+
+// Tests killswitch disables RequestImmediateBeginMainFrame.
+class LayerTreeHostProxyTestRequestImmediateBeginMainFrameDisabled
+    : public LayerTreeHostProxyTest {
+ protected:
+  LayerTreeHostProxyTestRequestImmediateBeginMainFrameDisabled() {
+    feature_list_.InitAndDisableFeature(
+        features::kSendEarlyFinalBeginMainFrame);
+  }
+  ~LayerTreeHostProxyTestRequestImmediateBeginMainFrameDisabled() override =
+      default;
+
+  void BeginTest() override { PostSetNeedsCommitToMainThread(); }
+
+  void WillSendBeginMainFrameOnThread(LayerTreeHostImpl* host_impl) override {
+    if (!requested_) {
+      requested_ = true;
+      MainThreadTaskRunner()->PostTask(
+          FROM_HERE,
+          base::BindOnce(&LayerTreeHost::RequestImmediateBeginMainFrame,
+                         base::Unretained(layer_tree_host())));
+    }
+  }
+
+  void DidSendEarlyFinalBeginMainFrameOnThread(
+      LayerTreeHostImpl* host_impl) override {
+    received_ = true;
+  }
+
+  void DidCommit() override { EndTest(); }
+
+  void AfterTest() override { EXPECT_FALSE(received_); }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+  bool requested_ = false;
+  bool received_ = false;
+};
+
+MULTI_THREAD_TEST_F(
+    LayerTreeHostProxyTestRequestImmediateBeginMainFrameDisabled);
 
 }  // namespace cc

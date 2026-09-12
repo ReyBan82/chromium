@@ -70,7 +70,6 @@ void InsecureFormBlockingPage::CommandReceived(const std::string& command) {
     case security_interstitials::CMD_REPORT_PHISHING_ERROR:
       // Not supported by the insecure form blocking page.
       NOTREACHED() << "Unsupported command: " << command;
-      break;
     case security_interstitials::CMD_ERROR:
     case security_interstitials::CMD_TEXT_FOUND:
     case security_interstitials::CMD_TEXT_NOT_FOUND:
@@ -80,7 +79,7 @@ void InsecureFormBlockingPage::CommandReceived(const std::string& command) {
 }
 
 void InsecureFormBlockingPage::PopulateInterstitialStrings(
-    base::Value::Dict& load_time_data) {
+    base::DictValue& load_time_data) {
   PopulateValuesForSharedHTML(load_time_data);
 
   load_time_data.Set("tabTitle",
@@ -102,12 +101,10 @@ void InsecureFormBlockingPage::PopulateInterstitialStrings(
 }
 
 void InsecureFormBlockingPage::PopulateValuesForSharedHTML(
-    base::Value::Dict& load_time_data) {
+    base::DictValue& load_time_data) {
   load_time_data.Set("type", "INSECURE_FORM");
   load_time_data.Set("overridable", false);
   load_time_data.Set("hide_primary_button", false);
-  load_time_data.Set("show_recurrent_error_paragraph", false);
-  load_time_data.Set("recurrentErrorParagraph", "");
   load_time_data.Set("openDetails", "");
   load_time_data.Set("explanationParagraph", "");
   load_time_data.Set("finalParagraph", "");

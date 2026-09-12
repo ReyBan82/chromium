@@ -4,8 +4,9 @@
 
 #include "net/reporting/reporting_header_parser.h"
 
-#include <cstring>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -24,6 +25,7 @@
 #include "net/reporting/reporting_context.h"
 #include "net/reporting/reporting_delegate.h"
 #include "net/reporting/reporting_endpoint.h"
+#include "net/reporting/reporting_target_type.h"
 
 namespace net {
 
@@ -38,6 +40,20 @@ const char kMaxAgeKey[] = "max_age";
 const char kPriorityKey[] = "priority";
 const char kWeightKey[] = "weight";
 
+bool IsAbsolutePath(const std::string& endpoint_url) {
+  if (endpoint_url.empty()) {
+    return false;
+  }
+
+  // handle with '/'
+  if (endpoint_url.size() == 1) {
+    return endpoint_url[0] == '/';
+  }
+
+  // Support path-absolute-URL string with exactly one leading "/"
+  return endpoint_url[0] == '/' && endpoint_url[1] != '/';
+}
+
 // Processes a single endpoint url string parsed from header.
 //
 // |endpoint_url_string| is the string value of the endpoint URL.
@@ -48,8 +64,7 @@ const char kWeightKey[] = "weight";
 bool ProcessEndpointURLString(const std::string& endpoint_url_string,
                               const url::Origin& header_origin,
                               GURL& endpoint_url_out) {
-  // Support path-absolute-URL string with exactly one leading "/"
-  if (std::strspn(endpoint_url_string.c_str(), "/") == 1) {
+  if (IsAbsolutePath(endpoint_url_string)) {
     endpoint_url_out = header_origin.GetURL().Resolve(endpoint_url_string);
   } else {
     endpoint_url_out = GURL(endpoint_url_string);
@@ -73,7 +88,7 @@ bool ProcessEndpoint(ReportingDelegate* delegate,
                      const ReportingEndpointGroupKey& group_key,
                      const base::Value& value,
                      ReportingEndpoint::EndpointInfo* endpoint_info_out) {
-  const base::Value::Dict* dict = value.GetIfDict();
+  const base::DictValue* dict = value.GetIfDict();
   if (!dict)
     return false;
 
@@ -82,7 +97,9 @@ bool ProcessEndpoint(ReportingDelegate* delegate,
     return false;
 
   GURL endpoint_url;
-  if (!ProcessEndpointURLString(*endpoint_url_string, group_key.origin,
+  // V0 endpoints should have an origin.
+  DCHECK(group_key.origin.has_value());
+  if (!ProcessEndpointURLString(*endpoint_url_string, group_key.origin.value(),
                                 endpoint_url)) {
     return false;
   }
@@ -108,7 +125,8 @@ bool ProcessEndpoint(ReportingDelegate* delegate,
     return false;
   endpoint_info_out->weight = weight;
 
-  return delegate->CanSetClient(group_key.origin, endpoint_info_out->url);
+  return delegate->CanSetClient(group_key.origin.value(),
+                                endpoint_info_out->url);
 }
 
 // Processes a single endpoint group tuple received in a Report-To header.
@@ -125,7 +143,7 @@ bool ProcessEndpointGroup(
     const url::Origin& origin,
     const base::Value& value,
     ReportingEndpointGroup* parsed_endpoint_group_out) {
-  const base::Value::Dict* dict = value.GetIfDict();
+  const base::DictValue* dict = value.GetIfDict();
   if (!dict)
     return false;
 
@@ -135,8 +153,11 @@ bool ProcessEndpointGroup(
       return false;
     group_name = maybe_group_name->GetString();
   }
+  // The target_type is set to kDeveloper because enterprise endpoints are
+  // created on a different path.
   ReportingEndpointGroupKey group_key(network_anonymization_key, origin,
-                                      group_name);
+                                      group_name,
+                                      ReportingTargetType::kDeveloper);
   parsed_endpoint_group_out->group_key = group_key;
 
   int ttl_sec = dict->FindInt(kMaxAgeKey).value_or(-1);
@@ -149,20 +170,20 @@ bool ProcessEndpointGroup(
   }
   parsed_endpoint_group_out->ttl = base::Seconds(ttl_sec);
 
-  absl::optional<bool> subdomains_bool = dict->FindBool(kIncludeSubdomainsKey);
+  std::optional<bool> subdomains_bool = dict->FindBool(kIncludeSubdomainsKey);
   if (subdomains_bool && subdomains_bool.value()) {
     // Disallow eTLDs from setting include_subdomains endpoint groups.
-    if (registry_controlled_domains::GetRegistryLength(
-            origin.GetURL(),
-            registry_controlled_domains::INCLUDE_UNKNOWN_REGISTRIES,
-            registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES) == 0) {
+    GURL gurl = origin.GetURL();
+    if (registry_controlled_domains::GetRegistry(
+            gurl, registry_controlled_domains::INCLUDE_UNKNOWN_REGISTRIES,
+            registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES) == "") {
       return false;
     }
 
     parsed_endpoint_group_out->include_subdomains = OriginSubdomains::INCLUDE;
   }
 
-  const base::Value::List* endpoint_list = dict->FindList(kEndpointsKey);
+  const base::ListValue* endpoint_list = dict->FindList(kEndpointsKey);
   if (!endpoint_list)
     return false;
 
@@ -199,7 +220,9 @@ bool ProcessEndpoint(ReportingDelegate* delegate,
     return false;
 
   GURL endpoint_url;
-  if (!ProcessEndpointURLString(endpoint_url_string, group_key.origin,
+  // Document endpoints should have an origin.
+  DCHECK(group_key.origin.has_value());
+  if (!ProcessEndpointURLString(endpoint_url_string, group_key.origin.value(),
                                 endpoint_url)) {
     return false;
   }
@@ -210,7 +233,8 @@ bool ProcessEndpoint(ReportingDelegate* delegate,
       ReportingEndpoint::EndpointInfo::kDefaultPriority;
   endpoint_info_out.weight = ReportingEndpoint::EndpointInfo::kDefaultWeight;
 
-  return delegate->CanSetClient(group_key.origin, endpoint_info_out.url);
+  return delegate->CanSetClient(group_key.origin.value(),
+                                endpoint_info_out.url);
 }
 
 // Process a single endpoint received in a Reporting-Endpoints header.
@@ -223,8 +247,11 @@ bool ProcessV1Endpoint(ReportingDelegate* delegate,
                        const std::string& endpoint_url_string,
                        ReportingEndpoint& parsed_endpoint_out) {
   DCHECK(!reporting_source.is_empty());
+  // The target_type is set to kDeveloper because enterprise endpoints are
+  // created on a different path.
   ReportingEndpointGroupKey group_key(network_anonymization_key,
-                                      reporting_source, origin, endpoint_name);
+                                      reporting_source, origin, endpoint_name,
+                                      ReportingTargetType::kDeveloper);
   parsed_endpoint_out.group_key = group_key;
 
   ReportingEndpoint::EndpointInfo parsed_endpoint;
@@ -239,31 +266,32 @@ bool ProcessV1Endpoint(ReportingDelegate* delegate,
 
 }  // namespace
 
-absl::optional<base::flat_map<std::string, std::string>>
-ParseReportingEndpoints(const std::string& header) {
+std::optional<base::flat_map<std::string, std::string>> ParseReportingEndpoints(
+    const std::string& header) {
   // Ignore empty header values. Skip logging metric to maintain parity with
   // ReportingHeaderType::kReportToInvalid.
   if (header.empty())
-    return absl::nullopt;
-  absl::optional<structured_headers::Dictionary> header_dict =
+    return std::nullopt;
+  std::optional<structured_headers::Dictionary> header_dict =
       structured_headers::ParseDictionary(header);
   if (!header_dict) {
     ReportingHeaderParser::RecordReportingHeaderType(
         ReportingHeaderParser::ReportingHeaderType::kReportingEndpointsInvalid);
-    return absl::nullopt;
+    return std::nullopt;
   }
   base::flat_map<std::string, std::string> parsed_header;
   for (const structured_headers::DictionaryMember& entry : *header_dict) {
-    if (entry.second.member_is_inner_list ||
-        !entry.second.member.front().item.is_string()) {
+    const auto item_and_params = entry.second.GetWithParamsIfItem();
+    const std::string* endpoint_url_string =
+        item_and_params.has_value() ? item_and_params->first.GetIfString()
+                                    : nullptr;
+    if (!endpoint_url_string) {
       ReportingHeaderParser::RecordReportingHeaderType(
           ReportingHeaderParser::ReportingHeaderType::
               kReportingEndpointsInvalid);
-      return absl::nullopt;
+      return std::nullopt;
     }
-    const std::string& endpoint_url_string =
-        entry.second.member.front().item.GetString();
-    parsed_header[entry.first] = endpoint_url_string;
+    parsed_header[entry.first] = *endpoint_url_string;
   }
   return parsed_header;
 }
@@ -279,7 +307,7 @@ void ReportingHeaderParser::ParseReportToHeader(
     ReportingContext* context,
     const NetworkAnonymizationKey& network_anonymization_key,
     const url::Origin& origin,
-    const base::Value::List& list) {
+    const base::ListValue& list) {
   DCHECK(GURL::SchemeIsCryptographic(origin.scheme()));
 
   ReportingDelegate* delegate = context->delegate();
@@ -319,7 +347,6 @@ void ReportingHeaderParser::ProcessParsedReportingEndpointsHeader(
     const NetworkAnonymizationKey& network_anonymization_key,
     const url::Origin& origin,
     base::flat_map<std::string, std::string> header) {
-  DCHECK(base::FeatureList::IsEnabled(net::features::kDocumentReporting));
   DCHECK(GURL::SchemeIsCryptographic(origin.scheme()));
   DCHECK(!reporting_source.is_empty());
   DCHECK(network_anonymization_key.IsEmpty() ||

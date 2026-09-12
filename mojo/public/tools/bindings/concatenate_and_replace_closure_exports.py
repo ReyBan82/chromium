@@ -32,7 +32,7 @@ def FilterLine(filename, line, output):
     return
 
   if line.startswith("goog.provide"):
-    match = re.match("goog.provide\('([^']+)'\);", line)
+    match = re.match(r"goog.provide\('([^']+)'\);", line)
     if not match:
       print("Invalid goog.provide line in %s:\n%s" % (filename, line))
       sys.exit(1)
@@ -46,8 +46,9 @@ def FilterLine(filename, line, output):
 
   output.write(line)
 
+
 def ConcatenateAndReplaceExports(filenames):
-  if (len(filenames) < 2):
+  if len(filenames) < 2:
     print("At least two filenames (one input and the output) are required.")
     return False
 
@@ -61,6 +62,7 @@ def ConcatenateAndReplaceExports(filenames):
   except IOError as e:
     print("Error generating %s\n: %s" % (filenames[-1], e))
     return False
+
 
 def main():
   parser = optparse.OptionParser()

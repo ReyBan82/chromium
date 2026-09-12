@@ -11,7 +11,11 @@
 #include "base/compiler_specific.h"
 
 // All data needed by TemplateURLRef::ReplaceSearchTerms which typically may
-// only be accessed on the UI thread.
+// only be accessed on the UI thread. This class provides a way to get at data
+// that is needed to expand the search terms in a TemplateURL. For example, it
+// provides the Google base URL, the application locale, and other data that
+// is needed to construct a valid search URL. The methods are virtual so that
+// they can be overridden in different contexts (e.g., on different platforms).
 class SearchTermsData {
  public:
   // Enumeration of the known search or suggest request sources. These values
@@ -19,8 +23,10 @@ class SearchTermsData {
   enum class RequestSource {
     SEARCHBOX,      // Omnibox or the NTP realbox. The default.
     CROS_APP_LIST,  // Chrome OS app list searchbox.
-    NTP_MODULE,     // Suggestions for the NTP modules.
-    JOURNEYS,       // Suggestions for the Journeys.
+    NTP_MODULE,     // NTP modules.
+    LENS_OVERLAY,   // Lens Overlay searchboxes.
+    COMPOSEBOX,     // AIM Composebox's (e.g. NTP, omnibox, & lens side panel).
+    NTP_ACTION_CHIPS,  // Suggestions retrieval for action chips in NTP.
   };
 
   // Utility function that takes a snapshot of a different SearchTermsData
@@ -41,8 +47,8 @@ class SearchTermsData {
   virtual std::string GoogleBaseURLValue() const;
 
   // Returns the value to use for the GOOGLE_BASE_SEARCH_BY_IMAGE_URL. Points
-  // at Lens if the user is enrolled in the Lens experiment, and defaults to
-  // Image Search otherwise.
+  // at LENS_OVERLAY if the user is enrolled in the LENS_OVERLAY experiment, and
+  // defaults to Image Search otherwise.
   virtual std::string GoogleBaseSearchByImageURLValue() const;
 
   // Returns the value for the GOOGLE_BASE_SUGGEST_URL term.  This
@@ -60,18 +66,6 @@ class SearchTermsData {
   // The optional client parameter passed with Google search requests.  This
   // implementation returns the empty string.
   virtual std::string GetSearchClient() const;
-
-  // The suggest client parameter ("client") passed with Google suggest
-  // requests.  See GetSuggestRequestIdentifier() for more details.
-  // This implementation returns the empty string.
-  virtual std::string GetSuggestClient(RequestSource request_source) const;
-
-  // The suggest request identifier parameter ("gs_ri") passed with Google
-  // suggest requests.   Along with suggestclient (See GetSuggestClient()),
-  // this parameter controls what suggestion results are returned.
-  // This implementation returns the empty string.
-  virtual std::string GetSuggestRequestIdentifier(
-      RequestSource request_source) const;
 
   // Returns the value to use for replacements of type
   // GOOGLE_IMAGE_SEARCH_SOURCE.

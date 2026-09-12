@@ -8,6 +8,9 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/timer/timer.h"
+#include "base/types/expected.h"
+#include "components/enterprise/browser/reporting/report_generation_config.h"
+#include "components/enterprise/browser/reporting/report_generator.h"
 #include "components/enterprise/browser/reporting/report_request.h"
 #include "components/policy/core/common/cloud/cloud_policy_client.h"
 #include "net/base/backoff_entry.h"
@@ -50,9 +53,30 @@ class ReportUploader {
 
   // Sets a list of requests and upload it. Request will be uploaded one after
   // another.
-  virtual void SetRequestAndUpload(ReportType report_type,
+  virtual void SetRequestAndUpload(const ReportGenerationConfig& config,
                                    ReportRequestQueue requests,
                                    ReportCallback callback);
+
+  class Listener {
+   public:
+    virtual ~Listener() = default;
+
+    // Called right before ReportUploader retries an upload attempt.
+    // The listener is responsible for resending the request by calling
+    // `SetRequestAndUpload` again.
+    virtual void OnReportWillRetry(const ReportGenerationConfig& config) = 0;
+  };
+
+  void SetListener(Listener* listener);
+  void RemoveListener(Listener* listener);
+  bool HasListener(Listener* listener) const;
+
+  void NotifyReportWillRetry(const ReportGenerationConfig& config);
+
+  // Overrides the backoff policy used for retrying requests. If nullptr is
+  // passed, the default policy is restored.
+  static void SetBackoffPolicyForTesting(
+      const net::BackoffEntry::Policy* backoff_policy);
 
  private:
   // Uploads the first request in the queue.
@@ -64,6 +88,7 @@ class ReportUploader {
 
   // Retries the first request in the queue.
   void Retry();
+  void OnRetryTimerFired();
   bool HasRetriedTooOften();
 
   // Notifies the upload result.
@@ -75,11 +100,12 @@ class ReportUploader {
   raw_ptr<policy::CloudPolicyClient> client_;
   ReportCallback callback_;
   ReportRequestQueue requests_;
-  ReportType report_type_;
+  ReportGenerationConfig config_;
 
   net::BackoffEntry backoff_entry_;
   base::OneShotTimer backoff_request_timer_;
   const int maximum_number_of_retries_;
+  raw_ptr<Listener> listener_ = nullptr;
 
   base::WeakPtrFactory<ReportUploader> weak_ptr_factory_{this};
 };

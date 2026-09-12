@@ -7,26 +7,26 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "content/public/browser/navigation_throttle.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if defined(__OBJC__)
 
-#import "base/mac/scoped_nsobject.h"
-
 @class ASWebAuthenticationSessionRequest;
 
-class Browser;
+class BrowserWindowInterface;
 class Profile;
 
 // A class to manage the WebContents running an
 // ASWebAuthenticationSessionRequest.
-class API_AVAILABLE(macos(10.15)) AuthSessionRequest
+class AuthSessionRequest
     : public content::WebContentsObserver,
       public content::WebContentsUserData<AuthSessionRequest> {
  public:
@@ -37,26 +37,29 @@ class API_AVAILABLE(macos(10.15)) AuthSessionRequest
   static void CancelAuthSession(ASWebAuthenticationSessionRequest* request);
 
   // Canonicalizes a scheme string. Returns nullopt if it is invalid.
-  static absl::optional<std::string> CanonicalizeScheme(std::string scheme);
+  static std::optional<std::string> CanonicalizeScheme(std::string_view scheme);
 
   // Create a throttle for the ongoing authentication session.
-  std::unique_ptr<content::NavigationThrottle> CreateThrottle(
-      content::NavigationHandle* handle);
+  void CreateAndAddNavigationThrottle(
+      content::NavigationThrottleRegistry& registry);
 
  private:
   friend class content::WebContentsUserData<AuthSessionRequest>;
 
   // Creates a AuthSessionRequest. `web_contents` is the WebContents to run,
   // `browser` is the browser window containing it, and `request` is the
-  // `ASWebAuthenticationSessionRequest` being serviced.
+  // `ASWebAuthenticationSessionRequest` being serviced. `matching_scheme` is
+  // provided as the scheme to match on macOS 14.3 and earlier, and is empty and
+  // unused otherwise.
   AuthSessionRequest(content::WebContents* web_contents,
-                     Browser* browser,
+                     BrowserWindowInterface* browser,
                      ASWebAuthenticationSessionRequest* request,
-                     std::string scheme);
+                     const std::string& matching_scheme);
 
   // Create a Browser and a WebContents to run the request.
-  static Browser* CreateBrowser(ASWebAuthenticationSessionRequest* request,
-                                Profile* profile);
+  static BrowserWindowInterface* CreateBrowser(
+      ASWebAuthenticationSessionRequest* request,
+      Profile* profile);
 
   // Returns a map that holds all the authentication sessions that are in
   // progress. The keys are the stringified uuids of the authentication
@@ -84,22 +87,25 @@ class API_AVAILABLE(macos(10.15)) AuthSessionRequest
   bool perform_cancellation_callback_ = true;
 
   // The browser containing the WebContents being used to service the request.
-  raw_ptr<Browser> browser_ = nullptr;
+  raw_ptr<BrowserWindowInterface> browser_ = nullptr;
 
   // The request being serviced.
-  base::scoped_nsobject<ASWebAuthenticationSessionRequest> request_;
+  ASWebAuthenticationSessionRequest* __strong request_;
 
-  // The scheme being watched for, canonicalized.
-  std::string scheme_;
+  // The scheme being watched for, canonicalized. Used only on macOS 14.3 and
+  // earlier.
+  std::string matching_scheme_;
 
   WEB_CONTENTS_USER_DATA_KEY_DECL();
+
+  base::WeakPtrFactory<AuthSessionRequest> weak_factory_{this};
 };
 
 #endif  // __OBJC__
 
 // If there is an authentication session in progress for the given navigation
 // handle, install a throttle.
-std::unique_ptr<content::NavigationThrottle> MaybeCreateAuthSessionThrottleFor(
-    content::NavigationHandle* handle) API_AVAILABLE(macos(10.15));
+void MaybeCreateAndAddAuthSessionNavigationThrottle(
+    content::NavigationThrottleRegistry& registry);
 
 #endif  // CHROME_BROWSER_MAC_AUTH_SESSION_REQUEST_H_

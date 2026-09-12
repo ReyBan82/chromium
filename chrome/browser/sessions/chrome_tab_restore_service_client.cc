@@ -9,8 +9,10 @@
 #include "chrome/browser/sessions/session_common_utils.h"
 #include "chrome/common/url_constants.h"
 #include "components/sessions/content/content_live_tab.h"
+#include "components/sessions/core/session_id.h"
 #include "components/tab_groups/tab_group_id.h"
 #include "extensions/buildflags/buildflags.h"
+#include "ui/base/mojom/window_show_state.mojom.h"
 
 #if BUILDFLAG(ENABLE_SESSION_SERVICE)
 #include "chrome/browser/sessions/exit_type_service.h"
@@ -32,14 +34,14 @@
 ChromeTabRestoreServiceClient::ChromeTabRestoreServiceClient(Profile* profile)
     : profile_(profile) {}
 
-ChromeTabRestoreServiceClient::~ChromeTabRestoreServiceClient() {}
+ChromeTabRestoreServiceClient::~ChromeTabRestoreServiceClient() = default;
 
 sessions::LiveTabContext* ChromeTabRestoreServiceClient::CreateLiveTabContext(
     sessions::LiveTabContext* existing_context,
     sessions::SessionWindow::WindowType type,
     const std::string& app_name,
     const gfx::Rect& bounds,
-    ui::WindowShowState show_state,
+    ui::mojom::WindowShowState show_state,
     const std::string& workspace,
     const std::string& user_title,
     const std::map<std::string, std::string>& extra_data) {
@@ -60,10 +62,10 @@ ChromeTabRestoreServiceClient::FindLiveTabContextForTab(
     const sessions::LiveTab* tab) {
 #if BUILDFLAG(IS_ANDROID)
   return AndroidLiveTabContext::FindContextForWebContents(
-      static_cast<const sessions::ContentLiveTab*>(tab)->web_contents());
+      &static_cast<const sessions::ContentLiveTab*>(tab)->GetWebContents());
 #else
   return BrowserLiveTabContext::FindContextForWebContents(
-      static_cast<const sessions::ContentLiveTab*>(tab)->web_contents());
+      &static_cast<const sessions::ContentLiveTab*>(tab)->GetWebContents());
 #endif
 }
 
@@ -96,7 +98,7 @@ std::string ChromeTabRestoreServiceClient::GetExtensionAppIDForTab(
 
 #if BUILDFLAG(ENABLE_EXTENSIONS)
   app_id = apps::GetAppIdForWebContents(
-      static_cast<sessions::ContentLiveTab*>(tab)->web_contents());
+      &static_cast<sessions::ContentLiveTab*>(tab)->GetWebContents());
 #endif
 
   return app_id;
@@ -107,7 +109,7 @@ base::FilePath ChromeTabRestoreServiceClient::GetPathToSaveTo() {
 }
 
 GURL ChromeTabRestoreServiceClient::GetNewTabURL() {
-  return GURL(chrome::kChromeUINewTabURL);
+  return chrome::ChromeUINewTabURLAsGURL();
 }
 
 bool ChromeTabRestoreServiceClient::HasLastSession() {

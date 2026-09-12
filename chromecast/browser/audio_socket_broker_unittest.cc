@@ -12,6 +12,7 @@
 #include <string>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
@@ -95,16 +96,18 @@ class AudioSocketBrokerTest : public content::RenderViewHostTestHarness {
 
   void OnAccept(int result) {
     EXPECT_EQ(result, net::OK);
-    char buffer[16];
+    uint8_t buffer[16];
     std::vector<base::ScopedFD> fds;
     const int flags = fcntl(accepted_descriptor_, F_GETFL);
     ASSERT_NE(
         HANDLE_EINTR(fcntl(accepted_descriptor_, F_SETFL, flags & ~O_NONBLOCK)),
         -1);
+    std::string_view expected_msg(kSocketMsg);
     EXPECT_EQ(static_cast<size_t>(base::UnixDomainSocket::RecvMsg(
-                  accepted_descriptor_, buffer, sizeof(buffer), &fds)),
-              sizeof(kSocketMsg));
-    EXPECT_EQ(memcmp(buffer, kSocketMsg, sizeof(kSocketMsg)), 0);
+                  accepted_descriptor_, buffer, &fds)),
+              expected_msg.size());
+    UNSAFE_TODO(
+        EXPECT_EQ(memcmp(buffer, expected_msg.data(), expected_msg.size()), 0));
     EXPECT_THAT(fds, ::testing::SizeIs(1U));
     accepted_socket_ = AdoptUnnamedSocketHandle(std::move(fds[0]));
   }

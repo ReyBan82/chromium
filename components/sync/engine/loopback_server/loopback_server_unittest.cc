@@ -4,8 +4,8 @@
 
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/guid.h"
 #include "base/test/task_environment.h"
+#include "base/uuid.h"
 #include "components/sync/base/client_tag_hash.h"
 #include "components/sync/engine/loopback_server/loopback_connection_manager.h"
 #include "components/sync/engine/syncer_proto_util.h"
@@ -35,7 +35,7 @@ SyncEntity NewBookmarkEntity(const std::string& url,
   SyncEntity entity;
   entity.mutable_specifics()->mutable_bookmark()->set_url(url);
   entity.set_parent_id_string(parent_id);
-  entity.set_id_string(base::GenerateGUID());
+  entity.set_id_string(base::Uuid::GenerateRandomV4().AsLowercaseString());
   return entity;
 }
 
@@ -82,17 +82,28 @@ class LoopbackServerTest : public testing::Test {
   static bool CallPostAndProcessHeaders(ServerConnectionManager* scm,
                                         const ClientToServerMessage& msg,
                                         ClientToServerResponse* response) {
-    return SyncerProtoUtil::PostAndProcessHeaders(scm, msg, response);
+    return SyncerProtoUtil::PostAndProcessHeaders(scm, msg, response,
+                                                  signin::AccessTokenInfo());
   }
 
  protected:
-  ClientToServerResponse GetUpdatesForType(int field_number) {
+  ClientToServerResponse GetUpdatesForType(
+      int field_number,
+      std::string_view birthday = "",
+      std::string_view progress_token = "") {
     ClientToServerMessage request;
     SyncerProtoUtil::SetProtocolVersion(&request);
     request.set_share("required");
+    if (!birthday.empty()) {
+      request.set_store_birthday(birthday);
+    }
     request.set_message_contents(ClientToServerMessage::GET_UPDATES);
     request.mutable_get_updates()->add_from_progress_marker()->set_data_type_id(
         field_number);
+    if (!progress_token.empty()) {
+      request.mutable_get_updates()->mutable_from_progress_marker(0)->set_token(
+          progress_token);
+    }
 
     ClientToServerResponse response;
     EXPECT_TRUE(CallPostAndProcessHeaders(lcm_.get(), request, &response));
@@ -185,7 +196,7 @@ TEST_F(LoopbackServerTest, CommitCommand) {
 
 TEST_F(LoopbackServerTest, CommitFailureNoTag) {
   // Non-bookmarks and non-commit only types must have a
-  // client_defined_unique_tag, which we don't set.
+  // client_tag_hash, which we don't set.
   SyncEntity entity;
   entity.mutable_specifics()->mutable_preference();
   CommitVerifyFailure(entity);
@@ -195,23 +206,52 @@ TEST_F(LoopbackServerTest, CommitBookmarkTombstoneSuccess) {
   std::string id1 = CommitVerifySuccess(NewBookmarkEntity(kUrl1, kBookmarkBar));
   std::string id2 = CommitVerifySuccess(NewBookmarkEntity(kUrl2, id1));
   std::string id3 = CommitVerifySuccess(NewBookmarkEntity(kUrl3, kBookmarkBar));
+  ClientToServerResponse original_response =
+      GetUpdatesForType(EntitySpecifics::kBookmarkFieldNumber);
+  std::map<std::string, SyncEntity> original_bookmarks =
+      ResponseToMap(original_response);
+  ASSERT_TRUE(original_bookmarks.contains(id1));
+  ASSERT_TRUE(original_bookmarks.contains(id2));
+  ASSERT_TRUE(original_bookmarks.contains(id3));
+  ASSERT_FALSE(original_bookmarks[id1].deleted());
+  ASSERT_FALSE(original_bookmarks[id2].deleted());
+  ASSERT_FALSE(original_bookmarks[id3].deleted());
+
+  const std::string birthday = original_response.store_birthday();
+  ASSERT_EQ(original_response.get_updates().new_progress_marker_size(), 1);
+  const std::string progress_token =
+      original_response.get_updates().new_progress_marker(0).token();
 
   // Because 2 is a child of 1, deleting 1 will also delete 2.
   CommitVerifySuccess(DeletedBookmarkEntity(id1, 10));
 
-  std::map<std::string, SyncEntity> bookmarks =
+  // In an incremental update, tombstones are returned for the deleted entities.
+  // The remaining entity is unchanged, so is not returned.
+  std::map<std::string, SyncEntity> incremental_update_bookmarks =
+      ResponseToMap(GetUpdatesForType(EntitySpecifics::kBookmarkFieldNumber,
+                                      birthday, progress_token));
+  EXPECT_TRUE(incremental_update_bookmarks.contains(id1));
+  EXPECT_TRUE(incremental_update_bookmarks.contains(id2));
+  EXPECT_FALSE(incremental_update_bookmarks.contains(id3));
+  EXPECT_TRUE(incremental_update_bookmarks[id1].deleted());
+  EXPECT_TRUE(incremental_update_bookmarks[id2].deleted());
+
+  // In a full (non-incremental) update, no tombstones are returned - the
+  // entities just aren't there anymore.
+  std::map<std::string, SyncEntity> full_update_bookmarks =
       ResponseToMap(GetUpdatesForType(EntitySpecifics::kBookmarkFieldNumber));
-  EXPECT_TRUE(bookmarks[id1].deleted());
-  EXPECT_TRUE(bookmarks[id2].deleted());
-  EXPECT_FALSE(bookmarks[id3].deleted());
+  EXPECT_FALSE(full_update_bookmarks.contains(id1));
+  EXPECT_FALSE(full_update_bookmarks.contains(id2));
+  EXPECT_TRUE(full_update_bookmarks.contains(id3));
+  EXPECT_FALSE(full_update_bookmarks[id3].deleted());
 }
 
 TEST_F(LoopbackServerTest, CommitBookmarkTombstoneFailure) {
   std::string id1 = CommitVerifySuccess(NewBookmarkEntity(kUrl1, kBookmarkBar));
   std::string id2 = CommitVerifySuccess(NewBookmarkEntity(kUrl2, "9" + id1));
 
-  // This write is going to fail, the id is supposed to encode the model type as
-  // as prefix, by adding 9 we're creating a fake model type.
+  // This write is going to fail, the id is supposed to encode the data type as
+  // as prefix, by adding 9 we're creating a fake data type.
   SyncEntity entity = DeletedBookmarkEntity("9" + id1, 1);
   CommitVerifyFailure(entity);
 
@@ -273,7 +313,7 @@ TEST_F(LoopbackServerTest, CommitCommandUpdate) {
 }
 
 TEST_F(LoopbackServerTest, CommitBookmarkCreationWithClientTag) {
-  const std::string kGuid = base::GenerateGUID();
+  const std::string kGuid = base::Uuid::GenerateRandomV4().AsLowercaseString();
   const std::string kClientTagHash =
       ClientTagHash::FromUnhashed(BOOKMARKS, kGuid).value();
 
@@ -281,19 +321,19 @@ TEST_F(LoopbackServerTest, CommitBookmarkCreationWithClientTag) {
   entity.mutable_specifics()->mutable_bookmark()->set_url(kUrl1);
   entity.set_parent_id_string(kBookmarkBar);
   entity.set_id_string(kGuid);
-  entity.set_client_defined_unique_tag(kClientTagHash);
+  entity.set_client_tag_hash(kClientTagHash);
 
   const std::string id = CommitVerifySuccess(entity);
 
   std::map<std::string, SyncEntity> bookmarks =
       ResponseToMap(GetUpdatesForType(EntitySpecifics::kBookmarkFieldNumber));
-  EXPECT_EQ(bookmarks[id].client_defined_unique_tag(), kClientTagHash);
+  EXPECT_EQ(bookmarks[id].client_tag_hash(), kClientTagHash);
 }
 
 // Verifies that a bookmark update (non-creation) does not populate the client
 // tag of a bookmark, if no client tag was provided upon creation.
 TEST_F(LoopbackServerTest, CommitBookmarkUpdateWithClientTag) {
-  const std::string kGuid = base::GenerateGUID();
+  const std::string kGuid = base::Uuid::GenerateRandomV4().AsLowercaseString();
   const std::string kClientTagHash =
       ClientTagHash::FromUnhashed(BOOKMARKS, kGuid).value();
 
@@ -307,11 +347,11 @@ TEST_F(LoopbackServerTest, CommitBookmarkUpdateWithClientTag) {
   std::map<std::string, SyncEntity> bookmarks =
       ResponseToMap(GetUpdatesForType(EntitySpecifics::kBookmarkFieldNumber));
   ASSERT_EQ(bookmarks[id].specifics().bookmark().url(), kUrl1);
-  ASSERT_FALSE(bookmarks[id].has_client_defined_unique_tag());
+  ASSERT_FALSE(bookmarks[id].has_client_tag_hash());
 
   // Issue an update, with the client tag being provided for the first time.
   entity.set_id_string(id);
-  entity.set_client_defined_unique_tag(kClientTagHash);
+  entity.set_client_tag_hash(kClientTagHash);
   entity.set_version(1);
   entity.mutable_specifics()->mutable_bookmark()->set_url(kUrl2);
   CommitVerifySuccess(entity);
@@ -319,7 +359,7 @@ TEST_F(LoopbackServerTest, CommitBookmarkUpdateWithClientTag) {
   bookmarks =
       ResponseToMap(GetUpdatesForType(EntitySpecifics::kBookmarkFieldNumber));
   ASSERT_EQ(bookmarks[id].specifics().bookmark().url(), kUrl2);
-  EXPECT_FALSE(bookmarks[id].has_client_defined_unique_tag());
+  EXPECT_FALSE(bookmarks[id].has_client_tag_hash());
 }
 
 }  // namespace syncer

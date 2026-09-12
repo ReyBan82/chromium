@@ -2,22 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/net/nss_service_factory.h"
-
 #include <memory>
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "build/build_config.h"
 #include "chrome/browser/ash/login/login_manager_test.h"
 #include "chrome/browser/ash/login/test/device_state_mixin.h"
 #include "chrome/browser/ash/login/test/login_manager_mixin.h"
 #include "chrome/browser/ash/login/test/user_policy_mixin.h"
-#include "chrome/browser/ash/login/ui/user_adding_screen.h"
-#include "chrome/browser/ash/profiles/profile_helper.h"
-#include "chrome/browser/ash/scoped_test_system_nss_key_slot_mixin.h"
 #include "chrome/browser/net/nss_service.h"
+#include "chrome/browser/net/nss_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/ash/login/user_adding_screen.h"
+#include "chrome/test/base/ash/scoped_test_system_nss_key_slot_mixin.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "chromeos/ash/components/login/auth/public/user_context.h"
 #include "components/account_id/account_id.h"
 #include "components/signin/public/identity_manager/identity_test_utils.h"
@@ -36,6 +36,11 @@ constexpr char kTestAffiliationId[] = "test_affiliation_id";
 
 void NotCalledDbCallback(net::NSSCertDatabase* db) {
   ASSERT_TRUE(false);
+}
+
+Profile* GetProfileForUser(const user_manager::User* user) {
+  return Profile::FromBrowserContext(
+      ash::BrowserContextHelper::Get()->GetBrowserContextByUser(user));
 }
 
 // DBTester handles retrieving the NSSCertDatabase for a given profile, and
@@ -137,8 +142,8 @@ class DBTester {
                                                  std::move(done_callback));
   }
 
-  Profile* profile_ = nullptr;
-  net::NSSCertDatabase* db_ = nullptr;
+  raw_ptr<Profile> profile_ = nullptr;
+  raw_ptr<net::NSSCertDatabase> db_ = nullptr;
   // Indicates if the tester should expect to receive a database with
   // initialized system slot or not.
   bool will_have_system_slot_ = false;
@@ -192,7 +197,7 @@ class NSSContextChromeOSBrowserTest : public ash::LoginManagerTest {
     // affiliated ones in the `login_mixin_.users()` array.
     login_mixin_.AppendRegularUsers(2);
   }
-  ~NSSContextChromeOSBrowserTest() override {}
+  ~NSSContextChromeOSBrowserTest() override = default;
 
   void SetUpInProcessBrowserTestFixture() override {
     LoginManagerTest::SetUpInProcessBrowserTestFixture();
@@ -248,8 +253,8 @@ IN_PROC_BROWSER_TEST_F(NSSContextChromeOSBrowserTest,
   user_manager::UserManager* user_manager = user_manager::UserManager::Get();
 
   LoginUser(affiliated_account_id_1_);
-  Profile* profile1 = ash::ProfileHelper::Get()->GetProfileByUser(
-      user_manager->FindUser(affiliated_account_id_1_));
+  Profile* profile1 =
+      GetProfileForUser(user_manager->FindUser(affiliated_account_id_1_));
   ASSERT_TRUE(profile1);
 
   DBTester tester1(profile1, /*will_have_system_slot=*/true);
@@ -265,8 +270,7 @@ IN_PROC_BROWSER_TEST_F(NSSContextChromeOSBrowserTest,
   const AccountId account_id1(
       login_mixin_.users()[kUnaffiliatedUserIdx1].account_id);
   LoginUser(account_id1);
-  Profile* profile1 = ash::ProfileHelper::Get()->GetProfileByUser(
-      user_manager->FindUser(account_id1));
+  Profile* profile1 = GetProfileForUser(user_manager->FindUser(account_id1));
   ASSERT_TRUE(profile1);
 
   DBTester tester1(profile1, /*will_have_system_slot=*/false);
@@ -281,8 +285,8 @@ IN_PROC_BROWSER_TEST_F(NSSContextChromeOSBrowserTest,
 
   // Log in first user and get their DB.
   LoginUser(affiliated_account_id_1_);
-  Profile* profile1 = ash::ProfileHelper::Get()->GetProfileByUser(
-      user_manager->FindUser(affiliated_account_id_1_));
+  Profile* profile1 =
+      GetProfileForUser(user_manager->FindUser(affiliated_account_id_1_));
   ASSERT_TRUE(profile1);
 
   DBTester tester1(profile1, /*will_have_system_slot=*/true);
@@ -296,8 +300,8 @@ IN_PROC_BROWSER_TEST_F(NSSContextChromeOSBrowserTest,
   AddUser(affiliated_account_id_2_);
   observer.WaitUntilUserAddingFinishedOrCancelled();
 
-  Profile* profile2 = ash::ProfileHelper::Get()->GetProfileByUser(
-      user_manager->FindUser(affiliated_account_id_2_));
+  Profile* profile2 =
+      GetProfileForUser(user_manager->FindUser(affiliated_account_id_2_));
   ASSERT_TRUE(profile2);
 
   DBTester tester2(profile2, /*will_have_system_slot=*/true);
@@ -319,8 +323,7 @@ IN_PROC_BROWSER_TEST_F(NSSContextChromeOSBrowserTest,
   const AccountId account_id1(
       login_mixin_.users()[kUnaffiliatedUserIdx1].account_id);
   LoginUser(account_id1);
-  Profile* profile1 = ash::ProfileHelper::Get()->GetProfileByUser(
-      user_manager->FindUser(account_id1));
+  Profile* profile1 = GetProfileForUser(user_manager->FindUser(account_id1));
   ASSERT_TRUE(profile1);
 
   DBTester tester1(profile1, /*will_have_system_slot=*/false);
@@ -336,8 +339,7 @@ IN_PROC_BROWSER_TEST_F(NSSContextChromeOSBrowserTest,
   AddUser(account_id2);
   observer.WaitUntilUserAddingFinishedOrCancelled();
 
-  Profile* profile2 = ash::ProfileHelper::Get()->GetProfileByUser(
-      user_manager->FindUser(account_id2));
+  Profile* profile2 = GetProfileForUser(user_manager->FindUser(account_id2));
   ASSERT_TRUE(profile2);
 
   DBTester tester2(profile2, /*will_have_system_slot=*/false);
@@ -357,8 +359,8 @@ IN_PROC_BROWSER_TEST_F(NSSContextChromeOSBrowserTest,
 
   // Log in first user and get their DB.
   LoginUser(affiliated_account_id_1_);
-  Profile* profile1 = ash::ProfileHelper::Get()->GetProfileByUser(
-      user_manager->FindUser(affiliated_account_id_1_));
+  Profile* profile1 =
+      GetProfileForUser(user_manager->FindUser(affiliated_account_id_1_));
   ASSERT_TRUE(profile1);
 
   DBTester tester1(profile1, /*will_have_system_slot=*/true);
@@ -374,8 +376,7 @@ IN_PROC_BROWSER_TEST_F(NSSContextChromeOSBrowserTest,
   AddUser(account_id2);
   observer.WaitUntilUserAddingFinishedOrCancelled();
 
-  Profile* profile2 = ash::ProfileHelper::Get()->GetProfileByUser(
-      user_manager->FindUser(account_id2));
+  Profile* profile2 = GetProfileForUser(user_manager->FindUser(account_id2));
   ASSERT_TRUE(profile2);
 
   DBTester tester2(profile2, /*will_have_system_slot=*/false);

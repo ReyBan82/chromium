@@ -4,6 +4,7 @@
 
 #include "chrome/browser/web_applications/preinstalled_web_apps/preinstalled_web_app_definition_utils.h"
 
+#include "base/numerics/safe_conversions.h"
 #include "chrome/browser/browser_process.h"
 #include "third_party/icu/source/common/unicode/localematcher.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -22,9 +23,9 @@ icu::Locale GetLocaleFromTranslation(const Translation& translation) {
 
 }  // namespace
 
-std::map<SquareSizePx, SkBitmap> LoadBundledIcons(
+OrderedSizeToBitmap LoadBundledIcons(
     const std::initializer_list<int>& icon_resource_ids) {
-  std::map<SquareSizePx, SkBitmap> results;
+  OrderedSizeToBitmap results;
   for (int id : icon_resource_ids) {
     const gfx::Image& image =
         ui::ResourceBundle::GetSharedInstance().GetImageNamed(id);
@@ -55,7 +56,7 @@ const char* GetTranslatedName(const char* utf8_default_name,
   if (best_index == -1)
     return utf8_default_name;
 
-  return translations[best_index].utf8_translation;
+  return translations[base::checked_cast<size_t>(best_index)].utf8_translation;
 }
 
 }  // namespace web_app

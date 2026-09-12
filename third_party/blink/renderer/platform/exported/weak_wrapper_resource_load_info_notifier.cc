@@ -37,16 +37,17 @@ void WeakWrapperResourceLoadInfoNotifier::NotifyResourceResponseReceived(
     int64_t request_id,
     const url::SchemeHostPort& final_response_url,
     network::mojom::URLResponseHeadPtr response_head,
-    network::mojom::RequestDestination request_destination) {
+    network::mojom::RequestDestination request_destination,
+    bool is_ad_resource) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   resource_load_info_notifier_->NotifyResourceResponseReceived(
       request_id, final_response_url, std::move(response_head),
-      request_destination);
+      request_destination, is_ad_resource);
 }
 
 void WeakWrapperResourceLoadInfoNotifier::NotifyResourceTransferSizeUpdated(
     int64_t request_id,
-    int32_t transfer_size_diff) {
+    base::ByteSize transfer_size_diff) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   resource_load_info_notifier_->NotifyResourceTransferSizeUpdated(
       request_id, transfer_size_diff);

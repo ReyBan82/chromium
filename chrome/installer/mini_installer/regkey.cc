@@ -4,6 +4,7 @@
 
 #include "chrome/installer/mini_installer/regkey.h"
 
+#include "base/compiler_specific.h"
 #include "build/branding_buildflags.h"
 #include "chrome/installer/mini_installer/mini_installer_constants.h"
 #include "chrome/installer/mini_installer/mini_string.h"
@@ -27,11 +28,12 @@ LONG RegKey::ReadSZValue(const wchar_t* value_name,
       result = ERROR_NOT_SUPPORTED;
     } else if (byte_length < 2) {
       *value = L'\0';
-    } else if (value[byte_length / sizeof(wchar_t) - 1] != L'\0') {
-      if ((byte_length / sizeof(wchar_t)) < value_size)
-        value[byte_length / sizeof(wchar_t)] = L'\0';
-      else
+    } else if (UNSAFE_TODO(value[byte_length / sizeof(wchar_t) - 1]) != L'\0') {
+      if ((byte_length / sizeof(wchar_t)) < value_size) {
+        UNSAFE_TODO(value[byte_length / sizeof(wchar_t)]) = L'\0';
+      } else {
         result = ERROR_MORE_DATA;
+      }
     }
   }
   return result;
@@ -50,12 +52,6 @@ LONG RegKey::ReadDWValue(const wchar_t* value_name, DWORD* value) const {
     }
   }
   return result;
-}
-
-LONG RegKey::WriteSZValue(const wchar_t* value_name, const wchar_t* value) {
-  return ::RegSetValueEx(key_, value_name, 0, REG_SZ,
-                         reinterpret_cast<const BYTE*>(value),
-                         (lstrlen(value) + 1) * sizeof(wchar_t));
 }
 
 LONG RegKey::WriteDWValue(const wchar_t* value_name, DWORD value) {

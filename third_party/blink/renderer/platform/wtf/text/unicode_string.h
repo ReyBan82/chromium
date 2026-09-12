@@ -24,28 +24,43 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_UNICODE_STRING_H_
 
 #include <unicode/stringoptions.h>
+#include <unicode/unistr.h>
 #include <unicode/ustring.h>
 
-namespace WTF {
-namespace unicode {
+#include "base/containers/span.h"
 
-inline int FoldCase(UChar* result,
-                    int result_length,
-                    const UChar* src,
-                    int src_length,
-                    bool* error) {
+#if U_ICU_VERSION_MAJOR_NUM >= 59
+#include <unicode/char16ptr.h>
+#endif
+
+namespace blink::unicode {
+
+inline std::optional<size_t> FoldCase(base::span<const UChar> src,
+                                      base::span<UChar> result) {
   UErrorCode status = U_ZERO_ERROR;
-  int real_length = u_strFoldCase(result, result_length, src, src_length,
-                                  U_FOLD_CASE_DEFAULT, &status);
-  *error = !U_SUCCESS(status);
-  return real_length;
+  int real_length = u_strFoldCase(
+      result.data(), base::checked_cast<int>(result.size()), src.data(),
+      base::checked_cast<int>(src.size()), U_FOLD_CASE_DEFAULT, &status);
+  if (U_SUCCESS(status) || status == U_BUFFER_OVERFLOW_ERROR) {
+    return real_length;
+  }
+  return std::nullopt;
 }
 
 inline int Umemcasecmp(const UChar* a, const UChar* b, int len) {
   return u_memcasecmp(a, b, len, U_FOLD_CASE_DEFAULT);
 }
 
-}  // namespace unicode
-}  // namespace WTF
+inline base::span<const UChar> ToSpan(const icu::UnicodeString& ustring) {
+  size_t size = static_cast<size_t>(ustring.length());
+  // SAFETY: ICU ensures ustring.length() is valid for ustring.getBuffer().
+#if U_ICU_VERSION_MAJOR_NUM >= 59
+  return UNSAFE_BUFFERS(base::span(icu::toUCharPtr(ustring.getBuffer()), size));
+#else
+  return UNSAFE_BUFFERS(base::span(ustring.getBuffer(), size));
+#endif
+}
+
+}  // namespace blink::unicode
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_UNICODE_STRING_H_

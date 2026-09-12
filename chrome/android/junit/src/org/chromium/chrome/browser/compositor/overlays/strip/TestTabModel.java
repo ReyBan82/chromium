@@ -7,35 +7,61 @@ package org.chromium.chrome.browser.compositor.overlays.strip;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import androidx.annotation.Nullable;
+
+import org.chromium.base.supplier.NullableObservableSupplier;
+import org.chromium.base.supplier.ObservableSuppliers;
 import org.chromium.chrome.browser.tab.Tab;
-import org.chromium.chrome.browser.tab.TabImpl;
 import org.chromium.chrome.browser.tab.TabSelectionType;
 import org.chromium.chrome.browser.tabmodel.EmptyTabModel;
+import org.chromium.chrome.browser.tabmodel.NextTabPolicy;
+import org.chromium.chrome.browser.tabmodel.NextTabPolicy.NextTabPolicySupplier;
+import org.chromium.chrome.browser.tabmodel.NextTabSelectionUtil;
+import org.chromium.chrome.browser.tabmodel.TabClosureParams;
+import org.chromium.chrome.browser.tabmodel.TabModelUtils;
+import org.chromium.chrome.browser.tabmodel.TabRemover;
+import org.chromium.components.tabs.TabAlert;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Set;
 
 /** Simple mock of TabModel used for tests. */
 public class TestTabModel extends EmptyTabModel {
     private final List<Tab> mMockTabs = new ArrayList<>();
+    private final Set<Integer> mMultiSelectedTabs = new HashSet<>();
+    private @Nullable TabRemover mTabRemover;
     private int mMaxId = -1;
     private int mIndex;
 
     public void addTab(final String title) {
         mMaxId++;
-        final TabImpl mockTab = mock(TabImpl.class);
+        final Tab mockTab = mock(Tab.class);
         final int tabId = mMaxId;
         when(mockTab.getId()).thenReturn(tabId);
         when(mockTab.getTitle()).thenReturn(title);
+        when(mockTab.getParentId()).thenReturn(Tab.INVALID_TAB_ID);
+        when(mockTab.getAlertState()).thenReturn(TabAlert.NONE);
         mMockTabs.add(mockTab);
     }
 
     @Override
+    public TabRemover getTabRemover() {
+        assert mTabRemover != null;
+        return mTabRemover;
+    }
+
+    @Override
     public Tab getTabAt(int position) {
-        if (position < mMockTabs.size()) {
-            return mMockTabs.get(position);
-        }
-        return null;
+        if (position < 0 || position >= mMockTabs.size()) return null;
+        return mMockTabs.get(position);
+    }
+
+    @Override
+    public @Nullable Tab getTabById(int tabId) {
+        return mMockTabs.stream().filter(t -> t.getId() == tabId).findAny().orElse(null);
     }
 
     @Override
@@ -44,21 +70,57 @@ public class TestTabModel extends EmptyTabModel {
     }
 
     @Override
+    public Iterator<Tab> iterator() {
+        return mMockTabs.iterator();
+    }
+
+    @Override
     public int index() {
         return mIndex;
     }
 
     @Override
-    public void closeAllTabs() {
-        mMockTabs.clear();
-        mMaxId = -1;
-        mIndex = 0;
+    public NullableObservableSupplier<Tab> getCurrentTabSupplier() {
+        return ObservableSuppliers.createNullable(getTabAt(mIndex));
     }
 
     @Override
-    public boolean closeTab(Tab tab, boolean animate, boolean uponExit, boolean canUndo) {
-        // The tabId and index are the same.
-        mMockTabs.remove(tab.getId());
+    public NextTabPolicySupplier getNextTabPolicySupplier() {
+        return () -> NextTabPolicy.HIERARCHICAL;
+    }
+
+    @Override
+    public boolean closeTabs(TabClosureParams params) {
+        if (params.isAllTabs) {
+            mMockTabs.clear();
+            mMaxId = -1;
+            mIndex = 0;
+            return true;
+        }
+
+        List<Tab> tabsToRemove = params.tabs;
+        if (tabsToRemove == null || tabsToRemove.isEmpty()) return true;
+
+        Tab recommendedNextTab = params.recommendedNextTab;
+        if (recommendedNextTab != null && tabsToRemove.contains(recommendedNextTab)) {
+            recommendedNextTab = null;
+        }
+        Tab nextTab =
+                recommendedNextTab != null
+                        ? recommendedNextTab
+                        : NextTabSelectionUtil.getNextTabIfClosed(
+                                this, /* modelDelegate= */ null, tabsToRemove, params.uponExit);
+
+        for (Tab tab : tabsToRemove) {
+            mMockTabs.remove(tab);
+        }
+
+        if (nextTab != null) {
+            setIndex(indexOf(nextTab), TabSelectionType.FROM_CLOSE);
+        } else if (mIndex >= mMockTabs.size()) {
+            mIndex = Math.max(0, mMockTabs.size() - 1);
+        }
+
         return true;
     }
 
@@ -67,7 +129,7 @@ public class TestTabModel extends EmptyTabModel {
     }
 
     @Override
-    public void setIndex(int i, @TabSelectionType int type, boolean skipLoadingTab) {
+    public void setIndex(int i, @TabSelectionType int type) {
         mIndex = i;
     }
 
@@ -89,5 +151,66 @@ public class TestTabModel extends EmptyTabModel {
             return mMockTabs.get(1);
         }
         return null;
+    }
+
+    @Override
+    public int indexOf(@Nullable Tab tab) {
+        return mMockTabs.indexOf(tab);
+    }
+
+    public void setTabRemover(TabRemover tabRemover) {
+        mTabRemover = tabRemover;
+    }
+
+    @Override
+    public void setTabsMultiSelected(Set<Integer> tabIds, boolean isSelected) {
+        if (isSelected) {
+            mMultiSelectedTabs.addAll(tabIds);
+        } else {
+            mMultiSelectedTabs.removeAll(tabIds);
+        }
+    }
+
+    @Override
+    public void clearMultiSelection(boolean notifyObservers) {
+        if (mMultiSelectedTabs.isEmpty()) return;
+        mMultiSelectedTabs.clear();
+    }
+
+    @Override
+    public boolean isTabMultiSelected(int tabId) {
+        return mMultiSelectedTabs.contains(tabId) || tabId == TabModelUtils.getCurrentTabId(this);
+    }
+
+    @Override
+    public int getMultiSelectedTabsCount() {
+        if (mMockTabs.isEmpty()) return 0;
+        // If no other tabs are in multi-selection, this returns 1, as the active tab is always
+        // considered selected.
+        return mMultiSelectedTabs.isEmpty() ? 1 : mMultiSelectedTabs.size();
+    }
+
+    @Override
+    public List<Integer> getOrderedMultiSelectedTabIds() {
+        return new ArrayList<>(mMultiSelectedTabs);
+    }
+
+    @Override
+    public List<Tab> getOrderedMultiSelectedTabs() {
+        List<Tab> orderedTabs = new ArrayList<>();
+        if (mMultiSelectedTabs.isEmpty()) {
+            Tab currentTab = TabModelUtils.getCurrentTab(this);
+            if (currentTab != null) {
+                orderedTabs.add(currentTab);
+            }
+        } else {
+            for (Integer id : mMultiSelectedTabs) {
+                Tab tab = getTabById(id);
+                if (tab != null) {
+                    orderedTabs.add(tab);
+                }
+            }
+        }
+        return orderedTabs;
     }
 }

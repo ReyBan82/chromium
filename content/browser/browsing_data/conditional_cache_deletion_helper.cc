@@ -84,14 +84,14 @@ void ConditionalCacheDeletionHelper::IterateOverEntries(
     if (previous_entry_) {
       if (condition_.Run(previous_entry_.get()))
         previous_entry_->Doom();
-      previous_entry_->Close();
+      previous_entry_.ExtractAsDangling()->Close();
     }
 
     if (result.net_error() == net::ERR_FAILED) {
       // The iteration finished successfully or we can no longer iterate
       // (e.g. the cache was destroyed). We cannot distinguish between the two,
       // but we know that there is nothing more that we can do, so we return OK.
-      DCHECK(completion_callback_);
+      CHECK(completion_callback_, base::NotFatalUntil::M159);
       base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
           FROM_HERE, base::BindOnce(std::move(completion_callback_), net::OK));
       base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE,

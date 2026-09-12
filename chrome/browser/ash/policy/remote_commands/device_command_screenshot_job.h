@@ -7,7 +7,6 @@
 
 #include <stddef.h>
 
-#include <map>
 #include <memory>
 #include <string>
 #include <utility>
@@ -111,8 +110,7 @@ class DeviceCommandScreenshotJob : public RemoteCommandJob,
 
   // RemoteCommandJob:
   bool ParseCommandPayload(const std::string& command_payload) override;
-  void RunImpl(CallbackWithResult succeeded_callback,
-               CallbackWithResult failed_callback) override;
+  void RunImpl(CallbackWithResult result_callback) override;
   void TerminateImpl() override;
 
   // Posts `StartScreenshotUpload` job on |task_runner|.
@@ -121,15 +119,14 @@ class DeviceCommandScreenshotJob : public RemoteCommandJob,
 
   void StartScreenshotUpload(std::vector<ScreenshotData> upload_data);
 
+  void ReportResult(ResultType result_type, ResultCode result_code);
+
   // The URL to which the POST request should be directed.
   GURL upload_url_;
 
   // The callback that will be called when the screenshot was successfully
-  // uploaded.
-  CallbackWithResult succeeded_callback_;
-
-  // The callback that will be called when this command failed.
-  CallbackWithResult failed_callback_;
+  // uploaded or when the command has failed.
+  CallbackWithResult result_callback_;
 
   // The Delegate is used to acquire screenshots and create UploadJobs.
   std::unique_ptr<Delegate> screenshot_delegate_;

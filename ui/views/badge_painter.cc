@@ -7,6 +7,7 @@
 #include <algorithm>
 
 #include "base/i18n/rtl.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
 #include "ui/gfx/canvas.h"
@@ -14,23 +15,14 @@
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/text_constants.h"
 #include "ui/gfx/text_utils.h"
+#include "ui/views/layout/layout_provider.h"
+#include "ui/views/style/typography.h"
+#include "ui/views/style/typography_provider.h"
 #include "ui/views/view.h"
 
 namespace views {
 
 namespace {
-
-// Returns the appropriate font to use for the badge based on the font
-// currently being used to render the title of the menu item.
-gfx::FontList DeriveBadgeFont(const gfx::FontList& primary_font) {
-  // Preferred font is slightly smaller and slightly more bold than the title
-  // font. The size change is required to make it look correct in the badge; we
-  // add a small degree of bold to prevent color smearing/blurring due to font
-  // smoothing. This ensures readability on all platforms and in both light and
-  // dark modes.
-  return primary_font.Derive(BadgePainter::kBadgeFontSizeAdjustment,
-                             gfx::Font::NORMAL, gfx::Font::Weight::MEDIUM);
-}
 
 // Returns the highlight rect for the badge given the font and text rect
 // for the badge text.
@@ -51,7 +43,7 @@ void BadgePainter::PaintBadge(gfx::Canvas* canvas,
                               int text_top_y,
                               const std::u16string& text,
                               const gfx::FontList& primary_font) {
-  gfx::FontList badge_font = DeriveBadgeFont(primary_font);
+  gfx::FontList badge_font = GetBadgeFont(primary_font);
 
   // Calculate bounding box for badge text.
   unmirrored_badge_left_x += kBadgeInternalPadding;
@@ -66,24 +58,31 @@ void BadgePainter::PaintBadge(gfx::Canvas* canvas,
   cc::PaintFlags flags;
   const ui::ColorProvider* color_provider = view->GetColorProvider();
   const SkColor background_color =
-      color_provider->GetColor(ui::kColorButtonBackgroundProminent);
+      color_provider->GetColor(ui::kColorBadgeBackground);
   flags.setColor(background_color);
   canvas->DrawRoundRect(
       GetBadgeRectOutsetAroundText(badge_font, badge_text_bounds),
-      kBadgeCornerRadius, flags);
+      LayoutProvider::Get()->GetCornerRadiusMetric(
+          ShapeContextTokens::kBadgeRadius),
+      flags);
 
   // Render the badge text.
   const SkColor foreground_color =
-      color_provider->GetColor(ui::kColorButtonForegroundProminent);
+      color_provider->GetColor(ui::kColorBadgeForeground);
   canvas->DrawStringRect(text, badge_font, foreground_color, badge_text_bounds);
 }
 
 // static
 gfx::Size BadgePainter::GetBadgeSize(const std::u16string& text,
                                      const gfx::FontList& primary_font) {
-  gfx::FontList badge_font = DeriveBadgeFont(primary_font);
+  gfx::FontList badge_font = GetBadgeFont(primary_font);
   const gfx::Size text_size = gfx::GetStringSize(text, badge_font);
   return GetBadgeRectOutsetAroundText(badge_font, gfx::Rect(text_size)).size();
+}
+
+gfx::FontList BadgePainter::GetBadgeFont(const gfx::FontList& context_font) {
+  return views::TypographyProvider::Get().GetFont(
+      views::style::CONTEXT_BADGE, views::style::STYLE_SECONDARY);
 }
 
 }  // namespace views

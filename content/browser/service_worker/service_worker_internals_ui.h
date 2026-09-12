@@ -11,7 +11,7 @@
 
 #include "base/files/file_path.h"
 #include "base/functional/callback_forward.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/values.h"
 #include "content/public/browser/web_ui_controller.h"
@@ -53,10 +53,11 @@ class ServiceWorkerInternalsHandler : public WebUIMessageHandler {
 
   void OnRunningStateChanged();
   void OnVersionStateChanged(int partition_id, int64_t version_id);
+  void OnVersionRouterRulesChanged();
   void OnErrorEvent(const std::string& event_name,
                     int partition_id,
                     int64_t version_id,
-                    const base::Value::Dict& details);
+                    const base::DictValue& details);
   void OnRegistrationEvent(const std::string& event_name, const GURL& scope);
   void OnDidGetRegistrations(
       int partition_id,
@@ -79,20 +80,17 @@ class ServiceWorkerInternalsHandler : public WebUIMessageHandler {
   void RemoveObserverFromStoragePartition(StoragePartition* partition);
 
   // Called from Javascript.
-  void HandleGetOptions(const base::Value::List& args);
-  void HandleSetOption(const base::Value::List& args);
-  void HandleGetAllRegistrations(const base::Value::List& args);
-  void HandleStopWorker(const base::Value::List& args);
-  void HandleInspectWorker(const base::Value::List& args);
-  void HandleUnregister(const base::Value::List& args);
-  void HandleStartWorker(const base::Value::List& args);
+  void HandleGetOptions(const base::ListValue& args);
+  void HandleSetOption(const base::ListValue& args);
+  void HandleGetAllRegistrations(const base::ListValue& args);
+  void HandleStopWorker(const base::ListValue& args);
+  void HandleInspectWorker(const base::ListValue& args);
+  void HandleUnregister(const base::ListValue& args);
+  void HandleStartWorker(const base::ListValue& args);
 
   bool GetServiceWorkerContext(
       int partition_id,
       scoped_refptr<ServiceWorkerContextWrapper>* context);
-  void FindStoragePartitionById(int partition_id,
-                                StoragePartition** result_partition,
-                                StoragePartition* storage_partition) const;
 
   void StopWorkerWithId(scoped_refptr<ServiceWorkerContextWrapper> context,
                         int64_t version_id,

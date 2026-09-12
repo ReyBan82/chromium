@@ -8,16 +8,37 @@
 #include <utility>
 #include <vector>
 
-#include "ash/system/video_conference/video_conference_media_state.h"
+#include "ash/system/video_conference/video_conference_common.h"
+#include "base/memory/raw_ref.h"
+#include "base/notreached.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
 #include "base/unguessable_token.h"
-#include "chromeos/crosapi/mojom/video_conference.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace ash {
+
+namespace {
+
+VideoConferenceMediaAppInfo MakeMediaAppInfo(const base::UnguessableToken& id,
+                                             base::Time last_activity_time,
+                                             bool is_capturing_camera,
+                                             bool is_capturing_microphone,
+                                             bool is_capturing_screen,
+                                             const std::u16string& title) {
+  VideoConferenceMediaAppInfo app;
+  app.id = id;
+  app.last_activity_time = last_activity_time;
+  app.is_capturing_camera = is_capturing_camera;
+  app.is_capturing_microphone = is_capturing_microphone;
+  app.is_capturing_screen = is_capturing_screen;
+  app.title = title;
+  return app;
+}
+
+}  // namespace
 
 class FakeVideoConferenceManagerAsh : public VideoConferenceManagerAsh {
  public:
@@ -30,40 +51,28 @@ class FakeVideoConferenceManagerAsh : public VideoConferenceManagerAsh {
   VideoConferenceMediaState state_;
 };
 
-class FakeVcManagerCppClient
-    : public crosapi::mojom::VideoConferenceManagerClient {
+class FakeVcManagerCppClient : public VideoConferenceManagerClient {
  public:
   explicit FakeVcManagerCppClient(FakeVideoConferenceManagerAsh& vc_manager)
       : id_(base::UnguessableToken::Create()), vc_manager_(vc_manager) {}
   FakeVcManagerCppClient(const FakeVcManagerCppClient&) = delete;
   FakeVcManagerCppClient& operator=(const FakeVcManagerCppClient&) = delete;
-  ~FakeVcManagerCppClient() override { vc_manager_.UnregisterClient(id_); }
+  ~FakeVcManagerCppClient() override { vc_manager_->UnregisterClient(id_); }
 
-  // crosapi::mojom::VideoConferenceManagerClient overrides
-  void GetMediaApps(
-      crosapi::mojom::VideoConferenceManagerClient::GetMediaAppsCallback
-          callback) override {
-    std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr> apps;
+  // VideoConferenceManagerClient overrides
+  MediaApps GetMediaApps() override { return apps_; }
 
-    for (auto& app : apps_) {
-      apps.push_back(app->Clone());
-    }
+  bool ReturnToApp(const base::UnguessableToken& id) override { NOTREACHED(); }
 
-    std::move(callback).Run(std::move(apps));
+  bool SetSystemMediaDeviceStatus(VideoConferenceMediaDevice device,
+                                  bool enabled) override {
+    NOTREACHED();
   }
-
-  void ReturnToApp(const base::UnguessableToken& id,
-                   ReturnToAppCallback callback) override {}
-
-  void SetSystemMediaDeviceStatus(
-      crosapi::mojom::VideoConferenceMediaDevice device,
-      bool disabled,
-      SetSystemMediaDeviceStatusCallback callback) override {}
 
   // Public for testing.
   base::UnguessableToken id_;
-  std::vector<crosapi::mojom::VideoConferenceMediaAppInfoPtr> apps_;
-  FakeVideoConferenceManagerAsh& vc_manager_;
+  MediaApps apps_;
+  const raw_ref<FakeVideoConferenceManagerAsh> vc_manager_;
 };
 
 class VideoConferenceManagerAshTest : public testing::Test {
@@ -85,9 +94,9 @@ class VideoConferenceManagerAshTest : public testing::Test {
     bool is_capturing_screen = false;
 
     for (auto& app : apps) {
-      is_capturing_camera |= app->is_capturing_camera;
-      is_capturing_microphone |= app->is_capturing_microphone;
-      is_capturing_screen |= app->is_capturing_screen;
+      is_capturing_camera |= app.is_capturing_camera;
+      is_capturing_microphone |= app.is_capturing_microphone;
+      is_capturing_screen |= app.is_capturing_screen;
     }
 
     return {is_capturing_camera, is_capturing_microphone, is_capturing_screen};
@@ -103,14 +112,16 @@ class VideoConferenceManagerAshTest : public testing::Test {
 // Tests |VideoConferenceManagerAsh::GetMediaApps| returns correct aggregated
 // results from all VcClients.
 TEST_F(VideoConferenceManagerAshTest, VcManagerGetMediaApps) {
+  const auto now = base::Time::Now();
+  const auto duration = base::Seconds(1);
+
   std::unique_ptr<FakeVcManagerCppClient> client1 =
       std::make_unique<FakeVcManagerCppClient>(vc_manager());
-  client1->apps_.push_back(crosapi::mojom::VideoConferenceMediaAppInfo::New(
+  client1->apps_.push_back(MakeMediaAppInfo(
       /*id=*/base::UnguessableToken::Create(),
-      /*last_activity_time=*/base::Time::Now(),
+      /*last_activity_time=*/now,
       /*is_capturing_camera=*/false, /*is_capturing_microphone=*/false,
-      /*is_capturing_screen=*/true, /*title=*/u"Test App",
-      /*url=*/absl::nullopt));
+      /*is_capturing_screen=*/true, /*title=*/u"Test App0"));
 
   vc_manager().RegisterCppClient(client1.get(), client1->id_);
 
@@ -119,6 +130,7 @@ TEST_F(VideoConferenceManagerAshTest, VcManagerGetMediaApps) {
   vc_manager().GetMediaApps(base::BindLambdaForTesting(
       [&](VideoConferenceManagerAsh::MediaApps apps) {
         EXPECT_EQ(apps.size(), 1u);
+        EXPECT_EQ(apps[0].title, u"Test App0");
 
         auto status = GetAggregatedCaptureStatus(std::move(apps));
 
@@ -129,17 +141,18 @@ TEST_F(VideoConferenceManagerAshTest, VcManagerGetMediaApps) {
       }));
   run_loop1.Run();
 
-  client1->apps_.push_back(crosapi::mojom::VideoConferenceMediaAppInfo::New(
+  client1->apps_.push_back(MakeMediaAppInfo(
       /*id=*/base::UnguessableToken::Create(),
-      /*last_activity_time=*/base::Time::Now(),
+      /*last_activity_time=*/now + duration * 10,
       /*is_capturing_camera=*/true, /*is_capturing_microphone=*/false,
-      /*is_capturing_screen=*/true, /*title=*/u"Test App",
-      /*url=*/absl::nullopt));
+      /*is_capturing_screen=*/true, /*title=*/u"Test App1"));
 
   base::RunLoop run_loop2;
   vc_manager().GetMediaApps(base::BindLambdaForTesting(
       [&](VideoConferenceManagerAsh::MediaApps apps) {
         EXPECT_EQ(apps.size(), 2UL);
+        EXPECT_EQ(apps[0].title, u"Test App1");
+        EXPECT_EQ(apps[1].title, u"Test App0");
 
         auto status = GetAggregatedCaptureStatus(std::move(apps));
 
@@ -154,12 +167,11 @@ TEST_F(VideoConferenceManagerAshTest, VcManagerGetMediaApps) {
   {
     std::unique_ptr<FakeVcManagerCppClient> client2 =
         std::make_unique<FakeVcManagerCppClient>(vc_manager());
-    client2->apps_.push_back(crosapi::mojom::VideoConferenceMediaAppInfo::New(
+    client2->apps_.push_back(MakeMediaAppInfo(
         /*id=*/base::UnguessableToken::Create(),
-        /*last_activity_time=*/base::Time::Now(),
+        /*last_activity_time=*/now + duration * 2,
         /*is_capturing_camera=*/false, /*is_capturing_microphone=*/true,
-        /*is_capturing_screen=*/false, /*title=*/u"Test App",
-        /*url=*/absl::nullopt));
+        /*is_capturing_screen=*/false, /*title=*/u"Test App2"));
 
     vc_manager().RegisterCppClient(client2.get(), client2->id_);
 
@@ -167,6 +179,9 @@ TEST_F(VideoConferenceManagerAshTest, VcManagerGetMediaApps) {
     vc_manager().GetMediaApps(base::BindLambdaForTesting(
         [&](VideoConferenceManagerAsh::MediaApps apps) {
           EXPECT_EQ(apps.size(), 3UL);
+          EXPECT_EQ(apps[0].title, u"Test App1");
+          EXPECT_EQ(apps[1].title, u"Test App2");
+          EXPECT_EQ(apps[2].title, u"Test App0");
 
           auto status = GetAggregatedCaptureStatus(std::move(apps));
 
@@ -199,7 +214,6 @@ TEST_F(VideoConferenceManagerAshTest, VcManagerGetMediaApps) {
 
 // Tests VcManager state correctly updates after |NotifyMediaUsageUpdate| calls.
 TEST_F(VideoConferenceManagerAshTest, VcManagerNotifyMediaUsageUpdate) {
-  // crosapi::mojom::VideoConferenceMediaUsageStatus
   std::unique_ptr<FakeVcManagerCppClient> client1 =
       std::make_unique<FakeVcManagerCppClient>(vc_manager());
   vc_manager().RegisterCppClient(client1.get(), client1->id_);
@@ -212,19 +226,16 @@ TEST_F(VideoConferenceManagerAshTest, VcManagerNotifyMediaUsageUpdate) {
   EXPECT_FALSE(vc_manager().state().is_capturing_microphone);
   EXPECT_FALSE(vc_manager().state().is_capturing_screen);
 
-  auto success_callback =
-      base::BindRepeating([](bool success) { EXPECT_TRUE(success); });
-
   // Basic functioning.
 
   base::RunLoop run_loop1;
+  VideoConferenceMediaUsageStatus status1(client1->id_);
+  status1.state.has_media_app = true;
+  status1.state.has_microphone_permission = true;
+  status1.state.is_capturing_microphone = true;
+
   vc_manager().NotifyMediaUsageUpdate(
-      crosapi::mojom::VideoConferenceMediaUsageStatus::New(
-          /*client_id=*/client1->id_, /*has_media_app=*/true,
-          /*has_camera_permission=*/false,
-          /*has_microphone_permission=*/true, /*is_capturing_camera=*/false,
-          /*is_capturing_microphone=*/true, /*is_capturing_screen=*/false),
-      base::BindLambdaForTesting([&](bool success) {
+      std::move(status1), base::BindLambdaForTesting([&](bool success) {
         EXPECT_TRUE(success);
         run_loop1.Quit();
       }));
@@ -244,15 +255,16 @@ TEST_F(VideoConferenceManagerAshTest, VcManagerNotifyMediaUsageUpdate) {
     vc_manager().RegisterCppClient(client2.get(), client2->id_);
 
     base::RunLoop run_loop2;
+    VideoConferenceMediaUsageStatus status2(client2->id_);
+    status2.state.has_media_app = true;
+    status2.state.has_camera_permission = true;
+    status2.state.has_microphone_permission = true;
+    status2.state.is_capturing_camera = true;
+    status2.state.is_capturing_microphone = true;
+    status2.state.is_capturing_screen = true;
+
     vc_manager().NotifyMediaUsageUpdate(
-        crosapi::mojom::VideoConferenceMediaUsageStatus::New(
-            /*client_id=*/client2->id_, /*has_media_app=*/true,
-            /*has_camera_permission=*/true,
-            /*has_microphone_permission=*/true,
-            /*is_capturing_camera=*/true,
-            /*is_capturing_microphone=*/true,
-            /*is_capturing_screen=*/true),
-        base::BindLambdaForTesting([&](bool success) {
+        std::move(status2), base::BindLambdaForTesting([&](bool success) {
           EXPECT_TRUE(success);
           run_loop2.Quit();
         }));
@@ -277,14 +289,12 @@ TEST_F(VideoConferenceManagerAshTest, VcManagerNotifyMediaUsageUpdate) {
   // Expect previously true fields are correctly reset on later
   // |NotifyMediaUsageUpdate| calls.
   base::RunLoop run_loop3;
+  VideoConferenceMediaUsageStatus status3(client1->id_);
+  status3.state.has_media_app = true;
+  status3.state.has_microphone_permission = true;
+
   vc_manager().NotifyMediaUsageUpdate(
-      crosapi::mojom::VideoConferenceMediaUsageStatus::New(
-          /*client_id=*/client1->id_, /*has_media_app=*/true,
-          /*has_camera_permission=*/false,
-          /*has_microphone_permission=*/true, /*is_capturing_camera=*/false,
-          /*is_capturing_microphone=*/false,
-          /*is_capturing_screen=*/false),
-      base::BindLambdaForTesting([&](bool success) {
+      std::move(status3), base::BindLambdaForTesting([&](bool success) {
         EXPECT_TRUE(success);
         run_loop3.Quit();
       }));

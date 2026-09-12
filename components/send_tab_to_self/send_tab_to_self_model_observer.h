@@ -6,7 +6,9 @@
 #define COMPONENTS_SEND_TAB_TO_SELF_SEND_TAB_TO_SELF_MODEL_OBSERVER_H_
 
 #include <string>
-#include <vector>
+
+#include "base/containers/span.h"
+#include "base/observer_list_types.h"
 
 namespace send_tab_to_self {
 
@@ -14,36 +16,32 @@ class SendTabToSelfEntry;
 
 // Observer for the Send Tab To Self model. In the observer methods care should
 // be taken to not modify the model.
-class SendTabToSelfModelObserver {
+class SendTabToSelfModelObserver : public base::CheckedObserver {
  public:
-  SendTabToSelfModelObserver() {}
+  SendTabToSelfModelObserver() = default;
 
   SendTabToSelfModelObserver(const SendTabToSelfModelObserver&) = delete;
   SendTabToSelfModelObserver& operator=(const SendTabToSelfModelObserver&) =
       delete;
 
-  virtual ~SendTabToSelfModelObserver() {}
+  ~SendTabToSelfModelObserver() override = default;
 
-  // Invoked when the model has finished loading. Until this method is called it
-  // is unsafe to use the model.
-  // This call has overlaps with SendTabToSelfModel::IsReady but by having this
-  // be a pure virtual function we can ensure that subclasses of this class will
-  // have a way to ensure that the model is active before interacting with it.
-  virtual void SendTabToSelfModelLoaded() = 0;
 
-  // Invoked when elements of the model are added, removed, or updated. This is
-  // the mechanism for the sync server to push changes in the state of the model
-  // to clients.
-  // TODO(crbug.com/945396) move EntriesAddedRemotely to use const refs to
-  // clarify ownership.
-  virtual void EntriesAddedRemotely(
-      const std::vector<const SendTabToSelfEntry*>& new_entries) = 0;
-  virtual void EntriesRemovedRemotely(
-      const std::vector<std::string>& guids) = 0;
-  // This observer will>>>>>>>> notify listeners of new and existing entries
-  // that have been marked as opened.
-  virtual void EntriesOpenedRemotely(
-      const std::vector<const SendTabToSelfEntry*>& opened_entries) {}
+  // Invoked when new entries are added to the model by the  sync server.
+  virtual void OnEntriesAddedRemotely(
+      base::span<const SendTabToSelfEntry* const> new_entries) {}
+  // Invoked when a new entry is added on the local device.
+  virtual void OnEntryAddedLocally(const SendTabToSelfEntry* entry) {}
+  // Invoked when entries are removed from the model by the sync server.
+  // `guids` contains the unique identifiers of the removed entries.
+  virtual void OnEntriesRemovedRemotely(base::span<const std::string> guids) {}
+  // Invoked when new and existing entries have been marked as opened by the
+  // sync server.
+  virtual void OnEntriesOpenedRemotely(
+      base::span<const SendTabToSelfEntry* const> opened_entries) {}
+  // Invoked when the model becomes operational and ready to sync (initial data
+  // is loaded).
+  virtual void OnModelReady() {}
 };
 
 }  // namespace send_tab_to_self

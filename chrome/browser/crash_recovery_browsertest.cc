@@ -10,17 +10,15 @@
 #include "base/functional/bind.h"
 #include "base/strings/stringprintf.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/url_constants.h"
+#include "chrome/test/base/chrome_test_path_utils.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
-#include "content/public/browser/notification_service.h"
-#include "content/public/browser/notification_types.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_widget_host_view.h"
@@ -34,23 +32,23 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/chrome_debug_urls.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 
 using content::OpenURLParams;
 using content::Referrer;
 using content::WebContents;
 
-// TODO(jam): http://crbug.com/350550
-#if !(BUILDFLAG(IS_CHROMEOS_ASH) && defined(ADDRESS_SANITIZER))
+// TODO(jam): http://crbug.com/40354951
+#if !(BUILDFLAG(IS_CHROMEOS) && defined(ADDRESS_SANITIZER))
 
 namespace {
 
-void SimulateRendererCrash(Browser* browser) {
+void SimulateRendererCrash(BrowserWindowInterface* browser) {
   content::RenderProcessHostWatcher crash_observer(
-      browser->tab_strip_model()->GetActiveWebContents(),
+      browser->GetTabStripModel()->GetActiveWebContents(),
       content::RenderProcessHostWatcher::WATCH_FOR_PROCESS_EXIT);
-  browser->OpenURL(OpenURLParams(GURL(blink::kChromeUICrashURL), Referrer(),
-                                 WindowOpenDisposition::CURRENT_TAB,
-                                 ui::PAGE_TRANSITION_TYPED, false));
+  browser->OpenGURL(GURL(blink::kChromeUICrashURL),
+                    WindowOpenDisposition::CURRENT_TAB);
   crash_observer.Wait();
 }
 
@@ -117,14 +115,16 @@ IN_PROC_BROWSER_TEST_F(CrashRecoveryBrowserTest, Reload) {
   EXPECT_NE(title_before_crash, title_after_crash);
   ASSERT_TRUE(
       GetActiveWebContents()->GetPrimaryMainFrame()->GetView()->IsShowing());
-  ASSERT_FALSE(GetActiveWebContents()
-                   ->GetPrimaryMainFrame()
-                   ->GetProcess()
-                   ->IsProcessBackgrounded());
+  ASSERT_NE(base::Process::Priority::kBestEffort, GetActiveWebContents()
+                                                      ->GetPrimaryMainFrame()
+                                                      ->GetProcess()
+                                                      ->GetPriority());
 }
 
 // Test that reload after a crash forces a cache revalidation.
-IN_PROC_BROWSER_TEST_F(CrashRecoveryBrowserTest, ReloadCacheRevalidate) {
+// TODO(crbug.com/323792317): Times out flakily.
+IN_PROC_BROWSER_TEST_F(CrashRecoveryBrowserTest,
+                       DISABLED_ReloadCacheRevalidate) {
   const char kTestPath[] = "/test";
 
   // Use the test server so as not to bypass cache behavior. The title of the
@@ -153,11 +153,16 @@ IN_PROC_BROWSER_TEST_F(CrashRecoveryBrowserTest, ReloadCacheRevalidate) {
 // There was an earlier bug (1270510) in process-per-site in which the max page
 // ID of the RenderProcessHost was stale, so the NavigationEntry in the new tab
 // was not committed.  This prevents regression of that bug.
-IN_PROC_BROWSER_TEST_F(CrashRecoveryBrowserTest, LoadInNewTab) {
+#if BUILDFLAG(IS_WIN)
+#define MAYBE_LoadInNewTab DISABLED_LoadInNewTab
+#else
+#define MAYBE_LoadInNewTab LoadInNewTab
+#endif
+IN_PROC_BROWSER_TEST_F(CrashRecoveryBrowserTest, MAYBE_LoadInNewTab) {
   const base::FilePath::CharType kTitle2File[] =
       FILE_PATH_LITERAL("title2.html");
 
-  GURL url(ui_test_utils::GetTestUrl(
+  GURL url(chrome_test_utils::GetTestUrl(
       base::FilePath(base::FilePath::kCurrentDirectory),
       base::FilePath(kTitle2File)));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -180,7 +185,7 @@ IN_PROC_BROWSER_TEST_F(CrashRecoveryBrowserTest, LoadInNewTab) {
 }
 
 // Tests that reloads of navigation errors behave correctly after a crash.
-// Regression test for http://crbug.com/348918
+// Regression test for http://crbug.com/40354123
 IN_PROC_BROWSER_TEST_F(CrashRecoveryBrowserTest, DoubleReloadWithError) {
   GURL url(content::GetWebUIURL("bogus"));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));

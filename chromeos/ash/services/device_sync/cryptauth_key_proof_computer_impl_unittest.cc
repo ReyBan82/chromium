@@ -2,20 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chromeos/ash/services/device_sync/cryptauth_key_proof_computer_impl.h"
+
+#include <array>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "chromeos/ash/services/device_sync/cryptauth_key.h"
 #include "chromeos/ash/services/device_sync/cryptauth_key_proof_computer.h"
-#include "chromeos/ash/services/device_sync/cryptauth_key_proof_computer_impl.h"
 #include "chromeos/ash/services/device_sync/proto/cryptauth_common.pb.h"
-#include "crypto/ec_private_key.h"
-#include "crypto/ec_signature_creator.h"
 #include "crypto/hmac.h"
+#include "crypto/sign.h"
 #include "crypto/signature_verifier.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -26,7 +28,7 @@ namespace {
 // ASN.1 formats: SubjectPublicKeyInfo (RFC 5280) and PKCS #8 PrivateKeyInfo
 // (RFC 5208). Note: SecureMessage returns private keys (but not public keys) in
 // this formatting.
-const std::vector<uint8_t> kTestPublicKeyBytes = {
+const std::array<uint8_t, 91> kTestPublicKeyBytes = {
     0x30, 0x59,
     // Begin AlgorithmIdentifier: ecPublicKey, prime256v1
     0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
@@ -41,7 +43,7 @@ const std::vector<uint8_t> kTestPublicKeyBytes = {
     0x79, 0x03, 0xfe, 0x10, 0x08, 0xb8, 0xbc, 0x99, 0xa4, 0x1a, 0xe9, 0xe9,
     0x56, 0x28, 0xbc, 0x64, 0xf2, 0xf1, 0xb2, 0x0c, 0x2d, 0x7e, 0x9f, 0x51,
     0x77, 0xa3, 0xc2, 0x94, 0xd4, 0x46, 0x22, 0x99};
-const std::vector<uint8_t> kTestPrivateKeyBytes = {
+const std::array<uint8_t, 138> kTestPrivateKeyBytes = {
     0x30, 0x81, 0x87, 0x02, 0x01, 0x00,
     // Begin AlgorithmIdentifier: ecPublicKey, prime256v1
     0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06,
@@ -67,27 +69,29 @@ const std::string kAsymmetricTestSalt = "salt";
 // signing. Here, we use the first HKDF test case from RFC 5869 so we have a
 // known derived key to verify the HMAC signature with.
 // Input key material (IKM):
-const std::vector<uint8_t> kTestSymmetricKeyBytes(22, 0x0b);
+const std::array<uint8_t, 22> kTestSymmetricKeyBytes = {
+    0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
+    0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b};
 // salt:
-const std::vector<uint8_t> kSymmetricTestSaltBytes = {
+const std::array<uint8_t, 13> kSymmetricTestSaltBytes = {
     0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
     0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c};
 // info:
-const std::vector<uint8_t> kSymmetricTestInfoBytes = {
+const std::array<uint8_t, 10> kSymmetricTestInfoBytes = {
     0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9};
 // The first 16 bytes of output key material (OKM):
-const std::vector<uint8_t> kExpectedDerivedSymmetricKey16Bytes = {
+const std::array<uint8_t, 16> kExpectedDerivedSymmetricKey16Bytes = {
     0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a,
     0x90, 0x43, 0x4f, 0x64, 0xd0, 0x36, 0x2f, 0x2a};
 // The first 32 bytes of output key material (OKM):
-const std::vector<uint8_t> kExpectedDerivedSymmetricKey32Bytes = {
+const std::array<uint8_t, 32> kExpectedDerivedSymmetricKey32Bytes = {
     0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a, 0x90, 0x43, 0x4f,
     0x64, 0xd0, 0x36, 0x2f, 0x2a, 0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a,
     0x5a, 0x4c, 0x5d, 0xb0, 0x2d, 0x56, 0xec, 0xc4, 0xc5, 0xbf};
 
 const std::string kTestPayload = "sample";
 
-std::string ByteVectorToString(const std::vector<uint8_t>& byte_array) {
+std::string ByteVectorToString(base::span<const uint8_t> byte_array) {
   return std::string(byte_array.begin(), byte_array.end());
 }
 
@@ -103,9 +107,9 @@ TEST(DeviceSyncCryptAuthKeyProofComputerImplTest,
                    ByteVectorToString(kTestPrivateKeyBytes),
                    CryptAuthKey::Status::kActive, cryptauthv2::KeyType::P256);
 
-  absl::optional<std::string> key_proof =
+  std::optional<std::string> key_proof =
       CryptAuthKeyProofComputerImpl::Factory::Create()->ComputeKeyProof(
-          key, kTestPayload, kAsymmetricTestSalt, absl::nullopt /* info */);
+          key, kTestPayload, kAsymmetricTestSalt, std::nullopt /* info */);
   EXPECT_TRUE(key_proof);
 
   // Verify the key proof which should be of the form:
@@ -114,9 +118,9 @@ TEST(DeviceSyncCryptAuthKeyProofComputerImplTest,
   // Note: The signature is random, i.e., we have no way of setting "k" from RFC
   // 6979 A.2.5. So, we can only verify the signature using the public key.
   crypto::SignatureVerifier verifier;
-  EXPECT_TRUE(verifier.VerifyInit(
-      crypto::SignatureVerifier::SignatureAlgorithm::ECDSA_SHA256,
-      StringToByteVector(*key_proof), kTestPublicKeyBytes));
+  EXPECT_TRUE(verifier.VerifyInit(crypto::sign::ECDSA_SHA256,
+                                  StringToByteVector(*key_proof),
+                                  kTestPublicKeyBytes));
   verifier.VerifyUpdate(StringToByteVector(kAsymmetricTestSalt + kTestPayload));
   EXPECT_TRUE(verifier.VerifyFinal());
 }
@@ -126,19 +130,20 @@ TEST(DeviceSyncCryptAuthKeyProofComputerImplTest,
   CryptAuthKey key(ByteVectorToString(kTestSymmetricKeyBytes),
                    CryptAuthKey::Status::kActive, cryptauthv2::KeyType::RAW256);
 
-  absl::optional<std::string> key_proof =
+  std::optional<std::string> key_proof =
       CryptAuthKeyProofComputerImpl::Factory::Create()->ComputeKeyProof(
           key, kTestPayload, ByteVectorToString(kSymmetricTestSaltBytes),
           ByteVectorToString(kSymmetricTestInfoBytes));
 
   EXPECT_TRUE(key_proof);
+  auto hmac = base::as_byte_span(*key_proof)
+                  .to_fixed_extent<crypto::hash::kSha256Size>();
 
   // Verify the key proof which should be of the form:
   //     HMAC(HKDF(|key|, |salt|, |info|), |payload|)
-  crypto::HMAC hmac(crypto::HMAC::HashAlgorithm::SHA256);
-  EXPECT_TRUE(
-      hmac.Init(ByteVectorToString(kExpectedDerivedSymmetricKey32Bytes)));
-  EXPECT_TRUE(hmac.Verify(kTestPayload, *key_proof));
+  EXPECT_TRUE(crypto::hmac::VerifySha256(kExpectedDerivedSymmetricKey32Bytes,
+                                         base::as_byte_span(kTestPayload),
+                                         *hmac));
 }
 
 TEST(DeviceSyncCryptAuthKeyProofComputerImplTest,
@@ -146,16 +151,17 @@ TEST(DeviceSyncCryptAuthKeyProofComputerImplTest,
   CryptAuthKey key(ByteVectorToString(kTestSymmetricKeyBytes),
                    CryptAuthKey::Status::kActive, cryptauthv2::KeyType::RAW128);
 
-  absl::optional<std::string> key_proof =
+  std::optional<std::string> key_proof =
       CryptAuthKeyProofComputerImpl::Factory::Create()->ComputeKeyProof(
           key, kTestPayload, ByteVectorToString(kSymmetricTestSaltBytes),
           ByteVectorToString(kSymmetricTestInfoBytes));
   EXPECT_TRUE(key_proof);
+  auto hmac = base::as_byte_span(*key_proof)
+                  .to_fixed_extent<crypto::hash::kSha256Size>();
 
-  crypto::HMAC hmac(crypto::HMAC::HashAlgorithm::SHA256);
-  EXPECT_TRUE(
-      hmac.Init(ByteVectorToString(kExpectedDerivedSymmetricKey16Bytes)));
-  EXPECT_TRUE(hmac.Verify(kTestPayload, *key_proof));
+  EXPECT_TRUE(crypto::hmac::VerifySha256(kExpectedDerivedSymmetricKey16Bytes,
+                                         base::as_byte_span(kTestPayload),
+                                         *hmac));
 }
 
 TEST(DeviceSyncCryptAuthKeyProofComputerImplTest,
@@ -163,9 +169,9 @@ TEST(DeviceSyncCryptAuthKeyProofComputerImplTest,
   CryptAuthKey key("public_key", "non_pkcs8_private_key",
                    CryptAuthKey::Status::kActive, cryptauthv2::KeyType::P256);
 
-  absl::optional<std::string> key_proof =
+  std::optional<std::string> key_proof =
       CryptAuthKeyProofComputerImpl::Factory::Create()->ComputeKeyProof(
-          key, kTestPayload, kAsymmetricTestSalt, absl::nullopt /* info */);
+          key, kTestPayload, kAsymmetricTestSalt, std::nullopt /* info */);
 
   EXPECT_FALSE(key_proof);
 }

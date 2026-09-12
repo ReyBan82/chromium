@@ -35,20 +35,23 @@ SVGRect* SVGRect::Clone() const {
 }
 
 template <typename CharType>
-SVGParsingError SVGRect::Parse(const CharType*& ptr, const CharType* end) {
-  const CharType* start = ptr;
+SVGParsingError SVGRect::Parse(base::span<const CharType> span) {
+  const size_t start_size = span.size();
   float x = 0;
   float y = 0;
   float width = 0;
   float height = 0;
-  if (!ParseNumber(ptr, end, x) || !ParseNumber(ptr, end, y) ||
-      !ParseNumber(ptr, end, width) ||
-      !ParseNumber(ptr, end, height, kDisallowWhitespace))
-    return SVGParsingError(SVGParseStatus::kExpectedNumber, ptr - start);
+  if (!ParseNumber(span, x) || !ParseNumber(span, y) ||
+      !ParseNumber(span, width) ||
+      !ParseNumber(span, height, kDisallowWhitespace)) {
+    return SVGParsingError(SVGParseStatus::kExpectedNumber,
+                           start_size - span.size());
+  }
 
-  if (SkipOptionalSVGSpaces(ptr, end)) {
+  if (SkipOptionalSVGSpaces(span)) {
     // Nothing should come after the last, fourth number.
-    return SVGParsingError(SVGParseStatus::kTrailingGarbage, ptr - start);
+    return SVGParsingError(SVGParseStatus::kTrailingGarbage,
+                           start_size - span.size());
   }
 
   Set(x, y, width, height);
@@ -62,15 +65,15 @@ SVGParsingError SVGRect::SetValueAsString(const String& string) {
   // Also clear the existing values.
   Set(0, 0, 0, 0);
 
+  // We have to allow null Strings here, because it corresponds to an attribute
+  // removal. We should hoist this into the attribute parsing driver instead.
   if (string.IsNull())
     return SVGParseStatus::kNoError;
 
   if (string.empty())
     return SVGParsingError(SVGParseStatus::kExpectedNumber, 0);
 
-  return WTF::VisitCharacters(string, [&](const auto* chars, unsigned length) {
-    return Parse(chars, chars + length);
-  });
+  return VisitCharacters(string, [&](auto chars) { return Parse(chars); });
 }
 
 String SVGRect::ValueAsString() const {
@@ -85,9 +88,10 @@ String SVGRect::ValueAsString() const {
   return builder.ToString();
 }
 
-void SVGRect::Add(const SVGPropertyBase* other, const SVGElement*) {
+bool SVGRect::Add(const SVGPropertyBase* other, const SVGElement*) {
   auto* other_rect = To<SVGRect>(other);
   Add(other_rect->x_, other_rect->y_, other_rect->width_, other_rect->height_);
+  return true;
 }
 
 void SVGRect::Set(float x, float y, float width, float height) {

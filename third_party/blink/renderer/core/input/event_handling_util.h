@@ -5,20 +5,20 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_INPUT_EVENT_HANDLING_UTIL_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_INPUT_EVENT_HANDLING_UTIL_H_
 
+#include <optional>
+
 #include "third_party/blink/public/platform/web_input_event_result.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/dom/element.h"
-#include "third_party/blink/renderer/core/layout/geometry/physical_offset.h"
 #include "third_party/blink/renderer/core/layout/hit_test_result.h"
 #include "third_party/blink/renderer/core/page/event_with_hit_test_results.h"
+#include "third_party/blink/renderer/platform/geometry/physical_offset.h"
 
 namespace blink {
 
 class ContainerNode;
 class EventTarget;
 class LocalFrame;
-class ScrollableArea;
-class PaintLayer;
 enum class DispatchEventResult;
 
 namespace event_handling_util {
@@ -33,9 +33,6 @@ WebInputEventResult MergeEventResult(WebInputEventResult result_a,
                                      WebInputEventResult result_b);
 WebInputEventResult ToWebInputEventResult(DispatchEventResult);
 
-PaintLayer* LayerForNode(Node*);
-ScrollableArea* AssociatedScrollableArea(const PaintLayer*);
-
 bool IsInDocument(EventTarget*);
 
 ContainerNode* ParentForClickEvent(const Node&);
@@ -48,10 +45,29 @@ MouseEventWithHitTestResults PerformMouseEventHitTest(LocalFrame*,
                                                       const WebMouseEvent&);
 
 LocalFrame* GetTargetSubframe(const MouseEventWithHitTestResults&,
-                              Node* capturing_node = nullptr,
                               bool* is_remote_frame = nullptr);
 
 LocalFrame* SubframeForTargetNode(Node*, bool* is_remote_frame = nullptr);
+
+// If an active unbounded element is present inside a descendant subframe of
+// `from_frame`, and `point_in_root_frame` lands on that unbounded element (or
+// its descendants) outside the subframe's normal bounds, this struct holds
+// the target subframe and the subframe-relative hit test information.
+struct UnboundedSubframeHitTestResult {
+  STACK_ALLOCATED();
+
+ public:
+  LocalFrame* frame = nullptr;
+  HitTestLocation location;
+  HitTestResult result;
+};
+
+// Checks if `point_in_root_frame` targets an active unbounded element inside a
+// descendant subframe of `from_frame`. If so, returns the subframe and its
+// subframe-relative hit test location and result.
+std::optional<UnboundedSubframeHitTestResult> SubframeForActiveUnboundedElement(
+    LocalFrame* from_frame,
+    const gfx::PointF& point_in_root_frame);
 
 // Intervention: if an input event lands on a cross-origin iframe or fencedframe
 // that has moved or resized recently (recent==500ms), and which contains an
@@ -59,6 +75,12 @@ LocalFrame* SubframeForTargetNode(Node*, bool* is_remote_frame = nullptr);
 // discarded.
 bool ShouldDiscardEventTargetingFrame(const WebInputEvent& event,
                                       const LocalFrame& frame);
+
+// If a "down" event was discarded by the above intervention, and the next down
+// event arrives within `DiscardedEventMistakeInterval` with the same target as
+// the discarded event, we conclude that the first event was intentional and
+// should not have been discarded.
+constexpr base::TimeDelta kDiscardedEventMistakeInterval = base::Seconds(5);
 
 class PointerEventTarget {
   DISALLOW_NEW();
@@ -69,7 +91,6 @@ class PointerEventTarget {
   Member<Element> target_element;
   Member<LocalFrame> target_frame;
   Member<Scrollbar> scrollbar;
-  String region;
 };
 
 }  // namespace event_handling_util

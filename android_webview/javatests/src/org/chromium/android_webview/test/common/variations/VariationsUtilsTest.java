@@ -4,7 +4,7 @@
 
 package org.chromium.android_webview.test.common.variations;
 
-import static org.chromium.android_webview.test.OnlyRunIn.ProcessMode.SINGLE_PROCESS;
+import static org.chromium.android_webview.test.OnlyRunIn.ProcessMode.EITHER_PROCESS;
 
 import androidx.test.filters.MediumTest;
 
@@ -27,11 +27,9 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.Arrays;
 
-/**
- * Test reading and writing variations seeds.
- */
+/** Test reading and writing variations seeds. */
 @RunWith(AwJUnit4ClassRunner.class)
-@OnlyRunIn(SINGLE_PROCESS) // These are unit tests
+@OnlyRunIn(EITHER_PROCESS) // These are unit tests
 @Batch(Batch.UNIT_TESTS)
 public class VariationsUtilsTest {
     @Test
@@ -43,6 +41,69 @@ public class VariationsUtilsTest {
             VariationsTestUtils.writeMockSeed(file);
             SeedInfo readSeed = VariationsUtils.readSeedFile(file);
             VariationsTestUtils.assertSeedsEqual(VariationsTestUtils.createMockSeed(), readSeed);
+        } finally {
+            if (file != null) file.delete();
+        }
+    }
+
+    // Test writing a seed when entropy sources ARE available.
+    // The resulting file should contain the entropy sources.
+    @Test
+    @MediumTest
+    public void testWriteSeedWithEntropy() throws IOException {
+        File file = null;
+        try {
+            file = File.createTempFile("seed", null, null);
+            SeedInfo mockSeed = VariationsTestUtils.createMockSeed();
+            int testEntropy = 123;
+            String testLimitedEntropy = "0123456789ABCDEF0123456789ABCDEF";
+
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                VariationsUtils.writeSeed(out, mockSeed, testEntropy, testLimitedEntropy);
+            }
+
+            AwVariationsSeed readProto = VariationsTestUtils.readProtoFromFile(file);
+            Assert.assertTrue(
+                    "Seed should have low entropy source", readProto.hasLowEntropySource());
+            Assert.assertEquals(
+                    "Entropy source mismatch", testEntropy, readProto.getLowEntropySource());
+            Assert.assertTrue(
+                    "Seed should have limited entropy source",
+                    readProto.hasLimitedEntropyRandomizationSource());
+            Assert.assertEquals(
+                    "Limited entropy source mismatch",
+                    testLimitedEntropy,
+                    readProto.getLimitedEntropyRandomizationSource());
+        } finally {
+            if (file != null) file.delete();
+        }
+    }
+
+    // Test writing a seed when entropy sources are NOT available.
+    // The resulting file should not contain the entropy sources.
+    @Test
+    @MediumTest
+    public void testWriteSeedWithoutEntropy() throws IOException {
+        File file = null;
+        try {
+            file = File.createTempFile("seed", null, null);
+            SeedInfo mockSeed = VariationsTestUtils.createMockSeed();
+
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                VariationsUtils.writeSeed(
+                        out,
+                        mockSeed,
+                        /* lowEntropySource= */ -1,
+                        /* limitedEntropyRandomizationSource= */ null);
+            }
+
+            // Verify the file does NOT contain the entropy sources.
+            AwVariationsSeed readProto = VariationsTestUtils.readProtoFromFile(file);
+            Assert.assertFalse(
+                    "Seed should not have low entropy source", readProto.hasLowEntropySource());
+            Assert.assertFalse(
+                    "Seed should not have limited entropy source",
+                    readProto.hasLimitedEntropyRandomizationSource());
         } finally {
             if (file != null) file.delete();
         }
@@ -60,14 +121,16 @@ public class VariationsUtilsTest {
                 // Create a seed that's missing some fields.
                 stream = new FileOutputStream(file);
                 SeedInfo info = VariationsTestUtils.createMockSeed();
-                AwVariationsSeed proto = AwVariationsSeed.newBuilder()
-                                                 .setSignature(info.signature)
-                                                 .setCountry(info.country)
-                                                 .setDate(info.date)
-                                                 .build();
+                AwVariationsSeed proto =
+                        AwVariationsSeed.newBuilder()
+                                .setSignature(info.signature)
+                                .setCountry(info.country)
+                                .setDate(info.date)
+                                .build();
                 proto.writeTo(stream);
 
-                Assert.assertNull("Seed with missing fields should've failed to load.",
+                Assert.assertNull(
+                        "Seed with missing fields should've failed to load.",
                         VariationsUtils.readSeedFile(file));
             } finally {
                 if (stream != null) stream.close();
@@ -83,13 +146,14 @@ public class VariationsUtilsTest {
     public void testReadTruncatedSeed() throws IOException {
         // Create a complete, serialized seed.
         SeedInfo info = VariationsTestUtils.createMockSeed();
-        AwVariationsSeed proto = AwVariationsSeed.newBuilder()
-                                         .setSignature(info.signature)
-                                         .setCountry(info.country)
-                                         .setDate(info.date)
-                                         .setIsGzipCompressed(info.isGzipCompressed)
-                                         .setSeedData(ByteString.copyFrom(info.seedData))
-                                         .build();
+        AwVariationsSeed proto =
+                AwVariationsSeed.newBuilder()
+                        .setSignature(info.signature)
+                        .setCountry(info.country)
+                        .setDate(info.date)
+                        .setIsGzipCompressed(info.isGzipCompressed)
+                        .setSeedData(ByteString.copyFrom(info.seedData))
+                        .build();
         byte[] protoBytes = proto.toByteArray();
 
         // Sanity check: protoBytes is at least as long as the seedData field.
@@ -110,7 +174,11 @@ public class VariationsUtilsTest {
                 }
 
                 // Reading each truncated seed should fail.
-                Assert.assertNull("Seed truncated from " + protoBytes.length + " to " + offset
+                Assert.assertNull(
+                        "Seed truncated from "
+                                + protoBytes.length
+                                + " to "
+                                + offset
                                 + " bytes should've failed to load.",
                         VariationsUtils.readSeedFile(file));
             } finally {

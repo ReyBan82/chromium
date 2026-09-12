@@ -28,9 +28,9 @@ class MEDIA_EXPORT AVC {
                                    std::vector<uint8_t>* buffer,
                                    std::vector<SubsampleEntry>* subsamples);
 
-  // Inserts the SPS & PPS data from |avc_config| into |buffer|.
-  // |buffer| is expected to contain AnnexB conformant data.
-  // |subsamples| contains the SubsampleEntry info if |buffer| contains
+  // Inserts the SPS & PPS data from `avc_config` into `buffer`.
+  // `buffer` is expected to contain AnnexB conformant data.
+  // `subsamples` contains the SubsampleEntry info if `buffer` contains
   // encrypted data.
   // Returns true if the param sets were successfully inserted.
   static bool InsertParamSetsAnnexB(
@@ -42,30 +42,39 @@ class MEDIA_EXPORT AVC {
       const AVCDecoderConfigurationRecord& avc_config,
       std::vector<uint8_t>* buffer);
 
-  // Analyzes the contents of |buffer| for conformance to Section 7.4.1.2.3 of
-  // ISO/IEC 14496-10. Also analyzes |buffer| and reports if it looks like a
-  // keyframe, if such can be determined. Determination of keyframe-ness is done
-  // only if |buffer| is conformant or if lack of conformance is detected after
-  // detecting keyframe-ness.
-  // |subsamples| contains the information about what parts of the buffer are
+  // Analyzes the contents of `buffer` for keyframe detection. While it also
+  // checks for conformance to Section 7.4.1.2.3 of ISO/IEC 14496-10, parsing is
+  // intentionally lax to accommodate real-world content; out-of-order NALUs do
+  // not prevent keyframe determination and are reported via `is_conformant`.
+  // This method should primarily be used for keyframe probing.
+  // `subsamples` contains the information about what parts of the buffer are
   // encrypted and which parts are clear.
+  // `allow_bare_idr` indicates whether the analyzer should treat an IDR NAL
+  // unit without accompanying SPS/PPS parameter sets as sufficient to mark a
+  // frame as a keyframe. When true, the analyzer relies on a "bare" IDR NAL
+  // unit alone to determine keyframe-ness.
   static BitstreamConverter::AnalysisResult AnalyzeAnnexB(
-      const uint8_t* buffer,
-      size_t size,
-      const std::vector<SubsampleEntry>& subsamples);
+      base::span<const uint8_t> buffer,
+      const std::vector<SubsampleEntry>& subsamples,
+      bool allow_bare_idr = true);
 
-  // Given a |buffer| and |subsamples| information and |pts| pointer into the
-  // |buffer| finds the index of the subsample |ptr| is pointing into.
+  // Given a `buffer` and `subsamples` information and `pts` pointer into the
+  // `buffer` finds the index of the subsample `ptr` is pointing into.
   static int FindSubsampleIndex(const std::vector<uint8_t>& buffer,
-                                const std::vector<SubsampleEntry>* subsamples,
+                                base::span<const SubsampleEntry> subsamples,
                                 const uint8_t* ptr);
+
+  // Convert a `buffer` from AVC bitstream to Annex-B bitstream by replacing
+  // 4-byte NALU length to 4-byte NALU start code.
+  static bool ConvertAVCToAnnexBInPlaceForLengthSize4(
+      std::vector<uint8_t>* buffer);
 };
 
 // AVCBitstreamConverter converts AVC/H.264 bitstream from MP4 container format
 // with embedded NALU lengths into AnnexB bitstream format (described in ISO/IEC
 // 14496-10) with 4-byte start codes. It also knows how to handle CENC-encrypted
 // streams and adjusts subsample data for those streams while converting.
-class AVCBitstreamConverter : public BitstreamConverter {
+class MEDIA_EXPORT AVCBitstreamConverter : public BitstreamConverter {
  public:
   explicit AVCBitstreamConverter(
       std::unique_ptr<AVCDecoderConfigurationRecord> avc_config);
@@ -82,7 +91,7 @@ class AVCBitstreamConverter : public BitstreamConverter {
  private:
   ~AVCBitstreamConverter() override;
   AnalysisResult Analyze(
-      std::vector<uint8_t>* frame_buf,
+      base::span<const uint8_t> frame_buf,
       std::vector<SubsampleEntry>* subsamples) const override;
   std::unique_ptr<AVCDecoderConfigurationRecord> avc_config_;
 };

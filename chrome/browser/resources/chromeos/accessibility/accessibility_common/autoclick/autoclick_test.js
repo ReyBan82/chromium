@@ -9,23 +9,14 @@ GEN_INCLUDE(['../../common/testing/mock_accessibility_private.js']);
  * Automatic clicks feature using accessibility common extension browser tests.
  */
 AutoclickE2ETest = class extends E2ETestBase {
-  constructor() {
-    super();
-    this.navigateLacrosWithAutoComplete = true;
-  }
-
   async setUpDeferred() {
     this.mockAccessibilityPrivate = new MockAccessibilityPrivate();
     chrome.accessibilityPrivate = this.mockAccessibilityPrivate;
 
-    window.RoleType = chrome.automation.RoleType;
-
-    const module =
-        await import('/accessibility_common/accessibility_common_loader.js');
-    await importModule('RectUtil', '/common/rect_util.js');
+    globalThis.RoleType = chrome.automation.RoleType;
 
     // Re-initialize AccessibilityCommon with mock AccessibilityPrivate API.
-    accessibilityCommon = new module.AccessibilityCommon();
+    accessibilityCommon = new AccessibilityCommon();
 
     await new Promise(r => {
       chrome.accessibilityFeatures.autoclick.get({}, () => {
@@ -36,6 +27,8 @@ AutoclickE2ETest = class extends E2ETestBase {
     });
 
     await super.setUpDeferred();
+
+    await this.waitForBoundsListener();
   }
 
   /** @override */
@@ -47,6 +40,7 @@ AutoclickE2ETest = class extends E2ETestBase {
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "chrome/browser/ash/accessibility/accessibility_manager.h"
+#include "ui/accessibility/accessibility_features.h"
     `);
   }
 
@@ -68,6 +62,24 @@ AutoclickE2ETest = class extends E2ETestBase {
    */
   assertSameRect(first, second) {
     assertTrue(RectUtil.equal(first, second));
+  }
+
+  async waitForBoundsListener() {
+    // The bounds listener is added during autoclick initialization, which can
+    // take non-trivial time in mv3.
+    await new Promise(resolve => {
+      if (this.mockAccessibilityPrivate.boundsListener_ !== null) {
+        resolve();
+        return;
+      }
+
+      const intervalId = setInterval(() => {
+        if (this.mockAccessibilityPrivate.boundsListener_ !== null) {
+          clearInterval(intervalId);
+          resolve();
+        }
+      }, 500);
+    });
   }
 };
 
@@ -127,12 +139,10 @@ AX_TEST_F('AutoclickE2ETest', 'RemovesAndAddsAutoclick', async function() {
   });
 
   // Toggle autoclick off and on, ensure it still works and no crashes.
-  await new Promise(resolve => {
-    chrome.accessibilityFeatures.autoclick.set({value: false}, resolve);
-  });
-  await new Promise(resolve => {
-    chrome.accessibilityFeatures.autoclick.set({value: true}, resolve);
-  });
+  accessibilityCommon.onAutoclickUpdated_({value: false});
+  accessibilityCommon.onAutoclickUpdated_({value: true});
+  this.waitForBoundsListener();
+
   const node =
       root.find({role: RoleType.STATIC_TEXT, attributes: {name: 'Cats rock!'}});
   await new Promise(resolve => {
@@ -148,7 +158,45 @@ AX_TEST_F('AutoclickE2ETest', 'RemovesAndAddsAutoclick', async function() {
   this.assertSameRect(focusRings[0].rects[0], expected);
 });
 
-// TODO(crbug.com/978163): Add tests for when the scrollable area is scrolled
+// Verifies that hit test events targeting detached or unparented nodes that are
+// not connected to the desktop tree hierarchy do not trigger focus rings or
+// scrollable bounds updates.
+AX_TEST_F('AutoclickE2ETest', 'IgnoresDetachedHitTestNodes', async function() {
+  await this.runWithLoadedTree(
+      'data:text/html;charset=utf-8,<p id="target">Hit Target</p>');
+
+  // Clear any existing focus rings or bounds in mock API.
+  this.mockAccessibilityPrivate.focusRings_ = [];
+  this.mockAccessibilityPrivate.scrollableBounds_ = null;
+
+  const autoclick = accessibilityCommon.getAutoclickForTest();
+
+  // Test 1: Event with a detached / unparented node.
+  const detachedNode = {
+    role: RoleType.STATIC_TEXT,
+    location: {left: 100, top: 100, width: 200, height: 50},
+  };
+  autoclick.onAutomationHitTestResult_({target: detachedNode});
+
+  assertEquals(this.mockAccessibilityPrivate.getFocusRings().length, 0);
+  assertEquals(this.mockAccessibilityPrivate.getScrollableBounds(), null);
+
+  // Test 2: Event with a detached tree branch (parent chain not reaching
+  // desktop).
+  const detachedRoot = {role: RoleType.ROOT_WEB_AREA, parent: null};
+  const detachedChild = {
+    role: RoleType.GENERIC_CONTAINER,
+    root: detachedRoot,
+    parent: detachedRoot,
+    location: {left: 50, top: 50, width: 100, height: 100},
+  };
+  autoclick.onAutomationHitTestResult_({target: detachedChild});
+
+  assertEquals(this.mockAccessibilityPrivate.getFocusRings().length, 0);
+  assertEquals(this.mockAccessibilityPrivate.getScrollableBounds(), null);
+});
+
+// TODO(crbug.com/41467584): Add tests for when the scrollable area is scrolled
 // all the way up or down, left or right. Add tests for nested scrollable areas.
 // Add tests for root types like toolbar, dialog, and window to ensure
 // we don't break boundaries when searching for scroll bars.

@@ -8,19 +8,19 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <list>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/dcheck_is_on.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/scoped_refptr.h"
 #include "base/process/launch.h"
-#include "base/strings/string_piece.h"
-#include "base/synchronization/lock.h"
+#include "base/types/expected.h"
 #include "base/win/access_token.h"
+#include "base/win/scoped_process_information.h"
 #include "base/win/windows_types.h"
 #include "sandbox/win/src/app_container_base.h"
 #include "sandbox/win/src/handle_closer.h"
@@ -29,7 +29,6 @@
 #include "sandbox/win/src/policy_engine_opcodes.h"
 #include "sandbox/win/src/policy_engine_params.h"
 #include "sandbox/win/src/sandbox_policy.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace sandbox {
 
@@ -60,39 +59,40 @@ class ConfigBase final : public TargetConfig {
   ResultCode SetJobLevel(JobLevel job_level, uint32_t ui_exceptions) override;
   JobLevel GetJobLevel() const override;
   void SetJobMemoryLimit(size_t memory_limit) override;
-  void SetAllowNoSandboxJob() override;
-  bool GetAllowNoSandboxJob() override;
-  ResultCode AddRule(SubSystem subsystem,
-                     Semantics semantics,
-                     const wchar_t* pattern) override;
-  void AddDllToUnload(const wchar_t* dll_name) override;
+  ResultCode AllowFileAccess(FileSemantics semantics,
+                             std::wstring_view pattern) override;
+  ResultCode AllowExtraDll(std::wstring_view path) override;
+  ResultCode SetFakeGdiInit() override;
+  void AddDllToUnload(std::wstring_view dll_name) override;
   ResultCode SetIntegrityLevel(IntegrityLevel integrity_level) override;
   IntegrityLevel GetIntegrityLevel() const override;
   void SetDelayedIntegrityLevel(IntegrityLevel integrity_level) override;
-  ResultCode SetLowBox(const wchar_t* sid) override;
+  ResultCode SetLowBox(base::wcstring_view sid) override;
   ResultCode SetProcessMitigations(MitigationFlags flags) override;
   MitigationFlags GetProcessMitigations() override;
   ResultCode SetDelayedProcessMitigations(MitigationFlags flags) override;
   MitigationFlags GetDelayedProcessMitigations() const override;
   void AddRestrictingRandomSid() override;
   void SetLockdownDefaultDacl() override;
-  ResultCode AddAppContainerProfile(const wchar_t* package_name,
-                                    bool create_profile) override;
-  scoped_refptr<AppContainer> GetAppContainer() override;
-  ResultCode AddKernelObjectToClose(const wchar_t* handle_type,
-                                    const wchar_t* handle_name) override;
-  ResultCode SetDisconnectCsrss() override;
+  ResultCode AddAppContainerProfile(base::wcstring_view package_name) override;
+  AppContainer* GetAppContainer() override;
+  void AddKernelObjectToClose(HandleToClose handle_info) override;
+  void SetDisconnectCsrss() override;
   void SetDesktop(Desktop desktop) override;
   void SetFilterEnvironment(bool filter) override;
   bool GetEnvironmentFiltered() override;
+  void SetZeroAppShim() override;
+  void SetSecurityAttributeName(std::wstring_view name) override;
 
  private:
-  // Can call Freeze()
+  // Can call Freeze() and is_csrss_connected().
   friend class BrokerServicesBase;
   // Can examine private fields.
   friend class PolicyDiagnostic;
   // Can call private accessors.
   friend class PolicyBase;
+  // Can ask for the low-level policy.
+  friend class TopLevelDispatcher;
 
   // Promise that no further changes will be made to the configuration, and
   // this object can be reused by multiple policies.
@@ -100,6 +100,15 @@ class ConfigBase final : public TargetConfig {
 
   // Use in DCHECK only - returns `true` in non-DCHECK builds.
   bool IsOnCreatingThread() const;
+
+  // Lazily populates the policy_ and policy_maker_ members for internal rules.
+  // Can only be called before the object is fully configured.
+  LowLevelPolicy* PolicyMaker();
+
+  // Some IPCs are only configured if a matching policy has been set, this
+  // method allows TopLevelDispatcher to determine if a policy exists for a
+  // given service. Only call after calling Freeze().
+  bool NeedsIpc(IpcTag service) const;
 
 #if DCHECK_IS_ON()
   // Used to sequence-check in DCHECK builds.
@@ -109,12 +118,9 @@ class ConfigBase final : public TargetConfig {
   // Once true the configuration is frozen and can be applied to later policies.
   bool configured_ = false;
 
-  ResultCode AddRuleInternal(SubSystem subsystem,
-                             Semantics semantics,
-                             const wchar_t* pattern);
-
   // Should only be called once the object is configured.
   PolicyGlobal* policy();
+  std::optional<base::span<const uint8_t>> policy_span();
   std::vector<std::wstring>& blocklisted_dlls();
   AppContainerBase* app_container();
   IntegrityLevel integrity_level() { return integrity_level_; }
@@ -125,8 +131,14 @@ class ConfigBase final : public TargetConfig {
   size_t memory_limit() { return memory_limit_; }
   uint32_t ui_exceptions() { return ui_exceptions_; }
   Desktop desktop() { return desktop_; }
-  // nullptr if no objects have been added via AddKernelObjectToClose().
-  HandleCloser* handle_closer() { return handle_closer_.get(); }
+  const HandleCloserConfig& handle_closer() { return handle_closer_; }
+  bool zero_appshim() { return zero_appshim_; }
+  const std::vector<base::win::ScopedHandle>& shared_handles() {
+    return shared_handles_;
+  }
+  std::optional<std::wstring> security_attribute_name() {
+    return security_attribute_name_;
+  }
 
   TokenLevel lockdown_level_;
   TokenLevel initial_level_;
@@ -137,32 +149,41 @@ class ConfigBase final : public TargetConfig {
   MitigationFlags delayed_mitigations_;
   bool add_restricting_random_sid_;
   bool lockdown_default_dacl_;
-  bool allow_no_sandbox_job_;
   bool is_csrss_connected_;
   size_t memory_limit_;
   uint32_t ui_exceptions_;
   Desktop desktop_;
   bool filter_environment_;
+  bool zero_appshim_;
+  HandleCloserConfig handle_closer_;
 
   // Object in charge of generating the low level policy. Will be reset() when
   // Freeze() is called.
   std::unique_ptr<LowLevelPolicy> policy_maker_;
   // Memory structure that stores the low level policy rules for proxied calls.
   raw_ptr<PolicyGlobal> policy_;
-  // This is a map of handle-types to names that we need to close in the
-  // target process. A null set for a given type means we need to close all
-  // handles of the given type. If no entries are added this will be nullptr and
-  // no handles are closed.
-  std::unique_ptr<HandleCloser> handle_closer_;
   // The list of dlls to unload in the target process.
   std::vector<std::wstring> blocklisted_dlls_;
   // AppContainer to be applied to the target process.
-  scoped_refptr<AppContainerBase> app_container_;
+  std::unique_ptr<AppContainerBase> app_container_;
+  // List of handles to be shared with a new process to complete the config.
+  std::vector<base::win::ScopedHandle> shared_handles_;
+  // The name of the Security Attribute to use in the default DACL of the
+  // target process.
+  std::optional<std::wstring> security_attribute_name_;
+};
+
+struct TargetTokens {
+  base::win::AccessToken initial_;
+  base::win::AccessToken lockdown_;
+  TargetTokens(base::win::AccessToken initial, base::win::AccessToken lockdown);
+  TargetTokens(TargetTokens&&) = default;
+  ~TargetTokens();
 };
 
 class PolicyBase final : public TargetPolicy {
  public:
-  PolicyBase(base::StringPiece key);
+  PolicyBase(std::string_view key);
   ~PolicyBase() override;
 
   PolicyBase(const PolicyBase&) = delete;
@@ -173,6 +194,7 @@ class PolicyBase final : public TargetPolicy {
   ResultCode SetStdoutHandle(HANDLE handle) override;
   ResultCode SetStderrHandle(HANDLE handle) override;
   void AddHandleToShare(HANDLE handle) override;
+  void AddDelegateData(base::span<const uint8_t> data) override;
 
   // Creates a Job object with the level specified in a previous call to
   // SetJobLevel().
@@ -185,26 +207,15 @@ class PolicyBase final : public TargetPolicy {
   // Returns true if a job is associated with this policy.
   bool HasJob();
 
-  // Updates the active process limit on the policy's job to zero.
-  // Has no effect if the job is allowed to spawn processes.
-  ResultCode DropActiveProcessLimit();
-
   // Creates the two tokens with the levels specified in a previous call to
   // SetTokenLevel().
-  ResultCode MakeTokens(absl::optional<base::win::AccessToken>& initial,
-                        absl::optional<base::win::AccessToken>& lockdown);
+  base::expected<TargetTokens, ResultCode> MakeTokens();
 
-  // Applies the sandbox to |target| and takes ownership. Internally a
-  // call to TargetProcess::Init() is issued.
-  ResultCode ApplyToTarget(std::unique_ptr<TargetProcess> target);
-
-  // Called when there are no more active processes in the policy's Job.
-  // If a process is not in a job, call OnProcessFinished().
-  bool OnJobEmpty();
-
-  // Called when a process no longer needs to be tracked. Processes in jobs
-  // should be notified via OnJobEmpty instead.
-  bool OnProcessFinished(DWORD process_id);
+  // Initialize the sandbox process for the policy. This creates the IPC channel
+  // using the thread pool and applies process mitigations.
+  ResultCode InitProcess(HANDLE process_handle,
+                         ThreadPool* thread_pool,
+                         DWORD& last_error);
 
   EvalResult EvalPolicy(IpcTag service, CountedParameterSetBase* params);
 
@@ -215,10 +226,12 @@ class PolicyBase final : public TargetPolicy {
   const base::HandlesToInheritVector& GetHandlesBeingShared();
 
  private:
-  // BrokerServicesBase is allowed to set shared backing fields for FixedPolicy.
+  // BrokerServicesBase is allowed to set shared backing fields for TargetConfig.
   friend class sandbox::BrokerServicesBase;
   // Allow PolicyDiagnostic to snapshot PolicyBase for diagnostics.
   friend class PolicyDiagnostic;
+  // Allow TopLevelDispatcher to know which IPC policy rules are necessary.
+  friend class TopLevelDispatcher;
 
   // Sets up interceptions for a new target. This policy must own |target|.
   ResultCode SetupAllInterceptions(TargetProcess& target);
@@ -241,19 +254,25 @@ class PolicyBase final : public TargetPolicy {
   // Remaining members are unique to this instance and will be configured every
   // time.
 
-  // The policy takes ownership of a target as it is applied to it.
-  std::unique_ptr<TargetProcess> target_;
+  // Returns nullopt if no data has been set, or a view into the data.
+  std::optional<base::span<const uint8_t>> delegate_data_span();
+
   // The user-defined global policy settings.
   HANDLE stdout_handle_;
   HANDLE stderr_handle_;
+  // An opaque blob of data the delegate uses to prime any pre-sandbox hooks.
+  std::unique_ptr<const std::vector<uint8_t>> delegate_data_;
+
   std::unique_ptr<Dispatcher> dispatcher_;
 
   // Contains the list of handles being shared with the target process.
   // This list contains handles other than the stderr/stdout handles which are
   // shared with the target at times.
   base::HandlesToInheritVector handles_to_share_;
-
   Job job_;
+
+  // The policy takes ownership of a target as it is applied to it.
+  std::unique_ptr<TargetProcess> target_;
 };
 
 }  // namespace sandbox

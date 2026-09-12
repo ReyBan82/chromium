@@ -5,14 +5,10 @@
 #ifndef COMPONENTS_WEBAPPS_BROWSER_INSTALLABLE_INSTALLABLE_METRICS_H_
 #define COMPONENTS_WEBAPPS_BROWSER_INSTALLABLE_INSTALLABLE_METRICS_H_
 
-namespace base {
-class TimeDelta;
-}
+#include <iosfwd>
 
 namespace content {
 class WebContents;
-enum class OfflineCapability;
-enum class ServiceWorkerCapability;
 }  // namespace content
 
 namespace webapps {
@@ -38,6 +34,9 @@ enum class InstallTrigger {
 // InstallableMetrics::IsReportableInstallSource(). This enum backs a UMA
 // histogram and must be treated as append-only. A Java counterpart will be
 // generated for this enum.
+//
+// This should be kept in sync with WebappInstallSource in
+// tools/metrics/histograms/enums.xml.
 //
 // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.components.webapps
 enum class WebappInstallSource {
@@ -65,10 +64,10 @@ enum class WebappInstallSource {
   // Extensions management API (not reported).
   MANAGEMENT_API = 7,
 
-  // PWA ambient badge in an Android Custom Tab.
+  // PWA ambient badge in Android browser Tab.
   AMBIENT_BADGE_BROWSER_TAB = 8,
 
-  // PWA ambient badge in browser Tab.
+  // PWA ambient badge in an Android Custom Tab.
   AMBIENT_BADGE_CUSTOM_TAB = 9,
 
   // Installation via ARC on Chrome OS.
@@ -82,6 +81,7 @@ enum class WebappInstallSource {
   EXTERNAL_DEFAULT = 12,
 
   // A policy-installed app on Chrome OS.
+  // Note: IWAs use a separate `ISOLATED_WEB_APP_EXTERNAL_POLICY` source.
   EXTERNAL_POLICY = 13,
 
   // A system app installed on Chrome OS.
@@ -108,25 +108,69 @@ enum class WebappInstallSource {
   // Installed by Kiosk on Chrome OS.
   KIOSK = 21,
 
-  // Isolated app installation for development.
-  ISOLATED_APP_DEV_INSTALL = 22,
+  // Isolated app installation for development via command line.
+  IWA_DEV_COMMAND_LINE = 22,
 
   // Lock screen app infrastructure installing to the lock screen app profile.
   EXTERNAL_LOCK_SCREEN = 23,
 
-  // OEM apps installed by the App Preload Service.
+  // OEM apps installed by the App Preload Service on ChromeOS.
   PRELOADED_OEM = 24,
 
   // Installed via the Microsoft 365 setup dialog.
   MICROSOFT_365_SETUP = 25,
 
-  // Add any new values above this one.
-  COUNT,
+  // Profile picking in ProfileMenuView (for installable WebUIs).
+  PROFILE_MENU = 26,
+
+  // Installation promotion was triggered via ML model.
+  ML_PROMOTION = 27,
+
+  // Default apps installed by the App Preload Service on ChromeOS.
+  PRELOADED_DEFAULT = 28,
+
+  // Apps installed in shimless RMA.
+  IWA_SHIMLESS_RMA = 29,
+
+  // A policy-installed Isolated Web App.
+  // Note: PWAs use a separate `EXTERNAL_POLICY` source.
+  IWA_EXTERNAL_POLICY = 30,
+
+  IWA_GRAPHICAL_INSTALLER = 31,
+
+  IWA_DEV_UI = 32,
+
+  // Web apps installed via almanac://install-app navigation, ChromeOS only, see
+  // [App Install
+  // Service](../../chrome/browser/apps/app_service/app_install/README.md).
+  ALMANAC_INSTALL_APP_URI = 33,
+
+  // WebAPK Backup and restore.
+  WEBAPK_RESTORE = 34,
+
+  // Recommended apps screen in the ChromeOS Out Of Box Experience.
+  OOBE_APP_RECOMMENDATIONS = 35,
+
+  // Installed from web content via Web Install API.
+  WEB_INSTALL = 36,
+
+  // Installed via the ChromeOS help app directing the user to a page and
+  // displaying the install dialog for that page.
+  CHROMEOS_HELP_APP = 37,
+
+  // Installed via a migration source app.
+  MIGRATION = 38,
+
+  kMaxValue = MIGRATION,
 };
+
+std::ostream& operator<<(std::ostream& os, WebappInstallSource source);
 
 // Uninstall surface from which an uninstall was initiated. This value cannot be
 // used to infer an install source. These values are persisted to logs. Entries
 // should not be renumbered and numeric values should never be reused.
+
+// LINT.IfChange(WebappUninstallSource)
 enum class WebappUninstallSource {
   // Unknown surface, potentially in ChromeOS.
   kUnknown = 0,
@@ -146,8 +190,13 @@ enum class WebappUninstallSource {
   // App management surface, currently ChromeOS-only.
   kAppManagement = 5,
 
-  // Migration.
-  kMigration = 6,
+  // Uninstalled because this app was replaced by another app specified via
+  // policy, maintaining app list positions and shelf pins, for the
+  // `uninstall_and_replace` feature supported by web app policies via
+  // ExternalInstallOptions.
+  // This should not be mixed up with 'kAppMigration`, which is specifically
+  // related to the app origin migration feature for PWAs.
+  kUninstallAndReplaceMigration = 6,
 
   // App List (Launcher in ChromeOS).
   kAppList = 7,
@@ -162,6 +211,7 @@ enum class WebappUninstallSource {
   kExternalPreinstalled = 10,
 
   // Enterprise policy app management.
+  // Note: IWAs use a separate `kIwaEnterprisePolicy` source.
   kExternalPolicy = 11,
 
   // System app management on ChromeOS.
@@ -191,24 +241,41 @@ enum class WebappUninstallSource {
   // Tests often need a way of fully installing apps to clean up OS integration.
   kTestCleanup = 19,
 
+  // The DedupeInstallUrlsCommand.
+  kInstallUrlDeduping = 20,
+
+  // Healthcare app cleaning up all user installed apps in between shared
+  // sessions.
+  kHealthcareUserInstallCleanup = 21,
+
+  // Isolated Web App Enterprise policy.
+  kIwaEnterprisePolicy = 22,
+
+  // Via devtools PWA.uninstall or similar commands.
+  kDevtools = 23,
+
+  // When IWA is blocklisted it is automatically removed from the device.
+  kIwaBlocklisted = 24,
+
+  // Removed because this app was migrated to be a different PWA, as per the app
+  // origin migration feature.
+  // To measure uninstalls via the `uninstall_and_replace` web app policy, use
+  // `kUninstallAndReplaceMigration` listed above instead.
+  kAppMigration = 25,
+
+  // Uninstalled from the button on the web app's frame toolbar during a launch
+  // after the first install.
+  kToolbarPostInstall = 26,
+
   // Add any new values above this one.
-  kMaxValue = kTestCleanup,
+  kMaxValue = kToolbarPostInstall,
 };
 
-// This is the result of the promotability check that is recorded in the
-// Webapp.CheckServiceWorker.Status histogram.
-// Do not reorder or reuse any values in this enum. New values must be added to
-// the end only.
-enum class ServiceWorkerOfflineCapability {
-  kNoServiceWorker,
-  kServiceWorkerNoFetchHandler,
-  // Service worker with a fetch handler but no offline support.
-  kServiceWorkerNoOfflineSupport,
-  // Service worker with a fetch handler with offline support.
-  kServiceWorkerWithOfflineSupport,
-  // Note: kMaxValue is needed only for histograms.
-  kMaxValue = kServiceWorkerWithOfflineSupport,
-};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/webapps/enums.xml:WebappUninstallSource)
+
+std::ostream& operator<<(std::ostream& os, WebappUninstallSource source);
+
+bool IsUserUninstall(WebappUninstallSource source);
 
 class InstallableMetrics {
  public:
@@ -224,32 +291,25 @@ class InstallableMetrics {
   // TrackInstallEvent.
   static bool IsReportableInstallSource(WebappInstallSource source);
 
+  // Returns whether |source| is considered a trusted install surface for
+  // setting trusted icons.
+  static bool IsInstallSurfaceConsideredTrusted(WebappInstallSource source);
+
   // Returns the appropriate WebappInstallSource for |web_contents| when the
   // install originates from |trigger|.
   static WebappInstallSource GetInstallSource(
       content::WebContents* web_contents,
       InstallTrigger trigger);
 
-  // Records |time| in the Webapp.CheckServiceWorker.Time histogram.
-  static void RecordCheckServiceWorkerTime(base::TimeDelta time);
-
-  // Records |status| in the Webapp.CheckServiceWorker.Status histogram.
-  static void RecordCheckServiceWorkerStatus(
-      ServiceWorkerOfflineCapability status);
-
-  // Converts ServiceWorkerCapability to ServiceWorkerOfflineCapability.
-  static ServiceWorkerOfflineCapability ConvertFromServiceWorkerCapability(
-      content::ServiceWorkerCapability capability);
-
-  // Converts OfflineCapability to ServiceWorkerOfflineCapability.
-  static ServiceWorkerOfflineCapability ConvertFromOfflineCapability(
-      content::OfflineCapability capability);
-
-  // Records |source| in the Webapp.Install.UninstallEvent histogram.
+  // Records |source| in the Webapp.Install.UninstallEvent histogram. This is
+  // recorded like the TrackInstallEvent() function, whenever an uninstall
+  // is triggered, without waiting for it to complete.
   static void TrackUninstallEvent(WebappUninstallSource source);
 
-  // Records the result for WebApp.Install.Result histogram.
-  static void TrackInstallResult(bool result);
+  // Records the result for WebApp.Install.Result,
+  // WebApp.Install.Source.Success and WebApp.Install.Source.Failure
+  // histograms.
+  static void TrackInstallResult(bool result, WebappInstallSource source);
 };
 
 }  // namespace webapps

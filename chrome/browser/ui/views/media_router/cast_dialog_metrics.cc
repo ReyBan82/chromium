@@ -6,10 +6,8 @@
 
 #include "base/metrics/histogram_macros.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/media_router/ui_media_sink.h"
 #include "chrome/common/pref_names.h"
 #include "components/media_router/common/mojom/media_route_provider_id.mojom-shared.h"
-#include "components/media_router/common/pref_names.h"
 #include "components/prefs/pref_service.h"
 
 namespace media_router {
@@ -117,7 +115,6 @@ DialogActivationLocationAndCastMode GetActivationLocationAndCastMode(
       break;
   }
   NOTREACHED();
-  return DialogActivationLocationAndCastMode::kMaxValue;
 }
 
 }  // namespace
@@ -136,54 +133,18 @@ CastDialogMetrics::CastDialogMetrics(
 CastDialogMetrics::~CastDialogMetrics() = default;
 
 void CastDialogMetrics::OnSinksLoaded(const base::Time& sinks_load_time) {
-  if (!sinks_load_time_.is_null())
+  if (!sinks_load_time_.is_null()) {
     return;
-  MediaRouterMetrics::RecordMediaRouterDialogLoaded(sinks_load_time -
-                                                    initialization_time_);
+  }
+  MediaRouterMetrics::RecordCastDialogLoaded(sinks_load_time -
+                                             initialization_time_);
   sinks_load_time_ = sinks_load_time;
 }
 
-void CastDialogMetrics::OnPaint(const base::Time& paint_time) {
-  if (!paint_time_.is_null())
-    return;
-  MediaRouterMetrics::RecordMediaRouterDialogPaint(paint_time -
-                                                   initialization_time_);
-  paint_time_ = paint_time;
-}
-
-void CastDialogMetrics::OnStartCasting(const base::Time& start_time,
-                                       int selected_sink_index,
-                                       MediaCastMode cast_mode,
+void CastDialogMetrics::OnStartCasting(MediaCastMode cast_mode,
                                        SinkIconType icon_type) {
-  DCHECK(!sinks_load_time_.is_null());
-  MediaRouterMetrics::RecordStartRouteDeviceIndex(selected_sink_index);
-  if (!first_action_recorded_) {
-    MediaRouterMetrics::RecordStartLocalSessionLatency(start_time -
-                                                       sinks_load_time_);
-  }
-  MaybeRecordFirstAction(MediaRouterUserAction::START_LOCAL);
   MaybeRecordActivationLocationAndCastMode(cast_mode);
   MediaRouterMetrics::RecordMediaSinkTypeForCastDialog(icon_type);
-}
-
-void CastDialogMetrics::OnStopCasting(bool is_local_route) {
-  if (is_local_route) {
-    MediaRouterMetrics::RecordStopLocalRoute();
-    MaybeRecordFirstAction(MediaRouterUserAction::STOP_LOCAL);
-  } else {
-    MediaRouterMetrics::RecordStopRemoteRoute();
-    MaybeRecordFirstAction(MediaRouterUserAction::STOP_REMOTE);
-  }
-}
-
-void CastDialogMetrics::OnCastModeSelected() {
-  MaybeRecordFirstAction(MediaRouterUserAction::CHANGE_MODE);
-}
-
-void CastDialogMetrics::OnCloseDialog(const base::Time& close_time) {
-  if (!first_action_recorded_ && !paint_time_.is_null())
-    MediaRouterMetrics::RecordCloseDialogLatency(close_time - paint_time_);
-  MaybeRecordFirstAction(MediaRouterUserAction::CLOSE);
 }
 
 void CastDialogMetrics::OnRecordSinkCount(
@@ -191,17 +152,17 @@ void CastDialogMetrics::OnRecordSinkCount(
   media_router::MediaRouterMetrics::RecordDeviceCount(sink_buttons.size());
 }
 
-void CastDialogMetrics::MaybeRecordFirstAction(MediaRouterUserAction action) {
-  if (first_action_recorded_)
-    return;
-  MediaRouterMetrics::RecordMediaRouterInitialUserAction(action);
-  first_action_recorded_ = true;
+void CastDialogMetrics::OnRecordSinkCount(
+    const std::vector<raw_ptr<CastDialogSinkView, DanglingUntriaged>>&
+        sink_views) {
+  media_router::MediaRouterMetrics::RecordDeviceCount(sink_views.size());
 }
 
 void CastDialogMetrics::MaybeRecordActivationLocationAndCastMode(
     MediaCastMode cast_mode) {
-  if (activation_location_and_cast_mode_recorded_)
+  if (activation_location_and_cast_mode_recorded_) {
     return;
+  }
   UMA_HISTOGRAM_ENUMERATION(
       "MediaRouter.Ui.Dialog.ActivationLocationAndCastMode",
       GetActivationLocationAndCastMode(activation_location_, cast_mode,

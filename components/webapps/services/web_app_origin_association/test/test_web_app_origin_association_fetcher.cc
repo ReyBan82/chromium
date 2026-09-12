@@ -7,28 +7,31 @@
 #include <memory>
 #include <utility>
 
+#include "base/task/sequenced_task_runner.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 
 namespace webapps {
 
-TestWebAppOriginAssociationFetcher::TestWebAppOriginAssociationFetcher() =
-    default;
+TestWebAppOriginAssociationFetcher::TestWebAppOriginAssociationFetcher()
+    : WebAppOriginAssociationFetcher(/*shared_url_loader_factory=*/nullptr) {}
 
 TestWebAppOriginAssociationFetcher::~TestWebAppOriginAssociationFetcher() =
     default;
 
 void TestWebAppOriginAssociationFetcher::FetchWebAppOriginAssociationFile(
-    const apps::UrlHandlerInfo& url_handler,
-    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+    const url::Origin& origin,
     FetchFileCallback callback) {
-  auto search = data_.find(url_handler.origin);
+  auto search = data_.find(origin);
   std::string file_content;
   if (search != data_.end())
     file_content = search->second;
 
-  std::move(callback).Run(file_content.empty()
-                              ? nullptr
-                              : std::make_unique<std::string>(file_content));
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(std::move(callback),
+                     file_content.empty()
+                         ? std::nullopt
+                         : std::make_optional(std::move(file_content))));
 }
 
 void TestWebAppOriginAssociationFetcher::SetData(

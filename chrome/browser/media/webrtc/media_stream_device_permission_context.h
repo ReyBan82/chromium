@@ -6,12 +6,26 @@
 #define CHROME_BROWSER_MEDIA_WEBRTC_MEDIA_STREAM_DEVICE_PERMISSION_CONTEXT_H_
 
 #include "base/memory/weak_ptr.h"
+#include "components/content_settings/core/common/content_settings.h"
 #include "components/content_settings/core/common/content_settings_types.h"
-#include "components/permissions/permission_context_base.h"
+#include "components/permissions/content_setting_permission_context_base.h"
+
+namespace permissions {
+struct PermissionRequestData;
+#if BUILDFLAG(IS_ANDROID)
+struct PermissionPromptDecision;
+#endif
+}  // namespace permissions
+
+#if BUILDFLAG(IS_ANDROID)
+namespace content {
+struct PermissionResult;
+}
+#endif
 
 // Common class which handles the mic and camera permissions.
 class MediaStreamDevicePermissionContext
-    : public permissions::PermissionContextBase {
+    : public permissions::ContentSettingPermissionContextBase {
  public:
   MediaStreamDevicePermissionContext(content::BrowserContext* browser_context,
                                      ContentSettingsType content_settings_type);
@@ -23,40 +37,39 @@ class MediaStreamDevicePermissionContext
 
   ~MediaStreamDevicePermissionContext() override;
 
-#if BUILDFLAG(IS_ANDROID)
   // PermissionContextBase:
-  void NotifyPermissionSet(const permissions::PermissionRequestID& id,
-                           const GURL& requesting_origin,
-                           const GURL& embedding_origin,
-                           permissions::BrowserPermissionCallback callback,
-                           bool persist,
-                           ContentSetting content_setting,
-                           bool is_one_time,
-                           bool is_final_decision) override;
+  void DecidePermission(
+      std::unique_ptr<permissions::PermissionRequestData> request_data,
+      permissions::BrowserPermissionCallback callback) override;
+#if BUILDFLAG(IS_ANDROID)
+  void NotifyPermissionSet(
+      const permissions::PermissionRequestData& request_data,
+      permissions::BrowserPermissionCallback callback,
+      bool persist,
+      const content::PermissionResult* permission_result,
+      const permissions::PermissionPromptDecision& decision) override;
 #endif
+  void ResetPermission(const GURL& requesting_origin,
+                       const GURL& embedding_origin) override;
 
+  // ContentSettingPermissionContextBase:
   // TODO(xhwang): GURL.DeprecatedGetOriginAsURL() shouldn't be used as the
-  // origin. Need to refactor to use url::Origin. crbug.com/527149 is filed for
-  // this.
-  ContentSetting GetPermissionStatusInternal(
+  // origin. Need to refactor to use url::Origin. crbug.com/40082781 is filed
+  // for this.
+  ContentSetting GetContentSettingStatusInternal(
       content::RenderFrameHost* render_frame_host,
       const GURL& requesting_origin,
       const GURL& embedding_origin) const override;
 
-  void ResetPermission(const GURL& requesting_origin,
-                       const GURL& embedding_origin) override;
-
  private:
 #if BUILDFLAG(IS_ANDROID)
-  // PermissionContextBase:
-  void UpdateTabContext(const permissions::PermissionRequestID& id,
-                        const GURL& requesting_origin,
+  // ContentSettingPermissionContextBase:
+  void UpdateTabContext(const permissions::PermissionRequestData& request_data,
                         bool allowed) override;
 
   void OnAndroidPermissionDecided(
-      const permissions::PermissionRequestID& id,
-      const GURL& requesting_origin,
-      const GURL& embedding_origin,
+      const permissions::PermissionRequestData& request_data,
+      const content::PermissionResult& website_permission_result,
       permissions::BrowserPermissionCallback callback,
       bool permission_granted);
 #endif

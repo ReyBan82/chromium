@@ -10,25 +10,34 @@ import android.text.format.DateUtils;
 import androidx.annotation.IntDef;
 import androidx.annotation.VisibleForTesting;
 
+import org.jni_zero.CalledByNative;
+import org.jni_zero.NativeMethods;
+
 import org.chromium.base.ContextUtils;
 import org.chromium.base.ObserverList;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.NativeMethods;
+import org.chromium.base.TimeUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.background_task_scheduler.BackgroundTaskSchedulerFactory;
 import org.chromium.components.background_task_scheduler.TaskIds;
 import org.chromium.components.background_task_scheduler.TaskInfo;
 
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+
 /**
- * The {@link BackgroundSyncBackgroundTaskScheduler} singleton is responsible
- * for scheduling and cancelling background tasks to wake Chrome up so that
- * Background Sync events ready to be fired can be fired.
+ * The {@link BackgroundSyncBackgroundTaskScheduler} singleton is responsible for scheduling and
+ * cancelling background tasks to wake Chrome up so that Background Sync events ready to be fired
+ * can be fired.
  *
- * Thread model: This class is to be run on the UI thread only.
+ * <p>Thread model: This class is to be run on the UI thread only.
  */
+@NullMarked
 public class BackgroundSyncBackgroundTaskScheduler {
     /** An observer interface for BackgroundSyncBackgroundTaskScheduler. */
     interface Observer {
         void oneOffTaskScheduledFor(@BackgroundSyncTask int taskType, long delay);
+
         void oneOffTaskCanceledFor(@BackgroundSyncTask int taskType);
     }
 
@@ -41,19 +50,19 @@ public class BackgroundSyncBackgroundTaskScheduler {
     public static final String TASK_TAG = "BackgroundSync Event";
 
     /**
-     * Denotes the one-off Background Sync Background Tasks scheduled through
-     * this class.
-     * ONE_SHOT_SYNC_CHROME_WAKE_UP is the task that processes one-shot
-     * Background Sync registrations.
-     * PERIODIC_SYNC_CHROME_WAKE_UP processes Periodic Background Sync
-     * registrations.
+     * Denotes the one-off Background Sync Background Tasks scheduled through this class.
+     * ONE_SHOT_SYNC_CHROME_WAKE_UP is the task that processes one-shot Background Sync
+     * registrations. PERIODIC_SYNC_CHROME_WAKE_UP processes Periodic Background Sync registrations.
      */
-    @IntDef({BackgroundSyncTask.ONE_SHOT_SYNC_CHROME_WAKE_UP,
-            BackgroundSyncTask.PERIODIC_SYNC_CHROME_WAKE_UP})
+    @IntDef({
+        BackgroundSyncTask.ONE_SHOT_SYNC_CHROME_WAKE_UP,
+        BackgroundSyncTask.PERIODIC_SYNC_CHROME_WAKE_UP
+    })
+    @Retention(RetentionPolicy.SOURCE)
     public @interface BackgroundSyncTask {
         int ONE_SHOT_SYNC_CHROME_WAKE_UP = 0;
         int PERIODIC_SYNC_CHROME_WAKE_UP = 1;
-    };
+    }
 
     // Keep in sync with the default min_sync_recovery_time of
     // BackgroundSyncParameters.
@@ -63,7 +72,7 @@ public class BackgroundSyncBackgroundTaskScheduler {
     // this task.
     public static final String SOONEST_EXPECTED_WAKETIME = "SoonestWakeupTime";
 
-    private static BackgroundSyncBackgroundTaskScheduler sInstance;
+    private static @Nullable BackgroundSyncBackgroundTaskScheduler sInstance;
 
     private final ObserverList<Observer> mObservers = new ObserverList<>();
 
@@ -116,8 +125,8 @@ public class BackgroundSyncBackgroundTaskScheduler {
     @VisibleForTesting
     @CalledByNative
     protected void cancelOneOffTask(@BackgroundSyncTask int taskType) {
-        BackgroundTaskSchedulerFactory.getScheduler().cancel(
-                ContextUtils.getApplicationContext(), getAppropriateTaskId(taskType));
+        BackgroundTaskSchedulerFactory.getScheduler()
+                .cancel(ContextUtils.getApplicationContext(), getAppropriateTaskId(taskType));
 
         for (Observer observer : mObservers) {
             observer.oneOffTaskCanceledFor(taskType);
@@ -142,20 +151,23 @@ public class BackgroundSyncBackgroundTaskScheduler {
         // We setWindowEndTime to Long.MAX_VALUE to wait a long time for network connectivity,
         // so that we can process the pending sync event. setExpiresAfterWindowEndTime ensures
         // that we never wake up Chrome without network connectivity.
-        TaskInfo.TimingInfo timingInfo = TaskInfo.OneOffInfo.create()
-                                                 .setWindowStartTimeMs(minDelayMs)
-                                                 .setWindowEndTimeMs(Long.MAX_VALUE)
-                                                 .setExpiresAfterWindowEndTime(true)
-                                                 .build();
-        TaskInfo taskInfo = TaskInfo.createTask(getAppropriateTaskId(taskType), timingInfo)
-                                    .setRequiredNetworkType(TaskInfo.NetworkType.ANY)
-                                    .setUpdateCurrent(true)
-                                    .setIsPersisted(true)
-                                    .setExtras(taskExtras)
-                                    .build();
+        TaskInfo.TimingInfo timingInfo =
+                TaskInfo.OneOffInfo.create()
+                        .setWindowStartTimeMs(minDelayMs)
+                        .setWindowEndTimeMs(TimeUtils.MILLISECONDS_PER_YEAR)
+                        .setExpiresAfterWindowEndTime(true)
+                        .build();
+        TaskInfo taskInfo =
+                TaskInfo.createTask(getAppropriateTaskId(taskType), timingInfo)
+                        .setRequiredNetworkType(TaskInfo.NetworkType.ANY)
+                        .setUpdateCurrent(true)
+                        .setIsPersisted(true)
+                        .setExtras(taskExtras)
+                        .build();
         // This will overwrite any existing task with this ID.
-        boolean didSchedule = BackgroundTaskSchedulerFactory.getScheduler().schedule(
-                ContextUtils.getApplicationContext(), taskInfo);
+        boolean didSchedule =
+                BackgroundTaskSchedulerFactory.getScheduler()
+                        .schedule(ContextUtils.getApplicationContext(), taskInfo);
 
         for (Observer observer : mObservers) {
             observer.oneOffTaskScheduledFor(taskType, minDelayMs);
@@ -165,13 +177,13 @@ public class BackgroundSyncBackgroundTaskScheduler {
     }
 
     /**
-     * Method for rescheduling a background task to wake up Chrome for processing
-     * Background Sync events in the event of an OS upgrade or Google Play Services
-     * upgrade.
+     * Method for rescheduling a background task to wake up Chrome for processing Background Sync
+     * events in the event of an OS upgrade or Google Play Services upgrade.
      *
      * @param taskType The Background Sync task to reschedule.
      */
     public void reschedule(@BackgroundSyncTask int taskType) {
+        // TODO(crbug.com/40256221): Investigate if this can be deleted.
         scheduleOneOffTask(taskType, MIN_SYNC_RECOVERY_TIME);
     }
 
@@ -179,9 +191,10 @@ public class BackgroundSyncBackgroundTaskScheduler {
     interface Natives {
         /**
          * Chrome currently disables BackgroundSyncManager if Google Play Services aren't up-to-date
-         * at startup. Disable this check for tests, since we mock out interaction with GCM.
-         * This method can be removed once our test devices start updating Google Play Services
-         * before tests are run. https://crbug.com/514449
+         * at startup. Disable this check for tests, since we mock out interaction with GCM. This
+         * method can be removed once our test devices start updating Google Play Services before
+         * tests are run. https://crbug.com/40428648
+         *
          * @param disabled disable or enable the version check for Google Play Services.
          */
         void setPlayServicesVersionCheckDisabledForTests(boolean disabled);

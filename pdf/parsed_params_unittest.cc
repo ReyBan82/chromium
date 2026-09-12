@@ -4,14 +4,14 @@
 
 #include "pdf/parsed_params.h"
 
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "pdf/pdfium/pdfium_form_filler.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/platform/web_string.h"
-#include "third_party/blink/public/platform/web_vector.h"
 #include "third_party/blink/public/web/web_plugin_params.h"
 #include "third_party/skia/include/core/SkColor.h"
 
@@ -26,8 +26,8 @@ constexpr char kFakeSrcUrl[] = "chrome-extension://fake-source-url";
 // Creates a `blink::WebPluginParams` with only required attributes.
 blink::WebPluginParams CreateMinimalWebPluginParams() {
   blink::WebPluginParams params;
-  params.attribute_names.push_back(blink::WebString("src"));
-  params.attribute_values.push_back(blink::WebString(kFakeSrcUrl));
+  params.attribute_names.push_back("src");
+  params.attribute_values.push_back(kFakeSrcUrl);
   return params;
 }
 
@@ -36,7 +36,7 @@ blink::WebPluginParams CreateMinimalWebPluginParams() {
 TEST(ParsedParamsTest, ParseWebPluginParamsMinimal) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_EQ(kFakeSrcUrl, result->src_url);
@@ -44,24 +44,23 @@ TEST(ParsedParamsTest, ParseWebPluginParamsMinimal) {
   EXPECT_EQ("", result->top_level_url);
   EXPECT_FALSE(result->full_frame);
   EXPECT_EQ(SK_ColorTRANSPARENT, result->background_color);
-  EXPECT_EQ(PDFiumFormFiller::DefaultScriptOption(), result->script_option);
-  EXPECT_FALSE(result->has_edits);
+  EXPECT_EQ(PDFiumFormFiller::ScriptOption::kJavaScript, result->script_option);
+  EXPECT_FALSE(result->use_skia);
 }
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithoutSourceUrl) {
   blink::WebPluginParams params;
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   EXPECT_FALSE(result.has_value());
 }
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithOriginalUrl) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("original-url"));
-  params.attribute_values.push_back(
-      blink::WebString("https://example.com/original.pdf"));
+  params.attribute_names.push_back("original-url");
+  params.attribute_values.push_back("https://example.com/original.pdf");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_EQ(kFakeSrcUrl, result->src_url);
@@ -70,11 +69,10 @@ TEST(ParsedParamsTest, ParseWebPluginParamsWithOriginalUrl) {
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithTopLevelUrl) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("top-level-url"));
-  params.attribute_values.push_back(
-      blink::WebString("https://example.net/top.html"));
+  params.attribute_names.push_back("top-level-url");
+  params.attribute_values.push_back("https://example.net/top.html");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_EQ("https://example.net/top.html", result->top_level_url);
@@ -82,10 +80,10 @@ TEST(ParsedParamsTest, ParseWebPluginParamsWithTopLevelUrl) {
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithFullFrame) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("full-frame"));
-  params.attribute_values.push_back(blink::WebString(""));
+  params.attribute_names.push_back("full-frame");
+  params.attribute_values.push_back("");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_TRUE(result->full_frame);
@@ -93,10 +91,10 @@ TEST(ParsedParamsTest, ParseWebPluginParamsWithFullFrame) {
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithFullFrameNonEmpty) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("full-frame"));
-  params.attribute_values.push_back(blink::WebString("false"));
+  params.attribute_names.push_back("full-frame");
+  params.attribute_values.push_back("false");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_TRUE(result->full_frame);
@@ -104,10 +102,10 @@ TEST(ParsedParamsTest, ParseWebPluginParamsWithFullFrameNonEmpty) {
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithBackgroundColor) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("background-color"));
-  params.attribute_values.push_back(blink::WebString("4283586137"));
+  params.attribute_names.push_back("background-color");
+  params.attribute_values.push_back("4283586137");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_EQ(4283586137, result->background_color);
@@ -115,19 +113,19 @@ TEST(ParsedParamsTest, ParseWebPluginParamsWithBackgroundColor) {
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithInvalidBackgroundColor) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("background-color"));
-  params.attribute_values.push_back(blink::WebString("red"));
+  params.attribute_names.push_back("background-color");
+  params.attribute_values.push_back("red");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   EXPECT_FALSE(result.has_value());
 }
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithJavascriptAllow) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("javascript"));
-  params.attribute_values.push_back(blink::WebString("allow"));
+  params.attribute_names.push_back("javascript");
+  params.attribute_values.push_back("allow");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_THAT(result->script_option,
@@ -137,10 +135,10 @@ TEST(ParsedParamsTest, ParseWebPluginParamsWithJavascriptAllow) {
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithJavascriptEmpty) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("javascript"));
-  params.attribute_values.push_back(blink::WebString(""));
+  params.attribute_names.push_back("javascript");
+  params.attribute_values.push_back("");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_EQ(PDFiumFormFiller::ScriptOption::kNoJavaScript,
@@ -149,36 +147,78 @@ TEST(ParsedParamsTest, ParseWebPluginParamsWithJavascriptEmpty) {
 
 TEST(ParsedParamsTest, ParseWebPluginParamsWithJavascriptNonEmpty) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("javascript"));
-  params.attribute_values.push_back(blink::WebString("true"));
+  params.attribute_names.push_back("javascript");
+  params.attribute_values.push_back("true");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
   EXPECT_EQ(PDFiumFormFiller::ScriptOption::kNoJavaScript,
             result->script_option);
 }
 
-TEST(ParsedParamsTest, ParseWebPluginParamsWithHasEdits) {
+TEST(ParsedParamsTest, ParseWebPluginParamsWithHasUseSkia) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("has-edits"));
-  params.attribute_values.push_back(blink::WebString(""));
+  params.attribute_names.push_back("use-skia");
+  params.attribute_values.push_back("");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
-  EXPECT_TRUE(result->has_edits);
+  EXPECT_TRUE(result->use_skia);
 }
 
-TEST(ParsedParamsTest, ParseWebPluginParamsWithHasEditsNonEmpty) {
+TEST(ParsedParamsTest, ParseWebPluginParamsWithHasUseSkiaNonEmpty) {
   blink::WebPluginParams params = CreateMinimalWebPluginParams();
-  params.attribute_names.push_back(blink::WebString("has-edits"));
-  params.attribute_values.push_back(blink::WebString("false"));
+  params.attribute_names.push_back("use-skia");
+  params.attribute_values.push_back("false");
 
-  absl::optional<ParsedParams> result = ParseWebPluginParams(params);
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
   ASSERT_TRUE(result.has_value());
 
-  EXPECT_TRUE(result->has_edits);
+  EXPECT_TRUE(result->use_skia);
+}
+
+TEST(ParsedParamsTest, ParseWebPluginParamsWithHasAllowXfa) {
+  blink::WebPluginParams params = CreateMinimalWebPluginParams();
+  params.attribute_names.push_back("javascript");
+  params.attribute_values.push_back("allow");
+  params.attribute_names.push_back("allow-xfa-forms");
+  params.attribute_values.push_back("");
+
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
+  ASSERT_TRUE(result.has_value());
+
+  EXPECT_EQ(PDFiumFormFiller::ScriptOption::kJavaScriptAndXFA,
+            result->script_option);
+}
+
+TEST(ParsedParamsTest, ParseWebPluginParamsWithHasAllowXfaNonEmpty) {
+  blink::WebPluginParams params = CreateMinimalWebPluginParams();
+  params.attribute_names.push_back("javascript");
+  params.attribute_values.push_back("allow");
+  params.attribute_names.push_back("allow-xfa-forms");
+  params.attribute_values.push_back("false");
+
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
+  ASSERT_TRUE(result.has_value());
+
+  EXPECT_EQ(PDFiumFormFiller::ScriptOption::kJavaScriptAndXFA,
+            result->script_option);
+}
+
+TEST(ParsedParamsTest, ParseWebPluginParamsWithHasAllowXfaNoJavaScript) {
+  blink::WebPluginParams params = CreateMinimalWebPluginParams();
+  params.attribute_names.push_back("javascript");
+  params.attribute_values.push_back("");
+  params.attribute_names.push_back("allow-xfa-forms");
+  params.attribute_values.push_back("");
+
+  std::optional<ParsedParams> result = ParseWebPluginParams(params);
+  ASSERT_TRUE(result.has_value());
+
+  EXPECT_EQ(PDFiumFormFiller::ScriptOption::kNoJavaScript,
+            result->script_option);
 }
 
 }  // namespace chrome_pdf

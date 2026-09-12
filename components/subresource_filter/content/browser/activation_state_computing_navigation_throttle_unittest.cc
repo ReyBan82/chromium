@@ -5,6 +5,7 @@
 #include "components/subresource_filter/content/browser/activation_state_computing_navigation_throttle.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -16,20 +17,22 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/test_simple_task_runner.h"
-#include "components/subresource_filter/content/browser/async_document_subresource_filter.h"
-#include "components/subresource_filter/content/browser/async_document_subresource_filter_test_utils.h"
-#include "components/subresource_filter/content/browser/content_subresource_filter_web_contents_helper.h"
+#include "components/subresource_filter/content/browser/utils.h"
+#include "components/subresource_filter/core/browser/async_document_subresource_filter.h"
+#include "components/subresource_filter/core/browser/async_document_subresource_filter_test_utils.h"
+#include "components/subresource_filter/core/common/constants.h"
 #include "components/subresource_filter/core/common/scoped_timers.h"
 #include "components/subresource_filter/core/common/test_ruleset_creator.h"
 #include "components/subresource_filter/core/common/test_ruleset_utils.h"
 #include "components/subresource_filter/core/mojom/subresource_filter.mojom.h"
 #include "components/url_pattern_index/proto/rules.pb.h"
 #include "content/public/browser/navigation_handle.h"
+#include "content/public/browser/navigation_throttle_registry.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/test/navigation_simulator.h"
+#include "content/public/test/test_navigation_throttle_inserter.h"
 #include "content/public/test/test_renderer_host.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace subresource_filter {
 
@@ -52,13 +55,19 @@ class ActivationStateComputingNavigationThrottleTest
   ActivationStateComputingNavigationThrottleTest& operator=(
       const ActivationStateComputingNavigationThrottleTest&) = delete;
 
-  ~ActivationStateComputingNavigationThrottleTest() override {}
+  ~ActivationStateComputingNavigationThrottleTest() override = default;
 
   void SetUp() override {
     content::RenderViewHostTestHarness::SetUp();
     NavigateAndCommit(GURL("https://example.first"));
     InitializeRuleset();
     Observe(RenderViewHostTestHarness::web_contents());
+    throttle_inserter_ =
+        std::make_unique<content::TestNavigationThrottleInserter>(
+            RenderViewHostTestHarness::web_contents(),
+            base::BindRepeating(
+                &ActivationStateComputingNavigationThrottleTest::InsertThrottle,
+                base::Unretained(this)));
   }
 
   void TearDown() override {
@@ -153,7 +162,7 @@ class ActivationStateComputingNavigationThrottleTest
   void InitializeRulesetHandles(
       scoped_refptr<base::SequencedTaskRunner> ruleset_task_runner) {
     dealer_handle_ = std::make_unique<VerifiedRulesetDealer::Handle>(
-        std::move(ruleset_task_runner));
+        std::move(ruleset_task_runner), kSafeBrowsingRulesetConfig);
     dealer_handle_->TryOpenAndSetRulesetFile(test_ruleset_pair_.indexed.path,
                                              /*expected_checksum=*/0,
                                              base::DoNothing());
@@ -183,34 +192,48 @@ class ActivationStateComputingNavigationThrottleTest
     parent_activation_state_ = state;
   }
 
+  // Destroys the VerifiedRuleset::Handle owned by the fixture, invalidating
+  // the WeakPtr held by the live throttle. Simulates the page's throttle
+  // manager being torn down mid-navigation. See crbug.com/534608620.
+  void ResetRulesetHandleForTesting() { ruleset_handle_.reset(); }
+
+  // Detaches the fixture observer from the tracked throttle so that its
+  // ReadyToCommitNavigation/DidFinishNavigation overrides do not run on a
+  // navigation that is intentionally abandoned mid-flight during teardown.
+  void ClearTrackedThrottleForTesting() { test_throttle_ = nullptr; }
+
  protected:
-  // content::WebContentsObserver:
-  void DidStartNavigation(
-      content::NavigationHandle* navigation_handle) override {
+  void InsertThrottle(content::NavigationThrottleRegistry& registry) {
+    content::NavigationHandle& navigation_handle =
+        registry.GetNavigationHandle();
     std::unique_ptr<ActivationStateComputingNavigationThrottle> throttle =
-        IsInSubresourceFilterRoot(navigation_handle)
+        IsInSubresourceFilterRoot(&navigation_handle)
             ? ActivationStateComputingNavigationThrottle::CreateForRoot(
-                  navigation_handle)
+                  registry, kSafeBrowsingRulesetConfig.uma_tag)
             : ActivationStateComputingNavigationThrottle::CreateForChild(
-                  navigation_handle, ruleset_handle_.get(),
-                  parent_activation_state_.value());
-    if (navigation_handle->IsInMainFrame() && dryrun_speculation_) {
+                  registry, ruleset_handle_.get(),
+                  parent_activation_state_.value(),
+                  kSafeBrowsingRulesetConfig.uma_tag);
+    if (navigation_handle.IsInMainFrame() && dryrun_speculation_) {
       mojom::ActivationState dryrun_state;
       dryrun_state.activation_level = mojom::ActivationLevel::kDryRun;
       throttle->NotifyPageActivationWithRuleset(ruleset_handle_.get(),
                                                 dryrun_state);
     }
     test_throttle_ = throttle.get();
-    navigation_handle->RegisterThrottleForTesting(std::move(throttle));
+    registry.AddThrottle(std::move(throttle));
   }
 
+  // content::WebContentsObserver:
   void ReadyToCommitNavigation(
       content::NavigationHandle* navigation_handle) override {
-    if (!test_throttle_)
+    if (!test_throttle_) {
       return;
+    }
     ASSERT_EQ(navigation_handle, test_throttle_->navigation_handle());
-    if (test_throttle_->filter())
+    if (test_throttle_->filter()) {
       test_throttle_->WillSendActivationToRenderer();
+    }
 
     if (auto filter = test_throttle_->ReleaseFilter()) {
       EXPECT_NE(mojom::ActivationLevel::kDisabled,
@@ -223,8 +246,9 @@ class ActivationStateComputingNavigationThrottleTest
 
   void DidFinishNavigation(
       content::NavigationHandle* navigation_handle) override {
-    if (!test_throttle_)
+    if (!test_throttle_) {
       return;
+    }
     last_committed_frame_host_ = navigation_handle->GetRenderFrameHost();
     test_throttle_ = nullptr;
   }
@@ -244,13 +268,16 @@ class ActivationStateComputingNavigationThrottleTest
 
   // Owned by the current navigation.
   raw_ptr<ActivationStateComputingNavigationThrottle> test_throttle_;
-  absl::optional<mojom::ActivationState> last_activation_state_;
-  absl::optional<mojom::ActivationState> parent_activation_state_;
+  std::optional<mojom::ActivationState> last_activation_state_;
+  std::optional<mojom::ActivationState> parent_activation_state_;
 
   // Needed for potential cross process navigations which swap hosts.
-  raw_ptr<content::RenderFrameHost> last_committed_frame_host_ = nullptr;
+  raw_ptr<content::RenderFrameHost, DanglingUntriaged>
+      last_committed_frame_host_ = nullptr;
 
   bool dryrun_speculation_;
+
+  std::unique_ptr<content::TestNavigationThrottleInserter> throttle_inserter_;
 };
 
 typedef ActivationStateComputingNavigationThrottleTest
@@ -266,9 +293,11 @@ TEST_P(ActivationStateComputingThrottleMainFrameTest, Activate) {
   EXPECT_FALSE(state.filtering_disabled_for_document);
 }
 
-// TODO(crbug.com/1069398): Fix this test failure.
 TEST_P(ActivationStateComputingThrottleMainFrameTest,
-       DISABLED_NoPageActivationNotification_NoActivation) {
+       NoPageActivationNotification_NoActivation) {
+  if (dryrun_speculation()) {
+    GTEST_SKIP() << "TODO(crbug.com/40125895): Fix this test failure.";
+  }
   CreateTestNavigationForMainFrame(GURL("http://example.test/"));
   SimulateStartAndExpectToProceed();
   SimulateRedirectAndExpectToProceed(GURL("http://example.test/?v=1"));
@@ -475,45 +504,9 @@ TEST_P(ActivationStateComputingThrottleSubFrameTest, DisabledStatePropagated2) {
   EXPECT_TRUE(state.generic_blocking_rules_disabled);
 }
 
-// TODO(crbug.com/1143730): This test needs to verify that
+// TODO(crbug.com/40155196): A test is needed to verify that
 // ComputeActivationState was called appropriately.  Previously this was done
 // via looking at performance histograms, but those are now obsolete.
-TEST_P(ActivationStateComputingThrottleSubFrameTest, DISABLED_Speculation) {
-  // Main frames don't do speculative lookups, a navigation commit should only
-  // trigger a single ruleset lookup.
-  CreateTestNavigationForMainFrame(GURL("http://example.test/"));
-  SimulateStartAndExpectToProceed();
-  base::RunLoop().RunUntilIdle();
-  // Check that there was one activation decision.
-
-  SimulateRedirectAndExpectToProceed(GURL("http://example.test2/"));
-  base::RunLoop().RunUntilIdle();
-  // Check that there was one additional activation decision.
-
-  mojom::ActivationState state;
-  state.activation_level = mojom::ActivationLevel::kEnabled;
-  NotifyPageActivation(state);
-  SimulateCommitAndExpectToProceed();
-  // Check that there was one additional activation decision.
-
-  base::HistogramTester sub_histogram_tester;
-  CreateSubframeAndInitTestNavigation(GURL("http://example.test/"),
-                                      last_committed_frame_host(),
-                                      last_activation_state());
-  // For subframes, do a ruleset lookup at the start and every redirect.
-  SimulateStartAndExpectToProceed();
-  base::RunLoop().RunUntilIdle();
-  // Check that there was one additional activation decision.
-
-  SimulateRedirectAndExpectToProceed(GURL("http://example.test2/"));
-  base::RunLoop().RunUntilIdle();
-  // Check that there was one additional activation decision.
-
-  // No ruleset lookup required at commit because we've already checked the
-  // latest URL.
-  SimulateCommitAndExpectToProceed();
-  // Check that there were no additional activation decisions.
-}
 
 TEST_P(ActivationStateComputingThrottleSubFrameTest, SpeculationWithDelay) {
   InitializeRulesetHandles(simple_task_runner());
@@ -576,6 +569,60 @@ TEST_P(ActivationStateComputingThrottleSubFrameTest, SpeculationWithDelay) {
   EXPECT_FALSE(subframe_simulator->IsDeferred());
   EXPECT_EQ(content::NavigationThrottle::PROCEED,
             simulator->GetLastThrottleCheckResult());
+}
+
+// Regression test for crbug.com/534608620. The throttle holds a WeakPtr to a
+// VerifiedRuleset::Handle owned by the page's throttle manager. That handle can
+// be invalidated while the navigation is still in flight (e.g. a
+// target_hint=_blank new-tab prerender whose pre-created WebContents is taken
+// or discarded during a redirect). A redirect arriving afterwards must proceed
+// gracefully instead of dereferencing the null handle in CheckActivationState.
+TEST_P(ActivationStateComputingThrottleMainFrameTest,
+       RulesetHandleDestroyedBeforeRedirectDoesNotCrash) {
+  if (!dryrun_speculation()) {
+    GTEST_SKIP()
+        << "Requires dryrun activation so the root throttle is created "
+           "with a parent activation state and a ruleset handle.";
+  }
+  CreateTestNavigationForMainFrame(GURL("http://example.test/"));
+  SimulateStartAndExpectToProceed();
+
+  // Tear down the underlying Handle; the throttle's WeakPtr is now null.
+  ResetRulesetHandleForTesting();
+
+  // Must proceed rather than CHECK/deref in CheckActivationState().
+  SimulateRedirectAndExpectToProceed(GURL("http://example.test/?redir=1"));
+
+  // The navigation is intentionally left mid-redirect; detach the observer so
+  // it does not run against an abandoned navigation during teardown.
+  ClearTrackedThrottleForTesting();
+}
+
+// Companion coverage for the WillProcessResponse() guard: when the handle is
+// destroyed before any activation check created an async filter, the response
+// step must proceed rather than defer forever on a callback that can never
+// fire. See crbug.com/534608620.
+TEST_P(ActivationStateComputingThrottleMainFrameTest,
+       RulesetHandleDestroyedBeforeResponseDoesNotDefer) {
+  if (dryrun_speculation()) {
+    GTEST_SKIP() << "Requires the non-dryrun path so WillStartRequest does not "
+                    "create an async filter before the response.";
+  }
+  CreateTestNavigationForMainFrame(GURL("http://example.test/"));
+  // parent_activation_state_ is unset here, so WillStartRequest is a no-op and
+  // no async filter is created.
+  SimulateStartAndExpectToProceed();
+
+  // Install a parent activation state and ruleset handle on the throttle, then
+  // immediately destroy the underlying Handle.
+  mojom::ActivationState dryrun_state;
+  dryrun_state.activation_level = mojom::ActivationLevel::kDryRun;
+  NotifyPageActivation(dryrun_state);
+  ResetRulesetHandleForTesting();
+
+  // WillProcessResponse sees a null handle and no async filter: it must proceed
+  // instead of deferring on an OnActivationStateComputed that will never come.
+  SimulateCommitAndExpectToProceed();
 }
 
 INSTANTIATE_TEST_SUITE_P(All,

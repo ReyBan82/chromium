@@ -2,11 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #ifndef CC_PAINT_PAINT_OP_H_
 #define CC_PAINT_PAINT_OP_H_
 
 #include <stdint.h>
 
+#include <array>
+#include <cmath>
+#include <iosfwd>
 #include <limits>
 #include <memory>
 #include <string>
@@ -15,18 +19,21 @@
 #include <vector>
 
 #include "base/check_op.h"
-#include "base/containers/stack_container.h"
+#include "base/containers/span.h"
 #include "base/debug/alias.h"
-#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/memory/stack_allocated.h"
 #include "base/notreached.h"
 #include "cc/base/math_util.h"
+#include "cc/paint/element_id.h"
 #include "cc/paint/node_id.h"
 #include "cc/paint/paint_canvas.h"
 #include "cc/paint/paint_export.h"
+#include "cc/paint/paint_filter.h"
 #include "cc/paint/paint_flags.h"
 #include "cc/paint/paint_record.h"
+#include "cc/paint/refcounted_buffer.h"
 #include "cc/paint/skottie_color_map.h"
 #include "cc/paint/skottie_frame_data.h"
 #include "cc/paint/skottie_resource_metadata.h"
@@ -34,27 +41,26 @@
 #include "cc/paint/skottie_wrapper.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "third_party/skia/include/core/SkPath.h"
+#include "third_party/skia/include/core/SkPathTypes.h"
+#include "third_party/skia/include/core/SkPoint.h"
 #include "third_party/skia/include/core/SkRRect.h"
 #include "third_party/skia/include/core/SkRect.h"
 #include "third_party/skia/include/core/SkRefCnt.h"
 #include "third_party/skia/include/core/SkScalar.h"
+#include "ui/gfx/display_color_spaces.h"
 #include "ui/gfx/geometry/rect.h"
 
 class SkImage;
 class SkTextBlob;
+namespace sktext::gpu {
+class Slug;
+}
 
 namespace cc {
 
+class DisplayItemList;
 class PaintOpWriter;
 class PaintOpReader;
-
-class CC_PAINT_EXPORT ThreadsafePath : public SkPath {
- public:
-  explicit ThreadsafePath(const SkPath& path) : SkPath(path) {
-    updateBoundsCache();
-  }
-  ThreadsafePath() { updateBoundsCache(); }
-};
 
 // See PaintOp::Serialize/Deserialize for comments.  Serialize() of derived
 // types don't write the type/serialized_size header because they don't know how
@@ -66,37 +72,44 @@ class CC_PAINT_EXPORT ThreadsafePath : public SkPath {
   static PaintOp* Deserialize(PaintOpReader& reader, void* output)
 
 enum class PaintOpType : uint8_t {
-  Annotate,
-  ClipPath,
-  ClipRect,
-  ClipRRect,
-  Concat,
-  CustomData,
-  DrawColor,
-  DrawDRRect,
-  DrawImage,
-  DrawImageRect,
-  DrawIRect,
-  DrawLine,
-  DrawOval,
-  DrawPath,
-  DrawRecord,
-  DrawRect,
-  DrawRRect,
-  DrawSkottie,
-  DrawSlug,
-  DrawTextBlob,
-  Noop,
-  Restore,
-  Rotate,
-  Save,
-  SaveLayer,
-  SaveLayerAlpha,
-  Scale,
-  SetMatrix,
-  SetNodeId,
-  Translate,
-  LastPaintOpType = Translate,
+  kAnnotate,
+  kClipPath,
+  kClipRect,
+  kClipRRect,
+  kConcat,
+  kCustomData,
+  kDrawArc,
+  kDrawArcLite,
+  kDrawColor,
+  kDrawDRRect,
+  kDrawImage,
+  kDrawImageRect,
+  kDrawIRect,
+  kDrawLine,
+  kDrawLineLite,
+  kDrawOval,
+  kDrawPath,
+  kDrawRecord,
+  kDrawRect,
+  kDrawRRect,
+  kDrawScrollingContents,
+  kDrawSkottie,
+  kDrawSlug,
+  kDrawTextBlob,
+  kDrawTextSlugs,
+  kDrawVertices,
+  kNoop,
+  kRestore,
+  kRotate,
+  kSave,
+  kSaveLayer,
+  kSaveLayerAlpha,
+  kSaveLayerFilters,
+  kScale,
+  kSetMatrix,
+  kSetNodeId,
+  kTranslate,
+  kLastPaintOpType = kTranslate,
 };
 
 CC_PAINT_EXPORT std::string PaintOpTypeToString(PaintOpType type);
@@ -104,13 +117,17 @@ CC_PAINT_EXPORT std::ostream& operator<<(std::ostream&, PaintOpType);
 
 class CC_PAINT_EXPORT PaintOp {
  public:
+  PaintOp(const PaintOp&) = delete;
+  PaintOp& operator=(const PaintOp&) = delete;
+
+  // Run the destructor for the derived op type.  Ops are usually contained in
+  // memory buffers and so don't have their destructors run automatically.
+  void DestroyThis();
+
   uint8_t type;
-  uint16_t aligned_size;
 
   using SerializeOptions = PaintOpBuffer::SerializeOptions;
   using DeserializeOptions = PaintOpBuffer::DeserializeOptions;
-
-  explicit PaintOp(PaintOpType type) : type(static_cast<uint8_t>(type)) {}
 
   PaintOpType GetType() const { return static_cast<PaintOpType>(type); }
 
@@ -119,8 +136,9 @@ class CC_PAINT_EXPORT PaintOp {
   // static with a pointer to the base type so that we can use it as a function
   // pointer.
   void Raster(SkCanvas* canvas, const PlaybackParams& params) const;
-  bool IsDrawOp() const;
-  bool IsPaintOpWithFlags() const;
+  bool IsDrawOp() const { return g_is_draw_op[type]; }
+  bool IsPaintOpWithFlags() const { return g_has_paint_flags[type]; }
+  uint16_t AlignedSize() const { return g_type_to_aligned_size[type]; }
 
   bool EqualsForTesting(const PaintOp& other) const;
 
@@ -134,35 +152,31 @@ class CC_PAINT_EXPORT PaintOp {
   };
 
   // Subclasses should provide a Serialize() method called from here.
-  // If the op can be serialized to |memory| in no more than |size| bytes,
-  // then return the number of bytes written.  If it won't fit, return 0.
-  // If |flags_to_serialize| is non-null, it overrides any flags within the op.
-  // |current_ctm| is the transform that will affect the op when rasterized.
-  // |original_ctm| is the transform that SetMatrixOps must be made relative to.
-  size_t Serialize(void* memory,
-                   size_t size,
+  // If the op can be serialized to `memory`, then return the number of bytes
+  // written.  If it won't fit, return 0.
+  // If `flags_to_serialize` is non-null, it overrides any flags within the op.
+  // `current_ctm` is the transform that will affect the op when rasterized.
+  // `original_ctm` is the transform that SetMatrixOps must be made relative to.
+  size_t Serialize(base::span<uint8_t> memory,
                    const SerializeOptions& options,
                    const PaintFlags* flags_to_serialize,
                    const SkM44& current_ctm,
                    const SkM44& original_ctm) const;
 
-  // Deserializes a PaintOp of this type from a given buffer |input| of
-  // at most |input_size| bytes.  Returns null on any errors.
-  // The PaintOp is deserialized into the |output| buffer and returned
+  // Deserializes a PaintOp of this type from a given buffer `input`.
+  // Returns null on any errors.
+  // The PaintOp is deserialized into the `output` buffer and returned
   // if valid.  nullptr is returned if the deserialization fails.
-  // |output_size| must be at least ComputeOpAlignedSize<LargestPaintOp>(),
+  // `output` must be at least ComputeOpAlignedSize<LargestPaintOp>() bytes,
   // to fit all ops.  The caller is responsible for destroying these ops.
-  // After reading, it returns the number of bytes read in |read_bytes|.
-  static PaintOp* Deserialize(const volatile void* input,
-                              size_t input_size,
-                              void* output,
-                              size_t output_size,
+  // After reading, it returns the number of bytes read in `read_bytes`.
+  static PaintOp* Deserialize(base::span<const volatile uint8_t> input,
+                              base::span<uint8_t> output,
                               size_t* read_bytes,
                               const DeserializeOptions& options);
-  // Similar to the above, but deserializes into |buffer|.
+  // Similar to the above, but deserializes into `buffer`.
   static PaintOp* DeserializeIntoPaintOpBuffer(
-      const volatile void* input,
-      size_t input_size,
+      base::span<const volatile uint8_t> input,
       PaintOpBuffer* buffer,
       size_t* read_bytes,
       const DeserializeOptions& options);
@@ -186,8 +200,35 @@ class CC_PAINT_EXPORT PaintOp {
   // generated images.
   static bool OpHasDiscardableImages(const PaintOp& op);
 
+  // Returns true if the op contains any draw text operations.
+  static bool OpHasDrawTextOps(const PaintOp& op);
+
+  static size_t OpAdditionalOpCount(const PaintOp& op);
+
   // Returns true if the given op type has PaintFlags.
   static bool TypeHasFlags(PaintOpType type);
+
+  // kDrawColor is more restrictive on the blend modes that can be used.
+  static bool IsValidDrawColorSkBlendMode(SkBlendMode mode) {
+    return static_cast<uint32_t>(mode) <=
+           static_cast<uint32_t>(SkBlendMode::kLastCoeffMode);
+  }
+
+  // PaintFlags can have more complex blend modes than kDrawColor.
+  static bool IsValidPaintFlagsSkBlendMode(SkBlendMode mode) {
+    return static_cast<uint32_t>(mode) <=
+           static_cast<uint32_t>(SkBlendMode::kLastMode);
+  }
+
+  static constexpr size_t kNumOpTypes =
+      static_cast<size_t>(PaintOpType::kLastPaintOpType) + 1;
+
+  static constexpr bool kIsDrawOp = false;
+  static constexpr bool kHasPaintFlags = false;
+
+ protected:
+  explicit PaintOp(PaintOpType op_type) : type(static_cast<uint8_t>(op_type)) {}
+  ~PaintOp() = default;
 
   int CountSlowPaths() const { return 0; }
   int CountSlowPathsFromFlags() const { return 0; }
@@ -197,11 +238,19 @@ class CC_PAINT_EXPORT PaintOp {
   bool HasSaveLayerOps() const { return false; }
   bool HasSaveLayerAlphaOps() const { return false; }
   // Returns true if effects are present that would break LCD text or be broken
-  // by the flags for SaveLayerAlpha to preserving LCD text.
+  // by the flags for kSaveLayerAlpha to preserving LCD text.
   bool HasEffectsPreventingLCDTextForSaveLayerAlpha() const { return false; }
 
-  bool HasDiscardableImages() const { return false; }
-  bool HasDiscardableImagesFromFlags() const { return false; }
+  // If `content_color_usage` is not null, the functions should update
+  // `*content_color_usage` to be
+  // max(*content_color_usage, max_content_color_usage_of_this_op).
+  bool HasDiscardableImages(gfx::ContentColorUsage* content_color_usage) const {
+    return false;
+  }
+  bool HasDiscardableImagesFromFlags(
+      gfx::ContentColorUsage* content_color_usage) const {
+    return false;
+  }
 
   // Returns the number of bytes used by this op in referenced sub records
   // and display lists.  This doesn't count other objects like paths or blobs.
@@ -209,22 +258,6 @@ class CC_PAINT_EXPORT PaintOp {
 
   // Returns the number of ops in referenced sub records and display lists.
   size_t AdditionalOpCount() const { return 0; }
-
-  // Run the destructor for the derived op type.  Ops are usually contained in
-  // memory buffers and so don't have their destructors run automatically.
-  void DestroyThis();
-
-  // DrawColor is more restrictive on the blend modes that can be used.
-  static bool IsValidDrawColorSkBlendMode(SkBlendMode mode) {
-    return static_cast<uint32_t>(mode) <=
-           static_cast<uint32_t>(SkBlendMode::kLastCoeffMode);
-  }
-
-  // PaintFlags can have more complex blend modes than DrawColor.
-  static bool IsValidPaintFlagsSkBlendMode(SkBlendMode mode) {
-    return static_cast<uint32_t>(mode) <=
-           static_cast<uint32_t>(SkBlendMode::kLastMode);
-  }
 
   static bool IsValidSkClipOp(SkClipOp op) {
     return static_cast<uint32_t>(op) <=
@@ -241,26 +274,20 @@ class CC_PAINT_EXPORT PaintOp {
     return IsUnsetRect(rect) || rect.isFinite();
   }
 
-  static constexpr bool kIsDrawOp = false;
-  static constexpr bool kHasPaintFlags = false;
+  static const std::array<bool, kNumOpTypes> g_is_draw_op;
+  static const std::array<bool, kNumOpTypes> g_has_paint_flags;
+  static const std::array<uint16_t, kNumOpTypes> g_type_to_aligned_size;
+
   static const SkRect kUnsetRect;
-
-  PaintOp(const PaintOp&) = delete;
-  PaintOp& operator=(const PaintOp&) = delete;
-
- protected:
-  ~PaintOp() = default;
 };
 
 class CC_PAINT_EXPORT PaintOpWithFlags : public PaintOp {
  public:
   static constexpr bool kHasPaintFlags = true;
-  PaintOpWithFlags(PaintOpType type, const PaintFlags& flags)
-      : PaintOp(type), flags(flags) {}
 
   int CountSlowPathsFromFlags() const { return flags.getPathEffect() ? 1 : 0; }
-  bool HasNonAAPaint() const { return !flags.isAntiAlias(); }
-  bool HasDiscardableImagesFromFlags() const;
+  bool HasDiscardableImagesFromFlags(
+      gfx::ContentColorUsage* content_color_usage) const;
 
   void RasterWithFlags(SkCanvas* canvas,
                        const PaintFlags* flags,
@@ -275,14 +302,45 @@ class CC_PAINT_EXPORT PaintOpWithFlags : public PaintOp {
   PaintFlags flags;
 
  protected:
+  PaintOpWithFlags(PaintOpType op_type, const PaintFlags& paint_flags)
+      : PaintOp(op_type), flags(paint_flags) {}
+  explicit PaintOpWithFlags(PaintOpType op_type) : PaintOp(op_type) {}
   ~PaintOpWithFlags() = default;
 
-  explicit PaintOpWithFlags(PaintOpType type) : PaintOp(type) {}
+  bool HasNonAAPaint() const { return !flags.isAntiAlias(); }
 };
 
-class CC_PAINT_EXPORT AnnotateOp final : public PaintOp {
+// The internal types make the non-runtime-polymorphic functions (which are
+// protected in PaintOp[WithFlags] to prevent bugs where the functions are
+// incorrectly used outside of paint_op.{h,cc}) public in subclasses.
+
+#define INTERNAL_PAINTOP_BASE_TYPE(type, super)                \
+  class type : public super {                                  \
+   public:                                                     \
+    using super::CountSlowPaths;                               \
+    using super::CountSlowPathsFromFlags;                      \
+    using super::HasNonAAPaint;                                \
+    using super::HasDrawTextOps;                               \
+    using super::HasSaveLayerOps;                              \
+    using super::HasSaveLayerAlphaOps;                         \
+    using super::HasEffectsPreventingLCDTextForSaveLayerAlpha; \
+    using super::HasDiscardableImages;                         \
+    using super::HasDiscardableImagesFromFlags;                \
+    using super::AdditionalBytesUsed;                          \
+    using super::AdditionalOpCount;                            \
+                                                               \
+   protected:                                                  \
+    using super::super;                                        \
+  }
+
+INTERNAL_PAINTOP_BASE_TYPE(PaintOpBaseInternal, PaintOp);
+INTERNAL_PAINTOP_BASE_TYPE(PaintOpWithFlagsBaseInternal, PaintOpWithFlags);
+
+#undef INTERNAL_PAINTOP_BASE_TYPE
+
+class CC_PAINT_EXPORT AnnotateOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::Annotate;
+  static constexpr PaintOpType kType = PaintOpType::kAnnotate;
   AnnotateOp(PaintCanvas::AnnotationType annotation_type,
              const SkRect& rect,
              sk_sp<SkData> data);
@@ -302,14 +360,14 @@ class CC_PAINT_EXPORT AnnotateOp final : public PaintOp {
   AnnotateOp();
 };
 
-class CC_PAINT_EXPORT ClipPathOp final : public PaintOp {
+class CC_PAINT_EXPORT ClipPathOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::ClipPath;
+  static constexpr PaintOpType kType = PaintOpType::kClipPath;
   ClipPathOp(SkPath path,
              SkClipOp op,
              bool antialias,
              UsePaintCache use_paint_cache = UsePaintCache::kEnabled)
-      : PaintOp(kType),
+      : PaintOpBaseInternal(kType),
         path(path),
         op(op),
         antialias(antialias),
@@ -323,20 +381,20 @@ class CC_PAINT_EXPORT ClipPathOp final : public PaintOp {
   bool HasNonAAPaint() const { return !antialias; }
   HAS_SERIALIZATION_FUNCTIONS();
 
-  ThreadsafePath path;
+  SkPath path;
   SkClipOp op;
   bool antialias;
   UsePaintCache use_cache = UsePaintCache::kDisabled;
 
  private:
-  ClipPathOp() : PaintOp(kType) {}
+  ClipPathOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT ClipRectOp final : public PaintOp {
+class CC_PAINT_EXPORT ClipRectOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::ClipRect;
+  static constexpr PaintOpType kType = PaintOpType::kClipRect;
   ClipRectOp(const SkRect& rect, SkClipOp op, bool antialias)
-      : PaintOp(kType), rect(rect), op(op), antialias(antialias) {}
+      : PaintOpBaseInternal(kType), rect(rect), op(op), antialias(antialias) {}
   static void Raster(const ClipRectOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -349,14 +407,17 @@ class CC_PAINT_EXPORT ClipRectOp final : public PaintOp {
   bool antialias;
 
  private:
-  ClipRectOp() : PaintOp(kType) {}
+  ClipRectOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT ClipRRectOp final : public PaintOp {
+class CC_PAINT_EXPORT ClipRRectOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::ClipRRect;
+  static constexpr PaintOpType kType = PaintOpType::kClipRRect;
   ClipRRectOp(const SkRRect& rrect, SkClipOp op, bool antialias)
-      : PaintOp(kType), rrect(rrect), op(op), antialias(antialias) {}
+      : PaintOpBaseInternal(kType),
+        rrect(rrect),
+        op(op),
+        antialias(antialias) {}
   static void Raster(const ClipRRectOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -370,13 +431,14 @@ class CC_PAINT_EXPORT ClipRRectOp final : public PaintOp {
   bool antialias;
 
  private:
-  ClipRRectOp() : PaintOp(kType) {}
+  ClipRRectOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT ConcatOp final : public PaintOp {
+class CC_PAINT_EXPORT ConcatOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::Concat;
-  explicit ConcatOp(const SkM44& matrix) : PaintOp(kType), matrix(matrix) {}
+  static constexpr PaintOpType kType = PaintOpType::kConcat;
+  explicit ConcatOp(const SkM44& matrix)
+      : PaintOpBaseInternal(kType), matrix(matrix) {}
   static void Raster(const ConcatOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -387,13 +449,13 @@ class CC_PAINT_EXPORT ConcatOp final : public PaintOp {
   SkM44 matrix;
 
  private:
-  ConcatOp() : PaintOp(kType) {}
+  ConcatOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT CustomDataOp final : public PaintOp {
+class CC_PAINT_EXPORT CustomDataOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::CustomData;
-  explicit CustomDataOp(uint32_t id) : PaintOp(kType), id(id) {}
+  static constexpr PaintOpType kType = PaintOpType::kCustomData;
+  explicit CustomDataOp(uint32_t id) : PaintOpBaseInternal(kType), id(id) {}
   static void Raster(const CustomDataOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -405,15 +467,15 @@ class CC_PAINT_EXPORT CustomDataOp final : public PaintOp {
   uint32_t id;
 
  private:
-  CustomDataOp() : PaintOp(kType) {}
+  CustomDataOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawColorOp final : public PaintOp {
+class CC_PAINT_EXPORT DrawColorOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawColor;
+  static constexpr PaintOpType kType = PaintOpType::kDrawColor;
   static constexpr bool kIsDrawOp = true;
   DrawColorOp(SkColor4f color, SkBlendMode mode)
-      : PaintOp(kType), color(color), mode(mode) {}
+      : PaintOpBaseInternal(kType), color(color), mode(mode) {}
   static void Raster(const DrawColorOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -425,17 +487,19 @@ class CC_PAINT_EXPORT DrawColorOp final : public PaintOp {
   SkBlendMode mode;
 
  private:
-  DrawColorOp() : PaintOp(kType) {}
+  DrawColorOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawDRRectOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawDRRectOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawDRRect;
+  static constexpr PaintOpType kType = PaintOpType::kDrawDRRect;
   static constexpr bool kIsDrawOp = true;
   DrawDRRectOp(const SkRRect& outer,
                const SkRRect& inner,
-               const PaintFlags& flags)
-      : PaintOpWithFlags(kType, flags), outer(outer), inner(inner) {}
+               const PaintFlags& paint_flags)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags),
+        outer(outer),
+        inner(inner) {}
   static void RasterWithFlags(const DrawDRRectOp* op,
                               const PaintFlags* flags,
                               SkCanvas* canvas,
@@ -450,12 +514,12 @@ class CC_PAINT_EXPORT DrawDRRectOp final : public PaintOpWithFlags {
   SkRRect inner;
 
  private:
-  DrawDRRectOp() : PaintOpWithFlags(kType) {}
+  DrawDRRectOp() : PaintOpWithFlagsBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawImageOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawImageOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawImage;
+  static constexpr PaintOpType kType = PaintOpType::kDrawImage;
   static constexpr bool kIsDrawOp = true;
   DrawImageOp(const PaintImage& image, SkScalar left, SkScalar top);
   DrawImageOp(const PaintImage& image,
@@ -469,11 +533,12 @@ class CC_PAINT_EXPORT DrawImageOp final : public PaintOpWithFlags {
                               SkCanvas* canvas,
                               const PlaybackParams& params);
   bool IsValid() const {
-    return flags.IsValid() && SkScalarIsFinite(scale_adjustment.width()) &&
-           SkScalarIsFinite(scale_adjustment.height());
+    return flags.IsValid() && std::isfinite(scale_adjustment.width()) &&
+           std::isfinite(scale_adjustment.height());
   }
   bool EqualsForTesting(const DrawImageOp& other) const;
-  bool HasDiscardableImages() const;
+  bool HasDiscardableImages(gfx::ContentColorUsage* content_color_usage) const;
+  PaintFlags::FilterQuality GetImageQuality() const;
   bool HasNonAAPaint() const { return false; }
   HAS_SERIALIZATION_FUNCTIONS();
 
@@ -486,13 +551,14 @@ class CC_PAINT_EXPORT DrawImageOp final : public PaintOpWithFlags {
   DrawImageOp();
 
   // Scale that has already been applied to the decoded image during
-  // serialization. Used with OOP raster.
+  // serialization. Used with GPU raster.
   SkSize scale_adjustment = SkSize::Make(1.f, 1.f);
 };
 
-class CC_PAINT_EXPORT DrawImageRectOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawImageRectOp final
+    : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawImageRect;
+  static constexpr PaintOpType kType = PaintOpType::kDrawImageRect;
   static constexpr bool kIsDrawOp = true;
   DrawImageRectOp(const PaintImage& image,
                   const SkRect& src,
@@ -511,11 +577,12 @@ class CC_PAINT_EXPORT DrawImageRectOp final : public PaintOpWithFlags {
                               const PlaybackParams& params);
   bool IsValid() const {
     return flags.IsValid() && src.isFinite() && dst.isFinite() &&
-           SkScalarIsFinite(scale_adjustment.width()) &&
-           SkScalarIsFinite(scale_adjustment.height());
+           std::isfinite(scale_adjustment.width()) &&
+           std::isfinite(scale_adjustment.height());
   }
   bool EqualsForTesting(const DrawImageRectOp& other) const;
-  bool HasDiscardableImages() const;
+  bool HasDiscardableImages(gfx::ContentColorUsage* content_color_usage) const;
+  PaintFlags::FilterQuality GetImageQuality() const;
   HAS_SERIALIZATION_FUNCTIONS();
 
   PaintImage image;
@@ -528,16 +595,16 @@ class CC_PAINT_EXPORT DrawImageRectOp final : public PaintOpWithFlags {
   DrawImageRectOp();
 
   // Scale that has already been applied to the decoded image during
-  // serialization. Used with OOP raster.
+  // serialization. Used with GPU raster.
   SkSize scale_adjustment = SkSize::Make(1.f, 1.f);
 };
 
-class CC_PAINT_EXPORT DrawIRectOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawIRectOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawIRect;
+  static constexpr PaintOpType kType = PaintOpType::kDrawIRect;
   static constexpr bool kIsDrawOp = true;
-  DrawIRectOp(const SkIRect& rect, const PaintFlags& flags)
-      : PaintOpWithFlags(kType, flags), rect(rect) {}
+  DrawIRectOp(const SkIRect& rect, const PaintFlags& paint_flags)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags), rect(rect) {}
   static void RasterWithFlags(const DrawIRectOp* op,
                               const PaintFlags* flags,
                               SkCanvas* canvas,
@@ -550,19 +617,25 @@ class CC_PAINT_EXPORT DrawIRectOp final : public PaintOpWithFlags {
   SkIRect rect;
 
  private:
-  DrawIRectOp() : PaintOpWithFlags(kType) {}
+  DrawIRectOp() : PaintOpWithFlagsBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawLineOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawLineOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawLine;
+  static constexpr PaintOpType kType = PaintOpType::kDrawLine;
   static constexpr bool kIsDrawOp = true;
   DrawLineOp(SkScalar x0,
              SkScalar y0,
              SkScalar x1,
              SkScalar y1,
-             const PaintFlags& flags)
-      : PaintOpWithFlags(kType, flags), x0(x0), y0(y0), x1(x1), y1(y1) {}
+             const PaintFlags& paint_flags,
+             bool draw_as_path = false)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags),
+        x0(x0),
+        y0(y0),
+        x1(x1),
+        y1(y1),
+        draw_as_path(draw_as_path) {}
   static void RasterWithFlags(const DrawLineOp* op,
                               const PaintFlags* flags,
                               SkCanvas* canvas,
@@ -577,44 +650,148 @@ class CC_PAINT_EXPORT DrawLineOp final : public PaintOpWithFlags {
   SkScalar y0;
   SkScalar x1;
   SkScalar y1;
+  // Used to indicate if rasterization should treat the line as a path.
+  // Typically this should be false, but in some situations it can be quicker
+  // to raster lines as paths.
+  bool draw_as_path;
 
  private:
-  DrawLineOp() : PaintOpWithFlags(kType) {}
+  DrawLineOp() : PaintOpWithFlagsBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawOvalOp final : public PaintOpWithFlags {
+// TODO(crbug.com/340122178): figure out a better way to unify types.
+class CC_PAINT_EXPORT DrawLineLiteOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawOval;
+  static constexpr PaintOpType kType = PaintOpType::kDrawLineLite;
   static constexpr bool kIsDrawOp = true;
-  DrawOvalOp(const SkRect& oval, const PaintFlags& flags)
-      : PaintOpWithFlags(kType, flags), oval(oval) {}
+  DrawLineLiteOp(SkScalar x0,
+                 SkScalar y0,
+                 SkScalar x1,
+                 SkScalar y1,
+                 const CorePaintFlags& core_paint_flags)
+      : PaintOpBaseInternal(kType),
+        x0(x0),
+        y0(y0),
+        x1(x1),
+        y1(y1),
+        core_paint_flags(core_paint_flags) {}
+  static void Raster(const DrawLineLiteOp* op,
+                     SkCanvas* canvas,
+                     const PlaybackParams& params);
+  bool IsValid() const { return core_paint_flags.IsValid(); }
+  bool EqualsForTesting(const DrawLineLiteOp& other) const;
+  HAS_SERIALIZATION_FUNCTIONS();
+
+  int CountSlowPaths() const { return 0; }
+
+  SkScalar x0;
+  SkScalar y0;
+  SkScalar x1;
+  SkScalar y1;
+  CorePaintFlags core_paint_flags;
+
+ private:
+  DrawLineLiteOp() : PaintOpBaseInternal(kType) {}
+};
+
+// TODO(crbug.com/340122178): figure out a better way to unify types.
+class CC_PAINT_EXPORT DrawArcLiteOp final : public PaintOpBaseInternal {
+ public:
+  static constexpr PaintOpType kType = PaintOpType::kDrawArcLite;
+  static constexpr bool kIsDrawOp = true;
+  DrawArcLiteOp(const SkRect& oval,
+                SkScalar start_angle_degrees,
+                SkScalar sweep_angle_degrees,
+                const CorePaintFlags& core_paint_flags)
+      : PaintOpBaseInternal(kType),
+        oval(oval),
+        start_angle_degrees(start_angle_degrees),
+        sweep_angle_degrees(sweep_angle_degrees),
+        core_paint_flags(core_paint_flags) {}
+  static void Raster(const DrawArcLiteOp* op,
+                     SkCanvas* canvas,
+                     const PlaybackParams& params);
+  bool IsValid() const {
+    return core_paint_flags.IsValid() && oval.isFinite() &&
+           std::isfinite(start_angle_degrees) &&
+           std::isfinite(sweep_angle_degrees);
+  }
+  bool EqualsForTesting(const DrawArcLiteOp& other) const;
+  HAS_SERIALIZATION_FUNCTIONS();
+
+  SkRect oval;
+  SkScalar start_angle_degrees;
+  SkScalar sweep_angle_degrees;
+  CorePaintFlags core_paint_flags;
+
+ private:
+  DrawArcLiteOp() : PaintOpBaseInternal(kType) {}
+};
+
+class CC_PAINT_EXPORT DrawArcOp final : public PaintOpWithFlagsBaseInternal {
+ public:
+  static constexpr PaintOpType kType = PaintOpType::kDrawArc;
+  static constexpr bool kIsDrawOp = true;
+  DrawArcOp(const SkRect& oval,
+            SkScalar start_angle_degrees,
+            SkScalar sweep_angle_degrees,
+            const PaintFlags& paint_flags)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags),
+        oval(oval),
+        start_angle_degrees(start_angle_degrees),
+        sweep_angle_degrees(sweep_angle_degrees) {}
+  static void RasterWithFlags(const DrawArcOp* op,
+                              const PaintFlags* flags,
+                              SkCanvas* canvas,
+                              const PlaybackParams& params);
+  // Actual implementation for rastering.
+  void RasterWithFlagsImpl(const PaintFlags* flags, SkCanvas* canvas) const;
+  bool IsValid() const {
+    return flags.IsValid() && oval.isFinite() &&
+           std::isfinite(start_angle_degrees) &&
+           std::isfinite(sweep_angle_degrees);
+  }
+  bool EqualsForTesting(const DrawArcOp& other) const;
+  HAS_SERIALIZATION_FUNCTIONS();
+
+  SkRect oval;
+  SkScalar start_angle_degrees;
+  SkScalar sweep_angle_degrees;
+
+ private:
+  DrawArcOp() : PaintOpWithFlagsBaseInternal(kType) {}
+};
+
+class CC_PAINT_EXPORT DrawOvalOp final : public PaintOpWithFlagsBaseInternal {
+ public:
+  static constexpr PaintOpType kType = PaintOpType::kDrawOval;
+  static constexpr bool kIsDrawOp = true;
+  DrawOvalOp(const SkRect& oval, const PaintFlags& paint_flags)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags), oval(oval) {}
   static void RasterWithFlags(const DrawOvalOp* op,
                               const PaintFlags* flags,
                               SkCanvas* canvas,
                               const PlaybackParams& params);
-  bool IsValid() const {
-    // Reproduce SkRRect::isValid without converting.
-    return flags.IsValid() && oval.isFinite() && oval.isSorted();
-  }
+  bool IsValid() const { return flags.IsValid() && oval.isFinite(); }
   bool EqualsForTesting(const DrawOvalOp& other) const;
   HAS_SERIALIZATION_FUNCTIONS();
 
   SkRect oval;
 
  private:
-  DrawOvalOp() : PaintOpWithFlags(kType) {}
+  DrawOvalOp() : PaintOpWithFlagsBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawPathOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawPathOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawPath;
+  static constexpr PaintOpType kType = PaintOpType::kDrawPath;
   static constexpr bool kIsDrawOp = true;
   DrawPathOp(const SkPath& path,
-             const PaintFlags& flags,
+             const PaintFlags& paint_flags,
              UsePaintCache use_paint_cache = UsePaintCache::kEnabled)
-      : PaintOpWithFlags(kType, flags),
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags),
         path(path),
-        sk_path_fill_type(static_cast<uint8_t>(path.getFillType())),
+        sk_path_fill_type(path.getFillType()),
         use_cache(use_paint_cache) {}
   static void RasterWithFlags(const DrawPathOp* op,
                               const PaintFlags* flags,
@@ -625,24 +802,24 @@ class CC_PAINT_EXPORT DrawPathOp final : public PaintOpWithFlags {
   int CountSlowPaths() const;
   HAS_SERIALIZATION_FUNCTIONS();
 
-  ThreadsafePath path;
+  SkPath path;
 
   // Changing the fill type on an SkPath does not change the
   // generation id. This can lead to caching issues so we explicitly
   // serialize/deserialize this value and set it on the SkPath before handing it
   // to Skia.
-  uint8_t sk_path_fill_type;
+  SkPathFillType sk_path_fill_type;
   UsePaintCache use_cache = UsePaintCache::kDisabled;
 
  private:
-  DrawPathOp() : PaintOpWithFlags(kType) {}
+  DrawPathOp() : PaintOpWithFlagsBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawRecordOp final : public PaintOp {
+class CC_PAINT_EXPORT DrawRecordOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawRecord;
+  static constexpr PaintOpType kType = PaintOpType::kDrawRecord;
   static constexpr bool kIsDrawOp = true;
-  explicit DrawRecordOp(PaintRecord record);
+  explicit DrawRecordOp(PaintRecord record, bool local_ctm = true);
   ~DrawRecordOp();
   static void Raster(const DrawRecordOp* op,
                      SkCanvas* canvas,
@@ -651,7 +828,7 @@ class CC_PAINT_EXPORT DrawRecordOp final : public PaintOp {
   bool EqualsForTesting(const DrawRecordOp& other) const;
   size_t AdditionalBytesUsed() const;
   size_t AdditionalOpCount() const;
-  bool HasDiscardableImages() const;
+  bool HasDiscardableImages(gfx::ContentColorUsage* content_color_usage) const;
   int CountSlowPaths() const;
   bool HasNonAAPaint() const;
   bool HasDrawTextOps() const;
@@ -661,14 +838,24 @@ class CC_PAINT_EXPORT DrawRecordOp final : public PaintOp {
   HAS_SERIALIZATION_FUNCTIONS();
 
   PaintRecord record;
+
+  // If `local_ctm` is `true`, the transform operations in `record` are local to
+  // that recording: any transform changes done by `record` are undone before
+  // this `DrawRecordOp` completes and `SetMatrixOp` acts relatively to the
+  // transform set on the destination record (to "anchor" `SetMatrixOp` and
+  // other multiplicative matrix transforms on the same base transform). If
+  // `local_ctm` is `false`, matrix changes done by `record` act as if part of
+  // the parent record: transform changes are preserved after this
+  // `DrawRecordOp` is rasterized and `SetMatrixOp` ignores parent transforms.
+  bool local_ctm = true;
 };
 
-class CC_PAINT_EXPORT DrawRectOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawRectOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawRect;
+  static constexpr PaintOpType kType = PaintOpType::kDrawRect;
   static constexpr bool kIsDrawOp = true;
-  DrawRectOp(const SkRect& rect, const PaintFlags& flags)
-      : PaintOpWithFlags(kType, flags), rect(rect) {}
+  DrawRectOp(const SkRect& rect, const PaintFlags& paint_flags)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags), rect(rect) {}
   static void RasterWithFlags(const DrawRectOp* op,
                               const PaintFlags* flags,
                               SkCanvas* canvas,
@@ -680,15 +867,15 @@ class CC_PAINT_EXPORT DrawRectOp final : public PaintOpWithFlags {
   SkRect rect;
 
  private:
-  DrawRectOp() : PaintOpWithFlags(kType) {}
+  DrawRectOp() : PaintOpWithFlagsBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawRRectOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawRRectOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawRRect;
+  static constexpr PaintOpType kType = PaintOpType::kDrawRRect;
   static constexpr bool kIsDrawOp = true;
-  DrawRRectOp(const SkRRect& rrect, const PaintFlags& flags)
-      : PaintOpWithFlags(kType, flags), rrect(rrect) {}
+  DrawRRectOp(const SkRRect& rrect, const PaintFlags& paint_flags)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags), rrect(rrect) {}
   static void RasterWithFlags(const DrawRRectOp* op,
                               const PaintFlags* flags,
                               SkCanvas* canvas,
@@ -700,12 +887,81 @@ class CC_PAINT_EXPORT DrawRRectOp final : public PaintOpWithFlags {
   SkRRect rrect;
 
  private:
-  DrawRRectOp() : PaintOpWithFlags(kType) {}
+  DrawRRectOp() : PaintOpWithFlagsBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT DrawSkottieOp final : public PaintOp {
+// This is used to draw non-composited scrolling contents. The display item
+// list should contain painted results beyond the current scroll port like
+// composited scrolling contents. During rasterization or serialization, the
+// current clip of the canvas and the current scroll offset and will be applied
+// to the display item list. This PaintOp doesn't apply the overflow clip of
+// the scroller, but the client should emit ClipRectOp.
+class CC_PAINT_EXPORT DrawScrollingContentsOp final
+    : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawSkottie;
+  static constexpr PaintOpType kType = PaintOpType::kDrawScrollingContents;
+  static constexpr bool kIsDrawOp = true;
+  DrawScrollingContentsOp(ElementId scroll_element_id,
+                          scoped_refptr<DisplayItemList> display_item_list);
+  ~DrawScrollingContentsOp();
+  static void Raster(const DrawScrollingContentsOp* op,
+                     SkCanvas* canvas,
+                     const PlaybackParams& params);
+  bool IsValid() const { return scroll_element_id && display_item_list; }
+  bool EqualsForTesting(const DrawScrollingContentsOp& other) const;
+  size_t AdditionalBytesUsed() const;
+  size_t AdditionalOpCount() const;
+  bool HasDiscardableImages(gfx::ContentColorUsage* content_color_usage) const;
+  int CountSlowPaths() const;
+  bool HasNonAAPaint() const;
+  bool HasDrawTextOps() const;
+  bool HasSaveLayerOps() const;
+  bool HasSaveLayerAlphaOps() const;
+  bool HasEffectsPreventingLCDTextForSaveLayerAlpha() const;
+  HAS_SERIALIZATION_FUNCTIONS();
+
+  ElementId scroll_element_id;
+  scoped_refptr<DisplayItemList> display_item_list;
+};
+
+class CC_PAINT_EXPORT DrawVerticesOp final
+    : public PaintOpWithFlagsBaseInternal {
+ public:
+  static constexpr PaintOpType kType = PaintOpType::kDrawVertices;
+  static constexpr bool kIsDrawOp = true;
+
+  DrawVerticesOp(scoped_refptr<RefCountedBuffer<SkPoint>> vertices,
+                 scoped_refptr<RefCountedBuffer<SkPoint>> uvs,
+                 scoped_refptr<RefCountedBuffer<uint16_t>> indices,
+                 const PaintFlags&);
+  ~DrawVerticesOp();
+
+  static void RasterWithFlags(const DrawVerticesOp* op,
+                              const PaintFlags* flags,
+                              SkCanvas* canvas,
+                              const PlaybackParams& params);
+
+  bool IsValid() const {
+    return flags.IsValid() && vertices && uvs && indices &&
+           vertices->data().size() > 0 &&
+           vertices->data().size() == uvs->data().size() &&
+           indices->data().size() > 0 && (indices->data().size() % 3) == 0;
+  }
+
+  bool EqualsForTesting(const DrawVerticesOp& other) const;
+  HAS_SERIALIZATION_FUNCTIONS();
+
+  scoped_refptr<RefCountedBuffer<SkPoint>> vertices;
+  scoped_refptr<RefCountedBuffer<SkPoint>> uvs;
+  scoped_refptr<RefCountedBuffer<uint16_t>> indices;
+
+ private:
+  DrawVerticesOp();
+};
+
+class CC_PAINT_EXPORT DrawSkottieOp final : public PaintOpBaseInternal {
+ public:
+  static constexpr PaintOpType kType = PaintOpType::kDrawSkottie;
   static constexpr bool kIsDrawOp = true;
   DrawSkottieOp(scoped_refptr<SkottieWrapper> skottie,
                 SkRect dst,
@@ -722,7 +978,7 @@ class CC_PAINT_EXPORT DrawSkottieOp final : public PaintOp {
            t <= 1.f;
   }
   bool EqualsForTesting(const DrawSkottieOp& other) const;
-  bool HasDiscardableImages() const;
+  bool HasDiscardableImages(gfx::ContentColorUsage* content_color_usage) const;
   HAS_SERIALIZATION_FUNCTIONS();
 
   scoped_refptr<SkottieWrapper> skottie;
@@ -750,17 +1006,18 @@ class CC_PAINT_EXPORT DrawSkottieOp final : public PaintOp {
   DrawSkottieOp();
 };
 
-class CC_PAINT_EXPORT DrawSlugOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawSlugOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawSlug;
+  static constexpr PaintOpType kType = PaintOpType::kDrawSlug;
   static constexpr bool kIsDrawOp = true;
-  DrawSlugOp(sk_sp<GrSlug> slug, const PaintFlags& flags);
+  DrawSlugOp(sk_sp<sktext::gpu::Slug> slug, const PaintFlags& paint_flags);
   ~DrawSlugOp();
-  static void SerializeSlugs(const sk_sp<GrSlug>& slug,
-                             const std::vector<sk_sp<GrSlug>>& extra_slugs,
-                             PaintOpWriter& writer,
-                             const PaintFlags* flags_to_serialize,
-                             const SkM44& current_ctm);
+  static void SerializeSlugs(
+      const sk_sp<sktext::gpu::Slug>& slug,
+      const std::vector<sk_sp<sktext::gpu::Slug>>& extra_slugs,
+      PaintOpWriter& writer,
+      const PaintFlags* flags_to_serialize,
+      const SkM44& current_ctm);
   static void RasterWithFlags(const DrawSlugOp* op,
                               const PaintFlags* flags,
                               SkCanvas* canvas,
@@ -770,26 +1027,27 @@ class CC_PAINT_EXPORT DrawSlugOp final : public PaintOpWithFlags {
   bool EqualsForTesting(const DrawSlugOp& other) const;
   HAS_SERIALIZATION_FUNCTIONS();
 
-  sk_sp<GrSlug> slug;
-  std::vector<sk_sp<GrSlug>> extra_slugs;
+  sk_sp<sktext::gpu::Slug> slug;
+  std::vector<sk_sp<sktext::gpu::Slug>> extra_slugs;
 
  private:
   DrawSlugOp();
 };
 
-class CC_PAINT_EXPORT DrawTextBlobOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT DrawTextBlobOp final
+    : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::DrawTextBlob;
+  static constexpr PaintOpType kType = PaintOpType::kDrawTextBlob;
   static constexpr bool kIsDrawOp = true;
   DrawTextBlobOp(sk_sp<SkTextBlob> blob,
                  SkScalar x,
                  SkScalar y,
-                 const PaintFlags& flags);
+                 const PaintFlags& paint_flags);
   DrawTextBlobOp(sk_sp<SkTextBlob> blob,
                  SkScalar x,
                  SkScalar y,
                  NodeId node_id,
-                 const PaintFlags& flags);
+                 const PaintFlags& paint_flags);
   ~DrawTextBlobOp();
   static void RasterWithFlags(const DrawTextBlobOp* op,
                               const PaintFlags* flags,
@@ -801,8 +1059,6 @@ class CC_PAINT_EXPORT DrawTextBlobOp final : public PaintOpWithFlags {
   HAS_SERIALIZATION_FUNCTIONS();
 
   sk_sp<SkTextBlob> blob;
-  mutable sk_sp<GrSlug> slug;
-  mutable std::vector<sk_sp<GrSlug>> extra_slugs;
   SkScalar x;
   SkScalar y;
   // This field isn't serialized.
@@ -812,10 +1068,39 @@ class CC_PAINT_EXPORT DrawTextBlobOp final : public PaintOpWithFlags {
   DrawTextBlobOp();
 };
 
-class CC_PAINT_EXPORT NoopOp final : public PaintOp {
+class CC_PAINT_EXPORT DrawTextSlugsOp final
+    : public PaintOpWithFlagsBaseInternal {
+  STACK_ALLOCATED();
+
  public:
-  static constexpr PaintOpType kType = PaintOpType::Noop;
-  NoopOp() : PaintOp(kType) {}
+  static constexpr PaintOpType kType = PaintOpType::kDrawTextSlugs;
+  static constexpr bool kIsDrawOp = true;
+  DrawTextSlugsOp() = delete;
+  explicit DrawTextSlugsOp(const DrawTextBlobOp& op);
+  ~DrawTextSlugsOp();
+  static void RasterWithFlags(const DrawTextSlugsOp* op,
+                              const PaintFlags* flags,
+                              SkCanvas* canvas,
+                              const PlaybackParams& params);
+  bool IsValid() const { return flags.IsValid(); }
+  bool HasDrawTextOps() const { return true; }
+  bool EqualsForTesting(const DrawTextSlugsOp& other) const;
+  HAS_SERIALIZATION_FUNCTIONS();
+
+  // These fields copied from the DrawTextBlobOp given to the constructor.
+  sk_sp<SkTextBlob> blob;
+  SkScalar x;
+  SkScalar y;
+  NodeId node_id = kInvalidNodeId;
+  // These fields used only during serialization.
+  mutable sk_sp<sktext::gpu::Slug> slug;
+  mutable std::vector<sk_sp<sktext::gpu::Slug>> extra_slugs;
+};
+
+class CC_PAINT_EXPORT NoopOp final : public PaintOpBaseInternal {
+ public:
+  static constexpr PaintOpType kType = PaintOpType::kNoop;
+  NoopOp() : PaintOpBaseInternal(kType) {}
   static void Raster(const NoopOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params) {}
@@ -824,10 +1109,10 @@ class CC_PAINT_EXPORT NoopOp final : public PaintOp {
   HAS_SERIALIZATION_FUNCTIONS();
 };
 
-class CC_PAINT_EXPORT RestoreOp final : public PaintOp {
+class CC_PAINT_EXPORT RestoreOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::Restore;
-  RestoreOp() : PaintOp(kType) {}
+  static constexpr PaintOpType kType = PaintOpType::kRestore;
+  RestoreOp() : PaintOpBaseInternal(kType) {}
   static void Raster(const RestoreOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -836,10 +1121,11 @@ class CC_PAINT_EXPORT RestoreOp final : public PaintOp {
   HAS_SERIALIZATION_FUNCTIONS();
 };
 
-class CC_PAINT_EXPORT RotateOp final : public PaintOp {
+class CC_PAINT_EXPORT RotateOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::Rotate;
-  explicit RotateOp(SkScalar degrees) : PaintOp(kType), degrees(degrees) {}
+  static constexpr PaintOpType kType = PaintOpType::kRotate;
+  explicit RotateOp(SkScalar degrees)
+      : PaintOpBaseInternal(kType), degrees(degrees) {}
   static void Raster(const RotateOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -850,13 +1136,13 @@ class CC_PAINT_EXPORT RotateOp final : public PaintOp {
   SkScalar degrees;
 
  private:
-  RotateOp() : PaintOp(kType) {}
+  RotateOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT SaveOp final : public PaintOp {
+class CC_PAINT_EXPORT SaveOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::Save;
-  SaveOp() : PaintOp(kType) {}
+  static constexpr PaintOpType kType = PaintOpType::kSave;
+  SaveOp() : PaintOpBaseInternal(kType) {}
   static void Raster(const SaveOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -865,13 +1151,13 @@ class CC_PAINT_EXPORT SaveOp final : public PaintOp {
   HAS_SERIALIZATION_FUNCTIONS();
 };
 
-class CC_PAINT_EXPORT SaveLayerOp final : public PaintOpWithFlags {
+class CC_PAINT_EXPORT SaveLayerOp final : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::SaveLayer;
-  explicit SaveLayerOp(const PaintFlags& flags)
-      : PaintOpWithFlags(kType, flags), bounds(kUnsetRect) {}
-  SaveLayerOp(const SkRect& bounds, const PaintFlags& flags)
-      : PaintOpWithFlags(kType, flags), bounds(bounds) {}
+  static constexpr PaintOpType kType = PaintOpType::kSaveLayer;
+  explicit SaveLayerOp(const PaintFlags& paint_flags)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags), bounds(kUnsetRect) {}
+  SaveLayerOp(const SkRect& bounds, const PaintFlags& paint_flags)
+      : PaintOpWithFlagsBaseInternal(kType, paint_flags), bounds(bounds) {}
   static void RasterWithFlags(const SaveLayerOp* op,
                               const PaintFlags* flags,
                               SkCanvas* canvas,
@@ -881,7 +1167,7 @@ class CC_PAINT_EXPORT SaveLayerOp final : public PaintOpWithFlags {
   bool HasNonAAPaint() const { return false; }
   // We simply assume any effects (or even no effects -- just starting an empty
   // transparent layer) would break LCD text or be broken by the flags for
-  // SaveLayerAlpha to preserve LCD text.
+  // kSaveLayerAlpha to preserve LCD text.
   bool HasEffectsPreventingLCDTextForSaveLayerAlpha() const { return true; }
   bool HasSaveLayerOps() const { return true; }
   HAS_SERIALIZATION_FUNCTIONS();
@@ -889,18 +1175,20 @@ class CC_PAINT_EXPORT SaveLayerOp final : public PaintOpWithFlags {
   SkRect bounds;
 
  private:
-  SaveLayerOp() : PaintOpWithFlags(kType) {}
+  SaveLayerOp() : PaintOpWithFlagsBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT SaveLayerAlphaOp final : public PaintOp {
+class CC_PAINT_EXPORT SaveLayerAlphaOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::SaveLayerAlpha;
-  template <class F, class = std::enable_if_t<std::is_same_v<F, float>>>
+  static constexpr PaintOpType kType = PaintOpType::kSaveLayerAlpha;
+  template <class F>
+    requires(std::is_same_v<F, float>)
   explicit SaveLayerAlphaOp(F alpha)
-      : PaintOp(kType), bounds(kUnsetRect), alpha(alpha) {}
-  template <class F, class = std::enable_if_t<std::is_same_v<F, float>>>
+      : PaintOpBaseInternal(kType), bounds(kUnsetRect), alpha(alpha) {}
+  template <class F>
+    requires(std::is_same_v<F, float>)
   SaveLayerAlphaOp(const SkRect& bounds, F alpha)
-      : PaintOp(kType), bounds(bounds), alpha(alpha) {}
+      : PaintOpBaseInternal(kType), bounds(bounds), alpha(alpha) {}
   static void Raster(const SaveLayerAlphaOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -914,13 +1202,47 @@ class CC_PAINT_EXPORT SaveLayerAlphaOp final : public PaintOp {
   float alpha;
 
  private:
-  SaveLayerAlphaOp() : PaintOp(kType) {}
+  SaveLayerAlphaOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT ScaleOp final : public PaintOp {
+class CC_PAINT_EXPORT SaveLayerFiltersOp final
+    : public PaintOpWithFlagsBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::Scale;
-  ScaleOp(SkScalar sx, SkScalar sy) : PaintOp(kType), sx(sx), sy(sy) {}
+  static constexpr PaintOpType kType = PaintOpType::kSaveLayerFilters;
+  static constexpr int kMaxFiltersPerLayer = SkCanvas::kMaxFiltersPerLayer;
+  explicit SaveLayerFiltersOp(base::span<const sk_sp<PaintFilter>> filters,
+                              const sk_sp<PaintFilter> backdrop_filter,
+                              const PaintFlags& paint_flags);
+  explicit SaveLayerFiltersOp(const SkRect& bounds,
+                              base::span<const sk_sp<PaintFilter>> filters,
+                              const sk_sp<PaintFilter> backdrop_filter,
+                              const PaintFlags& paint_flags);
+  ~SaveLayerFiltersOp();
+  static void RasterWithFlags(const SaveLayerFiltersOp* op,
+                              const PaintFlags* flags,
+                              SkCanvas* canvas,
+                              const PlaybackParams& params);
+  bool IsValid() const {
+    return flags.IsValid() && (!flags.getImageFilter() || filters.empty()) &&
+           filters.size() <= kMaxFiltersPerLayer;
+  }
+  bool EqualsForTesting(const SaveLayerFiltersOp& other) const;
+  bool HasSaveLayerOps() const { return true; }
+  HAS_SERIALIZATION_FUNCTIONS();
+
+  SkRect bounds;
+  std::vector<sk_sp<PaintFilter>> filters;
+  sk_sp<PaintFilter> backdrop_filter;
+
+ private:
+  SaveLayerFiltersOp();
+};
+
+class CC_PAINT_EXPORT ScaleOp final : public PaintOpBaseInternal {
+ public:
+  static constexpr PaintOpType kType = PaintOpType::kScale;
+  ScaleOp(SkScalar sx, SkScalar sy)
+      : PaintOpBaseInternal(kType), sx(sx), sy(sy) {}
   static void Raster(const ScaleOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -932,19 +1254,20 @@ class CC_PAINT_EXPORT ScaleOp final : public PaintOp {
   SkScalar sy;
 
  private:
-  ScaleOp() : PaintOp(kType) {}
+  ScaleOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT SetMatrixOp final : public PaintOp {
+class CC_PAINT_EXPORT SetMatrixOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::SetMatrix;
-  explicit SetMatrixOp(const SkM44& matrix) : PaintOp(kType), matrix(matrix) {}
+  static constexpr PaintOpType kType = PaintOpType::kSetMatrix;
+  explicit SetMatrixOp(const SkM44& matrix)
+      : PaintOpBaseInternal(kType), matrix(matrix) {}
   // This is the only op that needs the original ctm of the SkCanvas
-  // used for raster (since SetMatrix is relative to the recording origin and
+  // used for raster (since kSetMatrix is relative to the recording origin and
   // shouldn't clobber the SkCanvas raster origin).
   //
   // TODO(enne): Find some cleaner way to do this, possibly by making
-  // all SetMatrix calls Concat??
+  // all kSetMatrix calls kConcat??
   static void Raster(const SetMatrixOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -955,13 +1278,14 @@ class CC_PAINT_EXPORT SetMatrixOp final : public PaintOp {
   SkM44 matrix;
 
  private:
-  SetMatrixOp() : PaintOp(kType) {}
+  SetMatrixOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT SetNodeIdOp final : public PaintOp {
+class CC_PAINT_EXPORT SetNodeIdOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::SetNodeId;
-  explicit SetNodeIdOp(int node_id) : PaintOp(kType), node_id(node_id) {}
+  static constexpr PaintOpType kType = PaintOpType::kSetNodeId;
+  explicit SetNodeIdOp(int node_id)
+      : PaintOpBaseInternal(kType), node_id(node_id) {}
   static void Raster(const SetNodeIdOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -972,13 +1296,14 @@ class CC_PAINT_EXPORT SetNodeIdOp final : public PaintOp {
   int node_id;
 
  private:
-  SetNodeIdOp() : PaintOp(kType) {}
+  SetNodeIdOp() : PaintOpBaseInternal(kType) {}
 };
 
-class CC_PAINT_EXPORT TranslateOp final : public PaintOp {
+class CC_PAINT_EXPORT TranslateOp final : public PaintOpBaseInternal {
  public:
-  static constexpr PaintOpType kType = PaintOpType::Translate;
-  TranslateOp(SkScalar dx, SkScalar dy) : PaintOp(kType), dx(dx), dy(dy) {}
+  static constexpr PaintOpType kType = PaintOpType::kTranslate;
+  TranslateOp(SkScalar dx, SkScalar dy)
+      : PaintOpBaseInternal(kType), dx(dx), dy(dy) {}
   static void Raster(const TranslateOp* op,
                      SkCanvas* canvas,
                      const PlaybackParams& params);
@@ -990,7 +1315,7 @@ class CC_PAINT_EXPORT TranslateOp final : public PaintOp {
   SkScalar dy;
 
  private:
-  TranslateOp() : PaintOp(kType) {}
+  TranslateOp() : PaintOpBaseInternal(kType) {}
 };
 
 #undef HAS_SERIALIZATION_FUNCTIONS
@@ -1006,6 +1331,13 @@ using LargestPaintOp =
 // kLargestPaintOpAlignedSize instead of sizeof(LargestPaintOp).
 inline constexpr size_t kLargestPaintOpAlignedSize =
     PaintOpBuffer::ComputeOpAlignedSize<LargestPaintOp>();
+
+// This is declared here for use in gtest-based unit tests but is defined in
+// the //cc:test_support target. Depend on that to use this in your unit test.
+// This should not be used in production code.
+void PrintTo(const PaintOp& rect, std::ostream* os);
+
+CC_PAINT_EXPORT bool AreLiteOpsEnabled();
 
 }  // namespace cc
 

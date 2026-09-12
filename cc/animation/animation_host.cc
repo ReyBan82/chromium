@@ -9,11 +9,10 @@
 #include <utility>
 
 #include "base/auto_reset.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/memory/ptr_util.h"
-#include "base/ranges/algorithm.h"
+#include "base/memory/raw_ptr.h"
 #include "base/trace_event/trace_event.h"
 #include "base/trace_event/traced_value.h"
 #include "cc/animation/animation.h"
@@ -21,15 +20,16 @@
 #include "cc/animation/animation_events.h"
 #include "cc/animation/animation_id_provider.h"
 #include "cc/animation/animation_timeline.h"
+#include "cc/animation/animation_trigger.h"
 #include "cc/animation/element_animations.h"
 #include "cc/animation/keyframe_effect.h"
 #include "cc/animation/scroll_offset_animation_curve.h"
 #include "cc/animation/scroll_offset_animations.h"
 #include "cc/animation/scroll_offset_animations_impl.h"
 #include "cc/animation/scroll_timeline.h"
+#include "cc/animation/timeline_trigger.h"
 #include "cc/animation/worklet_animation.h"
 #include "ui/gfx/animation/keyframe/timing_function.h"
-#include "ui/gfx/geometry/box_f.h"
 #include "ui/gfx/geometry/vector2d_f.h"
 
 namespace cc {
@@ -53,7 +53,7 @@ AnimationWorkletMutationState ToAnimationWorkletMutationState(
 }  // namespace
 
 std::unique_ptr<AnimationHost> AnimationHost::CreateMainInstance() {
-  return base::WrapUnique(new AnimationHost(ThreadInstance::MAIN));
+  return base::WrapUnique(new AnimationHost(ThreadInstance::kMain));
 }
 
 std::unique_ptr<AnimationHost> AnimationHost::CreateForTesting(
@@ -68,13 +68,13 @@ AnimationHost::AnimationHost(ThreadInstance thread_instance)
 
 AnimationHost::~AnimationHost() {
   ClearMutators();
-  DCHECK(!mutator_host_client());
+  DCHECK(!mutator_host_delegate());
 }
 
 std::unique_ptr<MutatorHost> AnimationHost::CreateImplInstance() const {
-  DCHECK_EQ(thread_instance_, ThreadInstance::MAIN);
+  DCHECK_EQ(thread_instance_, ThreadInstance::kMain);
   auto mutator_host_impl =
-      base::WrapUnique<MutatorHost>(new AnimationHost(ThreadInstance::IMPL));
+      base::WrapUnique<MutatorHost>(new AnimationHost(ThreadInstance::kImpl));
   return mutator_host_impl;
 }
 
@@ -89,10 +89,32 @@ AnimationTimeline* AnimationHost::GetTimelineById(int timeline_id) {
                                                      : f->second.get();
 }
 
+scoped_refptr<AnimationTimeline> AnimationHost::GetScopedRefTimelineById(
+    int timeline_id) {
+  auto f = id_to_timeline_map_.Write(*this).find(timeline_id);
+  return f == id_to_timeline_map_.Write(*this).end() ? nullptr : f->second;
+}
+
+const AnimationTrigger* AnimationHost::GetTriggerById(int id) const {
+  const auto& it = id_to_trigger_map_.Read(*this).find(id);
+  return it == id_to_trigger_map_.Read(*this).end() ? nullptr
+                                                    : it->second.get();
+}
+
+AnimationTrigger* AnimationHost::GetTriggerById(int id) {
+  auto it = id_to_trigger_map_.Write(*this).find(id);
+  return it == id_to_trigger_map_.Write(*this).end() ? nullptr
+                                                     : it->second.get();
+}
+
 void AnimationHost::ClearMutators() {
   for (auto& kv : id_to_timeline_map_.Read(*this))
     EraseTimeline(kv.second);
   id_to_timeline_map_.Write(*this).clear();
+  for (auto& it : id_to_trigger_map_.Write(*this)) {
+    EraseTrigger(it.second);
+  }
+  id_to_trigger_map_.Write(*this).clear();
 }
 
 base::TimeDelta AnimationHost::MinimumTickInterval() const {
@@ -114,6 +136,10 @@ void AnimationHost::EraseTimeline(scoped_refptr<AnimationTimeline> timeline) {
   timeline->SetAnimationHost(nullptr);
 }
 
+void AnimationHost::EraseTrigger(scoped_refptr<AnimationTrigger> trigger) {
+  trigger->SetAnimationHost(nullptr);
+}
+
 void AnimationHost::AddAnimationTimeline(
     scoped_refptr<AnimationTimeline> timeline) {
   DCHECK(timeline->id());
@@ -123,12 +149,47 @@ void AnimationHost::AddAnimationTimeline(
   SetNeedsPushProperties();
 }
 
+void AnimationHost::AddTrigger(scoped_refptr<AnimationTrigger> trigger) {
+  trigger->SetAnimationHost(this);
+  id_to_trigger_map_.Write(*this).insert(
+      std::make_pair(trigger->id(), trigger));
+  SetNeedsPushProperties();
+}
+
 void AnimationHost::RemoveAnimationTimeline(
     scoped_refptr<AnimationTimeline> timeline) {
   DCHECK(timeline->id());
   EraseTimeline(timeline);
   id_to_timeline_map_.Write(*this).erase(timeline->id());
   SetNeedsPushProperties();
+}
+
+void AnimationHost::RemoveTrigger(scoped_refptr<AnimationTrigger> trigger) {
+  DCHECK(trigger->id());
+  EraseTrigger(trigger);
+  id_to_trigger_map_.Write(*this).erase(trigger->id());
+  SetNeedsPushProperties();
+}
+
+void AnimationHost::DetachAnimationTimeline(
+    scoped_refptr<AnimationTimeline> timeline) {
+  if (InProtectedSequence()) {
+    // Defer cleanup until post-commit.
+    detached_timeline_map_.Write(*this).insert(
+        std::make_pair(timeline->id(), timeline));
+  } else {
+    RemoveAnimationTimeline(timeline);
+  }
+}
+
+void AnimationHost::DetachTrigger(scoped_refptr<AnimationTrigger> trigger) {
+  if (InProtectedSequence()) {
+    // Defer cleanup until post-commit.
+    detached_trigger_map_.Write(*this).insert(
+        std::make_pair(trigger->id(), trigger));
+  } else {
+    RemoveTrigger(trigger);
+  }
 }
 
 void AnimationHost::SetHasCanvasInvalidation(bool has_canvas_invalidation) {
@@ -208,12 +269,12 @@ void AnimationHost::RegisterAnimationForElement(ElementId element_id,
     DCHECK(cc_keyframe_model->affects_active_elements() ||
            cc_keyframe_model->affects_pending_elements());
     DCHECK(!cc_keyframe_model->affects_active_elements() ||
-           mutator_host_client()->IsElementInPropertyTrees(
+           mutator_host_delegate()->IsElementInPropertyTrees(
                model_element_id, ElementListType::ACTIVE));
     // Test thread_instance_ because LayerTreeHost has no pending tree.
-    DCHECK(thread_instance_ == ThreadInstance::MAIN ||
+    DCHECK(thread_instance_ == ThreadInstance::kMain ||
            !cc_keyframe_model->affects_pending_elements() ||
-           mutator_host_client()->IsElementInPropertyTrees(
+           mutator_host_delegate()->IsElementInPropertyTrees(
                model_element_id, ElementListType::PENDING));
   }
 #endif
@@ -265,25 +326,26 @@ void AnimationHost::UpdateClientAnimationStateForElementAnimations(
     element_animations->UpdateClientAnimationState();
 }
 
-void AnimationHost::SetMutatorHostClient(MutatorHostClient* client) {
-  if (mutator_host_client() == client)
+void AnimationHost::SetMutatorHostDelegate(MutatorHostDelegate* delegate) {
+  if (mutator_host_delegate() == delegate) {
     return;
+  }
 
   WaitForProtectedSequenceCompletion();
 
-  if (!client) {
+  if (!delegate) {
     scroll_offset_animations_impl_.Write(*this).reset();
     scroll_offset_animations_.Write(*this).reset();
     ClearMutators();
   }
 
-  mutator_host_client_ = client;
+  mutator_host_delegate_ = delegate;
 
   // Creating ScrollOffsetAnimationsImpl calls back into this, triggering
-  // DCHECKs that are easier to verify once `mutator_host_client_` has been
+  // DCHECKs that are easier to verify once `mutator_host_delegate_` has been
   // set.
-  if (mutator_host_client() && !scroll_offset_animations_impl_.Read(*this)) {
-    if (thread_instance_ == ThreadInstance::IMPL) {
+  if (mutator_host_delegate() && !scroll_offset_animations_impl_.Read(*this)) {
+    if (thread_instance_ == ThreadInstance::kImpl) {
       scroll_offset_animations_impl_.Write(*this) =
           std::make_unique<ScrollOffsetAnimationsImpl>(this);
     } else {
@@ -292,46 +354,54 @@ void AnimationHost::SetMutatorHostClient(MutatorHostClient* client) {
     }
   }
 
-  if (mutator_host_client() && needs_push_properties_.Read(*this))
-    mutator_host_client()->SetMutatorsNeedCommit();
+  if (mutator_host_delegate() && needs_push_properties_.Read(*this)) {
+    mutator_host_delegate()->SetMutatorsNeedCommit();
+  }
 }
 
 bool AnimationHost::IsOwnerThread() const {
-  return !mutator_host_client_ || mutator_host_client_->IsOwnerThread();
+  return !mutator_host_delegate_ || mutator_host_delegate_->IsOwnerThread();
 }
 
 bool AnimationHost::InProtectedSequence() const {
-  return !mutator_host_client_ || mutator_host_client_->InProtectedSequence();
+  return !mutator_host_delegate_ ||
+         mutator_host_delegate_->InProtectedSequence();
 }
 
 void AnimationHost::WaitForProtectedSequenceCompletion() const {
-  if (mutator_host_client_)
-    mutator_host_client_->WaitForProtectedSequenceCompletion();
+  if (mutator_host_delegate_) {
+    mutator_host_delegate_->WaitForProtectedSequenceCompletion();
+  }
 }
 
 void AnimationHost::SetNeedsCommit() {
-  DCHECK(mutator_host_client());
+  DCHECK(mutator_host_delegate());
   DCHECK(IsOwnerThread());
   DCHECK(!InProtectedSequence());
-  mutator_host_client()->SetMutatorsNeedCommit();
+  mutator_host_delegate()->SetMutatorsNeedCommit();
   // TODO(loyso): Invalidate property trees only if really needed.
-  mutator_host_client()->SetMutatorsNeedRebuildPropertyTrees();
+  mutator_host_delegate()->SetMutatorsNeedRebuildPropertyTrees();
 }
 
 void AnimationHost::SetNeedsPushProperties() {
   if (needs_push_properties())
     return;
   needs_push_properties_.Write(*this) = true;
-  if (mutator_host_client())
-    mutator_host_client()->SetMutatorsNeedCommit();
+  if (mutator_host_delegate()) {
+    mutator_host_delegate()->SetMutatorsNeedCommit();
+  }
+}
+
+void AnimationHost::ResetNeedsPushProperties() {
+  needs_push_properties_.Write(*this) = false;
 }
 
 void AnimationHost::PushPropertiesTo(MutatorHost* mutator_host_impl,
                                      const PropertyTrees& property_trees) {
   auto* host_impl = static_cast<AnimationHost*>(mutator_host_impl);
 
-  base::AutoReset<const PropertyTrees*> properties(&property_trees_,
-                                                   &property_trees);
+  base::AutoReset<raw_ptr<const PropertyTrees>> properties(&property_trees_,
+                                                           &property_trees);
 
   // Update animation counts and whether raf was requested. These explicitly
   // do not request push properties and are pushed as part of the next commit
@@ -350,10 +420,39 @@ void AnimationHost::PushPropertiesTo(MutatorHost* mutator_host_impl,
     needs_push_properties_.Write(*this) = false;
     PushTimelinesToImplThread(host_impl);
     RemoveTimelinesFromImplThread(host_impl);
+    PushTriggersToImplThread(host_impl);
+    RemoveTriggersFromImplThread(host_impl);
     PushPropertiesToImplThread(host_impl);
-    // This is redundant but used in tests.
-    host_impl->needs_push_properties_.Write(*host_impl) = false;
+
+    // When using a display tree this ensures that any new animation updates are
+    // pushed to Viz on next display tree update. When not using display trees,
+    // setting this flag here is meaningless.
+    host_impl->needs_push_properties_.Write(*host_impl) = true;
   }
+}
+
+void AnimationHost::RemoveStaleTimelines() {
+  DCHECK(!InProtectedSequence());
+  if (detached_timeline_map_.Read(*this).empty()) {
+    return;
+  }
+
+  for (auto& kv : detached_timeline_map_.Read(*this)) {
+    RemoveAnimationTimeline(kv.second);
+  }
+  detached_timeline_map_.Write(*this).clear();
+}
+
+void AnimationHost::RemoveStaleTriggers() {
+  DCHECK(!InProtectedSequence());
+  if (detached_trigger_map_.Read(*this).empty()) {
+    return;
+  }
+
+  for (auto& kv : detached_trigger_map_.Read(*this)) {
+    RemoveTrigger(kv.second);
+  }
+  detached_trigger_map_.Write(*this).clear();
 }
 
 void AnimationHost::PushTimelinesToImplThread(AnimationHost* host_impl) const {
@@ -369,12 +468,27 @@ void AnimationHost::PushTimelinesToImplThread(AnimationHost* host_impl) const {
   }
 }
 
+void AnimationHost::PushTriggersToImplThread(AnimationHost* host_impl) const {
+  for (auto& it : id_to_trigger_map_.Read(*this)) {
+    const scoped_refptr<AnimationTrigger>& trigger = it.second;
+    if (host_impl->GetTriggerById(trigger->id())) {
+      continue;
+    }
+
+    auto to_add = trigger->CreateImplInstance(*host_impl);
+    host_impl->AddTrigger(std::move(to_add));
+  }
+}
+
 void AnimationHost::RemoveTimelinesFromImplThread(
     AnimationHost* host_impl) const {
   IdToTimelineMap& timelines_impl =
       host_impl->id_to_timeline_map_.Write(*host_impl);
 
   // Erase all the impl timelines which |this| doesn't have.
+  // TODO(crbug.com/459538550): It might be too early to remove a timeline here
+  // as the timeline might still be relevant to the active tree until the
+  // pending tree becomes active.
   for (auto it = timelines_impl.begin(); it != timelines_impl.end();) {
     auto& timeline_impl = it->second;
     if (timeline_impl->is_impl_only() || GetTimelineById(timeline_impl->id())) {
@@ -386,9 +500,22 @@ void AnimationHost::RemoveTimelinesFromImplThread(
   }
 }
 
+void AnimationHost::RemoveTriggersFromImplThread(
+    AnimationHost* host_impl) const {
+  IdToTriggerMap& impl_list = host_impl->id_to_trigger_map_.Write(*host_impl);
+  // TODO(crbug.com/459538550): It might be too early to remove a trigger here
+  // as the trigger might still be relevant to the active tree until the pending
+  // tree becomes active.
+  std::erase_if(
+      impl_list,
+      [&](const std::pair<int, scoped_refptr<AnimationTrigger>>& pair) {
+        return !GetTriggerById(pair.second->id());
+      });
+}
+
 void AnimationHost::PushPropertiesToImplThread(AnimationHost* host_impl) {
-  base::AutoReset<const PropertyTrees*> properties(&host_impl->property_trees_,
-                                                   property_trees_);
+  base::AutoReset<raw_ptr<const PropertyTrees>> properties(
+      &host_impl->property_trees_, property_trees_);
 
   // Sync all animations with impl thread to create ElementAnimations. This
   // needs to happen before the element animations are synced below.
@@ -409,15 +536,24 @@ void AnimationHost::PushPropertiesToImplThread(AnimationHost* host_impl) {
     }
   }
 
+  for (auto& kv : id_to_trigger_map_.Read(*this)) {
+    AnimationTrigger* trigger = kv.second.get();
+    if (AnimationTrigger* trigger_impl =
+            host_impl->GetTriggerById(trigger->id())) {
+      trigger->PushPropertiesTo(trigger_impl);
+    }
+  }
+
   // Update the impl-only scroll offset animations.
   scroll_offset_animations_.Write(*this)->PushPropertiesTo(
       host_impl->scroll_offset_animations_impl_.Write(*host_impl).get());
 
   // The pending info list is cleared in LayerTreeHostImpl::CommitComplete
   // and should be empty when pushing properties.
-  DCHECK(host_impl->pending_throughput_tracker_infos_.Read(*host_impl).empty());
-  host_impl->pending_throughput_tracker_infos_.Write(*host_impl) =
-      TakePendingThroughputTrackerInfos();
+  DCHECK(host_impl->pending_compositor_metrics_tracker_infos_.Read(*host_impl)
+             .empty());
+  host_impl->pending_compositor_metrics_tracker_infos_.Write(*host_impl) =
+      TakePendingCompositorMetricsTrackerInfos();
 }
 
 const ElementAnimations* AnimationHost::GetElementAnimationsForElementId(
@@ -457,7 +593,12 @@ void AnimationHost::SetScrollAnimationDurationForTesting(
 }
 
 bool AnimationHost::NeedsTickAnimations() const {
-  return !ticking_animations_.Read(*this).empty();
+  for (auto& animation : ticking_animations_.Read(*this)) {
+    if (!animation->keyframe_effect()->awaiting_deletion()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void AnimationHost::TickMutator(base::TimeTicks monotonic_time,
@@ -480,8 +621,8 @@ void AnimationHost::TickMutator(base::TimeTicks monotonic_time,
   auto on_done = base::BindOnce(
       [](base::WeakPtr<AnimationHost> animation_host, ElementListType tree_type,
          MutateStatus status) {
-        if (animation_host->mutator_host_client()) {
-          animation_host->mutator_host_client()
+        if (animation_host->mutator_host_delegate()) {
+          animation_host->mutator_host_delegate()
               ->NotifyAnimationWorkletStateChange(
                   ToAnimationWorkletMutationState(status), tree_type);
         }
@@ -492,7 +633,7 @@ void AnimationHost::TickMutator(base::TimeTicks monotonic_time,
       is_active_tree ? MutateQueuingStrategy::kQueueAndReplaceNormalPriority
                      : MutateQueuingStrategy::kQueueHighPriority;
   if (mutator->Mutate(std::move(state), queuing_strategy, std::move(on_done))) {
-    mutator_host_client()->NotifyAnimationWorkletStateChange(
+    mutator_host_delegate()->NotifyAnimationWorkletStateChange(
         AnimationWorkletMutationState::STARTED, tree_type);
   }
 }
@@ -514,9 +655,18 @@ bool AnimationHost::ActivateAnimations(MutatorEvents* mutator_events) {
   return true;
 }
 
-bool AnimationHost::TickAnimations(base::TimeTicks monotonic_time,
-                                   const ScrollTree& scroll_tree,
-                                   bool is_active_tree) {
+AnimationTickResult AnimationHost::TickAnimations(
+    base::TimeTicks monotonic_time,
+    const ScrollTree& scroll_tree,
+    bool is_active_tree,
+    MutatorEvents* mutator_events) {
+  if (is_active_tree) {
+    // We update triggers first since they affect whether an animation is in
+    // effect or not.
+    auto* animation_events = static_cast<AnimationEvents*>(mutator_events);
+    UpdateTriggers(scroll_tree, animation_events, monotonic_time);
+  }
+
   TRACE_EVENT0("cc", "AnimationHost::TickAnimations");
   // We tick animations in the following order:
   // 1. regular animations 2. mutator 3. worklet animations
@@ -527,20 +677,33 @@ bool AnimationHost::TickAnimations(base::TimeTicks monotonic_time,
   // mutator even if there are active scroll animations.
   // The ticking of worklet animations is deferred until draw to ensure that
   // mutator output takes effect in the same impl frame that it was mutated.
-  if (!NeedsTickAnimations())
-    return false;
+  if (is_active_tree && !NeedsTickAnimations()) {
+    return {};
+  }
 
-  TRACE_EVENT_INSTANT0("cc", "NeedsTickAnimations", TRACE_EVENT_SCOPE_THREAD);
+  TRACE_EVENT_INSTANT("cc", "NeedsTickAnimations");
 
-  bool animated = false;
+  AnimationTickResult result;
+
+  std::vector<AnimationTimeline*> scroll_timelines;
   for (auto& kv : id_to_timeline_map_.Read(*this)) {
     AnimationTimeline* timeline = kv.second.get();
     if (timeline->IsScrollTimeline()) {
-      animated |= timeline->TickScrollLinkedAnimations(
-          ticking_animations_.Read(*this), scroll_tree, is_active_tree);
+      scroll_timelines.push_back(timeline);
     } else {
-      animated |= timeline->TickTimeLinkedAnimations(
-          ticking_animations_.Read(*this), monotonic_time);
+      if (timeline->TickTimeLinkedAnimations(ticking_animations_.Read(*this),
+                                             monotonic_time, !is_active_tree)) {
+        result.animated = true;
+        result.needs_next_frame = true;
+      }
+    }
+  }
+  // Tick the scroll-linked animations last, since a smooth scroll (time-linked)
+  // might update the scroll offset.
+  for (auto* timeline : scroll_timelines) {
+    if (timeline->TickScrollLinkedAnimations(ticking_animations_.Read(*this),
+                                             scroll_tree, is_active_tree)) {
+      result.animated = true;
     }
   }
 
@@ -553,7 +716,7 @@ bool AnimationHost::TickAnimations(base::TimeTicks monotonic_time,
   // handle these mutations are performed on receiving the asynchronous results.
   TickMutator(monotonic_time, scroll_tree, is_active_tree);
 
-  return animated;
+  return result;
 }
 
 void AnimationHost::TickScrollAnimations(base::TimeTicks monotonic_time,
@@ -599,6 +762,7 @@ bool AnimationHost::UpdateAnimationState(bool start_ready_animations,
   auto* animation_events = static_cast<AnimationEvents*>(mutator_events);
 
   TRACE_EVENT0("cc", "AnimationHost::UpdateAnimationState");
+
   AnimationsList ticking_animations_copy = ticking_animations_.Read(*this);
   for (auto& it : ticking_animations_copy)
     it->UpdateState(start_ready_animations, animation_events);
@@ -630,18 +794,30 @@ std::unique_ptr<MutatorEvents> AnimationHost::CreateEvents() {
 
 void AnimationHost::SetAnimationEvents(
     std::unique_ptr<MutatorEvents> mutator_events) {
-  DCHECK_EQ(thread_instance_, ThreadInstance::MAIN);
+  DCHECK_EQ(thread_instance_, ThreadInstance::kMain);
   auto events =
       base::WrapUnique(static_cast<AnimationEvents*>(mutator_events.release()));
 
-  for (size_t event_index = 0; event_index < events->events_.size();
-       ++event_index) {
-    AnimationEvent& event = events->events_[event_index];
-    AnimationTimeline* timeline = GetTimelineById(event.uid.timeline_id);
-    if (timeline) {
-      Animation* animation = timeline->GetAnimationById(event.uid.animation_id);
-      if (animation)
-        animation->DispatchAndDelegateAnimationEvent(event);
+  for (const AnimationEvents::Event& event : events->events()) {
+    if (const auto* playback_event =
+            std::get_if<AnimationPlaybackEvent>(&event)) {
+      AnimationTimeline* timeline =
+          GetTimelineById(playback_event->uid.timeline_id);
+      if (timeline) {
+        Animation* animation =
+            timeline->GetAnimationById(playback_event->uid.animation_id);
+        if (animation) {
+          animation->DispatchAndDelegateAnimationEvent(*playback_event);
+        }
+      }
+    } else if (const auto* trigger_event =
+                   std::get_if<AnimationTriggerEvent>(&event)) {
+      AnimationTrigger* trigger = GetTriggerById(trigger_event->trigger_id);
+      if (trigger) {
+        trigger->DispatchAnimationTriggerEvent(*trigger_event);
+      }
+    } else {
+      NOTREACHED();  // Unhandled animation event type.
     }
   }
 }
@@ -649,18 +825,16 @@ void AnimationHost::SetAnimationEvents(
 bool AnimationHost::ScrollOffsetAnimationWasInterrupted(
     ElementId element_id) const {
   const auto* element_animations = GetElementAnimationsForElementId(element_id);
-  return element_animations
-             ? element_animations->ScrollOffsetAnimationWasInterrupted()
-             : false;
+  return element_animations &&
+         element_animations->ScrollOffsetAnimationWasInterrupted();
 }
 
 bool AnimationHost::IsAnimatingProperty(ElementId element_id,
                                         ElementListType list_type,
                                         TargetProperty::Type property) const {
   const auto* element_animations = GetElementAnimationsForElementId(element_id);
-  return element_animations ? element_animations->IsCurrentlyAnimatingProperty(
-                                  property, list_type)
-                            : false;
+  return element_animations &&
+         element_animations->IsCurrentlyAnimatingProperty(property, list_type);
 }
 
 bool AnimationHost::HasPotentiallyRunningAnimationForProperty(
@@ -668,29 +842,25 @@ bool AnimationHost::HasPotentiallyRunningAnimationForProperty(
     ElementListType list_type,
     TargetProperty::Type property) const {
   const auto* element_animations = GetElementAnimationsForElementId(element_id);
-  return element_animations
-             ? element_animations->IsPotentiallyAnimatingProperty(property,
-                                                                  list_type)
-             : false;
+  return element_animations &&
+         element_animations->IsPotentiallyAnimatingProperty(property,
+                                                            list_type);
 }
 
 bool AnimationHost::HasAnyAnimationTargetingProperty(
     ElementId element_id,
     TargetProperty::Type property) const {
   const auto* element_animations = GetElementAnimationsForElementId(element_id);
-  if (!element_animations)
-    return false;
-
-  return element_animations->HasAnyAnimationTargetingProperty(property,
+  return element_animations &&
+         element_animations->HasAnyAnimationTargetingProperty(property,
                                                               element_id);
 }
 
 bool AnimationHost::AnimationsPreserveAxisAlignment(
     ElementId element_id) const {
   const auto* element_animations = GetElementAnimationsForElementId(element_id);
-  return element_animations
-             ? element_animations->AnimationsPreserveAxisAlignment()
-             : true;
+  return !element_animations ||
+         element_animations->AnimationsPreserveAxisAlignment();
 }
 
 float AnimationHost::MaximumScale(ElementId element_id,
@@ -704,14 +874,13 @@ float AnimationHost::MaximumScale(ElementId element_id,
 
 bool AnimationHost::IsElementAnimating(ElementId element_id) const {
   const auto* element_animations = GetElementAnimationsForElementId(element_id);
-  return element_animations ? element_animations->HasAnyKeyframeModel() : false;
+  return element_animations && element_animations->HasAnyKeyframeModel();
 }
 
 bool AnimationHost::HasTickingKeyframeModelForTesting(
     ElementId element_id) const {
   const auto* element_animations = GetElementAnimationsForElementId(element_id);
-  return element_animations ? element_animations->HasTickingKeyframeEffect()
-                            : false;
+  return element_animations && element_animations->HasTickingKeyframeEffect();
 }
 
 void AnimationHost::ImplOnlyAutoScrollAnimationCreate(
@@ -738,15 +907,17 @@ void AnimationHost::ImplOnlyScrollAnimationCreate(
       animation_start_offset);
 }
 
-bool AnimationHost::ImplOnlyScrollAnimationUpdateTarget(
+std::optional<gfx::PointF> AnimationHost::ImplOnlyScrollAnimationUpdateTarget(
     const gfx::Vector2dF& scroll_delta,
     const gfx::PointF& max_scroll_offset,
     base::TimeTicks frame_monotonic_time,
-    base::TimeDelta delayed_by) {
+    base::TimeDelta delayed_by,
+    ElementId element_id) {
   DCHECK(scroll_offset_animations_impl_.Read(*this));
   return scroll_offset_animations_impl_.Write(*this)
       ->ScrollAnimationUpdateTarget(scroll_delta, max_scroll_offset,
-                                    frame_monotonic_time, delayed_by);
+                                    frame_monotonic_time, delayed_by,
+                                    element_id);
 }
 
 ScrollOffsetAnimations& AnimationHost::scroll_offset_animations() {
@@ -754,35 +925,52 @@ ScrollOffsetAnimations& AnimationHost::scroll_offset_animations() {
   return *scroll_offset_animations_.Write(*this).get();
 }
 
-void AnimationHost::ScrollAnimationAbort() {
+void AnimationHost::ScrollAnimationAbort(ElementId element_id) {
   DCHECK(scroll_offset_animations_impl_.Read(*this));
   scroll_offset_animations_impl_.Write(*this)->ScrollAnimationAbort(
-      false /* needs_completion */);
+      false /* needs_completion */, element_id);
 }
 
-ElementId AnimationHost::ImplOnlyScrollAnimatingElement() const {
-  DCHECK(scroll_offset_animations_impl_.Read(*this));
-  if (!scroll_offset_animations_impl_.Read(*this)->IsAnimating())
-    return ElementId();
-
-  return scroll_offset_animations_impl_.Read(*this)->GetElementId();
+bool AnimationHost::ElementHasImplOnlyScrollAnimation(
+    ElementId element_id) const {
+  return scroll_offset_animations_impl_.Read(*this)
+      ->ElementHasImplOnlyScrollAnimation(element_id);
 }
 
-void AnimationHost::ImplOnlyScrollAnimatingElementRemoved() {
+bool AnimationHost::HasImplOnlyScrollAnimatingElement() const {
+  return scroll_offset_animations_impl_.Read(*this)
+      ->HasImplOnlyScrollAnimatingElement();
+}
+
+bool AnimationHost::HasImplOnlyAutoScrollAnimatingElement() const {
+  return scroll_offset_animations_impl_.Read(*this)
+      ->HasImplOnlyAutoScrollAnimatingElement();
+}
+
+bool AnimationHost::IsElementInPropertyTrees(ElementId element_id,
+                                             bool commits_to_active) const {
+  return mutator_host_delegate()->IsElementInPropertyTrees(
+      element_id,
+      commits_to_active ? ElementListType::ACTIVE : ElementListType::PENDING);
+}
+
+void AnimationHost::HandleRemovedScrollAnimatingElements(
+    bool commits_to_active) {
   scroll_offset_animations_impl_.Write(*this)
-      ->AnimatingElementRemovedByCommit();
+      ->HandleRemovedScrollAnimatingElements(commits_to_active);
 }
 
 void AnimationHost::AddToTicking(scoped_refptr<Animation> animation) {
-  DCHECK(!base::Contains(ticking_animations_.Read(*this), animation));
+  DCHECK(!std::ranges::contains(ticking_animations_.Read(*this), animation));
   ticking_animations_.Write(*this).push_back(animation);
 }
 
 void AnimationHost::RemoveFromTicking(scoped_refptr<Animation> animation) {
   auto to_erase =
-      base::ranges::find(ticking_animations_.Write(*this), animation);
-  if (to_erase != ticking_animations_.Write(*this).end())
+      std::ranges::find(ticking_animations_.Write(*this), animation);
+  if (to_erase != ticking_animations_.Write(*this).end()) {
     ticking_animations_.Write(*this).erase(to_erase);
+  }
 }
 
 const AnimationHost::AnimationsList&
@@ -798,13 +986,13 @@ AnimationHost::element_animations_for_testing() const {
 void AnimationHost::SetLayerTreeMutator(
     std::unique_ptr<LayerTreeMutator> mutator) {
   mutator_.Write(*this) = std::move(mutator);
-  mutator_.Write(*this)->SetClient(this);
+  mutator_.Write(*this)->SetDelegate(this);
 }
 
 WorkletAnimation* AnimationHost::FindWorkletAnimation(WorkletAnimationId id) {
   // TODO(majidvp): Use a map to make lookup O(1)
   auto animation =
-      base::ranges::find_if(ticking_animations_.Read(*this), [id](auto& it) {
+      std::ranges::find_if(ticking_animations_.Read(*this), [id](auto& it) {
         return it->IsWorkletAnimation() &&
                ToWorkletAnimation(it.get())->worklet_animation_id() == id;
       });
@@ -864,25 +1052,47 @@ bool AnimationHost::HasNativePropertyAnimation() const {
   return false;
 }
 
-AnimationHost::PendingThroughputTrackerInfos
-AnimationHost::TakePendingThroughputTrackerInfos() {
-  PendingThroughputTrackerInfos infos =
-      std::move(pending_throughput_tracker_infos_.Write(*this));
-  pending_throughput_tracker_infos_.Write(*this) = {};
+AnimationHost::PendingCompositorMetricsTrackerInfos
+AnimationHost::TakePendingCompositorMetricsTrackerInfos() {
+  PendingCompositorMetricsTrackerInfos infos =
+      std::move(pending_compositor_metrics_tracker_infos_.Write(*this));
+  pending_compositor_metrics_tracker_infos_.Write(*this) = {};
   return infos;
 }
 
-void AnimationHost::StartThroughputTracking(
+void AnimationHost::StartCompositorMetricsTracking(
     TrackedAnimationSequenceId sequence_id) {
-  pending_throughput_tracker_infos_.Write(*this).push_back({sequence_id, true});
+  pending_compositor_metrics_tracker_infos_.Write(*this).push_back(
+      {sequence_id, true});
   SetNeedsPushProperties();
 }
 
-void AnimationHost::StopThroughputTracking(
-    TrackedAnimationSequenceId sequnece_id) {
-  pending_throughput_tracker_infos_.Write(*this).push_back(
-      {sequnece_id, false});
+void AnimationHost::StopCompositorMetricsTracking(
+    TrackedAnimationSequenceId sequence_id) {
+  pending_compositor_metrics_tracker_infos_.Write(*this).push_back(
+      {sequence_id, false});
   SetNeedsPushProperties();
+}
+
+bool AnimationHost::HasScrollLinkedAnimation(ElementId for_scroller) const {
+  for (auto& animation : ticking_animations_.Read(*this)) {
+    if (auto* timeline = animation->animation_timeline()) {
+      if (timeline->IsLinkedToScroller(for_scroller)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void AnimationHost::UpdateTriggers(const ScrollTree& scroll_tree,
+                                   AnimationEvents* events,
+                                   base::TimeTicks monotonic_time) const {
+  for (const auto& kv : id_to_trigger_map_.Read(*this)) {
+    AnimationTrigger* trigger = kv.second.get();
+    // NOTE(crbug.com/451238244): Only timeline triggers are supported for now.
+    ToTimelineTrigger(trigger)->Update(scroll_tree, events, monotonic_time);
+  }
 }
 
 }  // namespace cc

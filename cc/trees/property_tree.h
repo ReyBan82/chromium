@@ -7,17 +7,17 @@
 
 #include <stddef.h>
 
+#include <map>
 #include <memory>
+#include <optional>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/callback.h"
-#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "cc/base/synced_property.h"
@@ -25,15 +25,17 @@
 #include "cc/input/scroll_snap_data.h"
 #include "cc/paint/element_id.h"
 #include "cc/paint/filter_operations.h"
+#include "cc/paint/scroll_offset_map.h"
 #include "cc/trees/clip_node.h"
 #include "cc/trees/effect_node.h"
 #include "cc/trees/mutator_host.h"
+#include "cc/trees/property_ids.h"
 #include "cc/trees/scroll_node.h"
 #include "cc/trees/sticky_position_constraint.h"
 #include "cc/trees/transform_node.h"
 #include "components/viz/common/view_transition_element_resource_id.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/gfx/geometry/point_f.h"
+#include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/rect_f.h"
 #include "ui/gfx/geometry/transform.h"
 #include "ui/gfx/geometry/vector2d_f.h"
@@ -55,74 +57,81 @@ class RenderSurfaceImpl;
 struct RenderSurfacePropertyChangedFlags;
 struct CompositorCommitData;
 struct ViewportPropertyIds;
+enum class ScrollSourceType;
 
 using SyncedScrollOffset =
     SyncedProperty<AdditionGroup<gfx::PointF, gfx::Vector2dF>>;
 
 class PropertyTrees;
 
-// Property tree node starts from index 0. See equivalent constants in
-// property_tree_manager.cc for comments.
-enum {
-  kInvalidPropertyNodeId = -1,
-  kRootPropertyNodeId = 0,
-  kSecondaryRootPropertyNodeId = 1,
-  kContentsRootPropertyNodeId = kSecondaryRootPropertyNodeId,
-  kViewportPropertyNodeId = kSecondaryRootPropertyNodeId
-};
-
 template <typename T>
 class CC_EXPORT PropertyTree {
   friend class PropertyTrees;
 
  public:
+  using NodeType = T;
+
   PropertyTree(const PropertyTree& other) = delete;
   ~PropertyTree();
   PropertyTree<T>& operator=(const PropertyTree<T>&);
 
 #if DCHECK_IS_ON()
   bool operator==(const PropertyTree<T>& other) const;
+  std::string ToString() const;
 #endif
 
   int Insert(const T& tree_node, int parent_id);
 
-  T* Node(int i) {
+  // Removes the last `n` nodes from the tree.
+  void RemoveNodes(size_t n);
+
+  const T& Node(int i) const {
     CHECK_LT(i, static_cast<int>(nodes_.size()));
-    return i > kInvalidPropertyNodeId ? &nodes_[i] : nullptr;
-  }
-  const T* Node(int i) const {
-    CHECK_LT(i, static_cast<int>(nodes_.size()));
-    return i > kInvalidPropertyNodeId ? &nodes_[i] : nullptr;
+    CHECK_GT(i, kInvalidPropertyNodeId);
+    return nodes_[i];
   }
 
-  T* parent(const T* t) { return Node(t->parent_id); }
-  const T* parent(const T* t) const { return Node(t->parent_id); }
+  T& MutableNode(int i) {
+    CHECK_LT(i, static_cast<int>(nodes_.size()));
+    CHECK_GT(i, kInvalidPropertyNodeId);
+    return nodes_[i];
+  }
 
-  T* back() { return size() ? &nodes_.back() : nullptr; }
+  bool HasParent(const T& t) const {
+    return t.parent_id != kInvalidPropertyNodeId;
+  }
+
+  const T& parent(const T& t) const { return Node(t.parent_id); }
+
+  T& MutableParent(const T& t) { return MutableNode(t.parent_id); }
+
+  T* MutableBack() { return size() ? &nodes_.back() : nullptr; }
   const T* back() const { return size() ? &nodes_.back() : nullptr; }
 
   void SetElementIdForNodeId(int node_id, ElementId element_id) {
     element_id_to_node_index_[element_id] = node_id;
   }
-  T* FindNodeFromElementId(ElementId id) {
+  T* MutableFindNodeFromElementId(ElementId id) {
     auto iterator = element_id_to_node_index_.find(id);
-    if (iterator == element_id_to_node_index_.end())
+    if (iterator == element_id_to_node_index_.end() ||
+        iterator->second == kInvalidPropertyNodeId) {
       return nullptr;
-    return Node(iterator->second);
+    }
+    return &MutableNode(iterator->second);
   }
   const T* FindNodeFromElementId(ElementId id) const {
     auto iterator = element_id_to_node_index_.find(id);
-    if (iterator == element_id_to_node_index_.end())
+    if (iterator == element_id_to_node_index_.end() ||
+        iterator->second == kInvalidPropertyNodeId) {
       return nullptr;
-    return Node(iterator->second);
+    }
+    return &Node(iterator->second);
   }
 
   void clear();
   size_t size() const { return nodes_.size(); }
 
-  void set_needs_update(bool needs_update) {
-    needs_update_ = needs_update;
-  }
+  void set_needs_update(bool needs_update) { needs_update_ = needs_update; }
   bool needs_update() const { return needs_update_; }
 
   std::vector<T>& nodes() { return nodes_; }
@@ -142,13 +151,6 @@ class CC_EXPORT PropertyTree {
   explicit PropertyTree(PropertyTrees* property_trees);
   std::vector<T> nodes_;
 
- private:
-  void SetPropertyTrees(PropertyTrees* property_trees) {
-    property_trees_ = property_trees;
-  }
-
-  bool needs_update_;
-  raw_ptr<PropertyTrees> property_trees_;
   // This map allow mapping directly from a compositor element id to the
   // respective property node. This will eventually allow simplifying logic in
   // various places that today has to map from element id to layer id, and then
@@ -156,9 +158,19 @@ class CC_EXPORT PropertyTree {
   // pending the launch of BlinkGenPropertyTrees and reworking UI compositor
   // logic to produce cc property trees and these maps.
   base::flat_map<ElementId, int> element_id_to_node_index_;
+
+ private:
+  void SetPropertyTrees(PropertyTrees* property_trees) {
+    property_trees_ = property_trees;
+  }
+
+  bool needs_update_;
+  // RAW_PTR_EXCLUSION: Renderer performance: visible in sampling profiler
+  // stacks.
+  RAW_PTR_EXCLUSION PropertyTrees* property_trees_;
 };
 
-struct AnchorScrollContainersData;
+struct AnchorPositionScrollData;
 struct StickyPositionNodeData;
 
 class CC_EXPORT TransformTree final : public PropertyTree<TransformNode> {
@@ -178,22 +190,51 @@ class CC_EXPORT TransformTree final : public PropertyTree<TransformNode> {
 #endif
 
   int Insert(const TransformNode& tree_node, int parent_id);
+  void RemoveNodes(size_t n);
 
   void clear();
 
   bool OnTransformAnimated(ElementId element_id,
                            const gfx::Transform& transform);
   void ResetChangeTracking();
-  // Updates the parent, target, and screen space transforms and snapping.
+
+  // Updates the parent, target, and screen space transforms and snapping for
+  // all nodes.
+  void UpdateAllTransforms(const ViewportPropertyIds& viewport_property_ids);
+
+  // Copies the transform tree from `other` but preserves the existing nodes
+  // vector. This is useful for incremental updates where nodes are updated
+  // in-place.
+  void CopyFromPreservingNodes(const TransformTree& other);
+
+  // UpdateAllTransforms() may update the transform tree in multiple passes.
+  // This struct stores data collected and used across the passes.
+  struct UpdateTransformsData {
+    UpdateTransformsData();
+    ~UpdateTransformsData();
+    // A transform node may depend on a later transform node (e.g. an anchor
+    // position offset node references later adjustment container nodes). When
+    // the former is updated, the latter id will be stored in this set assuming
+    // the depended data is stale. When the latter node is updated, its id will
+    // be removed from this set if it hasn't changed anything affecting the
+    // depending node. If this set is not empty after a pass,
+    // UpdateAllTransforms() will run another pass.
+    base::flat_set<int> stale_forward_dependencies;
+  };
+
+  // Updates transforms for a node.
   void UpdateTransforms(
       int id,
-      const ViewportPropertyIds* viewport_property_ids = nullptr);
-  void UpdateTransformChanged(TransformNode* node, TransformNode* parent_node);
+      const ViewportPropertyIds* viewport_property_ids = nullptr,
+      UpdateTransformsData* update_data = nullptr);
+  void UpdateTransformChanged(TransformNode* node,
+                              const TransformNode& parent_node);
   void UpdateNodeAndAncestorsAreAnimatedOrInvertible(
       TransformNode* node,
-      TransformNode* parent_node);
-  void UpdateNodeOrAncestorsWillChangeTransform(TransformNode* node,
-                                                TransformNode* parent_node);
+      const TransformNode& parent_node);
+  void UpdateNodeOrAncestorsWillChangeTransform(
+      TransformNode* node,
+      const TransformNode& parent_node);
 
   void set_needs_update(bool needs_update);
 
@@ -209,8 +250,20 @@ class CC_EXPORT TransformTree final : public PropertyTree<TransformNode> {
   }
   float device_scale_factor() const { return device_scale_factor_; }
 
+  // Embedder magnification of an OOPIF. Like page_scale_factor for the main
+  // frame, it scales raster and non-root effect surfaces but not geometry.
+  void set_external_page_scale_factor(float external_page_scale_factor) {
+    external_page_scale_factor_ = external_page_scale_factor;
+  }
+  float external_page_scale_factor() const {
+    return external_page_scale_factor_;
+  }
+
   void SetRootScaleAndTransform(float device_scale_factor,
                                 const gfx::Transform& device_transform);
+  void set_device_transform_scale_factor(float device_transform_scale_factor) {
+    device_transform_scale_factor_ = device_transform_scale_factor;
+  }
   float device_transform_scale_factor() const {
     return device_transform_scale_factor_;
   }
@@ -224,6 +277,38 @@ class CC_EXPORT TransformTree final : public PropertyTree<TransformNode> {
   const std::vector<int>& nodes_affected_by_outer_viewport_bounds_delta()
       const {
     return nodes_affected_by_outer_viewport_bounds_delta_;
+  }
+  void set_nodes_affected_by_outer_viewport_bounds_delta(
+      std::vector<int> nodes) {
+    nodes_affected_by_outer_viewport_bounds_delta_ = std::move(nodes);
+  }
+
+  void NeedTransformUpdateForSafeAreaInsetBottom();
+
+  void AddNodeAffectedBySafeAreaInsetBottom(int node_id);
+
+  bool HasNodesAffectedBySafeAreaBottom() const;
+
+  const std::vector<int>& nodes_affected_by_safe_area_bottom() const {
+    return nodes_affected_by_safe_area_inset_bottom_;
+  }
+  void set_nodes_affected_by_safe_area_bottom(std::vector<int> nodes) {
+    nodes_affected_by_safe_area_inset_bottom_ = std::move(nodes);
+  }
+
+  const std::vector<StickyPositionNodeData>& sticky_position_data() const {
+    return sticky_position_data_;
+  }
+  std::vector<StickyPositionNodeData>& sticky_position_data() {
+    return sticky_position_data_;
+  }
+
+  const std::vector<AnchorPositionScrollData>& anchor_position_scroll_data()
+      const {
+    return anchor_position_scroll_data_;
+  }
+  std::vector<AnchorPositionScrollData>& anchor_position_scroll_data() {
+    return anchor_position_scroll_data_;
   }
 
   const gfx::Transform& FromScreen(int node_id) const;
@@ -242,7 +327,7 @@ class CC_EXPORT TransformTree final : public PropertyTree<TransformNode> {
     return cached_data_;
   }
 
-  void UndoOverscroll(const TransformNode* node,
+  void UndoOverscroll(const TransformNode& node,
                       gfx::Vector2dF& position_adjustment,
                       const ViewportPropertyIds* viewport_property_ids);
 
@@ -251,9 +336,9 @@ class CC_EXPORT TransformTree final : public PropertyTree<TransformNode> {
   }
   StickyPositionNodeData& EnsureStickyPositionData(int node_id);
 
-  const AnchorScrollContainersData* GetAnchorScrollContainersData(
+  const AnchorPositionScrollData* GetAnchorPositionScrollData(
       int node_id) const;
-  AnchorScrollContainersData& EnsureAnchorScrollContainersData(int node_id);
+  AnchorPositionScrollData& EnsureAnchorPositionScrollData(int node_id);
 
   // Computes the combined transform between |source_id| and |dest_id|. These
   // two nodes must be on the same ancestor chain.
@@ -268,25 +353,44 @@ class CC_EXPORT TransformTree final : public PropertyTree<TransformNode> {
                               int dest_id,
                               gfx::Transform* transform) const;
 
+  const base::flat_map<ElementId, gfx::Vector2dF>& drawn_elastic_overscroll()
+      const {
+    return drawn_elastic_overscroll_;
+  }
+  base::flat_map<ElementId, gfx::Vector2dF>& drawn_elastic_overscroll() {
+    return drawn_elastic_overscroll_;
+  }
+
+  bool SetDrawnElasticOverscroll(ElementId id,
+                                 const gfx::Vector2dF& elastic_overscroll);
+
+  gfx::Vector2dF GetDrawnElasticOverscroll(ElementId id) const;
+
+  std::pair<ElementId, gfx::Vector2dF>
+  FindDrawnElasticOverscrollFromTransformId(
+      int transform_id,
+      const ViewportPropertyIds* viewport_property_ids) const;
+
  private:
   // Returns true iff the node at |desc_id| is a descendant of the node at
   // |anc_id|.
   bool IsDescendant(int desc_id, int anc_id) const;
 
   StickyPositionNodeData* MutableStickyPositionData(int node_id);
-  gfx::Vector2dF StickyPositionOffset(TransformNode* node);
-  gfx::Vector2dF AnchorScrollOffset(TransformNode* node);
+  gfx::Vector2dF StickyPositionOffset(const TransformNode& node);
+  gfx::Vector2dF AnchorPositionOffset(const TransformNode& node,
+                                      int max_updated_node_id,
+                                      UpdateTransformsData* update_data,
+                                      base::flat_set<int>& visited);
   void UpdateLocalTransform(TransformNode* node,
-                            const ViewportPropertyIds* viewport_property_ids);
+                            const ViewportPropertyIds* viewport_property_ids,
+                            UpdateTransformsData* update_data);
   void UpdateScreenSpaceTransform(TransformNode* node,
-                                  TransformNode* parent_node);
+                                  const TransformNode& parent_node);
   void UpdateAnimationProperties(TransformNode* node,
-                                 TransformNode* parent_node);
+                                 const TransformNode& parent_node);
   void UndoSnapping(TransformNode* node);
   void UpdateSnapping(TransformNode* node);
-  void UpdateNodeAndAncestorsHaveIntegerTranslations(
-      TransformNode* node,
-      TransformNode* parent_node);
 
   // When to_screen transform has perspective, the transform node's sublayer
   // scale is calculated using page scale factor, device scale factor and the
@@ -294,34 +398,49 @@ class CC_EXPORT TransformTree final : public PropertyTree<TransformNode> {
   float page_scale_factor_;
   float device_scale_factor_;
   float device_transform_scale_factor_;
+  // Used to size an OOPIF's non-root effect surfaces to match its magnified
+  // raster density; see external_page_scale_factor().
+  float external_page_scale_factor_;
   std::vector<int> nodes_affected_by_outer_viewport_bounds_delta_;
+  std::vector<int> nodes_affected_by_safe_area_inset_bottom_;
   std::vector<TransformCachedNodeData> cached_data_;
   std::vector<StickyPositionNodeData> sticky_position_data_;
-  std::vector<AnchorScrollContainersData> anchor_scroll_containers_data_;
+  std::vector<AnchorPositionScrollData> anchor_position_scroll_data_;
+  // Elastic overscroll effect that has been visibly applied to this tree. May
+  // be out of date from the active `ScrollTree::elastic_overscroll()` which is
+  // the amount that the user has currently overscrolled.
+  base::flat_map<ElementId, gfx::Vector2dF> drawn_elastic_overscroll_;
 };
 
-struct CC_EXPORT AnchorScrollContainersData {
-  AnchorScrollContainersData();
-  ~AnchorScrollContainersData();
-  AnchorScrollContainersData(const AnchorScrollContainersData&);
+struct CC_EXPORT AnchorPositionScrollData {
+  AnchorPositionScrollData();
+  ~AnchorPositionScrollData();
+  AnchorPositionScrollData(const AnchorPositionScrollData&);
 
-  bool operator==(const AnchorScrollContainersData&) const;
-  bool operator!=(const AnchorScrollContainersData&) const;
+  bool operator==(const AnchorPositionScrollData&) const;
 
-  std::vector<ElementId> scroll_container_ids;
+  // See blink::AnchorPositionScrollData for the definition of adjustment
+  // containers.
+  std::vector<ElementId> adjustment_container_ids;
   gfx::Vector2d accumulated_scroll_origin;
+  bool needs_scroll_adjustment_in_x = false;
+  bool needs_scroll_adjustment_in_y = false;
 };
 
-struct StickyPositionNodeData {
-  int scroll_ancestor;
+struct CC_EXPORT StickyPositionNodeData {
+  int x_scroll_ancestor = kInvalidPropertyNodeId;
+  int y_scroll_ancestor = kInvalidPropertyNodeId;
+
   StickyPositionConstraint constraints;
 
   // In order to properly compute the sticky offset, we need to know if we have
   // any sticky ancestors both between ourselves and our containing block and
   // between our containing block and the viewport. These ancestors are then
-  // used to correct the constraining rect locations.
-  int nearest_node_shifting_sticky_box;
-  int nearest_node_shifting_containing_block;
+  // used to correct the constraining rect locations. Whether they contribute in
+  // a given axis is determined by whether that ancestor shares the same scroll
+  // ancestor in that axis.
+  int nearest_node_shifting_sticky_box = kInvalidPropertyNodeId;
+  int nearest_node_shifting_containing_block = kInvalidPropertyNodeId;
 
   // For performance we cache our accumulated sticky offset to allow descendant
   // sticky elements to offset their constraint rects. Because we can either
@@ -330,10 +449,9 @@ struct StickyPositionNodeData {
   gfx::Vector2dF total_sticky_box_sticky_offset;
   gfx::Vector2dF total_containing_block_sticky_offset;
 
-  StickyPositionNodeData()
-      : scroll_ancestor(kInvalidPropertyNodeId),
-        nearest_node_shifting_sticky_box(kInvalidPropertyNodeId),
-        nearest_node_shifting_containing_block(kInvalidPropertyNodeId) {}
+  StickyPositionNodeData() = default;
+
+  bool operator==(const StickyPositionNodeData&) const;
 };
 
 class CC_EXPORT ClipTree final : public PropertyTree<ClipNode> {
@@ -359,10 +477,11 @@ class CC_EXPORT EffectTree final : public PropertyTree<EffectNode> {
 #endif
 
   int Insert(const EffectNode& tree_node, int parent_id);
+  void RemoveNodes(size_t n);
 
   void clear();
 
-  float EffectiveOpacity(const EffectNode* node) const;
+  float EffectiveOpacity(const EffectNode& node) const;
 
   void UpdateSurfaceContentsScale(EffectNode* node);
 
@@ -373,11 +492,15 @@ class CC_EXPORT EffectTree final : public PropertyTree<EffectNode> {
 
   void UpdateEffects(int id);
 
-  void UpdateEffectChanged(EffectNode* node, EffectNode* parent_node);
+  void UpdateEffectChanged(EffectNode* node, const EffectNode* parent_node);
 
-  void UpdateHasFilters(EffectNode* node, EffectNode* parent_node);
+  void UpdateHasFilters(EffectNode* node, const EffectNode* parent_node);
+  void UpdateHasFastRoundedCorner(EffectNode* node,
+                                  const EffectNode* parent_node);
 
-  typedef std::unordered_multimap<int, std::unique_ptr<viz::CopyOutputRequest>>
+  // TODO(crbug.com/443024856): Revisit decision of 'unordered_multimap' to
+  // 'multimap'.
+  typedef std::multimap<int, std::unique_ptr<viz::CopyOutputRequest>>
       CopyRequestMap;
 
   void AddCopyRequest(int node_id,
@@ -399,6 +522,8 @@ class CC_EXPORT EffectTree final : public PropertyTree<EffectNode> {
   // surface.
   int LowestCommonAncestorWithRenderSurface(int id_1, int id_2) const;
 
+  size_t num_render_surfaces() const { return render_surfaces_.size(); }
+
   RenderSurfaceImpl* GetRenderSurface(int id) {
     return render_surfaces_[static_cast<size_t>(id)].get();
   }
@@ -406,10 +531,6 @@ class CC_EXPORT EffectTree final : public PropertyTree<EffectNode> {
   const RenderSurfaceImpl* GetRenderSurface(int id) const {
     return render_surfaces_[static_cast<size_t>(id)].get();
   }
-
-  void ClearTransitionPseudoElementEffectNodes();
-  void AddTransitionPseudoElementEffectId(int id);
-  std::vector<RenderSurfaceImpl*> GetTransitionPseudoElementRenderSurfaces();
 
   bool ContributesToDrawnSurface(int id) const;
 
@@ -431,6 +552,29 @@ class CC_EXPORT EffectTree final : public PropertyTree<EffectNode> {
   // 2) There are no mask layers.
   bool ClippedHitTestRegionIsRectangle(int effect_node_id) const;
 
+  struct RoundedCornersHitTestInfo {
+    struct CornerRadii {
+      gfx::Vector2dF upper_left;
+      gfx::Vector2dF upper_right;
+      gfx::Vector2dF lower_right;
+      gfx::Vector2dF lower_left;
+
+      friend bool operator==(const CornerRadii&, const CornerRadii&) = default;
+    };
+
+    bool requires_async_hit_test = false;
+    // Empty when no rounded corners apply or async hit testing is required.
+    std::optional<CornerRadii> corner_radii;
+  };
+
+  // Returns the corner radii that can be serialized for viz hit testing, or
+  // indicates that the mask configuration must stay on the async path. Returns
+  // empty radii without requiring async hit testing when none apply.
+  RoundedCornersHitTestInfo GetRoundedCornersForHitTest(
+      int effect_tree_index,
+      int transform_tree_index,
+      const gfx::RectF& hit_test_rect_in_transform_space) const;
+
   // This function checks if the associated layer can use its layer bounds to
   // correctly hit test. It returns true if the layer bounds cannot be trusted.
   bool HitTestMayBeAffectedByMask(int effect_node_id) const;
@@ -438,23 +582,24 @@ class CC_EXPORT EffectTree final : public PropertyTree<EffectNode> {
   CopyRequestMap TakeCopyRequests();
 
  private:
-  void UpdateOpacities(EffectNode* node, EffectNode* parent_node);
-  void UpdateSubtreeHidden(EffectNode* node, EffectNode* parent_node);
-  void UpdateIsDrawn(EffectNode* node, EffectNode* parent_node);
-  void UpdateBackfaceVisibility(EffectNode* node, EffectNode* parent_node);
+  void UpdateOpacities(EffectNode* node, const EffectNode* parent_node);
+  void UpdateSubtreeHidden(EffectNode* node, const EffectNode* parent_node);
+  void UpdateIsDrawn(EffectNode* node, const EffectNode* parent_node);
+  void UpdateBackfaceVisibility(EffectNode* node,
+                                const EffectNode* parent_node);
   void UpdateHasMaskingChild(EffectNode* node, EffectNode* parent_node);
-  void UpdateOnlyDrawsVisibleContent(EffectNode* node, EffectNode* parent_node);
+  void UpdateOnlyDrawsVisibleContent(EffectNode* node,
+                                     const EffectNode* parent_node);
   void UpdateClosestAncestorSharedElement(EffectNode* node,
-                                          EffectNode* parent_node);
+                                          const EffectNode* parent_node);
 
   // Stores copy requests, keyed by node id.
-  std::unordered_multimap<int, std::unique_ptr<viz::CopyOutputRequest>>
-      copy_requests_;
+  // TODO(crbug.com/443024856): Revisit decision of 'unordered_multimap' to
+  // 'multimap'.
+  std::multimap<int, std::unique_ptr<viz::CopyOutputRequest>> copy_requests_;
 
   // Indexed by node id.
   std::vector<std::unique_ptr<RenderSurfaceImpl>> render_surfaces_;
-
-  std::unordered_set<int> transition_pseudo_element_effect_nodes_;
 };
 
 // These callbacks are called in the main thread to notify changes of scroll
@@ -465,7 +610,8 @@ class ScrollCallbacks {
   virtual void DidCompositorScroll(
       ElementId scroll_element_id,
       const gfx::PointF&,
-      const absl::optional<TargetSnapAreaElementIds>&) = 0;
+      ScrollSourceType type,
+      const std::optional<TargetSnapAreaElementIds>&) = 0;
   // Called after the hidden status of composited scrollbars changed. Note that
   // |scroll_element_id| is the element id of the scroll not of the scrollbars.
   virtual void DidChangeScrollbarsHidden(ElementId scroll_element_id,
@@ -518,11 +664,11 @@ class CC_EXPORT ScrollTree final : public PropertyTree<ScrollNode> {
   // Note: Using this method may causes the associated transform node for this
   // scroll node to update its transforms.
   //
-  // TODO(crbug.com/585458): Updating single transform node only works for
+  // TODO(crbug.com/41238797): Updating single transform node only works for
   // simple cases but we really should update the whole transform tree otherwise
   // we are ignoring any parent transform node that needs updating and thus our
   // snap amount can be incorrect.
-  const gfx::PointF GetPixelSnappedScrollOffset(int scroll_node_id) const;
+  gfx::PointF GetScrollOffsetForScrollTimeline(const ScrollNode&) const;
 
   // Collects deltas for scroll changes on the impl thread that need to be
   // reported to the main thread during the main frame. As such, should only be
@@ -555,9 +701,27 @@ class CC_EXPORT ScrollTree final : public PropertyTree<ScrollNode> {
   // Returns true if the scroll offset is changed.
   bool SetScrollOffset(ElementId id, const gfx::PointF& scroll_offset);
   void SetScrollOffsetClobberActiveValue(ElementId id) {
-    if (auto* synced_offset = GetSyncedScrollOffset(id))
+    if (auto* synced_offset = GetSyncedScrollOffset(id)) {
       synced_offset->set_clobber_active_value();
+    }
   }
+
+  bool SetElasticOverscroll(const ScrollNode& scroll_node,
+                            const gfx::Vector2dF& elastic_overscroll);
+  gfx::Vector2dF GetElasticOverscroll(const ScrollNode& scroll_node) const;
+  gfx::Vector2dF GetElasticOverscrollFromElementId(ElementId id) const;
+  std::pair<ElementId, gfx::Vector2dF> FindElasticOverscrollFromTransformId(
+      int transform_id,
+      const ViewportPropertyIds* viewport_property_ids) const;
+
+  // Sets the painting cull rect of scrolling contents of a scroll. If set, the
+  // painting of scrolling contents in this cull rect is guaranteed to be
+  // complete. It's in the space of `transform_id` of the corresponding scroll
+  // node. If not set or after ClearScrollingContentsCullRect is called, the
+  // cull rect is supposed to always cover all scrolling contents.
+  void SetScrollingContentsCullRect(ElementId id, const gfx::Rect& cull_rect);
+  void ClearScrollingContentsCullRect(ElementId id);
+  const gfx::Rect* ScrollingContentsCullRect(ElementId id) const;
 
   SyncedScrollOffset* GetOrCreateSyncedScrollOffsetForTesting(ElementId id);
   bool UpdateScrollOffsetBaseForTesting(ElementId id,
@@ -586,32 +750,50 @@ class CC_EXPORT ScrollTree final : public PropertyTree<ScrollNode> {
   void NotifyDidCompositorScroll(
       ElementId scroll_element_id,
       const gfx::PointF& scroll_offset,
-      const absl::optional<TargetSnapAreaElementIds>& snap_target_ids);
+      ScrollSourceType type,
+      const std::optional<TargetSnapAreaElementIds>& snap_target_ids);
   void NotifyDidChangeScrollbarsHidden(ElementId scroll_element_id,
                                        bool hidden) const;
 
-  // A composited scroll node is a scroll node that has an associated composited
-  // layer, otherwise the scroll node corresponds to a scroller that requires
-  // repainting.
-  bool IsComposited(const ScrollNode& node) const;
+  // These functions determines how the rendered result of a compositor-
+  // initiated scroll should be realized by updating the scroll offset in
+  // the associated transform node.
+  // All of them return false if `node.transform_id` is invalid which means
+  // Blink didn't paint the transform node because the scrolling contents
+  // were far from the viewport and we don't need to realize the scrolls.
+  bool CanRealizeScrollsOnActiveTree(const ScrollNode& node) const;
+  bool CanRealizeScrollsOnPendingTree(const ScrollNode& node) const;
+  bool ShouldRealizeScrollsOnMain(const ScrollNode& node) const;
 
-  // Returns true iff the node is composited and does not have any non-transient
-  // main-thread scrolling reasons (see main_thread_scrolling_reason.h).
-  bool CanRealizeScrollsOnCompositor(const ScrollNode& node) const;
+  using SyncedScrollOffsetMap =
+      base::flat_map<ElementId, scoped_refptr<SyncedScrollOffset>>;
 
-  // Reports reasons for blocking scroll updates on main-thread repaint. For use
-  // only with scroll unification enabled. Returns bitfield of values from
-  // MainThreadScrollingReason.
-  uint32_t GetMainThreadRepaintReasons(const ScrollNode& node) const;
+  const SyncedScrollOffsetMap& synced_scroll_offset_map() const {
+    return synced_scroll_offset_map_;
+  }
+  SyncedScrollOffsetMap& synced_scroll_offset_map() {
+    return synced_scroll_offset_map_;
+  }
+
+  const base::flat_map<ElementId, gfx::Rect>& scrolling_contents_cull_rects()
+      const {
+    return scrolling_contents_cull_rects_;
+  }
+  base::flat_map<ElementId, gfx::Rect>& scrolling_contents_cull_rects() {
+    return scrolling_contents_cull_rects_;
+  }
+
+  const base::flat_map<ElementId, gfx::Vector2dF>& elastic_overscroll() const {
+    return elastic_overscroll_;
+  }
+  base::flat_map<ElementId, gfx::Vector2dF>& elastic_overscroll() {
+    return elastic_overscroll_;
+  }
 
  private:
   // ScrollTree doesn't use the needs_update flag.
   using PropertyTree::needs_update;
   using PropertyTree::set_needs_update;
-
-  using ScrollOffsetMap = base::flat_map<ElementId, gfx::PointF>;
-  using SyncedScrollOffsetMap =
-      base::flat_map<ElementId, scoped_refptr<SyncedScrollOffset>>;
 
   int currently_scrolling_node_id_ = kInvalidPropertyNodeId;
 
@@ -622,6 +804,13 @@ class CC_EXPORT ScrollTree final : public PropertyTree<ScrollNode> {
   // and impl threads.
   ScrollOffsetMap scroll_offset_map_;
   SyncedScrollOffsetMap synced_scroll_offset_map_;
+
+  // Maps from scroll element id to the current elastic overscroll on that
+  // element.
+  base::flat_map<ElementId, gfx::Vector2dF> elastic_overscroll_;
+
+  // Maps from scroll element id to scrolling contents cull rect.
+  base::flat_map<ElementId, gfx::Rect> scrolling_contents_cull_rects_;
 
   base::WeakPtr<ScrollCallbacks> callbacks_;
 
@@ -679,7 +868,7 @@ struct DrawTransforms {
 
 struct DrawTransformData {
   int update_number = kInvalidUpdateNumber;
-  int target_id = kInvalidPropertyNodeId;
+  int effect_id = kInvalidPropertyNodeId;
 
   // TODO(sunxd): Move screen space transforms here if it can improve
   // performance.
@@ -695,21 +884,13 @@ struct PropertyTreesCachedData {
   ~PropertyTreesCachedData();
 };
 
-struct PropertyTreesChangeState {
-  PropertyTreesChangeState();
-  ~PropertyTreesChangeState();
-  bool changed = false;
-  bool needs_rebuild = false;
-  bool full_tree_damaged = false;
-  EffectTree::CopyRequestMap effect_tree_copy_requests;
-  std::vector<int> changed_effect_nodes;
-  std::vector<int> changed_transform_nodes;
-  std::vector<RenderSurfacePropertyChangedFlags> surface_property_changed_flags;
-};
-
+// PropertyTrees is a container for the property trees (transform, effect, clip,
+// and scroll). It also optionally stores transient change tracking state that
+// is used during the commit process to synchronize changes between the main
+// thread and the compositor thread.
 class CC_EXPORT PropertyTrees final {
  public:
-  explicit PropertyTrees(const ProtectedSequenceSynchronizer& synchronizer);
+  PropertyTrees();
   PropertyTrees(const PropertyTrees& other) = delete;
   void* operator new(size_t) = delete;
   void* operator new(size_t, void*) = delete;
@@ -723,10 +904,6 @@ class CC_EXPORT PropertyTrees final {
   bool operator==(const PropertyTrees& other) const;
 #endif
 
-  const ProtectedSequenceSynchronizer& synchronizer() const {
-    return *synchronizer_;
-  }
-
   const ClipTree& clip_tree() const { return clip_tree_; }
   ClipTree& clip_tree_mutable() { return clip_tree_; }
   const EffectTree& effect_tree() const { return effect_tree_; }
@@ -736,34 +913,35 @@ class CC_EXPORT PropertyTrees final {
   const TransformTree& transform_tree() const { return transform_tree_; }
   TransformTree& transform_tree_mutable() { return transform_tree_; }
 
-  void set_needs_rebuild(bool value) {
-    needs_rebuild_.Write(synchronizer()) = value;
-  }
-  bool needs_rebuild() const { return needs_rebuild_.Read(synchronizer()); }
+  void set_needs_rebuild(bool value) { needs_rebuild_ = value; }
+  bool needs_rebuild() const { return needs_rebuild_; }
 
-  void set_changed(bool value) { changed_.Write(synchronizer()) = value; }
-  bool changed() const { return changed_.Read(synchronizer()); }
+  void set_changed(bool value) { changed_ = value; }
+  bool changed() const { return changed_; }
 
-  void set_full_tree_damaged(bool value) {
-    full_tree_damaged_.Write(synchronizer()) = value;
-  }
-  bool full_tree_damaged() const {
-    return full_tree_damaged_.Read(synchronizer());
-  }
+  void set_full_tree_damaged(bool value) { full_tree_damaged_ = value; }
+  bool full_tree_damaged() const { return full_tree_damaged_; }
 
-  void set_is_main_thread(bool value) {
-    is_main_thread_.Write(synchronizer()) = value;
-  }
-  bool is_main_thread() const { return is_main_thread_.Read(synchronizer()); }
+  void set_is_main_thread(bool value) { is_main_thread_ = value; }
+  bool is_main_thread() const { return is_main_thread_; }
 
-  void set_is_active(bool value) { is_active_.Write(synchronizer()) = value; }
-  bool is_active() const { return is_active_.Read(synchronizer()); }
+  void set_is_active(bool value) { is_active_ = value; }
+  bool is_active() const { return is_active_; }
 
-  void set_sequence_number(int n) {
-    sequence_number_.Write(synchronizer()) = n;
+  void set_sequence_number(int n) { sequence_number_ = n; }
+  void increment_sequence_number() { sequence_number_++; }
+  int sequence_number() const { return sequence_number_; }
+
+  const std::vector<int>& changed_effect_nodes() const {
+    return changed_effect_nodes_;
   }
-  void increment_sequence_number() { sequence_number_.Write(synchronizer())++; }
-  int sequence_number() const { return sequence_number_.Read(synchronizer()); }
+  const std::vector<int>& changed_transform_nodes() const {
+    return changed_transform_nodes_;
+  }
+  const std::vector<RenderSurfacePropertyChangedFlags>&
+  surface_property_changed_flags() const {
+    return surface_property_changed_flags_;
+  }
 
   void clear();
 
@@ -777,17 +955,29 @@ class CC_EXPORT PropertyTrees final {
   void MaximumAnimationScaleChanged(ElementId element_id, float maximum_scale);
   void SetInnerViewportContainerBoundsDelta(gfx::Vector2dF bounds_delta);
   void SetOuterViewportContainerBoundsDelta(gfx::Vector2dF bounds_delta);
+  void SetTransformDeltaBySafeAreaInsetBottom(float);
   void UpdateChangeTracking();
   void GetChangedNodes(std::vector<int>& effect_nodes,
                        std::vector<int>& transform_nodes) const;
   void ApplyChangedNodes(const std::vector<int>& effect_nodes,
                          const std::vector<int>& transform_nodes);
-  // Note that GetChangeState mutates the state of effect_tree_.
-  void GetChangeState(PropertyTreesChangeState& change_state);
+
+  // Collects the changed nodes and surface property changed flags from the
+  // current trees and stores them in the internal change tracking vectors.
+  void CollectChangeState();
+
+  // Takes the change tracking state from the |source| property trees.
+  // Note that this mutates the state of |source| by taking its copy requests.
+  void TakeChangeStateFrom(PropertyTrees& source);
+
+  // Applies the change tracking state from |source| to this.
+  // Note that this mutates the state of |source| by taking its copy requests.
+  void ApplyChangeStateFrom(PropertyTrees& source);
+
   void ResetAllChangeTracking();
 
   gfx::Vector2dF inner_viewport_container_bounds_delta() const {
-    return inner_viewport_container_bounds_delta_.Read(synchronizer());
+    return inner_viewport_container_bounds_delta_;
   }
   gfx::Vector2dF inner_viewport_scroll_bounds_delta() const {
     // Inner viewport scroll bounds are always the same as outer viewport
@@ -795,7 +985,11 @@ class CC_EXPORT PropertyTrees final {
     return outer_viewport_container_bounds_delta();
   }
   gfx::Vector2dF outer_viewport_container_bounds_delta() const {
-    return outer_viewport_container_bounds_delta_.Read(synchronizer());
+    return outer_viewport_container_bounds_delta_;
+  }
+
+  float transform_delta_by_safe_area_inset_bottom() const {
+    return transform_delta_by_safe_area_inset_bottom_;
   }
 
   std::unique_ptr<base::trace_event::TracedValue> AsTracedValue() const;
@@ -829,34 +1023,36 @@ class CC_EXPORT PropertyTrees final {
   bool HasElement(ElementId element_id) const;
 
  private:
-  const raw_ref<const ProtectedSequenceSynchronizer> synchronizer_;
-
   TransformTree transform_tree_;
   EffectTree effect_tree_;
   ClipTree clip_tree_;
   ScrollTree scroll_tree_;
 
-  ProtectedSequenceReadable<bool> needs_rebuild_;
+  bool needs_rebuild_ = true;
   // Change tracking done on property trees needs to be preserved across commits
   // (when they are not rebuild). We cache a global bool which stores whether
   // we did any change tracking so that we can skip copying the change status
   // between property trees when this bool is false.
-  ProtectedSequenceReadable<bool> changed_;
+  bool changed_ = false;
   // We cache a global bool for full tree damages to avoid walking the entire
   // tree.
   // TODO(jaydasika): Changes to transform and effects that damage the entire
   // tree should be tracked by this bool. Currently, they are tracked by the
   // individual nodes.
-  ProtectedSequenceReadable<bool> full_tree_damaged_;
-  ProtectedSequenceReadable<bool> is_main_thread_;
-  ProtectedSequenceReadable<bool> is_active_;
+  bool full_tree_damaged_ = false;
+  bool is_main_thread_ = true;
+  bool is_active_ = false;
 
-  ProtectedSequenceReadable<int> sequence_number_;
+  int sequence_number_ = 0;
 
-  ProtectedSequenceReadable<gfx::Vector2dF>
-      inner_viewport_container_bounds_delta_;
-  ProtectedSequenceReadable<gfx::Vector2dF>
-      outer_viewport_container_bounds_delta_;
+  std::vector<int> changed_effect_nodes_;
+  std::vector<int> changed_transform_nodes_;
+  std::vector<RenderSurfacePropertyChangedFlags>
+      surface_property_changed_flags_;
+
+  gfx::Vector2dF inner_viewport_container_bounds_delta_;
+  gfx::Vector2dF outer_viewport_container_bounds_delta_;
+  float transform_delta_by_safe_area_inset_bottom_ = 0.f;
 
   const AnimationScaleData& GetAnimationScaleData(int transform_id);
 
@@ -865,8 +1061,7 @@ class CC_EXPORT PropertyTrees final {
   DrawTransformData& FetchDrawTransformsDataFromCache(int transform_id,
                                                       int effect_id) const;
 
-  // This can be mutable and not wrapped in ProtectedSequence* because it isn't
-  // copied by operator=().
+  // This can be mutable because it isn't copied by operator=().
   mutable PropertyTreesCachedData cached_data_;
 };
 

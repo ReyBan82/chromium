@@ -32,7 +32,10 @@ component("wifi") {
     sources += [ "wifi_service_mac.mm" ]
     frameworks = [
       "CoreWLAN.framework",
+      "CryptoTokenKit.framework",
       "Foundation.framework",
+      "LocalAuthentication.framework",
+      "Security.framework",
       "SystemConfiguration.framework",
     ]
   }
@@ -64,4 +67,20 @@ executable("wifi_test") {
     "//build/win:default_exe_manifest",
     "//components/onc",
   ]
+}
+
+source_set("unit_tests") {
+  testonly = true
+  sources = []
+  deps = [
+    ":wifi",
+    "//base",
+    "//base/test:test_support",
+    "//testing/gtest",
+  ]
+
+  if (is_mac) {
+    sources += [ "wifi_service_mac_unittest.mm" ]
+    frameworks = [ "Foundation.framework" ]
+  }
 }

@@ -17,29 +17,30 @@ import os.path
 import sys
 
 LINES = [
-    f'Copyright {date.today().year} The Chromium Authors',
-    'Use of this source code is governed by a BSD-style license that can be',
-    'found in the LICENSE file.'
+  f'Copyright {date.today().year} The Chromium Authors',
+  'Use of this source code is governed by a BSD-style license that can be',
+  'found in the LICENSE file.',
 ]
 
 NO_COMPILE_LINES = [
-    'This is a "No Compile Test" suite.',
-    'https://dev.chromium.org/developers/testing/no-compile-tests'
+  'This is a "No Compile Test" suite.',
+  'https://dev.chromium.org/developers/testing/no-compile-tests',
 ]
 
 EXTENSIONS_TO_COMMENTS = {
-    'h': '//',
-    'cc': '//',
-    'nc': '//',
-    'mm': '//',
-    'js': '//',
-    'py': '#',
-    'gn': '#',
-    'gni': '#',
-    'mojom': '//',
-    'ts': '//',
-    'typemap': '#',
-    "swift": "//",
+  'cc': '//',
+  'gn': '#',
+  'gni': '#',
+  'h': '//',
+  'js': '//',
+  'mm': '//',
+  'mojom': '//',
+  'nc': '//',
+  'proto': '//',
+  'py': '#',
+  'swift': '//',
+  'ts': '//',
+  'typemap': '#',
 }
 
 
@@ -55,7 +56,7 @@ def _GetHeader(filename):
 
 
 def _GetNoCompileHeader(filename):
-  assert (filename.endswith(".nc"))
+  assert filename.endswith(".nc")
   return '\n' + _GetHeaderImpl(filename, NO_COMPILE_LINES)
 
 
@@ -63,14 +64,9 @@ def _CppHeader(filename):
   guard = filename.upper() + '_'
   for char in '/\\.+':
     guard = guard.replace(char, '_')
-  return '\n'.join([
-    '',
-    '#ifndef ' + guard,
-    '#define ' + guard,
-    '',
-    '#endif  // ' + guard,
-    ''
-  ])
+  return '\n'.join(
+    ['', '#ifndef ' + guard, '#define ' + guard, '', '#endif  // ' + guard, '']
+  )
 
 
 def _RemoveCurrentDirectoryPrefix(filename):
@@ -79,13 +75,13 @@ def _RemoveCurrentDirectoryPrefix(filename):
     current_dir_prefixes.append(os.curdir + os.altsep)
   for prefix in current_dir_prefixes:
     if filename.startswith(prefix):
-      return filename[len(prefix):]
+      return filename[len(prefix) :]
   return filename
 
 
 def _RemoveTestSuffix(filename):
   base, _ = os.path.splitext(filename)
-  suffixes = [ '_test', '_unittest', '_browsertest' ]
+  suffixes = ['_test', '_unittest', '_browsertest']
   for suffix in suffixes:
     l = len(suffix)
     if base[-l:] == suffix:
@@ -106,19 +102,17 @@ def _FilePathSlashesToCpp(filename):
 
 
 def _CppImplementation(filename):
-  return '\n#include "' + _FilePathSlashesToCpp(_RemoveTestSuffix(filename)) \
+  return (
+    '\n#include "'
+    + _FilePathSlashesToCpp(_RemoveTestSuffix(filename))
     + '.h"\n'
+  )
 
 
 def _ObjCppImplementation(filename):
-  implementation = '\n#import "' + _RemoveTestSuffix(filename) + '.h"\n'
-  if not _IsIOSFile(filename):
-    return implementation
-  implementation += '\n'
-  implementation += '#if !defined(__has_feature) || !__has_feature(objc_arc)\n'
-  implementation += '#error "This file requires ARC support."\n'
-  implementation += '#endif\n'
-  return implementation
+  return (
+    '\n#import "' + _FilePathSlashesToCpp(_RemoveTestSuffix(filename)) + '.h"\n'
+  )
 
 
 def _CreateFile(filename):
@@ -140,11 +134,21 @@ def _CreateFile(filename):
     fd.write(contents)
 
 
+# A file is safe to overwrite if it's an empty file we can write to.
+def _IsSafeToOverwrite(path):
+  return (
+    os.path.isfile(path)
+    and os.path.getsize(path) == 0
+    and os.access(path, os.W_OK)
+  )
+
+
 def Main():
   files = sys.argv[1:]
   if len(files) < 1:
     print(
-        'Usage: boilerplate.py path/to/file.h path/to/file.cc', file=sys.stderr)
+      'Usage: boilerplate.py path/to/file.h path/to/file.cc', file=sys.stderr
+    )
     return 1
 
   # Perform checks first so that the entire operation is atomic.
@@ -154,16 +158,8 @@ def Main():
       print('Unknown file type for %s' % f, file=sys.stderr)
       return 2
 
-    if os.path.exists(f):
+    if os.path.exists(f) and not _IsSafeToOverwrite(f):
       print('A file at path %s already exists' % f, file=sys.stderr)
-      return 2
-
-    # TODO(crbug.com/1375793): Remove this check.
-    if _IsIOSFile(f) and f.endswith('.js'):
-      print(
-          'Invalid file type for %s. (Please use \'.ts\' for new iOS scripts.)'
-          % f,
-          file=sys.stderr)
       return 2
 
   for f in files:

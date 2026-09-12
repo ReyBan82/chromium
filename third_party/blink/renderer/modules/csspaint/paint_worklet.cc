@@ -4,11 +4,12 @@
 
 #include "third_party/blink/renderer/modules/csspaint/paint_worklet.h"
 
+#include <utility>
+
 #include "base/rand_util.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/core/css/cssom/prepopulated_computed_style_property_map.h"
 #include "third_party/blink/renderer/core/dom/document.h"
-#include "third_party/blink/renderer/core/dom/node_rare_data.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
@@ -42,9 +43,7 @@ PaintWorklet::PaintWorklet(LocalDOMWindow& window)
       pending_generator_registry_(
           MakeGarbageCollected<PaintWorkletPendingGeneratorRegistry>()),
       worklet_id_(PaintWorkletIdGenerator::NextId()),
-      is_paint_off_thread_(
-          RuntimeEnabledFeatures::OffMainThreadCSSPaintEnabled() &&
-          Thread::CompositorThread()) {}
+      is_paint_off_thread_(Thread::CompositorThread()) {}
 
 PaintWorklet::~PaintWorklet() = default;
 
@@ -53,8 +52,8 @@ void PaintWorklet::AddPendingGenerator(const String& name,
   pending_generator_registry_->AddPendingGenerator(name, generator);
 }
 
-void PaintWorklet::ResetIsPaintOffThreadForTesting() {
-  is_paint_off_thread_ = RuntimeEnabledFeatures::OffMainThreadCSSPaintEnabled();
+void PaintWorklet::ResetIsPaintOffThreadForTesting(bool is_off_thread) {
+  is_paint_off_thread_ = is_off_thread;
 }
 
 // We start with a random global scope when a new frame starts. Then within this
@@ -90,7 +89,7 @@ int PaintWorklet::GetPaintsBeforeSwitching() {
   // according to the actual paints per frame. For example, if we found that
   // there are typically ~1000 paints in each frame, we'd want to set the number
   // to average at 500.
-  return base::RandInt(0, kMaxPaintCountToSwitch - 1);
+  return base::RandIntInclusive(0, kMaxPaintCountToSwitch - 1);
 }
 
 wtf_size_t PaintWorklet::SelectNewGlobalScope() {
@@ -101,7 +100,7 @@ wtf_size_t PaintWorklet::SelectNewGlobalScope() {
 scoped_refptr<Image> PaintWorklet::Paint(const String& name,
                                          const ImageResourceObserver& observer,
                                          const gfx::SizeF& container_size,
-                                         const CSSStyleValueVector* data) {
+                                         const GCedCSSStyleValueVector* data) {
   if (!document_definition_map_.Contains(name))
     return nullptr;
 
@@ -161,8 +160,8 @@ void PaintWorklet::RegisterCSSPaintDefinition(const String& name,
       document_definition_map_.Set(name, nullptr);
       exception_state.ThrowDOMException(
           DOMExceptionCode::kNotSupportedError,
-          "A class with name:'" + name +
-              "' was registered with a different definition.");
+          StrCat({"A class with name:'", name,
+                  "' was registered with a different definition."}));
       return;
     }
     // Notify the generator ready only when register paint is called the
@@ -170,9 +169,8 @@ void PaintWorklet::RegisterCSSPaintDefinition(const String& name,
     // definition associated with |name|
     //
     // We are looking for kNumGlobalScopesPerThread number of definitions
-    // regiserered from RegisterCSSPaintDefinition and one extra definition from
-    // RegisterMainThreadDocumentPaintDefinition if OffMainThreadCSSPaintEnabled
-    // is true.
+    // registered from RegisterCSSPaintDefinition and one extra definition from
+    // RegisterMainThreadDocumentPaintDefinition
     unsigned required_registered_count = is_paint_off_thread_
                                              ? kNumGlobalScopesPerThread + 1
                                              : kNumGlobalScopesPerThread;
@@ -192,7 +190,7 @@ void PaintWorklet::RegisterCSSPaintDefinition(const String& name,
 void PaintWorklet::RegisterMainThreadDocumentPaintDefinition(
     const String& name,
     Vector<CSSPropertyID> native_properties,
-    Vector<String> custom_properties,
+    Vector<AtomicString> custom_properties,
     Vector<CSSSyntaxDefinition> input_argument_types,
     double alpha) {
   if (document_definition_map_.Contains(name)) {
@@ -207,15 +205,8 @@ void PaintWorklet::RegisterMainThreadDocumentPaintDefinition(
       return;
     }
   } else {
-    // Because this method is called cross-thread, |custom_properties| cannot be
-    // an AtomicString. Instead, convert to AtomicString now that we are on the
-    // main thread.
-    Vector<AtomicString> new_custom_properties;
-    new_custom_properties.ReserveInitialCapacity(custom_properties.size());
-    for (const String& property : custom_properties)
-      new_custom_properties.push_back(AtomicString(property));
     auto document_definition = std::make_unique<DocumentPaintDefinition>(
-        std::move(native_properties), std::move(new_custom_properties),
+        std::move(native_properties), std::move(custom_properties),
         std::move(input_argument_types), alpha);
     document_definition_map_.insert(name, std::move(document_definition));
   }

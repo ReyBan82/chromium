@@ -15,6 +15,7 @@
 #include "third_party/blink/renderer/bindings/core/v8/v8_custom_element_form_associated_callback.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_custom_element_form_disabled_callback.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_custom_element_form_state_restore_callback.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_custom_element_tool_fill_callback.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_void_function.h"
 #include "third_party/blink/renderer/core/html/custom/custom_element_registry.h"
 #include "third_party/blink/renderer/platform/bindings/callback_method_retriever.h"
@@ -81,6 +82,15 @@ bool ScriptCustomElementDefinitionBuilder::RememberOriginalProperties() {
     data_.disconnected_callback_ =
         V8VoidFunction::Create(v8_disconnected_callback_.As<v8::Function>());
   }
+  v8_connected_move_callback_ =
+      retriever.GetMethodOrUndefined("connectedMoveCallback", exception_state_);
+  if (exception_state_.HadException()) {
+    return false;
+  }
+  if (v8_connected_move_callback_->IsFunction()) {
+    data_.connected_move_callback_ =
+        V8VoidFunction::Create(v8_connected_move_callback_.As<v8::Function>());
+  }
   v8_adopted_callback_ =
       retriever.GetMethodOrUndefined("adoptedCallback", exception_state_);
   if (exception_state_.HadException())
@@ -104,7 +114,7 @@ bool ScriptCustomElementDefinitionBuilder::RememberOriginalProperties() {
   if (data_.attribute_changed_callback_) {
     v8::Isolate* isolate = Isolate();
     v8::Local<v8::Context> current_context = isolate->GetCurrentContext();
-    v8::TryCatch try_catch(isolate);
+    TryRethrowScope rethrow_scope(isolate, exception_state_);
     v8::Local<v8::Value> v8_observed_attributes;
 
     if (!Constructor()
@@ -112,7 +122,6 @@ bool ScriptCustomElementDefinitionBuilder::RememberOriginalProperties() {
              ->Get(current_context,
                    V8AtomicString(isolate, "observedAttributes"))
              .ToLocal(&v8_observed_attributes)) {
-      exception_state_.RethrowV8Exception(try_catch.Exception());
       return false;
     }
 
@@ -131,14 +140,13 @@ bool ScriptCustomElementDefinitionBuilder::RememberOriginalProperties() {
   {
     auto* isolate = Isolate();
     v8::Local<v8::Context> current_context = isolate->GetCurrentContext();
-    v8::TryCatch try_catch(isolate);
+    TryRethrowScope rethrow_scope(isolate, exception_state_);
     v8::Local<v8::Value> v8_disabled_features;
 
     if (!Constructor()
              ->CallbackObject()
              ->Get(current_context, V8AtomicString(isolate, "disabledFeatures"))
              .ToLocal(&v8_disabled_features)) {
-      exception_state_.RethrowV8Exception(try_catch.Exception());
       return false;
     }
 
@@ -154,14 +162,13 @@ bool ScriptCustomElementDefinitionBuilder::RememberOriginalProperties() {
   {
     auto* isolate = Isolate();
     v8::Local<v8::Context> current_context = isolate->GetCurrentContext();
-    v8::TryCatch try_catch(isolate);
+    TryRethrowScope rethrow_scope(isolate, exception_state_);
     v8::Local<v8::Value> v8_form_associated;
 
     if (!Constructor()
              ->CallbackObject()
              ->Get(current_context, V8AtomicString(isolate, "formAssociated"))
              .ToLocal(&v8_form_associated)) {
-      exception_state_.RethrowV8Exception(try_catch.Exception());
       return false;
     }
 
@@ -210,6 +217,16 @@ bool ScriptCustomElementDefinitionBuilder::RememberOriginalProperties() {
       data_.form_state_restore_callback_ =
           V8CustomElementFormStateRestoreCallback::Create(
               v8_form_state_restore_callback_.As<v8::Function>());
+    }
+
+    v8_tool_fill_callback_ =
+        retriever.GetMethodOrUndefined("toolFillCallback", exception_state_);
+    if (exception_state_.HadException()) {
+      return false;
+    }
+    if (v8_tool_fill_callback_->IsFunction()) {
+      data_.tool_fill_callback_ = V8CustomElementToolFillCallback::Create(
+          v8_tool_fill_callback_.As<v8::Function>());
     }
   }
 

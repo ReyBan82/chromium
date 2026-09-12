@@ -19,6 +19,10 @@ component("metrics_cpp") {
     "ukm_entry_builder_base.h",
     "ukm_recorder.cc",
     "ukm_recorder.h",
+    "ukm_recorder_client_interface_registry.cc",
+    "ukm_recorder_client_interface_registry.h",
+    "ukm_recorder_impl_utils.cc",
+    "ukm_recorder_impl_utils.h",
     "ukm_source.cc",
     "ukm_source.h",
     "ukm_source_id.cc",
@@ -47,14 +51,25 @@ source_set("tests") {
 
   sources = [
     "metrics_utils_unittest.cc",
+    "ukm_entry_builder_unittest.cc",
     "ukm_source_id_unittest.cc",
   ]
 
   deps = [
     ":metrics_cpp",
     "//base",
+    "//testing/gmock",
     "//testing/gtest",
   ]
+}
+
+source_set("test_support") {
+  testonly = true
+  sources = [
+    "test_recording_helper.cc",
+    "test_recording_helper.h",
+  ]
+  public_deps = [ ":metrics_cpp" ]
 }
 
 action("gen_ukm_builders") {
@@ -65,6 +80,14 @@ action("gen_ukm_builders") {
     "//tools/metrics/ukm/builders_template.py",
     "//tools/metrics/ukm/decode_template.py",
     "//tools/metrics/ukm/codegen.py",
+    "//tools/metrics/ukm/setup_modules.py",
+    "//tools/metrics/python_support/setup_modules_lib.py",
+    "//tools/metrics/ukm/ukm_model.py",
+    "//tools/metrics/common/models.py",
+    "//tools/metrics/common/model_shared.py",
+    "//tools/metrics/common/pretty_print_xml.py",
+    "//tools/metrics/common/etree_util.py",
+    "//tools/metrics/common/codegen_shared.py",
   ]
   sources = [ "//tools/metrics/ukm/ukm.xml" ]
 

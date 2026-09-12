@@ -5,12 +5,13 @@
 #ifndef UI_OZONE_PLATFORM_WAYLAND_HOST_WAYLAND_BUFFER_BACKING_H_
 #define UI_OZONE_PLATFORM_WAYLAND_HOST_WAYLAND_BUFFER_BACKING_H_
 
+#include <drm_fourcc.h>
+
 #include "base/containers/flat_map.h"
 #include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
-#include "drm_fourcc.h"
 #include "ui/gfx/geometry/size.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/ozone/platform/wayland/common/wayland_object.h"
 
 namespace ui {
@@ -30,7 +31,7 @@ class WaylandBufferBacking {
   enum class BufferBackingType {
     kShm = 0,
     kDmabuf = 1,
-    kSolidColor = 2,
+    kSinglePixel = 2,
   };
 
   WaylandBufferBacking() = delete;
@@ -39,17 +40,15 @@ class WaylandBufferBacking {
   WaylandBufferBacking(const WaylandConnection* connection,
                        uint32_t buffer_id,
                        const gfx::Size& size,
-                       uint32_t format = DRM_FORMAT_INVALID);
+                       BufferBackingType type);
   virtual ~WaylandBufferBacking();
 
   const WaylandConnection* connection() const { return connection_; }
-  uint32_t format() const { return format_; }
   uint32_t id() const { return buffer_id_; }
   gfx::Size size() const { return size_; }
 
-  // Whether linux_explicit_synchronization extension is enabled. It is an
-  // extension that completely replaces base protocol's wl_buffer.release
-  // events.
+  // If true, protocol's wl_buffer.release event is superceded by
+  // linux-drm-syncobj extension.
   bool UseExplicitSyncRelease() const;
 
   // Returns a wl_buffer wrapper that can be attached to the |requestor|.
@@ -60,14 +59,11 @@ class WaylandBufferBacking {
   WaylandBufferHandle* GetBufferHandle(WaylandSurface* requestor);
 
   // Returns type of the backing. See BufferBackingType.
-  virtual BufferBackingType GetBackingType() const = 0;
+  BufferBackingType type() const { return type_; }
 
  private:
   // Non-owned pointer to the main connection.
   raw_ptr<const WaylandConnection> connection_;
-
-  // DRM buffer format if specified, otherwise DRM_FORMAT_INVALID (0)
-  const uint32_t format_;
 
   // Requests a new wl_buffer. |callback| will be run with the created wl_buffer
   // object when creation is complete.
@@ -82,6 +78,8 @@ class WaylandBufferBacking {
 
   // Actual buffer size in pixels.
   const gfx::Size size_;
+
+  const BufferBackingType type_;
 
   // Collection of wl_buffers objects backed by this backing. Maintains the
   // relationship of wl_surfaces to wl_buffers, corresponding to the

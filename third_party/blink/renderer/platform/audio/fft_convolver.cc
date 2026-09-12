@@ -27,74 +27,70 @@
  */
 
 #include "third_party/blink/renderer/platform/audio/fft_convolver.h"
+
+#include <algorithm>
+
 #include "third_party/blink/renderer/platform/audio/vector_math.h"
+#include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
 
 namespace blink {
 
 FFTConvolver::FFTConvolver(unsigned fft_size)
     : frame_(fft_size),
-      read_write_index_(0),
       input_buffer_(fft_size),  // 2nd half of buffer is always zeroed
       output_buffer_(fft_size),
       last_overlap_buffer_(fft_size / 2) {}
 
 void FFTConvolver::Process(const FFTFrame* fft_kernel,
-                           const float* source_p,
-                           float* dest_p,
-                           uint32_t frames_to_process) {
+                           base::span<const float> source,
+                           base::span<float> dest) {
+  DCHECK_EQ(source.size(), dest.size());
+
   unsigned half_size = FftSize() / 2;
 
-  // framesToProcess must be an exact multiple of halfSize,
-  // or halfSize is a multiple of framesToProcess when halfSize >
-  // framesToProcess.
-  bool is_good =
-      !(half_size % frames_to_process && frames_to_process % half_size);
-  DCHECK(is_good);
+  base::span<float> input_buffer_span = input_buffer_.as_span();
+  base::span<float> output_buffer_span = output_buffer_.as_span();
 
-  size_t number_of_divisions =
-      half_size <= frames_to_process ? (frames_to_process / half_size) : 1;
-  size_t division_size =
-      number_of_divisions == 1 ? frames_to_process : half_size;
+  while (!source.empty()) {
+    size_t frames_to_copy =
+        std::min(source.size(), half_size - read_write_index_);
 
-  for (size_t i = 0; i < number_of_divisions;
-       ++i, source_p += division_size, dest_p += division_size) {
-    // Copy samples to input buffer (note contraint above!)
-    float* input_p = input_buffer_.Data();
+    // Copy samples to input buffer
+    DCHECK_LE(read_write_index_ + frames_to_copy, input_buffer_.size());
 
-    DCHECK(source_p);
-    DCHECK(input_p);
-    DCHECK_LE(read_write_index_ + division_size, input_buffer_.size());
-
-    memcpy(input_p + read_write_index_, source_p,
-           sizeof(float) * division_size);
+    input_buffer_span.subspan(read_write_index_, frames_to_copy)
+        .copy_from(source.take_first(frames_to_copy));
 
     // Copy samples from output buffer
-    float* output_p = output_buffer_.Data();
+    DCHECK_LE(read_write_index_ + frames_to_copy, output_buffer_.size());
 
-    DCHECK(dest_p);
-    DCHECK(output_p);
-    DCHECK_LE(read_write_index_ + division_size, output_buffer_.size());
-
-    memcpy(dest_p, output_p + read_write_index_, sizeof(float) * division_size);
-    read_write_index_ += division_size;
+    dest.take_first(frames_to_copy)
+        .copy_from(
+            output_buffer_span.subspan(read_write_index_, frames_to_copy));
+    read_write_index_ += frames_to_copy;
 
     // Check if it's time to perform the next FFT
     if (read_write_index_ == half_size) {
-      // The input buffer is now filled (get frequency-domain version)
-      frame_.DoFFT(input_buffer_.Data());
-      frame_.Multiply(*fft_kernel);
-      frame_.DoInverseFFT(output_buffer_.Data());
+      {
+        TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("webaudio.audionode"),
+                     "FFTConvolver::ExecuteFFT");
+        // The input buffer is now filled (get frequency-domain version)
+        frame_.DoFFT(input_buffer_span);
+        frame_.Multiply(*fft_kernel);
+        frame_.DoInverseFFT(output_buffer_span);
+      }
 
       // Overlap-add 1st half from previous time
-      vector_math::Vadd(output_buffer_.Data(), 1, last_overlap_buffer_.Data(),
-                        1, output_buffer_.Data(), 1, half_size);
+      vector_math::Vadd(output_buffer_.as_span(),
+                        last_overlap_buffer_.as_span(),
+                        output_buffer_.as_span(), half_size);
 
       // Finally, save 2nd half of result
       DCHECK_EQ(output_buffer_.size(), 2 * half_size);
       DCHECK_EQ(last_overlap_buffer_.size(), half_size);
 
-      memcpy(last_overlap_buffer_.Data(), output_buffer_.Data() + half_size,
-             sizeof(float) * half_size);
+      last_overlap_buffer_.as_span().copy_from(
+          output_buffer_span.subspan(half_size, half_size));
 
       // Reset index back to start for next time
       read_write_index_ = 0;

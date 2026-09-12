@@ -17,7 +17,7 @@ namespace blink {
 class ComputedStyle;
 class FragmentData;
 class GraphicsContext;
-class NGPhysicalBoxFragment;
+class PhysicalBoxFragment;
 
 // This class is responsible for painting self-painting PaintLayer.
 //
@@ -32,6 +32,11 @@ class CORE_EXPORT PaintLayerPainter {
   // Paints the layers from back to front. It assumes that the caller will
   // clip to the bounds of damage rect if necessary.
   PaintResult Paint(GraphicsContext&, PaintFlags = PaintFlag::kNoFlag);
+
+  // Paints a replaced normal-flow stacking context (like <video> or SVG
+  // <foreignObject>) via its PaintLayer. Called inline by the parent's
+  // content painter to maintain correct paint order with siblings.
+  void PaintLayerForReplacedNormalFlowStackingContext(const PaintInfo&);
 
   // Returns true if the painted output of this PaintLayer and its children is
   // invisible and therefore can't impact painted output.
@@ -49,12 +54,20 @@ class CORE_EXPORT PaintLayerPainter {
                             PaintFlags);
   void PaintFragmentWithPhase(PaintPhase,
                               const FragmentData&,
-                              const NGPhysicalBoxFragment*,
+                              wtf_size_t fragment_data_idx,
+                              const PhysicalBoxFragment*,
                               GraphicsContext&,
                               PaintFlags);
   void PaintWithPhase(PaintPhase, GraphicsContext&, PaintFlags);
   void PaintForegroundPhases(GraphicsContext&, PaintFlags);
   void PaintOverlayOverflowControls(GraphicsContext&, PaintFlags);
+  void PaintTransitionScopeSnapshotIfNeeded(
+      GraphicsContext&,
+      const LayoutBoxModelObject&,
+      const EffectPaintPropertyNodeOrAlias*);
+  PaintResult PaintTransitionPseudos(GraphicsContext&,
+                                     const LayoutBoxModelObject&,
+                                     PaintFlags);
 
   PaintLayer& paint_layer_;
 };

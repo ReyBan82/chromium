@@ -34,12 +34,12 @@
 #include "base/dcheck_is_on.h"
 #include "base/functional/function_ref.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/core/dom/synchronous_mutation_observer.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
 #include "third_party/blink/renderer/core/editing/iterators/text_iterator.h"
 #include "third_party/blink/renderer/core/editing/markers/composition_marker.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker_group.h"
+#include "third_party/blink/renderer/core/editing/markers/preview_stylus_gesture_marker.h"
 #include "third_party/blink/renderer/core/editing/markers/suggestion_marker.h"
 #include "third_party/blink/renderer/core/editing/markers/text_match_marker.h"
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
@@ -49,23 +49,25 @@
 
 namespace blink {
 
+class Document;
 class DocumentMarkerList;
+class Element;
 class Highlight;
 class SuggestionMarkerProperties;
 
 class CORE_EXPORT DocumentMarkerController final
-    : public GarbageCollected<DocumentMarkerController>,
-      public SynchronousMutationObserver {
+    : public GarbageCollected<DocumentMarkerController> {
  public:
   explicit DocumentMarkerController(Document&);
   DocumentMarkerController(const DocumentMarkerController&) = delete;
   DocumentMarkerController& operator=(const DocumentMarkerController&) = delete;
 
-  void Clear();
   void AddSpellingMarker(const EphemeralRange&,
-                         const String& description = g_empty_string);
+                         const String& description = g_empty_string,
+                         bool should_hide_suggestion_menu = false);
   void AddGrammarMarker(const EphemeralRange&,
-                        const String& description = g_empty_string);
+                        const String& description = g_empty_string,
+                        bool should_hide_suggestion_menu = false);
   void AddTextMatchMarker(const EphemeralRange&, TextMatchMarker::MatchStatus);
   void AddCompositionMarker(const EphemeralRange&,
                             Color underline_color,
@@ -73,6 +75,8 @@ class CORE_EXPORT DocumentMarkerController final
                             ui::mojom::ImeTextSpanUnderlineStyle,
                             Color text_color,
                             Color background_color);
+  void AddPreviewStylusGestureMarker(const EphemeralRange&,
+                                     Color background_color);
   void AddActiveSuggestionMarker(const EphemeralRange&,
                                  Color underline_color,
                                  ui::mojom::ImeTextSpanThickness,
@@ -82,9 +86,21 @@ class CORE_EXPORT DocumentMarkerController final
   void AddSuggestionMarker(const EphemeralRange&,
                            const SuggestionMarkerProperties&);
   void AddTextFragmentMarker(const EphemeralRange&);
-  void AddCustomHighlightMarker(const EphemeralRange&,
-                                const String& highlight_name,
-                                const Member<Highlight> highlight);
+  // Adds custom highlight markers for the Text nodes the range covers. When
+  // `on_element_node` is non-null, the range is iterated with object
+  // replacement characters emitted, and the callback is invoked for each
+  // Element the range crosses as a non-Text node (e.g. a replaced
+  // <img>/<object>). It is up to the caller to filter to the elements it
+  // cares about (e.g. tracking replaced elements covered by the highlight in
+  // this same pass). Marker creation itself still happens only for Text
+  // nodes, so the markers produced are identical whether or not the callback
+  // is supplied.
+  void AddCustomHighlightMarker(
+      const EphemeralRange&,
+      const String& highlight_name,
+      const Member<Highlight> highlight,
+      base::FunctionRef<void(const Element&)>* on_element_node = nullptr);
+  void AddGlicMarker(const EphemeralRange&);
 
   void MoveMarkers(const Text& src_node, int length, const Text& dst_node);
 
@@ -103,15 +119,13 @@ class CORE_EXPORT DocumentMarkerController final
       const SuggestionMarker::SuggestionType& type);
   // Removes suggestion marker with |RemoveOnFinishComposing::kRemove|.
   void RemoveSuggestionMarkerInRangeOnFinish(const EphemeralRangeInFlatTree&);
-  void RepaintMarkers(
-      DocumentMarker::MarkerTypes = DocumentMarker::MarkerTypes::All());
   // Returns true if markers within a range are found.
   bool SetTextMatchMarkersActive(const EphemeralRange&, bool);
   // Returns true if markers within a range defined by a text node,
   // |start_offset| and |end_offset| are found.
   bool SetTextMatchMarkersActive(const Text&,
-                                 unsigned start_offset,
-                                 unsigned end_offset,
+                                 wtf_size_t start_offset,
+                                 wtf_size_t end_offset,
                                  bool);
 
   // TODO(rlanday): can these methods for retrieving markers be consolidated
@@ -143,8 +157,8 @@ class CORE_EXPORT DocumentMarkerController final
   // are provided as to which one). Otherwise, this method will return null.
   DocumentMarker* FirstMarkerIntersectingOffsetRange(
       const Text&,
-      unsigned start_offset,
-      unsigned end_offset,
+      wtf_size_t start_offset,
+      wtf_size_t end_offset,
       DocumentMarker::MarkerTypes);
   // Wrappers for FirstMarker functions that return the DocumentMarkerGroup for
   // the found DocumentMarker.
@@ -153,11 +167,6 @@ class CORE_EXPORT DocumentMarkerController final
       DocumentMarker::MarkerTypes);
   DocumentMarkerGroup* FirstMarkerGroupIntersectingEphemeralRange(
       const EphemeralRange&,
-      DocumentMarker::MarkerTypes);
-  DocumentMarkerGroup* FirstMarkerGroupIntersectingOffsetRange(
-      const Text&,
-      unsigned start_offset,
-      unsigned end_offset,
       DocumentMarker::MarkerTypes);
   // If the given position is either at the boundary or inside a word, expands
   // the position to the surrounding word and then looks for all markers having
@@ -179,58 +188,111 @@ class CORE_EXPORT DocumentMarkerController final
   DocumentMarkerVector MarkersFor(
       const Text&,
       DocumentMarker::MarkerTypes = DocumentMarker::MarkerTypes::All()) const;
+  DocumentMarkerVector MarkersFor(const Text&,
+                                  DocumentMarker::MarkerType,
+                                  wtf_size_t start_offset,
+                                  wtf_size_t end_offset) const;
   DocumentMarkerVector Markers() const;
-  DocumentMarkerVector CustomHighlightMarkersNotOverlapping(const Text&) const;
-  DocumentMarkerVector ComputeMarkersToPaint(const Text&) const;
 
+  // Apply a function to all the markers of a particular type. The
+  // function receives the text node and marker, for every <node,marker>
+  // pair in the marker set. The function MUST NOT modify marker offsets, as
+  // doing so may violate the requirement that markers be sorted.
+  void ApplyToMarkersOfType(
+      base::FunctionRef<void(const Text&, DocumentMarker*)>,
+      DocumentMarker::MarkerType);
+
+  DocumentMarkerVector ComputeMarkersToPaint(const Text&) const;
+  void MergeOverlappingMarkers(DocumentMarker::MarkerType);
+
+  bool HasAnyMarkersForText(const Text&) const;
   bool PossiblyHasTextMatchMarkers() const;
   Vector<gfx::Rect> LayoutRectsForTextMatchMarkers();
   void InvalidateRectsForAllTextMatchMarkers();
   void InvalidateRectsForTextMatchMarkersInNode(const Text&);
 
-  void Trace(Visitor*) const override;
+  void Trace(Visitor*) const;
 
 #if DCHECK_IS_ON()
   void ShowMarkers() const;
 #endif
 
-  // SynchronousMutationObserver
-  // For performance, observer is only registered when
-  // |possibly_existing_marker_types_| is non-zero.
   void DidUpdateCharacterData(CharacterData*,
-                              unsigned offset,
-                              unsigned old_length,
-                              unsigned new_length) final;
+                              wtf_size_t offset,
+                              wtf_size_t old_length,
+                              wtf_size_t new_length);
+
+  void StartGlicMarkerAnimationIfNeeded();
+
+  void ContinueGlicMarkerAnimation(base::TimeTicks tick);
 
  private:
+  // TODO(https://crbug.com/41406914): Remove once we migrate to
+  // scroll-promises.
+  friend class AnnotationAgentImplTest;
+
   void AddMarkerInternal(
       const EphemeralRange&,
       base::FunctionRef<DocumentMarker*(int, int)> create_marker_from_offsets,
-      const TextIteratorBehavior& iterator_behavior = {});
+      const TextIteratorBehavior& iterator_behavior = {},
+      base::FunctionRef<void(const Element&)>* on_element_node = nullptr);
   void AddMarkerToNode(const Text&, DocumentMarker*);
   DocumentMarkerGroup* GetMarkerGroupForMarker(const DocumentMarker* marker);
 
-  using MarkerLists = HeapVector<Member<DocumentMarkerList>,
-                                 DocumentMarker::kMarkerTypeIndexesCount>;
-  using MarkerMap = HeapHashMap<WeakMember<const Text>, Member<MarkerLists>>;
-  static Member<DocumentMarkerList>& ListForType(MarkerLists*,
-                                                 DocumentMarker::MarkerType);
+  // We have a hash map per marker type, mapping from nodes to a list of markers
+  // for that node.
+  using MarkerList = Member<DocumentMarkerList>;
+  using MarkerMap = GCedHeapHashMap<WeakMember<const Text>, MarkerList>;
+  using MarkerMaps = HeapVector<Member<MarkerMap>>;
+
   bool PossiblyHasMarkers(DocumentMarker::MarkerTypes) const;
   bool PossiblyHasMarkers(DocumentMarker::MarkerType) const;
-  void RemoveMarkersFromList(MarkerMap::iterator, DocumentMarker::MarkerTypes);
+  void RemoveMarkersFromList(MarkerMap::iterator, DocumentMarker::MarkerType);
   void RemoveMarkers(TextIterator&, DocumentMarker::MarkerTypes);
   void RemoveMarkersInternal(const Text&,
-                             unsigned start_offset,
-                             int length,
-                             DocumentMarker::MarkerTypes);
-  // Searches `markers_` for `key`. Returns the mapped value if it is present,
-  // otherwise nullptr. Crashes if the value is present and it is nullptr.
-  MarkerLists* FindMarkers(const Text* key) const;
+                             wtf_size_t start_offset,
+                             wtf_size_t length,
+                             DocumentMarker::MarkerType);
+  // Searches marker_map for key. Returns the mapped value if it is present,
+  // otherwise nullptr.
+  DocumentMarkerList* FindMarkers(const MarkerMap* marker_map,
+                                  const Text* key) const;
+  // Find the marker list of the given type for the given text node,
+  // or nullptr if the node has no markers of that type.
+  DocumentMarkerList* FindMarkersForType(DocumentMarker::MarkerType,
+                                         const Text* key) const;
 
-  // Called after weak processing of |markers_| is done.
-  void DidProcessMarkerMap(const LivenessBroker&);
+  // Called when a node is removed from a marker map.
+  void DidRemoveNodeFromMap(DocumentMarker::MarkerType);
 
-  MarkerMap markers_;
+  // Returns a boolean indicating if the last frame is reached.
+  bool UpdateGlicMarkerOpacity(base::TimeDelta duration);
+
+  void InvalidatePaintForGlicMarkers();
+
+  // TODO(https://crbug.com/41406914): The state can be removed when we migrate
+  // to the scroll-promises. With scroll-promises we are guaranteed to call
+  // `StartGlicAnimation()` only once and only for the targeted programmatic
+  // scroll.
+  //
+  // Glic animations are highlight animations for `GlicMarker`s. Each
+  // `GlicMarker`s are always removed before they are added to guarantee they
+  // are only animated once.
+  enum class GlicAnimationState {
+    // The default state.
+    kNotStarted = 0,
+    // The animation is running.
+    kRunning,
+    // Finished. Note we don't allow the animation to restart in this case. We
+    // rely on the markers to be removed first, which resets the state back to
+    // `kNotStarted`.
+    kFinished,
+  };
+  GlicAnimationState glic_animation_state_ = GlicAnimationState::kNotStarted;
+
+  std::optional<base::TimeTicks> glic_marker_animation_start_;
+
+  MarkerMaps markers_;
 
   using MarkerGroup = HeapHashMap<WeakMember<const DocumentMarker>,
                                   Member<DocumentMarkerGroup>>;

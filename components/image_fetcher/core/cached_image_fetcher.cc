@@ -6,13 +6,15 @@
 
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/strings/string_view_util.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "base/timer/elapsed_timer.h"
+#include "base/trace_event/trace_event.h"
 #include "components/image_fetcher/core/cache/image_cache.h"
 #include "components/image_fetcher/core/image_decoder.h"
 #include "components/image_fetcher/core/image_fetcher_metrics_reporter.h"
@@ -37,6 +39,9 @@ struct CachedImageFetcherRequest {
 
   // The start time of the fetch sequence.
   base::Time start_time;
+
+  // Unique id for this request, used for tracing
+  uint64_t flow_id;
 };
 
 namespace {
@@ -47,6 +52,7 @@ void DataCallbackIfPresent(ImageDataFetcherCallback data_callback,
   if (data_callback.is_null()) {
     return;
   }
+  TRACE_EVENT("ui", "CachedImageFetcher Image Data Callback");
   std::move(data_callback).Run(image_data, metadata);
 }
 
@@ -56,23 +62,27 @@ void ImageCallbackIfPresent(ImageFetcherCallback image_callback,
   if (image_callback.is_null()) {
     return;
   }
+  TRACE_EVENT("ui", "CachedImageFetcher Image Callback");
   std::move(image_callback).Run(image, metadata);
 }
 
 std::string EncodeSkBitmapToPNG(const std::string& uma_client_name,
-                                const SkBitmap& bitmap) {
-  std::vector<unsigned char> encoded_data;
-  bool result = gfx::PNGCodec::Encode(
+                                const SkBitmap& bitmap,
+                                uint64_t request_flow_id) {
+  TRACE_EVENT("ui", "CachedImageFetcher::EncodeSkBitmapToPNG",
+              perfetto::Flow::ProcessScoped(request_flow_id));
+  std::optional<std::vector<uint8_t>> encoded_data = gfx::PNGCodec::Encode(
       static_cast<const unsigned char*>(bitmap.getPixels()),
-      gfx::PNGCodec::FORMAT_RGBA, gfx::Size(bitmap.width(), bitmap.height()),
-      static_cast<int>(bitmap.rowBytes()), /* discard_transparency */ false,
-      std::vector<gfx::PNGCodec::Comment>(), &encoded_data);
-  if (!result) {
+      gfx::PNGCodec::FORMAT_SkBitmap,
+      gfx::Size(bitmap.width(), bitmap.height()),
+      static_cast<int>(bitmap.rowBytes()), /*discard_transparency=*/false,
+      std::vector<gfx::PNGCodec::Comment>());
+  if (!encoded_data) {
     ImageFetcherMetricsReporter::ReportEvent(
         uma_client_name, ImageFetcherEvent::kTranscodingError);
     return "";
   } else {
-    return std::string(encoded_data.begin(), encoded_data.end());
+    return std::string(base::as_string_view(encoded_data.value()));
   }
 }
 
@@ -100,12 +110,16 @@ void CachedImageFetcher::FetchImageAndData(
     ImageDataFetcherCallback image_data_callback,
     ImageFetcherCallback image_callback,
     ImageFetcherParams params) {
+  uint64_t request_flow_id =
+      reinterpret_cast<uint64_t>(this) ^ ++request_sequence_number_;
+  TRACE_EVENT("ui", "CachedImageFetcher::FetchImageAndData",
+              perfetto::Flow::ProcessScoped(request_flow_id));
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   // TODO(wylieb): Inject a clock for better testability.
   CachedImageFetcherRequest request = {
       image_url, std::move(params),
       /* cache_hit_before_network_request */ false,
-      /* start_time */ base::Time::Now()};
+      /* start_time */ base::Time::Now(), request_flow_id};
 
   ImageFetcherMetricsReporter::ReportEvent(request.params.uma_client_name(),
                                            ImageFetcherEvent::kImageRequest);
@@ -131,6 +145,8 @@ void CachedImageFetcher::OnImageFetchedFromCache(
     ImageFetcherCallback image_callback,
     bool cache_result_needs_transcoding,
     std::string image_data) {
+  TRACE_EVENT("ui", "CachedImageFetcher::OnImageFetchedFromCache",
+              perfetto::Flow::ProcessScoped(request.flow_id));
   if (image_data.empty()) {
     ImageFetcherMetricsReporter::ReportEvent(request.params.uma_client_name(),
                                              ImageFetcherEvent::kCacheMiss);
@@ -150,6 +166,7 @@ void CachedImageFetcher::OnImageFetchedFromCache(
     if (!image_callback.is_null() ||
         (cache_result_needs_transcoding &&
          !request.params.allow_needs_transcoding_file())) {
+      TRACE_EVENT("ui", "CachedImageFetcher::OnImageFetchedFromCache Decode");
       auto* data_decoder = request.params.data_decoder();
       GetImageDecoder()->DecodeImage(
           image_data, gfx::Size(), data_decoder,
@@ -167,6 +184,8 @@ void CachedImageFetcher::OnImageDecodedFromCache(
     ImageFetcherCallback image_callback,
     bool cache_result_needs_transcoding,
     const gfx::Image& image) {
+  TRACE_EVENT("ui", "CachedImageFetcher::OnImageDecodedFromCache",
+              perfetto::Flow::ProcessScoped(request.flow_id));
   if (image.IsEmpty()) {
     ImageFetcherMetricsReporter::ReportEvent(
         request.params.uma_client_name(),
@@ -211,6 +230,8 @@ void CachedImageFetcher::FetchImageFromNetwork(
     CachedImageFetcherRequest request,
     ImageDataFetcherCallback image_data_callback,
     ImageFetcherCallback image_callback) {
+  TRACE_EVENT("ui", "CachedImageFetcher::FetchImageFromNetwork",
+              perfetto::Flow::ProcessScoped(request.flow_id));
   const GURL& url = request.url;
 
   ImageDataFetcherCallback wrapper_data_callback;
@@ -264,6 +285,8 @@ void CachedImageFetcher::OnImageFetchedForTranscoding(
     ImageFetcherCallback image_callback,
     const gfx::Image& image,
     const RequestMetadata& request_metadata) {
+  TRACE_EVENT("ui", "CachedImageFetcher::OnImageFetchedForTranscoding",
+              perfetto::Flow::ProcessScoped(request.flow_id));
   ImageCallbackIfPresent(std::move(image_callback), image, request_metadata);
 
   // Report to different histograms depending upon if there was a cache hit.
@@ -293,11 +316,13 @@ void CachedImageFetcher::EncodeAndStoreData(bool cache_result_needs_transcoding,
 
     image_cache_->DeleteImage(request.url.spec());
   } else {
+    // Copy of flow_id is necessary to avoid use after move in bindings below.
+    auto flow_id = request.flow_id;
     std::string uma_client_name = request.params.uma_client_name();
     // Post a task to another thread to encode the image data downloaded.
     base::ThreadPool::PostTaskAndReplyWithResult(
         FROM_HERE,
-        base::BindOnce(&EncodeSkBitmapToPNG, uma_client_name, *bitmap),
+        base::BindOnce(&EncodeSkBitmapToPNG, uma_client_name, *bitmap, flow_id),
         base::BindOnce(&CachedImageFetcher::StoreData,
                        weak_ptr_factory_.GetWeakPtr(),
                        cache_result_needs_transcoding, is_image_data_transcoded,
@@ -309,6 +334,8 @@ void CachedImageFetcher::StoreData(bool cache_result_needs_transcoding,
                                    bool is_image_data_transcoded,
                                    CachedImageFetcherRequest request,
                                    std::string image_data) {
+  TRACE_EVENT("ui", "CachedImageFetcher::StoreData",
+              perfetto::Flow::ProcessScoped(request.flow_id));
   std::string url = request.url.spec();
   // If the image is empty, delete the image.
   if (image_data.empty()) {
@@ -325,8 +352,8 @@ void CachedImageFetcher::StoreData(bool cache_result_needs_transcoding,
         return;
     }
 
-    // |needs_transcoding| is only true when the image to save isn't transcoded
-    // and |allow_needs_transcoding_file()| is true (set by
+    // `needs_transcoding` is only true when the image to save isn't transcoded
+    // and `allow_needs_transcoding_file()` is true (set by
     // ReducedModeImageFetcher).
     bool needs_transcoding = !is_image_data_transcoded &&
                              request.params.allow_needs_transcoding_file();

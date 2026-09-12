@@ -5,17 +5,17 @@
 #ifndef COMPONENTS_AUTOFILL_CORE_BROWSER_LOGGING_LOG_MANAGER_H_
 #define COMPONENTS_AUTOFILL_CORE_BROWSER_LOGGING_LOG_MANAGER_H_
 
+#include <concepts>
 #include <memory>
-#include <string>
-#include <type_traits>
 
 #include "base/functional/callback.h"
 #include "base/types/pass_key.h"
 #include "components/autofill/core/browser/logging/log_buffer_submitter.h"
+#include "components/autofill/core/common/logging/log_buffer.h"
 #include "components/autofill/core/common/logging/log_macros.h"
 
 namespace base {
-class Value;
+class DictValue;
 }
 
 namespace autofill {
@@ -39,15 +39,14 @@ class LogManager {
 
   virtual ~LogManager() = default;
 
-  // Returns true if logs recorded via LogTextMessage will be displayed, and
-  // false otherwise.
+  // Returns whether logs recorded via `Log()` will be displayed.
   virtual bool IsLoggingActive() const = 0;
 
   // This is the preferred way to submitting log entries.
   virtual LogBufferSubmitter Log() = 0;
 
   // Emits the log entry.
-  virtual void ProcessLog(base::Value::Dict node,
+  virtual void ProcessLog(base::DictValue node,
                           base::PassKey<LogBufferSubmitter>) = 0;
 };
 
@@ -83,11 +82,8 @@ inline LogBuffer::IsActive IsLoggingActive(LogManager* log_manager) {
 namespace internal {
 
 // Traits for LOG_AF() macro for `LogManager*`.
-template <typename T>
-struct LoggerTraits<
-    T,
-    typename std::enable_if_t<std::is_convertible_v<decltype(std::declval<T>()),
-                                                    const LogManager*>>> {
+template <std::convertible_to<const LogManager*> T>
+struct LoggerTraits<T> {
   static bool active(const LogManager* log_manager) {
     return log_manager && log_manager->IsLoggingActive();
   }
@@ -98,11 +94,8 @@ struct LoggerTraits<
 };
 
 // Traits for LOG_AF() macro for `LogManager&`.
-template <typename T>
-struct LoggerTraits<
-    T,
-    typename std::enable_if_t<std::is_convertible_v<decltype(std::declval<T>()),
-                                                    const LogManager&>>> {
+template <std::convertible_to<const LogManager&> T>
+struct LoggerTraits<T> {
   static bool active(const LogManager& log_manager) {
     return log_manager.IsLoggingActive();
   }

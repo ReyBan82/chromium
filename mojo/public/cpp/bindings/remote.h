@@ -6,6 +6,7 @@
 #define MOJO_PUBLIC_CPP_BINDINGS_REMOTE_H_
 
 #include <cstdint>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -18,9 +19,12 @@
 #include "mojo/public/cpp/bindings/lib/interface_ptr_state.h"
 #include "mojo/public/cpp/bindings/pending_flush.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
+#include "mojo/public/cpp/bindings/runtime_features.h"
 #include "mojo/public/cpp/system/message_pipe.h"
 
 namespace mojo {
+
+class MessageFilter;
 
 // A Remote is used to issue Interface method calls to a single connected
 // Receiver or PendingReceiver. The Remote must be bound in order to issue those
@@ -143,8 +147,9 @@ class Remote {
   // If invoked at all, |handler| will be scheduled asynchronously using the
   // Remote's bound SequencedTaskRunner.
   void set_disconnect_handler(base::OnceClosure handler) {
-    if (is_connected())
+    if (is_connected()) {
       internal_state_.set_connection_error_handler(std::move(handler));
+    }
   }
 
   // Like above but also receives extra user-defined metadata about why the
@@ -216,10 +221,20 @@ class Remote {
   }
 
   // Similar to the method above, but also specifies a disconnect reason.
-  void ResetWithReason(uint32_t custom_reason, const std::string& description) {
-    if (internal_state_.is_bound())
+  void ResetWithReason(uint32_t custom_reason, std::string_view description) {
+    if (internal_state_.is_bound()) {
       internal_state_.CloseWithReason(custom_reason, description);
+    }
     reset();
+  }
+
+  // Sets the message filter to be notified of each outgoing message before
+  // dispatch. If a filter returns |false| from WillDispatch(), the message is
+  // not dispatched and the pip is closed. Filters cannot be removed once
+  // added and only one can be set.
+  void SetFilter(std::unique_ptr<MessageFilter> filter) {
+    CHECK(is_bound()) << "Remote must be bound before setting the filter";
+    internal_state_.SetFilter(std::move(filter));
   }
 
   // Returns the version of Interface used by this Remote. Defaults to 0 but can
@@ -247,6 +262,10 @@ class Remote {
       scoped_refptr<base::SequencedTaskRunner> task_runner) {
     DCHECK(!is_bound()) << "Remote for " << Interface::Name_
                         << " is already bound";
+    if (!internal::GetRuntimeFeature_ExpectEnabled<Interface>()) {
+      reset();
+      return PendingReceiver<Interface>();
+    }
     MessagePipe pipe;
     Bind(PendingRemote<Interface>(std::move(pipe.handle0), 0),
          std::move(task_runner));
@@ -277,7 +296,10 @@ class Remote {
       reset();
       return;
     }
-
+    if (!internal::GetRuntimeFeature_ExpectEnabled<Interface>()) {
+      reset();
+      return;
+    }
     internal_state_.Bind(pending_remote.internal_state(),
                          std::move(task_runner));
 

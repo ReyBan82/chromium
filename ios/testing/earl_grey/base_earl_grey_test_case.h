@@ -5,15 +5,22 @@
 #ifndef IOS_TESTING_EARL_GREY_BASE_EARL_GREY_TEST_CASE_H_
 #define IOS_TESTING_EARL_GREY_BASE_EARL_GREY_TEST_CASE_H_
 
-#import <XCTest/XCTest.h>
-
+#import "ios/testing/base_xc_test_case.h"
 #import "ios/testing/earl_grey/app_launch_configuration.h"
 
 // Base class for all Earl Grey tests.
 // Provides EG1-compatible start-of-test-case hooks for EG2 tests,
 // as well as handling common EG2 app-launching logic.
 // This class also sets up code coverage by default.
-@interface BaseEarlGreyTestCase : XCTestCase
+@interface BaseEarlGreyTestCase : BaseXCTestCase
+
+// When enabled, the app starts without loading its normal UI, and each
+// test can present the UI that will be tested.
+- (BOOL)loadMinimalAppUI;
+
+// When enabled, restart the test host between each test, and wipe the host
+// home directory to mimic a new install.
++ (BOOL)forceRestartAndWipe;
 
 // Invoked once per test case after launching test app from -setUp.
 // Subclasses can use this method to perform class level setup instead of
@@ -25,6 +32,9 @@
 
 // Invoked upon starting each test method in a test case.
 - (void)setUp NS_REQUIRES_SUPER;
+
+// Invoked upon end of each test case.
++ (void)tearDown NS_REQUIRES_SUPER;
 
 // Provides an |AppLaunchConfiguration| for host app used across a TestCase.
 // Subclasses must override this method to change app launching configuration

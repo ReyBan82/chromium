@@ -9,13 +9,16 @@
 #include <string>
 #include <vector>
 
+#include "base/byte_size.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
+#include "base/types/expected.h"
 #include "components/offline_pages/core/archive_validator.h"
 #include "components/offline_pages/core/offline_page_item.h"
 #include "components/offline_pages/core/request_header/offline_page_header.h"
+#include "net/base/net_errors.h"
 
 namespace base {
 class FilePath;
@@ -45,76 +48,6 @@ namespace offline_pages {
 // * "X-Chrome-offline" custom header.
 class OfflinePageRequestHandler {
  public:
-  // This enum is used for UMA reporting. It contains all possible outcomes of
-  // handling requests that might service offline page in different network
-  // conditions. Generally one of these outcomes will happen.
-  // The fringe errors (like no OfflinePageModel, etc.) are not reported due
-  // to their low probability.
-  // NOTE: because this is used for UMA reporting, these values should not be
-  // changed or reused; new values should be ended immediately before the MAX
-  // value. Make sure to update the histogram enum
-  // (OfflinePagesAggregatedRequestResult in enums.xml) accordingly.
-  // Public for testing.
-  enum class AggregatedRequestResult {
-    SHOW_OFFLINE_ON_DISCONNECTED_NETWORK,
-    PAGE_NOT_FOUND_ON_DISCONNECTED_NETWORK,
-    SHOW_OFFLINE_ON_FLAKY_NETWORK,
-    PAGE_NOT_FOUND_ON_FLAKY_NETWORK,
-    SHOW_OFFLINE_ON_PROHIBITIVELY_SLOW_NETWORK,
-    PAGE_NOT_FOUND_ON_PROHIBITIVELY_SLOW_NETWORK,
-    PAGE_NOT_FRESH_ON_PROHIBITIVELY_SLOW_NETWORK,
-    SHOW_OFFLINE_ON_CONNECTED_NETWORK,
-    PAGE_NOT_FOUND_ON_CONNECTED_NETWORK,
-    NO_TAB_ID,
-    NO_WEB_CONTENTS,
-    SHOW_NET_ERROR_PAGE,
-    REDIRECTED_ON_DISCONNECTED_NETWORK,
-    REDIRECTED_ON_FLAKY_NETWORK,
-    REDIRECTED_ON_PROHIBITIVELY_SLOW_NETWORK,
-    REDIRECTED_ON_CONNECTED_NETWORK,
-    DIGEST_MISMATCH_ON_DISCONNECTED_NETWORK,
-    DIGEST_MISMATCH_ON_FLAKY_NETWORK,
-    DIGEST_MISMATCH_ON_PROHIBITIVELY_SLOW_NETWORK,
-    DIGEST_MISMATCH_ON_CONNECTED_NETWORK,
-    FILE_NOT_FOUND,
-    AGGREGATED_REQUEST_RESULT_MAX
-  };
-
-  // This enum is used for UMA reporting of the UI location from which an
-  // offline page was launched.
-  // NOTE: because this is used for UMA reporting, these values should not be
-  // changed or reused; new values should be appended immediately before COUNT.
-  // Make sure to update the histogram enum (OfflinePagesAcessEntryPoint in
-  // enums.xml) accordingly.
-  enum class AccessEntryPoint {
-    // Any other cases not listed below.
-    UNKNOWN = 0,
-    // Launched from the NTP suggestions or bookmarks.
-    NTP_SUGGESTIONS_OR_BOOKMARKS = 1,
-    // Launched from Downloads home.
-    DOWNLOADS = 2,
-    // Launched from the omnibox.
-    OMNIBOX = 3,
-    // Launched from Chrome Custom Tabs.
-    CCT = 4,
-    // Launched due to clicking a link in a page.
-    LINK = 5,
-    // Launched due to hitting the reload button or hitting enter in the
-    // omnibox.
-    RELOAD = 6,
-    // Launched due to clicking a notification.
-    NOTIFICATION = 7,
-    // Launched due to processing a file URL intent to view MHTML file.
-    FILE_URL_INTENT = 8,
-    // Launched due to processing a content URL intent to view MHTML content.
-    CONTENT_URL_INTENT = 9,
-    // Launched due to clicking "Open" link in the progress bar.
-    PROGRESS_BAR = 10,
-    // Launched from content suggestion on the net error page.
-    NET_ERROR_PAGE = 11,
-    COUNT  // Must be last.
-  };
-
   enum class NetworkState {
     // No network connection.
     DISCONNECTED_NETWORK,
@@ -184,7 +117,7 @@ class OfflinePageRequestHandler {
     virtual TabIdGetter GetTabIdGetter() const = 0;
 
    protected:
-    virtual ~Delegate() {}
+    virtual ~Delegate() = default;
   };
 
   class ThreadSafeArchiveValidator final
@@ -197,10 +130,6 @@ class OfflinePageRequestHandler {
     friend class base::RefCountedThreadSafe<ThreadSafeArchiveValidator>;
     ~ThreadSafeArchiveValidator() override = default;
   };
-
-  // Reports the aggregated result combining both request result and network
-  // state.
-  static void ReportAggregatedRequestResult(AggregatedRequestResult result);
 
   OfflinePageRequestHandler(
       const GURL& url,
@@ -241,13 +170,12 @@ class OfflinePageRequestHandler {
 
   NetworkState GetNetworkState() const;
 
-  AccessEntryPoint GetAccessEntryPoint() const;
-
   const OfflinePageItem& GetCurrentOfflinePage() const;
 
   bool IsProcessingFileUrlIntent() const;
   bool IsProcessingContentUrlIntent() const;
   bool IsProcessingFileOrContentUrlIntent() const;
+  base::FilePath GetIntentFilePath() const;
 
   void OnTrustedOfflinePageFound();
   void VisitTrustedOfflinePage();
@@ -255,30 +183,27 @@ class OfflinePageRequestHandler {
 
   void OpenFile(const base::FilePath& file_path,
                 const base::RepeatingCallback<void(int)>& callback);
-  void UpdateDigestOnBackground(
-      scoped_refptr<net::IOBuffer> buffer,
-      size_t len,
-      base::OnceCallback<void(void)> digest_updated_callback);
+  void UpdateDigestOnBackground(scoped_refptr<net::IOBuffer> buffer,
+                                size_t len,
+                                base::OnceClosure digest_updated_callback);
   void FinalizeDigestOnBackground(
       base::OnceCallback<void(const std::string&)> digest_finalized_callback);
 
   // All the work related to validations.
   void ValidateFile();
   void GetFileSizeForValidation();
-  void DidGetFileSizeForValidation(const int64_t* actual_file_size);
+  void DidGetFileSizeForValidation(std::optional<int64_t> file_size);
   void DidOpenForValidation(int result);
   void ReadForValidation();
-  void DidReadForValidation(int result);
+  void DidReadForValidation(base::expected<base::ByteSize, net::Error> result);
   void DidComputeActualDigestForValidation(const std::string& actual_digest);
   void OnFileValidationDone(FileValidationResult result);
 
   // All the work related to serving from the archive file.
   void DidOpenForServing(int result);
-  void DidSeekForServing(int64_t result);
-  void DidReadForServing(scoped_refptr<net::IOBuffer> buf, int result);
-  void NotifyReadRawDataComplete(int result);
-  void DidComputeActualDigestForServing(int result,
-                                        const std::string& actual_digest);
+  void DidSeekForServing(base::expected<int64_t, net::Error> result);
+  void DidReadForServing(scoped_refptr<net::IOBuffer> buf,
+                         base::expected<base::ByteSize, net::Error> result);
 
   GURL url_;
   raw_ptr<Delegate> delegate_;

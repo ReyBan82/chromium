@@ -23,14 +23,14 @@ async function getDownloads() {
   return new Promise((resolve, reject) => {
     chrome.fileManagerPrivate.getVolumeMetadataList((volumeMetadaList) => {
       const downloads =
-          volumeMetadaList.filter((v) => v.volumeId.startsWith('downloads:'))
+          volumeMetadaList.filter((v) => v.volumeId.startsWith('downloads:'));
       if (downloads.length !== 1) {
         reject(`Expected 1 downloads directory found ${downloads.length}`);
       } else {
         chrome.fileSystem.requestFileSystem(
             {
               volumeId: downloads[0].volumeId,
-              writable: !downloads[0].isReadOnly
+              writable: !downloads[0].isReadOnly,
             },
             (fileSystem) => {
               resolve(fileSystem.root);
@@ -112,7 +112,7 @@ chrome.test.runTests([
             query: 'bar',
             types: 'ALL',
             maxResults: 10,
-            timestamp: 1579089600000 - delta,  // Jan 15 2020, noon - 1s
+            modifiedTimestamp: 1579089600000 - delta,  // Jan 15 2020, noon - 1s
           },
           (entryList) => {
             resolve(entryList);
@@ -125,21 +125,20 @@ chrome.test.runTests([
             query: 'bar',
             types: 'ALL',
             maxResults: 10,
-            timestamp: 1577880000000 - delta,  // Jan 01 2020, noon - 1s
+            modifiedTimestamp: 1577880000000 - delta,  // Jan 01 2020, noon - 1s
           },
           (entryList) => {
             resolve(entryList);
           });
     });
-    assertHasEntries(
-        ['/bar_01012020.jpg', '/bar_15012020.jpg'], jan01Entries);
+    assertHasEntries(['/bar_01012020.jpg', '/bar_15012020.jpg'], jan01Entries);
     const noEntries = await new Promise((resolve) => {
       chrome.fileManagerPrivate.searchFiles(
           {
             query: 'bar',
             types: 'ALL',
             maxResults: 10,
-            timestamp: 1579089600000 + delta,  // Jan 15 2020, noon + 1s
+            modifiedTimestamp: 1579089600000 + delta,  // Jan 15 2020, noon + 1s
           },
           (entryList) => {
             resolve(entryList);

@@ -6,19 +6,54 @@
 
 #include <stddef.h>
 
+#include <array>
+
 #include "base/compiler_specific.h"
+#include "base/message_loop/message_pump_type.h"
 #include "base/process/process.h"
 #include "base/synchronization/waitable_event.h"
+#include "base/task/thread_type.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/threading/thread.h"
 #include "base/threading/threading_features.h"
+#include "build/blink_buildflags.h"
 #include "build/build_config.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+namespace base {
+std::ostream& operator<<(std::ostream& os, ThreadType type) {
+  return os << ThreadTypeToString(type);
+}
+
+std::ostream& operator<<(std::ostream& os, MessagePumpType type) {
+  switch (type) {
+    case MessagePumpType::DEFAULT:
+      return os << "DEFAULT";
+    case MessagePumpType::UI:
+      return os << "UI";
+    case MessagePumpType::CUSTOM:
+      return os << "CUSTOM";
+    case MessagePumpType::IO:
+      return os << "IO";
+#if BUILDFLAG(IS_ANDROID)
+    case MessagePumpType::JAVA:
+      return os << "JAVA";
+#endif
+#if BUILDFLAG(IS_APPLE)
+    case MessagePumpType::NS_RUNLOOP:
+      return os << "NS_RUNLOOP";
+#endif
+  }
+  return os << "Unknown(" << static_cast<int>(type) << ")";
+}
+}  // namespace base
 
 #if BUILDFLAG(IS_POSIX)
 #include "base/threading/platform_thread_internal_posix.h"
 #elif BUILDFLAG(IS_WIN)
 #include <windows.h>
+
 #include "base/threading/platform_thread_win.h"
 #endif
 
@@ -26,6 +61,7 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>
+
 #include "base/mac/mac_util.h"
 #include "base/metrics/field_trial_params.h"
 #include "base/time/time.h"
@@ -39,6 +75,13 @@
 #include <unistd.h>
 #endif
 
+#if BUILDFLAG(IS_ANDROID)
+#include "base/system/sys_info.h"
+#endif
+
+using ::testing::_;
+using ::testing::InSequence;
+
 namespace base {
 
 // Trivial tests that thread runs and doesn't crash on create, join, or detach -
@@ -47,8 +90,9 @@ namespace {
 
 class TrivialThread : public PlatformThread::Delegate {
  public:
-  TrivialThread() : run_event_(WaitableEvent::ResetPolicy::MANUAL,
-                               WaitableEvent::InitialState::NOT_SIGNALED) {}
+  TrivialThread()
+      : run_event_(WaitableEvent::ResetPolicy::MANUAL,
+                   WaitableEvent::InitialState::NOT_SIGNALED) {}
 
   TrivialThread(const TrivialThread&) = delete;
   TrivialThread& operator=(const TrivialThread&) = delete;
@@ -74,17 +118,21 @@ TEST(PlatformThreadTest, TrivialJoin) {
 }
 
 TEST(PlatformThreadTest, TrivialJoinTimesTen) {
-  TrivialThread thread[10];
-  PlatformThreadHandle handle[std::size(thread)];
+  std::array<TrivialThread, 10> thread;
+  std::array<PlatformThreadHandle, std::size(thread)> handle;
 
-  for (auto& n : thread)
+  for (auto& n : thread) {
     ASSERT_FALSE(n.run_event().IsSignaled());
-  for (size_t n = 0; n < std::size(thread); n++)
+  }
+  for (size_t n = 0; n < std::size(thread); n++) {
     ASSERT_TRUE(PlatformThread::Create(0, &thread[n], &handle[n]));
-  for (auto n : handle)
+  }
+  for (auto n : handle) {
     PlatformThread::Join(n);
-  for (auto& n : thread)
+  }
+  for (auto& n : thread) {
     ASSERT_TRUE(n.run_event().IsSignaled());
+  }
 }
 
 // The following detach tests are by nature racy. The run_event approximates the
@@ -101,17 +149,19 @@ TEST(PlatformThreadTest, TrivialDetach) {
 }
 
 TEST(PlatformThreadTest, TrivialDetachTimesTen) {
-  TrivialThread thread[10];
-  PlatformThreadHandle handle[std::size(thread)];
+  std::array<TrivialThread, 10> thread;
+  std::array<PlatformThreadHandle, std::size(thread)> handle;
 
-  for (auto& n : thread)
+  for (auto& n : thread) {
     ASSERT_FALSE(n.run_event().IsSignaled());
+  }
   for (size_t n = 0; n < std::size(thread); n++) {
     ASSERT_TRUE(PlatformThread::Create(0, &thread[n], &handle[n]));
     PlatformThread::Detach(handle[n]);
   }
-  for (auto& n : thread)
+  for (auto& n : thread) {
     n.run_event().Wait();
+  }
 }
 
 // Tests of basic thread functions ---------------------------------------------
@@ -125,8 +175,7 @@ class FunctionTestThread : public PlatformThread::Delegate {
         termination_ready_(WaitableEvent::ResetPolicy::MANUAL,
                            WaitableEvent::InitialState::NOT_SIGNALED),
         terminate_thread_(WaitableEvent::ResetPolicy::MANUAL,
-                          WaitableEvent::InitialState::NOT_SIGNALED),
-        done_(false) {}
+                          WaitableEvent::InitialState::NOT_SIGNALED) {}
 
   FunctionTestThread(const FunctionTestThread&) = delete;
   FunctionTestThread& operator=(const FunctionTestThread&) = delete;
@@ -162,9 +211,7 @@ class FunctionTestThread : public PlatformThread::Delegate {
     return thread_id_;
   }
 
-  bool IsRunning() const {
-    return termination_ready_.IsSignaled() && !done_;
-  }
+  bool IsRunning() const { return termination_ready_.IsSignaled() && !done_; }
 
   // Blocks until this thread is started and ready to be terminated.
   void WaitForTerminationReady() { termination_ready_.Wait(); }
@@ -181,7 +228,7 @@ class FunctionTestThread : public PlatformThread::Delegate {
 
   mutable WaitableEvent termination_ready_;
   WaitableEvent terminate_thread_;
-  bool done_;
+  bool done_ = false;
 };
 
 }  // namespace
@@ -209,16 +256,19 @@ TEST(PlatformThreadTest, Function) {
 TEST(PlatformThreadTest, FunctionTimesTen) {
   PlatformThreadId main_thread_id = PlatformThread::CurrentId();
 
-  FunctionTestThread thread[10];
-  PlatformThreadHandle handle[std::size(thread)];
+  std::array<FunctionTestThread, 10> thread;
+  std::array<PlatformThreadHandle, std::size(thread)> handle;
 
-  for (const auto& n : thread)
+  for (const auto& n : thread) {
     ASSERT_FALSE(n.IsRunning());
+  }
 
-  for (size_t n = 0; n < std::size(thread); n++)
+  for (size_t n = 0; n < std::size(thread); n++) {
     ASSERT_TRUE(PlatformThread::Create(0, &thread[n], &handle[n]));
-  for (auto& n : thread)
+  }
+  for (auto& n : thread) {
     n.WaitForTerminationReady();
+  }
 
   for (size_t n = 0; n < std::size(thread); n++) {
     ASSERT_TRUE(thread[n].IsRunning());
@@ -230,12 +280,15 @@ TEST(PlatformThreadTest, FunctionTimesTen) {
     }
   }
 
-  for (auto& n : thread)
+  for (auto& n : thread) {
     n.MarkForTermination();
-  for (auto n : handle)
+  }
+  for (auto n : handle) {
     PlatformThread::Join(n);
-  for (const auto& n : thread)
+  }
+  for (const auto& n : thread) {
     ASSERT_FALSE(n.IsRunning());
+  }
 
   // Make sure that the thread ID is the same across calls.
   EXPECT_EQ(main_thread_id, PlatformThread::CurrentId());
@@ -244,10 +297,9 @@ TEST(PlatformThreadTest, FunctionTimesTen) {
 namespace {
 
 constexpr ThreadType kAllThreadTypes[] = {
-    ThreadType::kRealtimeAudio,     ThreadType::kDisplayCritical,
-    ThreadType::kCompositing,       ThreadType::kDefault,
-    ThreadType::kResourceEfficient, ThreadType::kUtility,
-    ThreadType::kBackground};
+    ThreadType::kRealtimeAudio, ThreadType::kAudioProcessing,
+    ThreadType::kPresentation,  ThreadType::kDefault,
+    ThreadType::kUtility,       ThreadType::kBackground};
 
 class ThreadTypeTestThread : public FunctionTestThread {
  public:
@@ -262,9 +314,9 @@ class ThreadTypeTestThread : public FunctionTestThread {
  private:
   void RunTest() override {
     EXPECT_EQ(PlatformThread::GetCurrentThreadType(), ThreadType::kDefault);
-    PlatformThread::SetCurrentThreadType(from_);
+    PlatformThread::SetDefaultThreadType(from_);
     EXPECT_EQ(PlatformThread::GetCurrentThreadType(), from_);
-    PlatformThread::SetCurrentThreadType(to_);
+    PlatformThread::SetDefaultThreadType(to_);
     EXPECT_EQ(PlatformThread::GetCurrentThreadType(), to_);
   }
 
@@ -274,8 +326,7 @@ class ThreadTypeTestThread : public FunctionTestThread {
 
 class ThreadPriorityTestThread : public FunctionTestThread {
  public:
-  ThreadPriorityTestThread(ThreadType thread_type,
-                           ThreadPriorityForTest priority)
+  ThreadPriorityTestThread(ThreadType thread_type, ThreadType priority)
       : thread_type_(thread_type), priority(priority) {}
 
  private:
@@ -285,19 +336,20 @@ class ThreadPriorityTestThread : public FunctionTestThread {
     SCOPED_TRACE(message);
 
     EXPECT_EQ(PlatformThread::GetCurrentThreadType(), ThreadType::kDefault);
-    PlatformThread::SetCurrentThreadType(thread_type_);
+    PlatformThread::SetDefaultThreadType(thread_type_);
     EXPECT_EQ(PlatformThread::GetCurrentThreadType(), thread_type_);
     if (PlatformThread::CanChangeThreadType(ThreadType::kDefault,
                                             thread_type_)) {
-      EXPECT_EQ(PlatformThread::GetCurrentThreadPriorityForTest(), priority);
+      EXPECT_EQ(PlatformThread::GetCurrentEffectiveThreadTypeForTest(),
+                priority);
     }
   }
 
   const ThreadType thread_type_;
-  const ThreadPriorityForTest priority;
+  const ThreadType priority;
 };
 
-void TestSetCurrentThreadType() {
+void TestSetDefaultThreadType() {
   for (auto from : kAllThreadTypes) {
     if (!PlatformThread::CanChangeThreadType(ThreadType::kDefault, from)) {
       continue;
@@ -319,7 +371,7 @@ void TestSetCurrentThreadType() {
 }
 
 void TestPriorityResultingFromThreadType(ThreadType thread_type,
-                                         ThreadPriorityForTest priority) {
+                                         ThreadType priority) {
   ThreadPriorityTestThread thread(thread_type, priority);
   PlatformThreadHandle handle;
 
@@ -333,86 +385,20 @@ void TestPriorityResultingFromThreadType(ThreadType thread_type,
   ASSERT_FALSE(thread.IsRunning());
 }
 
-ThreadPriorityForTest GetCurrentThreadPriorityIfStartWithThreadType(
-    ThreadType thread_type,
-    MessagePumpType message_pump_type) {
-  Thread::Options options;
-  options.thread_type = thread_type;
-  options.message_pump_type = message_pump_type;
-
-  Thread thread("GetCurrentThreadPriorityIfStartWithThreadType");
-  thread.StartWithOptions(std::move(options));
-  thread.WaitUntilThreadStarted();
-
-  ThreadPriorityForTest priority;
-  thread.task_runner()->PostTask(
-      FROM_HERE, BindOnce(
-                     [](ThreadPriorityForTest* priority) {
-                       *priority =
-                           PlatformThread::GetCurrentThreadPriorityForTest();
-                     },
-                     &priority));
-  thread.Stop();
-
-  return priority;
-}
-
-ThreadPriorityForTest GetCurrentThreadPriorityIfSetThreadTypeLater(
-    ThreadType thread_type,
-    MessagePumpType message_pump_type) {
-  Thread::Options options;
-  options.message_pump_type = message_pump_type;
-
-  Thread thread("GetCurrentThreadPriorityIfSetThreadTypeLater");
-  thread.StartWithOptions(std::move(options));
-  thread.WaitUntilThreadStarted();
-
-  ThreadPriorityForTest priority;
-  thread.task_runner()->PostTask(
-      FROM_HERE,
-      BindOnce(
-          [](ThreadType thread_type, ThreadPriorityForTest* priority) {
-            PlatformThread::SetCurrentThreadType(thread_type);
-            *priority = PlatformThread::GetCurrentThreadPriorityForTest();
-          },
-          thread_type, &priority));
-  thread.Stop();
-
-  return priority;
-}
-
-void TestPriorityResultingFromThreadType(ThreadType thread_type,
-                                         MessagePumpType message_pump_type,
-                                         ThreadPriorityForTest priority) {
-  testing::Message message;
-  message << "thread_type: " << static_cast<int>(thread_type)
-          << ", message_pump_type: " << static_cast<int>(message_pump_type);
-  SCOPED_TRACE(message);
-
-  if (PlatformThread::CanChangeThreadType(ThreadType::kDefault, thread_type)) {
-    EXPECT_EQ(GetCurrentThreadPriorityIfStartWithThreadType(thread_type,
-                                                            message_pump_type),
-              priority);
-    EXPECT_EQ(GetCurrentThreadPriorityIfSetThreadTypeLater(thread_type,
-                                                           message_pump_type),
-              priority);
-  }
-}
-
 }  // namespace
 
 // Test changing a created thread's type.
-TEST(PlatformThreadTest, SetCurrentThreadType) {
-  TestSetCurrentThreadType();
+TEST(PlatformThreadTest, SetDefaultThreadType) {
+  TestSetDefaultThreadType();
 }
 
 #if BUILDFLAG(IS_WIN)
 // Test changing a created thread's priority in an IDLE_PRIORITY_CLASS process
 // (regression test for https://crbug.com/901483).
 TEST(PlatformThreadTest,
-     SetCurrentThreadTypeWithThreadModeBackgroundIdleProcess) {
+     SetDefaultThreadTypeWithThreadModeBackgroundIdleProcess) {
   ::SetPriorityClass(Process::Current().Handle(), IDLE_PRIORITY_CLASS);
-  TestSetCurrentThreadType();
+  TestSetDefaultThreadType();
   ::SetPriorityClass(Process::Current().Handle(), NORMAL_PRIORITY_CLASS);
 }
 #endif  // BUILDFLAG(IS_WIN)
@@ -424,8 +410,12 @@ TEST(PlatformThreadTest,
 TEST(PlatformThreadTest, CanChangeThreadType) {
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
   // On Ubuntu, RLIMIT_NICE and RLIMIT_RTPRIO are 0 by default, so we won't be
-  // able to increase priority to any level.
-  constexpr bool kCanIncreasePriority = false;
+  // able to increase priority to any level unless we are root (euid == 0).
+  bool kCanIncreasePriority = false;
+  if (geteuid() == 0) {
+    kCanIncreasePriority = true;
+  }
+
 #else
   constexpr bool kCanIncreasePriority = true;
 #endif
@@ -436,96 +426,62 @@ TEST(PlatformThreadTest, CanChangeThreadType) {
 #if BUILDFLAG(IS_FUCHSIA)
   EXPECT_FALSE(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
                                                    ThreadType::kUtility));
-  EXPECT_FALSE(PlatformThread::CanChangeThreadType(
-      ThreadType::kBackground, ThreadType::kResourceEfficient));
   EXPECT_FALSE(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
                                                    ThreadType::kDefault));
-  EXPECT_FALSE(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
-                                                   ThreadType::kCompositing));
   EXPECT_FALSE(PlatformThread::CanChangeThreadType(ThreadType::kDefault,
-                                                   ThreadType::kBackground));
-  EXPECT_FALSE(PlatformThread::CanChangeThreadType(ThreadType::kCompositing,
                                                    ThreadType::kBackground));
 #else
   EXPECT_EQ(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
                                                 ThreadType::kUtility),
             kCanIncreasePriority);
   EXPECT_EQ(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
-                                                ThreadType::kResourceEfficient),
-            kCanIncreasePriority);
-  EXPECT_EQ(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
                                                 ThreadType::kDefault),
-            kCanIncreasePriority);
-  EXPECT_EQ(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
-                                                ThreadType::kCompositing),
             kCanIncreasePriority);
   EXPECT_TRUE(PlatformThread::CanChangeThreadType(ThreadType::kDefault,
                                                   ThreadType::kBackground));
-  EXPECT_TRUE(PlatformThread::CanChangeThreadType(ThreadType::kCompositing,
-                                                  ThreadType::kBackground));
 #endif
   EXPECT_EQ(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
-                                                ThreadType::kDisplayCritical),
+                                                ThreadType::kPresentation),
             kCanIncreasePriority);
   EXPECT_EQ(PlatformThread::CanChangeThreadType(ThreadType::kBackground,
                                                 ThreadType::kRealtimeAudio),
             kCanIncreasePriority);
 #if BUILDFLAG(IS_FUCHSIA)
-  EXPECT_FALSE(PlatformThread::CanChangeThreadType(ThreadType::kDisplayCritical,
+  EXPECT_FALSE(PlatformThread::CanChangeThreadType(ThreadType::kPresentation,
                                                    ThreadType::kBackground));
   EXPECT_FALSE(PlatformThread::CanChangeThreadType(ThreadType::kRealtimeAudio,
                                                    ThreadType::kBackground));
 #else
-  EXPECT_TRUE(PlatformThread::CanChangeThreadType(ThreadType::kDisplayCritical,
+  EXPECT_TRUE(PlatformThread::CanChangeThreadType(ThreadType::kPresentation,
                                                   ThreadType::kBackground));
   EXPECT_TRUE(PlatformThread::CanChangeThreadType(ThreadType::kRealtimeAudio,
                                                   ThreadType::kBackground));
 #endif
 }
 
-TEST(PlatformThreadTest, SetCurrentThreadTypeTest) {
+TEST(PlatformThreadTest, SetDefaultThreadTypeTest) {
   TestPriorityResultingFromThreadType(ThreadType::kBackground,
-                                      ThreadPriorityForTest::kBackground);
+                                      ThreadType::kBackground);
   TestPriorityResultingFromThreadType(ThreadType::kUtility,
-                                      ThreadPriorityForTest::kUtility);
-#if BUILDFLAG(IS_APPLE)
-  TestPriorityResultingFromThreadType(ThreadType::kResourceEfficient,
-                                      ThreadPriorityForTest::kUtility);
-#else
-  TestPriorityResultingFromThreadType(ThreadType::kResourceEfficient,
-                                      ThreadPriorityForTest::kNormal);
-#endif  // BUILDFLAG(IS_APPLE)
+                                      ThreadType::kUtility);
+
   TestPriorityResultingFromThreadType(ThreadType::kDefault,
-                                      ThreadPriorityForTest::kNormal);
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS)
-  TestPriorityResultingFromThreadType(ThreadType::kCompositing,
-                                      ThreadPriorityForTest::kDisplay);
-#if BUILDFLAG(IS_WIN)
-  TestPriorityResultingFromThreadType(ThreadType::kCompositing,
-                                      MessagePumpType::UI,
-                                      ThreadPriorityForTest::kNormal);
-#else
-  TestPriorityResultingFromThreadType(ThreadType::kCompositing,
-                                      MessagePumpType::UI,
-                                      ThreadPriorityForTest::kDisplay);
-#endif  // BUILDFLAG(IS_WIN)
-  TestPriorityResultingFromThreadType(ThreadType::kCompositing,
-                                      MessagePumpType::IO,
-                                      ThreadPriorityForTest::kDisplay);
-#else  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_FUCHSIA)
-  TestPriorityResultingFromThreadType(ThreadType::kCompositing,
-                                      ThreadPriorityForTest::kNormal);
-  TestPriorityResultingFromThreadType(ThreadType::kCompositing,
-                                      MessagePumpType::UI,
-                                      ThreadPriorityForTest::kNormal);
-  TestPriorityResultingFromThreadType(ThreadType::kCompositing,
-                                      MessagePumpType::IO,
-                                      ThreadPriorityForTest::kNormal);
-#endif
-  TestPriorityResultingFromThreadType(ThreadType::kDisplayCritical,
-                                      ThreadPriorityForTest::kDisplay);
+                                      ThreadType::kDefault);
+  TestPriorityResultingFromThreadType(ThreadType::kPresentation,
+                                      ThreadType::kPresentation);
   TestPriorityResultingFromThreadType(ThreadType::kRealtimeAudio,
-                                      ThreadPriorityForTest::kRealtimeAudio);
+                                      ThreadType::kRealtimeAudio);
+#if BUILDFLAG(IS_WIN)
+  // Currently only on Windows, kInteractive maps to a higher priority than
+  // kDisplayCritical.
+  TestPriorityResultingFromThreadType(ThreadType::kAudioProcessing,
+                                      ThreadType::kAudioProcessing);
+#else
+  // On other platforms, kInteractive maps to the same priority as
+  // kDisplayCritical.
+  TestPriorityResultingFromThreadType(ThreadType::kAudioProcessing,
+                                      ThreadType::kPresentation);
+#endif
 }
 
 TEST(PlatformThreadTest, SetHugeThreadName) {
@@ -539,7 +495,9 @@ TEST(PlatformThreadTest, SetHugeThreadName) {
 
 TEST(PlatformThreadTest, GetDefaultThreadStackSize) {
   size_t stack_size = PlatformThread::GetDefaultThreadStackSize();
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_IOS) || BUILDFLAG(IS_FUCHSIA) ||        \
+#if BUILDFLAG(IS_IOS)
+  EXPECT_EQ(1024u * 1024u, stack_size);
+#elif BUILDFLAG(IS_WIN) || BUILDFLAG(IS_FUCHSIA) ||                           \
     ((BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)) && defined(__GLIBC__) && \
      !defined(THREAD_SANITIZER)) ||                                           \
     (BUILDFLAG(IS_ANDROID) && !defined(ADDRESS_SANITIZER))
@@ -596,9 +554,6 @@ class RealtimeTestThread : public FunctionTestThread {
     mach_timebase_info(&tb_info);
 
     if (FeatureList::IsEnabled(kOptimizedRealtimeThreadingMac) &&
-#if BUILDFLAG(IS_MAC)
-        !mac::IsOS10_14() &&  // Should not be applied on 10.14.
-#endif
         !realtime_period_.is_zero()) {
       uint32_t abs_realtime_period = saturated_cast<uint32_t>(
           realtime_period_.InNanoseconds() *
@@ -667,7 +622,7 @@ TEST_P(RealtimePlatformThreadTest, RealtimeAudioConfigMac) {
     feature_list.InitAndDisableFeature(kOptimizedRealtimeThreadingMac);
   }
 
-  PlatformThread::InitFeaturesPostFieldTrial();
+  PlatformThread::InitializeFeatures();
   VerifyRealtimeConfig(std::get<2>(GetParam()));
 }
 
@@ -706,7 +661,7 @@ INSTANTIATE_TEST_SUITE_P(
 namespace {
 
 bool IsTidCacheCorrect() {
-  return PlatformThread::CurrentId() == syscall(__NR_gettid);
+  return PlatformThread::CurrentId().raw() == syscall(__NR_gettid);
 }
 
 void* CheckTidCacheCorrectWrapper(void*) {
@@ -736,8 +691,9 @@ void TestTidCacheCorrect(bool main_thread_accesses_cache_first) {
   if (child_pid == 0) {
     // In the child.
     if (main_thread_accesses_cache_first) {
-      if (!IsTidCacheCorrect())
+      if (!IsTidCacheCorrect()) {
         _exit(1);
+      }
     }
 
     // Access the TID cache on another thread and make sure the cached value is
@@ -747,8 +703,9 @@ void TestTidCacheCorrect(bool main_thread_accesses_cache_first) {
     if (!main_thread_accesses_cache_first) {
       // Make sure the main thread's cache is correct even though another thread
       // accessed the cache first.
-      if (!IsTidCacheCorrect())
+      if (!IsTidCacheCorrect()) {
         _exit(1);
+      }
     }
 
     _exit(0);
@@ -771,5 +728,296 @@ TEST(PlatformThreadTidCacheTest, MainThreadSecond) {
 }  // namespace
 
 #endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+
+#if BUILDFLAG(IS_ANDROID)
+
+namespace {
+// Helper function to put all the UNSAFE_BUFFERS() in a single place.
+int NumberOfAllowedProcessors() {
+  cpu_set_t cpuset;
+  // SAFETY: Here and below, these macros are part of system headers, and we
+  // cannot assume their content, however it checks the bounds.
+  UNSAFE_BUFFERS(CPU_ZERO(&cpuset));
+  EXPECT_EQ(0, sched_getaffinity(0, sizeof(cpu_set_t), &cpuset));
+  return UNSAFE_BUFFERS(CPU_COUNT(&cpuset));
+}
+}  // namespace
+
+TEST(PlatformThreadCpuAffinity, DefaultToAllCores) {
+  if (!IsEligibleForBigCoreAffinityChange()) {
+    GTEST_SKIP();
+  }
+
+  test::ScopedFeatureList feature_list{kRestrictBigCoreThreadAffinity};
+  EXPECT_EQ(SysInfo::NumberOfProcessors(), NumberOfAllowedProcessors());
+}
+
+TEST(PlatformThreadCpuAffinity, RestrictAffinity) {
+  // Need at least three distinct classes to test affinity, skip if there are
+  // fewer CPUs than that.
+  if (SysInfo::NumberOfProcessors() < 3) {
+    GTEST_SKIP();
+  }
+
+  std::vector<uint64_t> fake_frequencies = SysInfo::MaxFrequencyPerProcessor();
+  if (fake_frequencies.empty()) {
+    GTEST_SKIP() << "Cannot determine frequencies. This can happen in VMs for "
+                 << "instance";
+  }
+
+  for (size_t i = 0; i < fake_frequencies.size(); i++) {
+    fake_frequencies[i] = static_cast<uint64_t>(1000000000) + (i * 100000000);
+  }
+  SetMaxFrequencyPerProcessorOverrideForTesting(&fake_frequencies);
+  ASSERT_TRUE(IsEligibleForBigCoreAffinityChange());
+
+  {
+    test::ScopedFeatureList feature_list{kRestrictBigCoreThreadAffinity};
+
+    EXPECT_EQ(SysInfo::NumberOfProcessors(), NumberOfAllowedProcessors());
+    PlatformThread::SetDefaultThreadType(ThreadType::kBackground);
+    EXPECT_EQ(SysInfo::NumberOfProcessors() - 1, NumberOfAllowedProcessors());
+    PlatformThread::SetDefaultThreadType(ThreadType::kPresentation);
+    EXPECT_EQ(SysInfo::NumberOfProcessors(), NumberOfAllowedProcessors());
+    PlatformThread::SetDefaultThreadType(ThreadType::kDefault);
+    EXPECT_EQ(SysInfo::NumberOfProcessors() - 1, NumberOfAllowedProcessors());
+
+    // Make sure that affinity is reset to everything, as when the feature is
+    // disabled, the affinity will stay to the value it had previously.
+    PlatformThread::SetDefaultThreadType(ThreadType::kPresentation);
+    EXPECT_EQ(SysInfo::NumberOfProcessors(), NumberOfAllowedProcessors());
+  }
+
+  {
+    test::ScopedFeatureList feature_list;
+    feature_list.InitAndDisableFeature(kRestrictBigCoreThreadAffinity);
+
+    PlatformThread::SetDefaultThreadType(ThreadType::kBackground);
+    EXPECT_EQ(SysInfo::NumberOfProcessors(), NumberOfAllowedProcessors());
+    PlatformThread::SetDefaultThreadType(ThreadType::kDefault);
+    EXPECT_EQ(SysInfo::NumberOfProcessors(), NumberOfAllowedProcessors());
+  }
+
+  SetMaxFrequencyPerProcessorOverrideForTesting(nullptr);
+}
+
+TEST(PlatformThreadCpuAffinity, RestrictAffinityNoopWithTwoCoreTypes) {
+  // Only two core types.
+  std::vector<uint64_t> fake_frequencies = SysInfo::MaxFrequencyPerProcessor();
+  for (size_t i = 0; i < fake_frequencies.size(); i++) {
+    fake_frequencies[i] = i % 2 ? 1000000000 : 1500000000;
+  }
+  SetMaxFrequencyPerProcessorOverrideForTesting(&fake_frequencies);
+  EXPECT_FALSE(IsEligibleForBigCoreAffinityChange());
+
+  test::ScopedFeatureList feature_list{kRestrictBigCoreThreadAffinity};
+
+  EXPECT_EQ(SysInfo::NumberOfProcessors(), NumberOfAllowedProcessors());
+  PlatformThread::SetDefaultThreadType(ThreadType::kBackground);
+  EXPECT_EQ(SysInfo::NumberOfProcessors(), NumberOfAllowedProcessors());
+
+  SetMaxFrequencyPerProcessorOverrideForTesting(nullptr);
+}
+
+TEST(PlatformThreadCpuAffinity, IsEligibleForBigCoreAffinityChange) {
+  std::vector<uint64_t> fake_frequencies;
+  SetMaxFrequencyPerProcessorOverrideForTesting(&fake_frequencies);
+  EXPECT_FALSE(IsEligibleForBigCoreAffinityChange());
+
+  fake_frequencies = {1000, 2000};
+  EXPECT_FALSE(IsEligibleForBigCoreAffinityChange());
+
+  fake_frequencies = {1000, 2000, 3000};
+  EXPECT_TRUE(IsEligibleForBigCoreAffinityChange());
+
+  fake_frequencies = {1000, 2000, 2000, 3000};
+  EXPECT_TRUE(IsEligibleForBigCoreAffinityChange());
+
+  fake_frequencies = {1000, 1000, 1000};
+  EXPECT_FALSE(IsEligibleForBigCoreAffinityChange());
+
+  SetMaxFrequencyPerProcessorOverrideForTesting(nullptr);
+}
+
+#endif  // BUILDFLAG(IS_ANDROID)
+
+class PlatformThreadThreadTypeManagerTest : public ::testing::Test,
+                                            public internal::ThreadTypeManager {
+ public:
+  std::unique_ptr<PlatformThread::RaiseThreadTypeLease> CreateLease(
+      ThreadType type) {
+    return std::unique_ptr<PlatformThread::RaiseThreadTypeLease>(
+        new PlatformThread::RaiseThreadTypeLease(type, this));
+  }
+
+  void SetCurrentThreadTypeImpl(ThreadType type,
+                                MessagePumpType pump_type) override {
+    mock_set_thread_type_.Call(type, pump_type);
+  }
+
+  testing::MockFunction<void(ThreadType, MessagePumpType)>
+      mock_set_thread_type_;
+};
+
+TEST_F(PlatformThreadThreadTypeManagerTest, HasDefaultThreadTypeInitialState) {
+  EXPECT_CALL(mock_set_thread_type_, Call).Times(0);
+  EXPECT_EQ(GetCurrent(), ThreadType::kDefault);
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest, CanDepressPriority) {
+  EXPECT_CALL(mock_set_thread_type_, Call).Times(1);
+  SetDefault(ThreadType::kBackground);
+  EXPECT_EQ(GetCurrent(), ThreadType::kBackground);
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest, CanElevatePriority) {
+  EXPECT_CALL(mock_set_thread_type_, Call).Times(1);
+  SetDefault(ThreadType::kPresentation);
+  EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest,
+       CanLeaseLowerThanDefaultPriorityWithUnsetBase) {
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kBackground, _));
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kDefault, _));
+  auto lease = CreateLease(ThreadType::kBackground);
+  EXPECT_EQ(GetCurrent(), ThreadType::kBackground);
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest, RaisesPriorityWithLeaseScoped) {
+  InSequence s;
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kPresentation, _));
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kDefault, _));
+  {
+    auto lease = CreateLease(ThreadType::kPresentation);
+    EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+  }
+  EXPECT_EQ(GetCurrent(), ThreadType::kDefault);
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest, IgnoresLowerPriorityLease) {
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kPresentation, _));
+  SetDefault(ThreadType::kPresentation);
+  {
+    auto lease = CreateLease(ThreadType::kDefault);
+    EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+  }
+  EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest, HandlesMultipleIdenticalLeases) {
+  InSequence s;
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kPresentation, _));
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kDefault, _));
+  {
+    auto lease1 = CreateLease(ThreadType::kPresentation);
+    EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+    {
+      auto lease2 = CreateLease(ThreadType::kPresentation);
+      EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+    }
+    EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+  }
+  EXPECT_EQ(GetCurrent(), ThreadType::kDefault);
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest, HandlesMultipleDistinctLeases) {
+  InSequence s;
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kPresentation, _));
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kRealtimeAudio, _));
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kPresentation, _));
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kDefault, _));
+  {
+    auto lease1 = CreateLease(ThreadType::kPresentation);
+    EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+    {
+      auto lease2 = CreateLease(ThreadType::kRealtimeAudio);
+      EXPECT_EQ(GetCurrent(), ThreadType::kRealtimeAudio);
+    }
+    EXPECT_EQ(GetCurrent(), ThreadType::kPresentation);
+  }
+  EXPECT_EQ(GetCurrent(), ThreadType::kDefault);
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest, LeaseTransferByMoveAssignment) {
+  InSequence s;
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kPresentation, _));
+  auto lease1 = CreateLease(ThreadType::kPresentation);
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kRealtimeAudio, _));
+  auto lease2 = CreateLease(ThreadType::kRealtimeAudio);
+  lease1 = std::move(lease2);
+  EXPECT_EQ(GetCurrent(), ThreadType::kRealtimeAudio);
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kDefault, _));
+}
+
+TEST_F(PlatformThreadThreadTypeManagerTest, LeaseCrossDrop) {
+  InSequence s;
+
+  std::unique_ptr<PlatformThread::RaiseThreadTypeLease> bg_lease;
+  std::unique_ptr<PlatformThread::RaiseThreadTypeLease> audio_lease;
+  std::unique_ptr<PlatformThread::RaiseThreadTypeLease> presentation_lease;
+
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kBackground, _));
+  bg_lease = CreateLease(ThreadType::kBackground);
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kRealtimeAudio, _));
+  audio_lease = CreateLease(ThreadType::kRealtimeAudio);
+
+  // No call expected since audio_lease is active & kAudioProcessing > kDefault
+  presentation_lease = CreateLease(ThreadType::kPresentation);
+
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kPresentation, _));
+  audio_lease = nullptr;
+
+  // No call expected since presentation_lease is still active.
+  bg_lease = nullptr;
+
+  EXPECT_CALL(mock_set_thread_type_, Call(ThreadType::kDefault, _));
+  presentation_lease = nullptr;
+}
+
+TEST(PlatformThreadRaiseLeaseIntegrationTest, KeepsMaxThreadType) {
+  {
+    auto audio_lease =
+        PlatformThread::RaiseThreadTypeLease(ThreadType::kAudioProcessing);
+    EXPECT_EQ(PlatformThread::GetCurrentThreadType(),
+              ThreadType::kAudioProcessing);
+    {
+      auto presentation_lease =
+          PlatformThread::RaiseThreadTypeLease(ThreadType::kPresentation);
+      EXPECT_EQ(PlatformThread::GetCurrentThreadType(),
+                ThreadType::kAudioProcessing);
+    }
+    EXPECT_EQ(PlatformThread::GetCurrentThreadType(),
+              ThreadType::kAudioProcessing);
+  }
+  EXPECT_EQ(PlatformThread::GetCurrentThreadType(), ThreadType::kDefault);
+}
+
+TEST(PlatformThreadRaiseLeaseIntegrationTest, TemporaryDepression) {
+  std::optional<PlatformThread::RaiseThreadTypeLease> audio_lease;
+  audio_lease.emplace(ThreadType::kAudioProcessing);
+  EXPECT_EQ(PlatformThread::GetCurrentThreadType(),
+            ThreadType::kAudioProcessing);
+  audio_lease = std::nullopt;
+  EXPECT_EQ(PlatformThread::GetCurrentThreadType(), ThreadType::kDefault);
+  audio_lease.emplace(ThreadType::kAudioProcessing);
+  EXPECT_EQ(PlatformThread::GetCurrentThreadType(),
+            ThreadType::kAudioProcessing);
+}
+
+TEST(PlatformThreadRaiseLeaseIntegrationTest, LeaseCrossDrop) {
+  std::optional<PlatformThread::RaiseThreadTypeLease> audio_lease;
+  std::optional<PlatformThread::RaiseThreadTypeLease> presentation_lease;
+  audio_lease.emplace(ThreadType::kAudioProcessing);
+  EXPECT_EQ(PlatformThread::GetCurrentThreadType(),
+            ThreadType::kAudioProcessing);
+  presentation_lease.emplace(ThreadType::kPresentation);
+  EXPECT_EQ(PlatformThread::GetCurrentThreadType(),
+            ThreadType::kAudioProcessing);
+  audio_lease = std::nullopt;
+  EXPECT_EQ(PlatformThread::GetCurrentThreadType(), ThreadType::kPresentation);
+  presentation_lease = std::nullopt;
+  EXPECT_EQ(PlatformThread::GetCurrentThreadType(), ThreadType::kDefault);
+}
 
 }  // namespace base

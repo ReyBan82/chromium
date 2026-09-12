@@ -8,7 +8,6 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 
 #include "base/check.h"
 #include "base/functional/callback.h"
@@ -19,6 +18,7 @@
 #include "components/commerce/core/account_checker.h"
 #include "components/commerce/core/proto/commerce_subscription_db_content.pb.h"
 #include "components/session_proto_db/session_proto_storage.h"
+#include "components/signin/public/base/consent_level.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
 #include "components/signin/public/identity_manager/primary_account_change_event.h"
 
@@ -75,7 +75,8 @@ class SubscriptionsManager : public signin::IdentityManager::Observer {
       SessionProtoStorage<
           commerce_subscription_db::CommerceSubscriptionContentProto>*
           subscription_proto_db,
-      AccountChecker* account_checker);
+      AccountChecker* account_checker,
+      signin::ConsentLevel consent_level);
   // Used for tests. The passed in objects are ordinarily created with
   // parameters from the non-test constructor.
   SubscriptionsManager(signin::IdentityManager* identity_manager,
@@ -114,7 +115,7 @@ class SubscriptionsManager : public signin::IdentityManager::Observer {
   // latter one is older, the local cache is outdated and we need to fetch the
   // newest subscriptions from server. This is mainly used to keep local
   // subscriptions up to date when users operate on multiple devices.
-  void CheckTimestampOnBookmarkChange(
+  virtual void CheckTimestampOnBookmarkChange(
       int64_t bookmark_subscription_change_time);
 
   void AddObserver(SubscriptionsObserver* observer);
@@ -133,6 +134,10 @@ class SubscriptionsManager : public signin::IdentityManager::Observer {
   bool HasPendingRequestsForTesting();
 
   void SetLastRequestStartedTimeForTesting(base::Time time);
+
+ protected:
+  // Default constructor for testing.
+  SubscriptionsManager();
 
  private:
   enum class AsyncOperation {
@@ -219,9 +224,11 @@ class SubscriptionsManager : public signin::IdentityManager::Observer {
       SubscriptionsRequestStatus status,
       std::unique_ptr<std::vector<CommerceSubscription>> remote_subscriptions);
 
-  void HandleManageSubscriptionsResponse(SubscriptionType type,
-                                         SubscriptionsRequestCallback callback,
-                                         SubscriptionsRequestStatus status);
+  void HandleManageSubscriptionsResponse(
+      SubscriptionType type,
+      SubscriptionsRequestCallback callback,
+      SubscriptionsRequestStatus status,
+      std::unique_ptr<std::vector<CommerceSubscription>> remote_subscriptions);
 
   void HandleLookup(CommerceSubscription subscription,
                     base::OnceCallback<void(bool)> callback);
@@ -239,6 +246,20 @@ class SubscriptionsManager : public signin::IdentityManager::Observer {
 
   void HandleCheckTimestampOnBookmarkChange(
       int64_t bookmark_subscription_change_time);
+
+  void HandleGetSubscriptionsResponseOnBookmarkChange(
+      SubscriptionsRequestStatus status,
+      std::unique_ptr<std::vector<CommerceSubscription>> remote_subscriptions);
+
+  void OnStorageUpdatedOnBookmarkChange(
+      SubscriptionsRequestStatus status,
+      std::vector<CommerceSubscription> added_subs,
+      std::vector<CommerceSubscription> removed_subs);
+
+  void OnSubscribe(const std::vector<CommerceSubscription>& subscriptions,
+                   bool succeeded);
+  void OnUnsubscribe(const std::vector<CommerceSubscription>& subscriptions,
+                     bool succeeded);
 
   void OnPrimaryAccountChanged(
       const signin::PrimaryAccountChangeEvent& event_details) override;
@@ -274,12 +295,7 @@ class SubscriptionsManager : public signin::IdentityManager::Observer {
 
   base::ObserverList<SubscriptionsObserver>::Unchecked observers_;
 
-  // An in-memory cache of subscriptions that can be accessed synchronously.
-  // This may not have the most up-to-date information as it does not check
-  // the backend.
-  std::unordered_set<std::string> subscriptions_cache_;
-
-  base::WeakPtrFactory<SubscriptionsManager> weak_ptr_factory_;
+  base::WeakPtrFactory<SubscriptionsManager> weak_ptr_factory_{this};
 };
 
 }  // namespace commerce

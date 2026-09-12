@@ -101,17 +101,19 @@ void TestDownloadDriver::Pause(const std::string& guid) {
   it->second.paused = true;
 }
 
-void TestDownloadDriver::Resume(const std::string& guid) {
+void TestDownloadDriver::ResumeWithFactory(
+    const std::string& guid,
+    scoped_refptr<network::SharedURLLoaderFactory> factory) {
   auto it = entries_.find(guid);
   if (it == entries_.end())
     return;
   it->second.paused = false;
 }
 
-absl::optional<DriverEntry> TestDownloadDriver::Find(const std::string& guid) {
+std::optional<DriverEntry> TestDownloadDriver::Find(const std::string& guid) {
   auto it = entries_.find(guid);
   if (it == entries_.end())
-    return absl::nullopt;
+    return std::nullopt;
   return it->second;
 }
 

@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// clang-format off
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
-import {ManageProfileBrowserProxy, ManageProfileBrowserProxyImpl, ProfileShortcutStatus, SettingsManageProfileElement} from 'chrome://settings/lazy_load.js';
-import {CrToggleElement, loadTimeData, Router, routes, StatusAction} from 'chrome://settings/settings.js';
+import {webUIListenerCallback} from 'chrome://resources/js/cr.js';
+import type {ManageProfileBrowserProxy, SettingsManageProfileElement} from 'chrome://settings/lazy_load.js';
+import {ManageProfileBrowserProxyImpl, ProfileShortcutStatus} from 'chrome://settings/lazy_load.js';
+import type {CrToggleElement} from 'chrome://settings/settings.js';
+import {loadTimeData, ProfileInfoBrowserProxyImpl, resetRouterForTesting, Router, routes, StatusAction} from 'chrome://settings/settings.js';
 import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
 import {TestBrowserProxy} from 'chrome://webui-test/test_browser_proxy.js';
+import {isVisible, microtasksFinished} from 'chrome://webui-test/test_util.js';
 
-// clang-format on
+import {TestProfileInfoBrowserProxy} from './test_profile_info_browser_proxy.js';
 
 class TestManageProfileBrowserProxy extends TestBrowserProxy implements
     ManageProfileBrowserProxy {
@@ -88,29 +90,39 @@ class TestManageProfileBrowserProxy extends TestBrowserProxy implements
 suite('ManageProfileTests', function() {
   let manageProfile: SettingsManageProfileElement;
   let browserProxy: TestManageProfileBrowserProxy;
+  let profileInfoBrowserProxy: TestProfileInfoBrowserProxy;
 
-  setup(function() {
+  setup(async function() {
     browserProxy = new TestManageProfileBrowserProxy();
     ManageProfileBrowserProxyImpl.setInstance(browserProxy);
+    profileInfoBrowserProxy = new TestProfileInfoBrowserProxy();
+    profileInfoBrowserProxy.fakeProfileInfo = {
+      name: 'Initial Fake Name',
+      iconUrl: '',
+    };
+    ProfileInfoBrowserProxyImpl.setInstance(profileInfoBrowserProxy);
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
     loadTimeData.overrideValues({profileShortcutsEnabled: false});
-    manageProfile = createManageProfileElement();
+    resetRouterForTesting();
     Router.getInstance().navigateTo(routes.MANAGE_PROFILE);
+    manageProfile = await createManageProfileElement();
   });
 
   teardown(function() {
     manageProfile.remove();
   });
 
-  function createManageProfileElement(): SettingsManageProfileElement {
+  async function createManageProfileElement():
+      Promise<SettingsManageProfileElement> {
     const element = document.createElement('settings-manage-profile');
-    element.profileName = 'Initial Fake Name';
-    element.syncStatus = {
-      supervisedUser: false,
-      childUser: false,
-      statusAction: StatusAction.NO_ACTION,
-    };
     document.body.appendChild(element);
+    webUIListenerCallback('sync-status-changed', {
+      supervisedUser: false,
+      statusAction: StatusAction.NO_ACTION,
+    });
+    webUIListenerCallback(
+        'profile-info-changed', {name: 'Initial Fake Name', iconUrl: ''});
+    await microtasksFinished();
     return element;
   }
 
@@ -120,162 +132,164 @@ suite('ManageProfileTests', function() {
   test('ManageProfileChangeIcon', async function() {
     let items = null;
     await browserProxy.whenCalled('getAvailableIcons');
-    flush();
+    await microtasksFinished();
     items =
-        manageProfile.shadowRoot!.querySelector(
-                                     'cr-profile-avatar-selector')!.shadowRoot!
+        manageProfile.shadowRoot.querySelector(
+                                    'cr-profile-avatar-selector')!.shadowRoot
             .querySelector('#avatar-grid')!.querySelectorAll<HTMLElement>(
-                '.avatar');
+                '.avatar-container > .avatar');
 
     assertEquals(3, items.length);
-    assertFalse(items[0]!.classList.contains('iron-selected'));
-    assertTrue(items[1]!.classList.contains('iron-selected'));
-    assertFalse(items[2]!.classList.contains('iron-selected'));
+    assertFalse(items[0]!.parentElement!.classList.contains('iron-selected'));
+    assertTrue(items[1]!.parentElement!.classList.contains('iron-selected'));
+    assertFalse(items[2]!.parentElement!.classList.contains('iron-selected'));
 
     items[1]!.click();
+    await microtasksFinished();
     const args = await browserProxy.whenCalled('setProfileIconToDefaultAvatar');
     assertEquals(2, args[0]);
 
     items[2]!.click();
+    await microtasksFinished();
     await browserProxy.whenCalled('setProfileIconToGaiaAvatar');
   });
 
   test('ManageProfileChangeName', async function() {
-    const nameField = manageProfile.$.name;
-    assertTrue(!!nameField);
-    assertFalse(!!nameField.disabled);
-    assertEquals('.*\\S.*', nameField.pattern);
+    const nameInput = manageProfile.$.nameInput;
+    assertTrue(!!nameInput);
+    assertFalse(nameInput.disabled);
+    assertEquals('.*\\S.*', nameInput.pattern);
 
-    assertEquals('Initial Fake Name', nameField.value);
+    assertEquals('Initial Fake Name', nameInput.value);
+    // No policy indicator is shown.
+    const policyIndicator =
+        nameInput.shadowRoot.querySelector<HTMLElement>('#policyIcon');
+    assertEquals(policyIndicator, null);
 
-    nameField.value = 'New Name';
-    nameField.dispatchEvent(
+    nameInput.value = 'New Name';
+    nameInput.dispatchEvent(
         new CustomEvent('change', {bubbles: true, composed: true}));
 
     const args = await browserProxy.whenCalled('setProfileName');
     assertEquals('New Name', args[0]);
   });
 
-  test('ProfileNameIsDisabledForSupervisedUser', function() {
-    manageProfile.syncStatus = {
-      supervisedUser: true,
-      childUser: false,
-      statusAction: StatusAction.NO_ACTION,
-    };
-
-    const nameField = manageProfile.$.name;
-    assertTrue(!!nameField);
-
-    // Name field should be disabled for legacy supervised users.
-    assertTrue(!!nameField.disabled);
-  });
-
   // Tests profile name updates pushed from the browser.
   test('ManageProfileNameUpdated', async function() {
-    const nameField = manageProfile.$.name;
-    assertTrue(!!nameField);
-
     await browserProxy.whenCalled('getAvailableIcons');
-    manageProfile.profileName = 'New Name From Browser';
+    webUIListenerCallback(
+        'profile-info-changed', {name: 'New Name From Browser', iconUrl: ''});
+    await microtasksFinished();
+    assertEquals('New Name From Browser', manageProfile.$.nameInput.value);
+  });
 
-    flush();
+  // Tests profile name is not editable for work profile.
+  test('ManageProfileNameDisabledForEnterprise', async function() {
+    loadTimeData.overrideValues({hasEnterpriseLabel: true});
+    manageProfile = await createManageProfileElement();
+    const nameInput = manageProfile.$.nameInput;
+    assertTrue(nameInput.disabled);
+    assertEquals('Initial Fake Name', nameInput.value);
 
-    assertEquals('New Name From Browser', nameField.value);
+    // The policy indicator is shown.
+    const policyIndicator =
+        nameInput.shadowRoot.querySelector<HTMLElement>('#policyIcon');
+    assertFalse(!!policyIndicator && policyIndicator.hidden);
   });
 
   // Tests that the theme selector is visible.
-  test('ProfileThemeSelector', function() {
-    assertTrue(!!manageProfile.shadowRoot!.querySelector('#themeSelector'));
+  test('ThemeColorPicker', async function() {
+    manageProfile = await createManageProfileElement();
+    assertTrue(isVisible(
+        manageProfile.shadowRoot.querySelector('cr-theme-color-picker')));
   });
 
   // Tests profile shortcut toggle is hidden if profile shortcuts feature is
   // disabled.
   test('ManageProfileShortcutToggleHidden', function() {
     const hasShortcutToggle =
-        manageProfile.shadowRoot!.querySelector('#hasShortcutToggle');
+        manageProfile.shadowRoot.querySelector('#hasShortcutToggle');
     assertFalse(!!hasShortcutToggle);
   });
 
   // Tests profile shortcut toggle is visible and toggling it removes and
   // creates the profile shortcut respectively.
   test('ManageProfileShortcutToggle', async function() {
+    resetRouterForTesting();
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
     loadTimeData.overrideValues({profileShortcutsEnabled: true});
-    manageProfile = createManageProfileElement();
-    flush();
+    manageProfile = await createManageProfileElement();
 
-    assertFalse(
-        !!manageProfile.shadowRoot!.querySelector('#hasShortcutToggle'));
+    assertFalse(!!manageProfile.shadowRoot.querySelector('#hasShortcutToggle'));
+
+    Router.getInstance().navigateTo(routes.MANAGE_PROFILE);
     await browserProxy.whenCalled('getProfileShortcutStatus');
-
-    flush();
+    await microtasksFinished();
 
     const hasShortcutToggle =
-        manageProfile.shadowRoot!.querySelector<CrToggleElement>(
+        manageProfile.shadowRoot.querySelector<CrToggleElement>(
             '#hasShortcutToggle');
     assertTrue(!!hasShortcutToggle);
 
     // The profile shortcut toggle is checked.
-    assertTrue(hasShortcutToggle!.checked);
+    assertTrue(hasShortcutToggle.checked);
 
     // Simulate tapping the profile shortcut toggle.
-    hasShortcutToggle!.click();
+    hasShortcutToggle.click();
     await browserProxy.whenCalled('removeProfileShortcut');
 
-    flush();
+    await microtasksFinished();
 
-    // The profile shortcut toggle is checked.
-    assertFalse(hasShortcutToggle!.checked);
+    // The profile shortcut toggle is unchecked.
+    assertFalse(hasShortcutToggle.checked);
 
     // Simulate tapping the profile shortcut toggle.
-    hasShortcutToggle!.click();
+    hasShortcutToggle.click();
     await browserProxy.whenCalled('addProfileShortcut');
   });
 
   // Tests profile shortcut toggle is visible and toggled off when no
   // profile shortcut is found.
   test('ManageProfileShortcutToggleShortcutNotFound', async function() {
+    resetRouterForTesting();
     browserProxy.setProfileShortcutStatus(
         ProfileShortcutStatus.PROFILE_SHORTCUT_NOT_FOUND);
 
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
     loadTimeData.overrideValues({profileShortcutsEnabled: true});
-    manageProfile = createManageProfileElement();
-    flush();
+    manageProfile = await createManageProfileElement();
 
-    assertFalse(
-        !!manageProfile.shadowRoot!.querySelector('#hasShortcutToggle'));
+    assertFalse(!!manageProfile.shadowRoot.querySelector('#hasShortcutToggle'));
+
+    Router.getInstance().navigateTo(routes.MANAGE_PROFILE);
     await browserProxy.whenCalled('getProfileShortcutStatus');
-
-    flush();
+    await microtasksFinished();
 
     const hasShortcutToggle =
-        manageProfile.shadowRoot!.querySelector<CrToggleElement>(
+        manageProfile.shadowRoot.querySelector<CrToggleElement>(
             '#hasShortcutToggle');
     assertTrue(!!hasShortcutToggle);
 
-    assertFalse(hasShortcutToggle!.checked);
+    assertFalse(hasShortcutToggle.checked);
   });
 
   // Tests the case when the profile shortcut setting is hidden. This can
   // occur in the single profile case.
   test('ManageProfileShortcutSettingHidden', async function() {
+    resetRouterForTesting();
     browserProxy.setProfileShortcutStatus(
         ProfileShortcutStatus.PROFILE_SHORTCUT_SETTING_HIDDEN);
 
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
     loadTimeData.overrideValues({profileShortcutsEnabled: true});
-    manageProfile = createManageProfileElement();
-    flush();
+    manageProfile = await createManageProfileElement();
 
-    assertFalse(
-        !!manageProfile.shadowRoot!.querySelector('#hasShortcutToggle'));
+    assertFalse(!!manageProfile.shadowRoot.querySelector('#hasShortcutToggle'));
 
+    Router.getInstance().navigateTo(routes.MANAGE_PROFILE);
     await browserProxy.whenCalled('getProfileShortcutStatus');
+    await microtasksFinished();
 
-    flush();
-
-    assertFalse(
-        !!manageProfile.shadowRoot!.querySelector('#hasShortcutToggle'));
+    assertFalse(!!manageProfile.shadowRoot.querySelector('#hasShortcutToggle'));
   });
 });

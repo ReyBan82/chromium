@@ -9,6 +9,11 @@
 #include <string>
 
 #include "base/power_monitor/power_observer.h"
+#include "build/build_config.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/android/screen_state_receiver.h"
+#endif
 #include "base/process/process_handle.h"
 #include "base/types/pass_key.h"
 #include "content/public/browser/document_user_data.h"
@@ -20,7 +25,7 @@
 #include "third_party/blink/public/mojom/peerconnection/peer_connection_tracker.mojom.h"
 
 namespace base {
-class Value;
+class ListValue;
 }  // namespace base
 
 namespace content {
@@ -34,10 +39,13 @@ class RenderFrameHost;
 //
 // Note: This class and all of its methods are meant to only be used on the UI
 //       thread.
-class PeerConnectionTrackerHost
+class CONTENT_EXPORT PeerConnectionTrackerHost
     : public DocumentUserData<PeerConnectionTrackerHost>,
       public base::PowerSuspendObserver,
       public base::PowerThermalObserver,
+#if BUILDFLAG(IS_ANDROID)
+      public base::android::ScreenStateReceiver::Observer,
+#endif
       public blink::mojom::PeerConnectionTrackerHost {
  public:
   PeerConnectionTrackerHost(const PeerConnectionTrackerHost&) = delete;
@@ -56,17 +64,22 @@ class PeerConnectionTrackerHost
 
   // base::PowerSuspendObserver override.
   void OnSuspend() override;
+#if BUILDFLAG(IS_ANDROID)
+  void OnScreenOff() override;
+#endif
   // base::PowerThermalObserver override.
   void OnThermalStateChange(
       base::PowerThermalObserver::DeviceThermalState new_state) override;
-  void OnSpeedLimitChange(int) override;
+  void OnSpeedLimitChange(int) override {}  // This signal is not forwarded.
 
   // These methods call out to blink::mojom::PeerConnectionManager on renderer
   // side.
   void StartEventLog(int peer_connection_local_id, int output_period_ms);
   void StopEventLog(int lid);
+  void StartDataChannelLog(int peer_connection_local_id);
+  void StopDataChannelLog(int lid);
   void GetStandardStats();
-  void GetLegacyStats();
+  void GetCurrentState();
 
   void BindReceiver(
       mojo::PendingReceiver<blink::mojom::PeerConnectionTrackerHost>
@@ -84,7 +97,8 @@ class PeerConnectionTrackerHost
                             const std::string& type,
                             const std::string& value) override;
   void OnPeerConnectionSessionIdSet(int lid,
-                                    const std::string& session_id) override;
+                                    const std::string& session_id,
+                                    base::OnceClosure callback) override;
   void GetUserMedia(int request_id,
                     bool audio,
                     bool video,
@@ -111,13 +125,17 @@ class PeerConnectionTrackerHost
                               const std::string& error_message) override;
   void WebRtcEventLogWrite(int lid,
                            const std::vector<uint8_t>& output) override;
-  void AddStandardStats(int lid, base::Value::List value) override;
-  void AddLegacyStats(int lid, base::Value::List value) override;
+  void WebRtcDataChannelLogWrite(int lid,
+                                 const std::vector<uint8_t>& output) override;
+  void AddStandardStats(int lid, base::ListValue value) override;
 
   GlobalRenderFrameHostId frame_id_;
   base::ProcessId peer_pid_;
   mojo::Receiver<blink::mojom::PeerConnectionTrackerHost> receiver_{this};
   mojo::Remote<blink::mojom::PeerConnectionManager> tracker_;
+
+  // A set of local peer connection IDs that belong to this host.
+  std::set<int> peer_connection_lids_;
 };
 
 }  // namespace content

@@ -2,23 +2,38 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "ui/accessibility/platform/ax_platform_node_auralinux.h"
+
 #include <atk/atk.h>
-#include <dlfcn.h>
+
+#include <array>
 #include <utility>
 #include <vector>
 
+#include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
+#include "base/version.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/accessibility/platform/atk_util_auralinux.h"
-#include "ui/accessibility/platform/ax_platform_node_auralinux.h"
+#include "ui/accessibility/platform/ax_platform_for_test.h"
 #include "ui/accessibility/platform/ax_platform_node_unittest.h"
 #include "ui/accessibility/platform/test_ax_node_wrapper.h"
+#include "ui/base/glib/scoped_gsignal.h"
 
-// TODO(https://crbug.com/1394423): Remove this again.
+// TODO(crbug.com/40248581): Remove this again.
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 namespace {
+
+template <typename T>
+T& GArrayFirst(GArray* array) {
+  CHECK(array);
+  CHECK_GT(array->len, 0u);
+  CHECK_EQ(sizeof(T), g_array_get_element_size(array));
+  return *reinterpret_cast<T*>(array->data);
+}
 
 // ATK window activated event will be held until AT-SPI bridge is ready. For
 // those tests using this event, we work that around by faking the state of the
@@ -79,7 +94,7 @@ class AXPlatformNodeAuraLinuxTest : public AXPlatformNodeTest {
   // it's possible that the state we want to expose and/or emit an event for
   // is not present. This will generate a runtime error.
   bool PlatformSupportsState(AtkStateType atk_state_type) {
-    static absl::optional<int> max_state_type = absl::nullopt;
+    static std::optional<int> max_state_type = std::nullopt;
     if (!max_state_type.has_value()) {
       GEnumClass* enum_class =
           G_ENUM_CLASS(g_type_class_ref(atk_state_type_get_type()));
@@ -93,7 +108,7 @@ class AXPlatformNodeAuraLinuxTest : public AXPlatformNodeTest {
   // it's possible that the relation type we want to expose and/or emit an event
   // for is not present. This will generate a runtime error.
   bool PlatformSupportsRelation(AtkRelationType atk_relation_type) {
-    static absl::optional<int> max_relation_type = absl::nullopt;
+    static std::optional<int> max_relation_type = std::nullopt;
     if (!max_relation_type.has_value()) {
       GEnumClass* enum_class =
           G_ENUM_CLASS(g_type_class_ref(atk_relation_type_get_type()));
@@ -118,7 +133,7 @@ static void EnsureAtkObjectHasAttributeWithValue(
   while (current) {
     AtkAttribute* attribute = static_cast<AtkAttribute*>(current->data);
 
-    if (0 == strcmp(attribute_name, attribute->name)) {
+    if (0 == UNSAFE_TODO(strcmp(attribute_name, attribute->name))) {
       // Ensure that we only see this attribute once.
       ASSERT_FALSE(saw_attribute) << attribute_name;
 
@@ -150,7 +165,7 @@ static void SetStringAttributeOnNode(
     AXNode* ax_node,
     ax::mojom::StringAttribute attribute,
     const char* attribute_value,
-    absl::optional<ax::mojom::Role> role = absl::nullopt) {
+    std::optional<ax::mojom::Role> role = std::nullopt) {
   AXNodeData new_data = AXNodeData();
   new_data.role = role.value_or(ax::mojom::Role::kApplication);
   new_data.id = ax_node->id();
@@ -163,7 +178,7 @@ static void TestAtkObjectIntAttribute(
     AtkObject* atk_object,
     ax::mojom::IntAttribute mojom_attribute,
     const gchar* attribute_name,
-    absl::optional<ax::mojom::Role> role = absl::nullopt) {
+    std::optional<ax::mojom::Role> role = std::nullopt) {
   AXNodeData new_data = AXNodeData();
   new_data.role = role.value_or(ax::mojom::Role::kApplication);
   new_data.id = ax_node->id();
@@ -192,7 +207,7 @@ static void TestAtkObjectStringAttribute(
     AtkObject* atk_object,
     ax::mojom::StringAttribute mojom_attribute,
     const gchar* attribute_name,
-    absl::optional<ax::mojom::Role> role = absl::nullopt) {
+    std::optional<ax::mojom::Role> role = std::nullopt) {
   AXNodeData new_data = AXNodeData();
   new_data.role = role.value_or(ax::mojom::Role::kApplication);
   new_data.id = ax_node->id();
@@ -215,7 +230,7 @@ static void TestAtkObjectBoolAttribute(
     AtkObject* atk_object,
     ax::mojom::BoolAttribute mojom_attribute,
     const gchar* attribute_name,
-    absl::optional<ax::mojom::Role> role = absl::nullopt) {
+    std::optional<ax::mojom::Role> role = std::nullopt) {
   AXNodeData new_data = AXNodeData();
   new_data.role = role.value_or(ax::mojom::Role::kApplication);
   new_data.id = ax_node->id();
@@ -879,17 +894,6 @@ typedef bool (*ScrollToPointFunc)(AtkComponent* component,
 typedef bool (*ScrollToFunc)(AtkComponent* component, AtkScrollType type);
 
 TEST_F(AXPlatformNodeAuraLinuxTest, AtkComponentScrollToPoint) {
-  // There's a chance we may be compiled with a newer version of ATK and then
-  // run with an older one, so we need to do a runtime check for this method
-  // that is available in ATK 2.30 instead of linking directly.
-  ScrollToPointFunc scroll_to_point = reinterpret_cast<ScrollToPointFunc>(
-      dlsym(RTLD_DEFAULT, "atk_component_scroll_to_point"));
-  if (!scroll_to_point) {
-    LOG(WARNING) << "Skipping AtkComponentScrollToPoint"
-                    " because ATK version < 2.30 detected.";
-    return;
-  }
-
   AXNodeData root;
   root.id = 1;
   root.role = ax::mojom::Role::kRootWebArea;
@@ -917,7 +921,8 @@ TEST_F(AXPlatformNodeAuraLinuxTest, AtkComponentScrollToPoint) {
   EXPECT_EQ(10, width);
   EXPECT_EQ(10, height);
 
-  scroll_to_point(ATK_COMPONENT(child_obj), ATK_XY_SCREEN, 600, 650);
+  atk_component_scroll_to_point(ATK_COMPONENT(child_obj), ATK_XY_SCREEN, 600,
+                                650);
   atk_component_get_extents(ATK_COMPONENT(child_obj), &x_left, &y_top, &width,
                             &height, ATK_XY_SCREEN);
   EXPECT_EQ(610, x_left);
@@ -925,7 +930,8 @@ TEST_F(AXPlatformNodeAuraLinuxTest, AtkComponentScrollToPoint) {
   EXPECT_EQ(10, width);
   EXPECT_EQ(10, height);
 
-  scroll_to_point(ATK_COMPONENT(child_obj), ATK_XY_PARENT, 10, 10);
+  atk_component_scroll_to_point(ATK_COMPONENT(child_obj), ATK_XY_PARENT, 10,
+                                10);
   atk_component_get_extents(ATK_COMPONENT(child_obj), &x_left, &y_top, &width,
                             &height, ATK_XY_SCREEN);
   // The test wrapper scrolls every element when scrolling, so this should be
@@ -942,17 +948,6 @@ TEST_F(AXPlatformNodeAuraLinuxTest, AtkComponentScrollToPoint) {
 }
 
 TEST_F(AXPlatformNodeAuraLinuxTest, AtkComponentScrollTo) {
-  // There's a chance we may be compiled with a newer version of ATK and then
-  // run with an older one, so we need to do a runtime check for this method
-  // that is available in ATK 2.30 instead of linking directly.
-  ScrollToFunc scroll_to = reinterpret_cast<ScrollToFunc>(
-      dlsym(RTLD_DEFAULT, "atk_component_scroll_to"));
-  if (!scroll_to) {
-    LOG(WARNING) << "Skipping AtkComponentScrollTo"
-                    " because ATK version < 2.30 detected.";
-    return;
-  }
-
   AXNodeData root;
   root.id = 1;
   root.role = ax::mojom::Role::kRootWebArea;
@@ -980,7 +975,7 @@ TEST_F(AXPlatformNodeAuraLinuxTest, AtkComponentScrollTo) {
   EXPECT_EQ(10, width);
   EXPECT_EQ(10, height);
 
-  scroll_to(ATK_COMPONENT(child_obj), ATK_SCROLL_ANYWHERE);
+  atk_component_scroll_to(ATK_COMPONENT(child_obj), ATK_SCROLL_ANYWHERE);
   atk_component_get_extents(ATK_COMPONENT(child_obj), &x_left, &y_top, &width,
                             &height, ATK_XY_SCREEN);
   EXPECT_EQ(0, x_left);
@@ -1092,6 +1087,60 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkActionDoAction) {
   // Test that querying actions out of bounds doesn't crash
   EXPECT_FALSE(atk_action_do_action(ATK_ACTION(root_obj), -1));
   EXPECT_FALSE(atk_action_do_action(ATK_ACTION(root_obj), 4));
+
+  g_object_unref(root_obj);
+}
+
+TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkActionAriaAction) {
+  AXNodeData root;
+  root.id = 1;
+  root.role = ax::mojom::Role::kRootWebArea;
+  root.AddIntListAttribute(ax::mojom::IntListAttribute::kActionsIds, {2, 3});
+
+  AXNodeData child1;
+  child1.id = 2;
+  child1.role = ax::mojom::Role::kButton;
+  child1.SetName("close");
+  root.child_ids.push_back(2);
+
+  AXNodeData child2;
+  child2.id = 3;
+  child2.role = ax::mojom::Role::kButton;
+  child2.SetName("open");
+  child2.AddStringAttribute(ax::mojom::StringAttribute::kHtmlId, "open-button");
+  root.child_ids.push_back(3);
+
+  Init(root, child1, child2);
+
+  AtkObject* root_obj(GetRootAtkObject());
+  ASSERT_TRUE(ATK_IS_OBJECT(root_obj));
+  ASSERT_TRUE(ATK_IS_ACTION(root_obj));
+  g_object_ref(root_obj);
+
+  // Root node should have the default 2 actions (kDoDefault and
+  // kShowContextMenu) + 2 actions from aria-actions (child1 and child2).
+  gint number_of_actions = atk_action_get_n_actions(ATK_ACTION(root_obj));
+  EXPECT_EQ(4, number_of_actions);
+
+  // The third action refers to child1.
+  const gchar* action_name = atk_action_get_name(ATK_ACTION(root_obj), 2);
+  const gchar* action_localized_name =
+      atk_action_get_localized_name(ATK_ACTION(root_obj), 2);
+  EXPECT_STREQ("custom", action_name);
+  EXPECT_STREQ("close", action_localized_name);
+  EXPECT_TRUE(atk_action_do_action(ATK_ACTION(root_obj), 2));
+  EXPECT_EQ(GetRoot()->GetChildAtIndex(0),
+            TestAXNodeWrapper::GetNodeFromLastDefaultAction());
+
+  // The fourth action refers to child2.
+  action_name = atk_action_get_name(ATK_ACTION(root_obj), 3);
+  action_localized_name =
+      atk_action_get_localized_name(ATK_ACTION(root_obj), 3);
+  EXPECT_STREQ("custom_open-button", action_name);
+  EXPECT_STREQ("open", action_localized_name);
+  EXPECT_TRUE(atk_action_do_action(ATK_ACTION(root_obj), 3));
+  EXPECT_EQ(GetRoot()->GetChildAtIndex(1),
+            TestAXNodeWrapper::GetNodeFromLastDefaultAction());
 
   g_object_unref(root_obj);
 }
@@ -1428,6 +1477,63 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkTextCharacterGranularity) {
   g_object_unref(root_obj);
 }
 
+TEST_F(AXPlatformNodeAuraLinuxTest,
+       AtkTextLineBoundaryRequestsInlineTextBoxes) {
+  TestAXNodeWrapper::SetGlobalIsWebContent(true);
+  Init(BuildTextField());
+
+  AtkObject* root_obj = GetRootAtkObject();
+  ASSERT_TRUE(ATK_IS_TEXT(root_obj));
+  AtkText* atk_text = ATK_TEXT(root_obj);
+
+  const int initial_call_count =
+      AXPlatformForTest::GetInstance()
+          .inline_text_boxes_used_in_web_content_count();
+
+  EXPECT_GT(atk_text_get_character_count(atk_text), 0);
+  EXPECT_EQ(initial_call_count,
+            AXPlatformForTest::GetInstance()
+                .inline_text_boxes_used_in_web_content_count());
+
+  int start_offset = -1;
+  int end_offset = -1;
+  char* text = atk_text_get_text_at_offset(
+      atk_text, 0, ATK_TEXT_BOUNDARY_LINE_START, &start_offset, &end_offset);
+  g_free(text);
+  EXPECT_EQ(initial_call_count + 1,
+            AXPlatformForTest::GetInstance()
+                .inline_text_boxes_used_in_web_content_count());
+}
+
+TEST_F(AXPlatformNodeAuraLinuxTest, AtkTextGeometryRequestsInlineTextBoxes) {
+  TestAXNodeWrapper::SetGlobalIsWebContent(true);
+  Init(BuildTextField());
+
+  AtkObject* root_obj = GetRootAtkObject();
+  ASSERT_TRUE(ATK_IS_TEXT(root_obj));
+  AtkText* atk_text = ATK_TEXT(root_obj);
+
+  const int initial_call_count =
+      AXPlatformForTest::GetInstance()
+          .inline_text_boxes_used_in_web_content_count();
+
+  int x;
+  int y;
+  int width;
+  int height;
+  atk_text_get_character_extents(atk_text, 0, &x, &y, &width, &height,
+                                 ATK_XY_SCREEN);
+
+  AtkTextRectangle rectangle;
+  atk_text_get_range_extents(atk_text, 0, 1, ATK_XY_SCREEN, &rectangle);
+
+  atk_text_get_offset_at_point(atk_text, 0, 0, ATK_XY_SCREEN);
+
+  EXPECT_EQ(initial_call_count + 3,
+            AXPlatformForTest::GetInstance()
+                .inline_text_boxes_used_in_web_content_count());
+}
+
 struct GetTextSegmentTest {
   int offset;
   const char* content;
@@ -1559,6 +1665,47 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkTextSentenceGranularity) {
   g_object_unref(root_obj);
 }
 
+TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkTextInvalidBoundaryAndGranularity) {
+  AXNodeData root;
+  root.id = 1;
+  root.role = ax::mojom::Role::kTextField;
+  root.AddStringAttribute(ax::mojom::StringAttribute::kValue,
+                          "A decently long string.");
+  Init(root);
+
+  AtkObject* root_obj(GetRootAtkObject());
+  ASSERT_TRUE(ATK_IS_OBJECT(root_obj));
+  g_object_ref(root_obj);
+
+  ASSERT_TRUE(ATK_IS_TEXT(root_obj));
+  AtkText* atk_text = ATK_TEXT(root_obj);
+
+  // The AT-SPI bridge can pass a boundary as an unvalidated integer.
+  // No text is returned for an unrecognized boundary (7 in this case).
+  int start_offset = 0, end_offset = 0;
+  char* content = atk_text_get_text_at_offset(
+      atk_text, 0, static_cast<AtkTextBoundary>(7), &start_offset, &end_offset);
+  EXPECT_EQ(content, nullptr);
+  EXPECT_EQ(start_offset, -1);
+  EXPECT_EQ(end_offset, -1);
+  g_free(content);
+
+#if ATK_CHECK_VERSION(2, 10, 0)
+  // Likewise for an unrecognized granularity (5 in this case).
+  start_offset = 0;
+  end_offset = 0;
+  content = atk_text_get_string_at_offset(atk_text, 0,
+                                          static_cast<AtkTextGranularity>(5),
+                                          &start_offset, &end_offset);
+  EXPECT_EQ(content, nullptr);
+  EXPECT_EQ(start_offset, -1);
+  EXPECT_EQ(end_offset, -1);
+  g_free(content);
+#endif
+
+  g_object_unref(root_obj);
+}
+
 #if ATK_CHECK_VERSION(2, 10, 0)
 TEST_F(AXPlatformNodeAuraLinuxTest, DISABLED_TestAtkTextParagraphGranularity) {
   // TODO(nektar): Enable navigating by paragraphs in plain text.
@@ -1657,8 +1804,8 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkTextWithNonBMPCharacters) {
 #endif
   }
 
-  static GetTextSegmentTest tests[] = {{0, "\xF0\x9F\x83\x8f ", 0, 2},
-                                       {6, "decently ", 4, 13}};
+  static auto tests = std::to_array<GetTextSegmentTest>(
+      {{0, "\xF0\x9F\x83\x8f ", 0, 2}, {6, "decently ", 4, 13}});
 
   for (const auto& test : tests) {
     int start_offset = -1, end_offset = -1;
@@ -1775,7 +1922,7 @@ class ActivationTester {
     saw_deactivate_ = false;
   }
 
-  virtual ~ActivationTester() {
+  ~ActivationTester() {
     g_signal_handler_disconnect(target_, activate_id_);
     g_signal_handler_disconnect(target_, deactivate_id_);
   }
@@ -1865,7 +2012,7 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestPostponedAtkWindowActive) {
   g_object_ref(root_atk_object);
   EXPECT_TRUE(ATK_IS_WINDOW(root_atk_object));
 
-  AtkUtilAuraLinux* atk_util = ui::AtkUtilAuraLinux::GetInstance();
+  AtkUtilAuraLinux* atk_util = AtkUtilAuraLinux::GetInstance();
 
   {
     ActivationTester tester(root_atk_object);
@@ -2131,42 +2278,14 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkPopupWindowActive) {
 }
 
 TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkSelectionInterface) {
-  AXNodeData root;
-  root.id = 1;
-  root.role = ax::mojom::Role::kListBox;
-  root.AddState(ax::mojom::State::kFocusable);
-  root.AddState(ax::mojom::State::kMultiselectable);
-  root.child_ids.push_back(2);
-  root.child_ids.push_back(3);
-  root.child_ids.push_back(4);
-  root.child_ids.push_back(5);
+  TestAXTreeUpdate update(std::string(R"HTML(
+    ++1 kListBox states=kFocusable,kMultiselectable
+    ++++2 kListBoxOption
+    ++++3 kListBoxOption
+    ++++4 kListBoxOption
+    ++++5 kListItem
+  )HTML"));
 
-  AXNodeData item_1;
-  item_1.id = 2;
-  item_1.role = ax::mojom::Role::kListBoxOption;
-
-  AXNodeData item_2;
-  item_2.id = 3;
-  item_2.role = ax::mojom::Role::kListBoxOption;
-
-  AXNodeData item_3;
-  item_3.id = 4;
-  item_3.role = ax::mojom::Role::kListBoxOption;
-
-  // Add a final item which is not selectable.
-  AXNodeData item_4;
-  item_4.id = 5;
-  item_4.role = ax::mojom::Role::kListItem;
-
-  AXTreeUpdate update;
-  update.root_id = 1;
-  update.nodes.push_back(root);
-  update.nodes.push_back(item_1);
-  update.nodes.push_back(item_2);
-  update.nodes.push_back(item_3);
-  update.nodes.push_back(item_4);
-  update.has_tree_data = true;
-  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
   Init(update);
 
   AtkObject* root_atk_object(GetRootAtkObject());
@@ -2242,6 +2361,94 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkSelectionInterface) {
   g_object_unref(root_atk_object);
 }
 
+TEST_F(AXPlatformNodeAuraLinuxTest, SelectionEventReflectsSelectedState) {
+  AXNodeData list_box;
+  list_box.id = 1;
+  list_box.role = ax::mojom::Role::kListBox;
+  list_box.child_ids = {2, 3, 4};
+
+  AXNodeData selected_option;
+  selected_option.id = 2;
+  selected_option.role = ax::mojom::Role::kListBoxOption;
+  selected_option.AddBoolAttribute(ax::mojom::BoolAttribute::kSelected, true);
+
+  AXNodeData deselected_option;
+  deselected_option.id = 3;
+  deselected_option.role = ax::mojom::Role::kListBoxOption;
+  deselected_option.AddBoolAttribute(ax::mojom::BoolAttribute::kSelected,
+                                     false);
+
+  AXNodeData option_without_selected_state;
+  option_without_selected_state.id = 4;
+  option_without_selected_state.role = ax::mojom::Role::kListBoxOption;
+
+  AXTreeUpdate update;
+  update.root_id = list_box.id;
+  update.nodes = {list_box, selected_option, deselected_option,
+                  option_without_selected_state};
+  update.has_tree_data = true;
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+  Init(update);
+
+  struct StateChangeCount {
+    int selected = 0;
+    int unselected = 0;
+  };
+
+  auto selected_state_change_callback = [](StateChangeCount* count) {
+    return base::BindRepeating(
+        +[](StateChangeCount* count, AtkObject*, gchar* state_changed,
+            gboolean new_value) {
+          if (g_strcmp0(state_changed, "selected")) {
+            return;
+          }
+
+          if (new_value) {
+            ++count->selected;
+          } else {
+            ++count->unselected;
+          }
+        },
+        count);
+  };
+
+  StateChangeCount selected_count;
+  AtkObject* selected_atk_object = AtkObjectFromNode(GetNode(2));
+  ASSERT_TRUE(ATK_IS_OBJECT(selected_atk_object));
+  ScopedGSignal selected_signal(
+      selected_atk_object, "state-change",
+      selected_state_change_callback(&selected_count));
+  ASSERT_TRUE(selected_signal.Connected());
+  GetPlatformNode(GetNode(2))
+      ->NotifyAccessibilityEvent(ax::mojom::Event::kSelection);
+  EXPECT_EQ(1, selected_count.selected);
+  EXPECT_EQ(0, selected_count.unselected);
+
+  StateChangeCount deselected_count;
+  AtkObject* deselected_atk_object = AtkObjectFromNode(GetNode(3));
+  ASSERT_TRUE(ATK_IS_OBJECT(deselected_atk_object));
+  ScopedGSignal deselected_signal(
+      deselected_atk_object, "state-change",
+      selected_state_change_callback(&deselected_count));
+  ASSERT_TRUE(deselected_signal.Connected());
+  GetPlatformNode(GetNode(3))
+      ->NotifyAccessibilityEvent(ax::mojom::Event::kSelection);
+  EXPECT_EQ(0, deselected_count.selected);
+  EXPECT_EQ(1, deselected_count.unselected);
+
+  StateChangeCount no_state_count;
+  AtkObject* no_state_atk_object = AtkObjectFromNode(GetNode(4));
+  ASSERT_TRUE(ATK_IS_OBJECT(no_state_atk_object));
+  ScopedGSignal no_state_signal(
+      no_state_atk_object, "state-change",
+      selected_state_change_callback(&no_state_count));
+  ASSERT_TRUE(no_state_signal.Connected());
+  GetPlatformNode(GetNode(4))
+      ->NotifyAccessibilityEvent(ax::mojom::Event::kSelection);
+  EXPECT_EQ(1, no_state_count.selected);
+  EXPECT_EQ(0, no_state_count.unselected);
+}
+
 // Tests GetPosInSet() and GetSetSize() functions of AXPlatformNodeBase.
 // PosInSet and SetSize must be tested separately from other IntAttributes
 // because they can be either assigned values or calculated dynamically.
@@ -2294,7 +2501,8 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkRelations) {
   AXNodeData root;
   root.id = 1;
   root.role = ax::mojom::Role::kRootWebArea;
-  root.AddIntListAttribute(ax::mojom::IntListAttribute::kDetailsIds, {2});
+  // Add 999 as a target relation id to test that invalid relations are dropped.
+  root.AddIntListAttribute(ax::mojom::IntListAttribute::kDetailsIds, {2, 999});
 
   AXNodeData child1;
   child1.id = 2;
@@ -2305,7 +2513,7 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkRelations) {
   AXNodeData child2;
   child2.id = 3;
   child2.role = ax::mojom::Role::kStaticText;
-  std::vector<int32_t> labelledby_ids = {1, 4};
+  std::vector<int32_t> labelledby_ids = {1, 999, 4};
   child2.AddIntListAttribute(ax::mojom::IntListAttribute::kLabelledbyIds,
                              labelledby_ids);
 
@@ -2409,15 +2617,6 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAllReverseAtkRelations) {
     g_object_unref(G_OBJECT(relations));
   };
 
-  auto test_int_relation = [&](ax::mojom::IntAttribute relation,
-                               AtkRelationType expected_relation,
-                               AtkRelationType expected_reverse_relation) {
-    auto setter = [&](AXNodeData* data, int target_id) {
-      data->AddIntAttribute(relation, target_id);
-    };
-    test_relation(setter, expected_relation, expected_reverse_relation);
-  };
-
   auto test_int_list_relation = [&](ax::mojom::IntListAttribute relation,
                                     AtkRelationType expected_relation,
                                     AtkRelationType expected_reverse_relation) {
@@ -2430,8 +2629,8 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAllReverseAtkRelations) {
 
   test_int_list_relation(ax::mojom::IntListAttribute::kDetailsIds,
                          ATK_RELATION_DETAILS, ATK_RELATION_DETAILS_FOR);
-  test_int_relation(ax::mojom::IntAttribute::kErrormessageId,
-                    ATK_RELATION_ERROR_MESSAGE, ATK_RELATION_ERROR_FOR);
+  test_int_list_relation(ax::mojom::IntListAttribute::kErrormessageIds,
+                         ATK_RELATION_ERROR_MESSAGE, ATK_RELATION_ERROR_FOR);
   test_int_list_relation(ax::mojom::IntListAttribute::kControlsIds,
                          ATK_RELATION_CONTROLLER_FOR,
                          ATK_RELATION_CONTROLLED_BY);
@@ -2495,8 +2694,9 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkRelationsTargetIndex) {
     AtkRelation* relation =
         atk_relation_set_get_relation_by_type(relation_set, relation_type);
     GPtrArray* targets = atk_relation_get_target(relation);
-    ASSERT_TRUE(ATK_IS_OBJECT(g_ptr_array_index(targets, index)));
-    ASSERT_TRUE(ATK_OBJECT(g_ptr_array_index(targets, index)) == target);
+    UNSAFE_TODO(ASSERT_TRUE(ATK_IS_OBJECT(g_ptr_array_index(targets, index))));
+    UNSAFE_TODO(
+        ASSERT_TRUE(ATK_OBJECT(g_ptr_array_index(targets, index)) == target));
 
     g_object_unref(G_OBJECT(relation_set));
   };
@@ -2525,6 +2725,199 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkRelationsTargetIndex) {
   test_index(atk_button3, atk_label2, ATK_RELATION_LABELLED_BY, 2);
 
   g_object_unref(root_atk_object);
+}
+
+TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkDocumentTextSelections) {
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {2, 4};
+
+  AXNodeData heading_data;
+  heading_data.id = 2;
+  heading_data.role = ax::mojom::Role::kHeading;
+  heading_data.child_ids = {3};
+
+  AXNodeData text1_data;
+  text1_data.id = 3;
+  text1_data.role = ax::mojom::Role::kStaticText;
+  text1_data.SetName("a😀b");
+
+  AXNodeData paragraph_data;
+  paragraph_data.id = 4;
+  paragraph_data.role = ax::mojom::Role::kParagraph;
+  paragraph_data.child_ids = {5};
+
+  AXNodeData text2_data;
+  text2_data.id = 5;
+  text2_data.role = ax::mojom::Role::kStaticText;
+  text2_data.SetName("c😀d");
+
+  AXTreeUpdate update;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, heading_data, text1_data, paragraph_data,
+                  text2_data};
+  update.has_tree_data = true;
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+  update.tree_data.sel_anchor_object_id = text1_data.id;
+  update.tree_data.sel_anchor_offset = 3;
+  update.tree_data.sel_focus_object_id = text2_data.id;
+  update.tree_data.sel_focus_offset = 1;
+  AXTree* tree = Init(update);
+
+  AXPlatformNodeAuraLinux* document = GetRootPlatformNode();
+  AtkObject* heading = AtkObjectFromNode(GetRoot()->children()[0]);
+  AtkObject* paragraph = AtkObjectFromNode(GetRoot()->children()[1]);
+
+  GArray* selections = document->GetDocumentTextSelections();
+  ASSERT_TRUE(selections);
+  ASSERT_EQ(1u, selections->len);
+  const auto& selection = GArrayFirst<AtkTextSelectionCompat>(selections);
+  EXPECT_EQ(heading, selection.start_object);
+  EXPECT_EQ(2, selection.start_offset);
+  EXPECT_EQ(paragraph, selection.end_object);
+  EXPECT_EQ(1, selection.end_offset);
+  EXPECT_FALSE(selection.start_is_active);
+  g_array_free(selections, true);
+
+  AtkTextSelectionCompat new_selection = {
+      .start_object = heading,
+      .start_offset = 1,
+      .end_object = paragraph,
+      .end_offset = 2,
+      .start_is_active = true,
+  };
+  selections = g_array_new(false, true, sizeof(AtkTextSelectionCompat));
+  g_array_append_vals(selections, &new_selection, 1);
+  EXPECT_TRUE(document->SetDocumentTextSelections(selections));
+  EXPECT_EQ(text2_data.id, tree->data().sel_anchor_object_id);
+  EXPECT_EQ(3, tree->data().sel_anchor_offset);
+  EXPECT_EQ(text1_data.id, tree->data().sel_focus_object_id);
+  EXPECT_EQ(1, tree->data().sel_focus_offset);
+
+  new_selection.start_offset = 5;
+  GArrayFirst<AtkTextSelectionCompat>(selections) = new_selection;
+  EXPECT_FALSE(document->SetDocumentTextSelections(selections));
+
+  new_selection = {
+      .start_object = heading,
+      .start_offset = 1,
+      .end_object = heading,
+      .end_offset = 1,
+      .start_is_active = false,
+  };
+  GArrayFirst<AtkTextSelectionCompat>(selections) = new_selection;
+  EXPECT_TRUE(document->SetDocumentTextSelections(selections));
+  EXPECT_EQ(text1_data.id, tree->data().sel_anchor_object_id);
+  EXPECT_EQ(1, tree->data().sel_anchor_offset);
+  EXPECT_EQ(text1_data.id, tree->data().sel_focus_object_id);
+  EXPECT_EQ(1, tree->data().sel_focus_offset);
+
+  GArray* collapsed_selections = document->GetDocumentTextSelections();
+  ASSERT_TRUE(collapsed_selections);
+  EXPECT_EQ(0u, collapsed_selections->len);
+  g_array_free(collapsed_selections, true);
+  g_array_free(selections, true);
+}
+
+TEST_F(AXPlatformNodeAuraLinuxTest,
+       TestAtkDocumentTextSelectionsNestedHypertextRoundTrip) {
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {2};
+
+  AXNodeData paragraph_data;
+  paragraph_data.id = 2;
+  paragraph_data.role = ax::mojom::Role::kParagraph;
+  paragraph_data.child_ids = {3, 4, 6};
+
+  AXNodeData text_before_data;
+  text_before_data.id = 3;
+  text_before_data.role = ax::mojom::Role::kStaticText;
+  text_before_data.SetName("abc");
+
+  AXNodeData link_data;
+  link_data.id = 4;
+  link_data.role = ax::mojom::Role::kLink;
+  link_data.child_ids = {5};
+
+  AXNodeData link_text_data;
+  link_text_data.id = 5;
+  link_text_data.role = ax::mojom::Role::kStaticText;
+  link_text_data.SetName("def");
+
+  AXNodeData text_after_data;
+  text_after_data.id = 6;
+  text_after_data.role = ax::mojom::Role::kStaticText;
+  text_after_data.SetName("ghi");
+
+  AXTreeUpdate update;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, paragraph_data, text_before_data,
+                  link_data, link_text_data, text_after_data};
+  update.has_tree_data = true;
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+  update.tree_data.sel_anchor_object_id = link_text_data.id;
+  update.tree_data.sel_anchor_offset = 1;
+  update.tree_data.sel_focus_object_id = text_after_data.id;
+  update.tree_data.sel_focus_offset = 0;
+  Init(update);
+
+  AXPlatformNodeAuraLinux* document = GetRootPlatformNode();
+  AXNode* paragraph_node = GetRoot()->children()[0];
+  AtkObject* paragraph = AtkObjectFromNode(paragraph_node);
+  AtkObject* link = AtkObjectFromNode(paragraph_node->children()[1]);
+
+  GArray* selections = document->GetDocumentTextSelections();
+  ASSERT_TRUE(selections);
+  ASSERT_EQ(1u, selections->len);
+  const auto& selection = GArrayFirst<AtkTextSelectionCompat>(selections);
+  EXPECT_EQ(link, selection.start_object);
+  EXPECT_EQ(1, selection.start_offset);
+  EXPECT_EQ(paragraph, selection.end_object);
+  EXPECT_EQ(4, selection.end_offset);
+  EXPECT_TRUE(document->SetDocumentTextSelections(selections));
+  g_array_free(selections, true);
+}
+
+TEST_F(AXPlatformNodeAuraLinuxTest,
+       TestAtkDocumentTextSelectionsCollapsedAtLeafBoundary) {
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {2};
+
+  AXNodeData paragraph_data;
+  paragraph_data.id = 2;
+  paragraph_data.role = ax::mojom::Role::kParagraph;
+  paragraph_data.child_ids = {3, 4};
+
+  AXNodeData text1_data;
+  text1_data.id = 3;
+  text1_data.role = ax::mojom::Role::kStaticText;
+  text1_data.SetName("abc");
+
+  AXNodeData text2_data;
+  text2_data.id = 4;
+  text2_data.role = ax::mojom::Role::kStaticText;
+  text2_data.SetName("def");
+
+  AXTreeUpdate update;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, paragraph_data, text1_data, text2_data};
+  update.has_tree_data = true;
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+  update.tree_data.sel_anchor_object_id = text1_data.id;
+  update.tree_data.sel_anchor_offset = 3;
+  update.tree_data.sel_focus_object_id = text2_data.id;
+  update.tree_data.sel_focus_offset = 0;
+  Init(update);
+
+  GArray* selections = GetRootPlatformNode()->GetDocumentTextSelections();
+  ASSERT_TRUE(selections);
+  EXPECT_EQ(0u, selections->len);
+  g_array_free(selections, true);
 }
 
 TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkTextTextFieldGetNSelectionsZero) {
@@ -2716,6 +3109,7 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestAtkObjectExpandRebuildsPlatformNode) {
   root_data = AXNodeData();
   root_data.id = 1;
   root_data.role = ax::mojom::Role::kListBox;
+  root_data.AddState(ax::mojom::State::kCollapsed);
   GetRoot()->SetData(root_data);
 
   ASSERT_EQ(original_atk_object, GetRootAtkObject());
@@ -2883,6 +3277,99 @@ TEST_F(AXPlatformNodeAuraLinuxTest, TestDialogActiveWhenChildFocused) {
       ->NotifyAccessibilityEvent(ax::mojom::Event::kFocus);
   EXPECT_TRUE(saw_active_state_change);
   EXPECT_FALSE(AtkObjectHasState(dialog_obj, ATK_STATE_ACTIVE));
+}
+
+TEST_F(AXPlatformNodeAuraLinuxTest, AccessibleURL) {
+  const std::string& test_url = "https://example.com";
+
+  AXNodeData root;
+  root.id = 1;
+  root.role = ax::mojom::Role::kWindow;
+  root.AddStringAttribute(ax::mojom::StringAttribute::kUrl, test_url);
+  root.child_ids.push_back(2);
+
+  AXNodeData child;
+  child.id = 2;
+  child.role = ax::mojom::Role::kGenericContainer;
+  Init(root, child);
+
+  AXPlatformNodeAuraLinux* root_obj = GetPlatformNode(GetRoot());
+  ASSERT_TRUE(root_obj);
+  EXPECT_EQ(root_obj->GetRootURL(), test_url);
+
+  AXPlatformNodeAuraLinux* child_obj =
+      GetPlatformNode(GetRoot()->children()[0]);
+  ASSERT_TRUE(child_obj);
+  EXPECT_EQ(child_obj->GetRootURL(), test_url);
+}
+
+TEST_F(AXPlatformNodeAuraLinuxTest, AriaNotification) {
+  if (base::Version(atk_get_version()).CompareTo(base::Version("2.50.0")) >=
+      0) {
+    AXNodeData root_data;
+    root_data.id = 1;
+    root_data.role = ax::mojom::Role::kRootWebArea;
+    Init(root_data);
+
+    AXNode* root_node = GetRoot();
+    AtkObject* root_object = AtkObjectFromNode(root_node);
+    AXPlatformNodeAuraLinux* root_platform_node = GetPlatformNode(root_node);
+
+    bool notification_signal_sent = false;
+    ScopedGSignal notification_signal(
+        root_object, "notification",
+        base::BindRepeating(
+            [](bool* flag, AtkObject* object, gchar announcement,
+               gint atk_live) { *flag = true; },
+            base::Unretained(&notification_signal_sent)));
+
+    root_platform_node->OnAriaNotificationPosted(
+        "Hello, world!", ax::mojom::AriaNotificationPriority::kNormal);
+    EXPECT_TRUE(notification_signal_sent);
+  } else {
+    AXNodeData root_data;
+    root_data.id = 1;
+    root_data.role = ax::mojom::Role::kRootWebArea;
+
+    AXNodeData child_data;
+    child_data.id = 2;
+    child_data.role = ax::mojom::Role::kTextField;
+    child_data.AddStringAttribute(
+        ax::mojom::StringAttribute::kContainerLiveStatus, "assertive");
+    root_data.child_ids.push_back(2);
+    Init(root_data, child_data);
+
+    AXNode* text_node = GetRoot()->children()[0];
+    AtkObject* text_object = AtkObjectFromNode(text_node);
+    AXPlatformNodeAuraLinux* text_platform_node = GetPlatformNode(text_node);
+    ASSERT_TRUE(ATK_IS_TEXT(text_object));
+
+    bool text_insert_signal_sent = false;
+    ScopedGSignal text_insert_signal(
+        text_object, "text-insert",
+        base::BindRepeating(
+            [](bool* flag, AtkObject*, gint text_offset, gint announcement_size,
+               gchar announcement) { *flag = true; },
+            base::Unretained(&text_insert_signal_sent)));
+
+    text_platform_node->OnAriaNotificationPosted(
+        "Hello, world!", ax::mojom::AriaNotificationPriority::kNormal);
+    EXPECT_TRUE(text_insert_signal_sent);
+  }
+}
+
+TEST_F(AXPlatformNodeAuraLinuxTest, FindStartOfStyleWithNoStyles) {
+  AXNodeData root;
+  root.id = 1;
+  root.role = ax::mojom::Role::kStaticText;
+  root.SetName("text");
+  Init(root);
+
+  AXPlatformNodeAuraLinux* node = GetRootPlatformNode();
+  ASSERT_NE(nullptr, node);
+
+  EXPECT_EQ(0, node->FindStartOfStyle(0, ax::mojom::MoveDirection::kBackward));
+  EXPECT_EQ(0, node->FindStartOfStyle(4, ax::mojom::MoveDirection::kBackward));
 }
 
 }  // namespace ui

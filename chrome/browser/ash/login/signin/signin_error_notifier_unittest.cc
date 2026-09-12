@@ -4,30 +4,34 @@
 
 #include "chrome/browser/ash/login/signin/signin_error_notifier.h"
 
-#include <stddef.h>
-
 #include <memory>
 #include <string>
 
-#include "base/memory/ptr_util.h"
+#include "ash/constants/ash_login_pref_names.h"
+#include "ash/public/cpp/notification_utils.h"
+#include "ash/public/cpp/token_handle_store.h"
+#include "base/check_deref.h"
 #include "build/build_config.h"
 #include "chrome/browser/ash/login/signin/signin_error_notifier_factory.h"
-#include "chrome/browser/ash/login/users/mock_user_manager.h"
+#include "chrome/browser/ash/login/signin/token_handle_store_factory.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
 #include "chrome/browser/signin/identity_test_environment_profile_adaptor.h"
-#include "chrome/browser/supervised_user/supervised_user_service.h"
 #include "chrome/browser/supervised_user/supervised_user_service_factory.h"
-#include "chrome/common/pref_names.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/browser_with_test_window_test.h"
+#include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "components/prefs/pref_service.h"
 #include "components/signin/public/identity_manager/identity_test_environment.h"
 #include "components/signin/public/identity_manager/identity_test_utils.h"
-#include "components/user_manager/scoped_user_manager.h"
+#include "components/supervised_user/core/browser/supervised_user_service.h"
+#include "components/user_manager/user.h"
+#include "google_apis/gaia/gaia_id.h"
+#include "google_apis/gaia/google_service_auth_error.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 
 namespace ash {
@@ -38,26 +42,26 @@ constexpr char kTestSecondaryEmail[] = "email2@example.com";
 
 constexpr char kTokenHandle[] = "test_token_handle";
 
-// Notification ID corresponding to kProfileSigninNotificationId +
-// kTestAccountId.
+// Notification ID base strings corresponding to kSettingsSigninUrl and
+// secondary account reauth.
 constexpr char kPrimaryAccountErrorNotificationId[] =
-    "chrome://settings/signin/testing_profile@test";
+    "chrome://settings/signin/";
 constexpr char kSecondaryAccountErrorNotificationId[] =
-    "chrome://settings/signin/testing_profile@test/secondary-account";
+    "chrome://settings/signin/secondary-account";
 }  // namespace
 
 class SigninErrorNotifierTest : public BrowserWithTestWindowTest {
  public:
   void SetUp() override {
     BrowserWithTestWindowTest::SetUp();
+    // Required to initialize TokenHandleUtil.
+    ash::UserDataAuthClient::InitializeFake();
 
-    mock_user_manager_ = new MockUserManager();
-    user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
-        base::WrapUnique(mock_user_manager_));
+    token_handle_store_factory_ = std::make_unique<TokenHandleStoreFactory>(
+        TestingBrowserProcess::GetGlobal()->local_state());
+    token_handle_store_ = TokenHandleStoreFactory::Get()->GetTokenHandleStore();
 
     SigninErrorNotifierFactory::GetForProfile(GetProfile());
-    display_service_ =
-        std::make_unique<NotificationDisplayServiceTester>(profile());
 
     identity_test_env_profile_adaptor_ =
         std::make_unique<IdentityTestEnvironmentProfileAdaptor>(GetProfile());
@@ -68,6 +72,10 @@ class SigninErrorNotifierTest : public BrowserWithTestWindowTest {
     // will be destroyed as part of the TearDown() process.
     identity_test_env_profile_adaptor_.reset();
 
+    token_handle_store_ = nullptr;
+    ash::UserDataAuthClient::Shutdown();
+    SigninErrorNotifierFactory::GetForProfile(GetProfile())->Shutdown();
+    token_handle_store_factory_.reset();
     BrowserWithTestWindowTest::TearDown();
   }
 
@@ -82,23 +90,36 @@ class SigninErrorNotifierTest : public BrowserWithTestWindowTest {
         identity_test_env()->identity_manager(), account_id, error);
   }
 
+  const message_center::Notification* GetPrimaryAccountErrorNotification() {
+    const user_manager::User& user = CHECK_DEREF(
+        BrowserContextHelper::Get()->GetUserByBrowserContext(profile()));
+    return message_center::MessageCenter::Get()->FindNotificationById(
+        CreateUserScopedNotificationId(kPrimaryAccountErrorNotificationId,
+                                       user.username_hash()));
+  }
+
+  const message_center::Notification* GetSecondaryAccountErrorNotification() {
+    const user_manager::User& user = CHECK_DEREF(
+        BrowserContextHelper::Get()->GetUserByBrowserContext(profile()));
+    return message_center::MessageCenter::Get()->FindNotificationById(
+        CreateUserScopedNotificationId(kSecondaryAccountErrorNotificationId,
+                                       user.username_hash()));
+  }
+
   signin::IdentityTestEnvironment* identity_test_env() {
     return identity_test_env_profile_adaptor_->identity_test_env();
   }
 
  protected:
-  std::unique_ptr<NotificationDisplayServiceTester> display_service_;
-  MockUserManager* mock_user_manager_;  // Not owned.
-  std::unique_ptr<user_manager::ScopedUserManager> user_manager_enabler_;
   std::unique_ptr<IdentityTestEnvironmentProfileAdaptor>
       identity_test_env_profile_adaptor_;
+  std::unique_ptr<TokenHandleStoreFactory> token_handle_store_factory_;
+  raw_ptr<TokenHandleStore> token_handle_store_;
 };
 
 TEST_F(SigninErrorNotifierTest, NoNotification) {
-  EXPECT_FALSE(
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId));
-  EXPECT_FALSE(
-      display_service_->GetNotification(kSecondaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetPrimaryAccountErrorNotification());
+  EXPECT_FALSE(GetSecondaryAccountErrorNotification());
 }
 
 // Verify that if Supervision has just been added for the current user
@@ -107,103 +128,97 @@ TEST_F(SigninErrorNotifierTest, NoNotification) {
 // is unnecessary.
 TEST_F(SigninErrorNotifierTest, NoNotificationAfterAddSupervisionEnabled) {
   CoreAccountId account_id =
-      identity_test_env()->MakeAccountAvailable(kTestEmail).account_id;
+      identity_test_env()->MakeAccountAvailable(kTestEmail).GetAccountId();
   identity_test_env()->SetPrimaryAccount(kTestEmail,
                                          signin::ConsentLevel::kSync);
 
   // Mark signout required.
-  SupervisedUserService* service =
-      SupervisedUserServiceFactory::GetForProfile(profile());
+  supervised_user::SupervisedUserService* service =
+      supervised_user::SupervisedUserServiceFactory::GetForProfile(profile());
   service->set_signout_required_after_supervision_enabled();
 
   SetAuthError(
       identity_test_env()->identity_manager()->GetPrimaryAccountId(
           signin::ConsentLevel::kSync),
-      GoogleServiceAuthError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS));
+      GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+          GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN));
 
-  EXPECT_FALSE(
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetPrimaryAccountErrorNotification());
 }
 
 TEST_F(SigninErrorNotifierTest, ErrorResetForPrimaryAccount) {
-  EXPECT_FALSE(
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetPrimaryAccountErrorNotification());
 
   CoreAccountId account_id =
       identity_test_env()
           ->MakePrimaryAccountAvailable(kTestEmail, signin::ConsentLevel::kSync)
-          .account_id;
+          .GetAccountId();
   SetAuthError(
       account_id,
-      GoogleServiceAuthError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS));
-  EXPECT_TRUE(
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId));
+      GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+          GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN));
+  EXPECT_TRUE(GetPrimaryAccountErrorNotification());
 
   SetAuthError(account_id, GoogleServiceAuthError::AuthErrorNone());
-  EXPECT_FALSE(
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetPrimaryAccountErrorNotification());
 }
 
 TEST_F(SigninErrorNotifierTest, ErrorShownForUnconsentedPrimaryAccount) {
-  EXPECT_FALSE(
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetPrimaryAccountErrorNotification());
 
   CoreAccountId account_id = identity_test_env()
                                  ->MakePrimaryAccountAvailable(
                                      kTestEmail, signin::ConsentLevel::kSignin)
-                                 .account_id;
+                                 .GetAccountId();
   SetAuthError(
       account_id,
-      GoogleServiceAuthError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS));
-  EXPECT_TRUE(
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId));
+      GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+          GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN));
+  EXPECT_TRUE(GetPrimaryAccountErrorNotification());
 
   SetAuthError(account_id, GoogleServiceAuthError::AuthErrorNone());
-  EXPECT_FALSE(
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetPrimaryAccountErrorNotification());
 }
 
 TEST_F(SigninErrorNotifierTest, ErrorResetForSecondaryAccount) {
-  EXPECT_FALSE(
-      display_service_->GetNotification(kSecondaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetSecondaryAccountErrorNotification());
 
   CoreAccountId account_id =
-      identity_test_env()->MakeAccountAvailable(kTestEmail).account_id;
+      identity_test_env()->MakeAccountAvailable(kTestEmail).GetAccountId();
   SetAuthError(
       account_id,
-      GoogleServiceAuthError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS));
+      GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+          GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN));
   // Uses the run loop from `BrowserTaskEnvironment`.
   base::RunLoop().RunUntilIdle();
-  EXPECT_TRUE(
-      display_service_->GetNotification(kSecondaryAccountErrorNotificationId));
+  EXPECT_TRUE(GetSecondaryAccountErrorNotification());
 
   SetAuthError(account_id, GoogleServiceAuthError::AuthErrorNone());
-  EXPECT_FALSE(
-      display_service_->GetNotification(kSecondaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetSecondaryAccountErrorNotification());
 }
 
 TEST_F(SigninErrorNotifierTest, ErrorTransitionForPrimaryAccount) {
   CoreAccountId account_id =
       identity_test_env()
           ->MakePrimaryAccountAvailable(kTestEmail, signin::ConsentLevel::kSync)
-          .account_id;
+          .GetAccountId();
   SetAuthError(
       account_id,
-      GoogleServiceAuthError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS));
+      GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+          GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN));
 
-  absl::optional<message_center::Notification> notification =
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId);
+  const message_center::Notification* notification =
+      GetPrimaryAccountErrorNotification();
   ASSERT_TRUE(notification);
   std::u16string message = notification->message();
   EXPECT_FALSE(message.empty());
 
   // Now set another auth error.
-  SetAuthError(account_id,
-               GoogleServiceAuthError(
-                   GoogleServiceAuthError::UNEXPECTED_SERVICE_RESPONSE));
+  SetAuthError(
+      account_id,
+      GoogleServiceAuthError::FromUnexpectedServiceResponse(std::string()));
 
-  notification =
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId);
+  notification = GetPrimaryAccountErrorNotification();
   ASSERT_TRUE(notification);
   std::u16string new_message = notification->message();
   EXPECT_FALSE(new_message.empty());
@@ -213,31 +228,35 @@ TEST_F(SigninErrorNotifierTest, ErrorTransitionForPrimaryAccount) {
 
 // Verify that SigninErrorNotifier ignores certain errors.
 TEST_F(SigninErrorNotifierTest, AuthStatusEnumerateAllErrors) {
-  GoogleServiceAuthError::State table[] = {
-      GoogleServiceAuthError::NONE,
-      GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS,
-      GoogleServiceAuthError::USER_NOT_SIGNED_UP,
-      GoogleServiceAuthError::CONNECTION_FAILED,
-      GoogleServiceAuthError::SERVICE_UNAVAILABLE,
-      GoogleServiceAuthError::REQUEST_CANCELED,
-      GoogleServiceAuthError::UNEXPECTED_SERVICE_RESPONSE,
-      GoogleServiceAuthError::SERVICE_ERROR,
-      GoogleServiceAuthError::SCOPE_LIMITED_UNRECOVERABLE_ERROR,
-  };
+  using gsae = GoogleServiceAuthError;
+
+  auto errors = std::to_array<GoogleServiceAuthError>({
+      gsae::AuthErrorNone(),
+      gsae::FromInvalidGaiaCredentialsReason(
+          gsae::InvalidGaiaCredentialsReason::UNKNOWN),
+      gsae::CreateAccountNotFound(), gsae::FromConnectionError(net::ERR_FAILED),
+      gsae::FromServiceUnavailable(std::string()),
+      gsae::CreateRequestCanceled(),
+      gsae::FromUnexpectedServiceResponse(std::string()),
+      gsae::FromServiceError(std::string()),
+      gsae::FromScopeLimitedUnrecoverableErrorReason(
+          gsae::ScopeLimitedUnrecoverableErrorReason::kInvalidGrantRaptError),
+      gsae::FromTokenBindingChallenge(std::string()),
+      // DEVICE_MANAGEMENT_ERROR is not supported in ash.
+  });
   static_assert(
-      std::size(table) == GoogleServiceAuthError::NUM_STATES -
-                              GoogleServiceAuthError::kDeprecatedStateCount,
+      errors.size() == gsae::NUM_STATES - gsae::kDeprecatedStateCount - 1,
       "table size should match number of auth error types");
   CoreAccountId account_id =
       identity_test_env()
           ->MakePrimaryAccountAvailable(kTestEmail, signin::ConsentLevel::kSync)
-          .account_id;
+          .GetAccountId();
 
-  for (size_t i = 0; i < std::size(table); ++i) {
-    GoogleServiceAuthError error(table[i]);
+  for (size_t i = 0; i < std::size(errors); ++i) {
+    const auto& error = errors[i];
     SetAuthError(account_id, error);
-    absl::optional<message_center::Notification> notification =
-        display_service_->GetNotification(kPrimaryAccountErrorNotificationId);
+    const message_center::Notification* notification =
+        GetPrimaryAccountErrorNotification();
 
     // Only non scope persistent errors are reported.
     bool expect_notification =
@@ -246,11 +265,11 @@ TEST_F(SigninErrorNotifierTest, AuthStatusEnumerateAllErrors) {
     if (!expect_notification)
       continue;
 
-    ASSERT_TRUE(notification.has_value()) << "Failed case #" << i;
+    ASSERT_TRUE(notification) << "Failed case #" << i;
     EXPECT_FALSE(notification->title().empty());
     EXPECT_FALSE(notification->message().empty());
     EXPECT_EQ((size_t)1, notification->buttons().size());
-    SetAuthError(account_id, GoogleServiceAuthError::AuthErrorNone());
+    SetAuthError(account_id, gsae::AuthErrorNone());
   }
 }
 
@@ -258,9 +277,11 @@ TEST_F(SigninErrorNotifierTest, ChildSecondaryAccountMigrationTest) {
   CoreAccountId primary_account =
       identity_test_env()
           ->MakePrimaryAccountAvailable(kTestEmail, signin::ConsentLevel::kSync)
-          .account_id;
+          .GetAccountId();
   CoreAccountId secondary_account =
-      identity_test_env()->MakeAccountAvailable(kTestSecondaryEmail).account_id;
+      identity_test_env()
+          ->MakeAccountAvailable(kTestSecondaryEmail)
+          .GetAccountId();
 
   // Mark the profile as a child user.
   GetProfile()->SetIsSupervisedProfile();
@@ -269,30 +290,30 @@ TEST_F(SigninErrorNotifierTest, ChildSecondaryAccountMigrationTest) {
   // Invalidate the secondary account.
   SetAuthError(
       secondary_account,
-      GoogleServiceAuthError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS));
+      GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+          GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN));
 
   // Expect that there is a notification, accounts didn't migrate yet.
-  absl::optional<message_center::Notification> notification =
-      display_service_->GetNotification(kSecondaryAccountErrorNotificationId);
+  const message_center::Notification* notification =
+      GetSecondaryAccountErrorNotification();
   ASSERT_TRUE(notification);
   std::u16string message = notification->message();
   EXPECT_FALSE(message.empty());
 
   // Clear error.
   SetAuthError(secondary_account, GoogleServiceAuthError::AuthErrorNone());
-  EXPECT_FALSE(
-      display_service_->GetNotification(kSecondaryAccountErrorNotificationId));
+  EXPECT_FALSE(GetSecondaryAccountErrorNotification());
 
   // Mark secondary account as migrated, message should be different.
-  profile()->GetPrefs()->SetBoolean(prefs::kEduCoexistenceArcMigrationCompleted,
-                                    true);
+  profile()->GetPrefs()->SetBoolean(
+      ash::prefs::kEduCoexistenceArcMigrationCompleted, true);
 
   // Invalidate the secondary account.
   SetAuthError(
       secondary_account,
-      GoogleServiceAuthError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS));
-  notification =
-      display_service_->GetNotification(kSecondaryAccountErrorNotificationId);
+      GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+          GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN));
+  notification = GetSecondaryAccountErrorNotification();
   ASSERT_TRUE(notification);
   std::u16string new_message = notification->message();
   EXPECT_NE(new_message, message);
@@ -301,22 +322,22 @@ TEST_F(SigninErrorNotifierTest, ChildSecondaryAccountMigrationTest) {
 // Tests that token handle errors display the expected error message.
 TEST_F(SigninErrorNotifierTest, TokenHandleTest) {
   // Setup.
-  const CoreAccountId core_account_id =
+  const GaiaId gaia_id =
       identity_test_env()
           ->MakePrimaryAccountAvailable(kTestEmail, signin::ConsentLevel::kSync)
-          .account_id;
+          .GetGaiaId();
   const AccountId account_id = AccountId::FromUserEmailGaiaId(
-      /*user_email=*/kTestEmail, /*gaia_id=*/core_account_id.ToString());
-  TokenHandleUtil::StoreTokenHandle(account_id, kTokenHandle);
-  TokenHandleUtil::SetInvalidTokenForTesting(kTokenHandle);
+      /*user_email=*/kTestEmail, gaia_id);
+  token_handle_store_->StoreTokenHandle(account_id, kTokenHandle);
+  token_handle_store_->SetInvalidTokenForTesting(kTokenHandle);
   SigninErrorNotifier* signin_error_notifier =
       SigninErrorNotifierFactory::GetForProfile(GetProfile());
-  signin_error_notifier->OnTokenHandleCheck(account_id,
-                                            TokenHandleUtil::INVALID);
+  signin_error_notifier->OnTokenHandleCheck(account_id, kTokenHandle,
+                                            /*reauth_required=*/true);
 
   // Test.
-  absl::optional<message_center::Notification> notification =
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId);
+  const message_center::Notification* notification =
+      GetPrimaryAccountErrorNotification();
   ASSERT_TRUE(notification);
   const std::u16string& message = notification->message();
   EXPECT_EQ(message, l10n_util::GetStringUTF16(
@@ -327,28 +348,31 @@ TEST_F(SigninErrorNotifierTest,
        TokenHandleErrorsDoNotDisplaySecondaryAccountErrors) {
   // Setup Secondary Account Error.
   CoreAccountId secondary_account =
-      identity_test_env()->MakeAccountAvailable(kTestSecondaryEmail).account_id;
+      identity_test_env()
+          ->MakeAccountAvailable(kTestSecondaryEmail)
+          .GetAccountId();
   SetAuthError(
       secondary_account,
-      GoogleServiceAuthError(GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS));
+      GoogleServiceAuthError::FromInvalidGaiaCredentialsReason(
+          GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN));
 
   // Setup Device Account.
-  const CoreAccountId core_account_id =
+  const GaiaId gaia_id =
       identity_test_env()
           ->MakePrimaryAccountAvailable(kTestEmail, signin::ConsentLevel::kSync)
-          .account_id;
+          .GetGaiaId();
   const AccountId account_id = AccountId::FromUserEmailGaiaId(
-      /*user_email=*/kTestEmail, /*gaia_id=*/core_account_id.ToString());
-  TokenHandleUtil::StoreTokenHandle(account_id, kTokenHandle);
-  TokenHandleUtil::SetInvalidTokenForTesting(kTokenHandle);
+      /*user_email=*/kTestEmail, gaia_id);
+  token_handle_store_->StoreTokenHandle(account_id, kTokenHandle);
+  token_handle_store_->SetInvalidTokenForTesting(kTokenHandle);
   SigninErrorNotifier* signin_error_notifier =
       SigninErrorNotifierFactory::GetForProfile(GetProfile());
-  signin_error_notifier->OnTokenHandleCheck(account_id,
-                                            TokenHandleUtil::INVALID);
+  signin_error_notifier->OnTokenHandleCheck(account_id, kTokenHandle,
+                                            /*reauth_required=*/true);
 
   // Test.
-  absl::optional<message_center::Notification> notification =
-      display_service_->GetNotification(kPrimaryAccountErrorNotificationId);
+  const message_center::Notification* notification =
+      GetPrimaryAccountErrorNotification();
   ASSERT_TRUE(notification);
   const std::u16string& message = notification->message();
   EXPECT_EQ(message, l10n_util::GetStringUTF16(

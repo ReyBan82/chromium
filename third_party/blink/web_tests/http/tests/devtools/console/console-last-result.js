@@ -2,43 +2,31 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ConsoleTestRunner} from 'console_test_runner';
+
+import * as Console from 'devtools/panels/console/console.js';
+
 (async function() {
   TestRunner.addResult(`Tests that console exposes last evaluation result as $_.\n`);
 
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
 
 
   TestRunner.runTestSuite([
-    function testLastResult(next) {
-      ConsoleTestRunner.evaluateInConsole('1+1', step1);
-
-      function step1() {
-        evaluateLastResultAndDump(next);
-      }
+    async function testLastResult(next) {
+      await ConsoleTestRunner.evaluateInConsolePromise('1+1');
+      await ConsoleTestRunner.evaluateInConsolePromise('$_');
+      await ConsoleTestRunner.dumpConsoleMessages();
+      next();
     },
-    function testLastResultAfterConsoleClear(next) {
-      ConsoleTestRunner.evaluateInConsole('1+1', step1);
-
-      function step1() {
-        Console.ConsoleView.clearConsole();
-        TestRunner.deprecatedRunAfterPendingDispatches(step2);
-      }
-
-      function step2() {
-        evaluateLastResultAndDump(next);
-      }
+    async function testLastResultAfterConsoleClear(next) {
+      await ConsoleTestRunner.evaluateInConsolePromise('1+1');
+      Console.ConsoleView.ConsoleView.instance().clearConsole();
+      await ConsoleTestRunner.waitForPendingViewportUpdates();
+      await ConsoleTestRunner.evaluateInConsolePromise('$_');
+      await ConsoleTestRunner.dumpConsoleMessages();
+      next();
     }
   ]);
-
-  function evaluateLastResultAndDump(callback) {
-    ConsoleTestRunner.evaluateInConsole('$_', didEvaluate);
-
-    async function didEvaluate() {
-      await ConsoleTestRunner.dumpConsoleMessages();
-
-      if (callback)
-        callback();
-    }
-  }
 })();

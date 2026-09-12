@@ -4,15 +4,24 @@
 
 #include "media/capture/video/win/video_capture_device_win.h"
 
+#include <objbase.h>
+
 #include <ks.h>
 #include <ksmedia.h>
-#include <objbase.h>
 
 #include <algorithm>
 #include <list>
 #include <utility>
 
+#include "base/check.h"
+#include "base/compiler_specific.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
+#include "base/dcheck_is_on.h"
 #include "base/feature_list.h"
+#include "base/logging.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/trace_event/trace_event.h"
@@ -137,10 +146,11 @@ void VideoCaptureDeviceWin::GetPinCapabilityList(
     return;
   }
 
-  std::unique_ptr<BYTE[]> caps(new BYTE[byte_size]);
+  auto caps = base::HeapArray<BYTE>::Uninit(byte_size);
   for (int i = 0; i < count; ++i) {
     VideoCaptureDeviceWin::ScopedMediaType media_type;
-    hr = stream_config->GetStreamCaps(i, media_type.Receive(), caps.get());
+    hr = stream_config->GetStreamCaps(
+        i, &media_type.Receive()->AsEphemeralRawAddr(), caps.data());
     // GetStreamCaps() may return S_FALSE, so don't use FAILED() or SUCCEED()
     // macros here since they'll trigger incorrectly.
     if (hr != S_OK || !media_type.get()) {
@@ -177,7 +187,8 @@ void VideoCaptureDeviceWin::GetPinCapabilityList(
         // http://crbug.com/306237.
         if (hr == S_OK && list_size > 0 && time_per_frame_list) {
           for (int k = 0; k < list_size; k++) {
-            LONGLONG time_per_frame = *(time_per_frame_list.get() + k);
+            LONGLONG time_per_frame =
+                *UNSAFE_TODO(time_per_frame_list.get() + k);
             if (time_per_frame <= 0)
               continue;
             frame_rates.push_back(kSecondsToReferenceTime /
@@ -237,7 +248,9 @@ ComPtr<IPin> VideoCaptureDeviceWin::GetPin(ComPtr<IBaseFilter> capture_filter,
 VideoPixelFormat VideoCaptureDeviceWin::TranslateMediaSubtypeToPixelFormat(
     const GUID& sub_type) {
   static struct {
-    const GUID& sub_type;
+    // This field is not a raw_ref<> because it only ever references statically-
+    // allocated data that will never be freed, so it cannot possibly dangle.
+    RAW_PTR_EXCLUSION const GUID& sub_type;
     VideoPixelFormat format;
   } const kMediaSubtypeToPixelFormatCorrespondence[] = {
       {kMediaSubTypeI420, PIXEL_FORMAT_I420},
@@ -270,7 +283,7 @@ void VideoCaptureDeviceWin::ScopedMediaType::Free() {
   media_type_ = nullptr;
 }
 
-AM_MEDIA_TYPE** VideoCaptureDeviceWin::ScopedMediaType::Receive() {
+raw_ptr<AM_MEDIA_TYPE>* VideoCaptureDeviceWin::ScopedMediaType::Receive() {
   DCHECK(!media_type_);
   return &media_type_;
 }
@@ -284,7 +297,7 @@ void VideoCaptureDeviceWin::ScopedMediaType::FreeMediaType(AM_MEDIA_TYPE* mt) {
     mt->pbFormat = nullptr;
   }
   if (mt->pUnk != nullptr) {
-    NOTREACHED();
+    DUMP_WILL_BE_NOTREACHED();
     // pUnk should not be used.
     mt->pUnk->Release();
     mt->pUnk = nullptr;
@@ -345,12 +358,7 @@ bool VideoCaptureDeviceWin::Init() {
   }
 
   // Create the sink filter used for receiving Captured frames.
-  sink_filter_ = new SinkFilter(this);
-  if (sink_filter_.get() == nullptr) {
-    DLOG(ERROR) << "Failed to create sink filter";
-    return false;
-  }
-
+  sink_filter_ = base::MakeRefCounted<SinkFilter>(this);
   input_sink_pin_ = sink_filter_->GetPin(0);
 
   HRESULT hr =
@@ -414,11 +422,14 @@ void VideoCaptureDeviceWin::AllocateAndStart(
   DCHECK(thread_checker_.CalledOnValidThread());
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("video_and_image_capture"),
                "VideoCaptureDeviceWin::AllocateAndStart");
+  {
+    base::AutoLock lock(lock_);
+    if (state_ != kIdle) {
+      return;
+    }
 
-  if (state_ != kIdle)
-    return;
-
-  client_ = std::move(client);
+    client_ = std::move(client);
+  }
 
   // Get the camera capability that best match the requested format.
   const CapabilityWin found_capability =
@@ -448,14 +459,15 @@ void VideoCaptureDeviceWin::AllocateAndStart(
     return;
   }
 
-  std::unique_ptr<BYTE[]> caps(new BYTE[size]);
+  auto caps = base::HeapArray<BYTE>::Uninit(size);
   ScopedMediaType media_type;
 
   // Get the windows capability from the capture device.
   // GetStreamCaps can return S_FALSE which we consider an error. Therefore the
   // FAILED macro can't be used.
   hr = stream_config->GetStreamCaps(found_capability.media_type_index,
-                                    media_type.Receive(), caps.get());
+                                    &media_type.Receive()->AsEphemeralRawAddr(),
+                                    caps.data());
   if (hr != S_OK) {
     SetErrorState(media::VideoCaptureError::
                       kWinDirectShowFailedToGetCaptureDeviceCapabilities,
@@ -520,14 +532,19 @@ void VideoCaptureDeviceWin::AllocateAndStart(
 
   base::UmaHistogramEnumeration(
       "Media.VideoCapture.Win.Device.InternalPixelFormat",
-      capture_format_.pixel_format, media::VideoPixelFormat::PIXEL_FORMAT_MAX);
+      capture_format_.pixel_format,
+      static_cast<media::VideoPixelFormat>(
+          media::VideoPixelFormat::PIXEL_FORMAT_MAX + 1));
   base::UmaHistogramEnumeration(
       "Media.VideoCapture.Win.Device.CapturePixelFormat",
-      capture_format_.pixel_format, media::VideoPixelFormat::PIXEL_FORMAT_MAX);
+      capture_format_.pixel_format,
+      static_cast<media::VideoPixelFormat>(
+          media::VideoPixelFormat::PIXEL_FORMAT_MAX + 1));
   base::UmaHistogramEnumeration(
       "Media.VideoCapture.Win.Device.RequestedPixelFormat",
       params.requested_format.pixel_format,
-      media::VideoPixelFormat::PIXEL_FORMAT_MAX);
+      static_cast<media::VideoPixelFormat>(
+          media::VideoPixelFormat::PIXEL_FORMAT_MAX + 1));
 
   {
     base::AutoLock lock(lock_);
@@ -540,8 +557,12 @@ void VideoCaptureDeviceWin::StopAndDeAllocate() {
   DCHECK(thread_checker_.CalledOnValidThread());
   TRACE_EVENT0(TRACE_DISABLED_BY_DEFAULT("video_and_image_capture"),
                "VideoCaptureDeviceWin::StopAndDeAllocate");
-  if (state_ != kCapturing)
-    return;
+  {
+    base::AutoLock lock(lock_);
+    if (state_ != kCapturing) {
+      return;
+    }
+  }
 
   HRESULT hr = media_control_->Stop();
   if (FAILED(hr)) {
@@ -563,6 +584,7 @@ void VideoCaptureDeviceWin::StopAndDeAllocate() {
 
 void VideoCaptureDeviceWin::TakePhoto(TakePhotoCallback callback) {
   DCHECK(thread_checker_.CalledOnValidThread());
+  base::AutoLock lock(lock_);
   // DirectShow has other means of capturing still pictures, e.g. connecting a
   // SampleGrabber filter to a PIN_CATEGORY_STILL of |capture_filter_|. This
   // way, however, is not widespread and proves too cumbersome, so we just grab
@@ -858,8 +880,7 @@ bool VideoCaptureDeviceWin::GetCameraAndVideoControls(
 }
 
 // Implements SinkFilterObserver::SinkFilterObserver.
-void VideoCaptureDeviceWin::FrameReceived(const uint8_t* buffer,
-                                          int length,
+void VideoCaptureDeviceWin::FrameReceived(base::span<const uint8_t> buffer,
                                           const VideoCaptureFormat& format,
                                           base::TimeDelta timestamp,
                                           bool flip_y) {
@@ -869,35 +890,38 @@ void VideoCaptureDeviceWin::FrameReceived(const uint8_t* buffer,
   if (!camera_rotation_.has_value() || IsAutoRotationEnabled())
     camera_rotation_ = GetCameraRotation(device_descriptor_.facing);
 
-  {
-    base::AutoLock lock(lock_);
-    if (state_ != kCapturing)
-      return;
-
-    if (first_ref_time_.is_null())
-      first_ref_time_ = base::TimeTicks::Now();
-
-    // There is a chance that the platform does not provide us with the
-    // timestamp, in which case, we use reference time to calculate a timestamp.
-    if (timestamp == kNoTimestamp)
-      timestamp = base::TimeTicks::Now() - first_ref_time_;
-
-    // TODO(julien.isorce): retrieve the color space information using the
-    // DirectShow api, AM_MEDIA_TYPE::VIDEOINFOHEADER2::dwControlFlags. If
-    // AMCONTROL_COLORINFO_PRESENT, then reinterpret dwControlFlags as a
-    // DXVA_ExtendedFormat. Then use its fields DXVA_VideoPrimaries,
-    // DXVA_VideoTransferMatrix, DXVA_VideoTransferFunction and
-    // DXVA_NominalRangeto build a gfx::ColorSpace. See http://crbug.com/959992.
-    client_->OnIncomingCapturedData(buffer, length, format, gfx::ColorSpace(),
-                                    camera_rotation_.value(), flip_y,
-                                    base::TimeTicks::Now(), timestamp);
+  base::AutoLock lock(lock_);
+  if (state_ != kCapturing) {
+    return;
   }
+
+  if (first_ref_time_.is_null()) {
+    first_ref_time_ = base::TimeTicks::Now();
+  }
+
+  // There is a chance that the platform does not provide us with the
+  // timestamp, in which case, we use reference time to calculate a timestamp.
+  if (timestamp == kNoTimestamp) {
+    timestamp = base::TimeTicks::Now() - first_ref_time_;
+  }
+
+  // TODO(julien.isorce): retrieve the color space information using the
+  // DirectShow api, AM_MEDIA_TYPE::VIDEOINFOHEADER2::dwControlFlags. If
+  // AMCONTROL_COLORINFO_PRESENT, then reinterpret dwControlFlags as a
+  // DXVA_ExtendedFormat. Then use its fields DXVA_VideoPrimaries,
+  // DXVA_VideoTransferMatrix, DXVA_VideoTransferFunction and
+  // DXVA_NominalRangeto build a gfx::ColorSpace. See http://crbug.com/959992.
+  client_->OnIncomingCapturedData(
+      buffer, format, gfx::ColorSpace(), camera_rotation_.value(), flip_y,
+      base::TimeTicks::Now(), timestamp,
+      /*capture_begin_timestamp=*/std::nullopt, /*metadata=*/std::nullopt);
 
   while (!take_photo_callbacks_.empty()) {
     TakePhotoCallback cb = std::move(take_photo_callbacks_.front());
     take_photo_callbacks_.pop();
 
-    mojom::BlobPtr blob = RotateAndBlobify(buffer, length, format, 0);
+    mojom::BlobPtr blob =
+        RotateAndBlobify(buffer.data(), buffer.size(), format, 0);
     if (blob) {
       std::move(cb).Run(std::move(blob));
     }
@@ -905,6 +929,10 @@ void VideoCaptureDeviceWin::FrameReceived(const uint8_t* buffer,
 }
 
 void VideoCaptureDeviceWin::FrameDropped(VideoCaptureFrameDropReason reason) {
+  base::AutoLock lock(lock_);
+  if (state_ != kCapturing) {
+    return;
+  }
   client_->OnFrameDropped(reason);
 }
 
@@ -919,8 +947,8 @@ bool VideoCaptureDeviceWin::CreateCapabilityMap() {
 void VideoCaptureDeviceWin::SetAntiFlickerInCaptureFilter(
     const VideoCaptureParams& params) {
   const PowerLineFrequency power_line_frequency = GetPowerLineFrequency(params);
-  if (power_line_frequency != PowerLineFrequency::FREQUENCY_50HZ &&
-      power_line_frequency != PowerLineFrequency::FREQUENCY_60HZ) {
+  if (power_line_frequency != PowerLineFrequency::k50Hz &&
+      power_line_frequency != PowerLineFrequency::k60Hz) {
     return;
   }
   ComPtr<IKsPropertySet> ks_propset;
@@ -936,8 +964,7 @@ void VideoCaptureDeviceWin::SetAntiFlickerInCaptureFilter(
     data.Property.Set = PROPSETID_VIDCAP_VIDEOPROCAMP;
     data.Property.Id = KSPROPERTY_VIDEOPROCAMP_POWERLINE_FREQUENCY;
     data.Property.Flags = KSPROPERTY_TYPE_SET;
-    data.Value =
-        (power_line_frequency == PowerLineFrequency::FREQUENCY_50HZ) ? 1 : 2;
+    data.Value = (power_line_frequency == PowerLineFrequency::k50Hz) ? 1 : 2;
     data.Flags = KSPROPERTY_VIDEOPROCAMP_FLAGS_MANUAL;
     hr = ks_propset->Set(PROPSETID_VIDCAP_VIDEOPROCAMP,
                          KSPROPERTY_VIDEOPROCAMP_POWERLINE_FREQUENCY, &data,
@@ -951,8 +978,14 @@ void VideoCaptureDeviceWin::SetErrorState(media::VideoCaptureError error,
                                           const std::string& reason,
                                           HRESULT hr) {
   DCHECK(thread_checker_.CalledOnValidThread());
+  base::AutoLock lock(lock_);
   DLOG_IF_FAILED_WITH_HRESULT(reason, hr);
   state_ = kError;
   client_->OnError(error, from_here, reason);
 }
+void VideoCaptureDeviceWin::InvalidateBuffers() {
+  base::AutoLock lock(lock_);
+  client_->InvalidateBuffers();
+}
+
 }  // namespace media

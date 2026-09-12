@@ -8,8 +8,7 @@
 #include "base/no_destructor.h"
 #include "base/strings/utf_string_conversions.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 const char16_t kFakeMobileProviderName[] = u"Fake Mobile Provider";
 
@@ -35,12 +34,12 @@ const PhoneStatusModel& CreateFakePhoneStatusModel() {
 const char kFakeBrowserTabUrl1[] = "https://www.example.com/tab1";
 const char16_t kFakeBrowserTabName1[] = u"Tab 1";
 const base::Time kFakeBrowserTabLastAccessedTimestamp1 =
-    base::Time::FromDoubleT(4);
+    base::Time::FromSecondsSinceUnixEpoch(4);
 
 const char kFakeBrowserTabUrl2[] = "https://www.example.com/tab2";
 const char16_t kFakeBrowserTabName2[] = u"Tab 2";
 const base::Time kFakeBrowserTabLastAccessedTimestamp2 =
-    base::Time::FromDoubleT(3);
+    base::Time::FromSecondsSinceUnixEpoch(3);
 
 const BrowserTabsModel::BrowserTabMetadata& CreateFakeBrowserTabMetadata() {
   static const base::NoDestructor<BrowserTabsModel::BrowserTabMetadata>
@@ -74,15 +73,20 @@ const int64_t kFakeInlineReplyId = 1337;
 const int64_t kUserId = 1;
 const char16_t kFakeNotificationTitle[] = u"Fake Title";
 const char16_t kFakeNotificationText[] = u"Fake Text";
-const base::flat_map<Notification::ActionType, int64_t> kFakeActionIdMap = {
-    {Notification::ActionType::kInlineReply, kFakeInlineReplyId}};
+
+const base::flat_map<Notification::ActionType, int64_t>& GetFakeActionIdMap() {
+  static const base::NoDestructor<
+      base::flat_map<Notification::ActionType, int64_t>>
+      map({{Notification::ActionType::kInlineReply, kFakeInlineReplyId}});
+  return *map;
+}
 
 const Notification::AppMetadata& CreateFakeAppMetadata() {
   static const base::NoDestructor<Notification::AppMetadata> fake_app_metadata{
       kFakeAppVisibleName,
       kFakeAppPackageName,
       gfx::Image(),
-      /*icon_color=*/absl::nullopt,
+      /*icon_color=*/std::nullopt,
       /*icon_is_monochrome=*/true,
       kUserId,
       phonehub::proto::AppStreamabilityStatus::STREAMABLE};
@@ -96,12 +100,11 @@ const Notification& CreateFakeNotification() {
       base::Time(),
       Notification::Importance::kDefault,
       Notification::Category::kConversation,
-      kFakeActionIdMap,
+      GetFakeActionIdMap(),
       Notification::InteractionBehavior::kNone,
       kFakeNotificationTitle,
       kFakeNotificationText};
   return *fake_notification;
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

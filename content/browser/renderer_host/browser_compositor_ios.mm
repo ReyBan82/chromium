@@ -17,11 +17,11 @@
 #include "components/viz/common/features.h"
 #include "components/viz/common/surfaces/local_surface_id.h"
 #include "content/browser/compositor/image_transport_factory.h"
+#include "content/browser/renderer_host/begin_frame_source_ios.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/context_factory.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "ui/base/layout.h"
-#include "ui/compositor/compositor_switches.h"
+#include "third_party/skia/include/core/SkColor.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/geometry/dip_util.h"
 #include "ui/gfx/geometry/size_conversions.h"
 
@@ -38,12 +38,13 @@ BrowserCompositorIOS::BrowserCompositorIOS(
     : client_(client),
       accelerated_widget_(accelerated_widget),
       weak_factory_(this) {
-  root_layer_ = std::make_unique<ui::Layer>(ui::LAYER_SOLID_COLOR);
+  root_layer_ = std::make_unique<ui::LayerSurface>();
   // Ensure that this layer draws nothing when it does not not have delegated
   // content (otherwise this solid color will be flashed during navigation).
-  root_layer_->SetColor(SK_ColorRED);
+  root_layer_->SetFallbackBackgroundColor(SkColors::kRed);
+  root_layer_->SetFillsBoundsOpaquely(false);
   delegated_frame_host_ = std::make_unique<DelegatedFrameHost>(
-      frame_sink_id, this, true /* should_register_frame_sink_id */);
+      frame_sink_id, this, /*should_register_frame_sink_id=*/true);
 
   SetRenderWidgetHostIsHidden(render_widget_host_is_hidden);
 }
@@ -59,7 +60,7 @@ BrowserCompositorIOS::~BrowserCompositorIOS() {
 }
 
 DelegatedFrameHost* BrowserCompositorIOS::GetDelegatedFrameHost() {
-  DCHECK(delegated_frame_host_);
+  CHECK(delegated_frame_host_, base::NotFatalUntil::M152);
   return delegated_frame_host_.get();
 }
 
@@ -141,7 +142,7 @@ void BrowserCompositorIOS::UpdateSurfaceFromChild(
     }
     delegated_frame_host_->EmbedSurface(
         dfh_local_surface_id_allocator_.GetCurrentLocalSurfaceId(),
-        dfh_size_dip_, GetDeadlinePolicy(true /* is_resize */));
+        dfh_size_dip_, GetDeadlinePolicy(/*is_resize=*/true));
   }
   client_->OnBrowserCompositorSurfaceIdChanged();
 }
@@ -175,7 +176,7 @@ void BrowserCompositorIOS::SetRenderWidgetHostIsHidden(bool hidden) {
     // ParentLayerCompositor, since it returns early on a no-op state
     // transition.
     delegated_frame_host_->WasShown(GetRendererLocalSurfaceId(), dfh_size_dip_,
-                                    {} /* record_tab_switch_time_request */);
+                                    /*record_tab_switch_time_request=*/{});
   }
 }
 
@@ -217,14 +218,16 @@ void BrowserCompositorIOS::TransitionToState(State new_state) {
   // First, detach from the current compositor, if there is one.
   delegated_frame_host_->DetachFromCompositor();
   if (state_ == UseParentLayerCompositor) {
-    DCHECK(root_layer_->parent());
+    CHECK(root_layer_->parent(), base::NotFatalUntil::M152);
     state_ = HasNoCompositor;
     root_layer_->parent()->RemoveObserver(this);
     root_layer_->parent()->Remove(root_layer_.get());
   }
   if (state_ == HasOwnCompositor) {
     compositor_->SetRootLayer(nullptr);
+    begin_frame_source_.reset();
     compositor_.reset();
+    InvalidateSurface();
   }
 
   // The compositor is now detached. If this is the target state, we're done.
@@ -239,7 +242,7 @@ void BrowserCompositorIOS::TransitionToState(State new_state) {
 
   // Attach to the new compositor.
   if (new_state == UseParentLayerCompositor) {
-    DCHECK(parent_ui_layer_);
+    CHECK(parent_ui_layer_, base::NotFatalUntil::M152);
     parent_ui_layer_->Add(root_layer_.get());
     parent_ui_layer_->AddObserver(this);
     state_ = UseParentLayerCompositor;
@@ -249,19 +252,24 @@ void BrowserCompositorIOS::TransitionToState(State new_state) {
     compositor_ = std::make_unique<ui::Compositor>(
         context_factory->AllocateFrameSinkId(), context_factory,
         base::SingleThreadTaskRunner::GetCurrentDefault(),
-        ui::IsPixelCanvasRecordingEnabled());
+        features::IsPixelCanvasRecordingEnabled(),
+        /*use_external_begin_frame_control=*/true);
+    begin_frame_source_ =
+        std::make_unique<BeginFrameSourceIOS>(compositor_.get());
+    Suspend();
     display::ScreenInfo current = client_->GetCurrentScreenInfo();
     UpdateSurface(dfh_size_pixels_, current.device_scale_factor,
                   current.display_color_spaces);
     compositor_->SetRootLayer(root_layer_.get());
     compositor_->SetBackgroundColor(background_color_);
     compositor_->SetAcceleratedWidget(accelerated_widget_);
+    Unsuspend();
     state_ = HasOwnCompositor;
   }
-  DCHECK_EQ(state_, new_state);
+  CHECK_EQ(state_, new_state, base::NotFatalUntil::M152);
   delegated_frame_host_->AttachToCompositor(GetCompositor());
   delegated_frame_host_->WasShown(GetRendererLocalSurfaceId(), dfh_size_dip_,
-                                  {} /* record_tab_switch_time_request */);
+                                  /*record_tab_switch_time_request=*/{});
 }
 
 void BrowserCompositorIOS::TakeFallbackContentFrom(
@@ -273,7 +281,7 @@ void BrowserCompositorIOS::TakeFallbackContentFrom(
 ////////////////////////////////////////////////////////////////////////////////
 // DelegatedFrameHost, public:
 
-ui::Layer* BrowserCompositorIOS::DelegatedFrameHostGetLayer() const {
+ui::LayerSurface* BrowserCompositorIOS::GetDelegatedFrameHostLayer() const {
   return root_layer_.get();
 }
 
@@ -299,13 +307,28 @@ void BrowserCompositorIOS::InvalidateLocalSurfaceIdOnEviction() {
   dfh_local_surface_id_allocator_.Invalidate();
 }
 
-std::vector<viz::SurfaceId>
+viz::FrameEvictorClient::EvictIds
 BrowserCompositorIOS::CollectSurfaceIdsForEviction() {
-  return client_->CollectSurfaceIdsForEviction();
+  viz::FrameEvictorClient::EvictIds ids;
+  ids.embedded_ids = client_->CollectSurfaceIdsForEviction();
+  return ids;
 }
 
 bool BrowserCompositorIOS::ShouldShowStaleContentOnEviction() {
   return false;
+}
+
+void BrowserCompositorIOS::DidNavigateMainFramePreCommit() {
+  delegated_frame_host_->DidNavigateMainFramePreCommit();
+}
+
+void BrowserCompositorIOS::DidEnterBackForwardCache() {
+  dfh_local_surface_id_allocator_.GenerateId();
+  delegated_frame_host_->DidEnterBackForwardCache();
+}
+
+void BrowserCompositorIOS::ActivatedOrEvictedFromBackForwardCache() {
+  delegated_frame_host_->ActivatedOrEvictedFromBackForwardCache();
 }
 
 void BrowserCompositorIOS::DidNavigate() {
@@ -332,16 +355,16 @@ void BrowserCompositorIOS::DidNavigate() {
 
 void BrowserCompositorIOS::SetParentUiLayer(ui::Layer* new_parent_ui_layer) {
   if (new_parent_ui_layer) {
-    DCHECK(new_parent_ui_layer->GetCompositor());
+    CHECK(new_parent_ui_layer->GetCompositor(), base::NotFatalUntil::M152);
   }
 
   // Set |parent_ui_layer_| to the new value, which potentially not match the
   // value of |root_layer_->parent()|. The call to UpdateState will re-parent
   // |root_layer_|.
-  DCHECK_EQ(root_layer_->parent(), parent_ui_layer_);
+  CHECK_EQ(root_layer_->parent(), parent_ui_layer_, base::NotFatalUntil::M152);
   parent_ui_layer_ = new_parent_ui_layer;
   UpdateState();
-  DCHECK_EQ(root_layer_->parent(), parent_ui_layer_);
+  CHECK_EQ(root_layer_->parent(), parent_ui_layer_, base::NotFatalUntil::M152);
 }
 
 void BrowserCompositorIOS::ForceNewSurfaceForTesting() {
@@ -375,7 +398,7 @@ void BrowserCompositorIOS::TransformPointToRootSurface(gfx::PointF* point) {
 }
 
 void BrowserCompositorIOS::LayerDestroyed(ui::Layer* layer) {
-  DCHECK_EQ(layer, parent_ui_layer_);
+  CHECK_EQ(layer, parent_ui_layer_, base::NotFatalUntil::M152);
   SetParentUiLayer(nullptr);
 }
 
@@ -384,6 +407,11 @@ ui::Compositor* BrowserCompositorIOS::GetCompositor() const {
     return parent_ui_layer_->GetCompositor();
   }
   return compositor_.get();
+}
+
+void BrowserCompositorIOS::InvalidateSurfaceAllocationGroup() {
+  local_surface_id_allocator_.Invalidate(
+      /*also_invalidate_allocation_group=*/true);
 }
 
 cc::DeadlinePolicy BrowserCompositorIOS::GetDeadlinePolicy(
@@ -418,6 +446,24 @@ void BrowserCompositorIOS::UpdateSurface(
     display_color_spaces_ = display_color_spaces;
     compositor_->SetDisplayColorSpaces(display_color_spaces_);
   }
+}
+
+void BrowserCompositorIOS::InvalidateSurface() {
+  size_pixels_ = gfx::Size();
+  scale_factor_ = 1.f;
+  local_surface_id_allocator_.Invalidate(
+      /*also_invalidate_allocation_group=*/true);
+}
+
+void BrowserCompositorIOS::Suspend() {
+  CHECK(compositor_, base::NotFatalUntil::M152);
+  // Requests a compositor lock without a timeout.
+  compositor_suspended_lock_ =
+      compositor_->GetCompositorLock(nullptr, base::TimeDelta());
+}
+
+void BrowserCompositorIOS::Unsuspend() {
+  compositor_suspended_lock_ = nullptr;
 }
 
 }  // namespace content

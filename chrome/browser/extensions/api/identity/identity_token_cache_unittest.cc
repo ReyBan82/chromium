@@ -8,7 +8,10 @@
 #include <string>
 
 #include "base/test/task_environment.h"
+#include "extensions/buildflags/buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -81,7 +84,7 @@ TEST_F(IdentityTokenCacheTest, AccessTokenCacheHit) {
 }
 
 // The cache should return NOTFOUND status when a token expires.
-// Regression test for https://crbug.com/1127187.
+// Regression test for https://crbug.com/40718910.
 TEST_F(IdentityTokenCacheTest, ExpiredAccessTokenCacheHit) {
   std::string token_string = "token";
   std::set<std::string> scopes = {"foo", "bar"};

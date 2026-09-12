@@ -7,7 +7,7 @@
 
 #include "base/containers/flat_map.h"
 #include "base/memory/raw_ptr.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace ui {
 
@@ -42,6 +42,16 @@ class X11WindowManager {
   void RemoveWindow(X11Window* window);
   X11Window* GetWindow(gfx::AcceleratedWidget widget) const;
 
+  // Returns true if pointer events are currently being delivered to Chrome,
+  // i.e. the pointer is inside one of the windows or Chrome holds an active
+  // pointer grab.  While this is true, X11EventSource::last_cursor_location()
+  // is kept up to date by those events.
+  bool IsTrackingPointer() const;
+
+  // Returns true if any window has requested to be mapped but has not yet
+  // received the corresponding MapNotify.
+  bool HasWindowPendingMap() const;
+
   void MouseOnWindow(X11Window* delegate);
 
   const X11Window* window_mouse_currently_on_for_test() const {
@@ -52,7 +62,8 @@ class X11WindowManager {
   raw_ptr<X11Window> located_events_grabber_ = nullptr;
   raw_ptr<X11Window> window_mouse_currently_on_ = nullptr;
 
-  base::flat_map<gfx::AcceleratedWidget, X11Window*> windows_;
+  base::flat_map<gfx::AcceleratedWidget, raw_ptr<X11Window, CtnExperimental>>
+      windows_;
 };
 
 }  // namespace ui

@@ -4,10 +4,16 @@
 
 #include "chrome/browser/ash/login/saml/password_sync_token_checkers_collection.h"
 
-#include "base/containers/contains.h"
-#include "chrome/browser/browser_process.h"
+#include <memory>
+#include <string>
+
+#include "base/check_deref.h"
+#include "chrome/browser/ash/login/saml/password_sync_token_login_checker.h"
 #include "components/user_manager/known_user.h"
+#include "components/user_manager/user.h"
 #include "components/user_manager/user_manager.h"
+#include "net/base/backoff_entry.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 
 namespace ash {
 
@@ -22,8 +28,14 @@ const net::BackoffEntry::Policy
         true,            // Use initial delay in the first retry.
 };
 
-PasswordSyncTokenCheckersCollection::PasswordSyncTokenCheckersCollection()
-    : sync_token_retry_backoff_(&kFetchTokenRetryBackoffPolicy) {}
+PasswordSyncTokenCheckersCollection::PasswordSyncTokenCheckersCollection(
+    PrefService* local_state,
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory)
+    : local_state_(CHECK_DEREF(local_state)),
+      shared_url_loader_factory_(std::move(shared_url_loader_factory)),
+      sync_token_retry_backoff_(&kFetchTokenRetryBackoffPolicy) {
+  CHECK(shared_url_loader_factory_);
+}
 
 PasswordSyncTokenCheckersCollection::~PasswordSyncTokenCheckersCollection() =
     default;
@@ -31,21 +43,21 @@ PasswordSyncTokenCheckersCollection::~PasswordSyncTokenCheckersCollection() =
 void PasswordSyncTokenCheckersCollection::StartPasswordSyncCheckers(
     const user_manager::UserList& users,
     PasswordSyncTokenLoginChecker::Observer* observer) {
-  for (auto* user : users) {
+  for (user_manager::User* user : users) {
     // Online login already enforced for the user - no further checks are
     // required.
     if (!user->using_saml() || user->force_online_signin())
       continue;
 
-    user_manager::KnownUser known_user(g_browser_process->local_state());
+    user_manager::KnownUser known_user(&local_state_.get());
     const std::string* sync_token =
         known_user.GetPasswordSyncToken(user->GetAccountId());
     if (sync_token && !sync_token->empty() &&
-        !base::Contains(sync_token_checkers_, *sync_token)) {
+        !sync_token_checkers_.contains(*sync_token)) {
       sync_token_checkers_.insert(
-          {*sync_token,
-           std::make_unique<PasswordSyncTokenLoginChecker>(
-               user->GetAccountId(), *sync_token, &sync_token_retry_backoff_)});
+          {*sync_token, std::make_unique<PasswordSyncTokenLoginChecker>(
+                            shared_url_loader_factory_, user->GetAccountId(),
+                            *sync_token, &sync_token_retry_backoff_)});
       if (observer)
         sync_token_checkers_[*sync_token]->AddObserver(observer);
       sync_token_checkers_[*sync_token]->AddObserver(this);
@@ -57,12 +69,13 @@ void PasswordSyncTokenCheckersCollection::StartPasswordSyncCheckers(
 
 void PasswordSyncTokenCheckersCollection::OnInvalidSyncToken(
     const AccountId& account_id) {
-  user_manager::KnownUser known_user(g_browser_process->local_state());
+  user_manager::KnownUser known_user(&local_state_.get());
   const std::string* sync_token = known_user.GetPasswordSyncToken(account_id);
   if (!sync_token)
     return;
-  if (base::Contains(sync_token_checkers_, *sync_token))
+  if (sync_token_checkers_.contains(*sync_token)) {
     sync_token_checkers_.erase(*sync_token);
+  }
 }
 
 }  // namespace ash

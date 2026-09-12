@@ -2,10 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import './strings.m.js';
+import '/strings.m.js';
 
-import {assertNotReached} from 'chrome://resources/js/assert_ts.js';
+import {assertNotReached, assertNotReachedCase} from 'chrome://resources/js/assert.js';
 import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+
+// This `SafetyCheckWarningReason` enum should match the enum of the same
+// name defined in the developer_private.webidl and enums.xml files.
+export enum SafetyCheckWarningReason {
+  UNPUBLISHED = 1,
+  POLICY = 2,
+  MALWARE = 3,
+  OFFSTORE = 4,
+  UNWANTED = 5,
+  NO_PRIVACY_PRACTICE = 6,
+}
 
 export enum SourceType {
   WEBSTORE = 'webstore',
@@ -22,14 +33,8 @@ export enum EnableControl {
   ENABLE_TOGGLE = 'ENABLE_TOGGLE',
 }
 
-// TODO(tjudkins): This should be extracted to a shared metrics module.
-export enum UserAction {
-  ALL_TOGGLED_ON = 'Extensions.Settings.HostList.AllHostsToggledOn',
-  ALL_TOGGLED_OFF = 'Extensions.Settings.HostList.AllHostsToggledOff',
-  SPECIFIC_TOGGLED_ON = 'Extensions.Settings.HostList.SpecificHostToggledOn',
-  SPECIFIC_TOGGLED_OFF = 'Extensions.Settings.HostList.SpecificHostToggledOff',
-  LEARN_MORE = 'Extensions.Settings.HostList.LearnMoreActivated',
-}
+// Duration of the toast shown.
+export const TOAST_DURATION_MS = 3000;
 
 /**
  * Returns true if the extension is enabled, including terminated
@@ -41,11 +46,11 @@ export function isEnabled(state: chrome.developerPrivate.ExtensionState):
     case chrome.developerPrivate.ExtensionState.ENABLED:
     case chrome.developerPrivate.ExtensionState.TERMINATED:
       return true;
-    case chrome.developerPrivate.ExtensionState.BLACKLISTED:
+    case chrome.developerPrivate.ExtensionState.BLOCKLISTED:
     case chrome.developerPrivate.ExtensionState.DISABLED:
       return false;
     default:
-      assertNotReached();
+      assertNotReachedCase(state);
   }
 }
 
@@ -63,7 +68,10 @@ export function userCanChangeEnablement(
   if (item.disableReasons.corruptInstall ||
       item.disableReasons.suspiciousInstall ||
       item.disableReasons.updateRequired ||
-      item.disableReasons.blockedByPolicy) {
+      item.disableReasons.publishedInStoreRequired ||
+      item.disableReasons.blockedByPolicy ||
+      item.disableReasons.unsupportedDeveloperExtension ||
+      item.disableReasons.unsupportedManifestVersion) {
     return false;
   }
   // An item with dependent extensions can't be disabled (it would bork the
@@ -71,8 +79,8 @@ export function userCanChangeEnablement(
   if (item.dependentExtensions.length > 0) {
     return false;
   }
-  // Blacklisted can't be enabled, either.
-  if (item.state === chrome.developerPrivate.ExtensionState.BLACKLISTED) {
+  // Blocklisted can't be enabled, either.
+  if (item.state === chrome.developerPrivate.ExtensionState.BLOCKLISTED) {
     return false;
   }
 
@@ -97,7 +105,7 @@ export function getItemSource(item: chrome.developerPrivate.ExtensionInfo):
     case chrome.developerPrivate.Location.INSTALLED_BY_DEFAULT:
       return SourceType.INSTALLED_BY_DEFAULT;
     default:
-      assertNotReached(item.location);
+      assertNotReachedCase(item.location);
   }
 }
 
@@ -118,7 +126,39 @@ export function getItemSourceString(source: SourceType): string {
       // chrome.developerPrivate.ExtensionInfo's |locationText| instead.
       return '';
     default:
-      assertNotReached();
+      assertNotReachedCase(source);
+  }
+}
+
+// This converter is used to convert the `SafetyCheckWarningReason` enum
+// defined in the developer_private.webidl file for metrics logging
+// reasons. It needs to be kept in sync with the corresponding enum in
+// the developer_private.webidl and enums.xml files.
+export function convertSafetyCheckReason(
+    reason: chrome.developerPrivate.SafetyCheckWarningReason):
+    SafetyCheckWarningReason {
+  switch (reason) {
+    case chrome.developerPrivate.SafetyCheckWarningReason.UNPUBLISHED: {
+      return SafetyCheckWarningReason.UNPUBLISHED;
+    }
+    case chrome.developerPrivate.SafetyCheckWarningReason.POLICY: {
+      return SafetyCheckWarningReason.POLICY;
+    }
+    case chrome.developerPrivate.SafetyCheckWarningReason.MALWARE: {
+      return SafetyCheckWarningReason.MALWARE;
+    }
+    case chrome.developerPrivate.SafetyCheckWarningReason.OFFSTORE: {
+      return SafetyCheckWarningReason.OFFSTORE;
+    }
+    case chrome.developerPrivate.SafetyCheckWarningReason.UNWANTED: {
+      return SafetyCheckWarningReason.UNWANTED;
+    }
+    case chrome.developerPrivate.SafetyCheckWarningReason.NO_PRIVACY_PRACTICE: {
+      return SafetyCheckWarningReason.NO_PRIVACY_PRACTICE;
+    }
+    default: {
+      assertNotReachedCase(reason);
+    }
   }
 }
 
@@ -127,12 +167,17 @@ export function getItemSourceString(source: SourceType): string {
  */
 export function computeInspectableViewLabel(
     view: chrome.developerPrivate.ExtensionView): string {
-  // Trim the "chrome-extension://<id>/".
-  const url = new URL(view.url);
   let label = view.url;
-  if (url.protocol === 'chrome-extension:') {
-    label = url.pathname.substring(1);
+  // TODO(crbug.com/509552434): Investigate why view.url can have invalid URLs.
+  try {
+    // Trim the "chrome-extension://<id>/".
+    const url = new URL(view.url);
+    if (url.protocol === 'chrome-extension:') {
+      label = url.pathname.substring(1);
+    }
+  } catch (e) {
   }
+
   if (label === '_generated_background_page.html') {
     label = loadTimeData.getString('viewBackgroundPage');
   }
@@ -151,6 +196,34 @@ export function computeInspectableViewLabel(
   }
 
   return label;
+}
+
+/**
+ * Computes the accessible human-facing aria label for an extension toggle item.
+ */
+export function getEnableToggleAriaLabel(
+    toggleEnabled: boolean,
+    extensionsDataType: chrome.developerPrivate.ExtensionType,
+    appEnabled: string, extensionEnabled: string, itemOff: string): string {
+  if (!toggleEnabled) {
+    return itemOff;
+  }
+
+  const ExtensionType = chrome.developerPrivate.ExtensionType;
+  switch (extensionsDataType) {
+    case ExtensionType.HOSTED_APP:
+    case ExtensionType.LEGACY_PACKAGED_APP:
+    case ExtensionType.PLATFORM_APP:
+      return appEnabled;
+    case ExtensionType.EXTENSION:
+    case ExtensionType.SHARED_MODULE:
+      return extensionEnabled;
+    case ExtensionType.THEME:
+      assertNotReached('Don\'t send themes to the chrome://extensions page');
+    default:
+      assertNotReachedCase(
+          extensionsDataType, 'Item type is not App or Extension.');
+  }
 }
 
 /**
@@ -193,4 +266,71 @@ export function getEnableControl(data: chrome.developerPrivate.ExtensionInfo):
     return EnableControl.REPAIR;
   }
   return EnableControl.ENABLE_TOGGLE;
+}
+
+/**
+ * @return Whether the "Write a review" link can be displayed for the extension.
+ */
+export function canShowOpenReviewPageLink(
+    data: chrome.developerPrivate.ExtensionInfo): boolean {
+  if (!loadTimeData.getBoolean('cwsReviewPromptingEnabled')) {
+    return false;
+  }
+  return getItemSource(data) === SourceType.WEBSTORE && !!data.webStoreUrl &&
+      !data.mustRemainInstalled;
+}
+
+export function createDummyExtensionInfo():
+    chrome.developerPrivate.ExtensionInfo {
+  return {
+    commands: [],
+    isCommandRegistrationHandledExternally: false,
+    dependentExtensions: [],
+    description: '',
+    disableReasons: {
+      suspiciousInstall: false,
+      corruptInstall: false,
+      updateRequired: false,
+      publishedInStoreRequired: false,
+      blockedByPolicy: false,
+      reloading: false,
+      custodianApprovalRequired: false,
+      parentDisabledPermissions: false,
+      unsupportedManifestVersion: false,
+      unsupportedDeveloperExtension: false,
+      disabledByAnotherExtension: false,
+    },
+    errorCollection: {isEnabled: false, isActive: false},
+    fileAccess: {isEnabled: false, isActive: false},
+    fileAccessPendingChange: false,
+    homePage: {url: '', specified: false},
+    iconUrl: '',
+    id: '',
+    incognitoAccess: {isEnabled: false, isActive: false},
+    userScriptsAccess: {isEnabled: false, isActive: false},
+    incognitoAccessPendingChange: false,
+    installWarnings: [],
+    location: chrome.developerPrivate.Location.UNKNOWN,
+    manifestErrors: [],
+    manifestHomePageUrl: '',
+    mustRemainInstalled: false,
+    name: '',
+    offlineEnabled: false,
+    permissions: {simplePermissions: []},
+    runtimeErrors: [],
+    runtimeWarnings: [],
+    state: chrome.developerPrivate.ExtensionState.ENABLED,
+    type: chrome.developerPrivate.ExtensionType.EXTENSION,
+    updateUrl: '',
+    userMayModify: false,
+    version: '2.0',
+    views: [],
+    webStoreUrl: '',
+    showSafeBrowsingAllowlistWarning: false,
+    showAccessRequestsInToolbar: false,
+    safetyCheckWarningReason:
+        chrome.developerPrivate.SafetyCheckWarningReason.UNPUBLISHED,
+    isAffectedByMV2Deprecation: false,
+    canUploadAsAccountExtension: false,
+  };
 }

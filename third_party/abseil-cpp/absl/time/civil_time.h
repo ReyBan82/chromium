@@ -55,7 +55,7 @@
 // Example:
 //
 //   // Construct a civil-time object for a specific day
-//   const absl::CivilDay cd(1969, 07, 20);
+//   const absl::CivilDay cd(1969, 7, 20);
 //
 //   // Construct a civil-time object for a specific second
 //   const absl::CivilSecond cd(2018, 8, 1, 12, 0, 1);
@@ -65,7 +65,7 @@
 // Example:
 //
 //   // Valid in C++14
-//   constexpr absl::CivilDay cd(1969, 07, 20);
+//   constexpr absl::CivilDay cd(1969, 7, 20);
 
 #ifndef ABSL_TIME_CIVIL_TIME_H_
 #define ABSL_TIME_CIVIL_TIME_H_
@@ -76,6 +76,7 @@
 #include "absl/base/config.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/internal/cctz/include/cctz/civil_time.h"
+#include "absl/time/internal/cctz/include/cctz/civil_time_detail.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -483,6 +484,13 @@ std::string FormatCivilTime(CivilYear c);
 //   absl::CivilDay d;
 //   bool ok = absl::ParseCivilTime("2018-01-02", &d); // OK
 //
+// Parsing tolerates the following variations from the standard format:
+// * Leading and trailing whitespace is ignored.
+// * The year component may be negative (prefixed with '-') and may contain
+//   an arbitrary number of digits.
+// * Sub-year components (month, day, hour, minute, second) may consist of
+//   either one or two digits.
+//
 // Note that parsing will fail if the string's format does not match the
 // expected type exactly. `ParseLenientCivilTime()` below is more lenient.
 //
@@ -495,9 +503,12 @@ bool ParseCivilTime(absl::string_view s, CivilYear* c);
 
 // ParseLenientCivilTime()
 //
-// Parses any of the formats accepted by `absl::ParseCivilTime()`, but is more
-// lenient if the format of the string does not exactly match the associated
-// type.
+// Parses any of the formats accepted by `absl::ParseCivilTime()`. Unlike
+// `ParseCivilTime()`, the input string format does not need to match the
+// target civil-time type. Discrepancies are resolved as follows:
+// * Extra components in the input string are ignored.
+// * Missing components are defaulted to their minimum valid values.
+// This behavior is consistent with civil-time converting constructors.
 //
 // Example:
 //
@@ -514,6 +525,32 @@ bool ParseLenientCivilTime(absl::string_view s, CivilMonth* c);
 bool ParseLenientCivilTime(absl::string_view s, CivilYear* c);
 
 namespace time_internal {  // For functions found via ADL on civil-time tags.
+
+// Support for StrFormat(), StrCat(), etc
+template <typename Sink>
+void AbslStringify(Sink& sink, CivilSecond c) {
+  sink.Append(FormatCivilTime(c));
+}
+template <typename Sink>
+void AbslStringify(Sink& sink, CivilMinute c) {
+  sink.Append(FormatCivilTime(c));
+}
+template <typename Sink>
+void AbslStringify(Sink& sink, CivilHour c) {
+  sink.Append(FormatCivilTime(c));
+}
+template <typename Sink>
+void AbslStringify(Sink& sink, CivilDay c) {
+  sink.Append(FormatCivilTime(c));
+}
+template <typename Sink>
+void AbslStringify(Sink& sink, CivilMonth c) {
+  sink.Append(FormatCivilTime(c));
+}
+template <typename Sink>
+void AbslStringify(Sink& sink, CivilYear c) {
+  sink.Append(FormatCivilTime(c));
+}
 
 // Streaming Operators
 //

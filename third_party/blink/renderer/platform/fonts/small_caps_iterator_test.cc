@@ -32,10 +32,10 @@ class SmallCapsIteratorTest : public testing::Test {
     text.Ensure16Bit();
     Vector<SmallCapsExpectedRun> expect;
     for (auto& run : runs) {
-      text.Append(String::FromUTF8(run.text));
+      text.Append(String::FromUtf8(run.text));
       expect.push_back(SmallCapsExpectedRun(text.length(), run.code));
     }
-    SmallCapsIterator small_caps_iterator(text.Characters16(), text.length());
+    SmallCapsIterator small_caps_iterator(text.Span16());
     VerifyRuns(&small_caps_iterator, expect);
   }
 
@@ -43,7 +43,7 @@ class SmallCapsIteratorTest : public testing::Test {
                   const Vector<SmallCapsExpectedRun>& expect) {
     unsigned limit;
     SmallCapsIterator::SmallCapsBehavior small_caps_behavior;
-    size_t run_count = 0;
+    wtf_size_t run_count = 0;
     while (small_caps_iterator->Consume(&limit, &small_caps_behavior)) {
       ASSERT_LT(run_count, expect.size());
       ASSERT_EQ(expect[run_count].limit, limit);
@@ -54,19 +54,13 @@ class SmallCapsIteratorTest : public testing::Test {
   }
 };
 
-// Some of our compilers cannot initialize a vector from an array yet.
-#define DECLARE_SMALL_CAPS_RUNSVECTOR(...)                  \
-  static const SmallCapsTestRun kRunsArray[] = __VA_ARGS__; \
-  Vector<SmallCapsTestRun> runs;                            \
-  runs.Append(kRunsArray, sizeof(kRunsArray) / sizeof(*kRunsArray));
-
-#define CHECK_SMALL_CAPS_RUN(...)             \
-  DECLARE_SMALL_CAPS_RUNSVECTOR(__VA_ARGS__); \
+#define CHECK_SMALL_CAPS_RUN(...)              \
+  Vector<SmallCapsTestRun> runs = __VA_ARGS__; \
   CheckRuns(runs);
 
 TEST_F(SmallCapsIteratorTest, Empty) {
   String empty(g_empty_string16_bit);
-  SmallCapsIterator small_caps_iterator(empty.Characters16(), empty.length());
+  SmallCapsIterator small_caps_iterator(empty.Span16());
   unsigned limit = 0;
   SmallCapsIterator::SmallCapsBehavior small_caps_behavior =
       SmallCapsIterator::kSmallCapsInvalid;

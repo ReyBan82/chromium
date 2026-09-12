@@ -25,24 +25,15 @@ class GnPrepareOut(cr.PrepareOut):
     gn_args = cr.context.Find('GN_ARGS') or ''
     for key, value in cr.context.exported.items():
       if key.startswith(GN_ARG_PREFIX):
-        gn_args += ' %s=%s' % (key[len(GN_ARG_PREFIX):], value)
+        gn_args += ' %s=%s' % (key[len(GN_ARG_PREFIX) :], value)
 
-    gn_args += (' is_debug=%s' %
-        ('true' if cr.context['CR_BUILDTYPE'] == 'Debug' else 'false'))
+    gn_args += ' is_debug=%s' % (
+      'true' if cr.context['CR_BUILDTYPE'] == 'Debug' else 'false'
+    )
 
     arch = cr.context.Find('CR_ENVSETUP_ARCH') or ''
     if arch:
       gn_args += ' target_cpu="%s"' % ('x86' if arch == 'ia32' else arch)
-
-    # Detect goma.
-    goma_binaries = cr.Host.SearchPath('gomacc', [
-      '{GOMA_DIR}',
-      '/usr/local/google/code/goma',
-      os.path.expanduser('~/goma')
-    ])
-    if goma_binaries:
-      gn_args += ' use_goma=true'
-      gn_args += ' goma_dir="%s"' % os.path.dirname(goma_binaries[0])
 
     cr.context['GN_ARGS'] = gn_args.strip()
     if cr.context.verbose >= 1:

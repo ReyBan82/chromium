@@ -5,15 +5,16 @@
 #ifndef NET_SOCKET_FUZZED_DATAGRAM_CLIENT_SOCKET_H_
 #define NET_SOCKET_FUZZED_DATAGRAM_CLIENT_SOCKET_H_
 
-#include "net/socket/datagram_client_socket.h"
-
 #include <stdint.h>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/network_handle.h"
 #include "net/log/net_log_with_source.h"
+#include "net/socket/datagram_client_socket.h"
+#include "net/socket/read_multiple_emulator.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 
 class FuzzedDataProvider;
@@ -50,6 +51,7 @@ class FuzzedDatagramClientSocket : public DatagramClientSocket {
                                       CompletionOnceCallback callback) override;
   handles::NetworkHandle GetBoundNetwork() const override;
   void ApplySocketTag(const SocketTag& tag) override;
+  DscpAndEcn GetLastTos() const override;
 
   // DatagramSocket implementation:
   void Close() override;
@@ -64,6 +66,12 @@ class FuzzedDatagramClientSocket : public DatagramClientSocket {
   int Read(IOBuffer* buf,
            int buf_len,
            CompletionOnceCallback callback) override;
+  base::expected<DatagramsMetadata, Error> ReadMultiple(
+      IOBuffer* buf,
+      size_t buf_len,
+      size_t maximum_packet_size,
+      base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
+          callback) override;
   int Write(IOBuffer* buf,
             int buf_len,
             CompletionOnceCallback callback,
@@ -71,13 +79,15 @@ class FuzzedDatagramClientSocket : public DatagramClientSocket {
   int SetReceiveBufferSize(int32_t size) override;
   int SetSendBufferSize(int32_t size) override;
   int SetDoNotFragment() override;
+  int SetRecvTos() override;
+  int SetTos(DiffServCodePoint dscp, EcnCodePoint ecn) override;
   void SetMsgConfirm(bool confirm) override {}
 
  private:
   void OnReadComplete(net::CompletionOnceCallback callback, int result);
   void OnWriteComplete(net::CompletionOnceCallback callback, int result);
 
-  FuzzedDataProvider* data_provider_;
+  raw_ptr<FuzzedDataProvider> data_provider_;
 
   bool connected_ = false;
   bool read_pending_ = false;
@@ -86,6 +96,8 @@ class FuzzedDatagramClientSocket : public DatagramClientSocket {
   NetLogWithSource net_log_;
 
   IPEndPoint remote_address_;
+
+  ReadMultipleEmulator read_multiple_emulator_{this};
 
   base::WeakPtrFactory<FuzzedDatagramClientSocket> weak_factory_{this};
 };

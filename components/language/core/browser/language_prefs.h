@@ -7,10 +7,11 @@
 
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "base/i18n/language_tag.h"
 #include "base/memory/raw_ptr.h"
-#include "base/strings/string_piece.h"
 #include "components/prefs/pref_change_registrar.h"
 
 class PrefService;
@@ -27,7 +28,7 @@ class PrefService;
 
 namespace language {
 
-extern const char kFallbackInputMethodLocale[];
+inline constexpr char kFallbackInputMethodLocale[] = "en-US";
 
 class LanguagePrefs {
  public:
@@ -51,7 +52,7 @@ class LanguagePrefs {
   // be in the Chrome internal format.
   void SetUserSelectedLanguagesList(const std::vector<std::string>& languages);
   // Returns true if the target language is forced through policy.
-  bool IsForcedLanguage(const std::string& language);
+  bool IsForcedLanguage(std::string_view language);
 
 #if BUILDFLAG(IS_ANDROID)
   // Get the ULP languages from a preference. This is an unfiltered list of
@@ -59,7 +60,7 @@ class LanguagePrefs {
   // need specific locals always compare base languages from the list.
   std::vector<std::string> GetULPLanguages();
   // Clear the previous ULP language pref and set to the new list of languages.
-  void SetULPLanguages(std::vector<std::string> ulp_languages);
+  void SetULPLanguages(std::vector<base::i18n::LanguageTag> ulp_languages);
 #endif
 
  private:
@@ -78,7 +79,7 @@ class LanguagePrefs {
   void InitializeSelectedLanguagesPref();
 
   // Used for deduplication and reordering of languages.
-  std::set<std::string> forced_languages_set_;
+  std::set<std::string, std::less<>> forced_languages_set_;
 
   raw_ptr<PrefService> prefs_;  // Weak.
   PrefChangeRegistrar pref_change_registrar_;
@@ -87,7 +88,13 @@ class LanguagePrefs {
 void ResetLanguagePrefs(PrefService* prefs);
 
 // Given a comma separated list of locales, return the first.
-std::string GetFirstLanguage(base::StringPiece language_list);
+std::string GetFirstLanguage(std::string_view language_list);
+
+// Given a comma separated list of language tags, return a new list which keeps
+// the same first language tag but otherwise matches one of Chrome's standard
+// default configurations. This is to reduce the identifiability when incognito
+// of users who've configured unusual language preferences.
+std::string GetIncognitoLanguageList(std::string_view language_list);
 
 }  // namespace language
 

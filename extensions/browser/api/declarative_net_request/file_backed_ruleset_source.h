@@ -11,7 +11,6 @@
 #include <vector>
 
 #include "base/files/file_path.h"
-#include "base/functional/callback_forward.h"
 #include "base/time/time.h"
 #include "extensions/browser/api/declarative_net_request/ruleset_source.h"
 #include "extensions/common/api/declarative_net_request/dnr_manifest_data.h"
@@ -20,9 +19,6 @@ namespace content {
 class BrowserContext;
 }  // namespace content
 
-namespace data_decoder {
-class DataDecoder;
-}  // namespace data_decoder
 
 namespace extensions {
 class Extension;
@@ -74,25 +70,25 @@ struct IndexAndPersistJSONRulesetResult {
   // The result of IndexAndPersistRules.
   Status status = Status::kError;
 
-  // Checksum of the persisted indexed ruleset file. Valid if |status| if
+  // Checksum of the persisted indexed ruleset file. Valid if `status` if
   // kSuccess. Note: there's no sane default value for this, any integer value
   // is a valid checksum value.
   int ruleset_checksum = 0;
 
-  // Valid if |status| is kSuccess or kIgnore.
+  // Valid if `status` is kSuccess or kIgnore.
   std::vector<InstallWarning> warnings;
 
-  // The number of indexed rules. Valid if |status| is kSuccess.
+  // The number of indexed rules. Valid if `status` is kSuccess.
   size_t rules_count = 0;
 
-  // The number of indexed regex rules. Valid if |status| is kSuccess.
+  // The number of indexed regex rules. Valid if `status` is kSuccess.
   size_t regex_rules_count = 0;
 
   // Time taken to deserialize the JSON rules and persist them in flatbuffer
   // format. Valid if status is kSuccess.
   base::TimeDelta index_and_persist_time;
 
-  // Valid if |status| is kError.
+  // Valid if `status` is kError.
   std::string error;
 
  private:
@@ -112,10 +108,11 @@ struct ReadJSONRulesResult {
     // Status returned when the list of rules to be read exceeds the static rule
     // count limit.
     kRuleCountLimitExceeded = 5,
+    kRulesetFileSizeLimitExceeded = 6,
 
     // Magic constant used by histograms code. Should be equal to the maximum
     // enum value.
-    kMaxValue = kRuleCountLimitExceeded
+    kMaxValue = kRulesetFileSizeLimitExceeded
   };
 
   static ReadJSONRulesResult CreateErrorResult(Status status,
@@ -161,8 +158,8 @@ class FileBackedRulesetSource : public RulesetSource {
       const Extension& extension,
       RulesetFilter ruleset_filter);
 
-  // Creates a static FileBackedRulesetSource corresponding to |info| for the
-  // given |extension|.
+  // Creates a static FileBackedRulesetSource corresponding to `info` for the
+  // given `extension`.
   static FileBackedRulesetSource CreateStatic(
       const Extension& extension,
       const DNRManifestData::RulesetInfo& info);
@@ -194,35 +191,22 @@ class FileBackedRulesetSource : public RulesetSource {
 
   bool is_dynamic_ruleset() const { return id() == kDynamicRulesetID; }
 
-  // Indexes and persists the JSON ruleset. This is potentially unsafe since the
-  // JSON rules file is parsed in-process. Note: This must be called on a
+  // Indexes and persists the JSON ruleset. Note: This must be called on a
   // sequence where file IO is allowed.
-  IndexAndPersistJSONRulesetResult IndexAndPersistJSONRulesetUnsafe(
+  IndexAndPersistJSONRulesetResult IndexAndPersistJSONRuleset(
       uint8_t parse_flags) const;
 
-  using IndexAndPersistJSONRulesetCallback =
-      base::OnceCallback<void(IndexAndPersistJSONRulesetResult)>;
-  // Same as IndexAndPersistJSONRulesetUnsafe but parses the JSON rules file
-  // out-of-process. |decoder| corresponds to a Data Decoder service instance
-  // to use for decode operations related to this call.
-  //
-  // NOTE: This must be called on a sequence where file IO is allowed.
-  void IndexAndPersistJSONRuleset(
-      data_decoder::DataDecoder* decoder,
-      uint8_t parse_flags,
-      IndexAndPersistJSONRulesetCallback callback) const;
+  // Reads JSON rules synchronously. Must be called on a sequence which supports
+  // file IO.
+  ReadJSONRulesResult ReadJSONRules() const;
 
-  // Reads JSON rules synchronously. Callers should only use this if the JSON is
-  // trusted. Must be called on a sequence which supports file IO.
-  ReadJSONRulesResult ReadJSONRulesUnsafe() const;
-
-  // Serializes |rules| into the `json` string. Returns false on failure.
+  // Serializes `rules` into the `json` string. Returns false on failure.
   bool SerializeRulesToJSON(
       const std::vector<api::declarative_net_request::Rule>& rules,
       std::string* json) const;
 
   // Creates a verified RulesetMatcher corresponding to indexed ruleset on disk.
-  // Returns kSuccess on success along with the ruleset |matcher|. Must be
+  // Returns kSuccess on success along with the ruleset `matcher`. Must be
   // called on a sequence which supports file IO.
   LoadRulesetResult CreateVerifiedMatcher(
       int expected_ruleset_checksum,

@@ -6,11 +6,11 @@
 #define ASH_QUICK_PAIR_FAST_PAIR_HANDSHAKE_FAST_PAIR_HANDSHAKE_H_
 
 #include <memory>
+#include <optional>
 
 #include "ash/quick_pair/common/pair_failure.h"
 #include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace device {
 class BluetoothAdapter;
@@ -41,7 +41,7 @@ class FastPairHandshake {
  public:
   using OnCompleteCallback =
       base::OnceCallback<void(scoped_refptr<Device>,
-                              absl::optional<PairFailure>)>;
+                              std::optional<PairFailure>)>;
   using OnBleAddressRotationCallback = base::OnceClosure;
 
   FastPairHandshake(
@@ -56,12 +56,10 @@ class FastPairHandshake {
 
   bool completed_successfully() { return completed_successfully_; }
 
+  void set_completed_successfully() { completed_successfully_ = true; }
+
   FastPairDataEncryptor* fast_pair_data_encryptor() {
     return fast_pair_data_encryptor_.get();
-  }
-
-  FastPairGattServiceClient* fast_pair_gatt_service_client() {
-    return fast_pair_gatt_service_client_.get();
   }
 
   void BleAddressRotated(OnBleAddressRotationCallback callback) {
@@ -80,9 +78,10 @@ class FastPairHandshake {
   bool completed_successfully_ = false;
   scoped_refptr<device::BluetoothAdapter> adapter_;
   scoped_refptr<Device> device_;
+  // TODO(b/265853116): Audit FastPairHandshake code once refactor is completed
+  // and legacy code is removed.
   OnCompleteCallback on_complete_callback_;
   std::unique_ptr<FastPairDataEncryptor> fast_pair_data_encryptor_;
-  std::unique_ptr<FastPairGattServiceClient> fast_pair_gatt_service_client_;
 
   // This callback will only be set if a BLE Address rotation happens during a
   // retroactive pair. The callback being set signals that a rotation

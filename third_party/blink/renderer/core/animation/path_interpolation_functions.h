@@ -6,13 +6,11 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_ANIMATION_PATH_INTERPOLATION_FUNCTIONS_H_
 
 #include "third_party/blink/renderer/core/animation/interpolation_type.h"
+#include "third_party/blink/renderer/core/animation/shape_property_functions.h"
 #include "third_party/blink/renderer/core/core_export.h"
-#include "third_party/blink/renderer/core/svg/svg_path_byte_stream.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 
 namespace blink {
-
-class StylePath;
 
 class CORE_EXPORT PathInterpolationFunctions {
   STATIC_ONLY(PathInterpolationFunctions);
@@ -20,15 +18,15 @@ class CORE_EXPORT PathInterpolationFunctions {
  public:
   enum CoordinateConversion { kPreserveCoordinates, kForceAbsolute };
 
-  static scoped_refptr<StylePath> AppliedValue(const InterpolableValue&,
-                                               const NonInterpolableValue*);
+  static BasicShapeInfo AppliedValue(const InterpolableValue&,
+                                     const NonInterpolableValue&);
 
   static void Composite(UnderlyingValueOwner&,
                         double underlying_fraction,
-                        const InterpolationType&,
+                        const InterpolationType*,
                         const InterpolationValue&);
 
-  static InterpolationValue ConvertValue(const StylePath*,
+  static InterpolationValue ConvertValue(const BasicShapeInfo&,
                                          CoordinateConversion);
 
   static InterpolationValue MaybeConvertNeutral(

@@ -9,23 +9,46 @@ from mojom.generate import module as mojom
 
 
 class ModuleTest(unittest.TestCase):
-  def testNonInterfaceAsInterfaceRequest(self):
-    """Tests that a non-interface cannot be used for interface requests."""
+  def testNonInterfaceAsPendingReceiver(self):
     module = mojom.Module('test_module', 'test_namespace')
     struct = mojom.Struct('TestStruct', module=module)
     with self.assertRaises(Exception) as e:
-      mojom.InterfaceRequest(struct)
-    self.assertEquals(
-        e.exception.__str__(),
-        'Interface request requires \'x:TestStruct\' to be an interface.')
+      mojom.PendingReceiver(struct)
+    self.assertEqual(
+      e.exception.__str__(),
+      'pending_receiver<T> requires T to be an interface type. '
+      'Got \'x:TestStruct\'',
+    )
 
-  def testNonInterfaceAsAssociatedInterface(self):
-    """Tests that a non-interface type cannot be used for associated interfaces.
-    """
+  def testNonInterfaceAsPendingRemote(self):
     module = mojom.Module('test_module', 'test_namespace')
     struct = mojom.Struct('TestStruct', module=module)
     with self.assertRaises(Exception) as e:
-      mojom.AssociatedInterface(struct)
-    self.assertEquals(
-        e.exception.__str__(),
-        'Associated interface requires \'x:TestStruct\' to be an interface.')
+      mojom.PendingRemote(struct)
+    self.assertEqual(
+      e.exception.__str__(),
+      'pending_remote<T> requires T to be an interface type. '
+      'Got \'x:TestStruct\'',
+    )
+
+  def testNonInterfaceAsPendingAssociatedReceiver(self):
+    module = mojom.Module('test_module', 'test_namespace')
+    struct = mojom.Struct('TestStruct', module=module)
+    with self.assertRaises(Exception) as e:
+      mojom.PendingAssociatedReceiver(struct)
+    self.assertEqual(
+      e.exception.__str__(),
+      'pending_associated_receiver<T> requires T to be an interface type. '
+      'Got \'x:TestStruct\'',
+    )
+
+  def testNonInterfaceAsPendingAssociatedRemote(self):
+    module = mojom.Module('test_module', 'test_namespace')
+    struct = mojom.Struct('TestStruct', module=module)
+    with self.assertRaises(Exception) as e:
+      mojom.PendingAssociatedRemote(struct)
+    self.assertEqual(
+      e.exception.__str__(),
+      'pending_associated_remote<T> requires T to be an interface type. '
+      'Got \'x:TestStruct\'',
+    )

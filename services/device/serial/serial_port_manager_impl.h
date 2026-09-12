@@ -63,7 +63,8 @@ class SerialPortManagerImpl : public mojom::SerialPortManager,
   // mojom::SerialPortManager methods:
   void SetClient(
       mojo::PendingRemote<mojom::SerialPortManagerClient> client) override;
-  void GetDevices(GetDevicesCallback callback) override;
+  void GetDevices(bool allow_bluetooth_system_prompt,
+                  GetDevicesCallback callback) override;
   void OpenPort(const base::UnguessableToken& token,
                 bool use_alternate_path,
                 device::mojom::SerialConnectionOptionsPtr options,
@@ -74,6 +75,7 @@ class SerialPortManagerImpl : public mojom::SerialPortManager,
   // SerialDeviceEnumerator::Observer methods:
   void OnPortAdded(const mojom::SerialPortInfo& port) override;
   void OnPortRemoved(const mojom::SerialPortInfo& port) override;
+  void OnPortConnectedStateChanged(const mojom::SerialPortInfo& port) override;
 
   void OpenBluetoothSerialPortOnUI(
       const std::string& address,

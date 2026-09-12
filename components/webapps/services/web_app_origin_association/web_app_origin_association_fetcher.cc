@@ -4,9 +4,12 @@
 
 #include "components/webapps/services/web_app_origin_association/web_app_origin_association_fetcher.h"
 
+#include <optional>
+#include <string_view>
 #include <utility>
 
 #include "base/functional/bind.h"
+#include "base/time/time.h"
 #include "components/webapps/services/web_app_origin_association/web_app_origin_association_uma_util.h"
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
@@ -31,12 +34,12 @@ constexpr net::NetworkTrafficAnnotationTag
       semantics {
           sender: "Web App Origin Association Fetcher"
           description:
-            "PWAs can specify URL Handlers in the Manifest. To verify the "
+            "PWAs can specify Scope Extensions in the Manifest. To verify the "
             "handlers, we download the corresponding web app origin "
             "association files."
           trigger:
-            "A PWA that has URL Handlers declared in the Manifest is "
-            "installed, updated, or when DevTools displays URL Handler "
+            "A PWA that has Scope Extensions declared in the Manifest is "
+            "installed, updated, or when DevTools displays Scope Extensions "
             "information to users."
           data:
             "Nothing."
@@ -49,7 +52,7 @@ constexpr net::NetworkTrafficAnnotationTag
           policy_exception_justification:
             "Not implemented, "
             "considered not necessary as no user data is sent."
-    })");
+     })");
 
 constexpr char association_file_name[] =
     ".well-known/web-app-origin-association";
@@ -64,6 +67,7 @@ std::unique_ptr<network::SimpleURLLoader> CreateRequester(const GURL& url) {
   url_loader->SetRetryOptions(g_max_retry, g_retry_mode);
   url_loader->SetURLLoaderFactoryOptions(
       network::mojom::kURLLoadOptionBlockAllCookies);
+  url_loader->SetTimeoutDuration(base::Seconds(30));
   return url_loader;
 }
 
@@ -76,19 +80,20 @@ bool ShouldFetchAssociationFile(const GURL& resource_url) {
   if (resource_url.HostIsIPAddress())
     return true;
 
-  const size_t registry_length =
-      net::registry_controlled_domains::GetRegistryLength(
+  const std::optional<size_t> registry_length =
+      net::registry_controlled_domains::GetRegistry(
           resource_url,
           // Reject unknown registries (registries that don't have any matches
           // in effective TLD names).
           net::registry_controlled_domains::EXCLUDE_UNKNOWN_REGISTRIES,
           // Skip matching private registries that allow external users to
           // specify sub-domains, e.g. glitch.me, as this is allowed.
-          net::registry_controlled_domains::EXCLUDE_PRIVATE_REGISTRIES);
+          net::registry_controlled_domains::EXCLUDE_PRIVATE_REGISTRIES)
+          .transform(&std::string_view::size);
 
   // Host cannot be a TLD or invalid.
-  if (registry_length == 0 || registry_length == std::string::npos ||
-      registry_length >= resource_url.host().length()) {
+  if (!registry_length.has_value() || *registry_length == 0 ||
+      *registry_length >= resource_url.GetHost().length()) {
     return false;
   }
 
@@ -98,7 +103,9 @@ bool ShouldFetchAssociationFile(const GURL& resource_url) {
 
 namespace webapps {
 
-WebAppOriginAssociationFetcher::WebAppOriginAssociationFetcher() = default;
+WebAppOriginAssociationFetcher::WebAppOriginAssociationFetcher(
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory)
+    : shared_url_loader_factory_(std::move(shared_url_loader_factory)) {}
 
 WebAppOriginAssociationFetcher::~WebAppOriginAssociationFetcher() = default;
 
@@ -110,31 +117,27 @@ void WebAppOriginAssociationFetcher::SetRetryOptionsForTest(
 }
 
 void WebAppOriginAssociationFetcher::FetchWebAppOriginAssociationFile(
-    const apps::UrlHandlerInfo& url_handler,
-    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+    const url::Origin& origin,
     FetchFileCallback callback) {
-  const GURL resource_url =
-      url_handler.origin.GetURL().Resolve(association_file_name);
+  const GURL resource_url = origin.GetURL().Resolve(association_file_name);
   if (!ShouldFetchAssociationFile(resource_url)) {
     // Do not proceed if |resource_url| is not valid.
     webapps::WebAppOriginAssociationMetrics::RecordFetchResult(
         webapps::WebAppOriginAssociationMetrics::FetchResult::
             kFetchFailedInvalidUrl);
-    std::move(callback).Run(nullptr);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
-  SendRequest(resource_url, std::move(shared_url_loader_factory),
-              std::move(callback));
+  SendRequest(resource_url, std::move(callback));
 }
 
 void WebAppOriginAssociationFetcher::SendRequest(
     const GURL& url,
-    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
     FetchFileCallback callback) {
   url_loader_ = CreateRequester(url);
   url_loader_->DownloadToString(
-      shared_url_loader_factory.get(),
+      shared_url_loader_factory_.get(),
       base::BindOnce(&WebAppOriginAssociationFetcher::OnResponse,
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback)),
       kMaxJsonSize);
@@ -142,7 +145,7 @@ void WebAppOriginAssociationFetcher::SendRequest(
 
 void WebAppOriginAssociationFetcher::OnResponse(
     FetchFileCallback callback,
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   if (!response_body) {
     webapps::WebAppOriginAssociationMetrics::RecordFetchResult(
         webapps::WebAppOriginAssociationMetrics::FetchResult::

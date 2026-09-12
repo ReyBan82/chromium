@@ -10,6 +10,7 @@
 #include "ash/ash_export.h"
 #include "ash/wm/drag_details.h"
 #include "ash/wm/window_state.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "ui/wm/public/window_move_client.h"
 
@@ -28,11 +29,26 @@ class GestureEvent;
 namespace ash {
 class PresentationTimeRecorder;
 
-// WindowResizer is used by ToplevelWindowEventFilter to handle dragging, moving
-// or resizing a window. All coordinates passed to this are in the parent
+// WindowResizer is used by ToplevelWindowEventHandler to handle dragging,
+// moving or resizing a window. All coordinates passed to this are in the parent
 // windows coordinates.
 class ASH_EXPORT WindowResizer {
  public:
+  // ScopedDeleteBlocker prevents the WindowResizer from being deleted while
+  // it is in scope.
+  class ASH_EXPORT ScopedDeleteBlocker {
+   public:
+    explicit ScopedDeleteBlocker(WindowResizer* resizer) : resizer_(resizer) {
+      resizer_->delete_block_count_++;
+    }
+    ScopedDeleteBlocker(const ScopedDeleteBlocker&) = delete;
+    ScopedDeleteBlocker& operator=(const ScopedDeleteBlocker&) = delete;
+    ~ScopedDeleteBlocker() { resizer_->delete_block_count_--; }
+
+   private:
+    raw_ptr<WindowResizer> resizer_;
+  };
+
   // Constants to identify the type of resize.
   static const int kBoundsChange_None;
   static const int kBoundsChange_Repositions;
@@ -50,16 +66,21 @@ class ASH_EXPORT WindowResizer {
 
   virtual ~WindowResizer();
 
-  // Returns a bitmask of the kBoundsChange_ values.
+  // Returns a bitmask of the `kBoundsChange_*` values.
   static int GetBoundsChangeForWindowComponent(int component);
 
-  // Returns a bitmask of the kBoundsChange_ values.
+  // Returns a bitmask of the `kBoundsChangeDirection_*` values.
   static int GetPositionChangeDirectionForWindowComponent(int window_component);
 
   // Invoked to drag/move/resize the window. |location| is in the coordinates
   // of the window supplied to the constructor. |event_flags| is the event
   // flags from the event.
   virtual void Drag(const gfx::PointF& location, int event_flags) = 0;
+
+  // Invoked during pinch to move and resize the window. `location` is in the
+  // coordinates of the window supplied to the constructor. `scale` is the
+  // the scale change since last gesture event.
+  virtual void Pinch(const gfx::PointF& location, float scale) {}
 
   // Invoked to complete the drag.
   virtual void CompleteDrag() = 0;
@@ -88,11 +109,15 @@ class ASH_EXPORT WindowResizer {
   // should not be called as the result of a revert.
   void SetBoundsDuringResize(const gfx::Rect& bounds);
 
+  // Called during an active resize to change the transform of the
+  // window.
+  void SetTransformDuringResize(const gfx::Transform& transform);
+
   void SetPresentationTimeRecorder(
       std::unique_ptr<PresentationTimeRecorder> recorder);
 
   // WindowState of the drag target.
-  WindowState* window_state_;
+  raw_ptr<WindowState> window_state_;
 
  private:
   // In case of touch resizing, adjusts deltas so that the border is positioned
@@ -107,19 +132,21 @@ class ASH_EXPORT WindowResizer {
                               const gfx::PointF& event_location);
 
   // Returns the size of the window for the drag.
-  gfx::Size GetSizeForDrag(int* delta_x, int* delta_y);
+  gfx::Size GetSizeForDrag(int* delta_x, int* delta_y) const;
 
-  // Returns the width of the window.
-  int GetWidthForDrag(int min_width, int* delta_x);
+  // Called by `GetSizeForDrag` to get the width of the window for the drag.
+  int GetWidthForDrag(int min_width, int* delta_x) const;
 
-  // Returns the height of the drag.
-  int GetHeightForDrag(int min_height, int* delta_y);
+  // Called by `GetSizeForDrag` to get the height of the window for the drag.
+  int GetHeightForDrag(int min_height, int* delta_y) const;
 
   // Updates |new_bounds| to adhere to the aspect ratio.
   void CalculateBoundsWithAspectRatio(float aspect_ratio,
                                       gfx::Rect* new_bounds);
 
   std::unique_ptr<PresentationTimeRecorder> recorder_;
+
+  uint32_t delete_block_count_ = 0;
 
   base::WeakPtrFactory<WindowResizer> weak_ptr_factory_{this};
 };
@@ -130,7 +157,8 @@ ASH_EXPORT std::unique_ptr<WindowResizer> CreateWindowResizer(
     aura::Window* window,
     const gfx::PointF& point_in_parent,
     int window_component,
-    ::wm::WindowMoveSource source);
+    ::wm::WindowMoveSource source,
+    bool for_pinch = false);
 
 }  // namespace ash
 

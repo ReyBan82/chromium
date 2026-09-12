@@ -7,6 +7,8 @@
 #include <string>
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "build/build_config.h"
 #include "build/buildflag.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -16,6 +18,7 @@
 #include "third_party/blink/public/web/web_heap.h"
 #include "third_party/blink/public/web/web_script_source.h"
 #include "third_party/blink/renderer/bindings/core/v8/dictionary.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise_tester.h"
 #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_void_function.h"
@@ -24,8 +27,10 @@
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_ice_server.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_offer_options.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_peer_connection_error_callback.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_sdp_type.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_session_description_callback.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_rtc_session_description_init.h"
+#include "third_party/blink/renderer/core/frame/policy_container.h"
 #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
 #include "third_party/blink/renderer/core/testing/sim/sim_request.h"
 #include "third_party/blink/renderer/core/testing/sim/sim_test.h"
@@ -38,11 +43,13 @@
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/mediastream/media_stream_audio_track.h"
+#include "third_party/blink/renderer/platform/mediastream/media_stream_component_impl.h"
 #include "third_party/blink/renderer/platform/mediastream/media_stream_track_platform.h"
 #include "third_party/blink/renderer/platform/peerconnection/rtc_rtp_receiver_platform.h"
 #include "third_party/blink/renderer/platform/peerconnection/rtc_rtp_sender_platform.h"
 #include "third_party/blink/renderer/platform/peerconnection/rtc_session_description_platform.h"
 #include "third_party/blink/renderer/platform/testing/io_task_runner_testing_platform_support.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 #include "third_party/webrtc/api/rtc_error.h"
@@ -99,7 +106,7 @@ class RTCPeerConnectionTest : public testing::Test {
   }
 
   std::string GetExceptionMessage(V8TestingScope& scope) {
-    ExceptionState& exception_state = scope.GetExceptionState();
+    DummyExceptionStateForTesting& exception_state = scope.GetExceptionState();
     return exception_state.HadException() ? exception_state.Message().Utf8()
                                           : "";
   }
@@ -119,6 +126,7 @@ class RTCPeerConnectionTest : public testing::Test {
   }
 
  protected:
+  test::TaskEnvironment task_environment_;
   ScopedTestingPlatformSupport<IOTaskRunnerTestingPlatformSupport> platform_;
 };
 
@@ -210,8 +218,9 @@ TEST_F(RTCPeerConnectionTest, GetTrackRemoveStreamAndGCAll) {
     // Transceivers will still reference the stream even after it is "removed".
     // To make the GC tests work, clear the stream from tracks so that the
     // stream does not keep tracks alive.
-    while (!stream->getTracks().empty())
+    while (!stream->getTracks().empty()) {
       stream->removeTrack(stream->getTracks()[0], scope.GetExceptionState());
+    }
   }
 
   // This will destroy |MediaStream|, |MediaStreamTrack| and its
@@ -247,8 +256,9 @@ TEST_F(RTCPeerConnectionTest,
     // Transceivers will still reference the stream even after it is "removed".
     // To make the GC tests work, clear the stream from tracks so that the
     // stream does not keep tracks alive.
-    while (!stream->getTracks().empty())
+    while (!stream->getTracks().empty()) {
       stream->removeTrack(stream->getTracks()[0], scope.GetExceptionState());
+    }
   }
 
   // This will destroy |MediaStream| and |MediaStreamTrack| (but not
@@ -296,13 +306,13 @@ void PostToCompleteRequest(AsyncOperationAction action, RequestType* request) {
       return;
     case AsyncOperationAction::kResolve:
       scheduler::GetSequencedTaskRunnerForTesting()->PostTask(
-          FROM_HERE, WTF::BindOnce(&CompleteRequest<RequestType>,
-                                   WrapWeakPersistent(request), true));
+          FROM_HERE, BindOnce(&CompleteRequest<RequestType>,
+                              WrapWeakPersistent(request), true));
       return;
     case AsyncOperationAction::kReject:
       scheduler::GetSequencedTaskRunnerForTesting()->PostTask(
-          FROM_HERE, WTF::BindOnce(&CompleteRequest<RequestType>,
-                                   WrapWeakPersistent(request), false));
+          FROM_HERE, BindOnce(&CompleteRequest<RequestType>,
+                              WrapWeakPersistent(request), false));
       return;
   }
 }
@@ -322,6 +332,10 @@ class FakeRTCPeerConnectionHandlerPlatform
                     RTCAnswerOptionsPlatform*) override {
     PostToCompleteRequest<RTCSessionDescriptionRequest>(async_operation_action_,
                                                         request);
+  }
+
+  void SetLocalDescription(RTCVoidRequest* request) override {
+    PostToCompleteRequest<RTCVoidRequest>(async_operation_action_, request);
   }
 
   void SetLocalDescription(RTCVoidRequest* request,
@@ -369,6 +383,143 @@ TEST_F(RTCPeerConnectionTest, MediaStreamTrackStopsThrottling) {
   // Stopping the track disables the opt-out.
   track->stopTrack(scope.GetExecutionContext());
   EXPECT_FALSE(scheduler->OptedOutFromAggressiveThrottlingForTest());
+}
+
+TEST_F(RTCPeerConnectionTest, ConnectionAllowlistBlockIncrementsHistogram) {
+  base::HistogramTester histogram_tester;
+
+  // First, create the Connection Allowlist in the policy container. By default,
+  // WebRTC is blocked.
+  mojom::blink::PolicyContainerPoliciesPtr policies =
+      mojom::blink::PolicyContainerPolicies::New();
+  policies->connection_allowlists.enforced = network::ConnectionAllowlist();
+
+  mojo::PendingAssociatedRemote<mojom::blink::PolicyContainerHost> stub_remote;
+  std::unique_ptr<PolicyContainer> policy_container =
+      std::make_unique<PolicyContainer>(std::move(stub_remote),
+                                        std::move(policies));
+
+  V8TestingScope scope;
+  scope.GetExecutionContext()->SetPolicyContainer(std::move(policy_container));
+
+  // Next, create the RTCPeerConnection. This should fail, and the target
+  // histogram will be incremented accordingly.
+  RTCPeerConnection* pc = CreatePC(scope);
+  ASSERT_TRUE(pc);
+  histogram_tester.ExpectTotalCount(
+      "WebRTC.PeerConnection.BlockedByConnectionAllowlist", 1);
+  histogram_tester.ExpectBucketCount(
+      "WebRTC.PeerConnection.BlockedByConnectionAllowlist", true, 1);
+}
+
+class RTCPeerConnectionSetLocalDescriptionTest : public RTCPeerConnectionTest {
+ public:
+  std::unique_ptr<RTCPeerConnectionHandler> CreateRTCPeerConnectionHandler()
+      override {
+    DCHECK(!handler_);
+    auto handler = std::make_unique<FakeRTCPeerConnectionHandlerPlatform>();
+    handler_ = handler.get();
+    return handler;
+  }
+
+  FakeRTCPeerConnectionHandlerPlatform* handler() { return handler_; }
+
+ private:
+  raw_ptr<FakeRTCPeerConnectionHandlerPlatform> handler_ = nullptr;
+};
+
+TEST_F(RTCPeerConnectionSetLocalDescriptionTest,
+       EmptySdpSetLocalDescriptionOffer) {
+  V8TestingScope scope;
+  RTCPeerConnection* pc = CreatePC(scope);
+  ASSERT_TRUE(pc);
+
+  handler()->set_async_operation_action(AsyncOperationAction::kResolve);
+
+  RTCSessionDescriptionInit* description = RTCSessionDescriptionInit::Create();
+  description->setType(V8RTCSdpType::Enum::kOffer);
+  description->setSdp("");
+
+  // Since signaling state is kStable (allowed for offer), it should delegate
+  // to parameterless SetLocalDescription(request) and resolve.
+  auto promise = pc->setLocalDescription(scope.GetScriptState(), description,
+                                         scope.GetExceptionState());
+  EXPECT_FALSE(scope.GetExceptionState().HadException());
+
+  ScriptPromiseTester tester(scope.GetScriptState(), promise);
+  tester.WaitUntilSettled();
+  EXPECT_TRUE(tester.IsFulfilled());
+}
+
+TEST_F(RTCPeerConnectionSetLocalDescriptionTest,
+       EmptySdpSetLocalDescriptionAnswerMismatchesState) {
+  V8TestingScope scope;
+  RTCPeerConnection* pc = CreatePC(scope);
+  ASSERT_TRUE(pc);
+
+  RTCSessionDescriptionInit* description = RTCSessionDescriptionInit::Create();
+  description->setType(V8RTCSdpType::Enum::kAnswer);
+  description->setSdp("");
+
+  // Since type is answer but state is kStable (only allowed for offer),
+  // it should throw synchronously.
+  pc->setLocalDescription(scope.GetScriptState(), description,
+                          scope.GetExceptionState());
+  EXPECT_TRUE(scope.GetExceptionState().HadException());
+  EXPECT_EQ(DOMExceptionCode::kInvalidStateError,
+            scope.GetExceptionState().CodeAs<DOMExceptionCode>());
+}
+
+TEST_F(RTCPeerConnectionSetLocalDescriptionTest,
+       EmptySdpSetLocalDescriptionAnswerAllowedState) {
+  V8TestingScope scope;
+  RTCPeerConnection* pc = CreatePC(scope);
+  ASSERT_TRUE(pc);
+
+  handler()->set_async_operation_action(AsyncOperationAction::kResolve);
+
+  // Transition to kHaveRemoteOffer.
+  pc->DidModifyTransceivers(webrtc::PeerConnectionInterface::kHaveRemoteOffer,
+                            {}, {},
+                            /*is_remote_description_or_rollback=*/true);
+
+  RTCSessionDescriptionInit* description = RTCSessionDescriptionInit::Create();
+  description->setType(V8RTCSdpType::Enum::kAnswer);
+  description->setSdp("");
+
+  // Since signaling state is kHaveRemoteOffer (allowed for answer), it should
+  // delegate and resolve successfully.
+  auto promise = pc->setLocalDescription(scope.GetScriptState(), description,
+                                         scope.GetExceptionState());
+  EXPECT_FALSE(scope.GetExceptionState().HadException());
+
+  ScriptPromiseTester tester(scope.GetScriptState(), promise);
+  tester.WaitUntilSettled();
+  EXPECT_TRUE(tester.IsFulfilled());
+}
+
+TEST_F(RTCPeerConnectionSetLocalDescriptionTest,
+       EmptySdpSetLocalDescriptionOfferMismatchesState) {
+  V8TestingScope scope;
+  RTCPeerConnection* pc = CreatePC(scope);
+  ASSERT_TRUE(pc);
+
+  // Transition to kHaveRemoteOffer.
+  pc->DidModifyTransceivers(webrtc::PeerConnectionInterface::kHaveRemoteOffer,
+                            {}, {},
+                            /*is_remote_description_or_rollback=*/true);
+
+  RTCSessionDescriptionInit* description = RTCSessionDescriptionInit::Create();
+  description->setType(V8RTCSdpType::Enum::kOffer);
+  description->setSdp("");
+
+  // Since type is offer but state is kHaveRemoteOffer (only allowed for
+  // answer/pranswer), it should throw synchronously.
+  pc->setLocalDescription(scope.GetScriptState(), description,
+                          scope.GetExceptionState());
+  EXPECT_TRUE(scope.GetExceptionState().HadException());
+  EXPECT_EQ(DOMExceptionCode::kInvalidStateError,
+            scope.GetExceptionState().CodeAs<DOMExceptionCode>());
 }
 
 }  // namespace blink

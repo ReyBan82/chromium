@@ -37,25 +37,15 @@ class VIZ_SERVICE_EXPORT InfoCollectionGpuServiceImpl
 
   ~InfoCollectionGpuServiceImpl() override;
 
-  void RequestDxDiagNodeInfo(RequestDxDiagNodeInfoCallback callback) override;
-
-  void GetGpuSupportedDx12VersionAndDevicePerfInfo(
-      GetGpuSupportedDx12VersionAndDevicePerfInfoCallback callback) override;
-
-  void GetGpuSupportedVulkanVersionInfo(
-      GetGpuSupportedVulkanVersionInfoCallback callback) override;
+  void GetGpuSupportedDirectXVersionAndDevicePerfInfo(
+      GetGpuSupportedDirectXVersionAndDevicePerfInfoCallback callback) override;
 
  private:
   void BindOnIO(
       mojo::PendingReceiver<mojom::InfoCollectionGpuService> pending_receiver);
 
-  void RequestDxDiagNodeInfoOnMain(RequestDxDiagNodeInfoCallback callback);
-
-  void GetGpuSupportedDx12VersionAndDevicePerfInfoOnMain(
-      GetGpuSupportedDx12VersionAndDevicePerfInfoCallback callback);
-
-  void GetGpuSupportedVulkanVersionInfoOnMain(
-      GetGpuSupportedVulkanVersionInfoCallback callback);
+  void GetGpuSupportedDirectXVersionAndDevicePerfInfoOnMain(
+      GetGpuSupportedDirectXVersionAndDevicePerfInfoCallback callback);
 
   scoped_refptr<base::SingleThreadTaskRunner> main_runner_;
   scoped_refptr<base::SingleThreadTaskRunner> io_runner_;

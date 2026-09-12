@@ -31,7 +31,10 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_WIDGET_H_
 #define THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_WIDGET_H_
 
+#include "services/viz/public/mojom/compositing/compositor_frame_sink.mojom-shared.h"
 #include "third_party/blink/public/common/metrics/document_update_reason.h"
+#include "third_party/blink/public/mojom/widget/platform_widget.mojom-shared.h"
+#include "third_party/blink/public/platform/cross_variant_mojo_util.h"
 #include "third_party/blink/public/platform/web_input_event_result.h"
 #include "third_party/blink/public/platform/web_string.h"
 #include "third_party/blink/public/web/web_lifecycle_update.h"
@@ -69,13 +72,28 @@ class WebWidget {
   // is called. |settings| is typically null. When |settings| is null
   // the default settings will be used, tests may provide a |settings| object to
   // override the defaults.
-  virtual void InitializeCompositing(const display::ScreenInfos& screen_info,
-                                     const cc::LayerTreeSettings* settings) = 0;
+  // The optional initial frame sink parameters allow the renderer to
+  // communicate with the frame sink in the GPU process earlier, without having
+  // to request the browser process for it first.
+  virtual void InitializeCompositing(
+      const display::ScreenInfos& screen_info,
+      const cc::LayerTreeSettings* settings,
+      CrossVariantMojoRemote<viz::mojom::CompositorFrameSinkInterfaceBase>
+          initial_frame_sink,
+      CrossVariantMojoReceiver<
+          viz::mojom::CompositorFrameSinkClientInterfaceBase>
+          initial_frame_sink_client,
+      CrossVariantMojoReceiver<mojom::RenderInputRouterClientInterfaceBase>
+          initial_viz_rir_client) = 0;
 
   // Set the compositor as visible. If |visible| is true, then the compositor
   // will request a new layer frame sink and begin producing frames from the
   // compositor.
   virtual void SetCompositorVisible(bool visible) = 0;
+
+  // Asks the compositor to request warming up and request a new frame sink
+  // speculatively even if invisible.
+  virtual void WarmUpCompositor() = 0;
 
   // Returns the current size of the WebWidget.
   virtual gfx::Size Size() { return gfx::Size(); }
@@ -140,6 +158,10 @@ class WebWidget {
   virtual void ProcessInputEventSynchronouslyForTesting(
       const WebCoalescedInputEvent&) = 0;
 
+  // Dispatches the input event asynchronously, without blocking.
+  virtual void DispatchNonBlockingEventForTesting(
+      std::unique_ptr<WebCoalescedInputEvent> event) = 0;
+
   virtual void DidOverscrollForTesting(
       const gfx::Vector2dF& overscroll_delta,
       const gfx::Vector2dF& accumulated_overscroll,
@@ -154,7 +176,7 @@ class WebWidget {
   virtual void FlushInputProcessedCallback() = 0;
 
   // Cancel the current composition.
-  virtual void CancelCompositionForPepper() = 0;
+  virtual void CancelComposition() = 0;
 
   // Requests the selection bounds be updated.
   virtual void UpdateSelectionBounds() = 0;
@@ -193,8 +215,8 @@ class WebWidget {
   virtual void SetScreenRects(const gfx::Rect& widget_screen_rect,
                               const gfx::Rect& window_screen_rect) = 0;
 
-  // Returns the visible viewport size (in screen coorindates).
-  virtual gfx::Size VisibleViewportSizeInDIPs() = 0;
+  // Returns the visible viewport size (in device pixel screen coordinates).
+  virtual gfx::Size VisibleViewportSize() = 0;
 
   // Returns the emulator scale.
   virtual float GetEmulatorScale() { return 1.0f; }

@@ -4,76 +4,74 @@
 
 #include "components/page_info/core/features.h"
 
+#include <string_view>
+
+#include "base/containers/fixed_flat_set.h"
 #include "base/feature_list.h"
+#include "base/i18n/legacy_language_tag_helpers.h"
 #include "base/metrics/field_trial_params.h"
+#include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "ui/base/l10n/l10n_util.h"
 
 namespace page_info {
-
-#if BUILDFLAG(IS_ANDROID)
-BASE_FEATURE(kPageInfoStoreInfo,
-             "PageInfoStoreInfo",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-BASE_FEATURE(kPageInfoAboutThisSiteImprovedBottomSheet,
-             "PageInfoAboutThisSiteImprovedBottomSheet",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-#endif
+constexpr auto kDefaultLangs = base::MakeFixedFlatSet<std::string_view>({
+    "ar", "bg", "ca", "cs", "da", "de", "el", "en", "es", "et",
+    "fi", "fr", "he", "hi", "hr", "hu", "id", "it", "ja", "ko",
+    "lt", "lv", "nb", "nl", "pl", "pt", "ro", "ru", "sk", "sl",
+    "sr", "sv", "sw", "th", "tr", "uk", "vi", "zh",
+});
 
 extern bool IsAboutThisSiteFeatureEnabled(const std::string& locale) {
-  if (l10n_util::GetLanguage(locale) == "en") {
-    return base::FeatureList::IsEnabled(kPageInfoAboutThisSiteEn);
-  } else {
-    return base::FeatureList::IsEnabled(kPageInfoAboutThisSiteNonEn);
+  if (kDefaultLangs.contains(
+          base::i18n::GetLanguageSubtagUsingLanguageTag(locale))) {
+    return base::FeatureList::IsEnabled(kPageInfoAboutThisSite);
   }
+  return base::FeatureList::IsEnabled(kPageInfoAboutThisSiteMoreLangs);
 }
 
-BASE_FEATURE(kPageInfoAboutThisSiteNewIcon,
-             "PageInfoAboutThisSiteNewIcon",
+BASE_FEATURE(kPageInfoAboutThisSite, base::FEATURE_ENABLED_BY_DEFAULT);
+BASE_FEATURE(kPageInfoAboutThisSiteMoreLangs,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kPageInfoAboutThisSiteEn,
-             "PageInfoAboutThisSiteEn",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-BASE_FEATURE(kPageInfoAboutThisSiteNonEn,
-             "PageInfoAboutThisSiteNonEn",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-BASE_FEATURE(kPageInfoAboutThisSiteNonMsbb,
-             "PageInfoAboutThisSiteNonMsbb",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-const base::FeatureParam<bool> kShowSampleContent{&kPageInfoAboutThisSiteEn,
+const base::FeatureParam<bool> kShowSampleContent{&kPageInfoAboutThisSite,
                                                   "ShowSampleContent", false};
 
-BASE_FEATURE(kPageInfoAboutThisSiteMoreInfo,
-             "PageInfoAboutThisSiteMoreInfo",
-#if BUILDFLAG(IS_ANDROID)
-             base::FEATURE_ENABLED_BY_DEFAULT);
-#else
-             base::FEATURE_DISABLED_BY_DEFAULT);
-#endif
+BASE_FEATURE(kMerchantTrust, base::FEATURE_ENABLED_BY_DEFAULT);
 
-BASE_FEATURE(kPageInfoAboutThisSiteDescriptionPlaceholder,
-             "PageInfoAboutThisSiteDescriptionPlaceholder",
-             base::FEATURE_ENABLED_BY_DEFAULT);
+const char kMerchantTrustEnabledWithSampleDataName[] =
+    "enabled-with-sample-data";
+const base::FeatureParam<bool> kMerchantTrustEnabledWithSampleData{
+    &kMerchantTrust, kMerchantTrustEnabledWithSampleDataName, false};
 
-#if !BUILDFLAG(IS_ANDROID)
-BASE_FEATURE(kPageInfoHistoryDesktop,
-             "PageInfoHistoryDesktop",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+const char kMerchantTrustEnabledForCountry[] = "us";
+const char kMerchantTrustEnabledForLocale[] = "en-us";
 
-BASE_FEATURE(kPageInfoHideSiteSettings,
-             "PageInfoHideSiteSettings",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+const char kMerchantTrustForceShowUIForTestingName[] =
+    "force-show-ui-for-testing";
+const base::FeatureParam<bool> kMerchantTrustForceShowUIForTesting{
+    &kMerchantTrust, kMerchantTrustForceShowUIForTestingName, false};
 
-BASE_FEATURE(kPageInfoCookiesSubpage,
-             "PageInfoCookiesSubpage",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+const char kMerchantTrustWithoutSummaryName[] = "enable-without-summary";
+const base::FeatureParam<bool> kMerchantTrustWithoutSummary{
+    &kMerchantTrust, kMerchantTrustWithoutSummaryName, true};
 
-BASE_FEATURE(kPageSpecificSiteDataDialog,
-             "PageSpecificSiteDataDialog",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+bool IsMerchantTrustWithoutSummaryEnabled() {
+  return base::GetFieldTrialParamByFeatureAsBool(
+      kMerchantTrust, kMerchantTrustWithoutSummaryName, true);
+}
 
-#endif
+extern bool IsMerchantTrustFeatureEnabled(const std::string& country_code,
+                                          const std::string& locale) {
+  if (kMerchantTrustForceShowUIForTesting.Get()) {
+    return true;
+  }
+
+  return base::FeatureList::IsEnabled(kMerchantTrust) &&
+         base::EqualsCaseInsensitiveASCII(country_code,
+                                          kMerchantTrustEnabledForCountry) &&
+         base::EqualsCaseInsensitiveASCII(locale,
+                                          kMerchantTrustEnabledForLocale);
+}
 
 }  // namespace page_info

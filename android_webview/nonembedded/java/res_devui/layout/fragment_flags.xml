@@ -26,13 +26,14 @@
             android:id="@+id/flag_search_bar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:nextFocusUp="@id/action_button"
             android:layout_alignParentStart="true"
             android:layout_toStartOf="@id/reset_flags_button"
             android:hint="Search flags"
             android:inputType="textFilter"
             android:singleLine="true"
             android:drawablePadding="4dp"
-            android:drawableStart="@drawable/ic_devui_search"
+            android:drawableStart="@drawable/ic_search_24dp"
             android:imeOptions="actionDone"
             android:drawableTint="?android:textColorPrimary"
             android:textAppearance="?android:attr/textAppearanceMedium"/>
@@ -41,6 +42,7 @@
         <Button
             android:text="Reset flags"
             android:id="@+id/reset_flags_button"
+            android:nextFocusUp="@id/action_button"
             android:layout_marginStart="8dp"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -57,6 +59,7 @@
 
     <ListView
         android:id="@+id/flags_list"
+        android:nextFocusUp="@id/flag_search_bar"
         android:layout_width="match_parent"
         android:layout_height="match_parent"/>
 

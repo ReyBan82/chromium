@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "chrome/test/chromedriver/key_converter.h"
 
 #include <stddef.h>
 
+#include <array>
 #include <string>
 
 #include "base/strings/utf_string_conversions.h"
@@ -247,7 +249,7 @@ TEST(KeyConverter, ToggleModifiers) {
 }
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-// Fails on bots: crbug.com/174962
+// Fails on bots: crbug.com/40301345
 #define MAYBE_AllEnglishKeyboardSymbols DISABLED_AllEnglishKeyboardSymbols
 #else
 #define MAYBE_AllEnglishKeyboardSymbols AllEnglishKeyboardSymbols
@@ -256,7 +258,7 @@ TEST(KeyConverter, ToggleModifiers) {
 TEST(KeyConverter, MAYBE_AllEnglishKeyboardSymbols) {
   ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
   std::u16string keys;
-  const ui::KeyboardCode kSymbolKeyCodes[] = {
+  const auto kSymbolKeyCodes = std::to_array<ui::KeyboardCode>({
       ui::VKEY_OEM_3,
       ui::VKEY_OEM_MINUS,
       ui::VKEY_OEM_PLUS,
@@ -267,7 +269,8 @@ TEST(KeyConverter, MAYBE_AllEnglishKeyboardSymbols) {
       ui::VKEY_OEM_7,
       ui::VKEY_OEM_COMMA,
       ui::VKEY_OEM_PERIOD,
-      ui::VKEY_OEM_2};
+      ui::VKEY_OEM_2,
+  });
   std::string kLowerSymbols = "`-=[]\\;',./";
   std::string kUpperSymbols = "~_+{}|:\"<>?";
   for (size_t i = 0; i < kLowerSymbols.length(); ++i)
@@ -302,15 +305,16 @@ TEST(KeyConverter, AllEnglishKeyboardTextChars) {
 
 TEST(KeyConverter, AllSpecialWebDriverKeysOnEnglishKeyboard) {
   ui::ScopedKeyboardLayout keyboard_layout(ui::KEYBOARD_LAYOUT_ENGLISH_US);
-  const char kTextForKeys[] = {
+  const auto kTextForKeys = std::to_array<char>({
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-      0, 0, 0, 0, '\t', 0, '\r', '\r', 0, 0, 0, 0, 0,
+      0,   0,   0,   0,   '\t', 0,   '\r', '\r', 0,   0,   0,   0,   0,
 #else
-      0, 0, 0, 0, 0, 0, '\r', '\r', 0, 0, 0, 0, 0,
+      0,   0,   0,   0,   0,   0,   '\r', '\r', 0,   0,   0,   0,   0,
 #endif
-      ' ', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, ';', '=',
-      '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-      '*', '+', ',', '-', '.', '/'};
+      ' ', 0,   0,   0,   0,    0,   0,    0,    0,   0,   0,   ';', '=',
+      '0', '1', '2', '3', '4',  '5', '6',  '7',  '8', '9', '*', '+', ',',
+      '-', '.', '/',
+  });
   for (size_t i = 0; i <= 0x3D; ++i) {
     if (i > 0x29 && i < 0x31)
       continue;
@@ -379,6 +383,34 @@ TEST(KeyConverter, ReleaseModifiers) {
   std::u16string keys = u"\uE008\uE009";
 
   CheckEvents(keys, key_events, true /* release_modifiers */, 0);
+}
+
+TEST(KeyConverter, SurrogatePairValid) {
+  const std::string emoji = "\xF0\x9F\x98\x80";
+  std::vector<KeyEvent> key_events;
+  KeyEventBuilder builder;
+  builder.SetText(emoji, emoji)
+      ->SetKeyCode(ui::VKEY_UNKNOWN)
+      ->Generate(&key_events);
+
+  std::u16string keys = {0xD83Du, 0xDE00u};
+  CheckEventsReleaseModifiers(keys, key_events);
+}
+
+TEST(KeyConverter, LoneLeadSurrogateRejected) {
+  int modifiers = 0;
+  std::vector<KeyEvent> events;
+  std::u16string keys = {0xD83Du};
+  Status status = ConvertKeysToKeyEvents(keys, true, &modifiers, &events);
+  EXPECT_EQ(kUnknownError, status.code());
+}
+
+TEST(KeyConverter, LoneTrailSurrogateRejected) {
+  int modifiers = 0;
+  std::vector<KeyEvent> events;
+  std::u16string keys = {0xDE00u};
+  Status status = ConvertKeysToKeyEvents(keys, true, &modifiers, &events);
+  EXPECT_EQ(kUnknownError, status.code());
 }
 
 TEST(KeyConverter, CommandA) {

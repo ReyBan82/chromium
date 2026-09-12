@@ -5,7 +5,7 @@
 // Navigates to |url| and invokes |callback| when the navigation is complete.
 function navigateTab(url, callback) {
   chrome.tabs.onUpdated.addListener(function updateCallback(_, info, tab) {
-    if (info.status == 'complete' && tab.url == url) {
+    if (info.status === 'complete' && tab.url === url) {
       chrome.tabs.onUpdated.removeListener(updateCallback);
       callback(tab);
     }
@@ -14,27 +14,28 @@ function navigateTab(url, callback) {
   chrome.tabs.update({url: url});
 }
 
-var testServerPort;
+let testServerPort;
 function getServerURL(host) {
-  if (!testServerPort)
+  if (!testServerPort) {
     throw new Error('Called getServerURL outside of runTests.');
+  }
   return `http://${host}:${testServerPort}/`;
 }
 
-var testData = [
+const testData = [
   {host: 'ab.com', rule: {ruleId: 1, rulesetId: 'rules1'}},
   {host: 'abc.com', rule: {ruleId: 2, rulesetId: 'rules1'}},
   {host: 'abcd.com', rule: {ruleId: 1, rulesetId: 'rules2'}},
   {
     host: 'dynamic.com',
     rule:
-        {ruleId: 1, rulesetId: chrome.declarativeNetRequest.DYNAMIC_RULESET_ID}
+        {ruleId: 1, rulesetId: chrome.declarativeNetRequest.DYNAMIC_RULESET_ID},
   },
   {
     host: 'session.com',
     rule:
-        {ruleId: 5, rulesetId: chrome.declarativeNetRequest.SESSION_RULESET_ID}
-  }
+        {ruleId: 5, rulesetId: chrome.declarativeNetRequest.SESSION_RULESET_ID},
+  },
 ];
 
 function addDynamicRule() {
@@ -98,7 +99,7 @@ function createTest(index) {
 
             const expectedRuleInfo = {
               rule: testData[index].rule,
-              tabId: tab.id
+              tabId: tab.id,
             };
 
             // Sanity check that the RulesMatchedInfo fields are populated
@@ -109,23 +110,23 @@ function createTest(index) {
           });
     });
   };
-};
+}
 
 chrome.test.getConfig(function(config) {
   testServerPort = config.testServer.port;
-  var tests = [];
+  const tests = [];
 
   // First add the dynamic and session rule, since it's required by one of the
   // latter tests.
   tests.push(addDynamicRule);
   tests.push(addSessionRule);
 
-  for (var i = 0; i < testData.length; ++i) {
-    var test = createTest(i);
+  for (let i = 0; i < testData.length; ++i) {
+    const test = createTest(i);
 
     // Assign a name to the function so that the extension test framework prints
     // the sub-test name.
-    Object.defineProperty(test, 'name', {value: 'test' + i})
+    Object.defineProperty(test, 'name', {value: `test${i}`});
 
     tests.push(test);
   }

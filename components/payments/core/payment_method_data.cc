@@ -19,20 +19,11 @@ static const char kSupportedNetworks[] = "supportedNetworks";
 
 }  // namespace
 
-PaymentMethodData::PaymentMethodData() {}
+PaymentMethodData::PaymentMethodData() = default;
 PaymentMethodData::PaymentMethodData(const PaymentMethodData& other) = default;
 PaymentMethodData::~PaymentMethodData() = default;
 
-bool PaymentMethodData::operator==(const PaymentMethodData& other) const {
-  return supported_method == other.supported_method && data == other.data &&
-         supported_networks == other.supported_networks;
-}
-
-bool PaymentMethodData::operator!=(const PaymentMethodData& other) const {
-  return !(*this == other);
-}
-
-bool PaymentMethodData::FromValueDict(const base::Value::Dict& dict) {
+bool PaymentMethodData::FromValueDict(const base::DictValue& dict) {
   supported_networks.clear();
 
   // The value of supportedMethods should be a string.
@@ -45,12 +36,10 @@ bool PaymentMethodData::FromValueDict(const base::Value::Dict& dict) {
 
   // Data is optional, but if a dictionary is present, save a stringified
   // version and attempt to parse supportedNetworks.
-  const base::Value::Dict* data_dict = dict.FindDict(kMethodDataData);
+  const base::DictValue* data_dict = dict.FindDict(kMethodDataData);
   if (data_dict) {
-    std::string json_data;
-    base::JSONWriter::Write(*data_dict, &json_data);
-    data = json_data;
-    const base::Value::List* supported_networks_list =
+    data = base::WriteJson(*data_dict).value_or("");
+    const base::ListValue* supported_networks_list =
         data_dict->FindList(kSupportedNetworks);
     if (supported_networks_list) {
       for (const base::Value& supported_network : *supported_networks_list) {

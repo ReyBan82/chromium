@@ -7,14 +7,16 @@
 
 #include <stddef.h>
 
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "cc/resources/ui_resource_client.h"
 #include "cc/slim/ui_resource_layer.h"
 #include "chrome/browser/android/compositor/layer/layer.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size_f.h"
 
+namespace thumbnail {
 class Thumbnail;
+}  // namespace thumbnail
 
 namespace cc::slim {
 class Layer;
@@ -32,7 +34,7 @@ class ThumbnailLayer : public Layer {
   ThumbnailLayer& operator=(const ThumbnailLayer&) = delete;
 
   // Sets thumbnail that will be shown. |thumbnail| should not be nullptr.
-  void SetThumbnail(Thumbnail* thumbnail);
+  void SetThumbnail(thumbnail::Thumbnail* thumbnail);
   // Clip the thumbnail to the given |clipping|.
   void Clip(const gfx::Rect& clipping);
   void ClearClip();

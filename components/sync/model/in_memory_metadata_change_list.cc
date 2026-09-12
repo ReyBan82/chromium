@@ -8,8 +8,17 @@
 
 namespace syncer {
 
-InMemoryMetadataChangeList::InMemoryMetadataChangeList() = default;
-InMemoryMetadataChangeList::~InMemoryMetadataChangeList() = default;
+InMemoryMetadataChangeList::InMemoryMetadataChangeList(
+    bool allow_changes_on_destruction)
+    : allow_changes_on_destruction_(allow_changes_on_destruction) {}
+
+InMemoryMetadataChangeList::~InMemoryMetadataChangeList() {
+  if (!allow_changes_on_destruction_) {
+    // Verify that all changes were transferred or dropped.
+    CHECK(metadata_changes_.empty(), base::NotFatalUntil::M153);
+    CHECK(!state_change_, base::NotFatalUntil::M153);
+  }
+}
 
 void InMemoryMetadataChangeList::TransferChangesTo(MetadataChangeList* other) {
   DCHECK(other);
@@ -27,25 +36,35 @@ void InMemoryMetadataChangeList::TransferChangesTo(MetadataChangeList* other) {
   if (state_change_) {
     switch (state_change_->type) {
       case UPDATE:
-        other->UpdateModelTypeState(state_change_->state);
+        other->UpdateDataTypeState(state_change_->state);
         break;
       case CLEAR:
-        other->ClearModelTypeState();
+        other->ClearDataTypeState();
         break;
     }
     state_change_.reset();
   }
 }
 
-void InMemoryMetadataChangeList::UpdateModelTypeState(
-    const sync_pb::ModelTypeState& model_type_state) {
-  state_change_ = std::make_unique<ModelTypeStateChange>(
-      ModelTypeStateChange{UPDATE, model_type_state});
+void InMemoryMetadataChangeList::DropAllChanges() {
+  metadata_changes_.clear();
+  state_change_.reset();
 }
 
-void InMemoryMetadataChangeList::ClearModelTypeState() {
-  state_change_ = std::make_unique<ModelTypeStateChange>(
-      ModelTypeStateChange{CLEAR, sync_pb::ModelTypeState()});
+void InMemoryMetadataChangeList::DropMetadataChangeForStorageKey(
+    const std::string& storage_key) {
+  metadata_changes_.erase(storage_key);
+}
+
+void InMemoryMetadataChangeList::UpdateDataTypeState(
+    const sync_pb::DataTypeState& data_type_state) {
+  state_change_ = std::make_unique<DataTypeStateChange>(
+      DataTypeStateChange{UPDATE, data_type_state});
+}
+
+void InMemoryMetadataChangeList::ClearDataTypeState() {
+  state_change_ = std::make_unique<DataTypeStateChange>(
+      DataTypeStateChange{CLEAR, sync_pb::DataTypeState()});
 }
 
 void InMemoryMetadataChangeList::UpdateMetadata(

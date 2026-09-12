@@ -2,11 +2,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//components/enterprise/buildflags/buildflags.gni")
 import("//components/safe_browsing/buildflags.gni")
 
 if (is_android) {
   import("//build/config/android/config.gni")
   import("//build/config/android/rules.gni")
+  import("//third_party/jni_zero/jni_zero.gni")
 }
 
 source_set("internal") {
@@ -27,10 +29,13 @@ source_set("internal") {
     "download_db_cache.h",
     "download_file_factory.cc",
     "download_file_impl.cc",
+    "download_file_with_copy.cc",
+    "download_file_with_copy.h",
     "download_interrupt_reasons_impl.cc",
     "download_interrupt_reasons_utils.cc",
     "download_item_impl.cc",
     "download_item_impl_delegate.cc",
+    "download_item_rename_handler.cc",
     "download_job.cc",
     "download_job_factory.cc",
     "download_job_impl.cc",
@@ -62,6 +67,7 @@ source_set("internal") {
   ]
 
   public_deps = [
+    "//components/enterprise/buildflags",
     "//components/services/quarantine/public/mojom",
     "//mojo/public/cpp/bindings",
     "//services/network/public/mojom",
@@ -77,22 +83,33 @@ source_set("internal") {
     "//components/services/quarantine",
     "//mojo/public/c/system",
     "//net",
-    "//services/device/public/mojom:mojom",
+    "//services/device/public/mojom",
     "//services/metrics/public/cpp:metrics_cpp",
     "//services/metrics/public/cpp:ukm_builders",
     "//services/network/public/cpp",
-    "//services/service_manager/public/cpp:cpp",
+    "//services/service_manager/public/cpp",
   ]
 
-  # TODO(crbug/1056278): Enable this on Fuchsia
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
+  # TODO(crbug.com/40120259): Enable this on Fuchsia
   if (safe_browsing_mode > 0 && !is_fuchsia) {
     deps += [ "//components/safe_browsing/content/common:file_type_policies" ]
+  }
+
+  if (enterprise_cloud_content_analysis || is_android) {
+    deps +=
+        [ "//components/enterprise/obfuscation/core:enterprise_obfuscation" ]
   }
 
   if (is_android) {
     sources += [
       "android/download_collection_bridge.cc",
       "android/download_collection_bridge.h",
+      "android/download_document_uri_bridge.cc",
+      "android/download_document_uri_bridge.h",
+      "in_memory_download_file.cc",
+      "in_memory_download_file.h",
     ]
 
     deps += [ ":jni_headers" ]
@@ -109,24 +126,46 @@ source_set("internal") {
 
 if (is_android) {
   android_library("internal_java") {
+    srcjar_deps = [ ":jni_headers" ]
     sources = [
       "android/java/src/org/chromium/components/download/DownloadCollectionBridge.java",
       "android/java/src/org/chromium/components/download/DownloadDelegate.java",
+      "android/java/src/org/chromium/components/download/DownloadDocumentUriBridge.java",
+      "android/java/src/org/chromium/components/download/InMemoryDownloadFile.java",
     ]
 
     deps = [
       "//base:base_java",
-      "//base:jni_java",
       "//build/android:build_java",
       "//third_party/android_provider:android_provider_java",
       "//third_party/androidx:androidx_annotation_annotation_java",
+      "//third_party/jni_zero:jni_zero_java",
     ]
-    annotation_processor_deps = [ "//base/android/jni_generator:jni_processor" ]
   }
 
   generate_jni("jni_headers") {
     visibility = [ ":*" ]
-    sources = [ "android/java/src/org/chromium/components/download/DownloadCollectionBridge.java" ]
+    sources = [
+      "android/java/src/org/chromium/components/download/DownloadCollectionBridge.java",
+      "android/java/src/org/chromium/components/download/DownloadDocumentUriBridge.java",
+      "android/java/src/org/chromium/components/download/InMemoryDownloadFile.java",
+    ]
+  }
+
+  robolectric_library("junit") {
+    testonly = true
+
+    sources = [ "android/junit/src/org/chromium/components/download/DownloadDocumentUriBridgeTest.java" ]
+
+    deps = [
+      ":internal_java",
+      "//base:base_java",
+      "//base:base_java_test_support",
+      "//base:base_junit_test_support",
+      "//third_party/androidx:androidx_test_core_java",
+      "//third_party/androidx:androidx_test_runner_java",
+      "//third_party/junit",
+    ]
   }
 }
 
@@ -153,7 +192,9 @@ source_set("unit_tests") {
     "download_db_cache_unittest.cc",
     "download_file_unittest.cc",
     "download_item_impl_unittest.cc",
+    "download_job_factory_unittest.cc",
     "download_path_reservation_tracker_unittest.cc",
+    "download_response_handler_unittest.cc",
     "download_stats_unittest.cc",
     "download_ukm_helper_unittest.cc",
     "download_utils_unittest.cc",
@@ -162,11 +203,13 @@ source_set("unit_tests") {
     "rate_estimator_unittest.cc",
   ]
 
+  if (is_android) {
+    sources += [ "android/download_document_uri_bridge_unittest.cc" ]
+  }
+
   deps = [
     ":for_tests",
     "//base/test:test_support",
-    "//build:chromeos_buildflags",
-    "//build:chromeos_buildflags",
     "//components/download/database",
     "//components/download/public/common:test_support",
     "//components/leveldb_proto",

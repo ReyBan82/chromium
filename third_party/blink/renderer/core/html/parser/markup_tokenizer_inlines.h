@@ -39,19 +39,6 @@ inline bool IsTokenizerWhitespace(UChar cc) {
   return cc == ' ' || cc == '\x0A' || cc == '\x09' || cc == '\x0C';
 }
 
-inline void AdvanceStringAndASSERTIgnoringCase(
-    SegmentedString& source,
-    const char* expected_characters) {
-  while (*expected_characters)
-    source.AdvanceAndASSERTIgnoringCase(*expected_characters++);
-}
-
-inline void AdvanceStringAndASSERT(SegmentedString& source,
-                                   const char* expected_characters) {
-  while (*expected_characters)
-    source.AdvanceAndASSERT(*expected_characters++);
-}
-
 #if defined(COMPILER_MSVC)
 // We need to disable the "unreachable code" warning because we want to assert
 // that some code points aren't reached in the state machine.
@@ -62,9 +49,7 @@ inline void AdvanceStringAndASSERT(SegmentedString& source,
   case prefix::stateName:              \
   stateName:
 #define BEGIN_STATE_NOLABEL(prefix, stateName) case prefix::stateName:
-#define END_STATE() \
-  NOTREACHED();     \
-  break;
+#define END_STATE() NOTREACHED();
 
 // We use this macro when the HTML5 spec says "reconsume the current input
 // character in the <mumble> state."

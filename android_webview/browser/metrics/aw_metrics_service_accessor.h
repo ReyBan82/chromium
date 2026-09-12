@@ -5,7 +5,12 @@
 #ifndef ANDROID_WEBVIEW_BROWSER_METRICS_AW_METRICS_SERVICE_ACCESSOR_H_
 #define ANDROID_WEBVIEW_BROWSER_METRICS_AW_METRICS_SERVICE_ACCESSOR_H_
 
+#include <vector>
+
+#include "base/gtest_prod_util.h"
+#include "components/metrics/metrics_service.h"
 #include "components/metrics/metrics_service_accessor.h"
+#include "components/variations/synthetic_trial_registry.h"
 
 namespace android_webview {
 
@@ -15,8 +20,23 @@ namespace android_webview {
 class AwMetricsServiceAccessor : public metrics::MetricsServiceAccessor {
  private:
   friend class AwBrowserMainParts;
-};
+  friend class AwMetricsServiceClient;
+  friend class AwSettings;
+  friend class AwPrefetchManager;
+  friend class AwMetricsTestBase;
+  friend class AwMetricsServiceAccessorTest;
+  FRIEND_TEST_ALL_PREFIXES(AwMetricsServiceAccessorTest,
+                           RegisterExternalExperimentUpdatesCorrectly);
+  FRIEND_TEST_ALL_PREFIXES(AwMetricsServiceAccessorTest,
+                           RegisterExternalExperimentOrderingAgnostic);
 
+  // Must be called from the UI thread because
+  // `AwMetricsServiceClient::GetInstance()` is bound to the UI thread.
+  static void RegisterExternalExperiment(
+      const std::vector<int>& experiment_ids);
+
+  static void ClearAllExternalExperimentsForTesting();
+};
 }  // namespace android_webview
 
 #endif  // ANDROID_WEBVIEW_BROWSER_METRICS_AW_METRICS_SERVICE_ACCESSOR_H_

@@ -7,10 +7,13 @@
 #include <algorithm>
 #include <utility>
 
+#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_usvstring_usvstringsequencesequence_usvstringusvstringrecord.h"
-#include "third_party/blink/renderer/core/url/dom_url.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
+#include "third_party/blink/renderer/core/url/url.h"
 #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
 #include "third_party/blink/renderer/platform/network/form_data_encoder.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_encoding.h"
 
@@ -24,10 +27,7 @@ class URLSearchParamsIterationSource final
   explicit URLSearchParamsIterationSource(URLSearchParams* params)
       : params_(params), current_(0) {}
 
-  bool FetchNextItem(ScriptState*,
-                     String& key,
-                     String& value,
-                     ExceptionState&) override {
+  bool FetchNextItem(ScriptState*, String& key, String& value) override {
     if (current_ >= params_->Params().size())
       return false;
 
@@ -49,7 +49,7 @@ class URLSearchParamsIterationSource final
 
 bool CompareParams(const std::pair<String, String>& a,
                    const std::pair<String, String>& b) {
-  return WTF::CodeUnitCompareLessThan(a.first, b.first);
+  return CodeUnitCompareLessThan(a.first, b.first);
 }
 
 }  // namespace
@@ -60,8 +60,9 @@ URLSearchParams* URLSearchParams::Create(const URLSearchParamsInit* init,
   switch (init->GetContentType()) {
     case URLSearchParamsInit::ContentType::kUSVString: {
       const String& query_string = init->GetAsUSVString();
-      if (query_string.StartsWith('?'))
-        return MakeGarbageCollected<URLSearchParams>(query_string.Substring(1));
+      if (query_string.starts_with('?')) {
+        return MakeGarbageCollected<URLSearchParams>(query_string.substr(1));
+      }
       return MakeGarbageCollected<URLSearchParams>(query_string);
     }
     case URLSearchParamsInit::ContentType::kUSVStringSequenceSequence:
@@ -72,7 +73,6 @@ URLSearchParams* URLSearchParams::Create(const URLSearchParamsInit* init,
                                      exception_state);
   }
   NOTREACHED();
-  return nullptr;
 }
 
 URLSearchParams* URLSearchParams::Create(const Vector<Vector<String>>& init,
@@ -93,7 +93,7 @@ URLSearchParams* URLSearchParams::Create(const Vector<Vector<String>>& init,
   return instance;
 }
 
-URLSearchParams::URLSearchParams(const String& query_string, DOMURL* url_object)
+URLSearchParams::URLSearchParams(const String& query_string, URL* url_object)
     : url_object_(url_object) {
   if (!query_string.empty())
     SetInputWithoutUpdate(query_string);
@@ -118,7 +118,7 @@ void URLSearchParams::Trace(Visitor* visitor) const {
 }
 
 #if DCHECK_IS_ON()
-DOMURL* URLSearchParams::UrlObject() const {
+URL* URLSearchParams::UrlObject() const {
   return url_object_;
 }
 #endif
@@ -136,8 +136,8 @@ void URLSearchParams::RunUpdateSteps() {
 static String DecodeString(String input) {
   // |DecodeURLMode::kUTF8| is used because "UTF-8 decode without BOM" should
   // be performed (see https://url.spec.whatwg.org/#concept-urlencoded-parser).
-  return DecodeURLEscapeSequences(input.Replace('+', ' '),
-                                  DecodeURLMode::kUTF8);
+  return DecodeUrlEscapeSequences(input.Replace('+', ' '),
+                                  DecodeUrlMode::kUtf8);
 }
 
 void URLSearchParams::SetInputWithoutUpdate(const String& query_string) {
@@ -155,10 +155,10 @@ void URLSearchParams::SetInputWithoutUpdate(const String& query_string) {
       if (end_of_name == kNotFound || end_of_name > name_value_end)
         end_of_name = name_value_end;
       String name = DecodeString(
-          query_string.Substring(name_start, end_of_name - name_start));
+          query_string.substr(name_start, end_of_name - name_start));
       String value;
       if (end_of_name != name_value_end)
-        value = DecodeString(query_string.Substring(
+        value = DecodeString(query_string.substr(
             end_of_name + 1, name_value_end - end_of_name - 1));
       if (value.IsNull())
         value = "";
@@ -171,7 +171,11 @@ void URLSearchParams::SetInputWithoutUpdate(const String& query_string) {
 String URLSearchParams::toString() const {
   Vector<char> encoded_data;
   EncodeAsFormData(encoded_data);
-  return String(encoded_data.data(), encoded_data.size());
+  return String(encoded_data);
+}
+
+uint32_t URLSearchParams::size() const {
+  return params_.size();
 }
 
 void URLSearchParams::AppendWithoutUpdate(const String& name,
@@ -184,20 +188,53 @@ void URLSearchParams::append(const String& name, const String& value) {
   RunUpdateSteps();
 }
 
-void URLSearchParams::deleteAllWithName(const String& name) {
-  for (wtf_size_t i = 0; i < params_.size();) {
-    if (params_[i].first == name)
-      params_.EraseAt(i);
-    else
-      i++;
+void URLSearchParams::deleteAllWithNameOrTuple(
+    ExecutionContext* execution_context,
+    const String& name) {
+  deleteAllWithNameOrTuple(execution_context, name, String());
+}
+
+void URLSearchParams::deleteAllWithNameOrTuple(
+    ExecutionContext* execution_context,
+    const String& name,
+    const String& val) {
+  String value = val;
+  if (!RuntimeEnabledFeatures::
+          URLSearchParamsHasAndDeleteMultipleArgsEnabled()) {
+    value = String();
   }
+  // TODO(debadree333): Remove the code to count
+  // kURLSearchParamsDeleteFnBehaviourDiverged in October 2023.
+  Vector<wtf_size_t, 1u> indices_to_remove_with_name_value;
+  Vector<wtf_size_t, 1u> indices_to_remove_with_name;
+
+  for (wtf_size_t i = 0; i < params_.size(); i++) {
+    if (params_[i].first == name) {
+      indices_to_remove_with_name.push_back(i);
+      if (params_[i].second == value || value.IsNull()) {
+        indices_to_remove_with_name_value.push_back(i);
+      }
+    }
+  }
+
+  if (indices_to_remove_with_name_value != indices_to_remove_with_name) {
+    UseCounter::Count(execution_context,
+                      WebFeature::kURLSearchParamsDeleteFnBehaviourDiverged);
+  }
+
+  for (auto it = indices_to_remove_with_name_value.rbegin();
+       it != indices_to_remove_with_name_value.rend(); ++it) {
+    params_.EraseAt(*it);
+  }
+
   RunUpdateSteps();
 }
 
 String URLSearchParams::get(const String& name) const {
   for (const auto& param : params_) {
-    if (param.first == name)
+    if (param.first == name) {
       return param.second;
+    }
   }
   return String();
 }
@@ -205,18 +242,46 @@ String URLSearchParams::get(const String& name) const {
 Vector<String> URLSearchParams::getAll(const String& name) const {
   Vector<String> result;
   for (const auto& param : params_) {
-    if (param.first == name)
+    if (param.first == name) {
       result.push_back(param.second);
+    }
   }
   return result;
 }
 
-bool URLSearchParams::has(const String& name) const {
-  for (const auto& param : params_) {
-    if (param.first == name)
-      return true;
+bool URLSearchParams::has(ExecutionContext* execution_context,
+                          const String& name) const {
+  return has(execution_context, name, String());
+}
+
+bool URLSearchParams::has(ExecutionContext* execution_context,
+                          const String& name,
+                          const String& val) const {
+  String value = val;
+  if (!RuntimeEnabledFeatures::
+          URLSearchParamsHasAndDeleteMultipleArgsEnabled()) {
+    value = String();
   }
-  return false;
+  // TODO(debadree333): Remove the code to count
+  // kURLSearchParamsHasFnBehaviourDiverged in October 2023.
+  bool found_match_using_name_and_value = false;
+  bool found_match_using_name = false;
+  for (const auto& param : params_) {
+    const bool name_matched = (param.first == name);
+    if (name_matched) {
+      found_match_using_name = true;
+    }
+    if (name_matched && (value.IsNull() || param.second == value)) {
+      found_match_using_name_and_value = true;
+      break;
+    }
+  }
+
+  if (found_match_using_name_and_value != found_match_using_name) {
+    UseCounter::Count(execution_context,
+                      WebFeature::kURLSearchParamsHasFnBehaviourDiverged);
+  }
+  return found_match_using_name_and_value;
 }
 
 void URLSearchParams::set(const String& name, const String& value) {
@@ -237,10 +302,11 @@ void URLSearchParams::set(const String& name, const String& value) {
     }
   }
   // Otherwise, append a new name-value pair to the list.
-  if (!found_match)
+  if (!found_match) {
     append(name, value);
-  else
+  } else {
     RunUpdateSteps();
+  }
 }
 
 void URLSearchParams::sort() {
@@ -249,20 +315,21 @@ void URLSearchParams::sort() {
 }
 
 void URLSearchParams::EncodeAsFormData(Vector<char>& encoded_data) const {
-  for (const auto& param : params_)
+  for (const auto& param : params_) {
     FormDataEncoder::AddKeyValuePairAsFormData(
         encoded_data, param.first.Utf8(), param.second.Utf8(),
-        EncodedFormData::kFormURLEncoded, FormDataEncoder::kDoNotNormalizeCRLF);
+        EncodedFormData::kFormUrlEncoded, FormDataEncoder::kDoNotNormalizeCRLF);
+  }
 }
 
 scoped_refptr<EncodedFormData> URLSearchParams::ToEncodedFormData() const {
   Vector<char> encoded_data;
   EncodeAsFormData(encoded_data);
-  return EncodedFormData::Create(encoded_data.data(), encoded_data.size());
+  return EncodedFormData::Create(encoded_data);
 }
 
 PairSyncIterable<URLSearchParams>::IterationSource*
-URLSearchParams::CreateIterationSource(ScriptState*, ExceptionState&) {
+URLSearchParams::CreateIterationSource(ScriptState*) {
   return MakeGarbageCollected<URLSearchParamsIterationSource>(this);
 }
 

@@ -5,6 +5,7 @@
 #ifndef BASE_TASK_THREAD_POOL_POOLED_SINGLE_THREAD_TASK_RUNNER_MANAGER_H_
 #define BASE_TASK_THREAD_POOL_POOLED_SINGLE_THREAD_TASK_RUNNER_MANAGER_H_
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -123,7 +124,9 @@ class BASE_EXPORT PooledSingleThreadTaskRunnerManager final {
       ThreadType thread_type_hint) EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   template <typename DelegateType>
-  WorkerThread*& GetSharedWorkerThreadForTraits(const TaskTraits& traits);
+  WorkerThread*& GetSharedWorkerThreadForTraits(
+      const TaskTraits& traits,
+      ThreadType originating_thread_type) EXCLUSIVE_LOCKS_REQUIRED(lock_);
 
   void UnregisterWorkerThread(WorkerThread* worker);
 
@@ -147,16 +150,19 @@ class BASE_EXPORT PooledSingleThreadTaskRunnerManager final {
   // CONTINUE_ON_SHUTDOWN to avoid being in a situation where a
   // CONTINUE_ON_SHUTDOWN task effectively blocks shutdown by preventing a
   // BLOCK_SHUTDOWN task to be scheduled. https://crbug.com/829786
-  WorkerThread* shared_worker_threads_[ENVIRONMENT_COUNT]
-                                      [CONTINUE_ON_SHUTDOWN_COUNT] GUARDED_BY(
-                                          lock_) = {};
+  std::array<std::array<WorkerThread*, CONTINUE_ON_SHUTDOWN_COUNT>,
+             ENVIRONMENT_COUNT>
+      shared_worker_threads_ GUARDED_BY(lock_) = {};
 #if BUILDFLAG(IS_WIN)
-  WorkerThread* shared_com_worker_threads_
-      [ENVIRONMENT_COUNT][CONTINUE_ON_SHUTDOWN_COUNT] GUARDED_BY(lock_) = {};
+  std::array<std::array<WorkerThread*, CONTINUE_ON_SHUTDOWN_COUNT>,
+             ENVIRONMENT_COUNT>
+      shared_com_worker_threads_ GUARDED_BY(lock_) = {};
 #endif  // BUILDFLAG(IS_WIN)
 
   // Set to true when Start() is called.
   bool started_ GUARDED_BY(lock_) = false;
+
+  bool inherit_task_importance_by_default_ GUARDED_BY(lock_) = false;
 };
 
 }  // namespace internal

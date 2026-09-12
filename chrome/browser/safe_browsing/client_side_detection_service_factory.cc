@@ -4,19 +4,16 @@
 
 #include "chrome/browser/safe_browsing/client_side_detection_service_factory.h"
 
-#include "base/command_line.h"
-#include "base/memory/scoped_refptr.h"
-#include "base/task/sequenced_task_runner.h"
-#include "base/task/task_traits.h"
-#include "base/task/thread_pool.h"
-#include "chrome/browser/optimization_guide/optimization_guide_keyed_service.h"
-#include "chrome/browser/optimization_guide/optimization_guide_keyed_service_factory.h"
+#include "chrome/browser/browser_process.h"
+#include "chrome/browser/optimization_guide/model_execution/optimization_guide_global_state.h"
+#include "chrome/browser/optimization_guide/optimization_guide_global_state_holder_keyed_service.h"
+#include "chrome/browser/optimization_guide/optimization_guide_global_state_holder_keyed_service_factory.h"
 #include "chrome/browser/profiles/incognito_helpers.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/safe_browsing/chrome_client_side_detection_service_delegate.h"
+#include "chrome/common/chrome_features.h"
 #include "chrome/common/chrome_switches.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
-#include "components/safe_browsing/buildflags.h"
 #include "components/safe_browsing/content/browser/client_side_detection_service.h"
 #include "components/safe_browsing/core/common/features.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
@@ -34,32 +31,58 @@ ClientSideDetectionService* ClientSideDetectionServiceFactory::GetForProfile(
 // static
 ClientSideDetectionServiceFactory*
 ClientSideDetectionServiceFactory::GetInstance() {
-  return base::Singleton<ClientSideDetectionServiceFactory>::get();
+  static base::NoDestructor<ClientSideDetectionServiceFactory> instance;
+  return instance.get();
 }
 
 ClientSideDetectionServiceFactory::ClientSideDetectionServiceFactory()
-    : ProfileKeyedServiceFactory("ClientSideDetectionService") {}
+    : ProfileKeyedServiceFactory(
+          "ClientSideDetectionService",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              // ChromeOS creates various profiles (login, lock screen...) that
+              // do not display web content and thus do not need the
+              // client side phishing detection
+              .WithAshInternals(ProfileSelection::kNone)
+              .Build()) {
+  DependsOn(
+      OptimizationGuideGlobalStateHolderKeyedServiceFactory::GetInstance());
+}
 
-KeyedService* ClientSideDetectionServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+ClientSideDetectionServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  Profile* profile = Profile::FromBrowserContext(context);
-
-  auto* opt_guide = OptimizationGuideKeyedServiceFactory::GetForProfile(
-      Profile::FromBrowserContext(context));
-
-  if (base::FeatureList::IsEnabled(
-          kClientSideDetectionModelOptimizationGuide) &&
-      !opt_guide) {
+  if (!g_browser_process || !g_browser_process->safe_browsing_service()) {
     return nullptr;
   }
 
-  scoped_refptr<base::SequencedTaskRunner> background_task_runner =
-      base::ThreadPool::CreateSequencedTaskRunner(
-          {base::MayBlock(), base::TaskPriority::BEST_EFFORT});
+  Profile* profile = Profile::FromBrowserContext(context);
 
-  return new ClientSideDetectionService(
+  auto* holder_service =
+      OptimizationGuideGlobalStateHolderKeyedServiceFactory::GetForProfile(
+          Profile::FromBrowserContext(context));
+  if (!holder_service) {
+    return nullptr;
+  }
+  auto& opt_guide = holder_service->GetGlobalState().model_provider();
+
+  return std::make_unique<ClientSideDetectionService>(
       std::make_unique<ChromeClientSideDetectionServiceDelegate>(profile),
-      opt_guide, background_task_runner);
+      &opt_guide);
+}
+
+bool ClientSideDetectionServiceFactory::ServiceIsCreatedWithBrowserContext()
+    const {
+  if (base::FeatureList::IsEnabled(
+          ::features::kLazyKeyedServiceInstantiation) &&
+      ::features::kLazyKeyedServiceInstantiationSafeBrowsing.Get()) {
+    return false;
+  }
+  return true;
+}
+
+bool ClientSideDetectionServiceFactory::ServiceIsNULLWhileTesting() const {
+  return true;
 }
 
 }  // namespace safe_browsing

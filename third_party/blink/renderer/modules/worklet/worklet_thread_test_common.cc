@@ -36,8 +36,9 @@ CreateAnimationAndPaintWorkletThread(
           nullptr /* web_worker_fetch_context */,
           Vector<network::mojom::blink::ContentSecurityPolicyPtr>(),
           Vector<network::mojom::blink::ContentSecurityPolicyPtr>(),
-          window->GetReferrerPolicy(), window->GetSecurityOrigin(),
-          window->IsSecureContext(), window->GetHttpsState(), clients,
+          window->GetReferrerPolicy(), DocumentPolicy::DocumentPolicyBundle{},
+          window->GetSecurityOrigin(), window->IsSecureContext(),
+          window->GetHttpsState(), clients,
           nullptr /* content_settings_client */,
           OriginTrialContext::GetInheritedTrialFeatures(window).get(),
           base::UnguessableToken::Create(), nullptr /* worker_settings */,
@@ -49,7 +50,7 @@ CreateAnimationAndPaintWorkletThread(
           BeginFrameProviderParams(), nullptr /* parent_permissions_policy */,
           window->GetAgentClusterID(), ukm::kInvalidSourceId,
           window->GetExecutionContextToken()),
-      absl::nullopt, std::make_unique<WorkerDevToolsParams>());
+      std::nullopt, std::make_unique<WorkerDevToolsParams>());
   return thread;
 }
 

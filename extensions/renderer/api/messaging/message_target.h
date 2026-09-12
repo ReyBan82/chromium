@@ -5,10 +5,11 @@
 #ifndef EXTENSIONS_RENDERER_API_MESSAGING_MESSAGE_TARGET_H_
 #define EXTENSIONS_RENDERER_API_MESSAGING_MESSAGE_TARGET_H_
 
+#include <optional>
 #include <string>
 
+#include "extensions/common/api/messaging/signing_certificate.h"
 #include "extensions/common/extension_id.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace extensions {
 
@@ -36,7 +37,8 @@ struct MessageTarget {
                               int frame_id,
                               const std::string& document_id);
   static MessageTarget ForExtension(const ExtensionId& extension_id);
-  static MessageTarget ForNativeApp(const std::string& native_app_name);
+  static MessageTarget ForNativeApp(const std::string& native_app_name,
+                                    SigningCertificates android_certificates);
 
   MessageTarget(MessageTarget&& other);
   MessageTarget(const MessageTarget& other);
@@ -44,13 +46,14 @@ struct MessageTarget {
 
   Type type;
   // Only valid for Type::EXTENSION.
-  absl::optional<ExtensionId> extension_id;
+  std::optional<ExtensionId> extension_id;
   // Only valid for Type::NATIVE_APP.
-  absl::optional<std::string> native_application_name;
+  std::optional<std::string> native_application_name;
+  SigningCertificates android_certificates;
   // Only valid for Type::TAB.
-  absl::optional<int> tab_id;
-  absl::optional<int> frame_id;
-  absl::optional<std::string> document_id;
+  std::optional<int> tab_id;
+  std::optional<int> frame_id;
+  std::optional<std::string> document_id;
 
   bool operator==(const MessageTarget& other) const;
 

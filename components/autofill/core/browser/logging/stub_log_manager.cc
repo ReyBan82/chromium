@@ -4,6 +4,10 @@
 
 #include "components/autofill/core/browser/logging/stub_log_manager.h"
 
+#include "base/types/pass_key.h"
+#include "base/values.h"
+#include "components/autofill/core/browser/logging/log_buffer_submitter.h"
+
 namespace autofill {
 
 void StubLogManager::OnLogRouterAvailabilityChanged(bool router_can_be_used) {}
@@ -18,7 +22,7 @@ LogBufferSubmitter StubLogManager::Log() {
   return LogBufferSubmitter(this);
 }
 
-void StubLogManager::ProcessLog(base::Value::Dict node,
+void StubLogManager::ProcessLog(base::DictValue node,
                                 base::PassKey<LogBufferSubmitter>) {}
 
 }  // namespace autofill

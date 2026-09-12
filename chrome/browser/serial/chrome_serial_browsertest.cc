@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <string_view>
+
 #include "base/command_line.h"
 #include "base/memory/raw_ptr.h"
 #include "base/test/scoped_feature_list.h"
@@ -10,9 +12,8 @@
 #include "chrome/browser/serial/serial_blocklist.h"
 #include "chrome/browser/serial/serial_chooser_context.h"
 #include "chrome/browser/serial/serial_chooser_context_factory.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_dialogs.h"
 #include "chrome/browser/ui/chooser_bubble_testapi.h"
+#include "chrome/browser/ui/dialogs/browser_dialogs.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -41,12 +42,15 @@ class SerialTest : public InProcessBrowserTest {
 
     mojo::PendingRemote<device::mojom::SerialPortManager> port_manager;
     port_manager_.AddReceiver(port_manager.InitWithNewPipeAndPassReceiver());
-    context_ = SerialChooserContextFactory::GetForProfile(browser()->profile());
+    context_ =
+        SerialChooserContextFactory::GetForProfile(browser()->GetProfile());
     context_->SetPortManagerForTesting(std::move(port_manager));
 
     GURL url = embedded_test_server()->GetURL("localhost", "/simple_page.html");
     ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   }
+
+  void TearDownOnMainThread() override { context_ = nullptr; }
 
   void TearDown() override {
     // Because SerialBlocklist is a singleton it must be cleared after tests run
@@ -55,7 +59,7 @@ class SerialTest : public InProcessBrowserTest {
     SerialBlocklist::Get().ResetToDefaultValuesForTesting();
   }
 
-  void SetDynamicBlocklist(base::StringPiece value) {
+  void SetDynamicBlocklist(std::string_view value) {
     feature_list_.Reset();
 
     std::map<std::string, std::string> parameters;
@@ -72,7 +76,7 @@ class SerialTest : public InProcessBrowserTest {
  private:
   base::test::ScopedFeatureList feature_list_;
   device::FakeSerialPortManager port_manager_;
-  raw_ptr<SerialChooserContext, DanglingUntriaged> context_;
+  raw_ptr<SerialChooserContext> context_ = nullptr;
 };
 
 IN_PROC_BROWSER_TEST_F(SerialTest, NavigateWithChooserCrossOrigin) {

@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 // Expiration is capped at 400 days in the future, so we use 100 days here.
-var TEST_EXPIRATION_DATE = Math.round(Date.now() / 1000) + 100 * 24 * 60 * 60;
+const TEST_EXPIRATION_DATE = Math.round(Date.now() / 1000) + 100 * 24 * 60 * 60;
 
 // These are the cookies we expect to see along the way.
-var SET_REMOVE_COOKIE = {
+const SET_REMOVE_COOKIE = {
   name: 'testSetRemove',
   value: '42',
   domain: 'a.com',
@@ -17,10 +17,10 @@ var SET_REMOVE_COOKIE = {
   sameSite: chrome.cookies.SameSiteStatus.UNSPECIFIED,
   session: false,
   expirationDate: TEST_EXPIRATION_DATE,
-  storeId: "0"
+  storeId: '0',
 };
 
-var OVERWRITE_COOKIE_PRE = {
+const OVERWRITE_COOKIE_PRE = {
   name: 'testOverwrite',
   value: '42',
   domain: 'a.com',
@@ -31,10 +31,10 @@ var OVERWRITE_COOKIE_PRE = {
   sameSite: chrome.cookies.SameSiteStatus.UNSPECIFIED,
   session: false,
   expirationDate: TEST_EXPIRATION_DATE,
-  storeId: "0"
+  storeId: '0',
 };
 
-var OVERWRITE_COOKIE_POST = {
+const OVERWRITE_COOKIE_POST = {
   name: 'testOverwrite',
   value: '43',
   domain: 'a.com',
@@ -45,12 +45,12 @@ var OVERWRITE_COOKIE_POST = {
   sameSite: chrome.cookies.SameSiteStatus.UNSPECIFIED,
   session: false,
   expirationDate: TEST_EXPIRATION_DATE,
-  storeId: "0"
+  storeId: '0',
 };
 
 chrome.test.runTests([
   function testSet() {
-    chrome.test.listenOnce(chrome.cookies.onChanged, function (info) {
+    chrome.test.listenOnce(chrome.cookies.onChanged, function(info) {
       chrome.test.assertFalse(info.removed);
       chrome.test.assertEq('explicit', info.cause);
       chrome.test.assertEq(SET_REMOVE_COOKIE, info.cookie);
@@ -59,22 +59,22 @@ chrome.test.runTests([
       url: 'http://a.com/path',
       name: 'testSetRemove',
       value: '42',
-      expirationDate: TEST_EXPIRATION_DATE
+      expirationDate: TEST_EXPIRATION_DATE,
     });
   },
   function testRemove() {
-    chrome.test.listenOnce(chrome.cookies.onChanged, function (info) {
+    chrome.test.listenOnce(chrome.cookies.onChanged, function(info) {
       chrome.test.assertTrue(info.removed);
       chrome.test.assertEq('explicit', info.cause);
       chrome.test.assertEq(SET_REMOVE_COOKIE, info.cookie);
     });
     chrome.cookies.remove({
       url: 'http://a.com/path',
-      name: 'testSetRemove'
+      name: 'testSetRemove',
     });
   },
   function overwriteFirstSet() {
-    chrome.test.listenOnce(chrome.cookies.onChanged, function (info) {
+    chrome.test.listenOnce(chrome.cookies.onChanged, function(info) {
       chrome.test.assertFalse(info.removed);
       chrome.test.assertEq('explicit', info.cause);
       chrome.test.assertEq(OVERWRITE_COOKIE_PRE, info.cookie);
@@ -83,40 +83,40 @@ chrome.test.runTests([
       url: 'http://a.com/path',
       name: 'testOverwrite',
       value: '42',
-      expirationDate: TEST_EXPIRATION_DATE
+      expirationDate: TEST_EXPIRATION_DATE,
     });
   },
   function overwriteSecondSet() {
-    var haveRemoved = false;
-    var haveSet = false;
-    var done = chrome.test.listenForever(chrome.cookies.onChanged,
-      function(info) {
-        if (info.removed) {
-          chrome.test.assertEq('overwrite', info.cause);
-          chrome.test.assertEq(OVERWRITE_COOKIE_PRE, info.cookie);
-          chrome.test.assertFalse(haveRemoved);
-          chrome.test.assertFalse(haveSet);
-          haveRemoved = true;
-        } else {
-          chrome.test.assertEq('explicit', info.cause);
-          chrome.test.assertEq(OVERWRITE_COOKIE_POST, info.cookie);
-          chrome.test.assertTrue(haveRemoved);
-          chrome.test.assertFalse(haveSet);
-          haveSet = true;
-        }
-        if (haveRemoved && haveSet) {
-          done();
-        }
-      });
+    let haveRemoved = false;
+    let haveSet = false;
+    const done =
+        chrome.test.listenForever(chrome.cookies.onChanged, function(info) {
+          if (info.removed) {
+            chrome.test.assertEq('overwrite', info.cause);
+            chrome.test.assertEq(OVERWRITE_COOKIE_PRE, info.cookie);
+            chrome.test.assertFalse(haveRemoved);
+            chrome.test.assertFalse(haveSet);
+            haveRemoved = true;
+          } else {
+            chrome.test.assertEq('explicit', info.cause);
+            chrome.test.assertEq(OVERWRITE_COOKIE_POST, info.cookie);
+            chrome.test.assertTrue(haveRemoved);
+            chrome.test.assertFalse(haveSet);
+            haveSet = true;
+          }
+          if (haveRemoved && haveSet) {
+            done();
+          }
+        });
     chrome.cookies.set({
       url: 'http://a.com/path',
       name: 'testOverwrite',
       value: '43',
-      expirationDate: TEST_EXPIRATION_DATE
+      expirationDate: TEST_EXPIRATION_DATE,
     });
   },
   function overwriteExpired() {
-    chrome.test.listenOnce(chrome.cookies.onChanged, function (info) {
+    chrome.test.listenOnce(chrome.cookies.onChanged, function(info) {
       chrome.test.assertTrue(info.removed);
       chrome.test.assertEq('expired_overwrite', info.cause);
       chrome.test.assertEq(OVERWRITE_COOKIE_POST, info.cookie);
@@ -125,7 +125,38 @@ chrome.test.runTests([
       url: 'http://a.com/path',
       name: 'testOverwrite',
       value: '43',
-      expirationDate: 1
+      expirationDate: 1,
     });
-  }
+  },
+  // Regression test for https://crbug.com/423096904.
+  function overwriteNoChange() {
+    let eventsObserved = 0;
+    const cookieOpts = {
+      url: 'http://a.com/path',
+      name: 'testOverwrite',
+      value: '42',
+      expirationDate: TEST_EXPIRATION_DATE,
+    };
+    const done =
+        chrome.test.listenForever(chrome.cookies.onChanged, function(info) {
+          eventsObserved++;
+          if (eventsObserved === 1) {
+            chrome.test.assertEq('explicit', info.cause);
+            chrome.test.assertEq(OVERWRITE_COOKIE_PRE, info.cookie);
+            chrome.test.assertFalse(info.removed);
+            // Overwrite with an exact duplicate cookie.
+            chrome.cookies.set(cookieOpts);
+          } else if (eventsObserved === 2) {
+            chrome.test.assertEq('overwrite', info.cause);
+            chrome.test.assertEq(OVERWRITE_COOKIE_PRE, info.cookie);
+            chrome.test.assertTrue(info.removed);
+          } else if (eventsObserved === 3) {
+            chrome.test.assertEq('explicit', info.cause);
+            chrome.test.assertEq(OVERWRITE_COOKIE_PRE, info.cookie);
+            chrome.test.assertFalse(info.removed);
+            done();
+          }
+        });
+    chrome.cookies.set(cookieOpts);
+  },
 ]);

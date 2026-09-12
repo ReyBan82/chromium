@@ -16,9 +16,8 @@ import {DataSeries} from './line_chart/data_series.js';
  *   kernel: number,
  *   usage: number,
  *   user: number,
- * }}
+ * }} GeneralCpuType
  */
-export var GeneralCpuType;
 
 /**
  * For info page.
@@ -27,9 +26,8 @@ export var GeneralCpuType;
  *   swapUsed: number,
  *   total: number,
  *   used: number,
- * }}
+ * }} GeneralMemoryType
  */
-export var GeneralMemoryType;
 
 /**
  * For info page.
@@ -38,23 +36,36 @@ export var GeneralMemoryType;
  *   comprRatio: number,
  *   orig: number,
  *   total: number,
- * }}
+ * }} GeneralZramType
  */
-export var GeneralZramType;
+
+/**
+ * For info page.
+ * @typedef {{
+ *   usage: number,
+ * }} GeneralGpuType
+ */
+
+/**
+ * For info page.
+ * @typedef {{
+ *   usage: number,
+ * }} GeneralNpuType
+ */
 
 /**
  * @typedef {{
- *   cpu: GeneralCpuType,
- *   memory: GeneralMemoryType,
- *   zram: GeneralZramType,
- * }}
+ *   cpu: !GeneralCpuType,
+ *   memory: !GeneralMemoryType,
+ *   zram: !GeneralZramType,
+ *   gpu: ?GeneralGpuType,
+ *   npu: ?GeneralNpuType,
+ * }} GeneralInfoType
  */
-export var GeneralInfoType;
 
 /**
- * @typedef {Array<!DataSeries>|null}
+ * @typedef {Array<!DataSeries>|null} CpuDataSeriesSet
  */
-export var CpuDataSeriesSet;
 
 /**
  * @typedef {{
@@ -62,9 +73,8 @@ export var CpuDataSeriesSet;
  *   swapUsed: !DataSeries,
  *   pswpin: !DataSeries,
  *   pswpout: !DataSeries
- * }}
+ * }} MemoryDataSeriesSet
  */
-export var MemoryDataSeriesSet;
 
 /**
  * @typedef {{
@@ -73,20 +83,17 @@ export var MemoryDataSeriesSet;
  *   memUsedTotal: !DataSeries,
  *   numReads: !DataSeries,
  *   numWrites: !DataSeries
- * }}
+ * }} ZramDataSeriesSet
  */
-export var ZramDataSeriesSet;
 
 /**
  * @typedef {{
  *   cpus: CpuDataSeriesSet,
  *   memory: MemoryDataSeriesSet,
  *   zram: ZramDataSeriesSet,
- * }}
+ * }} DataSeriesSet
  */
-export var DataSeriesSet;
 
 /**
- * @typedef {{value: number, timestamp: number}}
+ * @typedef {{value: number, timestamp: number}} CounterType
  */
-export var CounterType;

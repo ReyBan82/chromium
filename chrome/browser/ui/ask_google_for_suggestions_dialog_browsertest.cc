@@ -5,16 +5,17 @@
 #include <memory>
 
 #include "chrome/browser/renderer_context_menu/spelling_bubble_model.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/confirm_bubble.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
 #include "content/public/test/browser_test.h"
+#include "ui/base/base_window.h"
+#include "ui/gfx/native_ui_types.h"
 
 class AskGoogleForSuggestionsDialogTest : public DialogBrowserTest {
  public:
-  AskGoogleForSuggestionsDialogTest() {}
+  AskGoogleForSuggestionsDialogTest() = default;
 
   AskGoogleForSuggestionsDialogTest(const AskGoogleForSuggestionsDialogTest&) =
       delete;
@@ -25,13 +26,14 @@ class AskGoogleForSuggestionsDialogTest : public DialogBrowserTest {
   void ShowUi(const std::string& name) override {
     std::unique_ptr<SpellingBubbleModel> model =
         std::make_unique<SpellingBubbleModel>(
-            browser()->profile(),
-            browser()->tab_strip_model()->GetActiveWebContents());
+            browser()->GetProfile(),
+            browser()->GetTabStripModel()->GetActiveWebContents());
 
     // The toolkit-views version of the dialog does not utilize the anchor_view
     // and origin parameters passed to this function. Pass dummy values.
-    chrome::ShowConfirmBubble(browser()->window()->GetNativeWindow(), nullptr,
-                              gfx::Point(), std::move(model));
+    chrome::ShowConfirmBubble(browser()->GetWindow()->GetNativeWindow(),
+                              gfx::NativeView(), gfx::Point(),
+                              std::move(model));
   }
 };
 

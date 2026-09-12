@@ -64,7 +64,7 @@ class CORE_EXPORT EditorCommand {
   String Value(Event* triggering_event = nullptr) const;
 
   bool IsTextInsertion() const;
-  bool IsValueInterpretedAsHTML() const;
+  bool IsValueInterpretedAsHtml() const;
 
   // Returns 0 if this EditorCommand is not supported.
   int IdForHistogram() const;
@@ -74,13 +74,21 @@ class CORE_EXPORT EditorCommand {
 
   FRIEND_TEST_ALL_PREFIXES(EditingCommandTest,
                            DeleteSoftLineBackwardTargetRanges);
+  FRIEND_TEST_ALL_PREFIXES(EditingCommandTest,
+                           DeleteBackwardTargetRangesInGraphemeCluster);
+  FRIEND_TEST_ALL_PREFIXES(EditingCommandTest,
+                           DeleteBackwardTargetRangesInEmojiSequence);
+  FRIEND_TEST_ALL_PREFIXES(EditingCommandTest,
+                           DeleteBackwardTargetRangesWithRangeSelection);
+  FRIEND_TEST_ALL_PREFIXES(EditingCommandTest,
+                           DeleteForwardTargetRangesInGraphemeCluster);
   // Returns target ranges for the command, currently only supports delete
   // related commands. Used by InputEvent.
-  const StaticRangeVector* GetTargetRanges() const;
+  const GCedStaticRangeVector* GetTargetRanges() const;
 
-  const EditorInternalCommand* command_;
+  const EditorInternalCommand* command_ = nullptr;
   const EditorCommandSource source_;
-  LocalFrame* const frame_;
+  LocalFrame* const frame_ = nullptr;
 };
 
 }  // namespace blink

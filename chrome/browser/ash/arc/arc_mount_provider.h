@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_ASH_ARC_ARC_MOUNT_PROVIDER_H_
 #define CHROME_BROWSER_ASH_ARC_ARC_MOUNT_PROVIDER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/guest_os/public/guest_os_mount_provider.h"
 
@@ -12,12 +13,15 @@ namespace guest_os {
 class GuestOsFileWatcher;
 }
 
+class PrefService;
+
 namespace arc {
 
 // This class is responsible for mounting the sshfs version of Play files mount.
 class ArcMountProvider : public guest_os::GuestOsMountProvider {
  public:
-  ArcMountProvider(Profile* profile, int cid);
+  // `local_state` must be non-null and must outlive `this`.
+  ArcMountProvider(PrefService* local_state, Profile* profile, int cid);
 
   ArcMountProvider(const ArcMountProvider&) = delete;
   ArcMountProvider& operator=(const ArcMountProvider&) = delete;
@@ -40,7 +44,7 @@ class ArcMountProvider : public guest_os::GuestOsMountProvider {
   void Prepare(PrepareCallback callback) override;
 
  private:
-  Profile* const profile_;
+  const raw_ptr<Profile> profile_;
   const int cid_;
 
   // Note: This should remain the last member so it'll be destroyed and

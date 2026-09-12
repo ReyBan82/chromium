@@ -94,8 +94,8 @@ class MessageReceivedListener : public WebSocketListener {
 
 class WebSocketTest : public testing::Test {
  public:
-  WebSocketTest() {}
-  ~WebSocketTest() override {}
+  WebSocketTest() = default;
+  ~WebSocketTest() override = default;
 
   void SetUp() override { ASSERT_TRUE(server_.Start()); }
 
@@ -218,7 +218,7 @@ TEST_F(WebSocketTest, SendReceiveLarge) {
 
 TEST_F(WebSocketTest, SendReceiveManyPacks) {
   std::vector<std::string> messages;
-  // A message size of 1 << 16 crashes code with https://crbug.com/877105 bug
+  // A message size of 1 << 16 crashes code with https://crbug.com/40590674 bug
   // on Linux and Windows, but a size of 1 << 17 is needed to cause crash on
   // Mac. We use message size 1 << 18 for some extra margin to ensure bug repro.
   messages.push_back(std::string(1 << 18, 'a'));
@@ -242,8 +242,7 @@ TEST_F(WebSocketTest, VerifyTextFramelsProcessed) {
       static_cast<char>(net::WebSocketFrameHeader::kOpCodeText | kFinalBit),
       static_cast<char>(kOriginalMessage.length())};
   frame += kOriginalMessage;
-  std::string encoded_frame;
-  base::Base64Encode(frame, &encoded_frame);
+  std::string encoded_frame = base::Base64Encode(frame);
 
   server_.SetMessageAction(TestHttpServer::kEchoRawMessage);
   base::RunLoop run_loop;
@@ -267,8 +266,7 @@ TEST_F(WebSocketTest, VerifyBinaryFramelsNotProcessed) {
       static_cast<char>(net::WebSocketFrameHeader::kOpCodeBinary | kFinalBit),
       static_cast<char>(kOriginalMessage.length())};
   frame += kOriginalMessage;
-  std::string encoded_frame;
-  base::Base64Encode(frame, &encoded_frame);
+  std::string encoded_frame = base::Base64Encode(frame);
 
   server_.SetMessageAction(TestHttpServer::kEchoRawMessage);
   base::RunLoop run_loop;
@@ -290,8 +288,7 @@ TEST_F(WebSocketTest, VerifyCloseFramelsNotProcessed) {
   std::string frame = {
       static_cast<char>(net::WebSocketFrameHeader::kOpCodeClose | kFinalBit),
       0};
-  std::string encoded_frame;
-  base::Base64Encode(frame, &encoded_frame);
+  std::string encoded_frame = base::Base64Encode(frame);
 
   server_.SetMessageAction(TestHttpServer::kEchoRawMessage);
   base::RunLoop run_loop;

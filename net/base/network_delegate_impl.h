@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <optional>
 #include <set>
 #include <string>
 
@@ -18,7 +19,7 @@
 #include "net/first_party_sets/first_party_set_metadata.h"
 #include "net/first_party_sets/first_party_sets_cache_filter.h"
 #include "net/proxy_resolution/proxy_retry_info.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "net/ssl/ssl_info.h"
 
 class GURL;
 
@@ -28,8 +29,8 @@ class Origin;
 
 namespace net {
 
-class SchemefulSite;
 class CookieOptions;
+class CookieInclusionStatus;
 class HttpRequestHeaders;
 class HttpResponseHeaders;
 class URLRequest;
@@ -57,9 +58,12 @@ class NET_EXPORT NetworkDelegateImpl : public NetworkDelegate {
       const HttpResponseHeaders* original_response_headers,
       scoped_refptr<HttpResponseHeaders>* override_response_headers,
       const IPEndPoint& endpoint,
-      absl::optional<GURL>* preserve_fragment_on_redirect_url) override;
+      std::optional<GURL>* preserve_fragment_on_redirect_url,
+      const std::optional<net::SSLInfo>& ssl_info) override;
 
   void OnBeforeRedirect(URLRequest* request, const GURL& new_location) override;
+
+  void OnBeforeRetry(URLRequest* request) override;
 
   void OnResponseStarted(URLRequest* request, int net_error) override;
 
@@ -75,9 +79,18 @@ class NET_EXPORT NetworkDelegateImpl : public NetworkDelegate {
       net::CookieAccessResultList& maybe_included_cookies,
       net::CookieAccessResultList& excluded_cookies) override;
 
-  bool OnCanSetCookie(const URLRequest& request,
-                      const net::CanonicalCookie& cookie,
-                      CookieOptions* options) override;
+  bool OnCanSetCookie(
+      const URLRequest& request,
+      const net::CanonicalCookie& cookie,
+      CookieOptions* options,
+      const net::FirstPartySetMetadata& first_party_set_metadata,
+      CookieInclusionStatus* inclusion_status) override;
+
+  bool OnShouldForceIgnoreSiteForCookies(const URLRequest& request) override;
+
+  std::optional<cookie_util::StorageAccessStatus> OnGetStorageAccessStatus(
+      const URLRequest& request,
+      base::optional_ref<const RedirectInfo> redirect_info) const override;
 
   NetworkDelegate::PrivacySetting OnForcePrivacyMode(
       const URLRequest& request) const override;
@@ -98,12 +111,6 @@ class NET_EXPORT NetworkDelegateImpl : public NetworkDelegate {
 
   bool OnCanUseReportingClient(const url::Origin& origin,
                                const GURL& endpoint) const override;
-
-  absl::optional<FirstPartySetsCacheFilter::MatchInfo>
-  OnGetFirstPartySetsCacheFilterMatchInfoMaybeAsync(
-      const SchemefulSite& request_site,
-      base::OnceCallback<void(FirstPartySetsCacheFilter::MatchInfo)> callback)
-      const override;
 };
 
 }  // namespace net

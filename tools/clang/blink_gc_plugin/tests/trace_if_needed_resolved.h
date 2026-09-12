@@ -9,6 +9,8 @@
 
 namespace blink {
 
+struct Foo {};
+
 class HeapObject : public GarbageCollected<HeapObject> {
  public:
   virtual void Trace(Visitor*) const;
@@ -16,8 +18,9 @@ class HeapObject : public GarbageCollected<HeapObject> {
  private:
   Member<HeapObject> m_one;
   int m_two;
+  std::unique_ptr<Foo> m_three;
 };
 
 }  // namespace blink
 
-#endif
+#endif  // TRACE_IF_NEEDED_RESOLVED_H_

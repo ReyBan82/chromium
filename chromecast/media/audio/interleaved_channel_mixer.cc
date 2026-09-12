@@ -5,6 +5,7 @@
 #include "chromecast/media/audio/interleaved_channel_mixer.h"
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "media/base/channel_mixing_matrix.h"
 
 namespace chromecast {
@@ -21,7 +22,8 @@ InterleavedChannelMixer::InterleavedChannelMixer(
       output_layout_(output_layout),
       output_channel_count_(output_channel_count),
       max_frames_(max_frames) {
-  if (input_layout_ == output_layout_) {
+  if (input_layout_ == output_layout_ &&
+      input_channel_count_ == output_channel_count_) {
     return;
   }
 
@@ -29,8 +31,8 @@ InterleavedChannelMixer::InterleavedChannelMixer(
 
   std::vector<std::vector<float>> matrix;
   ::media::ChannelMixingMatrix matrix_builder(
-      input_layout_, input_channel_count_, output_layout_,
-      output_channel_count_);
+      ::media::ChannelLayoutConfig(input_layout_, input_channel_count_),
+      ::media::ChannelLayoutConfig(output_layout_, output_channel_count_));
   matrix_builder.CreateTransformationMatrix(&matrix);
 
   transform_.reserve(input_channel_count_ * output_channel_count_);
@@ -43,7 +45,8 @@ InterleavedChannelMixer::InterleavedChannelMixer(
 InterleavedChannelMixer::~InterleavedChannelMixer() = default;
 
 float* InterleavedChannelMixer::Transform(const float* input, int num_frames) {
-  if (input_layout_ == output_layout_) {
+  if (input_layout_ == output_layout_ &&
+      input_channel_count_ == output_channel_count_) {
     return const_cast<float*>(input);
   }
 
@@ -59,14 +62,14 @@ float* InterleavedChannelMixer::Transform(const float* input, int num_frames) {
       // the input frame.
       float result = 0;
       for (int in_c = 0; in_c < input_channel_count_; ++in_c) {
-        result += *t * input[in_c];
-        ++t;
+        result += *t * UNSAFE_TODO(input[in_c]);
+        UNSAFE_TODO(++t);
       }
       *output = result;
-      ++output;
+      UNSAFE_TODO(++output);
     }
     // Move to next input frame.
-    input += input_channel_count_;
+    UNSAFE_TODO(input += input_channel_count_);
   }
 
   return buffer_.data();

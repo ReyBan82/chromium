@@ -4,7 +4,6 @@
 
 #include "third_party/blink/renderer/core/css/css_paint_value.h"
 
-#include "base/metrics/histogram_macros.h"
 #include "third_party/blink/renderer/core/css/css_custom_ident_value.h"
 #include "third_party/blink/renderer/core/css/css_paint_image_generator.h"
 #include "third_party/blink/renderer/core/css/css_syntax_definition.h"
@@ -29,20 +28,18 @@ CSSPaintValue::CSSPaintValue(CSSCustomIdentValue* name,
     : CSSImageGeneratorValue(kPaintClass),
       name_(name),
       paint_image_generator_observer_(MakeGarbageCollected<Observer>(this)),
-      off_thread_paint_state_(
-          (!threaded_compositing_enabled ||
-           !RuntimeEnabledFeatures::OffMainThreadCSSPaintEnabled())
-              ? OffThreadPaintState::kMainThread
-              : OffThreadPaintState::kUnknown) {}
+      off_thread_paint_state_(!threaded_compositing_enabled
+                                  ? OffThreadPaintState::kMainThread
+                                  : OffThreadPaintState::kUnknown) {}
 
 CSSPaintValue::CSSPaintValue(CSSCustomIdentValue* name)
     : CSSPaintValue(name, Thread::CompositorThread()) {}
 
 CSSPaintValue::CSSPaintValue(
     CSSCustomIdentValue* name,
-    Vector<scoped_refptr<CSSVariableData>>& variable_data)
+    HeapVector<Member<CSSVariableData>>&& variable_data)
     : CSSPaintValue(name) {
-  argument_variable_data_.swap(variable_data);
+  argument_variable_data_ = variable_data;
 }
 
 CSSPaintValue::~CSSPaintValue() = default;
@@ -53,7 +50,7 @@ String CSSPaintValue::CustomCSSText() const {
   result.Append(name_->CustomCSSText());
   for (const auto& variable_data : argument_variable_data_) {
     result.Append(", ");
-    result.Append(variable_data.get()->TokenRange().Serialize());
+    result.Append(variable_data.Get()->Serialize());
   }
   result.Append(')');
   return result.ReleaseString();
@@ -104,7 +101,7 @@ CSSPaintImageGenerator& CSSPaintValue::EnsureGenerator(
 
 scoped_refptr<Image> CSSPaintValue::GetImage(
     const ImageResourceObserver& client,
-    const Document& document,
+    const Node& node,
     const ComputedStyle& style,
     const gfx::SizeF& target_size) {
   // https://crbug.com/835589: early exit when paint target is associated with
@@ -113,6 +110,7 @@ scoped_refptr<Image> CSSPaintValue::GetImage(
     return nullptr;
   }
 
+  const Document& document = node.GetDocument();
   CSSPaintImageGenerator& generator = EnsureGenerator(document);
 
   // If the generator isn't ready yet, we have nothing to paint. Our
@@ -150,10 +148,6 @@ scoped_refptr<Image> CSSPaintValue::GetImage(
     auto style_data = PaintWorkletStylePropertyMap::BuildCrossThreadData(
         document, layout_object.UniqueId(), style, native_properties,
         custom_properties, input_property_keys);
-    if (off_thread_paint_state_ == OffThreadPaintState::kUnknown) {
-      UMA_HISTOGRAM_BOOLEAN("Blink.CSSPaintValue.PaintOffThread",
-                            style_data.has_value());
-    }
     off_thread_paint_state_ = style_data.has_value()
                                   ? OffThreadPaintState::kOffThread
                                   : OffThreadPaintState::kMainThread;
@@ -171,7 +165,7 @@ scoped_refptr<Image> CSSPaintValue::GetImage(
     }
   }
 
-  return generator.Paint(client, target_size, parsed_input_arguments_);
+  return generator.Paint(client, target_size, parsed_input_arguments_.Get());
 }
 
 void CSSPaintValue::BuildInputArgumentValues(
@@ -210,21 +204,28 @@ bool CSSPaintValue::ParseInputArguments(const Document& document) {
     return false;
   }
 
-  parsed_input_arguments_ = MakeGarbageCollected<CSSStyleValueVector>();
+  parsed_input_arguments_ = MakeGarbageCollected<GCedCSSStyleValueVector>();
 
   for (wtf_size_t i = 0; i < argument_variable_data_.size(); ++i) {
     // If we are parsing a paint() function, we must be a secure context.
     DCHECK_EQ(SecureContextMode::kSecureContext,
               document.GetExecutionContext()->GetSecureContextMode());
     DCHECK(!argument_variable_data_[i]->NeedsVariableResolution());
+    //  TODO(crbug.com/475807587): We use CSSParserLocalContext without a
+    //  property because parsed_value is converted to a CSSStyleValue, which
+    //  does not yet support the random() function. Revisit when CSSOM is
+    //  updated.
+    CSSParserLocalContext local_context =
+        CSSParserLocalContext::CreateWithoutPropertyForCSSOM();
     const CSSValue* parsed_value = argument_variable_data_[i]->ParseForSyntax(
-        input_argument_types[i], SecureContextMode::kSecureContext);
+        input_argument_types[i], SecureContextMode::kSecureContext,
+        local_context);
     if (!parsed_value) {
       input_arguments_invalid_ = true;
       parsed_input_arguments_ = nullptr;
       return false;
     }
-    parsed_input_arguments_->AppendVector(
+    parsed_input_arguments_->append_range(
         StyleValueFactory::CssValueToStyleValueVector(*parsed_value));
   }
   return true;
@@ -244,6 +245,12 @@ void CSSPaintValue::PaintImageGeneratorReady() {
   }
 }
 
+bool CSSPaintValue::IsCorsSameOrigin() const {
+  // TODO(https://crbug.com/513107673): This is pessimistic and incorrectly
+  // considers all paint values to be cross-origin.
+  return false;
+}
+
 bool CSSPaintValue::KnownToBeOpaque(const Document& document,
                                     const ComputedStyle&) const {
   auto it = generators_.find(&document);
@@ -255,11 +262,16 @@ bool CSSPaintValue::Equals(const CSSPaintValue& other) const {
          CustomCSSText() == other.CustomCSSText();
 }
 
+bool CSSPaintValue::HasRandomFunctions() const {
+  return name_ && name_->HasRandomFunctions();
+}
+
 void CSSPaintValue::TraceAfterDispatch(blink::Visitor* visitor) const {
   visitor->Trace(name_);
   visitor->Trace(generators_);
   visitor->Trace(paint_image_generator_observer_);
   visitor->Trace(parsed_input_arguments_);
+  visitor->Trace(argument_variable_data_);
   CSSImageGeneratorValue::TraceAfterDispatch(visitor);
 }
 

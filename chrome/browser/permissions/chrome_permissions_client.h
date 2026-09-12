@@ -5,13 +5,23 @@
 #ifndef CHROME_BROWSER_PERMISSIONS_CHROME_PERMISSIONS_CLIENT_H_
 #define CHROME_BROWSER_PERMISSIONS_CHROME_PERMISSIONS_CLIENT_H_
 
+#include <optional>
+
 #include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
-#include "chrome/browser/ui/browser_navigator_params.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
+#include "components/content_settings/core/common/content_settings.h"
+#include "components/permissions/embedded_permission_prompt_flow_model.h"
+#include "components/permissions/features.h"
 #include "components/permissions/permission_request_enums.h"
-#include "components/permissions/permission_uma_util.h"
+#include "components/permissions/permission_uma_constants.h"
 #include "components/permissions/permissions_client.h"
+#include "components/permissions/resolvers/permission_prompt_options.h"
+
+namespace content {
+class RenderFrameHost;
+}  // namespace content
 
 class ChromePermissionsClient : public permissions::PermissionsClient {
  public:
@@ -42,12 +52,11 @@ class ChromePermissionsClient : public permissions::PermissionsClient {
   void AreSitesImportant(
       content::BrowserContext* browser_context,
       std::vector<std::pair<url::Origin, bool>>* urls) override;
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_CHROMEOS_ASH)
   bool IsCookieDeletionDisabled(content::BrowserContext* browser_context,
                                 const GURL& origin) override;
-#endif
-  void GetUkmSourceId(content::BrowserContext* browser_context,
-                      content::WebContents* web_contents,
+  void GetUkmSourceId(ContentSettingsType permission_type,
+                      content::BrowserContext* browser_context,
+                      content::RenderFrameHost* render_frame_host,
                       const GURL& requesting_origin,
                       GetUkmSourceIdCallback callback) override;
   permissions::IconId GetOverrideIconId(
@@ -56,60 +65,80 @@ class ChromePermissionsClient : public permissions::PermissionsClient {
   CreatePermissionUiSelectors(
       content::BrowserContext* browser_context) override;
 
-#if !BUILDFLAG(IS_ANDROID)
   void TriggerPromptHatsSurveyIfEnabled(
-      content::BrowserContext* context,
+      content::WebContents* web_contents,
       permissions::RequestType request_type,
-      absl::optional<permissions::PermissionAction> action,
+      std::optional<permissions::PermissionAction> action,
       permissions::PermissionPromptDisposition prompt_disposition,
       permissions::PermissionPromptDispositionReason prompt_disposition_reason,
       permissions::PermissionRequestGestureType gesture_type,
-      absl::optional<base::TimeDelta> prompt_display_duration,
+      std::optional<base::TimeDelta> prompt_display_duration,
       bool is_post_prompt,
-      base::OnceCallback<void()> hats_shown_callback_) override;
+      const GURL& gurl,
+      std::optional<
+          permissions::feature_params::PermissionElementPromptPosition>
+          pepc_prompt_position,
+      ContentSetting initial_permission_status,
+      base::OnceCallback<void()> hats_shown_callback,
+      PromptOptions prompt_options) override;
 
+#if !BUILDFLAG(IS_ANDROID)
   permissions::PermissionIgnoredReason DetermineIgnoreReason(
       content::WebContents* web_contents) override;
 #endif
 
   void OnPromptResolved(
-      permissions::RequestType request_type,
+      const permissions::PermissionRequest* request,
       permissions::PermissionAction action,
-      const GURL& origin,
+      const PromptOptions& prompt_options,
       permissions::PermissionPromptDisposition prompt_disposition,
       permissions::PermissionPromptDispositionReason prompt_disposition_reason,
-      permissions::PermissionRequestGestureType gesture_type,
-      absl::optional<QuietUiReason> quiet_ui_reason,
+      std::optional<QuietUiReason> quiet_ui_reason,
       base::TimeDelta prompt_display_duration,
+      std::optional<
+          permissions::feature_params::PermissionElementPromptPosition>
+          pepc_prompt_position,
+      ContentSetting initial_permission_status,
       content::WebContents* web_contents) override;
-  absl::optional<bool> HadThreeConsecutiveNotificationPermissionDenies(
+  std::optional<bool> HadThreeConsecutiveNotificationPermissionDenies(
       content::BrowserContext* browser_context) override;
-  absl::optional<bool> HasPreviouslyAutoRevokedPermission(
+  std::optional<bool> HasPreviouslyAutoRevokedPermission(
       content::BrowserContext* browser_context,
       const GURL& origin,
       ContentSettingsType permission) override;
-  absl::optional<url::Origin> GetAutoApprovalOrigin() override;
+  std::optional<url::Origin> GetAutoApprovalOrigin(
+      content::BrowserContext* browser_context) override;
+  std::optional<permissions::PermissionAction> GetAutoApprovalStatus(
+      content::BrowserContext* browser_context,
+      const GURL& origin) override;
   bool CanBypassEmbeddingOriginCheck(const GURL& requesting_origin,
                                      const GURL& embedding_origin) override;
-  absl::optional<GURL> OverrideCanonicalOrigin(
+  std::optional<GURL> GetCanonicalOriginOverride(
       const GURL& requesting_origin,
       const GURL& embedding_origin) override;
-  // Checks if `requesting_origin` and `embedding_origin` are the new tab page
-  // origins.
-  bool DoURLsMatchNewTabPage(const GURL& requesting_origin,
-                             const GURL& embedding_origin) override;
+  std::optional<GURL> GetEmbeddingOriginOverride(
+      const GURL& requesting_origin,
+      content::RenderFrameHost* render_frame_host) override;
+
+  bool IsFromNewTabPage(content::WebContents* web_contents,
+                        const GURL& requester,
+                        bool already_overrode_requester) override;
+
+  bool IsPrivilegedInternalWebUI(content::WebContents* web_contents,
+                                 const GURL& requester,
+                                 bool already_overrode_requester) override;
+
+  bool IsPrivilegedInternalWebUIForUIRouting(
+      content::WebContents* web_contents) override;
+
+  bool IsOmniboxEverywhere(content::WebContents* web_contents) override;
+
 #if BUILDFLAG(IS_ANDROID)
   bool IsDseOrigin(content::BrowserContext* browser_context,
                    const url::Origin& origin) override;
-  infobars::InfoBarManager* GetInfoBarManager(
-      content::WebContents* web_contents) override;
-  infobars::InfoBar* MaybeCreateInfoBar(
-      content::WebContents* web_contents,
-      ContentSettingsType type,
-      base::WeakPtr<permissions::PermissionPromptAndroid> prompt) override;
   std::unique_ptr<PermissionMessageDelegate> MaybeCreateMessageUI(
       content::WebContents* web_contents,
-      ContentSettingsType type,
+      const permissions::PermissionRequest& request,
       base::WeakPtr<permissions::PermissionPromptAndroid> prompt) override;
   void RepromptForAndroidPermissions(
       content::WebContents* web_contents,
@@ -119,13 +148,42 @@ class ChromePermissionsClient : public permissions::PermissionsClient {
       const std::vector<std::string>& optional_permissions,
       PermissionsUpdatedCallback callback) override;
   int MapToJavaDrawableId(int resource_id) override;
+  favicon::FaviconService* GetFaviconService(
+      content::BrowserContext* browser_context) override;
+  const std::u16string GetClientApplicationName() const override;
 #else
   std::unique_ptr<permissions::PermissionPrompt> CreatePrompt(
       content::WebContents* web_contents,
       permissions::PermissionPrompt::Delegate* delegate) override;
+  std::unique_ptr<
+      permissions::EmbeddedPermissionPromptFlowModel::PromptContentScrim>
+  CreatePromptContentScrim(
+      content::WebContents* web_contents,
+      permissions::EmbeddedPermissionPromptFlowModel* flow_model) override;
 #endif
 
+  bool HasDevicePermission(ContentSettingsType type) const override;
+  bool CanRequestDevicePermission(ContentSettingsType type) const override;
+  bool IsPermissionBlockedByDevicePolicy(
+      content::WebContents* web_contents,
+      PermissionSetting setting,
+      const content_settings::SettingInfo& info,
+      ContentSettingsType type) const override;
+  bool IsPermissionAllowedByDevicePolicy(
+      content::WebContents* web_contents,
+      PermissionSetting setting,
+      const content_settings::SettingInfo& info,
+      ContentSettingsType type) const override;
+  bool IsSystemDenied(ContentSettingsType type) const override;
+  bool CanPromptSystemPermission(ContentSettingsType type) const override;
+  bool IsActorOperatingOnWebContents(
+      content::WebContents* web_contents) const override;
+
  private:
+  bool IsPrivilegedInternalWebUIForUIRouting(
+      const url::Origin& embedding_origin);
+  url::Origin GetEmbeddingOrigin(content::WebContents* web_contents);
+  url::Origin GetGoogleURLOrigin();
   friend base::NoDestructor<ChromePermissionsClient>;
 
   ChromePermissionsClient() = default;

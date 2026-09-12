@@ -6,6 +6,7 @@
 #define SQL_SQLITE_RESULT_CODE_H_
 
 #include <iosfwd>
+#include <string>
 
 #include "base/component_export.h"
 #include "base/dcheck_is_on.h"
@@ -83,7 +84,7 @@ bool IsSqliteSuccessCode(SqliteResultCode sqlite_result_code);
 // Works for all result codes, including success codes and extended error codes.
 // DCHECKs if provided result code should not occur in Chrome's usage of SQLite.
 COMPONENT_EXPORT(SQL)
-void UmaHistogramSqliteResult(const char* histogram_name,
+void UmaHistogramSqliteResult(const std::string& histogram_name,
                               int sqlite_result_code);
 
 // Converts a SQLite result code into a UMA logging-friendly form.
@@ -106,6 +107,24 @@ std::ostream& operator<<(std::ostream& os, SqliteErrorCode sqlite_error_code);
 // DCHECKs the representation invariants of the mapping table used to convert
 // SQLite result codes to logging-friendly values.
 COMPONENT_EXPORT(SQL) void CheckSqliteLoggedResultCodeForTesting();
+
+// Converts an extended result code into its corresponding primary result code,
+// as defined in https://sqlite.org/rescode.html. For instance,
+// `SqliteResultCode::kOkSymlink` converts to `SqliteResultCode::kOk`.
+COMPONENT_EXPORT(SQL)
+inline SqliteResultCode ToPrimaryResultCode(
+    SqliteResultCode extended_result_code) {
+  return ToSqliteResultCode(static_cast<int>(extended_result_code) & 0xFF);
+}
+
+// Converts an extended error code into its corresponding primary error code,
+// as defined in https://sqlite.org/rescode.html. For instance,
+// `SqliteErrorCode::kIoRead` converts to `SqliteResultCode::kIo`.
+COMPONENT_EXPORT(SQL)
+inline SqliteErrorCode ToPrimaryErrorCode(SqliteErrorCode sqlite_error_code) {
+  return ToSqliteErrorCode(
+      ToSqliteResultCode(static_cast<int>(sqlite_error_code) & 0xFF));
+}
 
 }  // namespace sql
 

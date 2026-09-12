@@ -9,7 +9,8 @@
 #include <vector>
 
 #include "base/check.h"
-#include "base/cxx17_backports.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 
 namespace gfx {
 
@@ -19,10 +20,14 @@ float SkTransferFnEvalUnclamped(const skcms_TransferFunction& fn, float x) {
   return std::pow(fn.a * x + fn.b, fn.g) + fn.e;
 }
 
+namespace {
+
 float SkTransferFnEval(const skcms_TransferFunction& fn, float x) {
   float fn_at_x_unclamped = SkTransferFnEvalUnclamped(fn, x);
-  return base::clamp(fn_at_x_unclamped, 0.0f, 1.0f);
+  return std::clamp(fn_at_x_unclamped, 0.0f, 1.0f);
 }
+
+}  // namespace
 
 skcms_TransferFunction SkTransferFnInverse(const skcms_TransferFunction& fn) {
   skcms_TransferFunction fn_inv = {0};
@@ -39,22 +44,6 @@ skcms_TransferFunction SkTransferFnInverse(const skcms_TransferFunction& fn) {
     fn_inv.f = -fn.f / fn.c;
   }
   return fn_inv;
-}
-
-skcms_TransferFunction SkTransferFnScaled(const skcms_TransferFunction& fn,
-                                          float scale) {
-  if (scale == 1.f)
-    return fn;
-  float scale_to_g_inv = std::pow(scale, 1.f / fn.g);
-  skcms_TransferFunction fn_scaled = {0};
-  fn_scaled.a = fn.a * scale_to_g_inv;
-  fn_scaled.b = fn.b * scale_to_g_inv;
-  fn_scaled.c = fn.c * scale;
-  fn_scaled.d = fn.d;
-  fn_scaled.e = fn.e * scale;
-  fn_scaled.f = fn.f * scale;
-  fn_scaled.g = fn.g;
-  return fn_scaled;
 }
 
 bool SkTransferFnsApproximatelyCancel(const skcms_TransferFunction& a,
@@ -81,26 +70,45 @@ bool SkTransferFnIsApproximatelyIdentity(const skcms_TransferFunction& a) {
   return true;
 }
 
-bool SkM44IsApproximatelyIdentity(const SkM44& m) {
-  const float kEpsilon = 1.f / 256.f;
+bool SkM44IsApproximatelyIdentity(const SkM44& m, float epsilon) {
   for (int i = 0; i < 4; ++i) {
     for (int j = 0; j < 4; ++j) {
       float identity_value = i == j ? 1 : 0;
       float value = m.rc(i, j);
-      if (std::abs(identity_value - value) > kEpsilon)
+      if (std::abs(identity_value - value) > epsilon) {
         return false;
+      }
     }
   }
   return true;
 }
 
-SkM44 SkM44FromRowMajor3x3(const float* data) {
-  DCHECK(data);
+skcms_Matrix3x3 COLOR_SPACE_EXPORT SkcmsMatrix3x3FromSkM44(const SkM44& in) {
   // clang-format off
-  return SkM44(data[0], data[1], data[2], 0,
-               data[3], data[4], data[5], 0,
-               data[6], data[7], data[8], 0,
-               0, 0, 0, 1);
+  return {{
+      { in.rc(0, 0), in.rc(0, 1), in.rc(0, 2), },
+      { in.rc(1, 0), in.rc(1, 1), in.rc(1, 2), },
+      { in.rc(2, 0), in.rc(2, 1), in.rc(2, 2), },
+  }};
+  // clang-format on
+}
+
+SkM44 COLOR_SPACE_EXPORT SkM44FromSkcmsMatrix3x3(const skcms_Matrix3x3& in) {
+  constexpr size_t kNumElements = 9u;
+  static_assert(sizeof(in.vals) == sizeof(float) * kNumElements);
+  // SAFETY: skcms_Matrix3x3 is a 3x3 matrix, and we've verified it has 9
+  // elements as expected.
+  return SkM44FromRowMajor3x3(UNSAFE_BUFFERS(
+      base::span<const float, kNumElements>(&in.vals[0][0], kNumElements)));
+}
+
+SkM44 SkM44FromRowMajor3x3(base::span<const float, 9u> scale_3x3) {
+  // clang-format off
+  return SkM44(
+      scale_3x3[0], scale_3x3[1], scale_3x3[2], 0,
+      scale_3x3[3], scale_3x3[4], scale_3x3[5], 0,
+      scale_3x3[6], scale_3x3[7], scale_3x3[8], 0,
+      0, 0, 0, 1);
   // clang-format on
 }
 

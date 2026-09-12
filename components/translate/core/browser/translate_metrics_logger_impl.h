@@ -6,14 +6,15 @@
 #define COMPONENTS_TRANSLATE_CORE_BROWSER_TRANSLATE_METRICS_LOGGER_IMPL_H_
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "components/translate/core/browser/translate_metrics_logger.h"
 #include "components/translate/core/browser/translate_prefs.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class TickClock;
@@ -78,16 +79,16 @@ class NullTranslateMetricsLogger : public TranslateMetricsLogger {
   void LogReversion() override {}
   void LogUIChange(bool is_ui_shown) override {}
   void LogOmniboxIconChange(bool is_omnibox_icon_shown) override {}
-  void LogInitialSourceLanguage(const std::string& source_language_code,
+  void LogInitialSourceLanguage(std::string_view source_language_code,
                                 bool is_in_users_content_languages) override {}
-  void LogSourceLanguage(const std::string& source_language_code) override {}
-  void LogTargetLanguage(const std::string& target_language_code,
+  void LogSourceLanguage(std::string_view source_language_code) override {}
+  void LogTargetLanguage(std::string_view target_language_code,
                          TranslateBrowserMetrics::TargetLanguageOrigin
                              target_language_origin) override {}
-  void LogHTMLDocumentLanguage(const std::string& html_doc_language) override {}
-  void LogHTMLContentLanguage(
-      const std::string& html_content_language) override {}
-  void LogDetectedLanguage(const std::string& detected_language) override {}
+  void LogHTMLDocumentLanguage(std::string_view html_doc_language) override {}
+  void LogHTMLContentLanguage(std::string_view html_content_language) override {
+  }
+  void LogDetectedLanguage(std::string_view detected_language) override {}
   void LogDetectionReliabilityScore(
       const float& model_detection_reliability_score) override {}
   void LogUIInteraction(UIInteraction ui_interaction) override {}
@@ -139,16 +140,15 @@ class TranslateMetricsLoggerImpl : public TranslateMetricsLogger {
   void LogReversion() override;
   void LogUIChange(bool is_ui_shown) override;
   void LogOmniboxIconChange(bool is_omnibox_icon_shown) override;
-  void LogInitialSourceLanguage(const std::string& source_language_code,
+  void LogInitialSourceLanguage(std::string_view source_language_code,
                                 bool is_in_users_content_languages) override;
-  void LogSourceLanguage(const std::string& source_language_code) override;
-  void LogTargetLanguage(const std::string& target_language_code,
+  void LogSourceLanguage(std::string_view source_language_code) override;
+  void LogTargetLanguage(std::string_view target_language_code,
                          TranslateBrowserMetrics::TargetLanguageOrigin
                              target_language_origin) override;
-  void LogHTMLDocumentLanguage(const std::string& html_doc_language) override;
-  void LogHTMLContentLanguage(
-      const std::string& html_content_language) override;
-  void LogDetectedLanguage(const std::string& detected_language) override;
+  void LogHTMLDocumentLanguage(std::string_view html_doc_language) override;
+  void LogHTMLContentLanguage(std::string_view html_content_language) override;
+  void LogDetectedLanguage(std::string_view detected_language) override;
   void LogDetectionReliabilityScore(
       const float& model_detection_reliability_score) override;
   void LogUIInteraction(UIInteraction ui_interaction) override;
@@ -216,7 +216,7 @@ class TranslateMetricsLoggerImpl : public TranslateMetricsLogger {
   RankerDecision ranker_decision_ = RankerDecision::kUninitialized;
   uint32_t ranker_version_ = 0;
   base::TimeTicks ranker_start_time_;
-  absl::optional<base::TimeDelta> ranker_duration_;
+  std::optional<base::TimeDelta> ranker_duration_;
 
   // Stores the reason for the initial state of the page load. In the case there
   // are multiple reasons, only the first reported reason is stored.

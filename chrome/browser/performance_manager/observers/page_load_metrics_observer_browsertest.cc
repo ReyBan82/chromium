@@ -3,7 +3,8 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/performance_manager/observers/page_load_metrics_observer.h"
-#include "chrome/browser/ui/browser.h"
+
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/ukm/test_ukm_recorder.h"
@@ -63,7 +64,7 @@ class PageLoadMetricsObserverPrerenderBrowserTest
       const PageLoadMetricsObserverPrerenderBrowserTest&) = delete;
 
   void SetUp() override {
-    prerender_helper_.SetUp(embedded_test_server());
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
     PageLoadMetricsObserverBrowserTest::SetUp();
   }
 
@@ -108,7 +109,8 @@ IN_PROC_BROWSER_TEST_F(PageLoadMetricsObserverPrerenderBrowserTest,
 
   // Load a page in the prerender.
   GURL prerender_url = embedded_test_server()->GetURL("/title1.html");
-  const int host_id = prerender_test_helper().AddPrerender(prerender_url);
+  const content::PrerenderHostId host_id =
+      prerender_test_helper().AddPrerender(prerender_url);
   content::test::PrerenderHostObserver host_observer(*GetWebContents(),
                                                      host_id);
   EXPECT_FALSE(host_observer.was_activated());

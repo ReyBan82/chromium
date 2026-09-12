@@ -7,6 +7,7 @@
 #include "components/webcrypto/algorithm_implementation.h"
 #include "components/webcrypto/algorithm_implementations.h"
 #include "components/webcrypto/algorithm_registry.h"
+#include "components/webcrypto/encapsulate_result.h"
 #include "components/webcrypto/generate_key_result.h"
 #include "components/webcrypto/status.h"
 #include "crypto/openssl_util.h"
@@ -250,7 +251,7 @@ Status UnwrapKey(blink::WebCryptoKeyFormat format,
 
 Status DeriveBits(const blink::WebCryptoAlgorithm& algorithm,
                   const blink::WebCryptoKey& base_key,
-                  unsigned int length_bits,
+                  std::optional<unsigned int> length_bits,
                   std::vector<uint8_t>* derived_bytes) {
   if (!base_key.KeyUsageAllows(blink::kWebCryptoKeyUsageDeriveBits))
     return Status::ErrorUnexpected();
@@ -263,8 +264,7 @@ Status DeriveBits(const blink::WebCryptoAlgorithm& algorithm,
   if (status.IsError())
     return status;
 
-  return impl->DeriveBits(algorithm, base_key, true, length_bits,
-                          derived_bytes);
+  return impl->DeriveBits(algorithm, base_key, length_bits, derived_bytes);
 }
 
 Status DeriveKey(const blink::WebCryptoAlgorithm& algorithm,
@@ -290,12 +290,11 @@ Status DeriveKey(const blink::WebCryptoAlgorithm& algorithm,
     return status;
 
   // Determine how many bits long the derived key should be.
-  unsigned int length_bits = 0;
-  bool has_length_bits = false;
-  status = import_impl->GetKeyLength(key_length_algorithm, &has_length_bits,
-                                     &length_bits);
-  if (status.IsError())
+  std::optional<unsigned int> length_bits;
+  status = import_impl->GetKeyLength(key_length_algorithm, &length_bits);
+  if (status.IsError()) {
     return status;
+  }
 
   // Derive the key bytes.
   const AlgorithmImplementation* derive_impl = nullptr;
@@ -304,18 +303,190 @@ Status DeriveKey(const blink::WebCryptoAlgorithm& algorithm,
     return status;
 
   std::vector<uint8_t> derived_bytes;
-  status = derive_impl->DeriveBits(algorithm, base_key, has_length_bits,
-                                   length_bits, &derived_bytes);
-  if (status.IsError())
+  status =
+      derive_impl->DeriveBits(algorithm, base_key, length_bits, &derived_bytes);
+  if (status.IsError()) {
     return status;
+  }
 
   // Create the key using the derived bytes.
-  return ImportKey(blink::kWebCryptoKeyFormatRaw, derived_bytes,
+  //
+  // Use "raw-secret" as the key format.
+  //
+  // https://wicg.github.io/webcrypto-modern-algos/#subtlecrypto-interface-keyformat
+  return ImportKey(blink::kWebCryptoKeyFormatRawSecret, derived_bytes,
                    import_algorithm, extractable, usages, derived_key);
 }
 
+Status EncapsulateKey(const blink::WebCryptoAlgorithm& algorithm,
+                      const blink::WebCryptoKey& encapsulation_key,
+                      const blink::WebCryptoAlgorithm& shared_key_algorithm,
+                      bool extractable,
+                      blink::WebCryptoKeyUsageMask usages,
+                      EncapsulateKeyResult* result) {
+  if (algorithm.Id() != encapsulation_key.Algorithm().Id()) {
+    return Status::ErrorUnexpected();
+  }
+
+  // Method described by:
+  // https://wicg.github.io/webcrypto-modern-algos/#SubtleCrypto-method-encapsulateKey
+  if (!encapsulation_key.KeyUsageAllows(
+          blink::kWebCryptoKeyUsageEncapsulateKey)) {
+    return Status::ErrorUnexpected();
+  }
+
+  const AlgorithmImplementation* impl = nullptr;
+  Status status = GetAlgorithmImplementation(algorithm.Id(), &impl);
+  if (status.IsError()) {
+    return status;
+  }
+
+  // 3.2.1.12: Let encapsulatedBits be the result of performing the encapsulate
+  //           operation specified by the algorithm internal slot of
+  //           encapsulationKey using encapsulationKey.
+  //
+  // (encapsulatedBits = shared secret + ciphertext
+  std::vector<uint8_t> shared_secret;
+  std::vector<uint8_t> ciphertext;
+  status = impl->Encapsulate(algorithm, encapsulation_key, &shared_secret,
+                             &ciphertext);
+  if (status.IsError()) {
+    return status;
+  }
+
+  // 3.2.1.13: Let sharedKey be the result of performing the import key
+  //           operation specified by normalizedSharedKeyAlgorithm using
+  //           "raw-secret" as format, the sharedKey field of encapsulatedBits
+  //           as keyData, sharedKeyAlgorithm as algorithm and using extractable
+  //           and usages.
+  //
+  // 3.2.1.14: Set the extractable internal slot of sharedKey to extractable.
+  //
+  // 3.2.1.15: Set the usages internal slot of sharedKey to the normalized value
+  // of usages.
+  blink::WebCryptoKey shared_key;
+  status = ImportKey(blink::kWebCryptoKeyFormatRawSecret, shared_secret,
+                     shared_key_algorithm, extractable, usages, &shared_key);
+  if (status.IsError()) {
+    return status;
+  }
+
+  result->Assign(shared_key, std::move(ciphertext));
+  return Status::Success();
+}
+
+Status EncapsulateBits(const blink::WebCryptoAlgorithm& algorithm,
+                       const blink::WebCryptoKey& encapsulation_key,
+                       EncapsulateBitsResult* result) {
+  if (algorithm.Id() != encapsulation_key.Algorithm().Id()) {
+    return Status::ErrorUnexpected();
+  }
+  if (!encapsulation_key.KeyUsageAllows(
+          blink::kWebCryptoKeyUsageEncapsulateBits)) {
+    return Status::ErrorUnexpected();
+  }
+
+  const AlgorithmImplementation* impl = nullptr;
+  Status status = GetAlgorithmImplementation(algorithm.Id(), &impl);
+  if (status.IsError()) {
+    return status;
+  }
+
+  std::vector<uint8_t> shared_secret;
+  std::vector<uint8_t> ciphertext;
+  status = impl->Encapsulate(algorithm, encapsulation_key, &shared_secret,
+                             &ciphertext);
+  if (status.IsError()) {
+    return status;
+  }
+
+  result->Assign(std::move(shared_secret), std::move(ciphertext));
+  return Status::Success();
+}
+
+Status DecapsulateKey(const blink::WebCryptoAlgorithm& algorithm,
+                      const blink::WebCryptoKey& decapsulation_key,
+                      base::span<const uint8_t> ciphertext,
+                      const blink::WebCryptoAlgorithm& shared_key_algorithm,
+                      bool extractable,
+                      blink::WebCryptoKeyUsageMask usages,
+                      blink::WebCryptoKey* shared_key) {
+  if (algorithm.Id() != decapsulation_key.Algorithm().Id()) {
+    return Status::ErrorUnexpected();
+  }
+  // Method described by:
+  // https://wicg.github.io/webcrypto-modern-algos/#SubtleCrypto-method-decapsulateKey
+
+  if (!decapsulation_key.KeyUsageAllows(
+          blink::kWebCryptoKeyUsageDecapsulateKey)) {
+    return Status::ErrorUnexpected();
+  }
+
+  const AlgorithmImplementation* impl = nullptr;
+  Status status = GetAlgorithmImplementation(algorithm.Id(), &impl);
+  if (status.IsError()) {
+    return status;
+  }
+
+  // 3.2.3.13: Let decapsulatedBits be the result of performing the decapsulate
+  //           operation specified by the algorithm internal slot of
+  //           decapsulationKey using decapsulationKey and ciphertext.
+  std::vector<uint8_t> shared_secret;
+  status = impl->Decapsulate(algorithm, decapsulation_key, ciphertext,
+                             &shared_secret);
+  if (status.IsError()) {
+    return status;
+  }
+
+  // 3.2.3.14: Let sharedKey be the result of performing the import key
+  //           operation specified by normalizedSharedKeyAlgorithm using
+  //           "raw-secret" as format, the decapsulatedBits as keyData,
+  //           sharedKeyAlgorithm as algorithm and using extractable and usages.
+  //
+  // 3.2.3.15: Set the extractable internal slot of sharedKey to extractable.
+  //
+  // 3.2.3.16: Set the usages internal slot of sharedKey to the normalized value
+  //           of usages.
+  return ImportKey(blink::kWebCryptoKeyFormatRawSecret, shared_secret,
+                   shared_key_algorithm, extractable, usages, shared_key);
+}
+
+Status DecapsulateBits(const blink::WebCryptoAlgorithm& algorithm,
+                       const blink::WebCryptoKey& decapsulation_key,
+                       base::span<const uint8_t> ciphertext,
+                       std::vector<uint8_t>* shared_bits) {
+  if (algorithm.Id() != decapsulation_key.Algorithm().Id()) {
+    return Status::ErrorUnexpected();
+  }
+  if (!decapsulation_key.KeyUsageAllows(
+          blink::kWebCryptoKeyUsageDecapsulateBits)) {
+    return Status::ErrorUnexpected();
+  }
+
+  const AlgorithmImplementation* impl = nullptr;
+  Status status = GetAlgorithmImplementation(algorithm.Id(), &impl);
+  if (status.IsError()) {
+    return status;
+  }
+
+  return impl->Decapsulate(algorithm, decapsulation_key, ciphertext,
+                           shared_bits);
+}
+
+Status GetPublicKey(const blink::WebCryptoKey& key,
+                    blink::WebCryptoKeyUsageMask usages,
+                    blink::WebCryptoKey* public_key) {
+  const AlgorithmImplementation* impl = nullptr;
+  Status status = GetAlgorithmImplementation(key.Algorithm().Id(), &impl);
+  if (status.IsError()) {
+    return status;
+  }
+
+  return impl->GetPublicKey(key, usages, public_key);
+}
+
 bool SerializeKeyForClone(const blink::WebCryptoKey& key,
-                          blink::WebVector<uint8_t>* key_data) {
+                          std::vector<uint8_t>* key_data) {
   const AlgorithmImplementation* impl = nullptr;
   Status status = GetAlgorithmImplementation(key.Algorithm().Id(), &impl);
   if (status.IsError())
@@ -339,6 +510,29 @@ bool DeserializeKeyForClone(const blink::WebCryptoKeyAlgorithm& algorithm,
   status = impl->DeserializeKeyForClone(algorithm, type, extractable, usages,
                                         key_data, key);
   return status.IsSuccess();
+}
+
+bool Supports(blink::WebCryptoOperation op,
+              const blink::WebCryptoAlgorithm& algorithm,
+              std::optional<unsigned int> length_bits) {
+  const AlgorithmImplementation* impl = nullptr;
+  Status status = GetAlgorithmImplementation(algorithm.Id(), &impl);
+  if (status.IsError()) {
+    return false;
+  }
+
+  return impl->Supports(op, algorithm, length_bits);
+}
+
+Status GetKeyLength(const blink::WebCryptoAlgorithm& key_length_algorithm,
+                    std::optional<unsigned int>* length_bits) {
+  const AlgorithmImplementation* impl = nullptr;
+  Status status = GetAlgorithmImplementation(key_length_algorithm.Id(), &impl);
+  if (status.IsError()) {
+    return status;
+  }
+
+  return impl->GetKeyLength(key_length_algorithm, length_bits);
 }
 
 }  // namespace webcrypto

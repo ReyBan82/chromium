@@ -4,51 +4,78 @@
 
 #include "components/autofill/core/browser/metrics/payments/card_unmask_flow_metrics.h"
 
+#include <string_view>
+#include <variant>
+
 #include "base/metrics/histogram_functions.h"
+#include "base/strings/strcat.h"
+#include "components/autofill/core/browser/data_model/payments/credit_card.h"
 #include "components/autofill/core/browser/metrics/autofill_metrics.h"
+#include "components/autofill/core/browser/payments/payments_autofill_client.h"
 
 namespace autofill::autofill_metrics {
 
-void LogServerCardUnmaskAttempt(AutofillClient::PaymentsRpcCardType card_type) {
+void LogServerCardUnmaskAttempt(
+    payments::PaymentsAutofillClient::PaymentsRpcCardType card_type) {
   base::UmaHistogramBoolean(
-      "Autofill.ServerCardUnmask" +
-          AutofillMetrics::GetHistogramStringForCardType(card_type) +
-          ".Attempt",
+      base::StrCat({"Autofill.ServerCardUnmask",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".Attempt"}),
       true);
 }
 
-void LogServerCardUnmaskResult(ServerCardUnmaskResult unmask_result,
-                               AutofillClient::PaymentsRpcCardType card_type,
-                               VirtualCardUnmaskFlowType flow_type) {
-  std::string flow_type_suffix;
+void LogCvcFilling(CvcFillingFlowType flow_type,
+                   CreditCard::RecordType record_type) {
+  base::UmaHistogramEnumeration(
+      base::StrCat(
+          {"Autofill.CvcStorage.CvcFilling",
+           AutofillMetrics::GetHistogramStringForCardType(record_type)}),
+      flow_type);
+}
+
+void LogServerCardUnmaskResult(
+    ServerCardUnmaskResult unmask_result,
+    std::variant<payments::PaymentsAutofillClient::PaymentsRpcCardType,
+                 CreditCard::RecordType> card_type,
+    ServerCardUnmaskFlowType flow_type) {
+  std::string_view flow_type_suffix;
   switch (flow_type) {
-    case VirtualCardUnmaskFlowType::kUnspecified:
+    case ServerCardUnmaskFlowType::kUnspecified:
       flow_type_suffix = ".UnspecifiedFlowType";
       break;
-    case VirtualCardUnmaskFlowType::kFidoOnly:
+    case ServerCardUnmaskFlowType::kFidoOnly:
       flow_type_suffix = ".Fido";
       break;
-    case VirtualCardUnmaskFlowType::kOtpOnly:
+    case ServerCardUnmaskFlowType::kOtpOnly:
       flow_type_suffix = ".Otp";
       break;
-    case VirtualCardUnmaskFlowType::kOtpFallbackFromFido:
+    case ServerCardUnmaskFlowType::kOtpFallbackFromFido:
       flow_type_suffix = ".OtpFallbackFromFido";
+      break;
+    case ServerCardUnmaskFlowType::kRiskBased:
+      flow_type_suffix = ".RiskBased";
+      break;
+    case ServerCardUnmaskFlowType::kDeviceUnlock:
+      flow_type_suffix = ".DeviceUnlock";
+      break;
+    case ServerCardUnmaskFlowType::kThreeDomainSecure:
+      flow_type_suffix = ".ThreeDomainSecure";
       break;
   }
 
   base::UmaHistogramEnumeration(
-      "Autofill.ServerCardUnmask" +
-          AutofillMetrics::GetHistogramStringForCardType(card_type) +
-          ".Result" + flow_type_suffix,
+      base::StrCat({"Autofill.ServerCardUnmask",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".Result", flow_type_suffix}),
       unmask_result);
 }
 
 void LogServerCardUnmaskFormSubmission(
-    AutofillClient::PaymentsRpcCardType card_type) {
+    payments::PaymentsAutofillClient::PaymentsRpcCardType card_type) {
   base::UmaHistogramBoolean(
-      "Autofill.ServerCardUnmask" +
-          AutofillMetrics::GetHistogramStringForCardType(card_type) +
-          ".FormSubmission",
+      base::StrCat({"Autofill.ServerCardUnmask",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".FormSubmission"}),
       true);
 }
 

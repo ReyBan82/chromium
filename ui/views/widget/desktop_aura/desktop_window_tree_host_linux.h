@@ -11,10 +11,13 @@
 
 #include "base/gtest_prod_util.h"
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "ui/aura/scoped_window_targeter.h"
 #include "ui/base/buildflags.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/gfx/geometry/rect.h"
-#include "ui/ozone/buildflags.h"
+#include "ui/native_theme/native_theme.h"
+#include "ui/native_theme/native_theme_observer.h"
 #include "ui/platform_window/extensions/x11_extension_delegate.h"
 #include "ui/views/views_export.h"
 #include "ui/views/widget/desktop_aura/desktop_window_tree_host_platform.h"
@@ -29,6 +32,8 @@ class X11Extension;
 
 namespace views {
 
+class FrameView;
+
 class WindowEventFilterLinux;
 using WindowEventFilterClass = WindowEventFilterLinux;
 
@@ -36,8 +41,11 @@ using WindowEventFilterClass = WindowEventFilterLinux;
 // backend.
 class VIEWS_EXPORT DesktopWindowTreeHostLinux
     : public DesktopWindowTreeHostPlatform,
-      public ui::X11ExtensionDelegate {
+      public ui::X11ExtensionDelegate,
+      public ui::NativeThemeObserver {
  public:
+  static const char kWindowKey[];
+
   DesktopWindowTreeHostLinux(
       internal::NativeWidgetDelegate* native_widget_delegate,
       DesktopNativeWidgetAura* desktop_native_widget_aura);
@@ -53,23 +61,34 @@ class VIEWS_EXPORT DesktopWindowTreeHostLinux
   gfx::Rect GetXRootWindowOuterBounds() const;
 
   // DesktopWindowTreeHostPlatform:
+  std::unique_ptr<FrameView> CreateFrameView() override;
   void LowerWindow() override;
   // Disables event listening to make |dialog| modal.
   base::OnceClosure DisableEventListening();
+
+  // Sets hints for the WM/compositor that reflect the extents of the
+  // client-drawn shadow.
+  virtual void UpdateFrameHints();
 
  protected:
   // Overridden from DesktopWindowTreeHost:
   void Init(const Widget::InitParams& params) override;
   void OnNativeWidgetCreated(const Widget::InitParams& params) override;
-  void InitModalType(ui::ModalType modal_type) override;
+  void InitModalType(ui::mojom::ModalType modal_type) override;
+  void PrepareForMoveLoop(Widget::MoveLoopSource source) override;
+  void SetBypassWindowManager(bool bypass) override;
   Widget::MoveLoopResult RunMoveLoop(
       const gfx::Vector2d& drag_offset,
       Widget::MoveLoopSource source,
       Widget::MoveLoopEscapeBehavior escape_behavior) override;
 
   // PlatformWindowDelegate:
+  gfx::Insets CalculateInsetsInDIP(
+      ui::PlatformWindowState window_state) const override;
   void DispatchEvent(ui::Event* event) override;
   void OnClosed() override;
+  void OnBoundsChanged(const BoundsChange& change) override;
+  void OnWindowTiledStateChanged(ui::WindowTiledEdges new_tiled_edges) override;
 
   ui::X11Extension* GetX11Extension();
   const ui::X11Extension* GetX11Extension() const;
@@ -79,6 +98,9 @@ class VIEWS_EXPORT DesktopWindowTreeHostLinux
       const Widget::InitParams& params,
       ui::PlatformWindowInitProperties* properties) override;
 
+  // ui::NativeThemeObserver:
+  void OnNativeThemeUpdated(ui::NativeTheme* observed_theme) override;
+
  private:
   FRIEND_TEST_ALL_PREFIXES(DesktopWindowTreeHostPlatformImplTestWithTouch,
                            HitTest);
@@ -86,18 +108,27 @@ class VIEWS_EXPORT DesktopWindowTreeHostLinux
   // DesktopWindowTreeHostPlatform:
   base::flat_map<std::string, std::string> GetKeyboardLayoutMap() override;
 
+  // WindowTreeHost:
+  bool SupportsMouseLock() override;
+  void LockMouse(aura::Window* window) override;
+  void UnlockMouse(aura::Window* window) override;
+
   // Called back by compositor_observer_ if the latter is set.
   virtual void OnCompleteSwapWithNewSize(const gfx::Size& size);
 
   void CreateNonClientEventFilter();
   void DestroyNonClientEventFilter();
 
+  // Sets the opaque and input regions for the window based on
+  // FrameViewLinux decorations.
+  void UpdateFrameRegions();
+
   // X11ExtensionDelegate overrides:
   void OnLostMouseGrab() override;
 #if BUILDFLAG(USE_ATK)
   bool OnAtkKeyEvent(AtkKeyEventStruct* atk_key_event, bool transient) override;
 #endif  // BUILDFLAG(USE_ATK)
-  bool IsOverrideRedirect() const override;
+  bool IsOverrideRedirect(const ui::X11Extension& x11_extension) const override;
   gfx::Rect GetGuessedFullScreenSizeInPx() const override;
 
   // Enables event listening after closing |dialog|.
@@ -113,6 +144,9 @@ class VIEWS_EXPORT DesktopWindowTreeHostLinux
   std::unique_ptr<aura::ScopedWindowTargeter> targeter_for_modal_;
 
   uint32_t modal_dialog_counter_ = 0;
+
+  base::ScopedObservation<ui::NativeTheme, ui::NativeThemeObserver>
+      theme_observation_{this};
 
   // The display and the native X window hosting the root window.
   base::WeakPtrFactory<DesktopWindowTreeHostLinux> weak_factory_{this};

@@ -7,28 +7,38 @@
 
 #include <windows.h>
 
+#include <array>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/sequence_checker.h"
-#include "chrome/updater/win/install_progress_observer.h"
+#include "base/win/scoped_gdi_object.h"
+#include "chrome/updater/app/app_install_progress.h"
 #include "chrome/updater/win/ui/complete_wnd.h"
+#include "chrome/updater/win/ui/message_loop.h"
 #include "chrome/updater/win/ui/owner_draw_controls.h"
 #include "chrome/updater/win/ui/resources/resources.grh"
+#include "ui/gfx/win/msg_util.h"
+#include "url/gurl.h"
+
+namespace base {
+class TimeDelta;
+class Version;
+}  // namespace base
 
 namespace updater::ui {
-
-// Used to communicate between InstallStoppedWnd and ProgressWnd.
-inline constexpr unsigned int WM_INSTALL_STOPPED = WM_APP;
 
 class ProgressWndEvents : public CompleteWndEvents {
  public:
   // Restarts the running browsers.
   // If |restart_all_browsers| is true, all known browsers will be restarted.
   virtual bool DoRestartBrowser(bool restart_all_browsers,
-                                const std::vector<std::u16string>& urls) = 0;
+                                const std::vector<GURL>& urls) = 0;
 
   // Initiates a reboot and returns whether it was initiated successfully.
   virtual bool DoReboot() = 0;
@@ -37,139 +47,51 @@ class ProgressWndEvents : public CompleteWndEvents {
   virtual void DoCancel() = 0;
 };
 
-// Implements the "Installation Stopped" window. |InstallStoppedWnd| is
-// modal relative to its parent. When the window is closed it sends
-// a user message to its parent to notify which button the user has clicked on.
-class InstallStoppedWnd : public CAxDialogImpl<InstallStoppedWnd>,
-                          public OwnerDrawTitleBar,
-                          public CustomDlgColors,
-                          public WTL::CMessageFilter {
-  using Base = CAxDialogImpl<InstallStoppedWnd>;
-
- public:
-  static constexpr int IDD = IDD_INSTALL_STOPPED;
-
-  InstallStoppedWnd(WTL::CMessageLoop* message_loop, HWND parent);
-  InstallStoppedWnd(const InstallStoppedWnd&) = delete;
-  InstallStoppedWnd& operator=(const InstallStoppedWnd&) = delete;
-  ~InstallStoppedWnd() override;
-
-  // Closes the window, handling transition back to the parent window.
-  HRESULT CloseWindow();
-
-  // Overrides for WTL::CMessageFilter.
-  BOOL PreTranslateMessage(MSG* msg) override;
-
-  BEGIN_MSG_MAP(InstallStoppedWnd)
-    MESSAGE_HANDLER(WM_INITDIALOG, OnInitDialog)
-    MESSAGE_HANDLER(WM_DESTROY, OnDestroy)
-    COMMAND_ID_HANDLER(IDOK, OnClickButton)
-    COMMAND_ID_HANDLER(IDCANCEL, OnClickButton)
-    CHAIN_MSG_MAP(Base)
-    CHAIN_MSG_MAP(OwnerDrawTitleBar)
-    CHAIN_MSG_MAP(CustomDlgColors)
-  END_MSG_MAP()
-
- private:
-  LRESULT OnInitDialog(UINT msg,
-                       WPARAM wparam,
-                       LPARAM lparam,
-                       BOOL& handled);  // NOLINT
-  LRESULT OnClickButton(WORD notify_code,
-                        WORD id,
-                        HWND wnd_ctl,
-                        BOOL& handled);  // NOLINT
-  LRESULT OnDestroy(UINT msg,
-                    WPARAM wparam,
-                    LPARAM lparam,
-                    BOOL& handled);  // NOLINT
-
-  SEQUENCE_CHECKER(sequence_checker_);
-
-  raw_ptr<WTL::CMessageLoop> message_loop_ = nullptr;
-  HWND parent_ = nullptr;
-
-  WTL::CFont default_font_;
-};
+inline constexpr UINT WM_SET_APP_LOGO = WM_APP + 10;
 
 // Implements the UI progress window.
-class ProgressWnd : public CompleteWnd, public InstallProgressObserver {
+class ProgressWnd : public CompleteWnd, public AppInstallProgress {
  public:
-  ProgressWnd(WTL::CMessageLoop* message_loop, HWND parent);
+  ProgressWnd(MessageLoop* message_loop, HWND parent);
   ProgressWnd(const ProgressWnd&) = delete;
   ProgressWnd& operator=(const ProgressWnd&) = delete;
   ~ProgressWnd() override;
 
   void SetEventSink(ProgressWndEvents* ev);
 
-  BEGIN_MSG_MAP(ProgressWnd)
-    MESSAGE_HANDLER(WM_INITDIALOG, OnInitDialog)
-    MESSAGE_HANDLER(WM_INSTALL_STOPPED, OnInstallStopped)
-    COMMAND_HANDLER(IDC_BUTTON1, BN_CLICKED, OnClickedButton)
-    COMMAND_HANDLER(IDC_BUTTON2, BN_CLICKED, OnClickedButton)
-    COMMAND_HANDLER(IDC_CLOSE, BN_CLICKED, OnClickedButton)
-    CHAIN_MSG_MAP(CompleteWnd)
-  END_MSG_MAP()
+  CR_BEGIN_MSG_MAP_EX(ProgressWnd)
+    CR_MESSAGE_HANDLER_EX(WM_SET_APP_LOGO, OnSetAppLogo)
+    CR_MESSAGE_HANDLER_EX(WM_INITDIALOG, OnInitDialog)
+    CR_MESSAGE_HANDLER_EX(WM_SIZE, OnSize)
+    CR_MESSAGE_HANDLER_EX(WM_ERASEBKGND, OnEraseBkgnd)
+    CR_MESSAGE_HANDLER_EX(WM_SYSCOLORCHANGE, OnThemeChanged)
+    CR_MESSAGE_HANDLER_EX(WM_SETTINGCHANGE, OnSettingChange)
+    CR_MESSAGE_HANDLER_EX(WM_THEMECHANGED, OnThemeChanged)
+    CR_MSG_WM_CTLCOLORSTATIC(OnCtlColorStatic)
+    CR_COMMAND_HANDLER_EX(IDC_BUTTON1, BN_CLICKED, OnClickedButton)
+    CR_COMMAND_HANDLER_EX(IDC_BUTTON2, BN_CLICKED, OnClickedButton)
+    CR_COMMAND_HANDLER_EX(IDC_CLOSE, BN_CLICKED, OnClickedButton)
+    CR_CHAIN_MSG_MAP(CompleteWnd)
+  CR_END_MSG_MAP()
 
  private:
-  // Overrides for InstallProgressObserver.
-  // These functions are called on the thread which owns this window.
-  void OnCheckingForUpdate() override;
-  void OnUpdateAvailable(const std::u16string& app_id,
-                         const std::u16string& app_name,
-                         const std::u16string& version_string) override;
-  void OnWaitingToDownload(const std::u16string& app_id,
-                           const std::u16string& app_name) override;
-  void OnDownloading(const std::u16string& app_id,
-                     const std::u16string& app_name,
-                     int time_remaining_ms,
-                     int pos) override;
-  void OnWaitingRetryDownload(const std::u16string& app_id,
-                              const std::u16string& app_name,
-                              const base::Time& next_retry_time) override;
-  void OnWaitingToInstall(const std::u16string& app_id,
-                          const std::u16string& app_name,
-                          bool* can_start_install) override;
-  void OnInstalling(const std::u16string& app_id,
-                    const std::u16string& app_name,
-                    int time_remaining_ms,
-                    int pos) override;
-  void OnPause() override;
-  void OnComplete(const ObserverCompletionInfo& observer_info) override;
-
-  LRESULT OnInitDialog(UINT msg,
-                       WPARAM wparam,
-                       LPARAM lparam,
-                       BOOL& handled);  // NOLINT
-  LRESULT OnInstallStopped(UINT msg,
-                           WPARAM wparam,
-                           LPARAM lparam,
-                           BOOL& handled);  // NOLINT
-  LRESULT OnClickedButton(WORD notify_code,
-                          WORD id,
-                          HWND wnd_ctl,
-                          BOOL& handled);  // NOLINT
-
-  // Returns true if this window is closed.
-  bool MaybeCloseWindow() override;
-
-  HRESULT LaunchCmdLine(const AppCompletionInfo& app_info);
-  bool LaunchCmdLines(const ObserverCompletionInfo& info);
-  HRESULT ChangeControlState();
-  HRESULT SetMarqueeMode(bool is_marquee);
-
-  bool IsInstallStoppedWindowPresent();
-
-  void HandleCancelRequest();
-
-  // Returns true if the |InstallStoppedWnd| window is closed.
-  bool CloseInstallStoppedWindow();
-
-  void DeterminePostInstallUrls(const ObserverCompletionInfo& info);
-  CompletionCodes GetBundleOverallCompletionCode(
-      const ObserverCompletionInfo& info) const;
-  std::wstring GetBundleCompletionErrorMessages(
-      const ObserverCompletionInfo& info) const;
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, ClickedButton);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, OnInstallStopped);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, MaybeCloseWindow);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, GetBundleCompletionCode);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, DeterminePostInstallUrls);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, OnCheckingForUpdate);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, OnWaitingToDownload);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, OnWaitingRetryDownload);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, OnPause);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, OnDownloading);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, OnComplete);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, LaunchCmdLine);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, FlatButtonSubclass);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, SetAppLogoDynamicSizing);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, SetAppLogoThemeSwitching);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, ErrorIllustrationThemeSwitching);
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, ApplyDpiScalingIconMetrics);
 
   enum class States {
     STATE_INIT = 0,
@@ -187,25 +109,132 @@ class ProgressWnd : public CompleteWnd, public InstallProgressObserver {
     STATE_END,
   };
 
+  static CompletionCodes GetBundleCompletionCode(
+      const ObserverCompletionInfo& info);
+  static std::wstring GetBundleCompletionErrorMessages(
+      const ObserverCompletionInfo& info);
+
+  // Overrides for AppInstallProgress.
+  // These functions are called on the thread which owns this window.
+  void OnCheckingForUpdate() override;
+  void OnUpdateAvailable(const std::string& app_id,
+                         const std::u16string& app_name,
+                         const base::Version& version) override;
+  void OnWaitingToDownload(const std::string& app_id,
+                           const std::u16string& app_name) override;
+  void OnDownloading(const std::string& app_id,
+                     const std::u16string& app_name,
+                     const std::optional<base::TimeDelta> time_remaining,
+                     int pos) override;
+  void OnWaitingRetryDownload(const std::string& app_id,
+                              const std::u16string& app_name,
+                              base::Time next_retry_time) override;
+  void OnWaitingToInstall(const std::string& app_id,
+                          const std::u16string& app_name) override;
+  void OnInstalling(const std::string& app_id,
+                    const std::u16string& app_name,
+                    const std::optional<base::TimeDelta> time_remaining,
+                    int pos) override;
+  void OnPause() override;
+  void OnComplete(const ObserverCompletionInfo& observer_info) override;
+
+  LRESULT OnSetAppLogo(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnInitDialog(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnSize(UINT msg, WPARAM wparam, LPARAM lparam);
+  void OnClickedButton(UINT notify_code, int id, HWND wnd_ctl);
+  LRESULT OnEraseBkgnd(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnSettingChange(UINT msg, WPARAM wparam, LPARAM lparam);
+  LRESULT OnThemeChanged(UINT msg, WPARAM wparam, LPARAM lparam);
+  HBRUSH OnCtlColorStatic(HDC dc, HWND ctl_hwnd);
+
+  void SetControlText(int id, const std::wstring& text);
+  void SetAppLogo(HBITMAP light_bitmap, HBITMAP dark_bitmap);
+  void UpdateAppLogo(UINT target_dpi = 0);
+  HBITMAP GetCurrentAppLogoBitmap() const;
+  void UpdateErrorIllustration() override;
+  // Returns the cached error illustration bitmap for the specified theme,
+  // loading it from resources on first request.
+  HBITMAP GetErrorIllustrationBitmap(bool is_dark_mode);
+  void ResetThemeResources();
+
+  // Returns true if this window is closed.
+  bool MaybeCloseWindow() override;
+
+  HRESULT ChangeControlState();
+  HRESULT SetMarqueeMode(bool is_marquee);
+
+  void HandleCancelRequest();
+  void UpdateWindowRgn();
+  void ApplyDpiScaling(UINT dpi) override;
+  int GetScaledCornerRadius() const;
+
+  void DeterminePostInstallUrls(const ObserverCompletionInfo& info);
+
   SEQUENCE_CHECKER(sequence_checker_);
 
   States cur_state_ = States::STATE_INIT;
 
-  std::unique_ptr<InstallStoppedWnd> install_stopped_wnd_;
-
   raw_ptr<ProgressWndEvents> events_sink_ = nullptr;
-  std::vector<std::u16string> post_install_urls_;
+  std::vector<GURL> post_install_urls_;
   bool is_canceled_ = false;
+  std::optional<bool> is_marquee_;
 
   struct ControlState {
+   private:
+    static constexpr size_t kNumControlAttributes =
+        1 + std::to_underlying(States::STATE_END);
+
+   public:
     const int id;
-    const ControlAttributes attr[static_cast<size_t>(States::STATE_END) + 1];
+    const std::array<ControlAttributes, kNumControlAttributes> attr;
   };
 
   static const ControlState ctls_[];
 
+  // Background image cache for both light and dark themes.
+  base::win::ScopedGDIObject<HBITMAP> light_bg_bmp_;
+  base::win::ScopedGDIObject<HBITMAP> dark_bg_bmp_;
+
+  // Error illustration image cache for both light and dark themes.
+  base::win::ScopedGDIObject<HBITMAP> light_error_illustration_bmp_;
+  base::win::ScopedGDIObject<HBITMAP> dark_error_illustration_bmp_;
+
+  // Cached original app logo bitmaps for light and dark themes received via
+  // WM_SET_APP_LOGO.
+  base::win::ScopedGDIObject<HBITMAP> light_app_logo_bmp_;
+  base::win::ScopedGDIObject<HBITMAP> dark_app_logo_bmp_;
+
+  // Scaled app logo bitmap dynamically sized for the window's current DPI.
+  base::win::ScopedGDIObject<HBITMAP> scaled_app_logo_bmp_;
+
+  // The design-time bottom Y-coordinate of `IDC_APP_BITMAP` normalized to
+  // standard 96-DPI space. The bottom edge is locked to preserve the design
+  // margin above the dialog buttons, allowing taller square logos (e.g. 48x48)
+  // to expand upward into the empty area below the progress bar.
+  int initial_app_logo_base_bottom_y_ = -1;
+
+  // Returns the bounding rectangle of `control` in parent client coordinates,
+  // normalized for right-to-left (RTL) mirrored layouts.
+  RECT GetControlClientRect(HWND control) const;
+
+  HBITMAP GetBackgroundBitmap(bool is_dark_mode);
+
   // The speed by which the progress bar moves in marquee mode.
-  static constexpr int kMarqueeModeUpdatesMs = 75;
+  static constexpr int kMarqueeModeUpdatesMs = 15;
+
+  // Subclassed buttons representing the standard dialog actions.
+  // btn1_ (Primary): Used for "Restart Now" actions on reboot/restart screens.
+  // btn2_ (Secondary): Used for "Restart Later" actions on reboot/restart
+  // screens. close_btn_ (Primary): Used for "Close" or "Cancel" actions.
+  // get_help_btn_ (Secondary): Used for the "Get Help" link action.
+  FlatButton btn1_;
+  FlatButton btn2_;
+  FlatButton close_btn_;
+  FlatButton get_help_btn_;
+
+  FRIEND_TEST_ALL_PREFIXES(ProgressWndTest, SetAppLogoDynamicSizing);
+
+  CR_MSG_MAP_CLASS_DECLARATIONS(ProgressWnd)
 };
 
 }  // namespace updater::ui

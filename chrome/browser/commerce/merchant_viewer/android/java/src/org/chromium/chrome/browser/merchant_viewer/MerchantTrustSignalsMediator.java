@@ -6,17 +6,19 @@ package org.chromium.chrome.browser.merchant_viewer;
 
 import android.text.TextUtils;
 
-import org.chromium.base.supplier.ObservableSupplier;
+import org.chromium.base.supplier.NullableObservableSupplier;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.tab.CurrentTabObserver;
-import org.chromium.chrome.browser.tab.EmptyTabObserver;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabHidingType;
+import org.chromium.chrome.browser.tab.TabObserver;
 import org.chromium.content_public.browser.NavigationHandle;
 
 /**
  * Responsible for detecting candidate events for fetching the merchant trust signal and publishing
  * the merchant trust message.
  */
+@NullMarked
 class MerchantTrustSignalsMediator {
     /** Callback interface to communicate with the owning object. */
     interface MerchantTrustSignalsCallback {
@@ -29,34 +31,42 @@ class MerchantTrustSignalsMediator {
 
     private final CurrentTabObserver mCurrentTabObserver;
 
-    MerchantTrustSignalsMediator(ObservableSupplier<Tab> tabSupplier,
-            MerchantTrustSignalsCallback delegate, MerchantTrustMetrics metrics) {
-        mCurrentTabObserver = new CurrentTabObserver(tabSupplier, new EmptyTabObserver() {
-            @Override
-            public void onDidFinishNavigationInPrimaryMainFrame(
-                    Tab tab, NavigationHandle navigation) {
-                if ((tab.isIncognito()) || (!navigation.hasCommitted())
-                        || (navigation.isPrimaryMainFrameFragmentNavigation())
-                        || (navigation.isErrorPage()) || (navigation.getUrl() == null)
-                        || (TextUtils.isEmpty(navigation.getUrl().getHost()))) {
-                    return;
-                }
+    MerchantTrustSignalsMediator(
+            NullableObservableSupplier<Tab> tabSupplier,
+            MerchantTrustSignalsCallback delegate,
+            MerchantTrustMetrics metrics) {
+        mCurrentTabObserver =
+                new CurrentTabObserver(
+                        tabSupplier,
+                        new TabObserver() {
+                            @Override
+                            public void onDidFinishNavigationInPrimaryMainFrame(
+                                    Tab tab, NavigationHandle navigation) {
+                                if (tab.isIncognito()
+                                        || !navigation.hasCommitted()
+                                        || navigation.isPrimaryMainFrameFragmentNavigation()
+                                        || navigation.isErrorPage()
+                                        || (navigation.getUrl() == null)
+                                        || TextUtils.isEmpty(navigation.getUrl().getHost())) {
+                                    return;
+                                }
 
-                metrics.updateRecordingMessageImpact(navigation.getUrl().getHost());
-                delegate.onFinishEligibleNavigation(
-                        new MerchantTrustMessageContext(navigation, tab.getWebContents()));
-            }
+                                metrics.updateRecordingMessageImpact(navigation.getUrl().getHost());
+                                delegate.onFinishEligibleNavigation(
+                                        new MerchantTrustMessageContext(
+                                                navigation, tab.getWebContents()));
+                            }
 
-            @Override
-            public void onHidden(Tab tab, @TabHidingType int type) {
-                metrics.finishRecordingMessageImpact();
-            }
+                            @Override
+                            public void onHidden(Tab tab, @TabHidingType int type) {
+                                metrics.finishRecordingMessageImpact();
+                            }
 
-            @Override
-            public void onDestroyed(Tab tab) {
-                metrics.finishRecordingMessageImpact();
-            }
-        });
+                            @Override
+                            public void onDestroyed(Tab tab) {
+                                metrics.finishRecordingMessageImpact();
+                            }
+                        });
     }
 
     void destroy() {

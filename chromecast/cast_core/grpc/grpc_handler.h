@@ -8,6 +8,7 @@
 #include <grpcpp/generic/async_generic_service.h>
 #include <grpcpp/grpcpp.h>
 
+#include "base/memory/raw_ptr.h"
 #include "chromecast/cast_core/grpc/server_reactor_tracker.h"
 
 namespace cast {
@@ -32,7 +33,8 @@ class GrpcHandler {
       grpc::CallbackServerContext* context) = 0;
 
  private:
-  ServerReactorTracker* server_reactor_tracker_;
+  // Dangling in GrpcUnaryTest.StartsUdsServer on Linux CastOS.
+  raw_ptr<ServerReactorTracker, DanglingUntriaged> server_reactor_tracker_;
 };
 
 }  // namespace utils

@@ -10,13 +10,16 @@
 #include "ash/webui/grit/ash_sample_system_web_app_resources_map.h"
 #include "ash/webui/sample_system_web_app_ui/sample_page_handler.h"
 #include "ash/webui/sample_system_web_app_ui/url_constants.h"
+#include "ash/webui/web_applications/webui_test_prod_util.h"
+#include "base/base64.h"
 #include "base/memory/ptr_util.h"
+#include "base/strings/stringprintf.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
 #include "content/public/browser/web_ui_data_source.h"
 #include "content/public/common/url_constants.h"
+#include "crypto/random.h"
 #include "services/network/public/mojom/content_security_policy.mojom.h"
-#include "ui/webui/color_change_listener/color_change_handler.h"
 #include "ui/webui/webui_allowlist.h"
 
 namespace ash {
@@ -27,9 +30,8 @@ SampleSystemWebAppUI::SampleSystemWebAppUI(content::WebUI* web_ui)
   content::WebUIDataSource* trusted_source =
       content::WebUIDataSource::CreateAndAdd(browser_context,
                                              kChromeUISampleSystemWebAppHost);
-  trusted_source->AddResourcePath("", IDR_ASH_SAMPLE_SYSTEM_WEB_APP_INDEX_HTML);
-  trusted_source->AddResourcePaths(base::make_span(
-      kAshSampleSystemWebAppResources, kAshSampleSystemWebAppResourcesSize));
+  trusted_source->SetDefaultResource(IDR_ASH_SAMPLE_SYSTEM_WEB_APP_INDEX_HTML);
+  trusted_source->AddResourcePaths(kAshSampleSystemWebAppResources);
 
 #if !DCHECK_IS_ON()
   // If a user goes to an invalid url and non-DCHECK mode (DHECK = debug mode)
@@ -48,28 +50,39 @@ SampleSystemWebAppUI::SampleSystemWebAppUI(content::WebUI* web_ui)
   trusted_source->OverrideContentSecurityPolicy(
       network::mojom::CSPDirectiveName::WorkerSrc,
       std::string("worker-src 'self';"));
+
+  std::string script_src = "script-src chrome://resources 'self';";
+  std::string trusted_types = "trusted-types lit-html worker-js-static;";
+
+  // Allow loading test scripts from chrome://webui-test and using the
+  // 'test-harness' Trusted Types policy when running under browser tests.
+  if (MaybeConfigureTestableDataSource(trusted_source)) {
+    script_src.insert(script_src.length() - 1, " chrome://webui-test");
+    trusted_types.insert(trusted_types.length() - 1, " test-harness");
+  }
+
   trusted_source->OverrideContentSecurityPolicy(
-      network::mojom::CSPDirectiveName::TrustedTypes,
-      "trusted-types lit-html worker-js-static;");
+      network::mojom::CSPDirectiveName::ScriptSrc, script_src);
+  trusted_source->OverrideContentSecurityPolicy(
+      network::mojom::CSPDirectiveName::TrustedTypes, trusted_types);
 
   // Add ability to request chrome-untrusted: URLs
   web_ui->AddRequestableScheme(content::kChromeUIUntrustedScheme);
 
   // Register common permissions for chrome-untrusted:// pages.
-  // TODO(https://crbug.com/1113568): Remove this after common permissions are
+  // TODO(crbug.com/40710326): Remove this after common permissions are
   // granted by default.
   auto* webui_allowlist = WebUIAllowlist::GetOrCreate(browser_context);
   const url::Origin sample_system_web_app_untrusted_origin =
       url::Origin::Create(GURL(kChromeUISampleSystemWebAppUntrustedURL));
-  for (const auto& permission : {
-           ContentSettingsType::COOKIES,
-           ContentSettingsType::JAVASCRIPT,
-           ContentSettingsType::IMAGES,
-           ContentSettingsType::SOUND,
-       }) {
-    webui_allowlist->RegisterAutoGrantedPermission(
-        sample_system_web_app_untrusted_origin, permission);
-  }
+  webui_allowlist->RegisterAutoGrantedPermissions(
+      sample_system_web_app_untrusted_origin,
+      {
+          ContentSettingsType::COOKIES,
+          ContentSettingsType::JAVASCRIPT,
+          ContentSettingsType::IMAGES,
+          ContentSettingsType::SOUND,
+      });
 }
 
 SampleSystemWebAppUI::~SampleSystemWebAppUI() = default;
@@ -80,12 +93,6 @@ void SampleSystemWebAppUI::BindInterface(
     sample_page_factory_.reset();
   }
   sample_page_factory_.Bind(std::move(factory));
-}
-
-void SampleSystemWebAppUI::BindInterface(
-    mojo::PendingReceiver<color_change_listener::mojom::PageHandler> receiver) {
-  color_provider_handler_ = std::make_unique<ui::ColorChangeHandler>(
-      web_ui()->GetWebContents(), std::move(receiver));
 }
 
 void SampleSystemWebAppUI::CreatePageHandler(

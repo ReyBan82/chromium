@@ -23,12 +23,16 @@
 #include "third_party/blink/renderer/core/style/content_data.h"
 
 #include <memory>
+
+#include "base/memory/values_equivalent.h"
+#include "third_party/blink/renderer/core/css/counter_style.h"
+#include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/pseudo_element.h"
 #include "third_party/blink/renderer/core/dom/tree_scope.h"
+#include "third_party/blink/renderer/core/layout/layout_counter.h"
 #include "third_party/blink/renderer/core/layout/layout_image.h"
 #include "third_party/blink/renderer/core/layout/layout_image_resource.h"
 #include "third_party/blink/renderer/core/layout/layout_image_resource_style_image.h"
-#include "third_party/blink/renderer/core/layout/layout_object_factory.h"
 #include "third_party/blink/renderer/core/layout/layout_quote.h"
 #include "third_party/blink/renderer/core/layout/layout_text_fragment.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
@@ -54,13 +58,33 @@ void ContentData::Trace(Visitor* visitor) const {
   visitor->Trace(next_);
 }
 
-LayoutObject* ImageContentData::CreateLayoutObject(
-    PseudoElement& pseudo,
-    const ComputedStyle& pseudo_style,
-    LegacyLayout) const {
-  LayoutImage* image = LayoutImage::CreateAnonymous(pseudo);
+bool ContentData::HasAltCounterContent() const {
+  for (const ContentData* current = this; current; current = current->Next()) {
+    if (current->IsAltCounter()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+String ContentData::ConcatenateAltText(const ContentData& first_alt_data) {
+  DCHECK(first_alt_data.IsAlt());
+  StringBuilder alt_text;
+  for (const ContentData* content_data = &first_alt_data; content_data;
+       content_data = content_data->Next()) {
+    if (auto* alt_counter = DynamicTo<AltCounterContentData>(content_data)) {
+      alt_text.Append(alt_counter->GetText());
+    } else {
+      alt_text.Append(To<AltTextContentData>(content_data)->GetText());
+    }
+  }
+  return alt_text.ToString();
+}
+
+LayoutObject* ImageContentData::CreateLayoutObject(LayoutObject& owner) const {
+  LayoutImage* image = LayoutImage::CreateAnonymous(owner.GetDocument());
   bool match_parent_size = image_ && image_->IsGeneratedImage();
-  image->SetPseudoElementStyle(&pseudo_style, match_parent_size);
+  image->SetPseudoElementStyle(owner, match_parent_size);
   if (image_) {
     image->SetImageResource(
         MakeGarbageCollected<LayoutImageResourceStyleImage>(image_.Get()));
@@ -75,60 +99,102 @@ void ImageContentData::Trace(Visitor* visitor) const {
   ContentData::Trace(visitor);
 }
 
-LayoutObject* TextContentData::CreateLayoutObject(
-    PseudoElement& pseudo,
-    const ComputedStyle& pseudo_style,
-    LegacyLayout legacy) const {
+LayoutObject* TextContentData::CreateLayoutObject(LayoutObject& owner) const {
   LayoutObject* layout_object =
-      LayoutTextFragment::CreateAnonymous(pseudo, text_.Impl(), legacy);
-  layout_object->SetPseudoElementStyle(&pseudo_style);
+      LayoutTextFragment::CreateAnonymous(owner.GetDocument(), text_);
+  layout_object->SetPseudoElementStyle(owner);
   return layout_object;
 }
 
 LayoutObject* AltTextContentData::CreateLayoutObject(
-    PseudoElement& pseudo,
-    const ComputedStyle& pseudo_style,
-    LegacyLayout) const {
+    LayoutObject& owner) const {
   // Does not require a layout object. Calling site should first check
   // IsAltContentData() before calling this method.
   NOTREACHED();
-  return nullptr;
 }
 
 LayoutObject* CounterContentData::CreateLayoutObject(
-    PseudoElement& pseudo,
-    const ComputedStyle& pseudo_style,
-    LegacyLayout legacy) const {
+    LayoutObject& owner) const {
   LayoutObject* layout_object =
-      LayoutObjectFactory::CreateCounter(pseudo, *this, legacy);
-  layout_object->SetPseudoElementStyle(&pseudo_style);
+      MakeGarbageCollected<LayoutCounter>(owner.GetDocument(), *this);
+  layout_object->SetPseudoElementStyle(owner);
   return layout_object;
 }
 
+void CounterData::Trace(Visitor* visitor) const {
+  visitor->Trace(tree_scope);
+  visitor->Trace(symbols_counter_style);
+}
+
+CounterContentData::CounterContentData(
+    const AtomicString& identifier,
+    const AtomicString& style,
+    const AtomicString& separator,
+    const TreeScope* tree_scope,
+    const cssvalue::CSSSymbolsValue* list_style_symbols_function)
+    : counter_data_(identifier,
+                    style,
+                    separator,
+                    tree_scope,
+                    list_style_symbols_function
+                        ? CounterStyle::CreateAnonymousCounterStyle(
+                              *list_style_symbols_function)
+                        : nullptr) {}
+
 void CounterContentData::Trace(Visitor* visitor) const {
-  visitor->Trace(tree_scope_);
+  visitor->Trace(counter_data_);
   ContentData::Trace(visitor);
 }
 
-LayoutObject* QuoteContentData::CreateLayoutObject(
-    PseudoElement& pseudo,
-    const ComputedStyle& pseudo_style,
-    LegacyLayout legacy) const {
-  LayoutObject* layout_object =
-      MakeGarbageCollected<LayoutQuote>(pseudo, quote_);
-  if (legacy == LegacyLayout::kForce) {
-    layout_object->SetForceLegacyLayout();
+bool CounterContentData::Equals(const ContentData& data) const {
+  const auto* other = DynamicTo<CounterContentData>(data);
+  if (!other) {
+    return false;
   }
-  layout_object->SetPseudoElementStyle(&pseudo_style);
+  return Identifier() == other->Identifier() &&
+         ListStyle() == other->ListStyle() &&
+         Separator() == other->Separator() &&
+         GetTreeScope() == other->GetTreeScope() &&
+         base::ValuesEquivalent(GetSymbolsCounterStyle(),
+                                other->GetSymbolsCounterStyle());
+}
+
+const CounterStyle& CounterContentData::ResolveCounterStyle(
+    const StyleEngine& style_engine) const {
+  // A symbols() function supplies its counter style inline, with no name;
+  // otherwise the value names a <counter-style> to resolve in scope.
+  if (const CounterStyle* symbols_style = GetSymbolsCounterStyle()) {
+    return *symbols_style;
+  }
+  return style_engine.FindCounterStyleAcrossScopes(ListStyle(), GetTreeScope());
+}
+
+LayoutObject* AltCounterContentData::CreateLayoutObject(
+    LayoutObject& owner) const {
+  NOTREACHED();
+}
+
+void AltCounterContentData::UpdateText(
+    CountersAttachmentContext& context,
+    const StyleEngine& style_engine,
+    const LayoutObject& content_generating_object) {
+  Vector<int> counter_values = context.GetCounterValues(
+      content_generating_object, Identifier(), Separator().IsNull());
+  const CounterStyle& counter_style = ResolveCounterStyle(style_engine);
+  String text = LayoutCounter::GenerateCounterText(std::move(counter_values),
+                                                   &counter_style, Separator());
+  SetText(std::move(text));
+}
+
+LayoutObject* QuoteContentData::CreateLayoutObject(LayoutObject& owner) const {
+  LayoutObject* layout_object =
+      MakeGarbageCollected<LayoutQuote>(owner, quote_);
+  layout_object->SetPseudoElementStyle(owner);
   return layout_object;
 }
 
-LayoutObject* NoneContentData::CreateLayoutObject(
-    PseudoElement& pseudo,
-    const ComputedStyle& pseudo_style,
-    LegacyLayout) const {
+LayoutObject* NoneContentData::CreateLayoutObject(LayoutObject& owner) const {
   NOTREACHED();
-  return nullptr;
 }
 
 }  // namespace blink

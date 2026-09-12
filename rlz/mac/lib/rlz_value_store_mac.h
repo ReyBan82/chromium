@@ -5,15 +5,17 @@
 #ifndef RLZ_MAC_LIB_RLZ_VALUE_STORE_MAC_H_
 #define RLZ_MAC_LIB_RLZ_VALUE_STORE_MAC_H_
 
+#import <Foundation/Foundation.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#include "base/compiler_specific.h"
-#include "base/mac/scoped_nsobject.h"
-#include "rlz/lib/rlz_value_store.h"
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
 
-@class NSDictionary;
-@class NSMutableDictionary;
+#include "base/compiler_specific.h"
+#include "rlz/lib/rlz_value_store.h"
 
 namespace rlz_lib {
 
@@ -27,25 +29,22 @@ class RlzValueStoreMac : public RlzValueStore {
   bool HasAccess(AccessType type) override;
 
   bool WritePingTime(Product product, int64_t time) override;
-  bool ReadPingTime(Product product, int64_t* time) override;
+  std::optional<int64_t> ReadPingTime(Product product) override;
   bool ClearPingTime(Product product) override;
 
   bool WriteAccessPointRlz(AccessPoint access_point,
-                           const char* new_rlz) override;
-  bool ReadAccessPointRlz(AccessPoint access_point,
-                          char* rlz,
-                          size_t rlz_size) override;
+                           std::string_view new_rlz) override;
+  std::string ReadAccessPointRlz(AccessPoint access_point) override;
   bool ClearAccessPointRlz(AccessPoint access_point) override;
-  bool UpdateExistingAccessPointRlz(const std::string& brand) override;
+  bool UpdateExistingAccessPointRlz(std::string_view brand) override;
 
-  bool AddProductEvent(Product product, const char* event_rlz) override;
-  bool ReadProductEvents(Product product,
-                         std::vector<std::string>* events) override;
-  bool ClearProductEvent(Product product, const char* event_rlz) override;
+  bool AddProductEvent(Product product, std::string_view event_rlz) override;
+  std::vector<std::string> ReadProductEvents(Product product) override;
+  bool ClearProductEvent(Product product, std::string_view event_rlz) override;
   bool ClearAllProductEvents(Product product) override;
 
-  bool AddStatefulEvent(Product product, const char* event_rlz) override;
-  bool IsStatefulEvent(Product product, const char* event_rlz) override;
+  bool AddStatefulEvent(Product product, std::string_view event_rlz) override;
+  bool IsStatefulEvent(Product product, std::string_view event_rlz) override;
   bool ClearAllStatefulEvents(Product product) override;
 
   void CollectGarbage() override;
@@ -63,9 +62,9 @@ class RlzValueStoreMac : public RlzValueStore {
   // Returns the dictionary to which all data should be written. Usually, this
   // is just |dictionary()|, but if supplementary branding is used, it's a
   // subdirectory at key "brand_<supplementary branding code>".
-  // Note that windows stores data at
+  // Note that Windows stores data at
   //    rlz/name (e.g. "pingtime")/supplementalbranding/productcode
-  // Mac on the other hand does
+  // The Mac on the other hand uses
   //    supplementalbranding/productcode/pingtime.
   NSMutableDictionary* WorkingDict();
 
@@ -73,8 +72,8 @@ class RlzValueStoreMac : public RlzValueStore {
   // product p.
   NSMutableDictionary* ProductDict(Product p);
 
-  base::scoped_nsobject<NSMutableDictionary> dict_;
-  base::scoped_nsobject<NSString> plist_path_;
+  NSMutableDictionary* __strong dict_;
+  NSString* __strong plist_path_;
 };
 
 }  // namespace rlz_lib

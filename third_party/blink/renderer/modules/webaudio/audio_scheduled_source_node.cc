@@ -25,8 +25,6 @@
 
 #include "third_party/blink/renderer/modules/webaudio/audio_scheduled_source_node.h"
 
-#include <algorithm>
-
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/modules/event_modules.h"
@@ -41,7 +39,7 @@
 namespace blink {
 
 AudioScheduledSourceNode::AudioScheduledSourceNode(BaseAudioContext& context)
-    : AudioNode(context) {}
+    : AudioNode(context), ActiveScriptWrappable<AudioScheduledSourceNode>({}) {}
 
 AudioScheduledSourceHandler&
 AudioScheduledSourceNode::GetAudioScheduledSourceHandler() const {
@@ -77,7 +75,7 @@ void AudioScheduledSourceNode::setOnended(EventListener* listener) {
 bool AudioScheduledSourceNode::HasPendingActivity() const {
   // To avoid the leak, a node should be collected regardless of its
   // playback state if the context is closed.
-  if (context()->ContextState() == BaseAudioContext::kClosed) {
+  if (context()->ContextState() == V8AudioContextState::Enum::kClosed) {
     return false;
   }
 

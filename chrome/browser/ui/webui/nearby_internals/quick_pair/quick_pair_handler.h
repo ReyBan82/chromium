@@ -6,9 +6,9 @@
 #define CHROME_BROWSER_UI_WEBUI_NEARBY_INTERNALS_QUICK_PAIR_QUICK_PAIR_HANDLER_H_
 
 #include <memory>
+
 #include "ash/quick_pair/common/log_buffer.h"
 #include "ash/quick_pair/common/logging.h"
-#include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/values.h"
@@ -44,18 +44,18 @@ class QuickPairHandler : public content::WebUIMessageHandler,
   void OnLogBufferCleared() override;
 
   // Message handler callback that returns the Log Buffer in dictionary form.
-  void HandleGetLogMessages(const base::Value::List& args);
+  void HandleGetLogMessages(const base::ListValue& args);
 
   // Message handler callback that clears the Log Buffer.
-  void ClearLogBuffer(const base::Value::List& args);
+  void ClearLogBuffer(const base::ListValue& args);
 
   // Fast Pair UI Triggers.
-  void NotifyFastPairError(const base::Value::List& args);
-  void NotifyFastPairDiscovery(const base::Value::List& args);
-  void NotifyFastPairPairing(const base::Value::List& args);
-  void NotifyFastPairApplicationAvailable(const base::Value::List& args);
-  void NotifyFastPairApplicationInstalled(const base::Value::List& args);
-  void NotifyFastPairAssociateAccountKey(const base::Value::List& args);
+  void NotifyFastPairError(const base::ListValue& args);
+  void NotifyFastPairDiscovery(const base::ListValue& args);
+  void NotifyFastPairPairing(const base::ListValue& args);
+  void NotifyFastPairApplicationAvailable(const base::ListValue& args);
+  void NotifyFastPairApplicationInstalled(const base::ListValue& args);
+  void NotifyFastPairAssociateAccountKey(const base::ListValue& args);
 
   void OnImageDecodedFastPairError(gfx::Image image);
   void OnImageDecodedFastPairDiscovery(gfx::Image image);

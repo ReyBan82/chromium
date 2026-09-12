@@ -9,55 +9,93 @@ import static org.chromium.android_webview.test.OnlyRunIn.ProcessMode.SINGLE_PRO
 
 import androidx.test.filters.SmallTest;
 
-import org.junit.After;
+import org.jni_zero.JNINamespace;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.UseParametersRunnerFactory;
 
 import org.chromium.android_webview.test.util.MemoryMetricsLoggerUtilsJni;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.metrics.RecordHistogram;
 import org.chromium.base.test.util.Feature;
+import org.chromium.base.test.util.HistogramWatcher;
 
-/**
- * Tests for memory_metrics_logger.cc.
- */
+/** Tests for memory_metrics_logger.cc. */
 @JNINamespace("android_webview")
-@RunWith(AwJUnit4ClassRunner.class)
-public class MemoryMetricsLoggerTest {
-    @Rule
-    public AwActivityTestRule mActivityTestRule = new AwActivityTestRule();
+@RunWith(Parameterized.class)
+@UseParametersRunnerFactory(AwJUnit4ClassRunnerWithParameters.Factory.class)
+public class MemoryMetricsLoggerTest extends AwParameterizedTest {
+    @Rule public AwActivityTestRule mActivityTestRule;
+
+    private HistogramWatcher mHistogramExpectationBrowser;
+    private HistogramWatcher mHistogramExpectationRendererMulti;
+    private HistogramWatcher mHistogramExpectationRendererSingle;
+    private HistogramWatcher mHistogramExpectationTotal;
+
+    private HistogramWatcher mHistogramExpectationBrowserPAAllocatedObjects;
+
+    public MemoryMetricsLoggerTest(AwSettingsMutation param) {
+        this.mActivityTestRule = new AwActivityTestRule(param.getMutation());
+    }
 
     @Before
     public void setUp() throws Exception {
+        mHistogramExpectationBrowser =
+                HistogramWatcher.newBuilder()
+                        .expectAnyRecordTimes("Memory.Browser.PrivateMemoryFootprint", 1)
+                        .expectAnyRecordTimes("Memory.Browser.ResidentSet", 1)
+                        .expectAnyRecordTimes("Memory.Browser.ResidentSetPeak", 1)
+                        .allowExtraRecordsForHistogramsAbove()
+                        .build();
+        mHistogramExpectationRendererMulti =
+                HistogramWatcher.newBuilder()
+                        .expectAnyRecordTimes("Memory.Renderer.PrivateMemoryFootprint", 1)
+                        .expectAnyRecordTimes("Memory.Renderer.ResidentSet", 1)
+                        .expectAnyRecordTimes("Memory.Renderer.ResidentSetPeak", 1)
+                        .allowExtraRecordsForHistogramsAbove()
+                        .build();
+        mHistogramExpectationRendererSingle =
+                HistogramWatcher.newBuilder()
+                        .expectNoRecords("Memory.Renderer.PrivateMemoryFootprint")
+                        .expectNoRecords("Memory.Renderer.ResidentSet")
+                        .expectNoRecords("Memory.Renderer.ResidentSetPeak")
+                        .build();
+        mHistogramExpectationTotal =
+                HistogramWatcher.newBuilder()
+                        .expectAnyRecordTimes("Memory.Total.PrivateMemoryFootprint", 1)
+                        .expectAnyRecordTimes("Memory.Total.ResidentSet", 1)
+                        .allowExtraRecordsForHistogramsAbove()
+                        .build();
+
+        mHistogramExpectationBrowserPAAllocatedObjects =
+                HistogramWatcher.newBuilder()
+                        .expectAnyRecordTimes(
+                                "Memory.Browser.PartitionAlloc.Malloc.AllocatedObjects", 1)
+                        .allowExtraRecordsForHistogramsAbove()
+                        .build();
         TestAwContentsClient contentsClient = new TestAwContentsClient();
         AwTestContainerView testContainerView =
                 mActivityTestRule.createAwTestContainerViewOnMainSync(contentsClient);
 
-        mActivityTestRule.loadUrlSync(testContainerView.getAwContents(),
-                contentsClient.getOnPageFinishedHelper(), "about:blank");
+        mActivityTestRule.loadUrlSync(
+                testContainerView.getAwContents(),
+                contentsClient.getOnPageFinishedHelper(),
+                "about:blank");
         Assert.assertTrue(MemoryMetricsLoggerUtilsJni.get().forceRecordHistograms());
     }
-
-    @After
-    public void tearDown() {}
 
     @Test
     @Feature({"AndroidWebView"})
     @OnlyRunIn(MULTI_PROCESS)
     @SmallTest
     public void testMultiProcessHistograms() {
-        Assert.assertNotEquals(0,
-                RecordHistogram.getHistogramTotalCountForTesting(
-                        "Memory.Browser.PrivateMemoryFootprint"));
-        Assert.assertNotEquals(0,
-                RecordHistogram.getHistogramTotalCountForTesting(
-                        "Memory.Renderer.PrivateMemoryFootprint"));
-        Assert.assertNotEquals(0,
-                RecordHistogram.getHistogramTotalCountForTesting(
-                        "Memory.Total.PrivateMemoryFootprint"));
+        mHistogramExpectationBrowser.assertExpected();
+        mHistogramExpectationRendererMulti.assertExpected();
+        mHistogramExpectationTotal.assertExpected();
+
+        mHistogramExpectationBrowserPAAllocatedObjects.assertExpected();
     }
 
     @Test
@@ -65,15 +103,11 @@ public class MemoryMetricsLoggerTest {
     @OnlyRunIn(SINGLE_PROCESS)
     @SmallTest
     public void testSingleProcessHistograms() {
-        Assert.assertNotEquals(0,
-                RecordHistogram.getHistogramTotalCountForTesting(
-                        "Memory.Browser.PrivateMemoryFootprint"));
+        mHistogramExpectationBrowser.assertExpected();
         // Verify no renderer record in single process mode.
-        Assert.assertEquals(0,
-                RecordHistogram.getHistogramTotalCountForTesting(
-                        "Memory.Renderer.PrivateMemoryFootprint"));
-        Assert.assertNotEquals(0,
-                RecordHistogram.getHistogramTotalCountForTesting(
-                        "Memory.Total.PrivateMemoryFootprint"));
+        mHistogramExpectationRendererSingle.assertExpected();
+        mHistogramExpectationTotal.assertExpected();
+
+        mHistogramExpectationBrowserPAAllocatedObjects.assertExpected();
     }
 }

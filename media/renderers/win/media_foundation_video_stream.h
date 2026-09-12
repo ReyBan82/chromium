@@ -23,8 +23,6 @@ class MediaFoundationVideoStream : public MediaFoundationStreamWrapper {
                         std::unique_ptr<MediaLog> media_log,
                         MediaFoundationStreamWrapper** stream_out);
 
-  bool IsEncrypted() const override;
-
  protected:
   HRESULT GetMediaType(IMFMediaType** media_type_out) override;
 };
@@ -42,6 +40,7 @@ class MediaFoundationH264VideoStream : public MediaFoundationVideoStream {
 // The HEVC specific video stream.
 class MediaFoundationHEVCVideoStream : public MediaFoundationVideoStream {
  protected:
+  HRESULT GetMediaType(IMFMediaType** media_type_out) override;
   bool AreFormatChangesEnabled() override;
 };
 #endif  // BUILDFLAG(ENABLE_PLATFORM_HEVC) ||

@@ -7,6 +7,8 @@
 
 #include <stddef.h>
 
+#include "base/compiler_specific.h"
+
 #ifndef COMPILE_ASSERT
 // Some bots that build mini_installer don't know static_assert.
 #if __cplusplus >= 201103L
@@ -54,17 +56,6 @@ bool StrEndsWith(const wchar_t* str, const wchar_t* end_str);
 // Function to check if a string (specified by str) starts with another string
 // (specified by start_str).
 bool StrStartsWith(const wchar_t* str, const wchar_t* start_str);
-
-// Case insensitive search of the first occurrence of |find| in |source|.
-const wchar_t* SearchStringI(const wchar_t* source, const wchar_t* find);
-
-// Searches for |tag| within |str|.  Returns true if |tag| is found and is
-// immediately followed by '-' or is at the end of the string.  If |position|
-// is non-nullptr, the location of the tag is returned in |*position| on
-// success.
-bool FindTagInStr(const wchar_t* str,
-                  const wchar_t* tag,
-                  const wchar_t** position);
 
 // Takes the path to file and returns a pointer to the basename component.
 // Example input -> output:
@@ -119,11 +110,6 @@ class StackString {
 
   bool empty() const { return length() == 0; }
 
-  // Does a case insensitive search for a substring.
-  const wchar_t* findi(const wchar_t* find) const {
-    return SearchStringI(buffer_, find);
-  }
-
   // Case insensitive string compare.
   int comparei(const wchar_t* str) const { return lstrcmpiW(buffer_, str); }
 
@@ -136,7 +122,7 @@ class StackString {
   bool truncate_at(size_t location) {
     if (location >= kCapacity)
       return false;
-    buffer_[location] = L'\0';
+    UNSAFE_TODO(buffer_[location] = L'\0');
     return true;
   }
 

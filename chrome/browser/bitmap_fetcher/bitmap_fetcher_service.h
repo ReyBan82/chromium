@@ -32,12 +32,11 @@ class BitmapFetcherService : public KeyedService, public BitmapFetcherDelegate {
  public:
   typedef int RequestId;
   static const RequestId REQUEST_ID_INVALID = 0;
-  using BitmapFetchedCallback =
-      base::OnceCallback<void(const SkBitmap& bitmap)>;
+  using BitmapFetchedCallback = base::OnceCallback<void(SkBitmap bitmap)>;
 
   class Observer {
    public:
-    virtual ~Observer() {}
+    virtual ~Observer() = default;
 
     // Called whenever the image changes. Called with an empty image if the
     // fetch failed or the request ended for any reason.

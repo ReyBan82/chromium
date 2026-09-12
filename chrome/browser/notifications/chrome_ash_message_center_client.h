@@ -5,17 +5,27 @@
 #ifndef CHROME_BROWSER_NOTIFICATIONS_CHROME_ASH_MESSAGE_CENTER_CLIENT_H_
 #define CHROME_BROWSER_NOTIFICATIONS_CHROME_ASH_MESSAGE_CENTER_CLIENT_H_
 
+#include <map>
+#include <memory>
+#include <string>
+
 #include "ash/public/cpp/notifier_settings_controller.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
-#include "chrome/browser/notifications/notification_platform_bridge.h"
+#include "chrome/browser/notifications/displayed_notifications_dispatch_callback.h"
+#include "chrome/browser/notifications/notification_handler.h"
 #include "chrome/browser/notifications/notification_platform_bridge_delegate.h"
+#include "chrome/browser/notifications/notification_platform_bridge.h"
 #include "chrome/browser/notifications/notifier_controller.h"
+#include "ui/gfx/image/image_skia.h"
+#include "ui/message_center/public/cpp/notification.h"
+#include "ui/message_center/public/cpp/notifier_id.h"
+#include "url/gurl.h"
 
 // Helper for NotificationPlatformBridgeChromeOs. Sends notifications to Ash
 // and handles interactions with those notifications, plus it keeps track of
-// NotifierControllers to provide notifier settings information to Ash (visible
-// in NotifierSettingsView). With Lacros, runs in the ash-chrome process.
+// NotifierControllers to provide notifier settings information to Ash.
 class ChromeAshMessageCenterClient : public NotificationPlatformBridge,
                                      public ash::NotifierSettingsController,
                                      public NotifierController::Observer {
@@ -35,6 +45,10 @@ class ChromeAshMessageCenterClient : public NotificationPlatformBridge,
   void Close(Profile* profile, const std::string& notification_id) override;
   void GetDisplayed(Profile* profile,
                     GetDisplayedNotificationsCallback callback) const override;
+  void GetDisplayedForOrigin(
+      Profile* profile,
+      const GURL& origin,
+      GetDisplayedNotificationsCallback callback) const override;
   void SetReadyCallback(NotificationBridgeReadyCallback callback) override;
   void DisplayServiceShutDown(Profile* profile) override {}
 
@@ -54,7 +68,7 @@ class ChromeAshMessageCenterClient : public NotificationPlatformBridge,
                                 bool enabled) override;
 
  private:
-  NotificationPlatformBridgeDelegate* delegate_;
+  raw_ptr<NotificationPlatformBridgeDelegate> delegate_;
 
   // Notifier source for each notifier type.
   std::map<message_center::NotifierType, std::unique_ptr<NotifierController>>

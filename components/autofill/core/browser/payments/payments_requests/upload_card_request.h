@@ -5,15 +5,17 @@
 #ifndef COMPONENTS_AUTOFILL_CORE_BROWSER_PAYMENTS_PAYMENTS_REQUESTS_UPLOAD_CARD_REQUEST_H_
 #define COMPONENTS_AUTOFILL_CORE_BROWSER_PAYMENTS_PAYMENTS_REQUESTS_UPLOAD_CARD_REQUEST_H_
 
+#include <optional>
 #include <string>
 
 #include "base/functional/callback.h"
-#include "components/autofill/core/browser/autofill_client.h"
-#include "components/autofill/core/browser/payments/payments_client.h"
+#include "base/time/time.h"
+#include "components/autofill/core/browser/payments/payments_autofill_client.h"
+#include "components/autofill/core/browser/payments/payments_request_details.h"
 #include "components/autofill/core/browser/payments/payments_requests/payments_request.h"
 
 namespace base {
-class Value;
+class DictValue;
 }  // namespace base
 
 namespace autofill::payments {
@@ -21,11 +23,10 @@ namespace autofill::payments {
 class UploadCardRequest : public PaymentsRequest {
  public:
   UploadCardRequest(
-      const PaymentsClient::UploadRequestDetails& request_details,
+      const UploadCardRequestDetails& request_details,
       const bool full_sync_enabled,
-      base::OnceCallback<void(AutofillClient::PaymentsRpcResult,
-                              const PaymentsClient::UploadCardResponseDetails&)>
-          callback);
+      base::OnceCallback<void(PaymentsAutofillClient::PaymentsRpcResult,
+                              const UploadCardResponseDetails&)> callback);
   UploadCardRequest(const UploadCardRequest&) = delete;
   UploadCardRequest& operator=(const UploadCardRequest&) = delete;
   ~UploadCardRequest() override;
@@ -34,17 +35,20 @@ class UploadCardRequest : public PaymentsRequest {
   std::string GetRequestUrlPath() override;
   std::string GetRequestContentType() override;
   std::string GetRequestContent() override;
-  void ParseResponse(const base::Value::Dict& response) override;
+  void ParseResponse(const base::DictValue& response) override;
   bool IsResponseComplete() override;
-  void RespondToDelegate(AutofillClient::PaymentsRpcResult result) override;
+  void RespondToDelegate(
+      PaymentsAutofillClient::PaymentsRpcResult result) override;
+  std::string GetHistogramName() const override;
+  std::optional<base::TimeDelta> GetTimeout() const override;
 
  private:
-  const PaymentsClient::UploadRequestDetails request_details_;
+  const UploadCardRequestDetails request_details_;
   const bool full_sync_enabled_;
-  base::OnceCallback<void(AutofillClient::PaymentsRpcResult,
-                          const PaymentsClient::UploadCardResponseDetails&)>
+  base::OnceCallback<void(PaymentsAutofillClient::PaymentsRpcResult,
+                          const UploadCardResponseDetails&)>
       callback_;
-  PaymentsClient::UploadCardResponseDetails upload_card_response_details_;
+  UploadCardResponseDetails upload_card_response_details_;
 };
 
 }  // namespace autofill::payments

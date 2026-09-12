@@ -6,6 +6,7 @@
 #define COMPONENTS_SERVICES_APP_SERVICE_PUBLIC_CPP_PREFERRED_APPS_LIST_HANDLE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,7 +15,6 @@
 #include "base/observer_list_types.h"
 #include "components/services/app_service/public/cpp/intent.h"
 #include "components/services/app_service/public/cpp/preferred_app.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class GURL;
 
@@ -42,22 +42,29 @@ class PreferredAppsListHandle {
       const std::string& app_id) const = 0;
 
   // Find preferred app id for an |url|.
-  virtual absl::optional<std::string> FindPreferredAppForUrl(
+  virtual std::optional<std::string> FindPreferredAppForUrl(
       const GURL& url) const = 0;
 
   // Find preferred app id for an |intent|.
-  virtual absl::optional<std::string> FindPreferredAppForIntent(
+  virtual std::optional<std::string> FindPreferredAppForIntent(
       const IntentPtr& intent) const = 0;
 
-  // Returns a list of app IDs that are set as preferred app to an intent
-  // filter in the |intent_filters| list.
+  // Returns a list of app IDs that are set as preferred apps for intent
+  // filters that structurally overlap with `intent_filters`. `app_id` is the
+  // ID of the new app we want to enable (which is ignored to avoid
+  // self-conflict checks and passed to the conflict callback to verify if they
+  // can co-exist). If `app_id` is std::nullopt, we return all overlapping
+  // preferred apps.
   virtual base::flat_set<std::string> FindPreferredAppsForFilters(
+      std::optional<std::string> app_id,
       const IntentFilters& intent_filters) const = 0;
 
   class Observer : public base::CheckedObserver {
    public:
     virtual void OnPreferredAppChanged(const std::string& app_id,
                                        bool is_preferred_app) = 0;
+
+    virtual void OnPreferredAppsListInitialized() {}
 
     // Called when the PreferredAppsList object (the thing that this observer
     // observes) will be destroyed. In response, the observer, |this|, should

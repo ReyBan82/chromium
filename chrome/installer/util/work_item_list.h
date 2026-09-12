@@ -16,6 +16,7 @@
 
 #include "base/files/file_path.h"
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/installer/util/work_item.h"
 
 // A WorkItem subclass that recursively contains a list of WorkItems. Thus it
@@ -42,12 +43,9 @@ class WorkItemList : public WorkItem {
   // Add a CopyTreeWorkItem to the list of work items.
   // See the NOTE in the documentation for the CopyTreeWorkItem class for
   // special considerations regarding |temp_path|.
-  virtual WorkItem* AddCopyTreeWorkItem(
-      const base::FilePath& source_path,
-      const base::FilePath& dest_path,
-      const base::FilePath& temp_path,
-      CopyOverWriteOption overwrite_option,
-      const base::FilePath& alternative_path = base::FilePath());
+  virtual WorkItem* AddCopyTreeWorkItem(const base::FilePath& source_path,
+                                        const base::FilePath& dest_path,
+                                        const base::FilePath& temp_path);
 
   // Add a CreateDirWorkItem that creates a directory at the given path.
   virtual WorkItem* AddCreateDirWorkItem(const base::FilePath& path);
@@ -80,7 +78,7 @@ class WorkItemList : public WorkItem {
   virtual WorkItem* AddMoveTreeWorkItem(const base::FilePath& source_path,
                                         const base::FilePath& dest_path,
                                         const base::FilePath& temp_path,
-                                        MoveTreeOption duplicate_option);
+                                        MoveTreeOptions options);
 
   // Add a SetRegValueWorkItem that sets a registry value with REG_SZ type
   // at the key with specified path.
@@ -122,7 +120,7 @@ class WorkItemList : public WorkItem {
  protected:
   friend class WorkItem;
 
-  typedef std::list<WorkItem*> WorkItems;
+  typedef std::list<raw_ptr<WorkItem, CtnExperimental>> WorkItems;
   typedef WorkItems::iterator WorkItemIterator;
 
   WorkItemList();

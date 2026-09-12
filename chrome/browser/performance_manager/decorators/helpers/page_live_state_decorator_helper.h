@@ -5,10 +5,13 @@
 #ifndef CHROME_BROWSER_PERFORMANCE_MANAGER_DECORATORS_HELPERS_PAGE_LIVE_STATE_DECORATOR_HELPER_H_
 #define CHROME_BROWSER_PERFORMANCE_MANAGER_DECORATORS_HELPERS_PAGE_LIVE_STATE_DECORATOR_HELPER_H_
 
+#include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/sequence_checker.h"
+#include "chrome/browser/glic/public/glic_perf_traits_tracker.h"
 #include "chrome/browser/media/webrtc/media_stream_capture_indicator.h"
-#include "components/performance_manager/public/performance_manager_main_thread_observer.h"
+#include "components/performance_manager/public/performance_manager_observer.h"
 #include "content/public/browser/devtools_agent_host.h"
 
 namespace performance_manager {
@@ -19,8 +22,9 @@ class ActiveTabObserver;
 
 class PageLiveStateDecoratorHelper
     : public MediaStreamCaptureIndicator::Observer,
-      public PerformanceManagerMainThreadObserverDefaultImpl,
-      public content::DevToolsAgentHostObserver {
+      public PerformanceManagerObserver,
+      public content::DevToolsAgentHostObserver,
+      public glic::GlicPerfTraitsTracker::Observer {
  public:
   PageLiveStateDecoratorHelper();
   ~PageLiveStateDecoratorHelper() override;
@@ -36,6 +40,8 @@ class PageLiveStateDecoratorHelper
                                  bool is_capturing_audio) override;
   void OnIsBeingMirroredChanged(content::WebContents* contents,
                                 bool is_being_mirrored) override;
+  void OnIsCapturingTabChanged(content::WebContents* contents,
+                               bool is_capturing_tab) override;
   void OnIsCapturingWindowChanged(content::WebContents* contents,
                                   bool is_capturing_window) override;
   void OnIsCapturingDisplayChanged(content::WebContents* contents,
@@ -47,9 +53,16 @@ class PageLiveStateDecoratorHelper
   void DevToolsAgentHostDetached(
       content::DevToolsAgentHost* agent_host) override;
 
-  // PerformanceManagerMainThreadObserver:
+  // PerformanceManagerObserver:
   void OnPageNodeCreatedForWebContents(
       content::WebContents* web_contents) override;
+
+  // glic::GlicPerfTraitsTracker::Observer:
+  void OnGlicActuationStateChanged(content::WebContents* web_contents,
+                                   GlicActuationState state) override;
+  void OnIsGlicPinnedToVisibleInstanceChanged(
+      content::WebContents* web_contents,
+      bool is_pinned_to_visible) override;
 
  private:
   class WebContentsObserver;
@@ -61,9 +74,11 @@ class PageLiveStateDecoratorHelper
   // destructor of PageLiveStateDecoratorHelper is invoked are destroyed.
   raw_ptr<WebContentsObserver> first_web_contents_observer_ = nullptr;
 
-#if !BUILDFLAG(IS_ANDROID)
   std::unique_ptr<ActiveTabObserver> active_tab_observer_;
-#endif  // !BUILDFLAG(IS_ANDROID)
+
+  base::ScopedObservation<glic::GlicPerfTraitsTracker,
+                          glic::GlicPerfTraitsTracker::Observer>
+      glic_perf_traits_observation_{this};
 
   SEQUENCE_CHECKER(sequence_checker_);
 };

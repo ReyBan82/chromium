@@ -3,8 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Unittest for chrome_messages_json.py.
-"""
+"""Unittest for chrome_messages_json.py."""
 
 import io
 import json
@@ -19,8 +18,8 @@ from grit import grd_reader
 from grit import util
 from grit.tool import build
 
-class ChromeMessagesJsonFormatUnittest(unittest.TestCase):
 
+class ChromeMessagesJsonFormatUnittest(unittest.TestCase):
   # The default unittest diff limit is too low for our unittests.
   # Allow the framework to show the full diff output all the time.
   maxDiff = None
@@ -59,8 +58,9 @@ class ChromeMessagesJsonFormatUnittest(unittest.TestCase):
     """)
 
     buf = io.StringIO()
-    build.RcBuilder.ProcessNode(root, DummyOutput('chrome_messages_json', 'en'),
-                                buf)
+    build.RcBuilder.ProcessNode(
+      root, DummyOutput('chrome_messages_json', 'en'), buf
+    )
     output = buf.getvalue()
     test = """
 {
@@ -113,8 +113,9 @@ class ChromeMessagesJsonFormatUnittest(unittest.TestCase):
     """)
 
     buf = io.StringIO()
-    build.RcBuilder.ProcessNode(root, DummyOutput('chrome_messages_json', 'fr'),
-                                buf)
+    build.RcBuilder.ProcessNode(
+      root, DummyOutput('chrome_messages_json', 'fr'), buf
+    )
     output = buf.getvalue()
     test = """
 {
@@ -123,6 +124,41 @@ class ChromeMessagesJsonFormatUnittest(unittest.TestCase):
   },
   "ID_HELLO_USER": {
     "message": "H\u00e9P\u00e9ll\u00f4P\u00f4 %s"
+  }
+}
+"""
+    self.assertEqual(json.loads(test), json.loads(output))
+
+  # This test makes sure that we don't always get False back from:
+  #
+  #   translation_missing = not child.GetCliques()[0].HasTranslation(lang,
+  #     constants.DEFAULT_GENDER)
+  #
+  # If we got False back all the time (say, due to calling it with an argument
+  # of the wrong type), then we would assume it was completely normal to just
+  # skip every translation and let Chrome fall back to English all the time with
+  # no errors or warnings.
+  def testTranslationsWithFallbackToEnglish(self):
+    root = util.ParseGrdForUnittest("""
+    <messages fallback_to_english="true">
+        <message name="ID_HELLO">Hello!</message>
+        <message name="ID_HELLO_USER">Hello <ph name="USERNAME">%s<ex>
+          Joi</ex></ph></message>
+      </messages>
+    """)
+
+    buf = io.StringIO()
+    build.RcBuilder.ProcessNode(
+      root, DummyOutput('chrome_messages_json', 'en'), buf
+    )
+    output = buf.getvalue()
+    test = """
+{
+  "ID_HELLO": {
+    "message": "Hello!"
+  },
+  "ID_HELLO_USER": {
+    "message": "Hello %s"
   }
 }
 """
@@ -143,8 +179,9 @@ class ChromeMessagesJsonFormatUnittest(unittest.TestCase):
     root = grd_reader.Parse(io.StringIO(grd), dir=".")
 
     buf = io.StringIO()
-    build.RcBuilder.ProcessNode(root, DummyOutput('chrome_messages_json', 'fr'),
-                                buf)
+    build.RcBuilder.ProcessNode(
+      root, DummyOutput('chrome_messages_json', 'fr'), buf
+    )
     output = buf.getvalue()
     test = '{}'
     self.assertEqual(test, output)
@@ -159,16 +196,18 @@ class ChromeMessagesJsonFormatUnittest(unittest.TestCase):
     """)
 
     buf = io.StringIO()
-    build.RcBuilder.ProcessNode(root, DummyOutput('chrome_messages_json', 'en'),
-                                buf)
+    build.RcBuilder.ProcessNode(
+      root, DummyOutput('chrome_messages_json', 'en'), buf
+    )
     output = buf.getvalue()
-    test = ('{"IDS":{"message":"$1$test$2$","placeholders":'
-            '{"1":{"content":"$1"},"2":{"content":"$2"}}}}')
+    test = (
+      '{"IDS":{"message":"$1$test$2$","placeholders":'
+      '{"1":{"content":"$1"},"2":{"content":"$2"}}}}'
+    )
     self.assertEqual(test, output)
 
 
 class DummyOutput:
-
   def __init__(self, type, language):
     self.type = type
     self.language = language
@@ -181,6 +220,9 @@ class DummyOutput:
 
   def GetOutputFilename(self):
     return 'hello.gif'
+
+  def GetGender(self):
+    return None
 
 
 if __name__ == '__main__':

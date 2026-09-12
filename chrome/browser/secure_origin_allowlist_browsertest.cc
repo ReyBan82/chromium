@@ -5,8 +5,7 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
-#include "chrome/browser/ssl/security_state_tab_helper.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ssl/chrome_security_state_util.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -54,8 +53,9 @@ class SecureOriginAllowlistBrowsertest
     // need the embedded server, we unconditionally start it here.
     EXPECT_TRUE(embedded_test_server()->Start());
 
-    if (GetParam() != TestVariant::kCommandline)
+    if (GetParam() != TestVariant::kCommandline) {
       return;
+    }
 
     command_line->AppendSwitchASCII(
         network::switches::kUnsafelyTreatInsecureOriginAsSecure, BaseURL());
@@ -65,8 +65,9 @@ class SecureOriginAllowlistBrowsertest
     TestVariant variant = GetParam();
     if (variant != TestVariant::kPolicyOld && variant != TestVariant::kPolicy &&
         variant != TestVariant::kPolicy2 && variant != TestVariant::kPolicy3 &&
-        variant != TestVariant::kPolicyOldAndNew)
+        variant != TestVariant::kPolicyOldAndNew) {
       return;
+    }
 
     // We setup the policy here, because the policy must be 'live' before
     // the renderer is created, since the value for this policy is passed
@@ -78,7 +79,7 @@ class SecureOriginAllowlistBrowsertest
         /*is_first_policy_load_complete_return=*/true);
     policy::BrowserPolicyConnector::SetPolicyProviderForTesting(&provider_);
 
-    base::Value::List urls;
+    base::ListValue urls;
     if (variant == TestVariant::kPolicy || variant == TestVariant::kPolicyOld ||
         variant == TestVariant::kPolicyOldAndNew) {
       urls.Append(BaseURL());
@@ -100,7 +101,7 @@ class SecureOriginAllowlistBrowsertest
                policy::POLICY_SOURCE_CLOUD, base::Value(std::move(urls)),
                nullptr);
     if (variant == TestVariant::kPolicyOldAndNew) {
-      base::Value::List other_urls;
+      base::ListValue other_urls;
       other_urls.Append(OtherURL());
       values.Set(policy::key::kOverrideSecurityRestrictionsOnInsecureOrigin,
                  policy::POLICY_LEVEL_MANDATORY, policy::POLICY_SCOPE_USER,
@@ -180,21 +181,23 @@ IN_PROC_BROWSER_TEST_P(SecureOriginAllowlistBrowsertest, SecurityIndicators) {
       browser(),
       embedded_test_server()->GetURL(
           "example.com", "/secure_origin_allowlist_browsertest.html")));
-  auto* helper = SecurityStateTabHelper::FromWebContents(
-      browser()->tab_strip_model()->GetActiveWebContents());
-  ASSERT_TRUE(helper);
 
   if (GetParam() == TestVariant::kPolicyOldAndNew) {
     // When both policies are set, the new policy overrides the old policy.
-    EXPECT_EQ(security_state::WARNING, helper->GetSecurityLevel());
+    EXPECT_EQ(security_state::WARNING,
+              chrome_security_state::GetSecurityLevel(
+                  browser()->tab_strip_model()->GetActiveWebContents()));
     ASSERT_TRUE(ui_test_utils::NavigateToURL(
         browser(),
         embedded_test_server()->GetURL(
             "otherexample.com", "/secure_origin_allowlist_browsertest.html")));
-    EXPECT_EQ(security_state::NONE, helper->GetSecurityLevel());
+    EXPECT_EQ(security_state::NONE,
+              chrome_security_state::GetSecurityLevel(
+                  browser()->tab_strip_model()->GetActiveWebContents()));
   } else {
     EXPECT_EQ(
         ExpectSecureContext() ? security_state::NONE : security_state::WARNING,
-        helper->GetSecurityLevel());
+        chrome_security_state::GetSecurityLevel(
+            browser()->tab_strip_model()->GetActiveWebContents()));
   }
 }

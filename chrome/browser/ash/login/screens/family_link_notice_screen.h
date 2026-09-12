@@ -14,11 +14,12 @@
 namespace ash {
 
 class FamilyLinkNoticeView;
+class ScopedSessionRefresher;
 
 // Controller for the family link notice screen.
 class FamilyLinkNoticeScreen : public BaseScreen {
  public:
-  enum class Result { DONE, SKIPPED };
+  enum class Result { kDone, kSkipped };
 
   static std::string GetResultString(Result result);
 
@@ -45,9 +46,12 @@ class FamilyLinkNoticeScreen : public BaseScreen {
   bool MaybeSkip(WizardContext& context) override;
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
   base::WeakPtr<FamilyLinkNoticeView> view_;
+
+  // Keeps cryptohome authsession alive.
+  std::unique_ptr<ScopedSessionRefresher> session_refresher_;
 
   ScreenExitCallback exit_callback_;
 };

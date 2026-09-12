@@ -6,7 +6,7 @@
 #define COMPONENTS_PAYMENTS_CORE_FEATURES_H_
 
 #include "base/feature_list.h"
-#include "build/build_config.h"
+#include "base/metrics/field_trial_params.h"
 
 namespace payments {
 namespace features {
@@ -14,19 +14,6 @@ namespace features {
 // Master toggle for all experimental features that will ship in the next
 // release.
 BASE_DECLARE_FEATURE(kWebPaymentsExperimentalFeatures);
-
-#if BUILDFLAG(IS_IOS)
-// Used to control the support for iOS third party apps as payment methods.
-BASE_DECLARE_FEATURE(kWebPaymentsNativeApps);
-#endif
-
-// Used to control payment method section order on payment request UI. Payment
-// method section should be put on top of the address section when this feature
-// is enabled instead of under it.
-BASE_DECLARE_FEATURE(kWebPaymentsMethodSectionOrderV2);
-
-// Used to control the support for Payment Details modifiers.
-BASE_DECLARE_FEATURE(kWebPaymentsModifiers);
 
 // Used to control whether the Payment Sheet can be skipped for Payment Requests
 // with a single URL based payment app and no other info requested.
@@ -43,16 +30,11 @@ BASE_DECLARE_FEATURE(kAppStoreBillingDebug);
 // Used to control whether allow crawling just-in-time installable payment app.
 BASE_DECLARE_FEATURE(kWebPaymentsJustInTimePaymentApp);
 
-// Used to control whether the shipping address returned for the
-// ShippingAddressChangeEvent is redacted of fine-grained details.
-BASE_DECLARE_FEATURE(kWebPaymentsRedactShippingAddress);
-
-// Desktop only, if enabled payment handler window size matches the pop up
-// window size.
-BASE_DECLARE_FEATURE(kPaymentHandlerPopUpSizeWindow);
-
 // Used to test icon refetch for JIT installed apps with missing icons.
 BASE_DECLARE_FEATURE(kAllowJITInstallationWhenAppIconIsMissing);
+
+// Delays the dimming dialog background when the UI is skipped.
+BASE_DECLARE_FEATURE(kDelayNativePaymentAppScrimShow);
 
 // Used to reject the apps with partial delegation.
 BASE_DECLARE_FEATURE(kEnforceFullDelegation);
@@ -61,13 +43,81 @@ BASE_DECLARE_FEATURE(kEnforceFullDelegation);
 // GPay app and the browser for dynamic updates on shipping and payment data.
 BASE_DECLARE_FEATURE(kGPayAppDynamicUpdate);
 
-// Used to control whether SecurePaymentConfirmation is able to rely on OS-level
-// credential store APIs, or if it can only rely on the user-profile database.
-BASE_DECLARE_FEATURE(kSecurePaymentConfirmationUseCredentialStoreAPIs);
+// Approach for discovering available Secure Payment Confirmation credentials.
+// Different platforms use different approaches, due to differing capabilities
+// of the authenticators in use by SPC.
+enum class CredentialDiscoveryMode {
+  // Query only the local profile database.
+  kUserDatabaseOnly = 0,
+  // Query both the OS credential store and the local profile database in
+  // parallel. The OS credential store results take precedence if available.
+  kHybrid = 1,
+  // Query only the OS credential store.
+  kOsOnly = 2,
+};
 
-// Desktop only, if enabled PaymentHandler will use the new minimal header UX.
-// See https://crbug.com/1385136.
-BASE_DECLARE_FEATURE(kPaymentHandlerMinimalHeaderUX);
+// Returns the string representation for a CredentialDiscoveryMode.
+constexpr const char* CredentialDiscoveryModeToString(
+    CredentialDiscoveryMode mode) {
+  switch (mode) {
+    case CredentialDiscoveryMode::kUserDatabaseOnly:
+      return "database-only";
+    case CredentialDiscoveryMode::kHybrid:
+      return "hybrid";
+    case CredentialDiscoveryMode::kOsOnly:
+      return "os-only";
+  }
+}
+
+// Controls the approach for discovering available Secure Payment Confirmation
+// credentials.
+BASE_DECLARE_FEATURE(kSecurePaymentConfirmationCredentialDiscoveryMode);
+
+extern const base::FeatureParam<CredentialDiscoveryMode>
+    kCredentialDiscoveryModeParam;
+
+// Used to control whether SecurePaymentConfirmation stores newly created
+// credentials in the OS-level credential store (skipping saving to the
+// user-profile database).
+BASE_DECLARE_FEATURE(kSecurePaymentConfirmationStoreCredentialsInOS);
+
+// Used to control the usage of the renderer URL loader in the payment request.
+BASE_DECLARE_FEATURE(kPaymentRequestUseRendererUrlLoader);
+
+// Used to control whether Payment Request/Handler dialogs are rejected if the
+// browser window is too small to contain them.
+BASE_DECLARE_FEATURE(kPaymentRequestRejectTooSmallWindows);
+
+
+// Used to control whether Payment Handler dialog includes an initiator during
+// the URL load.
+BASE_DECLARE_FEATURE(kPaymentHandlerDialogUseInitiatorInUrlLoad);
+
+// Used to control whether to support HTML head <meta name="theme-color"> in
+// Payment Handler dialog headers.
+BASE_DECLARE_FEATURE(kPaymentHandlerHtmlHeadThemeColor);
+
+// Used to control whether Payment Handler dialog requires user interaction
+// before resolving a success payment response.
+BASE_DECLARE_FEATURE(kPaymentRequestMandatoryPaymentAppUi);
+
+// Used to control whether camera access is allowed in Payment Handler windows.
+BASE_DECLARE_FEATURE(kPaymentHandlerCameraAccess);
+
+// Used to control whether camera access with interactive permission prompt
+// and indicator is allowed in Payment Handler windows.
+BASE_DECLARE_FEATURE(kPaymentHandlerCameraAccessUx);
+
+// Used to control whether SPC supports validating locale.
+BASE_DECLARE_FEATURE(kSPCLocaleValidation);
+
+// Used to control whether 3D-Secure telemetry is collected.
+BASE_DECLARE_FEATURE(kThreeDSecureTelemetry);
+
+// Used to control whether modal dialogs triggered from a web-based payment
+// handler are parented to the Payment Request dialog widget native view
+// instead of the browser tab.
+BASE_DECLARE_FEATURE(kPaymentHandlerModalDialogHost);
 
 }  // namespace features
 }  // namespace payments

@@ -9,14 +9,11 @@
 #include <utility>
 
 #include "base/run_loop.h"
-#include "base/task/sequenced_task_runner.h"
 #include "base/test/task_environment.h"
-#include "components/openscreen_platform/network_context.h"
-#include "components/openscreen_platform/task_runner.h"
+#include "components/openscreen_platform/socket_factory.h"
 #include "components/openscreen_platform/tls_client_connection.h"
 #include "net/base/net_errors.h"
-#include "services/network/public/mojom/network_context.mojom.h"
-#include "services/network/test/test_network_context.h"
+#include "services/network/public/mojom/socket_factory.mojom.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -57,14 +54,14 @@ class MockTlsConnectionFactoryClient
               (override));
   MOCK_METHOD(void,
               OnError,
-              (openscreen::TlsConnectionFactory*, Error),
+              (openscreen::TlsConnectionFactory*, const Error&),
               (override));
 };
 
-class FakeNetworkContext : public network::TestNetworkContext {
+class FakeSocketFactory : public network::mojom::SocketFactory {
  public:
   void CreateTCPConnectedSocket(
-      const absl::optional<net::IPEndPoint>& local_addr,
+      const std::optional<net::IPEndPoint>& local_addr,
       const net::AddressList& remote_addr_list,
       network::mojom::TCPConnectedSocketOptionsPtr tcp_connected_socket_options,
       const net::MutableNetworkTrafficAnnotationTag& traffic_annotation,
@@ -75,10 +72,15 @@ class FakeNetworkContext : public network::TestNetworkContext {
     callback_ = std::move(callback);
   }
 
+  void CreateUDPSocket(
+      mojo::PendingReceiver<network::mojom::UDPSocket> receiver,
+      mojo::PendingRemote<network::mojom::UDPSocketListener> listener)
+      override {}
+
   int times_called() { return times_called_; }
 
   void ExecuteCreateCallback(int32_t net_result) {
-    std::move(callback_).Run(net_result, absl::nullopt, absl::nullopt,
+    std::move(callback_).Run(net_result, std::nullopt, std::nullopt,
                              mojo::ScopedDataPipeConsumerHandle{},
                              mojo::ScopedDataPipeProducerHandle{});
   }
@@ -93,51 +95,43 @@ class FakeNetworkContext : public network::TestNetworkContext {
 class TlsConnectionFactoryTest : public ::testing::Test {
  public:
   void SetUp() override {
-    task_environment_ = std::make_unique<base::test::TaskEnvironment>();
-
-    task_runner = std::make_unique<openscreen_platform::TaskRunner>(
-        task_environment_->GetMainThreadTaskRunner());
-
-    mock_network_context = std::make_unique<FakeNetworkContext>();
-    SetNetworkContextGetter(base::BindRepeating(
-        &TlsConnectionFactoryTest::GetNetworkContext, base::Unretained(this)));
+    mock_socket_factory = std::make_unique<FakeSocketFactory>();
+    SocketFactoryGetter::Set(base::BindRepeating(
+        &TlsConnectionFactoryTest::GetSocketFactory, base::Unretained(this)));
   }
 
-  void TearDown() override {
-    SetNetworkContextGetter(openscreen_platform::NetworkContextGetter());
-  }
+  void TearDown() override { SocketFactoryGetter::Clear(); }
 
  protected:
-  network::mojom::NetworkContext* GetNetworkContext() {
-    return mock_network_context.get();
+  network::mojom::SocketFactory* GetSocketFactory() {
+    return mock_socket_factory.get();
   }
 
-  std::unique_ptr<openscreen_platform::TaskRunner> task_runner;
-  std::unique_ptr<FakeNetworkContext> mock_network_context;
-  std::unique_ptr<base::test::TaskEnvironment> task_environment_;
+  base::test::TaskEnvironment task_environment_;
+  std::unique_ptr<FakeSocketFactory> mock_socket_factory;
 };
 
 TEST_F(TlsConnectionFactoryTest, CallsNetworkContextCreateMethod) {
   StrictMock<MockTlsConnectionFactoryClient> mock_client;
-  TlsConnectionFactory factory(&mock_client, task_runner.get());
+  TlsConnectionFactory factory(mock_client);
 
   factory.Connect(kValidOpenscreenEndpoint, TlsConnectOptions{});
 
-  mock_network_context->ExecuteCreateCallback(net::OK);
-  EXPECT_EQ(1, mock_network_context->times_called());
+  mock_socket_factory->ExecuteCreateCallback(net::OK);
+  EXPECT_EQ(1, mock_socket_factory->times_called());
 }
 
 TEST_F(TlsConnectionFactoryTest,
        CallsOnConnectionFailedWhenNetworkContextReportsError) {
   StrictMock<MockTlsConnectionFactoryClient> mock_client;
-  TlsConnectionFactory factory(&mock_client, task_runner.get());
+  TlsConnectionFactory factory(mock_client);
   EXPECT_CALL(mock_client,
               OnConnectionFailed(&factory, kValidOpenscreenEndpoint));
 
   factory.Connect(kValidOpenscreenEndpoint, TlsConnectOptions{});
 
-  mock_network_context->ExecuteCreateCallback(net::ERR_FAILED);
-  EXPECT_EQ(1, mock_network_context->times_called());
+  mock_socket_factory->ExecuteCreateCallback(net::ERR_FAILED);
+  EXPECT_EQ(1, mock_socket_factory->times_called());
   base::RunLoop().RunUntilIdle();
 }
 

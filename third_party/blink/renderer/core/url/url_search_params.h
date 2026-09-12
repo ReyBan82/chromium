@@ -5,6 +5,7 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_URL_URL_SEARCH_PARAMS_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_URL_URL_SEARCH_PARAMS_H_
 
+#include <cstdint>
 #include <utility>
 
 #include "base/dcheck_is_on.h"
@@ -20,8 +21,8 @@
 
 namespace blink {
 
-class DOMURL;
 class ExceptionState;
+class URL;
 class V8UnionUSVStringOrUSVStringSequenceSequenceOrUSVStringUSVStringRecord;
 
 using URLSearchParamsInit =
@@ -41,20 +42,28 @@ class CORE_EXPORT URLSearchParams final
                                  ExceptionState&);
 
   static URLSearchParams* Create(const String& query_string,
-                                 DOMURL* url_object = nullptr) {
+                                 URL* url_object = nullptr) {
     return MakeGarbageCollected<URLSearchParams>(query_string, url_object);
   }
 
-  explicit URLSearchParams(const String&, DOMURL* = nullptr);
+  explicit URLSearchParams(const String&, URL* = nullptr);
   ~URLSearchParams() override;
 
   // URLSearchParams interface methods
   String toString() const;
+  uint32_t size() const;
   void append(const String& name, const String& value);
-  void deleteAllWithName(const String&);
+  void deleteAllWithNameOrTuple(ExecutionContext* execution_context,
+                                const String& name);
+  void deleteAllWithNameOrTuple(ExecutionContext* execution_context,
+                                const String& name,
+                                const String& val);
   String get(const String&) const;
   Vector<String> getAll(const String&) const;
-  bool has(const String&) const;
+  bool has(ExecutionContext* execution_context, const String& name) const;
+  bool has(ExecutionContext* execution_context,
+           const String& name,
+           const String& val) const;
   void set(const String& name, const String& value);
   void sort();
   void SetInputWithoutUpdate(const String&);
@@ -64,7 +73,7 @@ class CORE_EXPORT URLSearchParams final
   const Vector<std::pair<String, String>>& Params() const { return params_; }
 
 #if DCHECK_IS_ON()
-  DOMURL* UrlObject() const;
+  URL* UrlObject() const;
 #endif
 
   void Trace(Visitor*) const override;
@@ -73,15 +82,14 @@ class CORE_EXPORT URLSearchParams final
   FRIEND_TEST_ALL_PREFIXES(URLSearchParamsTest, EncodedFormData);
 
   void RunUpdateSteps();
-  IterationSource* CreateIterationSource(ScriptState*,
-                                         ExceptionState&) override;
+  IterationSource* CreateIterationSource(ScriptState*) override;
   void EncodeAsFormData(Vector<char>&) const;
 
   void AppendWithoutUpdate(const String& name, const String& value);
 
   Vector<std::pair<String, String>> params_;
 
-  WeakMember<DOMURL> url_object_;
+  WeakMember<URL> url_object_;
 };
 
 }  // namespace blink

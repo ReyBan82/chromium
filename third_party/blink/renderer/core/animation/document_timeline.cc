@@ -99,21 +99,21 @@ bool DocumentTimeline::IsActive() const {
 
 // Document-linked animations are initialized with start time of the document
 // timeline current time.
-absl::optional<base::TimeDelta>
+std::optional<base::TimeDelta>
 DocumentTimeline::InitialStartTimeForAnimations() {
-  absl::optional<double> current_time_ms = CurrentTimeMilliseconds();
+  std::optional<double> current_time_ms = CurrentTimeMilliseconds();
   if (current_time_ms.has_value()) {
     return base::Milliseconds(current_time_ms.value());
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 void DocumentTimeline::ScheduleNextService() {
   DCHECK_EQ(outdated_animation_count_, 0U);
 
-  absl::optional<AnimationTimeDelta> time_to_next_effect;
+  std::optional<AnimationTimeDelta> time_to_next_effect;
   for (const auto& animation : animations_needing_update_) {
-    absl::optional<AnimationTimeDelta> time_to_effect_change =
+    std::optional<AnimationTimeDelta> time_to_effect_change =
         animation->TimeToEffectChange();
     if (!time_to_effect_change)
       continue;
@@ -160,37 +160,40 @@ void DocumentTimeline::ResetForTesting() {
   zero_time_ = base::TimeTicks() + origin_time_;
   zero_time_initialized_ = true;
   playback_rate_ = 1;
-  last_current_phase_and_time_.reset();
+  last_current_time_.reset();
 }
 
 void DocumentTimeline::SetTimingForTesting(PlatformTiming* timing) {
   timing_ = timing;
 }
 
-AnimationTimeline::PhaseAndTime DocumentTimeline::CurrentPhaseAndTime() {
+std::optional<base::TimeDelta> DocumentTimeline::CurrentTimeInternal() {
   if (!IsActive()) {
-    return {TimelinePhase::kInactive, /*current_time*/ absl::nullopt};
+    return std::nullopt;
   }
 
-  absl::optional<base::TimeDelta> result =
+  std::optional<base::TimeDelta> result =
       playback_rate_ == 0
           ? CalculateZeroTime().since_origin()
           : (CurrentAnimationTime(GetDocument()) - CalculateZeroTime()) *
                 playback_rate_;
-  return {TimelinePhase::kActive, result};
+  return result;
 }
 
-void DocumentTimeline::PauseAnimationsForTesting(
-    AnimationTimeDelta pause_time) {
+void DocumentTimeline::PauseAnimationsForTesting(AnimationTimeDelta hold_time) {
   for (const auto& animation : animations_needing_update_)
-    animation->PauseForTesting(pause_time);
+    animation->PauseForTesting(hold_time);
   ServiceAnimations(kTimingUpdateOnDemand);
 }
 
 void DocumentTimeline::SetPlaybackRate(double playback_rate) {
   if (!IsActive())
     return;
-  base::TimeDelta current_time = CurrentPhaseAndTime().time.value();
+
+  bool should_mark_pending = playback_rate != playback_rate_;
+
+  base::TimeDelta current_time = CurrentTimeInternal().value();
+
   playback_rate_ = playback_rate;
   zero_time_ = playback_rate == 0 ? base::TimeTicks() + current_time
                                   : CurrentAnimationTime(GetDocument()) -
@@ -199,16 +202,20 @@ void DocumentTimeline::SetPlaybackRate(double playback_rate) {
 
   // Corresponding compositor animation may need to be restarted to pick up
   // the new playback rate. Marking the effect changed forces this.
-  MarkAnimationsCompositorPending(true);
+  if (should_mark_pending) {
+    MarkAnimationsCompositorPending(true);
+  }
 }
 
 double DocumentTimeline::PlaybackRate() const {
   return playback_rate_;
 }
 
-void DocumentTimeline::InvalidateKeyframeEffects(const TreeScope& tree_scope) {
+void DocumentTimeline::InvalidateKeyframeEffects(
+    const TreeScope& tree_scope,
+    const StyleChangeReasonForTracing& reason) {
   for (const auto& animation : animations_)
-    animation->InvalidateKeyframeEffect(tree_scope);
+    animation->InvalidateKeyframeEffect(tree_scope, reason);
 }
 
 cc::AnimationTimeline* DocumentTimeline::EnsureCompositorTimeline() {

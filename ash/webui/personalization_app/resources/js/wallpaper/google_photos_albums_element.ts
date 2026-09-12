@@ -6,23 +6,23 @@
  * @fileoverview Polymer element that displays Google Photos albums.
  */
 
+import 'chrome://resources/ash/common/personalization/common.css.js';
+import 'chrome://resources/ash/common/personalization/wallpaper.css.js';
 import 'chrome://resources/polymer/v3_0/iron-list/iron-list.js';
 import 'chrome://resources/polymer/v3_0/iron-scroll-threshold/iron-scroll-threshold.js';
-import '../../css/wallpaper.css.js';
-import '../../css/common.css.js';
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {IronListElement} from 'chrome://resources/polymer/v3_0/iron-list/iron-list.js';
-import {IronScrollThresholdElement} from 'chrome://resources/polymer/v3_0/iron-scroll-threshold/iron-scroll-threshold.js';
+import {isNonEmptyArray} from 'chrome://resources/ash/common/sea_pen/sea_pen_utils.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {IronListElement} from 'chrome://resources/polymer/v3_0/iron-list/iron-list.js';
+import type {IronScrollThresholdElement} from 'chrome://resources/polymer/v3_0/iron-scroll-threshold/iron-scroll-threshold.js';
 import {afterNextRender} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
-import {GooglePhotosAlbum, WallpaperProviderInterface} from '../../personalization_app.mojom-webui.js';
-import {isGooglePhotosSharedAlbumsEnabled} from '../load_time_booleans.js';
+import type {GooglePhotosAlbum, WallpaperProviderInterface} from '../../personalization_app.mojom-webui.js';
 import {dismissErrorAction, setErrorAction} from '../personalization_actions.js';
-import {PersonalizationRouter} from '../personalization_router_element.js';
-import {PersonalizationStateError} from '../personalization_state.js';
+import {PersonalizationRouterElement} from '../personalization_router_element.js';
+import type {PersonalizationStateError} from '../personalization_state.js';
 import {WithPersonalizationStore} from '../personalization_store.js';
-import {getCountText, isNonEmptyArray, isRecentHighlightsAlbum} from '../utils.js';
+import {getCountText, isRecentHighlightsAlbum} from '../utils.js';
 
 import {getTemplate} from './google_photos_albums_element.html.js';
 import {getLoadingPlaceholders} from './utils.js';
@@ -40,17 +40,17 @@ function getPlaceholders(): GooglePhotosAlbum[] {
       title: '',
       photoCount: 0,
       isShared: false,
-      preview: {url: ''},
+      preview: '',
       timestamp: {internalValue: BigInt(0)},
     };
   });
 }
 
-export interface GooglePhotosAlbums {
+export interface GooglePhotosAlbumsElement {
   $: {grid: IronListElement, gridScrollThreshold: IronScrollThresholdElement};
 }
 
-export class GooglePhotosAlbums extends WithPersonalizationStore {
+export class GooglePhotosAlbumsElement extends WithPersonalizationStore {
   static get is() {
     return 'google-photos-albums';
   }
@@ -89,13 +89,6 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
         type: Object,
         value: null,
       },
-
-      isSharedAlbumsEnabled_: {
-        type: Boolean,
-        value() {
-          return isGooglePhotosSharedAlbumsEnabled();
-        },
-      },
     };
   }
 
@@ -107,60 +100,56 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
   }
 
   /** Whether or not this element is currently hidden. */
-  override hidden: boolean;
+  declare hidden: boolean;
 
   /** The list of owned albums. */
-  private albums_: GooglePhotosAlbum[]|null|undefined;
+  declare private albums_: GooglePhotosAlbum[]|null|undefined;
 
   /** Merged |albums_| and |albumsShared_| for display. */
-  private albumsForDisplay_: GooglePhotosAlbum[];
+  declare private albumsForDisplay_: GooglePhotosAlbum[];
 
   /** Whether the list of owned albums is currently loading. */
-  private albumsLoading_: boolean;
+  declare private albumsLoading_: boolean;
 
   /** The resume token needed to fetch the next page of owned albums. */
-  private albumsResumeToken_: string|null;
+  declare private albumsResumeToken_: string|null;
 
   /** The list of shared albums. */
-  private albumsShared_: GooglePhotosAlbum[]|null|undefined;
+  declare private albumsShared_: GooglePhotosAlbum[]|null|undefined;
 
   /** Whether the list of shared albums is currently loading. */
-  private albumsSharedLoading_: boolean;
+  declare private albumsSharedLoading_: boolean;
 
   /** The resume token needed to fetch the next page of shared albums. */
-  private albumsSharedResumeToken_: string|null;
+  declare private albumsSharedResumeToken_: string|null;
 
   /** The current personalization error state. */
-  private error_: PersonalizationStateError|null;
+  declare private error_: PersonalizationStateError|null;
 
   /** The singleton wallpaper provider interface. */
   private wallpaperProvider_: WallpaperProviderInterface =
       getWallpaperProvider();
 
-  /** Whether feature flag |kGooglePhotosSharedAlbums| is enabled. */
-  private isSharedAlbumsEnabled_: boolean;
-
   override connectedCallback() {
     super.connectedCallback();
 
-    this.watch<GooglePhotosAlbums['albums_']>(
+    this.watch<GooglePhotosAlbumsElement['albums_']>(
         'albums_', state => state.wallpaper.googlePhotos.albums);
-    this.watch<GooglePhotosAlbums['albumsLoading_']>(
+    this.watch<GooglePhotosAlbumsElement['albumsLoading_']>(
         'albumsLoading_', state => state.wallpaper.loading.googlePhotos.albums);
-    this.watch<GooglePhotosAlbums['albumsResumeToken_']>(
+    this.watch<GooglePhotosAlbumsElement['albumsResumeToken_']>(
         'albumsResumeToken_',
         state => state.wallpaper.googlePhotos.resumeTokens.albums);
-    if (this.isSharedAlbumsEnabled_) {
-      this.watch<GooglePhotosAlbums['albumsShared_']>(
-          'albumsShared_', state => state.wallpaper.googlePhotos.albumsShared);
-      this.watch<GooglePhotosAlbums['albumsSharedLoading_']>(
-          'albumsSharedLoading_',
-          state => state.wallpaper.loading.googlePhotos.albumsShared);
-      this.watch<GooglePhotosAlbums['albumsSharedResumeToken_']>(
-          'albumsSharedResumeToken_',
-          state => state.wallpaper.googlePhotos.resumeTokens.albumsShared);
-    }
-    this.watch<GooglePhotosAlbums['error_']>('error_', state => state.error);
+    this.watch<GooglePhotosAlbumsElement['albumsShared_']>(
+        'albumsShared_', state => state.wallpaper.googlePhotos.albumsShared);
+    this.watch<GooglePhotosAlbumsElement['albumsSharedLoading_']>(
+        'albumsSharedLoading_',
+        state => state.wallpaper.loading.googlePhotos.albumsShared);
+    this.watch<GooglePhotosAlbumsElement['albumsSharedResumeToken_']>(
+        'albumsSharedResumeToken_',
+        state => state.wallpaper.googlePhotos.resumeTokens.albumsShared);
+    this.watch<GooglePhotosAlbumsElement['error_']>(
+        'error_', state => state.error);
 
     this.updateFromStore();
   }
@@ -169,13 +158,14 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
   private onAlbumSelected_(e: Event&{model: {album: GooglePhotosAlbum}}) {
     assert(e.model.album);
     if (!this.isAlbumPlaceholder_(e.model.album)) {
-      PersonalizationRouter.instance().selectGooglePhotosAlbum(e.model.album);
+      PersonalizationRouterElement.instance().selectGooglePhotosAlbum(
+          e.model.album);
     }
   }
 
   private mergeAlbumsByTimestamp_(
-      owned: GooglePhotosAlbums['albums_'],
-      shared: GooglePhotosAlbums['albumsShared_']) {
+      owned: GooglePhotosAlbumsElement['albums_'],
+      shared: GooglePhotosAlbumsElement['albumsShared_']) {
     if (!isNonEmptyArray(owned)) {
       owned = [];
     }
@@ -196,14 +186,11 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
 
   /** Invoked on changes to |albums_| or |albumsShared_|. */
   private onAlbumsChanged_(
-      albums: GooglePhotosAlbums['albums_'],
-      albumsShared: GooglePhotosAlbums['albumsShared_']) {
+      albums: GooglePhotosAlbumsElement['albums_'],
+      albumsShared: GooglePhotosAlbumsElement['albumsShared_']) {
     // If the list of albums fails to load, display an error to the user that
     // allows them to make another attempt.
-    // When shared albums flag is enabled, also need to make sure |albumsShared|
-    // fails to load.
-    if (albums === null &&
-        !(this.isSharedAlbumsEnabled_ && albumsShared !== null)) {
+    if (albums === null && albumsShared === null) {
       if (!this.hidden) {
         this.dispatch(setErrorAction({
           id: ERROR_ID,
@@ -218,10 +205,8 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
                 setTimeout(() => {
                   fetchGooglePhotosAlbums(
                       this.wallpaperProvider_, this.getStore());
-                  if (this.isSharedAlbumsEnabled_) {
-                    fetchGooglePhotosSharedAlbums(
-                        this.wallpaperProvider_, this.getStore());
-                  }
+                  fetchGooglePhotosSharedAlbums(
+                      this.wallpaperProvider_, this.getStore());
                 });
               }
             },
@@ -245,8 +230,9 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
    * Invoked on changes to |albumsResumeToken_| or |albumsSharedResumeToken_|.
    */
   private onAlbumsResumeTokenChanged_(
-      albumsResumeToken: GooglePhotosAlbums['albumsResumeToken_'],
-      albumsSharedResumeToken: GooglePhotosAlbums['albumsSharedResumeToken_']) {
+      albumsResumeToken: GooglePhotosAlbumsElement['albumsResumeToken_'],
+      albumsSharedResumeToken:
+          GooglePhotosAlbumsElement['albumsSharedResumeToken_']) {
     if (albumsResumeToken || albumsSharedResumeToken) {
       this.$.gridScrollThreshold.clearTriggers();
     }
@@ -274,17 +260,14 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
     fetchGooglePhotosAlbums(this.wallpaperProvider_, this.getStore());
 
     // Fetch the next page of shared albums when needed.
-    if (this.isSharedAlbumsEnabled_) {
-      if (this.albumsSharedLoading_ === true ||
-          !this.albumsSharedResumeToken_) {
-        return;
-      }
-      fetchGooglePhotosSharedAlbums(this.wallpaperProvider_, this.getStore());
+    if (this.albumsSharedLoading_ === true || !this.albumsSharedResumeToken_) {
+      return;
     }
+    fetchGooglePhotosSharedAlbums(this.wallpaperProvider_, this.getStore());
   }
 
   /** Invoked on changes to this element's |hidden| state. */
-  private onHiddenChanged_(hidden: GooglePhotosAlbums['hidden']) {
+  private onHiddenChanged_(hidden: GooglePhotosAlbumsElement['hidden']) {
     if (hidden && this.error_ && this.error_.id === ERROR_ID) {
       // If |hidden|, the error associated with this element will have lost
       // user-facing context so it should be dismissed.
@@ -301,8 +284,9 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
   /** Returns the aria label for the specified |album|. */
   private getAlbumAriaLabel_(album: GooglePhotosAlbum|null): string|undefined {
     if (album) {
-      return album.id === PLACEHOLDER_ID ? this.i18n('ariaLabelLoading') :
-                                           album.title;
+      return album.id === PLACEHOLDER_ID ?
+          this.i18n('ariaLabelLoading') :
+          `${album.title} ${this.getSecondaryText_(album)}`;
     }
     return undefined;
   }
@@ -324,4 +308,4 @@ export class GooglePhotosAlbums extends WithPersonalizationStore {
   }
 }
 
-customElements.define(GooglePhotosAlbums.is, GooglePhotosAlbums);
+customElements.define(GooglePhotosAlbumsElement.is, GooglePhotosAlbumsElement);

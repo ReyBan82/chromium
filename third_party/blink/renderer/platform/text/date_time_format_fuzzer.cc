@@ -6,7 +6,11 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
+#include "base/containers/span.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 #include "third_party/blink/renderer/platform/testing/blink_fuzzer_test_support.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
@@ -20,19 +24,18 @@ class DummyTokenHandler : public DateTimeFormat::TokenHandler {
     CHECK_GE(count, 1);
   }
 
-  void VisitLiteral(const WTF::String& string) override {
+  void VisitLiteral(const String& string) override {
     CHECK_GT(string.length(), 0u);
   }
 };
 
 }  // namespace blink
 
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(const base::span<const uint8_t> data) {
   static blink::BlinkFuzzerTestSupport test_support =
       blink::BlinkFuzzerTestSupport();
+  blink::test::TaskEnvironment task_environment;
   blink::DummyTokenHandler handler;
-  blink::DateTimeFormat::Parse(
-      WTF::String::FromUTF8(reinterpret_cast<const char*>(data), size),
-      handler);
+  blink::DateTimeFormat::Parse(blink::String::FromUtf8(data), handler);
   return 0;
 }

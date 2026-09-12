@@ -2,8 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {ForeignSession, ForeignSessionTab, ForeignSessionWindow, HistoryAppElement, HistoryEntry, HistoryQuery} from 'chrome://history/history.js';
-import {middleOfNode} from 'chrome://resources/polymer/v3_0/iron-test-helpers/mock-interactions.js';
+import type {ForeignSession, ForeignSessionTab, ForeignSessionWindow, HistoryAppElement} from 'chrome://history/history.js';
+import type {HistoryEntry, HistoryQuery} from 'chrome://resources/cr_components/history/history.mojom-webui.js';
+import type {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import {middleOfNode} from 'chrome://webui-test/mouse_mock_interactions.js';
 
 
 /**
@@ -11,9 +13,13 @@ import {middleOfNode} from 'chrome://resources/polymer/v3_0/iron-test-helpers/mo
  * @param timestamp Timestamp of the entry, as a number in ms or a string which
  *     can be parsed by Date.parse().
  * @param urlStr The URL to set on this entry.
+ * @param otherTimestamps The other timestamps associated with this or similar
+ *     urls. This should not include the current `timestamp` associated with
+ *     `urlStr`.
  */
 export function createHistoryEntry(
-    timestamp: number|string, urlStr: string): HistoryEntry {
+    timestamp: number|string, urlStr: string,
+    otherTimestamps?: {[key: string]: number[]}): HistoryEntry {
   if (typeof timestamp === 'string') {
     timestamp += ' UTC';
   }
@@ -21,8 +27,19 @@ export function createHistoryEntry(
   const d = new Date(timestamp);
   const url = new URL(urlStr);
   const domain = url.host;
+
+  // Add the other urls' timestamps (if any) and append the current url &
+  // timestamp to allTimestamps.
+  otherTimestamps = otherTimestamps || {};
+  const {[urlStr]: currentUrlTimestamps = [], ...otherUrlsTimestamps} =
+      otherTimestamps;
+  const allTimestamps = {
+    [urlStr]: [d.getTime(), ...currentUrlTimestamps],
+    ...otherUrlsTimestamps,
+  };
+
   return {
-    allTimestamps: [d.getTime()],
+    allTimestamps: allTimestamps,
     remoteIconUrlForUma: '',
     isUrlInRemoteUserData: false,
     blockedVisit: false,
@@ -32,6 +49,7 @@ export function createHistoryEntry(
     dateRelativeDay: d.toISOString().split('T')[0]!,
     dateShort: '',
     dateTimeOfDay: d.getUTCHours() + ':' + d.getUTCMinutes(),
+    debug: null,
     deviceName: '',
     deviceType: '',
     domain: domain,
@@ -44,6 +62,8 @@ export function createHistoryEntry(
     time: d.getTime(),
     title: urlStr,
     url: urlStr,
+    isActorVisit: false,
+    criticalActions: [],
   };
 }
 
@@ -73,10 +93,6 @@ export function createHistoryInfo(searchTerm?: string): HistoryQuery {
   return {finished: true, term: searchTerm || ''};
 }
 
-export function polymerSelectAll(element: Element, selector: string): NodeList {
-  return element.shadowRoot!.querySelectorAll(selector);
-}
-
 /**
  * Returns a promise which is resolved when |eventName| is fired on |element|
  * and |predicate| is true.
@@ -90,7 +106,7 @@ export function waitForEvent(
 
   return new Promise<void>(function(resolve) {
     const listener = function(e: Event) {
-      if (!predicate!(e)) {
+      if (!predicate(e)) {
         return;
       }
 
@@ -105,7 +121,7 @@ export function waitForEvent(
 /**
  * Sends a shift click event to |element|.
  */
-export function shiftClick(element: HTMLElement) {
+export async function shiftClick(element: CrLitElement): Promise<void> {
   const xy = middleOfNode(element);
   const props = {
     bubbles: true,
@@ -115,10 +131,29 @@ export function shiftClick(element: HTMLElement) {
     buttons: 1,
     shiftKey: true,
   };
-
   element.dispatchEvent(new MouseEvent('mousedown', props));
   element.dispatchEvent(new MouseEvent('mouseup', props));
   element.dispatchEvent(new MouseEvent('click', props));
+  await element.updateComplete;
+}
+
+/**
+ * Sends a shift click event to |element|, using PointerEvent.
+ */
+export async function shiftPointerClick(element: CrLitElement): Promise<void> {
+  const xy = middleOfNode(element);
+  const props = {
+    bubbles: true,
+    cancelable: true,
+    clientX: xy.x,
+    clientY: xy.y,
+    buttons: 1,
+    shiftKey: true,
+  };
+  element.dispatchEvent(new PointerEvent('pointerdown', props));
+  element.dispatchEvent(new PointerEvent('pointerup', props));
+  element.dispatchEvent(new PointerEvent('click', props));
+  await element.updateComplete;
 }
 
 export function disableLinkClicks() {
@@ -166,8 +201,8 @@ export function createWindow(tabUrls: string[]): ForeignSessionWindow {
       remoteIconUrlForUma: '',
       sessionId: 456,
       timestamp: 0,
+      timestampDisplayStr: '',
       title: tabUrl,
-      type: 'tab',
       url: tabUrl,
       windowId: 0,
     };
@@ -176,10 +211,7 @@ export function createWindow(tabUrls: string[]): ForeignSessionWindow {
   return {tabs: tabs, sessionId: 123, timestamp: 0};
 }
 
-export function navigateTo(route: string, app: HistoryAppElement) {
+export function navigateTo(route: string, _app: HistoryAppElement) {
   window.history.replaceState({}, '', route);
-  window.dispatchEvent(new CustomEvent('location-changed'));
-  // Update from the URL synchronously.
-  app.shadowRoot!.querySelector(
-                     'history-router')!.getDebouncerForTesting()!.flush();
+  window.dispatchEvent(new CustomEvent('popstate'));
 }

@@ -39,7 +39,6 @@
 namespace blink {
 
 class Element;
-class LocalFrame;
 class UndoStep;
 
 // |UndoStack| is owned by and always 1:1 to |Editor|. Since |Editor| is 1:1 to
@@ -65,8 +64,8 @@ class CORE_EXPORT UndoStack final : public GarbageCollected<UndoStack> {
 
    public:
     using ConstIterator = UndoStepStack::const_reverse_iterator;
-    ConstIterator begin() { return step_stack_.rbegin(); }
-    ConstIterator end() { return step_stack_.rend(); }
+    ConstIterator begin() const { return step_stack_.rbegin(); }
+    ConstIterator end() const { return step_stack_.rend(); }
 
     explicit UndoStepRange(const UndoStepStack&);
 
@@ -84,6 +83,7 @@ class CORE_EXPORT UndoStack final : public GarbageCollected<UndoStack> {
   // should be root editable element and be in undo/redo stack.
   void ElementRemoved(Element* element);
 
+  String ToString() const;
   void Trace(Visitor*) const;
 
  private:

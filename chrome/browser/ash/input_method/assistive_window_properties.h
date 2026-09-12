@@ -7,7 +7,8 @@
 
 #include <string>
 #include <vector>
-#include "chrome/browser/ash/input_method/ui/assistive_delegate.h"
+
+#include "chrome/browser/ui/ash/input_method/assistive_delegate.h"
 
 namespace ash {
 namespace input_method {
@@ -32,4 +33,4 @@ struct AssistiveWindowProperties {
 }  // namespace input_method
 }  // namespace ash
 
-#endif  //  CHROME_BROWSER_ASH_INPUT_METHOD_ASSISTIVE_WINDOW_PROPERTIES_H_
+#endif  // CHROME_BROWSER_ASH_INPUT_METHOD_ASSISTIVE_WINDOW_PROPERTIES_H_

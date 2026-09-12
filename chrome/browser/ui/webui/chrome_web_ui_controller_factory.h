@@ -8,12 +8,13 @@
 #include <memory>
 #include <vector>
 
-#include "base/memory/singleton.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/no_destructor.h"
 #include "build/build_config.h"
 #include "components/favicon_base/favicon_callback.h"
 #include "content/public/browser/web_ui.h"
 #include "content/public/browser/web_ui_controller_factory.h"
-#include "ui/base/layout.h"
+#include "ui/base/resource/resource_scale_factor.h"
 
 class Profile;
 
@@ -33,7 +34,7 @@ class ChromeWebUIControllerFactory : public content::WebUIControllerFactory {
 
   static ChromeWebUIControllerFactory* GetInstance();
 
-  // http://crbug.com/829412
+  // http://crbug.com/40091019
   // Renderers with WebUI bindings shouldn't make http(s) requests for security
   // reasons (e.g. to avoid malicious responses being able to run code in
   // priviliged renderers). Fix these webui's to make requests through C++
@@ -56,32 +57,26 @@ class ChromeWebUIControllerFactory : public content::WebUIControllerFactory {
                         const std::vector<int>& desired_sizes_in_pixel,
                         favicon_base::FaviconResultsCallback callback) const;
 
-#if BUILDFLAG(IS_CHROMEOS)
-  // Called to retrieve a list of URLs which can be handled by this browser.
-  // For Ash this means that they are shown in an SWA application and for
-  // Lacros it means that Lacros will handle them themselves.
-  std::vector<GURL> GetListOfAcceptableURLs();
-
-  // Determines if the given URL can be handled by any known handler.
-  // Note that the provided |url| needs to be sanitized.
-  bool CanHandleUrl(const GURL& url);
-#endif
-
  protected:
   ChromeWebUIControllerFactory();
   ~ChromeWebUIControllerFactory() override;
 
  private:
-  friend struct base::DefaultSingletonTraits<ChromeWebUIControllerFactory>;
+  friend base::NoDestructor<ChromeWebUIControllerFactory>;
 
   // Gets the data for the favicon for a WebUI page. Returns NULL if the WebUI
   // does not have a favicon.
   // The returned favicon data must be
   // |gfx::kFaviconSize| x |gfx::kFaviconSize| DIP. GetFaviconForURL() should
   // be updated if this changes.
-  base::RefCountedMemory* GetFaviconResourceBytes(
+  scoped_refptr<base::RefCountedMemory> GetFaviconResourceBytes(
       const GURL& page_url,
       ui::ResourceScaleFactor scale_factor) const;
+
+#if BUILDFLAG(IS_ANDROID)
+  // Checks if the given page URL is a chrome native page that has a favicon.
+  bool HasFaviconForNativePage(const GURL& page_url) const;
+#endif
 };
 
 #endif  // CHROME_BROWSER_UI_WEBUI_CHROME_WEB_UI_CONTROLLER_FACTORY_H_

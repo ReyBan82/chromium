@@ -4,9 +4,10 @@
 
 #include "chrome/browser/extensions/api/input_ime/input_ime_api.h"
 
-#include <memory>
 #include <utility>
+
 #include "base/lazy_instance.h"
+#include "base/memory/singleton.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/common/extensions/api/input_method_private.h"
@@ -43,9 +44,9 @@ InputMethodEngine* GetEngineIfActive(Profile* profile,
 ui::KeyEvent ConvertKeyboardEventToUIKeyEvent(
     const input_ime::KeyboardEvent& event) {
   const ui::EventType type =
-      event.type == input_ime::KEYBOARD_EVENT_TYPE_KEYDOWN
-          ? ui::ET_KEY_PRESSED
-          : ui::ET_KEY_RELEASED;
+      event.type == input_ime::KeyboardEventType::kKeydown
+          ? ui::EventType::kKeyPressed
+          : ui::EventType::kKeyReleased;
 
   const auto key_code = static_cast<ui::KeyboardCode>(
       event.key_code && *event.key_code != ui::VKEY_UNKNOWN
@@ -81,8 +82,9 @@ InputImeEventRouterFactory::InputImeEventRouterFactory() = default;
 InputImeEventRouterFactory::~InputImeEventRouterFactory() = default;
 
 InputImeEventRouter* InputImeEventRouterFactory::GetRouter(Profile* profile) {
-  if (!profile)
+  if (!profile) {
     return nullptr;
+  }
   // The |router_map_| is keyed by the original profile.
   // Refers to the comments in |RemoveProfile| method for the reason.
   profile = profile->GetOriginalProfile();
@@ -102,8 +104,9 @@ InputImeEventRouter* InputImeEventRouterFactory::GetRouter(Profile* profile) {
 }
 
 void InputImeEventRouterFactory::RemoveProfile(Profile* profile) {
-  if (!profile || router_map_.empty())
+  if (!profile || router_map_.empty()) {
     return;
+  }
   auto it = router_map_.find(profile);
   // The routers are common between an incognito profile and its original
   // profile, and are keyed on the original profiles.
@@ -116,13 +119,14 @@ void InputImeEventRouterFactory::RemoveProfile(Profile* profile) {
 }
 
 ExtensionFunction::ResponseAction InputImeKeyEventHandledFunction::Run() {
-  std::unique_ptr<KeyEventHandled::Params> params(
-      KeyEventHandled::Params::Create(args()));
+  std::optional<KeyEventHandled::Params> params =
+      KeyEventHandled::Params::Create(args());
   std::string error;
   InputMethodEngine* engine = GetEngineIfActive(
       Profile::FromBrowserContext(browser_context()), extension_id(), &error);
-  if (!engine)
+  if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
 
   engine->KeyEventHandled(extension_id(), params->request_id, params->response);
   return RespondNow(NoArguments());
@@ -132,24 +136,25 @@ ExtensionFunction::ResponseAction InputImeSetCompositionFunction::Run() {
   std::string error;
   InputMethodEngine* engine = GetEngineIfActive(
       Profile::FromBrowserContext(browser_context()), extension_id(), &error);
-  if (!engine)
+  if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
 
-  std::unique_ptr<SetComposition::Params> parent_params(
-      SetComposition::Params::Create(args()));
+  std::optional<SetComposition::Params> parent_params =
+      SetComposition::Params::Create(args());
   const SetComposition::Params::Parameters& params = parent_params->parameters;
   std::vector<InputMethodEngine::SegmentInfo> segments;
   if (params.segments) {
     for (const auto& segments_arg : *params.segments) {
       EXTENSION_FUNCTION_VALIDATE(segments_arg.style !=
-                                  input_ime::UNDERLINE_STYLE_NONE);
+                                  input_ime::UnderlineStyle::kNone);
       InputMethodEngine::SegmentInfo segment_info;
       segment_info.start = segments_arg.start;
       segment_info.end = segments_arg.end;
-      if (segments_arg.style == input_ime::UNDERLINE_STYLE_UNDERLINE) {
+      if (segments_arg.style == input_ime::UnderlineStyle::kUnderline) {
         segment_info.style = InputMethodEngine::SEGMENT_STYLE_UNDERLINE;
       } else if (segments_arg.style ==
-                 input_ime::UNDERLINE_STYLE_DOUBLEUNDERLINE) {
+                 input_ime::UnderlineStyle::kDoubleUnderline) {
         segment_info.style = InputMethodEngine::SEGMENT_STYLE_DOUBLE_UNDERLINE;
       } else {
         segment_info.style = InputMethodEngine::SEGMENT_STYLE_NO_UNDERLINE;
@@ -164,9 +169,9 @@ ExtensionFunction::ResponseAction InputImeSetCompositionFunction::Run() {
   if (!engine->SetComposition(params.context_id, params.text.c_str(),
                               selection_start, selection_end, params.cursor,
                               segments, &error)) {
-    base::Value::List results;
+    base::ListValue results;
     results.Append(false);
-    return RespondNow(ErrorWithArguments(
+    return RespondNow(ErrorWithArgumentsDoNotUse(
         std::move(results), InformativeError(error, static_function_name())));
   }
   return RespondNow(WithArguments(true));
@@ -176,17 +181,18 @@ ExtensionFunction::ResponseAction InputImeCommitTextFunction::Run() {
   std::string error;
   InputMethodEngine* engine = GetEngineIfActive(
       Profile::FromBrowserContext(browser_context()), extension_id(), &error);
-  if (!engine)
+  if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
 
-  std::unique_ptr<CommitText::Params> parent_params(
-      CommitText::Params::Create(args()));
+  std::optional<CommitText::Params> parent_params =
+      CommitText::Params::Create(args());
   const CommitText::Params::Parameters& params = parent_params->parameters;
   if (!engine->CommitText(params.context_id, base::UTF8ToUTF16(params.text),
                           &error)) {
-    base::Value::List results;
+    base::ListValue results;
     results.Append(false);
-    return RespondNow(ErrorWithArguments(
+    return RespondNow(ErrorWithArgumentsDoNotUse(
         std::move(results), InformativeError(error, static_function_name())));
   }
   return RespondNow(WithArguments(true));
@@ -196,11 +202,12 @@ ExtensionFunction::ResponseAction InputImeSendKeyEventsFunction::Run() {
   std::string error;
   InputMethodEngine* engine = GetEngineIfActive(
       Profile::FromBrowserContext(browser_context()), extension_id(), &error);
-  if (!engine)
+  if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
 
-  std::unique_ptr<SendKeyEvents::Params> parent_params(
-      SendKeyEvents::Params::Create(args()));
+  std::optional<SendKeyEvents::Params> parent_params =
+      SendKeyEvents::Params::Create(args());
   EXTENSION_FUNCTION_VALIDATE(parent_params);
   const SendKeyEvents::Params::Parameters& params = parent_params->parameters;
 
@@ -247,8 +254,9 @@ BrowserContextKeyedAPIFactory<InputImeAPI>* InputImeAPI::GetFactoryInstance() {
 }
 
 InputImeEventRouter* GetInputImeEventRouter(Profile* profile) {
-  if (!profile)
+  if (!profile) {
     return nullptr;
+  }
   return InputImeEventRouterFactory::GetInstance()->GetRouter(profile);
 }
 

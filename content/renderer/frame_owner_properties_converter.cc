@@ -11,7 +11,7 @@ TypeConverter<blink::WebFrameOwnerProperties,
               blink::mojom::FrameOwnerProperties>::
     Convert(const blink::mojom::FrameOwnerProperties& mojo_properties) {
   blink::WebFrameOwnerProperties result;
-  result.name = blink::WebString::FromUTF8(mojo_properties.name);
+  result.name = blink::WebString::FromUtf8(mojo_properties.name);
   result.scrollbar_mode = mojo_properties.scrollbar_mode;
   result.margin_width = mojo_properties.margin_width;
   result.margin_height = mojo_properties.margin_height;
@@ -19,6 +19,7 @@ TypeConverter<blink::WebFrameOwnerProperties,
   result.allow_payment_request = mojo_properties.allow_payment_request;
   result.is_display_none = mojo_properties.is_display_none;
   result.color_scheme = mojo_properties.color_scheme;
+  result.responsive_sizing = mojo_properties.responsive_sizing;
 
   return result;
 }
@@ -40,6 +41,8 @@ TypeConverter<blink::mojom::FrameOwnerPropertiesPtr,
       web_frame_owner_properties.allow_payment_request;
   mojo_properties->is_display_none = web_frame_owner_properties.is_display_none;
   mojo_properties->color_scheme = web_frame_owner_properties.color_scheme;
+  mojo_properties->responsive_sizing =
+      web_frame_owner_properties.responsive_sizing;
 
   return mojo_properties;
 }

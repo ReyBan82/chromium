@@ -8,8 +8,10 @@
 #include <string>
 #include <vector>
 
+#include "base/containers/flat_map.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
+#include "base/time/time.h"
 #include "components/sync_sessions/open_tabs_ui_delegate.h"
 
 namespace sync_sessions {
@@ -37,10 +39,12 @@ class OpenTabsUIDelegateImpl : public OpenTabsUIDelegate {
 
   // OpenTabsUIDelegate implementation.
   bool GetAllForeignSessions(
-      std::vector<const SyncedSession*>* sessions) override;
-  bool GetForeignSession(
-      const std::string& tag,
-      std::vector<const sessions::SessionWindow*>* windows) override;
+      std::vector<raw_ptr<const SyncedSession, VectorExperimental>>* sessions)
+      override;
+  base::flat_map<std::string, base::Time>
+  GetAllForeignSessionLastModifiedTimes() const override;
+  std::vector<const sessions::SessionWindow*> GetForeignSession(
+      const std::string& tag) override;
   bool GetForeignTab(const std::string& tag,
                      SessionID tab_id,
                      const sessions::SessionTab** tab) override;
@@ -52,7 +56,7 @@ class OpenTabsUIDelegateImpl : public OpenTabsUIDelegate {
 
  private:
   const raw_ptr<const SyncSessionsClient> sessions_client_;
-  raw_ptr<const SyncedSessionTracker> session_tracker_;
+  const raw_ptr<const SyncedSessionTracker> session_tracker_;
   DeleteForeignSessionCallback delete_foreign_session_cb_;
 };
 

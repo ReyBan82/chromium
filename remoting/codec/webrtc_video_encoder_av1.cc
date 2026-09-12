@@ -4,7 +4,9 @@
 
 #include "remoting/codec/webrtc_video_encoder_av1.h"
 
-#include "base/cxx17_backports.h"
+#include <algorithm>
+
+#include "base/compiler_specific.h"
 #include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/notreached.h"
@@ -38,7 +40,7 @@ constexpr int kAv1MinimumTargetBitrateKbpsPerMegapixel = 2500;
 
 // Use the highest possible encoder speed as it produces frames faster than the
 // lower settings, requires fewer CPU resources, and still has low bitrates.
-constexpr int kAv1DefaultEncoderSpeed = 10;
+constexpr int kAv1DefaultEncoderSpeed = 11;
 
 }  // namespace
 
@@ -61,9 +63,21 @@ void WebrtcVideoEncoderAV1::SetLosslessColor(bool want_lossless) {
 void WebrtcVideoEncoderAV1::SetEncoderSpeed(int encoder_speed) {
   // Clamp values are based on the lowest and highest values available when
   // realtime encoding with AV1.  This allows for client-driven experimentation,
-  // however in practice, a value of 9 or 10 should be chosen as that will give
+  // however in practice, a value of 10 or 11 should be chosen as they will give
   // the best performance.
-  av1_encoder_speed_ = base::clamp<int>(encoder_speed, 7, 10);
+  int clamped_speed = std::clamp<int>(encoder_speed, 7, 11);
+  if (av1_encoder_speed_ != clamped_speed) {
+    VLOG(0) << "Setting AV1 encoder speed to " << clamped_speed;
+    av1_encoder_speed_ = clamped_speed;
+    codec_.reset();
+  }
+}
+
+void WebrtcVideoEncoderAV1::SetUseActiveMap(bool use_active_map) {
+  if (use_active_map != use_active_map_) {
+    use_active_map_ = use_active_map;
+    codec_.reset();
+  }
 }
 
 bool WebrtcVideoEncoderAV1::InitializeCodec(const webrtc::DesktopSize& size) {
@@ -94,7 +108,12 @@ bool WebrtcVideoEncoderAV1::InitializeCodec(const webrtc::DesktopSize& size) {
   DCHECK_NE(codec->name, nullptr);
 
   if (use_active_map_) {
-    active_map_.Initialize(size);
+    active_map_data_.Initialize(size);
+    active_map_ = {
+        .active_map = active_map_data_.data(),
+        .rows = active_map_data_.height(),
+        .cols = active_map_data_.width(),
+    };
   }
 
   error = aom_codec_control(codec.get(), AOME_SET_CPUUSED, av1_encoder_speed_);
@@ -251,6 +270,7 @@ void WebrtcVideoEncoderAV1::PrepareImage(
   }
 
   // Convert the updated region to YUV ready for encoding.
+  CHECK_EQ(frame->pixel_format(), webrtc::FOURCC_ARGB);
   const uint8_t* rgb_data = frame->data();
   const int rgb_stride = frame->stride();
   const int y_stride = image_->stride[0];
@@ -269,10 +289,11 @@ void WebrtcVideoEncoderAV1::PrepareImage(
                          rect.left() * webrtc::DesktopFrame::kBytesPerPixel;
         int y_offset = y_stride * rect.top() + rect.left();
         int uv_offset = uv_stride * rect.top() / 2 + rect.left() / 2;
-        libyuv::ARGBToI420(rgb_data + rgb_offset, rgb_stride, y_data + y_offset,
-                           y_stride, u_data + uv_offset, uv_stride,
-                           v_data + uv_offset, uv_stride, rect.width(),
-                           rect.height());
+        libyuv::ARGBToI420(UNSAFE_TODO(rgb_data + rgb_offset), rgb_stride,
+                           UNSAFE_TODO(y_data + y_offset), y_stride,
+                           UNSAFE_TODO(u_data + uv_offset), uv_stride,
+                           UNSAFE_TODO(v_data + uv_offset), uv_stride,
+                           rect.width(), rect.height());
       }
       break;
     case AOM_IMG_FMT_I444:
@@ -282,15 +303,15 @@ void WebrtcVideoEncoderAV1::PrepareImage(
         int rgb_offset = rgb_stride * rect.top() +
                          rect.left() * webrtc::DesktopFrame::kBytesPerPixel;
         int yuv_offset = uv_stride * rect.top() + rect.left();
-        libyuv::ARGBToI444(rgb_data + rgb_offset, rgb_stride,
-                           y_data + yuv_offset, y_stride, u_data + yuv_offset,
-                           uv_stride, v_data + yuv_offset, uv_stride,
+        libyuv::ARGBToI444(UNSAFE_TODO(rgb_data + rgb_offset), rgb_stride,
+                           UNSAFE_TODO(y_data + yuv_offset), y_stride,
+                           UNSAFE_TODO(u_data + yuv_offset), uv_stride,
+                           UNSAFE_TODO(v_data + yuv_offset), uv_stride,
                            rect.width(), rect.height());
       }
       break;
     default:
       NOTREACHED();
-      break;
   }
 }
 
@@ -409,24 +430,17 @@ void WebrtcVideoEncoderAV1::Encode(std::unique_ptr<webrtc::DesktopFrame> frame,
   webrtc::DesktopRegion updated_region;
   PrepareImage(frame.get(), updated_region);
 
-  aom_active_map_t act_map;
   if (use_active_map_) {
-    if (params.clear_active_map) {
-      active_map_.Clear();
+    if (params.clear_active_map || params.key_frame) {
+      active_map_data_.Clear();
     }
 
-    if (params.key_frame) {
-      updated_region.SetRect(webrtc::DesktopRect::MakeSize(frame_size));
-    }
-
-    active_map_.Update(updated_region);
-
-    // Apply active map to the encoder.
-    act_map.rows = active_map_.height();
-    act_map.cols = active_map_.width();
-    act_map.active_map = active_map_.data();
-    if (aom_codec_control(codec_.get(), AOME_SET_ACTIVEMAP, &act_map)) {
-      LOG(ERROR) << "Unable to apply active map";
+    // AV1 does not use an active map for keyframes so skip in that case.
+    if (!params.key_frame) {
+      active_map_data_.Update(updated_region);
+      if (aom_codec_control(codec_.get(), AOME_SET_ACTIVEMAP, &active_map_)) {
+        LOG(ERROR) << "Unable to apply active map";
+      }
     }
   }
 
@@ -443,14 +457,6 @@ void WebrtcVideoEncoderAV1::Encode(std::unique_ptr<webrtc::DesktopFrame> frame,
                << (error_detail ? error_detail : "No error details");
     std::move(done).Run(EncodeResult::UNKNOWN_ERROR, nullptr);
     return;
-  }
-
-  if (use_active_map_) {
-    // Update our active map based on the internal map in the encoder.
-    ret = aom_codec_control(codec_.get(), AV1E_GET_ACTIVEMAP, &act_map);
-    DCHECK_EQ(ret, AOM_CODEC_OK)
-        << "Failed to fetch active map: " << aom_codec_err_to_string(ret)
-        << "\n";
   }
 
   // Read the encoded data.

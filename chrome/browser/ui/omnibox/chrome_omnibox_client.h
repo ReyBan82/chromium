@@ -8,62 +8,98 @@
 #include <memory>
 #include <vector>
 
+#include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
-#include "chrome/browser/autocomplete/chrome_autocomplete_scheme_classifier.h"
 #include "chrome/browser/bitmap_fetcher/bitmap_fetcher_service.h"
 #include "chrome/common/search/instant_types.h"
 #include "components/omnibox/browser/favicon_cache.h"
 #include "components/omnibox/browser/omnibox.mojom-shared.h"
 #include "components/omnibox/browser/omnibox_client.h"
-#include "components/omnibox/browser/on_device_tail_model_observer.h"
+#include "ui/gfx/image/image.h"
 
-class ChromeOmniboxEditModelDelegate;
+class AiModeButtonService;
+class BrowserWindowInterface;
+class ChromeAutocompleteSchemeClassifier;
 class GURL;
+class LocationBar;
 class Profile;
 
-class ChromeOmniboxClient : public OmniboxClient {
- public:
-  ChromeOmniboxClient(ChromeOmniboxEditModelDelegate* edit_model_delegate,
-                      Profile* profile);
+namespace content {
+class NavigationHandle;
+}  // namespace content
 
+namespace omnibox {
+class OmniboxPopupCloser;
+}  // namespace omnibox
+
+class ChromeOmniboxClient final : public OmniboxClient {
+ public:
+  ChromeOmniboxClient(LocationBar* location_bar,
+                      BrowserWindowInterface* browser,
+                      Profile* profile);
   ChromeOmniboxClient(const ChromeOmniboxClient&) = delete;
   ChromeOmniboxClient& operator=(const ChromeOmniboxClient&) = delete;
-
   ~ChromeOmniboxClient() override;
 
+  LocationBar* GetLocationBar() const { return location_bar_; }
+
   // OmniboxClient.
+  bool IsChromeOmniboxClient() const override;
   std::unique_ptr<AutocompleteProviderClient> CreateAutocompleteProviderClient()
       override;
   bool CurrentPageExists() const override;
   const GURL& GetURL() const override;
   const std::u16string& GetTitle() const override;
   gfx::Image GetFavicon() const override;
+  ukm::SourceId GetUKMSourceId() const override;
   bool IsLoading() const override;
   bool IsPasteAndGoEnabled() const override;
   bool IsDefaultSearchProviderEnabled() const override;
-  const SessionID& GetSessionID() const override;
+  SessionID GetSessionID() const override;
+  bool ShowConfirmationDialogIfDefaultSearchExtensionControlled(
+      const GURL& url,
+      base::OnceCallback<void(ExtensionControlledDialogResult)> callback)
+      override;
+  PrefService* GetPrefs() override;
+  const PrefService* GetPrefs() const override;
   bookmarks::BookmarkModel* GetBookmarkModel() override;
   AutocompleteControllerEmitter* GetAutocompleteControllerEmitter() override;
   TemplateURLService* GetTemplateURLService() override;
+  AiModeButtonService* GetAiModeButtonService() override;
   const AutocompleteSchemeClassifier& GetSchemeClassifier() const override;
   AutocompleteClassifier* GetAutocompleteClassifier() override;
+  omnibox::OmniboxPopupCloser* GetOmniboxPopupCloser() override;
   bool ShouldDefaultTypedNavigationsToHttps() const override;
   int GetHttpsPortForTesting() const override;
   bool IsUsingFakeHttpsForHttpsUpgradeTesting() const override;
-  gfx::Image GetIconIfExtensionMatch(
-      const AutocompleteMatch& match) const override;
+  gfx::Image GetExtensionIcon(const TemplateURL* template_url) const override;
+  gfx::Image GetSizedIcon(const SkBitmap* bitmap) const override;
   gfx::Image GetSizedIcon(const gfx::VectorIcon& vector_icon_type,
                           SkColor vector_icon_color) const override;
   gfx::Image GetSizedIcon(const gfx::Image& icon) const override;
-  bool ProcessExtensionKeyword(const std::u16string& text,
-                               const TemplateURL* template_url,
-                               const AutocompleteMatch& match,
-                               WindowOpenDisposition disposition) override;
+  std::u16string GetFormattedFullURL() const override;
+  std::u16string GetURLForDisplay() const override;
+  GURL GetNavigationEntryURL() const override;
+  bool IsContextualTasksPage() const override;
+  GURL GetContextualTasksInnerFrameURL() const override;
+  metrics::OmniboxEventProto::PageClassification GetPageClassification(
+      bool is_prefetch) const override;
+  metrics::OmniboxEventProto::PageClassification
+  GetOmniboxComposeboxPageClassification() const override;
+  security_state::SecurityLevel GetSecurityLevel() const override;
+  net::CertStatus GetCertStatus() const override;
+  const gfx::VectorIcon& GetVectorIcon() const override;
+  void ProcessExtensionMatch(const std::u16string& text,
+                             const TemplateURL* template_url,
+                             const AutocompleteMatch& match,
+                             WindowOpenDisposition disposition) override;
   void OnInputStateChanged() override;
   void OnFocusChanged(OmniboxFocusState state,
                       OmniboxFocusChangeReason reason) override;
+  void MaybeShowOnFocusHatsSurvey(AutocompleteProviderClient* client) override;
+  void CheckConditionsAndLaunchSurvey();
   void OnResultChanged(const AutocompleteResult& result,
                        bool default_match_changed,
                        bool should_prerender,
@@ -76,6 +112,9 @@ class ChromeOmniboxClient : public OmniboxClient {
   gfx::Image GetFaviconForKeywordSearchProvider(
       const TemplateURL* template_url,
       FaviconFetchedCallback on_favicon_fetched) override;
+  gfx::Image GetFaviconForIconUrl(const GURL& icon_url,
+                                  FaviconFetchedCallback on_favicon_fetched,
+                                  bool notify_on_empty) override;
   void OnTextChanged(const AutocompleteMatch& current_match,
                      bool user_input_in_progress,
                      const std::u16string& user_text,
@@ -85,12 +124,42 @@ class ChromeOmniboxClient : public OmniboxClient {
   void OnURLOpenedFromOmnibox(OmniboxLog* log) override;
   void OnBookmarkLaunched() override;
   void DiscardNonCommittedNavigations() override;
-  void OpenUpdateChromeDialog() override;
   void FocusWebContents() override;
   void OnNavigationLikely(
       size_t index,
       const AutocompleteMatch& match,
       omnibox::mojom::NavigationPredictor navigation_predictor) override;
+  void ShowFeedbackPage(const std::u16string& input_text,
+                        const GURL& destination_url) override;
+  void OnAutocompleteAccept(
+      const GURL& destination_url,
+      TemplateURLRef::PostContent* post_content,
+      WindowOpenDisposition disposition,
+      ui::PageTransition transition,
+      AutocompleteMatchType::Type match_type,
+      base::TimeTicks match_selection_timestamp,
+      bool destination_url_entered_without_scheme,
+      bool destination_url_entered_with_http_scheme,
+      const std::u16string& text,
+      const AutocompleteMatch& match,
+      const AutocompleteMatch& alternative_nav_match) override;
+  void OnInputInProgress(bool in_progress) override;
+  void OnPopupVisibilityChanged(bool popup_is_open) override;
+  void OpenUrl(GURL gurl, WindowOpenDisposition disposition) override;
+  void OpenUrlWithCallback(
+      GURL gurl,
+      WindowOpenDisposition disposition,
+      base::OnceCallback<void(base::WeakPtr<content::NavigationHandle>)>
+          callback);
+  void OpenIphLink(GURL gurl) override;
+  bool IsHistoryEmbeddingsEnabled() const override;
+  bool IsAimPopupEnabled() const override;
+  std::optional<lens::proto::LensOverlaySuggestInputs>
+  GetLensOverlaySuggestInputs() const override;
+  void MaybePrewarmForDefaultSearchEngine(PrewarmTrigger trigger) override;
+  base::WeakPtr<OmniboxClient> AsWeakPtr() override;
+  Profile* profile() { return profile_; }
+  BrowserWindowInterface* browser() { return browser_; }
 
   // Update shortcuts when a navigation succeeds.
   static void OnSuccessfulNavigation(Profile* profile,
@@ -104,16 +173,13 @@ class ChromeOmniboxClient : public OmniboxClient {
   // Performs preconnection for |match|.
   void DoPreconnect(const AutocompleteMatch& match);
 
-  void OnBitmapFetched(const BitmapFetchedCallback& callback,
-                       int result_index,
-                       const SkBitmap& bitmap);
-
-  raw_ptr<ChromeOmniboxEditModelDelegate> edit_model_delegate_;
-  raw_ptr<Profile> profile_;
-  ChromeAutocompleteSchemeClassifier scheme_classifier_;
+  // Implemented by `LocationBarView` which owns `OmniboxView` which owns this.
+  const raw_ptr<LocationBar> location_bar_;
+  const raw_ptr<BrowserWindowInterface, DanglingUntriaged> browser_;
+  const raw_ptr<Profile> profile_;
+  std::unique_ptr<ChromeAutocompleteSchemeClassifier> scheme_classifier_;
   std::vector<BitmapFetcherService::RequestId> request_ids_;
   FaviconCache favicon_cache_;
-  std::unique_ptr<OnDeviceTailModelObserver> tail_model_observer_;
 
   base::WeakPtrFactory<ChromeOmniboxClient> weak_factory_{this};
 };

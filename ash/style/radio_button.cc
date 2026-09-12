@@ -9,9 +9,11 @@
 #include "ui/accessibility/ax_node_data.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/base/models/image_model.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/paint_vector_icon.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/vector_icons.h"
 
 namespace ash {
@@ -23,10 +25,18 @@ RadioButton::RadioButton(int button_width,
                          const std::u16string& label,
                          IconDirection icon_direction,
                          IconType icon_type,
-                         const gfx::Insets& insets)
-    : OptionButtonBase(button_width, std::move(callback), label, insets),
+                         const gfx::Insets& insets,
+                         int image_label_spacing)
+    : OptionButtonBase(button_width,
+                       std::move(callback),
+                       label,
+                       insets,
+                       image_label_spacing,
+                       ClickBehavior::kSetToOn),
       icon_direction_(icon_direction),
-      icon_type_(icon_type) {}
+      icon_type_(icon_type) {
+  GetViewAccessibility().SetRole(ax::mojom::Role::kRadioButton);
+}
 
 RadioButton::~RadioButton() = default;
 
@@ -40,8 +50,12 @@ gfx::ImageSkia RadioButton::GetImage(ButtonState for_state) const {
 
 const gfx::VectorIcon& RadioButton::GetVectorIcon() const {
   if (icon_type_ == IconType::kCircle) {
-    return selected() ? views::kRadioButtonActiveIcon
-                      : views::kRadioButtonNormalIcon;
+    return selected() ? ::features::IsRoundedIconsEnabled()
+                            ? views::kRadioButtonCheckedIcon
+                            : views::kRadioButtonActiveOldIcon
+           : ::features::IsRoundedIconsEnabled()
+               ? views::kCircleIcon
+               : views::kRadioButtonNormalOldIcon;
   }
   return kHollowCheckCircleIcon;
 }
@@ -50,12 +64,7 @@ bool RadioButton::IsIconOnTheLeftSide() {
   return icon_direction_ == IconDirection::kLeading;
 }
 
-void RadioButton::GetAccessibleNodeData(ui::AXNodeData* node_data) {
-  OptionButtonBase::GetAccessibleNodeData(node_data);
-  node_data->role = ax::mojom::Role::kRadioButton;
-}
-
-BEGIN_METADATA(RadioButton, OptionButtonBase)
+BEGIN_METADATA(RadioButton)
 END_METADATA
 
 }  // namespace ash

@@ -17,6 +17,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.stringContainsInOrder;
 
 import android.app.Activity;
+import android.content.Context;
 
 import androidx.preference.PreferenceFragmentCompat;
 import androidx.preference.PreferenceScreen;
@@ -24,37 +25,21 @@ import androidx.test.filters.LargeTest;
 
 import com.google.common.collect.ImmutableList;
 
-import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
-import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
-import org.chromium.base.FeatureList;
-import org.chromium.base.test.params.BaseJUnit4RunnerDelegate;
-import org.chromium.base.test.params.ParameterAnnotations;
-import org.chromium.base.test.params.ParameterSet;
-import org.chromium.base.test.params.ParameterizedRunner;
+import org.chromium.base.ThreadUtils;
+import org.chromium.base.test.BaseJUnit4ClassRunner;
 import org.chromium.base.test.util.Batch;
-import org.chromium.components.browser_ui.settings.test.R;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
-import org.chromium.ui.test.util.DisableAnimationsTestRule;
+import org.chromium.components.browser_ui.settings.ManagedPreferenceTestDelegates.TestManagedPreferenceDelegate;
 
-import java.util.Arrays;
-import java.util.List;
-
-/**
- * Tests of {@link ChromeSwitchPreference}.
- */
-@RunWith(ParameterizedRunner.class)
-@ParameterAnnotations.UseRunnerDelegate(BaseJUnit4RunnerDelegate.class)
+/** Tests of {@link ChromeSwitchPreference}. */
+@RunWith(BaseJUnit4ClassRunner.class)
 @Batch(Batch.PER_CLASS)
 public class ChromeSwitchPreferenceTest {
-    @ClassRule
-    public static final DisableAnimationsTestRule disableAnimationsRule =
-            new DisableAnimationsTestRule();
     @Rule
     public final BlankUiTestActivitySettingsTestRule mSettingsRule =
             new BlankUiTestActivitySettingsTestRule();
@@ -62,36 +47,28 @@ public class ChromeSwitchPreferenceTest {
     private static final String TITLE = "Preference Title";
     private static final String SUMMARY = "This is a summary.";
 
+    private static final String CUSTOM_LAYOUT_PREF_NAME = "preference_with_custom_layout";
+
     private Activity mActivity;
     private PreferenceScreen mPreferenceScreen;
 
-    private boolean mEnableHighlightManagedPrefDisclaimerAndroid;
+    /** Test-only subclass of {@link ChromeSwitchPreference} to expose notifyChanged(). */
+    private static class TestChromeSwitchPreference extends ChromeSwitchPreference {
+        public TestChromeSwitchPreference(Context context) {
+            super(context);
+        }
 
-    @ParameterAnnotations.ClassParameter
-    private static List<ParameterSet> sClassParams = Arrays.asList(
-            new ParameterSet().value(true).name("EnableHighlightManagedPrefDisclaimerAndroid"),
-            new ParameterSet().value(false).name("DisableHighlightManagedPrefDisclaimerAndroid"));
-
-    public ChromeSwitchPreferenceTest(boolean enableHighlightManagedPrefDisclaimerAndroid) {
-        mEnableHighlightManagedPrefDisclaimerAndroid = enableHighlightManagedPrefDisclaimerAndroid;
+        @Override
+        public void notifyChanged() {
+            super.notifyChanged();
+        }
     }
 
     @Before
     public void setUp() {
-        FeatureList.TestValues testValuesOverride = new FeatureList.TestValues();
-        testValuesOverride.addFeatureFlagOverride(
-                SettingsFeatureList.HIGHLIGHT_MANAGED_PREF_DISCLAIMER_ANDROID,
-                mEnableHighlightManagedPrefDisclaimerAndroid);
-        FeatureList.setTestValues(testValuesOverride);
-
         mSettingsRule.launchPreference(PlaceholderSettingsForTest.class);
         mActivity = mSettingsRule.getActivity();
         mPreferenceScreen = mSettingsRule.getPreferenceScreen();
-    }
-
-    @After
-    public void tearDown() {
-        FeatureList.setTestValues(null);
     }
 
     @Test
@@ -126,19 +103,15 @@ public class ChromeSwitchPreferenceTest {
         Assert.assertFalse(preference.isEnabled());
 
         onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
-        if (mEnableHighlightManagedPrefDisclaimerAndroid) {
-            onView(withId(android.R.id.summary)).check(matches(not(isDisplayed())));
-            onView(withId(R.id.managed_disclaimer_text))
-                    .check(matches(allOf(withText(R.string.managed_by_your_organization),
-                            Matchers.hasDrawableStart(), isDisplayed())));
-            onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
-        } else {
-            onView(withId(android.R.id.summary))
-                    .check(matches(
-                            allOf(withText(R.string.managed_by_your_organization), isDisplayed())));
-            onView(withId(R.id.managed_disclaimer_text)).check(doesNotExist());
-            onView(withId(android.R.id.icon)).check(matches(isDisplayed()));
-        }
+        onView(withId(android.R.id.summary)).check(matches(not(isDisplayed())));
+        onView(withId(R.id.managed_disclaimer_text))
+                .check(
+                        matches(
+                                allOf(
+                                        withText(R.string.managed_by_your_organization),
+                                        Matchers.hasDrawableStart(),
+                                        isDisplayed())));
+        onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
         onView(withId(R.id.switchWidget)).check(matches(allOf(not(isEnabled()), isDisplayed())));
     }
 
@@ -154,22 +127,16 @@ public class ChromeSwitchPreferenceTest {
         Assert.assertFalse(preference.isEnabled());
 
         onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
-        if (mEnableHighlightManagedPrefDisclaimerAndroid) {
-            onView(withId(android.R.id.summary))
-                    .check(matches(allOf(withText(SUMMARY), isDisplayed())));
-            onView(withId(R.id.managed_disclaimer_text))
-                    .check(matches(allOf(withText(R.string.managed_by_your_organization),
-                            Matchers.hasDrawableStart(), isDisplayed())));
-            onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
-        } else {
-            onView(withId(android.R.id.summary))
-                    .check(matches(allOf(
-                            withText(stringContainsInOrder(ImmutableList.of(SUMMARY,
-                                    mActivity.getString(R.string.managed_by_your_organization)))),
-                            isDisplayed())));
-            onView(withId(R.id.managed_disclaimer_text)).check(doesNotExist());
-            onView(withId(android.R.id.icon)).check(matches(isDisplayed()));
-        }
+        onView(withId(android.R.id.summary))
+                .check(matches(allOf(withText(SUMMARY), isDisplayed())));
+        onView(withId(R.id.managed_disclaimer_text))
+                .check(
+                        matches(
+                                allOf(
+                                        withText(R.string.managed_by_your_organization),
+                                        Matchers.hasDrawableStart(),
+                                        isDisplayed())));
+        onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
         onView(withId(R.id.switchWidget)).check(matches(allOf(not(isEnabled()), isDisplayed())));
     }
 
@@ -187,11 +154,7 @@ public class ChromeSwitchPreferenceTest {
         onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
         onView(withId(android.R.id.summary))
                 .check(matches(allOf(withText(R.string.managed_by_your_parent), isDisplayed())));
-        if (mEnableHighlightManagedPrefDisclaimerAndroid) {
-            onView(withId(R.id.managed_disclaimer_text)).check(matches(not(isDisplayed())));
-        } else {
-            onView(withId(R.id.managed_disclaimer_text)).check(doesNotExist());
-        }
+        onView(withId(R.id.managed_disclaimer_text)).check(matches(not(isDisplayed())));
         onView(withId(android.R.id.icon)).check(matches(isDisplayed()));
         onView(withId(R.id.switchWidget)).check(matches(allOf(not(isEnabled()), isDisplayed())));
     }
@@ -210,13 +173,119 @@ public class ChromeSwitchPreferenceTest {
         onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
         onView(withId(android.R.id.summary))
                 .check(matches(allOf(withText(R.string.managed_by_your_parents), isDisplayed())));
-        if (mEnableHighlightManagedPrefDisclaimerAndroid) {
-            onView(withId(R.id.managed_disclaimer_text)).check(matches(not(isDisplayed())));
-        } else {
-            onView(withId(R.id.managed_disclaimer_text)).check(doesNotExist());
-        }
+        onView(withId(R.id.managed_disclaimer_text)).check(matches(not(isDisplayed())));
         onView(withId(android.R.id.icon)).check(matches(isDisplayed()));
         onView(withId(R.id.switchWidget)).check(matches(allOf(not(isEnabled()), isDisplayed())));
+    }
+
+    @Test
+    @LargeTest
+    public void testRecommended_startsFollowingAndToggles() {
+        final TestChromeSwitchPreference preference = new TestChromeSwitchPreference(mActivity);
+        preference.setTitle(TITLE);
+        preference.setSummary(SUMMARY);
+        final TestManagedPreferenceDelegate delegate = new TestManagedPreferenceDelegate();
+
+        delegate.setIsRecommendation(true);
+        preference.setManagedPreferenceDelegate(delegate);
+        mPreferenceScreen.addPreference(preference);
+
+        // 1. Verify initial "following" state.
+        Assert.assertTrue(preference.isEnabled());
+        onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
+        onView(withId(android.R.id.summary))
+                .check(matches(allOf(withText(SUMMARY), isDisplayed())));
+        onView(withId(R.id.managed_disclaimer_text))
+                .check(
+                        matches(
+                                allOf(
+                                        withText(R.string.recommended_by_your_organization),
+                                        Matchers.hasDrawableStart(),
+                                        isDisplayed())));
+        onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
+        onView(withId(R.id.switchWidget)).check(matches(isEnabled()));
+
+        // 2. Simulate user overriding the recommendation.
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    delegate.setIsRecommendation(false);
+                    preference.notifyChanged();
+                });
+
+        // Verify "overridden" state.
+        onView(withId(R.id.managed_disclaimer_text)).check(matches(not(isDisplayed())));
+        onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
+        onView(withId(R.id.switchWidget)).check(matches(isEnabled()));
+
+        // 3. Simulate user changing back to follow the recommendation.
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    delegate.setIsRecommendation(true);
+                    preference.notifyChanged();
+                });
+
+        // Verify "following" state again.
+        onView(withId(R.id.managed_disclaimer_text))
+                .check(
+                        matches(
+                                allOf(
+                                        withText(R.string.recommended_by_your_organization),
+                                        Matchers.hasDrawableStart(),
+                                        isDisplayed())));
+        onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
+        onView(withId(R.id.switchWidget)).check(matches(isEnabled()));
+    }
+
+    @Test
+    @LargeTest
+    public void testRecommended_startsOverriddenAndToggles() {
+        final TestChromeSwitchPreference preference = new TestChromeSwitchPreference(mActivity);
+        preference.setTitle(TITLE);
+        preference.setSummary(SUMMARY);
+        final TestManagedPreferenceDelegate delegate = new TestManagedPreferenceDelegate();
+
+        delegate.setIsRecommendation(false);
+        preference.setManagedPreferenceDelegate(delegate);
+        mPreferenceScreen.addPreference(preference);
+
+        // 1. Verify initial "overridden" state.
+        Assert.assertTrue(preference.isEnabled());
+        onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
+        onView(withId(android.R.id.summary))
+                .check(matches(allOf(withText(SUMMARY), isDisplayed())));
+        onView(withId(R.id.managed_disclaimer_text)).check(matches(not(isDisplayed())));
+        onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
+        onView(withId(R.id.switchWidget)).check(matches(isEnabled()));
+
+        // 2. Simulate user aligning with the recommendation.
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    delegate.setIsRecommendation(true);
+                    preference.notifyChanged();
+                });
+
+        // 3. Verify "following" state.
+        onView(withId(R.id.managed_disclaimer_text))
+                .check(
+                        matches(
+                                allOf(
+                                        withText(R.string.recommended_by_your_organization),
+                                        Matchers.hasDrawableStart(),
+                                        isDisplayed())));
+        onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
+        onView(withId(R.id.switchWidget)).check(matches(isEnabled()));
+
+        // 4. Simulate user overriding the recommendation again.
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    delegate.setIsRecommendation(false);
+                    preference.notifyChanged();
+                });
+
+        // 5. Verify "overridden" state again.
+        onView(withId(R.id.managed_disclaimer_text)).check(matches(not(isDisplayed())));
+        onView(withId(android.R.id.icon)).check(matches(not(isDisplayed())));
+        onView(withId(R.id.switchWidget)).check(matches(isEnabled()));
     }
 
     @Test
@@ -225,18 +294,19 @@ public class ChromeSwitchPreferenceTest {
         PreferenceFragmentCompat fragment = mSettingsRule.getPreferenceFragment();
         SettingsUtils.addPreferencesFromResource(
                 fragment, R.xml.test_chrome_switch_preference_screen);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            ChromeSwitchPreference preference =
-                    fragment.findPreference("preference_with_custom_layout");
-            preference.setTitle(TITLE);
-            preference.setSummary(SUMMARY);
-            preference.setManagedPreferenceDelegate(
-                    ManagedPreferenceTestDelegates.UNMANAGED_DELEGATE);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    ChromeSwitchPreference preference =
+                            fragment.findPreference(CUSTOM_LAYOUT_PREF_NAME);
+                    preference.setTitle(TITLE);
+                    preference.setSummary(SUMMARY);
+                    preference.setManagedPreferenceDelegate(
+                            ManagedPreferenceTestDelegates.UNMANAGED_DELEGATE);
+                });
 
-        ChromeSwitchPreference preference =
-                fragment.findPreference("preference_with_custom_layout");
-        Assert.assertEquals(preference.getLayoutResource(),
+        ChromeSwitchPreference preference = fragment.findPreference(CUSTOM_LAYOUT_PREF_NAME);
+        Assert.assertEquals(
+                preference.getLayoutResource(),
                 R.layout.chrome_managed_preference_with_custom_layout);
         Assert.assertTrue(preference.isEnabled());
         onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
@@ -253,25 +323,34 @@ public class ChromeSwitchPreferenceTest {
         PreferenceFragmentCompat fragment = mSettingsRule.getPreferenceFragment();
         SettingsUtils.addPreferencesFromResource(
                 fragment, R.xml.test_chrome_switch_preference_screen);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            ChromeSwitchPreference preference =
-                    fragment.findPreference("preference_with_custom_layout");
-            preference.setTitle(TITLE);
-            preference.setSummary(SUMMARY);
-            preference.setManagedPreferenceDelegate(ManagedPreferenceTestDelegates.POLICY_DELEGATE);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    ChromeSwitchPreference preference =
+                            fragment.findPreference(CUSTOM_LAYOUT_PREF_NAME);
+                    preference.setTitle(TITLE);
+                    preference.setSummary(SUMMARY);
+                    preference.setManagedPreferenceDelegate(
+                            ManagedPreferenceTestDelegates.POLICY_DELEGATE);
+                });
 
-        ChromeSwitchPreference preference =
-                fragment.findPreference("preference_with_custom_layout");
-        Assert.assertEquals(preference.getLayoutResource(),
+        ChromeSwitchPreference preference = fragment.findPreference(CUSTOM_LAYOUT_PREF_NAME);
+        Assert.assertEquals(
+                preference.getLayoutResource(),
                 R.layout.chrome_managed_preference_with_custom_layout);
         Assert.assertFalse(preference.isEnabled());
         onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
         onView(withId(android.R.id.summary))
-                .check(matches(
-                        allOf(withText(stringContainsInOrder(ImmutableList.of(SUMMARY,
-                                      mActivity.getString(R.string.managed_by_your_organization)))),
-                                isDisplayed())));
+                .check(
+                        matches(
+                                allOf(
+                                        withText(
+                                                stringContainsInOrder(
+                                                        ImmutableList.of(
+                                                                SUMMARY,
+                                                                mActivity.getString(
+                                                                        R.string
+                                                                                .managed_by_your_organization)))),
+                                        isDisplayed())));
         onView(withId(R.id.managed_disclaimer_text)).check(doesNotExist());
         onView(withId(android.R.id.icon)).check(matches(isDisplayed()));
         onView(withId(R.id.switchWidget)).check(matches(allOf(not(isEnabled()), isDisplayed())));
@@ -283,22 +362,27 @@ public class ChromeSwitchPreferenceTest {
         PreferenceFragmentCompat fragment = mSettingsRule.getPreferenceFragment();
         SettingsUtils.addPreferencesFromResource(
                 fragment, R.xml.test_chrome_switch_preference_screen);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            ChromeSwitchPreference preference =
-                    fragment.findPreference("preference_with_custom_layout");
-            preference.setTitle(TITLE);
-            preference.setManagedPreferenceDelegate(ManagedPreferenceTestDelegates.POLICY_DELEGATE);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    ChromeSwitchPreference preference =
+                            fragment.findPreference(CUSTOM_LAYOUT_PREF_NAME);
+                    preference.setTitle(TITLE);
+                    preference.setManagedPreferenceDelegate(
+                            ManagedPreferenceTestDelegates.POLICY_DELEGATE);
+                });
 
-        ChromeSwitchPreference preference =
-                fragment.findPreference("preference_with_custom_layout");
-        Assert.assertEquals(preference.getLayoutResource(),
+        ChromeSwitchPreference preference = fragment.findPreference(CUSTOM_LAYOUT_PREF_NAME);
+        Assert.assertEquals(
+                preference.getLayoutResource(),
                 R.layout.chrome_managed_preference_with_custom_layout);
         Assert.assertFalse(preference.isEnabled());
         onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));
         onView(withId(android.R.id.summary))
-                .check(matches(
-                        allOf(withText(R.string.managed_by_your_organization), isDisplayed())));
+                .check(
+                        matches(
+                                allOf(
+                                        withText(R.string.managed_by_your_organization),
+                                        isDisplayed())));
         onView(withId(R.id.managed_disclaimer_text)).check(doesNotExist());
         onView(withId(android.R.id.icon)).check(matches(isDisplayed()));
         onView(withId(R.id.switchWidget)).check(matches(allOf(not(isEnabled()), isDisplayed())));
@@ -310,17 +394,18 @@ public class ChromeSwitchPreferenceTest {
         PreferenceFragmentCompat fragment = mSettingsRule.getPreferenceFragment();
         SettingsUtils.addPreferencesFromResource(
                 fragment, R.xml.test_chrome_switch_preference_screen);
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            ChromeSwitchPreference preference =
-                    fragment.findPreference("preference_with_custom_layout");
-            preference.setTitle(TITLE);
-            preference.setManagedPreferenceDelegate(
-                    ManagedPreferenceTestDelegates.SINGLE_CUSTODIAN_DELEGATE);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    ChromeSwitchPreference preference =
+                            fragment.findPreference(CUSTOM_LAYOUT_PREF_NAME);
+                    preference.setTitle(TITLE);
+                    preference.setManagedPreferenceDelegate(
+                            ManagedPreferenceTestDelegates.SINGLE_CUSTODIAN_DELEGATE);
+                });
 
-        ChromeSwitchPreference preference =
-                fragment.findPreference("preference_with_custom_layout");
-        Assert.assertEquals(preference.getLayoutResource(),
+        ChromeSwitchPreference preference = fragment.findPreference(CUSTOM_LAYOUT_PREF_NAME);
+        Assert.assertEquals(
+                preference.getLayoutResource(),
                 R.layout.chrome_managed_preference_with_custom_layout);
         Assert.assertFalse(preference.isEnabled());
         onView(withId(android.R.id.title)).check(matches(allOf(withText(TITLE), isDisplayed())));

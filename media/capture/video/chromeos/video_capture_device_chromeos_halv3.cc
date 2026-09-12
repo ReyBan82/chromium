@@ -21,7 +21,9 @@ VideoCaptureDeviceChromeOSHalv3::VideoCaptureDeviceChromeOSHalv3(
 }
 
 VideoCaptureDeviceChromeOSHalv3::~VideoCaptureDeviceChromeOSHalv3() {
-  vcd_delegate_->Shutdown();
+  // TODO(b/335574894) : Self deleting object is kind of a dangerous pattern.
+  // Refine the pattern when refactoring.
+  vcd_delegate_.ExtractAsDangling()->Shutdown();
 }
 
 // VideoCaptureDevice implementation.
@@ -48,6 +50,10 @@ void VideoCaptureDeviceChromeOSHalv3::SetPhotoOptions(
     mojom::PhotoSettingsPtr settings,
     SetPhotoOptionsCallback callback) {
   vcd_delegate_->SetPhotoOptions(std::move(settings), std::move(callback));
+}
+
+void VideoCaptureDeviceChromeOSHalv3::InvalidateBuffers() {
+  vcd_delegate_->InvalidateBuffers(client_type_);
 }
 
 }  // namespace media

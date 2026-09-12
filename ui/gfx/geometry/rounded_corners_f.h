@@ -8,16 +8,23 @@
 #include <iosfwd>
 #include <limits>
 #include <string>
+#include <tuple>
 
-#include "ui/gfx/geometry/geometry_export.h"
+#include "base/component_export.h"
 #include "ui/gfx/geometry/vector2d_f.h"
 
 namespace gfx {
 
 // Represents the geometry of a region with rounded corners, expressed as four
 // corner radii in the order: top-left, top-right, bottom-right, bottom-left.
-class GEOMETRY_EXPORT RoundedCornersF {
+class COMPONENT_EXPORT(GEOMETRY) RoundedCornersF {
  public:
+  static bool Compare(const RoundedCornersF& a, const RoundedCornersF& b) {
+    return std::tie(a.upper_left_, a.upper_right_, a.lower_right_,
+                    a.lower_left_) < std::tie(b.upper_left_, b.upper_right_,
+                                              b.lower_right_, b.lower_left_);
+  }
+
   // Creates an empty RoundedCornersF with all corners having zero radius.
   constexpr RoundedCornersF() : RoundedCornersF(0.0f) {}
 
@@ -61,16 +68,8 @@ class GEOMETRY_EXPORT RoundedCornersF {
            lower_right_ == 0.0f && lower_left_ == 0.0f;
   }
 
-  bool operator==(const RoundedCornersF& corners) const {
-    return upper_left_ == corners.upper_left_ &&
-           upper_right_ == corners.upper_right_ &&
-           lower_right_ == corners.lower_right_ &&
-           lower_left_ == corners.lower_left_;
-  }
-
-  bool operator!=(const RoundedCornersF& corners) const {
-    return !(*this == corners);
-  }
+  friend bool operator==(const RoundedCornersF&,
+                         const RoundedCornersF&) = default;
 
   // Returns a string representation of the insets.
   std::string ToString() const;

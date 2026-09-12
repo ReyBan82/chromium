@@ -28,12 +28,10 @@ class ASH_EXPORT FakeVideoConferenceTrayController
     : public VideoConferenceTrayController {
  public:
   FakeVideoConferenceTrayController();
-
   FakeVideoConferenceTrayController(const FakeVideoConferenceTrayController&) =
       delete;
   FakeVideoConferenceTrayController& operator=(
       const FakeVideoConferenceTrayController&) = delete;
-
   ~FakeVideoConferenceTrayController() override;
 
   // VideoConferenceTrayController:
@@ -41,23 +39,29 @@ class ASH_EXPORT FakeVideoConferenceTrayController
   void SetMicrophoneMuted(bool muted) override;
   bool GetCameraMuted() override;
   bool GetMicrophoneMuted() override;
+  VideoConferenceTrayEffectsManager& GetEffectsManager() override;
+
+  void SetEffectsManager(VideoConferenceTrayEffectsManager* effects_manager);
   void GetMediaApps(base::OnceCallback<void(MediaApps)> ui_callback) override;
   void ReturnToApp(const base::UnguessableToken& id) override;
-  void HandleDeviceUsedWhileDisabled(
-      crosapi::mojom::VideoConferenceMediaDevice device,
-      const std::u16string& app_name) override;
+  void HandleDeviceUsedWhileDisabled(VideoConferenceMediaDevice device,
+                                     const std::u16string& app_name) override;
+  void HandleClientUpdate(VideoConferenceClientUpdate update) override;
 
   // Adds or clears media app(s) in `media_apps_`.
-  void AddMediaApp(crosapi::mojom::VideoConferenceMediaAppInfoPtr media_app);
+  void AddMediaApp(VideoConferenceMediaAppInfo media_app);
   void ClearMediaApps();
 
-  bool camera_muted() { return camera_muted_; }
-  bool microphone_muted() { return microphone_muted_; }
-  const std::vector<
-      std::pair<crosapi::mojom::VideoConferenceMediaDevice, std::u16string>>&
+  const std::vector<std::pair<VideoConferenceMediaDevice, std::u16string>>&
   device_used_while_disabled_records() {
     return device_used_while_disabled_records_;
   }
+
+  const VideoConferenceClientUpdate& last_client_update() {
+    return last_client_update_;
+  }
+
+  const MediaApps& media_apps() { return media_apps_; }
 
  private:
   FRIEND_TEST_ALL_PREFIXES(video_conference::ReturnToAppPanelTest, ReturnToApp);
@@ -67,21 +71,29 @@ class ASH_EXPORT FakeVideoConferenceTrayController
   // A vector containing all currently running media apps. Used for testing.
   MediaApps media_apps_;
 
-  // Indicates whether camera/microphone is muted.
-  bool camera_muted_ = false;
+  // Indicates whether microphone is muted.
   bool microphone_muted_ = false;
 
   // Records calls of the HandleDeviceUsedWhileDisabled for testing.
-  std::vector<
-      std::pair<crosapi::mojom::VideoConferenceMediaDevice, std::u16string>>
+  std::vector<std::pair<VideoConferenceMediaDevice, std::u16string>>
       device_used_while_disabled_records_;
 
   // A mapping from the media app's id to its launch state (whether the app is
   // launched and brought to the foreground).
   std::map<base::UnguessableToken, bool> app_to_launch_state_;
 
+  // The `VideoConferenceTrayEffectsManager` that should be used. Can be
+  // specified by `SetEffectsManager()`. Mainly used by tests that require use
+  // of a fake VC effects manager over the manager used in production. If null,
+  // then a call to `GetEffectsManager()` will return the result of the base
+  // `VideoConferenceTrayController::GetEffectsManager()`.
+  raw_ptr<VideoConferenceTrayEffectsManager> effects_manager_;
+
   // General-purpose repository for fake effects.
   std::unique_ptr<fake_video_conference::EffectRepository> effect_repository_;
+
+  // Last client update received.
+  VideoConferenceClientUpdate last_client_update_;
 };
 
 }  // namespace ash

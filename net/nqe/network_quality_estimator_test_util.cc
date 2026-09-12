@@ -51,8 +51,8 @@ TestNetworkQualityEstimator::TestNetworkQualityEstimator(
     : NetworkQualityEstimator(
           std::make_unique<NetworkQualityEstimatorParams>(variation_params),
           NetLog::Get()),
-      embedded_test_server_(base::FilePath(kTestFilePath)),
-      suppress_notifications_for_testing_(suppress_notifications_for_testing) {
+      suppress_notifications_for_testing_(suppress_notifications_for_testing),
+      embedded_test_server_(base::FilePath(kTestFilePath)) {
   SetUseLocalHostRequestsForTesting(allow_local_host_requests_for_tests);
   SetUseSmallResponsesForTesting(allow_smaller_responses_for_tests);
 }
@@ -60,8 +60,8 @@ TestNetworkQualityEstimator::TestNetworkQualityEstimator(
 TestNetworkQualityEstimator::TestNetworkQualityEstimator(
     std::unique_ptr<NetworkQualityEstimatorParams> params)
     : NetworkQualityEstimator(std::move(params), NetLog::Get()),
-      embedded_test_server_(base::FilePath(kTestFilePath)),
-      suppress_notifications_for_testing_(false) {}
+      suppress_notifications_for_testing_(false),
+      embedded_test_server_(base::FilePath(kTestFilePath)) {}
 
 TestNetworkQualityEstimator::~TestNetworkQualityEstimator() = default;
 
@@ -75,12 +75,12 @@ void TestNetworkQualityEstimator::RunOneRequest() {
   auto builder = CreateTestURLRequestContextBuilder();
   builder->set_network_quality_estimator(this);
   auto context = builder->Build();
-  std::unique_ptr<URLRequest> request(
-      context->CreateRequest(GetEchoURL(), DEFAULT_PRIORITY, &test_delegate,
-                             TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> request(context->CreateRequest(
+      GetEchoURL(), DEFAULT_PRIORITY, &test_delegate,
+      TRAFFIC_ANNOTATION_FOR_TESTS, net::handles::kInvalidNetworkHandle));
   request->SetLoadFlags(request->load_flags() | LOAD_MAIN_FRAME_DEPRECATED);
   request->Start();
-  base::RunLoop().Run();
+  test_delegate.RunUntilComplete();
 }
 
 void TestNetworkQualityEstimator::SimulateNetworkChange(
@@ -96,7 +96,7 @@ const GURL TestNetworkQualityEstimator::GetEchoURL() {
   if (!embedded_test_server_.Started()) {
     EXPECT_TRUE(embedded_test_server_.Start());
   }
-  return embedded_test_server_.GetURL("/simple.html");
+  return embedded_test_server_.GetURL("/BullRunSpeech.txt");
 }
 
 const GURL TestNetworkQualityEstimator::GetRedirectURL() {
@@ -191,7 +191,7 @@ bool TestNetworkQualityEstimator::GetRecentRTT(
                                                rtt, observations_count);
 }
 
-absl::optional<base::TimeDelta> TestNetworkQualityEstimator::GetTransportRTT()
+std::optional<base::TimeDelta> TestNetworkQualityEstimator::GetTransportRTT()
     const {
   if (start_time_null_transport_rtt_)
     return start_time_null_transport_rtt_;
@@ -282,7 +282,7 @@ void TestNetworkQualityEstimator::
     observer.OnEffectiveConnectionTypeChanged(type);
 }
 
-absl::optional<net::EffectiveConnectionType>
+std::optional<net::EffectiveConnectionType>
 TestNetworkQualityEstimator::GetOverrideECT() const {
   return effective_connection_type_;
 }
@@ -341,7 +341,7 @@ void TestNetworkQualityEstimator::SetStartTimeNullHttpRtt(
   // Force compute effective connection type so that the new RTT value is
   // immediately picked up. This ensures that the next call to
   // GetEffectiveConnectionType() returns the effective connnection type
-  // that was computed based on |http_rtt|.
+  // that was computed based on `http_rtt`.
   ComputeEffectiveConnectionType();
 }
 
@@ -351,7 +351,7 @@ void TestNetworkQualityEstimator::SetStartTimeNullTransportRtt(
   // Force compute effective connection type so that the new RTT value is
   // immediately picked up. This ensures that the next call to
   // GetEffectiveConnectionType() returns the effective connnection type
-  // that was computed based on |transport_rtt|.
+  // that was computed based on `transport_rtt`.
   ComputeEffectiveConnectionType();
 }
 

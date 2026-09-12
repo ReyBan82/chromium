@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <limits.h>
+#include <linux/input-event-codes.h>
 #include <linux/input.h>
 #include <poll.h>
 #include <stdlib.h>
@@ -12,12 +14,16 @@
 
 #include <iostream>
 #include <string>
+#include <type_traits>
 
+#include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_path.h"
 #include "base/logging.h"
 #include "base/posix/eintr_wrapper.h"
+#include "base/strings/cstring_view.h"
+#include "base/strings/string_number_conversions.h"
 
 // Records and replays touch events on Android device.
 //
@@ -45,12 +51,18 @@ struct TouchInputEventRecord {
   int type;
   int code;
   int value;
+#if LONG_MAX > INT_MAX
+  // Explicitly zero the padding so `std::has_unique_object_representations_v`
+  // will hold.
+  int unused_padding = 0;
+#endif
 
   uint64_t InMilliseconds() const {
     return base::checked_cast<uint64_t>(sec) * 1000 +
            base::checked_cast<uint64_t>(usec / 1000);
   }
 };
+static_assert(std::has_unique_object_representations_v<TouchInputEventRecord>);
 
 class InputDevice {
  public:
@@ -65,7 +77,9 @@ class InputDevice {
 
   void SendEvents(std::vector<TouchInputEventRecord>& events,
                   int index_first,
-                  int index_last);
+                  int index_last,
+                  int offset_x,
+                  int offset_y);
 
  private:
   base::ScopedFD fd_;
@@ -129,12 +143,21 @@ bool InputDevice::HasTouch() {
 
 void InputDevice::SendEvents(std::vector<TouchInputEventRecord>& events,
                              int index_first,
-                             int index_last) {
+                             int index_last,
+                             int offset_x,
+                             int offset_y) {
   for (int i = index_first; i < index_last; i++) {
     TouchInputEventRecord& rec = events[i];
+    int offset = 0;
+    if (rec.code == ABS_MT_POSITION_X) {
+      offset = offset_x;
+    } else if (rec.code == ABS_MT_POSITION_Y) {
+      offset = offset_y;
+    }
+
     input_event event{.type = base::checked_cast<uint16_t>(rec.type),
                       .code = base::checked_cast<uint16_t>(rec.code),
-                      .value = rec.value};
+                      .value = rec.value + offset};
     char* data = reinterpret_cast<char*>(&event);
     constexpr int kSize = static_cast<int>(sizeof(event));
     int bytes_written = 0;
@@ -152,9 +175,18 @@ void InputDevice::SendEvents(std::vector<TouchInputEventRecord>& events,
 }
 
 void PrintUsage(char* prog) {
-  std::cout << "Usage: " << prog << " record|replay FILE" << std::endl
+  std::cout << "Usage: " << prog
+            << " record|replay FILE [--offset-x X] [--offset-y Y]" << std::endl
             << std::endl
             << "Record input events to FILE or replay them from FILE."
+            << std::endl
+            << std::endl
+            << "Options:" << std::endl
+            << "--offset-x X\t"
+            << "the offset along the x-axis to be applied to replay events"
+            << std::endl
+            << "--offset-y Y\t"
+            << "the offset along the y-axis to be applied to replay events"
             << std::endl;
 }
 
@@ -167,6 +199,25 @@ Command ParseCommand(char* arg) {
     return Command::kReplay;
   }
   return Command::kNone;
+}
+
+bool ParseOffset(const char* offset_type,
+                 const char* offset_value,
+                 std::optional<int>& offset_x,
+                 std::optional<int>& offset_y) {
+  int offset = 0;
+  base::StringToInt(std::string(offset_value), &offset);
+  if (!std::string("--offset-x").compare(offset_type) &&
+      !offset_x.has_value()) {
+    offset_x.emplace(offset);
+  } else if (!std::string("--offset-y").compare(offset_type) &&
+             !offset_y.has_value()) {
+    offset_y.emplace(offset);
+  } else {
+    return false;
+  }
+
+  return true;
 }
 
 void PrintProgressMarkers(int i) {
@@ -187,8 +238,8 @@ constexpr int kLogFileHeaderSize = static_cast<int>(sizeof(kLogFileHeader));
 
 bool IsValidFileHeader(base::File& dump_file) {
   char magic_buf[kLogFileHeaderSize];
-  int bytes_read = dump_file.ReadAtCurrentPos(magic_buf, kLogFileHeaderSize);
-  if (bytes_read < kLogFileHeaderSize) {
+  if (!dump_file.ReadAtCurrentPosAndCheck(
+          base::as_writable_byte_span(magic_buf))) {
     PLOG(ERROR) << "read magic";
     return false;
   }
@@ -208,8 +259,7 @@ bool ReadNullTerminatedString(base::File& f,
   char cur;
   int64_t name_bytes_read = 0;
   do {
-    int bytes_read = f.Read(offset, &cur, 1);
-    if (bytes_read < 1) {
+    if (!f.ReadAndCheck(offset, base::byte_span_from_ref(cur))) {
       PLOG(ERROR) << "read device name";
       return false;
     }
@@ -248,7 +298,8 @@ bool RecordForever(const base::FilePath& file_path) {
   }
 
   // Write the magic.
-  if (!dump_file.WriteAtCurrentPos(kLogFileHeader, sizeof(kLogFileHeader))) {
+  if (!dump_file.WriteAtCurrentPosAndCheck(
+          base::byte_span_with_nul_from_cstring(kLogFileHeader))) {
     LOG(ERROR) << "Could not write magic";
   }
 
@@ -273,9 +324,10 @@ bool RecordForever(const base::FilePath& file_path) {
     return false;
   }
 
-  // Write the device file name to the dump.
-  const std::string& s = device->path().MaybeAsASCII();
-  if (!dump_file.WriteAtCurrentPos(s.c_str(), s.size() + 1)) {
+  // Write the device file name to the dump (inc. terminating NUL).
+  if (!dump_file.WriteAtCurrentPosAndCheck(
+          base::byte_span_with_nul_from_cstring_view(
+              base::cstring_view(device->path().MaybeAsASCII())))) {
     LOG(ERROR) << "Could not write device name";
     return false;
   }
@@ -297,8 +349,8 @@ bool RecordForever(const base::FilePath& file_path) {
                                    .type = event.type,
                                    .code = event.code,
                                    .value = event.value};
-      if (!dump_file.WriteAtCurrentPos(reinterpret_cast<char*>(&record),
-                                       sizeof(record))) {
+      if (!dump_file.WriteAtCurrentPosAndCheck(
+              base::byte_span_from_ref(record))) {
         LOG(ERROR) << "Failed to write record";
         return false;
       }
@@ -321,7 +373,7 @@ void ValidateRecords(const std::vector<TouchInputEventRecord>& records) {
   }
 }
 
-bool Replay(const base::FilePath& file_path) {
+bool Replay(const base::FilePath& file_path, int offset_x, int offset_y) {
   // Open the dump file for reading.
   base::File dump_file(file_path,
                        base::File::FLAG_OPEN | base::File::FLAG_READ);
@@ -351,15 +403,11 @@ bool Replay(const base::FilePath& file_path) {
     LOG(ERROR) << "No events to send";
     return false;
   }
-  const int64_t bytes_to_read = num_records * sizeof(TouchInputEventRecord);
   std::vector<TouchInputEventRecord> records(num_records);
-  int bytes_read = dump_file.Read(
-      offset, reinterpret_cast<char*>(records.data()), bytes_to_read);
-  if (bytes_read < base::checked_cast<int>(bytes_to_read)) {
+  if (!dump_file.ReadAndCheck(offset, base::as_writable_byte_span(records))) {
     PLOG(ERROR) << "Could not read records";
     return false;
   }
-
   ValidateRecords(records);
 
   // Open the device.
@@ -394,7 +442,7 @@ bool Replay(const base::FilePath& file_path) {
     }
 
     // Send all events from the chunk to the device without delays in between.
-    device->SendEvents(records, chunk_first, chunk_last);
+    device->SendEvents(records, chunk_first, chunk_last, offset_x, offset_y);
 
     // Print progress after sending the chunk of events to reduce
     // delays between the events within each chunk.
@@ -409,7 +457,7 @@ bool Replay(const base::FilePath& file_path) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
+  if (!(argc == 3 || argc == 5 || argc == 7)) {
     PrintUsage(argv[0]);
     return 1;
   }
@@ -428,7 +476,17 @@ int main(int argc, char** argv) {
       return 1;
     }
   } else if (command == Command::kReplay) {
-    if (!Replay(file_path)) {
+    std::optional<int> offset_x;
+    std::optional<int> offset_y;
+    for (int i = 3; i < argc; i += 2) {
+      // Expect the next arguments to be of the form: --offset-[x|y] OFFSET
+      if (!ParseOffset(argv[i], argv[i + 1], offset_x, offset_y)) {
+        PrintUsage(argv[0]);
+        return 1;
+      }
+    }
+
+    if (!Replay(file_path, offset_x.value_or(0), offset_y.value_or(0))) {
       return 1;
     }
   }

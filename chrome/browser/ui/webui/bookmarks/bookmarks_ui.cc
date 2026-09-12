@@ -9,15 +9,21 @@
 #include <string>
 #include <utility>
 
-#include "base/containers/cxx20_erase.h"
+#include "base/feature_list.h"
+#include "chrome/browser/enterprise/isolated_mode/isolated_mode_settings_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/bookmarks/bookmarks_service_feature.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/ui_features.h"
 #include "chrome/browser/ui/webui/bookmarks/bookmarks_message_handler.h"
 #include "chrome/browser/ui/webui/favicon_source.h"
 #include "chrome/browser/ui/webui/managed_ui_handler.h"
 #include "chrome/browser/ui/webui/metrics_handler.h"
+#include "chrome/browser/ui/webui/page_not_available_for_guest/page_not_available_for_guest_ui.h"
 #include "chrome/browser/ui/webui/plural_string_handler.h"
-#include "chrome/browser/ui/webui/webui_util.h"
+#include "chrome/browser/ui/webui/theme_source.h"
+#include "chrome/common/channel_info.h"
 #include "chrome/common/url_constants.h"
 #include "chrome/grit/bookmarks_resources.h"
 #include "chrome/grit/bookmarks_resources_map.h"
@@ -25,6 +31,7 @@
 #include "chrome/grit/theme_resources.h"
 #include "components/favicon_base/favicon_url_parser.h"
 #include "components/strings/grit/components_strings.h"
+#include "components/tabs/public/tab_interface.h"
 #include "content/public/browser/url_data_source.h"
 #include "content/public/browser/web_ui.h"
 #include "content/public/browser/web_ui_data_source.h"
@@ -32,6 +39,8 @@
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/base/webui/web_ui_util.h"
+#include "ui/base/window_open_disposition.h"
+#include "ui/webui/webui_util.h"
 
 namespace {
 
@@ -39,20 +48,19 @@ void AddLocalizedString(content::WebUIDataSource* source,
                         const std::string& message,
                         int id) {
   std::u16string str = l10n_util::GetStringUTF16(id);
-  base::Erase(str, '&');
+  std::erase(str, '&');
   source->AddString(message, str);
 }
 
 content::WebUIDataSource* CreateAndAddBookmarksUIHTMLSource(Profile* profile) {
   content::WebUIDataSource* source = content::WebUIDataSource::CreateAndAdd(
       profile, chrome::kChromeUIBookmarksHost);
-  webui::SetupWebUIDataSource(
-      source, base::make_span(kBookmarksResources, kBookmarksResourcesSize),
-      IDR_BOOKMARKS_BOOKMARKS_HTML);
+  webui::SetupWebUIDataSource(source, kBookmarksResources,
+                              IDR_BOOKMARKS_BOOKMARKS_HTML);
 
   // Build an Accelerator to describe undo shortcut
   // NOTE: the undo shortcut is also defined in bookmarks/command_manager.js
-  // TODO(crbug/893033): de-duplicate shortcut by moving all shortcut
+  // TODO(crbug.com/40597071): de-duplicate shortcut by moving all shortcut
   // definitions from JS to C++.
   ui::Accelerator undo_accelerator(ui::VKEY_Z, ui::EF_PLATFORM_ACCELERATOR);
   source->AddString("undoDescription", l10n_util::GetStringFUTF16(
@@ -63,8 +71,11 @@ content::WebUIDataSource* CreateAndAddBookmarksUIHTMLSource(Profile* profile) {
   static constexpr webui::LocalizedString kStrings[] = {
       {"addBookmarkTitle", IDS_BOOKMARK_MANAGER_ADD_BOOKMARK_TITLE},
       {"addFolderTitle", IDS_BOOKMARK_MANAGER_ADD_FOLDER_TITLE},
+      {"accountBookmarksTitle", IDS_BOOKMARKS_ACCOUNT_BOOKMARKS},
+      {"bookmarkPromoCardTitle", IDS_BATCH_UPLOAD_PROMO_TITLE},
       {"cancel", IDS_CANCEL},
       {"clearSearch", IDS_BOOKMARK_MANAGER_CLEAR_SEARCH},
+      {"close", IDS_CLOSE},
       {"delete", IDS_DELETE},
       {"editBookmarkTitle", IDS_BOOKMARK_EDITOR_TITLE},
       {"editDialogInvalidUrl", IDS_BOOKMARK_MANAGER_INVALID_URL},
@@ -78,6 +89,7 @@ content::WebUIDataSource* CreateAndAddBookmarksUIHTMLSource(Profile* profile) {
       {"itemsSelected", IDS_BOOKMARK_MANAGER_ITEMS_SELECTED},
       {"itemsUnselected", IDS_BOOKMARK_MANAGER_ITEMS_UNSELECTED},
       {"listAxLabel", IDS_BOOKMARK_MANAGER_LIST_AX_LABEL},
+      {"localBookmarksTitle", IDS_BOOKMARKS_DEVICE_BOOKMARKS},
       {"menu", IDS_MENU},
       {"menuAddBookmark", IDS_BOOKMARK_MANAGER_MENU_ADD_BOOKMARK},
       {"menuAddFolder", IDS_BOOKMARK_MANAGER_MENU_ADD_FOLDER},
@@ -98,12 +110,23 @@ content::WebUIDataSource* CreateAndAddBookmarksUIHTMLSource(Profile* profile) {
       {"menuOpenAllIncognito", IDS_BOOKMARK_MANAGER_MENU_OPEN_ALL_INCOGNITO},
       {"menuOpenAllIncognitoWithCount",
        IDS_BOOKMARK_MANAGER_MENU_OPEN_ALL_INCOGNITO_WITH_COUNT},
+      {"menuOpenAllIsolated", IDS_BOOKMARK_MANAGER_MENU_OPEN_ALL_ISOLATED},
+      {"menuOpenAllIsolatedWithCount",
+       IDS_BOOKMARK_MANAGER_MENU_OPEN_ALL_ISOLATED_WITH_COUNT},
+      {"menuOpenAllNewTabGroup",
+       IDS_BOOKMARK_MANAGER_MENU_OPEN_ALL_NEW_TAB_GROUP},
+      {"menuOpenAllNewTabGroupWithCount",
+       IDS_BOOKMARK_MANAGER_MENU_OPEN_ALL_NEW_TAB_GROUP_WITH_COUNT},
       {"menuOpenNewTab", IDS_BOOKMARK_MANAGER_MENU_OPEN_IN_NEW_TAB},
+      {"menuOpenNewTabGroup", IDS_BOOKMARK_MANAGER_MENU_OPEN_IN_NEW_TAB_GROUP},
       {"menuOpenNewWindow", IDS_BOOKMARK_MANAGER_MENU_OPEN_IN_NEW_WINDOW},
       {"menuOpenIncognito", IDS_BOOKMARK_MANAGER_MENU_OPEN_INCOGNITO},
+      {"menuOpenIsolated", IDS_BOOKMARK_MANAGER_MENU_OPEN_ISOLATED},
+      {"menuOpenSplitView", IDS_BOOKMARK_MANAGER_MENU_OPEN_IN_SPLIT_VIEW},
       {"menuRename", IDS_BOOKMARK_MANAGER_MENU_RENAME},
       {"menuShowInFolder", IDS_BOOKMARK_MANAGER_MENU_SHOW_IN_FOLDER},
       {"menuSort", IDS_BOOKMARK_MANAGER_MENU_SORT},
+      {"uploadBookmarkButtonTitle", IDS_BOOKMARK_MOVE_TO_ACCOUNT_ICON_TOOLTIP},
       {"moreActionsButtonTitle", IDS_BOOKMARK_MANAGER_MORE_ACTIONS},
       {"moreActionsButtonAxLabel", IDS_BOOKMARK_MANAGER_MORE_ACTIONS_AX_LABEL},
       {"moreActionsMultiButtonAxLabel",
@@ -114,6 +137,7 @@ content::WebUIDataSource* CreateAndAddBookmarksUIHTMLSource(Profile* profile) {
       {"openDialogTitle", IDS_BOOKMARK_MANAGER_OPEN_DIALOG_TITLE},
       {"organizeButtonTitle", IDS_BOOKMARK_MANAGER_ORGANIZE_MENU},
       {"renameFolderTitle", IDS_BOOKMARK_MANAGER_FOLDER_RENAME_TITLE},
+      {"saveToAccount", IDS_BATCH_UPLOAD_PROMO_TITLE_OK_BUTTON_LABEL},
       {"searchPrompt", IDS_BOOKMARK_MANAGER_SEARCH_BUTTON},
       {"sidebarAxLabel", IDS_BOOKMARK_MANAGER_SIDEBAR_AX_LABEL},
       {"searchCleared", IDS_SEARCH_CLEARED},
@@ -125,15 +149,50 @@ content::WebUIDataSource* CreateAndAddBookmarksUIHTMLSource(Profile* profile) {
       {"toastItemDeleted", IDS_BOOKMARK_MANAGER_TOAST_ITEM_DELETED},
       {"undo", IDS_BOOKMARK_BAR_UNDO},
   };
-  for (const auto& str : kStrings)
+  for (const auto& str : kStrings) {
     AddLocalizedString(source, str.name, str.id);
+  }
+
+  source->AddBoolean("menuSimplification",
+                     features::IsMenuSimplificationEnabled());
+  source->AddBoolean(
+      "isIsolatedModeEnabled",
+      enterprise_isolated_mode::IsolatedModeReplacesIncognito(profile));
+
+  source->AddResourcePath(
+      "images/batch_upload_bookmarks_promo.svg",
+      IDR_BOOKMARKS_IMAGES_BATCH_UPLOAD_BOOKMARKS_PROMO_SVG);
+  source->AddResourcePath(
+      "images/batch_upload_bookmarks_promo_dark.svg",
+      IDR_BOOKMARKS_IMAGES_BATCH_UPLOAD_BOOKMARKS_PROMO_DARK_SVG);
+
+  source->AddString("webuiRefresh2026", features::IsWebuiRefresh2026Enabled()
+                                            ? "webui-refresh-2026"
+                                            : "");
 
   return source;
 }
 
 }  // namespace
 
-BookmarksUI::BookmarksUI(content::WebUI* web_ui) : WebUIController(web_ui) {
+BookmarksUIConfig::BookmarksUIConfig()
+    : WebUIConfig(content::kChromeUIScheme, chrome::kChromeUIBookmarksHost) {}
+
+BookmarksUIConfig::~BookmarksUIConfig() = default;
+
+std::unique_ptr<content::WebUIController>
+BookmarksUIConfig::CreateWebUIController(content::WebUI* web_ui,
+                                         const GURL& url) {
+  Profile* profile = Profile::FromWebUI(web_ui);
+  if (profile->IsGuestSession()) {
+    return std::make_unique<PageNotAvailableForGuestUI>(
+        web_ui, chrome::kChromeUIBookmarksHost);
+  }
+  return std::make_unique<BookmarksUI>(web_ui);
+}
+
+BookmarksUI::BookmarksUI(content::WebUI* web_ui)
+    : ui::MojoWebUIController(web_ui, /*enable_chrome_send=*/true) {
   // Set up the chrome://bookmarks/ source.
   Profile* profile = Profile::FromWebUI(web_ui);
   auto* source = CreateAndAddBookmarksUIHTMLSource(profile);
@@ -142,6 +201,7 @@ BookmarksUI::BookmarksUI(content::WebUI* web_ui) : WebUIController(web_ui) {
   content::URLDataSource::Add(
       profile, std::make_unique<FaviconSource>(
                    profile, chrome::FaviconUrlFormat::kFavicon2));
+  content::URLDataSource::Add(profile, std::make_unique<ThemeSource>(profile));
 
   auto plural_string_handler = std::make_unique<PluralStringHandler>();
   plural_string_handler->AddLocalizedString(
@@ -157,8 +217,26 @@ BookmarksUI::BookmarksUI(content::WebUI* web_ui) : WebUIController(web_ui) {
 }
 
 // static
-base::RefCountedMemory* BookmarksUI::GetFaviconResourceBytes(
+scoped_refptr<base::RefCountedMemory> BookmarksUI::GetFaviconResourceBytes(
     ui::ResourceScaleFactor scale_factor) {
   return ui::ResourceBundle::GetSharedInstance().LoadDataResourceBytesForScale(
       IDR_BOOKMARKS_FAVICON, scale_factor);
 }
+
+BookmarksUI::~BookmarksUI() = default;
+
+void BookmarksUI::BindInterface(
+    mojo::PendingReceiver<bookmarks_api::mojom::BookmarksService> receiver) {
+  auto* tab = tabs::TabInterface::GetFromContents(web_ui()->GetWebContents());
+  if (tab) {
+    auto* browser_window = tab->GetBrowserWindowInterface();
+    if (browser_window) {
+      auto* feature = BookmarksServiceFeature::From(browser_window);
+      if (feature) {
+        feature->Accept(std::move(receiver));
+      }
+    }
+  }
+}
+
+WEB_UI_CONTROLLER_TYPE_IMPL(BookmarksUI)

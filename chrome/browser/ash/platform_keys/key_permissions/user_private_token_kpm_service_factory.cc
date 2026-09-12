@@ -6,11 +6,11 @@
 
 #include <memory>
 
+#include "ash/constants/ash_pref_names.h"
 #include "chrome/browser/ash/platform_keys/key_permissions/key_permissions_manager_impl.h"
 #include "chrome/browser/ash/platform_keys/platform_keys_service.h"
 #include "chrome/browser/ash/platform_keys/platform_keys_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/pref_names.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 
 namespace ash {
@@ -56,28 +56,29 @@ UserPrivateTokenKeyPermissionsManagerServiceFactory::GetForBrowserContext(
 // static
 UserPrivateTokenKeyPermissionsManagerServiceFactory*
 UserPrivateTokenKeyPermissionsManagerServiceFactory::GetInstance() {
-  return base::Singleton<
-      UserPrivateTokenKeyPermissionsManagerServiceFactory>::get();
+  static base::NoDestructor<UserPrivateTokenKeyPermissionsManagerServiceFactory>
+      instance;
+  return instance.get();
 }
 
 UserPrivateTokenKeyPermissionsManagerServiceFactory::
     UserPrivateTokenKeyPermissionsManagerServiceFactory()
-    : ProfileKeyedServiceFactory(
-          "UserPrivateTokenKeyPermissionsManagerService",
-          ProfileSelections::Builder()
-              .WithGuest(ProfileSelections::kRegularProfileDefault)
-              .WithAshInternals(ProfileSelection::kNone)
-              .Build()) {
+    : ProfileKeyedServiceFactory("UserPrivateTokenKeyPermissionsManagerService",
+                                 ProfileSelections::Builder()
+                                     .WithGuest(ProfileSelection::kOriginalOnly)
+                                     .WithAshInternals(ProfileSelection::kNone)
+                                     .Build()) {
   DependsOn(PlatformKeysServiceFactory::GetInstance());
 }
 
 UserPrivateTokenKeyPermissionsManagerServiceFactory::
     ~UserPrivateTokenKeyPermissionsManagerServiceFactory() = default;
 
-KeyedService*
-UserPrivateTokenKeyPermissionsManagerServiceFactory::BuildServiceInstanceFor(
-    content::BrowserContext* context) const {
-  return new UserPrivateTokenKeyPermissionsManagerService(
+std::unique_ptr<KeyedService>
+UserPrivateTokenKeyPermissionsManagerServiceFactory::
+    BuildServiceInstanceForBrowserContext(
+        content::BrowserContext* context) const {
+  return std::make_unique<UserPrivateTokenKeyPermissionsManagerService>(
       Profile::FromBrowserContext(context));
 }
 
@@ -93,7 +94,7 @@ bool UserPrivateTokenKeyPermissionsManagerServiceFactory::
 
 void UserPrivateTokenKeyPermissionsManagerServiceFactory::RegisterProfilePrefs(
     user_prefs::PrefRegistrySyncable* registry) {
-  registry->RegisterBooleanPref(prefs::kKeyPermissionsOneTimeMigrationDone,
+  registry->RegisterBooleanPref(ash::prefs::kKeyPermissionsOneTimeMigrationDone,
                                 /*default_value=*/false);
 }
 

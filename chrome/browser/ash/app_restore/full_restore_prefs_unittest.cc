@@ -6,12 +6,14 @@
 
 #include <memory>
 
-#include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
+#include "ash/constants/ash_pref_names.h"
+#include "ash/constants/chrome_pref_names.h"
+#include "ash/wm/window_restore/window_restore_util.h"
 #include "chrome/browser/prefs/session_startup_pref.h"
-#include "chrome/common/pref_names.h"
+#include "chrome/test/base/testing_browser_process.h"
 #include "components/pref_registry/pref_registry_syncable.h"
+#include "components/session_manager/test/user_session_test_environment.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
-#include "components/user_manager/scoped_user_manager.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace ash::full_restore {
@@ -19,108 +21,116 @@ namespace ash::full_restore {
 // Unit tests for full_restore_prefs.
 class FullRestorePrefsTest : public testing::Test {
  public:
-  FullRestorePrefsTest()
-      : user_manager_enabler_(std::make_unique<FakeChromeUserManager>()) {}
+  FullRestorePrefsTest() = default;
 
   void SetUp() override {
+    user_session_test_environment_ =
+        std::make_unique<ash::test::UserSessionTestEnvironment>(
+            TestingBrowserProcess::GetGlobal()->local_state());
     pref_service_ =
         std::make_unique<sync_preferences::TestingPrefServiceSyncable>();
+  }
+
+  void TearDown() override {
+    pref_service_.reset();
+    user_session_test_environment_.reset();
   }
 
   user_prefs::PrefRegistrySyncable* registry() {
     return pref_service_->registry();
   }
 
-  FakeChromeUserManager* GetFakeUserManager() const {
-    return static_cast<FakeChromeUserManager*>(
-        user_manager::UserManager::Get());
-  }
-
   RestoreOption GetRestoreOption() const {
     return static_cast<RestoreOption>(
-        pref_service_->GetInteger(kRestoreAppsAndPagesPrefName));
+        pref_service_->GetInteger(prefs::kRestoreAppsAndPagesPrefName));
   }
 
+  sync_preferences::TestingPrefServiceSyncable* pref_service() {
+    return pref_service_.get();
+  }
+
+ private:
+  std::unique_ptr<ash::test::UserSessionTestEnvironment>
+      user_session_test_environment_;
   std::unique_ptr<sync_preferences::TestingPrefServiceSyncable> pref_service_;
-  user_manager::ScopedUserManager user_manager_enabler_;
 };
 
 // For a brand new user, set 'ask every time' as the default value.
 TEST_F(FullRestorePrefsTest, NewUser) {
-  GetFakeUserManager()->set_current_user_new(true);
-  RegisterProfilePrefs(registry());
+  user_manager::UserManager::Get()->SetIsCurrentUserNew(true);
+  RegisterProfilePrefsFullRestore(registry());
 
-  SetDefaultRestorePrefIfNecessary(pref_service_.get());
+  SetDefaultRestorePrefIfNecessary(pref_service());
   EXPECT_EQ(RestoreOption::kAskEveryTime, GetRestoreOption());
-  EXPECT_TRUE(CanPerformRestore(pref_service_.get()));
+  EXPECT_TRUE(CanPerformRestore(pref_service()));
 }
 
 // When a user upgrades to the full restore release, set 'ask every time' as the
 // default value if the browser setting is 'continue where you left off'.
 TEST_F(FullRestorePrefsTest, UpgradingFromRestore) {
   SessionStartupPref::RegisterProfilePrefs(registry());
-  pref_service_->SetInteger(
-      prefs::kRestoreOnStartup,
+  pref_service()->SetInteger(
+      ash::chrome_prefs::kRestoreOnStartup,
       static_cast<int>(SessionStartupPref::kPrefValueLast));
 
-  RegisterProfilePrefs(registry());
-  SetDefaultRestorePrefIfNecessary(pref_service_.get());
+  RegisterProfilePrefsFullRestore(registry());
+  SetDefaultRestorePrefIfNecessary(pref_service());
   EXPECT_EQ(RestoreOption::kAskEveryTime, GetRestoreOption());
-  EXPECT_TRUE(CanPerformRestore(pref_service_.get()));
+  EXPECT_TRUE(CanPerformRestore(pref_service()));
 }
 
 // When a user upgrades to the full restore release, set 'do not restore' as the
 // default value if the browser setting is 'new tab'.
 TEST_F(FullRestorePrefsTest, UpgradingFromNotRestore) {
   SessionStartupPref::RegisterProfilePrefs(registry());
-  pref_service_->SetInteger(
-      prefs::kRestoreOnStartup,
+  pref_service()->SetInteger(
+      ash::chrome_prefs::kRestoreOnStartup,
       static_cast<int>(SessionStartupPref::kPrefValueNewTab));
 
-  RegisterProfilePrefs(registry());
-  SetDefaultRestorePrefIfNecessary(pref_service_.get());
+  RegisterProfilePrefsFullRestore(registry());
+  SetDefaultRestorePrefIfNecessary(pref_service());
   EXPECT_EQ(RestoreOption::kDoNotRestore, GetRestoreOption());
-  EXPECT_FALSE(CanPerformRestore(pref_service_.get()));
+  EXPECT_FALSE(CanPerformRestore(pref_service()));
 }
 
 // For a new Chrome OS user, set 'always restore' as the default value if the
 // browser setting is 'continue where you left off'.
 TEST_F(FullRestorePrefsTest, NewChromeOSUserFromRestore) {
-  GetFakeUserManager()->set_current_user_new(true);
+  user_manager::UserManager::Get()->SetIsCurrentUserNew(true);
 
-  RegisterProfilePrefs(registry());
-  SetDefaultRestorePrefIfNecessary(pref_service_.get());
+  RegisterProfilePrefsFullRestore(registry());
+  SetDefaultRestorePrefIfNecessary(pref_service());
   EXPECT_EQ(RestoreOption::kAskEveryTime, GetRestoreOption());
-  EXPECT_TRUE(CanPerformRestore(pref_service_.get()));
+  EXPECT_TRUE(CanPerformRestore(pref_service()));
 
   SessionStartupPref::RegisterProfilePrefs(registry());
-  pref_service_->SetInteger(
-      prefs::kRestoreOnStartup,
+  pref_service()->SetInteger(
+      ash::chrome_prefs::kRestoreOnStartup,
       static_cast<int>(SessionStartupPref::kPrefValueLast));
 
-  UpdateRestorePrefIfNecessary(pref_service_.get());
+  UpdateRestorePrefIfNecessary(pref_service());
   EXPECT_EQ(RestoreOption::kAlways, GetRestoreOption());
-  EXPECT_TRUE(CanPerformRestore(pref_service_.get()));
+  EXPECT_TRUE(CanPerformRestore(pref_service()));
 }
 
 // For a new Chrome OS user, set 'ask every time' as the default value if the
 // browser setting is 'new tab'.
 TEST_F(FullRestorePrefsTest, NewChromeOSUserFromNotRestore) {
-  GetFakeUserManager()->set_current_user_new(true);
+  user_manager::UserManager::Get()->SetIsCurrentUserNew(true);
 
-  RegisterProfilePrefs(registry());
-  SetDefaultRestorePrefIfNecessary(pref_service_.get());
+  RegisterProfilePrefsFullRestore(registry());
+  SetDefaultRestorePrefIfNecessary(pref_service());
   EXPECT_EQ(RestoreOption::kAskEveryTime, GetRestoreOption());
-  EXPECT_TRUE(CanPerformRestore(pref_service_.get()));
+  EXPECT_TRUE(CanPerformRestore(pref_service()));
 
   SessionStartupPref::RegisterProfilePrefs(registry());
-  pref_service_->SetInteger(
-      prefs::kRestoreOnStartup,
+  pref_service()->SetInteger(
+      ash::chrome_prefs::kRestoreOnStartup,
       static_cast<int>(SessionStartupPref::kPrefValueNewTab));
 
-  UpdateRestorePrefIfNecessary(pref_service_.get());
+  UpdateRestorePrefIfNecessary(pref_service());
   EXPECT_EQ(RestoreOption::kAskEveryTime, GetRestoreOption());
-  EXPECT_TRUE(CanPerformRestore(pref_service_.get()));
+  EXPECT_TRUE(CanPerformRestore(pref_service()));
 }
 
 }  // namespace ash::full_restore

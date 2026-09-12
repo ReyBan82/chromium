@@ -17,18 +17,19 @@ class CrostiniSecurityDelegate : public guest_os::GuestOsSecurityDelegate {
   // Builds an instance of the security_delegate for the given |profile|.
   static void Build(
       Profile* profile,
+      std::string vm_name,
       base::OnceCallback<
           void(std::unique_ptr<guest_os::GuestOsSecurityDelegate>)> callback);
 
   ~CrostiniSecurityDelegate() override;
 
   // exo::SecurityDelegate overrides:
-  std::string GetSecurityContext() const override;
   bool CanLockPointer(aura::Window* window) const override;
 
  private:
   // Private constructor to force use of Build().
-  CrostiniSecurityDelegate() = default;
+  explicit CrostiniSecurityDelegate(std::string vm_name)
+      : guest_os::GuestOsSecurityDelegate(std::move(vm_name)) {}
 };
 
 }  // namespace crostini

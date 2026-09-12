@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/ash/app_list/search/test/app_list_search_test_helper.h"
+#include "base/memory/raw_ptr.h"
 
 #include "base/run_loop.h"
 #include "chrome/browser/ash/app_list/search/search_controller.h"
@@ -30,10 +31,6 @@ void ResultsWaiter::Wait() {
   run_loop_.Run();
 }
 
-AppListSearchBrowserTest::AppListSearchBrowserTest() {
-  scoped_feature_list_.InitWithFeatures({ash::features::kHelpAppLauncherSearch},
-                                        {});
-}
 
 void AppListSearchBrowserTest::SetUpOnMainThread() {
   InProcessBrowserTest::SetUpOnMainThread();
@@ -54,7 +51,7 @@ void AppListSearchBrowserTest::StartSearch(const std::string& query) {
 
 void AppListSearchBrowserTest::SearchAndWaitForProviders(
     const std::string& query,
-    const std::set<ResultType> providers) {
+    const std::set<ResultType>& providers) {
   // The waiter should be created before starting the search request, otherwise
   // it may miss synchronous result changes.
   SearchResultsChangedWaiter results_changed_waiter(
@@ -67,7 +64,8 @@ void AppListSearchBrowserTest::SearchAndWaitForProviders(
   results_waiter.Wait();
 }
 
-std::vector<ChromeSearchResult*> AppListSearchBrowserTest::PublishedResults() {
+std::vector<raw_ptr<ChromeSearchResult, VectorExperimental>>
+AppListSearchBrowserTest::PublishedResults() {
   return GetClient()
       ->GetModelUpdaterForTest()
       ->GetPublishedSearchResultsForTest();
@@ -77,7 +75,7 @@ std::vector<ChromeSearchResult*>
 AppListSearchBrowserTest::PublishedResultsForProvider(
     const ResultType provider) {
   std::vector<ChromeSearchResult*> results;
-  for (auto* result : PublishedResults()) {
+  for (ChromeSearchResult* result : PublishedResults()) {
     if (result->result_type() == provider)
       results.push_back(result);
   }
@@ -88,7 +86,7 @@ AppListSearchBrowserTest::PublishedResultsForProvider(
 // search result exists.
 ChromeSearchResult* AppListSearchBrowserTest::FindResult(
     const std::string& id) {
-  for (auto* result : PublishedResults()) {
+  for (ChromeSearchResult* result : PublishedResults()) {
     if (result->id() == id)
       return result;
   }
@@ -96,7 +94,7 @@ ChromeSearchResult* AppListSearchBrowserTest::FindResult(
 }
 
 Profile* AppListSearchBrowserTest::GetProfile() {
-  return browser()->profile();
+  return browser()->GetProfile();
 }
 
 }  // namespace app_list

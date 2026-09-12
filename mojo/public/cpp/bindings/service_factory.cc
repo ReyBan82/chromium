@@ -4,8 +4,8 @@
 
 #include "mojo/public/cpp/bindings/service_factory.h"
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
+#include "base/threading/platform_thread.h"
 
 namespace mojo {
 
@@ -16,7 +16,7 @@ ServiceFactory::~ServiceFactory() = default;
 bool ServiceFactory::CanRunService(
     const GenericPendingReceiver& receiver) const {
   DCHECK(receiver.is_valid());
-  return base::Contains(constructors_, *receiver.interface_name());
+  return constructors_.contains(*receiver.interface_name());
 }
 
 bool ServiceFactory::RunService(GenericPendingReceiver receiver,
@@ -29,12 +29,15 @@ bool ServiceFactory::RunService(GenericPendingReceiver receiver,
   MessagePipeHandle pipe = receiver.pipe();
 
   auto it = constructors_.find(*receiver.interface_name());
-  if (it == constructors_.end())
+  if (it == constructors_.end()) {
     return false;
+  }
 
-  auto instance = it->second.Run(std::move(receiver));
-  if (!instance)
+  auto& constructor = it->second;
+  auto instance = constructor.Run(std::move(receiver));
+  if (!instance) {
     return false;
+  }
 
   auto disconnect_callback =
       base::BindOnce(&ServiceFactory::OnInstanceDisconnected,
@@ -52,8 +55,13 @@ void ServiceFactory::OnInstanceDisconnected(InstanceHolderBase* instance) {
   instances_.erase(instance);
 }
 
-ServiceFactory::InstanceHolderBase::InstanceHolderBase()
-    : watcher_(FROM_HERE, mojo::SimpleWatcher::ArmingPolicy::AUTOMATIC) {}
+ServiceFactory::InstanceHolderBase::InstanceHolderBase(
+    base::ThreadType thread_type)
+    : watcher_(FROM_HERE, mojo::SimpleWatcher::ArmingPolicy::AUTOMATIC) {
+  if (thread_type != base::ThreadType::kDefault) {
+    thread_type_lease_.emplace(thread_type);
+  }
+}
 
 ServiceFactory::InstanceHolderBase::~InstanceHolderBase() = default;
 

@@ -12,12 +12,14 @@
 #include "base/logging.h"
 #include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
-#include "chrome/browser/ash/crosapi/browser_manager.h"
 #include "chrome/browser/ash/policy/core/cached_policy_key_loader.h"
 #include "chrome/browser/ash/policy/value_validation/onc_user_policy_value_validator.h"
-#include "chrome/browser/lifetime/application_lifetime.h"
 #include "chromeos/ash/components/cryptohome/cryptohome_parameters.h"
+#include "chromeos/ash/components/cryptohome/cryptohome_util.h"
+#include "chromeos/ash/components/dbus/session_manager/policy_descriptor.h"
+#include "components/policy/core/common/cloud/cloud_policy_constants.h"
 #include "components/policy/proto/device_management_backend.pb.h"
+#include "components/session_manager/core/session_manager.h"
 #include "google_apis/gaia/gaia_auth_util.h"
 
 using RetrievePolicyResponseType =
@@ -34,6 +36,17 @@ std::string ExtractDomain(const std::string& username) {
   return gaia::ExtractDomainName(gaia::CanonicalizeEmail(username));
 }
 
+login_manager::PolicyDescriptor MakePolicyDescriptor(
+    const AccountId& account_id,
+    const std::string& policy_type) {
+  login_manager::PolicyDomain domain =
+      policy_type == dm_protocol::kChromeExtensionInstallUserCloudPolicyType
+          ? login_manager::POLICY_DOMAIN_EXTENSION_INSTALL
+          : login_manager::POLICY_DOMAIN_CHROME;
+  return ash::MakePolicyDescriptor(login_manager::ACCOUNT_TYPE_USER, domain,
+                                   cryptohome::GetCryptohomeId(account_id));
+}
+
 }  // namespace
 
 UserCloudPolicyStoreAsh::UserCloudPolicyStoreAsh(
@@ -42,23 +55,27 @@ UserCloudPolicyStoreAsh::UserCloudPolicyStoreAsh(
     scoped_refptr<base::SequencedTaskRunner> background_task_runner,
     const AccountId& account_id,
     const base::FilePath& user_policy_key_dir,
-    bool is_active_directory)
+    const std::string& policy_type)
     : UserCloudPolicyStoreBase(background_task_runner,
-                               PolicyScope::POLICY_SCOPE_USER),
+                               PolicyScope::POLICY_SCOPE_USER,
+                               policy_type),
       session_manager_client_(session_manager_client),
       account_id_(account_id),
-      is_active_directory_(is_active_directory),
       cached_policy_key_loader_(
           std::make_unique<CachedPolicyKeyLoader>(cryptohome_misc_client,
                                                   background_task_runner,
                                                   account_id,
-                                                  user_policy_key_dir)) {}
+                                                  user_policy_key_dir,
+                                                  policy_type)) {
+  CHECK(policy_type == dm_protocol::GetChromeUserPolicyType() ||
+        policy_type == dm_protocol::kChromeExtensionInstallUserCloudPolicyType)
+      << "Unsupported policy type: " << policy_type;
+}
 
-UserCloudPolicyStoreAsh::~UserCloudPolicyStoreAsh() {}
+UserCloudPolicyStoreAsh::~UserCloudPolicyStoreAsh() = default;
 
 void UserCloudPolicyStoreAsh::Store(const em::PolicyFetchResponse& policy) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!is_active_directory_);
 
   // Cancel all pending requests.
   weak_factory_.InvalidateWeakPtrs();
@@ -76,19 +93,25 @@ void UserCloudPolicyStoreAsh::Load() {
   // Cancel all pending requests.
   weak_factory_.InvalidateWeakPtrs();
 
-  session_manager_client_->RetrievePolicyForUser(
-      cryptohome::CreateAccountIdentifierFromAccountId(account_id_),
-      base::BindOnce(&UserCloudPolicyStoreAsh::OnPolicyRetrieved,
-                     weak_factory_.GetWeakPtr()));
+  login_manager::PolicyDescriptor descriptor =
+      MakePolicyDescriptor(account_id_, policy_type());
+  session_manager_client_->RetrievePolicy(
+      descriptor, base::BindOnce(&UserCloudPolicyStoreAsh::OnPolicyRetrieved,
+                                 weak_factory_.GetWeakPtr()));
 }
 
-std::unique_ptr<UserCloudPolicyValidator>
+std::unique_ptr<CloudPolicyValidatorBase>
 UserCloudPolicyStoreAsh::CreateValidator(
     std::unique_ptr<em::PolicyFetchResponse> policy,
     CloudPolicyValidatorBase::ValidateTimestampOption option) {
   auto validator =
       UserCloudPolicyStoreBase::CreateValidator(std::move(policy), option);
-  validator->ValidateValues(std::make_unique<ONCUserPolicyValueValidator>());
+  if (policy_type() == dm_protocol::GetChromeUserPolicyType()) {
+    UserCloudPolicyValidator* user_validator =
+        static_cast<UserCloudPolicyValidator*>(validator.get());
+    user_validator->ValidateValues(
+        std::make_unique<ONCUserPolicyValueValidator>());
+  }
   return validator;
 }
 
@@ -102,18 +125,18 @@ void UserCloudPolicyStoreAsh::LoadImmediately() {
   // the user has flags configured in about:flags.
   // However, on those paths we must load policy synchronously so that the
   // Profile initialization never sees unmanaged prefs, which would lead to
-  // data loss. http://crbug.com/263061
+  // data loss. http://crbug.com/40326003
   std::string policy_blob;
+  login_manager::PolicyDescriptor descriptor =
+      MakePolicyDescriptor(account_id_, policy_type());
   RetrievePolicyResponseType response_type =
-      session_manager_client_->BlockingRetrievePolicyForUser(
-          cryptohome::CreateAccountIdentifierFromAccountId(account_id_),
-          &policy_blob);
+      session_manager_client_->BlockingRetrievePolicy(descriptor, &policy_blob);
 
   if (response_type == RetrievePolicyResponseType::GET_SERVICE_FAIL) {
     LOG(ERROR)
         << "Session manager claims that session doesn't exist; signing out";
     base::debug::DumpWithoutCrashing();
-    chrome::AttemptUserExit();
+    session_manager::SessionManager::Get()->RequestSignOut();
     return;
   }
 
@@ -137,7 +160,7 @@ void UserCloudPolicyStoreAsh::LoadImmediately() {
     return;
   }
 
-  std::unique_ptr<UserCloudPolicyValidator> validator =
+  std::unique_ptr<CloudPolicyValidatorBase> validator =
       CreateValidatorForLoad(std::move(policy));
   validator->RunValidation();
   OnRetrievedPolicyValidated(validator.get());
@@ -145,11 +168,12 @@ void UserCloudPolicyStoreAsh::LoadImmediately() {
 
 void UserCloudPolicyStoreAsh::ValidatePolicyForStore(
     std::unique_ptr<em::PolicyFetchResponse> policy) {
-  DCHECK(!is_active_directory_);
-
   // Create and configure a validator.
-  std::unique_ptr<UserCloudPolicyValidator> validator = CreateValidator(
+
+  std::unique_ptr<CloudPolicyValidatorBase> validator = CreateValidator(
       std::move(policy), CloudPolicyValidatorBase::TIMESTAMP_VALIDATED);
+
+  CHECK(validator) << "Unsupported policy type: " << policy_type();
   validator->ValidateUser(account_id_);
   const std::string& cached_policy_key =
       cached_policy_key_loader_->cached_policy_key();
@@ -161,16 +185,14 @@ void UserCloudPolicyStoreAsh::ValidatePolicyForStore(
   }
 
   // Start validation.
-  UserCloudPolicyValidator::StartValidation(
+  CloudPolicyValidatorBase::StartValidation(
       std::move(validator),
       base::BindOnce(&UserCloudPolicyStoreAsh::OnPolicyToStoreValidated,
                      weak_factory_.GetWeakPtr()));
 }
 
 void UserCloudPolicyStoreAsh::OnPolicyToStoreValidated(
-    UserCloudPolicyValidator* validator) {
-  DCHECK(!is_active_directory_);
-
+    CloudPolicyValidatorBase* validator) {
   validation_result_ = validator->GetValidationResult();
   if (!validator->success()) {
     status_ = STATUS_VALIDATION_ERROR;
@@ -185,16 +207,19 @@ void UserCloudPolicyStoreAsh::OnPolicyToStoreValidated(
     return;
   }
 
+  login_manager::PolicyDomain domain =
+      policy_type() == dm_protocol::kChromeExtensionInstallUserCloudPolicyType
+          ? login_manager::POLICY_DOMAIN_EXTENSION_INSTALL
+          : login_manager::POLICY_DOMAIN_CHROME;
+
   session_manager_client_->StorePolicyForUser(
-      cryptohome::CreateAccountIdentifierFromAccountId(account_id_),
+      cryptohome::CreateAccountIdentifierFromAccountId(account_id_), domain,
       policy_blob,
       base::BindOnce(&UserCloudPolicyStoreAsh::OnPolicyStored,
                      weak_factory_.GetWeakPtr()));
 }
 
 void UserCloudPolicyStoreAsh::OnPolicyStored(bool success) {
-  DCHECK(!is_active_directory_);
-
   if (!success) {
     status_ = STATUS_STORE_ERROR;
     NotifyStoreError();
@@ -218,7 +243,7 @@ void UserCloudPolicyStoreAsh::OnPolicyRetrieved(
     LOG(ERROR)
         << "Session manager claims that session doesn't exist; signing out";
     base::debug::DumpWithoutCrashing();
-    chrome::AttemptUserExit();
+    session_manager::SessionManager::Get()->RequestSignOut();
     return;
   }
 
@@ -241,25 +266,23 @@ void UserCloudPolicyStoreAsh::OnPolicyRetrieved(
   }
 
   // Load |cached_policy_key_| to verify the loaded policy.
-  if (is_active_directory_) {
-    ValidateRetrievedPolicy(std::move(policy));
-  } else {
-    cached_policy_key_loader_->EnsurePolicyKeyLoaded(
-        base::BindOnce(&UserCloudPolicyStoreAsh::ValidateRetrievedPolicy,
-                       weak_factory_.GetWeakPtr(), std::move(policy)));
-  }
+  cached_policy_key_loader_->EnsurePolicyKeyLoaded(
+      base::BindOnce(&UserCloudPolicyStoreAsh::ValidateRetrievedPolicy,
+                     weak_factory_.GetWeakPtr(), std::move(policy)));
 }
 
 void UserCloudPolicyStoreAsh::ValidateRetrievedPolicy(
     std::unique_ptr<em::PolicyFetchResponse> policy) {
-  UserCloudPolicyValidator::StartValidation(
-      CreateValidatorForLoad(std::move(policy)),
+  std::unique_ptr<CloudPolicyValidatorBase> validator =
+      CreateValidatorForLoad(std::move(policy));
+  CloudPolicyValidatorBase::StartValidation(
+      std::move(validator),
       base::BindOnce(&UserCloudPolicyStoreAsh::OnRetrievedPolicyValidated,
                      weak_factory_.GetWeakPtr()));
 }
 
 void UserCloudPolicyStoreAsh::OnRetrievedPolicyValidated(
-    UserCloudPolicyValidator* validator) {
+    CloudPolicyValidatorBase* validator) {
   validation_result_ = validator->GetValidationResult();
   if (!validator->success()) {
     status_ = STATUS_VALIDATION_ERROR;
@@ -267,35 +290,24 @@ void UserCloudPolicyStoreAsh::OnRetrievedPolicyValidated(
     return;
   }
 
-  InstallPolicy(std::move(validator->policy()),
-                std::move(validator->policy_data()),
-                std::move(validator->payload()),
+  InstallPolicy(std::move(validator->policy_data()), validator,
                 cached_policy_key_loader_->cached_policy_key());
   status_ = STATUS_OK;
 
   NotifyStoreLoaded();
 }
 
-std::unique_ptr<UserCloudPolicyValidator>
+std::unique_ptr<CloudPolicyValidatorBase>
 UserCloudPolicyStoreAsh::CreateValidatorForLoad(
     std::unique_ptr<em::PolicyFetchResponse> policy) {
-  std::unique_ptr<UserCloudPolicyValidator> validator = CreateValidator(
+  std::unique_ptr<CloudPolicyValidatorBase> validator = CreateValidator(
       std::move(policy), CloudPolicyValidatorBase::TIMESTAMP_VALIDATED);
-  if (is_active_directory_) {
-    validator->ValidateTimestamp(
-        base::Time(), CloudPolicyValidatorBase::TIMESTAMP_NOT_VALIDATED);
-    validator->ValidateDMToken(std::string(),
-                               CloudPolicyValidatorBase::DM_TOKEN_NOT_REQUIRED);
-    validator->ValidateDeviceId(
-        std::string(), CloudPolicyValidatorBase::DEVICE_ID_NOT_REQUIRED);
-  } else {
-    validator->ValidateUser(account_id_);
-    // The policy loaded from session manager need not be validated using the
-    // verification key since it is secure, and since there may be legacy policy
-    // data that was stored without a verification key.
-    validator->ValidateSignature(
-        cached_policy_key_loader_->cached_policy_key());
-  }
+
+  validator->ValidateUser(account_id_);
+  // The policy loaded from session manager need not be validated using the
+  // verification key since it is secure, and since there may be legacy policy
+  // data that was stored without a verification key.
+  validator->ValidateSignature(cached_policy_key_loader_->cached_policy_key());
   return validator;
 }
 

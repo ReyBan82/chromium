@@ -1,46 +1,26 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf.util;
 
-import com.google.common.base.Splitter;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import com.google.protobuf.Descriptors.Descriptor;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.FieldMask;
 import com.google.protobuf.GeneratedMessage;
 import com.google.protobuf.Message;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Deque;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map.Entry;
-import java.util.SortedMap;
+import java.util.NavigableMap;
 import java.util.TreeMap;
 import java.util.logging.Logger;
 
@@ -68,7 +48,7 @@ final class FieldMaskTree {
   private static final String FIELD_PATH_SEPARATOR_REGEX = "\\.";
 
   private static final class Node {
-    final SortedMap<String, Node> children = new TreeMap<>();
+    final NavigableMap<String, Node> children = new TreeMap<>();
   }
 
   private final Node root = new Node();
@@ -143,43 +123,44 @@ final class FieldMaskTree {
    *   <li>If all children of a node have been removed, the node itself will be removed as well.
    *       That is, if "foo" only has one child "bar" and "foo.bar" only has one child "baz",
    *       removing "foo.bar.barz" would remove both "foo" and "foo.bar". If "foo" has both "bar"
-   *       and "qux" as children, removing "foo.bar" would leave the path "foo.qux" intact.
+   *       and "moo" as children, removing "foo.bar" would leave the path "foo.moo" intact.
    *   <li>If the field path to remove is a non-exist sub-path, nothing will be changed.
    * </ul>
    */
   @CanIgnoreReturnValue
+  @SuppressWarnings("StringSplitter")
   FieldMaskTree removeFieldPath(String path) {
-    List<String> parts = Splitter.onPattern(FIELD_PATH_SEPARATOR_REGEX).splitToList(path);
+    if (path.isEmpty()) {
+      return this;
+    }
+    List<String> parts = Arrays.asList(path.split(FIELD_PATH_SEPARATOR_REGEX));
     if (parts.isEmpty()) {
       return this;
     }
-    removeFieldPath(root, parts, 0);
+
+    Node lastBranchNode = root;
+    String branchKey = null;
+    Node current = root;
+
+    for (String part : parts) {
+      // While descending, keep track of the last node we saw which had more than one child.
+      // When we go to remove later, we want to remove the entire branch beneath that node.
+      if (current.children.size() > 1) {
+        lastBranchNode = current;
+        branchKey = part;
+      }
+      current = current.children.get(part);
+      if (current == null) {
+        return this; // Path not found, remove nothing.
+      }
+    }
+
+    if (branchKey != null) {
+      lastBranchNode.children.remove(branchKey);
+    } else {
+      root.children.clear();
+    }
     return this;
-  }
-
-  /**
-   * Removes {@code parts} from {@code node} recursively.
-   *
-   * @return a boolean value indicating whether current {@code node} should be removed.
-   */
-  @CanIgnoreReturnValue
-  private static boolean removeFieldPath(Node node, List<String> parts, int index) {
-    String key = parts.get(index);
-
-    // Base case 1: path not match.
-    if (!node.children.containsKey(key)) {
-      return false;
-    }
-    // Base case 2: last element in parts.
-    if (index == parts.size() - 1) {
-      node.children.remove(key);
-      return node.children.isEmpty();
-    }
-    // Recursive remove sub-path.
-    if (removeFieldPath(node.children.get(key), parts, index + 1)) {
-      node.children.remove(key);
-    }
-    return node.children.isEmpty();
   }
 
   /** Removes all field paths in {@code mask} from this tree. */
@@ -201,19 +182,39 @@ final class FieldMaskTree {
     return FieldMask.newBuilder().addAllPaths(paths).build();
   }
 
-  /** Gathers all field paths in a sub-tree. */
   private static void getFieldPaths(Node node, String path, List<String> paths) {
-    if (node.children.isEmpty()) {
-      paths.add(path);
-      return;
+    class PathStackElement {
+      final Node node;
+      final String path;
+
+      PathStackElement(Node node, String path) {
+        this.node = node;
+        this.path = path;
+      }
     }
-    for (Entry<String, Node> entry : node.children.entrySet()) {
-      String childPath = path.isEmpty() ? entry.getKey() : path + "." + entry.getKey();
-      getFieldPaths(entry.getValue(), childPath, paths);
+
+    Deque<PathStackElement> stack = new ArrayDeque<>();
+    stack.push(new PathStackElement(node, path));
+
+    while (!stack.isEmpty()) {
+      PathStackElement element = stack.pop();
+      if (element.node.children.isEmpty()) {
+        paths.add(element.path);
+        continue;
+      }
+      // Pushing the children in reverse order so that they are processed in ascending order
+      // will maintain the behavior that the paths are alphabetically sorted in the final
+      // FieldMask.
+      for (Entry<String, Node> entry : element.node.children.descendingMap().entrySet()) {
+        String childPath =
+            element.path.isEmpty() ? entry.getKey() : element.path + "." + entry.getKey();
+        stack.push(new PathStackElement(entry.getValue(), childPath));
+      }
     }
   }
 
   /** Adds the intersection of this tree with the given {@code path} to {@code output}. */
+  @SuppressWarnings("StringSplitter")
   void intersectFieldPath(String path, FieldMaskTree output) {
     if (root.children.isEmpty()) {
       return;
@@ -263,6 +264,7 @@ final class FieldMaskTree {
     if (source.getDescriptorForType() != destination.getDescriptorForType()) {
       throw new IllegalArgumentException(
           String.format(
+              Locale.ROOT,
               "source (%s) and destination (%s) descriptor must be equal",
               source.getDescriptorForType().getFullName(),
               destination.getDescriptorForType().getFullName()));

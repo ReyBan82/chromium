@@ -13,7 +13,6 @@
 #include "third_party/blink/renderer/core/page/validation_message_client_impl.h"
 #include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
 #include "third_party/blink/renderer/platform/testing/paint_test_configurations.h"
-#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 #include "third_party/blink/renderer/platform/web_test_support.h"
 
 #if BUILDFLAG(IS_WIN)
@@ -34,7 +33,7 @@ class ValidationMessageOverlayDelegateTest : public PaintTestConfigurations,
     // an extra step is required to ensure that the system font is configured.
     // See https://crbug.com/969622
     blink::WebFontRendering::SetMenuFontMetrics(
-        blink::WebString::FromASCII("Arial"), 12);
+        blink::WebString::FromAscii("Arial"), 12);
   }
 #endif
 
@@ -68,6 +67,7 @@ TEST_P(ValidationMessageOverlayDelegateTest,
       DocumentUpdateReason::kTest));
 
   // Trigger the overlay animations.
+  delegate_ptr->UpdateFrameViewState(*overlay);
   delegate_ptr->UpdateFrameViewState(*overlay);
 
   // Now find the related animations, and make sure they weren't composited.

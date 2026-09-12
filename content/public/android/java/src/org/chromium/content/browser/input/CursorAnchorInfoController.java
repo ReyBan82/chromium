@@ -5,38 +5,44 @@
 package org.chromium.content.browser.input;
 
 import android.graphics.Matrix;
+import android.graphics.RectF;
+import android.os.Build;
 import android.view.View;
 import android.view.inputmethod.CursorAnchorInfo;
+import android.view.inputmethod.EditorBoundsInfo;
+import android.view.inputmethod.TextAppearanceInfo;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
-import androidx.annotation.VisibleForTesting;
-
+import org.chromium.blink.mojom.InputCursorAnchorInfo;
+import org.chromium.blink_public.common.BlinkFeatures;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.content_public.browser.ContentFeatureMap;
 import org.chromium.content_public.browser.InputMethodManagerWrapper;
-
-import java.util.Arrays;
+import org.chromium.gfx.mojom.Rect;
 
 /**
  * A state machine interface which receives Chromium internal events to determines when to call
- * {@link InputMethodManager#updateCursorAnchorInfo(View, CursorAnchorInfo)}. This interface is
- * also used in unit tests to mock out {@link CursorAnchorInfo}.
+ * {@link InputMethodManager#updateCursorAnchorInfo(View, CursorAnchorInfo)}. This interface is also
+ * used in unit tests to mock out {@link CursorAnchorInfo}.
  */
+@NullMarked
 final class CursorAnchorInfoController {
-    /**
-     * An interface to mock out {@link View#getLocationOnScreen(int[])} for testing.
-     */
+    /** An interface to mock out {@link View#getLocationOnScreen(int[])} for testing. */
     public interface ViewDelegate {
         void getLocationOnScreen(View view, int[] location);
     }
 
-    /**
-     * An interface to mock out composing text retrieval from ImeAdapter.
-     */
+    /** An interface to mock out composing text retrieval from ImeAdapter. */
     public interface ComposingTextDelegate {
+        @Nullable
         CharSequence getText();
+
         int getSelectionStart();
+
         int getSelectionEnd();
+
         int getComposingTextStart();
+
         int getComposingTextEnd();
     }
 
@@ -45,10 +51,7 @@ final class CursorAnchorInfoController {
     private boolean mHasPendingImmediateRequest;
     private boolean mMonitorModeEnabled;
 
-    // Parmeter for CursorAnchorInfo, updated by setCompositionCharacterBounds.
-    @Nullable
-    private float[] mCompositionCharacterBounds;
-    // Paremeters for CursorAnchorInfo, updated by onUpdateFrameInfo.
+    // Parameters for CursorAnchorInfo, updated by onUpdateFrameInfo.
     private boolean mHasCoordinateInfo;
     private float mScale;
     private float mTranslationX;
@@ -59,26 +62,31 @@ final class CursorAnchorInfoController {
     private float mInsertionMarkerTop;
     private float mInsertionMarkerBottom;
 
-    @Nullable
-    private CursorAnchorInfo mLastCursorAnchorInfo;
+    private @Nullable CursorAnchorInfo mLastCursorAnchorInfo;
 
-    @NonNull
+    // Most recent selection bounds, used to detect cursor moves.
+    private boolean mHasLastSelection;
+    private int mLastSelectionStart;
+    private int mLastSelectionEnd;
+
+    // Data which has come through the new code path from the renderer. Eventually, other data like
+    // visible line bounds, composition bounds and editor bounds will be removed in favour of this.
+    private @Nullable InputCursorAnchorInfo mInputCursorAnchorInfo;
+
     private final Matrix mMatrix = new Matrix();
-    @NonNull
     private final int[] mViewOrigin = new int[2];
-    @NonNull
+
     private final CursorAnchorInfo.Builder mCursorAnchorInfoBuilder =
             new CursorAnchorInfo.Builder();
 
-    @Nullable
-    private InputMethodManagerWrapper mInputMethodManagerWrapper;
-    @Nullable
+    private @Nullable InputMethodManagerWrapper mInputMethodManagerWrapper;
     private final ComposingTextDelegate mComposingTextDelegate;
-    @NonNull
     private final ViewDelegate mViewDelegate;
 
-    private CursorAnchorInfoController(InputMethodManagerWrapper inputMethodManagerWrapper,
-            ComposingTextDelegate composingTextDelegate, ViewDelegate viewDelegate) {
+    private CursorAnchorInfoController(
+            InputMethodManagerWrapper inputMethodManagerWrapper,
+            ComposingTextDelegate composingTextDelegate,
+            ViewDelegate viewDelegate) {
         mInputMethodManagerWrapper = inputMethodManagerWrapper;
         mComposingTextDelegate = composingTextDelegate;
         mViewDelegate = viewDelegate;
@@ -87,8 +95,10 @@ final class CursorAnchorInfoController {
     public static CursorAnchorInfoController create(
             InputMethodManagerWrapper inputMethodManagerWrapper,
             ComposingTextDelegate composingTextDelegate) {
-        return new CursorAnchorInfoController(inputMethodManagerWrapper,
-                composingTextDelegate, new ViewDelegate() {
+        return new CursorAnchorInfoController(
+                inputMethodManagerWrapper,
+                composingTextDelegate,
+                new ViewDelegate() {
                     @Override
                     public void getLocationOnScreen(View view, int[] location) {
                         view.getLocationOnScreen(location);
@@ -100,18 +110,15 @@ final class CursorAnchorInfoController {
         mInputMethodManagerWrapper = inputMethodManagerWrapper;
     }
 
-    @VisibleForTesting
     public static CursorAnchorInfoController createForTest(
             InputMethodManagerWrapper inputMethodManagerWrapper,
             ComposingTextDelegate composingTextDelegate,
             ViewDelegate viewDelegate) {
-        return new CursorAnchorInfoController(inputMethodManagerWrapper, composingTextDelegate,
-                viewDelegate);
+        return new CursorAnchorInfoController(
+                inputMethodManagerWrapper, composingTextDelegate, viewDelegate);
     }
 
-    /**
-     * Called by ImeAdapter when a IME related web content state is changed.
-     */
+    /** Called by ImeAdapter when a IME related web content state is changed. */
     public void invalidateLastCursorAnchorInfo() {
         if (!mIsEditable) return;
 
@@ -119,24 +126,8 @@ final class CursorAnchorInfoController {
     }
 
     /**
-     * Sets positional information of composing text as an array of character bounds.
-     * @param compositionCharacterBounds Array of character bounds in local coordinates.
-     * @param view The attached view.
-     */
-    public void setCompositionCharacterBounds(float[] compositionCharacterBounds, View view) {
-        if (!mIsEditable) return;
-
-        if (!Arrays.equals(compositionCharacterBounds, mCompositionCharacterBounds)) {
-            mLastCursorAnchorInfo = null;
-            mCompositionCharacterBounds = compositionCharacterBounds;
-            if (mHasCoordinateInfo) {
-                updateCursorAnchorInfo(view);
-            }
-        }
-    }
-
-    /**
      * Sets coordinates system parameters and selection marker information.
+     *
      * @param scale device scale factor.
      * @param contentOffsetYPix Y offset below the browser controls.
      * @param hasInsertionMarker {@code true} if the insertion marker exists.
@@ -146,9 +137,15 @@ final class CursorAnchorInfoController {
      * @param insertionMarkerBottom Y coordinate of the bottom of the first selection marker.
      * @param view The attached view.
      */
-    public void onUpdateFrameInfo(float scale, float contentOffsetYPix, boolean hasInsertionMarker,
-            boolean isInsertionMarkerVisible, float insertionMarkerHorizontal,
-            float insertionMarkerTop, float insertionMarkerBottom, @NonNull View view) {
+    public void onUpdateFrameInfo(
+            float scale,
+            float contentOffsetYPix,
+            boolean hasInsertionMarker,
+            boolean isInsertionMarkerVisible,
+            float insertionMarkerHorizontal,
+            float insertionMarkerTop,
+            float insertionMarkerBottom,
+            View view) {
         if (!mIsEditable) return;
 
         // Reuse {@param #mViewOrigin} to avoid object creation, as this method is supposed to be
@@ -177,30 +174,30 @@ final class CursorAnchorInfoController {
             mScale = scale;
             mTranslationX = translationX;
             mTranslationY = translationY;
-            mHasInsertionMarker = hasInsertionMarker;
-            mIsInsertionMarkerVisible = isInsertionMarkerVisible;
-            mInsertionMarkerHorizontal = insertionMarkerHorizontal;
-            mInsertionMarkerTop = insertionMarkerTop;
-            mInsertionMarkerBottom = insertionMarkerBottom;
+            if (!ContentFeatureMap.isEnabled(BlinkFeatures.INPUT_CURSOR_ANCHOR_INFO_MIGRATION)) {
+                mHasInsertionMarker = hasInsertionMarker;
+                mIsInsertionMarkerVisible = isInsertionMarkerVisible;
+                mInsertionMarkerHorizontal = insertionMarkerHorizontal;
+                mInsertionMarkerTop = insertionMarkerTop;
+                mInsertionMarkerBottom = insertionMarkerBottom;
+            }
         }
 
         // Notify to IME if there is a pending request, or if it is in monitor mode and we have
         // some change in the state.
-        if (mHasPendingImmediateRequest
-                || (mMonitorModeEnabled && mLastCursorAnchorInfo == null)) {
+        if (mHasPendingImmediateRequest || (mMonitorModeEnabled && mLastCursorAnchorInfo == null)) {
             updateCursorAnchorInfo(view);
         }
     }
 
     public void focusedNodeChanged(boolean isEditable) {
         mIsEditable = isEditable;
-        mCompositionCharacterBounds = null;
         mHasCoordinateInfo = false;
         mLastCursorAnchorInfo = null;
     }
 
-    public boolean onRequestCursorUpdates(boolean immediateRequest, boolean monitorRequest,
-            View view) {
+    public boolean onRequestCursorUpdates(
+            boolean immediateRequest, boolean monitorRequest, View view) {
         if (!mIsEditable) return false;
 
         if (mMonitorModeEnabled && !monitorRequest) {
@@ -217,9 +214,49 @@ final class CursorAnchorInfoController {
         return true;
     }
 
+    /** Did the selection move since the last cursor anchor info update? */
+    private boolean didSelectionMove(InputCursorAnchorInfo cursorAnchorInfo) {
+        // No selection move if no current selection.
+        if (cursorAnchorInfo.insertionMarker == null) {
+            mHasLastSelection = false;
+            return false;
+        }
+
+        // Check current selection bounds against previous bounds.
+        int selectionStart = mComposingTextDelegate.getSelectionStart();
+        int selectionEnd = mComposingTextDelegate.getSelectionEnd();
+        boolean didMove =
+                !mHasLastSelection
+                        || selectionStart != mLastSelectionStart
+                        || selectionEnd != mLastSelectionEnd;
+
+        // Reset previous bounds and return.
+        mHasLastSelection = true;
+        mLastSelectionStart = selectionStart;
+        mLastSelectionEnd = selectionEnd;
+        return didMove;
+    }
+
     /**
-     * Computes the CursorAnchorInfo instance and notify to InputMethodManager if needed.
+     * Updates the CursorAnchorInfo instance if necessary to match the provided information.
+     *
+     * @return Did the selection move since the last update?
      */
+    public boolean updateCursorAnchorInfoData(InputCursorAnchorInfo cursorAnchorInfo, View view) {
+        // Check selection move before previous information is overwritten.
+        boolean isSelectionMove = didSelectionMove(cursorAnchorInfo);
+
+        mInputCursorAnchorInfo = cursorAnchorInfo;
+        mLastCursorAnchorInfo = null;
+        if (cursorAnchorInfo.requested || mMonitorModeEnabled) {
+            updateCursorAnchorInfo(view);
+        }
+
+        return isSelectionMove;
+    }
+
+    /** Computes the CursorAnchorInfo instance and notify to InputMethodManager if needed. */
+    @SuppressWarnings("checkstyle:SetTextColorAndSetTextSizeCheck")
     private void updateCursorAnchorInfo(View view) {
         if (!mHasCoordinateInfo) return;
 
@@ -233,19 +270,20 @@ final class CursorAnchorInfoController {
             int composingTextStart = mComposingTextDelegate.getComposingTextStart();
             int composingTextEnd = mComposingTextDelegate.getComposingTextEnd();
             if (text != null && 0 <= composingTextStart && composingTextEnd <= text.length()) {
-                mCursorAnchorInfoBuilder.setComposingText(composingTextStart,
-                        text.subSequence(composingTextStart, composingTextEnd));
-                float[] compositionCharacterBounds = mCompositionCharacterBounds;
-                if (compositionCharacterBounds != null) {
-                    int numCharacter = compositionCharacterBounds.length / 4;
-                    for (int i = 0; i < numCharacter; ++i) {
-                        float left = compositionCharacterBounds[i * 4];
-                        float top = compositionCharacterBounds[i * 4 + 1];
-                        float right = compositionCharacterBounds[i * 4 + 2];
-                        float bottom = compositionCharacterBounds[i * 4 + 3];
-                        int charIndex = composingTextStart + i;
-                        mCursorAnchorInfoBuilder.addCharacterBounds(charIndex, left, top, right,
-                                bottom, CursorAnchorInfo.FLAG_HAS_VISIBLE_REGION);
+                mCursorAnchorInfoBuilder.setComposingText(
+                        composingTextStart, text.subSequence(composingTextStart, composingTextEnd));
+                if (mInputCursorAnchorInfo != null
+                        && mInputCursorAnchorInfo.characterBounds != null) {
+                    int idx = composingTextStart;
+                    for (Rect rect : mInputCursorAnchorInfo.characterBounds) {
+                        mCursorAnchorInfoBuilder.addCharacterBounds(
+                                idx,
+                                rect.x,
+                                rect.y,
+                                rect.x + rect.width,
+                                rect.y + rect.height,
+                                CursorAnchorInfo.FLAG_HAS_VISIBLE_REGION);
+                        idx++;
                     }
                 }
             }
@@ -253,14 +291,69 @@ final class CursorAnchorInfoController {
             mMatrix.setScale(mScale, mScale);
             mMatrix.postTranslate(mTranslationX, mTranslationY);
             mCursorAnchorInfoBuilder.setMatrix(mMatrix);
-            if (mHasInsertionMarker) {
+            if (!ContentFeatureMap.isEnabled(BlinkFeatures.INPUT_CURSOR_ANCHOR_INFO_MIGRATION)) {
+                if (mHasInsertionMarker) {
+                    mCursorAnchorInfoBuilder.setInsertionMarkerLocation(
+                            mInsertionMarkerHorizontal,
+                            mInsertionMarkerTop,
+                            mInsertionMarkerBottom,
+                            mInsertionMarkerBottom,
+                            mIsInsertionMarkerVisible
+                                    ? CursorAnchorInfo.FLAG_HAS_VISIBLE_REGION
+                                    : CursorAnchorInfo.FLAG_HAS_INVISIBLE_REGION);
+                }
+            } else if (mInputCursorAnchorInfo != null
+                    && mInputCursorAnchorInfo.insertionMarker != null) {
+                Rect marker = mInputCursorAnchorInfo.insertionMarker;
                 mCursorAnchorInfoBuilder.setInsertionMarkerLocation(
-                        mInsertionMarkerHorizontal,
-                        mInsertionMarkerTop,
-                        mInsertionMarkerBottom,
-                        mInsertionMarkerBottom,
-                        mIsInsertionMarkerVisible ? CursorAnchorInfo.FLAG_HAS_VISIBLE_REGION :
-                                CursorAnchorInfo.FLAG_HAS_INVISIBLE_REGION);
+                        marker.x,
+                        marker.y,
+                        marker.y + marker.height,
+                        marker.y + marker.height,
+                        CursorAnchorInfo.FLAG_HAS_VISIBLE_REGION);
+            }
+            if (mInputCursorAnchorInfo != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    if (mInputCursorAnchorInfo.visibleLineBounds != null) {
+                        for (Rect rect : mInputCursorAnchorInfo.visibleLineBounds) {
+                            mCursorAnchorInfoBuilder.addVisibleLineBounds(
+                                    rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+                        }
+                    }
+                    if (mInputCursorAnchorInfo.textAppearanceInfo.textColor != null) {
+                        mCursorAnchorInfoBuilder.setTextAppearanceInfo(
+                                new TextAppearanceInfo.Builder()
+                                        .setTextColor(
+                                                mInputCursorAnchorInfo
+                                                        .textAppearanceInfo
+                                                        .textColor
+                                                        .value)
+                                        .build());
+                    }
+                }
+                org.chromium.gfx.mojom.RectF editorBounds =
+                        mInputCursorAnchorInfo.editorBoundsInfo.editorBounds;
+                org.chromium.gfx.mojom.RectF handwritingBounds =
+                        mInputCursorAnchorInfo.editorBoundsInfo.handwritingBounds;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                        && editorBounds != null
+                        && handwritingBounds != null) {
+                    mCursorAnchorInfoBuilder.setEditorBoundsInfo(
+                            new EditorBoundsInfo.Builder()
+                                    .setEditorBounds(
+                                            new RectF(
+                                                    editorBounds.x,
+                                                    editorBounds.y,
+                                                    editorBounds.x + editorBounds.width,
+                                                    editorBounds.y + editorBounds.height))
+                                    .setHandwritingBounds(
+                                            new RectF(
+                                                    handwritingBounds.x,
+                                                    handwritingBounds.y,
+                                                    handwritingBounds.x + handwritingBounds.width,
+                                                    handwritingBounds.y + handwritingBounds.height))
+                                    .build());
+                }
             }
             mLastCursorAnchorInfo = mCursorAnchorInfoBuilder.build();
         }

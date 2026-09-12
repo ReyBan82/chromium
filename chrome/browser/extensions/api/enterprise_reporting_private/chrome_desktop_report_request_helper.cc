@@ -30,9 +30,10 @@
 #endif
 
 #if BUILDFLAG(IS_MAC)
-#include "base/mac/foundation_util.h"
+#include "base/apple/foundation_util.h"
 #include "chrome/browser/extensions/api/enterprise_reporting_private/keychain_data_helper_mac.h"
-#include "crypto/apple_keychain.h"
+#include "crypto/apple/scoped_keychain_user_interaction_allowed.h"
+#include "crypto/apple/security_framework_lock.h"
 #endif
 
 namespace extensions {
@@ -45,17 +46,19 @@ const wchar_t kValueName[] = L"Safe Storage";
 
 LONG ReadEncryptedSecret(std::string* encrypted_secret) {
   base::win::RegKey key;
-  DWORD kMaxRawSize = 1024;
+  constexpr DWORD kMaxRawSize = 1024;
   char raw_data[kMaxRawSize];
   DWORD raw_data_size = kMaxRawSize;
   DWORD raw_type;
   encrypted_secret->clear();
   LONG result = key.Open(HKEY_CURRENT_USER, kDefaultRegistryPath, KEY_READ);
-  if (result != ERROR_SUCCESS)
+  if (result != ERROR_SUCCESS) {
     return result;
+  }
   result = key.ReadValue(kValueName, raw_data, &raw_data_size, &raw_type);
-  if (result != ERROR_SUCCESS)
+  if (result != ERROR_SUCCESS) {
     return result;
+  }
   if (raw_type != REG_BINARY) {
     key.DeleteValue(kValueName);
     return ERROR_INVALID_DATATYPE;
@@ -76,8 +79,9 @@ LONG EncryptString(const std::string& plaintext, std::string* ciphertext) {
   DATA_BLOB output;
   BOOL result = ::CryptProtectData(&input, nullptr, nullptr, nullptr, nullptr,
                                    0, &output);
-  if (!result)
+  if (!result) {
     return ::GetLastError();
+  }
 
   // this does a copy
   ciphertext->assign(reinterpret_cast<std::string::value_type*>(output.pbData),
@@ -100,8 +104,9 @@ LONG DecryptString(const std::string& ciphertext, std::string* plaintext) {
   BOOL result =
       ::CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr, 0,
                            &output);
-  if (!result)
+  if (!result) {
     return ::GetLastError();
+  }
 
   plaintext->assign(reinterpret_cast<char*>(output.pbData), output.cbData);
   LocalFree(output.pbData);
@@ -111,22 +116,25 @@ LONG DecryptString(const std::string& ciphertext, std::string* plaintext) {
 LONG CreateRandomSecret(std::string* secret) {
   // Generate a password with 128 bits of randomness.
   const int kBytes = 128 / 8;
-  std::string generated_secret;
-  base::Base64Encode(base::RandBytesAsString(kBytes), &generated_secret);
+  std::string generated_secret =
+      base::Base64Encode(base::RandBytesAsVector(kBytes));
 
   std::string encrypted_secret;
   LONG result = EncryptString(generated_secret, &encrypted_secret);
-  if (result != ERROR_SUCCESS)
+  if (result != ERROR_SUCCESS) {
     return result;
+  }
 
   base::win::RegKey key;
   result = key.Create(HKEY_CURRENT_USER, kDefaultRegistryPath, KEY_WRITE);
-  if (result != ERROR_SUCCESS)
+  if (result != ERROR_SUCCESS) {
     return result;
+  }
   result = key.WriteValue(kValueName, encrypted_secret.data(),
                           encrypted_secret.size(), REG_BINARY);
-  if (result == ERROR_SUCCESS)
+  if (result == ERROR_SUCCESS) {
     *secret = generated_secret;
+  }
   return result;
 }
 
@@ -143,40 +151,47 @@ bool IsAuthFailedError(OSStatus status) {
   return status == errSecAuthFailed;
 }
 
-OSStatus AddRandomPasswordToKeychain(const crypto::AppleKeychain& keychain,
-                                     std::string* secret) {
+OSStatus AddRandomPasswordToKeychain(std::string* secret) {
   // Generate a password with 128 bits of randomness.
   const int kBytes = 128 / 8;
-  std::string password;
-  base::Base64Encode(base::RandBytesAsString(kBytes), &password);
+  std::string password = base::Base64Encode(base::RandBytesAsVector(kBytes));
 
   OSStatus status = WriteKeychainItem(kServiceName, kAccountName, password);
-  if (status == noErr)
+  if (status == noErr) {
     *secret = password;
-  else
+  } else {
     secret->clear();
+  }
   return status;
 }
+
+// Much of the Keychain API was marked deprecated as of the macOS 13 SDK.
+// Removal of its use is tracked in https://crbug.com/40233280 but deprecation
+// warnings are disabled in the meanwhile.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 int32_t ReadEncryptedSecret(std::string* password, bool force_recreate) {
   password->clear();
 
   OSStatus status;
-  crypto::ScopedKeychainUserInteractionAllowed user_interaction_allowed(
+  crypto::apple::ScopedKeychainUserInteractionAllowed user_interaction_allowed(
       FALSE, &status);
-  if (status != noErr)
+  if (status != noErr) {
     return status;
+  }
 
-  crypto::AppleKeychain keychain;
+  base::AutoLock lock(crypto::apple::GetSecurityFrameworkLock());
   UInt32 password_length = 0;
   void* password_data = nullptr;
-  base::ScopedCFTypeRef<SecKeychainItemRef> item_ref;
-  status = keychain.FindGenericPassword(
-      strlen(kServiceName), kServiceName, strlen(kAccountName), kAccountName,
-      &password_length, &password_data, item_ref.InitializeInto());
+  base::apple::ScopedCFTypeRef<SecKeychainItemRef> item_ref;
+  status = SecKeychainFindGenericPassword(
+      nullptr, strlen(kServiceName), kServiceName, strlen(kAccountName),
+      kAccountName, &password_length, &password_data,
+      item_ref.InitializeInto());
   if (status == noErr) {
     *password = std::string(static_cast<char*>(password_data), password_length);
-    keychain.ItemFreeContent(password_data);
+    SecKeychainItemFreeContent(nullptr, password_data);
     return status;
   }
 
@@ -190,9 +205,9 @@ int32_t ReadEncryptedSecret(std::string* password, bool force_recreate) {
     // - Then recreate the item.
     // If any of those steps fail don't try to proceed any further.
     item_ref.reset();
-    OSStatus exists_status = keychain.FindGenericPassword(
-        strlen(kServiceName), kServiceName, strlen(kAccountName), kAccountName,
-        nullptr, nullptr, item_ref.InitializeInto());
+    OSStatus exists_status = SecKeychainFindGenericPassword(
+        nullptr, strlen(kServiceName), kServiceName, strlen(kAccountName),
+        kAccountName, nullptr, nullptr, item_ref.InitializeInto());
     if (exists_status != noErr) {
       return exists_status;
     }
@@ -201,7 +216,7 @@ int32_t ReadEncryptedSecret(std::string* password, bool force_recreate) {
     if (was_auth_error) {
       bool unlocked;
       OSStatus keychain_status =
-          VerifyKeychainForItemUnlocked(item_ref, &unlocked);
+          VerifyKeychainForItemUnlocked(item_ref.get(), &unlocked);
       if (keychain_status != noErr) {
         // Failed to get keychain status.
         return keychain_status;
@@ -212,7 +227,7 @@ int32_t ReadEncryptedSecret(std::string* password, bool force_recreate) {
     }
 
     if (force_recreate) {
-      status = keychain.ItemDelete(item_ref.get());
+      status = SecKeychainItemDelete(item_ref.get());
       if (status != noErr) {
         return status;
       }
@@ -221,7 +236,7 @@ int32_t ReadEncryptedSecret(std::string* password, bool force_recreate) {
 
   if (was_item_not_found || force_recreate) {
     // Add the random password to the default keychain.
-    status = AddRandomPasswordToKeychain(keychain, password);
+    status = AddRandomPasswordToKeychain(password);
 
     // If add failed, check whether the default keychain is locked. If so,
     // return the custom status code.
@@ -240,6 +255,8 @@ int32_t ReadEncryptedSecret(std::string* password, bool force_recreate) {
   return status;
 }
 
+#pragma clang diagnostic pop
+
 #endif  // BUILDFLAG(IS_MAC)
 
 base::FilePath* GetEndpointVerificationDirOverride() {
@@ -250,8 +267,9 @@ base::FilePath* GetEndpointVerificationDirOverride() {
 // Returns "AppData\Local\Google\Endpoint Verification".
 base::FilePath GetEndpointVerificationDir() {
   base::FilePath path;
-  if (!GetEndpointVerificationDirOverride()->empty())
+  if (!GetEndpointVerificationDirOverride()->empty()) {
     return *GetEndpointVerificationDirOverride();
+  }
 
   bool got_path = false;
 #if BUILDFLAG(IS_WIN)
@@ -264,8 +282,9 @@ base::FilePath GetEndpointVerificationDir() {
 #elif BUILDFLAG(IS_MAC)
   got_path = base::PathService::Get(base::DIR_APP_DATA, &path);
 #endif
-  if (!got_path)
+  if (!got_path) {
     return path;
+  }
 
 #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
   path = path.AppendASCII("google");
@@ -276,6 +295,19 @@ base::FilePath GetEndpointVerificationDir() {
   return path;
 }
 
+std::optional<base::FilePath> GetValidatedDeviceDataFilePath(
+    const base::FilePath& data_dir,
+    const std::string& id) {
+  if (data_dir.empty()) {
+    return std::nullopt;
+  }
+  base::FilePath target_file = data_dir.AppendASCII(id);
+  if (target_file.ReferencesParent() || !data_dir.IsParent(target_file)) {
+    return std::nullopt;
+  }
+  return target_file;
+}
+
 }  // namespace
 
 // Sets the path used to store Endpoint Verification data for tests.
@@ -284,7 +316,7 @@ void OverrideEndpointVerificationDirForTesting(const base::FilePath& path) {
 }
 
 void StoreDeviceData(const std::string& id,
-                     const absl::optional<std::vector<uint8_t>> data,
+                     const std::optional<std::vector<uint8_t>> data,
                      base::OnceCallback<void(bool)> callback) {
   base::FilePath data_file = GetEndpointVerificationDir();
   if (data_file.empty()) {
@@ -292,9 +324,13 @@ void StoreDeviceData(const std::string& id,
     return;
   }
 
-  // TODO(pastarmovj): Make sure the resulting path is still a direct file or
-  // subdir+file of the EV folder.
-  data_file = data_file.AppendASCII(id);
+  std::optional<base::FilePath> target_file =
+      GetValidatedDeviceDataFilePath(data_file, id);
+  if (!target_file) {
+    std::move(callback).Run(false);
+    return;
+  }
+  data_file = *target_file;
 
   bool success = false;
   if (data) {
@@ -316,14 +352,14 @@ void StoreDeviceData(const std::string& id,
       return;
     }
 
-    base::WriteFile(tmp_path, reinterpret_cast<const char*>(data->data()),
-                    data->size());
+    base::WriteFile(tmp_path, *data);
     success = base::Move(tmp_path, data_file);
   } else {
     // Not passing a second parameter means clear the data sored under |id|.
     success = base::DeleteFile(data_file);
-    if (base::IsDirectoryEmpty(data_file.DirName()))
+    if (base::IsDirectoryEmpty(data_file.DirName())) {
       base::DeleteFile(data_file.DirName());
+    }
   }
 
   std::move(callback).Run(success);
@@ -339,7 +375,14 @@ void RetrieveDeviceData(
                             RetrieveDeviceDataStatus::kDataDirectoryUnknown);
     return;
   }
-  data_file = data_file.AppendASCII(id);
+
+  std::optional<base::FilePath> target_file =
+      GetValidatedDeviceDataFilePath(data_file, id);
+  if (!target_file) {
+    std::move(callback).Run("", RetrieveDeviceDataStatus::kDataRecordNotFound);
+    return;
+  }
+  data_file = *target_file;
   // If the file does not exist don't treat this as an error rather return an
   // empty string.
   if (!base::PathExists(data_file)) {
@@ -364,13 +407,15 @@ void RetrieveDeviceSecret(
 #if BUILDFLAG(IS_WIN)
   std::string encrypted_secret;
   LONG result = ReadEncryptedSecret(&encrypted_secret);
-  if (result == ERROR_FILE_NOT_FOUND)
+  if (result == ERROR_FILE_NOT_FOUND) {
     result = CreateRandomSecret(&secret);
-  else if (result == ERROR_SUCCESS)
+  } else if (result == ERROR_SUCCESS) {
     result = DecryptString(encrypted_secret, &secret);
+  }
   // If something failed above [re]try creating the secret if forced.
-  if (result != ERROR_SUCCESS && force_recreate)
+  if (result != ERROR_SUCCESS && force_recreate) {
     result = CreateRandomSecret(&secret);
+  }
 #elif BUILDFLAG(IS_MAC)
   int32_t result = ReadEncryptedSecret(&secret, force_recreate);
 #else

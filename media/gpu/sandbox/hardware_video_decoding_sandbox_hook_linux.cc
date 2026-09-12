@@ -7,7 +7,9 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 
+#include "base/process/process_metrics.h"
 #include "base/strings/stringprintf.h"
+#include "build/build_config.h"
 #include "media/gpu/buildflags.h"
 #include "sandbox/policy/linux/bpf_hardware_video_decoding_policy_linux.h"
 
@@ -23,10 +25,10 @@ using sandbox::syscall_broker::BrokerFilePermission;
 // to exist only in those configurations so that the presandbox hook is only
 // compiled in those scenarios. As it is now, kHardwareVideoDecoding exists for
 // all ash-chrome builds because
-// chrome/browser/ash/arc/video/gpu_arc_video_service_host.cc depends on it and
-// that file is built for ash-chrome regardless of VA-API/V4L2. That means that
-// bots like linux-chromeos-rel end up compiling this presandbox hook (thus the
-// NOTREACHED()s in some places here).
+// chromeos/ash/experiences/arc/video/gpu_arc_video_service_host.cc depends on
+// it and that file is built for ash-chrome regardless of VA-API/V4L2. That
+// means that bots like linux-chromeos-rel end up compiling this presandbox hook
+// (thus the NOTREACHED()s in some places here).
 
 namespace media {
 namespace {
@@ -45,9 +47,33 @@ void AllowAccessToRenderNodes(std::vector<BrokerFilePermission>& permissions,
         uint32_t major = (static_cast<uint32_t>(st.st_rdev) >> 8) & 0xff;
         uint32_t minor = static_cast<uint32_t>(st.st_rdev) & 0xff;
         std::string char_device_path =
-            base::StringPrintf("/sys/dev/char/%u:%u/", major, minor);
+            base::StringPrintf("/sys/dev/char/%u:%u", major, minor);
+        permissions.push_back(BrokerFilePermission::ReadOnly(char_device_path));
         permissions.push_back(
-            BrokerFilePermission::ReadOnlyRecursive(char_device_path));
+            BrokerFilePermission::ReadOnly(char_device_path + "/uevent"));
+        permissions.push_back(
+            BrokerFilePermission::ReadOnly(char_device_path + "/dev"));
+
+        // libdrm and graphics drivers query these specific sysfs files inside
+        // the sandbox (e.g. during vaInitialize) to identify the GPU and
+        // select/configure the correct driver. We whitelist them explicitly
+        // to avoid granting recursive read access to the whole device
+        // directory. Note: 'config' is omitted because 'revision' exists on
+        // target devices.
+        std::string device_path = char_device_path + "/device/";
+        for (const char* file : {
+                 "vendor",
+                 "device",
+                 "revision",
+                 "subsystem_vendor",
+                 "subsystem_device",
+                 "subsystem",
+                 "uevent",
+                 "drm",
+             }) {
+          permissions.push_back(
+              BrokerFilePermission::ReadOnly(device_path + file));
+        }
       }
     }
   }
@@ -56,7 +82,7 @@ void AllowAccessToRenderNodes(std::vector<BrokerFilePermission>& permissions,
 bool HardwareVideoDecodingPreSandboxHookForVaapiOnIntel(
     sandbox::syscall_broker::BrokerCommandSet& command_set,
     std::vector<BrokerFilePermission>& permissions) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // This should only be needed in order for GbmDeviceWrapper in
   // platform_video_frame_utils.cc to be able to initialize minigbm after
   // entering the sandbox. Since minigbm is only needed for buffer allocation on
@@ -65,16 +91,29 @@ bool HardwareVideoDecodingPreSandboxHookForVaapiOnIntel(
   // TODO(b/210759684): we should open the render nodes for both libva and
   // minigbm before entering the sandbox so that we can remove this permission.
   command_set.set(sandbox::syscall_broker::COMMAND_OPEN);
-  AllowAccessToRenderNodes(permissions, /*include_sys_dev_char=*/false,
+
+  // This is added because libdrm does a stat() on a sysfs path on behalf of
+  // libva to determine if a particular FD refers to a DRM device (more details
+  // in b/271788848#comment2).
+  //
+  // TODO(b/210759684): we probably will need to do this for Linux as well.
+  command_set.set(sandbox::syscall_broker::COMMAND_STAT);
+
+  // This is added because libdrm calls access() from drmGetMinorType() that is
+  // called from drmGetNodeTypeFromFd(). libva calls drmGetNodeTypeFromFd()
+  // during initialization.
+  //
+  // TODO(b/210759684): we probably will need to do this for Linux as well.
+  command_set.set(sandbox::syscall_broker::COMMAND_ACCESS);
+
+  // libdrm calls readlink on the 'subsystem' symlink to determine the bus type.
+  command_set.set(sandbox::syscall_broker::COMMAND_READLINK);
+
+  AllowAccessToRenderNodes(permissions, /*include_sys_dev_char=*/true,
                            /*read_write=*/false);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
-#if BUILDFLAG(USE_VAAPI)
-  VaapiWrapper::PreSandboxInitialization();
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
   return true;
-#else
-  NOTREACHED();
-  return false;
-#endif  // BUILDFLAG(USE_VAAPI)
 }
 
 bool HardwareVideoDecodingPreSandboxHookForVaapiOnAMD(
@@ -84,26 +123,41 @@ bool HardwareVideoDecodingPreSandboxHookForVaapiOnAMD(
   command_set.set(sandbox::syscall_broker::COMMAND_STAT);
   command_set.set(sandbox::syscall_broker::COMMAND_READLINK);
 
+#if BUILDFLAG(IS_CHROMEOS)
+  // This is added because libdrm calls access() from drmGetMinorType() that is
+  // called from drmGetNodeTypeFromFd(). libva calls drmGetNodeTypeFromFd()
+  // during initialization.
+  //
+  // TODO(b/210759684): we probably will need to do this for Linux as well.
+  command_set.set(sandbox::syscall_broker::COMMAND_ACCESS);
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
   AllowAccessToRenderNodes(permissions, /*include_sys_dev_char=*/true,
                            /*read_write=*/true);
   permissions.push_back(BrokerFilePermission::ReadOnly("/dev/dri"));
 
+  permissions.push_back(
+      BrokerFilePermission::ReadOnly("/usr/share/vulkan/icd.d"));
+  permissions.push_back(BrokerFilePermission::ReadOnly(
+      "/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"));
+
+  constexpr int kDlopenFlags = RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE;
   const char* radeonsi_lib = "/usr/lib64/dri/radeonsi_dri.so";
 #if defined(DRI_DRIVER_DIR)
   radeonsi_lib = DRI_DRIVER_DIR "/radeonsi_dri.so";
 #endif
-  if (nullptr == dlopen(radeonsi_lib, RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE)) {
+  if (nullptr == dlopen(radeonsi_lib, kDlopenFlags)) {
     LOG(ERROR) << "dlopen(radeonsi_dri.so) failed with error: " << dlerror();
     return false;
   }
 
-#if BUILDFLAG(USE_VAAPI)
-  VaapiWrapper::PreSandboxInitialization();
+  // minigbm may use the DRI driver (requires Mesa 24.0 or older) or the
+  // Vulkan driver (requires VK_EXT_image_drm_format_modifier).  Preload the
+  // Vulkan driver as well but ignore failures.
+  dlopen("libvulkan.so.1", kDlopenFlags);
+  dlopen("libvulkan_radeon.so", kDlopenFlags);
+
   return true;
-#else
-  NOTREACHED();
-  return false;
-#endif  // BUILDFLAG(USE_VAAPI)
 }
 
 bool HardwareVideoDecodingPreSandboxHookForV4L2(
@@ -145,19 +199,12 @@ bool HardwareVideoDecodingPreSandboxHookForV4L2(
   static const char kDevImageProc0Path[] = "/dev/image-proc0";
   permissions.push_back(BrokerFilePermission::ReadWrite(kDevImageProc0Path));
 
-  // Some platforms (RK3399) need libv4l2 to interact with the kernel V4L2
-  // driver, so we need to load that library prior to entering the sandbox.
-#if BUILDFLAG(USE_LIBV4L2)
-#if defined(__aarch64__)
-  dlopen("/usr/lib64/libv4l2.so", RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
-#else
-  dlopen("/usr/lib/libv4l2.so", RTLD_NOW | RTLD_GLOBAL | RTLD_NODELETE);
-#endif  // defined(__aarch64__)
-#endif  // BUILDFLAG(USE_LIBV4L2)
+  // Files needed for protected DMA allocations.
+  static const char kDmaHeapPath[] = "/dev/dma_heap/restricted_mtk_cma";
+  permissions.push_back(BrokerFilePermission::ReadWrite(kDmaHeapPath));
   return true;
 #else
   NOTREACHED();
-  return false;
 #endif  // BUILDFLAG(USE_V4L2_CODEC)
 }
 
@@ -179,6 +226,15 @@ bool HardwareVideoDecodingPreSandboxHook(
       sandbox::policy::HardwareVideoDecodingProcessPolicy;
   using PolicyType =
       sandbox::policy::HardwareVideoDecodingProcessPolicy::PolicyType;
+
+  // When decoding many video streams at once, the video utility process can hit
+  // FD limits. Increase the limit of maximum FDs allowed to (at least) 8192.
+  // IncreaseFdLimitTo() will only increase the FD limit to a value in:
+  // [max(soft limit, requested value), min(hard limit, requested value)], never
+  // decrease it. See https://man7.org/linux/man-pages/man2/getrlimit.2.html for
+  // context on resource limits.
+  constexpr unsigned int kAttemptedFdSoftLimit = 1u << 13;
+  base::IncreaseFdLimitTo(kAttemptedFdSoftLimit);
 
   const PolicyType policy_type =
       HardwareVideoDecodingProcessPolicy::ComputePolicyType(
@@ -203,6 +259,26 @@ bool HardwareVideoDecodingPreSandboxHook(
       result_for_platform_policy =
           HardwareVideoDecodingPreSandboxHookForV4L2(command_set, permissions);
       break;
+    case PolicyType::kVaapiAndV4L2:
+      // The active backend is selected at runtime; grant the union of broker
+      // permissions so either path can open its devices. See the matching
+      // note in EvaluateSyscallForVaapiAndV4L2().
+      result_for_platform_policy =
+          HardwareVideoDecodingPreSandboxHookForVaapiOnIntel(command_set,
+                                                             permissions) &&
+          HardwareVideoDecodingPreSandboxHookForV4L2(command_set, permissions);
+      break;
+    case PolicyType::kVaapiOnAMDAndV4L2:
+      // AMD variant of the mixed build: pair the AMD VA-API broker setup
+      // (radeonsi/vulkan preload, read-write render nodes) with the V4L2
+      // device permissions. HardwareVideoDecodingPreSandboxHookForVaapiOnAMD()
+      // dlopen()s radeonsi_dri.so and fails if it is missing, so it must only
+      // be invoked on AMD hardware.
+      result_for_platform_policy =
+          HardwareVideoDecodingPreSandboxHookForVaapiOnAMD(command_set,
+                                                           permissions) &&
+          HardwareVideoDecodingPreSandboxHookForV4L2(command_set, permissions);
+      break;
   }
   if (!result_for_platform_policy)
     return false;
@@ -210,8 +286,7 @@ bool HardwareVideoDecodingPreSandboxHook(
   // TODO(b/210759684): should this still be called if |command_set| or
   // |permissions| is empty?
   sandbox::policy::SandboxLinux::GetInstance()->StartBrokerProcess(
-      command_set, permissions, sandbox::policy::SandboxLinux::PreSandboxHook(),
-      options);
+      command_set, permissions, options);
   return true;
 }
 

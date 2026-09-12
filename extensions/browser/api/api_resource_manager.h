@@ -8,7 +8,6 @@
 #include <map>
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -21,7 +20,6 @@
 #include "components/keyed_service/core/keyed_service.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-#include "content/public/browser/notification_registrar.h"
 #include "extensions/browser/browser_context_keyed_api_factory.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extension_registry_factory.h"
@@ -30,6 +28,8 @@
 #include "extensions/browser/process_manager_factory.h"
 #include "extensions/browser/process_manager_observer.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/extension_id.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace extensions {
 
@@ -124,15 +124,15 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
   // Takes ownership.
   int Add(T* api_resource) { return data_->Add(api_resource); }
 
-  void Remove(const std::string& extension_id, int api_resource_id) {
+  void Remove(const ExtensionId& extension_id, int api_resource_id) {
     data_->Remove(extension_id, api_resource_id);
   }
 
-  T* Get(const std::string& extension_id, int api_resource_id) {
+  T* Get(const ExtensionId& extension_id, int api_resource_id) {
     return data_->Get(extension_id, api_resource_id);
   }
 
-  std::unordered_set<int>* GetResourceIds(const std::string& extension_id) {
+  absl::flat_hash_set<int>* GetResourceIds(const ExtensionId& extension_id) {
     return data_->GetResourceIds(extension_id);
   }
 
@@ -148,11 +148,11 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
   // BrowserContextKeyedAPI implementation.
   static const char* service_name() { return T::service_name(); }
 
-  // Change the resource mapped to this |extension_id| at this
-  // |api_resource_id| to |resource|. Returns true and succeeds unless
-  // |api_resource_id| does not already identify a resource held by
-  // |extension_id|.
-  bool Replace(const std::string& extension_id,
+  // Change the resource mapped to this `extension_id` at this
+  // `api_resource_id` to `resource`. Returns true and succeeds unless
+  // `api_resource_id` does not already identify a resource held by
+  // `extension_id`.
+  bool Replace(const ExtensionId& extension_id,
                int api_resource_id,
                T* resource) {
     return data_->Replace(extension_id, api_resource_id, resource);
@@ -160,7 +160,7 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
 
  protected:
   // ProcessManagerObserver:
-  void OnBackgroundHostClose(const std::string& extension_id) override {
+  void OnBackgroundHostClose(const ExtensionId& extension_id) override {
     data_->InitiateExtensionSuspendedCleanup(extension_id);
   }
 
@@ -193,7 +193,7 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
    public:
     typedef std::map<int, std::unique_ptr<T>> ApiResourceMap;
     // Lookup map from extension id's to allocated resource id's.
-    typedef std::map<std::string, std::unordered_set<int>>
+    typedef std::map<std::string, absl::flat_hash_set<int>>
         ExtensionToResourceMap;
 
     ApiResourceData() : next_id_(1) { DETACH_FROM_SEQUENCE(sequence_checker_); }
@@ -205,13 +205,12 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
       if (id > 0) {
         api_resource_map_[id] = base::WrapUnique<T>(api_resource);
 
-        const std::string& extension_id = api_resource->owner_extension_id();
+        const ExtensionId& extension_id = api_resource->owner_extension_id();
         ExtensionToResourceMap::iterator it =
             extension_resource_map_.find(extension_id);
         if (it == extension_resource_map_.end()) {
           it = extension_resource_map_
-                   .insert(
-                       std::make_pair(extension_id, std::unordered_set<int>()))
+                   .emplace(extension_id, absl::flat_hash_set<int>())
                    .first;
         }
         it->second.insert(id);
@@ -220,7 +219,7 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
       return 0;
     }
 
-    void Remove(const std::string& extension_id, int api_resource_id) {
+    void Remove(const ExtensionId& extension_id, int api_resource_id) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
       if (GetOwnedResource(extension_id, api_resource_id)) {
         ExtensionToResourceMap::iterator it =
@@ -230,16 +229,16 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
       }
     }
 
-    T* Get(const std::string& extension_id, int api_resource_id) {
+    T* Get(const ExtensionId& extension_id, int api_resource_id) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
       return GetOwnedResource(extension_id, api_resource_id);
     }
 
-    // Change the resource mapped to this |extension_id| at this
-    // |api_resource_id| to |resource|. Returns true and succeeds unless
-    // |api_resource_id| does not already identify a resource held by
-    // |extension_id|.
-    bool Replace(const std::string& extension_id,
+    // Change the resource mapped to this `extension_id` at this
+    // `api_resource_id` to `resource`. Returns true and succeeds unless
+    // `api_resource_id` does not already identify a resource held by
+    // `extension_id`.
+    bool Replace(const ExtensionId& extension_id,
                  int api_resource_id,
                  T* api_resource) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -251,12 +250,12 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
       return false;
     }
 
-    std::unordered_set<int>* GetResourceIds(const std::string& extension_id) {
+    absl::flat_hash_set<int>* GetResourceIds(const ExtensionId& extension_id) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
       return GetOwnedResourceIds(extension_id);
     }
 
-    void InitiateExtensionUnloadedCleanup(const std::string& extension_id) {
+    void InitiateExtensionUnloadedCleanup(const ExtensionId& extension_id) {
       ThreadingTraits::GetSequencedTaskRunner()->PostTask(
           FROM_HERE,
           base::BindOnce(
@@ -264,7 +263,7 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
               extension_id));
     }
 
-    void InitiateExtensionSuspendedCleanup(const std::string& extension_id) {
+    void InitiateExtensionSuspendedCleanup(const ExtensionId& extension_id) {
       ThreadingTraits::GetSequencedTaskRunner()->PostTask(
           FROM_HERE,
           base::BindOnce(
@@ -282,48 +281,50 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
 
     virtual ~ApiResourceData() {}
 
-    T* GetOwnedResource(const std::string& extension_id, int api_resource_id) {
+    T* GetOwnedResource(const ExtensionId& extension_id, int api_resource_id) {
       const std::unique_ptr<T>& ptr = api_resource_map_[api_resource_id];
       T* resource = ptr.get();
-      if (resource && extension_id == resource->owner_extension_id())
+      if (resource && extension_id == resource->owner_extension_id()) {
         return resource;
+      }
       return NULL;
     }
 
-    std::unordered_set<int>* GetOwnedResourceIds(
-        const std::string& extension_id) {
+    absl::flat_hash_set<int>* GetOwnedResourceIds(
+        const ExtensionId& extension_id) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
       ExtensionToResourceMap::iterator it =
           extension_resource_map_.find(extension_id);
-      if (it == extension_resource_map_.end())
-        return NULL;
+      if (it == extension_resource_map_.end()) {
+        return nullptr;
+      }
       return &(it->second);
     }
 
     void CleanupResourcesFromUnloadedExtension(
-        const std::string& extension_id) {
+        const ExtensionId& extension_id) {
       CleanupResourcesFromExtension(extension_id, true);
     }
 
     void CleanupResourcesFromSuspendedExtension(
-        const std::string& extension_id) {
+        const ExtensionId& extension_id) {
       CleanupResourcesFromExtension(extension_id, false);
     }
 
-    void CleanupResourcesFromExtension(const std::string& extension_id,
+    void CleanupResourcesFromExtension(const ExtensionId& extension_id,
                                        bool remove_all) {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
       ExtensionToResourceMap::iterator extension_it =
           extension_resource_map_.find(extension_id);
-      if (extension_it == extension_resource_map_.end())
+      if (extension_it == extension_resource_map_.end()) {
         return;
+      }
 
-      // Remove all resources, or the non persistent ones only if |remove_all|
+      // Remove all resources, or the non persistent ones only if `remove_all`
       // is false.
-      std::unordered_set<int>& resource_ids = extension_it->second;
-      for (std::unordered_set<int>::iterator it = resource_ids.begin();
-           it != resource_ids.end();) {
+      absl::flat_hash_set<int>& resource_ids = extension_it->second;
+      for (auto it = resource_ids.begin(); it != resource_ids.end();) {
         bool erase = false;
         if (remove_all) {
           erase = true;
@@ -350,14 +351,14 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
     void Cleanup() {
       DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-      // Subtle: Move |api_resource_map_| to a temporary and clear that.
-      // |api_resource_map_| will become empty and any destructors called
-      // transitively from clearing |local_api_resource_map| will see empty
-      // |api_resource_map_| instead of trying to access being-destroyed map.
+      // Subtle: Move `api_resource_map_` to a temporary and clear that.
+      // `api_resource_map_` will become empty and any destructors called
+      // transitively from clearing `local_api_resource_map` will see empty
+      // `api_resource_map_` instead of trying to access being-destroyed map.
       ApiResourceMap local_api_resource_map;
       api_resource_map_.swap(local_api_resource_map);
       local_api_resource_map.clear();
-      // Do the same as above for |extension_resource_map_|.
+      // Do the same as above for `extension_resource_map_`.
       ExtensionToResourceMap local_extension_resource_map;
       extension_resource_map_.swap(local_extension_resource_map);
       local_extension_resource_map.clear();
@@ -371,7 +372,6 @@ class ApiResourceManager : public BrowserContextKeyedAPI,
     SEQUENCE_CHECKER(sequence_checker_);
   };
 
-  content::NotificationRegistrar registrar_;
   scoped_refptr<ApiResourceData> data_;
 
   base::ScopedObservation<ExtensionRegistry, ExtensionRegistryObserver>

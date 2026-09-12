@@ -5,67 +5,85 @@
 #ifndef CONTENT_BROWSER_MEMORY_PRESSURE_USER_LEVEL_MEMORY_PRESSURE_SIGNAL_GENERATOR_H_
 #define CONTENT_BROWSER_MEMORY_PRESSURE_USER_LEVEL_MEMORY_PRESSURE_SIGNAL_GENERATOR_H_
 
-#include "build/build_config.h"
-
-#if BUILDFLAG(IS_ANDROID)
+#include <memory>
+#include <optional>
 #include <utility>
-#include "base/no_destructor.h"
+
+#include "base/byte_size.h"
+#include "base/memory/memory_pressure_level.h"
+#include "base/sequence_checker.h"
 #include "base/timer/timer.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "build/build_config.h"
+#include "components/memory_pressure/memory_pressure_voter.h"
+#include "components/memory_pressure/multi_source_memory_pressure_monitor.h"
+#include "components/memory_pressure/system_memory_pressure_evaluator.h"
+#include "content/public/browser/user_level_memory_pressure_metrics.h"
 
 namespace base {
 class Process;
 class TimeDelta;
 }  // namespace base
 
-namespace memory_pressure {
+namespace content {
 
 // Generates extra memory pressure signals (on top of the OS generated ones)
 // when the memory usage exceeds a threshold.
-class UserLevelMemoryPressureSignalGenerator {
+class UserLevelMemoryPressureSignalGenerator
+    : public memory_pressure::SystemMemoryPressureEvaluator {
  public:
-  static void Initialize();
+  // Creates an instance. Returns nullptr if
+  // UserLevelMemoryPressureSignalGenerator if disabled on this device.
+  static std::unique_ptr<UserLevelMemoryPressureSignalGenerator> MaybeCreate(
+      std::unique_ptr<memory_pressure::MemoryPressureVoter> voter);
+
+  ~UserLevelMemoryPressureSignalGenerator() override;
+
+  // Returns the latest memory metrics if the metrics collection is enabled.
+  static std::optional<content::UserLevelMemoryPressureMetrics>
+  GetLatestMemoryMetrics();
 
  private:
-  friend class base::NoDestructor<UserLevelMemoryPressureSignalGenerator>;
+  explicit UserLevelMemoryPressureSignalGenerator(
+      std::unique_ptr<memory_pressure::MemoryPressureVoter> voter);
 
-  // Singleton
-  static UserLevelMemoryPressureSignalGenerator& Get();
+  void StartMetricsCollection();
 
-  UserLevelMemoryPressureSignalGenerator();
-  ~UserLevelMemoryPressureSignalGenerator();
-
-  void Start(uint64_t memory_threshold,
-             base::TimeDelta measure_interval,
-             base::TimeDelta minimum_interval);
-  void OnTimerFired();
-  void OnReportingTimerFired();
+  void CollectMemoryMetrics();
 
   void StartPeriodicTimer(base::TimeDelta interval);
-  void StartReportingTimer();
+  void OnTimerFired();
 
-  static std::pair<uint64_t, uint64_t>
+  void StartReportingTimer();
+  void OnReportingTimerFired();
+
+  static base::ByteSize
   GetTotalPrivateFootprintVisibleOrHigherPriorityRenderers();
 
-  static void NotifyMemoryPressure();
+  void HandleMemoryPressureLevel(base::MemoryPressureLevel level);
 
   static void ReportBeforeAfterMetrics(
-      uint64_t total_pmf_visible_or_higher_priority_renderers,
-      uint64_t total_pmf,
+      base::ByteSize total_pmf_visible_or_higher_priority_renderers,
       const char* suffix_name);
 
-  static absl::optional<uint64_t> GetPrivateFootprint(
+  static std::optional<base::ByteSize> GetPrivateFootprint(
       const base::Process& process);
 
-  uint64_t memory_threshold_;
+  std::optional<content::UserLevelMemoryPressureMetrics>
+  GetLatestMemoryMetricsImpl();
+
+  base::ByteSize memory_threshold_;
   base::TimeDelta measure_interval_;
   base::TimeDelta minimum_interval_;
   base::OneShotTimer periodic_measuring_timer_;
   base::OneShotTimer delayed_report_timer_;
+
+  base::MemoryPressureLevel current_level_ = base::MEMORY_PRESSURE_LEVEL_NONE;
+
+  std::optional<UserLevelMemoryPressureMetrics> latest_metrics_;
+
+  SEQUENCE_CHECKER(sequence_checker_);
 };
 
-}  // namespace memory_pressure
-
-#endif  // BUILDFLAG(IS_ANDROID)
+}  // namespace content
 
 #endif  // CONTENT_BROWSER_MEMORY_PRESSURE_USER_LEVEL_MEMORY_PRESSURE_SIGNAL_GENERATOR_H_

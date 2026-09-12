@@ -10,7 +10,7 @@
 namespace blink {
 namespace {
 
-ImeTextSpan CreateImeTextSpan(unsigned start_offset, unsigned end_offset) {
+ImeTextSpan CreateImeTextSpan(wtf_size_t start_offset, wtf_size_t end_offset) {
   return ImeTextSpan(ImeTextSpan::Type::kComposition, start_offset, end_offset,
                      Color::kTransparent,
                      ui::mojom::ImeTextSpanThickness::kNone,
@@ -19,8 +19,8 @@ ImeTextSpan CreateImeTextSpan(unsigned start_offset, unsigned end_offset) {
 }
 
 ImeTextSpan CreateImeTextSpan(
-    unsigned start_offset,
-    unsigned end_offset,
+    wtf_size_t start_offset,
+    wtf_size_t end_offset,
     ui::mojom::ImeTextSpanUnderlineStyle underline_style) {
   return ImeTextSpan(ImeTextSpan::Type::kComposition, start_offset, end_offset,
                      Color::kTransparent,
@@ -28,8 +28,8 @@ ImeTextSpan CreateImeTextSpan(
                      Color::kTransparent, Color::kTransparent);
 }
 
-ImeTextSpan CreateImeTextSpan(unsigned start_offset,
-                              unsigned end_offset,
+ImeTextSpan CreateImeTextSpan(wtf_size_t start_offset,
+                              wtf_size_t end_offset,
                               bool interim_char_selection) {
   return ImeTextSpan(
       ImeTextSpan::Type::kComposition, start_offset, end_offset,
@@ -69,29 +69,24 @@ TEST(ImeTextSpanTest, EndBeforeStart) {
 }
 
 TEST(ImeTextSpanTest, LastChar) {
-  ImeTextSpan ime_text_span =
-      CreateImeTextSpan(std::numeric_limits<unsigned>::max() - 1,
-                        std::numeric_limits<unsigned>::max());
-  EXPECT_EQ(std::numeric_limits<unsigned>::max() - 1,
-            ime_text_span.StartOffset());
-  EXPECT_EQ(std::numeric_limits<unsigned>::max(), ime_text_span.EndOffset());
+  constexpr wtf_size_t kMax = std::numeric_limits<wtf_size_t>::max();
+  ImeTextSpan ime_text_span = CreateImeTextSpan(kMax - 1, kMax);
+  EXPECT_EQ(kMax - 1, ime_text_span.StartOffset());
+  EXPECT_EQ(kMax, ime_text_span.EndOffset());
 }
 
 TEST(ImeTextSpanTest, LastCharEndBeforeStart) {
-  ImeTextSpan ime_text_span =
-      CreateImeTextSpan(std::numeric_limits<unsigned>::max(),
-                        std::numeric_limits<unsigned>::max() - 1);
-  EXPECT_EQ(std::numeric_limits<unsigned>::max() - 1,
-            ime_text_span.StartOffset());
-  EXPECT_EQ(std::numeric_limits<unsigned>::max(), ime_text_span.EndOffset());
+  constexpr wtf_size_t kMax = std::numeric_limits<wtf_size_t>::max();
+  ImeTextSpan ime_text_span = CreateImeTextSpan(kMax, kMax - 1);
+  EXPECT_EQ(kMax - 1, ime_text_span.StartOffset());
+  EXPECT_EQ(kMax, ime_text_span.EndOffset());
 }
 
 TEST(ImeTextSpanTest, LastCharEndBeforeStartZeroEnd) {
-  ImeTextSpan ime_text_span =
-      CreateImeTextSpan(std::numeric_limits<unsigned>::max(), 0);
-  EXPECT_EQ(std::numeric_limits<unsigned>::max() - 1,
-            ime_text_span.StartOffset());
-  EXPECT_EQ(std::numeric_limits<unsigned>::max(), ime_text_span.EndOffset());
+  constexpr wtf_size_t kMax = std::numeric_limits<wtf_size_t>::max();
+  ImeTextSpan ime_text_span = CreateImeTextSpan(kMax, 0);
+  EXPECT_EQ(kMax - 1, ime_text_span.StartOffset());
+  EXPECT_EQ(kMax, ime_text_span.EndOffset());
 }
 
 TEST(ImeTextSpanTest, UnderlineStyles) {
@@ -118,6 +113,66 @@ TEST(ImeTextSpanTest, InterimCharSelection) {
   EXPECT_EQ(false, ime_text_span.InterimCharSelection());
   ime_text_span = CreateImeTextSpan(0, 1, true);
   EXPECT_EQ(true, ime_text_span.InterimCharSelection());
+}
+
+TEST(ImeTextSpanTest, ShouldHideSuggestionMenuTrue) {
+  ImeTextSpan ime_text_span(
+      ImeTextSpan::Type::kMisspellingSuggestion, /* start_offset= */ 0,
+      /* end_offset= */ 1, Color::kTransparent,
+      ui::mojom::ImeTextSpanThickness::kNone,
+      ui::mojom::ImeTextSpanUnderlineStyle::kNone, Color::kTransparent,
+      Color::kTransparent, Color::kTransparent,
+      /* remove_on_finish_composing=*/false,
+      /*  interim_char_selection= */ false,
+      /* suggestions= */ Vector<String>(),
+      /* should_hide_suggestion_menu= */ true);
+
+  EXPECT_TRUE(ime_text_span.ShouldHideSuggestionMenu());
+}
+
+TEST(ImeTextSpanTest, ShouldHideSuggestionMenuFalse) {
+  ImeTextSpan ime_text_span(
+      ImeTextSpan::Type::kMisspellingSuggestion, /* start_offset= */ 0,
+      /* end_offset= */ 1, Color::kTransparent,
+      ui::mojom::ImeTextSpanThickness::kNone,
+      ui::mojom::ImeTextSpanUnderlineStyle::kNone, Color::kTransparent,
+      Color::kTransparent, Color::kTransparent,
+      /* remove_on_finish_composing=*/false,
+      /*  interim_char_selection= */ false,
+      /* suggestions= */ Vector<String>(),
+      /* should_hide_suggestion_menu= */ false);
+
+  EXPECT_FALSE(ime_text_span.ShouldHideSuggestionMenu());
+}
+
+TEST(ImeTextSpanTest, ShouldHideSuggestionMenuToUiImeTextSpanTrue) {
+  ImeTextSpan ime_text_span(
+      ImeTextSpan::Type::kMisspellingSuggestion, /* start_offset= */ 0,
+      /* end_offset= */ 1, Color::kTransparent,
+      ui::mojom::ImeTextSpanThickness::kNone,
+      ui::mojom::ImeTextSpanUnderlineStyle::kNone, Color::kTransparent,
+      Color::kTransparent, Color::kTransparent,
+      /* remove_on_finish_composing=*/false,
+      /*  interim_char_selection= */ false,
+      /* suggestions= */ Vector<String>(),
+      /* should_hide_suggestion_menu= */ true);
+
+  EXPECT_TRUE(ime_text_span.ToUiImeTextSpan().should_hide_suggestion_menu);
+}
+
+TEST(ImeTextSpanTest, ShouldHideSuggestionMenuToUiImeTextSpanFalse) {
+  ImeTextSpan ime_text_span(
+      ImeTextSpan::Type::kMisspellingSuggestion, /* start_offset= */ 0,
+      /* end_offset= */ 1, Color::kTransparent,
+      ui::mojom::ImeTextSpanThickness::kNone,
+      ui::mojom::ImeTextSpanUnderlineStyle::kNone, Color::kTransparent,
+      Color::kTransparent, Color::kTransparent,
+      /* remove_on_finish_composing=*/false,
+      /*  interim_char_selection= */ false,
+      /* suggestions= */ Vector<String>(),
+      /* should_hide_suggestion_menu= */ false);
+
+  EXPECT_FALSE(ime_text_span.ToUiImeTextSpan().should_hide_suggestion_menu);
 }
 
 }  // namespace

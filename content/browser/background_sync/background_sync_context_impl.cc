@@ -28,16 +28,16 @@ BackgroundSyncContextImpl::BackgroundSyncContextImpl()
           {{blink::mojom::BackgroundSyncType::ONE_SHOT, base::TimeDelta::Max()},
            {blink::mojom::BackgroundSyncType::PERIODIC,
             base::TimeDelta::Max()}}) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 }
 
 BackgroundSyncContextImpl::~BackgroundSyncContextImpl() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  DCHECK(!background_sync_manager_);
-  DCHECK(one_shot_sync_services_.empty());
-  DCHECK(periodic_sync_services_.empty());
+  CHECK(!background_sync_manager_, base::NotFatalUntil::M159);
+  CHECK(one_shot_sync_services_.empty(), base::NotFatalUntil::M159);
+  CHECK(periodic_sync_services_.empty(), base::NotFatalUntil::M159);
 }
 
 // static
@@ -45,9 +45,9 @@ BackgroundSyncContextImpl::~BackgroundSyncContextImpl() {
 void BackgroundSyncContext::FireBackgroundSyncEventsAcrossPartitions(
     BrowserContext* browser_context,
     blink::mojom::BackgroundSyncType sync_type,
-    const base::android::JavaParamRef<jobject>& j_runnable) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(browser_context);
+    const base::android::JavaRef<jobject>& j_runnable) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  CHECK(browser_context, base::NotFatalUntil::M159);
   BackgroundSyncLauncher::FireBackgroundSyncEvents(browser_context, sync_type,
                                                    j_runnable);
 }
@@ -55,8 +55,7 @@ void BackgroundSyncContext::FireBackgroundSyncEventsAcrossPartitions(
 
 void BackgroundSyncContextImpl::Init(
     const scoped_refptr<ServiceWorkerContextWrapper>& service_worker_context,
-    const scoped_refptr<DevToolsBackgroundServicesContextImpl>&
-        devtools_context) {
+    DevToolsBackgroundServicesContextImpl& devtools_context) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   CreateBackgroundSyncManager(service_worker_context, devtools_context);
@@ -75,7 +74,7 @@ void BackgroundSyncContextImpl::CreateOneShotSyncService(
     mojo::PendingReceiver<blink::mojom::OneShotBackgroundSyncService>
         receiver) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(background_sync_manager_);
+  CHECK(background_sync_manager_, base::NotFatalUntil::M159);
   one_shot_sync_services_.insert(
       std::make_unique<OneShotBackgroundSyncServiceImpl>(
           this, origin, render_process_host, std::move(receiver)));
@@ -87,7 +86,7 @@ void BackgroundSyncContextImpl::CreatePeriodicSyncService(
     mojo::PendingReceiver<blink::mojom::PeriodicBackgroundSyncService>
         receiver) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(background_sync_manager_);
+  CHECK(background_sync_manager_, base::NotFatalUntil::M159);
   periodic_sync_services_.insert(
       std::make_unique<PeriodicBackgroundSyncServiceImpl>(
           this, origin, render_process_host, std::move(receiver)));
@@ -96,20 +95,20 @@ void BackgroundSyncContextImpl::CreatePeriodicSyncService(
 void BackgroundSyncContextImpl::OneShotSyncServiceHadConnectionError(
     OneShotBackgroundSyncServiceImpl* service) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(service);
+  CHECK(service, base::NotFatalUntil::M159);
 
   auto iter = one_shot_sync_services_.find(service);
-  DCHECK(iter != one_shot_sync_services_.end());
+  CHECK(iter != one_shot_sync_services_.end());
   one_shot_sync_services_.erase(iter);
 }
 
 void BackgroundSyncContextImpl::PeriodicSyncServiceHadConnectionError(
     PeriodicBackgroundSyncServiceImpl* service) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(service);
+  CHECK(service, base::NotFatalUntil::M159);
 
   auto iter = periodic_sync_services_.find(service);
-  DCHECK(iter != periodic_sync_services_.end());
+  CHECK(iter != periodic_sync_services_.end());
   periodic_sync_services_.erase(iter);
 }
 
@@ -184,12 +183,12 @@ void BackgroundSyncContextImpl::FireBackgroundSyncEvents(
 
 void BackgroundSyncContextImpl::CreateBackgroundSyncManager(
     scoped_refptr<ServiceWorkerContextWrapper> service_worker_context,
-    scoped_refptr<DevToolsBackgroundServicesContextImpl> devtools_context) {
+    DevToolsBackgroundServicesContextImpl& devtools_context) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!background_sync_manager_);
+  CHECK(!background_sync_manager_, base::NotFatalUntil::M159);
 
   background_sync_manager_ = BackgroundSyncManager::Create(
-      std::move(service_worker_context), std::move(devtools_context));
+      std::move(service_worker_context), devtools_context);
 }
 
 }  // namespace content

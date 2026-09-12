@@ -9,14 +9,13 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
-#include "content/browser/renderer_host/render_frame_host_impl.h"
+#include "base/memory/weak_ptr.h"
+#include "content/browser/renderer_host/back_forward_cache_disabling_feature_handle.h"
 #include "content/public/browser/document_service.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "third_party/blink/public/mojom/keyboard_lock/keyboard_lock.mojom.h"
 
 namespace content {
-
-class RenderFrameHost;
 
 class KeyboardLockServiceImpl final
     : public DocumentService<blink::mojom::KeyboardLockService> {
@@ -39,7 +38,8 @@ class KeyboardLockServiceImpl final
   // |this| can only be destroyed by DocumentService.
   ~KeyboardLockServiceImpl() override;
 
-  RenderFrameHostImpl::BackForwardCacheDisablingFeatureHandle feature_handle_;
+  BackForwardCacheDisablingFeatureHandle feature_handle_;
+  base::WeakPtrFactory<KeyboardLockServiceImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace content

@@ -14,6 +14,29 @@
 namespace ash {
 namespace network_health {
 
+// static
+NetworkHealthManager* NetworkHealthManager::GetInstance() {
+  static base::NoDestructor<NetworkHealthManager> instance;
+  return instance.get();
+}
+
+// static
+void NetworkHealthManager::NetworkDiagnosticsServiceCallback(
+    mojo::PendingReceiver<
+        chromeos::network_diagnostics::mojom::NetworkDiagnosticsRoutines>
+        receiver) {
+  ash::network_health::NetworkHealthManager::GetInstance()
+      ->BindDiagnosticsReceiver(std::move(receiver));
+}
+
+// static
+void NetworkHealthManager::NetworkHealthServiceCallback(
+    mojo::PendingReceiver<chromeos::network_health::mojom::NetworkHealthService>
+        receiver) {
+  ash::network_health::NetworkHealthManager::GetInstance()->BindHealthReceiver(
+      std::move(receiver));
+}
+
 NetworkHealthManager::NetworkHealthManager() {
   // Ensure that the NetworkHealthService instance is running.
   GetInProcessInstance();
@@ -63,9 +86,12 @@ void NetworkHealthManager::AddObserver(
   GetInProcessInstance()->AddObserver(std::move(observer));
 }
 
-NetworkHealthManager* NetworkHealthManager::GetInstance() {
-  static base::NoDestructor<NetworkHealthManager> instance;
-  return instance.get();
+void NetworkHealthManager::RunGoogleServicesConnectivity(
+    chromeos::network_diagnostics::mojom::NetworkDiagnosticsRoutines::
+        RunGoogleServicesConnectivityCallback callback) {
+  network_diagnostics_->RunGoogleServicesConnectivity(
+      chromeos::network_diagnostics::mojom::RoutineCallSource::kDiagnosticsUI,
+      std::move(callback));
 }
 
 }  // namespace network_health

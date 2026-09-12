@@ -31,20 +31,48 @@
 #include "third_party/blink/public/web/web_select_element.h"
 
 #include "third_party/blink/public/platform/web_string.h"
+#include "third_party/blink/public/web/web_option_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_option_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_select_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 
 namespace blink {
 
-WebVector<WebElement> WebSelectElement::GetListItems() const {
+std::vector<WebElement> WebSelectElement::GetListItems() const {
   const HeapVector<Member<HTMLElement>>& source_items =
       ConstUnwrap<HTMLSelectElement>()->GetListItems();
-  WebVector<WebElement> items(source_items.size());
+  std::vector<WebElement> items(source_items.size());
   for (wtf_size_t i = 0; i < source_items.size(); ++i)
     items[i] = WebElement(source_items[i].Get());
 
   return items;
+}
+
+void WebSelectElement::SetAutofillOption(WebOptionElement* option,
+                                         WebAutofillState autofill_state) {
+  if (!Focused()) {
+    DispatchFocusEvent();
+  }
+  // The focus event above may have run script which modified the contents of
+  // this select element. If `option` is no longer associated with this select,
+  // fall back to selecting by `option`'s value, which re-resolves the option
+  // element in the updated DOM. This mirrors
+  // autofill::form_util::FillFormField(), which fills by value when it cannot
+  // find an option element to select. See crbug.com/535975677.
+  HTMLSelectElement* select = Unwrap<HTMLSelectElement>();
+  HTMLOptionElement* option_element = *option;
+  if (option_element->OwnerSelectElement() == select) {
+    select->SetAutofillOption(option_element, autofill_state);
+  } else {
+    select->SetAutofillValue(option_element->value(), autofill_state);
+  }
+  if (!Focused()) {
+    DispatchBlurEvent();
+  }
+}
+
+void WebSelectElement::SetSuggestedOption(WebOptionElement* option) {
+  Unwrap<HTMLSelectElement>()->SetSuggestedOption(*option);
 }
 
 WebSelectElement::WebSelectElement(HTMLSelectElement* element)

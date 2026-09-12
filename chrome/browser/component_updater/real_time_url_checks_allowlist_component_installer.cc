@@ -4,6 +4,7 @@
 
 #include "chrome/browser/component_updater/real_time_url_checks_allowlist_component_installer.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -19,9 +20,6 @@
 #include "base/task/thread_pool.h"
 #include "base/values.h"
 #include "components/safe_browsing/android/real_time_url_checks_allowlist.h"
-#include "components/safe_browsing/core/common/features.h"
-
-using component_updater::ComponentUpdateService;
 
 namespace {
 
@@ -42,8 +40,9 @@ const char kRealTimeUrlChecksAllowlistManifestName[] =
 
 void LoadFromDisk(const base::FilePath& pb_path) {
   base::UmaHistogramBoolean(kInstallerLoadFromDiskPbFileEmpty, pb_path.empty());
-  if (pb_path.empty())
+  if (pb_path.empty()) {
     return;
+  }
 
   std::string binary_pb;
   if (!base::ReadFileToString(pb_path, &binary_pb)) {
@@ -70,7 +69,7 @@ bool RealTimeUrlChecksAllowlistComponentInstallerPolicy::
 
 update_client::CrxInstaller::Result
 RealTimeUrlChecksAllowlistComponentInstallerPolicy::OnCustomInstall(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) {
   return update_client::CrxInstaller::Result(0);  // Nothing custom here.
 }
@@ -86,7 +85,7 @@ RealTimeUrlChecksAllowlistComponentInstallerPolicy::GetInstalledPath(
 void RealTimeUrlChecksAllowlistComponentInstallerPolicy::ComponentReady(
     const base::Version& version,
     const base::FilePath& install_dir,
-    base::Value::Dict manifest) {
+    base::DictValue manifest) {
   base::ThreadPool::PostTask(
       FROM_HERE, {base::MayBlock(), base::TaskPriority::BEST_EFFORT},
       base::BindOnce(&LoadFromDisk, GetInstalledPath(install_dir)));
@@ -94,7 +93,7 @@ void RealTimeUrlChecksAllowlistComponentInstallerPolicy::ComponentReady(
 
 // Called during startup and installation before ComponentReady().
 bool RealTimeUrlChecksAllowlistComponentInstallerPolicy::VerifyInstallation(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) const {
   // No need to actually validate the proto here, since we'll do the checking
   // in |PopulateFromDynamicUpdate()|.
@@ -109,9 +108,7 @@ RealTimeUrlChecksAllowlistComponentInstallerPolicy::GetRelativeInstallDir()
 
 void RealTimeUrlChecksAllowlistComponentInstallerPolicy::GetHash(
     std::vector<uint8_t>* hash) const {
-  hash->assign(kRealTimeUrlChecksAllowlistPublicKeySHA256,
-               kRealTimeUrlChecksAllowlistPublicKeySHA256 +
-                   std::size(kRealTimeUrlChecksAllowlistPublicKeySHA256));
+  hash->assign_range(kRealTimeUrlChecksAllowlistPublicKeySHA256);
 }
 
 std::string RealTimeUrlChecksAllowlistComponentInstallerPolicy::GetName()
@@ -126,12 +123,9 @@ RealTimeUrlChecksAllowlistComponentInstallerPolicy::GetInstallerAttributes()
 }
 
 void RegisterRealTimeUrlChecksAllowlistComponent(ComponentUpdateService* cus) {
-  if (base::FeatureList::IsEnabled(
-          safe_browsing::kComponentUpdaterAndroidProtegoAllowlist)) {
-    auto installer = base::MakeRefCounted<ComponentInstaller>(
-        std::make_unique<RealTimeUrlChecksAllowlistComponentInstallerPolicy>());
-    installer->Register(cus, base::OnceClosure());
-  }
+  auto installer = base::MakeRefCounted<ComponentInstaller>(
+      std::make_unique<RealTimeUrlChecksAllowlistComponentInstallerPolicy>());
+  installer->Register(cus, base::OnceClosure());
 }
 
 }  // namespace component_updater

@@ -31,11 +31,14 @@
 ../../../third_party/markupsafe/__init__.py
 ../../../third_party/markupsafe/_compat.py
 ../../../third_party/markupsafe/_native.py
+../../action_helpers.py
 ../../gn_helpers.py
+../../zip_helpers.py
 ../pylib/__init__.py
 ../pylib/constants/__init__.py
 ../pylib/constants/host_paths.py
 jinja_template.py
 util/__init__.py
 util/build_utils.py
+util/parallel.py
 util/resource_utils.py

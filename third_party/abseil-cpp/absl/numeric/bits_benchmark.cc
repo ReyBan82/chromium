@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
-#include "benchmark/benchmark.h"
 #include "absl/base/optimization.h"
 #include "absl/numeric/bits.h"
 #include "absl/random/random.h"
+#include "benchmark/benchmark.h"
 
 namespace absl {
 namespace {

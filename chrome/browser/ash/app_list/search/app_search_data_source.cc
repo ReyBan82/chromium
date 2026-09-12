@@ -5,10 +5,13 @@
 #include "chrome/browser/ash/app_list/search/app_search_data_source.h"
 
 #include <algorithm>
+#include <array>
 #include <set>
 #include <utility>
 
+#include "ash/constants/web_app_id_constants.h"
 #include "ash/public/cpp/app_list/internal_app_id_constants.h"
+#include "base/compiler_specific.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/clock.h"
@@ -20,13 +23,14 @@
 #include "chrome/browser/ash/app_list/search/app_service_app_result.h"
 #include "chrome/browser/ash/extensions/gfx_utils.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/web_applications/web_app_id_constants.h"
 #include "chromeos/ash/components/string_matching/fuzzy_tokenized_string_match.h"
 #include "chromeos/ash/components/string_matching/tokenized_string.h"
 #include "chromeos/ash/components/string_matching/tokenized_string_match.h"
+#include "chromeos/ash/experiences/arc/app/arc_app_constants.h"
 #include "components/services/app_service/public/cpp/app_types.h"
 #include "components/services/app_service/public/cpp/app_update.h"
 #include "components/services/app_service/public/cpp/types_util.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 using ::ash::string_matching::FuzzyTokenizedStringMatch;
 using ::ash::string_matching::TokenizedString;
@@ -47,9 +51,10 @@ constexpr bool kUseWeightedRatio = false;
 constexpr double kRelevanceThreshold = 0.64;
 
 // Default recommended apps in descending order of priority.
-constexpr const char* const ranked_default_app_ids[] = {
-    web_app::kOsSettingsAppId, web_app::kHelpAppId, arc::kPlayStoreAppId,
-    web_app::kCanvasAppId, web_app::kCameraAppId};
+constexpr std::array ranked_default_app_ids = {
+    ash::kOsSettingsAppId, ash::kHelpAppId,   arc::kPlayStoreAppId,
+    ash::kCanvasAppId,     ash::kCameraAppId,
+};
 
 // Flag to enable/disable diacritics stripping
 constexpr bool kStripDiacritics = true;
@@ -61,11 +66,13 @@ constexpr bool kStripDiacritics = true;
 // Returns:
 //    The priority rank 0, 1, ... if the app is a default app.
 //    -1 if the app is not a default app.
-int GetDefaultAppRank(const std::string app_id) {
-  for (size_t i = 0; i < std::size(ranked_default_app_ids); ++i) {
-    if (app_id == ranked_default_app_ids[i]) {
-      return i;
+int GetDefaultAppRank(const std::string& app_id) {
+  int rank = 0;
+  for (const char* id : ranked_default_app_ids) {
+    if (app_id == id) {
+      return rank;
     }
+    ++rank;
   }
   return -1;
 }
@@ -82,7 +89,7 @@ void MaybeAddResult(SearchProvider::Results* results,
 
   seen_or_filtered_apps->insert(app_result->app_id());
 
-  std::unordered_set<std::string> duplicate_app_ids;
+  absl::flat_hash_set<std::string> duplicate_app_ids;
   if (!extensions::util::GetEquivalentInstalledArcApps(
           app_result->profile(), app_result->app_id(), &duplicate_app_ids)) {
     results->emplace_back(std::move(app_result));
@@ -90,7 +97,7 @@ void MaybeAddResult(SearchProvider::Results* results,
   }
 
   for (const auto& duplicate_app_id : duplicate_app_ids) {
-    if (seen_or_filtered_apps->count(duplicate_app_id)) {
+    if (seen_or_filtered_apps->contains(duplicate_app_id)) {
       return;
     }
   }
@@ -99,8 +106,9 @@ void MaybeAddResult(SearchProvider::Results* results,
 
   // Add duplicate ids in order to filter them if they appear down the
   // list.
-  seen_or_filtered_apps->insert(duplicate_app_ids.begin(),
-                                duplicate_app_ids.end());
+  seen_or_filtered_apps->insert(
+      std::make_move_iterator(duplicate_app_ids.begin()),
+      std::make_move_iterator(duplicate_app_ids.end()));
 }
 
 // Linearly maps |score| to the range [min, max].
@@ -251,9 +259,12 @@ AppSearchDataSource::AppSearchDataSource(
     : profile_(profile),
       list_controller_(list_controller),
       clock_(clock),
-      proxy_(apps::AppServiceProxyFactory::GetForProfile(profile)),
-      icon_cache_(proxy_, apps::IconCache::GarbageCollectionPolicy::kExplicit) {
-  Observe(&proxy_->AppRegistryCache());
+      icon_cache_(apps::AppServiceProxyFactory::GetForProfile(profile)
+                      ->app_icon_loader(),
+                  apps::IconCache::GarbageCollectionPolicy::kExplicit) {
+  app_registry_cache_observer_.Observe(
+      &apps::AppServiceProxyFactory::GetForProfile(profile)
+           ->AppRegistryCache());
 }
 
 AppSearchDataSource::~AppSearchDataSource() = default;
@@ -402,39 +413,33 @@ void AppSearchDataSource::Refresh() {
   apps_.clear();
   apps_.reserve(kMinimumReservedAppsContainerCapacity);
 
-  proxy_->AppRegistryCache().ForEachApp([this](const apps::AppUpdate& update) {
-    if (!apps_util::IsInstalled(update.Readiness()) ||
-        (!update.ShowInSearch().value_or(false) &&
-         !(update.Recommendable().value_or(false) &&
-           update.AppType() == apps::AppType::kBuiltIn))) {
-      return;
-    }
+  apps::AppServiceProxyFactory::GetForProfile(profile_)
+      ->AppRegistryCache()
+      .ForEachApp([this](const apps::AppUpdate& update) {
+        if (!apps_util::IsInstalled(update.Readiness()) ||
+            !update.ShowInSearch().value_or(false)) {
+          return;
+        }
 
-    if (!std::strcmp(update.AppId().c_str(),
-                     ash::kInternalAppIdContinueReading)) {
-      // Don't show continue reading results in the recommended apps.
-      return;
-    }
+        // TODO(crbug.com/40569217): add the "can load in incognito" concept to
+        // the App Service and use it here, similar to ExtensionDataSource.
+        const std::string name = update.Name();
 
-    // TODO(crbug.com/826982): add the "can load in incognito" concept to
-    // the App Service and use it here, similar to ExtensionDataSource.
-    const std::string name = update.Name();
+        apps_.emplace_back(std::make_unique<AppInfo>(
+            update.AppId(), name, GetAppLastActivityTime(update)));
+        // TODO(crbug.com/1364452): Test that non-recommendable apps are not
+        // shown in the Recent Apps section.
+        apps_.back()->set_recommendable(
+            update.Recommendable().value_or(false) &&
+            !update.Paused().value_or(false) &&
+            !apps_util::IsDisabled(update.Readiness()) &&
+            update.ShowInLauncher());
+        apps_.back()->set_searchable(update.Searchable().value_or(false));
 
-    apps_.emplace_back(std::make_unique<AppInfo>(
-        update.AppId(), name, GetAppLastActivityTime(update)));
-    // TODO(crbug.com/1364452): Test that non-recommendable apps are not shown
-    // in the Recent Apps section.
-    apps_.back()->set_recommendable(update.Recommendable().value_or(false) &&
-                                    !update.Paused().value_or(false) &&
-                                    update.Readiness() !=
-                                        apps::Readiness::kDisabledByPolicy &&
-                                    update.ShowInLauncher());
-    apps_.back()->set_searchable(update.Searchable().value_or(false));
-
-    for (const std::string& term : update.AdditionalSearchTerms()) {
-      apps_.back()->AddSearchableText(base::UTF8ToUTF16(term));
-    }
-  });
+        for (const std::string& term : update.AdditionalSearchTerms()) {
+          apps_.back()->AddSearchableText(base::UTF8ToUTF16(term));
+        }
+      });
 
   // Presort app based on last activity time in order to be able to remove
   // duplicates from results. We break ties by App ID, which is arbitrary, but
@@ -447,7 +452,7 @@ void AppSearchDataSource::Refresh() {
 
 void AppSearchDataSource::OnAppUpdate(const apps::AppUpdate& update) {
   if (!apps_util::IsInstalled(update.Readiness()) || update.IconKeyChanged()) {
-    icon_cache_.RemoveIcon(update.AppType(), update.AppId());
+    icon_cache_.RemoveIcon(update.AppId());
   }
 
   if (update.Readiness() == apps::Readiness::kReady) {
@@ -461,7 +466,7 @@ void AppSearchDataSource::OnAppUpdate(const apps::AppUpdate& update) {
 
 void AppSearchDataSource::OnAppRegistryCacheWillBeDestroyed(
     apps::AppRegistryCache* cache) {
-  Observe(nullptr);
+  app_registry_cache_observer_.Reset();
 }
 
 void AppSearchDataSource::ScheduleRefresh() {

@@ -22,7 +22,6 @@
 
 import("//build/config/chrome_build.gni")
 import("//build/config/ui.gni")
-import("//chromeos/ash/components/assistant/assistant.gni")
 import("//tools/v8_context_snapshot/v8_context_snapshot.gni")
 import("//ui/base/ui_features.gni")
 
@@ -36,12 +35,12 @@ public_app_shared_sources = [
 ]
 
 public_app_shared_public_deps = [
+  "//base",
   "//content:export",
   "//third_party/abseil-cpp:absl",
 ]
 
 public_app_shared_deps = [
-  "//base",
   "//base:i18n",
   "//content/app",
   "//content/public/common:common_sources",
@@ -58,7 +57,7 @@ if (is_win) {
 if (is_component_build) {
   source_set("app_sources") {
     # Only the main content shared library can pull this in.
-    visibility = [ "//content:content" ]
+    visibility = [ "//content" ]
 
     sources = public_app_shared_sources
 
@@ -94,6 +93,43 @@ if (is_component_build) {
       # This target is a pair with the non-public version. They always go
       # together and include headers from each other.
       "//content/app",
+    ]
+  }
+}
+
+if (is_mac) {
+  import("//build/util/branding.gni")
+  import("//chrome/version.gni")
+
+  shared_library("aperitif") {
+    sources = [ "aperitif_mac.h" ]
+
+    public_deps = [ "//content/app:aperitif" ]
+
+    ldflags = [
+      "-compatibility_version",
+      chrome_dylib_version,
+      "-current_version",
+      chrome_dylib_version,
+    ]
+
+    if (is_component_build) {
+      ldflags += [
+        "-Wl,-install_name,@rpath/libaperitif.dylib",
+
+        # Typically packaged at Content Shell.app/Contents/Frameworks/Content
+        #     Shell Framework.framework/Versions/C/Libraries/libaperitif.dylib
+        # so set rpath up to the root out directory.
+        "-Wl,-rpath,@loader_path/../../../../../../..",
+      ]
+    } else {
+      ldflags += [ "-Wl,-install_name,@executable_path/../Frameworks/$chrome_product_full_name Framework.framework/Versions/$chrome_version_full/Libraries/libaperitif.dylib" ]
+    }
+
+    allow_circular_includes_from = [
+      # This target is a pair with the non-public version. They always go
+      # together and include headers from each other.
+      "//content/app:aperitif",
     ]
   }
 }

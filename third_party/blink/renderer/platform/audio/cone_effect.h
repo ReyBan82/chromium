@@ -41,11 +41,11 @@ namespace blink {
 
 // Cone gain is defined according to the OpenAL specification
 
-class PLATFORM_EXPORT ConeEffect {
+class PLATFORM_EXPORT ConeEffect final {
   DISALLOW_NEW();
 
  public:
-  ConeEffect();
+  ConeEffect() = default;
 
   // Returns scalar gain for the given source/listener positions/orientations
   double Gain(gfx::Point3F source_position,
@@ -62,10 +62,10 @@ class PLATFORM_EXPORT ConeEffect {
   void SetOuterGain(double outer_gain) { outer_gain_ = outer_gain; }
   double OuterGain() const { return outer_gain_; }
 
- protected:
-  double inner_angle_;
-  double outer_angle_;
-  double outer_gain_;
+ private:
+  double inner_angle_ = 360.0;
+  double outer_angle_ = 360.0;
+  double outer_gain_ = 0.0;
 };
 
 }  // namespace blink

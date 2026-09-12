@@ -4,7 +4,7 @@
 
 button {
   border: 0;
-  border-radius: 4px;
+  border-radius: 20px;
   box-sizing: border-box;
   color: var(--primary-button-text-color);
   cursor: pointer;
@@ -31,7 +31,10 @@ button {
 .ssl button,
 .enterprise-block button,
 .enterprise-warn button,
-.safe-browsing-billing button {
+.managed-profile-required button,
+.safe-browsing-billing button,
+.supervised-user-verify button,
+.supervised-user-verify-subframe button {
   background: var(--primary-button-fill-color);
 }
 
@@ -145,10 +148,14 @@ input[type=checkbox]:focus ~ .checkbox::after {
 }
 
 #enhanced-protection-message {
-  border-radius: 4px;
+  border-radius: 20px;
   font-size: 1em;
   margin-top: 32px;
   padding: 10px 5px;
+}
+
+#enhanced-protection-message a {
+  color: var(--google-red-10);
 }
 
 #enhanced-protection-message label {
@@ -221,29 +228,13 @@ input[type=checkbox]:focus ~ .checkbox::after {
   left: calc(.3em + var(--padding));
   opacity: 0;
   position: absolute;
-  top: calc(.3em  + var(--padding));
+  top: calc(.3em + var(--padding));
   transform: rotate(-45deg);
   width: .5em;
 }
 
 input[type=checkbox]:checked ~ .checkbox::before {
   opacity: 1;
-}
-
-#recurrent-error-message {
-  background: #ededed;
-  border-radius: 4px;
-  margin-bottom: 16px;
-  margin-top: 12px;
-  padding: 12px 16px;
-}
-
-.showing-recurrent-error-message #extended-reporting-opt-in {
-  margin-top: 16px;
-}
-
-.showing-recurrent-error-message #enhanced-protection-message {
-  margin-top: 16px;
 }
 
 @media (max-width: 700px) {
@@ -440,7 +431,7 @@ input[type=checkbox]:checked ~ .checkbox::before {
   }
 }
 
-@media (min-height: 400px) and (orientation:portrait) {
+@media (min-height: 400px) and (orientation: portrait) {
   .interstitial-wrapper {
     margin-bottom: 145px;
   }
@@ -452,7 +443,7 @@ input[type=checkbox]:checked ~ .checkbox::before {
   }
 }
 
-@media (max-height: 560px) and (min-height: 240px) and (orientation:landscape) {
+@media (max-height: 560px) and (min-height: 240px) and (orientation: landscape) {
   .extended-reporting-has-checkbox #details {
     padding-bottom: 80px;
   }

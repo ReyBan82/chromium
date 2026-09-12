@@ -3,16 +3,19 @@
 // found in the LICENSE file.
 
 #include "ash/accessibility/magnifier/docked_magnifier_controller.h"
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "ash/public/cpp/keyboard/keyboard_controller.h"
 #include "ash/shell.h"
 #include "chrome/browser/ash/accessibility/accessibility_manager.h"
 #include "chrome/browser/ash/accessibility/magnification_manager.h"
 #include "chrome/browser/ash/login/test/oobe_base_test.h"
-#include "chrome/browser/ash/login/ui/login_display_host.h"
-#include "chrome/browser/ash/login/ui/webui_login_view.h"
 #include "chrome/browser/ui/ash/keyboard/chrome_keyboard_controller_client.h"
+#include "chrome/browser/ui/ash/login/login_display_host.h"
+#include "chrome/browser/ui/ash/login/webui_login_view.h"
 #include "content/public/test/browser_test.h"
+#include "ui/base/l10n/l10n_util.h"
 #include "ui/gfx/geometry/rect.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/view_observer.h"
 
 namespace ash {
@@ -129,6 +132,16 @@ IN_PROC_BROWSER_TEST_F(DockedMagnifierVirtualKeyboardTest, WelcomeScreen) {
 
   HideKeyboard();
   EXPECT_EQ(original_bounds, GetOobeBounds());
+}
+
+IN_PROC_BROWSER_TEST_F(DockedMagnifierVirtualKeyboardTest,
+                       WebUILoginViewAccessibleProperties) {
+  ui::AXNodeData data;
+
+  webui_login_view()->GetViewAccessibility().GetAccessibleNodeData(&data);
+  EXPECT_EQ(ax::mojom::Role::kWindow, data.role);
+  EXPECT_EQ(l10n_util::GetStringUTF16(IDS_OOBE_ACCESSIBLE_SCREEN_NAME),
+            data.GetString16Attribute(ax::mojom::StringAttribute::kName));
 }
 
 }  // namespace ash

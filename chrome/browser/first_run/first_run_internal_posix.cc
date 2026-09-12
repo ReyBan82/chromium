@@ -14,6 +14,7 @@
 #include "chrome/browser/metrics/metrics_reporting_state.h"
 #include "components/metrics/metrics_pref_names.h"
 #include "components/metrics/metrics_reporting_default_state.h"
+#include "components/signin/public/base/signin_switches.h"
 #include "components/startup_metric_utils/browser/startup_metric_utils.h"
 
 #if BUILDFLAG(IS_CHROMEOS)
@@ -47,6 +48,10 @@ bool ShouldShowFirstRunDialog() {
   if (g_forced_show_dialog_state != ForcedShowDialogState::kNotForced)
     return g_forced_show_dialog_state == ForcedShowDialogState::kForceShown;
 
+  if (switches::IsPreFirstRunDesktopRefreshEnabled()) {
+    return false;
+  }
+
 #if !BUILDFLAG(GOOGLE_CHROME_BRANDING)
   return false;
 #else
@@ -58,16 +63,15 @@ bool ShouldShowFirstRunDialog() {
   // in enterprise scenarios. If that is the case, skip the dialog entirely, as
   // it's not worth bothering the user for only the default browser question
   // (which is likely to be forced in enterprise deployments anyway).
-  if (IsMetricsReportingPolicyManaged())
+  if (metrics::IsMetricsReportingPolicyManaged()) {
     return false;
+  }
 
   // For real first runs, Mac and Desktop Linux initialize the default metrics
-  // reporting state when the first run dialog is shown.
-  bool is_opt_in = first_run::IsMetricsReportingOptIn();
+  // reporting state when the first run dialog is shown. These days, metrics are
+  // always enabled by default (opt-out).
   metrics::RecordMetricsReportingDefaultState(
-      g_browser_process->local_state(),
-      is_opt_in ? metrics::EnableMetricsDefault::OPT_IN
-                : metrics::EnableMetricsDefault::OPT_OUT);
+      g_browser_process->local_state(), metrics::EnableMetricsDefault::OPT_OUT);
   return true;
 #endif
 }
@@ -89,11 +93,11 @@ void DoPostImportPlatformSpecificTasks() {
     std::move(GetBeforeShowFirstRunDialogHookForTesting()).Run();
 
   ShowFirstRunDialog();
-  startup_metric_utils::SetNonBrowserUIDisplayed();
+  startup_metric_utils::GetBrowser().SetNonBrowserUIDisplayed();
 }
 
 bool ShowPostInstallEULAIfNeeded(installer::InitialPreferences* install_prefs) {
-  // The EULA is only handled on Windows.
+  // The EULA is only handled on Windows and Linux.
   return true;
 }
 

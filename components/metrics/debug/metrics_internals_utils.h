@@ -8,13 +8,25 @@
 #include "base/values.h"
 #include "components/metrics/metrics_service.h"
 #include "components/metrics_services_manager/metrics_services_manager.h"
+#include "components/variations/variations_seed_store.h"
+
+namespace ukm {
+class UkmService;
+}
 
 namespace metrics {
 
-base::Value::List GetUmaSummary(MetricsService* metrics_service);
+base::ListValue GetUmaSummary(MetricsService* metrics_service);
 
-base::Value::List GetVariationsSummary(
+base::ListValue GetUkmSummary(ukm::UkmService* ukm_service);
+
+base::ListValue GetVariationsSummary(
     metrics_services_manager::MetricsServicesManager* metrics_service_manager);
+
+void GetStoredSeedInfo(
+    base::OnceCallback<void(base::ValueView)> done_callback,
+    metrics_services_manager::MetricsServicesManager* metrics_service_manager,
+    variations::VariationsSeedStore::SeedType seed_type);
 
 }  // namespace metrics
 

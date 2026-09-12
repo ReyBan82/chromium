@@ -10,6 +10,10 @@
 
 class Profile;
 
+namespace content {
+class BrowserContext;
+}
+
 namespace safe_browsing {
 
 // Delegate class which implements chrome specific bits for configuring
@@ -28,9 +32,10 @@ class ChromeClientSideDetectionServiceDelegate
 
   // ClientSideDetectionService::Delegate implementation.
   PrefService* GetPrefs() override;
-  scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory() override;
   scoped_refptr<network::SharedURLLoaderFactory>
   GetSafeBrowsingURLLoaderFactory() override;
+  bool ShouldSendModelToBrowserContext(
+      content::BrowserContext* context) override;
 
  private:
   raw_ptr<Profile> profile_;

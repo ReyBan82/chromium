@@ -5,8 +5,10 @@
 #include "content/shell/app/shell_main_delegate.h"
 
 #include <iostream>
+#include <memory>
 #include <tuple>
 #include <utility>
+#include <variant>
 
 #include "base/base_paths.h"
 #include "base/base_switches.h"
@@ -14,13 +16,16 @@
 #include "base/cpu.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
-#include "base/lazy_instance.h"
 #include "base/logging.h"
+#include "base/logging/logging_settings.h"
+#include "base/no_destructor.h"
 #include "base/path_service.h"
 #include "base/process/current_process.h"
-#include "base/trace_event/trace_log.h"
+#include "base/strings/string_number_conversions.h"
 #include "build/build_config.h"
 #include "components/crash/core/common/crash_key.h"
+#include "components/memory_system/initializer.h"
+#include "components/memory_system/parameters.h"
 #include "content/common/content_constants_internal.h"
 #include "content/public/app/initialize_mojo_core.h"
 #include "content/public/browser/browser_main_runner.h"
@@ -29,28 +34,20 @@
 #include "content/public/common/url_constants.h"
 #include "content/shell/app/shell_crash_reporter_client.h"
 #include "content/shell/browser/shell_content_browser_client.h"
-#include "content/shell/browser/shell_paths.h"
 #include "content/shell/common/shell_content_client.h"
+#include "content/shell/common/shell_paths.h"
 #include "content/shell/common/shell_switches.h"
 #include "content/shell/gpu/shell_content_gpu_client.h"
 #include "content/shell/renderer/shell_content_renderer_client.h"
 #include "content/shell/utility/shell_content_utility_client.h"
-#include "ipc/ipc_buildflags.h"
 #include "net/cookies/cookie_monster.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "ui/base/resource/resource_bundle.h"
-
-#if BUILDFLAG(IPC_MESSAGE_LOG_ENABLED)
-#define IPC_MESSAGE_MACROS_LOG_ENABLED
-#include "content/public/common/content_ipc_logging.h"
-#define IPC_LOG_TABLE_ADD_ENTRY(msg_id, logger) \
-    content::RegisterIPCLogger(msg_id, logger)
-#endif
 
 #if !BUILDFLAG(IS_ANDROID)
 #include "content/web_test/browser/web_test_browser_main_runner.h"  // nogncheck
 #include "content/web_test/browser/web_test_content_browser_client.h"  // nogncheck
 #include "content/web_test/renderer/web_test_content_renderer_client.h"  // nogncheck
+#include "ui/native_theme/mock_os_settings_provider.h"  // nogncheck
 #endif
 
 #if BUILDFLAG(IS_ANDROID)
@@ -65,7 +62,7 @@
 #endif
 
 #if BUILDFLAG(IS_APPLE)
-#include "content/shell/app/paths_mac.h"
+#include "content/shell/app/paths_apple.h"
 #endif
 
 #if BUILDFLAG(IS_MAC)
@@ -73,10 +70,12 @@
 #endif  // BUILDFLAG(IS_MAC)
 
 #if BUILDFLAG(IS_WIN)
+#include <initguid.h>
 #include <windows.h>
 
-#include <initguid.h>
 #include "base/logging_win.h"
+#include "base/win/scoped_handle.h"
+#include "base/win/win_util.h"
 #include "content/shell/common/v8_crashpad_support_win.h"
 #endif
 
@@ -85,14 +84,32 @@
 #endif
 
 #if BUILDFLAG(IS_IOS)
-#include "content/shell/browser/shell_application_ios.h"
+#include "content/shell/app/ios/shell_application_ios.h"
+#endif
+
+#if BUILDFLAG(IS_IOS_TVOS)
+#include "base/files/file_path.h"
+#include "base/path_service.h"
+#include "content/shell/common/shell_switches.h"
 #endif
 
 namespace {
 
+enum class LoggingDest {
+  kFile,
+  kStderr,
+  kSystem,
+#if BUILDFLAG(IS_WIN)
+  kHandle,
+#endif
+};
+
 #if !BUILDFLAG(IS_FUCHSIA)
-base::LazyInstance<content::ShellCrashReporterClient>::Leaky
-    g_shell_crash_client = LAZY_INSTANCE_INITIALIZER;
+content::ShellCrashReporterClient& GetShellCrashReporterClient() {
+  static base::NoDestructor<content::ShellCrashReporterClient>
+      shell_crash_client;
+  return *shell_crash_client;
+}
 #endif
 
 #if BUILDFLAG(IS_WIN)
@@ -113,20 +130,73 @@ const GUID kContentShellProviderName = {
 #endif
 
 void InitLogging(const base::CommandLine& command_line) {
-  base::FilePath log_filename =
-      command_line.GetSwitchValuePath(switches::kLogFile);
-  if (log_filename.empty()) {
+  LoggingDest dest = LoggingDest::kFile;
+
+  const std::string logging_dest =
+      command_line.GetSwitchValueASCII(switches::kEnableLogging);
+  if (logging_dest == "stderr") {
+    dest = LoggingDest::kStderr;
+  } else if (logging_dest == "system") {
+    dest = LoggingDest::kSystem;
+  }
+
+#if BUILDFLAG(IS_WIN)
+  // On Windows child process may be given a handle in the --log-file switch.
+  base::win::ScopedHandle log_handle;
+  if (logging_dest == "handle") {
+    auto handle_str = command_line.GetSwitchValueNative(switches::kLogFile);
+    uint32_t handle_value = 0;
+    if (base::StringToUint(handle_str, &handle_value)) {
+      // This handle is owned by the logging framework and is closed when the
+      // process exits.
+      HANDLE duplicate = nullptr;
+      if (::DuplicateHandle(GetCurrentProcess(),
+                            base::win::Uint32ToHandle(handle_value),
+                            GetCurrentProcess(), &duplicate, 0, FALSE,
+                            DUPLICATE_SAME_ACCESS)) {
+        log_handle.Set(duplicate);
+        dest = LoggingDest::kHandle;
+      }
+    }
+  }
+#endif  // BUILDFLAG(IS_WIN)
+
+  base::FilePath log_filename;
+  if (dest == LoggingDest::kFile) {
+    log_filename = command_line.GetSwitchValuePath(switches::kLogFile);
+    if (log_filename.empty()) {
 #if BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_IOS)
-    base::PathService::Get(base::DIR_TEMP, &log_filename);
+      base::PathService::Get(base::DIR_TEMP, &log_filename);
 #else
-    base::PathService::Get(base::DIR_EXE, &log_filename);
+      base::PathService::Get(base::DIR_EXE, &log_filename);
 #endif
-    log_filename = log_filename.AppendASCII("content_shell.log");
+      log_filename = log_filename.AppendASCII("content_shell.log");
+    }
   }
 
   logging::LoggingSettings settings;
-  settings.logging_dest = logging::LOG_TO_ALL;
-  settings.log_file_path = log_filename.value().c_str();
+#if BUILDFLAG(IS_WIN)
+  if (dest == LoggingDest::kHandle) {
+    // TODO(crbug.com/328285906) Use a ScopedHandle in logging settings.
+    settings.log_file = log_handle.release();
+  } else {
+    settings.log_file = nullptr;
+  }
+#endif  // BUILDFLAG(IS_WIN)
+
+  if (dest == LoggingDest::kFile) {
+    settings.log_file_path = log_filename.value();
+  }
+
+  if (dest == LoggingDest::kStderr) {
+    settings.logging_dest = logging::LOG_TO_STDERR;
+  } else if (dest == LoggingDest::kSystem) {
+    settings.logging_dest = logging::LOG_TO_SYSTEM_DEBUG_LOG;
+  } else {
+    // Includes both handle or provided filename on Windows.
+    settings.logging_dest = logging::LOG_TO_ALL;
+  }
+
   settings.delete_old = logging::DELETE_OLD_LOG_FILE;
   logging::InitLogging(settings);
   logging::SetLogItems(true /* Process ID */, true /* Thread ID */,
@@ -143,7 +213,7 @@ ShellMainDelegate::ShellMainDelegate(bool is_content_browsertests)
 ShellMainDelegate::~ShellMainDelegate() {
 }
 
-absl::optional<int> ShellMainDelegate::BasicStartupComplete() {
+std::optional<int> ShellMainDelegate::BasicStartupComplete() {
   base::CommandLine& command_line = *base::CommandLine::ForCurrentProcess();
   if (command_line.HasSwitch("run-layout-test")) {
     std::cerr << std::string(79, '*') << "\n"
@@ -162,22 +232,25 @@ absl::optional<int> ShellMainDelegate::BasicStartupComplete() {
   logging::LogEventProvider::Initialize(kContentShellProviderName);
 
   v8_crashpad_support::SetUp();
+
+  base::win::EnableStrictHandleCheckingForCurrentProcess();
 #endif
 
 #if BUILDFLAG(IS_MAC)
   // Needs to happen before InitializeResourceBundle().
-  OverrideFrameworkBundlePath();
-  OverrideOuterBundlePath();
-  OverrideChildProcessPath();
-  OverrideSourceRootPath();
   EnsureCorrectResolutionSettings();
-  OverrideBundleID();
 #endif  // BUILDFLAG(IS_MAC)
 
   InitLogging(command_line);
 
 #if !BUILDFLAG(IS_ANDROID)
   if (switches::IsRunWebTestsSwitchPresent()) {
+    // Instantiating `ui::OsSettingsProvider` will both provide sane default
+    // behavior and prevent `ui::OsSettingsProvider::Get()` from instantiating a
+    // platform-specific subclass.
+    os_settings_provider_ = std::make_unique<ui::OsSettingsProvider>(
+        ui::OsSettingsProvider::PriorityLevel::kTesting);
+
     const bool browser_process =
         command_line.GetSwitchValueASCII(switches::kProcessType).empty();
     if (browser_process) {
@@ -187,13 +260,31 @@ absl::optional<int> ShellMainDelegate::BasicStartupComplete() {
   }
 #endif
 
+#if BUILDFLAG(IS_IOS_TVOS)
+  // On tvOS, local storage is limited and data cannot be written anywhere
+  // other than the cache directory, so `base::DIR_CACHE` is used for
+  // the user data directory.
+  //
+  // The exception is when a different user data directory has been specified
+  // (for example by content's WrapperTestLauncherDelegate::GetCommandLine()
+  // when running browser tests). In this case, we prefer the value has been
+  // passed, otherwise multiple tests running at the same time will try to use
+  // the same temporary files and fail.
+  base::FilePath path;
+  if (!command_line.HasSwitch(switches::kContentShellUserDataDir) &&
+      base::PathService::Get(base::DIR_CACHE, &path) && !path.empty()) {
+    command_line.AppendSwitchASCII(switches::kContentShellUserDataDir,
+                                   path.MaybeAsASCII());
+  }
+#endif
+
   RegisterShellPathProvider();
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 bool ShellMainDelegate::ShouldCreateFeatureList(InvokedIn invoked_in) {
-  return absl::holds_alternative<InvokedInChildProcess>(invoked_in);
+  return std::holds_alternative<InvokedInChildProcess>(invoked_in);
 }
 
 bool ShellMainDelegate::ShouldInitializeMojo(InvokedIn invoked_in) {
@@ -201,23 +292,16 @@ bool ShellMainDelegate::ShouldInitializeMojo(InvokedIn invoked_in) {
 }
 
 void ShellMainDelegate::PreSandboxStartup() {
-#if defined(ARCH_CPU_ARM_FAMILY) && \
-    (BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS))
-  // Create an instance of the CPU class to parse /proc/cpuinfo and cache
-  // cpu_brand info.
-  base::CPU cpu_info;
-#endif
-
 // Disable platform crash handling and initialize the crash reporter, if
 // requested.
-// TODO(crbug.com/1226159): Implement crash reporter integration for Fuchsia.
+// TODO(crbug.com/40188745): Implement crash reporter integration for Fuchsia.
 #if !BUILDFLAG(IS_FUCHSIA)
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kEnableCrashReporter)) {
     std::string process_type =
         base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
             switches::kProcessType);
-    crash_reporter::SetCrashReporterClient(g_shell_crash_client.Pointer());
+    crash_reporter::SetCrashReporterClient(&GetShellCrashReporterClient());
     // Reporting for sub-processes will be initialized in ZygoteForked.
     if (process_type != switches::kZygoteProcess) {
       crash_reporter::InitializeCrashpad(process_type.empty(), process_type);
@@ -234,7 +318,7 @@ void ShellMainDelegate::PreSandboxStartup() {
   InitializeResourceBundle();
 }
 
-absl::variant<int, MainFunctionParams> ShellMainDelegate::RunProcess(
+std::variant<int, MainFunctionParams> ShellMainDelegate::RunProcess(
     const std::string& process_type,
     MainFunctionParams main_function_params) {
   // For non-browser process, return and have the caller run the main loop.
@@ -243,14 +327,24 @@ absl::variant<int, MainFunctionParams> ShellMainDelegate::RunProcess(
 
   base::CurrentProcess::GetInstance().SetProcessType(
       base::CurrentProcessType::PROCESS_BROWSER);
-  base::trace_event::TraceLog::GetInstance()->SetProcessSortIndex(
-      kTraceEventBrowserProcessSortIndex);
 
-#if BUILDFLAG(IS_ANDROID)
-  // On Android, we defer to the system message loop when the stack unwinds.
-  // So here we only create (and leak) a BrowserMainRunner. The shutdown
-  // of BrowserMainRunner doesn't happen in Chrome Android and doesn't work
-  // properly on Android at all.
+#if !BUILDFLAG(IS_ANDROID)
+  if (switches::IsRunWebTestsSwitchPresent()) {
+    // Web tests implement their own BrowserMain() replacement.
+    web_test_runner_->RunBrowserMain(std::move(main_function_params));
+    web_test_runner_.reset();
+    // Returning 0 to indicate that we have replaced BrowserMain() and the
+    // caller should not call BrowserMain() itself. Web tests do not ever
+    // return an error.
+    return 0;
+  }
+#endif
+
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+  // On Android and iOS, we defer to the system message loop when the stack
+  // unwinds. So here we only create (and leak) a BrowserMainRunner. The
+  // shutdown of BrowserMainRunner doesn't happen in Chrome Android/iOS and
+  // doesn't work properly on Android/iOS at all.
   std::unique_ptr<BrowserMainRunner> main_runner = BrowserMainRunner::Create();
   // In browser tests, the |main_function_params| contains a |ui_task| which
   // will execute the testing. The task will be executed synchronously inside
@@ -264,35 +358,7 @@ absl::variant<int, MainFunctionParams> ShellMainDelegate::RunProcess(
   // the system message loop for ContentShell, and we're already done thanks
   // to the |ui_task| for browser tests.
   return 0;
-#elif BUILDFLAG(IS_IOS)
-  // On iOS, we need to create the UIApplication which owns the main event
-  // loop.
-  std::unique_ptr<BrowserMainRunner> main_runner = BrowserMainRunner::Create();
-  // In browser tests, the |main_function_params| contains a |ui_task| which
-  // will execute the testing. The task will be executed synchronously inside
-  // Initialize() so we don't depend on the BrowserMainRunner being Run().
-  int initialize_exit_code =
-      main_runner->Initialize(std::move(main_function_params));
-  DCHECK_LT(initialize_exit_code, 0)
-      << "BrowserMainRunner::Initialize failed in ShellMainDelegate";
-
-  RunShellApplication(main_function_params.argc, main_function_params.argv);
-
-  // Return 0 as BrowserMain() should not be called after this, bounce up to
-  // the system message loop for ContentShell, and we're already done thanks
-  // to the |ui_task| for browser tests.
-  return 0;
 #else
-  if (switches::IsRunWebTestsSwitchPresent()) {
-    // Web tests implement their own BrowserMain() replacement.
-    web_test_runner_->RunBrowserMain(std::move(main_function_params));
-    web_test_runner_.reset();
-    // Returning 0 to indicate that we have replaced BrowserMain() and the
-    // caller should not call BrowserMain() itself. Web tests do not ever
-    // return an error.
-    return 0;
-  }
-
   // On non-Android, we can return the |main_function_params| back and have the
   // caller run BrowserMain() normally.
   return std::move(main_function_params);
@@ -339,7 +405,7 @@ void ShellMainDelegate::InitializeResourceBundle() {
     global_descriptors->Set(kShellPakDescriptor, pak_fd, pak_region);
   }
   DCHECK_GE(pak_fd, 0);
-  // TODO(crbug.com/330930): A better way to prevent fdsan error from a double
+  // TODO(crbug.com/40346051): A better way to prevent fdsan error from a double
   // close is to refactor GlobalDescriptors.{Get,MaybeGet} to return
   // "const base::File&" rather than fd itself.
   base::File android_pak_file(pak_fd);
@@ -358,19 +424,18 @@ void ShellMainDelegate::InitializeResourceBundle() {
 #endif
 }
 
-absl::optional<int> ShellMainDelegate::PreBrowserMain() {
-  absl::optional<int> exit_code =
-      content::ContentMainDelegate::PreBrowserMain();
+std::optional<int> ShellMainDelegate::PreBrowserMain() {
+  std::optional<int> exit_code = content::ContentMainDelegate::PreBrowserMain();
   if (exit_code.has_value())
     return exit_code;
 
 #if BUILDFLAG(IS_MAC)
   RegisterShellCrApp();
 #endif
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<int> ShellMainDelegate::PostEarlyInitialization(
+std::optional<int> ShellMainDelegate::PostEarlyInitialization(
     InvokedIn invoked_in) {
   if (!ShouldCreateFeatureList(invoked_in)) {
     // Apply field trial testing configuration since content did not.
@@ -379,7 +444,30 @@ absl::optional<int> ShellMainDelegate::PostEarlyInitialization(
   if (!ShouldInitializeMojo(invoked_in)) {
     InitializeMojoCore();
   }
-  return absl::nullopt;
+
+  const std::string process_type =
+      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+          switches::kProcessType);
+
+  // ShellMainDelegate has GWP-ASan as well as Profiling Client disabled.
+  // Consequently, we provide no parameters for these two. The memory_system
+  // includes the PoissonAllocationSampler dynamically only if the Profiling
+  // Client is enabled. However, we are not sure if this is the only user of
+  // PoissonAllocationSampler in the ContentShell. Therefore, enforce inclusion
+  // at the moment.
+  //
+  // TODO(crbug.com/40062835): Clarify which users of
+  // PoissonAllocationSampler we have in the ContentShell. Do we really need to
+  // enforce it?
+  memory_system::Initializer()
+      .SetDispatcherParameters(memory_system::DispatcherParameters::
+                                   PoissonAllocationSamplerInclusion::kEnforce,
+                               memory_system::DispatcherParameters::
+                                   AllocationTraceRecorderInclusion::kIgnore,
+                               process_type)
+      .Initialize(memory_system_);
+
+  return std::nullopt;
 }
 
 ContentClient* ShellMainDelegate::CreateContentClient() {
@@ -410,7 +498,8 @@ ContentRendererClient* ShellMainDelegate::CreateContentRendererClient() {
     return renderer_client_.get();
   }
 #endif
-  renderer_client_ = std::make_unique<ShellContentRendererClient>();
+  renderer_client_ =
+      std::make_unique<ShellContentRendererClient>(is_content_browsertests_);
   return renderer_client_.get();
 }
 

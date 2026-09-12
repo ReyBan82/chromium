@@ -8,9 +8,7 @@
 
 #include "base/values.h"
 
-namespace update_client {
-
-namespace protocol_request {
+namespace update_client::protocol_request {
 
 OS::OS() = default;
 OS::OS(OS&&) = default;
@@ -49,6 +47,4 @@ Request::Request(Request&&) = default;
 Request& Request::operator=(Request&&) = default;
 Request::~Request() = default;
 
-}  // namespace protocol_request
-
-}  // namespace update_client
+}  // namespace update_client::protocol_request

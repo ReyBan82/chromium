@@ -12,10 +12,6 @@
 #import "ios/web/public/js_messaging/script_message.h"
 #import "ios/web/web_state/web_state_impl.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace {
 const char kScriptName[] = "favicon";
 const char kEventListenersScriptName[] = "favicon_event_listeners";
@@ -39,12 +35,11 @@ FaviconJavaScriptFeature::FaviconJavaScriptFeature()
                FeatureScript::InjectionTime::kDocumentEnd,
                FeatureScript::TargetFrames::kMainFrame,
                FeatureScript::ReinjectionBehavior::
-                   kReinjectOnDocumentRecreation)},
-          {web::java_script_features::GetCommonJavaScriptFeature()}) {}
+                   kReinjectOnDocumentRecreation)}) {}
 
 FaviconJavaScriptFeature::~FaviconJavaScriptFeature() {}
 
-absl::optional<std::string>
+std::optional<std::string>
 FaviconJavaScriptFeature::GetScriptMessageHandlerName() const {
   return kFaviconScriptHandlerName;
 }
@@ -54,15 +49,17 @@ void FaviconJavaScriptFeature::ScriptMessageReceived(
     const web::ScriptMessage& message) {
   DCHECK(message.is_main_frame());
 
-  if (!message.body() || !message.body()->is_list() || !message.request_url()) {
+  if (!message.legacy_body() || !message.legacy_body()->is_list() ||
+      !message.request_url()) {
     return;
   }
 
   const GURL url = message.request_url().value();
 
   std::vector<FaviconURL> urls;
-  if (!ExtractFaviconURL(message.body()->GetList(), url, &urls))
+  if (!ExtractFaviconURL(message.legacy_body()->GetList(), url, &urls)) {
     return;
+  }
 
   if (!urls.empty()) {
     WebStateImpl::FromWebState(web_state)->OnFaviconUrlUpdated(urls);

@@ -1,5 +1,5 @@
 This is a testharness.js-based test.
-FAIL audio exchange with transform promise_test: Unhandled rejection with value: object "ReferenceError: RTCRtpScriptTransform is not defined"
-FAIL video exchange with transform promise_test: Unhandled rejection with value: object "ReferenceError: RTCRtpScriptTransform is not defined"
+[FAIL] video metadata: captureTime
+  assert_equals: expected "number" but got "undefined"
 Harness: the test ran to completion.
 

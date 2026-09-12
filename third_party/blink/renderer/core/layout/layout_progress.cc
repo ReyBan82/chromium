@@ -34,26 +34,24 @@ constexpr base::TimeDelta kAnimationDuration = kAnimationInterval * 20;
 
 }  // namespace
 
-LayoutProgress::LayoutProgress(ContainerNode* node)
-    : LayoutBlockFlow(node),
+LayoutProgress::LayoutProgress(HTMLProgressElement& node)
+    : LayoutBlockFlow(&node),
       position_(HTMLProgressElement::kInvalidPosition),
       animating_(false),
       animation_timer_(
-          node->GetDocument().GetTaskRunner(TaskType::kInternalDefault),
+          node.GetDocument().GetTaskRunner(TaskType::kInternalDefault),
           this,
-          &LayoutProgress::AnimationTimerFired) {
-  DCHECK(IsA<HTMLProgressElement>(node));
-}
+          &LayoutProgress::AnimationTimerFired) {}
 
 LayoutProgress::~LayoutProgress() = default;
 
-void LayoutProgress::WillBeDestroyed() {
+void LayoutProgress::WillBeDestroyed(const ComputedStyle* style) {
   NOT_DESTROYED();
   if (animating_) {
     animation_timer_.Stop();
     animating_ = false;
   }
-  LayoutBlockFlow::WillBeDestroyed();
+  LayoutBlockFlow::WillBeDestroyed(style);
 }
 
 void LayoutProgress::UpdateFromElement() {

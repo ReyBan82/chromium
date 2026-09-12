@@ -33,11 +33,11 @@
 namespace blink {
 
 IconURL IconURL::DefaultFavicon(const KURL& document_url) {
-  DCHECK(document_url.ProtocolIsInHTTPFamily());
+  DCHECK(document_url.ProtocolIsInHttpFamily());
   KURL url;
   bool could_set_protocol = url.SetProtocol(document_url.Protocol());
   DCHECK(could_set_protocol);
-  url.SetHost(document_url.Host());
+  url.SetHost(document_url.Host().ToString());
   if (document_url.HasPort())
     url.SetPort(document_url.Port());
   url.SetPath("/favicon.ico");

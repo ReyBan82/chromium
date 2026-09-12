@@ -4,6 +4,8 @@
 
 #include "services/viz/public/cpp/compositing/shared_image_format_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 // static
@@ -11,33 +13,37 @@ viz::mojom::PlaneConfig
 EnumTraits<viz::mojom::PlaneConfig, viz::SharedImageFormat::PlaneConfig>::
     ToMojom(viz::SharedImageFormat::PlaneConfig plane_config) {
   switch (plane_config) {
+    case viz::SharedImageFormat::PlaneConfig::kY_U_V:
+      return viz::mojom::PlaneConfig::kY_U_V;
     case viz::SharedImageFormat::PlaneConfig::kY_V_U:
       return viz::mojom::PlaneConfig::kY_V_U;
     case viz::SharedImageFormat::PlaneConfig::kY_UV:
       return viz::mojom::PlaneConfig::kY_UV;
     case viz::SharedImageFormat::PlaneConfig::kY_UV_A:
       return viz::mojom::PlaneConfig::kY_UV_A;
+    case viz::SharedImageFormat::PlaneConfig::kY_U_V_A:
+      return viz::mojom::PlaneConfig::kY_U_V_A;
   }
   NOTREACHED();
-  return viz::mojom::PlaneConfig::kY_UV;
 }
 
 // static
-bool EnumTraits<viz::mojom::PlaneConfig, viz::SharedImageFormat::PlaneConfig>::
-    FromMojom(viz::mojom::PlaneConfig input,
-              viz::SharedImageFormat::PlaneConfig* out) {
+viz::SharedImageFormat::PlaneConfig
+EnumTraits<viz::mojom::PlaneConfig, viz::SharedImageFormat::PlaneConfig>::
+    FromMojom(viz::mojom::PlaneConfig input) {
   switch (input) {
+    case viz::mojom::PlaneConfig::kY_U_V:
+      return viz::SharedImageFormat::PlaneConfig::kY_U_V;
     case viz::mojom::PlaneConfig::kY_V_U:
-      *out = viz::SharedImageFormat::PlaneConfig::kY_V_U;
-      return true;
+      return viz::SharedImageFormat::PlaneConfig::kY_V_U;
     case viz::mojom::PlaneConfig::kY_UV:
-      *out = viz::SharedImageFormat::PlaneConfig::kY_UV;
-      return true;
+      return viz::SharedImageFormat::PlaneConfig::kY_UV;
     case viz::mojom::PlaneConfig::kY_UV_A:
-      *out = viz::SharedImageFormat::PlaneConfig::kY_UV_A;
-      return true;
+      return viz::SharedImageFormat::PlaneConfig::kY_UV_A;
+    case viz::mojom::PlaneConfig::kY_U_V_A:
+      return viz::SharedImageFormat::PlaneConfig::kY_U_V_A;
   }
-  return false;
+  NOTREACHED();
 }
 
 // static
@@ -47,21 +53,27 @@ EnumTraits<viz::mojom::Subsampling, viz::SharedImageFormat::Subsampling>::
   switch (subsampling) {
     case viz::SharedImageFormat::Subsampling::k420:
       return viz::mojom::Subsampling::k420;
+    case viz::SharedImageFormat::Subsampling::k422:
+      return viz::mojom::Subsampling::k422;
+    case viz::SharedImageFormat::Subsampling::k444:
+      return viz::mojom::Subsampling::k444;
   }
   NOTREACHED();
-  return viz::mojom::Subsampling::k420;
 }
 
 // static
-bool EnumTraits<viz::mojom::Subsampling, viz::SharedImageFormat::Subsampling>::
-    FromMojom(viz::mojom::Subsampling input,
-              viz::SharedImageFormat::Subsampling* out) {
+viz::SharedImageFormat::Subsampling
+EnumTraits<viz::mojom::Subsampling, viz::SharedImageFormat::Subsampling>::
+    FromMojom(viz::mojom::Subsampling input) {
   switch (input) {
     case viz::mojom::Subsampling::k420:
-      *out = viz::SharedImageFormat::Subsampling::k420;
-      return true;
+      return viz::SharedImageFormat::Subsampling::k420;
+    case viz::mojom::Subsampling::k422:
+      return viz::SharedImageFormat::Subsampling::k422;
+    case viz::mojom::Subsampling::k444:
+      return viz::SharedImageFormat::Subsampling::k444;
   }
-  return false;
+  NOTREACHED();
 }
 
 // static
@@ -79,29 +91,23 @@ EnumTraits<viz::mojom::ChannelFormat, viz::SharedImageFormat::ChannelFormat>::
       return viz::mojom::ChannelFormat::k16F;
   }
   NOTREACHED();
-  return viz::mojom::ChannelFormat::k8;
 }
 
 // static
-bool EnumTraits<viz::mojom::ChannelFormat,
-                viz::SharedImageFormat::ChannelFormat>::
-    FromMojom(viz::mojom::ChannelFormat input,
-              viz::SharedImageFormat::ChannelFormat* out) {
+viz::SharedImageFormat::ChannelFormat
+EnumTraits<viz::mojom::ChannelFormat, viz::SharedImageFormat::ChannelFormat>::
+    FromMojom(viz::mojom::ChannelFormat input) {
   switch (input) {
     case viz::mojom::ChannelFormat::k8:
-      *out = viz::SharedImageFormat::ChannelFormat::k8;
-      return true;
+      return viz::SharedImageFormat::ChannelFormat::k8;
     case viz::mojom::ChannelFormat::k10:
-      *out = viz::SharedImageFormat::ChannelFormat::k10;
-      return true;
+      return viz::SharedImageFormat::ChannelFormat::k10;
     case viz::mojom::ChannelFormat::k16:
-      *out = viz::SharedImageFormat::ChannelFormat::k16;
-      return true;
+      return viz::SharedImageFormat::ChannelFormat::k16;
     case viz::mojom::ChannelFormat::k16F:
-      *out = viz::SharedImageFormat::ChannelFormat::k16F;
-      return true;
+      return viz::SharedImageFormat::ChannelFormat::k16F;
   }
-  return false;
+  NOTREACHED();
 }
 
 // static
@@ -111,12 +117,18 @@ bool StructTraits<
     Read(viz::mojom::MultiplanarFormatDataView data,
          viz::SharedImageFormat::SharedImageFormatUnion::MultiplanarFormat*
              out) {
-  if (!data.ReadPlaneConfig(&out->plane_config))
+  if (!data.ReadPlaneConfig(&out->plane_config)) {
     return false;
-  if (!data.ReadSubsampling(&out->subsampling))
+  }
+  if (!data.ReadSubsampling(&out->subsampling)) {
     return false;
-  if (!data.ReadChannelFormat(&out->channel_format))
+  }
+  if (!data.ReadChannelFormat(&out->channel_format)) {
     return false;
+  }
+#if BUILDFLAG(IS_OZONE) || BUILDFLAG(IS_ANDROID)
+  out->prefers_external_sampler = data.prefers_external_sampler();
+#endif
 
   return true;
 }
@@ -126,14 +138,16 @@ bool UnionTraits<
     viz::SharedImageFormat>::Read(viz::mojom::SharedImageFormatDataView data,
                                   viz::SharedImageFormat* out) {
   switch (data.tag()) {
-    case viz::mojom::SharedImageFormatDataView::Tag::kResourceFormat:
-      if (!data.ReadResourceFormat(&out->format_.resource_format))
+    case viz::mojom::SharedImageFormatDataView::Tag::kSingleplanarFormat:
+      if (!data.ReadSingleplanarFormat(&out->format_.singleplanar_format)) {
         return false;
+      }
       out->plane_type_ = viz::SharedImageFormat::PlaneType::kSinglePlane;
       return true;
     case viz::mojom::SharedImageFormatDataView::Tag::kMultiplanarFormat:
-      if (!data.ReadMultiplanarFormat(&out->format_.multiplanar_format))
+      if (!data.ReadMultiplanarFormat(&out->format_.multiplanar_format)) {
         return false;
+      }
       out->plane_type_ = viz::SharedImageFormat::PlaneType::kMultiPlane;
       return true;
   }

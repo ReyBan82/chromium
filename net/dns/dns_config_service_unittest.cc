@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/cancelable_callback.h"
@@ -13,7 +14,6 @@
 #include "base/location.h"
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
@@ -97,7 +97,7 @@ class DnsConfigServiceTest : public TestWithTaskEnvironment {
   DnsConfig MakeConfig(unsigned seed) {
     DnsConfig config;
     config.nameservers.emplace_back(IPAddress(1, 2, 3, 4), seed & 0xFFFF);
-    EXPECT_TRUE(config.IsValid());
+    EXPECT_FALSE(config.nameservers.empty());
     return config;
   }
 
@@ -129,7 +129,7 @@ class DnsConfigServiceTest : public TestWithTaskEnvironment {
   void SetUp() override {
     service_ = std::make_unique<TestDnsConfigService>();
     SetUpService(*service_);
-    EXPECT_FALSE(last_config_.IsValid());
+    EXPECT_EQ(last_config_, DnsConfig());
   }
 
   void TearDown() override {
@@ -172,11 +172,11 @@ MockHostsParserFactory::GetFactory() {
       });
 }
 
-DnsHosts::value_type CreateHostsEntry(base::StringPiece name,
+DnsHosts::value_type CreateHostsEntry(std::string_view name,
                                       AddressFamily family,
                                       IPAddress address) {
-  DnsHostsKey key = std::make_pair(std::string(name), family);
-  return std::make_pair(std::move(key), address);
+  DnsHostsKey key = std::pair(std::string(name), family);
+  return std::pair(std::move(key), address);
 }
 
 }  // namespace
@@ -195,7 +195,7 @@ TEST_F(DnsConfigServiceTest, FirstConfig) {
 TEST_F(DnsConfigServiceTest, Timeout) {
   DnsConfig config = MakeConfig(1);
   config.hosts = MakeHosts(1);
-  ASSERT_TRUE(config.IsValid());
+  ASSERT_FALSE(config.nameservers.empty());
 
   service_->OnConfigRead(config);
   service_->OnHostsRead(config.hosts);

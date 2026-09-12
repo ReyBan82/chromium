@@ -4,9 +4,12 @@
 
 #include "third_party/blink/renderer/core/html/parser/background_html_scanner.h"
 
+#include "base/metrics/histogram_macros.h"
 #include "base/task/sequenced_task_runner.h"
 #include "third_party/blink/public/common/features.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/scriptable_document_parser.h"
+#include "third_party/blink/renderer/core/execution_context/agent.h"
 #include "third_party/blink/renderer/core/html/parser/html_preload_scanner.h"
 #include "third_party/blink/renderer/core/html/parser/html_token.h"
 #include "third_party/blink/renderer/core/html/parser/html_tokenizer.h"
@@ -39,6 +42,11 @@ enum class CompileStrategy {
   kEager,
 };
 
+void EmitHTMLInlineCompilationHistograms(bool script_streamer_timed_out) {
+  UMA_HISTOGRAM_BOOLEAN("WebCore.Scripts.InlineStreamerTimedOut",
+                        script_streamer_timed_out);
+}
+
 CompileOptions GetCompileOptions(bool first_script_in_scan) {
   static const base::FeatureParam<CompileStrategy>::Option
       kCompileStrategyOptions[] = {
@@ -47,11 +55,11 @@ CompileOptions GetCompileOptions(bool first_script_in_scan) {
           {CompileStrategy::kEager, "eager"},
       };
 
-  static const base::FeatureParam<CompileStrategy> kCompileStrategyParam{
-      &features::kPrecompileInlineScripts, "compile-strategy",
-      CompileStrategy::kLazy, &kCompileStrategyOptions};
-
-  switch (kCompileStrategyParam.Get()) {
+  static const CompileStrategy strategy =
+      base::GetFieldTrialParamByFeatureAsEnum(
+          features::kPrecompileInlineScripts, "compile-strategy",
+          CompileStrategy::kLazy, kCompileStrategyOptions);
+  switch (strategy) {
     case CompileStrategy::kLazy:
       return CompileOptions::kNoCompileOptions;
     case CompileStrategy::kFirstScriptLazy:
@@ -64,7 +72,7 @@ CompileOptions GetCompileOptions(bool first_script_in_scan) {
 
 scoped_refptr<base::SequencedTaskRunner> GetCompileTaskRunner() {
   static const base::FeatureParam<bool> kCompileInParallelParam{
-      &features::kPrecompileInlineScripts, "compile-in-parallel", true};
+      &features::kPrecompileInlineScripts, "compile-in-parallel", false};
   // Returning a null task runner will result in posting to the worker pool for
   // each task.
   if (kCompileInParallelParam.Get()) {
@@ -88,7 +96,7 @@ bool ShouldPrecompileFrame(bool is_main_frame) {
     return false;
 
   static const base::FeatureParam<bool> kPrecompileMainFrameOnlyParam{
-      &features::kPrecompileInlineScripts, "precompile-main-frame-only", false};
+      &features::kPrecompileInlineScripts, "precompile-main-frame-only", true};
   // Cache the value to avoid parsing the param string more than once.
   static const bool kPrecompileMainFrameOnlyValue =
       kPrecompileMainFrameOnlyParam.Get();
@@ -98,17 +106,17 @@ bool ShouldPrecompileFrame(bool is_main_frame) {
 }  // namespace
 
 // static
-WTF::SequenceBound<BackgroundHTMLScanner> BackgroundHTMLScanner::Create(
+SequenceBound<BackgroundHTMLScanner> BackgroundHTMLScanner::Create(
     const HTMLParserOptions& options,
     ScriptableDocumentParser* parser) {
   TRACE_EVENT0("blink", "BackgroundHTMLScanner::Create");
   auto token_scanner = ScriptTokenScanner::Create(parser);
   if (!token_scanner)
-    return WTF::SequenceBound<BackgroundHTMLScanner>();
+    return SequenceBound<BackgroundHTMLScanner>();
   // The background scanner lives on one sequence, while the script streamers
   // work on a second sequence. This allows us to continue scanning the HTML
   // while scripts are compiling.
-  return WTF::SequenceBound<BackgroundHTMLScanner>(
+  return SequenceBound<BackgroundHTMLScanner>(
       worker_pool::CreateSequencedTaskRunner(
           {base::TaskPriority::USER_BLOCKING}),
       std::make_unique<HTMLTokenizer>(options), std::move(token_scanner));
@@ -151,7 +159,8 @@ BackgroundHTMLScanner::ScriptTokenScanner::ScriptTokenScanner(
     ScriptableDocumentParser* parser,
     scoped_refptr<base::SequencedTaskRunner> task_runner,
     wtf_size_t min_script_size)
-    : parser_(parser),
+    : isolate_(parser->GetDocument()->GetAgent().isolate()),
+      parser_(parser),
       task_runner_(std::move(task_runner)),
       min_script_size_(min_script_size) {}
 
@@ -160,10 +169,7 @@ void BackgroundHTMLScanner::ScriptTokenScanner::ScanToken(
   switch (token.GetType()) {
     case HTMLToken::kCharacter: {
       if (in_script_) {
-        if (token.IsAll8BitData())
-          script_builder_.Append(token.Data().AsString8());
-        else
-          script_builder_.Append(token.Data().AsString());
+        script_builder_.Append(token.Data().AsString());
       }
       return;
     }
@@ -188,25 +194,31 @@ void BackgroundHTMLScanner::ScriptTokenScanner::ScanToken(
         if (script_text.length() < min_script_size_) {
           return;
         }
-
+        static const base::FeatureParam<base::TimeDelta> kWaitTimeoutParam{
+            &features::kPrecompileInlineScripts, "inline-script-timeout",
+            base::Milliseconds(0)};
         auto streamer = base::MakeRefCounted<BackgroundInlineScriptStreamer>(
-            script_text, GetCompileOptions(first_script_in_scan_));
+            isolate_, script_text, GetCompileOptions(first_script_in_scan_),
+            kWaitTimeoutParam.Get());
         first_script_in_scan_ = false;
         auto parser_lock = parser_.Lock();
         if (!parser_lock || !streamer->CanStream())
           return;
 
         parser_lock->AddInlineScriptStreamer(script_text, streamer);
+
+        auto run_streamer_task = CrossThreadBindOnce(
+            [](scoped_refptr<BackgroundInlineScriptStreamer> streamer) {
+              streamer->Run();
+              EmitHTMLInlineCompilationHistograms(streamer->TimedOut());
+            },
+            streamer);
         if (task_runner_) {
-          PostCrossThreadTask(
-              *task_runner_, FROM_HERE,
-              CrossThreadBindOnce(&BackgroundInlineScriptStreamer::Run,
-                                  std::move(streamer)));
+          PostCrossThreadTask(*task_runner_, FROM_HERE,
+                              std::move(run_streamer_task));
         } else {
-          worker_pool::PostTask(
-              FROM_HERE, {base::TaskPriority::USER_BLOCKING},
-              CrossThreadBindOnce(&BackgroundInlineScriptStreamer::Run,
-                                  std::move(streamer)));
+          worker_pool::PostTask(FROM_HERE, {base::TaskPriority::USER_BLOCKING},
+                                std::move(run_streamer_task));
         }
       }
       return;

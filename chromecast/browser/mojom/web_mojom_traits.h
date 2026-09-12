@@ -13,11 +13,6 @@
   case InputType::x:           \
     return OutputType::x;
 
-#define CASE_TRANSLATE_MOJOM_ENUM(x) \
-  case InputType::x:                 \
-    *out = OutputType::x;            \
-    return true;
-
 namespace mojo {
 
 template <>
@@ -34,24 +29,20 @@ struct EnumTraits<chromecast::mojom::PageState, chromecast::PageState> {
       CASE_TRANSLATE_ENUM(ERROR);
     }
     NOTREACHED();
-    return chromecast::mojom::PageState::IDLE;
   }
 
-  static bool FromMojom(chromecast::mojom::PageState state,
-                        chromecast::PageState* out) {
+  static chromecast::PageState FromMojom(chromecast::mojom::PageState state) {
     using InputType = chromecast::mojom::PageState;
     using OutputType = chromecast::PageState;
     switch (state) {
-      CASE_TRANSLATE_MOJOM_ENUM(IDLE);
-      CASE_TRANSLATE_MOJOM_ENUM(LOADING);
-      CASE_TRANSLATE_MOJOM_ENUM(LOADED);
-      CASE_TRANSLATE_MOJOM_ENUM(CLOSED);
-      CASE_TRANSLATE_MOJOM_ENUM(DESTROYED);
-      CASE_TRANSLATE_MOJOM_ENUM(ERROR);
+      CASE_TRANSLATE_ENUM(IDLE);
+      CASE_TRANSLATE_ENUM(LOADING);
+      CASE_TRANSLATE_ENUM(LOADED);
+      CASE_TRANSLATE_ENUM(CLOSED);
+      CASE_TRANSLATE_ENUM(DESTROYED);
+      CASE_TRANSLATE_ENUM(ERROR);
     }
     NOTREACHED();
-    *out = chromecast::PageState::IDLE;
-    return false;
   }
 };
 }  // namespace mojo

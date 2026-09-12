@@ -6,22 +6,14 @@
 
 #include <utility>
 
-#include "chrome/browser/ash/settings/cros_settings.h"
+#include "base/check_deref.h"
 #include "chrome/browser/ui/ash/desks/desks_client.h"
-#include "components/policy/policy_constants.h"
 
 namespace policy {
 
 PreconfiguredDeskTemplatesExternalDataHandler::
-    PreconfiguredDeskTemplatesExternalDataHandler(
-        ash::CrosSettings* cros_settings,
-        DeviceLocalAccountPolicyService* policy_service)
-    : preconfigured_desk_templates_observer_(cros_settings,
-                                             policy_service,
-                                             key::kPreconfiguredDeskTemplates,
-                                             this) {
-  preconfigured_desk_templates_observer_.Init();
-}
+    PreconfiguredDeskTemplatesExternalDataHandler(PrefService* local_state)
+    : local_state_(CHECK_DEREF(local_state)) {}
 
 PreconfiguredDeskTemplatesExternalDataHandler::
     ~PreconfiguredDeskTemplatesExternalDataHandler() = default;
@@ -32,7 +24,8 @@ void PreconfiguredDeskTemplatesExternalDataHandler::OnExternalDataCleared(
   DesksClient* dc = DesksClient::Get();
   if (dc) {
     dc->RemovePolicyPreconfiguredTemplate(
-        CloudExternalDataPolicyHandler::GetAccountId(user_id));
+        CloudExternalDataPolicyObserver::GetAccountId(local_state_.get(),
+                                                      user_id));
   }
 }
 
@@ -44,17 +37,18 @@ void PreconfiguredDeskTemplatesExternalDataHandler::OnExternalDataFetched(
   DesksClient* dc = DesksClient::Get();
   if (dc) {
     dc->SetPolicyPreconfiguredTemplate(
-        CloudExternalDataPolicyHandler::GetAccountId(user_id), std::move(data));
+        CloudExternalDataPolicyObserver::GetAccountId(local_state_.get(),
+                                                      user_id),
+        std::move(data));
   }
 }
 
 void PreconfiguredDeskTemplatesExternalDataHandler::RemoveForAccountId(
-    const AccountId& account_id,
-    base::OnceClosure on_removed) {
+    const AccountId& account_id) {
   DesksClient* dc = DesksClient::Get();
-  if (dc)
+  if (dc) {
     dc->RemovePolicyPreconfiguredTemplate(account_id);
-  std::move(on_removed).Run();
+  }
 }
 
 }  // namespace policy

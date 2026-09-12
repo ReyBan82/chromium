@@ -3,14 +3,15 @@
 // found in the LICENSE file.
 
 #include <memory>
-#include <set>
 #include <string>
 #include <utility>
 
 #include "base/base_switches.h"
 #include "base/check.h"
 #include "base/command_line.h"
+#include "base/containers/flat_set.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/process/process.h"
 #include "base/strings/strcat.h"
@@ -28,7 +29,7 @@
 namespace mojo::core::ipcz_driver {
 namespace {
 
-const char kParentHandle[] = "mojo-ipcz-test-parent-handle";
+constexpr char kParentHandle[] = "mojo-ipcz-test-parent-handle";
 
 const char kMojoIpczInProcessTestDriverName[] = "MojoIpczInProcess";
 const char kMojoIpczMultiprocessTestDriverName[] = "MojoIpczMultiprocess";
@@ -39,12 +40,13 @@ class MojoIpczInProcessTestNodeController
   class NodeThreadDelegate : public base::DelegateSimpleThread::Delegate {
    public:
     NodeThreadDelegate(std::unique_ptr<ipcz::test::TestNode> node,
-                       ipcz::test::TestDriver* driver)
-        : node_(std::move(node)), driver_(driver) {}
+                       ipcz::test::TestDriver* driver,
+                       const std::string& feature_set)
+        : node_(std::move(node)), driver_(driver), feature_set_(feature_set) {}
 
     // base::DelegateSimpleThread::Delegate:
     void Run() override {
-      node_->Initialize(driver_);
+      node_->Initialize(driver_, feature_set_);
       node_->NodeBody();
       node_.reset();
     }
@@ -52,13 +54,18 @@ class MojoIpczInProcessTestNodeController
    private:
     std::unique_ptr<ipcz::test::TestNode> node_;
     const raw_ptr<ipcz::test::TestDriver> driver_;
+    const std::string feature_set_;
   };
 
   MojoIpczInProcessTestNodeController(
+      ipcz::test::TestNode& source,
       const std::string& node_name,
       std::unique_ptr<ipcz::test::TestNode> test_node,
-      ipcz::test::TestDriver* test_driver)
-      : node_thread_delegate_(std::move(test_node), test_driver),
+      ipcz::test::TestDriver* test_driver,
+      const std::string& feature_set)
+      : source_(source),
+        is_broker_(test_node->GetDetails().is_broker),
+        node_thread_delegate_(std::move(test_node), test_driver, feature_set),
         node_thread_(&node_thread_delegate_, node_name) {
     node_thread_.StartAsync();
   }
@@ -71,11 +78,28 @@ class MojoIpczInProcessTestNodeController
     return true;
   }
 
+  ipcz::test::TransportPair CreateNewTransports() override {
+    ipcz::test::TransportPair transports;
+    if (is_broker_) {
+      transports = source_->CreateBrokerToBrokerTransports();
+    } else {
+      transports = source_->CreateTransports();
+    }
+
+    Transport::FromHandle(transports.ours)
+        ->set_remote_process(base::Process::Current());
+    Transport::FromHandle(transports.theirs)
+        ->set_remote_process(base::Process::Current());
+    return transports;
+  }
+
  private:
   ~MojoIpczInProcessTestNodeController() override {
     CHECK(node_thread_.HasBeenJoined());
   }
 
+  const raw_ref<ipcz::test::TestNode> source_;
+  const bool is_broker_;
   NodeThreadDelegate node_thread_delegate_;
   base::DelegateSimpleThread node_thread_;
 };
@@ -83,8 +107,13 @@ class MojoIpczInProcessTestNodeController
 class MojoIpczChildTestNodeController
     : public ipcz::test::TestNode::TestNodeController {
  public:
-  explicit MojoIpczChildTestNodeController(base::Process process)
-      : process_(std::move(process)) {}
+  MojoIpczChildTestNodeController(
+      ipcz::test::TestNode& source,
+      const ipcz::test::TestNodeDetails& child_details,
+      base::Process process)
+      : source_(source),
+        is_broker_(child_details.is_broker),
+        process_(std::move(process)) {}
 
   // ipcz::test::TestNode::TestNodeController:
   bool WaitForShutdown() override {
@@ -101,11 +130,26 @@ class MojoIpczChildTestNodeController
     return *result_;
   }
 
+  ipcz::test::TransportPair CreateNewTransports() override {
+    ipcz::test::TransportPair transports;
+    if (is_broker_) {
+      transports = source_->CreateBrokerToBrokerTransports();
+    } else {
+      transports = source_->CreateTransports();
+    }
+
+    Transport::FromHandle(transports.ours)
+        ->set_remote_process(process_.Duplicate());
+    return transports;
+  }
+
  private:
   ~MojoIpczChildTestNodeController() override { DCHECK(result_.has_value()); }
 
+  const raw_ref<ipcz::test::TestNode> source_;
+  const bool is_broker_;
   base::Process process_;
-  absl::optional<bool> result_;
+  std::optional<bool> result_;
 };
 
 // TestDriver implementation for the mojo-ipcz driver to have coverage in ipcz'
@@ -118,7 +162,9 @@ class MojoIpczTestDriver : public ipcz::test::TestDriver {
   };
   explicit MojoIpczTestDriver(Mode mode) : mode_(mode) {}
 
-  const IpczDriver& GetIpczDriver() const override { return kDriver; }
+  const IpczDriver& GetIpczDriver() const override {
+    return ::mojo::core::ipcz_driver::GetIpczDriver();
+  }
 
   const char* GetName() const override {
     if (mode_ == kInProcess) {
@@ -127,13 +173,19 @@ class MojoIpczTestDriver : public ipcz::test::TestDriver {
     return kMojoIpczMultiprocessTestDriverName;
   }
 
-  ipcz::test::TestNode::TransportPair CreateTransports(
+  ipcz::test::TransportPair CreateTransports(
       ipcz::test::TestNode& source,
       bool for_broker_target) const override {
     std::pair<scoped_refptr<Transport>, scoped_refptr<Transport>> transports;
     transports = Transport::CreatePair(
         Transport::kBroker,
         for_broker_target ? Transport::kBroker : Transport::kNonBroker);
+    if (for_broker_target) {
+      // Cooperating broker test nodes explicitly trust each other so that
+      // each end may convey broker-destined transports to the other.
+      transports.first->set_is_peer_trusted(true);
+      transports.second->set_is_peer_trusted(true);
+    }
     return {
         .ours = Transport::ReleaseAsHandle(std::move(transports.first)),
         .theirs = Transport::ReleaseAsHandle(std::move(transports.second)),
@@ -143,13 +195,14 @@ class MojoIpczTestDriver : public ipcz::test::TestDriver {
   ipcz::Ref<ipcz::test::TestNode::TestNodeController> SpawnTestNode(
       ipcz::test::TestNode& source,
       const ipcz::test::TestNodeDetails& details,
+      const std::string& feature_set,
       IpczDriverHandle our_transport,
       IpczDriverHandle their_transport) override {
     if (mode_ == kInProcess) {
-      return SpawnTestNodeThread(source, details, our_transport,
+      return SpawnTestNodeThread(source, details, feature_set, our_transport,
                                  their_transport);
     }
-    return SpawnTestNodeProcess(source, details, our_transport,
+    return SpawnTestNodeProcess(source, details, feature_set, our_transport,
                                 their_transport);
   }
 
@@ -178,16 +231,21 @@ class MojoIpczTestDriver : public ipcz::test::TestDriver {
     }
 #endif  // BUILDFLAG(IS_WIN)
     const bool is_broker = parent_process.IsValid();
-    return Transport::ReleaseAsHandle(Transport::Create(
+    scoped_refptr<Transport> transport = Transport::Create(
         {.source = is_broker ? Transport::kBroker : Transport::kNonBroker,
          .destination = Transport::kBroker},
-        std::move(endpoint), std::move(parent_process)));
+        std::move(endpoint), std::move(parent_process));
+    if (is_broker) {
+      transport->set_is_peer_trusted(true);
+    }
+    return Transport::ReleaseAsHandle(std::move(transport));
   }
 
  private:
   ipcz::Ref<ipcz::test::TestNode::TestNodeController> SpawnTestNodeThread(
       ipcz::test::TestNode& source,
       const ipcz::test::TestNodeDetails& details,
+      const std::string& feature_set,
       IpczDriverHandle our_transport,
       IpczDriverHandle their_transport) {
     Transport::FromHandle(our_transport)
@@ -199,32 +257,36 @@ class MojoIpczTestDriver : public ipcz::test::TestDriver {
     std::unique_ptr<ipcz::test::TestNode> node = details.factory();
     node->SetTransport(their_transport);
     return ipcz::MakeRefCounted<MojoIpczInProcessTestNodeController>(
-        std::string(details.name.begin(), details.name.end()), std::move(node),
-        this);
+        source, std::string(details.name.begin(), details.name.end()),
+        std::move(node), this, feature_set);
   }
 
   ipcz::Ref<ipcz::test::TestNode::TestNodeController> SpawnTestNodeProcess(
       ipcz::test::TestNode& source,
       const ipcz::test::TestNodeDetails& details,
+      const std::string& feature_set,
       IpczDriverHandle our_transport,
       IpczDriverHandle their_transport) {
-    const std::string test_child_main = base::StrCat(
-        {details.name.data(), "/", kMojoIpczMultiprocessTestDriverName});
+    const std::string test_child_main =
+        base::StrCat({details.name.data(), "/",
+                      kMojoIpczMultiprocessTestDriverName, "_", feature_set});
     base::CommandLine command_line(
         base::GetMultiProcessTestChildBaseCommandLine().GetProgram());
 
-    std::set<std::string> uninherited_args;
-    uninherited_args.insert(PlatformChannel::kHandleSwitch);
-    uninherited_args.insert(kParentHandle);
-    uninherited_args.insert(switches::kTestChildProcess);
+    const auto kUninheritedArgs = base::flat_set<std::string_view>({
+        PlatformChannel::kHandleSwitch,
+        kParentHandle,
+        switches::kTestChildProcess,
+    });
 
     // Copy commandline switches from the parent process, except for the
     // multiprocess client name and mojo message pipe handle; this allows test
     // clients to spawn other test clients.
     for (const auto& entry :
          base::CommandLine::ForCurrentProcess()->GetSwitches()) {
-      if (uninherited_args.find(entry.first) == uninherited_args.end())
+      if (!kUninheritedArgs.contains(entry.first)) {
         command_line.AppendSwitchNative(entry.first, entry.second);
+      }
     }
 
     base::LaunchOptions options;
@@ -259,7 +321,7 @@ class MojoIpczTestDriver : public ipcz::test::TestDriver {
     endpoint.ProcessLaunchAttempted();
     Transport::FromHandle(our_transport)->set_remote_process(child.Duplicate());
     return ipcz::MakeRefCounted<MojoIpczChildTestNodeController>(
-        std::move(child));
+        source, details, std::move(child));
   }
 
   const Mode mode_;

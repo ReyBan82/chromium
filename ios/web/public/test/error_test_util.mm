@@ -4,23 +4,26 @@
 
 #import "ios/web/public/test/error_test_util.h"
 
+#import "base/ios/ios_util.h"
 #import "base/strings/stringprintf.h"
 #import "base/strings/sys_string_conversions.h"
 #import "base/strings/utf_string_conversions.h"
 #import "ios/net/protocol_handler_util.h"
 #import "ios/web/public/web_state.h"
-#import "ios/web/web_view/error_translation_util.h"
+#import "ios/web/util/error_translation_util.h"
 #import "net/base/net_errors.h"
 #import "url/gurl.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace web {
 namespace testing {
 
 NSError* CreateConnectionLostError() {
+  if (base::ios::IsRunningOnOrLater(26, 4, 0)) {
+    return CreateErrorWithUnderlyingErrorChain(
+        {{@"NSURLErrorDomain", NSURLErrorNetworkConnectionLost},
+         {@"NSPOSIXErrorDomain", 96},
+         {net::kNSErrorDomain, net::ERR_CONNECTION_CLOSED}});
+  }
   return CreateErrorWithUnderlyingErrorChain(
       {{@"NSURLErrorDomain", NSURLErrorNetworkConnectionLost},
        {@"kCFErrorDomainCFNetwork", kCFURLErrorNetworkConnectionLost},
@@ -33,8 +36,9 @@ NSError* CreateTestNetError(NSError* error) {
 
 NSError* CreateErrorWithUnderlyingErrorChain(
     const std::vector<std::pair<NSErrorDomain, NSInteger>>& domain_code_pairs) {
-  if (domain_code_pairs.empty())
+  if (domain_code_pairs.empty()) {
     return nil;
+  }
 
   NSError* error = nil;
   for (int i = domain_code_pairs.size() - 1; i >= 0; --i) {
@@ -58,8 +62,9 @@ std::string GetErrorText(WebState* web_state,
     error_text += base::StringPrintf(
         "{%s, %ld}", base::SysNSStringToUTF8(error.domain).c_str(), error.code);
     error = error.userInfo[NSUnderlyingErrorKey];
-    if (error)
+    if (error) {
       error_text += " => ";
+    }
   }
   error_text += "}";
 

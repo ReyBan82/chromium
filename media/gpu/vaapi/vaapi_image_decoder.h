@@ -13,6 +13,7 @@
 #include "base/containers/span.h"
 #include "base/functional/callback_forward.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/sequence_checker.h"
 #include "gpu/config/gpu_info.h"
 #include "third_party/skia/include/core/SkImageInfo.h"
 
@@ -50,6 +51,10 @@ enum class VaapiImageDecodeStatus : uint32_t {
   kInvalidState,
 };
 
+enum class ImageDecodeAcceleratorType {
+  kJpeg,
+};
+
 // This class abstracts the idea of VA-API format-specific decoders. It is the
 // responsibility of each subclass to initialize |vaapi_wrapper_| appropriately
 // for the purpose of performing hardware-accelerated image decodes of a
@@ -63,8 +68,9 @@ class VaapiImageDecoder {
 
   virtual ~VaapiImageDecoder();
 
-  // Initializes |vaapi_wrapper_| in kDecode mode with the
-  // appropriate VAAPI profile and |error_uma_cb| for error reporting.
+  // Initializes |vaapi_wrapper_| in kDecode mode with the appropriate VAAPI
+  // profile and |error_uma_cb| for error reporting. When the VaapiImageDecoder
+  // is already initialized, this is a no-op that returns true.
   virtual bool Initialize(const ReportErrorToUMACB& error_uma_cb);
 
   // Decodes a picture. It will fill VA-API parameters and call the
@@ -81,15 +87,11 @@ class VaapiImageDecoder {
   virtual const ScopedVASurface* GetScopedVASurface() const;
 
   // Returns the type of image supported by this decoder.
-  virtual gpu::ImageDecodeAcceleratorType GetType() const = 0;
+  virtual ImageDecodeAcceleratorType GetType() const = 0;
 
   // Returns the type of mapping needed to convert the NativePixmapDmaBuf
   // returned by ExportAsNativePixmapDmaBuf() from YUV to RGB.
   virtual SkYUVColorSpace GetYUVColorSpace() const = 0;
-
-  // Returns the image profile supported by this decoder.
-  virtual gpu::ImageDecodeAcceleratorSupportedProfile GetSupportedProfile()
-      const;
 
   // Exports the decoded data from the last Decode() call as a
   // gfx::NativePixmapDmaBuf. Returns nullptr on failure and sets *|status| to
@@ -101,9 +103,13 @@ class VaapiImageDecoder {
  protected:
   explicit VaapiImageDecoder(VAProfile va_profile);
 
-  ScopedVAContextAndSurface scoped_va_context_and_surface_;
+  SEQUENCE_CHECKER(decoder_sequence_checker_);
 
-  scoped_refptr<VaapiWrapper> vaapi_wrapper_;
+  ScopedVAContextAndSurface scoped_va_context_and_surface_
+      GUARDED_BY_CONTEXT(decoder_sequence_checker_);
+
+  scoped_refptr<VaapiWrapper> vaapi_wrapper_
+      GUARDED_BY_CONTEXT(decoder_sequence_checker_);
 
  private:
   // Submits an image to the VA-API by filling its parameters and calling on the
@@ -114,7 +120,7 @@ class VaapiImageDecoder {
       base::span<const uint8_t> encoded_image) = 0;
 
   // The VA profile used for the current image decoder.
-  const VAProfile va_profile_;
+  const VAProfile va_profile_ GUARDED_BY_CONTEXT(decoder_sequence_checker_);
 };
 
 }  // namespace media

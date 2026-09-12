@@ -6,18 +6,17 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/sequence_manager/test/fake_task.h"
-#include "base/task/sequence_manager/test/sequence_manager_for_test.h"
-#include "base/task/single_thread_task_runner.h"
-#include "base/test/task_environment.h"
 #include "base/time/time.h"
-#include "components/ukm/test_ukm_recorder.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/renderer/platform/scheduler/common/process_state.h"
 #include "third_party/blink/renderer/platform/scheduler/common/task_priority.h"
 #include "third_party/blink/renderer/platform/scheduler/test/fake_frame_scheduler.h"
 #include "third_party/blink/renderer/platform/scheduler/test/recording_task_time_observer.h"
+#include "third_party/blink/renderer/platform/scheduler/test/task_environment.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 
 using testing::ElementsAreArray;
 
@@ -55,8 +54,8 @@ int TimeTicksToIntMs(const base::TimeTicks& time) {
 
 void RecordTimelineTask(Vector<String>* timeline,
                         const base::TickClock* clock) {
-  timeline->push_back(String::Format("run RecordTimelineTask @ %d",
-                                     TimeTicksToIntMs(clock->NowTicks())));
+  timeline->push_back(Format("run RecordTimelineTask @ {}",
+                             TimeTicksToIntMs(clock->NowTicks())));
 }
 
 void AppendToVectorTestTask(Vector<String>* vector, String value) {
@@ -70,8 +69,8 @@ void AppendToVectorIdleTestTask(Vector<String>* vector,
 }
 
 void TimelineIdleTestTask(Vector<String>* timeline, base::TimeTicks deadline) {
-  timeline->push_back(String::Format("run TimelineIdleTestTask deadline %d",
-                                     TimeTicksToIntMs(deadline)));
+  timeline->push_back(Format("run TimelineIdleTestTask deadline {}",
+                             TimeTicksToIntMs(deadline)));
 }
 
 class WorkerThreadSchedulerForTest : public WorkerThreadScheduler {
@@ -91,9 +90,6 @@ class WorkerThreadSchedulerForTest : public WorkerThreadScheduler {
         clock_(clock_),
         timeline_(timeline) {}
 
-  using WorkerThreadScheduler::SetUkmRecorderForTest;
-  using WorkerThreadScheduler::SetUkmTaskSamplingRateForTest;
-
   void AddTaskTimeObserver(base::sequence_manager::TaskTimeObserver* observer) {
     GetHelper().AddTaskTimeObserver(observer);
   }
@@ -107,13 +103,17 @@ class WorkerThreadSchedulerForTest : public WorkerThreadScheduler {
     on_microtask_checkpoint_ = std::move(cb);
   }
 
+  scoped_refptr<base::SingleThreadTaskRunner> DefaultTaskRunner() {
+    return DefaultTaskQueue()->GetTaskRunnerWithDefaultTaskType();
+  }
+
  private:
   bool CanEnterLongIdlePeriod(
       base::TimeTicks now,
       base::TimeDelta* next_long_idle_period_delay_out) override {
     if (timeline_) {
       timeline_->push_back(
-          String::Format("CanEnterLongIdlePeriod @ %d", TimeTicksToIntMs(now)));
+          Format("CanEnterLongIdlePeriod @ {}", TimeTicksToIntMs(now)));
     }
     return WorkerThreadScheduler::CanEnterLongIdlePeriod(
         now, next_long_idle_period_delay_out);
@@ -121,8 +121,8 @@ class WorkerThreadSchedulerForTest : public WorkerThreadScheduler {
 
   void IsNotQuiescent() override {
     if (timeline_) {
-      timeline_->push_back(String::Format(
-          "IsNotQuiescent @ %d", TimeTicksToIntMs(clock_->NowTicks())));
+      timeline_->push_back(
+          Format("IsNotQuiescent @ {}", TimeTicksToIntMs(clock_->NowTicks())));
     }
     WorkerThreadScheduler::IsNotQuiescent();
   }
@@ -132,31 +132,51 @@ class WorkerThreadSchedulerForTest : public WorkerThreadScheduler {
       std::move(on_microtask_checkpoint_).Run();
   }
 
-  const base::TickClock* clock_;        // Not owned.
-  Vector<String>* timeline_;            // Not owned.
+  raw_ptr<const base::TickClock> clock_;  // Not owned.
+  raw_ptr<Vector<String>> timeline_;      // Not owned.
   base::OnceClosure on_microtask_checkpoint_;
+};
+
+class TaskEnvironmentWithWorkerThreadScheduler
+    : public base::test::TaskEnvironment {
+ public:
+  explicit TaskEnvironmentWithWorkerThreadScheduler(Vector<String>* timeline)
+      : base::test::TaskEnvironment(CreateTaskEnvironmentWithPriorities(
+            blink::scheduler::CreatePrioritySettings(),
+            SubclassCreatesDefaultTaskRunner{},
+            base::test::TaskEnvironment::TimeSource::MOCK_TIME,
+            base::test::TaskEnvironment::ThreadPoolExecutionMode::QUEUED)),
+        timeline_(timeline) {
+    scheduler_ = std::make_unique<WorkerThreadSchedulerForTest>(
+        sequence_manager(), GetMockTickClock(), timeline_);
+    scheduler_->Init();
+    scheduler_->AttachToCurrentThread();
+    DeferredInitFromSubclass(scheduler_->DefaultTaskQueue()->GetTaskQueue());
+  }
+
+  ~TaskEnvironmentWithWorkerThreadScheduler() override {
+    if (scheduler_) {
+      scheduler_->Shutdown();
+    }
+  }
+
+  WorkerThreadSchedulerForTest* GetThreadScheduler() {
+    return scheduler_.get();
+  }
+
+ private:
+  // Needs to be initialized immediately after |task_environment_|, specifically
+  // before |scheduler_|.
+  ScopedSaveStartTicks save_start_ticks_{NowTicks()};
+  std::unique_ptr<WorkerThreadSchedulerForTest> scheduler_;
+  raw_ptr<Vector<String>> timeline_;  // Not owned.
 };
 
 class WorkerThreadSchedulerTest : public testing::Test {
  public:
-  WorkerThreadSchedulerTest()
-      : task_environment_(
-            base::test::TaskEnvironment::TimeSource::MOCK_TIME,
-            base::test::TaskEnvironment::ThreadPoolExecutionMode::QUEUED),
-        sequence_manager_(
-            base::sequence_manager::SequenceManagerForTest::Create(
-                nullptr,
-                task_environment_.GetMainThreadTaskRunner(),
-                task_environment_.GetMockTickClock(),
-                base::sequence_manager::SequenceManager::Settings::Builder()
-                    .SetPrioritySettings(CreatePrioritySettings())
-                    .Build())),
-        scheduler_(new WorkerThreadSchedulerForTest(
-            sequence_manager_.get(),
-            task_environment_.GetMockTickClock(),
-            &timeline_)) {
-    scheduler_->Init();
-    scheduler_->AttachToCurrentThread();
+  WorkerThreadSchedulerTest() : task_environment_(&timeline_) {
+    scheduler_ = task_environment_.GetThreadScheduler();
+
     default_task_queue_ =
         scheduler_->CreateTaskQueue(base::sequence_manager::QueueName::TEST_TQ);
     default_task_runner_ =
@@ -174,13 +194,13 @@ class WorkerThreadSchedulerTest : public testing::Test {
   }
 
   void RunUntilIdle() {
-    timeline_.push_back(String::Format(
-        "RunUntilIdle begin @ %d",
+    timeline_.push_back(Format(
+        "RunUntilIdle begin @ {}",
         TimeTicksToIntMs(task_environment_.GetMockTickClock()->NowTicks())));
     // RunUntilIdle with auto-advancing for the mock clock.
     task_environment_.FastForwardUntilNoTasksRemain();
-    timeline_.push_back(String::Format(
-        "RunUntilIdle end @ %d",
+    timeline_.push_back(Format(
+        "RunUntilIdle end @ {}",
         TimeTicksToIntMs(task_environment_.GetMockTickClock()->NowTicks())));
   }
 
@@ -198,12 +218,12 @@ class WorkerThreadSchedulerTest : public testing::Test {
         case 'D':
           default_task_runner_->PostTask(
               FROM_HERE, base::BindOnce(&AppendToVectorTestTask, run_order,
-                                        String::FromUTF8(task)));
+                                        String::FromUtf8(task)));
           break;
         case 'I':
           idle_task_runner_->PostIdleTask(
               FROM_HERE, base::BindOnce(&AppendToVectorIdleTestTask, run_order,
-                                        String::FromUTF8(task)));
+                                        String::FromUtf8(task)));
           break;
         default:
           NOTREACHED();
@@ -212,18 +232,13 @@ class WorkerThreadSchedulerTest : public testing::Test {
   }
 
   static base::TimeDelta maximum_idle_period_duration() {
-    return IdleHelper::kMaximumIdlePeriod;
+    return IdleHelper::kMaximumIdlePeriodDuration;
   }
 
  protected:
-  base::test::TaskEnvironment task_environment_;
-  // Needs to be initialized immediately after |task_environment_|, specifically
-  // before |scheduler_|.
-  ScopedSaveStartTicks save_start_ticks_{task_environment_.NowTicks()};
-  std::unique_ptr<base::sequence_manager::SequenceManagerForTest>
-      sequence_manager_;
   Vector<String> timeline_;
-  std::unique_ptr<WorkerThreadSchedulerForTest> scheduler_;
+  TaskEnvironmentWithWorkerThreadScheduler task_environment_;
+  raw_ptr<WorkerThreadSchedulerForTest> scheduler_;
   scoped_refptr<NonMainThreadTaskQueue> default_task_queue_;
   scoped_refptr<base::SingleThreadTaskRunner> default_task_runner_;
   scoped_refptr<SingleThreadIdleTaskRunner> idle_task_runner_;
@@ -363,8 +378,8 @@ TEST_F(WorkerThreadSchedulerTest, TestPostIdleTaskAfterRunningUntilIdle) {
 void PostIdleTask(Vector<String>* timeline,
                   const base::TickClock* clock,
                   SingleThreadIdleTaskRunner* idle_task_runner) {
-  timeline->push_back(String::Format("run PostIdleTask @ %d",
-                                     TimeTicksToIntMs(clock->NowTicks())));
+  timeline->push_back(
+      Format("run PostIdleTask @ {}", TimeTicksToIntMs(clock->NowTicks())));
 
   idle_task_runner->PostIdleTask(
       FROM_HERE, base::BindOnce(&TimelineIdleTestTask, timeline));
@@ -434,11 +449,11 @@ TEST_F(WorkerThreadSchedulerTest, TestMicrotaskCheckpointTiming) {
   base::TimeTicks start_time = task_environment_.NowTicks();
   default_task_runner_->PostTask(
       FROM_HERE,
-      WTF::BindOnce(&base::test::TaskEnvironment::FastForwardBy,
-                    base::Unretained(&task_environment_), kTaskTime));
+      blink::BindOnce(&base::test::TaskEnvironment::FastForwardBy,
+                      base::Unretained(&task_environment_), kTaskTime));
   scheduler_->set_on_microtask_checkpoint(
-      WTF::BindOnce(&base::test::TaskEnvironment::FastForwardBy,
-                    base::Unretained(&task_environment_), kMicrotaskTime));
+      blink::BindOnce(&base::test::TaskEnvironment::FastForwardBy,
+                      base::Unretained(&task_environment_), kMicrotaskTime));
 
   RecordingTaskTimeObserver observer;
 
@@ -452,137 +467,6 @@ TEST_F(WorkerThreadSchedulerTest, TestMicrotaskCheckpointTiming) {
   EXPECT_EQ(start_time, observer.result().back().first);
   EXPECT_EQ(start_time + kTaskTime + kMicrotaskTime,
             observer.result().back().second);
-}
-
-namespace {
-
-class FrameSchedulerDelegateWithUkmSourceId : public FrameScheduler::Delegate {
- public:
-  FrameSchedulerDelegateWithUkmSourceId(ukm::SourceId source_id)
-      : source_id_(source_id) {}
-
-  ~FrameSchedulerDelegateWithUkmSourceId() override {}
-
-  ukm::UkmRecorder* GetUkmRecorder() override { return nullptr; }
-
-  ukm::SourceId GetUkmSourceId() override { return source_id_; }
-
-  void UpdateTaskTime(base::TimeDelta time) override {}
-
-  void UpdateBackForwardCacheDisablingFeatures(
-      uint64_t features_mask,
-      const BFCacheBlockingFeatureAndLocations&
-          non_sticky_features_and_js_locations,
-      const BFCacheBlockingFeatureAndLocations&
-          sticky_features_and_js_locations) override {}
-
-  const base::UnguessableToken& GetAgentClusterId() const override {
-    return base::UnguessableToken::Null();
-  }
-
- private:
-  ukm::SourceId source_id_;
-};
-
-}  // namespace
-
-class WorkerThreadSchedulerWithProxyTest : public testing::Test {
- public:
-  WorkerThreadSchedulerWithProxyTest()
-      : task_environment_(
-            base::test::TaskEnvironment::TimeSource::MOCK_TIME,
-            base::test::TaskEnvironment::ThreadPoolExecutionMode::QUEUED),
-        sequence_manager_(
-            base::sequence_manager::SequenceManagerForTest::Create(
-                nullptr,
-                task_environment_.GetMainThreadTaskRunner(),
-                task_environment_.GetMockTickClock(),
-                base::sequence_manager::SequenceManager::Settings::Builder()
-                    .SetPrioritySettings(CreatePrioritySettings())
-                    .Build())) {
-    frame_scheduler_delegate_ =
-        std::make_unique<FrameSchedulerDelegateWithUkmSourceId>(42);
-    frame_scheduler_ = FakeFrameScheduler::Builder()
-                           .SetIsPageVisible(false)
-                           .SetFrameType(FrameScheduler::FrameType::kSubframe)
-                           .SetIsCrossOriginToNearestMainFrame(true)
-                           .SetDelegate(frame_scheduler_delegate_.get())
-                           .Build();
-    frame_scheduler_->SetCrossOriginToNearestMainFrame(true);
-
-    worker_scheduler_proxy_ =
-        std::make_unique<WorkerSchedulerProxy>(frame_scheduler_.get());
-
-    scheduler_ = std::make_unique<WorkerThreadSchedulerForTest>(
-        sequence_manager_.get(), task_environment_.GetMockTickClock(),
-        &timeline_, worker_scheduler_proxy_.get());
-
-    task_environment_.FastForwardBy(base::Milliseconds(5));
-
-    scheduler_->Init();
-    scheduler_->AttachToCurrentThread();
-  }
-
-  WorkerThreadSchedulerWithProxyTest(
-      const WorkerThreadSchedulerWithProxyTest&) = delete;
-  WorkerThreadSchedulerWithProxyTest& operator=(
-      const WorkerThreadSchedulerWithProxyTest&) = delete;
-  ~WorkerThreadSchedulerWithProxyTest() override = default;
-
-  void TearDown() override {
-    task_environment_.FastForwardUntilNoTasksRemain();
-  }
-
- protected:
-  base::test::TaskEnvironment task_environment_;
-  std::unique_ptr<base::sequence_manager::SequenceManagerForTest>
-      sequence_manager_;
-  Vector<String> timeline_;
-  std::unique_ptr<FrameScheduler::Delegate> frame_scheduler_delegate_;
-  std::unique_ptr<FrameScheduler> frame_scheduler_;
-  std::unique_ptr<WorkerSchedulerProxy> worker_scheduler_proxy_;
-  std::unique_ptr<WorkerThreadSchedulerForTest> scheduler_;
-  scoped_refptr<base::SingleThreadTaskRunner> default_task_runner_;
-  scoped_refptr<SingleThreadIdleTaskRunner> idle_task_runner_;
-};
-
-TEST_F(WorkerThreadSchedulerWithProxyTest, UkmTaskRecording) {
-  internal::ProcessState::Get()->is_process_backgrounded = true;
-
-  std::unique_ptr<ukm::TestUkmRecorder> owned_ukm_recorder =
-      std::make_unique<ukm::TestUkmRecorder>();
-  ukm::TestUkmRecorder* ukm_recorder = owned_ukm_recorder.get();
-
-  scheduler_->SetUkmTaskSamplingRateForTest(1);
-  scheduler_->SetUkmRecorderForTest(std::move(owned_ukm_recorder));
-
-  base::sequence_manager::FakeTask task(
-      static_cast<int>(TaskType::kJavascriptTimerDelayedLowNesting));
-  base::sequence_manager::FakeTaskTiming task_timing(
-      base::TimeTicks() + base::Milliseconds(200),
-      base::TimeTicks() + base::Milliseconds(700),
-      base::ThreadTicks() + base::Milliseconds(250),
-      base::ThreadTicks() + base::Milliseconds(500));
-
-  scheduler_->OnTaskCompleted(nullptr, task, &task_timing, nullptr);
-
-  auto entries = ukm_recorder->GetEntriesByName("RendererSchedulerTask");
-
-  EXPECT_EQ(entries.size(), static_cast<size_t>(1));
-
-  ukm::TestUkmRecorder::ExpectEntryMetric(
-      entries[0], "ThreadType", static_cast<int>(ThreadType::kTestThread));
-  ukm::TestUkmRecorder::ExpectEntryMetric(entries[0], "RendererBackgrounded",
-                                          true);
-  ukm::TestUkmRecorder::ExpectEntryMetric(
-      entries[0], "TaskType",
-      static_cast<int>(TaskType::kJavascriptTimerDelayedLowNesting));
-  ukm::TestUkmRecorder::ExpectEntryMetric(
-      entries[0], "FrameStatus",
-      static_cast<int>(FrameStatus::kCrossOriginBackground));
-  ukm::TestUkmRecorder::ExpectEntryMetric(entries[0], "TaskDuration", 500000);
-  ukm::TestUkmRecorder::ExpectEntryMetric(entries[0], "TaskCPUDuration",
-                                          250000);
 }
 
 }  // namespace worker_thread_scheduler_unittest

@@ -9,18 +9,10 @@
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
 #include "base/task/thread_pool.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/platform_util_internal.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_window.h"
-#include "chrome/browser/ui/lacros/window_properties.h"
-#include "chromeos/ui/base/window_pin_type.h"
-#include "ui/aura/window.h"
-#endif
 
 using content::BrowserThread;
 
@@ -28,11 +20,11 @@ namespace platform_util {
 
 namespace {
 
-bool shell_operations_allowed = true;
-
 void VerifyAndOpenItemOnBlockingThread(const base::FilePath& path,
                                        OpenItemType type,
                                        OpenOperationCallback callback) {
+  internal::RunOpenItemThreadObserverForTesting();
+
   base::File target_item(path, base::File::FLAG_OPEN | base::File::FLAG_READ);
   if (!base::PathExists(path)) {
     if (!callback.is_null())
@@ -49,8 +41,9 @@ void VerifyAndOpenItemOnBlockingThread(const base::FilePath& path,
     return;
   }
 
-  if (shell_operations_allowed)
+  if (internal::AreShellOperationsAllowed()) {
     internal::PlatformOpenVerifiedItem(path, type);
+  }
   if (!callback.is_null())
     content::GetUIThreadTaskRunner({})->PostTask(
         FROM_HERE, base::BindOnce(std::move(callback), OPEN_SUCCEEDED));
@@ -58,19 +51,7 @@ void VerifyAndOpenItemOnBlockingThread(const base::FilePath& path,
 
 }  // namespace
 
-namespace internal {
-
-void DisableShellOperationsForTesting() {
-  shell_operations_allowed = false;
-}
-
-bool AreShellOperationsAllowed() {
-  return shell_operations_allowed;
-}
-
-}  // namespace internal
-
-void OpenItem(Profile* profile,
+void OpenItem(Profile*,
               const base::FilePath& full_path,
               OpenItemType item_type,
               OpenOperationCallback callback) {
@@ -80,26 +61,23 @@ void OpenItem(Profile* profile,
   // TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN because this doesn't need global
   // state and can hang shutdown without this trait as it may result in an
   // interactive dialog.
+  static constexpr base::TaskTraits kTraits = {
+      base::MayBlock(), base::TaskPriority::USER_BLOCKING,
+      base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN};
+#if BUILDFLAG(IS_WIN)
+  // ShellExecute() can marshal to shell extensions or out-of-process
+  // handlers (e.g., a hand-off via the Windows DDE protocol) that require
+  // the calling thread to be a COM Single-Threaded Apartment (STA).
+  base::ThreadPool::CreateCOMSTATaskRunner(kTraits)->PostTask(
+      FROM_HERE, base::BindOnce(&VerifyAndOpenItemOnBlockingThread, full_path,
+                                item_type, std::move(callback)));
+#else
   base::ThreadPool::PostTask(
-      FROM_HERE,
-      {base::MayBlock(), base::TaskPriority::USER_BLOCKING,
-       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
+      FROM_HERE, kTraits,
       base::BindOnce(&VerifyAndOpenItemOnBlockingThread, full_path, item_type,
                      std::move(callback)));
+#endif  // BUILDFLAG(IS_WIN)
 }
 
-bool IsBrowserLockedFullscreen(const Browser* browser) {
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  aura::Window* window = browser->window()->GetNativeWindow();
-  // |window| can be nullptr inside of unit tests.
-  if (!window)
-    return false;
-
-  return window->GetProperty(lacros::kWindowPinTypeKey) ==
-         chromeos::WindowPinType::kTrustedPinned;
-#else
-  return false;
-#endif
-}
 
 }  // namespace platform_util

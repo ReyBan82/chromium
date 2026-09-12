@@ -5,7 +5,10 @@
 #ifndef CONTENT_PUBLIC_TEST_CONTENT_BROWSER_TEST_CONTENT_BROWSER_CLIENT_H_
 #define CONTENT_PUBLIC_TEST_CONTENT_BROWSER_TEST_CONTENT_BROWSER_CLIENT_H_
 
+#include <string_view>
+
 #include "content/shell/browser/shell_content_browser_client.h"
+#include "media/mojo/mojom/speech_recognizer.mojom.h"
 
 namespace content {
 
@@ -19,7 +22,14 @@ class ContentBrowserTestContentBrowserClient
   ContentBrowserTestContentBrowserClient();
   ~ContentBrowserTestContentBrowserClient() override;
 
-  bool CreateThreadPool(base::StringPiece name) override;
+  void OnNetworkServiceCreated(
+      network::mojom::NetworkService* network_service) override;
+
+  media::mojom::AvailabilityStatus
+  GetOnDeviceSpeechRecognitionAvailabilityStatus(
+      BrowserContext* context,
+      const std::string& language,
+      media::mojom::SpeechRecognitionQuality quality) override;
 };
 
 }  // namespace content

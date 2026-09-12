@@ -4,13 +4,11 @@
 
 #include "chrome/browser/ash/policy/remote_commands/device_command_reset_euicc_job.h"
 
+#include "base/run_loop.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_future.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
-#include "chrome/browser/notifications/system_notification_helper.h"
 #include "chrome/test/base/chrome_ash_test_base.h"
-#include "chrome/test/base/testing_browser_process.h"
 #include "chromeos/ash/components/dbus/hermes/hermes_clients.h"
 #include "chromeos/ash/components/dbus/hermes/hermes_euicc_client.h"
 #include "chromeos/ash/components/dbus/hermes/hermes_manager_client.h"
@@ -18,10 +16,12 @@
 #include "chromeos/ash/components/dbus/shill/shill_manager_client.h"
 #include "chromeos/ash/components/network/network_handler.h"
 #include "chromeos/ash/components/network/network_handler_test_helper.h"
+#include "chromeos/ash/components/network/network_state_handler.h"
+#include "chromeos/ash/components/network/network_state_handler_observer.h"
 #include "components/prefs/testing_pref_service.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "ui/message_center/public/cpp/notification.h"
+#include "ui/message_center/message_center.h"
 
 namespace policy {
 
@@ -51,8 +51,9 @@ void VerifyEuiccProfileCount(size_t expected_count) {
   ash::HermesEuiccClient::Properties* euicc_properties =
       ash::HermesEuiccClient::Get()->GetProperties(
           dbus::ObjectPath(kTestEuiccPath));
-  EXPECT_EQ(expected_count,
-            euicc_properties->installed_carrier_profiles().value().size());
+  const std::vector<dbus::ObjectPath>& profile_paths =
+      euicc_properties->profiles().value();
+  EXPECT_EQ(expected_count, profile_paths.size());
 }
 
 void VerifyJobResult(const RemoteCommandJob& job,
@@ -61,6 +62,50 @@ void VerifyJobResult(const RemoteCommandJob& job,
   EXPECT_EQ(expected_status, job.status());
   VerifyEuiccProfileCount(expected_profile_count);
 }
+
+// Helper that waits until NetworkStateHandler has registered the expected
+// number of Shill cellular services for the test EUICC.
+//
+// Adding fake eSIM profiles asynchronously creates backing services in Shill.
+// We need to wait for these services to appear in NetworkStateHandler before
+// running the reset job, which requires them to be present to remove them.
+class ESimServiceListWaiter : public ash::NetworkStateHandlerObserver {
+ public:
+  explicit ESimServiceListWaiter(size_t expected_service_count)
+      : expected_service_count_(expected_service_count) {
+    observation_.Observe(ash::NetworkHandler::Get()->network_state_handler());
+  }
+
+  ESimServiceListWaiter(const ESimServiceListWaiter&) = delete;
+  ESimServiceListWaiter& operator=(const ESimServiceListWaiter&) = delete;
+
+  ~ESimServiceListWaiter() override = default;
+
+  void Wait() { run_loop_.Run(); }
+
+ private:
+  void NetworkListChanged() override {
+    ash::NetworkStateHandler::NetworkStateList networks;
+    ash::NetworkHandler::Get()->network_state_handler()->GetNetworkListByType(
+        ash::NetworkTypePattern::Cellular(),
+        /*configured_only=*/false,
+        /*visible_only=*/false, /*limit=*/0, &networks);
+
+    size_t service_count = 0;
+    for (const ash::NetworkState* network : networks) {
+      if (network->eid() == kTestEid && !network->IsNonShillCellularNetwork()) {
+        ++service_count;
+      }
+    }
+    if (service_count == expected_service_count_) {
+      run_loop_.Quit();
+    }
+  }
+
+  const size_t expected_service_count_;
+  base::RunLoop run_loop_;
+  ash::NetworkStateHandlerScopedObservation observation_{this};
+};
 
 }  // namespace
 
@@ -83,12 +128,20 @@ class DeviceCommandResetEuiccJobTest : public ChromeAshTestBase {
         dbus::ObjectPath(kTestEuiccPath), kTestEid,
         /*is_active=*/true, /*physical_slot=*/0);
 
+    ESimServiceListWaiter service_list_waiter(/*expected_service_count=*/2u);
     AddFakeESimProfile();
     AddFakeESimProfile();
-    // Wait for all pending Hermes and Shill change notifications to be handled
-    // so that new EUICC and profile states are reflected correctly.
-    base::RunLoop().RunUntilIdle();
+
+    // The reset needs both profile services in the network list before
+    // it can remove them.
+    service_list_waiter.Wait();
+
     VerifyEuiccProfileCount(/*expected_count=*/2u);
+  }
+
+  void TearDown() override {
+    helper_.reset();
+    ChromeAshTestBase::TearDown();
   }
 
  protected:
@@ -119,10 +172,6 @@ class DeviceCommandResetEuiccJobTest : public ChromeAshTestBase {
 };
 
 TEST_F(DeviceCommandResetEuiccJobTest, ResetEuicc) {
-  TestingBrowserProcess::GetGlobal()->SetSystemNotificationHelper(
-      std::make_unique<SystemNotificationHelper>());
-  NotificationDisplayServiceTester tester(/*profile=*/nullptr);
-
   std::unique_ptr<RemoteCommandJob> job = CreateResetEuiccJob(test_start_time_);
   base::test::TestFuture<void> job_finished_future;
   EXPECT_TRUE(job->Run(base::Time::Now(), base::TimeTicks::Now(),
@@ -133,9 +182,9 @@ TEST_F(DeviceCommandResetEuiccJobTest, ResetEuicc) {
 
   task_environment()->FastForwardBy(kNetworkListWaitTimeout);
   // Verify that the notification should be displayed.
-  EXPECT_TRUE(tester.GetNotification(
+  EXPECT_TRUE(message_center::MessageCenter::Get()->FindVisibleNotificationById(
       DeviceCommandResetEuiccJob::kResetEuiccNotificationId));
-  // Verfiy that appropriate metrics have been logged.
+  // Verify that appropriate metrics have been logged.
   histogram_tester_.ExpectTotalCount(kResetEuiccOperationResultHistogram, 1);
   histogram_tester_.ExpectBucketCount(
       kResetEuiccOperationResultHistogram,
@@ -147,9 +196,6 @@ TEST_F(DeviceCommandResetEuiccJobTest, ResetEuicc) {
 TEST_F(DeviceCommandResetEuiccJobTest, ResetEuiccFailure) {
   // Simulate a failure by removing the cellular device.
   ash::ShillManagerClient::Get()->GetTestInterface()->ClearDevices();
-  TestingBrowserProcess::GetGlobal()->SetSystemNotificationHelper(
-      std::make_unique<SystemNotificationHelper>());
-  NotificationDisplayServiceTester tester(/*profile=*/nullptr);
   base::test::TestFuture<void> job_finished_future;
 
   std::unique_ptr<RemoteCommandJob> job = CreateResetEuiccJob(test_start_time_);
@@ -160,9 +206,10 @@ TEST_F(DeviceCommandResetEuiccJobTest, ResetEuiccFailure) {
                   /*expected_profile_count=*/2u);
 
   // Verify that the notification was not displayed.
-  EXPECT_FALSE(tester.GetNotification(
-      DeviceCommandResetEuiccJob::kResetEuiccNotificationId));
-  // Verfiy that appropriate metrics have been logged.
+  EXPECT_FALSE(
+      message_center::MessageCenter::Get()->FindVisibleNotificationById(
+          DeviceCommandResetEuiccJob::kResetEuiccNotificationId));
+  // Verify that appropriate metrics have been logged.
   histogram_tester_.ExpectTotalCount(kResetEuiccOperationResultHistogram, 1);
   histogram_tester_.ExpectBucketCount(
       kResetEuiccOperationResultHistogram,

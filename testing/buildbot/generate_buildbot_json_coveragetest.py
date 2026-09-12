@@ -3,10 +3,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import coverage
 import io
 import sys
 import unittest
+
+# vpython-provided modules.
+import coverage  # pylint: disable=import-error
 
 
 class FakeStream(object):  # pylint: disable=useless-object-inheritance
@@ -16,14 +18,18 @@ class FakeStream(object):  # pylint: disable=useless-object-inheritance
   def flush(self):
     pass
 
+
 def main():
-  cov = coverage.coverage(include='*generate_buildbot_json.py')
+  cov = coverage.coverage(data_file=None, include='*generate_buildbot_json.py')
   cov.start()
+  # //testing/buildbot imports.
   # pylint: disable=import-outside-toplevel
   import generate_buildbot_json_unittest
+
   # pylint: enable=import-outside-toplevel
   suite = unittest.TestLoader().loadTestsFromModule(
-    generate_buildbot_json_unittest)
+    generate_buildbot_json_unittest
+  )
   unittest.TextTestRunner(stream=FakeStream()).run(suite)
   cov.stop()
   outf = io.StringIO()
@@ -33,6 +39,7 @@ def main():
     print('FATAL: Insufficient coverage (%.f%%)' % int(percentage))
     return 1
   return 0
+
 
 if __name__ == '__main__':
   sys.exit(main())

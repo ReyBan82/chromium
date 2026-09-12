@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "base/check_op.h"
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "chromecast/metrics/cast_event_builder.h"
 #include "net/base/ip_address.h"
@@ -205,9 +206,9 @@ class FakeCastEventBuilder : public CastEventBuilder {
   };
   Metadata metadata;
   LaunchFrom launch_from = FROM_UNKNOWN;
-  const ::metrics::CastLogsProto_CastEventProto* cast_event_proto;
+  raw_ptr<const ::metrics::CastLogsProto_CastEventProto> cast_event_proto;
 };
 
 }  // namespace chromecast
 
-#endif  // CHROMECAST_INTERNAL_METRICS_MOCK_CAST_EVENT_BUILDER_H_
+#endif  // CHROMECAST_METRICS_MOCK_CAST_EVENT_BUILDER_H_

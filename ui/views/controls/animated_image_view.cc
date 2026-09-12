@@ -38,22 +38,24 @@ void AnimatedImageView::SetAnimatedImage(
     return;
   }
 
-  gfx::Size preferred_size(GetPreferredSize());
+  gfx::Size preferred_size(GetPreferredSize({}));
   animated_image_ = std::move(animated_image);
 
   // Stop the animation to reset it.
   Stop();
 
-  if (preferred_size != GetPreferredSize())
+  if (preferred_size != GetPreferredSize({})) {
     PreferredSizeChanged();
+  }
   SchedulePaint();
 }
 
 void AnimatedImageView::Play(
-    absl::optional<lottie::Animation::PlaybackConfig> playback_config) {
+    std::optional<lottie::Animation::PlaybackConfig> playback_config) {
   DCHECK(animated_image_);
-  if (state_ == State::kPlaying)
+  if (state_ == State::kPlaying) {
     return;
+  }
 
   state_ = State::kPlaying;
 
@@ -64,17 +66,22 @@ void AnimatedImageView::Play(
   set_check_active_duration(playback_config->style !=
                             lottie::Animation::Style::kLoop);
 
-  SetCompositorFromWidget();
-
-  animated_image_->Start(std::move(playback_config));
+  if (GetWidget()) {
+    DoPlay(std::move(*playback_config));
+  } else {
+    // Playback will start in `AddedToWidget`.
+    playback_config_ = std::make_unique<lottie::Animation::PlaybackConfig>(
+        std::move(*playback_config));
+  }
 }
 
 void AnimatedImageView::Stop() {
-  if (state_ == State::kStopped)
+  if (state_ == State::kStopped) {
     return;
+  }
 
   DCHECK(animated_image_);
-  ClearCurrentCompositor();
+  compositor_observation_.Reset();
 
   animated_image_->Stop();
   state_ = State::kStopped;
@@ -87,8 +94,9 @@ gfx::Size AnimatedImageView::GetImageSize() const {
 
 void AnimatedImageView::OnPaint(gfx::Canvas* canvas) {
   View::OnPaint(canvas);
-  if (!animated_image_)
+  if (!animated_image_) {
     return;
+  }
   canvas->Save();
 
   gfx::Vector2d translation = GetImageBounds().origin().OffsetFromOrigin();
@@ -109,19 +117,27 @@ void AnimatedImageView::OnPaint(gfx::Canvas* canvas) {
 void AnimatedImageView::NativeViewHierarchyChanged() {
   ui::Compositor* compositor = GetWidget()->GetCompositor();
   DCHECK(compositor);
-  if (compositor_ != compositor) {
-    ClearCurrentCompositor();
+  if (!compositor_observation_.IsObservingSource(compositor)) {
+    compositor_observation_.Reset();
 
     // Restore the Play() state with the new compositor.
-    if (state_ == State::kPlaying)
+    if (state_ == State::kPlaying) {
       SetCompositorFromWidget();
+    }
+  }
+}
+
+void AnimatedImageView::AddedToWidget() {
+  if (state_ == State::kPlaying && playback_config_) {
+    DoPlay(std::move(*playback_config_));
+    playback_config_.reset();
   }
 }
 
 void AnimatedImageView::RemovedFromWidget() {
-  if (compositor_) {
+  if (compositor_observation_.IsObserving()) {
     Stop();
-    ClearCurrentCompositor();
+    compositor_observation_.Reset();
   }
 }
 
@@ -133,30 +149,28 @@ void AnimatedImageView::OnAnimationStep(base::TimeTicks timestamp) {
 }
 
 void AnimatedImageView::OnCompositingShuttingDown(ui::Compositor* compositor) {
-  if (compositor_ == compositor) {
+  if (compositor_observation_.IsObservingSource(compositor)) {
     Stop();
-    ClearCurrentCompositor();
+    compositor_observation_.Reset();
   }
+}
+
+void AnimatedImageView::DoPlay(
+    lottie::Animation::PlaybackConfig playback_config) {
+  SetCompositorFromWidget();
+  animated_image_->Start(std::move(playback_config));
 }
 
 void AnimatedImageView::SetCompositorFromWidget() {
-  DCHECK(!compositor_);
+  DCHECK(!compositor_observation_.IsObserving());
   auto* widget = GetWidget();
   DCHECK(widget);
-  compositor_ = widget->GetCompositor();
-  DCHECK(!compositor_->HasAnimationObserver(this));
-  compositor_->AddAnimationObserver(this);
+  ui::Compositor* compositor = widget->GetCompositor();
+  DCHECK(!compositor->HasAnimationObserver(this));
+  compositor_observation_.Observe(compositor);
 }
 
-void AnimatedImageView::ClearCurrentCompositor() {
-  if (compositor_) {
-    DCHECK(compositor_->HasAnimationObserver(this));
-    compositor_->RemoveAnimationObserver(this);
-    compositor_ = nullptr;
-  }
-}
-
-BEGIN_METADATA(AnimatedImageView, ImageViewBase)
+BEGIN_METADATA(AnimatedImageView)
 END_METADATA
 
 }  // namespace views

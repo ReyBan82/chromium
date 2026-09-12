@@ -13,3 +13,9 @@ Document
 ++++++Text Name='<newline>    '
 ++++++Text Name='<newline>    '
 ++++++Text Name='<newline>  '
+++++Image
+++++++Group
+++++++++Text Name='Line breaking content in a fallback'
+++++++Group
+++++++++Text Name='This is another paragraph in fallback'
+

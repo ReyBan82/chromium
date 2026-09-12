@@ -33,7 +33,7 @@ std::unique_ptr<SetupSingleton> SetupSingleton::Acquire(
   base::win::ScopedHandle setup_mutex(::CreateMutex(
       nullptr, FALSE,
       (L"Global\\ChromeSetupMutex_" + sync_primitive_name_suffix).c_str()));
-  if (!setup_mutex.IsValid()) {
+  if (!setup_mutex.is_valid()) {
     // UMA data indicates that this happens 0.03 % of the time.
     return nullptr;
   }
@@ -41,7 +41,7 @@ std::unique_ptr<SetupSingleton> SetupSingleton::Acquire(
   base::win::ScopedHandle exit_event(::CreateEvent(
       nullptr, TRUE, FALSE,
       (L"Global\\ChromeSetupExitEvent_" + sync_primitive_name_suffix).c_str()));
-  if (!exit_event.IsValid()) {
+  if (!exit_event.is_valid()) {
     // UMA data indicates that this happens < 0.01 % of the time.
     return nullptr;
   }
@@ -57,13 +57,13 @@ std::unique_ptr<SetupSingleton> SetupSingleton::Acquire(
         nullptr, FALSE,
         (L"Global\\ChromeSetupExitEventMutex_" + sync_primitive_name_suffix)
             .c_str()));
-    if (!exit_event_mutex.IsValid()) {
+    if (!exit_event_mutex.is_valid()) {
       // UMA data indicates that this happens < 0.01 % of the time.
       return nullptr;
     }
 
     ScopedHoldMutex scoped_hold_exit_event_mutex;
-    if (!scoped_hold_exit_event_mutex.Acquire(exit_event_mutex.Get())) {
+    if (!scoped_hold_exit_event_mutex.Acquire(exit_event_mutex.get())) {
       // UMA data indicates that this happens < 0.01 % of the time.
       return nullptr;
     }
@@ -75,7 +75,7 @@ std::unique_ptr<SetupSingleton> SetupSingleton::Acquire(
 
     // Acquire |setup_mutex_|.
     if (!setup_singleton->scoped_hold_setup_mutex_.Acquire(
-            setup_singleton->setup_mutex_.Get())) {
+            setup_singleton->setup_mutex_.get())) {
       // UMA data indicates that this happens 0.84 % of the time.
       return nullptr;
     }
@@ -93,7 +93,7 @@ std::unique_ptr<SetupSingleton> SetupSingleton::Acquire(
 
 SetupSingleton::~SetupSingleton() = default;
 
-bool SetupSingleton::WaitForInterrupt(const base::TimeDelta& max_time) const {
+bool SetupSingleton::WaitForInterrupt(base::TimeDelta max_time) const {
   const bool exit_event_signaled = exit_event_.TimedWait(max_time);
   return exit_event_signaled;
 }
@@ -124,7 +124,7 @@ bool SetupSingleton::ScopedHoldMutex::Acquire(HANDLE mutex) {
 SetupSingleton::SetupSingleton(base::win::ScopedHandle setup_mutex,
                                base::win::ScopedHandle exit_event)
     : setup_mutex_(std::move(setup_mutex)), exit_event_(std::move(exit_event)) {
-  DCHECK(setup_mutex_.IsValid());
+  DCHECK(setup_mutex_.is_valid());
 }
 
 }  // namespace installer

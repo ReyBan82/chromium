@@ -11,7 +11,7 @@ chrome.test.runTests([
           } else {
             chrome.test.fail();
           }
-        })
+        });
   },
   function requestNotifications() {
     Notification.requestPermission().then(function(permission) {
@@ -30,7 +30,7 @@ chrome.test.runTests([
           } else {
             chrome.test.fail();
           }
-        })
+        });
   },
   function geolocation_getCurrentPosition() {
     navigator.geolocation.getCurrentPosition(
@@ -46,10 +46,10 @@ chrome.test.runTests([
       } else {
         chrome.test.fail();
       }
-    })
+    });
   },
   function requestCamera() {
-    var constraints = {video: true};
+    const constraints = {video: true};
     navigator.mediaDevices.getUserMedia(constraints)
         .then(function(stream) {
           chrome.test.succeed();
@@ -66,10 +66,10 @@ chrome.test.runTests([
           } else {
             chrome.test.fail();
           }
-        })
+        });
   },
   function requestMicrophone() {
-    var constraints = {audio: true};
+    const constraints = {audio: true};
     navigator.mediaDevices.getUserMedia(constraints)
         .then(function(stream) {
           chrome.test.succeed();
@@ -77,5 +77,5 @@ chrome.test.runTests([
         .catch(function(err) {
           chrome.test.fail();
         });
-  }
+  },
 ]);

@@ -17,9 +17,7 @@ import org.chromium.base.test.BaseRobolectricTestRunner;
 
 import java.io.File;
 
-/**
- * junit tests for {@link PathUtils}.
- */
+/** junit tests for {@link PathUtils}. */
 @RunWith(BaseRobolectricTestRunner.class)
 public class PathUtilsTest {
     static final String THUMBNAIL_DIRECTORY_NAME = "textures";
@@ -39,9 +37,9 @@ public class PathUtilsTest {
         String cacheDir = PathUtils.getCacheDirectory();
         String thumbnailDir = PathUtils.getThumbnailCacheDirectory();
 
-        assertEquals(dataDir, expectedDataDir);
-        assertEquals(cacheDir, expectedCacheDir);
-        assertEquals(thumbnailDir, expectedThumbnailDir);
+        assertEquals(expectedDataDir, dataDir);
+        assertEquals(expectedCacheDir, cacheDir);
+        assertEquals(expectedThumbnailDir, thumbnailDir);
     }
 
     @Test
@@ -59,9 +57,9 @@ public class PathUtilsTest {
         String cacheDir = PathUtils.getCacheDirectory();
         String thumbnailDir = PathUtils.getThumbnailCacheDirectory();
 
-        assertEquals(dataDir, expectedDataDir);
-        assertEquals(cacheDir, expectedCacheDir);
-        assertEquals(thumbnailDir, expectedThumbnailDir);
+        assertEquals(expectedDataDir, dataDir);
+        assertEquals(expectedCacheDir, cacheDir);
+        assertEquals(expectedThumbnailDir, thumbnailDir);
     }
 
     @Test
@@ -79,8 +77,8 @@ public class PathUtilsTest {
         String cacheDir = PathUtils.getCacheDirectory();
         String thumbnailDir = PathUtils.getThumbnailCacheDirectory();
 
-        assertEquals(dataDir, expectedDataDir);
-        assertEquals(cacheDir, expectedCacheDir);
-        assertEquals(thumbnailDir, expectedThumbnailDir);
+        assertEquals(expectedDataDir, dataDir);
+        assertEquals(expectedCacheDir, cacheDir);
+        assertEquals(expectedThumbnailDir, thumbnailDir);
     }
 }

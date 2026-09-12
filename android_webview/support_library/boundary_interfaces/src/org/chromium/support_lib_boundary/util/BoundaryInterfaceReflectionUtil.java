@@ -5,9 +5,8 @@ package org.chromium.support_lib_boundary.util;
 
 import android.os.Build;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
-import androidx.annotation.RequiresApi;
+import org.jspecify.annotations.NullMarked;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
@@ -16,15 +15,13 @@ import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Collection;
 
-/**
- * A set of utility methods used for calling across the support library boundary.
- */
-// Although this is not enforced in chromium, this is a requirement enforced when this file is
-// mirrored into AndroidX. See http://b/120770118 for details.
+/** A set of utility methods used for calling across the support library boundary. */
+@NullMarked
+@SuppressWarnings("PatternVariableCanBeUsed") // Not valid in androidx.
 public class BoundaryInterfaceReflectionUtil {
     /**
-     * Check if an object is an instance of {@code className}, resolving {@code className} in
-     * the object's own ClassLoader. This is useful when {@code obj} may have been created in a
+     * Check if an object is an instance of {@code className}, resolving {@code className} in the
+     * object's own ClassLoader. This is useful when {@code obj} may have been created in a
      * ClassLoader other than the current one (in which case {@code obj instanceof Foo} would fail
      * but {@code instanceOfInOwnClassLoader(obj, "Foo")} may succeed).
      */
@@ -42,11 +39,11 @@ public class BoundaryInterfaceReflectionUtil {
     }
 
     /**
-     * Utility method for fetching a method from {@param delegateLoader}, with the same signature
+     * Utility method for fetching a method from {@code delegateLoader}, with the same signature
      * (package + class + method name + parameters) as a given method defined in another
      * classloader.
      */
-    public static Method dupeMethod(Method method, ClassLoader delegateLoader)
+    public static Method dupeMethod(Method method, @Nullable ClassLoader delegateLoader)
             throws ClassNotFoundException, NoSuchMethodException {
         // We're converting one type to another. This is analogous to instantiating the type on the
         // other side of the Boundary, so it makes sense to perform static initialization if it
@@ -69,13 +66,17 @@ public class BoundaryInterfaceReflectionUtil {
      * @param invocationHandler an {@link InvocationHandler} compatible with this boundary
      *     interface.
      */
-    @Nullable
-    public static <T> T castToSuppLibClass(
-            @NonNull Class<T> clazz, @Nullable InvocationHandler invocationHandler) {
-        if (invocationHandler == null) return null;
+    @Contract("_, !null -> !null")
+    public static <T> @Nullable T castToSuppLibClass(
+            Class<T> clazz, @Nullable InvocationHandler invocationHandler) {
+        if (invocationHandler == null) {
+            return null;
+        }
         return clazz.cast(
-                Proxy.newProxyInstance(BoundaryInterfaceReflectionUtil.class.getClassLoader(),
-                        new Class[] {clazz}, invocationHandler));
+                Proxy.newProxyInstance(
+                        BoundaryInterfaceReflectionUtil.class.getClassLoader(),
+                        new Class[] {clazz},
+                        invocationHandler));
     }
 
     /**
@@ -89,10 +90,12 @@ public class BoundaryInterfaceReflectionUtil {
      *     method calls to.
      * @return an InvocationHandlerWithDelegateGetter wrapping {@code delegate}
      */
-    @RequiresApi(Build.VERSION_CODES.KITKAT)
-    @Nullable
-    public static InvocationHandler createInvocationHandlerFor(@Nullable final Object delegate) {
-        if (delegate == null) return null;
+    @Contract("!null -> !null")
+    public static @Nullable InvocationHandler createInvocationHandlerFor(
+            @Nullable final Object delegate) {
+        if (delegate == null) {
+            return null;
+        }
         return new InvocationHandlerWithDelegateGetter(delegate);
     }
 
@@ -104,18 +107,19 @@ public class BoundaryInterfaceReflectionUtil {
      * <p>A {@code null} array of delegates is represented with a {@code null} array of {@link
      * InvocationHandler}s. Any individual {@code null} delegate is represented with a {@code null}
      * {@link InvocationHandler}.
-
+     *
      * @param delegates an array of objects to which to delegate.
-     * @return an array of InvocationHandlerWithDelegateGetter instances, each delegating to
-     *     the corresponding member of {@code delegates}.
+     * @return an array of InvocationHandlerWithDelegateGetter instances, each delegating to the
+     *     corresponding member of {@code delegates}.
      */
-    @RequiresApi(Build.VERSION_CODES.KITKAT)
-    @Nullable
-    public static InvocationHandler[] createInvocationHandlersForArray(
-            @Nullable final Object[] delegates) {
-        if (delegates == null) return null;
+    @Contract("!null -> !null")
+    public static @Nullable InvocationHandler @Nullable [] createInvocationHandlersForArray(
+            final @Nullable Object @Nullable [] delegates) {
+        if (delegates == null) {
+            return null;
+        }
 
-        InvocationHandler[] handlers = new InvocationHandler[delegates.length];
+        @Nullable InvocationHandler[] handlers = new InvocationHandler[delegates.length];
         for (int i = 0; i < handlers.length; i++) {
             handlers[i] = createInvocationHandlerFor(delegates[i]);
         }
@@ -132,30 +136,32 @@ public class BoundaryInterfaceReflectionUtil {
      * @param invocationHandler a {@link Nullable} InvocationHandlerWithDelegateGetter.
      * @return the corresponding delegate.
      */
-    @RequiresApi(Build.VERSION_CODES.KITKAT)
-    @Nullable
-    public static Object getDelegateFromInvocationHandler(
+    @Contract("!null -> !null")
+    public static @Nullable Object getDelegateFromInvocationHandler(
             @Nullable InvocationHandler invocationHandler) {
-        if (invocationHandler == null) return null;
+        if (invocationHandler == null) {
+            return null;
+        }
         InvocationHandlerWithDelegateGetter objectHolder =
                 (InvocationHandlerWithDelegateGetter) invocationHandler;
         return objectHolder.getDelegate();
     }
 
     /**
-     * An InvocationHandler storing the original object that method calls are delegated to.
-     * This allows us to pass InvocationHandlers across the support library boundary and later
-     * unwrap the objects used as delegates within those InvocationHandlers.
+     * An InvocationHandler storing the original object that method calls are delegated to. This
+     * allows us to pass InvocationHandlers across the support library boundary and later unwrap the
+     * objects used as delegates within those InvocationHandlers.
      */
-    @RequiresApi(Build.VERSION_CODES.KITKAT)
     private static class InvocationHandlerWithDelegateGetter implements InvocationHandler {
+
         private final Object mDelegate;
 
-        public InvocationHandlerWithDelegateGetter(@NonNull final Object delegate) {
+        public InvocationHandlerWithDelegateGetter(final Object delegate) {
             mDelegate = delegate;
         }
 
         @Override
+        @Nullable
         public Object invoke(Object o, Method method, Object[] objects) throws Throwable {
             final ClassLoader delegateLoader = mDelegate.getClass().getClassLoader();
             try {
@@ -168,17 +174,34 @@ public class BoundaryInterfaceReflectionUtil {
             }
         }
 
-        /**
-         * Gets the delegate object (which is never {@code null}).
-         */
-        @NonNull
+        /** Gets the delegate object (which is never {@code null}). */
         public Object getDelegate() {
             return mDelegate;
+        }
+
+        @Override
+        public boolean equals(Object obj) {
+            if (obj == null) {
+                return false;
+            }
+            // Identity is based on the delegate object.
+            if (obj instanceof InvocationHandlerWithDelegateGetter) {
+                InvocationHandlerWithDelegateGetter other =
+                        (InvocationHandlerWithDelegateGetter) obj;
+                return mDelegate.equals(other.mDelegate);
+            }
+            return mDelegate.equals(obj);
+        }
+
+        @Override
+        public int hashCode() {
+            // Identity is based on the delegate object.
+            return mDelegate.hashCode();
         }
     }
 
     /**
-     * Check if this is a debuggable build of Android. Note: we copy BuildInfo's method because we
+     * Check if this is a debuggable build of Android. Note: we copy ApkInfo's method because we
      * cannot depend on the base-layer here (this folder is mirrored into Android).
      */
     private static boolean isDebuggable() {
@@ -186,7 +209,7 @@ public class BoundaryInterfaceReflectionUtil {
     }
 
     /**
-     * Check whether a set of features {@param features} contains a certain feature {@param
+     * Check whether a set of features {@code features} contains a certain feature {@param
      * soughtFeature}.
      */
     public static boolean containsFeature(Collection<String> features, String soughtFeature) {

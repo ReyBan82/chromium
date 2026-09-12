@@ -1,4 +1,5 @@
 include_rules = [
+  "+components/viz/common/resources/shared_image_format.h",
   "+gpu/vulkan",
   "+services/service_manager/public/cpp",
   "+skia/ext",
@@ -17,7 +18,7 @@ include_rules = [
   "+ui/platform_window",
 ]
 specific_include_rules = {
-  "run_all_unittests\.cc": [
+  "run_all_unittests\\.cc": [
     "+mojo/core/embedder/embedder.h",
   ],
 }

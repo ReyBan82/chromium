@@ -113,6 +113,10 @@ void AddWord(PlatformSpellChecker* spell_checker_instance,
 void RemoveWord(PlatformSpellChecker* spell_checker_instance,
                 const std::u16string& word);
 
+// Whether |word| has been added to the dictionary by the user.
+bool IsUserAddedWord(PlatformSpellChecker* spell_checker_instance,
+                     const std::u16string& word);
+
 // Gets a unique tag to identify a document. Used in ignoring words.
 int GetDocumentTag();
 
@@ -145,13 +149,12 @@ void GetPerLanguageSuggestions(PlatformSpellChecker* spell_checker_instance,
 #if BUILDFLAG(IS_WIN)
 // Records statistics about spell check support for the user's Chrome locales.
 void RecordChromeLocalesStats(PlatformSpellChecker* spell_checker_instance,
-                              const std::vector<std::string> chrome_locales);
+                              std::vector<std::string> chrome_locales);
 
 // Records statistics about which spell checker supports which of the user's
 // enabled spell check locales.
-void RecordSpellcheckLocalesStats(
-    PlatformSpellChecker* spell_checker_instance,
-    const std::vector<std::string> spellcheck_locales);
+void RecordSpellcheckLocalesStats(PlatformSpellChecker* spell_checker_instance,
+                                  std::vector<std::string> spellcheck_locales);
 #endif  // BUILDFLAG(IS_WIN)
 
 // Internal state, to restore system state after testing.
@@ -164,7 +167,7 @@ class ScopedEnglishLanguageForTest {
   ScopedEnglishLanguageForTest();
   ~ScopedEnglishLanguageForTest();
  private:
-  raw_ptr<SpellcheckerStateInternal> state_;
+  raw_ptr<SpellcheckerStateInternal, DanglingUntriaged> state_;
 };
 
 }  // namespace spellcheck_platform

@@ -6,10 +6,10 @@
 
 #include "base/memory/ref_counted_memory.h"
 #include "chrome/browser/ash/system_web_apps/test_support/test_system_web_app_url_data_source.h"
-#include "chrome/common/webui_url_constants.h"
 #include "chrome/grit/browser_resources.h"
 #include "chrome/grit/chrome_unscaled_resources.h"
 #include "content/public/browser/web_ui_data_source.h"
+#include "content/public/common/url_constants.h"
 
 namespace ash {
 
@@ -40,8 +40,7 @@ std::unique_ptr<content::WebUIController>
 TestSystemWebAppWebUIControllerFactory::CreateWebUIControllerForURL(
     content::WebUI* web_ui,
     const GURL& url) {
-  if (!url.SchemeIs(content::kChromeUIScheme) ||
-      url.host_piece() != source_name_) {
+  if (!url.SchemeIs(content::kChromeUIScheme) || url.host() != source_name_) {
     return nullptr;
   }
 
@@ -61,8 +60,7 @@ content::WebUI::TypeID TestSystemWebAppWebUIControllerFactory::GetWebUIType(
 bool TestSystemWebAppWebUIControllerFactory::UseWebUIForURL(
     content::BrowserContext* browser_context,
     const GURL& url) {
-  return url.SchemeIs(content::kChromeUIScheme) &&
-         url.host_piece() == source_name_;
+  return url.SchemeIs(content::kChromeUIScheme) && url.host() == source_name_;
 }
 
 }  // namespace ash

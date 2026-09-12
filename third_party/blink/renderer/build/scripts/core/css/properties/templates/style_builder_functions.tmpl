@@ -7,7 +7,12 @@
   {% if property.style_builder_declare %}
     {% if property.style_builder_generate_initial %}
 void {{class_name}}::ApplyInitial(StyleResolverState& state) const {
-{{(caller(property) ~ '}')}}
+{{caller(property)}}
+      {%- if property.tracks_animated_source %}
+  state.StyleBuilder().ClearAnimatedSource(
+      CSSPropertyID::{{property.enum_key}});
+      {% endif %}
+}
     {% endif %}
   {% endif %}
 {% endmacro %}
@@ -17,7 +22,20 @@ void {{class_name}}::ApplyInitial(StyleResolverState& state) const {
   {% if property.style_builder_declare %}
     {% if property.style_builder_generate_inherit %}
 void {{class_name}}::ApplyInherit(StyleResolverState& state) const {
-{{(caller(property) ~ '}')}}
+      {% if property.affected_by_zoom %}
+  if (state.GetDocument().StandardizedBrowserZoomEnabled()) {
+    if (ApplyParentValueIfZoomChanged(state)) {
+      return;
+    }
+  }
+      {% endif %}
+{{caller(property)}}
+      {%- if property.tracks_animated_source %}
+  state.StyleBuilder().CopyAnimatedSourceFrom(
+      CSSPropertyID::{{property.enum_key}}, state.ParentStyle(),
+      /*has_untracked_dependencies=*/false);
+      {% endif %}
+}
     {% endif %}
   {% endif %}
 {% endmacro %}
@@ -26,15 +44,25 @@ void {{class_name}}::ApplyInherit(StyleResolverState& state) const {
   {% set class_name = property.name.to_upper_camel_case() %}
   {% if property.style_builder_declare %}
     {% if property.style_builder_generate_value %}
-void {{class_name}}::ApplyValue(StyleResolverState& state, const CSSValue& value) const {
-{{(caller(property) ~ '}')}}
+void {{class_name}}::ApplyValue(StyleResolverState& state, const CSSValue& value, ValueModeFlags) const {
+{% if property.anchor_mode %}
+  blink::AnchorScope anchor_scope(
+      blink::AnchorScope::Mode::{{property.anchor_mode.to_enum_value()}},
+      state.CssToLengthConversionData().GetAnchorEvaluator());
+{% endif %}
+{{caller(property)}}
+      {%- if property.tracks_animated_source %}
+  state.StyleBuilder().ClearAnimatedSource(
+      CSSPropertyID::{{property.enum_key}});
+      {% endif %}
+}
     {% endif %}
   {% endif %}
 {% endmacro %}
 
 {% macro style_access(property) %}
 state.StyleBuilder().
-{% endmacro %}
+{%- endmacro %}
 
 {% macro set_value(property) %}
   {%- if property.font %}
@@ -46,7 +74,7 @@ state.GetFontBuilder().{{property.setter}}
 
 {% macro convert_and_set_value(property) %}
   {% if property.converter == 'CSSPrimitiveValue' %}
-{{set_value(property)}}(To<CSSPrimitiveValue>(value).ConvertTo<{{property.type_name}}>());
+{{set_value(property)}}(To<CSSPrimitiveValue>(value).ConvertTo<{{property.type_name}}>(state.CssToLengthConversionData()));
   {%- elif property.converter == 'CSSIdentifierValue' %}
 {{set_value(property)}}(To<CSSIdentifierValue>(value).ConvertTo<blink::{{property.type_name}}>());
   {%- elif property.converter %}
@@ -214,9 +242,11 @@ state.GetFontBuilder().{{property.setter}}
     {% endcall %}
 
     {% call(property) apply_value(property) %}
+  const CSSValueList& list = To<CSSValueList>(value);
   CSS{{animation}}Data& data = state.StyleBuilder().Access{{animation}}s();
   data.{{vector}}.clear();
-  for (const CSSValue* list_value : To<CSSValueList>(value)) {
+  data.{{vector}}.reserve(list.length());
+  for (const CSSValue* list_value : list) {
     const auto& item = *list_value;
     data.{{vector}}.push_back(CSSToStyleMap::MapAnimation{{attribute}}(state, item));
   }
@@ -303,23 +333,23 @@ state.GetFontBuilder().{{property.setter}}
     {% set action = property.style_builder_template_args['action'] %}
     {% call(property) apply_initial(property) %}
   state.StyleBuilder().Clear{{action}}Directives();
+  state.StyleBuilder().SetCounter{{action}}List(nullptr);
     {% endcall %}
 
     {% call(property) apply_inherit(property) %}
   state.StyleBuilder().Clear{{action}}Directives();
-  const CounterDirectiveMap* parent_map = state.ParentStyle()->GetCounterDirectives();
-  if (!parent_map)
-    return;
-
-  CounterDirectiveMap& map = state.StyleBuilder().AccessCounterDirectives();
-  DCHECK(!parent_map->empty());
-
-  typedef CounterDirectiveMap::const_iterator Iterator;
-  Iterator end = parent_map->end();
-  for (Iterator it = parent_map->begin(); it != end; ++it) {
-    CounterDirectives& directives = map.insert(it->key, CounterDirectives()).stored_value->value;
-    directives.Inherit{{action}}(it->value);
+  if (const CounterDirectiveMap* parent_map =
+          state.ParentStyle()->GetCounterDirectives()) {
+    DCHECK(!parent_map->empty());
+    CounterDirectiveMap& map = state.StyleBuilder().AccessCounterDirectives();
+    for (const auto& [name, parent_directives] : *parent_map) {
+      map.insert(name, CounterDirectives()).stored_value->value
+          .Inherit{{action}}(parent_directives);
+    }
   }
+  const auto* parent_list = state.ParentStyle()->Counter{{action}}List();
+  state.StyleBuilder().SetCounter{{action}}List(
+      parent_list ? parent_list->Clone() : nullptr);
     {% endcall %}
 
     {% call(property) apply_value(property) %}
@@ -328,41 +358,53 @@ state.GetFontBuilder().{{property.setter}}
   const auto* list = DynamicTo<CSSValueList>(value);
   if (!list) {
     DCHECK_EQ(To<CSSIdentifierValue>(value).GetValueID(), CSSValueID::kNone);
+    state.StyleBuilder().SetCounter{{action}}List(nullptr);
     return;
   }
 
   CounterDirectiveMap& map = state.StyleBuilder().AccessCounterDirectives();
+  auto new_list = std::make_unique<CounterPropertyList>();
 
   for (const CSSValue* item : *list) {
-    const auto& pair = To<CSSValuePair>(*item);
-    AtomicString identifier(To<CSSCustomIdentValue>(pair.First()).Value());
-    int counter_value = To<CSSPrimitiveValue>(pair.Second()).GetIntValue();
+    const auto& counter_data = To<cssvalue::CSSCounterValue>(*item);
+    AtomicString identifier(To<CSSCustomIdentValue>(counter_data.Identifier())->Value());
     CounterDirectives& directives =
-    map.insert(identifier, CounterDirectives()).stored_value->value;
+        map.insert(identifier, CounterDirectives()).stored_value->value;
+    const CSSPrimitiveValue* counter_data_value = counter_data.Value();
+    CounterPropertyEntry entry;
+    entry.name = identifier;
         {% if action == 'Reset' %}
-    directives.SetResetValue(counter_value);
-        {% elif action == 'Increment' %}
-    directives.AddIncrementValue(counter_value);
+    if (counter_data.IsReversed()) {
+      directives.SetIsResetReversed();
+      entry.is_reversed = true;
+    }
+    if (counter_data_value) {
+      directives.SetResetValue(counter_data_value->ComputeNumber(
+          state.CssToLengthConversionData()));
+      // CounterDirectives keeps reset as int64_t; the computed-value list
+      // serializes the saturated int.
+      entry.value = *directives.ResetValue();
+    } else if (!entry.is_reversed) {
+      entry.value = 0;
+    }
         {% else %}
-    directives.SetSetValue(counter_value);
+    if (counter_data_value) {
+      const int counter_value = counter_data_value->ComputeInteger(
+          state.CssToLengthConversionData());
+          {% if action == 'Increment' %}
+      directives.AddIncrementValue(counter_value);
+          {% else %}
+      directives.SetSetValue(counter_value);
+          {% endif %}
+      entry.value = counter_value;
+    } else {
+      entry.value = {{ 1 if action == 'Increment' else 0 }};
+    }
         {% endif %}
+    new_list->push_back(entry);
   }
   DCHECK(!map.empty());
-    {% endcall %}
-  {% elif property.style_builder_template == 'grid' %}
-    {% set type = property.style_builder_template_args['type'] %}
-    {% call(property) apply_initial(property) %}
-  {{style_access(property)}}SetGridTemplate{{type}}s(ComputedStyleInitialValues::InitialGridTemplate{{type}}s());
-    {% endcall %}
-
-    {% call(property) apply_inherit(property) %}
-  {{style_access(property)}}SetGridTemplate{{type}}s(state.ParentStyle()->GridTemplate{{type}}s());
-    {% endcall %}
-
-    {% call(property) apply_value(property) %}
-  ComputedGridTrackList computed_grid_track_list;
-  StyleBuilderConverter::ConvertGridTrackList(value, computed_grid_track_list, state);
-  {{style_access(property)}}SetGridTemplate{{type}}s(computed_grid_track_list);
+  state.StyleBuilder().SetCounter{{action}}List(std::move(new_list));
     {% endcall %}
   {% endif %}
 {%- endmacro %}

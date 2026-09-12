@@ -5,11 +5,14 @@
 #include "third_party/blink/renderer/bindings/core/v8/js_event_handler_for_content_attribute.h"
 
 #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
+#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+#include "third_party/blink/renderer/core/ad_tracker/script_initiation_monitor.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
 #include "third_party/blink/renderer/core/events/error_event.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
+#include "third_party/blink/renderer/core/probe/core_probes.h"
 #include "third_party/blink/renderer/platform/bindings/source_location.h"
 
 namespace blink {
@@ -24,8 +27,14 @@ JSEventHandlerForContentAttribute* JSEventHandlerForContentAttribute::Create(
   if (value.IsNull())
     return nullptr;
   DCHECK(IsA<LocalDOMWindow>(context));
-  return MakeGarbageCollected<JSEventHandlerForContentAttribute>(context, name,
-                                                                 value, type);
+  auto* handler = MakeGarbageCollected<JSEventHandlerForContentAttribute>(
+      context, name, value, type);
+
+  handler->async_task_context()->Schedule(
+      context, "JSEventHandlerForContentAttribute",
+      probe::AsyncTaskContext::StackOptions::kScan);
+
+  return handler;
 }
 
 JSEventHandlerForContentAttribute::JSEventHandlerForContentAttribute(
@@ -69,13 +78,16 @@ v8::Local<v8::Value> JSEventHandlerForContentAttribute::GetCompiledHandler(
   if (!execution_context_of_event_target)
     return v8::Null(GetIsolate());
 
+  probe::AsyncTask async_task(execution_context_of_event_target,
+                              async_task_context());
+
   v8::Local<v8::Context> v8_context_of_event_target =
       ToV8Context(execution_context_of_event_target, GetWorld());
   if (v8_context_of_event_target.IsEmpty())
     return v8::Null(GetIsolate());
 
   ScriptState* script_state_of_event_target =
-      ScriptState::From(v8_context_of_event_target);
+      ScriptState::From(GetIsolate(), v8_context_of_event_target);
   if (!script_state_of_event_target->ContextIsValid())
     return v8::Null(GetIsolate());
 
@@ -121,8 +133,9 @@ v8::Local<v8::Value> JSEventHandlerForContentAttribute::GetCompiledHandler(
 
   // Step 2. If scripting is disabled for document, then return null.
   if (!document->AllowInlineEventHandler(element, this, source_url_,
-                                         position_.line_))
+                                         position_)) {
     return v8::Null(GetIsolate());
+  }
 
   // Step 5. If element is not null and element has a form owner, let form owner
   // be that form owner. Otherwise, let form owner be null.
@@ -167,7 +180,7 @@ v8::Local<v8::Value> JSEventHandlerForContentAttribute::GetCompiledHandler(
   //
   // Note: Strict is set by V8.
   v8::Isolate* isolate = script_state_of_event_target->GetIsolate();
-  v8::Local<v8::String> parameter_list[5];
+  std::array<v8::Local<v8::String>, 5> parameter_list;
   size_t parameter_list_size = 0;
   if (IsOnErrorEventHandler() && window) {
     // SVG requires to introduce evt as an alias to event in event handlers.
@@ -184,26 +197,27 @@ v8::Local<v8::Value> JSEventHandlerForContentAttribute::GetCompiledHandler(
     parameter_list[parameter_list_size++] =
         V8String(isolate, element && element->IsSVGElement() ? "evt" : "event");
   }
-  DCHECK_LE(parameter_list_size, std::size(parameter_list));
 
-  v8::Local<v8::Object> scopes[3];
+  std::array<v8::Local<v8::Object>, 3> scopes;
   size_t scopes_size = 0;
   if (element) {
     scopes[scopes_size++] =
-        ToV8(document, script_state_of_event_target).As<v8::Object>();
+        ToV8Traits<Document>::ToV8(script_state_of_event_target, document)
+            .As<v8::Object>();
   }
   if (form_owner) {
-    scopes[scopes_size++] =
-        ToV8(form_owner, script_state_of_event_target).As<v8::Object>();
+    scopes[scopes_size++] = ToV8Traits<HTMLFormElement>::ToV8(
+                                script_state_of_event_target, form_owner)
+                                .As<v8::Object>();
   }
   if (element) {
     scopes[scopes_size++] =
-        ToV8(element, script_state_of_event_target).As<v8::Object>();
+        ToV8Traits<Element>::ToV8(script_state_of_event_target, element)
+            .As<v8::Object>();
   }
-  DCHECK_LE(scopes_size, std::size(scopes));
 
   v8::ScriptOrigin origin(
-      isolate, V8String(isolate, source_url_), position_.line_.ZeroBasedInt(),
+      V8String(isolate, source_url_), position_.line_.ZeroBasedInt(),
       position_.column_.ZeroBasedInt(),
       true);  // true as |SanitizeScriptErrors::kDoNotSanitize|
   v8::ScriptCompiler::Source source(V8String(isolate, script_body_), origin);
@@ -213,9 +227,9 @@ v8::Local<v8::Value> JSEventHandlerForContentAttribute::GetCompiledHandler(
     v8::TryCatch block(isolate);
     block.SetVerbose(true);
     v8::MaybeLocal<v8::Function> maybe_result =
-        v8::ScriptCompiler::CompileFunction(v8_context_of_event_target, &source,
-                                            parameter_list_size, parameter_list,
-                                            scopes_size, scopes);
+        v8::ScriptCompiler::CompileFunction(
+            v8_context_of_event_target, &source, parameter_list_size,
+            parameter_list.data(), scopes_size, scopes.data());
 
     // Step 7. If body is not parsable as FunctionBody or if parsing detects an
     // early error, then follow these substeps:
@@ -229,6 +243,12 @@ v8::Local<v8::Value> JSEventHandlerForContentAttribute::GetCompiledHandler(
       return v8::Null(isolate);
   }
 
+  if (auto* monitor = ScriptInitiationMonitor::FromExecutionContext(
+          execution_context_of_event_target)) {
+    monitor->DidRegisterDynamicScript(
+        V8ScriptId(compiled_function->ScriptId()));
+  }
+
   // Step 12. Set eventHandler's value to the result of creating a Web IDL
   // EventHandler callback function object whose object reference is function
   // and whose callback context is settings object.
@@ -238,13 +258,13 @@ v8::Local<v8::Value> JSEventHandlerForContentAttribute::GetCompiledHandler(
   return JSEventHandler::GetListenerObject(event_target);
 }
 
-std::unique_ptr<SourceLocation>
-JSEventHandlerForContentAttribute::GetSourceLocation(EventTarget& target) {
-  auto source_location = JSEventHandler::GetSourceLocation(target);
+SourceLocation* JSEventHandlerForContentAttribute::GetSourceLocation(
+    EventTarget& target) {
+  auto* source_location = JSEventHandler::GetSourceLocation(target);
   if (source_location)
     return source_location;
   // Fallback to uncompiled source info.
-  return std::make_unique<SourceLocation>(
+  return MakeGarbageCollected<SourceLocation>(
       source_url_, String(), position_.line_.ZeroBasedInt(),
       position_.column_.ZeroBasedInt(), nullptr);
 }

@@ -7,13 +7,16 @@
 
 #include <memory>
 
+#include "base/file_descriptor_posix.h"
+#include "base/files/scoped_file.h"
+#include "base/memory/weak_ptr.h"
 #include "components/printing/browser/print_manager.h"
 #include "components/printing/common/print.mojom-forward.h"
 #include "content/public/browser/web_contents_user_data.h"
 #include "printing/print_settings.h"
 
 namespace android_webview {
-
+// Lifetime: WebView
 class AwPrintManager : public printing::PrintManager,
     public content::WebContentsUserData<AwPrintManager> {
  public:
@@ -28,13 +31,15 @@ class AwPrintManager : public printing::PrintManager,
       content::RenderFrameHost* rfh);
 
   // printing::PrintManager:
+  void SetupScriptedPrintAndroid(
+      SetupScriptedPrintAndroidCallback callback) override;
   void PdfWritingDone(int page_count) override;
 
   bool PrintNow();
 
   // Updates the parameters for printing.
   void UpdateParam(std::unique_ptr<printing::PrintSettings> settings,
-                   int file_descriptor,
+                   base::ScopedFD file_descriptor,
                    PdfWritingDoneCallback callback);
 
  private:
@@ -50,17 +55,18 @@ class AwPrintManager : public printing::PrintManager,
   void ScriptedPrint(printing::mojom::ScriptedPrintParamsPtr params,
                      ScriptedPrintCallback callback) override;
 
-  static void OnDidPrintDocumentWritingDone(
-      const PdfWritingDoneCallback& callback,
+  void OnDidPrintDocumentWritingDone(
       DidPrintDocumentCallback did_print_document_cb,
       uint32_t page_count);
 
   std::unique_ptr<printing::PrintSettings> settings_;
 
   // The file descriptor into which the PDF of the document will be written.
-  int fd_ = -1;
+  base::ScopedFD fd_;
 
   WEB_CONTENTS_USER_DATA_KEY_DECL();
+
+  base::WeakPtrFactory<AwPrintManager> weak_ptr_factory_{this};
 };
 
 }  // namespace android_webview

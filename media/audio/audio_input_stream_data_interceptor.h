@@ -56,14 +56,20 @@ class MEDIA_EXPORT AudioInputStreamDataInterceptor
   // Implementation of AudioInputCallback
   void OnData(const AudioBus* source,
               base::TimeTicks capture_time,
-              double volume) override;
+              double volume,
+              const AudioGlitchInfo& audio_glitch_info) override;
 
-  void OnError() override;
+  using Error = AudioInputStream::AudioInputCallback::Error;
+
+  void OnError(Error error_code) override;
+
+  // Returns the underlying stream.
+  AudioInputStream* GetUnderlyingStreamForTesting() const { return stream_; }
 
  private:
   const CreateDebugRecorderCB create_debug_recorder_cb_;
   std::unique_ptr<AudioDebugRecorder> debug_recorder_;
-  const raw_ptr<AudioInputStream, DanglingUntriaged> stream_;
+  raw_ptr<AudioInputStream> stream_;
   raw_ptr<AudioInputStream::AudioInputCallback> callback_;
   SEQUENCE_CHECKER(sequence_checker_);
 };

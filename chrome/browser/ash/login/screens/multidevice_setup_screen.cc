@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ash/login/screens/multidevice_setup_screen.h"
 
+#include "ash/constants/ash_switches.h"
 #include "base/feature_list.h"
 #include "base/logging.h"
 #include "base/memory/weak_ptr.h"
@@ -15,6 +16,7 @@
 #include "chrome/browser/ash/multidevice_setup/oobe_completion_tracker_factory.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/ui/webui/ash/login/multidevice_setup_screen_handler.h"
+#include "chromeos/ash/components/quick_start/quick_start_metrics.h"
 #include "chromeos/ash/services/device_sync/public/cpp/device_sync_client.h"
 #include "chromeos/ash/services/multidevice_setup/public/cpp/multidevice_setup_client.h"
 #include "chromeos/ash/services/multidevice_setup/public/cpp/oobe_completion_tracker.h"
@@ -34,12 +36,14 @@ constexpr const char kDeclinedSetupUserAction[] = "setup-declined";
 
 // static
 std::string MultiDeviceSetupScreen::GetResultString(Result result) {
+  // LINT.IfChange(UsageMetrics)
   switch (result) {
     case Result::NEXT:
       return "Next";
     case Result::NOT_APPLICABLE:
       return BaseScreen::kNotApplicable;
   }
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/oobe/histograms.xml)
 }
 
 MultiDeviceSetupScreen::MultiDeviceSetupScreen(
@@ -69,9 +73,15 @@ void MultiDeviceSetupScreen::TryInitSetupClient() {
 }
 
 bool MultiDeviceSetupScreen::MaybeSkip(WizardContext& context) {
+  // Skip multidevice setup screen during oobe.SmokeEndToEnd test.
+  if (switches::ShouldMultideviceScreenBeSkippedForTesting()) {
+    exit_callback_.Run(Result::NOT_APPLICABLE);
+    return true;
+  }
+
   // Only attempt the setup flow for non-guest users.
   if (context.skip_post_login_screens_for_tests ||
-      chrome_user_manager_util::IsPublicSessionOrEphemeralLogin()) {
+      chrome_user_manager_util::IsManagedGuestSessionOrEphemeralLogin()) {
     exit_callback_.Run(Result::NOT_APPLICABLE);
     RecordOobeMultideviceScreenSkippedReasonHistogram(
         OobeMultideviceScreenSkippedReason::kPublicSessionOrEphemeralLogin);
@@ -88,6 +98,15 @@ bool MultiDeviceSetupScreen::MaybeSkip(WizardContext& context) {
     exit_callback_.Run(Result::NOT_APPLICABLE);
     skipped_ = true;
     return true;
+  }
+
+  // Use WizardContext here to check if user already connected phone during
+  // Quick Start. If so, the multidevice setup screen will display UI
+  // enhancements.
+  const std::string& phone_instance_id = context.quick_start_phone_instance_id;
+  if (!phone_instance_id.empty()) {
+    setup_client_->SetQuickStartPhoneInstanceID(phone_instance_id);
+    quick_start_metrics_ = std::make_unique<quick_start::QuickStartMetrics>();
   }
 
   // Do not skip if potential host exists but none is set yet.
@@ -113,6 +132,11 @@ void MultiDeviceSetupScreen::ShowImpl() {
     view_->Show();
   }
 
+  if (quick_start_metrics_ != nullptr) {
+    quick_start_metrics_->RecordScreenOpened(
+        quick_start::QuickStartMetrics::ScreenName::kUnifiedSetup);
+  }
+
   // Record that user was presented with setup flow to prevent spam
   // notifications from suggesting setup in the future.
   multidevice_setup::OobeCompletionTracker* oobe_completion_tracker =
@@ -124,14 +148,16 @@ void MultiDeviceSetupScreen::ShowImpl() {
 
 void MultiDeviceSetupScreen::HideImpl() {}
 
-void MultiDeviceSetupScreen::OnUserAction(const base::Value::List& args) {
+void MultiDeviceSetupScreen::OnUserAction(const base::ListValue& args) {
   const std::string& action_id = args[0].GetString();
 
   if (action_id == kAcceptedSetupUserAction) {
     RecordMultiDeviceSetupOOBEUserChoiceHistogram(
         MultiDeviceSetupOOBEUserChoice::kAccepted);
+    MaybeRecordQuickStartScreenClosed();
     exit_callback_.Run(Result::NEXT);
   } else if (action_id == kDeclinedSetupUserAction) {
+    MaybeRecordQuickStartScreenClosed();
     RecordMultiDeviceSetupOOBEUserChoiceHistogram(
         MultiDeviceSetupOOBEUserChoice::kDeclined);
     exit_callback_.Run(Result::NEXT);
@@ -257,6 +283,13 @@ void MultiDeviceSetupScreen::OnGetGroupPrivateKeyStatus(
   }
 }
 
+void MultiDeviceSetupScreen::MaybeRecordQuickStartScreenClosed() {
+  if (quick_start_metrics_ != nullptr) {
+    quick_start_metrics_->RecordScreenClosed(
+        quick_start::QuickStartMetrics::ScreenName::kUnifiedSetup,
+        quick_start::QuickStartMetrics::ScreenClosedReason::kAdvancedInFlow);
+  }
+}
 void MultiDeviceSetupScreen::RecordOobeMultideviceScreenSkippedReasonHistogram(
     OobeMultideviceScreenSkippedReason reason) {
   skipped_reason_determined_ = true;

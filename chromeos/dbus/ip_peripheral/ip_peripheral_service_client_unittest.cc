@@ -9,6 +9,7 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/run_loop.h"
 #include "base/test/task_environment.h"
@@ -74,14 +75,14 @@ class IpPeripheralServiceClientTest : public testing::Test {
 
  protected:
   base::test::SingleThreadTaskEnvironment task_environment_;
-  IpPeripheralServiceClient* client_ = nullptr;
+  raw_ptr<IpPeripheralServiceClient, DanglingUntriaged> client_ = nullptr;
   scoped_refptr<dbus::MockBus> mock_bus_;
   scoped_refptr<dbus::MockObjectProxy> mock_proxy_;
 };
 
 TEST_F(IpPeripheralServiceClientTest, GetPanDBusMessage) {
   EXPECT_CALL(*mock_proxy_.get(),
-              DoCallMethod(HasMember(ip_peripheral::kGetPanMethod), _, _));
+              CallMethod(HasMember(ip_peripheral::kGetPanMethod), _, _));
 
   client_->GetPan("", base::DoNothing());
   base::RunLoop().RunUntilIdle();
@@ -89,7 +90,7 @@ TEST_F(IpPeripheralServiceClientTest, GetPanDBusMessage) {
 
 TEST_F(IpPeripheralServiceClientTest, GetTiltDBusMessage) {
   EXPECT_CALL(*mock_proxy_.get(),
-              DoCallMethod(HasMember(ip_peripheral::kGetTiltMethod), _, _));
+              CallMethod(HasMember(ip_peripheral::kGetTiltMethod), _, _));
 
   client_->GetTilt("", base::DoNothing());
   base::RunLoop().RunUntilIdle();
@@ -97,7 +98,7 @@ TEST_F(IpPeripheralServiceClientTest, GetTiltDBusMessage) {
 
 TEST_F(IpPeripheralServiceClientTest, GetZoomDBusMessage) {
   EXPECT_CALL(*mock_proxy_.get(),
-              DoCallMethod(HasMember(ip_peripheral::kGetZoomMethod), _, _));
+              CallMethod(HasMember(ip_peripheral::kGetZoomMethod), _, _));
 
   client_->GetZoom("", base::DoNothing());
   base::RunLoop().RunUntilIdle();
@@ -105,7 +106,7 @@ TEST_F(IpPeripheralServiceClientTest, GetZoomDBusMessage) {
 
 TEST_F(IpPeripheralServiceClientTest, SetPanDBusMessage) {
   EXPECT_CALL(*mock_proxy_.get(),
-              DoCallMethod(HasMember(ip_peripheral::kSetPanMethod), _, _));
+              CallMethod(HasMember(ip_peripheral::kSetPanMethod), _, _));
 
   client_->SetPan("", 0, base::DoNothing());
   base::RunLoop().RunUntilIdle();
@@ -113,7 +114,7 @@ TEST_F(IpPeripheralServiceClientTest, SetPanDBusMessage) {
 
 TEST_F(IpPeripheralServiceClientTest, SetTiltDBusMessage) {
   EXPECT_CALL(*mock_proxy_.get(),
-              DoCallMethod(HasMember(ip_peripheral::kSetTiltMethod), _, _));
+              CallMethod(HasMember(ip_peripheral::kSetTiltMethod), _, _));
 
   client_->SetTilt("", 0, base::DoNothing());
   base::RunLoop().RunUntilIdle();
@@ -121,9 +122,32 @@ TEST_F(IpPeripheralServiceClientTest, SetTiltDBusMessage) {
 
 TEST_F(IpPeripheralServiceClientTest, SetZoomDBusMessage) {
   EXPECT_CALL(*mock_proxy_.get(),
-              DoCallMethod(HasMember(ip_peripheral::kSetZoomMethod), _, _));
+              CallMethod(HasMember(ip_peripheral::kSetZoomMethod), _, _));
 
   client_->SetZoom("", 0, base::DoNothing());
+  base::RunLoop().RunUntilIdle();
+}
+
+std::vector<uint8_t> GetGoogleGuidLe() {
+  return {0x24, 0xE9, 0xD7, 0x74, 0xC9, 0x49, 0x45, 0x4A,
+          0x98, 0xA3, 0x8A, 0x9F, 0x60, 0x06, 0x1E, 0x83};
+}
+
+TEST_F(IpPeripheralServiceClientTest, GetControlDBusMessage) {
+  EXPECT_CALL(*mock_proxy_.get(),
+              CallMethod(HasMember(ip_peripheral::kGetControlMethod), _, _));
+  client_->GetControl("192.168.17.204", GetGoogleGuidLe(), 9, 1,
+                      base::DoNothing());
+  base::RunLoop().RunUntilIdle();
+}
+
+TEST_F(IpPeripheralServiceClientTest, SetControlDBusMessage) {
+  EXPECT_CALL(*mock_proxy_.get(),
+              CallMethod(HasMember(ip_peripheral::kSetControlMethod), _, _));
+  std::vector<uint8_t> control_setting = {0x00, 0x00, 0x00, 0x00,
+                                          0x00, 0x00, 0x00, 0x00};
+  client_->SetControl("192.168.17.204", GetGoogleGuidLe(), 9, control_setting,
+                      base::DoNothing());
   base::RunLoop().RunUntilIdle();
 }
 

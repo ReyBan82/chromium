@@ -12,20 +12,19 @@
 
 namespace syncer {
 
-class KeyDerivationParams;
 struct NigoriState;
+class SyncEncryptionHandlerObserverList;
 
 // Interface representing an intended local change to the Nigori state that
 // is pending a commit to the sync server.
 class PendingLocalNigoriCommit {
  public:
   static std::unique_ptr<PendingLocalNigoriCommit> ForSetCustomPassphrase(
-      const std::string& passphrase,
-      const KeyDerivationParams& key_derivation_params);
-
+      const std::string& passphrase);
   static std::unique_ptr<PendingLocalNigoriCommit> ForKeystoreInitialization();
 
-  static std::unique_ptr<PendingLocalNigoriCommit> ForKeystoreReencryption();
+  static std::unique_ptr<PendingLocalNigoriCommit>
+  ForCrossUserSharingPublicPrivateKeyInitializer();
 
   PendingLocalNigoriCommit() = default;
 
@@ -34,21 +33,18 @@ class PendingLocalNigoriCommit {
 
   virtual ~PendingLocalNigoriCommit() = default;
 
-  // Attempts to modify |*state| to reflect the intended commit. Returns true if
+  // Attempts to modify `state` to reflect the intended commit. Returns true if
   // the change was successfully applied (which may include the no-op case) or
   // false if it no longer applies (leading to OnFailure()).
-  //
-  // |state| must not be null.
-  virtual bool TryApply(NigoriState* state) const = 0;
+  virtual bool TryApply(NigoriState& state) const = 0;
 
   // Invoked when the commit has been successfully acked by the server.
-  // |observer| must not be null.
   virtual void OnSuccess(const NigoriState& state,
-                         SyncEncryptionHandler::Observer* observer) = 0;
+                         SyncEncryptionHandlerObserverList& observer_list) = 0;
 
   // Invoked when the change no longer applies or was aborted for a different
-  // reason (e.g. sync disabled). |observer| must not be null.
-  virtual void OnFailure(SyncEncryptionHandler::Observer* observer) = 0;
+  // reason (e.g. sync disabled).
+  virtual void OnFailure(SyncEncryptionHandlerObserverList& observer_list) = 0;
 };
 
 }  // namespace syncer

@@ -8,8 +8,8 @@
 #include "base/process/launch.h"
 #include "base/strings/stringprintf.h"
 #include "content/browser/child_process_launcher.h"
+#include "content/browser/sandboxed_process_launcher_delegate.h"
 #include "content/public/browser/child_process_launcher_utils.h"
-#include "content/public/common/sandboxed_process_launcher_delegate.h"
 #include "printing/buildflags/buildflags.h"
 #include "sandbox/policy/mojom/sandbox.mojom.h"
 
@@ -40,6 +40,8 @@ const char* ProcessNameFromSandboxType(sandbox::mojom::Sandbox sandbox_type) {
       return "audio";
     case sandbox::mojom::Sandbox::kCdm:
       return "cdm";
+    case sandbox::mojom::Sandbox::kOnDeviceModelExecution:
+      return "on-device-model-execution";
     case sandbox::mojom::Sandbox::kPrintCompositor:
       return "print-compositor";
     case sandbox::mojom::Sandbox::kSpeechRecognition:
@@ -53,11 +55,11 @@ const char* ProcessNameFromSandboxType(sandbox::mojom::Sandbox sandbox_type) {
 
 }  // namespace
 
-void ChildProcessLauncherHelper::SetProcessBackgroundedOnLauncherThread(
+void ChildProcessLauncherHelper::SetProcessPriorityOnLauncherThread(
     base::Process process,
-    bool is_background) {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
-  // TODO(https://crbug.com/926583): Fuchsia does not currently support this.
+    base::Process::Priority priority) {
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M159);
+  // TODO(crbug.com/40611633): Fuchsia does not currently support this.
 }
 
 ChildProcessTerminationInfo ChildProcessLauncherHelper::GetTerminationInfo(
@@ -76,7 +78,8 @@ bool ChildProcessLauncherHelper::TerminateProcess(const base::Process& process,
 }
 
 void ChildProcessLauncherHelper::BeforeLaunchOnClientThread() {
-  DCHECK(client_task_runner_->RunsTasksInCurrentSequence());
+  CHECK(client_task_runner_->RunsTasksInCurrentSequence(),
+        base::NotFatalUntil::M159);
 
   sandbox_policy_ = std::make_unique<sandbox::policy::SandboxPolicyFuchsia>(
       delegate_->GetSandboxType());
@@ -84,7 +87,7 @@ void ChildProcessLauncherHelper::BeforeLaunchOnClientThread() {
 
 std::unique_ptr<FileMappedForLaunch>
 ChildProcessLauncherHelper::GetFilesToMap() {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M159);
   return nullptr;
 }
 
@@ -95,8 +98,8 @@ bool ChildProcessLauncherHelper::IsUsingLaunchOptions() {
 bool ChildProcessLauncherHelper::BeforeLaunchOnLauncherThread(
     PosixFileDescriptorInfo& files_to_register,
     base::LaunchOptions* options) {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
-  DCHECK(sandbox_policy_);
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M159);
+  CHECK(sandbox_policy_, base::NotFatalUntil::M159);
 
   mojo_channel_->PrepareToPassRemoteEndpoint(&options->handles_to_transfer,
                                              command_line());
@@ -117,10 +120,10 @@ ChildProcessLauncherHelper::LaunchProcessOnLauncherThread(
     std::unique_ptr<FileMappedForLaunch> files_to_register,
     bool* is_synchronous_launch,
     int* launch_result) {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
-  DCHECK(mojo_channel_);
-  DCHECK(mojo_channel_->remote_endpoint().is_valid());
-  DCHECK(sandbox_policy_);
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M159);
+  CHECK(mojo_channel_, base::NotFatalUntil::M159);
+  CHECK(mojo_channel_->remote_endpoint().is_valid(), base::NotFatalUntil::M159);
+  CHECK(sandbox_policy_, base::NotFatalUntil::M159);
 
   Process child_process;
   // Move `sandbox_policy_` into the child process object so that it doesn't get
@@ -137,7 +140,7 @@ void ChildProcessLauncherHelper::AfterLaunchOnLauncherThread(
 // static
 void ChildProcessLauncherHelper::ForceNormalProcessTerminationSync(
     ChildProcessLauncherHelper::Process process) {
-  DCHECK(CurrentlyOnProcessLauncherTaskRunner());
+  CHECK(CurrentlyOnProcessLauncherTaskRunner(), base::NotFatalUntil::M159);
   // Wait for the process to terminate to ensure that `process` and its child
   // `sandbox_policy` aren't destroyed before the process is terminated.
   process.process.Terminate(RESULT_CODE_NORMAL_EXIT, true);

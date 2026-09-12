@@ -21,11 +21,15 @@ class PageTimingSender {
       std::vector<mojom::ResourceDataUpdatePtr> resources,
       const mojom::FrameRenderDataUpdate& render_data,
       const mojom::CpuTimingPtr& cpu_timing,
-      mojom::InputTimingPtr input_timing_delta,
-      mojom::SubresourceLoadMetricsPtr subresource_load_metrics,
-      uint32_t soft_navigation_count) = 0;
-  virtual void SetUpSmoothnessReporting(
-      base::ReadOnlySharedMemoryRegion shared_memory) = 0;
+      std::vector<mojom::EventTimingPtr> event_timings,
+      const std::optional<blink::SubresourceLoadMetrics>&
+          subresource_load_metrics,
+      std::vector<mojom::SoftNavigationMetricsPtr> soft_navigation_metrics,
+      std::vector<mojom::LargestContentfulPaintTimingPtr>
+          soft_largest_contentful_paint,
+      std::vector<mojom::CustomUserTimingMarkPtr> user_timings,
+      const mojom::FontLoadingMetricsPtr& font_loading_metrics) = 0;
+  virtual void SendCustomUserTiming(mojom::CustomUserTimingMarkPtr timing) = 0;
 };
 
 }  // namespace page_load_metrics

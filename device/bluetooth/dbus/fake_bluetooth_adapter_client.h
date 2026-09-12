@@ -69,7 +69,7 @@ class DEVICE_BLUETOOTH_EXPORT FakeBluetoothAdapterClient
                            ErrorCallback error_callback) override;
   void ConnectDevice(const dbus::ObjectPath& object_path,
                      const std::string& address,
-                     const absl::optional<AddressType>& address_type,
+                     const std::optional<AddressType>& address_type,
                      ConnectDeviceCallback callback,
                      ErrorCallback error_callback) override;
 
@@ -99,6 +99,9 @@ class DEVICE_BLUETOOTH_EXPORT FakeBluetoothAdapterClient
   // Set discoverable timeout
   void SetDiscoverableTimeout(base::TimeDelta timeout);
 
+  // Set adapter roles
+  void SetRoles(const std::vector<std::string>& roles);
+
   // Object path, name and addresses of the adapters we emulate.
   static const char kAdapterPath[];
   static const char kAdapterName[];
@@ -119,7 +122,12 @@ class DEVICE_BLUETOOTH_EXPORT FakeBluetoothAdapterClient
   void UpdateDiscoveringProperty(bool discovering);
 
   // List of observers interested in event notifications from us.
-  base::ObserverList<Observer>::Unchecked observers_;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      /*check_empty=*/false,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
+      observers_;
 
   // Static properties we return.
   std::unique_ptr<Properties> properties_;

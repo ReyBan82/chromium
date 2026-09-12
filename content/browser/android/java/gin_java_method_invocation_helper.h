@@ -58,7 +58,7 @@ class CONTENT_EXPORT GinJavaMethodInvocationHelper
 
   GinJavaMethodInvocationHelper(std::unique_ptr<ObjectDelegate> object,
                                 const std::string& method_name,
-                                const base::Value::List& arguments);
+                                const base::ListValue& arguments);
 
   GinJavaMethodInvocationHelper(const GinJavaMethodInvocationHelper&) = delete;
   GinJavaMethodInvocationHelper& operator=(
@@ -69,19 +69,19 @@ class CONTENT_EXPORT GinJavaMethodInvocationHelper
   void Invoke();
 
   bool HoldsPrimitiveResult();
-  const base::Value::List& GetPrimitiveResult();
+  const base::ListValue& GetPrimitiveResult();
   const base::android::JavaRef<jobject>& GetObjectResult();
   const base::android::JavaRef<jclass>& GetSafeAnnotationClass();
-  GinJavaBridgeError GetInvocationError();
+  mojom::GinJavaBridgeError GetInvocationError();
 
  private:
   friend class base::RefCountedThreadSafe<GinJavaMethodInvocationHelper>;
   ~GinJavaMethodInvocationHelper();
 
   void BuildObjectRefsFromListValue(DispatcherDelegate* dispatcher,
-                                    const base::Value::List& list_value);
+                                    const base::ListValue& list_value);
   void BuildObjectRefsFromDictionaryValue(DispatcherDelegate* dispatcher,
-                                          const base::Value::Dict& dict_value);
+                                          const base::DictValue& dict_value);
 
   bool AppendObjectRef(DispatcherDelegate* dispatcher,
                        const base::Value& raw_value);
@@ -91,8 +91,8 @@ class CONTENT_EXPORT GinJavaMethodInvocationHelper
                     const JavaType& return_type,
                     jmethodID id,
                     jvalue* parameters);
-  void SetInvocationError(GinJavaBridgeError error);
-  void SetPrimitiveResult(base::Value::List result_wrapper);
+  void SetInvocationError(mojom::GinJavaBridgeError error);
+  void SetPrimitiveResult(base::ListValue result_wrapper);
   void SetObjectResult(
       const base::android::JavaRef<jobject>& object,
       const base::android::JavaRef<jclass>& safe_annotation_clazz);
@@ -102,11 +102,11 @@ class CONTENT_EXPORT GinJavaMethodInvocationHelper
 
   std::unique_ptr<ObjectDelegate> object_;
   const std::string method_name_;
-  base::Value::List arguments_;
+  base::ListValue arguments_;
   ObjectRefs object_refs_;
   bool holds_primitive_result_;
-  std::unique_ptr<base::Value::List> primitive_result_;
-  GinJavaBridgeError invocation_error_;
+  std::unique_ptr<base::ListValue> primitive_result_;
+  mojom::GinJavaBridgeError invocation_error_;
   base::android::ScopedJavaGlobalRef<jobject> object_result_;
   base::android::ScopedJavaGlobalRef<jclass> safe_annotation_clazz_;
 };

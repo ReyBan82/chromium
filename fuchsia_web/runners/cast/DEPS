@@ -3,7 +3,7 @@ include_rules = [
   "+content/public/test",
   "+fuchsia_web/cast_streaming",
 
-  # TODO(crbug.com/852834): Remove this dependency when
+  # TODO(crbug.com/42050621): Remove this dependency when
   # kAudioCapturerWithEchoCancellation is removed.
   "+media/base/media_switches.h",
 
@@ -11,14 +11,15 @@ include_rules = [
 ]
 
 specific_include_rules = {
-  ".*_browsertest\.cc": [
+  ".*_browsertest\\.cc": [
     # WebEngine test helpers.
-    "+fuchsia_web/webengine/test/frame_for_test.h",
+    "+chromecast/bindings/bindings_manager_fuchsia.h",
     "+fuchsia_web/webengine/test/web_engine_browser_test.h",
   ],
-  "cast_runner_integration_test\.cc": [
+  "cast_runner_integration_test\\.cc": [
     # The expeted behavior of some tests depends on ENABLE_CAST_RECEIVER.
     "+build/chromecast_buildflags.h",
+    "+chromecast/bindings/bindings_manager_fuchsia.h",
   ],
   "main.cc": [
     # Allow logging when !ENABLE_CAST_RECEIVER.

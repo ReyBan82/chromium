@@ -6,16 +6,17 @@
 
 #include <utility>
 
+#include "base/containers/to_vector.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "components/apdu/apdu_response.h"
 #include "components/cbor/writer.h"
 #include "device/fido/device_response_converter.h"
-#include "device/fido/fido_constants.h"
-#include "device/fido/fido_parsing_utils.h"
 #include "device/fido/fido_test_data.h"
+#include "device/fido/public/fido_constants.h"
 
 namespace device {
 
@@ -27,12 +28,12 @@ AuthenticatorGetInfoResponse DefaultAuthenticatorInfo() {
 
 // static
 std::unique_ptr<MockFidoDevice> MockFidoDevice::MakeU2f() {
-  return std::make_unique<MockFidoDevice>(ProtocolVersion::kU2f, absl::nullopt);
+  return std::make_unique<MockFidoDevice>(ProtocolVersion::kU2f, std::nullopt);
 }
 
 // static
 std::unique_ptr<MockFidoDevice> MockFidoDevice::MakeCtap(
-    absl::optional<AuthenticatorGetInfoResponse> device_info) {
+    std::optional<AuthenticatorGetInfoResponse> device_info) {
   if (!device_info) {
     device_info = DefaultAuthenticatorInfo();
   }
@@ -50,13 +51,13 @@ MockFidoDevice::MakeU2fWithGetInfoExpectation() {
   device->StubGetDisplayName();
   device->ExpectWinkedAtLeastOnce();
   device->ExpectCtap2CommandAndRespondWith(
-      CtapRequestCommand::kAuthenticatorGetInfo, absl::nullopt);
+      CtapRequestCommand::kAuthenticatorGetInfo, std::nullopt);
   return device;
 }
 
 // static
 std::unique_ptr<MockFidoDevice> MockFidoDevice::MakeCtapWithGetInfoExpectation(
-    absl::optional<base::span<const uint8_t>> get_info_response) {
+    std::optional<base::span<const uint8_t>> get_info_response) {
   if (!get_info_response) {
     get_info_response = test_data::kTestAuthenticatorGetInfoResponse;
   }
@@ -72,11 +73,11 @@ std::unique_ptr<MockFidoDevice> MockFidoDevice::MakeCtapWithGetInfoExpectation(
 }
 
 std::vector<uint8_t> MockFidoDevice::EncodeCBORRequest(
-    std::pair<CtapRequestCommand, absl::optional<cbor::Value>> request) {
+    std::pair<CtapRequestCommand, std::optional<cbor::Value>> request) {
   std::vector<uint8_t> request_bytes;
 
   if (request.second) {
-    absl::optional<std::vector<uint8_t>> cbor_bytes =
+    std::optional<std::vector<uint8_t>> cbor_bytes =
         cbor::Writer::Write(*request.second);
     DCHECK(cbor_bytes);
     request_bytes = std::move(*cbor_bytes);
@@ -94,7 +95,7 @@ MATCHER_P(IsCtap2Command, expected_command, "") {
 MockFidoDevice::MockFidoDevice() = default;
 MockFidoDevice::MockFidoDevice(
     ProtocolVersion protocol_version,
-    absl::optional<AuthenticatorGetInfoResponse> device_info)
+    std::optional<AuthenticatorGetInfoResponse> device_info)
     : MockFidoDevice() {
   set_supported_protocol(protocol_version);
   if (device_info) {
@@ -131,16 +132,17 @@ void MockFidoDevice::StubGetId() {
   // Use a counter to keep the device ID unique.
   static size_t i = 0;
   EXPECT_CALL(*this, GetId())
-      .WillRepeatedly(
-          testing::Return(base::StrCat({"mockdevice", std::to_string(i++)})));
+      .WillRepeatedly(testing::Return(
+          base::StrCat({"mockdevice", base::NumberToString(i++)})));
 }
 
 void MockFidoDevice::ExpectCtap2CommandAndRespondWith(
     CtapRequestCommand command,
-    absl::optional<base::span<const uint8_t>> response,
+    std::optional<base::span<const uint8_t>> response,
     base::TimeDelta delay,
     testing::Matcher<base::span<const uint8_t>> request_matcher) {
-  auto data = fido_parsing_utils::MaterializeOrNull(response);
+  auto data =
+      response ? std::make_optional(base::ToVector(*response)) : std::nullopt;
   auto send_response = [data(std::move(data)), delay](DeviceCallback& cb) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE, base::BindOnce(std::move(cb), std::move(data)), delay);
@@ -149,9 +151,8 @@ void MockFidoDevice::ExpectCtap2CommandAndRespondWith(
   EXPECT_CALL(*this,
               DeviceTransactPtr(AllOf(IsCtap2Command(command), request_matcher),
                                 ::testing::_))
-      .WillOnce(::testing::DoAll(
-          ::testing::WithArg<1>(::testing::Invoke(send_response)),
-          ::testing::Return(0)));
+      .WillOnce(::testing::DoAll(::testing::WithArg<1>(send_response),
+                                 ::testing::Return(0)));
 }
 
 void MockFidoDevice::ExpectCtap2CommandAndRespondWithError(
@@ -164,20 +165,20 @@ void MockFidoDevice::ExpectCtap2CommandAndRespondWithError(
 
 void MockFidoDevice::ExpectRequestAndRespondWith(
     base::span<const uint8_t> request,
-    absl::optional<base::span<const uint8_t>> response,
+    std::optional<base::span<const uint8_t>> response,
     base::TimeDelta delay) {
-  auto data = fido_parsing_utils::MaterializeOrNull(response);
+  auto data =
+      response ? std::make_optional(base::ToVector(*response)) : std::nullopt;
   auto send_response = [data(std::move(data)), delay](DeviceCallback& cb) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE, base::BindOnce(std::move(cb), std::move(data)), delay);
   };
 
-  auto request_as_vector = fido_parsing_utils::Materialize(request);
+  auto request_as_vector = base::ToVector(request);
   EXPECT_CALL(*this,
               DeviceTransactPtr(std::move(request_as_vector), ::testing::_))
-      .WillOnce(::testing::DoAll(
-          ::testing::WithArg<1>(::testing::Invoke(send_response)),
-          ::testing::Return(0)));
+      .WillOnce(::testing::DoAll(::testing::WithArg<1>(send_response),
+                                 ::testing::Return(0)));
 }
 
 void MockFidoDevice::ExpectCtap2CommandAndDoNotRespond(
@@ -188,7 +189,7 @@ void MockFidoDevice::ExpectCtap2CommandAndDoNotRespond(
 
 void MockFidoDevice::ExpectRequestAndDoNotRespond(
     base::span<const uint8_t> request) {
-  auto request_as_vector = fido_parsing_utils::Materialize(request);
+  auto request_as_vector = base::ToVector(request);
   EXPECT_CALL(*this,
               DeviceTransactPtr(std::move(request_as_vector), ::testing::_))
       .WillOnce(::testing::Return(0));

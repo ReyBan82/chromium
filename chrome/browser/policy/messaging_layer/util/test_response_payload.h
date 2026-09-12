@@ -7,9 +7,11 @@
 #ifndef CHROME_BROWSER_POLICY_MESSAGING_LAYER_UTIL_TEST_RESPONSE_PAYLOAD_H_
 #define CHROME_BROWSER_POLICY_MESSAGING_LAYER_UTIL_TEST_RESPONSE_PAYLOAD_H_
 
+#include <optional>
+
 #include "base/values.h"
-#include "components/policy/core/common/cloud/cloud_policy_client.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "chrome/browser/policy/messaging_layer/util/reporting_server_connector.h"
+#include "components/reporting/util/statusor.h"
 
 namespace reporting {
 
@@ -28,18 +30,18 @@ namespace reporting {
 class ResponseBuilder {
  public:
   ResponseBuilder() = default;
-  // We need a copy constructor here because base::Value::Dict has deleted its
+  // We need a copy constructor here because base::DictValue has deleted its
   // copy constructor and gtest will implicitly copy a ResponseBuilder object
   // when it uses |MakeUploadEncryptedReportAction|, which we cannot work
   // around.
   ResponseBuilder(const ResponseBuilder& other);
   ResponseBuilder(ResponseBuilder&& other) = default;
-  explicit ResponseBuilder(const base::Value::Dict& request);
-  explicit ResponseBuilder(base::Value::Dict&& request);
+  explicit ResponseBuilder(const base::DictValue& request);
+  explicit ResponseBuilder(base::DictValue&& request);
   ResponseBuilder& SetForceConfirm(bool force_confirm);
   ResponseBuilder& SetNull(bool null);
-  ResponseBuilder& SetRequest(const base::Value::Dict& request);
-  ResponseBuilder& SetRequest(base::Value::Dict&& request);
+  ResponseBuilder& SetRequest(const base::DictValue& request);
+  ResponseBuilder& SetRequest(base::DictValue&& request);
   ResponseBuilder& SetSuccess(bool success);
 
   // Build the response to be fed to a
@@ -50,11 +52,11 @@ class ResponseBuilder {
   // for convenience. Additionally, this allows us to add more const qualifiers
   // throughout the tests so that we reduce chances of incorrect test code
   // (which itself isn't tested!).
-  absl::optional<base::Value::Dict> Build() const;
+  StatusOr<base::DictValue> Build() const;
 
  private:
   // The request that was sent to the server.
-  base::Value::Dict request_;
+  base::DictValue request_;
   // Parameters that can be tuned.
   struct {
     // Whether response should be a success or not
@@ -88,9 +90,9 @@ class MakeUploadEncryptedReportAction {
  public:
   explicit MakeUploadEncryptedReportAction(
       ResponseBuilder&& response_builder = ResponseBuilder());
-  void operator()(base::Value::Dict request,
-                  absl::optional<base::Value::Dict> context,
-                  ::policy::CloudPolicyClient::ResponseCallback callback);
+  void operator()(base::DictValue request,
+                  std::optional<base::DictValue> context,
+                  ReportingServerConnector::ResponseCallback callback);
 
  private:
   ResponseBuilder response_builder_;

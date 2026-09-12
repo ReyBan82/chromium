@@ -49,5 +49,11 @@ bool CSSContentDistributionValue::Equals(
          overflow_ == other.overflow_;
 }
 
+uint32_t CSSContentDistributionValue::CustomHash() const {
+  return HashInts(static_cast<uint32_t>(distribution_),
+                  HashInts(static_cast<uint32_t>(position_),
+                           static_cast<uint32_t>(overflow_)));
+}
+
 }  // namespace cssvalue
 }  // namespace blink

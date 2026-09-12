@@ -4,9 +4,10 @@
 
 #include "ui/ozone/public/platform_screen.h"
 
-#include "base/notreached.h"
+#include <optional>
+
+#include "base/notimplemented.h"
 #include "base/time/time.h"
-#include "ui/display/tablet_state.h"
 #include "ui/gfx/geometry/point.h"
 
 namespace ui {
@@ -50,23 +51,25 @@ base::TimeDelta PlatformScreen::CalculateIdleTime() const {
   return base::Seconds(0);
 }
 
-base::Value::List PlatformScreen::GetGpuExtraInfo(
+base::ListValue PlatformScreen::GetGpuExtraInfo(
     const gfx::GpuExtraInfo& gpu_extra_info) {
-  return base::Value::List();
+  return base::ListValue();
 }
 
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-display::TabletState PlatformScreen::GetTabletState() const {
-  return display::TabletState::kInClamshellMode;
+std::optional<float>
+PlatformScreen::GetPreferredScaleFactorForAcceleratedWidget(
+    gfx::AcceleratedWidget widget) const {
+  return std::nullopt;
 }
-#endif
 
-void PlatformScreen::SetDeviceScaleFactor(float scale) {}
+bool PlatformScreen::IsHeadless() const {
+  return false;
+}
 
 void PlatformScreen::StorePlatformNameIntoListOfValues(
-    base::Value::List& values,
+    base::ListValue& values,
     const std::string& platform_name) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set("description", "Ozone platform");
   dict.Set("value", platform_name);
   values.Append(std::move(dict));

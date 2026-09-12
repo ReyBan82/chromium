@@ -28,9 +28,10 @@
 
 #include <cstddef>
 
+#include "base/time/time.h"
 #include "third_party/blink/public/common/mediastream/media_devices.h"
-#include "third_party/blink/public/platform/web_audio_sink_descriptor.h"
 #include "third_party/blink/public/platform/web_audio_latency_hint.h"
+#include "third_party/blink/public/platform/web_audio_sink_descriptor.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 
 namespace blink::audio_utilities {
@@ -69,8 +70,14 @@ PLATFORM_EXPORT bool IsValidAudioBufferSampleRate(float sample_rate);
 PLATFORM_EXPORT float MinAudioBufferSampleRate();
 PLATFORM_EXPORT float MaxAudioBufferSampleRate();
 
-// Check to see if x is a power of two.  If x == 0, returns false.
-PLATFORM_EXPORT bool IsPowerOfTwo(size_t x);
+PLATFORM_EXPORT bool IsValidRenderQuantumSize(uint32_t render_quantum_size,
+                                              float sample_rate);
+PLATFORM_EXPORT uint32_t MinRenderQuantumSize();
+PLATFORM_EXPORT uint32_t MaxRenderQuantumSize(float sample_rate);
+
+// Returns `value` rounded up to the smallest multiple of `modulus`, safe
+// against integer overflow. `modulus` must be strictly greater than 0.
+PLATFORM_EXPORT size_t RoundUpToMultiple(size_t value, size_t modulus);
 
 PLATFORM_EXPORT const std::string GetSinkIdForTracing(
     blink::WebAudioSinkDescriptor sink_descriptor);

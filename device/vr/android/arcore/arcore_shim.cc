@@ -6,8 +6,7 @@
 
 #include <dlfcn.h>
 
-#include "base/android/android_hardware_buffer_compat.h"
-#include "base/android/build_info.h"
+#include "base/android/android_info.h"
 #include "base/logging.h"
 #include "device/vr/android/arcore/arcore_sdk.h"
 
@@ -177,7 +176,6 @@ bool LoadArCoreSdk(const std::string& libraryPath) {
     VLOG(2) << "Opened shim shared library.";
   }
 
-  // TODO(https://crbug.com/914999): check SDK version.
   auto* arcore_api = new ArCoreApi();
   LoadArCoreApi(sdk_handle, arcore_api);
 
@@ -187,8 +185,8 @@ bool LoadArCoreSdk(const std::string& libraryPath) {
 }
 
 bool IsArCoreSupported() {
-  return base::android::BuildInfo::GetInstance()->sdk_int() >=
-         base::android::SDK_VERSION_NOUGAT;
+  return base::android::android_info::sdk_int() >=
+         base::android::android_info::SDK_VERSION_NOUGAT;
 }
 
 }  // namespace device

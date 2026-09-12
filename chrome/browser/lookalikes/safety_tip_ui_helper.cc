@@ -5,13 +5,14 @@
 #include "chrome/browser/lookalikes/safety_tip_ui_helper.h"
 
 #include "build/build_config.h"
-#include "chrome/browser/ssl/security_state_tab_helper.h"
 #include "chrome/common/url_constants.h"
 #include "components/security_interstitials/core/common_string_util.h"
 #include "components/security_state/core/security_state.h"
 #include "components/strings/grit/components_strings.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 
 #if BUILDFLAG(IS_ANDROID)
 #include "chrome/browser/android/tab_android.h"
@@ -58,14 +59,16 @@ void LeaveSiteFromSafetyTip(content::WebContents* web_contents,
       navigated_to, content::Referrer(), WindowOpenDisposition::CURRENT_TAB,
       ui::PAGE_TRANSITION_AUTO_TOPLEVEL, false /* is_renderer_initiated */);
   params.should_replace_current_entry = true;
-  web_contents->OpenURL(params);
+  web_contents->OpenURL(params, /*navigation_handle_callback=*/{});
 }
 
 void OpenHelpCenterFromSafetyTip(content::WebContents* web_contents) {
-  web_contents->OpenURL(content::OpenURLParams(
-      GURL(chrome::kSafetyTipHelpCenterURL), content::Referrer(),
-      WindowOpenDisposition::NEW_FOREGROUND_TAB, ui::PAGE_TRANSITION_LINK,
-      false /*is_renderer_initiated*/));
+  web_contents->OpenURL(
+      content::OpenURLParams(
+          GURL(chrome::kSafetyTipHelpCenterURL), content::Referrer(),
+          WindowOpenDisposition::NEW_FOREGROUND_TAB, ui::PAGE_TRANSITION_LINK,
+          false /*is_renderer_initiated*/),
+      /*navigation_handle_callback=*/{});
 }
 
 std::u16string GetSafetyTipTitle(
@@ -84,7 +87,6 @@ std::u16string GetSafetyTipTitle(
   }
 
   NOTREACHED();
-  return std::u16string();
 }
 
 std::u16string GetSafetyTipDescription(
@@ -99,7 +101,6 @@ std::u16string GetSafetyTipDescription(
       NOTREACHED();
   }
   NOTREACHED();
-  return std::u16string();
 }
 
 int GetSafetyTipLeaveButtonId(security_state::SafetyTipStatus warning_type) {
@@ -110,8 +111,6 @@ int GetSafetyTipLeaveButtonId(security_state::SafetyTipStatus warning_type) {
     case security_state::SafetyTipStatus::kUnknown:
     case security_state::SafetyTipStatus::kNone:
       NOTREACHED();
-      return 0;
   }
   NOTREACHED();
-  return 0;
 }

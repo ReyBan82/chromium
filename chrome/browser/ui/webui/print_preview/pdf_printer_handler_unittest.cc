@@ -4,16 +4,22 @@
 
 #include "chrome/browser/ui/webui/print_preview/pdf_printer_handler.h"
 
+#include <memory>
+#include <optional>
+
+#include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/values_test_util.h"
+#include "base/values.h"
 #include "build/build_config.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/test/base/browser_with_test_window_test.h"
+#include "chrome/browser/printing/print_preview_dialog_controller.h"
+#include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "chrome/test/base/scoped_browser_locale.h"
 #include "components/url_formatter/url_formatter.h"
+#include "content/public/test/web_contents_tester.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 #if BUILDFLAG(IS_MAC)
@@ -160,25 +166,25 @@ const char kPdfPrinterCapability[] =
 // Used as a callback to StartGetCapability() in tests.
 // Records values returned by StartGetCapability().
 void RecordCapability(base::OnceClosure done_closure,
-                      base::Value::Dict* capability_out,
-                      base::Value::Dict capability) {
+                      base::DictValue* capability_out,
+                      base::DictValue capability) {
   *capability_out = std::move(capability);
   std::move(done_closure).Run();
 }
 
 #if BUILDFLAG(IS_MAC)
-base::Value::Dict GetValueFromCustomPaper(
+base::DictValue GetValueFromCustomPaper(
     const PrinterSemanticCapsAndDefaults::Paper& paper) {
-  base::Value::Dict paper_value;
-  paper_value.Set("custom_display_name", paper.display_name);
-  paper_value.Set("height_microns", paper.size_um.height());
-  paper_value.Set("width_microns", paper.size_um.width());
-  int imageable_area_left_microns = paper.printable_area_um.x();
-  int imageable_area_bottom_microns = paper.printable_area_um.y();
+  base::DictValue paper_value;
+  paper_value.Set("custom_display_name", paper.display_name());
+  paper_value.Set("height_microns", paper.size_um().height());
+  paper_value.Set("width_microns", paper.size_um().width());
+  int imageable_area_left_microns = paper.printable_area_um().x();
+  int imageable_area_bottom_microns = paper.printable_area_um().y();
   int imageable_area_right_microns =
-      paper.printable_area_um.x() + paper.printable_area_um.width();
+      paper.printable_area_um().x() + paper.printable_area_um().width();
   int imageable_area_top_microns =
-      paper.printable_area_um.y() + paper.printable_area_um.height();
+      paper.printable_area_um().y() + paper.printable_area_um().height();
   paper_value.Set("imageable_area_left_microns", imageable_area_left_microns);
   paper_value.Set("imageable_area_bottom_microns",
                   imageable_area_bottom_microns);
@@ -188,31 +194,45 @@ base::Value::Dict GetValueFromCustomPaper(
 }
 #endif
 
+class MockPdfPrinterHandler : public PdfPrinterHandler {
+ public:
+  MockPdfPrinterHandler(Profile* profile,
+                        content::WebContents* preview_web_contents,
+                        PrintPreviewStickySettings* sticky_settings)
+      : PdfPrinterHandler(profile, preview_web_contents, sticky_settings) {}
+
+  MOCK_METHOD3(SelectFile,
+               void(const base::FilePath& default_filename,
+                    content::WebContents* initiator,
+                    bool prompt_user));
+};
+
 }  // namespace
 
 using PdfPrinterHandlerTest = testing::Test;
 
-class PdfPrinterHandlerGetCapabilityTest : public BrowserWithTestWindowTest {
+class PdfPrinterHandlerGetCapabilityTest
+    : public ChromeRenderViewHostTestHarness {
  public:
   PdfPrinterHandlerGetCapabilityTest() = default;
   ~PdfPrinterHandlerGetCapabilityTest() override = default;
 
   void SetUp() override {
-    BrowserWithTestWindowTest::SetUp();
+    ChromeRenderViewHostTestHarness::SetUp();
 
     // Set the locale to ensure NA_LETTER is the default paper size.
     scoped_browser_locale_ = std::make_unique<ScopedBrowserLocale>("en-US");
 
     // Create the PDF printer handler
-    pdf_printer_handler_ = std::make_unique<PdfPrinterHandler>(
-        profile(), browser()->tab_strip_model()->GetActiveWebContents(),
-        /*sticky_settings=*/nullptr);
+    pdf_printer_handler_ =
+        std::make_unique<PdfPrinterHandler>(profile(), web_contents(),
+                                            /*sticky_settings=*/nullptr);
   }
 
  protected:
-  base::Value::Dict StartGetCapabilityAndWaitForResults() {
+  base::DictValue StartGetCapabilityAndWaitForResults() {
     base::RunLoop run_loop;
-    base::Value::Dict capability;
+    base::DictValue capability;
     pdf_printer_handler_->StartGetCapability(
         kPdfDeviceName,
         base::BindOnce(&RecordCapability, run_loop.QuitClosure(), &capability));
@@ -320,7 +340,7 @@ TEST_F(PdfPrinterHandlerGetCapabilityTest, GetCapability) {
   base::Value expected_capability =
       base::test::ParseJson(kPdfPrinterCapability);
   ASSERT_TRUE(expected_capability.is_dict());
-  base::Value::Dict capability = StartGetCapabilityAndWaitForResults();
+  base::DictValue capability = StartGetCapabilityAndWaitForResults();
   EXPECT_EQ(expected_capability.GetDict(), capability);
 }
 
@@ -345,22 +365,74 @@ TEST_F(PdfPrinterHandlerGetCapabilityTest,
       base::test::ParseJson(kPdfPrinterCapability);
   ASSERT_TRUE(expected_capability.is_dict());
 
-  base::Value::List* expected_paper_options =
+  base::ListValue* expected_paper_options =
       expected_capability.GetDict().FindListByDottedPath(kPaperOptionPath);
   ASSERT_TRUE(expected_paper_options);
 
-  for (const PrinterSemanticCapsAndDefaults::Paper& paper : kTestPapers)
+  for (const PrinterSemanticCapsAndDefaults::Paper& paper : kTestPapers) {
     expected_paper_options->Append(GetValueFromCustomPaper(paper));
+  }
 
   SetMacCustomPaperSizesForTesting(kTestPapers);
 
-  base::Value::Dict capability = StartGetCapabilityAndWaitForResults();
+  base::DictValue capability = StartGetCapabilityAndWaitForResults();
 
-  const base::Value::List* paper_options =
+  const base::ListValue* paper_options =
       capability.FindListByDottedPath(kPaperOptionPath);
   ASSERT_TRUE(paper_options);
   EXPECT_EQ(*expected_paper_options, *paper_options);
 }
 #endif
+
+class PdfPrinterHandlerStartPrintTest
+    : public ChromeRenderViewHostTestHarness,
+      public testing::WithParamInterface<const char*> {
+ public:
+  PdfPrinterHandlerStartPrintTest() = default;
+  ~PdfPrinterHandlerStartPrintTest() override = default;
+
+  void SetUp() override {
+    ChromeRenderViewHostTestHarness::SetUp();
+    preview_dialog_ =
+        content::WebContentsTester::CreateTestWebContents(profile(), nullptr);
+  }
+
+  void TearDown() override {
+    preview_dialog_.reset();
+    ChromeRenderViewHostTestHarness::TearDown();
+  }
+
+  GURL url() { return GURL(GetParam()); }
+
+ protected:
+  std::unique_ptr<content::WebContents> preview_dialog_;
+};
+
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    PdfPrinterHandlerStartPrintTest,
+    testing::Values("https://example.com/document-without-extension",
+                    "https://example.com/document-with-extension.pdf"));
+
+TEST_P(PdfPrinterHandlerStartPrintTest, PdfFileName) {
+  content::WebContentsTester::For(web_contents())->NavigateAndCommit(url());
+  content::WebContentsTester::For(web_contents())
+      ->SetMainFrameMimeType("application/pdf");
+
+  PrintPreviewDialogController::GetInstance()->AssociateWebContentsesForTesting(
+      web_contents(), preview_dialog_.get());
+
+  auto handler = std::make_unique<testing::NiceMock<MockPdfPrinterHandler>>(
+      profile(), preview_dialog_.get(), /*sticky_settings=*/nullptr);
+
+  EXPECT_CALL(*handler, SelectFile(base::FilePath(FPL("My PDF Document.pdf")),
+                                   web_contents(), testing::_));
+
+  handler->StartPrint(u"My PDF Document", base::DictValue(),
+                      /*print_data=*/nullptr, base::DoNothing());
+
+  PrintPreviewDialogController::GetInstance()
+      ->DisassociateWebContentsesForTesting(preview_dialog_.get());
+}
 
 }  // namespace printing

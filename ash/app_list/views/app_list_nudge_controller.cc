@@ -10,7 +10,6 @@
 #include "ash/constants/ash_pref_names.h"
 #include "ash/constants/ash_switches.h"
 #include "ash/public/cpp/app_list/app_list_types.h"
-#include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "base/json/values_util.h"
@@ -52,13 +51,12 @@ std::string GetPrefPath(AppListNudgeController::NudgeType type) {
       return prefs::kAppListReorderNudge;
     default:
       NOTREACHED();
-      return "";
   }
 }
 
 // Returns true if the app list has been reordered before.
 bool WasAppListReorderedPreviously(PrefService* prefs) {
-  const base::Value::Dict& dictionary =
+  const base::DictValue& dictionary =
       prefs->GetDict(prefs::kAppListReorderNudge);
   return dictionary.FindBool(kReorderNudgeConfirmed).value_or(false);
 }
@@ -75,14 +73,8 @@ void AppListNudgeController::RegisterProfilePrefs(
 }
 
 // static
-void AppListNudgeController::ResetPrefsForNewUserSession(PrefService* prefs) {
-  prefs->ClearPref(prefs::kAppListReorderNudge);
-  prefs->ClearPref(prefs::kLauncherFilesPrivacyNotice);
-}
-
-// static
 int AppListNudgeController::GetShownCount(PrefService* prefs, NudgeType type) {
-  const base::Value::Dict& dictionary = prefs->GetDict(GetPrefPath(type));
+  const base::DictValue& dictionary = prefs->GetDict(GetPrefPath(type));
 
   return dictionary.FindInt(kReorderNudgeShownCount).value_or(0);
 }
@@ -109,6 +101,11 @@ bool AppListNudgeController::ShouldShowReorderNudge() const {
   if (current_nudge_ == NudgeType::kPrivacyNotice)
     return false;
 
+  // Don't show the reorder nudge if the tutorial nudge is showing.
+  if (current_nudge_ == NudgeType::kTutorialNudge) {
+    return false;
+  }
+
   if (GetShownCount(prefs, NudgeType::kReorderNudge) < kMaxShowCount &&
       !WasAppListReorderedPreviously(prefs)) {
     return true;
@@ -118,7 +115,7 @@ bool AppListNudgeController::ShouldShowReorderNudge() const {
 }
 
 void AppListNudgeController::OnTemporarySortOrderChanged(
-    const absl::optional<AppListSortOrder>& new_order) {
+    const std::optional<AppListSortOrder>& new_order) {
   PrefService* prefs = GetPrefs();
   if (!prefs)
     return;
@@ -251,6 +248,7 @@ void AppListNudgeController::UpdateCurrentNudgeStateInPrefs(
         break;
       }
       case NudgeType::kPrivacyNotice:
+      case NudgeType::kTutorialNudge:
       case NudgeType::kNone:
         break;
     }
@@ -280,6 +278,7 @@ void AppListNudgeController::UpdateCurrentNudgeStateInPrefs(
       }
     } break;
     case NudgeType::kPrivacyNotice:
+    case NudgeType::kTutorialNudge:
     case NudgeType::kNone:
       break;
   }

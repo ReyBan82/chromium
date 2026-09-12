@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
     const {page, session, dp} = await testRunner.startURL(
     '/inspector-protocol/resources/empty.html',
     `Tests that browser.Target.setAutoAttach() attaches to new service workers.`);
@@ -17,7 +17,8 @@
   const [swTarget, swAttachedEvent] = await Promise.all(swTargetPromises);
   const swTargetInfo = swTarget.params.targetInfo;
   testRunner.log(`Started and attached to ${swTargetInfo.type} target, waitingForDebugger=${swAttachedEvent.params.waitingForDebugger}`);
-  const swSession = new TestRunner.Session(testRunner, swAttachedEvent.params.sessionId);
+  const swSession =
+      testRunner.createSessionFor(swAttachedEvent.params.sessionId);
   testRunner.log('self.globalVar = ' + await swSession.evaluate('self.globalVar'));
   await Promise.all([
     swSession.protocol.Runtime.runIfWaitingForDebugger(),

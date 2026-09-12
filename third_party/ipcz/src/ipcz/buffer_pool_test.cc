@@ -6,6 +6,8 @@
 
 #include <vector>
 
+#include "base/rand_util.h"
+#include "base/test/metrics/histogram_tester.h"
 #include "ipcz/block_allocator.h"
 #include "ipcz/driver_memory.h"
 #include "ipcz/driver_memory_mapping.h"
@@ -27,8 +29,7 @@ class BufferPoolTest : public testing::Test {
  private:
   const Ref<Node> node_{
       MakeRefCounted<Node>(Node::Type::kBroker,
-                           reference_drivers::kSyncReferenceDriver,
-                           IPCZ_INVALID_DRIVER_HANDLE)};
+                           reference_drivers::GetSyncReferenceDriver())};
 };
 
 TEST_F(BufferPoolTest, AddBlockBuffer) {
@@ -194,9 +195,11 @@ TEST_F(BufferPoolTest, BasicBlockAllocation) {
             pool.GetTotalBlockCapacity(kBlockSize));
 
   // We can't free something that isn't a valid allocation.
-  EXPECT_FALSE(pool.FreeBlock(Fragment{{}, nullptr}));
-  EXPECT_FALSE(pool.FreeBlock(Fragment{{BufferId{1000}, 0, 1}, nullptr}));
-  EXPECT_FALSE(pool.FreeBlock(Fragment{{BufferId{0}, 0, 1}, bytes0.data()}));
+  EXPECT_FALSE(pool.FreeBlock(Fragment::FromDescriptorUnsafe({}, nullptr)));
+  EXPECT_FALSE(pool.FreeBlock(
+      Fragment::FromDescriptorUnsafe({BufferId{1000}, 0, 1}, nullptr)));
+  EXPECT_FALSE(pool.FreeBlock(
+      Fragment::FromDescriptorUnsafe({BufferId{0}, 0, 1}, bytes0.data())));
 
   // Allocate all available capacity.
   std::vector<Fragment> fragments;
@@ -288,7 +291,7 @@ TEST_F(BufferPoolTest, BestEffortBlockAllocation) {
   EXPECT_TRUE(pool.AddBlockBuffer(id1, std::move(mapping1), {&allocator1, 1}));
   EXPECT_TRUE(pool.AddBlockBuffer(id2, std::move(mapping2), {&allocator2, 1}));
 
-  // Oversized best-effort allocations can succceed.
+  // Oversized best-effort allocations can succeed.
 
   Fragment partial_fragment =
       pool.AllocateBlockBestEffort(kBuffer2BlockSize * 2);
@@ -307,6 +310,40 @@ TEST_F(BufferPoolTest, BestEffortBlockAllocation) {
   EXPECT_TRUE(partial_fragment.is_addressable());
   EXPECT_EQ(id1, partial_fragment.buffer_id());
   EXPECT_EQ(kBuffer1BlockSize, partial_fragment.size());
+}
+
+TEST_F(BufferPoolTest, AllocateBlockResultHistogram) {
+  base::MetricsSubSampler::ScopedAlwaysSampleForTesting always_sample;
+  base::HistogramTester histogram_tester;
+  BufferPool pool;
+
+  // Check allocation result with an empty pool.
+  Fragment failed = pool.AllocateBlock(64);
+  constexpr int kBlockAllocationSize64Bytes = 1;
+  EXPECT_TRUE(failed.is_null());
+  histogram_tester.ExpectBucketCount("Mojo.Ipcz.BufferPoolAllocateBlockResult",
+                                     /*sample=*/false, 1);
+  histogram_tester.ExpectBucketCount(
+      "Mojo.Ipcz.BufferPoolAllocateBlockFailureSize",
+      /*sample=*/kBlockAllocationSize64Bytes, 1);
+  histogram_tester.ExpectTotalCount(
+      "Mojo.Ipcz.BufferPoolAllocateBlockSuccessSize", 0);
+
+  // Check successful allocation.
+  constexpr size_t kBufferSize = 4096;
+  constexpr size_t kBlockSize = 64;
+  DriverMemoryMapping mapping = AllocateDriverMemory(kBufferSize);
+  const BlockAllocator allocator(mapping.bytes(), kBlockSize);
+  EXPECT_TRUE(
+      pool.AddBlockBuffer(BufferId(0), std::move(mapping), {&allocator, 1}));
+
+  Fragment fragment = pool.AllocateBlock(64);
+  EXPECT_FALSE(fragment.is_null());
+  histogram_tester.ExpectBucketCount("Mojo.Ipcz.BufferPoolAllocateBlockResult",
+                                     /*sample=*/true, 1);
+  histogram_tester.ExpectBucketCount(
+      "Mojo.Ipcz.BufferPoolAllocateBlockSuccessSize",
+      /*sample=*/kBlockAllocationSize64Bytes, 1);
 }
 
 }  // namespace

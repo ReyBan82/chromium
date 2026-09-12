@@ -2,22 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/viz/service/hit_test/hit_test_manager.h"
+
+#include <fuzzer/FuzzedDataProvider.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#include <fuzzer/FuzzedDataProvider.h>
-
 #include <vector>
 
 #include "base/command_line.h"
-#include "components/viz/service/display_embedder/server_shared_bitmap_manager.h"
 #include "components/viz/service/frame_sinks/compositor_frame_sink_support.h"
 #include "components/viz/service/frame_sinks/frame_sink_manager_impl.h"
 #include "components/viz/service/hit_test/hit_test_aggregator.h"
-#include "components/viz/service/hit_test/hit_test_manager.h"
 #include "components/viz/test/compositor_frame_helpers.h"
 #include "components/viz/test/test_latest_local_surface_id_lookup_delegate.h"
+#include "ui/gfx/geometry/rrect_f.h"
 #include "ui/gfx/geometry/test/fuzzer_util.h"
 
 namespace {
@@ -48,8 +48,9 @@ void AddHitTestRegion(FuzzedDataProvider* fuzz,
     return;
 
   // If there's not enough space left for a HitTestRegion, then skip.
-  if (fuzz->remaining_bytes() < sizeof(viz::HitTestRegion))
+  if (fuzz->remaining_bytes() < sizeof(viz::HitTestRegion) + sizeof(bool)) {
     return;
+  }
 
   viz::HitTestRegion hit_test_region;
   hit_test_region.flags = fuzz->ConsumeIntegral<uint32_t>();
@@ -58,9 +59,20 @@ void AddHitTestRegion(FuzzedDataProvider* fuzz,
     hit_test_region.flags |= viz::HitTestRegionFlags::kHitTestChildSurface;
   hit_test_region.frame_sink_id = viz::FrameSinkId(
       fuzz->ConsumeIntegral<uint32_t>(), fuzz->ConsumeIntegral<uint32_t>());
-  hit_test_region.rect =
-      gfx::Rect(fuzz->ConsumeIntegral<int>(), fuzz->ConsumeIntegral<int>(),
-                fuzz->ConsumeIntegral<int>(), fuzz->ConsumeIntegral<int>());
+  gfx::RectF rect(fuzz->ConsumeIntegral<int>(), fuzz->ConsumeIntegral<int>(),
+                  fuzz->ConsumeIntegral<int>(), fuzz->ConsumeIntegral<int>());
+  hit_test_region.rect = gfx::RRectF(rect);
+  if (fuzz->ConsumeBool()) {
+    hit_test_region.rect =
+        gfx::RRectF(rect, fuzz->ConsumeFloatingPoint<float>(),
+                    fuzz->ConsumeFloatingPoint<float>(),
+                    fuzz->ConsumeFloatingPoint<float>(),
+                    fuzz->ConsumeFloatingPoint<float>(),
+                    fuzz->ConsumeFloatingPoint<float>(),
+                    fuzz->ConsumeFloatingPoint<float>(),
+                    fuzz->ConsumeFloatingPoint<float>(),
+                    fuzz->ConsumeFloatingPoint<float>());
+  }
   hit_test_region.transform = gfx::ConsumeTransform(*fuzz);
 
   if (fuzz->ConsumeBool() &&
@@ -100,7 +112,7 @@ void SubmitHitTestRegionList(
     return;
   }
 
-  absl::optional<viz::HitTestRegionList> hit_test_region_list;
+  std::optional<viz::HitTestRegionList> hit_test_region_list;
   if (fuzz->ConsumeBool()) {
     hit_test_region_list.emplace();
     hit_test_region_list->flags = fuzz->ConsumeIntegral<uint32_t>();
@@ -132,9 +144,8 @@ void SubmitHitTestRegionList(
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t num_bytes) {
   FuzzedDataProvider fuzz(data, num_bytes);
-  viz::ServerSharedBitmapManager shared_bitmap_manager;
   viz::FrameSinkManagerImpl frame_sink_manager{
-      viz::FrameSinkManagerImpl::InitParams(&shared_bitmap_manager)};
+      viz::FrameSinkManagerImpl::InitParams()};
   viz::TestLatestLocalSurfaceIdLookupDelegate delegate;
   viz::TestLatestLocalSurfaceIdLookupDelegate* lsi_delegate =
       fuzz.ConsumeBool() ? &delegate : nullptr;

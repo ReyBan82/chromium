@@ -9,7 +9,6 @@
 #include "cc/paint/paint_flags.h"
 #include "cc/paint/paint_image.h"
 #include "cc/paint/target_color_params.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkM44.h"
 #include "third_party/skia/include/core/SkRect.h"
@@ -31,14 +30,13 @@ class CC_PAINT_EXPORT DrawImage {
             bool use_dark_mode,
             const SkIRect& src_rect,
             PaintFlags::FilterQuality filter_quality,
-            const SkM44& matrix,
-            absl::optional<size_t> frame_index = absl::nullopt);
+            const SkM44& matrix);
   DrawImage(PaintImage image,
             bool use_dark_mode,
             const SkIRect& src_rect,
             PaintFlags::FilterQuality filter_quality,
             const SkM44& matrix,
-            absl::optional<size_t> frame_index,
+            size_t frame_index,
             const TargetColorParams& target_color_params);
   // Constructs a DrawImage from |other| by adjusting its scale and setting new
   // color params.
@@ -67,10 +65,7 @@ class CC_PAINT_EXPORT DrawImage {
   PaintImage::FrameKey frame_key() const {
     return paint_image_.GetKeyForFrame(frame_index());
   }
-  size_t frame_index() const {
-    DCHECK(frame_index_.has_value());
-    return frame_index_.value();
-  }
+  size_t frame_index() const { return frame_index_; }
 
   const TargetColorParams& target_color_params() const {
     DCHECK(target_color_params_.has_value());
@@ -80,20 +75,18 @@ class CC_PAINT_EXPORT DrawImage {
     DCHECK(target_color_params_.has_value());
     return target_color_params_->color_space;
   }
-  float sdr_white_level() const {
-    DCHECK(target_color_params_.has_value());
-    return target_color_params_->sdr_max_luminance_nits;
-  }
 
  private:
+  void SetTargetColorParams(const TargetColorParams& target_color_params);
+
   PaintImage paint_image_;
   bool use_dark_mode_;
   SkIRect src_rect_;
   PaintFlags::FilterQuality filter_quality_;
   SkSize scale_;
   bool matrix_is_decomposable_;
-  absl::optional<size_t> frame_index_;
-  absl::optional<TargetColorParams> target_color_params_;
+  size_t frame_index_ = PaintImage::kDefaultFrameIndex;
+  std::optional<TargetColorParams> target_color_params_;
 };
 
 }  // namespace cc

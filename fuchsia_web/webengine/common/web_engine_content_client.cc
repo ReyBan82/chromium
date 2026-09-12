@@ -4,8 +4,11 @@
 
 #include "fuchsia_web/webengine/common/web_engine_content_client.h"
 
+#include <string_view>
+
 #include "base/command_line.h"
 #include "base/feature_list.h"
+#include "base/memory/ref_counted_memory.h"
 #include "base/notreached.h"
 #include "components/embedder_support/origin_trials/origin_trial_policy_impl.h"
 #include "fuchsia_web/common/fuchsia_dir_scheme.h"
@@ -22,15 +25,15 @@ std::u16string WebEngineContentClient::GetLocalizedString(int message_id) {
   return l10n_util::GetStringUTF16(message_id);
 }
 
-base::StringPiece WebEngineContentClient::GetDataResource(
+std::string_view WebEngineContentClient::GetDataResource(
     int resource_id,
     ui::ResourceScaleFactor scale_factor) {
   return ui::ResourceBundle::GetSharedInstance().GetRawDataResourceForScale(
       resource_id, scale_factor);
 }
 
-base::RefCountedMemory* WebEngineContentClient::GetDataResourceBytes(
-    int resource_id) {
+scoped_refptr<base::RefCountedMemory>
+WebEngineContentClient::GetDataResourceBytes(int resource_id) {
   return ui::ResourceBundle::GetSharedInstance().LoadDataResourceBytes(
       resource_id);
 }

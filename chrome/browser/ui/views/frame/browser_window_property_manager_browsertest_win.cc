@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <objbase.h>
+
 #include <propkey.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -16,10 +17,6 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
 #include "base/win/scoped_propvariant.h"
-#include "chrome/browser/apps/app_service/app_launch_params.h"
-#include "chrome/browser/apps/app_service/app_service_proxy.h"
-#include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
-#include "chrome/browser/apps/app_service/browser_app_launcher.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/profiles/profile.h"
@@ -29,19 +26,26 @@
 #include "chrome/browser/profiles/profile_shortcut_manager_win.h"
 #include "chrome/browser/profiles/profile_test_util.h"
 #include "chrome/browser/profiles/profiles_state.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/shell_integration_win.h"
+#include "chrome/browser/ui/browser_init_state.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
+#include "chrome/browser/web_applications/extensions/launch.h"
 #include "chrome/browser/web_applications/os_integration/web_app_shortcut.h"
 #include "chrome/browser/web_applications/os_integration/web_app_shortcut_win.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/extensions/extension_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "chrome/test/base/ui_test_utils.h"
+#include "components/services/app_service/public/cpp/app_launch_params.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/views/win/hwnd_util.h"
 
 typedef extensions::ExtensionBrowserTest BrowserWindowPropertyManagerTest;
@@ -55,12 +59,13 @@ std::wstring AddIdToIconPath(const std::wstring& path) {
 // Checks that the relaunch name, relaunch command and app icon for the given
 // |browser| are correct.
 void ValidateBrowserWindowProperties(
-    const Browser* browser,
+    const BrowserWindowInterface* browser,
     const std::u16string& expected_profile_name) {
   // Let shortcut creation finish before we validate the results.
   content::RunAllTasksUntilIdle();
 
-  HWND hwnd = views::HWNDForNativeWindow(browser->window()->GetNativeWindow());
+  HWND hwnd =
+      views::HWNDForNativeWindow(browser->GetWindow()->GetNativeWindow());
 
   Microsoft::WRL::ComPtr<IPropertyStore> pps;
   HRESULT result = SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&pps));
@@ -86,7 +91,7 @@ void ValidateBrowserWindowProperties(
   EXPECT_EQ(VT_LPWSTR, prop_var.get().vt);
   base::CommandLine cmd_line(
       base::CommandLine::FromString(prop_var.get().pwszVal));
-  EXPECT_EQ(browser->profile()->GetBaseName().value(),
+  EXPECT_EQ(browser->GetProfile()->GetBaseName().value(),
             cmd_line.GetSwitchValueNative(switches::kProfileDirectory));
   prop_var.Reset();
 
@@ -95,17 +100,18 @@ void ValidateBrowserWindowProperties(
                                 prop_var.Receive()));
   EXPECT_EQ(VT_LPWSTR, prop_var.get().vt);
   EXPECT_EQ(AddIdToIconPath(profiles::internal::GetProfileIconPath(
-                                browser->profile()->GetPath())
+                                browser->GetProfile()->GetPath())
                                 .value()),
             prop_var.get().pwszVal);
   prop_var.Reset();
 }
 
-void ValidateHostedAppWindowProperties(const Browser* browser,
+void ValidateHostedAppWindowProperties(BrowserWindowInterface* browser,
                                        const extensions::Extension* extension) {
   content::RunAllTasksUntilIdle();
 
-  HWND hwnd = views::HWNDForNativeWindow(browser->window()->GetNativeWindow());
+  HWND hwnd =
+      views::HWNDForNativeWindow(browser->GetWindow()->GetNativeWindow());
 
   Microsoft::WRL::ComPtr<IPropertyStore> pps;
   HRESULT result = SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&pps));
@@ -113,21 +119,19 @@ void ValidateHostedAppWindowProperties(const Browser* browser,
 
   base::win::ScopedPropVariant prop_var;
   // The relaunch name should be the extension name.
-  EXPECT_EQ(S_OK,
-            pps->GetValue(PKEY_AppUserModel_RelaunchDisplayNameResource,
-                          prop_var.Receive()));
+  EXPECT_EQ(S_OK, pps->GetValue(PKEY_AppUserModel_RelaunchDisplayNameResource,
+                                prop_var.Receive()));
   EXPECT_EQ(VT_LPWSTR, prop_var.get().vt);
   EXPECT_EQ(base::UTF8ToWide(extension->name()), prop_var.get().pwszVal);
   prop_var.Reset();
 
   // The relaunch command should specify the profile and the app id.
-  EXPECT_EQ(
-      S_OK,
-      pps->GetValue(PKEY_AppUserModel_RelaunchCommand, prop_var.Receive()));
+  EXPECT_EQ(S_OK, pps->GetValue(PKEY_AppUserModel_RelaunchCommand,
+                                prop_var.Receive()));
   EXPECT_EQ(VT_LPWSTR, prop_var.get().vt);
   base::CommandLine cmd_line(
       base::CommandLine::FromString(prop_var.get().pwszVal));
-  EXPECT_EQ(browser->profile()->GetBaseName().value(),
+  EXPECT_EQ(browser->GetProfile()->GetBaseName().value(),
             cmd_line.GetSwitchValueNative(switches::kProfileDirectory));
   EXPECT_EQ(base::UTF8ToWide(extension->id()),
             cmd_line.GetSwitchValueNative(switches::kAppId));
@@ -136,10 +140,9 @@ void ValidateHostedAppWindowProperties(const Browser* browser,
   // The app icon should be set to the extension app icon.
   base::FilePath web_app_dir =
       web_app::GetOsIntegrationResourcesDirectoryForApp(
-          browser->profile()->GetPath(), extension->id(), GURL());
-  EXPECT_EQ(S_OK,
-            pps->GetValue(PKEY_AppUserModel_RelaunchIconResource,
-                          prop_var.Receive()));
+          browser->GetProfile()->GetPath(), extension->id(), GURL());
+  EXPECT_EQ(S_OK, pps->GetValue(PKEY_AppUserModel_RelaunchIconResource,
+                                prop_var.Receive()));
   EXPECT_EQ(VT_LPWSTR, prop_var.get().vt);
   EXPECT_EQ(
       AddIdToIconPath(web_app::internals::GetIconFilePath(
@@ -155,7 +158,7 @@ void ValidateHostedAppWindowProperties(const Browser* browser,
 // having --user-data-dir specified.
 class BrowserTestWithProfileShortcutManager : public InProcessBrowserTest {
  public:
-  BrowserTestWithProfileShortcutManager() {}
+  BrowserTestWithProfileShortcutManager() = default;
 
   BrowserTestWithProfileShortcutManager(
       const BrowserTestWithProfileShortcutManager&) = delete;
@@ -175,8 +178,9 @@ IN_PROC_BROWSER_TEST_F(BrowserTestWithProfileShortcutManager,
 
   // If multiprofile mode is not enabled, we can't test the behavior when there
   // are multiple profiles.
-  if (!profiles::IsMultipleProfilesEnabled())
+  if (!profiles::IsMultipleProfilesEnabled()) {
     return;
+  }
 
   // Two profile case. Both profile names should be shown.
   ProfileManager* profile_manager = g_browser_process->profile_manager();
@@ -187,10 +191,11 @@ IN_PROC_BROWSER_TEST_F(BrowserTestWithProfileShortcutManager,
 
   // The default profile's name should be part of the relaunch name.
   ValidateBrowserWindowProperties(
-      browser(), base::UTF8ToUTF16(browser()->profile()->GetProfileUserName()));
+      browser(),
+      base::UTF8ToUTF16(browser()->GetProfile()->GetProfileUserName()));
 
   // The second profile's name should be part of the relaunch name.
-  Browser* profile2_browser =
+  BrowserWindowInterface* profile2_browser =
       CreateBrowser(profile_manager->GetProfileByPath(path_profile2));
   ProfileAttributesEntry* entry =
       profile_manager->GetProfileAttributesStorage()
@@ -206,28 +211,90 @@ IN_PROC_BROWSER_TEST_F(BrowserWindowPropertyManagerTest, DISABLED_HostedApp) {
   EXPECT_TRUE(extension);
 
   base::RunLoop done;
-  apps::AppServiceProxyFactory::GetForProfile(browser()->profile())
-      ->BrowserAppLauncher()
-      ->LaunchAppWithParams(
-          apps::AppLaunchParams(extension->id(),
-                                apps::LaunchContainer::kLaunchContainerWindow,
-                                WindowOpenDisposition::NEW_FOREGROUND_TAB,
-                                apps::LaunchSource::kFromTest),
-          base::IgnoreArgs<content::WebContents*>(done.QuitClosure()));
+  web_app::LaunchExtensionOrWebApp(
+      browser()->GetProfile(),
+      apps::AppLaunchParams(extension->id(),
+                            apps::LaunchContainer::kLaunchContainerWindow,
+                            WindowOpenDisposition::NEW_FOREGROUND_TAB,
+                            apps::LaunchSource::kFromTest),
+      base::IgnoreArgs<content::WebContents*>(done.QuitClosure()));
   done.Run();
 
   // Check that the new browser has an app name.
   // The launch should have created a new browser.
-  ASSERT_EQ(2u, chrome::GetBrowserCount(browser()->profile()));
+  ASSERT_EQ(2u, ProfileBrowserCollection::GetForProfile(browser()->GetProfile())
+                    ->GetSize());
 
   // Find the new browser.
-  Browser* app_browser = nullptr;
-  for (auto* b : *BrowserList::GetInstance()) {
-    if (b != browser())
-      app_browser = b;
-  }
+  BrowserWindowInterface* app_browser =
+      ui_test_utils::GetBrowserNotInSet({browser()});
   ASSERT_TRUE(app_browser);
-  ASSERT_TRUE(app_browser != browser());
+  ASSERT_NE(app_browser, browser());
 
   ValidateHostedAppWindowProperties(app_browser, extension);
+}
+
+IN_PROC_BROWSER_TEST_F(BrowserWindowPropertyManagerTest,
+                       PictureInPictureWithAppName) {
+  std::string app_name = "TestAppName";
+  BrowserWindowCreateParams params =
+      BrowserWindowCreateParams::CreateForPictureInPicture(
+          app_name, /*trusted_source=*/true, browser()->GetProfile(),
+          /*user_gesture=*/true);
+  BrowserWindowInterface* pip_browser = CreateBrowserWindow(std::move(params));
+  ASSERT_EQ(pip_browser->GetType(),
+            BrowserWindowInterface::Type::TYPE_PICTURE_IN_PICTURE);
+  ASSERT_EQ(app_name,
+            BrowserInitState::From(pip_browser)->create_params().app_name);
+
+  content::RunAllTasksUntilIdle();
+
+  HWND hwnd =
+      views::HWNDForNativeWindow(pip_browser->GetWindow()->GetNativeWindow());
+
+  Microsoft::WRL::ComPtr<IPropertyStore> pps;
+  HRESULT result = SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&pps));
+  EXPECT_TRUE(SUCCEEDED(result));
+
+  base::win::ScopedPropVariant prop_var;
+  EXPECT_EQ(S_OK, pps->GetValue(PKEY_AppUserModel_ID, prop_var.Receive()));
+  EXPECT_EQ(VT_LPWSTR, prop_var.get().vt);
+
+  std::wstring expected_app_id =
+      shell_integration::win::GetAppUserModelIdForApp(
+          base::UTF8ToWide(app_name), browser()->GetProfile()->GetPath());
+
+  EXPECT_EQ(expected_app_id, prop_var.get().pwszVal);
+}
+
+IN_PROC_BROWSER_TEST_F(BrowserWindowPropertyManagerTest,
+                       PictureInPictureWithoutAppName) {
+  BrowserWindowCreateParams params =
+      BrowserWindowCreateParams::CreateForPictureInPicture(
+          "", /*trusted_source=*/true, browser()->GetProfile(),
+          /*user_gesture=*/true);
+  BrowserWindowInterface* pip_browser = CreateBrowserWindow(std::move(params));
+  ASSERT_EQ(pip_browser->GetType(),
+            BrowserWindowInterface::Type::TYPE_PICTURE_IN_PICTURE);
+  ASSERT_TRUE(
+      BrowserInitState::From(pip_browser)->create_params().app_name.empty());
+
+  content::RunAllTasksUntilIdle();
+
+  HWND hwnd =
+      views::HWNDForNativeWindow(pip_browser->GetWindow()->GetNativeWindow());
+
+  Microsoft::WRL::ComPtr<IPropertyStore> pps;
+  HRESULT result = SHGetPropertyStoreForWindow(hwnd, IID_PPV_ARGS(&pps));
+  EXPECT_TRUE(SUCCEEDED(result));
+
+  base::win::ScopedPropVariant prop_var;
+  EXPECT_EQ(S_OK, pps->GetValue(PKEY_AppUserModel_ID, prop_var.Receive()));
+  EXPECT_EQ(VT_LPWSTR, prop_var.get().vt);
+
+  std::wstring expected_app_id =
+      shell_integration::win::GetAppUserModelIdForBrowser(
+          browser()->GetProfile()->GetPath());
+
+  EXPECT_EQ(expected_app_id, prop_var.get().pwszVal);
 }

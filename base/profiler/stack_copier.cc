@@ -4,12 +4,51 @@
 
 #include "base/profiler/stack_copier.h"
 
+#include <vector>
+
 #include "base/bits.h"
 #include "base/compiler_specific.h"
+#include "base/profiler/stack_buffer.h"
+
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC)
+#include "partition_alloc/tagging.h"  // nogncheck
+#endif
 
 namespace base {
 
 StackCopier::~StackCopier() = default;
+
+std::unique_ptr<StackBuffer> StackCopier::CloneStack(
+    const StackBuffer& stack_buffer,
+    uintptr_t* stack_top,
+    RegisterContext* thread_context) {
+  const uintptr_t original_top = *stack_top;
+  const uintptr_t original_bottom =
+      reinterpret_cast<uintptr_t>(stack_buffer.buffer());
+  size_t stack_size = original_top - original_bottom;
+  auto cloned_stack_buffer = std::make_unique<StackBuffer>(stack_size);
+  const uint8_t* stack_copy_bottom = CopyStackContentsAndRewritePointers(
+      reinterpret_cast<const uint8_t*>(stack_buffer.buffer()),
+      reinterpret_cast<const uintptr_t*>(original_top),
+      StackBuffer::kPlatformStackAlignment, cloned_stack_buffer->buffer());
+
+  // `stack_buffer` is double pointer aligned by default so we should always
+  // get the same result.
+  CHECK(stack_copy_bottom ==
+        reinterpret_cast<uint8_t*>(cloned_stack_buffer->buffer()));
+  *stack_top =
+      reinterpret_cast<const uintptr_t>(stack_copy_bottom) + stack_size;
+
+  std::vector<uintptr_t> registers = GetRegisters(thread_context);
+  for (uintptr_t& reg : registers) {
+    reg = RewritePointerIfInOriginalStack(
+        reinterpret_cast<const uint8_t*>(original_bottom),
+        reinterpret_cast<const uintptr_t*>(original_top), stack_copy_bottom,
+        reg);
+  }
+  SetRegisters(thread_context, registers);
+  return cloned_stack_buffer;
+}
 
 // static
 uintptr_t StackCopier::RewritePointerIfInOriginalStack(
@@ -24,19 +63,29 @@ uintptr_t StackCopier::RewritePointerIfInOriginalStack(
   auto stack_copy_bottom_uint = reinterpret_cast<uintptr_t>(stack_copy_bottom);
 
   if (pointer < original_stack_bottom_uint ||
-      pointer >= original_stack_top_uint)
+      pointer >= original_stack_top_uint) {
     return pointer;
+  }
 
   return stack_copy_bottom_uint + (pointer - original_stack_bottom_uint);
 }
 
 // static
 NO_SANITIZE("address")
+NO_SANITIZE("hwaddress")
 const uint8_t* StackCopier::CopyStackContentsAndRewritePointers(
     const uint8_t* original_stack_bottom,
     const uintptr_t* original_stack_top,
     size_t platform_stack_alignment,
     uintptr_t* stack_buffer_bottom) {
+#if PA_BUILDFLAG(USE_PARTITION_ALLOC)
+  // Disable MTE during this function because this function indiscriminately
+  // reads stack frames, some of which belong to system libraries, not Chrome
+  // itself. With stack tagging, some bytes on the stack have MTE tags different
+  // from the stack pointer tag.
+  partition_alloc::SuspendTagCheckingScope suspend_tag_checking_scope;
+#endif
+
   const uint8_t* byte_src = original_stack_bottom;
   // The first address in the stack with pointer alignment. Pointer-aligned
   // values from this point to the end of the stack are possibly rewritten using
@@ -50,20 +99,22 @@ const uint8_t* StackCopier::CopyStackContentsAndRewritePointers(
   // alignment between values in the original stack and the copy. This uses the
   // platform stack alignment rather than pointer alignment so that the stack
   // copy is aligned to platform expectations.
-  uint8_t* stack_copy_bottom =
+  uint8_t* stack_copy_bottom = UNSAFE_TODO(
       reinterpret_cast<uint8_t*>(stack_buffer_bottom) +
-      (byte_src - bits::AlignDown(byte_src, platform_stack_alignment));
+      (byte_src - bits::AlignDown(byte_src, platform_stack_alignment)));
   uint8_t* byte_dst = stack_copy_bottom;
 
   // Copy bytes verbatim up to the first aligned address.
-  for (; byte_src < first_aligned_address; ++byte_src, ++byte_dst)
+  for (; byte_src < first_aligned_address;
+       UNSAFE_TODO(++byte_src), UNSAFE_TODO(++byte_dst)) {
     *byte_dst = *byte_src;
+  }
 
   // Copy the remaining stack by pointer-sized values, rewriting anything that
   // looks like a pointer into the stack.
   const uintptr_t* src = reinterpret_cast<const uintptr_t*>(byte_src);
   uintptr_t* dst = reinterpret_cast<uintptr_t*>(byte_dst);
-  for (; src < original_stack_top; ++src, ++dst) {
+  for (; src < original_stack_top; UNSAFE_TODO(++src), UNSAFE_TODO(++dst)) {
     *dst = RewritePointerIfInOriginalStack(
         original_stack_bottom, original_stack_top, stack_copy_bottom, *src);
   }

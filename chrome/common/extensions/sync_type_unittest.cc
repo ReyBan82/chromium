@@ -8,13 +8,15 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "chrome/common/extensions/sync_helper.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
-#include "extensions/common/features/simple_feature.h"
 #include "extensions/common/manifest.h"
 #include "extensions/common/manifest_constants.h"
 #include "extensions/common/manifest_handlers/app_display_info.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -37,14 +39,14 @@ class ExtensionSyncTypeTest : public testing::Test {
       mojom::ManifestLocation location,
       const base::FilePath& extension_path,
       int creation_flags) {
-    base::Value::Dict source;
-    source.Set(keys::kName, "PossiblySyncableExtension");
-    source.Set(keys::kVersion, "0.0.0.0");
-    source.Set(keys::kManifestVersion, 2);
+    auto source = base::DictValue()
+                      .Set(keys::kName, "PossiblySyncableExtension")
+                      .Set(keys::kVersion, "0.0.0.0")
+                      .Set(keys::kManifestVersion, 2);
     if (type == APP && launch_url.is_empty())
       source.Set(keys::kApp, "true");
     if (type == THEME)
-      source.Set(keys::kTheme, base::Value(base::Value::Type::DICT));
+      source.Set(keys::kTheme, base::DictValue());
     if (!update_url.is_empty()) {
       source.Set(keys::kUpdateURL, update_url.spec());
     }
@@ -54,7 +56,7 @@ class ExtensionSyncTypeTest : public testing::Test {
     if (type != THEME)
       source.Set(keys::kConvertedFromUserScript, type == USER_SCRIPT);
 
-    std::string error;
+    std::u16string error;
     scoped_refptr<Extension> extension = Extension::Create(
         extension_path, location, source, creation_flags, &error);
     EXPECT_TRUE(extension.get());
@@ -147,17 +149,17 @@ TEST_F(ExtensionSyncTypeTest, OnlyDisplayAppsInLauncher) {
 }
 
 TEST_F(ExtensionSyncTypeTest, DisplayInXManifestProperties) {
-  base::Value::Dict manifest;
-  manifest.Set(keys::kName, "TestComponentApp");
-  manifest.Set(keys::kVersion, "0.0.0.0");
-  manifest.SetByDottedPath(keys::kPlatformAppBackgroundPage, std::string());
+  auto manifest = base::DictValue()
+                      .Set(keys::kName, "TestComponentApp")
+                      .Set(keys::kVersion, "0.0.0.0");
+  manifest.SetByDottedPath(keys::kPlatformAppBackgroundPage, "background.html");
 
   // Default to true.
-  std::string error;
+  std::u16string error;
   scoped_refptr<Extension> app =
       Extension::Create(base::FilePath(), mojom::ManifestLocation::kComponent,
                         manifest, 0, &error);
-  EXPECT_EQ(error, std::string());
+  EXPECT_EQ(error, std::u16string());
   EXPECT_TRUE(AppDisplayInfo::ShouldDisplayInAppLauncher(*app));
   EXPECT_TRUE(AppDisplayInfo::ShouldDisplayInNewTabPage(*app));
 
@@ -165,7 +167,7 @@ TEST_F(ExtensionSyncTypeTest, DisplayInXManifestProperties) {
   manifest.Set(keys::kDisplayInLauncher, false);
   app = Extension::Create(base::FilePath(), mojom::ManifestLocation::kComponent,
                           manifest, 0, &error);
-  EXPECT_EQ(error, std::string());
+  EXPECT_EQ(error, std::u16string());
   EXPECT_FALSE(AppDisplayInfo::ShouldDisplayInAppLauncher(*app));
   EXPECT_FALSE(AppDisplayInfo::ShouldDisplayInNewTabPage(*app));
 
@@ -173,7 +175,7 @@ TEST_F(ExtensionSyncTypeTest, DisplayInXManifestProperties) {
   manifest.Set(keys::kDisplayInNewTabPage, true);
   app = Extension::Create(base::FilePath(), mojom::ManifestLocation::kComponent,
                           manifest, 0, &error);
-  EXPECT_EQ(error, std::string());
+  EXPECT_EQ(error, std::u16string());
   EXPECT_FALSE(AppDisplayInfo::ShouldDisplayInAppLauncher(*app));
   EXPECT_TRUE(AppDisplayInfo::ShouldDisplayInNewTabPage(*app));
 
@@ -182,7 +184,7 @@ TEST_F(ExtensionSyncTypeTest, DisplayInXManifestProperties) {
   manifest.Set(keys::kDisplayInNewTabPage, false);
   app = Extension::Create(base::FilePath(), mojom::ManifestLocation::kComponent,
                           manifest, 0, &error);
-  EXPECT_EQ(error, std::string());
+  EXPECT_EQ(error, std::u16string());
   EXPECT_TRUE(AppDisplayInfo::ShouldDisplayInAppLauncher(*app));
   EXPECT_FALSE(AppDisplayInfo::ShouldDisplayInNewTabPage(*app));
 
@@ -190,7 +192,7 @@ TEST_F(ExtensionSyncTypeTest, DisplayInXManifestProperties) {
   manifest.Set(keys::kDisplayInNewTabPage, "invalid");
   app = Extension::Create(base::FilePath(), mojom::ManifestLocation::kComponent,
                           manifest, 0, &error);
-  EXPECT_EQ(error, base::UTF16ToUTF8(errors::kInvalidDisplayInNewTabPage));
+  EXPECT_EQ(error, errors::kInvalidDisplayInNewTabPage);
 }
 
 TEST_F(ExtensionSyncTypeTest, OnlySyncInternal) {
@@ -210,16 +212,6 @@ TEST_F(ExtensionSyncTypeTest, DontSyncDefault) {
       EXTENSION, GURL(), GURL(), mojom::ManifestLocation::kInternal,
       base::FilePath(), Extension::WAS_INSTALLED_BY_DEFAULT));
   EXPECT_FALSE(sync_helper::IsSyncable(extension_default.get()));
-}
-
-TEST_F(ExtensionSyncTypeTest, DontSyncExtensionInDoNotSyncList) {
-  scoped_refptr<Extension> extension(MakeSyncTestExtension(
-      EXTENSION, GURL(), GURL(), mojom::ManifestLocation::kInternal,
-      base::FilePath(), Extension::NO_FLAGS));
-  EXPECT_TRUE(extension->is_extension());
-  EXPECT_TRUE(sync_helper::IsSyncable(extension.get()));
-  SimpleFeature::ScopedThreadUnsafeAllowlistForTest allowlist(extension->id());
-  EXPECT_FALSE(sync_helper::IsSyncable(extension.get()));
 }
 
 }  // namespace extensions

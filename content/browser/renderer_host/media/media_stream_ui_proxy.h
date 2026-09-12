@@ -9,15 +9,17 @@
 
 #include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
+#include "base/types/expected.h"
 #include "build/build_config.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/desktop_media_id.h"
 #include "content/public/browser/media_stream_request.h"
+#include "content/public/browser/select_audio_output_request.h"
 #include "third_party/blink/public/common/mediastream/media_stream_request.h"
 #include "third_party/blink/public/mojom/mediastream/media_stream.mojom-shared.h"
 #include "ui/gfx/geometry/rect.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace content {
 
@@ -31,7 +33,8 @@ class CONTENT_EXPORT MediaStreamUIProxy {
  public:
   using ResponseCallback = base::OnceCallback<void(
       const blink::mojom::StreamDevicesSet& stream_devices_set,
-      blink::mojom::MediaStreamRequestResult result)>;
+      blink::mojom::MediaStreamRequestResult result,
+      bool is_allowed_while_screen_locked)>;
 
   using WindowIdCallback =
       base::OnceCallback<void(gfx::NativeViewId window_id)>;
@@ -51,6 +54,12 @@ class CONTENT_EXPORT MediaStreamUIProxy {
   // denies request.
   virtual void RequestAccess(std::unique_ptr<MediaStreamRequest> request,
                              ResponseCallback response_callback);
+
+  // Forwards the request to select an audio output device to the
+  // RenderFrameHostDelegate associated with the given render frame.
+  virtual void RequestSelectAudioOutput(
+      std::unique_ptr<SelectAudioOutputRequest> request,
+      SelectAudioOutputCallback callback);
 
   // Notifies the UI that the MediaStream has started. Must be called after
   // access has been approved using RequestAccess().
@@ -86,12 +95,12 @@ class CONTENT_EXPORT MediaStreamUIProxy {
   virtual void OnDeviceStoppedForSourceChange(
       const std::string& label,
       const DesktopMediaID& old_media_id,
-      const DesktopMediaID& new_media_id);
+      const DesktopMediaID& new_media_id,
+      bool captured_surface_control_active);
 
   virtual void OnRegionCaptureRectChanged(
-      const absl::optional<gfx::Rect>& region_capture_rect);
+      const std::optional<gfx::Rect>& region_capture_rect);
 
-#if !BUILDFLAG(IS_ANDROID)
   // Determines whether the captured display surface represented by |media_id|
   // should be focused or not.
   // Only the first call to this method on a given object has an effect; the
@@ -106,7 +115,6 @@ class CONTENT_EXPORT MediaStreamUIProxy {
                         bool focus,
                         bool is_from_microtask,
                         bool is_from_timer);
-#endif
 
  protected:
   explicit MediaStreamUIProxy(RenderFrameHostDelegate* test_render_delegate);
@@ -118,9 +126,11 @@ class CONTENT_EXPORT MediaStreamUIProxy {
 
   void ProcessAccessRequestResponse(
       blink::mojom::StreamDevicesSetPtr stream_devices_set,
-      blink::mojom::MediaStreamRequestResult result);
+      blink::mojom::MediaStreamRequestResult result,
+      bool is_allowed_while_screen_locked);
   void ProcessStopRequestFromUI();
-  void ProcessChangeSourceRequestFromUI(const DesktopMediaID& media_id);
+  void ProcessChangeSourceRequestFromUI(const DesktopMediaID& media_id,
+                                        bool captured_surface_control_active);
   void ProcessStateChangeFromUI(const DesktopMediaID& media_id,
                                 blink::mojom::MediaStreamStateChange new_state);
   void OnWindowId(WindowIdCallback window_id_callback,
@@ -147,7 +157,7 @@ class CONTENT_EXPORT FakeMediaStreamUIProxy : public MediaStreamUIProxy {
 
   ~FakeMediaStreamUIProxy() override;
 
-  void SetAvailableDevices(const blink::MediaStreamDevices& devices);
+  void AddAvailableDevices(const blink::MediaStreamDevices& devices);
   void SetMicAccess(bool access);
   void SetCameraAccess(bool access);
   void SetAudioShare(bool audio_share);
@@ -155,6 +165,11 @@ class CONTENT_EXPORT FakeMediaStreamUIProxy : public MediaStreamUIProxy {
   // MediaStreamUIProxy overrides.
   void RequestAccess(std::unique_ptr<MediaStreamRequest> request,
                      ResponseCallback response_callback) override;
+
+  void RequestSelectAudioOutput(
+      std::unique_ptr<SelectAudioOutputRequest> request,
+      SelectAudioOutputCallback callback) override;
+
   void OnStarted(
       base::OnceClosure stop_callback,
       MediaStreamUI::SourceCallback source_callback,
@@ -167,11 +182,12 @@ class CONTENT_EXPORT FakeMediaStreamUIProxy : public MediaStreamUIProxy {
   void OnDeviceStoppedForSourceChange(
       const std::string& label,
       const DesktopMediaID& old_media_id,
-      const DesktopMediaID& new_media_id) override;
+      const DesktopMediaID& new_media_id,
+      bool captured_surface_control_active) override;
 
  private:
   // This is used for RequestAccess().
-  // TODO(crbug.com/1313021): Use blink::mojom::StreamDevices instead of
+  // TODO(crbug.com/40220802): Use blink::mojom::StreamDevices instead of
   // blink::MediaStreamDevices.
   blink::MediaStreamDevices devices_;
 

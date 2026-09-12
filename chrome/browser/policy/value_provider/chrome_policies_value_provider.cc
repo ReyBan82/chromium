@@ -8,7 +8,6 @@
 #include <memory>
 #include <utility>
 
-#include "base/functional/callback_forward.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/values.h"
 #include "chrome/browser/policy/chrome_policy_conversions_client.h"
@@ -17,6 +16,7 @@
 #include "chrome/browser/profiles/profile.h"
 #include "components/policy/core/browser/policy_conversions.h"
 #include "components/policy/core/common/policy_namespace.h"
+#include "components/policy/core/common/policy_types.h"
 #include "components/policy/core/common/schema.h"
 #include "components/policy/core/common/schema_map.h"
 #include "components/policy/core/common/schema_registry.h"
@@ -43,15 +43,15 @@ ChromePoliciesValueProvider::~ChromePoliciesValueProvider() {
   registry->RemoveObserver(this);
 }
 
-base::Value::Dict ChromePoliciesValueProvider::GetValues() {
-  auto client =
-      std::make_unique<policy::ChromePolicyConversionsClient>(profile_);
-  auto policy_conversions = policy::ChromePolicyConversions(std::move(client));
-  return policy_conversions.ToValueDict();
+base::DictValue ChromePoliciesValueProvider::GetValues() {
+  return policy::PolicyConversions(
+             std::make_unique<policy::ChromePolicyConversionsClient>(profile_))
+      .UseChromePolicyConversions()
+      .ToValueDict();
 }
 
-base::Value::Dict ChromePoliciesValueProvider::GetNames() {
-  base::Value::Dict names;
+base::DictValue ChromePoliciesValueProvider::GetNames() {
+  base::DictValue names;
 
   policy::SchemaRegistry* registry = profile_->GetOriginalProfile()
                                          ->GetPolicySchemaRegistryService()
@@ -59,25 +59,25 @@ base::Value::Dict ChromePoliciesValueProvider::GetNames() {
   scoped_refptr<policy::SchemaMap> schema_map = registry->schema_map();
 
   // Add Chrome policy names.
-  base::Value::List chrome_policy_names;
+  base::ListValue chrome_policy_names;
   policy::PolicyNamespace chrome_ns(policy::POLICY_DOMAIN_CHROME, "");
   const policy::Schema* chrome_schema = schema_map->GetSchema(chrome_ns);
   for (auto it = chrome_schema->GetPropertiesIterator(); !it.IsAtEnd();
        it.Advance()) {
     chrome_policy_names.Append(it.key());
   }
-  base::Value::Dict chrome_values;
+  base::DictValue chrome_values;
   chrome_values.Set(policy::kNameKey, policy::kChromePoliciesName);
   chrome_values.Set(policy::kPolicyNamesKey, std::move(chrome_policy_names));
   names.Set(policy::kChromePoliciesId, std::move(chrome_values));
 
 #if !BUILDFLAG(IS_CHROMEOS)
   // Add precedence policy names.
-  base::Value::List precedence_policy_names;
+  base::ListValue precedence_policy_names;
   for (auto* policy : policy::metapolicy::kPrecedence) {
     precedence_policy_names.Append(policy);
   }
-  base::Value::Dict precedence_values;
+  base::DictValue precedence_values;
   precedence_values.Set(policy::kNameKey, policy::kPrecedencePoliciesName);
   precedence_values.Set(policy::kPolicyNamesKey,
                         std::move(precedence_policy_names));
@@ -89,7 +89,8 @@ base::Value::Dict ChromePoliciesValueProvider::GetNames() {
 void ChromePoliciesValueProvider::Refresh() {
   GetPolicyService(profile_)->RefreshPolicies(
       base::BindOnce(&ChromePoliciesValueProvider::OnRefreshPoliciesDone,
-                     weak_ptr_factory_.GetWeakPtr()));
+                     weak_ptr_factory_.GetWeakPtr()),
+      policy::PolicyFetchReason::kUserRequest);
 }
 
 void ChromePoliciesValueProvider::OnRefreshPoliciesDone() {

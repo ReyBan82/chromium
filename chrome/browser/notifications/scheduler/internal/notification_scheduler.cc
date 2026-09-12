@@ -4,12 +4,12 @@
 
 #include "chrome/browser/notifications/scheduler/internal/notification_scheduler.h"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
@@ -18,18 +18,17 @@
 #include "chrome/browser/notifications/scheduler/internal/background_task_coordinator.h"
 #include "chrome/browser/notifications/scheduler/internal/display_decider.h"
 #include "chrome/browser/notifications/scheduler/internal/impression_history_tracker.h"
-#include "chrome/browser/notifications/scheduler/internal/notification_entry.h"
 #include "chrome/browser/notifications/scheduler/internal/notification_scheduler_context.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduled_notification_manager.h"
 #include "chrome/browser/notifications/scheduler/internal/scheduler_utils.h"
 #include "chrome/browser/notifications/scheduler/internal/stats.h"
 #include "chrome/browser/notifications/scheduler/public/display_agent.h"
 #include "chrome/browser/notifications/scheduler/public/notification_background_task_scheduler.h"
+#include "chrome/browser/notifications/scheduler/public/notification_entry.h"
 #include "chrome/browser/notifications/scheduler/public/notification_params.h"
 #include "chrome/browser/notifications/scheduler/public/notification_scheduler_client.h"
 #include "chrome/browser/notifications/scheduler/public/notification_scheduler_client_registrar.h"
 #include "chrome/browser/notifications/scheduler/public/user_action_handler.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace notifications {
 namespace {
@@ -54,7 +53,7 @@ class InitHelper {
             InitCallback callback) {
     // TODO(xingliu): Initialize the databases in parallel, we currently
     // initialize one by one to work around a shared db issue. See
-    // https://crbug.com/978680.
+    // https://crbug.com/41467860.
     context_ = context;
     callback_ = std::move(callback);
 
@@ -172,13 +171,17 @@ class DisplayHelper {
     context_->display_agent()->ShowNotification(
         std::move(updated_notification_data), std::move(system_data));
 
+    auto* client = context_->client_registrar()->GetClient(entry->type);
+    DCHECK(client);
+    client->OnShowNotification(std::move(updated_notification_data));
+
     MaybeFinish(entry->guid, true /*shown*/);
   }
 
   // Called when notification display flow is finished. Invokes
   // |finish_callback_| when all display flows are done.
   void MaybeFinish(const std::string& guid, bool shown) {
-    if (base::Contains(guids_, guid) && shown) {
+    if (guids_.contains(guid) && shown) {
       shown_count_++;
     }
     guids_.erase(guid);
@@ -248,9 +251,10 @@ class NotificationSchedulerImpl : public NotificationScheduler,
       SchedulerClientType type,
       ClientOverview::ClientOverviewCallback callback,
       ImpressionDetail impression_detail) {
-    std::vector<const NotificationEntry*> notifications;
+    std::vector<raw_ptr<const NotificationEntry>> notifications;
     context_->notification_manager()->GetNotifications(type, &notifications);
-    ClientOverview result(std::move(impression_detail), notifications.size());
+    ClientOverview result(std::move(impression_detail),
+                          std::move(notifications));
     std::move(callback).Run(std::move(result));
   }
 
@@ -273,10 +277,10 @@ class NotificationSchedulerImpl : public NotificationScheduler,
   }
 
   void NotifyClientAfterInit(SchedulerClientType type, bool success) {
-    std::vector<const NotificationEntry*> notifications;
+    std::vector<raw_ptr<const NotificationEntry>> notifications;
     context_->notification_manager()->GetNotifications(type, &notifications);
     std::set<std::string> guids;
-    for (const auto* notification : notifications) {
+    for (const notifications::NotificationEntry* notification : notifications) {
       DCHECK(notification);
       guids.emplace(notification->guid);
     }
@@ -288,8 +292,6 @@ class NotificationSchedulerImpl : public NotificationScheduler,
 
   // NotificationBackgroundTaskScheduler::Handler implementation.
   void OnStartTask(TaskFinishedCallback callback) override {
-    stats::LogBackgroundTaskEvent(stats::BackgroundTaskEvent::kStart);
-
     // Updates the impression data to compute daily notification shown budget.
     context_->impression_tracker()->AnalyzeImpressionHistory();
 
@@ -297,10 +299,7 @@ class NotificationSchedulerImpl : public NotificationScheduler,
     FindNotificationToShow(std::move(callback));
   }
 
-  void OnStopTask() override {
-    stats::LogBackgroundTaskEvent(stats::BackgroundTaskEvent::kStopByOS);
-    ScheduleBackgroundTask();
-  }
+  void OnStopTask() override { ScheduleBackgroundTask(); }
 
   void FindNotificationToShow(TaskFinishedCallback task_finish_callback) {
     DisplayDecider::Results results;
@@ -330,7 +329,6 @@ class NotificationSchedulerImpl : public NotificationScheduler,
     // Schedule the next background task based on scheduled notifications.
     ScheduleBackgroundTask();
 
-    stats::LogBackgroundTaskEvent(stats::BackgroundTaskEvent::kFinish);
     std::move(task_finish_callback).Run(false /*need_reschedule*/);
   }
 

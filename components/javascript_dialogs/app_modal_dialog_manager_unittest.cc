@@ -47,8 +47,7 @@ TEST(AppModalDialogManagerTest, GetTitle) {
        "An embedded page on this page says"},
 
       // data:
-      // /!\ NOTE that this is for data URLs entered directly in the omnibox.
-      // For pages that generate frames with data URLs, see the browsertest.
+      // See also the javascript_dialog_browsertest.
       // - main frame:
       {"data main frame", "data:blahblah", true, "", "This page says"},
       // - subframe:
@@ -103,8 +102,9 @@ TEST(AppModalDialogManagerTest, GetTitle) {
         test_case.is_main_frame
             ? main_frame_origin
             : url::Origin::Create(GURL(test_case.alerting_frame_url));
-    std::u16string result = AppModalDialogManager::GetTitleImpl(
-        main_frame_origin, alerting_frame_origin);
+    std::u16string result = AppModalDialogManager::GetSiteFrameTitle(
+        GURL(test_case.main_frame_url), main_frame_origin,
+        alerting_frame_origin);
     EXPECT_EQ(test_case.expected, base::UTF16ToUTF8(result));
   }
 }

@@ -31,10 +31,15 @@
 #include "third_party/blink/renderer/platform/text/date_components.h"
 
 #include <limits.h>
+
+#include <cstdlib>
+
 #include "base/notreached.h"
 #include "third_party/blink/renderer/platform/wtf/date_math.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 #include "third_party/blink/renderer/platform/wtf/text/ascii_ctype.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
@@ -50,8 +55,8 @@ static const int kMaximumMonthInMaximumYear = 8;
 static const int kMaximumDayInMaximumMonth = 13;
 static const int kMaximumWeekInMaximumYear = 37;  // The week of 275760-09-13
 
-static const int kDaysInMonth[12] = {31, 28, 31, 30, 31, 30,
-                                     31, 31, 30, 31, 30, 31};
+static const std::array<int, 12> kDaysInMonth = {31, 28, 31, 30, 31, 30,
+                                                 31, 31, 30, 31, 30, 31};
 
 // 'month' is 0-based.
 static int MaxDayOfMonth(int year, int month) {
@@ -95,8 +100,9 @@ int DateComponents::MaxWeekNumberInYear() const {
 static unsigned CountDigits(const String& src, unsigned start) {
   unsigned index = start;
   for (; index < src.length(); ++index) {
-    if (!IsASCIIDigit(src[index]))
+    if (!IsAsciiDigit(src[index])) {
       break;
+    }
   }
   return index - start;
 }
@@ -115,8 +121,9 @@ static bool ToInt(const String& src,
 
   // We don't need to handle negative numbers for ISO 8601.
   for (; current < end; ++current) {
-    if (!IsASCIIDigit(src[current]))
+    if (!IsAsciiDigit(src[current])) {
       return false;
+    }
     int digit = src[current] - '0';
     if (value > (INT_MAX - digit) / 10)  // Check for overflow.
       return false;
@@ -143,7 +150,7 @@ bool DateComponents::ParseYear(const String& src,
   return true;
 }
 
-static bool WithinHTMLDateLimits(int year, int month) {
+static bool WithinHtmlDateLimits(int year, int month) {
   if (year < DateComponents::MinimumYear())
     return false;
   if (year < DateComponents::MaximumYear())
@@ -151,7 +158,7 @@ static bool WithinHTMLDateLimits(int year, int month) {
   return month <= kMaximumMonthInMaximumYear;
 }
 
-static bool WithinHTMLDateLimits(int year, int month, int month_day) {
+static bool WithinHtmlDateLimits(int year, int month, int month_day) {
   if (year < DateComponents::MinimumYear())
     return false;
   if (year < DateComponents::MaximumYear())
@@ -161,7 +168,7 @@ static bool WithinHTMLDateLimits(int year, int month, int month_day) {
   return month_day <= kMaximumDayInMaximumMonth;
 }
 
-static bool WithinHTMLDateLimits(int year,
+static bool WithinHtmlDateLimits(int year,
                                  int month,
                                  int month_day,
                                  int hour,
@@ -197,8 +204,9 @@ bool DateComponents::ParseMonth(const String& src,
   if (!ToInt(src, index, 2, month) || month < 1 || month > 12)
     return false;
   --month;
-  if (!WithinHTMLDateLimits(year_, month))
+  if (!WithinHtmlDateLimits(year_, month)) {
     return false;
+  }
   month_ = month;
   end = index + 2;
   type_ = kMonth;
@@ -222,8 +230,9 @@ bool DateComponents::ParseDate(const String& src,
   if (!ToInt(src, index, 2, day) || day < 1 ||
       day > MaxDayOfMonth(year_, month_))
     return false;
-  if (!WithinHTMLDateLimits(year_, month_, day))
+  if (!WithinHtmlDateLimits(year_, month_, day)) {
     return false;
+  }
   month_day_ = day;
   end = index + 2;
   type_ = kDate;
@@ -330,30 +339,47 @@ bool DateComponents::ParseDateTimeLocal(const String& src,
   ++index;
   if (!ParseTime(src, index, end))
     return false;
-  if (!WithinHTMLDateLimits(year_, month_, month_day_, hour_, minute_, second_,
-                            millisecond_))
+  if (!WithinHtmlDateLimits(year_, month_, month_day_, hour_, minute_, second_,
+                            millisecond_)) {
     return false;
+  }
   type_ = kDateTimeLocal;
   return true;
 }
 
-static inline double PositiveFmod(double value, double divider) {
+namespace {
+
+inline double PositiveFmod(double value, double divider) {
   double remainder = fmod(value, divider);
   return remainder < 0 ? remainder + divider : remainder;
 }
 
-void DateComponents::SetMillisecondsSinceMidnightInternal(double ms_in_day) {
+int ToMillisecondsSinceMidnight(double ms) {
+  const double ms_in_day = PositiveFmod(ms, base::Time::kMillisecondsPerDay);
+  return base::ClampFloor<int>(ms_in_day);
+}
+
+}  // namespace
+
+void DateComponents::SetMillisecondsSinceMidnightInternal(int ms_in_day) {
   DCHECK_GE(ms_in_day, 0);
-  DCHECK_LT(ms_in_day, kMsPerDay);
-  millisecond_ = static_cast<int>(fmod(ms_in_day, kMsPerSecond));
-  double value = std::floor(ms_in_day / kMsPerSecond);
-  second_ = static_cast<int>(fmod(value, kSecondsPerMinute));
-  value = std::floor(value / kSecondsPerMinute);
-  minute_ = static_cast<int>(fmod(value, kMinutesPerHour));
-  hour_ = static_cast<int>(value / kMinutesPerHour);
+  DCHECK_LT(ms_in_day, base::Time::kMillisecondsPerDay);
+  const std::div_t seconds =
+      std::div(ms_in_day, static_cast<int>(base::Time::kMillisecondsPerSecond));
+  millisecond_ = seconds.rem;
+  const std::div_t minutes =
+      std::div(seconds.quot, static_cast<int>(base::Time::kSecondsPerMinute));
+  second_ = minutes.rem;
+  const std::div_t hours =
+      std::div(minutes.quot, static_cast<int>(base::Time::kMinutesPerHour));
+  minute_ = hours.rem;
+  hour_ = hours.quot;
 }
 
 bool DateComponents::SetMillisecondsSinceEpochForDateInternal(double ms) {
+  if (ms < kMinimumEcmaDateInMs || ms > kMaximumEcmaDateInMs) {
+    return false;
+  }
   year_ = MsToYear(ms);
   int year_day = DayInYear(ms, year_);
   month_ = MonthFromDayInYear(year_day, IsLeapYear(year_));
@@ -367,8 +393,9 @@ bool DateComponents::SetMillisecondsSinceEpochForDate(double ms) {
     return false;
   if (!SetMillisecondsSinceEpochForDateInternal(round(ms)))
     return false;
-  if (!WithinHTMLDateLimits(year_, month_, month_day_))
+  if (!WithinHtmlDateLimits(year_, month_, month_day_)) {
     return false;
+  }
   type_ = kDate;
   return true;
 }
@@ -378,12 +405,13 @@ bool DateComponents::SetMillisecondsSinceEpochForDateTimeLocal(double ms) {
   if (!std::isfinite(ms))
     return false;
   ms = round(ms);
-  SetMillisecondsSinceMidnightInternal(PositiveFmod(ms, kMsPerDay));
+  SetMillisecondsSinceMidnightInternal(ToMillisecondsSinceMidnight(ms));
   if (!SetMillisecondsSinceEpochForDateInternal(ms))
     return false;
-  if (!WithinHTMLDateLimits(year_, month_, month_day_, hour_, minute_, second_,
-                            millisecond_))
+  if (!WithinHtmlDateLimits(year_, month_, month_day_, hour_, minute_, second_,
+                            millisecond_)) {
     return false;
+  }
   type_ = kDateTimeLocal;
   return true;
 }
@@ -394,8 +422,9 @@ bool DateComponents::SetMillisecondsSinceEpochForMonth(double ms) {
     return false;
   if (!SetMillisecondsSinceEpochForDateInternal(round(ms)))
     return false;
-  if (!WithinHTMLDateLimits(year_, month_))
+  if (!WithinHtmlDateLimits(year_, month_)) {
     return false;
+  }
   type_ = kMonth;
   return true;
 }
@@ -404,7 +433,7 @@ bool DateComponents::SetMillisecondsSinceMidnight(double ms) {
   type_ = kInvalid;
   if (!std::isfinite(ms))
     return false;
-  SetMillisecondsSinceMidnightInternal(PositiveFmod(round(ms), kMsPerDay));
+  SetMillisecondsSinceMidnightInternal(ToMillisecondsSinceMidnight(ms));
   type_ = kTime;
   return true;
 }
@@ -419,8 +448,9 @@ bool DateComponents::SetMonthsSinceEpoch(double months) {
     return false;
   int year = static_cast<int>(double_year);
   int month = static_cast<int>(double_month);
-  if (!WithinHTMLDateLimits(year, month))
+  if (!WithinHtmlDateLimits(year, month)) {
     return false;
+  }
   year_ = year;
   month_ = month;
   type_ = kMonth;
@@ -480,33 +510,39 @@ bool DateComponents::SetWeek(int year, int week_number) {
   return true;
 }
 
-double DateComponents::MillisecondsSinceEpochForTime() const {
+base::TimeDelta DateComponents::MillisecondsSinceEpochForTime() const {
   DCHECK(type_ == kTime || type_ == kDateTimeLocal);
-  return ((hour_ * kMinutesPerHour + minute_) * kSecondsPerMinute + second_) *
-             kMsPerSecond +
-         millisecond_;
+  base::TimeDelta time = base::Hours(hour_);
+  time += base::Minutes(minute_);
+  time += base::Seconds(second_);
+  time += base::Milliseconds(millisecond_);
+  return time;
 }
 
 double DateComponents::MillisecondsSinceEpoch() const {
+  base::TimeDelta time;
   switch (type_) {
     case kDate:
-      return DateToDaysFrom1970(year_, month_, month_day_) * kMsPerDay;
-    case kDateTimeLocal:
-      return DateToDaysFrom1970(year_, month_, month_day_) * kMsPerDay +
-             MillisecondsSinceEpochForTime();
-    case kMonth:
-      return DateToDaysFrom1970(year_, month_, 1) * kMsPerDay;
-    case kTime:
-      return MillisecondsSinceEpochForTime();
-    case kWeek:
-      return (DateToDaysFrom1970(year_, 0, 1) + OffsetTo1stWeekStart(year_) +
-              (week_ - 1) * 7) *
-             kMsPerDay;
-    case kInvalid:
+      time = base::Days(DateToDaysFrom1970(year_, month_, month_day_));
       break;
+    case kDateTimeLocal:
+      time = base::Days(DateToDaysFrom1970(year_, month_, month_day_));
+      time += MillisecondsSinceEpochForTime();
+      break;
+    case kMonth:
+      time = base::Days(DateToDaysFrom1970(year_, month_, 1));
+      break;
+    case kTime:
+      time = MillisecondsSinceEpochForTime();
+      break;
+    case kWeek:
+      time = base::Days(DateToDaysFrom1970(year_, 0, 1) +
+                        OffsetTo1stWeekStart(year_) + (week_ - 1) * 7);
+      break;
+    case kInvalid:
+      NOTREACHED();
   }
-  NOTREACHED();
-  return InvalidMilliseconds();
+  return time.InMillisecondsF();
 }
 
 double DateComponents::MonthsSinceEpoch() const {
@@ -523,37 +559,35 @@ String DateComponents::ToStringForTime(SecondFormat format) const {
     effective_format = SecondFormat::kSecond;
 
   switch (effective_format) {
+    case SecondFormat::kNone:
+      return Format("{:02}:{:02}", hour_, minute_);
+    case SecondFormat::kSecond:
+      return Format("{:02}:{:02}:{:02}", hour_, minute_, second_);
+    case SecondFormat::kMillisecond:
+      return Format("{:02}:{:02}:{:02}.{:03}", hour_, minute_, second_,
+                    millisecond_);
     default:
       NOTREACHED();
-      [[fallthrough]];
-    case SecondFormat::kNone:
-      return String::Format("%02d:%02d", hour_, minute_);
-    case SecondFormat::kSecond:
-      return String::Format("%02d:%02d:%02d", hour_, minute_, second_);
-    case SecondFormat::kMillisecond:
-      return String::Format("%02d:%02d:%02d.%03d", hour_, minute_, second_,
-                            millisecond_);
   }
 }
 
 String DateComponents::ToString(SecondFormat format) const {
   switch (type_) {
     case kDate:
-      return String::Format("%04d-%02d-%02d", year_, month_ + 1, month_day_);
+      return Format("{:04}-{:02}-{:02}", year_, month_ + 1, month_day_);
     case kDateTimeLocal:
-      return String::Format("%04d-%02d-%02dT", year_, month_ + 1, month_day_) +
-             ToStringForTime(format);
+      return Format("{:04}-{:02}-{:02}T{}", year_, month_ + 1, month_day_,
+                    ToStringForTime(format));
     case kMonth:
-      return String::Format("%04d-%02d", year_, month_ + 1);
+      return Format("{:04}-{:02}", year_, month_ + 1);
     case kTime:
       return ToStringForTime(format);
     case kWeek:
-      return String::Format("%04d-W%02d", year_, week_);
+      return Format("{:04}-W{:02}", year_, week_);
     case kInvalid:
       break;
   }
   NOTREACHED();
-  return String("(Invalid DateComponents)");
 }
 
 }  // namespace blink

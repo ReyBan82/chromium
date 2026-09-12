@@ -14,6 +14,7 @@
 #include "media/base/callback_registry.h"
 #include "media/base/cdm_context.h"
 #include "media/base/decryptor.h"
+#include "media/base/hdr_metadata_reordering_map.h"
 #include "media/base/video_decoder.h"
 #include "media/base/video_decoder_config.h"
 
@@ -89,9 +90,11 @@ class MEDIA_EXPORT DecryptingVideoDecoder : public VideoDecoder {
   void CompletePendingDecode(Decryptor::Status status);
   void CompleteWaitingForDecryptionKey();
 
+  bool HasClearLead() const { return has_clear_lead_.value_or(false); }
+
   // Set in constructor.
   scoped_refptr<base::SequencedTaskRunner> const task_runner_;
-  const raw_ptr<MediaLog> media_log_;
+  const std::unique_ptr<MediaLog> media_log_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 
@@ -110,6 +113,8 @@ class MEDIA_EXPORT DecryptingVideoDecoder : public VideoDecoder {
   // The buffer that needs decrypting/decoding.
   scoped_refptr<media::DecoderBuffer> pending_buffer_to_decode_;
 
+  HdrMetadataReorderingMap hdr_metadata_reordering_map_;
+
   // Indicates the situation where new key is added during pending decode
   // (in other words, this variable can only be set in state kPendingDecode).
   // If this variable is true and kNoKey is returned then we need to try
@@ -120,6 +125,10 @@ class MEDIA_EXPORT DecryptingVideoDecoder : public VideoDecoder {
   // Once Initialized() with encrypted content support, if the stream changes to
   // clear content, we want to ensure this decoder remains used.
   bool support_clear_content_ = false;
+
+  std::optional<bool> has_clear_lead_;
+
+  bool switched_clear_to_encrypted_ = false;
 
   // To keep the CdmContext event callback registered.
   std::unique_ptr<CallbackRegistration> event_cb_registration_;

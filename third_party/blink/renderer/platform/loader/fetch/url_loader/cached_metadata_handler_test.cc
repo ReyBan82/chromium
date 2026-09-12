@@ -4,16 +4,20 @@
 
 #include "third_party/blink/renderer/platform/loader/fetch/url_loader/cached_metadata_handler.h"
 
+#include "base/memory/raw_ptr.h"
 #include "base/test/task_environment.h"
+#include "components/persistent_cache/pending_backend.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
 #include "third_party/blink/public/mojom/loader/code_cache.mojom-blink.h"
 #include "third_party/blink/public/platform/url_conversion.h"
 #include "third_party/blink/public/platform/web_url.h"
 #include "third_party/blink/renderer/platform/loader/fetch/code_cache_host.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_request.h"
 #include "third_party/blink/renderer/platform/loader/fetch/resource_response.h"
-#include "third_party/blink/renderer/platform/testing/testing_platform_support_with_mock_scheduler.h"
+#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
+#include "third_party/blink/renderer/platform/testing/testing_platform_support.h"
 #include "third_party/blink/renderer/platform/weborigin/kurl.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
@@ -50,6 +54,10 @@ class CodeCacheHostMockImpl : public mojom::blink::CodeCacheHost {
 
  private:
   // CodeCacheHost implementation.
+  void GetPendingBackend(mojom::blink::CodeCacheType cache_type,
+                         GetPendingBackendCallback callback) override {
+    std::move(callback).Run(std::nullopt);
+  }
   void DidGenerateCacheableMetadata(mojom::blink::CodeCacheType cache_type,
                                     const KURL& url,
                                     base::Time expected_response_time,
@@ -57,7 +65,9 @@ class CodeCacheHostMockImpl : public mojom::blink::CodeCacheHost {
     sim_->CacheMetadata(cache_type, url, expected_response_time, data.data(),
                         data.size());
   }
-
+  void DidGenerateSourceKeyedCacheableMetadata(
+      const blink::Vector<uint8_t>& script_hash,
+      mojo_base::BigBuffer data) override {}
   void FetchCachedCode(mojom::blink::CodeCacheType cache_type,
                        const KURL& url,
                        FetchCachedCodeCallback) override {}
@@ -68,12 +78,11 @@ class CodeCacheHostMockImpl : public mojom::blink::CodeCacheHost {
       const KURL& url,
       base::Time expected_response_time,
       mojo_base::BigBuffer data,
-      const scoped_refptr<const SecurityOrigin>& cache_storage_origin,
       const String& cache_storage_cache_name) override {
     sim_->CacheMetadataInCacheStorage(url);
   }
 
-  MockGeneratedCodeCache* sim_;
+  raw_ptr<MockGeneratedCodeCache> sim_;
 };
 
 ResourceResponse CreateTestResourceResponse() {
@@ -96,8 +105,8 @@ void SendDataFor(const ResourceResponse& response,
   mojo::Remote<mojom::blink::CodeCacheHost> remote;
   mojo::Receiver<mojom::blink::CodeCacheHost> receiver(
       mojo_code_cache_host.get(), remote.BindNewPipeAndPassReceiver());
-  CodeCacheHost code_cache_host(std::move(remote));
-  sender->Send(&code_cache_host, kTestData, sizeof(kTestData));
+  auto code_cache_host = CodeCacheHost::Create(std::move(remote));
+  sender->Send(code_cache_host.get(), kTestData);
 
   // Drain the task queue.
   task_environment.RunUntilIdle();
@@ -129,6 +138,7 @@ TEST(
 TEST(
     CachedMetadataHandlerTest,
     SendsMetadataToPlatformWhenFetchedViaServiceWorkerWithPassThroughResponse) {
+  ScopedServiceWorkerCodeCacheForTest scoped_feature(true);
   MockGeneratedCodeCache mock_disk_cache;
 
   // Equivalent to service worker calling respondWith(fetch(evt.request.url));
@@ -144,6 +154,7 @@ TEST(
 TEST(
     CachedMetadataHandlerTest,
     DoesNotSendMetadataToPlatformWhenFetchedViaServiceWorkerWithDifferentURLResponse) {
+  ScopedServiceWorkerCodeCacheForTest scoped_feature(true);
   MockGeneratedCodeCache mock_disk_cache;
 
   // Equivalent to service worker calling respondWith(fetch(some_different_url))
@@ -159,16 +170,87 @@ TEST(
 
 TEST(CachedMetadataHandlerTest,
      SendsMetadataToPlatformWhenFetchedViaServiceWorkerWithCacheResponse) {
+  ScopedServiceWorkerCodeCacheForTest scoped_feature(true);
   MockGeneratedCodeCache mock_disk_cache;
 
   // Equivalent to service worker calling respondWith(cache.match(some_url));
+  ResourceResponse response(CreateTestResourceResponse());
+  response.SetWasFetchedViaServiceWorker(true);
+  response.SetUrlListViaServiceWorker({response.CurrentRequestUrl()});
+  response.SetCacheStorageCacheName("dummy");
+
+  SendDataFor(response, &mock_disk_cache);
+  EXPECT_EQ(0u, mock_disk_cache.CachedURLs().size());
+  EXPECT_EQ(1u, mock_disk_cache.CacheStorageCachedURLs().size());
+}
+
+TEST(CachedMetadataHandlerTest,
+     DoesNotSendMetadataToPlatformWhenServiceWorkerCodeCacheDisabled) {
+  ScopedServiceWorkerCodeCacheForTest scoped_feature(false);
+  MockGeneratedCodeCache mock_disk_cache;
+
+  ResourceResponse response(CreateTestResourceResponse());
+  response.SetWasFetchedViaServiceWorker(true);
+  response.SetUrlListViaServiceWorker({response.CurrentRequestUrl()});
+  response.SetCacheStorageCacheName("dummy");
+
+  SendDataFor(response, &mock_disk_cache);
+  EXPECT_EQ(0u, mock_disk_cache.CachedURLs().size());
+  EXPECT_EQ(0u, mock_disk_cache.CacheStorageCachedURLs().size());
+}
+
+TEST(
+    CachedMetadataHandlerTest,
+    DoesNotSendMetadataToPlatformWhenFetchedViaServiceWorkerWithSyntheticCacheResponse) {
+  ScopedServiceWorkerCodeCacheForTest scoped_feature(true);
+  MockGeneratedCodeCache mock_disk_cache;
+
+  // Equivalent to service worker calling
+  // respondWith(cache.match(synthetic_response));
   ResourceResponse response(CreateTestResourceResponse());
   response.SetWasFetchedViaServiceWorker(true);
   response.SetCacheStorageCacheName("dummy");
 
   SendDataFor(response, &mock_disk_cache);
   EXPECT_EQ(0u, mock_disk_cache.CachedURLs().size());
-  EXPECT_EQ(1u, mock_disk_cache.CacheStorageCachedURLs().size());
+  EXPECT_EQ(0u, mock_disk_cache.CacheStorageCachedURLs().size());
+}
+
+TEST(
+    CachedMetadataHandlerTest,
+    DoesNotSendMetadataToPlatformWhenFetchedViaServiceWorkerWithDifferentURLCacheResponse) {
+  ScopedServiceWorkerCodeCacheForTest scoped_feature(true);
+  MockGeneratedCodeCache mock_disk_cache;
+
+  // Equivalent to service worker calling
+  // respondWith(cache.match(different_url));
+  ResourceResponse response(CreateTestResourceResponse());
+  response.SetWasFetchedViaServiceWorker(true);
+  response.SetUrlListViaServiceWorker(
+      {KURL("https://example.com/different/url")});
+  response.SetCacheStorageCacheName("dummy");
+
+  SendDataFor(response, &mock_disk_cache);
+  EXPECT_EQ(0u, mock_disk_cache.CachedURLs().size());
+  EXPECT_EQ(0u, mock_disk_cache.CacheStorageCachedURLs().size());
+}
+
+TEST(CachedMetadataHandlerTest,
+     ShouldUseIsolatedCodeCacheRespectsServiceWorkerCodeCacheFlag) {
+  ResourceResponse response(CreateTestResourceResponse());
+  response.SetWasFetchedViaServiceWorker(true);
+  response.SetUrlListViaServiceWorker({response.CurrentRequestUrl()});
+
+  {
+    ScopedServiceWorkerCodeCacheForTest scoped_feature(false);
+    EXPECT_FALSE(ShouldUseIsolatedCodeCache(
+        mojom::blink::RequestContextType::SCRIPT, response));
+  }
+  {
+    ScopedServiceWorkerCodeCacheForTest scoped_feature(true);
+    EXPECT_TRUE(ShouldUseIsolatedCodeCache(
+        mojom::blink::RequestContextType::SCRIPT, response));
+  }
 }
 
 }  // namespace

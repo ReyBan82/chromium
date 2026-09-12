@@ -5,7 +5,11 @@
 #ifndef CHROME_BROWSER_COMMAND_UPDATER_H_
 #define CHROME_BROWSER_COMMAND_UPDATER_H_
 
+#include <optional>
+#include <vector>
+
 #include "base/time/time.h"
+#include "ui/actions/actions.h"
 #include "ui/base/window_open_disposition.h"
 
 class CommandObserver;
@@ -25,7 +29,7 @@ class CommandObserver;
 //
 class CommandUpdater {
  public:
-  virtual ~CommandUpdater() {}
+  virtual ~CommandUpdater() = default;
 
   // Returns true if the specified command ID is supported.
   virtual bool SupportsCommand(int id) const = 0;
@@ -38,18 +42,26 @@ class CommandUpdater {
   // disposition.
   // Returns true if the command was executed (i.e. it is supported and is
   // enabled).
-  virtual bool ExecuteCommand(
+  bool ExecuteCommand(
       int id,
-      base::TimeTicks time_stamp = base::TimeTicks::Now()) = 0;
+      std::optional<actions::ActionInvocationContext> context = std::nullopt,
+      base::TimeTicks time_stamp = base::TimeTicks::Now()) {
+    return ExecuteCommandWithDispositionAndContext(
+        id, WindowOpenDisposition::CURRENT_TAB, std::move(context), time_stamp);
+  }
 
   // Performs the action associated with this command ID using the given
   // disposition.
   // Returns true if the command was executed (i.e. it is supported and is
   // enabled).
-  virtual bool ExecuteCommandWithDisposition(
+  bool ExecuteCommandWithDisposition(
       int id,
       WindowOpenDisposition disposition,
-      base::TimeTicks time_stamp = base::TimeTicks::Now()) = 0;
+      std::optional<actions::ActionInvocationContext> context = std::nullopt,
+      base::TimeTicks time_stamp = base::TimeTicks::Now()) {
+    return ExecuteCommandWithDispositionAndContext(
+        id, disposition, std::move(context), time_stamp);
+  }
 
   // Adds an observer to the state of a particular command. If the command does
   // not exist, it is created, initialized to false.
@@ -68,6 +80,19 @@ class CommandUpdater {
   // Returns true if the update succeeded (it's possible that the browser is in
   // "locked-down" state where we prevent changes to the command state).
   virtual bool UpdateCommandEnabled(int id, bool state) = 0;
+
+  // Disables all commands.
+  virtual void DisableAllCommands() = 0;
+
+  // Returns all registered command IDs.
+  virtual std::vector<int> GetAllIds() const = 0;
+
+ protected:
+  virtual bool ExecuteCommandWithDispositionAndContext(
+      int id,
+      WindowOpenDisposition disposition,
+      std::optional<actions::ActionInvocationContext> context,
+      base::TimeTicks time_stamp) = 0;
 };
 
 #endif  // CHROME_BROWSER_COMMAND_UPDATER_H_

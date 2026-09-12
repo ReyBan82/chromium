@@ -16,56 +16,53 @@ import android.widget.OverScroller;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.annotation.Config;
-import org.robolectric.shadows.ShadowLooper;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.components.paintpreview.player.OverscrollHandler;
 
-/**
- * Tests for the {@link PlayerFrameScrollController} class.
- */
+/** Tests for the {@link PlayerFrameScrollController} class. */
 @RunWith(BaseRobolectricTestRunner.class)
 @Config(shadows = {PaintPreviewCustomFlingingShadowScroller.class})
 public class PlayerFrameScrollControllerTest {
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
     private static final int CONTENT_WIDTH = 500;
     private static final int CONTENT_HEIGHT = 1000;
     private static final float TOLERANCE = 0.001f;
 
     private OverScroller mScroller;
     private PlayerFrameViewport mViewport;
-    @Mock
-    private PlayerFrameMediatorDelegate mMediatorDelegateMock;
-    @Mock
-    private OverscrollHandler mOverscrollHandlerMock;
+    @Mock private PlayerFrameMediatorDelegate mMediatorDelegateMock;
+    @Mock private OverscrollHandler mOverscrollHandlerMock;
     private boolean mDidScroll;
     private boolean mDidFling;
     private PlayerFrameScrollController mScrollController;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mScroller = new OverScroller(ContextUtils.getApplicationContext());
         mDidScroll = false;
-        Runnable mOnScrollListener = () -> mDidScroll = true;
-        Runnable mOnFlingListener = () -> mDidFling = true;
+        Runnable onScrollListener = () -> mDidScroll = true;
+        Runnable onFlingListener = () -> mDidFling = true;
         mViewport = new PlayerFrameViewport();
         when(mMediatorDelegateMock.getViewport()).thenReturn(mViewport);
         when(mMediatorDelegateMock.getContentSize())
                 .thenReturn(new Size(CONTENT_WIDTH, CONTENT_HEIGHT));
-        mScrollController = new PlayerFrameScrollController(
-                mScroller, mMediatorDelegateMock, mOnScrollListener, mOnFlingListener);
+        mScrollController =
+                new PlayerFrameScrollController(
+                        mScroller, mMediatorDelegateMock, onScrollListener, onFlingListener);
     }
 
-    /**
-     * Test that scrolling updates the viewport correctly and triggers expected callbacks.
-     */
+    /** Test that scrolling updates the viewport correctly and triggers expected callbacks. */
     @Test
     public void testScrollBy() {
         mViewport.setSize(100, 100);
@@ -80,9 +77,7 @@ public class PlayerFrameScrollControllerTest {
         Assert.assertTrue(mDidScroll);
     }
 
-    /**
-     * Test that scrolling won't exceed content bounds.
-     */
+    /** Test that scrolling won't exceed content bounds. */
     @Test
     public void testScrollByWithinBounds() {
         mViewport.setSize(100, 100);
@@ -139,45 +134,43 @@ public class PlayerFrameScrollControllerTest {
 
         Assert.assertTrue(mScrollController.onFling(100, 0));
         Assert.assertTrue(mDidFling);
-        ShadowLooper.runUiThreadTasks();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertTrue(mScroller.isFinished());
         Assert.assertEquals(mScroller.getFinalX(), mViewport.getTransX(), TOLERANCE);
         Assert.assertEquals(mScroller.getFinalY(), mViewport.getTransY(), TOLERANCE);
 
         Assert.assertTrue(mScrollController.onFling(-100, 0));
-        ShadowLooper.runUiThreadTasks();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertTrue(mScroller.isFinished());
         Assert.assertEquals(mScroller.getFinalX(), mViewport.getTransX(), TOLERANCE);
         Assert.assertEquals(mScroller.getFinalY(), mViewport.getTransY(), TOLERANCE);
 
         Assert.assertTrue(mScrollController.onFling(0, 100));
-        ShadowLooper.runUiThreadTasks();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertTrue(mScroller.isFinished());
         Assert.assertEquals(mScroller.getFinalX(), mViewport.getTransX(), TOLERANCE);
         Assert.assertEquals(mScroller.getFinalY(), mViewport.getTransY(), TOLERANCE);
 
         Assert.assertTrue(mScrollController.onFling(0, -100));
-        ShadowLooper.runUiThreadTasks();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertTrue(mScroller.isFinished());
         Assert.assertEquals(mScroller.getFinalX(), mViewport.getTransX(), TOLERANCE);
         Assert.assertEquals(mScroller.getFinalY(), mViewport.getTransY(), TOLERANCE);
 
         Assert.assertTrue(mScrollController.onFling(100, 100));
-        ShadowLooper.runUiThreadTasks();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertTrue(mScroller.isFinished());
         Assert.assertEquals(mScroller.getFinalX(), mViewport.getTransX(), TOLERANCE);
         Assert.assertEquals(mScroller.getFinalY(), mViewport.getTransY(), TOLERANCE);
 
         Assert.assertTrue(mScrollController.onFling(-100, -100));
-        ShadowLooper.runUiThreadTasks();
+        RobolectricUtil.runAllBackgroundAndUi();
         Assert.assertTrue(mScroller.isFinished());
         Assert.assertEquals(mScroller.getFinalX(), mViewport.getTransX(), TOLERANCE);
         Assert.assertEquals(mScroller.getFinalY(), mViewport.getTransY(), TOLERANCE);
     }
 
-    /**
-     * Test that the overscroll-to-refresh handler is called when appropriate.
-     */
+    /** Test that the overscroll-to-refresh handler is called when appropriate. */
     @Test
     public void testOverscrollToRefresh() {
         mScrollController.setOverscrollHandler(mOverscrollHandlerMock);
@@ -194,9 +187,7 @@ public class PlayerFrameScrollControllerTest {
         verify(mOverscrollHandlerMock).release();
     }
 
-    /**
-     * Test that the overscroll-to-refresh handler is eased correctly.
-     */
+    /** Test that the overscroll-to-refresh handler is eased correctly. */
     @Test
     public void testOverscrollToRefreshEasedOff() {
         mScrollController.setOverscrollHandler(mOverscrollHandlerMock);
@@ -216,9 +207,7 @@ public class PlayerFrameScrollControllerTest {
         verify(mOverscrollHandlerMock, never()).release();
     }
 
-    /**
-     * Test that the bitmap scale matrix updates correctly if it isn't identity.
-     */
+    /** Test that the bitmap scale matrix updates correctly if it isn't identity. */
     @Test
     public void testOffsetBitmapScaleMatrix() {
         mViewport.setSize(100, 100);

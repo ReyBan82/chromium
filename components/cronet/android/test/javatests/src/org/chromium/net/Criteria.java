@@ -4,14 +4,11 @@
 
 package org.chromium.net;
 
-/**
- * Provides a means for validating whether some condition/criteria has been met.
- */
+/** Provides a means for validating whether some condition/criteria has been met. */
 public interface Criteria {
 
     /**
      * @return Whether the criteria this is testing has been satisfied.
      */
-    public boolean isSatisfied();
-
+    boolean isSatisfied();
 }

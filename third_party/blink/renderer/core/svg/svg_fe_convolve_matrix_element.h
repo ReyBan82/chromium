@@ -42,6 +42,9 @@ class SVGFEConvolveMatrixElement final
 
  public:
   explicit SVGFEConvolveMatrixElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFEConvolveMatrixElement;
+  }
 
   SVGAnimatedBoolean* preserveAlpha() { return preserve_alpha_.Get(); }
   SVGAnimatedNumber* divisor() { return divisor_.Get(); }
@@ -69,6 +72,10 @@ class SVGFEConvolveMatrixElement final
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override { return false; }
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumber> bias_;
   Member<SVGAnimatedNumber> divisor_;

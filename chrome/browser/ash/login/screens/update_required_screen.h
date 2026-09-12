@@ -10,6 +10,8 @@
 #include <string>
 
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
@@ -17,11 +19,14 @@
 #include "chrome/browser/ash/login/screens/error_screen.h"
 #include "chrome/browser/ash/login/version_updater/version_updater.h"
 #include "chromeos/ash/components/network/network_state_handler_observer.h"
-#include "components/user_manager/remove_user_delegate.h"
 
 namespace base {
 class Clock;
 }  // namespace base
+
+namespace policy {
+class BrowserPolicyConnectorAsh;
+}  // namespace policy
 
 namespace ash {
 
@@ -32,14 +37,16 @@ class UpdateRequiredView;
 // Controller for the update required screen.
 class UpdateRequiredScreen : public BaseScreen,
                              public VersionUpdater::Delegate,
-                             public NetworkStateHandlerObserver,
-                             public user_manager::RemoveUserDelegate {
+                             public NetworkStateHandlerObserver {
  public:
   using TView = UpdateRequiredView;
 
-  UpdateRequiredScreen(base::WeakPtr<UpdateRequiredView> view,
-                       ErrorScreen* error_screen,
-                       base::RepeatingClosure exit_callback);
+  // `browser_policy_connector_ash` must be non-null and must outlive `this`.
+  UpdateRequiredScreen(
+      const policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
+      base::WeakPtr<UpdateRequiredView> view,
+      ErrorScreen* error_screen,
+      base::RepeatingClosure exit_callback);
 
   UpdateRequiredScreen(const UpdateRequiredScreen&) = delete;
   UpdateRequiredScreen& operator=(const UpdateRequiredScreen&) = delete;
@@ -72,7 +79,7 @@ class UpdateRequiredScreen : public BaseScreen,
   // BaseScreen:
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
   void EnsureScreenIsShown();
 
@@ -84,10 +91,6 @@ class UpdateRequiredScreen : public BaseScreen,
 
   // NetworkStateHandlerObserver:
   void DefaultNetworkChanged(const NetworkState* network) override;
-
-  // user_manager::RemoveUserDelegate:
-  void OnBeforeUserRemoved(const AccountId& account_id) override;
-  void OnUserRemoved(const AccountId& account_id) override;
 
   void RefreshNetworkState();
   void RefreshView(const VersionUpdater::UpdateInfo& update_info);
@@ -110,12 +113,15 @@ class UpdateRequiredScreen : public BaseScreen,
   // Deletes all users data on the device.
   void DeleteUsersData();
 
+  const raw_ref<const policy::BrowserPolicyConnectorAsh>
+      browser_policy_connector_ash_;
+
   // True if there was no notification about captive portal state for
   // the default network.
   bool is_first_portal_notification_ = true;
 
   base::WeakPtr<UpdateRequiredView> view_;
-  ErrorScreen* error_screen_;
+  raw_ptr<ErrorScreen> error_screen_;
   base::RepeatingClosure exit_callback_;
   std::unique_ptr<ErrorScreensHistogramHelper> histogram_helper_;
 
@@ -143,7 +149,7 @@ class UpdateRequiredScreen : public BaseScreen,
   base::OneShotTimer error_message_timer_;
 
   // Overridden for testing EOL by setting the current time.
-  base::Clock* clock_;
+  raw_ptr<base::Clock> clock_;
 
   base::TimeDelta error_message_delay_;
 

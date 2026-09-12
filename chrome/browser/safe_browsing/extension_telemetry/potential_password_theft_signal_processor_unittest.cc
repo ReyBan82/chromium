@@ -1,9 +1,12 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "chrome/browser/safe_browsing/extension_telemetry/potential_password_theft_signal_processor.h"
-#include "base/test/scoped_feature_list.h"
+
+#include <array>
+#include <vector>
+
 #include "chrome/browser/safe_browsing/extension_telemetry/password_reuse_signal.h"
 #include "chrome/browser/safe_browsing/extension_telemetry/remote_host_contacted_signal.h"
 #include "components/safe_browsing/content/browser/password_protection/password_protection_service.h"
@@ -32,11 +35,18 @@ using RemoteHostContactedInfo =
 using LoginReputationClientReusedPasswordAccountType =
     LoginReputationClientRequest::PasswordReuseEvent::ReusedPasswordAccountType;
 
-constexpr const char* kExtensionId[] = {"crx-0", "crx-1"};
-const char* host_urls[] = {"http://www.google.com", "http://www.youtube.com",
-                           "http://www.giggle.com", "http://www.yutube.com"};
-RemoteHostContactedInfo::ProtocolType kProtocolType =
+constexpr const auto kExtensionId =
+    std::to_array<const char*>({"crx-0", "crx-1"});
+auto host_urls = std::to_array<const char*>({
+    "http://www.google.com",
+    "http://www.youtube.com",
+    "http://www.giggle.com",
+    "http://www.yutube.com",
+});
+constexpr RemoteHostContactedInfo::ProtocolType kProtocolType =
     RemoteHostContactedInfo::HTTP_HTTPS;
+constexpr RemoteHostContactedInfo::ContactInitiator kContactInitiator =
+    RemoteHostContactedInfo::EXTENSION;
 
 class PotentialPasswordTheftSignalProcessorTest : public ::testing::Test {
  protected:
@@ -68,7 +78,6 @@ class PotentialPasswordTheftSignalProcessorTest : public ::testing::Test {
     return reused_password_account_type;
   }
 
-  base::test::ScopedFeatureList scoped_feature_list;
   PotentialPasswordTheftSignalProcessor processor_;
   content::BrowserTaskEnvironment task_environment_;
 
@@ -86,9 +95,7 @@ TEST_F(PotentialPasswordTheftSignalProcessorTest,
 TEST_F(PotentialPasswordTheftSignalProcessorTest, ProcessTwoSignalsInOrder) {
   auto pw_reuse_signal = PasswordReuseSignal(kExtensionId[0], pw_reuse_event_0);
   auto remote_host_signal = RemoteHostContactedSignal(
-      kExtensionId[0], GURL(host_urls[0]), kProtocolType);
-  scoped_feature_list.InitAndEnableFeature(
-      kExtensionTelemetryPotentialPasswordTheft);
+      kExtensionId[0], GURL(host_urls[0]), kProtocolType, kContactInitiator);
   processor_.ProcessSignal(pw_reuse_signal);
 
   EXPECT_FALSE(processor_.IsPasswordQueueEmptyForTest());
@@ -121,11 +128,9 @@ TEST_F(PotentialPasswordTheftSignalProcessorTest,
        ProcessTwoSignalsInReverseOrder) {
   auto pw_reuse_signal = PasswordReuseSignal(kExtensionId[0], pw_reuse_event_0);
   auto remote_host_signal_0 = RemoteHostContactedSignal(
-      kExtensionId[0], GURL(host_urls[0]), kProtocolType);
+      kExtensionId[0], GURL(host_urls[0]), kProtocolType, kContactInitiator);
   auto remote_host_signal_1 = RemoteHostContactedSignal(
-      kExtensionId[0], GURL(host_urls[1]), kProtocolType);
-  scoped_feature_list.InitAndEnableFeature(
-      kExtensionTelemetryPotentialPasswordTheft);
+      kExtensionId[0], GURL(host_urls[1]), kProtocolType, kContactInitiator);
   processor_.ProcessSignal(remote_host_signal_0);
   task_environment_.FastForwardBy(base::Milliseconds(100));
   processor_.ProcessSignal(remote_host_signal_1);
@@ -139,9 +144,10 @@ TEST_F(PotentialPasswordTheftSignalProcessorTest,
   processor_.ProcessSignal(pw_reuse_signal);
 
   EXPECT_FALSE(processor_.IsPasswordQueueEmptyForTest());
-  // Remote host queue should be empty even though remote host signals are
-  // received because the processor clean up unqualified data.
-  EXPECT_FALSE(processor_.IsRemoteHostURLQueueEmptyForTest());
+  // Remote host queue should be empty because the signals are older than
+  // kPasswordTheftLatency and are now proactively cleaned up to prevent
+  // memory leaks.
+  EXPECT_TRUE(processor_.IsRemoteHostURLQueueEmptyForTest());
   EXPECT_FALSE(processor_.HasDataToReportForTest());
 }
 
@@ -155,16 +161,14 @@ TEST_F(PotentialPasswordTheftSignalProcessorTest, VerifyProtoData) {
       PasswordReuseSignal(kExtensionId[0], pw_reuse_event_1);
 
   auto remote_host_signal_0 = RemoteHostContactedSignal(
-      kExtensionId[0], GURL(host_urls[0]), kProtocolType);
+      kExtensionId[0], GURL(host_urls[0]), kProtocolType, kContactInitiator);
   auto remote_host_signal_1 = RemoteHostContactedSignal(
-      kExtensionId[0], GURL(host_urls[1]), kProtocolType);
+      kExtensionId[0], GURL(host_urls[1]), kProtocolType, kContactInitiator);
   auto remote_host_signal_2 = RemoteHostContactedSignal(
-      kExtensionId[0], GURL(host_urls[2]), kProtocolType);
+      kExtensionId[0], GURL(host_urls[2]), kProtocolType, kContactInitiator);
   auto remote_host_signal_3 = RemoteHostContactedSignal(
-      kExtensionId[0], GURL(host_urls[3]), kProtocolType);
+      kExtensionId[0], GURL(host_urls[3]), kProtocolType, kContactInitiator);
 
-  scoped_feature_list.InitAndEnableFeature(
-      kExtensionTelemetryPotentialPasswordTheft);
   processor_.ProcessSignal(pw_reuse_signal_0);
   task_environment_.FastForwardBy(base::Milliseconds(50));
   processor_.ProcessSignal(pw_reuse_signal_1);
@@ -259,6 +263,101 @@ TEST_F(PotentialPasswordTheftSignalProcessorTest, VerifyProtoData) {
     // The count is 2 because there are 2 password reuse event.
     ASSERT_EQ(remote_host_info_3.count(), static_cast<uint32_t>(3));
   }
+}
+
+// Tests that the queues do not grow beyond kMaxQueueSize when only one type
+// of signal is received.
+TEST_F(PotentialPasswordTheftSignalProcessorTest, PreventsUnboundedQueueGrowth) {
+  // Send many remote host signals but no password reuse signals.
+  for (size_t i = 0;
+       i < PotentialPasswordTheftSignalProcessor::kMaxQueueSize + 10; ++i) {
+    auto remote_host_signal = RemoteHostContactedSignal(
+        kExtensionId[0], GURL(host_urls[0]), kProtocolType, kContactInitiator);
+    processor_.ProcessSignal(remote_host_signal);
+  }
+
+  EXPECT_EQ(processor_.GetRemoteHostURLQueueSizeForTest(kExtensionId[0]),
+            PotentialPasswordTheftSignalProcessor::kMaxQueueSize);
+
+  // Send many password reuse signals but no remote host signals.
+  for (size_t i = 0;
+       i < PotentialPasswordTheftSignalProcessor::kMaxQueueSize + 10; ++i) {
+    auto pw_reuse_signal =
+        PasswordReuseSignal(kExtensionId[0], pw_reuse_event_0);
+    processor_.ProcessSignal(pw_reuse_signal);
+  }
+
+  EXPECT_EQ(processor_.GetPasswordQueueSizeForTest(kExtensionId[0]),
+            PotentialPasswordTheftSignalProcessor::kMaxQueueSize);
+}
+
+// Tests that queues are cleared after a report is generated.
+TEST_F(PotentialPasswordTheftSignalProcessorTest,
+       QueuesClearedAfterReportTest) {
+  auto pw_reuse_signal = PasswordReuseSignal(kExtensionId[0], pw_reuse_event_0);
+  auto remote_host_signal = RemoteHostContactedSignal(
+      kExtensionId[0], GURL(host_urls[0]), kProtocolType, kContactInitiator);
+
+  processor_.ProcessSignal(pw_reuse_signal);
+  processor_.ProcessSignal(remote_host_signal);
+
+  EXPECT_EQ(processor_.GetPasswordQueueSizeForTest(kExtensionId[0]), 1u);
+  EXPECT_EQ(processor_.GetRemoteHostURLQueueSizeForTest(kExtensionId[0]), 1u);
+
+  // Forward time and trigger processing to stage data.
+  task_environment_.FastForwardBy(base::Seconds(2));
+  processor_.ProcessSignal(remote_host_signal);
+
+  EXPECT_TRUE(processor_.HasDataToReportForTest());
+
+  // Generating report should clear the queues for that extension.
+  processor_.GetSignalInfoForReport(kExtensionId[0]);
+
+  EXPECT_EQ(processor_.GetPasswordQueueSizeForTest(kExtensionId[0]), 0u);
+  EXPECT_EQ(processor_.GetRemoteHostURLQueueSizeForTest(kExtensionId[0]), 0u);
+}
+
+// Tests that queues are cleared after a report is generated even when
+// there is no correlation (no password reuse events).
+TEST_F(PotentialPasswordTheftSignalProcessorTest,
+       QueuesClearedAfterReportEvenWithoutCorrelationTest) {
+  auto remote_host_signal = RemoteHostContactedSignal(
+      kExtensionId[0], GURL(host_urls[0]), kProtocolType, kContactInitiator);
+
+  processor_.ProcessSignal(remote_host_signal);
+
+  EXPECT_EQ(processor_.GetRemoteHostURLQueueSizeForTest(kExtensionId[0]), 1u);
+
+  // Generating report should clear the queues for that extension, even if it
+  // returns nullptr because there is no correlation.
+  EXPECT_EQ(processor_.GetSignalInfoForReport(kExtensionId[0]), nullptr);
+
+  EXPECT_EQ(processor_.GetRemoteHostURLQueueSizeForTest(kExtensionId[0]), 0u);
+}
+
+// Tests that multiple passwords in the queue are processed even if some
+// do not result in a potential password theft signal (e.g. no matching
+// domains).
+TEST_F(PotentialPasswordTheftSignalProcessorTest,
+       MultiplePasswordsProcessedWithoutMatchingDomainsTest) {
+  auto pw_reuse_signal_no_match =
+      PasswordReuseSignal(kExtensionId[0], pw_reuse_event_0);
+  auto pw_reuse_signal_with_match =
+      PasswordReuseSignal(kExtensionId[0], pw_reuse_event_1);
+  auto remote_host_signal = RemoteHostContactedSignal(
+      kExtensionId[0], GURL(host_urls[0]), kProtocolType, kContactInitiator);
+
+  // Send two password signals, then a remote host signal.
+  processor_.ProcessSignal(pw_reuse_signal_no_match);
+  processor_.ProcessSignal(pw_reuse_signal_with_match);
+  processor_.ProcessSignal(remote_host_signal);
+
+  // Forward time and trigger processing.
+  task_environment_.FastForwardBy(base::Seconds(2));
+  processor_.ProcessSignal(remote_host_signal);
+
+  // Both passwords should have been popped from the queue.
+  EXPECT_EQ(processor_.GetPasswordQueueSizeForTest(kExtensionId[0]), 0u);
 }
 
 }  // namespace

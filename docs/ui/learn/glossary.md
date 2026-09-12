@@ -69,8 +69,7 @@ and hidden when focus is gone. It is often drawn by a
 handles drawing a colored border along a path. When creating focus rings, it's
 important to color them such that they contrast with both the color inside and
 the color outside the ring; see the uses of the
-[`PickGoogleColorTwoBackgrounds()`](/chrome/browser/ui/color/chrome_color_mixer.cc)
-function.
+[`PickGoogleColorTwoBackgrounds`](/ui/color/color_transform.cc) function.
 
 ### HWND
 
@@ -78,7 +77,7 @@ Windows-specific. An opaque handle to a system-native window. Ultimately
 [type-aliased to a `void*`](https://learn.microsoft.com/en-us/windows/win32/winprog/windows-data-types),
 but you should never dereference this or examine the actual value; it is only
 used to pass to various Windows native APIs. Used as the type for
-[`AcceleratedWidget`](/ui/gfx/native_widget_types.h) on Windows.
+[`AcceleratedWidget`](/ui/gfx/native_ui_types.h) on Windows.
 
 ### Ink drop
 
@@ -90,13 +89,6 @@ in water, and the most prominent effect, known as a "ripple", spreads rapidly
 outward from a single point (generally the cursor position). The base
 [`InkDrop`](/ui/views/animation/ink_drop.h) class can also manage instant on/off
 "hover highlight" effects and contains a variety of hooks for different uses.
-
-### LaCrOS
-
-An abbreviation for "Linux And Chrome OS". An architecture project to decouple
-the Chrome browser on Chrome OS from the operating system stack; historically
-these were tightly coupled and updated simultaneously.
-[More general background on LaCrOS](/docs/lacros.md)
 
 ### Layer
 
@@ -112,13 +104,13 @@ order, and should be used sparingly.
 An operation where a `View` sets the bounds of all of its children. Generally,
 calling `InvalidateLayout()` on a `View` will recursively mark that `View` and
 all ancestors as dirty; then at some point,
-`Widget::LayoutRootViewIfNecessary()` will call `Layout()` on the `RootView`,
-which will call `Layout()` on its contents, and so forth down the tree. `View`s
-can implement custom layout by overriding the virtual `Layout()` method, but
-generally should use one of the available `LayoutManager`s to describe how
-children should be arranged; then the `LayoutManager` will be responsible for
-both computing the `View`'s preferred size and for updating child bounds as
-necessary.
+`Widget::LayoutRootViewIfNecessary()` will call `LayoutImmediately()` on the
+`RootView`, which will call `Layout()` on its contents, and so forth down the
+tree. `View`s can currently implement custom layout by overriding the virtual
+`Layout()` method, but should instead use one of the available `LayoutManager`s
+to describe how children should be arranged; then the `LayoutManager` will be
+responsible for both computing the `View`'s preferred size and for updating
+child bounds as necessary.
 
 ### NativeWidget
 

@@ -4,7 +4,7 @@
 
 #include "chrome/browser/feedback/feedback_uploader_factory_chrome.h"
 
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "chrome/browser/feedback/feedback_uploader_chrome.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_selections.h"
@@ -14,7 +14,8 @@ namespace feedback {
 
 // static
 FeedbackUploaderFactoryChrome* FeedbackUploaderFactoryChrome::GetInstance() {
-  return base::Singleton<FeedbackUploaderFactoryChrome>::get();
+  static base::NoDestructor<FeedbackUploaderFactoryChrome> instance;
+  return instance.get();
 }
 
 // static
@@ -31,8 +32,16 @@ FeedbackUploaderFactoryChrome::~FeedbackUploaderFactoryChrome() = default;
 
 content::BrowserContext* FeedbackUploaderFactoryChrome::GetBrowserContextToUse(
     content::BrowserContext* context) const {
-  return ProfileSelections::BuildRedirectedInIncognito().ApplyProfileSelection(
-      Profile::FromBrowserContext(context));
+  return ProfileSelections::Builder()
+      .WithRegular(ProfileSelection::kRedirectedToOriginal)
+      // TODO(crbug.com/40257657): Check if this service is needed in
+      // Guest mode.
+      .WithGuest(ProfileSelection::kRedirectedToOriginal)
+      // TODO(crbug.com/41488885): Check if this service is needed for
+      // Ash Internals.
+      .WithAshInternals(ProfileSelection::kRedirectedToOriginal)
+      .Build()
+      .ApplyProfileSelection(Profile::FromBrowserContext(context));
 }
 
 bool FeedbackUploaderFactoryChrome::ServiceIsCreatedWithBrowserContext() const {
@@ -45,9 +54,10 @@ bool FeedbackUploaderFactoryChrome::ServiceIsNULLWhileTesting() const {
   return true;
 }
 
-KeyedService* FeedbackUploaderFactoryChrome::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+FeedbackUploaderFactoryChrome::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new FeedbackUploaderChrome(context);
+  return std::make_unique<FeedbackUploaderChrome>(context);
 }
 
 }  // namespace feedback

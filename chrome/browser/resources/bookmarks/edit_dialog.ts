@@ -5,20 +5,22 @@
 import 'chrome://resources/cr_elements/cr_button/cr_button.js';
 import 'chrome://resources/cr_elements/cr_dialog/cr_dialog.js';
 import 'chrome://resources/cr_elements/cr_input/cr_input.js';
-import 'chrome://resources/cr_elements/cr_shared_style.css.js';
-import './strings.m.js';
+import '/strings.m.js';
 
-import {CrDialogElement} from 'chrome://resources/cr_elements/cr_dialog/cr_dialog.js';
-import {CrInputElement} from 'chrome://resources/cr_elements/cr_input/cr_input.js';
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import type {CrDialogElement} from 'chrome://resources/cr_elements/cr_dialog/cr_dialog.js';
+import type {CrInputElement} from 'chrome://resources/cr_elements/cr_input/cr_input.js';
+import {getCss as getSharedStyleCss} from 'chrome://resources/cr_elements/cr_shared_style_lit.css.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
 import {highlightUpdatedItems, trackUpdatedItems} from './api_listener.js';
 import {BookmarksApiProxyImpl} from './bookmarks_api_proxy.js';
+import {MAX_BOOKMARK_INPUT_LENGTH} from './constants.js';
 import {DialogFocusManager} from './dialog_focus_manager.js';
-import {getTemplate} from './edit_dialog.html.js';
-import {BookmarkNode} from './types.js';
+import {getHtml} from './edit_dialog.html.js';
+import type {BookmarkNode} from './types.js';
 
 export interface BookmarksEditDialogElement {
   $: {
@@ -29,40 +31,81 @@ export interface BookmarksEditDialogElement {
   };
 }
 
-export class BookmarksEditDialogElement extends PolymerElement {
+export class BookmarksEditDialogElement extends CrLitElement {
   static get is() {
     return 'bookmarks-edit-dialog';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getSharedStyleCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
-      isFolder_: Boolean,
-      isEdit_: Boolean,
+      isFolder_: {type: Boolean},
+      isEdit_: {type: Boolean},
 
       /**
        * Item that is being edited, or null when adding.
        */
-      editItem_: Object,
+      editItem_: {type: Object},
 
       /**
        * Parent node for the item being added, or null when editing.
        */
-      parentId_: String,
-      titleValue_: String,
-      urlValue_: String,
+      parentId_: {type: String},
+      titleValue_: {type: String},
+      urlValue_: {type: String},
     };
   }
 
-  private isFolder_: boolean;
-  private isEdit_: boolean;
-  private editItem_: BookmarkNode|null;
-  private parentId_: string|null;
-  private titleValue_: string;
-  private urlValue_: string;
+  protected accessor isFolder_: boolean = false;
+  private accessor isEdit_: boolean = false;
+  private accessor editItem_: BookmarkNode|null = null;
+  private accessor parentId_: string|null = null;
+  protected accessor titleValue_: string = '';
+  protected accessor urlValue_: string = '';
+
+  override firstUpdated(changedProperties: PropertyValues<this>) {
+    super.firstUpdated(changedProperties);
+    const urlInput = this.$.url;
+    const nameInput = this.$.name;
+    // Intercept paste for the URL and name textfields
+    // provide sanitized clipboard text
+    urlInput.addEventListener('paste', this.onPaste_.bind(this, urlInput));
+    nameInput.addEventListener('paste', this.onPaste_.bind(this, nameInput));
+  }
+
+  private onPaste_(inputComponent: CrInputElement, e: ClipboardEvent) {
+    const text = e.clipboardData?.getData('text/plain');
+    if (!text) {
+      return;
+    }
+
+    // Limit to 500KB to match Chrome address bar (Omnibox) behavior and
+    // prevent performance issues with extremely long strings.
+    if (text.length <= MAX_BOOKMARK_INPUT_LENGTH) {
+      return;
+    }
+
+    e.preventDefault();
+    const truncated = text.substring(0, MAX_BOOKMARK_INPUT_LENGTH);
+    // Insert the truncated text using setRangeText, which is the modern
+    // replacement for execCommand('insertText').
+    // Note: This may not preserve the undo history as robustly as execCommand
+    // in all cases, but it is the standard API.
+    const input = inputComponent.inputElement;
+    const start = input.selectionStart || 0;
+    const end = input.selectionEnd || 0;
+    input.setRangeText(truncated, start, end, 'end');
+    // Manually trigger input/change events so cr-input updates its value.
+    input.dispatchEvent(new Event('input', {bubbles: true, composed: true}));
+    input.dispatchEvent(new Event('change', {bubbles: true, composed: true}));
+  }
 
   /**
    * Show the dialog to add a new folder (if |isFolder|) or item, which will be
@@ -104,15 +147,23 @@ export class BookmarksEditDialogElement extends PolymerElement {
     this.urlValue_ = '';
   }
 
-  private getDialogTitle_(isFolder: boolean, isEdit: boolean): string {
+  protected getDialogTitle_(): string {
     let title;
-    if (isEdit) {
-      title = isFolder ? 'renameFolderTitle' : 'editBookmarkTitle';
+    if (this.isEdit_) {
+      title = this.isFolder_ ? 'renameFolderTitle' : 'editBookmarkTitle';
     } else {
-      title = isFolder ? 'addFolderTitle' : 'addBookmarkTitle';
+      title = this.isFolder_ ? 'addFolderTitle' : 'addBookmarkTitle';
     }
 
     return loadTimeData.getString(title);
+  }
+
+  protected onTitleValueChanged_(e: CustomEvent<{value: string}>) {
+    this.titleValue_ = e.detail.value;
+  }
+
+  protected onUrlValueChanged_(e: CustomEvent<{value: string}>) {
+    this.urlValue_ = e.detail.value;
   }
 
   /**
@@ -122,13 +173,25 @@ export class BookmarksEditDialogElement extends PolymerElement {
    */
   validateUrl(): boolean {
     const urlInput = this.$.url;
-    const originalValue = this.urlValue_;
+
+    // Early check for URL length
+    // avoid performance issues with extremely long URLs.
+    // Limit to 500KB to match Chrome address bar (Omnibox) behavior.
+    if (this.urlValue_.length > MAX_BOOKMARK_INPUT_LENGTH) {
+      return false;
+    }
 
     if (urlInput.validate()) {
       return true;
     }
 
+    const originalValue = this.urlValue_;
     this.urlValue_ = 'http://' + originalValue;
+    // Force an update to propagate this to the cr-input synchronously. This is
+    // not best for performance, but validate() already forces an update to
+    // the cr-input by calling performUpdate() on that element below, and this
+    // method is not expected to be frequently called.
+    this.performUpdate();
 
     if (urlInput.validate()) {
       return true;
@@ -138,9 +201,10 @@ export class BookmarksEditDialogElement extends PolymerElement {
     return false;
   }
 
-  private onSaveButtonTap_() {
-    const edit: { title: string, url?: string, parentId?: string|null } =
-        { 'title': this.titleValue_ };
+  protected onSaveButtonClick_() {
+    const edit: {title: string, url?: string, parentId?: string|null} = {
+      'title': this.titleValue_.substring(0, MAX_BOOKMARK_INPUT_LENGTH),
+    };
     if (!this.isFolder_) {
       if (!this.validateUrl()) {
         return;
@@ -150,19 +214,23 @@ export class BookmarksEditDialogElement extends PolymerElement {
     }
 
     if (this.isEdit_) {
-      chrome.bookmarks.update(this.editItem_!.id, edit);
+      BookmarksApiProxyImpl.getInstance().update(this.editItem_!.id, edit);
     } else {
-      edit['parentId'] = this.parentId_;
       trackUpdatedItems();
-      BookmarksApiProxyImpl.getInstance().create(edit).then(
-          highlightUpdatedItems);
+      // Editable nodes all have parents. The only nodes that do not have
+      // parents are permanent nodes, which are not editable.
+      assert(this.parentId_ !== null);
+      BookmarksApiProxyImpl.getInstance()
+          .create(this.parentId_, null, edit.title, edit.url)
+          .then(highlightUpdatedItems);
     }
     this.$.dialog.close();
   }
 
-  private onCancelButtonTap_() {
+  protected onCancelButtonClick_() {
     this.$.dialog.cancel();
   }
+
 }
 
 declare global {

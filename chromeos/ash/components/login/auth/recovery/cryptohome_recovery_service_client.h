@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,6 +6,7 @@
 #define CHROMEOS_ASH_COMPONENTS_LOGIN_AUTH_RECOVERY_CRYPTOHOME_RECOVERY_SERVICE_CLIENT_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/functional/bind.h"
@@ -25,10 +26,10 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_LOGIN_AUTH)
     CryptohomeRecoveryServiceClient {
  public:
   using OnEpochResponseCallback =
-      base::OnceCallback<void(absl::optional<CryptohomeRecoveryEpochResponse>,
+      base::OnceCallback<void(std::optional<CryptohomeRecoveryEpochResponse>,
                               CryptohomeRecoveryServerStatusCode)>;
   using OnRecoveryResponseCallback =
-      base::OnceCallback<void(absl::optional<CryptohomeRecoveryResponse>,
+      base::OnceCallback<void(std::optional<CryptohomeRecoveryResponse>,
                               CryptohomeRecoveryServerStatusCode)>;
 
   explicit CryptohomeRecoveryServiceClient(
@@ -51,12 +52,12 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_LOGIN_AUTH)
  private:
   void OnFetchEpochComplete(const GaiaAccessToken& access_token,
                             OnEpochResponseCallback callback,
-                            std::unique_ptr<std::string> response_body);
+                            std::optional<std::string> response_body);
   void OnFetchRecoveryResponseComplete(
       const std::string& request,
       const GaiaAccessToken& access_token,
       OnRecoveryResponseCallback callback,
-      std::unique_ptr<std::string> response_body);
+      std::optional<std::string> response_body);
 
   std::unique_ptr<network::SimpleURLLoader> simple_url_loader_;
   scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;

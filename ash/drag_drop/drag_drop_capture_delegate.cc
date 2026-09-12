@@ -9,7 +9,6 @@
 #include "ui/aura/window_delegate.h"
 #include "ui/aura/window_event_dispatcher.h"
 #include "ui/aura/window_observer.h"
-#include "ui/aura/window_tracker.h"
 #include "ui/base/hit_test.h"
 #include "ui/events/event.h"
 #include "ui/events/event_target.h"
@@ -26,8 +25,9 @@ void NotifyWindowOfTouchDispatchGestureEnd(aura::Window* window) {
 
   ui::PointerDetails touch_details(ui::EventPointerType::kTouch,
                                    /*pointer_id=*/0, 1.0f, 1.0f, 1.0f);
-  ui::TouchEvent touch_cancel_event(ui::ET_TOUCH_CANCELLED, gfx::Point(),
-                                    ui::EventTimeForNow(), touch_details);
+  ui::TouchEvent touch_cancel_event(ui::EventType::kTouchCancelled,
+                                    gfx::Point(), ui::EventTimeForNow(),
+                                    touch_details);
   window->delegate()->OnTouchEvent(&touch_cancel_event);
 }
 
@@ -35,7 +35,7 @@ void NotifyWindowOfTouchDispatchGestureEnd(aura::Window* window) {
 
 void DispatchGestureEndToWindow(aura::Window* window) {
   DCHECK(window && window->delegate());
-  ui::GestureEventDetails details(ui::ET_GESTURE_END);
+  ui::GestureEventDetails details(ui::EventType::kGestureEnd);
   details.set_device_type(ui::GestureDeviceType::DEVICE_TOUCHSCREEN);
   ui::GestureEvent gesture_end(0, 0, 0, ui::EventTimeForNow(), details);
   window->delegate()->OnGestureEvent(&gesture_end);
@@ -54,21 +54,23 @@ bool DragDropCaptureDelegate::TakeCapture(
   // queue to the |drag_drop_tracker_|'s capture window so that when it takes
   // capture, it still gets a valid gesture state.
   aura::Window* capture_window = drag_drop_tracker_->capture_window();
-  aura::WindowTracker tracker({source_window, capture_window});
+  base::WeakPtr<aura::Window> source_window_weak =
+      source_window->GetWeakPtrAsWindow();
+  base::WeakPtr<aura::Window> capture_window_weak =
+      capture_window->GetWeakPtrAsWindow();
   auto* gesture_recognizer = aura::Env::GetInstance()->gesture_recognizer();
   gesture_recognizer->TransferEventsTo(
       source_window, drag_drop_tracker_->capture_window(), behavior);
-  if (tracker.Contains(source_window)) {
+  if (source_window_weak) {
     // We also send a gesture end and touch cancel to the source window so it
     // can clear state.  TODO(varunjain): Remove this whole block when gesture
     // sequence transferring is properly done in the GR
     // (http://crbug.com/160558)
     NotifyWindowOfTouchDispatchGestureEnd(source_window);
   }
-  if (!tracker.Contains(capture_window)) {
+  if (!capture_window_weak) {
     // This means the drag was cancelled during event transfer.
     // See: crbug.com/1297209.
-    gesture_recognizer->CleanupStateForConsumer(capture_window);
     return false;
   }
   drag_drop_tracker_->TakeCapture();
@@ -77,17 +79,22 @@ bool DragDropCaptureDelegate::TakeCapture(
 
 aura::Window* DragDropCaptureDelegate::GetTarget(
     const ui::LocatedEvent& event) {
-  return drag_drop_tracker_->GetTarget(event);
+  return drag_drop_tracker_ ? drag_drop_tracker_->GetTarget(event) : nullptr;
 }
 
 std::unique_ptr<ui::LocatedEvent> DragDropCaptureDelegate::ConvertEvent(
     aura::Window* target,
     const ui::LocatedEvent& event) {
-  return drag_drop_tracker_->ConvertEvent(target, event);
+  return drag_drop_tracker_ ? drag_drop_tracker_->ConvertEvent(target, event)
+                            : nullptr;
 }
 
 aura::Window* DragDropCaptureDelegate::capture_window() {
-  return drag_drop_tracker_->capture_window();
+  return drag_drop_tracker_ ? drag_drop_tracker_->capture_window() : nullptr;
+}
+
+void DragDropCaptureDelegate::ReleaseCapture() {
+  drag_drop_tracker_.reset();
 }
 
 }  // namespace ash

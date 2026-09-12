@@ -7,13 +7,15 @@
 
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
+#include "components/safe_browsing/core/browser/database_manager_mechanism.h"
 #include "components/safe_browsing/core/browser/db/database_manager.h"
-#include "components/safe_browsing/core/browser/hash_database_mechanism.h"
 #include "components/safe_browsing/core/browser/hashprefix_realtime/hash_realtime_service.h"
 #include "components/safe_browsing/core/browser/safe_browsing_lookup_mechanism.h"
 #include "url/gurl.h"
 
 namespace safe_browsing {
+
+class V5GetHashProtocolManager;
 
 // This performs the hash-prefix real-time Safe Browsing check.
 class HashRealTimeMechanism : public SafeBrowsingLookupMechanism {
@@ -22,19 +24,12 @@ class HashRealTimeMechanism : public SafeBrowsingLookupMechanism {
       const GURL& url,
       const SBThreatTypeSet& threat_types,
       scoped_refptr<SafeBrowsingDatabaseManager> database_manager,
-      bool can_check_db,
       scoped_refptr<base::SequencedTaskRunner> ui_task_runner,
       base::WeakPtr<HashRealTimeService> lookup_service_on_ui,
-      MechanismExperimentHashDatabaseCache experiment_cache_selection);
+      base::WeakPtr<V5GetHashProtocolManager> v5_get_hash_protocol_manager);
   HashRealTimeMechanism(const HashRealTimeMechanism&) = delete;
   HashRealTimeMechanism& operator=(const HashRealTimeMechanism&) = delete;
   ~HashRealTimeMechanism() override;
-
-  // Returns whether the |url| is eligible for hash-prefix real-time checks.
-  // It's never eligible if the |request_destination| is not mainframe.
-  static bool CanCheckUrl(
-      const GURL& url,
-      network::mojom::RequestDestination request_destination);
 
  private:
   // SafeBrowsingLookupMechanism implementation:
@@ -42,7 +37,11 @@ class HashRealTimeMechanism : public SafeBrowsingLookupMechanism {
 
   // If |did_match_allowlist| is true, this will fall back to the hash-based
   // check instead of performing the URL lookup.
-  void OnCheckUrlForHighConfidenceAllowlist(bool did_match_allowlist);
+  void OnCheckUrlForHighConfidenceAllowlist(
+      bool did_match_allowlist,
+      std::optional<SafeBrowsingDatabaseManager::
+                        HighConfidenceAllowlistCheckLoggingDetails>
+          logging_details);
 
   // This function has to be static because it is called in UI thread. This
   // function starts a hash-prefix real-time lookup if |lookup_service_on_ui| is
@@ -60,19 +59,22 @@ class HashRealTimeMechanism : public SafeBrowsingLookupMechanism {
   // |threat_type| will not be populated if the lookup was unsuccessful, but
   // will otherwise always be populated with the result of the lookup.
   void OnLookupResponse(bool is_lookup_successful,
-                        absl::optional<SBThreatType> threat_type);
+                        std::optional<SBThreatType> threat_type);
 
   // Perform the hash-based database check for the url.
-  void PerformHashBasedCheck(const GURL& url);
+  void PerformHashBasedCheck(const GURL& url,
+                             HashDatabaseFallbackTrigger fallback_trigger);
 
   // The hash-prefix real-time check can sometimes default back to the
   // hash-based database check. In these cases, this function is called once the
   // check has completed, which reports back the final results to the caller.
   void OnHashDatabaseCompleteCheckResult(
+      HashDatabaseFallbackTrigger fallback_trigger,
       std::unique_ptr<SafeBrowsingLookupMechanism::CompleteCheckResult> result);
   void OnHashDatabaseCompleteCheckResultInternal(
       SBThreatType threat_type,
-      const ThreatMetadata& metadata);
+      std::optional<ThreatSource> threat_source,
+      HashDatabaseFallbackTrigger fallback_trigger);
 
   SEQUENCE_CHECKER(sequence_checker_);
 
@@ -85,7 +87,10 @@ class HashRealTimeMechanism : public SafeBrowsingLookupMechanism {
 
   // This will be created in cases where the hash-prefix real-time check decides
   // to fall back to the hash-based database checks.
-  std::unique_ptr<HashDatabaseMechanism> hash_database_mechanism_ = nullptr;
+  std::unique_ptr<DatabaseManagerMechanism> hash_database_mechanism_ = nullptr;
+
+  // The protocol manager used for Safe Browsing v5 get hash requests.
+  base::WeakPtr<V5GetHashProtocolManager> v5_get_hash_protocol_manager_;
 
   base::WeakPtrFactory<HashRealTimeMechanism> weak_factory_{this};
 };

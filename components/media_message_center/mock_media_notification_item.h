@@ -5,6 +5,7 @@
 #ifndef COMPONENTS_MEDIA_MESSAGE_CENTER_MOCK_MEDIA_NOTIFICATION_ITEM_H_
 #define COMPONENTS_MEDIA_MESSAGE_CENTER_MOCK_MEDIA_NOTIFICATION_ITEM_H_
 
+#include "base/unguessable_token.h"
 #include "components/media_message_center/media_notification_item.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
@@ -28,7 +29,12 @@ class MockMediaNotificationItem : public MediaNotificationItem {
   MOCK_METHOD(void, SetVolume, (float));
   MOCK_METHOD(void, SetMute, (bool));
   MOCK_METHOD(bool, RequestMediaRemoting, ());
-  MOCK_METHOD(media_message_center::SourceType, SourceType, ());
+  MOCK_METHOD(media_message_center::Source, GetSource, (), (const));
+  MOCK_METHOD(media_message_center::SourceType, GetSourceType, (), (const));
+  MOCK_METHOD((std::optional<base::UnguessableToken>),
+              GetSourceId,
+              (),
+              (const));
 
   base::WeakPtr<MockMediaNotificationItem> GetWeakPtr();
 

@@ -5,6 +5,7 @@
 import("//mojo/public/tools/bindings/mojom.gni")
 
 mojom_component("mojom") {
+  generate_blink = true
   sources = [ "gamepad.mojom" ]
 
   deps = [ "//mojo/public/mojom/base" ]
@@ -21,6 +22,10 @@ mojom_component("mojom") {
       {
         mojom = "device.mojom.GamepadButton"
         cpp = "::device::GamepadButton"
+      },
+      {
+        mojom = "device.mojom.GamepadButtonType"
+        cpp = "::device::GamepadButtonType"
       },
       {
         mojom = "device.mojom.GamepadHand"
@@ -48,6 +53,10 @@ mojom_component("mojom") {
         mojom = "device.mojom.GamepadQuaternion"
         cpp = "::device::GamepadQuaternion"
         nullable_is_same_type = true
+      },
+      {
+        mojom = "device.mojom.GamepadTouch"
+        cpp = "::device::GamepadTouch"
       },
       {
         mojom = "device.mojom.GamepadVector"

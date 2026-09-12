@@ -6,36 +6,42 @@
 // The fuzzer input is passed through parsing twice,
 // so that presumably valid json is parsed/written again.
 
-#include <stddef.h>
 #include <stdint.h>
 
 #include <string>
+#include <string_view>
 
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/json/string_escape.h"
 #include "base/logging.h"
+#include "base/strings/string_view_util.h"
 #include "base/values.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 
 // Entry point for libFuzzer.
 // We will use the last byte of data as parsing options.
 // The rest will be used as text input to the parser.
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  if (size < 2)
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(base::span<const uint8_t> all_input) {
+  if (all_input.size() < 2) {
     return 0;
+  }
 
   // Create a copy of input buffer, as otherwise we don't catch
   // overflow that touches the last byte (which is used in options).
-  std::unique_ptr<char[]> input(new char[size - 1]);
-  memcpy(input.get(), data, size - 1);
+  auto input = base::HeapArray<char>::CopiedFrom(
+      base::as_chars(all_input.first(all_input.size() - 1)));
 
-  base::StringPiece input_string(input.get(), size - 1);
+  std::string_view input_string = base::as_string_view(input.as_span());
 
-  const int options = data[size - 1];
+  const int options = all_input.back();
   auto result =
       base::JSONReader::ReadAndReturnValueWithError(input_string, options);
-  if (!result.has_value())
+  if (!result.has_value()) {
     return 0;
+  }
 
   std::string parsed_output;
   bool b = base::JSONWriter::Write(*result, &parsed_output);

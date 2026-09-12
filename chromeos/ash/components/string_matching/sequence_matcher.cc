@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <queue>
+#include <string_view>
 
 #include "base/check_op.h"
 
@@ -34,8 +35,8 @@ SequenceMatcher::Match::Match(int pos_first, int pos_second, int len)
   DCHECK_GE(length, 0);
 }
 
-SequenceMatcher::SequenceMatcher(const std::u16string& first_string,
-                                 const std::u16string& second_string,
+SequenceMatcher::SequenceMatcher(std::u16string_view first_string,
+                                 std::u16string_view second_string,
                                  double num_matching_blocks_penalty)
     : first_string_(first_string),
       second_string_(second_string),
@@ -173,7 +174,7 @@ Matches SequenceMatcher::GetMatchingBlocks() {
   return matching_blocks_;
 }
 
-double SequenceMatcher::Ratio(bool use_text_length_agnosticism) {
+double SequenceMatcher::Ratio(bool text_length_agnostic) {
   // Uses block matching to calculate ratio.
   if (block_matching_ratio_ < 0) {
     int sum_match = 0;
@@ -182,10 +183,10 @@ double SequenceMatcher::Ratio(bool use_text_length_agnosticism) {
 
     int sum_length = query_size;
     // Text-length agnosticism is applied for long texts if
-    // `use_text_length_agnosticism` is true, but we still keep it not shorter
+    // `text_length_agnostic` is true, but we still keep it not shorter
     // than the query length. Text length agnosticism is ignored if we have a
     // longer query than the text.
-    if (use_text_length_agnosticism && query_size < text_size) {
+    if (text_length_agnostic && query_size < text_size) {
       int max_recognized_text_length =
           std::max(kTextAgnosticismSize, query_size);
       sum_length += std::min(text_size, max_recognized_text_length);

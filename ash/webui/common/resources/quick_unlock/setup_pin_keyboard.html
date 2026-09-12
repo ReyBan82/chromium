@@ -9,7 +9,8 @@ Usage:
               is-confirm-step="{{isConfirmStep_}}"
               on-pin-submit="onPinSubmit_"
               on-set-pin-done="onSetPinDone_"
-              set-modes="{{setModes}}">
+              enable-visibility-icon
+              auth-token="[[authToken]]">
           </setup-pin-keyboard>
 
 Where:
@@ -27,7 +28,8 @@ Where:
   * on-set-pin-done - Event handler for the "set pin done" event, which should
         normally close the pin setup UI. This object state is reset before
         sending this event.
-  * set-modes - Reflects property set in password_prompt_dialog.js.
+  * enable-visibility-icon - Whether to show an icon that can show/hide the
+        user's PIN.
 
 -->
 
@@ -47,8 +49,8 @@ Where:
     flex-direction: row;
     font-size: 10px;
     height: 32px;
+    max-width: 200px;
     min-height: 0;
-    padding-bottom: 8px;
   }
 
   /* Hide this using visibility: hidden instead of hidden so that the
@@ -56,18 +58,48 @@ Where:
   #problemDiv[invisible] {
     visibility: hidden;
   }
+
+  #complexityRequirement {
+    color: var(--cr-secondary-text-color);
+    display: flex;
+    font-size: 13px;
+    line-height: 20px;
+    width: 100%;
+    max-width: 250px;
+    padding: 16px 12px;
+    gap: 5px;
+    justify-content: center;
+   }
+
+  #complexityRequirement[hidden] {
+    display: none;
+  }
+
+  #containerDiv {
+    display:flex;
+    flex-direction: column;
+  }
+
 </style>
-<pin-keyboard id="pinKeyboard" on-pin-change="onPinChange_"
-    on-submit="onPinSubmit_" value="{{pinKeyboardValue_}}"
-    has-error="[[hasError_(problemMessageId_, problemClass_)]]"
-    disabled="[[isSetModesCallPending_]]"
-    enable-placeholder="[[enablePlaceholder]]">
-  <!-- Warning/error; only shown if title is hidden. -->
-  <div id="problemDiv" class$="[[problemClass_]]"
-      invisible$="[[!problemMessageId_]]" problem>
-    <span aria-live="assertive">
-      [[formatProblemMessage_(locale, problemMessageId_,
-            problemMessageParameters_)]]
-    </span>
+<div id="containerDiv">
+  <div id="complexityRequirement"
+      hidden$="[[!complexityRequirementId_]]">
+    [[formatProblemMessage_(locale, complexityRequirementId_,
+          complexityRequirementParameters_)]]
   </div>
-</pin-keyboard>
+  <pin-keyboard id="pinKeyboard" on-pin-change="onPinChange_"
+      on-submit="onPinSubmit_" value="{{pinKeyboardValue_}}"
+      has-error="[[hasError_(problemMessageId_, problemClass_)]]"
+      disabled="[[shouldDisableKeyboard_(isSetPinCallPending_, localAuthFactorsComplexity_)]]"
+      enable-visibility-icon="[[enableVisibilityIcon]]"
+      enable-placeholder="[[enablePlaceholder]]">
+    <!-- Warning/error; only shown if title is hidden. -->
+    <div id="problemDiv" class$="[[problemClass_]]"
+        invisible$="[[!problemMessageId_]]" problem>
+      <span aria-live="assertive">
+        [[formatProblemMessage_(locale, problemMessageId_,
+              problemMessageParameters_)]]
+      </span>
+    </div>
+  </pin-keyboard>
+</div>

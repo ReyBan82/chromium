@@ -6,10 +6,12 @@
 
 #include <memory>
 
+#include "base/feature_list.h"
 #include "base/functional/callback.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/download/chrome_download_manager_delegate.h"
+#include "chrome/browser/download/download_core_service.h"
 #include "chrome/browser/download/download_history.h"
 #include "chrome/browser/download/download_offline_content_provider.h"
 #include "chrome/browser/download/download_offline_content_provider_factory.h"
@@ -19,12 +21,13 @@
 #include "chrome/browser/history/history_service_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_key.h"
+#include "components/download/public/common/download_features.h"
 #include "components/download/public/common/simple_download_manager_coordinator.h"
 #include "components/history/core/browser/history_service.h"
 #include "content/public/browser/download_manager.h"
 #include "extensions/buildflags/buildflags.h"
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 #include "chrome/browser/extensions/api/downloads/downloads_api.h"
 #endif
 
@@ -32,14 +35,12 @@
 #include "chrome/browser/download/android/download_utils.h"
 #endif
 
-using content::BrowserContext;
 using content::DownloadManager;
-using content::DownloadManagerDelegate;
 
 DownloadCoreServiceImpl::DownloadCoreServiceImpl(Profile* profile)
     : download_manager_created_(false), profile_(profile) {}
 
-DownloadCoreServiceImpl::~DownloadCoreServiceImpl() {}
+DownloadCoreServiceImpl::~DownloadCoreServiceImpl() = default;
 
 ChromeDownloadManagerDelegate*
 DownloadCoreServiceImpl::GetDownloadManagerDelegate() {
@@ -61,7 +62,7 @@ DownloadCoreServiceImpl::GetDownloadManagerDelegate() {
 
   manager_delegate_->SetDownloadManager(manager);
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   extension_event_router_ =
       std::make_unique<extensions::ExtensionDownloadsEventRouter>(profile_,
                                                                   manager);
@@ -72,19 +73,17 @@ DownloadCoreServiceImpl::GetDownloadManagerDelegate() {
         profile_, ServiceAccessType::EXPLICIT_ACCESS);
     history->GetNextDownloadId(
         manager_delegate_->GetDownloadIdReceiverCallback());
-    download_history_ = std::make_unique<DownloadHistory>(
-        manager, std::make_unique<DownloadHistory::HistoryAdapter>(history));
+    if (!base::FeatureList::IsEnabled(
+            download::features::kDeferredDownloadHistoryLoading)) {
+      download_history_ = std::make_unique<DownloadHistory>(
+          manager, std::make_unique<DownloadHistory::HistoryAdapter>(history));
+    }
   }
 
   // Pass an empty delegate when constructing the DownloadUIController. The
   // default delegate does all the notifications we need.
   download_ui_ = std::make_unique<DownloadUIController>(
       manager, std::unique_ptr<DownloadUIController::Delegate>());
-
-#if !BUILDFLAG(IS_ANDROID)
-  download_shelf_controller_ =
-      std::make_unique<DownloadShelfController>(profile_);
-#endif
 
   // Include this download manager in the set monitored by the
   // global status updater.
@@ -98,15 +97,28 @@ DownloadUIController* DownloadCoreServiceImpl::GetDownloadUIController() {
   return download_ui_ ? download_ui_.get() : nullptr;
 }
 
-DownloadHistory* DownloadCoreServiceImpl::GetDownloadHistory() {
+void DownloadCoreServiceImpl::InitializeHistory() {
+  if (download_history_ || profile_->IsOffTheRecord()) {
+    return;
+  }
   if (!download_manager_created_) {
     GetDownloadManagerDelegate();
   }
   DCHECK(download_manager_created_);
+  DownloadManager* manager = profile_->GetDownloadManager();
+  history::HistoryService* history = HistoryServiceFactory::GetForProfile(
+      profile_, ServiceAccessType::EXPLICIT_ACCESS);
+  if (history) {
+    download_history_ = std::make_unique<DownloadHistory>(
+        manager, std::make_unique<DownloadHistory::HistoryAdapter>(history));
+  }
+}
+
+DownloadHistory* DownloadCoreServiceImpl::GetDownloadHistory() {
   return download_history_.get();
 }
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 extensions::ExtensionDownloadsEventRouter*
 DownloadCoreServiceImpl::GetExtensionEventRouter() {
   return extension_event_router_.get();
@@ -117,22 +129,28 @@ bool DownloadCoreServiceImpl::HasCreatedDownloadManager() {
   return download_manager_created_;
 }
 
-int DownloadCoreServiceImpl::NonMaliciousDownloadCount() const {
+int DownloadCoreServiceImpl::BlockingShutdownCount() const {
   if (!download_manager_created_)
     return 0;
-  return profile_->GetDownloadManager()->NonMaliciousInProgressCount();
+  return profile_->GetDownloadManager()->BlockingShutdownCount();
 }
 
-void DownloadCoreServiceImpl::CancelDownloads() {
-  if (!download_manager_created_)
+void DownloadCoreServiceImpl::CancelDownloads(
+    DownloadCoreService::CancelDownloadsTrigger trigger) {
+  if (!download_manager_created_) {
     return;
+  }
 
   DownloadManager* download_manager = profile_->GetDownloadManager();
   DownloadManager::DownloadVector downloads;
   download_manager->GetAllDownloads(&downloads);
-  for (auto it = downloads.begin(); it != downloads.end(); ++it) {
-    if ((*it)->GetState() == download::DownloadItem::IN_PROGRESS)
-      (*it)->Cancel(false);
+  for (auto& download : downloads) {
+    if (download->GetState() == download::DownloadItem::IN_PROGRESS) {
+      download->Cancel(/*user_cancel=*/false);
+      if (trigger == DownloadCoreService::CancelDownloadsTrigger::kShutdown) {
+        manager_delegate_->OnDownloadCanceledAtShutdown(download);
+      }
+    }
   }
 }
 
@@ -153,11 +171,22 @@ void DownloadCoreServiceImpl::SetDownloadHistoryForTesting(
   download_history_ = std::move(download_history);
 }
 
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+void DownloadCoreServiceImpl::SetDownloadUiEnabledForTest(bool enabled) {
+  is_download_ui_enabled_for_test_ = enabled;
+}
+#endif
+
 bool DownloadCoreServiceImpl::IsDownloadUiEnabled() {
-#if BUILDFLAG(IS_ANDROID)
-  return true;
-#else
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  if (is_download_ui_enabled_for_test_.has_value()) {
+    return *is_download_ui_enabled_for_test_;
+  }
   return !extension_event_router_ || extension_event_router_->IsUiEnabled();
+#else
+  // On platforms like non-desktop Android that don't support extensions, always
+  // enable the downloads UI.
+  return true;
 #endif
 }
 
@@ -167,10 +196,10 @@ void DownloadCoreServiceImpl::Shutdown() {
     // goes away and BrowserContext's destructor runs. But that would be too
     // late for us since we need to use the profile (indirectly through history
     // code) when the DownloadManager is shutting down. So we shut it down
-    // manually earlier. See http://crbug.com/131692
+    // manually earlier. See http://crbug.com/40222377
     profile_->GetDownloadManager()->Shutdown();
   }
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
   extension_event_router_.reset();
 #endif
   manager_delegate_.reset();

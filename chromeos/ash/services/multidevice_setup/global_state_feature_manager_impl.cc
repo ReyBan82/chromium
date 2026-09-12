@@ -110,8 +110,8 @@ GlobalStateFeatureManagerImpl::GlobalStateFeatureManagerImpl(
       pref_service_(pref_service),
       device_sync_client_(device_sync_client),
       timer_(std::move(timer)) {
-  host_status_provider_->AddObserver(this);
-  device_sync_client_->AddObserver(this);
+  host_status_observation_.Observe(host_status_provider);
+  device_sync_observation_.Observe(device_sync_client);
 
   if (GetCurrentState() == CurrentState::kValidPendingRequest) {
     AttemptSetHostStateNetworkRequest(false /* is_retry */);
@@ -122,10 +122,7 @@ GlobalStateFeatureManagerImpl::GlobalStateFeatureManagerImpl(
   }
 }
 
-GlobalStateFeatureManagerImpl::~GlobalStateFeatureManagerImpl() {
-  host_status_provider_->RemoveObserver(this);
-  device_sync_client_->RemoveObserver(this);
-}
+GlobalStateFeatureManagerImpl::~GlobalStateFeatureManagerImpl() = default;
 
 void GlobalStateFeatureManagerImpl::OnHostStatusChange(
     const HostStatusProvider::HostStatusWithDevice& host_status_with_device) {
@@ -251,29 +248,13 @@ void GlobalStateFeatureManagerImpl::AttemptSetHostStateNetworkRequest(
   multidevice::RemoteDeviceRef host_device =
       *host_status_provider_->GetHostWithStatus().host_device();
 
-  if (features::ShouldUseV1DeviceSync()) {
-    // Even if the |device_to_set| has a non-trivial Instance ID, we still
-    // invoke the v1 DeviceSync RPC to set the feature state. This ensures that
-    // GmsCore will be notified of the change regardless of what version of
-    // DeviceSync it is running. The v1 and v2 RPCs to change feature states
-    // ultimately update the same backend database entry. Note: The
-    // RemoteDeviceProvider guarantees that every device will have a public key
-    // while v1 DeviceSync is enabled.
-    device_sync_client_->SetSoftwareFeatureState(
-        host_device.public_key(), managed_host_feature_,
-        pending_enabled /* enabled */, pending_enabled /* is_exclusive */,
-        base::BindOnce(&GlobalStateFeatureManagerImpl::
-                           OnSetHostStateNetworkRequestFinished,
-                       weak_ptr_factory_.GetWeakPtr(), pending_enabled));
-  } else {
-    device_sync_client_->SetFeatureStatus(
-        host_device.instance_id(), managed_host_feature_,
-        pending_enabled ? device_sync::FeatureStatusChange::kEnableExclusively
-                        : device_sync::FeatureStatusChange::kDisable,
-        base::BindOnce(&GlobalStateFeatureManagerImpl::
-                           OnSetHostStateNetworkRequestFinished,
-                       weak_ptr_factory_.GetWeakPtr(), pending_enabled));
-  }
+  device_sync_client_->SetFeatureStatus(
+      host_device.instance_id(), managed_host_feature_,
+      pending_enabled ? device_sync::FeatureStatusChange::kEnableExclusively
+                      : device_sync::FeatureStatusChange::kDisable,
+      base::BindOnce(
+          &GlobalStateFeatureManagerImpl::OnSetHostStateNetworkRequestFinished,
+          weak_ptr_factory_.GetWeakPtr(), pending_enabled));
 }
 
 void GlobalStateFeatureManagerImpl::OnSetHostStateNetworkRequestFinished(

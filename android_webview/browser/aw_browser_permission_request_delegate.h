@@ -7,7 +7,8 @@
 
 #include "android_webview/browser/permission/permission_callback.h"
 #include "base/functional/callback_forward.h"
-#include "url/gurl.h"
+
+class GURL;
 
 namespace android_webview {
 

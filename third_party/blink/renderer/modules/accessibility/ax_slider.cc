@@ -28,17 +28,16 @@
 
 #include "third_party/blink/renderer/modules/accessibility/ax_slider.h"
 
-#include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
-#include "third_party/blink/renderer/core/html/shadow/shadow_element_names.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
+#include "third_party/blink/renderer/modules/accessibility/ax_object-inl.h"
 #include "third_party/blink/renderer/modules/accessibility/ax_object_cache_impl.h"
 
 namespace blink {
 
 AXSlider::AXSlider(LayoutObject* layout_object,
                    AXObjectCacheImpl& ax_object_cache)
-    : AXLayoutObject(layout_object, ax_object_cache) {}
+    : AXNodeObject(layout_object, ax_object_cache) {}
 
 ax::mojom::blink::Role AXSlider::NativeRoleIgnoringAria() const {
   return ax::mojom::blink::Role::kSlider;
@@ -46,23 +45,31 @@ ax::mojom::blink::Role AXSlider::NativeRoleIgnoringAria() const {
 
 AccessibilityOrientation AXSlider::Orientation() const {
   // Default to horizontal in the unknown case.
-  if (!layout_object_)
+  if (!GetLayoutObject()) {
     return kAccessibilityOrientationHorizontal;
+  }
 
-  const ComputedStyle* style = layout_object_->Style();
-  if (!style)
-    return kAccessibilityOrientationHorizontal;
+  const ComputedStyle& style = GetLayoutObject()->StyleRef();
 
-  ControlPart style_appearance = style->EffectiveAppearance();
-  switch (style_appearance) {
-    case kSliderThumbHorizontalPart:
-    case kSliderHorizontalPart:
-    case kMediaSliderPart:
+  // If CSS writing-mode is vertical, return kAccessibilityOrientationVertical.
+  if (!style.IsHorizontalWritingMode()) {
+    return kAccessibilityOrientationVertical;
+  }
+
+  // Else, look at the CSS appearance property for slider orientation.
+  switch (style.EffectiveAppearance()) {
+    case AppearanceValue::kSliderThumbHorizontal:
+    case AppearanceValue::kSliderHorizontal:
+    case AppearanceValue::kMediaSlider:
       return kAccessibilityOrientationHorizontal;
 
-    case kSliderThumbVerticalPart:
-    case kSliderVerticalPart:
-    case kMediaVolumeSliderPart:
+    case AppearanceValue::kSliderVertical:
+      return RuntimeEnabledFeatures::
+                     NonStandardAppearanceValueSliderVerticalEnabled()
+                 ? kAccessibilityOrientationVertical
+                 : kAccessibilityOrientationHorizontal;
+    case AppearanceValue::kSliderThumbVertical:
+    case AppearanceValue::kMediaVolumeSlider:
       return kAccessibilityOrientationVertical;
 
     default:
@@ -93,7 +100,7 @@ bool AXSlider::OnNativeSetValueAction(const String& value) {
 }
 
 HTMLInputElement* AXSlider::GetInputElement() const {
-  return To<HTMLInputElement>(layout_object_->GetNode());
+  return To<HTMLInputElement>(GetNode());
 }
 
 }  // namespace blink

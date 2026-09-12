@@ -15,8 +15,7 @@
 #include "base/threading/simple_thread.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace base {
-namespace internal {
+namespace base::internal {
 namespace {
 
 // Adapted from base::Lock's BasicLockTestThread to make sure
@@ -24,7 +23,7 @@ namespace {
 class BasicLockTestThread : public SimpleThread {
  public:
   explicit BasicLockTestThread(CheckedLock* lock)
-      : SimpleThread("BasicLockTestThread"), lock_(lock), acquired_(0) {}
+      : SimpleThread("BasicLockTestThread"), lock_(lock) {}
 
   BasicLockTestThread(const BasicLockTestThread&) = delete;
   BasicLockTestThread& operator=(const BasicLockTestThread&) = delete;
@@ -41,13 +40,13 @@ class BasicLockTestThread : public SimpleThread {
     for (int i = 0; i < 10; i++) {
       lock_->Acquire();
       acquired_++;
-      PlatformThread::Sleep(Milliseconds(base::RandInt(0, 19)));
+      PlatformThread::Sleep(Milliseconds(base::RandIntInclusive(0, 19)));
       lock_->Release();
     }
   }
 
   const raw_ptr<CheckedLock> lock_;
-  int acquired_;
+  int acquired_ = 0;
 };
 
 class BasicLockAcquireAndWaitThread : public SimpleThread {
@@ -99,13 +98,13 @@ TEST(CheckedLockTest, Basic) {
   for (int i = 0; i < 10; i++) {
     lock.Acquire();
     acquired++;
-    PlatformThread::Sleep(Milliseconds(base::RandInt(0, 19)));
+    PlatformThread::Sleep(Milliseconds(base::RandIntInclusive(0, 19)));
     lock.Release();
   }
   for (int i = 0; i < 5; i++) {
     lock.Acquire();
     acquired++;
-    PlatformThread::Sleep(Milliseconds(base::RandInt(0, 19)));
+    PlatformThread::Sleep(Milliseconds(base::RandIntInclusive(0, 19)));
     lock.Release();
   }
 
@@ -448,5 +447,4 @@ TEST(CheckedLockTest, AnnotateAcquiredLockAlias) {
   member_guarded_by_lock.value = 42;  // Doesn't compile without |annotate|.
 }
 
-}  // namespace internal
-}  // namespace base
+}  // namespace base::internal

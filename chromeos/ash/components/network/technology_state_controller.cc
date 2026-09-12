@@ -5,6 +5,7 @@
 #include "chromeos/ash/components/network/technology_state_controller.h"
 
 #include "ash/constants/ash_features.h"
+#include "chromeos/ash/components/network/metrics/network_metrics_helper.h"
 #include "chromeos/ash/components/network/network_event_log.h"
 #include "chromeos/ash/components/network/network_state_handler.h"
 
@@ -64,7 +65,7 @@ void TechnologyStateController::SetTechnologiesEnabled(
     const NetworkTypePattern& type,
     bool enabled,
     network_handler::ErrorCallback error_callback) {
-  if (!hotspot_operation_delegate_ && ash::features::IsHotspotEnabled()) {
+  if (!hotspot_operation_delegate_) {
     NET_LOG(ERROR) << "hotspot operation delegate is null while hotspot flag is"
                    << " on.";
     network_handler::RunErrorCallback(std::move(error_callback),
@@ -72,8 +73,7 @@ void TechnologyStateController::SetTechnologiesEnabled(
     return;
   }
 
-  if (ash::features::IsHotspotEnabled() && enabled &&
-      type.MatchesPattern(NetworkTypePattern::WiFi())) {
+  if (enabled && type.MatchesPattern(NetworkTypePattern::WiFi())) {
     hotspot_operation_delegate_->PrepareEnableWifi(base::BindOnce(
         &TechnologyStateController::OnPrepareEnableWifiCompleted,
         weak_ptr_factory_.GetWeakPtr(), type, std::move(error_callback)));
@@ -88,13 +88,13 @@ void TechnologyStateController::OnPrepareEnableWifiCompleted(
     const NetworkTypePattern& type,
     network_handler::ErrorCallback error_callback,
     bool success) {
-  DCHECK(ash::features::IsHotspotEnabled());
-
   if (success) {
     network_state_handler_->SetTechnologiesEnabled(type, /*enabled=*/true,
                                                    std::move(error_callback));
     return;
   }
+  NetworkMetricsHelper::LogEnableTechnologyResult(
+      shill::kTypeWifi, /*success=*/false, kErrorDisableHotspot);
   network_handler::RunErrorCallback(std::move(error_callback),
                                     kErrorDisableHotspot);
 }

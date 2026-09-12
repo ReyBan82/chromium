@@ -16,17 +16,19 @@
 #include "base/time/time.h"
 #include "components/sync/engine/active_devices_invalidation_info.h"
 #include "components/sync/engine/cycle/debug_info_getter.h"
-#include "components/sync/engine/model_type_registry.h"
+#include "components/sync/engine/data_type_registry.h"
 #include "components/sync/engine/sync_engine_event_listener.h"
+#include "components/sync/protocol/sync.pb.h"
 
 namespace syncer {
 
 class ExtensionsActivity;
-class ModelTypeRegistry;
+class DataTypeRegistry;
 class ServerConnectionManager;
+class SyncAccessTokenFetcher;
 
 // Default number of items a client can commit in a single message.
-static const int kDefaultMaxCommitBatchSize = 25;
+constexpr int kDefaultMaxCommitBatchSize = 25;
 
 // SyncCycleContext encapsulates the contextual information and engine
 // components specific to a SyncCycle.  Unlike the SyncCycle, the context
@@ -43,12 +45,13 @@ class SyncCycleContext {
                    ExtensionsActivity* extensions_activity,
                    const std::vector<SyncEngineEventListener*>& listeners,
                    DebugInfoGetter* debug_info_getter,
-                   ModelTypeRegistry* model_type_registry,
-                   const std::string& invalidator_client_id,
+                   DataTypeRegistry* data_type_registry,
                    const std::string& cache_guid,
                    const std::string& birthday,
                    const std::string& bag_of_chips,
-                   base::TimeDelta poll_interval);
+                   base::TimeDelta poll_interval,
+                   const std::string& account_email,
+                   SyncAccessTokenFetcher* sync_access_token_fetcher);
 
   SyncCycleContext(const SyncCycleContext&) = delete;
   SyncCycleContext& operator=(const SyncCycleContext&) = delete;
@@ -57,9 +60,7 @@ class SyncCycleContext {
 
   ServerConnectionManager* connection_manager() { return connection_manager_; }
 
-  ModelTypeSet GetConnectedTypes() const;
-
-  bool proxy_tabs_datatype_enabled() const;
+  DataTypeSet GetConnectedTypes() const;
 
   ExtensionsActivity* extensions_activity() {
     return extensions_activity_.get();
@@ -81,15 +82,14 @@ class SyncCycleContext {
   void set_bag_of_chips(const std::string& bag_of_chips);
   const std::string& bag_of_chips() const { return bag_of_chips_; }
 
-  void set_account_name(const std::string& name) { account_name_ = name; }
-  const std::string& account_name() const { return account_name_; }
+  const std::string& account_email() const { return account_email_; }
 
   void set_max_commit_batch_size(int batch_size) {
     max_commit_batch_size_ = batch_size;
   }
   int32_t max_commit_batch_size() const { return max_commit_batch_size_; }
 
-  base::ObserverList<SyncEngineEventListener>::Unchecked* listeners() {
+  base::ObserverList<SyncEngineEventListener>* listeners() {
     return &listeners_;
   }
 
@@ -99,15 +99,7 @@ class SyncCycleContext {
 
   const sync_pb::ClientStatus& client_status() const { return client_status_; }
 
-  const std::string& invalidator_client_id() const {
-    return invalidator_client_id_;
-  }
-
-  void set_invalidator_client_id(const std::string& id) {
-    invalidator_client_id_ = id;
-  }
-
-  ModelTypeRegistry* model_type_registry() { return model_type_registry_; }
+  DataTypeRegistry* data_type_registry() { return data_type_registry_; }
 
   bool cookie_jar_mismatch() const { return cookie_jar_mismatch_; }
 
@@ -131,18 +123,22 @@ class SyncCycleContext {
         std::move(active_devices_invalidation_info);
   }
 
- private:
-  base::ObserverList<SyncEngineEventListener>::Unchecked listeners_;
+  SyncAccessTokenFetcher* sync_access_token_fetcher() {
+    return sync_access_token_fetcher_;
+  }
 
-  const raw_ptr<ServerConnectionManager> connection_manager_;
+ private:
+  base::ObserverList<SyncEngineEventListener> listeners_;
+
+  const raw_ptr<ServerConnectionManager, DanglingUntriaged> connection_manager_;
 
   // We use this to stuff extensions activity into CommitMessages so the server
   // can correlate commit traffic with extension-related bookmark mutations.
-  scoped_refptr<ExtensionsActivity> extensions_activity_;
+  const scoped_refptr<ExtensionsActivity> extensions_activity_;
 
   // Kept up to date with talk events to determine whether notifications are
   // enabled. True only if the notification channel is authorized and open.
-  bool notifications_enabled_;
+  bool notifications_enabled_ = false;
 
   const std::string cache_guid_;
 
@@ -150,35 +146,32 @@ class SyncCycleContext {
 
   std::string bag_of_chips_;
 
-  // The name of the account being synced.
-  std::string account_name_;
-
   // The server limits the number of items a client can commit in one batch.
-  int max_commit_batch_size_;
+  int max_commit_batch_size_ = kDefaultMaxCommitBatchSize;
 
   // We use this to get debug info to send to the server for debugging
   // client behavior on server side.
-  const raw_ptr<DebugInfoGetter> debug_info_getter_;
+  const raw_ptr<DebugInfoGetter, DanglingUntriaged> debug_info_getter_;
 
-  raw_ptr<ModelTypeRegistry> model_type_registry_;
+  const raw_ptr<DataTypeRegistry> data_type_registry_;
 
   // Satus information to be sent up to the server.
   sync_pb::ClientStatus client_status_;
 
-  // This is a copy of the identifier the that the invalidations client used to
-  // register itself with the invalidations server during startup.  We need to
-  // provide this to the sync server when we make changes to enable it to
-  // prevent us from receiving notifications of changes we make ourselves.
-  std::string invalidator_client_id_;
-
   // Whether the account(s) present in the content area's cookie jar match the
   // chrome account. If multiple accounts are present in the cookie jar, a
   // mismatch implies all of them are different from the chrome account.
-  bool cookie_jar_mismatch_;
+  bool cookie_jar_mismatch_ = false;
 
-  ActiveDevicesInvalidationInfo active_devices_invalidation_info_;
+  ActiveDevicesInvalidationInfo active_devices_invalidation_info_ =
+      ActiveDevicesInvalidationInfo::CreateUninitialized();
 
   base::TimeDelta poll_interval_;
+
+  // The email of the account being synced.
+  const std::string account_email_;
+
+  const raw_ptr<SyncAccessTokenFetcher> sync_access_token_fetcher_;
 };
 
 }  // namespace syncer

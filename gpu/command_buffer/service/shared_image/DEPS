@@ -1,15 +1,15 @@
-include_rules = [
-  "+third_party/dawn/include",
-]
-
 specific_include_rules = {
-  "external_vk_image_backing_factory_unittest\.cc": [
-    "+components/viz/common/gpu/vulkan_in_process_context_provider.h",
-  ],
-  "dcomp_image_backing_factory_unittest\.cc": [
+  "dcomp_image_backing_factory_unittest\\.cc": [
     "+ui/platform_window",
   ],
-  ".*_unittest\.cc": [
+  "shared_image_test_base\\.cc": [
+    "+cc/test",
+  ],
+  "shared_image_factory\\.cc": [
+    # TODO(crbug.com/434724013): Remove include once DumpWithoutCrashing is no longer needed.
+    "+ash/constants/ash_switches.h"
+  ],
+  ".*_unittest\\.cc": [
     "+cc/test",
   ],
 }

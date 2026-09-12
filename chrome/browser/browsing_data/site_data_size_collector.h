@@ -6,22 +6,19 @@
 #define CHROME_BROWSER_BROWSING_DATA_SITE_DATA_SIZE_COLLECTOR_H_
 
 #include <list>
-#include <vector>
 
 #include "base/files/file_path.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "chrome/browser/browsing_data/browsing_data_quota_helper.h"
+#include "components/browsing_data/content/browsing_data_quota_helper.h"
 #include "components/browsing_data/content/cookie_helper.h"
 #include "components/browsing_data/content/local_storage_helper.h"
-#include "content/public/browser/storage_partition.h"
 
 class SiteDataSizeCollector {
  public:
   using CookieList = std::list<net::CanonicalCookie>;
   using LocalStorageInfoList = std::list<content::StorageUsageInfo>;
-  using QuotaStorageUsageInfoList =
-      std::list<BrowsingDataQuotaHelper::QuotaInfo>;
+  using QuotaStorageUsageInfoList = BrowsingDataQuotaHelper::QuotaInfoArray;
 
   SiteDataSizeCollector(
       const base::FilePath& default_storage_partition_path,
@@ -45,7 +42,7 @@ class SiteDataSizeCollector {
   void OnLocalStorageModelInfoLoaded(
       const LocalStorageInfoList& local_storage_info_list);
   void OnQuotaModelInfoLoaded(
-      const QuotaStorageUsageInfoList& quota_storage_info_list);
+      QuotaStorageUsageInfoList quota_storage_info_list);
 
   // Callback for when the size is fetched from each storage backend.
   void OnStorageSizeFetched(int64_t size);
@@ -53,7 +50,7 @@ class SiteDataSizeCollector {
   // Path of the default storage partition of this profile.
   base::FilePath default_storage_partition_path_;
 
-  // Pointers to the helper objects, needed to retreive all the types of locally
+  // Pointers to the helper objects, needed to retrieve all the types of locally
   // stored data.
   scoped_refptr<browsing_data::CookieHelper> cookie_helper_;
   scoped_refptr<browsing_data::LocalStorageHelper> local_storage_helper_;

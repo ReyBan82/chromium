@@ -10,12 +10,19 @@
 #include "base/component_export.h"
 #include "base/feature_list.h"
 #include "base/metrics/field_trial_params.h"
+#include "build/build_config.h"
 #include "third_party/webrtc/modules/audio_processing/include/audio_processing.h"
 
 namespace features {
 
+
+#if BUILDFLAG(IS_WIN)
 COMPONENT_EXPORT(MEDIA_WEBRTC)
-BASE_DECLARE_FEATURE(kWebRtcAllowWgcDesktopCapturer);
+BASE_DECLARE_FEATURE(kWebRtcWgcRequireBorder);
+
+COMPONENT_EXPORT(MEDIA_WEBRTC)
+BASE_DECLARE_FEATURE(kWebRtcAllowWgcUsingTexture);
+#endif
 
 COMPONENT_EXPORT(MEDIA_WEBRTC)
 BASE_DECLARE_FEATURE(kWebRtcAllowInputVolumeAdjustment);
@@ -29,7 +36,27 @@ extern const base::FeatureParam<
     kWebRtcApmDownmixMethodParam;
 
 COMPONENT_EXPORT(MEDIA_WEBRTC)
-BASE_DECLARE_FEATURE(kWebRtcApmTellsIfPlayoutReferenceIsNeeded);
+BASE_DECLARE_FEATURE(kWebRtcAllowH265Send);
+
+COMPONENT_EXPORT(MEDIA_WEBRTC)
+BASE_DECLARE_FEATURE(kWebRtcAllowH265Receive);
+
+COMPONENT_EXPORT(MEDIA_WEBRTC)
+BASE_DECLARE_FEATURE(kWebRtcH265L1T2);
+
+COMPONENT_EXPORT(MEDIA_WEBRTC)
+BASE_DECLARE_FEATURE(kWebRtcH265L1T3);
+
+COMPONENT_EXPORT(MEDIA_WEBRTC)
+BASE_DECLARE_FEATURE(kWebRtcAV1HWEncode);
+
+COMPONENT_EXPORT(MEDIA_WEBRTC)
+BASE_DECLARE_FEATURE(kWebRtcNeuralResidualEchoEstimationAsyncInit);
+
+// Returns whether the OpenH264 encoder is available in WebRTC based on
+// build flags and OpenH264SoftwareEncoder feature flag status.
+COMPONENT_EXPORT(MEDIA_WEBRTC)
+bool IsOpenH264SoftwareEncoderEnabledForWebRTC();
 
 }  // namespace features
 

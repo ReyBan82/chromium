@@ -23,10 +23,13 @@
 #include "third_party/blink/renderer/core/dom/document_fragment.h"
 
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/dom/node_cloning_data.h"
+#include "third_party/blink/renderer/core/dom/tree_scope.h"
+#include "third_party/blink/renderer/core/execution_context/agent.h"
 #include "third_party/blink/renderer/core/html/parser/html_document_parser.h"
 #include "third_party/blink/renderer/core/xml/parser/xml_document_parser.h"
+#include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/bindings/runtime_call_stats.h"
-#include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
 
 namespace blink {
 
@@ -56,28 +59,64 @@ bool DocumentFragment::ChildTypeAllowed(NodeType type) const {
   }
 }
 
-Node* DocumentFragment::Clone(Document& factory, CloneChildrenFlag flag) const {
+Node* DocumentFragment::Clone(Document& factory,
+                              NodeCloningData& data,
+                              ContainerNode* append_to,
+                              CustomElementRegistry* fallback_registry,
+                              ExceptionState&) const {
+  DCHECK_EQ(append_to, nullptr)
+      << "DocumentFragment::Clone() doesn't support append_to";
   DocumentFragment* clone = Create(factory);
-  if (flag != CloneChildrenFlag::kSkip)
-    clone->CloneChildNodesFrom(*this, flag);
+  if (data.Has(CloneOption::kIncludeDescendants)) {
+    clone->CloneChildNodesFrom(*this, data, fallback_registry);
+  }
   return clone;
 }
 
 void DocumentFragment::ParseHTML(const String& source,
                                  Element* context_element,
-                                 ParserContentPolicy parser_content_policy) {
+                                 CustomElementRegistry* registry,
+                                 ParserContentPolicy parser_content_policy,
+                                 StreamingSanitizer* sanitizer) {
   RUNTIME_CALL_TIMER_SCOPE(
-      V8PerIsolateData::MainThreadIsolate(),
+      GetDocument().GetAgent().isolate(),
       RuntimeCallStats::CounterId::kDocumentFragmentParseHTML);
   HTMLDocumentParser::ParseDocumentFragment(source, this, context_element,
-                                            parser_content_policy);
+                                            registry, parser_content_policy,
+                                            sanitizer);
 }
 
 bool DocumentFragment::ParseXML(const String& source,
                                 Element* context_element,
-                                ParserContentPolicy parser_content_policy) {
-  return XMLDocumentParser::ParseDocumentFragment(source, this, context_element,
-                                                  parser_content_policy);
+                                ExceptionState& exception_state,
+                                ParserContentPolicy parser_content_policy,
+                                StreamingSanitizer* sanitizer) {
+  return XMLDocumentParser::ParseDocumentFragment(
+      source, this, context_element, parser_content_policy, exception_state);
+}
+
+void DocumentFragment::ForgetChildren() {
+  DCHECK(HoldsUnnotifiedChildren());
+
+  if (!hasChildren()) {
+    return;
+  }
+
+  Node* next_child = firstChild();
+  do {
+    Node* child = next_child;
+    child->SetParentNode(nullptr);
+    child->SetPreviousSibling(nullptr);
+    next_child = child->nextSibling();
+    child->SetNextSibling(nullptr);
+  } while (next_child);
+
+  SetFirstChild(nullptr);
+  SetLastChild(nullptr);
+}
+
+void DocumentFragment::Trace(Visitor* visitor) const {
+  ContainerNode::Trace(visitor);
 }
 
 }  // namespace blink

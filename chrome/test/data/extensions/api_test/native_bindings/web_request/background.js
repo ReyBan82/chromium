@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Check invalid call: 'asyncBlocking' is not allowed for onBeforeRequest.
-var caught = false;
+let caught = false;
 try {
   chrome.webRequest.onBeforeRequest.addListener(
       function(details) {}, {urls: ['http://example.com/*/*']},
@@ -25,16 +25,17 @@ chrome.test.assertTrue(caught);
 
 // Redirect calls from simple.html -> simple2.html.
 chrome.webRequest.onBeforeRequest.addListener(function(details) {
-  var url = new URL(details.url);
+  const url = new URL(details.url);
   // Ignore favicon requests, and don't redirect simple2.html.
-  if (url.pathname == '/native_bindings/simple2.html' ||
-      url.pathname == '/favicon.ico')
+  if (url.pathname === '/native_bindings/simple2.html' ||
+      url.pathname === '/favicon.ico') {
     return {};
+  }
 
   chrome.test.assertEq('/native_bindings/simple.html', url.pathname);
-  chrome.test.assertTrue(url.port != '');
-  chrome.test.assertEq('example.com:' + url.port, url.host);
-  var newUrl = url.origin + '/native_bindings/simple2.html';
+  chrome.test.assertNe('', url.port);
+  chrome.test.assertEq(`example.com:${url.port}`, url.host);
+  const newUrl = `${url.origin}/native_bindings/simple2.html`;
   return {redirectUrl: newUrl};
 }, {urls: ['http://example.com:*/*']}, ['blocking']);
 

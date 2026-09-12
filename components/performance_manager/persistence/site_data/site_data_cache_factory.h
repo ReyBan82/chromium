@@ -6,20 +6,16 @@
 #define COMPONENTS_PERFORMANCE_MANAGER_PERSISTENCE_SITE_DATA_SITE_DATA_CACHE_FACTORY_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/containers/flat_map.h"
 #include "base/files/file_path.h"
-#include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/unguessable_token.h"
 #include "components/performance_manager/persistence/site_data/site_data_cache.h"
-#include "content/public/browser/browser_context.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-
-namespace content {
-class BrowserContext;
-}
 
 namespace performance_manager {
 
@@ -44,12 +40,12 @@ class SiteDataCacheFactory {
   // Returns a pointer to the data cache associated with |browser_context_id|,
   // or null if there's no cache for this context yet.
   SiteDataCache* GetDataCacheForBrowserContext(
-      const std::string& browser_context_id) const;
+      const base::UnguessableToken& browser_context_id) const;
 
   // Returns the data cache inspector associated with |browser_context_id|, or
   // null if there's no data cache inspector for this context yet.
   SiteDataCacheInspector* GetInspectorForBrowserContext(
-      const std::string& browser_context_id) const;
+      const base::UnguessableToken& browser_context_id) const;
 
   // Sets the inspector instance associated with a given browser context.
   // If |inspector| is nullptr the association is cleared.
@@ -59,36 +55,41 @@ class SiteDataCacheFactory {
   // class' constructors and destructors.
   void SetDataCacheInspectorForBrowserContext(
       SiteDataCacheInspector* inspector,
-      const std::string& browser_context_id);
+      const base::UnguessableToken& browser_context_id);
 
   // Testing functions to check if the data cache associated with
   // |browser_context_id| is recording.
-  bool IsDataCacheRecordingForTesting(const std::string& browser_context_id);
+  bool IsDataCacheRecordingForTesting(
+      const base::UnguessableToken& browser_context_id);
 
   // Set the cache for a given browser context, this will replace any existing
   // cache.
-  void SetCacheForTesting(const std::string& browser_context_id,
+  void SetCacheForTesting(const base::UnguessableToken& browser_context_id,
                           std::unique_ptr<SiteDataCache> cache);
 
-  void SetCacheInspectorForTesting(const std::string& browser_context_id,
-                                   SiteDataCacheInspector* inspector);
+  void SetCacheInspectorForTesting(
+      const base::UnguessableToken& browser_context_id,
+      SiteDataCacheInspector* inspector);
 
   // Implementation of the corresponding *OnUIThread public static functions
   // that runs on this object's task runner.
-  void OnBrowserContextCreated(const std::string& browser_context_id,
-                               const base::FilePath& context_path,
-                               absl::optional<std::string> parent_context_id);
-  void OnBrowserContextDestroyed(const std::string& browser_context_id);
+  void OnBrowserContextCreated(
+      const base::UnguessableToken& browser_context_id,
+      const base::FilePath& context_path,
+      std::optional<base::UnguessableToken> parent_context_id);
+  void OnBrowserContextDestroyed(
+      const base::UnguessableToken& browser_context_id);
 
  private:
   // A map that associates a BrowserContext's ID with a SiteDataCache. This
   // object owns the caches.
-  base::flat_map<std::string, std::unique_ptr<SiteDataCache>> data_cache_map_
-      GUARDED_BY_CONTEXT(sequence_checker_);
+  base::flat_map<base::UnguessableToken, std::unique_ptr<SiteDataCache>>
+      data_cache_map_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   // A map that associates a BrowserContext's ID with a SiteDataCacheInspector.
-  base::flat_map<std::string, SiteDataCacheInspector*> data_cache_inspector_map_
-      GUARDED_BY_CONTEXT(sequence_checker_);
+  base::flat_map<base::UnguessableToken,
+                 raw_ptr<SiteDataCacheInspector, CtnExperimental>>
+      data_cache_inspector_map_ GUARDED_BY_CONTEXT(sequence_checker_);
 
   SEQUENCE_CHECKER(sequence_checker_);
 };

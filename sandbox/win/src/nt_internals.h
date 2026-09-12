@@ -40,12 +40,6 @@ typedef NTSTATUS(WINAPI* NtOpenFileFunction)(OUT PHANDLE FileHandle,
 
 typedef NTSTATUS(WINAPI* NtCloseFunction)(IN HANDLE Handle);
 
-// Uses undocumented value not in FILE_INFORMATION_CLASS.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wenum-constexpr-conversion"
-constexpr auto FileRenameInformation = static_cast<FILE_INFORMATION_CLASS>(10);
-#pragma clang diagnostic push
-
 typedef struct _FILE_RENAME_INFORMATION {
   BOOLEAN ReplaceIfExists;
   HANDLE RootDirectory;
@@ -162,12 +156,6 @@ typedef NTSTATUS(WINAPI* NtSetInformationThreadFunction)(
     IN PVOID ThreadInformation,
     IN ULONG ThreadInformationLength);
 
-// Partial definition only for values not in PROCESS_INFO_CLASS.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wenum-constexpr-conversion"
-constexpr auto ProcessHandleTable = static_cast<PROCESSINFOCLASS>(58);
-#pragma clang diagnostic pop
-
 // Partial definition only adding fields not in winternl.h, from
 // https://msdn.microsoft.com/en-us/library/windows/desktop/aa813706(v=vs.85).aspx
 typedef struct _NT_PEB {
@@ -185,19 +173,6 @@ typedef struct _NT_PEB {
 static_assert(offsetof(NT_PEB, Ldr) == offsetof(PEB, Ldr));
 static_assert(offsetof(NT_PEB, ProcessParameters) ==
               offsetof(PEB, ProcessParameters));
-
-typedef NTSTATUS(WINAPI* NtQueryInformationProcessFunction)(
-    IN HANDLE ProcessHandle,
-    IN PROCESSINFOCLASS ProcessInformationClass,
-    OUT PVOID ProcessInformation,
-    IN ULONG ProcessInformationLength,
-    OUT PULONG ReturnLength OPTIONAL);
-
-typedef NTSTATUS(WINAPI* NtSetInformationProcessFunction)(
-    HANDLE ProcessHandle,
-    IN PROCESSINFOCLASS ProcessInformationClass,
-    IN PVOID ProcessInformation,
-    IN ULONG ProcessInformationLength);
 
 typedef NTSTATUS(WINAPI* NtOpenThreadTokenFunction)(IN HANDLE ThreadHandle,
                                                     IN ACCESS_MASK
@@ -222,18 +197,6 @@ typedef NTSTATUS(WINAPI* NtOpenProcessTokenExFunction)(
     IN ACCESS_MASK DesiredAccess,
     IN ULONG HandleAttributes,
     OUT PHANDLE TokenHandle);
-
-typedef NTSTATUS(WINAPI* RtlCreateUserThreadFunction)(
-    IN HANDLE Process,
-    IN PSECURITY_DESCRIPTOR ThreadSecurityDescriptor,
-    IN BOOLEAN CreateSuspended,
-    IN ULONG ZeroBits,
-    IN SIZE_T MaximumStackSize,
-    IN SIZE_T CommittedStackSize,
-    IN LPTHREAD_START_ROUTINE StartAddress,
-    IN PVOID Parameter,
-    OUT PHANDLE Thread,
-    OUT PCLIENT_ID ClientId);
 
 // -----------------------------------------------------------------------
 // Memory

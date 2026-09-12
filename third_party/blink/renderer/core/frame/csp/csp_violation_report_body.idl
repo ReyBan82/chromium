@@ -5,7 +5,7 @@
 // https://www.w3.org/TR/CSP3/#cspviolationreportbody
 
 [
-    LegacyNoInterfaceObject
+    Exposed=Window
 ] interface CSPViolationReportBody : ReportBody {
   readonly attribute USVString documentURL;
   readonly attribute USVString? referrer;
@@ -18,5 +18,7 @@
   readonly attribute unsigned short statusCode;
   readonly attribute unsigned long? lineNumber;
   readonly attribute unsigned long? columnNumber;
-  [CallWith=ScriptState] object toJSON();
+  [RuntimeEnabled=CSPHashesV1] readonly attribute DOMString? urlHash;
+  [RuntimeEnabled=CSPHashesV1] readonly attribute DOMString? evalHash;
+  [CallWith=ScriptState] object toJSON(optional DOMString key);
 };

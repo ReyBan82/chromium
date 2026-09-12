@@ -5,11 +5,15 @@
 #ifndef CONTENT_PUBLIC_BROWSER_NAVIGATION_THROTTLE_H_
 #define CONTENT_PUBLIC_BROWSER_NAVIGATION_THROTTLE_H_
 
+#include <optional>
+
 #include "base/functional/callback.h"
+#include "base/memory/advanced_memory_safety_checks.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "content/common/content_export.h"
+#include "content/public/browser/navigation_throttle_registry.h"
 #include "net/base/net_errors.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace content {
 class NavigationHandle;
@@ -21,6 +25,10 @@ class NavigationHandle;
 // code that just wishes to defer a commit, including activations to the
 // primary frame tree, should instead use a CommitDeferringCondition.
 class CONTENT_EXPORT NavigationThrottle {
+  // Do not remove this macro!
+  // The macro is maintained by the memory safety team.
+  ADVANCED_MEMORY_SAFETY_CHECKS();
+
  public:
   // Represents what a NavigationThrottle can decide to do to a navigation. Note
   // that this enum is implicitly convertable to ThrottleCheckResult.
@@ -36,6 +44,12 @@ class CONTENT_EXPORT NavigationThrottle {
     // NavigationHandle::Resume or NavigationHandle::CancelDeferredRequest. If
     // the NavigationHandle is destroyed while the navigation is deferred, the
     // navigation will be canceled in the network stack.
+    // Note: since this slows page load it should be avoided unless there's no
+    // other option. An example necessary case would be locked down users where
+    // a server check needs to be done before starting the navigation. For other
+    // cases, please consider alternatives like sending data to the renderer
+    // asynchronously, showing interstitials later when possible etc. It's good
+    // practice to add histograms to know how long the delay takes.
     DEFER,
 
     // Cancels the navigation.
@@ -110,7 +124,7 @@ class CONTENT_EXPORT NavigationThrottle {
     // Construct with an action, error, and error page HTML.
     ThrottleCheckResult(ThrottleAction action,
                         net::Error net_error_code,
-                        absl::optional<std::string> error_page_content);
+                        std::optional<std::string> error_page_content);
 
     ThrottleCheckResult(const ThrottleCheckResult& other);
 
@@ -118,17 +132,17 @@ class CONTENT_EXPORT NavigationThrottle {
 
     ThrottleAction action() const { return action_; }
     net::Error net_error_code() const { return net_error_code_; }
-    const absl::optional<std::string>& error_page_content() {
+    const std::optional<std::string>& error_page_content() {
       return error_page_content_;
     }
 
    private:
     ThrottleAction action_;
     net::Error net_error_code_;
-    absl::optional<std::string> error_page_content_;
+    std::optional<std::string> error_page_content_;
   };
 
-  NavigationThrottle(NavigationHandle* navigation_handle);
+  explicit NavigationThrottle(NavigationThrottleRegistry& registry);
   virtual ~NavigationThrottle();
 
   // Called when a network request is about to be made for this navigation.
@@ -147,6 +161,16 @@ class CONTENT_EXPORT NavigationThrottle {
   // method. Failing to do so will result in use-after-free bugs. Should the
   // implementer need to destroy the WebContents, it should return CANCEL,
   // CANCEL_AND_IGNORE or DEFER and perform the destruction asynchronously.
+  //
+  // At the point where this is invoked, some navigation state has already been
+  // updated to reflect the redirect. Specifically:
+  // - navigation_handle()->GetURL() returns the new URL (the redirection
+  // target).
+  // - navigation_handle()->GetRedirectChain() contains the new URL as its last
+  //   entry.
+  // - navigation_handle()->GetResponseHeaders() returns the headers of the
+  //   redirect response (i.e. the response that triggered this redirect, not
+  //   the response of the new URL).
   virtual ThrottleCheckResult WillRedirectRequest();
 
   // Called when a request will fail.
@@ -193,7 +217,9 @@ class CONTENT_EXPORT NavigationThrottle {
 
   // The NavigationHandle that is tracking the information related to this
   // navigation.
-  NavigationHandle* navigation_handle() const { return navigation_handle_; }
+  NavigationHandle* navigation_handle() const {
+    return &registry_->GetNavigationHandle();
+  }
 
   // Overrides the default Resume method and replaces it by |callback|. This
   // should only be used in tests.
@@ -225,7 +251,7 @@ class CONTENT_EXPORT NavigationThrottle {
   virtual void CancelDeferredNavigation(ThrottleCheckResult result);
 
  private:
-  const raw_ptr<NavigationHandle> navigation_handle_;
+  const raw_ref<NavigationThrottleRegistry> registry_;
 
   // Used in tests.
   base::RepeatingClosure resume_callback_;
@@ -239,12 +265,6 @@ class CONTENT_EXPORT NavigationThrottle {
 inline bool operator==(NavigationThrottle::ThrottleAction lhs,
                        const NavigationThrottle::ThrottleCheckResult& rhs) {
   return lhs == rhs.action();
-}
-// Test-only operator!= to enable assertions like:
-//   EXPECT_NE(NavigationThrottle::PROCEED, throttle->WillProcessResponse())
-inline bool operator!=(NavigationThrottle::ThrottleAction lhs,
-                       const NavigationThrottle::ThrottleCheckResult& rhs) {
-  return lhs != rhs.action();
 }
 #endif
 

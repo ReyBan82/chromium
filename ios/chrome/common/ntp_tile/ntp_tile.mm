@@ -4,21 +4,17 @@
 
 #import "ios/chrome/common/ntp_tile/ntp_tile.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace {
-NSString* kTitleKey = @"title";
-NSString* kURLKey = @"URL";
-NSString* kfaviconFileNameKey = @"faviconFileName";
-NSString* kFallbackTextColorKey = @"fallbackTextColor";
-NSString* kFallbackBackgroundColorKey = @"fallbackBackgroundColor";
-NSString* kFallbackIsDefaultColorKey = @"fallbackIsDefaultColor";
-NSString* kFallbackMonogram = @"fallbackMonogram";
-NSString* kFaviconFetched = @"faviconFetched";
-NSString* kPosition = @"position";
-}
+NSString* const kTitleKey = @"title";
+NSString* const kURLKey = @"URL";
+NSString* const kfaviconFileNameKey = @"faviconFileName";
+NSString* const kFallbackTextColorKey = @"fallbackTextColor";
+NSString* const kFallbackBackgroundColorKey = @"fallbackBackgroundColor";
+NSString* const kFallbackIsDefaultColorKey = @"fallbackIsDefaultColor";
+NSString* const kFallbackMonogram = @"fallbackMonogram";
+NSString* const kFaviconFetched = @"faviconFetched";
+NSString* const kPosition = @"position";
+}  // namespace
 
 @implementation NTPTile
 
@@ -65,18 +61,31 @@ NSString* kPosition = @"position";
   return self;
 }
 
+#pragma mark - NSSecureCoding
+
++ (BOOL)supportsSecureCoding {
+  return YES;
+}
+
 - (instancetype)initWithCoder:(NSCoder*)aDecoder {
-  return [self initWithTitle:[aDecoder decodeObjectForKey:kTitleKey]
-                          URL:[aDecoder decodeObjectForKey:kURLKey]
-              faviconFileName:[aDecoder decodeObjectForKey:kfaviconFileNameKey]
+  return [self initWithTitle:[aDecoder decodeObjectOfClass:[NSString class]
+                                                    forKey:kTitleKey]
+                          URL:[aDecoder decodeObjectOfClass:[NSURL class]
+                                                     forKey:kURLKey]
+              faviconFileName:[aDecoder decodeObjectOfClass:[NSString class]
+                                                     forKey:kfaviconFileNameKey]
             fallbackTextColor:[aDecoder
-                                  decodeObjectForKey:kFallbackTextColorKey]
+                                  decodeObjectOfClass:[UIColor class]
+                                               forKey:kFallbackTextColorKey]
       fallbackBackgroundColor:
-          [aDecoder decodeObjectForKey:kFallbackBackgroundColorKey]
+          [aDecoder decodeObjectOfClass:[UIColor class]
+                                 forKey:kFallbackBackgroundColorKey]
        fallbackIsDefaultColor:[aDecoder
                                   decodeBoolForKey:kFallbackIsDefaultColorKey]
-             fallbackMonogram:[aDecoder decodeObjectForKey:kFallbackMonogram]
-                     position:[[aDecoder decodeObjectForKey:kPosition]
+             fallbackMonogram:[aDecoder decodeObjectOfClass:[NSString class]
+                                                     forKey:kFallbackMonogram]
+                     position:[[aDecoder decodeObjectOfClass:[NSNumber class]
+                                                      forKey:kPosition]
                                   unsignedIntegerValue]];
 }
 

@@ -33,16 +33,29 @@ int TestLauncherTracer::RecordProcessExecution(TimeTicks start_time,
 bool TestLauncherTracer::Dump(const FilePath& path) {
   AutoLock lock(lock_);
 
-  Value::List json_events_list;
+  ListValue json_events_list;
   for (const Event& event : events_) {
-    Value::Dict json_event;
+    DictValue json_event;
     json_event.Set("name", event.name);
     json_event.Set("ph", "X");
     json_event.Set("ts",
                    checked_cast<int>(
                        (event.timestamp - trace_start_time_).InMicroseconds()));
     json_event.Set("dur", checked_cast<int>(event.duration.InMicroseconds()));
-    json_event.Set("tid", checked_cast<int>(event.thread_id));
+
+    // The TID might be an int64, however int64 values are not representable in
+    // JS and JSON (cf. crbug.com/40228085) since JS numbers are float64. Since
+    // thread IDs are likely to be allocated sequentially, truncation of the
+    // high bits is preferable to loss of precision in the low bits, as threads
+    // are more likely to differ in their low bit values, so we truncate the
+    // value to int32. Since this is only used for dumping test runner state,
+    // the loss of information is not catastrophic and won't happen in normal
+    // browser execution. Additionally, the test thread ids are also truncated,
+    // so the truncated values should match.
+    //
+    // LINT.IfChange(TestLauncherTidTruncation)
+    json_event.Set("tid", event.thread_id.truncate_to_int32_for_display_only());
+    // LINT.ThenChange(test_results_tracker.cc:TestLauncherTidTruncation)
 
     // Add fake values required by the trace viewer.
     json_event.Set("pid", 0);

@@ -5,12 +5,34 @@
 #ifndef COMPONENTS_MEDIA_MESSAGE_CENTER_MEDIA_NOTIFICATION_ITEM_H_
 #define COMPONENTS_MEDIA_MESSAGE_CENTER_MEDIA_NOTIFICATION_ITEM_H_
 
+#include <optional>
+
 #include "base/component_export.h"
-#include "services/media_session/public/mojom/media_controller.mojom.h"
+#include "base/time/time.h"
 #include "services/media_session/public/mojom/media_session.mojom.h"
+
+namespace base {
+class UnguessableToken;
+}  // namespace base
 
 namespace media_message_center {
 
+// The source of the media item. This is used in metrics so new values must only
+// be added to the end.
+// LINT.IfChange(Source)
+enum class Source {
+  kUnknown,
+  kWeb,
+  kAssistant,  // Obsolete.
+  kArc,
+  kLocalCastSession,
+  kNonLocalCastSession,
+  kCastDevicePicker,
+  kMaxValue = kCastDevicePicker,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/media/enums.xml:MediaNotificationSource)
+
+// The source type of the media item.
 enum class SourceType {
   kLocalMediaSession,
   kCast,
@@ -33,18 +55,6 @@ class COMPONENT_EXPORT(MEDIA_MESSAGE_CENTER) MediaNotificationItem {
   // The name of the histogram used when recording the source.
   static const char kSourceHistogramName[];
 
-  // The source of the media session. This is used in metrics so new values must
-  // only be added to the end.
-  enum class Source {
-    kUnknown,
-    kWeb,
-    kAssistant,
-    kArc,
-    kLocalCastSession,
-    kNonLocalCastSession,
-    kMaxValue = kNonLocalCastSession,
-  };
-
   MediaNotificationItem() = default;
   MediaNotificationItem(const MediaNotificationItem&) = delete;
   MediaNotificationItem& operator=(const MediaNotificationItem&) = delete;
@@ -57,7 +67,7 @@ class COMPONENT_EXPORT(MEDIA_MESSAGE_CENTER) MediaNotificationItem {
   virtual void OnMediaSessionActionButtonPressed(
       media_session::mojom::MediaSessionAction action) = 0;
 
-  // Called by MediaNotificationViewImpl when progress bar is clicked to seek.
+  // Called by MediaNotificationView when progress bar is clicked to seek.
   virtual void SeekTo(base::TimeDelta time) = 0;
 
   // Hides the media notification.
@@ -73,8 +83,14 @@ class COMPONENT_EXPORT(MEDIA_MESSAGE_CENTER) MediaNotificationItem {
   // started.
   virtual bool RequestMediaRemoting() = 0;
 
-  // Returns the type of source.
-  virtual media_message_center::SourceType SourceType() = 0;
+  // Returns the source of the media item for recording metrics.
+  virtual media_message_center::Source GetSource() const = 0;
+
+  // Returns the source type of the media item.
+  virtual media_message_center::SourceType GetSourceType() const = 0;
+
+  // Returns the ID of the source of the media session, if it has one.
+  virtual std::optional<base::UnguessableToken> GetSourceId() const = 0;
 };
 
 }  // namespace media_message_center

@@ -4,33 +4,32 @@
 
 #include "gpu/vulkan/android/vulkan_implementation_android.h"
 
-#include "base/android/android_hardware_buffer_compat.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
-#include "gpu/ipc/common/vulkan_ycbcr_info.h"
+#include "base/notimplemented.h"
 #include "gpu/vulkan/vulkan_device_queue.h"
 #include "gpu/vulkan/vulkan_function_pointers.h"
 #include "gpu/vulkan/vulkan_image.h"
 #include "gpu/vulkan/vulkan_instance.h"
 #include "gpu/vulkan/vulkan_surface.h"
 #include "gpu/vulkan/vulkan_util.h"
+#include "gpu/vulkan/vulkan_ycbcr_info.h"
 #include "ui/gfx/gpu_fence.h"
-#include "ui/gfx/gpu_memory_buffer.h"
+#include "ui/gfx/gpu_memory_buffer_handle.h"
 
 namespace gpu {
 
-VulkanImplementationAndroid::VulkanImplementationAndroid() = default;
+VulkanImplementationAndroid::VulkanImplementationAndroid(bool force_native)
+    : VulkanImplementation(false, false, force_native),
+      vulkan_instance_(force_native) {}
 
 VulkanImplementationAndroid::~VulkanImplementationAndroid() = default;
 
 bool VulkanImplementationAndroid::InitializeVulkanInstance(bool using_surface) {
   DCHECK(using_surface);
   std::vector<const char*> required_extensions = {
-      VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
-      VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
-      VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME};
-
+      VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME};
   return vulkan_instance_.Initialize(base::FilePath("libvulkan.so"),
                                      required_extensions, {});
 }
@@ -93,40 +92,17 @@ VulkanImplementationAndroid::GetOptionalDeviceExtensions() {
 VkFence VulkanImplementationAndroid::CreateVkFenceForGpuFence(
     VkDevice vk_device) {
   NOTREACHED();
-  return VK_NULL_HANDLE;
 }
 
 std::unique_ptr<gfx::GpuFence>
 VulkanImplementationAndroid::ExportVkFenceToGpuFence(VkDevice vk_device,
                                                      VkFence vk_fence) {
   NOTREACHED();
-  return nullptr;
 }
 
-VkSemaphore VulkanImplementationAndroid::CreateExternalSemaphore(
-    VkDevice vk_device) {
-  return CreateExternalVkSemaphore(
-      vk_device, VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-}
-
-VkSemaphore VulkanImplementationAndroid::ImportSemaphoreHandle(
-    VkDevice vk_device,
-    SemaphoreHandle sync_handle) {
-  return ImportVkSemaphoreHandle(vk_device, std::move(sync_handle));
-}
-
-SemaphoreHandle VulkanImplementationAndroid::GetSemaphoreHandle(
-    VkDevice vk_device,
-    VkSemaphore vk_semaphore) {
-  // VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT specifies a POSIX file
-  // descriptor handle to a Linux Sync File or Android Fence object.
-  return GetVkSemaphoreHandle(vk_device, vk_semaphore,
-                              VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT);
-}
-
-VkExternalMemoryHandleTypeFlagBits
-VulkanImplementationAndroid::GetExternalImageHandleType() {
-  return VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+VkExternalSemaphoreHandleTypeFlagBits
+VulkanImplementationAndroid::GetExternalSemaphoreHandleType() {
+  return VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
 }
 
 bool VulkanImplementationAndroid::CanImportGpuMemoryBuffer(

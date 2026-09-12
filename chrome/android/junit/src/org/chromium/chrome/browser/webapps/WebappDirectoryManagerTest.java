@@ -6,39 +6,30 @@ package org.chromium.chrome.browser.webapps;
 
 import android.content.Context;
 
-import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RuntimeEnvironment;
-import org.robolectric.annotation.Config;
-import org.robolectric.annotation.LooperMode;
-import org.robolectric.shadows.ShadowApplication;
-import org.robolectric.shadows.ShadowLooper;
 
 import org.chromium.base.ContextUtils;
+import org.chromium.base.FakeTimeTestRule;
 import org.chromium.base.PathUtils;
 import org.chromium.base.ThreadUtils;
 import org.chromium.base.metrics.RecordHistogram;
-import org.chromium.base.task.test.CustomShadowAsyncTask;
 import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.base.test.util.Feature;
 import org.chromium.webapk.lib.common.WebApkConstants;
 
 import java.io.File;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Tests that directories for WebappActivities are managed correctly.
- */
+/** Tests that directories for WebappActivities are managed correctly. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE, shadows = {CustomShadowAsyncTask.class})
-@LooperMode(LooperMode.Mode.LEGACY)
 public class WebappDirectoryManagerTest {
-    @Rule
-    public MockWebappDataStorageClockRule mClockRule = new MockWebappDataStorageClockRule();
+    @Rule public FakeTimeTestRule mClockRule = new FakeTimeTestRule();
 
     private static final String WEBAPK_PACKAGE_NAME_1 = "webapk_1";
     private static final String WEBAPK_PACKAGE_NAME_2 = "webapk_2";
@@ -53,23 +44,20 @@ public class WebappDirectoryManagerTest {
     public void setUp() {
         mContext = RuntimeEnvironment.application;
         ContextUtils.initApplicationContext(mContext);
-        ThreadUtils.setThreadAssertsDisabledForTesting(true);
+        ThreadUtils.hasSubtleSideEffectsSetThreadAssertsDisabledForTesting(true);
         PathUtils.setPrivateDataDirectorySuffix("chrome");
         WebappDirectoryManager.resetForTesting();
     }
 
-    @After
-    public void tearDown() {
-        ThreadUtils.setThreadAssertsDisabledForTesting(false);
-    }
-
     public void registerWebapp(String webappId) {
-        WebappRegistry.getInstance().register(
-                webappId, new WebappRegistry.FetchWebappDataStorageCallback() {
-                    @Override
-                    public void onWebappDataStorageRetrieved(WebappDataStorage storage) {}
-                });
-        ShadowApplication.runBackgroundTasks();
+        WebappRegistry.getInstance()
+                .register(
+                        webappId,
+                        new WebappRegistry.FetchWebappDataStorageCallback() {
+                            @Override
+                            public void onWebappDataStorageRetrieved(WebappDataStorage storage) {}
+                        });
+        RobolectricUtil.runAllBackgroundAndUi();
     }
 
     @Test
@@ -110,7 +98,8 @@ public class WebappDirectoryManagerTest {
         // uninstalled.
 
         runCleanup();
-        Assert.assertEquals(1,
+        Assert.assertEquals(
+                1,
                 RecordHistogram.getHistogramValueCountForTesting(
                         "WebApk.Update.NumStaleUpdateRequestFiles", 2));
     }
@@ -127,10 +116,11 @@ public class WebappDirectoryManagerTest {
         registerWebapp(WEBAPK_ID_1);
         WebappDataStorage storage = WebappRegistry.getInstance().getWebappDataStorage(WEBAPK_ID_1);
         storage.updateTimeOfLastCheckForUpdatedWebManifest();
-        mClockRule.advance(TimeUnit.DAYS.toMillis(30));
+        mClockRule.advanceMillis(TimeUnit.DAYS.toMillis(30));
 
         runCleanup();
-        Assert.assertEquals(1,
+        Assert.assertEquals(
+                1,
                 RecordHistogram.getHistogramValueCountForTesting(
                         "WebApk.Update.NumStaleUpdateRequestFiles", 1));
     }
@@ -148,16 +138,17 @@ public class WebappDirectoryManagerTest {
         registerWebapp(WEBAPK_ID_1);
         WebappDataStorage storage = WebappRegistry.getInstance().getWebappDataStorage(WEBAPK_ID_1);
         storage.updateTimeOfLastCheckForUpdatedWebManifest();
-        mClockRule.advance(1);
+        mClockRule.advanceMillis(1);
 
         runCleanup();
-        Assert.assertEquals(0,
+        Assert.assertEquals(
+                0,
                 RecordHistogram.getHistogramValueCountForTesting(
                         "WebApk.Update.NumStaleUpdateRequestFiles", 1));
     }
 
     private void runCleanup() {
         WebappDirectoryManager.cleanUpDirectories();
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
     }
 }

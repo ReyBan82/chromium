@@ -5,14 +5,21 @@
 #ifndef CHROME_BROWSER_ASH_SYNC_SYNC_APPSYNC_SERVICE_FACTORY_H_
 #define CHROME_BROWSER_ASH_SYNC_SYNC_APPSYNC_SERVICE_FACTORY_H_
 
+#include <memory>
+
 #include "chrome/browser/profiles/profile_keyed_service_factory.h"
+#include "components/keyed_service/core/keyed_service.h"
 
 class Profile;
 
 namespace base {
 template <typename T>
-struct DefaultSingletonTraits;
+class NoDestructor;
 }  // namespace base
+
+namespace content {
+class BrowserContext;
+}  // namespace content
 
 namespace ash {
 
@@ -28,14 +35,15 @@ class SyncAppsyncServiceFactory : public ProfileKeyedServiceFactory {
       delete;
 
  private:
-  friend struct base::DefaultSingletonTraits<SyncAppsyncServiceFactory>;
+  friend base::NoDestructor<SyncAppsyncServiceFactory>;
 
   SyncAppsyncServiceFactory();
   ~SyncAppsyncServiceFactory() override;
 
-  // BrowserContextKeyedServiceFactory implementation.
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
+  bool ServiceIsCreatedWithBrowserContext() const override;
+  bool ServiceIsNULLWhileTesting() const override;
 };
 
 }  // namespace ash

@@ -2,18 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/ranges/algorithm.h"
+#include <algorithm>
+
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
 #include "chrome/browser/task_manager/mock_web_contents_task_manager.h"
+#include "chrome/browser/task_manager/providers/web_contents/web_contents_tags_manager.h"
 #include "chrome/common/chrome_switches.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "extensions/browser/test_image_loader.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
 #include "ui/gfx/image/image.h"
 #include "ui/gfx/skia_util.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace task_manager {
 
@@ -28,14 +35,20 @@ class ExtensionTagsTest : public extensions::ExtensionBrowserTest {
   // If no extension task was found, a nullptr will be returned.
   Task* FindAndGetExtensionTask(
       const MockWebContentsTaskManager& task_manager) {
-    auto itr = base::ranges::find(task_manager.tasks(), Task::EXTENSION,
-                                  &Task::GetType);
+    auto itr = std::ranges::find(task_manager.tasks(), Task::EXTENSION,
+                                 &Task::GetType);
 
     return itr != task_manager.tasks().end() ? *itr : nullptr;
   }
 
-  const std::vector<WebContentsTag*>& tracked_tags() const {
-    return WebContentsTagsManager::GetInstance()->tracked_tags();
+  std::vector<raw_ptr<WebContentsTag, VectorExperimental>> tracked_tags()
+      const {
+    auto all_tags = WebContentsTagsManager::GetInstance()->tracked_tags();
+    std::vector<raw_ptr<WebContentsTag, VectorExperimental>> filtered_tags;
+    std::ranges::copy_if(
+        all_tags, std::back_inserter(filtered_tags),
+        [](const auto& tag) { return !tag->web_contents()->GetWebUI(); });
+    return filtered_tags;
   }
 };
 
@@ -63,7 +76,7 @@ IN_PROC_BROWSER_TEST_F(ExtensionTagsTest, Basic) {
   EXPECT_EQ(1U, tracked_tags().size());
 }
 
-// Disabled due to flakiness, see crbug.com/519333 and crbug.com/639185.
+// Disabled due to flakiness, see crbug.com/40430827 and crbug.com/40481263.
 IN_PROC_BROWSER_TEST_F(ExtensionTagsTest,
                        DISABLED_PreAndPostExistingTaskProviding) {
   // Browser tests start with a single tab.
@@ -118,4 +131,3 @@ IN_PROC_BROWSER_TEST_F(ExtensionTagsTest,
 }
 
 }  // namespace task_manager
-

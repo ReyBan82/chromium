@@ -1,12 +1,12 @@
-/* Copyright 2022 The Chromium Authors
+/* Copyright 2024 The Chromium Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file. */
 
 /* #css_wrapper_metadata_start
- * #type=style
- * #import=chrome://resources/cr_elements/cr_shared_style.css.js
+ * #type=style-lit
+ * #import=chrome://resources/cr_elements/cr_shared_style_lit.css.js
  * #import=chrome://resources/cr_elements/cr_shared_vars.css.js
- * #include=cr-shared-style
+ * #include=cr-shared-style-lit
  * #css_wrapper_metadata_end */
 
 :host {
@@ -15,13 +15,9 @@
   --scrollbar-width: 4px;
   --scrollbar-background: var(--google-grey-100);
   --footer-spacing: 40px;
-  --profile-card-hover-color: var(--md-background-color);
+  --profile-card-hover-color: var(--google-grey-100);
   --profile-item-height: 178px;
   --profile-item-width: 162px;
-}
-
-html {
-  font-family: roboto;
 }
 
 .title {
@@ -99,27 +95,20 @@ html {
   width: var(--profile-card-avatar-icon-size);
 }
 
-#tangible-sync-style-left-banner {
-  content: url(images/tangible_sync_style_left_banner.svg);
-  left: 0;
+.profile-avatar.with-avatar-ring {
+  /* LINT.IfChange(AvatarRingStandardSpecs) */
+  --avatar-ring-gap: 2px;
+  --avatar-ring-thickness: 3px;
+  /* LINT.ThenChange(//chrome/browser/ui/profiles/profile_view_utils.h:AvatarRingStandardSpecs) */
+
+  /* The avatar with avatar ring is already cropped as circular image,
+  we remove the border-radius otherwise this crops part of the ring. */
+  border-radius: 0;
+  height: calc(var(--profile-card-avatar-icon-size) + 2 * (var(--avatar-ring-gap) + var(--avatar-ring-thickness)));
+  margin: calc(-1 * (var(--avatar-ring-gap) + var(--avatar-ring-thickness)));
+  width: calc(var(--profile-card-avatar-icon-size) + 2 * (var(--avatar-ring-gap) + var(--avatar-ring-thickness)));
 }
 
-#tangible-sync-style-right-banner {
-  content: url(images/tangible_sync_style_right_banner.svg);
-  right: 0;
-}
-
-#tangible-sync-style-left-banner,
-#tangible-sync-style-right-banner {
-  max-width: 320px;
-  position: absolute;
-  top: 0;
-  width: 17vw;
-}
-
-.tangible-sync-style .title {
-  font-family: 'Google Sans', arial, sans-serif;
-}
 
 @media (prefers-color-scheme: dark) {
   :host {
@@ -129,13 +118,5 @@ html {
 
   .footer.division-line {
     border-top-color: var(--cr-separator-color);
-  }
-
-    #tangible-sync-style-left-banner {
-      content: url(images/tangible_sync_style_left_banner_dark.svg);
-  }
-
-    #tangible-sync-style-right-banner {
-      content: url(images/tangible_sync_style_right_banner_dark.svg);
   }
 }

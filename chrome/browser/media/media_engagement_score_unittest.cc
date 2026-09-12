@@ -9,11 +9,13 @@
 #include "base/memory/raw_ptr.h"
 #include "base/metrics/field_trial_param_associator.h"
 #include "base/metrics/field_trial_params.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/simple_test_clock.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
+#include "chrome/browser/media/media_engagement_service.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "chrome/test/base/testing_profile.h"
@@ -29,19 +31,13 @@ namespace {
 using ::testing::Optional;
 
 base::Time GetReferenceTime() {
-  base::Time::Exploded exploded_reference_time;
-  exploded_reference_time.year = 2015;
-  exploded_reference_time.month = 1;
-  exploded_reference_time.day_of_month = 30;
-  exploded_reference_time.day_of_week = 5;
-  exploded_reference_time.hour = 11;
-  exploded_reference_time.minute = 0;
-  exploded_reference_time.second = 0;
-  exploded_reference_time.millisecond = 0;
-
+  static constexpr base::Time::Exploded kReferenceTime = {.year = 2015,
+                                                          .month = 1,
+                                                          .day_of_week = 5,
+                                                          .day_of_month = 30,
+                                                          .hour = 11};
   base::Time out_time;
-  EXPECT_TRUE(
-      base::Time::FromLocalExploded(exploded_reference_time, &out_time));
+  EXPECT_TRUE(base::Time::FromLocalExploded(kReferenceTime, &out_time));
   return out_time;
 }
 
@@ -51,6 +47,12 @@ class MediaEngagementScoreTest : public ChromeRenderViewHostTestHarness {
  public:
   void SetUp() override {
     ChromeRenderViewHostTestHarness::SetUp();
+
+    // Initialize the MediaEngagementService to ensure its schema version is set
+    // and it doesn't clear the HostContentSettingsMap when accessed later by
+    // the test harness' WebContents.
+    MediaEngagementService::Get(profile());
+
     test_clock.SetNow(GetReferenceTime());
     score_ = std::make_unique<MediaEngagementScore>(&test_clock, url::Origin(),
                                                     nullptr);
@@ -83,7 +85,7 @@ class MediaEngagementScoreTest : public ChromeRenderViewHostTestHarness {
   }
 
   void TestScoreInitializesAndUpdates(
-      base::Value::Dict score_dict,
+      base::DictValue score_dict,
       int expected_visits,
       int expected_media_playbacks,
       base::Time expected_last_media_playback_time,
@@ -123,7 +125,7 @@ class MediaEngagementScoreTest : public ChromeRenderViewHostTestHarness {
     EXPECT_EQ(details->visits, score.visits());
     EXPECT_EQ(details->media_playbacks, score.media_playbacks());
     EXPECT_EQ(details->last_media_playback_time,
-              score.last_media_playback_time().ToJsTime());
+              score.last_media_playback_time().InMillisecondsFSinceUnixEpoch());
   }
 };
 
@@ -145,11 +147,11 @@ class MediaEngagementScoreWithOverrideFieldTrialsTest
 
     std::map<std::string, std::string> params;
     params[MediaEngagementScore::kScoreMinVisitsParamName] =
-        std::to_string(min_visits);
+        base::NumberToString(min_visits);
     params[MediaEngagementScore::kHighScoreLowerThresholdParamName] =
-        std::to_string(lower_threshold);
+        base::NumberToString(lower_threshold);
     params[MediaEngagementScore::kHighScoreUpperThresholdParamName] =
-        std::to_string(upper_threshold);
+        base::NumberToString(upper_threshold);
 
     scoped_feature_list_ = std::make_unique<base::test::ScopedFeatureList>();
     scoped_feature_list_->InitAndEnableFeatureWithParameters(
@@ -179,14 +181,14 @@ TEST_F(MediaEngagementScoreTest, MojoSerialization) {
 // Test that scores are read / written correctly from / to empty score
 // dictionaries.
 TEST_F(MediaEngagementScoreTest, EmptyDictionary) {
-  TestScoreInitializesAndUpdates(base::Value::Dict(), 0, 0, base::Time(), false,
+  TestScoreInitializesAndUpdates(base::DictValue(), 0, 0, base::Time(), false,
                                  true);
 }
 
 // Test that scores are read / written correctly from / to partially empty
 // score dictionaries.
 TEST_F(MediaEngagementScoreTest, PartiallyEmptyDictionary) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set(MediaEngagementScore::kVisitsKey, int(2));
 
   TestScoreInitializesAndUpdates(std::move(dict), 2, 0, base::Time(), false,
@@ -196,7 +198,7 @@ TEST_F(MediaEngagementScoreTest, PartiallyEmptyDictionary) {
 // Test that scores are read / written correctly from / to populated score
 // dictionaries.
 TEST_F(MediaEngagementScoreTest, PopulatedDictionary) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set(MediaEngagementScore::kVisitsKey, int(20));
   dict.Set(MediaEngagementScore::kMediaPlaybacksKey, int(12));
   dict.Set(MediaEngagementScore::kLastMediaPlaybackTimeKey,
@@ -207,7 +209,7 @@ TEST_F(MediaEngagementScoreTest, PopulatedDictionary) {
                                  true, true);
 }
 
-// Test getting and commiting the score works correctly with different
+// Test getting and committing the score works correctly with different
 // origins.
 TEST_F(MediaEngagementScoreTest, ContentSettingsMultiOrigin) {
   url::Origin origin = url::Origin::Create(GURL("https://www.google.com"));
@@ -248,7 +250,7 @@ TEST_F(MediaEngagementScoreTest, ContentSettings) {
 
   // Store some example data in content settings.
   url::Origin origin = url::Origin::Create(GURL("https://www.google.com"));
-  base::Value::Dict score_dict;
+  base::DictValue score_dict;
   score_dict.Set(MediaEngagementScore::kVisitsKey, example_num_visits);
   score_dict.Set(MediaEngagementScore::kMediaPlaybacksKey,
                  example_media_playbacks);
@@ -272,16 +274,16 @@ TEST_F(MediaEngagementScoreTest, ContentSettings) {
   score.Commit();
 
   // Now read back content settings and make sure we have the right values.
-  base::Value::Dict values =
+  base::DictValue values =
       settings_map
           ->GetWebsiteSetting(origin.GetURL(), GURL(),
                               ContentSettingsType::MEDIA_ENGAGEMENT, nullptr)
           .TakeDict();
-  absl::optional<int> stored_visits =
+  std::optional<int> stored_visits =
       values.FindInt(MediaEngagementScore::kVisitsKey);
-  absl::optional<int> stored_media_playbacks =
+  std::optional<int> stored_media_playbacks =
       values.FindInt(MediaEngagementScore::kMediaPlaybacksKey);
-  absl::optional<double> stored_last_media_playback_time =
+  std::optional<double> stored_last_media_playback_time =
       values.FindDouble(MediaEngagementScore::kLastMediaPlaybackTimeKey);
   EXPECT_TRUE(stored_visits);
   EXPECT_TRUE(stored_media_playbacks);
@@ -317,7 +319,7 @@ TEST_F(MediaEngagementScoreTest, HighScoreLegacy_High) {
       HostContentSettingsMapFactory::GetForProfile(profile());
 
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
     dict.Set(MediaEngagementScore::kVisitsKey, 20);
     dict.Set(MediaEngagementScore::kMediaPlaybacksKey, 6);
     settings_map->SetWebsiteSettingDefaultScope(
@@ -339,7 +341,7 @@ TEST_F(MediaEngagementScoreTest, HighScoreLegacy_Low) {
       HostContentSettingsMapFactory::GetForProfile(profile());
 
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
     dict.Set(MediaEngagementScore::kVisitsKey, 20);
     dict.Set(MediaEngagementScore::kMediaPlaybacksKey, 4);
     settings_map->SetWebsiteSettingDefaultScope(
@@ -362,7 +364,7 @@ TEST_F(MediaEngagementScoreTest, HighScoreUpdated) {
       HostContentSettingsMapFactory::GetForProfile(profile());
 
   {
-    base::Value::Dict dict;
+    base::DictValue dict;
     dict.Set(MediaEngagementScore::kVisitsKey, 10);
     dict.Set(MediaEngagementScore::kMediaPlaybacksKey, 1);
     dict.Set(MediaEngagementScore::kLastMediaPlaybackTimeKey,
@@ -381,7 +383,7 @@ TEST_F(MediaEngagementScoreTest, HighScoreUpdated) {
   }
 
   {
-    base::Value::Dict dict =
+    base::DictValue dict =
         settings_map
             ->GetWebsiteSetting(origin.GetURL(), GURL(),
                                 ContentSettingsType::MEDIA_ENGAGEMENT, nullptr)
@@ -456,7 +458,7 @@ class MediaEngagementScoreWithHTTPSOnlyTest : public MediaEngagementScoreTest {
 // Test that scores are read / written correctly from / to populated score
 // dictionaries.
 TEST_F(MediaEngagementScoreWithHTTPSOnlyTest, PopulatedDictionary_HTTPSOnly) {
-  base::Value::Dict dict;
+  base::DictValue dict;
   dict.Set(MediaEngagementScore::kVisitsKey, int(20));
   dict.Set(MediaEngagementScore::kMediaPlaybacksKey, int(12));
   dict.Set(
@@ -483,7 +485,7 @@ TEST_F(MediaEngagementScoreTest, DoNotStoreDeprecatedFields) {
   url::Origin origin = url::Origin::Create(GURL("https://www.google.com"));
   HostContentSettingsMap* settings_map =
       HostContentSettingsMapFactory::GetForProfile(profile());
-  base::Value::Dict score_dict;
+  base::DictValue score_dict;
 
   // Store data with deprecated fields in content settings.
   score_dict.Set(kVisitsWithMediaTag, 10);
@@ -510,7 +512,7 @@ TEST_F(MediaEngagementScoreTest, DoNotStoreDeprecatedFields) {
   score.Commit();
 
   // Check the deprecated fields have been dropped.
-  base::Value::Dict values =
+  base::DictValue values =
       settings_map
           ->GetWebsiteSetting(origin.GetURL(), GURL(),
                               ContentSettingsType::MEDIA_ENGAGEMENT, nullptr)

@@ -5,8 +5,13 @@
 #ifndef CHROMEOS_UI_FRAME_HIGHLIGHT_BORDER_OVERLAY_H_
 #define CHROMEOS_UI_FRAME_HIGHLIGHT_BORDER_OVERLAY_H_
 
+#include <memory>
+
+#include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
+#include "chromeos/ui/frame/highlight_border_overlay_delegate.h"
 #include "ui/aura/window_observer.h"
-#include "ui/compositor/layer.h"
+#include "ui/compositor/layer_nine_patch.h"
 #include "ui/display/display_observer.h"
 #include "ui/display/tablet_state.h"
 
@@ -23,14 +28,17 @@ class Widget;
 // the border from being covered by the client view, the class creates a nine
 // patch layer painted with a highlight border and overlay on the widget. The
 // inner border covers on the window contents and outer border is outside the
-// window. It uses `kHighlightBorder3` as its border type which has low opacity
-// of outer border.
+// window. It uses `kHighlightBorderOnShadow` as its border type.
 class HighlightBorderOverlay : public aura::WindowObserver,
                                public display::DisplayObserver {
  public:
-  explicit HighlightBorderOverlay(views::Widget* widget);
+  HighlightBorderOverlay(
+      views::Widget* widget,
+      std::unique_ptr<HighlightBorderOverlayDelegate> delegate);
+
   HighlightBorderOverlay(const HighlightBorderOverlay&) = delete;
   HighlightBorderOverlay& operator=(const HighlightBorderOverlay&) = delete;
+
   ~HighlightBorderOverlay() override;
 
   // Calculate image source size according to rounded corner radius and border
@@ -61,12 +69,17 @@ class HighlightBorderOverlay : public aura::WindowObserver,
   // Update the nine patch layer with current highlight border settings.
   void UpdateNinePatchLayer();
 
-  ui::Layer layer_;
-  base::raw_ptr<views::Widget> widget_;
-  base::raw_ptr<aura::Window> window_;
+  ui::LayerNinePatch layer_;
+  raw_ptr<views::Widget> widget_;
+  raw_ptr<aura::Window> window_;
   int rounded_corner_radius_ = 0;
 
+  std::unique_ptr<HighlightBorderOverlayDelegate> delegate_;
+
   display::ScopedDisplayObserver display_observer_{this};
+
+  base::ScopedObservation<aura::Window, aura::WindowObserver> window_observer_{
+      this};
 };
 
 #endif  // CHROMEOS_UI_FRAME_HIGHLIGHT_BORDER_OVERLAY_H_

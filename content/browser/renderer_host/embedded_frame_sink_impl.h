@@ -5,6 +5,8 @@
 #ifndef CONTENT_BROWSER_RENDERER_HOST_EMBEDDED_FRAME_SINK_IMPL_H_
 #define CONTENT_BROWSER_RENDERER_HOST_EMBEDDED_FRAME_SINK_IMPL_H_
 
+#include <optional>
+
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
@@ -15,7 +17,6 @@
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/remote.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/mojom/frame_sinks/embedded_frame_sink.mojom.h"
 
 namespace viz {
@@ -73,6 +74,11 @@ class EmbeddedFrameSinkImpl : public viz::HostFrameSinkClient {
   void RegisterFrameSinkHierarchy();
   void UnregisterFrameSinkHierarchy();
 
+  // Adjusts the hierarchy for a new parent. This unregisters the current
+  // frame sink from its old parent and registers it as a child of
+  // `parent_frame_sink_id`.
+  void SetParentFrameSinkId(const viz::FrameSinkId& parent_frame_sink_id);
+
   // viz::HostFrameSinkClient implementation.
   void OnFirstSurfaceActivation(const viz::SurfaceInfo& surface_info) override;
   void OnFrameTokenChanged(uint32_t frame_token,
@@ -80,7 +86,7 @@ class EmbeddedFrameSinkImpl : public viz::HostFrameSinkClient {
 
  private:
   void CreateFrameSink(
-      const absl::optional<viz::FrameSinkBundleId>& bundle_id,
+      const std::optional<viz::FrameSinkBundleId>& bundle_id,
       mojo::PendingRemote<viz::mojom::CompositorFrameSinkClient> client,
       mojo::PendingReceiver<viz::mojom::CompositorFrameSink> receiver);
 
@@ -89,7 +95,7 @@ class EmbeddedFrameSinkImpl : public viz::HostFrameSinkClient {
   mojo::Remote<blink::mojom::EmbeddedFrameSinkClient> client_;
 
   // Surface-related state
-  const viz::FrameSinkId parent_frame_sink_id_;
+  viz::FrameSinkId parent_frame_sink_id_;
   const viz::FrameSinkId frame_sink_id_;
   viz::LocalSurfaceId local_surface_id_;
 

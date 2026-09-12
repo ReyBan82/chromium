@@ -58,27 +58,26 @@ class SyncReader : public OutputController::SyncReader {
 
   void set_max_wait_timeout_for_test(base::TimeDelta time) {
     maximum_wait_time_ = time;
-    maximum_wait_time_for_mixing_ = time;
   }
 
   // OutputController::SyncReader implementation.
   void RequestMoreData(base::TimeDelta delay,
                        base::TimeTicks delay_timestamp,
                        const media::AudioGlitchInfo& glitch_info) override;
-  void Read(media::AudioBus* dest, bool is_mixing) override;
+  bool Read(media::AudioBus* dest, bool is_mixing) override;
   void Close() override;
 
  private:
   // Blocks until data is ready for reading or a timeout expires.  Returns false
   // if an error or timeout occurs.
-  bool WaitUntilDataIsReady(bool is_mixing);
+  bool WaitUntilDataIsReady();
 
   const base::RepeatingCallback<void(const std::string&)> log_callback_;
 
   base::UnsafeSharedMemoryRegion shared_memory_region_;
   base::WritableSharedMemoryMapping shared_memory_mapping_;
 
-  const media::AudioLatency::LatencyType latency_tag_;
+  const media::AudioLatency::Type latency_tag_;
 
   // Mutes all incoming samples. This is used to prevent audible sound
   // during automated testing.
@@ -102,7 +101,6 @@ class SyncReader : public OutputController::SyncReader {
   // The maximum amount of time to wait for data from the renderer.  Calculated
   // from the parameters given at construction.
   base::TimeDelta maximum_wait_time_;
-  base::TimeDelta maximum_wait_time_for_mixing_;
 
   // The index of the audio buffer we're expecting to be sent from the renderer;
   // used to block with timeout for audio data.
@@ -111,7 +109,7 @@ class SyncReader : public OutputController::SyncReader {
   // Tracks the glitch info that we should send over IPC. This is only reset
   // once we have confirmation that the info has been received by the other
   // side.
-  media::AudioGlitchInfo pending_glitch_info_;
+  media::AudioGlitchInfo::Accumulator pending_glitch_info_;
 
   // The glitch information of a single read timeout glitch.
   const media::AudioGlitchInfo read_timeout_glitch_;

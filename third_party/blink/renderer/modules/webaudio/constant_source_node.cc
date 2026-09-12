@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/modules/webaudio/constant_source_node.h"
 
+#include "third_party/blink/renderer/bindings/modules/v8/v8_automation_rate.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_constant_source_options.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
 #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
@@ -22,9 +23,9 @@ ConstantSourceNode::ConstantSourceNode(BaseAudioContext& context)
       offset_(AudioParam::Create(
           context,
           Uuid(),
-          AudioParamHandler::kParamTypeConstantSourceOffset,
+          AudioParamHandler::AudioParamType::kParamTypeConstantSourceOffset,
           kDefaultOffsetValue,
-          AudioParamHandler::AutomationRate::kAudio,
+          V8AutomationRate::Enum::kARate,
           AudioParamHandler::AutomationRateMode::kVariable)) {
   SetHandler(ConstantSourceHandler::Create(*this, context.sampleRate(),
                                            offset_->Handler()));
@@ -65,7 +66,7 @@ ConstantSourceHandler& ConstantSourceNode::GetConstantSourceHandler() const {
 }
 
 AudioParam* ConstantSourceNode::offset() {
-  return offset_;
+  return offset_.Get();
 }
 
 void ConstantSourceNode::ReportDidCreate() {

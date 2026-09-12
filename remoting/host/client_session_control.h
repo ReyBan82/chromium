@@ -5,6 +5,8 @@
 #ifndef REMOTING_HOST_CLIENT_SESSION_CONTROL_H_
 #define REMOTING_HOST_CLIENT_SESSION_CONTROL_H_
 
+#include "remoting/base/source_location.h"
+#include "remoting/proto/control.pb.h"
 #include "remoting/protocol/errors.h"
 #include "ui/events/event.h"
 
@@ -30,7 +32,9 @@ class ClientSessionControl {
 
   // Disconnects the client session, tears down transport resources and stops
   // scheduler components.
-  virtual void DisconnectSession(protocol::ErrorCode error) = 0;
+  virtual void DisconnectSession(ErrorCode error,
+                                 std::string_view error_details,
+                                 const SourceLocation& error_location) = 0;
 
   // Called when local mouse or touch movement is detected.
   virtual void OnLocalPointerMoved(const webrtc::DesktopVector& position,
@@ -46,6 +50,10 @@ class ClientSessionControl {
   // TODO(yuweih): Move this to ClientSessionEvents.
   virtual void OnDesktopDisplayChanged(
       std::unique_ptr<protocol::VideoLayout> layout) = 0;
+
+  // Notifies the client session that the virtual microphone state has changed.
+  virtual void OnMicrophoneControl(
+      const protocol::MicrophoneControl& control) = 0;
 };
 
 }  // namespace remoting

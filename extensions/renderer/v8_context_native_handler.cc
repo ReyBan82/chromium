@@ -58,7 +58,7 @@ void V8ContextNativeHandler::GetAvailability(
            v8::String::NewFromUtf8(isolate, "result",
                                    v8::NewStringType::kInternalized)
                .ToLocalChecked(),
-           v8::Integer::New(isolate, availability.result()))
+           v8::Integer::New(isolate, availability.result_as_int32()))
       .ToChecked();
   args.GetReturnValue().Set(ret);
 }
@@ -69,8 +69,10 @@ void V8ContextNativeHandler::GetModuleSystem(
   CHECK(args[0]->IsObject());
   ScriptContext* context = ScriptContextSet::GetContextByObject(
       v8::Local<v8::Object>::Cast(args[0]));
-  if (context && blink::WebFrame::ScriptCanAccess(context->web_frame()))
+  if (context && blink::WebFrame::ScriptCanAccess(args.GetIsolate(),
+                                                  context->web_frame())) {
     args.GetReturnValue().Set(context->module_system()->NewInstance());
+  }
 }
 
 }  // namespace extensions

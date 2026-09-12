@@ -11,8 +11,7 @@
 #include "base/rand_util.h"
 #include "base/time/time.h"
 #include "components/version_info/version_info.h"
-#include "crypto/secure_hash.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 #include "net/base/hash_value.h"
 #include "net/cert/ct_serialization.h"
 #include "net/cert/sct_status_flags.h"
@@ -26,7 +25,6 @@
 #include "services/network/public/proto/sct_audit_report.pb.h"
 #include "services/network/sct_auditing/sct_auditing_handler.h"
 #include "third_party/boringssl/src/include/openssl/pool.h"
-#include "third_party/boringssl/src/include/openssl/sha.h"
 
 namespace network {
 
@@ -45,13 +43,6 @@ void RecordSCTAuditingReportDeduplicatedMetrics(bool deduplicated) {
                             deduplicated);
 }
 
-// Records whether a new report that wasn't deduplicated was sampled for
-// sending to the reporting server.
-void RecordSCTAuditingReportSampledMetrics(bool sampled) {
-  base::UmaHistogramBoolean("Security.SCTAuditing.OptIn.ReportSampled",
-                            sampled);
-}
-
 // Records the size of a report that will be sent to the reporting server, in
 // bytes. Used to track how much bandwidth is consumed by sending reports.
 void RecordSCTAuditingReportSizeMetrics(size_t report_size) {
@@ -61,7 +52,10 @@ void RecordSCTAuditingReportSizeMetrics(size_t report_size) {
 
 }  // namespace
 
-SCTAuditingCache::ReportEntry::ReportEntry() = default;
+SCTAuditingCache::ReportEntry::ReportEntry(
+    net::HashValue key,
+    std::unique_ptr<sct_auditing::SCTClientReport> report)
+    : key(std::move(key)), report(std::move(report)) {}
 SCTAuditingCache::ReportEntry::ReportEntry(ReportEntry&& other) = default;
 SCTAuditingCache::ReportEntry::~ReportEntry() = default;
 
@@ -79,14 +73,14 @@ mojom::SCTAuditingConfigurationPtr SCTAuditingCache::GetConfiguration() const {
   return configuration_.Clone();
 }
 
-absl::optional<SCTAuditingCache::ReportEntry>
+std::optional<SCTAuditingCache::ReportEntry>
 SCTAuditingCache::MaybeGenerateReportEntry(
     const net::HostPortPair& host_port_pair,
     const net::X509Certificate* validated_certificate_chain,
     const net::SignedCertificateTimestampAndStatusList&
         signed_certificate_timestamps) {
   if (!configuration_) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   if (!histogram_timer_.IsRunning()) {
     // High-water-mark metrics get logged hourly (rather than once-per-session
@@ -102,11 +96,10 @@ SCTAuditingCache::MaybeGenerateReportEntry(
   // SCTs is used as the cache key to deduplicate reports with the same SCTs.
   // Constructing the report in parallel with computing the hash avoids
   // encoding the SCTs multiple times and avoids extra copies.
-  SHA256_CTX ctx;
-  SHA256_Init(&ctx);
+  crypto::hash::Hasher hasher(crypto::hash::kSha256);
   for (const auto& sct : signed_certificate_timestamps) {
     auto* sct_source_and_status = tls_report->add_included_sct();
-    // TODO(crbug.com/1082860): Update the proto to remove the status entirely
+    // TODO(crbug.com/40692154): Update the proto to remove the status entirely
     // since only valid SCTs are reported now.
     sct_source_and_status->set_status(
         sct_auditing::SCTWithVerifyStatus::SctVerifyStatus::
@@ -115,35 +108,34 @@ SCTAuditingCache::MaybeGenerateReportEntry(
     net::ct::EncodeSignedCertificateTimestamp(
         sct.sct, sct_source_and_status->mutable_serialized_sct());
 
-    SHA256_Update(&ctx, sct_source_and_status->serialized_sct().data(),
-                  sct_source_and_status->serialized_sct().size());
+    hasher.Update(sct_source_and_status->serialized_sct());
   }
   // Don't handle reports if there were no valid SCTs.
   if (tls_report->included_sct().empty())
-    return absl::nullopt;
+    return std::nullopt;
 
-  net::HashValue cache_key(net::HASH_VALUE_SHA256);
-  SHA256_Final(reinterpret_cast<uint8_t*>(cache_key.data()), &ctx);
+  net::SHA256HashValue hash;
+  hasher.Finish(hash);
+  net::HashValue cache_key(net::HASH_VALUE_SHA256, hash);
 
   // Check if the SCTs are already in the cache. This will update the last seen
   // time if they are present in the cache.
   auto it = dedupe_cache_.Get(cache_key);
   if (it != dedupe_cache_.end()) {
     RecordSCTAuditingReportDeduplicatedMetrics(true);
-    return absl::nullopt;
+    return std::nullopt;
   }
   RecordSCTAuditingReportDeduplicatedMetrics(false);
 
-  report->set_user_agent(version_info::GetProductNameAndVersionForUserAgent());
+  report->set_user_agent(
+      std::string(version_info::GetProductNameAndVersionForUserAgent()));
 
   // Add `cache_key` to the dedupe cache. The cache value is not used.
   dedupe_cache_.Put(cache_key, true);
 
   if (base::RandDouble() > configuration_->sampling_rate) {
-    RecordSCTAuditingReportSampledMetrics(false);
-    return absl::nullopt;
+    return std::nullopt;
   }
-  RecordSCTAuditingReportSampledMetrics(true);
 
   auto* connection_context = tls_report->mutable_context();
   base::TimeDelta time_since_unix_epoch =
@@ -171,10 +163,7 @@ SCTAuditingCache::MaybeGenerateReportEntry(
   if (dedupe_cache_.size() > dedupe_cache_size_hwm_)
     dedupe_cache_size_hwm_ = dedupe_cache_.size();
 
-  ReportEntry report_entry;
-  report_entry.key = std::move(cache_key);
-  report_entry.report = std::move(report);
-  return report_entry;
+  return ReportEntry(std::move(cache_key), std::move(report));
 }
 
 bool SCTAuditingCache::IsPopularSCT(base::span<const uint8_t> sct_leaf_hash) {

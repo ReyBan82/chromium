@@ -1,6 +1,6 @@
 import("//build/config/c++/c++.gni")
+import("//build/config/c++/modules.gni")
 import("//build/config/chrome_build.gni")
-import("//build/config/chromeos/ui_mode.gni")
 import("//build/config/compiler/compiler.gni")
 import("//build/config/dcheck_always_on.gni")
 import("//buildtools/deps_revisions.gni")
@@ -40,6 +40,16 @@ config("runtime_library") {
   #    expensive checks. Enable these only if enable_iterator_debugging is on.
   if (enable_iterator_debugging) {
     defines += [ "_LIBCPP_ENABLE_DEBUG_MODE" ]
+  }
+
+  # Fuzzers build parts of the code with asan enabled and some with it
+  # disabled. That's incompatible with _LIBCPP_INSTRUMENTED_WITH_ASAN, see
+  # https://crbug.com/347026228#comment25
+  # TODO(thakis): Enable on apple if https://llvm.org/PR96099 gets fixed.
+  if (is_asan && !use_fuzzing_engine && !is_apple) {
+    defines += [ "_LIBCPP_INSTRUMENTED_WITH_ASAN=1" ]
+  } else {
+    defines += [ "_LIBCPP_INSTRUMENTED_WITH_ASAN=0" ]
   }
 
   defines += [ "CR_LIBCXX_REVISION=$libcxx_revision" ]
@@ -94,7 +104,29 @@ config("runtime_library") {
       ]
     }
   }
-  if (use_custom_libcxx && enable_safe_libcxx) {
-    defines += [ "_LIBCPP_ENABLE_ASSERTIONS=1" ]
+
+  if (is_ios) {
+    swiftflags = [
+      # Prevent the swift compiler from leaking the system's default C++
+      # toolchain into the build.
+      "-Xcc=-nostdinc++",
+      "-Xcc=-nodefaultlibs",
+
+      # Add the path to our custom libc++ to the swift compiler. This is used
+      # when enabling the C++/Swift interoperability.
+      "-isystem",
+      rebase_path("//third_party/libc++/src/include", root_build_dir),
+      "-isystem",
+      rebase_path("//third_party/libc++abi/src/include", root_build_dir),
+      "-I",
+      rebase_path("//buildtools/third_party/libc++", root_build_dir),
+    ]
   }
+
+  # In a world without NaCl, the `runtime_library` config would also configure
+  # the `_LIBCPP_ENABLE_ASSERTIONS` define to enable hardening when using the
+  # custom hermetic libc++. However, this is currently added by the `compiler`
+  # config instead, since this hardening define should also be used by the NaCl
+  # saigo toolchain, which uses a prebuilt libc++ that is distinct from the
+  # custom hermetic libc++.
 }

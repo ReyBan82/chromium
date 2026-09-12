@@ -11,7 +11,7 @@
 #include <windows.h>
 #elif BUILDFLAG(IS_MAC)
 #include <Carbon/Carbon.h>
-#include "base/mac/scoped_cftyperef.h"
+#include "base/apple/scoped_cftyperef.h"
 #elif BUILDFLAG(IS_OZONE)
 #include "ui/events/ozone/layout/scoped_keyboard_layout_engine.h"  // nogncheck
 #endif
@@ -20,7 +20,9 @@ namespace ui {
 
 enum KeyboardLayout {
   KEYBOARD_LAYOUT_ENGLISH_US,
+  KEYBOARD_LAYOUT_DVORAK,
 #if BUILDFLAG(IS_WIN)
+  KEYBOARD_LAYOUT_ARABIC,
   KEYBOARD_LAYOUT_FRENCH,
   KEYBOARD_LAYOUT_GERMAN,
   KEYBOARD_LAYOUT_GREEK,
@@ -33,7 +35,7 @@ enum KeyboardLayout {
 #if BUILDFLAG(IS_WIN)
 using PlatformKeyboardLayout = HKL;
 #elif BUILDFLAG(IS_MAC)
-using PlatformKeyboardLayout = base::ScopedCFTypeRef<TISInputSourceRef>;
+using PlatformKeyboardLayout = base::apple::ScopedCFTypeRef<TISInputSourceRef>;
 #endif
 
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)

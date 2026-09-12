@@ -191,7 +191,6 @@ class ServiceMap {
   auto& GetOrCreateRemote(const ServiceKey& key) { return remotes_[key]; }
 
   void EraseRemote(const ServiceKey& key) {
-    DCHECK(remotes_.count(key));
     remotes_.erase(key);
   }
 
@@ -229,20 +228,18 @@ T& GetService(const media::CdmType& cdm_type,
               const GURL& site,
               const std::string& service_name,
               const base::FilePath& cdm_path) {
-  ServiceKey key;
-  std::string display_name = service_name;
-
-  if (base::FeatureList::IsEnabled(media::kCdmProcessSiteIsolation)) {
-    key = {cdm_type, browser_context, site};
-    auto site_display_name =
-        GetContentClient()->browser()->GetSiteDisplayNameForCdmProcess(
-            browser_context, site);
-    if (!site_display_name.empty())
-      display_name += " (" + site_display_name + ")";
-  } else {
-    key = {cdm_type, nullptr, GURL()};
-  }
+  // The service is always per CDM type, per user profile and per site.
+  ServiceKey key = {cdm_type, browser_context, site};
   DVLOG(2) << __func__ << ": key=" << key;
+
+  // Generate the service display name.
+  std::string display_name = service_name;
+  auto site_display_name =
+      GetContentClient()->browser()->GetSiteDisplayNameForCdmProcess(
+          browser_context, site);
+  if (!site_display_name.empty()) {
+    display_name += " (" + site_display_name + ")";
+  }
 
   auto& broker_service_pair = GetServiceMap<T>().GetOrCreateRemote(key);
   auto& broker_remote = broker_service_pair.first;
@@ -251,6 +248,9 @@ T& GetService(const media::CdmType& cdm_type,
     ServiceProcessHost::Options options;
     options.WithDisplayName(display_name);
     options.WithSite(site);
+    if (base::FeatureList::IsEnabled(media::kCdmProcessPriorityElevation)) {
+      options.WithPriority(base::Process::Priority::kUserBlocking);
+    }
     ServiceProcessHost::Launch(broker_remote.BindNewPipeAndPassReceiver(),
                                options.Pass());
 
@@ -288,14 +288,26 @@ media::mojom::CdmService& GetCdmService(BrowserContext* browser_context,
       cdm_info.type, browser_context, site, cdm_info.name, cdm_info.path);
 }
 
+void ResetCdmService(BrowserContext* browser_context,
+                     const GURL& site,
+                     const media::CdmType& cdm_type) {
+  EraseCdmService<media::mojom::CdmService>({cdm_type, browser_context, site});
+}
+
 #if BUILDFLAG(IS_WIN)
 media::mojom::MediaFoundationService& GetMediaFoundationService(
+    const media::CdmType& cdm_type,
     BrowserContext* browser_context,
     const GURL& site,
     const base::FilePath& cdm_path) {
   return GetService<media::mojom::MediaFoundationService>(
-      media::CdmType(), browser_context, site, "Media Foundation Service",
-      cdm_path);
+      cdm_type, browser_context, site, "Media Foundation Service", cdm_path);
+}
+
+void ResetMediaFoundationService(BrowserContext* browser_context,
+                                 const GURL& site) {
+  EraseCdmService<media::mojom::MediaFoundationService>(
+      {media::CdmType(), browser_context, site});
 }
 #endif  // BUILDFLAG(IS_WIN)
 

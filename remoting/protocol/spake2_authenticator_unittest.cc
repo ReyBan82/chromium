@@ -9,11 +9,8 @@
 #include "base/run_loop.h"
 #include "remoting/base/rsa_key_pair.h"
 #include "remoting/protocol/authenticator_test_base.h"
-#include "remoting/protocol/channel_authenticator.h"
-#include "remoting/protocol/connection_tester.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
 
 using testing::_;
 using testing::DeleteArg;
@@ -22,12 +19,6 @@ using testing::SaveArg;
 namespace remoting::protocol {
 
 namespace {
-
-const int kMessageSize = 100;
-const int kMessages = 1;
-
-const char kClientId[] = "alice@gmail.com/abc";
-const char kHostId[] = "alice@gmail.com/123";
 
 const char kTestSharedSecret[] = "1234-1234-5678";
 const char kTestSharedSecretBad[] = "0000-0000-0001";
@@ -59,20 +50,8 @@ TEST_F(Spake2AuthenticatorTest, SuccessfulAuth) {
       InitAuthenticators(kTestSharedSecret, kTestSharedSecret));
   ASSERT_NO_FATAL_FAILURE(RunAuthExchange());
 
-  ASSERT_EQ(Authenticator::ACCEPTED, host_->state());
-  ASSERT_EQ(Authenticator::ACCEPTED, client_->state());
-
-  client_auth_ = client_->CreateChannelAuthenticator();
-  host_auth_ = host_->CreateChannelAuthenticator();
-  RunChannelAuth(false);
-
-  StreamConnectionTester tester(host_socket_.get(), client_socket_.get(),
-                                kMessageSize, kMessages);
-
-  base::RunLoop run_loop;
-  tester.Start(run_loop.QuitClosure());
-  run_loop.Run();
-  tester.CheckResults();
+  ASSERT_EQ(host_->state(), Authenticator::ACCEPTED);
+  ASSERT_EQ(client_->state(), Authenticator::ACCEPTED);
 }
 
 // Verify that connection is rejected when secrets don't match.
@@ -81,21 +60,21 @@ TEST_F(Spake2AuthenticatorTest, InvalidSecret) {
       InitAuthenticators(kTestSharedSecretBad, kTestSharedSecret));
   ASSERT_NO_FATAL_FAILURE(RunAuthExchange());
 
-  ASSERT_EQ(Authenticator::REJECTED, client_->state());
-  ASSERT_EQ(Authenticator::RejectionReason::INVALID_CREDENTIALS,
-            client_->rejection_reason());
+  ASSERT_EQ(client_->state(), Authenticator::REJECTED);
+  ASSERT_EQ(client_->rejection_reason(),
+            Authenticator::RejectionReason::INVALID_CREDENTIALS);
 
   // Change |client_| so that we can get the last message.
   reinterpret_cast<Spake2Authenticator*>(client_.get())->state_ =
       Authenticator::MESSAGE_READY;
 
-  std::unique_ptr<jingle_xmpp::XmlElement> message(client_->GetNextMessage());
-  ASSERT_TRUE(message.get());
+  JingleAuthentication message = client_->GetNextMessage();
+  ASSERT_FALSE(message.is_empty());
 
-  ASSERT_EQ(Authenticator::WAITING_MESSAGE, client_->state());
-  host_->ProcessMessage(message.get(), base::DoNothing());
+  ASSERT_EQ(client_->state(), Authenticator::WAITING_MESSAGE);
+  host_->ProcessMessage(message, base::DoNothing());
   // This assumes that Spake2Authenticator::ProcessMessage runs synchronously.
-  ASSERT_EQ(Authenticator::REJECTED, host_->state());
+  ASSERT_EQ(host_->state(), Authenticator::REJECTED);
 }
 
 }  // namespace remoting::protocol

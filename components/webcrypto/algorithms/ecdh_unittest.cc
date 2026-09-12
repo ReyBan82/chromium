@@ -5,7 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "base/ranges/algorithm.h"
+#include <algorithm>
+
 #include "components/webcrypto/algorithm_dispatch.h"
 #include "components/webcrypto/algorithms/ec.h"
 #include "components/webcrypto/algorithms/test_helpers.h"
@@ -45,12 +46,12 @@ struct KeyPair {
 };
 
 // Helper that loads a "public_key" and "private_key" from the test data.
-KeyPair ImportKeysFromTest(const base::Value::Dict& test) {
+KeyPair ImportKeysFromTest(const base::DictValue& test) {
   KeyPair result;
 
   // Import the public key.
   {
-    const base::Value::Dict* public_key_jwk = test.FindDict("public_key");
+    const base::DictValue* public_key_jwk = test.FindDict("public_key");
     auto curve = CurveNameToCurve(*public_key_jwk->FindString("crv"));
     Status status = ImportKey(
         blink::kWebCryptoKeyFormatJwk, MakeJsonVector(*public_key_jwk),
@@ -60,7 +61,7 @@ KeyPair ImportKeysFromTest(const base::Value::Dict& test) {
 
   // Import the private key.
   {
-    const base::Value::Dict* private_key_jwk = test.FindDict("private_key");
+    const base::DictValue* private_key_jwk = test.FindDict("private_key");
     auto curve = CurveNameToCurve(*private_key_jwk->FindString("crv"));
     Status status = ImportKey(blink::kWebCryptoKeyFormatJwk,
                               MakeJsonVector(*private_key_jwk),
@@ -76,18 +77,18 @@ KeyPair ImportKeysFromTest(const base::Value::Dict& test) {
 class WebCryptoEcdhTest : public WebCryptoTestBase {};
 
 TEST_F(WebCryptoEcdhTest, DeriveBitsKnownAnswer) {
-  base::Value::List tests = ReadJsonTestFileAsList("ecdh.json");
+  base::ListValue tests = ReadJsonTestFileAsList("ecdh.json");
 
   for (const base::Value& test_value : tests) {
     SCOPED_TRACE(&test_value - &tests[0]);
-    const base::Value::Dict& test = test_value.GetDict();
+    const base::DictValue& test = test_value.GetDict();
 
     // Import the keys.
     KeyPair keys = ImportKeysFromTest(test);
 
     // Now try to derive bytes.
     std::vector<uint8_t> derived_bytes;
-    absl::optional<int> length_bits = test.FindInt("length_bits");
+    std::optional<int> length_bits = test.FindInt("length_bits");
     ASSERT_TRUE(length_bits);
 
     // If the test didn't specify an error, that implies it expects success.
@@ -113,8 +114,8 @@ TEST_F(WebCryptoEcdhTest, DeriveBitsKnownAnswer) {
 // come from different key pairs, and can be used for key derivation of up to
 // 528 bits.
 KeyPair LoadTestKeys() {
-  base::Value::List tests = ReadJsonTestFileAsList("ecdh.json");
-  const auto& test = base::ranges::find_if(tests, [](const base::Value& v) {
+  base::ListValue tests = ReadJsonTestFileAsList("ecdh.json");
+  const auto& test = std::ranges::find_if(tests, [](const base::Value& v) {
     return v.GetDict().FindBool("valid_p521_keys").has_value();
   });
 
@@ -272,12 +273,12 @@ TEST_F(WebCryptoEcdhTest, DeriveKeyAes128) {
 TEST_F(WebCryptoEcdhTest, ImportKeyEmptyUsage) {
   blink::WebCryptoKey key;
 
-  base::Value::List tests = ReadJsonTestFileAsList("ecdh.json");
-  const base::Value::Dict& test = tests[0].GetDict();
+  base::ListValue tests = ReadJsonTestFileAsList("ecdh.json");
+  const base::DictValue& test = tests[0].GetDict();
 
   // Import the public key.
   {
-    const base::Value::Dict* public_key_jwk = test.FindDict("public_key");
+    const base::DictValue* public_key_jwk = test.FindDict("public_key");
     auto curve = CurveNameToCurve(*public_key_jwk->FindString("crv"));
     Status status = ImportKey(blink::kWebCryptoKeyFormatJwk,
                               MakeJsonVector(*public_key_jwk),
@@ -288,7 +289,7 @@ TEST_F(WebCryptoEcdhTest, ImportKeyEmptyUsage) {
 
   // Import the private key.
   {
-    const base::Value::Dict* private_key_jwk = test.FindDict("private_key");
+    const base::DictValue* private_key_jwk = test.FindDict("private_key");
     auto curve = CurveNameToCurve(*private_key_jwk->FindString("crv"));
     Status status = ImportKey(blink::kWebCryptoKeyFormatJwk,
                               MakeJsonVector(*private_key_jwk),

@@ -5,7 +5,9 @@
 #include "chrome/browser/metrics/metrics_reporting_state.h"
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
@@ -17,7 +19,7 @@
 #include "base/run_loop.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/values.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/chrome_browser_main.h"
 #include "chrome/browser/chrome_browser_main_extra_parts.h"
@@ -34,11 +36,10 @@
 #include "content/public/test/browser_test.h"
 #include "testing/gmock/include/gmock/gmock-matchers.h"
 #include "testing/gmock/include/gmock/gmock.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ash/settings/device_settings_cache.h"
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chromeos/ash/components/install_attributes/stub_install_attributes.h"
+#include "chromeos/ash/components/settings/device_settings_cache.h"
 #include "components/policy/proto/chrome_device_policy.pb.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 #endif
@@ -171,7 +172,7 @@ class MetricsReportingStateTestParameterized
 class MetricsReportingStateClearDataTest
     : public MetricsReportingStateTest,
       public testing::WithParamInterface<
-          ChangeMetricsReportingStateCalledFrom> {
+          metrics::ChangeMetricsReportingStateCalledFrom> {
  public:
   // Set metrics reporting to false initially.
   bool IsMetricsReportingEnabledInitialValue() const override { return false; }
@@ -190,11 +191,12 @@ void OnMetricsReportingStateChanged(bool* new_state_ptr,
   std::move(run_loop_closure).Run();
 }
 
-bool HistogramExists(base::StringPiece name) {
+bool HistogramExists(std::string_view name) {
   return base::StatisticsRecorder::FindHistogram(name) != nullptr;
 }
 
-base::HistogramBase::Count GetHistogramDeltaTotalCount(base::StringPiece name) {
+base::HistogramBase::Count32 GetHistogramDeltaTotalCount(
+    std::string_view name) {
   return base::StatisticsRecorder::FindHistogram(name)
       ->SnapshotDelta()
       ->TotalCount();
@@ -209,10 +211,11 @@ IN_PROC_BROWSER_TEST_P(MetricsReportingStateTestParameterized,
   // Update the client's metrics reporting state.
   base::RunLoop run_loop;
   bool value_after_change = false;
-  ChangeMetricsReportingStateWithReply(
+  metrics::ChangeMetricsReportingStateWithReply(
       is_metrics_reporting_enabled_final_value(),
       base::BindOnce(&OnMetricsReportingStateChanged, &value_after_change,
-                     run_loop.QuitClosure()));
+                     run_loop.QuitClosure()),
+      metrics::ChangeMetricsReportingStateCalledFrom::kUiFirstRun);
   run_loop.Run();
 
   // Verify that the reporting state has been duly updated.
@@ -233,7 +236,7 @@ IN_PROC_BROWSER_TEST_P(MetricsReportingStateTestParameterized,
   ASSERT_THAT(local_state_contents, ::testing::NotNull());
 
   // Verify that the metrics reporting state in the file is what's expected.
-  absl::optional<bool> metrics_reporting_state =
+  std::optional<bool> metrics_reporting_state =
       local_state_contents->GetIfDict()->FindBoolByDottedPath(
           metrics::prefs::kMetricsReportingEnabled);
   EXPECT_TRUE(metrics_reporting_state.has_value());
@@ -258,10 +261,10 @@ IN_PROC_BROWSER_TEST_P(MetricsReportingStateClearDataTest,
   ASSERT_TRUE(HistogramExists("Test.Before.StabilityHistogram"));
 
   // Simulate enabling metrics reporting.
-  ChangeMetricsReportingStateCalledFrom called_from = GetParam();
+  metrics::ChangeMetricsReportingStateCalledFrom called_from = GetParam();
   base::RunLoop run_loop;
   bool value_after_change = false;
-  ChangeMetricsReportingStateWithReply(
+  metrics::ChangeMetricsReportingStateWithReply(
       true,
       base::BindOnce(&OnMetricsReportingStateChanged, &value_after_change,
                      run_loop.QuitClosure()),
@@ -280,7 +283,8 @@ IN_PROC_BROWSER_TEST_P(MetricsReportingStateClearDataTest,
   // Verify that histogram data that came before clearing data are not included
   // in the next snapshot if metrics reporting was enabled from a settings page.
   bool called_from_settings_page =
-      (called_from == ChangeMetricsReportingStateCalledFrom::kUiSettings);
+      (called_from ==
+       metrics::ChangeMetricsReportingStateCalledFrom::kUiSettings);
   EXPECT_EQ(called_from_settings_page ? 0 : 1,
             GetHistogramDeltaTotalCount("Test.Before.Histogram"));
   EXPECT_EQ(called_from_settings_page ? 0 : 1,
@@ -308,12 +312,15 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
     MetricsReportingStateTests,
     MetricsReportingStateClearDataTest,
-    testing::ValuesIn<ChangeMetricsReportingStateCalledFrom>(
-        {ChangeMetricsReportingStateCalledFrom::kUnknown,
-         ChangeMetricsReportingStateCalledFrom::kUiSettings,
-         ChangeMetricsReportingStateCalledFrom::kCrosMetricsSettingsChange}));
+    testing::ValuesIn<metrics::ChangeMetricsReportingStateCalledFrom>(
+        {metrics::ChangeMetricsReportingStateCalledFrom::kUiSettings,
+         metrics::ChangeMetricsReportingStateCalledFrom::kUiFirstRun,
+         metrics::ChangeMetricsReportingStateCalledFrom::kSessionCrashedDialog,
+         metrics::ChangeMetricsReportingStateCalledFrom::
+             kCrosMetricsSettingsChange}));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+
+#if BUILDFLAG(IS_CHROMEOS)
 // Used to verify that managed/unmanged devices returns correct values based on
 // management state.
 class MetricsReportingStateManagedTest
@@ -354,7 +361,7 @@ class MetricsReportingStateManagedTest
 
 IN_PROC_BROWSER_TEST_P(MetricsReportingStateManagedTest,
                        IsMetricsReportingPolicyManagedReturnsCorrectValue) {
-  EXPECT_EQ(IsMetricsReportingPolicyManaged(), is_managed());
+  EXPECT_EQ(metrics::IsMetricsReportingPolicyManaged(), is_managed());
 }
 
 IN_PROC_BROWSER_TEST_P(MetricsReportingStateManagedTest,
@@ -362,11 +369,12 @@ IN_PROC_BROWSER_TEST_P(MetricsReportingStateManagedTest,
   // Simulate enabling metrics reporting through OnCrosMetricsChange().
   base::RunLoop run_loop;
   bool value_after_change = false;
-  ChangeMetricsReportingStateWithReply(
+  metrics::ChangeMetricsReportingStateWithReply(
       true,
       base::BindOnce(&OnMetricsReportingStateChanged, &value_after_change,
                      run_loop.QuitClosure()),
-      ChangeMetricsReportingStateCalledFrom::kCrosMetricsSettingsChange);
+      metrics::ChangeMetricsReportingStateCalledFrom::
+          kCrosMetricsSettingsChange);
   run_loop.Run();
 
   // Value should have changed regardless whether the device is managed or not.

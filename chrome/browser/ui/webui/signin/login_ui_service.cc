@@ -6,23 +6,10 @@
 
 #include "base/observer_list.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/signin/signin_promo.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_window.h"
-#include "chrome/common/url_constants.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/signin/signin_view_controller.h"
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ui/profile_picker.h"
-#endif  // !BUILDFLAG(IS_CHROMEOS_ASH)
-
-LoginUIService::LoginUIService(Profile* profile)
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
-    : profile_(profile)
-#endif
-{
-}
+LoginUIService::LoginUIService() = default;
 
 LoginUIService::~LoginUIService() = default;
 
@@ -49,40 +36,26 @@ void LoginUIService::LoginUIClosed(LoginUI* ui) {
 
 void LoginUIService::SyncConfirmationUIClosed(
     SyncConfirmationUIClosedResult result) {
-  for (Observer& observer : observer_list_)
+  for (Observer& observer : observer_list_) {
     observer.OnSyncConfirmationUIClosed(result);
+  }
 }
 
-void LoginUIService::DisplayLoginResult(Browser* browser,
-                                        const SigninUIError& error,
-                                        bool from_profile_picker) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+void LoginUIService::DisplayLoginResult(BrowserWindowInterface& browser_window,
+                                        const SigninUIError& error) {
+#if BUILDFLAG(IS_CHROMEOS)
   // ChromeOS doesn't have the avatar bubble so it never calls this function.
   NOTREACHED();
 #else
   last_login_error_ = error;
-  // TODO(crbug.com/1326904): Check if the condition should be `!error.IsOk()`
+  // TODO(crbug.com/40225985): Check if the condition should be `!error.IsOk()`
   if (!error.message().empty()) {
-    if (browser) {
-      browser->signin_view_controller()->ShowModalSigninErrorDialog();
-    } else if (from_profile_picker) {
-      ProfilePickerForceSigninDialog::DisplayErrorMessage();
-    } else {
-      LOG(ERROR) << "Unable to show Login error message: " << error.message();
-    }
+    SigninViewController::From(&browser_window)->ShowModalSigninErrorDialog();
   }
 #endif
 }
 
-void LoginUIService::SetProfileBlockingErrorMessage() {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  NOTREACHED();
-#else
-  last_login_error_ = SigninUIError::ProfileIsBlocked();
-#endif
-}
-
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 const SigninUIError& LoginUIService::GetLastLoginError() const {
   return last_login_error_;
 }

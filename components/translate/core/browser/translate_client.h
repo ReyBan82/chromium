@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 
+#include "base/functional/callback_forward.h"
 #include "build/build_config.h"
 #include "components/language/core/browser/accept_languages_service.h"
 #include "components/translate/core/browser/translate_prefs.h"
@@ -37,7 +38,7 @@ class TranslateInfoBarDelegate;
 // TranslateManager is used (e.g. a single tab).
 class TranslateClient {
  public:
-  virtual ~TranslateClient() {}
+  virtual ~TranslateClient() = default;
 
   // Gets the TranslateDriver associated with the client.
   virtual TranslateDriver* GetTranslateDriver() = 0;
@@ -51,13 +52,10 @@ class TranslateClient {
   // Returns the associated AcceptLanguagesService.
   virtual language::AcceptLanguagesService* GetAcceptLanguagesService() = 0;
 
-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+#if BUILDFLAG(IS_IOS)
   // Returns a translate infobar that owns |delegate|.
   virtual std::unique_ptr<infobars::InfoBar> CreateInfoBar(
       std::unique_ptr<TranslateInfoBarDelegate> delegate) const = 0;
-
-  // Returns the resource ID of the icon to be shown for the Translate infobars.
-  virtual int GetInfobarIconID() const = 0;
 #endif
 
   // Called when the embedder should present UI to the user corresponding to the
@@ -72,6 +70,12 @@ class TranslateClient {
 
   // Returns true if the URL can be translated.
   virtual bool IsTranslatableURL(const GURL& url) = 0;
+
+  // Triggers PDF translation.
+  virtual void TriggerPdfTranslation() {}
+
+  // Returns true if Reading Mode is open.
+  virtual bool IsReadingModeOpen() const = 0;
 };
 
 }  // namespace translate

@@ -3,30 +3,32 @@
 // found in the LICENSE file.
 package org.chromium.components.content_capture;
 
-import org.chromium.base.CommandLine;
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.NativeMethods;
 
-/**
- * The class to get if feature is enabled from native.
- */
+import org.chromium.base.CommandLine;
+import org.chromium.base.TriState;
+import org.chromium.base.TriStateUtils;
+import org.chromium.build.annotations.NullMarked;
+
+/** The class to get if feature is enabled from native. */
+@NullMarked
 public class ContentCaptureFeatures {
     private static final String FLAG = "dump-captured-content-to-logcat-for-testing";
+    private static @TriState int sEnableDebugLogging;
 
     public static boolean isEnabled() {
         return ContentCaptureFeaturesJni.get().isEnabled();
     }
 
     public static boolean isDumpForTestingEnabled() {
-        return CommandLine.getInstance().hasSwitch(FLAG);
-    }
-
-    public static boolean shouldTriggerContentCaptureForExperiment() {
-        return ContentCaptureFeaturesJni.get().shouldTriggerContentCaptureForExperiment();
+        if (sEnableDebugLogging == TriState.NOT_SET) {
+            sEnableDebugLogging = TriStateUtils.from(CommandLine.getInstance().hasSwitch(FLAG));
+        }
+        return sEnableDebugLogging == TriState.TRUE;
     }
 
     @NativeMethods
-    interface Natives {
+    public interface Natives {
         boolean isEnabled();
-        boolean shouldTriggerContentCaptureForExperiment();
     }
 }

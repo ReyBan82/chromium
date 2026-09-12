@@ -7,14 +7,8 @@
 
 #include "third_party/blink/renderer/platform/platform_export.h"
 
-namespace WTF {
-class String;
-}  // namespace WTF
-
 namespace blink {
 
-// TODO(chrisha): Remove knowledge of ExecutionContext class from this code!
-class ExecutionContext;
 class Frame;
 class HTMLFrameOwnerElement;
 class ScriptState;
@@ -43,11 +37,8 @@ class PLATFORM_EXPORT RendererResourceCoordinator {
   // Used for tracking content javascript contexts (frames, workers, worklets,
   // etc). These functions are thread-safe.
 
-  // Called when a |script_state| is created. Note that |execution_context| may
-  // be nullptr if the |script_state| is not associated with an
-  // |execution_context|.
-  virtual void OnScriptStateCreated(ScriptState* script_state,
-                                    ExecutionContext* execution_context) = 0;
+  // Called when a |script_state| is created.
+  virtual void OnScriptStateCreated(ScriptState* script_state) = 0;
   // Called when the |script_state| has been detached from the v8::Context
   // (and ExecutionContext, if applicable) it was associated with at creation.
   // At this point the associated v8::Context is considered "detached" until it
@@ -64,12 +55,6 @@ class PLATFORM_EXPORT RendererResourceCoordinator {
   virtual void OnBeforeContentFrameDetached(
       const Frame& frame,
       const HTMLFrameOwnerElement& owner) = 0;
-
-  // Used to fire a named tracing trigger from a renderer. This is a nop unless
-  // the tracing machinery has been appropriately configured in the browser
-  // process.
-  virtual void FireBackgroundTracingTrigger(
-      const WTF::String& trigger_name) = 0;
 };
 
 }  // namespace blink

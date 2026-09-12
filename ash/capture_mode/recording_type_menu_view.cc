@@ -6,12 +6,14 @@
 
 #include "ash/capture_mode/capture_mode_controller.h"
 #include "ash/capture_mode/capture_mode_types.h"
+#include "ash/capture_mode/capture_mode_util.h"
 #include "ash/constants/ash_features.h"
 #include "ash/public/cpp/style/color_provider.h"
 #include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/strings/grit/ash_strings.h"
 #include "ash/style/ash_color_id.h"
 #include "ash/style/system_shadow.h"
+#include "chromeos/constants/chromeos_features.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/compositor/layer.h"
 #include "ui/gfx/geometry/point.h"
@@ -57,11 +59,17 @@ RecordingTypeMenuView::RecordingTypeMenuView(
           this,
           SystemShadow::Type::kElevation12)) {
   SetPaintToLayer();
-  SetBackground(views::CreateThemedSolidBackground(kColorAshShieldAndBase80));
-  layer()->SetFillsBoundsOpaquely(false);
   layer()->SetRoundedCornerRadius(kRoundedCorners);
-  layer()->SetBackgroundBlur(ColorProvider::kBackgroundBlurSigma);
-  layer()->SetBackdropFilterQuality(ColorProvider::kBackgroundBlurQuality);
+  SetBackground(views::CreateSolidBackground(
+      chromeos::features::IsSystemBlurEnabled()
+          ? static_cast<ui::ColorId>(kColorAshShieldAndBase80)
+          : cros_tokens::kCrosSysSystemOnBaseOpaque));
+
+  if (chromeos::features::IsSystemBlurEnabled()) {
+    layer()->SetFillsBoundsOpaquely(false);
+    layer()->SetBackgroundBlur(ColorProvider::kBackgroundBlurSigma);
+    layer()->SetBackdropFilterQuality(ColorProvider::kBackgroundBlurQuality);
+  }
 
   AddOption(
       &kCaptureModeVideoIcon,
@@ -71,13 +79,11 @@ RecordingTypeMenuView::RecordingTypeMenuView(
             l10n_util::GetStringUTF16(IDS_ASH_SCREEN_CAPTURE_LABEL_GIF_RECORD),
             ToInt(RecordingType::kGif));
 
-  if (features::IsDarkLightModeEnabled()) {
-    SetBorder(std::make_unique<views::HighlightBorder>(
-        kCornerRadius, views::HighlightBorder::Type::kHighlightBorder1,
-        /*use_light_colors=*/false));
-  }
+  capture_mode_util::SetHighlightBorder(
+      this, kCornerRadius,
+      views::HighlightBorder::Type::kHighlightBorderOnShadow);
 
-  shadow_->SetRoundedCornerRadius(kCornerRadius);
+  shadow_->SetRoundedCorners(gfx::RoundedCornersF(kCornerRadius));
 }
 
 RecordingTypeMenuView::~RecordingTypeMenuView() = default;
@@ -85,12 +91,31 @@ RecordingTypeMenuView::~RecordingTypeMenuView() = default;
 // static
 gfx::Rect RecordingTypeMenuView::GetIdealScreenBounds(
     const gfx::Rect& capture_label_widget_screen_bounds,
+    const gfx::Rect& target_display_screen_bounds,
     views::View* contents_view) {
   const auto size = GetIdealSize(contents_view);
   const auto bottom_center = capture_label_widget_screen_bounds.bottom_center();
-  const int y = bottom_center.y() + kYOffsetFromLabelWidget;
-  const int x = bottom_center.x() - (size.width() / 2);
-  return gfx::Rect(gfx::Point(x, y), size);
+  // Make sure the left and right edges are within the screen bounds.
+  int x = std::max(0, bottom_center.x() - (size.width() / 2));
+  if (x + size.width() > target_display_screen_bounds.right()) {
+    x = target_display_screen_bounds.right() - size.width();
+  }
+
+  // Try positioning the menu below the bar first, if this makes it outside the
+  // bounds of the display, then try positioning it above.
+  gfx::Rect result{gfx::Point(x, bottom_center.y() + kYOffsetFromLabelWidget),
+                   size};
+  if (result.bottom() > target_display_screen_bounds.bottom()) {
+    result.set_y(capture_label_widget_screen_bounds.y() -
+                 kYOffsetFromLabelWidget - size.height());
+  }
+
+  CHECK(target_display_screen_bounds.Contains(result))
+      << "display bounds (screen) = " << target_display_screen_bounds.ToString()
+      << ", recording type menu bounds (screen) = " << result.ToString()
+      << ", user region bounds (root) = "
+      << CaptureModeController::Get()->user_capture_region().ToString();
+  return result;
 }
 
 void RecordingTypeMenuView::OnOptionSelected(int option_id) const {

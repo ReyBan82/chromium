@@ -16,6 +16,7 @@ using SharedHandleState = FileSystemAccessManagerImpl::SharedHandleState;
 FileSystemAccessTransferTokenImpl::FileSystemAccessTransferTokenImpl(
     const storage::FileSystemURL& url,
     const url::Origin& origin,
+    const std::string& display_name,
     const FileSystemAccessManagerImpl::SharedHandleState& handle_state,
     HandleType handle_type,
     FileSystemAccessManagerImpl* manager,
@@ -25,9 +26,11 @@ FileSystemAccessTransferTokenImpl::FileSystemAccessTransferTokenImpl(
       manager_(manager),
       url_(url),
       origin_(origin),
+      display_name_(display_name),
       handle_state_(handle_state) {
-  DCHECK(manager_);
-  DCHECK(url.origin().opaque() || url.origin() == origin);
+  CHECK(manager_, base::NotFatalUntil::M159);
+  CHECK(url.origin().opaque() || url.origin() == origin,
+        base::NotFatalUntil::M159);
 
   receivers_.set_disconnect_handler(
       base::BindRepeating(&FileSystemAccessTransferTokenImpl::OnMojoDisconnect,
@@ -43,16 +46,16 @@ std::unique_ptr<FileSystemAccessFileHandleImpl>
 FileSystemAccessTransferTokenImpl::CreateFileHandle(
     const FileSystemAccessManagerImpl::BindingContext& binding_context) const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_EQ(handle_type_, HandleType::kFile);
+  CHECK_EQ(handle_type_, HandleType::kFile, base::NotFatalUntil::M159);
   return std::make_unique<FileSystemAccessFileHandleImpl>(
-      manager_, binding_context, url_, handle_state_);
+      manager_, binding_context, url_, display_name_, handle_state_);
 }
 
 std::unique_ptr<FileSystemAccessDirectoryHandleImpl>
 FileSystemAccessTransferTokenImpl::CreateDirectoryHandle(
     const FileSystemAccessManagerImpl::BindingContext& binding_context) const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_EQ(handle_type_, HandleType::kDirectory);
+  CHECK_EQ(handle_type_, HandleType::kDirectory, base::NotFatalUntil::M159);
   return std::make_unique<FileSystemAccessDirectoryHandleImpl>(
       manager_, binding_context, url_, handle_state_);
 }

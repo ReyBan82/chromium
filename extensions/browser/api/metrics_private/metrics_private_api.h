@@ -11,6 +11,11 @@
 
 #include "base/metrics/histogram.h"
 #include "extensions/browser/extension_function.h"
+#include "extensions/buildflags/buildflags.h"
+
+// Enabled on all platforms (including desktop Android) because it is used by
+// internal webui (chrome:// pages).
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -58,6 +63,18 @@ class MetricsPrivateRecordUserActionFunction : public ExtensionFunction {
 
  protected:
   ~MetricsPrivateRecordUserActionFunction() override {}
+
+  // ExtensionFunction:
+  ResponseAction Run() override;
+};
+
+class MetricsPrivateRecordExtensionUsageUkmFunction : public ExtensionFunction {
+ public:
+  DECLARE_EXTENSION_FUNCTION("metricsPrivate.recordExtensionUsageUkm",
+                             METRICSPRIVATE_RECORDEXTENSIONUSAGEUKM)
+
+ protected:
+  ~MetricsPrivateRecordExtensionUsageUkmFunction() override = default;
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -256,11 +273,11 @@ class MetricsPrivateGetHistogramFunction : public ExtensionFunction {
   ResponseAction Run() override;
 
   // Sends an asynchronous response containing data for the histogram named
-  // |name|. Passed to content::FetchHistogramsAsynchronously() to be run after
+  // `name`. Passed to content::FetchHistogramsAsynchronously() to be run after
   // new data from other processes has been collected.
   void RespondOnHistogramsFetched(const std::string& name);
 
-  // Creates a response with current data for the histogram named |name|.
+  // Creates a response with current data for the histogram named `name`.
   ResponseValue GetHistogram(const std::string& name);
 };
 

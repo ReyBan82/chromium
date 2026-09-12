@@ -13,7 +13,7 @@
 #include "components/history/core/browser/history_types.h"
 #include "ui/base/models/table_model.h"
 
-class Browser;
+class BrowserWindowInterface;
 class GURL;
 class Profile;
 
@@ -41,11 +41,6 @@ class CustomHomePagesTableModel : public ui::TableModel {
   // Sets the set of urls that this model contains.
   void SetURLs(const std::vector<GURL>& urls);
 
-  // Collect all entries indexed by |index_list|, and moves them to be right
-  // before the element addressed by |insert_before|. Used by Drag&Drop.
-  // Expects |index_list| to be ordered ascending.
-  void MoveURLs(size_t insert_before, const std::vector<size_t>& index_list);
-
   // Adds an entry at the specified index.
   void Add(size_t index, const GURL& url);
 
@@ -60,9 +55,9 @@ class CustomHomePagesTableModel : public ui::TableModel {
   std::vector<GURL> GetURLs();
 
   // TableModel overrides:
-  size_t RowCount() override;
-  std::u16string GetText(size_t row, int column_id) override;
-  std::u16string GetTooltip(size_t row) override;
+  size_t RowCount() const override;
+  std::u16string GetText(size_t row, int column_id) const override;
+  std::u16string GetTooltip(size_t row) const override;
   void SetObserver(ui::TableModelObserver* observer) override;
 
  private:
@@ -71,7 +66,7 @@ class CustomHomePagesTableModel : public ui::TableModel {
   struct Entry;
 
   // Returns false if pages from |browser| should not be considered.
-  bool ShouldIncludeBrowser(Browser* browser);
+  bool ShouldIncludeBrowser(BrowserWindowInterface* browser);
 
   // Loads the title for the specified entry.
   void LoadTitle(Entry* entry);

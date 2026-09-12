@@ -19,17 +19,15 @@ EndpointResolver::EndpointResolver() {
   service_discovery_client_ = ServiceDiscoverySharedClient::GetInstance();
 }
 
-EndpointResolver::~EndpointResolver() {}
+EndpointResolver::~EndpointResolver() = default;
 
 void EndpointResolver::Start(const net::HostPortPair& address,
                              ResultCallback callback) {
 #if BUILDFLAG(IS_MAC)
   net::IPAddress ip_address;
   if (!ip_address.AssignFromIPLiteral(address.host())) {
+    // Unexpected, but could be a reason for crbug.com/40428182
     NOTREACHED() << address.ToString();
-    // Unexpected, but could be a reason for crbug.com/513505
-    base::debug::DumpWithoutCrashing();
-    return std::move(callback).Run(net::IPEndPoint());
   }
 
   // OSX already has IP there.

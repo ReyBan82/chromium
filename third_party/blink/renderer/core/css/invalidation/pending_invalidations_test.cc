@@ -9,6 +9,7 @@
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/testing/dummy_page_holder.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace blink {
 
@@ -23,6 +24,7 @@ class PendingInvalidationsTest : public testing::Test {
   }
 
  private:
+  test::TaskEnvironment task_environment_;
   std::unique_ptr<DummyPageHolder> dummy_page_holder_;
 };
 
@@ -31,7 +33,7 @@ void PendingInvalidationsTest::SetUp() {
 }
 
 TEST_F(PendingInvalidationsTest, ScheduleOnDocumentNode) {
-  GetDocument().body()->setInnerHTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(
       "<div id='d'></div><i id='i'></i><span></span>");
   GetDocument().View()->UpdateAllLifecyclePhasesForTest();
 
@@ -39,8 +41,8 @@ TEST_F(PendingInvalidationsTest, ScheduleOnDocumentNode) {
 
   scoped_refptr<DescendantInvalidationSet> set =
       DescendantInvalidationSet::Create();
-  set->AddTagName("div");
-  set->AddTagName("span");
+  set->AddTagName(AtomicString("div"));
+  set->AddTagName(AtomicString("span"));
 
   InvalidationLists lists;
   lists.descendants.push_back(set);
@@ -63,7 +65,7 @@ TEST_F(PendingInvalidationsTest, ScheduleOnDocumentNode) {
 }
 
 TEST_F(PendingInvalidationsTest, DescendantInvalidationOnDisplayNone) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <style>
       #a { display: none }
       .a .b { color: green }
@@ -77,8 +79,69 @@ TEST_F(PendingInvalidationsTest, DescendantInvalidationOnDisplayNone) {
   GetDocument().View()->UpdateAllLifecyclePhasesForTest();
 
   // We skip scheduling descendant invalidations on display:none elements.
-  GetDocument().getElementById("a")->setAttribute(html_names::kClassAttr, "a");
+  GetDocument()
+      .getElementById(AtomicString("a"))
+      ->setAttribute(html_names::kClassAttr, AtomicString("a"));
   EXPECT_FALSE(GetDocument().NeedsLayoutTreeUpdate());
+}
+
+// Regression test for https://crbug.com/40257823.
+// With a style rule using :not() and the subsequent-sibling combinator (~),
+// adding and removing an element should not leave an orphaned entry in the
+// pending invalidation map.
+TEST_F(PendingInvalidationsTest, NoLeakForNotWithSubsequentSibling) {
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
+    <style>:not(.x) ~ * { color: red; }</style>
+    <div id="container"></div>
+  )HTML");
+  GetDocument().View()->UpdateAllLifecyclePhasesForTest();
+
+  Element* container = GetDocument().getElementById(AtomicString("container"));
+  ASSERT_TRUE(container);
+
+  // Add a button as the only child (no nextSibling).
+  Element* button = GetDocument().CreateRawElement(html_names::kButtonTag);
+  container->AppendChild(button);
+
+  // The pending invalidation map may have entries for the container (from
+  // sibling invalidation being rescheduled as descendant invalidation). Flush
+  // style to clear all pending state.
+  GetDocument().View()->UpdateAllLifecyclePhasesForTest();
+
+  // Remove the button.
+  container->RemoveChild(button);
+
+  // After removal, the button should not remain in the pending invalidation
+  // map.
+  EXPECT_TRUE(
+      GetPendingNodeInvalidations().GetPendingInvalidationMap().find(button) ==
+      GetPendingNodeInvalidations().GetPendingInvalidationMap().end());
+}
+
+// Verify that Nth sibling invalidation sets are still scheduled on a last child
+// even when it has no nextSibling.
+TEST_F(PendingInvalidationsTest, NthSetsScheduledOnLastSibling) {
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(
+      "<div id='parent'><div id='only'></div></div>");
+  GetDocument().View()->UpdateAllLifecyclePhasesForTest();
+
+  Element* only = GetDocument().getElementById(AtomicString("only"));
+  ASSERT_TRUE(only);
+  ASSERT_FALSE(only->nextSibling());
+
+  // Create an NthSiblingInvalidationSet.
+  scoped_refptr<NthSiblingInvalidationSet> nth_set =
+      NthSiblingInvalidationSet::Create();
+
+  InvalidationLists lists;
+  lists.siblings.push_back(nth_set);
+  GetPendingNodeInvalidations().ScheduleInvalidationSetsForNode(lists, *only);
+
+  // The Nth set should have been scheduled and the node should be in the map.
+  EXPECT_TRUE(only->NeedsStyleInvalidation());
+  EXPECT_TRUE(
+      GetPendingNodeInvalidations().GetPendingInvalidationMap().find(only) !=
+      GetPendingNodeInvalidations().GetPendingInvalidationMap().end());
 }
 
 }  // namespace blink

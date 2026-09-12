@@ -6,6 +6,7 @@
 #define HEADLESS_PUBLIC_HEADLESS_BROWSER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,7 +15,6 @@
 #include "build/build_config.h"
 #include "headless/public/headless_browser_context.h"
 #include "headless/public/headless_export.h"
-#include "net/base/host_port_pair.h"
 #include "ui/gfx/font_render_params.h"
 #include "ui/gfx/geometry/size.h"
 
@@ -22,9 +22,12 @@ namespace base {
 class SingleThreadTaskRunner;
 }
 
+namespace blink {
+struct UserAgentMetadata;
+}
+
 namespace headless {
 
-class HeadlessDevToolsChannel;
 class HeadlessWebContents;
 
 // This class represents the global headless browser instance. To get a pointer
@@ -43,27 +46,10 @@ class HEADLESS_EXPORT HeadlessBrowser {
   // Pointer to HeadlessBrowserContext becomes invalid after:
   // a) Calling HeadlessBrowserContext::Close or
   // b) Calling HeadlessBrowser::Shutdown
-  virtual HeadlessBrowserContext::Builder CreateBrowserContextBuilder() = 0;
+  virtual HeadlessBrowserContext* CreateBrowserContext(
+      HeadlessBrowserContext::CreateParams params = {}) = 0;
 
   virtual std::vector<HeadlessBrowserContext*> GetAllBrowserContexts() = 0;
-
-  // Return a DevTools target corresponding to this browser. Note that this
-  // method only returns a valid target after browser has been initialized on
-  // the main thread. The target only supports the domains available on the
-  // browser endpoint excluding the Tethering domain.
-  // TODO(dgozman): remove together with HeadlessDevToolsTarget.
-  virtual HeadlessDevToolsTarget* GetDevToolsTarget() = 0;
-
-  // Creates a channel connected to the browser. Note that this
-  // method only returns a valid channel after browser has been initialized on
-  // the main thread. The channel only supports the domains available on the
-  // browser endpoint excluding the Tethering domain.
-  virtual std::unique_ptr<HeadlessDevToolsChannel> CreateDevToolsChannel() = 0;
-
-  // Returns the HeadlessWebContents associated with the
-  // |devtools_agent_host_id| if any.  Otherwise returns null.
-  virtual HeadlessWebContents* GetWebContentsForDevToolsAgentHostId(
-      const std::string& devtools_agent_host_id) = 0;
 
   // Returns HeadlessBrowserContext associated with the given id if any.
   // Otherwise returns null.
@@ -87,6 +73,7 @@ class HEADLESS_EXPORT HeadlessBrowser {
   virtual void Shutdown() = 0;
 
   static std::string GetProductNameAndVersion();
+  static blink::UserAgentMetadata GetUserAgentMetadata();
 
  protected:
   HeadlessBrowser() {}
@@ -95,8 +82,7 @@ class HEADLESS_EXPORT HeadlessBrowser {
 
 // Embedding API overrides for the headless browser.
 struct HEADLESS_EXPORT HeadlessBrowser::Options {
-  class Builder;
-
+  Options();
   Options(Options&& options);
 
   Options(const Options&) = delete;
@@ -106,9 +92,8 @@ struct HEADLESS_EXPORT HeadlessBrowser::Options {
 
   Options& operator=(Options&& options);
 
-  // Address at which DevTools should listen for connections. Disabled by
-  // default.
-  net::HostPortPair devtools_endpoint;
+  // Port at which DevTools should listen for connections on localhost.
+  std::optional<int> devtools_port;
 
   // Enables remote debug over stdio pipes [in=3, out=4].
   bool devtools_pipe_enabled = false;
@@ -124,12 +109,19 @@ struct HEADLESS_EXPORT HeadlessBrowser::Options {
   std::unique_ptr<net::ProxyConfig> proxy_config;
 
   // Default window size. This is also used to create the window tree host and
-  // as initial screen size. Defaults to 800x600.
-  gfx::Size window_size;
+  // as the headless screen size. Defaults to 800x600.
+  gfx::Size window_size = gfx::Size(800, 600);
+
+  // Headless screen info specification.
+  std::string screen_info_spec;
 
   // Path to user data directory, where browser will look for its state.
   // If empty, default directory (where the binary is located) will be used.
   base::FilePath user_data_dir;
+
+  // Path to disk cache directory. If emppty, 'Cache' subdirectory of the
+  // user data directory will be used.
+  base::FilePath disk_cache_dir;
 
   // Run a browser context in an incognito mode. Enabled by default.
   bool incognito_mode = true;
@@ -142,52 +134,17 @@ struct HEADLESS_EXPORT HeadlessBrowser::Options {
   bool enable_begin_frame_control = false;
 
   // Font render hinting value to override any default settings
-  gfx::FontRenderParams::Hinting font_render_hinting;
+  gfx::FontRenderParams::Hinting font_render_hinting =
+      gfx::FontRenderParams::Hinting::HINTING_FULL;
 
   // Whether lazy loading of images and frames is enabled.
   bool lazy_load_enabled = true;
 
+  // Forces each navigation to use a new BrowsingInstance.
+  bool force_new_browsing_instance = false;
+
   // Reminder: when adding a new field here, do not forget to add it to
   // HeadlessBrowserContextOptions (where appropriate).
- private:
-  Options();
-};
-
-class HEADLESS_EXPORT HeadlessBrowser::Options::Builder {
- public:
-  Builder();
-
-  Builder(const Builder&) = delete;
-  Builder& operator=(const Builder&) = delete;
-
-  ~Builder();
-
-  // Browser-wide settings.
-
-  Builder& EnableDevToolsServer(const net::HostPortPair& endpoint);
-  Builder& EnableDevToolsPipe();
-
-  // Settings that are currently browser-wide, but could be per-context if
-  // needed.
-  Builder& SetEnableLazyLoading(bool enable);
-
-  // Per-context settings.
-
-  Builder& SetAcceptLanguage(const std::string& language);
-  Builder& SetEnableBeginFrameControl(bool enable);
-  Builder& SetUserAgent(const std::string& agent);
-  Builder& SetProxyConfig(std::unique_ptr<net::ProxyConfig> config);
-  Builder& SetWindowSize(const gfx::Size& size);
-  Builder& SetUserDataDir(const base::FilePath& dir);
-  Builder& SetIncognitoMode(bool incognito);
-  Builder& SetBlockNewWebContents(bool block);
-  Builder& SetCrashReporterEnabled(bool enabled);
-  Builder& SetCrashDumpsDir(const base::FilePath& dir);
-  Builder& SetFontRenderHinting(gfx::FontRenderParams::Hinting hinting);
-  Options Build();
-
- private:
-  Options options_;
 };
 
 }  // namespace headless

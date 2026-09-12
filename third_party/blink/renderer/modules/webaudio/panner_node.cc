@@ -25,6 +25,7 @@
 
 #include "third_party/blink/renderer/modules/webaudio/panner_node.h"
 
+#include "third_party/blink/renderer/bindings/modules/v8/v8_automation_rate.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_panner_options.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_listener.h"
@@ -48,48 +49,48 @@ constexpr double kDefaultOrientationZValue = 0.0;
 
 PannerNode::PannerNode(BaseAudioContext& context)
     : AudioNode(context),
-      position_x_(
-          AudioParam::Create(context,
-                             Uuid(),
-                             AudioParamHandler::kParamTypePannerPositionX,
-                             kDefaultPositionXValue,
-                             AudioParamHandler::AutomationRate::kAudio,
-                             AudioParamHandler::AutomationRateMode::kVariable)),
-      position_y_(
-          AudioParam::Create(context,
-                             Uuid(),
-                             AudioParamHandler::kParamTypePannerPositionY,
-                             kDefaultPositionYValue,
-                             AudioParamHandler::AutomationRate::kAudio,
-                             AudioParamHandler::AutomationRateMode::kVariable)),
-      position_z_(
-          AudioParam::Create(context,
-                             Uuid(),
-                             AudioParamHandler::kParamTypePannerPositionZ,
-                             kDefaultPositionZValue,
-                             AudioParamHandler::AutomationRate::kAudio,
-                             AudioParamHandler::AutomationRateMode::kVariable)),
-      orientation_x_(
-          AudioParam::Create(context,
-                             Uuid(),
-                             AudioParamHandler::kParamTypePannerOrientationX,
-                             kDefaultOrientationXValue,
-                             AudioParamHandler::AutomationRate::kAudio,
-                             AudioParamHandler::AutomationRateMode::kVariable)),
-      orientation_y_(
-          AudioParam::Create(context,
-                             Uuid(),
-                             AudioParamHandler::kParamTypePannerOrientationY,
-                             kDefaultOrientationYValue,
-                             AudioParamHandler::AutomationRate::kAudio,
-                             AudioParamHandler::AutomationRateMode::kVariable)),
-      orientation_z_(
-          AudioParam::Create(context,
-                             Uuid(),
-                             AudioParamHandler::kParamTypePannerOrientationZ,
-                             kDefaultOrientationZValue,
-                             AudioParamHandler::AutomationRate::kAudio,
-                             AudioParamHandler::AutomationRateMode::kVariable)),
+      position_x_(AudioParam::Create(
+          context,
+          Uuid(),
+          AudioParamHandler::AudioParamType::kParamTypePannerPositionX,
+          kDefaultPositionXValue,
+          V8AutomationRate::Enum::kARate,
+          AudioParamHandler::AutomationRateMode::kVariable)),
+      position_y_(AudioParam::Create(
+          context,
+          Uuid(),
+          AudioParamHandler::AudioParamType::kParamTypePannerPositionY,
+          kDefaultPositionYValue,
+          V8AutomationRate::Enum::kARate,
+          AudioParamHandler::AutomationRateMode::kVariable)),
+      position_z_(AudioParam::Create(
+          context,
+          Uuid(),
+          AudioParamHandler::AudioParamType::kParamTypePannerPositionZ,
+          kDefaultPositionZValue,
+          V8AutomationRate::Enum::kARate,
+          AudioParamHandler::AutomationRateMode::kVariable)),
+      orientation_x_(AudioParam::Create(
+          context,
+          Uuid(),
+          AudioParamHandler::AudioParamType::kParamTypePannerOrientationX,
+          kDefaultOrientationXValue,
+          V8AutomationRate::Enum::kARate,
+          AudioParamHandler::AutomationRateMode::kVariable)),
+      orientation_y_(AudioParam::Create(
+          context,
+          Uuid(),
+          AudioParamHandler::AudioParamType::kParamTypePannerOrientationY,
+          kDefaultOrientationYValue,
+          V8AutomationRate::Enum::kARate,
+          AudioParamHandler::AutomationRateMode::kVariable)),
+      orientation_z_(AudioParam::Create(
+          context,
+          Uuid(),
+          AudioParamHandler::AudioParamType::kParamTypePannerOrientationZ,
+          kDefaultOrientationZValue,
+          V8AutomationRate::Enum::kARate,
+          AudioParamHandler::AutomationRateMode::kVariable)),
       listener_(context.listener()) {
   SetHandler(PannerHandler::Create(
       *this, context.sampleRate(), position_x_->Handler(),
@@ -101,7 +102,14 @@ PannerNode* PannerNode::Create(BaseAudioContext& context,
                                ExceptionState& exception_state) {
   DCHECK(IsMainThread());
 
-  return MakeGarbageCollected<PannerNode>(context);
+  auto* node = MakeGarbageCollected<PannerNode>(context);
+  if (!node->GetPannerHandler().InitializeSampleAccurateArrays()) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kNotSupportedError,
+        "Failed to initialize PannerNode due to insufficient memory.");
+    return nullptr;
+  }
+  return node;
 }
 
 PannerNode* PannerNode::Create(BaseAudioContext* context,
@@ -140,12 +148,12 @@ PannerHandler& PannerNode::GetPannerHandler() const {
   return static_cast<PannerHandler&>(Handler());
 }
 
-String PannerNode::panningModel() const {
-  return GetPannerHandler().PanningModel();
+V8PanningModelType PannerNode::panningModel() const {
+  return V8PanningModelType(GetPannerHandler().PanningModel());
 }
 
-void PannerNode::setPanningModel(const String& model) {
-  GetPannerHandler().SetPanningModel(model);
+void PannerNode::setPanningModel(const V8PanningModelType& model) {
+  GetPannerHandler().SetPanningModel(model.AsEnum());
 }
 
 void PannerNode::setPosition(float x,
@@ -162,12 +170,12 @@ void PannerNode::setOrientation(float x,
   GetPannerHandler().SetOrientation(x, y, z, exceptionState);
 }
 
-String PannerNode::distanceModel() const {
-  return GetPannerHandler().DistanceModel();
+V8DistanceModelType PannerNode::distanceModel() const {
+  return V8DistanceModelType(GetPannerHandler().DistanceModel());
 }
 
-void PannerNode::setDistanceModel(const String& model) {
-  GetPannerHandler().SetDistanceModel(model);
+void PannerNode::setDistanceModel(const V8DistanceModelType& model) {
+  GetPannerHandler().SetDistanceModel(model.AsEnum());
 }
 
 double PannerNode::refDistance() const {

@@ -88,11 +88,9 @@ TEST_F(CancelableTaskTrackerTest, CancelPostedTaskAndReply) {
   scoped_refptr<TestSimpleTaskRunner> test_task_runner(
       new TestSimpleTaskRunner());
 
-  CancelableTaskTracker::TaskId task_id =
-      task_tracker_.PostTaskAndReply(test_task_runner.get(),
-                                     FROM_HERE,
-                                     MakeExpectedNotRunClosure(FROM_HERE),
-                                     MakeExpectedNotRunClosure(FROM_HERE));
+  CancelableTaskTracker::TaskId task_id = task_tracker_.PostTaskAndReply(
+      test_task_runner.get(), FROM_HERE, MakeExpectedNotRunClosure(FROM_HERE),
+      MakeExpectedNotRunClosure(FROM_HERE));
   EXPECT_NE(CancelableTaskTracker::kBadTaskId, task_id);
 
   task_tracker_.TryCancel(task_id);
@@ -107,11 +105,9 @@ TEST_F(CancelableTaskTrackerTest, CancelReply) {
   scoped_refptr<TestSimpleTaskRunner> test_task_runner(
       new TestSimpleTaskRunner());
 
-  CancelableTaskTracker::TaskId task_id =
-      task_tracker_.PostTaskAndReply(test_task_runner.get(),
-                                     FROM_HERE,
-                                     MakeExpectedRunClosure(FROM_HERE),
-                                     MakeExpectedNotRunClosure(FROM_HERE));
+  CancelableTaskTracker::TaskId task_id = task_tracker_.PostTaskAndReply(
+      test_task_runner.get(), FROM_HERE, MakeExpectedRunClosure(FROM_HERE),
+      MakeExpectedNotRunClosure(FROM_HERE));
   EXPECT_NE(CancelableTaskTracker::kBadTaskId, task_id);
 
   test_task_runner->RunUntilIdle();
@@ -136,12 +132,6 @@ TEST_F(CancelableTaskTrackerTest, CancelReplyDifferentThread) {
   worker_thread.Stop();
 }
 
-void ExpectIsCanceled(
-    const CancelableTaskTracker::IsCanceledCallback& is_canceled,
-    bool expected_is_canceled) {
-  EXPECT_EQ(expected_is_canceled, is_canceled.Run());
-}
-
 // Create a new task ID and check its status on a separate thread
 // before and after canceling.  The is-canceled callback should be
 // thread-safe (i.e., nothing should blow up).
@@ -152,18 +142,21 @@ TEST_F(CancelableTaskTrackerTest, NewTrackedTaskIdDifferentThread) {
 
   EXPECT_FALSE(is_canceled.Run());
 
-  Thread other_thread("other thread");
-  ASSERT_TRUE(other_thread.Start());
-  other_thread.task_runner()->PostTask(
-      FROM_HERE, BindOnce(&ExpectIsCanceled, is_canceled, false));
-  other_thread.Stop();
+  Thread other_thread1("other thread");
+  ASSERT_TRUE(other_thread1.Start());
+  other_thread1.task_runner()->PostTask(
+      FROM_HERE, is_canceled.Then(
+                     BindRepeating([](bool result) { EXPECT_FALSE(result); })));
+  other_thread1.Stop();
 
   task_tracker_.TryCancel(task_id);
 
-  ASSERT_TRUE(other_thread.Start());
-  other_thread.task_runner()->PostTask(
-      FROM_HERE, BindOnce(&ExpectIsCanceled, is_canceled, true));
-  other_thread.Stop();
+  Thread other_thread2("other thread2");
+  ASSERT_TRUE(other_thread2.Start());
+  other_thread2.task_runner()->PostTask(
+      FROM_HERE, is_canceled.Then(
+                     BindRepeating([](bool result) { EXPECT_TRUE(result); })));
+  other_thread2.Stop();
 }
 
 // With the task tracker, post a task, a task with a reply, get a new
@@ -303,7 +296,7 @@ class CancelableTaskTrackerDeathTest : public CancelableTaskTrackerTest {
  protected:
   CancelableTaskTrackerDeathTest() {
     // The default style "fast" does not support multi-threaded tests.
-    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
   }
 };
 
@@ -314,25 +307,20 @@ void MaybeRunDeadlyTaskTrackerMemberFunction(
   EXPECT_DCHECK_DEATH(std::move(fn).Run(task_tracker));
 }
 
-void PostDoNothingTask(CancelableTaskTracker* task_tracker) {
-  std::ignore = task_tracker->PostTask(
-      scoped_refptr<TestSimpleTaskRunner>(new TestSimpleTaskRunner()).get(),
-      FROM_HERE, DoNothing());
-}
-
 TEST_F(CancelableTaskTrackerDeathTest, PostFromDifferentThread) {
   Thread bad_thread("bad thread");
   ASSERT_TRUE(bad_thread.Start());
 
   bad_thread.task_runner()->PostTask(
       FROM_HERE,
-      BindOnce(&MaybeRunDeadlyTaskTrackerMemberFunction,
-               Unretained(&task_tracker_), BindOnce(&PostDoNothingTask)));
-}
-
-void TryCancel(CancelableTaskTracker::TaskId task_id,
-               CancelableTaskTracker* task_tracker) {
-  task_tracker->TryCancel(task_id);
+      BindOnce(
+          &MaybeRunDeadlyTaskTrackerMemberFunction, Unretained(&task_tracker_),
+          BindOnce([](CancelableTaskTracker* task_tracker) {
+            std::ignore = task_tracker->PostTask(
+                scoped_refptr<TestSimpleTaskRunner>(new TestSimpleTaskRunner())
+                    .get(),
+                FROM_HERE, DoNothing());
+          })));
 }
 
 TEST_F(CancelableTaskTrackerDeathTest, CancelOnDifferentThread) {
@@ -347,9 +335,14 @@ TEST_F(CancelableTaskTrackerDeathTest, CancelOnDifferentThread) {
   EXPECT_NE(CancelableTaskTracker::kBadTaskId, task_id);
 
   bad_thread.task_runner()->PostTask(
-      FROM_HERE,
-      BindOnce(&MaybeRunDeadlyTaskTrackerMemberFunction,
-               Unretained(&task_tracker_), BindOnce(&TryCancel, task_id)));
+      FROM_HERE, BindOnce(&MaybeRunDeadlyTaskTrackerMemberFunction,
+                          Unretained(&task_tracker_),
+                          BindOnce(
+                              [](CancelableTaskTracker::TaskId task_id,
+                                 CancelableTaskTracker* task_tracker) {
+                                task_tracker->TryCancel(task_id);
+                              },
+                              task_id)));
 
   test_task_runner->RunUntilIdle();
 }
@@ -368,7 +361,9 @@ TEST_F(CancelableTaskTrackerDeathTest, CancelAllOnDifferentThread) {
   bad_thread.task_runner()->PostTask(
       FROM_HERE, BindOnce(&MaybeRunDeadlyTaskTrackerMemberFunction,
                           Unretained(&task_tracker_),
-                          BindOnce(&CancelableTaskTracker::TryCancelAll)));
+                          BindOnce([](CancelableTaskTracker* task_tracker) {
+                            task_tracker->TryCancelAll();
+                          })));
 
   test_task_runner->RunUntilIdle();
 }

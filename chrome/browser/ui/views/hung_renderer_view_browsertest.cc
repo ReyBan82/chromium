@@ -8,9 +8,11 @@
 
 #include "base/functional/callback_helpers.h"
 #include "chrome/browser/platform_util.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
 #include "chrome/browser/ui/tab_dialogs.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
@@ -44,14 +46,15 @@ class HungRendererDialogViewBrowserTest : public DialogBrowserTest {
     model->tab_observers_.push_back(
         std::make_unique<HungPagesTableModel::WebContentsObserverImpl>(
             model, web_contents));
-    if (model->observer_)
+    if (model->observer_) {
       model->observer_->OnModelChanged();
+    }
     dialog->UpdateLabels();
   }
 
   // DialogBrowserTest:
   void ShowUi(const std::string& name) override {
-    auto* web_contents = browser()->tab_strip_model()->GetActiveWebContents();
+    auto* web_contents = browser()->GetTabStripModel()->GetActiveWebContents();
     HungRendererDialogView::Show(
         web_contents,
         web_contents->GetPrimaryMainFrame()->GetRenderViewHost()->GetWidget(),
@@ -67,10 +70,10 @@ class HungRendererDialogViewBrowserTest : public DialogBrowserTest {
   }
 
   HungRendererDialogView* CreateDialogView() {
-    auto* web_contents = browser()->tab_strip_model()->GetActiveWebContents();
+    auto* web_contents = browser()->GetTabStripModel()->GetActiveWebContents();
 
     return HungRendererDialogView::CreateInstance(
-        web_contents, browser()->window()->GetNativeWindow());
+        web_contents, browser()->GetWindow()->GetNativeWindow());
   }
 
   void EndForWebContents(HungRendererDialogView* dialog,
@@ -93,9 +96,9 @@ IN_PROC_BROWSER_TEST_F(HungRendererDialogViewBrowserTest,
   ShowAndVerifyUi();
 }
 
-// This is a regression test for https://crbug.com/855369.
+// This is a regression test for https://crbug.com/41396098.
 IN_PROC_BROWSER_TEST_F(HungRendererDialogViewBrowserTest, InactiveWindow) {
-  auto* web_contents = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* web_contents = browser()->GetTabStripModel()->GetActiveWebContents();
 
   // Simulate creation of the dialog, without initializing or showing it yet.
   // This is what happens when HungRendererDialogView::ShowForWebContents
@@ -106,12 +109,13 @@ IN_PROC_BROWSER_TEST_F(HungRendererDialogViewBrowserTest, InactiveWindow) {
   // Simulate the renderer becoming responsive again.
   content::RenderWidgetHost* render_widget_host =
       web_contents->GetRenderWidgetHostView()->GetRenderWidgetHost();
-  content::WebContentsDelegate* web_contents_delegate = browser();
+  content::WebContentsDelegate* web_contents_delegate =
+      BrowserWebContentsDelegate::From(browser());
   web_contents_delegate->RendererResponsive(web_contents, render_widget_host);
 }
 
 IN_PROC_BROWSER_TEST_F(HungRendererDialogViewBrowserTest, ProcessClosed) {
-  auto* web_contents = browser()->tab_strip_model()->GetActiveWebContents();
+  auto* web_contents = browser()->GetTabStripModel()->GetActiveWebContents();
 
   HungRendererDialogView* dialog = CreateDialogView();
   ASSERT_TRUE(dialog);
@@ -153,17 +157,18 @@ IN_PROC_BROWSER_TEST_F(HungRendererDialogViewBrowserTest, TwoHungBrowsers) {
     return;
   }
 
-  Browser* browser1 = browser();
+  BrowserWindowInterface* browser1 = browser();
   content::WebContents* web_contents1 =
-      browser1->tab_strip_model()->GetActiveWebContents();
+      browser1->GetTabStripModel()->GetActiveWebContents();
   content::RenderWidgetHost* widget_host1 =
       web_contents1->GetPrimaryMainFrame()->GetRenderViewHost()->GetWidget();
 
-  Browser* browser2 =
-      Browser::Create(Browser::CreateParams(browser1->profile(), true));
-  chrome::NewTab(browser2);
+  BrowserWindowInterface* browser2 = CreateBrowserWindow(
+      BrowserWindowCreateParams(browser1->GetProfile(),
+                                /*from_user_gesture=*/true));
+  chrome::NewTab(browser2, NewTabTypes::kNoUserAction);
   content::WebContents* web_contents2 =
-      browser2->tab_strip_model()->GetActiveWebContents();
+      browser2->GetTabStripModel()->GetActiveWebContents();
   content::RenderWidgetHost* widget_host2 =
       web_contents2->GetPrimaryMainFrame()->GetRenderViewHost()->GetWidget();
 

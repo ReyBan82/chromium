@@ -3,26 +3,35 @@
 # found in the LICENSE file.
 """Definitions of builders in the tryserver.chromium.chromiumos builder group."""
 
-load("//lib/branches.star", "branches")
-load("//lib/builder_config.star", "builder_config")
-load("//lib/builders.star", "goma", "os", "reclient")
-load("//lib/try.star", "try_")
-load("//lib/consoles.star", "consoles")
+load("@chromium-luci//branches.star", "branches")
+load("@chromium-luci//builder_config.star", "builder_config")
+load("@chromium-luci//builders.star", "os")
+load("@chromium-luci//consoles.star", "consoles")
+load("@chromium-luci//gn_args.star", "gn_args")
+load("@chromium-luci//try.star", "try_")
+load("//lib/siso.star", "siso")
+load("//lib/try_constants.star", "try_constants")
 load("//project.star", "settings")
 
 try_.defaults.set(
-    executable = try_.DEFAULT_EXECUTABLE,
+    executable = try_constants.DEFAULT_EXECUTABLE,
     builder_group = "tryserver.chromium.chromiumos",
-    pool = try_.DEFAULT_POOL,
+    pool = try_constants.DEFAULT_POOL,
     cores = 8,
     os = os.LINUX_DEFAULT,
     compilator_cores = 16,
-    compilator_reclient_jobs = reclient.jobs.HIGH_JOBS_FOR_CQ,
-    execution_timeout = try_.DEFAULT_EXECUTION_TIMEOUT,
-    orchestrator_cores = 2,
-    reclient_instance = reclient.instance.DEFAULT_UNTRUSTED,
-    reclient_jobs = reclient.jobs.LOW_JOBS_FOR_CQ,
-    service_account = try_.DEFAULT_SERVICE_ACCOUNT,
+    execution_timeout = try_constants.DEFAULT_EXECUTION_TIMEOUT,
+    experiments = {
+        "chromium_tests.resultdb_module": 100,
+        "luci.buildbucket.run_in_turboci": 100,
+    },
+    orchestrator_cores = "2|4",
+    orchestrator_siso_remote_jobs = siso.remote_jobs.HIGH_JOBS_FOR_CQ,
+    service_account = try_constants.DEFAULT_SERVICE_ACCOUNT,
+    siso_keep_going = siso.KEEP_GOING,
+    siso_project = siso.project.DEFAULT_UNTRUSTED,
+    siso_remote_jobs = siso.remote_jobs.LOW_JOBS_FOR_CQ,
+    siso_remote_linking = True,
 )
 
 consoles.list_view(
@@ -31,10 +40,21 @@ consoles.list_view(
 )
 
 try_.builder(
+    name = "chromeos-amd64-generic-asan-rel",
+    mirrors = [
+        "ci/chromeos-amd64-generic-asan-rel",
+    ],
+    gn_args = "ci/chromeos-amd64-generic-asan-rel",
+)
+
+try_.builder(
     name = "chromeos-amd64-generic-cfi-thin-lto-rel",
     mirrors = [
         "ci/chromeos-amd64-generic-cfi-thin-lto-rel",
     ],
+    # TODO(crbug.com/40605913): Enable DCHECKS on the two amd64-generic bots
+    # when the PFQ has it enabled.
+    gn_args = "ci/chromeos-amd64-generic-cfi-thin-lto-rel",
 )
 
 try_.builder(
@@ -43,31 +63,35 @@ try_.builder(
     mirrors = [
         "ci/chromeos-amd64-generic-dbg",
     ],
-    main_list_view = "try",
-    tryjob = try_.job(
+    gn_args = gn_args.config(
+        configs = [
+            "ci/chromeos-amd64-generic-dbg",
+        ],
+    ),
+    cq_settings = try_.cq_settings(
         location_filters = [
             "content/gpu/.+",
             "media/.+",
         ],
     ),
+    main_list_view = "try",
 )
 
-try_.orchestrator_builder(
+try_.builder(
     name = "chromeos-amd64-generic-rel",
     branch_selector = branches.selector.CROS_LTS_BRANCHES,
-    mirrors = ["ci/chromeos-amd64-generic-rel"],
-    compilator = "chromeos-amd64-generic-rel-compilator",
-    main_list_view = "try",
-    tryjob = try_.job(),
-    # TODO(crbug.com/1372179): Use orchestrator pool once overloaded test pools
-    # are addressed
-    # use_orchestrator_pool = True,
-)
-
-try_.compilator_builder(
-    name = "chromeos-amd64-generic-rel-compilator",
-    branch_selector = branches.selector.CROS_LTS_BRANCHES,
-    cores = 8,
+    description_html = "This is an Ash chrome builder which runs gtests.",
+    mirrors = [
+        "ci/chromeos-amd64-generic-rel",
+        "ci/chromeos-amd64-generic-rel-gtest",
+    ],
+    gn_args = gn_args.config(
+        configs = [
+            "ci/chromeos-amd64-generic-rel",
+            "dcheck_always_on",
+        ],
+    ),
+    contact_team_email = "chromeos-chrome-build@google.com",
     main_list_view = "try",
 )
 
@@ -76,144 +100,67 @@ try_.builder(
     mirrors = [
         "ci/chromeos-arm-generic-dbg",
     ],
+    gn_args = "ci/chromeos-arm-generic-dbg",
 )
 
 try_.builder(
     name = "chromeos-arm-generic-rel",
     branch_selector = branches.selector.CROS_LTS_BRANCHES,
     mirrors = ["ci/chromeos-arm-generic-rel"],
-    builderless = not settings.is_main,
+    gn_args = gn_args.config(
+        configs = [
+            "ci/chromeos-arm-generic-rel",
+            "dcheck_always_on",
+        ],
+    ),
+    experiments = {
+        # crbug/940930
+        "chromium.enable_cleandead": 100,
+    },
     main_list_view = "try",
-    tryjob = try_.job(),
 )
 
 try_.builder(
     name = "chromeos-arm64-generic-rel",
     branch_selector = branches.selector.CROS_LTS_BRANCHES,
     mirrors = ["ci/chromeos-arm64-generic-rel"],
-)
-
-try_.builder(
-    name = "lacros-amd64-generic-rel",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    mirrors = [
-        "ci/lacros-amd64-generic-rel",
-    ],
-    builderless = not settings.is_main,
-    main_list_view = "try",
-    tryjob = try_.job(),
-)
-
-try_.orchestrator_builder(
-    name = "lacros-amd64-generic-rel-orchestrator",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    mirrors = [
-        "ci/lacros-amd64-generic-rel",
-    ],
-    compilator = "lacros-amd64-generic-rel-compilator",
-    main_list_view = "try",
-    use_orchestrator_pool = True,
-)
-
-try_.builder(
-    name = "lacros-amd64-generic-rel-skylab",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    builder_spec = builder_config.builder_spec(
-        gclient_config = builder_config.gclient_config(
-            config = "chromium",
-            apply_configs = [
-                "checkout_lacros_sdk",
-                "chromeos",
-            ],
-        ),
-        chromium_config = builder_config.chromium_config(
-            config = "chromium",
-            apply_configs = [
-                "mb",
-            ],
-            build_config = builder_config.build_config.RELEASE,
-            target_arch = builder_config.target_arch.INTEL,
-            target_bits = 64,
-            target_platform = builder_config.target_platform.CHROMEOS,
-            target_cros_boards = [
-                "amd64-generic",
-            ],
-        ),
-        build_gs_bucket = "chromium-chromiumos-archive",
-        # TODO(https://crbug.com/1399919): change skylab_upload_location
-        # as a property. Change try builder as CI mirrors
-        skylab_upload_location = builder_config.skylab_upload_location(
-            gs_bucket = "chromium-try-skylab",
-        ),
-    ),
-)
-
-try_.compilator_builder(
-    name = "lacros-amd64-generic-rel-compilator",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    cores = None,
-    # TODO (crbug.com/1287228): Set correct values once bots are set up
-    ssd = None,
-    goma_backend = goma.backend.RBE_PROD,
-    main_list_view = "try",
-)
-
-try_.builder(
-    name = "lacros-amd64-generic-rel-skylab-fyi",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    builder_spec = builder_config.builder_spec(
-        gclient_config = builder_config.gclient_config(
-            config = "chromium",
-            apply_configs = [
-                "chromeos",
-                "checkout_lacros_sdk",
-            ],
-        ),
-        chromium_config = builder_config.chromium_config(
-            config = "chromium",
-            apply_configs = ["mb", "mb_no_luci_auth"],
-            target_bits = 64,
-            target_platform = "chromeos",
-            target_cros_boards = "eve",
-            cros_boards_with_qemu_images = "amd64-generic",
-        ),
-        build_gs_bucket = "chromium-fyi-archive",
-        skylab_upload_location = builder_config.skylab_upload_location(
-            gs_bucket = "gs://lacros-amd64-generic-rel-skylab-try",
-        ),
+    gn_args = gn_args.config(
+        configs = [
+            "ci/chromeos-arm64-generic-rel",
+            "dcheck_always_on",
+        ],
     ),
     builderless = not settings.is_main,
-    goma_backend = goma.backend.RBE_PROD,
+    cq_settings = try_.cq_settings(
+        on_default_cq = True,
+    ),
+    experiments = {
+        # crbug/940930
+        "chromium.enable_cleandead": 100,
+        # go/rts-project-proposal
+        "chromium_rts.filter_file_analysis": 100,
+        # crbug.com/40280175
+        "chromium_checkout.expand_submodules": 100,
+    },
     main_list_view = "try",
+    siso_remote_jobs = siso.remote_jobs.HIGH_JOBS_FOR_CQ,
 )
 
 try_.builder(
-    name = "chromeos-amd64-generic-lacros-dbg",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    mirrors = [
-        "ci/chromeos-amd64-generic-lacros-dbg",
-    ],
-)
-
-try_.builder(
-    name = "lacros-arm-generic-rel",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    mirrors = [
-        "ci/lacros-arm-generic-rel",
-    ],
-    builderless = not settings.is_main,
-    main_list_view = "try",
-    tryjob = try_.job(),
-)
-
-try_.builder(
-    name = "lacros-arm64-generic-rel",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    mirrors = [
-        "ci/lacros-arm64-generic-rel",
-    ],
-    goma_backend = goma.backend.RBE_PROD,
-    main_list_view = "try",
+    name = "chromeos-libfuzzer-asan-rel",
+    # TODO(crbug.com/41492669): Can delete this description when it's
+    # automatically generated.
+    executable = "recipe:chromium/fuzz",
+    mirrors = ["ci/Libfuzzer Upload Chrome OS ASan"],
+    gn_args = gn_args.config(
+        configs = [
+            "ci/Libfuzzer Upload Chrome OS ASan",
+            "dcheck_always_on",
+            "no_symbols",
+            "skip_generate_fuzzer_owners",
+        ],
+    ),
+    contact_team_email = "chrome-fuzzing-core@google.com",
 )
 
 try_.builder(
@@ -222,39 +169,26 @@ try_.builder(
     mirrors = [
         "ci/linux-chromeos-dbg",
     ],
-    try_settings = builder_config.try_settings(
+    builder_config_settings = builder_config.try_settings(
         include_all_triggered_testers = True,
         is_compile_only = True,
     ),
+    gn_args = gn_args.config(
+        configs = [
+            "ci/linux-chromeos-dbg",
+            "no_symbols",
+        ],
+    ),
     builderless = not settings.is_main,
+    cq_settings = try_.cq_settings(
+        on_default_cq = True,
+    ),
+    experiments = {
+        # crbug/940930
+        "chromium.enable_cleandead": 100,
+    },
     main_list_view = "try",
-    reclient_jobs = reclient.jobs.HIGH_JOBS_FOR_CQ,
-    tryjob = try_.job(),
-)
-
-try_.builder(
-    name = "chromeos-jacuzzi-rel",
-    branch_selector = branches.selector.CROS_LTS_BRANCHES,
-    mirrors = [
-        "ci/chromeos-jacuzzi-rel",
-    ],
-    goma_backend = goma.backend.RBE_PROD,
-    main_list_view = "try",
-)
-
-try_.builder(
-    name = "chromeos-octopus-rel",
-    branch_selector = branches.selector.CROS_LTS_BRANCHES,
-    mirrors = [
-        "ci/chromeos-octopus-rel",
-    ],
-    goma_backend = goma.backend.RBE_PROD,
-    main_list_view = "try",
-)
-
-try_.builder(
-    name = "linux-chromeos-inverse-fieldtrials-fyi-rel",
-    mirrors = builder_config.copy_from("try/linux-chromeos-rel"),
+    siso_remote_jobs = siso.remote_jobs.HIGH_JOBS_FOR_CQ,
 )
 
 try_.orchestrator_builder(
@@ -263,49 +197,43 @@ try_.orchestrator_builder(
     mirrors = [
         "ci/linux-chromeos-rel",
     ],
+    gn_args = gn_args.config(
+        configs = [
+            "ci/linux-chromeos-rel",
+            "release_try_builder",
+            "no_symbols",
+            "use_clang_coverage",
+            "partial_code_coverage_instrumentation",
+            "enable_dangling_raw_ptr_feature_flag",
+            "enable_backup_ref_ptr_feature_flag",
+            "enable_rust_clippy",
+        ],
+    ),
     compilator = "linux-chromeos-rel-compilator",
     coverage_test_types = ["unit", "overall"],
-    main_list_view = "try",
-    tryjob = try_.job(),
-    use_clang_coverage = True,
-    # TODO(crbug.com/1372179): Use orchestrator pool once overloaded test pools
+    # TODO(crbug.com/40241638): Use orchestrator pool once overloaded test pools
     # are addressed
     # use_orchestrator_pool = True,
+    cq_settings = try_.cq_settings(
+        on_default_cq = True,
+    ),
+    experiments = {
+        # go/nplus1shardsproposal
+        "chromium.add_one_test_shard": 10,
+        # crbug/940930
+        "chromium.enable_cleandead": 100,
+        # go/rts-project-proposal
+        "chromium_rts.filter_file_analysis": 100,
+        # crbug.com/40280175
+        "chromium_checkout.expand_submodules": 100,
+    },
+    main_list_view = "try",
+    use_clang_coverage = True,
 )
 
 try_.compilator_builder(
     name = "linux-chromeos-rel-compilator",
     branch_selector = branches.selector.CROS_LTS_BRANCHES,
-    main_list_view = "try",
-)
-
-try_.builder(
-    name = "linux-lacros-dbg",
-    # TODO(crbug.com/1233247) Adds the CI tester when it's available.
-    mirrors = [
-        "ci/linux-lacros-dbg",
-    ],
-)
-
-try_.orchestrator_builder(
-    name = "linux-lacros-rel",
-    branch_selector = branches.selector.CROS_BRANCHES,
-    mirrors = [
-        "ci/linux-lacros-builder-rel",
-        "ci/linux-lacros-tester-rel",
-    ],
-    check_for_flakiness = True,
-    compilator = "linux-lacros-rel-compilator",
-    main_list_view = "try",
-    tryjob = try_.job(),
-    # TODO(crbug.com/1372179): Use orchestrator pool once overloaded test pools
-    # are addressed
-    # use_orchestrator_pool = True,
-)
-
-try_.compilator_builder(
-    name = "linux-lacros-rel-compilator",
-    branch_selector = branches.selector.CROS_BRANCHES,
     cores = 32,
     main_list_view = "try",
 )
@@ -318,13 +246,30 @@ try_.builder(
     mirrors = [
         "ci/linux-chromeos-dbg",
     ],
+    gn_args = gn_args.config(
+        configs = [
+            "ci/linux-chromeos-dbg",
+        ],
+    ),
+    ssd = 1,
 )
 
 try_.builder(
     name = "linux-chromeos-annotator-rel",
+    description_html = "Runs tests for the Network Traffic Annotation Auditor on ChromeOS, mirroring linux-chromeos-annotator-rel.",
     mirrors = [
         "ci/linux-chromeos-annotator-rel",
     ],
+    gn_args = gn_args.config(
+        configs = [
+            "ci/linux-chromeos-annotator-rel",
+            "try_builder",
+            "no_symbols",
+            "enable_dangling_raw_ptr_feature_flag",
+            "enable_backup_ref_ptr_feature_flag",
+        ],
+    ),
+    contact_team_email = "cbe-compliance@google.com",
 )
 
 try_.builder(
@@ -332,36 +277,78 @@ try_.builder(
     mirrors = [
         "ci/linux-cfm-rel",
     ],
-    reclient_instance = reclient.instance.DEFAULT_UNTRUSTED,
-    tryjob = try_.job(
+    gn_args = gn_args.config(
+        configs = [
+            "ci/linux-cfm-rel",
+            "release_try_builder",
+        ],
+    ),
+    cq_settings = try_.cq_settings(
         location_filters = [
             "chromeos/ash/components/chromebox_for_meetings/.+",
             "chromeos/ash/components/dbus/chromebox_for_meetings/.+",
-            "chromeos/ash/services/chromebox_for_meetings/.+",
+            "chromeos/services/chromebox_for_meetings/.+",
             "chrome/browser/ash/chromebox_for_meetings/.+",
-            "chrome/browser/resources/chromeos/chromebox_for_meetings/.+",
-            "chrome/browser/ui/webui/ash/chromebox_for_meetings/.+",
-            "chrome/test/data/webui/chromeos/chromebox_for_meetings/.+",
         ],
     ),
+    siso_project = siso.project.DEFAULT_UNTRUSTED,
 )
 
-# RTS builders
+try_.builder(
+    name = "linux-chromeos-treesinviz-disabled-rel",
+    mirrors = [
+        "ci/linux-chromeos-treesinviz-disabled-rel",
+    ],
+    gn_args = "ci/linux-chromeos-treesinviz-disabled-rel",
+    contact_team_email = "chrome-gpu-team@google.com",
+)
 
 try_.builder(
-    name = "linux-chromeos-rel-rts",
+    name = "linux-chromeos-tsgo-rel",
+    mirrors = [
+        "ci/linux-chromeos-tsgo-rel",
+    ],
+    gn_args = "ci/linux-chromeos-tsgo-rel",
+    contact_team_email = "chrome-webui@google.com",
+)
+
+try_.builder(
+    name = "linux-chromeos-clobber-rel",
+    mirrors = [
+        "ci/linux-chromeos-archive-rel",
+    ],
+    builder_config_settings = builder_config.try_settings(
+        include_all_triggered_testers = True,
+        is_compile_only = True,
+    ),
+    gn_args = "ci/linux-chromeos-archive-rel",
+    contact_team_email = "chrome-browser-infra-team@google.com",
+    properties = {
+        # The format of these properties is defined at archive/properties.proto
+        "$build/archive": {
+            "source_side_spec_path": [
+                "src",
+                "infra",
+                "archive_config",
+                "linux-chromiumos-full.json",
+            ],
+            "verify_paths_only": True,
+        },
+    },
+    siso_remote_jobs = siso.remote_jobs.LOW_JOBS_FOR_CQ,
+)
+
+try_.builder(
+    name = "linux-chromeos-no-initial-webui-rel",
     mirrors = [
         "ci/linux-chromeos-rel",
+        "ci/linux-chromeos-no-initial-webui-rel",
     ],
-    try_settings = builder_config.try_settings(
-        rts_config = builder_config.rts_config(
-            condition = builder_config.rts_condition.ALWAYS,
-        ),
+    gn_args = gn_args.config(
+        configs = [
+            "ci/linux-chromeos-rel",
+            "release_try_builder",
+        ],
     ),
-    builderless = False,
-    coverage_test_types = ["unit", "overall"],
-    tryjob = try_.job(
-        experiment_percentage = 5,
-    ),
-    use_clang_coverage = True,
+    contact_team_email = "chrome-webium-product-eng@google.com",
 )

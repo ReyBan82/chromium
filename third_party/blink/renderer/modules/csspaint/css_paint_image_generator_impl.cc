@@ -13,6 +13,23 @@
 
 namespace blink {
 
+namespace {
+
+// This matches PaintWorklet's generator-ready accounting:
+// registered_definitions_count_ starts at 1 for the first
+// RegisterCSSPaintDefinition() call that creates the document definition,
+// then increments for each additional matching worklet-scope registration.
+// Off-thread paint requires one additional
+// RegisterMainThreadDocumentPaintDefinition() registration/finalization step,
+// so readiness for painting is kNumGlobalScopesPerThread + 1 in that mode.
+unsigned RequiredDefinitionCountForPaint(const PaintWorklet& paint_worklet) {
+  return paint_worklet.IsOffMainThread()
+             ? PaintWorklet::kNumGlobalScopesPerThread + 1
+             : PaintWorklet::kNumGlobalScopesPerThread;
+}
+
+}  // namespace
+
 CSSPaintImageGenerator* CSSPaintImageGeneratorImpl::Create(
     const String& name,
     const Document& document,
@@ -54,7 +71,7 @@ void CSSPaintImageGeneratorImpl::NotifyGeneratorReady() {
 scoped_refptr<Image> CSSPaintImageGeneratorImpl::Paint(
     const ImageResourceObserver& observer,
     const gfx::SizeF& container_size,
-    const CSSStyleValueVector* data) {
+    const GCedCSSStyleValueVector* data) {
   return paint_worklet_->Paint(name_, observer, container_size, data);
 }
 
@@ -67,20 +84,22 @@ bool CSSPaintImageGeneratorImpl::GetValidDocumentDefinition(
   if (!HasDocumentDefinition())
     return false;
   definition = paint_worklet_->GetDocumentDefinitionMap().at(name_);
+  if (!definition) {
+    return false;
+  }
   // In off-thread CSS Paint, we register CSSPaintDefinition on the worklet
   // thread first. Once the same CSSPaintDefinition is successfully registered
   // to all the paint worklet global scopes, we then post to the main thread and
   // register that CSSPaintDefinition on the main thread. So for the off-thread
   // case, as long as the DocumentPaintDefinition exists in the map, it should
   // be valid.
-  if (RuntimeEnabledFeatures::OffMainThreadCSSPaintEnabled()) {
+  if (paint_worklet_->IsOffMainThread()) {
     DCHECK(definition);
     return true;
   }
-  if (definition->GetRegisteredDefinitionCount() !=
-      PaintWorklet::kNumGlobalScopesPerThread) {
+  if (definition && definition->GetRegisteredDefinitionCount() !=
+                        PaintWorklet::kNumGlobalScopesPerThread) {
     definition = nullptr;
-    return false;
   }
   return definition;
 }
@@ -129,7 +148,13 @@ CSSPaintImageGeneratorImpl::InputArgumentTypes() const {
 }
 
 bool CSSPaintImageGeneratorImpl::IsImageGeneratorReady() const {
-  return HasDocumentDefinition();
+  if (!HasDocumentDefinition()) {
+    return false;
+  }
+  DocumentPaintDefinition* definition =
+      paint_worklet_->GetDocumentDefinitionMap().at(name_);
+  return definition && definition->GetRegisteredDefinitionCount() ==
+                           RequiredDefinitionCountForPaint(*paint_worklet_);
 }
 
 int CSSPaintImageGeneratorImpl::WorkletId() const {

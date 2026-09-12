@@ -7,6 +7,8 @@
 
 namespace media {
 
+DataSourceInfo::~DataSourceInfo() = default;
+
 DataSource::DataSource() = default;
 
 DataSource::~DataSource() = default;
@@ -26,14 +28,18 @@ GURL DataSource::GetUrlAfterRedirects() const {
   return GURL();
 }
 
-void DataSource::OnBufferingHaveEnough(bool must_cancel_netops) {}
+GURL DataSource::GetUrlDataOrigin() const {
+  return GetUrlAfterRedirects();
+}
+
+bool DataSource::DidRedirect() const {
+  return false;
+}
+
+void DataSource::StopPreloading() {}
 
 void DataSource::OnMediaPlaybackRateChanged(double playback_rate) {}
 
 void DataSource::OnMediaIsPlaying() {}
-
-const CrossOriginDataSource* DataSource::GetAsCrossOriginDataSource() const {
-  return nullptr;
-}
 
 }  // namespace media

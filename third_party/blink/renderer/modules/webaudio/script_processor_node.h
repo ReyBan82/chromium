@@ -26,29 +26,20 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_SCRIPT_PROCESSOR_NODE_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_WEBAUDIO_SCRIPT_PROCESSOR_NODE_H_
 
-#include "base/gtest_prod_util.h"
-#include "base/memory/scoped_refptr.h"
-#include "base/memory/weak_ptr.h"
 #include "base/synchronization/waitable_event.h"
+#include "base/types/pass_key.h"
 #include "third_party/blink/renderer/bindings/core/v8/active_script_wrappable.h"
 #include "third_party/blink/renderer/modules/webaudio/audio_node.h"
 #include "third_party/blink/renderer/modules/webaudio/script_processor_handler.h"
 #include "third_party/blink/renderer/platform/audio/audio_bus.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
-#include "third_party/blink/renderer/platform/wtf/threading_primitives.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
-
-namespace base {
-class SingleThreadTaskRunner;
-}
 
 namespace blink {
 
 class AudioBuffer;
 class BaseAudioContext;
-class SharedAudioBuffer;
-class WaitableEvent;
 
 // ScriptProcessorNode is an AudioNode which allows for arbitrary synthesis or
 // processing directly using JavaScript.  The API allows for a variable number
@@ -85,7 +76,8 @@ class ScriptProcessorNode final
                                      uint32_t number_of_output_channels,
                                      ExceptionState&);
 
-  ScriptProcessorNode(BaseAudioContext&,
+  ScriptProcessorNode(base::PassKey<ScriptProcessorNode>,
+                      BaseAudioContext&,
                       float sample_rate,
                       uint32_t buffer_size,
                       uint32_t number_of_input_channels,

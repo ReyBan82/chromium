@@ -13,6 +13,8 @@
 #include "base/functional/bind.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/path_service.h"
+#include "base/threading/thread_restrictions.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui_controller.h"
 #include "content/public/browser/web_ui_controller_factory.h"
 #include "content/public/browser/web_ui_data_source.h"
@@ -34,19 +36,26 @@ constexpr char kUntrustedSystemAppTestURL[] =
 
 bool IsSystemAppTestURL(const GURL& url) {
   return url.SchemeIs(content::kChromeUIScheme) &&
-         url.host() == kSystemAppTestHost;
+         url.GetHost() == kSystemAppTestHost;
 }
 
 void HandleRequest(const std::string& url_path,
                    content::WebUIDataSource::GotDataCallback callback) {
-  base::FilePath path;
-  CHECK(base::PathService::Get(base::BasePathKey::DIR_SOURCE_ROOT, &path));
-  path = path.Append(kRootDir);
-  path = path.AppendASCII(url_path.substr(0, url_path.find('?')));
-
+  const auto& path_for_key = [url_path](base::BasePathKey key) {
+    base::FilePath path;
+    CHECK(base::PathService::Get(key, &path));
+    path = path.Append(kRootDir);
+    path = path.AppendASCII(url_path.substr(0, url_path.find('?')));
+    return path;
+  };
+  // First try the source dir, then try generated files.
+  base::FilePath path = path_for_key(base::BasePathKey::DIR_SRC_TEST_DATA_ROOT);
   std::string contents;
   {
     base::ScopedAllowBlockingForTesting allow_blocking;
+    if (!base::PathExists(path)) {
+      path = path_for_key(base::BasePathKey::DIR_GEN_TEST_DATA_ROOT);
+    }
     CHECK(base::ReadFileToString(path, &contents)) << path.value();
   }
 
@@ -71,6 +80,9 @@ void CreateAndAddTrustedSystemAppTestDataSource(
       std::string("frame-src ") + kUntrustedSystemAppTestURL + ";";
   trusted_source->OverrideContentSecurityPolicy(
       network::mojom::CSPDirectiveName::FrameSrc, csp);
+  trusted_source->OverrideContentSecurityPolicy(
+      network::mojom::CSPDirectiveName::ScriptSrc,
+      "script-src chrome://resources chrome://webui-test 'self';");
 
   SetRequestFilterForDataSource(*trusted_source);
 }
@@ -85,9 +97,9 @@ void CreateAndAddUntrustedSystemAppTestDataSource(
   SetRequestFilterForDataSource(*untrusted_source);
 }
 
-class JsLibraryTestWebUIController : public ui::MojoWebUIController {
+class SystemAppTestWebUIController : public ui::MojoWebUIController {
  public:
-  explicit JsLibraryTestWebUIController(content::WebUI* web_ui)
+  explicit SystemAppTestWebUIController(content::WebUI* web_ui)
       : ui::MojoWebUIController(web_ui) {
     auto* browser_context = web_ui->GetWebContents()->GetBrowserContext();
     CreateAndAddTrustedSystemAppTestDataSource(browser_context);
@@ -98,16 +110,30 @@ class JsLibraryTestWebUIController : public ui::MojoWebUIController {
   }
 };
 
-class JsLibraryTestWebUIControllerFactory
+// WebUIControllerFactory for the System App Test WebUI.
+//
+// This factory must only handle the system app test URL
+// `chrome://system-app-test`. Because it is registered first in the global
+// registry during test setup, it will unconditionally hijack all WebUI creation
+// requests if not properly restricted.
+class SystemAppTestWebUIControllerFactory
     : public content::WebUIControllerFactory {
  public:
-  JsLibraryTestWebUIControllerFactory() = default;
-  ~JsLibraryTestWebUIControllerFactory() override = default;
+  SystemAppTestWebUIControllerFactory() = default;
+  ~SystemAppTestWebUIControllerFactory() override = default;
 
   std::unique_ptr<content::WebUIController> CreateWebUIControllerForURL(
       content::WebUI* web_ui,
       const GURL& url) override {
-    return std::make_unique<JsLibraryTestWebUIController>(web_ui);
+    // Only handle system app test URLs to prevent hijacking other WebUIs.
+    // Otherwise, intercepting TopChrome toolbar WebUI like
+    // `chrome://webui-toolbar.top-chrome/` during startup would prevent
+    // the correct controller from registering its data source, leading to fatal
+    // crashes.
+    if (!IsSystemAppTestURL(url)) {
+      return nullptr;
+    }
+    return std::make_unique<SystemAppTestWebUIController>(web_ui);
   }
 
   content::WebUI::TypeID GetWebUIType(content::BrowserContext* browser_context,
@@ -130,6 +156,6 @@ class JsLibraryTestWebUIControllerFactory
 }  // namespace
 
 JsLibraryTest::JsLibraryTest()
-    : factory_(std::make_unique<JsLibraryTestWebUIControllerFactory>()) {}
+    : factory_(std::make_unique<SystemAppTestWebUIControllerFactory>()) {}
 
 JsLibraryTest::~JsLibraryTest() = default;

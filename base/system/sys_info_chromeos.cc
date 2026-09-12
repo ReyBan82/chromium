@@ -15,7 +15,6 @@
 #include "base/no_destructor.h"
 #include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_tokenizer.h"
 #include "base/strings/string_util.h"
@@ -30,13 +29,16 @@ const char kLsbReleaseTimeKey[] = "LSB_RELEASE_TIME";  // Seconds since epoch
 namespace {
 
 const char* const kLinuxStandardBaseVersionKeys[] = {
-    "CHROMEOS_RELEASE_VERSION", "GOOGLE_RELEASE", "DISTRIB_RELEASE",
+    "CHROMEOS_RELEASE_VERSION",
+    "GOOGLE_RELEASE",
+    "DISTRIB_RELEASE",
 };
 
 const char kChromeOsReleaseNameKey[] = "CHROMEOS_RELEASE_NAME";
 
 const char* const kChromeOsReleaseNames[] = {
-    "Chrome OS", "Chromium OS",
+    "Chrome OS",
+    "Chromium OS",
 };
 
 const char kLinuxStandardBaseReleaseFile[] = "/etc/lsb-release";
@@ -52,13 +54,18 @@ class ChromeOSVersionInfo {
   ChromeOSVersionInfo() {
     std::string lsb_release, lsb_release_time_str;
     std::unique_ptr<Environment> env(Environment::Create());
+    std::optional<std::string> lsb_release_var = env->GetVar(kLsbReleaseKey);
+    std::optional<std::string> lsb_release_time_var =
+        env->GetVar(kLsbReleaseTimeKey);
     bool parsed_from_env =
-        env->GetVar(kLsbReleaseKey, &lsb_release) &&
-        env->GetVar(kLsbReleaseTimeKey, &lsb_release_time_str);
+        lsb_release_var.has_value() && lsb_release_time_var.has_value();
     if (parsed_from_env) {
+      lsb_release = std::move(lsb_release_var.value());
+      lsb_release_time_str = std::move(lsb_release_time_var.value());
       double us = 0;
-      if (StringToDouble(lsb_release_time_str, &us))
-        lsb_release_time_ = Time::FromDoubleT(us);
+      if (StringToDouble(lsb_release_time_str, &us)) {
+        lsb_release_time_ = Time::FromSecondsSinceUnixEpoch(us);
+      }
     } else {
       // If the LSB_RELEASE and LSB_RELEASE_TIME environment variables are not
       // set, fall back to a blocking read of the lsb_release file. This should
@@ -67,8 +74,9 @@ class ChromeOSVersionInfo {
       FilePath path(kLinuxStandardBaseReleaseFile);
       ReadFileToString(path, &lsb_release);
       File::Info fileinfo;
-      if (GetFileInfo(path, &fileinfo))
+      if (GetFileInfo(path, &fileinfo)) {
         lsb_release_time_ = fileinfo.creation_time;
+      }
     }
     ParseLsbRelease(lsb_release);
     // For debugging:
@@ -83,8 +91,9 @@ class ChromeOSVersionInfo {
 
   bool GetLsbReleaseValue(const std::string& key, std::string* value) {
     LsbReleaseMap::const_iterator iter = lsb_release_map_.find(key);
-    if (iter == lsb_release_map_.end())
+    if (iter == lsb_release_map_.end()) {
       return false;
+    }
     *value = iter->second;
     return true;
   }
@@ -97,8 +106,8 @@ class ChromeOSVersionInfo {
     *bugfix_version = bugfix_version_;
   }
 
-  const Time& lsb_release_time() const { return lsb_release_time_; }
-  void set_lsb_release_time(const Time& time) { lsb_release_time_ = time; }
+  Time lsb_release_time() const { return lsb_release_time_; }
+  void set_lsb_release_time(Time time) { lsb_release_time_ = time; }
 
   bool is_running_on_chromeos() const { return is_running_on_chromeos_; }
 
@@ -112,16 +121,17 @@ class ChromeOSVersionInfo {
       std::string key, value;
       TrimWhitespaceASCII(pairs[i].first, TRIM_ALL, &key);
       TrimWhitespaceASCII(pairs[i].second, TRIM_ALL, &value);
-      if (key.empty())
+      if (key.empty()) {
         continue;
+      }
       lsb_release_map_[key] = value;
     }
     // Parse the version from the first matching recognized version key.
     std::string version;
-    for (size_t i = 0; i < std::size(kLinuxStandardBaseVersionKeys); ++i) {
-      std::string key = kLinuxStandardBaseVersionKeys[i];
-      if (GetLsbReleaseValue(key, &version) && !version.empty())
+    for (const char* key : kLinuxStandardBaseVersionKeys) {
+      if (GetLsbReleaseValue(key, &version) && !version.empty()) {
         break;
+      }
     }
     StringTokenizer tokenizer(version, ".");
     if (tokenizer.GetNext()) {
@@ -137,8 +147,8 @@ class ChromeOSVersionInfo {
     // Check release name for Chrome OS.
     std::string release_name;
     if (GetLsbReleaseValue(kChromeOsReleaseNameKey, &release_name)) {
-      for (size_t i = 0; i < std::size(kChromeOsReleaseNames); ++i) {
-        if (release_name == kChromeOsReleaseNames[i]) {
+      for (const char* name : kChromeOsReleaseNames) {
+        if (release_name == name) {
           is_running_on_chromeos_ = true;
           break;
         }
@@ -162,8 +172,9 @@ ChromeOSVersionInfo& GetChromeOSVersionInfo() {
   // ChromeOSVersionInfo only stores the parsed lsb-release values, not the full
   // contents of the lsb-release file. Therefore, use a second instance for
   // overrides in tests so we can cleanly restore the original lsb-release.
-  if (g_chromeos_version_info_for_test)
+  if (g_chromeos_version_info_for_test) {
     return *g_chromeos_version_info_for_test;
+  }
 
   static base::NoDestructor<ChromeOSVersionInfo> version_info;
   return *version_info;
@@ -172,11 +183,15 @@ ChromeOSVersionInfo& GetChromeOSVersionInfo() {
 // static
 std::string SysInfo::HardwareModelName() {
   std::string board = GetLsbReleaseBoard();
+  if (board == "unknown") {
+    return "";
+  }
   // GetLsbReleaseBoard() may be suffixed with a "-signed-" and other extra
   // info. Strip it.
   const size_t index = board.find("-signed-");
-  if (index != std::string::npos)
+  if (index != std::string::npos) {
     board.resize(index);
+  }
 
   return base::ToUpperASCII(board);
 }
@@ -201,7 +216,6 @@ std::string SysInfo::KernelVersion() {
   struct utsname info;
   if (uname(&info) < 0) {
     NOTREACHED();
-    return std::string();
   }
   return std::string(info.release);
 }
@@ -215,8 +229,9 @@ bool SysInfo::GetLsbReleaseValue(const std::string& key, std::string* value) {
 std::string SysInfo::GetLsbReleaseBoard() {
   const char kMachineInfoBoard[] = "CHROMEOS_RELEASE_BOARD";
   std::string board;
-  if (!GetLsbReleaseValue(kMachineInfoBoard, &board))
+  if (!GetLsbReleaseValue(kMachineInfoBoard, &board)) {
     board = "unknown";
+  }
   return board;
 }
 
@@ -232,7 +247,7 @@ bool SysInfo::IsRunningOnChromeOS() {
 
 // static
 void SysInfo::SetChromeOSVersionInfoForTest(const std::string& lsb_release,
-                                            const Time& lsb_release_time) {
+                                            Time lsb_release_time) {
   DCHECK(!g_chromeos_version_info_for_test) << "Nesting is not allowed";
   g_chromeos_version_info_for_test =
       new ChromeOSVersionInfo(ChromeOSVersionInfo::FOR_TEST);
@@ -249,8 +264,9 @@ void SysInfo::ResetChromeOSVersionInfoForTest() {
 
 // static
 void SysInfo::CrashIfChromeOSNonTestImage() {
-  if (!IsRunningOnChromeOS())
+  if (!IsRunningOnChromeOS()) {
     return;
+  }
 
   // On the test images etc/lsb-release has a line:
   // CHROMEOS_RELEASE_TRACK=testimage-channel.

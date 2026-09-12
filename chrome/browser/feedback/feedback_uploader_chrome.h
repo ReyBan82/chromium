@@ -5,18 +5,14 @@
 #ifndef CHROME_BROWSER_FEEDBACK_FEEDBACK_UPLOADER_CHROME_H_
 #define CHROME_BROWSER_FEEDBACK_FEEDBACK_UPLOADER_CHROME_H_
 
+#include <memory>
 #include <string>
 
 #include "base/memory/raw_ptr.h"
-#include "base/task/single_thread_task_runner.h"
-#include "build/chromeos_buildflags.h"
+#include "base/memory/weak_ptr.h"
+#include "base/types/expected.h"
 #include "build/config/chromebox_for_meetings/buildflags.h"
 #include "components/feedback/feedback_uploader.h"
-#include "components/signin/public/identity_manager/access_token_info.h"
-
-#if BUILDFLAG(PLATFORM_CFM)
-#include "components/invalidation/public/identity_provider.h"
-#endif
 
 namespace content {
 class BrowserContext;
@@ -24,13 +20,14 @@ class BrowserContext;
 
 namespace signin {
 class PrimaryAccountAccessTokenFetcher;
+struct AccessTokenInfo;
 }  // namespace signin
 
 class GoogleServiceAuthError;
 
 namespace feedback {
 
-class FeedbackUploaderChrome : public FeedbackUploader {
+class FeedbackUploaderChrome final : public FeedbackUploader {
  public:
   explicit FeedbackUploaderChrome(content::BrowserContext* context);
 
@@ -38,6 +35,8 @@ class FeedbackUploaderChrome : public FeedbackUploader {
   FeedbackUploaderChrome& operator=(const FeedbackUploaderChrome&) = delete;
 
   ~FeedbackUploaderChrome() override;
+
+  base::WeakPtr<FeedbackUploader> AsWeakPtr() override;
 
   class Delegate {
    public:
@@ -65,10 +64,12 @@ class FeedbackUploaderChrome : public FeedbackUploader {
   void AccessTokenAvailable(GoogleServiceAuthError error, std::string token);
 
 #if BUILDFLAG(PLATFORM_CFM)
-  void ActiveAccountAccessTokenAvailable(GoogleServiceAuthError error,
-                                         std::string token);
+  class ActiveAccountAccessTokenFetcher;
 
-  std::unique_ptr<invalidation::ActiveAccountAccessTokenFetcher>
+  void ActiveAccountAccessTokenAvailable(
+      base::expected<std::string, GoogleServiceAuthError> access_token);
+
+  std::unique_ptr<ActiveAccountAccessTokenFetcher>
       active_account_token_fetcher_;
 #endif  // BUILDFLAG(PLATFORM_CFM)
 
@@ -80,6 +81,8 @@ class FeedbackUploaderChrome : public FeedbackUploader {
   raw_ptr<Delegate> delegate_ = nullptr;  // Not owned.
 
   raw_ptr<content::BrowserContext> context_ = nullptr;
+
+  base::WeakPtrFactory<FeedbackUploaderChrome> weak_ptr_factory_{this};
 };
 
 }  // namespace feedback

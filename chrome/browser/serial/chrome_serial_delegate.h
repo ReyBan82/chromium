@@ -22,6 +22,7 @@ class ChromeSerialDelegate : public content::SerialDelegate {
   std::unique_ptr<content::SerialChooser> RunChooser(
       content::RenderFrameHost* frame,
       std::vector<blink::mojom::SerialPortFilterPtr> filters,
+      std::vector<device::BluetoothUUID> allowed_bluetooth_service_class_ids,
       content::SerialChooser::Callback callback) override;
   bool CanRequestPortPermission(content::RenderFrameHost* frame) override;
   bool HasPortPermission(content::RenderFrameHost* frame,
@@ -38,6 +39,9 @@ class ChromeSerialDelegate : public content::SerialDelegate {
                    Observer* observer) override;
   void RemoveObserver(content::RenderFrameHost* frame,
                       Observer* observer) override;
+
+ private:
+  bool MayUseSerial(content::RenderFrameHost* frame);
 };
 
 #endif  // CHROME_BROWSER_SERIAL_CHROME_SERIAL_DELEGATE_H_

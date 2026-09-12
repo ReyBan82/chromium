@@ -10,7 +10,11 @@
 #include "chrome/browser/ui/session_crashed_bubble.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 
-class Browser;
+class BrowserWindowInterface;
+
+namespace views {
+class BubbleDialogDelegate;
+}
 
 // SessionCrashedBubbleView shows a bubble allowing the user to restore the
 // previous session. If metrics reporting is not enabled a checkbox is presented
@@ -35,9 +39,10 @@ class SessionCrashedBubbleView : public SessionCrashedBubble {
 
   // Internal show method also used by SessionCrashedBubbleViewTest.
   // TODO(pbos): Mock conditions in test instead.
-  static views::BubbleDialogDelegate* ShowBubble(Browser* browser,
-                                                 bool uma_opted_in_already,
-                                                 bool offer_uma_optin);
+  static views::BubbleDialogDelegate* ShowBubble(
+      BrowserWindowInterface* browser,
+      bool uma_opted_in_already,
+      bool offer_uma_optin);
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_SESSION_CRASHED_BUBBLE_VIEW_H_

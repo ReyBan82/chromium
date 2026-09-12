@@ -12,8 +12,10 @@
 #include "base/component_export.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "base/scoped_observation.h"
 #include "base/sequence_checker.h"
 #include "base/time/time.h"
@@ -25,7 +27,7 @@
 
 namespace base {
 class Clock;
-class Value;
+class DictValue;
 }  // namespace base
 
 namespace ash {
@@ -45,7 +47,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ClientCertResolver
       public NetworkCertLoader::Observer,
       public NetworkPolicyObserver {
  public:
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
     Observer& operator=(const Observer&) = delete;
 
@@ -56,7 +58,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ClientCertResolver
     virtual void ResolveRequestCompleted(bool network_properties_changed) = 0;
 
    protected:
-    virtual ~Observer() {}
+    ~Observer() override = default;
   };
 
   ClientCertResolver();
@@ -91,7 +93,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ClientCertResolver
   static bool ResolveClientCertificateSync(
       const client_cert::ConfigType client_cert_type,
       const client_cert::ClientCertConfig& client_cert_config,
-      base::Value::Dict* shill_properties);
+      base::DictValue* shill_properties);
 
   // Allows overwriting the function which gets the client certificate
   // provisioning profile id of a certificate. This is necessary for unit tests,
@@ -137,7 +139,7 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ClientCertResolver
   // instead.
   base::Time Now() const;
 
-  base::ObserverList<Observer, true>::Unchecked observers_;
+  base::ObserverList<Observer, true> observers_;
 
   // Tracks which network configurations ClientCertResolver is aware of, to be
   // able to detect newly created networks for which certificate resolution may
@@ -155,15 +157,15 @@ class COMPONENT_EXPORT(CHROMEOS_NETWORK) ClientCertResolver
   bool network_properties_changed_;
 
   // Unowned associated (global or test) instance.
-  NetworkStateHandler* network_state_handler_;
+  raw_ptr<NetworkStateHandler> network_state_handler_;
   base::ScopedObservation<NetworkStateHandler, NetworkStateHandlerObserver>
       network_state_handler_observer_{this};
 
   // Unowned associated (global or test) instance.
-  ManagedNetworkConfigurationHandler* managed_network_config_handler_;
+  raw_ptr<ManagedNetworkConfigurationHandler> managed_network_config_handler_;
 
   // Can be set for testing.
-  base::Clock* testing_clock_;
+  raw_ptr<base::Clock> testing_clock_;
 
   SEQUENCE_CHECKER(sequence_checker_);
 

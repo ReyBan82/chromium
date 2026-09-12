@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/platform/graphics/image_decoder_wrapper.h"
 
+#include "base/system/sys_info.h"
 #include "base/trace_event/trace_event.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/platform/graphics/image_decoding_store.h"
@@ -70,6 +71,7 @@ ImageDecoderWrapper::ImageDecoderWrapper(
     SegmentReader* data,
     const SkPixmap& pixmap,
     ColorBehavior decoder_color_behavior,
+    cc::AuxImage aux_image,
     wtf_size_t index,
     bool all_data_received,
     cc::PaintImage::GeneratorClientId client_id)
@@ -77,16 +79,30 @@ ImageDecoderWrapper::ImageDecoderWrapper(
       data_(data),
       pixmap_(pixmap),
       decoder_color_behavior_(decoder_color_behavior),
+      aux_image_(aux_image),
       frame_index_(index),
       all_data_received_(all_data_received),
       client_id_(client_id) {}
 
 ImageDecoderWrapper::~ImageDecoderWrapper() = default;
 
+namespace {
+
+bool IsLowEndDeviceOrPartialLowEndModeEnabled() {
+#if BUILDFLAG(IS_ANDROID)
+  // Since ImageFrameGeneratorTest depends on Platform::Current(), use
+  // Platform::Current()->IsLowEndDevice() here.
+  return Platform::Current()->IsLowEndDevice() ||
+         base::SysInfo::IsLowEndDeviceOrPartialLowEndModeEnabled();
+#else
+  return Platform::Current()->IsLowEndDevice();
+#endif
+}
+
+}  // namespace
+
 bool ImageDecoderWrapper::Decode(ImageDecoderFactory* factory,
-                                 wtf_size_t* frame_count,
                                  bool* has_alpha) {
-  DCHECK(frame_count);
   DCHECK(has_alpha);
 
   ImageDecoder* decoder = nullptr;
@@ -106,15 +122,14 @@ bool ImageDecoderWrapper::Decode(ImageDecoderFactory* factory,
     decoder = new_decoder.get();
   }
 
-  // For multi-frame image decoders, we need to know how many frames are
-  // in that image in order to release the decoder when all frames are
-  // decoded. FrameCount() is reliable only if all data is received and set in
-  // decoder, particularly with GIF.
-  if (all_data_received_)
-    *frame_count = decoder->FrameCount();
+  // For multi-frame image decoders, we need to know how many frames are in
+  // that image in order to release the decoder when all frames are decoded.
+  // `FrameCount()` is reliable only if all data is received and set in decoder,
+  // particularly with GIF.
+  wtf_size_t frame_count = all_data_received_ ? decoder->FrameCount() : 0u;
 
   const bool decode_to_external_memory =
-      ShouldDecodeToExternalMemory(*frame_count, resume_decoding);
+      ShouldDecodeToExternalMemory(frame_count, resume_decoding);
 
   ExternalMemoryAllocator external_memory_allocator(pixmap_);
   if (decode_to_external_memory)
@@ -171,8 +186,7 @@ bool ImageDecoderWrapper::Decode(ImageDecoderFactory* factory,
   // re-decoding of all frames in the dependency chain).
   const bool frame_was_completely_decoded =
       frame->GetStatus() == ImageFrame::kFrameComplete || all_data_received_;
-  PurgeAllFramesIfNecessary(decoder, frame_was_completely_decoded,
-                            *frame_count);
+  PurgeAllFramesIfNecessary(decoder, frame_was_completely_decoded, frame_count);
 
   const bool should_remove_decoder = ShouldRemoveDecoder(
       frame_was_completely_decoded, decode_to_external_memory);
@@ -210,14 +224,14 @@ bool ImageDecoderWrapper::ShouldDecodeToExternalMemory(
   // On low-end devices, always use the external allocator, to avoid storing
   // duplicate copies of the data for partial decodes in the ImageDecoder's
   // cache.
-  if (Platform::Current()->IsLowEndDevice()) {
+  if (IsLowEndDeviceOrPartialLowEndModeEnabled()) {
     DCHECK(!resume_decoding);
     return true;
   }
 
-  // TODO (scroggo): If !is_multi_frame_ && new_decoder && frame_count_, it
-  // should always be the case that 1u == frame_count_. But it looks like it
-  // is currently possible for frame_count_ to be another value.
+  // TODO (scroggo): If !is_multi_frame_ && new_decoder && frame_count, it
+  // should always be the case that 1u == frame_count. But it looks like it is
+  // currently possible for frame_count to be another value.
   if (1u == frame_count && all_data_received_ && !resume_decoding) {
     // Also use external allocator in situations when all of the data has been
     // received and there is not already a partial cache in the image decoder.
@@ -291,10 +305,10 @@ std::unique_ptr<ImageDecoder> ImageDecoderWrapper::CreateDecoderWithData(
               : ImageDecoder::kDefaultBitDepth;
 
   // The newly created decoder just grabbed the data.  No need to reset it.
-  return ImageDecoder::Create(data_, all_data_received_,
-                              PixmapAlphaOption(pixmap_),
-                              high_bit_depth_decoding_option,
-                              decoder_color_behavior_, pixmap_.dimensions());
+  return ImageDecoder::Create(
+      data_, all_data_received_, PixmapAlphaOption(pixmap_),
+      high_bit_depth_decoding_option, decoder_color_behavior_, aux_image_,
+      Platform::GetMaxDecodedImageBytes(), pixmap_.dimensions());
 }
 
 }  // namespace blink

@@ -8,30 +8,37 @@
 #include <memory>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_span.h"
+#include "base/types/expected.h"
 #include "chrome/browser/media/webrtc/desktop_media_list.h"
 #include "chrome/browser/media/webrtc/desktop_media_picker.h"
 #include "chrome/browser/media/webrtc/desktop_media_picker_factory.h"
 #include "content/public/browser/desktop_media_id.h"
+#include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
 
 class FakeDesktopMediaPicker;
 
 // Used in tests to supply fake picker.
 class FakeDesktopMediaPickerFactory : public DesktopMediaPickerFactory {
  public:
-  // TODO(crbug.com/1179665): Make this less error prone - use WithX() methods.
+  // TODO(crbug.com/40169647): Make this less error prone - use WithX() methods.
   struct TestFlags {
     bool expect_screens = false;
     bool expect_windows = false;
     bool expect_tabs = false;
     bool expect_current_tab = false;
     bool expect_audio = false;
-    content::DesktopMediaID selected_source;
+    std::optional<base::expected<content::DesktopMediaID,
+                                 blink::mojom::MediaStreamRequestResult>>
+        picker_result;
     bool cancelled = false;
 
-    // Following flags are set by FakeDesktopMediaPicker when it's created and
-    // deleted.
+    // Following flags are set by FakeDesktopMediaPicker when it's created,
+    // shown and deleted.
     bool picker_created = false;
+    bool picker_shown = false;
     bool picker_deleted = false;
   };
 
@@ -44,11 +51,12 @@ class FakeDesktopMediaPickerFactory : public DesktopMediaPickerFactory {
   ~FakeDesktopMediaPickerFactory() override;
 
   //  |test_flags| are expected to outlive the factory.
-  void SetTestFlags(TestFlags* test_flags, int tests_count);
-  FakeDesktopMediaPicker* picker() const { return picker_; }
+  void SetTestFlags(base::span<TestFlags> test_flags);
+  FakeDesktopMediaPicker* picker() const { return picker_.get(); }
   bool IsWebContentsExcluded() const { return is_web_contents_excluded_; }
   // DesktopMediaPickerFactory implementation
-  std::unique_ptr<DesktopMediaPicker> CreatePicker() override;
+  std::unique_ptr<DesktopMediaPicker> CreatePicker(
+      const content::MediaStreamRequest* request) override;
   std::vector<std::unique_ptr<DesktopMediaList>> CreateMediaList(
       const std::vector<DesktopMediaList::Type>& types,
       content::WebContents* web_contents,
@@ -56,10 +64,9 @@ class FakeDesktopMediaPickerFactory : public DesktopMediaPickerFactory {
       override;
 
  private:
-  raw_ptr<FakeDesktopMediaPicker, DanglingUntriaged> picker_;
-  raw_ptr<TestFlags, DanglingUntriaged | AllowPtrArithmetic> test_flags_;
-  int tests_count_;
-  int current_test_;
+  base::WeakPtr<FakeDesktopMediaPicker> picker_;
+  base::raw_span<TestFlags> test_flags_;
+  size_t current_test_;
   bool is_web_contents_excluded_ = false;
 };
 
@@ -79,6 +86,7 @@ class FakeDesktopMediaPicker : public DesktopMediaPicker {
             DoneCallback done_callback) override;
 
   DesktopMediaPicker::Params GetParams();
+  base::WeakPtr<FakeDesktopMediaPicker> GetWeakPtr();
 
  private:
   void CallCallback(DoneCallback done_callback);

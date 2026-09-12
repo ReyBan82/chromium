@@ -11,25 +11,28 @@
 #include <sstream>
 #include <string>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_span.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "media/base/audio_bus.h"
-#include "media/base/fake_single_thread_task_runner.h"
+#include "media/base/audio_codecs.h"
 #include "media/base/media.h"
+#include "media/base/video_codecs.h"
 #include "media/cast/cast_config.h"
-#include "media/cast/cast_environment.h"
 #include "media/cast/common/rtp_time.h"
 #include "media/cast/common/sender_encoded_frame.h"
+#include "media/cast/test/test_with_cast_environment.h"
 #include "media/cast/test/utility/audio_utility.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/openscreen/src/cast/streaming/encoded_frame.h"
+#include "third_party/openscreen/src/cast/streaming/public/encoded_frame.h"
 
-namespace media {
-namespace cast {
+namespace media::cast {
 
 static const int kNumChannels = 2;
 
@@ -37,8 +40,7 @@ namespace {
 
 class TestEncodedAudioFrameReceiver {
  public:
-  TestEncodedAudioFrameReceiver() : frames_received_(0) {}
-
+  TestEncodedAudioFrameReceiver() = default;
   TestEncodedAudioFrameReceiver(const TestEncodedAudioFrameReceiver&) = delete;
   TestEncodedAudioFrameReceiver& operator=(
       const TestEncodedAudioFrameReceiver&) = delete;
@@ -59,8 +61,7 @@ class TestEncodedAudioFrameReceiver {
 
   void FrameEncoded(std::unique_ptr<SenderEncodedFrame> encoded_frame,
                     int samples_skipped) {
-    EXPECT_EQ(encoded_frame->dependency,
-              openscreen::cast::EncodedFrame::Dependency::kKeyFrame);
+    EXPECT_TRUE(encoded_frame->is_key_frame);
     EXPECT_EQ(frames_received_, encoded_frame->frame_id - FrameId::first());
     EXPECT_EQ(encoded_frame->frame_id, encoded_frame->referenced_frame_id);
     // RTP timestamps should be monotonically increasing and integer multiples
@@ -82,25 +83,24 @@ class TestEncodedAudioFrameReceiver {
   }
 
  private:
-  int frames_received_;
+  int frames_received_ = 0;
   RtpTimeTicks rtp_lower_bound_;
-  int samples_per_frame_;
+  int samples_per_frame_ = 0;
   base::TimeTicks lower_bound_;
   base::TimeTicks upper_bound_;
 };
 
 struct TestScenario {
-  raw_ptr<const int64_t> durations_in_ms;
-  size_t num_durations;
+  base::raw_span<const int64_t> durations_in_ms;
 
-  TestScenario(const int64_t* d, size_t n)
-      : durations_in_ms(d), num_durations(n) {}
+  explicit TestScenario(base::span<const int64_t> d) : durations_in_ms(d) {}
 
   std::string ToString() const {
     std::ostringstream out;
-    for (size_t i = 0; i < num_durations; ++i) {
-      if (i > 0)
+    for (size_t i = 0; i < durations_in_ms.size(); ++i) {
+      if (i > 0) {
         out << ", ";
+      }
       out << durations_in_ms[i];
     }
     return out.str();
@@ -109,25 +109,17 @@ struct TestScenario {
 
 }  // namespace
 
-class AudioEncoderTest : public ::testing::TestWithParam<TestScenario> {
+class AudioEncoderTest : public ::testing::TestWithParam<TestScenario>,
+                         public WithCastEnvironment {
  public:
-  AudioEncoderTest() {
-    InitializeMediaLibrary();
-    testing_clock_.Advance(base::TimeTicks::Now() - base::TimeTicks());
-  }
-
-  void SetUp() final {
-    task_runner_ = new FakeSingleThreadTaskRunner(&testing_clock_);
-    cast_environment_ = new CastEnvironment(&testing_clock_, task_runner_,
-                                            task_runner_, task_runner_);
-  }
+  AudioEncoderTest() { InitializeMediaLibrary(); }
 
   AudioEncoderTest(const AudioEncoderTest&) = delete;
+  AudioEncoderTest(AudioEncoderTest&&) = delete;
   AudioEncoderTest& operator=(const AudioEncoderTest&) = delete;
+  AudioEncoderTest& operator=(AudioEncoderTest&&) = delete;
 
-  virtual ~AudioEncoderTest() = default;
-
-  void RunTestForCodec(Codec codec) {
+  void RunTestForCodec(AudioCodec codec) {
     const TestScenario& scenario = GetParam();
     SCOPED_TRACE(::testing::Message() << "Durations: " << scenario.ToString());
 
@@ -135,33 +127,29 @@ class AudioEncoderTest : public ::testing::TestWithParam<TestScenario> {
 
     const base::TimeDelta frame_duration = audio_encoder_->GetFrameDuration();
 
-    for (size_t i = 0; i < scenario.num_durations; ++i) {
-      const bool simulate_missing_data = scenario.durations_in_ms[i] < 0;
+    for (const int64_t duration_ms : scenario.durations_in_ms) {
+      const bool simulate_missing_data = duration_ms < 0;
       const base::TimeDelta duration =
-          base::Milliseconds(std::abs(scenario.durations_in_ms[i]));
-      receiver_->SetCaptureTimeBounds(
-          testing_clock_.NowTicks() - frame_duration,
-          testing_clock_.NowTicks() + duration);
-      if (simulate_missing_data) {
-        task_runner_->RunTasks();
-        testing_clock_.Advance(duration);
-      } else {
+          base::Milliseconds(std::abs(duration_ms));
+      receiver_->SetCaptureTimeBounds(NowTicks() - frame_duration,
+                                      NowTicks() + duration);
+      if (!simulate_missing_data) {
         audio_encoder_->InsertAudio(audio_bus_factory_->NextAudioBus(duration),
-                                    testing_clock_.NowTicks());
-        task_runner_->RunTasks();
-        testing_clock_.Advance(duration);
+                                    NowTicks());
       }
+      RunUntilIdle();
+      AdvanceClock(duration);
 
-      if (codec == CODEC_AUDIO_OPUS) {
-        const int bitrate = audio_encoder_->GetBitrate();
-        EXPECT_GT(bitrate, 0);
+      if (codec == AudioCodec::kOpus) {
+        const uint32_t bitrate = audio_encoder_->GetBitrate();
+        EXPECT_GT(bitrate, 0u);
         // Typically Opus has a max of 120000, but this may change if the
         // library gets rolled. It would be very surprising for it to
         // surpass this value and getting a test failure is reasonable.
-        EXPECT_LT(bitrate, 256000);
+        EXPECT_LT(bitrate, 256000u);
       } else {
         // Bit rate is only implemented for opus.
-        EXPECT_EQ(0, audio_encoder_->GetBitrate());
+        EXPECT_EQ(0u, audio_encoder_->GetBitrate());
       }
     }
 
@@ -170,15 +158,15 @@ class AudioEncoderTest : public ::testing::TestWithParam<TestScenario> {
   }
 
  private:
-  void CreateObjectsForCodec(Codec codec) {
-    audio_bus_factory_.reset(
-        new TestAudioBusFactory(kNumChannels, kDefaultAudioSamplingRate,
-                                TestAudioBusFactory::kMiddleANoteFreq, 0.5f));
+  void CreateObjectsForCodec(AudioCodec codec) {
+    audio_bus_factory_ = std::make_unique<TestAudioBusFactory>(
+        kNumChannels, kDefaultAudioSamplingRate,
+        TestAudioBusFactory::kMiddleANoteFreq, 0.5f);
 
-    receiver_.reset(new TestEncodedAudioFrameReceiver());
+    receiver_ = std::make_unique<TestEncodedAudioFrameReceiver>();
 
     audio_encoder_ = std::make_unique<AudioEncoder>(
-        cast_environment_, kNumChannels, kDefaultAudioSamplingRate,
+        cast_environment(), kNumChannels, kDefaultAudioSamplingRate,
         kDefaultAudioEncoderBitrate, codec,
         base::BindRepeating(&TestEncodedAudioFrameReceiver::FrameEncoded,
                             base::Unretained(receiver_.get())));
@@ -186,85 +174,74 @@ class AudioEncoderTest : public ::testing::TestWithParam<TestScenario> {
     receiver_->SetSamplesPerFrame(audio_encoder_->GetSamplesPerFrame());
   }
 
-  base::SimpleTestTickClock testing_clock_;
-  scoped_refptr<FakeSingleThreadTaskRunner> task_runner_;
   std::unique_ptr<TestAudioBusFactory> audio_bus_factory_;
   std::unique_ptr<TestEncodedAudioFrameReceiver> receiver_;
   std::unique_ptr<AudioEncoder> audio_encoder_;
-  scoped_refptr<CastEnvironment> cast_environment_;
 };
 
 TEST_P(AudioEncoderTest, EncodeOpus) {
-  RunTestForCodec(CODEC_AUDIO_OPUS);
-}
-
-TEST_P(AudioEncoderTest, EncodePcm16) {
-  RunTestForCodec(CODEC_AUDIO_PCM16);
+  RunTestForCodec(AudioCodec::kOpus);
 }
 
 #if BUILDFLAG(IS_MAC)
 TEST_P(AudioEncoderTest, EncodeAac) {
-  RunTestForCodec(CODEC_AUDIO_AAC);
+  RunTestForCodec(AudioCodec::kAAC);
 }
 #endif
 
-static const int64_t kOneCall_3Millis[] = {3};
-static const int64_t kOneCall_10Millis[] = {10};
-static const int64_t kOneCall_13Millis[] = {13};
-static const int64_t kOneCall_20Millis[] = {20};
+static const std::vector<int64_t> kOneCall_3Millis = {3};
+static const std::vector<int64_t> kOneCall_10Millis = {10};
+static const std::vector<int64_t> kOneCall_13Millis = {13};
+static const std::vector<int64_t> kOneCall_20Millis = {20};
 
-static const int64_t kTwoCalls_3Millis[] = {3, 3};
-static const int64_t kTwoCalls_10Millis[] = {10, 10};
-static const int64_t kTwoCalls_Mixed1[] = {3, 10};
-static const int64_t kTwoCalls_Mixed2[] = {10, 3};
-static const int64_t kTwoCalls_Mixed3[] = {3, 17};
-static const int64_t kTwoCalls_Mixed4[] = {17, 3};
+static const std::vector<int64_t> kTwoCalls_3Millis = {3, 3};
+static const std::vector<int64_t> kTwoCalls_10Millis = {10, 10};
+static const std::vector<int64_t> kTwoCalls_Mixed1 = {3, 10};
+static const std::vector<int64_t> kTwoCalls_Mixed2 = {10, 3};
+static const std::vector<int64_t> kTwoCalls_Mixed3 = {3, 17};
+static const std::vector<int64_t> kTwoCalls_Mixed4 = {17, 3};
 
-static const int64_t kManyCalls_3Millis[] = {3, 3, 3, 3, 3, 3, 3, 3,
-                                             3, 3, 3, 3, 3, 3, 3};
-static const int64_t kManyCalls_10Millis[] = {10, 10, 10, 10, 10, 10, 10, 10,
-                                              10, 10, 10, 10, 10, 10, 10};
-static const int64_t kManyCalls_Mixed1[] = {3,  10, 3,  10, 3,  10, 3,  10, 3,
-                                            10, 3,  10, 3,  10, 3,  10, 3,  10};
-static const int64_t kManyCalls_Mixed2[] = {10, 3, 10, 3, 10, 3, 10, 3, 10, 3,
-                                            10, 3, 10, 3, 10, 3, 10, 3, 10, 3};
-static const int64_t kManyCalls_Mixed3[] = {3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8,
-                                            9, 7, 9, 3, 2, 3, 8, 4, 6, 2, 6, 4};
-static const int64_t kManyCalls_Mixed4[] = {31, 4, 15, 9,  26, 53, 5,  8, 9,
-                                            7,  9, 32, 38, 4,  62, 64, 3};
-static const int64_t kManyCalls_Mixed5[] = {3, 14, 15, 9, 26, 53, 58, 9, 7,
-                                            9, 3,  23, 8, 4,  6,  2,  6, 43};
+static const std::vector<int64_t> kManyCalls_3Millis = {3, 3, 3, 3, 3, 3, 3, 3,
+                                                        3, 3, 3, 3, 3, 3, 3};
+static const std::vector<int64_t> kManyCalls_10Millis = {
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10};
+static const std::vector<int64_t> kManyCalls_Mixed1 = {
+    3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10};
+static const std::vector<int64_t> kManyCalls_Mixed2 = {
+    10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3, 10, 3};
+static const std::vector<int64_t> kManyCalls_Mixed3 = {
+    3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4, 6, 2, 6, 4};
+static const std::vector<int64_t> kManyCalls_Mixed4 = {
+    31, 4, 15, 9, 26, 53, 5, 8, 9, 7, 9, 32, 38, 4, 62, 64, 3};
+static const std::vector<int64_t> kManyCalls_Mixed5 = {
+    3, 14, 15, 9, 26, 53, 58, 9, 7, 9, 3, 23, 8, 4, 6, 2, 6, 43};
+static const std::vector<int64_t> kOneBigUnderrun = {10,    10, 10, 10,
+                                                     -1000, 10, 10, 10};
+static const std::vector<int64_t> kTwoBigUnderruns = {
+    10, 10, 10, 10, -712, 10, 10, 10, -1311, 10, 10, 10};
+static const std::vector<int64_t> kMixedUnderruns = {
+    31, -64, 4, 15, 9, 26, -53, 5, 8, -9, 7, 9, 32, 38, -4, 62, -64, 3};
 
-static const int64_t kOneBigUnderrun[] = {10, 10, 10, 10, -1000, 10, 10, 10};
-static const int64_t kTwoBigUnderruns[] = {10, 10, 10,    10, -712, 10,
-                                           10, 10, -1311, 10, 10,   10};
-static const int64_t kMixedUnderruns[] = {31, -64, 4, 15, 9,  26, -53, 5,   8,
-                                          -9, 7,   9, 32, 38, -4, 62,  -64, 3};
-
-INSTANTIATE_TEST_SUITE_P(
-    AudioEncoderTestScenarios,
-    AudioEncoderTest,
-    ::testing::Values(
-        TestScenario(kOneCall_3Millis, std::size(kOneCall_3Millis)),
-        TestScenario(kOneCall_10Millis, std::size(kOneCall_10Millis)),
-        TestScenario(kOneCall_13Millis, std::size(kOneCall_13Millis)),
-        TestScenario(kOneCall_20Millis, std::size(kOneCall_20Millis)),
-        TestScenario(kTwoCalls_3Millis, std::size(kTwoCalls_3Millis)),
-        TestScenario(kTwoCalls_10Millis, std::size(kTwoCalls_10Millis)),
-        TestScenario(kTwoCalls_Mixed1, std::size(kTwoCalls_Mixed1)),
-        TestScenario(kTwoCalls_Mixed2, std::size(kTwoCalls_Mixed2)),
-        TestScenario(kTwoCalls_Mixed3, std::size(kTwoCalls_Mixed3)),
-        TestScenario(kTwoCalls_Mixed4, std::size(kTwoCalls_Mixed4)),
-        TestScenario(kManyCalls_3Millis, std::size(kManyCalls_3Millis)),
-        TestScenario(kManyCalls_10Millis, std::size(kManyCalls_10Millis)),
-        TestScenario(kManyCalls_Mixed1, std::size(kManyCalls_Mixed1)),
-        TestScenario(kManyCalls_Mixed2, std::size(kManyCalls_Mixed2)),
-        TestScenario(kManyCalls_Mixed3, std::size(kManyCalls_Mixed3)),
-        TestScenario(kManyCalls_Mixed4, std::size(kManyCalls_Mixed4)),
-        TestScenario(kManyCalls_Mixed5, std::size(kManyCalls_Mixed5)),
-        TestScenario(kOneBigUnderrun, std::size(kOneBigUnderrun)),
-        TestScenario(kTwoBigUnderruns, std::size(kTwoBigUnderruns)),
-        TestScenario(kMixedUnderruns, std::size(kMixedUnderruns))));
-
-}  // namespace cast
-}  // namespace media
+INSTANTIATE_TEST_SUITE_P(AudioEncoderTestScenarios,
+                         AudioEncoderTest,
+                         ::testing::Values(TestScenario(kOneCall_3Millis),
+                                           TestScenario(kOneCall_10Millis),
+                                           TestScenario(kOneCall_13Millis),
+                                           TestScenario(kOneCall_20Millis),
+                                           TestScenario(kTwoCalls_3Millis),
+                                           TestScenario(kTwoCalls_10Millis),
+                                           TestScenario(kTwoCalls_Mixed1),
+                                           TestScenario(kTwoCalls_Mixed2),
+                                           TestScenario(kTwoCalls_Mixed3),
+                                           TestScenario(kTwoCalls_Mixed4),
+                                           TestScenario(kManyCalls_3Millis),
+                                           TestScenario(kManyCalls_10Millis),
+                                           TestScenario(kManyCalls_Mixed1),
+                                           TestScenario(kManyCalls_Mixed2),
+                                           TestScenario(kManyCalls_Mixed3),
+                                           TestScenario(kManyCalls_Mixed4),
+                                           TestScenario(kManyCalls_Mixed5),
+                                           TestScenario(kOneBigUnderrun),
+                                           TestScenario(kTwoBigUnderruns),
+                                           TestScenario(kMixedUnderruns)));
+}  // namespace media::cast

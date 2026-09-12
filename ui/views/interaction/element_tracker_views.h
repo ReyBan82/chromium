@@ -9,13 +9,13 @@
 #include <string>
 #include <vector>
 
+#include "base/functional/callback_forward.h"
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
-#include "base/scoped_multi_source_observation.h"
-#include "base/strings/string_piece_forward.h"
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/base/interaction/element_tracker.h"
+#include "ui/views/interaction/element_tracker_widget_state.h"
 #include "ui/views/view_utils.h"
 #include "ui/views/views_export.h"
 
@@ -37,30 +37,45 @@ class VIEWS_EXPORT TrackedElementViews : public ui::TrackedElement {
 
   // TrackedElement:
   gfx::Rect GetScreenBounds() const override;
+  gfx::NativeView GetNativeView() const override;
+  std::string GetSecondaryIdentifier() const override;
   std::string ToString() const override;
 
-  DECLARE_FRAMEWORK_SPECIFIC_METADATA()
+  DECLARE_SAFE_CAST_TARGET()
 
  private:
   const raw_ptr<View> view_;
 };
 
 // Manages TrackedElements associated with View objects.
-class VIEWS_EXPORT ElementTrackerViews {
+class VIEWS_EXPORT ElementTrackerViews
+    : public internal::ElementTrackerWidgetState::Delegate {
  public:
   using ViewList = std::vector<View*>;
+
+  // Returns the context to use for `primary_widget`, which will be a logical
+  // top-level widget, or null to use the default computation. Used e.g. to
+  // ensure that all system widgets on ChromeOS share a context.
+  using ContextOverrideCallback =
+      base::RepeatingCallback<ui::ElementContext(Widget* primary_widget)>;
+
+  // Changes the computation of contexts for some or all widgets. See
+  // `ContextOverrideCallback` for details.
+  static void SetContextOverrideCallback(ContextOverrideCallback callback);
 
   // Gets the global instance of the tracker for Views.
   static ElementTrackerViews* GetInstance();
 
   // Returns the context associated with a particular View. The context will be
   // the same across all Views associated with a root Widget (such as an
-  // application window).
+  // application window), or as specified by the current
+  // `ContextOverrideCallback` if one is set.
   static ui::ElementContext GetContextForView(View* view);
 
   // Returns the context associated with a particular Widget. The context will
   // be the same across all Widgets associated with a root Widget (such as an
-  // application window).
+  // application window), or as specified by the current
+  // `ContextOverrideCallback` if one is set.
   static ui::ElementContext GetContextForWidget(Widget* widget);
 
   // ----------
@@ -83,8 +98,11 @@ class VIEWS_EXPORT ElementTrackerViews {
   // Returns either the unique View matching the given `id` in the given
   // `context`, or null if there is none.
   //
+  // Views which are not [yet] visible are not counted (you can use
+  // `GetFirstMatchingView()` if you need to retrieve non-visible views).
+  //
   // Use if you are sure there's at most one matching element in the context
-  // and that (if present) the element is a View; will DCHECK/crash otherwise.
+  // which is visible, and (if present) is a View; will DCHECK/crash otherwise.
   View* GetUniqueView(ui::ElementIdentifier id, ui::ElementContext context);
 
   // Convenience method that calls GetUniqueView() and then safely converts the
@@ -99,25 +117,33 @@ class VIEWS_EXPORT ElementTrackerViews {
   //
   // Use when you just need *a* View in the given context, and don't care if
   // there's more than one.
+  //
+  // Unlike other methods, this is capable of retrieving views which have not
+  // yet become visible (this is done for both speed and convenience). If there
+  // are a mix of visible and non-visible views with `id`, you can set
+  // `require_visible` to `true` to force only visible views to be returned.
   View* GetFirstMatchingView(ui::ElementIdentifier id,
-                             ui::ElementContext context);
+                             ui::ElementContext context,
+                             bool require_visible = false);
 
   // Convenience method that calls GetFirstMatchingView() and then safely
   // converts the result to `T`, which must be a view subclass with metadata.
   // Fails if a View is found but is not of the expected subtype.
   template <class T>
   T* GetFirstMatchingViewAs(ui::ElementIdentifier id,
-                            ui::ElementContext context);
+                            ui::ElementContext context,
+                            bool require_visible = false);
 
-  // Returns a list of all visible Views with identifier `id` in `context`.
-  // The list may be empty. Ignores any non-Views elements which might match.
+  // Returns a list of all Views with identifier `id` in `context`. The list
+  // may be empty. Ignores any non-Views elements which might match.
   ViewList GetAllMatchingViews(ui::ElementIdentifier id,
-                               ui::ElementContext context);
+                               ui::ElementContext context,
+                               bool require_visible = false);
 
-  // Returns a list of all visible Views with identifier `id` in any context.
-  // Order is not guaranteed. Ignores any non-Views elements with the same
-  // identifier.
-  ViewList GetAllMatchingViewsInAnyContext(ui::ElementIdentifier id);
+  // Returns a list of all Views with identifier `id` in any context. Order is
+  // not guaranteed. Ignores any non-Views elements with the same identifier.
+  ViewList GetAllMatchingViewsInAnyContext(ui::ElementIdentifier id,
+                                           bool require_visible = false);
 
   // Returns a widget that matches the given context. A valid
   // TrackedElementViews must exist within the widget.
@@ -151,14 +177,16 @@ class VIEWS_EXPORT ElementTrackerViews {
   friend class base::NoDestructor<ElementTrackerViews>;
   FRIEND_TEST_ALL_PREFIXES(ElementTrackerViewsTest, CleansUpWidgetTrackers);
   class ElementDataViews;
-  class WidgetTracker;
 
   ElementTrackerViews();
   ~ElementTrackerViews();
 
+  // Returns the current `ContextOverrideCallback`, which may be null.
+  static ContextOverrideCallback& GetContextOverrideCallback();
+
   // We do not get notified at the View level if a view's widget has not yet
   // been shown. We need this notification to know when the view is actually
-  // visible to the user. So if a view is added to the trakcer or is added to
+  // visible to the user. So if a view is added to the tracker or is added to
   // a widget, and its widget is not visible, we watch it until it is (or it is
   // destroyed).
   void MaybeTrackWidget(Widget* widget);
@@ -169,8 +197,12 @@ class VIEWS_EXPORT ElementTrackerViews {
   // Aura is not exactly synced with our event reporting.
   bool IsWidgetVisible(const Widget* widget) const;
 
+  // internal::ElementTrackerWidgetState::Delegate:
+  void OnWidgetVisibilityChanged(const Widget* widget, bool visible) override;
+  void OnWidgetDestroying(const Widget* widget) override;
+
   std::map<ui::ElementIdentifier, ElementDataViews> element_data_;
-  std::map<const Widget*, WidgetTracker> widget_trackers_;
+  std::map<const Widget*, internal::ElementTrackerWidgetState> widget_trackers_;
 };
 
 // Template implementations.
@@ -179,8 +211,9 @@ template <class T>
 T* ElementTrackerViews::GetUniqueViewAs(ui::ElementIdentifier id,
                                         ui::ElementContext context) {
   views::View* const view = GetUniqueView(id, context);
-  if (!view)
+  if (!view) {
     return nullptr;
+  }
   T* const result = views::AsViewClass<T>(view);
   DCHECK(result);
   return result;
@@ -188,10 +221,12 @@ T* ElementTrackerViews::GetUniqueViewAs(ui::ElementIdentifier id,
 
 template <class T>
 T* ElementTrackerViews::GetFirstMatchingViewAs(ui::ElementIdentifier id,
-                                               ui::ElementContext context) {
-  views::View* const view = GetFirstMatchingView(id, context);
-  if (!view)
+                                               ui::ElementContext context,
+                                               bool require_visible) {
+  views::View* const view = GetFirstMatchingView(id, context, require_visible);
+  if (!view) {
     return nullptr;
+  }
   T* const result = views::AsViewClass<T>(view);
   DCHECK(result);
   return result;

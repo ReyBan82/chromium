@@ -6,12 +6,17 @@
 #define CHROME_BROWSER_UI_WEBUI_WEB_APP_INTERNALS_WEB_APP_INTERNALS_HANDLER_H_
 
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ref.h"
 #include "base/values.h"
 #include "chrome/browser/ui/webui/web_app_internals/web_app_internals.mojom.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 
 class Profile;
+
+namespace content {
+class WebUI;
+}  // namespace content
 
 // Handles API requests from chrome://web-app-internals page by implementing
 // mojom::WebAppInternalsHandler.
@@ -22,7 +27,7 @@ class WebAppInternalsHandler : public mojom::WebAppInternalsHandler {
       base::OnceCallback<void(base::Value root)> callback);
 
   WebAppInternalsHandler(
-      Profile* profile,
+      content::WebUI* web_ui,
       mojo::PendingReceiver<mojom::WebAppInternalsHandler> receiver);
 
   WebAppInternalsHandler(const WebAppInternalsHandler&) = delete;
@@ -35,7 +40,7 @@ class WebAppInternalsHandler : public mojom::WebAppInternalsHandler {
       GetDebugInfoAsJsonStringCallback callback) override;
 
  private:
-  const raw_ptr<Profile> profile_;
+  const raw_ref<Profile> profile_;
   mojo::Receiver<mojom::WebAppInternalsHandler> receiver_;
 };
 

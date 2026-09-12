@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/ui/startup/credential_provider_signin_info_fetcher_win.h"
+
 #include <memory>
 #include <utility>
 #include <vector>
-
-#include "chrome/browser/ui/startup/credential_provider_signin_info_fetcher_win.h"
 
 #include "base/logging.h"
 #include "base/strings/string_split.h"
@@ -63,7 +63,7 @@ void CredentialProviderSigninInfoFetcher::SetCompletionCallbackAndStart(
 }
 
 void CredentialProviderSigninInfoFetcher::OnGetTokenInfoResponse(
-    const base::Value::Dict& token_info) {
+    const base::DictValue& token_info) {
   DCHECK(token_handle_.empty());
   if (const std::string* token_handle = token_info.FindString("token_handle");
       token_handle) {
@@ -74,7 +74,7 @@ void CredentialProviderSigninInfoFetcher::OnGetTokenInfoResponse(
 }
 
 void CredentialProviderSigninInfoFetcher::OnGetUserInfoResponse(
-    const base::Value::Dict& user_info) {
+    const base::DictValue& user_info) {
   DCHECK(!mdm_access_token_.empty());
   DCHECK(!mdm_id_token_.empty());
   DCHECK(full_name_.empty());
@@ -140,7 +140,7 @@ void CredentialProviderSigninInfoFetcher::WriteResultsIfFinished(
     return;
   }
 
-  base::Value::Dict fetch_result;
+  base::DictValue fetch_result;
   if (!has_error) {
     fetch_result.Set(credential_provider::kKeyMdmAccessToken,
                      mdm_access_token_);

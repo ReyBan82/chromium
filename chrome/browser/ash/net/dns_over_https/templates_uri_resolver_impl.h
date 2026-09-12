@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "chrome/browser/ash/net/dns_over_https/templates_uri_resolver.h"
 #include "chrome/browser/ash/policy/core/device_attributes.h"
@@ -14,7 +15,6 @@
 
 namespace policy {
 class DeviceAttributes;
-class FakeDeviceAttributes;
 }  // namespace policy
 
 class PrefService;
@@ -38,13 +38,16 @@ class TemplatesUriResolverImpl : public TemplatesUriResolver {
   // Each identifier occurrence will be replaced by hash(salt + value). This
   // class is Chrome OS only and on other platforms only kDnsOverHttpsTemplates
   // can be set.
-  TemplatesUriResolverImpl();
+  // `device_attributes` must not be null.
+  explicit TemplatesUriResolverImpl(
+      std::unique_ptr<policy::DeviceAttributes> device_attributes);
   TemplatesUriResolverImpl(const TemplatesUriResolverImpl&) = delete;
   TemplatesUriResolverImpl& operator=(const TemplatesUriResolverImpl&) = delete;
   ~TemplatesUriResolverImpl() override;
 
   // TemplatesUriResolver implementation.
-  void UpdateFromPrefs(PrefService* pref_service) override;
+  void Update(const PrefService& local_state,
+              const user_manager::User& user) override;
 
   // This function checks whether the DoH system is configured to provide
   // DoH identifiers in the DNS URL
@@ -58,8 +61,11 @@ class TemplatesUriResolverImpl : public TemplatesUriResolver {
   // hashed.
   std::string GetDisplayTemplates() override;
 
-  void SetDeviceAttributesForTesting(
-      std::unique_ptr<policy::FakeDeviceAttributes> attributes);
+  // Indicates if `uri_templates` contains the template URI placeholder for the
+  // device IP addresses, as defined by the policy
+  // DnsOverHttpsTemplatesWithIdentifiers.
+  static bool IsDeviceIpAddressIncludedInUriTemplate(
+      std::string_view uri_templates);
 
  private:
   bool doh_with_identifiers_active_ = false;

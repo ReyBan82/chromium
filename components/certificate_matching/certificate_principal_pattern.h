@@ -6,9 +6,9 @@
 #define COMPONENTS_CERTIFICATE_MATCHING_CERTIFICATE_PRINCIPAL_PATTERN_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/component_export.h"
-#include "base/strings/string_piece_forward.h"
 #include "base/values.h"
 
 namespace net {
@@ -58,11 +58,11 @@ class COMPONENT_EXPORT(CERTIFICATE_MATCHING) CertificatePrincipalPattern {
   // empty (putting no constraint on the principal field). If |value| is nullptr
   // or not a dictionary, returns an empty pattern.
   static CertificatePrincipalPattern ParseFromOptionalDict(
-      const base::Value::Dict* dict,
-      base::StringPiece key_common_name,
-      base::StringPiece key_locality,
-      base::StringPiece key_organization,
-      base::StringPiece key_organization_unit);
+      const base::DictValue* dict,
+      std::string_view key_common_name,
+      std::string_view key_locality,
+      std::string_view key_organization,
+      std::string_view key_organization_unit);
 
  private:
   std::string common_name_;

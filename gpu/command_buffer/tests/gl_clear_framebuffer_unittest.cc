@@ -22,7 +22,6 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/extension_set.h"
 #include "ui/gl/gl_context.h"
-#include "ui/gl/gl_version_info.h"
 
 namespace gpu {
 
@@ -32,25 +31,21 @@ class GLClearFramebufferTest : public testing::TestWithParam<bool> {
   GLClearFramebufferTest() : color_handle_(0u), depth_handle_(0u) {}
 
  protected:
+  virtual GLManager::Options GetGlManagerOptions() {
+    return GLManager::Options();
+  }
+
   void SetUp() override {
     if (GetParam()) {
       // Force the glClear() workaround so we can test it here.
       GpuDriverBugWorkarounds workarounds;
       workarounds.gl_clear_broken = true;
-      gl_.InitializeWithWorkarounds(GLManager::Options(), workarounds);
+      gl_.InitializeWithWorkarounds(GetGlManagerOptions(), workarounds);
       DCHECK(gl_.workarounds().gl_clear_broken);
     } else {
-      gl_.Initialize(GLManager::Options());
+      gl_.Initialize(GetGlManagerOptions());
       DCHECK(!gl_.workarounds().gl_clear_broken);
     }
-  }
-
-  bool IsApplicable() {
-    // The workaround doesn't use VAOs which would cause a failure on a core
-    // context and the hardware for each the workaround is necessary has a buggy
-    // VAO implementation. So we skip testing the workaround on core profiles.
-    return !GetParam() ||
-           !gl_.context()->GetVersionInfo()->is_desktop_core_profile;
   }
 
   void InitDraw();
@@ -63,7 +58,7 @@ class GLClearFramebufferTest : public testing::TestWithParam<bool> {
     gl_.Destroy();
   }
 
- private:
+ protected:
   GLManager gl_;
   GLuint color_handle_;
   GLuint depth_handle_;
@@ -118,10 +113,6 @@ INSTANTIATE_TEST_SUITE_P(GLClearFramebufferTestWithParam,
                          ::testing::Values(true, false));
 
 TEST_P(GLClearFramebufferTest, ClearColor) {
-  if (!IsApplicable()) {
-    return;
-  }
-
   glClearColor(1.0f, 0.5f, 0.25f, 0.5f);
   glClear(GL_COLOR_BUFFER_BIT);
 
@@ -132,10 +123,6 @@ TEST_P(GLClearFramebufferTest, ClearColor) {
 }
 
 TEST_P(GLClearFramebufferTest, ClearColorWithMask) {
-  if (!IsApplicable()) {
-    return;
-  }
-
   glColorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_FALSE);
   glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
   glClear(GL_COLOR_BUFFER_BIT);
@@ -149,10 +136,6 @@ TEST_P(GLClearFramebufferTest, ClearColorWithMask) {
 // crbug.com/434094
 #if !BUILDFLAG(IS_MAC)
 TEST_P(GLClearFramebufferTest, ClearColorWithScissor) {
-  if (!IsApplicable()) {
-    return;
-  }
-
   // TODO(jonahr): Test fails on Linux with ANGLE/passthrough
   // (crbug.com/1099770)
   gpu::GPUTestBotConfig bot_config;
@@ -181,9 +164,6 @@ TEST_P(GLClearFramebufferTest, ClearColorWithScissor) {
 #endif
 
 TEST_P(GLClearFramebufferTest, ClearDepthStencil) {
-  if (!IsApplicable()) {
-    return;
-  }
   // TODO(kainino): https://crbug.com/782317
   if (GPUTestBotConfig::CurrentConfigMatches("Intel")) {
     return;
@@ -242,7 +222,7 @@ TEST_P(GLClearFramebufferTest, SeparateFramebufferClear) {
   gfx::ExtensionSet extensions = gfx::MakeExtensionSet(extension_string);
   bool has_separate_framebuffer =
       gfx::HasExtension(extensions, "GL_CHROMIUM_framebuffer_multisample");
-  if (!IsApplicable() || !has_separate_framebuffer) {
+  if (!has_separate_framebuffer) {
     return;
   }
 
@@ -259,7 +239,7 @@ TEST_P(GLClearFramebufferTest, SeparateFramebufferClear) {
   glClearColor(1.f, 0.f, 0.f, 1.f);
   glClear(GL_COLOR_BUFFER_BIT);
 
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+  gl_.BindOffscreenFramebuffer(GL_READ_FRAMEBUFFER);
   const uint8_t kRed[] = {255, 0, 0, 255};
   EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kRed, nullptr));
 
@@ -279,21 +259,21 @@ TEST_P(GLClearFramebufferTest, SeparateFramebufferClear) {
   glClearColor(0.f, 1.f, 0.f, 1.f);
   glClear(GL_COLOR_BUFFER_BIT);
 
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+  gl_.BindOffscreenFramebuffer(GL_READ_FRAMEBUFFER);
   const uint8_t kGreen[] = {0, 255, 0, 255};
   EXPECT_TRUE(GLTestHelper::CheckPixels(3, 3, 1, 1, 0, kGreen, nullptr));
 }
 
-class ES3ClearBufferTest : public testing::Test {
+class ES3ClearBufferTest : public GLClearFramebufferTest {
  protected:
   static const GLsizei kCanvasSize = 4;
+  static const size_t kTfBufferSizeBytes = 1024;
 
-  void SetUp() override {
+  GLManager::Options GetGlManagerOptions() override {
     GLManager::Options options;
     options.size = gfx::Size(kCanvasSize, kCanvasSize);
     options.context_type = CONTEXT_TYPE_OPENGLES3;
-
-    gl_.Initialize(options);
+    return options;
   }
 
   bool ShouldSkipTest() const {
@@ -303,14 +283,92 @@ class ES3ClearBufferTest : public testing::Test {
     return (!gl_.decoder() || !gl_.decoder()->GetContextGroup());
   }
 
-  void TearDown() override {
-    gl_.Destroy();
+  bool ShouldSkipTransformFeedbackTest() const {
+    if (!GetParam()) {
+      return false;
+    }
+
+#if defined(ARCH_CPU_X86_FAMILY)
+    std::string renderer =
+        reinterpret_cast<const char*>(glGetString(GL_RENDERER));
+    // android-29;google_apis;x86 does not follow OpenGL ES 3.0+ spec. It
+    // doesn't allow any primitive type to be used in glDrawArrays, etc. while
+    // transform feedback is paused, which will cause an error in the
+    // gl_clear_broken workaround.
+    return renderer ==
+           "Android Emulator OpenGL ES Translator (Google SwiftShader)";
+#else
+    return false;
+#endif
   }
 
-  GLManager gl_;
+  void InitDrawWithTF();
+
+ protected:
+  GLuint tf_buffer_ = 0;
 };
 
-TEST_F(ES3ClearBufferTest, ClearBuffersuiv) {
+INSTANTIATE_TEST_SUITE_P(ES3ClearBufferTestWithParam,
+                         ES3ClearBufferTest,
+                         ::testing::Values(true, false));
+
+void ES3ClearBufferTest::InitDrawWithTF() {
+  static const char* vs =
+      "#version 300 es\n"
+      "in vec4 a_Position;\n"
+      "out vec4 v_out;\n"
+      "uniform float u_depth;\n"
+      "void main()\n"
+      "{\n"
+      "   v_out = a_Position;\n"
+      "   gl_Position = a_Position;\n"
+      "   gl_Position.z = u_depth;\n"
+      "}\n";
+  static const char* fs =
+      "#version 300 es\n"
+      "precision mediump float;\n"
+      "uniform vec4 u_draw_color;\n"
+      "out vec4 fragColor;\n"
+      "void main()\n"
+      "{\n"
+      "  fragColor = u_draw_color;\n"
+      "}\n";
+  GLuint vertex_shader = GLTestHelper::CompileShader(GL_VERTEX_SHADER, vs);
+  GLuint fragment_shader = GLTestHelper::CompileShader(GL_FRAGMENT_SHADER, fs);
+  GLuint program = glCreateProgram();
+  glAttachShader(program, vertex_shader);
+  glAttachShader(program, fragment_shader);
+  const char* varyings[] = {"v_out"};
+  glTransformFeedbackVaryings(program, 1, varyings, GL_INTERLEAVED_ATTRIBS);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  glLinkProgram(program);
+  GLint linked = GL_FALSE;
+  glGetProgramiv(program, GL_LINK_STATUS, &linked);
+  ASSERT_EQ(GL_TRUE, linked);
+
+  DCHECK(program);
+  glUseProgram(program);
+  GLuint position_loc = glGetAttribLocation(program, "a_Position");
+
+  GLTestHelper::SetupUnitQuad(position_loc);
+  color_handle_ = glGetUniformLocation(program, "u_draw_color");
+  DCHECK(color_handle_ != static_cast<GLuint>(-1));
+  depth_handle_ = glGetUniformLocation(program, "u_depth");
+  DCHECK(depth_handle_ != static_cast<GLuint>(-1));
+
+  // Set up transform feedback outputs
+  glGenBuffers(1, &tf_buffer_);
+  glBindBuffer(GL_TRANSFORM_FEEDBACK_BUFFER, tf_buffer_);
+  glBufferData(GL_TRANSFORM_FEEDBACK_BUFFER, kTfBufferSizeBytes, nullptr,
+               GL_DYNAMIC_COPY);
+  GLuint tf;
+  glGenTransformFeedbacks(1, &tf);
+  glBindTransformFeedback(GL_TRANSFORM_FEEDBACK, tf);
+  glBindBufferBase(GL_TRANSFORM_FEEDBACK_BUFFER, 0, tf_buffer_);
+}
+
+TEST_P(ES3ClearBufferTest, ClearBuffersuiv) {
   if (ShouldSkipTest())
     return;
 
@@ -320,6 +378,582 @@ TEST_F(ES3ClearBufferTest, ClearBuffersuiv) {
   // The above call should not crash in ASAN build.
   EXPECT_EQ(static_cast<GLenum>(GL_INVALID_ENUM), glGetError());
   GLTestHelper::CheckGLError("no errors", __LINE__);
+}
+
+TEST_P(ES3ClearBufferTest,
+       DrawArraysWithUnclearedAttachmentAndTransformFeedback) {
+  if (ShouldSkipTest()) {
+    GTEST_SKIP() << "ES3 not supported";
+  }
+  if (ShouldSkipTransformFeedbackTest()) {
+    GTEST_SKIP() << "Transform feedback not supported in workaround";
+  }
+
+  InitDrawWithTF();
+
+  glBeginTransformFeedback(GL_TRIANGLES);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  // Create framebuffer with an uncleared texture attachment and bind it as
+  // the draw framebuffer. This will trigger a clear from HandleDrawArrays ->
+  // DoMultiDrawArrays -> CheckBoundDrawFramebufferValid ->
+  // CheckFramebufferValid -> ClearUnclearedAttachments when drawing quad
+  GLuint fbo, texture;
+  glGenFramebuffers(1, &fbo);
+  glGenTextures(1, &texture);
+  glBindTexture(GL_TEXTURE_2D, texture);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+               nullptr /* data, nullptr to make it uncleared */);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+  glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                         GL_TEXTURE_2D, texture, 0);
+  EXPECT_EQ(glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER),
+            static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE));
+
+  // Draw quad to fbo.
+  SetDrawColor(1.0f, 0.0f, 0.0f, 1.0f);
+  DrawQuad();
+
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+  const uint8_t kRed[] = {255, 0, 0, 255};
+  EXPECT_TRUE(
+      GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kRed, nullptr));
+
+  GLint tf_active = 0;
+  GLint tf_paused = 0;
+  glGetIntegerv(GL_TRANSFORM_FEEDBACK_ACTIVE, &tf_active);
+  glGetIntegerv(GL_TRANSFORM_FEEDBACK_PAUSED, &tf_paused);
+  EXPECT_EQ(1, tf_active);
+  EXPECT_EQ(0, tf_paused);
+
+  glEndTransformFeedback();
+  EXPECT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  // GLTestHelper::SetupUnitQuad + DrawQuad: 2 triangles (6 vertices) forming a
+  // unit quad
+  constexpr size_t kQuadVertexCount = 6;
+  constexpr size_t kVec4ComponentCount = 4;
+  constexpr size_t kFeedbackSize =
+      kQuadVertexCount * kVec4ComponentCount * sizeof(GLfloat);
+
+  uint8_t buffer_data[kFeedbackSize] = {0};
+  glGetBufferSubDataCHROMIUM(GL_TRANSFORM_FEEDBACK_BUFFER, 0, kFeedbackSize,
+                             buffer_data);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  // SAFETY: glBufferSubDataCHROMIUM would fail if reading out of bounds of the
+  // GPU buffer and the kFeedbackSize is a multiple of the span size for bytes
+  // -> floats.
+  auto feedback_span =
+      UNSAFE_BUFFERS(base::span(reinterpret_cast<const GLfloat*>(buffer_data),
+                                kQuadVertexCount * kVec4ComponentCount));
+
+  for (size_t vertex_index = 0; vertex_index < kQuadVertexCount;
+       ++vertex_index) {
+    size_t base_index = vertex_index * kVec4ComponentCount;
+    GLfloat w = feedback_span[base_index + 3];
+    GLfloat x = feedback_span[base_index];
+    GLfloat y = feedback_span[base_index + 1];
+    // Unit quad vertex component check
+    EXPECT_FLOAT_EQ(1.0f, std::abs(x))
+        << "x component wrong at vertex " << vertex_index;
+    EXPECT_FLOAT_EQ(1.0f, std::abs(y))
+        << "y component wrong at vertex " << vertex_index;
+    // 1.0f means it was set. SetupUnitQuad vertices are lower dimension than
+    // vec4 (vec2), but 1.0f should be filled in for it.
+    EXPECT_FLOAT_EQ(1.0f, w) << "w component wrong at vertex " << vertex_index;
+  }
+}
+
+TEST_P(ES3ClearBufferTest, ClearDoesNotWriteToTransformFeedbackBuffer) {
+  if (ShouldSkipTest()) {
+    GTEST_SKIP() << "ES3 not supported";
+  }
+  if (ShouldSkipTransformFeedbackTest()) {
+    GTEST_SKIP() << "Transform feedback not supported in workaround";
+  }
+
+  InitDrawWithTF();
+
+  glBeginTransformFeedback(GL_TRIANGLES);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  // Issue several clears while transform feedback is active. Transform feedback
+  // should only capture Primitives generated by the Vertex Processing step(s).
+  // The workaround should have the effect of glClear which is not part of
+  // Vertex Processing.
+  glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kRed[] = {255, 0, 0, 255};
+  EXPECT_TRUE(
+      GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kRed, nullptr));
+
+  GLint tf_active = 0;
+  GLint tf_paused = 0;
+  glGetIntegerv(GL_TRANSFORM_FEEDBACK_ACTIVE, &tf_active);
+  glGetIntegerv(GL_TRANSFORM_FEEDBACK_PAUSED, &tf_paused);
+  EXPECT_EQ(1, tf_active);
+  EXPECT_EQ(0, tf_paused);
+
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kGreen[] = {0, 255, 0, 255};
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kGreen,
+                                        nullptr));
+
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kBlue[] = {0, 0, 255, 255};
+  EXPECT_TRUE(
+      GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kBlue, nullptr));
+
+  glEndTransformFeedback();
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  // The TF buffer was initialized with nullptr (all zeros). If glClear
+  // workaround incorrectly wrote anything to it, we would see non-zero values.
+  constexpr size_t kBufferFloats = kTfBufferSizeBytes / sizeof(GLfloat);
+  uint8_t buffer_data[kTfBufferSizeBytes] = {0};
+  glGetBufferSubDataCHROMIUM(GL_TRANSFORM_FEEDBACK_BUFFER, 0,
+                             kTfBufferSizeBytes, buffer_data);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  // SAFETY: glBufferSubDataCHROMIUM would fail if reading out of bounds of the
+  // GPU buffer and the kFeedbackSizekTfBufferSizeBytes is a multiple of the
+  // span size for bytes -> floats.
+  auto feedback_span = UNSAFE_BUFFERS(
+      base::span(reinterpret_cast<const GLfloat*>(buffer_data), kBufferFloats));
+
+  for (size_t float_index = 0; float_index < kBufferFloats; ++float_index) {
+    EXPECT_EQ(0.0f, feedback_span[float_index])
+        << "TF buffer nonzero at float index " << float_index;
+  }
+}
+
+TEST_P(ES3ClearBufferTest, ClearSucceedsWithDifferentTransformFeedbackTypes) {
+  if (ShouldSkipTest()) {
+    GTEST_SKIP() << "ES3 not supported";
+  }
+  if (ShouldSkipTransformFeedbackTest()) {
+    GTEST_SKIP() << "Transform feedback not supported in workaround";
+  }
+
+  InitDrawWithTF();
+
+  glBeginTransformFeedback(GL_TRIANGLES);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kRed[] = {255, 0, 0, 255};
+  EXPECT_TRUE(
+      GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kRed, nullptr));
+
+  glEndTransformFeedback();
+  glBeginTransformFeedback(GL_LINES);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kGreen[] = {0, 255, 0, 255};
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kGreen,
+                                        nullptr));
+
+  glEndTransformFeedback();
+  glBeginTransformFeedback(GL_POINTS);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kBlue[] = {0, 0, 255, 255};
+  EXPECT_TRUE(
+      GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kBlue, nullptr));
+
+  glEndTransformFeedback();
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+}
+
+TEST_P(ES3ClearBufferTest,
+       ClearSucceedsWithPausingAndResumingTransformFeedback) {
+  if (ShouldSkipTest()) {
+    GTEST_SKIP() << "ES3 not supported";
+  }
+  if (ShouldSkipTransformFeedbackTest()) {
+    GTEST_SKIP() << "Transform feedback not supported in workaround";
+  }
+
+  InitDrawWithTF();
+
+  glBeginTransformFeedback(GL_TRIANGLES);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kRed[] = {255, 0, 0, 255};
+  EXPECT_TRUE(
+      GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kRed, nullptr));
+
+  glPauseTransformFeedback();
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kGreen[] = {0, 255, 0, 255};
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kGreen,
+                                        nullptr));
+
+  glResumeTransformFeedback();
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  glClearColor(0.0f, 0.0f, 1.0f, 1.0f);
+  glClear(GL_COLOR_BUFFER_BIT);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+  const uint8_t kBlue[] = {0, 0, 255, 255};
+  EXPECT_TRUE(
+      GLTestHelper::CheckPixels(0, 0, 1, 1, 0 /* tolerance */, kBlue, nullptr));
+
+  glEndTransformFeedback();
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+}
+
+TEST_P(ES3ClearBufferTest, RasterizerDiscardIntegerClearBypass) {
+  if (ShouldSkipTest()) {
+    return;
+  }
+
+  const GLsizei kDirtyWidth = 256;
+  const GLsizei kDirtyHeight = 256;
+
+  // Step 0: Dirty VRAM using a separate context.
+  {
+    GLManager gl2;
+    gl2.Initialize(GetGlManagerOptions());
+    gl2.MakeCurrent();
+
+    for (int i = 0; i < 8; ++i) {
+      GLuint rb = 0;
+      glGenRenderbuffers(1, &rb);
+      glBindRenderbuffer(GL_RENDERBUFFER, rb);
+      glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, kDirtyWidth,
+                            kDirtyHeight);
+      GLuint fb = 0;
+      glGenFramebuffers(1, &fb);
+      glBindFramebuffer(GL_FRAMEBUFFER, fb);
+      glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                GL_RENDERBUFFER, rb);
+      EXPECT_EQ(static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE),
+                glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+      glClearColor(0.8f, 0.2f, 0.6f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
+
+      glDeleteFramebuffers(1, &fb);
+      glDeleteRenderbuffers(1, &rb);
+    }
+    glFinish();
+    gl2.Destroy();
+  }
+
+  // Restore main context.
+  gl_.MakeCurrent();
+
+  // Step 1: Trigger the bug.
+  GLuint rb = 0;
+  glGenRenderbuffers(1, &rb);
+  glBindRenderbuffer(GL_RENDERBUFFER, rb);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8UI, kDirtyWidth, kDirtyHeight);
+
+  GLuint fb = 0;
+  glGenFramebuffers(1, &fb);
+  glBindFramebuffer(GL_FRAMEBUFFER, fb);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                            GL_RENDERBUFFER, rb);
+  EXPECT_EQ(static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE),
+            glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+  glEnable(GL_RASTERIZER_DISCARD);
+  ASSERT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  // readPixels to trigger lazy clear.
+  std::vector<GLuint> pixels(kDirtyWidth * kDirtyHeight * 4, 0xAAAAAAAAu);
+  glReadPixels(0, 0, kDirtyWidth, kDirtyHeight, GL_RGBA_INTEGER,
+               GL_UNSIGNED_INT, pixels.data());
+
+  EXPECT_EQ(static_cast<GLenum>(GL_NO_ERROR), glGetError());
+
+  // Inspect results.
+  uint32_t nonzero_components = 0;
+  for (GLuint val : pixels) {
+    if (val != 0) {
+      nonzero_components++;
+    }
+  }
+
+  // If bug is present, we expect non-zero components (leak from dirty VRAM).
+  // If fixed, we expect ALL zero.
+  EXPECT_EQ(0u, nonzero_components);
+
+  // Cleanup.
+  glDisable(GL_RASTERIZER_DISCARD);
+  glDeleteFramebuffers(1, &fb);
+  glDeleteRenderbuffers(1, &rb);
+}
+
+class GLReattachFboDepthStencilTest : public GLClearFramebufferTest {
+ protected:
+  void SetUp() override {
+    GpuDriverBugWorkarounds workarounds;
+    if (GetParam()) {
+      workarounds.reattach_fbo_depth_stencil_on_reallocation = true;
+    }
+    gl_.InitializeWithWorkarounds(GetGlManagerOptions(), workarounds);
+  }
+
+  void RunReattachFboDepthStencilTest(bool use_texture,
+                                      bool bind_fbo_during_reallocation);
+};
+
+INSTANTIATE_TEST_SUITE_P(GLReattachFboDepthStencilTestWithParam,
+                         GLReattachFboDepthStencilTest,
+                         ::testing::Bool());
+
+void GLReattachFboDepthStencilTest::RunReattachFboDepthStencilTest(
+    bool use_texture,
+    bool bind_fbo_during_reallocation) {
+  GLuint fbo = 0;
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+  GLuint color_tex = 0;
+  glGenTextures(1, &color_tex);
+  glBindTexture(GL_TEXTURE_2D, color_tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+               nullptr);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                         color_tex, 0);
+
+  GLuint depth_obj = 0;
+  if (use_texture) {
+    glGenTextures(1, &depth_obj);
+    glBindTexture(GL_TEXTURE_2D, depth_obj);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 16, 16, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, nullptr);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                           depth_obj, 0);
+  } else {
+    glGenRenderbuffers(1, &depth_obj);
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_obj);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 16, 16);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                              GL_RENDERBUFFER, depth_obj);
+  }
+
+  EXPECT_EQ(static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE),
+            glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+  // Clear color to Green, depth to 1.0 (far).
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClearDepthf(1.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  const uint8_t kGreen[] = {0, 255, 0, 255};
+  const uint8_t kRed[] = {255, 0, 0, 255};
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kGreen, nullptr));
+
+  // Enable depth test. Draw Red quad at depth 0.5. Should pass (0.5 < 1.0).
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+
+  InitDraw();
+  SetDrawDepth(0.5f);
+  SetDrawColor(1.0f, 0.0f, 0.0f, 1.0f);
+  DrawQuad();
+
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kRed, nullptr));
+
+  // Clear color to Green, depth to 0.0 (near).
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClearDepthf(0.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kGreen, nullptr));
+
+  // Draw Red quad at depth 0.5. Should fail (0.5 is not < 0.0).
+  DrawQuad();
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kGreen, nullptr));
+
+  if (!bind_fbo_during_reallocation) {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  }
+
+  // Redefine depth attachment (reallocate to 16x16).
+  if (use_texture) {
+    glBindTexture(GL_TEXTURE_2D, depth_obj);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 16, 16, 0,
+                 GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, nullptr);
+  } else {
+    glBindRenderbuffer(GL_RENDERBUFFER, depth_obj);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, 16, 16);
+  }
+
+  if (!bind_fbo_during_reallocation) {
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  }
+
+  // Clear depth to 1.0.
+  glClearDepthf(1.0f);
+  glClear(GL_DEPTH_BUFFER_BIT);
+
+  // Draw Red quad at depth 0.5. Should pass (0.5 < 1.0).
+  SetDrawDepth(0.5f);
+  SetDrawColor(1.0f, 0.0f, 0.0f, 1.0f);
+  DrawQuad();
+
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kRed, nullptr));
+
+  glDeleteFramebuffers(1, &fbo);
+  glDeleteTextures(1, &color_tex);
+  if (use_texture) {
+    glDeleteTextures(1, &depth_obj);
+  } else {
+    glDeleteRenderbuffers(1, &depth_obj);
+  }
+}
+
+TEST_P(GLReattachFboDepthStencilTest, TextureReallocationBound) {
+  RunReattachFboDepthStencilTest(true, true);
+}
+
+TEST_P(GLReattachFboDepthStencilTest, TextureReallocationUnbound) {
+  RunReattachFboDepthStencilTest(true, false);
+}
+
+TEST_P(GLReattachFboDepthStencilTest, RenderbufferReallocationBound) {
+  RunReattachFboDepthStencilTest(false, true);
+}
+
+TEST_P(GLReattachFboDepthStencilTest, RenderbufferReallocationUnbound) {
+  RunReattachFboDepthStencilTest(false, false);
+}
+
+class ES3ReattachFboDepthStencilTest : public GLReattachFboDepthStencilTest {
+ protected:
+  GLManager::Options GetGlManagerOptions() override {
+    GLManager::Options options;
+    options.context_type = CONTEXT_TYPE_OPENGLES3;
+    return options;
+  }
+
+  bool ShouldSkipTest() const {
+    return (!gl_.decoder() || !gl_.decoder()->GetContextGroup());
+  }
+
+  void RunTexImage2DToTexStorage2DTest(bool bind_fbo_during_reallocation);
+};
+
+INSTANTIATE_TEST_SUITE_P(ES3ReattachFboDepthStencilTestWithParam,
+                         ES3ReattachFboDepthStencilTest,
+                         ::testing::Bool());
+
+void ES3ReattachFboDepthStencilTest::RunTexImage2DToTexStorage2DTest(
+    bool bind_fbo_during_reallocation) {
+  if (ShouldSkipTest()) {
+    return;
+  }
+
+  GLuint fbo = 0;
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+  GLuint color_tex = 0;
+  glGenTextures(1, &color_tex);
+  glBindTexture(GL_TEXTURE_2D, color_tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+               nullptr);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                         color_tex, 0);
+
+  GLuint depth_tex = 0;
+  glGenTextures(1, &depth_tex);
+  glBindTexture(GL_TEXTURE_2D, depth_tex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT16, 16, 16, 0,
+               GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, nullptr);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
+                         depth_tex, 0);
+
+  EXPECT_EQ(static_cast<GLenum>(GL_FRAMEBUFFER_COMPLETE),
+            glCheckFramebufferStatus(GL_FRAMEBUFFER));
+
+  // Clear color to Green, depth to 1.0 (far).
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClearDepthf(1.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+  const uint8_t kGreen[] = {0, 255, 0, 255};
+  const uint8_t kRed[] = {255, 0, 0, 255};
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kGreen, nullptr));
+
+  // Enable depth test. Draw Red quad at depth 0.5. Should pass.
+  glEnable(GL_DEPTH_TEST);
+  glDepthFunc(GL_LESS);
+
+  InitDraw();
+  SetDrawDepth(0.5f);
+  SetDrawColor(1.0f, 0.0f, 0.0f, 1.0f);
+  DrawQuad();
+
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kRed, nullptr));
+
+  // Clear color to Green, depth to 0.0 (near).
+  glClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+  glClearDepthf(0.0f);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kGreen, nullptr));
+
+  // Draw Red quad at depth 0.5. Should fail.
+  DrawQuad();
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kGreen, nullptr));
+
+  if (!bind_fbo_during_reallocation) {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  }
+
+  // Redefine depth attachment via glTexStorage2D.
+  glBindTexture(GL_TEXTURE_2D, depth_tex);
+  glTexStorage2DEXT(GL_TEXTURE_2D, 1, GL_DEPTH_COMPONENT16, 16, 16);
+
+  if (!bind_fbo_during_reallocation) {
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+  }
+
+  // Clear depth to 1.0.
+  glClearDepthf(1.0f);
+  glClear(GL_DEPTH_BUFFER_BIT);
+
+  // Draw Red quad at depth 0.5. Should pass.
+  SetDrawDepth(0.5f);
+  SetDrawColor(1.0f, 0.0f, 0.0f, 1.0f);
+  DrawQuad();
+
+  EXPECT_TRUE(GLTestHelper::CheckPixels(0, 0, 1, 1, 0, kRed, nullptr));
+
+  glDeleteFramebuffers(1, &fbo);
+  glDeleteTextures(1, &color_tex);
+  glDeleteTextures(1, &depth_tex);
+}
+
+TEST_P(ES3ReattachFboDepthStencilTest, TexImage2DToTexStorage2DBound) {
+  RunTexImage2DToTexStorage2DTest(true);
+}
+
+TEST_P(ES3ReattachFboDepthStencilTest, TexImage2DToTexStorage2DUnbound) {
+  RunTexImage2DToTexStorage2DTest(false);
 }
 
 }  // namespace gpu

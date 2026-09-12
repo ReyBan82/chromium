@@ -7,6 +7,7 @@
 #include <wrl/implements.h>
 
 #include "base/no_destructor.h"
+#include "base/win/windows_version.h"
 #include "ui/accessibility/accessibility_features.h"
 
 namespace ui {
@@ -33,14 +34,30 @@ UiaRegistrarWin::UiaRegistrarWin() {
   registrar->RegisterProperty(&unique_id_property_info,
                               &unique_id_property_id_);
 
-  if (features::IsAccessibilityAriaVirtualContentEnabled()) {
-    // Register the custom UIA property that represents the value for the
-    // 'aria-virtualcontent' attribute.
-    UIAutomationPropertyInfo virtual_content_property_info = {
-        kUiaPropertyVirtualContentGuid, L"VirtualContent",
-        UIAutomationType_String};
-    registrar->RegisterProperty(&virtual_content_property_info,
-                                &virtual_content_property_id_);
+  UIAutomationPropertyInfo is_web_content_root_property_info = {
+      kUiaPropertyIsWebContentRootGuid, L"IsWebContentRoot",
+      UIAutomationType_Bool};
+  registrar->RegisterProperty(&is_web_content_root_property_info,
+                              &is_web_content_root_property_id_);
+
+  if (features::IsUiaMathMlSupportEnabled()) {
+    // Register the custom UIA property that provides MathML markup for
+    // math elements. This GUID matches Microsoft Word's implementation for
+    // compatibility with assistive technologies.
+    UIAutomationPropertyInfo mathml_property_info = {
+        kUiaPropertyMathMlGuid, L"MathML", UIAutomationType_String};
+    registrar->RegisterProperty(&mathml_property_info, &mathml_property_id_);
+  }
+
+  // Register the custom UIA property that exposes the list of
+  // aria-actions action names. UIAutomationType_ElementArray is only
+  // supported for custom properties on Windows 11 and later.
+  if (base::win::GetVersion() >= base::win::Version::WIN11) {
+    UIAutomationPropertyInfo aria_actions_property_info = {
+        kUiaPropertyAriaActionsGuid, L"AccessibleActions",
+        UIAutomationType_ElementArray};
+    registrar->RegisterProperty(&aria_actions_property_info,
+                                &aria_actions_property_id_);
   }
 }
 
@@ -56,10 +73,19 @@ PROPERTYID UiaRegistrarWin::GetUniqueIdPropertyId() const {
   return unique_id_property_id_;
 }
 
-PROPERTYID UiaRegistrarWin::GetVirtualContentPropertyId() const {
-  if (!features::IsAccessibilityAriaVirtualContentEnabled())
+PROPERTYID UiaRegistrarWin::GetMathMLPropertyId() const {
+  if (!features::IsUiaMathMlSupportEnabled()) {
     return 0;
-  return virtual_content_property_id_;
+  }
+  return mathml_property_id_;
+}
+
+PROPERTYID UiaRegistrarWin::GetAriaActionsPropertyId() const {
+  return aria_actions_property_id_;
+}
+
+PROPERTYID UiaRegistrarWin::GetIsWebContentRootPropertyId() const {
+  return is_web_content_root_property_id_;
 }
 
 const UiaRegistrarWin& UiaRegistrarWin::GetInstance() {

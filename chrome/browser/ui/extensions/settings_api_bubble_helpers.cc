@@ -4,39 +4,41 @@
 
 #include "chrome/browser/ui/extensions/settings_api_bubble_helpers.h"
 
+#include <memory>
 #include <utility>
 
+#include "base/auto_reset.h"
+#include "base/functional/bind.h"
+#include "base/memory/ptr_util.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/extensions/extension_web_ui.h"
-#include "chrome/browser/extensions/settings_api_bubble_delegate.h"
-#include "chrome/browser/extensions/settings_api_helpers.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser_finder.h"
-#include "chrome/browser/ui/browser_window.h"
-#include "chrome/browser/ui/extensions/extension_message_bubble_bridge.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/extensions/controlled_home_dialog.h"
+#include "chrome/browser/ui/extensions/controlled_home_dialog_controller.h"
 #include "chrome/browser/ui/extensions/extension_settings_overridden_dialog.h"
-#include "chrome/browser/ui/extensions/extensions_container.h"
-#include "chrome/browser/ui/extensions/extensions_dialogs.h"
+#include "chrome/browser/ui/extensions/settings_overridden_dialog.h"
 #include "chrome/browser/ui/extensions/settings_overridden_params_providers.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/browser/ui/toolbar/toolbar_actions_model.h"
-#include "chrome/common/extensions/manifest_handlers/settings_overrides_handler.h"
 #include "chrome/common/url_constants.h"
 #include "components/prefs/pref_registry.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "content/public/browser/browser_url_handler.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
+#include "content/public/browser/web_contents.h"
 #include "extensions/browser/extension_prefs.h"
 #include "extensions/common/constants.h"
+#include "extensions/common/manifest_handlers/chrome_url_overrides_handler.h"
+#include "ui/base/base_window.h"
 
 namespace extensions {
 
 namespace {
 
 // Whether the NTP post-install UI is enabled. By default, this is limited to
-// Windows, Mac, and ChromeOS, but can be overridden for testing.
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_CHROMEOS)
+// Windows, Mac, ChromeOS, and Desktop Android but can be overridden for
+// testing.
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_CHROMEOS) || \
+    BUILDFLAG(IS_ANDROID)
 bool g_ntp_post_install_ui_enabled = true;
 #else
 bool g_ntp_post_install_ui_enabled = false;
@@ -60,27 +62,6 @@ bool g_acknowledge_existing_ntp_extensions =
 const char kDidAcknowledgeExistingNtpExtensions[] =
     "ack_existing_ntp_extensions";
 
-#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
-void ShowSettingsApiBubble(SettingsApiOverrideType type,
-                           Browser* browser) {
-  ToolbarActionsModel* model = ToolbarActionsModel::Get(browser->profile());
-  if (model->has_active_bubble())
-    return;
-
-  std::unique_ptr<ExtensionMessageBubbleController> settings_api_bubble(
-      new ExtensionMessageBubbleController(
-          new SettingsApiBubbleDelegate(browser->profile(), type), browser));
-  if (!settings_api_bubble->ShouldShow())
-    return;
-
-  settings_api_bubble->SetIsActiveBubble();
-  std::unique_ptr<ToolbarActionsBarBubbleDelegate> bridge(
-      new ExtensionMessageBubbleBridge(std::move(settings_api_bubble)));
-  browser->window()->GetExtensionsContainer()->ShowToolbarActionBubble(
-      std::move(bridge));
-}
-#endif
-
 }  // namespace
 
 // Whether a given ntp-overriding extension has been acknowledged by the user.
@@ -103,8 +84,9 @@ void AcknowledgePreExistingNtpExtensions(Profile* profile) {
   ExtensionRegistry* registry = ExtensionRegistry::Get(profile);
   PrefService* profile_prefs = profile->GetPrefs();
   // Only acknowledge existing extensions once per profile.
-  if (profile_prefs->GetBoolean(kDidAcknowledgeExistingNtpExtensions))
+  if (profile_prefs->GetBoolean(kDidAcknowledgeExistingNtpExtensions)) {
     return;
+  }
 
   profile_prefs->SetBoolean(kDidAcknowledgeExistingNtpExtensions, true);
   ExtensionPrefs* prefs = ExtensionPrefs::Get(profile);
@@ -114,7 +96,7 @@ void AcknowledgePreExistingNtpExtensions(Profile* profile) {
     if (overrides.find(chrome::kChromeUINewTabHost) != overrides.end()) {
       prefs->UpdateExtensionPref(extension->id(),
                                  kNtpOverridingExtensionAcknowledged,
-                                 std::make_unique<base::Value>(true));
+                                 base::Value(true));
     }
   }
 }
@@ -124,9 +106,20 @@ void RegisterSettingsOverriddenUiPrefs(PrefRegistrySimple* registry) {
                                 PrefRegistry::NO_REGISTRATION_FLAGS);
 }
 
-void MaybeShowExtensionControlledHomeNotification(Browser* browser) {
+void MaybeShowExtensionControlledHomeNotification(
+    BrowserWindowInterface* browser,
+    content::WebContents* web_contents) {
 #if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
-  ShowSettingsApiBubble(BUBBLE_TYPE_HOME_PAGE, browser);
+  auto* profile = browser->GetProfile();
+  auto bubble_delegate =
+      std::make_unique<ControlledHomeDialogController>(profile, web_contents);
+  if (!bubble_delegate->ShouldShow()) {
+    return;
+  }
+
+  bubble_delegate->PendingShow();
+  ShowControlledHomeDialog(profile, browser->GetWindow()->GetNativeWindow(),
+                           std::move(bubble_delegate));
 #endif
 }
 
@@ -139,69 +132,95 @@ void MaybeShowExtensionControlledSearchNotification(
     return;
   }
 
-  Browser* browser = chrome::FindBrowserWithWebContents(web_contents);
-  if (!browser)
+  Profile* profile =
+      Profile::FromBrowserContext(web_contents->GetBrowserContext());
+  if (!profile) {
     return;
+  }
 
-  absl::optional<ExtensionSettingsOverriddenDialog::Params> params =
-      settings_overridden_params::GetSearchOverriddenParams(browser->profile());
-  if (!params)
-    return;
+  // Ansynchronously collect the parameters needed for the dialog, then show it.
+  settings_overridden_params::GetSearchOverriddenParamsThenRun(
+      web_contents,
+      base::BindOnce(
+          [](Profile* profile, content::WebContents* web_contents,
+             std::unique_ptr<ExtensionSettingsOverriddenDialog::Params>
+                 params) {
+            if (!params) {
+              return;
+            }
+            auto dialog = std::make_unique<ExtensionSettingsOverriddenDialog>(
+                std::move(*params), *profile);
+            if (!dialog->ShouldShow()) {
+              return;
+            }
 
-  auto dialog = std::make_unique<ExtensionSettingsOverriddenDialog>(
-      std::move(*params), browser->profile());
-  if (!dialog->ShouldShow())
-    return;
-
-  ShowSettingsOverriddenDialog(std::move(dialog), browser);
+            gfx::NativeWindow parent_window =
+                web_contents->GetTopLevelNativeWindow();
+            ShowSettingsOverriddenDialog(std::move(dialog), parent_window);
+          },
+          profile, web_contents));
 #endif
 }
 
 void MaybeShowExtensionControlledNewTabPage(
-    Browser* browser, content::WebContents* web_contents) {
-  if (!g_ntp_post_install_ui_enabled)
+    BrowserWindowInterface* browser,
+    content::WebContents* web_contents) {
+  if (!g_ntp_post_install_ui_enabled) {
     return;
+  }
 
   // Acknowledge existing extensions if necessary.
-  if (g_acknowledge_existing_ntp_extensions)
-    AcknowledgePreExistingNtpExtensions(browser->profile());
+  if (g_acknowledge_existing_ntp_extensions) {
+    AcknowledgePreExistingNtpExtensions(browser->GetProfile());
+  }
 
   // Jump through a series of hoops to see if the web contents is pointing to
   // an extension-controlled NTP.
-  // TODO(devlin): Some of this is redundant with the checks in the bubble/
-  // dialog. We should consolidate, but that'll be simpler once we only have
-  // one UI option. In the meantime, extra checks don't hurt.
+  // On Android, the dialog is shown as a tab modal which is dismissed if page
+  // load starts (via TabModalLifetimeHandler), so we must wait until the
+  // navigation has committed (GetLastCommittedEntry). On Desktop, the dialog
+  // is anchored to the browser window and shows during tab selection
+  // (GetVisibleEntry).
+#if BUILDFLAG(IS_ANDROID)
+  content::NavigationEntry* entry =
+      web_contents->GetController().GetLastCommittedEntry();
+#else
   content::NavigationEntry* entry =
       web_contents->GetController().GetVisibleEntry();
-  if (!entry)
+#endif
+  if (!entry) {
     return;
+  }
   GURL active_url = entry->GetURL();
-  if (!active_url.SchemeIs(extensions::kExtensionScheme))
+  if (!active_url.SchemeIs(extensions::kExtensionScheme)) {
     return;  // Not a URL that we care about.
+  }
 
   // See if the current active URL matches a transformed NewTab URL.
-  GURL ntp_url(chrome::kChromeUINewTabURL);
+  GURL ntp_url = chrome::ChromeUINewTabURLAsGURL();
   content::BrowserURLHandler::GetInstance()->RewriteURLIfNecessary(
       &ntp_url, web_contents->GetBrowserContext());
-  if (ntp_url != active_url)
+  if (ntp_url != active_url) {
     return;  // Not being overridden by an extension.
+  }
 
-  Profile* const profile = browser->profile();
-  ToolbarActionsModel* model = ToolbarActionsModel::Get(profile);
-  if (model->has_active_bubble())
-    return;
+  Profile* const profile = browser->GetProfile();
+  CHECK(profile);
 
-  absl::optional<ExtensionSettingsOverriddenDialog::Params> params =
+  std::optional<ExtensionSettingsOverriddenDialog::Params> params =
       settings_overridden_params::GetNtpOverriddenParams(profile);
-  if (!params)
+  if (!params) {
     return;
+  }
 
   auto dialog = std::make_unique<ExtensionSettingsOverriddenDialog>(
-      std::move(*params), profile);
-  if (!dialog->ShouldShow())
+      std::move(*params), *profile);
+  if (!dialog->ShouldShow()) {
     return;
+  }
 
-  ShowSettingsOverriddenDialog(std::move(dialog), browser);
+  ShowSettingsOverriddenDialog(std::move(dialog),
+                               browser->GetWindow()->GetNativeWindow());
 }
 
 }  // namespace extensions

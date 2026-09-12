@@ -17,12 +17,16 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdint>
 #include <cstdlib>
-#include <iostream>
+#include <cstring>
+#include <istream>
 #include <iterator>
 #include <limits>
+#include <ostream>
 #include <type_traits>
 
+#include "absl/base/config.h"
 #include "absl/base/internal/endian.h"
 #include "absl/meta/type_traits.h"
 #include "absl/random/internal/iostream_state_saver.h"
@@ -46,7 +50,7 @@ class alignas(8) randen_engine {
  public:
   // C++11 URBG interface:
   using result_type = T;
-  static_assert(std::is_unsigned<result_type>::value,
+  static_assert(std::is_unsigned_v<result_type>,
                 "randen_engine template argument must be a built-in unsigned "
                 "integer type");
 
@@ -62,8 +66,8 @@ class alignas(8) randen_engine {
   explicit randen_engine(result_type seed_value) { seed(seed_value); }
 
   template <class SeedSequence,
-            typename = typename absl::enable_if_t<
-                !std::is_same<SeedSequence, randen_engine>::value>>
+            typename = typename std::enable_if_t<
+                !std::is_same_v<SeedSequence, randen_engine>>>
   explicit randen_engine(SeedSequence&& seq) {
     seed(seq);
   }
@@ -92,8 +96,7 @@ class alignas(8) randen_engine {
   }
 
   template <class SeedSequence>
-  typename absl::enable_if_t<
-      !std::is_convertible<SeedSequence, result_type>::value>
+  typename std::enable_if_t<!std::is_convertible_v<SeedSequence, result_type>>
   seed(SeedSequence&& seq) {
     // Zeroes the state.
     seed();
@@ -142,7 +145,7 @@ class alignas(8) randen_engine {
       // The Randen paper suggests preferentially initializing even-numbered
       // 128-bit vectors of the randen state (there are 16 such vectors).
       // The seed data is merged into the state offset by 128-bits, which
-      // implies prefering seed bytes [16..31, ..., 208..223]. Since the
+      // implies preferring seed bytes [16..31, ..., 208..223]. Since the
       // buffer is 32-bit values, we swap the corresponding buffer positions in
       // 128-bit chunks.
       size_t dst = kBufferSize;

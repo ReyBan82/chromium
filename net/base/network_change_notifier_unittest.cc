@@ -5,9 +5,11 @@
 #include "net/base/network_change_notifier.h"
 
 #include "base/run_loop.h"
+#include "base/test/run_until.h"
 #include "build/build_config.h"
 #include "net/base/mock_network_change_notifier.h"
 #include "net/base/network_interfaces.h"
+#include "net/test/test_connection_cost_observer.h"
 #include "net/test/test_with_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -55,7 +57,7 @@ TEST(NetworkChangeNotifierTest, NetMaxBandwidthRange) {
       EXPECT_LE(100.0, max_bandwidth);
       break;
     case NetworkChangeNotifier::CONNECTION_5G:
-      // TODO(crbug.com/1127134): Expect proper bounds once we have introduced
+      // TODO(crbug.com/40148439): Expect proper bounds once we have introduced
       // subtypes for 5G connections.
       EXPECT_EQ(std::numeric_limits<double>::infinity(), max_bandwidth);
       break;
@@ -69,6 +71,12 @@ TEST(NetworkChangeNotifierTest, NetMaxBandwidthRange) {
   }
 }
 
+#if !BUILDFLAG(IS_IOS)
+// Tests that ConnectionTypeFromInterfaceList() works as expected.
+//
+// As the method is not available on iOS (as the connection type cannot be
+// retrieved for a NetworkInterface using the public API) disable the test
+// on that OS.
 TEST(NetworkChangeNotifierTest, ConnectionTypeFromInterfaceList) {
   NetworkInterfaceList list;
 
@@ -97,7 +105,15 @@ TEST(NetworkChangeNotifierTest, ConnectionTypeFromInterfaceList) {
     }
   }
 }
+#endif
 
+#if !BUILDFLAG(IS_IOS)
+// Tests that ConnectionTypeFromInterfaceList() works as expected and that
+// the Teredo pseudo interface is ignored on Windows.
+//
+// As the method is not available on iOS (as the connection type cannot be
+// retrieved for a NetworkInterface using the public API) disable the test
+// on that OS.
 TEST(NetworkChangeNotifierTest, IgnoreTeredoOnWindows) {
   NetworkInterfaceList list;
   NetworkInterface interface_teredo;
@@ -113,7 +129,15 @@ TEST(NetworkChangeNotifierTest, IgnoreTeredoOnWindows) {
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 #endif
 }
+#endif
 
+#if !BUILDFLAG(IS_IOS)
+// Tests that ConnectionTypeFromInterfaceList() works as expected and that
+// Air Drop interfaces are ignored on macOS.
+//
+// As the method is not available on iOS (as the connection type cannot be
+// retrieved for a NetworkInterface using the public API) disable the test
+// on that OS.
 TEST(NetworkChangeNotifierTest, IgnoreAirdropOnMac) {
   NetworkInterfaceList list;
   NetworkInterface interface_airdrop;
@@ -122,7 +146,7 @@ TEST(NetworkChangeNotifierTest, IgnoreAirdropOnMac) {
   interface_airdrop.friendly_name = "awdl0";
   interface_airdrop.address =
       // Link-local IPv6 address
-      IPAddress({0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4});
+      IPAddress(0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4);
   list.push_back(interface_airdrop);
 
 #if BUILDFLAG(IS_APPLE)
@@ -133,7 +157,15 @@ TEST(NetworkChangeNotifierTest, IgnoreAirdropOnMac) {
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 #endif
 }
+#endif
 
+#if !BUILDFLAG(IS_IOS)
+// Tests that ConnectionTypeFromInterfaceList() works as expected and that
+// tunnel interfaces are ignored on macOS.
+//
+// As the method is not available on iOS (as the connection type cannot be
+// retrieved for a NetworkInterface using the public API) disable the test
+// on that OS.
 TEST(NetworkChangeNotifierTest, IgnoreTunnelsOnMac) {
   NetworkInterfaceList list;
   NetworkInterface interface_tunnel;
@@ -142,7 +174,7 @@ TEST(NetworkChangeNotifierTest, IgnoreTunnelsOnMac) {
   interface_tunnel.friendly_name = "utun0";
   interface_tunnel.address =
       // Link-local IPv6 address
-      IPAddress({0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 2, 1});
+      IPAddress(0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 3, 2, 1);
   list.push_back(interface_tunnel);
 
 #if BUILDFLAG(IS_APPLE)
@@ -153,7 +185,15 @@ TEST(NetworkChangeNotifierTest, IgnoreTunnelsOnMac) {
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 #endif
 }
+#endif
 
+#if !BUILDFLAG(IS_IOS)
+// Tests that ConnectionTypeFromInterfaceList() works as expected and that
+// disconnected ethernet interfaces are ignored on macOS.
+//
+// As the method is not available on iOS (as the connection type cannot be
+// retrieved for a NetworkInterface using the public API) disable the test
+// on that OS.
 TEST(NetworkChangeNotifierTest, IgnoreDisconnectedEthernetOnMac) {
   NetworkInterfaceList list;
   NetworkInterface interface_ethernet;
@@ -162,7 +202,7 @@ TEST(NetworkChangeNotifierTest, IgnoreDisconnectedEthernetOnMac) {
   interface_ethernet.friendly_name = "en5";
   interface_ethernet.address =
       // Link-local IPv6 address
-      IPAddress({0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 2, 3});
+      IPAddress(0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 1, 2, 3);
   list.push_back(interface_ethernet);
 
 #if BUILDFLAG(IS_APPLE)
@@ -173,7 +213,15 @@ TEST(NetworkChangeNotifierTest, IgnoreDisconnectedEthernetOnMac) {
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 #endif
 }
+#endif
 
+#if !BUILDFLAG(IS_IOS)
+// Tests that ConnectionTypeFromInterfaceList() works as expected and that
+// VMWare virtual interfaces are ignored.
+//
+// As the method is not available on iOS (as the connection type cannot be
+// retrieved for a NetworkInterface using the public API) disable the test
+// on that OS.
 TEST(NetworkChangeNotifierTest, IgnoreVMInterfaces) {
   NetworkInterfaceList list;
   NetworkInterface interface_vmnet_linux;
@@ -191,6 +239,7 @@ TEST(NetworkChangeNotifierTest, IgnoreVMInterfaces) {
   EXPECT_EQ(NetworkChangeNotifier::CONNECTION_NONE,
             NetworkChangeNotifier::ConnectionTypeFromInterfaceList(list));
 }
+#endif
 
 TEST(NetworkChangeNotifierTest, GetConnectionSubtype) {
   // Call GetConnectionSubtype() and ensure that there is no crash.
@@ -226,37 +275,17 @@ TEST_F(NetworkChangeNotifierMockedTest, TriggerNonSystemDnsChange) {
   NetworkChangeNotifier::RemoveDNSObserver(&observer);
 }
 
-class TestConnectionCostObserver
-    : public NetworkChangeNotifier::ConnectionCostObserver {
- public:
-  void OnConnectionCostChanged(
-      NetworkChangeNotifier::ConnectionCost cost) override {
-    cost_changed_inputs_.push_back(cost);
-    ++cost_changed_calls_;
-  }
-
-  int cost_changed_calls() const { return cost_changed_calls_; }
-  std::vector<NetworkChangeNotifier::ConnectionCost> cost_changed_inputs()
-      const {
-    return cost_changed_inputs_;
-  }
-
- private:
-  int cost_changed_calls_ = 0;
-  std::vector<NetworkChangeNotifier::ConnectionCost> cost_changed_inputs_;
-};
-
 TEST_F(NetworkChangeNotifierMockedTest, TriggerConnectionCostChange) {
   TestConnectionCostObserver observer;
   NetworkChangeNotifier::AddConnectionCostObserver(&observer);
 
-  ASSERT_EQ(0, observer.cost_changed_calls());
+  ASSERT_EQ(0u, observer.cost_changed_calls());
 
   NetworkChangeNotifier::NotifyObserversOfConnectionCostChangeForTests(
       NetworkChangeNotifier::CONNECTION_COST_METERED);
   base::RunLoop().RunUntilIdle();
 
-  EXPECT_EQ(1, observer.cost_changed_calls());
+  EXPECT_EQ(1u, observer.cost_changed_calls());
   EXPECT_EQ(NetworkChangeNotifier::CONNECTION_COST_METERED,
             observer.cost_changed_inputs()[0]);
 
@@ -265,7 +294,7 @@ TEST_F(NetworkChangeNotifierMockedTest, TriggerConnectionCostChange) {
       NetworkChangeNotifier::CONNECTION_COST_UNMETERED);
   base::RunLoop().RunUntilIdle();
 
-  EXPECT_EQ(1, observer.cost_changed_calls());
+  EXPECT_EQ(1u, observer.cost_changed_calls());
 }
 
 TEST_F(NetworkChangeNotifierMockedTest, ConnectionCostDefaultsToCellular) {
@@ -312,6 +341,95 @@ TEST_F(NetworkChangeNotifierConnectionCostTest, AddObserver) {
   // RunUntilIdle because the secondary work resulting from adding an observer
   // may be posted to a task queue.
   base::RunLoop().RunUntilIdle();
+}
+
+class TestLowLatencyObserver
+    : public NetworkChangeNotifier::LowLatencyNetworkChangeObserver {
+ public:
+  void OnLowLatencyNetworkChanged() override { ++calls_; }
+
+  int calls() const { return calls_; }
+
+ private:
+  int calls_ = 0;
+};
+
+TEST_F(NetworkChangeNotifierMockedTest, AddAndRemoveLowLatencyObserver) {
+  TestLowLatencyObserver observer;
+
+  NetworkChangeNotifier::AddLowLatencyNetworkChangeObserver(&observer);
+  NetworkChangeNotifier::RemoveLowLatencyNetworkChangeObserver(&observer);
+}
+
+TEST_F(NetworkChangeNotifierMockedTest, TriggerLowLatencyNetworkChange) {
+  TestLowLatencyObserver observer;
+  NetworkChangeNotifier::AddLowLatencyNetworkChangeObserver(&observer);
+
+  ASSERT_EQ(0, observer.calls());
+
+  NetworkChangeNotifier::NotifyObserversOfLowLatencyNetworkChangeForTests();
+  ASSERT_TRUE(base::test::RunUntil([&] { return observer.calls() == 1; }));
+
+  NetworkChangeNotifier::RemoveLowLatencyNetworkChangeObserver(&observer);
+
+  // Add a canary observer to wait until the notification dispatch finishes.
+  TestLowLatencyObserver canary_observer;
+  NetworkChangeNotifier::AddLowLatencyNetworkChangeObserver(&canary_observer);
+
+  NetworkChangeNotifier::NotifyObserversOfLowLatencyNetworkChangeForTests();
+
+  // Wait for the canary observer to receive the notification.
+  ASSERT_TRUE(
+      base::test::RunUntil([&] { return canary_observer.calls() == 1; }));
+
+  // Verify the removed observer did not receive the second notification.
+  EXPECT_EQ(1, observer.calls());
+
+  NetworkChangeNotifier::RemoveLowLatencyNetworkChangeObserver(
+      &canary_observer);
+}
+
+TEST_F(NetworkChangeNotifierMockedTest,
+       LowLatencyObserverTriggeredOnIPAddressChange) {
+  TestLowLatencyObserver observer;
+  NetworkChangeNotifier::AddLowLatencyNetworkChangeObserver(&observer);
+
+  ASSERT_EQ(0, observer.calls());
+
+  NetworkChangeNotifier::NotifyObserversOfIPAddressChangeForTests();
+  ASSERT_TRUE(base::test::RunUntil([&] { return observer.calls() == 1; }));
+
+  NetworkChangeNotifier::RemoveLowLatencyNetworkChangeObserver(&observer);
+}
+
+TEST_F(NetworkChangeNotifierMockedTest,
+       LowLatencyObserverTriggeredOnConnectionTypeChange) {
+  TestLowLatencyObserver observer;
+  NetworkChangeNotifier::AddLowLatencyNetworkChangeObserver(&observer);
+
+  ASSERT_EQ(0, observer.calls());
+
+  NetworkChangeNotifier::NotifyObserversOfConnectionTypeChangeForTests(
+      NetworkChangeNotifier::CONNECTION_WIFI);
+  ASSERT_TRUE(base::test::RunUntil([&] { return observer.calls() == 1; }));
+
+  NetworkChangeNotifier::RemoveLowLatencyNetworkChangeObserver(&observer);
+}
+
+TEST_F(NetworkChangeNotifierMockedTest, LowLatencyObserverNoDebouncing) {
+  TestLowLatencyObserver observer;
+  NetworkChangeNotifier::AddLowLatencyNetworkChangeObserver(&observer);
+
+  ASSERT_EQ(0, observer.calls());
+
+  constexpr int kNumNotifications = 5;
+  for (int i = 0; i < kNumNotifications; ++i) {
+    NetworkChangeNotifier::NotifyObserversOfLowLatencyNetworkChangeForTests();
+  }
+  ASSERT_TRUE(base::test::RunUntil(
+      [&] { return observer.calls() == kNumNotifications; }));
+
+  NetworkChangeNotifier::RemoveLowLatencyNetworkChangeObserver(&observer);
 }
 
 }  // namespace net

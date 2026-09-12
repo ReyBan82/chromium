@@ -7,7 +7,7 @@
 
 #include <memory>
 
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace ui {
 
@@ -26,14 +26,6 @@ class OverlayManagerOzone {
   bool allow_sync_and_real_buffer_page_flip_testing() const {
     return allow_sync_and_real_buffer_page_flip_testing_;
   }
-
-  // Tell the manager that the overlay delegation is enabled. This is only
-  // useful for Wayland as checking for overlay support depends on
-  // features::IsDelegatedCompositingEnabled, which cannot be accessed from
-  // //ui/ozone.
-  // TODO(msisov, petermcneeley): remove this once Wayland uses only delegated
-  // context.
-  virtual void SetContextDelegated() {}
 
  protected:
   // TODO(fangzhoug): Some Chrome OS boards still use the legacy video decoder.

@@ -36,7 +36,7 @@ class FaviconClient;
 // case of an error.
 class FaviconServiceImpl : public FaviconService {
  public:
-  // |history_service| most not be nullptr and  must outlive this object.
+  // `history_service` most not be nullptr and  must outlive this object.
   FaviconServiceImpl(std::unique_ptr<FaviconClient> favicon_client,
                      history::HistoryService* history_service);
 
@@ -145,21 +145,11 @@ class FaviconServiceImpl : public FaviconService {
 
   // Intermediate callback for GetFaviconImage() and GetFaviconImageForPageURL()
   // so that history service can deal solely with FaviconResultsCallback.
-  // Builds favicon_base::FaviconImageResult from |favicon_bitmap_results| and
-  // runs |callback|.
-  void RunFaviconImageCallbackWithBitmapResults(
+  // Builds favicon_base::FaviconImageResult from `favicon_bitmap_results` and
+  // runs `callback`.
+  static void RunFaviconImageCallbackWithBitmapResults(
       favicon_base::FaviconImageCallback callback,
       int desired_size_in_dip,
-      const std::vector<favicon_base::FaviconRawBitmapResult>&
-          favicon_bitmap_results);
-
-  // Intermediate callback for GetRawFavicon() and GetRawFaviconForPageURL()
-  // so that history service can deal solely with FaviconResultsCallback.
-  // Resizes favicon_base::FaviconRawBitmapResult if necessary and runs
-  // |callback|.
-  void RunFaviconRawBitmapCallbackWithBitmapResults(
-      favicon_base::FaviconRawBitmapCallback callback,
-      int desired_size_in_pixel,
       const std::vector<favicon_base::FaviconRawBitmapResult>&
           favicon_bitmap_results);
 

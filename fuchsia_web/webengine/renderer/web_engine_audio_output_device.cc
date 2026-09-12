@@ -6,12 +6,16 @@
 
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/logging.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "base/memory/writable_shared_memory_region.h"
 #include "base/no_destructor.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread.h"
+#include "base/types/pass_key.h"
+#include "media/base/audio_bus.h"
 #include "media/base/audio_glitch_info.h"
+#include "media/base/audio_sample_types.h"
 #include "media/base/audio_timestamp_helper.h"
 
 namespace {
@@ -26,7 +30,7 @@ constexpr size_t kNumBuffers = 4;
 // keep latency reasonably low, while making playback reliable under normal
 // conditions.
 //
-// TODO(crbug.com/1153909): It may be possible to reduce this value to reduce
+// TODO(crbug.com/40159229): It may be possible to reduce this value to reduce
 // total latency, but that requires that an elevated scheduling profile is
 // applied to this thread.
 constexpr base::TimeDelta kLeadTimeExtra = base::Milliseconds(20);
@@ -59,8 +63,8 @@ scoped_refptr<base::SingleThreadTaskRunner> GetDefaultAudioTaskRunner() {
 scoped_refptr<WebEngineAudioOutputDevice> WebEngineAudioOutputDevice::Create(
     fidl::InterfaceHandle<fuchsia::media::AudioConsumer> audio_consumer_handle,
     scoped_refptr<base::SingleThreadTaskRunner> task_runner) {
-  scoped_refptr<WebEngineAudioOutputDevice> result(
-      new WebEngineAudioOutputDevice(task_runner));
+  auto result = base::MakeRefCounted<WebEngineAudioOutputDevice>(
+      base::PassKey<WebEngineAudioOutputDevice>(), task_runner);
   task_runner->PostTask(
       FROM_HERE,
       base::BindOnce(
@@ -78,6 +82,7 @@ WebEngineAudioOutputDevice::CreateOnDefaultThread(
 }
 
 WebEngineAudioOutputDevice::WebEngineAudioOutputDevice(
+    base::PassKey<WebEngineAudioOutputDevice>,
     scoped_refptr<base::SingleThreadTaskRunner> task_runner)
     : task_runner_(std::move(task_runner)) {}
 
@@ -148,7 +153,7 @@ bool WebEngineAudioOutputDevice::SetVolume(double volume) {
 media::OutputDeviceInfo WebEngineAudioOutputDevice::GetOutputDeviceInfo() {
   // AudioConsumer doesn't provider any information about the output device.
   //
-  // TODO(crbug.com/852834): Update this method when that functionality is
+  // TODO(crbug.com/42050621): Update this method when that functionality is
   // implemented.
   return media::OutputDeviceInfo(
       std::string(), media::OUTPUT_DEVICE_STATUS_OK,
@@ -428,9 +433,13 @@ void WebEngineAudioOutputDevice::PumpSamples(base::TimeTicks playback_time) {
     int buffer_index = available_buffers_indices_.back();
     available_buffers_indices_.pop_back();
 
-    audio_bus_->ToInterleaved<media::Float32SampleTypeTraitsNoClip>(
-        frames_filled,
-        static_cast<float*>(stream_sink_buffers_[buffer_index].memory()));
+    const size_t samples_filled = frames_filled * audio_bus_->channels();
+    auto samples_dest =
+        stream_sink_buffers_[buffer_index].GetMemoryAsSpan<float>().first(
+            samples_filled);
+    audio_bus_->ToInterleavedPartial<media::Float32SampleTypeTraitsNoClip>(
+        0u, stream_sink_buffers_[buffer_index].GetMemoryAsSpan<float>().first(
+                samples_filled));
 
     fuchsia::media::StreamPacket packet;
     packet.payload_buffer_id = buffer_index;
@@ -438,7 +447,8 @@ void WebEngineAudioOutputDevice::PumpSamples(base::TimeTicks playback_time) {
                      media_pos_frames_, params_.sample_rate())
                      .InNanoseconds();
     packet.payload_offset = 0;
-    packet.payload_size = frames_filled * sizeof(float) * params_.channels();
+    packet.payload_size =
+        base::as_bytes(base::allow_nonunique_obj, samples_dest).size();
 
     stream_sink_->SendPacket(std::move(packet), [this, buffer_index]() {
       OnStreamSendDone(buffer_index);

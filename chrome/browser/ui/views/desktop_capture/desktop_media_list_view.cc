@@ -4,49 +4,51 @@
 
 #include "chrome/browser/ui/views/desktop_capture/desktop_media_list_view.h"
 
+#include <algorithm>
 #include <string>
-#include <utility>
 
-#include "base/cxx17_backports.h"
-#include "base/ranges/algorithm.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/media/webrtc/desktop_media_list.h"
 #include "chrome/browser/media/webrtc/window_icon_util.h"
-#include "chrome/browser/ui/views/desktop_capture/desktop_media_picker_views.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/views/desktop_capture/desktop_media_source_view.h"
 #include "chrome/browser/ui/views/frame/browser_view.h"
-#include "chrome/common/chrome_switches.h"
-#include "chrome/grit/theme_resources.h"
-#include "extensions/grit/extensions_browser_resources.h"
 #include "ui/accessibility/ax_enums.mojom.h"
-#include "ui/accessibility/ax_node_data.h"
-#include "ui/base/resource/resource_bundle.h"
+#include "ui/views/accessibility/view_accessibility.h"
+#include "ui/views/border.h"
+#include "ui/views/layout/table_layout.h"
 #include "ui/views/view_utils.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/grit/theme_resources.h"
+#include "extensions/grit/extensions_browser_resources.h"
 #include "ui/aura/window.h"
+#include "ui/base/resource/resource_bundle.h"
 #endif
 
 using content::DesktopMediaID;
 
 namespace {
 
-const int kDesktopMediaSourceViewGroupId = 1;
+constexpr int kDesktopMediaSourceViewGroupId = 1;
+constexpr int kItemSpacing = 4;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 // Here we are going to display default app icon for app windows without an
 // icon, and display product logo for chrome browser windows.
 gfx::ImageSkia LoadDefaultIcon(aura::Window* window) {
   BrowserView* browser_view =
       BrowserView::GetBrowserViewForNativeWindow(window);
-  Browser* browser = browser_view ? browser_view->browser() : nullptr;
+  BrowserWindowInterface* browser =
+      browser_view ? browser_view->browser() : nullptr;
 
   // Apps could be launched in a view other than BrowserView, so we count those
   // windows without Browser association as apps.
   // Technically dev tool is actually a special app, but we would like to
   // display product logo for it, because intuitively it is internal to browser.
   bool is_app =
-      !browser || browser->is_type_app() || browser->is_type_app_popup();
+      !browser ||
+      browser->GetType() == BrowserWindowInterface::Type::TYPE_APP ||
+      browser->GetType() == BrowserWindowInterface::Type::TYPE_APP_POPUP;
   int idr = is_app ? IDR_APP_DEFAULT_ICON : IDR_PRODUCT_LOGO_32;
 
   ui::ResourceBundle& rb = ui::ResourceBundle::GetSharedInstance();
@@ -59,6 +61,13 @@ DesktopMediaSourceView* AsDesktopMediaSourceView(views::View* view) {
   return static_cast<DesktopMediaSourceView*>(view);
 }
 
+// Returns the number of rows, each of size `num_columns`, required to display
+// `num_elements`.
+size_t NumRows(size_t num_elements, size_t num_columns) {
+  CHECK_GT(num_columns, 0u);
+  return (num_elements + num_columns - 1) / num_columns;
+}
+
 }  // namespace
 
 DesktopMediaListView::DesktopMediaListView(
@@ -66,42 +75,22 @@ DesktopMediaListView::DesktopMediaListView(
     DesktopMediaSourceViewStyle generic_style,
     DesktopMediaSourceViewStyle single_style,
     const std::u16string& accessible_name)
-    : controller_(controller),
+    : controller_(controller ? controller->GetWeakPtr() : nullptr),
       single_style_(single_style),
-      generic_style_(generic_style),
-      active_style_(&single_style_),
-      accessible_name_(accessible_name) {
-  SetStyle(&single_style_);
+      generic_style_(generic_style) {
+  SetBorder(views::CreateEmptyBorder(16));
+  SetLayoutManager(std::make_unique<views::TableLayout>());
+  SetStyle(single_style_);
+
+  GetViewAccessibility().SetRole(ax::mojom::Role::kGroup);
+  GetViewAccessibility().SetName(accessible_name);
 }
 
-DesktopMediaListView::~DesktopMediaListView() {}
+DesktopMediaListView::~DesktopMediaListView() = default;
 
 void DesktopMediaListView::OnSelectionChanged() {
-  controller_->OnSourceSelectionChanged();
-}
-
-gfx::Size DesktopMediaListView::CalculatePreferredSize() const {
-  int total_rows =
-      (static_cast<int>(children().size()) + active_style_->columns - 1) /
-      active_style_->columns;
-  return gfx::Size(active_style_->columns * active_style_->item_size.width(),
-                   total_rows * active_style_->item_size.height());
-}
-
-void DesktopMediaListView::Layout() {
-  // Children lay out in a grid, all with the same size and without padding.
-  const int width = active_style_->item_size.width();
-  const int height = active_style_->item_size.height();
-  auto i = children().begin();
-  // Child order is left-to-right, top-to-bottom, so lay out row-major.  The
-  // last row may not be full, so the inner loop will need to be careful about
-  // the child count anyway, so don't bother to compute a row count.
-  for (int y = 0;; y += height) {
-    for (int x = 0, col = 0; col < active_style_->columns; ++col, x += width) {
-      if (i == children().end())
-        return;
-      (*i++)->SetBounds(x, y, width, height);
-    }
+  if (controller_) {
+    controller_->OnSourceSelectionChanged();
   }
 }
 
@@ -109,10 +98,10 @@ bool DesktopMediaListView::OnKeyPressed(const ui::KeyEvent& event) {
   int position_increment = 0;
   switch (event.key_code()) {
     case ui::VKEY_UP:
-      position_increment = -active_style_->columns;
+      position_increment = -static_cast<int>(active_style_.columns);
       break;
     case ui::VKEY_DOWN:
-      position_increment = active_style_->columns;
+      position_increment = static_cast<int>(active_style_.columns);
       break;
     case ui::VKEY_LEFT:
       position_increment = -1;
@@ -124,8 +113,7 @@ bool DesktopMediaListView::OnKeyPressed(const ui::KeyEvent& event) {
       return false;
   }
 
-  if (position_increment == 0)
-    return false;
+  CHECK_NE(position_increment, 0);
 
   views::View* selected = GetSelectedView();
   views::View* new_selected = nullptr;
@@ -140,21 +128,23 @@ bool DesktopMediaListView::OnKeyPressed(const ui::KeyEvent& event) {
                (index + position_increment) > (children().size() - 1)) {
       new_index = children().size() - 1;
     }
-    if (index != new_index)
+    if (index != new_index) {
       new_selected = children()[new_index];
+    }
   } else if (!children().empty()) {
     new_selected = children().front();
   }
 
-  if (new_selected)
+  if (new_selected) {
     new_selected->RequestFocus();
+  }
   return true;
 }
 
-absl::optional<content::DesktopMediaID> DesktopMediaListView::GetSelection() {
+std::optional<content::DesktopMediaID> DesktopMediaListView::GetSelection() {
   DesktopMediaSourceView* view = GetSelectedView();
-  return view ? absl::optional<content::DesktopMediaID>(view->source_id())
-              : absl::nullopt;
+  return view ? std::optional<content::DesktopMediaID>(view->source_id())
+              : std::nullopt;
 }
 
 DesktopMediaListController::SourceListListener*
@@ -170,39 +160,54 @@ void DesktopMediaListView::ClearSelection() {
 }
 
 void DesktopMediaListView::OnSourceAdded(size_t index) {
+  if (!controller_) {
+    return;
+  }
   const DesktopMediaList::Source& source = controller_->GetSource(index);
 
-  // We are going to have a second item, apply the generic style.
-  if (children().size() == 1)
-    SetStyle(&generic_style_);
-
   DesktopMediaSourceView* source_view =
-      new DesktopMediaSourceView(this, source.id, *active_style_);
+      new DesktopMediaSourceView(this, source.id, active_style_);
 
   source_view->SetName(source.name);
   source_view->SetGroup(kDesktopMediaSourceViewGroupId);
   if (source.id.type == DesktopMediaID::TYPE_WINDOW) {
     gfx::ImageSkia icon_image = GetWindowIcon(source.id);
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     // Empty icons are used to represent default icon for aura windows. By
     // detecting this, we load the default icon from resource.
     if (icon_image.isNull()) {
       aura::Window* window = DesktopMediaID::GetNativeWindowById(source.id);
-      if (window)
+      if (window) {
         icon_image = LoadDefaultIcon(window);
+      }
     }
 #endif
     source_view->SetIcon(icon_image);
   }
   AddChildViewAt(source_view, index);
 
-  if ((children().size() - 1) % active_style_->columns == 0)
+  if (children().size() == 2) {
+    // We just added a second item, apply the generic style.
+    SetStyle(generic_style_);
+  } else if ((children().size() == 1) ||
+             ((children().size() - 1) % active_style_.columns == 0)) {
+    auto* const layout = static_cast<views::TableLayout*>(GetLayoutManager());
+    if (layout->NumRows() > 0) {
+      layout->AddPaddingRow(views::TableLayout::kFixedSize, kItemSpacing);
+    }
+    layout->AddRows(1, views::TableLayout::kFixedSize,
+                    active_style_.item_size.height());
     controller_->OnSourceListLayoutChanged();
+  }
 
   PreferredSizeChanged();
 }
 
 void DesktopMediaListView::OnSourceRemoved(size_t index) {
+  if (!controller_) {
+    return;
+  }
+
   DesktopMediaSourceView* view = AsDesktopMediaSourceView(children()[index]);
   DCHECK(view);
 
@@ -210,15 +215,19 @@ void DesktopMediaListView::OnSourceRemoved(size_t index) {
   RemoveChildView(view);
   delete view;
 
-  if (was_selected)
+  if (was_selected) {
     OnSelectionChanged();
+  }
 
-  if (children().size() % active_style_->columns == 0)
+  if (children().size() == 1) {
+    // Apply single-item styling when the second source is removed.
+    SetStyle(single_style_);
+  } else if (children().empty() ||
+             (children().size() % active_style_.columns == 0)) {
+    auto* const layout = static_cast<views::TableLayout*>(GetLayoutManager());
+    layout->RemoveRows(layout->NumRows() == 1 ? 1 : 2);  // 1 actual, 1 padding
     controller_->OnSourceListLayoutChanged();
-
-  // Apply single-item styling when the second source is removed.
-  if (children().size() == 1)
-    SetStyle(&single_style_);
+  }
 
   PreferredSizeChanged();
 }
@@ -229,6 +238,9 @@ void DesktopMediaListView::OnSourceMoved(size_t old_index, size_t new_index) {
 }
 
 void DesktopMediaListView::OnSourceNameChanged(size_t index) {
+  if (!controller_) {
+    return;
+  }
   const DesktopMediaList::Source& source = controller_->GetSource(index);
   DesktopMediaSourceView* source_view =
       AsDesktopMediaSourceView(children()[index]);
@@ -236,6 +248,9 @@ void DesktopMediaListView::OnSourceNameChanged(size_t index) {
 }
 
 void DesktopMediaListView::OnSourceThumbnailChanged(size_t index) {
+  if (!controller_) {
+    return;
+  }
   const DesktopMediaList::Source& source = controller_->GetSource(index);
   DesktopMediaSourceView* source_view =
       AsDesktopMediaSourceView(children()[index]);
@@ -248,26 +263,55 @@ void DesktopMediaListView::OnDelegatedSourceListSelection() {
   // If the SourceList is delegated, we will only have one (or zero), sources.
   // As long as we have one source, select it once we get notified that the user
   // made a selection in the delegated source list.
-  if (!children().empty())
+  if (!children().empty()) {
     children().front()->RequestFocus();
+  }
 }
 
-void DesktopMediaListView::SetStyle(DesktopMediaSourceViewStyle* style) {
-  active_style_ = style;
-  controller_->SetThumbnailSize(style->image_rect.size());
+void DesktopMediaListView::SetStyle(const DesktopMediaSourceViewStyle& style) {
+  if (!controller_) {
+    return;
+  }
 
-  for (auto* child : children())
-    AsDesktopMediaSourceView(child)->SetStyle(*active_style_);
+  const size_t old_columns = active_style_.columns;
+  const gfx::Size old_item_size = active_style_.item_size;
+  active_style_ = style;
+
+  controller_->SetThumbnailSize(active_style_.image_rect.size());
+
+  for (views::View* child : children()) {
+    AsDesktopMediaSourceView(child)->SetStyle(active_style_);
+  }
+
+  if (active_style_.columns != old_columns ||
+      active_style_.item_size != old_item_size) {
+    auto* const layout = static_cast<views::TableLayout*>(GetLayoutManager());
+    layout->RemoveRows(layout->NumRows());
+    layout->RemoveColumns(layout->NumColumns());
+    for (size_t col = 0; col < active_style_.columns; ++col) {
+      if (col) {
+        layout->AddPaddingColumn(views::TableLayout::kFixedSize, kItemSpacing);
+      }
+      layout->AddColumn(
+          views::LayoutAlignment::kStretch, views::LayoutAlignment::kStretch, 0,
+          views::TableLayout::ColumnSize::kFixed,
+          active_style_.item_size.width(), active_style_.item_size.width());
+    }
+    const size_t rows = NumRows(children().size(), active_style_.columns);
+    for (size_t row = 0; row < rows; ++row) {
+      if (row) {
+        layout->AddPaddingRow(views::TableLayout::kFixedSize, kItemSpacing);
+      }
+      layout->AddRows(1, views::TableLayout::kFixedSize,
+                      active_style_.item_size.height());
+    }
+    controller_->OnSourceListLayoutChanged();
+  }
 }
 
 DesktopMediaSourceView* DesktopMediaListView::GetSelectedView() {
   const auto i =
-      base::ranges::find_if(children(), &DesktopMediaSourceView::GetSelected,
-                            &AsDesktopMediaSourceView);
+      std::ranges::find_if(children(), &DesktopMediaSourceView::GetSelected,
+                           &AsDesktopMediaSourceView);
   return (i == children().cend()) ? nullptr : AsDesktopMediaSourceView(*i);
-}
-
-void DesktopMediaListView::GetAccessibleNodeData(ui::AXNodeData* node_data) {
-  node_data->role = ax::mojom::Role::kGroup;
-  node_data->SetNameChecked(accessible_name_);
 }

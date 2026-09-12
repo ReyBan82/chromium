@@ -31,9 +31,7 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_WINDOW_FEATURES_H_
 #define THIRD_PARTY_BLINK_PUBLIC_WEB_WEB_WINDOW_FEATURES_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
-
-#include "third_party/blink/public/common/navigation/impression.h"
+#include "third_party/blink/public/platform/web_string.h"
 
 namespace blink {
 
@@ -48,6 +46,7 @@ struct WebWindowFeatures {
   bool height_set = false;
 
   bool is_popup = false;
+  bool always_on_top = false;
 
   // The members above this line are transferred through mojo
   // in the form of |struct WindowFeatures| defined in window_features.mojom,
@@ -56,13 +55,10 @@ struct WebWindowFeatures {
   bool resizable = true;
 
   bool noopener = false;
+  bool explicit_opener = false;
   bool noreferrer = false;
   bool background = false;
   bool persistent = false;
-
-  // Represents the attribution source declared by Attribution Reporting related
-  // window features, if any.
-  absl::optional<Impression> impression;
 };
 
 }  // namespace blink

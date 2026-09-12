@@ -4,7 +4,27 @@
 
 #include "components/autofill/core/browser/payments/card_unmask_challenge_option.h"
 
+#include <stddef.h>
+
+#include <string>
+
 namespace autofill {
+
+Vcn3dsChallengeOptionMetadata::Vcn3dsChallengeOptionMetadata() = default;
+
+Vcn3dsChallengeOptionMetadata::Vcn3dsChallengeOptionMetadata(
+    const Vcn3dsChallengeOptionMetadata&) = default;
+
+Vcn3dsChallengeOptionMetadata::Vcn3dsChallengeOptionMetadata(
+    Vcn3dsChallengeOptionMetadata&&) = default;
+
+Vcn3dsChallengeOptionMetadata& Vcn3dsChallengeOptionMetadata::operator=(
+    const Vcn3dsChallengeOptionMetadata&) = default;
+
+Vcn3dsChallengeOptionMetadata& Vcn3dsChallengeOptionMetadata::operator=(
+    Vcn3dsChallengeOptionMetadata&&) = default;
+
+Vcn3dsChallengeOptionMetadata::~Vcn3dsChallengeOptionMetadata() = default;
 
 CardUnmaskChallengeOption::CardUnmaskChallengeOption(
     ChallengeOptionId id,

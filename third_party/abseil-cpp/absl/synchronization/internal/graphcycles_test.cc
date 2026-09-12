@@ -14,15 +14,23 @@
 
 #include "absl/synchronization/internal/graphcycles.h"
 
+#include <climits>
+#include <cstdint>
+#include <cstdio>
+#include <iterator>
 #include <map>
 #include <random>
+#include <string>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "gtest/gtest.h"
-#include "absl/base/internal/raw_logging.h"
+#include "absl/base/config.h"
 #include "absl/base/macros.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -47,8 +55,8 @@ static GraphId Get(const IdMap& id, int num) {
 }
 
 // Return whether "to" is reachable from "from".
-static bool IsReachable(Edges *edges, int from, int to,
-                        std::unordered_set<int> *seen) {
+static bool IsReachable(Edges* edges, int from, int to,
+                        absl::flat_hash_set<int>* seen) {
   seen->insert(from);     // we are investigating "from"; don't do it again
   if (from == to) return true;
   for (const auto &edge : *edges) {
@@ -65,56 +73,56 @@ static bool IsReachable(Edges *edges, int from, int to,
 }
 
 static void PrintEdges(Edges *edges) {
-  ABSL_RAW_LOG(INFO, "EDGES (%zu)", edges->size());
+  LOG(INFO) << "EDGES (" << edges->size() << ")";
   for (const auto &edge : *edges) {
     int a = edge.from;
     int b = edge.to;
-    ABSL_RAW_LOG(INFO, "%d %d", a, b);
+    LOG(INFO) << a << " " << b;
   }
-  ABSL_RAW_LOG(INFO, "---");
+  LOG(INFO) << "---";
 }
 
 static void PrintGCEdges(Nodes *nodes, const IdMap &id, GraphCycles *gc) {
-  ABSL_RAW_LOG(INFO, "GC EDGES");
+  LOG(INFO) << "GC EDGES";
   for (int a : *nodes) {
     for (int b : *nodes) {
       if (gc->HasEdge(Get(id, a), Get(id, b))) {
-        ABSL_RAW_LOG(INFO, "%d %d", a, b);
+        LOG(INFO) << a << " " << b;
       }
     }
   }
-  ABSL_RAW_LOG(INFO, "---");
+  LOG(INFO) << "---";
 }
 
 static void PrintTransitiveClosure(Nodes *nodes, Edges *edges) {
-  ABSL_RAW_LOG(INFO, "Transitive closure");
+  LOG(INFO) << "Transitive closure";
   for (int a : *nodes) {
     for (int b : *nodes) {
-      std::unordered_set<int> seen;
+      absl::flat_hash_set<int> seen;
       if (IsReachable(edges, a, b, &seen)) {
-        ABSL_RAW_LOG(INFO, "%d %d", a, b);
+        LOG(INFO) << a << " " << b;
       }
     }
   }
-  ABSL_RAW_LOG(INFO, "---");
+  LOG(INFO) << "---";
 }
 
 static void PrintGCTransitiveClosure(Nodes *nodes, const IdMap &id,
                                      GraphCycles *gc) {
-  ABSL_RAW_LOG(INFO, "GC Transitive closure");
+  LOG(INFO) << "GC Transitive closure";
   for (int a : *nodes) {
     for (int b : *nodes) {
       if (gc->IsReachable(Get(id, a), Get(id, b))) {
-        ABSL_RAW_LOG(INFO, "%d %d", a, b);
+        LOG(INFO) << a << " " << b;
       }
     }
   }
-  ABSL_RAW_LOG(INFO, "---");
+  LOG(INFO) << "---";
 }
 
 static void CheckTransitiveClosure(Nodes *nodes, Edges *edges, const IdMap &id,
                                    GraphCycles *gc) {
-  std::unordered_set<int> seen;
+  absl::flat_hash_set<int> seen;
   for (const auto &a : *nodes) {
     for (const auto &b : *nodes) {
       seen.clear();
@@ -125,9 +133,8 @@ static void CheckTransitiveClosure(Nodes *nodes, Edges *edges, const IdMap &id,
         PrintGCEdges(nodes, id, gc);
         PrintTransitiveClosure(nodes, edges);
         PrintGCTransitiveClosure(nodes, id, gc);
-        ABSL_RAW_LOG(FATAL, "gc_reachable %s reachable %s a %d b %d",
-                     gc_reachable ? "true" : "false",
-                     reachable ? "true" : "false", a, b);
+        LOG(FATAL) << "gc_reachable " << gc_reachable << " reachable "
+                   << reachable << " a " << a << " b " << b;
       }
     }
   }
@@ -142,7 +149,7 @@ static void CheckEdges(Nodes *nodes, Edges *edges, const IdMap &id,
     if (!gc->HasEdge(Get(id, a), Get(id, b))) {
       PrintEdges(edges);
       PrintGCEdges(nodes, id, gc);
-      ABSL_RAW_LOG(FATAL, "!gc->HasEdge(%d, %d)", a, b);
+      LOG(FATAL) << "!gc->HasEdge(" << a << ", " << b << ")";
     }
   }
   for (const auto &a : *nodes) {
@@ -155,13 +162,12 @@ static void CheckEdges(Nodes *nodes, Edges *edges, const IdMap &id,
   if (count != edges->size()) {
     PrintEdges(edges);
     PrintGCEdges(nodes, id, gc);
-    ABSL_RAW_LOG(FATAL, "edges->size() %zu  count %d", edges->size(), count);
+    LOG(FATAL) << "edges->size() " << edges->size() << "  count " << count;
   }
 }
 
 static void CheckInvariants(const GraphCycles &gc) {
-  if (ABSL_PREDICT_FALSE(!gc.CheckInvariants()))
-    ABSL_RAW_LOG(FATAL, "CheckInvariants");
+  CHECK(gc.CheckInvariants()) << "CheckInvariants";
 }
 
 // Returns the index of a randomly chosen node in *nodes.
@@ -225,7 +231,7 @@ TEST(GraphCycles, RandomizedTest) {
       break;
 
     case 1:    // Remove a node
-      if (nodes.size() > 0) {
+      if (!nodes.empty()) {
         int node_index = RandomNode(&rng, &nodes);
         int node = nodes[node_index];
         nodes[node_index] = nodes.back();
@@ -246,7 +252,7 @@ TEST(GraphCycles, RandomizedTest) {
       break;
 
     case 2:   // Add an edge
-      if (nodes.size() > 0) {
+      if (!nodes.empty()) {
         int from = RandomNode(&rng, &nodes);
         int to = RandomNode(&rng, &nodes);
         if (EdgeIndex(&edges, nodes[from], nodes[to]) == -1) {
@@ -256,7 +262,7 @@ TEST(GraphCycles, RandomizedTest) {
             new_edge.to = nodes[to];
             edges.push_back(new_edge);
           } else {
-            std::unordered_set<int> seen;
+            absl::flat_hash_set<int> seen;
             ASSERT_TRUE(IsReachable(&edges, nodes[to], nodes[from], &seen))
                 << "Edge " << nodes[to] << "->" << nodes[from];
           }
@@ -265,7 +271,7 @@ TEST(GraphCycles, RandomizedTest) {
       break;
 
     case 3:    // Remove an edge
-      if (edges.size() > 0) {
+      if (!edges.empty()) {
         int i = RandomEdge(&rng, &edges);
         int from = edges[i].from;
         int to = edges[i].to;
@@ -278,13 +284,13 @@ TEST(GraphCycles, RandomizedTest) {
       break;
 
     case 4:   // Check a path
-      if (nodes.size() > 0) {
+      if (!nodes.empty()) {
         int from = RandomNode(&rng, &nodes);
         int to = RandomNode(&rng, &nodes);
         GraphId path[2*kMaxNodes];
         int path_len = graph_cycles.FindPath(id[nodes[from]], id[nodes[to]],
-                                             ABSL_ARRAYSIZE(path), path);
-        std::unordered_set<int> seen;
+                                             std::size(path), path);
+        absl::flat_hash_set<int> seen;
         bool reachable = IsReachable(&edges, nodes[from], nodes[to], &seen);
         bool gc_reachable =
             graph_cycles.IsReachable(Get(id, nodes[from]), Get(id, nodes[to]));
@@ -309,7 +315,7 @@ TEST(GraphCycles, RandomizedTest) {
       break;
 
     default:
-      ABSL_RAW_LOG(FATAL, "op %d", op);
+      LOG(FATAL) << "op " << op;
     }
 
     // Very rarely, test graph expansion by adding then removing many nodes.
@@ -387,10 +393,10 @@ class GraphCyclesTest : public ::testing::Test {
 
   std::string Path(int x, int y) {
     GraphId path[5];
-    int np = g_.FindPath(Get(id_, x), Get(id_, y), ABSL_ARRAYSIZE(path), path);
+    int np = g_.FindPath(Get(id_, x), Get(id_, y), std::size(path), path);
     std::string result;
     for (int i = 0; i < np; i++) {
-      if (i >= ABSL_ARRAYSIZE(path)) {
+      if (i >= int{std::size(path)}) {
         result += " ...";
         break;
       }
@@ -457,6 +463,24 @@ TEST_F(GraphCyclesTest, ManyEdges) {
   CheckInvariants(g_);
   ASSERT_FALSE(AddEdge(10, 9));
   CheckInvariants(g_);
+}
+
+TEST(GraphCycles, IntegerOverflow) {
+  GraphCycles graph_cycles;
+  uintptr_t buf = 0;
+  GraphId prev_id = graph_cycles.GetId(reinterpret_cast<void*>(buf));
+  buf += 1;
+  GraphId id = graph_cycles.GetId(reinterpret_cast<void*>(buf));
+  ASSERT_TRUE(graph_cycles.InsertEdge(prev_id, id));
+
+  // INT_MAX / 40 is enough to cause an overflow when multiplied by 41.
+  graph_cycles.TestOnlyAddNodes(INT_MAX / 40);
+
+  buf += 1;
+  GraphId newid = graph_cycles.GetId(reinterpret_cast<void*>(buf));
+  graph_cycles.HasEdge(prev_id, newid);
+
+  graph_cycles.RemoveNode(reinterpret_cast<void*>(buf));
 }
 
 }  // namespace synchronization_internal

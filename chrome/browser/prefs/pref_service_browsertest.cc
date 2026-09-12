@@ -5,6 +5,7 @@
 #include <string>
 
 #include "base/command_line.h"
+#include "base/feature_list.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/json/json_file_value_serializer.h"
@@ -13,16 +14,17 @@
 #include "base/threading/thread_restrictions.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/browser_window_state.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/pref_names.h"
+#include "chrome/test/base/chrome_test_path_utils.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "content/public/common/content_features.h"
 #include "content/public/test/browser_test.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "ui/gfx/geometry/rect.h"
@@ -30,20 +32,33 @@
 typedef InProcessBrowserTest PreservedWindowPlacement;
 using ::testing::Optional;
 
+namespace {
+
+const gfx::Rect window_frame = gfx::Rect(20, 40, 600, 600);
+
+}  // namespace
+
 IN_PROC_BROWSER_TEST_F(PreservedWindowPlacement, PRE_Test) {
-  browser()->window()->SetBounds(gfx::Rect(20, 30, 600, 600));
+  browser()->GetWindow()->SetBounds(window_frame);
 }
 
 // Fails on Chrome OS as the browser thinks it is restarting after a crash, see
-// http://crbug.com/168044
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+// http://crbug.com/40297793
+#if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_Test DISABLED_Test
 #else
 #define MAYBE_Test Test
 #endif
 IN_PROC_BROWSER_TEST_F(PreservedWindowPlacement, MAYBE_Test) {
-  gfx::Rect bounds = browser()->window()->GetBounds();
-  gfx::Rect expected_bounds(gfx::Rect(20, 30, 600, 600));
+#if BUILDFLAG(IS_LINUX)
+  if (base::FeatureList::IsEnabled(features::kInitialWebUI)) {
+    GTEST_SKIP()
+        << "Skipping test because it fails with InitialWebUI enabled on Linux. "
+           "See b/464087732.";
+  }
+#endif
+  gfx::Rect bounds = browser()->GetWindow()->GetRestoredBounds();
+  gfx::Rect expected_bounds(window_frame);
   ASSERT_EQ(expected_bounds.ToString(), bounds.ToString());
 }
 
@@ -53,7 +68,7 @@ class PreferenceServiceTest : public InProcessBrowserTest {
     base::FilePath user_data_directory;
     base::PathService::Get(chrome::DIR_USER_DATA, &user_data_directory);
 
-    original_pref_file_ = ui_test_utils::GetTestFilePath(
+    original_pref_file_ = chrome_test_utils::GetTestFilePath(
         base::FilePath()
             .AppendASCII("profiles")
             .AppendASCII("window_placement")
@@ -100,10 +115,10 @@ IN_PROC_BROWSER_TEST_F(PreferenceServiceTest, Test) {
 
   ASSERT_TRUE(root.get());
   ASSERT_TRUE(root->is_dict());
-  base::Value::Dict& root_dict = root->GetDict();
+  base::DictValue& root_dict = root->GetDict();
 
   // Retrieve the screen rect for the launched window
-  gfx::Rect bounds = browser()->window()->GetRestoredBounds();
+  gfx::Rect bounds = browser()->GetWindow()->GetRestoredBounds();
 
   // Retrieve the expected rect values from "Preferences"
   std::string kBrowserWindowPlacement(prefs::kBrowserWindowPlacement);
@@ -121,7 +136,7 @@ IN_PROC_BROWSER_TEST_F(PreferenceServiceTest, Test) {
               Optional(bounds.x() + bounds.width()));
 
   // Find if launched window is maximized.
-  bool is_window_maximized = browser()->window()->IsMaximized();
+  bool is_window_maximized = browser()->GetWindow()->IsMaximized();
   EXPECT_THAT(
       root_dict.FindBoolByDottedPath(kBrowserWindowPlacement + ".maximized"),
       Optional(is_window_maximized));

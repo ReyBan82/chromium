@@ -8,10 +8,10 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#include "base/memory/raw_ptr_exclusion.h"
-#include "base/strings/string_piece.h"
+#include "base/memory/raw_ptr.h"
 
 class PrefService;
 
@@ -39,7 +39,7 @@ class DictionaryValueUpdate;
 //
 class ScopedDictionaryPrefUpdate {
  public:
-  ScopedDictionaryPrefUpdate(PrefService* service, base::StringPiece path);
+  ScopedDictionaryPrefUpdate(PrefService* service, std::string_view path);
 
   ScopedDictionaryPrefUpdate(const ScopedDictionaryPrefUpdate&) = delete;
   ScopedDictionaryPrefUpdate& operator=(const ScopedDictionaryPrefUpdate&) =
@@ -62,9 +62,9 @@ class ScopedDictionaryPrefUpdate {
   void RecordPath(std::vector<std::string> path);
 
   // Weak pointer.
-  // `service_` is not a raw_ptr<...> for performance reasons (based on analysis
-  // of sampling profiler data).
-  RAW_PTR_EXCLUSION PrefService* const service_;
+  // `service_` uses UnprotectedInRelease | DanglingUntriaged for performance
+  // reasons (based on analysis of sampling profiler data).
+  const raw_ptr<PrefService, UnprotectedInRelease | DanglingUntriaged> service_;
   // Path of the preference being updated.
   const std::string path_;
 

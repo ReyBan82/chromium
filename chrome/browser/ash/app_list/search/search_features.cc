@@ -4,58 +4,63 @@
 
 #include "chrome/browser/ash/app_list/search/search_features.h"
 
+#include "ash/constants/ash_features.h"
 #include "base/feature_list.h"
-#include "chromeos/constants/chromeos_features.h"
+#include "chromeos/components/libsegmentation/buildflags.h"
 
 namespace search_features {
 
-BASE_FEATURE(kLauncherGameSearch,
-             "LauncherGameSearch",
+BASE_FEATURE(kLauncherImageSearch, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kLauncherLocalImageSearchConfidence,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kLauncherKeywordExtractionScoring,
-             "LauncherKeywordExtractionScoring",
+BASE_FEATURE(kLauncherLocalImageSearchRelevance,
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kLauncherQueryFederatedAnalyticsPHH,
-             "LauncherQueryFederatedAnalyticsPHH",
+BASE_FEATURE(kLauncherImageSearchIca, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kICASupportedByHardware, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kLauncherImageSearchOcr, base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kLauncherImageSearchIndexingLimit,
+             base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kLauncherImageSearchDebug,
+             "kLauncherImageSearchDebug",
              base::FEATURE_DISABLED_BY_DEFAULT);
 
-BASE_FEATURE(kLauncherFuzzyMatchForOmnibox,
-             "LauncherFuzzyMatchForOmnibox",
+BASE_FEATURE(kLauncherSearchFileScan,
+             "kLauncherSearchFileScan",
              base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kLauncherImageSearch,
-             "LauncherImageSearch",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-BASE_FEATURE(kLauncherSystemInfoAnswerCards,
-             "LauncherSystemInfoAnswerCards",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-
-bool IsLauncherGameSearchEnabled() {
-  return base::FeatureList::IsEnabled(kLauncherGameSearch) ||
-         chromeos::features::IsCloudGamingDeviceEnabled();
-}
-
-bool IsLauncherKeywordExtractionScoringEnabled() {
-  return base::FeatureList::IsEnabled(kLauncherKeywordExtractionScoring);
-}
-
-bool IsLauncherQueryFederatedAnalyticsPHHEnabled() {
-  return base::FeatureList::IsEnabled(kLauncherQueryFederatedAnalyticsPHH);
-}
-
-bool isLauncherFuzzyMatchForOmniboxEnabled() {
-  return base::FeatureList::IsEnabled(kLauncherFuzzyMatchForOmnibox);
-}
 
 bool IsLauncherImageSearchEnabled() {
-  return base::FeatureList::IsEnabled(kLauncherImageSearch);
+  return base::FeatureList::IsEnabled(
+             ash::features::kFeatureManagementLocalImageSearch) &&
+         base::FeatureList::IsEnabled(kLauncherImageSearch);
 }
 
-bool isLauncherSystemInfoAnswerCardsEnabled() {
-  return base::FeatureList::IsEnabled(kLauncherSystemInfoAnswerCards);
+// Only enable ica image search for ICA supported devices.
+bool IsLauncherImageSearchIcaEnabled() {
+  return base::FeatureList::IsEnabled(kLauncherImageSearchIca) &&
+         base::FeatureList::IsEnabled(kICASupportedByHardware);
+}
+
+bool IsLauncherImageSearchOcrEnabled() {
+  return base::FeatureList::IsEnabled(kLauncherImageSearchOcr);
+}
+
+bool IsLauncherImageSearchIndexingLimitEnabled() {
+  return base::FeatureList::IsEnabled(kLauncherImageSearchIndexingLimit);
+}
+
+bool IsLauncherImageSearchDebugEnabled() {
+  return base::FeatureList::IsEnabled(kLauncherImageSearchDebug);
+}
+
+bool IsLauncherSearchFileScanEnabled() {
+  return base::FeatureList::IsEnabled(kLauncherSearchFileScan);
 }
 
 }  // namespace search_features

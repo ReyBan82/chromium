@@ -6,15 +6,15 @@
 #define CHROME_BROWSER_ANDROID_CUSTOMTABS_TAB_INTERACTION_RECORDER_ANDROID_H_
 
 #include "base/android/jni_android.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "components/autofill/core/browser/autofill_manager.h"
+#include "components/autofill/core/browser/foundations/autofill_manager.h"
 #include "content/public/browser/document_user_data.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
-#include "url/gurl.h"
 
 namespace customtabs {
 
@@ -34,10 +34,20 @@ class AutofillObserverImpl : public autofill::AutofillManager::Observer {
   ~AutofillObserverImpl() override;
 
   // AutofillManager::Observer:
-  void OnFormSubmitted(autofill::AutofillManager&) override;
-  void OnSelectControlDidChange(autofill::AutofillManager&) override;
-  void OnTextFieldDidChange(autofill::AutofillManager&) override;
-  void OnTextFieldDidScroll(autofill::AutofillManager&) override;
+  void OnBeforeFormSubmitted(autofill::AutofillManager&,
+                             const autofill::FormData&) override;
+  void OnAfterSelectControlSelectionChanged(autofill::AutofillManager&,
+                                            autofill::FormGlobalId,
+                                            autofill::FieldGlobalId) override;
+  void OnAfterTextFieldValueChanged(autofill::AutofillManager&,
+                                    autofill::FormGlobalId,
+                                    autofill::FieldGlobalId) override;
+  void OnAfterTextFieldDidScroll(autofill::AutofillManager&,
+                                 autofill::FormGlobalId,
+                                 autofill::FieldGlobalId) override;
+  void OnAfterFormsSeen(autofill::AutofillManager&,
+                        base::span<const autofill::FormGlobalId>,
+                        base::span<const autofill::FormGlobalId>) override;
 
  private:
   void OnFormInteraction();
@@ -60,7 +70,7 @@ class FormInteractionData
   bool GetHasFormInteractionData();
 
  private:
-  bool had_form_interaction_data_;
+  bool had_form_interaction_data_ = false;
 
   friend DocumentUserData;
   DOCUMENT_USER_DATA_KEY_DECL();
@@ -110,10 +120,10 @@ class TabInteractionRecorderAndroid
   void DidGetUserInteraction(const blink::WebInputEvent& event) override;
 
   // JNI methods
-  jboolean DidGetUserInteraction(JNIEnv* env) const;
-  jboolean HadFormInteractionInSession(JNIEnv* env) const;
-  jboolean HadFormInteractionInActivePage(JNIEnv* env) const;
-  jboolean HadNavigationInteraction(JNIEnv* env) const;
+  bool DidGetUserInteraction(JNIEnv* env) const;
+  bool HadFormInteractionInSession(JNIEnv* env) const;
+  bool HadFormInteractionInActivePage(JNIEnv* env) const;
+  bool HadNavigationInteraction(JNIEnv* env) const;
   void Reset(JNIEnv* env);
 
 #ifdef UNIT_TEST

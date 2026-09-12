@@ -45,7 +45,6 @@ if (current_toolchain == default_toolchain) {
       "//base",
       "//tools/android/common",
     ]
-    data_deps = [ "//build/android/pylib/device/commands" ]
   }
 
   create_native_executable_dist("device_forwarder_prepare_dist") {
@@ -108,6 +107,7 @@ if (current_toolchain != default_toolchain) {
   binary_symlink("host_forwarder") {
     binary_label = ":$target_name($host_toolchain)"
   }
+
   binary_symlink("host_forwarder_unittests") {
     testonly = true
     binary_label = ":$target_name($host_toolchain)"

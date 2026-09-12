@@ -4,7 +4,8 @@
 
 // clang-format off
 import {sendWithPromise} from 'chrome://resources/js/cr.js';
-import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+
+import {loadTimeData} from '../i18n_setup.js';
 // clang-format on
 
 export interface AppearanceBrowserProxy {
@@ -14,6 +15,13 @@ export interface AppearanceBrowserProxy {
   /** @return Whether the current profile is a child account. */
   isChildAccount(): boolean;
 
+  openCustomizeChrome(): void;
+  openCustomizeChromeToolbarSection(): void;
+  recordGlassFrameEnabledChanged(enabled: boolean): void;
+  recordHoverCardImagesEnabledChanged(enabled: boolean): void;
+  recordHoverCardMemoryUsageEnabledChanged(enabled: boolean): void;
+  recordVerticalTabStripModeChanged(enabled: boolean): void;
+  resetPinnedToolbarActions(): void;
   useDefaultTheme(): void;
 
   // <if expr="is_linux">
@@ -22,6 +30,7 @@ export interface AppearanceBrowserProxy {
   // </if>
 
   validateStartupPage(url: string): Promise<boolean>;
+  pinnedToolbarActionsAreDefault(): Promise<boolean>;
 }
 
 export class AppearanceBrowserProxyImpl implements AppearanceBrowserProxy {
@@ -35,6 +44,36 @@ export class AppearanceBrowserProxyImpl implements AppearanceBrowserProxy {
 
   isChildAccount() {
     return loadTimeData.getBoolean('isChildAccount');
+  }
+
+  openCustomizeChrome() {
+    chrome.send('openCustomizeChrome');
+  }
+
+  openCustomizeChromeToolbarSection() {
+    chrome.send('openCustomizeChromeToolbarSection');
+  }
+
+  recordGlassFrameEnabledChanged(enabled: boolean) {
+    chrome.metricsPrivate.recordBoolean('Settings.GlassFrame.Enabled', enabled);
+  }
+
+  recordHoverCardImagesEnabledChanged(enabled: boolean) {
+    chrome.metricsPrivate.recordBoolean(
+        'Settings.HoverCards.ImagePreview.Enabled', enabled);
+  }
+
+  recordHoverCardMemoryUsageEnabledChanged(enabled: boolean) {
+    chrome.metricsPrivate.recordBoolean(
+        'Settings.HoverCards.MemoryUsage.Enabled', enabled);
+  }
+
+  recordVerticalTabStripModeChanged(enabled: boolean) {
+    chrome.send('recordVerticalTabStripModeChanged', [enabled]);
+  }
+
+  resetPinnedToolbarActions() {
+    chrome.send('resetPinnedToolbarActions');
   }
 
   useDefaultTheme() {
@@ -52,7 +91,11 @@ export class AppearanceBrowserProxyImpl implements AppearanceBrowserProxy {
   // </if>
 
   validateStartupPage(url: string) {
-    return sendWithPromise('validateStartupPage', url);
+    return sendWithPromise<boolean>('validateStartupPage', url);
+  }
+
+  pinnedToolbarActionsAreDefault() {
+    return sendWithPromise<boolean>('pinnedToolbarActionsAreDefault');
   }
 
   static getInstance(): AppearanceBrowserProxy {

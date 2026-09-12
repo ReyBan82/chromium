@@ -6,6 +6,7 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_HEAP_HEAP_ALLOCATOR_IMPL_H_
 
 #include "base/bits.h"
+#include "build/buildflag.h"
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_table_backing.h"
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_vector_backing.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
@@ -15,6 +16,7 @@
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/partition_allocator.h"
+#include "third_party/blink/renderer/platform/wtf/wtf_buildflags.h"
 #include "v8/include/cppgc/explicit-management.h"
 #include "v8/include/cppgc/heap-consistency.h"
 #include "v8/include/cppgc/internal/api-constants.h"
@@ -22,6 +24,12 @@
 #include "v8/include/cppgc/visitor.h"
 
 namespace blink {
+
+#if BUILDFLAG(ENABLE_HEAP_VECTOR_PROMPTLY_FREE)
+inline constexpr bool kEnableHeapVectorPromptlyFree = true;
+#else
+inline constexpr bool kEnableHeapVectorPromptlyFree = false;
+#endif
 
 template <typename T>
 void GenerationalBarrierForBacking(
@@ -36,7 +44,7 @@ void GenerationalBarrierForBacking(
 template <typename K, typename V>
 void GenerationalBarrierForBacking(
     const cppgc::subtle::HeapConsistency::WriteBarrierParams& params,
-    WTF::KeyValuePair<K, V>* slot_in_backing);
+    KeyValuePair<K, V>* slot_in_backing);
 
 class PLATFORM_EXPORT HeapAllocator {
   STATIC_ONLY(HeapAllocator);
@@ -55,7 +63,7 @@ class PLATFORM_EXPORT HeapAllocator {
     // arbitrary sized allocations. Delegate to PA to keep limits in sync which
     // may be enforced for security reasons. E.g. PA may cap the limit below
     // 32-bit sizes to avoid integer overflows in old code.
-    return WTF::PartitionAllocator::MaxElementCountInBackingStore<T>();
+    return PartitionAllocator::MaxElementCountInBackingStore<T>();
   }
 
   template <typename T>
@@ -78,6 +86,9 @@ class PLATFORM_EXPORT HeapAllocator {
 
   template <typename T>
   static void FreeVectorBacking(T* array) {
+    if constexpr (!kEnableHeapVectorPromptlyFree) {
+      return;
+    }
     if (!array)
       return;
 
@@ -186,7 +197,7 @@ class PLATFORM_EXPORT HeapAllocator {
       case HeapConsistency::WriteBarrierType::kMarking:
         HeapConsistency::DijkstraWriteBarrierRange(
             params, slot_in_backing, sizeof(T), 1,
-            TraceCollectionIfEnabled<WTF::kNoWeakHandling, T, Traits>::Trace);
+            TraceCollectionIfEnabled<kNoWeakHandling, T, Traits>::Trace);
         break;
       case HeapConsistency::WriteBarrierType::kGenerational:
         GenerationalBarrierForBacking(params, slot_in_backing);
@@ -199,7 +210,9 @@ class PLATFORM_EXPORT HeapAllocator {
   }
 
   template <typename T, typename Traits>
-  static void NotifyNewObjects(T* first_element, size_t length) {
+  static void NotifyNewObjects(base::span<T> objects) {
+    T* first_element = &objects.front();
+    size_t length = objects.size();
     HeapConsistency::WriteBarrierParams params;
     // `first_element` points into a backing store and T is not necessarily a
     // garbage collected type but may be kept inline.
@@ -211,7 +224,7 @@ class PLATFORM_EXPORT HeapAllocator {
       case HeapConsistency::WriteBarrierType::kMarking:
         HeapConsistency::DijkstraWriteBarrierRange(
             params, first_element, sizeof(T), length,
-            TraceCollectionIfEnabled<WTF::kNoWeakHandling, T, Traits>::Trace);
+            TraceCollectionIfEnabled<kNoWeakHandling, T, Traits>::Trace);
         break;
       case HeapConsistency::WriteBarrierType::kGenerational:
         GenerationalBarrierForBacking(params, first_element);
@@ -225,28 +238,36 @@ class PLATFORM_EXPORT HeapAllocator {
 
   template <typename T, typename Traits>
   static void Trace(Visitor* visitor, const T& t) {
-    TraceCollectionIfEnabled<WTF::WeakHandlingTrait<T>::value, T,
-                             Traits>::Trace(visitor, &t);
+    TraceCollectionIfEnabled<kWeakHandlingTrait<T>, T, Traits>::Trace(visitor,
+                                                                      &t);
   }
 
   template <typename T>
   static void TraceVectorBacking(Visitor* visitor,
                                  const T* backing,
                                  const T* const* backing_slot) {
-    visitor->RegisterMovableReference(const_cast<const HeapVectorBacking<T>**>(
-        reinterpret_cast<const HeapVectorBacking<T>* const*>(backing_slot)));
+    using BackingType = HeapVectorBacking<T>;
+
+    if constexpr (internal::CompactionTraits<
+                      BackingType>::SupportsCompaction()) {
+      visitor->RegisterMovableReference(const_cast<const BackingType**>(
+          reinterpret_cast<const BackingType* const*>(backing_slot)));
+    }
     visitor->TraceStrongContainer(
-        reinterpret_cast<const HeapVectorBacking<T>*>(backing));
+        reinterpret_cast<const BackingType*>(backing));
   }
 
   template <typename T, typename HashTable>
   static void TraceHashTableBackingStrongly(Visitor* visitor,
                                             const T* backing,
                                             const T* const* backing_slot) {
-    visitor->RegisterMovableReference(
-        const_cast<const HeapHashTableBacking<HashTable>**>(
-            reinterpret_cast<const HeapHashTableBacking<HashTable>* const*>(
-                backing_slot)));
+    if constexpr (internal::CompactionTraits<
+                      HeapHashTableBacking<HashTable>>::SupportsCompaction()) {
+      visitor->RegisterMovableReference(
+          const_cast<const HeapHashTableBacking<HashTable>**>(
+              reinterpret_cast<const HeapHashTableBacking<HashTable>* const*>(
+                  backing_slot)));
+    }
     visitor->TraceStrongContainer(
         reinterpret_cast<const HeapHashTableBacking<HashTable>*>(backing));
   }
@@ -257,10 +278,13 @@ class PLATFORM_EXPORT HeapAllocator {
                                           const T* const* backing_slot,
                                           WeakCallback callback,
                                           const void* parameter) {
-    visitor->RegisterMovableReference(
-        const_cast<const HeapHashTableBacking<HashTable>**>(
-            reinterpret_cast<const HeapHashTableBacking<HashTable>* const*>(
-                backing_slot)));
+    if constexpr (internal::CompactionTraits<
+                      HeapHashTableBacking<HashTable>>::SupportsCompaction()) {
+      visitor->RegisterMovableReference(
+          const_cast<const HeapHashTableBacking<HashTable>**>(
+              reinterpret_cast<const HeapHashTableBacking<HashTable>* const*>(
+                  backing_slot)));
+    }
     visitor->TraceWeakContainer(
         reinterpret_cast<const HeapHashTableBacking<HashTable>*>(backing),
         callback, parameter);
@@ -279,11 +303,11 @@ template <typename T>
 void GenerationalBarrierForBacking(
     const cppgc::subtle::HeapConsistency::WriteBarrierParams& params,
     T* slot_in_backing) {
-  if constexpr (WTF::IsMemberOrWeakMemberType<std::decay_t<T>>::value) {
+  if constexpr (IsMemberOrWeakMemberType<std::decay_t<T>>::value) {
     // TODO(1029379): Provide Member::GetSlot() and call it here.
     cppgc::subtle::HeapConsistency::GenerationalBarrier(params,
                                                         slot_in_backing);
-  } else if constexpr (WTF::IsTraceable<std::decay_t<T>>::value) {
+  } else if constexpr (IsTraceableV<std::decay_t<T>>) {
     cppgc::subtle::HeapConsistency::GenerationalBarrierForSourceObject(
         params, slot_in_backing);
   }
@@ -300,7 +324,7 @@ void GenerationalBarrierForBacking(
 template <typename K, typename V>
 void GenerationalBarrierForBacking(
     const cppgc::subtle::HeapConsistency::WriteBarrierParams& params,
-    WTF::KeyValuePair<K, V>* slot_in_backing) {
+    KeyValuePair<K, V>* slot_in_backing) {
   GenerationalBarrierForBacking(params, &slot_in_backing->key);
   GenerationalBarrierForBacking(params, &slot_in_backing->value);
 }

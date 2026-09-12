@@ -4,9 +4,9 @@
 
 #include "extensions/common/manifest_handlers/requirements_info.h"
 
+#include <algorithm>
 #include <memory>
 
-#include "base/containers/contains.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "extensions/common/api/requirements.h"
@@ -19,14 +19,16 @@ namespace errors = manifest_errors;
 
 using ManifestKeys = api::requirements::ManifestKeys;
 
+// static
+const char* RequirementsInfo::kManifestDataKey = ManifestKeys::kRequirements;
+
 RequirementsInfo::RequirementsInfo() = default;
 RequirementsInfo::~RequirementsInfo() = default;
 
 // static
 const RequirementsInfo& RequirementsInfo::GetRequirements(
     const Extension* extension) {
-  RequirementsInfo* info = static_cast<RequirementsInfo*>(
-      extension->GetManifestData(ManifestKeys::kRequirements));
+  const RequirementsInfo* info = extension->GetManifestData<RequirementsInfo>();
 
   // We should be guaranteed to have requirements, since they are parsed for all
   // extension types.
@@ -49,14 +51,13 @@ bool RequirementsHandler::AlwaysParseForType(Manifest::Type type) const {
 bool RequirementsHandler::Parse(Extension* extension, std::u16string* error) {
   ManifestKeys manifest_keys;
   if (!ManifestKeys::ParseFromDictionary(
-          extension->manifest()->available_values(), &manifest_keys, error)) {
+          extension->manifest()->available_values(), manifest_keys, *error)) {
     return false;
   }
 
   auto requirements_info = std::make_unique<RequirementsInfo>();
   if (!manifest_keys.requirements) {
-    extension->SetManifestData(ManifestKeys::kRequirements,
-                               std::move(requirements_info));
+    extension->SetManifestData(std::move(requirements_info));
     return true;
   }
 
@@ -76,15 +77,11 @@ bool RequirementsHandler::Parse(Extension* extension, std::u16string* error) {
   if (requirements._3d) {
     // css3d is always available, so no check is needed, but no error is
     // generated.
-    requirements_info->webgl = base::Contains(
-        requirements._3d->features, api::requirements::_3D_FEATURE_WEBGL);
+    requirements_info->webgl = std::ranges::contains(
+        requirements._3d->features, api::requirements::_3DFeature::kWebgl);
   }
 
-  if (requirements.window && requirements.window->shape)
-    requirements_info->window_shape = *requirements.window->shape;
-
-  extension->SetManifestData(ManifestKeys::kRequirements,
-                             std::move(requirements_info));
+  extension->SetManifestData(std::move(requirements_info));
   return true;
 }
 

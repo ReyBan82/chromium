@@ -4,14 +4,13 @@
 
 package org.chromium.chromecast.shell;
 
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
 
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
@@ -25,10 +24,9 @@ import java.util.List;
 /**
  * Tests for LogcatProvider.
  *
- * Full testing of elision of PII is done in LogcatElisionUnitTest.
+ * <p>Full testing of elision of PII is done in LogcatElisionUnitTest.
  */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class ElidedLogcatProviderUnitTest {
     private static final String LOG_FILE_NAME = "log.txt";
 
@@ -55,9 +53,13 @@ public class ElidedLogcatProviderUnitTest {
 
     @Test
     public void testElidesPii() throws IOException {
-        List<String> lines = Arrays.asList("email me at someguy@mailservice.com",
-                "file bugs at crbug.com", "at android.content.Intent", "at java.util.ArrayList",
-                "mac address: AB-AB-AB-AB-AB-AB");
+        List<String> lines =
+                Arrays.asList(
+                        "email me at someguy@mailservice.com",
+                        "file bugs at crbug.com",
+                        "at android.content.Intent",
+                        "at java.util.ArrayList",
+                        "mac address: AB-AB-AB-AB-AB-AB");
         String elided = ElidedLogcatProvider.elideLogcat(concatLines(lines));
         // PII like email addresses, web addresses, and MAC addresses are elided.
         assertThat(elided, not(containsString("someguy@mailservice.com")));
@@ -70,10 +72,15 @@ public class ElidedLogcatProviderUnitTest {
 
     @Test
     public void testSpamRemoved() throws IOException {
-        List<String> lines = Arrays.asList(
-                "04-30 16:30:11.030 15721 15721 E libc    : Access denied finding property \"persist.mtk.mlog2logcat\"",
-                "04-30 16:30:51.590 15721 15721 W MLOG_KERN: type=1400 audit(0.0:137421): avc: denied",
-                "05-01 15:34:55.523   651   651 I chromium: [651:651:INFO:ccs_manager_impl.cc(891)] Waiting for all transports to be enabled");
+        List<String> lines =
+                Arrays.asList(
+                        "04-30 16:30:11.030 15721 15721 E libc    : Access denied finding property"
+                                + " \"persist.mtk.mlog2logcat\"",
+                        "04-30 16:30:51.590 15721 15721 W MLOG_KERN: type=1400 audit(0.0:137421):"
+                                + " avc: denied",
+                        "05-01 15:34:55.523   651   651 I chromium:"
+                            + " [651:651:INFO:ccs_manager_impl.cc(891)] Waiting for all transports"
+                            + " to be enabled");
 
         String elided = ElidedLogcatProvider.elideLogcat(concatLines(lines));
         assertThat(elided, not(containsString(lines.get(0))));
@@ -83,10 +90,12 @@ public class ElidedLogcatProviderUnitTest {
 
     @Test
     public void testSpamBecomesEmptyString() throws IOException {
-        List<String> lines = Arrays.asList(
-                "04-30 16:30:11.030 15721 15721 E libc    : Access denied finding property \"persist.mtk.mlog2logcat\"");
+        List<String> lines =
+                Arrays.asList(
+                        "04-30 16:30:11.030 15721 15721 E libc    : Access denied finding property"
+                                + " \"persist.mtk.mlog2logcat\"");
 
         String elided = ElidedLogcatProvider.elideLogcat(concatLines(lines));
-        assertEquals(elided, "");
+        assertEquals("", elided);
     }
 }

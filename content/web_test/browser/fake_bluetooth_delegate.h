@@ -55,7 +55,7 @@ class FakeBluetoothDelegate : public BluetoothDelegate {
                             const std::u16string& device_identifier,
                             PairPromptCallback callback,
                             PairingKind pairing_kind,
-                            const absl::optional<std::u16string>& pin) override;
+                            const std::optional<std::u16string>& pin) override;
 
   blink::WebBluetoothDeviceId GetWebBluetoothDeviceId(
       RenderFrameHost* frame,
@@ -87,9 +87,6 @@ class FakeBluetoothDelegate : public BluetoothDelegate {
       const uint16_t manufacturer_code) override;
   std::vector<blink::mojom::WebBluetoothDevicePtr> GetPermittedDevices(
       RenderFrameHost* frame) override;
-  void AddFramePermissionObserver(FramePermissionObserver* observer) override;
-  void RemoveFramePermissionObserver(
-      FramePermissionObserver* observer) override;
 
  private:
   using AddressToIdMap =

@@ -6,6 +6,7 @@
 
 #include "base/observer_list.h"
 #include "components/sync/base/extensions_activity.h"
+#include "components/sync/engine/sync_access_token_fetcher.h"
 
 namespace syncer {
 
@@ -14,40 +15,34 @@ SyncCycleContext::SyncCycleContext(
     ExtensionsActivity* extensions_activity,
     const std::vector<SyncEngineEventListener*>& listeners,
     DebugInfoGetter* debug_info_getter,
-    ModelTypeRegistry* model_type_registry,
-    const std::string& invalidator_client_id,
+    DataTypeRegistry* data_type_registry,
     const std::string& cache_guid,
     const std::string& birthday,
     const std::string& bag_of_chips,
-    base::TimeDelta poll_interval)
+    base::TimeDelta poll_interval,
+    const std::string& account_email,
+    SyncAccessTokenFetcher* sync_access_token_fetcher)
     : connection_manager_(connection_manager),
       extensions_activity_(extensions_activity),
-      notifications_enabled_(false),
       cache_guid_(cache_guid),
       birthday_(birthday),
       bag_of_chips_(bag_of_chips),
-      max_commit_batch_size_(kDefaultMaxCommitBatchSize),
       debug_info_getter_(debug_info_getter),
-      model_type_registry_(model_type_registry),
-      invalidator_client_id_(invalidator_client_id),
-      cookie_jar_mismatch_(false),
-      active_devices_invalidation_info_(
-          ActiveDevicesInvalidationInfo::CreateUninitialized()),
-      poll_interval_(poll_interval) {
+      data_type_registry_(data_type_registry),
+      poll_interval_(poll_interval),
+      account_email_(account_email),
+      sync_access_token_fetcher_(sync_access_token_fetcher) {
   DCHECK(!poll_interval.is_zero());
   std::vector<SyncEngineEventListener*>::const_iterator it;
-  for (it = listeners.begin(); it != listeners.end(); ++it)
+  for (it = listeners.begin(); it != listeners.end(); ++it) {
     listeners_.AddObserver(*it);
+  }
 }
 
 SyncCycleContext::~SyncCycleContext() = default;
 
-ModelTypeSet SyncCycleContext::GetConnectedTypes() const {
-  return model_type_registry_->GetConnectedTypes();
-}
-
-bool SyncCycleContext::proxy_tabs_datatype_enabled() const {
-  return model_type_registry_->proxy_tabs_datatype_enabled();
+DataTypeSet SyncCycleContext::GetConnectedTypes() const {
+  return data_type_registry_->GetConnectedTypes();
 }
 
 void SyncCycleContext::set_birthday(const std::string& birthday) {

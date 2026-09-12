@@ -6,24 +6,30 @@
 
 #include <stdint.h>
 
+#include <string>
+#include <string_view>
+
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
 #include "base/android/scoped_java_ref.h"
 #include "base/check.h"
+#include "base/i18n/language_tag.h"
 #include "base/i18n/rtl.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/string_util.h"
 #include "third_party/icu/source/common/unicode/uloc.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
 #include "ui/base/ui_base_jni_headers/LocalizationUtils_jni.h"
 
-using base::android::JavaParamRef;
+using base::android::JavaRef;
 using base::android::ScopedJavaLocalRef;
 
 namespace l10n_util {
 
-jint JNI_LocalizationUtils_GetFirstStrongCharacterDirection(
+static int32_t JNI_LocalizationUtils_GetFirstStrongCharacterDirection(
     JNIEnv* env,
-    const JavaParamRef<jstring>& string) {
+    const JavaRef<jstring>& string) {
   return base::i18n::GetFirstStrongCharacterDirection(
       base::android::ConvertJavaStringToUTF16(env, string));
 }
@@ -42,46 +48,31 @@ bool IsLayoutRtl() {
   return layout_rtl_cache;
 }
 
-namespace {
-
-// Common prototype of ICU uloc_getXXX() functions.
-typedef int32_t (*UlocGetComponentFunc)(const char*, char*, int32_t,
-                                        UErrorCode*);
-
-std::string GetLocaleComponent(const std::string& locale,
-                               UlocGetComponentFunc uloc_func,
-                               size_t max_capacity) {
-  std::string result;
-  UErrorCode error = U_ZERO_ERROR;
-  auto actual_length = base::checked_cast<size_t>(
-      uloc_func(locale.c_str(), base::WriteInto(&result, max_capacity),
-                base::checked_cast<int32_t>(max_capacity), &error));
-  DCHECK(U_SUCCESS(error));
-  DCHECK(actual_length < max_capacity);
-  result.resize(actual_length);
-  return result;
+bool ShouldMirrorBackForwardGestures() {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  return static_cast<bool>(
+      Java_LocalizationUtils_shouldMirrorBackForwardGestures(env));
 }
 
-ScopedJavaLocalRef<jobject> JNI_LocalizationUtils_NewJavaLocale(
+void SetRtlForTesting(bool is_rtl) {
+  JNIEnv* env = base::android::AttachCurrentThread();
+  Java_LocalizationUtils_setRtlForTesting(env, is_rtl);  // IN-TEST
+}
+
+namespace {
+
+static ScopedJavaLocalRef<jobject> JNI_LocalizationUtils_NewJavaLocale(
     JNIEnv* env,
-    const std::string& locale) {
-  // TODO(wangxianzhu): Use new Locale API once Android supports scripts.
-  std::string language = GetLocaleComponent(
-      locale, uloc_getLanguage, ULOC_LANG_CAPACITY);
-  std::string country = GetLocaleComponent(
-      locale, uloc_getCountry, ULOC_COUNTRY_CAPACITY);
-  std::string variant = GetLocaleComponent(
-      locale, uloc_getVariant, ULOC_FULLNAME_CAPACITY);
-  return Java_LocalizationUtils_getJavaLocale(
-      env, base::android::ConvertUTF8ToJavaString(env, language),
-      base::android::ConvertUTF8ToJavaString(env, country),
-      base::android::ConvertUTF8ToJavaString(env, variant));
+    const base::i18n::LanguageTag& locale) {
+  return Java_LocalizationUtils_getJavaLocaleForBcp47Tag(
+      env, base::android::ConvertUTF8ToJavaString(env, locale.tag_string()));
 }
 
 }  // namespace
 
-std::u16string GetDisplayNameForLocale(const std::string& locale,
-                                       const std::string& display_locale) {
+std::u16string GetDisplayNameForLocale(
+    const base::i18n::LanguageTag& locale,
+    const base::i18n::LanguageTag& display_locale) {
   JNIEnv* env = base::android::AttachCurrentThread();
   ScopedJavaLocalRef<jobject> java_locale =
       JNI_LocalizationUtils_NewJavaLocale(env, locale);
@@ -91,10 +82,10 @@ std::u16string GetDisplayNameForLocale(const std::string& locale,
   ScopedJavaLocalRef<jstring> java_result(
       Java_LocalizationUtils_getDisplayNameForLocale(env, java_locale,
                                                      java_display_locale));
-  return ConvertJavaStringToUTF16(java_result);
+  return base::android::ConvertJavaStringToUTF16(java_result);
 }
 
-ScopedJavaLocalRef<jstring> JNI_LocalizationUtils_GetNativeUiLocale(
+static ScopedJavaLocalRef<jstring> JNI_LocalizationUtils_GetNativeUiLocale(
     JNIEnv* env) {
   ScopedJavaLocalRef<jstring> native_ui_locale_string =
       base::android::ConvertUTF8ToJavaString(env,
@@ -103,3 +94,5 @@ ScopedJavaLocalRef<jstring> JNI_LocalizationUtils_GetNativeUiLocale(
 }
 
 }  // namespace l10n_util
+
+DEFINE_JNI(LocalizationUtils)

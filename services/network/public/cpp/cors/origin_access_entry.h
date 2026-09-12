@@ -6,6 +6,7 @@
 #define SERVICES_NETWORK_PUBLIC_CPP_CORS_ORIGIN_ACCESS_ENTRY_H_
 
 #include <string>
+#include <string_view>
 
 #include "base/component_export.h"
 #include "mojo/public/cpp/bindings/struct_ptr.h"
@@ -26,13 +27,13 @@ namespace cors {
 
 // Returns true if the host and subdomain are the same, or if subdomain is a
 // subdomain of host. (e.g., bar.foo.com is a subdomain of foo.com).
-bool COMPONENT_EXPORT(NETWORK_CPP)
-    IsSubdomainOfHost(const std::string& subdomain, const std::string& host);
+bool COMPONENT_EXPORT(NETWORK_CPP_WEB_PLATFORM)
+    IsSubdomainOfHost(std::string_view subdomain, std::string_view host);
 
 // A class to hold a protocol and domain and port triple and to provide methods
 // to determine if a given origin or domain matches. The class can have a
 // setting to control if the matching methods accept a partial match.
-class COMPONENT_EXPORT(NETWORK_CPP) OriginAccessEntry final {
+class COMPONENT_EXPORT(NETWORK_CPP_WEB_PLATFORM) OriginAccessEntry final {
  public:
   enum MatchResult {
     kMatchesOrigin,

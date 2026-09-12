@@ -8,6 +8,16 @@ an extension API.  It is primarily used in order to provide testing
 functionality used in writing extension API tests by exercising an API directly
 in JS.  See also [writing extension tests].
 
+### Accessibility
+
+#### `browser.test` Alias
+In extension contexts `chrome` is aliased to `browser` for cross-browser
+compatibility. Therefore `chrome.test` is accessible from `browser.test`.
+
+#### Web Page Access to `chrome.test`
+In web pages, `chrome.test` is only accessible if the browser has been passed
+the `--extension-test-api-on-web-pages` flag.
+
 ### Basic JS-Based Tests
 All tests must have some limited C++ portion (in order to kick off and drive
 the test).  In the most basic form, this C++ test only needs to load the
@@ -53,29 +63,45 @@ chrome.tabs.create(() => {
 API, as described in the sections below.
 
 ### test.runTests()
+
+```js
+chrome.test.runTests(tests): Promise<void>
+```
+
 `chrome.test.runTests()` is used to run a sequence of individual, smaller JS
 tests, and then passes the result to the browser by **automatically** calling
 `chrome.test.notifyPass()` or `chrome.test.notifyFail()`.  `notifyPass()` will
 be called if and only if all individual tests pass; `notifyFail()` will be
-called if any test fails.  A test may fail if an assertion fails, if there is
-an unexpected runtime error, or if `chrome.test.fail()` is called explicitly.
+called if any test fails.  A test may fail if an assertion fails, if there is an
+unexpected runtime error, or if `chrome.test.fail()` is called explicitly.
+`runTests()` returns a Promise that resolves when all tests pass, or rejects if
+any test fails.
 
 `chrome.test.runTests()` takes an array of functions, and runs them serially.
 This means that these functions may be independent, or may implicitly rely on
 one another.  The output of running these individual tests is printed through
 `console.log()`s, which enables tracing how far a test suite progresses.
 
-Each individual test function passed to `runTests()` will execute, and then
-wait for that specific function to pass or fail.  Passing is indicated by
-calling `chrome.test.succeed()` within each test function (**not**
-`chrome.test.notifyPass()`, which will automatically indicate the entire JS
-test passes, and may mask failures - see also the [Do's And Don't's]. Failure
-is indicated by calling `chrome.test.fail()`, a failed assertion, or through
-an unexpected runtime error or API error (indicated in
-`chrome.runtime.lastError`). Each test function must signal success or failure;
-otherwise the test will hang (and eventually timeout).
+**Important Note:** `chrome.test.runTests()` modifies global test suite state
+and cannot be run concurrently. Calling `runTests()` while another `runTests()`
+execution is actively running in the same script context will throw an error.
+You must either `await` the Promise of an existing `runTests()` call or place
+all tests into a single array.
 
-A sample test suite may look like this.
+#### Test Case Results
+
+##### Explicit Test Case Results (Passing/Failing)
+
+Each individual test function passed to `runTests()` will execute, and then wait
+for that specific function to pass or fail.
+
+By default, passing/failing is indicated by calling
+`chrome.test.succeed()`/`chrome.test.fail()` within each test function
+(**not** `chrome.test.notifyPass()`/`chrome.test.notifyFail`, which will
+automatically indicate the entire JS test passes, and may mask failures - see
+also the [Do's And Don't's]).
+
+A sample **explicit** test suite may look like this.
 
 ```js
 let tabId;
@@ -105,23 +131,151 @@ chrome.test.runTests([
 ]);
 ```
 
+#### Implicit Test Case Passing
+
+If you opt-in to standardized `chrome.test` behavior by passing via the
+`--extension-test-api-standardized-behavior` flag, test cases are expected to
+implicitly pass or fail. They should not use `chrome.test.succeed()` or
+`chrome.test.fail()`.
+
+Implicitly passing means the test function:
+  * returns `undefined` or
+  * its returned `Promise` resolves
+
+Implicitly failing is if the test function:
+  * throws an uncaught exception
+  * returns a `Promise` that rejects
+  * triggers a test API assertion failure (e.g. by calling
+    `chrome.test.assertEq(...)` or `chrome.test.assertTrue(...)` and that
+    assertion fails)
+
+Each test function must do either of these things; otherwise the test will hang
+(and eventually timeout).
+
+If you have enabled standardized behavior, a sample Promise-based test suite
+may look like this.
+
+```js
+let tabId;
+
+chrome.test.runTests([
+  async function createNewTab() {
+    const tab = await chrome.tabs.create({url: 'https://example.com'});
+    chrome.test.assertNoLastError();
+    // <verify `tab` properties>
+    tabId = tab.id;
+  },
+  async function queryTab() {
+    const tabs = await chrome.tabs.query({url: 'https://example.com'});
+    chrome.test.assertNoLastError();
+    // <verify `tabs`>
+  },
+  async function removeTab() {
+    await chrome.tabs.remove(tabId);
+    chrome.test.assertNoLastError();
+  },
+]);
+```
+
+> **WARNING:** Implicit passing is designed primarily for Promise-based workflows or
+> strictly synchronous tests. Relying on it with legacy asynchronous callback APIs
+> (or utilizing `setTimeout`) can lead to premature test completion or hidden
+> assertions if the callbacks fire after the main test function returns.
+>
+> ```javascript
+> // Incorrectly waiting with a callback.
+> function testTabCreation() {
+>   chrome.tabs.create({ url: 'https://example.com' }, (tab) => {
+>     // This callback executes asynchronously later.
+>     chrome.test.assertTrue(false);
+>   });
+>   // The function returns 'undefined' here instantly.
+>   // 🐛 Bug: Test passes before the callback runs which would've failed the test.
+> }
+>
+> // Properly waiting using a Promise.
+> async function testTabCreation() {
+>   // ✅ Solution: Wait for callback using a Promise, or a Promise-based API.
+>   await new Promise((resolve) => {
+>     chrome.tabs.create({ url: 'https://example.com' }, (tab) => {
+>       chrome.test.assertTrue(true);
+>       resolve();
+>     });
+>   });
+> }
+> ```
+
+### Events
+
+The testing framework also provides events that are fired during the execution
+of tests in `runTests()`:
+
+#### onTestStarted
+
+```js
+chrome.test.onTestStarted.addListener(function(info: {testName: string}) {...});
+```
+
+Fired when an individual test begins running. Emitted before any test logic has
+run. Provides `{testName: string}`.
+
+#### onTestFinished
+
+```js
+chrome.test.onTestFinished.addListener(
+    function(info: {
+      testName: string,
+      result: boolean,
+      remainingTests: number,
+      assertionDescription: string,
+      message?: string}) {
+  ...
+});
+```
+
+Fired when an individual test finishes execution. Provides `{testName: string,
+result: boolean, remainingTests: number, assertionDescription: string, message?:
+string}` (where message is only set if the test failed). `remainingTests` counts
+the tests remaining in the queue after the current test finishes.
+
+### Checks
+
+#### checkDeepEq(value, other_value)
+Checks if `value` is equal to `other_value`. If `value` is an object, this will
+perform a deep-equals check (i.e., verifying that two objects are equivalent by
+value, rather than have the same address) and return `true`. Otherwise returns
+`false`.
+
+**Important Notes:**
+- Primitive wrappers (`Number`, `Boolean`, `String`): are value compared to
+  their internal representation, even if `NaN`.
+- `Date`s: compared to their `Date.getTime()` representation, even if `NaN`.
+- `undefined` is implicitly converted to `null` so it is not currently supported
+for value checking. This means that `checkDeepEq(undefined, null) === true`.
+
 ### Assertions
-The ``chrome.test API`` provides a number of basic assertion methods.
+The `chrome.test API` provides a number of basic assertion methods.
 
-#### assertTrue(condition, message?)
-Asserts that the given condition is true, printing out the optional error
-message if it is not.
+#### assertTrue/assertFalse(condition, message?)
 
-#### assertFalse(condition, message?)
-Asserts that the given condition is false, printing out the optional error
-message if it is not.
+```js
+chrome.test.assertTrue(/* boolean */ condition, /* optional string */ message );
+chrome.test.assertFalse(/* boolean */ condition, /* optional string */ message );
+```
 
-#### assertEq(expected, actual, message?)
-Asserts that the provided value matches the expected value.  If `expected` is
-an object, this will perform a deep-equals check (i.e., verifying that two
-objects are logically equivalent, rather than have the same address).  If the
-expected value does not match the actual value, this will print out the
-expected and actual values (through `JSON.stringify()` for objects).
+Asserts that the given condition strictly evaluates to the boolean `true` (or
+`false`), printing out the optional error message if it is not.
+
+#### assertEq/assertNe(value, other_value, message?)
+
+```js
+chrome.test.assertEq(value, other_value, /*optional*/ message);
+chrome.test.assertNe(value, other_value, /*optional*/ message);
+```
+
+Asserts that the provided values match (or don't match)
+via `checkDeepEq(value, other_value)`. If the values do not match (or
+unexpectedly match), this will print out the compared values.
 
 #### assertNoLastError()
 Asserts that `chrome.runtime.lastError` is undefined, printing out the error
@@ -131,11 +285,58 @@ otherwise.
 Asserts that `chrome.runtime.lastError.message` is equivalent to
 `expectedError`, printing out the expected and actual errors otherwise.
 
-#### assertThrows(fn, self?, args, expectedError?)
-Asserts that executing `fn` with the context object of `self` (if defined) and
-the specified `arguments` throws a runtime error, which is then validated
-against `expectedError`.  `expectedError` may be either a string (which must
-match exactly) or a `RegExp`.
+#### assertThrows(fn, expectedError?, message?)
+Asserts that executing `fn` throws a runtime error.
+
+*   `fn` (`Function`): The function that is expected to throw. It must be called
+    without arguments. If arguments are needed, wrap it in an arrow function or
+    `bind`.
+*   `expectedError` (`String` or `RegExp`, optional): If defined, the thrown
+    error's message must match this value (either exactly for `String`, or by
+    matching for `RegExp`).
+*   `message` (`String`, optional): A custom error message to print if the
+    assertion fails (e.g., if the function does not throw, or throws the
+    wrong error).
+
+Examples:
+```js
+// Assert that any error is thrown:
+chrome.test.assertThrows(myObject.myFunction.bind(myObject, arg1));
+
+// Assert that an error with a specific message is thrown:
+chrome.test.assertThrows(
+  myObject.myFunction.bind(myObject, arg1),
+  /* expectedError */ 'specific error'
+);
+
+// Assert that an error matching a `RegExp` is thrown:
+chrome.test.assertThrows(
+  JSON.parse.bind(null, /* text */ 'invalid-json'),
+  /* expectedError */ /Unexpected token/
+);
+
+// Assert that an error is thrown with a custom failure message:
+chrome.test.assertThrows(
+  myObject.myFunction.bind(myObject, arg1),
+  /* expectedError */ 'expected error',
+  /* message */ 'My custom failure message'
+);
+
+// Assert that a function called with a specific context and arguments throws.
+// Note: Using an arrow function wrapper can reduce stack trace clarity
+// (since an anonymous function will show up in the stack trace when doing this).
+chrome.test.assertThrows(
+  () => myObject.myFunction(arg1, arg2),
+  /* expectedError */ 'Expected Error Message'
+);
+
+// Assert that a function called with a specific context and arguments throws
+// (using `bind`):
+chrome.test.assertThrows(
+  myObject.myFunction.bind(myObject, arg1, arg2),
+  /* expectedError */ 'Expected Error Message'
+);
+```
 
 ### callbackPass() and callbackFail()
 **Important Notes:**
@@ -170,8 +371,8 @@ chrome.test.runTests([
 Here, we want to have `step1()` finish after both the new tab has been created
 and a storage value has been set (again, this is admittedly contrived).  There
 is no hard guarantee about which function will finish first, so putting a
-chrome.test.succeed() call in either may result in succeeding and continuing to
-the next step too early.  Putting a `chrome.test.succeed()` call in both will
+`chrome.test.succeed()` call in either may result in succeeding and continuing
+to the next step too early.  Putting a `chrome.test.succeed()` call in both will
 result in badness (see the [Do's And Don't's]).
 
 `callbackPass()` lets the testing infrastructure handle this.  `callbackPass()`
@@ -240,16 +441,16 @@ two separate test functions, passed serially in the array to
 ```js
 chrome.test.runTests([
   function createTab() {
-    chrome.tabs.create({url: 'http://example.com'}, callbackPass(() => {
+    chrome.tabs.create({url: 'http://example.com'}, () => {
       <verify state>
       chrome.test.succeed();
-    }));
+    });
   },
   function initializeStorage() {
-    chrome.storage.local.set({foo: 'bar'}, callbackPass(() => {
+    chrome.storage.local.set({foo: 'bar'}, () => {
       <verify state>
       chrome.test.succeed();
-    }));
+    });
   },
   function nextStep() {
     ...
@@ -305,20 +506,87 @@ const tab =
 <verify state>
 ```
 
-This, too, will be even more readable with Promise-based APIs.
+For Promise-based calls in MV3 tests this can be simplified even more:
 
-### listenOnce() and listenForever()
-`chrome.test.listenOnce()` and `chrome.test.listenForever()` are utility
-functions used when waiting on different events.  Like `callbackPass()` and
-`callbackFail()` above, they use the test API's internal callback counter,
-allowing the test to finish automatically once all callbacks have been invoked.
-Naturally, they share all the same disadvantages as well.
+```js
+const tab = await chrome.tabs.create({url: url});
+<verify state>
+```
 
-`listenOnce()` waits for the event to be invoked a single time, and then
-removes the listener and reduces the internal callback counter.  Calling
-`listenForever()` adds the listener and returns a function to be invoked at any
-point; invoking this function will remove the listener and decrement the
-callback counter.
+### listenOnce()
+`chrome.test.listenOnce()` is a utility function to allow waiting for an event
+to trigger. It comes in two flavors:
+
+#### Promise-based
+The modern version of this method can be used to return a promise, which will
+resolve when the event is triggered. The promise will be resolved either with
+the argument the event is invoked with, if the event has a single argument, or
+with an array of arguments, if the event takes multiple arguments.
+
+This version will not have any implications for the lifetime of the test, and
+can be used seamlessly with `chrome.test.succeed()` and friends.
+
+A simple example with one event argument is the following:
+```js
+let tabCreated = chrome.test.listenOnce(chrome.tabs.onCreated);
+chrome.tabs.create({...});
+let tab = await tabCreated;
+// Verify the created tab.
+chrome.test.succeed();  // Deterministically and clearly end the test.
+```
+
+An event triggered with multiple arguments might look like this:
+```js
+let eventPromise = chrome.test.listenOnce(chrome.tabs.onRemoved);
+chrome.tabs.remove(tabId);
+let args = await eventPromise;
+// chrome.tabs.onRemoved has two arguments...
+let removedTabId = args[0];
+let removeInfo = args[1];
+```
+
+This can be simplified further with destructuring assignment:
+```js
+let [removedTabId, removeInfo] = await eventPromise;
+```
+
+#### Callback-based
+The callback based version of `chrome.test.listenOnce()` takes in an event and
+a function, and the function is invoked when the event fires. This variant uses
+the internal callback counter of the test API, similar to `callbackPass()` and
+`callbackFail()`, and will automatically finish the test when all callbacks have
+been invoked. As such, this has all the same disadvantages of the callback
+counters. Please avoid using these in new tests.
+
+### listenForever()
+`chrome.test.listenForever()` is a utility function that listens for the event
+until some time in the future. It will return a function that can be called to
+stop listening. This also uses the internal callback counter, and the callback
+is considered complete (allowing the test to end) when the function to stop
+listening is called.
+
+```js
+let done = chrome.test.listenForever(chrome.tabs.create, function(tab) {
+  createdTabs.push(tab);
+});
+...  // Create a bunch of tabs.
+// Stops listening. This might automatically end the test, if no other
+// callbacks are pending.
+done();
+```
+
+Generally, prefer using your own listener and remove it using the general
+Event API by calling `removeListener()`, instead of using `listenForever()`:
+
+```js
+const listener = function(tab) { createdTabs.push(tab); };
+chrome.tabs.onCreated.addListener(listener);
+...  // Create a bunch of tabs.
+// Done listening. This won't end the test.
+chrome.tabs.removeListener(listener);
+... // Verify state.
+chrome.test.succeed();
+```
 
 ### getConfig()
 `chrome.test.getConfig()` retrieves the current configuration of the test
@@ -387,7 +655,7 @@ unless the use of it is explicitly necessary for the test.)
 ### **Don't** Mix chrome.test.notifyPass() and chrome.test.runTests()
 `chrome.test.notifyPass()` (or `chrome.test.notifyFail()`) will finish the
 entire suite.  It should not be used with `chrome.test.runTests()`.  Instead,
-use chrome.test.succeed().
+use `chrome.test.succeed()`.
 
 ### **Don't** Mix chrome.test.callbackPass() et al. and chrome.test.succeed()
 If the callback counter is incremented anywhere in a test function, the test

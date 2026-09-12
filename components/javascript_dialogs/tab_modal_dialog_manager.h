@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "base/functional/callback_forward.h"
+#include "base/memory/advanced_memory_safety_checks.h"
 #include "base/memory/weak_ptr.h"
 #include "build/build_config.h"
 #include "components/javascript_dialogs/tab_modal_dialog_manager_delegate.h"
@@ -40,6 +41,9 @@ class TabModalDialogManager
     : public content::JavaScriptDialogManager,
       public content::WebContentsObserver,
       public content::WebContentsUserData<TabModalDialogManager> {
+  // TODO(crbug.com/493445322): Remove this macro once the bug gets fixed.
+  ADVANCED_MEMORY_SAFETY_CHECKS();
+
  public:
   enum class DismissalCause {
     // This is used for a UMA histogram. Please never alter existing values,
@@ -86,7 +90,10 @@ class TabModalDialogManager
     // user on a non-Mac platform.
     kDialogClosed = 9,
 
-    kMaxValue = kDialogClosed,
+    // Another modal dialog is showing, so this dialog could not be shown.
+    kSuppressedByOtherDialog = 10,
+
+    kMaxValue = kSuppressedByOtherDialog,
   };
 
   TabModalDialogManager(const TabModalDialogManager&) = delete;
@@ -99,6 +106,9 @@ class TabModalDialogManager
 
   void SetDialogShownCallbackForTesting(base::OnceClosure callback);
   bool IsShowingDialogForTesting() const;
+  const std::u16string& GetDialogTitleForTesting() const {
+    return dialog_title_;
+  }
   void ClickDialogButtonForTesting(bool accept,
                                    const std::u16string& user_input);
   using DialogDismissedCallback = base::OnceCallback<void(DismissalCause)>;
@@ -187,6 +197,9 @@ class TabModalDialogManager
 
   // A closure to be fired when a dialog is shown. For testing only.
   base::OnceClosure dialog_shown_;
+
+  // The title of the dialog being displayed.
+  std::u16string dialog_title_;
 
   // A closure to be fired when a dialog is dismissed. For testing only.
   DialogDismissedCallback dialog_dismissed_;

@@ -1,8 +1,8 @@
+dgn@chromium.org
 nicolaso@chromium.org
-tmartino@chromium.org
 ydago@chromium.org
 
 grt@chromium.org  # emeritus
 
 per-file credential_provider*=file://chrome/credential_provider/OWNERS
-per-file first_run_service*=dgn@chromium.org
+per-file startup_launch*=file://chrome/browser/startup/OWNERS

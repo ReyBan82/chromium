@@ -2,11 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var port;
-var visitedPageUrl;
+let port;
+let visitedPageUrl;
 
-window.onload =
-    function() {
+window.onload = function() {
   chrome.test.runTests([
     async function init() {
       port = (await chrome.test.getConfig()).testServer.port;
@@ -19,35 +18,46 @@ window.onload =
     function various() {
       const testCases = [
         [
-          'Load favicon using only pageUrl', true,
-          `_favicon/?pageUrl=${visitedPageUrl}`
+          'Load favicon using only pageUrl',
+          true,
+          `_favicon/?pageUrl=${visitedPageUrl}`,
         ],
         [
-          'Load favicon using multiple arguments', true,
-          `_favicon/?pageUrl=${visitedPageUrl}&size=16&scaleFactor=1x`
+          'Succeed with chrome.runtime.getURL',
+          true,
+          chrome.runtime.getURL(`_favicon/?pageUrl=${visitedPageUrl}`),
         ],
         [
-          'Get the default icon when a url hasn\'t been visited', true,
+          'Load favicon using multiple arguments',
+          true,
+          `_favicon/?pageUrl=${visitedPageUrl}&size=16&scaleFactor=1x`,
+        ],
+        [
+          'Get the default icon when a url hasn\'t been visited',
+          true,
           `_favicon/?pageUrl=http://www.unvisited.com:${
-              port}/extensions/favicon/test_file.html`
+              port}/extensions/favicon/test_file.html`,
         ],
         [
-          'Incorrect baseUrl', false,
+          'Incorrect baseUrl',
+          false,
           `chrome-extension://${
               chrome.runtime.id}/_faviconbutnotreally/?pageUrl=${
-              visitedPageUrl}`
+              visitedPageUrl}`,
         ],
         [
-          'Slash not required before question mark query params', true,
+          'Slash not required before question mark query params',
+          true,
           `chrome-extension://${chrome.runtime.id}/_favicon/?pageUrl=${
-              visitedPageUrl}`
+              visitedPageUrl}`,
         ],
         [
-          'pageUrl must be present and iconUrl is ignored', false,
-          `_favicon/?iconUrl=${visitedPageUrl}`
+          'pageUrl must be present and iconUrl is ignored',
+          false,
+          `_favicon/?iconUrl=${visitedPageUrl}`,
         ],
       ];
-      let promises = [];
+      const promises = [];
       testCases.forEach(testCase => {
         promises.push(new Promise(resolve => {
           const [title, isOk, url] = testCase;
@@ -73,7 +83,7 @@ window.onload =
             chrome.test.assertEq(pixels, image.height);
             chrome.test.assertEq(pixels, image.width);
             resolve();
-          }
+          };
         });
       });
       Promise.all(promises).then(() => chrome.test.succeed());
@@ -89,7 +99,7 @@ window.onload =
         chrome.test.assertEq(expected, image.height);
         chrome.test.assertEq(expected, image.width);
         chrome.test.succeed();
-      }
+      };
     },
 
     // Verify uncached default icon resolutions. Supported sizes: 16, 32, 64.
@@ -100,14 +110,14 @@ window.onload =
         return new Promise((resolve, reject) => {
           const [pixels, expected] = requestAndExpect;
           const url = `_favicon/?pageUrl=http://www.unvisited.com:${
-              port}/extensions/favicon/test_file.html&size=${pixels}`
+              port}/extensions/favicon/test_file.html&size=${pixels}`;
           const image = new Image();
           image.src = url;
           image.onload = () => {
             chrome.test.assertEq(expected, image.height);
             chrome.test.assertEq(expected, image.width);
             resolve();
-          }
+          };
         });
       });
       Promise.all(promises).then(() => chrome.test.succeed());
@@ -121,7 +131,7 @@ window.onload =
     function bmpMatch() {
       const urls = [
         '_test_resources/favicon/favicon.bmp',
-        `_favicon/?pageUrl=${visitedPageUrl}&size=48`
+        `_favicon/?pageUrl=${visitedPageUrl}&size=48`,
       ];
       const promises = [];
       urls.forEach(url => promises.push(toDataURL(url)));
@@ -134,7 +144,7 @@ window.onload =
       });
     },
   ]);
-}
+};
 
 // Fetches the data from url and encodes the retrieved data into a data URL.
 function toDataURL(url) {

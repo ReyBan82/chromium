@@ -42,7 +42,7 @@ class COMPONENT_EXPORT(NETWORK_CPP_BASE)
   static int64_t ip_address_attributes(const net::NetworkInterface& network) {
     return network.ip_address_attributes;
   }
-  static const absl::optional<net::Eui48MacAddress>& mac_address(
+  static const std::optional<net::Eui48MacAddress>& mac_address(
       const net::NetworkInterface& network) {
     return network.mac_address;
   }
@@ -57,8 +57,8 @@ struct COMPONENT_EXPORT(NETWORK_CPP_BASE)
                net::NetworkChangeNotifier::ConnectionType> {
   static network::mojom::ConnectionType ToMojom(
       net::NetworkChangeNotifier::ConnectionType input);
-  static bool FromMojom(network::mojom::ConnectionType input,
-                        net::NetworkChangeNotifier::ConnectionType* output);
+  static net::NetworkChangeNotifier::ConnectionType FromMojom(
+      network::mojom::ConnectionType input);
 };
 
 }  // namespace mojo

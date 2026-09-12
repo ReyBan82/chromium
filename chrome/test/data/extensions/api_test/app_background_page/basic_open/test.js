@@ -4,19 +4,19 @@
 
 // This test opens a single background page opened by a.html.
 
-var pagePrefix =
+const pagePrefix =
     'http://a.com:PORT/extensions/api_test/app_background_page/common';
 
 // Dispatch "tunneled" functions from the live web pages to this testing page.
-chrome.extension.onRequest.addListener(function(request) {
+chrome.runtime.onMessage.addListener(function(request) {
   window[request.name](request.args);
 });
 
 // At no point should a window be created that contains the background page
 // (bg.html).
 chrome.tabs.onUpdated.addListener(function(tabId, changeInfo, tab) {
-  if (tab.url.match("bg\.html$")) {
-    chrome.test.notifyFail("popup opened instead of background page");
+  if (tab.url.match('bg\.html$')) {
+    chrome.test.notifyFail('popup opened instead of background page');
   }
 });
 
@@ -26,13 +26,13 @@ window.onload = function() {
   // config is requested before onload, then sometimes onload has already
   // fired by the time chrome.test.getConfig()'s callback runs.
   chrome.test.getConfig(function(config) {
-    var closeUrl =
+    const closeUrl =
         pagePrefix.replace(/PORT/, config.testServer.port) + '/a.html';
-    chrome.tabs.create({ 'url': closeUrl }, function(tab) {});
+    chrome.tabs.create({'url': closeUrl}, function(tab) {});
   });
 };
 
 // Background page is open now.
 function onBackgroundPageLoaded() {
   chrome.test.notifyPass();
-};
+}

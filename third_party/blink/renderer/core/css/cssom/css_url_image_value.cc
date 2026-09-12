@@ -14,9 +14,9 @@ const String& CSSURLImageValue::url() const {
   return value_->RelativeUrl();
 }
 
-absl::optional<gfx::Size> CSSURLImageValue::IntrinsicSize() const {
+std::optional<gfx::Size> CSSURLImageValue::IntrinsicSize() const {
   if (Status() != ResourceStatus::kCached) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   DCHECK(!value_->IsCachePending());
@@ -35,12 +35,11 @@ ResourceStatus CSSURLImageValue::Status() const {
 }
 
 scoped_refptr<Image> CSSURLImageValue::GetSourceImageForCanvas(
-    SourceImageStatus*,
-    const gfx::SizeF&,
-    const AlphaDisposition alpha_disposition) {
-  // UnpremultiplyAlpha is not implemented yet.
-  DCHECK_EQ(alpha_disposition, kPremultiplyAlpha);
-  return GetImage();
+    SourceImageStatus* status,
+    const gfx::SizeF&) {
+  scoped_refptr<Image> image = GetImage();
+  *status = image ? kNormalSourceImageStatus : kInvalidSourceImageStatus;
+  return image;
 }
 
 scoped_refptr<Image> CSSURLImageValue::GetImage() const {
@@ -61,7 +60,7 @@ bool CSSURLImageValue::IsAccelerated() const {
 }
 
 const CSSValue* CSSURLImageValue::ToCSSValue() const {
-  return value_;
+  return value_.Get();
 }
 
 void CSSURLImageValue::Trace(Visitor* visitor) const {

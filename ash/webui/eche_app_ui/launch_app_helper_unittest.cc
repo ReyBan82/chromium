@@ -4,6 +4,8 @@
 
 #include "ash/webui/eche_app_ui/launch_app_helper.h"
 
+#include <memory>
+#include <optional>
 #include <ostream>
 #include <string>
 
@@ -11,6 +13,8 @@
 #include "ash/shell.h"
 #include "ash/system/toast/toast_manager_impl.h"
 #include "ash/test/ash_test_base.h"
+#include "ash/webui/eche_app_ui/apps_launch_info_provider.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
@@ -19,7 +23,6 @@
 #include "chromeos/ash/components/phonehub/screen_lock_manager.h"
 #include "chromeos/ash/components/test/ash_test_suite.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/resource/resource_bundle.h"
 #include "ui/gfx/image/image.h"
 
@@ -36,18 +39,19 @@ constexpr char kUniqueAppsMetricName[] = "Eche.UniqueAppsStreamed.PerDay";
 class Callback {
  public:
   static void LaunchEcheAppFunction(
-      const absl::optional<int64_t>& notification_id,
+      const std::optional<int64_t>& notification_id,
       const std::string& package_name,
       const std::u16string& visible_name,
-      const absl::optional<int64_t>& user_id,
+      const std::optional<int64_t>& user_id,
       const gfx::Image& icon,
-      const std::u16string& phone_name) {
+      const std::u16string& phone_name,
+      AppsLaunchInfoProvider* apps_launch_info_provider) {
     launchEcheApp_ = true;
   }
 
   static void ShowNotificationFunction(
-      const absl::optional<std::u16string>& title,
-      const absl::optional<std::u16string>& message,
+      const std::optional<std::u16string>& title,
+      const std::optional<std::u16string>& message,
       std::unique_ptr<LaunchAppHelper::NotificationInfo> info) {
     showNotification_ = true;
   }
@@ -88,6 +92,9 @@ class LaunchAppHelperTest : public ash::AshTestBase {
         /*disabled_features=*/{});
 
     fake_phone_hub_manager_ = std::make_unique<phonehub::FakePhoneHubManager>();
+    connection_handler_ = std::make_unique<EcheConnectionStatusHandler>();
+    apps_launch_info_provider_ =
+        std::make_unique<AppsLaunchInfoProvider>(connection_handler_.get());
     launch_app_helper_ = std::make_unique<LaunchAppHelper>(
         fake_phone_hub_manager_.get(),
         base::BindRepeating(&Callback::LaunchEcheAppFunction),
@@ -96,7 +103,14 @@ class LaunchAppHelperTest : public ash::AshTestBase {
     toast_manager_ = Shell::Get()->toast_manager();
   }
 
-  void TearDown() override { AshTestBase::TearDown(); }
+  void TearDown() override {
+    toast_manager_ = nullptr;
+    launch_app_helper_.reset();
+    apps_launch_info_provider_.reset();
+    connection_handler_.reset();
+    fake_phone_hub_manager_.reset();
+    AshTestBase::TearDown();
+  }
 
   LaunchAppHelper::AppLaunchProhibitedReason ProhibitedByPolicy(
       FeatureStatus status) const {
@@ -118,19 +132,20 @@ class LaunchAppHelperTest : public ash::AshTestBase {
     EXPECT_EQ(overlay->GetText(), text);
   }
 
-  void LaunchEcheApp(const absl::optional<int64_t>& notification_id,
+  void LaunchEcheApp(const std::optional<int64_t>& notification_id,
                      const std::string& package_name,
                      const std::u16string& visible_name,
-                     const absl::optional<int64_t>& user_id,
+                     const std::optional<int64_t>& user_id,
                      const gfx::Image& icon,
                      const std::u16string& phone_name) {
     launch_app_helper_->LaunchEcheApp(notification_id, package_name,
-                                      visible_name, user_id, icon, phone_name);
+                                      visible_name, user_id, icon, phone_name,
+                                      apps_launch_info_provider_.get());
   }
 
   void ShowNotification(
-      const absl::optional<std::u16string>& title,
-      const absl::optional<std::u16string>& message,
+      const std::optional<std::u16string>& title,
+      const std::optional<std::u16string>& message,
       std::unique_ptr<LaunchAppHelper::NotificationInfo> info) {
     launch_app_helper_->ShowNotification(title, message, std::move(info));
   }
@@ -146,8 +161,10 @@ class LaunchAppHelperTest : public ash::AshTestBase {
  private:
   base::test::ScopedFeatureList scoped_feature_list_;
   std::unique_ptr<phonehub::FakePhoneHubManager> fake_phone_hub_manager_;
+  std::unique_ptr<EcheConnectionStatusHandler> connection_handler_;
+  std::unique_ptr<AppsLaunchInfoProvider> apps_launch_info_provider_;
   std::unique_ptr<LaunchAppHelper> launch_app_helper_;
-  ToastManagerImpl* toast_manager_ = nullptr;
+  raw_ptr<ToastManagerImpl> toast_manager_ = nullptr;
 };
 
 TEST_F(LaunchAppHelperTest, TestProhibitedByPolicy) {
@@ -185,10 +202,10 @@ TEST_F(LaunchAppHelperTest, VerifyShowToast) {
 }
 
 TEST_F(LaunchAppHelperTest, LaunchEcheApp) {
-  const absl::optional<int64_t> notification_id = 0;
+  const std::optional<int64_t> notification_id = 0;
   const std::string package_name = "package_name";
   const std::u16string visible_name = u"visible_name";
-  const absl::optional<int64_t> user_id = 0;
+  const std::optional<int64_t> user_id = 0;
   const std::u16string phone_name = u"your phone";
 
   LaunchEcheApp(notification_id, package_name, visible_name, user_id,
@@ -198,8 +215,8 @@ TEST_F(LaunchAppHelperTest, LaunchEcheApp) {
 }
 
 TEST_F(LaunchAppHelperTest, ShowNotification) {
-  const absl::optional<std::u16string> title = u"title";
-  const absl::optional<std::u16string> message = u"message";
+  const std::optional<std::u16string> title = u"title";
+  const std::optional<std::u16string> message = u"message";
 
   ShowNotification(
       title, message,
@@ -221,13 +238,13 @@ TEST_F(LaunchAppHelperTest, CloseNotification) {
 TEST_F(LaunchAppHelperTest, UniqueAppPackages) {
   base::HistogramTester histogram_tester;
 
-  const absl::optional<int64_t> notification_id = 0;
+  const std::optional<int64_t> notification_id = 0;
   const std::string package_name = "package_name";
   const std::u16string visible_name = u"visible_name";
-  const absl::optional<int64_t> user_id = 0;
+  const std::optional<int64_t> user_id = 0;
   const std::u16string phone_name = u"your phone";
 
-  const absl::optional<int64_t> notification_id2 = 1;
+  const std::optional<int64_t> notification_id2 = 1;
   const std::string package_name2 = "package_name2";
   const std::u16string visible_name2 = u"visible_name2";
 
@@ -253,13 +270,13 @@ TEST_F(LaunchAppHelperTest, UniqueAppPackages) {
 TEST_F(LaunchAppHelperTest, SessionPackagesResetsAfterOneDay) {
   base::HistogramTester histogram_tester;
 
-  const absl::optional<int64_t> notification_id = 0;
+  const std::optional<int64_t> notification_id = 0;
   const std::string package_name = "package_name";
   const std::u16string visible_name = u"visible_name";
-  const absl::optional<int64_t> user_id = 0;
+  const std::optional<int64_t> user_id = 0;
   const std::u16string phone_name = u"your phone";
 
-  const absl::optional<int64_t> notification_id2 = 1;
+  const std::optional<int64_t> notification_id2 = 1;
   const std::string package_name2 = "package_name2";
   const std::u16string visible_name2 = u"visible_name2";
 

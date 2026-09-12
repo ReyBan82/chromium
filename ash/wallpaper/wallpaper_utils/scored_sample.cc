@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "base/logging.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/timer/elapsed_timer.h"
 #include "third_party/material_color_utilities/src/cpp/quantize/celebi.h"
 #include "third_party/material_color_utilities/src/cpp/score/score.h"
@@ -35,10 +36,18 @@ std::vector<Argb> ImageToArgb(const SkBitmap* bitmap) {
                 "Assert that SkColor is encoded as ARGB.");
 
   const SkPixmap& pixmap = bitmap->pixmap();
-  int64_t num_pixels = pixmap.dimensions().area();
+  const size_t num_pixels =
+      base::checked_cast<size_t>(pixmap.dimensions().area());
   if (pixmap.colorType() == kBGRA_8888_SkColorType) {
     // Fast path if the buffer is already in the expected format.
-    return std::vector<Argb>(pixmap.addr32(), pixmap.addr32() + num_pixels);
+    if (num_pixels == 0) {
+      return {};
+    }
+
+    std::vector<Argb> pixels(num_pixels);
+    CHECK(pixmap.readPixels(pixmap.info(), pixels.data(),
+                            pixmap.info().minRowBytes()));
+    return pixels;
   }
 
   // TODO(b/266948729): Evaluate if there are faster ways to perform this
@@ -70,7 +79,16 @@ SkColor ComputeWallpaperSeedColor(gfx::ImageSkia image) {
     return gfx::kGoogleBlue400;
   }
 
-  std::vector<Argb> best_colors = RankedSuggestions(result.color_to_count);
+  // TODO(b/314178502): Remove this re-packing when the type of QuantizerResult
+  // is fixed.
+  std::map<Argb, uint32_t> color_to_count;
+  for (const auto& it : result.color_to_count) {
+    // Re-pack the color_to_count map so that we can pass it to
+    // `RankedSuggestions`.
+    color_to_count.emplace(it.first, static_cast<uint32_t>(it.second));
+  }
+
+  std::vector<Argb> best_colors = RankedSuggestions(color_to_count);
 
   return best_colors.front();
 }

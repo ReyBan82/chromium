@@ -33,15 +33,15 @@ namespace {
 void TruncateString(std::string* data) {
   const size_t kMaxLength = 200;
   if (data->length() > kMaxLength) {
-    data->resize(kMaxLength);
-    data->replace(kMaxLength - 3, 3, "...");
+    base::TruncateUTF8ToByteSize(*data, kMaxLength - 3, data);
+    data->append("...");
   }
 }
 
 base::Value SmartDeepCopy(const base::Value* value) {
   const size_t kMaxChildren = 20;
   if (value->is_dict()) {
-    base::Value::Dict dict_copy;
+    base::DictValue dict_copy;
     for (auto [dict_key, dict_value] : value->GetDict()) {
       if (dict_copy.size() >= kMaxChildren - 1) {
         dict_copy.Set("~~~", "...");
@@ -51,7 +51,7 @@ base::Value SmartDeepCopy(const base::Value* value) {
     }
     return base::Value(std::move(dict_copy));
   } else if (value->is_list()) {
-    base::Value::List list_copy;
+    base::ListValue list_copy;
     for (const base::Value& child : value->GetList()) {
       if (list_copy.size() >= kMaxChildren - 1) {
         list_copy.Append("...");
@@ -76,7 +76,7 @@ bool IsVLogOn(int vlog_level) {
   return Log::is_vlog_on_func(vlog_level);
 }
 
-std::string PrettyPrintValue(const base::Value& value) {
+std::string PrettyPrintValue(base::ValueView value) {
   std::string json;
   base::JSONWriter::WriteWithOptions(
       value, base::JSONWriter::OPTIONS_PRETTY_PRINT, &json);
@@ -98,7 +98,8 @@ std::string FormatValueForDisplay(const base::Value& value) {
 }
 
 std::string FormatJsonForDisplay(const std::string& json) {
-  absl::optional<base::Value> value = base::JSONReader::Read(json);
+  std::optional<base::Value> value =
+      base::JSONReader::Read(json, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   if (!value)
     value.emplace(json);
   return FormatValueForDisplay(*value);

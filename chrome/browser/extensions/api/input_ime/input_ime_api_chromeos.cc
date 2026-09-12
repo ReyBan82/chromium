@@ -6,17 +6,20 @@
 
 #include <stddef.h>
 
-#include <memory>
+#include <optional>
+#include <string_view>
 #include <utility>
 
+#include "ash/constants/ash_features.h"
 #include "ash/public/cpp/keyboard/keyboard_config.h"
 #include "base/feature_list.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/ash/input_method/assistive_window_properties.h"
 #include "chrome/browser/ash/input_method/input_method_engine.h"
 #include "chrome/browser/ash/input_method/native_input_method_engine.h"
 #include "chrome/browser/ash/input_method/text_field_contextual_info_fetcher.h"
-#include "chrome/browser/ash/login/lock/screen_locker.h"
 #include "chrome/browser/ash/login/session/user_session_manager.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/ui/ash/keyboard/chrome_keyboard_controller_client.h"
@@ -33,6 +36,7 @@
 #include "ui/base/ime/ash/text_input_method.h"
 #include "ui/base/ime/constants.h"
 #include "ui/base/ui_base_features.h"
+#include "ui/events/keycodes/dom/keycode_converter.h"
 
 namespace {
 
@@ -75,7 +79,7 @@ void SetMenuItemToMenu(const input_ime::MenuItem& input,
     out->label = *input.label;
   }
 
-  if (input.style != input_ime::MENU_ITEM_STYLE_NONE) {
+  if (input.style != input_ime::MenuItemStyle::kNone) {
     out->style =
         static_cast<ash::input_method::InputMethodManager::MenuItemStyle>(
             input.style);
@@ -83,8 +87,9 @@ void SetMenuItemToMenu(const input_ime::MenuItem& input,
 
   out->visible = input.visible ? *input.visible : true;
 
-  if (input.checked)
+  if (input.checked) {
     out->modified |= InputMethodEngine::MENU_ITEM_MODIFIED_CHECKED;
+  }
   out->checked = input.checked ? *input.checked : false;
 
   out->enabled = input.enabled ? *input.enabled : true;
@@ -97,9 +102,9 @@ keyboard::KeyboardConfig GetKeyboardConfig() {
 ash::ime::AssistiveWindowType ConvertAssistiveWindowType(
     input_ime::AssistiveWindowType type) {
   switch (type) {
-    case input_ime::ASSISTIVE_WINDOW_TYPE_NONE:
+    case input_ime::AssistiveWindowType::kNone:
       return ash::ime::AssistiveWindowType::kNone;
-    case input_ime::ASSISTIVE_WINDOW_TYPE_UNDO:
+    case input_ime::AssistiveWindowType::kUndo:
       return ash::ime::AssistiveWindowType::kUndoWindow;
   }
 }
@@ -107,11 +112,11 @@ ash::ime::AssistiveWindowType ConvertAssistiveWindowType(
 ui::ime::ButtonId ConvertAssistiveWindowButtonId(
     input_ime::AssistiveWindowButton id) {
   switch (id) {
-    case input_ime::ASSISTIVE_WINDOW_BUTTON_ADDTODICTIONARY:
+    case input_ime::AssistiveWindowButton::kAddToDictionary:
       return ui::ime::ButtonId::kAddToDictionary;
-    case input_ime::ASSISTIVE_WINDOW_BUTTON_UNDO:
+    case input_ime::AssistiveWindowButton::kUndo:
       return ui::ime::ButtonId::kUndo;
-    case input_ime::ASSISTIVE_WINDOW_BUTTON_NONE:
+    case input_ime::AssistiveWindowButton::kNone:
       return ui::ime::ButtonId::kNone;
   }
 }
@@ -124,11 +129,11 @@ input_ime::AssistiveWindowButton ConvertAssistiveWindowButton(
     case ui::ime::ButtonId::kSuggestion:
     case ui::ime::ButtonId::kLearnMore:
     case ui::ime::ButtonId::kIgnoreSuggestion:
-      return input_ime::ASSISTIVE_WINDOW_BUTTON_NONE;
+      return input_ime::AssistiveWindowButton::kNone;
     case ui::ime::ButtonId::kUndo:
-      return input_ime::ASSISTIVE_WINDOW_BUTTON_UNDO;
+      return input_ime::AssistiveWindowButton::kUndo;
     case ui::ime::ButtonId::kAddToDictionary:
-      return input_ime::ASSISTIVE_WINDOW_BUTTON_ADDTODICTIONARY;
+      return input_ime::AssistiveWindowButton::kAddToDictionary;
   }
 }
 
@@ -136,30 +141,35 @@ input_ime::AssistiveWindowType ConvertAssistiveWindowType(
     const ash::ime::AssistiveWindowType& type) {
   switch (type) {
     case ash::ime::AssistiveWindowType::kNone:
-    case ash::ime::AssistiveWindowType::kEmojiSuggestion:
     case ash::ime::AssistiveWindowType::kPersonalInfoSuggestion:
     case ash::ime::AssistiveWindowType::kGrammarSuggestion:
     case ash::ime::AssistiveWindowType::kMultiWordSuggestion:
     case ash::ime::AssistiveWindowType::kLongpressDiacriticsSuggestion:
     case ash::ime::AssistiveWindowType::kLearnMore:
-      return input_ime::AssistiveWindowType::ASSISTIVE_WINDOW_TYPE_NONE;
+      return input_ime::AssistiveWindowType::kNone;
     case ash::ime::AssistiveWindowType::kUndoWindow:
-      return input_ime::AssistiveWindowType::ASSISTIVE_WINDOW_TYPE_UNDO;
+      return input_ime::AssistiveWindowType::kUndo;
   }
 }
 
 std::string GetKeyFromEvent(const ui::KeyEvent& event) {
-  const std::string code = event.GetCodeString();
-  if (base::StartsWith(code, "Control", base::CompareCase::SENSITIVE))
+  std::string code = event.GetCodeString();
+  if (base::StartsWith(code, "Control", base::CompareCase::SENSITIVE)) {
     return "Ctrl";
-  if (base::StartsWith(code, "Shift", base::CompareCase::SENSITIVE))
+  }
+  if (base::StartsWith(code, "Shift", base::CompareCase::SENSITIVE)) {
     return "Shift";
-  if (base::StartsWith(code, "Alt", base::CompareCase::SENSITIVE))
+  }
+  if (base::StartsWith(code, "Alt", base::CompareCase::SENSITIVE)) {
     return "Alt";
-  if (base::StartsWith(code, "Arrow", base::CompareCase::SENSITIVE))
-    return code.substr(5);
-  if (code == "Escape")
+  }
+  if (base::StartsWith(code, "Arrow", base::CompareCase::SENSITIVE)) {
+    code.erase(0, 5);
+    return code;
+  }
+  if (code == "Escape") {
     return "Esc";
+  }
   if (code == "Backspace" || code == "Tab" || code == "Enter" ||
       code == "CapsLock" || code == "Power")
     return code;
@@ -198,7 +208,7 @@ std::string GetKeyFromEvent(const ui::KeyEvent& event) {
     default:
       break;
   }
-  uint16_t ch = 0;
+  char16_t ch;
   // Ctrl+? cases, gets key value for Ctrl is not down.
   if (event.flags() & ui::EF_CONTROL_DOWN) {
     ui::KeyEvent event_no_ctrl(event.type(), event.key_code(),
@@ -207,9 +217,8 @@ std::string GetKeyFromEvent(const ui::KeyEvent& event) {
   } else {
     ch = event.GetCharacter();
   }
-  return base::UTF16ToUTF8(std::u16string(1, ch));
+  return base::UTF16ToUTF8(std::u16string_view(&ch, 1));
 }
-
 // TODO(b/247441188): Change the input extension JS API to use
 // PersonalizationMode instead of a bool.
 bool ConvertPersonalizationMode(const TextInputMethod::InputContext& context) {
@@ -253,20 +262,20 @@ class ImeObserverChromeOS
         !HasListener(input_ime::OnCandidateClicked::kEventName))
       return;
 
-    input_ime::MouseButton button_enum = input_ime::MOUSE_BUTTON_NONE;
+    input_ime::MouseButton button_enum = input_ime::MouseButton::kNone;
     switch (button) {
       case ash::input_method::MOUSE_BUTTON_MIDDLE:
-        button_enum = input_ime::MOUSE_BUTTON_MIDDLE;
+        button_enum = input_ime::MouseButton::kMiddle;
         break;
 
       case ash::input_method::MOUSE_BUTTON_RIGHT:
-        button_enum = input_ime::MOUSE_BUTTON_RIGHT;
+        button_enum = input_ime::MouseButton::kRight;
         break;
 
       case ash::input_method::MOUSE_BUTTON_LEFT:
       // Default to left.
       default:
-        button_enum = input_ime::MOUSE_BUTTON_LEFT;
+        button_enum = input_ime::MouseButton::kLeft;
         break;
     }
 
@@ -297,7 +306,7 @@ class ImeObserverChromeOS
       return;
     }
     // Note: this is a private API event.
-    base::Value::List args;
+    base::ListValue args;
     args.Append(is_projected);
 
     DispatchEventToExtension(
@@ -308,8 +317,9 @@ class ImeObserverChromeOS
   void OnActivate(const std::string& component_id) override {
     // Don't check whether the extension listens on onActivate event here.
     // Send onActivate event to give the IME a chance to add their listeners.
-    if (extension_id_.empty())
+    if (extension_id_.empty()) {
       return;
+    }
 
     auto args(input_ime::OnActivate::Create(
         component_id, input_ime::ParseScreenType(GetCurrentScreenType())));
@@ -320,8 +330,9 @@ class ImeObserverChromeOS
   }
 
   void OnBlur(const std::string& engine_id, int context_id) override {
-    if (extension_id_.empty() || !HasListener(input_ime::OnBlur::kEventName))
+    if (extension_id_.empty() || !HasListener(input_ime::OnBlur::kEventName)) {
       return;
+    }
 
     auto args(input_ime::OnBlur::Create(context_id));
 
@@ -332,8 +343,9 @@ class ImeObserverChromeOS
   void OnKeyEvent(const std::string& component_id,
                   const ui::KeyEvent& event,
                   TextInputMethod::KeyEventDoneCallback callback) override {
-    if (extension_id_.empty())
+    if (extension_id_.empty()) {
       return;
+    }
 
     // If there is no listener for the event, no need to dispatch the event to
     // extension. Instead, releases the key event for default system behavior.
@@ -347,15 +359,16 @@ class ImeObserverChromeOS
     std::string error;
     InputMethodEngine* engine =
         GetEngineIfActive(profile_, extension_id_, &error);
-    if (!engine)
+    if (!engine) {
       return;
+    }
     const std::string request_id =
         engine->AddPendingKeyEvent(component_id, std::move(callback));
 
     input_ime::KeyboardEvent keyboard_event;
-    keyboard_event.type = (event.type() == ui::ET_KEY_RELEASED)
-                              ? input_ime::KEYBOARD_EVENT_TYPE_KEYUP
-                              : input_ime::KEYBOARD_EVENT_TYPE_KEYDOWN;
+    keyboard_event.type = (event.type() == ui::EventType::kKeyReleased)
+                              ? input_ime::KeyboardEventType::kKeyup
+                              : input_ime::KeyboardEventType::kKeydown;
 
     // For legacy reasons, we still put a |requestID| into the keyData, even
     // though there is already a |requestID| argument in OnKeyEvent.
@@ -387,8 +400,9 @@ class ImeObserverChromeOS
   }
 
   void OnReset(const std::string& component_id) override {
-    if (extension_id_.empty() || !HasListener(input_ime::OnReset::kEventName))
+    if (extension_id_.empty() || !HasListener(input_ime::OnReset::kEventName)) {
       return;
+    }
 
     auto args(input_ime::OnReset::Create(component_id));
 
@@ -454,7 +468,6 @@ class ImeObserverChromeOS
               context.autocapitalization_mode);
       private_api_input_context.spell_check =
           ConvertInputContextSpellCheck(context.spellcheck_mode);
-      private_api_input_context.has_been_password = context.has_been_password;
       private_api_input_context.should_do_learning =
           ConvertPersonalizationMode(context);
       private_api_input_context.focus_reason =
@@ -521,34 +534,6 @@ class ImeObserverChromeOS
         extensions::events::INPUT_IME_ON_SURROUNDING_TEXT_CHANGED,
         input_ime::OnSurroundingTextChanged::kEventName, std::move(args));
   }
-  void OnTouch(ui::EventPointerType pointerType) override {
-    if (extension_id_.empty() ||
-        !HasListener(input_method_private::OnTouch::kEventName))
-      return;
-
-    std::string pointer = "";
-    switch (pointerType) {
-      case ui::EventPointerType::kPen:
-        pointer = "pen";
-        break;
-      case ui::EventPointerType::kMouse:
-        pointer = "mouse";
-        break;
-      case ui::EventPointerType::kTouch:
-        pointer = "touch";
-        break;
-      default:
-        pointer = "other";
-        break;
-    }
-
-    auto args(input_method_private::OnTouch::Create(
-        input_method_private::ParseFocusReason(pointer)));
-
-    DispatchEventToExtension(extensions::events::INPUT_METHOD_PRIVATE_ON_TOUCH,
-                             input_method_private::OnTouch::kEventName,
-                             std::move(args));
-  }
 
   void OnAssistiveWindowButtonClicked(
       const ui::ime::AssistiveWindowButton& button) override {
@@ -593,7 +578,7 @@ class ImeObserverChromeOS
   void DispatchEventToExtension(
       extensions::events::HistogramValue histogram_value,
       const std::string& event_name,
-      base::Value::List args) {
+      base::ListValue args) {
     if (event_name == input_ime::OnActivate::kEventName) {
       // Send onActivate event regardless of it's listened by the IME.
       auto event = std::make_unique<extensions::Event>(
@@ -612,10 +597,10 @@ class ImeObserverChromeOS
         extensions::ExtensionRegistry::Get(profile_);
     if (extension_registry) {
       const extensions::Extension* extension =
-          extension_registry->GetExtensionById(
-              extension_id_, extensions::ExtensionRegistry::ENABLED);
-      if (!extension)
+          extension_registry->enabled_extensions().GetByID(extension_id_);
+      if (!extension) {
         return;
+      }
       extensions::ProcessManager* process_manager =
           extensions::ProcessManager::Get(profile_);
       if (extensions::BackgroundInfo::HasBackgroundPage(extension) &&
@@ -632,7 +617,7 @@ class ImeObserverChromeOS
 
   // The component IME extensions need to know the current screen type (e.g.
   // lock screen, login screen, etc.) so that its on-screen keyboard page
-  // won't open new windows/pages. See crbug.com/395621.
+  // won't open new windows/pages. See crbug.com/40375509.
   std::string GetCurrentScreenType() {
     switch (ash::input_method::InputMethodManager::Get()
                 ->GetActiveIMEState()
@@ -663,14 +648,15 @@ class ImeObserverChromeOS
             .GetEventListenersByName(input_ime::OnKeyEvent::kEventName);
     for (const std::unique_ptr<extensions::EventListener>& listener :
          listeners) {
-      if (listener->extension_id() == extension_id_ && !listener->IsLazy())
+      if (listener->extension_id() == extension_id_ && !listener->IsLazy()) {
         return true;
+      }
     }
     return false;
   }
 
   // Returns true if there are any listeners on the given event.
-  // TODO(https://crbug.com/835699): Merge this with |ExtensionHasListener|.
+  // TODO(crbug.com/41384866): Merge this with |ExtensionHasListener|.
   bool HasListener(const std::string& event_name) const {
     return extensions::EventRouter::Get(profile_)->HasEventListener(event_name);
   }
@@ -709,13 +695,14 @@ class ImeObserverChromeOS
 
   input_method_private::AutoCapitalizeType
   ConvertInputContextAutoCapitalizePrivate(ash::AutocapitalizationMode mode) {
-    if (!GetKeyboardConfig().auto_capitalize)
-      return input_method_private::AUTO_CAPITALIZE_TYPE_OFF;
+    if (!GetKeyboardConfig().auto_capitalize) {
+      return input_method_private::AutoCapitalizeType::kOff;
+    }
 
     switch (mode) {
       case ash::AutocapitalizationMode::kUnspecified:
         // Autocapitalize flag may be missing for native text fields,
-        // crbug/1002713. As a safe default, use
+        // crbug.com/40098281. As a safe default, use
         // input_method_private::AUTO_CAPITALIZE_TYPE_OFF
         // ("off" in API specs). This corresponds to Blink's "off" represented
         // by ui::TEXT_INPUT_FLAG_AUTOCAPITALIZE_NONE. Note: This fallback must
@@ -723,15 +710,15 @@ class ImeObserverChromeOS
         // "unspecified" and translates to JS falsy empty string, because the
         // API specifies a non-falsy AutoCapitalizeType enum for
         // InputContext.autoCapitalize.
-        return input_method_private::AUTO_CAPITALIZE_TYPE_OFF;
+        return input_method_private::AutoCapitalizeType::kOff;
       case ash::AutocapitalizationMode::kNone:
-        return input_method_private::AUTO_CAPITALIZE_TYPE_OFF;
+        return input_method_private::AutoCapitalizeType::kOff;
       case ash::AutocapitalizationMode::kCharacters:
-        return input_method_private::AUTO_CAPITALIZE_TYPE_CHARACTERS;
+        return input_method_private::AutoCapitalizeType::kCharacters;
       case ash::AutocapitalizationMode::kWords:
-        return input_method_private::AUTO_CAPITALIZE_TYPE_WORDS;
+        return input_method_private::AutoCapitalizeType::kWords;
       case ash::AutocapitalizationMode::kSentences:
-        return input_method_private::AUTO_CAPITALIZE_TYPE_SENTENCES;
+        return input_method_private::AutoCapitalizeType::kSentences;
     }
   }
 
@@ -740,9 +727,9 @@ class ImeObserverChromeOS
            mode != ash::SpellcheckMode::kDisabled;
   }
 
-  std::string ConvertInputContextMode(
+  std::string_view ConvertInputContextMode(
       TextInputMethod::InputContext input_context) {
-    std::string input_mode_type = "none";  // default to nothing
+    std::string_view input_mode_type = "none";  // default to nothing
     switch (input_context.mode) {
       case ui::TEXT_INPUT_MODE_SEARCH:
         input_mode_type = "search";
@@ -775,9 +762,9 @@ class ImeObserverChromeOS
     return input_mode_type;
   }
 
-  std::string ConvertInputContextType(
+  std::string_view ConvertInputContextType(
       TextInputMethod::InputContext input_context) {
-    std::string input_context_type = "text";
+    std::string_view input_context_type = "text";
     switch (input_context.type) {
       case ui::TEXT_INPUT_TYPE_SEARCH:
         input_context_type = "search";
@@ -818,20 +805,20 @@ class ImeObserverChromeOS
     // API, the behaviour is left intact for now.
     switch (mode) {
       case ash::AutocapitalizationMode::kNone:
-        return input_ime::AUTO_CAPITALIZE_TYPE_NONE;
+        return input_ime::AutoCapitalizeType::kNone;
       case ash::AutocapitalizationMode::kCharacters:
-        return input_ime::AUTO_CAPITALIZE_TYPE_CHARACTERS;
+        return input_ime::AutoCapitalizeType::kCharacters;
       case ash::AutocapitalizationMode::kWords:
-        return input_ime::AUTO_CAPITALIZE_TYPE_WORDS;
+        return input_ime::AutoCapitalizeType::kWords;
       case ash::AutocapitalizationMode::kSentences:
-        return input_ime::AUTO_CAPITALIZE_TYPE_SENTENCES;
+        return input_ime::AutoCapitalizeType::kSentences;
       case ash::AutocapitalizationMode::kUnspecified:
         // The default value is "sentences".
-        return input_ime::AUTO_CAPITALIZE_TYPE_SENTENCES;
+        return input_ime::AutoCapitalizeType::kSentences;
     }
   }
 
-  std::string extension_id_;
+  extensions::ExtensionId extension_id_;
   raw_ptr<Profile, DanglingUntriaged> profile_;
 };
 
@@ -848,8 +835,9 @@ InputMethodEngine* GetEngine(content::BrowserContext* browser_context,
   InputMethodEngine* engine =
       static_cast<InputMethodEngine*>(event_router->GetEngine(extension_id));
   DCHECK(engine) << kErrorEngineNotAvailable;
-  if (!engine)
+  if (!engine) {
     *error = kErrorEngineNotAvailable;
+  }
   return engine;
 }
 
@@ -863,8 +851,9 @@ bool InputImeEventRouter::RegisterImeExtension(
     const std::vector<InputComponentInfo>& input_components) {
   VLOG(1) << "RegisterImeExtension: " << extension_id;
 
-  if (engine_map_[extension_id])
+  if (engine_map_[extension_id]) {
     return false;
+  }
 
   auto* manager = ash::input_method::InputMethodManager::Get();
   ash::ComponentExtensionIMEManager* comp_ext_ime_manager =
@@ -886,8 +875,8 @@ bool InputImeEventRouter::RegisterImeExtension(
       const std::string& layout =
           component.layouts.empty() ? "us" : *component.layouts.begin();
 
-      std::vector<std::string> languages;
-      languages.assign(component.languages.begin(), component.languages.end());
+      std::vector<std::string> languages = {component.languages.begin(),
+                                            component.languages.end()};
 
       const std::string& input_method_id =
           ash::extension_ime_util::GetInputMethodID(extension_id, component.id);
@@ -896,7 +885,9 @@ bool InputImeEventRouter::RegisterImeExtension(
           std::string(),  // TODO(uekawa): Set short name.
           layout, languages,
           false,  // 3rd party IMEs are always not for login.
-          component.options_page_url, component.input_view_url));
+          component.options_page_url, component.input_view_url,
+          // Not applicable to 3rd-party IMEs.
+          /*handwriting_language=*/std::nullopt));
     }
   }
 
@@ -983,17 +974,17 @@ ExtensionFunction::ResponseAction InputImeClearCompositionFunction::Run() {
     return RespondNow(Error(InformativeError(error, static_function_name())));
   }
 
-  std::unique_ptr<ClearComposition::Params> parent_params(
-      ClearComposition::Params::Create(args()));
+  std::optional<ClearComposition::Params> parent_params =
+      ClearComposition::Params::Create(args());
   const ClearComposition::Params::Parameters& params =
       parent_params->parameters;
 
   bool success = engine->ClearComposition(params.context_id, &error);
-  base::Value::List results;
+  base::ListValue results;
   results.Append(success);
   return RespondNow(success
                         ? ArgumentList(std::move(results))
-                        : ErrorWithArguments(
+                        : ErrorWithArgumentsDoNotUse(
                               std::move(results),
                               InformativeError(error, static_function_name())));
 }
@@ -1002,8 +993,9 @@ ExtensionFunction::ResponseAction InputImeHideInputViewFunction::Run() {
   std::string error;
   InputMethodEngine* engine = GetEngineIfActive(
       Profile::FromBrowserContext(browser_context()), extension_id(), &error);
-  if (!engine)
+  if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
   engine->HideInputView();
   return RespondNow(NoArguments());
 }
@@ -1016,8 +1008,8 @@ InputImeSetAssistiveWindowPropertiesFunction::Run() {
   if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
   }
-  std::unique_ptr<SetAssistiveWindowProperties::Params> parent_params(
-      SetAssistiveWindowProperties::Params::Create(args()));
+  std::optional<SetAssistiveWindowProperties::Params> parent_params =
+      SetAssistiveWindowProperties::Params::Create(args());
   const SetAssistiveWindowProperties::Params::Parameters& params =
       parent_params->parameters;
   const input_ime::AssistiveWindowProperties& window = params.properties;
@@ -1031,8 +1023,9 @@ InputImeSetAssistiveWindowPropertiesFunction::Run() {
 
   engine->SetAssistiveWindowProperties(params.context_id, assistive_window,
                                        &error);
-  if (!error.empty())
+  if (!error.empty()) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
   return RespondNow(WithArguments(true));
 }
 
@@ -1044,29 +1037,31 @@ InputImeSetAssistiveWindowButtonHighlightedFunction::Run() {
   if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
   }
-  std::unique_ptr<SetAssistiveWindowButtonHighlighted::Params> parent_params(
-      SetAssistiveWindowButtonHighlighted::Params::Create(args()));
+  std::optional<SetAssistiveWindowButtonHighlighted::Params> parent_params =
+      SetAssistiveWindowButtonHighlighted::Params::Create(args());
   const SetAssistiveWindowButtonHighlighted::Params::Parameters& params =
       parent_params->parameters;
   ui::ime::AssistiveWindowButton button;
 
   button.id = ConvertAssistiveWindowButtonId(params.button_id);
   button.window_type = ConvertAssistiveWindowType(params.window_type);
-  if (params.announce_string)
+  if (params.announce_string) {
     button.announce_string = base::UTF8ToUTF16(*params.announce_string);
+  }
 
   engine->SetButtonHighlighted(params.context_id, button, params.highlighted,
                                &error);
-  if (!error.empty())
+  if (!error.empty()) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
 
   return RespondNow(NoArguments());
 }
 
 ExtensionFunction::ResponseAction
 InputImeSetCandidateWindowPropertiesFunction::Run() {
-  std::unique_ptr<SetCandidateWindowProperties::Params> parent_params(
-      SetCandidateWindowProperties::Params::Create(args()));
+  std::optional<SetCandidateWindowProperties::Params> parent_params =
+      SetCandidateWindowProperties::Params::Create(args());
   const SetCandidateWindowProperties::Params::Parameters& params =
       parent_params->parameters;
 
@@ -1082,9 +1077,9 @@ InputImeSetCandidateWindowPropertiesFunction::Run() {
 
   if (properties.visible &&
       !engine->SetCandidateWindowVisible(*properties.visible, &error)) {
-    base::Value::List results;
+    base::ListValue results;
     results.Append(false);
-    return RespondNow(ErrorWithArguments(
+    return RespondNow(ErrorWithArgumentsDoNotUse(
         std::move(results), InformativeError(error, static_function_name())));
   }
 
@@ -1107,10 +1102,10 @@ InputImeSetCandidateWindowPropertiesFunction::Run() {
     modified = true;
   }
 
-  if (properties.window_position == input_ime::WINDOW_POSITION_COMPOSITION) {
+  if (properties.window_position == input_ime::WindowPosition::kComposition) {
     properties_out.show_window_at_composition = true;
     modified = true;
-  } else if (properties.window_position == input_ime::WINDOW_POSITION_CURSOR) {
+  } else if (properties.window_position == input_ime::WindowPosition::kCursor) {
     properties_out.show_window_at_composition = false;
     modified = true;
   }
@@ -1152,8 +1147,8 @@ ExtensionFunction::ResponseAction InputImeSetCandidatesFunction::Run() {
     return RespondNow(Error(InformativeError(error, static_function_name())));
   }
 
-  std::unique_ptr<SetCandidates::Params> parent_params(
-      SetCandidates::Params::Create(args()));
+  std::optional<SetCandidates::Params> parent_params =
+      SetCandidates::Params::Create(args());
   const SetCandidates::Params::Parameters& params = parent_params->parameters;
 
   std::vector<InputMethodEngine::Candidate> candidates_out;
@@ -1161,10 +1156,12 @@ ExtensionFunction::ResponseAction InputImeSetCandidatesFunction::Run() {
     candidates_out.emplace_back();
     candidates_out.back().value = candidate_in.candidate;
     candidates_out.back().id = candidate_in.id;
-    if (candidate_in.label)
+    if (candidate_in.label) {
       candidates_out.back().label = *candidate_in.label;
-    if (candidate_in.annotation)
+    }
+    if (candidate_in.annotation) {
       candidates_out.back().annotation = *candidate_in.annotation;
+    }
     if (candidate_in.usage) {
       candidates_out.back().usage.title = candidate_in.usage->title;
       candidates_out.back().usage.body = candidate_in.usage->body;
@@ -1173,11 +1170,11 @@ ExtensionFunction::ResponseAction InputImeSetCandidatesFunction::Run() {
 
   bool success =
       engine->SetCandidates(params.context_id, candidates_out, &error);
-  base::Value::List results;
+  base::ListValue results;
   results.Append(success);
   return RespondNow(success
                         ? ArgumentList(std::move(results))
-                        : ErrorWithArguments(
+                        : ErrorWithArgumentsDoNotUse(
                               std::move(results),
                               InformativeError(error, static_function_name())));
 }
@@ -1190,25 +1187,25 @@ ExtensionFunction::ResponseAction InputImeSetCursorPositionFunction::Run() {
     return RespondNow(Error(InformativeError(error, static_function_name())));
   }
 
-  std::unique_ptr<SetCursorPosition::Params> parent_params(
-      SetCursorPosition::Params::Create(args()));
+  std::optional<SetCursorPosition::Params> parent_params =
+      SetCursorPosition::Params::Create(args());
   const SetCursorPosition::Params::Parameters& params =
       parent_params->parameters;
 
   bool success =
       engine->SetCursorPosition(params.context_id, params.candidate_id, &error);
-  base::Value::List results;
+  base::ListValue results;
   results.Append(success);
   return RespondNow(success
                         ? ArgumentList(std::move(results))
-                        : ErrorWithArguments(
+                        : ErrorWithArgumentsDoNotUse(
                               std::move(results),
                               InformativeError(error, static_function_name())));
 }
 
 ExtensionFunction::ResponseAction InputImeSetMenuItemsFunction::Run() {
-  std::unique_ptr<SetMenuItems::Params> parent_params(
-      SetMenuItems::Params::Create(args()));
+  std::optional<SetMenuItems::Params> parent_params =
+      SetMenuItems::Params::Create(args());
   const input_ime::MenuParameters& params = parent_params->parameters;
 
   std::string error;
@@ -1216,6 +1213,11 @@ ExtensionFunction::ResponseAction InputImeSetMenuItemsFunction::Run() {
       GetEngine(browser_context(), extension_id(), &error);
   if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
+
+  if (engine->GetActiveComponentId() != params.engine_id) {
+    return RespondNow(
+        Error(InformativeError(kErrorEngineNotActive, static_function_name())));
   }
 
   std::vector<ash::input_method::InputMethodManager::MenuItem> items_out;
@@ -1233,8 +1235,8 @@ ExtensionFunction::ResponseAction InputImeSetMenuItemsFunction::Run() {
 }
 
 ExtensionFunction::ResponseAction InputImeUpdateMenuItemsFunction::Run() {
-  std::unique_ptr<UpdateMenuItems::Params> parent_params(
-      UpdateMenuItems::Params::Create(args()));
+  std::optional<UpdateMenuItems::Params> parent_params =
+      UpdateMenuItems::Params::Create(args());
   const input_ime::MenuParameters& params = parent_params->parameters;
 
   std::string error;
@@ -1242,6 +1244,11 @@ ExtensionFunction::ResponseAction InputImeUpdateMenuItemsFunction::Run() {
       GetEngine(browser_context(), extension_id(), &error);
   if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
+  }
+
+  if (engine->GetActiveComponentId() != params.engine_id) {
+    return RespondNow(
+        Error(InformativeError(kErrorEngineNotActive, static_function_name())));
   }
 
   std::vector<ash::input_method::InputMethodManager::MenuItem> items_out;
@@ -1259,8 +1266,8 @@ ExtensionFunction::ResponseAction InputImeUpdateMenuItemsFunction::Run() {
 }
 
 ExtensionFunction::ResponseAction InputImeDeleteSurroundingTextFunction::Run() {
-  std::unique_ptr<DeleteSurroundingText::Params> parent_params(
-      DeleteSurroundingText::Params::Create(args()));
+  std::optional<DeleteSurroundingText::Params> parent_params =
+      DeleteSurroundingText::Params::Create(args());
   const DeleteSurroundingText::Params::Parameters& params =
       parent_params->parameters;
 
@@ -1283,10 +1290,11 @@ InputMethodPrivateFinishComposingTextFunction::Run() {
   std::string error;
   InputMethodEngine* engine = GetEngineIfActive(
       Profile::FromBrowserContext(browser_context()), extension_id(), &error);
-  if (!engine)
+  if (!engine) {
     return RespondNow(Error(InformativeError(error, static_function_name())));
-  std::unique_ptr<FinishComposingText::Params> parent_params(
-      FinishComposingText::Params::Create(args()));
+  }
+  std::optional<FinishComposingText::Params> parent_params =
+      FinishComposingText::Params::Create(args());
   const FinishComposingText::Params::Parameters& params =
       parent_params->parameters;
   engine->FinishComposingText(params.context_id, &error);
@@ -1315,8 +1323,9 @@ void InputImeAPI::OnExtensionLoaded(content::BrowserContext* browser_context,
       // When extension is unloaded unexpectedly and reloaded, OS doesn't pass
       // details.browser_context value in OnListenerAdded callback. So we need
       // to reactivate engine here.
-      if (engine)
+      if (engine) {
         engine->Enable(engine->GetActiveComponentId());
+      }
       event_router->SetUnloadedExtensionId("");
     } else {
       event_router->RegisterImeExtension(extension->id(), *input_components);
@@ -1329,12 +1338,14 @@ void InputImeAPI::OnExtensionUnloaded(content::BrowserContext* browser_context,
                                       UnloadedExtensionReason reason) {
   const std::vector<InputComponentInfo>* input_components =
       InputComponents::GetInputComponents(extension);
-  if (!input_components || input_components->empty())
+  if (!input_components || input_components->empty()) {
     return;
+  }
   InputImeEventRouter* event_router =
       GetInputImeEventRouter(Profile::FromBrowserContext(browser_context));
-  if (!event_router)
+  if (!event_router) {
     return;
+  }
   auto* manager = ash::input_method::InputMethodManager::Get();
   ash::ComponentExtensionIMEManager* comp_ext_ime_manager =
       manager->GetComponentExtensionIMEManager();
@@ -1364,8 +1375,9 @@ void InputImeAPI::OnExtensionUnloaded(content::BrowserContext* browser_context,
 }
 
 void InputImeAPI::OnListenerAdded(const EventListenerInfo& details) {
-  if (details.is_lazy)
+  if (details.is_lazy) {
     return;
+  }
 
   // Other listeners may trigger this function, but only reactivate the IME
   // on focus event.
@@ -1378,25 +1390,29 @@ void InputImeAPI::OnListenerAdded(const EventListenerInfo& details) {
       GetEngineIfActive(Profile::FromBrowserContext(details.browser_context),
                         details.extension_id, &error);
   // Notifies the IME extension for IME ready with onActivate/onFocus events.
-  if (engine)
+  if (engine) {
     engine->Enable(engine->GetActiveComponentId());
+  }
 }
 
 void InputImeAPI::OnListenerRemoved(const EventListenerInfo& details) {
-  if (details.is_lazy)
+  if (details.is_lazy) {
     return;
+  }
 
   // If a key event listener was removed, cancel all the pending key events
   // because they might've been dropped by the IME.
-  if (details.event_name != input_ime::OnKeyEvent::kEventName)
+  if (details.event_name != input_ime::OnKeyEvent::kEventName) {
     return;
+  }
 
   std::string error;
   InputMethodEngine* engine =
       GetEngineIfActive(Profile::FromBrowserContext(details.browser_context),
                         details.extension_id, &error);
-  if (engine)
+  if (engine) {
     engine->CancelPendingKeyEvents();
+  }
 }
 
 }  // namespace extensions

@@ -4,10 +4,11 @@
 
 #include "ui/base/accelerators/accelerator_manager.h"
 
+#include <algorithm>
 #include <ostream>
 
 #include "base/check.h"
-#include "base/containers/contains.h"
+#include "base/logging.h"
 
 namespace ui {
 
@@ -31,10 +32,16 @@ void AcceleratorManager::Unregister(const Accelerator& accelerator,
                                     AcceleratorTarget* target) {
   DCHECK(target);
   AcceleratorTargetInfo* target_info = accelerators_.Find(accelerator);
-  DCHECK(target_info) << "Unregistering non-existing accelerator";
+  if (!target_info) {
+    DLOG(WARNING) << "Unregistering non-existing accelerator";
+    return;
+  }
 
   const bool was_registered = target_info->Unregister(target);
-  DCHECK(was_registered) << "Unregistering accelerator for wrong target";
+  if (!was_registered) {
+    DLOG(WARNING) << "Unregistering accelerator for wrong target";
+    return;
+  }
 
   // If the last target for the accelerator is removed, then erase the
   // entry from the map.
@@ -139,9 +146,12 @@ bool AcceleratorManager::AcceleratorTargetInfo::Unregister(
     has_priority_handler_ = false;
 
   // Attempt to remove the target and return true if it was present.
-  const size_t original_target_count = targets_.size();
-  targets_.remove(target);
-  return original_target_count != targets_.size();
+  auto iter = std::find(targets_.begin(), targets_.end(), target);
+  if (iter != targets_.end()) {
+    targets_.erase(iter);
+    return true;
+  }
+  return false;
 }
 
 bool AcceleratorManager::AcceleratorTargetInfo::TryProcess(
@@ -166,7 +176,7 @@ bool AcceleratorManager::AcceleratorTargetInfo::HasPriorityHandler() const {
 bool AcceleratorManager::AcceleratorTargetInfo::Contains(
     AcceleratorTarget* target) const {
   DCHECK(target);
-  return base::Contains(targets_, target);
+  return std::ranges::contains(targets_, target);
 }
 
 }  // namespace ui

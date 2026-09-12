@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,12 +18,12 @@
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
-#include "base/memory/raw_ref.h"
+#include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/sequence_checker.h"
-#include "base/strings/string_piece_forward.h"
 #include "components/winhttp/proxy_configuration.h"
 #include "components/winhttp/scoped_hinternet.h"
+#include "components/winhttp/scoped_winttp_proxy_info.h"
 #include "url/gurl.h"
 
 namespace base {
@@ -33,6 +34,10 @@ namespace winhttp {
 
 // Implements a network fetcher in terms of WinHTTP. The class is ref-counted
 // as it is accessed from the main sequence and the worker threads in WinHTTP.
+//
+// Each NetworkFetcher instance is strictly single-use and cannot be reused to
+// send multiple requests consecutively or concurrently. Subsequent attempts to
+// start a fetch will trigger a CHECK failure.
 class NetworkFetcher : public base::RefCountedThreadSafe<NetworkFetcher> {
  public:
   using FetchCompleteCallback = base::OnceCallback<void(int response_code)>;
@@ -40,7 +45,7 @@ class NetworkFetcher : public base::RefCountedThreadSafe<NetworkFetcher> {
       base::OnceCallback<void(int response_code, int64_t content_length)>;
   using FetchProgressCallback = base::RepeatingCallback<void(int64_t current)>;
 
-  NetworkFetcher(const HINTERNET& session_handle,
+  NetworkFetcher(scoped_refptr<SharedHInternet> session_handle,
                  scoped_refptr<ProxyConfiguration> proxy_configuration);
   NetworkFetcher(const NetworkFetcher&) = delete;
   NetworkFetcher& operator=(const NetworkFetcher&) = delete;
@@ -58,12 +63,13 @@ class NetworkFetcher : public base::RefCountedThreadSafe<NetworkFetcher> {
 
   // Downloads the content of the |url| to a file identified by |file_path|.
   // The content is written to the file as it is being retrieved from the
-  // network.
-  void DownloadToFile(const GURL& url,
-                      const base::FilePath& file_path,
-                      FetchStartedCallback fetch_started_callback,
-                      FetchProgressCallback fetch_progress_callback,
-                      FetchCompleteCallback fetch_complete_callback);
+  // network. Returns a closure that can be run to cancel the download.
+  base::OnceClosure DownloadToFile(
+      const GURL& url,
+      const base::FilePath& file_path,
+      FetchStartedCallback fetch_started_callback,
+      FetchProgressCallback fetch_progress_callback,
+      FetchCompleteCallback fetch_complete_callback);
 
   HRESULT QueryHeaderString(const std::wstring& name,
                             std::wstring* value) const;
@@ -95,7 +101,13 @@ class NetworkFetcher : public base::RefCountedThreadSafe<NetworkFetcher> {
 
   HRESULT BeginFetch(
       const std::string& data,
-      base::flat_map<std::string, std::string> additional_headers);
+      const base::flat_map<std::string, std::string>& additional_headers);
+  std::optional<ScopedWinHttpProxyInfo> GetProxyForUrl();
+  void ContinueFetch(
+      const std::string& data,
+      base::flat_map<std::string, std::string> additional_headers,
+      std::optional<ScopedWinHttpProxyInfo> winhttp_proxy_info);
+
   ScopedHInternet Connect();
   ScopedHInternet OpenRequest();
   HRESULT SendRequest(const std::string& data);
@@ -115,8 +127,7 @@ class NetworkFetcher : public base::RefCountedThreadSafe<NetworkFetcher> {
   SEQUENCE_CHECKER(sequence_checker_);
   scoped_refptr<base::SequencedTaskRunner> main_task_runner_;
 
-  const raw_ref<const HINTERNET>
-      session_handle_;  // Owned by NetworkFetcherFactory.
+  scoped_refptr<SharedHInternet> session_handle_;
   scoped_refptr<ProxyConfiguration> proxy_configuration_;
   ScopedHInternet connect_handle_;
   ScopedHInternet request_handle_;
@@ -132,7 +143,7 @@ class NetworkFetcher : public base::RefCountedThreadSafe<NetworkFetcher> {
   int port_ = 0;
   std::string path_for_request_;
 
-  base::WStringPiece verb_;
+  std::wstring verb_;
   std::string request_data_;
   // The value of Content-Type header, e.g. "application/json".
   std::string content_type_;

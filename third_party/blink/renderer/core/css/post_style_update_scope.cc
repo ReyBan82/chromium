@@ -10,7 +10,6 @@
 #include "third_party/blink/renderer/core/css/style_engine.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/element.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 
 namespace blink {
 
@@ -43,13 +42,17 @@ PostStyleUpdateScope::~PostStyleUpdateScope() {
 }
 
 bool PostStyleUpdateScope::Apply() {
+  if (current_ != this) {
+    // We only record and apply updates in the outermost scope (reflected by
+    // current_).
+    return false;
+  }
+
   if (ApplyPseudo()) {
     return true;
   }
   ApplyAnimations();
-  document_.ClearFocusedElementIfNeeded();
-  document_.RemoveFinishedTopLayerElements();
-  return false;
+  return document_.RemoveFinishedTopLayerElements();
 }
 
 bool PostStyleUpdateScope::ApplyPseudo() {
@@ -84,6 +87,16 @@ void PostStyleUpdateScope::ApplyAnimations() {
     element_animations->CssAnimations().MaybeApplyPendingUpdate(element.Get());
   }
 
+  // NOTE: We avoid performing the trigger attachments if we know we still need
+  // to run layout because the trigger names (and scopes) are made visible by
+  // propagating them through the fragment tree which happens during layout.
+  // Otherwise, we run the risk of performing attachments based on obsolete
+  // trigger names and scopes.
+  if (RuntimeEnabledFeatures::AnimationTriggerEnabled() &&
+      !document_.View()->NeedsLayout()) {
+    document_.GetDocumentAnimations().UpdateAnimationTriggerAttachments();
+  }
+
   DCHECK(animation_data_.elements_with_pending_updates_.empty())
       << "MaybeApplyPendingUpdate must not set further pending updates";
 }
@@ -95,11 +108,18 @@ void PostStyleUpdateScope::AnimationData::SetPendingUpdate(
   elements_with_pending_updates_.insert(&element);
 }
 
+void PostStyleUpdateScope::SetPendingUpdateForTesting(
+    Element& element,
+    const CSSAnimationUpdate& update) {
+  if (AnimationData* data = CurrentAnimationData()) {
+    data->SetPendingUpdate(element, update);
+  }
+}
+
 void PostStyleUpdateScope::AnimationData::StoreOldStyleIfNeeded(
     Element& element) {
-  old_styles_.insert(
-      &element, scoped_refptr<const ComputedStyle>(
-                    ComputedStyle::NullifyEnsured(element.GetComputedStyle())));
+  old_styles_.insert(&element,
+                     ComputedStyle::NullifyEnsured(element.GetComputedStyle()));
 }
 
 const ComputedStyle* PostStyleUpdateScope::AnimationData::GetOldStyle(
@@ -108,7 +128,7 @@ const ComputedStyle* PostStyleUpdateScope::AnimationData::GetOldStyle(
   if (iter == old_styles_.end()) {
     return ComputedStyle::NullifyEnsured(element.GetComputedStyle());
   }
-  return iter->value.get();
+  return iter->value.Get();
 }
 
 void PostStyleUpdateScope::PseudoData::AddPendingBackdrop(

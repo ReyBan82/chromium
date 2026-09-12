@@ -4,24 +4,25 @@
 
 #include "chrome/browser/policy/status_provider/updater_status_and_value_provider.h"
 
-#include <windows.h>
-
-#include <DSRole.h>
 #include <algorithm>
 #include <utility>
 
-#include "base/functional/callback_forward.h"
+#include "base/barrier_callback.h"
 #include "base/sequence_checker.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 #include "base/values.h"
-#include "chrome/browser/google/google_update_policy_fetcher_win.h"
+#include "build/build_config.h"
+#include "build/buildflag.h"
+#include "chrome/browser/google/google_update_policy_fetcher.h"
 #include "chrome/browser/policy/chrome_policy_conversions_client.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/install_static/install_util.h"
+#include "chrome/browser/updater/updater.h"
 #include "components/policy/core/browser/policy_conversions.h"
 #include "components/policy/core/browser/webui/policy_status_provider.h"
+#include "components/policy/resources/webui/mojom/policy.mojom.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/web_contents.h"
@@ -32,61 +33,63 @@ constexpr char kUpdaterPoliciesId[] = "updater";
 constexpr char kUpdaterPoliciesName[] = "Google Update Policies";
 constexpr char kUpdaterPolicyStatusDescription[] = "statusUpdater";
 
-std::string GetActiveDirectoryDomain() {
-  std::string domain;
-  ::DSROLE_PRIMARY_DOMAIN_INFO_BASIC* info = nullptr;
-  if (::DsRoleGetPrimaryDomainInformation(nullptr,
-                                          ::DsRolePrimaryDomainInfoBasic,
-                                          (PBYTE*)&info) != ERROR_SUCCESS) {
-    return domain;
-  }
-  if (info->DomainNameDns)
-    domain = base::WideToUTF8(info->DomainNameDns);
-  ::DsRoleFreeMemory(info);
-  return domain;
-}
-
 }  // namespace
 
 UpdaterStatusAndValueProvider::UpdaterStatusAndValueProvider(Profile* profile)
     : profile_(profile) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  base::ThreadPool::PostTaskAndReplyWithResult(
-      FROM_HERE,
-      {base::MayBlock(), base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
-      base::BindOnce(&GetActiveDirectoryDomain),
-      base::BindOnce(&UpdaterStatusAndValueProvider::OnDomainReceived,
-                     weak_factory_.GetWeakPtr()));
+  Init();
 }
 
 UpdaterStatusAndValueProvider::~UpdaterStatusAndValueProvider() = default;
 
-base::Value::Dict UpdaterStatusAndValueProvider::GetStatus() {
+base::DictValue UpdaterStatusAndValueProvider::GetStatus() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  base::Value::Dict dict;
+  base::DictValue dict;
   if (!domain_.empty())
     dict.Set(policy::kDomainKey, domain_);
   if (!updater_status_)
     return dict;
   if (!updater_status_->version.empty())
-    dict.Set("version", base::WideToUTF8(updater_status_->version));
+    dict.Set("version", updater_status_->version);
   if (!updater_status_->last_checked_time.is_null()) {
     dict.Set("timeSinceLastRefresh",
              GetTimeSinceLastActionString(updater_status_->last_checked_time));
   }
-  if (dict.empty())
+
+  if (dict.empty()) {
     return {};
+  }
 
   dict.Set(policy::kPolicyDescriptionKey, kUpdaterPolicyStatusDescription);
   return dict;
 }
 
-base::Value::Dict UpdaterStatusAndValueProvider::GetValues() {
+policy::mojom::StatusPtr UpdaterStatusAndValueProvider::GetStatusMojo() {
+  auto status = policy::mojom::Status::New();
+  if (!domain_.empty()) {
+    status->domain = domain_;
+  }
+  if (!updater_status_) {
+    return status;
+  }
+  if (!updater_status_->version.empty()) {
+    status->version = updater_status_->version;
+  }
+  if (!updater_status_->last_checked_time.is_null()) {
+    status->time_since_last_refresh = base::UTF16ToUTF8(
+        GetTimeSinceLastActionString(updater_status_->last_checked_time));
+  }
+  status->policy_description_key = kUpdaterPolicyStatusDescription;
+  return status;
+}
+
+base::DictValue UpdaterStatusAndValueProvider::GetValues() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (!updater_policies_)
     return {};
 
-  base::Value::Dict updater_policies_data;
+  base::DictValue updater_policies_data;
   updater_policies_data.Set(policy::kNameKey, kUpdaterPoliciesName);
 
   auto client =
@@ -100,16 +103,16 @@ base::Value::Dict UpdaterStatusAndValueProvider::GetValues() {
       client->ConvertUpdaterPolicies(updater_policies_->Clone(),
                                      GetGoogleUpdatePolicySchemas()));
 
-  base::Value::Dict policy_values;
+  base::DictValue policy_values;
   policy_values.Set(kUpdaterPoliciesId, std::move(updater_policies_data));
   return policy_values;
 }
 
-base::Value::Dict UpdaterStatusAndValueProvider::GetNames() {
+base::DictValue UpdaterStatusAndValueProvider::GetNames() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  base::Value::Dict names;
+  base::DictValue names;
   if (updater_policies_) {
-    base::Value::Dict updater_policies;
+    base::DictValue updater_policies;
     updater_policies.Set(policy::kNameKey, kUpdaterPoliciesName);
     updater_policies.Set(policy::kPolicyNamesKey, GetGoogleUpdatePolicyNames());
     names.Set(kUpdaterPoliciesId, std::move(updater_policies));
@@ -119,28 +122,58 @@ base::Value::Dict UpdaterStatusAndValueProvider::GetNames() {
 
 void UpdaterStatusAndValueProvider::Refresh() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  base::ThreadPool::CreateCOMSTATaskRunner(
-      {base::TaskPriority::USER_BLOCKING,
-       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN, base::MayBlock()})
-      ->PostTaskAndReplyWithResult(
-          FROM_HERE, base::BindOnce(&GetGoogleUpdatePoliciesAndState),
-          base::BindOnce(
-              &UpdaterStatusAndValueProvider::OnUpdaterPoliciesRefreshed,
-              weak_factory_.GetWeakPtr()));
+  base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE, base::BindOnce(&UpdaterStatusAndValueProvider::DoRefresh,
+                                weak_factory_.GetWeakPtr()));
 }
 
-void UpdaterStatusAndValueProvider::OnDomainReceived(std::string domain) {
+void UpdaterStatusAndValueProvider::DoRefresh() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  domain_ = std::move(domain);
-  // Call Refresh() to load the policies when the domain is received.
-  Refresh();
+
+  // Use a `BarrierCallback` to wait for both async Mojo calls to complete
+  // before invoking `OnUpdaterPoliciesRefreshed`. This unified implementation
+  // works for both Windows and macOS, ensuring parity with the chrome://updater
+  // page.
+  auto barrier = base::BarrierCallback<GoogleUpdatePoliciesAndState>(
+      2,
+      base::BindOnce(&UpdaterStatusAndValueProvider::OnUpdaterPoliciesRefreshed,
+                     weak_factory_.GetWeakPtr()));
+
+  // Fetch updater state (version + last_checked).
+  updater::GetSystemUpdaterState(
+      base::BindOnce([](const updater::mojom::UpdaterState& state) {
+        return GoogleUpdatePoliciesAndState{
+            .state =
+                GoogleUpdateState{
+                    .version = state.active_version,
+                    .last_checked_time = state.last_checked,
+                },
+        };
+      }).Then(barrier));
+
+  // Fetch policies JSON and parse into PolicyMap.
+  updater::GetSystemPoliciesJson(
+      base::BindOnce([](const std::string& json) {
+        policy::PolicyMap p;
+        ParsePoliciesJsonIntoPolicyMap(json, GetUpdaterAppId(), &p);
+        return GoogleUpdatePoliciesAndState{.policies = std::move(p)};
+      }).Then(barrier));
 }
 
 void UpdaterStatusAndValueProvider::OnUpdaterPoliciesRefreshed(
-    std::unique_ptr<GoogleUpdatePoliciesAndState> updater_policies_and_state) {
+    std::vector<GoogleUpdatePoliciesAndState> results) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  updater_policies_ = std::move(updater_policies_and_state->policies);
-  updater_status_ = std::move(updater_policies_and_state->state);
+
+  updater_policies_ = std::nullopt;
+  updater_status_ = std::nullopt;
+
+  for (auto& result : results) {
+    if (result.state.has_value()) {
+      updater_status_ = std::move(*result.state);
+    } else if (result.policies.has_value()) {
+      updater_policies_ = std::move(*result.policies);
+    }
+  }
   NotifyValueChange();
   NotifyStatusChange();
 }

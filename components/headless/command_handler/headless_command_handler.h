@@ -23,7 +23,14 @@ namespace headless {
 
 class HeadlessCommandHandler : public content::WebContentsObserver {
  public:
-  typedef base::OnceCallback<void()> DoneCallback;
+  enum class Result {
+    kSuccess,
+    kPageLoadError,
+    kPageLoadTimeout,
+    kWriteFileError,
+  };
+
+  typedef base::OnceCallback<void(Result)> DoneCallback;
 
   HeadlessCommandHandler(const HeadlessCommandHandler&) = delete;
   HeadlessCommandHandler& operator=(const HeadlessCommandHandler&) = delete;
@@ -40,6 +47,10 @@ class HeadlessCommandHandler : public content::WebContentsObserver {
       DoneCallback done_callback,
       scoped_refptr<base::SequencedTaskRunner> io_task_runner = {});
 
+  // Sets an additional callback that is fired when command is processed
+  // for testing purposes.
+  static void SetDoneCallbackForTesting(DoneCallback done_callback);
+
  private:
   using SimpleDevToolsProtocolClient =
       simple_devtools_protocol_client::SimpleDevToolsProtocolClient;
@@ -51,27 +62,33 @@ class HeadlessCommandHandler : public content::WebContentsObserver {
       scoped_refptr<base::SequencedTaskRunner> io_task_runner);
   ~HeadlessCommandHandler() override;
 
-  void ExecuteCommands();
-
   // content::WebContentsObserver implementation:
   void DocumentOnLoadCompletedInPrimaryMainFrame() override;
   void WebContentsDestroyed() override;
 
-  void OnTargetCrashed(const base::Value::Dict&);
+  void OnDevToolsProtocolExposed(base::DictValue);
 
-  void OnCommandsResult(base::Value::Dict result);
+  void OnTargetCrashed(const base::DictValue&);
 
+  void OnCommandsResult(base::DictValue result);
+
+  void WriteFile(base::FilePath file_path, std::string base64_file_data);
+  void OnWriteFileDone(bool success);
+
+  void PostDone();
   void Done();
 
   SimpleDevToolsProtocolClient devtools_client_;
   SimpleDevToolsProtocolClient browser_devtools_client_;
-  raw_ptr<content::WebContents> web_contents_;
   GURL target_url_;
   DoneCallback done_callback_;
   scoped_refptr<base::SequencedTaskRunner> io_task_runner_;
 
   base::FilePath pdf_file_path_;
   base::FilePath screenshot_file_path_;
+
+  int write_file_tasks_in_flight_ = 0;
+  Result result_ = Result::kSuccess;
 };
 
 }  // namespace headless

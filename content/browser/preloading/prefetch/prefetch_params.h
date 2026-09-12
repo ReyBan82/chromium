@@ -5,23 +5,18 @@
 #ifndef CONTENT_BROWSER_PRELOADING_PREFETCH_PREFETCH_PARAMS_H_
 #define CONTENT_BROWSER_PRELOADING_PREFETCH_PREFETCH_PARAMS_H_
 
+#include <optional>
+
 #include "base/time/time.h"
 #include "content/common/content_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "third_party/blink/public/mojom/speculation_rules/speculation_rules.mojom.h"
-
 #include "url/gurl.h"
 
 namespace content {
 
-// Returns true if the |kPrefetchUseContentRefactor| feature is enabled.
-bool PrefetchContentRefactorIsEnabled();
+class PrefetchType;
 
 // The url of the tunnel proxy.
 CONTENT_EXPORT GURL PrefetchProxyHost(const GURL& default_proxy_url);
-
-// The header name used to connect to the tunnel proxy.
-std::string PrefetchProxyHeaderKey();
 
 // This value is included in the |PrefetchProxyHeaderKey| request header.
 // The tunnel proxy will use this to determine what, if any, experimental
@@ -36,14 +31,6 @@ bool PrefetchAllowAllDomains();
 // Returns true if any domain can issue private prefetches using the prefetch
 // proxy, so long as the user opted-in to extended preloading.
 bool PrefetchAllowAllDomainsForExtendedPreloading();
-
-// The maximum number of mainframes allowed to be prefetched at the same time.
-size_t PrefetchServiceMaximumNumberOfConcurrentPrefetches();
-
-// The maximum number of prefetch requests to start from a page. A return value
-// of nullopt means unlimited. Negative values given by the field trial return
-// nullopt.
-absl::optional<int> PrefetchServiceMaximumNumberOfPrefetchesPerPage();
 
 // Returns true if an ineligible prefetch request should be put on the network,
 // but not cached, to disguise the presence of cookies (or other criteria). The
@@ -60,24 +47,21 @@ base::TimeDelta PrefetchTimeoutDuration();
 // bytes.
 size_t PrefetchMainframeBodyLengthLimit();
 
-// Whether idle sockets should be closed after every prefetch.
-bool PrefetchCloseIdleSockets();
-
 // Whether a spare renderer should be started after prefetching.
 bool PrefetchStartsSpareRenderer();
 
-// The amount of time |PrefetchService| will keep an owned |PrefetchContainer|
-// alive. If this value is zero or less, the service will keep the prefetch
-// forever.
-base::TimeDelta PrefetchContainerLifetimeInPrefetchService();
+// The default amount of time `PrefetchService` will keep an owned
+// `PrefetchContainer` alive. If this value is zero or less, the service will
+// keep the prefetch forever. This can be overridden in the `PrefetchContainer`.
+CONTENT_EXPORT base::TimeDelta PrefetchContainerDefaultTtlInPrefetchService();
 
-// Retrieves a host for which the prefetch proxy should be bypassed for testing
-// purposes.
-CONTENT_EXPORT absl::optional<std::string> PrefetchBypassProxyForHost();
+// Returns if the specified host should have the prefetch proxy bypassed for
+// testing purposes. Currently this is only used for WPT test servers.
+CONTENT_EXPORT bool ShouldPrefetchBypassProxyForTestHost(std::string_view host);
 
 // Whether only prefetched resources with a text/html MIME type should be used.
 // If this is false, there is no MIME type restriction.
-bool PrefetchServiceHTMLOnly();
+CONTENT_EXPORT bool PrefetchServiceHTMLOnly();
 
 // The maximum time a prefetched response is servable.
 CONTENT_EXPORT base::TimeDelta PrefetchCacheableDuration();
@@ -109,14 +93,33 @@ base::TimeDelta PrefetchCanaryCheckTimeout();
 // The number of retries to allow for canary checks.
 int PrefetchCanaryCheckRetries();
 
-// Whether or not |PrefetchService| should block until the head of a prefetch
-// request is received when considering to serve a prefetch for a navigation.
-bool PrefetchShouldBlockUntilHead(
-    blink::mojom::SpeculationEagerness prefetch_eagerness);
+// The maximum amount of time to block until the head of a prefetch is received.
+// If the value is zero or less, then a navigation can be blocked indefinitely.
+CONTENT_EXPORT base::TimeDelta PrefetchBlockUntilHeadTimeout(
+    const PrefetchType& prefetch_type,
+    bool should_disable_block_until_head_timeout,
+    bool is_nav_prerender);
 
-// Returns whether the client is involved in the Holdback Finch
-// experiment group.
-bool IsContentPrefetchHoldback();
+// Gets the histogram suffix for the given `prefetch_type` and
+// `histogram_suffix`.
+// `histogram_suffix` will be utilized directly to generate the
+// histogram names. `TriggerTypeAndEagerness` in
+// //tools/metrics/histograms/metadata/prefetch/histograms.xml should be updated
+// if we start using a new one.
+CONTENT_EXPORT std::string GetMetricsSuffixTriggerTypeAndEagerness(
+    const PrefetchType prefetch_type,
+    const std::optional<std::string>& histogram_suffix);
+
+// The max number of immediate prefetches allowed.
+inline constexpr size_t kMaxNumberOfImmediatePrefetchesPerPage = 50;
+// The max number of conservative prefetches allowed.
+inline constexpr size_t kMaxNumberOfConservativePrefetchesPerPage = 2;
+
+// Returns true if NIK prefetch scope is enabled. See crbug.com/1502326
+bool PrefetchNIKScopeEnabled();
+
+size_t GetPrefetchDataPipeTeeBodySizeLimit();
+
 }  // namespace content
 
 #endif  // CONTENT_BROWSER_PRELOADING_PREFETCH_PREFETCH_PARAMS_H_

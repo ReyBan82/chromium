@@ -1,21 +1,39 @@
-(async function(testRunner) {
-  const {page, session, dp} = await testRunner.startBlank(
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
+  const {tabTargetSession} = await testRunner.startBlankWithTabTarget(
       `Test that prerender navigations receives the status updates`);
-  await dp.Page.enable();
 
-  // Navigate to speculation rules Prerender Page.
-  page.navigate('resources/simple-prerender.html');
+  const childTargetManager =
+      testRunner.createChildTargetManagerFor(tabTargetSession);
+  await childTargetManager.startAutoAttach();
+  const session1 = childTargetManager.findAttachedSessionPrimaryMainFrame();
+  const dp1 = session1.protocol;
+  await dp1.Preload.enable();
 
-  let statusReport = await dp.Page.oncePrerenderStatusUpdated();
-  testRunner.log(statusReport, '', ['initiatingFrameId', 'sessionId']);
-  statusReport = await dp.Page.oncePrerenderStatusUpdated();
-  testRunner.log(statusReport, '', ['initiatingFrameId', 'sessionId']);
-  statusReport = await dp.Page.oncePrerenderStatusUpdated();
-  testRunner.log(statusReport, '', ['initiatingFrameId', 'sessionId']);
+  session1.navigate('resources/simple-prerender.html');
 
-  session.evaluate(`document.getElementById('link').click()`);
-  statusReport = await dp.Page.oncePrerenderStatusUpdated();
-  testRunner.log(statusReport, '', ['initiatingFrameId', 'sessionId']);
+  // Pending
+  const resultPending = await dp1.Preload.oncePrerenderStatusUpdated();
+  testRunner.log(resultPending);
+
+  // Running
+  testRunner.log(await dp1.Preload.oncePrerenderStatusUpdated());
+  // Ready
+  testRunner.log(await dp1.Preload.oncePrerenderStatusUpdated());
+
+  const session2 = childTargetManager.findAttachedSessionPrerender();
+  const dp2 = session2.protocol;
+  await dp2.Preload.enable();
+
+  // Activate prerendered page.
+  session1.evaluate(`document.getElementById('link').click()`);
+
+  // Success
+  const resultSuccess = await dp2.Preload.oncePrerenderStatusUpdated();
+  testRunner.log(resultSuccess);
+
+  if (resultPending.params.key.loaderId !== resultSuccess.params.key.loaderId) {
+    testRunner.log('loaderId should remain consistent.');
+  }
 
   testRunner.completeTest();
 });

@@ -4,347 +4,157 @@
 
 #include "third_party/blink/renderer/modules/webgpu/gpu_queue.h"
 
+#include <cmath>
+
 #include "build/build_config.h"
 #include "gpu/command_buffer/client/shared_image_interface.h"
 #include "gpu/command_buffer/client/webgpu_interface.h"
 #include "gpu/command_buffer/common/shared_image_usage.h"
+#include "gpu/config/gpu_finch_features.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
-#include "third_party/blink/renderer/bindings/core/v8/v8_union_htmlcanvaselement_htmlvideoelement_imagebitmap_offscreencanvas.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_union_element_elementimage.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_command_buffer_descriptor.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_copy_element_image_destination.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_copy_element_image_source.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_draw_element_image_destination.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_draw_element_image_source.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_image_copy_external_image.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_image_copy_image_bitmap.h"
-#include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_image_copy_texture.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_image_copy_texture_tagged.h"
-#include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_origin_2d_dict.h"
-#include "third_party/blink/renderer/bindings/modules/v8/v8_union_gpuorigin2ddict_unsignedlongenforcerangesequence.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_gpu_texel_copy_texture_info.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_union_gpuextent3ddict_unsignedlongenforcerangesequence.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_union_htmlcanvaselement_htmlimageelement_htmlvideoelement_imagebitmap_imagedata_offscreencanvas_videoframe.h"
 #include "third_party/blink/renderer/core/dom/dom_exception.h"
-#include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context_host.h"
+#include "third_party/blink/renderer/core/dom/dom_node_ids.h"
+#include "third_party/blink/renderer/core/frame/web_feature.h"
+#include "third_party/blink/renderer/core/html/canvas/element_image.h"
 #include "third_party/blink/renderer/core/html/canvas/html_canvas_element.h"
 #include "third_party/blink/renderer/core/html/canvas/predefined_color_space.h"
-#include "third_party/blink/renderer/core/imagebitmap/image_bitmap.h"
 #include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer.h"
 #include "third_party/blink/renderer/modules/webgpu/dawn_conversions.h"
+#include "third_party/blink/renderer/modules/webgpu/external_image_utils.h"
 #include "third_party/blink/renderer/modules/webgpu/external_texture_helper.h"
+#include "third_party/blink/renderer/modules/webgpu/gpu_adapter.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_buffer.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_command_buffer.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_device.h"
 #include "third_party/blink/renderer/modules/webgpu/gpu_texture.h"
 #include "third_party/blink/renderer/modules/webgpu/texture_utils.h"
+#include "third_party/blink/renderer/platform/graphics/gpu/webgpu_callback.h"
 #include "third_party/blink/renderer/platform/graphics/gpu/webgpu_mailbox_texture.h"
-#include "third_party/blink/renderer/platform/graphics/graphics_types.h"
+#include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "ui/gfx/geometry/size_conversions.h"
 
 namespace blink {
 
 namespace {
 
-WGPUOrigin3D GPUOrigin2DToWGPUOrigin3D(const V8GPUOrigin2D* webgpu_origin) {
-  DCHECK(webgpu_origin);
-
-  WGPUOrigin3D dawn_origin = {
-      0,
-      0,
-      0,
-  };
-
-  switch (webgpu_origin->GetContentType()) {
-    case V8GPUOrigin2D::ContentType::kGPUOrigin2DDict: {
-      const GPUOrigin2DDict* webgpu_origin_2d_dict =
-          webgpu_origin->GetAsGPUOrigin2DDict();
-      dawn_origin.x = webgpu_origin_2d_dict->x();
-      dawn_origin.y = webgpu_origin_2d_dict->y();
-      break;
-    }
-    case V8GPUOrigin2D::ContentType::kUnsignedLongEnforceRangeSequence: {
-      const Vector<uint32_t>& webgpu_origin_sequence =
-          webgpu_origin->GetAsUnsignedLongEnforceRangeSequence();
-      // The WebGPU spec states that if the sequence isn't big enough then the
-      // default values of 0 are used (which are set above).
-      switch (webgpu_origin_sequence.size()) {
-        default:
-          // This is a 2D origin and the depth should be 0 always.
-          dawn_origin.y = webgpu_origin_sequence[1];
-          [[fallthrough]];
-        case 1:
-          dawn_origin.x = webgpu_origin_sequence[0];
-          [[fallthrough]];
-        case 0:
-          break;
-      }
-      break;
-    }
-  }
-
-  return dawn_origin;
-}
-
 bool IsValidExternalImageDestinationFormat(
-    WGPUTextureFormat dawn_texture_format) {
+    wgpu::TextureFormat dawn_texture_format) {
   switch (dawn_texture_format) {
-    case WGPUTextureFormat_R8Unorm:
-    case WGPUTextureFormat_R16Float:
-    case WGPUTextureFormat_R32Float:
-    case WGPUTextureFormat_RG8Unorm:
-    case WGPUTextureFormat_RG16Float:
-    case WGPUTextureFormat_RG32Float:
-    case WGPUTextureFormat_RGBA8Unorm:
-    case WGPUTextureFormat_RGBA8UnormSrgb:
-    case WGPUTextureFormat_BGRA8Unorm:
-    case WGPUTextureFormat_BGRA8UnormSrgb:
-    case WGPUTextureFormat_RGB10A2Unorm:
-    case WGPUTextureFormat_RGBA16Float:
-    case WGPUTextureFormat_RGBA32Float:
+    case wgpu::TextureFormat::R8Unorm:
+    case wgpu::TextureFormat::R16Float:
+    case wgpu::TextureFormat::R16Unorm:
+    case wgpu::TextureFormat::R32Float:
+    case wgpu::TextureFormat::RG8Unorm:
+    case wgpu::TextureFormat::RG16Float:
+    case wgpu::TextureFormat::RG16Unorm:
+    case wgpu::TextureFormat::RG32Float:
+    case wgpu::TextureFormat::RGBA8Unorm:
+    case wgpu::TextureFormat::RGBA8UnormSrgb:
+    case wgpu::TextureFormat::BGRA8Unorm:
+    case wgpu::TextureFormat::BGRA8UnormSrgb:
+    case wgpu::TextureFormat::RGB10A2Unorm:
+    case wgpu::TextureFormat::RG11B10Ufloat:
+    case wgpu::TextureFormat::RGBA16Float:
+    case wgpu::TextureFormat::RGBA16Unorm:
+    case wgpu::TextureFormat::RGBA32Float:
       return true;
     default:
       return false;
   }
 }
 
-WGPUTextureFormat SkColorTypeToDawnColorFormat(SkColorType sk_color_type) {
-  switch (sk_color_type) {
-    case SkColorType::kRGBA_8888_SkColorType:
-      return WGPUTextureFormat_RGBA8Unorm;
-    case SkColorType::kBGRA_8888_SkColorType:
-      return WGPUTextureFormat_BGRA8Unorm;
-    default:
-      NOTREACHED();
-      return WGPUTextureFormat_Undefined;
-  }
-}
-
-static constexpr uint64_t kDawnBytesPerRowAlignmentBits = 8;
-
-// Calculate bytes per row for T2B/B2T copy
-// TODO(shaobo.yan@intel.com): Using Dawn's constants once they are exposed
-uint64_t AlignBytesPerRow(uint64_t bytesPerRow) {
-  return (((bytesPerRow - 1) >> kDawnBytesPerRowAlignmentBits) + 1)
-         << kDawnBytesPerRowAlignmentBits;
-}
-
-struct ExternalSource {
-  ExternalTextureSource external_texture_source;
-  scoped_refptr<Image> image = nullptr;
-  uint32_t width = 0;
-  uint32_t height = 0;
-  bool valid = false;
-};
-
-ExternalSource GetExternalSourceFromExternalImage(
-    const V8UnionHTMLCanvasElementOrHTMLVideoElementOrImageBitmapOrOffscreenCanvas*
-        external_image,
+std::optional<ExternalImageSource> GetExternalSourceFromExternalImage(
+    const V8GPUImageCopyExternalImageSource* external_image,
+    const ExternalImageDstInfo& dst_info,
     ExceptionState& exception_state) {
-  ExternalSource external_source;
-  ExternalTextureSource external_texture_source;
-  CanvasImageSource* canvas_image_source = nullptr;
-  CanvasRenderingContextHost* canvas = nullptr;
   switch (external_image->GetContentType()) {
-    case V8UnionHTMLCanvasElementOrHTMLVideoElementOrImageBitmapOrOffscreenCanvas::
-        ContentType::kHTMLVideoElement:
-      external_texture_source = GetExternalTextureSourceFromVideoElement(
-          external_image->GetAsHTMLVideoElement(), exception_state);
-      if (external_texture_source.valid) {
-        external_source.external_texture_source = external_texture_source;
-        DCHECK(external_texture_source.media_video_frame);
-        external_source.width = static_cast<uint32_t>(
-            external_texture_source.media_video_frame->visible_rect().width());
-        external_source.height = static_cast<uint32_t>(
-            external_texture_source.media_video_frame->visible_rect().height());
-        external_source.valid = true;
-      }
-      return external_source;
-    case V8UnionHTMLCanvasElementOrHTMLVideoElementOrImageBitmapOrOffscreenCanvas::
-        ContentType::kHTMLCanvasElement:
-      canvas_image_source = external_image->GetAsHTMLCanvasElement();
-      canvas = external_image->GetAsHTMLCanvasElement();
-      break;
-    case V8UnionHTMLCanvasElementOrHTMLVideoElementOrImageBitmapOrOffscreenCanvas::
-        ContentType::kImageBitmap:
-      canvas_image_source = external_image->GetAsImageBitmap();
-      break;
-    case V8UnionHTMLCanvasElementOrHTMLVideoElementOrImageBitmapOrOffscreenCanvas::
-        ContentType::kOffscreenCanvas:
-      canvas_image_source = external_image->GetAsOffscreenCanvas();
-      canvas = external_image->GetAsOffscreenCanvas();
-      break;
-    default:
-      NOTREACHED();
-      break;
+    case V8GPUImageCopyExternalImageSource::ContentType::kHTMLVideoElement:
+      return GetExternalImageSourceFrom(external_image->GetAsHTMLVideoElement(),
+                                        dst_info, exception_state);
+    case V8GPUImageCopyExternalImageSource::ContentType::kVideoFrame:
+      return GetExternalImageSourceFrom(external_image->GetAsVideoFrame(),
+                                        dst_info, exception_state);
+    case V8GPUImageCopyExternalImageSource::ContentType::kHTMLCanvasElement:
+      return GetExternalImageSourceFrom(
+          external_image->GetAsHTMLCanvasElement(), dst_info, exception_state);
+    case V8GPUImageCopyExternalImageSource::ContentType::kImageBitmap:
+      return GetExternalImageSourceFrom(external_image->GetAsImageBitmap(),
+                                        dst_info, exception_state);
+    case V8GPUImageCopyExternalImageSource::ContentType::kImageData:
+      return GetExternalImageSourceFrom(external_image->GetAsImageData(),
+                                        dst_info, exception_state);
+    case V8GPUImageCopyExternalImageSource::ContentType::kHTMLImageElement:
+      return GetExternalImageSourceFrom(external_image->GetAsHTMLImageElement(),
+                                        dst_info, exception_state);
+    case V8GPUImageCopyExternalImageSource::ContentType::kOffscreenCanvas:
+      return GetExternalImageSourceFrom(external_image->GetAsOffscreenCanvas(),
+                                        dst_info, exception_state);
   }
-
-  // Neutered external image.
-  if (canvas_image_source->IsNeutered()) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
-                                      "External Image has been detached.");
-    return external_source;
-  }
-
-  // Placeholder source is not allowed.
-  if (canvas_image_source->IsPlaceholder()) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
-                                      "Cannot copy from a canvas that has had "
-                                      "transferControlToOffscreen() called.");
-    return external_source;
-  }
-
-  // Canvas element contains cross-origin data and may not be loaded
-  if (canvas_image_source->WouldTaintOrigin()) {
-    exception_state.ThrowSecurityError(
-        "The external image is tainted by cross-origin data.");
-    return external_source;
-  }
-
-  if (canvas && !(canvas->IsWebGL() || canvas->IsRenderingContext2D() ||
-                  canvas->IsWebGPU())) {
-    exception_state.ThrowDOMException(
-        DOMExceptionCode::kOperationError,
-        "CopyExternalImageToTexture doesn't support canvas without 2d, webgl,"
-        " webgl2 or webgpu context");
-    return external_source;
-  }
-
-  // HTMLCanvasElement and OffscreenCanvas won't care image orientation. But for
-  // ImageBitmap, use kRespectImageOrientation will make ElementSize() behave
-  // as Size().
-  gfx::SizeF image_size = canvas_image_source->ElementSize(
-      gfx::SizeF(),  // It will be ignored and won't affect size.
-      kRespectImageOrientation);
-
-  // TODO(crbug.com/1197369): Ensure kUnpremultiplyAlpha impl will also make
-  // image live on GPU if possible.
-  // Use kDontChangeAlpha here to bypass the alpha type conversion here.
-  // Left the alpha op to CopyTextureForBrowser() and CopyContentFromCPU().
-  // This will help combine more transforms (e.g. flipY, color-space)
-  // into a single blit.
-  SourceImageStatus source_image_status = kInvalidSourceImageStatus;
-  auto image = canvas_image_source->GetSourceImageForCanvas(
-      &source_image_status, image_size, kDontChangeAlpha);
-  if (source_image_status != kNormalSourceImageStatus) {
-    // Canvas back resource is broken, zero size, incomplete or invalid.
-    // but developer can do nothing. Return nullptr and issue an noop.
-    return external_source;
-  }
-
-  external_source.image = image;
-  external_source.width = static_cast<uint32_t>(image->width());
-  external_source.height = static_cast<uint32_t>(image->height());
-  external_source.valid = true;
-
-  return external_source;
-}
-
-// CopyExternalImageToTexture() needs to set src/dst AlphaMode, flipY and color
-// space conversion related params. This helper function also initializes
-// ColorSpaceConversionConstants param.
-WGPUCopyTextureForBrowserOptions CreateCopyTextureForBrowserOptions(
-    const StaticBitmapImage* image,
-    const PaintImage* paint_image,
-    PredefinedColorSpace dst_color_space,
-    bool dst_premultiplied_alpha,
-    bool flipY,
-    ColorSpaceConversionConstants* color_space_conversion_constants) {
-  WGPUCopyTextureForBrowserOptions options = {};
-
-  options.srcAlphaMode = image->IsPremultiplied()
-                             ? WGPUAlphaMode_Premultiplied
-                             : WGPUAlphaMode_Unpremultiplied;
-  options.dstAlphaMode = dst_premultiplied_alpha
-                             ? WGPUAlphaMode_Premultiplied
-                             : WGPUAlphaMode_Unpremultiplied;
-
-  // Set color space conversion params
-  sk_sp<SkColorSpace> sk_src_color_space =
-      paint_image->GetSkImageInfo().refColorSpace();
-
-  // If source input discard the color space info(e.g. ImageBitmap created with
-  // flag colorSpaceConversion: none). Treat the source color space as sRGB.
-  if (sk_src_color_space == nullptr) {
-    sk_src_color_space = SkColorSpace::MakeSRGB();
-  }
-
-  gfx::ColorSpace gfx_src_color_space = gfx::ColorSpace(*sk_src_color_space);
-  gfx::ColorSpace gfx_dst_color_space =
-      PredefinedColorSpaceToGfxColorSpace(dst_color_space);
-
-  *color_space_conversion_constants = GetColorSpaceConversionConstants(
-      gfx_src_color_space, gfx_dst_color_space);
-
-  if (gfx_src_color_space != gfx_dst_color_space) {
-    options.needsColorSpaceConversion = true;
-    options.srcTransferFunctionParameters =
-        color_space_conversion_constants->src_transfer_constants.data();
-    options.dstTransferFunctionParameters =
-        color_space_conversion_constants->dst_transfer_constants.data();
-    options.conversionMatrix =
-        color_space_conversion_constants->gamut_conversion_matrix.data();
-  }
-  options.flipY = image->IsOriginTopLeft() == flipY;
-
-  return options;
-}
-
-// Helper function to get clipped rect from source image. Using in
-// CopyExternalImageToTexture().
-gfx::Rect GetSourceImageSubrect(StaticBitmapImage* image,
-                                gfx::Rect source_image_rect,
-                                const WGPUOrigin3D& origin,
-                                const WGPUExtent3D& copy_size) {
-  int width = static_cast<int>(copy_size.width);
-  int height = static_cast<int>(copy_size.height);
-  int x = static_cast<int>(origin.x) + source_image_rect.x();
-  int y = static_cast<int>(origin.y) + source_image_rect.y();
-
-  // Ensure generated source image subrect is into source image rect.
-  DCHECK(width <= source_image_rect.width() - source_image_rect.x() &&
-         height <= source_image_rect.height() - source_image_rect.y() &&
-         x <= source_image_rect.width() - source_image_rect.x() - width &&
-         y <= source_image_rect.height() - source_image_rect.y() - height);
-
-  return gfx::Rect(x, y, width, height);
 }
 
 }  // namespace
 
-GPUQueue::GPUQueue(GPUDevice* device, WGPUQueue queue)
-    : DawnObject<WGPUQueue>(device, queue) {}
+GPUQueue::GPUQueue(GPUDevice* device, wgpu::Queue queue, const String& label)
+    : DawnObject<wgpu::Queue>(device, std::move(queue), label) {}
 
-void GPUQueue::submit(const HeapVector<Member<GPUCommandBuffer>>& buffers) {
-  std::unique_ptr<WGPUCommandBuffer[]> commandBuffers = AsDawnType(buffers);
+void GPUQueue::submit(ScriptState* script_state,
+                      const HeapVector<Member<GPUCommandBuffer>>& buffers) {
+  std::unique_ptr<wgpu::CommandBuffer[]> commandBuffers = AsDawnType(buffers);
 
-  GetProcs().queueSubmit(GetHandle(), buffers.size(), commandBuffers.get());
+  GetHandle().Submit(buffers.size(), commandBuffers.get());
   // WebGPU guarantees that submitted commands finish in finite time so we
   // need to ensure commands are flushed. Flush immediately so the GPU process
   // eagerly processes commands to maximize throughput.
   FlushNow();
+
+  ExecutionContext* execution_context = ExecutionContext::From(script_state);
+  UseCounter::Count(execution_context, WebFeature::kWebGPUQueueSubmit);
 }
 
-void GPUQueue::OnWorkDoneCallback(ScriptPromiseResolver* resolver,
-                                  WGPUQueueWorkDoneStatus status) {
+void OnWorkDoneCallback(ScriptPromiseResolver<IDLUndefined>* resolver,
+                        wgpu::QueueWorkDoneStatus status,
+                        wgpu::StringView message) {
   switch (status) {
-    case WGPUQueueWorkDoneStatus_Success:
+    case wgpu::QueueWorkDoneStatus::Success:
       resolver->Resolve();
       break;
-    case WGPUQueueWorkDoneStatus_Error:
-    case WGPUQueueWorkDoneStatus_Unknown:
-    case WGPUQueueWorkDoneStatus_DeviceLost:
-      resolver->Reject(MakeGarbageCollected<DOMException>(
-          DOMExceptionCode::kOperationError));
+    case wgpu::QueueWorkDoneStatus::Error:
+      resolver->RejectWithDOMException(DOMExceptionCode::kOperationError,
+                                       String::FromUtf8(message));
       break;
-    default:
-      NOTREACHED();
+    case wgpu::QueueWorkDoneStatus::CallbackCancelled:
+      resolver->RejectWithDOMException(DOMExceptionCode::kOperationError,
+                                       String::FromUtf8(message));
+      break;
   }
 }
 
-ScriptPromise GPUQueue::onSubmittedWorkDone(ScriptState* script_state) {
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
-  ScriptPromise promise = resolver->Promise();
+ScriptPromise<IDLUndefined> GPUQueue::onSubmittedWorkDone(
+    ScriptState* script_state) {
+  auto* resolver =
+      MakeGarbageCollected<ScriptPromiseResolver<IDLUndefined>>(script_state);
+  auto promise = resolver->Promise();
 
-  auto* callback =
-      BindWGPUOnceCallback(&GPUQueue::OnWorkDoneCallback, WrapPersistent(this),
-                           WrapPersistent(resolver));
+  auto* callback = MakeWGPUOnceCallback(
+      resolver->WrapCallbackInScriptScope(BindOnce(&OnWorkDoneCallback)));
 
-  GetProcs().queueOnSubmittedWorkDone(
-      GetHandle(), 0u, callback->UnboundCallback(), callback->AsUserdata());
+  GetHandle().OnSubmittedWorkDone(wgpu::CallbackMode::AllowProcessEvents,
+                                  callback->UnboundCallback(),
+                                  callback->AsUserdata());
   // WebGPU guarantees that promises are resolved in finite time so we
   // need to ensure commands are flushed.
   EnsureFlush(ToEventLoop(script_state));
@@ -357,8 +167,8 @@ void GPUQueue::writeBuffer(ScriptState* script_state,
                            const MaybeShared<DOMArrayBufferView>& data,
                            uint64_t data_element_offset,
                            ExceptionState& exception_state) {
-  WriteBufferImpl(script_state, buffer, buffer_offset, data->byteLength(),
-                  data->BaseAddressMaybeShared(), data->TypeSize(),
+  WriteBufferImpl(script_state, buffer, buffer_offset,
+                  data->ByteSpanMaybeShared(), data->TypeSize(),
                   data_element_offset, {}, exception_state);
 }
 
@@ -369,8 +179,8 @@ void GPUQueue::writeBuffer(ScriptState* script_state,
                            uint64_t data_element_offset,
                            uint64_t data_element_count,
                            ExceptionState& exception_state) {
-  WriteBufferImpl(script_state, buffer, buffer_offset, data->byteLength(),
-                  data->BaseAddressMaybeShared(), data->TypeSize(),
+  WriteBufferImpl(script_state, buffer, buffer_offset,
+                  data->ByteSpanMaybeShared(), data->TypeSize(),
                   data_element_offset, data_element_count, exception_state);
 }
 
@@ -380,8 +190,8 @@ void GPUQueue::writeBuffer(ScriptState* script_state,
                            const DOMArrayBufferBase* data,
                            uint64_t data_byte_offset,
                            ExceptionState& exception_state) {
-  WriteBufferImpl(script_state, buffer, buffer_offset, data->ByteLength(),
-                  data->DataMaybeShared(), 1, data_byte_offset, {},
+  WriteBufferImpl(script_state, buffer, buffer_offset,
+                  data->ByteSpanMaybeShared(), 1, data_byte_offset, {},
                   exception_state);
 }
 
@@ -392,30 +202,29 @@ void GPUQueue::writeBuffer(ScriptState* script_state,
                            uint64_t data_byte_offset,
                            uint64_t byte_size,
                            ExceptionState& exception_state) {
-  WriteBufferImpl(script_state, buffer, buffer_offset, data->ByteLength(),
-                  data->DataMaybeShared(), 1, data_byte_offset, byte_size,
+  WriteBufferImpl(script_state, buffer, buffer_offset,
+                  data->ByteSpanMaybeShared(), 1, data_byte_offset, byte_size,
                   exception_state);
 }
 
 void GPUQueue::WriteBufferImpl(ScriptState* script_state,
                                GPUBuffer* buffer,
                                uint64_t buffer_offset,
-                               uint64_t data_byte_length,
-                               const void* data_base_ptr,
+                               base::span<const uint8_t> data,
                                unsigned data_bytes_per_element,
                                uint64_t data_element_offset,
-                               absl::optional<uint64_t> data_element_count,
+                               std::optional<uint64_t> data_element_count,
                                ExceptionState& exception_state) {
   CHECK_LE(data_bytes_per_element, 8u);
 
-  if (data_element_offset > data_byte_length / data_bytes_per_element) {
+  if (data_element_offset > data.size() / data_bytes_per_element) {
     exception_state.ThrowDOMException(DOMExceptionCode::kOperationError,
                                       "Data offset is too large");
     return;
   }
 
   uint64_t data_byte_offset = data_element_offset * data_bytes_per_element;
-  uint64_t max_write_size = data_byte_length - data_byte_offset;
+  uint64_t max_write_size = data.size() - data_byte_offset;
 
   uint64_t write_byte_size = max_write_size;
   if (data_element_count.has_value()) {
@@ -435,74 +244,73 @@ void GPUQueue::WriteBufferImpl(ScriptState* script_state,
   }
 
   // Check that the write size can be cast to a size_t. This should always be
-  // the case since data_byte_length comes from an ArrayBuffer size.
+  // the case since `data` comes from an ArrayBuffer.
   if (write_byte_size > uint64_t(std::numeric_limits<size_t>::max())) {
     exception_state.ThrowRangeError(
         "writeSize larger than size_t (please report a bug if you see this)");
     return;
   }
 
-  const uint8_t* data_base_ptr_bytes =
-      static_cast<const uint8_t*>(data_base_ptr);
-  const uint8_t* data_ptr = data_base_ptr_bytes + data_byte_offset;
-  GetProcs().queueWriteBuffer(GetHandle(), buffer->GetHandle(), buffer_offset,
-                              data_ptr, static_cast<size_t>(write_byte_size));
+  auto data_span = data.subspan(static_cast<size_t>(data_byte_offset),
+                                static_cast<size_t>(write_byte_size));
+  GetHandle().WriteBuffer(buffer->GetHandle(), buffer_offset, data_span.data(),
+                          data_span.size());
   EnsureFlush(ToEventLoop(script_state));
 }
 
 void GPUQueue::writeTexture(ScriptState* script_state,
-                            GPUImageCopyTexture* destination,
+                            GPUTexelCopyTextureInfo* destination,
                             const MaybeShared<DOMArrayBufferView>& data,
-                            GPUImageDataLayout* data_layout,
+                            GPUTexelCopyBufferLayout* data_layout,
                             const V8GPUExtent3D* write_size,
                             ExceptionState& exception_state) {
-  WriteTextureImpl(script_state, destination, data->BaseAddressMaybeShared(),
-                   data->byteLength(), data_layout, write_size,
-                   exception_state);
+  WriteTextureImpl(script_state, destination, data->ByteSpanMaybeShared(),
+                   data_layout, write_size, exception_state);
 }
 
 void GPUQueue::writeTexture(ScriptState* script_state,
-                            GPUImageCopyTexture* destination,
+                            GPUTexelCopyTextureInfo* destination,
                             const DOMArrayBufferBase* data,
-                            GPUImageDataLayout* data_layout,
+                            GPUTexelCopyBufferLayout* data_layout,
                             const V8GPUExtent3D* write_size,
                             ExceptionState& exception_state) {
-  WriteTextureImpl(script_state, destination, data->DataMaybeShared(),
-                   data->ByteLength(), data_layout, write_size,
-                   exception_state);
+  WriteTextureImpl(script_state, destination, data->ByteSpanMaybeShared(),
+                   data_layout, write_size, exception_state);
 }
 
 void GPUQueue::WriteTextureImpl(ScriptState* script_state,
-                                GPUImageCopyTexture* destination,
-                                const void* data,
-                                size_t data_size,
-                                GPUImageDataLayout* data_layout,
+                                GPUTexelCopyTextureInfo* destination,
+                                base::span<const uint8_t> data,
+                                GPUTexelCopyBufferLayout* data_layout,
                                 const V8GPUExtent3D* write_size,
                                 ExceptionState& exception_state) {
-  WGPUExtent3D dawn_write_size = AsDawnType(write_size);
-  WGPUImageCopyTexture dawn_destination = AsDawnType(destination);
+  wgpu::Extent3D dawn_write_size;
+  wgpu::TexelCopyTextureInfo dawn_destination;
+  if (!ConvertToDawn(write_size, &dawn_write_size, device_, exception_state) ||
+      !ConvertToDawn(destination, &dawn_destination, exception_state)) {
+    return;
+  }
 
-  WGPUTextureDataLayout dawn_data_layout = {};
+  wgpu::TexelCopyBufferLayout dawn_data_layout = {};
   {
     const char* error =
-        ValidateTextureDataLayout(data_layout, &dawn_data_layout);
+        ValidateTexelCopyBufferLayout(data_layout, &dawn_data_layout);
     if (error) {
-      device_->InjectError(WGPUErrorType_Validation, error);
+      device_->InjectError(wgpu::ErrorType::Validation, error);
       return;
     }
   }
 
-  if (dawn_data_layout.offset > data_size) {
-    device_->InjectError(WGPUErrorType_Validation, "Data offset is too large");
+  if (dawn_data_layout.offset > data.size()) {
+    device_->InjectError(wgpu::ErrorType::Validation,
+                         "Data offset is too large");
     return;
   }
 
   // Handle the data layout offset by offsetting the data pointer instead. This
   // helps move less data between then renderer and GPU process (otherwise all
   // the data from 0 to offset would be copied over as well).
-  const void* data_ptr =
-      static_cast<const uint8_t*>(data) + dawn_data_layout.offset;
-  data_size -= dawn_data_layout.offset;
+  auto data_span = data.subspan(static_cast<size_t>(dawn_data_layout.offset));
   dawn_data_layout.offset = 0;
 
   // Compute a tight upper bound of the number of bytes to send for this
@@ -513,11 +321,11 @@ void GPUQueue::WriteTextureImpl(ScriptState* script_state,
   size_t data_size_upper_bound = EstimateWriteTextureBytesUpperBound(
       dawn_data_layout, dawn_write_size, destination->texture()->Format(),
       dawn_destination.aspect);
-  size_t required_copy_size = std::min(data_size, data_size_upper_bound);
+  size_t required_copy_size = std::min(data_span.size(), data_size_upper_bound);
 
-  GetProcs().queueWriteTexture(GetHandle(), &dawn_destination, data_ptr,
-                               required_copy_size, &dawn_data_layout,
-                               &dawn_write_size);
+  GetHandle().WriteTexture(&dawn_destination, data_span.data(),
+                           required_copy_size, &dawn_data_layout,
+                           &dawn_write_size);
   EnsureFlush(ToEventLoop(script_state));
   return;
 }
@@ -527,28 +335,56 @@ void GPUQueue::copyExternalImageToTexture(
     GPUImageCopyTextureTagged* destination,
     const V8GPUExtent3D* copy_size,
     ExceptionState& exception_state) {
-  // "srgb" is the only valid color space for now.
-  DCHECK_EQ(destination->colorSpace(), "srgb");
-  ExternalSource source =
-      GetExternalSourceFromExternalImage(copyImage->source(), exception_state);
-  if (!source.valid) {
+  // Extract color space info before getting source image to handle some
+  // redecoded cases like ImageElement.
+  PredefinedColorSpace color_space;
+  if (!ValidateAndConvertColorSpace(destination->colorSpace(), color_space,
+                                    exception_state)) {
+    return;
+  }
+
+  if (std::isnan(destination->linearHDRHeadroom()) ||
+      destination->linearHDRHeadroom() < 1.0f) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kOperationError,
+        "linearHDRHeadroom must be greater or equal to 1.");
+    return;
+  }
+
+  std::optional<ExternalImageSource> source =
+      GetExternalSourceFromExternalImage(
+          copyImage->source(), {destination->premultipliedAlpha(), color_space},
+          exception_state);
+  if (!source) {
+    if (!exception_state.HadException()) {
+      exception_state.ThrowDOMException(DOMExceptionCode::kOperationError,
+                                        "Could not get the source image");
+    }
     device_->AddConsoleWarning(
         "CopyExternalImageToTexture(): Browser fails extracting valid resource"
         "from external image. This API call will return early.");
     return;
   }
 
-  WGPUExtent3D dawn_copy_size = AsDawnType(copy_size);
+  wgpu::TexelCopyTextureInfo dawn_destination;
+  if (!IsValidDestinationTexture(destination, dawn_destination,
+                                 exception_state)) {
+    return;
+  }
 
-  // Extract and validate source origin value.
-  WGPUOrigin3D origin_in_external_image =
-      GPUOrigin2DToWGPUOrigin3D(copyImage->origin());
+  wgpu::Extent3D dawn_copy_size;
+  wgpu::Origin2D origin_in_external_image;
+  if (!ConvertToDawn(copy_size, &dawn_copy_size, device_, exception_state) ||
+      !ConvertToDawn(copyImage->origin(), &origin_in_external_image,
+                     exception_state)) {
+    return;
+  }
 
   const bool copyRectOutOfBounds =
-      source.width < origin_in_external_image.x ||
-      source.height < origin_in_external_image.y ||
-      source.width - origin_in_external_image.x < dawn_copy_size.width ||
-      source.height - origin_in_external_image.y < dawn_copy_size.height;
+      source->width < origin_in_external_image.x ||
+      source->height < origin_in_external_image.y ||
+      source->width - origin_in_external_image.x < dawn_copy_size.width ||
+      source->height - origin_in_external_image.y < dawn_copy_size.height;
 
   if (copyRectOutOfBounds) {
     exception_state.ThrowDOMException(
@@ -568,31 +404,205 @@ void GPUQueue::copyExternalImageToTexture(
     return;
   }
 
-  WGPUImageCopyTexture dawn_destination = AsDawnType(destination);
+  // Issue the noop copy to continue validation to destination textures
+  if (dawn_copy_size.width == 0 || dawn_copy_size.height == 0 ||
+      dawn_copy_size.depthOrArrayLayers == 0) {
+    device_->AddConsoleWarning(
+        "CopyExternalImageToTexture(): It is a noop copy"
+        "({width|height|depthOrArrayLayers} equals to 0).");
+  }
 
+  if (source->external_texture_source.valid) {
+    // Use display size which is based on natural size but considering
+    // transformation metadata.
+    wgpu::Extent2D video_frame_display_size = {source->width, source->height};
+    CopyFromVideoElement(
+        source->external_texture_source, video_frame_display_size,
+        origin_in_external_image, dawn_copy_size, dawn_destination,
+        destination->premultipliedAlpha(), color_space, copyImage->flipY());
+    return;
+  }
+
+  if (!CopyStaticImagBitmapToWGPUTexture(
+          GetDawnControlClient(), device_->GetHandle(), source->image.get(),
+          origin_in_external_image, dawn_copy_size, dawn_destination,
+          destination->premultipliedAlpha(), color_space, copyImage->flipY())) {
+    exception_state.ThrowTypeError(
+        "Failed to copy content from external image.");
+    return;
+  }
+}
+
+bool GPUQueue::IsValidDestinationTexture(
+    GPUImageCopyTextureTagged* destination,
+    wgpu::TexelCopyTextureInfo& dawn_destination,
+    ExceptionState& exception_state) {
+  if (!ConvertToDawn(destination, &dawn_destination, exception_state)) {
+    device_->GetHandle().InjectError(wgpu::ErrorType::Validation,
+                                     "Invalid destination.");
+    return false;
+  }
   if (!IsValidExternalImageDestinationFormat(
           destination->texture()->Format())) {
-    GetProcs().deviceInjectError(device_->GetHandle(), WGPUErrorType_Validation,
-                                 "Invalid destination gpu texture format.");
-    return;
+    device_->GetHandle().InjectError(wgpu::ErrorType::Validation,
+                                     "Invalid destination gpu texture format.");
+    return false;
+  }
+  if (destination->texture()->Dimension() != wgpu::TextureDimension::e2D) {
+    device_->GetHandle().InjectError(wgpu::ErrorType::Validation,
+                                     "Dst gpu texture must be 2d.");
+    return false;
   }
 
-  if (destination->texture()->Dimension() != WGPUTextureDimension_2D) {
-    GetProcs().deviceInjectError(device_->GetHandle(), WGPUErrorType_Validation,
-                                 "Dst gpu texture must be 2d.");
-    return;
-  }
-
-  WGPUTextureUsage dst_texture_usage = destination->texture()->Usage();
-
-  if ((dst_texture_usage & WGPUTextureUsage_RenderAttachment) !=
-          WGPUTextureUsage_RenderAttachment ||
-      (dst_texture_usage & WGPUTextureUsage_CopyDst) !=
-          WGPUTextureUsage_CopyDst) {
-    GetProcs().deviceInjectError(
-        device_->GetHandle(), WGPUErrorType_Validation,
+  wgpu::TextureUsage dst_texture_usage = destination->texture()->Usage();
+  if ((dst_texture_usage & wgpu::TextureUsage::RenderAttachment) !=
+          wgpu::TextureUsage::RenderAttachment ||
+      (dst_texture_usage & wgpu::TextureUsage::CopyDst) !=
+          wgpu::TextureUsage::CopyDst) {
+    device_->GetHandle().InjectError(
+        wgpu::ErrorType::Validation,
         "Destination texture needs to have CopyDst and RenderAttachment "
         "usage.");
+    return false;
+  }
+  return true;
+}
+
+void GPUQueue::copyElementImageToTexture(
+    GPUCopyElementImageSource* source,
+    GPUCopyElementImageDestination* destination,
+    ExceptionState& exception_state) {
+  if (source->hasSx() != source->hasSy() ||
+      source->hasSx() != source->hasSwidth() ||
+      source->hasSx() != source->hasSheight()) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kOperationError,
+        "Must specify all or none of (sx, sy, swidth, sheight).");
+    return;
+  }
+  if (destination->hasWidth() != destination->hasHeight()) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kOperationError,
+        "Must specify neither or both of (width,height).");
+    return;
+  }
+  std::optional<float> sx;
+  std::optional<float> sy;
+  std::optional<float> swidth;
+  std::optional<float> sheight;
+  if (source->hasSx()) {
+    sx = source->sx();
+    sy = source->sy();
+    swidth = source->swidth();
+    sheight = source->sheight();
+  }
+
+  std::optional<uint32_t> width;
+  std::optional<uint32_t> height;
+  if (destination->hasWidth()) {
+    width = destination->width();
+    height = destination->height();
+  }
+
+  DrawElementImageToTextureInternal(source->source(), sx, sy, swidth, sheight,
+                                    width, height, destination->destination(),
+                                    exception_state);
+}
+
+void GPUQueue::drawElementImageToTexture(
+    GPUDrawElementImageSource* source,
+    GPUDrawElementImageDestination* destination,
+    ExceptionState& exception_state) {
+  if (source->hasSourceX() != source->hasSourceY() ||
+      source->hasSourceX() != source->hasSourceWidth() ||
+      source->hasSourceX() != source->hasSourceHeight()) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kOperationError,
+        "Must specify all or none of "
+        "(sourceX, sourceY, sourceWidth, sourceHeight).");
+    return;
+  }
+  std::optional<wgpu::Extent3D> dawn_copy_size;
+  if (destination->hasSize()) {
+    dawn_copy_size.emplace();
+    if (!ConvertToDawn(destination->size(), &dawn_copy_size.value(), device_,
+                       exception_state)) {
+      return;
+    }
+  }
+
+  std::optional<float> sx;
+  std::optional<float> sy;
+  std::optional<float> swidth;
+  std::optional<float> sheight;
+  if (source->hasSourceX()) {
+    sx = source->sourceX();
+    sy = source->sourceY();
+    swidth = source->sourceWidth();
+    sheight = source->sourceHeight();
+  }
+
+  std::optional<uint32_t> width;
+  std::optional<uint32_t> height;
+  if (dawn_copy_size.has_value()) {
+    width = dawn_copy_size->width;
+    height = dawn_copy_size->height;
+  }
+
+  DrawElementImageToTextureInternal(source->source(), sx, sy, swidth, sheight,
+                                    width, height, destination,
+                                    exception_state);
+}
+
+void GPUQueue::DrawElementImageToTextureInternal(
+    const V8UnionElementOrElementImage* source,
+    std::optional<float> sx,
+    std::optional<float> sy,
+    std::optional<float> swidth,
+    std::optional<float> sheight,
+    std::optional<uint32_t> width,
+    std::optional<uint32_t> height,
+    GPUImageCopyTextureTagged* destination,
+    ExceptionState& exception_state) {
+  CHECK(RuntimeEnabledFeatures::CanvasDrawElementEnabled(
+      device_->GetExecutionContext()));
+
+  CanvasRenderingContext* context = nullptr;
+  if (source->IsElement()) {
+    context = CanvasRenderingContext::GetEnclosingContextForDrawElement(
+        source->GetAsElement(), "drawElementImageToTexture()", exception_state);
+  } else {
+    const std::unique_ptr<CanvasChildPaintRecord>& record =
+        source->GetAsElementImage()->PaintRecord();
+    if (record) {
+      DOMNodeId canvas_node_id = record->paint_state.canvas_node_id;
+      if (canvas_node_id != kInvalidDOMNodeId) {
+        if (device_->GetExecutionContext()->IsWindow()) {
+          if (auto* html_canvas = DynamicTo<HTMLCanvasElement>(
+                  DOMNodeIds::NodeForId(canvas_node_id))) {
+            context = html_canvas->RenderingContext();
+          }
+        }
+        if (!context) {
+          if (auto* offscreen_canvas = OffscreenCanvas::FromPlaceholderId(
+                  device_->GetExecutionContext(), canvas_node_id)) {
+            context = offscreen_canvas->RenderingContext();
+          }
+        }
+      }
+    }
+  }
+
+  if (!context) {
+    if (source->IsElementImage()) {
+      if (!source->GetAsElementImage()->PaintRecord()) {
+        exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+                                          "The ElementImage has been closed.");
+      } else {
+        exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
+                                          "No context found for ElementImage.");
+      }
+    }
     return;
   }
 
@@ -602,311 +612,105 @@ void GPUQueue::copyExternalImageToTexture(
     return;
   }
 
-  // Issue the noop copy to continue validation to destination textures
-  if (dawn_copy_size.width == 0 || dawn_copy_size.height == 0 ||
-      dawn_copy_size.depthOrArrayLayers == 0) {
-    device_->AddConsoleWarning(
-        "CopyExternalImageToTexture(): It is a noop copy"
-        "({width|height|depthOrArrayLayers} equals to 0).");
-  }
-
-  if (source.external_texture_source.valid) {
-    CopyFromVideoElement(source.external_texture_source,
-                         origin_in_external_image, dawn_copy_size,
-                         dawn_destination, destination->premultipliedAlpha(),
-                         color_space, copyImage->flipY());
+  wgpu::TexelCopyTextureInfo dawn_destination;
+  if (!IsValidDestinationTexture(destination, dawn_destination,
+                                 exception_state)) {
     return;
   }
 
-  scoped_refptr<StaticBitmapImage> static_bitmap_image =
-      DynamicTo<StaticBitmapImage>(source.image.get());
-  DCHECK(static_bitmap_image);
-  if (!CopyFromCanvasSourceImage(
-          static_bitmap_image.get(), origin_in_external_image, dawn_copy_size,
-          dawn_destination, destination->premultipliedAlpha(), color_space,
-          copyImage->flipY())) {
+  scoped_refptr<StaticBitmapImage> image =
+      context->GetElementImage(source, sx, sy, swidth, sheight, width, height,
+                               gpu::SHARED_IMAGE_USAGE_WEBGPU_READ,
+                               "drawElementImageToTexture()", exception_state);
+  if (!image) {
+    return;
+  }
+
+  // If the image is larger than the destination texture, clip it
+  wgpu::Extent3D dawn_copy_size;
+  dawn_copy_size.width = std::min(
+      dawn_destination.texture.GetWidth(),
+      base::ClampedNumeric(image->Size().width()).Cast<uint32_t>().RawValue());
+  dawn_copy_size.height = std::min(
+      dawn_destination.texture.GetHeight(),
+      base::ClampedNumeric(image->Size().height()).Cast<uint32_t>().RawValue());
+  if (!CopyStaticImagBitmapToWGPUTexture(
+          GetDawnControlClient(), device_->GetHandle(), image.get(),
+          wgpu::Origin2D(), dawn_copy_size, dawn_destination,
+          destination->premultipliedAlpha(), color_space,
+          /*flipY*/ false)) {
     exception_state.ThrowTypeError(
-        "Failed to copy content from external image.");
+        "Failed to copy content from element image.");
     return;
   }
 }
 
-void GPUQueue::CopyFromVideoElement(const ExternalTextureSource source,
-                                    const WGPUOrigin3D& origin,
-                                    const WGPUExtent3D& copy_size,
-                                    const WGPUImageCopyTexture& destination,
-                                    bool dst_premultiplied_alpha,
-                                    PredefinedColorSpace dst_color_space,
-                                    bool flipY) {
-  DCHECK(source.valid);
-
-  // Import GPUExternalTexture to sRGB color space always.
-  // Delegate future color space conversion for
-  // Dawn::CopyExternalTextureForBrowser.
-  gfx::ColorSpace external_texture_dst_color_space =
-      PredefinedColorSpaceToGfxColorSpace(dst_color_space);
-  ExternalTexture external_texture =
-      CreateExternalTexture(device_, source.media_video_frame->ColorSpace(),
-                            external_texture_dst_color_space,
-                            source.media_video_frame, source.video_renderer);
-
-  WGPUCopyTextureForBrowserOptions options = {};
-
-  // Extracting contents from HTMLVideoElement (e.g. CreateStaticBitmapImage(),
-  // GetSourceImageForCanvas) always assume alpha mode as premultiplied. Keep
-  // this assumption here.
-  options.srcAlphaMode = WGPUAlphaMode_Premultiplied;
-  options.dstAlphaMode = dst_premultiplied_alpha
-                             ? WGPUAlphaMode_Premultiplied
-                             : WGPUAlphaMode_Unpremultiplied;
-
-  // Set color space conversion params
-  gfx::ColorSpace gfx_dst_color_space =
-      PredefinedColorSpaceToGfxColorSpace(dst_color_space);
-
-  ColorSpaceConversionConstants color_space_conversion_constants;
-
-  if (external_texture_dst_color_space != gfx_dst_color_space) {
-    color_space_conversion_constants = GetColorSpaceConversionConstants(
-        external_texture_dst_color_space, gfx_dst_color_space);
-
-    options.needsColorSpaceConversion = true;
-    options.srcTransferFunctionParameters =
-        color_space_conversion_constants.src_transfer_constants.data();
-    options.dstTransferFunctionParameters =
-        color_space_conversion_constants.dst_transfer_constants.data();
-    options.conversionMatrix =
-        color_space_conversion_constants.gamut_conversion_matrix.data();
-  }
-
-  options.flipY = flipY;
-
-  WGPUImageCopyExternalTexture src = {};
-  src.externalTexture = external_texture.wgpu_external_texture;
-  src.origin = origin;
-
-  GetProcs().queueCopyExternalTextureForBrowser(GetHandle(), &src, &destination,
-                                                &copy_size, &options);
-}
-
-bool GPUQueue::CopyFromCanvasSourceImage(
-    StaticBitmapImage* image,
-    const WGPUOrigin3D& origin,
-    const WGPUExtent3D& copy_size,
-    const WGPUImageCopyTexture& destination,
+void GPUQueue::CopyFromVideoElement(
+    const ExternalTextureSource source,
+    const wgpu::Extent2D& video_frame_natural_size,
+    const wgpu::Origin2D& origin,
+    const wgpu::Extent3D& copy_size,
+    const wgpu::TexelCopyTextureInfo& destination,
     bool dst_premultiplied_alpha,
     PredefinedColorSpace dst_color_space,
     bool flipY) {
-  // If GPU backed image failed to uploading through GPU, call
-  // MakeUnaccelerated() to generate CPU backed image and fallback to CPU
-  // uploading path.
-  scoped_refptr<StaticBitmapImage> unaccelerated_image = nullptr;
-  bool use_webgpu_mailbox_texture = true;
+  CHECK(source.valid);
 
-// TODO(crbug.com/1309194): using webgpu mailbox texture uploading path on linux
-// platform requires interop supported. According to the bug, this change will
-// be a long time task. So disable using webgpu mailbox texture uploading path
-// on linux platform.
-#if BUILDFLAG(IS_LINUX)
-  use_webgpu_mailbox_texture = false;
-  unaccelerated_image = image->MakeUnaccelerated();
-  image = unaccelerated_image.get();
-#endif  // BUILDFLAG(IS_LINUX)
+  // Create External Texture with dst color space. No color space conversion
+  // happens during copy step.
+  ExternalTexture external_texture =
+      CreateExternalTexture(device_, dst_color_space, source.media_video_frame);
 
-// TODO(crbug.com/1404632): Using webgpu mailbox texture to upload cpu backed
-// resource on x86 mac platform has bug. So disable using webgpu mailbox texture
-// uploading path on Mac x86 platform when source image is cpu backed resource.
-#if BUILDFLAG(IS_MAC) && defined(ARCH_CPU_X86_FAMILY)
-  if (!image->IsTextureBacked()) {
-    use_webgpu_mailbox_texture = false;
+  wgpu::CopyTextureForBrowserOptions options = {
+      // Extracting contents from HTMLVideoElement (e.g.
+      // CreateStaticBitmapImage(),
+      // GetSourceImageForCanvas) always assume alpha mode as premultiplied.
+      // Keep this assumption here.
+      .srcAlphaMode = wgpu::AlphaMode::Premultiplied,
+      .dstAlphaMode = dst_premultiplied_alpha
+                          ? wgpu::AlphaMode::Premultiplied
+                          : wgpu::AlphaMode::Unpremultiplied,
+  };
+
+  options.flipY = flipY;
+
+  wgpu::ImageCopyExternalTexture src = {
+      .externalTexture = external_texture.wgpu_external_texture,
+      .origin = {origin.x, origin.y},
+      .naturalSize = video_frame_natural_size,
+  };
+  GetHandle().CopyExternalTextureForBrowser(&src, &destination, &copy_size,
+                                            &options);
+
+  if (external_texture.is_zero_copy &&
+      source.media_video_frame->metadata().read_lock_fences_enabled) {
+    ReferenceUntilGPUIsFinished(std::move(external_texture.mailbox_texture));
   }
-#endif  // BUILDFLAG(IS_MAC) && defined(ARCH_CPU_X86_FAMILY)
-
-  bool noop = copy_size.width == 0 || copy_size.height == 0 ||
-              copy_size.depthOrArrayLayers == 0;
-
-  // The copy rect might be a small part from a large source image. Instead of
-  // copying the whole large source image, clipped to the small rect and upload
-  // it is more performant. The clip rect should be chosen carefully when a
-  // flipY op is required during uploading.
-  gfx::Rect image_source_copy_rect =
-      GetSourceImageSubrect(image, image->Rect(), origin, copy_size);
-
-  // Get source image info.
-  PaintImage paint_image = image->PaintImageForCurrentFrame();
-  SkImageInfo source_image_info = paint_image.GetSkImageInfo();
-
-  // Source and dst might have different constants
-  ColorSpaceConversionConstants color_space_conversion_constants = {};
-
-  // This uploading path try to extract WebGPU mailbox texture from source
-  // image based on the copy size.
-  // The uploading path works like this:
-  // - Try to get WebGPUMailboxTexture with image source copy rect.
-  // - If success, Issue Dawn::queueCopyTextureForBrowser to upload contents
-  //   to WebGPU texture.
-  if (use_webgpu_mailbox_texture) {
-    // The copy rect might be a small part from a large source image. Instead of
-    // copying large source image, clipped to the small copy rect is more
-    // performant. The clip rect should be chosen carefully when a flipY op is
-    // required during uploading.
-    scoped_refptr<WebGPUMailboxTexture> mailbox_texture =
-        WebGPUMailboxTexture::FromStaticBitmapImage(
-            GetDawnControlClient(), device_->GetHandle(),
-            static_cast<WGPUTextureUsage>(WGPUTextureUsage_CopyDst |
-                                          WGPUTextureUsage_CopySrc |
-                                          WGPUTextureUsage_TextureBinding),
-            image, source_image_info, image_source_copy_rect, noop);
-
-    if (mailbox_texture != nullptr) {
-      WGPUImageCopyTexture src = {};
-      src.texture = mailbox_texture->GetTexture();
-
-      WGPUCopyTextureForBrowserOptions options =
-          CreateCopyTextureForBrowserOptions(
-              image, &paint_image, dst_color_space, dst_premultiplied_alpha,
-              flipY, &color_space_conversion_constants);
-
-      GetProcs().queueCopyTextureForBrowser(GetHandle(), &src, &destination,
-                                            &copy_size, &options);
-      return true;
-    }
-    // Fallback path accepts CPU backed resource only.
-    unaccelerated_image = image->MakeUnaccelerated();
-    image = unaccelerated_image.get();
-    paint_image = image->PaintImageForCurrentFrame();
-    image_source_copy_rect =
-        GetSourceImageSubrect(image, image->Rect(), origin, copy_size);
-    source_image_info = paint_image.GetSkImageInfo();
-  }
-
-  // This fallback path will handle all cases that cannot extract source image
-  // to webgpu mailbox texture based on copy rect. It accepts CPU backed
-  // resource only. The fallback path works like this:
-  // - Always create a mappable WGPUBuffer and copy CPU backed image resource to
-  // the buffer.
-  // - Always create a WGPUTexture and issue a B2T copy to upload the content
-  // from buffer to texture.
-  // - Issue Dawn::queueCopyTextureForBrowser to upload contents from temp
-  // texture to dst texture.
-  // - Destroy all temp resources.
-  DCHECK(!image->IsTextureBacked());
-  DCHECK(!paint_image.IsTextureBacked());
-
-  // Handling CPU resource.
-
-  // Create intermediate texture as input for CopyTextureForBrowser().
-  // For noop copy, creating intermediate texture with minimum size.
-  const uint32_t src_width =
-      noop && image_source_copy_rect.width() == 0
-          ? 1
-          : static_cast<uint32_t>(image_source_copy_rect.width());
-  const uint32_t src_height =
-      noop && image_source_copy_rect.height() == 0
-          ? 1
-          : static_cast<uint32_t>(image_source_copy_rect.height());
-
-  SkColorType source_color_type = source_image_info.colorType();
-  WGPUTextureDescriptor texture_desc = {};
-  texture_desc.usage = WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst |
-                       WGPUTextureUsage_TextureBinding;
-  texture_desc.dimension = WGPUTextureDimension_2D;
-  texture_desc.size = {src_width, src_height, 1};
-  texture_desc.format = SkColorTypeToDawnColorFormat(source_color_type);
-  texture_desc.mipLevelCount = 1;
-  texture_desc.sampleCount = 1;
-
-  WGPUTexture intermediate_texture =
-      GetProcs().deviceCreateTexture(device_->GetHandle(), &texture_desc);
-
-  // For noop copy, read source image content to mappable webgpu buffer and
-  // using B2T copy to copy source content to intermediate texture.
-  if (!noop) {
-    // Source type is SkColorType::kRGBA_8888_SkColorType or
-    // SkColorType::kBGRA_8888_SkColorType.
-    uint64_t bytes_per_pixel = 4;
-
-    base::CheckedNumeric<uint32_t> bytes_per_row =
-        AlignBytesPerRow(image_source_copy_rect.width() * bytes_per_pixel);
-
-    // Static cast to uint64_t to catch overflow during multiplications and use
-    // base::CheckedNumeric to catch this overflow.
-    base::CheckedNumeric<size_t> size_in_bytes =
-        bytes_per_row * static_cast<uint64_t>(image_source_copy_rect.height());
-
-    // Overflow happens when calculating size or row bytes.
-    if (!size_in_bytes.IsValid()) {
-      return false;
-    }
-
-    uint32_t wgpu_bytes_per_row = bytes_per_row.ValueOrDie();
-
-    // Create a mapped buffer to receive external image contents
-    WGPUBufferDescriptor buffer_desc = {};
-    buffer_desc.usage = WGPUBufferUsage_CopySrc;
-    buffer_desc.size = size_in_bytes.ValueOrDie();
-    buffer_desc.mappedAtCreation = true;
-
-    WGPUBuffer intermediate_buffer =
-        GetProcs().deviceCreateBuffer(device_->GetHandle(), &buffer_desc);
-
-    size_t size = static_cast<size_t>(buffer_desc.size);
-    void* data = GetProcs().bufferGetMappedRange(intermediate_buffer, 0, size);
-
-    auto dest_pixels = base::span<uint8_t>(static_cast<uint8_t*>(data), size);
-
-    SkImageInfo copy_rect_info = source_image_info.makeWH(
-        image_source_copy_rect.width(), image_source_copy_rect.height());
-    bool success = paint_image.readPixels(
-        copy_rect_info, dest_pixels.data(), wgpu_bytes_per_row,
-        image_source_copy_rect.x(), image_source_copy_rect.y());
-    if (!success) {
-      // Release the buffer.
-      GetProcs().bufferRelease(intermediate_buffer);
-      return false;
-    }
-
-    GetProcs().bufferUnmap(intermediate_buffer);
-
-    // Start a B2T copy to move contents from buffer to intermediate texture
-    WGPUImageCopyBuffer dawn_intermediate_buffer = {};
-    dawn_intermediate_buffer.buffer = intermediate_buffer;
-    dawn_intermediate_buffer.layout.bytesPerRow = wgpu_bytes_per_row;
-    dawn_intermediate_buffer.layout.rowsPerImage = copy_size.height;
-
-    WGPUImageCopyTexture dawn_intermediate_texture = {};
-    dawn_intermediate_texture.texture = intermediate_texture;
-    dawn_intermediate_texture.aspect = WGPUTextureAspect_All;
-
-    WGPUExtent3D source_image_copy_size = {copy_size.width, copy_size.height,
-                                           1};
-
-    WGPUCommandEncoder encoder =
-        GetProcs().deviceCreateCommandEncoder(device_->GetHandle(), nullptr);
-    GetProcs().commandEncoderCopyBufferToTexture(
-        encoder, &dawn_intermediate_buffer, &dawn_intermediate_texture,
-        &source_image_copy_size);
-    WGPUCommandBuffer commands =
-        GetProcs().commandEncoderFinish(encoder, nullptr);
-
-    GetProcs().queueSubmit(GetHandle(), 1, &commands);
-
-    // Release intermediate resources.
-    GetProcs().commandBufferRelease(commands);
-    GetProcs().commandEncoderRelease(encoder);
-    GetProcs().bufferRelease(intermediate_buffer);
-  }
-
-  WGPUImageCopyTexture src = {};
-  src.texture = intermediate_texture;
-  WGPUCopyTextureForBrowserOptions options = CreateCopyTextureForBrowserOptions(
-      image, &paint_image, dst_color_space, dst_premultiplied_alpha, flipY,
-      &color_space_conversion_constants);
-  GetProcs().queueCopyTextureForBrowser(GetHandle(), &src, &destination,
-                                        &copy_size, &options);
-
-  // Release intermediate texture.
-  GetProcs().textureRelease(intermediate_texture);
-  return true;
 }
+
+void GPUQueue::ReferenceUntilGPUIsFinished(
+    scoped_refptr<WebGPUMailboxTexture> mailbox_texture) {
+  CHECK(mailbox_texture);
+  ExecutionContext* execution_context = device_->GetExecutionContext();
+
+  // If device has no valid execution context. Release
+  // the mailbox immediately.
+  if (!execution_context) {
+    return;
+  }
+
+  // Keep mailbox texture alive until callback returns.
+  auto* callback = BindWGPUOnceCallback(
+      [](scoped_refptr<WebGPUMailboxTexture> mailbox_texture,
+         wgpu::QueueWorkDoneStatus, wgpu::StringView) {},
+      std::move(mailbox_texture));
+
+  GetHandle().OnSubmittedWorkDone(wgpu::CallbackMode::AllowProcessEvents,
+                                  callback->UnboundCallback(),
+                                  callback->AsUserdata());
+
+  // Ensure commands are flushed.
+  device_->EnsureFlush(ToEventLoop(execution_context));
+}
+
 }  // namespace blink

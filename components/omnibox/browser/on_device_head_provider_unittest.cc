@@ -5,6 +5,7 @@
 #include "components/omnibox/browser/on_device_head_provider.h"
 
 #include <memory>
+#include <vector>
 
 #include "base/files/file_util.h"
 #include "base/path_service.h"
@@ -20,6 +21,7 @@
 #include "components/omnibox/browser/on_device_model_update_listener.h"
 #include "components/omnibox/browser/test_scheme_classifier.h"
 #include "components/omnibox/common/omnibox_features.h"
+#include "components/optimization_guide/core/delivery/model_info.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/metrics_proto/omnibox_focus_type.pb.h"
@@ -52,7 +54,7 @@ class OnDeviceHeadProviderTest : public testing::Test,
 
   void SetupTestOnDeviceHeadModel() {
     base::FilePath file_path;
-    base::PathService::Get(base::DIR_SOURCE_ROOT, &file_path);
+    base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &file_path);
     // The same test model also used in ./on_device_head_model_unittest.cc.
     file_path = file_path.AppendASCII("components/test/data/omnibox");
     ASSERT_TRUE(base::PathExists(file_path));
@@ -62,10 +64,9 @@ class OnDeviceHeadProviderTest : public testing::Test,
     task_environment_.RunUntilIdle();
   }
 
-#if BUILDFLAG(BUILD_WITH_TFLITE_LIB)
   void SetupTestOnDeviceTailModel() {
     base::FilePath dir_path, tail_model_path, vocab_path;
-    base::PathService::Get(base::DIR_SOURCE_ROOT, &dir_path);
+    base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &dir_path);
     dir_path = dir_path.AppendASCII("components/test/data/omnibox");
     // The same test model also used in
     // ./on_device_tail_model_executor_unittest.cc.
@@ -74,22 +75,32 @@ class OnDeviceHeadProviderTest : public testing::Test,
     vocab_path = dir_path.AppendASCII("vocab_test.txt");
     ASSERT_TRUE(base::PathExists(vocab_path));
 
-    base::flat_set<base::FilePath> additional_files;
-    additional_files.insert(vocab_path);
+    std::vector<base::FilePath> additional_files = {vocab_path};
 
     OnDeviceTailModelExecutor::ModelMetadata metadata;
     metadata.mutable_lstm_model_params()->set_num_layer(1);
     metadata.mutable_lstm_model_params()->set_state_size(512);
     metadata.mutable_lstm_model_params()->set_embedding_dimension(64);
 
-    auto* update_listener = OnDeviceModelUpdateListener::GetInstance();
-    if (update_listener) {
-      update_listener->OnTailModelUpdate(tail_model_path, additional_files,
-                                         metadata);
-    }
+    optimization_guide::proto::Any any_metadata;
+    any_metadata.set_type_url(
+        "type.googleapis.com/com.foo.OnDeviceTailSuggestModelMetadata");
+    metadata.SerializeToString(any_metadata.mutable_value());
+
+    optimization_guide::ModelInfo model_info = {
+        .model_file_path = tail_model_path,
+        .additional_files = additional_files,
+        .version = 123,
+        .model_metadata = any_metadata,
+    };
+
+    client_->GetOnDeviceTailModelService()->OnModelUpdated(
+        optimization_guide::proto::OptimizationTarget::
+            OPTIMIZATION_TARGET_OMNIBOX_ON_DEVICE_TAIL_SUGGEST,
+        model_info);
+
     task_environment_.RunUntilIdle();
   }
-#endif
 
   void ResetModelInstance() {
     auto* update_listener = OnDeviceModelUpdateListener::GetInstance();
@@ -100,9 +111,6 @@ class OnDeviceHeadProviderTest : public testing::Test,
   bool IsOnDeviceHeadProviderAllowed(const AutocompleteInput& input) {
     return provider_->IsOnDeviceHeadProviderAllowed(input);
   }
-  // This needs to be declared before the TaskEnvironment so that the
-  // TaskEnvironment is destroyed before the ScopedFeatureList.
-  base::test::ScopedFeatureList scoped_feature_list_;
   base::test::TaskEnvironment task_environment_;
   std::unique_ptr<FakeAutocompleteProviderClient> client_;
   scoped_refptr<OnDeviceHeadProvider> provider_;
@@ -201,9 +209,7 @@ TEST_F(OnDeviceHeadProviderTest, HasHeadMatches) {
   EXPECT_EQ(u"map", provider_->matches()[2].contents);
 }
 
-#if BUILDFLAG(BUILD_WITH_TFLITE_LIB)
 TEST_F(OnDeviceHeadProviderTest, HasTailMatches) {
-  scoped_feature_list_.InitAndEnableFeature(omnibox::kOnDeviceTailModel);
   SetupTestOnDeviceTailModel();
   AutocompleteInput input(u"Faceb", metrics::OmniboxEventProto::OTHER,
                           TestSchemeClassifier());
@@ -212,17 +218,81 @@ TEST_F(OnDeviceHeadProviderTest, HasTailMatches) {
   EXPECT_CALL(*client_.get(), IsOffTheRecord()).WillRepeatedly(Return(false));
   EXPECT_CALL(*client_.get(), SearchSuggestEnabled())
       .WillRepeatedly(Return(true));
+  EXPECT_CALL(*client_.get(), GetApplicationLocale())
+      .WillRepeatedly(Return("some_locale"));
 
   ASSERT_TRUE(IsOnDeviceHeadProviderAllowed(input));
 
-  provider_->Start(input, false);
-  task_environment_.RunUntilIdle();
+  {
+    SCOPED_TRACE("disable tail model for single word prefix");
+    base::test::ScopedFeatureList scoped_feature_list;
+    scoped_feature_list.InitAndEnableFeatureWithParameters(
+        omnibox::kOnDeviceTailModel, {
+                                         {"EnableForSingleWordPrefix", "false"},
+                                     });
+    provider_->Start(input, false);
+    task_environment_.RunUntilIdle();
 
-  EXPECT_TRUE(provider_->done());
-  EXPECT_FALSE(provider_->matches().empty());
-  EXPECT_EQ(u"facebook", provider_->matches()[0].contents);
+    EXPECT_TRUE(provider_->done());
+    EXPECT_TRUE(provider_->matches().empty());
+  }
+
+  {
+    SCOPED_TRACE("enable tail model for single word prefix");
+    base::test::ScopedFeatureList scoped_feature_list;
+    scoped_feature_list.InitAndEnableFeatureWithParameters(
+        omnibox::kOnDeviceTailModel, {
+                                         {"EnableForSingleWordPrefix", "true"},
+                                     });
+    provider_->Start(input, false);
+    task_environment_.RunUntilIdle();
+
+    EXPECT_TRUE(provider_->done());
+    EXPECT_FALSE(provider_->matches().empty());
+    EXPECT_TRUE(base::StartsWith(provider_->matches()[0].contents, u"facebook",
+                                 base::CompareCase::SENSITIVE));
+  }
 }
-#endif
+
+#if !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
+TEST_F(OnDeviceHeadProviderTest, LaunchEnglishTailModel) {
+  SetupTestOnDeviceTailModel();
+  AutocompleteInput input(u"Facebook l", metrics::OmniboxEventProto::OTHER,
+                          TestSchemeClassifier());
+  input.set_omit_asynchronous_matches(false);
+
+  EXPECT_CALL(*client_.get(), IsOffTheRecord()).WillRepeatedly(Return(false));
+  EXPECT_CALL(*client_.get(), SearchSuggestEnabled())
+      .WillRepeatedly(Return(true));
+  EXPECT_CALL(*client_.get(), GetApplicationLocale())
+      .WillRepeatedly(Return("en-US"));
+
+  ASSERT_TRUE(IsOnDeviceHeadProviderAllowed(input));
+
+  {
+    SCOPED_TRACE("enable tail model for English locales");
+    provider_->Start(input, false);
+    task_environment_.RunUntilIdle();
+
+    EXPECT_TRUE(provider_->done());
+    EXPECT_FALSE(provider_->matches().empty());
+    EXPECT_TRUE(base::StartsWith(provider_->matches()[0].contents, u"facebook",
+                                 base::CompareCase::SENSITIVE));
+  }
+
+  {
+    SCOPED_TRACE("disable tail model for English locales");
+    base::test::ScopedFeatureList scoped_feature_list;
+    scoped_feature_list.InitAndDisableFeature(
+        omnibox::kOnDeviceTailEnableEnglishModel);
+    provider_->Start(input, false);
+    task_environment_.RunUntilIdle();
+
+    EXPECT_TRUE(provider_->done());
+    EXPECT_TRUE(provider_->matches().empty());
+  }
+}
+#endif  // !BUILDFLAG(IS_ANDROID) && !BUILDFLAG(IS_IOS)
 
 TEST_F(OnDeviceHeadProviderTest, CancelInProgressRequest) {
   AutocompleteInput input1(u"g", metrics::OmniboxEventProto::OTHER,

@@ -2,19 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <ntstatus.h>
-#include <stdlib.h>
 #include <windows.h>
 #include <winternl.h>
 
+#include <ntstatus.h>
+#include <stdlib.h>
+
 #include <memory>
 
+#include "base/compiler_specific.h"
 #include "base/memory/page_size.h"
-#include "base/win/win_util.h"
+#include "base/strings/string_number_conversions_win.h"
+#include "base/win/windows_handle_util.h"
 #include "sandbox/win/src/crosscall_client.h"
 #include "sandbox/win/src/filesystem_interception.h"
 #include "sandbox/win/src/ipc_tags.h"
-#include "sandbox/win/src/named_pipe_interception.h"
 #include "sandbox/win/src/policy_engine_processor.h"
 #include "sandbox/win/src/policy_low_level.h"
 #include "sandbox/win/src/policy_params.h"
@@ -33,7 +35,6 @@ enum TestId {
   TESTIPC_NTOPENFILE,
   TESTIPC_NTCREATEFILE,
   TESTIPC_CREATETHREAD,
-  TESTIPC_CREATENAMEDPIPEW,
   TESTIPC_LAST
 };
 
@@ -42,34 +43,10 @@ PolicyGlobal* MakePolicyMemory() {
   // Should not exceed kPolMemSize from |sandbox_policy_base.cc|.
   const size_t kTotalPolicySz = 4096 * 6;
   char* mem = new char[kTotalPolicySz];
-  memset(mem, 0, kTotalPolicySz);
+  UNSAFE_TODO(memset(mem, 0, kTotalPolicySz));
   PolicyGlobal* policy = reinterpret_cast<PolicyGlobal*>(mem);
   policy->data_size = kTotalPolicySz - sizeof(PolicyGlobal);
   return policy;
-}
-
-// CreateNamedPipeW
-HANDLE WINAPI DummyCreateNamedPipeW(LPCWSTR pipe_name,
-                                    DWORD open_mode,
-                                    DWORD pipe_mode,
-                                    DWORD max_instance,
-                                    DWORD out_buffer_size,
-                                    DWORD in_buffer_size,
-                                    DWORD default_timeout,
-                                    LPSECURITY_ATTRIBUTES security_attributes) {
-  return INVALID_HANDLE_VALUE;
-}
-
-void TestCreateNamedPipeW() {
-  HANDLE handle;
-
-  handle = TargetCreateNamedPipeW(
-      reinterpret_cast<CreateNamedPipeWFunction>(DummyCreateNamedPipeW),
-      L"\\??\\leak", PIPE_ACCESS_DUPLEX,
-      PIPE_TYPE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 0x1000,
-      0x1000, 100, nullptr);
-  if (handle != INVALID_HANDLE_VALUE)
-    CloseHandle(handle);
 }
 
 // NtCreateFile
@@ -159,12 +136,8 @@ PolicyGlobal* GenerateBlankPolicy() {
 
   LowLevelPolicy policy_maker(policy);
 
-  for (int i = static_cast<int>(IpcTag::UNUSED);
-       i < static_cast<int>(IpcTag::LAST); i++) {
-    IpcTag service = static_cast<IpcTag>(i);
-    PolicyRule ask_broker(ASK_BROKER);
-    ask_broker.Done();
-    policy_maker.AddRule(service, &ask_broker);
+  for (size_t i = 0; i < kSandboxIpcCount; i++) {
+    policy_maker.AddRule(static_cast<IpcTag>(i), PolicyRule{ASK_BROKER});
   }
 
   policy_maker.Done();
@@ -176,42 +149,46 @@ PolicyGlobal* GenerateBlankPolicy() {
 void CopyPolicyToTarget(const void* source, size_t size, void* dest) {
   if (!source || !size)
     return;
-  memcpy(dest, source, size);
+  UNSAFE_TODO(memcpy(dest, source, size));
   sandbox::PolicyGlobal* policy =
       reinterpret_cast<sandbox::PolicyGlobal*>(dest);
 
   size_t offset = reinterpret_cast<size_t>(source);
 
-  for (size_t i = 0; i < sandbox::kMaxServiceCount; i++) {
-    size_t buffer = reinterpret_cast<size_t>(policy->entry[i]);
+  for (size_t i = 0; i < kSandboxIpcCount; i++) {
+    size_t buffer = reinterpret_cast<size_t>(UNSAFE_TODO(policy->entry[i]));
     if (buffer) {
       buffer -= offset;
-      policy->entry[i] = reinterpret_cast<sandbox::PolicyBuffer*>(buffer);
+      UNSAFE_TODO(policy->entry[i]) =
+          reinterpret_cast<sandbox::PolicyBuffer*>(buffer);
     }
   }
 }
 
 }  // namespace
 
-SBOX_TESTS_COMMAND int IPC_Leak(int argc, wchar_t** argv) {
-  if (argc != 1)
+SBOX_TEST_COMMAND(IPC_Leak) {
+  if (args.size() != 1) {
     return SBOX_TEST_FAILED;
-
+  }
   // Replace current target policy with one that forwards all interceptions to
   // broker.
   PolicyGlobal* policy = GenerateBlankPolicy();
   PolicyGlobal* current_policy =
-      (PolicyGlobal*)sandbox::GetGlobalPolicyMemory();
+      (PolicyGlobal*)sandbox::GetGlobalPolicyMemoryForTesting();
   CopyPolicyToTarget(policy, policy->data_size + sizeof(PolicyGlobal),
                      current_policy);
 
-  int test = wcstol(argv[0], nullptr, 10);
+  int test;
+  if (!base::StringToInt(args[0], &test)) {
+    return SBOX_TEST_INVALID_PARAMETER;
+  }
 
   static_assert(TESTIPC_NTOPENFILE == 0,
                 "TESTIPC_NTOPENFILE must be first in enum.");
-  if (test < TESTIPC_NTOPENFILE || test >= TESTIPC_LAST)
+  if (test < TESTIPC_NTOPENFILE || test >= TESTIPC_LAST) {
     return SBOX_TEST_INVALID_PARAMETER;
-
+  }
   auto test_id = TestId(test);
 
   switch (test_id) {
@@ -223,9 +200,6 @@ SBOX_TESTS_COMMAND int IPC_Leak(int argc, wchar_t** argv) {
       break;
     case TESTIPC_CREATETHREAD:
       TestCreateThread();
-      break;
-    case TESTIPC_CREATENAMEDPIPEW:
-      TestCreateNamedPipeW();
       break;
     case TESTIPC_LAST:
       NOTREACHED_NT();
@@ -241,9 +215,9 @@ SBOX_TESTS_COMMAND int IPC_Leak(int argc, wchar_t** argv) {
       (sizeof(ChannelControl) * channel_count) + offsetof(IPCControl, channels);
 
   void* memory = GetGlobalIPCMemory();
-  if (!memory)
+  if (!memory) {
     return SBOX_TEST_FAILED;
-
+  }
   // structure taken from crosscall_params.h
   struct ipc_internal {
     uint32_t tag;
@@ -252,7 +226,7 @@ SBOX_TESTS_COMMAND int IPC_Leak(int argc, wchar_t** argv) {
   };
 
   auto* ipc_data = reinterpret_cast<ipc_internal*>(
-      reinterpret_cast<char*>(memory) + base_start);
+      UNSAFE_TODO(reinterpret_cast<char*>(memory) + base_start));
 
   return base::win::HandleToUint32(ipc_data->answer.handle);
 }
@@ -264,17 +238,16 @@ TEST(IPCTest, IPCLeak) {
     HANDLE expected_result;
   } test_data[] = {{TESTIPC_NTOPENFILE, "TESTIPC_NTOPENFILE", nullptr},
                    {TESTIPC_NTCREATEFILE, "TESTIPC_NTCREATEFILE", nullptr},
-                   {TESTIPC_CREATETHREAD, "TESTIPC_CREATETHREAD", nullptr},
-                   {TESTIPC_CREATENAMEDPIPEW, "TESTIPC_CREATENAMEDPIPEW",
-                    INVALID_HANDLE_VALUE}};
+                   {TESTIPC_CREATETHREAD, "TESTIPC_CREATETHREAD", nullptr}};
 
   static_assert(std::size(test_data) == TESTIPC_LAST, "Not enough tests.");
   for (auto test : test_data) {
-    TestRunner runner;
-    std::wstring command = std::wstring(L"IPC_Leak ");
-    command += std::to_wstring(test.test_id);
+    IPC_LeakTestRunner runner;
+    // There has to be a policy allocated for the child to have one to replace.
+    runner.AllowFileAccess(sandbox::FileSemantics::kAllowReadonly,
+                           L"c:\\Windows\\System32\\Nothing.txt");
     EXPECT_EQ(test.expected_result,
-              base::win::Uint32ToHandle(runner.RunTest(command.c_str())))
+              base::win::Uint32ToHandle(runner.RunTest(test.test_id)))
         << test.test_name;
   }
 }

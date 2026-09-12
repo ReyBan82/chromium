@@ -2,20 +2,43 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ash/constants/ash_features.h"
-#include "base/path_service.h"
-#include "base/test/scoped_feature_list.h"
 #include "chrome/browser/ash/file_manager/open_with_browser.h"
+
+#include "ash/constants/ash_features.h"
+#include "ash/constants/chrome_switches.h"
+#include "ash/constants/web_app_id_constants.h"
+#include "base/files/file_util.h"
+#include "base/files/scoped_temp_dir.h"
+#include "base/path_service.h"
+#include "base/run_loop.h"
+#include "base/strings/strcat.h"
+#include "base/test/gmock_callback_support.h"
+#include "base/test/mock_callback.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/threading/thread_restrictions.h"
+#include "chrome/browser/apps/app_service/app_service_proxy.h"
+#include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
+#include "chrome/browser/apps/app_service/metrics/app_platform_metrics.h"
+#include "chrome/browser/ash/drive/drive_integration_service.h"
+#include "chrome/browser/ash/drive/drive_integration_service_factory.h"
+#include "chrome/browser/ash/drive/drivefs_test_support.h"
+#include "chrome/browser/ash/file_manager/file_manager_test_util.h"
+#include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/signin/identity_manager_factory.h"
 #include "chrome/browser/web_applications/test/profile_test_helper.h"
+#include "chrome/common/chrome_features.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "chromeos/ash/components/drivefs/mojom/drivefs.mojom.h"
+#include "components/services/app_service/public/cpp/app_types.h"
+#include "components/services/app_service/public/cpp/launch_result.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "net/base/filename_util.h"
+#include "storage/browser/file_system/file_system_url.h"
+#include "third_party/blink/public/common/features.h"
 
-namespace file_manager {
-namespace util {
+namespace file_manager::util {
 
 namespace {
 
@@ -23,7 +46,7 @@ namespace {
 base::FilePath GetTestFilePath(const std::string& file_name) {
   // Get the path to file manager's test data directory.
   base::FilePath source_dir;
-  CHECK(base::PathService::Get(base::DIR_SOURCE_ROOT, &source_dir));
+  CHECK(base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &source_dir));
   base::FilePath test_data_dir = source_dir.AppendASCII("chrome")
                                      .AppendASCII("test")
                                      .AppendASCII("data")
@@ -33,6 +56,9 @@ base::FilePath GetTestFilePath(const std::string& file_name) {
 }
 
 }  // namespace
+
+using base::test::RunClosure;
+using testing::_;
 
 // Profile type to test. Provided to OpenWithBrowserBrowserTest via
 // profile_type().
@@ -83,16 +109,13 @@ class OpenWithBrowserBrowserTest
     : public InProcessBrowserTest,
       public ::testing::WithParamInterface<TestCase> {
  public:
-  OpenWithBrowserBrowserTest() {
-    scoped_feature_list_.InitWithFeatures(
-        {}, /*disabled_features=*/{ash::features::kLacrosPrimary});
-  }
+  OpenWithBrowserBrowserTest() = default;
 
   void SetUpCommandLine(base::CommandLine* command_line) override {
     if (profile_type() == TestProfileType::kGuest) {
       ConfigureCommandLineForGuestMode(command_line);
     } else if (profile_type() == TestProfileType::kIncognito) {
-      command_line->AppendSwitch(::switches::kIncognito);
+      command_line->AppendSwitch(ash::chrome_switches::kIncognito);
     }
     if (!startup_browser()) {
       command_line->AppendSwitch(::switches::kNoStartupWindow);
@@ -105,8 +128,9 @@ class OpenWithBrowserBrowserTest
   bool startup_browser() const { return GetParam().startup_browser; }
 
   Profile* profile() const {
-    if (browser())
-      return browser()->profile();
+    if (browser()) {
+      return browser()->GetProfile();
+    }
     return ProfileManager::GetActiveUserProfile();
   }
 
@@ -132,39 +156,9 @@ IN_PROC_BROWSER_TEST_P(OpenWithBrowserBrowserTest, OpenTextFile) {
   GURL page_url = net::FilePathToFileURL(test_file_url.path());
   content::TestNavigationObserver navigation_observer(page_url);
   navigation_observer.StartWatchingNewWebContents();
-  OpenFileWithBrowser(profile(), test_file_url, "view-in-browser");
+  OpenFileWithAppOrBrowser(profile(), test_file_url, "view-in-browser");
   navigation_observer.Wait();
   ASSERT_TRUE(navigation_observer.last_navigation_succeeded());
-}
-
-// Test to check that OpenNewTabForHostedOfficeFile() doesn't crash when passed
-// an invalid URL.
-IN_PROC_BROWSER_TEST_P(OpenWithBrowserBrowserTest,
-                       InvalidUrlDoesNotCauseCrash) {
-  // Create an empty, invalid URL.
-  GURL invalid_url = GURL();
-  ASSERT_FALSE(invalid_url.is_valid());
-
-  OpenNewTabForHostedOfficeFile(invalid_url);
-}
-
-// Test to check that OpenNewTabForHostedOfficeFile() correctly adds a query
-// parameter to the input office url and attempts to open the resulting url in
-// the browser.
-IN_PROC_BROWSER_TEST_P(OpenWithBrowserBrowserTest,
-                       AddQueryParamToOfficeFileUrl) {
-  const std::string& test_url =
-      "https://docs.google.com/document/d/testurl/edit";
-  GURL page_url = GURL(test_url);
-  GURL page_url_with_query_param = GURL(test_url + "?cros_files=true");
-
-  content::TestNavigationObserver navigation_observer(
-      page_url_with_query_param);
-
-  // Start watching for the opening of `page_url_with_query_param`
-  navigation_observer.StartWatchingNewWebContents();
-  OpenNewTabForHostedOfficeFile(page_url);
-  navigation_observer.Wait();
 }
 
 INSTANTIATE_TEST_SUITE_P(
@@ -179,5 +173,269 @@ INSTANTIATE_TEST_SUITE_P(
         TestCase(TestProfileType::kGuest).WithStartupBrowser()),
     &PostTestCaseName);
 
-}  // namespace util
-}  // namespace file_manager
+struct HostedAppTestCase {
+  const std::string name;
+  const std::string app_id;
+  const std::string file_name;
+};
+
+std::string AppendTestCaseName(
+    const ::testing::TestParamInfo<HostedAppTestCase>& test) {
+  return test.param.name;
+}
+
+class OpenHostedFileWithAppBrowserBaseTest : public InProcessBrowserTest {
+ public:
+  OpenHostedFileWithAppBrowserBaseTest() {
+    scoped_feature_list_.InitWithFeatures(
+        {blink::features::kDesktopPWAsTabStrip},
+        {features::kDesktopPWAsTabStripSettings});
+  }
+  ~OpenHostedFileWithAppBrowserBaseTest() override = default;
+
+ protected:
+  storage::FileSystemURL PathToFileSystemURL(base::FilePath path) {
+    return storage::FileSystemURL::CreateForTest(
+        kTestStorageKey, storage::kFileSystemTypeExternal, path);
+  }
+
+  Profile* profile() const {
+    if (browser()) {
+      return browser()->GetProfile();
+    }
+    return ProfileManager::GetActiveUserProfile();
+  }
+
+  void SetUpAppInAppService(const std::string& app_id,
+                            apps::Readiness readiness) {
+    std::vector<apps::AppPtr> apps;
+    apps::AppPtr app = std::make_unique<apps::App>(apps::AppType::kWeb, app_id);
+    app->app_id = app_id;
+    app->readiness = readiness;
+    apps.push_back(std::move(app));
+    apps::AppServiceProxyFactory::GetForProfile(profile())->OnApps(
+        std::move(apps), apps::AppType::kWeb,
+        false /* should_notify_initialized */);
+  }
+
+  const storage::FileSystemURL CreateHostedFile(
+      const std::string& file_name,
+      const GURL& hosted_url = GURL("https://docs.google.com/test-id")) {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    if (!temp_dir_.IsValid()) {
+      EXPECT_TRUE(temp_dir_.CreateUniqueTempDir());
+    }
+    const base::FilePath test_file_path = temp_dir_.GetPath().Append(file_name);
+    EXPECT_TRUE(base::WriteFile(
+        test_file_path,
+        base::StrCat({"{\"url\":\"", hosted_url.spec(), "\"}"})));
+    return PathToFileSystemURL(test_file_path);
+  }
+
+  void OpenURLAndExpectAppToBeOpened(
+      const storage::FileSystemURL& test_file_url) {
+    base::RunLoop run_loop;
+    base::MockCallback<LaunchAppCallback> mock_callback;
+    EXPECT_CALL(mock_callback, Run(_))
+        .WillOnce(RunClosure(run_loop.QuitClosure()));
+    OpenFileWithAppOrBrowser(profile(), test_file_url, "view-in-browser",
+                             mock_callback.Get());
+    run_loop.Run();
+  }
+
+  void OpenURLAndExpectBrowserToBeOpened(
+      const storage::FileSystemURL& test_file_url,
+      const GURL& expected_url = GURL("https://docs.google.com/test-id")) {
+    content::TestNavigationObserver navigation_observer(expected_url);
+    navigation_observer.StartWatchingNewWebContents();
+    OpenFileWithAppOrBrowser(profile(), test_file_url, "view-in-browser");
+    navigation_observer.Wait();
+    EXPECT_EQ(navigation_observer.last_navigation_url(), expected_url);
+  }
+
+  const blink::StorageKey kTestStorageKey =
+      blink::StorageKey::CreateFromStringForTesting("chrome://file-manager");
+  base::ScopedTempDir temp_dir_;
+  const GURL kTestHostedURL = GURL("https://docs.google.com/test-id");
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+class OpenHostedFileWithAppBrowserTest
+    : public OpenHostedFileWithAppBrowserBaseTest,
+      public ::testing::WithParamInterface<HostedAppTestCase> {};
+
+IN_PROC_BROWSER_TEST_P(OpenHostedFileWithAppBrowserTest,
+                       AppIsAvailableAndReady) {
+  const HostedAppTestCase& test_case = GetParam();
+  const storage::FileSystemURL test_file_url =
+      CreateHostedFile(test_case.file_name);
+  SetUpAppInAppService(test_case.app_id, apps::Readiness::kReady);
+  OpenURLAndExpectAppToBeOpened(test_file_url);
+}
+
+IN_PROC_BROWSER_TEST_P(OpenHostedFileWithAppBrowserTest, AppIsNotInstalled) {
+  const HostedAppTestCase& test_case = GetParam();
+  const storage::FileSystemURL test_file_url =
+      CreateHostedFile(test_case.file_name);
+  OpenURLAndExpectBrowserToBeOpened(test_file_url);
+}
+
+IN_PROC_BROWSER_TEST_P(OpenHostedFileWithAppBrowserTest,
+                       AppIsUninstalledByUser) {
+  const HostedAppTestCase& test_case = GetParam();
+  const storage::FileSystemURL test_file_url =
+      CreateHostedFile(test_case.file_name);
+  SetUpAppInAppService(test_case.app_id, apps::Readiness::kUninstalledByUser);
+  OpenURLAndExpectBrowserToBeOpened(test_file_url);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    OpenHostedFileWithAppBrowserTest,
+    ::testing::Values(HostedAppTestCase{.name = "Docs",
+                                        .app_id = ash::kGoogleDocsAppId,
+                                        .file_name = "doc.gdoc"},
+                      HostedAppTestCase{.name = "Sheets",
+                                        .app_id = ash::kGoogleSheetsAppId,
+                                        .file_name = "sheet.gsheet"},
+                      HostedAppTestCase{.name = "Slides",
+                                        .app_id = ash::kGoogleSlidesAppId,
+                                        .file_name = "slide.gslides"}),
+    &AppendTestCaseName);
+
+using OpenHostedFileWithoutAppBrowserTest =
+    OpenHostedFileWithAppBrowserBaseTest;
+
+IN_PROC_BROWSER_TEST_F(OpenHostedFileWithoutAppBrowserTest,
+                       HostedDocWithoutApp) {
+  const storage::FileSystemURL test_file_url = CreateHostedFile("form.gform");
+  OpenURLAndExpectBrowserToBeOpened(test_file_url);
+}
+
+using OpenHostedFileUnsafeSchemeTest = OpenHostedFileWithAppBrowserBaseTest;
+
+IN_PROC_BROWSER_TEST_F(OpenHostedFileUnsafeSchemeTest,
+                       RejectJavascriptURLInGDoc) {
+  const GURL unsafe_url("javascript:alert(1)");
+  const storage::FileSystemURL test_file_url =
+      CreateHostedFile("unsafe.gdoc", unsafe_url);
+
+  // When the URL is not HTTP/HTTPS, it should fallback to opening the local
+  // file.
+  const GURL expected_url = net::FilePathToFileURL(test_file_url.path());
+  OpenURLAndExpectBrowserToBeOpened(test_file_url, expected_url);
+}
+
+IN_PROC_BROWSER_TEST_F(OpenHostedFileUnsafeSchemeTest, RejectDataURLInGDoc) {
+  const GURL unsafe_url("data:text/html,<html></html>");
+  const storage::FileSystemURL test_file_url =
+      CreateHostedFile("unsafe.gsheet", unsafe_url);
+
+  const GURL expected_url = net::FilePathToFileURL(test_file_url.path());
+  OpenURLAndExpectBrowserToBeOpened(test_file_url, expected_url);
+}
+
+IN_PROC_BROWSER_TEST_F(OpenHostedFileUnsafeSchemeTest,
+                       DirectRejectUnsafeScheme) {
+  base::FilePath file_path("/test/doc.gdoc");
+  GURL unsafe_url("javascript:alert(1)");
+  base::RunLoop run_loop;
+  base::MockCallback<LaunchAppCallback> mock_callback;
+  EXPECT_CALL(mock_callback,
+              Run(std::optional<apps::LaunchResult>(std::nullopt)))
+      .WillOnce(RunClosure(run_loop.QuitClosure()));
+
+  EXPECT_FALSE(OpenHostedFileInNewTabOrApp(profile(), file_path,
+                                           mock_callback.Get(), unsafe_url));
+  run_loop.Run();
+}
+
+class OpenDriveFsFileBrowserTest : public InProcessBrowserTest {
+ public:
+  OpenDriveFsFileBrowserTest() {
+    EXPECT_TRUE(temp_dir_.CreateUniqueTempDir());
+    drive_mount_point_ = temp_dir_.GetPath();
+  }
+
+  bool SetUpUserDataDirectory() override {
+    return drive::SetUpUserDataDirectoryForDriveFsTest();
+  }
+
+  void SetUpInProcessBrowserTestFixture() override {
+    create_drive_integration_service_ = base::BindRepeating(
+        &OpenDriveFsFileBrowserTest::CreateDriveIntegrationService,
+        base::Unretained(this));
+    service_factory_for_test_ = std::make_unique<
+        drive::DriveIntegrationServiceFactory::ScopedFactoryForTest>(
+        &create_drive_integration_service_);
+  }
+
+ protected:
+  drive::DriveIntegrationService* CreateDriveIntegrationService(
+      Profile* profile) {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    fake_drivefs_helpers_[profile] =
+        std::make_unique<test::FakeSimpleDriveFsHelper>(profile,
+                                                        drive_mount_point_);
+    return new drive::DriveIntegrationService(
+        g_browser_process->local_state(), profile,
+        IdentityManagerFactory::GetForProfile(profile), "", drive_mount_point_,
+        fake_drivefs_helpers_[profile]->CreateFakeDriveFsListenerFactory());
+  }
+
+  storage::FileSystemURL SetUpDriveFile(const std::string& file_name,
+                                        const std::string& alternate_url) {
+    drivefs::FakeMetadata metadata;
+    metadata.path = base::FilePath("/").AppendASCII(file_name);
+    metadata.alternate_url = alternate_url;
+    fake_drivefs_helpers_[profile()]->fake_drivefs().SetMetadata(
+        std::move(metadata));
+    return storage::FileSystemURL::CreateForTest(
+        kTestStorageKey, storage::kFileSystemTypeLocal,
+        drive_mount_point_.AppendASCII(file_name));
+  }
+
+  const blink::StorageKey kTestStorageKey =
+      blink::StorageKey::CreateFromStringForTesting("chrome://file-manager");
+
+  Profile* profile() const {
+    if (browser()) {
+      return browser()->GetProfile();
+    }
+    return ProfileManager::GetActiveUserProfile();
+  }
+
+ private:
+  base::ScopedTempDir temp_dir_;
+  base::FilePath drive_mount_point_;
+  drive::DriveIntegrationServiceFactory::FactoryCallback
+      create_drive_integration_service_;
+  std::unique_ptr<drive::DriveIntegrationServiceFactory::ScopedFactoryForTest>
+      service_factory_for_test_;
+  std::map<Profile*, std::unique_ptr<test::FakeSimpleDriveFsHelper>>
+      fake_drivefs_helpers_;
+};
+
+IN_PROC_BROWSER_TEST_F(OpenDriveFsFileBrowserTest,
+                       RejectJavascriptURLInEncryptedFile) {
+  const GURL unsafe_url("data:text/html,<html></html>");
+  const GURL safe_url("https://drive.google.com/encrypted");
+  const storage::FileSystemURL unsafe_file =
+      SetUpDriveFile("unsafe.txt", unsafe_url.spec());
+  const storage::FileSystemURL safe_file =
+      SetUpDriveFile("safe.png", safe_url.spec());
+
+  content::TestNavigationObserver navigation_observer(
+      nullptr, /*expected_number_of_navigations=*/1);
+  navigation_observer.StartWatchingNewWebContents();
+
+  OpenFileWithAppOrBrowser(profile(), unsafe_file, "open-encrypted");
+  OpenFileWithAppOrBrowser(profile(), safe_file, "open-encrypted");
+
+  navigation_observer.Wait();
+  EXPECT_EQ(navigation_observer.last_navigation_url(), safe_url);
+}
+
+}  // namespace file_manager::util

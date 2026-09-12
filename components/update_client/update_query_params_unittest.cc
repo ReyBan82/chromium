@@ -3,16 +3,14 @@
 // found in the LICENSE file.
 
 #include "components/update_client/update_query_params.h"
-#include "base/strings/stringprintf.h"
+
 #include "base/system/sys_info.h"
 #include "components/update_client/update_query_params_delegate.h"
 #include "components/version_info/version_info.h"
 #include "testing/gtest/include/gtest/gtest.h"
-
-using base::StringPrintf;
+#include "third_party/abseil-cpp/absl/strings/str_format.h"
 
 namespace update_client {
-
 namespace {
 
 bool Contains(const std::string& source, const std::string& target) {
@@ -33,18 +31,16 @@ void TestParams(UpdateQueryParams::ProdId prod_id, bool extra_params) {
   // really test anything) as it is a verification that all the params are
   // present in the generated string.
   EXPECT_TRUE(
-      Contains(params, StringPrintf("os=%s", UpdateQueryParams::GetOS())));
-  EXPECT_TRUE(
-      Contains(params, StringPrintf("arch=%s", UpdateQueryParams::GetArch())));
+      Contains(params, absl::StrFormat("os=%s", UpdateQueryParams::GetOS())));
+  EXPECT_TRUE(Contains(
+      params, absl::StrFormat("arch=%s", UpdateQueryParams::GetArch())));
   EXPECT_TRUE(Contains(
       params,
-      StringPrintf("os_arch=%s",
-                   base::SysInfo().OperatingSystemArchitecture().c_str())));
-  EXPECT_TRUE(Contains(
-      params,
-      StringPrintf("prod=%s", UpdateQueryParams::GetProdIdString(prod_id))));
-  if (extra_params)
+      absl::StrFormat("prod=%s", UpdateQueryParams::GetProdIdString(prod_id))));
+  if (extra_params) {
     EXPECT_TRUE(Contains(params, "cat=dog"));
+  }
+  EXPECT_FALSE(Contains(params, "os_arch="));
 }
 
 void TestProdVersion() {

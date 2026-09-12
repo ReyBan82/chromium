@@ -8,8 +8,8 @@
 #include "base/files/scoped_temp_dir.h"
 #include "extensions/browser/computed_hashes.h"
 #include "extensions/browser/content_hash_tree.h"
+#include "extensions/browser/content_verifier/content_verifier_delegate.h"
 #include "extensions/browser/content_verifier/test_utils.h"
-#include "extensions/browser/content_verifier_delegate.h"
 #include "extensions/browser/extension_file_task_runner.h"
 #include "extensions/browser/extensions_test.h"
 #include "extensions/browser/verified_contents.h"
@@ -41,12 +41,13 @@ class ContentHashUnittest : public ExtensionsTest {
 
   scoped_refptr<Extension> LoadExtension(
       const content_verifier_test_utils::TestExtensionBuilder& builder) {
-    std::string error;
+    std::u16string error;
     scoped_refptr<Extension> extension = file_util::LoadExtension(
         builder.extension_path(), builder.extension_id(),
         mojom::ManifestLocation::kInternal, 0 /* flags */, &error);
-    if (!extension)
+    if (!extension) {
       ADD_FAILURE() << " error:'" << error << "'";
+    }
     return extension;
   }
 
@@ -61,7 +62,7 @@ class ContentHashUnittest : public ExtensionsTest {
     ASSERT_TRUE(base::CopyDirectory(builder.extension_path(),
                                     temp_dir.GetPath(), /*recursive=*/true));
 
-    std::string error;
+    std::u16string error;
     auto extension = file_util::LoadExtension(
         temp_dir.GetPath().Append(builder.extension_path().BaseName()),
         override_extension_id, mojom::ManifestLocation::kInternal,

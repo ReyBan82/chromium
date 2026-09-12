@@ -12,8 +12,8 @@
 #include "base/base64url.h"
 #include "base/check.h"
 #include "base/functional/bind.h"
+#include "components/safe_browsing/core/browser/db/sb_test_util.h"
 #include "components/safe_browsing/core/browser/db/util.h"
-#include "components/safe_browsing/core/browser/db/v4_test_util.h"
 #include "net/base/url_util.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/test/embedded_test_server/http_request.h"
@@ -78,8 +78,8 @@ std::unique_ptr<net::test_server::HttpResponse> HandleFullHashRequest(
   for (const HashPrefixStr& prefix : request_prefixes) {
     for (const auto& response : response_map) {
       FullHashStr full_hash =
-          V4ProtocolManagerUtil::GetFullHash(response.first);
-      if (V4ProtocolManagerUtil::FullHashMatchesHashPrefix(full_hash, prefix)) {
+          SBProtocolManagerUtil::GetFullHash(response.first);
+      if (SBProtocolManagerUtil::FullHashMatchesHashPrefix(full_hash, prefix)) {
         ThreatMatch* match = find_full_hashes_response.add_matches();
         *match = response.second;
         auto it = delay_map.find(response.first);

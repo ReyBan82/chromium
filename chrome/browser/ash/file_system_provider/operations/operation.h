@@ -10,14 +10,14 @@
 #include <vector>
 
 #include "base/files/file.h"
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "chrome/browser/ash/file_system_provider/provided_file_system_info.h"
 #include "chrome/browser/ash/file_system_provider/request_manager.h"
 #include "extensions/browser/extension_event_histogram_value.h"
 #include "storage/browser/file_system/async_file_util.h"
 
-namespace ash {
-namespace file_system_provider {
+namespace ash::file_system_provider {
 
 class ProvidedFileSystemInfo;
 class RequestDispatcher;
@@ -38,10 +38,10 @@ class Operation : public RequestManager::HandlerInterface {
   // RequestManager::HandlerInterface overrides.
   bool Execute(int request_id) override = 0;
   void OnSuccess(int request_id,
-                 std::unique_ptr<RequestValue> result,
+                 const RequestValue& result,
                  bool has_more) override = 0;
   void OnError(int request_id,
-               std::unique_ptr<RequestValue> result,
+               const RequestValue& result,
                base::File::Error error) override = 0;
   void OnAbort(int request_id) override;
 
@@ -51,7 +51,7 @@ class Operation : public RequestManager::HandlerInterface {
   bool SendEvent(int request_id,
                  extensions::events::HistogramValue histogram_value,
                  const std::string& event_name,
-                 base::Value::List event_args);
+                 base::ListValue event_args);
 
   ProvidedFileSystemInfo file_system_info_;
 
@@ -60,7 +60,6 @@ class Operation : public RequestManager::HandlerInterface {
 };
 
 }  // namespace operations
-}  // namespace file_system_provider
-}  // namespace ash
+}  // namespace ash::file_system_provider
 
 #endif  // CHROME_BROWSER_ASH_FILE_SYSTEM_PROVIDER_OPERATIONS_OPERATION_H_

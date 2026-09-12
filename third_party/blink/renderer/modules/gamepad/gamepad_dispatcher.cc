@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <utility>
-
 #include "third_party/blink/renderer/modules/gamepad/gamepad_dispatcher.h"
 
+#include <utility>
+
 #include "device/gamepad/public/cpp/gamepads.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/modules/gamepad/gamepad_shared_memory_reader.h"
 #include "third_party/blink/renderer/modules/gamepad/navigator_gamepad.h"
@@ -15,6 +16,7 @@
 namespace blink {
 
 using device::mojom::blink::GamepadHapticsManager;
+using device::mojom::blink::GamepadHapticsResult;
 
 void GamepadDispatcher::SampleGamepads(device::Gamepads& gamepads) {
   if (reader_) {
@@ -28,6 +30,11 @@ void GamepadDispatcher::PlayVibrationEffectOnce(
     device::mojom::blink::GamepadEffectParametersPtr params,
     GamepadHapticsManager::PlayVibrationEffectOnceCallback callback) {
   InitializeHaptics();
+  if (!gamepad_haptics_manager_remote_.is_bound()) {
+    std::move(callback).Run(
+        GamepadHapticsResult::GamepadHapticsResultNotSupported);
+    return;
+  }
   gamepad_haptics_manager_remote_->PlayVibrationEffectOnce(
       pad_index, type, std::move(params), std::move(callback));
 }
@@ -36,6 +43,11 @@ void GamepadDispatcher::ResetVibrationActuator(
     uint32_t pad_index,
     GamepadHapticsManager::ResetVibrationActuatorCallback callback) {
   InitializeHaptics();
+  if (!gamepad_haptics_manager_remote_.is_bound()) {
+    std::move(callback).Run(
+        GamepadHapticsResult::GamepadHapticsResultNotSupported);
+    return;
+  }
   gamepad_haptics_manager_remote_->ResetVibrationActuator(pad_index,
                                                           std::move(callback));
 }
@@ -46,7 +58,12 @@ GamepadDispatcher::GamepadDispatcher(ExecutionContext& context)
 GamepadDispatcher::~GamepadDispatcher() = default;
 
 void GamepadDispatcher::InitializeHaptics() {
-  if (!gamepad_haptics_manager_remote_.is_bound() && execution_context_) {
+  if (!execution_context_ ||
+      !execution_context_->IsFeatureEnabled(
+          network::mojom::PermissionsPolicyFeature::kGamepad)) {
+    return;
+  }
+  if (!gamepad_haptics_manager_remote_.is_bound()) {
     // See https://bit.ly/2S0zRAS for task types.
     auto task_runner =
         execution_context_->GetTaskRunner(TaskType::kMiscPlatformAPI);
@@ -73,9 +90,19 @@ void GamepadDispatcher::DidDisconnectGamepad(uint32_t index,
   DispatchDidConnectOrDisconnectGamepad(index, gamepad, false);
 }
 
-void GamepadDispatcher::ButtonOrAxisDidChange(uint32_t index,
-                                              const device::Gamepad& gamepad) {
-  DCHECK_LT(index, device::Gamepads::kItemsLengthCap);
+void GamepadDispatcher::DidChangeGamepadRawInput(
+    uint32_t index,
+    const device::Gamepad& gamepad) {
+  if (!RuntimeEnabledFeatures::GamepadRawInputChangeEventEnabled(
+          execution_context_)) {
+    // Return early to avoid unnecessary work.
+    return;
+  }
+
+  CHECK_LT(index, device::Gamepads::kItemsLengthCap);
+  CHECK_EQ(true, gamepad.connected);
+  // TODO(https://crbug.com/438906421): Queue gamepad input changes in the
+  // renderer.
   NotifyControllers();
 }
 
@@ -92,6 +119,10 @@ void GamepadDispatcher::DispatchDidConnectOrDisconnectGamepad(
 void GamepadDispatcher::StartListening(LocalDOMWindow* window) {
   if (!reader_) {
     DCHECK(window);
+    if (!window->IsFeatureEnabled(
+            network::mojom::PermissionsPolicyFeature::kGamepad)) {
+      return;
+    }
     reader_ = MakeGarbageCollected<GamepadSharedMemoryReader>(*window);
   }
   reader_->Start(this);

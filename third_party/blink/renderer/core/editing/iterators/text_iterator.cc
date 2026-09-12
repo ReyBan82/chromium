@@ -28,6 +28,7 @@
 #include "third_party/blink/renderer/core/editing/iterators/text_iterator.h"
 
 #include <unicode/utf16.h>
+
 #include "build/build_config.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/display_lock/display_lock_utilities.h"
@@ -41,18 +42,29 @@
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_legend_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_opt_group_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_option_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_select_element.h"
 #include "third_party/blink/renderer/core/html/forms/text_control_element.h"
+#include "third_party/blink/renderer/core/html/html_body_element.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/html/html_image_element.h"
+#include "third_party/blink/renderer/core/html/html_meter_element.h"
+#include "third_party/blink/renderer/core/html/html_progress_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/input_type_names.h"
-#include "third_party/blink/renderer/core/layout/layout_table_cell.h"
-#include "third_party/blink/renderer/core/layout/layout_table_row.h"
+#include "third_party/blink/renderer/core/layout/table/layout_table.h"
+#include "third_party/blink/renderer/core/layout/table/layout_table_cell.h"
+#include "third_party/blink/renderer/core/layout/table/layout_table_row.h"
 #include "third_party/blink/renderer/platform/fonts/font.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
 namespace blink {
+
+using mojom::blink::FormControlType;
 
 namespace {
 
@@ -92,7 +104,7 @@ static bool NotSkipping(const Node& node) {
 }
 
 template <typename Strategy>
-const Node* StartNode(const Node* start_container, unsigned start_offset) {
+const Node* StartNode(const Node* start_container, wtf_size_t start_offset) {
   if (start_container->IsCharacterDataNode())
     return start_container;
   if (Node* child = Strategy::ChildAt(*start_container, start_offset))
@@ -103,7 +115,7 @@ const Node* StartNode(const Node* start_container, unsigned start_offset) {
 }
 
 template <typename Strategy>
-const Node* EndNode(const Node& end_container, unsigned end_offset) {
+const Node* EndNode(const Node& end_container, wtf_size_t end_offset) {
   if (!end_container.IsCharacterDataNode() && end_offset)
     return Strategy::ChildAt(end_container, end_offset - 1);
   return nullptr;
@@ -114,7 +126,7 @@ const Node* EndNode(const Node& end_container, unsigned end_offset) {
 // |advance()|.
 template <typename Strategy>
 const Node* PastLastNode(const Node& range_end_container,
-                         unsigned range_end_offset) {
+                         wtf_size_t range_end_offset) {
   if (!range_end_container.IsCharacterDataNode() &&
       NotSkipping(range_end_container)) {
     for (Node* next = Strategy::ChildAt(range_end_container, range_end_offset);
@@ -137,16 +149,17 @@ const Node* PastLastNode(const Node& range_end_container,
 // Figure out the initial value of shadow_depth_: the depth of start_container's
 // tree scope from the common ancestor tree scope.
 template <typename Strategy>
-unsigned ShadowDepthOf(const Node& start_container, const Node& end_container);
+wtf_size_t ShadowDepthOf(const Node& start_container,
+                         const Node& end_container);
 
 template <>
-unsigned ShadowDepthOf<EditingStrategy>(const Node& start_container,
-                                        const Node& end_container) {
+wtf_size_t ShadowDepthOf<EditingStrategy>(const Node& start_container,
+                                          const Node& end_container) {
   const TreeScope* common_ancestor_tree_scope =
       start_container.GetTreeScope().CommonAncestorTreeScope(
           end_container.GetTreeScope());
   DCHECK(common_ancestor_tree_scope);
-  unsigned shadow_depth = 0;
+  wtf_size_t shadow_depth = 0;
   for (const TreeScope* tree_scope = &start_container.GetTreeScope();
        tree_scope != common_ancestor_tree_scope;
        tree_scope = tree_scope->ParentTreeScope())
@@ -155,8 +168,8 @@ unsigned ShadowDepthOf<EditingStrategy>(const Node& start_container,
 }
 
 template <>
-unsigned ShadowDepthOf<EditingInFlatTreeStrategy>(const Node& start_container,
-                                                  const Node& end_container) {
+wtf_size_t ShadowDepthOf<EditingInFlatTreeStrategy>(const Node& start_container,
+                                                    const Node& end_container) {
   return 0;
 }
 
@@ -211,7 +224,6 @@ TextIteratorAlgorithm<Strategy>::TextIteratorAlgorithm(
       end_node_(EndNode<Strategy>(*end_container_, end_offset_)),
       past_end_node_(PastLastNode<Strategy>(*end_container_, end_offset_)),
       node_(StartNode<Strategy>(start_container_, start_offset_)),
-      iteration_progress_(kHandledNone),
       shadow_depth_(
           ShadowDepthOf<Strategy>(*start_container_, *end_container_)),
       behavior_(AdjustBehaviorFlags<Strategy>(behavior)),
@@ -255,8 +267,8 @@ bool TextIteratorAlgorithm<Strategy>::IsInsideAtomicInlineElement() const {
   if (AtEnd() || length() != 1 || !node_)
     return false;
 
-  LayoutObject* layout_object = node_->GetLayoutObject();
-  return layout_object && layout_object->IsAtomicInlineLevel();
+  const LayoutObject* layout_object = node_->GetLayoutObject();
+  return layout_object && layout_object->IsAtomicInline();
 }
 
 template <typename Strategy>
@@ -298,10 +310,12 @@ void TextIteratorAlgorithm<Strategy>::Advance() {
 
   if (HandleRememberedProgress())
     return;
-
-  while (node_ && (node_ != past_end_node_ || shadow_depth_)) {
+  bool should_continue_iteration = (node_ != past_end_node_);
+  while (node_ && should_continue_iteration) {
     // TODO(crbug.com/1296290): Disable this DCHECK as it's troubling CrOS engs.
-#if DCHECK_IS_ON() && !BUILDFLAG(IS_CHROMEOS)
+    // TODO(crbug.com/421311110): Disable this DCHECK as it's troubling android
+    // engs.
+#if DCHECK_IS_ON() && !BUILDFLAG(IS_CHROMEOS) && !BUILDFLAG(IS_ANDROID)
     // |node_| shouldn't be after |past_end_node_|.
     if (past_end_node_) {
       DCHECK_LE(PositionTemplate<Strategy>(node_, 0),
@@ -365,7 +379,7 @@ void TextIteratorAlgorithm<Strategy>::Advance() {
       // Enter user-agent shadow root, if necessary.
       if (iteration_progress_ < kHandledUserAgentShadowRoot) {
         if (std::is_same<Strategy, EditingStrategy>::value &&
-            EntersTextControls() && layout_object->IsTextControlIncludingNG()) {
+            EntersTextControls() && layout_object->IsTextControl()) {
           ShadowRoot* user_agent_shadow_root =
               To<Element>(node_)->UserAgentShadowRoot();
           DCHECK(user_agent_shadow_root->IsUserAgent());
@@ -438,11 +452,23 @@ void TextIteratorAlgorithm<Strategy>::Advance() {
               Strategy::IsDescendantOf(*end_container_, *parent_node)) {
             return;
           }
+          // ExitNode() is invoked if |node_| is the last child under
+          // |parent_node|, irrespective of whether |node_| possesses a layout
+          // object. However, if any block node resides within a node that has
+          // an inline layout it should not be called.
           bool have_layout_object = node_->GetLayoutObject();
           node_ = parent_node;
           fully_clipped_stack_.Pop();
           parent_node = Strategy::Parent(*node_);
-          if (have_layout_object) {
+          LayoutObject* node_layout =
+              node_ ? node_->GetLayoutObject() : nullptr;
+          LayoutObject* parent_node_layout =
+              parent_node ? parent_node->GetLayoutObject() : nullptr;
+          bool should_exit_node =
+              have_layout_object ||
+              (node_layout && parent_node_layout &&
+               node_layout->IsLayoutBlock() && !parent_node_layout->IsInline());
+          if (should_exit_node) {
             ExitNode();
           }
           if (text_state_.PositionNode()) {
@@ -458,7 +484,11 @@ void TextIteratorAlgorithm<Strategy>::Advance() {
           // sibling shadow root, if any.
           const auto* shadow_root = DynamicTo<ShadowRoot>(node_);
           if (!shadow_root) {
+#if !BUILDFLAG(IS_ANDROID)
+            // TODO(crbug.com/421311110): Hits at chrome://extensions,
+            // chrome://flags, etc.
             NOTREACHED();
+#endif  // !BUILDFLAG(IS_ANDROID)
             should_stop_ = true;
             return;
           }
@@ -474,7 +504,7 @@ void TextIteratorAlgorithm<Strategy>::Advance() {
             // to the host.
             // TODO(kochi): Make sure we treat closed shadow as user agent
             // shadow here.
-            DCHECK(shadow_root->GetType() == ShadowRootType::kClosed ||
+            DCHECK(shadow_root->GetMode() == ShadowRootMode::kClosed ||
                    shadow_root->IsUserAgent());
             node_ = &shadow_root->host();
             iteration_progress_ = kHandledUserAgentShadowRoot;
@@ -496,17 +526,29 @@ void TextIteratorAlgorithm<Strategy>::Advance() {
     // how would this ever be?
     if (text_state_.PositionNode())
       return;
+
+    should_continue_iteration = (node_ != past_end_node_);
   }
 }
 
 template <typename Strategy>
 void TextIteratorAlgorithm<Strategy>::HandleTextNode() {
   if (ExcludesAutofilledValue()) {
-    TextControlElement* control = EnclosingTextControl(node_);
+    HTMLFormControlElement* control = nullptr;
+    if (RuntimeEnabledFeatures::
+            TextIteratorExcludeAutofilledSelectFixEnabled()) {
+      if (node_->IsInUserAgentShadowRoot()) {
+        control = DynamicTo<HTMLFormControlElement>(node_->OwnerShadowHost());
+      }
+    } else {
+      control = EnclosingTextControl(node_);
+    }
     // For security reason, we don't expose suggested value if it is
     // auto-filled.
-    if (control && control->IsAutofilled())
+    // TODO(crbug.com/1472209): Only hide suggested value of previews.
+    if (control && (control->IsAutofilled() || control->IsPreviewed())) {
       return;
+    }
   }
 
   DCHECK_NE(last_text_node_, node_)
@@ -542,8 +584,9 @@ bool TextIteratorAlgorithm<Strategy>::SupportsAltText(const Node& node) {
 
   auto* html_input_element = DynamicTo<HTMLInputElement>(element);
   if (html_input_element &&
-      html_input_element->type() == input_type_names::kImage)
+      html_input_element->FormControlType() == FormControlType::kInputImage) {
     return true;
+  }
   return false;
 }
 
@@ -555,19 +598,19 @@ void TextIteratorAlgorithm<Strategy>::HandleReplacedElement() {
     return;
 
   LayoutObject* layout_object = node_->GetLayoutObject();
-  if (layout_object->Style()->Visibility() != EVisibility::kVisible &&
+  if (layout_object->StyleRef().Visibility() != EVisibility::kVisible &&
       !IgnoresStyleVisibility()) {
     return;
   }
 
   if (EmitsObjectReplacementCharacter()) {
-    EmitChar16AsNode(kObjectReplacementCharacter, *node_);
+    EmitChar16AsNode(uchar::kObjectReplacementCharacter, *node_);
     return;
   }
 
   DCHECK_EQ(last_text_node_, text_node_handler_.GetNode());
 
-  if (EntersTextControls() && layout_object->IsTextControlIncludingNG()) {
+  if (EntersTextControls() && layout_object->IsTextControl()) {
     // The shadow tree should be already visited.
     return;
   }
@@ -600,9 +643,8 @@ bool TextIteratorAlgorithm<Strategy>::ShouldEmitTabBeforeNode(
     return false;
 
   // Want a tab before every cell other than the first one
-  const LayoutNGTableCellInterface* rc =
-      ToInterface<LayoutNGTableCellInterface>(r);
-  const LayoutNGTableInterface* t = rc->TableInterface();
+  const auto* rc = To<LayoutTableCell>(r);
+  const LayoutTable* t = rc->Table();
   return t && !t->IsFirstCell(*rc);
 }
 
@@ -660,15 +702,14 @@ static bool ShouldEmitNewlinesBeforeAndAfterNode(const Node& node) {
   // Need to make an exception for table row elements, because they are neither
   // "inline" or "LayoutBlock", but we want newlines for them.
   if (r->IsTableRow()) {
-    const LayoutNGTableInterface* t =
-        ToInterface<LayoutNGTableRowInterface>(r)->TableInterface();
-    if (t && !t->ToLayoutObject()->IsInline())
+    const LayoutTable* t = To<LayoutTableRow>(r)->Table();
+    if (t && !t->IsInline()) {
       return true;
+    }
   }
 
   return !r->IsInline() && r->IsLayoutBlock() &&
-         !r->IsFloatingOrOutOfFlowPositioned() && !r->IsBody() &&
-         !r->IsRubyText();
+         !r->IsFloatingOrOutOfFlowPositioned() && !r->IsBody();
 }
 
 template <typename Strategy>
@@ -755,12 +796,13 @@ bool TextIteratorAlgorithm<Strategy>::ShouldRepresentNodeOffsetZero() {
   // unrendered content, we would create VisiblePositions on every call to this
   // function without this check.
   if (!node_->GetLayoutObject() ||
-      node_->GetLayoutObject()->Style()->Visibility() !=
+      node_->GetLayoutObject()->StyleRef().Visibility() !=
           EVisibility::kVisible ||
       (node_->GetLayoutObject()->IsLayoutBlockFlow() &&
-       !To<LayoutBlock>(node_->GetLayoutObject())->Size().Height() &&
-       !IsA<HTMLBodyElement>(*node_)))
+       !To<LayoutBlock>(node_->GetLayoutObject())->StitchedSize().height &&
+       !IsA<HTMLBodyElement>(*node_))) {
     return false;
+  }
 
   // The startPos.isNotNull() check is needed because the start could be before
   // the body, and in that case we'll get null. We don't want to put in newlines
@@ -803,7 +845,7 @@ void TextIteratorAlgorithm<Strategy>::RepresentNodeOffsetZero() {
       EmitChar16BeforeNode('\n', *node_);
   } else if (ShouldEmitSpaceBeforeAndAfterNode(*node_)) {
     if (ShouldRepresentNodeOffsetZero())
-      EmitChar16BeforeNode(kSpaceCharacter, *node_);
+      EmitChar16BeforeNode(uchar::kSpace, *node_);
   }
 }
 
@@ -813,7 +855,7 @@ void TextIteratorAlgorithm<Strategy>::HandleNonTextNode() {
     EmitChar16AsNode('\n', *node_);
   else if (EmitsCharactersBetweenAllVisiblePositions() &&
            node_->GetLayoutObject() && node_->GetLayoutObject()->IsHR())
-    EmitChar16AsNode(kSpaceCharacter, *node_);
+    EmitChar16AsNode(uchar::kSpace, *node_);
   else
     RepresentNodeOffsetZero();
 }
@@ -847,19 +889,19 @@ void TextIteratorAlgorithm<Strategy>::ExitNode() {
     // contain a VisiblePosition when doing selection preservation.
     if (text_state_.LastCharacter() != '\n') {
       // insert a newline with a position following this block's contents.
-      EmitChar16AfterNode(kNewlineCharacter, *base_node);
+      EmitChar16AfterNode(uchar::kLineFeed, *base_node);
       // remember whether to later add a newline for the current node
       DCHECK(!needs_another_newline_);
       needs_another_newline_ = add_newline;
     } else if (add_newline) {
       // insert a newline with a position following this block's contents.
-      EmitChar16AfterNode(kNewlineCharacter, *base_node);
+      EmitChar16AfterNode(uchar::kLineFeed, *base_node);
     }
   }
 
   // If nothing was emitted, see if we need to emit a space.
   if (!text_state_.PositionNode() && ShouldEmitSpaceBeforeAndAfterNode(*node_))
-    EmitChar16AfterNode(kSpaceCharacter, *base_node);
+    EmitChar16AfterNode(uchar::kSpace, *base_node);
 }
 
 template <typename Strategy>
@@ -908,7 +950,8 @@ const Node* TextIteratorAlgorithm<Strategy>::GetNode() const {
 }
 
 template <typename Strategy>
-int TextIteratorAlgorithm<Strategy>::StartOffsetInCurrentContainer() const {
+wtf_size_t TextIteratorAlgorithm<Strategy>::StartOffsetInCurrentContainer()
+    const {
   if (!text_state_.PositionNode())
     return end_offset_;
   EnsurePositionContainer();
@@ -916,7 +959,8 @@ int TextIteratorAlgorithm<Strategy>::StartOffsetInCurrentContainer() const {
 }
 
 template <typename Strategy>
-int TextIteratorAlgorithm<Strategy>::EndOffsetInCurrentContainer() const {
+wtf_size_t TextIteratorAlgorithm<Strategy>::EndOffsetInCurrentContainer()
+    const {
   if (!text_state_.PositionNode())
     return end_offset_;
   EnsurePositionContainer();
@@ -944,15 +988,14 @@ void TextIteratorAlgorithm<Strategy>::EnsurePositionContainer() const {
 
 template <typename Strategy>
 PositionTemplate<Strategy> TextIteratorAlgorithm<Strategy>::GetPositionBefore(
-    int char16_offset) const {
+    wtf_size_t char16_offset) const {
   if (AtEnd()) {
-    DCHECK_EQ(char16_offset, 0);
+    DCHECK_EQ(char16_offset, 0u);
     return PositionTemplate<Strategy>(CurrentContainer(),
                                       StartOffsetInCurrentContainer());
   }
-  DCHECK_GE(char16_offset, 0);
   DCHECK_LT(char16_offset, length());
-  DCHECK_GE(length(), 1);
+  DCHECK_GE(length(), 1u);
   const Node& node = *text_state_.PositionNode();
   if (text_state_.IsInTextNode() || text_state_.IsBeforeCharacter()) {
     return PositionTemplate<Strategy>(
@@ -971,15 +1014,14 @@ PositionTemplate<Strategy> TextIteratorAlgorithm<Strategy>::GetPositionBefore(
 
 template <typename Strategy>
 PositionTemplate<Strategy> TextIteratorAlgorithm<Strategy>::GetPositionAfter(
-    int char16_offset) const {
+    wtf_size_t char16_offset) const {
   if (AtEnd()) {
-    DCHECK_EQ(char16_offset, 0);
+    DCHECK_EQ(char16_offset, 0u);
     return PositionTemplate<Strategy>(CurrentContainer(),
                                       EndOffsetInCurrentContainer());
   }
-  DCHECK_GE(char16_offset, 0);
   DCHECK_LT(char16_offset, length());
-  DCHECK_GE(length(), 1);
+  DCHECK_GE(length(), 1u);
   const Node& node = *text_state_.PositionNode();
   if (text_state_.IsBeforeCharacter()) {
     return PositionTemplate<Strategy>(
@@ -1015,7 +1057,7 @@ TextIteratorAlgorithm<Strategy>::EndPositionInCurrentContainer() const {
 }
 
 template <typename Strategy>
-int TextIteratorAlgorithm<Strategy>::RangeLength(
+wtf_size_t TextIteratorAlgorithm<Strategy>::RangeLength(
     const PositionTemplate<Strategy>& start,
     const PositionTemplate<Strategy>& end,
     const TextIteratorBehavior& behavior) {
@@ -1023,7 +1065,7 @@ int TextIteratorAlgorithm<Strategy>::RangeLength(
   DocumentLifecycle::DisallowTransitionScope disallow_transition(
       start.GetDocument()->Lifecycle());
 
-  int length = 0;
+  wtf_size_t length = 0;
   for (TextIteratorAlgorithm<Strategy> it(start, end, behavior); !it.AtEnd();
        it.Advance())
     length += it.length();
@@ -1032,7 +1074,7 @@ int TextIteratorAlgorithm<Strategy>::RangeLength(
 }
 
 template <typename Strategy>
-int TextIteratorAlgorithm<Strategy>::RangeLength(
+wtf_size_t TextIteratorAlgorithm<Strategy>::RangeLength(
     const EphemeralRangeTemplate<Strategy>& range,
     const TextIteratorBehavior& behavior) {
   return RangeLength(range.StartPosition(), range.EndPosition(), behavior);
@@ -1057,7 +1099,7 @@ static String CreatePlainText(const EphemeralRangeTemplate<Strategy>& range,
 
   // The initial buffer size can be critical for performance:
   // https://bugs.webkit.org/show_bug.cgi?id=81192
-  static const unsigned kInitialCapacity = 1 << 15;
+  static const wtf_size_t kInitialCapacity = 1 << 15;
 
   StringBuilder builder;
   builder.ReserveCapacity(kInitialCapacity);

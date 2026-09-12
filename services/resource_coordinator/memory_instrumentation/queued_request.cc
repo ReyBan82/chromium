@@ -4,6 +4,9 @@
 
 #include "services/resource_coordinator/memory_instrumentation/queued_request.h"
 
+#include "base/containers/to_vector.h"
+#include "services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics.h"
+
 namespace memory_instrumentation {
 
 QueuedRequest::Args::Args(MemoryDumpType dump_type,
@@ -51,13 +54,11 @@ base::trace_event::MemoryDumpRequestArgs QueuedRequest::GetRequestArgs() {
   return request_args;
 }
 
-QueuedVmRegionRequest::Response::Response() = default;
-QueuedVmRegionRequest::Response::~Response() = default;
-
-QueuedVmRegionRequest::QueuedVmRegionRequest(
-    uint64_t dump_guid,
-    mojom::HeapProfilerHelper::GetVmRegionsForHeapProfilerCallback callback)
-    : dump_guid(dump_guid), callback(std::move(callback)) {}
-QueuedVmRegionRequest::~QueuedVmRegionRequest() = default;
+std::vector<mojom::MemDumpFlags> QueuedRequest::memory_dump_flags() const {
+  if (!args.memory_footprint_only) {
+    return base::ToVector(OSMetrics::MemDumpFlagSet::All());
+  }
+  return {};
+}
 
 }  // namespace memory_instrumentation

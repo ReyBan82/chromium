@@ -6,6 +6,11 @@ package org.chromium.chrome.browser.customtabs.features.partialcustomtab;
 
 import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
 
+import static androidx.browser.customtabs.CustomTabsCallback.ACTIVITY_LAYOUT_STATE_FULL_SCREEN;
+
+import static org.chromium.build.NullUtil.assumeNonNull;
+
+import android.animation.ValueAnimator.AnimatorUpdateListener;
 import android.app.Activity;
 import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
@@ -14,20 +19,38 @@ import android.view.ViewGroup;
 import android.view.WindowManager;
 
 import androidx.annotation.Px;
+import androidx.annotation.StringRes;
+import androidx.browser.customtabs.CustomTabsCallback;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.R;
+import org.chromium.chrome.browser.browserservices.intents.BrowserServicesIntentDataProvider;
 import org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbar;
+import org.chromium.chrome.browser.customtabs.features.toolbar.CustomTabToolbarButtonsCoordinator;
 import org.chromium.chrome.browser.fullscreen.FullscreenManager;
 
 /**
  * CustomTabHeightStrategy for Partial Custom Tab Full-Size implementation. An instance of this
  * class should be owned by the CustomTabActivity.
  */
+@NullMarked
 public class PartialCustomTabFullSizeStrategy extends PartialCustomTabBaseStrategy {
-    public PartialCustomTabFullSizeStrategy(Activity activity,
+    public PartialCustomTabFullSizeStrategy(
+            Activity activity,
+            BrowserServicesIntentDataProvider intentData,
             CustomTabHeightStrategy.OnResizedCallback onResizedCallback,
-            FullscreenManager fullscreenManager, boolean isTablet, boolean interactWithBackground,
+            CustomTabHeightStrategy.OnActivityLayoutCallback onActivityLayoutCallback,
+            FullscreenManager fullscreenManager,
+            boolean isTablet,
             PartialCustomTabHandleStrategyFactory handleStrategyFactory) {
-        super(activity, onResizedCallback, fullscreenManager, isTablet, interactWithBackground,
+        super(
+                activity,
+                intentData,
+                onResizedCallback,
+                onActivityLayoutCallback,
+                fullscreenManager,
+                isTablet,
                 handleStrategyFactory);
 
         mPositionUpdater = this::updatePosition;
@@ -41,14 +64,21 @@ public class PartialCustomTabFullSizeStrategy extends PartialCustomTabBaseStrate
     }
 
     @Override
-    public void onToolbarInitialized(
-            View coordinatorView, CustomTabToolbar toolbar, @Px int toolbarCornerRadius) {
-        super.onToolbarInitialized(coordinatorView, toolbar, toolbarCornerRadius);
+    public @StringRes int getTypeStringId() {
+        return R.string.accessibility_partial_custom_tab_full_sheet;
+    }
 
-        PartialCustomTabHandleStrategy handleStrategy = mHandleStrategyFactory.create(
-                getStrategyType(), mActivity, this::isFullHeight, () -> 0, null);
-        toolbar.setHandleStrategy(handleStrategy);
-        updateDragBarVisibility(/*dragHandlebarVisibility*/ View.GONE);
+    @Override
+    public void onToolbarInitialized(
+            View coordinatorView,
+            CustomTabToolbar toolbar,
+            @Px int toolbarCornerRadius,
+            @Nullable CustomTabToolbarButtonsCoordinator toolbarButtonsCoordinator) {
+        super.onToolbarInitialized(
+                coordinatorView, toolbar, toolbarCornerRadius, toolbarButtonsCoordinator);
+        assumeNonNull(toolbarButtonsCoordinator);
+        toolbarButtonsCoordinator.setMinimizeButtonEnabled(true);
+        updateDragBarVisibility(/* dragHandlebarVisibility= */ View.GONE);
     }
 
     @Override
@@ -57,7 +87,7 @@ public class PartialCustomTabFullSizeStrategy extends PartialCustomTabBaseStrate
 
         initializeSize();
         updateShadowOffset();
-        // TODO(crbug.com/1406107): Check if we should invoke the resize callback
+        maybeInvokeResizeCallback();
     }
 
     @Override
@@ -68,7 +98,18 @@ public class PartialCustomTabFullSizeStrategy extends PartialCustomTabBaseStrate
         positionOnWindow();
         setCoordinatorLayoutHeight(MATCH_PARENT);
 
-        updateDragBarVisibility(/*dragHandlebarVisibility*/ View.GONE);
+        updateDragBarVisibility(/* dragHandlebarVisibility= */ View.GONE);
+    }
+
+    @Override
+    public boolean handleCloseAnimation(Runnable finishRunnable) {
+        if (!super.handleCloseAnimation(finishRunnable)) return false;
+
+        configureLayoutBeyondScreen(true);
+        AnimatorUpdateListener updater = animator -> setWindowY((int) animator.getAnimatedValue());
+        int start = mActivity.getWindow().getAttributes().y;
+        startAnimation(start, mHeight, updater, this::onCloseAnimationEnd);
+        return true;
     }
 
     @Override
@@ -87,12 +128,17 @@ public class PartialCustomTabFullSizeStrategy extends PartialCustomTabBaseStrate
     }
 
     @Override
+    protected @CustomTabsCallback.ActivityLayoutState int getActivityLayoutState() {
+        return ACTIVITY_LAYOUT_STATE_FULL_SCREEN;
+    }
+
+    @Override
     protected void adjustCornerRadius(GradientDrawable d, int radius) {}
 
     @Override
     protected void setTopMargins(int shadowOffset, int handleOffset) {
         // No offset as we will not have handle view in full-screen
-        View handleView = mActivity.findViewById(org.chromium.chrome.R.id.custom_tabs_handle_view);
+        View handleView = mActivity.findViewById(R.id.custom_tabs_handle_view);
         ViewGroup.MarginLayoutParams lp =
                 (ViewGroup.MarginLayoutParams) handleView.getLayoutParams();
         lp.setMargins(0, 0, 0, 0);
@@ -100,6 +146,11 @@ public class PartialCustomTabFullSizeStrategy extends PartialCustomTabBaseStrate
         ViewGroup.MarginLayoutParams mlp =
                 (ViewGroup.MarginLayoutParams) mToolbarCoordinator.getLayoutParams();
         mlp.setMargins(0, 0, 0, 0);
+    }
+
+    @Override
+    protected int getCustomTabsElevation() {
+        return 0;
     }
 
     @Override
@@ -111,6 +162,14 @@ public class PartialCustomTabFullSizeStrategy extends PartialCustomTabBaseStrate
     protected boolean isMaximized() {
         return false;
     }
+
+    @Override
+    protected boolean shouldDrawDividerLine() {
+        return false;
+    }
+
+    @Override
+    protected void drawDividerLine() {}
 
     private void positionOnWindow() {
         WindowManager.LayoutParams attrs = mActivity.getWindow().getAttributes();

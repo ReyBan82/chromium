@@ -4,19 +4,19 @@
 
 #include "chrome/browser/ash/account_manager/account_manager_edu_coexistence_controller.h"
 
+#include <algorithm>
+#include <optional>
+
 #include "ash/constants/ash_pref_names.h"
-#include "base/containers/contains.h"
 #include "base/logging.h"
-#include "base/ranges/algorithm.h"
 #include "chrome/browser/ash/account_manager/account_manager_util.h"
 #include "chrome/browser/ash/child_accounts/edu_coexistence_tos_store_utils.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/webui/ash/edu_coexistence/edu_coexistence_login_handler.h"
-#include "components/account_manager_core/account_manager_facade.h"
 #include "components/account_manager_core/chromeos/account_manager.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "google_apis/gaia/gaia_id.h"
 
 namespace ash {
 
@@ -39,11 +39,9 @@ EduCoexistenceConsentInvalidationController::
     EduCoexistenceConsentInvalidationController(
         Profile* profile,
         account_manager::AccountManager* account_manager,
-        account_manager::AccountManagerFacade* account_manager_facade,
         const AccountId& device_account_id)
     : profile_(profile),
       account_manager_(account_manager),
-      account_manager_facade_(account_manager_facade),
       device_account_id_(device_account_id) {
   DCHECK(profile_);
   DCHECK(profile_->IsChild());
@@ -54,7 +52,7 @@ EduCoexistenceConsentInvalidationController::
     ~EduCoexistenceConsentInvalidationController() = default;
 
 void EduCoexistenceConsentInvalidationController::Init() {
-  account_manager_facade_->GetAccounts(
+  account_manager_->GetAccounts(
       base::BindOnce(&EduCoexistenceConsentInvalidationController::
                          UpdateEduAccountsInTermsOfServicePref,
                      weak_factory_.GetWeakPtr()));
@@ -84,12 +82,12 @@ void EduCoexistenceConsentInvalidationController::
   //  |new_edu_account_consent_list|.
   for (const auto& account : accounts) {
     // Don't add the device account id.
-    if (account.key.id() == device_account_id_.GetGaiaId()) {
+    if (GaiaId(account.key.id()) == device_account_id_.GetGaiaId()) {
       continue;
     }
 
-    auto iterator = base::ranges::find(
-        current_edu_account_consent_list, account.key.id(),
+    auto iterator = std::ranges::find(
+        current_edu_account_consent_list, GaiaId(account.key.id()),
         &edu_coexistence::UserConsentInfo::edu_account_gaia_id);
 
     // If account exists in |current_edu_account_consent_list| copy the entry
@@ -101,7 +99,7 @@ void EduCoexistenceConsentInvalidationController::
       // This will be used to add secondary edu accounts added in the first
       // version of EduCoexistence.
       new_edu_account_consent_list.push_back(edu_coexistence::UserConsentInfo{
-          account.key.id(),
+          GaiaId(account.key.id()),
           edu_coexistence::
               kMinTOSVersionNumber /* default terms of service version */});
     }
@@ -120,7 +118,7 @@ void EduCoexistenceConsentInvalidationController::TermsOfServicePrefChanged() {
   std::vector<edu_coexistence::UserConsentInfo> infos =
       edu_coexistence::GetUserConsentInfoListForProfile(profile_);
 
-  std::vector<std::string> to_invalidate;
+  std::vector<GaiaId> to_invalidate;
   for (const auto& info : infos) {
     if (edu_coexistence::IsConsentVersionLessThan(
             info.edu_coexistence_tos_version, new_version)) {
@@ -128,13 +126,13 @@ void EduCoexistenceConsentInvalidationController::TermsOfServicePrefChanged() {
     }
   }
 
-  account_manager_facade_->GetAccounts(base::BindOnce(
+  account_manager_->GetAccounts(base::BindOnce(
       &EduCoexistenceConsentInvalidationController::InvalidateEduAccounts,
       weak_factory_.GetWeakPtr(), std::move(to_invalidate)));
 }
 
 void EduCoexistenceConsentInvalidationController::InvalidateEduAccounts(
-    const std::vector<std::string>& account_gaia_ids_to_invalidate,
+    const std::vector<GaiaId>& account_gaia_ids_to_invalidate,
     const std::vector<::account_manager::Account>& accounts) {
   for (const ::account_manager::Account& account : accounts) {
     if (account.key.account_type() != account_manager::AccountType::kGaia) {
@@ -143,12 +141,13 @@ void EduCoexistenceConsentInvalidationController::InvalidateEduAccounts(
 
     // Do not invalidate the Device Account.
     if (device_account_id_.GetAccountType() == AccountType::GOOGLE &&
-        account.key.id() == device_account_id_.GetGaiaId()) {
+        GaiaId(account.key.id()) == device_account_id_.GetGaiaId()) {
       continue;
     }
 
     // This account should not be invalidated.
-    if (!base::Contains(account_gaia_ids_to_invalidate, account.key.id())) {
+    if (!std::ranges::contains(account_gaia_ids_to_invalidate,
+                               GaiaId(account.key.id()))) {
       continue;
     }
 

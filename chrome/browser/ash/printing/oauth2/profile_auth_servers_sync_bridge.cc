@@ -5,30 +5,30 @@
 #include "chrome/browser/ash/printing/oauth2/profile_auth_servers_sync_bridge.h"
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
 #include "base/check.h"
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "chrome/common/channel_info.h"
+#include "base/trace_event/trace_event.h"
+#include "chromeos/ash/components/channel/channel_info.h"
 #include "components/sync/base/report_unrecoverable_error.h"
-#include "components/sync/model/client_tag_based_model_type_processor.h"
+#include "components/sync/model/client_tag_based_data_type_processor.h"
+#include "components/sync/model/data_type_local_change_processor.h"
+#include "components/sync/model/data_type_store.h"
+#include "components/sync/model/data_type_store_base.h"
+#include "components/sync/model/data_type_sync_bridge.h"
 #include "components/sync/model/entity_change.h"
 #include "components/sync/model/metadata_change_list.h"
 #include "components/sync/model/model_error.h"
-#include "components/sync/model/model_type_change_processor.h"
-#include "components/sync/model/model_type_store.h"
-#include "components/sync/model/model_type_store_base.h"
-#include "components/sync/model/model_type_sync_bridge.h"
 #include "components/sync/model/mutable_data_batch.h"
 #include "components/sync/protocol/entity_data.h"
 #include "components/sync/protocol/entity_specifics.pb.h"
 #include "components/sync/protocol/printers_authorization_server_specifics.pb.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 namespace ash::printing::oauth2 {
@@ -68,21 +68,21 @@ std::set<GURL> ToSetOfUris(const std::set<std::string>& strs) {
 std::unique_ptr<ProfileAuthServersSyncBridge>
 ProfileAuthServersSyncBridge::Create(
     Observer* observer,
-    syncer::OnceModelTypeStoreFactory store_factory) {
+    syncer::OnceDataTypeStoreFactory store_factory) {
   DCHECK(observer);
   return base::WrapUnique(new ProfileAuthServersSyncBridge(
-      std::make_unique<syncer::ClientTagBasedModelTypeProcessor>(
+      std::make_unique<syncer::ClientTagBasedDataTypeProcessor>(
           syncer::PRINTERS_AUTHORIZATION_SERVERS,
           base::BindRepeating(&syncer::ReportUnrecoverableError,
-                              chrome::GetChannel())),
+                              ash::GetChannel())),
       std::move(store_factory), observer));
 }
 
 std::unique_ptr<ProfileAuthServersSyncBridge>
 ProfileAuthServersSyncBridge::CreateForTesting(
     Observer* observer,
-    std::unique_ptr<syncer::ModelTypeChangeProcessor> change_processor,
-    syncer::OnceModelTypeStoreFactory store_factory) {
+    std::unique_ptr<syncer::DataTypeLocalChangeProcessor> change_processor,
+    syncer::OnceDataTypeStoreFactory store_factory) {
   DCHECK(observer);
   DCHECK(change_processor);
   return base::WrapUnique(new ProfileAuthServersSyncBridge(
@@ -109,10 +109,10 @@ void ProfileAuthServersSyncBridge::AddAuthorizationServer(
 }
 
 ProfileAuthServersSyncBridge::ProfileAuthServersSyncBridge(
-    std::unique_ptr<syncer::ModelTypeChangeProcessor> change_processor,
-    syncer::OnceModelTypeStoreFactory store_factory,
+    std::unique_ptr<syncer::DataTypeLocalChangeProcessor> change_processor,
+    syncer::OnceDataTypeStoreFactory store_factory,
     Observer* observer)
-    : syncer::ModelTypeSyncBridge(std::move(change_processor)),
+    : syncer::DataTypeSyncBridge(std::move(change_processor)),
       observer_(observer) {
   std::move(store_factory)
       .Run(syncer::PRINTERS_AUTHORIZATION_SERVERS,
@@ -121,8 +121,8 @@ ProfileAuthServersSyncBridge::ProfileAuthServersSyncBridge(
 }
 
 void ProfileAuthServersSyncBridge::OnStoreCreated(
-    const absl::optional<syncer::ModelError>& error,
-    std::unique_ptr<syncer::ModelTypeStore> store) {
+    const std::optional<syncer::ModelError>& error,
+    std::unique_ptr<syncer::DataTypeStore> store) {
   if (error) {
     change_processor()->ReportError(*error);
     return;
@@ -135,18 +135,19 @@ void ProfileAuthServersSyncBridge::OnStoreCreated(
 }
 
 void ProfileAuthServersSyncBridge::OnReadAllData(
-    const absl::optional<syncer::ModelError>& error,
-    std::unique_ptr<syncer::ModelTypeStore::RecordList> record_list) {
+    const std::optional<syncer::ModelError>& error,
+    std::unique_ptr<syncer::DataTypeStore::RecordList> record_list) {
   if (error) {
     change_processor()->ReportError(*error);
     return;
   }
 
-  for (const syncer::ModelTypeStore::Record& r : *record_list) {
+  for (const syncer::DataTypeStore::Record& r : *record_list) {
     sync_pb::PrintersAuthorizationServerSpecifics specifics;
     if (!specifics.ParseFromString(r.value)) {
       change_processor()->ReportError(
-          {FROM_HERE, "Failed to deserialize all specifics."});
+          {FROM_HERE, syncer::ModelError::Type::
+                          kProfileAuthServersFailedToDeserializeSpecifics});
       return;
     }
     servers_uris_.insert(specifics.uri());
@@ -160,8 +161,9 @@ void ProfileAuthServersSyncBridge::OnReadAllData(
 }
 
 void ProfileAuthServersSyncBridge::OnReadAllMetadata(
-    const absl::optional<syncer::ModelError>& error,
+    const std::optional<syncer::ModelError>& error,
     std::unique_ptr<syncer::MetadataBatch> metadata_batch) {
+  TRACE_EVENT0("ui", "ProfileAuthServersSyncBridge::OnReadAllMetadata");
   if (error) {
     change_processor()->ReportError(*error);
     return;
@@ -171,20 +173,16 @@ void ProfileAuthServersSyncBridge::OnReadAllMetadata(
   observer_->OnProfileAuthorizationServersInitialized();
 }
 
-std::unique_ptr<syncer::MetadataChangeList>
-ProfileAuthServersSyncBridge::CreateMetadataChangeList() {
-  return syncer::ModelTypeStore::WriteBatch::CreateMetadataChangeList();
-}
-
-absl::optional<syncer::ModelError> ProfileAuthServersSyncBridge::MergeSyncData(
+std::optional<syncer::ModelError>
+ProfileAuthServersSyncBridge::MergeFullSyncData(
     std::unique_ptr<syncer::MetadataChangeList> metadata_change_list,
     syncer::EntityChangeList entity_data) {
   // Every local URI is considered unsynced until the contrary is proven, i.e.
   // until the same URI is seen in the incoming `entity_data`.
   std::set<std::string> unsynced_local_uris = servers_uris_;
   std::set<std::string> added_local_uris;
-  std::unique_ptr<syncer::ModelTypeStore::WriteBatch> batch =
-      store_->CreateWriteBatch();
+  std::unique_ptr<syncer::DataTypeStore::WriteBatch> batch =
+      store_->CreateWriteBatch(std::move(metadata_change_list));
 
   for (const std::unique_ptr<syncer::EntityChange>& change : entity_data) {
     const sync_pb::PrintersAuthorizationServerSpecifics& specifics =
@@ -203,28 +201,27 @@ absl::optional<syncer::ModelError> ProfileAuthServersSyncBridge::MergeSyncData(
   // Send unmatched local URIs to the server.
   for (const std::string& uri : unsynced_local_uris) {
     change_processor()->Put(uri, ToEntityDataPtr(uri),
-                            metadata_change_list.get());
+                            batch->GetMetadataChangeList());
   }
 
   // Save new local URIs to the local store.
-  batch->TakeMetadataChangesFrom(std::move(metadata_change_list));
   store_->CommitWriteBatch(
       std::move(batch), base::BindOnce(&ProfileAuthServersSyncBridge::OnCommit,
                                        weak_ptr_factory_.GetWeakPtr()));
 
   NotifyObserver(added_local_uris, /*deleted=*/{});
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<syncer::ModelError>
-ProfileAuthServersSyncBridge::ApplySyncChanges(
+std::optional<syncer::ModelError>
+ProfileAuthServersSyncBridge::ApplyIncrementalSyncChanges(
     std::unique_ptr<syncer::MetadataChangeList> metadata_change_list,
     syncer::EntityChangeList entity_changes) {
   std::set<std::string> added_local_uris;
   std::set<std::string> deleted_local_uris;
 
-  std::unique_ptr<syncer::ModelTypeStore::WriteBatch> batch =
-      store_->CreateWriteBatch();
+  std::unique_ptr<syncer::DataTypeStore::WriteBatch> batch =
+      store_->CreateWriteBatch(std::move(metadata_change_list));
   for (const std::unique_ptr<syncer::EntityChange>& change : entity_changes) {
     const std::string& uri = change->storage_key();
     if (change->type() == syncer::EntityChange::ACTION_DELETE) {
@@ -241,48 +238,61 @@ ProfileAuthServersSyncBridge::ApplySyncChanges(
       }
     }
   }
-  batch->TakeMetadataChangesFrom(std::move(metadata_change_list));
   store_->CommitWriteBatch(
       std::move(batch), base::BindOnce(&ProfileAuthServersSyncBridge::OnCommit,
                                        weak_ptr_factory_.GetWeakPtr()));
 
   NotifyObserver(added_local_uris, deleted_local_uris);
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-void ProfileAuthServersSyncBridge::GetData(StorageKeyList storage_keys,
-                                           DataCallback callback) {
+std::unique_ptr<syncer::DataBatch>
+ProfileAuthServersSyncBridge::GetDataForCommit(StorageKeyList storage_keys) {
   auto batch = std::make_unique<syncer::MutableDataBatch>();
   for (const std::string& key : storage_keys) {
-    if (base::Contains(servers_uris_, key)) {
+    if (servers_uris_.contains(key)) {
       batch->Put(key, ToEntityDataPtr(key));
     }
   }
-  std::move(callback).Run(std::move(batch));
+  return batch;
 }
 
-void ProfileAuthServersSyncBridge::GetAllDataForDebugging(
-    DataCallback callback) {
+std::unique_ptr<syncer::DataBatch>
+ProfileAuthServersSyncBridge::GetAllDataForDebugging() {
   auto batch = std::make_unique<syncer::MutableDataBatch>();
   for (const auto& uri : servers_uris_) {
     batch->Put(uri, ToEntityDataPtr(uri));
   }
-  std::move(callback).Run(std::move(batch));
+  return batch;
 }
 
 std::string ProfileAuthServersSyncBridge::GetClientTag(
-    const syncer::EntityData& entity_data) {
+    const syncer::EntityData& entity_data) const {
   return GetStorageKey(entity_data);
 }
 
 std::string ProfileAuthServersSyncBridge::GetStorageKey(
-    const syncer::EntityData& entity_data) {
+    const syncer::EntityData& entity_data) const {
   DCHECK(entity_data.specifics.has_printers_authorization_server());
   return entity_data.specifics.printers_authorization_server().uri();
 }
 
+sync_pb::EntitySpecifics
+ProfileAuthServersSyncBridge::TrimAllSupportedFieldsFromRemoteSpecifics(
+    const sync_pb::EntitySpecifics& entity_specifics) const {
+  // Clears all fields by default to avoid the memory and I/O overhead of an
+  // additional copy of the data.
+  return sync_pb::EntitySpecifics();
+}
+
+bool ProfileAuthServersSyncBridge::IsEntityDataValid(
+    const syncer::EntityData& entity_data) const {
+  DCHECK(entity_data.specifics.has_printers_authorization_server());
+  return !entity_data.specifics.printers_authorization_server().uri().empty();
+}
+
 void ProfileAuthServersSyncBridge::OnCommit(
-    const absl::optional<syncer::ModelError>& error) {
+    const std::optional<syncer::ModelError>& error) {
   if (error) {
     LOG(WARNING) << "Failed to commit operation to store in "
                     "ProfileAuthServersSyncBridge";

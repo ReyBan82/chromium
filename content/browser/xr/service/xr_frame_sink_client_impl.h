@@ -5,6 +5,8 @@
 #ifndef CONTENT_BROWSER_XR_SERVICE_XR_FRAME_SINK_CLIENT_IMPL_H_
 #define CONTENT_BROWSER_XR_SERVICE_XR_FRAME_SINK_CLIENT_IMPL_H_
 
+#include <optional>
+
 #include "base/callback_list.h"
 #include "base/functional/callback_forward.h"
 #include "base/memory/scoped_refptr.h"
@@ -14,9 +16,9 @@
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "components/viz/common/surfaces/surface_id.h"
 #include "components/viz/host/host_frame_sink_client.h"
+#include "content/public/browser/global_routing_id.h"
 #include "device/vr/public/cpp/xr_frame_sink_client.h"
 #include "services/viz/privileged/mojom/compositing/frame_sink_manager.mojom-forward.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class SingleThreadTaskRunner;
@@ -29,7 +31,8 @@ namespace content {
 class XrFrameSinkClientImpl : public device::XrFrameSinkClient,
                               viz::HostFrameSinkClient {
  public:
-  XrFrameSinkClientImpl(int32_t render_process_id, int32_t render_frame_id);
+  explicit XrFrameSinkClientImpl(
+      const content::GlobalRenderFrameHostId& global_frame_id);
   ~XrFrameSinkClientImpl() override;
 
   // device::XrFrameSinkClient:
@@ -38,7 +41,7 @@ class XrFrameSinkClientImpl : public device::XrFrameSinkClient,
       device::DomOverlaySetup dom_setup,
       base::OnceClosure on_initialized) override;
   void SurfaceDestroyed() override;
-  absl::optional<viz::SurfaceId> GetDOMSurface() override;
+  std::optional<viz::SurfaceId> GetDOMSurface() override;
   viz::FrameSinkId FrameSinkId() override;
 
  private:
@@ -57,13 +60,15 @@ class XrFrameSinkClientImpl : public device::XrFrameSinkClient,
                            base::TimeTicks activation_time) override {}
 
   scoped_refptr<base::SingleThreadTaskRunner> ui_thread_task_runner_;
-  int32_t render_process_id_;
-  int32_t render_frame_id_;
+  content::GlobalRenderFrameHostId global_frame_id_;
 
   viz::FrameSinkId root_frame_sink_id_;
   bool initialized_ = false;
+  // The FrameSinkId for the DOM Overlay that is currently registered as a child
+  // of the root FrameSinkId.
+  viz::FrameSinkId registered_dom_frame_sink_id_;
 
-  absl::optional<viz::SurfaceId> dom_surface_id_;
+  std::optional<viz::SurfaceId> dom_surface_id_;
   base::Lock dom_surface_lock_;
 #if BUILDFLAG(IS_ANDROID)
   base::CallbackListSubscription surface_id_changed_subscription_;

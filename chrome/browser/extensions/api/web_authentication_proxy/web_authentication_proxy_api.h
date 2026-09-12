@@ -6,12 +6,16 @@
 #define CHROME_BROWSER_EXTENSIONS_API_WEB_AUTHENTICATION_PROXY_WEB_AUTHENTICATION_PROXY_API_H_
 
 #include "base/memory/raw_ptr.h"
+#include "build/build_config.h"
 #include "chrome/browser/extensions/api/web_authentication_proxy/remote_session_state_change.h"
 #include "extensions/browser/browser_context_keyed_api_factory.h"
 #include "extensions/browser/event_router.h"
 #include "extensions/browser/event_router_factory.h"
 #include "extensions/browser/extension_function.h"
 #include "extensions/browser/extension_function_histogram_value.h"
+
+// This API is limited to Win/Mac/Linux.
+static_assert(BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX));
 
 namespace extensions {
 
@@ -88,7 +92,7 @@ class WebAuthenticationProxyCompleteCreateRequestFunction
  protected:
   ~WebAuthenticationProxyCompleteCreateRequestFunction() override;
 
-  void DoRespond(absl::optional<std::string> error);
+  void DoRespond(std::optional<std::string> error);
 
   // ExtensionFunction:
   ResponseAction Run() override;
@@ -104,7 +108,7 @@ class WebAuthenticationProxyCompleteGetRequestFunction
  protected:
   ~WebAuthenticationProxyCompleteGetRequestFunction() override;
 
-  void DoRespond(absl::optional<std::string> error);
+  void DoRespond(std::optional<std::string> error);
 
   // ExtensionFunction:
   ResponseAction Run() override;

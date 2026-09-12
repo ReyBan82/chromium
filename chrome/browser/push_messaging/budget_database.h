@@ -79,13 +79,13 @@ class BudgetDatabase {
                    SpendBudgetCallback callback,
                    double amount = kDefaultAmount);
 
+  // Used to allow tests to change time for testing.
+  void SetClockForTesting(std::unique_ptr<base::Clock> clock);
+
  private:
   FRIEND_TEST_ALL_PREFIXES(BudgetDatabaseTest,
                            DefaultSiteEngagementInIncognitoProfile);
   friend class BudgetDatabaseTest;
-
-  // Used to allow tests to change time for testing.
-  void SetClockForTesting(std::unique_ptr<base::Clock> clock);
 
   // Holds information about individual pieces of awarded budget. There is a
   // one-to-one mapping of these to the chunks in the underlying database.
@@ -166,7 +166,7 @@ class BudgetDatabase {
   // score of zero when |profile_| is off the record.
   double GetSiteEngagementScoreForOrigin(const url::Origin& origin) const;
 
-  raw_ptr<Profile> profile_;
+  base::WeakPtr<Profile> profile_;
 
   // The database for storing budget information.
   std::unique_ptr<leveldb_proto::ProtoDatabase<budget_service::Budget>> db_;

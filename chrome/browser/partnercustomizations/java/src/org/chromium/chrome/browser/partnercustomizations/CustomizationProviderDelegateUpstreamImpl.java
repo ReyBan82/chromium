@@ -8,16 +8,18 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.ProviderInfo;
 import android.database.Cursor;
 import android.net.Uri;
-
-import androidx.annotation.Nullable;
-import androidx.annotation.VisibleForTesting;
+import android.os.SystemClock;
 
 import org.chromium.base.ContextUtils;
 import org.chromium.base.Log;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.base.version_info.VersionInfo;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.embedder_support.util.UrlConstants;
-import org.chromium.components.version_info.VersionInfo;
 
 /** Delegate used to retrieve information from the ContentProvider about partner customization. */
+@NullMarked
 public class CustomizationProviderDelegateUpstreamImpl implements CustomizationProviderDelegate {
     private static final String PARTNER_DISABLE_BOOKMARKS_EDITING_PATH = "disablebookmarksediting";
     private static final String PARTNER_DISABLE_INCOGNITO_MODE_PATH = "disableincognitomode";
@@ -26,17 +28,40 @@ public class CustomizationProviderDelegateUpstreamImpl implements CustomizationP
     private static final String PARTNER_HOMEPAGE_PATH = "homepage";
 
     private static String sProviderAuthority = PROVIDER_AUTHORITY;
-    private static Boolean sIgnoreSystemPackageCheck;
-    private static Boolean sValid;
+    private static @Nullable Boolean sIgnoreSystemPackageCheckForTesting;
+    private static @Nullable Boolean sValid;
+    private static @Nullable String @Nullable [] sHomepageForTesting;
+    private static @Nullable Boolean sIsIncognitoModeDisabledForTesting;
+    private static @Nullable Boolean sIsBookmarksEditingDisabledForTesting;
+
+    /** Provides a way to do some post-process timing for the validation function. */
+    interface DelegateValidationCompletion {
+        /**
+         * When validation has completed, notify the closure of how long that took, regardless of
+         * outcome.
+         */
+        void validated(long startTime);
+    }
+
+    /**
+     * A completion to call after determining isValid that includes timing information. Typically
+     * {@code null} on Chromium but can be set from Downstream.
+     */
+    private @Nullable DelegateValidationCompletion mValidationCompletion;
 
     @Override
     public @Nullable String getHomepage() {
+        if (sHomepageForTesting != null) {
+            return sHomepageForTesting[0];
+        }
         if (!isValid()) {
             return null;
         }
         String homepage = null;
-        Cursor cursor = ContextUtils.getApplicationContext().getContentResolver().query(
-                buildQueryUri(PARTNER_HOMEPAGE_PATH), null, null, null, null);
+        Cursor cursor =
+                ContextUtils.getApplicationContext()
+                        .getContentResolver()
+                        .query(buildQueryUri(PARTNER_HOMEPAGE_PATH), null, null, null, null);
         if (cursor != null && cursor.moveToFirst() && cursor.getColumnCount() == 1) {
             homepage = cursor.getString(0);
         }
@@ -48,12 +73,22 @@ public class CustomizationProviderDelegateUpstreamImpl implements CustomizationP
 
     @Override
     public boolean isIncognitoModeDisabled() {
+        if (sIsIncognitoModeDisabledForTesting != null) {
+            return sIsIncognitoModeDisabledForTesting;
+        }
         if (!isValid()) {
             return false;
         }
         boolean disabled = false;
-        Cursor cursor = ContextUtils.getApplicationContext().getContentResolver().query(
-                buildQueryUri(PARTNER_DISABLE_INCOGNITO_MODE_PATH), null, null, null, null);
+        Cursor cursor =
+                ContextUtils.getApplicationContext()
+                        .getContentResolver()
+                        .query(
+                                buildQueryUri(PARTNER_DISABLE_INCOGNITO_MODE_PATH),
+                                null,
+                                null,
+                                null,
+                                null);
         if (cursor != null && cursor.moveToFirst() && cursor.getColumnCount() == 1) {
             disabled = cursor.getInt(0) == 1;
         }
@@ -65,12 +100,22 @@ public class CustomizationProviderDelegateUpstreamImpl implements CustomizationP
 
     @Override
     public boolean isBookmarksEditingDisabled() {
+        if (sIsBookmarksEditingDisabledForTesting != null) {
+            return sIsBookmarksEditingDisabledForTesting;
+        }
         if (!isValid()) {
             return false;
         }
         boolean disabled = false;
-        Cursor cursor = ContextUtils.getApplicationContext().getContentResolver().query(
-                buildQueryUri(PARTNER_DISABLE_BOOKMARKS_EDITING_PATH), null, null, null, null);
+        Cursor cursor =
+                ContextUtils.getApplicationContext()
+                        .getContentResolver()
+                        .query(
+                                buildQueryUri(PARTNER_DISABLE_BOOKMARKS_EDITING_PATH),
+                                null,
+                                null,
+                                null,
+                                null);
         if (cursor != null && cursor.moveToFirst() && cursor.getColumnCount() == 1) {
             disabled = cursor.getInt(0) == 1;
         }
@@ -82,8 +127,9 @@ public class CustomizationProviderDelegateUpstreamImpl implements CustomizationP
 
     private boolean isValidInternal() {
         ProviderInfo providerInfo =
-                ContextUtils.getApplicationContext().getPackageManager().resolveContentProvider(
-                        sProviderAuthority, 0);
+                ContextUtils.getApplicationContext()
+                        .getPackageManager()
+                        .resolveContentProvider(sProviderAuthority, 0);
         if (providerInfo == null) {
             return false;
         }
@@ -95,33 +141,53 @@ public class CustomizationProviderDelegateUpstreamImpl implements CustomizationP
         // is rejected unless Chrome Android is a local build.
         // When sIgnoreBrowserProviderSystemPackageCheck is true, accept non-system package.
         // When sIgnoreBrowserProviderSystemPackageCheck is false, reject non-system package.
-        if (sIgnoreSystemPackageCheck != null && sIgnoreSystemPackageCheck) {
+        if (sIgnoreSystemPackageCheckForTesting != null && sIgnoreSystemPackageCheckForTesting) {
             return true;
         }
 
-        Log.w(TAG,
-                "Browser Customizations content provider package, " + providerInfo.packageName
+        Log.w(
+                TAG,
+                "Browser Customizations content provider package, "
+                        + providerInfo.packageName
                         + ", is not a system package. "
                         + "This could be a malicious attempt from a third party "
                         + "app, so skip reading the browser content provider.");
-        if (sIgnoreSystemPackageCheck != null && !sIgnoreSystemPackageCheck) {
+        if (sIgnoreSystemPackageCheckForTesting != null && !sIgnoreSystemPackageCheckForTesting) {
             return false;
         }
         if (VersionInfo.isLocalBuild()) {
-            Log.w(TAG,
+            Log.w(
+                    TAG,
                     "This is a local build of Chrome Android, "
                             + "so keep reading the browser content provider, "
                             + "to make debugging customization easier.");
             return true;
         }
+        // ProviderInfo was present, but flags don't indicate it was a System APK (above), and none
+        // of our overrides apply.
         return false;
     }
 
-    private boolean isValid() {
+    /**
+     * May be called by Downstream to determine if the default Upstream delegate is actually being
+     * used.
+     */
+    boolean isValid() {
         if (sValid == null) {
+            long validationStartTime = SystemClock.elapsedRealtime();
             sValid = isValidInternal();
+            if (mValidationCompletion != null) {
+                mValidationCompletion.validated(validationStartTime);
+            }
         }
         return sValid;
+    }
+
+    /** Sets a function to call when validation has been performed. */
+    void setValidationCompletion(DelegateValidationCompletion validationCompletion) {
+        assert mValidationCompletion == null
+                : "Coding error: setValidationCompletion may only be called once!";
+        mValidationCompletion = validationCompletion;
     }
 
     static Uri buildQueryUri(String path) {
@@ -132,9 +198,10 @@ public class CustomizationProviderDelegateUpstreamImpl implements CustomizationP
                 .build();
     }
 
-    @VisibleForTesting
     static void setProviderAuthorityForTesting(String providerAuthority) {
+        var oldValue = sProviderAuthority;
         sProviderAuthority = providerAuthority;
+        ResettersForTesting.register(() -> sProviderAuthority = oldValue);
     }
 
     /**
@@ -144,8 +211,23 @@ public class CustomizationProviderDelegateUpstreamImpl implements CustomizationP
      *
      * @param ignore whether we should ignore browser provider system package checking.
      */
-    @VisibleForTesting
     static void ignoreBrowserProviderSystemPackageCheckForTesting(boolean ignore) {
-        sIgnoreSystemPackageCheck = ignore;
+        sIgnoreSystemPackageCheckForTesting = ignore;
+        ResettersForTesting.register(() -> sIgnoreSystemPackageCheckForTesting = null);
+    }
+
+    static void setHomepageForTesting(@Nullable String homepage) {
+        sHomepageForTesting = new String[] {homepage};
+        ResettersForTesting.register(() -> sHomepageForTesting = null);
+    }
+
+    static void setIsIncognitoModeDisabledForTesting(boolean disabled) {
+        sIsIncognitoModeDisabledForTesting = disabled;
+        ResettersForTesting.register(() -> sIsIncognitoModeDisabledForTesting = null);
+    }
+
+    static void setIsBookmarksEditingDisabledForTesting(boolean disabled) {
+        sIsBookmarksEditingDisabledForTesting = disabled;
+        ResettersForTesting.register(() -> sIsBookmarksEditingDisabledForTesting = null);
     }
 }

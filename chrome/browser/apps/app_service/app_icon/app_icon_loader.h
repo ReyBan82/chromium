@@ -5,7 +5,6 @@
 #ifndef CHROME_BROWSER_APPS_APP_SERVICE_APP_ICON_APP_ICON_LOADER_H_
 #define CHROME_BROWSER_APPS_APP_SERVICE_APP_ICON_APP_ICON_LOADER_H_
 
-#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -13,25 +12,24 @@
 #include "base/files/file_path.h"
 #include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/ref_counted.h"
+#include "base/scoped_observation.h"
 #include "base/task/cancelable_task_tracker.h"
 #include "base/task/sequenced_task_runner.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/apps/app_service/app_icon/app_icon_factory.h"
+#include "chrome/browser/profiles/profile_observer.h"
+#include "chrome/browser/web_applications/model/web_app_icon_types.h"
 #include "components/services/app_service/public/cpp/icon_types.h"
 #include "extensions/common/constants.h"
 #include "ui/gfx/image/image_skia.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "ash/components/arc/mojom/intent_helper.mojom.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chromeos/ash/experiences/arc/mojom/intent_helper.mojom.h"
 #include "ui/base/resource/resource_scale_factor.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace arc {
 class IconDecodeRequest;
-}
-
-namespace content {
-class BrowserContext;
 }
 
 namespace extensions {
@@ -71,24 +69,33 @@ struct AdaptiveIconPaths {
 // * Allow easy additions to the icon loader if necessary (like new effects or
 // backups).
 // Must be created & run from the UI thread.
-class AppIconLoader : public base::RefCounted<AppIconLoader> {
+class AppIconLoader : public base::RefCounted<AppIconLoader>,
+                      public ProfileObserver {
  public:
   static const int kFaviconFallbackImagePx =
       extension_misc::EXTENSION_ICON_BITTY;
 
-  AppIconLoader(IconType icon_type,
+  AppIconLoader(Profile* profile,
+                std::optional<std::string> app_id,
+                IconType icon_type,
                 int size_hint_in_dip,
                 bool is_placeholder_icon,
                 apps::IconEffects icon_effects,
                 int fallback_icon_resource,
                 LoadIconCallback callback);
 
-  AppIconLoader(IconType icon_type,
+  AppIconLoader(Profile* profile,
+                std::optional<std::string> app_id,
+                IconType icon_type,
                 int size_hint_in_dip,
                 bool is_placeholder_icon,
                 apps::IconEffects icon_effects,
                 int fallback_icon_resource,
                 base::OnceCallback<void(LoadIconCallback)> fallback,
+                LoadIconCallback callback);
+
+  AppIconLoader(Profile* profile,
+                int size_hint_in_dip,
                 LoadIconCallback callback);
 
   AppIconLoader(int size_hint_in_dip,
@@ -100,17 +107,19 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
 
   AppIconLoader(int size_hint_in_dip, LoadIconCallback callback);
 
-  void ApplyIconEffects(IconEffects icon_effects, IconValuePtr iv);
+  void ApplyIconEffects(IconEffects icon_effects,
+                        const std::optional<std::string>& app_id,
+                        IconValuePtr iv);
 
-  void ApplyBadges(IconEffects icon_effects, IconValuePtr iv);
+  void ApplyBadges(IconEffects icon_effects,
+                   const std::optional<std::string>& app_id,
+                   IconValuePtr iv);
 
   void LoadWebAppIcon(const std::string& web_app_id,
                       const GURL& launch_url,
-                      web_app::WebAppIconManager& icon_manager,
-                      Profile* profile);
+                      web_app::WebAppIconManager& icon_manager);
 
-  void LoadExtensionIcon(const extensions::Extension* extension,
-                         content::BrowserContext* context);
+  void LoadExtensionIcon(const extensions::Extension* extension);
 
   // The image file must be compressed using the default encoding.
   void LoadCompressedIconFromFile(const base::FilePath& path);
@@ -118,7 +127,7 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
 
   void LoadIconFromResource(int icon_resource);
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // For ARC icons, converts an icon png data to an ImageSkia using
   // arc::IconDecodeRequest.
   void LoadArcIconPngData(const std::vector<uint8_t>& icon_png_data);
@@ -131,9 +140,7 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
   // Loads icons for ARC activities.
   void LoadArcActivityIcons(
       const std::vector<arc::mojom::ActivityIconPtr>& icons);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
 
-#if BUILDFLAG(IS_CHROMEOS)
   // Requests a compressed icon data with `scale_factor` for an web app
   // identified by `web_app_id`.
   void GetWebAppCompressedIconData(const std::string& web_app_id,
@@ -143,11 +150,8 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
   // Requests a compressed icon data with `scale_factor` for a chrome app
   // identified by `extension`.
   void GetChromeAppCompressedIconData(const extensions::Extension* extension,
-                                      content::BrowserContext* context,
                                       ui::ResourceScaleFactor scale_factor);
-#endif  // BUILDFLAG(IS_CHROMEOS)
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
   // Requests a compressed icon data with `scale_factor` for an ARC app
   // identified by `app_id`.
   void GetArcAppCompressedIconData(const std::string& app_id,
@@ -156,17 +160,16 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
 
   // Requests a compressed icon data with `scale_factor` for a Guest OS app
   // identified by `app_id`.
-  void GetGuestOSAppCompressedIconData(Profile* profile,
-                                       const std::string& app_id,
+  void GetGuestOSAppCompressedIconData(const std::string& app_id,
                                        ui::ResourceScaleFactor scale_factor);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
  private:
   friend class base::RefCounted<AppIconLoader>;
 
-  ~AppIconLoader();
+  ~AppIconLoader() override;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   void OnGetArcAppCompressedIconData(AdaptiveIconPaths app_icon_paths,
                                      arc::mojom::RawIconPngDataPtr icon);
 
@@ -187,7 +190,7 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
 
   void OnArcActivityIconLoaded(gfx::ImageSkia* arc_activity_icon,
                                const gfx::ImageSkia& icon);
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
   void MaybeApplyEffectsAndComplete(const gfx::ImageSkia image);
 
@@ -197,17 +200,30 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
 
   void CompleteWithIconValue(IconValuePtr iv);
 
-  void OnReadWebAppIcon(std::map<int, SkBitmap> icon_bitmaps);
+  void OnReadWebAppIcon(web_app::OrderedSizeToBitmap icon_bitmaps);
 
-  void OnReadWebAppForCompressedIconData(bool is_maskable_icon,
-                                         std::map<int, SkBitmap> icon_bitmaps);
+  void OnReadWebAppForCompressedIconData(
+      bool is_maskable_icon,
+      web_app::OrderedSizeToBitmap icon_bitmaps);
 
   void OnGetCompressedIconDataWithSkBitmap(bool is_maskable_icon,
-                                           SkBitmap bitmap);
+                                           const SkBitmap& bitmap);
 
   void OnReadChromeAppForCompressedIconData(gfx::ImageSkia image);
 
   void MaybeLoadFallbackOrCompleteEmpty();
+
+  // ProfileObserver overrides.
+  void OnProfileWillBeDestroyed(Profile* profile) override;
+
+  // If non-null, points to the profile necessary to support the icon loading.
+  // Not used by all codepaths, so this isn't mandatory in the constructor,
+  // and could be reset to null if the profile is torn down whilst async icon
+  // loading is in-flight.
+  raw_ptr<Profile> profile_ = nullptr;
+  base::ScopedObservation<Profile, ProfileObserver> profile_observation_{this};
+
+  std::optional<std::string> app_id_;
 
   const IconType icon_type_ = IconType::kUnknown;
 
@@ -226,9 +242,7 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
 
   // If |fallback_favicon_url_| is populated, then the favicon service is the
   // first fallback method attempted in MaybeLoadFallbackOrCompleteEmpty().
-  // These members are only populated from LoadWebAppIcon or LoadExtensionIcon.
   GURL fallback_favicon_url_;
-  raw_ptr<Profile> profile_ = nullptr;
 
   // If |fallback_icon_resource_| is not |kInvalidIconResource|, then it is the
   // second fallback method attempted in MaybeLoadFallbackOrCompleteEmpty()
@@ -257,12 +271,12 @@ class AppIconLoader : public base::RefCounted<AppIconLoader> {
   base::OnceCallback<void(const std::vector<gfx::ImageSkia>& icon)>
       arc_activity_icons_callback_;
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   std::unique_ptr<arc::IconDecodeRequest> arc_icon_decode_request_;
   std::unique_ptr<arc::IconDecodeRequest> arc_foreground_icon_decode_request_;
   std::unique_ptr<arc::IconDecodeRequest> arc_background_icon_decode_request_;
   std::unique_ptr<SvgIconTranscoder> svg_icon_transcoder_;
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 };
 
 }  // namespace apps

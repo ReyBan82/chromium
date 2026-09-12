@@ -28,7 +28,7 @@ using testing::Pointee;
 
 namespace {
 
-using StructTraitsTest = testing::Test;
+using MemoryInstrumentationStructTraitsTest = testing::Test;
 
 // Test StructTrait serialization and deserialization for copyable type. |input|
 // will be serialized and then deserialized into |output|.
@@ -39,17 +39,17 @@ void SerializeAndDeserialize(const Type& input, Type* output) {
 
 }  // namespace
 
-TEST_F(StructTraitsTest, MemoryDumpRequestArgs) {
-  MemoryDumpRequestArgs input{10u, MemoryDumpType::SUMMARY_ONLY,
-                              MemoryDumpLevelOfDetail::DETAILED};
+TEST_F(MemoryInstrumentationStructTraitsTest, MemoryDumpRequestArgs) {
+  MemoryDumpRequestArgs input{10u, MemoryDumpType::kSummaryOnly,
+                              MemoryDumpLevelOfDetail::kDetailed};
   MemoryDumpRequestArgs output;
   SerializeAndDeserialize<mojom::RequestArgs>(input, &output);
   EXPECT_EQ(10u, output.dump_guid);
-  EXPECT_EQ(MemoryDumpType::SUMMARY_ONLY, output.dump_type);
-  EXPECT_EQ(MemoryDumpLevelOfDetail::DETAILED, output.level_of_detail);
+  EXPECT_EQ(MemoryDumpType::kSummaryOnly, output.dump_type);
+  EXPECT_EQ(MemoryDumpLevelOfDetail::kDetailed, output.level_of_detail);
 }
 
-TEST_F(StructTraitsTest, MemoryAllocatorDumpEdge) {
+TEST_F(MemoryInstrumentationStructTraitsTest, MemoryAllocatorDumpEdge) {
   ProcessMemoryDump::MemoryAllocatorDumpEdge input{
       MemoryAllocatorDumpGuid(42), MemoryAllocatorDumpGuid(43), -99, true};
   ProcessMemoryDump::MemoryAllocatorDumpEdge output;
@@ -62,7 +62,8 @@ TEST_F(StructTraitsTest, MemoryAllocatorDumpEdge) {
   EXPECT_TRUE(output.overridable);
 }
 
-TEST_F(StructTraitsTest, MemoryAllocatorDumpEdgeWithStringIDs) {
+TEST_F(MemoryInstrumentationStructTraitsTest,
+       MemoryAllocatorDumpEdgeWithStringIDs) {
   ProcessMemoryDump::MemoryAllocatorDumpEdge input{
       MemoryAllocatorDumpGuid("string1"), MemoryAllocatorDumpGuid("string2"), 0,
       false};
@@ -76,7 +77,7 @@ TEST_F(StructTraitsTest, MemoryAllocatorDumpEdgeWithStringIDs) {
   EXPECT_FALSE(output.overridable);
 }
 
-TEST_F(StructTraitsTest, MemoryAllocatorDumpEntry) {
+TEST_F(MemoryInstrumentationStructTraitsTest, MemoryAllocatorDumpEntry) {
   MemoryAllocatorDump::Entry input1("name_uint64", "units_uint64", 42);
   MemoryAllocatorDump::Entry output1;
   SerializeAndDeserialize<mojom::RawAllocatorDumpEntry>(input1, &output1);
@@ -104,30 +105,30 @@ TEST_F(StructTraitsTest, MemoryAllocatorDumpEntry) {
   EXPECT_EQ("!", output1.value_string);
 }
 
-TEST_F(StructTraitsTest, MemoryAllocatorDump) {
+TEST_F(MemoryInstrumentationStructTraitsTest, MemoryAllocatorDump) {
   auto input = std::make_unique<MemoryAllocatorDump>(
-      "absolute/name", MemoryDumpLevelOfDetail::DETAILED,
+      "absolute/name", MemoryDumpLevelOfDetail::kDetailed,
       MemoryAllocatorDumpGuid(42));
   std::unique_ptr<MemoryAllocatorDump> output;
   input->AddScalar("size", "bytes", 10);
   input->AddScalar("count", "number", 20);
-  input->set_flags(MemoryAllocatorDump::WEAK);
+  input->set_flags(MemoryAllocatorDump::kWeak);
   SerializeAndDeserialize<mojom::RawAllocatorDump>(input, &output);
 
   EXPECT_EQ(42u, output->guid().ToUint64());
   EXPECT_EQ("absolute/name", output->absolute_name());
-  EXPECT_EQ(MemoryAllocatorDump::WEAK, output->flags());
+  EXPECT_EQ(MemoryAllocatorDump::kWeak, output->flags());
   EXPECT_EQ(10u, output->GetSizeInternal());
-  EXPECT_EQ(MemoryDumpLevelOfDetail::DETAILED, output->level_of_detail());
+  EXPECT_EQ(MemoryDumpLevelOfDetail::kDetailed, output->level_of_detail());
   MemoryAllocatorDump::Entry expected_entry1("size", "bytes", 10);
   EXPECT_THAT(output->entries(), Contains(Eq(ByRef(expected_entry1))));
   MemoryAllocatorDump::Entry expected_entry2("count", "number", 20);
   EXPECT_THAT(output->entries(), Contains(Eq(ByRef(expected_entry2))));
 }
 
-TEST_F(StructTraitsTest, ProcessMemoryDump) {
+TEST_F(MemoryInstrumentationStructTraitsTest, ProcessMemoryDump) {
   auto input = std::make_unique<ProcessMemoryDump>(
-      MemoryDumpArgs{MemoryDumpLevelOfDetail::DETAILED});
+      MemoryDumpArgs{MemoryDumpLevelOfDetail::kDetailed});
   std::unique_ptr<ProcessMemoryDump> output;
   MemoryAllocatorDump* mad1 = input->CreateAllocatorDump("mad/1");
   MemoryAllocatorDumpGuid mad1_id = mad1->guid();
@@ -151,7 +152,7 @@ TEST_F(StructTraitsTest, ProcessMemoryDump) {
   mad_wshg->AddString("shared_weak_name", "url", ".");
   SerializeAndDeserialize<mojom::RawProcessMemoryDump>(input, &output);
 
-  EXPECT_EQ(MemoryDumpLevelOfDetail::DETAILED,
+  EXPECT_EQ(MemoryDumpLevelOfDetail::kDetailed,
             output->dump_args().level_of_detail);
   const auto& dumps = output->allocator_dumps();
   {
@@ -181,7 +182,7 @@ TEST_F(StructTraitsTest, ProcessMemoryDump) {
   {
     auto mad_it = dumps.find("global/1");
     ASSERT_NE(dumps.end(), mad_it);
-    EXPECT_FALSE(mad_it->second->flags() & MemoryAllocatorDump::WEAK);
+    EXPECT_FALSE(mad_it->second->flags() & MemoryAllocatorDump::kWeak);
     MemoryAllocatorDump::Entry expected_entry("shared_name", "url", "!");
     EXPECT_EQ(1u, mad_it->second->entries().size());
     EXPECT_THAT(mad_it->second->entries(), Contains(Eq(ByRef(expected_entry))));
@@ -189,7 +190,7 @@ TEST_F(StructTraitsTest, ProcessMemoryDump) {
   {
     auto mad_it = dumps.find("global/2");
     ASSERT_NE(dumps.end(), mad_it);
-    EXPECT_TRUE(mad_it->second->flags() & MemoryAllocatorDump::WEAK);
+    EXPECT_TRUE(mad_it->second->flags() & MemoryAllocatorDump::kWeak);
     MemoryAllocatorDump::Entry expected_entry("shared_weak_name", "url", ".");
     EXPECT_EQ(1u, mad_it->second->entries().size());
     EXPECT_THAT(mad_it->second->entries(), Contains(Eq(ByRef(expected_entry))));

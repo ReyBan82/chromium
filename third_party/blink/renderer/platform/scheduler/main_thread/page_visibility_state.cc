@@ -7,12 +7,13 @@
 namespace blink {
 namespace scheduler {
 
-const char* PageVisibilityStateToString(PageVisibilityState visibility) {
+perfetto::StaticString PageVisibilityStateToString(
+    PageVisibilityState visibility) {
   switch (visibility) {
     case PageVisibilityState::kVisible:
       return "visible";
     case PageVisibilityState::kHidden:
-      return "hidden";
+      return nullptr;
   }
   // Keep MSVC happy.
   return nullptr;

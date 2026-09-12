@@ -10,8 +10,11 @@
 #include <memory>
 #include <vector>
 
+#include "base/compiler_specific.h"
+#include "base/functional/callback_helpers.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/string_util.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "chrome/common/safe_browsing/archive_analyzer_results.h"
@@ -19,108 +22,119 @@
 #include "chrome/common/safe_browsing/mach_o_image_reader_mac.h"
 #include "chrome/utility/safe_browsing/mac/dmg_iterator.h"
 #include "chrome/utility/safe_browsing/mac/read_stream.h"
+#include "components/safe_browsing/core/common/features.h"
 #include "components/safe_browsing/core/common/proto/csd.pb.h"
-#include "crypto/secure_hash.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 
 namespace safe_browsing {
 namespace dmg {
 
 namespace {
 
-// The maximum duration of DMG analysis, in milliseconds.
-const double kDmgAnalysisTimeoutMs = 10000;
-
 // MachOFeatureExtractor examines files to determine if they are Mach-O, and,
 // if so, it uses the BinaryFeatureExtractor to obtain information about the
 // image. In addition, this class will compute the SHA256 hash of the file.
 class MachOFeatureExtractor {
  public:
-  MachOFeatureExtractor();
+  explicit MachOFeatureExtractor(std::unique_ptr<ReadStream> stream);
 
   MachOFeatureExtractor(const MachOFeatureExtractor&) = delete;
   MachOFeatureExtractor& operator=(const MachOFeatureExtractor&) = delete;
 
   ~MachOFeatureExtractor();
 
-  // Tests if the stream references a Mach-O image by examinig its magic
-  // number.
-  bool IsMachO(ReadStream* stream);
+  // Returns whether the stream references a Mach-O image by examining its magic
+  // number. If not, the stream is reset and it is an error to attempt further
+  // operations.
+  bool IsMachO();
 
-  // Computes the hash of the data in |stream| and extracts the Mach-O
-  // features from the data. Returns true if successful, or false on error or
-  // if the file was not Mach-O.
-  bool ExtractFeatures(ReadStream* stream,
-                       ClientDownloadRequest_ArchivedBinary* result);
+  // Computes the hash of the data in the underlying stream and extracts the
+  // Mach-O features from the data, populating `result` with the features.
+  // Returns true on success, or false on error.
+  bool ExtractFeatures(ClientDownloadRequest_ArchivedBinary* result);
 
  private:
-  // Reads the entire stream and updates the hash.
-  bool HashAndCopyStream(ReadStream* stream,
-                         uint8_t digest[crypto::kSHA256Length]);
+  // Reads the entire stream into `buffer` and updates `digest` with the hash.
+  bool HashAndCopyStream(base::span<uint8_t, crypto::hash::kSha256Size> digest,
+                         std::vector<uint8_t>& buffer);
 
   scoped_refptr<BinaryFeatureExtractor> bfe_;
-  std::vector<uint8_t> buffer_;  // Buffer that contains read stream data.
+  std::unique_ptr<ReadStream> stream_;
 };
 
-MachOFeatureExtractor::MachOFeatureExtractor()
-    : bfe_(new BinaryFeatureExtractor()),
-      buffer_() {
-  buffer_.reserve(1024 * 1024);
-}
+MachOFeatureExtractor::MachOFeatureExtractor(std::unique_ptr<ReadStream> stream)
+    : bfe_(base::MakeRefCounted<BinaryFeatureExtractor>()),
+      stream_(std::move(stream)) {}
 
-MachOFeatureExtractor::~MachOFeatureExtractor() {}
+MachOFeatureExtractor::~MachOFeatureExtractor() = default;
 
-bool MachOFeatureExtractor::IsMachO(ReadStream* stream) {
+bool MachOFeatureExtractor::IsMachO() {
+  if (!stream_) {
+    return false;
+  }
   uint32_t magic = 0;
-  return stream->ReadType<uint32_t>(&magic) &&
-         MachOImageReader::IsMachOMagicValue(magic);
+  bool is_mach_o = stream_->ReadType<uint32_t>(magic) &&
+                   MachOImageReader::IsMachOMagicValue(magic);
+  if (!is_mach_o) {
+    stream_.reset();
+  }
+  return is_mach_o;
 }
 
 bool MachOFeatureExtractor::ExtractFeatures(
-    ReadStream* stream,
     ClientDownloadRequest_ArchivedBinary* result) {
-  uint8_t digest[crypto::kSHA256Length];
-  if (!HashAndCopyStream(stream, digest))
+  if (!stream_) {
     return false;
+  }
+  std::array<uint8_t, crypto::hash::kSha256Size> hash;
+  std::vector<uint8_t> buffer;
+  if (!HashAndCopyStream(hash, buffer)) {
+    return false;
+  }
 
   if (!bfe_->ExtractImageFeaturesFromData(
-          &buffer_[0], buffer_.size(), 0,
-          result->mutable_image_headers(),
+          buffer, 0, result->mutable_image_headers(),
           result->mutable_signature()->mutable_signed_data())) {
     return false;
   }
 
-  result->set_length(buffer_.size());
-  result->mutable_digests()->set_sha256(digest, sizeof(digest));
+  result->set_length(buffer.size());
+  result->mutable_digests()->set_sha256(base::as_string_view(hash));
 
   return true;
 }
 
 bool MachOFeatureExtractor::HashAndCopyStream(
-    ReadStream* stream, uint8_t digest[crypto::kSHA256Length]) {
-  if (stream->Seek(0, SEEK_SET) != 0)
+    base::span<uint8_t, crypto::hash::kSha256Size> hash,
+    std::vector<uint8_t>& buffer) {
+  if (stream_->Seek(0, SEEK_SET) != 0) {
     return false;
+  }
 
-  buffer_.clear();
-  std::unique_ptr<crypto::SecureHash> sha256(
-      crypto::SecureHash::Create(crypto::SecureHash::SHA256));
+  buffer.clear();
+  buffer.reserve(1024 * 1024);
+  crypto::hash::Hasher hasher(crypto::hash::HashKind::kSha256);
 
   size_t bytes_read;
-  const size_t kBufferSize = 2048;
+  const size_t kBufferSizeIncrement = 2048;
   do {
-    size_t buffer_offset = buffer_.size();
+    size_t buffer_offset = buffer.size();
 
-    buffer_.resize(buffer_.size() + kBufferSize);
-    if (!stream->Read(&buffer_[buffer_offset], kBufferSize, &bytes_read))
+    buffer.resize(buffer.size() + kBufferSizeIncrement);
+    base::span<uint8_t> read_buf =
+        base::span(buffer).last(kBufferSizeIncrement);
+    if (!stream_->Read(read_buf, &bytes_read)) {
       return false;
+    }
 
-    buffer_.resize(buffer_offset + bytes_read);
-    if (bytes_read)
-      sha256->Update(&buffer_[buffer_offset], bytes_read);
+    buffer.resize(buffer_offset + bytes_read);
+    read_buf = read_buf.first(bytes_read);
+    if (bytes_read) {
+      hasher.Update(read_buf);
+    }
   } while (bytes_read > 0);
 
-  sha256->Finish(digest, crypto::kSHA256Length);
-
+  hasher.Finish(hash);
   return true;
 }
 
@@ -131,88 +145,129 @@ constexpr uint8_t kDERPKCS7SignedData[] = {0x30, 0x80, 0x06, 0x09, 0x2a,
 
 }  // namespace
 
-void AnalyzeDMGFile(base::File dmg_file, ArchiveAnalyzerResults* results) {
-  FileReadStream read_stream(dmg_file.GetPlatformFile());
-  DMGIterator iterator(&read_stream);
-  AnalyzeDMGFile(&iterator, results);
+DMGAnalyzer::~DMGAnalyzer() = default;
+
+DMGAnalyzer::DMGAnalyzer() = default;
+
+void DMGAnalyzer::Init() {
+  GetTempFile(
+      base::BindOnce(&DMGAnalyzer::OnGetTempFile, weak_factory_.GetWeakPtr()));
+
+  read_stream_ =
+      std::make_unique<FileReadStream>(GetArchiveFile().GetPlatformFile());
+  iterator_ = std::make_unique<DMGIterator>(&*read_stream_);
 }
 
-void AnalyzeDMGFile(DMGIterator* iterator, ArchiveAnalyzerResults* results) {
-  base::Time start_time = base::Time::Now();
-  results->success = false;
-
-  bool opened_iterator = iterator->Open();
-  if (!opened_iterator) {
-    results->analysis_result = safe_browsing::ArchiveAnalysisResult::kUnknown;
-    return;
-  } else if (iterator->IsEmpty()) {
-    results->analysis_result =
-        safe_browsing::ArchiveAnalysisResult::kDmgNoPartitions;
-    return;
-  }
-
-  MachOFeatureExtractor feature_extractor;
-
-  results->signature_blob = iterator->GetCodeSignature();
-
-  bool timeout = false;
-  while (iterator->Next()) {
-    std::unique_ptr<ReadStream> stream = iterator->GetReadStream();
-    if (!stream)
+bool DMGAnalyzer::ResumeExtraction() {
+  while (iterator_->Next()) {
+    std::unique_ptr<ReadStream> stream = iterator_->GetReadStream();
+    if (!stream) {
       continue;
-    if (base::Time::Now() - start_time >=
-        base::Milliseconds(kDmgAnalysisTimeoutMs)) {
-      timeout = true;
-      break;
     }
 
-    std::string path = base::UTF16ToUTF8(iterator->GetPath());
+    std::string path = base::UTF16ToUTF8(iterator_->GetPath());
 
     bool is_detached_code_signature_file = base::EndsWith(
         path, "_CodeSignature/CodeSignature", base::CompareCase::SENSITIVE);
 
     if (is_detached_code_signature_file) {
-      results->has_executable = true;
+      results()->has_executable = true;
 
-      std::vector<uint8_t> signature_contents;
-      if (!ReadEntireStream(stream.get(), &signature_contents))
+      auto maybe_signature_contents = ReadEntireStream(*stream);
+      if (!maybe_signature_contents.has_value()) {
         continue;
+      }
+      std::vector<uint8_t>& signature_contents =
+          maybe_signature_contents.value();
 
-      if (signature_contents.size() < std::size(kDERPKCS7SignedData))
+      if (signature_contents.size() < std::size(kDERPKCS7SignedData)) {
         continue;
+      }
 
-      if (memcmp(kDERPKCS7SignedData, signature_contents.data(),
-                 std::size(kDERPKCS7SignedData)) != 0) {
+      if (base::span(signature_contents)
+              .first(std::size(kDERPKCS7SignedData)) != kDERPKCS7SignedData) {
         continue;
       }
 
       ClientDownloadRequest_DetachedCodeSignature* detached_signature =
-          results->detached_code_signatures.Add();
+          results()->detached_code_signatures.Add();
       detached_signature->set_file_name(path);
       detached_signature->set_contents(signature_contents.data(),
                                        signature_contents.size());
-    } else if (feature_extractor.IsMachO(stream.get())) {
-      ClientDownloadRequest_ArchivedBinary* binary =
-          results->archived_binary.Add();
-      binary->set_file_basename(path);
+      continue;
+    }
 
-      if (feature_extractor.ExtractFeatures(stream.get(), binary)) {
+    MachOFeatureExtractor feature_extractor(std::move(stream));
+    if (feature_extractor.IsMachO()) {
+      ClientDownloadRequest_ArchivedBinary* binary =
+          results()->archived_binary.Add();
+      binary->set_file_path(path);
+      if (feature_extractor.ExtractFeatures(binary)) {
         binary->set_download_type(
             ClientDownloadRequest_DownloadType_MAC_EXECUTABLE);
         binary->set_is_executable(true);
-        results->has_executable = true;
+        results()->has_executable = true;
       } else {
-        results->archived_binary.RemoveLast();
+        results()->archived_binary.RemoveLast();
+      }
+    } else {
+      // Get a new `stream` because it was moved from in previous branches.
+      stream = iterator_->GetReadStream();
+      if (!CopyStreamToFile(*stream, temp_file_)) {
+        continue;
+      }
+
+      if (!temp_file_.IsValid()) {
+        continue;
+      }
+
+      // TODO(crbug.com/40871873): Support file length here.
+      if (!UpdateResultsForEntry(temp_file_.Duplicate(),
+                                 GetRootPath().Append(path),
+                                 /*file_length=*/0,
+                                 /*is_encrypted=*/false, /*is_directory=*/false,
+                                 /*contents_valid=*/true)) {
+        return false;
       }
     }
   }
 
-  if (timeout) {
-    results->analysis_result = safe_browsing::ArchiveAnalysisResult::kTimeout;
-  } else {
-    results->analysis_result = safe_browsing::ArchiveAnalysisResult::kValid;
-    results->success = true;
+  return true;
+}
+
+void DMGAnalyzer::OnGetTempFile(base::File temp_file) {
+  if (!temp_file.IsValid()) {
+    InitComplete(ArchiveAnalysisResult::kFailedToOpenTempFile);
+    return;
   }
+
+  temp_file_ = std::move(temp_file);
+
+  if (!iterator_->Open()) {
+    InitComplete(ArchiveAnalysisResult::kUnknown);
+    return;
+  } else if (iterator_->IsEmpty()) {
+    InitComplete(ArchiveAnalysisResult::kDmgNoPartitions);
+    return;
+  }
+
+  results()->signature_blob = iterator_->GetCodeSignature();
+  InitComplete(ArchiveAnalysisResult::kValid);
+}
+
+void DMGAnalyzer::AnalyzeDMGFileForTesting(
+    std::unique_ptr<DMGIterator> iterator,
+    ArchiveAnalyzerResults* results,
+    base::File temp_file,
+    FinishedAnalysisCallback callback) {
+  SetResultsForTesting(results);                       // IN-TEST
+  SetFinishedCallbackForTesting(std::move(callback));  // IN-TEST
+  iterator_ = std::move(iterator);
+  OnGetTempFile(std::move(temp_file));
+}
+
+base::WeakPtr<ArchiveAnalyzer> DMGAnalyzer::GetWeakPtr() {
+  return weak_factory_.GetWeakPtr();
 }
 
 }  // namespace dmg

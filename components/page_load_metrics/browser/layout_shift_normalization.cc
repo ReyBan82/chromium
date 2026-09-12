@@ -9,12 +9,19 @@ constexpr auto NEW_SHIFT_BUFFER_WINDOW_DURATION = base::Seconds(5);
 constexpr auto MAX_SHIFT_BUFFER_SIZE = 300;
 
 LayoutShiftNormalization::LayoutShiftNormalization() = default;
+LayoutShiftNormalization::LayoutShiftNormalization(
+    const LayoutShiftNormalization&) = default;
+LayoutShiftNormalization::LayoutShiftNormalization(LayoutShiftNormalization&&) =
+    default;
+LayoutShiftNormalization& LayoutShiftNormalization::operator=(
+    const LayoutShiftNormalization&) = default;
+LayoutShiftNormalization& LayoutShiftNormalization::operator=(
+    LayoutShiftNormalization&&) = default;
 LayoutShiftNormalization::~LayoutShiftNormalization() = default;
 
 void LayoutShiftNormalization::AddNewLayoutShifts(
-    const std::vector<page_load_metrics::mojom::LayoutShiftPtr>& new_shifts,
-    base::TimeTicks current_time,
-    float cumulative_layout_shift_score) {
+    base::span<const mojom::LayoutShiftPtr> new_shifts,
+    base::TimeTicks current_time) {
   if (new_shifts.empty() || normalized_cls_data_.data_tainted)
     return;
 
@@ -54,7 +61,7 @@ void LayoutShiftNormalization::AddNewLayoutShifts(
 
   // Update sliding and session window CLS.
   UpdateWindowCLS(recent_layout_shifts_.begin(), first_non_stale,
-                  recent_layout_shifts_.end(), cumulative_layout_shift_score);
+                  recent_layout_shifts_.end());
 
   // Finally, remove the stale shifts at this point.
   recent_layout_shifts_.erase(recent_layout_shifts_.begin(), first_non_stale);
@@ -104,8 +111,7 @@ void LayoutShiftNormalization::UpdateWindowCLS(
     std::vector<std::pair<base::TimeTicks, double>>::const_iterator first,
     std::vector<std::pair<base::TimeTicks, double>>::const_iterator
         first_non_stale,
-    std::vector<std::pair<base::TimeTicks, double>>::const_iterator last,
-    float cumulative_layout_shift_score) {
+    std::vector<std::pair<base::TimeTicks, double>>::const_iterator last) {
   // Update Session Windows.
   UpdateSessionWindow(
       &session_gap1000ms_max5000ms_, base::Milliseconds(1000),

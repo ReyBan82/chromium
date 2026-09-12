@@ -21,9 +21,12 @@ BluetoothManifestData::BluetoothManifestData(
 BluetoothManifestData::~BluetoothManifestData() = default;
 
 // static
-BluetoothManifestData* BluetoothManifestData::Get(const Extension* extension) {
-  return static_cast<BluetoothManifestData*>(
-      extension->GetManifestData(manifest_keys::kBluetooth));
+const char* BluetoothManifestData::kManifestDataKey = manifest_keys::kBluetooth;
+
+// static
+const BluetoothManifestData* BluetoothManifestData::Get(
+    const Extension* extension) {
+  return extension->GetManifestData<BluetoothManifestData>();
 }
 
 // static

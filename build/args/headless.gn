@@ -23,9 +23,6 @@ headless_enable_commands = false
 # Don't use Prefs component, disabling access to Local State prefs.
 headless_use_prefs = false
 
-# Don't use Policy component, disabling all policies.
-headless_use_policy = false
-
 # Remove a dependency on a system fontconfig library.
 use_bundled_fontconfig = true
 
@@ -37,9 +34,6 @@ icu_use_data_file = false
 # to simplify deployment.
 v8_use_external_startup_data = false
 
-enable_nacl = false
-enable_print_preview = false
-enable_remoting = false
 use_alsa = false
 use_bluez = false
 use_cups = false
@@ -54,3 +48,4 @@ v8_enable_lazy_source_positions = false
 use_glib = false
 use_gtk = false
 use_pangocairo = false
+use_mold = false

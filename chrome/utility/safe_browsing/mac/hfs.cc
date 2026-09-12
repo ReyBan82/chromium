@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "chrome/utility/safe_browsing/mac/hfs.h"
 
 #include <libkern/OSByteOrder.h>
@@ -10,11 +11,16 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <vector>
 
+#include "base/containers/buffer_iterator.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/raw_span.h"
 #include "base/numerics/safe_math.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/utility/safe_browsing/mac/convert_big_endian.h"
@@ -25,6 +31,11 @@ namespace dmg {
 
 // UTF-16 character for file path seprator.
 static const char16_t kFilePathSeparator = u'/';
+
+// Maximum buffer size to allocate for a single extent. Safe Browsing limits DMG
+// analysis to 50 MB (see download_file_types.asciipb), so an individual extent
+// buffer should never need to exceed 64 MB.
+constexpr size_t kMaxExtentBufferSize = 64 * 1024 * 1024;
 
 // We cannot pass pointers to members of packed structs directly to
 // ConvertBigEndian, since the alignment of the member may be lower than the
@@ -41,9 +52,9 @@ static void ConvertBigEndian(HFSPlusForkData* fork) {
   fork->logicalSize = FromBigEndian(fork->logicalSize);
   fork->clumpSize = FromBigEndian(fork->clumpSize);
   fork->totalBlocks = FromBigEndian(fork->totalBlocks);
-  for (size_t i = 0; i < std::size(fork->extents); ++i) {
-    fork->extents[i].startBlock = FromBigEndian(fork->extents[i].startBlock);
-    fork->extents[i].blockCount = FromBigEndian(fork->extents[i].blockCount);
+  for (HFSPlusExtentDescriptor& extent : base::span(fork->extents)) {
+    extent.startBlock = FromBigEndian(extent.startBlock);
+    extent.blockCount = FromBigEndian(extent.blockCount);
   }
 }
 
@@ -146,29 +157,41 @@ class HFSForkReadStream : public ReadStream {
 
   ~HFSForkReadStream() override;
 
-  bool Read(uint8_t* buffer, size_t buffer_size, size_t* bytes_read) override;
+  bool Read(base::span<uint8_t> buf, size_t* bytes_read) override;
   // Seek only supports SEEK_SET.
   off_t Seek(off_t offset, int whence) override;
 
  private:
   const raw_ptr<HFSIterator> hfs_;  // The HFS+ iterator.
   const HFSPlusForkData fork_;  // The fork to be read.
-  uint8_t current_extent_;  // The current extent index in the fork.
-  bool read_current_extent_;  // Whether the current_extent_ has been read.
+  // All extents in the fork.
+  base::raw_span<const HFSPlusExtentDescriptor> extents_;
+  // The current extent in the fork.
+  base::raw_span<const HFSPlusExtentDescriptor>::iterator current_extent_;
+  // Whether the current_extent_ has been read.
+  bool read_current_extent_ = false;
   std::vector<uint8_t> current_extent_data_;  // Data for |current_extent_|.
-  size_t fork_logical_offset_;  // The logical offset into the fork.
+  size_t fork_logical_offset_ = 0u;  // The logical offset into the fork.
 };
 
 // HFSBTreeIterator iterates over the HFS+ catalog file.
 class HFSBTreeIterator {
  public:
   struct Entry {
-    uint16_t record_type;  // Catalog folder item type.
+    uint16_t record_type = 0u;  // Catalog folder item type.
     std::u16string path;   // Full path to the item.
-    bool unexported;  // Whether this is HFS+ private data.
+    bool unexported = false;  // Whether this is HFS+ private data.
+
+    // Stores a pointer to the item's data, in host-endian byte order.
+    // This points into `leaf_data_`.
+    // Note: member fields may be unaligned.
     union {
-      HFSPlusCatalogFile* file;
-      HFSPlusCatalogFolder* folder;
+      // This field is not a raw_ptr<> because it was filtered by the rewriter
+      // for: #union
+      RAW_PTR_EXCLUSION const HFSPlusCatalogFile* file;
+      // This field is not a raw_ptr<> because it was filtered by the rewriter
+      // for: #union
+      RAW_PTR_EXCLUSION const HFSPlusCatalogFolder* folder;
     };
   };
 
@@ -194,16 +217,29 @@ class HFSBTreeIterator {
   // buffer offsets.
   bool ReadCurrentLeaf();
 
-  // Returns a pointer to data at |current_leaf_offset_| in |leaf_data_|. This
-  // then advances the offset by the size of the object being returned.
-  template <typename T> T* GetLeafData();
+  // Returns a copy of the data in `leaf_data_` at the current position of the
+  // `leaf_iterator_` (assuming that it is of type T) converted to host endian,
+  // and automatically advances the `leaf_iterator_`. Returns nullopt if no T
+  // can be read at the current position. The data need not be aligned.
+  template <typename T>
+  std::optional<T> CopyLeafDataHostEndian();
+
+  // Returns a pointer to an object of type T at the current position of the
+  // `leaf_iterator_` with that data converted in place to host endian, and
+  // automatically advances the `leaf_iterator_`. Returns pointer to the
+  // resulting object, or nullptr on failure. This does not ensure alignment, so
+  // caller should only use this if the current iterator position is aligned.
+  template <typename T>
+  const T* GetLeafObjectHostEndian();
 
   // Checks if the HFS+ catalog key is a Mac OS X reserved key that should not
   // have it or its contents iterated over.
   bool IsKeyUnexported(const std::u16string& path);
 
-  raw_ptr<ReadStream> stream_;  // The stream backing the catalog file.
-  BTHeaderRec header_;  // The header B-tree node.
+  // The stream backing the catalog file.
+  raw_ptr<ReadStream> stream_ = nullptr;
+  // The header B-tree node.
+  BTHeaderRec header_;
 
   // Maps CNIDs to their full path. This is used to construct full paths for
   // items that descend from the folders in this map.
@@ -214,21 +250,31 @@ class HFSBTreeIterator {
   std::set<uint32_t> unexported_parents_;
 
   // The total number of leaf records read from all the leaf nodes.
-  uint32_t leaf_records_read_;
+  uint32_t leaf_records_read_ = 0u;
 
   // The number of records read from the current leaf node.
-  uint32_t current_leaf_records_read_;
-  uint32_t current_leaf_number_;  // The node ID of the leaf being read.
+  uint32_t current_leaf_records_read_ = 0u;
+  uint32_t current_leaf_number_ = 0u;  // The node ID of the leaf being read.
   // Whether the |current_leaf_number_|'s data has been read into the
   // |leaf_data_| buffer.
-  bool read_current_leaf_;
+  bool read_current_leaf_ = false;
   // The node data for |current_leaf_number_| copied from |stream_|.
+  // In general, parts of this data may be big-endian and parts of it may or may
+  // not have been swapped to host-endian.
   std::vector<uint8_t> leaf_data_;
-  size_t current_leaf_offset_;  // The offset in |leaf_data_|.
 
-  // Pointer to |leaf_data_| as a BTNodeDescriptor.
-  raw_ptr<const BTNodeDescriptor> current_leaf_;
-  Entry current_record_;  // The record read at |current_leaf_offset_|.
+  // Keeps track of our current position within the current `leaf_data_`.
+  std::unique_ptr<base::BufferIterator<uint8_t>> leaf_iterator_;
+
+  // The per-record byte offsets into `leaf_data_` for the current leaf, taken
+  // from the offset table at the end of the node. There are `numRecords + 1`
+  // entries; the last entry marks the start of the node's free space.
+  std::vector<uint16_t> record_offsets_;
+
+  // Points to the BTNodeDescriptor at the start of `leaf_data_`.
+  raw_ptr<const BTNodeDescriptor> current_leaf_ = nullptr;
+  // The record read at the current position of the `leaf_iterator_`.
+  Entry current_record_;
 
   // Constant, string16 versions of the __APPLE_API_PRIVATE values.
   const std::u16string kHFSMetadataFolder{u"\0\0\0\0HFS+ Private Data", 21};
@@ -241,13 +287,13 @@ HFSIterator::HFSIterator(ReadStream* stream)
       volume_header_() {
 }
 
-HFSIterator::~HFSIterator() {}
+HFSIterator::~HFSIterator() = default;
 
 bool HFSIterator::Open() {
   if (stream_->Seek(1024, SEEK_SET) != 1024)
     return false;
 
-  if (!stream_->ReadType(&volume_header_)) {
+  if (!stream_->ReadType(volume_header_)) {
     DLOG(ERROR) << "Failed to read volume header";
     return false;
   }
@@ -284,8 +330,7 @@ bool HFSIterator::Next() {
     keep_going = catalog_->Next();
     if (keep_going) {
       if (!catalog_->current_record()->unexported &&
-          (catalog_->current_record()->record_type == kHFSPlusFolderRecord ||
-           catalog_->current_record()->record_type == kHFSPlusFileRecord)) {
+          (IsDirectory() || IsFile())) {
         return true;
       }
       keep_going = catalog_->HasNext();
@@ -296,27 +341,38 @@ bool HFSIterator::Next() {
 }
 
 bool HFSIterator::IsDirectory() {
-  return catalog_->current_record()->record_type == kHFSPlusFolderRecord;
+  return catalog_->current_record()->record_type == kHFSPlusFolderRecord &&
+         catalog_->current_record()->folder;
+}
+
+bool HFSIterator::IsFile() {
+  return catalog_->current_record()->record_type == kHFSPlusFileRecord &&
+         catalog_->current_record()->file;
 }
 
 bool HFSIterator::IsSymbolicLink() {
-  if (IsDirectory())
+  if (IsDirectory()) {
     return S_ISLNK(catalog_->current_record()->folder->bsdInfo.fileMode);
-  else
+  }
+  if (IsFile()) {
     return S_ISLNK(catalog_->current_record()->file->bsdInfo.fileMode);
+  }
+  return false;
 }
 
 bool HFSIterator::IsHardLink() {
-  if (IsDirectory())
+  if (IsDirectory()) {
     return false;
+  }
   const HFSPlusCatalogFile* file = catalog_->current_record()->file;
   return file->userInfo.fdType == kHardLinkFileType &&
          file->userInfo.fdCreator == kHFSPlusCreator;
 }
 
 bool HFSIterator::IsDecmpfsCompressed() {
-  if (IsDirectory())
+  if (IsDirectory()) {
     return false;
+  }
   const HFSPlusCatalogFile* file = catalog_->current_record()->file;
   return file->bsdInfo.ownerFlags & UF_COMPRESSED;
 }
@@ -326,8 +382,9 @@ std::u16string HFSIterator::GetPath() {
 }
 
 std::unique_ptr<ReadStream> HFSIterator::GetReadStream() {
-  if (IsDirectory() || IsHardLink())
+  if (IsDirectory() || IsHardLink()) {
     return nullptr;
+  }
 
   DCHECK_EQ(kHFSPlusFileRecord, catalog_->current_record()->record_type);
   return std::make_unique<HFSForkReadStream>(
@@ -351,38 +408,34 @@ HFSForkReadStream::HFSForkReadStream(HFSIterator* hfs,
                                      const HFSPlusForkData& fork)
     : hfs_(hfs),
       fork_(fork),
-      current_extent_(0),
-      read_current_extent_(false),
-      current_extent_data_(),
-      fork_logical_offset_(0) {
-}
+      extents_(fork.extents),
+      current_extent_(extents_.begin()) {}
 
-HFSForkReadStream::~HFSForkReadStream() {}
+HFSForkReadStream::~HFSForkReadStream() = default;
 
-bool HFSForkReadStream::Read(uint8_t* buffer,
-                             size_t buffer_size,
-                             size_t* bytes_read) {
-  size_t buffer_space_remaining = buffer_size;
+bool HFSForkReadStream::Read(base::span<uint8_t> buf, size_t* bytes_read) {
+  size_t buffer_space_remaining = buf.size();
   *bytes_read = 0;
 
   if (fork_logical_offset_ == fork_.logicalSize)
     return true;
 
-  for (; current_extent_ < std::size(fork_.extents); ++current_extent_) {
+  for (; current_extent_ != extents_.end(); ++current_extent_) {
     // If the buffer is out of space, do not attempt any reads. Check this
     // here, so that current_extent_ is advanced by the loop if the last
     // extent was fully read.
     if (buffer_space_remaining == 0)
       break;
 
-    const HFSPlusExtentDescriptor* extent = &fork_.extents[current_extent_];
+    const HFSPlusExtentDescriptor& extent = *current_extent_;
 
     // A zero-length extent means end-of-fork.
-    if (extent->startBlock == 0 && extent->blockCount == 0)
+    if (extent.startBlock == 0 && extent.blockCount == 0) {
       break;
+    }
 
     auto extent_size =
-        base::CheckedNumeric<size_t>(extent->blockCount) * hfs_->block_size();
+        base::CheckedNumeric<size_t>(extent.blockCount) * hfs_->block_size();
     if (extent_size.ValueOrDefault(0) == 0) {
       DLOG(ERROR) << "Extent blockCount overflows or is 0";
       return false;
@@ -390,14 +443,17 @@ bool HFSForkReadStream::Read(uint8_t* buffer,
 
     // Read the entire extent now, to avoid excessive seeking and re-reading.
     if (!read_current_extent_) {
-      if (!hfs_->SeekToBlock(extent->startBlock)) {
-        DLOG(ERROR) << "Failed to seek to block " << extent->startBlock;
+      if (!hfs_->SeekToBlock(extent.startBlock)) {
+        DLOG(ERROR) << "Failed to seek to block " << extent.startBlock;
+        return false;
+      }
+      if (extent_size.ValueOrDie() > kMaxExtentBufferSize) {
+        DLOG(ERROR) << "Extent size too large";
         return false;
       }
       current_extent_data_.resize(extent_size.ValueOrDie());
-      if (!hfs_->stream()->ReadExact(current_extent_data_.data(),
-                                     extent_size.ValueOrDie())) {
-        DLOG(ERROR) << "Failed to read extent " << current_extent_;
+      if (!hfs_->stream()->ReadExact(current_extent_data_)) {
+        DLOG(ERROR) << "Failed to read extent";
         return false;
       }
 
@@ -411,9 +467,9 @@ bool HFSForkReadStream::Read(uint8_t* buffer,
             static_cast<size_t>((extent_size - extent_offset).ValueOrDie())),
         buffer_space_remaining);
 
-    memcpy(&buffer[buffer_size - buffer_space_remaining],
-           &current_extent_data_[extent_offset],
-           bytes_to_copy);
+    base::span<uint8_t> current_data =
+        base::span(current_extent_data_).subspan(extent_offset, bytes_to_copy);
+    buf.last(buffer_space_remaining).copy_prefix_from(current_data);
 
     buffer_space_remaining -= bytes_to_copy;
     *bytes_read += bytes_to_copy;
@@ -441,24 +497,25 @@ off_t HFSForkReadStream::Seek(off_t offset, int whence) {
   DCHECK(offset == 0 || static_cast<uint64_t>(offset) < fork_.logicalSize);
   size_t target_block = offset / hfs_->block_size();
   size_t block_count = 0;
-  for (size_t i = 0; i < std::size(fork_.extents); ++i) {
-    const HFSPlusExtentDescriptor* extent = &fork_.extents[i];
+  for (auto it = extents_.begin(); it != extents_.end(); ++it) {
+    const HFSPlusExtentDescriptor& extent = *it;
 
     // An empty extent indicates end-of-fork.
-    if (extent->startBlock == 0 && extent->blockCount == 0)
+    if (extent.startBlock == 0 && extent.blockCount == 0) {
       break;
+    }
 
     base::CheckedNumeric<size_t> new_block_count(block_count);
-    new_block_count += extent->blockCount;
+    new_block_count += extent.blockCount;
     if (!new_block_count.IsValid()) {
       DLOG(ERROR) << "Seek offset block count overflows";
       return false;
     }
 
     if (target_block < new_block_count.ValueOrDie()) {
-      if (current_extent_ != i) {
+      if (current_extent_ != it) {
         read_current_extent_ = false;
-        current_extent_ = i;
+        current_extent_ = it;
       }
       auto iterator_block_offset =
           base::CheckedNumeric<size_t>(block_count) * hfs_->block_size();
@@ -475,19 +532,9 @@ off_t HFSForkReadStream::Seek(off_t offset, int whence) {
   return -1;
 }
 
-HFSBTreeIterator::HFSBTreeIterator()
-    : stream_(),
-      header_(),
-      leaf_records_read_(0),
-      current_leaf_records_read_(0),
-      current_leaf_number_(0),
-      read_current_leaf_(false),
-      leaf_data_(),
-      current_leaf_offset_(0),
-      current_leaf_() {
-}
+HFSBTreeIterator::HFSBTreeIterator() = default;
 
-HFSBTreeIterator::~HFSBTreeIterator() {}
+HFSBTreeIterator::~HFSBTreeIterator() = default;
 
 bool HFSBTreeIterator::Init(ReadStream* stream) {
   DCHECK(!stream_);
@@ -499,7 +546,7 @@ bool HFSBTreeIterator::Init(ReadStream* stream) {
   }
 
   BTNodeDescriptor node;
-  if (!stream_->ReadType(&node)) {
+  if (!stream_->ReadType(node)) {
     DLOG(ERROR) << "Failed to read BTNodeDescriptor";
     return false;
   }
@@ -510,7 +557,7 @@ bool HFSBTreeIterator::Init(ReadStream* stream) {
     return false;
   }
 
-  if (!stream_->ReadType(&header_)) {
+  if (!stream_->ReadType(header_)) {
     DLOG(ERROR) << "Failed to read BTHeaderRec";
     return false;
   }
@@ -535,101 +582,147 @@ bool HFSBTreeIterator::Next() {
   if (!ReadCurrentLeaf())
     return false;
 
-  GetLeafData<uint16_t>();  // keyLength
+  CHECK(leaf_iterator_);
 
-  uint32_t parent_id;
-  if (auto* parent_id_ptr = GetLeafData<uint32_t>()) {
-    parent_id = OSSwapBigToHostInt32(*parent_id_ptr);
-  } else {
+  // Position at the start of the current record using the node's offset table.
+  if (static_cast<size_t>(current_leaf_records_read_) + 1u >=
+      record_offsets_.size()) {
+    return false;
+  }
+  const uint16_t record_offset = record_offsets_[current_leaf_records_read_];
+  const uint16_t record_end = record_offsets_[current_leaf_records_read_ + 1];
+  leaf_iterator_->Seek(record_offset);
+
+  auto key_length = CopyLeafDataHostEndian<uint16_t>();
+  if (!key_length.has_value()) {
     return false;
   }
 
-  uint16_t key_string_length;
-  if (auto* key_string_length_ptr = GetLeafData<uint16_t>()) {
-    key_string_length = OSSwapBigToHostInt16(*key_string_length_ptr);
-  } else {
+  // The data portion of a keyed record begins immediately after the key,
+  // located at `record_offset + sizeof(keyLength) + keyLength`.
+  base::CheckedNumeric<size_t> data_offset = record_offset;
+  data_offset += sizeof(uint16_t);
+  data_offset += *key_length;
+  if (*key_length > header_.maxKeyLength || !data_offset.IsValid() ||
+      data_offset.ValueOrDie() > record_end) {
+    DLOG(ERROR) << "Catalog record key extends past record";
+    return false;
+  }
+
+  auto parent_id = CopyLeafDataHostEndian<uint32_t>();
+  if (!parent_id.has_value()) {
+    return false;
+  }
+
+  auto key_string_length = CopyLeafDataHostEndian<uint16_t>();
+  if (!key_string_length.has_value()) {
+    return false;
+  }
+  if (leaf_iterator_->position() +
+          static_cast<size_t>(*key_string_length) * sizeof(uint16_t) >
+      data_offset.ValueOrDie()) {
+    DLOG(ERROR) << "Catalog key node name extends past key";
     return false;
   }
 
   // Read and byte-swap the variable-length key string.
-  std::u16string key(key_string_length, '\0');
-  for (uint16_t i = 0; i < key_string_length; ++i) {
-    auto* character = GetLeafData<uint16_t>();
+  std::u16string key(*key_string_length, '\0');
+  for (uint16_t i = 0u; i < *key_string_length; ++i) {
+    auto character = CopyLeafDataHostEndian<uint16_t>();
     if (!character) {
       DLOG(ERROR) << "Key string length points past leaf data";
       return false;
     }
-    key[i] = OSSwapBigToHostInt16(*character);
+    key[i] = character.value();
   }
 
   // Read the record type and then rewind as the field is part of the catalog
   // structure that is read next.
-  auto* record_type = GetLeafData<int16_t>();
-  if (!record_type) {
+  leaf_iterator_->Seek(data_offset.ValueOrDie());
+  size_t rewind_to = leaf_iterator_->position();
+  auto record_type = CopyLeafDataHostEndian<int16_t>();
+  if (!record_type.has_value()) {
     DLOG(ERROR) << "Failed to read record type";
     return false;
   }
-  current_record_.record_type = OSSwapBigToHostInt16(*record_type);
+  current_record_.record_type = *record_type;
   current_record_.unexported = false;
-  current_leaf_offset_ -= sizeof(int16_t);
+  leaf_iterator_->Seek(rewind_to);
+
   switch (current_record_.record_type) {
     case kHFSPlusFolderRecord: {
-      auto* folder = GetLeafData<HFSPlusCatalogFolder>();
-      ConvertBigEndian(folder);
+      if ((data_offset + sizeof(HFSPlusCatalogFolder))
+              .ValueOrDefault(SIZE_MAX) > record_end) {
+        DLOG(ERROR) << "Folder record data extends past record";
+        return false;
+      }
+      const HFSPlusCatalogFolder* folder =
+          GetLeafObjectHostEndian<HFSPlusCatalogFolder>();
+      if (!folder) {
+        return false;
+      }
       ++leaf_records_read_;
       ++current_leaf_records_read_;
+
+      // Make a copy of this field to avoid unaligned access when inserting into
+      // sets/maps.
+      uint32_t folder_id = folder->folderID;
 
       // If this key is unexported, or the parent folder is, then mark the
       // record as such.
       if (IsKeyUnexported(key) ||
-          unexported_parents_.find(parent_id) != unexported_parents_.end()) {
-        unexported_parents_.insert(folder->folderID);
+          unexported_parents_.find(*parent_id) != unexported_parents_.end()) {
+        unexported_parents_.insert(folder_id);
         current_record_.unexported = true;
       }
 
       // Update the CNID map to construct the path tree.
-      if (parent_id != 0) {
-        auto parent_name = folder_cnid_map_.find(parent_id);
+      if (*parent_id != 0) {
+        auto parent_name = folder_cnid_map_.find(*parent_id);
         if (parent_name != folder_cnid_map_.end())
           key = parent_name->second + kFilePathSeparator + key;
       }
-      folder_cnid_map_[folder->folderID] = key;
+      folder_cnid_map_[folder_id] = key;
 
       current_record_.path = key;
       current_record_.folder = folder;
       break;
     }
     case kHFSPlusFileRecord: {
-      auto* file = GetLeafData<HFSPlusCatalogFile>();
-      ConvertBigEndian(file);
+      if ((data_offset + sizeof(HFSPlusCatalogFile)).ValueOrDefault(SIZE_MAX) >
+          record_end) {
+        DLOG(ERROR) << "File record data extends past record";
+        return false;
+      }
+      const HFSPlusCatalogFile* file =
+          GetLeafObjectHostEndian<HFSPlusCatalogFile>();
+      if (!file) {
+        return false;
+      }
       ++leaf_records_read_;
       ++current_leaf_records_read_;
 
       std::u16string path =
-          folder_cnid_map_[parent_id] + kFilePathSeparator + key;
+          folder_cnid_map_[*parent_id] + kFilePathSeparator + key;
       current_record_.path = path;
       current_record_.file = file;
       current_record_.unexported =
-          unexported_parents_.find(parent_id) != unexported_parents_.end();
+          unexported_parents_.find(*parent_id) != unexported_parents_.end();
       break;
     }
     case kHFSPlusFolderThreadRecord:
     case kHFSPlusFileThreadRecord: {
       // Thread records are used to quickly locate a file or folder just by
-      // CNID. As these are not necessary for the iterator, skip past the data.
-      GetLeafData<uint16_t>();  // recordType
-      GetLeafData<uint16_t>();  // reserved
-      GetLeafData<uint32_t>();  // parentID
-      auto string_length = OSSwapBigToHostInt16(*GetLeafData<uint16_t>());
-      for (uint16_t i = 0; i < string_length; ++i)
-        GetLeafData<uint16_t>();
+      // CNID. These are not necessary for the iterator; the next record is
+      // located via the node's offset table.
       ++leaf_records_read_;
       ++current_leaf_records_read_;
       break;
     }
-    default:
+    default: {
       DLOG(ERROR) << "Unknown record type " << current_record_.record_type;
       return false;
+    }
   }
 
   // If all the records from this leaf have been read, follow the forward link
@@ -637,20 +730,28 @@ bool HFSBTreeIterator::Next() {
   if (current_leaf_records_read_ >= current_leaf_->numRecords) {
     current_leaf_number_ = current_leaf_->fLink;
     read_current_leaf_ = false;
+    leaf_iterator_.reset();
+    record_offsets_.clear();
   }
 
   return true;
 }
 
 bool HFSBTreeIterator::SeekToNode(uint32_t node_id) {
-  if (node_id >= header_.totalNodes)
+  if (node_id >= header_.totalNodes) {
     return false;
-  size_t offset = node_id * header_.nodeSize;
-  if (stream_->Seek(offset, SEEK_SET) != -1) {
-    current_leaf_number_ = node_id;
-    return true;
   }
-  return false;
+
+  base::CheckedNumeric<off_t> safe_offset = node_id;
+  safe_offset *= header_.nodeSize;
+
+  if (off_t offset; !safe_offset.AssignIfValid(&offset) ||
+                    stream_->Seek(offset, SEEK_SET) == -1) {
+    return false;
+  }
+
+  current_leaf_number_ = node_id;
+  return true;
 }
 
 bool HFSBTreeIterator::ReadCurrentLeaf() {
@@ -659,35 +760,89 @@ bool HFSBTreeIterator::ReadCurrentLeaf() {
 
   if (!SeekToNode(current_leaf_number_)) {
     DLOG(ERROR) << "Failed to seek to node " << current_leaf_number_;
+    record_offsets_.clear();
     return false;
   }
 
-  if (!stream_->ReadExact(&leaf_data_[0], header_.nodeSize)) {
+  CHECK_EQ(leaf_data_.size(), header_.nodeSize);
+  if (!stream_->ReadExact(leaf_data_)) {
     DLOG(ERROR) << "Failed to read node " << current_leaf_number_;
+    record_offsets_.clear();
     return false;
   }
 
-  auto* leaf = reinterpret_cast<BTNodeDescriptor*>(&leaf_data_[0]);
-  ConvertBigEndian(leaf);
-  if (leaf->kind != kBTLeafNode) {
-    DLOG(ERROR) << "Node " << current_leaf_number_ << " is not a leaf";
+  leaf_iterator_ = std::make_unique<base::BufferIterator<uint8_t>>(leaf_data_);
+
+  current_leaf_ = GetLeafObjectHostEndian<BTNodeDescriptor>();
+  if (!current_leaf_) {
+    DLOG(ERROR) << "Failed to read node " << current_leaf_number_;
+    leaf_iterator_.reset();
+    record_offsets_.clear();
     return false;
   }
-  current_leaf_ = leaf;
-  current_leaf_offset_ = sizeof(BTNodeDescriptor);
-  current_leaf_records_read_ = 0;
+  if (current_leaf_->kind != kBTLeafNode) {
+    DLOG(ERROR) << "Node " << current_leaf_number_ << " is not a leaf";
+    current_leaf_ = nullptr;
+    leaf_iterator_.reset();
+    record_offsets_.clear();
+    return false;
+  }
+
+  // Each B-tree node ends with a table of `numRecords + 1` big-endian uint16
+  // offsets, stored in reverse order at the end of the node. Entry `i` gives
+  // the byte offset of record `i` within the node and the final entry marks
+  // the start of free space. Records must lie between the node descriptor and
+  // the offset table itself.
+  const size_t num_offsets =
+      static_cast<size_t>(current_leaf_->numRecords) + 1u;
+  const size_t table_size = num_offsets * sizeof(uint16_t);
+  if (table_size > leaf_data_.size() - sizeof(BTNodeDescriptor)) {
+    DLOG(ERROR) << "Node " << current_leaf_number_
+                << " offset table overflows node";
+    current_leaf_ = nullptr;
+    leaf_iterator_.reset();
+    record_offsets_.clear();
+    return false;
+  }
+  const size_t records_end = leaf_data_.size() - table_size;
+  record_offsets_.resize(num_offsets);
+  for (size_t i = 0; i < num_offsets; ++i) {
+    leaf_iterator_->Seek(leaf_data_.size() - (i + 1) * sizeof(uint16_t));
+    auto offset = CopyLeafDataHostEndian<uint16_t>();
+    if (!offset.has_value() || *offset < sizeof(BTNodeDescriptor) ||
+        *offset > records_end || (i > 0 && *offset < record_offsets_[i - 1])) {
+      DLOG(ERROR) << "Node " << current_leaf_number_
+                  << " has inconsistent record offset table";
+      current_leaf_ = nullptr;
+      leaf_iterator_.reset();
+      record_offsets_.clear();
+      return false;
+    }
+    record_offsets_[i] = *offset;
+  }
+
+  current_leaf_records_read_ = 0u;
   read_current_leaf_ = true;
   return true;
 }
 
 template <typename T>
-T* HFSBTreeIterator::GetLeafData() {
-  base::CheckedNumeric<size_t> size = sizeof(T);
-  auto new_offset = size + current_leaf_offset_;
-  if (!new_offset.IsValid() || new_offset.ValueOrDie() >= leaf_data_.size())
-    return nullptr;
-  T* object = reinterpret_cast<T*>(&leaf_data_[current_leaf_offset_]);
-  current_leaf_offset_ = new_offset.ValueOrDie();
+std::optional<T> HFSBTreeIterator::CopyLeafDataHostEndian() {
+  CHECK(leaf_iterator_);
+  std::optional<T> data = leaf_iterator_->CopyObject<T>();
+  if (data.has_value()) {
+    ConvertBigEndian(&*data);
+  }
+  return data;
+}
+
+template <typename T>
+const T* HFSBTreeIterator::GetLeafObjectHostEndian() {
+  CHECK(leaf_iterator_);
+  T* object = leaf_iterator_->MutableObject<T>();
+  if (object) {
+    ConvertBigEndian(object);
+  }
   return object;
 }
 

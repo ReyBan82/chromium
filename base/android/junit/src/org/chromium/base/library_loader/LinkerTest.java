@@ -4,7 +4,7 @@
 
 package org.chromium.base.library_loader;
 
-import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 
 import androidx.test.filters.SmallTest;
 
@@ -21,28 +21,53 @@ import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 import org.mockito.quality.Strictness;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.Implementation;
+import org.robolectric.annotation.Implements;
+import org.robolectric.shadow.api.Shadow;
+import org.robolectric.shadows.ShadowParcelFileDescriptor;
 
 import org.chromium.base.library_loader.Linker.PreferAddress;
 import org.chromium.base.metrics.RecordHistogram;
-import org.chromium.base.metrics.UmaRecorderHolder;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
-/**
- *  Tests for {@link Linker}.
- */
+/** Tests for {@link Linker}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
+@Config(shadows = {LinkerTest.ShadowParcelFileDescriptorForLibInfo.class})
 @SuppressWarnings("GuardedBy") // doNothing().when(...).methodLocked() cannot resolve |mLock|.
 public class LinkerTest {
-    @Mock
-    Linker.Natives mNativeMock;
+    // This shadow is required for calling LibInfo.to/from Aidl. Since we don't actually have real
+    // FDs underpining anything, we have to fake the functions LibInfo is calling.
+    @Implements(ParcelFileDescriptor.class)
+    public static class ShadowParcelFileDescriptorForLibInfo extends ShadowParcelFileDescriptor {
+        private boolean mDetached;
 
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule().strictness(Strictness.STRICT_STUBS);
+        @Implementation
+        public static ParcelFileDescriptor fromFd(int fd) {
+            return Shadow.newInstanceOf(ParcelFileDescriptor.class);
+        }
+
+        @Override
+        @Implementation
+        public ParcelFileDescriptor dup() {
+            return Shadow.newInstanceOf(ParcelFileDescriptor.class);
+        }
+
+        @Implementation
+        public int detachFd() {
+            if (mDetached) {
+                throw new IllegalStateException("Already detached");
+            }
+            mDetached = true;
+            return 1023;
+        }
+    }
+
+    @Mock Linker.Natives mNativeMock;
+
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule().strictness(Strictness.STRICT_STUBS);
 
     @Before
     public void setUp() {
-        UmaRecorderHolder.resetForTesting();
         Linker.setLinkerNativesForTesting(mNativeMock);
     }
 
@@ -167,20 +192,17 @@ public class LinkerTest {
         // Set a fake RELRO FD so that it is not silently ignored when taking the LibInfo from the
         // (simulated) outside.
         libInfo.mRelroFd = 1023;
-        // Create the bundle following the _internal_ format of the Linker. Not great, but shorter
-        // than factoring out this logic from the Linker only for testing.
-        Bundle relros = libInfo.toBundle();
-        Bundle b = new Bundle();
-        b.putBundle(Linker.SHARED_RELROS, relros);
+        IRelroLibInfo relros = libInfo.toAidl();
 
         // Exercise.
         linker.ensureInitialized(
                 /* asRelroProducer= */ false, PreferAddress.RESERVE_HINT, someAddress);
         linker.pretendLibraryIsLoadedForTesting();
-        linker.takeSharedRelrosFromBundle(b);
+        linker.takeSharedRelrosFromAidl(relros);
 
         // Verify.
-        Assert.assertEquals(1,
+        Assert.assertEquals(
+                1,
                 RecordHistogram.getHistogramTotalCountForTesting(
                         "ChromiumAndroidLinker.RelroSharingStatus2"));
     }
@@ -228,44 +250,22 @@ public class LinkerTest {
 
     @Test
     @SmallTest
-    public void testWebviewRegionSearchHistograms() {
-        // Set up.
-        Linker linker = Mockito.spy(new Linker());
-        Mockito.doNothing().when(linker).loadLinkerJniLibraryLocked();
-        // The lookup of the region succeeds.
-        Mockito.when(mNativeMock.findRegionReservedByWebViewZygote(anyLibInfo())).thenReturn(true);
-        Mockito.when(linker.isNonZeroLoadAddress(anyLibInfo())).thenReturn(true);
+    public void testMultipleLibInfoFromAidlDoesNotInvalidateFd() {
+        Linker.LibInfo libInfo = new Linker.LibInfo();
+        libInfo.mLoadAddress = 1 << 12;
+        libInfo.mRelroFd = 1023;
+        IRelroLibInfo relros = libInfo.toAidl();
+        Assert.assertNotNull(relros.fd);
 
-        // Exercise.
-        linker.ensureInitialized(
-                /* asRelroProducer= */ false, PreferAddress.FIND_RESERVED, 0);
-        linker.recordHistograms("Zygote");
+        Linker.LibInfo remote1 = Linker.LibInfo.fromAidl(relros);
+        Assert.assertEquals(1023, remote1.mRelroFd);
 
-        // Verify.
-        Assert.assertNotNull(linker.mWebviewReservationSearchResult);
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramTotalCountForTesting(
-                        "ChromiumAndroidLinker.TimeToFindWebViewReservation.Found.Zygote"));
-    }
+        // The original aidl relros.fd must not have been detached or closed so subsequent
+        // usages (e.g. sending to other child processes) remain valid.
+        Linker.LibInfo remote2 = Linker.LibInfo.fromAidl(relros);
+        Assert.assertEquals(1023, remote2.mRelroFd);
 
-    @Test
-    @SmallTest
-    public void testWebviewRegionSearchFailedHistograms() {
-        // Set up.
-        Linker linker = Mockito.spy(new Linker());
-        Mockito.doNothing().when(linker).loadLinkerJniLibraryLocked();
-        // The lookup of the region fails.
-        Mockito.when(mNativeMock.findRegionReservedByWebViewZygote(anyLibInfo())).thenReturn(false);
-
-        // Exercise.
-        linker.ensureInitialized(
-                /* asRelroProducer= */ false, PreferAddress.FIND_RESERVED, 0);
-        linker.recordHistograms("Child");
-
-        // Verify.
-        Assert.assertNotNull(linker.mWebviewReservationSearchResult);
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramTotalCountForTesting(
-                        "ChromiumAndroidLinker.TimeToFindWebViewReservation.NotFound.Child"));
+        remote1.close();
+        remote2.close();
     }
 }

@@ -5,16 +5,16 @@
 #include "chrome/browser/ash/login/screens/demo_preferences_screen.h"
 
 #include "ash/constants/ash_features.h"
+#include "ash/constants/ash_pref_names.h"
+#include "base/check_deref.h"
 #include "base/check_op.h"
 #include "base/memory/weak_ptr.h"
 #include "base/values.h"
 #include "chrome/browser/ash/login/demo_mode/demo_session.h"
 #include "chrome/browser/ash/login/screens/welcome_screen.h"
 #include "chrome/browser/ash/login/wizard_controller.h"
-#include "chrome/browser/browser_process.h"
 #include "chrome/browser/ui/webui/ash/login/demo_preferences_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/welcome_screen_handler.h"
-#include "chrome/common/pref_names.h"
 #include "components/prefs/pref_service.h"
 
 namespace ash {
@@ -28,19 +28,23 @@ constexpr char kUserActionSetDemoModeCountry[] = "set-demo-mode-country";
 
 // static
 std::string DemoPreferencesScreen::GetResultString(Result result) {
+  // LINT.IfChange(UsageMetrics)
   switch (result) {
     case Result::COMPLETED:
       return "Completed";
     case Result::CANCELED:
       return "Canceled";
   }
+  // LINT.ThenChange(//tools/metrics/histograms/metadata/oobe/histograms.xml)
 }
 
 DemoPreferencesScreen::DemoPreferencesScreen(
+    PrefService* local_state,
     base::WeakPtr<DemoPreferencesScreenView> view,
     const ScreenExitCallback& exit_callback)
     : BaseScreen(DemoPreferencesScreenView::kScreenId,
                  OobeScreenPriority::DEFAULT),
+      local_state_(CHECK_DEREF(local_state)),
       view_(std::move(view)),
       exit_callback_(exit_callback) {}
 
@@ -53,12 +57,11 @@ void DemoPreferencesScreen::ShowImpl() {
 
 void DemoPreferencesScreen::HideImpl() {}
 
-void DemoPreferencesScreen::OnUserAction(const base::Value::List& args) {
+void DemoPreferencesScreen::OnUserAction(const base::ListValue& args) {
   const std::string& action_id = args[0].GetString();
   if (action_id == kUserActionContinue) {
     CHECK_EQ(args.size(), 3u);
-    std::string country(
-        g_browser_process->local_state()->GetString(prefs::kDemoModeCountry));
+    std::string country(local_state_->GetString(prefs::kDemoModeCountry));
     if (country == DemoSession::kCountryNotSelectedId) {
       return;
     }
@@ -69,7 +72,7 @@ void DemoPreferencesScreen::OnUserAction(const base::Value::List& args) {
     const std::string& store_number_input = args[2].GetString();
     DemoSetupController* demo_setup_controller =
         WizardController::default_controller()->demo_setup_controller();
-    demo_setup_controller->set_retailer_name(retailer_name_input);
+    demo_setup_controller->SetAndCanonicalizeRetailerName(retailer_name_input);
     demo_setup_controller->set_store_number(store_number_input);
 
     exit_callback_.Run(Result::COMPLETED);
@@ -77,8 +80,7 @@ void DemoPreferencesScreen::OnUserAction(const base::Value::List& args) {
     exit_callback_.Run(Result::CANCELED);
   } else if (action_id == kUserActionSetDemoModeCountry) {
     CHECK_EQ(args.size(), 2u);
-    g_browser_process->local_state()->SetString(prefs::kDemoModeCountry,
-                                                args[1].GetString());
+    local_state_->SetString(prefs::kDemoModeCountry, args[1].GetString());
   } else {
     BaseScreen::OnUserAction(args);
   }

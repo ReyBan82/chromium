@@ -188,6 +188,10 @@ class CONTENT_EXPORT BackgroundFetchDataManager
 
   void Shutdown();
 
+  ServiceWorkerContextWrapper* service_worker_context() const {
+    return service_worker_context_.get();
+  }
+
  private:
   FRIEND_TEST_ALL_PREFIXES(BackgroundFetchDataManagerTest, Cleanup);
   friend class BackgroundFetchDataManagerTest;
@@ -195,9 +199,6 @@ class CONTENT_EXPORT BackgroundFetchDataManager
   friend class background_fetch::DatabaseTask;
 
   // Accessors for tests and DatabaseTasks.
-  ServiceWorkerContextWrapper* service_worker_context() const {
-    return service_worker_context_.get();
-  }
   std::set<std::string>& ref_counted_unique_ids() {
     return ref_counted_unique_ids_;
   }
@@ -269,7 +270,7 @@ class CONTENT_EXPORT BackgroundFetchDataManager
   // |unique_id|. These remotes are created opportunistically in
   // GetOrOpenCacheStorage(). They are cleared after the Cache has been
   // deleted.
-  // TODO(crbug.com/711354): Possibly update key when CORS support is added.
+  // TODO(crbug.com/40515511): Possibly update key when CORS support is added.
   std::map<std::string, mojo::Remote<blink::mojom::CacheStorage>>
       cache_storage_remote_map_;
   mojo::Remote<blink::mojom::CacheStorage> null_remote_;

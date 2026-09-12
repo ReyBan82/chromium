@@ -54,33 +54,50 @@ class ColorInputType final : public InputType,
   Element& OwnerElement() const override;
   gfx::Rect ElementRectRelativeToLocalRoot() const override;
   Color CurrentColor() override;
+  bool ShouldShowAlpha() const override;
   bool ShouldShowSuggestions() const override;
   Vector<mojom::blink::ColorSuggestionPtr> Suggestions() const override;
   ColorChooserClient* GetColorChooserClient() override;
   bool TypeMismatchFor(const String&) const;
+
+  bool SupportsBaseAppearance(Element::BaseAppearanceValue) const override;
 
  private:
   InputTypeView* CreateView() override;
   ValueMode GetValueMode() const override;
   void ValueAttributeChanged() override;
   void CountUsage() override;
-  const AtomicString& FormControlType() const override;
   bool SupportsRequired() const override;
   String SanitizeValue(const String&) const override;
   void CreateShadowSubtree() override;
   void DidSetValue(const String&, bool value_changed) override;
   void HandleDOMActivateEvent(Event&) override;
-  ControlPart AutoAppearance() const override;
+  AppearanceValue AutoAppearance() const override;
   void OpenPopupView() override;
   void ClosePopupView() override;
   bool HasOpenedPopup() const override;
+  bool IsPickerVisible() const override;
   bool ShouldRespectListAttribute() override;
   void WarnIfValueIsInvalid(const String&) const override;
   void UpdateView() override;
+  void ColorSpaceOrAlphaAttributeChanged() override;
   AXObject* PopupRootAXObject() override;
 
   Color ValueAsColor() const;
   HTMLElement* ShadowColorSwatch() const;
+
+  // Returns true if the `colorspace` attribute selects "display-p3". Only
+  // honored when the InputTypeColorEnhancements feature is enabled.
+  bool IsDisplayP3ColorSpace() const;
+  // Returns true if the serialized value should carry an alpha component, i.e.
+  // the `alpha` attribute is present. Only honored when the
+  // InputTypeColorEnhancements feature is enabled.
+  bool HasAlphaComponent() const;
+  // Implements the "serialize a color well control color" algorithm, which is
+  // the part of the type=color value sanitization algorithm that serializes
+  // `color` according to the element's `colorspace`/`alpha` attributes.
+  // https://html.spec.whatwg.org/multipage/input.html#serialize-a-color-well-control-color
+  String SerializeColorForColorSpaceAndAlpha(Color color) const;
 
   Member<ColorChooser> chooser_;
 };

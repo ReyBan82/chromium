@@ -9,7 +9,9 @@
 #include "components/services/storage/public/cpp/big_io_buffer.h"
 #include "components/services/storage/public/mojom/service_worker_storage_control.mojom.h"
 #include "components/services/storage/service_worker/service_worker_disk_cache.h"
+#include "crypto/hash.h"
 #include "mojo/public/cpp/bindings/receiver.h"
+#include "net/base/hash_value.h"
 
 namespace storage {
 
@@ -115,7 +117,8 @@ class ServiceWorkerResourceReaderImpl
       int64_t resource_id,
       base::WeakPtr<ServiceWorkerDiskCache> disk_cache,
       mojo::PendingReceiver<mojom::ServiceWorkerResourceReader> receiver,
-      base::OnceClosure disconnect_handler);
+      base::OnceClosure disconnect_handler,
+      const std::optional<const net::SHA256HashValue>& sha256_checksum);
 
   ServiceWorkerResourceReaderImpl(const ServiceWorkerResourceReaderImpl&) =
       delete;
@@ -135,14 +138,14 @@ class ServiceWorkerResourceReaderImpl
   // Called while executing ReadResponseHead() in the order they are declared.
   void ContinueReadResponseHead();
   void DidReadHttpResponseInfo(scoped_refptr<net::IOBuffer> buffer, int status);
-  void DidReadMetadata(int status);
+  void DidReadMetadata(scoped_refptr<BigIOBuffer> metadata_buffer, int status);
   // Complete the operation started by ReadResponseHead().
   void FailReadResponseHead(int status);
   void CompleteReadResponseHead(int status);
 
   // Completes ReadData(). Called when `data_reader_` finished reading response
   // data.
-  void DidReadDataComplete();
+  void DidReadDataComplete(int status);
 
   DiskEntryOpener entry_opener_;
 
@@ -155,8 +158,26 @@ class ServiceWorkerResourceReaderImpl
   // handle //net-style maybe-async methods.
   ReadResponseHeadCallback read_response_head_callback_;
 
+  // The expected SHA-256 checksum of the service worker resource. This is
+  // calculated for both the main script and imported scripts.
+  //
+  // This checksum is calculated on the raw bytes of the service worker
+  // resource when it is first written to the disk cache. The checksum is
+  // then stored in the resource's metadata in the ServiceWorkerDatabase.
+  //
+  // When the resource is read back from the cache, a new checksum is
+  // calculated on the data that was read, and this new checksum is
+  // compared with the stored checksum to verify the integrity of the
+  // resource. The result of this comparison is recorded in the
+  // "ServiceWorker.ResourceChecksumMatch" UMA metric.
+  std::optional<net::SHA256HashValue> sha256_checksum_;
+
   // Helper for ReadData().
   std::unique_ptr<DataReader> data_reader_;
+
+  crypto::hash::Hasher hasher_{crypto::hash::HashKind::kSha256};
+  int64_t bytes_read_so_far_ = 0;
+  int64_t expected_total_size_ = 0;
 
 #if DCHECK_IS_ON()
   enum class State {

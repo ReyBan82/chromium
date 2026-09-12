@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_SAFE_BROWSING_EXTENSION_TELEMETRY_EXTENSION_TELEMETRY_CONFIG_MANAGER_H_
 #define CHROME_BROWSER_SAFE_BROWSING_EXTENSION_TELEMETRY_EXTENSION_TELEMETRY_CONFIG_MANAGER_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "extensions/common/extension_id.h"
 
@@ -80,13 +81,15 @@ class ExtensionTelemetryConfigManager {
 
  private:
   // Holds string values that map to the configurable Extension Telemetry
-  // Service variables. Packed into a base::Value::Dict so it can be
+  // Service variables. Packed into a base::DictValue so it can be
   // stored in Chrome prefs.
-  base::Value::Dict configuration_;
+  base::DictValue configuration_;
 
   // ExtensionTelemetryConfigManager uses the pref service to store
   // the telemetry config.
   raw_ptr<PrefService> pref_service_;
 };
+
 }  // namespace safe_browsing
+
 #endif  // CHROME_BROWSER_SAFE_BROWSING_EXTENSION_TELEMETRY_EXTENSION_TELEMETRY_CONFIG_MANAGER_H_

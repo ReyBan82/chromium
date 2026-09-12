@@ -2,20 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "media/formats/hls/media_playlist.h"
+
 #include <fuzzer/FuzzedDataProvider.h>
+
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
+#include <variant>
 
 #include "base/at_exit.h"
 #include "base/check.h"
 #include "base/i18n/icu_util.h"
 #include "base/memory/scoped_refptr.h"
-#include "base/strings/string_piece.h"
-#include "base/strings/string_piece_forward.h"
-#include "media/formats/hls/media_playlist.h"
+#include "base/no_destructor.h"
 #include "media/formats/hls/multivariant_playlist.h"
 #include "media/formats/hls/playlist.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 #include "url/gurl.h"
 
 struct IcuEnvironment {
@@ -24,12 +26,11 @@ struct IcuEnvironment {
   base::AtExitManager at_exit_manager;
 };
 
-IcuEnvironment* env = new IcuEnvironment();
 
-// Attempts to determine playlist version from the given source (excercising
+// Attempts to determine playlist version from the given source (exercising
 // `Playlist::IdentifyPlaylist`). Since we don't necessarily want to exit early
 // on a failure here, return `kDefaultVersion` on error.
-media::hls::types::DecimalInteger GetPlaylistVersion(base::StringPiece source) {
+media::hls::types::DecimalInteger GetPlaylistVersion(std::string_view source) {
   auto ident_result = media::hls::Playlist::IdentifyPlaylist(source);
   if (!ident_result.has_value()) {
     return media::hls::Playlist::kDefaultVersion;
@@ -39,6 +40,7 @@ media::hls::types::DecimalInteger GetPlaylistVersion(base::StringPiece source) {
 }
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
+  static const base::NoDestructor<IcuEnvironment> env;
   FuzzedDataProvider data_provider(data, size);
 
   // Decide whether to create a multivariant playlist + media playlist or just a
@@ -50,9 +52,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
     // Determine playlist version (ignore type mismatch)
     const auto version = GetPlaylistVersion(multivariant_playlist_source);
+    const auto playlist_uri = GURL("http://localhost/multi_playlist.m3u8");
     auto multivariant_playlist_result = media::hls::MultivariantPlaylist::Parse(
-        multivariant_playlist_source,
-        GURL("http://localhost/multi_playlist.m3u8"), version);
+        multivariant_playlist_source, playlist_uri,
+        url::Origin::Create(playlist_uri), version);
     if (!multivariant_playlist_result.has_value()) {
       return 0;
     }
@@ -64,9 +67,10 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
   // Determine playlist version (ignore type mismatch)
   const auto version = GetPlaylistVersion(media_playlist_source);
-  media::hls::MediaPlaylist::Parse(media_playlist_source,
-                                   GURL("http://localhost/playlist.m3u8"),
-                                   version, multivariant_playlist.get());
+  const auto playlist_uri = GURL("http://localhost/playlist.m3u8");
+  media::hls::MediaPlaylist::Parse(media_playlist_source, playlist_uri,
+                                   url::Origin::Create(playlist_uri), version,
+                                   multivariant_playlist.get());
 
   return 0;
 }

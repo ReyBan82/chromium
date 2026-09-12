@@ -30,25 +30,27 @@ class AutocompleteScoringModelExecutorTest : public testing::Test {
 
   void SetUp() override {
     base::FilePath source_root_dir;
-    base::PathService::Get(base::DIR_SOURCE_ROOT, &source_root_dir);
+    base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &source_root_dir);
     // A model of `add` operator.
     model_file_path_ = source_root_dir.AppendASCII("components")
                            .AppendASCII("test")
                            .AppendASCII("data")
                            .AppendASCII("omnibox")
                            .AppendASCII("adder.tflite");
-    execution_task_runner_ = base::ThreadPool::CreateSequencedTaskRunner(
+    task_runner_ = base::ThreadPool::CreateSequencedTaskRunner(
         {base::MayBlock(), base::TaskPriority::BEST_EFFORT});
     model_executor_ = std::make_unique<AutocompleteScoringModelExecutor>();
     model_executor_->InitializeAndMoveToExecutionThread(
-        /*model_inference_timeout=*/absl::nullopt,
+        /*model_inference_timeout=*/std::nullopt,
         optimization_guide::proto::OPTIMIZATION_TARGET_OMNIBOX_URL_SCORING,
-        execution_task_runner_, base::SequencedTaskRunner::GetCurrentDefault());
+        /*model_loading_task_runner=*/task_runner_,
+        /*execution_task_runner=*/task_runner_,
+        base::SequencedTaskRunner::GetCurrentDefault());
   }
 
   void TearDown() override {
     // Destroy model executor.
-    execution_task_runner_->DeleteSoon(FROM_HERE, std::move(model_executor_));
+    task_runner_->DeleteSoon(FROM_HERE, std::move(model_executor_));
     RunUntilIdle();
   }
 
@@ -57,13 +59,13 @@ class AutocompleteScoringModelExecutorTest : public testing::Test {
  protected:
   base::test::TaskEnvironment task_environment_;
   base::FilePath model_file_path_;
-  scoped_refptr<base::SequencedTaskRunner> execution_task_runner_;
+  scoped_refptr<base::SequencedTaskRunner> task_runner_;
   std::unique_ptr<AutocompleteScoringModelExecutor> model_executor_;
 };
 
 TEST_F(AutocompleteScoringModelExecutorTest, ExecuteModel) {
   // Update model file.
-  execution_task_runner_->PostTask(
+  task_runner_->PostTask(
       FROM_HERE,
       base::BindOnce(
           &optimization_guide::ModelExecutor<ModelOutput,
@@ -72,11 +74,11 @@ TEST_F(AutocompleteScoringModelExecutorTest, ExecuteModel) {
 
   // Execute model.
   std::unique_ptr<base::RunLoop> run_loop = std::make_unique<base::RunLoop>();
-  base::OnceCallback<void(const absl::optional<ModelOutput>&)>
+  base::OnceCallback<void(const std::optional<ModelOutput>&)>
       execution_callback = base::BindOnce(
           [](base::RunLoop* run_loop,
-             const absl::optional<ModelOutput>& output) {
-            ASSERT_EQ(1, static_cast<int>(output.value().size()));
+             const std::optional<ModelOutput>& output) {
+            ASSERT_EQ(1u, output.value().size());
             // 1 + 2 = 3
             EXPECT_NEAR(3, output.value().front(), 1e-1);
             run_loop->Quit();
@@ -84,7 +86,7 @@ TEST_F(AutocompleteScoringModelExecutorTest, ExecuteModel) {
           run_loop.get());
   base::TimeTicks now = base::TimeTicks::Now();
   ModelInput input = {1, 2};
-  execution_task_runner_->PostTask(
+  task_runner_->PostTask(
       FROM_HERE, base::BindOnce(&optimization_guide::ModelExecutor<
                                     ModelOutput, ModelInput>::SendForExecution,
                                 model_executor_->GetWeakPtrForExecutionThread(),

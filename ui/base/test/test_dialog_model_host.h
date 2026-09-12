@@ -17,7 +17,8 @@
 
 namespace ui {
 
-class TestDialogModelHost final : public DialogModelHost {
+class TestDialogModelHost final : public DialogModelHost,
+                                  public DialogModelFieldHost {
  public:
   enum class ButtonId {
     kCancel,
@@ -50,11 +51,12 @@ class TestDialogModelHost final : public DialogModelHost {
   const std::u16string& GetLabel(ButtonId button_id);
   ElementIdentifier GetId(ButtonId button_id);
   ElementIdentifier GetInitiallyFocusedField();
+  bool GetEnableInputProtection();
 
  private:
   // DialogModelHost:
   void Close() override;
-  void OnFieldAdded(DialogModelField* field) override;
+  void OnDialogButtonChanged() override;
 
   std::unique_ptr<DialogModel> dialog_model_;
 };

@@ -5,10 +5,11 @@
 #ifndef CHROMEOS_ASH_SERVICES_MULTIDEVICE_SETUP_HOST_STATUS_PROVIDER_H_
 #define CHROMEOS_ASH_SERVICES_MULTIDEVICE_SETUP_HOST_STATUS_PROVIDER_H_
 
+#include <optional>
+
 #include "base/observer_list.h"
 #include "chromeos/ash/components/multidevice/remote_device_ref.h"
 #include "chromeos/ash/services/multidevice_setup/public/mojom/multidevice_setup.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -23,7 +24,7 @@ class HostStatusProvider {
    public:
     HostStatusWithDevice(
         mojom::HostStatus host_status,
-        const absl::optional<multidevice::RemoteDeviceRef>& host_device);
+        const std::optional<multidevice::RemoteDeviceRef>& host_device);
     HostStatusWithDevice(const HostStatusWithDevice& other);
     ~HostStatusWithDevice();
 
@@ -34,20 +35,22 @@ class HostStatusProvider {
 
     // If host_status() is kNoEligibleHosts or
     // kEligibleHostExistsButNoHostSet, host_device() is null.
-    const absl::optional<multidevice::RemoteDeviceRef>& host_device() const {
+    const std::optional<multidevice::RemoteDeviceRef>& host_device() const {
       return host_device_;
     }
 
    private:
     mojom::HostStatus host_status_;
-    absl::optional<multidevice::RemoteDeviceRef> host_device_;
+    std::optional<multidevice::RemoteDeviceRef> host_device_;
   };
 
-  class Observer {
+  class Observer : public base::CheckedObserver {
    public:
-    virtual ~Observer() = default;
     virtual void OnHostStatusChange(
         const HostStatusWithDevice& host_status_with_device) = 0;
+
+   protected:
+    ~Observer() override = default;
   };
 
   HostStatusProvider(const HostStatusProvider&) = delete;
@@ -65,10 +68,10 @@ class HostStatusProvider {
 
   void NotifyHostStatusChange(
       mojom::HostStatus host_status,
-      const absl::optional<multidevice::RemoteDeviceRef>& host_device);
+      const std::optional<multidevice::RemoteDeviceRef>& host_device);
 
  private:
-  base::ObserverList<Observer>::Unchecked observer_list_;
+  base::ObserverList<Observer> observer_list_;
 };
 
 }  // namespace multidevice_setup

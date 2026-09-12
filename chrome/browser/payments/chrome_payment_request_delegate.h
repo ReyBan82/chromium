@@ -11,18 +11,21 @@
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/payments/webapps/twa_package_helper.h"
 #include "components/payments/content/content_payment_request_delegate.h"
-#include "components/payments/content/secure_payment_confirmation_controller.h"
-#include "components/payments/content/secure_payment_confirmation_no_creds.h"
 #include "content/public/browser/global_routing_id.h"
 
 namespace content {
 class BrowserContext;
 }  // namespace content
 
+namespace autofill {
+class RegionDataLoader;
+}  // namespace autofill
+
 namespace payments {
 
 class PaymentRequestDialog;
 class PaymentUIObserver;
+class SecurePaymentConfirmationController;
 
 class ChromePaymentRequestDelegate : public ContentPaymentRequestDelegate {
  public:
@@ -41,28 +44,21 @@ class ChromePaymentRequestDelegate : public ContentPaymentRequestDelegate {
   void CloseDialog() override;
   void ShowErrorMessage() override;
   void ShowProcessingSpinner() override;
+  void ShowLoadingView() override;
   autofill::PersonalDataManager* GetPersonalDataManager() override;
   const std::string& GetApplicationLocale() const override;
   bool IsOffTheRecord() const override;
   const GURL& GetLastCommittedURL() const override;
   autofill::AddressNormalizer* GetAddressNormalizer() override;
-  autofill::RegionDataLoader* GetRegionDataLoader() override;
-  ukm::UkmRecorder* GetUkmRecorder() override;
-  std::string GetAuthenticatedEmail() const override;
   PrefService* GetPrefService() override;
   bool IsBrowserWindowActive() const override;
-  void ShowNoMatchingPaymentCredentialDialog(
-      const std::u16string& merchant_name,
-      const std::string& rp_id,
-      base::OnceClosure response_callback,
-      base::OnceClosure opt_out_callback) override;
 
   // ContentPaymentRequestDelegate:
   content::RenderFrameHost* GetRenderFrameHost() const override;
   std::unique_ptr<webauthn::InternalAuthenticator> CreateInternalAuthenticator()
       const override;
-  scoped_refptr<PaymentManifestWebDataService>
-  GetPaymentManifestWebDataService() const override;
+  scoped_refptr<WebPaymentsWebDataService> GetWebPaymentsWebDataService()
+      const override;
   PaymentRequestDisplayManager* GetDisplayManager() override;
   void EmbedPaymentHandlerWindow(
       const GURL& url,
@@ -71,9 +67,12 @@ class ChromePaymentRequestDelegate : public ContentPaymentRequestDelegate {
   std::string GetInvalidSslCertificateErrorMessage() override;
   void GetTwaPackageName(GetTwaPackageNameCallback callback) const override;
   PaymentRequestDialog* GetDialogForTesting() override;
-  SecurePaymentConfirmationNoCreds* GetNoMatchingCredentialsDialogForTesting()
-      override;
+
   const base::WeakPtr<PaymentUIObserver> GetPaymentUIObserver() const override;
+  std::string GetSecurePaymentConfirmationKeychainAccessGroup() const override;
+
+  // Creates a new region data loader that will self delete, or a test mock.
+  virtual autofill::RegionDataLoader* GetRegionDataLoader();
 
  protected:
   // Reference to the dialog so that we can satisfy calls to CloseDialog(). This
@@ -88,8 +87,6 @@ class ChromePaymentRequestDelegate : public ContentPaymentRequestDelegate {
   content::BrowserContext* GetBrowserContextOrNull() const;
 
   std::unique_ptr<SecurePaymentConfirmationController> spc_dialog_;
-
-  std::unique_ptr<SecurePaymentConfirmationNoCreds> spc_no_creds_dialog_;
 
   const content::GlobalRenderFrameHostId frame_routing_id_;
 

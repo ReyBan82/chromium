@@ -5,10 +5,11 @@
 #ifndef GPU_COMMAND_BUFFER_COMMON_COMMAND_BUFFER_SHARED_H_
 #define GPU_COMMAND_BUFFER_COMMON_COMMAND_BUFFER_SHARED_H_
 
+#include <array>
 #include <atomic>
 
-#include "command_buffer.h"
 #include "base/atomicops.h"
+#include "command_buffer.h"
 
 namespace gpu {
 
@@ -16,43 +17,42 @@ namespace gpu {
 // ensure that the reader gets a consistent copy of what the writer wrote.
 template<typename T>
 class SharedState {
-  T states_[2][2];
-  base::subtle::Atomic32 reading_;
-  base::subtle::Atomic32 latest_;
-  base::subtle::Atomic32 slots_[2];
+  std::array<std::array<T, 2>, 2> states_;
+  std::atomic<int32_t> reading_;
+  std::atomic<int32_t> latest_;
+  std::array<std::atomic<int32_t>, 2> slots_;
 
-public:
-
+ public:
   void Initialize() {
-    for (int i = 0; i < 2; ++i) {
-      for (int j = 0; j < 2; ++j) {
-        states_[i][j] = T();
-      }
-    }
-    base::subtle::NoBarrier_Store(&reading_, 0);
-    base::subtle::NoBarrier_Store(&latest_, 0);
-    base::subtle::NoBarrier_Store(&slots_[0], 0);
-    base::subtle::Release_Store(&slots_[1], 0);
+    states_ = {};
+    reading_.store(0, std::memory_order_relaxed);
+    latest_.store(0, std::memory_order_relaxed);
+    slots_[0].store(0, std::memory_order_relaxed);
+    slots_[1].store(0, std::memory_order_release);
+    // TODO(crbug.com/40175832): Merge fence into release store
     std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   void Write(const T& state) {
-    int towrite = !base::subtle::Acquire_Load(&reading_);
-    int index = !base::subtle::Acquire_Load(&slots_[towrite]);
+    int towrite = !reading_.load(std::memory_order_acquire);
+    int index = !slots_[towrite].load(std::memory_order_acquire);
     states_[towrite][index] = state;
-    base::subtle::Release_Store(&slots_[towrite], index);
-    base::subtle::Release_Store(&latest_, towrite);
+    slots_[towrite].store(index, std::memory_order_release);
+    latest_.store(towrite, std::memory_order_release);
+    // TODO(crbug.com/40175832): Merge fence into release store
     std::atomic_thread_fence(std::memory_order_seq_cst);
   }
 
   // Attempt to update the state, updating only if the generation counter is
   // newer.
   void Read(T* state) {
+    // TODO(crbug.com/40175832): Merge fence into subsequent load
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    int toread = !!base::subtle::Acquire_Load(&latest_);
-    base::subtle::Release_Store(&reading_, toread);
+    int toread = !!latest_.load(std::memory_order_acquire);
+    reading_.store(toread, std::memory_order_release);
+    // TODO(crbug.com/40175832): Merge fence into release store above
     std::atomic_thread_fence(std::memory_order_seq_cst);
-    int index = !!base::subtle::Acquire_Load(&slots_[toread]);
+    int index = !!slots_[toread].load(std::memory_order_acquire);
     if (states_[toread][index].generation - state->generation < 0x80000000U)
       *state = states_[toread][index];
   }

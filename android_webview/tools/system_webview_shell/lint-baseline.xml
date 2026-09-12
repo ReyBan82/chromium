@@ -1,202 +1,132 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<issues format="6" by="lint 8.1.0-alpha01" type="baseline" client="" dependencies="true" name="" variant="all" version="8.1.0-alpha01">
+<issues format="6" by="lint 9.1.0-alpha06" type="baseline" client="" dependencies="true" name="" variant="all" version="9.1.0-alpha06">
 
     <issue
-        id="MissingClass"
-        message="Class referenced in the manifest, `org.chromium.test.broker.OnDeviceInstrumentationBroker`, was not found in the project or the libraries"
-        errorLine1="    &lt;activity android:name=&quot;org.chromium.test.broker.OnDeviceInstrumentationBroker&quot; android:exported=&quot;true&quot;/>"
-        errorLine2="                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        id="UnclosedTrace"
+        message="The `beginSection()` call is not always closed with a matching `endSection()` because the code in between may return early"
+        errorLine1="        Trace.beginSection(startUpAndLoadUrlTraceTag);"
+        errorLine2="              ~~~~~~~~~~~~">
         <location
-            file="gen/android_webview/tools/system_webview_shell/system_webview_shell_apk__lint/gen/android_webview/system_webview_shell_apk/AndroidManifest.xml"
-            line="187"
-            column="29"/>
+            file="../../android_webview/tools/system_webview_shell/apk/src/org/chromium/webview_shell/TelemetryActivity.java"
+            line="56"
+            column="15"/>
     </issue>
 
     <issue
-        id="RequiresFeature"
-        message="`getInstance` should only be called if the feature `TRACING_CONTROLLER_BASIC_USAGE` is present; to check call `androidx.webkit.WebViewFeature#isFeatureSupported`"
-        errorLine1="            TracingController tracingController = TracingController.getInstance();"
-        errorLine2="                                                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        id="UnclosedTrace"
+        message="The `beginSection()` call is not always closed with a matching `endSection()` because the code in between may return early"
+        errorLine1="        Trace.beginSection(loadUrlTraceTag);"
+        errorLine2="              ~~~~~~~~~~~~">
         <location
-            file="../../android_webview/tools/system_webview_shell/apk/src/org/chromium/webview_shell/WebViewBrowserActivity.java"
-            line="750"
-            column="51"/>
+            file="../../android_webview/tools/system_webview_shell/apk/src/org/chromium/webview_shell/TelemetryActivity.java"
+            line="104"
+            column="15"/>
     </issue>
 
     <issue
-        id="RequiresFeature"
-        message="`setForceDark` should only be called if the feature `FORCE_DARK` is present; to check call `androidx.webkit.WebViewFeature#isFeatureSupported`"
-        errorLine1="            WebSettingsCompat.setForceDark("
-        errorLine2="            ^">
+        id="UnclosedTrace"
+        message="The `beginSection()` call is not always closed with a matching `endSection()` because the code in between may return early"
+        errorLine1="        Trace.beginSection(placeholderTraceTag);"
+        errorLine2="              ~~~~~~~~~~~~">
         <location
-            file="../../android_webview/tools/system_webview_shell/apk/src/org/chromium/webview_shell/WebViewBrowserActivity.java"
-            line="771"
+            file="../../android_webview/tools/system_webview_shell/apk/src/org/chromium/webview_shell/TelemetryActivity.java"
+            line="112"
+            column="15"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
+        message="The resource `R.xml.ad_services_config` appears to be unused"
+        errorLine1="&lt;ad-services-config>"
+        errorLine2="^">
+        <location
+            file="../../android_webview/tools/system_webview_shell/apk/res/xml/ad_services_config.xml"
+            line="8"
+            column="1"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
+        message="The resource `R.drawable.ic_launcher` appears to be unused">
+        <location
+            file="../../android_webview/tools/system_webview_shell/apk/res/drawable-mdpi/ic_launcher.png"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
+        message="The resource `R.xml.network_security_config` appears to be unused"
+        errorLine1="&lt;network-security-config>"
+        errorLine2="^">
+        <location
+            file="../../android_webview/tools/system_webview_shell/apk/res/xml/network_security_config.xml"
+            line="6"
+            column="1"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
+        message="The resource `R.string.app_name` appears to be unused"
+        errorLine1="    &lt;string name=&quot;app_name&quot;>WebView Shell&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~">
+        <location
+            file="../../android_webview/tools/system_webview_shell/apk/res/values/strings.xml"
+            line="8"
             column="13"/>
     </issue>
 
     <issue
-        id="RequiresFeature"
-        message="`setForceDark` should only be called if the feature `FORCE_DARK` is present; to check call `androidx.webkit.WebViewFeature#isFeatureSupported`"
-        errorLine1="            WebSettingsCompat.setForceDark("
-        errorLine2="            ^">
+        id="UnusedResources"
+        message="The resource `R.string.title_activity_browser_second_process` appears to be unused"
+        errorLine1="    &lt;string name=&quot;title_activity_browser_second_process&quot;>Second Process Browser Tester&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="../../android_webview/tools/system_webview_shell/apk/src/org/chromium/webview_shell/WebViewBrowserActivity.java"
-            line="776"
+            file="../../android_webview/tools/system_webview_shell/apk/res/values/strings.xml"
+            line="13"
             column="13"/>
     </issue>
 
     <issue
-        id="RequiresFeature"
-        message="`setForceDark` should only be called if the feature `FORCE_DARK` is present; to check call `androidx.webkit.WebViewFeature#isFeatureSupported`"
-        errorLine1="            WebSettingsCompat.setForceDark(mWebView.getSettings(), WebSettingsCompat.FORCE_DARK_ON);"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        id="UnusedResources"
+        message="The resource `R.string.title_activity_layout_test` appears to be unused"
+        errorLine1="    &lt;string name=&quot;title_activity_layout_test&quot;>WebView Layout Test&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="../../android_webview/tools/system_webview_shell/apk/src/org/chromium/webview_shell/WebViewBrowserActivity.java"
-            line="781"
+            file="../../android_webview/tools/system_webview_shell/apk/res/values/strings.xml"
+            line="14"
             column="13"/>
     </issue>
 
     <issue
-        id="RequiresFeature"
-        message="`getInstance` should only be called if the feature `TRACING_CONTROLLER_BASIC_USAGE` is present; to check call `androidx.webkit.WebViewFeature#isFeatureSupported`"
-        errorLine1="        final TracingController tracingController = TracingController.getInstance();"
-        errorLine2="                                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        id="UnusedResources"
+        message="The resource `R.string.title_activity_thread_test` appears to be unused"
+        errorLine1="    &lt;string name=&quot;title_activity_thread_test&quot;>WebView Thread Test&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="../../android_webview/tools/system_webview_shell/apk/src/org/chromium/webview_shell/WebViewTracingActivity.java"
-            line="100"
-            column="53"/>
-    </issue>
-
-    <issue
-        id="WrongConstant"
-        message="Must be one of: Status.PENDING, Status.RUNNING, Status.FINISHED"
-        errorLine1="                    GET_STATUS_UMA_HISTOGRAM, status, Status.NUM_ENTRIES);"
-        errorLine2="                                                             ~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/task/AsyncTask.java"
-            line="315"
-            column="62"/>
-    </issue>
-
-    <issue
-        id="WrongConstant"
-        message="Must be one of: Status.PENDING, Status.RUNNING, Status.FINISHED"
-        errorLine1="                    GET_STATUS_UMA_HISTOGRAM, status, Status.NUM_ENTRIES);"
-        errorLine2="                                                             ~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/task/AsyncTask.java"
-            line="353"
-            column="62"/>
-    </issue>
-
-    <issue
-        id="WrongConstant"
-        message="Must be one of: Notification.UNKNOWN_TRIM_LEVEL, Notification.TRIM_MEMORY_COMPLETE, Notification.TRIM_MEMORY_MODERATE, Notification.TRIM_MEMORY_BACKGROUND, Notification.TRIM_MEMORY_UI_HIDDEN, Notification.TRIM_MEMORY_RUNNING_CRITICAL, Notification.TRIM_MEMORY_RUNNING_LOW, Notification.TRIM_MEMORY_RUNNING_MODERATE, Notification.ON_LOW_MEMORY"
-        errorLine1="                mHistogramName, notification, Notification.NUM_ENTRIES);"
-        errorLine2="                                                           ~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/memory/MemoryPressureUma.java"
-            line="110"
-            column="60"/>
-    </issue>
-
-    <issue
-        id="AppBundleLocaleChanges"
-        message="Found dynamic locale changes, but did not find corresponding Play Core library calls for downloading languages and splitting by language is not disabled in the `bundle` configuration"
-        errorLine1="            config.setLocale(Locale.forLanguageTag(languageTag));"
-        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/LocaleUtils.java"
-            line="267"
+            file="../../android_webview/tools/system_webview_shell/apk/res/values/strings.xml"
+            line="16"
             column="13"/>
     </issue>
 
     <issue
-        id="QueryPermissionsNeeded"
-        message="Consider adding a `&lt;queries>` declaration to your manifest when calling this \&#xA;method; see https://g.co/dev/packagevisibility for details"
-        errorLine1="            return pm.queryIntentActivities(intent, flags);"
-        errorLine2="                      ~~~~~~~~~~~~~~~~~~~~~">
+        id="UnusedResources"
+        message="The resource `R.string.title_activity_page_cycler` appears to be unused"
+        errorLine1="    &lt;string name=&quot;title_activity_page_cycler&quot;>WebView Page Cycler Test&lt;/string>"
+        errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="../../base/android/java/src/org/chromium/base/PackageManagerUtils.java"
-            line="63"
-            column="23"/>
+            file="../../android_webview/tools/system_webview_shell/apk/res/values/strings.xml"
+            line="17"
+            column="13"/>
     </issue>
 
     <issue
-        id="UseCompatLoadingForDrawables"
-        message="Use `ResourcesCompat.getDrawable()`"
-        errorLine1="                return res.getDrawable(id, null);"
-        errorLine2="                       ~~~~~~~~~~~~~~~~~~~~~~~~~">
+        id="UnusedResources"
+        message="The resource `R.style.ShellTheme` appears to be unused"
+        errorLine1="  &lt;style name=&quot;ShellTheme&quot; parent=&quot;Theme.AppCompat.DayNight.NoActionBar&quot;>"
+        errorLine2="         ~~~~~~~~~~~~~~~~~">
         <location
-            file="../../base/android/java/src/org/chromium/base/ApiCompatibilityUtils.java"
-            line="214"
-            column="24"/>
-    </issue>
-
-    <issue
-        id="HardcodedDebugMode"
-        message="Avoid hardcoding the debug mode; leaving it out allows debug and release builds to automatically assign one"
-        errorLine1="  &lt;application android:icon=&quot;@drawable/ic_launcher&quot; android:label=&quot;@string/app_name&quot; android:theme=&quot;@style/ShellTheme&quot; android:enableOnBackInvokedCallback=&quot;true&quot; android:networkSecurityConfig=&quot;@xml/network_security_config&quot; android:debuggable=&quot;true&quot;>"
-        errorLine2="                                                                                                                                                                                                                               ~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="gen/android_webview/tools/system_webview_shell/system_webview_shell_apk__lint/gen/android_webview/system_webview_shell_apk/AndroidManifest.xml"
-            line="69"
-            column="224"/>
-    </issue>
-
-    <issue
-        id="UnspecifiedRegisterReceiverFlag"
-        message="`receiver` \&#xA;is missing `RECEIVER_EXPORTED` or `RECEIVER_NOT_EXPORTED` flag for unprotected \&#xA;broadcasts registered for an IntentFilter that cannot be inspected by lint"
-        errorLine1="            return context.registerReceiver(receiver, filter, permission, scheduler);"
-        errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/ContextUtils.java"
-            line="307"
-            column="20"/>
-    </issue>
-
-    <issue
-        id="AssertionSideEffect"
-        message="Assertion condition has a side effect: f.setAccessible(true)"
-        errorLine1="                    assert reachesWindowCallback(activity.getWindow().getCallback());"
-        errorLine2="                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/ApplicationStatus.java"
-            line="351"
-            column="28"/>
-    </issue>
-
-    <issue
-        id="AssertionSideEffect"
-        message="Assertion condition has a side effect: sHaveAccessNetworkState =&#xA;                    ApiCompatibilityUtils.checkPermission(ContextUtils.getApplicationContext(),&#xA;                            Manifest.permission.ACCESS_NETWORK_STATE, Process.myPid(),&#xA;                            Process.myUid())&#xA;                    == PackageManager.PERMISSION_GRANTED"
-        errorLine1="        assert isSupported();"
-        errorLine2="               ~~~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/RadioUtils.java"
-            line="80"
-            column="16"/>
-    </issue>
-
-    <issue
-        id="AssertionSideEffect"
-        message="Assertion condition has a side effect: sHaveAccessNetworkState =&#xA;                    ApiCompatibilityUtils.checkPermission(ContextUtils.getApplicationContext(),&#xA;                            Manifest.permission.ACCESS_NETWORK_STATE, Process.myPid(),&#xA;                            Process.myUid())&#xA;                    == PackageManager.PERMISSION_GRANTED"
-        errorLine1="        assert isSupported();"
-        errorLine2="               ~~~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/RadioUtils.java"
-            line="105"
-            column="16"/>
-    </issue>
-
-    <issue
-        id="AssertionSideEffect"
-        message="Assertion condition has a side effect: sHaveAccessNetworkState =&#xA;                    ApiCompatibilityUtils.checkPermission(ContextUtils.getApplicationContext(),&#xA;                            Manifest.permission.ACCESS_NETWORK_STATE, Process.myPid(),&#xA;                            Process.myUid())&#xA;                    == PackageManager.PERMISSION_GRANTED"
-        errorLine1="        assert isSupported();"
-        errorLine2="               ~~~~~~~~~~~~~">
-        <location
-            file="../../base/android/java/src/org/chromium/base/RadioUtils.java"
-            line="131"
-            column="16"/>
+            file="../../android_webview/tools/system_webview_shell/apk/res/values-v17/styles.xml"
+            line="7"
+            column="10"/>
     </issue>
 
     <issue

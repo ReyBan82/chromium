@@ -2,21 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'chrome://resources/cr_elements/cr_search_field/cr_search_field.js';
+import 'chrome://resources/ash/common/cr_elements/cr_search_field/cr_search_field.js';
 import './emoji_category_button.js';
 import './emoji_group.js';
 
-import {CrSearchFieldElement} from 'chrome://resources/cr_elements/cr_search_field/cr_search_field.js';
-import {PolymerSpliceChange} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {CrSearchFieldElement} from 'chrome://resources/ash/common/cr_elements/cr_search_field/cr_search_field.js';
+import {assertNotReached} from 'chrome://resources/js/assert.js';
+import type {PolymerSpliceChange} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {NO_INTERNET_SEARCH_ERROR_MSG} from './constants.js';
-import {Status} from './emoji_picker.mojom-webui.js';
-import {EmojiPickerApiProxyImpl} from './emoji_picker_api_proxy.js';
+import {EmojiPickerApiProxy} from './emoji_picker_api_proxy.js';
 import {getTemplate} from './emoji_search.html.js';
 import {GIF_ERROR_TRY_AGAIN} from './events.js';
 import Fuse from './fuse.js';
-import {CategoryData, CategoryEnum, EmojiGroupData, EmojiVariants} from './types.js';
+import {Status} from './tenor_types.mojom-webui.js';
+import type {CategoryData, EmojiGroupData, EmojiVariants, Gender, Tone} from './types.js';
+import {CategoryEnum} from './types.js';
 
 export interface EmojiSearch {
   $: {
@@ -24,7 +26,6 @@ export interface EmojiSearch {
     searchShadow: HTMLElement,
   };
 }
-
 
 export class EmojiSearch extends PolymerElement {
   static get is() {
@@ -44,18 +45,28 @@ export class EmojiSearch extends PolymerElement {
       needIndexing: {type: Boolean, value: false},
       gifSupport: {type: Boolean, value: false},
       status: {type: Status, value: null},
-      searchQuery: {type: String, value: ''},
       nextGifPos: {type: String, value: ''},
       errorMessage: {type: String, value: NO_INTERNET_SEARCH_ERROR_MSG},
+      closeGifNudgeOverlay: {type: Object},
+      useMojoSearch: {type: Boolean, value: false},
+      useGroupedPreference: {type: Boolean, value: false},
+      globalTone: {type: Number, value: null, readonly: true},
+      globalGender: {type: Number, value: null, readonly: true},
     };
   }
-  categoriesData: EmojiGroupData;
-  categoryMetadata: CategoryData[];
-  lazyIndexing: boolean;
-  private searchResults: EmojiGroupData;
-  private needIndexing: boolean;
-  private gifSupport: boolean;
-  private status: Status|null;
+  declare categoriesData: EmojiGroupData;
+  declare categoryMetadata: CategoryData[];
+  declare lazyIndexing: boolean;
+  declare private searchResults: EmojiGroupData;
+  declare private needIndexing: boolean;
+  declare private gifSupport: boolean;
+  declare private status: Status|null;
+  declare private closeGifNudgeOverlay: () => void;
+  declare private useMojoSearch;
+  declare private useGroupedPreference: boolean;
+  declare private globalTone: Tone|null;
+  declare private globalGender: Gender|null;
+
   // TODO(b/235419647): Update the config to use extended search.
   private fuseConfig: Fuse.IFuseOptions<EmojiVariants> = {
     threshold: 0.0,        // Exact match only.
@@ -67,9 +78,10 @@ export class EmojiSearch extends PolymerElement {
         ],
   };
   private fuseInstances = new Map<CategoryEnum, Fuse<EmojiVariants>>();
-  private nextGifPos: string;  // This variable ensures that we get the correct
+  declare private nextGifPos: string;  // This variable ensures that we get the correct
                                // set of GIFs when fetching more.
-  private scrollTimeout: number|null;
+  declare private errorMessage: string;
+  private scrollTimeout: number|null = null;
 
   static get observers() {
     return [
@@ -88,13 +100,37 @@ export class EmojiSearch extends PolymerElement {
     this.addEventListener(GIF_ERROR_TRY_AGAIN, this.onClickTryAgain);
   }
 
-  private onSearch(newSearch: string): void {
-    this.set('searchResults', this.computeLocalSearchResults(newSearch));
-    if (this.gifSupport) {
+  private async onSearch(newSearch: string): Promise<void> {
+    const localSearchResults = this.useMojoSearch ?
+        await this.computeEmojiSearchResults(newSearch) :
+        this.computeLocalSearchResults(newSearch);
+
+    if (!this.gifSupport) {
+      this.set('searchResults', localSearchResults);
+    } else {
+      // With GIF support, we will progressively show local search results first
+      // and more online GIFs after. To avoid displaying a "no results" screen in
+      // the middle, we only do this update when local search results are not
+      // empty.
+      if (localSearchResults.length > 0) {
+        this.set('searchResults', localSearchResults);
+      }
       this.computeInitialGifSearchResults(newSearch).then((searchResults) => {
-        this.push('searchResults', ...searchResults);
+        this.set('searchResults', [...localSearchResults, ...searchResults]);
       });
     }
+
+    // If the user is searching, to ensure emoji tooltip or variants popup can
+    // be full displayed, we need to specify the minimum height as 100%.
+    this.updateStyles({
+      '--min-height': (newSearch.length > 0 ? '100%' : 'unset'),
+    });
+  }
+
+  // TODO(b/281609806): Remove this compatibility logic once gif support is
+  // turned on by default
+  private getSearchPlaceholderLabel(gifSupport: boolean): string {
+    return gifSupport ? 'Search' : 'Search emojis';
   }
 
   /**
@@ -125,7 +161,11 @@ export class EmojiSearch extends PolymerElement {
    * Event handler for keydown on the search input. Used to switch focus to the
    * results list on down arrow or enter key presses.
    */
-  private onSearchKeyDown(ev: KeyboardEvent): void {
+  onSearchKeyDown(ev: KeyboardEvent): void {
+    // If GIF support is enabled, we may have an overlay for the GIF nudge. Need
+    // to ensure the overlay is closed before searching for anything.
+    this.closeGifNudgeOverlay();
+
     const resultsCount = this.getNumSearchResults();
     // if not searching or no results, do nothing.
     if (!this.$.search.getValue() || resultsCount === 0) {
@@ -216,6 +256,47 @@ export class EmojiSearch extends PolymerElement {
     this.needIndexing = false;
   }
 
+  private findEmoji(category: CategoryEnum, emojiString: string):
+      EmojiVariants {
+    for (const group of this.categoriesData) {
+      if (group.category !== category) {
+        continue;
+      }
+      for (const emoji of group.emoji) {
+        if (emoji.base.string === emojiString) {
+          return emoji;
+        }
+      }
+    }
+    assertNotReached('Not able to find matching emoji');
+  }
+
+  private async computeEmojiSearchResults(search: string):
+      Promise<EmojiGroupData> {
+    const results = await EmojiPickerApiProxy.getInstance().searchEmoji(search);
+
+    return [
+      {
+        category: CategoryEnum.EMOJI,
+        group: '',
+        emoji: results.emojiResults.results.map(
+            (emoji) => this.findEmoji(CategoryEnum.EMOJI, emoji)),
+      },
+      {
+        category: CategoryEnum.SYMBOL,
+        group: '',
+        emoji: results.symbolResults.results.map(
+            (emoji) => this.findEmoji(CategoryEnum.SYMBOL, emoji)),
+      },
+      {
+        category: CategoryEnum.EMOTICON,
+        group: '',
+        emoji: results.emoticonResults.results.map(
+            (emoji) => this.findEmoji(CategoryEnum.EMOTICON, emoji)),
+      },
+    ];
+  }
+
   /**
    * Computes search results for a keyword.
    *
@@ -286,8 +367,8 @@ export class EmojiSearch extends PolymerElement {
 
     // Append more GIFs to show if user is near the bottom of the currently
     // rendered GIFs (300px is around the average height of 2 GIFs).
-    if (searchResultRect!.getBoundingClientRect().bottom -
-            thisRect!.getBoundingClientRect().bottom <=
+    if (searchResultRect.getBoundingClientRect().bottom -
+            thisRect.getBoundingClientRect().bottom <=
         300) {
       const gifIndex = this.searchResults.findIndex(
           group => group.category === CategoryEnum.GIF);
@@ -309,16 +390,20 @@ export class EmojiSearch extends PolymerElement {
     }
 
     const searchResults: EmojiGroupData = [];
-    const apiProxy = EmojiPickerApiProxyImpl.getInstance();
+    const apiProxy = EmojiPickerApiProxy.getInstance();
     const {status, searchGifs} = await apiProxy.searchGifs(search);
     this.status = status;
     this.nextGifPos = searchGifs.next;
-    searchResults.push({
-      'category': CategoryEnum.GIF,
-      'group': '',
-      'emoji': apiProxy.convertTenorGifsToEmoji(searchGifs),
-      'searchOnly': false,
-    });
+
+    if (searchGifs.results.length > 0) {
+      searchResults.push({
+        'category': CategoryEnum.GIF,
+        'group': '',
+        'emoji': apiProxy.convertTenorGifsToEmoji(searchGifs),
+        'searchOnly': false,
+      });
+    }
+
     return searchResults;
   }
 
@@ -328,7 +413,7 @@ export class EmojiSearch extends PolymerElement {
       return [];
     }
 
-    const apiProxy = EmojiPickerApiProxyImpl.getInstance();
+    const apiProxy = EmojiPickerApiProxy.getInstance();
     const {searchGifs} = await apiProxy.searchGifs(search, this.nextGifPos);
     this.nextGifPos = searchGifs.next;
     return apiProxy.convertTenorGifsToEmoji(searchGifs);
@@ -367,7 +452,7 @@ export class EmojiSearch extends PolymerElement {
    * Calculates the total number of items in the search results.
    *
    */
-  private getNumSearchResults(): number {
+  getNumSearchResults(): number {
     return this.searchResults ?
         this.searchResults.reduce((acc, item) => acc + item.emoji.length, 0) :
         0;
@@ -381,12 +466,9 @@ export class EmojiSearch extends PolymerElement {
     return this.$.search.getValue() !== '';
   }
 
-  /**
-   * Display no results if `gifSupport` flag is off and `searchResults` are
-   * empty. If `gifSupport` flag is on it will always have gifs to display.
-   */
-  noResults(searchResults: EmojiGroupData): boolean {
-    return !this.gifSupport && searchResults.length === 0;
+  noResults(status: Status, searchResults: EmojiGroupData): boolean {
+    return (!this.gifSupport || status === Status.kHttpOk) &&
+        searchResults.length === 0;
   }
 
   isGifInErrorState(status: Status, searchResults: EmojiGroupData): boolean {
@@ -398,11 +480,21 @@ export class EmojiSearch extends PolymerElement {
     this.onSearch(this.$.search.getValue());
   }
 
+  getSearchQuery(): string {
+    return this.$.search.getValue();
+  }
+
   /**
    * Sets the search query
    */
   setSearchQuery(value: string): void {
     this.$.search.setValue(value);
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    [EmojiSearch.is]: EmojiSearch;
   }
 }
 

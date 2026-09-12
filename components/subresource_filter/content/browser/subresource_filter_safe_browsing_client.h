@@ -10,7 +10,7 @@
 #include <memory>
 
 #include "base/containers/flat_map.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "components/safe_browsing/core/browser/db/util.h"
@@ -26,15 +26,15 @@ class TracedValue;
 
 namespace safe_browsing {
 class SafeBrowsingDatabaseManager;
+class V5GetHashProtocolManager;
 }  // namespace safe_browsing
 
 namespace subresource_filter {
 
-class SubresourceFilterSafeBrowsingActivationThrottle;
+class SafeBrowsingPageActivationThrottle;
 class SubresourceFilterSafeBrowsingClientRequest;
 
-// Created on the UI thread but used on the IO thread to communicate with the
-// safe browsing service.
+// This is used to communicate with the safe browsing service.
 //
 // The class is expected to accompany a single navigation, and can maintain many
 // database requests. It will cancel any outgoing requests when it is destroyed.
@@ -45,10 +45,10 @@ class SubresourceFilterSafeBrowsingClient {
     safe_browsing::SBThreatType threat_type =
         safe_browsing::SBThreatType::SB_THREAT_TYPE_SAFE;
 
-    // The metadata should generally be lightweight enough to copy around
+    // The match map should generally be lightweight enough to copy around
     // without performance implications. Refactor this class if that ever
     // changes.
-    safe_browsing::ThreatMetadata threat_metadata;
+    safe_browsing::SubresourceFilterMatch subresource_filter_match;
     base::TimeTicks start_time;
     bool finished = false;
 
@@ -58,9 +58,10 @@ class SubresourceFilterSafeBrowsingClient {
   SubresourceFilterSafeBrowsingClient(
       scoped_refptr<safe_browsing::SafeBrowsingDatabaseManager>
           database_manager,
-      base::WeakPtr<SubresourceFilterSafeBrowsingActivationThrottle> throttle,
-      scoped_refptr<base::SingleThreadTaskRunner> io_task_runner,
-      scoped_refptr<base::SingleThreadTaskRunner> throttle_task_runner);
+      SafeBrowsingPageActivationThrottle* throttle,
+      scoped_refptr<base::SingleThreadTaskRunner> throttle_task_runner,
+      base::WeakPtr<safe_browsing::V5GetHashProtocolManager>
+          v5_get_hash_protocol_manager);
 
   SubresourceFilterSafeBrowsingClient(
       const SubresourceFilterSafeBrowsingClient&) = delete;
@@ -69,9 +70,7 @@ class SubresourceFilterSafeBrowsingClient {
 
   ~SubresourceFilterSafeBrowsingClient();
 
-  void CheckUrlOnIO(const GURL& url,
-                    size_t request_id,
-                    base::TimeTicks start_time);
+  void CheckUrl(const GURL& url, size_t request_id, base::TimeTicks start_time);
 
   void OnCheckBrowseUrlResult(
       SubresourceFilterSafeBrowsingClientRequest* request,
@@ -84,10 +83,13 @@ class SubresourceFilterSafeBrowsingClient {
       requests_;
 
   scoped_refptr<safe_browsing::SafeBrowsingDatabaseManager> database_manager_;
-
-  base::WeakPtr<SubresourceFilterSafeBrowsingActivationThrottle> throttle_;
-  scoped_refptr<base::SingleThreadTaskRunner> io_task_runner_;
+  // A raw_ptr is safe because `throttle_` owns `this`.
+  raw_ptr<SafeBrowsingPageActivationThrottle> throttle_;
   scoped_refptr<base::SingleThreadTaskRunner> throttle_task_runner_;
+
+  // The protocol manager used for Safe Browsing v5 get hash requests.
+  base::WeakPtr<safe_browsing::V5GetHashProtocolManager>
+      v5_get_hash_protocol_manager_;
 };
 
 }  // namespace subresource_filter

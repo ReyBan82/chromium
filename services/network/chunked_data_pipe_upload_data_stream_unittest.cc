@@ -9,6 +9,7 @@
 #include <limits>
 #include <memory>
 
+#include "base/containers/span.h"
 #include "base/memory/ref_counted.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
@@ -17,11 +18,14 @@
 #include "mojo/public/cpp/system/data_pipe_utils.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/io_buffer.h"
+#include "net/base/net_errors.h"
 #include "net/base/test_completion_callback.h"
 #include "net/log/net_log_with_source.h"
+#include "net/test/gtest_util.h"
 #include "services/network/public/cpp/resource_request_body.h"
 #include "services/network/public/mojom/chunked_data_pipe_getter.mojom.h"
 #include "services/network/test_chunked_data_pipe_getter.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 // Most tests of this class are at the URLLoader layer. These tests focus on
@@ -463,6 +467,31 @@ TEST_F(ChunkedDataPipeUploadDataStreamTest, GetSizeFailsAfterReset) {
                                          net::NetLogWithSource()));
 }
 
+// Test the case where GetSize() is passed an invalid error code. Tests both the
+// case of a positive value, and ERR_IO_PENDING.
+TEST_F(ChunkedDataPipeUploadDataStreamTest, GetSizePassedInvalidErrorCode) {
+  const std::string kData = "1234567890";
+
+  const int kTestCases[] = {net::ERR_IO_PENDING, 1};
+
+  for (int test_case : kTestCases) {
+    SCOPED_TRACE(test_case);
+
+    // Initialization succeeds.
+    CreateAndInitChunkedUploadStream();
+
+    // Pass in bad data.
+    std::move(get_size_callback_).Run(test_case, 0);
+
+    net::TestCompletionCallback read_callback;
+    auto io_buffer = base::MakeRefCounted<net::IOBufferWithSize>(1);
+    // Reading fails.
+    EXPECT_THAT(read_callback.GetResult(chunked_upload_stream_->Read(
+                    io_buffer.get(), 1, read_callback.callback())),
+                net::test::IsError(net::ERR_INVALID_ARGUMENT));
+  }
+}
+
 // Three variations on when the stream can be closed before a request succeeds.
 
 // Stream is closed, then a read attempted, then the GetSizeCallback is invoked.
@@ -818,14 +847,15 @@ TEST_F(ChunkedDataPipeUploadDataStreamTest,
     EXPECT_TRUE(chunked_upload_stream->IsEOF());                              \
   }
 
-#define WRITE_DATA_SYNC(write_pipe, str)                            \
-  {                                                                 \
-    std::string data(str);                                          \
-    uint32_t num_size = data.size();                                \
-    EXPECT_EQ(write_pipe->WriteData((void*)data.c_str(), &num_size, \
-                                    MOJO_WRITE_DATA_FLAG_NONE),     \
-              MOJO_RESULT_OK);                                      \
-    EXPECT_EQ(num_size, data.size());                               \
+#define WRITE_DATA_SYNC(write_pipe, str)                       \
+  {                                                            \
+    std::string data(str);                                     \
+    size_t actually_written_bytes = 0;                         \
+    EXPECT_EQ(write_pipe->WriteData(base::as_byte_span(data),  \
+                                    MOJO_WRITE_DATA_FLAG_NONE, \
+                                    actually_written_bytes),   \
+              MOJO_RESULT_OK);                                 \
+    EXPECT_EQ(actually_written_bytes, data.size());            \
   }
 
 TEST_F(ChunkedDataPipeUploadDataStreamTest, CacheNotUsed) {

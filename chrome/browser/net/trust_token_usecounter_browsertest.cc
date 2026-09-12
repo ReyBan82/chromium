@@ -3,16 +3,16 @@
 // found in the LICENSE file.
 
 #include "base/test/metrics/histogram_tester.h"
-#include "base/test/scoped_feature_list.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/test_navigation_observer.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
-#include "services/network/public/cpp/features.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom.h"
 
 namespace content {
 
@@ -27,9 +27,7 @@ namespace content {
 
 class TrustTokenUseCountersBrowsertest : public InProcessBrowserTest {
  public:
-  TrustTokenUseCountersBrowsertest() {
-    features_.InitAndEnableFeature(network::features::kPrivateStateTokens);
-  }
+  TrustTokenUseCountersBrowsertest() = default;
 
   void SetUpOnMainThread() override {
     server_.AddDefaultHandlers(
@@ -38,8 +36,6 @@ class TrustTokenUseCountersBrowsertest : public InProcessBrowserTest {
   }
 
  protected:
-  base::test::ScopedFeatureList features_;
-
   net::EmbeddedTestServer server_{net::EmbeddedTestServer::TYPE_HTTPS};
 };
 
@@ -51,7 +47,7 @@ IN_PROC_BROWSER_TEST_F(TrustTokenUseCountersBrowsertest, CountsFetchUse) {
 
   std::string cmd = R"(
   (async () => {
-    await fetch("/page404.html", {trustToken: {version: 1,
+    await fetch("/page404.html", {privateToken: {version: 1,
                                                operation: 'token-request'}});
   } )(); )";
 
@@ -61,7 +57,7 @@ IN_PROC_BROWSER_TEST_F(TrustTokenUseCountersBrowsertest, CountsFetchUse) {
   // to test that the usage metric fired when the command was called.
   EXPECT_FALSE(
       content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(), cmd)
-          .error.empty());
+          .is_ok());
 
   // Navigate away in order to flush use counters.
   EXPECT_TRUE(
@@ -82,7 +78,8 @@ IN_PROC_BROWSER_TEST_F(TrustTokenUseCountersBrowsertest, CountsXhrUse) {
   (async () => {
     let request = new XMLHttpRequest();
     request.open('GET', '/page404.html');
-    request.setTrustToken({
+    request.setPrivateToken({
+      version: 1,
       operation: 'token-request'
     });
     let promise = new Promise((res, rej) => {
@@ -98,7 +95,7 @@ IN_PROC_BROWSER_TEST_F(TrustTokenUseCountersBrowsertest, CountsXhrUse) {
   // to test that the usage metric fired when the command was called.
   EXPECT_FALSE(
       content::EvalJs(browser()->tab_strip_model()->GetActiveWebContents(), cmd)
-          .error.empty());
+          .is_ok());
 
   // Navigate away in order to flush use counters.
   EXPECT_TRUE(
@@ -119,14 +116,16 @@ IN_PROC_BROWSER_TEST_F(TrustTokenUseCountersBrowsertest, CountsIframeUse) {
 
   // It's important to set the trust token arguments before updating src, as
   // the latter triggers a load. It's also important to JsReplace the trustToken
-  // argument here, because iframe.trustToken expects a (properly escaped)
+  // argument here, because iframe.privateToken expects a (properly escaped)
   // JSON-encoded string as its value, not a JS object.
-  EXPECT_TRUE(ExecJs(
-      web_contents, JsReplace(
-                        R"( const myFrame = document.getElementById("test");
-                         myFrame.trustToken = $1;
+  EXPECT_TRUE(ExecJs(web_contents,
+                     JsReplace(
+                         R"( const myFrame = document.getElementById("test");
+                         myFrame.privateToken = $1;
                          myFrame.src = $2;)",
-                        R"({"operation": "token-request"})", "/page404.html")));
+                         R"({"version": 1,
+                            "operation": "send-redemption-record"})",
+                         "/page404.html")));
   TestNavigationObserver load_observer(web_contents);
   load_observer.Wait();
 
@@ -151,12 +150,14 @@ IN_PROC_BROWSER_TEST_F(TrustTokenUseCountersBrowsertest, CountsIframeUseViaSetat
   // the latter triggers a load. It's also important to JsReplace the trustToken
   // argument here, because iframe.trustToken expects a (properly escaped)
   // JSON-encoded string as its value, not a JS object.
-  EXPECT_TRUE(ExecJs(
-      web_contents, JsReplace(
-                        R"( const myFrame = document.getElementById("test");
-                         myFrame.setAttribute('trustToken', $1);
+  EXPECT_TRUE(ExecJs(web_contents,
+                     JsReplace(
+                         R"( const myFrame = document.getElementById("test");
+                         myFrame.setAttribute('privateToken', $1);
                          myFrame.src = $2;)",
-                        R"({"operation": "token-request"})", "/page404.html")));
+                         R"({"version": 1,
+                            "operation": "send-redemption-record"})",
+                         "/page404.html")));
   TestNavigationObserver load_observer(web_contents);
   load_observer.Wait();
 

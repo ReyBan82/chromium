@@ -17,17 +17,17 @@
 #import "content/browser/web_contents/web_drag_dest_mac.h"
 #include "content/public/browser/content_browser_client.h"
 #include "content/public/common/content_client.h"
-#include "content/public/common/content_features.h"
 #include "ui/base/clipboard/clipboard_constants.h"
 #include "ui/base/clipboard/clipboard_util_mac.h"
 #include "ui/base/clipboard/custom_data_helper.h"
-#include "ui/base/cocoa/cocoa_base_utils.h"
 #include "ui/base/dragdrop/drag_drop_types.h"
+#include "ui/events/event_utils.h"
+#include "ui/events/platform_event.h"
+#include "ui/gfx/geometry/clamp_float_geometry.h"
 #include "ui/gfx/image/image.h"
 #include "ui/resources/grit/ui_resources.h"
 
 using content::DropData;
-using features::kMacWebContentsOcclusion;
 using remote_cocoa::mojom::DraggingInfo;
 using remote_cocoa::mojom::SelectionDirection;
 
@@ -74,12 +74,12 @@ class DroppedScreenShotCopierMac {
  private:
   bool IsPathScreenShot(const base::FilePath& path) const {
     const std::string& value = path.value();
-    size_t found_var = value.find("/var");
-    if (found_var != 0)
+    if (!value.contains("/var")) {
       return false;
-    size_t found_screencaptureui = value.find("screencaptureui");
-    if (found_screencaptureui == std::string::npos)
+    }
+    if (!value.contains("screencaptureui")) {
       return false;
+    }
     return true;
   }
 
@@ -99,25 +99,49 @@ STATIC_ASSERT_ENUM(NSDragOperationCopy, ui::DragDropTypes::DRAG_COPY);
 STATIC_ASSERT_ENUM(NSDragOperationLink, ui::DragDropTypes::DRAG_LINK);
 STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
 
+namespace {
+
+gfx::PointF GetSanitizedFlippedPoint(NSPoint point, CGFloat height) {
+  return gfx::PointF(gfx::ClampFloatGeometry(point.x),
+                     gfx::ClampFloatGeometry(height - point.y));
+}
+
+}  // namespace
+
 ////////////////////////////////////////////////////////////////////////////////
 // WebContentsViewCocoa
 
 @implementation WebContentsViewCocoa {
-  // TODO(https://crbug.com/883031): Remove this when kMacWebContentsOcclusion
-  // is enabled by default.
-  BOOL _inFullScreenTransition;
+  // Instances of this class are owned by both `_host` and AppKit. The `_host`
+  // must call `-setHost:nil` in its destructor.
+  raw_ptr<remote_cocoa::mojom::WebContentsNSViewHost> _host;
+
+  // The interface exported to views::Views that embed this as a sub-view.
+  raw_ptr<ui::ViewsHostableView> _viewsHostableView;
+
+  BOOL _mouseDownCanMoveWindow;
+
+  // Utility to copy screenshots to a usable directory for PWAs. This utility
+  // will maintain a temporary directory for such screenshot files until this
+  // WebContents is destroyed.
+  // https://crbug.com/1148078
+  std::unique_ptr<remote_cocoa::DroppedScreenShotCopierMac>
+      _droppedScreenShotCopier;
+
+  // Drag variables.
+  WebDragSource* __strong _dragSource;
+  NSDragOperation _dragOperation;
+
   BOOL _willSetWebContentsOccludedAfterDelay;
 }
 
 + (void)initialize {
-  if (base::FeatureList::IsEnabled(kMacWebContentsOcclusion)) {
-    // Create the WebContentsOcclusionCheckerMac shared instance.
-    [WebContentsOcclusionCheckerMac sharedInstance];
-  }
+  // Create the WebContentsOcclusionCheckerMac shared instance.
+  [WebContentsOcclusionCheckerMac sharedInstance];
 }
 
 - (instancetype)initWithViewsHostableView:(ui::ViewsHostableView*)v {
-  self = [super initWithFrame:NSZeroRect];
+  self = [super initWithFrame:NSZeroRect tracking:YES];
   if (self != nil) {
     _viewsHostableView = v;
     [self registerDragTypes];
@@ -137,8 +161,6 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
 
   [[NSNotificationCenter defaultCenter] removeObserver:self];
   [self cancelDelayedSetWebContentsOccluded];
-
-  [super dealloc];
 }
 
 - (void)enableDroppedScreenShotCopier {
@@ -154,21 +176,20 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
   NSPoint viewPoint = [self convertPoint:windowPoint fromView:nil];
   NSRect viewFrame = [self frame];
   info->location_in_view =
-      gfx::PointF(viewPoint.x, viewFrame.size.height - viewPoint.y);
+      GetSanitizedFlippedPoint(viewPoint, viewFrame.size.height);
 
-  NSPoint screenPoint =
-      ui::ConvertPointFromWindowToScreen([self window], windowPoint);
-  NSScreen* screen = [[self window] screen];
-  NSRect screenFrame = [screen frame];
+  NSPoint screenPoint = [self.window convertPointToScreen:windowPoint];
+  NSRect screenFrame = self.window.screen.frame;
   info->location_in_screen =
-      gfx::PointF(screenPoint.x, screenFrame.size.height - screenPoint.y);
+      GetSanitizedFlippedPoint(screenPoint, screenFrame.size.height);
 
   NSPasteboard* pboard = [nsInfo draggingPasteboard];
-  NSArray<NSString*>* urls;
-  NSArray<NSString*>* titles;
-  if (ui::ClipboardUtil::URLsAndTitlesFromPasteboard(
-          pboard, /*include_files=*/true, &urls, &titles)) {
-    info->url = GURL(base::SysNSStringToUTF8(urls.firstObject));
+  NSArray<URLAndTitle*>* urls_and_titles =
+      ui::clipboard_util::URLsAndTitlesFromPasteboard(pboard,
+                                                      /*include_files=*/true);
+
+  if (urls_and_titles.count) {
+    info->url = GURL(base::SysNSStringToUTF8(urls_and_titles.firstObject.URL));
   }
   info->operation_mask = ui::DragDropTypes::NSDragOperationToDragOperation(
       [nsInfo draggingSourceOperationMask]);
@@ -187,16 +208,15 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
   [self registerForDraggedTypes:@[
     NSPasteboardTypeFileURL, NSPasteboardTypeHTML, NSPasteboardTypeRTF,
     NSPasteboardTypeString, NSPasteboardTypeURL,
-    ui::kUTTypeChromiumInitiatedDrag, ui::kUTTypeChromiumWebCustomData,
-    ui::kUTTypeWebKitWebURLsWithTitles
+    ui::kUTTypeChromiumInitiatedDrag, ui::kUTTypeChromiumDataTransferCustomData,
+    ui::kUTTypeWebKitWebUrlsWithTitles
   ]];
 }
 
 - (void)mouseEvent:(NSEvent*)theEvent {
   if (!_host)
     return;
-  _host->OnMouseEvent([theEvent type] == NSEventTypeMouseMoved,
-                      [theEvent type] == NSEventTypeMouseExited);
+  _host->OnMouseEvent(ui::EventFromNative(base::apple::OwnedNSEvent(theEvent)));
 }
 
 - (void)setMouseDownCanMoveWindow:(BOOL)canMove {
@@ -214,6 +234,9 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
 }
 
 - (void)startDragWithDropData:(const DropData&)dropData
+              renderProcessId:(content::ChildProcessId)renderProcessId
+                documentToken:(const blink::DocumentToken&)documentToken
+                 sourceOrigin:(const url::Origin&)sourceOrigin
             dragOperationMask:(NSDragOperation)operationMask
                         image:(NSImage*)image
                        offset:(NSPoint)offset
@@ -232,11 +255,14 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
                                         clickCount:1
                                           pressure:1.0];
 
-  _dragSource.reset([[WebDragSource alloc] initWithHost:_host
-                                               dropData:dropData
-                                           isPrivileged:isPrivileged]);
-  NSDraggingItem* draggingItem = [[[NSDraggingItem alloc]
-      initWithPasteboardWriter:_dragSource] autorelease];
+  _dragSource = [[WebDragSource alloc] initWithHost:_host
+                                    renderProcessId:renderProcessId
+                                      documentToken:documentToken
+                                       sourceOrigin:sourceOrigin
+                                           dropData:dropData
+                                       isPrivileged:isPrivileged];
+  NSDraggingItem* draggingItem =
+      [[NSDraggingItem alloc] initWithPasteboardWriter:_dragSource];
 
   if (!image) {
     image = content::GetContentClient()
@@ -244,6 +270,10 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
                 .ToNSImage();
   }
 
+  // The frame given to -[NSDraggingItem setDraggingFrame:contents:] will be
+  // interpreted as being in the coordinate system of this view, so convert it
+  // from the coordinate system of the window.
+  mouseLocation = [self convertPoint:mouseLocation fromView:nil];
   NSRect imageRect = NSMakeRect(mouseLocation.x, mouseLocation.y,
                                 image.size.width, image.size.height);
   imageRect.origin.x -= offset.x;
@@ -251,12 +281,39 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
   imageRect.origin.y -= image.size.height - offset.y;
   [draggingItem setDraggingFrame:imageRect contents:image];
 
-  _dragOperation = operationMask;
-  _dragOffset = offset;
-  _dragImageHeight = image.size.height;
+  // Expose each URL as its own dragging item so native apps can read every URL
+  // from a multi-URL drag. The primary dragging item (a WebDragSource) exposes
+  // the first URL and any other drag data present in DropData, including the
+  // full WebKit-compatible URL/title list. The remaining URLs are represented
+  // by URL-only NSPasteboardItems that expose only the standard URL and title
+  // types.
+  NSMutableArray<NSDraggingItem*>* draggingItems =
+      [NSMutableArray arrayWithObject:draggingItem];
+  for (size_t i = 1; i < dropData.url_infos.size(); ++i) {
+    const auto& url_info = dropData.url_infos[i];
+    NSPasteboardItem* pasteboardItem = [[NSPasteboardItem alloc] init];
+    [pasteboardItem setString:base::SysUTF8ToNSString(url_info.url.spec())
+                      forType:NSPasteboardTypeURL];
+    if (!url_info.title.empty()) {
+      [pasteboardItem setString:base::SysUTF16ToNSString(url_info.title)
+                        forType:ui::kUTTypeUrlName];
+    }
+    NSDraggingItem* urlItem =
+        [[NSDraggingItem alloc] initWithPasteboardWriter:pasteboardItem];
+    [urlItem setDraggingFrame:imageRect contents:image];
+    [draggingItems addObject:urlItem];
+  }
 
-  // Run the drag operation.
-  [self beginDraggingSessionWithItems:@[ draggingItem ]
+  _dragOperation = operationMask;
+
+  // Start the drag session. This hands control to AppKit, which queries each
+  // item's pasteboard writer (the primary WebDragSource and the URL-only
+  // NSPasteboardItems) via the NSPasteboardWriting protocol. AppKit calls
+  // -writableTypesForPasteboard: to learn the declared types, then calls
+  // -pasteboardPropertyListForType: to pull the actual data, lazily when
+  // needed. See web_drag_source_mac.mm for WebDragSource's implementation of
+  // those methods.
+  [self beginDraggingSessionWithItems:draggingItems
                                 event:dragEvent
                                source:self];
 }
@@ -272,30 +329,31 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
 - (void)draggingSession:(NSDraggingSession*)session
            endedAtPoint:(NSPoint)screenPoint
               operation:(NSDragOperation)operation {
-  // Reconstruct the screen point by removing the offset. It seems like the
-  // underlying drag machinery is measuring from the corner of the dragged
-  // image.
-  screenPoint.x += _dragOffset.x;
-  screenPoint.y += _dragImageHeight - _dragOffset.y;
+  if (!_host) {
+    return;
+  }
 
   NSPoint localPoint = NSZeroPoint;
   if (self.window) {
-    NSPoint basePoint =
-        ui::ConvertPointFromScreenToWindow(self.window, screenPoint);
+    NSPoint basePoint = [self.window convertPointFromScreen:screenPoint];
     localPoint = [self convertPoint:basePoint fromView:nil];
   }
 
   // Flip the two points as per Cocoa's coordinate system.
   NSRect viewFrame = self.frame;
   NSRect screenFrame = self.window.screen.frame;
-  _host->EndDrag(
-      operation,
-      gfx::PointF(localPoint.x, viewFrame.size.height - localPoint.y),
-      gfx::PointF(screenPoint.x, screenFrame.size.height - screenPoint.y));
+
+  gfx::PointF local_point_f =
+      GetSanitizedFlippedPoint(localPoint, viewFrame.size.height);
+
+  gfx::PointF screen_point_f =
+      GetSanitizedFlippedPoint(screenPoint, screenFrame.size.height);
+
+  _host->EndDrag(operation, local_point_f, screen_point_f);
 
   // The drag is complete. Disconnect the drag source.
   [_dragSource webContentsIsGone];
-  _dragSource.reset();
+  _dragSource = nil;
 }
 
 // NSDraggingDestination methods
@@ -388,8 +446,18 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
 }
 
 - (void)setWebContentsVisibility:(remote_cocoa::mojom::Visibility)visibility {
-  if (_host && !content::GetContentClient()->browser()->IsShuttingDown())
-    _host->OnWindowVisibilityChanged(visibility);
+  if (!_host) {
+    return;
+  }
+  auto* content_client = content::GetContentClient();
+  if (!content_client) {
+    return;
+  }
+  auto* browser = content_client->browser();
+  if (browser && browser->IsShuttingDown()) {
+    return;
+  }
+  _host->OnWindowVisibilityChanged(visibility);
 }
 
 - (void)performDelayedSetWebContentsOccluded {
@@ -417,7 +485,6 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
     (remote_cocoa::mojom::Visibility)visibility {
   using remote_cocoa::mojom::Visibility;
 
-  DCHECK(base::FeatureList::IsEnabled(kMacWebContentsOcclusion));
   if (!_host)
     return;
 
@@ -463,21 +530,6 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
   [self updateWebContentsVisibility:visibility];
 }
 
-- (void)legacyUpdateWebContentsVisibility {
-  using remote_cocoa::mojom::Visibility;
-  DCHECK(!base::FeatureList::IsEnabled(kMacWebContentsOcclusion));
-  if (!_host || _inFullScreenTransition)
-    return;
-  Visibility visibility = Visibility::kVisible;
-  if ([self isHiddenOrHasHiddenAncestor] || ![self window])
-    visibility = Visibility::kHidden;
-  else if ([[self window] occlusionState] & NSWindowOcclusionStateVisible)
-    visibility = Visibility::kVisible;
-  else
-    visibility = Visibility::kOccluded;
-  _host->OnWindowVisibilityChanged(visibility);
-}
-
 - (void)resizeSubviewsWithOldSize:(NSSize)oldBoundsSize {
   // Subviews do not participate in auto layout unless the the size this view
   // changes. This allows RenderWidgetHostViewMac::SetBounds(..) to select a
@@ -500,72 +552,22 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
 
   NSWindow* oldWindow = [self window];
 
-  if (base::FeatureList::IsEnabled(kMacWebContentsOcclusion)) {
-    if (oldWindow) {
-      [notificationCenter
-          removeObserver:self
-                    name:NSWindowDidChangeOcclusionStateNotification
-                  object:oldWindow];
-    }
-
-    if (newWindow) {
-      [notificationCenter
-          addObserver:self
-             selector:@selector(windowChangedOcclusionState:)
-                 name:NSWindowDidChangeOcclusionStateNotification
-               object:newWindow];
-    }
-
-    return;
-  }
-
-  _inFullScreenTransition = NO;
   if (oldWindow) {
-    NSArray* notificationsToRemove = @[
-      NSWindowDidChangeOcclusionStateNotification,
-      NSWindowWillEnterFullScreenNotification,
-      NSWindowDidEnterFullScreenNotification,
-      NSWindowWillExitFullScreenNotification,
-      NSWindowDidExitFullScreenNotification
-    ];
-    for (NSString* notificationName in notificationsToRemove) {
-      [notificationCenter removeObserver:self
-                                    name:notificationName
-                                  object:oldWindow];
-    }
+    [notificationCenter
+        removeObserver:self
+                  name:NSWindowDidChangeOcclusionStateNotification
+                object:oldWindow];
   }
+
   if (newWindow) {
     [notificationCenter addObserver:self
                            selector:@selector(windowChangedOcclusionState:)
                                name:NSWindowDidChangeOcclusionStateNotification
                              object:newWindow];
-    // The fullscreen transition causes spurious occlusion notifications.
-    // See https://crbug.com/1081229
-    [notificationCenter addObserver:self
-                           selector:@selector(fullscreenTransitionStarted:)
-                               name:NSWindowWillEnterFullScreenNotification
-                             object:newWindow];
-    [notificationCenter addObserver:self
-                           selector:@selector(fullscreenTransitionComplete:)
-                               name:NSWindowDidEnterFullScreenNotification
-                             object:newWindow];
-    [notificationCenter addObserver:self
-                           selector:@selector(fullscreenTransitionStarted:)
-                               name:NSWindowWillExitFullScreenNotification
-                             object:newWindow];
-    [notificationCenter addObserver:self
-                           selector:@selector(fullscreenTransitionComplete:)
-                               name:NSWindowDidExitFullScreenNotification
-                             object:newWindow];
   }
 }
 
 - (void)windowChangedOcclusionState:(NSNotification*)aNotification {
-  if (!base::FeatureList::IsEnabled(kMacWebContentsOcclusion)) {
-    [self legacyUpdateWebContentsVisibility];
-    return;
-  }
-
   // Only respond to occlusion notifications sent by the occlusion checker.
   NSDictionary* userInfo = [aNotification userInfo];
   NSString* occlusionCheckerKey = [WebContentsOcclusionCheckerMac className];
@@ -573,68 +575,21 @@ STATIC_ASSERT_ENUM(NSDragOperationMove, ui::DragDropTypes::DRAG_MOVE);
     [self updateWebContentsVisibility];
 }
 
-- (void)fullscreenTransitionStarted:(NSNotification*)notification {
-  DCHECK(!base::FeatureList::IsEnabled(kMacWebContentsOcclusion));
-  _inFullScreenTransition = YES;
-}
-
-- (void)fullscreenTransitionComplete:(NSNotification*)notification {
-  DCHECK(!base::FeatureList::IsEnabled(kMacWebContentsOcclusion));
-  _inFullScreenTransition = NO;
-}
-
 - (void)viewDidMoveToWindow {
-  if (!base::FeatureList::IsEnabled(kMacWebContentsOcclusion)) {
-    [self legacyUpdateWebContentsVisibility];
-    return;
-  }
-
   [self updateWebContentsVisibility];
 }
 
 - (void)viewDidHide {
-  if (!base::FeatureList::IsEnabled(kMacWebContentsOcclusion)) {
-    [self legacyUpdateWebContentsVisibility];
-    return;
-  }
-
   [self updateWebContentsVisibility];
 }
 
 - (void)viewDidUnhide {
-  if (!base::FeatureList::IsEnabled(kMacWebContentsOcclusion)) {
-    [self legacyUpdateWebContentsVisibility];
-    return;
-  }
-
   [self updateWebContentsVisibility];
 }
 
 // ViewsHostable protocol implementation.
 - (ui::ViewsHostableView*)viewsHostableView {
   return _viewsHostableView;
-}
-
-- (void)updateWindowControlsOverlay:(const gfx::Rect&)boundingRect {
-  _windowControlsOverlayRect = boundingRect;
-}
-
-- (NSView*)hitTest:(NSPoint)point {
-  if (!_windowControlsOverlayRect.IsEmpty()) {
-    // _windowControlsOverlayRect represents the area at the top of the web
-    // contents that is available for the web. As such, if the y coordinate
-    // falls within this rect, but the x coordinate doesn't we want to route
-    // events to the BridgedContentView (our superview) instead.
-    gfx::Point p = gfx::Point(point);
-    p.set_y(NSHeight(self.bounds) - p.y());
-    if (p.y() >= _windowControlsOverlayRect.y() &&
-        p.y() < _windowControlsOverlayRect.bottom() &&
-        (p.x() < _windowControlsOverlayRect.x() ||
-         p.x() >= _windowControlsOverlayRect.right())) {
-      return self.superview;
-    }
-  }
-  return [super hitTest:point];
 }
 
 @end

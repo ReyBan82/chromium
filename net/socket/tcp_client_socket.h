@@ -19,6 +19,7 @@
 #include "net/base/address_list.h"
 #include "net/base/completion_once_callback.h"
 #include "net/base/net_export.h"
+#include "net/base/network_handle.h"
 #include "net/socket/socket_descriptor.h"
 #include "net/socket/stream_socket.h"
 #include "net/socket/tcp_socket.h"
@@ -53,26 +54,28 @@ class NET_EXPORT TCPClientSocket : public TransportClientSocket,
   // The IP address(es) and port number to connect to. The TCP socket will try
   // each IP address in the list until it succeeds in establishing a
   // connection.
-  // If `network` is specified, the socket will be bound to it. All data traffic
-  // on the socket will be sent and received via `network`. Communication using
-  // this socket will fail if `network` disconnects.
+  // If `target_network` is not `handles::kInvalidNetworkHandle`, the socket
+  // will be bound to it. All data traffic on the socket will be sent and
+  // received via `target_network`. Communication using this socket will fail if
+  // `target_network` disconnects.
   TCPClientSocket(
       const AddressList& addresses,
       std::unique_ptr<SocketPerformanceWatcher> socket_performance_watcher,
       NetworkQualityEstimator* network_quality_estimator,
       net::NetLog* net_log,
       const net::NetLogSource& source,
-      handles::NetworkHandle network = handles::kInvalidNetworkHandle);
+      handles::NetworkHandle network);
 
   // Adopts the given, connected socket and then acts as if Connect() had been
   // called. This function is used by TCPServerSocket and for testing.
   TCPClientSocket(std::unique_ptr<TCPSocket> connected_socket,
                   const IPEndPoint& peer_address);
 
-  // Adopts an unconnected TCPSocket. This function is used by
-  // TCPClientSocketBrokered.
+  // Adopts an unconnected TCPSocket. TCPSocket may be bound or unbound. This
+  // function is used by BrokeredTcpClientSocket.
   TCPClientSocket(std::unique_ptr<TCPSocket> unconnected_socket,
                   const AddressList& addresses,
+                  std::unique_ptr<IPEndPoint> bound_address,
                   NetworkQualityEstimator* network_quality_estimator);
 
   // Creates a TCPClientSocket from a bound-but-not-connected socket.
@@ -103,7 +106,6 @@ class NET_EXPORT TCPClientSocket : public TransportClientSocket,
   int GetLocalAddress(IPEndPoint* address) const override;
   const NetLogWithSource& NetLog() const override;
   bool WasEverUsed() const override;
-  bool WasAlpnNegotiated() const override;
   NextProto GetNegotiatedProtocol() const override;
   bool GetSSLInfo(SSLInfo* ssl_info) override;
   int64_t GetTotalReceivedBytes() const override;
@@ -233,7 +235,7 @@ class NET_EXPORT TCPClientSocket : public TransportClientSocket,
   bool was_disconnected_on_suspend_ = false;
 
   // The time when the latest connect attempt was started.
-  absl::optional<base::TimeTicks> start_connect_attempt_;
+  std::optional<base::TimeTicks> start_connect_attempt_;
 
   // The NetworkQualityEstimator for the context this socket is associated with.
   // Can be nullptr.

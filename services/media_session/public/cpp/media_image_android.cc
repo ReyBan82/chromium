@@ -8,8 +8,10 @@
 
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
-#include "services/media_session/public/cpp/android/media_session_jni_headers/MediaImage_jni.h"
 #include "url/android/gurl_android.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "services/media_session/public/cpp/android/media_session_jni_headers/MediaImage_jni.h"
 
 using base::android::ScopedJavaLocalRef;
 
@@ -29,7 +31,7 @@ ScopedJavaLocalRef<jobjectArray> MediaImage::ToJavaArray(
     ScopedJavaLocalRef<jobject> item = images[i].CreateJavaObject(env);
     env->SetObjectArrayElement(joa, i, item.obj());
   }
-  return ScopedJavaLocalRef<jobjectArray>(env, joa);
+  return jni_zero::AdoptRef(env, joa);
 }
 
 ScopedJavaLocalRef<jobject> MediaImage::CreateJavaObject(JNIEnv* env) const {
@@ -52,7 +54,9 @@ ScopedJavaLocalRef<jobject> MediaImage::CreateJavaObject(JNIEnv* env) const {
   }
 
   return Java_MediaImage_create(env, j_src, j_type,
-                                ScopedJavaLocalRef<jobjectArray>(env, joa));
+                                jni_zero::AdoptRef(env, joa));
 }
 
 }  // namespace media_session
+
+DEFINE_JNI(MediaImage)

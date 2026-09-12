@@ -4,11 +4,11 @@
 
 #include "remoting/host/linux/x11_character_injector.h"
 
+#include <algorithm>
 #include <unordered_map>
 
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
-#include "base/ranges/algorithm.h"
 #include "base/run_loop.h"
 #include "base/test/task_environment.h"
 #include "base/time/time.h"
@@ -71,7 +71,7 @@ FakeX11Keyboard::FakeX11Keyboard(
 FakeX11Keyboard::~FakeX11Keyboard() {
   EXPECT_TRUE(expected_code_point_sequence_.empty());
   for (const auto& pair : keycode_mapping_) {
-    EXPECT_EQ(0u, pair.second.code_point);
+    EXPECT_EQ(pair.second.code_point, 0u);
   }
 }
 
@@ -91,7 +91,7 @@ void FakeX11Keyboard::PressKey(uint32_t keycode, uint32_t modifiers) {
   auto position = keycode_mapping_.find(keycode);
   ASSERT_NE(position, keycode_mapping_.end());
   MappingInfo& info = position->second;
-  EXPECT_EQ(expected_code_point, info.code_point);
+  EXPECT_EQ(info.code_point, expected_code_point);
   info.reusable_at = base::TimeTicks::Now() + kKeycodeReuseDuration;
   expected_code_point_sequence_.pop_front();
   if (expected_code_point_sequence_.empty() && keypress_finished_callback_) {
@@ -103,10 +103,10 @@ bool FakeX11Keyboard::FindKeycode(uint32_t code_point,
                                   uint32_t* keycode,
                                   uint32_t* modifiers) {
   auto position =
-      base::ranges::find(keycode_mapping_, code_point,
-                         [](const std::pair<uint32_t, MappingInfo>& pair) {
-                           return pair.second.code_point;
-                         });
+      std::ranges::find(keycode_mapping_, code_point,
+                        [](const std::pair<uint32_t, MappingInfo>& pair) {
+                          return pair.second.code_point;
+                        });
   if (position == keycode_mapping_.end()) {
     return false;
   }
@@ -152,7 +152,8 @@ class X11CharacterInjectorTest : public testing::Test {
   void InjectAndRun(const std::vector<uint32_t>& code_points);
 
   std::unique_ptr<X11CharacterInjector> injector_;
-  raw_ptr<FakeX11Keyboard> keyboard_;  // Owned by |injector_|.
+  raw_ptr<FakeX11Keyboard, DanglingUntriaged>
+      keyboard_;  // Owned by |injector_|.
 
   base::test::SingleThreadTaskEnvironment task_environment_;
 };

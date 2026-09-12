@@ -7,7 +7,8 @@
 #include <algorithm>
 #include <vector>
 
-#include "base/cxx17_backports.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "build/build_config.h"
 #include "ui/base/clipboard/clipboard.h"
 #include "ui/events/event.h"
@@ -30,6 +31,8 @@ SelectionController::SelectionController(SelectionControllerDelegate* delegate)
   DCHECK(delegate);
 }
 
+SelectionController::~SelectionController() = default;
+
 bool SelectionController::OnMousePressed(
     const ui::MouseEvent& event,
     bool handled,
@@ -38,13 +41,15 @@ bool SelectionController::OnMousePressed(
   DCHECK(render_text);
 
   TrackMouseClicks(event);
-  if (handled)
+  if (handled) {
     return true;
+  }
 
   if (event.IsOnlyLeftMouseButton()) {
     first_drag_location_ = event.location();
-    if (delegate_->SupportsDrag())
+    if (delegate_->SupportsDrag()) {
       delegate_->SetTextBeingDragged(false);
+    }
 
     switch (aggregated_clicks_) {
       case 0:
@@ -70,7 +75,7 @@ bool SelectionController::OnMousePressed(
         SelectAll();
         break;
       default:
-        NOTREACHED_NORETURN();
+        NOTREACHED();
     }
   }
 
@@ -80,6 +85,8 @@ bool SelectionController::OnMousePressed(
       SelectAll();
     } else if (PlatformStyle::kSelectWordOnRightClick &&
                !render_text->IsPointInSelection(event.location()) &&
+               !render_text->selection().EqualsIgnoringDirection(
+                   gfx::Range(0, render_text->text().length())) &&
                IsInsideText(event.location())) {
       SelectWord(event.location());
     }
@@ -90,9 +97,10 @@ bool SelectionController::OnMousePressed(
     delegate_->OnBeforePointerAction();
     const bool selection_changed =
         render_text->MoveCursorToPoint(event.location(), false);
-    const bool text_changed = delegate_->PasteSelectionClipboard();
-    delegate_->OnAfterPointerAction(text_changed,
-                                    selection_changed | text_changed);
+    delegate_->OnAfterPointerAction(false, selection_changed);
+    if (ui::Clipboard::IsMiddleClickPasteEnabled()) {
+      delegate_->PasteSelectionClipboard(base::DoNothing());
+    }
   }
 
   return true;
@@ -105,8 +113,9 @@ bool SelectionController::OnMouseDragged(const ui::MouseEvent& event) {
   last_drag_location_ = event.location();
 
   // Don't adjust the cursor on a potential drag and drop.
-  if (delegate_->HasTextBeingDragged() || !event.IsOnlyLeftMouseButton())
+  if (delegate_->HasTextBeingDragged() || !event.IsOnlyLeftMouseButton()) {
     return true;
+  }
 
   // A timer is used to continuously scroll while selecting beyond side edges.
   const int x = event.location().x();
@@ -117,7 +126,7 @@ bool SelectionController::OnMouseDragged(const ui::MouseEvent& event) {
     SelectThroughLastDragLocation();
   } else if (!drag_selection_timer_.IsRunning()) {
     // Select through the edge of the visible text, then start the scroll timer.
-    last_drag_location_.set_x(base::clamp(x, 0, width));
+    last_drag_location_.set_x(std::clamp(x, 0, width));
     SelectThroughLastDragLocation();
 
     drag_selection_timer_.Start(
@@ -142,11 +151,13 @@ void SelectionController::OnMouseReleased(const ui::MouseEvent& event) {
     delegate_->OnAfterPointerAction(false, selection_changed);
   }
 
-  if (delegate_->SupportsDrag())
+  if (delegate_->SupportsDrag()) {
     delegate_->SetTextBeingDragged(false);
+  }
 
-  if (handles_selection_clipboard_ && !render_text->selection().is_empty())
+  if (handles_selection_clipboard_ && !render_text->selection().is_empty()) {
     delegate_->UpdateSelectionClipboard();
+  }
 }
 
 void SelectionController::OnMouseCaptureLost() {
@@ -155,8 +166,9 @@ void SelectionController::OnMouseCaptureLost() {
 
   drag_selection_timer_.Stop();
 
-  if (handles_selection_clipboard_ && !render_text->selection().is_empty())
+  if (handles_selection_clipboard_ && !render_text->selection().is_empty()) {
     delegate_->UpdateSelectionClipboard();
+  }
 }
 
 void SelectionController::OffsetDoubleClickWord(size_t offset) {
@@ -167,8 +179,7 @@ void SelectionController::OffsetDoubleClickWord(size_t offset) {
 void SelectionController::TrackMouseClicks(const ui::MouseEvent& event) {
   if (event.IsOnlyLeftMouseButton()) {
     base::TimeDelta time_delta = event.time_stamp() - last_click_time_;
-    if (!last_click_time_.is_null() &&
-        time_delta.InMilliseconds() <= GetDoubleClickInterval() &&
+    if (!last_click_time_.is_null() && time_delta <= GetDoubleClickInterval() &&
         !View::ExceededDragThreshold(event.root_location() -
                                      last_click_root_location_)) {
       // Upon clicking after a triple click, the count should go back to
@@ -236,9 +247,11 @@ bool SelectionController::IsInsideText(const gfx::Point& point) {
   std::vector<gfx::Rect> bounds_rects = render_text->GetSubstringBounds(
       gfx::Range(0, render_text->text().length()));
 
-  for (const auto& bounds : bounds_rects)
-    if (bounds.Contains(point))
+  for (const auto& bounds : bounds_rects) {
+    if (bounds.Contains(point)) {
       return true;
+    }
+  }
 
   return false;
 }

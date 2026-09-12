@@ -6,15 +6,16 @@ package org.chromium.chrome.browser.download;
 
 import android.content.Context;
 
-import androidx.annotation.Nullable;
-
 import org.chromium.base.Callback;
-import org.chromium.chrome.browser.profiles.OTRProfileID;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.profiles.OtrProfileId;
 import org.chromium.components.messages.MessageDispatcher;
 import org.chromium.components.offline_items_collection.ContentId;
 import org.chromium.components.offline_items_collection.OfflineContentProvider;
 import org.chromium.components.offline_items_collection.OfflineItem;
 import org.chromium.components.offline_items_collection.UpdateDelta;
+import org.chromium.ui.base.WindowAndroid;
 import org.chromium.ui.modaldialog.ModalDialogManager;
 import org.chromium.url.GURL;
 
@@ -25,22 +26,18 @@ import java.util.List;
  * bar and messages UI versions. Tracks updates for download items, offline items, android
  * downloads etc. and computes the current state of the UI to be shown.
  */
+@NullMarked
 public interface DownloadMessageUiController extends OfflineContentProvider.Observer {
-    /**
-     * A delegate to provide chrome layer dependencies.
-     */
+    /** A delegate to provide chrome layer dependencies. */
     interface Delegate {
         /** @return The context used for obtaining resources. */
-        @Nullable
-        Context getContext();
+        @Nullable Context getContext();
 
         /** @return The {@link MessageDispatcher} used for showing messages. */
-        @Nullable
-        MessageDispatcher getMessageDispatcher();
+        @Nullable MessageDispatcher getMessageDispatcher();
 
         /** @return The {@link ModalDialogManager} for showing download later dialog. */
-        @Nullable
-        ModalDialogManager getModalDialogManager();
+        @Nullable ModalDialogManager getModalDialogManager();
 
         /**
          * Called by the controller before updating the UI so that it is only using the last focused
@@ -50,14 +47,14 @@ public interface DownloadMessageUiController extends OfflineContentProvider.Obse
         boolean maybeSwitchToFocusedActivity();
 
         /** Called to open the downloads page. */
-        void openDownloadsPage(OTRProfileID otrProfileID, @DownloadOpenSource int source);
+        void openDownloadsPage(@Nullable OtrProfileId otrProfileId, @DownloadOpenSource int source);
 
-        /**
-         * Called to open the download associated with the given {@link
-         * contentId}.
-         */
-        void openDownload(ContentId contentId, OTRProfileID otrProfileID,
-                @DownloadOpenSource int source, Context context);
+        /** Called to open the download associated with the given {@link OfflineItem}. */
+        void openDownload(
+                @Nullable OfflineItem offlineItem,
+                @Nullable OtrProfileId otrProfileId,
+                @DownloadOpenSource int source,
+                Context context);
 
         /** Called to remove a notification. */
         void removeNotification(int notificationId, DownloadInfo downloadInfo);
@@ -82,15 +79,23 @@ public interface DownloadMessageUiController extends OfflineContentProvider.Obse
 
     /**
      * Returns true if the given download information matches an interstitial download.
+     *
      * @param originalUrl The URL of the download.
      * @param guid Unique GUID of the download.
      */
-    boolean isDownloadInterstitialItem(GURL originalUrl, String guid);
+    boolean isDownloadInterstitialItem(GURL originalUrl, @Nullable String guid);
+
+    /** Shows a message that asks for the user confirmation before the actual download starts. */
+    void showIncognitoDownloadMessage(Callback<Boolean> callback);
 
     /**
-     * Shows a message that asks for the user confirmation before the actual download starts.
+     * Shows a message that asks for the user confirmation on a specific window before download
+     * starts.
      */
-    void showIncognitoDownloadMessage(Callback<Boolean> callback);
+    default void showIncognitoDownloadMessage(
+            @Nullable WindowAndroid window, Callback<Boolean> callback) {
+        showIncognitoDownloadMessage(callback);
+    }
 
     /** OfflineContentProvider.Observer methods. */
     @Override
@@ -100,8 +105,10 @@ public interface DownloadMessageUiController extends OfflineContentProvider.Obse
     void onItemRemoved(ContentId id);
 
     @Override
-    void onItemUpdated(OfflineItem item, UpdateDelta updateDelta);
+    void onItemUpdated(OfflineItem item, @Nullable UpdateDelta updateDelta);
 
-    /** @return Whether the UI is currently showing. */
+    /**
+     * @return Whether the UI is currently showing.
+     */
     boolean isShowing();
 }

@@ -7,6 +7,7 @@
 
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
+#include "base/win/scoped_com_initializer.h"
 #include "gpu/config/gpu_info.h"
 #include "media/mojo/mojom/frame_interface_factory.mojom.h"
 #include "media/mojo/mojom/interface_factory.mojom.h"
@@ -36,6 +37,7 @@ class MEDIA_MOJO_EXPORT MediaFoundationService final
 
   // mojom::MediaFoundationService implementation:
   void IsKeySystemSupported(const std::string& key_system,
+                            bool is_hw_secure,
                             IsKeySystemSupportedCallback callback) final;
   void CreateInterfaceFactory(
       mojo::PendingReceiver<mojom::InterfaceFactory> receiver,
@@ -46,6 +48,10 @@ class MEDIA_MOJO_EXPORT MediaFoundationService final
   MediaFoundationMojoMediaClient mojo_media_client_;
   DeferredDestroyUniqueReceiverSet<mojom::InterfaceFactory>
       interface_factory_receivers_;
+
+  // IMFContentDecryptionModule implementations typically require MTA to run.
+  base::win::ScopedCOMInitializer com_initializer_{
+      base::win::ScopedCOMInitializer::kMTA};
 };
 
 }  // namespace media

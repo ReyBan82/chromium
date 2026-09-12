@@ -8,29 +8,33 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/browser/ui/autofill/autofill_popup_view_delegate.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
-#include "components/autofill/core/browser/ui/suggestion.h"
+#include "components/autofill/core/browser/suggestions/suggestion.h"
+#include "components/autofill/core/browser/test_utils/autofill_test_util.h"
+#include "components/autofill/core/browser/ui/popup_open_enums.h"
 #include "components/autofill/core/common/autofill_features.h"
+#include "components/strings/grit/components_strings.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/l10n/l10n_util.h"
 #include "ui/events/event_utils.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/point_conversions.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/rect_f.h"
-#include "ui/gfx/geometry/vector2d.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/test/views_test_base.h"
 #include "ui/views/widget/widget.h"
 
 namespace autofill {
-
 namespace {
 
 using testing::Return;
@@ -41,13 +45,17 @@ class MockAutofillPopupViewDelegate : public AutofillPopupViewDelegate {
   MockAutofillPopupViewDelegate() = default;
   ~MockAutofillPopupViewDelegate() override = default;
 
-  MOCK_METHOD(void, Hide, (PopupHidingReason), (override));
+  MOCK_METHOD(void, Hide, (SuggestionHidingReason), (override));
   MOCK_METHOD(void, ViewDestroyed, (), (override));
 
   MOCK_METHOD(gfx::NativeView, container_view, (), (const override));
   MOCK_METHOD(content::WebContents*, GetWebContents, (), (const override));
   MOCK_METHOD(const gfx::RectF&, element_bounds, (), (const override));
-  MOCK_METHOD(bool, IsRTL, (), (const override));
+  MOCK_METHOD(PopupAnchorType, anchor_type, (), (const override));
+  MOCK_METHOD(base::i18n::TextDirection,
+              GetElementTextDirection,
+              (),
+              (const override));
 
   base::WeakPtr<AutofillPopupViewDelegate> GetWeakPtr() {
     return weak_ptr_factory_.GetWeakPtr();
@@ -58,6 +66,8 @@ class MockAutofillPopupViewDelegate : public AutofillPopupViewDelegate {
 };
 
 }  // namespace
+// The anonymous namespace needs to end here because of `friend`ships between
+// the tests and the production code.
 
 class PopupBaseViewBrowsertest : public InProcessBrowserTest {
  public:
@@ -70,26 +80,32 @@ class PopupBaseViewBrowsertest : public InProcessBrowserTest {
 
   void SetUpOnMainThread() override {
     content::WebContents* web_contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
+        browser()->GetTabStripModel()->GetActiveWebContents();
     gfx::NativeView native_view = web_contents->GetNativeView();
     EXPECT_CALL(mock_delegate_, container_view())
         .WillRepeatedly(Return(native_view));
     EXPECT_CALL(mock_delegate_, GetWebContents())
         .WillRepeatedly(Return(web_contents));
-    EXPECT_CALL(mock_delegate_, ViewDestroyed());
+    EXPECT_CALL(mock_delegate_, ViewDestroyed()).Times(testing::AtMost(1));
 
     view_ = new PopupBaseView(mock_delegate_.GetWeakPtr(),
                               views::Widget::GetWidgetForNativeWindow(
-                                  browser()->window()->GetNativeWindow()));
+                                  browser()->GetWindow()->GetNativeWindow()));
   }
 
   void TearDownOnMainThread() override { view_ = nullptr; }
 
-  void ShowView() { view_->DoShow(); }
+  bool ShowView() { return view_->DoShow(); }
+  void HideView() { view_->DoHide(); }
 
  protected:
   testing::NiceMock<MockAutofillPopupViewDelegate> mock_delegate_;
   raw_ptr<PopupBaseView> view_ = nullptr;
+
+ private:
+  base::test::ScopedFeatureList feature_list_{
+      features::kAutofillPopupUseDeleteSoon};
+  test::AutofillBrowserTestEnvironment autofill_test_environment_;
 };
 
 IN_PROC_BROWSER_TEST_F(PopupBaseViewBrowsertest, CorrectBoundsTest) {
@@ -111,55 +127,45 @@ IN_PROC_BROWSER_TEST_F(PopupBaseViewBrowsertest, CorrectBoundsTest) {
   EXPECT_EQ(expected_point, display_point);
 }
 
-struct ProminentPopupTestParams {
-  bool is_feature_enabled;
-  int expected_left_offset;
-};
-
-class PopupBaseViewProminentStyleFeatureTest
-    : public PopupBaseViewBrowsertest,
-      public testing::WithParamInterface<ProminentPopupTestParams> {
- public:
-  PopupBaseViewProminentStyleFeatureTest() {
-    feature_list_.InitWithFeatureState(features::kAutofillMoreProminentPopup,
-                                       GetParam().is_feature_enabled);
-  }
-
- private:
-  base::test::ScopedFeatureList feature_list_;
-};
-
-IN_PROC_BROWSER_TEST_P(PopupBaseViewProminentStyleFeatureTest, LeftMaxOffset) {
+IN_PROC_BROWSER_TEST_F(PopupBaseViewBrowsertest, AccessibleProperties) {
   gfx::Rect web_bounds = mock_delegate_.GetWebContents()->GetViewBounds();
-  gfx::RectF bounds(web_bounds.x() + 100, web_bounds.y() + 150, 1000, 20);
+  gfx::RectF bounds(web_bounds.x() + 100, web_bounds.y() + 150, 10, 10);
   EXPECT_CALL(mock_delegate_, element_bounds())
       .WillRepeatedly(ReturnRef(bounds));
-
   ShowView();
+  ui::AXNodeData data;
 
-  gfx::Point display_point = static_cast<views::View*>(view_)
-                                 ->GetWidget()
-                                 ->GetClientAreaBoundsInScreen()
-                                 .origin();
-
-  // Shows the popup on a long (1000px) element and returns the offset
-  // of the poopup's top left point to the bottom left point of the target:
-  //     │      element     │
-  //     └──────────────────┘
-  //      |- offset -|┌──^───────────────┐
-  //                  │       popup      │
-  gfx::Vector2d offset =
-      display_point - gfx::ToRoundedPoint(bounds.bottom_left());
-
-  EXPECT_EQ(offset.x(), GetParam().expected_left_offset);
+  view_->GetViewAccessibility().GetAccessibleNodeData(&data);
+  EXPECT_EQ(ax::mojom::Role::kPane, data.role);
+  EXPECT_EQ(l10n_util::GetStringUTF16(IDS_AUTOFILL_POPUP_ACCESSIBLE_NODE_DATA),
+            data.GetString16Attribute(ax::mojom::StringAttribute::kName));
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    All,
-    PopupBaseViewProminentStyleFeatureTest,
-    testing::Values(ProminentPopupTestParams{.is_feature_enabled = false,
-                                             .expected_left_offset = 95},
-                    ProminentPopupTestParams{.is_feature_enabled = true,
-                                             .expected_left_offset = 55}));
+IN_PROC_BROWSER_TEST_F(PopupBaseViewBrowsertest,
+                       HideWithoutWidgetSchedulesDeleteSoon) {
+  EXPECT_EQ(nullptr, view_->GetWidget());
+
+  // DoHide() should not synchronously delete `view_`, and calling DoHide()
+  // again should be a safe no-op.
+  HideView();
+  HideView();
+
+  // Reset `view_` before running tasks to avoid a dangling raw_ptr when
+  // DeleteSoon destroys the view.
+  view_ = nullptr;
+
+  // Run pending tasks to execute DeleteSoon.
+  base::RunLoop().RunUntilIdle();
+}
+
+IN_PROC_BROWSER_TEST_F(PopupBaseViewBrowsertest, ShowAfterHideReturnsFalse) {
+  EXPECT_EQ(nullptr, view_->GetWidget());
+
+  HideView();
+  EXPECT_FALSE(ShowView());
+
+  view_ = nullptr;
+  base::RunLoop().RunUntilIdle();
+}
 
 }  // namespace autofill

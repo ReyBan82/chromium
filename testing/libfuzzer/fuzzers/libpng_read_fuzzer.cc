@@ -6,11 +6,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <vector>
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
 
-#include "base/functional/bind.h"
-#include "base/functional/callback_helpers.h"
 #define PNG_INTERNAL
+#include "base/containers/span.h"
+#include "testing/libfuzzer/libfuzzer_base_wrappers.h"
 #include "third_party/libpng/png.h"
 
 void* limited_malloc(png_structp, png_alloc_size_t size) {
@@ -33,13 +33,12 @@ static const int kPngHeaderSize = 8;
 // Entry point for LibFuzzer.
 // Roughly follows the libpng book example:
 // http://www.libpng.org/pub/png/book/chapter13.html
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
-  if (size < kPngHeaderSize) {
+DEFINE_LLVM_FUZZER_TEST_ONE_INPUT_SPAN(base::span<const uint8_t> data) {
+  if (data.size() < kPngHeaderSize) {
     return 0;
   }
 
-  std::vector<unsigned char> v(data, data + size);
-  if (png_sig_cmp(v.data(), 0, kPngHeaderSize)) {
+  if (png_sig_cmp(data.data(), 0, kPngHeaderSize)) {
     // not a PNG.
     return 0;
   }
@@ -63,15 +62,17 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   png_infop info_ptr = png_create_info_struct(png_ptr);
   assert(info_ptr);
 
-  base::ScopedClosureRunner struct_deleter(
-      base::BindOnce(&png_destroy_read_struct, &png_ptr, &info_ptr, nullptr));
+  absl::Cleanup struct_deleter = [&png_ptr, &info_ptr] {
+    png_destroy_read_struct(&png_ptr, &info_ptr, nullptr);
+  };
 
   if (setjmp(png_jmpbuf(png_ptr))) {
     return 0;
   }
 
   png_set_progressive_read_fn(png_ptr, nullptr, nullptr, nullptr, nullptr);
-  png_process_data(png_ptr, info_ptr, const_cast<uint8_t*>(data), size);
+  png_process_data(png_ptr, info_ptr, const_cast<uint8_t*>(data.data()),
+                   data.size());
 
   return 0;
 }

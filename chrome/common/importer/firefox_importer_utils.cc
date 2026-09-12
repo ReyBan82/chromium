@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <map>
 #include <string>
+#include <string_view>
 
 #include "base/files/file_util.h"
 #include "base/logging.h"
@@ -27,7 +28,7 @@
 namespace {
 
 // Retrieves the file system path of the profile name.
-base::FilePath GetProfilePath(const base::Value::Dict& root,
+base::FilePath GetProfilePath(const base::DictValue& root,
                               const std::string& profile_name) {
   std::string path_str;
   const std::string* is_relative =
@@ -67,7 +68,7 @@ std::vector<FirefoxDetail> GetFirefoxDetails(
 }
 
 std::vector<FirefoxDetail> GetFirefoxDetailsFromDictionary(
-    const base::Value::Dict& root,
+    const base::DictValue& root,
     const std::string& firefox_install_id) {
   std::vector<FirefoxDetail> profile_details;
 
@@ -121,7 +122,7 @@ bool ComposeMacAppPath(const std::string& path_from_file,
   // Append with an absolute path component will trigger an assert, so we
   // must handle it differently and initialize output with it.
   *output = base::FilePath(path_components[0]);
-  // Append next path components untill we find the *.app component. When we do,
+  // Append next path components until we find the *.app component. When we do,
   // append Contents/MacOS.
   for (size_t i = 1; i < path_components.size(); ++i) {
     *output = output->Append(path_components[i]);
@@ -312,7 +313,7 @@ std::u16string GetFirefoxImporterName(const base::FilePath& app_path) {
 
     const std::string name_attr("Name=");
     bool in_app_section = false;
-    for (const base::StringPiece& line : base::SplitStringPiece(
+    for (std::string_view line : base::SplitStringPiece(
              content, "\n", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL)) {
       if (line == "[App]") {
         in_app_section = true;

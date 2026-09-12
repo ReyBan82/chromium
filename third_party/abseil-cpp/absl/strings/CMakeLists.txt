@@ -16,21 +16,34 @@
 
 absl_cc_library(
   NAME
+    string_view
+  HDRS
+    "string_view.h"
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::config
+    absl::core_headers
+    absl::nullability
+  PUBLIC
+)
+
+absl_cc_library(
+  NAME
     strings
   HDRS
     "ascii.h"
     "charconv.h"
     "escaping.h"
+    "has_absl_stringify.h"
     "internal/damerau_levenshtein_distance.h"
     "internal/string_constant.h"
-    "internal/has_absl_stringify.h"
     "match.h"
     "numbers.h"
     "str_cat.h"
     "str_join.h"
     "str_replace.h"
     "str_split.h"
-    "string_view.h"
     "strip.h"
     "substitute.h"
   SRCS
@@ -46,7 +59,6 @@ absl_cc_library(
     "internal/memutil.h"
     "internal/stringify_sink.h"
     "internal/stringify_sink.cc"
-    "internal/stl_type_traits.h"
     "internal/str_join_internal.h"
     "internal/str_split_internal.h"
     "match.cc"
@@ -54,23 +66,81 @@ absl_cc_library(
     "str_cat.cc"
     "str_replace.cc"
     "str_split.cc"
-    "string_view.cc"
     "substitute.cc"
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
-    absl::strings_internal
     absl::base
     absl::bits
+    absl::charset
     absl::config
     absl::core_headers
     absl::endian
+    absl::hardening
     absl::int128
+    absl::iterator_traits_internal
     absl::memory
+    absl::nullability
     absl::raw_logging_internal
+    absl::source_location
+    absl::string_view
+    absl::strings_append_and_overwrite
+    absl::strings_internal
+    absl::strings_resize_and_overwrite
     absl::throw_delegate
     absl::type_traits
   PUBLIC
+)
+
+absl_cc_library(
+  NAME
+    charset
+  HDRS
+    charset.h
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::config
+    absl::string_view
+  PUBLIC
+)
+
+absl_cc_library(
+  NAME
+    has_ostream_operator
+  HDRS
+    "has_ostream_operator.h"
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::config
+  PUBLIC
+)
+
+absl_cc_library(
+  NAME
+    stringify_stream
+  HDRS
+    "internal/stringify_stream.h"
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::config
+    absl::string_view
+)
+
+absl_cc_test(
+  NAME
+    stringify_stream_test
+  SRCS
+    "internal/stringify_stream_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::str_format
+    absl::string_view
+    absl::stringify_stream
+    GTest::gmock_main
 )
 
 # Internal-only target, do not depend on directly.
@@ -78,7 +148,6 @@ absl_cc_library(
   NAME
     strings_internal
   HDRS
-    "internal/char_map.h"
     "internal/escaping.cc"
     "internal/escaping.h"
     "internal/ostringstream.h"
@@ -94,7 +163,65 @@ absl_cc_library(
     absl::core_headers
     absl::endian
     absl::raw_logging_internal
+    absl::strings_resize_and_overwrite
     absl::type_traits
+)
+
+absl_cc_library(
+  NAME
+    strings_resize_and_overwrite
+  HDRS
+    "resize_and_overwrite.h"
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::config
+    absl::core_headers
+    absl::dynamic_annotations
+    absl::hardening
+    absl::throw_delegate
+)
+
+absl_cc_test(
+  NAME
+    strings_resize_and_overwrite_test
+  SRCS
+    "resize_and_overwrite_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::absl_check
+    absl::dynamic_annotations
+    absl::strings_resize_and_overwrite
+    GTest::gmock_main
+)
+
+absl_cc_library(
+  NAME
+    strings_append_and_overwrite
+  HDRS
+    "internal/append_and_overwrite.h"
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::config
+    absl::core_headers
+    absl::hardening
+    absl::strings_resize_and_overwrite
+    absl::throw_delegate
+)
+
+absl_cc_test(
+  NAME
+    strings_append_and_overwrite_test
+  SRCS
+    "internal/append_and_overwrite_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::absl_check
+    absl::strings_resize_and_overwrite
+    GTest::gmock_main
 )
 
 absl_cc_test(
@@ -105,8 +232,9 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::base
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -118,9 +246,37 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
+    absl::charset
+    absl::check
     absl::core_headers
     absl::fixed_array
+    absl::str_format
+    absl::string_view
+    absl::strings
+    GTest::gmock_main
+)
+
+absl_cc_test(
+  NAME
+    has_absl_stringify_test
+  SRCS
+    "has_absl_stringify_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::strings
+    GTest::gmock_main
+)
+
+absl_cc_test(
+  NAME
+    has_ostream_operator_test
+  SRCS
+    "has_ostream_operator_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::has_ostream_operator
     GTest::gmock_main
 )
 
@@ -132,8 +288,9 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::core_headers
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -145,8 +302,8 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::base
+    absl::strings
     GTest::gmock_main
 )
 
@@ -159,8 +316,8 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::core_headers
+    absl::strings
     GTest::gmock_main
 )
 
@@ -172,9 +329,10 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings_internal
     absl::base
     absl::core_headers
+    absl::string_view
+    absl::strings_internal
     GTest::gmock_main
 )
 
@@ -186,8 +344,8 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
+    absl::string_view
     absl::strings
-    absl::type_traits
     GTest::gmock_main
 )
 
@@ -199,10 +357,11 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::config
     absl::core_headers
     absl::dynamic_annotations
+    absl::strings
+    absl::type_traits
     GTest::gmock_main
 )
 
@@ -214,8 +373,9 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::core_headers
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -227,6 +387,7 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
+    absl::string_view
     absl::strings
     GTest::gmock_main
 )
@@ -239,12 +400,14 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
+    absl::btree
     absl::core_headers
     absl::dynamic_annotations
-    absl::btree
     absl::flat_hash_map
+    absl::hash
     absl::node_hash_map
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -264,13 +427,13 @@ absl_cc_test(
   NAME
     resize_uninitialized_test
   SRCS
-    "internal/resize_uninitialized.h"
     "internal/resize_uninitialized_test.cc"
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
     absl::base
     absl::core_headers
+    absl::strings_internal
     absl::type_traits
     GTest::gmock_main
 )
@@ -283,10 +446,11 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::base
     absl::core_headers
     absl::memory
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -298,9 +462,11 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
-    absl::str_format
+    absl::config
     absl::core_headers
+    absl::str_format
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -313,13 +479,16 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
-    absl::core_headers
-    absl::pow10_helper
+    absl::cleanup
     absl::config
-    absl::raw_logging_internal
-    absl::random_random
+    absl::core_headers
+    absl::int128
+    absl::log
+    absl::pow10_helper
     absl::random_distributions
+    absl::random_random
+    absl::string_view
+    absl::strings
     absl::strings_internal
     GTest::gmock_main
 )
@@ -332,20 +501,22 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::base
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
 absl_cc_test(
   NAME
-    char_map_test
+    charset_test
   SRCS
-    "internal/char_map_test.cc"
+    "charset_test.cc"
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings_internal
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -357,9 +528,10 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
-    absl::str_format
     absl::pow10_helper
+    absl::str_format
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -372,9 +544,10 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
+    absl::check
     absl::config
-    absl::raw_logging_internal
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -388,8 +561,9 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
     absl::config
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -401,7 +575,12 @@ absl_cc_library(
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
+    absl::config
+    absl::core_headers
+    absl::nullability
+    absl::span
     absl::str_format_internal
+    absl::string_view
   PUBLIC
 )
 
@@ -429,14 +608,18 @@ absl_cc_library(
     ${ABSL_DEFAULT_COPTS}
   DEPS
     absl::bits
-    absl::strings
     absl::config
     absl::core_headers
+    absl::fixed_array
+    absl::inlined_vector
+    absl::int128
     absl::numeric_representation
+    absl::span
+    absl::string_view
+    absl::strings
+    absl::strings_internal
     absl::type_traits
     absl::utility
-    absl::int128
-    absl::span
 )
 
 absl_cc_test(
@@ -447,10 +630,13 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::str_format
+    absl::config
     absl::cord
-    absl::strings
     absl::core_headers
+    absl::span
+    absl::str_format
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -462,9 +648,10 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
+    absl::random_random
     absl::str_format
     absl::str_format_internal
-    absl::strings
+    absl::string_view
     GTest::gmock_main
 )
 
@@ -476,6 +663,7 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
+    absl::config
     absl::str_format
     absl::str_format_internal
     GTest::gmock_main
@@ -513,11 +701,16 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::strings
-    absl::str_format_internal
+    absl::config
     absl::core_headers
-    absl::raw_logging_internal
     absl::int128
+    absl::log
+    absl::raw_logging_internal
+    absl::span
+    absl::str_format
+    absl::str_format_internal
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -529,8 +722,8 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::str_format_internal
     absl::cord
+    absl::str_format_internal
     GTest::gmock_main
 )
 
@@ -542,8 +735,24 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::str_format_internal
+    absl::config
     absl::core_headers
+    absl::str_format_internal
+    absl::string_view
+    GTest::gmock_main
+)
+
+absl_cc_test(
+  NAME
+    char_formatting_test
+  SRCS
+    "char_formatting_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::base
+    absl::str_format
+    absl::strings
     GTest::gmock_main
 )
 
@@ -556,7 +765,7 @@ absl_cc_library(
   SRCS
     "internal/pow10_helper.cc"
   COPTS
-    ${ABSL_TEST_COPTS}
+    ${ABSL_DEFAULT_COPTS}
   DEPS
     absl::config
   TESTONLY
@@ -588,8 +797,6 @@ absl_cc_library(
     "internal/cord_rep_crc.h"
     "internal/cord_rep_consume.h"
     "internal/cord_rep_flat.h"
-    "internal/cord_rep_ring.h"
-    "internal/cord_rep_ring_reader.h"
   SRCS
     "internal/cord_internal.cc"
     "internal/cord_rep_btree.cc"
@@ -597,11 +804,10 @@ absl_cc_library(
     "internal/cord_rep_btree_reader.cc"
     "internal/cord_rep_crc.cc"
     "internal/cord_rep_consume.cc"
-    "internal/cord_rep_ring.cc"
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
-    absl::base_internal
+    absl::compare
     absl::compressed_tuple
     absl::config
     absl::container_memory
@@ -611,6 +817,7 @@ absl_cc_library(
     absl::inlined_vector
     absl::layout
     absl::raw_logging_internal
+    absl::string_view
     absl::strings
     absl::throw_delegate
     absl::type_traits
@@ -682,8 +889,8 @@ absl_cc_library(
     ${ABSL_DEFAULT_COPTS}
   DEPS
     absl::config
-    absl::core_headers
     absl::cordz_update_tracker
+    absl::core_headers
     absl::synchronization
 )
 
@@ -700,6 +907,7 @@ absl_cc_library(
   DEPS
     absl::base
     absl::config
+    absl::no_destructor
     absl::raw_logging_internal
     absl::synchronization
 )
@@ -714,8 +922,8 @@ absl_cc_test(
     absl::cordz_handle
     absl::cordz_test_helpers
     absl::memory
-    absl::random_random
     absl::random_distributions
+    absl::random_random
     absl::synchronization
     absl::time
     GTest::gmock_main
@@ -741,8 +949,9 @@ absl_cc_library(
     absl::cordz_update_tracker
     absl::core_headers
     absl::inlined_vector
-    absl::span
+    absl::no_destructor
     absl::raw_logging_internal
+    absl::span
     absl::stacktrace
     absl::synchronization
     absl::time
@@ -758,10 +967,10 @@ absl_cc_test(
   DEPS
     absl::config
     absl::cord_internal
-    absl::cordz_test_helpers
     absl::cordz_handle
     absl::cordz_info
     absl::cordz_statistics
+    absl::cordz_test_helpers
     absl::cordz_test_helpers
     absl::cordz_update_tracker
     absl::span
@@ -874,7 +1083,6 @@ absl_cc_library(
     "cord.cc"
     "cord_analysis.cc"
     "cord_analysis.h"
-    "cord_buffer.cc"
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
@@ -886,16 +1094,22 @@ absl_cc_library(
     absl::cordz_update_scope
     absl::cordz_update_tracker
     absl::core_headers
+    absl::crc32c
     absl::crc_cord_state
     absl::endian
-    absl::fixed_array
     absl::function_ref
+    absl::hardening
     absl::inlined_vector
+    absl::nullability
     absl::optional
     absl::raw_logging_internal
     absl::span
+    absl::string_view
     absl::strings
+    absl::strings_append_and_overwrite
+    absl::strings_resize_and_overwrite
     absl::type_traits
+    absl::weakly_mixed_integer
   PUBLIC
 )
 
@@ -911,7 +1125,7 @@ absl_cc_library(
     absl::config
     absl::cord_internal
     absl::raw_logging_internal
-    absl::strings
+    absl::string_view
   TESTONLY
 )
 
@@ -926,7 +1140,7 @@ absl_cc_library(
     absl::config
     absl::cord
     absl::cord_internal
-    absl::strings
+    absl::string_view
   TESTONLY
   PUBLIC
 )
@@ -948,6 +1162,7 @@ absl_cc_library(
     absl::cordz_statistics
     absl::cordz_update_tracker
     absl::core_headers
+    absl::nullability
     absl::strings
   TESTONLY
 )
@@ -960,19 +1175,24 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
-    absl::cord
-    absl::str_format
-    absl::strings
     absl::base
+    absl::check
     absl::config
+    absl::cord
     absl::cord_test_helpers
     absl::cordz_test_helpers
     absl::core_headers
     absl::endian
-    absl::hash
-    absl::random_random
-    absl::raw_logging_internal
     absl::fixed_array
+    absl::function_ref
+    absl::hash
+    absl::hash_testing
+    absl::log
+    absl::no_destructor
+    absl::random_random
+    absl::str_format
+    absl::string_view
+    absl::strings
     GTest::gmock_main
 )
 
@@ -989,7 +1209,7 @@ absl_cc_test(
     absl::cord_internal
     absl::cord_rep_test_util
     absl::core_headers
-    absl::strings
+    absl::string_view
     GTest::gmock_main
 )
 
@@ -1008,6 +1228,7 @@ absl_cc_test(
     absl::cord_rep_test_util
     absl::core_headers
     absl::raw_logging_internal
+    absl::string_view
     absl::strings
     GTest::gmock_main
 )
@@ -1026,6 +1247,7 @@ absl_cc_test(
     absl::cord_rep_test_util
     absl::core_headers
     absl::raw_logging_internal
+    absl::string_view
     absl::strings
     GTest::gmock_main
 )
@@ -1044,7 +1266,7 @@ absl_cc_test(
     absl::cord_rep_test_util
     absl::core_headers
     absl::raw_logging_internal
-    absl::strings
+    absl::string_view
     GTest::gmock_main
 )
 
@@ -1065,56 +1287,65 @@ absl_cc_test(
 
 absl_cc_test(
   NAME
-    cord_ring_test
-  SRCS
-    "cord_ring_test.cc"
-  COPTS
-    ${ABSL_TEST_COPTS}
-  DEPS
-    absl::base
-    absl::config
-    absl::cord_internal
-    absl::core_headers
-    absl::raw_logging_internal
-    absl::strings
-    GTest::gmock_main
-)
-
-absl_cc_test(
-  NAME
-    cord_ring_reader_test
-  SRCS
-    "cord_ring_reader_test.cc"
-  COPTS
-    ${ABSL_TEST_COPTS}
-  DEPS
-    absl::base
-    absl::cord_internal
-    absl::core_headers
-    absl::strings
-    GTest::gmock_main
-)
-
-absl_cc_test(
-  NAME
     cordz_test
   SRCS
     "cordz_test.cc"
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
+    absl::base
+    absl::config
     absl::cord
+    absl::cord_internal
     absl::cord_test_helpers
-    absl::cordz_test_helpers
     absl::cordz_functions
     absl::cordz_info
     absl::cordz_sample_token
     absl::cordz_statistics
+    absl::cordz_test_helpers
     absl::cordz_update_tracker
-    absl::base
-    absl::config
     absl::core_headers
     absl::raw_logging_internal
+    absl::string_view
+    absl::strings
+    GTest::gmock_main
+)
+
+absl_cc_library(
+  NAME
+    generic_printer_internal
+  SRCS
+    "internal/generic_printer.cc"
+    "internal/generic_printer_internal.h"
+  HDRS
+    "internal/generic_printer.h"
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::config
+    absl::log_internal_container
+    absl::requires_internal
+    absl::str_format
+    absl::strings
+)
+
+absl_cc_test(
+  NAME
+    generic_printer_test
+  SRCS
+    "internal/generic_printer_test.cc"
+  COPTS
+    ${ABSL_TEST_COPTS}
+  DEPS
+    absl::base
+    absl::cleanup
+    absl::config
+    absl::flat_hash_map
+    absl::generic_printer_internal
+    absl::status
+    absl::statusor
+    absl::str_format
+    absl::string_view
     absl::strings
     GTest::gmock_main
 )

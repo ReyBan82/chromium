@@ -13,7 +13,10 @@ namespace blink {
 ImageTrackList::ImageTrackList(ImageDecoderExternal* image_decoder)
     : image_decoder_(image_decoder),
       ready_property_(MakeGarbageCollected<ReadyProperty>(
-          image_decoder->GetExecutionContext())) {}
+          image_decoder->GetExecutionContext())) {
+  // Do not report unhandled rejections of the ready promise.
+  ready_property_->MarkAsHandled();
+}
 
 ImageTrackList::~ImageTrackList() = default;
 
@@ -25,13 +28,13 @@ int32_t ImageTrackList::selectedIndex() const {
   return selected_track_id_.value_or(-1);
 }
 
-absl::optional<ImageTrack*> ImageTrackList::selectedTrack() const {
+ImageTrack* ImageTrackList::selectedTrack() const {
   if (!selected_track_id_)
-    return absl::nullopt;
+    return nullptr;
   return tracks_[*selected_track_id_].Get();
 }
 
-ScriptPromise ImageTrackList::ready(ScriptState* script_state) {
+ScriptPromise<IDLUndefined> ImageTrackList::ready(ScriptState* script_state) {
   return ready_property_->Promise(script_state->World());
 }
 

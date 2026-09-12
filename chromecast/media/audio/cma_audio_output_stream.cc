@@ -8,6 +8,8 @@
 #include <limits>
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -21,6 +23,7 @@
 #include "chromecast/public/volume_control.h"
 #include "media/audio/audio_device_description.h"
 #include "media/base/audio_bus.h"
+#include "media/base/audio_sample_types.h"
 
 namespace chromecast {
 namespace media {
@@ -57,8 +60,7 @@ void CmaAudioOutputStream::SetRunning(bool running) {
 }
 
 void CmaAudioOutputStream::Initialize(
-    const std::string& application_session_id,
-    chromecast::mojom::MultiroomInfoPtr multiroom_info) {
+    const std::string& application_session_id) {
   DCHECK_CALLED_ON_VALID_THREAD(media_thread_checker_);
   DCHECK_EQ(cma_backend_state_, CmaBackendState::kUninitialized);
   // If AUDIO_PREFETCH is enabled, we're able to push audio ahead of
@@ -70,7 +72,7 @@ void CmaAudioOutputStream::Initialize(
           ? MediaPipelineDeviceParams::kModeSyncPts
           : MediaPipelineDeviceParams::kModeIgnorePts,
       false /*use_hw_av_sync*/, 0 /*audio_track_session_id*/,
-      std::move(multiroom_info), cma_backend_factory_, this);
+      cma_backend_factory_, this);
   cma_backend_state_ = CmaBackendState::kStopped;
 
   audio_bus_ = ::media::AudioBus::Create(audio_params_);
@@ -121,7 +123,7 @@ void CmaAudioOutputStream::Start(
 void CmaAudioOutputStream::Stop(base::WaitableEvent* finished) {
   DCHECK_CALLED_ON_VALID_THREAD(media_thread_checker_);
   // Prevent further pushes to the audio buffer after stopping.
-  push_timer_.AbandonAndStop();
+  push_timer_.Stop();
   // Don't actually stop the backend.  Stop() gets called when the stream is
   // paused.  We rely on Flush() to stop the backend.
   if (output_) {
@@ -135,7 +137,7 @@ void CmaAudioOutputStream::Stop(base::WaitableEvent* finished) {
 void CmaAudioOutputStream::Flush(base::WaitableEvent* finished) {
   DCHECK_CALLED_ON_VALID_THREAD(media_thread_checker_);
   // Prevent further pushes to the audio buffer after stopping.
-  push_timer_.AbandonAndStop();
+  push_timer_.Stop();
 
   if (output_ && (cma_backend_state_ == CmaBackendState::kPaused ||
                   cma_backend_state_ == CmaBackendState::kStarted)) {
@@ -150,7 +152,7 @@ void CmaAudioOutputStream::Flush(base::WaitableEvent* finished) {
 void CmaAudioOutputStream::Close(base::OnceClosure closure) {
   DCHECK_CALLED_ON_VALID_THREAD(media_thread_checker_);
   // Prevent further pushes to the audio buffer after stopping.
-  push_timer_.AbandonAndStop();
+  push_timer_.Stop();
   // Only stop the backend if it was started.
   if (output_ && cma_backend_state_ != CmaBackendState::kStopped) {
     output_->Stop();
@@ -229,8 +231,12 @@ void CmaAudioOutputStream::PushBuffer() {
   }
   auto decoder_buffer = base::MakeRefCounted<CastDecoderBufferImpl>(
       frame_count * audio_bus_->channels() * sizeof(int16_t));
-  audio_bus_->ToInterleaved<::media::SignedInt16SampleTypeTraits>(
-      frame_count, reinterpret_cast<int16_t*>(decoder_buffer->writable_data()));
+  // SAFETY: Per the CastDecoderBuffer API contract, `writable_data()` points
+  // to a buffer of at least `data_size()` bytes, so this span is within bounds.
+  base::span<uint8_t> dest_span = UNSAFE_BUFFERS(
+      base::span(decoder_buffer->writable_data(), decoder_buffer->data_size()));
+  audio_bus_->ToInterleavedBytesPartial<::media::SignedInt16SampleTypeTraits>(
+      0, dest_span);
   push_in_progress_ = true;
   output_->PushBuffer(std::move(decoder_buffer), false /*is_silence*/);
 }

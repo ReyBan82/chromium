@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/scheme_registry.h"
+#include "third_party/blink/renderer/core/frame/csp/csp_hash_report_body.h"
 #include "third_party/blink/renderer/core/frame/document_policy_violation_report_body.h"
 #include "third_party/blink/renderer/core/frame/location_report_body.h"
 #include "third_party/blink/renderer/core/frame/permissions_policy_violation_report_body.h"
@@ -85,6 +87,51 @@ TEST(ReportMatchIdTest, MatchIdGeneratedShouldNotBeZero) {
                   .MatchId(),
               0u);
   }
+}
+
+TEST(ReportTest, ExtensionURLsAreNotReported) {
+  CommonSchemeRegistry::RegisterURLSchemeAsExtension("chrome-extension");
+  EXPECT_TRUE(Report(ReportType::kDocumentPolicyViolation,
+                     "https://example.com/",
+                     MakeGarbageCollected<DocumentPolicyViolationReportBody>(
+                         "feature", "message", "disposition",
+                         "https://example.com/script.js"))
+                  .ShouldSendReport());
+  EXPECT_FALSE(Report(ReportType::kDocumentPolicyViolation,
+                      "https://example.com/",
+                      MakeGarbageCollected<DocumentPolicyViolationReportBody>(
+                          "feature", "message", "disposition",
+                          "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+                          "scripts/script.js"))
+                   .ShouldSendReport());
+  // This is false for now; all reports from extension scripts are blocked, even
+  // if the report comes from the extension itself.
+  EXPECT_FALSE(Report(ReportType::kDocumentPolicyViolation,
+                      "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+                      "background_page.html",
+                      MakeGarbageCollected<DocumentPolicyViolationReportBody>(
+                          "feature", "message", "disposition",
+                          "chrome-extension://abcdefghijklmnopabcdefghijklmnop/"
+                          "scripts/script.js"))
+                   .ShouldSendReport());
+}
+
+// Regression test for crbug.com/513824957.
+TEST(ReportTest, CSPHashExtensionURLsAreNotReported) {
+  CommonSchemeRegistry::RegisterURLSchemeAsExtension("chrome-extension");
+  // A report for a web URL should be sent.
+  EXPECT_TRUE(Report(ReportType::kCSPHash, "https://example.com/",
+                     MakeGarbageCollected<CSPHashReportBody>(
+                         "https://example.com/script.js", "hash", "type",
+                         "destination"))
+                  .ShouldSendReport());
+  // A report for an extension URL should NOT be sent.
+  // This test will FAIL if CSPHashReportBody does not override
+  // IsExtensionSource.
+  EXPECT_FALSE(Report(ReportType::kCSPHash, "https://example.com/",
+                      MakeGarbageCollected<CSPHashReportBody>(
+                          "chrome-extension", "hash", "type", "destination"))
+                   .ShouldSendReport());
 }
 
 }  // namespace

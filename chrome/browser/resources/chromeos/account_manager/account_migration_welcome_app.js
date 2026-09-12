@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'chrome://resources/cr_elements/cr_button/cr_button.js';
-import './strings.m.js';
+import 'chrome://resources/ash/common/cr_elements/cr_button/cr_button.js';
+import '/strings.m.js';
 import './account_manager_shared.css.js';
 
 import {assert} from 'chrome://resources/ash/common/assert.js';
@@ -38,7 +38,7 @@ Polymer({
   browserProxy_: null,
 
   /** @override */
-  ready() {
+  ready: function() {
     this.browserProxy_ = AccountManagerBrowserProxyImpl.getInstance();
 
     const dialogArgs = chrome.getVariableValue('dialogArguments');
@@ -60,12 +60,12 @@ Polymer({
   },
 
   /** @private */
-  closeDialog_() {
+  closeDialog_: function() {
     this.browserProxy_.closeDialog();
   },
 
   /** @private */
-  reauthenticateAccount_() {
+  reauthenticateAccount_: function() {
     this.browserProxy_.reauthenticateAccount(this.userEmail_);
   },
 });

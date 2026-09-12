@@ -5,14 +5,10 @@
 #include "chrome/credential_provider/gaiacp/mdm_utils.h"
 
 #include <windows.h>
-#include <winternl.h>
-#include <lm.h>  // Needed for PNTSTATUS
 
-#define _NTDEF_  // Prevent redefition errors, must come after <winternl.h>
-#include <MDMRegistration.h>  // For RegisterDeviceWithManagement()
-#include <ntsecapi.h>         // For LsaQueryInformationPolicy()
-
+#include <MDMRegistration.h>
 #include <atlconv.h>
+#include <lm.h>
 
 #include "base/base64.h"
 #include "base/files/file_path.h"
@@ -20,6 +16,7 @@
 #include "base/scoped_native_library.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/win/ntsecapi_shim.h"
 #include "base/win/win_util.h"
 #include "base/win/wmi.h"
 #include "build/branding_buildflags.h"
@@ -139,7 +136,7 @@ bool IsEnrolledWithGoogleMdm(const std::wstring& mdm_url) {
   return is_enrolled;
 }
 
-HRESULT ExtractRegistrationData(const base::Value& registration_data,
+HRESULT ExtractRegistrationData(const base::DictValue& registration_data,
                                 std::wstring* out_email,
                                 std::wstring* out_id_token,
                                 std::wstring* out_access_token,
@@ -154,10 +151,6 @@ HRESULT ExtractRegistrationData(const base::Value& registration_data,
   DCHECK(out_username);
   DCHECK(out_domain);
   DCHECK(out_is_ad_user_joined);
-  if (!registration_data.is_dict()) {
-    LOGFN(ERROR) << "Registration data is not a dictionary";
-    return E_INVALIDARG;
-  }
 
   *out_email = GetDictString(registration_data, kKeyEmail);
   *out_id_token = GetDictString(registration_data, kKeyMdmIdToken);
@@ -206,7 +199,7 @@ HRESULT ExtractRegistrationData(const base::Value& registration_data,
 }
 
 HRESULT RegisterWithGoogleDeviceManagement(const std::wstring& mdm_url,
-                                           const base::Value& properties) {
+                                           const base::DictValue& properties) {
   // Make sure all the needed data is present in the dictionary.
   std::wstring email;
   std::wstring id_token;
@@ -261,31 +254,27 @@ HRESULT RegisterWithGoogleDeviceManagement(const std::wstring& mdm_url,
   }
 
   // Build the json data needed by the server.
-  base::Value registration_data(base::Value::Type::DICT);
-  registration_data.SetStringKey("id_token", base::WideToUTF8(id_token));
-  registration_data.SetStringKey("access_token",
-                                 base::WideToUTF8(access_token));
-  registration_data.SetStringKey("sid", base::WideToUTF8(sid));
-  registration_data.SetStringKey("username", base::WideToUTF8(username));
-  registration_data.SetStringKey("domain", base::WideToUTF8(domain));
-  registration_data.SetStringKey("serial_number",
-                                 base::WideToUTF8(serial_number));
-  registration_data.SetStringKey("machine_guid",
-                                 base::WideToUTF8(machine_guid));
-  registration_data.SetStringKey(
-      "admin_local_user_group_name",
-      base::WideToUTF8(local_administrators_group_name));
-  registration_data.SetStringKey("builtin_administrator_name",
-                                 base::WideToUTF8(builtin_administrator_name));
-  registration_data.SetStringKey(kKeyIsAdJoinedUser,
-                                 base::WideToUTF8(is_ad_joined_user));
+  auto registration_data =
+      base::DictValue()
+          .Set("id_token", base::WideToUTF8(id_token))
+          .Set("access_token", base::WideToUTF8(access_token))
+          .Set("sid", base::WideToUTF8(sid))
+          .Set("username", base::WideToUTF8(username))
+          .Set("domain", base::WideToUTF8(domain))
+          .Set("serial_number", base::WideToUTF8(serial_number))
+          .Set("machine_guid", base::WideToUTF8(machine_guid))
+          .Set("admin_local_user_group_name",
+               base::WideToUTF8(local_administrators_group_name))
+          .Set("builtin_administrator_name",
+               base::WideToUTF8(builtin_administrator_name))
+          .Set(kKeyIsAdJoinedUser, base::WideToUTF8(is_ad_joined_user));
 
   // Send device resource ID if available as part of the enrollment payload.
   // Enrollment backend should not assume that this will always be available.
   std::wstring user_device_resource_id = GetUserDeviceResourceId(sid);
   if (!user_device_resource_id.empty()) {
-    registration_data.SetStringKey("resource_id",
-                                   base::WideToUTF8(user_device_resource_id));
+    registration_data.Set("resource_id",
+                          base::WideToUTF8(user_device_resource_id));
   }
 
   std::string registration_data_str;
@@ -312,8 +301,7 @@ HRESULT RegisterWithGoogleDeviceManagement(const std::wstring& mdm_url,
     return false;
   }
 
-  std::string data_encoded;
-  base::Base64Encode(registration_data_str, &data_encoded);
+  std::string data_encoded = base::Base64Encode(registration_data_str);
 
   // This register call is blocking.  It won't return until the machine is
   // properly registered with the MDM server.
@@ -439,28 +427,31 @@ bool IsGemEnabled() {
 bool IsOnlineLoginEnforced(const std::wstring& sid) {
   DWORD global_flag = GetGlobalFlagOrDefault(kRegMdmEnforceOnlineLogin, 0);
 
-  // Return true if global flag is set. If it is not set check for
-  // the user flag.
-  if (global_flag)
+  if (global_flag) {
+    LOGFN(VERBOSE) << "GetGlobalFlagOrDefault for " << kRegMdmEnforceOnlineLogin
+                   << " returned value: true. Enforcing online login.";
     return true;
-
+  }
 
   DWORD is_online_login_enforced_for_user = 0;
   HRESULT hr = GetUserProperty(sid, kRegMdmEnforceOnlineLogin,
-                       &is_online_login_enforced_for_user);
+                               &is_online_login_enforced_for_user);
 
   if (FAILED(hr)) {
-    LOGFN(VERBOSE) << "GetUserProperty for " << kRegMdmEnforceOnlineLogin
-                << " failed. hr=" << putHR(hr);
-    // Fallback to the less obstructive option to not enforce login via google
-    // when fetching the registry entry fails.
+    // Silently fall back to not enforcing online login if the registry entry is
+    // missing.
     return false;
   }
+
+  LOGFN(VERBOSE) << "GetUserProperty for " << kRegMdmEnforceOnlineLogin
+                 << " found for user: " << sid.c_str()
+                 << ", Value: " << is_online_login_enforced_for_user
+                 << ". Enforcing online login.";
 
   return is_online_login_enforced_for_user;
 }
 
-HRESULT EnrollToGoogleMdmIfNeeded(const base::Value& properties) {
+HRESULT EnrollToGoogleMdmIfNeeded(const base::DictValue& properties) {
   LOGFN(VERBOSE);
 
   if (UserPoliciesManager::Get()->CloudPoliciesEnabled()) {
@@ -474,7 +465,7 @@ HRESULT EnrollToGoogleMdmIfNeeded(const base::Value& properties) {
   if (mdm_url.empty())
     return S_OK;
 
-  // TODO(crbug.com/935577): Check if machine is already enrolled because
+  // TODO(crbug.com/41443432): Check if machine is already enrolled because
   // attempting to enroll when already enrolled causes a crash.
   if (IsEnrolledWithGoogleMdm(mdm_url)) {
     LOGFN(VERBOSE) << "Already enrolled to Google MDM";

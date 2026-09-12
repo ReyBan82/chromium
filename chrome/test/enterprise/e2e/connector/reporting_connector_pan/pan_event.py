@@ -8,7 +8,7 @@ import attrs
 
 
 @attrs.frozen(kw_only=True)
-class PanEvent(object):
+class PanEvent:
   """Maps to a event reported to the pan console.
 
   This class stores a event that is to match a xdr queried event from pan.
@@ -31,5 +31,9 @@ class PanEvent(object):
       return True
     if not isinstance(other, self.__class__):
       return False
-    return (other.type == self.type and other.device_id == self.device_id and
-            other.reason == self.reason and other.url == self.url)
+    return (
+      other.type == self.type
+      and other.device_id == self.device_id
+      and other.reason == self.reason
+      and other.url == self.url
+    )

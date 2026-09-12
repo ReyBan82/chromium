@@ -12,6 +12,7 @@
 
 #include "base/files/file.h"
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
 #include "base/strings/string_number_conversions.h"
 #include "chrome/browser/ash/file_system_provider/fake_extension_provider.h"
@@ -39,9 +40,14 @@
 #include "extensions/common/manifest_constants.h"
 #include "storage/browser/file_system/external_mount_points.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/models/image_model.h"
+#include "ui/message_center/message_center.h"
+#include "ui/message_center/public/cpp/notification.h"
+#include "ui/message_center/public/cpp/notification_types.h"
+#include "ui/message_center/public/cpp/notifier_id.h"
+#include "url/gurl.h"
 
-namespace ash {
-namespace file_system_provider {
+namespace ash::file_system_provider {
 namespace {
 
 const extensions::ExtensionId kExtensionId = "mbflcebpggnecokmikipoihdbecnjfoj";
@@ -52,25 +58,25 @@ const ProviderId kCustomProviderId =
 
 // The dot in the file system ID is there in order to check that saving to
 // preferences works correctly. File System ID is used as a key in
-// a base::Value::Dict, so it has to be stored without path expansion.
+// a base::DictValue, so it has to be stored without path expansion.
 const char kFileSystemId[] = "camera/pictures/id .!@#$%^&*()_+";
 
 // Creates a fake extension with the specified |extension_id|.
 // TODO(mtomasz): Use the extension builder.
 scoped_refptr<extensions::Extension> CreateFakeExtension(
     const extensions::ExtensionId& extension_id) {
-  base::Value::Dict manifest;
-  std::string error;
+  base::DictValue manifest;
+  std::u16string error;
   manifest.Set(extensions::manifest_keys::kVersion, "1.0.0.0");
   manifest.Set(extensions::manifest_keys::kManifestVersion, 2);
   manifest.Set(extensions::manifest_keys::kName, "unused");
 
-  base::Value::List permissions_list;
+  base::ListValue permissions_list;
   permissions_list.Append("fileSystemProvider");
   manifest.Set(extensions::manifest_keys::kPermissions,
                std::move(permissions_list));
 
-  base::Value::Dict capabilities;
+  base::DictValue capabilities;
   capabilities.Set("source", "network");
   capabilities.Set("watchable", true);
   manifest.Set(extensions::manifest_keys::kFileSystemProviderCapabilities,
@@ -90,9 +96,10 @@ class FileSystemProviderServiceTest : public testing::Test {
  protected:
   FileSystemProviderServiceTest() : profile_(nullptr) {}
 
-  ~FileSystemProviderServiceTest() override {}
+  ~FileSystemProviderServiceTest() override = default;
 
   void SetUp() override {
+    message_center::MessageCenter::Initialize();
     profile_manager_ = std::make_unique<TestingProfileManager>(
         TestingBrowserProcess::GetGlobal());
     ASSERT_TRUE(profile_manager_->SetUp());
@@ -101,14 +108,14 @@ class FileSystemProviderServiceTest : public testing::Test {
     user_manager_->AddUser(
         AccountId::FromUserEmail(profile_->GetProfileUserName()));
     user_manager_enabler_ = std::make_unique<user_manager::ScopedUserManager>(
-        base::WrapUnique(user_manager_));
+        base::WrapUnique(user_manager_.get()));
     extension_registry_ =
         std::make_unique<extensions::ExtensionRegistry>(profile_);
     service_ = std::make_unique<Service>(profile_, extension_registry_.get());
 
     registry_ = new FakeRegistry;
     // Passes ownership to the service instance.
-    service_->SetRegistryForTesting(base::WrapUnique(registry_));
+    service_->SetRegistryForTesting(base::WrapUnique(registry_.get()));
 
     fake_watcher_.entry_path = base::FilePath(FILE_PATH_LITERAL("/a/b/c"));
     fake_watcher_.recursive = true;
@@ -117,16 +124,17 @@ class FileSystemProviderServiceTest : public testing::Test {
 
   void TearDown() override {
     service_->Shutdown();
+    message_center::MessageCenter::Shutdown();
   }
 
   content::BrowserTaskEnvironment task_environment_;
   std::unique_ptr<TestingProfileManager> profile_manager_;
-  TestingProfile* profile_;
-  FakeChromeUserManager* user_manager_;
+  raw_ptr<TestingProfile> profile_;
+  raw_ptr<FakeChromeUserManager, DanglingUntriaged> user_manager_;
   std::unique_ptr<user_manager::ScopedUserManager> user_manager_enabler_;
   std::unique_ptr<extensions::ExtensionRegistry> extension_registry_;
   std::unique_ptr<Service> service_;
-  FakeRegistry* registry_;  // Owned by Service.
+  raw_ptr<FakeRegistry> registry_;  // Owned by Service.
   Watcher fake_watcher_;
 };
 
@@ -249,6 +257,17 @@ TEST_F(FileSystemProviderServiceTest, UnmountFileSystem) {
                 kProviderId, MountOptions(kFileSystemId, kDisplayName)));
   ASSERT_EQ(1u, observer.mounts.size());
 
+  const std::string notification_id =
+      service_->GetProvidedFileSystemInfoList()[0].mount_path().value();
+  message_center::MessageCenter::Get()->AddNotification(
+      std::make_unique<message_center::Notification>(
+          message_center::NOTIFICATION_TYPE_SIMPLE, notification_id, u"title",
+          u"message", ui::ImageModel(), std::u16string(), GURL(),
+          message_center::NotifierId(), message_center::RichNotificationData(),
+          nullptr));
+  ASSERT_TRUE(message_center::MessageCenter::Get()->FindNotificationById(
+      notification_id));
+
   EXPECT_EQ(base::File::FILE_OK,
             service_->UnmountFileSystem(kProviderId, kFileSystemId,
                                         Service::UNMOUNT_REASON_USER));
@@ -262,6 +281,8 @@ TEST_F(FileSystemProviderServiceTest, UnmountFileSystem) {
   std::vector<ProvidedFileSystemInfo> file_system_info_list =
       service_->GetProvidedFileSystemInfoList();
   ASSERT_EQ(0u, file_system_info_list.size());
+  EXPECT_FALSE(message_center::MessageCenter::Get()->FindNotificationById(
+      notification_id));
 
   service_->RemoveObserver(&observer);
 }
@@ -335,7 +356,7 @@ TEST_F(FileSystemProviderServiceTest, RestoreFileSystem_OnExtensionLoad) {
   options.supports_notify_tag = true;
   ProvidedFileSystemInfo file_system_info(
       kProviderId, options, base::FilePath(FILE_PATH_LITERAL("/a/b/c")),
-      false /* configurable */, true /* watchable */, extensions::SOURCE_FILE,
+      /*configurable=*/false, /*watchable=*/true, extensions::SOURCE_FILE,
       IconSet());
   Watchers fake_watchers;
   fake_watchers[WatcherKey(fake_watcher_.entry_path, fake_watcher_.recursive)] =
@@ -494,5 +515,4 @@ TEST_F(FileSystemProviderServiceTest, RememberFileSystem_OnUnmountByUser) {
   service_->RemoveObserver(&observer);
 }
 
-}  // namespace file_system_provider
-}  // namespace ash
+}  // namespace ash::file_system_provider

@@ -6,19 +6,24 @@
 #define CHROME_BROWSER_UI_WEBUI_ASH_ADD_SUPERVISION_ADD_SUPERVISION_UI_H_
 
 #include <memory>
+#include <string>
 
+#include "ash/constants/webui_url_constants.h"
+#include "base/memory/raw_ref.h"
 #include "chrome/browser/ui/webui/ash/add_supervision/add_supervision.mojom-forward.h"
 #include "chrome/browser/ui/webui/ash/add_supervision/add_supervision_handler.h"
-#include "chrome/browser/ui/webui/ash/system_web_dialog_delegate.h"
-#include "chrome/common/webui_url_constants.h"
+#include "chrome/browser/ui/webui/ash/system_web_dialog/system_web_dialog_delegate.h"
 #include "content/public/browser/webui_config.h"
 #include "content/public/common/url_constants.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/base/ui_base_types.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/views/controls/label.h"
 #include "ui/webui/mojo_web_ui_controller.h"
 #include "url/gurl.h"
+
+class ApplicationLocaleStorage;
 
 namespace ash {
 
@@ -51,11 +56,12 @@ class AddSupervisionDialog : public SystemWebDialogDelegate {
   void CloseNowForTesting();
 
   // ui::WebDialogDelegate:
-  ui::ModalType GetDialogModalType() const override;
+  ui::mojom::ModalType GetDialogModalType() const override;
   void GetDialogSize(gfx::Size* size) const override;
   bool OnDialogCloseRequested() override;
   void OnDialogWillClose() override;
   bool ShouldCloseDialogOnEscape() const override;
+  bool ShouldShowDialogTitle() const override;
 
  protected:
   AddSupervisionDialog();
@@ -68,19 +74,31 @@ class AddSupervisionDialog : public SystemWebDialogDelegate {
 class AddSupervisionUI;
 
 // WebUIConfig for chrome://add-supervision
-class AddSupervisionUIConfig
-    : public content::DefaultWebUIConfig<AddSupervisionUI> {
+class AddSupervisionUIConfig : public content::WebUIConfig {
  public:
-  AddSupervisionUIConfig()
-      : DefaultWebUIConfig(content::kChromeUIScheme,
-                           chrome::kChromeUIAddSupervisionHost) {}
+  // `application_locale_storage` must not be null and must outlive `this`.
+  explicit AddSupervisionUIConfig(
+      const ApplicationLocaleStorage* application_locale_storage);
+
+  AddSupervisionUIConfig(const AddSupervisionUIConfig&) = delete;
+  AddSupervisionUIConfig& operator=(const AddSupervisionUIConfig&) = delete;
+
+  ~AddSupervisionUIConfig() override;
+
+  // content::WebUIConfig:
+  std::unique_ptr<content::WebUIController> CreateWebUIController(
+      content::WebUI* web_ui,
+      const GURL& url) override;
+
+ private:
+  const raw_ref<const ApplicationLocaleStorage> application_locale_storage_;
 };
 
 // Controller for chrome://add-supervision
 class AddSupervisionUI : public ui::MojoWebUIController,
                          public AddSupervisionHandler::Delegate {
  public:
-  explicit AddSupervisionUI(content::WebUI* web_ui);
+  AddSupervisionUI(content::WebUI* web_ui, const std::string& app_locale);
 
   AddSupervisionUI(const AddSupervisionUI&) = delete;
   AddSupervisionUI& operator=(const AddSupervisionUI&) = delete;
@@ -100,7 +118,7 @@ class AddSupervisionUI : public ui::MojoWebUIController,
           receiver);
 
  private:
-  void SetUpResources();
+  void SetUpResources(const std::string& app_locale);
   GURL GetAddSupervisionURL();
 
   std::unique_ptr<add_supervision::mojom::AddSupervisionHandler>

@@ -4,20 +4,25 @@
 
 chrome.app.runtime.onLaunched.addListener(function() {
   chrome.test.getConfig(function(config) {
-    var testName = config.customArg;
+    const testName = config.customArg;
     if (!testName) {
-      chrome.test.fail("Missing test name.");
+      chrome.test.fail('Missing test name.');
       return;
     }
-    chrome.chromeosInfoPrivate.get([
-      'sessionType',
-      'playStoreStatus',
-      'managedDeviceStatus',
-      'deviceType',
-      'stylusStatus',
-      'assistantStatus',
-      'isMeetDevice',
-    ], chrome.test.callbackPass(function(values) {
+    chrome.chromeosInfoPrivate.get(
+        [
+          'sessionType',
+          'playStoreStatus',
+          'managedDeviceStatus',
+          'deviceType',
+          'stylusStatus',
+          'assistantStatus',
+          'isMeetDevice',
+          'deviceRequisition',
+          'hwid',
+          'customizationId',
+        ],
+        chrome.test.callbackPass(function(values) {
           switch (testName) {
             case 'kiosk':
               chrome.test.assertEq('kiosk', values['sessionType']);
@@ -61,11 +66,27 @@ chrome.app.runtime.onLaunched.addListener(function() {
             case 'assistant supported':
               chrome.test.assertEq('supported', values['assistantStatus']);
               break;
-            case 'Is Meet Device - True' :
+            case 'Is Meet Device - True':
               chrome.test.assertTrue(values['isMeetDevice']);
               break;
-            case 'Is Meet Device - False' :
+            case 'Is Meet Device - False':
               chrome.test.assertFalse(values['isMeetDevice']);
+              break;
+            case 'Device Requisition - Unset' :
+              chrome.test.assertEq('', values['deviceRequisition']);
+              break;
+            case 'Device Requisition - Remora':
+              chrome.test.assertEq('remora', values['deviceRequisition']);
+              break;
+            case 'HWID':
+              chrome.test.assertEq('test_hw', values['hwid']);
+              break;
+            case 'CustomizationId':
+              chrome.test.assertEq(
+                  'test_customization_id', values['customizationId']);
+              break;
+            default:
+              chrome.test.fail(`Unexpected test name: ${testName}`);
               break;
           }
         }));

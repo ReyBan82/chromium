@@ -4,49 +4,111 @@
 
 #include "chrome/browser/ui/views/frame/contents_web_view.h"
 
-#include "chrome/browser/themes/theme_properties.h"
+#include "base/debug/dump_without_crashing.h"
+#include "build/build_config.h"
 #include "chrome/browser/ui/color/chrome_color_id.h"
+#include "chrome/browser/ui/views/frame/safe_invoke/safe_invoke.h"
+#include "chrome/browser/ui/views/frame/web_contents_close_handler.h"
 #include "chrome/browser/ui/views/status_bubble_views.h"
+#include "components/tabs/public/tab_interface.h"
+#include "components/web_modal/web_contents_modal_dialog_manager.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/blink/public/common/input/web_input_event.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
-#include "ui/base/theme_provider.h"
 #include "ui/color/color_provider.h"
-#include "ui/compositor/layer.h"
+#include "ui/compositor/layer_solid_color.h"
 #include "ui/compositor/layer_tree_owner.h"
-#include "ui/views/background.h"
+#include "ui/views/view_class_properties.h"
+#include "ui/views/widget/widget.h"
 
 #if defined(USE_AURA)
 #include "ui/aura/window.h"
 #include "ui/wm/core/window_util.h"
 #endif
 
+DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(ContentsWebView,
+                                      kContentsWebViewElementId);
+
 ContentsWebView::ContentsWebView(content::BrowserContext* browser_context)
-    : views::WebView(browser_context),
-      status_bubble_(nullptr) {
+    : views::WebView(browser_context) {
+  // Draws the ContentsWebView background.
+  SetPaintToLayer(ui::LAYER_SOLID_COLOR);
+  SetProperty(views::kElementIdentifierKey, kContentsWebViewElementId);
+  status_bubble_ = std::make_unique<StatusBubbleViews>(this);
+  status_bubble_->Reposition();
+  web_contents_close_handler_ = std::make_unique<WebContentsCloseHandler>(this);
 }
 
-ContentsWebView::~ContentsWebView() {
-}
-
-void ContentsWebView::SetStatusBubble(StatusBubbleViews* status_bubble) {
-  status_bubble_ = status_bubble;
-  DCHECK(!status_bubble_ || status_bubble_->base_view() == this);
-  if (status_bubble_)
-    status_bubble_->Reposition();
-  OnPropertyChanged(&status_bubble_, views::kPropertyEffectsNone);
-}
+ContentsWebView::~ContentsWebView() = default;
 
 StatusBubbleViews* ContentsWebView::GetStatusBubble() const {
-  return status_bubble_;
+  if (status_bubble_) {
+    return status_bubble_.get();
+  }
+  return nullptr;
+}
+
+WebContentsCloseHandler* ContentsWebView::GetWebContentsCloseHandler() const {
+  return web_contents_close_handler_.get();
 }
 
 void ContentsWebView::SetBackgroundVisible(bool background_visible) {
   background_visible_ = background_visible;
-  if (GetWidget())
+  if (GetWidget()) {
     UpdateBackgroundColor();
+  }
+}
+
+const gfx::RoundedCornersF& ContentsWebView::GetBackgroundRadii() const {
+  const ui::Layer* background_layer = layer();
+
+  CHECK(background_layer);
+  return background_layer->rounded_corner_radii();
+}
+
+void ContentsWebView::SetBackgroundRadii(const gfx::RoundedCornersF& radii) {
+  ui::Layer* background_layer = layer();
+
+  CHECK(background_layer);
+  background_layer->SetRoundedCornerRadius(radii);
+  background_layer->SetIsFastRoundedCorner(true);
+}
+
+void ContentsWebView::SetIsAnimatingBounds(bool is_animating) {
+  if (is_animating_bounds_ == is_animating) {
+    return;
+  }
+
+  is_animating_bounds_ = is_animating;
+
+  if (is_animating_bounds_) {
+    if (status_bubble_) {
+      status_bubble_->Hide();
+    }
+
+    if (use_default_deadline_when_animating_) {
+      // Update the render widget host view to set to use default deadline when
+      // animating. This is a best effort synchronization between browser and
+      // web contents.
+      SafeInvoke(web_contents())
+          .Then(&content::WebContents::GetRenderWidgetHostView)
+          .Then(&content::RenderWidgetHostView::
+                    SetShouldUseDefaultDeadlineOnResize,
+                /*enable=*/true);
+    }
+  }
+}
+
+void ContentsWebView::UpdateIsBlockedByModal() {
+  bool is_blocked = false;
+  if (web_contents()) {
+    if (auto* tab = tabs::TabInterface::MaybeGetFromContents(web_contents())) {
+      is_blocked = tab->IsBlocked();
+    }
+  }
+  holder()->SetProperty(views::kIsBlockedByModalKey, is_blocked);
 }
 
 bool ContentsWebView::GetNeedsNotificationWhenVisibleBoundsChange() const {
@@ -54,8 +116,21 @@ bool ContentsWebView::GetNeedsNotificationWhenVisibleBoundsChange() const {
 }
 
 void ContentsWebView::OnVisibleBoundsChanged() {
-  if (status_bubble_)
-    status_bubble_->Reposition();
+  // If we are animating, the status bubble is hidden and avoid reposition the
+  // bubble as an optimization since it's expensive on some platform.
+  if (!is_animating_bounds_) {
+    SafeInvoke(status_bubble_.get()).Then(&StatusBubbleViews::Reposition);
+  }
+
+  // Reset using default deadline once animation is completed after the final
+  // bounds changes are made.
+  if (!is_animating_bounds_ && use_default_deadline_when_animating_) {
+    SafeInvoke(web_contents())
+        .Then(&content::WebContents::GetRenderWidgetHostView)
+        .Then(
+            &content::RenderWidgetHostView::SetShouldUseDefaultDeadlineOnResize,
+            /*enable=*/false);
+  }
 }
 
 void ContentsWebView::OnThemeChanged() {
@@ -64,25 +139,74 @@ void ContentsWebView::OnThemeChanged() {
 }
 
 void ContentsWebView::OnLetterboxingChanged() {
-  if (GetWidget())
+  if (GetWidget()) {
     UpdateBackgroundColor();
+  }
 }
 
-void ContentsWebView::UpdateBackgroundColor() {
-  SkColor color = GetColorProvider()->GetColor(
-      is_letterboxing() ? kColorWebContentsBackgroundLetterboxing
-                        : kColorWebContentsBackground);
-  SetBackground(background_visible_ ? views::CreateSolidBackground(color)
-                                    : nullptr);
+void ContentsWebView::SetWebContents(content::WebContents* web_contents) {
+  views::WebView::SetWebContents(web_contents);
+  if (web_contents == nullptr) {
+    status_bubble_.reset();
+    holder()->SetProperty(views::kIsBlockedByModalKey, false);
+    // Early exit: Without web contents, views dependent on ContentsWebView's
+    // bounds cannot be properly created or positioned. These views will
+    // initialize later when valid web contents exist.
+    return;
+  }
 
-  if (web_contents()) {
-    content::RenderWidgetHostView* rwhv =
-        web_contents()->GetRenderWidgetHostView();
-    if (rwhv) {
-      rwhv->SetBackgroundColor(background_visible_ ? color
-                                                   : SK_ColorTRANSPARENT);
+  UpdateIsBlockedByModal();
+
+  if (!status_bubble_) {
+    status_bubble_ = std::make_unique<StatusBubbleViews>(this);
+    status_bubble_->Reposition();
+  }
+
+  // Ensure any dialogs already showing for the webcontents gets
+  // re-centered when the active tab changes or a split tab is created.
+  SafeInvoke(
+      web_modal::WebContentsModalDialogManager::FromWebContents(web_contents))
+      .Then(&web_modal::WebContentsModalDialogManager::UpdateDialogHost);
+}
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+void ContentsWebView::DidGetUserInteraction(const blink::WebInputEvent& event) {
+  // If the user interacts with the web contents, ensure it is activated.
+  // This handles cases where the native window does not receive a focus
+  // event, such as when a permission prompt is open in another split view.
+  if (event.GetType() == blink::WebInputEvent::Type::kMouseDown ||
+      event.GetType() == blink::WebInputEvent::Type::kTouchStart) {
+    // RequestFocus() ensures the container view receives focus,
+    // which is sufficient to update the browser UI.
+    if (!HasFocus()) {
+      RequestFocus();
     }
   }
+}
+#endif
+
+void ContentsWebView::UpdateBackgroundColor() {
+  const SkColor color = GetColorProvider()->GetColor(
+      is_letterboxing() ? kColorWebContentsBackgroundLetterboxing
+                        : kColorWebContentsBackground);
+  // `color` must be opaque, see RenderWidgetHostView::SetBackgroundColor() for
+  // details.
+  // TODO(crbug.com/456309057): Update this to be a CHECK.
+  if (SkColorGetA(color) != SK_AlphaOPAQUE) {
+    base::debug::DumpWithoutCrashing();
+    if (background_visible_) {
+      return;
+    }
+  }
+
+  auto* background_layer = layer()->AsSolidColor();
+  background_layer->SetColor(
+      SkColor4f::FromColor(background_visible_ ? color : SK_ColorTRANSPARENT));
+
+  SafeInvoke(web_contents())
+      .Then(&content::WebContents::GetRenderWidgetHostView)
+      .Then(&content::RenderWidgetHostView::SetBackgroundColor,
+            background_visible_ ? color : SK_ColorTRANSPARENT);
 }
 
 std::unique_ptr<ui::Layer> ContentsWebView::RecreateLayer() {
@@ -105,8 +229,15 @@ std::unique_ptr<ui::Layer> ContentsWebView::RecreateLayer() {
 }
 
 void ContentsWebView::CloneWebContentsLayer() {
-  if (!web_contents())
+  if (!web_contents()) {
     return;
+  }
+
+  views::Widget* widget = GetWidget();
+  if (!widget || !widget->GetNativeWindow()) {
+    return;
+  }
+
 #if defined(USE_AURA)
   // We don't need to clone the layers on non-Aura (Mac), because closing an
   // NSWindow does not animate.
@@ -117,9 +248,7 @@ void ContentsWebView::CloneWebContentsLayer() {
     return;
   }
 
-  SetPaintToLayer();
-
-  // The cloned layer is in a different coordinate system them our layer (which
+  // The cloned layer is in a different coordinate system than our layer (which
   // is now the new parent of the cloned layer). Convert coordinates so that the
   // cloned layer appears at the right location.
   gfx::PointF origin;
@@ -133,16 +262,15 @@ void ContentsWebView::CloneWebContentsLayer() {
 
 void ContentsWebView::DestroyClonedLayer() {
   cloned_layer_tree_.reset();
-  DestroyLayer();
 }
 
 void ContentsWebView::RenderViewReady() {
   // Set the background color to be the theme's ntp background on startup.
-  if (GetWidget())
+  if (GetWidget()) {
     UpdateBackgroundColor();
+  }
   WebView::RenderViewReady();
 }
 
-BEGIN_METADATA(ContentsWebView, views::WebView)
-ADD_PROPERTY_METADATA(StatusBubbleViews*, StatusBubble)
+BEGIN_METADATA(ContentsWebView)
 END_METADATA

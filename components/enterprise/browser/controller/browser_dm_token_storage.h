@@ -14,7 +14,6 @@
 #include "base/no_destructor.h"
 #include "base/run_loop.h"
 #include "base/sequence_checker.h"
-#include "base/strings/string_piece_forward.h"
 #include "base/system/sys_info.h"
 #include "base/task/single_thread_task_runner.h"
 #include "components/policy/core/common/cloud/dm_token.h"
@@ -63,6 +62,8 @@ class BrowserDMTokenStorage {
     virtual StoreTask DeleteDMTokenTask(const std::string& client_id) = 0;
     // Gets the specific task runner that should be used by |SaveDMToken|.
     virtual scoped_refptr<base::TaskRunner> SaveDMTokenTaskRunner() = 0;
+    // Function called at the end of `InitIfNeeded()`.
+    virtual void OnTokenInitialized() {}
   };
 
   // Returns the global singleton object. Must be called from the UI thread. The
@@ -107,6 +108,9 @@ class BrowserDMTokenStorage {
   static void SetForTesting(BrowserDMTokenStorage* storage) {
     storage_for_testing_ = storage;
   }
+  // Force the class to initialize again. Use it when some fields are changed
+  // during test.
+  void ResetForTesting() { is_initialized_ = false; }
 
  protected:
   friend class base::NoDestructor<BrowserDMTokenStorage>;

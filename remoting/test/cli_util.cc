@@ -4,7 +4,7 @@
 
 #include "remoting/test/cli_util.h"
 
-#include <string.h>
+#include <iostream>
 
 #include "base/command_line.h"
 #include "base/run_loop.h"
@@ -64,17 +64,13 @@ void RunCommandOptionsLoop(const std::vector<CommandOption>& options) {
 }
 
 std::string ReadString() {
-  const int kMaxLen = 1024;
-  std::string str(kMaxLen, 0);
-  char* result = fgets(&str[0], kMaxLen, stdin);
-  if (!result) {
+  std::string str;
+  if (!std::getline(std::cin, str)) {
     return std::string();
   }
-  size_t newline_index = str.find('\n');
-  if (newline_index != std::string::npos) {
-    str[newline_index] = '\0';
+  if (!str.empty() && str.back() == '\r') {
+    str.pop_back();
   }
-  str.resize(strlen(&str[0]));
   return str;
 }
 
@@ -95,7 +91,10 @@ std::string ReadStringFromCommandLineOrStdin(const std::string& switch_name,
 
 void WaitForEnterKey(base::OnceClosure on_done) {
   base::ThreadPool::PostTaskAndReply(FROM_HERE, {base::MayBlock()},
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-result"
                                      base::BindOnce([]() { getchar(); }),
+#pragma clang diagnostic pop
                                      std::move(on_done));
 }
 

@@ -3,26 +3,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# IMPORTANT! Before running this script you have to run
-# `rm -r ~/scratch && mkdir ~/scratch` first
-#
+# IMPORTANT! This script relies on "${HOME}/scratch/". This directory
+# is made when it runs (and must not exist at runtime) and is left
+# behind at termination (for you to save off or remove).
 #
 # For more fine-grained instructions, see:
 # https://docs.google.com/document/d/1chTvr3fSofQNV_PDPEHRyUgcJCQBgTDOOBriW9gIm9M/edit?ts=5e9549a2#heading=h.fjdnrdg1gcty
 
 set -e  # makes the script quit on any command failure
+set -u  # unset variables are quit-worthy errors
 
-PLATFORMS="win,android"
-if [ "$1" != "" ]
-then
-  PLATFORMS="$1"
-fi
-
-SCRIPT_PATH=$(realpath $0)
-REWRITER_SRC_DIR=$(dirname $SCRIPT_PATH)
+PLATFORMS="${1:-linux,fuchsia,android,chromeos,win,mac}"
 
 COMPILE_DIRS=.
 EDIT_DIRS=.
+SCRATCH_DIR="${HOME}/scratch/"
+
+# Make the scratch dir, relying on mkdir's natural fail-on-existing
+# behavior (and prior `set -e` of this script).
+mkdir "${SCRATCH_DIR}"
 
 # Save llvm-build as it is about to be overwritten.
 mv third_party/llvm-build third_party/llvm-build-upstream
@@ -30,8 +29,7 @@ mv third_party/llvm-build third_party/llvm-build-upstream
 # Build and test the rewriter.
 echo "*** Building the rewriter ***"
 time tools/clang/scripts/build.py \
-    --without-android \
-    --without-fuchsia \
+    --with-android \
     --extra-tools rewrite_raw_ptr_fields
 tools/clang/rewrite_raw_ptr_fields/tests/run_all_tests.py
 
@@ -47,7 +45,7 @@ is_debug = false
 dcheck_always_on = true
 is_official_build = true
 symbol_level = 1
-use_goma = false
+use_remoteexec = false
 enable_remoting = true
 enable_webview_bundles = true
 ffmpeg_branding = "Chrome"
@@ -66,7 +64,7 @@ is_debug = false
 dcheck_always_on = true
 is_official_build = true
 symbol_level = 1
-use_goma = false
+use_remoteexec = false
 chrome_pgo_phase = 0
 force_enable_raw_ptr_exclusion = true
 EOF
@@ -75,25 +73,41 @@ EOF
     linux)
         cat <<EOF
 target_os = "linux"
+clang_use_chrome_plugins = false
 dcheck_always_on = true
 is_chrome_branded = true
 is_debug = false
 is_official_build = true
-use_goma = false
+use_remoteexec = false
 chrome_pgo_phase = 0
 force_enable_raw_ptr_exclusion = true
 EOF
         ;;
 
-    cros)
+    fuchsia)
         cat <<EOF
-target_os = "chromeos"
-chromeos_is_browser_only = true
+target_os = "fuchsia"
+enable_cast_receiver=true
+clang_use_chrome_plugins = false
 dcheck_always_on = true
 is_chrome_branded = true
 is_debug = false
 is_official_build = true
-use_goma = false
+use_remoteexec = false
+chrome_pgo_phase = 0
+force_enable_raw_ptr_exclusion = true
+EOF
+        ;;
+
+    chromeos)
+        cat <<EOF
+target_os = "chromeos"
+clang_use_chrome_plugins = false
+dcheck_always_on = true
+is_chrome_branded = true
+is_debug = false
+is_official_build = true
+use_remoteexec = false
 chrome_pgo_phase = 0
 force_enable_raw_ptr_exclusion = true
 EOF
@@ -102,14 +116,19 @@ EOF
     mac)
         cat <<EOF
 target_os = "mac"
+clang_use_chrome_plugins = false
 dcheck_always_on = true
 is_chrome_branded = true
 is_debug = false
 is_official_build = true
-use_goma = false
+use_remoteexec = false
 chrome_pgo_phase = 0
 symbol_level = 1
 force_enable_raw_ptr_exclusion = true
+# crbug/1396061
+enable_dsyms = false
+# Can't exec Xcode `strip` binary
+enable_stripping = false
 EOF
         ;;
 
@@ -142,11 +161,10 @@ pre_process() {
 
     # A preliminary rewriter run in a special mode that generates a list of fields
     # to ignore. These fields would likely lead to compiler errors if rewritten.
-    echo "*** Generating the ignore list for $PLATFORM ***"
+    echo "*** Phase 1: Analysis for $PLATFORM ***"
     time tools/clang/scripts/run_tool.py \
         $TARGET_OS_OPTION \
         --tool rewrite_raw_ptr_fields \
-        --tool-arg=--exclude-paths=$REWRITER_SRC_DIR/manual-paths-to-ignore.txt \
         --generate-compdb \
         -p $OUT_DIR \
         $COMPILE_DIRS > ~/scratch/rewriter-$PLATFORM.out
@@ -163,12 +181,12 @@ main_rewrite() {
     fi
 
     # Main rewrite.
-    echo "*** Running the main rewrite phase for $PLATFORM ***"
+    echo "*** Phase 2: Rewrite for $PLATFORM ***"
     time tools/clang/scripts/run_tool.py \
         $TARGET_OS_OPTION \
         --tool rewrite_raw_ptr_fields \
         --tool-arg=--exclude-fields="$HOME/scratch/combined-fields-to-ignore.txt" \
-        --tool-arg=--exclude-paths=$REWRITER_SRC_DIR/manual-paths-to-ignore.txt \
+        --tool-arg=--arithmetic-fields="$HOME/scratch/arithmetic-fields.txt" \
         -p $OUT_DIR \
         $COMPILE_DIRS > ~/scratch/rewriter-$PLATFORM.main.out
     cat ~/scratch/rewriter-$PLATFORM.main.out >> ~/scratch/rewriter.main.out
@@ -181,7 +199,16 @@ done
 
 cat ~/scratch/rewriter.out \
     | sed '/^==== BEGIN FIELD FILTERS ====$/,/^==== END FIELD FILTERS ====$/{//!b};d' \
+    | sort | uniq > ~/scratch/raw-field-filters.txt
+
+grep "pointer-arithmetic" ~/scratch/raw-field-filters.txt \
+    | sed 's/  # .*//' \
+    | sort | uniq > ~/scratch/arithmetic-fields.txt
+
+grep "ignore:" ~/scratch/raw-field-filters.txt \
+    | sed 's/  # .*//' \
     | sort | uniq > ~/scratch/automated-fields-to-ignore.txt
+
 cat ~/scratch/automated-fields-to-ignore.txt \
     tools/clang/rewrite_raw_ptr_fields/manual-fields-to-ignore.txt \
     | grep -v "base::FileDescriptorWatcher::Controller::watcher_" \

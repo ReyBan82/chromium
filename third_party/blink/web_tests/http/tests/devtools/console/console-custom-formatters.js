@@ -2,12 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {ConsoleTestRunner} from 'console_test_runner';
+import * as Console from 'devtools/panels/console/console.js';
+import * as ObjectUI from 'devtools/ui/legacy/components/object_ui/object_ui.js';
+import * as UI from 'devtools/ui/legacy/legacy.js';
+import {TestRunner} from 'test_runner';
+
 (async function() {
   TestRunner.addResult('Tests that console logging dumps properly when there are multiple custom formatters on the page\n');
 
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('console');
-
   await TestRunner.evaluateInPagePromise(`
     var a = {name: "a"};
     var b = {name: "b"};
@@ -127,16 +131,25 @@
     }
   `);
 
-  TestRunner.mainTarget.runtimeAgent().setCustomObjectFormatterEnabled(true);
+  TestRunner.mainTarget.runtimeAgent().invoke_setCustomObjectFormatterEnabled({enabled: true});
   TestRunner.evaluateInPage('logVars()', expandVariablesInConsole);
 
-  function expandVariablesInConsole() {
-    var consoleView = Console.ConsoleView.instance();
+  async function expandVariablesInConsole() {
+    var consoleView = Console.ConsoleView.ConsoleView.instance();
 
     if (consoleView.needsFullUpdate)
       consoleView.updateMessageList();
 
     var viewMessages = consoleView.visibleViewMessages;
+
+    const loadBodyPromises = [];
+    TestRunner.addSniffer(
+        ObjectUI.CustomPreviewComponent.CustomPreviewSection.prototype,
+        'loadBody', function(promise) {
+          if (promise) {
+            loadBodyPromises.push(promise);
+          }
+        }, true);
 
     for (var i = 0; i < viewMessages.length; ++i) {
       var uiMessage = viewMessages[i];
@@ -151,7 +164,10 @@
         customElement.click();
     }
 
-    TestRunner.deprecatedRunAfterPendingDispatches(dumpExpanded);
+    await Promise.all(loadBodyPromises);
+    await UI.Widget.Widget.allUpdatesComplete;
+    await ConsoleTestRunner.waitForPendingViewportUpdates();
+    await dumpExpanded();
   }
 
   async function dumpExpanded() {

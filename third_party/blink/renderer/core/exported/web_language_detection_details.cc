@@ -4,6 +4,8 @@
 
 #include "third_party/blink/public/web/web_language_detection_details.h"
 
+#include <algorithm>
+
 #include "base/metrics/histogram_functions.h"
 #include "third_party/blink/public/common/metrics/accept_language_and_content_language_usage.h"
 #include "third_party/blink/public/web/web_document.h"
@@ -51,8 +53,9 @@ bool HasNoTranslate(const Document& document) {
     AtomicString content = meta_element.Content();
     if (content.IsNull())
       content = meta_element.FastGetAttribute(html_names::kValueAttr);
-    if (EqualIgnoringASCIICase(content, "notranslate"))
+    if (EqualIgnoringAsciiCase(content, "notranslate")) {
       return true;
+    }
   }
 
   return false;
@@ -62,16 +65,15 @@ bool HasNoTranslate(const Document& document) {
 // languages with different locales have major difference, we return the value
 // include its locales.
 String GetLanguageCode(const String& language) {
-  if (language.StartsWith("zh")) {
+  if (language.starts_with("zh")) {
     return language;
   }
 
-  Vector<String> language_codes;
-  language.Split("-", language_codes);
+  Vector<StringView> language_codes = StringView(language).Split('-');
   // Split function default is not allowed empty entry which cause potentical
   // crash when |langauge_codes| may be empty (for example, if |language| is
   // '-').
-  return language_codes.empty() ? "" : language_codes[0];
+  return language_codes.empty() ? "" : language_codes[0].ToString();
 }
 
 void MatchTargetLanguageWithAcceptLanguages(
@@ -104,8 +106,8 @@ void MatchTargetLanguageWithAcceptLanguages(
                           kXmlLangMatchesPrimaryAcceptLanguage
                     : AcceptLanguageAndXmlHtmlLangUsage::
                           kHtmlLangMatchesPrimaryAcceptLanguage);
-  } else if (base::Contains(accept_languages, target_language,
-                            &GetLanguageCode)) {
+  } else if (std::ranges::contains(accept_languages, target_language,
+                                   &GetLanguageCode)) {
     base::UmaHistogramEnumeration(
         language_histogram_name,
         is_xml_lang ? AcceptLanguageAndXmlHtmlLangUsage::
@@ -144,7 +146,7 @@ void WebLanguageDetectionDetails::RecordAcceptLanguageAndXmlHtmlLangMetric(
   const Document* document = web_document.ConstUnwrap<Document>();
 
   // We only record UMA metrics where URLs are in http family.
-  if (!document->Url().ProtocolIsInHTTPFamily()) {
+  if (!document->Url().ProtocolIsInHttpFamily()) {
     return;
   }
 

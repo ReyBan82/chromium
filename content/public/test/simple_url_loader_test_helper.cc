@@ -30,7 +30,7 @@ void SimpleURLLoaderTestHelper::WaitForCallback() {
 }
 
 void SimpleURLLoaderTestHelper::OnCompleteCallback(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   DCHECK(!response_body_);
 
   response_body_ = std::move(response_body);

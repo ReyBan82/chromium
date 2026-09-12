@@ -10,6 +10,7 @@
 #include <string>
 
 #include "base/command_line.h"
+#include "base/containers/heap_array.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
@@ -27,12 +28,12 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/mediastream/media_stream_request.h"
 
+using testing::_;
 using testing::InSequence;
 
 namespace content {
 
-class MockAudioInputDeviceManagerListener
-    : public MediaStreamProviderListener {
+class MockAudioInputDeviceManagerListener : public MediaStreamProviderListener {
  public:
   MockAudioInputDeviceManagerListener() {}
 
@@ -165,8 +166,8 @@ TEST_F(MAYBE_AudioInputDeviceManagerTest, OpenMultipleDevices) {
   InSequence s;
 
   int index = 0;
-  std::unique_ptr<base::UnguessableToken[]> session_id(
-      new base::UnguessableToken[devices_.size()]);
+  auto session_id =
+      base::HeapArray<base::UnguessableToken>::WithSize(devices_.size());
 
   // Opens the devices in a loop.
   for (blink::MediaStreamDevices::const_iterator iter = devices_.begin();
@@ -268,8 +269,8 @@ TEST_F(MAYBE_AudioInputDeviceManagerTest, AccessAndCloseSession) {
   InSequence s;
 
   int index = 0;
-  std::unique_ptr<base::UnguessableToken[]> session_id(
-      new base::UnguessableToken[devices_.size()]);
+  auto session_id =
+      base::HeapArray<base::UnguessableToken>::WithSize(devices_.size());
 
   // Loops through the devices and calls Open()/Close()/GetOpenedDeviceById
   // for each device.
@@ -376,6 +377,47 @@ TEST_F(AudioInputDeviceManagerNoDevicesTest,
 
     base::RunLoop().RunUntilIdle();
   }
+}
+
+// Closes a session while its asynchronous open is still pending. The pending
+// open should be aborted and the session should never be registered.
+TEST_F(AudioInputDeviceManagerNoDevicesTest, CloseWhileOpenIsPending) {
+  ASSERT_FALSE(devices_.empty());
+
+  base::UnguessableToken session_id = manager_->Open(devices_.front());
+  manager_->Close(session_id);
+
+  EXPECT_CALL(*audio_input_listener_, Opened(_, session_id)).Times(0);
+  WaitForOpenCompletion();
+
+  EXPECT_EQ(nullptr, manager_->GetOpenedDeviceById(session_id));
+}
+
+// Closes one of two pending sessions. The other session should still open
+// normally.
+TEST_F(AudioInputDeviceManagerNoDevicesTest,
+       CloseOneOfMultiplePendingSessions) {
+  ASSERT_GE(devices_.size(), 2u);
+
+  base::UnguessableToken first_session_id = manager_->Open(devices_[0]);
+  base::UnguessableToken second_session_id = manager_->Open(devices_[1]);
+  manager_->Close(first_session_id);
+
+  EXPECT_CALL(*audio_input_listener_, Opened(_, first_session_id)).Times(0);
+  EXPECT_CALL(*audio_input_listener_,
+              Opened(devices_[1].type, second_session_id))
+      .Times(1);
+  WaitForOpenCompletion();
+
+  EXPECT_EQ(nullptr, manager_->GetOpenedDeviceById(first_session_id));
+  EXPECT_NE(nullptr, manager_->GetOpenedDeviceById(second_session_id));
+
+  base::RunLoop run_loop;
+  EXPECT_CALL(*audio_input_listener_,
+              Closed(devices_[1].type, second_session_id))
+      .WillOnce(testing::InvokeWithoutArgs([&run_loop]() { run_loop.Quit(); }));
+  manager_->Close(second_session_id);
+  run_loop.Run();
 }
 
 }  // namespace content

@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load(
     "//absl:copts/configure_copts.bzl",
     "ABSL_DEFAULT_COPTS",
@@ -19,7 +22,14 @@ load(
     "ABSL_TEST_COPTS",
 )
 
-package(default_visibility = ["//visibility:private"])
+package(
+    default_visibility = ["//visibility:private"],
+    features = [
+        "header_modules",
+        "layering_check",
+        "parse_headers",
+    ],
+)
 
 licenses(["notice"])
 
@@ -42,17 +52,21 @@ cc_library(
 cc_test(
     name = "sample_recorder_test",
     srcs = ["internal/sample_recorder_test.cc"],
+    copts = ABSL_TEST_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
     tags = [
         "no_test_wasm",
     ],
     deps = [
         ":sample_recorder",
+        "//absl/base:config",
         "//absl/base:core_headers",
+        "//absl/random",
         "//absl/synchronization",
         "//absl/synchronization:thread_pool",
         "//absl/time",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -60,6 +74,7 @@ cc_library(
     name = "exponential_biased",
     srcs = ["internal/exponential_biased.cc"],
     hdrs = ["internal/exponential_biased.h"],
+    copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
     visibility = [
         "//absl:__subpackages__",
@@ -79,8 +94,11 @@ cc_test(
     visibility = ["//visibility:private"],
     deps = [
         ":exponential_biased",
+        "//absl/base:config",
+        "//absl/base:core_headers",
         "//absl/strings",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
@@ -95,6 +113,7 @@ cc_library(
     ],
     deps = [
         ":exponential_biased",
+        "//absl/base:config",
         "//absl/base:core_headers",
     ],
 )
@@ -108,14 +127,16 @@ cc_test(
     visibility = ["//visibility:private"],
     deps = [
         ":periodic_sampler",
+        "//absl/base:config",
         "//absl/base:core_headers",
-        "@com_google_googletest//:gtest_main",
+        "@googletest//:gtest",
+        "@googletest//:gtest_main",
     ],
 )
 
 cc_binary(
     name = "periodic_sampler_benchmark",
-    testonly = 1,
+    testonly = True,
     srcs = ["internal/periodic_sampler_benchmark.cc"],
     copts = ABSL_TEST_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
@@ -123,7 +144,53 @@ cc_binary(
     visibility = ["//visibility:private"],
     deps = [
         ":periodic_sampler",
+        "//absl/base:config",
         "//absl/base:core_headers",
-        "@com_github_google_benchmark//:benchmark_main",
+        "@google_benchmark//:benchmark_main",
+    ],
+)
+
+cc_library(
+    name = "profile_builder",
+    srcs = ["internal/profile_builder.cc"],
+    hdrs = ["internal/profile_builder.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    visibility = [
+        "//absl:__subpackages__",
+    ],
+    deps = [
+        "//absl/base",
+        "//absl/base:config",
+        "//absl/base:raw_logging_internal",
+        "//absl/container:btree",
+        "//absl/container:flat_hash_map",
+        "//absl/container:hash_container_defaults",
+        "//absl/strings",
+        "//absl/strings:str_format",
+        "//absl/strings:string_view",
+        "//absl/types:span",
+    ],
+)
+
+cc_library(
+    name = "hashtable",
+    srcs = ["hashtable.cc"],
+    hdrs = ["hashtable.h"],
+    copts = ABSL_DEFAULT_COPTS,
+    linkopts = ABSL_DEFAULT_LINKOPTS,
+    visibility = [
+        "//absl:__subpackages__",
+    ],
+    deps = [
+        ":profile_builder",
+        "//absl/base",
+        "//absl/base:config",
+        "//absl/container:hashtablez_sampler",
+        "//absl/status:statusor",
+        "//absl/strings",
+        "//absl/strings:string_view",
+        "//absl/time",
+        "//absl/types:span",
     ],
 )

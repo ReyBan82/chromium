@@ -2,22 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {CrosNetworkConfig, CrosNetworkConfigRemote} from 'chrome://resources/mojo/chromeos/services/network_config/public/mojom/cros_network_config.mojom-webui.js';
+import {CrosNetworkConfig} from '//resources/mojo/chromeos/services/network_config/public/mojom/cros_network_config.mojom-webui.js';
+
+/**
+ * @typedef {import('//resources/mojo/chromeos/services/network_config/public/mojom/cros_network_config.mojom-webui.js').CrosNetworkConfigInterface}
+ * CrosNetworkConfigInterface
+ */
 
 /** @interface */
 export class MojoInterfaceProvider {
-  /** @return {!CrosNetworkConfigRemote} */
+  /** @return {!CrosNetworkConfigInterface} */
   getMojoServiceRemote() {}
 }
 
 /** @implements {MojoInterfaceProvider} */
 export class MojoInterfaceProviderImpl {
   constructor() {
-    /** @private {?CrosNetworkConfigRemote} */
+    /** @type {?CrosNetworkConfigInterface} */
     this.remote_ = null;
   }
 
-  /** @return {!CrosNetworkConfigRemote} */
+  /** @return {!CrosNetworkConfigInterface} */
   getMojoServiceRemote() {
     if (!this.remote_) {
       this.remote_ = CrosNetworkConfig.getRemote();
@@ -25,7 +30,7 @@ export class MojoInterfaceProviderImpl {
 
     return this.remote_;
   }
-  /** @param {!CrosNetworkConfigRemote} remote */
+  /** @param {!CrosNetworkConfigInterface} remote */
   setMojoServiceRemoteForTest(remote) {
     this.remote_ = remote;
   }

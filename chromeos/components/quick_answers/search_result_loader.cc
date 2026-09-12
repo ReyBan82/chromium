@@ -4,11 +4,14 @@
 
 #include "chromeos/components/quick_answers/search_result_loader.h"
 
+#include <string_view>
 #include <utility>
 
+#include "base/functional/bind.h"
 #include "base/json/json_writer.h"
 #include "base/strings/escape.h"
 #include "chromeos/components/quick_answers/quick_answers_model.h"
+#include "chromeos/components/quick_answers/search_result_parsers/search_response_parser.h"
 #include "chromeos/services/assistant/public/shared/constants.h"
 #include "net/base/url_util.h"
 #include "services/network/public/cpp/resource_request.h"
@@ -18,8 +21,6 @@
 
 namespace quick_answers {
 namespace {
-
-using base::Value;
 
 // The JSON we generate looks like this:
 // {
@@ -46,38 +47,35 @@ using base::Value;
 //     "language_context": DICT
 //       "language_code": STRING
 
-constexpr base::StringPiece kQueryKey = "query";
-constexpr base::StringPiece kRawQueryKey = "rawQuery";
-constexpr base::StringPiece kClientTypeKey = "clientType";
-constexpr base::StringPiece kClientIdKey = "clientId";
-constexpr base::StringPiece kClientType = "QUICK_ANSWERS_CROS";
-constexpr base::StringPiece kLanguageCodeKey = "languageCode";
-constexpr base::StringPiece kLanguageContextKey = "languageContext";
-constexpr base::StringPiece kRequestContextKey = "requestContext";
+constexpr std::string_view kQueryKey = "query";
+constexpr std::string_view kRawQueryKey = "rawQuery";
+constexpr std::string_view kClientTypeKey = "clientType";
+constexpr std::string_view kClientIdKey = "clientId";
+constexpr std::string_view kClientType = "QUICK_ANSWERS_CROS";
+constexpr std::string_view kLanguageCodeKey = "languageCode";
+constexpr std::string_view kLanguageContextKey = "languageContext";
+constexpr std::string_view kRequestContextKey = "requestContext";
 
 std::string BuildSearchRequestPayload(const std::string& selected_text,
                                       const std::string& device_language) {
-  Value::Dict payload;
+  base::DictValue payload;
 
-  Value::Dict query;
+  base::DictValue query;
   query.Set(kRawQueryKey, selected_text);
   payload.Set(kQueryKey, std::move(query));
 
   // TODO(llin): Change the client type.
-  Value::Dict client_id;
+  base::DictValue client_id;
   client_id.Set(kClientTypeKey, kClientType);
   payload.Set(kClientIdKey, std::move(client_id));
 
-  Value::Dict request_context;
-  Value::Dict language_context;
+  base::DictValue request_context;
+  base::DictValue language_context;
   language_context.Set(kLanguageCodeKey, device_language);
   request_context.Set(kLanguageContextKey, std::move(language_context));
   payload.Set(kRequestContextKey, std::move(request_context));
 
-  std::string request_payload_str;
-  base::JSONWriter::Write(payload, &request_payload_str);
-
-  return request_payload_str;
+  return base::WriteJson(payload).value_or("");
 }
 
 }  // namespace
@@ -103,16 +101,16 @@ void SearchResultLoader::BuildRequest(
 
   auto resource_request = std::make_unique<network::ResourceRequest>();
   resource_request->url = url;
+  resource_request->site_for_cookies =
+      net::SiteForCookies::FromUrl(resource_request->url);
   std::move(callback).Run(std::move(resource_request), std::string());
 }
 
 void SearchResultLoader::ProcessResponse(
     const PreprocessedOutput& preprocessed_output,
-    std::unique_ptr<std::string> response_body,
+    std::optional<std::string> response_body,
     ResponseParserCallback complete_callback) {
-  search_response_parser_ =
-      std::make_unique<SearchResponseParser>(std::move(complete_callback));
-  search_response_parser_->ProcessResponse(std::move(response_body));
+  std::move(complete_callback).Run(ParseSearchResponse(*response_body));
 }
 
 }  // namespace quick_answers

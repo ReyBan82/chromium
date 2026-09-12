@@ -33,19 +33,22 @@ class FirstRunInternalPosixTest : public InProcessBrowserTest {
     command_line->AppendSwitch(switches::kForceFirstRun);
   }
 
-#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-  // For Chrome, the presence of a Local State file should not influence whether
-  // the first run dialog is shown. See crbug.com/1221483.
   bool SetUpUserDataDirectory() override {
     base::FilePath user_data_dir;
     base::PathService::Get(chrome::DIR_USER_DATA, &user_data_dir);
+#if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+    // For Chrome, the presence of a Local State file should not influence whether
+    // the first run dialog is shown. See crbug.com/40186863.
     const base::FilePath local_state_file =
         user_data_dir.Append(chrome::kLocalStateFilename);
     const std::string empty_prefs = "{}";
     base::WriteFile(local_state_file, empty_prefs.data());
+#endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#if BUILDFLAG(IS_LINUX)
+    base::WriteFile(user_data_dir.Append("EULA Accepted"), "");
+#endif  // BUILDFLAG(IS_LINUX)
     return true;
   }
-#endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
 
   void SetUpInProcessBrowserTestFixture() override {
     InProcessBrowserTest::SetUpInProcessBrowserTestFixture();
@@ -62,10 +65,9 @@ class FirstRunInternalPosixTest : public InProcessBrowserTest {
     // BrowserTestBase sets ContentMainParams::ui_task before this, but the
     // ui_task isn't actually Run() until after the dialog is spawned in
     // ChromeBrowserMainParts::PreMainMessageLoopRunImpl(). Instead, try to
-    // inspect state by posting a task to run in that nested RunLoop.
-    // There's no MessageLoop to enqueue a task on yet, there's also no
-    // content::NotificationService, or anything else sensible that would allow
-    // us to hook in a task. So use a testing-only Closure.
+    // inspect state by posting a task to run in that nested RunLoop. There's no
+    // MessageLoop to enqueue a task on yet or anything else sensible that would
+    // allow us to hook in a task. So use a testing-only Closure.
     GetBeforeShowFirstRunDialogHookForTesting() = base::BindOnce(
         &FirstRunInternalPosixTest::SetupNestedTask, base::Unretained(this));
     EXPECT_FALSE(inspected_state_);
@@ -105,7 +107,13 @@ class FirstRunInternalPosixTest : public InProcessBrowserTest {
 // Test the first run flow for showing the modal dialog that surfaces the first
 // run dialog. Ensure browser startup safely handles a signal while the modal
 // RunLoop is running.
-IN_PROC_BROWSER_TEST_F(FirstRunInternalPosixTest, HandleSigint) {
+// TODO(crbug.com/338037494): Flaky on Linux ASan.
+#if BUILDFLAG(IS_LINUX) && defined(ADDRESS_SANITIZER)
+#define MAYBE_HandleSigint DISABLED_HandleSigint
+#else
+#define MAYBE_HandleSigint HandleSigint
+#endif  //  BUILDFLAG(IS_LINUX) && defined(ADDRESS_SANITIZER)
+IN_PROC_BROWSER_TEST_F(FirstRunInternalPosixTest, MAYBE_HandleSigint) {
   // Never reached. The above SIGINT should prevent the main message loop
   // (and the browser test hooking it) from running.
   ADD_FAILURE() << "Should never be called";

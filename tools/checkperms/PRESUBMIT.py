@@ -9,18 +9,26 @@ for more details on the presubmit API built into depot_tools.
 """
 
 
-USE_PYTHON3 = True
-
-
 def CommonChecks(input_api, output_api):
   output = []
+  disabled_warnings = [
+    'bad-indentation',
+    'consider-using-with',
+    'deprecated-module',
+    'logging-not-lazy',
+    'unspecified-encoding',
+  ]
   output.extend(
-      input_api.canned_checks.RunPylint(input_api, output_api, version='2.7'))
+    input_api.canned_checks.RunPylint(
+      input_api, output_api, disabled_warnings=disabled_warnings, version='3.2'
+    )
+  )
   # Run it like if it were a unit test.
   output.extend(
-      input_api.canned_checks.RunUnitTests(input_api,
-                                           output_api, ['./checkperms.py'],
-                                           run_on_python2=False))
+    input_api.canned_checks.RunUnitTests(
+      input_api, output_api, ['./checkperms.py']
+    )
+  )
   return output
 
 

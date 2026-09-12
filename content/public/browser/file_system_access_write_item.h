@@ -10,6 +10,7 @@
 
 #include "base/files/file_path.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "content/common/content_export.h"
 #include "content/public/browser/global_routing_id.h"
 #include "url/gurl.h"
@@ -45,6 +46,9 @@ struct CONTENT_EXPORT FileSystemAccessWriteItem {
   // id of the outermost main frame in which the write operation took place.
   GlobalRenderFrameHostId outermost_main_frame_id;
 
+  // id of the frame in which the write operation took place.
+  GlobalRenderFrameHostId initiating_frame_id;
+
   // True iff the frame had a transient user activation when the writer was
   // created.
   bool has_user_gesture = false;
@@ -53,8 +57,8 @@ struct CONTENT_EXPORT FileSystemAccessWriteItem {
   // can be nullptr when calling
   // FileSystemAccessPermissionContext::PerformAfterWriteChecks(), in which
   // case they will be filled by that method.
-  raw_ptr<WebContents> web_contents = nullptr;
-  raw_ptr<BrowserContext> browser_context = nullptr;
+  base::WeakPtr<WebContents> web_contents;
+  raw_ptr<BrowserContext, DanglingUntriaged> browser_context = nullptr;
 };
 
 }  // namespace content

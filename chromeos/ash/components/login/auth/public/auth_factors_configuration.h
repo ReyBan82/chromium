@@ -1,16 +1,16 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #ifndef CHROMEOS_ASH_COMPONENTS_LOGIN_AUTH_PUBLIC_AUTH_FACTORS_CONFIGURATION_H_
 #define CHROMEOS_ASH_COMPONENTS_LOGIN_AUTH_PUBLIC_AUTH_FACTORS_CONFIGURATION_H_
 
+#include <optional>
 #include <string>
 
 #include "chromeos/ash/components/cryptohome/auth_factor.h"
 #include "chromeos/ash/components/cryptohome/common_types.h"
 #include "chromeos/ash/components/cryptohome/cryptohome_parameters.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -39,6 +39,10 @@ class COMPONENT_EXPORT(CHROMEOS_ASH_COMPONENTS_LOGIN_AUTH_PUBLIC)
   ~AuthFactorsConfiguration();
 
   AuthFactorsConfiguration& operator=(const AuthFactorsConfiguration&);
+
+  const std::vector<cryptohome::AuthFactor>& GetConfiguredFactors() const {
+    return configured_factors_;
+  }
 
   const cryptohome::AuthFactorsSet get_supported_factors() const {
     return supported_factors_;

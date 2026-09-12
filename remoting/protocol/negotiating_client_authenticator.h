@@ -13,7 +13,6 @@
 #include "remoting/protocol/authenticator.h"
 #include "remoting/protocol/client_authentication_config.h"
 #include "remoting/protocol/negotiating_authenticator_base.h"
-#include "remoting/protocol/third_party_client_authenticator.h"
 
 namespace remoting::protocol {
 
@@ -34,9 +33,9 @@ class NegotiatingClientAuthenticator : public NegotiatingAuthenticatorBase {
   ~NegotiatingClientAuthenticator() override;
 
   // NegotiatingAuthenticatorBase:
-  void ProcessMessage(const jingle_xmpp::XmlElement* message,
+  void ProcessMessage(const JingleAuthentication& message,
                       base::OnceClosure resume_callback) override;
-  std::unique_ptr<jingle_xmpp::XmlElement> GetNextMessage() override;
+  JingleAuthentication GetNextMessage() override;
 
  private:
   // (Asynchronously) creates an authenticator, and stores it in
@@ -46,17 +45,6 @@ class NegotiatingClientAuthenticator : public NegotiatingAuthenticatorBase {
   void CreateAuthenticatorForCurrentMethod(
       Authenticator::State preferred_initial_state,
       base::OnceClosure resume_callback);
-
-  // If possible, create a preferred authenticator ready to send an
-  // initial message optimistically to the host. The host is free to
-  // ignore the client's preferred authenticator and initial message
-  // and to instead reply with an alternative method. See the comments
-  // in negotiating_authenticator_base.h for more details.
-  //
-  // Sets |current_authenticator_| and |current_method_| iff the client
-  // has a preferred authenticator that can optimistically send an initial
-  // message.
-  void CreatePreferredAuthenticator();
 
   // Creates a shared-secret authenticator in state |initial_state| with the
   // given |shared_secret|, then runs |resume_callback|.

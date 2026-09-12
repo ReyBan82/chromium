@@ -2,49 +2,63 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {DangerType, IconLoader, MojomData, PageCallbackRouter, PageHandlerInterface, PageRemote, States} from 'chrome://downloads/downloads.js';
+import type {IconLoader, MojomData, PageHandlerInterface} from 'chrome://downloads/downloads.js';
+import {DangerType, SafeBrowsingState, State, TailoredWarningType} from 'chrome://downloads/downloads.js';
 import {TestBrowserProxy} from 'chrome://webui-test/test_browser_proxy.js';
 
-export class TestDownloadsProxy {
-  callbackRouter: PageCallbackRouter;
-  callbackRouterRemote: PageRemote;
-  handler: FakePageHandler;
+export class FakePageHandler extends TestBrowserProxy implements
+    PageHandlerInterface {
+  private eligibleForEsbPromo_: boolean = false;
 
   constructor() {
-    this.callbackRouter = new PageCallbackRouter();
-
-    this.callbackRouterRemote =
-        this.callbackRouter.$.bindNewPipeAndPassRemote();
-
-    this.handler = new FakePageHandler(this.callbackRouterRemote);
-  }
-}
-
-class FakePageHandler implements PageHandlerInterface {
-  private callbackRouterRemote_: PageRemote;
-  private callTracker_: TestBrowserProxy = new TestBrowserProxy(['remove']);
-
-  constructor(callbackRouterRemote: PageRemote) {
-    this.callbackRouterRemote_ = callbackRouterRemote;
-    this.callTracker_ = new TestBrowserProxy(['remove']);
+    super([
+      'discardDangerous',
+      'isEligibleForEsbPromo',
+      'logEsbPromotionRowViewed',
+      'openEsbSettings',
+      'recordCancelBypassWarningDialog',
+      'recordOpenBypassWarningDialog',
+      'remove',
+      'saveDangerousFromDialogRequiringGesture',
+      'saveSuspiciousRequiringGesture',
+    ]);
   }
 
-  whenCalled(methodName: string): Promise<void> {
-    return this.callTracker_.whenCalled(methodName);
+  recordCancelBypassWarningDialog(id: string) {
+    this.methodCalled('recordCancelBypassWarningDialog', id);
   }
 
-  async remove(id: string) {
-    this.callbackRouterRemote_.removeItem(0);
-    await this.callbackRouterRemote_.$.flushForTesting();
-    this.callTracker_.methodCalled('remove', id);
+  recordOpenBypassWarningDialog(id: string) {
+    this.methodCalled('recordOpenBypassWarningDialog', id);
+  }
+
+  remove(id: string) {
+    this.methodCalled('remove', id);
+  }
+
+  discardDangerous(id: string) {
+    this.methodCalled('discardDangerous', id);
+  }
+
+  saveDangerousFromDialogRequiringGesture(id: string) {
+    this.methodCalled('saveDangerousFromDialogRequiringGesture', id);
+  }
+
+  saveSuspiciousRequiringGesture(id: string) {
+    this.methodCalled('saveSuspiciousRequiringGesture', id);
+  }
+
+  openEsbSettings() {
+    this.methodCalled('openEsbSettings');
+  }
+
+  logEsbPromotionRowViewed() {
+    this.methodCalled('logEsbPromotionRowViewed');
   }
 
   getDownloads(_searchTerms: string[]) {}
   openFileRequiringGesture(_id: string) {}
   drag(_id: string) {}
-  saveDangerousRequiringGesture(_id: string) {}
-  acceptIncognitoWarning(_id: string) {}
-  discardDangerous(_id: string) {}
   retryDownload(_id: string) {}
   show(_id: string) {}
   pause(_id: string) {}
@@ -57,6 +71,13 @@ class FakePageHandler implements PageHandlerInterface {
   reviewDangerousRequiringGesture(_id: string) {}
   deepScan(_id: string) {}
   bypassDeepScanRequiringGesture(_id: string) {}
+  isEligibleForEsbPromo(): Promise<{result: boolean}> {
+    this.methodCalled('isEligibleForEsbPromo');
+    return Promise.resolve({result: this.eligibleForEsbPromo_});
+  }
+  setEligbleForEsbPromo(eligible: boolean) {
+    this.eligibleForEsbPromo_ = eligible;
+  }
 }
 
 export class TestIconLoader extends TestBrowserProxy implements IconLoader {
@@ -81,7 +102,7 @@ export function createDownload(config?: Partial<MojomData>): MojomData {
       {
         byExtId: '',
         byExtName: '',
-        dangerType: DangerType.NOT_DANGEROUS,
+        dangerType: DangerType.kNoApplicableDangerType,
         dateString: '',
         fileExternallyRemoved: false,
         fileName: 'download 1',
@@ -103,9 +124,14 @@ export function createDownload(config?: Partial<MojomData>): MojomData {
         showInFolderText: '',
         sinceString: 'Today',
         started: Date.now() - 10000,
-        state: States.COMPLETE,
+        state: State.kComplete,
+        tailoredWarningType:
+            TailoredWarningType.kNoApplicableTailoredWarningType,
         total: -1,
         url: 'http://permission.site',
+        displayInitiatorOrigin: 'http://permission.site',
+        safeBrowsingState: SafeBrowsingState.kStandardProtection,
+        hasSafeBrowsingVerdict: true,
       },
       config || {});
 }

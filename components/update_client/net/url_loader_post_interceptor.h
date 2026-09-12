@@ -11,12 +11,15 @@
 #include <utility>
 #include <vector>
 
+#include "base/containers/flat_map.h"
 #include "base/containers/queue.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
+#include "components/update_client/test_configurator.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_status_code.h"
+#include "third_party/abseil-cpp/absl/strings/str_format.h"
 #include "url/gurl.h"
 
 namespace network {
@@ -43,10 +46,6 @@ class URLLoaderPostInterceptor {
   using InterceptedRequest =
       std::tuple<std::string, net::HttpRequestHeaders, GURL>;
 
-  // Called when the load associated with the url request is intercepted
-  // by this object:.
-  using UrlJobRequestReadyCallback = base::OnceCallback<void()>;
-
   // Allows a generic string maching interface when setting up expectations.
   class RequestMatcher {
    public:
@@ -72,13 +71,19 @@ class URLLoaderPostInterceptor {
   // response body is served. If |response_code| is provided, then an empty
   // response body with that response code is returned.
   // Returns |true| if the expectation was set.
-  bool ExpectRequest(std::unique_ptr<RequestMatcher> request_matcher);
+  bool ExpectRequest(
+      std::unique_ptr<RequestMatcher> request_matcher,
+      const base::flat_map<std::string, std::string>& extra_headers = {});
 
-  bool ExpectRequest(std::unique_ptr<RequestMatcher> request_matcher,
-                     net::HttpStatusCode response_code);
+  bool ExpectRequest(
+      std::unique_ptr<RequestMatcher> request_matcher,
+      net::HttpStatusCode response_code,
+      const base::flat_map<std::string, std::string>& extra_headers = {});
 
-  bool ExpectRequest(std::unique_ptr<RequestMatcher> request_matcher,
-                     const base::FilePath& filepath);
+  bool ExpectRequest(
+      std::unique_ptr<RequestMatcher> request_matcher,
+      const base::FilePath& filepath,
+      const base::flat_map<std::string, std::string>& extra_headers = {});
 
   // Returns how many requests have been intercepted and matched by
   // an expectation. One expectation can only be matched by one request.
@@ -113,7 +118,7 @@ class URLLoaderPostInterceptor {
   // using idle run loops. A paused request can be resumed after this callback
   // has been invoked.
   void url_job_request_ready_callback(
-      UrlJobRequestReadyCallback url_job_request_ready_callback);
+      base::OnceClosure url_job_request_ready_callback);
 
   int GetHitCountForURL(const GURL& url);
 
@@ -125,10 +130,19 @@ class URLLoaderPostInterceptor {
       const net::test_server::HttpRequest& request);
 
   struct ExpectationResponse {
-    ExpectationResponse(net::HttpStatusCode code, const std::string& body)
-        : response_code(code), response_body(body) {}
-    const net::HttpStatusCode response_code;
-    const std::string response_body;
+    ExpectationResponse() = delete;
+    ExpectationResponse(
+        net::HttpStatusCode code,
+        const std::string& body,
+        const base::flat_map<std::string, std::string>& extra_headers);
+    ExpectationResponse(const ExpectationResponse&);
+    ExpectationResponse& operator=(const ExpectationResponse&);
+
+    ~ExpectationResponse();
+
+    net::HttpStatusCode response_code;
+    std::string response_body;
+    base::flat_map<std::string, std::string> extra_headers;
   };
   using Expectation =
       std::pair<std::unique_ptr<RequestMatcher>, ExpectationResponse>;
@@ -152,9 +166,12 @@ class URLLoaderPostInterceptor {
 
   bool is_paused_ = false;
 
-  std::vector<GURL> filtered_urls_;
+  std::vector<GURL> filtered_urls_{GURL(absl::StrFormat("%s://%s%s",
+                                                        kPostInterceptScheme,
+                                                        kPostInterceptHostname,
+                                                        kPostInterceptPath))};
 
-  UrlJobRequestReadyCallback url_job_request_ready_callback_;
+  base::OnceClosure url_job_request_ready_callback_;
 };
 
 class PartialMatch : public URLLoaderPostInterceptor::RequestMatcher {

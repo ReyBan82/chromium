@@ -5,11 +5,14 @@
 #ifndef COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_CORE_UMA_PAGE_LOAD_METRICS_OBSERVER_H_
 #define COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_CORE_UMA_PAGE_LOAD_METRICS_OBSERVER_H_
 
+#include "base/byte_size.h"
 #include "base/time/time.h"
+#include "base/trace_event/typed_macros.h"
 #include "components/page_load_metrics/browser/observers/click_input_tracker.h"
 #include "components/page_load_metrics/browser/page_load_metrics_observer.h"
 #include "content/public/browser/navigation_handle_timing.h"
 #include "services/metrics/public/cpp/ukm_source.h"
+#include "third_party/perfetto/include/perfetto/tracing/event_context.h"
 
 namespace internal {
 
@@ -25,9 +28,11 @@ extern const char
         [];
 extern const char
     kHistogramUserInteractionLatencyHighPercentile2MaxEventDuration[];
+
 extern const char
     kHistogramSumOfUserInteractionLatencyOverBudgetMaxEventDuration[];
 extern const char kHistogramWorstUserInteractionLatencyMaxEventDuration[];
+extern const char kHistogramInpOffset[];
 extern const char kHistogramFirstInputDelay[];
 extern const char kHistogramFirstInputTimestamp[];
 extern const char kHistogramFirstInputDelay4[];
@@ -35,6 +40,8 @@ extern const char kHistogramFirstInputTimestamp4[];
 extern const char kHistogramFirstPaint[];
 extern const char kHistogramFirstImagePaint[];
 extern const char kHistogramDomContentLoaded[];
+extern const char kHistogramActualNavigationStartToDOMContentLoaded[];
+extern const char kHistogramParseStartToDOMContentLoaded[];
 extern const char kHistogramLoad[];
 extern const char kHistogramFirstContentfulPaint[];
 extern const char kHistogramLargestContentfulPaint[];
@@ -42,13 +49,18 @@ extern const char kHistogramLargestContentfulPaintContentType[];
 extern const char kHistogramLargestContentfulPaintMainFrame[];
 extern const char kHistogramLargestContentfulPaintMainFrameContentType[];
 extern const char kHistogramLargestContentfulPaintCrossSiteSubFrame[];
-extern const char kHistogramParseBlockedOnScriptLoad[];
-extern const char kHistogramParseBlockedOnScriptExecution[];
+extern const char
+    kHistogramLargestContentfulPaintSetSpeculationRulesPrerender[];
+extern const char kHistogramParseStartToLargestContentfulPaint[];
 
+extern const char kBackgroundHistogramFirstContentfulPaint[];
 extern const char kBackgroundHistogramFirstImagePaint[];
 extern const char kBackgroundHistogramDomContentLoaded[];
 extern const char kBackgroundHistogramLoad[];
 extern const char kBackgroundHistogramFirstPaint[];
+
+extern const char kHistogramFirstContentfulPaintExcludeReloadAfterDiscard[];
+extern const char kHistogramLargestContentfulPaintExcludeReloadAfterDiscard[];
 
 extern const char kHistogramLoadTypeFirstContentfulPaintReload[];
 extern const char kHistogramLoadTypeFirstContentfulPaintForwardBack[];
@@ -58,8 +70,6 @@ extern const char kHistogramLoadTypeParseStartReload[];
 extern const char kHistogramLoadTypeParseStartForwardBack[];
 extern const char kHistogramLoadTypeParseStartNewNavigation[];
 
-extern const char kHistogramUserGestureNavigationToForwardBack[];
-
 extern const char kHistogramPageTimingForegroundDuration[];
 extern const char kHistogramPageTimingForegroundDurationNoCommit[];
 
@@ -67,40 +77,31 @@ extern const char kHistogramCachedResourceLoadTimePrefix[];
 extern const char kHistogramCommitSentToFirstSubresourceLoadStart[];
 extern const char kHistogramNavigationToFirstSubresourceLoadStart[];
 extern const char kHistogramResourceLoadTimePrefix[];
-extern const char kHistogramTotalSubresourceLoadTimeAtFirstContentfulPaint[];
-extern const char kHistogramFirstEligibleToPaint[];
-extern const char kHistogramFirstEligibleToPaintToFirstPaint[];
-
-extern const char kHistogramPageLoadTotalBytes[];
-extern const char kHistogramPageLoadNetworkBytes[];
-extern const char kHistogramPageLoadCacheBytes[];
-extern const char kHistogramPageLoadNetworkBytesIncludingHeaders[];
-extern const char kHistogramPageLoadUnfinishedBytes[];
 
 extern const char kHistogramPageLoadCpuTotalUsage[];
 extern const char kHistogramPageLoadCpuTotalUsageForegrounded[];
 
-extern const char kHistogramLoadTypeTotalBytesForwardBack[];
-extern const char kHistogramLoadTypeNetworkBytesForwardBack[];
-extern const char kHistogramLoadTypeCacheBytesForwardBack[];
-
-extern const char kHistogramLoadTypeTotalBytesReload[];
-extern const char kHistogramLoadTypeNetworkBytesReload[];
-extern const char kHistogramLoadTypeCacheBytesReload[];
-
-extern const char kHistogramLoadTypeTotalBytesNewNavigation[];
-extern const char kHistogramLoadTypeNetworkBytesNewNavigation[];
-extern const char kHistogramLoadTypeCacheBytesNewNavigation[];
-
 extern const char kHistogramInputToNavigation[];
-extern const char kBackgroundHistogramInputToNavigation[];
 extern const char kHistogramInputToNavigationLinkClick[];
+extern const char kHistogramInputToNavigationFormSubmit[];
 extern const char kHistogramInputToNavigationOmnibox[];
-extern const char kHistogramInputToFirstPaint[];
-extern const char kBackgroundHistogramInputToFirstPaint[];
 extern const char kHistogramInputToFirstContentfulPaint[];
-extern const char kBackgroundHistogramInputToFirstContentfulPaint[];
+extern const char kHistogramInputCoverageWithUserGestureBrowserInitiated[];
+extern const char kHistogramInputCoverageWithUserGestureRendererInitiated[];
+extern const char kHistogramInputCoverageWithoutUserGestureBrowserInitiated[];
+extern const char kHistogramInputCoverageWithoutUserGestureRendererInitiated[];
+
 extern const char kHistogramBackForwardCacheEvent[];
+
+extern const char kHistogramNavigationCommitSentToParseStart[];
+
+extern const char kHistogramInteractionToNavigationStart[];
+extern const char kHistogramActualNavigationStartToNavigationStart[];
+
+extern const char kHistogramActualNavigationStartToNavigationCommitSent[];
+extern const char kHistogramActualNavigationStartToParseStart[];
+extern const char kHistogramActualNavigationStartToFirstContentfulPaint[];
+extern const char kHistogramActualNavigationStartToLargestContentfulPaint[];
 
 // Navigation metrics from the navigation start.
 extern const char
@@ -109,8 +110,6 @@ extern const char
     kHistogramNavigationTimingNavigationStartToFirstResponseStart[];
 extern const char
     kHistogramNavigationTimingNavigationStartToFirstLoaderCallback[];
-extern const char
-    kHistogramNavigationTimingNavigationStartToFinalRequestStart[];
 extern const char
     kHistogramNavigationTimingNavigationStartToFinalResponseStart[];
 extern const char
@@ -130,12 +129,6 @@ extern const char
 extern const char
     kHistogramNavigationTimingFinalLoaderCallbackToNavigationCommitSent[];
 
-// V8 memory usage metrics.
-extern const char kHistogramMemoryMainframe[];
-extern const char kHistogramMemorySubframeAggregate[];
-extern const char kHistogramMemoryTotal[];
-extern const char kHistogramMemoryUpdateReceived[];
-
 // Please keep in sync with PageLoadBackForwardCacheEvent in
 // tools/metrics/histograms/enums.xml. These values should not be renumbered.
 enum class PageLoadBackForwardCacheEvent {
@@ -149,6 +142,9 @@ enum class PageLoadBackForwardCacheEvent {
 // Observer responsible for recording 'core' UMA page load metrics. Core metrics
 // are maintained by loading-dev team, typically the metrics under
 // PageLoad.(Document|Paint|Parse)Timing.*.
+// Only pages with web (http/https) schemes are observed.
+// UmaFileAndDataPageLoadMetricsObserver records page load metrics for the file
+// and data schemes.
 class UmaPageLoadMetricsObserver
     : public page_load_metrics::PageLoadMetricsObserver {
  public:
@@ -160,8 +156,14 @@ class UmaPageLoadMetricsObserver
 
   ~UmaPageLoadMetricsObserver() override;
 
+  void WriteIntoTrace(
+      perfetto::TracedProto<perfetto::protos::pbzero::PageLoad> proto) const;
+
   // page_load_metrics::PageLoadMetricsObserver:
   const char* GetObserverName() const override;
+  ObservePolicy OnStart(content::NavigationHandle* navigation_handle,
+                        const GURL& currently_committed_url,
+                        bool started_in_foreground) override;
   ObservePolicy OnFencedFramesStart(
       content::NavigationHandle* navigation_handle,
       const GURL& currently_committed_url) override;
@@ -170,6 +172,9 @@ class UmaPageLoadMetricsObserver
   ObservePolicy OnRedirect(
       content::NavigationHandle* navigation_handle) override;
   ObservePolicy OnCommit(content::NavigationHandle* navigation_handle) override;
+  void OnTimingUpdate(
+      content::RenderFrameHost* subframe_rfh,
+      const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnDomContentLoadedEventStart(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnLoadEventStart(
@@ -183,8 +188,6 @@ class UmaPageLoadMetricsObserver
   void OnFirstInputInPage(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnParseStart(
-      const page_load_metrics::mojom::PageLoadTiming& timing) override;
-  void OnParseStop(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnComplete(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
@@ -210,21 +213,14 @@ class UmaPageLoadMetricsObserver
   void OnRestoreFromBackForwardCache(
       const page_load_metrics::mojom::PageLoadTiming& timing,
       content::NavigationHandle* navigation_handle) override;
-  void OnV8MemoryChanged(const std::vector<page_load_metrics::MemoryUpdate>&
-                             memory_updates) override;
 
  private:
-  // Class to keep track of per-frame memory usage by V8.
-  class MemoryUsage {
-   public:
-    void UpdateUsage(int64_t delta_bytes);
-
-    uint64_t current_bytes_used() { return current_bytes_used_; }
-    uint64_t max_bytes_used() { return max_bytes_used_; }
-
-   private:
-    uint64_t current_bytes_used_ = 0U;
-    uint64_t max_bytes_used_ = 0U;
+  // Stores the information of the most recently begun trace event that has
+  // not yet ended.
+  struct TraceBeginEvent {
+    std::string_view name;
+    int64_t navigation_id;
+    base::TimeTicks begin_time;
   };
 
   void RecordNavigationTimingHistograms();
@@ -236,8 +232,28 @@ class UmaPageLoadMetricsObserver
   void RecordForegroundDurationHistograms(
       const page_load_metrics::mojom::PageLoadTiming& timing,
       base::TimeTicks app_background_time);
-  void RecordV8MemoryHistograms();
   void RecordNormalizedResponsivenessMetrics();
+
+  void EmitFCPTraceEvent(
+      const page_load_metrics::mojom::PageLoadTiming& timing);
+  void EmitLCPTraceEventBegin(base::TimeDelta lcp_time);
+  void EmitLCPTraceEventEnd(base::TimeDelta lcp_time, bool in_foreground);
+
+  void EmitInstantTraceEvent(base::TimeDelta duration, const char event_name[]);
+
+  void CloseIncompleteTimelineTraceEvents(
+      const page_load_metrics::mojom::PageLoadTiming& main_frame_timing);
+
+  perfetto::NamedTrack GetTracingTrack(const char* track_name,
+                                       const char* event_name = nullptr) const;
+
+  void EmitPageLoadTimelineTraceEventBegin(const char* name,
+                                           base::TimeTicks begin);
+
+  void EmitPageLoadTimelineTraceEventEnd(
+      base::TimeTicks end,
+      std::optional<base::TimeDelta> before_unload_dialog_duration =
+          std::nullopt);
 
   content::NavigationHandleTiming navigation_handle_timing_;
 
@@ -246,12 +262,12 @@ class UmaPageLoadMetricsObserver
 
   // The number of body (not header) prefilter bytes consumed by completed
   // requests for the page.
-  int64_t cache_bytes_;
-  int64_t network_bytes_;
+  base::ByteSize cache_bytes_;
+  base::ByteSize network_bytes_;
 
   // The number of prefilter bytes consumed by completed and partial network
   // requests for the page.
-  int64_t network_bytes_including_headers_;
+  base::ByteSize network_bytes_including_headers_;
 
   // The CPU usage attributed to this page.
   base::TimeDelta total_cpu_usage_;
@@ -262,17 +278,14 @@ class UmaPageLoadMetricsObserver
   // Tracks user input clicks for possible click burst.
   page_load_metrics::ClickInputTracker click_tracker_;
 
-  // V8 Memory Usage: whether a memory update was received, the usage of the
-  // mainframe, the aggregate usage of all subframes on the page, and the
-  // aggregate usage of all frames on the page (including the main frame),
-  // respectively.
-  bool memory_update_received_ = false;
-  MemoryUsage main_frame_memory_usage_;
-  MemoryUsage aggregate_subframe_memory_usage_;
-  MemoryUsage aggregate_total_memory_usage_;
-
   bool received_first_subresource_load_ = false;
   base::TimeDelta total_subresource_load_time_;
+
+  std::optional<perfetto::NamedTrack> timeline_track_;
+  std::optional<TraceBeginEvent> trace_begin_event_;
+
+  bool lcp_trace_ended_ = false;
+  std::optional<base::TimeDelta> last_emitted_lcp_;
 };
 
 #endif  // COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_CORE_UMA_PAGE_LOAD_METRICS_OBSERVER_H_

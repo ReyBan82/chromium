@@ -53,6 +53,7 @@ class CORE_EXPORT FileChooserClient : public PopupOpeningObserver {
  public:
   virtual void FilesChosen(FileChooserFileInfoList,
                            const base::FilePath& base_dir) = 0;
+  virtual void FileChooserCanceled() = 0;
   virtual LocalFrame* FrameOrNull() const = 0;
   ~FileChooserClient() override;
 
@@ -104,8 +105,10 @@ class FileChooser : public RefCounted<FileChooser> {
 };
 
 CORE_EXPORT mojom::blink::FileChooserFileInfoPtr
-CreateFileChooserFileInfoNative(const String& path,
-                                const String& display_name = String());
+CreateFileChooserFileInfoNative(
+    const String& path,
+    const String& display_name = String(),
+    const Vector<String>& base_subdirs = Vector<String>());
 CORE_EXPORT mojom::blink::FileChooserFileInfoPtr
 CreateFileChooserFileInfoFileSystem(const KURL& url,
                                     base::Time modification_time,

@@ -15,7 +15,6 @@
 #include "base/win/scoped_com_initializer.h"
 #include "base/win/scoped_variant.h"
 #include "ui/accessibility/platform/ax_platform_node_win.h"
-#include "ui/base/win/atl_module.h"
 
 UiaAccessibilityEventWaiter::UiaAccessibilityEventWaiter(
     UiaAccessibilityWaiterInfo info) {
@@ -28,7 +27,7 @@ UiaAccessibilityEventWaiter::UiaAccessibilityEventWaiter(
   initialization_loop.Run();
 }
 
-UiaAccessibilityEventWaiter::~UiaAccessibilityEventWaiter() {}
+UiaAccessibilityEventWaiter::~UiaAccessibilityEventWaiter() = default;
 
 void UiaAccessibilityEventWaiter::Wait() {
   // Pump messages via |shutdown_loop_| until the thread is complete.
@@ -44,12 +43,17 @@ void UiaAccessibilityEventWaiter::WaitWithTimeout(base::TimeDelta timeout) {
   base::PlatformThread::Join(thread_handle_);
 }
 
-UiaAccessibilityEventWaiter::Thread::Thread() {}
+UiaAccessibilityEventWaiter::Thread::Thread() = default;
 
-UiaAccessibilityEventWaiter::Thread::~Thread() {}
+UiaAccessibilityEventWaiter::Thread::~Thread() = default;
 
 void UiaAccessibilityEventWaiter::Thread::SendShutdownSignal() {
   shutdown_signal_.Signal();
+}
+
+void UiaAccessibilityEventWaiter::Thread::SetNotificationString(
+    const std::wstring& str) {
+  owner_->notification_string_ = str;
 }
 
 void UiaAccessibilityEventWaiter::Thread::Init(
@@ -68,20 +72,20 @@ void UiaAccessibilityEventWaiter::Thread::ThreadMain() {
   base::win::ScopedCOMInitializer com_init{
       base::win::ScopedCOMInitializer::kMTA};
 
-  // Create an instance of the CUIAutomation class.
-  CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                   IID_PPV_ARGS(&uia_));
-  CHECK(uia_.Get());
+  // Use CLSID_CUIAutomation8 and query for IUIAutomation5 (notification
+  // events). CLSID_CUIAutomation's object does not support IUIAutomation5,
+  // without this the tests will not receive notification events.
+  HRESULT hr = CoCreateInstance(CLSID_CUIAutomation8, nullptr,
+                                CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia_));
+  CHECK(SUCCEEDED(hr)) << "CoCreateInstance failed: " << std::hex << hr;
 
   // Find the IUIAutomationElement for the root content window.
   uia_->ElementFromHandle(info_.hwnd, &root_);
   CHECK(root_.Get());
 
   // Create the event handler.
-  ui::win::CreateATLModuleIfNeeded();
-  CHECK(
-      SUCCEEDED(CComObject<EventHandler>::CreateInstance(&uia_event_handler_)));
-  uia_event_handler_->AddRef();
+  uia_event_handler_ = Microsoft::WRL::Make<Thread::EventHandler>();
+  CHECK(uia_event_handler_);
   uia_event_handler_->Init(this, root_);
 
   // Create a cache request to avoid cross-thread issues when logging.
@@ -116,15 +120,23 @@ void UiaAccessibilityEventWaiter::Thread::ThreadMain() {
   // Subscribe to all automation events (except structure-change events and
   // live-region events, which are handled elsewhere).
   constexpr EVENTID kMinEvent = UIA_ToolTipOpenedEventId;
-  constexpr EVENTID kMaxEvent = UIA_NotificationEventId;
+  constexpr EVENTID kMaxEvent = UIA_ActiveTextPositionChangedEventId;
   for (EVENTID event_id = kMinEvent; event_id <= kMaxEvent; ++event_id) {
     if (event_id != UIA_StructureChangedEventId &&
-        event_id != UIA_LiveRegionChangedEventId) {
+        event_id != UIA_LiveRegionChangedEventId &&
+        event_id != UIA_NotificationEventId) {
       uia_->AddAutomationEventHandler(
           event_id, root_.Get(), TreeScope::TreeScope_Subtree,
           cache_request_.Get(), uia_event_handler_.Get());
     }
   }
+
+  // Subscribe to notification events using the dedicated notification handler.
+  // UIA_NotificationEventId requires IUIAutomationNotificationEventHandler,
+  // not the generic IUIAutomationEventHandler.
+  uia_->AddNotificationEventHandler(root_.Get(), TreeScope::TreeScope_Subtree,
+                                    cache_request_.Get(),
+                                    uia_event_handler_.Get());
 
   // Subscribe to live-region change events.  This must be the last event we
   // subscribe to, because |AXFragmentRootWin| will fire events when advised of
@@ -152,9 +164,9 @@ void UiaAccessibilityEventWaiter::Thread::ThreadMain() {
   std::move(shutdown_complete_).Run();
 }
 
-UiaAccessibilityEventWaiter::Thread::EventHandler::EventHandler() {}
+UiaAccessibilityEventWaiter::Thread::EventHandler::EventHandler() = default;
 
-UiaAccessibilityEventWaiter::Thread::EventHandler::~EventHandler() {}
+UiaAccessibilityEventWaiter::Thread::EventHandler::~EventHandler() = default;
 
 void UiaAccessibilityEventWaiter::Thread::EventHandler::Init(
     UiaAccessibilityEventWaiter::Thread* owner,
@@ -202,11 +214,45 @@ HRESULT
 UiaAccessibilityEventWaiter::Thread::EventHandler::HandleAutomationEvent(
     IUIAutomationElement* sender,
     EVENTID event_id) {
-  if (owner_ &&
-      event_id ==
-          ui::AXPlatformNodeWin::MojoEventToUIAEvent(owner_->info_.event) &&
-      MatchesNameRole(sender)) {
-    owner_->SendShutdownSignal();
+  if (owner_ && MatchesNameRole(sender)) {
+    // Check if we're waiting for a direct UIA event ID or an ax::mojom::Event.
+    EVENTID expected_event_id = owner_->info_.uia_event_id;
+    if (expected_event_id == 0) {
+      // Fall back to mapping from ax::mojom::Event.
+      auto mapped_event =
+          ui::AXPlatformNodeWin::MojoEventToUIAEvent(owner_->info_.event);
+      expected_event_id = mapped_event.value_or(0);
+    }
+    // Guard against matching event_id 0, which would indicate no valid event.
+    // Also skip UIA_NotificationEventId since it's handled by
+    // HandleNotificationEvent.
+    if (expected_event_id != 0 && event_id == expected_event_id &&
+        event_id != UIA_NotificationEventId) {
+      owner_->SendShutdownSignal();
+    }
+  }
+  return S_OK;
+}
+
+HRESULT
+UiaAccessibilityEventWaiter::Thread::EventHandler::HandleNotificationEvent(
+    IUIAutomationElement* sender,
+    NotificationKind notification_kind,
+    NotificationProcessing notification_processing,
+    BSTR display_string,
+    BSTR activity_id) {
+  if (owner_) {
+    // Check if we're waiting for UIA_NotificationEventId.
+    // For notification events, we don't check MatchesNameRole because the
+    // cached properties may not be reliably available on the sender element.
+    // The test should be structured to only trigger the expected notification.
+    if (owner_->info_.uia_event_id == UIA_NotificationEventId) {
+      if (display_string) {
+        owner_->SetNotificationString(
+            std::wstring(display_string, SysStringLen(display_string)));
+      }
+      owner_->SendShutdownSignal();
+    }
   }
   return S_OK;
 }

@@ -26,7 +26,6 @@
 #include "third_party/blink/renderer/bindings/core/v8/dictionary.h"
 
 #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
-#include "third_party/blink/renderer/bindings/core/v8/v8_string_resource.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 
 namespace blink {
@@ -62,11 +61,10 @@ bool Dictionary::HasProperty(const StringView& key,
   if (dictionary_object_.IsEmpty())
     return false;
 
-  v8::TryCatch try_catch(isolate_);
+  TryRethrowScope rethrow_scope(isolate_, exception_state);
   bool has_key = false;
   if (!dictionary_object_->Has(V8Context(), V8String(isolate_, key))
            .To(&has_key)) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
     return false;
   }
 
@@ -114,23 +112,21 @@ bool Dictionary::GetInternal(const v8::Local<v8::Value>& key,
   if (dictionary_object_.IsEmpty())
     return false;
 
-  v8::TryCatch try_catch(GetIsolate());
+  TryRethrowScope rethrow_scope(GetIsolate(), exception_state);
   bool has_key = false;
   if (!dictionary_object_->Has(V8Context(), key).To(&has_key)) {
-    DCHECK(try_catch.HasCaught());
-    exception_state.RethrowV8Exception(try_catch.Exception());
+    DCHECK(rethrow_scope.HasCaught());
     return false;
   }
-  DCHECK(!try_catch.HasCaught());
+  DCHECK(!rethrow_scope.HasCaught());
   if (!has_key)
     return false;
 
   if (!dictionary_object_->Get(V8Context(), key).ToLocal(&result)) {
-    DCHECK(try_catch.HasCaught());
-    exception_state.RethrowV8Exception(try_catch.Exception());
+    DCHECK(rethrow_scope.HasCaught());
     return false;
   }
-  DCHECK(!try_catch.HasCaught());
+  DCHECK(!rethrow_scope.HasCaught());
   return true;
 }
 
@@ -149,11 +145,10 @@ HashMap<String, String> Dictionary::GetOwnPropertiesAsStringHashMap(
   if (dictionary_object_.IsEmpty())
     return HashMap<String, String>();
 
-  v8::TryCatch try_catch(GetIsolate());
+  TryRethrowScope rethrow_scope(GetIsolate(), exception_state);
   v8::Local<v8::Array> property_names;
   if (!dictionary_object_->GetOwnPropertyNames(V8Context())
            .ToLocal(&property_names)) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
     return HashMap<String, String>();
   }
 
@@ -161,24 +156,22 @@ HashMap<String, String> Dictionary::GetOwnPropertiesAsStringHashMap(
   for (uint32_t i = 0; i < property_names->Length(); ++i) {
     v8::Local<v8::String> key;
     if (!GetStringValueInArray(V8Context(), property_names, i).ToLocal(&key)) {
-      exception_state.RethrowV8Exception(try_catch.Exception());
       return HashMap<String, String>();
     }
-    V8StringResource<> string_key(key);
-    if (!string_key.Prepare(GetIsolate(), exception_state))
-      return HashMap<String, String>();
+    String string_key = ToBlinkString<String>(GetIsolate(), key, kExternalize);
 
     v8::Local<v8::Value> value;
     if (!dictionary_object_->Get(V8Context(), key).ToLocal(&value)) {
-      exception_state.RethrowV8Exception(try_catch.Exception());
       return HashMap<String, String>();
     }
-    V8StringResource<> string_value(value);
-    if (!string_value.Prepare(GetIsolate(), exception_state))
+    auto string_value = NativeValueTraits<IDLString>::NativeValue(
+        GetIsolate(), value, exception_state);
+    if (exception_state.HadException()) {
       return HashMap<String, String>();
-
-    if (!static_cast<const String&>(string_key).empty())
+    }
+    if (!string_key.empty()) {
       own_properties.Set(string_key, string_value);
+    }
   }
 
   return own_properties;
@@ -189,11 +182,10 @@ Vector<String> Dictionary::GetPropertyNames(
   if (dictionary_object_.IsEmpty())
     return Vector<String>();
 
-  v8::TryCatch try_catch(GetIsolate());
+  TryRethrowScope rethrow_scope(GetIsolate(), exception_state);
   v8::Local<v8::Array> property_names;
   if (!dictionary_object_->GetPropertyNames(V8Context())
            .ToLocal(&property_names)) {
-    exception_state.RethrowV8Exception(try_catch.Exception());
     return Vector<String>();
   }
 
@@ -201,12 +193,9 @@ Vector<String> Dictionary::GetPropertyNames(
   for (uint32_t i = 0; i < property_names->Length(); ++i) {
     v8::Local<v8::String> key;
     if (!GetStringValueInArray(V8Context(), property_names, i).ToLocal(&key)) {
-      exception_state.RethrowV8Exception(try_catch.Exception());
       return Vector<String>();
     }
-    V8StringResource<> string_key(key);
-    if (!string_key.Prepare(GetIsolate(), exception_state))
-      return Vector<String>();
+    String string_key = ToBlinkString<String>(GetIsolate(), key, kExternalize);
 
     names.push_back(string_key);
   }

@@ -47,7 +47,8 @@ class InitializationSubTask : public DatabaseTask {
     std::string unique_id;
 
     // The results to report.
-    raw_ptr<BackgroundFetchInitializationData> initialization_data;
+    raw_ptr<BackgroundFetchInitializationData, DanglingUntriaged>
+        initialization_data;
   };
 
   InitializationSubTask(DatabaseTaskHost* host,
@@ -56,7 +57,7 @@ class InitializationSubTask : public DatabaseTask {
       : DatabaseTask(host),
         sub_task_init_(sub_task_init),
         done_closure_(std::move(done_closure)) {
-    DCHECK(sub_task_init_.initialization_data);
+    CHECK(sub_task_init_.initialization_data, base::NotFatalUntil::M158);
   }
 
   InitializationSubTask(const InitializationSubTask&) = delete;
@@ -243,7 +244,8 @@ class GetRequestsTask : public InitializationSubTask {
         FinishWithError(blink::mojom::BackgroundFetchError::STORAGE_ERROR);
         return;
       }
-      DCHECK_EQ(sub_task_init().unique_id, active_request.unique_id());
+      CHECK_EQ(sub_task_init().unique_id, active_request.unique_id(),
+               base::NotFatalUntil::M158);
 
       auto request_info = base::MakeRefCounted<BackgroundFetchRequestInfo>(
           active_request.request_index(),
@@ -484,7 +486,8 @@ void GetInitializationDataTask::DidGetRegistrations(
   for (const auto& ud : user_data) {
     auto insertion_result = initialization_data_map_.emplace(
         ud.second, BackgroundFetchInitializationData());
-    DCHECK(insertion_result.second);  // Check unique_id is in fact unique.
+    CHECK(insertion_result.second,
+          base::NotFatalUntil::M158);  // Check unique_id is in fact unique.
 
     AddSubTask(std::make_unique<FillBackgroundFetchInitializationDataTask>(
         this,
@@ -510,7 +513,7 @@ void GetInitializationDataTask::FinishWithError(
       // is available, mark the registration for deletion.
       // Note that the Developer ID isn't available if the metadata extraction
       // failed.
-      // TODO(crbug.com/865388): Getting the Developer ID should be possible
+      // TODO(crbug.com/40585668): Getting the Developer ID should be possible
       // since it is part of the key for when we got the Unique ID.
       AddDatabaseTask(std::make_unique<MarkRegistrationForDeletionTask>(
           data_manager(), data.second.registration_id,
@@ -525,14 +528,8 @@ void GetInitializationDataTask::FinishWithError(
     }
   }
 
-  ReportStorageError();
-
   std::move(callback_).Run(error, std::move(results));
   Finished();  // Destroys |this|.
-}
-
-std::string GetInitializationDataTask::HistogramName() const {
-  return "GetInitializationDataTask";
 }
 
 }  // namespace background_fetch

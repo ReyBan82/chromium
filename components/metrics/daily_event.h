@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 
@@ -72,6 +73,9 @@ class DailyEvent {
   // be registered before the the DailyEvent starts checking time.
   void AddObserver(std::unique_ptr<Observer> observer);
 
+  // Registers closure that will be called when the DailyEvent is emitted.
+  void AddObserverClosure(base::RepeatingClosure closure);
+
   // Checks if a day has elapsed. If it has, OnDailyEvent will be called on
   // all observers.
   void CheckInterval();
@@ -84,7 +88,7 @@ class DailyEvent {
   // Handles an interval elapsing because of |type|.
   void OnInterval(base::Time now, IntervalType type);
 
-  // A weak pointer to the PrefService object to read and write preferences
+  // Non-owning pointer to the PrefService object to read and write preferences
   // from. Calling code should ensure this object continues to exist for the
   // lifetime of the DailyEvent object.
   raw_ptr<PrefService> pref_service_;

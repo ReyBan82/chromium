@@ -8,11 +8,7 @@
 
 #import "base/notreached.h"
 #import "ios/chrome/app/application_delegate/app_state.h"
-#import "ios/chrome/app/chrome_overlay_window.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ios/chrome/browser/shared/ui/chrome_overlay_window/chrome_overlay_window.h"
 
 namespace {
 
@@ -52,7 +48,7 @@ const CGFloat kWidthLandscapeSplitViewOnLargeIPad = 678.0;
 // Returns true if test is running on 12.9 inch iPad Pro. Otherwise, it's
 // running on regular iPad.
 - (BOOL)isRunningOnLargeIPadPro {
-  CGSize size = [[UIScreen mainScreen] bounds].size;
+  CGSize size = [super window].screen.bounds.size;
   return MAX(size.height, size.width) ==
          MAX(kLargeIPadPortraitSize.width, kLargeIPadPortraitSize.height);
 }

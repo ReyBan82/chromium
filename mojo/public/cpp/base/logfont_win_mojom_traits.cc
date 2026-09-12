@@ -6,6 +6,7 @@
 
 #include <tchar.h>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/numerics/safe_conversions.h"
 
@@ -15,8 +16,8 @@ namespace mojo {
 base::span<const uint8_t>
 StructTraits<mojo_base::mojom::LOGFONTDataView, ::LOGFONT>::bytes(
     const ::LOGFONT& input) {
-  return base::make_span(reinterpret_cast<const uint8_t*>(&input),
-                         sizeof(::LOGFONT));
+  return UNSAFE_TODO(
+      base::span(reinterpret_cast<const uint8_t*>(&input), sizeof(::LOGFONT)));
 }
 
 // static
@@ -25,14 +26,17 @@ bool StructTraits<mojo_base::mojom::LOGFONTDataView, ::LOGFONT>::Read(
     ::LOGFONT* out) {
   ArrayDataView<uint8_t> bytes_view;
   data.GetBytesDataView(&bytes_view);
-  if (bytes_view.size() != sizeof(::LOGFONT))
+  if (bytes_view.size() != sizeof(::LOGFONT)) {
     return false;
+  }
 
-  const ::LOGFONT* font = reinterpret_cast<const ::LOGFONT*>(bytes_view.data());
-  if (_tcsnlen(font->lfFaceName, LF_FACESIZE) >= LF_FACESIZE)
+  const ::LOGFONT* font =
+      UNSAFE_TODO(reinterpret_cast<const ::LOGFONT*>(bytes_view.data()));
+  if (UNSAFE_TODO(_tcsnlen(font->lfFaceName, LF_FACESIZE)) >= LF_FACESIZE) {
     return false;
+  }
 
-  memcpy(out, font, sizeof(::LOGFONT));
+  UNSAFE_TODO(memcpy(out, font, sizeof(::LOGFONT)));
   return true;
 }
 

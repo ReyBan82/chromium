@@ -13,15 +13,19 @@ import org.junit.runner.RunWith;
 
 import org.chromium.base.metrics.RecordHistogram;
 import org.chromium.base.test.util.CommandLineFlags;
+import org.chromium.base.test.util.DisableIf;
 import org.chromium.base.test.util.Feature;
+import org.chromium.base.test.util.Features.EnableFeatures;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.payments.PaymentRequestTestRule.AppPresence;
 import org.chromium.chrome.browser.payments.PaymentRequestTestRule.AppSpeed;
+import org.chromium.chrome.browser.payments.PaymentRequestTestRule.AppStability;
 import org.chromium.chrome.browser.payments.PaymentRequestTestRule.FactorySpeed;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.components.payments.Event;
+import org.chromium.components.payments.Event2;
 import org.chromium.components.payments.PaymentFeatureList;
+import org.chromium.ui.base.DeviceFormFactor;
 
 import java.util.concurrent.TimeoutException;
 
@@ -30,9 +34,12 @@ import java.util.concurrent.TimeoutException;
  * single payment app UI skip optimization.
  */
 @RunWith(ChromeJUnit4ClassRunner.class)
-@CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE,
-        // Speed up the test by not looking up actual apps installed on the device.
-        "disable-features=" + PaymentFeatureList.SERVICE_WORKER_PAYMENT_APPS})
+@CommandLineFlags.Add({
+    ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE,
+    // Speed up the test by not looking up actual apps installed on the device.
+    "disable-features=" + PaymentFeatureList.SERVICE_WORKER_PAYMENT_APPS
+})
+@DisableIf.Device(DeviceFormFactor.DESKTOP) // https://crbug.com/376100658
 public class PaymentRequestPaymentAppUiSkipTest {
     @Rule
     public PaymentRequestTestRule mPaymentRequestTestRule =
@@ -46,7 +53,7 @@ public class PaymentRequestPaymentAppUiSkipTest {
         mPaymentRequestTestRule.addPaymentAppFactory(
                 AppPresence.HAVE_APPS, FactorySpeed.FAST_FACTORY);
 
-        mPaymentRequestTestRule.triggerUIAndWait(
+        mPaymentRequestTestRule.triggerUiAndWait(
                 "buyFail", mPaymentRequestTestRule.getResultReady());
 
         mPaymentRequestTestRule.expectResultContains(new String[] {"Transaction failed"});
@@ -83,15 +90,18 @@ public class PaymentRequestPaymentAppUiSkipTest {
     }
 
     /**
-     * Test payment with a Bob Pay that is created with a delay, but responds immediately
-     * to getInstruments.
+     * Test payment with a Bob Pay that is created with a delay, but responds immediately to
+     * getInstruments.
      */
     @Test
     @MediumTest
     @Feature({"Payments"})
     public void testPayViaDelayedFastBobPay() throws TimeoutException {
-        mPaymentRequestTestRule.addPaymentAppFactory("https://bobpay.test", AppPresence.HAVE_APPS,
-                FactorySpeed.FAST_FACTORY, AppSpeed.SLOW_APP);
+        mPaymentRequestTestRule.addPaymentAppFactory(
+                "https://bobpay.test",
+                AppPresence.HAVE_APPS,
+                FactorySpeed.FAST_FACTORY,
+                AppSpeed.SLOW_APP);
         mPaymentRequestTestRule.clickNodeAndWait("buy", mPaymentRequestTestRule.getDismissed());
         mPaymentRequestTestRule.expectResultContains(
                 new String[] {"https://bobpay.test", "\"transaction\"", "1337"});
@@ -105,18 +115,44 @@ public class PaymentRequestPaymentAppUiSkipTest {
     @MediumTest
     @Feature({"Payments"})
     public void testPayViaDelayedSlowBobPay() throws TimeoutException {
-        mPaymentRequestTestRule.addPaymentAppFactory("https://bobpay.test", AppPresence.HAVE_APPS,
-                FactorySpeed.SLOW_FACTORY, AppSpeed.SLOW_APP);
+        mPaymentRequestTestRule.addPaymentAppFactory(
+                "https://bobpay.test",
+                AppPresence.HAVE_APPS,
+                FactorySpeed.SLOW_FACTORY,
+                AppSpeed.SLOW_APP);
         mPaymentRequestTestRule.clickNodeAndWait("buy", mPaymentRequestTestRule.getDismissed());
         mPaymentRequestTestRule.expectResultContains(
                 new String[] {"https://bobpay.test", "\"transaction\"", "1337"});
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramValueCountForTesting("PaymentRequest.Events",
-                        Event.REQUEST_METHOD_OTHER | Event.HAD_INITIAL_FORM_OF_PAYMENT
-                                | Event.HAD_NECESSARY_COMPLETE_SUGGESTIONS | Event.SKIPPED_SHOW
-                                | Event.AVAILABLE_METHOD_OTHER | Event.SELECTED_OTHER
-                                | Event.PAY_CLICKED | Event.RECEIVED_INSTRUMENT_DETAILS
-                                | Event.COMPLETED));
+        Assert.assertEquals(
+                1,
+                RecordHistogram.getHistogramValueCountForTesting(
+                        "PaymentRequest.Events2",
+                        Event2.REQUEST_METHOD_OTHER
+                                | Event2.HAD_INITIAL_FORM_OF_PAYMENT
+                                | Event2.SKIPPED_SHOW
+                                | Event2.SELECTED_OTHER
+                                | Event2.PAY_CLICKED
+                                | Event2.COMPLETED));
+        // One call for the dimBackground call, one for the showProcessingMessageAfterUiSkip call.
+        Assert.assertEquals(2, mPaymentRequestTestRule.getScrimShown().getCallCount());
+    }
+
+    /** If the payment app crashes on launch, the scrim should never be visible. */
+    @Test
+    @MediumTest
+    @Feature({"Payments"})
+    @EnableFeatures({PaymentFeatureList.DELAY_NATIVE_PAYMENT_APP_SCRIM_SHOW})
+    public void testScrimNotVisibleWhenPaymentAppCrashesOnLaunch() throws TimeoutException {
+        mPaymentRequestTestRule.addPaymentAppFactory(
+                "https://bobpay.test",
+                AppPresence.HAVE_APPS,
+                FactorySpeed.SLOW_FACTORY,
+                AppSpeed.FAST_APP,
+                AppStability.FAST_CRASH);
+        mPaymentRequestTestRule.clickNodeAndWait("buy", mPaymentRequestTestRule.getDismissed());
+        mPaymentRequestTestRule.expectResultContains(new String[] {"Payment app crashed"});
+
+        Assert.assertEquals(0, mPaymentRequestTestRule.getScrimShown().getCallCount());
     }
 
     /** Two payments apps with the same payment method name should not skip payments UI. */
@@ -124,21 +160,30 @@ public class PaymentRequestPaymentAppUiSkipTest {
     @MediumTest
     @Feature({"Payments"})
     public void testTwoPaymentsAppsWithTheSamePaymentMethodName() throws TimeoutException {
-        mPaymentRequestTestRule.addPaymentAppFactory("https://bobpay.test", AppPresence.HAVE_APPS,
-                FactorySpeed.FAST_FACTORY, AppSpeed.FAST_APP);
-        mPaymentRequestTestRule.addPaymentAppFactory("https://bobpay.test", AppPresence.HAVE_APPS,
-                FactorySpeed.FAST_FACTORY, AppSpeed.FAST_APP);
-        mPaymentRequestTestRule.triggerUIAndWait("buy", mPaymentRequestTestRule.getReadyToPay());
+        mPaymentRequestTestRule.addPaymentAppFactory(
+                "https://bobpay.test",
+                AppPresence.HAVE_APPS,
+                FactorySpeed.FAST_FACTORY,
+                AppSpeed.FAST_APP);
+        mPaymentRequestTestRule.addPaymentAppFactory(
+                "https://bobpay.test",
+                AppPresence.HAVE_APPS,
+                FactorySpeed.FAST_FACTORY,
+                AppSpeed.FAST_APP);
+        mPaymentRequestTestRule.triggerUiAndWait("buy", mPaymentRequestTestRule.getReadyToPay());
         mPaymentRequestTestRule.clickAndWait(
                 R.id.button_primary, mPaymentRequestTestRule.getDismissed());
         mPaymentRequestTestRule.expectResultContains(
                 new String[] {"https://bobpay.test", "\"transaction\"", "1337"});
-        Assert.assertEquals(1,
-                RecordHistogram.getHistogramValueCountForTesting("PaymentRequest.Events",
-                        Event.REQUEST_METHOD_OTHER | Event.HAD_INITIAL_FORM_OF_PAYMENT
-                                | Event.HAD_NECESSARY_COMPLETE_SUGGESTIONS | Event.SHOWN
-                                | Event.AVAILABLE_METHOD_OTHER | Event.SELECTED_OTHER
-                                | Event.PAY_CLICKED | Event.RECEIVED_INSTRUMENT_DETAILS
-                                | Event.COMPLETED));
+        Assert.assertEquals(
+                1,
+                RecordHistogram.getHistogramValueCountForTesting(
+                        "PaymentRequest.Events2",
+                        Event2.REQUEST_METHOD_OTHER
+                                | Event2.HAD_INITIAL_FORM_OF_PAYMENT
+                                | Event2.SHOWN
+                                | Event2.SELECTED_OTHER
+                                | Event2.PAY_CLICKED
+                                | Event2.COMPLETED));
     }
 }

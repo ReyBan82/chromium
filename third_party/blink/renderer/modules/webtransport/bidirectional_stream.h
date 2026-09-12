@@ -8,14 +8,16 @@
 #include <stdint.h>
 
 #include "mojo/public/cpp/system/data_pipe.h"
+#include "third_party/blink/renderer/core/streams/readable_stream.h"
+#include "third_party/blink/renderer/core/streams/writable_stream.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
-#include "third_party/blink/renderer/modules/webtransport/receive_stream.h"
-#include "third_party/blink/renderer/modules/webtransport/send_stream.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
+class IncomingStream;
+class OutgoingStream;
 class ScriptState;
 class WebTransport;
 
@@ -35,22 +37,27 @@ class MODULES_EXPORT BidirectionalStream final : public ScriptWrappable {
   void Init(ExceptionState&);
 
   // Implementation of web_transport_bidirectional_stream.idl.
-  WritableStream* writable() const { return send_stream_; }
+  WritableStream* writable() const { return send_stream_.Get(); }
 
-  ReadableStream* readable() const { return receive_stream_; }
+  ReadableStream* readable() const { return receive_stream_.Get(); }
 
-  OutgoingStream* GetOutgoingStream() {
-    return send_stream_->GetOutgoingStream();
-  }
-  IncomingStream* GetIncomingStream() {
-    return receive_stream_->GetIncomingStream();
-  }
+  OutgoingStream* GetOutgoingStream();
+  IncomingStream* GetIncomingStream();
 
   void Trace(Visitor*) const override;
 
  private:
-  const Member<SendStream> send_stream_;
-  const Member<ReceiveStream> receive_stream_;
+  // send_stream_ is either a SendStream or a WebTransportSendStream depending
+  // on whether the WebTransportSendGroup runtime flag is enabled.
+  // TODO(crbug.com/487117768): Remove old SendStream path when
+  // WebTransportSendGroup ships.
+  Member<WritableStream> send_stream_;
+  // receive_stream_ is either a ReceiveStream or a WebTransportReceiveStream
+  // depending on whether the WebTransportReceiveStream runtime flag is
+  // enabled.
+  // TODO(crbug.com/510589920): Remove old ReceiveStream path when
+  // WebTransportReceiveStream ships.
+  Member<ReadableStream> receive_stream_;
 };
 
 }  // namespace blink

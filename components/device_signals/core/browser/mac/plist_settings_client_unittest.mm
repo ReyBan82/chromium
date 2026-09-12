@@ -9,7 +9,7 @@
 #include <string>
 
 #include "base/files/file_path.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/test/task_environment.h"
 #include "base/test/test_future.h"
 #include "components/device_signals/test/test_constants.h"
@@ -32,8 +32,9 @@ class PlistSettingsClientTest : public testing::Test {
                                  PresenceValue value,
                                  const std::string& setting_value) {
     SettingsItem item;
-    if (!setting_value.empty())
+    if (!setting_value.empty()) {
       item.setting_json_value = setting_value;
+    }
     return FinishSettingItemSetup(item, key_path, value);
   }
 
@@ -41,7 +42,7 @@ class PlistSettingsClientTest : public testing::Test {
                                  PresenceValue value,
                                  const int setting_value) {
     SettingsItem item;
-    item.setting_json_value = base::StringPrintf("%d", setting_value);
+    item.setting_json_value = base::NumberToString(setting_value);
     return FinishSettingItemSetup(item, key_path, value);
   }
 
@@ -49,7 +50,7 @@ class PlistSettingsClientTest : public testing::Test {
                                  PresenceValue value,
                                  const double setting_value) {
     SettingsItem item;
-    item.setting_json_value = base::StringPrintf("%f", setting_value);
+    item.setting_json_value = base::NumberToString(setting_value);
     return FinishSettingItemSetup(item, key_path, value);
   }
 
@@ -294,6 +295,42 @@ TEST_F(PlistSettingsClientTest,
 
   std::vector<SettingsItem> items;
   items.push_back(CreateSettingItem(key_path, PresenceValue::kFound, 1));
+
+  client_.GetSettings(options, future_.GetCallback());
+  EXPECT_EQ(items, future_.Get());
+}
+
+// Tests a request to GetSettings with an array index that is exactly equal to
+// the array size. This should be handled as "Not Found".
+TEST_F(PlistSettingsClientTest,
+       GetSettings_Plist_MixOfArrayDictItems_ArrayOutOfBounds) {
+  test_file_path_ = test::GetMixArrayDictionaryPlistPath();
+
+  std::string key_path = "Key1.Array[2]";
+
+  std::vector<GetSettingsOptions> options;
+  options.push_back(CreateOption(key_path, true));
+
+  std::vector<SettingsItem> items;
+  items.push_back(CreateSettingItem(key_path, PresenceValue::kNotFound, ""));
+
+  client_.GetSettings(options, future_.GetCallback());
+  EXPECT_EQ(items, future_.Get());
+}
+
+// Tests that a key path containing a KVC operator is not executed and is
+// instead treated as a literal key (which should not be found).
+TEST_F(PlistSettingsClientTest,
+       GetSettings_Plist_OnlyDictionaryItems_KVCVulnerability) {
+  test_file_path_ = test::GetOnlyDictionaryPlistPath();
+
+  std::string key_path = "@count";
+
+  std::vector<GetSettingsOptions> options;
+  options.push_back(CreateOption(key_path, true));
+
+  std::vector<SettingsItem> items;
+  items.push_back(CreateSettingItem(key_path, PresenceValue::kNotFound, ""));
 
   client_.GetSettings(options, future_.GetCallback());
   EXPECT_EQ(items, future_.Get());

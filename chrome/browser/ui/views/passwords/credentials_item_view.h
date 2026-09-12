@@ -7,7 +7,6 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
-#include "build/branding_buildflags.h"
 #include "build/buildflag.h"
 #include "chrome/browser/ui/passwords/account_avatar_fetcher.h"
 #include "components/password_manager/core/browser/password_form.h"
@@ -34,9 +33,9 @@ class Label;
 // bubble.
 class CredentialsItemView : public AccountAvatarFetcherDelegate,
                             public views::Button {
- public:
-  METADATA_HEADER(CredentialsItemView);
+  METADATA_HEADER(CredentialsItemView, views::Button)
 
+ public:
   CredentialsItemView(PressedCallback callback,
                       const std::u16string& upper_text,
                       const std::u16string& lower_text,
@@ -49,10 +48,6 @@ class CredentialsItemView : public AccountAvatarFetcherDelegate,
   CredentialsItemView& operator=(const CredentialsItemView&) = delete;
   ~CredentialsItemView() override;
 
-  // If |store| is kAccountStore and the build is official, adds a G logo icon
-  // to the view. If |store| is kProfileStore, removes any existing icon.
-  void SetStoreIndicatorIcon(password_manager::PasswordForm::Store store);
-
   // AccountAvatarFetcherDelegate:
   void UpdateAvatar(const gfx::ImageSkia& image) override;
 
@@ -63,10 +58,6 @@ class CredentialsItemView : public AccountAvatarFetcherDelegate,
   void OnPaintBackground(gfx::Canvas* canvas) override;
 
   raw_ptr<views::ImageView> image_view_;
-
-  // Optional right-aligned icon to distinguish account store credentials and
-  // profile store ones.
-  raw_ptr<views::ImageView> store_indicator_icon_view_ = nullptr;
 
   raw_ptr<views::Label> upper_label_ = nullptr;
   raw_ptr<views::Label> lower_label_ = nullptr;

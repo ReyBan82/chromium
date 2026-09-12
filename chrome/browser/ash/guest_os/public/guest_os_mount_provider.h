@@ -9,11 +9,13 @@
 
 #include "base/files/file_path.h"
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/guest_os/guest_id.h"
 #include "chrome/browser/ash/guest_os/guest_os_file_watcher.h"
 #include "chrome/browser/ash/guest_os/public/types.h"
 
+class PrefService;
 class Profile;
 
 namespace guest_os {
@@ -23,7 +25,8 @@ class GuestOsMountProvider {
  public:
   using PrepareCallback = base::OnceCallback<
       void(bool success, int cid, int port, base::FilePath homedir)>;
-  GuestOsMountProvider();
+  // `local_state` must be non-null and must outlive `this`.
+  explicit GuestOsMountProvider(PrefService* local_state);
   virtual ~GuestOsMountProvider();
 
   GuestOsMountProvider(const GuestOsMountProvider&) = delete;
@@ -42,12 +45,8 @@ class GuestOsMountProvider {
   // depending on the underlying VM.
   virtual VmType vm_type() = 0;
 
-  // Requests the provider to mount its volume for `profile`. If `profile` is
-  // different than what `profile()` returns (e.g. we're mounting in incognito
-  // mode in which case `profile` is the off-the-record profile but `profile()`
-  // returns the original profile) then it'll mount for both.
-  // No-op if already mounted, so safe to call multiple times.
-  void Mount(Profile* profile, base::OnceCallback<void(bool)> callback);
+  // Requests the provider to mount its volume.
+  void Mount(base::OnceCallback<void(bool)> callback);
 
   // Requests the provider to unmount.
   void Unmount();
@@ -71,6 +70,8 @@ class GuestOsMountProvider {
   virtual void Prepare(PrepareCallback callback) = 0;
 
  private:
+  const raw_ref<PrefService> local_state_;
+
   std::unique_ptr<GuestOsMountProviderInner> callback_;
   base::WeakPtrFactory<GuestOsMountProvider> weak_ptr_factory_{this};
 };

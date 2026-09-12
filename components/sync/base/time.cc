@@ -4,34 +4,46 @@
 
 #include "components/sync/base/time.h"
 
-#include <memory>
+#include <cmath>
 
-#include "base/check.h"
-#include "base/i18n/unicodestring.h"
-#include "base/strings/utf_string_conversions.h"
-#include "third_party/icu/source/common/unicode/utypes.h"
-#include "third_party/icu/source/i18n/unicode/smpdtfmt.h"
+#include "base/strings/stringprintf.h"
+#include "base/time/time.h"
 
 namespace syncer {
 
 int64_t TimeToProtoTime(const base::Time& t) {
-  return (t - base::Time::UnixEpoch()).InMilliseconds();
+  return t.InMillisecondsSinceUnixEpoch();
 }
 
 base::Time ProtoTimeToTime(int64_t proto_t) {
-  return base::Time::UnixEpoch() + base::Milliseconds(proto_t);
+  return base::Time::FromMillisecondsSinceUnixEpoch(proto_t);
 }
 
 std::string GetTimeDebugString(const base::Time& t) {
-  // Note: We don't use some helper from base/i18n/time_formatting.h here,
-  // because those are all locale-dependent which we explicitly don't want.
-  UErrorCode status = U_ZERO_ERROR;
-  icu::SimpleDateFormat formatter(icu::UnicodeString("yyyy-MM-dd HH:mm:ss X"),
-                                  status);
-  DCHECK(U_SUCCESS(status));
-  icu::UnicodeString date_string;
-  formatter.format(static_cast<UDate>(t.ToDoubleT() * 1000), date_string);
-  return base::UTF16ToUTF8(base::i18n::UnicodeStringToString16(date_string));
+  base::Time::Exploded local_exploded;
+  t.LocalExplode(&local_exploded);
+
+  base::Time local_as_utc;
+  std::string offset_str = "Z";
+  if (base::Time::FromUTCExploded(local_exploded, &local_as_utc)) {
+    base::TimeDelta offset = local_as_utc - t;
+    if (!offset.is_zero()) {
+      int64_t total_minutes = offset.InMinutes();
+      int64_t hours = total_minutes / 60;
+      int64_t minutes = std::abs(total_minutes % 60);
+      if (minutes == 0) {
+        offset_str = base::StringPrintf("%+03d", static_cast<int>(hours));
+      } else {
+        offset_str = base::StringPrintf("%+03d%02d", static_cast<int>(hours),
+                                        static_cast<int>(minutes));
+      }
+    }
+  }
+
+  return base::StringPrintf(
+      "%04d-%02d-%02d %02d:%02d:%02d %s", local_exploded.year,
+      local_exploded.month, local_exploded.day_of_month, local_exploded.hour,
+      local_exploded.minute, local_exploded.second, offset_str.c_str());
 }
 
 }  // namespace syncer

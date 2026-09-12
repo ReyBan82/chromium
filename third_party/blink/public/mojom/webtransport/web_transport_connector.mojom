@@ -15,5 +15,10 @@ interface WebTransportConnector {
   Connect(
     url.mojom.Url url,
     array<network.mojom.WebTransportCertificateFingerprint> fingerprints,
+    array<string> application_protocols,
+    network.mojom.WebTransportCongestionControl congestion_control,
+    uint16? anticipated_concurrent_incoming_unidirectional_streams,
+    uint16? anticipated_concurrent_incoming_bidirectional_streams,
+    network.mojom.WebTransportHttpRequestHeaders additional_headers,
     pending_remote<network.mojom.WebTransportHandshakeClient> client);
 };

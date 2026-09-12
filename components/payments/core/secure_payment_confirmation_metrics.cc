@@ -18,4 +18,44 @@ void RecordEnrollSystemPromptResult(
       result);
 }
 
+void RecordBrowserBoundKeyInclusion(
+    SecurePaymentConfirmationBrowserBoundKeyInclusionResult result) {
+  base::UmaHistogramEnumeration(
+      "PaymentRequest.SecurePaymentConfirmation.BrowserBoundKeyInclusion",
+      result);
+}
+
+void RecordBrowserBoundKeyCreation(
+    SecurePaymentConfirmationBrowserBoundKeyDeviceResult result) {
+  base::UmaHistogramEnumeration(
+      "PaymentRequest.SecurePaymentConfirmation.BrowserBoundKeyStoreCreate",
+      result);
+}
+
+void RecordBrowserBoundKeyRetrieval(
+    SecurePaymentConfirmationBrowserBoundKeyDeviceResult result) {
+  base::UmaHistogramEnumeration(
+      "PaymentRequest.SecurePaymentConfirmation.BrowserBoundKeyStoreRetrieve",
+      result);
+}
+
+void RecordBrowserBoundKeyMetadataUpdated(bool success) {
+  base::UmaHistogramBoolean(
+      "PaymentRequest.SecurePaymentConfirmation.BrowserBoundKeyMetdataUpdate",
+      success);
+}
+
+void RecordOSStoreUplift(bool has_uplift) {
+  base::UmaHistogramBoolean(
+      "PaymentRequest.SecurePaymentConfirmation.CredentialFinder.OSStoreUplift",
+      has_uplift);
+}
+
+void RecordWebDatabaseHasOrphanedCredentials(bool has_orphaned_credentials) {
+  base::UmaHistogramBoolean(
+      "PaymentRequest.SecurePaymentConfirmation.CredentialFinder."
+      "WebDatabaseHasOrphanedCredentials",
+      has_orphaned_credentials);
+}
+
 }  // namespace payments

@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -102,6 +102,7 @@ chrome.chromeosInfoPrivate.AssistantStatus = {
  *   customizationId: (string|undefined),
  *   homeProvider: (string|undefined),
  *   hwid: (string|undefined),
+ *   deviceRequisition: (string|undefined),
  *   isMeetDevice: (boolean|undefined),
  *   initialLocale: (string|undefined),
  *   isOwner: (boolean|undefined),
@@ -129,7 +130,7 @@ chrome.chromeosInfoPrivate.AssistantStatus = {
  *   a11yDockedMagnifierEnabled: (boolean|undefined),
  *   sendFunctionKeys: (boolean|undefined),
  *   supportedTimezones: (!Array<!Array<string>>|undefined)
- * }): void} callback
+ * }): void=} callback
  */
 chrome.chromeosInfoPrivate.get = function(propertyNames, callback) {};
 
@@ -143,7 +144,7 @@ chrome.chromeosInfoPrivate.set = function(propertyName, propertyValue) {};
 
 /**
  * Called to request tablet mode enabled status from the Chrome OS system.
- * @param {function(boolean): void} callback Returns tablet mode enabled status
- *     as a boolean.
+ * @param {function(boolean): void=} callback Resolves with tablet mode enabled
+ *     status as a boolean.
  */
 chrome.chromeosInfoPrivate.isTabletModeEnabled = function(callback) {};

@@ -5,14 +5,10 @@
 #include "content/browser/scheduler/responsiveness/jank_monitor_impl.h"
 
 #include "base/compiler_specific.h"
-#include "base/functional/callback_helpers.h"
 #include "base/observer_list.h"
 #include "base/task/thread_pool.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-#include "ui/base/ui_base_features.h"
 
 namespace content {
 
@@ -39,7 +35,7 @@ static constexpr int64_t kInactivityThresholdUs =
 JankMonitorImpl::JankMonitorImpl()
     : timer_(std::make_unique<base::RepeatingTimer>()),
       timer_running_(false),
-      janky_task_id_(nullptr),
+      janky_task_id_(0),
       last_activity_time_us_(0) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   DETACH_FROM_SEQUENCE(monitor_sequence_checker_);
@@ -118,39 +114,43 @@ void JankMonitorImpl::WillRunTaskOnUIThread(
     const base::PendingTask* task,
     bool /* was_blocked_or_low_priority */) {
   DCHECK(ui_thread_exec_state_);
-  WillRunTaskOrEvent(ui_thread_exec_state_.get(), task);
+  WillRunTaskOrEvent(ui_thread_exec_state_.get(),
+                     reinterpret_cast<uintptr_t>(task));
 }
 
 void JankMonitorImpl::DidRunTaskOnUIThread(const base::PendingTask* task) {
   DCHECK(ui_thread_exec_state_);
-  DidRunTaskOrEvent(ui_thread_exec_state_.get(), task);
+  DidRunTaskOrEvent(ui_thread_exec_state_.get(),
+                    reinterpret_cast<uintptr_t>(task));
 }
 
 void JankMonitorImpl::WillRunTaskOnIOThread(
     const base::PendingTask* task,
     bool /* was_blocked_or_low_priority */) {
   DCHECK(io_thread_exec_state_);
-  WillRunTaskOrEvent(io_thread_exec_state_.get(), task);
+  WillRunTaskOrEvent(io_thread_exec_state_.get(),
+                     reinterpret_cast<uintptr_t>(task));
 }
 
 void JankMonitorImpl::DidRunTaskOnIOThread(const base::PendingTask* task) {
   DCHECK(io_thread_exec_state_);
-  DidRunTaskOrEvent(io_thread_exec_state_.get(), task);
+  DidRunTaskOrEvent(io_thread_exec_state_.get(),
+                    reinterpret_cast<uintptr_t>(task));
 }
 
-void JankMonitorImpl::WillRunEventOnUIThread(const void* opaque_identifier) {
+void JankMonitorImpl::WillRunEventOnUIThread(uintptr_t opaque_identifier) {
   DCHECK(ui_thread_exec_state_);
   WillRunTaskOrEvent(ui_thread_exec_state_.get(), opaque_identifier);
 }
 
-void JankMonitorImpl::DidRunEventOnUIThread(const void* opaque_identifier) {
+void JankMonitorImpl::DidRunEventOnUIThread(uintptr_t opaque_identifier) {
   DCHECK(ui_thread_exec_state_);
   DidRunTaskOrEvent(ui_thread_exec_state_.get(), opaque_identifier);
 }
 
 void JankMonitorImpl::WillRunTaskOrEvent(
     ThreadExecutionState* thread_exec_state,
-    const void* opaque_identifier) {
+    uintptr_t opaque_identifier) {
   thread_exec_state->WillRunTaskOrEvent(opaque_identifier);
   if (!timer_running_) {
     monitor_task_runner_->PostTask(
@@ -160,7 +160,7 @@ void JankMonitorImpl::WillRunTaskOrEvent(
 }
 
 void JankMonitorImpl::DidRunTaskOrEvent(ThreadExecutionState* thread_exec_state,
-                                        const void* opaque_identifier) {
+                                        uintptr_t opaque_identifier) {
   thread_exec_state->DidRunTaskOrEvent(opaque_identifier);
   NotifyJankStopIfNecessary(opaque_identifier);
 
@@ -215,7 +215,7 @@ void JankMonitorImpl::DestroyOnMonitorThread() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(monitor_sequence_checker_);
   DCHECK(timer_);
 
-  timer_->AbandonAndStop();
+  timer_->Stop();
   timer_ = nullptr;
   timer_running_ = false;
 }
@@ -249,7 +249,7 @@ void JankMonitorImpl::OnCheckJankiness() {
   StopTimerIfIdle();
 }
 
-void JankMonitorImpl::OnJankStarted(const void* opaque_identifier) {
+void JankMonitorImpl::OnJankStarted(uintptr_t opaque_identifier) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(monitor_sequence_checker_);
 
   janky_task_id_ = opaque_identifier;
@@ -259,21 +259,21 @@ void JankMonitorImpl::OnJankStarted(const void* opaque_identifier) {
     observer.OnJankStarted();
 }
 
-void JankMonitorImpl::OnJankStopped(const void* opaque_identifier) {
+void JankMonitorImpl::OnJankStopped(uintptr_t opaque_identifier) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(monitor_sequence_checker_);
-  DCHECK_NE(opaque_identifier, nullptr);
+  DCHECK_NE(opaque_identifier, 0u);
   if (janky_task_id_ != opaque_identifier)
     return;
 
-  janky_task_id_ = nullptr;
+  janky_task_id_ = 0;
 
   base::AutoLock auto_lock(observers_lock_);
   for (content::JankMonitor::Observer& observer : observers_)
     observer.OnJankStopped();
 }
 
-void JankMonitorImpl::NotifyJankStopIfNecessary(const void* opaque_identifier) {
-  if (LIKELY(!janky_task_id_ || janky_task_id_ != opaque_identifier)) {
+void JankMonitorImpl::NotifyJankStopIfNecessary(uintptr_t opaque_identifier) {
+  if (!janky_task_id_ || janky_task_id_ != opaque_identifier) [[likely]] {
     // Most tasks are unlikely to be janky.
     return;
   }
@@ -294,7 +294,7 @@ JankMonitorImpl::ThreadExecutionState::ThreadExecutionState() {
 
 JankMonitorImpl::ThreadExecutionState::~ThreadExecutionState() = default;
 
-absl::optional<const void*>
+std::optional<uintptr_t>
 JankMonitorImpl::ThreadExecutionState::CheckJankiness() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(monitor_sequence_checker_);
 
@@ -302,19 +302,19 @@ JankMonitorImpl::ThreadExecutionState::CheckJankiness() {
   static base::TimeDelta jank_threshold = base::Milliseconds(kJankThresholdMs);
 
   base::AutoLock lock(lock_);
-  if (LIKELY(task_execution_metadata_.empty() ||
-             (now - task_execution_metadata_.back().execution_start_time) <
-                 jank_threshold)) {
+  if (task_execution_metadata_.empty() ||
+      (now - task_execution_metadata_.back().execution_start_time) <
+          jank_threshold) [[likely]] {
     // Most tasks are unlikely to be janky.
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   // Mark that the target thread is janky and notify the monitor thread.
-  return task_execution_metadata_.back().identifier.get();
+  return task_execution_metadata_.back().identifier;
 }
 
 void JankMonitorImpl::ThreadExecutionState::WillRunTaskOrEvent(
-    const void* opaque_identifier) {
+    uintptr_t opaque_identifier) {
   AssertOnTargetThread();
 
   base::TimeTicks now = base::TimeTicks::Now();
@@ -324,18 +324,18 @@ void JankMonitorImpl::ThreadExecutionState::WillRunTaskOrEvent(
 }
 
 void JankMonitorImpl::ThreadExecutionState::DidRunTaskOrEvent(
-    const void* opaque_identifier) {
+    uintptr_t opaque_identifier) {
   AssertOnTargetThread();
 
   base::AutoLock lock(lock_);
-  if (UNLIKELY(task_execution_metadata_.empty()) ||
-      opaque_identifier != task_execution_metadata_.back().identifier) {
+  if (task_execution_metadata_.empty() ||
+      opaque_identifier != task_execution_metadata_.back().identifier)
+      [[unlikely]] {
     // Mismatches can happen (e.g: on ozone/wayland when Paste button is pressed
     // in context menus, among others). Simply ignore the mismatches for now.
     // See https://crbug.com/929813 for the details of why the mismatch
     // happens.
-#if (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS_LACROS)) && \
-    BUILDFLAG(IS_OZONE)
+#if BUILDFLAG(IS_LINUX) && BUILDFLAG(IS_OZONE)
     task_execution_metadata_.clear();
 #endif
     return;

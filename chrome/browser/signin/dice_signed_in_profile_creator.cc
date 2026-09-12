@@ -89,58 +89,42 @@ TokensLoadedCallbackRunner::TokensLoadedCallbackRunner(
 
 DiceSignedInProfileCreator::DiceSignedInProfileCreator(
     Profile* source_profile,
-    CoreAccountId account_id,
+    const CoreAccountId& initiator_account_id,
+    std::vector<CoreAccountId> secondary_account_ids,
     const std::u16string& local_profile_name,
-    absl::optional<size_t> icon_index,
-    bool use_guest_profile,
+    std::optional<size_t> icon_index,
     base::OnceCallback<void(Profile*)> callback)
-    : source_profile_(source_profile),
-      account_id_(account_id),
+    : source_profile_(source_profile->GetWeakPtr()),
+      initiator_account_id_(initiator_account_id),
+      secondary_account_ids_(std::move(secondary_account_ids)),
       callback_(std::move(callback)) {
-  auto initialized_callback =
-      base::BindOnce(&DiceSignedInProfileCreator::OnNewProfileInitialized,
-                     weak_pointer_factory_.GetWeakPtr());
-
-  // Passing the sign-in token to an ephemeral Guest profile is part of the
-  // experiment to surface a Guest mode link in the DiceWebSigninIntercept
-  // and is only used to sign in to the web through account consistency and
-  // does NOT enable sync or any other browser level functionality.
-  // TODO(https://crbug.com/1225171): Revise the comment after Guest mode plans
-  // are finalized.
-  if (use_guest_profile) {
-    // TODO(https://crbug.com/1225171): Re-enabled if ephemeral based Guest mode
-    // is added. Remove the code otherwise.
-    NOTREACHED();
-
-    // Make sure the callback is not called synchronously.
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE,
-        base::BindOnce(&ProfileManager::CreateProfileAsync,
-                       base::Unretained(g_browser_process->profile_manager()),
-                       ProfileManager::GetGuestProfilePath(),
-                       std::move(initialized_callback), base::DoNothing()));
-  } else {
-    ProfileAttributesStorage& storage =
-        g_browser_process->profile_manager()->GetProfileAttributesStorage();
-    if (!icon_index.has_value())
-      icon_index = storage.ChooseAvatarIconIndexForNewProfile();
-    std::u16string name = local_profile_name.empty()
-                              ? storage.ChooseNameForNewProfile(*icon_index)
-                              : local_profile_name;
-    ProfileManager::CreateMultiProfileAsync(name, *icon_index,
-                                            /*is_hidden=*/false,
-                                            std::move(initialized_callback));
+  CHECK(!initiator_account_id_.empty());
+  ProfileAttributesStorage& storage =
+      g_browser_process->profile_manager()->GetProfileAttributesStorage();
+  if (!icon_index.has_value()) {
+    icon_index = storage.ChooseAvatarIconIndexForNewProfile();
   }
+  std::u16string name = local_profile_name.empty()
+                            ? storage.ChooseNameForNewProfile()
+                            : local_profile_name;
+  ProfileManager::CreateMultiProfileAsync(
+      name, *icon_index,
+      /*is_hidden=*/false,
+      base::BindOnce(&DiceSignedInProfileCreator::OnNewProfileInitialized,
+                     weak_pointer_factory_.GetWeakPtr()));
 }
 
 DiceSignedInProfileCreator::DiceSignedInProfileCreator(
     Profile* source_profile,
-    CoreAccountId account_id,
+    const CoreAccountId& initiator_account_id,
+    std::vector<CoreAccountId> secondary_account_ids,
     const base::FilePath& target_profile_path,
     base::OnceCallback<void(Profile*)> callback)
-    : source_profile_(source_profile),
-      account_id_(account_id),
+    : source_profile_(source_profile->GetWeakPtr()),
+      initiator_account_id_(initiator_account_id),
+      secondary_account_ids_(std::move(secondary_account_ids)),
       callback_(std::move(callback)) {
+  CHECK(!initiator_account_id_.empty());
   // Make sure the callback is not called synchronously.
   base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
       FROM_HERE,
@@ -157,11 +141,12 @@ DiceSignedInProfileCreator::~DiceSignedInProfileCreator() = default;
 void DiceSignedInProfileCreator::OnNewProfileInitialized(Profile* new_profile) {
   if (!new_profile) {
     NOTREACHED() << "Error creating new profile";
-    if (callback_)
-      std::move(callback_).Run(nullptr);
-    return;
   }
 
+  LoadNewProfileTokens(new_profile);
+}
+
+void DiceSignedInProfileCreator::LoadNewProfileTokens(Profile* new_profile) {
   DCHECK(!tokens_loaded_callback_runner_);
   // base::Unretained is fine because the runner is owned by this.
   auto tokens_loaded_callback_runner =
@@ -178,18 +163,40 @@ void DiceSignedInProfileCreator::OnNewProfileInitialized(Profile* new_profile) {
 void DiceSignedInProfileCreator::OnNewProfileTokensLoaded(
     Profile* new_profile) {
   tokens_loaded_callback_runner_.reset();
-  if (!new_profile) {
-    if (callback_)
+  if (!new_profile || !source_profile_) {
+    if (callback_) {
       std::move(callback_).Run(nullptr);
+    }
     return;
   }
 
-  auto* accounts_mutator =
-      IdentityManagerFactory::GetForProfile(source_profile_)
-          ->GetAccountsMutator();
+  signin::IdentityManager* source_identity_manager =
+      IdentityManagerFactory::GetForProfile(source_profile_.get());
+  auto* accounts_mutator = source_identity_manager->GetAccountsMutator();
+  auto* new_profile_identity_manager =
+      IdentityManagerFactory::GetForProfile(new_profile);
   auto* new_profile_accounts_mutator =
-      IdentityManagerFactory::GetForProfile(new_profile)->GetAccountsMutator();
-  accounts_mutator->MoveAccount(new_profile_accounts_mutator, account_id_);
-  if (callback_)
+      new_profile_identity_manager->GetAccountsMutator();
+
+  accounts_mutator->MoveAccount(new_profile_accounts_mutator,
+                                initiator_account_id_);
+
+  for (const auto& id : secondary_account_ids_) {
+    if (source_identity_manager->HasAccountWithRefreshToken(id)) {
+      accounts_mutator->MoveAccount(new_profile_accounts_mutator, id);
+    }
+  }
+
+  // Sign in for new profiles, profile switches are expected to be already
+  // signed in.
+  if (!new_profile_identity_manager->HasPrimaryAccount(
+          signin::ConsentLevel::kSignin)) {
+    new_profile_identity_manager->GetPrimaryAccountMutator()->SetPrimaryAccount(
+        initiator_account_id_, signin::ConsentLevel::kSignin,
+        signin_metrics::AccessPoint::kSigninInterceptFirstRunExperience);
+  }
+
+  if (callback_) {
     std::move(callback_).Run(new_profile);
+  }
 }

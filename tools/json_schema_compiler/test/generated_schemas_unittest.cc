@@ -4,9 +4,13 @@
 
 #include "tools/json_schema_compiler/test/generated_schemas.h"
 
+#include <optional>
+
 #include "base/json/json_reader.h"
+#include "extensions/buildflags/buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace {
 
@@ -18,12 +22,10 @@ TEST(GeneratedSchemaTest, ManifestKeysExcluded) {
   ASSERT_TRUE(GeneratedSchemas::IsGenerated(kApiName));
 
   // The schema string must be in json format.
-  absl::optional<base::Value> json_schema =
-      base::JSONReader::Read(GeneratedSchemas::Get(kApiName));
+  std::optional<base::DictValue> json_schema = base::JSONReader::ReadDict(
+      GeneratedSchemas::Get(kApiName), base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   ASSERT_TRUE(json_schema);
-  ASSERT_TRUE(json_schema->is_dict());
-
-  EXPECT_FALSE(json_schema->FindPath("manifest_keys"));
+  EXPECT_FALSE(json_schema->Find("manifest_keys"));
 }
 
 }  // namespace

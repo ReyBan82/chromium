@@ -16,9 +16,10 @@ namespace blink {
 // is delegated to a common base class, SpellCheckMarker.
 class CORE_EXPORT SpellingMarker final : public SpellCheckMarker {
  public:
-  SpellingMarker(unsigned start_offset,
-                 unsigned end_offset,
-                 const String& description);
+  SpellingMarker(wtf_size_t start_offset,
+                 wtf_size_t end_offset,
+                 const String& description,
+                 bool should_hide_suggestion_menu = false);
   SpellingMarker(const SpellingMarker&) = delete;
   SpellingMarker& operator=(const SpellingMarker&) = delete;
 

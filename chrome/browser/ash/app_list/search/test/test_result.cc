@@ -4,6 +4,9 @@
 
 #include "chrome/browser/ash/app_list/search/test/test_result.h"
 
+#include "base/strings/utf_string_conversions.h"
+#include "chrome/browser/ash/app_list/search/omnibox/omnibox_types.h"
+
 namespace app_list {
 
 TestResult::TestResult(const std::string& id,
@@ -49,7 +52,7 @@ TestResult::TestResult(const std::string& id,
 
 TestResult::TestResult(const std::string& id,
                        ResultType result_type,
-                       crosapi::mojom::SearchResult::AnswerType answer_type,
+                       OmniboxResultAnswerType answer_type,
                        DisplayType display_type) {
   set_id(id);
   SetTitle(base::UTF8ToUTF16(id));
@@ -67,6 +70,24 @@ TestResult::TestResult(const std::string& id,
   set_relevance(relevance);
   scoring().set_normalized_relevance(normalized_relevance);
   SetMetricsType(metrics_type);
+}
+
+TestResult::TestResult(const std::string& id,
+                       DisplayType display_type,
+                       Category category,
+                       const std::string& fileName,
+                       const std::string& path,
+                       int best_match_rank,
+                       double relevance,
+                       double ftrl_result_score) {
+  set_id(id);
+  SetTitle(base::UTF8ToUTF16(fileName));
+  SetDisplayType(display_type);
+  SetCategory(category);
+  SetFilePath(base::FilePath(path));
+  scoring().set_best_match_rank(best_match_rank);
+  set_relevance(relevance);
+  scoring().set_ftrl_result_score(ftrl_result_score);
 }
 
 TestResult::~TestResult() = default;

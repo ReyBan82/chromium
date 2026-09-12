@@ -2,27 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/ui/views/safe_browsing/tailored_security_desktop_dialog_manager.h"
+
 #include "base/command_line.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/metrics/user_action_tester.h"
-#include "base/test/scoped_feature_list.h"
-#include "chrome/browser/ui/browser.h"
+#include "base/test/run_until.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
-#include "chrome/browser/ui/views/safe_browsing/tailored_security_desktop_dialog_manager.h"
-#include "chrome/common/chrome_features.h"
 #include "components/safe_browsing/core/browser/tailored_security_service/tailored_security_outcome.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/ui_base_switches.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
 #include "ui/events/base_event_utils.h"
 #include "ui/events/event.h"
 #include "ui/gfx/geometry/point.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
-#include "ui/views/controls/button/label_button.h"
+#include "ui/views/controls/button/md_text_button.h"
+#include "ui/views/test/widget_test.h"
 #include "ui/views/widget/any_widget_observer.h"
 #include "ui/views/widget/widget.h"
 #include "url/gurl.h"
@@ -56,7 +57,7 @@ void ClickButton(views::BubbleDialogDelegate* bubble_delegate,
   // unintended.
   bubble_delegate->ResetViewShownTimeStampForTesting();
   gfx::Point center(button->width() / 2, button->height() / 2);
-  const ui::MouseEvent event(ui::ET_MOUSE_PRESSED, center, center,
+  const ui::MouseEvent event(ui::EventType::kMousePressed, center, center,
                              ui::EventTimeForNow(), ui::EF_LEFT_MOUSE_BUTTON,
                              ui::EF_LEFT_MOUSE_BUTTON);
   button->OnMousePressed(event);
@@ -72,11 +73,6 @@ class TailoredSecurityDesktopDialogManagerTest
   TailoredSecurityDesktopDialogManagerTest() {
     dialog_manager_ =
         std::make_unique<safe_browsing::TailoredSecurityDesktopDialogManager>();
-    if (GetParam().use_dark_theme) {
-      features_.InitAndEnableFeature(features::kWebUIDarkMode);
-    } else {
-      features_.Init();
-    }
   }
 
   TailoredSecurityDesktopDialogManagerTest(
@@ -87,13 +83,15 @@ class TailoredSecurityDesktopDialogManagerTest
   // DialogBrowserTest:
   void ShowUi(const std::string& name) override {
     // Reduce flakes by ensuring that animation is disabled.
-    ui::ScopedAnimationDurationScaleMode disable_animation(
-        ui::ScopedAnimationDurationScaleMode::ZERO_DURATION);
+    gfx::ScopedAnimationDurationScaleMode disable_animation(
+        gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION);
     const std::string& actual_name = name.substr(0, name.find("/"));
     if (actual_name == "enabledDialog") {
-      dialog_manager_->ShowEnabledDialogForBrowser(browser());
+      dialog_manager_->ShowEnabledDialogForBrowser(browser(),
+                                                   base::DoNothing());
     } else if (actual_name == "disabledDialog") {
-      dialog_manager_->ShowDisabledDialogForBrowser(browser());
+      dialog_manager_->ShowDisabledDialogForBrowser(browser(),
+                                                    base::DoNothing());
     } else {
       FAIL() << "No dialog case defined for this string: " << name;
     }
@@ -105,26 +103,31 @@ class TailoredSecurityDesktopDialogManagerTest
     }
   }
 
-  views::Widget* ShowTailoredSecurityEnabledDialog(Browser* browser) {
+  views::Widget* ShowTailoredSecurityEnabledDialog(
+      BrowserWindowInterface* browser) {
     views::NamedWidgetShownWaiter waiter(
         views::test::AnyWidgetTestPasskey{},
         safe_browsing::kTailoredSecurityNoticeDialog);
-    dialog_manager_->ShowEnabledDialogForBrowser(browser);
+    dialog_manager_->ShowEnabledDialogForBrowser(browser, base::DoNothing());
 
-    return waiter.WaitIfNeededAndGet();
+    views::Widget* widget = waiter.WaitIfNeededAndGet();
+    EXPECT_TRUE(base::test::RunUntil([&]() { return widget->IsVisible(); }));
+    return widget;
   }
 
-  views::Widget* ShowTailoredSecurityDisabledDialog(Browser* browser) {
+  views::Widget* ShowTailoredSecurityDisabledDialog(
+      BrowserWindowInterface* browser) {
     views::NamedWidgetShownWaiter waiter(
         views::test::AnyWidgetTestPasskey{},
         safe_browsing::kTailoredSecurityNoticeDialog);
-    dialog_manager_->ShowDisabledDialogForBrowser(browser);
+    dialog_manager_->ShowDisabledDialogForBrowser(browser, base::DoNothing());
 
-    return waiter.WaitIfNeededAndGet();
+    views::Widget* widget = waiter.WaitIfNeededAndGet();
+    EXPECT_TRUE(base::test::RunUntil([&]() { return widget->IsVisible(); }));
+    return widget;
   }
 
  private:
-  base::test::ScopedFeatureList features_;
   std::unique_ptr<safe_browsing::TailoredSecurityDesktopDialogManager>
       dialog_manager_;
 };
@@ -172,12 +175,43 @@ IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
 
   ClickButton(bubble_delegate, bubble_delegate->GetCancelButton());
   EXPECT_TRUE(content::WaitForLoadStop(
-      browser()->tab_strip_model()->GetActiveWebContents()));
+      browser()->GetTabStripModel()->GetActiveWebContents()));
   EXPECT_EQ(browser()
-                ->tab_strip_model()
+                ->GetTabStripModel()
                 ->GetActiveWebContents()
                 ->GetLastCommittedURL(),
             GURL(kEnhancedProtectionSettingsUrl));
+}
+
+IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
+                       EnabledDialogRecordsUserActionOnShow) {
+  base::UserActionTester uat;
+  EXPECT_EQ(
+      uat.GetActionCount("SafeBrowsing.AccountIntegration.EnabledDialog.Shown"),
+      0);
+
+  ShowTailoredSecurityEnabledDialog(browser());
+
+  EXPECT_EQ(
+      uat.GetActionCount("SafeBrowsing.AccountIntegration.EnabledDialog.Shown"),
+      1);
+}
+
+IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
+                       EnabledDialogOkButtonRecordsUserAction) {
+  base::UserActionTester uat;
+  auto* dialog = ShowTailoredSecurityEnabledDialog(browser());
+  auto* bubble_delegate = dialog->widget_delegate()->AsBubbleDialogDelegate();
+  EXPECT_EQ(
+      uat.GetActionCount(
+          "SafeBrowsing.AccountIntegration.EnabledDialog.OkButtonClicked"),
+      0);
+
+  ClickButton(bubble_delegate, bubble_delegate->GetOkButton());
+  EXPECT_EQ(
+      uat.GetActionCount(
+          "SafeBrowsing.AccountIntegration.EnabledDialog.OkButtonClicked"),
+      1);
 }
 
 IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
@@ -228,12 +262,41 @@ IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
 
   ClickButton(bubble_delegate, bubble_delegate->GetCancelButton());
   EXPECT_TRUE(content::WaitForLoadStop(
-      browser()->tab_strip_model()->GetActiveWebContents()));
+      browser()->GetTabStripModel()->GetActiveWebContents()));
   EXPECT_EQ(browser()
-                ->tab_strip_model()
+                ->GetTabStripModel()
                 ->GetActiveWebContents()
                 ->GetLastCommittedURL(),
             GURL(kEnhancedProtectionSettingsUrl));
+}
+
+IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
+                       DisabledDialogRecordsUserActionOnShow) {
+  base::UserActionTester uat;
+  EXPECT_EQ(uat.GetActionCount(
+                "SafeBrowsing.AccountIntegration.DisabledDialog.Shown"),
+            0);
+
+  ShowTailoredSecurityDisabledDialog(browser());
+
+  EXPECT_EQ(uat.GetActionCount(
+                "SafeBrowsing.AccountIntegration.DisabledDialog.Shown"),
+            1);
+}
+
+IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
+                       DisabledDialogOkButtonRecordsUserAction) {
+  base::UserActionTester uat;
+  auto* dialog = ShowTailoredSecurityDisabledDialog(browser());
+  auto* bubble_delegate = dialog->widget_delegate()->AsBubbleDialogDelegate();
+  EXPECT_EQ(uat.GetActionCount("SafeBrowsing.AccountIntegration.DisabledDialog."
+                               "OkButtonClicked"),
+            0);
+
+  ClickButton(bubble_delegate, bubble_delegate->GetOkButton());
+  EXPECT_EQ(uat.GetActionCount("SafeBrowsing.AccountIntegration.DisabledDialog."
+                               "OkButtonClicked"),
+            1);
 }
 
 IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
@@ -254,8 +317,9 @@ IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
 IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
                        OpeningANewEnableDialogWillCloseAnyOpenDisableDialogs) {
   auto* disabled_dialog = ShowTailoredSecurityDisabledDialog(browser());
+  views::test::WidgetDestroyedWaiter destroyed_waiter(disabled_dialog);
   auto* enabled_dialog = ShowTailoredSecurityEnabledDialog(browser());
-  EXPECT_TRUE(disabled_dialog->IsClosed());
+  destroyed_waiter.Wait();
   EXPECT_FALSE(enabled_dialog->IsClosed());
 }
 
@@ -282,8 +346,9 @@ IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
 IN_PROC_BROWSER_TEST_P(TailoredSecurityDesktopDialogManagerTest,
                        OpeningANewDisableDialogWillCloseAnyOpenEnableDialogs) {
   auto* enabled_dialog = ShowTailoredSecurityEnabledDialog(browser());
+  views::test::WidgetDestroyedWaiter destroyed_waiter(enabled_dialog);
   auto* disabled_dialog = ShowTailoredSecurityDisabledDialog(browser());
-  EXPECT_TRUE(enabled_dialog->IsClosed());
+  destroyed_waiter.Wait();
   EXPECT_FALSE(disabled_dialog->IsClosed());
 }
 

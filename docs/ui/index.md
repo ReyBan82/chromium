@@ -18,11 +18,13 @@ Recipes to help you work with Chrome UI.
 
 Details on Chrome UI.
 
+* [ActionManager and ActionItems](/ui/actions/README.md)
 * [Activation and Focus](/docs/ui/learn/activation_and_focus.md)
 * [Animation Builder](/docs/ui/animation_builder/animation_builder.md)
 * [Best Practices](/docs/ui/learn/index.md#best-practices)
 * [Glossary](learn/glossary.md)
 * [Input Event Routing](/docs/ui/input_event/index.md)
+* [Keyboard Shortcuts](/docs/ui/learn/keyboard_shortcuts.md)
 * [Metadata and Properties](/docs/ui/views/metadata_properties.md)
 * [Platform Styling](/docs/ui/views/platform_style.md)
 * [Product Excellence](/docs/ui/product_excellence/index.md)

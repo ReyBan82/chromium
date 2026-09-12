@@ -5,38 +5,46 @@
 const notifications = chrome.notifications;
 
 function arrayEquals(a, b) {
-  if (a === b) return true;
-  if (a == null || b == null) return false;
-  if (a.length !== b.length) return false;
+  if (a === b) {
+    return true;
+  }
+  if (a == null || b == null) {
+    return false;
+  }
+  if (a.length !== b.length) {
+    return false;
+  }
 
-  for (var i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
   }
   return true;
-};
+}
 
 function create(id, options) {
-  return new Promise(function (resolve, reject) {
-    notifications.create(id, options, function (id) {
+  return new Promise(function(resolve, reject) {
+    notifications.create(id, options, function(id) {
       if (chrome.runtime.lastError) {
-        reject(new Error("Unable to create notification"));
+        reject(new Error('Unable to create notification'));
         return;
       }
-      console.log("Created with id: " + id);
+      console.info(`Created with id: ${id}`);
       resolve(id);
       return;
     });
   });
-};
+}
 
 function update(id, options) {
-  return new Promise(function (resolve, reject) {
-    notifications.update(id, options, function (ok) {
+  return new Promise(function(resolve, reject) {
+    notifications.update(id, options, function(ok) {
       if (chrome.runtime.lastError || !ok) {
-        reject(new Error("Unable to update notification"));
+        reject(new Error('Unable to update notification'));
         return;
       }
-      console.log("Updated id: ", id);
+      console.info('Updated id: ', id);
       resolve(ok);
       return;
     });
@@ -44,10 +52,10 @@ function update(id, options) {
 }
 
 function clear(id) {
-  return new Promise(function (resolve, reject) {
-    notifications.clear(id, function (ok) {
+  return new Promise(function(resolve, reject) {
+    notifications.clear(id, function(ok) {
       if (chrome.runtime.lastError || !ok) {
-        reject(new Error("Unable to clear notification"));
+        reject(new Error('Unable to clear notification'));
         return;
       }
       resolve(ok);
@@ -57,8 +65,8 @@ function clear(id) {
 }
 
 function getAll() {
-  return new Promise(function (resolve, reject) {
-    notifications.getAll(function (ids) {
+  return new Promise(function(resolve, reject) {
+    notifications.getAll(function(ids) {
       if (chrome.runtime.lastError) {
         reject(new Error(chrome.runtime.lastError.message));
         return;
@@ -66,80 +74,86 @@ function getAll() {
 
       if (ids === undefined) {
         resolve([]);
-        return
+        return;
       }
 
-      var id_list = Object.keys(ids);
-      resolve(id_list);
+      const idList = Object.keys(ids);
+      resolve(idList);
     });
   });
 }
 
 function clearAll() {
-  return getAll().then(function (ids) {
-    var idPromises = ids.map(function (id) { return clear(id); });
+  return getAll().then(function(ids) {
+    const idPromises = ids.map(function(id) {
+      return clear(id);
+    });
     return Promise.all(idPromises);
   });
 }
 
 function succeedTest(testName) {
-  return function () {
+  return function() {
     return clearAll().then(
-        function () { chrome.test.succeed(testName); },
-        function (error) {
-          console.log("Unknown error in clearAll: " +
-              JSON.stringify(arguments));
+        function() {
+          chrome.test.succeed(testName);
+        },
+        function(error) {
+          console.info(
+              'Unknown error in clearAll: ' + JSON.stringify(arguments));
         });
   };
 }
 
 function failTest(testName) {
-  return function () {
+  return function() {
     return clearAll().then(
-        function () { chrome.test.fail(testName); },
-        function (error) {
-          console.log("Unknown error in clearAll: " +
-              JSON.stringify(error.message));
+        function() {
+          chrome.test.fail(testName);
+        },
+        function(error) {
+          console.info(
+              'Unknown error in clearAll: ' + JSON.stringify(error.message));
         });
   };
 }
 
 function testPartialUpdate() {
-  var testName = "testPartialUpdate";
-  console.log("Starting " + testName);
-  var succeed = succeedTest(testName);
-  var fail = failTest(testName);
+  const testName = 'testPartialUpdate';
+  console.info(`Starting ${testName}`);
+  const succeed = succeedTest(testName);
+  const fail = failTest(testName);
 
-  const red_dot = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA" +
-      "AAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO" +
-      "9TXL0Y4OHwAAAABJRU5ErkJggg==";
+  const redDot = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAUA' +
+      'AAAFCAYAAACNbyblAAAAHElEQVQI12P4//8/w38GIAXDIBKE0DHxgljNBAAO' +
+      '9TXL0Y4OHwAAAABJRU5ErkJggg==';
 
-  var basicNotificationOptions = {
-    type: "basic",
-    title: "Basic title",
-    message: "Basic message",
-    iconUrl: red_dot,
+  const basicNotificationOptions = {
+    type: 'basic',
+    title: 'Basic title',
+    message: 'Basic message',
+    iconUrl: redDot,
     silent: false,
-    buttons: [{title: "Button"}]
+    buttons: [{title: 'Button'}],
   };
 
   // Create a notification.
-  create("testId", basicNotificationOptions)
+  create('testId', basicNotificationOptions)
       // Then update a few items
       .then(function() {
-        return update("testId", {
-          title: "Changed!",
-          message: "Too late! The show ended yesterday",
-          silent: true
+        return update('testId', {
+          title: 'Changed!',
+          message: 'Too late! The show ended yesterday',
+          silent: true,
         });
       })
       // Then update a few more items
       .then(function() {
-        return update("testId", {priority: 2, buttons: [{title: "NewButton"}]});
+        return update('testId', {priority: 2, buttons: [{title: 'NewButton'}]});
       })
       // The test will continue in C++, checking that all the updates "took"
       .then(chrome.test.succeed, chrome.test.fail);
-};
+}
 
 
 chrome.test.runTests([testPartialUpdate]);

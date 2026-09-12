@@ -4,12 +4,15 @@
 
 #include "ash/display/cursor_window_controller.h"
 
+#include <optional>
+
+#include "ash/accessibility/accessibility_controller.h"
 #include "ash/accessibility/magnifier/fullscreen_magnifier_controller.h"
 #include "ash/capture_mode/capture_mode_camera_controller.h"
 #include "ash/capture_mode/capture_mode_controller.h"
 #include "ash/capture_mode/capture_mode_session.h"
-#include "ash/color_enhancement/color_enhancement_controller.h"
 #include "ash/constants/ash_constants.h"
+#include "ash/constants/ash_features.h"
 #include "ash/constants/ash_pref_names.h"
 #include "ash/constants/ash_switches.h"
 #include "ash/curtain/security_curtain_controller.h"
@@ -20,14 +23,17 @@
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "base/command_line.h"
-#include "base/metrics/histogram_macros.h"
 #include "components/prefs/pref_service.h"
+#include "third_party/skia/include/core/SkColor.h"
+#include "ui/accessibility/accessibility_features.h"
 #include "ui/aura/env.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_delegate.h"
 #include "ui/base/hit_test.h"
-#include "ui/base/layout.h"
 #include "ui/base/resource/resource_bundle.h"
+#include "ui/base/resource/resource_scale_factor.h"
+#include "ui/compositor/layer_solid_color.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/compositor/paint_recorder.h"
 #include "ui/display/display.h"
 #include "ui/display/manager/display_manager.h"
@@ -37,18 +43,139 @@
 #include "ui/gfx/geometry/point_conversions.h"
 #include "ui/gfx/image/image_skia.h"
 #include "ui/gfx/image/image_skia_operations.h"
+#include "ui/gfx/image/image_skia_source.h"
 #include "ui/views/widget/widget.h"
+#include "ui/views/widget/widget_utils.h"
+#include "ui/wm/core/coordinate_conversion.h"
 #include "ui/wm/core/cursor_util.h"
 
 namespace ash {
 
 namespace {
 
-const int kMinLargeCursorSize = 25;
-const int kMaxLargeCursorSize = 64;
-const int kWideDisplayThreshold = 2400;
+// A color used to set the cursor fill. Assume that no pixels exist in this
+// color in the original cursor. If this is changed, checking logic in
+// `SeparateCursorBitmap` must also be updated.
+constexpr SkColor kFillColorForInvert = SK_ColorMAGENTA;
+
+std::vector<gfx::ImageSkia> GetCursorImages(
+    ui::CursorSize cursor_size,
+    ui::mojom::CursorType type,
+    int target_cursor_size_in_dip,
+    float dsf,
+    SkColor cursor_color,
+    std::optional<SkColor> outline_color,
+    gfx::Point* out_hotspot_in_physical_pixels) {
+  std::vector<gfx::ImageSkia> images;
+  // Rotation is handled in viz (for aura::Window based cursor)
+  // or fast ink canvas (for fast ink based cursor), so don't do any
+  // rotation here.
+  std::optional<ui::CursorData> cursor_data = wm::GetCursorData(
+      type, dsf,
+      cursor_size == ui::CursorSize::kLarge
+          ? std::make_optional(target_cursor_size_in_dip * dsf)
+          : std::nullopt,
+      display::Display::ROTATE_0, cursor_color, outline_color);
+  if (!cursor_data) {
+    return images;
+  }
+  *out_hotspot_in_physical_pixels = cursor_data->hotspot;
+  for (const auto& bitmap : cursor_data->bitmaps) {
+    images.push_back(gfx::ImageSkia::CreateFromBitmap(bitmap, dsf));
+  }
+  return images;
+}
+
+// Separates a cursor bitmap into a mask for backdrop inversion and an overlay
+// for normal rendering. This function assumes the "fill" area of the cursor
+// has been chroma-keyed to SK_ColorMAGENTA.
+void SeparateCursorBitmap(const SkBitmap& original,
+                          SkBitmap* mask,
+                          SkBitmap* overlay) {
+  mask->allocPixels(original.info());
+  mask->eraseColor(SK_ColorTRANSPARENT);
+  overlay->allocPixels(original.info());
+  overlay->eraseColor(SK_ColorTRANSPARENT);
+
+  for (int y = 0; y < original.height(); ++y) {
+    for (int x = 0; x < original.width(); ++x) {
+      SkColor color = original.getColor(x, y);
+      int alpha = SkColorGetA(color);
+      if (alpha == 0) {
+        continue;
+      }
+
+      int r = SkColorGetR(color);
+      int g = SkColorGetG(color);
+      int b = SkColorGetB(color);
+
+      // Magenta weight calculation: we look for pixels where red and blue are
+      // high and green is low.
+      int magenta_amount = std::clamp(std::min(r, b) - g, 0, 255);
+      float w = magenta_amount / 255.0f;
+
+      int mask_alpha = std::clamp(static_cast<int>(alpha * w), 0, 255);
+      int overlay_alpha =
+          std::clamp(static_cast<int>(alpha * (1.0f - w)), 0, 255);
+
+      // If the pixel is partially or fully magenta, it contributes to the mask.
+      if (mask_alpha > 0) {
+        *mask->getAddr32(x, y) = SkPreMultiplyARGB(mask_alpha, 0, 0, 0);
+      }
+
+      // If the pixel has a non-magenta component (like an outline or a colored
+      // accent), we keep it in the overlay. We mathematically un-blend the
+      // flattened RGB values to strip away the magenta and recover the exact
+      // original outline colors.
+      if (overlay_alpha > 0) {
+        int r_orig = 0, g_orig = 0, b_orig = 0;
+        if (w < 1.0f) {
+          float inv_w = 1.0f - w;
+          r_orig =
+              std::clamp(static_cast<int>((r - w * 255.0f) / inv_w), 0, 255);
+          g_orig = std::clamp(static_cast<int>(g / inv_w), 0, 255);
+          b_orig =
+              std::clamp(static_cast<int>((b - w * 255.0f) / inv_w), 0, 255);
+        }
+        *overlay->getAddr32(x, y) =
+            SkPreMultiplyARGB(overlay_alpha, r_orig, g_orig, b_orig);
+      }
+    }
+  }
+}
 
 }  // namespace
+
+class CursorLayerDelegate : public ui::LayerDelegate {
+ public:
+  CursorLayerDelegate() {}
+  CursorLayerDelegate(const CursorLayerDelegate&) = delete;
+  CursorLayerDelegate& operator=(const CursorLayerDelegate&) = delete;
+  ~CursorLayerDelegate() override {}
+
+  void set_images(const std::vector<gfx::ImageSkia>& images) {
+    images_ = images;
+  }
+  void set_size(const gfx::Size& size) { size_ = size; }
+  void set_paint_image_index(int index) { paint_image_index_ = index; }
+
+  // ui::LayerDelegate:
+  void OnPaintLayer(const ui::PaintContext& context) override {
+    if (images_.empty() ||
+        paint_image_index_ >= static_cast<int>(images_.size())) {
+      return;
+    }
+    ui::PaintRecorder recorder(context, size_);
+    recorder.canvas()->DrawImageInt(images_[paint_image_index_], 0, 0);
+  }
+  void OnDeviceScaleFactorChanged(float old_device_scale_factor,
+                                  float new_device_scale_factor) override {}
+
+ private:
+  std::vector<gfx::ImageSkia> images_;
+  int paint_image_index_ = 0;
+  gfx::Size size_;
+};
 
 class CursorWindowDelegate : public aura::WindowDelegate {
  public:
@@ -61,11 +188,16 @@ class CursorWindowDelegate : public aura::WindowDelegate {
 
   // aura::WindowDelegate overrides:
   gfx::Size GetMinimumSize() const override { return size_; }
-  gfx::Size GetMaximumSize() const override { return size_; }
+  std::optional<gfx::Size> GetMaximumSize() const override {
+    if (size_.IsZero()) {
+      return std::nullopt;
+    }
+    return size_;
+  }
   void OnBoundsChanged(const gfx::Rect& old_bounds,
                        const gfx::Rect& new_bounds) override {}
   gfx::NativeCursor GetCursor(const gfx::Point& point) override {
-    return gfx::kNullCursor;
+    return gfx::NativeCursor{};
   }
   int GetNonClientComponent(const gfx::Point& point) const override {
     return HTNOWHERE;
@@ -78,9 +210,13 @@ class CursorWindowDelegate : public aura::WindowDelegate {
   bool CanFocus() override { return false; }
   void OnCaptureLost() override {}
   void OnPaint(const ui::PaintContext& context) override {
+    if (use_inverted_cursor_) {
+      // We will use CursorLayerDelegates to draw instead.
+      return;
+    }
     // No need to cache the output here, the CursorWindow is not invalidated.
     ui::PaintRecorder recorder(context, size_);
-    recorder.canvas()->DrawImageInt(cursor_image_, 0, 0);
+    recorder.canvas()->DrawImageInt(cursor_images_[paint_image_index_], 0, 0);
   }
   void OnDeviceScaleFactorChanged(float old_device_scale_factor,
                                   float new_device_scale_factor) override {}
@@ -90,28 +226,181 @@ class CursorWindowDelegate : public aura::WindowDelegate {
   bool HasHitTestMask() const override { return false; }
   void GetHitTestMask(SkPath* mask) const override {}
 
+  // Updates cursor animation. If cursor_images_ has more than 1 image,
+  // start the timer to schedule frame painting.
+  void UpdateAnimation() {
+    paint_image_index_ = 0;
+    if (!cursor_window_) {
+      if (animated_cursor_timer_.IsRunning()) {
+        animated_cursor_timer_.Stop();
+      }
+      return;
+    }
+
+    if (use_inverted_cursor_) {
+      mask_delegate_.set_paint_image_index(paint_image_index_);
+      overlay_delegate_.set_paint_image_index(paint_image_index_);
+      if (mask_layer_) {
+        mask_layer_->SchedulePaint(gfx::Rect(size_));
+      }
+      if (overlay_layer_) {
+        overlay_layer_->SchedulePaint(gfx::Rect(size_));
+      }
+    }
+
+    if (cursor_images_.size() == 1) {
+      animated_cursor_timer_.Stop();
+    } else if (cursor_images_.size() > 1) {
+      animated_cursor_timer_.Start(
+          FROM_HERE, base::Milliseconds(16),
+          base::BindRepeating(&CursorWindowDelegate::AdvanceFrame,
+                              base::Unretained(this)));
+    }
+  }
+
+  // Schedules to paint the next frame.
+  void AdvanceFrame() {
+    paint_image_index_ = (paint_image_index_ + 1) % cursor_images_.size();
+
+    if (use_inverted_cursor_) {
+      mask_delegate_.set_paint_image_index(paint_image_index_);
+      overlay_delegate_.set_paint_image_index(paint_image_index_);
+      if (mask_layer_) {
+        mask_layer_->SchedulePaint(gfx::Rect(size_));
+      }
+      if (overlay_layer_) {
+        overlay_layer_->SchedulePaint(gfx::Rect(size_));
+      }
+    }
+
+    cursor_window_->SchedulePaintInRect(gfx::Rect(size_));
+  }
+
   // Sets the cursor image for the |display|'s scale factor.
-  void SetCursorImage(const gfx::Size& size, const gfx::ImageSkia& image) {
+  void SetCursorImage(const gfx::Size& size,
+                      const std::vector<gfx::ImageSkia>& images) {
     size_ = size;
-    cursor_image_ = image;
+    cursor_images_ = images;
+
+    if (use_inverted_cursor_) {
+      std::vector<gfx::ImageSkia> mask_images;
+      std::vector<gfx::ImageSkia> overlay_images;
+
+      for (const auto& image : images) {
+        const SkBitmap* bitmap = image.bitmap();
+        if (!bitmap) {
+          continue;
+        }
+        SkBitmap mask_bitmap, overlay_bitmap;
+        SeparateCursorBitmap(*bitmap, &mask_bitmap, &overlay_bitmap);
+        float scale = image.GetRepresentation(1.0f).scale();
+        mask_images.push_back(
+            gfx::ImageSkia::CreateFromBitmap(mask_bitmap, scale));
+        overlay_images.push_back(
+            gfx::ImageSkia::CreateFromBitmap(overlay_bitmap, scale));
+      }
+
+      mask_delegate_.set_images(mask_images);
+      mask_delegate_.set_size(size);
+      overlay_delegate_.set_images(overlay_images);
+      overlay_delegate_.set_size(size);
+
+      if (invert_layer_) {
+        invert_layer_->SetBounds(gfx::Rect(size_));
+      }
+      if (mask_layer_) {
+        mask_layer_->SetBounds(gfx::Rect(size_));
+      }
+      if (overlay_layer_) {
+        overlay_layer_->SetBounds(gfx::Rect(size_));
+      }
+    }
+
+    UpdateAnimation();
+  }
+
+  void SetCursorWindow(aura::Window* window) {
+    if (cursor_window_) {
+      if (invert_layer_) {
+        cursor_window_->layer()->Remove(invert_layer_.get());
+      }
+      if (overlay_layer_) {
+        cursor_window_->layer()->Remove(overlay_layer_.get());
+      }
+    }
+
+    cursor_window_ = window;
+
+    if (cursor_window_ && use_inverted_cursor_) {
+      invert_layer_ = std::make_unique<ui::LayerSolidColor>();
+      invert_layer_->SetColor(SkColors::kTransparent);
+      invert_layer_->SetBackgroundInverted(true);
+      invert_layer_->SetBounds(gfx::Rect(size_));
+
+      mask_layer_ = std::make_unique<ui::LayerTextured>();
+      mask_layer_->set_delegate(&mask_delegate_);
+      mask_layer_->SetFillsBoundsOpaquely(false);
+      mask_layer_->SetBounds(gfx::Rect(size_));
+      invert_layer_->SetMaskLayer(mask_layer_.get());
+
+      overlay_layer_ = std::make_unique<ui::LayerTextured>();
+      overlay_layer_->set_delegate(&overlay_delegate_);
+      overlay_layer_->SetFillsBoundsOpaquely(false);
+      overlay_layer_->SetBounds(gfx::Rect(size_));
+
+      cursor_window_->layer()->Add(invert_layer_.get());
+      cursor_window_->layer()->Add(overlay_layer_.get());
+
+    } else {
+      invert_layer_.reset();
+      mask_layer_.reset();
+      overlay_layer_.reset();
+    }
+
+    UpdateAnimation();
   }
 
   const gfx::Size& size() const { return size_; }
-  const gfx::ImageSkia& cursor_image() const { return cursor_image_; }
+  const std::vector<gfx::ImageSkia>& cursor_images() const {
+    return cursor_images_;
+  }
+
+  void set_use_inverted_cursor(bool use) {
+    if (use_inverted_cursor_ == use) {
+      return;
+    }
+    use_inverted_cursor_ = use;
+    if (cursor_window_) {
+      SetCursorWindow(cursor_window_);
+    }
+  }
 
  private:
-  gfx::ImageSkia cursor_image_;
+  std::vector<gfx::ImageSkia> cursor_images_;
+  int paint_image_index_ = 0;
+  raw_ptr<aura::Window> cursor_window_;
+  base::RepeatingTimer animated_cursor_timer_;
   gfx::Size size_;
+  bool use_inverted_cursor_ = false;
+
+  // A layer that inverts what is underneath itself.
+  std::unique_ptr<ui::LayerSolidColor> invert_layer_;
+
+  // A layer that masks the inversion to a certain shape.
+  std::unique_ptr<ui::LayerTextured> mask_layer_;
+
+  // An overlay to draw an outline or edges over the masked inversion layer.
+  std::unique_ptr<ui::LayerTextured> overlay_layer_;
+
+  CursorLayerDelegate mask_delegate_;
+  CursorLayerDelegate overlay_delegate_;
 };
 
 CursorWindowController::CursorWindowController()
-    : delegate_(new CursorWindowDelegate()),
-      is_cursor_motion_blur_enabled_(
-          base::CommandLine::ForCurrentProcess()->HasSwitch(
-              switches::kAshEnableCursorMotionBlur)) {}
+    : delegate_(new CursorWindowDelegate()) {}
 
 CursorWindowController::~CursorWindowController() {
-  SetContainer(NULL);
+  SetContainer(nullptr);
 }
 
 void CursorWindowController::AddObserver(Observer* observer) {
@@ -141,14 +430,33 @@ void CursorWindowController::SetLargeCursorSizeInDip(
 void CursorWindowController::SetCursorColor(SkColor cursor_color) {
   if (cursor_color_ == cursor_color)
     return;
+
   cursor_color_ = cursor_color;
+
+  // Reset cursor lottie animation cache when new color needs to be applied.
+  wm::ClearCursorAnimationCache();
+
   if (display_.is_valid())
     UpdateCursorImage();
 }
 
+void CursorWindowController::SetCursorInverted(bool inverted) {
+  if (is_inverted_ == inverted) {
+    return;
+  }
+
+  is_inverted_ = inverted;
+
+  // Reset cursor lottie animation cache when new color needs to be applied.
+  wm::ClearCursorAnimationCache();
+
+  UpdateCursorMode();
+}
+
 bool CursorWindowController::ShouldEnableCursorCompositing() {
-  if (is_cursor_motion_blur_enabled_)
+  if (::features::IsAccessibilityInvertedMouseCursorEnabled() && is_inverted_) {
     return true;
+  }
 
   if (base::CommandLine::ForCurrentProcess()->HasSwitch(
           switches::kForceShowCursor)) {
@@ -182,27 +490,7 @@ bool CursorWindowController::ShouldEnableCursorCompositing() {
     return true;
   }
 
-  // On specific CrOS devices (e.g. herobrine), driving a wide display requires
-  // more display hardware resources than a lower-resolution panel. If a wide
-  // display is connected as an external monitor, we can run out of hardware
-  // planes to display a separate cursor. As a result, we need to force the
-  // software cursor in this scenario.
-  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
-          switches::kSwCursorOnWideDisplays) &&
-      display_manager->num_connected_displays() > 1) {
-    for (const auto& display : display::Screen::GetScreen()->GetAllDisplays()) {
-      DCHECK(display.is_valid());
-      if (display.is_valid() &&
-          display.size().width() >= kWideDisplayThreshold) {
-        return true;
-      }
-    }
-  }
-
   if (shell->fullscreen_magnifier_controller()->IsEnabled())
-    return true;
-
-  if (cursor_color_ != kDefaultCursorColor)
     return true;
 
   PrefService* prefs = shell->session_controller()->GetActivePrefService();
@@ -212,28 +500,28 @@ bool CursorWindowController::ShouldEnableCursorCompositing() {
   }
 
   if (prefs->GetBoolean(prefs::kNightLightEnabled)) {
-    // All or some displays don't support setting a CRTC matrix, which means
-    // Night Light is using the composited color matrix, and hence software
+    // If the current display doesn't support setting a CRTC matrix,
+    // Night Light will be using the composited color matrix, and hence software
     // cursor should be used.
-    // TODO(afakhry): Instead of switching to the composited cursor on all
-    // displays if any of them don't support a CRTC matrix, we should provide
-    // the functionality to turn on the composited cursor on a per-display basis
-    // (i.e. use it only on the displays that don't support CRTC matrices).
-    const DisplayColorManager::DisplayCtmSupport displays_ctm_support =
-        shell->display_color_manager()->displays_ctm_support();
-    UMA_HISTOGRAM_ENUMERATION("Ash.NightLight.DisplayCrtcCtmSupport",
-                              displays_ctm_support);
-    if (displays_ctm_support != DisplayColorManager::DisplayCtmSupport::kAll)
+    if (!shell->display_color_manager()->HasColorCorrectionMatrix(
+            display_.id())) {
       return true;
+    }
   }
 
-  if (shell->color_enhancement_controller()
-          ->ShouldEnableCursorCompositingForSepia()) {
-    return true;
+  if (prefs->GetBoolean(prefs::kAccessibilityLargeCursorEnabled)) {
+    // If current display's cursor plane size (i.e. maximum cursor size) is
+    // larger than the large cursor size, then large cursor can be drawn
+    // using hardware plane. Otherwise, software compositing is needed
+    // for cursor.
+    if (gfx::ConvertSizeToDips(display_.maximum_cursor_size(),
+                               display_.device_scale_factor())
+            .height() < large_cursor_size_in_dip_) {
+      return true;
+    }
   }
 
-  return prefs->GetBoolean(prefs::kAccessibilityLargeCursorEnabled) ||
-         prefs->GetBoolean(prefs::kAccessibilityHighContrastEnabled) ||
+  return prefs->GetBoolean(prefs::kAccessibilityHighContrastEnabled) ||
          prefs->GetBoolean(prefs::kDockedMagnifierEnabled);
 }
 
@@ -244,6 +532,7 @@ void CursorWindowController::SetCursorCompositingEnabled(bool enabled) {
   is_cursor_compositing_enabled_ = enabled;
   if (display_.is_valid())
     UpdateCursorImage();
+
   UpdateContainer();
   for (auto& obs : observers_)
     obs.OnCursorCompositingStateChanged(is_cursor_compositing_enabled_);
@@ -251,7 +540,7 @@ void CursorWindowController::SetCursorCompositingEnabled(bool enabled) {
 
 void CursorWindowController::UpdateContainer() {
   if (is_cursor_compositing_enabled_) {
-    display::Screen* screen = display::Screen::GetScreen();
+    display::Screen* screen = display::Screen::Get();
     display::Display display =
         screen->GetDisplayNearestPoint(screen->GetCursorScreenPoint());
     DCHECK(display.is_valid());
@@ -265,9 +554,6 @@ void CursorWindowController::UpdateContainer() {
 }
 
 void CursorWindowController::SetDisplay(const display::Display& display) {
-  if (!is_cursor_compositing_enabled_)
-    return;
-
   // TODO(oshima): Do not update the composition cursor when crossing
   // display in unified desktop mode for now. crbug.com/517222.
   if (Shell::Get()->display_manager()->IsInUnifiedMode() &&
@@ -276,9 +562,23 @@ void CursorWindowController::SetDisplay(const display::Display& display) {
   }
 
   display_ = display;
+
+  Shell* shell = Shell::Get();
+  auto& managed_display_info =
+      shell->display_manager()->GetDisplayInfo(display_.id());
+  max_update_rate_ms_ =
+      (1000.f / managed_display_info.refresh_rate()) * 2.f / 3.f;
+
+  // Make sure next mouse event will update the cursor.
+  last_updated_.reset();
+
   aura::Window* root_window = Shell::GetRootWindowForDisplayId(display.id());
   if (!root_window)
     return;
+
+  if (!is_cursor_compositing_enabled_) {
+    return;
+  }
 
   SetContainer(RootWindowController::ForWindow(root_window)
                    ->GetContainer(kShellWindowId_MouseCursorContainer));
@@ -289,21 +589,53 @@ void CursorWindowController::SetDisplay(const display::Display& display) {
 
 void CursorWindowController::OnDockedMagnifierResizingStateChanged(
     bool is_active) {
+  if (!container_) {
+    return;
+  }
   const int container_id = is_active ? kShellWindowId_DockedMagnifierContainer
                                      : kShellWindowId_MouseCursorContainer;
-  SetContainer(
-      RootWindowController::ForWindow(container_)->GetContainer(container_id));
+  SetContainer(RootWindowController::ForWindow(container_.get())
+                   ->GetContainer(container_id));
 }
 
-void CursorWindowController::UpdateLocation() {
-  if (!cursor_window_)
+void CursorWindowController::OnFullscreenMagnifierEnabled(bool enabled) {
+  UpdateCursorMode();
+}
+
+void CursorWindowController::UpdateLocation(bool throttle) {
+  // Throttle cursor updates.
+  if (throttle) {
+    auto now = base::TimeTicks::Now();
+    if (last_updated_ &&
+        (now - *last_updated_).InMilliseconds() < max_update_rate_ms_) {
+      return;
+    }
+    last_updated_ = now;
+  }
+
+  if (cursor_view_widget_) {
+    gfx::Point cursor_location =
+        aura::Env::GetInstance()->last_mouse_location();
+    aura::Window* root_window = views::GetRootWindow(cursor_view_widget_.get());
+    // Convert cursor location point in screen coordinate to root window
+    // coordinate.
+    wm::ConvertPointFromScreen(root_window, &cursor_location);
+    static_cast<CursorView*>(cursor_view_widget_->GetContentsView())
+        ->SetLocation(cursor_location);
     return;
-  gfx::Point point = aura::Env::GetInstance()->last_mouse_location();
-  point.Offset(-bounds_in_screen_.x(), -bounds_in_screen_.y());
-  point.Offset(-hot_point_.x(), -hot_point_.y());
-  gfx::Rect bounds = cursor_window_->bounds();
-  bounds.set_origin(point);
-  cursor_window_->SetBounds(bounds);
+  }
+  if (cursor_window_) {
+    gfx::Point point = aura::Env::GetInstance()->last_mouse_location();
+    // Calculate the new origin.
+    // new_origin.x() + bounds_in_screen_.x() + hot_point_.x() = x value of
+    // the mouse location in the screen coordinates.
+    point.Offset(-bounds_in_screen_.x(), -bounds_in_screen_.y());
+    point.Offset(-hot_point_.x(), -hot_point_.y());
+    gfx::Rect bounds = cursor_window_->bounds();
+    bounds.set_origin(point);
+    cursor_window_->SetBounds(bounds);
+    return;
+  }
 }
 
 void CursorWindowController::SetCursor(gfx::NativeCursor cursor) {
@@ -324,45 +656,77 @@ void CursorWindowController::SetVisibility(bool visible) {
   UpdateCursorVisibility();
 }
 
+void CursorWindowController::OnWindowBoundsChanged(
+    aura::Window* window,
+    const gfx::Rect& old_bounds,
+    const gfx::Rect& new_bounds,
+    ui::PropertyChangeReason reason) {
+  DCHECK_EQ(container_.get(), window);
+
+  if (cursor_view_widget_) {
+    UpdateCursorView();
+  }
+}
+
+void CursorWindowController::OnWindowDestroying(aura::Window* window) {
+  DCHECK_EQ(container_.get(), window);
+  SetContainer(nullptr);
+  scoped_container_observer_.Reset();
+}
+
 const aura::Window* CursorWindowController::GetContainerForTest() const {
-  return container_;
+  return container_.get();
 }
 
 SkColor CursorWindowController::GetCursorColorForTest() const {
   return cursor_color_;
 }
 
-gfx::Rect CursorWindowController::GetBoundsForTest() const {
-  return cursor_window_->GetBoundsInScreen();
+bool CursorWindowController::IsCursorInvertedForTest() const {
+  return is_inverted_;
+}
+
+gfx::Rect CursorWindowController::GetCursorBoundsInScreenForTest() const {
+  if (cursor_view_widget_) {
+    gfx::Rect cursor_rect =
+        static_cast<CursorView*>(cursor_view_widget_->GetContentsView())
+            ->get_cursor_rect_for_test();  // IN-TEST
+    // Convert cursor rect in root window to screen coordinate.
+    wm::ConvertRectToScreen(views::GetRootWindow(cursor_view_widget_.get()),
+                            &cursor_rect);
+    return cursor_rect;
+  }
+  return cursor_window_ ? cursor_window_->GetBoundsInScreen() : gfx::Rect();
+}
+
+const aura::Window* CursorWindowController::GetCursorHostWindowForTest() const {
+  if (cursor_view_widget_) {
+    return cursor_view_widget_->GetNativeWindow();
+  }
+  return cursor_window_ ? cursor_window_.get() : nullptr;
 }
 
 void CursorWindowController::SetContainer(aura::Window* container) {
-  if (container_ == container)
+  if (container_ && container_.get() == container) {
     return;
+  }
+
+  scoped_container_observer_.Reset();
+
   container_ = container;
   if (!container) {
+    delegate_->SetCursorWindow(nullptr);
     cursor_window_.reset();
     cursor_view_widget_.reset();
     return;
   }
 
+  scoped_container_observer_.Observe(container_.get());
+
   bounds_in_screen_ = display_.bounds();
   rotation_ = display_.rotation();
 
-  if (is_cursor_motion_blur_enabled_) {
-    UpdateCursorView();
-  } else {
-    // Reusing the window does not work when the display is disconnected.
-    // Just creates a new one instead. crbug.com/384218.
-    cursor_window_ = std::make_unique<aura::Window>(delegate_.get());
-    cursor_window_->SetTransparent(true);
-    cursor_window_->Init(ui::LAYER_TEXTURED);
-    cursor_window_->SetEventTargetingPolicy(aura::EventTargetingPolicy::kNone);
-    cursor_window_->set_owned_by_parent(false);
-    // Call UpdateCursorImage() to figure out |cursor_window_|'s desired size.
-    UpdateCursorImage();
-    container->AddChild(cursor_window_.get());
-  }
+  UpdateCursorMode();
   UpdateCursorVisibility();
   UpdateLocation();
 }
@@ -370,76 +734,99 @@ void CursorWindowController::SetContainer(aura::Window* container) {
 void CursorWindowController::SetBoundsInScreenAndRotation(
     const gfx::Rect& bounds,
     display::Display::Rotation rotation) {
-  if (bounds == bounds_in_screen_ && rotation == rotation_)
+  if (bounds == bounds_in_screen_ && rotation == rotation_) {
     return;
+  }
   bounds_in_screen_ = bounds;
   rotation_ = rotation;
-  if (cursor_view_widget_)
+  if (cursor_view_widget_) {
     UpdateCursorView();
+  }
   UpdateLocation();
 }
 
 void CursorWindowController::UpdateCursorImage() {
-  if (!is_cursor_compositing_enabled_)
+  if (!is_cursor_compositing_enabled_) {
     return;
+  }
 
-  // Use the original device scale factor instead of the display's, which
-  // might have been adjusted for the UI scale.
-  const float original_scale = Shell::Get()
-                                   ->display_manager()
-                                   ->GetDisplayInfo(display_.id())
-                                   .device_scale_factor();
-  // And use the nearest resource scale factor.
-  float cursor_scale = ui::GetScaleForResourceScaleFactor(
-      ui::GetSupportedResourceScaleFactor(original_scale));
-
-  gfx::ImageSkia image;
+  std::vector<gfx::ImageSkia> images;
   gfx::Point hot_point_in_physical_pixels;
+
+  // Only use inverted mode if no other cursor color was set.
+  bool use_inverted =
+      ::features::IsAccessibilityInvertedMouseCursorEnabled() && is_inverted_;
+  SkColor fill_color = use_inverted ? kFillColorForInvert : cursor_color_;
+
   if (cursor_.type() == ui::mojom::CursorType::kCustom) {
-    const SkBitmap& bitmap = cursor_.custom_bitmap();
-    if (bitmap.isNull())
-      return;
-    image = gfx::ImageSkia::CreateFrom1xBitmap(bitmap);
-    hot_point_in_physical_pixels = cursor_.custom_hotspot();
-  } else {
-    int resource_id;
-    if (!wm::GetCursorDataFor(cursor_size_, cursor_.type(), cursor_scale,
-                              &resource_id, &hot_point_in_physical_pixels)) {
+    // Custom cursor.
+    SkBitmap bitmap = cursor_.custom_bitmap();
+    gfx::Point hotspot = cursor_.custom_hotspot();
+    if (bitmap.isNull()) {
       return;
     }
-    image =
-        *ui::ResourceBundle::GetSharedInstance().GetImageSkiaNamed(resource_id);
+    float cursor_scale = cursor_.image_scale_factor();
+
+    // Custom cursor's bitmap is already rotated. Revert the rotation because
+    // software cursor's rotation is handled by viz.
+    // TODO(b/320398214): Custom cursor's scaling and rotation
+    // should be handled in ash.
+    const display::Display::Rotation inverted_rotation =
+        static_cast<display::Display::Rotation>(
+            (4 - static_cast<int>(display_.rotation())) % 4);
+    wm::ScaleAndRotateCursorBitmapAndHotpoint(1.0f, inverted_rotation, &bitmap,
+                                              &hotspot);
+    images.push_back(gfx::ImageSkia::CreateFromBitmap(
+        wm::GetColorAdjustedBitmap(bitmap, fill_color), cursor_scale));
+    hot_point_in_physical_pixels = hotspot;
+
+    // Use `gfx::ToFlooredPoint` as `ImageSkiaRep::GetWidth` is implemented as
+    // `return static_cast<int>(pixel_width() / scale());`.
+    hot_point_ = gfx::ToFlooredPoint(
+        gfx::ConvertPointToDips(hot_point_in_physical_pixels, cursor_scale));
+
+    // Rescale cursor size. This is used with the combination of accessibility
+    // large cursor. We don't need to care about the case where cursor
+    // compositing is disabled as we always use cursor compositing if
+    // accessibility large cursor is enabled.
+    if (cursor_size_ == ui::CursorSize::kLarge &&
+        large_cursor_size_in_dip_ != images[0].size().height()) {
+      const float rescale = static_cast<float>(large_cursor_size_in_dip_) /
+                            static_cast<float>(images[0].size().height());
+      hot_point_ = gfx::ScaleToCeiledPoint(hot_point_, rescale);
+      for (size_t i = 0; i < images.size(); ++i) {
+        images[i] = gfx::ImageSkiaOperations::CreateResizedImage(
+            images[i], skia::ImageOperations::ResizeMethod::RESIZE_BEST,
+            gfx::ScaleToCeiledSize(images[i].size(), rescale));
+      }
+    }
+  } else {
+    // Standard cursor.
+    const float dsf = display_.device_scale_factor();
+
+    std::optional<SkColor> outline_color;
+    if (use_inverted) {
+      outline_color = SK_ColorWHITE;
+    }
+
+    images = GetCursorImages(cursor_size_, cursor_.type(),
+                             large_cursor_size_in_dip_, dsf, fill_color,
+                             outline_color, &hot_point_in_physical_pixels);
+    if (images.empty()) {
+      return;
+    }
+    hot_point_ = gfx::ToFlooredPoint(
+        gfx::ConvertPointToDips(hot_point_in_physical_pixels, dsf));
   }
 
-  gfx::ImageSkia resized = image;
+  delegate_->set_use_inverted_cursor(use_inverted);
 
-  // Rescale cursor size. This is used with the combination of accessibility
-  // large cursor. We don't need to care about the case where cursor
-  // compositing is disabled as we always use cursor compositing if
-  // accessibility large cursor is enabled.
-  if (cursor_size_ == ui::CursorSize::kLarge &&
-      large_cursor_size_in_dip_ != image.size().width()) {
-    float rescale = static_cast<float>(large_cursor_size_in_dip_) /
-                    static_cast<float>(image.size().width());
-    resized = gfx::ImageSkiaOperations::CreateResizedImage(
-        image, skia::ImageOperations::ResizeMethod::RESIZE_GOOD,
-        gfx::ScaleToCeiledSize(image.size(), rescale));
-    hot_point_in_physical_pixels =
-        gfx::ScaleToCeiledPoint(hot_point_in_physical_pixels, rescale);
-  }
-
-  const gfx::ImageSkiaRep& image_rep = resized.GetRepresentation(cursor_scale);
-  delegate_->SetCursorImage(resized.size(),
-                            gfx::ImageSkia::CreateFromBitmap(
-                                GetAdjustedBitmap(image_rep), cursor_scale));
-  // TODO(danakj): Should this be rounded? Or kept as a floating point?
-  hot_point_ = gfx::ToFlooredPoint(
-      gfx::ConvertPointToDips(hot_point_in_physical_pixels, cursor_scale));
+  delegate_->SetCursorImage(images[0].size(), images);
 
   if (cursor_view_widget_) {
-    static_cast<cursor::CursorView*>(cursor_view_widget_->GetContentsView())
-        ->SetCursorImage(delegate_->cursor_image(), delegate_->size(),
-                         hot_point_);
+    static_cast<CursorView*>(cursor_view_widget_->GetContentsView())
+        ->SetCursorImages(delegate_->cursor_images(), delegate_->size(),
+                          hot_point_);
   }
   if (cursor_window_) {
     cursor_window_->SetBounds(gfx::Rect(delegate_->size()));
@@ -465,61 +852,67 @@ void CursorWindowController::UpdateCursorVisibility() {
 }
 
 void CursorWindowController::UpdateCursorView() {
-  cursor_view_widget_ = cursor::CursorView::Create(
-      aura::Env::GetInstance()->last_mouse_location(),
-      is_cursor_motion_blur_enabled_, container_);
+  // Return if there is existing |cursor_view_widget_| and the container's size
+  // is not updated yet.
+  if (cursor_view_widget_ &&
+      container_->GetBoundsInRootWindow().size() != bounds_in_screen_.size()) {
+    return;
+  }
+
+  cursor_view_widget_ = CursorView::Create(
+      aura::Env::GetInstance()->last_mouse_location(), container_.get());
   UpdateCursorImage();
 }
 
-const gfx::ImageSkia& CursorWindowController::GetCursorImageForTest() const {
-  return delegate_->cursor_image();
+void CursorWindowController::UpdateCursorWindow() {
+  delegate_->SetCursorWindow(nullptr);
+  // Reusing the window does not work when the display is disconnected.
+  // Just creates a new one instead. crbug.com/384218.
+  cursor_window_ = std::make_unique<aura::Window>(delegate_.get());
+  cursor_window_->Init(ui::LAYER_TEXTURED);
+  cursor_window_->SetTransparent(true);
+  cursor_window_->SetEventTargetingPolicy(aura::EventTargetingPolicy::kNone);
+  cursor_window_->set_owned_by_parent(false);
+  delegate_->SetCursorWindow(cursor_window_.get());
+  // Call UpdateCursorImage() to figure out |cursor_window_|'s desired size.
+  UpdateCursorImage();
+  container_->AddChild(cursor_window_.get());
 }
 
-SkBitmap CursorWindowController::GetAdjustedBitmap(
-    const gfx::ImageSkiaRep& image_rep) const {
-  SkBitmap bitmap = image_rep.GetBitmap();
-  if (cursor_color_ == kDefaultCursorColor)
-    return bitmap;
-  // Recolor the black and greyscale parts of the image based on
-  // cursor_color_. Do not recolor pure white or tinted portions of the image,
-  // this ensures we do not impact the colored portions of cursors or the
-  // transition between the colored portion and white outline.
-  // TODO(crbug.com/1085442): Programmatically find a way to recolor the white
-  // parts in order to draw a black outline, but without impacting cursors
-  // like noDrop which contained tinted portions. Or, add new assets with
-  // black and white inverted for easier re-coloring.
-  SkBitmap recolored;
-  recolored.allocN32Pixels(bitmap.width(), bitmap.height());
-  recolored.eraseARGB(0, 0, 0, 0);
-  SkCanvas canvas(recolored);
-  canvas.drawImage(bitmap.asImage(), 0, 0);
-  color_utils::HSL cursor_hsl;
-  color_utils::SkColorToHSL(cursor_color_, &cursor_hsl);
-  for (int y = 0; y < bitmap.height(); ++y) {
-    for (int x = 0; x < bitmap.width(); ++x) {
-      SkColor color = bitmap.getColor(x, y);
-      // If the alpha is lower than 1, it's transparent, skip it.
-      if (SkColorGetA(color) < 1)
-        continue;
-      // Convert to HSL: We want to change the hue and saturation, and
-      // map the lightness from 0-100 to cursor_hsl.l-100. This means that
-      // things which were black (l=0) become the cursor color lightness, and
-      // things which were white (l=100) stay white.
-      color_utils::HSL hsl;
-      color_utils::SkColorToHSL(color, &hsl);
-      // If it has color, do not change it.
-      if (hsl.s > 0.01)
-        continue;
-      color_utils::HSL result;
-      result.h = cursor_hsl.h;
-      result.s = cursor_hsl.s;
-      result.l = hsl.l * (1 - cursor_hsl.l) + cursor_hsl.l;
-      SkPaint paint;
-      paint.setColor(color_utils::HSLToSkColor(result, SkColorGetA(color)));
-      canvas.drawRect(SkRect::MakeXYWH(x, y, 1, 1), paint);
-    }
+const gfx::ImageSkia& CursorWindowController::GetCursorImageForTest() const {
+  return delegate_->cursor_images()[0];
+}
+
+bool CursorWindowController::ShouldUseFastInk() const {
+  // If inverted cursor is enabled, we want to use the aura::Window path to
+  // support the inverted cursor feature.
+  if (::features::IsAccessibilityInvertedMouseCursorEnabled() && is_inverted_) {
+    return false;
   }
-  return recolored;
+
+  return !Shell::Get()->fullscreen_magnifier_controller()->IsEnabled();
+}
+
+void CursorWindowController::UpdateCursorMode() {
+  if (!container_) {
+    return;
+  }
+
+  if (ShouldUseFastInk()) {
+    delegate_->SetCursorWindow(nullptr);
+    cursor_window_.reset();
+    UpdateCursorView();
+  } else {
+    cursor_view_widget_.reset();
+    UpdateCursorWindow();
+  }
+}
+
+void CursorWindowController::SeparateCursorBitmapForTest(  // IN-TEST
+    const SkBitmap& original,
+    SkBitmap* mask,
+    SkBitmap* overlay) const {
+  SeparateCursorBitmap(original, mask, overlay);
 }
 
 }  // namespace ash

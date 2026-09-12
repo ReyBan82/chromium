@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   const {page, session} = await testRunner.startBlank(
       `Tests that browser.Target.setAutoAttach() attaches to pages opened by click on noopener link.`);
 
@@ -17,7 +17,8 @@
     const attachedEvent = await attachedEventPromise;
     testRunner.log('Attached to new window');
 
-    const popupSession = new TestRunner.Session(testRunner, attachedEvent.params.sessionId);
+    const popupSession =
+        testRunner.createSessionFor(attachedEvent.params.sessionId);
     const dp = popupSession.protocol;
     await Promise.all([
       dp.Emulation.setUserAgentOverride({ userAgent: 'Overridden value' }),

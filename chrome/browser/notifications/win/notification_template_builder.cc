@@ -6,25 +6,23 @@
 
 #include <algorithm>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/files/file_path.h"
-#include "base/i18n/time_formatting.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "chrome/browser/notifications/win/notification_launch_id.h"
-#include "chrome/common/chrome_features.h"
 #include "chrome/common/notifications/notification_image_retainer.h"
-#include "chrome/grit/chromium_strings.h"
-#include "chrome/grit/generated_resources.h"
+#include "chrome/grit/branded_strings.h"
 #include "components/url_formatter/elide_url.h"
 #include "third_party/libxml/chromium/xml_writer.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/gfx/image/image_skia.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/strings/grit/ui_strings.h"
 #include "url/gurl.h"
@@ -51,8 +49,6 @@ const char kBindingElementTemplateAttribute[] = "template";
 const char kContent[] = "content";
 const char kContextMenu[] = "contextMenu";
 const char kCritical[] = "Critical";
-const char kDuration[] = "duration";
-const char kDurationLong[] = "long";
 const char kForeground[] = "foreground";
 const char kHero[] = "hero";
 const char kHintButtonStyle[] = "hint-buttonStyle";
@@ -115,14 +111,9 @@ void StartToastElement(XmlWriter* xml_writer,
     xml_writer->AddAttribute(kScenario, kIncomingCall);
     xml_writer->AddAttribute(kUseButtonStyle, kTrue);
   } else if (notification.never_timeout()) {
-    if (base::FeatureList::IsEnabled(
-            features::kNotificationDurationLongForRequireInteraction)) {
-      xml_writer->AddAttribute(kDuration, kDurationLong);
-    } else {
-      // Note: If the notification doesn't include a button, then Windows will
-      // ignore the Reminder flag. See EnsureReminderHasButton below.
-      xml_writer->AddAttribute(kScenario, kReminder);
-    }
+    // Note: If the notification doesn't include a button, then Windows will
+    // ignore the Reminder flag. See EnsureReminderHasButton below.
+    xml_writer->AddAttribute(kScenario, kReminder);
   }
 
   if (notification.timestamp().is_null())
@@ -130,11 +121,10 @@ void StartToastElement(XmlWriter* xml_writer,
 
   base::Time::Exploded exploded;
   notification.timestamp().UTCExplode(&exploded);
-  xml_writer->AddAttribute(
-      kToastElementDisplayTimestamp,
-      base::StringPrintf("%04d-%02d-%02dT%02d:%02d:%02dZ", exploded.year,
-                         exploded.month, exploded.day_of_month, exploded.hour,
-                         exploded.minute, exploded.second));
+  std::string timestamp_str = base::StringPrintf(
+      "%04d-%02d-%02dT%02d:%02d:%02dZ", exploded.year, exploded.month,
+      exploded.day_of_month, exploded.hour, exploded.minute, exploded.second);
+  xml_writer->AddAttribute(kToastElementDisplayTimestamp, timestamp_str);
 }
 
 void EndToastElement(XmlWriter* xml_writer) {
@@ -188,8 +178,8 @@ void WriteItems(XmlWriter* xml_writer,
   std::string item_list;
   for (size_t i = 0; i < entries; ++i) {
     const auto& item = items[i];
-    item_list += base::UTF16ToUTF8(item.title) + " - " +
-                 base::UTF16ToUTF8(item.message) + "\n";
+    item_list += base::UTF16ToUTF8(item.title()) + " - " +
+                 base::UTF16ToUTF8(item.message()) + "\n";
   }
   WriteTextElement(xml_writer, item_list, TextType::NORMAL);
 }
@@ -359,13 +349,11 @@ void AddContextMenu(XmlWriter* xml_writer,
 // Ensures that every reminder has at least one button, as the Action Center
 // does not respect the Reminder setting on notifications with no buttons, so we
 // must add a Dismiss button to the notification for those cases. For more
-// details, see issue https://crbug.com/781792.
+// details, see issue https://crbug.com/40548271.
 void EnsureReminderHasButton(XmlWriter* xml_writer,
                              const message_center::Notification& notification,
                              NotificationLaunchId copied_launch_id) {
-  if (!notification.never_timeout() || !notification.buttons().empty() ||
-      base::FeatureList::IsEnabled(
-          features::kNotificationDurationLongForRequireInteraction)) {
+  if (!notification.never_timeout() || !notification.buttons().empty()) {
     return;
   }
 
@@ -466,7 +454,7 @@ std::wstring BuildNotificationTemplate(
   // The |kXmlVersionHeader| is automatically appended by libxml, but the toast
   // system in the Windows Action Center expects it to be absent.
   return base::UTF8ToWide(
-      base::StringPiece(template_xml).substr(sizeof(kXmlVersionHeader) - 1));
+      std::string_view(template_xml).substr(sizeof(kXmlVersionHeader) - 1));
 }
 
 void SetContextMenuLabelForTesting(const char* label) {

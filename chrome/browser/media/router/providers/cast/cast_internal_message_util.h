@@ -5,26 +5,27 @@
 #ifndef CHROME_BROWSER_MEDIA_ROUTER_PROVIDERS_CAST_CAST_INTERNAL_MESSAGE_UTIL_H_
 #define CHROME_BROWSER_MEDIA_ROUTER_PROVIDERS_CAST_CAST_INTERNAL_MESSAGE_UTIL_H_
 
+#include <optional>
+
 #include "base/containers/flat_set.h"
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/mojom/presentation/presentation.mojom.h"
 #include "third_party/openscreen/src/cast/common/channel/proto/cast_channel.pb.h"
 
 namespace media_router {
 
-using cast::channel::CastMessage;
+using openscreen::cast::proto::CastMessage;
 
 class MediaSinkInternal;
 
 // Values in the "supportedMediaCommands" list in media status messages
 // sent to the Cast sender SDK.
-constexpr char kMediaCommandPause[] = "pause";
-constexpr char kMediaCommandSeek[] = "seek";
-constexpr char kMediaCommandStreamVolume[] = "stream_volume";
-constexpr char kMediaCommandStreamMute[] = "stream_mute";
-constexpr char kMediaCommandQueueNext[] = "queue_next";
-constexpr char kMediaCommandQueuePrev[] = "queue_prev";
+inline constexpr char kMediaCommandPause[] = "pause";
+inline constexpr char kMediaCommandSeek[] = "seek";
+inline constexpr char kMediaCommandStreamVolume[] = "stream_volume";
+inline constexpr char kMediaCommandStreamMute[] = "stream_mute";
+inline constexpr char kMediaCommandQueueNext[] = "queue_next";
+inline constexpr char kMediaCommandQueuePrev[] = "queue_prev";
 
 // Values in the "supportedMediaCommands" bit array in media status messages
 // received from Cast receivers. They are converted to string values by
@@ -43,7 +44,6 @@ enum class MediaCommand {
 // PresentationConnection.
 class CastInternalMessage {
  public:
-  // TODO(crbug.com/809249): Add other types of messages.
   enum class Type {
     kClientConnect,   // Initial message sent by SDK client to connect to MRP.
     kAppMessage,      // App messages to pass through between SDK client and the
@@ -81,7 +81,7 @@ class CastInternalMessage {
 
   // Returns a CastInternalMessage for |message|, or nullptr is |message| is not
   // a valid Cast internal message.
-  static std::unique_ptr<CastInternalMessage> From(base::Value::Dict message);
+  static std::unique_ptr<CastInternalMessage> From(base::DictValue message);
 
   CastInternalMessage(const CastInternalMessage&) = delete;
   CastInternalMessage& operator=(const CastInternalMessage&) = delete;
@@ -90,7 +90,7 @@ class CastInternalMessage {
 
   Type type() const { return type_; }
   const std::string& client_id() const { return client_id_; }
-  absl::optional<int> sequence_number() const { return sequence_number_; }
+  std::optional<int> sequence_number() const { return sequence_number_; }
 
   bool has_session_id() const {
     return type_ == Type::kAppMessage || type_ == Type::kV2Message;
@@ -116,7 +116,7 @@ class CastInternalMessage {
     return message_body_;
   }
 
-  const base::Value::Dict& v2_message_body() const {
+  const base::DictValue& v2_message_body() const {
     DCHECK(type_ == Type::kV2Message);
     return message_body_.GetDict();
   }
@@ -124,20 +124,22 @@ class CastInternalMessage {
  private:
   CastInternalMessage(Type type,
                       const std::string& client_id,
-                      absl::optional<int> sequence_number,
+                      std::optional<int> sequence_number,
                       const std::string& session_id,
                       const std::string& namespace_or_v2_type_,
                       base::Value message_body);
 
   const Type type_;
   const std::string client_id_;
-  const absl::optional<int> sequence_number_;
+  const std::optional<int> sequence_number_;
 
   // Set if |type| is |kAppMessage| or |kV2Message|.
   const std::string session_id_;
   const std::string namespace_or_v2_type_;
   const base::Value message_body_;
 };
+
+std::string CastInternalMessageTypeToString(CastInternalMessage::Type type);
 
 // Represents a Cast session on a Cast device. Cast sessions are derived from
 // RECEIVER_STATUS messages sent by Cast devices.
@@ -150,7 +152,7 @@ class CastSession {
   // nullptr if |receiver_status| is not a valid RECEIVER_STATUS message.
   static std::unique_ptr<CastSession> From(
       const MediaSinkInternal& sink,
-      const base::Value::Dict& receiver_status);
+      const base::DictValue& receiver_status);
 
   CastSession();
   ~CastSession();
@@ -163,7 +165,7 @@ class CastSession {
   void UpdateSession(std::unique_ptr<CastSession> from);
 
   // Sets the 'media' field of |value_| with a value received from the client.
-  void UpdateMedia(const base::Value::List& media);
+  void UpdateMedia(const base::ListValue& media);
 
   // ID of the session.
   const std::string& session_id() const { return session_id_; }
@@ -183,14 +185,14 @@ class CastSession {
   // The dictionary representing this session, derived from |receiver_status|.
   // For convenience, this is used for generating messages sent to the SDK that
   // include the session value.
-  const base::Value::Dict& value() const { return value_; }
+  const base::DictValue& value() const { return value_; }
 
  private:
   std::string session_id_;
   std::string app_id_;
   std::string destination_id_;
   base::flat_set<std::string> message_namespaces_;
-  base::Value::Dict value_;
+  base::DictValue value_;
 
   // The human-readable name of the Cast application, for example, "YouTube".
   // Mandatory.
@@ -230,20 +232,20 @@ blink::mojom::PresentationConnectionMessagePtr CreateAppMessage(
     const CastMessage& cast_message);
 blink::mojom::PresentationConnectionMessagePtr CreateV2Message(
     const std::string& client_id,
-    const base::Value::Dict& payload,
-    absl::optional<int> sequence_number);
+    const base::DictValue& payload,
+    std::optional<int> sequence_number);
 blink::mojom::PresentationConnectionMessagePtr CreateErrorMessage(
     const std::string& client_id,
-    base::Value::Dict error,
-    absl::optional<int> sequence_number);
+    base::DictValue error,
+    std::optional<int> sequence_number);
 blink::mojom::PresentationConnectionMessagePtr CreateLeaveSessionAckMessage(
     const std::string& client_id,
-    absl::optional<int> sequence_number);
+    std::optional<int> sequence_number);
 blink::mojom::PresentationConnectionMessagePtr CreateLeaveSessionAckMessage(
     const std::string& client_id,
-    absl::optional<int> sequence_number);
+    std::optional<int> sequence_number);
 
-base::Value::List SupportedMediaCommandsToListValue(int media_commands);
+base::ListValue SupportedMediaCommandsToListValue(int media_commands);
 
 }  // namespace media_router
 

@@ -16,7 +16,8 @@
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/media/media_engagement_preloaded_list.h"
 #include "chrome/browser/media/media_engagement_service.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/renderer_configuration.mojom.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -25,12 +26,16 @@
 #include "content/public/test/browser_test_utils.h"
 #include "media/base/media_switches.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "ui/base/page_transition_types.h"
 
 namespace {
 
 base::FilePath GetPythonPath() {
-  // Every environment should have python3.
-  return base::FilePath(FILE_PATH_LITERAL("python3"));
+#if BUILDFLAG(IS_WIN)
+  return base::FilePath(FILE_PATH_LITERAL("vpython3.bat"));
+#else
+  return base::FilePath(FILE_PATH_LITERAL("vpython3"));
+#endif
 }
 
 const base::FilePath kTestDataPath = base::FilePath(
@@ -88,7 +93,8 @@ class MediaEngagementAutoplayBrowserTest
   }
 
   void LoadTestPage(const std::string& page) {
-    NavigateParams params(browser()->profile(), http_server_.GetURL("/" + page),
+    NavigateParams params(browser()->GetProfile(),
+                          http_server_.GetURL("/" + page),
                           ui::PageTransition::PAGE_TRANSITION_LINK);
     params.user_gesture = false;
     params.is_renderer_initiated = false;
@@ -96,7 +102,7 @@ class MediaEngagementAutoplayBrowserTest
   }
 
   void LoadTestPageSecondaryOrigin(const std::string& page) {
-    NavigateParams params(browser()->profile(),
+    NavigateParams params(browser()->GetProfile(),
                           http_server_origin2_.GetURL("/" + page),
                           ui::PageTransition::PAGE_TRANSITION_LINK);
     params.user_gesture = false;
@@ -105,10 +111,11 @@ class MediaEngagementAutoplayBrowserTest
   }
 
   void LoadSubFrame(const std::string& page) {
-    EXPECT_TRUE(content::ExecuteScriptWithoutUserGesture(
-        GetWebContents(), "document.getElementsByName('subframe')[0].src = \"" +
-                              http_server_origin2_.GetURL("/" + page).spec() +
-                              "\""));
+    EXPECT_TRUE(content::ExecJs(
+        GetWebContents(),
+        "document.getElementsByName('subframe')[0].src = \"" +
+            http_server_origin2_.GetURL("/" + page).spec() + "\"",
+        content::EXECUTE_SCRIPT_NO_USER_GESTURE));
   }
 
   void SetScores(const url::Origin& origin, int visits, int media_playbacks) {
@@ -148,11 +155,10 @@ class MediaEngagementAutoplayBrowserTest
     EXPECT_TRUE(base::CreateTemporaryFile(&output_path));
 
     // Write JSON file with the server origin in it.
-    base::Value::List list;
+    base::ListValue list;
     list.Append(origin.Serialize());
-    std::string json_data;
-    base::JSONWriter::Write(list, &json_data);
-    EXPECT_TRUE(base::WriteFile(input_path, json_data));
+    EXPECT_TRUE(
+        base::WriteFile(input_path, base::WriteJson(list).value_or("")));
 
     // Get the source root. The make_dafsa.py script is in here.
     base::FilePath src_root;
@@ -162,7 +168,7 @@ class MediaEngagementAutoplayBrowserTest
     // Get the generated root. The protobuf-generated files are in here.
     base::FilePath gen_root;
     EXPECT_TRUE(
-        base::PathService::Get(base::DIR_GEN_TEST_DATA_ROOT, &gen_root));
+        base::PathService::Get(base::DIR_OUT_TEST_DATA_ROOT, &gen_root));
 
     // Launch the generator and wait for it to finish.
     base::CommandLine cmd(GetPythonPath());
@@ -182,7 +188,8 @@ class MediaEngagementAutoplayBrowserTest
   void ApplyEmptyPreloadedList() {
     // Get the path relative to the source root.
     base::FilePath source_root;
-    EXPECT_TRUE(base::PathService::Get(base::DIR_SOURCE_ROOT, &source_root));
+    EXPECT_TRUE(
+        base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &source_root));
 
     base::ScopedAllowBlockingForTesting allow_blocking;
     EXPECT_TRUE(MediaEngagementPreloadedList::GetInstance()->LoadFromFile(
@@ -197,11 +204,11 @@ class MediaEngagementAutoplayBrowserTest
   }
 
   MediaEngagementService* GetService() {
-    return MediaEngagementService::Get(browser()->profile());
+    return MediaEngagementService::Get(browser()->GetProfile());
   }
 
   content::WebContents* GetWebContents() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
   net::EmbeddedTestServer http_server_;
@@ -295,7 +302,7 @@ IN_PROC_BROWSER_TEST_P(MediaEngagementAutoplayBrowserTest,
   ExpectAutoplayAllowedIfEnabled();
 }
 
-// Disabled due to being flaky. crbug.com/1212507
+// Disabled due to being flaky. crbug.com/40768252
 #if BUILDFLAG(IS_MAC)
 #define MAYBE_UsePreloadedData_Allowed DISABLED_UsePreloadedData_Allowed
 #else

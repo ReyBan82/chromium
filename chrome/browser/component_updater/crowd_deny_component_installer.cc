@@ -4,7 +4,9 @@
 
 #include "chrome/browser/component_updater/crowd_deny_component_installer.h"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,7 +19,6 @@
 #include "base/values.h"
 #include "chrome/browser/permissions/crowd_deny_preload_data.h"
 #include "components/permissions/permission_uma_util.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace {
 
@@ -49,7 +50,7 @@ bool CrowdDenyComponentInstallerPolicy::
 }
 
 bool CrowdDenyComponentInstallerPolicy::VerifyInstallation(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) const {
   // Just check that the file is there, detailed verification of the contents is
   // delegated to code in //chrome/browser/permissions.
@@ -62,7 +63,7 @@ bool CrowdDenyComponentInstallerPolicy::RequiresNetworkEncryption() const {
 
 update_client::CrxInstaller::Result
 CrowdDenyComponentInstallerPolicy::OnCustomInstall(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) {
   // Nothing custom here.
   return update_client::CrxInstaller::Result(0);
@@ -75,11 +76,11 @@ void CrowdDenyComponentInstallerPolicy::OnCustomUninstall() {
 void CrowdDenyComponentInstallerPolicy::ComponentReady(
     const base::Version& version,
     const base::FilePath& install_dir,
-    base::Value::Dict manifest) {
+    base::DictValue manifest) {
   DVLOG(1) << "Crowd Deny component ready, version " << version.GetString()
            << " in " << install_dir.value();
 
-  absl::optional<int> format =
+  std::optional<int> format =
       manifest.FindInt(kCrowdDenyManifestPreloadDataFormatKey);
   if (!format || *format != kCrowdDenyManifestPreloadDataCurrentFormat) {
     DVLOG(1) << "Crowd Deny component bailing out.";
@@ -98,9 +99,7 @@ base::FilePath CrowdDenyComponentInstallerPolicy::GetRelativeInstallDir()
 
 void CrowdDenyComponentInstallerPolicy::GetHash(
     std::vector<uint8_t>* hash) const {
-  hash->assign(
-      kCrowdDenyPublicKeySHA256,
-      kCrowdDenyPublicKeySHA256 + std::size(kCrowdDenyPublicKeySHA256));
+  hash->assign_range(kCrowdDenyPublicKeySHA256);
 }
 
 std::string CrowdDenyComponentInstallerPolicy::GetName() const {

@@ -8,16 +8,20 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
-#include "remoting/base/auto_thread_task_runner.h"
 #include "remoting/host/client_session_control.h"
 #include "remoting/host/host_mock_objects.h"
 #include "remoting/protocol/protocol_mock_objects.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+#if BUILDFLAG(IS_WIN)
+#include <windows.h>
+
+#include "remoting/host/win/input_extra_info.h"
+#endif
 
 namespace remoting {
 
@@ -42,8 +46,7 @@ class LocalInputMonitorTest : public testing::Test {
 #endif  // !BUILDFLAG(IS_WIN)
   };
 
-  base::RunLoop run_loop_;
-  scoped_refptr<AutoThreadTaskRunner> task_runner_;
+  scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
 
   std::string client_jid_;
   MockClientSessionControl client_session_control_;
@@ -55,10 +58,7 @@ LocalInputMonitorTest::LocalInputMonitorTest()
       client_session_control_factory_(&client_session_control_) {}
 
 void LocalInputMonitorTest::SetUp() {
-  // Run the task environment until no components depend on it.
-  task_runner_ = new AutoThreadTaskRunner(
-      base::SingleThreadTaskRunner::GetCurrentDefault(),
-      run_loop_.QuitClosure());
+  task_runner_ = task_environment_.GetMainThreadTaskRunner();
 }
 
 }  // namespace
@@ -70,7 +70,8 @@ TEST_F(LocalInputMonitorTest, BasicWithClientSession) {
   EXPECT_CALL(client_session_control_, client_jid())
       .Times(AnyNumber())
       .WillRepeatedly(ReturnRef(client_jid_));
-  EXPECT_CALL(client_session_control_, DisconnectSession(_)).Times(AnyNumber());
+  EXPECT_CALL(client_session_control_, DisconnectSession(_, _, _))
+      .Times(AnyNumber());
   EXPECT_CALL(client_session_control_, OnLocalPointerMoved(_, _))
       .Times(AnyNumber());
   EXPECT_CALL(client_session_control_, SetDisableInputs(_)).Times(0);
@@ -80,10 +81,10 @@ TEST_F(LocalInputMonitorTest, BasicWithClientSession) {
         LocalInputMonitor::Create(task_runner_, task_runner_, task_runner_);
     local_input_monitor->StartMonitoringForClientSession(
         client_session_control_factory_.GetWeakPtr());
-    task_runner_ = nullptr;
   }
 
-  run_loop_.Run();
+  task_runner_->PostTask(FROM_HERE, task_environment_.QuitClosure());
+  task_environment_.RunUntilQuit();
 }
 
 TEST_F(LocalInputMonitorTest, BasicWithCallbacks) {
@@ -97,10 +98,109 @@ TEST_F(LocalInputMonitorTest, BasicWithCallbacks) {
         LocalInputMonitor::Create(task_runner_, task_runner_, task_runner_);
     local_input_monitor->StartMonitoring(base::DoNothing(), base::DoNothing(),
                                          base::DoNothing());
-    task_runner_ = nullptr;
   }
 
-  run_loop_.Run();
+  task_runner_->PostTask(FROM_HERE, task_environment_.QuitClosure());
+  task_environment_.RunUntilQuit();
 }
+
+#if BUILDFLAG(IS_WIN)
+struct IsCrdInjectedInputTestCase {
+  const char* test_name;
+  DWORD dwType;
+  bool has_device_handle;
+  uint32_t extra_info;
+  bool expected_is_crd;
+};
+
+class LocalInputMonitorWinTest
+    : public testing::TestWithParam<IsCrdInjectedInputTestCase> {};
+
+TEST_P(LocalInputMonitorWinTest, DistinguishesCrdInjectedFromSoftwareInput) {
+  const auto& param = GetParam();
+  RAWINPUT event = {};
+  event.header.dwType = param.dwType;
+  if (param.has_device_handle) {
+    event.header.hDevice = reinterpret_cast<HANDLE>(0x1234);
+  }
+  if (param.dwType == RIM_TYPEMOUSE) {
+    event.data.mouse.ulExtraInformation = param.extra_info;
+  } else if (param.dwType == RIM_TYPEKEYBOARD) {
+    event.data.keyboard.ExtraInformation = param.extra_info;
+  }
+
+  EXPECT_EQ(IsCrdInjectedInput(event), param.expected_is_crd);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    LocalInputMonitorWinTest,
+    testing::Values(
+        IsCrdInjectedInputTestCase{
+            .test_name = "HardwareMouseNoExtraInfo",
+            .dwType = RIM_TYPEMOUSE,
+            .has_device_handle = true,
+            .extra_info = 0,
+            .expected_is_crd = false,
+        },
+        IsCrdInjectedInputTestCase{
+            .test_name = "HardwareMouseWithCrdExtraInfo",
+            .dwType = RIM_TYPEMOUSE,
+            .has_device_handle = true,
+            .extra_info = kCrdInputExtraInfo,
+            .expected_is_crd = false,
+        },
+        IsCrdInjectedInputTestCase{
+            .test_name = "SoftwareMouseNoExtraInfo",
+            .dwType = RIM_TYPEMOUSE,
+            .has_device_handle = false,
+            .extra_info = 0,
+            .expected_is_crd = false,
+        },
+        IsCrdInjectedInputTestCase{
+            .test_name = "CrdInjectedMouse",
+            .dwType = RIM_TYPEMOUSE,
+            .has_device_handle = false,
+            .extra_info = kCrdInputExtraInfo,
+            .expected_is_crd = true,
+        },
+        IsCrdInjectedInputTestCase{
+            .test_name = "HardwareKeyboardNoExtraInfo",
+            .dwType = RIM_TYPEKEYBOARD,
+            .has_device_handle = true,
+            .extra_info = 0,
+            .expected_is_crd = false,
+        },
+        IsCrdInjectedInputTestCase{
+            .test_name = "HardwareKeyboardWithCrdExtraInfo",
+            .dwType = RIM_TYPEKEYBOARD,
+            .has_device_handle = true,
+            .extra_info = kCrdInputExtraInfo,
+            .expected_is_crd = false,
+        },
+        IsCrdInjectedInputTestCase{
+            .test_name = "SoftwareKeyboardNoExtraInfo",
+            .dwType = RIM_TYPEKEYBOARD,
+            .has_device_handle = false,
+            .extra_info = 0,
+            .expected_is_crd = false,
+        },
+        IsCrdInjectedInputTestCase{
+            .test_name = "CrdInjectedKeyboard",
+            .dwType = RIM_TYPEKEYBOARD,
+            .has_device_handle = false,
+            .extra_info = kCrdInputExtraInfo,
+            .expected_is_crd = true,
+        },
+        IsCrdInjectedInputTestCase{
+            .test_name = "NonMouseOrKeyboardEvent",
+            .dwType = RIM_TYPEHID,
+            .has_device_handle = false,
+            .extra_info = 0,
+            .expected_is_crd = false,
+        }),
+    [](const testing::TestParamInfo<LocalInputMonitorWinTest::ParamType>&
+           info) { return info.param.test_name; });
+#endif  // BUILDFLAG(IS_WIN)
 
 }  // namespace remoting

@@ -4,23 +4,22 @@
 
 #include "ash/system/power/peripheral_battery_listener.h"
 
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "ash/power/hid_battery_util.h"
 #include "ash/public/cpp/notification_utils.h"
-#include "ash/resources/vector_icons/vector_icons.h"
 #include "ash/shell.h"
 #include "ash/strings/grit/ash_strings.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/weak_ptr.h"
-#include "base/strings/string_piece.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "device/bluetooth/bluetooth_adapter_factory.h"
 #include "device/bluetooth/bluetooth_device.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/re2/src/re2/re2.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -78,9 +77,8 @@ bool IsStylusDevice(const std::string& path,
   for (const ui::TouchscreenDevice& device :
        ui::DeviceDataManager::GetInstance()->GetTouchscreenDevices()) {
     if (device.has_stylus &&
-        (device.name == model_name ||
-         device.name.find(model_name) != std::string::npos) &&
-        device.sys_path.value().find(identifier) != std::string::npos) {
+        (device.name == model_name || device.name.contains(model_name)) &&
+        device.sys_path.value().contains(identifier)) {
       *has_garage = device.has_stylus_garage_switch;
       return true;
     }
@@ -103,16 +101,29 @@ bool IsEligibleForBatteryReport(
   // treat them as ineligible until this is resolved.
   if (type == PeripheralBatteryListener::BatteryInfo::PeripheralType::
                   kStylusViaScreen &&
-      serial_number.empty())
+      serial_number.empty()) {
+    base::UmaHistogramEnumeration(
+        kStylusBatteryReportingEligibilityHistogramName,
+        StylusBatteryReportingEligibility::kIneligibleDueToScreen);
     return false;
+  }
 
-  if (serial_number.empty())
+  if (serial_number.empty()) {
+    base::UmaHistogramEnumeration(
+        kStylusBatteryReportingEligibilityHistogramName,
+        StylusBatteryReportingEligibility::kEligible);
     return true;
+  }
 
-  // TODO(b/188811631): Add metrics
-  if (RE2::FullMatch(serial_number, kBlockedStylusDevicesPattern))
+  if (RE2::FullMatch(serial_number, kBlockedStylusDevicesPattern)) {
+    base::UmaHistogramEnumeration(
+        kStylusBatteryReportingEligibilityHistogramName,
+        StylusBatteryReportingEligibility::kIncorrectReports);
     return false;
+  }
 
+  base::UmaHistogramEnumeration(kStylusBatteryReportingEligibilityHistogramName,
+                                StylusBatteryReportingEligibility::kEligible);
   // kUnusualStylusDevicesPattern and unrecognized devices are eligible
   return true;
 }
@@ -174,7 +185,7 @@ PeripheralBatteryListener::BatteryInfo::BatteryInfo() = default;
 PeripheralBatteryListener::BatteryInfo::BatteryInfo(
     const std::string& key,
     const std::u16string& name,
-    absl::optional<uint8_t> level,
+    std::optional<uint8_t> level,
     bool battery_report_eligible,
     base::TimeTicks last_update_timestamp,
     PeripheralType type,
@@ -238,18 +249,17 @@ void PeripheralBatteryListener::UpdateSyntheticStylusGarargePeripheral() {
 }
 
 void PeripheralBatteryListener::GetSwitchStateCallback(ui::StylusState state) {
-  BatteryInfo battery{kStylusGarageKey,
-                      kStylusGarageName,
-                      (state == ui::StylusState::REMOVED)
-                          ? absl::optional<uint8_t>(absl::nullopt)
-                          : 100,
-                      /*battery_report_eligible=*/true,
-                      base::TimeTicks::Now(),
-                      BatteryInfo::PeripheralType::kStylusViaCharger,
-                      (state == ui::StylusState::REMOVED)
-                          ? BatteryInfo::ChargeStatus::kUnknown
-                          : BatteryInfo::ChargeStatus::kFull,
-                      ""};
+  BatteryInfo battery{
+      kStylusGarageKey,
+      kStylusGarageName,
+      (state == ui::StylusState::REMOVED) ? std::optional<uint8_t>(std::nullopt)
+                                          : 100,
+      /*battery_report_eligible=*/true,
+      base::TimeTicks::Now(),
+      BatteryInfo::PeripheralType::kStylusViaCharger,
+      (state == ui::StylusState::REMOVED) ? BatteryInfo::ChargeStatus::kUnknown
+                                          : BatteryInfo::ChargeStatus::kFull,
+      ""};
 
   UpdateBattery(battery, true);
 }
@@ -302,7 +312,7 @@ void PeripheralBatteryListener::PeripheralBatteryStatusReceived(
   }
 
   std::string map_key = GetBatteryMapKey(path);
-  absl::optional<uint8_t> opt_level;
+  std::optional<uint8_t> opt_level;
 
   // Discard: -1 level charge events, they, if they exist, are invalid.
   //          0-level discharge events can come through when hid devices
@@ -316,7 +326,7 @@ void PeripheralBatteryListener::PeripheralBatteryStatusReceived(
        pmc_charge_status !=
            power_manager::
                PeripheralBatteryStatus_ChargeStatus_CHARGE_STATUS_CHARGING)) {
-    opt_level = absl::nullopt;
+    opt_level = std::nullopt;
   } else {
     opt_level = level;
   }
@@ -351,7 +361,7 @@ void PeripheralBatteryListener::DeviceBatteryChanged(
   if (type != device::BluetoothDevice::BatteryType::kDefault)
     return;
 
-  absl::optional<device::BluetoothDevice::BatteryInfo> info =
+  std::optional<device::BluetoothDevice::BatteryInfo> info =
       device->GetBatteryInfo(type);
 
   if (info && info->percentage)
@@ -359,7 +369,7 @@ void PeripheralBatteryListener::DeviceBatteryChanged(
 
   BatteryInfo battery{GetBatteryMapKey(device),
                       device->GetNameForDisplay(),
-                      info.has_value() ? info->percentage : absl::nullopt,
+                      info.has_value() ? info->percentage : std::nullopt,
                       /*battery_report_eligible=*/true,
                       base::TimeTicks::Now(),
                       BatteryInfo::PeripheralType::kOther,
@@ -383,7 +393,7 @@ void PeripheralBatteryListener::DeviceConnectedStateChanged(
   }
 
   for (auto type : device->GetAvailableBatteryTypes()) {
-    absl::optional<device::BluetoothDevice::BatteryInfo> info =
+    std::optional<device::BluetoothDevice::BatteryInfo> info =
         device->GetBatteryInfo(type);
 
     DCHECK(info);
@@ -452,7 +462,7 @@ void PeripheralBatteryListener::OnDeviceListsComplete() {
 // full, and we don't provide a worse estimate than we were already showing.
 void PeripheralBatteryListener::GarageTimerAction(
     base::TimeTicks charge_start_time,
-    absl::optional<uint8_t> start_level) {
+    std::optional<uint8_t> start_level) {
   if (!synthetic_stylus_garage_peripheral_)
     return;
 
@@ -484,7 +494,7 @@ void PeripheralBatteryListener::GarageTimerAction(
   UpdateBattery(info, true);
 }
 
-absl::optional<uint8_t> PeripheralBatteryListener::DerateLastChargeLevel() {
+std::optional<uint8_t> PeripheralBatteryListener::DerateLastChargeLevel() {
   BatteryInfo latest_battery;
 
   // Find the battery info with most recent data about the stylus
@@ -505,7 +515,7 @@ absl::optional<uint8_t> PeripheralBatteryListener::DerateLastChargeLevel() {
 
   // No information available.
   if (!latest_battery.level.has_value())
-    return absl::nullopt;
+    return std::nullopt;
 
   int level = *latest_battery.level;
 

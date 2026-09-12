@@ -4,29 +4,153 @@
 
 #include "third_party/blink/renderer/platform/text/character.h"
 
+#include <ubidi_props.h>
+#include <unicode/uniset.h>
+#include <unicode/unistr.h>
+#include <unicode/uscript.h>
+#include <unicode/utfiterator.h>
+#include <unicode/utypes.h>
+
+#include <algorithm>
+
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/platform/text/character_property_data.h"
+#include "third_party/blink/renderer/platform/text/emoji_segmentation_category.h"
+#include "third_party/blink/renderer/platform/text/emoji_segmentation_category_inline_header.h"
+#include "third_party/blink/renderer/platform/text/justification_opportunity.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
 namespace blink {
 
-testing::AssertionResult IsCJKIdeographOrSymbolWithMessage(UChar32 codepoint) {
+testing::AssertionResult IsCjkIdeographOrSymbolWithMessage(UChar32 codepoint) {
   const size_t kFormatBufferSize = 10;
   char formatted_as_hex[kFormatBufferSize];
   snprintf(formatted_as_hex, kFormatBufferSize, "0x%x", codepoint);
 
-  if (Character::IsCJKIdeographOrSymbol(codepoint)) {
+  if (Character::IsCjkIdeographOrSymbol(codepoint)) {
     return testing::AssertionSuccess()
-           << "Codepoint " << formatted_as_hex << " is a CJKIdeographOrSymbol.";
+           << "Codepoint " << formatted_as_hex << " is a CjkIdeographOrSymbol.";
   }
 
   return testing::AssertionFailure() << "Codepoint " << formatted_as_hex
-                                     << " is not a CJKIdeographOrSymbol.";
+                                     << " is not a CjkIdeographOrSymbol.";
 }
 
-TEST(CharacterTest, HammerEmojiVsCJKIdeographOrSymbol) {
-  for (UChar32 test_char = 0; test_char < kMaxCodepoint; test_char++) {
-    if (Character::IsEmojiEmojiDefault(test_char)) {
-      EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(test_char));
+// Test Unicode-derived functions work as intended.
+// These functions may need to be adjusted if Unicode changes.
+TEST(CharacterTest, Derived) {
+  StringBuilder builder;
+  // Extended_Pictographic codepoints in RGI emoji sequences must be
+  // IsCjkIdeographOrSymbol so that the word segmenter enters the emoji code
+  // path and keeps multi-codepoint sequences together.
+  UErrorCode error = U_ZERO_ERROR;
+  icu::UnicodeSet set(
+      icu::UnicodeString(
+          "[[:RGI_Emoji_ZWJ_Sequence:][:RGI_Emoji_Modifier_Sequence:]]"),
+      error);
+  ASSERT_EQ(error, U_ZERO_ERROR);
+  for (auto s : set.strings()) {
+    for (auto unit : icu::header::unsafeUTFStringCodePoints<UChar32>(s)) {
+      UChar32 cp = unit.codePoint();
+      if (Character::IsExtendedPictographic(cp)) {
+        EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(cp));
+      }
+    }
+  }
+
+  for (UChar32 ch = 0; ch < uchar::kMaxCodepoint; ++ch) {
+    if (Character::IsEmojiEmojiDefault(ch)) {
+      EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(ch));
+    }
+
+    const UBlockCode block = ublock_getCode(ch);
+    EXPECT_EQ(Character::IsBlockCjkSymbolsAndPunctuation(ch),
+              block == UBLOCK_CJK_SYMBOLS_AND_PUNCTUATION);
+    EXPECT_EQ(Character::IsBlockHalfwidthAndFullwidthForms(ch),
+              block == UBLOCK_HALFWIDTH_AND_FULLWIDTH_FORMS);
+
+    const UEastAsianWidth eaw = Character::EastAsianWidth(ch);
+    EXPECT_EQ(Character::IsEastAsianWidthFullwidth(ch),
+              eaw == UEastAsianWidth::U_EA_FULLWIDTH);
+
+    if (!Character::MayNeedEastAsianSpacing(ch)) {
+      EastAsianSpacingType type = Character::GetEastAsianSpacingType(ch);
+      DCHECK_NE(type, EastAsianSpacingType::kWide);
+    }
+
+    if (!Character::MaybeHanKerningOpenOrCloseFast(ch)) {
+      DCHECK(!Character::MaybeHanKerningOpenSlow(ch));
+      DCHECK(!Character::MaybeHanKerningCloseSlow(ch));
+    }
+
+    // Test UTF-16 functions.
+    const UCharDirection bidi = ubidi_getClass(ch);
+    if (bidi == UCharDirection::U_RIGHT_TO_LEFT ||
+        bidi == UCharDirection::U_RIGHT_TO_LEFT_ARABIC ||
+        Character::IsBidiControl(ch)) {
+      builder.Clear();
+      builder.Append(ch);
+      const String utf16 = builder.ToString();
+      DCHECK(Character::MaybeBidiRtl(utf16));
+    }
+  }
+}
+
+TEST(CharacterTest, CjkIdeographOrSymbolCollisions) {
+  icu::UnicodeSet emoji_set;
+  UErrorCode error = U_ZERO_ERROR;
+  emoji_set.addAll(
+      icu::UnicodeSet(icu::UnicodeString("[:Emoji_Presentation:]"), error));
+  ASSERT_EQ(error, U_ZERO_ERROR);
+
+  const char* const kRgiEmojiSequences =
+      "[[:RGI_Emoji_ZWJ_Sequence:][:RGI_Emoji_Modifier_Sequence:]]";
+  icu::UnicodeSet set(icu::UnicodeString(kRgiEmojiSequences), error);
+  ASSERT_EQ(error, U_ZERO_ERROR);
+  for (auto s : set.strings()) {
+    icu::UnicodeString us(s.data(), static_cast<int32_t>(s.length()));
+    for (auto cp : icu::header::unsafeUTFStringCodePoints<UChar32>(us)) {
+      if (Character::IsExtendedPictographic(cp.codePoint())) {
+        emoji_set.add(cp.codePoint());
+      }
+    }
+  }
+
+  for (UChar32 cp : kIsCjkIdeographOrSymbolArray) {
+    if (emoji_set.contains(cp)) {
+      ADD_FAILURE() << "Codepoint 0x" << std::hex << cp
+                    << " in kIsCjkIdeographOrSymbolArray is already covered by "
+                       "SetIsCjkIdeographOrSymbolForEmoji.";
+    }
+  }
+
+  for (size_t i = 0; i < kIsCjkIdeographOrSymbolRanges.size(); i += 2) {
+    UChar32 start = kIsCjkIdeographOrSymbolRanges[i];
+    UChar32 end = kIsCjkIdeographOrSymbolRanges[i + 1];
+    for (UChar32 cp = start; cp <= end; ++cp) {
+      if (emoji_set.contains(cp)) {
+        ADD_FAILURE()
+            << "Codepoint 0x" << std::hex << cp
+            << " in kIsCjkIdeographOrSymbolRanges (range 0x" << start << " - 0x"
+            << end
+            << ") is already covered by SetIsCjkIdeographOrSymbolForEmoji.";
+      }
+    }
+  }
+}
+
+TEST(CharacterTest, CjkIdeographOrSymbolArrayOrRangeCollisions) {
+  for (UChar32 cp : kIsCjkIdeographOrSymbolArray) {
+    for (size_t i = 0; i < kIsCjkIdeographOrSymbolRanges.size(); i += 2) {
+      UChar32 start = kIsCjkIdeographOrSymbolRanges[i];
+      UChar32 end = kIsCjkIdeographOrSymbolRanges[i + 1];
+      if (cp >= start && cp <= end) {
+        ADD_FAILURE() << "Codepoint 0x" << std::hex << cp
+                      << " in kIsCjkIdeographOrSymbolArray is already covered "
+                         "by kIsCjkIdeographOrSymbolRanges (range 0x"
+                      << start << " - 0x" << end << ").";
+      }
     }
   }
 }
@@ -36,23 +160,23 @@ static void TestSpecificUChar32RangeIdeograph(UChar32 range_start,
                                               bool before = true,
                                               bool after = true) {
   if (before) {
-    EXPECT_FALSE(Character::IsCJKIdeographOrSymbol(range_start - 1))
+    EXPECT_FALSE(Character::IsCjkIdeographOrSymbol(range_start - 1))
         << std::hex << (range_start - 1);
   }
-  EXPECT_TRUE(Character::IsCJKIdeographOrSymbol(range_start))
+  EXPECT_TRUE(Character::IsCjkIdeographOrSymbol(range_start))
       << std::hex << range_start;
   UChar32 mid = static_cast<UChar32>(
       (static_cast<uint64_t>(range_start) + range_end) / 2);
-  EXPECT_TRUE(Character::IsCJKIdeographOrSymbol(mid)) << std::hex << mid;
-  EXPECT_TRUE(Character::IsCJKIdeographOrSymbol(range_end))
+  EXPECT_TRUE(Character::IsCjkIdeographOrSymbol(mid)) << std::hex << mid;
+  EXPECT_TRUE(Character::IsCjkIdeographOrSymbol(range_end))
       << std::hex << range_end;
   if (after) {
-    EXPECT_FALSE(Character::IsCJKIdeographOrSymbol(range_end + 1))
+    EXPECT_FALSE(Character::IsCjkIdeographOrSymbol(range_end + 1))
         << std::hex << (range_end + 1);
   }
 }
 
-TEST(CharacterTest, TestIsCJKIdeograph) {
+TEST(CharacterTest, TestIsCjkIdeograph) {
   // The basic CJK Unified Ideographs block.
   TestSpecificUChar32RangeIdeograph(0x4E00, 0x9FFF, false);
   // CJK Unified Ideographs Extension A.
@@ -74,156 +198,180 @@ TEST(CharacterTest, TestIsCJKIdeograph) {
 
 static void TestSpecificUChar32RangeIdeographSymbol(UChar32 range_start,
                                                     UChar32 range_end) {
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(range_start - 1));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(range_start));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(range_start - 1));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(range_start));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(
       (UChar32)((uint64_t)range_start + (uint64_t)range_end) / 2));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(range_end));
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(range_end + 1));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(range_end));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(range_end + 1));
 }
 
-TEST(CharacterTest, TestIsCJKIdeographOrSymbol) {
+TEST(CharacterTest, TestIsCjkIdeographOrSymbol) {
   // CJK Compatibility Ideographs Supplement.
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2C7));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2CA));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2CB));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2D9));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2C7));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2CA));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2CB));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2D9));
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2020));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2021));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2030));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x203B));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x203C));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2042));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2047));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2048));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2049));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2051));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x20DD));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x20DE));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2100));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2103));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2105));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2109));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x210A));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2113));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2116));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2121));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x212B));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x213B));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2150));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2151));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2152));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2020));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2021));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2030));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x203B));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x203C));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2042));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2047));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2048));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2049));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2051));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x20DD));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x20DE));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2100));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2103));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2105));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2109));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x210A));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2113));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2116));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2121));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x212B));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x213B));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2150));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2151));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2152));
 
   TestSpecificUChar32RangeIdeographSymbol(0x2156, 0x215A);
   TestSpecificUChar32RangeIdeographSymbol(0x2160, 0x216B);
   TestSpecificUChar32RangeIdeographSymbol(0x2170, 0x217B);
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x217F));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2189));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2307));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2312));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x217F));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2189));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2307));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2312));
 
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0x23BD));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x23BE));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x23C4));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x23CC));
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0x23CD));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x23CE));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2423));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0x23BD));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x23BE));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x23C4));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x23CC));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0x23CD));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x23CE));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2423));
 
   TestSpecificUChar32RangeIdeographSymbol(0x2460, 0x2492);
   TestSpecificUChar32RangeIdeographSymbol(0x249C, 0x24FF);
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25A0));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25A1));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25A2));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25AA));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25AB));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25B1));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25B2));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25B3));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25B6));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25B7));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25BC));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25BD));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25C0));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25C1));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25C6));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25C7));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25C9));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25CB));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25CC));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25A0));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25A1));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25A2));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25AA));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25AB));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25B1));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25B2));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25B3));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25B6));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25B7));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25BC));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25BD));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25C0));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25C1));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25C6));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25C7));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25C9));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25CB));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25CC));
 
   TestSpecificUChar32RangeIdeographSymbol(0x25CE, 0x25D3);
   TestSpecificUChar32RangeIdeographSymbol(0x25E2, 0x25E6);
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x25EF));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x25EF));
 
   TestSpecificUChar32RangeIdeographSymbol(0x2600, 0x2603);
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2605));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2606));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x260E));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2616));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2617));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2640));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2642));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2605));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2606));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x260E));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2616));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2617));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2640));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2642));
 
   TestSpecificUChar32RangeIdeographSymbol(0x2660, 0x266F);
   TestSpecificUChar32RangeIdeographSymbol(0x2672, 0x267D);
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x26A0));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x26BD));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x26BE));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2713));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x271A));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x273F));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2740));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2756));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x26A0));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x26BD));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x26BE));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2713));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x271A));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x273F));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2740));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2756));
 
   TestSpecificUChar32RangeIdeographSymbol(0x2763, 0x2764);
   TestSpecificUChar32RangeIdeographSymbol(0x2776, 0x277F);
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x2B1A));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x2B1A));
 
   TestSpecificUChar32RangeIdeographSymbol(0x2FF0, 0x302D);
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x3031));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x312F));
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0x3130));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x3031));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x312F));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0x3130));
 
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0x318F));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x3190));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x319F));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x31BF));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0x318F));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x3190));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x319F));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x31BF));
 
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0x31FF));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x3200));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x3300));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x33FF));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0x31FF));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x3200));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x3300));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x33FF));
 
   TestSpecificUChar32RangeIdeographSymbol(0xF860, 0xF862);
   TestSpecificUChar32RangeIdeographSymbol(0xFE30, 0xFE6F);
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0xFE10));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0xFE11));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0xFE12));
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0xFE19));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0xFE10));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0xFE11));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0xFE12));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0xFE19));
 
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0xFF0D));
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0xFF1B));
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0xFF1C));
-  EXPECT_FALSE(IsCJKIdeographOrSymbolWithMessage(0xFF1E));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0xFF0D));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0xFF1B));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0xFF1C));
+  EXPECT_FALSE(IsCjkIdeographOrSymbolWithMessage(0xFF1E));
 
   TestSpecificUChar32RangeIdeographSymbol(0xFF00, 0xFFEF);
 
-  EXPECT_TRUE(IsCJKIdeographOrSymbolWithMessage(0x1F100));
+  EXPECT_TRUE(IsCjkIdeographOrSymbolWithMessage(0x1F100));
 
   TestSpecificUChar32RangeIdeographSymbol(0x1F110, 0x1F129);
   TestSpecificUChar32RangeIdeographSymbol(0x1F130, 0x1F149);
   TestSpecificUChar32RangeIdeographSymbol(0x1F150, 0x1F169);
   TestSpecificUChar32RangeIdeographSymbol(0x1F170, 0x1F189);
   TestSpecificUChar32RangeIdeographSymbol(0x1F1E6, 0x1F6FF);
+}
+
+TEST(CharacterTest, HanKerning) {
+  struct Data {
+    UChar32 ch;
+    HanKerningCharType type;
+  } data_list[] = {
+      {uchar::kLeftDoubleQuotationMark, HanKerningCharType::kOpenQuote},
+      {uchar::kRightDoubleQuotationMark, HanKerningCharType::kCloseQuote},
+      {uchar::kMiddleDot, HanKerningCharType::kMiddle},
+      {uchar::kIdeographicSpace, HanKerningCharType::kMiddle},
+      {uchar::kFullwidthComma, HanKerningCharType::kDot},
+      {0x3008, HanKerningCharType::kOpen},
+      {0xFF5F, HanKerningCharType::kOpen},
+      {0x3009, HanKerningCharType::kClose},
+      {0xFF60, HanKerningCharType::kClose},
+      {0x0028, HanKerningCharType::kOpenNarrow},
+      {0xFF62, HanKerningCharType::kOpenNarrow},
+      {0x0029, HanKerningCharType::kCloseNarrow},
+      {0xFF63, HanKerningCharType::kCloseNarrow},
+  };
+  for (const Data& data : data_list) {
+    EXPECT_EQ(Character::GetHanKerningCharType(data.ch), data.type);
+  }
 }
 
 TEST(CharacterTest, CanTextDecorationSkipInk) {
@@ -307,6 +455,15 @@ TEST(CharacterTest, TestEmoji40Data) {
   EXPECT_TRUE(Character::IsEmojiModifierBase(0x1F933));
 }
 
+TEST(CharacterTest, EmojiReserved) {
+#if U_ICU_VERSION_MAJOR_NUM >= 78
+  EXPECT_TRUE(Character::IsEmoji(0x1FAEF));
+#else
+  EXPECT_TRUE(Character::IsEmojiReserved(0x1FAEF));
+#endif
+  EXPECT_TRUE(Character::IsEmojiReserved(0x1FFFD));
+}
+
 TEST(CharacterTest, LineBreakAndQuoteNotEmoji) {
   EXPECT_FALSE(Character::IsEmojiTextDefault('\n'));
   EXPECT_FALSE(Character::IsEmojiTextDefault('"'));
@@ -316,20 +473,20 @@ TEST(CharacterTest, Truncation) {
   const UChar32 kBase = 0x90000;
   UChar32 test_char = 0;
 
-  test_char = kBase + kSpaceCharacter;
+  test_char = kBase + uchar::kSpace;
   EXPECT_FALSE(Character::TreatAsSpace(test_char));
-  test_char = kBase + kNoBreakSpaceCharacter;
+  test_char = kBase + uchar::kNoBreakSpace;
   EXPECT_FALSE(Character::TreatAsSpace(test_char));
 
-  test_char = kBase + kZeroWidthNonJoinerCharacter;
+  test_char = kBase + uchar::kZeroWidthNonJoiner;
   EXPECT_FALSE(Character::TreatAsZeroWidthSpace(test_char));
-  test_char = kBase + kZeroWidthJoinerCharacter;
+  test_char = kBase + uchar::kZeroWidthJoiner;
   EXPECT_FALSE(Character::TreatAsZeroWidthSpace(test_char));
 
   test_char = kBase + 0x12;
   EXPECT_FALSE(Character::TreatAsZeroWidthSpaceInComplexScript(test_char));
   EXPECT_FALSE(Character::TreatAsZeroWidthSpaceInComplexScript(test_char));
-  test_char = kBase + kObjectReplacementCharacter;
+  test_char = kBase + uchar::kObjectReplacementCharacter;
   EXPECT_FALSE(Character::TreatAsZeroWidthSpaceInComplexScript(test_char));
 
   test_char = kBase + 0xA;
@@ -427,17 +584,17 @@ TEST(CharacterTest, IsVerticalMathCharacter) {
       0x290F, 0x2910, 0x294E, 0x2950, 0x2952, 0x2953, 0x2956, 0x2957, 0x295A,
       0x295B, 0x295E, 0x295F, 0x2B45, 0x2B46, 0xFE35, 0xFE36, 0xFE37, 0xFE38};
 
-  for (UChar32 test_char = 0; test_char < kMaxCodepoint; test_char++) {
-    if (test_char == kArabicMathematicalOperatorMeemWithHahWithTatweel) {
+  for (UChar32 test_char = 0; test_char < uchar::kMaxCodepoint; test_char++) {
+    if (test_char == uchar::kArabicMathematicalOperatorMeemWithHahWithTatweel) {
       EXPECT_FALSE(Character::IsVerticalMathCharacter(test_char));
-    } else if (test_char == kArabicMathematicalOperatorHahWithDal) {
+    } else if (test_char == uchar::kArabicMathematicalOperatorHahWithDal) {
       EXPECT_FALSE(Character::IsVerticalMathCharacter(test_char));
     } else {
-      bool in_vertical =
-          !std::binary_search(stretchy_operator_with_inline_axis,
-                              stretchy_operator_with_inline_axis +
-                                  std::size(stretchy_operator_with_inline_axis),
-                              test_char);
+      bool in_vertical = !std::binary_search(
+          stretchy_operator_with_inline_axis,
+          UNSAFE_TODO(stretchy_operator_with_inline_axis +
+                      std::size(stretchy_operator_with_inline_axis)),
+          test_char);
       EXPECT_TRUE(Character::IsVerticalMathCharacter(test_char) == in_vertical);
     }
   }
@@ -465,6 +622,296 @@ TEST(CharacterTest, EmojiComponents) {
 
   for (auto true_test : true_set)
     EXPECT_TRUE(Character::IsEmojiComponent(true_test));
+}
+
+// Ensure that the iterator forwarding in SymbolsIterator is not
+// skipping any other categories that would be computed for the same cursor
+// position and codepoint.
+TEST(CharacterTest, MaybeEmojiPresentationNoIllegalShortcut) {
+  for (UChar32 ch = 0; ch < uchar::kMaxCodepoint; ++ch) {
+    const EmojiSegmentationCategory emoji = GetEmojiSegmentationCategory(ch);
+    if (IsEmojiPresentationCategory(emoji)) {
+      EXPECT_TRUE(Character::MaybeEmojiPresentation(ch));
+    }
+    if (!Character::MaybeEmojiPresentation(ch)) {
+      EXPECT_FALSE(IsEmojiPresentationCategory(emoji));
+    }
+  }
+}
+
+TEST(CharacterTest, TestIsStandardizedVariationSequence) {
+  EXPECT_TRUE(Character::IsStandardizedVariationSequence(0x2293, 0xfe00));
+  EXPECT_TRUE(Character::IsStandardizedVariationSequence(0x8279, 0xfe00));
+  EXPECT_TRUE(Character::IsStandardizedVariationSequence(0x8279, 0xfe01));
+  EXPECT_FALSE(Character::IsStandardizedVariationSequence(0x8279, 0xe0100));
+  EXPECT_FALSE(Character::IsStandardizedVariationSequence(0x8279, 0xfe03));
+}
+
+TEST(CharacterTest, TestIsEmojiVariationSequence) {
+  EXPECT_TRUE(Character::IsEmojiVariationSequence(0x1fae8, 0xfe0f));
+  EXPECT_TRUE(Character::IsEmojiVariationSequence(0x0030, 0xfe0e));
+  EXPECT_FALSE(Character::IsEmojiVariationSequence(0x1faf0, 0xfe00));
+  EXPECT_FALSE(Character::IsEmojiVariationSequence(0x0041, 0xfe0f));
+}
+
+TEST(CharacterTest, TestIsIdeographicVariationSequence) {
+  EXPECT_TRUE(Character::IsIdeographicVariationSequence(0x8279, 0xe0100));
+  EXPECT_TRUE(Character::IsIdeographicVariationSequence(0x8279, 0xe01ef));
+  EXPECT_TRUE(Character::IsIdeographicVariationSequence(0x9038, 0xe0101));
+  EXPECT_TRUE(Character::IsIdeographicVariationSequence(0x9038, 0xe01ef));
+  EXPECT_FALSE(Character::IsIdeographicVariationSequence(0x9038, 0xfe00));
+  EXPECT_FALSE(Character::IsIdeographicVariationSequence(0x0041, 0xe0100));
+}
+
+// The test data are sampled from the ground truth.
+TEST(CharacterTest, TestEastAsianSpacingPropertySampling) {
+  // MICRO SIGN
+  EXPECT_EQ(Character::GetEastAsianSpacingType(0x00B5),
+            EastAsianSpacingType::kNarrow);
+  // WAVY DASH
+  EXPECT_EQ(Character::GetEastAsianSpacingType(0x3030),
+            EastAsianSpacingType::kOther);
+  // KAWI DANDA
+  EXPECT_EQ(Character::GetEastAsianSpacingType(0x11F43),
+            EastAsianSpacingType::kConditional);
+  // KATAKANA LETTER SMALL KO
+  EXPECT_EQ(Character::GetEastAsianSpacingType(0x1B155),
+            EastAsianSpacingType::kWide);
+}
+
+namespace {
+
+// https://www.unicode.org/reports/tr59/#UTR59-D2.
+static std::vector<UScriptCode> east_asian_script_codes{
+    USCRIPT_BOPOMOFO, USCRIPT_HAN,      USCRIPT_HANGUL,
+    USCRIPT_HIRAGANA, USCRIPT_KATAKANA, USCRIPT_KHITAN_SMALL_SCRIPT,
+    USCRIPT_NUSHU,    USCRIPT_TANGUT,   USCRIPT_YI};
+
+// returns true if the script code is in the above list.
+bool IsEastAsianScript(const UScriptCode& script_code) {
+  return std::ranges::contains(east_asian_script_codes, script_code);
+}
+
+// returns true if any of script_extension is in the above list.
+bool HasEastAsianScriptExtention(
+    const std::vector<UScriptCode>& script_extension) {
+  for (const UScriptCode& east_asian_script_extension_code :
+       east_asian_script_codes) {
+    if (std::ranges::contains(script_extension,
+                              east_asian_script_extension_code)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ShouldBeWidth(UChar32 test_char,
+                   UScriptCode script_code,
+                   UEastAsianWidth east_asian_width,
+                   const std::vector<UScriptCode>& script_extension) {
+  // Include the following code point: U+3013 GETA MARK
+  if (test_char == 0x3013) {
+    return true;
+  }
+  // Exclude if the East_Asian_Width property is “East Asian Halfwidth (H)”.
+  if (east_asian_width == UEastAsianWidth::U_EA_HALFWIDTH) {
+    return false;
+  }
+  // Exclude if the General_Category property is “Punctuation (P)” or
+  // “Other_Number (No)”.
+  const uint32_t gc_mask = U_GET_GC_MASK(test_char);
+  if (gc_mask & U_GC_P_MASK) {
+    return false;
+  }
+  if (gc_mask & U_GC_NO_MASK) {
+    return false;
+  }
+  // Exclude if the General_Category property is “Symbol (S)” except
+  // “Modifier_Symbol (Sk)”.
+  if ((gc_mask & U_GC_S_MASK) && !(gc_mask & U_GC_SK_MASK)) {
+    return false;
+  }
+  // Include if the Script property is one of the East Asian scripts.
+  // Include if the Script_Extensions property is one of the East Asian scripts,
+  // except when the East_Asian_Width property is “Neutral (N)” or “Narrow
+  // (Na)”.
+  return IsEastAsianScript(script_code) ||
+         (HasEastAsianScriptExtention(script_extension) &&
+          east_asian_width != UEastAsianWidth::U_EA_NEUTRAL &&
+          east_asian_width != UEastAsianWidth::U_EA_NARROW);
+}
+
+bool ShouldBeConditional(UChar32 test_char, UEastAsianWidth east_asian_width) {
+  // Exclude the following code points: U+0022 QUOTATION MARK U+0027 APOSTROPHE
+  // U+002A ASTERISK U+002F SOLIDUS U+00B7 MIDDLE DOT U+2020 DAGGER U+2021
+  // DOUBLE DAGGER U+2026 HORIZONTAL ELLIPSIS
+  static std::vector<UChar32> not_conditional{0x0022, 0x0027, 0x002A, 0x002F,
+                                              0x00B7, 0x2020, 0x2021, 0x2026};
+  if (std::ranges::contains(not_conditional, test_char)) {
+    return false;
+  }
+  // Exclude if the East_Asian_Width property is “East Asian Fullwidth (F)”,
+  // “East Asian Halfwidth (H)”, or “East Asian Wide (W)”.
+  if (east_asian_width == UEastAsianWidth::U_EA_FULLWIDTH ||
+      east_asian_width == UEastAsianWidth::U_EA_HALFWIDTH ||
+      east_asian_width == UEastAsianWidth::U_EA_WIDE) {
+    return false;
+  }
+  // Include if the General_Category property is “Other_Punctuation (Po)”.
+  const uint32_t gc_mask = U_GET_GC_MASK(test_char);
+  return gc_mask & U_GC_PO_MASK;
+}
+
+bool ShouldBeNarrow(UChar32 test_char, UEastAsianWidth east_asian_width) {
+  // Exclude if the East_Asian_Width property is “East Asian Fullwidth (F)”,
+  // “East Asian Halfwidth (H)”, or “East Asian Wide (W)”.
+  if (east_asian_width == UEastAsianWidth::U_EA_FULLWIDTH ||
+      east_asian_width == UEastAsianWidth::U_EA_HALFWIDTH ||
+      east_asian_width == UEastAsianWidth::U_EA_WIDE) {
+    return false;
+  }
+  const uint32_t gc_mask = U_GET_GC_MASK(test_char);
+  // Exclude if the East_Asian_Width property is “East Asian Fullwidth (F)",
+  // “East Asian Halfwidth (H)”, or “East Asian Wide (W)”.
+  return (gc_mask & U_GC_L_MASK) || (gc_mask & U_GC_M_MASK) ||
+         (gc_mask & U_GC_ND_MASK);
+}
+
+}  // namespace
+
+// Check the property based on https://www.unicode.org/reports/tr59/#data.
+TEST(CharacterTest, TestEastAsianSpacingPropertyRule) {
+  for (UChar32 test_char = 0; test_char < uchar::kMaxCodepoint; test_char++) {
+    if (U_GC_CN_MASK & U_GET_GC_MASK(test_char)) {
+      continue;
+    }
+    UErrorCode error_code = U_ZERO_ERROR;
+    UScriptCode script = uscript_getScript(test_char, &error_code);
+    ASSERT_TRUE(U_SUCCESS(error_code));
+    std::vector<UScriptCode> script_list(32);
+    int32_t required_capacity = uscript_getScriptExtensions(
+        test_char, script_list.data(), static_cast<int32_t>(script_list.size()),
+        &error_code);
+    ASSERT_TRUE(U_SUCCESS(error_code))
+        << error_code << "\t" << required_capacity;
+    UEastAsianWidth east_asian_width = Character::EastAsianWidth(test_char);
+
+    switch (Character::GetEastAsianSpacingType(test_char)) {
+      case EastAsianSpacingType::kWide:
+        EXPECT_TRUE(
+            ShouldBeWidth(test_char, script, east_asian_width, script_list))
+            << test_char << "should not be Wide";
+        break;
+      case EastAsianSpacingType::kConditional:
+        EXPECT_FALSE(
+            ShouldBeWidth(test_char, script, east_asian_width, script_list))
+            << test_char << "should not be wide";
+        EXPECT_TRUE(ShouldBeConditional(test_char, east_asian_width))
+            << test_char << "should be conditional";
+        break;
+      case EastAsianSpacingType::kNarrow:
+        EXPECT_FALSE(
+            ShouldBeWidth(test_char, script, east_asian_width, script_list))
+            << test_char << "should not be wide";
+        EXPECT_FALSE(ShouldBeConditional(test_char, east_asian_width))
+            << test_char << "should not be conditional";
+        EXPECT_TRUE(ShouldBeNarrow(test_char, east_asian_width))
+            << test_char << "should be narrow";
+        break;
+      case EastAsianSpacingType::kOther:
+        ASSERT_FALSE(
+            ShouldBeWidth(test_char, script, east_asian_width, script_list))
+            << test_char << "should not be wide";
+        EXPECT_FALSE(ShouldBeConditional(test_char, east_asian_width))
+            << test_char << "should not be conditional";
+        EXPECT_FALSE(ShouldBeNarrow(test_char, east_asian_width))
+            << test_char << "should be narrow";
+        break;
+    }
+  }
+}
+
+TEST(CharacterTest, ExpansionOpportunityEmoji) {
+  // a, an emoji ZWJ sequence, z
+  // We should count both side of the emoji sequence.
+  StringView source(u"a\U0001F635\u200d\U0001f4ABz");
+  {
+    JustificationContext context;
+    EXPECT_EQ(2u,
+              context.CountOpportunities(TextJustify::kAuto, source.Span16(),
+                                         TextDirection::kLtr));
+    EXPECT_FALSE(context.IsAfterOpportunity());
+  }
+
+  {
+    JustificationContext context;
+    EXPECT_EQ(2u,
+              context.CountOpportunities(TextJustify::kAuto, source.Span16(),
+                                         TextDirection::kRtl));
+    EXPECT_FALSE(context.IsAfterOpportunity());
+  }
+}
+
+static struct CanReceiveTextEmphasisTestData {
+  const UChar32 character;
+  bool expected;
+} can_receive_text_emphasis_test_data[] = {
+    {u'0', true},
+    {u'a', true},
+    {u'人', true},
+    {u'한', true},
+    // Additional word-separator characters.
+    {uchar::kEthiopicWordspace, false},
+    {uchar::kAegeanWordSeparatorLine, false},
+    {uchar::kAegeanWordSeparatorDot, false},
+    {uchar::kUgariticWordDivider, false},
+    {uchar::kTibetanMarkIntersyllabicTsheg, false},
+    {uchar::kTibetanMarkDelimiterTshegBstar, false},
+    // Punctuation.
+    {u'(', false},
+    {u']', false},
+    {u'!', false},
+    {u' ', false},
+    {u'，', false},
+    // A set of exceptions for punctuation.
+    {uchar::kNumberSign, true},
+    {uchar::kPercentSign, true},
+    {uchar::kAmpersand, true},
+    {uchar::kCommercialAt, true},
+    {uchar::kSectionSign, true},
+    {uchar::kPilcrowSign, true},
+    {uchar::kArabicIndicPerMilleSign, true},
+    {uchar::kArabicIndicPerTenThousandSign, true},
+    {uchar::kArabicPercentSign, true},
+    {uchar::kPerMilleSign, true},
+    {uchar::kPerTenThousandSign, true},
+    {uchar::kTironianSignEt, true},
+    {uchar::kReversedPilcrowSign, true},
+    {uchar::kSwungDash, true},
+    {uchar::kPartAlternationMark, true},
+    // Characters with NFKD equivalence to the above.
+    {uchar::kSmallNumberSign, true},
+    {uchar::kSmallAmpersand, true},
+    {uchar::kSmallPercentSign, true},
+    {uchar::kSmallCommercialAt, true},
+    {uchar::kFullwidthNumberSign, true},
+    {uchar::kFullwidthPercentSign, true},
+    {uchar::kFullwidthAmpersand, true},
+    {uchar::kFullwidthCommercialAt, true},
+};
+
+class CanReceiveTextEmphasisTest
+    : public testing::Test,
+      public testing::WithParamInterface<CanReceiveTextEmphasisTestData> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    CanReceiveTextEmphasisTest,
+    CanReceiveTextEmphasisTest,
+    testing::ValuesIn(can_receive_text_emphasis_test_data));
+
+TEST_P(CanReceiveTextEmphasisTest, ToLowerWithoutOffset) {
+  const auto data = GetParam();
+  EXPECT_EQ(Character::CanReceiveTextEmphasis(data.character), data.expected);
 }
 
 }  // namespace blink

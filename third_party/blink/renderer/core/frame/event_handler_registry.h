@@ -5,10 +5,13 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_EVENT_HANDLER_REGISTRY_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_EVENT_HANDLER_REGISTRY_H_
 
+#include <array>
+
 #include "base/dcheck_is_on.h"
 #include "third_party/blink/renderer/core/core_export.h"  // TODO(sashab): Remove this.
-#include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/platform/heap/forward.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/member.h"
 #include "third_party/blink/renderer/platform/wtf/hash_counted_set.h"
 
 namespace blink {
@@ -17,6 +20,7 @@ class AddEventListenerOptions;
 class Document;
 class EventTarget;
 class LocalFrame;
+class Page;
 
 // We use UntracedMember<> here to do custom weak processing.
 typedef HashCountedSet<UntracedMember<EventTarget>> EventTargetSet;
@@ -30,7 +34,7 @@ class CORE_EXPORT EventHandlerRegistry final
     : public GarbageCollected<EventHandlerRegistry> {
  public:
   explicit EventHandlerRegistry(LocalFrame&);
-  virtual ~EventHandlerRegistry();
+  ~EventHandlerRegistry();
 
   // Supported event handler classes. Note that each one may correspond to
   // multiple event types.
@@ -65,15 +69,21 @@ class CORE_EXPORT EventHandlerRegistry final
   void DidAddEventHandler(EventTarget&,
                           const AtomicString& event_type,
                           const AddEventListenerOptions*);
+  void DidAddEventHandler(EventTarget&,
+                          const AtomicString& event_type,
+                          bool passive);
   void DidAddEventHandler(EventTarget&, EventHandlerClass);
   void DidRemoveEventHandler(EventTarget&,
                              const AtomicString& event_type,
                              const AddEventListenerOptions*);
+  void DidRemoveEventHandler(EventTarget&,
+                             const AtomicString& event_type,
+                             bool passive);
   void DidRemoveEventHandler(EventTarget&, EventHandlerClass);
   void DidRemoveAllEventHandlers(EventTarget&);
 
-  void DidMoveIntoPage(EventTarget&);
-  void DidMoveOutOfPage(EventTarget&);
+  void DidMoveIntoLocalRoot(EventTarget&);
+  void DidMoveOutOfLocalRoot(EventTarget&);
 
   // Either |documentDetached| or |didMove{Into,OutOf,Between}Pages| must
   // be called whenever the Page that is associated with a registered event
@@ -93,7 +103,7 @@ class CORE_EXPORT EventHandlerRegistry final
 
   // Returns true if |eventType| belongs to a class this registry tracks.
   static bool EventTypeToClass(const AtomicString& event_type,
-                               const AddEventListenerOptions*,
+                               bool passive,
                                EventHandlerClass* result);
 
   // Returns true if the operation actually added a new target or completely
@@ -114,7 +124,7 @@ class CORE_EXPORT EventHandlerRegistry final
   // parent registry and other clients accordingly.
   void UpdateEventHandlerOfType(ChangeOperation,
                                 const AtomicString& event_type,
-                                const AddEventListenerOptions*,
+                                bool passive,
                                 EventTarget*);
 
   bool UpdateEventHandlerInternal(ChangeOperation,
@@ -130,7 +140,7 @@ class CORE_EXPORT EventHandlerRegistry final
   void ProcessCustomWeakness(const LivenessBroker&);
 
   Member<LocalFrame> frame_;
-  EventTargetSet targets_[kEventHandlerClassCount];
+  std::array<EventTargetSet, kEventHandlerClassCount> targets_;
 };
 
 }  // namespace blink

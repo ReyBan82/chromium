@@ -7,17 +7,13 @@ package org.chromium.components.browser_ui.photo_picker;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RuntimeEnvironment;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
 import java.util.Collections;
 
-/**
- * junit tests for the {@link PickerBitmapView} class.
- */
+/** junit tests for the {@link PickerBitmapView} class. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class PickerBitmapViewTest {
     @Test
     public void testPrematureOnSelectionStateChanged() {

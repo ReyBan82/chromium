@@ -2,35 +2,33 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
--keepclassmembers class org.chromium.android_webview.AwPdfExporter {
-    android.view.ViewGroup mContainerView;
-}
-
 # Keep the factory and its public members; it's the main entry point used by the
-# framework.
--keep class com.android.webview.chromium.WebViewChromiumFactoryProvider {
+# framework. Also keep the factory's constructors as some things are using them
+# via reflection; crbug.com/1462346
+-keep,allowoptimization class com.android.webview.chromium.WebViewChromiumFactoryProvider {
     public *;
+    <init>(...);
+}
+-keep,allowoptimization class com.android.webview.chromium.WebViewChromiumFactoryProviderFor* {
+    public *;
+    <init>(...);
 }
 
--keep class * implements android.webkit.WebViewFactoryProvider$Statics {
+-keep,allowoptimization class * implements android.webkit.WebViewFactoryProvider$Statics {
     *;
 }
 
--keep class com.android.webview.chromium.ContentSettingsAdapter {
+-keep,allowoptimization class com.android.webview.chromium.ContentSettingsAdapter {
     public *;
 }
 
--keep class com.android.webview.chromium.WebViewChromiumFactoryProviderFor* {
-    public *;
-}
-
--keep class com.android.webview.chromium.WebViewDatabaseAdapter {
+-keep,allowoptimization class com.android.webview.chromium.WebViewDatabaseAdapter {
   public *;
 }
 
 # This is the main entry point for APIs. It is kept to make developing with
 # unreleased Android easier.
--keep class com.android.webview.chromium.WebViewChromium {
+-keep,allowoptimization class com.android.webview.chromium.WebViewChromium {
   public *;
 }
 
@@ -54,3 +52,15 @@
     java.nio.channels.FileLock sExclusiveFileLock;
     java.io.RandomAccessFile sLockFile;
 }
+
+# Keep the chromium implementation names deobfuscated. These classes'
+# names are used by CTS to verify compatibility with the androidx.webkit
+# library.
+-keep,allowshrinking class com.android.webview.chromium.CookieManagerAdapter
+-keep,allowshrinking class com.android.webview.chromium.ContentSettingsAdapter
+-keep,allowshrinking class com.android.webview.chromium.WebMessagePortAdapter
+-keep,allowshrinking class com.android.webview.chromium.WebStorageAdapter
+-keep,allowshrinking class com.android.webview.chromium.ServiceWorkerSettingsAdapter
+-keep,allowshrinking class com.android.webview.chromium.WebResourceRequestAdapter
+-keep,allowshrinking class com.android.webview.chromium.WebResourceErrorAdapter
+-keep,allowshrinking class com.android.webview.chromium.SafeBrowsingResponseAdapter

@@ -4,6 +4,7 @@
 
 #include "base/profiler/stack_copier_suspend.h"
 
+#include "base/profiler/register_context_registers.h"
 #include "base/profiler/stack_buffer.h"
 #include "base/profiler/suspendable_thread_delegate.h"
 
@@ -39,11 +40,13 @@ bool StackCopierSuspend::CopyStack(StackBuffer* stack_buffer,
     // counter or TSC register on x86/x86_64 so is reentrant.
     *timestamp = TimeTicks::Now();
 
-    if (!suspend_thread->WasSuccessful())
+    if (!suspend_thread->WasSuccessful()) {
       return false;
+    }
 
-    if (!thread_delegate_->GetThreadContext(thread_context))
+    if (!thread_delegate_->GetThreadContext(thread_context)) {
       return false;
+    }
 
     bottom = RegisterContextStackPointer(thread_context);
 
@@ -51,11 +54,13 @@ bool StackCopierSuspend::CopyStack(StackBuffer* stack_buffer,
     // largest stack region allocation on the platform, but check just in case
     // it isn't *and* the actual stack itself exceeds the buffer allocation
     // size.
-    if ((top - bottom) > stack_buffer->size())
+    if ((top - bottom) > stack_buffer->size_bytes()) {
       return false;
+    }
 
-    if (!thread_delegate_->CanCopyStack(bottom))
+    if (!thread_delegate_->CanCopyStack(bottom)) {
       return false;
+    }
 
     delegate->OnStackCopy();
 
@@ -66,14 +71,26 @@ bool StackCopierSuspend::CopyStack(StackBuffer* stack_buffer,
 
   *stack_top = reinterpret_cast<uintptr_t>(stack_copy_bottom) + (top - bottom);
 
-  for (uintptr_t* reg :
-       thread_delegate_->GetRegistersToRewrite(thread_context)) {
-    *reg = RewritePointerIfInOriginalStack(reinterpret_cast<uint8_t*>(bottom),
-                                           reinterpret_cast<uintptr_t*>(top),
-                                           stack_copy_bottom, *reg);
+  std::vector<uintptr_t> registers =
+      thread_delegate_->GetRegisters(thread_context);
+  for (uintptr_t& reg : registers) {
+    reg = RewritePointerIfInOriginalStack(reinterpret_cast<uint8_t*>(bottom),
+                                          reinterpret_cast<uintptr_t*>(top),
+                                          stack_copy_bottom, reg);
   }
+  thread_delegate_->SetRegisters(thread_context, registers);
 
   return true;
+}
+
+std::vector<uintptr_t> StackCopierSuspend::GetRegisters(
+    RegisterContext* thread_context) {
+  return thread_delegate_->GetRegisters(thread_context);
+}
+
+void StackCopierSuspend::SetRegisters(RegisterContext* thread_context,
+                                      const std::vector<uintptr_t>& registers) {
+  thread_delegate_->SetRegisters(thread_context, registers);
 }
 
 }  // namespace base

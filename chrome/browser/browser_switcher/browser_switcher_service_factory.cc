@@ -7,6 +7,7 @@
 #include "build/build_config.h"
 #include "chrome/browser/browser_switcher/browser_switcher_service.h"
 #include "chrome/browser/profiles/profile.h"
+#include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_context.h"
@@ -17,10 +18,6 @@
 
 #if BUILDFLAG(IS_CHROMEOS)
 #error BrowserSwitcher is not supported on ChromeOS. Neither Ash nor LaCrOS.
-#endif
-
-#if BUILDFLAG(IS_FUCHSIA)
-#error BrowserSwitcher is not support on Fuchsia.
 #endif
 
 namespace browser_switcher {
@@ -37,7 +34,8 @@ using BrowserSwitcherServiceImpl = BrowserSwitcherService;
 
 // static
 BrowserSwitcherServiceFactory* BrowserSwitcherServiceFactory::GetInstance() {
-  return base::Singleton<BrowserSwitcherServiceFactory>::get();
+  static base::NoDestructor<BrowserSwitcherServiceFactory> instance;
+  return instance.get();
 }
 
 // static
@@ -48,17 +46,21 @@ BrowserSwitcherService* BrowserSwitcherServiceFactory::GetForBrowserContext(
 }
 
 BrowserSwitcherServiceFactory::BrowserSwitcherServiceFactory()
-    : ProfileKeyedServiceFactory("BrowserSwitcherServiceFactory",
-                                 // Only create BrowserSwitcherService for
-                                 // regular, non-Incognito profiles.
-                                 ProfileSelections::BuildForRegularProfile()) {}
+    : BrowserContextKeyedServiceFactory(
+          "BrowserSwitcherServiceFactory",
+          BrowserContextDependencyManager::GetInstance()) {}
 
-BrowserSwitcherServiceFactory::~BrowserSwitcherServiceFactory() {}
+BrowserSwitcherServiceFactory::~BrowserSwitcherServiceFactory() = default;
 
-KeyedService* BrowserSwitcherServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+BrowserSwitcherServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  auto* instance =
-      new BrowserSwitcherServiceImpl(Profile::FromBrowserContext(context));
+  Profile* profile = Profile::FromBrowserContext(context);
+  if (!profile || !profile->IsRegularProfile()) {
+    return nullptr;
+  }
+  std::unique_ptr<BrowserSwitcherServiceImpl> instance =
+      std::make_unique<BrowserSwitcherServiceImpl>(profile);
   instance->Init();
   return instance;
 }

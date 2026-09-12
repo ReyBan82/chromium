@@ -13,32 +13,45 @@
 #include "components/browsing_data/core/browsing_data_utils.h"
 #include "components/browsing_data/core/pref_names.h"
 #include "components/prefs/pref_service.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
 
 namespace browsing_data {
 
 namespace {
 static const int kDelayUntilShowCalculatingMs = 140;
 static const int kDelayUntilReadyToShowResultMs = 1000;
-}
+}  // namespace
 
 BrowsingDataCounter::BrowsingDataCounter()
     : initialized_(false), use_delay_(true), state_(State::IDLE) {}
 
-BrowsingDataCounter::~BrowsingDataCounter() {}
+BrowsingDataCounter::~BrowsingDataCounter() = default;
 
 void BrowsingDataCounter::Init(PrefService* pref_service,
-                               ClearBrowsingDataTab clear_browsing_data_tab,
                                ResultCallback callback) {
   DCHECK(!initialized_);
   callback_ = std::move(callback);
-  clear_browsing_data_tab_ = clear_browsing_data_tab;
   pref_.Init(GetPrefName(), pref_service,
              base::BindRepeating(&BrowsingDataCounter::Restart,
                                  base::Unretained(this)));
-  period_.Init(GetTimePeriodPreferenceName(GetTab()), pref_service,
+  period_.Init(GetTimePeriodPreferenceName(), pref_service,
                base::BindRepeating(&BrowsingDataCounter::Restart,
                                    base::Unretained(this)));
 
+  initialized_ = true;
+  OnInitialized();
+}
+
+void BrowsingDataCounter::InitWithoutPeriodPref(
+    PrefService* pref_service,
+    base::Time begin_time,
+    ResultCallback callback) {
+  DCHECK(!initialized_);
+  callback_ = std::move(callback);
+  pref_.Init(GetPrefName(), pref_service,
+             base::BindRepeating(&BrowsingDataCounter::Restart,
+                                 base::Unretained(this)));
+  begin_time_ = begin_time;
   initialized_ = true;
   OnInitialized();
 }
@@ -48,7 +61,6 @@ void BrowsingDataCounter::InitWithoutPref(base::Time begin_time,
   DCHECK(!initialized_);
   use_delay_ = false;
   callback_ = std::move(callback);
-  clear_browsing_data_tab_ = ClearBrowsingDataTab::ADVANCED;
   begin_time_ = begin_time;
   initialized_ = true;
   OnInitialized();
@@ -70,9 +82,9 @@ base::Time BrowsingDataCounter::GetPeriodEnd() {
 
 void BrowsingDataCounter::Restart() {
   DCHECK(initialized_);
-  TRACE_EVENT_NESTABLE_ASYNC_BEGIN1(
-      "browsing_data", "BrowsingDataCounter::Restart", TRACE_ID_LOCAL(this),
-      "data_type", GetPrefName());
+  TRACE_EVENT_BEGIN("browsing_data", "BrowsingDataCounter::Restart",
+                    perfetto::Track::FromPointer(this), "data_type",
+                    GetPrefName());
   if (state_ == State::IDLE) {
     DCHECK(!timer_.IsRunning());
     DCHECK(!staged_result_);
@@ -95,6 +107,12 @@ void BrowsingDataCounter::Restart() {
   Count();
 }
 
+void BrowsingDataCounter::SetBeginTime(base::Time begin_time) {
+  DCHECK(period_.GetPrefName().empty());
+  begin_time_ = begin_time;
+  Restart();
+}
+
 void BrowsingDataCounter::ReportResult(ResultInt value) {
   ReportResult(std::make_unique<FinishedResult>(this, value));
 }
@@ -102,9 +120,10 @@ void BrowsingDataCounter::ReportResult(ResultInt value) {
 void BrowsingDataCounter::ReportResult(std::unique_ptr<Result> result) {
   DCHECK(initialized_);
   DCHECK(result->Finished());
-  TRACE_EVENT_NESTABLE_ASYNC_END1(
-      "browsing_data", "BrowsingDataCounter::Restart", TRACE_ID_LOCAL(this),
-      "data_type", GetPrefName());
+
+  TRACE_EVENT_END(
+      "browsing_data",
+      /* BrowsingDataCounter::Restart */ perfetto::Track::FromPointer(this));
   switch (state_) {
     case State::RESTARTED:
     case State::READY_TO_REPORT_RESULT:
@@ -114,11 +133,10 @@ void BrowsingDataCounter::ReportResult(std::unique_ptr<Result> result) {
       staged_result_ = std::move(result);
       return;
     case State::IDLE:
-      NOTREACHED() << "State::IDLE";
+      DUMP_WILL_BE_NOTREACHED() << "State::IDLE";
       return;
     case State::REPORT_STAGED_RESULT:
       NOTREACHED() << "State::REPORT_STAGED_RESULT";
-      return;
   }
 }
 
@@ -138,10 +156,6 @@ void BrowsingDataCounter::DoReportResult(std::unique_ptr<Result> result) {
 const std::vector<BrowsingDataCounter::State>&
 BrowsingDataCounter::GetStateTransitionsForTesting() {
   return state_transitions_;
-}
-
-ClearBrowsingDataTab BrowsingDataCounter::GetTab() const {
-  return clear_browsing_data_tab_;
 }
 
 void BrowsingDataCounter::TransitionToShowCalculating() {
@@ -176,7 +190,7 @@ BrowsingDataCounter::Result::Result(const BrowsingDataCounter* source)
   DCHECK(source);
 }
 
-BrowsingDataCounter::Result::~Result() {}
+BrowsingDataCounter::Result::~Result() = default;
 
 bool BrowsingDataCounter::Result::Finished() const {
   return false;
@@ -189,7 +203,7 @@ BrowsingDataCounter::FinishedResult::FinishedResult(
     ResultInt value)
     : Result(source), value_(value) {}
 
-BrowsingDataCounter::FinishedResult::~FinishedResult() {}
+BrowsingDataCounter::FinishedResult::~FinishedResult() = default;
 
 bool BrowsingDataCounter::FinishedResult::Finished() const {
   return true;
@@ -207,6 +221,6 @@ BrowsingDataCounter::SyncResult::SyncResult(const BrowsingDataCounter* source,
                                             bool sync_enabled)
     : FinishedResult(source, value), sync_enabled_(sync_enabled) {}
 
-BrowsingDataCounter::SyncResult::~SyncResult() {}
+BrowsingDataCounter::SyncResult::~SyncResult() = default;
 
 }  // namespace browsing_data

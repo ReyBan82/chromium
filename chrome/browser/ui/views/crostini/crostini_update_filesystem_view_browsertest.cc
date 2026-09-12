@@ -12,7 +12,7 @@
 #include "chrome/browser/ash/crostini/crostini_util.h"
 #include "chrome/browser/ash/guest_os/guest_id.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/views/crostini/crostini_dialogue_browser_test_util.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chromeos/ash/components/dbus/cicerone/fake_cicerone_client.h"
@@ -20,6 +20,7 @@
 #include "components/crx_file/id_util.h"
 #include "content/public/test/browser_test.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 
 ash::FakeCiceroneClient* GetFakeCiceroneClient() {
   return ash::FakeCiceroneClient::Get();
@@ -39,7 +40,7 @@ class CrostiniUpdateFilesystemViewBrowserTest
   // DialogBrowserTest:
   void ShowUi(const std::string& name) override {
     PrepareShowCrostiniUpdateFilesystemView(
-        browser()->profile(), crostini::CrostiniUISurface::kAppList);
+        browser()->GetProfile(), crostini::CrostiniUISurface::kAppList);
     base::RunLoop().RunUntilIdle();
   }
 
@@ -86,7 +87,8 @@ IN_PROC_BROWSER_TEST_F(CrostiniUpdateFilesystemViewBrowserTest, HitOK) {
 
   ShowUi("default");
   ExpectView();
-  EXPECT_EQ(ui::DIALOG_BUTTON_OK, ActiveView()->GetDialogButtons());
+  EXPECT_EQ(static_cast<int>(ui::mojom::DialogButton::kOk),
+            ActiveView()->buttons());
 
   EXPECT_TRUE(HasAcceptButton());
   EXPECT_FALSE(HasCancelButton());
@@ -97,7 +99,7 @@ IN_PROC_BROWSER_TEST_F(CrostiniUpdateFilesystemViewBrowserTest, HitOK) {
 
   histogram_tester.ExpectUniqueSample(
       "Crostini.UpgradeContainerSource",
-      static_cast<base::HistogramBase::Sample>(
+      static_cast<base::HistogramBase::Sample32>(
           crostini::CrostiniUISurface::kAppList),
       1);
 }
@@ -111,31 +113,7 @@ IN_PROC_BROWSER_TEST_F(CrostiniUpdateFilesystemViewBrowserTest,
   reply.set_status(vm_tools::cicerone::StartLxdContainerResponse::STARTING);
   GetFakeCiceroneClient()->set_start_lxd_container_response(reply);
 
-  crostini::CrostiniManager::GetForProfile(browser()->profile())
+  crostini::CrostiniManager::GetForProfile(browser()->GetProfile())
       ->StartLxdContainer(kGuestId, base::DoNothing());
   ExpectNoView();
-}
-
-IN_PROC_BROWSER_TEST_F(CrostiniUpdateFilesystemViewBrowserTest,
-                       StartLxdContainerUpgradeNeeded) {
-  base::HistogramTester histogram_tester;
-  crostini::SetCrostiniUpdateFilesystemSkipDelayForTesting(true);
-
-  vm_tools::cicerone::StartLxdContainerResponse reply;
-  reply.set_status(vm_tools::cicerone::StartLxdContainerResponse::REMAPPING);
-  GetFakeCiceroneClient()->set_start_lxd_container_response(reply);
-
-  crostini::CrostiniManager::GetForProfile(browser()->profile())
-      ->StartLxdContainer(kGuestId, base::DoNothing());
-  ExpectView();
-
-  ActiveView()->AcceptDialog();
-  EXPECT_TRUE(ActiveView()->GetWidget()->IsClosed());
-  ExpectNoView();
-
-  histogram_tester.ExpectUniqueSample(
-      "Crostini.UpgradeContainerSource",
-      static_cast<base::HistogramBase::Sample>(
-          crostini::CrostiniUISurface::kAppList),
-      1);
 }

@@ -10,7 +10,6 @@
 #include "base/values.h"
 #include "chrome/browser/ash/login/saml/in_session_password_change_manager.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/pref_names.h"
 #include "chromeos/ash/components/login/auth/public/saml_password_attributes.h"
 #include "components/prefs/pref_service.h"
 #include "components/user_manager/user_manager.h"
@@ -52,10 +51,10 @@ ConfirmPasswordChangeHandler::~ConfirmPasswordChangeHandler() {
 }
 
 void ConfirmPasswordChangeHandler::HandleGetInitialState(
-    const base::Value::List& params) {
+    const base::ListValue& params) {
   const std::string callback_id = params[0].GetString();
 
-  base::Value::Dict state;
+  base::DictValue state;
   state.Set("showOldPasswordPrompt", scraped_old_password_.empty());
   state.Set("showNewPasswordPrompt", scraped_new_password_.empty());
   state.Set("showSpinner", show_spinner_initially_);
@@ -65,7 +64,7 @@ void ConfirmPasswordChangeHandler::HandleGetInitialState(
 }
 
 void ConfirmPasswordChangeHandler::HandleChangePassword(
-    const base::Value::List& params) {
+    const base::ListValue& params) {
   const std::string old_password =
       FirstNonEmpty(params[0].GetString(), scraped_old_password_);
   const std::string new_password =

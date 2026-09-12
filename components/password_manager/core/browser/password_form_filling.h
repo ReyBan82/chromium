@@ -5,7 +5,9 @@
 #ifndef COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_PASSWORD_FORM_FILLING_H_
 #define COMPONENTS_PASSWORD_MANAGER_CORE_BROWSER_PASSWORD_FORM_FILLING_H_
 
-#include <vector>
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
+#include "components/autofill/core/common/unique_ids.h"
 
 namespace autofill {
 struct PasswordFormFillData;
@@ -19,6 +21,7 @@ namespace password_manager {
 class PasswordFormMetricsRecorder;
 class PasswordManagerClient;
 class PasswordManagerDriver;
+struct StoredCredential;
 struct PasswordForm;
 
 // Enum detailing the browser process' best belief what kind of credential
@@ -44,12 +47,12 @@ LikelyFormFilling SendFillInformationToRenderer(
     PasswordManagerClient* client,
     PasswordManagerDriver* driver,
     const PasswordForm& observed_form,
-    const std::vector<const PasswordForm*>& best_matches,
-    const std::vector<const PasswordForm*>& federated_matches,
-    const PasswordForm* preferred_match,
-    bool blocked_by_user,
+    base::span<const StoredCredential> best_matches,
+    base::span<const StoredCredential> federated_matches,
+    const StoredCredential* preferred_match,
     PasswordFormMetricsRecorder* metrics_recorder,
-    bool webauthn_suggestions_available);
+    bool webauthn_suggestions_available,
+    base::span<autofill::FieldRendererId> suggestion_banned_fields);
 
 // Create a PasswordFormFillData structure in preparation for filling a form
 // identified by |form_on_page|, with credentials from |preferred_match| and
@@ -57,10 +60,11 @@ LikelyFormFilling SendFillInformationToRenderer(
 // If |wait_for_username| is true then fill on account select will be used.
 autofill::PasswordFormFillData CreatePasswordFormFillData(
     const PasswordForm& form_on_page,
-    const std::vector<const PasswordForm*>& matches,
-    const PasswordForm& preferred_match,
+    base::span<const StoredCredential> best_matches,
+    const StoredCredential* preferred_match,
     const url::Origin& main_frame_origin,
-    bool wait_for_username);
+    bool wait_for_username,
+    base::span<const autofill::FieldRendererId> suggestion_banned_fields);
 
 }  // namespace password_manager
 

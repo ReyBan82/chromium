@@ -23,14 +23,14 @@ namespace {
 // accesses resources.
 class SpellingOptionsSubMenuObserverTest : public InProcessBrowserTest {
  public:
-  SpellingOptionsSubMenuObserverTest() {}
+  SpellingOptionsSubMenuObserverTest() = default;
 
   SpellingOptionsSubMenuObserverTest(
       const SpellingOptionsSubMenuObserverTest&) = delete;
   SpellingOptionsSubMenuObserverTest& operator=(
       const SpellingOptionsSubMenuObserverTest&) = delete;
 
-  ~SpellingOptionsSubMenuObserverTest() override {}
+  ~SpellingOptionsSubMenuObserverTest() override = default;
 
   void SetUpOnMainThread() override {
     menu_ = std::make_unique<MockRenderViewContextMenu>(false);
@@ -58,7 +58,7 @@ class SpellingOptionsSubMenuObserverTest : public InProcessBrowserTest {
         use_spellchecking_service);
     menu()->GetPrefs()->SetString(language::prefs::kAcceptLanguages,
                                   accept_languages);
-    base::Value::List dictionaries_value;
+    base::ListValue dictionaries_value;
     for (const std::string& dict : dictionaries) {
       dictionaries_value.Append(dict);
     }
@@ -71,7 +71,7 @@ class SpellingOptionsSubMenuObserverTest : public InProcessBrowserTest {
                          const std::vector<std::string>& dictionaries) {
     EXPECT_EQ(spellcheck_enabled, menu()->GetPrefs()->GetBoolean(
                                       spellcheck::prefs::kSpellCheckEnable));
-    base::Value::List dictionaries_value;
+    base::ListValue dictionaries_value;
     for (const std::string& dict : dictionaries) {
       dictionaries_value.Append(dict);
     }

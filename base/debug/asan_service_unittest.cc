@@ -11,8 +11,8 @@
 #include <sstream>
 
 #include "base/debug/asan_invalid_access.h"
+#include "base/memory/raw_ref.h"
 #include "base/run_loop.h"
-#include "base/strings/string_piece.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -34,7 +34,7 @@ bool ExitedCleanly(int exit_status) {
   return exit_status == 0;
 }
 
-// TODO(crbug.com/1402267): ASAN death test is not picking up the failure
+// TODO(crbug.com/40884672): ASAN death test is not picking up the failure
 // in the emulator logs. Disabling to keep ASAN queue clear.
 #if BUILDFLAG(IS_FUCHSIA)
 #define MAYBE_ErrorCallback DISABLED_ErrorCallback
@@ -48,16 +48,24 @@ bool ExitedCleanly(int exit_status) {
 #define MAYBE_TaskTraceCallback TaskTraceCallback
 #endif
 
+// TODO(crbug.com/447520906): Fix the test on Mac-ASan and merge this back with
+// the Fuchsia issue above.
+#if BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_MAC)
+#define MAYBE_ShouldAbort DISABLED_ShouldAbort
+#else
+#define MAYBE_ShouldAbort ShouldAbort
+#endif
+
 TEST_F(AsanServiceTest, MAYBE_ErrorCallback) {
   // Register an error callback, and check that the output is added.
-  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*) {
+  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*, bool*) {
     AsanService::GetInstance()->Log("\nErrorCallback1");
   });
   EXPECT_DEATH(AsanHeapUseAfterFree(), "ErrorCallback1");
 
   // Register a second error callback, and check that the output from both
   // callbacks is added.
-  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*) {
+  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*, bool*) {
     AsanService::GetInstance()->Log("\nErrorCallback2");
   });
   EXPECT_DEATH(AsanHeapUseAfterFree(), "ErrorCallback1");
@@ -69,17 +77,20 @@ TEST_F(AsanServiceTest, MAYBE_CrashInErrorCallback) {
   // displayed, but we should still get some part of the ASan report. This
   // matches current ASan recursive fault handling - make sure we don't end up
   // deadlocking.
-  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*) {
+  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*, bool*) {
     AsanService::GetInstance()->Log("\nErrorCallback1");
     AsanHeapUseAfterFree();
   });
-  EXPECT_DEATH(AsanHeapUseAfterFree(),
-               "AddressSanitizer: nested bug in the same thread");
+
+  // Note that the behaviour is slightly different here when
+  // -fsanitize-recover=address is used, in that we'll see the full ASan error
+  // trace for the initial bug rather than seeing the nested crash.
+  EXPECT_DEATH(AsanHeapUseAfterFree(), "AddressSanitizer: heap-use-after-free");
 }
 
 TEST_F(AsanServiceTest, MAYBE_ShouldExitCleanly) {
   // Register an error callback, and check that the output is added.
-  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*) {
+  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*, bool*) {
     AsanService::GetInstance()->Log("\nErrorCallback1");
   });
   EXPECT_DEATH(AsanHeapUseAfterFree(), "ErrorCallback1");
@@ -87,35 +98,63 @@ TEST_F(AsanServiceTest, MAYBE_ShouldExitCleanly) {
 
   // Register a second error callback which will set should_exit_cleanly.
   AsanService::GetInstance()->AddErrorCallback(
-      [](const char* reason, bool* should_exit_cleanly) {
+      [](const char* reason, bool* should_exit_cleanly, bool*) {
         AsanService::GetInstance()->Log("\nShouldExitCleanly");
         *should_exit_cleanly = true;
       });
 
   // Check that we now exit instead of crashing.
-  EXPECT_EXIT(AsanHeapUseAfterFree(), ExitedCleanly, "ErrorCallback1");
-  EXPECT_EXIT(AsanHeapUseAfterFree(), ExitedCleanly, "ShouldExitCleanly");
-  EXPECT_EXIT(AsanHeapUseAfterFree(), ExitedCleanly, "EXITING");
+  EXPECT_EXIT(AsanHeapUseAfterFree(), ::testing::ExitedWithCode(0),
+              "ErrorCallback1");
+  EXPECT_EXIT(AsanHeapUseAfterFree(), ::testing::ExitedWithCode(0),
+              "ShouldExitCleanly");
+  EXPECT_EXIT(AsanHeapUseAfterFree(), ::testing::ExitedWithCode(0), "EXITING");
+}
+
+TEST_F(AsanServiceTest, MAYBE_ShouldAbort) {
+  // This test relies on `should_abort`, so it cannot run successfully when
+  // ASAN_OPTIONS=halt_on_error=1
+  if (AsanService::GetInstance()->halt_on_error()) {
+    GTEST_SKIP() << "Skipped because of halt_on_error=1";
+  }
+
+  // Register an error callback, and check that the output is added.
+  AsanService::GetInstance()->AddErrorCallback([](const char*, bool*, bool*) {
+    AsanService::GetInstance()->Log("\nErrorCallback1");
+  });
+  EXPECT_DEATH(AsanHeapUseAfterFree(), "ErrorCallback1");
+  EXPECT_DEATH(AsanHeapUseAfterFree(), "ABORTING");
+
+  // Register a second error callback which will clear should_abort.
+  AsanService::GetInstance()->AddErrorCallback(
+      [](const char* reason, bool* should_exit_cleanly, bool* should_abort) {
+        AsanService::GetInstance()->Log("\nShouldAbort");
+        *should_exit_cleanly = false;
+        *should_abort = false;
+      });
+
+  // This should now not exit immediately.
+  AsanHeapUseAfterFree();
 }
 
 class AsanTaskTraceTest {
  public:
-  AsanTaskTraceTest() {}
+  AsanTaskTraceTest() = default;
 
   void Run() {
-    task_runner_.PostTask(
+    task_runner_->PostTask(
         FROM_HERE, BindOnce(&AsanTaskTraceTest::PostingTask, Unretained(this)));
     task_environment_.RunUntilIdle();
   }
 
  private:
   void PostingTask() {
-    task_runner_.PostTask(FROM_HERE, BindOnce(&AsanHeapUseAfterFree));
+    task_runner_->PostTask(FROM_HERE, BindOnce(&AsanHeapUseAfterFree));
   }
 
   test::TaskEnvironment task_environment_;
-  SingleThreadTaskRunner& task_runner_ =
-      *task_environment_.GetMainThreadTaskRunner();
+  const raw_ref<SingleThreadTaskRunner> task_runner_{
+      *task_environment_.GetMainThreadTaskRunner()};
 };
 
 TEST_F(AsanServiceTest, MAYBE_TaskTraceCallback) {

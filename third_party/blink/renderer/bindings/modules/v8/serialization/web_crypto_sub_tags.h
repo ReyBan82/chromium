@@ -28,6 +28,14 @@ enum CryptoKeyAlgorithmTag : uint32_t {
   kHkdfTag = 16,
   kPbkdf2Tag = 17,
   kEd25519Tag = 18,
+  kX25519Tag = 19,
+  kChaCha20Poly1305Tag = 20,
+  kMlDsa44Tag = 21,
+  kMlDsa65Tag = 22,
+  kMlDsa87Tag = 23,
+  kMlKem768Tag = 24,
+  kMlKem1024Tag = 25,
+  kMlKem768X25519Tag = 26,
   // Maximum allowed value is 2^32-1
 };
 
@@ -51,6 +59,10 @@ enum CryptoKeyUsage : uint32_t {
   kWrapKeyUsage = 1 << 6,
   kUnwrapKeyUsage = 1 << 7,
   kDeriveBitsUsage = 1 << 8,
+  kEncapsulateKeyUsage = 1 << 9,
+  kEncapsulateBitsUsage = 1 << 10,
+  kDecapsulateKeyUsage = 1 << 11,
+  kDecapsulateBitsUsage = 1 << 12,
   // Maximum allowed value is 1 << 31
 };
 
@@ -60,14 +72,19 @@ enum CryptoKeySubTag : uint8_t {
   // ID 3 was used by RsaKeyTag, while still behind experimental flag.
   kRsaHashedKeyTag = 4,
   kEcKeyTag = 5,
+  // New algorithms with no params should use NoParamsWithKeyTypeKeyTag.
   kNoParamsKeyTag = 6,
+  // kEd25519KeyTag and kX25519KeyTag are separate for historical reasons.
   kEd25519KeyTag = 7,
+  kX25519KeyTag = 8,
+  kNoParamsWithKeyTypeKeyTag = 9,
   // Maximum allowed value is 255
 };
 
-enum AsymmetricCryptoKeyType : uint32_t {
+enum CryptoKeyType : uint32_t {
   kPublicKeyType = 1,
   kPrivateKeyType = 2,
+  kSecretKeyType = 3,
   // Maximum allowed value is 2^32-1
 };
 

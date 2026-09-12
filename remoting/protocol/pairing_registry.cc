@@ -6,16 +6,18 @@
 
 #include <stddef.h>
 
+#include <optional>
+#include <string_view>
 #include <utility>
 
 #include "base/base64.h"
 #include "base/functional/bind.h"
-#include "base/guid.h"
 #include "base/json/json_string_value_serializer.h"
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/uuid.h"
 #include "base/values.h"
 #include "crypto/random.h"
 
@@ -28,6 +30,16 @@ const char PairingRegistry::kCreatedTimeKey[] = "createdTime";
 const char PairingRegistry::kClientIdKey[] = "clientId";
 const char PairingRegistry::kClientNameKey[] = "clientName";
 const char PairingRegistry::kSharedSecretKey[] = "sharedSecret";
+
+// static
+std::optional<std::string> PairingRegistry::GetCanonicalClientId(
+    std::string_view client_id) {
+  base::Uuid uuid = base::Uuid::ParseCaseInsensitive(client_id);
+  if (!uuid.is_valid()) {
+    return std::nullopt;
+  }
+  return uuid.AsLowercaseString();
+}
 
 PairingRegistry::Pairing::Pairing() = default;
 
@@ -47,25 +59,25 @@ PairingRegistry::Pairing::~Pairing() = default;
 PairingRegistry::Pairing PairingRegistry::Pairing::Create(
     const std::string& client_name) {
   base::Time created_time = base::Time::Now();
-  std::string client_id = base::GenerateGUID();
+  std::string client_id = base::Uuid::GenerateRandomV4().AsLowercaseString();
   std::string shared_secret;
-  char buffer[kKeySize];
-  crypto::RandBytes(buffer, std::size(buffer));
-  base::Base64Encode(base::StringPiece(buffer, std::size(buffer)),
-                     &shared_secret);
+  uint8_t buffer[kKeySize];
+  crypto::RandBytes(buffer);
+  shared_secret = base::Base64Encode(buffer);
   return Pairing(created_time, client_name, client_id, shared_secret);
 }
 
 PairingRegistry::Pairing PairingRegistry::Pairing::CreateFromValue(
-    const base::Value::Dict& pairing) {
-  absl::optional<double> created_time_value =
+    const base::DictValue& pairing) {
+  std::optional<double> created_time_value =
       pairing.FindDouble(kCreatedTimeKey);
   const std::string* client_name = pairing.FindString(kClientNameKey);
   const std::string* client_id = pairing.FindString(kClientIdKey);
   if (created_time_value && client_name && client_id) {
     // The shared secret is optional.
     const std::string* shared_secret = pairing.FindString(kSharedSecretKey);
-    base::Time created_time = base::Time::FromJsTime(*created_time_value);
+    base::Time created_time =
+        base::Time::FromMillisecondsSinceUnixEpoch(*created_time_value);
     return Pairing(created_time, *client_name, *client_id,
                    shared_secret ? *shared_secret : "");
   }
@@ -74,9 +86,11 @@ PairingRegistry::Pairing PairingRegistry::Pairing::CreateFromValue(
   return Pairing();
 }
 
-base::Value::Dict PairingRegistry::Pairing::ToValue() const {
-  base::Value::Dict pairing;
-  pairing.Set(kCreatedTimeKey, static_cast<double>(created_time().ToJsTime()));
+base::DictValue PairingRegistry::Pairing::ToValue() const {
+  base::DictValue pairing;
+  pairing.Set(
+      kCreatedTimeKey,
+      static_cast<double>(created_time().InMillisecondsFSinceUnixEpoch()));
   pairing.Set(kClientNameKey, client_name());
   pairing.Set(kClientIdKey, client_id());
   if (!shared_secret().empty()) {
@@ -119,11 +133,20 @@ void PairingRegistry::GetPairing(const std::string& client_id,
                                  GetPairingCallback callback) {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
 
+  std::optional<std::string> canonical_id = GetCanonicalClientId(client_id);
+  if (!canonical_id) {
+    LOG(ERROR) << "Invalid client_id: " << client_id;
+    PostTask(caller_task_runner_, FROM_HERE,
+             base::BindOnce(std::move(callback), Pairing()));
+    return;
+  }
+
   GetPairingCallback wrapped_callback =
       base::BindOnce(&PairingRegistry::InvokeGetPairingCallbackAndScheduleNext,
                      this, std::move(callback));
   ServiceOrQueueRequest(base::BindOnce(&PairingRegistry::DoLoad, this,
-                                       client_id, std::move(wrapped_callback)));
+                                       *canonical_id,
+                                       std::move(wrapped_callback)));
 }
 
 void PairingRegistry::GetAllPairings(GetAllPairingsCallback callback) {
@@ -142,11 +165,20 @@ void PairingRegistry::DeletePairing(const std::string& client_id,
                                     DoneCallback callback) {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
 
+  std::optional<std::string> canonical_id = GetCanonicalClientId(client_id);
+  if (!canonical_id) {
+    LOG(ERROR) << "Invalid client_id: " << client_id;
+    PostTask(caller_task_runner_, FROM_HERE,
+             base::BindOnce(std::move(callback), false));
+    return;
+  }
+
   DoneCallback wrapped_callback =
       base::BindOnce(&PairingRegistry::InvokeDoneCallbackAndScheduleNext, this,
                      std::move(callback));
   ServiceOrQueueRequest(base::BindOnce(&PairingRegistry::DoDelete, this,
-                                       client_id, std::move(wrapped_callback)));
+                                       *canonical_id,
+                                       std::move(wrapped_callback)));
 }
 
 void PairingRegistry::ClearAllPairings(DoneCallback callback) {
@@ -179,7 +211,7 @@ void PairingRegistry::AddPairing(const Pairing& pairing) {
 void PairingRegistry::DoLoadAll(GetAllPairingsCallback callback) {
   DCHECK(delegate_task_runner_->BelongsToCurrentThread());
 
-  base::Value::List pairings = delegate_->LoadAll();
+  base::ListValue pairings = delegate_->LoadAll();
   PostTask(caller_task_runner_, FROM_HERE,
            base::BindOnce(std::move(callback), std::move(pairings)));
 }
@@ -239,17 +271,17 @@ void PairingRegistry::InvokeGetPairingCallbackAndScheduleNext(
 
 void PairingRegistry::InvokeGetAllPairingsCallbackAndScheduleNext(
     GetAllPairingsCallback callback,
-    base::Value::List pairings) {
+    base::ListValue pairings) {
   std::move(callback).Run(std::move(pairings));
   pending_requests_.pop();
   ServiceNextRequest();
 }
 
 void PairingRegistry::SanitizePairings(GetAllPairingsCallback callback,
-                                       base::Value::List pairings) {
+                                       base::ListValue pairings) {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
 
-  base::Value::List sanitized_pairings;
+  base::ListValue sanitized_pairings;
   for (const base::Value& pairing_json : pairings) {
     if (!pairing_json.is_dict()) {
       LOG(WARNING) << "A pairing entry is not a dictionary.";

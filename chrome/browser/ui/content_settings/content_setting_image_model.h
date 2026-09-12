@@ -6,6 +6,7 @@
 #define CHROME_BROWSER_UI_CONTENT_SETTINGS_CONTENT_SETTING_IMAGE_MODEL_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,12 +14,16 @@
 #include "build/build_config.h"
 #include "chrome/browser/ui/content_settings/content_setting_bubble_model.h"
 #include "chrome/browser/ui/content_settings/content_setting_bubble_model_delegate.h"
+#include "components/browser_apis/ui_controllers/toolbar/toolbar_ui_api_data_model.mojom-shared.h"
 #include "components/content_settings/core/common/content_settings_types.h"
+#include "third_party/skia/include/core/SkColor.h"
+#include "ui/base/interaction/element_identifier.h"
 #include "ui/gfx/image/image.h"
 
 namespace content {
+class Page;
 class WebContents;
-}
+}  // namespace content
 
 namespace gfx {
 struct VectorIcon;
@@ -28,39 +33,43 @@ struct VectorIcon;
 // that are displayed in the location bar.
 class ContentSettingImageModel {
  public:
-  // The type of the content setting image model. This enum is used in
-  // histograms and thus is append-only.
-  enum class ImageType {
-    COOKIES = 0,
-    IMAGES = 1,
-    JAVASCRIPT = 2,
-    // PPAPI_BROKER = 3, // Deprecated.
-    POPUPS = 5,
-    GEOLOCATION = 6,
-    MIXEDSCRIPT = 7,
-    PROTOCOL_HANDLERS = 8,
-    MEDIASTREAM = 9,
-    ADS = 10,
-    AUTOMATIC_DOWNLOADS = 11,
-    MIDI_SYSEX = 12,
-    SOUND = 13,
-    FRAMEBUST = 14,
-    // CLIPBOARD_READ = 15, // Replaced by CLIPBOARD_READ_WRITE in M81.
-    SENSORS = 16,
-    NOTIFICATIONS_QUIET_PROMPT = 17,
-    CLIPBOARD_READ_WRITE = 18,
+  using ImageType = toolbar_ui_api::mojom::ContentSettingImageType;
 
-    NUM_IMAGE_TYPES
-  };
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kCookiesIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kImagesIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kJavaScriptIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kPopupsIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kGeolocationIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kMixedScriptIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kProtocolHandlersIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kMediaStreamIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kAdsIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kAutomaticDownloadsIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kMidiSysexIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kSoundIconElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kFramebustElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kSensorsElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kClipboardRWElementId);
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kStorageAccessElementId);
+  // Notifications has global ID kNotificationContentSettingImageView.
+#if BUILDFLAG(IS_CHROMEOS)
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kSmartCardIconElementId);
+#endif
+#if BUILDFLAG(IS_WIN)
+  DECLARE_CLASS_ELEMENT_IDENTIFIER_VALUE(kProtectedMediaElementId);
+#endif
 
   ContentSettingImageModel(const ContentSettingImageModel&) = delete;
   ContentSettingImageModel& operator=(const ContentSettingImageModel&) = delete;
 
-  virtual ~ContentSettingImageModel() {}
+  virtual ~ContentSettingImageModel() = default;
 
   // Generates a vector of all image models to be used within one window.
   static std::vector<std::unique_ptr<ContentSettingImageModel>>
   GenerateContentSettingImageModels();
+
+  // Returns all element identifiers for all content setting image models.
+  static std::vector<ui::ElementIdentifier> GetAllElementIdentifiers();
 
   // Returns the corresponding index into the above vector for the given
   // ContentSettingsType. For testing.
@@ -94,9 +103,14 @@ class ContentSettingImageModel {
 
   bool is_visible() const { return is_visible_; }
 
+  bool is_blocked() const { return is_blocked_; }
+
   // Retrieve the icon that represents this content setting. Blocked content
   // settings icons will have a blocked badge.
   gfx::Image GetIcon(SkColor icon_color) const;
+
+  // Allows overriding the default icon size.
+  void SetIconSize(int icon_size);
 
   // Returns the resource ID of a string to show when the icon appears, or 0 if
   // we don't wish to show anything.
@@ -107,6 +121,9 @@ class ContentSettingImageModel {
 
   ImageType image_type() const { return image_type_; }
 
+  // Returns the element identifier to use that's appropriate for this type.
+  ui::ElementIdentifier GetElementIdentifier() const;
+
   // Public for testing.
   void set_explanatory_string_id(int text_id) {
     explanatory_string_id_ = text_id;
@@ -115,10 +132,11 @@ class ContentSettingImageModel {
   bool ShouldNotifyAccessibility(content::WebContents* contents) const;
   void AccessibilityWasNotified(content::WebContents* contents);
 
-  bool ShouldShowPromo(content::WebContents* contents);
-  virtual void SetPromoWasShown(content::WebContents* contents);
+  const gfx::VectorIcon* icon() const { return icon_; }
 
-  bool IsMacRestoreLocationPermissionExperimentActive();
+  bool should_auto_open_bubble() { return should_auto_open_bubble_; }
+
+  bool blocked_on_system_level() { return blocked_on_system_level_; }
 
  protected:
   // Note: image_type_should_notify_accessibility by itself does not guarantee
@@ -136,12 +154,7 @@ class ContentSettingImageModel {
   // Internal implementation by subclasses of bubble model creation.
   virtual std::unique_ptr<ContentSettingBubbleModel> CreateBubbleModelImpl(
       ContentSettingBubbleModel::Delegate* delegate,
-      content::WebContents* web_contents) = 0;
-
-  void set_icon(const gfx::VectorIcon& icon, const gfx::VectorIcon& badge) {
-    icon_ = &icon;
-    icon_badge_ = &badge;
-  }
+      content::Page& page) = 0;
 
   void set_accessibility_string_id(int id) { accessibility_string_id_ = id; }
 
@@ -149,12 +162,22 @@ class ContentSettingImageModel {
   void set_should_auto_open_bubble(const bool should_auto_open_bubble) {
     should_auto_open_bubble_ = should_auto_open_bubble;
   }
-  void set_should_show_promo(const bool should_show_promo) {
-    should_show_promo_ = should_show_promo;
+  void set_blocked_on_system_level(const bool blocked_on_system_level) {
+    blocked_on_system_level_ = blocked_on_system_level;
   }
+
+  // Sets an icon based on the content setting type, and whether the setting is
+  // blocked. We use ContentSettingsType rather than ImageType because some
+  // ImageTypes may have multiple icons.
+  void SetIcon(ContentSettingsType type, bool blocked);
+
+  // A special case for framebusting since that does not have a
+  // ContentSettingsType.
+  void SetFramebustBlockedIcon();
 
  private:
   bool is_visible_ = false;
+  bool is_blocked_ = false;
 
   raw_ptr<const gfx::VectorIcon> icon_;
   raw_ptr<const gfx::VectorIcon> icon_badge_;
@@ -164,7 +187,8 @@ class ContentSettingImageModel {
   const ImageType image_type_;
   const bool image_type_should_notify_accessibility_;
   bool should_auto_open_bubble_ = false;
-  bool should_show_promo_ = false;
+  bool blocked_on_system_level_ = false;
+  std::optional<int> icon_size_;
 };
 
 // A subclass for an image model tied to a single content type.
@@ -183,7 +207,7 @@ class ContentSettingSimpleImageModel : public ContentSettingImageModel {
   // ContentSettingImageModel implementation.
   std::unique_ptr<ContentSettingBubbleModel> CreateBubbleModelImpl(
       ContentSettingBubbleModel::Delegate* delegate,
-      content::WebContents* web_contents) override;
+      content::Page& page) override;
 
   ContentSettingsType content_type() { return content_type_; }
 
@@ -204,7 +228,7 @@ class ContentSettingFramebustBlockImageModel : public ContentSettingImageModel {
 
   std::unique_ptr<ContentSettingBubbleModel> CreateBubbleModelImpl(
       ContentSettingBubbleModel::Delegate* delegate,
-      content::WebContents* web_contents) override;
+      content::Page& page) override;
 };
 
 #endif  // CHROME_BROWSER_UI_CONTENT_SETTINGS_CONTENT_SETTING_IMAGE_MODEL_H_

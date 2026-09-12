@@ -21,54 +21,33 @@
 namespace sandbox {
 
 ThreadProcessDispatcher::ThreadProcessDispatcher() {
-  static const IPCCall open_thread = {
-      {IpcTag::NTOPENTHREAD, {UINT32_TYPE, UINT32_TYPE}},
+  ipc_calls_[IpcTag::NTOPENTHREAD] = {
+      {UINT32_TYPE, UINT32_TYPE},
       reinterpret_cast<CallbackGeneric>(
           &ThreadProcessDispatcher::NtOpenThread)};
-
-  static const IPCCall open_process = {
-      {IpcTag::NTOPENPROCESS, {UINT32_TYPE, UINT32_TYPE}},
-      reinterpret_cast<CallbackGeneric>(
-          &ThreadProcessDispatcher::NtOpenProcess)};
-
-  static const IPCCall process_token = {
-      {IpcTag::NTOPENPROCESSTOKEN, {VOIDPTR_TYPE, UINT32_TYPE}},
-      reinterpret_cast<CallbackGeneric>(
-          &ThreadProcessDispatcher::NtOpenProcessToken)};
-
-  static const IPCCall process_tokenex = {
-      {IpcTag::NTOPENPROCESSTOKENEX, {VOIDPTR_TYPE, UINT32_TYPE, UINT32_TYPE}},
+  ipc_calls_[IpcTag::NTOPENPROCESSTOKENEX] = {
+      {UINT32_TYPE, UINT32_TYPE},
       reinterpret_cast<CallbackGeneric>(
           &ThreadProcessDispatcher::NtOpenProcessTokenEx)};
-
   // NOTE(liamjm): 2nd param is size_t: Using VOIDPTR_TYPE as they are
   // the same size on windows.
   static_assert(sizeof(size_t) == sizeof(void*),
                 "VOIDPTR_TYPE not same size as size_t");
-  static const IPCCall create_thread_params = {
-      {IpcTag::CREATETHREAD,
-       {VOIDPTR_TYPE, VOIDPTR_TYPE, VOIDPTR_TYPE, UINT32_TYPE}},
+  ipc_calls_[IpcTag::CREATETHREAD] = {
+      {VOIDPTR_TYPE, VOIDPTR_TYPE, VOIDPTR_TYPE, UINT32_TYPE},
       reinterpret_cast<CallbackGeneric>(
           &ThreadProcessDispatcher::CreateThread)};
-
-  ipc_calls_.push_back(open_thread);
-  ipc_calls_.push_back(open_process);
-  ipc_calls_.push_back(process_token);
-  ipc_calls_.push_back(process_tokenex);
-  ipc_calls_.push_back(create_thread_params);
 }
 
 bool ThreadProcessDispatcher::SetupService(InterceptionManager* manager,
                                            IpcTag service) {
   switch (service) {
     case IpcTag::NTOPENTHREAD:
-    case IpcTag::NTOPENPROCESS:
-    case IpcTag::NTOPENPROCESSTOKEN:
     case IpcTag::NTOPENPROCESSTOKENEX:
     case IpcTag::CREATETHREAD:
       // There is no explicit policy for these services.
+      // Intercepts are set up in SetupBasicInterceptions(), not here.
       NOTREACHED();
-      return false;
 
     default:
       return false;
@@ -86,36 +65,12 @@ bool ThreadProcessDispatcher::NtOpenThread(IPCInfo* ipc,
   return true;
 }
 
-bool ThreadProcessDispatcher::NtOpenProcess(IPCInfo* ipc,
-                                            uint32_t desired_access,
-                                            uint32_t process_id) {
-  HANDLE handle;
-  NTSTATUS ret = ProcessPolicy::OpenProcessAction(
-      *ipc->client_info, desired_access, process_id, &handle);
-  ipc->return_info.nt_status = ret;
-  ipc->return_info.handle = handle;
-  return true;
-}
-
-bool ThreadProcessDispatcher::NtOpenProcessToken(IPCInfo* ipc,
-                                                 HANDLE process,
-                                                 uint32_t desired_access) {
-  HANDLE handle;
-  NTSTATUS ret = ProcessPolicy::OpenProcessTokenAction(
-      *ipc->client_info, process, desired_access, &handle);
-  ipc->return_info.nt_status = ret;
-  ipc->return_info.handle = handle;
-  return true;
-}
-
 bool ThreadProcessDispatcher::NtOpenProcessTokenEx(IPCInfo* ipc,
-                                                   HANDLE process,
                                                    uint32_t desired_access,
                                                    uint32_t attributes) {
   HANDLE handle;
-  NTSTATUS ret = ProcessPolicy::OpenProcessTokenExAction(
-      *ipc->client_info, process, desired_access, attributes, &handle);
-  ipc->return_info.nt_status = ret;
+  ipc->return_info.nt_status = ProcessPolicy::OpenProcessTokenExAction(
+      *ipc->client_info, desired_access, attributes, &handle);
   ipc->return_info.handle = handle;
   return true;
 }
@@ -130,11 +85,10 @@ bool ThreadProcessDispatcher::CreateThread(IPCInfo* ipc,
   }
 
   HANDLE handle;
-  NTSTATUS ret = ProcessPolicy::CreateThreadAction(
-      *ipc->client_info, stack_size, start_address, parameter, creation_flags,
-      nullptr, &handle);
-
-  ipc->return_info.nt_status = ret;
+  DWORD ret = ProcessPolicy::CreateThreadAction(*ipc->client_info, stack_size,
+                                                start_address, parameter,
+                                                creation_flags, &handle);
+  ipc->return_info.win32_result = ret;
   ipc->return_info.handle = handle;
   return true;
 }

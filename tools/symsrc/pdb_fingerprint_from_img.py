@@ -12,28 +12,25 @@ We can retrieve the same information from the .PDB file itself, but this file
 format is much more difficult and undocumented.  Instead, we can look at the
 DLL's reference to the PDB, and use that to retrieve the information."""
 
-from __future__ import print_function
-
 import os
 import sys
 
 # Assume this script is under tools/symsrc/
 _SCRIPT_DIR = os.path.dirname(__file__)
 _ROOT_DIR = os.path.join(_SCRIPT_DIR, os.pardir, os.pardir)
-_PEFILE_DIR = os.path.join(
-    _ROOT_DIR, 'third_party', 'pefile_py3' if sys.version_info >=
-    (3, 0) else 'pefile')
+_PEFILE_DIR = os.path.join(_ROOT_DIR, 'third_party', 'pefile_py3')
 
 sys.path.insert(1, _PEFILE_DIR)
 
 import pefile
 
 
-__CV_INFO_PDB70_format__ = ('CV_INFO_PDB70',
-  ('4s,CvSignature', '16s,Signature', 'L,Age'))
+__CV_INFO_PDB70_format__ = (
+  'CV_INFO_PDB70',
+  ('4s,CvSignature', '16s,Signature', 'L,Age'),
+)
 
-__GUID_format__ = ('GUID',
-  ('L,Data1', 'H,Data2', 'H,Data3', '8s,Data4'))
+__GUID_format__ = ('GUID', ('L,Data1', 'H,Data2', 'H,Data3', '8s,Data4'))
 
 
 def GetPDBInfoFromImg(filename):
@@ -45,11 +42,11 @@ def GetPDBInfoFromImg(filename):
     if dbg.struct.Type == 2:  # IMAGE_DEBUG_TYPE_CODEVIEW
       off = dbg.struct.AddressOfRawData
       size = dbg.struct.SizeOfData
-      data = pe.get_memory_mapped_image()[off:off+size]
+      data = pe.get_memory_mapped_image()[off : off + size]
 
       cv = pefile.Structure(__CV_INFO_PDB70_format__)
       cv.__unpack__(data)
-      cv.PdbFileName = data[cv.sizeof():]
+      cv.PdbFileName = data[cv.sizeof() :]
       guid = pefile.Structure(__GUID_format__)
       guid.__unpack__(cv.Signature)
 
@@ -60,9 +57,18 @@ def GetPDBInfoFromImg(filename):
       guid.Data4_0 = ''.join("%02X" % x for x in guid.Data4[0:2])
       guid.Data4_1 = ''.join("%02X" % x for x in guid.Data4[2:])
 
-      return ("%08X%04X%04X%s%s%d" % (guid.Data1, guid.Data2, guid.Data3,
-                                      guid.Data4_0, guid.Data4_1, cv.Age),
-              str(cv.PdbFileName.split(b'\x00', 1)[0].decode()))
+      return (
+        "%08X%04X%04X%s%s%d"
+        % (
+          guid.Data1,
+          guid.Data2,
+          guid.Data3,
+          guid.Data4_0,
+          guid.Data4_1,
+          cv.Age,
+        ),
+        str(cv.PdbFileName.split(b'\x00', 1)[0].decode()),
+      )
 
     break
 

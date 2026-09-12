@@ -19,16 +19,29 @@ class RemoteHostContactedSignal : public ExtensionSignal {
  public:
   RemoteHostContactedSignal(const extensions::ExtensionId& extension_id,
                             const GURL& host_url,
-                            RemoteHostInfo::ProtocolType protocol);
+                            RemoteHostInfo::ProtocolType protocol,
+                            RemoteHostInfo::ContactInitiator contact_initiator);
+
+  RemoteHostContactedSignal(const RemoteHostContactedSignal&);
+  RemoteHostContactedSignal(RemoteHostContactedSignal&&);
+  RemoteHostContactedSignal& operator=(const RemoteHostContactedSignal&);
+  RemoteHostContactedSignal& operator=(RemoteHostContactedSignal&&);
+
   ~RemoteHostContactedSignal() override;
 
   // ExtensionSignal:
   ExtensionSignalType GetType() const override;
 
+  // Creates a unique id, which can be used to uniquely identify a remote host
+  // contacted signal.
+  std::string GetUniqueRemoteHostContactedId() const;
+
   const GURL& remote_host_url() const { return remote_host_url_; }
 
-  const RemoteHostInfo::ProtocolType& protocol_type() const {
-    return protocol_;
+  RemoteHostInfo::ProtocolType protocol_type() const { return protocol_; }
+
+  RemoteHostInfo::ContactInitiator contact_initiator() const {
+    return contact_initiator_;
   }
 
  protected:
@@ -37,6 +50,10 @@ class RemoteHostContactedSignal : public ExtensionSignal {
 
   // The protocol used to contact the remote host.
   RemoteHostInfo::ProtocolType protocol_;
+
+  // Request initiated by either extension (service worker or extension page) or
+  // content script.
+  RemoteHostInfo::ContactInitiator contact_initiator_;
 };
 
 }  // namespace safe_browsing

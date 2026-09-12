@@ -22,9 +22,14 @@ NavigationController::LoadURLParams::LoadURLParams(
 NavigationController::LoadURLParams::LoadURLParams(const OpenURLParams& input)
     : url(input.url),
       initiator_frame_token(input.initiator_frame_token),
-      initiator_process_id(input.initiator_process_id),
+      // TODO(crbug.com/379869738): Remove FromUnsafeValue.
+      initiator_process_id(
+          ChildProcessId::FromUnsafeValue(input.initiator_process_id)),
       initiator_origin(input.initiator_origin),
       initiator_base_url(input.initiator_base_url),
+      initiator_navigation_state(input.initiator_navigation_state),
+      should_ignore_initiator_policies_for_inheritance(
+          input.should_ignore_initiator_policies_for_inheritance),
       source_site_instance(input.source_site_instance),
       load_type(input.post_data ? LOAD_TYPE_HTTP_POST : LOAD_TYPE_DEFAULT),
       transition_type(input.transition),
@@ -40,8 +45,9 @@ NavigationController::LoadURLParams::LoadURLParams(const OpenURLParams& input)
       blob_url_loader_factory(input.blob_url_loader_factory),
       href_translate(input.href_translate),
       reload_type(input.reload_type),
-      impression(input.impression),
-      is_pdf(input.is_pdf) {
+      is_pdf(input.is_pdf),
+      has_rel_opener(input.has_rel_opener),
+      internal_scroll_to_text_fragment(input.internal_scroll_to_text_fragment) {
 #if DCHECK_IS_ON()
   DCHECK(input.Valid());
 #endif
@@ -56,7 +62,7 @@ NavigationController::LoadURLParams::LoadURLParams(const OpenURLParams& input)
   // Implementation notes:
   //   The following LoadURLParams don't have an equivalent in OpenURLParams:
   //     base_url_for_data_url
-  //     virtual_url_for_data_url
+  //     virtual_url_for_special_cases
   //     data_url_as_string
   //
   //     can_load_local_resources
@@ -71,14 +77,13 @@ NavigationController::LoadURLParams::LoadURLParams(const OpenURLParams& input)
   //
   //   The following OpenURLParams don't have an equivalent in LoadURLParams:
   //     disposition
-  //     open_app_window_if_possible
+  //     is_service_worker_open_window
   //     source_render_frame_id
   //     source_render_process_id
   //     triggering_event_info
 }
 
-NavigationController::LoadURLParams::~LoadURLParams() {
-}
+NavigationController::LoadURLParams::~LoadURLParams() = default;
 
 NavigationController::LoadURLParams&
 NavigationController::LoadURLParams::operator=(

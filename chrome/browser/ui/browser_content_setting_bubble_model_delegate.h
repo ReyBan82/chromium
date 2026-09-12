@@ -5,17 +5,25 @@
 #ifndef CHROME_BROWSER_UI_BROWSER_CONTENT_SETTING_BUBBLE_MODEL_DELEGATE_H_
 #define CHROME_BROWSER_UI_BROWSER_CONTENT_SETTING_BUBBLE_MODEL_DELEGATE_H_
 
-#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "chrome/browser/ui/content_settings/content_setting_bubble_model_delegate.h"
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
 
-class Browser;
+class BrowserWindowInterface;
 
 // Implementation of ContentSettingBubbleModelDelegate which uses an instance of
 // Browser in order to fulfil its duties.
 class BrowserContentSettingBubbleModelDelegate
     : public ContentSettingBubbleModelDelegate {
  public:
-  explicit BrowserContentSettingBubbleModelDelegate(Browser* browser);
+  DECLARE_USER_DATA(BrowserContentSettingBubbleModelDelegate);
+
+  explicit BrowserContentSettingBubbleModelDelegate(
+      BrowserWindowInterface* browser);
+
+  // Returns the delegate for `browser`, or null if it does not have one.
+  static BrowserContentSettingBubbleModelDelegate* From(
+      BrowserWindowInterface* browser);
 
   BrowserContentSettingBubbleModelDelegate(
       const BrowserContentSettingBubbleModelDelegate&) = delete;
@@ -31,7 +39,10 @@ class BrowserContentSettingBubbleModelDelegate
   void ShowLearnMorePage(ContentSettingsType type) override;
 
  private:
-  const raw_ptr<Browser> browser_;
+  ui::ScopedUnownedUserData<BrowserContentSettingBubbleModelDelegate>
+      scoped_unowned_user_data_;
+
+  const raw_ref<BrowserWindowInterface> browser_;
 };
 
 #endif  // CHROME_BROWSER_UI_BROWSER_CONTENT_SETTING_BUBBLE_MODEL_DELEGATE_H_

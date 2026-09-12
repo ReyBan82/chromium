@@ -6,6 +6,7 @@
 #define COMPONENTS_LANGUAGE_CORE_BROWSER_LANGUAGE_MODEL_H_
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "components/keyed_service/core/keyed_service.h"
@@ -19,7 +20,7 @@ class LanguageModel {
   // Information about one language that a user understands.
   struct LanguageDetails {
     LanguageDetails();
-    LanguageDetails(const std::string& in_lang_code, float in_score);
+    LanguageDetails(std::string_view in_lang_code, float in_score);
 
     // The language code.
     std::string lang_code;
@@ -29,7 +30,7 @@ class LanguageModel {
     float score;
   };
 
-  virtual ~LanguageModel() {}
+  virtual ~LanguageModel() = default;
 
   // The set of languages that the user understands. The languages are ranked
   // from most important to least.

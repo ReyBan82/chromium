@@ -4,16 +4,21 @@
 
 #include "chrome/browser/extensions/api/terminal/terminal_private_api.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-#include "ash/constants/ash_features.h"
 #include "ash/constants/ash_pref_names.h"
+#include "ash/constants/ash_switches.h"
+#include "ash/constants/webui_url_constants.h"
+#include "ash/webui/settings/public/constants/routes.mojom.h"
 #include "base/command_line.h"
-#include "base/containers/contains.h"
+#include "base/containers/fixed_flat_map.h"
+#include "base/containers/fixed_flat_set.h"
 #include "base/containers/flat_set.h"
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
@@ -26,30 +31,34 @@
 #include "base/strings/string_util.h"
 #include "base/system/sys_info.h"
 #include "base/values.h"
+#include "chrome/browser/ash/crostini/crostini_features.h"
 #include "chrome/browser/ash/crostini/crostini_pref_names.h"
 #include "chrome/browser/ash/crostini/crostini_util.h"
 #include "chrome/browser/ash/guest_os/guest_id.h"
 #include "chrome/browser/ash/guest_os/guest_os_pref_names.h"
 #include "chrome/browser/ash/guest_os/guest_os_session_tracker.h"
+#include "chrome/browser/ash/guest_os/guest_os_session_tracker_factory.h"
 #include "chrome/browser/ash/guest_os/guest_os_terminal.h"
 #include "chrome/browser/ash/guest_os/public/guest_os_service.h"
+#include "chrome/browser/ash/guest_os/public/guest_os_service_factory.h"
 #include "chrome/browser/ash/guest_os/public/guest_os_terminal_provider.h"
 #include "chrome/browser/ash/guest_os/public/guest_os_terminal_provider_registry.h"
 #include "chrome/browser/ash/guest_os/public/types.h"
-#include "chrome/browser/ash/guest_os/virtual_machines/virtual_machines_util.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/extensions/api/terminal/startup_status.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/extension_tab_util.h"
+#include "chrome/browser/extensions/profile_util.h"
 #include "chrome/browser/policy/system_features_disable_list_policy_handler.h"
-#include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/settings_window_manager_chromeos.h"
-#include "chrome/browser/ui/webui/settings/chromeos/constants/routes.mojom.h"
-#include "chrome/common/chrome_switches.h"
 #include "chrome/common/extensions/api/terminal_private.h"
+#include "chromeos/ash/components/browser_context_helper/browser_context_helper.h"
 #include "chromeos/ash/components/dbus/cicerone/cicerone_client.h"
+#include "chromeos/ash/experiences/guest_os/virtual_machines/virtual_machines_util.h"
 #include "chromeos/process_proxy/process_proxy_registry.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_context.h"
@@ -63,6 +72,7 @@
 #include "extensions/browser/extension_registry.h"
 #include "extensions/browser/extensions_browser_client.h"
 #include "extensions/common/constants.h"
+#include "extensions/common/mojom/event_dispatcher.mojom.h"
 #include "ui/display/types/display_constants.h"
 
 namespace terminal_private = extensions::api::terminal_private;
@@ -190,37 +200,52 @@ std::string GetContainerFeaturesArg() {
   // sufficient.
   for (vm_tools::cicerone::ContainerFeature feature :
        crostini::GetContainerFeatures()) {
-    if (!result.empty())
+    if (!result.empty()) {
       result += ",";
+    }
     result += base::NumberToString(static_cast<int>(feature));
   }
   return result;
 }
 
 void NotifyProcessOutput(content::BrowserContext* browser_context,
+                         content::ChildProcessId render_process_host_id,
                          const std::string& terminal_id,
                          const std::string& output_type,
                          const std::string& output) {
   if (!content::BrowserThread::CurrentlyOn(content::BrowserThread::UI)) {
     content::GetUIThreadTaskRunner({})->PostTask(
         FROM_HERE, base::BindOnce(&NotifyProcessOutput, browser_context,
-                                  terminal_id, output_type, output));
+                                  render_process_host_id, terminal_id,
+                                  output_type, output));
     return;
   }
 
-  base::Value::List args;
-  args.Append(terminal_id);
-  args.Append(output_type);
-  args.Append(base::Value(base::make_span(
-      reinterpret_cast<const uint8_t*>(&output[0]), output.size())));
+  scoped_refptr<extensions::EventArgs> args =
+      base::MakeRefCounted<extensions::EventArgs>();
+  args->data.Append(terminal_id);
+  args->data.Append(output_type);
+  args->data.Append(base::Value(base::as_byte_span(output)));
+
+  content::RenderProcessHost* rph =
+      content::RenderProcessHost::FromID(render_process_host_id);
+  if (!rph) {
+    return;
+  }
 
   extensions::EventRouter* event_router =
       extensions::EventRouter::Get(browser_context);
+  // Terminal app does not have an extension ID, but empty is OK for this call.
+  std::string extension_id;
   if (event_router) {
-    std::unique_ptr<extensions::Event> event(new extensions::Event(
+    event_router->DispatchEventToSender(
+        rph, browser_context,
+        extensions::mojom::HostID(
+            extensions::mojom::HostID::HostType::kExtensions, extension_id),
         extensions::events::TERMINAL_PRIVATE_ON_PROCESS_OUTPUT,
-        terminal_private::OnProcessOutput::kEventName, std::move(args)));
-    event_router->BroadcastEvent(std::move(event));
+        terminal_private::OnProcessOutput::kEventName,
+        extensions::kMainThreadId, /*service_worker_version_id=*/0,
+        std::move(args), extensions::mojom::EventFilteringInfo::New());
   }
 }
 
@@ -229,8 +254,8 @@ void PrefChanged(Profile* profile, const std::string& pref_name) {
   if (!event_router) {
     return;
   }
-  base::Value::List args;
-  base::Value::Dict prefs;
+  base::ListValue args;
+  base::DictValue prefs;
   prefs.Set(pref_name, profile->GetPrefs()->GetValue(pref_name).Clone());
   args.Append(std::move(prefs));
   auto event = std::make_unique<extensions::Event>(
@@ -273,9 +298,9 @@ TerminalPrivateOpenTerminalProcessFunction::
 
 ExtensionFunction::ResponseAction
 TerminalPrivateOpenTerminalProcessFunction::Run() {
-  std::unique_ptr<OpenTerminalProcess::Params> params(
-      OpenTerminalProcess::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<OpenTerminalProcess::Params> params =
+      OpenTerminalProcess::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   return OpenProcess(params->process_name, std::move(params->args));
 }
@@ -283,21 +308,22 @@ TerminalPrivateOpenTerminalProcessFunction::Run() {
 ExtensionFunction::ResponseAction
 TerminalPrivateOpenTerminalProcessFunction::OpenProcess(
     const std::string& process_name,
-    absl::optional<std::vector<std::string>> args) {
-  const std::string& user_id_hash =
-      extensions::ExtensionsBrowserClient::Get()->GetUserIdHashFromContext(
+    std::optional<std::vector<std::string>> args) {
+  const std::string user_id_hash =
+      ash::BrowserContextHelper::GetUserIdHashFromBrowserContext(
           browser_context());
   content::WebContents* caller_contents = GetSenderWebContents();
-  if (!caller_contents)
+  if (!caller_contents) {
     return RespondNow(Error("No web contents."));
+  }
 
   // Passing --crosh-command overrides any JS process name.
   base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-  if (command_line->HasSwitch(switches::kCroshCommand)) {
+  if (command_line->HasSwitch(ash::switches::kCroshCommand)) {
     OpenProcess(
         user_id_hash,
         base::CommandLine(base::FilePath(
-            command_line->GetSwitchValueASCII(switches::kCroshCommand))));
+            command_line->GetSwitchValueASCII(ash::switches::kCroshCommand))));
 
   } else if (process_name == kCroshName) {
     // Ensure crosh is allowed before starting terminal.
@@ -322,13 +348,14 @@ TerminalPrivateOpenTerminalProcessFunction::OpenProcess(
     // command=vmshell: ensure --owner_id, --vm_name, --target_container, --cwd
     // are set, and the specified vm/container is running.
     base::CommandLine cmdline((base::FilePath(kVmShellCommand)));
-    if (!args)
+    if (!args) {
       args.emplace();
+    }
     args->insert(args->begin(), kVmShellCommand);
     base::CommandLine params_args(*args);
     VLOG(1) << "Original cmdline= " << params_args.GetCommandLineString();
-    std::string owner_id =
-        GetSwitch(params_args, &cmdline, kSwitchOwnerId, user_id_hash);
+    // Do not use GetSwitch for kSwitchOwnerId. Force the trusted value.
+    cmdline.AppendSwitchASCII(kSwitchOwnerId, user_id_hash);
     std::string vm_name = GetSwitch(params_args, &cmdline, kSwitchVmName,
                                     crostini::kCrostiniDefaultVmName);
     std::string container_name =
@@ -341,24 +368,37 @@ TerminalPrivateOpenTerminalProcessFunction::OpenProcess(
     // Unlike the other switches, this is computed here directly rather than
     // taken from |args|.
     std::string container_features = GetContainerFeaturesArg();
-    if (!container_features.empty())
+    if (!container_features.empty()) {
       cmdline.AppendSwitchASCII(kSwitchContainerFeatures, container_features);
+    }
 
+    // Append trailing passthrough args if any.  E.g. `-- vim file.txt`
+    auto passthrough_args = params_args.GetArgs();
+    if (!passthrough_args.empty()) {
+      cmdline.AppendArg("--");
+      for (const auto& arg : passthrough_args) {
+        cmdline.AppendArg(arg);
+      }
+    }
     VLOG(1) << "Starting " << *guest_id_
             << ", cmdline=" << cmdline.GetCommandLineString();
 
     Profile* profile = Profile::FromBrowserContext(browser_context());
-    auto* service = guest_os::GuestOsService::GetForProfile(profile);
+    auto* service = guest_os::GuestOsServiceFactory::GetForProfile(profile);
     guest_os::GuestOsTerminalProvider* provider = nullptr;
     if (service) {
       provider = service->TerminalProviderRegistry()->Get(*guest_id_);
     }
-    auto* tracker = guest_os::GuestOsSessionTracker::GetForProfile(profile);
+    auto* tracker =
+        guest_os::GuestOsSessionTrackerFactory::GetForProfile(profile);
     bool verbose = !(tracker && tracker->GetInfo(*guest_id_).has_value());
     auto status_printer = std::make_unique<StartupStatusPrinter>(
-        base::BindRepeating(&NotifyProcessOutput, browser_context(), startup_id,
-                            api::terminal_private::ToString(
-                                api::terminal_private::OUTPUT_TYPE_STDOUT)),
+        base::BindRepeating(
+            &NotifyProcessOutput, browser_context(),
+            caller_contents->GetPrimaryMainFrame()->GetProcess()->GetID(),
+            std::move(startup_id),
+            api::terminal_private::ToString(
+                api::terminal_private::OutputType::kStdout)),
         verbose);
     if (provider) {
       startup_status_ =
@@ -438,7 +478,7 @@ void TerminalPrivateOpenTerminalProcessFunction::OnGetVshSession(
     const std::string& user_id_hash,
     base::CommandLine cmdline,
     const std::string& terminal_id,
-    absl::optional<vm_tools::cicerone::GetVshSessionResponse> response) {
+    std::optional<vm_tools::cicerone::GetVshSessionResponse> response) {
   if (!response || !response->success()) {
     LOG(WARNING) << "Failed to get vsh session for " << terminal_id << ": "
                  << (response ? response->failure_reason() : "empty response");
@@ -454,12 +494,23 @@ void TerminalPrivateOpenTerminalProcessFunction::OpenProcess(
     const std::string& user_id_hash,
     base::CommandLine cmdline) {
   DCHECK(!cmdline.argv().empty());
+
+  content::WebContents* caller_contents = GetSenderWebContents();
+  if (!caller_contents) {
+    Respond(Error("No web contents."));
+    return;
+  }
+  content::ChildProcessId render_process_host_id =
+      caller_contents->GetPrimaryMainFrame()->GetProcess()->GetID();
+
   // Registry lives on its own task runner.
   chromeos::ProcessProxyRegistry::GetTaskRunner()->PostTask(
       FROM_HERE,
       base::BindOnce(
           &TerminalPrivateOpenTerminalProcessFunction::OpenOnRegistryTaskRunner,
-          this, base::BindRepeating(&NotifyProcessOutput, browser_context()),
+          this,
+          base::BindRepeating(&NotifyProcessOutput, browser_context(),
+                              render_process_host_id),
           base::BindOnce(
               &TerminalPrivateOpenTerminalProcessFunction::RespondOnUIThread,
               this),
@@ -511,7 +562,7 @@ void TerminalPrivateOpenTerminalProcessFunction::RespondOnUIThread(
     Respond(Error("Failed to open process."));
     return;
   }
-  Respond(OneArgument(base::Value(terminal_id)));
+  Respond(WithArguments(terminal_id));
 
   TerminalTabHelper::CreateForWebContents(contents);
   TerminalTabHelper::FromWebContents(contents)->AddTerminalId(terminal_id);
@@ -522,9 +573,9 @@ TerminalPrivateOpenVmshellProcessFunction::
 
 ExtensionFunction::ResponseAction
 TerminalPrivateOpenVmshellProcessFunction::Run() {
-  std::unique_ptr<OpenVmshellProcess::Params> params(
-      OpenVmshellProcess::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<OpenVmshellProcess::Params> params =
+      OpenVmshellProcess::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   // Only opens 'vmshell'.
   return OpenProcess(kVmShellName, std::move(params->args));
@@ -533,8 +584,8 @@ TerminalPrivateOpenVmshellProcessFunction::Run() {
 TerminalPrivateSendInputFunction::~TerminalPrivateSendInputFunction() = default;
 
 ExtensionFunction::ResponseAction TerminalPrivateSendInputFunction::Run() {
-  std::unique_ptr<SendInput::Params> params(SendInput::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<SendInput::Params> params = SendInput::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   if (!TerminalTabHelper::ValidateTerminalId(GetSenderWebContents(),
                                              params->id)) {
@@ -568,7 +619,7 @@ void TerminalPrivateSendInputFunction::OnSendInput(bool success) {
 }
 
 void TerminalPrivateSendInputFunction::RespondOnUIThread(bool success) {
-  Respond(OneArgument(base::Value(success)));
+  Respond(WithArguments(success));
 }
 
 TerminalPrivateCloseTerminalProcessFunction::
@@ -576,9 +627,9 @@ TerminalPrivateCloseTerminalProcessFunction::
 
 ExtensionFunction::ResponseAction
 TerminalPrivateCloseTerminalProcessFunction::Run() {
-  std::unique_ptr<CloseTerminalProcess::Params> params(
-      CloseTerminalProcess::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<CloseTerminalProcess::Params> params =
+      CloseTerminalProcess::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   if (!TerminalTabHelper::ValidateTerminalId(GetSenderWebContents(),
                                              params->id)) {
@@ -599,7 +650,7 @@ TerminalPrivateCloseTerminalProcessFunction::Run() {
 
 void TerminalPrivateCloseTerminalProcessFunction::RespondOnUIThread(
     bool success) {
-  Respond(OneArgument(base::Value(success)));
+  Respond(WithArguments(success));
 }
 
 TerminalPrivateOnTerminalResizeFunction::
@@ -607,9 +658,9 @@ TerminalPrivateOnTerminalResizeFunction::
 
 ExtensionFunction::ResponseAction
 TerminalPrivateOnTerminalResizeFunction::Run() {
-  std::unique_ptr<OnTerminalResize::Params> params(
-      OnTerminalResize::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<OnTerminalResize::Params> params =
+      OnTerminalResize::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   if (!TerminalTabHelper::ValidateTerminalId(GetSenderWebContents(),
                                              params->id)) {
@@ -642,14 +693,14 @@ void TerminalPrivateOnTerminalResizeFunction::OnResizeOnRegistryTaskRunner(
 }
 
 void TerminalPrivateOnTerminalResizeFunction::RespondOnUIThread(bool success) {
-  Respond(OneArgument(base::Value(success)));
+  Respond(WithArguments(success));
 }
 
 TerminalPrivateAckOutputFunction::~TerminalPrivateAckOutputFunction() = default;
 
 ExtensionFunction::ResponseAction TerminalPrivateAckOutputFunction::Run() {
-  std::unique_ptr<AckOutput::Params> params(AckOutput::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<AckOutput::Params> params = AckOutput::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
   // Every running terminal page will call ackOutput(), but we should only react
   // for the one who actually owns the output.
@@ -675,34 +726,39 @@ TerminalPrivateOpenWindowFunction::~TerminalPrivateOpenWindowFunction() =
     default;
 
 ExtensionFunction::ResponseAction TerminalPrivateOpenWindowFunction::Run() {
-  std::unique_ptr<OpenWindow::Params> params(
-      OpenWindow::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<OpenWindow::Params> params = OpenWindow::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
 
-  const std::string* url = &guest_os::GetTerminalHomeUrl();
+  GURL url(guest_os::GetTerminalHomeUrl());
   bool as_tab = false;
 
   auto& data = params->data;
   if (data) {
     if (data->url) {
-      url = &*data->url;
+      url = GURL(*data->url);
     }
     if (data->as_tab) {
       as_tab = *data->as_tab;
     }
   }
 
+  if (url.DeprecatedGetOriginAsURL() != ash::kChromeUIUntrustedTerminalURL) {
+    return RespondNow(
+        Error("Trying to launch terminal with an invalid url: " + url.spec()));
+  }
+
   if (as_tab) {
-    auto* browser = chrome::FindBrowserWithWebContents(GetSenderWebContents());
+    auto* browser = GlobalBrowserCollection::GetInstance()->FindBrowserWithTab(
+        GetSenderWebContents());
     if (browser) {
-      chrome::AddTabAt(browser, GURL(*url), -1, true);
+      chrome::AddTabAt(browser, url, -1, true);
     } else {
       LOG(ERROR) << "cannot find the browser";
     }
   } else {
     guest_os::LaunchTerminalWithUrl(
         Profile::FromBrowserContext(browser_context()),
-        display::kInvalidDisplayId, GURL(*url));
+        display::kInvalidDisplayId, /*restore_id=*/0, url);
   }
 
   return RespondNow(NoArguments());
@@ -723,43 +779,41 @@ TerminalPrivateOpenSettingsSubpageFunction::
 
 ExtensionFunction::ResponseAction
 TerminalPrivateOpenSettingsSubpageFunction::Run() {
+  Profile* profile = profile_util::GetActiveUserProfile();
   // Ignore params->subpage for now, and always open crostini.
-  chrome::SettingsWindowManager::GetInstance()->ShowOSSettings(
-      ProfileManager::GetActiveUserProfile(),
-      chromeos::settings::mojom::kCrostiniSectionPath);
+  if (crostini::CrostiniFeatures::Get()->IsEnabled(profile)) {
+    chrome::SettingsWindowManager::GetInstance()->ShowOSSettings(
+        profile, chromeos::settings::mojom::kCrostiniDetailsSubpagePath);
+  } else {
+    chrome::SettingsWindowManager::GetInstance()->ShowOSSettings(
+        profile, chromeos::settings::mojom::kAboutChromeOsSectionPath,
+        chromeos::settings::mojom::Setting::kSetUpCrostini);
+  }
   return RespondNow(NoArguments());
 }
 
 TerminalPrivateGetOSInfoFunction::~TerminalPrivateGetOSInfoFunction() = default;
 
 ExtensionFunction::ResponseAction TerminalPrivateGetOSInfoFunction::Run() {
-  base::Value::Dict info;
-  info.Set("alternative_emulator",
-           base::FeatureList::IsEnabled(
-               ash::features::kTerminalAlternativeEmulator));
-  info.Set("multi_profile",
-           base::FeatureList::IsEnabled(ash::features::kTerminalMultiProfile));
-  info.Set("sftp", base::FeatureList::IsEnabled(ash::features::kTerminalSftp));
+  base::DictValue info;
   info.Set("tast", extensions::ExtensionRegistry::Get(browser_context())
                        ->enabled_extensions()
                        .Contains(extension_misc::kGuestModeTestExtensionId));
-  info.Set("tmux_integration", base::FeatureList::IsEnabled(
-                                   ash::features::kTerminalTmuxIntegration));
-  return RespondNow(OneArgument(base::Value(std::move(info))));
+  return RespondNow(WithArguments(std::move(info)));
 }
 
 TerminalPrivateGetPrefsFunction::~TerminalPrivateGetPrefsFunction() = default;
 
 ExtensionFunction::ResponseAction TerminalPrivateGetPrefsFunction::Run() {
-  std::unique_ptr<GetPrefs::Params> params(GetPrefs::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<GetPrefs::Params> params = GetPrefs::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
   PrefService* service =
       Profile::FromBrowserContext(browser_context())->GetPrefs();
-  base::Value result(base::Value::Type::DICT);
+  base::DictValue result;
 
   for (const auto& path : params->paths) {
     // Ignore non-allowed paths.
-    if (!base::Contains(*kPrefsReadAllowList, path)) {
+    if (!std::ranges::contains(*kPrefsReadAllowList, path)) {
       LOG(WARNING) << "Ignoring non-allowed GetPrefs path=" << path;
       continue;
     }
@@ -767,29 +821,37 @@ ExtensionFunction::ResponseAction TerminalPrivateGetPrefsFunction::Run() {
       guest_os::RecordTerminalSettingsChangesUMAs(
           Profile::FromBrowserContext(browser_context()));
     }
-    result.SetKey(path, service->GetValue(path).Clone());
+    result.Set(path, service->GetValue(path).Clone());
   }
-  return RespondNow(OneArgument(std::move(result)));
+  return RespondNow(WithArguments(std::move(result)));
 }
 
 TerminalPrivateSetPrefsFunction::~TerminalPrivateSetPrefsFunction() = default;
 
 ExtensionFunction::ResponseAction TerminalPrivateSetPrefsFunction::Run() {
-  std::unique_ptr<SetPrefs::Params> params(SetPrefs::Params::Create(args()));
-  EXTENSION_FUNCTION_VALIDATE(params.get());
+  std::optional<SetPrefs::Params> params = SetPrefs::Params::Create(args());
+  EXTENSION_FUNCTION_VALIDATE(params);
+
+  // The writable prefs below belong to the Terminal System Web App and drive
+  // browser-side state such as shelf shortcut menu items, so writes from any
+  // other context are rejected.
+  if (extension() || source_url().DeprecatedGetOriginAsURL() !=
+                         ash::kChromeUIUntrustedTerminalURL) {
+    return RespondNow(Error("Unsupported context"));
+  }
 
   PrefService* service =
       Profile::FromBrowserContext(browser_context())->GetPrefs();
 
-  static const base::NoDestructor<
-      base::flat_map<std::string, base::Value::Type>>
-      kAllowList{{{guest_os::prefs::kGuestOsTerminalSettings,
-                   base::Value::Type::DICT}}};
+  static constexpr auto kAllowList =
+      base::MakeFixedFlatMap<std::string_view, base::Value::Type>(
+          {{guest_os::prefs::kGuestOsTerminalSettings,
+            base::Value::Type::DICT}});
 
   for (const auto item : params->prefs.additional_properties) {
     // Write prefs if they are allowed, and match expected type, else ignore.
-    auto allow_it = kAllowList->find(item.first);
-    if (allow_it == kAllowList->end() ||
+    auto allow_it = kAllowList.find(item.first);
+    if (allow_it == kAllowList.end() ||
         allow_it->second != item.second.type()) {
       LOG(WARNING) << "Ignoring non-allowed SetPrefs path=" << item.first
                    << ", type=" << item.second.type();

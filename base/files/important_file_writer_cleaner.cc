@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <functional>
 #include <iterator>
+#include <optional>
 #include <utility>
 
 #include "base/files/file_enumerator.h"
@@ -19,6 +20,7 @@
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
 
 namespace base {
 
@@ -53,8 +55,9 @@ void ImportantFileWriterCleaner::AddDirectory(const FilePath& directory) {
     AutoLock scoped_lock(instance.task_runner_lock_);
     task_runner = instance.task_runner_;
   }
-  if (!task_runner)
+  if (!task_runner) {
     return;
+  }
   if (task_runner->RunsTasksInCurrentSequence()) {
     instance.AddDirectoryImpl(directory);
   } else {
@@ -82,25 +85,29 @@ void ImportantFileWriterCleaner::Start() {
 #endif
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (is_started())
+  if (is_started()) {
     return;
+  }
 
   started_ = true;
 
-  if (!pending_directories_.empty())
+  if (!pending_directories_.empty()) {
     ScheduleTask();
+  }
 }
 
 void ImportantFileWriterCleaner::Stop() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!is_started())
+  if (!is_started()) {
     return;
+  }
 
-  if (is_running())
+  if (is_running()) {
     stop_flag_.store(true, std::memory_order_relaxed);
-  else
+  } else {
     DoStop();
+  }
 }
 
 void ImportantFileWriterCleaner::UninitializeForTesting() {
@@ -129,20 +136,23 @@ ImportantFileWriterCleaner::ImportantFileWriterCleaner()
 void ImportantFileWriterCleaner::AddDirectoryImpl(const FilePath& directory) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!important_directories_.insert(directory).second)
+  if (!important_directories_.insert(directory).second) {
     return;  // This directory has already been seen.
+  }
 
   pending_directories_.push_back(directory);
 
-  if (!is_started())
+  if (!is_started()) {
     return;  // Nothing more to do if Start() has not been called.
+  }
 
   // Start the background task if it's not already running. If it is running, a
   // new task will be posted on completion of the current one by
   // OnBackgroundTaskFinished to handle all directories added while it was
   // running.
-  if (!is_running())
+  if (!is_running()) {
     ScheduleTask();
+  }
 }
 
 void ImportantFileWriterCleaner::ScheduleTask() {
@@ -171,24 +181,60 @@ bool ImportantFileWriterCleaner::CleanInBackground(
     std::vector<FilePath> directories,
     std::atomic_bool& stop_flag) {
   DCHECK(!directories.empty());
-  for (auto scan = directories.begin(), end = directories.end(); scan != end;
-       ++scan) {
-    const auto& directory = *scan;
+  for (auto& directory : directories) {
+    // Per-directory cache: for each temp-file name prefix encountered, this
+    // stores the latest temp file that should be preserved as a potential
+    // recovery source for a missing target file named prefix. An empty
+    // FilePath value means the prefix was inspected and no candidate needs to
+    // be preserved (either the target file already exists, or no candidate was
+    // found).
+    absl::flat_hash_map<FilePath::StringType, FilePath>
+        prefix_to_preserved_candidate;
+
     FileEnumerator file_enum(
         directory, /*recursive=*/false, FileEnumerator::FILES,
-        FormatTemporaryFileName(FILE_PATH_LITERAL("*")).value());
+        FormatTemporaryFileName(FILE_PATH_LITERAL("*"), true).value());
     for (FilePath path = file_enum.Next(); !path.empty();
          path = file_enum.Next()) {
       const FileEnumerator::FileInfo info = file_enum.GetInfo();
-      if (info.GetLastModifiedTime() >= upper_bound_time)
+      if (info.GetLastModifiedTime() >= upper_bound_time) {
         continue;
+      }
+
+      // Attempt to preserve the latest temp file for any target file that
+      // appears to be missing, so it can later be used to restore that file.
+      std::optional<FilePath::StringType> name_prefix =
+          GetNamePrefixForTemporaryFile(path);
+      if (name_prefix.has_value()) {
+        auto [it, inserted] =
+            prefix_to_preserved_candidate.try_emplace(*name_prefix, FilePath());
+        if (inserted) {
+          // First time seeing this prefix in this directory. If the target
+          // file is missing, look up the latest candidate temp file to
+          // preserve.
+          if (!PathExists(directory.Append(*name_prefix))) {
+            std::optional<FilePath> latest_candidate =
+                GetLatestTemporaryFileWithNamePrefix(directory, *name_prefix);
+            if (latest_candidate.has_value()) {
+              it->second = *std::move(latest_candidate);
+            }
+          }
+        }
+        if (path == it->second) {
+          // Do not delete: this temp file is being kept as a restore
+          // candidate.
+          continue;
+        }
+      }
+
       // Cleanup is a best-effort process, so ignore any failures here and
       // continue to clean as much as possible. Metrics tell us that ~98.4% of
       // directories are cleaned with no failures.
       DeleteFile(path);
       // Break out without checking for the next file if a stop is requested.
-      if (stop_flag.load(std::memory_order_relaxed))
+      if (stop_flag.load(std::memory_order_relaxed)) {
         return false;
+      }
     }
   }
   return true;

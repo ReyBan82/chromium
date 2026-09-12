@@ -7,7 +7,6 @@
 #include <memory>
 #include <utility>
 
-#include "base/metrics/histogram_macros.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/values.h"
 #include "chrome/browser/profiles/profile.h"
@@ -32,22 +31,23 @@ StateStore::Transaction::~Transaction() {
   store_->has_transaction_ = false;
 #endif
   if (pref_update_)
-    platform_state_store::Store(store_->profile_, *store_->incidents_sent_);
+    platform_state_store::Store(store_->profile_, pref_update_->Get());
 }
 
 void StateStore::Transaction::MarkAsReported(IncidentType type,
                                              const std::string& key,
                                              IncidentDigest digest) {
   std::string type_string(base::NumberToString(static_cast<int>(type)));
-  base::Value::Dict& incidents_sent = GetPrefDict();
-  base::Value::Dict* type_dict = incidents_sent.EnsureDict(type_string);
+  base::DictValue& incidents_sent = GetPrefDict();
+  base::DictValue* type_dict = incidents_sent.EnsureDict(type_string);
   type_dict->Set(key, base::NumberToString(digest));
 }
 
 void StateStore::Transaction::Clear(IncidentType type, const std::string& key) {
-  // Nothing to do if the pref dict does not exist.
-  if (!store_->incidents_sent_)
-    return;
+  const base::DictValue& incidents_sent =
+      pref_update_ ? pref_update_->Get()
+                   : store_->profile_->GetPrefs()->GetDict(
+                         prefs::kSafeBrowsingIncidentsSent);
 
   // Use the read-only view on the preference to figure out if there is a value
   // to remove before committing to making a change since any use of GetPrefDict
@@ -55,72 +55,72 @@ void StateStore::Transaction::Clear(IncidentType type, const std::string& key) {
   // store.
   std::string type_string(base::NumberToString(static_cast<int>(type)));
 
-  const base::Value::Dict* const_type_dict =
-      store_->incidents_sent_->FindDict(type_string);
+  const base::DictValue* const_type_dict = incidents_sent.FindDict(type_string);
   if (const_type_dict && const_type_dict->Find(key)) {
-    base::Value::Dict* type_dict = GetPrefDict().FindDict(type_string);
+    base::DictValue* type_dict = GetPrefDict().FindDict(type_string);
     type_dict->Remove(key);
   }
 }
 
 void StateStore::Transaction::ClearForType(IncidentType type) {
-  // Nothing to do if the pref dict does not exist.
-  if (!store_->incidents_sent_)
-    return;
+  const base::DictValue& incidents_sent =
+      pref_update_ ? pref_update_->Get()
+                   : store_->profile_->GetPrefs()->GetDict(
+                         prefs::kSafeBrowsingIncidentsSent);
 
   // Use the read-only view on the preference to figure out if there is a value
   // to remove before committing to making a change since any use of GetPrefDict
   // will result in a full serialize-and-write operation on the preferences
   // store.
   std::string type_string(base::NumberToString(static_cast<int>(type)));
-  if (store_->incidents_sent_->FindDict(type_string))
+  if (incidents_sent.FindDict(type_string)) {
     GetPrefDict().Remove(type_string);
+  }
 }
 
 void StateStore::Transaction::ClearAll() {
+  const base::DictValue& incidents_sent =
+      pref_update_ ? pref_update_->Get()
+                   : store_->profile_->GetPrefs()->GetDict(
+                         prefs::kSafeBrowsingIncidentsSent);
   // Clear the preference if it exists and contains any values.
-  if (store_->incidents_sent_ && !store_->incidents_sent_->empty())
+  if (!incidents_sent.empty()) {
     GetPrefDict().clear();
+  }
 }
 
-base::Value::Dict& StateStore::Transaction::GetPrefDict() {
+base::DictValue& StateStore::Transaction::GetPrefDict() {
   if (!pref_update_) {
     pref_update_ = std::make_unique<ScopedDictPrefUpdate>(
         store_->profile_->GetPrefs(), prefs::kSafeBrowsingIncidentsSent);
-    // Getting the dict will cause it to be created if it doesn't exist.
-    // Unconditionally refresh the store's read-only view on the preference so
-    // that it will always be correct.
-    store_->incidents_sent_ = &pref_update_->Get();
   }
   return pref_update_->Get();
 }
 
-void StateStore::Transaction::ReplacePrefDict(base::Value::Dict pref_dict) {
+void StateStore::Transaction::ReplacePrefDict(base::DictValue pref_dict) {
   GetPrefDict() = std::move(pref_dict);
 }
 
 // StateStore ------------------------------------------------------------------
 
 StateStore::StateStore(Profile* profile)
-    : profile_(profile),
-      incidents_sent_(nullptr)
+    : profile_(profile)
 #if DCHECK_IS_ON()
       ,
       has_transaction_(false)
 #endif
 {
-  // Cache a read-only view of the preference.
-  incidents_sent_ =
-      &profile_->GetPrefs()->GetDict(prefs::kSafeBrowsingIncidentsSent);
-
   // Apply the platform data.
   Transaction transaction(this);
-  absl::optional<base::Value> value_dict(platform_state_store::Load(profile_));
-  if (value_dict) {
-    if (value_dict->DictEmpty())
+  std::optional<base::DictValue> value_dict(
+      platform_state_store::Load(profile_));
+  if (value_dict.has_value()) {
+    if (value_dict->empty()) {
       transaction.ClearAll();
-    else if (!incidents_sent_ || *incidents_sent_ != *value_dict)
-      transaction.ReplacePrefDict(std::move(value_dict.value()).TakeDict());
+    } else if (profile_->GetPrefs()->GetDict(
+                   prefs::kSafeBrowsingIncidentsSent) != value_dict.value()) {
+      transaction.ReplacePrefDict(std::move(value_dict.value()));
+    }
   }
 
   CleanLegacyValues(&transaction);
@@ -135,10 +135,10 @@ StateStore::~StateStore() {
 bool StateStore::HasBeenReported(IncidentType type,
                                  const std::string& key,
                                  IncidentDigest digest) {
-  const base::Value::Dict* type_dict =
-      incidents_sent_ ? incidents_sent_->FindDict(
-                            base::NumberToString(static_cast<int>(type)))
-                      : nullptr;
+  const base::DictValue& incidents_sent =
+      profile_->GetPrefs()->GetDict(prefs::kSafeBrowsingIncidentsSent);
+  const base::DictValue* type_dict =
+      incidents_sent.FindDict(base::NumberToString(static_cast<int>(type)));
   if (!type_dict)
     return false;
   const std::string* digest_string = type_dict->FindString(key);

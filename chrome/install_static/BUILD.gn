@@ -9,9 +9,9 @@ import("//testing/test.gni")
 buildflag_header("buildflags") {
   header = "buildflags.h"
   if (is_chrome_branded && is_win) {
-    flags = [ "USE_GOOGLE_UPDATE_INTEGRATION=1" ]
+    flags = [ "USE_GOOGLE_UPDATE_INTEGRATION=true" ]
   } else {
-    flags = [ "USE_GOOGLE_UPDATE_INTEGRATION=0" ]
+    flags = [ "USE_GOOGLE_UPDATE_INTEGRATION=false" ]
   }
 }
 
@@ -19,16 +19,12 @@ if (is_win) {
   # This file contains utility functions that only depend on kernel32.
   # Please don't add dependencies on other system libraries.
   static_library("install_static_util") {
-    deps = [
-      "//components/nacl/common:buildflags",
-      "//components/version_info:channel",
-      "//components/version_info:generate_version_info",
-    ]
+    deps = [ "//base/version_info:generate_version_info" ]
 
     public_deps = [
       ":buildflags",
+      "//base",
       "//build:branding_buildflags",
-      "//chrome/browser/chrome_for_testing:buildflags",
       "//chrome/chrome_elf:nt_registry",
     ]
 
@@ -55,20 +51,11 @@ if (is_win) {
     ]
 
     if (is_chrome_branded) {
-      sources += [
-        "google_chrome_install_modes.cc",
-        "google_chrome_install_modes.h",
-      ]
+      sources += [ "google_chrome_install_modes.h" ]
     } else if (is_chrome_for_testing_branded) {
-      sources += [
-        "google_chrome_for_testing_install_modes.cc",
-        "google_chrome_for_testing_install_modes.h",
-      ]
+      sources += [ "google_chrome_for_testing_install_modes.h" ]
     } else {
-      sources += [
-        "chromium_install_modes.cc",
-        "chromium_install_modes.h",
-      ]
+      sources += [ "chromium_install_modes.h" ]
     }
 
     libs = [ "kernel32.lib" ]
@@ -107,10 +94,10 @@ if (is_win) {
       "//base",
       "//base/test:run_all_unittests",
       "//base/test:test_support",
+      "//base/version_info",
       "//build:branding_buildflags",
       "//chrome/install_static:install_static_util",
       "//chrome/install_static/test:test_support",
-      "//components/version_info",
       "//testing/gmock",
       "//testing/gtest",
     ]

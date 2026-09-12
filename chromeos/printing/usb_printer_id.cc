@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <utility>
 
-#include "base/containers/contains.h"
 #include "base/strings/string_split.h"
 
 namespace chromeos {
@@ -19,31 +18,39 @@ const char kModel[] = "MODEL";
 const char kModelAbbr[] = "MDL";
 const char kCommandSet[] = "COMMAND SET";
 const char kCommandSetAbbr[] = "CMD";
+const char kChromeOsRawId[] = "CHROMEOS_RAW_ID";
 
 UsbPrinterId::UsbPrinterId(base::span<const uint8_t> device_id_data) {
   // Build mapping.
   id_mappings_ = BuildDeviceIdMapping(device_id_data);
 
+  // Save original ID.
+  if (auto it = id_mappings_.find(kChromeOsRawId); it != id_mappings_.end()) {
+    raw_id_ = it->second.front();
+  }
+
   // Save required mappings.
   // Save make_.
-  if (base::Contains(id_mappings_, kManufacturer)) {
-    make_ = id_mappings_[kManufacturer].front();
-  } else if (base::Contains(id_mappings_, kManufacturerAbbr)) {
-    make_ = id_mappings_[kManufacturerAbbr].front();
+  if (auto it = id_mappings_.find(kManufacturer); it != id_mappings_.end()) {
+    make_ = it->second.front();
+  } else if (it = id_mappings_.find(kManufacturerAbbr);
+             it != id_mappings_.end()) {
+    make_ = it->second.front();
   }
 
   // Save model_.
-  if (base::Contains(id_mappings_, kModel)) {
-    model_ = id_mappings_[kModel].front();
-  } else if (base::Contains(id_mappings_, kModelAbbr)) {
-    model_ = id_mappings_[kModelAbbr].front();
+  if (auto it = id_mappings_.find(kModel); it != id_mappings_.end()) {
+    model_ = it->second.front();
+  } else if (it = id_mappings_.find(kModelAbbr); it != id_mappings_.end()) {
+    model_ = it->second.front();
   }
 
   // Save command_set_.
-  if (base::Contains(id_mappings_, kCommandSet)) {
-    command_set_ = id_mappings_[kCommandSet];
-  } else if (base::Contains(id_mappings_, kCommandSetAbbr)) {
-    command_set_ = id_mappings_[kCommandSetAbbr];
+  if (auto it = id_mappings_.find(kCommandSet); it != id_mappings_.end()) {
+    command_set_ = it->second;
+  } else if (it = id_mappings_.find(kCommandSetAbbr);
+             it != id_mappings_.end()) {
+    command_set_ = it->second;
   }
 }
 
@@ -79,8 +86,9 @@ std::map<std::string, std::vector<std::string>> BuildDeviceIdMapping(
       continue;
     }
 
-    ret[term.first] = values;
+    ret[term.first] = std::move(values);
   }
+  ret[kChromeOsRawId].emplace_back(std::move(printer_id));
 
   return ret;
 }

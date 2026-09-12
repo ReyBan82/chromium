@@ -11,6 +11,9 @@
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/synchronization/waitable_event.h"
+#include "components/bookmarks/browser/bookmark_client.h"
+#include "components/bookmarks/common/storage_file_encryption_type.h"
+#include "components/os_crypt/async/common/encryptor.h"
 
 namespace base {
 class FilePath;
@@ -27,14 +30,51 @@ class HistoryBookmarkModel;
 // BookmarkModel.
 class ModelLoader : public base::RefCountedThreadSafe<ModelLoader> {
  public:
+  // Invoked when ModelLoader completes loading.
   using LoadCallback =
       base::OnceCallback<void(std::unique_ptr<BookmarkLoadDetails>)>;
-  // Creates the ModelLoader, and schedules loading on a backend task runner.
-  // |callback| is run once loading completes (on the main thread).
-  static scoped_refptr<ModelLoader> Create(
-      const base::FilePath& file_path,
-      std::unique_ptr<BookmarkLoadDetails> details,
-      LoadCallback callback);
+
+  // Invoked when bookmarks `json_content` needs to be saved to disk. Only save
+  // the bookmarks to the file with the given encryption type. The other file
+  // will not be touched. `json_content` should be a clear text JSON string.
+  using SaveSingleFileCallback =
+      base::OnceCallback<void(StorageFileEncryptionType encryption_type,
+                              std::string json_content)>;
+
+  // Creates the ModelLoader for later initialization via `Load()`. This is
+  // a separate step as loading has asynchronous dependencies.
+  static scoped_refptr<ModelLoader> Create();
+
+  // Initializes the ModelLoader, and schedules work on a backend task runner.
+  // `callback` is run once loading completes (on the main thread).
+  // `local_or_syncable_file_path` must be non-empty and represents the
+  // main (non-account) bookmarks, whereas `account_file_path` may be empty.
+  // Depending on the stage of encryption feature rollout, `encryptor`,
+  // `encrypted_local_or_syncable_file_path` and `encrypted_account_file_path`
+  // will be used to load the encrypted bookmarks file to either verify its
+  // content matches the unencrypted file, or to use it in place of the
+  // unencrypted content. If encryption is not enabled, these three parameters
+  // will not be used.
+  // `encryptor` can be null if encryption is not enabled.
+  // `encrypted_local_or_syncable_file_path` must be non-empty and
+  // `encrypted_account_file_path` should be empty only if
+  // `account_file_path` is empty.
+  // `save_local_or_syncable_secondary_file_callback` and
+  // `save_account_secondary_file_callback`  will be called if bookmarks need to
+  // be saved to a secondary file. The secondary file might contain the
+  // unencrypted or encrypted bookmarks, see
+  // BookmarkStorage::SaveBookmarksToSecondaryFile for more details.
+  // `files_to_delete` is a list of unneeded files to delete in the background.
+  void Load(scoped_refptr<const os_crypt_async::Encryptor> encryptor,
+            const base::FilePath& local_or_syncable_file_path,
+            const base::FilePath& encrypted_local_or_syncable_file_path,
+            const base::FilePath& account_file_path,
+            const base::FilePath& encrypted_account_file_path,
+            LoadManagedNodeCallback load_managed_node_callback,
+            SaveSingleFileCallback save_local_or_syncable_single_file_callback,
+            SaveSingleFileCallback save_account_single_file_callback,
+            const std::vector<base::FilePath>& files_to_delete,
+            LoadCallback callback);
 
   ModelLoader(const ModelLoader&) = delete;
   ModelLoader& operator=(const ModelLoader&) = delete;
@@ -49,6 +89,12 @@ class ModelLoader : public base::RefCountedThreadSafe<ModelLoader> {
     return history_bookmark_model_.get();
   }
 
+  // Test-only factory function that creates a ModelLoader() that is initially
+  // loaded.
+  static scoped_refptr<ModelLoader> CreateForTest(
+      LoadManagedNodeCallback load_managed_node_callback,
+      BookmarkLoadDetails* details);
+
  private:
   friend class base::RefCountedThreadSafe<ModelLoader>;
   ModelLoader();
@@ -56,12 +102,21 @@ class ModelLoader : public base::RefCountedThreadSafe<ModelLoader> {
 
   // Performs the load on a background thread.
   std::unique_ptr<BookmarkLoadDetails> DoLoadOnBackgroundThread(
-      const base::FilePath& file_path,
-      std::unique_ptr<BookmarkLoadDetails> details);
+      scoped_refptr<const os_crypt_async::Encryptor> encryptor,
+      const base::FilePath& local_or_syncable_file_path,
+      const base::FilePath& encrypted_local_or_syncable_file_path,
+      const base::FilePath& account_file_path,
+      const base::FilePath& encrypted_account_file_path,
+      SaveSingleFileCallback save_local_or_syncable_single_file_callback,
+      SaveSingleFileCallback save_account_single_file_callback,
+      LoadManagedNodeCallback load_managed_node_callback);
 
   scoped_refptr<base::SequencedTaskRunner> backend_task_runner_;
 
   scoped_refptr<HistoryBookmarkModel> history_bookmark_model_;
+
+  // Loading can only be started once.
+  bool started_load_ = false;
 
   // Signaled once loading completes.
   base::WaitableEvent loaded_signal_;

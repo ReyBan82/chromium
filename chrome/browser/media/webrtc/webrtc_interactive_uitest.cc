@@ -6,22 +6,21 @@
 #include "base/memory/raw_ptr.h"
 #include "base/task/deferred_sequenced_task_runner.h"
 #include "base/test/bind.h"
-#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/browser/media/webrtc/webrtc_browsertest_base.h"
 #include "chrome/browser/media/webrtc/webrtc_browsertest_common.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/network_service_instance.h"
+#include "content/public/browser/network_service_util.h"
 #include "content/public/common/content_switches.h"
-#include "content/public/common/network_service_util.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "media/base/media_switches.h"
+#include "media/media_buildflags.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/sync_call_restrictions.h"
 #include "net/nqe/network_quality_estimator.h"
@@ -127,8 +126,8 @@ class WebRtcBrowserTest : public WebRtcTestBase {
     mojo::Remote<network::mojom::NetworkServiceTest> network_service_test;
     content::GetNetworkService()->BindTestInterfaceForTesting(
         network_service_test.BindNewPipeAndPassReceiver());
-    // TODO(crbug.com/901026): Make sure the network process is started to avoid
-    // a deadlock on Android.
+    // TODO(crbug.com/41423903): Make sure the network process is started to
+    // avoid a deadlock on Android.
     network_service_test.FlushForTesting();
 
     mojo::ScopedAllowSyncCallForTesting allow_sync_call;
@@ -151,7 +150,7 @@ class WebRtcBrowserTest : public WebRtcTestBase {
     StartDetectingVideo(left_tab_, "remote-view");
     StartDetectingVideo(right_tab_, "remote-view");
 #if !BUILDFLAG(IS_MAC)
-    // Video is choppy on Mac OS X. http://crbug.com/443542.
+    // Video is choppy on Mac OS X. http://crbug.com/40398907.
     WaitForVideoToPlay(left_tab_);
     WaitForVideoToPlay(right_tab_);
 #endif
@@ -159,29 +158,44 @@ class WebRtcBrowserTest : public WebRtcTestBase {
     HangUp(right_tab_);
   }
 
-  raw_ptr<content::WebContents, DanglingUntriaged> left_tab_;
-  raw_ptr<content::WebContents, DanglingUntriaged> right_tab_;
+  raw_ptr<content::WebContents, AcrossTasksDanglingUntriaged> left_tab_;
+  raw_ptr<content::WebContents, AcrossTasksDanglingUntriaged> right_tab_;
 };
 
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsVP8 \
+  DISABLED_RunsAudioVideoWebRTCCallInTwoTabsVP8
+#else
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsVP8 \
+  RunsAudioVideoWebRTCCallInTwoTabsVP8
+#endif
 IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
-                       RunsAudioVideoWebRTCCallInTwoTabsVP8) {
+                       MAYBE_RunsAudioVideoWebRTCCallInTwoTabsVP8) {
   RunsAudioVideoWebRTCCallInTwoTabs("VP8");
 }
 
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsVP9 \
+  DISABLED_RunsAudioVideoWebRTCCallInTwoTabsVP9
+#else
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsVP9 \
+  RunsAudioVideoWebRTCCallInTwoTabsVP9
+#endif
 IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
-                       RunsAudioVideoWebRTCCallInTwoTabsVP9) {
+                       MAYBE_RunsAudioVideoWebRTCCallInTwoTabsVP9) {
   RunsAudioVideoWebRTCCallInTwoTabs("VP9");
 }
 
-#if BUILDFLAG(RTC_USE_H264)
+#if BUILDFLAG(ENABLE_OPENH264)
 
 IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
                        RunsAudioVideoWebRTCCallInTwoTabsH264) {
-  // Only run test if run-time feature corresponding to |rtc_use_h264| is on.
-  if (!base::FeatureList::IsEnabled(
-          blink::features::kWebRtcH264WithOpenH264FFmpeg)) {
+  // Only run test if run-time feature corresponding to OpenH264 is on.
+  if (!base::FeatureList::IsEnabled(media::kOpenH264SoftwareEncoder)) {
     LOG(WARNING)
-        << "Run-time feature WebRTC-H264WithOpenH264FFmpeg disabled. "
+        << "Run-time feature OpenH264SoftwareEncoder disabled. "
            "Skipping WebRtcBrowserTest.RunsAudioVideoWebRTCCallInTwoTabsH264 "
            "(test \"OK\")";
     return;
@@ -190,7 +204,7 @@ IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
   RunsAudioVideoWebRTCCallInTwoTabs("H264", true /* prefer_hw_video_codec */);
 }
 
-#endif  // BUILDFLAG(RTC_USE_H264)
+#endif  // BUILDFLAG(ENABLE_OPENH264)
 
 IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest, TestWebAudioMediaStream) {
   // This tests against crash regressions for the WebAudio-MediaStream
@@ -214,21 +228,38 @@ IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
                                     kKeygenAlgorithmRsa, kKeygenAlgorithmRsa);
 }
 
-IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
-                       RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerEcdsa) {
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerEcdsa \
+  DISABLED_RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerEcdsa
+#else
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerEcdsa \
+  RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerEcdsa
+#endif
+IN_PROC_BROWSER_TEST_F(
+    WebRtcBrowserTest,
+    MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerEcdsa) {
   RunsAudioVideoWebRTCCallInTwoTabs(
       WebRtcTestBase::kUseDefaultVideoCodec, false /* prefer_hw_video_codec */,
       kKeygenAlgorithmEcdsa, kKeygenAlgorithmEcdsa);
 }
 
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificateRsa \
+  DISABLED_RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificateRsa
+#else
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificateRsa \
+  RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificateRsa
+#endif
 IN_PROC_BROWSER_TEST_F(
     WebRtcBrowserTest,
-    RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificateRsa) {
+    MAYBE_RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificateRsa) {
   RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificate(kKeygenAlgorithmRsa);
 }
 
-// TODO(https://crbug.com/1291255): Flaky on Linux ASAN.
-#if BUILDFLAG(IS_LINUX) && defined(ADDRESS_SANITIZER)
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
 #define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificateEcdsa \
   DISABLED_RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificateEcdsa
 #else
@@ -241,30 +272,36 @@ IN_PROC_BROWSER_TEST_F(
   RunsAudioVideoWebRTCCallInTwoTabsWithClonedCertificate(kKeygenAlgorithmEcdsa);
 }
 
-IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
-                       RunsAudioVideoWebRTCCallInTwoTabsOfferRsaAnswerEcdsa) {
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferRsaAnswerEcdsa \
+  DISABLED_RunsAudioVideoWebRTCCallInTwoTabsOfferRsaAnswerEcdsa
+#else
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferRsaAnswerEcdsa \
+  RunsAudioVideoWebRTCCallInTwoTabsOfferRsaAnswerEcdsa
+#endif
+IN_PROC_BROWSER_TEST_F(
+    WebRtcBrowserTest,
+    MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferRsaAnswerEcdsa) {
   RunsAudioVideoWebRTCCallInTwoTabs(WebRtcTestBase::kUseDefaultVideoCodec,
                                     false /* prefer_hw_video_codec */,
                                     kKeygenAlgorithmRsa, kKeygenAlgorithmEcdsa);
 }
 
-IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
-                       RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerRsa) {
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerRsa \
+  DISABLED_RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerRsa
+#else
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerRsa \
+  RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerRsa
+#endif
+IN_PROC_BROWSER_TEST_F(
+    WebRtcBrowserTest,
+    MAYBE_RunsAudioVideoWebRTCCallInTwoTabsOfferEcdsaAnswerRsa) {
   RunsAudioVideoWebRTCCallInTwoTabs(WebRtcTestBase::kUseDefaultVideoCodec,
                                     false /* prefer_hw_video_codec */,
                                     kKeygenAlgorithmEcdsa, kKeygenAlgorithmRsa);
-}
-
-IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
-                       RunsAudioVideoWebRTCCallInTwoTabsGetStatsCallback) {
-  StartServerAndOpenTabs();
-  SetupPeerconnectionWithLocalStream(left_tab_);
-  SetupPeerconnectionWithLocalStream(right_tab_);
-  NegotiateCall(left_tab_, right_tab_);
-
-  VerifyStatsGeneratedCallback(left_tab_);
-
-  DetectVideoAndHangUp();
 }
 
 IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
@@ -277,69 +314,23 @@ IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
   SetupPeerconnectionWithLocalStream(right_tab_);
   NegotiateCall(left_tab_, right_tab_);
 
-  VerifyStatsGeneratedCallback(left_tab_);
   EXPECT_EQ(2u, GetPeerToPeerConnectionsCountChangeFromNetworkService());
 
   DetectVideoAndHangUp();
   EXPECT_EQ(0u, GetPeerToPeerConnectionsCountChangeFromNetworkService());
 }
 
-IN_PROC_BROWSER_TEST_F(WebRtcBrowserTest,
-                       RunsAudioVideoWebRTCCallInTwoTabsGetStatsPromise) {
-  StartServerAndOpenTabs();
-  SetupPeerconnectionWithLocalStream(left_tab_);
-  SetupPeerconnectionWithLocalStream(right_tab_);
-  CreateDataChannel(left_tab_, "data");
-  CreateDataChannel(right_tab_, "data");
-  NegotiateCall(left_tab_, right_tab_);
-
-  std::set<std::string> missing_expected_stats;
-  for (const std::string& type : GetMandatoryStatsTypes(left_tab_)) {
-    missing_expected_stats.insert(type);
-  }
-  for (const std::string& type : VerifyStatsGeneratedPromise(left_tab_)) {
-    missing_expected_stats.erase(type);
-  }
-  EXPECT_THAT(missing_expected_stats, ::testing::IsEmpty());
-
-  DetectVideoAndHangUp();
-}
-
-class WebRtcBrowserTestIdl : public WebRtcBrowserTest {
- public:
-  WebRtcBrowserTestIdl() {
-    scoped_features_.InitAndEnableFeature(
-        blink::features::kWebRtcStatsReportIdl);
-  }
-
- private:
-  base::test::ScopedFeatureList scoped_features_;
-};
-
-IN_PROC_BROWSER_TEST_F(WebRtcBrowserTestIdl,
-                       RunsAudioVideoWebRTCCallInTwoTabsGetStatsPromiseIDL) {
-  StartServerAndOpenTabs();
-  SetupPeerconnectionWithLocalStream(left_tab_);
-  SetupPeerconnectionWithLocalStream(right_tab_);
-  CreateDataChannel(left_tab_, "data");
-  CreateDataChannel(right_tab_, "data");
-  NegotiateCall(left_tab_, right_tab_);
-
-  std::set<std::string> missing_expected_stats;
-  for (const std::string& type : GetMandatoryStatsTypes(left_tab_)) {
-    missing_expected_stats.insert(type);
-  }
-  for (const std::string& type : VerifyStatsGeneratedPromise(left_tab_)) {
-    missing_expected_stats.erase(type);
-  }
-  EXPECT_THAT(missing_expected_stats, ::testing::IsEmpty());
-
-  DetectVideoAndHangUp();
-}
-
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange \
+  DISABLED_RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange
+#else
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange \
+  RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange
+#endif
 IN_PROC_BROWSER_TEST_F(
     WebRtcBrowserTest,
-    RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange) {
+    MAYBE_RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange) {
   StartServerAndOpenTabs();
   SetupPeerconnectionWithLocalStream(left_tab_);
   SetupPeerconnectionWithLocalStream(right_tab_);
@@ -352,9 +343,17 @@ IN_PROC_BROWSER_TEST_F(
   DetectVideoAndHangUp();
 }
 
+// TODO(crbug.com/490247578): Flaky on ASan.
+#if defined(ADDRESS_SANITIZER)
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange_ConnectionCount \
+  DISABLED_RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange_ConnectionCount
+#else
+#define MAYBE_RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange_ConnectionCount \
+  RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange_ConnectionCount
+#endif
 IN_PROC_BROWSER_TEST_F(
     WebRtcBrowserTest,
-    RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange_ConnectionCount) {
+    MAYBE_RunsAudioVideoWebRTCCallInTwoTabsEmitsGatheringStateChange_ConnectionCount) {
   EXPECT_EQ(0u, GetPeerToPeerConnectionsCountChangeFromNetworkService());
   StartServerAndOpenTabs();
   SetupPeerconnectionWithLocalStream(left_tab_);

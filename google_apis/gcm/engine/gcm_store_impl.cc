@@ -4,6 +4,8 @@
 
 #include "google_apis/gcm/engine/gcm_store_impl.h"
 
+#include <optional>
+#include <string_view>
 #include <utility>
 
 #include "base/files/file_path.h"
@@ -16,7 +18,6 @@
 #include "base/metrics/histogram_macros.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_tokenizer.h"
 #include "base/strings/string_util.h"
 #include "base/task/sequenced_task_runner.h"
@@ -25,7 +26,6 @@
 #include "base/time/time.h"
 #include "google_apis/gcm/base/encryptor.h"
 #include "google_apis/gcm/base/gcm_constants.h"
-#include "google_apis/gcm/base/gcm_features.h"
 #include "google_apis/gcm/base/mcs_message.h"
 #include "google_apis/gcm/base/mcs_util.h"
 #include "google_apis/gcm/protocol/mcs.pb.h"
@@ -188,8 +188,8 @@ std::string ParseInstanceIDKey(const std::string& key) {
 // Note: leveldb::Slice keeps a pointer to the data in |s|, which must therefore
 // outlive the slice.
 // For example: MakeSlice(MakeOutgoingKey(x)) is invalid.
-leveldb::Slice MakeSlice(const base::StringPiece& s) {
-  return leveldb::Slice(s.begin(), s.size());
+leveldb::Slice MakeSlice(std::string_view s) {
+  return leveldb::Slice(s.data(), s.size());
 }
 
 }  // namespace
@@ -198,7 +198,6 @@ class GCMStoreImpl::Backend
     : public base::RefCountedThreadSafe<GCMStoreImpl::Backend> {
  public:
   Backend(const base::FilePath& path,
-          bool remove_account_mappings_with_email_key,
           scoped_refptr<base::SequencedTaskRunner> foreground_runner,
           std::unique_ptr<Encryptor> encryptor);
 
@@ -262,8 +261,7 @@ class GCMStoreImpl::Backend
   bool LoadRegistrations(std::map<std::string, std::string>* registrations);
   bool LoadIncomingMessages(std::vector<std::string>* incoming_messages);
   bool LoadOutgoingMessages(OutgoingMessageMap* outgoing_messages);
-  bool LoadLastCheckinInfo(base::Time* last_checkin_time,
-                           std::set<std::string>* accounts);
+  bool LoadLastCheckinInfo(base::Time* last_checkin_time);
   bool LoadGServicesSettings(std::map<std::string, std::string>* settings,
                              std::string* digest);
   bool LoadAccountMappingInfo(AccountMappings* account_mappings);
@@ -272,7 +270,6 @@ class GCMStoreImpl::Backend
   bool LoadInstanceIDData(std::map<std::string, std::string>* instance_id_data);
 
   const base::FilePath path_;
-  bool remove_account_mappings_with_email_key_;
   scoped_refptr<base::SequencedTaskRunner> foreground_task_runner_;
   std::unique_ptr<Encryptor> encryptor_;
 
@@ -281,12 +278,9 @@ class GCMStoreImpl::Backend
 
 GCMStoreImpl::Backend::Backend(
     const base::FilePath& path,
-    bool remove_account_mappings_with_email_key,
     scoped_refptr<base::SequencedTaskRunner> foreground_task_runner,
     std::unique_ptr<Encryptor> encryptor)
     : path_(path),
-      remove_account_mappings_with_email_key_(
-          remove_account_mappings_with_email_key),
       foreground_task_runner_(foreground_task_runner),
       encryptor_(std::move(encryptor)) {}
 
@@ -311,6 +305,13 @@ LoadStatus GCMStoreImpl::Backend::OpenStoreAndLoadData(StoreOpenMode open_mode,
   leveldb_env::Options options;
   options.create_if_missing = open_mode == CREATE_IF_MISSING;
   options.paranoid_checks = true;
+
+  // GCMStore does not typically handle large amounts of data, nor a
+  // high rate of store operations, so limit the write log size to something
+  // more appropriate (impact both in-memory and on-disk size before
+  // LevelDB compaction will be triggered).
+  options.write_buffer_size = 128 * 1024;
+
   leveldb::Status status =
       leveldb_env::OpenDB(options, path_.AsUTF8Unsafe(), &db_);
   UMA_HISTOGRAM_ENUMERATION("GCM.Database.Open",
@@ -332,8 +333,7 @@ LoadStatus GCMStoreImpl::Backend::OpenStoreAndLoadData(StoreOpenMode open_mode,
     return LOADING_INCOMING_MESSAGES_FAILED;
   if (!LoadOutgoingMessages(&result->outgoing_messages))
     return LOADING_OUTGOING_MESSAGES_FAILED;
-  if (!LoadLastCheckinInfo(&result->last_checkin_time,
-                           &result->last_checkin_accounts)) {
+  if (!LoadLastCheckinInfo(&result->last_checkin_time)) {
     return LOADING_LAST_CHECKIN_INFO_FAILED;
   }
   if (!LoadGServicesSettings(&result->gservices_settings,
@@ -356,7 +356,7 @@ void GCMStoreImpl::Backend::Load(StoreOpenMode open_mode,
                                  LoadCallback callback) {
   std::unique_ptr<LoadResult> result(new LoadResult());
   LoadStatus load_status = OpenStoreAndLoadData(open_mode, result.get());
-  UMA_HISTOGRAM_ENUMERATION("GCM.LoadStatus", load_status, LOAD_STATUS_COUNT);
+
   if (load_status != LOADING_SUCCEEDED) {
     result->Reset();
     result->store_does_not_exist = (load_status == STORE_DOES_NOT_EXIST);
@@ -379,23 +379,11 @@ void GCMStoreImpl::Backend::Load(StoreOpenMode open_mode,
 
   // Only record histograms if GCM had already been set up for this device.
   if (result->device_android_id != 0 && result->device_security_token != 0) {
-    int64_t file_size = 0;
-    if (base::GetFileSize(path_, &file_size)) {
+    std::optional<int64_t> file_size = base::GetFileSize(path_);
+    if (file_size.has_value()) {
       UMA_HISTOGRAM_COUNTS_1M("GCM.StoreSizeKB",
-                              static_cast<int>(file_size / 1024));
+                              static_cast<int>(file_size.value() / 1024));
     }
-
-    UMA_HISTOGRAM_COUNTS_1M("GCM.RestoredRegistrations",
-                            gcm_registration_count);
-    UMA_HISTOGRAM_COUNTS_1M("GCM.RestoredOutgoingMessages",
-                            result->outgoing_messages.size());
-    UMA_HISTOGRAM_COUNTS_1M("GCM.RestoredIncomingMessages",
-                            result->incoming_messages.size());
-
-    UMA_HISTOGRAM_COUNTS_1M("InstanceID.RestoredTokenCount",
-                            instance_id_token_count);
-    UMA_HISTOGRAM_COUNTS_1M("InstanceID.RestoredIDCount",
-                            result->instance_id_data.size());
   }
 
   DVLOG(1) << "Succeeded in loading "
@@ -631,10 +619,7 @@ void GCMStoreImpl::Backend::RemoveOutgoingMessages(
     // Skip the initial tag byte and parse the rest to extract the message.
     if (data_message.ParseFromString(outgoing_message.substr(1))) {
       DCHECK(!data_message.category().empty());
-      if (removed_message_counts.count(data_message.category()) != 0)
-        removed_message_counts[data_message.category()]++;
-      else
-        removed_message_counts[data_message.category()] = 1;
+      ++removed_message_counts[data_message.category()];
     }
     DVLOG(1) << "Removing outgoing message with id " << *iter;
     s = db_->Delete(write_options, MakeSlice(key));
@@ -1024,21 +1009,12 @@ bool GCMStoreImpl::Backend::LoadIncomingMessages(
         expired_incoming_messages.push_back(std::move(persistent_id));
       }
     } else {
-      if (base::FeatureList::IsEnabled(
-              features::kGCMDeleteIncomingMessagesWithoutTTL)) {
-        // No expiration time can be found from |data|. The messeage should be
-        // added with the legacy non-TTL path. Treat it as expired.
-        expired_incoming_messages.push_back(std::move(data));
-      } else {
-        incoming_messages->push_back(std::move(data));
-      }
+      incoming_messages->push_back(std::move(data));
     }
   }
   if (!expired_incoming_messages.empty()) {
     DVLOG(1) << "Removing " << expired_incoming_messages.size()
              << " expired incoming messages.";
-    UMA_HISTOGRAM_COUNTS_1M("GCM.ExpiredIncomingMessages",
-                            expired_incoming_messages.size());
     RemoveIncomingMessages(expired_incoming_messages, base::DoNothing());
   }
   return true;
@@ -1076,9 +1052,7 @@ bool GCMStoreImpl::Backend::LoadOutgoingMessages(
   return true;
 }
 
-bool GCMStoreImpl::Backend::LoadLastCheckinInfo(
-    base::Time* last_checkin_time,
-    std::set<std::string>* accounts) {
+bool GCMStoreImpl::Backend::LoadLastCheckinInfo(base::Time* last_checkin_time) {
   leveldb::ReadOptions read_options;
   read_options.verify_checksums = true;
 
@@ -1095,15 +1069,6 @@ bool GCMStoreImpl::Backend::LoadLastCheckinInfo(
   // In case we cannot read last checkin time, we default it to 0, as we don't
   // want that situation to cause the whole load to fail.
   *last_checkin_time = base::Time::FromInternalValue(time_internal);
-
-  accounts->clear();
-  s = db_->Get(read_options, MakeSlice(kLastCheckinAccountsKey), &result);
-  if (!s.ok())
-    DVLOG(1) << "No accounts where stored during last run.";
-
-  base::StringTokenizer t(result, ",");
-  while (t.GetNext())
-    accounts->insert(t.token());
 
   return true;
 }
@@ -1158,14 +1123,7 @@ bool GCMStoreImpl::Backend::LoadAccountMappingInfo(
   }
 
   for (const auto& account_mapping : loaded_account_mappings) {
-    bool remove = remove_account_mappings_with_email_key_ &&
-                  account_mapping.account_id.IsEmail();
-    base::UmaHistogramBoolean("GCM.RemoveAccountMappingWhenLoading", remove);
-    if (remove) {
-      RemoveAccountMapping(account_mapping.account_id, base::DoNothing());
-    } else {
-      account_mappings->push_back(account_mapping);
-    }
+    account_mappings->push_back(account_mapping);
   }
 
   return true;
@@ -1240,11 +1198,9 @@ bool GCMStoreImpl::Backend::LoadInstanceIDData(
 
 GCMStoreImpl::GCMStoreImpl(
     const base::FilePath& path,
-    bool remove_account_mappings_with_email_key,
     scoped_refptr<base::SequencedTaskRunner> blocking_task_runner,
     std::unique_ptr<Encryptor> encryptor)
     : backend_(new Backend(path,
-                           remove_account_mappings_with_email_key,
                            base::SingleThreadTaskRunner::GetCurrentDefault(),
                            std::move(encryptor))),
       blocking_task_runner_(blocking_task_runner) {}
@@ -1332,10 +1288,9 @@ bool GCMStoreImpl::AddOutgoingMessage(const std::string& persistent_id,
   std::string app_id = reinterpret_cast<const mcs_proto::DataMessageStanza*>(
                            &message.GetProtobuf())->category();
   DCHECK(!app_id.empty());
-  if (app_message_counts_.count(app_id) == 0)
-    app_message_counts_[app_id] = 0;
-  if (app_message_counts_[app_id] < kMessagesPerAppLimit) {
-    app_message_counts_[app_id]++;
+  auto [it, inserted] = app_message_counts_.try_emplace(app_id, 0);
+  if (it->second < kMessagesPerAppLimit) {
+    it->second++;
 
     blocking_task_runner_->PostTask(
         FROM_HERE,
@@ -1390,11 +1345,12 @@ void GCMStoreImpl::RemoveOutgoingMessages(
 }
 
 void GCMStoreImpl::SetLastCheckinInfo(const base::Time& time,
-                                      const std::set<std::string>& accounts,
                                       UpdateCallback callback) {
   blocking_task_runner_->PostTask(
-      FROM_HERE, base::BindOnce(&GCMStoreImpl::Backend::SetLastCheckinInfo,
-                                backend_, time, accounts, std::move(callback)));
+      FROM_HERE,
+      base::BindOnce(&GCMStoreImpl::Backend::SetLastCheckinInfo, backend_, time,
+                     /*accounts*/ std::set<std::string>(),
+                     std::move(callback)));
 }
 
 void GCMStoreImpl::SetGServicesSettings(
@@ -1459,21 +1415,14 @@ void GCMStoreImpl::LoadContinuation(LoadCallback callback,
     std::move(callback).Run(std::move(result));
     return;
   }
-  int num_throttled_apps = 0;
   for (OutgoingMessageMap::const_iterator
            iter = result->outgoing_messages.begin();
        iter != result->outgoing_messages.end(); ++iter) {
     const mcs_proto::DataMessageStanza* data_message =
         reinterpret_cast<mcs_proto::DataMessageStanza*>(iter->second.get());
     DCHECK(!data_message->category().empty());
-    if (app_message_counts_.count(data_message->category()) == 0)
-      app_message_counts_[data_message->category()] = 1;
-    else
-      app_message_counts_[data_message->category()]++;
-    if (app_message_counts_[data_message->category()] == kMessagesPerAppLimit)
-      num_throttled_apps++;
+    ++app_message_counts_[data_message->category()];
   }
-  UMA_HISTOGRAM_COUNTS_1M("GCM.NumThrottledApps", num_throttled_apps);
   std::move(callback).Run(std::move(result));
 }
 

@@ -16,11 +16,6 @@ bool LocationBarModelDelegate::ShouldDisplayURL() const {
   return true;
 }
 
-bool LocationBarModelDelegate::ShouldUseUpdatedConnectionSecurityIndicators()
-    const {
-  return false;
-}
-
 security_state::SecurityLevel LocationBarModelDelegate::GetSecurityLevel()
     const {
   return security_state::NONE;
@@ -58,6 +53,14 @@ bool LocationBarModelDelegate::IsNewTabPageURL(const GURL& url) const {
 
 bool LocationBarModelDelegate::IsHomePage(const GURL& url) const {
   return false;
+}
+
+bool LocationBarModelDelegate::IsContextualTasksPage() const {
+  return false;
+}
+
+GURL LocationBarModelDelegate::GetContextualTasksInnerFrameURL() const {
+  return GURL();
 }
 
 AutocompleteClassifier* LocationBarModelDelegate::GetAutocompleteClassifier() {

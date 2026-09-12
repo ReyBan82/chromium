@@ -8,6 +8,7 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/values.h"
 #include "chromeos/ash/components/dbus/shill/fake_shill_service_client.h"
@@ -36,7 +37,7 @@ ShillServiceClient* g_instance = nullptr;
 void OnGetDictionaryError(
     const std::string& method_name,
     const dbus::ObjectPath& service_path,
-    chromeos::DBusMethodCallback<base::Value::Dict> callback,
+    chromeos::DBusMethodCallback<base::DictValue> callback,
     const std::string& error_name,
     const std::string& error_message) {
   const std::string log_string = "Failed to call org.chromium.shill.Service." +
@@ -52,7 +53,7 @@ void OnGetDictionaryError(
     LOG(ERROR) << log_string;
   }
 
-  std::move(callback).Run(absl::nullopt);
+  std::move(callback).Run(std::nullopt);
 }
 
 // The ShillServiceClient implementation.
@@ -66,10 +67,12 @@ class ShillServiceClientImpl : public ShillServiceClient {
   ~ShillServiceClientImpl() override {
     for (auto& helper_pair : helpers_) {
       ShillClientHelper* helper = helper_pair.second;
-      bus_->RemoveObjectProxy(shill::kFlimflamServiceName,
-                              helper->object_proxy()->object_path(),
-                              base::DoNothing());
+      dbus::ObjectPath object_path = helper->object_proxy()->object_path();
+      // Delete `helper` before removing the `ObjectProxy` to prevent a dangling
+      // `raw_ptr` for `proxy_` in `ShillClientHelper`.
       delete helper;
+      bus_->RemoveObjectProxy(shill::kFlimflamServiceName, object_path,
+                              base::DoNothing());
     }
   }
 
@@ -95,10 +98,10 @@ class ShillServiceClientImpl : public ShillServiceClient {
 
   void GetProperties(
       const dbus::ObjectPath& service_path,
-      chromeos::DBusMethodCallback<base::Value::Dict> callback) override {
+      chromeos::DBusMethodCallback<base::DictValue> callback) override {
     auto* helper = GetHelper(service_path);
     if (!helper) {
-      std::move(callback).Run(base::Value::Dict());
+      std::move(callback).Run(base::DictValue());
       return;
     }
     dbus::MethodCall method_call(shill::kFlimflamServiceInterface,
@@ -131,7 +134,7 @@ class ShillServiceClientImpl : public ShillServiceClient {
   }
 
   void SetProperties(const dbus::ObjectPath& service_path,
-                     const base::Value::Dict& properties,
+                     const base::DictValue& properties,
                      base::OnceClosure callback,
                      ErrorCallback error_callback) override {
     auto* helper = GetHelper(service_path);
@@ -240,10 +243,10 @@ class ShillServiceClientImpl : public ShillServiceClient {
 
   void GetLoadableProfileEntries(
       const dbus::ObjectPath& service_path,
-      chromeos::DBusMethodCallback<base::Value::Dict> callback) override {
+      chromeos::DBusMethodCallback<base::DictValue> callback) override {
     auto* helper = GetHelper(service_path);
     if (!helper) {
-      std::move(callback).Run(base::Value::Dict());
+      std::move(callback).Run(base::DictValue());
       return;
     }
     dbus::MethodCall method_call(shill::kFlimflamServiceInterface,
@@ -329,7 +332,8 @@ class ShillServiceClientImpl : public ShillServiceClient {
   }
 
  private:
-  using HelperMap = std::map<std::string, ShillClientHelper*>;
+  using HelperMap =
+      std::map<std::string, raw_ptr<ShillClientHelper, CtnExperimental>>;
 
   // Returns the corresponding ShillClientHelper for the profile.
   ShillClientHelper* GetHelper(const dbus::ObjectPath& service_path) {
@@ -372,24 +376,26 @@ class ShillServiceClientImpl : public ShillServiceClient {
                      << shill::kFlimflamServicePath;
       return;
     }
+    helpers_.erase(object_path.value());
+    // Delete `helper` before removing the `ObjectProxy` to prevent a dangling
+    // `raw_ptr` for `proxy_` in `ShillClientHelper`.
+    delete helper;
     bus_->RemoveObjectProxy(shill::kFlimflamServiceName, object_path,
                             base::DoNothing());
-    helpers_.erase(object_path.value());
-    delete helper;
   }
 
-  static base::OnceCallback<void(base::Value::Dict result)>
+  static base::OnceCallback<void(base::DictValue result)>
   AdaptCallbackWithoutStatus(
-      chromeos::DBusMethodCallback<base::Value::Dict> callback) {
+      chromeos::DBusMethodCallback<base::DictValue> callback) {
     return base::BindOnce(
-        [](chromeos::DBusMethodCallback<base::Value::Dict> callback,
-           base::Value::Dict result) {
+        [](chromeos::DBusMethodCallback<base::DictValue> callback,
+           base::DictValue result) {
           std::move(callback).Run(std::move(result));
         },
         std::move(callback));
   }
 
-  dbus::Bus* bus_;
+  raw_ptr<dbus::Bus> bus_;
   HelperMap helpers_;
   base::WeakPtrFactory<ShillServiceClientImpl> weak_ptr_factory_{this};
 };

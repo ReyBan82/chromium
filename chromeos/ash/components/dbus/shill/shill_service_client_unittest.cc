@@ -2,21 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chromeos/ash/components/dbus/shill/shill_service_client.h"
+
 #include <memory>
+#include <optional>
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/mock_callback.h"
 #include "base/test/test_future.h"
 #include "base/values.h"
 #include "chromeos/ash/components/dbus/shill/shill_client_unittest_base.h"
-#include "chromeos/ash/components/dbus/shill/shill_service_client.h"
 #include "dbus/message.h"
 #include "dbus/object_path.h"
 #include "dbus/values_util.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 
 using testing::_;
@@ -51,7 +53,8 @@ class ShillServiceClientTest : public ShillClientUnittestBase {
   }
 
  protected:
-  ShillServiceClient* client_ = nullptr;  // Unowned convenience pointer.
+  raw_ptr<ShillServiceClient, DanglingUntriaged> client_ =
+      nullptr;  // Unowned convenience pointer.
 };
 
 TEST_F(ShillServiceClientTest, PropertyChanged) {
@@ -102,16 +105,15 @@ TEST_F(ShillServiceClientTest, GetProperties) {
   writer.CloseContainer(&array_writer);
 
   // Set expectations.
-  base::Value::Dict expected_value;
+  base::DictValue expected_value;
   expected_value.Set(shill::kSignalStrengthProperty, kValue);
   PrepareForMethodCall(shill::kGetPropertiesFunction,
                        base::BindRepeating(&ExpectNoArgument), response.get());
   // Call method.
-  base::test::TestFuture<absl::optional<base::Value::Dict>>
-      get_properties_result;
+  base::test::TestFuture<std::optional<base::DictValue>> get_properties_result;
   client_->GetProperties(dbus::ObjectPath(kExampleServicePath),
                          get_properties_result.GetCallback());
-  absl::optional<base::Value::Dict> result = get_properties_result.Take();
+  std::optional<base::DictValue> result = get_properties_result.Take();
   EXPECT_TRUE(result.has_value());
   EXPECT_EQ(expected_value, result.value());
 }
@@ -145,7 +147,7 @@ TEST_F(ShillServiceClientTest, SetProperties) {
   std::unique_ptr<dbus::Response> response(dbus::Response::CreateEmpty());
 
   // Set expectations.
-  base::Value::Dict arg = CreateExampleServiceProperties();
+  base::DictValue arg = CreateExampleServiceProperties();
   // Use a variant valued dictionary rather than a string valued one.
   const bool string_valued = false;
   PrepareForMethodCall(
@@ -207,7 +209,7 @@ TEST_F(ShillServiceClientTest, ClearProperties) {
                        response.get());
   // Call method.
   // We can't use `base::test::TestFuture` for non-copyable objects and
-  // base::Value::List is non-copyable. So this test will keep using
+  // base::ListValue is non-copyable. So this test will keep using
   // base::RunLoop unlike other tests in this suite until TestFuture can support
   // it.
   base::MockCallback<ShillServiceClient::ListValueCallback>
@@ -342,15 +344,15 @@ TEST_F(ShillServiceClientTest, RequestPortalDetection) {
 
 TEST_F(ShillServiceClientTest, RequestTrafficCounters) {
   // Set up value of response.
-  base::Value::List traffic_counters;
+  base::ListValue traffic_counters;
 
-  base::Value::Dict chrome_dict;
+  base::DictValue chrome_dict;
   chrome_dict.Set("source", shill::kTrafficCounterSourceChrome);
   chrome_dict.Set("rx_bytes", 12);
   chrome_dict.Set("tx_bytes", 34);
   traffic_counters.Append(std::move(chrome_dict));
 
-  base::Value::Dict user_dict;
+  base::DictValue user_dict;
   user_dict.Set("source", shill::kTrafficCounterSourceUser);
   user_dict.Set("rx_bytes", 90);
   user_dict.Set("tx_bytes", 87);
@@ -366,12 +368,12 @@ TEST_F(ShillServiceClientTest, RequestTrafficCounters) {
                        base::BindRepeating(&ExpectNoArgument), response.get());
 
   // Call method.
-  base::test::TestFuture<absl::optional<base::Value>> request_result;
+  base::test::TestFuture<std::optional<base::Value>> request_result;
   client_->RequestTrafficCounters(dbus::ObjectPath(kExampleServicePath),
                                   request_result.GetCallback());
-  absl::optional<base::Value> result = request_result.Take();
+  std::optional<base::Value> result = request_result.Take();
   EXPECT_TRUE(result);
-  const base::Value::List& result_list = result.value().GetList();
+  const base::ListValue& result_list = result.value().GetList();
   EXPECT_EQ(result_list, traffic_counters);
 }
 

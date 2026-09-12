@@ -6,13 +6,17 @@
 #define CHROME_BROWSER_ANDROID_FRAMEBUST_INTERVENTION_FRAMEBUST_BLOCKED_DELEGATE_ANDROID_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "components/messages/android/message_enums.h"
 #include "components/messages/android/message_wrapper.h"
+#include "content/public/browser/page.h"
+#include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 class HostContentSettingsMap;
 
@@ -26,7 +30,8 @@ namespace blocked_content {
 // Created lazily when a framebust is first blocked, and matches the
 // lifetime of WebContents afterwards.
 class FramebustBlockedMessageDelegate
-    : public content::WebContentsUserData<FramebustBlockedMessageDelegate> {
+    : public content::WebContentsUserData<FramebustBlockedMessageDelegate>,
+      public content::WebContentsObserver {
  public:
   // Describes the actions the user can take regarding this intervention, they
   // are provided through a callback the caller can pass to the delegate's
@@ -42,6 +47,7 @@ class FramebustBlockedMessageDelegate
   typedef base::OnceCallback<void(InterventionOutcome)> OutcomeCallback;
 
   bool ShowMessage(const GURL& blocked_url,
+                   const std::optional<url::Origin>& initiator_origin,
                    HostContentSettingsMap* settings_map,
                    OutcomeCallback intervention_callback);
 
@@ -56,6 +62,10 @@ class FramebustBlockedMessageDelegate
   void HandleClick();
   void HandleDismissCallback(messages::DismissReason dismiss_reason);
   void HandleOpenLink();
+  void DismissMessage();
+
+  // content::WebContentsObserver:
+  void PrimaryPageChanged(content::Page& page) override;
 
   raw_ptr<HostContentSettingsMap> settings_map_ = nullptr;
 
@@ -64,6 +74,7 @@ class FramebustBlockedMessageDelegate
   OutcomeCallback intervention_callback_;
   std::unique_ptr<messages::MessageWrapper> message_;
   GURL blocked_url_;
+  std::optional<url::Origin> initiator_origin_;
   WEB_CONTENTS_USER_DATA_KEY_DECL();
 };
 

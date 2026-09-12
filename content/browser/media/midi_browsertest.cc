@@ -3,13 +3,24 @@
 // found in the LICENSE file.
 
 #include "base/strings/utf_string_conversions.h"
+#include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
+#include "content/browser/permissions/permission_controller_impl.h"
+#include "content/browser/security/cpsp/child_process_security_policy_impl.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
 #include "content/public/test/content_browser_test_utils.h"
 #include "content/shell/browser/shell.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "third_party/blink/public/common/features.h"
+#include "third_party/blink/public/common/permissions/permission_utils.h"
+#include "url/origin.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "media/midi/midi_manager_android.h"
+#endif  // BUILDFLAG(IS_ANDROID)
 
 namespace content {
 
@@ -20,9 +31,20 @@ class MidiBrowserTest : public ContentBrowserTest {
   MidiBrowserTest()
       : https_test_server_(std::make_unique<net::EmbeddedTestServer>(
             net::EmbeddedTestServer::TYPE_HTTPS)) {}
-  ~MidiBrowserTest() override {}
+  ~MidiBrowserTest() override = default;
+
+  void SetUp() override {
+    feature_list_.InitAndDisableFeature(blink::features::kBlockMidiByDefault);
+    ContentBrowserTest::SetUp();
+  }
 
   void NavigateAndCheckResult(const std::string& path) {
+#if BUILDFLAG(IS_ANDROID)
+    if (!midi::HasSystemFeatureMidiForTesting()) {
+      GTEST_SKIP() << "MIDI service is not available on this device.";
+    }
+#endif  // BUILDFLAG(IS_ANDROID)
+
     const std::u16string expected = u"pass";
     content::TitleWatcher watcher(shell()->web_contents(), expected);
     const std::u16string failed = u"fail";
@@ -57,25 +79,148 @@ class MidiBrowserTest : public ContentBrowserTest {
   }
 
   std::unique_ptr<net::EmbeddedTestServer> https_test_server_;
+  base::test::ScopedFeatureList feature_list_;
 };
 
-// TODO(https://crbug.com/1302995): MidiManager has no Fuchsia implementation.
-#if BUILDFLAG(IS_FUCHSIA)
-#define MAYBE_RequestMIDIAccess DISABLED_RequestMIDIAccess
+class MidiBrowserTestBlockMidiByDefault : public ContentBrowserTest {
+ public:
+  MidiBrowserTestBlockMidiByDefault()
+      : https_test_server_(std::make_unique<net::EmbeddedTestServer>(
+            net::EmbeddedTestServer::TYPE_HTTPS)) {}
+  ~MidiBrowserTestBlockMidiByDefault() override = default;
+
+  void SetUp() override {
+    feature_list_.InitAndEnableFeature(blink::features::kBlockMidiByDefault);
+    ContentBrowserTest::SetUp();
+  }
+
+  void NavigateAndCheckResult(const std::string& path) {
+    const std::u16string expected = u"fail";
+    content::TitleWatcher watcher(shell()->web_contents(), expected);
+    const std::u16string failed = u"pass";
+    watcher.AlsoWaitForTitle(failed);
+
+    EXPECT_TRUE(NavigateToURL(shell(), https_test_server_->GetURL(path)));
+
+    const std::u16string result = watcher.WaitAndGetTitle();
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+    // Try does not allow accessing /dev/snd/seq, and it results in a platform
+    // specific initialization error. See http://crbug.com/371230.
+    // Also, Chromecast does not support the feature and results in
+    // NotSupportedError.
+    EXPECT_TRUE(result == failed || result == expected);
+    if (result == failed) {
+      std::string error_message =
+          EvalJs(shell(), "error_message").ExtractString();
+      EXPECT_TRUE("Platform dependent initialization failed." ==
+                      error_message ||
+                  "The implementation did not support the requested type of "
+                  "object or operation." == error_message);
+    }
 #else
-#define MAYBE_RequestMIDIAccess RequestMIDIAccess
+    EXPECT_EQ(expected, result);
 #endif
-IN_PROC_BROWSER_TEST_F(MidiBrowserTest, MAYBE_RequestMIDIAccess) {
+  }
+
+ private:
+  void SetUpOnMainThread() override {
+    https_test_server_->ServeFilesFromSourceDirectory(GetTestDataFilePath());
+    ASSERT_TRUE(https_test_server_->Start());
+  }
+
+  std::unique_ptr<net::EmbeddedTestServer> https_test_server_;
+  base::test::ScopedFeatureList feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(MidiBrowserTest, RequestMIDIAccess) {
   NavigateAndCheckResult("/midi/request_midi_access.html");
 }
 
-#if BUILDFLAG(IS_FUCHSIA)
-#define MAYBE_SubscribeAll DISABLED_SubscribeAll
-#else
-#define MAYBE_SubscribeAll SubscribeAll
-#endif
-IN_PROC_BROWSER_TEST_F(MidiBrowserTest, MAYBE_SubscribeAll) {
+IN_PROC_BROWSER_TEST_F(MidiBrowserTestBlockMidiByDefault, RequestMIDIAccess) {
+  NavigateAndCheckResult("/midi/request_midi_access.html");
+}
+
+IN_PROC_BROWSER_TEST_F(MidiBrowserTest, SubscribeAll) {
   NavigateAndCheckResult("/midi/subscribe_all.html");
+}
+
+IN_PROC_BROWSER_TEST_F(MidiBrowserTestBlockMidiByDefault, SubscribeAll) {
+  NavigateAndCheckResult("/midi/subscribe_all.html");
+}
+
+class MidiBrowserTestWithPermissionOverride : public ContentBrowserTest {
+ public:
+  MidiBrowserTestWithPermissionOverride()
+      : https_test_server_(std::make_unique<net::EmbeddedTestServer>(
+            net::EmbeddedTestServer::TYPE_HTTPS)) {}
+  ~MidiBrowserTestWithPermissionOverride() override = default;
+
+  void SetUp() override {
+    feature_list_.InitAndEnableFeature(blink::features::kBlockMidiByDefault);
+    ContentBrowserTest::SetUp();
+  }
+
+ protected:
+  void SetUpOnMainThread() override {
+    https_test_server_->ServeFilesFromSourceDirectory(GetTestDataFilePath());
+    ASSERT_TRUE(https_test_server_->Start());
+  }
+
+  std::unique_ptr<net::EmbeddedTestServer> https_test_server_;
+  base::test::ScopedFeatureList feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(MidiBrowserTestWithPermissionOverride,
+                       RequestMIDIAccessWithSysexOverride) {
+#if BUILDFLAG(IS_ANDROID)
+  if (!midi::HasSystemFeatureMidiForTesting()) {
+    GTEST_SKIP() << "MIDI service is not available on this device.";
+  }
+#endif  // BUILDFLAG(IS_ANDROID)
+
+  url::Origin origin =
+      url::Origin::Create(https_test_server_->GetURL("/"));
+
+  PermissionControllerImpl* permission_controller =
+      PermissionControllerImpl::FromBrowserContext(
+          shell()->web_contents()->GetBrowserContext());
+
+  permission_controller->SetPermissionOverride(
+      origin, origin, blink::PermissionType::MIDI,
+      blink::mojom::PermissionStatus::GRANTED, base::DoNothing());
+  permission_controller->SetPermissionOverride(
+      origin, origin, blink::PermissionType::MIDI_SYSEX,
+      blink::mojom::PermissionStatus::GRANTED, base::DoNothing());
+
+  const std::u16string expected = u"pass";
+  content::TitleWatcher watcher(shell()->web_contents(), expected);
+  const std::u16string failed = u"fail";
+  watcher.AlsoWaitForTitle(failed);
+
+  EXPECT_TRUE(NavigateToURL(
+      shell(),
+      https_test_server_->GetURL("/midi/request_midi_sysex_access.html")));
+
+  const std::u16string result = watcher.WaitAndGetTitle();
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+  EXPECT_TRUE(result == failed || result == expected);
+  if (result == failed) {
+    std::string error_message =
+        EvalJs(shell(), "error_message").ExtractString();
+    EXPECT_TRUE("Platform dependent initialization failed." ==
+                    error_message ||
+                "The implementation did not support the requested type of "
+                "object or operation." == error_message);
+  }
+#else
+  EXPECT_EQ(expected, result);
+#endif
+
+  RenderProcessHost* rph =
+      shell()->web_contents()->GetPrimaryMainFrame()->GetProcess();
+  EXPECT_TRUE(
+      ChildProcessSecurityPolicyImpl::GetInstance()->CanSendMidiSysExMessage(
+          rph->GetID()));
 }
 
 }  // namespace

@@ -19,6 +19,7 @@ public class MockLocationProvider implements LocationProvider {
     private Handler mHandler;
     private HandlerThread mHandlerThread;
     private final Object mLock = new Object();
+    private boolean mEnableHighAccuracy;
 
     private static final int UPDATE_LOCATION_MSG = 100;
 
@@ -32,15 +33,18 @@ public class MockLocationProvider implements LocationProvider {
 
     @Override
     public void start(boolean enableHighAccuracy) {
-        if (mIsRunning) return;
-
         if (mHandlerThread == null) {
             startMockLocationProviderThread();
         }
 
         mIsRunning = true;
+        mEnableHighAccuracy = enableHighAccuracy;
         synchronized (mLock) {
-            mHandler.sendEmptyMessage(UPDATE_LOCATION_MSG);
+            mHandler.removeMessages(UPDATE_LOCATION_MSG);
+            // Sending the message directly might result in a race condition when the location is
+            // expected to be updated, e.g. from approximated to precise. Hence, we delay the
+            // message by 200 milliseconds to account for this.
+            mHandler.sendEmptyMessageDelayed(UPDATE_LOCATION_MSG, 200);
         }
     }
 
@@ -64,23 +68,29 @@ public class MockLocationProvider implements LocationProvider {
 
         mHandlerThread = new HandlerThread("MockLocationProviderImpl");
         mHandlerThread.start();
-        mHandler = new Handler(mHandlerThread.getLooper()) {
-            @Override
-            public void handleMessage(Message msg) {
-                synchronized (mLock) {
-                    if (msg.what == UPDATE_LOCATION_MSG) {
-                        newLocation();
-                        sendEmptyMessageDelayed(UPDATE_LOCATION_MSG, 250);
+        mHandler =
+                new Handler(mHandlerThread.getLooper()) {
+                    @Override
+                    public void handleMessage(Message msg) {
+                        synchronized (mLock) {
+                            if (msg.what == UPDATE_LOCATION_MSG) {
+                                newLocation();
+                                sendEmptyMessageDelayed(UPDATE_LOCATION_MSG, 250);
+                            }
+                        }
                     }
-                }
-            }
-        };
+                };
     }
 
     private void newLocation() {
         Location location = new Location("MockLocationProvider");
         location.setTime(System.currentTimeMillis());
-        location.setAccuracy(0.5f);
-        LocationProviderAdapter.onNewLocationAvailable(location);
+        if (mEnableHighAccuracy) {
+            location.setAccuracy(0.5f);
+        } else {
+            // A large accuracy value to simulate an approximate location.
+            location.setAccuracy(2000.0f);
+        }
+        LocationProviderAdapter.onNewLocationAvailable(location, mEnableHighAccuracy);
     }
-};
+}

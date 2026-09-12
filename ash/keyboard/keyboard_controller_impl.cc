@@ -4,6 +4,7 @@
 
 #include "ash/keyboard/keyboard_controller_impl.h"
 
+#include <optional>
 #include <utility>
 
 #include "ash/constants/ash_constants.h"
@@ -13,12 +14,16 @@
 #include "ash/keyboard/ui/keyboard_ui_factory.h"
 #include "ash/keyboard/virtual_keyboard_controller.h"
 #include "ash/public/cpp/keyboard/keyboard_switches.h"
+#include "ash/public/cpp/login_types.h"
 #include "ash/public/cpp/shell_window_ids.h"
 #include "ash/root_window_controller.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shelf/shelf.h"
 #include "ash/shell.h"
 #include "ash/shell_delegate.h"
+#include "ash/system/input_device_settings/input_device_settings_controller_impl.h"
+#include "ash/system/model/enterprise_domain_model.h"
+#include "ash/system/model/system_tray_model.h"
 #include "ash/wm/window_util.h"
 #include "base/command_line.h"
 #include "base/feature_list.h"
@@ -27,10 +32,10 @@
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "components/prefs/pref_service.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/aura/env.h"
 #include "ui/aura/window_delegate.h"
 #include "ui/base/ui_base_features.h"
+#include "ui/display/manager/display_manager.h"
 #include "ui/events/base_event_utils.h"
 #include "ui/events/gestures/gesture_recognizer.h"
 #include "ui/gfx/geometry/rect.h"
@@ -59,18 +64,21 @@ const char kSpellCheckEnabledKey[] = "spell_check_enabled";
 // enabled.
 const char kVoiceInputEnabledKey[] = "voice_input_enabled";
 
-absl::optional<display::Display> GetFirstTouchDisplay() {
-  for (const auto& display : display::Screen::GetScreen()->GetAllDisplays()) {
+std::optional<display::Display> GetFirstTouchDisplay() {
+  // Use `active_only_display_list()` because this function could be called
+  // during display update transition. See crbug.com/494034448.
+  for (const auto& display :
+       Shell::Get()->display_manager()->active_only_display_list()) {
     if (display.touch_support() == display::Display::TouchSupport::AVAILABLE)
       return display;
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 bool GetVirtualKeyboardFeatureValue(PrefService* prefs,
                                     const std::string& feature_path) {
   DCHECK(prefs);
-  const base::Value::Dict& features =
+  const base::DictValue& features =
       prefs->GetDict(prefs::kAccessibilityVirtualKeyboardFeatures);
 
   return features.FindBool(feature_path).value_or(false);
@@ -95,8 +103,20 @@ KeyboardControllerImpl::~KeyboardControllerImpl() {
 }
 
 // static
-void KeyboardControllerImpl::RegisterProfilePrefs(
-    PrefRegistrySimple* registry) {
+void KeyboardControllerImpl::RegisterProfilePrefs(PrefRegistrySimple* registry,
+                                                  std::string_view country) {
+  // Longpress diacritics pref is default on for NZ managed users only, default
+  // off otherwise.
+  registry->RegisterBooleanPref(
+      ash::prefs::kLongPressDiacriticsEnabled,
+      (country == "NZ" &&
+       Shell::Get()
+               ->system_tray_model()
+               ->enterprise_domain()
+               ->management_device_mode() == ManagementDeviceMode::kNone) ||
+          base::FeatureList::IsEnabled(
+              ash::features::kDiacriticsOnPhysicalKeyboardLongpressDefaultOn),
+      user_prefs::PrefRegistrySyncable::SYNCABLE_OS_PREF);
   registry->RegisterBooleanPref(
       ash::prefs::kXkbAutoRepeatEnabled, ash::kDefaultKeyAutoRepeatEnabled,
       user_prefs::PrefRegistrySyncable::SYNCABLE_OS_PREF);
@@ -226,7 +246,7 @@ void KeyboardControllerImpl::SetKeyboardLocked(bool locked) {
 
 void KeyboardControllerImpl::SetOccludedBounds(
     const std::vector<gfx::Rect>& bounds) {
-  // TODO(https://crbug.com/826617): Support occluded bounds with multiple
+  // TODO(crbug.com/41379402): Support occluded bounds with multiple
   // rectangles.
   keyboard_ui_controller_->SetOccludedBounds(bounds.empty() ? gfx::Rect()
                                                             : bounds[0]);
@@ -269,10 +289,10 @@ void KeyboardControllerImpl::RemoveObserver(
   observers_.RemoveObserver(observer);
 }
 
-absl::optional<KeyRepeatSettings>
+std::optional<KeyRepeatSettings>
 KeyboardControllerImpl::GetKeyRepeatSettings() {
   if (!pref_change_registrar_)
-    return absl::nullopt;
+    return std::nullopt;
   PrefService* prefs = pref_change_registrar_->prefs();
   bool enabled = prefs->GetBoolean(ash::prefs::kXkbAutoRepeatEnabled);
   int delay_in_ms = prefs->GetInteger(ash::prefs::kXkbAutoRepeatDelay);
@@ -282,8 +302,15 @@ KeyboardControllerImpl::GetKeyRepeatSettings() {
 }
 
 bool KeyboardControllerImpl::AreTopRowKeysFunctionKeys() {
-  PrefService* prefs = pref_change_registrar_->prefs();
-  return prefs->GetBoolean(ash::prefs::kSendFunctionKeys);
+  return Shell::Get()
+      ->input_device_settings_controller()
+      ->GetGeneralizedTopRowAreFKeys();
+}
+
+void KeyboardControllerImpl::SetSmartVisibilityEnabled(bool enabled) {
+  if (keyboard_ui_controller_->IsEnabled()) {
+    keyboard_ui_controller_->SetShouldShowOnTransientBlur(enabled);
+  }
 }
 
 // SessionObserver
@@ -398,14 +425,14 @@ aura::Window* KeyboardControllerImpl::GetContainerForDisplay(
   RootWindowController* controller =
       Shell::Get()->GetRootWindowControllerWithDisplayId(display.id());
   aura::Window* container =
-      controller->GetContainer(kShellWindowId_VirtualKeyboardContainer);
+      controller ? controller->GetContainer(kShellWindowId_VirtualKeyboardContainer) : nullptr ;
   DCHECK(container);
   return container;
 }
 
 aura::Window* KeyboardControllerImpl::GetContainerForDefaultDisplay() {
-  const display::Screen* screen = display::Screen::GetScreen();
-  const absl::optional<display::Display> first_touch_display =
+  const display::Screen* screen = display::Screen::Get();
+  const std::optional<display::Display> first_touch_display =
       GetFirstTouchDisplay();
   const bool has_touch_display = first_touch_display.has_value();
 
@@ -429,18 +456,16 @@ aura::Window* KeyboardControllerImpl::GetContainerForDefaultDisplay() {
 
 void KeyboardControllerImpl::TransferGestureEventToShelf(
     const ui::GestureEvent& e) {
-  if (!base::FeatureList::IsEnabled(
-          features::kShelfGesturesWithVirtualKeyboard)) {
-    return;
-  }
-
   ash::Shelf* shelf =
       ash::Shelf::ForWindow(keyboard_ui_controller_->GetKeyboardWindow());
   if (shelf) {
     shelf->ProcessGestureEvent(e);
-    aura::Env::GetInstance()->gesture_recognizer()->TransferEventsTo(
-        keyboard_ui_controller_->GetGestureConsumer(), shelf->GetWindow(),
-        ui::TransferTouchesBehavior::kCancel);
+    auto* current_consumer = keyboard_ui_controller_->GetGestureConsumer();
+    if (current_consumer) {
+      aura::Env::GetInstance()->gesture_recognizer()->TransferEventsTo(
+          current_consumer, shelf->GetWindow(),
+          ui::TransferTouchesBehavior::kCancel);
+    }
     HideKeyboard(HideReason::kUser);
   }
 }

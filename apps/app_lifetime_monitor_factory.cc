@@ -21,7 +21,8 @@ AppLifetimeMonitor* AppLifetimeMonitorFactory::GetForBrowserContext(
 }
 
 AppLifetimeMonitorFactory* AppLifetimeMonitorFactory::GetInstance() {
-  return base::Singleton<AppLifetimeMonitorFactory>::get();
+  static base::NoDestructor<AppLifetimeMonitorFactory> instance;
+  return instance.get();
 }
 
 AppLifetimeMonitorFactory::AppLifetimeMonitorFactory()
@@ -34,9 +35,10 @@ AppLifetimeMonitorFactory::AppLifetimeMonitorFactory()
 
 AppLifetimeMonitorFactory::~AppLifetimeMonitorFactory() = default;
 
-KeyedService* AppLifetimeMonitorFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+AppLifetimeMonitorFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new AppLifetimeMonitor(context);
+  return std::make_unique<AppLifetimeMonitor>(context);
 }
 
 bool AppLifetimeMonitorFactory::ServiceIsCreatedWithBrowserContext() const {
@@ -46,8 +48,7 @@ bool AppLifetimeMonitorFactory::ServiceIsCreatedWithBrowserContext() const {
 content::BrowserContext* AppLifetimeMonitorFactory::GetBrowserContextToUse(
     content::BrowserContext* context) const {
   return extensions::ExtensionsBrowserClient::Get()
-      ->GetRedirectedContextInIncognito(context, /*force_guest_profile=*/true,
-                                        /*force_system_profile=*/false);
+      ->GetContextRedirectedToOriginal(context);
 }
 
 }  // namespace apps

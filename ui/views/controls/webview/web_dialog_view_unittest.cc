@@ -15,11 +15,14 @@
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/test_browser_context.h"
+#include "content/public/test/test_content_browser_client.h"
 #include "content/public/test/test_renderer_host.h"
-#include "content/test/test_content_browser_client.h"
 #include "content/test/test_web_contents.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/events/keycodes/keyboard_codes.h"
+#include "ui/gfx/native_ui_types.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/test/view_metadata_test_utils.h"
 #include "ui/views/test/widget_test.h"
 #include "ui/views/window/dialog_delegate.h"
@@ -43,8 +46,8 @@ class TestWebDialogViewWebDialogDelegate
   // ui::WebDialogDelegate
   bool OnDialogCloseRequested() override { return true; }
   bool ShouldCloseDialogOnEscape() const override { return close_on_escape_; }
-  ui::ModalType GetDialogModalType() const override {
-    return ui::MODAL_TYPE_WINDOW;
+  ui::mojom::ModalType GetDialogModalType() const override {
+    return ui::mojom::ModalType::kWindow;
   }
 
  private:
@@ -67,11 +70,11 @@ class WebDialogViewUnitTest : public views::test::WidgetTest {
   void SetUp() override {
     views::test::WidgetTest::SetUp();
 
-    browser_context_ = std::make_unique<content::TestBrowserContext>();
-
     // Set the test content browser client to avoid pulling in needless
     // dependencies from content.
     SetBrowserClientForTesting(&test_browser_client_);
+
+    browser_context_ = std::make_unique<content::TestBrowserContext>();
 
     web_dialog_delegate_ =
         std::make_unique<TestWebDialogViewWebDialogDelegate>();
@@ -89,14 +92,15 @@ class WebDialogViewUnitTest : public views::test::WidgetTest {
     // views code and the location of TestingProfile.
     web_dialog_view_->disable_url_load_for_test_ = true;
 
-    widget_ = views::DialogDelegate::CreateDialogWidget(web_dialog_view_,
-                                                        GetContext(), nullptr);
+    widget_ = views::DialogDelegate::CreateDialogWidget(
+        web_dialog_view_, GetContext(), gfx::NativeView());
     widget_->Show();
     EXPECT_FALSE(widget_is_closed());
   }
 
   void TearDown() override {
-    widget_->CloseNow();
+    web_dialog_view_ = nullptr;
+    widget_.ExtractAsDangling()->CloseNow();
     views::test::WidgetTest::TearDown();
   }
 
@@ -104,8 +108,10 @@ class WebDialogViewUnitTest : public views::test::WidgetTest {
 
   WebDialogView* web_dialog_view() { return web_dialog_view_; }
 
-  views::WebView* web_view() {
-    return web_dialog_view_ ? web_dialog_view_->web_view_.get() : nullptr;
+  views::WebView* web_view() { return GetWebViewFor(web_dialog_view_); }
+
+  views::WebView* GetWebViewFor(WebDialogView* view) {
+    return view ? view->web_view_.get() : nullptr;
   }
 
   ui::WebDialogDelegate* web_view_delegate() {
@@ -118,6 +124,8 @@ class WebDialogViewUnitTest : public views::test::WidgetTest {
 
   void ResetWebDialogDelegate() { web_dialog_delegate_.reset(); }
 
+  content::BrowserContext* browser_context() { return browser_context_.get(); }
+
  protected:
   std::unique_ptr<content::TestWebContents> CreateWebContents() const {
     return base::WrapUnique<content::TestWebContents>(
@@ -129,8 +137,9 @@ class WebDialogViewUnitTest : public views::test::WidgetTest {
     ASSERT_TRUE(web_dialog_view_->GetFocusManager() != nullptr);
     ASSERT_TRUE(widget_ != nullptr);
     ui::KeyEvent event_copy = event;
-    if (web_dialog_view_->GetFocusManager()->OnKeyEvent(event_copy))
+    if (web_dialog_view_->GetFocusManager()->OnKeyEvent(event_copy)) {
       widget_->OnKeyEvent(&event_copy);
+    }
   }
 
  private:
@@ -149,7 +158,7 @@ class WebDialogViewUnitTest : public views::test::WidgetTest {
 
 TEST_F(WebDialogViewUnitTest, WebDialogViewClosedOnEscape) {
   web_dialog_delegate()->set_close_on_escape(true);
-  const ui::KeyEvent escape_event(ui::ET_KEY_PRESSED, ui::VKEY_ESCAPE,
+  const ui::KeyEvent escape_event(ui::EventType::kKeyPressed, ui::VKEY_ESCAPE,
                                   ui::EF_NONE);
   SimulateKeyEvent(escape_event);
 
@@ -159,7 +168,7 @@ TEST_F(WebDialogViewUnitTest, WebDialogViewClosedOnEscape) {
 
 TEST_F(WebDialogViewUnitTest, WebDialogViewNotClosedOnEscape) {
   web_dialog_delegate()->set_close_on_escape(false);
-  const ui::KeyEvent escape_event(ui::ET_KEY_PRESSED, ui::VKEY_ESCAPE,
+  const ui::KeyEvent escape_event(ui::EventType::kKeyPressed, ui::VKEY_ESCAPE,
                                   ui::EF_NONE);
   SimulateKeyEvent(escape_event);
 
@@ -170,7 +179,7 @@ TEST_F(WebDialogViewUnitTest, WebDialogViewNotClosedOnEscape) {
 TEST_F(WebDialogViewUnitTest, ObservableWebViewOnWebDialogViewClosed) {
   // Close the widget by pressing ESC key.
   web_dialog_delegate()->set_close_on_escape(true);
-  const ui::KeyEvent escape_event(ui::ET_KEY_PRESSED, ui::VKEY_ESCAPE,
+  const ui::KeyEvent escape_event(ui::EventType::kKeyPressed, ui::VKEY_ESCAPE,
                                   ui::EF_NONE);
   SimulateKeyEvent(escape_event);
 
@@ -182,8 +191,57 @@ TEST_F(WebDialogViewUnitTest, ObservableWebViewOnWebDialogViewClosed) {
   ResetWebDialogDelegate();
 }
 
+TEST_F(WebDialogViewUnitTest, RootViewAccessibleName) {
+  ui::AXNodeData root_view_data;
+  web_dialog_view()
+      ->GetWidget()
+      ->GetRootView()
+      ->GetViewAccessibility()
+      .GetAccessibleNodeData(&root_view_data);
+  EXPECT_EQ(
+      root_view_data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+      web_dialog_view()->GetAccessibleWindowTitle());
+
+  root_view_data = ui::AXNodeData();
+  web_dialog_view()
+      ->GetWidget()
+      ->GetRootView()
+      ->GetViewAccessibility()
+      .GetAccessibleNodeData(&root_view_data);
+  EXPECT_EQ(u"Test", web_dialog_view()->GetAccessibleWindowTitle());
+  EXPECT_EQ(
+      root_view_data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+      web_dialog_view()->GetAccessibleWindowTitle());
+
+  web_dialog_delegate()->set_accessible_dialog_title(u"Acessible Dialog Title");
+  root_view_data = ui::AXNodeData();
+  web_dialog_view()
+      ->GetWidget()
+      ->GetRootView()
+      ->GetViewAccessibility()
+      .GetAccessibleNodeData(&root_view_data);
+  EXPECT_EQ(u"Acessible Dialog Title",
+            web_dialog_view()->GetAccessibleWindowTitle());
+  EXPECT_EQ(
+      root_view_data.GetString16Attribute(ax::mojom::StringAttribute::kName),
+      web_dialog_view()->GetAccessibleWindowTitle());
+}
+
 TEST_F(WebDialogViewUnitTest, MetadataTest) {
   test::TestViewMetadata(web_dialog_view());
+}
+
+TEST_F(WebDialogViewUnitTest, AllowAccelerators) {
+  // By default, allow_accelerators should be true.
+  EXPECT_TRUE(web_view()->allow_accelerators());
+
+  // Test with allow_aceelerators set to false.
+  auto delegate = std::make_unique<TestWebDialogViewWebDialogDelegate>();
+  delegate->set_allow_accelerators(false);
+  auto web_dialog_view = std::make_unique<WebDialogView>(
+      browser_context(), delegate.get(),
+      std::make_unique<ui::test::TestWebContentsHandler>());
+  EXPECT_FALSE(GetWebViewFor(web_dialog_view.get())->allow_accelerators());
 }
 
 }  // namespace views

@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ash/arc/fileapi/file_stream_forwarder.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -23,7 +24,6 @@
 #include "storage/browser/test/mock_special_storage_policy.h"
 #include "storage/browser/test/test_file_system_context.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 
 namespace arc {
@@ -32,7 +32,7 @@ namespace {
 
 class FileStreamForwarderTest : public testing::Test {
  public:
-  FileStreamForwarderTest() {}
+  FileStreamForwarderTest() = default;
 
   void SetUp() override {
     // Prepare a temporary directory and the destination file.
@@ -58,15 +58,19 @@ class FileStreamForwarderTest : public testing::Test {
     // Prepare a file system.
     constexpr char kURLOrigin[] = "http://origin/";
 
+    base::RunLoop open_file_system_loop;
     context_->OpenFileSystem(
         blink::StorageKey::CreateFromStringForTesting(kURLOrigin),
-        /*bucket=*/absl::nullopt, storage::kFileSystemTypeTemporary,
+        /*bucket=*/std::nullopt, storage::kFileSystemTypeTemporary,
         storage::OPEN_FILE_SYSTEM_CREATE_IF_NONEXISTENT,
-        base::BindOnce([](const storage::FileSystemURL& root_url,
-                          const std::string& name, base::File::Error result) {
-          EXPECT_EQ(base::File::FILE_OK, result);
-        }));
-    base::RunLoop().RunUntilIdle();
+        base::BindOnce(
+            [](base::RunLoop* run_loop, const storage::FileSystemURL&,
+               const std::string&, base::File::Error result) {
+              EXPECT_EQ(base::File::FILE_OK, result);
+              run_loop->Quit();
+            },
+            &open_file_system_loop));
+    open_file_system_loop.Run();
 
     // Prepare a 64KB file in the file system.
     url_ = context_->CreateCrackedFileSystemURL(
@@ -79,7 +83,7 @@ class FileStreamForwarderTest : public testing::Test {
 
     ASSERT_EQ(base::File::FILE_OK,
               storage::AsyncFileTestHelper::CreateFileWithData(
-                  context_.get(), url_, test_data_.data(), test_data_.size()));
+                  context_.get(), url_, test_data_));
   }
 
  protected:
@@ -129,9 +133,7 @@ TEST_F(FileStreamForwarderTest, ForwardPartially) {
 
   std::string contents;
   ASSERT_TRUE(base::ReadFileToString(dest_file_path_, &contents));
-  EXPECT_EQ(std::string(test_data_.begin() + kOffset,
-                        test_data_.begin() + kOffset + kSize),
-            contents);
+  EXPECT_EQ(test_data_.substr(kOffset, kSize), contents);
 }
 
 TEST_F(FileStreamForwarderTest, ForwardPartially2) {
@@ -150,9 +152,7 @@ TEST_F(FileStreamForwarderTest, ForwardPartially2) {
 
   std::string contents;
   ASSERT_TRUE(base::ReadFileToString(dest_file_path_, &contents));
-  EXPECT_EQ(std::string(test_data_.begin() + kOffset,
-                        test_data_.begin() + kOffset + kSize),
-            contents);
+  EXPECT_EQ(test_data_.substr(kOffset, kSize), contents);
 }
 
 TEST_F(FileStreamForwarderTest, ForwardTooMuch) {
@@ -190,8 +190,7 @@ TEST_F(FileStreamForwarderTest, ForwardTooMuch2) {
 
   std::string contents;
   ASSERT_TRUE(base::ReadFileToString(dest_file_path_, &contents));
-  EXPECT_EQ(std::string(test_data_.begin() + kOffset, test_data_.end()),
-            contents);
+  EXPECT_EQ(test_data_.substr(kOffset), contents);
 }
 
 TEST_F(FileStreamForwarderTest, InvalidURL) {

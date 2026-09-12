@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "base/strings/strcat.h"
 #include "chromeos/components/mojo_bootstrap/pending_connection_manager.h"
+#include "mojo/core/configuration.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/system/platform_handle.h"
 
@@ -70,7 +71,7 @@ SmbFsMounter::SmbFsMounter()
 
 SmbFsMounter::~SmbFsMounter() {
   if (mojo_fd_pending_) {
-    mojo_bootstrap::PendingConnectionManager::Get()
+    mojo_bootstrap::PendingConnectionManager::GetForSmbFs()
         .CancelExpectedOpenIpcChannel(token_);
   }
 }
@@ -84,9 +85,10 @@ void SmbFsMounter::Mount(SmbFsMounter::DoneCallback callback) {
 
   // If |bootstrap_| is already bound, it was provided by a test subclass.
   if (!bootstrap_) {
-    mojo_bootstrap::PendingConnectionManager::Get().ExpectOpenIpcChannel(
-        token_,
-        base::BindOnce(&SmbFsMounter::OnIpcChannel, base::Unretained(this)));
+    mojo_bootstrap::PendingConnectionManager::GetForSmbFs()
+        .ExpectOpenIpcChannel(token_,
+                              base::BindOnce(&SmbFsMounter::OnIpcChannel,
+                                             base::Unretained(this)));
     mojo_fd_pending_ = true;
 
     bootstrap_.Bind(mojo::PendingRemote<mojom::SmbFsBootstrap>(
@@ -99,6 +101,10 @@ void SmbFsMounter::Mount(SmbFsMounter::DoneCallback callback) {
   std::vector<std::string> mount_options;
   if (options_.enable_verbose_logging) {
     mount_options.emplace_back("log-level=-2");
+  }
+  if (!options_.account_hash.empty()) {
+    mount_options.emplace_back(
+        base::StrCat({"account_hash=", options_.account_hash}));
   }
 
   ash::disks::MountPoint::Mount(
@@ -186,6 +192,10 @@ void SmbFsMounter::OnMountDone(
 
 void SmbFsMounter::OnIpcChannel(base::ScopedFD mojo_fd) {
   DCHECK(mojo_fd.is_valid());
+  if (!mojo::core::GetConfiguration().is_broker_process) {
+    bootstrap_invitation_.set_extra_flags(
+        MOJO_SEND_INVITATION_FLAG_SHARE_BROKER);
+  }
   mojo::OutgoingInvitation::Send(
       std::move(bootstrap_invitation_), base::kNullProcessHandle,
       mojo::PlatformChannelEndpoint(mojo::PlatformHandle(std::move(mojo_fd))));

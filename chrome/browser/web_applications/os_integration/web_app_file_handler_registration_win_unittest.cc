@@ -23,7 +23,6 @@
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/web_applications/chrome_pwa_launcher/chrome_pwa_launcher_util.h"
 #include "chrome/browser/web_applications/os_integration/web_app_handler_registration_utils_win.h"
-#include "chrome/browser/web_applications/test/fake_web_app_file_handler_manager.h"
 #include "chrome/browser/web_applications/web_app_constants.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/installer/util/shell_util.h"
@@ -57,7 +56,7 @@ constexpr char kAppName[] = "app name";
 
 class WebAppFileHandlerRegistrationWinTest : public testing::Test {
  protected:
-  WebAppFileHandlerRegistrationWinTest() {}
+  WebAppFileHandlerRegistrationWinTest() = default;
 
   void SetUp() override {
     // Set up fake windows registry
@@ -87,7 +86,7 @@ class WebAppFileHandlerRegistrationWinTest : public testing::Test {
   TestingProfileManager* testing_profile_manager() {
     return testing_profile_manager_.get();
   }
-  const AppId& app_id() const { return app_id_; }
+  const webapps::AppId& app_id() const { return app_id_; }
 
   const std::wstring file_handler1_prog_id() { return file_handler1_prog_id_; }
   const std::wstring file_handler2_prog_id() { return file_handler2_prog_id_; }
@@ -127,7 +126,8 @@ class WebAppFileHandlerRegistrationWinTest : public testing::Test {
         GetProgIdForAppFileHandler(profile->GetPath(), app_id(), {".doc"});
 
     base::RunLoop run_loop;
-    RegisterFileHandlersWithOs(app_id(), app_name, profile, file_handlers,
+    RegisterFileHandlersWithOs(app_id(), app_name, profile->GetPath(),
+                               file_handlers,
                                base::BindLambdaForTesting([&](Result result) {
                                  EXPECT_EQ(result, Result::kOk);
                                  run_loop.Quit();
@@ -159,7 +159,7 @@ class WebAppFileHandlerRegistrationWinTest : public testing::Test {
   // Returns the expected app launcher path inside the subdirectory for
   // |app_id|.
   base::FilePath GetLauncherPathForApp(Profile* profile,
-                                       const AppId app_id,
+                                       const webapps::AppId app_id,
                                        const std::string& sanitized_app_name) {
     base::FilePath web_app_dir(GetOsIntegrationResourcesDirectoryForApp(
         profile->GetPath(), app_id, GURL()));
@@ -176,7 +176,7 @@ class WebAppFileHandlerRegistrationWinTest : public testing::Test {
       content::BrowserTaskEnvironment::IO_MAINLOOP};
   raw_ptr<TestingProfile> profile_ = nullptr;
   std::unique_ptr<TestingProfileManager> testing_profile_manager_;
-  const AppId app_id_ = "app_id";
+  const webapps::AppId app_id_ = "app_id";
   // These are set in SetUp() and are the ProgIds for file handlers in the
   // default profile.
   std::wstring file_handler1_prog_id_;
@@ -260,7 +260,7 @@ TEST_F(WebAppFileHandlerRegistrationWinTest,
       GetProgIdForAppFileHandler(profile2->GetPath(), app_id(), {".doc"});
 
   base::RunLoop run_loop;
-  UnregisterFileHandlersWithOs(app_id(), profile(),
+  UnregisterFileHandlersWithOs(app_id(), profile()->GetPath(),
                                base::BindLambdaForTesting([&](Result result) {
                                  EXPECT_EQ(result, Result::kOk);
                                  run_loop.Quit();
@@ -309,7 +309,7 @@ TEST_F(WebAppFileHandlerRegistrationWinTest,
   AddAndVerifyFileAssociations(profile3, kAppName, " (Profile 3)");
 
   base::RunLoop run_loop;
-  UnregisterFileHandlersWithOs(app_id(), profile(),
+  UnregisterFileHandlersWithOs(app_id(), profile()->GetPath(),
                                base::BindLambdaForTesting([&](Result result) {
                                  EXPECT_EQ(result, Result::kOk);
                                  run_loop.Quit();
@@ -342,7 +342,7 @@ TEST_F(WebAppFileHandlerRegistrationWinTest, UnregisterFileHandlersForWebApp) {
       ShellUtil::GetApplicationPathForProgId(file_handler1_prog_id());
 
   base::RunLoop run_loop;
-  UnregisterFileHandlersWithOs(app_id(), profile(),
+  UnregisterFileHandlersWithOs(app_id(), profile()->GetPath(),
                                base::BindLambdaForTesting([&](Result result) {
                                  EXPECT_EQ(result, Result::kOk);
                                  run_loop.Quit();

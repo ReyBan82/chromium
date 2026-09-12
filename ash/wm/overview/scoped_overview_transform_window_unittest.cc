@@ -6,8 +6,10 @@
 
 #include "ash/public/cpp/window_properties.h"
 #include "ash/test/ash_test_base.h"
+#include "ash/wm/overview/overview_types.h"
 #include "ash/wm/overview/overview_utils.h"
 #include "ash/wm/window_state.h"
+#include "ash/wm/window_util.h"
 #include "base/numerics/safe_conversions.h"
 #include "ui/aura/window.h"
 #include "ui/compositor/layer.h"
@@ -20,12 +22,12 @@ namespace ash {
 
 namespace {
 
-float GetItemScale(const gfx::RectF& source,
-                   const gfx::RectF& target,
+float GetItemScale(int source_height,
+                   int target_height,
                    int top_view_inset,
                    int title_height) {
   return ScopedOverviewTransformWindow::GetItemScale(
-      source.size(), target.size(), top_view_inset, title_height);
+      source_height, target_height, top_view_inset, title_height);
 }
 
 }  // namespace
@@ -40,40 +42,40 @@ using ScopedOverviewTransformWindowTest = AshTestBase;
 // *_NEAR) within a single pixel.
 TEST_F(ScopedOverviewTransformWindowTest, TransformedRectMaintainsAspect) {
   std::unique_ptr<aura::Window> window =
-      CreateTestWindow(gfx::Rect(10, 10, 100, 100));
+      CreateWindowWithAppType(chromeos::AppType::NON_APP, {10, 10, 100, 100});
   ScopedOverviewTransformWindow transform_window(nullptr, window.get());
 
   gfx::RectF rect(50.f, 50.f, 200.f, 400.f);
   gfx::RectF bounds(100.f, 100.f, 50.f, 50.f);
   gfx::RectF transformed_rect =
       transform_window.ShrinkRectToFitPreservingAspectRatio(rect, bounds, 0, 0);
-  float scale = GetItemScale(rect, bounds, 0, 0);
+  float scale = GetItemScale(rect.height(), bounds.height(), 0, 0);
   EXPECT_NEAR(scale * rect.width(), transformed_rect.width(), 1);
   EXPECT_NEAR(scale * rect.height(), transformed_rect.height(), 1);
 
   rect = gfx::RectF(50.f, 50.f, 400.f, 200.f);
-  scale = GetItemScale(rect, bounds, 0, 0);
+  scale = GetItemScale(rect.height(), bounds.height(), 0, 0);
   transformed_rect =
       transform_window.ShrinkRectToFitPreservingAspectRatio(rect, bounds, 0, 0);
   EXPECT_NEAR(scale * rect.width(), transformed_rect.width(), 1);
   EXPECT_NEAR(scale * rect.height(), transformed_rect.height(), 1);
 
   rect = gfx::RectF(50.f, 50.f, 25.f, 25.f);
-  scale = GetItemScale(rect, bounds, 0, 0);
+  scale = GetItemScale(rect.height(), bounds.height(), 0, 0);
   transformed_rect =
       transform_window.ShrinkRectToFitPreservingAspectRatio(rect, bounds, 0, 0);
   EXPECT_NEAR(scale * rect.width(), transformed_rect.width(), 1);
   EXPECT_NEAR(scale * rect.height(), transformed_rect.height(), 1);
 
   rect = gfx::RectF(50.f, 50.f, 25.f, 50.f);
-  scale = GetItemScale(rect, bounds, 0, 0);
+  scale = GetItemScale(rect.height(), bounds.height(), 0, 0);
   transformed_rect =
       transform_window.ShrinkRectToFitPreservingAspectRatio(rect, bounds, 0, 0);
   EXPECT_NEAR(scale * rect.width(), transformed_rect.width(), 1);
   EXPECT_NEAR(scale * rect.height(), transformed_rect.height(), 1);
 
   rect = gfx::RectF(50.f, 50.f, 50.f, 25.f);
-  scale = GetItemScale(rect, bounds, 0, 0);
+  scale = GetItemScale(rect.height(), bounds.height(), 0, 0);
   transformed_rect =
       transform_window.ShrinkRectToFitPreservingAspectRatio(rect, bounds, 0, 0);
   EXPECT_NEAR(scale * rect.width(), transformed_rect.width(), 1);
@@ -83,7 +85,7 @@ TEST_F(ScopedOverviewTransformWindowTest, TransformedRectMaintainsAspect) {
 // Tests that transformed Rect fits in target bounds and is vertically centered.
 TEST_F(ScopedOverviewTransformWindowTest, TransformedRectIsCentered) {
   std::unique_ptr<aura::Window> window =
-      CreateTestWindow(gfx::Rect(10, 10, 100, 100));
+      CreateWindowWithAppType(chromeos::AppType::NON_APP, {10, 10, 100, 100});
   ScopedOverviewTransformWindow transform_window(nullptr, window.get());
   gfx::RectF rect(50.f, 50.f, 200.f, 400.f);
   gfx::RectF bounds(100.f, 100.f, 50.f, 50.f);
@@ -103,13 +105,14 @@ TEST_F(ScopedOverviewTransformWindowTest, TransformedRectIsCentered) {
 // when inset and header height are specified.
 TEST_F(ScopedOverviewTransformWindowTest, TransformedRectIsCenteredWithInset) {
   std::unique_ptr<aura::Window> window =
-      CreateTestWindow(gfx::Rect(10, 10, 100, 100));
+      CreateWindowWithAppType(chromeos::AppType::NON_APP, {10, 10, 100, 100});
   ScopedOverviewTransformWindow transform_window(nullptr, window.get());
   gfx::RectF rect(50.f, 50.f, 400.f, 200.f);
   gfx::RectF bounds(100.f, 100.f, 50.f, 50.f);
   const int inset = 20;
   const int header_height = 10;
-  const float scale = GetItemScale(rect, bounds, inset, header_height);
+  const float scale =
+      GetItemScale(rect.height(), bounds.height(), inset, header_height);
   gfx::RectF transformed_rect =
       transform_window.ShrinkRectToFitPreservingAspectRatio(rect, bounds, inset,
                                                             header_height);
@@ -134,9 +137,10 @@ TEST_F(ScopedOverviewTransformWindowTest, TransformingLetteredRect) {
   // Create a window whose width is more than twice the height.
   const gfx::Rect original_bounds(10, 10, 300, 100);
   const int scale = 3;
-  std::unique_ptr<aura::Window> window = CreateTestWindow(original_bounds);
+  std::unique_ptr<aura::Window> window =
+      CreateWindowWithAppType(chromeos::AppType::NON_APP, original_bounds);
   ScopedOverviewTransformWindow transform_window(nullptr, window.get());
-  EXPECT_EQ(OverviewGridWindowFillMode::kLetterBoxed, transform_window.type());
+  EXPECT_EQ(OverviewItemFillMode::kLetterBoxed, transform_window.fill_mode());
 
   // Without any headers, the width should match the target, and the height
   // should be such that the aspect ratio of |original_bounds| is maintained.
@@ -167,9 +171,10 @@ TEST_F(ScopedOverviewTransformWindowTest, TransformingPillaredRect) {
   // Create a window whose height is more than twice the width.
   const gfx::Rect original_bounds(10, 10, 150, 450);
   const int scale = 3;
-  std::unique_ptr<aura::Window> window = CreateTestWindow(original_bounds);
+  std::unique_ptr<aura::Window> window =
+      CreateWindowWithAppType(chromeos::AppType::NON_APP, original_bounds);
   ScopedOverviewTransformWindow transform_window(nullptr, window.get());
-  EXPECT_EQ(OverviewGridWindowFillMode::kPillarBoxed, transform_window.type());
+  EXPECT_EQ(OverviewItemFillMode::kPillarBoxed, transform_window.fill_mode());
 
   // Without any headers, the height should match the target, and the width
   // should be such that the aspect ratio of |original_bounds| is maintained.
@@ -203,9 +208,12 @@ TEST_F(ScopedOverviewTransformWindowTest, ExtremeWindowBounds) {
   // when the 400x300 is rotated to 300x400, and should be considered a normal
   // overview window after display change.
   UpdateDisplay("400x300");
-  std::unique_ptr<aura::Window> wide = CreateTestWindow(gfx::Rect(400, 160));
-  std::unique_ptr<aura::Window> tall = CreateTestWindow(gfx::Rect(100, 300));
-  std::unique_ptr<aura::Window> normal = CreateTestWindow(gfx::Rect(300, 300));
+  std::unique_ptr<aura::Window> wide =
+      CreateWindowWithAppType(chromeos::AppType::NON_APP, {400, 160});
+  std::unique_ptr<aura::Window> tall =
+      CreateWindowWithAppType(chromeos::AppType::NON_APP, {100, 300});
+  std::unique_ptr<aura::Window> normal =
+      CreateWindowWithAppType(chromeos::AppType::NON_APP, {300, 300});
 
   ScopedOverviewTransformWindow scoped_wide(nullptr, wide.get());
   ScopedOverviewTransformWindow scoped_tall(nullptr, tall.get());
@@ -213,35 +221,36 @@ TEST_F(ScopedOverviewTransformWindowTest, ExtremeWindowBounds) {
 
   // Verify the window dimension type is as expected after entering overview
   // mode.
-  using OverviewGridWindowFillMode = OverviewGridWindowFillMode;
-  EXPECT_EQ(OverviewGridWindowFillMode::kLetterBoxed, scoped_wide.type());
-  EXPECT_EQ(OverviewGridWindowFillMode::kPillarBoxed, scoped_tall.type());
-  EXPECT_EQ(OverviewGridWindowFillMode::kNormal, scoped_normal.type());
+  EXPECT_EQ(OverviewItemFillMode::kLetterBoxed, scoped_wide.fill_mode());
+  EXPECT_EQ(OverviewItemFillMode::kPillarBoxed, scoped_tall.fill_mode());
+  EXPECT_EQ(OverviewItemFillMode::kNormal, scoped_normal.fill_mode());
 
-  display::Screen* screen = display::Screen::GetScreen();
+  display::Screen* screen = display::Screen::Get();
   const display::Display& display = screen->GetPrimaryDisplay();
   display_manager()->SetDisplayRotation(
       display.id(), display::Display::ROTATE_90,
       display::Display::RotationSource::ACTIVE);
-  scoped_wide.UpdateWindowDimensionsType();
-  scoped_tall.UpdateWindowDimensionsType();
-  scoped_normal.UpdateWindowDimensionsType();
+  scoped_wide.UpdateOverviewItemFillMode();
+  scoped_tall.UpdateOverviewItemFillMode();
+  scoped_normal.UpdateOverviewItemFillMode();
 
   // Verify that |wide| has its window dimension type updated after the display
   // change.
-  EXPECT_EQ(OverviewGridWindowFillMode::kNormal, scoped_wide.type());
-  EXPECT_EQ(OverviewGridWindowFillMode::kPillarBoxed, scoped_tall.type());
-  EXPECT_EQ(OverviewGridWindowFillMode::kNormal, scoped_normal.type());
+  EXPECT_EQ(OverviewItemFillMode::kNormal, scoped_wide.fill_mode());
+  EXPECT_EQ(OverviewItemFillMode::kPillarBoxed, scoped_tall.fill_mode());
+  EXPECT_EQ(OverviewItemFillMode::kNormal, scoped_normal.fill_mode());
 }
 
 // Tests that transients which should be invisible in overview do not have their
 // transforms or opacities altered.
 TEST_F(ScopedOverviewTransformWindowTest, InvisibleTransients) {
-  auto window = CreateTestWindow(gfx::Rect(200, 200));
-  auto child = CreateTestWindow(gfx::Rect(100, 190, 100, 10),
-                                aura::client::WINDOW_TYPE_POPUP);
-  auto child2 = CreateTestWindow(gfx::Rect(0, 190, 100, 10),
-                                 aura::client::WINDOW_TYPE_POPUP);
+  auto window = CreateWindowWithAppType(chromeos::AppType::NON_APP, {200, 200});
+  auto child =
+      CreateTestWindowInShell({.bounds = gfx::Rect(100, 190, 100, 10),
+                               .window_type = aura::client::WINDOW_TYPE_POPUP});
+  auto child2 =
+      CreateTestWindowInShell({.bounds = gfx::Rect(0, 190, 100, 10),
+                               .window_type = aura::client::WINDOW_TYPE_POPUP});
   ::wm::AddTransientChild(window.get(), child.get());
   ::wm::AddTransientChild(window.get(), child2.get());
 
@@ -262,7 +271,7 @@ TEST_F(ScopedOverviewTransformWindowTest, InvisibleTransients) {
   EXPECT_FALSE(child2->IsVisible());
 
   auto transform = gfx::Transform::MakeTranslation(10.f, 10.f);
-  SetTransform(window.get(), transform);
+  window_util::SetTransform(window.get(), transform);
   EXPECT_EQ(transform, window->transform());
   EXPECT_EQ(transform, child->transform());
   EXPECT_TRUE(child2->transform().IsIdentity());
@@ -273,9 +282,10 @@ TEST_F(ScopedOverviewTransformWindowTest, InvisibleTransients) {
 // ScopedOverviewTransformWindow.
 TEST_F(ScopedOverviewTransformWindowTest,
        InvisibleTransientsPropertyChangeAfterInit) {
-  auto window = CreateTestWindow(gfx::Rect(200, 200));
-  auto child = CreateTestWindow(gfx::Rect(100, 190, 100, 10),
-                                aura::client::WINDOW_TYPE_POPUP);
+  auto window = CreateWindowWithAppType(chromeos::AppType::NON_APP, {200, 200});
+  auto child =
+      CreateTestWindowInShell({.bounds = gfx::Rect(100, 190, 100, 10),
+                               .window_type = aura::client::WINDOW_TYPE_POPUP});
   ::wm::AddTransientChild(window.get(), child.get());
 
   ScopedOverviewTransformWindow scoped_window(nullptr, window.get());
@@ -302,11 +312,13 @@ TEST_F(ScopedOverviewTransformWindowTest,
 // visible even if the window is added after initializing
 // ScopedOverviewTransformWindow.
 TEST_F(ScopedOverviewTransformWindowTest, InvisibleTransientsAddedAfterInit) {
-  auto window = CreateTestWindow(gfx::Rect(200, 200));
-  auto child = CreateTestWindow(gfx::Rect(100, 190, 100, 10),
-                                aura::client::WINDOW_TYPE_POPUP);
-  auto child2 = CreateTestWindow(gfx::Rect(0, 190, 100, 10),
-                                 aura::client::WINDOW_TYPE_POPUP);
+  auto window = CreateWindowWithAppType(chromeos::AppType::NON_APP, {200, 200});
+  auto child =
+      CreateTestWindowInShell({.bounds = gfx::Rect(100, 190, 100, 10),
+                               .window_type = aura::client::WINDOW_TYPE_POPUP});
+  auto child2 =
+      CreateTestWindowInShell({.bounds = gfx::Rect(0, 190, 100, 10),
+                               .window_type = aura::client::WINDOW_TYPE_POPUP});
   child2->SetProperty(kHideInOverviewKey, true);
 
   ScopedOverviewTransformWindow scoped_window(nullptr, window.get());
@@ -330,13 +342,14 @@ TEST_F(ScopedOverviewTransformWindowTest, EventTargetingPolicy) {
 
   // Helper for creating popups that will be transients for testing.
   auto create_popup = [this] {
-    std::unique_ptr<aura::Window> popup =
-        CreateTestWindow(gfx::Rect(10, 10), aura::client::WINDOW_TYPE_POPUP);
+    std::unique_ptr<aura::Window> popup = CreateTestWindowInShell(
+        {.bounds = gfx::Rect(10, 10),
+         .window_type = aura::client::WINDOW_TYPE_POPUP});
     popup->SetEventTargetingPolicy(etp::kTargetAndDescendants);
     return popup;
   };
 
-  auto window = CreateTestWindow(gfx::Rect(200, 200));
+  auto window = CreateWindowWithAppType(chromeos::AppType::NON_APP, {200, 200});
   window->SetEventTargetingPolicy(etp::kTargetAndDescendants);
 
   auto transient = create_popup();
@@ -361,7 +374,8 @@ TEST_F(ScopedOverviewTransformWindowTest, EventTargetingPolicy) {
 
     // Tests that adding a transient child which does not have |window| as its
     // descendant does not have its targeting policy altered.
-    auto window2 = CreateTestWindow(gfx::Rect(200, 200));
+    auto window2 =
+        CreateWindowWithAppType(chromeos::AppType::NON_APP, {200, 200});
     auto transient3 = create_popup();
     ::wm::AddTransientChild(window2.get(), transient3.get());
     EXPECT_EQ(etp::kTargetAndDescendants, transient3->event_targeting_policy());

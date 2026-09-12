@@ -8,18 +8,13 @@
 #include <sstream>
 #include <string>
 
+#include "ui/gfx/native_ui_types.h"
 #include "ui/views/views_export.h"
 
 namespace views {
 
 class View;
 class Widget;
-
-// Log the view hierarchy.
-VIEWS_EXPORT void PrintViewHierarchy(const View* view);
-
-// Print the view hierarchy to |out|.
-VIEWS_EXPORT void PrintViewHierarchy(const View* view, std::ostringstream* out);
 
 // Log the focus traversal hierarchy.
 VIEWS_EXPORT void PrintFocusHierarchy(const View* view);
@@ -29,6 +24,16 @@ VIEWS_EXPORT void PrintFocusHierarchy(const View* view);
 VIEWS_EXPORT void PrintWidgetInformation(const Widget& widget,
                                          bool detailed,
                                          std::ostringstream* out);
+
+// Prints the window hierarchy (Aura only) and Widget information for the given
+// native window.
+VIEWS_EXPORT void PrintWindowHierarchy(gfx::NativeWindow window,
+                                       std::ostringstream* out);
+
+// Prints the ui::Layer hierarchy for the given native window.
+// Uses ui::PrintLayerHierarchy to print the layer tree.
+VIEWS_EXPORT void PrintLayerHierarchy(gfx::NativeWindow window,
+                                      std::ostringstream* out);
 
 #if !defined(NDEBUG)
 // Returns string containing a graph of the views hierarchy in graphViz DOT

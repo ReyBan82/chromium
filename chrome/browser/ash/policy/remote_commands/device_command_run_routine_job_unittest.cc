@@ -6,6 +6,7 @@
 
 #include <limits>
 #include <memory>
+#include <optional>
 
 #include "base/json/json_writer.h"
 #include "base/test/bind.h"
@@ -18,7 +19,6 @@
 #include "chromeos/ash/services/cros_healthd/public/mojom/cros_healthd_diagnostics.mojom.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace policy {
 
@@ -43,10 +43,6 @@ constexpr char kLengthSecondsFieldName[] = "lengthSeconds";
 // String constants identifying the parameter fields for the AC power routine.
 constexpr char kExpectedStatusFieldName[] = "expectedStatus";
 constexpr char kExpectedPowerTypeFieldName[] = "expectedPowerType";
-
-// String constants identifying the parameter fields for the NVMe wear level
-// routine.
-constexpr char kWearLevelThresholdFieldName[] = "wearLevelThreshold";
 
 // String constants identifying the parameter fields for the NVMe self-test
 // routine.
@@ -95,47 +91,43 @@ em::RemoteCommand GenerateCommandProto(
     base::TimeDelta age_of_command,
     base::TimeDelta idleness_cutoff,
     bool terminate_upon_input,
-    absl::optional<ash::cros_healthd::mojom::DiagnosticRoutineEnum> routine,
-    absl::optional<base::Value::Dict> params) {
+    std::optional<ash::cros_healthd::mojom::DiagnosticRoutineEnum> routine,
+    std::optional<base::DictValue> params) {
   em::RemoteCommand command_proto;
   command_proto.set_type(em::RemoteCommand_Type_DEVICE_RUN_DIAGNOSTIC_ROUTINE);
   command_proto.set_command_id(unique_id);
   command_proto.set_age_of_command(age_of_command.InMilliseconds());
-  base::Value::Dict root_dict;
+  base::DictValue root_dict;
   if (routine.has_value()) {
     root_dict.Set(kRoutineEnumFieldName, static_cast<int>(routine.value()));
   }
   if (params.has_value()) {
     root_dict.Set(kParamsFieldName, std::move(params).value());
   }
-  std::string payload;
-  base::JSONWriter::Write(root_dict, &payload);
-  command_proto.set_payload(payload);
+  command_proto.set_payload(base::WriteJson(root_dict).value_or(""));
   return command_proto;
 }
 
 std::string CreateSuccessPayload(
     uint32_t id,
     ash::cros_healthd::mojom::DiagnosticRoutineStatusEnum status) {
-  std::string payload;
-  base::Value::Dict root_dict;
-  root_dict.Set(kIdFieldName, static_cast<int>(id));
-  root_dict.Set(kStatusFieldName, static_cast<int>(status));
-  base::JSONWriter::Write(root_dict, &payload);
-  return payload;
+  auto root_dict = base::DictValue()
+                       .Set(kIdFieldName, static_cast<int>(id))
+                       .Set(kStatusFieldName, static_cast<int>(status));
+  return base::WriteJson(root_dict).value_or("");
 }
 
 std::string CreateInvalidParametersFailurePayload() {
   std::string payload;
-  base::Value::Dict root_dict;
-  root_dict.Set(kIdFieldName,
-                static_cast<int>(ash::cros_healthd::mojom::kFailedToStartId));
-  root_dict.Set(
-      kStatusFieldName,
-      static_cast<int>(ash::cros_healthd::mojom::DiagnosticRoutineStatusEnum::
-                           kFailedToStart));
-  base::JSONWriter::Write(root_dict, &payload);
-  return payload;
+  auto root_dict =
+      base::DictValue()
+          .Set(kIdFieldName,
+               static_cast<int>(ash::cros_healthd::mojom::kFailedToStartId))
+          .Set(kStatusFieldName,
+               static_cast<int>(
+                   ash::cros_healthd::mojom::DiagnosticRoutineStatusEnum::
+                       kFailedToStart));
+  return base::WriteJson(root_dict).value_or("");
 }
 
 }  // namespace
@@ -155,10 +147,10 @@ class DeviceCommandRunRoutineJobTest : public testing::Test {
                      base::TimeDelta idleness_cutoff,
                      bool terminate_upon_input,
                      ash::cros_healthd::mojom::DiagnosticRoutineEnum routine,
-                     base::Value::Dict params);
+                     base::DictValue params);
 
   bool RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum routine,
-              base::Value::Dict params_dict,
+              base::DictValue params_dict,
               base::RepeatingCallback<void(RemoteCommandJob*)> callback);
 
   base::test::TaskEnvironment task_environment_{
@@ -184,7 +176,7 @@ void DeviceCommandRunRoutineJobTest::InitializeJob(
     base::TimeDelta idleness_cutoff,
     bool terminate_upon_input,
     ash::cros_healthd::mojom::DiagnosticRoutineEnum routine,
-    base::Value::Dict params) {
+    base::DictValue params) {
   EXPECT_TRUE(job->Init(
       base::TimeTicks::Now(),
       GenerateCommandProto(unique_id, base::TimeTicks::Now() - issued_time,
@@ -198,7 +190,7 @@ void DeviceCommandRunRoutineJobTest::InitializeJob(
 
 bool DeviceCommandRunRoutineJobTest::RunJob(
     ash::cros_healthd::mojom::DiagnosticRoutineEnum routine,
-    base::Value::Dict params_dict,
+    base::DictValue params_dict,
     base::RepeatingCallback<void(RemoteCommandJob*)> callback) {
   auto job = std::make_unique<DeviceCommandRunRoutineJob>();
   InitializeJob(job.get(), kUniqueID, test_start_time_, base::Seconds(30),
@@ -219,7 +211,7 @@ TEST_F(DeviceCommandRunRoutineJobTest, InvalidRoutineEnumInCommandPayload) {
           std::numeric_limits<std::underlying_type<
               ash::cros_healthd::mojom::DiagnosticRoutineEnum>::type>::max());
   auto job = std::make_unique<DeviceCommandRunRoutineJob>();
-  base::Value::Dict params_dict;
+  base::DictValue params_dict;
   EXPECT_FALSE(job->Init(
       base::TimeTicks::Now(),
       GenerateCommandProto(kUniqueID, base::TimeTicks::Now() - test_start_time_,
@@ -235,13 +227,13 @@ TEST_F(DeviceCommandRunRoutineJobTest, InvalidRoutineEnumInCommandPayload) {
 // Test that not specifying a routine causes the job initialization to fail.
 TEST_F(DeviceCommandRunRoutineJobTest, CommandPayloadMissingRoutine) {
   auto job = std::make_unique<DeviceCommandRunRoutineJob>();
-  base::Value::Dict params_dict;
+  base::DictValue params_dict;
   EXPECT_FALSE(job->Init(
       base::TimeTicks::Now(),
       GenerateCommandProto(kUniqueID, base::TimeTicks::Now() - test_start_time_,
                            base::Seconds(30),
                            /*terminate_upon_input=*/false,
-                           /*routine=*/absl::nullopt, std::move(params_dict)),
+                           /*routine=*/std::nullopt, std::move(params_dict)),
       em::SignedData()));
 
   EXPECT_EQ(kUniqueID, job->unique_id());
@@ -259,7 +251,7 @@ TEST_F(DeviceCommandRunRoutineJobTest, CommandPayloadMissingParamDict) {
       GenerateCommandProto(kUniqueID, base::TimeTicks::Now() - test_start_time_,
                            base::Seconds(30),
                            /*terminate_upon_input=*/false, kValidRoutineEnum,
-                           /*params=*/absl::nullopt),
+                           /*params=*/std::nullopt),
       em::SignedData()));
 
   EXPECT_EQ(kUniqueID, job->unique_id());
@@ -269,11 +261,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, CommandPayloadMissingParamDict) {
 // Note that the battery capacity routine has no parameters, so it's enough to
 // ensure the routine can be run.
 TEST_F(DeviceCommandRunRoutineJobTest, RunBatteryCapacityRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryCapacity,
              std::move(params_dict),
@@ -288,11 +278,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunBatteryCapacityRoutineSuccess) {
 // Note that the battery health routine has no parameters, so it's enough to
 // ensure the routine can be run.
 TEST_F(DeviceCommandRunRoutineJobTest, RunBatteryHealthRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryHealth,
              std::move(params_dict),
@@ -305,12 +293,10 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunBatteryHealthRoutineSuccess) {
 }
 
 TEST_F(DeviceCommandRunRoutineJobTest, RunUrandomRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryHealth,
              std::move(params_dict),
@@ -325,11 +311,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunUrandomRoutineSuccess) {
 // Test that the urandom routine handles the optional length_seconds parameter
 // being missing.
 TEST_F(DeviceCommandRunRoutineJobTest, RunUrandomRoutineMissingLengthSeconds) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kUrandom,
                      std::move(params_dict),
                      base::BindLambdaForTesting([](RemoteCommandJob* job) {
@@ -344,8 +328,8 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunUrandomRoutineMissingLengthSeconds) {
 // Test that a negative lengthSeconds parameter causes the urandom routine to
 // fail.
 TEST_F(DeviceCommandRunRoutineJobTest, RunUrandomRoutineInvalidLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kNegativeInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kUrandom,
              std::move(params_dict),
@@ -360,11 +344,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunUrandomRoutineInvalidLengthSeconds) {
 // Note that the smartctl check routine (without percentage_used) has no
 // parameters, so we only need to test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunSmartctlCheckRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kSmartctlCheck,
              std::move(params_dict),
@@ -380,13 +362,11 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunSmartctlCheckRoutineSuccess) {
 // optional percentage_used_threshold parameter being persent.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunSmartctlCheckRoutineWithPercentageUsedSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kPercentageUsedThresholdFieldName,
-                  kValidSmartctlCheckPercentageUsedValue);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue().Set(kPercentageUsedThresholdFieldName,
+                            kValidSmartctlCheckPercentageUsedValue);
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::
                          kSmartctlCheckWithPercentageUsed,
                      std::move(params_dict),
@@ -403,11 +383,9 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // optional percentage_used_threshold parameter being missing.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunSmartctlCheckRoutineWithPercentageUsedMissingParam) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::
                          kSmartctlCheckWithPercentageUsed,
                      std::move(params_dict),
@@ -424,8 +402,8 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // check routine (with percentage_used) to fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunSmartctlCheckRoutineWithPercentageUsedInvalidParam) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kPercentageUsedThresholdFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue().Set(kPercentageUsedThresholdFieldName, kNegativeInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::
                  kSmartctlCheckWithPercentageUsed,
@@ -440,14 +418,13 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 
 // Test that the AC power routine succeeds with all parameters specified.
 TEST_F(DeviceCommandRunRoutineJobTest, RunAcPowerRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kExpectedStatusFieldName,
-                  static_cast<int>(kValidAcPowerStatusEnum));
-  params_dict.Set(kExpectedPowerTypeFieldName, kValidExpectedAcPowerType);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue()
+          .Set(kExpectedStatusFieldName,
+               static_cast<int>(kValidAcPowerStatusEnum))
+          .Set(kExpectedPowerTypeFieldName, kValidExpectedAcPowerType);
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kAcPower,
                      std::move(params_dict),
                      base::BindLambdaForTesting([](RemoteCommandJob* job) {
@@ -463,13 +440,10 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunAcPowerRoutineSuccess) {
 // expectedPowerType specified.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunAcPowerRoutineNoOptionalExpectedPowerType) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kExpectedStatusFieldName,
-                  static_cast<int>(kValidAcPowerStatusEnum));
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict = base::DictValue().Set(
+      kExpectedStatusFieldName, static_cast<int>(kValidAcPowerStatusEnum));
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kAcPower,
                      std::move(params_dict),
                      base::BindLambdaForTesting([](RemoteCommandJob* job) {
@@ -484,8 +458,8 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // Test that leaving out the expectedStatus parameter causes the AC power
 // routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest, RunAcPowerRoutineMissingExpectedStatus) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kExpectedPowerTypeFieldName, kValidExpectedAcPowerType);
+  auto params_dict = base::DictValue().Set(kExpectedPowerTypeFieldName,
+                                           kValidExpectedAcPowerType);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kAcPower,
              std::move(params_dict),
@@ -504,10 +478,11 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunAcPowerRoutineInvalidExpectedStatus) {
       static_cast<ash::cros_healthd::mojom::AcPowerStatusEnum>(
           std::numeric_limits<std::underlying_type<
               ash::cros_healthd::mojom::AcPowerStatusEnum>::type>::max());
-  base::Value::Dict params_dict;
-  params_dict.Set(kExpectedStatusFieldName,
-                  static_cast<int>(kInvalidAcPowerStatusEnum));
-  params_dict.Set(kExpectedPowerTypeFieldName, kValidExpectedAcPowerType);
+  auto params_dict =
+      base::DictValue()
+          .Set(kExpectedStatusFieldName,
+               static_cast<int>(kInvalidAcPowerStatusEnum))
+          .Set(kExpectedPowerTypeFieldName, kValidExpectedAcPowerType);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kAcPower,
              std::move(params_dict),
@@ -520,12 +495,10 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunAcPowerRoutineInvalidExpectedStatus) {
 }
 
 TEST_F(DeviceCommandRunRoutineJobTest, RunCpuCacheRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kPositiveInt);
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kCpuCache,
                      std::move(params_dict),
                      base::BindLambdaForTesting([](RemoteCommandJob* job) {
@@ -540,11 +513,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunCpuCacheRoutineSuccess) {
 // Test that the CPU cache routine handles the optional length_seconds parameter
 // being missing.
 TEST_F(DeviceCommandRunRoutineJobTest, RunCpuCacheRoutineMissingLengthSeconds) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kCpuCache,
                      std::move(params_dict),
                      base::BindLambdaForTesting([](RemoteCommandJob* job) {
@@ -559,8 +530,8 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunCpuCacheRoutineMissingLengthSeconds) {
 // Test that a negative lengthSeconds parameter causes the CPU cache routine to
 // fail.
 TEST_F(DeviceCommandRunRoutineJobTest, RunCpuCacheRoutineInvalidLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kNegativeInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kCpuCache,
              std::move(params_dict),
@@ -573,12 +544,10 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunCpuCacheRoutineInvalidLengthSeconds) {
 }
 
 TEST_F(DeviceCommandRunRoutineJobTest, RunCpuStressRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kCpuStress,
              std::move(params_dict),
@@ -594,11 +563,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunCpuStressRoutineSuccess) {
 // parameter being missing.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunCpuStressRoutineMissingLengthSeconds) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kCpuStress,
              std::move(params_dict),
@@ -614,8 +581,8 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunCpuStressRoutineInvalidLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kNegativeInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kCpuStress,
              std::move(params_dict),
@@ -628,12 +595,10 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 }
 
 TEST_F(DeviceCommandRunRoutineJobTest, RunFloatingPointAccuracyRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kPositiveInt);
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kFloatingPointAccuracy,
       std::move(params_dict),
@@ -649,11 +614,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunFloatingPointAccuracyRoutineSuccess) {
 // length_seconds parameter being missing.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunFloatingPointAccuracyRoutineMissingLengthSeconds) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kFloatingPointAccuracy,
       std::move(params_dict),
@@ -669,8 +632,8 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // accuracy routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunFloatingPointAccuracyRoutineInvalidLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kNegativeInt);
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kFloatingPointAccuracy,
       std::move(params_dict),
@@ -682,69 +645,12 @@ TEST_F(DeviceCommandRunRoutineJobTest,
       })));
 }
 
-TEST_F(DeviceCommandRunRoutineJobTest, RunNvmeWearLevelRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
-  ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kWearLevelThresholdFieldName, kPositiveInt);
-  EXPECT_TRUE(
-      RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kNvmeWearLevel,
-             std::move(params_dict),
-             base::BindLambdaForTesting([](RemoteCommandJob* job) {
-               EXPECT_EQ(job->status(), RemoteCommandJob::SUCCEEDED);
-               std::unique_ptr<std::string> payload = job->GetResultPayload();
-               EXPECT_TRUE(payload);
-               EXPECT_EQ(CreateSuccessPayload(kId, kStatus), *payload);
-             })));
-}
-
-// Test that the NVMe wear level routine can be run without the
-// wearLevelThreshold parameter.
-TEST_F(DeviceCommandRunRoutineJobTest,
-       RunNvmeWearLevelRoutineWithoutWearLevelThreshold) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
-  ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  EXPECT_TRUE(
-      RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kNvmeWearLevel,
-             std::move(params_dict),
-             base::BindLambdaForTesting([](RemoteCommandJob* job) {
-               EXPECT_EQ(job->status(), RemoteCommandJob::SUCCEEDED);
-               std::unique_ptr<std::string> payload = job->GetResultPayload();
-               EXPECT_TRUE(payload);
-               EXPECT_EQ(CreateSuccessPayload(kId, kStatus), *payload);
-             })));
-}
-
-// Test that a negative wearLevelThreshold parameter causes the NVMe wear level
-// routine to fail.
-TEST_F(DeviceCommandRunRoutineJobTest,
-       RunNvmeWearLevelRoutineInvalidWearLevelThreshold) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kWearLevelThresholdFieldName, kNegativeInt);
-  EXPECT_TRUE(
-      RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kNvmeWearLevel,
-             std::move(params_dict),
-             base::BindLambdaForTesting([](RemoteCommandJob* job) {
-               EXPECT_EQ(job->status(), RemoteCommandJob::FAILED);
-               std::unique_ptr<std::string> payload = job->GetResultPayload();
-               EXPECT_TRUE(payload);
-               EXPECT_EQ(CreateInvalidParametersFailurePayload(), *payload);
-             })));
-}
-
 TEST_F(DeviceCommandRunRoutineJobTest, RunNvmeSelfTestRoutineSuccess) {
   constexpr auto kValidNvmeSelfTestTypeEnum =
       ash::cros_healthd::mojom::NvmeSelfTestTypeEnum::kShortSelfTest;
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   params_dict.Set(kNvmeSelfTestTypeFieldName,
                   static_cast<int>(kValidNvmeSelfTestTypeEnum));
   EXPECT_TRUE(
@@ -762,7 +668,7 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunNvmeSelfTestRoutineSuccess) {
 // test routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunNvmeSelfTestRoutineMissingSelfTestType) {
-  base::Value::Dict params_dict;
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kNvmeSelfTest,
              std::move(params_dict),
@@ -782,9 +688,9 @@ TEST_F(DeviceCommandRunRoutineJobTest,
       static_cast<ash::cros_healthd::mojom::NvmeSelfTestTypeEnum>(
           std::numeric_limits<std::underlying_type<
               ash::cros_healthd::mojom::NvmeSelfTestTypeEnum>::type>::max());
-  base::Value::Dict params_dict;
-  params_dict.Set(kNvmeSelfTestTypeFieldName,
-                  static_cast<int>(kInvalidNvmeSelfTestTypeEnum));
+  auto params_dict =
+      base::DictValue().Set(kNvmeSelfTestTypeFieldName,
+                            static_cast<int>(kInvalidNvmeSelfTestTypeEnum));
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kNvmeSelfTest,
              std::move(params_dict),
@@ -798,15 +704,13 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 
 // Test that the disk read routine succeeds with all parameters specified.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kTypeFieldName,
-                  static_cast<int>(kValidDiskReadRoutineTypeEnum));
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
-  params_dict.Set(kFileSizeMbFieldName, kPositiveInt);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue()
+          .Set(kTypeFieldName, static_cast<int>(kValidDiskReadRoutineTypeEnum))
+          .Set(kLengthSecondsFieldName, kPositiveInt)
+          .Set(kFileSizeMbFieldName, kPositiveInt);
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDiskRead,
                      std::move(params_dict),
                      base::BindLambdaForTesting([](RemoteCommandJob* job) {
@@ -821,9 +725,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineSuccess) {
 // Test that leaving out the type parameter causes the disk read routine to
 // fail.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineMissingType) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
-  params_dict.Set(kFileSizeMbFieldName, kPositiveInt);
+  auto params_dict = base::DictValue()
+                         .Set(kLengthSecondsFieldName, kPositiveInt)
+                         .Set(kFileSizeMbFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDiskRead,
              std::move(params_dict),
@@ -838,10 +742,10 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineMissingType) {
 // Test that leaving out the lengthSeconds parameter causes the disk read
 // routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineMissingLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kTypeFieldName,
-                  static_cast<int>(kValidDiskReadRoutineTypeEnum));
-  params_dict.Set(kFileSizeMbFieldName, kPositiveInt);
+  auto params_dict =
+      base::DictValue()
+          .Set(kTypeFieldName, static_cast<int>(kValidDiskReadRoutineTypeEnum))
+          .Set(kFileSizeMbFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDiskRead,
              std::move(params_dict),
@@ -856,10 +760,10 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineMissingLengthSeconds) {
 // Test that leaving out the fileSizeMb parameter causes the disk read routine
 // to fail.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineMissingFileSizeMb) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kTypeFieldName,
-                  static_cast<int>(kValidDiskReadRoutineTypeEnum));
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
+  auto params_dict =
+      base::DictValue()
+          .Set(kTypeFieldName, static_cast<int>(kValidDiskReadRoutineTypeEnum))
+          .Set(kLengthSecondsFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDiskRead,
              std::move(params_dict),
@@ -878,11 +782,11 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineInvalidType) {
       static_cast<ash::cros_healthd::mojom::DiskReadRoutineTypeEnum>(
           std::numeric_limits<std::underlying_type<
               ash::cros_healthd::mojom::DiskReadRoutineTypeEnum>::type>::max());
-  base::Value::Dict params_dict;
-  params_dict.Set(kTypeFieldName,
-                  static_cast<int>(kInvalidDiskReadRoutineTypeEnum));
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
-  params_dict.Set(kFileSizeMbFieldName, kPositiveInt);
+  auto params_dict = base::DictValue()
+                         .Set(kTypeFieldName,
+                              static_cast<int>(kInvalidDiskReadRoutineTypeEnum))
+                         .Set(kLengthSecondsFieldName, kPositiveInt)
+                         .Set(kFileSizeMbFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDiskRead,
              std::move(params_dict),
@@ -897,11 +801,11 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineInvalidType) {
 // Test that an invalid value for the lengthSeconds parameter causes the disk
 // read routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineInvalidLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kTypeFieldName,
-                  static_cast<int>(kValidDiskReadRoutineTypeEnum));
-  params_dict.Set(kLengthSecondsFieldName, kNegativeInt);
-  params_dict.Set(kFileSizeMbFieldName, kPositiveInt);
+  auto params_dict =
+      base::DictValue()
+          .Set(kTypeFieldName, static_cast<int>(kValidDiskReadRoutineTypeEnum))
+          .Set(kLengthSecondsFieldName, kNegativeInt)
+          .Set(kFileSizeMbFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDiskRead,
              std::move(params_dict),
@@ -916,11 +820,11 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineInvalidLengthSeconds) {
 // Test that an invalid value for the fileSizeMb parameter causes the disk read
 // routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineInvalidFileSizeMb) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kTypeFieldName,
-                  static_cast<int>(kValidDiskReadRoutineTypeEnum));
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
-  params_dict.Set(kFileSizeMbFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue()
+          .Set(kTypeFieldName, static_cast<int>(kValidDiskReadRoutineTypeEnum))
+          .Set(kLengthSecondsFieldName, kPositiveInt)
+          .Set(kFileSizeMbFieldName, kNegativeInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDiskRead,
              std::move(params_dict),
@@ -934,12 +838,10 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDiskReadRoutineInvalidFileSizeMb) {
 
 // Test that the prime search routine succeeds with all parameters specified.
 TEST_F(DeviceCommandRunRoutineJobTest, RunPrimeSearchRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kPrimeSearch,
              std::move(params_dict),
@@ -955,11 +857,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunPrimeSearchRoutineSuccess) {
 // parameter being missing.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunPrimeSearchRoutineMissingLengthSeconds) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kPrimeSearch,
              std::move(params_dict),
@@ -975,8 +875,8 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // search routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunPrimeSearchRoutineInvalidLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kNegativeInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kPrimeSearch,
              std::move(params_dict),
@@ -989,13 +889,12 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 }
 
 TEST_F(DeviceCommandRunRoutineJobTest, RunBatteryDischargeRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
-  params_dict.Set(kMaximumDischargePercentAllowedFieldName, kPositiveInt);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue()
+          .Set(kLengthSecondsFieldName, kPositiveInt)
+          .Set(kMaximumDischargePercentAllowedFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryDischarge,
              std::move(params_dict),
@@ -1011,8 +910,8 @@ TEST_F(DeviceCommandRunRoutineJobTest,
        RunBatteryDischargeRoutineMissingLengthSeconds) {
   // Test that leaving out the lengthSeconds parameter causes the routine to
   // fail.
-  base::Value::Dict params_dict;
-  params_dict.Set(kMaximumDischargePercentAllowedFieldName, kPositiveInt);
+  auto params_dict = base::DictValue().Set(
+      kMaximumDischargePercentAllowedFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryDischarge,
              std::move(params_dict),
@@ -1028,8 +927,8 @@ TEST_F(DeviceCommandRunRoutineJobTest,
        RunBatteryDischargeRoutineMissingMaximumDischargePercentAllowed) {
   // Test that leaving out the maximumDischargePercentAllowed parameter causes
   // the routine to fail.
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryDischarge,
              std::move(params_dict),
@@ -1044,9 +943,10 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunBatteryDischargeRoutineInvalidLengthSeconds) {
   // Test that a negative lengthSeconds parameter causes the routine to fail.
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kNegativeInt);
-  params_dict.Set(kMaximumDischargePercentAllowedFieldName, kPositiveInt);
+  auto params_dict =
+      base::DictValue()
+          .Set(kLengthSecondsFieldName, kNegativeInt)
+          .Set(kMaximumDischargePercentAllowedFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryDischarge,
              std::move(params_dict),
@@ -1062,9 +962,10 @@ TEST_F(DeviceCommandRunRoutineJobTest,
        RunBatteryDischargeRoutineInvalidMaximumDischargePercentAllowed) {
   // Test that a negative maximumDischargePercentAllowed parameter causes the
   // routine to fail.
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
-  params_dict.Set(kMaximumDischargePercentAllowedFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue()
+          .Set(kLengthSecondsFieldName, kPositiveInt)
+          .Set(kMaximumDischargePercentAllowedFieldName, kNegativeInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryDischarge,
              std::move(params_dict),
@@ -1078,13 +979,12 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 
 // Test that the battery charge routine can be run.
 TEST_F(DeviceCommandRunRoutineJobTest, RunBatteryChargeRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
-  params_dict.Set(kMinimumChargePercentRequiredFieldName, kPositiveInt);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue()
+          .Set(kLengthSecondsFieldName, kPositiveInt)
+          .Set(kMinimumChargePercentRequiredFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryCharge,
              std::move(params_dict),
@@ -1100,8 +1000,8 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunBatteryChargeRoutineSuccess) {
 // routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunBatteryChargeRoutineMissingLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kMinimumChargePercentRequiredFieldName, kPositiveInt);
+  auto params_dict = base::DictValue().Set(
+      kMinimumChargePercentRequiredFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryCharge,
              std::move(params_dict),
@@ -1117,8 +1017,8 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // battery charge routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunBatteryChargeRoutineMissingMinimumChargePercentRequired) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
+  auto params_dict =
+      base::DictValue().Set(kLengthSecondsFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryCharge,
              std::move(params_dict),
@@ -1134,9 +1034,10 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunBatteryChargeRoutineInvalidLengthSeconds) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kNegativeInt);
-  params_dict.Set(kMinimumChargePercentRequiredFieldName, kPositiveInt);
+  auto params_dict =
+      base::DictValue()
+          .Set(kLengthSecondsFieldName, kNegativeInt)
+          .Set(kMinimumChargePercentRequiredFieldName, kPositiveInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryCharge,
              std::move(params_dict),
@@ -1152,9 +1053,10 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // battery charge routine to fail.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunBatteryChargeRoutineInvalidMinimumChargePercentRequired) {
-  base::Value::Dict params_dict;
-  params_dict.Set(kLengthSecondsFieldName, kPositiveInt);
-  params_dict.Set(kMinimumChargePercentRequiredFieldName, kNegativeInt);
+  auto params_dict =
+      base::DictValue()
+          .Set(kLengthSecondsFieldName, kPositiveInt)
+          .Set(kMinimumChargePercentRequiredFieldName, kNegativeInt);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kBatteryCharge,
              std::move(params_dict),
@@ -1169,11 +1071,9 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // Note that the memory routine has no parameters, so we only need to test that
 // it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunMemoryRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kMemory,
                      std::move(params_dict),
                      base::BindLambdaForTesting([](RemoteCommandJob* job) {
@@ -1188,11 +1088,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunMemoryRoutineSuccess) {
 // Note that the LAN connectivity routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunLanConnectivityRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kLanConnectivity,
              std::move(params_dict),
@@ -1207,11 +1105,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunLanConnectivityRoutineSuccess) {
 // Note that the signal strength routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunSignalStrengthRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kSignalStrength,
              std::move(params_dict),
@@ -1226,11 +1122,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunSignalStrengthRoutineSuccess) {
 // Note that the gateway can be pinged routine has no parameters, so we only
 // need to test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunGatewayCanBePingedRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kGatewayCanBePinged,
       std::move(params_dict),
@@ -1246,11 +1140,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunGatewayCanBePingedRoutineSuccess) {
 // only need to test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunHasSecureWiFiConnectionRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kHasSecureWiFiConnection,
       std::move(params_dict),
@@ -1265,11 +1157,9 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // Note that the DNS resolver present routine has no parameters, so we only need
 // to test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDnsResolverPresentRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDnsResolverPresent,
       std::move(params_dict),
@@ -1284,11 +1174,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDnsResolverPresentRoutineSuccess) {
 // Note that the DNS latency routine has no parameters, so we only need
 // to test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDnsLatencyRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDnsLatency,
              std::move(params_dict),
@@ -1303,11 +1191,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDnsLatencyRoutineSuccess) {
 // Note that the DNS resolution routine has no parameters, so we only need
 // to test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunDnsResolutionRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kDnsResolution,
              std::move(params_dict),
@@ -1322,11 +1208,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunDnsResolutionRoutineSuccess) {
 // Note that the captive portal routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunCaptivePortalRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kCaptivePortal,
              std::move(params_dict),
@@ -1341,11 +1225,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunCaptivePortalRoutineSuccess) {
 // Note that the HTTP firewall routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunHttpFirewallRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kHttpFirewall,
              std::move(params_dict),
@@ -1360,11 +1242,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunHttpFirewallRoutineSuccess) {
 // Note that the HTTPS firewall routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunHttpsFirewallRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kHttpsFirewall,
              std::move(params_dict),
@@ -1379,11 +1259,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunHttpsFirewallRoutineSuccess) {
 // Note that the HTTPS latency routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunHttpsLatencyRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kHttpsLatency,
              std::move(params_dict),
@@ -1398,13 +1276,11 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunHttpsLatencyRoutineSuccess) {
 // Test that the video conferencing routine succeeds with all parameters
 // specified.
 TEST_F(DeviceCommandRunRoutineJobTest, RunVideoConferencingRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(DeviceCommandRunRoutineJob::kStunServerHostnameFieldName,
-                  kValidStunServerHostname);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict = base::DictValue().Set(
+      DeviceCommandRunRoutineJob::kStunServerHostnameFieldName,
+      kValidStunServerHostname);
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kVideoConferencing,
       std::move(params_dict),
@@ -1420,11 +1296,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunVideoConferencingRoutineSuccess) {
 // parameter stunServerHostname specified.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunVideoConferencingRoutineNoOptionalStunServerHostname) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kVideoConferencing,
       std::move(params_dict),
@@ -1439,11 +1313,9 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // Note that the ARC HTTP routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunArcHttpRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kArcHttp,
       std::move(params_dict),
@@ -1462,11 +1334,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunArcHttpRoutineSuccess) {
 // Note that the ARC Ping routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunArcPingRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kArcPing,
       std::move(params_dict),
@@ -1485,11 +1355,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunArcPingRoutineSuccess) {
 // Note that the ARC DNS Resolution routine has no parameters, so we only need
 // to test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunArcDnsResolutionRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kArcDnsResolution,
       std::move(params_dict),
@@ -1509,11 +1377,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunArcDnsResolutionRoutineSuccess) {
 // Note that the sensitive sensor routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunSensitiveSensorRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kSensitiveSensor,
       std::move(params_dict),
@@ -1532,12 +1398,10 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunSensitiveSensorRoutineSuccess) {
 
 // Test that privacy screen routine succeeds with all parameters specified.
 TEST_F(DeviceCommandRunRoutineJobTest, RunPrivacyScreenRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
-  params_dict.Set(kPrivacyScreenTargetStateFieldName, true);
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  auto params_dict =
+      base::DictValue().Set(kPrivacyScreenTargetStateFieldName, true);
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kPrivacyScreen,
              std::move(params_dict),
@@ -1553,11 +1417,9 @@ TEST_F(DeviceCommandRunRoutineJobTest, RunPrivacyScreenRoutineSuccess) {
 // |targetState| specified.
 TEST_F(DeviceCommandRunRoutineJobTest,
        RunPrivacyScreenRoutineSuccessNoOptionalTargetState) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(
       RunJob(ash::cros_healthd::mojom::DiagnosticRoutineEnum::kPrivacyScreen,
              std::move(params_dict),
@@ -1572,11 +1434,9 @@ TEST_F(DeviceCommandRunRoutineJobTest,
 // Note that the eMMC lifetime routine has no parameters, so we only need to
 // test that it can be run successfully.
 TEST_F(DeviceCommandRunRoutineJobTest, RunEmmcLifetimeRoutineSuccess) {
-  auto run_routine_response =
-      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus);
   ash::cros_healthd::FakeCrosHealthd::Get()->SetRunRoutineResponseForTesting(
-      run_routine_response);
-  base::Value::Dict params_dict;
+      ash::cros_healthd::mojom::RunRoutineResponse::New(kId, kStatus));
+  base::DictValue params_dict;
   EXPECT_TRUE(RunJob(
       ash::cros_healthd::mojom::DiagnosticRoutineEnum::kEmmcLifetime,
       std::move(params_dict),

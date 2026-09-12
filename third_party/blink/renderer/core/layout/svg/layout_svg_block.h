@@ -63,39 +63,43 @@ class LayoutSVGBlock : public LayoutBlockFlow {
   SVGElement* GetElement() const;
 
  protected:
-  void WillBeDestroyed() override;
+  void WillBeDestroyed(const ComputedStyle*) override;
   void InsertedIntoTree() override;
   void WillBeRemovedFromTree() override;
 
   bool MapToVisualRectInAncestorSpaceInternal(
       const LayoutBoxModelObject* ancestor,
       TransformState&,
-      VisualRectFlags = kDefaultVisualRectFlags) const final;
+      VisualRectFlags) const final;
 
   AffineTransform local_transform_;
-  bool needs_transform_update_ : 1;
-  bool transform_uses_reference_box_ : 1;
+  // True if `local_transform_` is not up-to-date.
+  bool needs_transform_update_ : 1 = true;
+  // The transform applied to the object depends on the reference box (i.e
+  // translate(50%, 50%) or similar).
+  bool transform_uses_reference_box_ : 1 = false;
 
-  bool IsOfType(LayoutObjectType type) const override {
+  bool IsSVG() const final {
     NOT_DESTROYED();
-    return type == kLayoutObjectSVG || LayoutBlockFlow::IsOfType(type);
+    return true;
   }
 
-  bool CheckForImplicitTransformChange(bool bbox_changed) const;
-  bool UpdateTransformAfterLayout(bool bounds_changed);
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
-  void UpdateFromStyle() override;
+  bool CheckForImplicitTransformChange(const SVGLayoutInfo&,
+                                       bool bbox_changed) const;
+  void UpdateTransformBeforeLayout();
+  bool UpdateTransformAfterLayout(const SVGLayoutInfo&, bool bounds_changed);
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const ComputedStyle& new_style,
+                      const StyleChangeContext&) override;
+  bool ShouldBeHandledAsFloating(const ComputedStyle&) const override {
+    NOT_DESTROYED();
+    return false;
+  }
 
  private:
   // LayoutSVGBlock subclasses should use GetElement() instead.
   void GetNode() const = delete;
-
-  PhysicalRect VisualRectInDocument(VisualRectFlags) const final;
-
-  bool NodeAtPoint(HitTestResult&,
-                   const HitTestLocation&,
-                   const PhysicalOffset& accumulated_offset,
-                   HitTestPhase) override;
 };
 
 }  // namespace blink

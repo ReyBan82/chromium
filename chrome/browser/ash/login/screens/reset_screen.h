@@ -6,19 +6,21 @@
 #define CHROME_BROWSER_ASH_LOGIN_SCREENS_RESET_SCREEN_H_
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 
 #include "ash/public/cpp/login_accelerators.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/login/help_app_launcher.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
-#include "chrome/browser/ash/tpm_firmware_update.h"
+#include "chrome/browser/ash/tpm/tpm_firmware_update.h"
 #include "chromeos/ash/components/dbus/update_engine/update_engine_client.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class PrefRegistrySimple;
+class PrefService;
 
 namespace ash {
 
@@ -30,7 +32,16 @@ class ScopedGuestButtonBlocker;
 // will end up in the device restart.
 class ResetScreen : public BaseScreen, public UpdateEngineClient::Observer {
  public:
-  ResetScreen(base::WeakPtr<ResetView> view,
+  enum class State {
+    kRestartRequired = 0,
+    kRevertPromise,
+    kPowerwashProposal,
+    kError,
+  };
+
+  // `local_state` must be non-null and must outlive `this`.
+  ResetScreen(PrefService* local_state,
+              base::WeakPtr<ResetView> view,
               const base::RepeatingClosure& exit_callback);
 
   ResetScreen(const ResetScreen&) = delete;
@@ -56,18 +67,27 @@ class ResetScreen : public BaseScreen, public UpdateEngineClient::Observer {
   // TPM firmware update has to be installed, the mode of update will be passed
   // as second parameter to `callback`.
   static void CheckIfPowerwashAllowed(
-      base::OnceCallback<void(bool, absl::optional<tpm_firmware_update::Mode>)>
+      base::OnceCallback<void(bool, std::optional<tpm_firmware_update::Mode>)>
           callback);
 
  private:
   // BaseScreen implementation:
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
   bool HandleAccelerator(LoginAcceleratorAction action) final;
 
   // UpdateEngineClient::Observer implementation:
   void UpdateStatusChanged(const update_engine::StatusResult& status) override;
+
+  void SetIsRollbackAvailable(bool value);
+  // Only serve the request if the confirmation dialog isn't being shown.
+  void SetIsRollbackRequested(bool value);
+  void SetIsTpmFirmwareUpdateChecked(bool value);
+  void SetTpmFirmwareUpdateMode(tpm_firmware_update::Mode value);
+  void SetShouldShowConfirmationDialog(bool value);
+  void SetConfirmationDialogClosed();
+  void SetScreenState(State value);
 
   void OnRollbackCheck(bool can_rollback);
   void OnTPMFirmwareUpdateAvailableCheck(
@@ -77,10 +97,10 @@ class ResetScreen : public BaseScreen, public UpdateEngineClient::Observer {
   void OnPowerwash();
   void OnRestart();
   void OnToggleRollback();
-  void OnShowConfirm();
-  void OnConfirmationDismissed();
 
   void ShowHelpArticle(HelpAppLauncher::HelpTopic topic);
+
+  const raw_ref<PrefService> local_state_;
 
   base::WeakPtr<ResetView> view_;
   base::RepeatingClosure exit_callback_;
@@ -92,6 +112,13 @@ class ResetScreen : public BaseScreen, public UpdateEngineClient::Observer {
   TpmFirmwareUpdateAvailabilityChecker tpm_firmware_update_checker_;
 
   std::unique_ptr<ScopedGuestButtonBlocker> scoped_guest_button_blocker_;
+
+  State state_ = State::kRestartRequired;
+  tpm_firmware_update::Mode mode_ = tpm_firmware_update::Mode::kPowerwash;
+  bool is_rollback_available_ = false;
+  bool is_rollback_requested_ = false;
+  bool is_tpm_firmware_update_checked_ = false;
+  bool is_showing_confirmation_dialog_ = false;
 
   base::WeakPtrFactory<ResetScreen> weak_ptr_factory_{this};
 };

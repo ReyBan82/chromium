@@ -4,16 +4,23 @@
 
 #include "chrome/browser/dev_ui/android/dev_ui_loader_throttle.h"
 
+#include <memory>
 #include <string>
-#include <utility>
 
-#include "base/check_op.h"
+#include "base/functional/bind.h"
 #include "chrome/android/modules/dev_ui/provider/dev_ui_module_provider.h"
 #include "chrome/browser/dev_ui/android/dev_ui_loader_error_page.h"
 #include "chrome/common/webui_url_constants.h"
+#include "components/commerce/core/commerce_constants.h"
+#include "components/history_clusters/history_clusters_internals/webui/url_constants.h"
+#include "components/optimization_guide/optimization_guide_internals/webui/url_constants.h"
+#include "components/private_ai/private_ai_internals/webui/url_constants.h"
+#include "components/webui/regional_capabilities_internals/constants.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/navigation_handle.h"
+#include "content/public/common/buildflags.h"
 #include "content/public/common/url_constants.h"
+#include "device/vr/buildflags/buildflags.h"
 #include "net/base/net_errors.h"
 #include "url/gurl.h"
 
@@ -29,21 +36,22 @@ bool IsWebUiHostInDevUiDfm(const std::string& host) {
   // Each WebUI host (including synonyms) in the DevUI DFM must have an entry.
   // Assume linear search is fast enough. Can optimize later if needed.
   return host == chrome::kChromeUIAccessibilityHost ||
+         host == chrome::kChromeUIActorInternalsHost ||
          host == chrome::kChromeUIAutofillInternalsHost ||
          host == chrome::kChromeUIBluetoothInternalsHost ||
-         host == chrome::kChromeUIBrowsingTopicsInternalsHost ||
+         host == chrome::kChromeUIChromeFindsInternalsHost ||
          host == chrome::kChromeUIComponentsHost ||
-         host == chrome::kChromeUICrashesHost ||
+         host == chrome::kChromeUIConnectorsInternalsHost ||
          host == chrome::kChromeUIDeviceLogHost ||
+         host == chrome::kChromeUIContextHubHost ||
          host == chrome::kChromeUIDownloadInternalsHost ||
          host == chrome::kChromeUIFamilyLinkUserInternalsHost ||
          host == chrome::kChromeUIGCMInternalsHost ||
          host == chrome::kChromeUIInternalsHost ||
          host == chrome::kChromeUIInterstitialHost ||
-         host == chrome::kChromeUIInvalidationsHost ||
          host == chrome::kChromeUILocalStateHost ||
          host == chrome::kChromeUIMediaEngagementHost ||
-         host == chrome::kChromeUIMemoryInternalsHost ||
+         host == chrome::kChromeUIMetricsInternalsHost ||
          host == chrome::kChromeUINTPTilesInternalsHost ||
          host == chrome::kChromeUINetExportHost ||
          host == chrome::kChromeUINetInternalsHost ||
@@ -52,20 +60,20 @@ bool IsWebUiHostInDevUiDfm(const std::string& host) {
          host == chrome::kChromeUIPolicyHost ||
          host == chrome::kChromeUIPredictorsHost ||
          host == chrome::kChromeUISandboxHost ||
+         host == chrome::kChromeUISegmentationInternalsHost ||
          host == chrome::kChromeUISignInInternalsHost ||
          host == chrome::kChromeUISiteEngagementHost ||
          host == chrome::kChromeUISnippetsInternalsHost ||
+         host == chrome::kChromeUISubresourceFilterInternalsHost ||
+         host == chrome::kChromeUISuggestInternalsHost ||
          host == chrome::kChromeUISyncInternalsHost ||
          host == chrome::kChromeUITranslateInternalsHost ||
          host == chrome::kChromeUIUsbInternalsHost ||
-         host == chrome::kChromeUIUserActionsHost ||
          host == chrome::kChromeUIWebApksHost ||
          host == chrome::kChromeUIWebRtcLogsHost ||
-         host == content::kChromeUIPrivateAggregationInternalsHost ||
-         host == content::kChromeUIAttributionInternalsHost ||
+         host == commerce::kChromeUICommerceInternalsHost ||
          host == content::kChromeUIBlobInternalsHost ||
          host == content::kChromeUIGpuHost ||
-         host == content::kChromeUIHistogramHost ||
          host == content::kChromeUIIndexedDBInternalsHost ||
          host == content::kChromeUIMediaInternalsHost ||
          host == content::kChromeUINetworkErrorsListingHost ||
@@ -73,7 +81,17 @@ bool IsWebUiHostInDevUiDfm(const std::string& host) {
          host == content::kChromeUIQuotaInternalsHost ||
          host == content::kChromeUIServiceWorkerInternalsHost ||
          host == content::kChromeUIUkmHost ||
-         host == content::kChromeUIWebRTCInternalsHost;
+         host == content::kChromeUIWebRTCInternalsHost ||
+#if BUILDFLAG(ENABLE_VR)
+         host == content::kChromeUIWebXrInternalsHost ||
+#endif
+         host == history_clusters_internals::
+                     kChromeUIHistoryClustersInternalsHost ||
+         host == optimization_guide_internals::
+                     kChromeUIOptimizationGuideInternalsHost ||
+         host == private_ai_internals::kChromeUIPrivateAiInternalsHost ||
+         host ==
+             regional_capabilities::kChromeUIRegionalCapabilitiesInternalsHost;
 }
 
 }  // namespace
@@ -82,32 +100,39 @@ namespace dev_ui {
 
 // static
 bool DevUiLoaderThrottle::ShouldInstallDevUiDfm(const GURL& url) {
+#if BUILDFLAG(ENABLE_DEVTOOLS_FRONTEND)
+  if (url.SchemeIs(content::kChromeDevToolsScheme)) {
+    return true;
+  }
+#endif
   return url.SchemeIs(content::kChromeUIScheme) &&
-         IsWebUiHostInDevUiDfm(url.host());
+         IsWebUiHostInDevUiDfm(url.GetHost());
 }
 
 // static
-std::unique_ptr<content::NavigationThrottle>
-DevUiLoaderThrottle::MaybeCreateThrottleFor(content::NavigationHandle* handle) {
+void DevUiLoaderThrottle::MaybeCreateAndAdd(
+    content::NavigationThrottleRegistry& registry) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  DCHECK(handle);
-  if (!handle->IsInPrimaryMainFrame())
-    return nullptr;
+  auto& handle = registry.GetNavigationHandle();
+  if (!handle.IsInPrimaryMainFrame()) {
+    return;
+  }
 
-  if (!ShouldInstallDevUiDfm(handle->GetURL()))
-    return nullptr;
+  if (!ShouldInstallDevUiDfm(handle.GetURL())) {
+    return;
+  }
 
   if (dev_ui::DevUiModuleProvider::GetInstance()->ModuleInstalled()) {
     dev_ui::DevUiModuleProvider::GetInstance()->EnsureLoaded();
-    return nullptr;
+    return;
   }
 
-  return std::make_unique<DevUiLoaderThrottle>(handle);
+  registry.AddThrottle(std::make_unique<DevUiLoaderThrottle>(registry));
 }
 
 DevUiLoaderThrottle::DevUiLoaderThrottle(
-    content::NavigationHandle* navigation_handle)
-    : content::NavigationThrottle(navigation_handle) {}
+    content::NavigationThrottleRegistry& registry)
+    : content::NavigationThrottle(registry) {}
 
 DevUiLoaderThrottle::~DevUiLoaderThrottle() = default;
 

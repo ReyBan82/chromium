@@ -20,28 +20,34 @@
 
 #include "third_party/blink/renderer/core/svg/svg_tests.h"
 
+#include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/frame/settings.h"
 #include "third_party/blink/renderer/core/mathml_names.h"
-#include "third_party/blink/renderer/core/page/chrome_client.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/svg/svg_element.h"
 #include "third_party/blink/renderer/core/svg/svg_static_string_list.h"
 #include "third_party/blink/renderer/core/svg_names.h"
 #include "third_party/blink/renderer/platform/language.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
-SVGTests::SVGTests(SVGElement* context_element)
-    : required_extensions_(
-          SVGStaticStringList::Create<' '>(context_element,
-                                           svg_names::kRequiredExtensionsAttr)),
-      system_language_(
-          SVGStaticStringList::Create<','>(context_element,
-                                           svg_names::kSystemLanguageAttr)) {
-  DCHECK(context_element);
+SVGTests::SVGTests() = default;
 
-  context_element->AddToPropertyMap(required_extensions_);
-  context_element->AddToPropertyMap(system_language_);
+SVGStaticStringList& SVGTests::EnsureRequiredExtensions(
+    const SVGElement* owner) {
+  if (!required_extensions_) {
+    required_extensions_ = SVGStaticStringList::Create<' '>(
+        const_cast<SVGElement*>(owner), svg_names::kRequiredExtensionsAttr);
+  }
+  return *required_extensions_;
+}
+
+SVGStaticStringList& SVGTests::EnsureSystemLanguage(const SVGElement* owner) {
+  if (!system_language_) {
+    system_language_ = SVGStaticStringList::Create<','>(
+        const_cast<SVGElement*>(owner), svg_names::kSystemLanguageAttr);
+  }
+  return *system_language_;
 }
 
 void SVGTests::Trace(Visitor* visitor) const {
@@ -49,23 +55,48 @@ void SVGTests::Trace(Visitor* visitor) const {
   visitor->Trace(system_language_);
 }
 
-SVGStringListTearOff* SVGTests::requiredExtensions() {
-  return required_extensions_->TearOff();
+SVGStringListTearOff* SVGTests::requiredExtensions(const SVGElement* owner) {
+  return EnsureRequiredExtensions(owner).TearOff();
 }
 
-SVGStringListTearOff* SVGTests::systemLanguage() {
-  return system_language_->TearOff();
+SVGStringListTearOff* SVGTests::systemLanguage(const SVGElement* owner) {
+  return EnsureSystemLanguage(owner).TearOff();
 }
 
-static bool IsLangTagPrefix(const String& lang_tag, const String& language) {
-  if (!lang_tag.StartsWithIgnoringASCIICase(language))
+SVGAnimatedPropertyBase* SVGTests::PropertyFromAttribute(
+    const SVGElement* owner,
+    const QualifiedName& attribute_name) {
+  if (attribute_name == svg_names::kRequiredExtensionsAttr) {
+    return &EnsureRequiredExtensions(owner);
+  } else if (attribute_name == svg_names::kSystemLanguageAttr) {
+    return &EnsureSystemLanguage(owner);
+  } else {
+    return nullptr;
+  }
+}
+
+void SVGTests::SynchronizeAllSVGAttributes() const {
+  if (required_extensions_) {
+    SVGAnimatedPropertyBase* attrs[]{required_extensions_.Get()};
+    SVGElement::SynchronizeListOfSVGAttributes(attrs);
+  }
+  if (system_language_) {
+    SVGAnimatedPropertyBase* attrs[]{system_language_.Get()};
+    SVGElement::SynchronizeListOfSVGAttributes(attrs);
+  }
+}
+
+static bool IsLangTagPrefix(const String& lang_tag,
+                            const StringView& language) {
+  if (!lang_tag.StartsWithIgnoringAsciiCase(language)) {
     return false;
+  }
   return lang_tag.length() == language.length() ||
          lang_tag[language.length()] == '-';
 }
 
 static bool MatchLanguageList(const String& lang_tag,
-                                 const Vector<String>& languages) {
+                              const Vector<StringView>& languages) {
   for (const auto& value : languages) {
     if (IsLangTagPrefix(lang_tag, value))
       return true;
@@ -74,15 +105,15 @@ static bool MatchLanguageList(const String& lang_tag,
 }
 
 bool SVGTests::IsValid() const {
-  if (system_language_->IsSpecified()) {
+  if (system_language_ && system_language_->IsSpecified()) {
     bool match_found = false;
-    Vector<String> languages;
-    system_language_->ContextElement()
-        ->GetDocument()
-        .GetPage()
-        ->GetChromeClient()
-        .AcceptLanguages()
-        .Split(',', languages);
+    String accept_languages = system_language_->ContextElement()
+                                  ->GetDocument()
+                                  .GetPage()
+                                  ->GetSettings()
+                                  .GetAcceptLanguages();
+    Vector<StringView> languages =
+        StringView(accept_languages).SplitSkippingEmpty(',');
     for (const auto& lang_tag : system_language_->Value()->Values()) {
       if (MatchLanguageList(lang_tag, languages)) {
         match_found = true;
@@ -93,7 +124,7 @@ bool SVGTests::IsValid() const {
       return false;
   }
 
-  if (required_extensions_->IsSpecified()) {
+  if (required_extensions_ && required_extensions_->IsSpecified()) {
     const Vector<String>& extensions = required_extensions_->Value()->Values();
     // 'If a null string or empty string value is given to attribute
     // 'requiredExtensions', the attribute evaluates to "false".'
@@ -101,9 +132,9 @@ bool SVGTests::IsValid() const {
       return false;
     for (const auto& extension : extensions) {
       if (extension != html_names::xhtmlNamespaceURI &&
-          (!RuntimeEnabledFeatures::MathMLCoreEnabled() ||
-           extension != mathml_names::kNamespaceURI))
+          extension != mathml_names::kNamespaceURI) {
         return false;
+      }
     }
   }
   return true;

@@ -10,25 +10,27 @@ import android.net.LinkAddress;
 import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkRequest;
-import android.os.Build;
 
-import androidx.annotation.RequiresApi;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
 
 import org.chromium.base.ContextUtils;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.build.annotations.UsedByReflection;
 
-import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
- * Class to evaluate PAC scripts.
+ * Class to evaluate PAC scripts. Its lifecycle is independent of any Renderer, Profile, or WebView
+ * instance.
  */
 @JNINamespace("android_webview")
-@RequiresApi(Build.VERSION_CODES.P)
 // TODO(amalova): remove UsedByReflection
 @UsedByReflection("Android")
 public class AwPacProcessor {
+    // 0 if it's already been destroyed.
     private long mNativePacProcessor;
     private Network mNetwork;
     private ConnectivityManager.NetworkCallback mNetworkCallback;
@@ -53,34 +55,38 @@ public class AwPacProcessor {
     }
 
     private void updateNetworkLinkAddress(Network network, LinkProperties linkProperties) {
-        if (network == null || linkProperties == null) {
-            setNetworkAndLinkAddresses(NETWORK_UNSPECIFIED, new String[0]);
-        } else {
-            String[] addresses = linkProperties.getLinkAddresses()
-                                         .stream()
-                                         .map(LinkAddress::getAddress)
-                                         .map(InetAddress::getHostAddress)
-                                         .toArray(String[] ::new);
-            setNetworkAndLinkAddresses(network.getNetworkHandle(), addresses);
+        long networkHandle = NETWORK_UNSPECIFIED;
+        ArrayList<String> addresses = new ArrayList<>();
+        if (network != null
+                && linkProperties != null
+                && !linkProperties.getLinkAddresses().isEmpty()) {
+            networkHandle = network.getNetworkHandle();
+            for (LinkAddress addr : linkProperties.getLinkAddresses()) {
+                addresses.add(addr.getAddress().getHostAddress());
+            }
         }
+        setNetworkAndLinkAddresses(networkHandle, addresses);
     }
 
-    public void setNetworkAndLinkAddresses(long networkHandle, String[] addresses) {
-        AwPacProcessorJni.get().setNetworkAndLinkAddresses(
-                mNativePacProcessor, networkHandle, addresses);
+    public void setNetworkAndLinkAddresses(long networkHandle, List<String> addresses) {
+        if (mNativePacProcessor == 0) return;
+        AwPacProcessorJni.get()
+                .setNetworkAndLinkAddresses(mNativePacProcessor, networkHandle, addresses);
     }
 
     private void registerNetworkCallback() {
         if (mNetworkCallback != null) return;
 
-        mNetworkCallback = new ConnectivityManager.NetworkCallback() {
-            @Override
-            public void onLinkPropertiesChanged(Network network, LinkProperties linkProperties) {
-                if (network.equals(mNetwork)) {
-                    updateNetworkLinkAddress(network, linkProperties);
-                }
-            }
-        };
+        mNetworkCallback =
+                new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onLinkPropertiesChanged(
+                            Network network, LinkProperties linkProperties) {
+                        if (network.equals(mNetwork)) {
+                            updateNetworkLinkAddress(network, linkProperties);
+                        }
+                    }
+                };
         NetworkRequest.Builder builder = new NetworkRequest.Builder();
 
         getConnectivityManager().registerNetworkCallback(builder.build(), mNetworkCallback);
@@ -96,18 +102,23 @@ public class AwPacProcessor {
     // The calling code must not call any methods after it called destroy().
     @UsedByReflection("Android")
     public void destroy() {
+        if (mNativePacProcessor == 0) return;
+        long nativePacProcessor = mNativePacProcessor;
+        mNativePacProcessor = 0;
         unregisterNetworkCallback();
-        AwPacProcessorJni.get().destroyNative(mNativePacProcessor, this);
+        AwPacProcessorJni.get().destroyNative(nativePacProcessor);
     }
 
     @UsedByReflection("Android")
     public boolean setProxyScript(String script) {
-        return AwPacProcessorJni.get().setProxyScript(mNativePacProcessor, this, script);
+        if (mNativePacProcessor == 0) return false;
+        return AwPacProcessorJni.get().setProxyScript(mNativePacProcessor, script);
     }
 
     @UsedByReflection("Android")
     public String makeProxyRequest(String url) {
-        return AwPacProcessorJni.get().makeProxyRequest(mNativePacProcessor, this, url);
+        if (mNativePacProcessor == 0) return null;
+        return AwPacProcessorJni.get().makeProxyRequest(mNativePacProcessor, url);
     }
 
     @UsedByReflection("Android")
@@ -133,11 +144,20 @@ public class AwPacProcessor {
     @NativeMethods
     interface Natives {
         void initializeEnvironment();
+
         long createNativePacProcessor();
-        boolean setProxyScript(long nativeAwPacProcessor, AwPacProcessor caller, String script);
-        String makeProxyRequest(long nativeAwPacProcessor, AwPacProcessor caller, String url);
-        void destroyNative(long nativeAwPacProcessor, AwPacProcessor caller);
+
+        boolean setProxyScript(long nativeAwPacProcessor, @JniType("std::string") String script);
+
+        @JniType("std::optional<std::string>")
+        @Nullable String makeProxyRequest(
+                long nativeAwPacProcessor, @JniType("std::string") String url);
+
+        void destroyNative(long nativeAwPacProcessor);
+
         void setNetworkAndLinkAddresses(
-                long nativeAwPacProcessor, long networkHandle, String[] adresses);
+                long nativeAwPacProcessor,
+                long networkHandle,
+                @JniType("std::vector<std::string>") List<String> addresses);
     }
 }

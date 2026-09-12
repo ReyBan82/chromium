@@ -6,7 +6,6 @@
 
 #include <utility>
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/task/sequenced_task_runner.h"
 #include "components/performance_manager/performance_manager_impl.h"
@@ -44,7 +43,7 @@ SiteDataCacheFactory* SiteDataCacheFactory::GetInstance() {
 }
 
 SiteDataCache* SiteDataCacheFactory::GetDataCacheForBrowserContext(
-    const std::string& browser_context_id) const {
+    const base::UnguessableToken& browser_context_id) const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto it = data_cache_map_.find(browser_context_id);
   if (it != data_cache_map_.end())
@@ -53,7 +52,7 @@ SiteDataCache* SiteDataCacheFactory::GetDataCacheForBrowserContext(
 }
 
 SiteDataCacheInspector* SiteDataCacheFactory::GetInspectorForBrowserContext(
-    const std::string& browser_context_id) const {
+    const base::UnguessableToken& browser_context_id) const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto it = data_cache_inspector_map_.find(browser_context_id);
   if (it != data_cache_inspector_map_.end())
@@ -63,7 +62,7 @@ SiteDataCacheInspector* SiteDataCacheFactory::GetInspectorForBrowserContext(
 
 void SiteDataCacheFactory::SetDataCacheInspectorForBrowserContext(
     SiteDataCacheInspector* inspector,
-    const std::string& browser_context_id) {
+    const base::UnguessableToken& browser_context_id) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   if (inspector) {
     DCHECK_EQ(nullptr, GetInspectorForBrowserContext(browser_context_id));
@@ -76,7 +75,7 @@ void SiteDataCacheFactory::SetDataCacheInspectorForBrowserContext(
 }
 
 bool SiteDataCacheFactory::IsDataCacheRecordingForTesting(
-    const std::string& browser_context_id) {
+    const base::UnguessableToken& browser_context_id) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto it = data_cache_map_.find(browser_context_id);
   CHECK(it != data_cache_map_.end());
@@ -84,7 +83,7 @@ bool SiteDataCacheFactory::IsDataCacheRecordingForTesting(
 }
 
 void SiteDataCacheFactory::SetCacheForTesting(
-    const std::string& browser_context_id,
+    const base::UnguessableToken& browser_context_id,
     std::unique_ptr<SiteDataCache> cache) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
@@ -93,26 +92,26 @@ void SiteDataCacheFactory::SetCacheForTesting(
 }
 
 void SiteDataCacheFactory::SetCacheInspectorForTesting(
-    const std::string& browser_context_id,
+    const base::UnguessableToken& browser_context_id,
     SiteDataCacheInspector* inspector) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!base::Contains(data_cache_inspector_map_, browser_context_id));
+  DCHECK(!data_cache_inspector_map_.contains(browser_context_id));
   data_cache_inspector_map_.emplace(browser_context_id, inspector);
 }
 
 void SiteDataCacheFactory::OnBrowserContextCreated(
-    const std::string& browser_context_id,
+    const base::UnguessableToken& browser_context_id,
     const base::FilePath& context_path,
-    absl::optional<std::string> parent_context_id) {
+    std::optional<base::UnguessableToken> parent_context_id) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  DCHECK(!base::Contains(data_cache_map_, browser_context_id));
+  DCHECK(!data_cache_map_.contains(browser_context_id));
 
   if (parent_context_id) {
     SiteDataCacheInspector* parent_debug =
         GetInspectorForBrowserContext(parent_context_id.value());
     DCHECK(parent_debug);
-    DCHECK(base::Contains(data_cache_map_, parent_context_id.value()));
+    DCHECK(data_cache_map_.contains(parent_context_id.value()));
     SiteDataCache* data_cache_for_readers =
         data_cache_map_[parent_context_id.value()].get();
     DCHECK(data_cache_for_readers);
@@ -128,9 +127,9 @@ void SiteDataCacheFactory::OnBrowserContextCreated(
 }
 
 void SiteDataCacheFactory::OnBrowserContextDestroyed(
-    const std::string& browser_context_id) {
+    const base::UnguessableToken& browser_context_id) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(base::Contains(data_cache_map_, browser_context_id));
+  DCHECK(data_cache_map_.contains(browser_context_id));
   data_cache_map_.erase(browser_context_id);
 }
 

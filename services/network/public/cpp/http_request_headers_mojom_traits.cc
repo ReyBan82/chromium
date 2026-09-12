@@ -4,6 +4,7 @@
 
 #include "services/network/public/cpp/http_request_headers_mojom_traits.h"
 
+#include "mojo/public/cpp/base/byte_string_mojom_traits.h"
 #include "net/http/http_util.h"
 #include "services/network/public/cpp/crash_keys.h"
 
@@ -45,6 +46,17 @@ bool StructTraits<network::mojom::HttpRequestHeadersDataView,
     headers->SetHeader(pair.key, pair.value);
   }
   return true;
+}
+
+// static
+bool StructTraits<network::mojom::HttpRequestHeadersUpdateParamsDataView,
+                  network::HttpRequestHeadersUpdateParams>::
+    Read(network::mojom::HttpRequestHeadersUpdateParamsDataView data,
+         network::HttpRequestHeadersUpdateParams* headers_update_params) {
+  return data.ReadRemovedHeaders(&headers_update_params->removed_headers) &&
+         data.ReadModifiedHeaders(&headers_update_params->modified_headers) &&
+         data.ReadModifiedCorsExemptHeaders(
+             &headers_update_params->modified_cors_exempt_headers);
 }
 
 }  // namespace mojo

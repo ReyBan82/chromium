@@ -6,10 +6,11 @@
 #define UI_VIEWS_CONTROLS_NATIVE_NATIVE_VIEW_HOST_AURA_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "ui/aura/window_observer.h"
-#include "ui/compositor/layer_owner.h"
 #include "ui/gfx/geometry/rounded_corners_f.h"
 #include "ui/gfx/geometry/transform.h"
 #include "ui/views/controls/native/native_view_host_wrapper.h"
@@ -17,7 +18,7 @@
 
 namespace aura {
 class Window;
-}
+}  // namespace aura
 
 namespace views {
 
@@ -39,13 +40,17 @@ class NativeViewHostAura : public NativeViewHostWrapper,
   void NativeViewDetaching(bool destroyed) override;
   void AddedToWidget() override;
   void RemovedFromWidget() override;
-  bool SetCornerRadii(const gfx::RoundedCornersF& corner_radii) override;
-  bool SetCustomMask(std::unique_ptr<ui::LayerOwner> mask) override;
+  bool SetNativeViewCornerRadii(
+      const gfx::RoundedCornersF& corner_radii) override;
+  gfx::RoundedCornersF GetNativeViewCornerRadii() const override;
+  gfx::Rect GetNativeViewClipRect() const override;
+
   void SetHitTestTopInset(int top_inset) override;
   int GetHitTestTopInset() const override;
   void InstallClip(int x, int y, int w, int h) override;
   bool HasInstalledClip() override;
   void UninstallClip() override;
+  bool SetNativeViewClipRect(const gfx::Rect& clip_rect) override;
   void ShowWidget(int x, int y, int w, int h, int native_w, int native_h)
       override;
   void HideWidget() override;
@@ -56,54 +61,31 @@ class NativeViewHostAura : public NativeViewHostWrapper,
   void SetVisible(bool visible) override;
   void SetParentAccessible(gfx::NativeViewAccessible) override;
   gfx::NativeViewAccessible GetParentAccessible() override;
+  ui::Layer* GetUILayer() override;
 
  private:
   friend class NativeViewHostAuraTest;
-  class ClippingWindowDelegate;
 
   // Overridden from aura::WindowObserver:
   void OnWindowDestroying(aura::Window* window) override;
   void OnWindowDestroyed(aura::Window* window) override;
-  void OnWindowBoundsChanged(aura::Window* window,
-                             const gfx::Rect& old_bounds,
-                             const gfx::Rect& new_bounds,
-                             ui::PropertyChangeReason reason) override;
-
-  void CreateClippingWindow();
-
-  // Reparents the native view with the clipping window existing between it and
-  // its old parent, so that the fast resize path works.
-  void AddClippingWindow();
-
-  // If the native view has been reparented via AddClippingWindow, this call
-  // undoes it.
-  void RemoveClippingWindow();
 
   // Sets or updates the |corner_radii_| on the native view's layer.
   void ApplyRoundedCorners();
 
-  // Sets or updates the mask layer on the native view's layer.
-  void InstallMask();
+  // Updates the clip on the native view's layer.
+  void UpdateLayerClip();
 
-  // Unsets the mask layer on the native view's layer.
-  void UninstallMask();
-
-  // Updates the top insets of |clipping_window_|.
-  void UpdateInsets();
+  // Returns the actual clip rect to be applied, combining layout clip and top
+  // inset.
+  gfx::Rect GetActualClipRect() const;
 
   // Our associated NativeViewHost.
   raw_ptr<NativeViewHost> host_;
 
-  std::unique_ptr<ClippingWindowDelegate> clipping_window_delegate_;
-
-  // Window that exists between the native view and the parent that allows for
-  // clipping to occur. This is positioned in the coordinate space of
-  // host_->GetWidget().
-  std::unique_ptr<aura::Window> clipping_window_;
-  std::unique_ptr<gfx::Rect> clip_rect_;
-
-  // This mask exists for the sake of SetCornerRadius().
-  std::unique_ptr<ui::LayerOwner> mask_;
+  // If set, this is applied to the the layer to clip the content of attached
+  // native view.
+  std::optional<gfx::Rect> clip_rect_;
 
   // Holds the corner_radii to be applied.
   gfx::RoundedCornersF corner_radii_;
@@ -118,8 +100,20 @@ class NativeViewHostAura : public NativeViewHostWrapper,
   // True if a transform different from the original was set.
   bool original_transform_changed_ = false;
 
+  // The external clip rect of the native view.
+  std::optional<gfx::Rect> external_clip_rect_;
+
   // The top insets to exclude the underlying native view from the target.
   int top_inset_ = 0;
+
+  // If attached, this contains the value of owned_by_parent of the
+  // native view.
+  std::optional<bool> owned_by_parent_;
+
+  // Observation of the attached NativeView. Points at host_->native_view()
+  // between AttachNativeView() and NativeViewDetaching()/window destruction.
+  base::ScopedObservation<aura::Window, aura::WindowObserver>
+      native_view_observation_{this};
 };
 
 }  // namespace views

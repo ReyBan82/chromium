@@ -4,19 +4,20 @@
 
 #include "third_party/blink/renderer/core/css/css_computed_style_declaration.h"
 
+#include "third_party/blink/renderer/core/css/css_property_names.h"
+#include "third_party/blink/renderer/core/css/properties/css_property.h"
 #include "third_party/blink/renderer/core/dom/dom_token_list.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
-#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 
 namespace blink {
 
 class CSSComputedStyleDeclarationTest : public PageTestBase {};
 
 TEST_F(CSSComputedStyleDeclarationTest, CleanAncestorsNoRecalc) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <div>
       <div id=dirty></div>
     </div>
@@ -27,10 +28,11 @@ TEST_F(CSSComputedStyleDeclarationTest, CleanAncestorsNoRecalc) {
   UpdateAllLifecyclePhasesForTest();
   EXPECT_FALSE(GetDocument().NeedsLayoutTreeUpdate());
 
-  GetDocument().getElementById("dirty")->setAttribute("style", "color:pink");
+  GetElementById("dirty")->setAttribute(html_names::kStyleAttr,
+                                        AtomicString("color:pink"));
   EXPECT_TRUE(GetDocument().NeedsLayoutTreeUpdate());
 
-  Element* target = GetDocument().getElementById("target");
+  Element* target = GetDocument().getElementById(AtomicString("target"));
   auto* computed = MakeGarbageCollected<CSSComputedStyleDeclaration>(target);
 
   EXPECT_EQ("rgb(0, 128, 0)",
@@ -39,28 +41,29 @@ TEST_F(CSSComputedStyleDeclarationTest, CleanAncestorsNoRecalc) {
 }
 
 TEST_F(CSSComputedStyleDeclarationTest, CleanShadowAncestorsNoRecalc) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <div>
       <div id=dirty></div>
     </div>
     <div id=host></div>
   )HTML");
 
-  Element* host = GetDocument().getElementById("host");
+  Element* host = GetDocument().getElementById(AtomicString("host"));
 
   ShadowRoot& shadow_root =
-      host->AttachShadowRootInternal(ShadowRootType::kOpen);
-  shadow_root.setInnerHTML(R"HTML(
+      host->AttachShadowRootForTesting(ShadowRootMode::kOpen);
+  shadow_root.SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <div id=target style='color:green'></div>
   )HTML");
 
   UpdateAllLifecyclePhasesForTest();
   EXPECT_FALSE(GetDocument().NeedsLayoutTreeUpdate());
 
-  GetDocument().getElementById("dirty")->setAttribute("style", "color:pink");
+  GetElementById("dirty")->setAttribute(html_names::kStyleAttr,
+                                        AtomicString("color:pink"));
   EXPECT_TRUE(GetDocument().NeedsLayoutTreeUpdate());
 
-  Element* target = shadow_root.getElementById("target");
+  Element* target = shadow_root.getElementById(AtomicString("target"));
   auto* computed = MakeGarbageCollected<CSSComputedStyleDeclaration>(target);
 
   EXPECT_EQ("rgb(0, 128, 0)",
@@ -69,7 +72,7 @@ TEST_F(CSSComputedStyleDeclarationTest, CleanShadowAncestorsNoRecalc) {
 }
 
 TEST_F(CSSComputedStyleDeclarationTest, AdjacentInvalidation) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <style>
       #b { color: red; }
       .test + #b { color: green; }
@@ -85,9 +88,9 @@ TEST_F(CSSComputedStyleDeclarationTest, AdjacentInvalidation) {
 
   EXPECT_FALSE(GetDocument().NeedsLayoutTreeUpdate());
 
-  Element* a = GetDocument().getElementById("a");
-  Element* b = GetDocument().getElementById("b");
-  Element* c = GetDocument().getElementById("c");
+  Element* a = GetDocument().getElementById(AtomicString("a"));
+  Element* b = GetDocument().getElementById(AtomicString("b"));
+  Element* c = GetDocument().getElementById(AtomicString("c"));
 
   EXPECT_FALSE(GetDocument().NeedsLayoutTreeUpdate());
   EXPECT_FALSE(GetDocument().NeedsLayoutTreeUpdateForNode(*a));
@@ -99,7 +102,7 @@ TEST_F(CSSComputedStyleDeclarationTest, AdjacentInvalidation) {
   EXPECT_EQ("rgb(255, 0, 0)",
             computed->GetPropertyValue(CSSPropertyID::kColor));
 
-  a->classList().Add("test");
+  a->classList().Add(AtomicString("test"));
 
   EXPECT_TRUE(GetDocument().NeedsLayoutTreeUpdate());
   EXPECT_TRUE(GetDocument().NeedsLayoutTreeUpdateForNode(*a));
@@ -122,15 +125,66 @@ TEST_F(CSSComputedStyleDeclarationTest,
   // Don't crash.
 }
 
+TEST_F(CSSComputedStyleDeclarationTest,
+       TimelineShorthandWithMismatchedListLengths) {
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
+    <div id="scroll" style="scroll-timeline-name: --a, --b, --c;
+                            scroll-timeline-axis: inline, inline"></div>
+    <div id="scroll-extra-axis" style="scroll-timeline-name: --a, --b;
+                                       scroll-timeline-axis: inline, inline, inline"></div>
+    <div id="view" style="view-timeline-name: --a, --b;
+                          view-timeline-axis: inline, inline;
+                          view-timeline-inset: auto, auto, auto"></div>
+  )HTML");
+
+  auto* scroll = MakeGarbageCollected<CSSComputedStyleDeclaration>(
+      GetElementById("scroll"));
+  EXPECT_EQ("", scroll->GetPropertyValue(CSSPropertyID::kScrollTimeline));
+
+  auto* scroll_extra_axis = MakeGarbageCollected<CSSComputedStyleDeclaration>(
+      GetElementById("scroll-extra-axis"));
+  EXPECT_EQ(
+      "", scroll_extra_axis->GetPropertyValue(CSSPropertyID::kScrollTimeline));
+
+  auto* view =
+      MakeGarbageCollected<CSSComputedStyleDeclaration>(GetElementById("view"));
+  EXPECT_EQ("", view->GetPropertyValue(CSSPropertyID::kViewTimeline));
+}
+
+TEST_F(CSSComputedStyleDeclarationTest, TimelineShorthandWithInitialLonghands) {
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
+    <div id="scroll" style="scroll-timeline-name: --a, --b"></div>
+    <div id="view-axis" style="view-timeline-name: --a, --b;
+                               view-timeline-inset: 1px, 2px"></div>
+    <div id="view-inset" style="view-timeline-name: --a, --b;
+                                view-timeline-axis: inline, inline"></div>
+  )HTML");
+
+  auto* scroll = MakeGarbageCollected<CSSComputedStyleDeclaration>(
+      GetElementById("scroll"));
+  EXPECT_EQ("--a, --b",
+            scroll->GetPropertyValue(CSSPropertyID::kScrollTimeline));
+
+  auto* view_axis = MakeGarbageCollected<CSSComputedStyleDeclaration>(
+      GetElementById("view-axis"));
+  EXPECT_EQ("--a 1px, --b 2px",
+            view_axis->GetPropertyValue(CSSPropertyID::kViewTimeline));
+
+  auto* view_inset = MakeGarbageCollected<CSSComputedStyleDeclaration>(
+      GetElementById("view-inset"));
+  EXPECT_EQ("--a inline, --b inline",
+            view_inset->GetPropertyValue(CSSPropertyID::kViewTimeline));
+}
+
 // https://crbug.com/1115877
 TEST_F(CSSComputedStyleDeclarationTest, SVGBlockSizeLayoutDependent) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <svg viewBox="0 0 400 400">
       <rect width="400" height="400"></rect>
     </svg>
   )HTML");
 
-  Element* rect = GetDocument().QuerySelector("rect");
+  Element* rect = GetDocument().QuerySelector(AtomicString("rect"));
   auto* computed = MakeGarbageCollected<CSSComputedStyleDeclaration>(rect);
 
   EXPECT_EQ("400px", computed->GetPropertyValue(CSSPropertyID::kBlockSize));
@@ -143,13 +197,13 @@ TEST_F(CSSComputedStyleDeclarationTest, SVGBlockSizeLayoutDependent) {
 
 // https://crbug.com/1115877
 TEST_F(CSSComputedStyleDeclarationTest, SVGInlineSizeLayoutDependent) {
-  GetDocument().body()->setInnerHTML(R"HTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <svg viewBox="0 0 400 400">
       <rect width="400" height="400"></rect>
     </svg>
   )HTML");
 
-  Element* rect = GetDocument().QuerySelector("rect");
+  Element* rect = GetDocument().QuerySelector(AtomicString("rect"));
   auto* computed = MakeGarbageCollected<CSSComputedStyleDeclaration>(rect);
 
   EXPECT_EQ("400px", computed->GetPropertyValue(CSSPropertyID::kInlineSize));
@@ -160,14 +214,8 @@ TEST_F(CSSComputedStyleDeclarationTest, SVGInlineSizeLayoutDependent) {
   EXPECT_FALSE(rect->GetLayoutObject()->NeedsLayout());
 }
 
-TEST_F(CSSComputedStyleDeclarationTest, UseCountComputedAnimationDelayZero) {
-  // Disable CSSScrollTimeline, because kAnimationDelay is not supposed to be
-  // reachable when this feature is enabled, and we have DCHECKs which enforce
-  // this. (We expect kAlternativeAnimationDelay if CSSScrollTimeline
-  // enabled).
-  ScopedCSSScrollTimelineForTest scroll_timeline_feature(false);
-
-  GetDocument().body()->setInnerHTML(R"HTML(
+TEST_F(CSSComputedStyleDeclarationTest, UseCountDurationZero) {
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(R"HTML(
     <style>
       div {
         color: green;
@@ -178,85 +226,113 @@ TEST_F(CSSComputedStyleDeclarationTest, UseCountComputedAnimationDelayZero) {
   )HTML");
   UpdateAllLifecyclePhasesForTest();
 
-  Element* div = GetDocument().getElementById("div");
+  Element* div = GetDocument().getElementById(AtomicString("div"));
   ASSERT_TRUE(div);
   auto* style = MakeGarbageCollected<CSSComputedStyleDeclaration>(div);
 
   // There is no animation property specified at all, so getting the computed
   // value should not trigger the counter.
-  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kAnimationDelay));
+  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kAnimationDuration));
   EXPECT_FALSE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
+      WebFeature::kCSSGetComputedAnimationDurationZero));
+  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kWebkitFontSmoothing));
+  EXPECT_FALSE(GetDocument().IsUseCounted(
+      WebFeature::kCSSGetComputedWebkitFontSmoothingAnimationDurationZero));
 
-  // Set some animation (without an explicit delay).
-  div->SetInlineStyleProperty(CSSPropertyID::kAnimation, "anim linear");
+  // Set some animation with zero duration.
+  div->SetInlineStyleProperty(CSSPropertyID::kAnimation, "anim 0s linear");
   UpdateAllLifecyclePhasesForTest();
-  // It should remain uncounted until we retrieve the computed value.
-  EXPECT_FALSE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
-  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kAnimationDelay));
-  EXPECT_TRUE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
-  // Accessing kAnimation should also set the counter.
-  GetDocument().ClearUseCounterForTesting(
-      WebFeature::kCSSGetComputedAnimationDelayZero);
-  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kAnimation));
-  EXPECT_TRUE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
 
-  // Use-counter should not trigger when there's a non-zero duration.
-  GetDocument().ClearUseCounterForTesting(
-      WebFeature::kCSSGetComputedAnimationDelayZero);
-  div->SetInlineStyleProperty(CSSPropertyID::kAnimation, "anim linear 1s");
-  UpdateAllLifecyclePhasesForTest();
+  // Duration should remain uncounted until we retrieve the computed value.
   EXPECT_FALSE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
-  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kAnimationDelay));
+      WebFeature::kCSSGetComputedAnimationDurationZero));
+  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kAnimationDuration));
+  EXPECT_TRUE(GetDocument().IsUseCounted(
+      WebFeature::kCSSGetComputedAnimationDurationZero));
+
+  // Font smoothing count should remain uncounted until we retrieve the computed
+  // value.
   EXPECT_FALSE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
+      WebFeature::kCSSGetComputedWebkitFontSmoothingAnimationDurationZero));
+  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kWebkitFontSmoothing));
+  EXPECT_TRUE(GetDocument().IsUseCounted(
+      WebFeature::kCSSGetComputedWebkitFontSmoothingAnimationDurationZero));
 }
 
-TEST_F(CSSComputedStyleDeclarationTest,
-       UseCountComputedAlternativeAnimationDelayZero) {
-  ScopedCSSScrollTimelineForTest scroll_timeline_feature(true);
+// Verifies that every non-internal longhand CSS property is included in the
+// kCSSComputableProperties array (and thus enumerable via getComputedStyle),
+// unless it is on a small, intentional exceptions list. This prevents
+// regressions where new properties are accidentally made non-enumerable by
+// setting computable:false in css_properties.json5.
+//
+// If this test fails because you added a new property:
+//   - If the property should be enumerable in getComputedStyle (the common
+//     case), remove any `computable: false` from css_properties.json5.
+//   - If the property is intentionally non-enumerable, add it to the
+//     kIntentionallyNotComputable set below with a comment explaining why.
+TEST_F(CSSComputedStyleDeclarationTest, AllLonghandsAreComputable) {
+  // Properties that are intentionally excluded from getComputedStyle iteration.
+  // Each entry needs a clear reason for not being enumerable.
+  static constexpr CSSPropertyID kIntentionallyNotComputable[] = {
+      // 'all' is a shorthand-like longhand; it resets all properties but
+      // has no meaningful computed value of its own.
+      CSSPropertyID::kAll,
+      // background-position-x/y are sub-longhands exposed only through
+      // the background-position shorthand in computed style.
+      CSSPropertyID::kBackgroundPositionX,
+      CSSPropertyID::kBackgroundPositionY,
+      // @page descriptor properties, not meaningful outside @page context.
+      CSSPropertyID::kPage,
+      CSSPropertyID::kPageMarginSafety,
+      CSSPropertyID::kPageOrientation,
+      CSSPropertyID::kSize,
+      // Legacy prefixed sub-longhands superseded by the unprefixed shorthand.
+      CSSPropertyID::kWebkitPerspectiveOriginX,
+      CSSPropertyID::kWebkitPerspectiveOriginY,
+      CSSPropertyID::kWebkitTransformOriginX,
+      CSSPropertyID::kWebkitTransformOriginY,
+      CSSPropertyID::kWebkitTransformOriginZ,
+      // Origin trial test property, never web-exposed.
+      CSSPropertyID::kOriginTrialTestProperty,
+  };
 
-  GetDocument().body()->setInnerHTML(R"HTML(
-    <style>
-      div {
-        color: green;
-        /* No animation here. */
-      }
-    </style>
-    <div id=div></div>
-  )HTML");
-  UpdateAllLifecyclePhasesForTest();
+  HashSet<CSSPropertyID> computable_set;
+  for (CSSPropertyID id : kCSSComputableProperties) {
+    computable_set.insert(id);
+  }
 
-  Element* div = GetDocument().getElementById("div");
-  ASSERT_TRUE(div);
-  auto* style = MakeGarbageCollected<CSSComputedStyleDeclaration>(div);
+  HashSet<CSSPropertyID> exceptions_set;
+  for (CSSPropertyID id : kIntentionallyNotComputable) {
+    exceptions_set.insert(id);
+  }
 
-  // There is no animation property specified at all, so getting the computed
-  // value should not trigger the counter.
-  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kAlternativeAnimation));
-  EXPECT_TRUE(
-      style->GetPropertyCSSValue(CSSPropertyID::kAlternativeAnimationDelay));
-  EXPECT_FALSE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
+  for (CSSPropertyID id = kFirstCSSProperty; id <= kLastCSSProperty;
+       id = static_cast<CSSPropertyID>(static_cast<int>(id) + 1)) {
+    const CSSProperty& property = CSSProperty::Get(id);
 
-  // Set some animation (without an explicit delay). We should not count for
-  // -alternative-animation[-delay], because those properties are only in
-  // use when 'CSSScrollTimeline' is enabled (which is the feature that would
-  // ship the change that this use-counter is for in the first place).
-  div->SetInlineStyleProperty(CSSPropertyID::kAlternativeAnimation,
-                              "anim linear");
-  UpdateAllLifecyclePhasesForTest();
-  EXPECT_FALSE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
-  EXPECT_TRUE(style->GetPropertyCSSValue(CSSPropertyID::kAlternativeAnimation));
-  EXPECT_TRUE(
-      style->GetPropertyCSSValue(CSSPropertyID::kAlternativeAnimationDelay));
-  EXPECT_FALSE(GetDocument().IsUseCounted(
-      WebFeature::kCSSGetComputedAnimationDelayZero));
+    // Only check non-internal longhands that are actual properties.
+    if (!property.IsLonghand() || property.IsInternal() ||
+        !property.IsProperty()) {
+      continue;
+    }
+
+    bool is_computable = computable_set.Contains(id);
+    bool is_exception = exceptions_set.Contains(id);
+
+    EXPECT_TRUE(is_computable || is_exception)
+        << "Property '" << property.GetPropertyName()
+        << "' is a non-internal longhand but is not in "
+           "kCSSComputableProperties and not on the exceptions list. "
+           "If this property should be enumerable in getComputedStyle "
+           "(the common case), remove `computable: false` from "
+           "css_properties.json5. Otherwise, add it to "
+           "kIntentionallyNotComputable with a comment explaining why.";
+
+    EXPECT_FALSE(is_computable && is_exception)
+        << "Property '" << property.GetPropertyName()
+        << "' is in kCSSComputableProperties but also on the exceptions "
+           "list. Remove it from kIntentionallyNotComputable.";
+  }
 }
 
 }  // namespace blink

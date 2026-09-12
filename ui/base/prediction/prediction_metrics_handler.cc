@@ -1,43 +1,55 @@
-// Copyright 2019 The Chromium Authors. All rights reserved.
+// Copyright 2019 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include "ui/base/prediction/prediction_metrics_handler.h"
 
+#include <string_view>
 #include <utility>
 
-#include "base/cpu_reduction_experiment.h"
+#include "base/metrics/dummy_histogram.h"
 #include "base/metrics/histogram.h"
 #include "base/strings/strcat.h"
 
 namespace ui {
 namespace {
-base::HistogramBase* GetHistogram(base::StringPiece name,
-                                  base::StringPiece suffix) {
-  return base::Histogram::FactoryGet(
+base::HistogramBase& GetHistogram(std::string_view name,
+                                  std::string_view suffix,
+                                  bool should_report = true) {
+  if (!should_report) {
+    return *base::DummyHistogram::GetInstance();
+  }
+  return *base::Histogram::FactoryGet(
       base::StrCat({name, ".", suffix}), 1, 1000, 50,
       base::HistogramBase::kUmaTargetedHistogramFlag);
 }
 }  // namespace
 
-PredictionMetricsHandler::PredictionMetricsHandler(std::string histogram_name)
+PredictionMetricsHandler::PredictionMetricsHandler(std::string histogram_name,
+                                                   bool report_score_metrics)
     : histogram_name_(std::move(histogram_name)),
-      over_prediction_histogram_(
-          *GetHistogram(histogram_name_, "OverPrediction")),
-      under_prediction_histogram_(
-          *GetHistogram(histogram_name_, "UnderPrediction")),
-      prediction_score_histogram_(
-          *GetHistogram(histogram_name_, "PredictionScore")),
-      frame_over_prediction_histogram_(
-          *GetHistogram(histogram_name_, "FrameOverPrediction")),
-      frame_under_prediction_histogram_(
-          *GetHistogram(histogram_name_, "FrameUnderPrediction")),
-      frame_prediction_score_histogram_(
-          *GetHistogram(histogram_name_, "FramePredictionScore")),
+      report_score_metrics_(report_score_metrics),
+      over_prediction_histogram_(GetHistogram(histogram_name_,
+                                              "OverPrediction",
+                                              report_score_metrics)),
+      under_prediction_histogram_(GetHistogram(histogram_name_,
+                                               "UnderPrediction",
+                                               report_score_metrics)),
+      prediction_score_histogram_(GetHistogram(histogram_name_,
+                                               "PredictionScore",
+                                               report_score_metrics)),
+      frame_over_prediction_histogram_(GetHistogram(histogram_name_,
+                                                    "FrameOverPrediction",
+                                                    report_score_metrics)),
+      frame_under_prediction_histogram_(GetHistogram(histogram_name_,
+                                                     "FrameUnderPrediction",
+                                                     report_score_metrics)),
+      frame_prediction_score_histogram_(GetHistogram(histogram_name_,
+                                                     "FramePredictionScore",
+                                                     report_score_metrics)),
       prediction_jitter_histogram_(
-          *GetHistogram(histogram_name_, "PredictionJitter")),
-      visual_jitter_histogram_(*GetHistogram(histogram_name_, "VisualJitter")) {
-}
+          GetHistogram(histogram_name_, "PredictionJitter")),
+      visual_jitter_histogram_(GetHistogram(histogram_name_, "VisualJitter")) {}
 
 PredictionMetricsHandler::~PredictionMetricsHandler() = default;
 
@@ -93,7 +105,14 @@ void PredictionMetricsHandler::AddPredictedEvent(
     const base::TimeTicks& time_stamp,
     const base::TimeTicks& frame_time,
     bool scrolling) {
-  DCHECK(!events_queue_.empty());
+  // A prediction can be generated synthetically before any real events have
+  // been processed. In this case, the metrics handler has no ground truth to
+  // compare against, so we must return early to avoid a crash from accessing an
+  // empty queue.
+  if (events_queue_.empty()) {
+    return;
+  }
+
   // If the predicted event is prior to the first real event, ignore it as we
   // don't have enough data for interpolation.
   if (time_stamp < events_queue_.front().time_stamp)
@@ -149,7 +168,7 @@ void PredictionMetricsHandler::EvaluatePrediction() {
 void PredictionMetricsHandler::Reset() {
   events_queue_.clear();
   predicted_events_queue_.clear();
-  last_predicted_ = absl::nullopt;
+  last_predicted_ = std::nullopt;
 }
 
 int PredictionMetricsHandler::GetInterpolatedEventForPredictedEvent(
@@ -192,21 +211,23 @@ void PredictionMetricsHandler::ComputeMetrics() {
   for (int i = 0; i < first_needed_event - 1; i++)
     events_queue_.pop_front();
 
-  double score = ComputeOverUnderPredictionMetric();
-  if (score >= 0) {
-    over_prediction_histogram_->Add(score);
-  } else {
-    under_prediction_histogram_->Add(-score);
-  }
-  prediction_score_histogram_->Add(std::abs(score));
+  if (report_score_metrics_) {
+    double score = ComputeOverUnderPredictionMetric();
+    if (score >= 0) {
+      over_prediction_histogram_->Add(score);
+    } else {
+      under_prediction_histogram_->Add(-score);
+    }
+    prediction_score_histogram_->Add(std::abs(score));
 
-  double frame_score = ComputeFrameOverUnderPredictionMetric();
-  if (frame_score >= 0) {
-    frame_over_prediction_histogram_->Add(frame_score);
-  } else {
-    frame_under_prediction_histogram_->Add(-frame_score);
+    double frame_score = ComputeFrameOverUnderPredictionMetric();
+    if (frame_score >= 0) {
+      frame_over_prediction_histogram_->Add(frame_score);
+    } else {
+      frame_under_prediction_histogram_->Add(-frame_score);
+    }
+    frame_prediction_score_histogram_->Add(std::abs(frame_score));
   }
-  frame_prediction_score_histogram_->Add(std::abs(frame_score));
 
   // Need |last_predicted_| to compute Jitter metrics.
   if (!last_predicted_.has_value())

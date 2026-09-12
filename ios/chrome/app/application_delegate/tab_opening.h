@@ -10,7 +10,6 @@
 #include "ios/chrome/app/application_mode.h"
 #include "ui/base/page_transition_types.h"
 
-@class AppState;
 class Browser;
 class GURL;
 @protocol StartupInformation;
@@ -18,7 +17,7 @@ struct UrlLoadParams;
 @class URLOpenerParams;
 
 // Protocol for object that can open new tabs during application launch.
-@protocol TabOpening<NSObject>
+@protocol TabOpening <NSObject>
 
 // 1. Dismisses any modal view, excluding the omnibox if `dismissOmnibox` is NO,
 // 2. (only if `targetMode` is UNDETERMINED) Resolves the value of `targetMode`,
@@ -34,8 +33,7 @@ struct UrlLoadParams;
 // After Tab is opened the virtual URL is set to the pending navigation item.
 - (void)dismissModalsAndMaybeOpenSelectedTabInMode:
             (ApplicationModeForTabOpening)targetMode
-                                 withUrlLoadParams:
-                                     (const UrlLoadParams&)urlLoadParams
+                                 withUrlLoadParams:(UrlLoadParams)urlLoadParams
                                     dismissOmnibox:(BOOL)dismissOmnibox
                                         completion:(ProceduralBlock)completion;
 
@@ -49,8 +47,7 @@ struct UrlLoadParams;
 
 // Creates a new tab if the launch options are not null.
 - (void)openTabFromLaunchWithParams:(URLOpenerParams*)params
-                 startupInformation:(id<StartupInformation>)startupInformation
-                           appState:(AppState*)appState;
+                 startupInformation:(id<StartupInformation>)startupInformation;
 
 // Returns whether an NTP tab should be opened when the specified browser is
 // made current.
@@ -63,8 +60,11 @@ struct UrlLoadParams;
 - (ProceduralBlock)completionBlockForTriggeringAction:
     (TabOpeningPostOpeningAction)action;
 
-// Whether the `URL` is already opened, in regular mode.
-- (BOOL)URLIsOpenedInRegularMode:(const GURL&)URL;
+// Opens a new tab or reuses an existing one in `targetMode` with
+// `urlLoadParams`. `tabOpenedCompletion` is called when the tab is opened.
+- (void)openOrReuseTabInMode:(ApplicationMode)targetMode
+           withUrlLoadParams:(UrlLoadParams)urlLoadParams
+         tabOpenedCompletion:(ProceduralBlock)tabOpenedCompletion;
 
 @end
 

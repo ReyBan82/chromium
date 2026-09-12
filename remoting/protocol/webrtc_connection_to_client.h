@@ -14,67 +14,80 @@
 #include "base/memory/weak_ptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread_checker.h"
+#include "remoting/base/session_options.h"
 #include "remoting/protocol/channel_dispatcher_base.h"
 #include "remoting/protocol/connection_to_client.h"
 #include "remoting/protocol/host_video_stats_dispatcher.h"
 #include "remoting/protocol/session.h"
 #include "remoting/protocol/webrtc_transport.h"
+#include "third_party/webrtc/api/scoped_refptr.h"
+
+namespace remoting {
+class FifoBufferWriter;
+}  // namespace remoting
 
 namespace remoting::protocol {
+struct AudioSampleInfo;
+class WebrtcAudioFifoSinkAdapter;
 
 class WebrtcVideoEncoderFactory;
+class IceConfigFetcher;
 class HostControlDispatcher;
 class HostEventDispatcher;
 
 class WebrtcConnectionToClient : public ConnectionToClient,
-                                 public Session::EventHandler,
                                  public WebrtcTransport::EventHandler,
                                  public ChannelDispatcherBase::EventHandler {
  public:
-  WebrtcConnectionToClient(
-      std::unique_ptr<Session> session,
-      scoped_refptr<protocol::TransportContext> transport_context,
-      scoped_refptr<base::SingleThreadTaskRunner> audio_task_runner);
+  explicit WebrtcConnectionToClient(
+      std::unique_ptr<protocol::IceConfigFetcher> ice_config_fetcher);
 
   WebrtcConnectionToClient(const WebrtcConnectionToClient&) = delete;
   WebrtcConnectionToClient& operator=(const WebrtcConnectionToClient&) = delete;
 
   ~WebrtcConnectionToClient() override;
 
+  void Start() override;
+
   // ConnectionToClient interface.
   void SetEventHandler(
       ConnectionToClient::EventHandler* event_handler) override;
-  Session* session() override;
-  void Disconnect(ErrorCode error) override;
+  Transport* transport() override;
+  void Disconnect(ErrorCode error,
+                  std::string_view error_details,
+                  const SourceLocation& error_location) override;
   std::unique_ptr<VideoStream> StartVideoStream(
-      const std::string& stream_name,
+      webrtc::ScreenId screen_id,
       std::unique_ptr<DesktopCapturer> desktop_capturer) override;
   std::unique_ptr<AudioStream> StartAudioStream(
       std::unique_ptr<AudioSource> audio_source) override;
+  void SetAudioWriter(std::unique_ptr<FifoBufferWriter> writer) override;
   ClientStub* client_stub() override;
   void set_clipboard_stub(ClipboardStub* clipboard_stub) override;
   void set_host_stub(HostStub* host_stub) override;
   void set_input_stub(InputStub* input_stub) override;
   void ApplySessionOptions(const SessionOptions& options) override;
+  void ApplyNetworkSettings(const NetworkSettings& settings) override;
   PeerConnectionControls* peer_connection_controls() override;
   WebrtcEventLogData* rtc_event_log() override;
-
-  // Session::EventHandler interface.
-  void OnSessionStateChange(Session::State state) override;
+  base::WeakPtr<ConnectionToClient> GetWeakPtr() override;
 
   // WebrtcTransport::EventHandler interface
   void OnWebrtcTransportConnecting() override;
   void OnWebrtcTransportConnected() override;
-  void OnWebrtcTransportError(ErrorCode error) override;
+  void OnWebrtcTransportError(ErrorCode error,
+                              std::string_view error_details,
+                              const base::Location& error_location) override;
   void OnWebrtcTransportProtocolChanged() override;
   void OnWebrtcTransportIncomingDataChannel(
       const std::string& name,
       std::unique_ptr<MessagePipe> pipe) override;
   void OnWebrtcTransportMediaStreamAdded(
-      rtc::scoped_refptr<webrtc::MediaStreamInterface> stream) override;
+      webrtc::scoped_refptr<webrtc::MediaStreamInterface> stream) override;
   void OnWebrtcTransportMediaStreamRemoved(
-      rtc::scoped_refptr<webrtc::MediaStreamInterface> stream) override;
+      webrtc::scoped_refptr<webrtc::MediaStreamInterface> stream) override;
   void OnWebrtcTransportRouteChanged(const TransportRoute& route) override;
+  bool FormatHandshakeCompleteForTesting() const;
 
   // ChannelDispatcherBase::EventHandler interface.
   void OnChannelInitialized(ChannelDispatcherBase* channel_dispatcher) override;
@@ -86,20 +99,33 @@ class WebrtcConnectionToClient : public ConnectionToClient,
   // Event handler for handling events sent from this object.
   raw_ptr<ConnectionToClient::EventHandler> event_handler_ = nullptr;
 
+  // Declared before transport_ so it outlives WebRTC tracks and streams.
+  scoped_refptr<base::SingleThreadTaskRunner> audio_task_runner_;
   std::unique_ptr<WebrtcTransport> transport_;
 
-  std::unique_ptr<Session> session_;
-
-  raw_ptr<WebrtcVideoEncoderFactory> video_encoder_factory_;
+  raw_ptr<WebrtcVideoEncoderFactory, AcrossTasksDanglingUntriaged>
+      video_encoder_factory_;
 
   HostVideoStatsDispatcher video_stats_dispatcher_;
-
-  scoped_refptr<base::SingleThreadTaskRunner> audio_task_runner_;
 
   SessionOptions session_options_;
 
   std::unique_ptr<HostControlDispatcher> control_dispatcher_;
   std::unique_ptr<HostEventDispatcher> event_dispatcher_;
+
+  // The media stream received from the client. This is cached because it may
+  // arrive before the audio stub is set (or vice versa).
+  webrtc::scoped_refptr<webrtc::MediaStreamInterface> incoming_audio_stream_;
+
+  std::unique_ptr<WebrtcAudioFifoSinkAdapter> audio_fifo_sink_adapter_;
+
+  void OnIncomingAudioFormatChanged(
+      const AudioSampleInfo& info,
+      base::OnceCallback<void(bool)> acknowledgment_callback);
+
+  void BindAudioFifoSinkAdapter();
+
+  bool closed_ = false;
 
   THREAD_CHECKER(thread_checker_);
 

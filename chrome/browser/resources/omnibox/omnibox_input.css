@@ -14,11 +14,13 @@
   --text-active-color: #fff;
   --text-hover-color: #eee;
   --text-inactive-color: #f5f5f5;
+
+  font-size: .75rem;
 }
 
 /* layout */
 
-.top {
+#top {
   background-color: white;
   border: 1px solid var(--border-color);
   display: flex;
@@ -38,10 +40,6 @@ input,
 select {
   font-family: inherit;
   font-size: inherit;
-}
-
-:host {
-  font-size: .75rem;
 }
 
 .row {
@@ -225,7 +223,7 @@ input[type=checkbox] {
 }
 
 .reset-icon {
-  background-image: url(chrome://resources/images/icon_refresh.svg);
+  background-image: url(chrome://resources/images/icon_refresh_old.svg);
 }
 
 .copy-icon {
@@ -234,18 +232,24 @@ input[type=checkbox] {
 
 /* drag */
 
-.drag-container * {
-  pointer-events: none;
-}
-
 .drag-container input[type=file] {
   display: none;
 }
 
-.drag-container.drag-hover {
+.drag-container.drag-silence *  {
+  pointer-events: none;
+}
+
+.drag-container.drag-background {
   background: lightblue;
 }
 
+/* misc */
+
 .accesskey {
   text-decoration: underline;
+}
+
+:host-context([webui-rounded-icons]) .reset-icon {
+  background-image: url(chrome://resources/images/icon_refresh.svg);
 }

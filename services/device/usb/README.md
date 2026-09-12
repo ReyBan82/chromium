@@ -8,7 +8,7 @@ Clients should use the [public Mojo interface](../public/mojom).
 
 ## USB ID Repository
 
-`/third_party/usb_ids/usb.ids` is imported regularly to provide human-readable
+`/third_party/usb_ids/src/usb.ids` is imported regularly to provide human-readable
 descriptions of USB devices.
 
 
@@ -20,8 +20,8 @@ Work is ongoing to implement each platform directly, without using `libusb`.
 
 *   `UsbServiceAndroid` done.
 *   `UsbServiceLinux` done.
-*   macOS not started.
-*   `UsbServiceWin` in progress. Enable via `chrome://flags/#new-usb-backend`
+*   `UsbServiceMac` in progress.
+*   `UsbServiceWin` done.
 
 
 ## Testing

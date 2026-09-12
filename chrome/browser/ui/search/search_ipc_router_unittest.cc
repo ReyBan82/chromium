@@ -13,7 +13,6 @@
 
 #include "base/command_line.h"
 #include "base/functional/bind.h"
-#include "base/memory/ptr_util.h"
 #include "base/metrics/field_trial.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/mock_callback.h"
@@ -23,12 +22,11 @@
 #include "chrome/browser/search_engines/template_url_service_factory.h"
 #include "chrome/browser/ui/search/search_ipc_router_policy_impl.h"
 #include "chrome/browser/ui/search/search_tab_helper.h"
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/common/search/instant_types.h"
 #include "chrome/common/search/mock_embedded_search_client.h"
 #include "chrome/common/url_constants.h"
-#include "chrome/test/base/browser_with_test_window_test.h"
+#include "chrome/test/base/chrome_render_view_host_test_harness.h"
 #include "chrome/test/base/search_test_utils.h"
 #include "components/favicon_base/favicon_types.h"
 #include "components/omnibox/common/omnibox_focus_state.h"
@@ -37,9 +35,7 @@
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/mock_render_process_host.h"
-#include "ipc/ipc_message.h"
-#include "ipc/ipc_message_start.h"
-#include "ipc/ipc_test_sink.h"
+#include "content/public/test/web_contents_tester.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/base/window_open_disposition.h"
@@ -54,35 +50,36 @@ namespace {
 
 class MockSearchIPCRouterDelegate : public SearchIPCRouter::Delegate {
  public:
-  virtual ~MockSearchIPCRouterDelegate() {}
+  virtual ~MockSearchIPCRouterDelegate() = default;
 
-  MOCK_METHOD1(FocusOmnibox, void(bool focus));
-  MOCK_METHOD1(OnDeleteMostVisitedItem, void(const GURL& url));
-  MOCK_METHOD1(OnUndoMostVisitedDeletion, void(const GURL& url));
-  MOCK_METHOD0(OnUndoAllMostVisitedDeletions, void());
-  MOCK_METHOD1(OnSetCustomBackgroundURL, void(const GURL& url));
+  MOCK_METHOD(void, FocusOmnibox, (bool focus));
+  MOCK_METHOD(void, OnDeleteMostVisitedItem, (const GURL& url));
+  MOCK_METHOD(void, OnUndoMostVisitedDeletion, (const GURL& url));
+  MOCK_METHOD(void, OnUndoAllMostVisitedDeletions, ());
+  MOCK_METHOD(void, OnSetCustomBackgroundURL, (const GURL& url));
 };
 
 class MockSearchIPCRouterPolicy : public SearchIPCRouter::Policy {
  public:
-  ~MockSearchIPCRouterPolicy() override {}
+  ~MockSearchIPCRouterPolicy() override = default;
 
-  MOCK_METHOD1(ShouldProcessFocusOmnibox, bool(bool));
-  MOCK_METHOD0(ShouldProcessDeleteMostVisitedItem, bool());
-  MOCK_METHOD0(ShouldProcessUndoMostVisitedDeletion, bool());
-  MOCK_METHOD0(ShouldProcessUndoAllMostVisitedDeletions, bool());
-  MOCK_METHOD1(ShouldSendSetInputInProgress, bool(bool));
-  MOCK_METHOD0(ShouldSendOmniboxFocusChanged, bool());
-  MOCK_METHOD0(ShouldSendMostVisitedInfo, bool());
-  MOCK_METHOD0(ShouldSendNtpTheme, bool());
-  MOCK_METHOD0(ShouldProcessThemeChangeMessages, bool());
+  MOCK_METHOD(bool, ShouldProcessFocusOmnibox, (bool));
+  MOCK_METHOD(bool, ShouldProcessDeleteMostVisitedItem, ());
+  MOCK_METHOD(bool, ShouldProcessUndoMostVisitedDeletion, ());
+  MOCK_METHOD(bool, ShouldProcessUndoAllMostVisitedDeletions, ());
+  MOCK_METHOD(bool, ShouldSendSetInputInProgress, (bool));
+  MOCK_METHOD(bool, ShouldSendOmniboxFocusChanged, ());
+  MOCK_METHOD(bool, ShouldSendMostVisitedInfo, ());
+  MOCK_METHOD(bool, ShouldSendNtpTheme, ());
+  MOCK_METHOD(bool, ShouldProcessThemeChangeMessages, ());
 };
 
 class MockEmbeddedSearchClientFactory
     : public SearchIPCRouter::EmbeddedSearchClientFactory {
  public:
-  MOCK_METHOD0(GetEmbeddedSearchClient,
-               search::mojom::EmbeddedSearchClient*(void));
+  MOCK_METHOD(search::mojom::EmbeddedSearchClient*,
+              GetEmbeddedSearchClient,
+              ());
 
   MOCK_METHOD(void,
               BindFactoryReceiver,
@@ -94,14 +91,19 @@ class MockEmbeddedSearchClientFactory
 
 }  // namespace
 
-class SearchIPCRouterTest : public BrowserWithTestWindowTest {
+class SearchIPCRouterTest : public ChromeRenderViewHostTestHarness {
  public:
-  SearchIPCRouterTest() {}
+  SearchIPCRouterTest() = default;
 
   void SetUp() override {
-    BrowserWithTestWindowTest::SetUp();
-    AddTab(browser(), GURL("chrome://blank"));
+    ChromeRenderViewHostTestHarness::SetUp();
+
+    // Ensure WebContents is navigated to initialize the process.
+    content::WebContentsTester::For(web_contents())
+        ->NavigateAndCommit(GURL("chrome://blank"));
+
     SearchTabHelper::CreateForWebContents(web_contents());
+    GetSearchTabHelper(web_contents())->OnTabActivated();
 
     TemplateURLServiceFactory::GetInstance()->SetTestingFactoryAndUse(
         profile(),
@@ -121,14 +123,13 @@ class SearchIPCRouterTest : public BrowserWithTestWindowTest {
     template_url_service->SetUserSelectedDefaultSearchProvider(template_url);
   }
 
-  content::WebContents* web_contents() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
-  }
-
-  SearchTabHelper* GetSearchTabHelper(
-      content::WebContents* web_contents) {
+  SearchTabHelper* GetSearchTabHelper(content::WebContents* web_contents) {
     EXPECT_NE(nullptr, web_contents);
     return SearchTabHelper::FromWebContents(web_contents);
+  }
+
+  void NavigateAndCommitActiveTab(const GURL& url) {
+    content::WebContentsTester::For(web_contents())->NavigateAndCommit(url);
   }
 
   void SetupMockDelegateAndPolicy() {
@@ -139,7 +140,7 @@ class SearchIPCRouterTest : public BrowserWithTestWindowTest {
     search_tab_helper->ipc_router_for_testing().set_delegate_for_testing(
         mock_delegate());
     search_tab_helper->ipc_router_for_testing().set_policy_for_testing(
-        base::WrapUnique(new MockSearchIPCRouterPolicy));
+        std::make_unique<MockSearchIPCRouterPolicy>());
     auto factory =
         std::make_unique<NiceMock<MockEmbeddedSearchClientFactory>>();
     ON_CALL(*factory, GetEmbeddedSearchClient())
@@ -221,20 +222,19 @@ TEST_F(SearchIPCRouterTest, IgnoreFocusOmniboxMsg) {
 TEST_F(SearchIPCRouterTest, HandleTabChangedEvents) {
   NavigateAndCommitActiveTab(GURL("chrome-search://foo/bar"));
   content::WebContents* contents = web_contents();
-  EXPECT_EQ(0, browser()->tab_strip_model()->GetIndexOfWebContents(contents));
+  SearchTabHelper* search_tab_helper = GetSearchTabHelper(contents);
+  ASSERT_TRUE(search_tab_helper);
+
+  // Manually activate the tab and verify state.
+  search_tab_helper->OnTabActivated();
   EXPECT_TRUE(IsActiveTab(contents));
 
-  // Add a new tab to deactivate the current tab.
-  AddTab(browser(), GURL(url::kAboutBlankURL));
-  EXPECT_EQ(2, browser()->tab_strip_model()->count());
-  EXPECT_EQ(1, browser()->tab_strip_model()->GetIndexOfWebContents(contents));
-  EXPECT_EQ(0, browser()->tab_strip_model()->active_index());
+  // Manually deactivate the tab and verify state.
+  search_tab_helper->OnTabDeactivated();
   EXPECT_FALSE(IsActiveTab(contents));
 
-  // Activate the first tab.
-  browser()->tab_strip_model()->ActivateTabAt(1);
-  EXPECT_EQ(browser()->tab_strip_model()->active_index(),
-            browser()->tab_strip_model()->GetIndexOfWebContents(contents));
+  // Manually activate the tab again.
+  search_tab_helper->OnTabActivated();
   EXPECT_TRUE(IsActiveTab(contents));
 }
 

@@ -9,7 +9,6 @@
 
 #include "build/build_config.h"
 #include "chrome/common/buildflags.h"
-#include "content/public/browser/browsing_data_filter_builder.h"
 #include "content/public/browser/browsing_data_remover.h"
 #include "extensions/buildflags/buildflags.h"
 
@@ -17,7 +16,7 @@ namespace chrome_browsing_data_remover {
 // This is an extension of content::BrowsingDataRemover::RemoveDataMask which
 // includes all datatypes therefrom and adds additional Chrome-specific ones.
 using DataType = uint64_t;
-  // Embedder can start adding datatypes after the last platform datatype.
+// Embedder can start adding datatypes after the last platform datatype.
 constexpr DataType DATA_TYPE_EMBEDDER_BEGIN =
     content::BrowsingDataRemover::DATA_TYPE_CONTENT_END << 1;
 
@@ -25,22 +24,30 @@ constexpr DataType DATA_TYPE_EMBEDDER_BEGIN =
 constexpr DataType DATA_TYPE_HISTORY = DATA_TYPE_EMBEDDER_BEGIN;
 constexpr DataType DATA_TYPE_FORM_DATA = DATA_TYPE_EMBEDDER_BEGIN << 1;
 constexpr DataType DATA_TYPE_PASSWORDS = DATA_TYPE_EMBEDDER_BEGIN << 2;
-constexpr DataType DATA_TYPE_PLUGIN_DATA = DATA_TYPE_EMBEDDER_BEGIN << 3;
 #if BUILDFLAG(IS_ANDROID)
-constexpr DataType DATA_TYPE_WEB_APP_DATA = DATA_TYPE_EMBEDDER_BEGIN << 4;
+constexpr DataType DATA_TYPE_WEB_APP_DATA = DATA_TYPE_EMBEDDER_BEGIN << 3;
 #endif
-constexpr DataType DATA_TYPE_SITE_USAGE_DATA = DATA_TYPE_EMBEDDER_BEGIN << 5;
-constexpr DataType DATA_TYPE_DURABLE_PERMISSION = DATA_TYPE_EMBEDDER_BEGIN << 6;
+constexpr DataType DATA_TYPE_SITE_USAGE_DATA = DATA_TYPE_EMBEDDER_BEGIN << 4;
+constexpr DataType DATA_TYPE_PERSISTENT_PERMISSION = DATA_TYPE_EMBEDDER_BEGIN
+                                                     << 5;
 constexpr DataType DATA_TYPE_EXTERNAL_PROTOCOL_DATA = DATA_TYPE_EMBEDDER_BEGIN
-                                                      << 7;
+                                                      << 6;
 constexpr DataType DATA_TYPE_HOSTED_APP_DATA_TEST_ONLY =
-    DATA_TYPE_EMBEDDER_BEGIN << 8;
-constexpr DataType DATA_TYPE_CONTENT_SETTINGS = DATA_TYPE_EMBEDDER_BEGIN << 9;
-constexpr DataType DATA_TYPE_BOOKMARKS = DATA_TYPE_EMBEDDER_BEGIN << 10;
-constexpr DataType DATA_TYPE_ISOLATED_ORIGINS = DATA_TYPE_EMBEDDER_BEGIN << 11;
-constexpr DataType DATA_TYPE_ACCOUNT_PASSWORDS = DATA_TYPE_EMBEDDER_BEGIN << 12;
+    DATA_TYPE_EMBEDDER_BEGIN << 7;
+constexpr DataType DATA_TYPE_CONTENT_SETTINGS = DATA_TYPE_EMBEDDER_BEGIN << 8;
+constexpr DataType DATA_TYPE_BOOKMARKS = DATA_TYPE_EMBEDDER_BEGIN << 9;
+constexpr DataType DATA_TYPE_ISOLATED_ORIGINS = DATA_TYPE_EMBEDDER_BEGIN << 10;
+constexpr DataType DATA_TYPE_ACCOUNT_PASSWORDS = DATA_TYPE_EMBEDDER_BEGIN << 11;
 constexpr DataType DATA_TYPE_LOCAL_CUSTOM_DICTIONARY = DATA_TYPE_EMBEDDER_BEGIN
-                                                       << 13;
+                                                       << 12;
+constexpr DataType DATA_TYPE_ISOLATED_WEB_APP_COOKIES = DATA_TYPE_EMBEDDER_BEGIN
+                                                        << 13;
+constexpr DataType DATA_TYPE_READING_LIST = DATA_TYPE_EMBEDDER_BEGIN << 14;
+constexpr DataType DATA_TYPE_TABS = DATA_TYPE_EMBEDDER_BEGIN << 15;
+constexpr DataType DATA_TYPE_SEARCH_ENGINE_CHOICE = DATA_TYPE_EMBEDDER_BEGIN
+                                                    << 16;
+constexpr DataType DATA_TYPE_PRIVATE_VERIFICATION_TOKENS =
+    DATA_TYPE_EMBEDDER_BEGIN << 17;
 
 // Group datatypes.
 
@@ -50,13 +57,16 @@ constexpr DataType DATA_TYPE_SITE_DATA =
     content::BrowsingDataRemover::DATA_TYPE_COOKIES |
     content::BrowsingDataRemover::DATA_TYPE_DOM_STORAGE |
     content::BrowsingDataRemover::DATA_TYPE_MEDIA_LICENSES |
-    DATA_TYPE_PLUGIN_DATA |
 #if BUILDFLAG(IS_ANDROID)
     DATA_TYPE_WEB_APP_DATA |
 #endif
-    DATA_TYPE_SITE_USAGE_DATA | DATA_TYPE_DURABLE_PERMISSION |
+    DATA_TYPE_SITE_USAGE_DATA | DATA_TYPE_PERSISTENT_PERMISSION |
     DATA_TYPE_EXTERNAL_PROTOCOL_DATA | DATA_TYPE_ISOLATED_ORIGINS |
-    content::BrowsingDataRemover::DATA_TYPE_PRIVACY_SANDBOX;
+    DATA_TYPE_ISOLATED_WEB_APP_COOKIES |
+    content::BrowsingDataRemover::DATA_TYPE_PRIVACY_SANDBOX |
+    content::BrowsingDataRemover::DATA_TYPE_DEVICE_BOUND_SESSIONS |
+    content::BrowsingDataRemover::DATA_TYPE_DECLARATIVE_PERFORMANCE_OBSERVER |
+    DATA_TYPE_PRIVATE_VERIFICATION_TOKENS;
 
 // Datatypes protected by Important Sites.
 constexpr DataType IMPORTANT_SITES_DATA_TYPES =
@@ -66,28 +76,31 @@ constexpr DataType IMPORTANT_SITES_DATA_TYPES =
 // whichever makes sense.
 constexpr DataType FILTERABLE_DATA_TYPES =
     DATA_TYPE_SITE_DATA | content::BrowsingDataRemover::DATA_TYPE_CACHE |
-    content::BrowsingDataRemover::DATA_TYPE_DOWNLOADS;
-
-// Datatypes with account-scoped data that needs to be removed
-// before Google cookies are deleted.
-constexpr DataType DEFERRED_COOKIE_DELETION_DATA_TYPES =
-    DATA_TYPE_ACCOUNT_PASSWORDS;
+    content::BrowsingDataRemover::DATA_TYPE_DOWNLOADS |
+    content::BrowsingDataRemover::DATA_TYPE_RELATED_WEBSITE_SETS_PERMISSIONS |
+    content::BrowsingDataRemover::DATA_TYPE_PREFETCH_CACHE |
+    content::BrowsingDataRemover::DATA_TYPE_PRERENDER_CACHE;
 
 // Includes all the available remove options. Meant to be used by clients
 // that wish to wipe as much data as possible from a Profile, to make it
 // look like a new Profile. Does not delete account-scoped data like
 // passwords but will remove access to account-scoped data by signing the
 // user out.
+//
+// TODO(crbug.com/506130502): This treats account vs local data inconsistently,
+// remove or fix.
 constexpr DataType ALL_DATA_TYPES =
     DATA_TYPE_SITE_DATA |  //
     content::BrowsingDataRemover::DATA_TYPE_CACHE |
     content::BrowsingDataRemover::DATA_TYPE_DOWNLOADS |
-    DATA_TYPE_FORM_DATA |         //
-    DATA_TYPE_HISTORY |           //
-    DATA_TYPE_PASSWORDS |         //
-    DATA_TYPE_CONTENT_SETTINGS |  //
-    DATA_TYPE_BOOKMARKS |         //
-    DATA_TYPE_LOCAL_CUSTOM_DICTIONARY;
+    DATA_TYPE_FORM_DATA |                //
+    DATA_TYPE_HISTORY |                  //
+    DATA_TYPE_PASSWORDS |                //
+    DATA_TYPE_CONTENT_SETTINGS |         //
+    DATA_TYPE_BOOKMARKS |                //
+    DATA_TYPE_LOCAL_CUSTOM_DICTIONARY |  //
+    DATA_TYPE_READING_LIST |             //
+    DATA_TYPE_SEARCH_ENGINE_CHOICE;
 
 // Includes all available remove options. Meant to be used when the Profile
 // is scheduled to be deleted, and all possible data should be wiped from
@@ -104,15 +117,15 @@ using OriginType = uint64_t;
 constexpr OriginType ORIGIN_TYPE_EMBEDDER_BEGIN =
     content::BrowsingDataRemover::ORIGIN_TYPE_CONTENT_END << 1;
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 // Packaged apps and extensions (chrome-extension://*).
 constexpr OriginType ORIGIN_TYPE_EXTENSION = ORIGIN_TYPE_EMBEDDER_BEGIN;
 #endif
 
-  // All origin types.
+// All origin types.
 constexpr OriginType ALL_ORIGIN_TYPES =
     content::BrowsingDataRemover::ORIGIN_TYPE_UNPROTECTED_WEB |
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
     ORIGIN_TYPE_EXTENSION |
 #endif
     content::BrowsingDataRemover::ORIGIN_TYPE_PROTECTED_WEB;
@@ -123,14 +136,6 @@ constexpr OriginType ALL_ORIGIN_TYPES =
 static_assert((IMPORTANT_SITES_DATA_TYPES & ~FILTERABLE_DATA_TYPES) == 0,
               "All important sites datatypes must be filterable.");
 
-static_assert((DEFERRED_COOKIE_DELETION_DATA_TYPES & FILTERABLE_DATA_TYPES) ==
-                  0,
-              "Deferred deletion is currently not implemented for filterable "
-              "data types");
-
-static_assert((DEFERRED_COOKIE_DELETION_DATA_TYPES & WIPE_PROFILE) == 0,
-              "Account data should not be included in deletions that remove "
-              "all local data");
 }  // namespace chrome_browsing_data_remover
 
 #endif  // CHROME_BROWSER_BROWSING_DATA_CHROME_BROWSING_DATA_REMOVER_CONSTANTS_H_

@@ -19,15 +19,19 @@ class JsSandboxIsolateCallback final
   enum class ErrorType {
     kJsEvaluationError = 0,
     kMemoryLimitExceeded = 1,
+    kFileDescriptorIOFailedError = 2,
   };
 
   explicit JsSandboxIsolateCallback(
-      base::android::ScopedJavaGlobalRef<jobject>&& callback);
+      base::android::ScopedJavaGlobalRef<jobject>&& callback,
+      bool use_fd);
   JsSandboxIsolateCallback(const JsSandboxIsolateCallback&) = delete;
   JsSandboxIsolateCallback& operator=(const JsSandboxIsolateCallback&) = delete;
 
   void ReportResult(const std::string& result);
+  void ReportError(ErrorType error_type, const std::string& error);
   void ReportJsEvaluationError(const std::string& error);
+  void ReportFileDescriptorIOFailedError(const std::string& error);
   // Report that the isolate has exceeded its memory limit, with various stats.
   //
   // memory_limit == 0 indicates that no explicit limit was configured.
@@ -43,13 +47,14 @@ class JsSandboxIsolateCallback final
   friend class base::RefCounted<JsSandboxIsolateCallback>;
   ~JsSandboxIsolateCallback();
 
-  void ReportError(ErrorType error_type, const std::string& error);
-
   base::android::ScopedJavaGlobalRef<jobject> UseCallback();
 
   // Access this via UseCallback() to ensure the callback isn't used multiple
   // times. This value with be reset (null) when it is used.
   base::android::ScopedJavaGlobalRef<jobject> callback_;
+  // If true, |callback_| is of Java type JsSandboxIsolateFdCallback.
+  // If false, |callback_| is of Java type JsSandboxIsolateCallback.
+  bool use_fd;
 };
 
 }  // namespace android_webview

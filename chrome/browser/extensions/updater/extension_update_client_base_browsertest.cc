@@ -5,6 +5,7 @@
 #include "chrome/browser/extensions/updater/extension_update_client_base_browsertest.h"
 
 #include <memory>
+#include <optional>
 
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
@@ -13,13 +14,18 @@
 #include "chrome/browser/chrome_browser_main.h"
 #include "chrome/browser/chrome_browser_main_extra_parts.h"
 #include "chrome/browser/extensions/browsertest_util.h"
+#include "chrome/browser/extensions/updater/test_update_client_event_waiter.h"
+#include "chrome/browser/profiles/profile.h"
 #include "components/update_client/net/url_loader_post_interceptor.h"
 #include "components/update_client/protocol_handler.h"
 #include "content/public/browser/browser_context.h"
+#include "content/public/test/url_loader_interceptor.h"
 #include "extensions/browser/updater/update_service.h"
 #include "extensions/browser/updater/update_service_factory.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension_features.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -34,7 +40,7 @@ class TestChromeUpdateClientConfig
   TestChromeUpdateClientConfig(content::BrowserContext* context,
                                const std::vector<GURL>& update_url,
                                const std::vector<GURL>& ping_url)
-      : extensions::ChromeUpdateClientConfig(context, absl::nullopt),
+      : extensions::ChromeUpdateClientConfig(context, std::nullopt),
         update_url_(update_url),
         ping_url_(ping_url) {}
 
@@ -48,6 +54,12 @@ class TestChromeUpdateClientConfig
   std::vector<GURL> PingUrl() const final { return ping_url_; }
 
   bool EnabledCupSigning() const final { return false; }
+
+  bool EnabledBackgroundDownloader() const final {
+    // Some tests rely on URLFetcher network interceptors, which won't intercept
+    // BITS requests.
+    return false;
+  }
 
   std::unique_ptr<update_client::ProtocolHandlerFactory>
   GetProtocolHandlerFactory() const final {
@@ -82,43 +94,6 @@ class TestChromeBrowserMainExtraParts : public ChromeBrowserMainExtraParts {
 
  private:
   raw_ptr<ExtensionUpdateClientBaseTest> test_;
-};
-
-class UpdateClientCompleteEventWaiter
-    : public update_client::UpdateClient::Observer {
- public:
-  using UpdateClientEvents = update_client::UpdateClient::Observer::Events;
-
-  explicit UpdateClientCompleteEventWaiter(const std::string& id)
-      : id_(id), event_(UpdateClientEvents::COMPONENT_UPDATE_ERROR) {}
-
-  UpdateClientCompleteEventWaiter(const UpdateClientCompleteEventWaiter&) =
-      delete;
-  UpdateClientCompleteEventWaiter& operator=(
-      const UpdateClientCompleteEventWaiter&) = delete;
-
-  ~UpdateClientCompleteEventWaiter() override = default;
-
-  void OnEvent(update_client::UpdateClient::Observer::Events event,
-               const std::string& id) final {
-    if (id_ == id &&
-        (event == UpdateClientEvents::COMPONENT_UPDATED ||
-         event == UpdateClientEvents::COMPONENT_ALREADY_UP_TO_DATE ||
-         event == UpdateClientEvents::COMPONENT_UPDATE_ERROR)) {
-      event_ = event;
-      run_loop_.Quit();
-    }
-  }
-
-  UpdateClientEvents Wait() {
-    run_loop_.Run();
-    return event_;
-  }
-
- private:
-  const std::string id_;
-  UpdateClientEvents event_;
-  base::RunLoop run_loop_;
 };
 
 }  // namespace
@@ -167,7 +142,9 @@ void ExtensionUpdateClientBaseTest::CreatedBrowserMainParts(
 
 void ExtensionUpdateClientBaseTest::SetUpOnMainThread() {
   ExtensionBrowserTest::SetUpOnMainThread();
+#if BUILDFLAG(IS_CHROMEOS)
   extensions::browsertest_util::CreateAndInitializeLocalCache();
+#endif
 
   update_service_ =
       extensions::UpdateServiceFactory::GetForBrowserContext(profile());
@@ -176,6 +153,8 @@ void ExtensionUpdateClientBaseTest::SetUpOnMainThread() {
 
 void ExtensionUpdateClientBaseTest::TearDownOnMainThread() {
   get_interceptor_.reset();
+  update_service_ = nullptr;
+  ExtensionBrowserTest::TearDownOnMainThread();
 }
 
 void ExtensionUpdateClientBaseTest::SetUpNetworkInterceptors() {
@@ -196,26 +175,43 @@ void ExtensionUpdateClientBaseTest::SetUpNetworkInterceptors() {
       ping_urls, &https_server_for_ping_);
   https_server_for_ping_.StartAcceptingConnections();
 
-  get_interceptor_ =
-      std::make_unique<content::URLLoaderInterceptor>(base::BindRepeating(
-          &ExtensionUpdateClientBaseTest::OnRequest, base::Unretained(this)));
+  // URLLoaderInterceptor construction is asynchronous and requires a RunLoop
+  // spin. On Android, browser test setup happens inside another RunLoop, so
+  // this RunLoop must be nestable.
+  base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);
+  get_interceptor_ = std::make_unique<content::URLLoaderInterceptor>(
+      base::BindRepeating(&ExtensionUpdateClientBaseTest::OnRequest,
+                          base::Unretained(this)),
+      content::URLLoaderInterceptor::URLLoaderCompletionStatusCallback(),
+      run_loop.QuitClosure());
+  run_loop.Run();
 }
 
-update_client::UpdateClient::Observer::Events
+void ExtensionUpdateClientBaseTest::AddUpdateClientObserver(
+    update_client::UpdateClient::Observer* observer) {
+  update_service_->AddUpdateClientObserver(observer);
+}
+
+void ExtensionUpdateClientBaseTest::RemoveUpdateClientObserver(
+    update_client::UpdateClient::Observer* observer) {
+  update_service_->RemoveUpdateClientObserver(observer);
+}
+
+update_client::ComponentState
 ExtensionUpdateClientBaseTest::WaitOnComponentUpdaterCompleteEvent(
     const std::string& id) {
-  UpdateClientCompleteEventWaiter waiter(id);
-  update_service_->AddUpdateClientObserver(&waiter);
+  TestUpdateClientEventWaiter waiter(id);
+  AddUpdateClientObserver(&waiter);
   auto event = waiter.Wait();
-  update_service_->RemoveUpdateClientObserver(&waiter);
-
+  RemoveUpdateClientObserver(&waiter);
   return event;
 }
 
 bool ExtensionUpdateClientBaseTest::OnRequest(
     content::URLLoaderInterceptor::RequestParams* params) {
-  if (params->url_request.url.host() != "localhost")
+  if (params->url_request.url.GetHost() != "localhost") {
     return false;
+  }
 
   get_interceptor_count_++;
   return callback_ && callback_.Run(params);

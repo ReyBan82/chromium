@@ -5,13 +5,13 @@
 #ifndef BASE_WIN_OBJECT_WATCHER_H_
 #define BASE_WIN_OBJECT_WATCHER_H_
 
-#include "base/win/windows_types.h"
-
 #include "base/base_export.h"
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/win/windows_types.h"
 
 namespace base {
 namespace win {
@@ -112,9 +112,11 @@ class BASE_EXPORT ObjectWatcher {
                              bool execute_only_once,
                              const Location& from_here);
 
-  void Signal(Delegate* delegate);
+  void Signal();
 
   void Reset();
+
+  raw_ptr<Delegate> delegate_ = nullptr;
 
   Location location_;
 

@@ -297,15 +297,15 @@ class ArrayTest extends TestBase
 
         // Test append.
         $arr[] = 1;
-        $this->assertFloatEquals(1.0, $arr[0], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.0, $arr[0], MAX_FLOAT_DIFF);
 
         $arr[] = 1.1;
-        $this->assertFloatEquals(1.1, $arr[1], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.1, $arr[1], MAX_FLOAT_DIFF);
 
         $arr[] = '2';
-        $this->assertFloatEquals(2.0, $arr[2], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(2.0, $arr[2], MAX_FLOAT_DIFF);
         $arr[] = '3.1';
-        $this->assertFloatEquals(3.1, $arr[3], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(3.1, $arr[3], MAX_FLOAT_DIFF);
 
         $this->assertEquals(4, count($arr));
 
@@ -316,15 +316,15 @@ class ArrayTest extends TestBase
 
         // Test set.
         $arr[0] = 1;
-        $this->assertFloatEquals(1.0, $arr[0], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.0, $arr[0], MAX_FLOAT_DIFF);
 
         $arr[1] = 1.1;
-        $this->assertFloatEquals(1.1, $arr[1], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.1, $arr[1], MAX_FLOAT_DIFF);
 
         $arr[2] = '2';
-        $this->assertFloatEquals(2.0, $arr[2], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(2.0, $arr[2], MAX_FLOAT_DIFF);
         $arr[3] = '3.1';
-        $this->assertFloatEquals(3.1, $arr[3], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(3.1, $arr[3], MAX_FLOAT_DIFF);
     }
 
     #########################################################
@@ -337,15 +337,15 @@ class ArrayTest extends TestBase
 
         // Test append.
         $arr[] = 1;
-        $this->assertFloatEquals(1.0, $arr[0], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.0, $arr[0], MAX_FLOAT_DIFF);
 
         $arr[] = 1.1;
-        $this->assertFloatEquals(1.1, $arr[1], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.1, $arr[1], MAX_FLOAT_DIFF);
 
         $arr[] = '2';
-        $this->assertFloatEquals(2.0, $arr[2], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(2.0, $arr[2], MAX_FLOAT_DIFF);
         $arr[] = '3.1';
-        $this->assertFloatEquals(3.1, $arr[3], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(3.1, $arr[3], MAX_FLOAT_DIFF);
 
         $this->assertEquals(4, count($arr));
 
@@ -356,15 +356,15 @@ class ArrayTest extends TestBase
 
         // Test set.
         $arr[0] = 1;
-        $this->assertFloatEquals(1.0, $arr[0], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.0, $arr[0], MAX_FLOAT_DIFF);
 
         $arr[1] = 1.1;
-        $this->assertFloatEquals(1.1, $arr[1], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.1, $arr[1], MAX_FLOAT_DIFF);
 
         $arr[2] = '2';
-        $this->assertFloatEquals(2.0, $arr[2], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(2.0, $arr[2], MAX_FLOAT_DIFF);
         $arr[3] = '3.1';
-        $this->assertFloatEquals(3.1, $arr[3], MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(3.1, $arr[3], MAX_FLOAT_DIFF);
     }
 
     #########################################################
@@ -507,6 +507,36 @@ class ArrayTest extends TestBase
         $arr[0.0] = 3;
         $this->assertSame(3, $arr[0.0]);
         $this->assertSame(1, count($arr));
+    }
+
+    public function testOffsetNegative()
+    {
+        $arr = new RepeatedField(GPBType::INT32);
+
+        $triggered = false;
+        $triggeredErrno = null;
+        $triggeredErrstr = null;
+
+        set_error_handler(function($errno, $errstr) use (&$triggered, &$triggeredErrno, &$triggeredErrstr) {
+            $triggered = true;
+            $triggeredErrno = $errno;
+            $triggeredErrstr = $errstr;
+            return true;
+        });
+
+        try {
+            $arr[-1] = 4;
+        } finally {
+            restore_error_handler();
+        }
+
+        $this->assertTrue($triggered);
+        $this->assertEquals(E_USER_ERROR, $triggeredErrno);
+        $this->assertTrue(
+            strpos($triggeredErrstr, "doesn't exist") !== false ||
+            strpos($triggeredErrstr, "Cannot modify element") !== false,
+            "Unexpected error message: " . $triggeredErrstr
+        );
     }
 
     public function testInsertRemoval()
@@ -654,5 +684,77 @@ class ArrayTest extends TestBase
         $arr[] = new TestMessage;
         $arr2 = clone $arr;
         $this->assertSame($arr[0], $arr2[0]);
+    }
+
+    #########################################################
+    # Test offsetUnset
+    #########################################################
+
+    public function testOffsetUnset()
+    {
+        $arr = new RepeatedField(GPBType::INT32);
+        $arr[] = 0;
+        $arr[] = 1;
+        $arr[] = 2;
+
+        $this->assertSame(3, count($arr));
+        $this->assertSame(0, $arr[0]);
+        $this->assertSame(1, $arr[1]);
+        $this->assertSame(2, $arr[2]);
+
+        $arr->offsetUnset(1);
+        $this->assertSame(0, $arr[0]);
+        $this->assertSame(2, $arr[1]);
+
+        $arr->offsetUnset(0);
+        $this->assertSame(2, $arr[0]);
+
+        $arr->offsetUnset(0);
+        $this->assertCount(0, $arr);
+    }
+
+    public function testIterationOutOfBoundsWithCustomErrorHandler()
+    {
+        $arr = new RepeatedField(GPBType::INT32);
+        $arr[] = 1;
+        $it = $arr->getIterator();
+        $it->next();
+
+        $triggered = false;
+        $triggeredErrno = null;
+        $triggeredErrstr = null;
+
+        set_error_handler(function($errno, $errstr) use (&$triggered, &$triggeredErrno, &$triggeredErrstr) {
+            $triggered = true;
+            $triggeredErrno = $errno;
+            $triggeredErrstr = $errstr;
+            // Returning true from a custom error handler bypasses the standard PHP
+            // error behavior (which would abort) and continues execution in the C extension.
+            return true;
+        });
+
+        try {
+            $val = $it->current();
+            $this->assertNull($val);
+        } finally {
+            restore_error_handler();
+        }
+
+        $this->assertTrue($triggered);
+
+        $this->assertTrue(
+            $triggeredErrno === E_USER_ERROR ||
+            $triggeredErrno === E_WARNING ||
+            $triggeredErrno === E_NOTICE,
+            "Unexpected error number: " . $triggeredErrno
+        );
+
+        if ($triggeredErrno === E_USER_ERROR) {
+            $this->assertStringContainsString("Element at 1 doesn't exist", $triggeredErrstr);
+        } else {
+            // PHP implementation triggers E_WARNING/E_NOTICE with messages like:
+            // "Undefined array key 1" (PHP 8) or "Undefined offset: 1" (PHP 7).
+            $this->assertStringContainsString("1", $triggeredErrstr);
+        }
     }
 }

@@ -5,6 +5,8 @@
 #ifndef CONTENT_BROWSER_THEME_HELPER_MAC_H_
 #define CONTENT_BROWSER_THEME_HELPER_MAC_H_
 
+#include <memory>
+
 #include "base/containers/span.h"
 #include "base/memory/read_only_shared_memory_region.h"
 #include "base/memory/writable_shared_memory_region.h"
@@ -12,12 +14,6 @@
 #include "third_party/blink/public/common/sandbox_support/sandbox_support_mac.h"
 #include "third_party/blink/public/platform/mac/web_scrollbar_theme.h"
 #include "third_party/skia/include/core/SkColor.h"
-
-#if __OBJC__
-@class SystemThemeObserver;
-#else
-class SystemThemeObserver;
-#endif
 
 namespace content {
 
@@ -28,7 +24,7 @@ class ThemeHelperMac : public content::RenderProcessHostCreationObserver {
  public:
   // Return pointer to the singleton instance for the current process, or NULL
   // if none.
-  static ThemeHelperMac* GetInstance();
+  CONTENT_EXPORT static ThemeHelperMac* GetInstance();
 
   ThemeHelperMac(const ThemeHelperMac&) = delete;
   ThemeHelperMac& operator=(const ThemeHelperMac&) = delete;
@@ -38,6 +34,8 @@ class ThemeHelperMac : public content::RenderProcessHostCreationObserver {
   base::ReadOnlySharedMemoryRegion DuplicateReadOnlyColorMapRegion();
 
  private:
+  friend class SystemAccentColorTest;
+
   ThemeHelperMac();
   ~ThemeHelperMac() override;
 
@@ -52,11 +50,11 @@ class ThemeHelperMac : public content::RenderProcessHostCreationObserver {
   // be stored.
   void LoadSystemColorsForCurrentAppearance(base::span<SkColor> values);
 
+  // Test-only method to set accent color for testing.
+  CONTENT_EXPORT void SetAccentColorForTesting(SkColor accent_color);
+
   // Overridden from content::RenderProcessHostCreationObserver:
   void OnRenderProcessHostCreated(content::RenderProcessHost* host) override;
-
-  // ObjC object that observes notifications from the system.
-  SystemThemeObserver* theme_observer_;  // strong
 
   // Writable and mapped array of SkColor values, indexed by MacSystemColorID
   // for a light appearance. Colors for a dark appearance in indexed by
@@ -66,6 +64,9 @@ class ThemeHelperMac : public content::RenderProcessHostCreationObserver {
   // Read-only handle to the |writable_color_map_| that can be duplicated for
   // sharing to child processes.
   base::ReadOnlySharedMemoryRegion read_only_color_map_;
+
+  struct ObjCStorage;
+  std::unique_ptr<ObjCStorage> objc_storage_;
 };
 
 }  // namespace content

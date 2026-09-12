@@ -9,12 +9,13 @@
 #include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "content/browser/devtools/devtools_io_context.h"
+#include "content/common/content_export.h"
 
 #include <string>
 
 namespace content {
 
-class DevToolsStreamFile : public DevToolsIOContext::Stream {
+class CONTENT_EXPORT DevToolsStreamFile : public DevToolsIOContext::Stream {
  public:
   static scoped_refptr<DevToolsStreamFile> Create(DevToolsIOContext* context,
                                                   bool binary);
@@ -27,7 +28,12 @@ class DevToolsStreamFile : public DevToolsIOContext::Stream {
 
   void Read(off_t position, size_t max_size, ReadCallback callback) override;
 
-  void ReadOnFileSequence(off_t pos, size_t max_size, ReadCallback callback);
+  void ReadOnFileSequence(off_t position,
+                          size_t max_size,
+                          ReadCallback callback);
+  Status InnerReadOnFileSequence(off_t position,
+                                 size_t max_size,
+                                 std::string& out_data);
   void AppendOnFileSequence(std::unique_ptr<std::string> data);
   bool InitOnFileSequenceIfNeeded();
 
@@ -36,8 +42,9 @@ class DevToolsStreamFile : public DevToolsIOContext::Stream {
 
   base::File file_;
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
-  bool had_errors_;
-  off_t last_read_pos_;
+  bool had_errors_ = false;
+  off_t last_written_pos_ = 0;
+  off_t last_read_pos_ = 0;
 };
 
 }  // namespace content

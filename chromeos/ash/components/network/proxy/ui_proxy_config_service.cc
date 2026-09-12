@@ -71,8 +71,8 @@ std::string EffectiveConfigStateToOncSourceString(
 }
 
 template <typename T>
-base::Value::Dict CreateEffectiveValue(const std::string& source, T value) {
-  base::Value::Dict dict;
+base::DictValue CreateEffectiveValue(const std::string& source, T value) {
+  base::DictValue dict;
   dict.Set(::onc::kAugmentationEffectiveSetting, source);
   // ActiveExtension is a special source type indicating that the Effective
   // value is the Active value and was set by an extension. It does not provide
@@ -85,7 +85,7 @@ base::Value::Dict CreateEffectiveValue(const std::string& source, T value) {
   return dict;
 }
 
-void SetManualProxy(base::Value::Dict* manual,
+void SetManualProxy(base::DictValue* manual,
                     const std::string& source,
                     const std::string& key,
                     const net::ProxyList& proxy_list) {
@@ -97,7 +97,9 @@ void SetManualProxy(base::Value::Dict* manual,
     return;
   }
 
-  const net::ProxyServer& proxy = proxy_list.Get();
+  const net::ProxyChain& chain = proxy_list.First();
+  CHECK(chain.is_single_proxy());
+  const net::ProxyServer& proxy = chain.First();
   manual->SetByDottedPath(
       base::JoinString({key, ::onc::proxy::kHost}, "."),
       CreateEffectiveValue(source, base::Value(proxy.host_port_pair().host())));
@@ -106,32 +108,30 @@ void SetManualProxy(base::Value::Dict* manual,
       CreateEffectiveValue(source, base::Value(proxy.host_port_pair().port())));
 }
 
-base::Value::Dict OncValueWithMode(const std::string& source,
-                                   const std::string& mode) {
-  base::Value::Dict result;
-  result.Set(::onc::network_config::kType,
-             CreateEffectiveValue(source, base::Value(mode)));
-  return result;
+base::DictValue OncValueWithMode(const std::string& source,
+                                 const std::string& mode) {
+  return base::DictValue().Set(::onc::network_config::kType,
+                               CreateEffectiveValue(source, base::Value(mode)));
 }
 
-absl::optional<base::Value::Dict> OncValueForManualProxyList(
+std::optional<base::DictValue> OncValueForManualProxyList(
     const std::string& source,
     const net::ProxyList& for_http,
     const net::ProxyList& for_https,
     const net::ProxyList& fallback,
-    const net::ProxyBypassRules& bypass_rules) {
+    const net::ProxyHostMatchingRules& bypass_rules) {
   if (for_http.IsEmpty() && for_https.IsEmpty() && fallback.IsEmpty()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
-  base::Value::Dict result = OncValueWithMode(source, ::onc::proxy::kManual);
+  base::DictValue result = OncValueWithMode(source, ::onc::proxy::kManual);
 
-  base::Value::Dict* manual =
-      result.Set(::onc::proxy::kManual, base::Value::Dict())->GetIfDict();
+  base::DictValue* manual =
+      result.Set(::onc::proxy::kManual, base::DictValue())->GetIfDict();
   SetManualProxy(manual, source, ::onc::proxy::kHttp, for_http);
   SetManualProxy(manual, source, ::onc::proxy::kHttps, for_https);
   SetManualProxy(manual, source, ::onc::proxy::kSocks, fallback);
 
-  base::Value::List exclude_domains;
+  base::ListValue exclude_domains;
   for (const auto& rule : bypass_rules.rules())
     exclude_domains.Append(rule->ToString());
   result.Set(::onc::proxy::kExcludeDomains,
@@ -140,7 +140,7 @@ absl::optional<base::Value::Dict> OncValueForManualProxyList(
   return result;
 }
 
-absl::optional<base::Value::Dict> OncValueForEmptyProxyRules(
+std::optional<base::DictValue> OncValueForEmptyProxyRules(
     const net::ProxyConfig& net_config,
     const std::string& source) {
   if (!net_config.HasAutomaticSettings()) {
@@ -152,17 +152,17 @@ absl::optional<base::Value::Dict> OncValueForEmptyProxyRules(
   }
 
   if (net_config.has_pac_url()) {
-    base::Value::Dict result = OncValueWithMode(source, ::onc::proxy::kPAC);
+    base::DictValue result = OncValueWithMode(source, ::onc::proxy::kPAC);
     result.Set(
         ::onc::proxy::kPAC,
         CreateEffectiveValue(source, base::Value(net_config.pac_url().spec())));
     return result;
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
-absl::optional<base::Value::Dict> NetProxyConfigAsOncValue(
+std::optional<base::DictValue> NetProxyConfigAsOncValue(
     const net::ProxyConfig& net_config,
     const std::string& source) {
   switch (net_config.proxy_rules().type) {
@@ -181,7 +181,7 @@ absl::optional<base::Value::Dict> NetProxyConfigAsOncValue(
           net_config.proxy_rules().fallback_proxies,
           net_config.proxy_rules().bypass_rules);
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 ProxyPrefs::ProxyMode OncStringToProxyMode(const std::string& onc_proxy_type) {
@@ -198,7 +198,6 @@ ProxyPrefs::ProxyMode OncStringToProxyMode(const std::string& onc_proxy_type) {
     return ProxyPrefs::ProxyMode::MODE_FIXED_SERVERS;
   }
   NOTREACHED() << "Unsupported ONC proxy type: " << onc_proxy_type;
-  return ProxyPrefs::ProxyMode::MODE_DIRECT;
 }
 
 }  // namespace
@@ -235,7 +234,7 @@ UIProxyConfigService::~UIProxyConfigService() = default;
 
 bool UIProxyConfigService::MergeEnforcedProxyConfig(
     const std::string& network_guid,
-    base::Value::Dict* proxy_settings) {
+    base::DictValue* proxy_settings) {
   current_ui_network_guid_ = network_guid;
   const NetworkState* network = nullptr;
   DCHECK(!network_guid.empty());
@@ -260,12 +259,12 @@ bool UIProxyConfigService::MergeEnforcedProxyConfig(
   DCHECK(local_state_prefs_);
   DCHECK(network_profile_handler_);
   PrefService* top_pref_service =
-      profile_prefs_ ? profile_prefs_ : local_state_prefs_;
+      profile_prefs_ ? profile_prefs_.get() : local_state_prefs_.get();
 
   // Get prefs proxy config if available.
   net::ProxyConfigWithAnnotation pref_config;
-  ProxyPrefs::ConfigState pref_state =
-      ProxyConfigServiceImpl::ReadPrefConfig(top_pref_service, &pref_config);
+  ProxyPrefs::ConfigState pref_state = ProxyConfigServiceImpl::ReadPrefConfig(
+      top_pref_service, &pref_config, /*policy_service=*/nullptr);
 
   // Get network proxy config if available.
   net::ProxyConfigWithAnnotation network_config;
@@ -275,9 +274,10 @@ bool UIProxyConfigService::MergeEnforcedProxyConfig(
   if (GetProxyConfig(profile_prefs_, local_state_prefs_, *network,
                      network_profile_handler_, &network_config, &onc_source)) {
     // Network is private or shared with user using shared proxies.
-    NET_LOG(EVENT) << "UIProxyConfigService for "
-                   << (profile_prefs_ ? "user" : "login")
-                   << ": using proxy of network: " << NetworkId(network);
+    // Note: This is a common occurrence so we don't spam NET_LOG.
+    VLOG(2) << "UIProxyConfigService for "
+            << (profile_prefs_ ? "user" : "login")
+            << ": using proxy of network: " << NetworkId(network);
     network_availability = net::ProxyConfigService::CONFIG_VALID;
   }
 
@@ -293,7 +293,7 @@ bool UIProxyConfigService::MergeEnforcedProxyConfig(
   if (source.empty())
     return false;
 
-  absl::optional<base::Value::Dict> enforced_settings =
+  std::optional<base::DictValue> enforced_settings =
       NetProxyConfigAsOncValue(effective_config.value(), source);
   if (!enforced_settings)
     return false;
@@ -318,14 +318,14 @@ ProxyPrefs::ProxyMode UIProxyConfigService::ProxyModeForNetwork(
     return mode;
   }
 
-  base::Value::Dict proxy_settings;
+  base::DictValue proxy_settings;
   if (proxy_dict) {
     proxy_settings = proxy_dict->GetDictionary().Clone();
   }
   // Check for managed proxy settings.
   MergeEnforcedProxyConfig(network->guid(), &proxy_settings);
   if (!proxy_settings.empty()) {
-    base::Value::Dict* proxy_type =
+    base::DictValue* proxy_type =
         proxy_settings.FindDict(::onc::network_config::kType);
     if (proxy_type) {
       std::string* proxy_active =

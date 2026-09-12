@@ -29,7 +29,6 @@
 #include "ui/events/keycodes/dom/keycode_converter.h"
 #include "ui/events/keycodes/keyboard_code_conversion.h"
 #include "ui/events/keycodes/keyboard_codes.h"
-#include "ui/gfx/native_widget_types.h"
 
 #ifdef USE_AURA
 #include "content/browser/renderer_host/render_widget_host_view_aura.h"
@@ -72,51 +71,49 @@ constexpr char kKeyboardLockMethodExistanceCheck[] =
 
 constexpr char kKeyboardLockMethodCallWithAllKeys[] =
     "navigator.keyboard.lock().then("
-    "  () => { window.domAutomationController.send(true); },"
-    "  () => { window.domAutomationController.send(false); },"
+    "  () => true,"
+    "  () => false,"
     ");";
 
 constexpr char kKeyboardLockMethodCallWithSomeKeys[] =
     "navigator.keyboard.lock(['MetaLeft', 'Tab', 'AltLeft']).then("
-    "  () => { window.domAutomationController.send(true); },"
-    "  () => { window.domAutomationController.send(false); },"
+    "  () => true,"
+    "  () => false,"
     ");";
 
 // Calling lock() with no valid key codes will cause the promise to be rejected.
 constexpr char kKeyboardLockMethodCallWithAllInvalidKeys[] =
     "navigator.keyboard.lock(['BlerghLeft', 'BlarghRight']).then("
-    "  () => { window.domAutomationController.send(false); },"
-    "  () => { window.domAutomationController.send(true); },"
+    "  () => false,"
+    "  () => true,"
     ");";
 
 // Calling lock() with some invalid key codes will reject the promise.
 constexpr char kKeyboardLockMethodCallWithSomeInvalidKeys[] =
     "navigator.keyboard.lock(['Tab', 'BlarghTab', 'Space', 'BlerghLeft']).then("
-    "  () => { window.domAutomationController.send(false); },"
-    "  () => { window.domAutomationController.send(true); },"
+    "  () => false,"
+    "  () => true,"
     ");";
 
 constexpr char kKeyboardUnlockMethodCall[] = "navigator.keyboard.unlock()";
 
 constexpr char kFocusInputFieldScript[] =
     "function onInput(e) {"
-    "  domAutomationController.send(getInputFieldText());"
+    "  resultQueue.push(getInputFieldText());"
     "}"
     "inputField = document.getElementById('text-field');"
     "inputField.addEventListener('input', onInput, false);";
 
 void SimulateKeyPress(WebContents* web_contents,
+                      RenderFrameHost* event_recipient,
                       const std::string& code_string,
                       const std::string& expected_result) {
-  DOMMessageQueue msg_queue(web_contents);
-  std::string reply;
   ui::DomKey dom_key = ui::KeycodeConverter::KeyStringToDomKey(code_string);
   ui::DomCode dom_code = ui::KeycodeConverter::CodeStringToDomCode(code_string);
   SimulateKeyPress(web_contents, dom_key, dom_code,
                    ui::DomCodeToUsLayoutKeyboardCode(dom_code), false, false,
                    false, false);
-  ASSERT_TRUE(msg_queue.WaitForMessage(&reply));
-  ASSERT_EQ("\"" + expected_result + "\"", reply);
+  ASSERT_EQ(expected_result, EvalJs(event_recipient, "waitForInput()"));
 }
 
 #if defined(USE_AURA)
@@ -125,7 +122,7 @@ bool g_window_has_focus = false;
 
 class TestRenderWidgetHostView : public RenderWidgetHostViewAura {
  public:
-  TestRenderWidgetHostView(RenderWidgetHost* host)
+  explicit TestRenderWidgetHostView(RenderWidgetHost* host)
       : RenderWidgetHostViewAura(host) {}
   ~TestRenderWidgetHostView() override {}
 
@@ -190,14 +187,23 @@ void FakeKeyboardLockWebContentsDelegate::RequestKeyboardLock(
     WebContents* web_contents,
     bool esc_key_locked) {
   keyboard_lock_requested_ = true;
-  if (is_fullscreen_)
-    web_contents->GotResponseToKeyboardLockRequest(/*allowed=*/true);
+  web_contents->GotResponseToKeyboardLockRequest(/*allowed=*/true);
 }
 
 void FakeKeyboardLockWebContentsDelegate::CancelKeyboardLockRequest(
     WebContents* web_contents) {
   keyboard_lock_requested_ = false;
 }
+
+// A delegate that opts in to allowing keyboard lock for inner WebContents
+// (e.g. as Browser does for WebUIBrowserWindow tabs).
+class AllowInnerContentsKeyboardLockDelegate
+    : public FakeKeyboardLockWebContentsDelegate {
+ public:
+  bool AllowKeyboardLockForInnerContents(WebContents* web_contents) override {
+    return true;
+  }
+};
 
 }  // namespace
 
@@ -285,7 +291,6 @@ void KeyboardLockBrowserTest::SetUp() {
 
 void KeyboardLockBrowserTest::SetUpCommandLine(
     base::CommandLine* command_line) {
-  ContentBrowserTest::SetUpCommandLine(command_line);
   mock_cert_verifier_.SetUpCommandLine(command_line);
 }
 
@@ -333,8 +338,7 @@ void KeyboardLockBrowserTest::RequestKeyboardLock(
   // keyboard.lock() is an async call which requires a promise handling dance.
   bool result = EvalJs(web_contents()->GetPrimaryMainFrame(),
                        lock_all_keys ? kKeyboardLockMethodCallWithAllKeys
-                                     : kKeyboardLockMethodCallWithSomeKeys,
-                       EXECUTE_SCRIPT_USE_MANUAL_REPLY)
+                                     : kKeyboardLockMethodCallWithSomeKeys)
                     .ExtractBool();
 
   ASSERT_TRUE(result) << "Location: " << from_here.ToString();
@@ -617,8 +621,7 @@ IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest, LockCallWithAllInvalidKeys) {
   NavigateToTestURL(url_for_test);
 
   ASSERT_EQ(true,
-            EvalJs(web_contents(), kKeyboardLockMethodCallWithAllInvalidKeys,
-                   EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+            EvalJs(web_contents(), kKeyboardLockMethodCallWithAllInvalidKeys));
 
   // If no valid Keys are passed in, then keyboard lock will not be requested.
   ASSERT_FALSE(web_contents()->GetKeyboardLockWidget());
@@ -631,8 +634,7 @@ IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest, LockCallWithSomeInvalidKeys) {
   NavigateToTestURL(url_for_test);
 
   ASSERT_EQ(true,
-            EvalJs(web_contents(), kKeyboardLockMethodCallWithSomeInvalidKeys,
-                   EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+            EvalJs(web_contents(), kKeyboardLockMethodCallWithSomeInvalidKeys));
 
   // If some valid Keys are passed in, then keyboard lock will not be requested.
   ASSERT_FALSE(web_contents()->GetKeyboardLockWidget());
@@ -646,8 +648,7 @@ IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest,
   ASSERT_TRUE(web_contents()->GetKeyboardLockWidget());
 
   ASSERT_EQ(true,
-            EvalJs(web_contents(), kKeyboardLockMethodCallWithSomeInvalidKeys,
-                   EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+            EvalJs(web_contents(), kKeyboardLockMethodCallWithSomeInvalidKeys));
 
   // An invalid call will cancel any previous lock request.
   ASSERT_FALSE(web_contents()->GetKeyboardLockWidget());
@@ -665,8 +666,7 @@ IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest,
 
   ASSERT_EQ(true, EvalJs(child_frame, kKeyboardLockMethodExistanceCheck));
 
-  ASSERT_EQ(false, EvalJs(child_frame, kKeyboardLockMethodCallWithAllKeys,
-                          EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+  ASSERT_EQ(false, EvalJs(child_frame, kKeyboardLockMethodCallWithAllKeys));
 
   ASSERT_FALSE(web_contents()->GetKeyboardLockWidget());
 }
@@ -683,8 +683,7 @@ IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest,
 
   ASSERT_EQ(true, EvalJs(child_frame, kKeyboardLockMethodExistanceCheck));
 
-  ASSERT_EQ(false, EvalJs(child_frame, kKeyboardLockMethodCallWithAllKeys,
-                          EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+  ASSERT_EQ(false, EvalJs(child_frame, kKeyboardLockMethodCallWithAllKeys));
 
   ASSERT_FALSE(web_contents()->GetKeyboardLockWidget());
 }
@@ -787,17 +786,16 @@ IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest,
   ASSERT_EQ(main_frame, web_contents()->GetFocusedFrame());
 
   ASSERT_TRUE(ExecJs(child, kFocusInputFieldScript));
-  ASSERT_EQ("input-focus", EvalJs(child, "window.focus(); focusInputField();",
-                                  EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+  ASSERT_EQ("input-focus", EvalJs(child, "window.focus(); focusInputField();"));
   ASSERT_EQ(child, web_contents()->GetFocusedFrame());
   ASSERT_TRUE(web_contents()->GetRenderWidgetHostView()->IsKeyboardLocked());
 
-  SimulateKeyPress(web_contents(), "KeyB", "B");
-  SimulateKeyPress(web_contents(), "KeyL", "BL");
-  SimulateKeyPress(web_contents(), "KeyA", "BLA");
-  SimulateKeyPress(web_contents(), "KeyR", "BLAR");
-  SimulateKeyPress(web_contents(), "KeyG", "BLARG");
-  SimulateKeyPress(web_contents(), "KeyH", "BLARGH");
+  SimulateKeyPress(web_contents(), child, "KeyB", "B");
+  SimulateKeyPress(web_contents(), child, "KeyL", "BL");
+  SimulateKeyPress(web_contents(), child, "KeyA", "BLA");
+  SimulateKeyPress(web_contents(), child, "KeyR", "BLAR");
+  SimulateKeyPress(web_contents(), child, "KeyG", "BLARG");
+  SimulateKeyPress(web_contents(), child, "KeyH", "BLARGH");
   ASSERT_TRUE(web_contents()->GetRenderWidgetHostView()->IsKeyboardLocked());
 }
 
@@ -869,8 +867,7 @@ IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest,
 
   ASSERT_EQ(true, EvalJs(inner_contents, kKeyboardLockMethodExistanceCheck));
 
-  ASSERT_EQ(false, EvalJs(inner_contents, kKeyboardLockMethodCallWithAllKeys,
-                          EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+  ASSERT_EQ(false, EvalJs(inner_contents, kKeyboardLockMethodCallWithAllKeys));
 
   // Verify neither inner nor outer WebContents have a pending lock request.
   WebContentsImpl* inner_contents_impl =
@@ -880,6 +877,36 @@ IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest,
       inner_contents_impl->GetRenderWidgetHostView()->IsKeyboardLocked());
   ASSERT_FALSE(web_contents()->GetKeyboardLockWidget());
   ASSERT_FALSE(web_contents()->GetRenderWidgetHostView()->IsKeyboardLocked());
+}
+
+IN_PROC_BROWSER_TEST_F(
+    KeyboardLockBrowserTest,
+    LockRequestSucceedsFromInnerWebContentsWhenAllowedByDelegate) {
+  NavigateToTestURL(https_cross_site_frame());
+
+  // The first child is a same-origin iframe.
+  RenderFrameHost* main_frame = web_contents()->GetPrimaryMainFrame();
+  RenderFrameHost* child = ChildFrameAt(main_frame, 0);
+  ASSERT_TRUE(child);
+
+  WebContents* inner_contents = CreateAndAttachInnerContents(child);
+
+  // Use a delegate that opts in via AllowKeyboardLockForInnerContents().
+  AllowInnerContentsKeyboardLockDelegate allow_delegate;
+  inner_contents->SetDelegate(&allow_delegate);
+
+  ASSERT_TRUE(
+      NavigateToURLFromRenderer(inner_contents, https_fullscreen_frame()));
+
+  ASSERT_EQ(true, EvalJs(inner_contents, kKeyboardLockMethodExistanceCheck));
+
+  // The lock request should succeed because the delegate allows it.
+  ASSERT_EQ(true, EvalJs(inner_contents, kKeyboardLockMethodCallWithAllKeys));
+
+  // Verify the inner WebContents has an active keyboard lock request.
+  WebContentsImpl* inner_contents_impl =
+      static_cast<WebContentsImpl*>(inner_contents);
+  ASSERT_TRUE(inner_contents_impl->GetKeyboardLockWidget());
 }
 
 IN_PROC_BROWSER_TEST_F(KeyboardLockBrowserTest,

@@ -4,6 +4,8 @@
 
 #include "chromeos/ash/services/device_sync/public/mojom/device_sync_mojom_traits.h"
 
+#include "base/notreached.h"
+
 namespace mojo {
 
 ash::device_sync::mojom::ConnectivityStatus EnumTraits<
@@ -22,28 +24,23 @@ ash::device_sync::mojom::ConnectivityStatus EnumTraits<
     case cryptauthv2::ConnectivityStatus::
         ConnectivityStatus_INT_MAX_SENTINEL_DO_NOT_USE_:
       NOTREACHED();
-      return ash::device_sync::mojom::ConnectivityStatus::kUnknownConnectivity;
   }
 }
 
-bool EnumTraits<ash::device_sync::mojom::ConnectivityStatus,
-                cryptauthv2::ConnectivityStatus>::
-    FromMojom(ash::device_sync::mojom::ConnectivityStatus input,
-              cryptauthv2::ConnectivityStatus* out) {
+cryptauthv2::ConnectivityStatus
+EnumTraits<ash::device_sync::mojom::ConnectivityStatus,
+           cryptauthv2::ConnectivityStatus>::
+    FromMojom(ash::device_sync::mojom::ConnectivityStatus input) {
   switch (input) {
     case ash::device_sync::mojom::ConnectivityStatus::kOnline:
-      *out = cryptauthv2::ConnectivityStatus::ONLINE;
-      return true;
+      return cryptauthv2::ConnectivityStatus::ONLINE;
     case ash::device_sync::mojom::ConnectivityStatus::kOffline:
-      *out = cryptauthv2::ConnectivityStatus::OFFLINE;
-      return true;
+      return cryptauthv2::ConnectivityStatus::OFFLINE;
     case ash::device_sync::mojom::ConnectivityStatus::kUnknownConnectivity:
-      *out = cryptauthv2::ConnectivityStatus::UNKNOWN_CONNECTIVITY;
-      return true;
+      return cryptauthv2::ConnectivityStatus::UNKNOWN_CONNECTIVITY;
   }
 
   NOTREACHED();
-  return false;
 }
 
 ash::device_sync::mojom::GroupPrivateKeyStatus
@@ -85,59 +82,48 @@ EnumTraits<ash::device_sync::mojom::GroupPrivateKeyStatus,
   }
 
   NOTREACHED();
-  return ash::device_sync::mojom::GroupPrivateKeyStatus::
-      kStatusUnavailableBecauseDeviceSyncIsNotInitialized;
 }
 
-bool EnumTraits<ash::device_sync::mojom::GroupPrivateKeyStatus,
-                ash::device_sync::GroupPrivateKeyStatus>::
-    FromMojom(ash::device_sync::mojom::GroupPrivateKeyStatus input,
-              ash::device_sync::GroupPrivateKeyStatus* out) {
+ash::device_sync::GroupPrivateKeyStatus
+EnumTraits<ash::device_sync::mojom::GroupPrivateKeyStatus,
+           ash::device_sync::GroupPrivateKeyStatus>::
+    FromMojom(ash::device_sync::mojom::GroupPrivateKeyStatus input) {
   switch (input) {
     case ash::device_sync::mojom::GroupPrivateKeyStatus::
         kStatusUnavailableBecauseDeviceSyncIsNotInitialized:
-      *out = ash::device_sync::GroupPrivateKeyStatus::
+      return ash::device_sync::GroupPrivateKeyStatus::
           kStatusUnavailableBecauseDeviceSyncIsNotInitialized;
-      return true;
     case ash::device_sync::mojom::GroupPrivateKeyStatus::
         kStatusUnavailableBecauseNoDeviceSyncerSet:
-      *out = ash::device_sync::GroupPrivateKeyStatus::
+      return ash::device_sync::GroupPrivateKeyStatus::
           kStatusUnavailableBecauseNoDeviceSyncerSet;
-      return true;
     case ash::device_sync::mojom::GroupPrivateKeyStatus::
         kWaitingForGroupPrivateKey:
-      *out =
-          ash::device_sync::GroupPrivateKeyStatus::kWaitingForGroupPrivateKey;
-      return true;
+      return ash::device_sync::GroupPrivateKeyStatus::
+          kWaitingForGroupPrivateKey;
     case ash::device_sync::mojom::GroupPrivateKeyStatus::
         kNoEncryptedGroupPrivateKeyReceived:
-      *out = ash::device_sync::GroupPrivateKeyStatus::
+      return ash::device_sync::GroupPrivateKeyStatus::
           kNoEncryptedGroupPrivateKeyReceived;
-      return true;
     case ash::device_sync::mojom::GroupPrivateKeyStatus::
         kEncryptedGroupPrivateKeyEmpty:
-      *out = ash::device_sync::GroupPrivateKeyStatus::
+      return ash::device_sync::GroupPrivateKeyStatus::
           kEncryptedGroupPrivateKeyEmpty;
-      return true;
     case ash::device_sync::mojom::GroupPrivateKeyStatus::
         kLocalDeviceSyncBetterTogetherKeyMissing:
-      *out = ash::device_sync::GroupPrivateKeyStatus::
+      return ash::device_sync::GroupPrivateKeyStatus::
           kLocalDeviceSyncBetterTogetherKeyMissing;
-      return true;
     case ash::device_sync::mojom::GroupPrivateKeyStatus::
         kGroupPrivateKeyDecryptionFailed:
-      *out = ash::device_sync::GroupPrivateKeyStatus::
+      return ash::device_sync::GroupPrivateKeyStatus::
           kGroupPrivateKeyDecryptionFailed;
-      return true;
     case ash::device_sync::mojom::GroupPrivateKeyStatus::
         kGroupPrivateKeySuccessfullyDecrypted:
-      *out = ash::device_sync::GroupPrivateKeyStatus::
+      return ash::device_sync::GroupPrivateKeyStatus::
           kGroupPrivateKeySuccessfullyDecrypted;
-      return true;
   }
 
   NOTREACHED();
-  return false;
 }
 
 ash::device_sync::mojom::BetterTogetherMetadataStatus
@@ -171,48 +157,39 @@ EnumTraits<ash::device_sync::mojom::BetterTogetherMetadataStatus,
   }
 
   NOTREACHED();
-  return ash::device_sync::mojom::BetterTogetherMetadataStatus::
-      kStatusUnavailableBecauseDeviceSyncIsNotInitialized;
 }
 
-bool EnumTraits<ash::device_sync::mojom::BetterTogetherMetadataStatus,
-                ash::device_sync::BetterTogetherMetadataStatus>::
-    FromMojom(ash::device_sync::mojom::BetterTogetherMetadataStatus input,
-              ash::device_sync::BetterTogetherMetadataStatus* out) {
+ash::device_sync::BetterTogetherMetadataStatus
+EnumTraits<ash::device_sync::mojom::BetterTogetherMetadataStatus,
+           ash::device_sync::BetterTogetherMetadataStatus>::
+    FromMojom(ash::device_sync::mojom::BetterTogetherMetadataStatus input) {
   switch (input) {
     case ash::device_sync::mojom::BetterTogetherMetadataStatus::
         kStatusUnavailableBecauseDeviceSyncIsNotInitialized:
-      *out = ash::device_sync::BetterTogetherMetadataStatus::
+      return ash::device_sync::BetterTogetherMetadataStatus::
           kStatusUnavailableBecauseDeviceSyncIsNotInitialized;
-      return true;
     case ash::device_sync::mojom::BetterTogetherMetadataStatus::
         kStatusUnavailableBecauseNoDeviceSyncerSet:
-      *out = ash::device_sync::BetterTogetherMetadataStatus::
+      return ash::device_sync::BetterTogetherMetadataStatus::
           kStatusUnavailableBecauseNoDeviceSyncerSet;
-      return true;
     case ash::device_sync::mojom::BetterTogetherMetadataStatus::
         kWaitingToProcessDeviceMetadata:
-      *out = ash::device_sync::BetterTogetherMetadataStatus::
+      return ash::device_sync::BetterTogetherMetadataStatus::
           kWaitingToProcessDeviceMetadata;
-      return true;
     case ash::device_sync::mojom::BetterTogetherMetadataStatus::
         kGroupPrivateKeyMissing:
-      *out = ash::device_sync::BetterTogetherMetadataStatus::
+      return ash::device_sync::BetterTogetherMetadataStatus::
           kGroupPrivateKeyMissing;
-      return true;
     case ash::device_sync::mojom::BetterTogetherMetadataStatus::
         kEncryptedMetadataEmpty:
-      *out = ash::device_sync::BetterTogetherMetadataStatus::
+      return ash::device_sync::BetterTogetherMetadataStatus::
           kEncryptedMetadataEmpty;
-      return true;
     case ash::device_sync::mojom::BetterTogetherMetadataStatus::
         kMetadataDecrypted:
-      *out = ash::device_sync::BetterTogetherMetadataStatus::kMetadataDecrypted;
-      return true;
+      return ash::device_sync::BetterTogetherMetadataStatus::kMetadataDecrypted;
   }
 
   NOTREACHED();
-  return false;
 }
 
 ash::device_sync::mojom::FeatureStatusChange
@@ -230,24 +207,20 @@ EnumTraits<ash::device_sync::mojom::FeatureStatusChange,
   }
 }
 
-bool EnumTraits<ash::device_sync::mojom::FeatureStatusChange,
-                ash::device_sync::FeatureStatusChange>::
-    FromMojom(ash::device_sync::mojom::FeatureStatusChange input,
-              ash::device_sync::FeatureStatusChange* out) {
+ash::device_sync::FeatureStatusChange
+EnumTraits<ash::device_sync::mojom::FeatureStatusChange,
+           ash::device_sync::FeatureStatusChange>::
+    FromMojom(ash::device_sync::mojom::FeatureStatusChange input) {
   switch (input) {
     case ash::device_sync::mojom::FeatureStatusChange::kEnableExclusively:
-      *out = ash::device_sync::FeatureStatusChange::kEnableExclusively;
-      return true;
+      return ash::device_sync::FeatureStatusChange::kEnableExclusively;
     case ash::device_sync::mojom::FeatureStatusChange::kEnableNonExclusively:
-      *out = ash::device_sync::FeatureStatusChange::kEnableNonExclusively;
-      return true;
+      return ash::device_sync::FeatureStatusChange::kEnableNonExclusively;
     case ash::device_sync::mojom::FeatureStatusChange::kDisable:
-      *out = ash::device_sync::FeatureStatusChange::kDisable;
-      return true;
+      return ash::device_sync::FeatureStatusChange::kDisable;
   }
 
   NOTREACHED();
-  return false;
 }
 
 ash::device_sync::mojom::CryptAuthService EnumTraits<
@@ -259,30 +232,23 @@ ash::device_sync::mojom::CryptAuthService EnumTraits<
     case cryptauthv2::TargetService::DEVICE_SYNC:
       return ash::device_sync::mojom::CryptAuthService::kDeviceSync;
     case cryptauthv2::TargetService::TARGET_SERVICE_UNSPECIFIED:
-      [[fallthrough]];
     case cryptauthv2::TargetService::TargetService_INT_MIN_SENTINEL_DO_NOT_USE_:
-      [[fallthrough]];
     case cryptauthv2::TargetService::TargetService_INT_MAX_SENTINEL_DO_NOT_USE_:
       NOTREACHED();
-      return ash::device_sync::mojom::CryptAuthService::kDeviceSync;
   }
 }
 
-bool EnumTraits<ash::device_sync::mojom::CryptAuthService,
-                cryptauthv2::TargetService>::
-    FromMojom(ash::device_sync::mojom::CryptAuthService input,
-              cryptauthv2::TargetService* out) {
+cryptauthv2::TargetService EnumTraits<ash::device_sync::mojom::CryptAuthService,
+                                      cryptauthv2::TargetService>::
+    FromMojom(ash::device_sync::mojom::CryptAuthService input) {
   switch (input) {
     case ash::device_sync::mojom::CryptAuthService::kEnrollment:
-      *out = cryptauthv2::TargetService::ENROLLMENT;
-      return true;
+      return cryptauthv2::TargetService::ENROLLMENT;
     case ash::device_sync::mojom::CryptAuthService::kDeviceSync:
-      *out = cryptauthv2::TargetService::DEVICE_SYNC;
-      return true;
+      return cryptauthv2::TargetService::DEVICE_SYNC;
   }
 
   NOTREACHED();
-  return false;
 }
 
 }  // namespace mojo

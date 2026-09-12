@@ -4,6 +4,8 @@
 
 #include <vector>
 
+#include "base/strings/string_number_conversions.h"
+#include "build/build_config.h"
 #include "chrome/browser/interstitials/security_interstitial_page_test_utils.h"
 #include "chrome/browser/policy/safe_browsing_policy_test.h"
 #include "chrome/browser/profiles/profile.h"
@@ -67,8 +69,15 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
 
 // Test that when SSL error overriding is allowed, the origin list is ignored
 // and the proceed link appears on SSL blocking pages.
+// TODO(crbug.com/555854628): Flaky on Android.
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_SSLErrorOverridingAllowedEnabled \
+  DISABLED_SSLErrorOverridingAllowedEnabled
+#else
+#define MAYBE_SSLErrorOverridingAllowedEnabled SSLErrorOverridingAllowedEnabled
+#endif
 IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
-                       SSLErrorOverridingAllowedEnabled) {
+                       MAYBE_SSLErrorOverridingAllowedEnabled) {
   net::EmbeddedTestServer https_server_expired(
       net::EmbeddedTestServer::TYPE_HTTPS);
   https_server_expired.SetSSLConfig(net::EmbeddedTestServer::CERT_EXPIRED);
@@ -86,7 +95,7 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
 
   // Add a policy to allow overriding on specific sites only. Since
   // kSSLErrorOverrideAllowed is enabled, this should do nothing.
-  base::Value::List allow_list;
+  base::ListValue allow_list;
   allow_list.Append("example.com");
   PolicyMap policies;
   policies.Set(key::kSSLErrorOverrideAllowedForOrigins, POLICY_LEVEL_MANDATORY,
@@ -111,8 +120,16 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
 
 // Test that when SSL error overriding is disabled, the proceed link does not
 // appear appear on SSL blocking pages.
+// TODO(crbug.com/555854628): Flaky on Android.
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_SSLErrorOverridingAllowedDisabled \
+  DISABLED_SSLErrorOverridingAllowedDisabled
+#else
+#define MAYBE_SSLErrorOverridingAllowedDisabled \
+  SSLErrorOverridingAllowedDisabled
+#endif
 IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
-                       SSLErrorOverridingAllowedDisabled) {
+                       MAYBE_SSLErrorOverridingAllowedDisabled) {
   net::EmbeddedTestServer https_server_expired(
       net::EmbeddedTestServer::TYPE_HTTPS);
   https_server_expired.SetSSLConfig(net::EmbeddedTestServer::CERT_EXPIRED);
@@ -152,8 +169,16 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
 // Test that when SSL error overriding is disallowed by policy and the origin
 // list is configured, the proceed link does not appear on SSL blocking pages if
 // the page is not on the origin list.
+// TODO(crbug.com/555854628): Flaky on Android.
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_SSLErrorOverridingAllowedForOriginsWrongOrigin \
+  DISABLED_SSLErrorOverridingAllowedForOriginsWrongOrigin
+#else
+#define MAYBE_SSLErrorOverridingAllowedForOriginsWrongOrigin \
+  SSLErrorOverridingAllowedForOriginsWrongOrigin
+#endif
 IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
-                       SSLErrorOverridingAllowedForOriginsWrongOrigin) {
+                       MAYBE_SSLErrorOverridingAllowedForOriginsWrongOrigin) {
   net::EmbeddedTestServer https_server_expired(
       net::EmbeddedTestServer::TYPE_HTTPS);
   https_server_expired.SetSSLConfig(net::EmbeddedTestServer::CERT_EXPIRED);
@@ -175,7 +200,7 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
                POLICY_SCOPE_USER, POLICY_SOURCE_CLOUD, base::Value(false),
                nullptr);
   // Add a policy to allow overriding on specific sites only.
-  base::Value::List allow_list;
+  base::ListValue allow_list;
   allow_list.Append("example.com");
   policies.Set(key::kSSLErrorOverrideAllowedForOrigins, POLICY_LEVEL_MANDATORY,
                POLICY_SCOPE_USER, POLICY_SOURCE_CLOUD,
@@ -225,7 +250,7 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
   policies.Set(key::kSSLErrorOverrideAllowed, POLICY_LEVEL_MANDATORY,
                POLICY_SCOPE_USER, POLICY_SOURCE_CLOUD, base::Value(false),
                nullptr);
-  base::Value::List allow_list;
+  base::ListValue allow_list;
   // We ignore "*" or badly formed patterns as inputs.
   allow_list.Append("*");
   allow_list.Append("bad 127.0.0.1 input");
@@ -277,7 +302,7 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
                POLICY_SCOPE_USER, POLICY_SOURCE_CLOUD, base::Value(false),
                nullptr);
   // The policy is intentionally configured with an empty list for this test.
-  base::Value::List allow_list;
+  base::ListValue allow_list;
   policies.Set(key::kSSLErrorOverrideAllowedForOrigins, POLICY_LEVEL_MANDATORY,
                POLICY_SCOPE_USER, POLICY_SOURCE_CLOUD,
                base::Value(std::move(allow_list)), nullptr);
@@ -307,8 +332,16 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
 // Test that when SSL error overriding is disallowed by policy and the origin
 // list is configured, the proceed link appears on SSL blocking pages if the
 // page is on the origin list.
+// TODO(crbug.com/555854628): Flaky on Android.
+#if BUILDFLAG(IS_ANDROID)
+#define MAYBE_SSLErrorOverridingAllowedForOrigins \
+  DISABLED_SSLErrorOverridingAllowedForOrigins
+#else
+#define MAYBE_SSLErrorOverridingAllowedForOrigins \
+  SSLErrorOverridingAllowedForOrigins
+#endif
 IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
-                       SSLErrorOverridingAllowedForOrigins) {
+                       MAYBE_SSLErrorOverridingAllowedForOrigins) {
   net::EmbeddedTestServer https_server_expired(
       net::EmbeddedTestServer::TYPE_HTTPS);
   https_server_expired.SetSSLConfig(net::EmbeddedTestServer::CERT_EXPIRED);
@@ -331,7 +364,7 @@ IN_PROC_BROWSER_TEST_F(SafeBrowsingPolicyTest,
                nullptr);
   // Add a policy to allow overriding on specific sites only. The path should be
   // ignored.
-  base::Value::List allow_list;
+  base::ListValue allow_list;
   allow_list.Append("127.0.0.1/my/path/to/file.ext");
   policies.Set(key::kSSLErrorOverrideAllowedForOrigins, POLICY_LEVEL_MANDATORY,
                POLICY_SCOPE_USER, POLICY_SOURCE_CLOUD,

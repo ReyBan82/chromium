@@ -7,12 +7,8 @@
 #include <memory>
 #include <utility>
 
+#include "base/memory/raw_ptr.h"
 #include "base/no_destructor.h"
-#include "chrome/browser/ash/android_sms/android_sms_app_manager.h"
-#include "chrome/browser/ash/android_sms/android_sms_pairing_state_tracker_impl.h"
-#include "chrome/browser/ash/android_sms/android_sms_service_factory.h"
-#include "chrome/browser/ash/authpolicy/authpolicy_credentials_manager.h"
-#include "chrome/browser/ash/cryptauth/gcm_device_info_provider_impl.h"
 #include "chrome/browser/ash/device_sync/device_sync_client_factory.h"
 #include "chrome/browser/ash/multidevice_setup/auth_token_validator_factory.h"
 #include "chrome/browser/ash/multidevice_setup/auth_token_validator_impl.h"
@@ -47,19 +43,12 @@ class MultiDeviceSetupServiceHolder : public KeyedService {
     bool is_secondary_user =
         user->GetAccountId() != primary_user->GetAccountId();
 
-    android_sms::AndroidSmsService* android_sms_service =
-        android_sms::AndroidSmsServiceFactory::GetForBrowserContext(context);
     multidevice_setup_service_ = std::make_unique<MultiDeviceSetupService>(
         profile_->GetPrefs(),
         device_sync::DeviceSyncClientFactory::GetForProfile(profile_),
         AuthTokenValidatorFactory::GetForProfile(profile_),
         OobeCompletionTrackerFactory::GetForProfile(profile_),
-        android_sms_service ? android_sms_service->android_sms_app_manager()
-                            : nullptr,
-        android_sms_service
-            ? android_sms_service->android_sms_pairing_state_tracker()
-            : nullptr,
-        GcmDeviceInfoProviderImpl::GetInstance(), is_secondary_user);
+        is_secondary_user);
   }
 
   MultiDeviceSetupService* multidevice_setup_service() {
@@ -70,7 +59,7 @@ class MultiDeviceSetupServiceHolder : public KeyedService {
   // KeyedService:
   void Shutdown() override { multidevice_setup_service_.reset(); }
 
-  Profile* const profile_;
+  const raw_ptr<Profile> profile_;
   std::unique_ptr<MultiDeviceSetupService> multidevice_setup_service_;
 };
 
@@ -106,16 +95,26 @@ MultiDeviceSetupServiceFactory* MultiDeviceSetupServiceFactory::GetInstance() {
 }
 
 MultiDeviceSetupServiceFactory::MultiDeviceSetupServiceFactory()
-    : ProfileKeyedServiceFactory("MultiDeviceSetupService") {
+    : ProfileKeyedServiceFactory(
+          "MultiDeviceSetupService",
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/40257657): Check if this service is needed in
+              // Guest mode.
+              .WithGuest(ProfileSelection::kOriginalOnly)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kOriginalOnly)
+              .Build()) {
   DependsOn(device_sync::DeviceSyncClientFactory::GetInstance());
   DependsOn(AuthTokenValidatorFactory::GetInstance());
   DependsOn(OobeCompletionTrackerFactory::GetInstance());
-  DependsOn(android_sms::AndroidSmsServiceFactory::GetInstance());
 }
 
 MultiDeviceSetupServiceFactory::~MultiDeviceSetupServiceFactory() = default;
 
-KeyedService* MultiDeviceSetupServiceFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+MultiDeviceSetupServiceFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
   if (!multidevice_setup::AreAnyMultiDeviceFeaturesAllowed(
           Profile::FromBrowserContext(context)->GetPrefs())) {
@@ -125,7 +124,7 @@ KeyedService* MultiDeviceSetupServiceFactory::BuildServiceInstanceFor(
     return nullptr;
   }
 
-  return new MultiDeviceSetupServiceHolder(context);
+  return std::make_unique<MultiDeviceSetupServiceHolder>(context);
 }
 
 }  // namespace multidevice_setup

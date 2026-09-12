@@ -23,7 +23,7 @@ class CORE_EXPORT FrameCallback : public GarbageCollected<FrameCallback>,
                                   public NameClient {
  public:
   virtual void Trace(Visitor* visitor) const {}
-  const char* NameInHeapSnapshot() const override { return "FrameCallback"; }
+  const char* GetHumanReadableName() const override { return "FrameCallback"; }
   ~FrameCallback() override = default;
   virtual void Invoke(double) = 0;
 
@@ -53,7 +53,9 @@ class CORE_EXPORT FrameCallback : public GarbageCollected<FrameCallback>,
 class CORE_EXPORT V8FrameCallback : public FrameCallback {
  public:
   void Trace(Visitor*) const override;
-  const char* NameInHeapSnapshot() const override { return "V8FrameCallback"; }
+  const char* GetHumanReadableName() const override {
+    return "V8FrameCallback";
+  }
 
   explicit V8FrameCallback(V8FrameRequestCallback*);
   ~V8FrameCallback() override = default;
@@ -64,6 +66,11 @@ class CORE_EXPORT V8FrameCallback : public FrameCallback {
   Member<V8FrameRequestCallback> callback_;
 };
 
+enum class FrameCallbackType {
+  kWebExposed,
+  kInternal,
+};
+
 class CORE_EXPORT FrameRequestCallbackCollection final : public NameClient {
   DISALLOW_NEW();
 
@@ -72,27 +79,37 @@ class CORE_EXPORT FrameRequestCallbackCollection final : public NameClient {
 
   using CallbackId = int;
 
-  CallbackId RegisterFrameCallback(FrameCallback*);
-  void CancelFrameCallback(CallbackId);
+  CallbackId RegisterFrameCallback(FrameCallback*, FrameCallbackType type);
+  void CancelFrameCallback(CallbackId, FrameCallbackType type);
   void ExecuteFrameCallbacks(double high_res_now_ms,
                              double high_res_now_ms_legacy);
 
-  bool HasFrameCallback() const { return frame_callbacks_.size(); }
-  bool IsEmpty() const { return !HasFrameCallback(); }
+  bool HasFrameCallback() const {
+    return frame_callbacks_.size() || internal_frame_callbacks_.size();
+  }
 
   void Trace(Visitor*) const;
-  const char* NameInHeapSnapshot() const override {
+  const char* GetHumanReadableName() const override {
     return "FrameRequestCallbackCollection";
   }
 
  private:
   using CallbackList = HeapVector<Member<FrameCallback>>;
 
+  void ExecuteFrameCallbacksImpl(CallbackList& callbacks_to_invoke,
+                                 double high_res_now_ms,
+                                 double high_res_now_ms_legacy);
+
   CallbackList frame_callbacks_;
   // only non-empty while inside ExecuteCallbacks.
   CallbackList callbacks_to_invoke_;
 
   CallbackId next_callback_id_ = 0;
+
+  CallbackList internal_frame_callbacks_;
+  CallbackList internal_callbacks_to_invoke_;
+
+  CallbackId next_internal_callback_id_ = 0;
 
   Member<ExecutionContext> context_;
 };

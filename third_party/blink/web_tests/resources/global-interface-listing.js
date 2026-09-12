@@ -35,6 +35,7 @@ function globalInterfaceListing(
     'Int32Array',
     'Int8Array',
     'Intl',
+    'Iterator',
     'JSON',
     'Map',
     'Math',
@@ -137,6 +138,14 @@ function globalInterfaceListing(
     ]),
     Notification: new Set([
       'getter image',
+    ]),
+    SpeechRecognition: new Set([
+      'getter unspokenPunctuation',
+      'setter unspokenPunctuation',
+    ]),
+    webkitSpeechRecognition: new Set([
+      'getter unspokenPunctuation',
+      'setter unspokenPunctuation',
     ]),
   };
 

@@ -8,13 +8,12 @@
 #include "ash/quick_pair/common/device.h"
 #include "ash/quick_pair/common/fast_pair/fast_pair_feature_usage_metrics_logger.h"
 #include "ash/quick_pair/common/fast_pair/fast_pair_metrics.h"
-#include "ash/quick_pair/common/logging.h"
 #include "ash/quick_pair/common/pair_failure.h"
 #include "ash/quick_pair/repository/fast_pair/device_metadata.h"
 #include "ash/quick_pair/repository/fast_pair_repository.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
-#include "base/containers/contains.h"
+#include "components/cross_device/logging/logging.h"
 #include "components/prefs/pref_service.h"
 #include "device/bluetooth/bluetooth_adapter_factory.h"
 
@@ -106,6 +105,32 @@ void QuickPairMetricsLogger::OnGetAdapter(
   adapter_observation_.Observe(adapter_.get());
 }
 
+const device::BluetoothDevice* QuickPairMetricsLogger::GetBluetoothDevice(
+    scoped_refptr<Device> device) const {
+  if (!adapter_) {
+    return nullptr;
+  }
+
+  device::BluetoothDevice* bt_device = nullptr;
+  // First, try to get the Bluetooth Device via the classic address since it's
+  // more stable than the BLE address.
+  if (device->classic_address()) {
+    bt_device = adapter_->GetDevice(device->classic_address().value());
+    CD_LOG(VERBOSE, Feature::FP)
+        << __func__
+        << ": Structured Classic device found: " << (bt_device ? "yes" : "no");
+  }
+
+  if (!bt_device) {
+    bt_device = adapter_->GetDevice(device->ble_address());
+    CD_LOG(VERBOSE, Feature::FP)
+        << __func__
+        << ": Structured LE device found: " << (bt_device ? "yes" : "no");
+  }
+
+  return bt_device;
+}
+
 void QuickPairMetricsLogger::DevicePairedChanged(
     device::BluetoothAdapter* adapter,
     device::BluetoothDevice* device,
@@ -119,8 +144,7 @@ void QuickPairMetricsLogger::DevicePairedChanged(
   // only continue our check here if we have a newly paired device that was
   // paired with classic Bluetooth pairing.
   const std::string& classic_address = device->GetAddress();
-  if (!new_paired_status ||
-      base::Contains(fast_pair_addresses_, classic_address)) {
+  if (!new_paired_status || fast_pair_addresses_.contains(classic_address)) {
     return;
   }
 
@@ -181,18 +205,18 @@ void QuickPairMetricsLogger::OnDiscoveryAction(scoped_refptr<Device> device,
         case Protocol::kFastPairSubsequent:
           RecordSubsequentSuccessFunnelFlow(
               FastPairSubsequentSuccessFunnelEvent::kNotificationsClicked);
-          RecordStructuredPairingStarted(*device);
+          RecordStructuredPairingStarted(*device, GetBluetoothDevice(device));
           break;
         case Protocol::kFastPairInitial:
           RecordInitialSuccessFunnelFlow(
               FastPairInitialSuccessFunnelEvent::kNotificationsClicked);
-          RecordStructuredPairingStarted(*device);
+          RecordStructuredPairingStarted(*device, GetBluetoothDevice(device));
           break;
         case Protocol::kFastPairRetroactive:
           break;
       }
 
-      if (base::Contains(discovery_learn_more_devices_, device)) {
+      if (discovery_learn_more_devices_.contains(device)) {
         AttemptRecordingFastPairEngagementFlow(
             *device, FastPairEngagementFlowEvent::
                          kDiscoveryUiConnectPressedAfterLearnMorePressed);
@@ -231,7 +255,7 @@ void QuickPairMetricsLogger::OnDiscoveryAction(scoped_refptr<Device> device,
           device, FastPairEngagementFlowEvent::kDiscoveryUiLearnMorePressed);
       break;
     case DiscoveryAction::kDismissedByUser:
-      if (base::Contains(discovery_learn_more_devices_, device)) {
+      if (discovery_learn_more_devices_.contains(device)) {
         AttemptRecordingFastPairEngagementFlow(
             *device, FastPairEngagementFlowEvent::
                          kDiscoveryUiDismissedByUserAfterLearnMorePressed);
@@ -248,7 +272,7 @@ void QuickPairMetricsLogger::OnDiscoveryAction(scoped_refptr<Device> device,
           device, FastPairEngagementFlowEvent::kDiscoveryUiDismissedByUser);
       break;
     case DiscoveryAction::kDismissedByOs:
-      if (base::Contains(discovery_learn_more_devices_, device)) {
+      if (discovery_learn_more_devices_.contains(device)) {
         AttemptRecordingFastPairEngagementFlow(
             *device, FastPairEngagementFlowEvent::
                          kDiscoveryUiDismissedAfterLearnMorePressed);
@@ -265,7 +289,7 @@ void QuickPairMetricsLogger::OnDiscoveryAction(scoped_refptr<Device> device,
           device, FastPairEngagementFlowEvent::kDiscoveryUiDismissed);
       break;
     case DiscoveryAction::kDismissedByTimeout:
-      if (base::Contains(discovery_learn_more_devices_, device)) {
+      if (discovery_learn_more_devices_.contains(device)) {
         AttemptRecordingFastPairEngagementFlow(
             *device, FastPairEngagementFlowEvent::
                          kDiscoveryUiDismissedByTimeoutAfterLearnMorePressed);
@@ -314,6 +338,8 @@ void QuickPairMetricsLogger::OnDeviceFound(scoped_refptr<Device> device) {
       *device, FastPairEngagementFlowEvent::kDiscoveryUiShown);
   GetDeviceMetadataAndLogEngagementFunnelWithMetadata(
       device, FastPairEngagementFlowEvent::kDiscoveryUiShown);
+  RecordStructuredDiscoveryNotificationShown(*device,
+                                             GetBluetoothDevice(device));
 }
 
 void QuickPairMetricsLogger::OnPairingStart(scoped_refptr<Device> device) {
@@ -361,12 +387,12 @@ void QuickPairMetricsLogger::OnPairingComplete(scoped_refptr<Device> device) {
     case Protocol::kFastPairSubsequent:
       RecordSubsequentSuccessFunnelFlow(
           FastPairSubsequentSuccessFunnelEvent::kProcessComplete);
-      RecordStructuredPairingComplete(*device);
+      RecordStructuredPairingComplete(*device, GetBluetoothDevice(device));
       break;
     case Protocol::kFastPairInitial:
       RecordInitialSuccessFunnelFlow(
           FastPairInitialSuccessFunnelEvent::kProcessComplete);
-      RecordStructuredPairingComplete(*device);
+      RecordStructuredPairingComplete(*device, GetBluetoothDevice(device));
       break;
     case Protocol::kFastPairRetroactive:
       break;
@@ -385,15 +411,15 @@ void QuickPairMetricsLogger::OnRetroactivePairFound(
       device, FastPairRetroactiveEngagementFlowEvent::kAssociateAccountUiShown);
   RecordRetroactiveSuccessFunnelFlow(
       FastPairRetroactiveSuccessFunnelEvent::kDeviceDetected);
-  RecordStructuredPairingStarted(*device);
+  RecordStructuredPairingStarted(*device, GetBluetoothDevice(device));
 }
 
 void QuickPairMetricsLogger::OnAssociateAccountAction(
     scoped_refptr<Device> device,
     AssociateAccountAction action) {
   switch (action) {
-    case AssociateAccountAction::kAssoicateAccount: {
-      if (base::Contains(associate_account_learn_more_devices_, device)) {
+    case AssociateAccountAction::kAssociateAccount: {
+      if (associate_account_learn_more_devices_.contains(device)) {
         AttemptRecordingFastPairRetroactiveEngagementFlow(
             *device, FastPairRetroactiveEngagementFlowEvent::
                          kAssociateAccountSavePressedAfterLearnMorePressed);
@@ -437,7 +463,7 @@ void QuickPairMetricsLogger::OnAssociateAccountAction(
                       kAssociateAccountLearnMorePressed);
       break;
     case AssociateAccountAction::kDismissedByUser:
-      if (base::Contains(associate_account_learn_more_devices_, device)) {
+      if (associate_account_learn_more_devices_.contains(device)) {
         AttemptRecordingFastPairRetroactiveEngagementFlow(
             *device, FastPairRetroactiveEngagementFlowEvent::
                          kAssociateAccountDismissedByUserAfterLearnMorePressed);
@@ -456,7 +482,7 @@ void QuickPairMetricsLogger::OnAssociateAccountAction(
                       kAssociateAccountUiDismissedByUser);
       break;
     case AssociateAccountAction::kDismissedByTimeout:
-      if (base::Contains(associate_account_learn_more_devices_, device)) {
+      if (associate_account_learn_more_devices_.contains(device)) {
         AttemptRecordingFastPairRetroactiveEngagementFlow(
             *device,
             FastPairRetroactiveEngagementFlowEvent::
@@ -477,7 +503,7 @@ void QuickPairMetricsLogger::OnAssociateAccountAction(
                       kAssociateAccountUiDismissedByTimeout);
       break;
     case AssociateAccountAction::kDismissedByOs:
-      if (base::Contains(associate_account_learn_more_devices_, device)) {
+      if (associate_account_learn_more_devices_.contains(device)) {
         AttemptRecordingFastPairRetroactiveEngagementFlow(
             *device, FastPairRetroactiveEngagementFlowEvent::
                          kAssociateAccountDismissedAfterLearnMorePressed);
@@ -500,13 +526,12 @@ void QuickPairMetricsLogger::OnAssociateAccountAction(
 
 void QuickPairMetricsLogger::OnAccountKeyWrite(
     scoped_refptr<Device> device,
-    absl::optional<AccountKeyFailure> error) {
+    std::optional<AccountKeyFailure> error) {
   switch (device->protocol()) {
     case Protocol::kFastPairSubsequent:
       // TODO(b/259443372): Record this case once we implement account key
       // writing in all scenarios,
       NOTREACHED();
-      break;
     case Protocol::kFastPairInitial:
       break;
     case Protocol::kFastPairRetroactive:
@@ -515,7 +540,7 @@ void QuickPairMetricsLogger::OnAccountKeyWrite(
       if (!error.has_value()) {
         RecordRetroactiveSuccessFunnelFlow(
             FastPairRetroactiveSuccessFunnelEvent::kAccountKeyWrittenToDevice);
-        RecordStructuredPairingComplete(*device);
+        RecordStructuredPairingComplete(*device, GetBluetoothDevice(device));
       }
       // TODO(jackshira): Log new PairFailure case here.
       break;

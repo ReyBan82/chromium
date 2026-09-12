@@ -5,7 +5,6 @@
 #include "ui/display/win/uwp_text_scale_factor.h"
 
 #include <windows.h>
-
 #include <windows.ui.viewmanagement.h>
 #include <wrl/client.h>
 #include <wrl/event.h>
@@ -14,7 +13,6 @@
 
 #include "base/lazy_instance.h"
 #include "base/logging.h"
-#include "base/strings/string_piece.h"
 #include "base/threading/thread_checker.h"
 #include "base/win/core_winrt_util.h"
 #include "base/win/scoped_com_initializer.h"
@@ -51,13 +49,6 @@ bool g_default_instance_cleaned_up = false;
 // to a separate function.
 bool CreateUiSettingsComObject(ComPtr<IUISettings2>& ptr) {
   DCHECK(!ptr);
-
-  // This is required setup before using ScopedHString.
-  if (!(base::win::ResolveCoreWinRTDelayload() &&
-        base::win::ScopedHString::ResolveCoreWinRTStringDelayload())) {
-    DLOG(ERROR) << "Failed loading functions from combase.dll";
-    return false;
-  }
 
   // Create the COM object.
   auto hstring = base::win::ScopedHString::Create(
@@ -182,9 +173,7 @@ class UwpTextScaleFactorImpl : public UwpTextScaleFactor {
 UwpTextScaleFactor::UwpTextScaleFactor() = default;
 
 UwpTextScaleFactor::~UwpTextScaleFactor() {
-  for (auto& observer : observer_list_) {
-    observer.OnUwpTextScaleFactorCleanup(this);
-  }
+  observer_list_.Notify(&Observer::OnUwpTextScaleFactorCleanup, this);
 }
 
 float UwpTextScaleFactor::GetTextScaleFactor() const {
@@ -200,9 +189,7 @@ void UwpTextScaleFactor::RemoveObserver(Observer* observer) {
 }
 
 void UwpTextScaleFactor::NotifyUwpTextScaleFactorChanged() {
-  for (auto& observer : observer_list_) {
-    observer.OnUwpTextScaleFactorChanged();
-  }
+  observer_list_.Notify(&Observer::OnUwpTextScaleFactorChanged);
 }
 
 void UwpTextScaleFactor::SetImplementationForTesting(

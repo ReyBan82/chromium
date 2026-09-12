@@ -5,24 +5,30 @@
 #ifndef CHROME_BROWSER_SESSIONS_SESSION_SERVICE_LOOKUP_H_
 #define CHROME_BROWSER_SESSIONS_SESSION_SERVICE_LOOKUP_H_
 
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 
+namespace content {
+class WebContents;
+}
+
+class Profile;
 class SessionServiceBase;
 
 // Returns whether or not the argument specified is accepted and
 // tracked by AppSessionService instances.
-bool IsRelevantToAppSessionService(Browser::Type type);
+bool IsRelevantToAppSessionService(BrowserWindowInterface::Type type);
 bool IsRelevantToAppSessionService(content::WebContents* web_contents);
-bool IsRelevantToAppSessionService(Browser* browser);
+bool IsRelevantToAppSessionService(BrowserWindowInterface* browser);
 
 // These helpers help choose between AppSessionService and SessionService.
 SessionServiceBase* GetAppropriateSessionServiceForProfile(
-    const Browser* browser);
+    BrowserWindowInterface* browser);
 
 SessionServiceBase* GetAppropriateSessionServiceForSessionRestore(
-    const Browser* browser);
+    Profile* profile,
+    BrowserWindowInterface::Type type);
 
 SessionServiceBase* GetAppropriateSessionServiceIfExisting(
-    const Browser* browser);
+    BrowserWindowInterface* browser);
 
 #endif  // CHROME_BROWSER_SESSIONS_SESSION_SERVICE_LOOKUP_H_

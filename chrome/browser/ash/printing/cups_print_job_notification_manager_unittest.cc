@@ -26,17 +26,17 @@ class CupsPrintJobNotificationManagerTest : public testing::Test {
 
 TEST_F(CupsPrintJobNotificationManagerTest, PrintJobLifetimeCheck) {
   CupsPrintJob printJob(chromeos::Printer(), 0, std::string(), 1,
-                        crosapi::mojom::PrintJob::Source::kUnknown,
+                        ::printing::PrintJob::Source::kPrintPreview,
                         std::string(), printing::proto::PrintSettings());
 
   manager_.OnPrintJobCreated(printJob.GetWeakPtr());
-  absl::optional<CupsPrintJobNotification*> notification =
+  CupsPrintJobNotification* notification =
       manager_.GetNotificationForTesting(&printJob);
-  ASSERT_TRUE(notification.has_value());
+  ASSERT_TRUE(notification);
 
-  manager_.OnPrintJobNotificationRemoved(*notification);
+  manager_.OnPrintJobNotificationRemoved(notification);
   notification = manager_.GetNotificationForTesting(&printJob);
-  EXPECT_FALSE(notification.has_value());
+  EXPECT_FALSE(notification);
 
   // Call this just to make sure it doesn't crash.
   manager_.OnPrintJobCancelled(printJob.GetWeakPtr());

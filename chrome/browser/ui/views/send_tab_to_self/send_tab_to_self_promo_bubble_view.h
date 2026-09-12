@@ -5,8 +5,9 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_SEND_TAB_TO_SELF_SEND_TAB_TO_SELF_PROMO_BUBBLE_VIEW_H_
 #define CHROME_BROWSER_UI_VIEWS_SEND_TAB_TO_SELF_SEND_TAB_TO_SELF_PROMO_BUBBLE_VIEW_H_
 
-#include "base/memory/weak_ptr.h"
 #include "chrome/browser/ui/views/send_tab_to_self/send_tab_to_self_bubble_view.h"
+#include "components/signin/public/base/signin_buildflags.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 
 namespace content {
 class WebContents;
@@ -18,39 +19,49 @@ class View;
 
 namespace send_tab_to_self {
 
-class SendTabToSelfBubbleController;
+// Shown when the user is signed out, offering a promotional sign-in flow.
+class SendTabToSelfSignInPromoBubbleView : public SendTabToSelfBubbleView {
+  METADATA_HEADER(SendTabToSelfSignInPromoBubbleView, SendTabToSelfBubbleView)
 
-// View to promo the send-tab-to-self feature when it can't be used yet. There
-// are 2 cases.
-// a) User is signed out. The view will have a button to offer sign in.
-// b) User is signed in but has no other signed-in device to share a tab to. The
-// view will contain text explaining they can use the feature by signing in on
-// another device.
-class SendTabToSelfPromoBubbleView : public SendTabToSelfBubbleView {
  public:
-  // Bubble will be anchored to |anchor_view|.
-  SendTabToSelfPromoBubbleView(views::View* anchor_view,
-                               content::WebContents* web_contents,
-                               bool show_signin_button);
+  enum class PromoMode {
+    kSignIn,
+    kReauth,
+  };
 
-  ~SendTabToSelfPromoBubbleView() override;
+  SendTabToSelfSignInPromoBubbleView(views::BubbleAnchor anchor,
+                                     content::WebContents* web_contents,
+                                     PromoMode promo_mode);
+  SendTabToSelfSignInPromoBubbleView(
+      const SendTabToSelfSignInPromoBubbleView&) = delete;
+  SendTabToSelfSignInPromoBubbleView& operator=(
+      const SendTabToSelfSignInPromoBubbleView&) = delete;
+  ~SendTabToSelfSignInPromoBubbleView() override;
 
-  SendTabToSelfPromoBubbleView(const SendTabToSelfPromoBubbleView&) = delete;
-  SendTabToSelfPromoBubbleView& operator=(const SendTabToSelfPromoBubbleView&) =
-      delete;
-
-  // SendTabToSelfBubbleView:
-  void Hide() override;
-
-  // views::BubbleDialogDelegateView:
+  // views::WidgetObserver:
+  // Sets up header illustration or custom profile styling.
   void AddedToWidget() override;
 
+  // views::BubbleDialogDelegateView:
+  // Override to prevent the OK button from receiving initial focus on display.
+  views::View* GetInitiallyFocusedView() override;
+
  private:
-  void OnSignInButtonClicked();
+  // Constructs the basic, text-only layout for the sign-in promo.
+  // Used when the enhanced UI is disabled.
+  void InitBasicLayout();
 
-  void OnBackButtonClicked();
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+  // Constructs the modernized, enhanced layout for the sign-in promo.
+  void InitEnhancedLayout(PromoMode promo_mode);
+#endif
 
-  const base::WeakPtr<SendTabToSelfBubbleController> controller_;
+  // Launches the Dice sign-in tab.
+  void HandleSignInButtonClicked();
+
+  // Returns true if the modernized/enhanced sign-in promo UI should be shown
+  // instead of the legacy design.
+  bool IsEnhancedUiEnabled() const;
 };
 
 }  // namespace send_tab_to_self

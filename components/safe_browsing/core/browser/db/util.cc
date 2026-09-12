@@ -8,36 +8,23 @@
 
 namespace safe_browsing {
 
-ThreatMetadata::ThreatMetadata()
-    : threat_pattern_type(ThreatPatternType::NONE) {}
+ThreatMetadata::ThreatMetadata() = default;
 
 ThreatMetadata::ThreatMetadata(const ThreatMetadata& other) = default;
 
-ThreatMetadata::~ThreatMetadata() {}
+ThreatMetadata::ThreatMetadata(ThreatMetadata&& other) = default;
 
-bool ThreatMetadata::operator==(const ThreatMetadata& other) const {
-  return threat_pattern_type == other.threat_pattern_type &&
-         api_permissions == other.api_permissions &&
-         subresource_filter_match == other.subresource_filter_match &&
-         population_id == other.population_id;
-}
+ThreatMetadata& ThreatMetadata::operator=(const ThreatMetadata& other) =
+    default;
 
-bool ThreatMetadata::operator!=(const ThreatMetadata& other) const {
-  return !operator==(other);
-}
+ThreatMetadata& ThreatMetadata::operator=(ThreatMetadata&& other) = default;
+
+ThreatMetadata::~ThreatMetadata() = default;
 
 std::unique_ptr<base::trace_event::TracedValue> ThreatMetadata::ToTracedValue()
     const {
   auto value = std::make_unique<base::trace_event::TracedValue>();
 
-  value->SetInteger("threat_pattern_type",
-                    static_cast<int>(threat_pattern_type));
-
-  value->BeginArray("api_permissions");
-  for (const std::string& permission : api_permissions) {
-    value->AppendString(permission);
-  }
-  value->EndArray();
 
   value->BeginDictionary("subresource_filter_match");
   for (const auto& it : subresource_filter_match) {
@@ -48,7 +35,6 @@ std::unique_ptr<base::trace_event::TracedValue> ThreatMetadata::ToTracedValue()
   }
   value->EndDictionary();
 
-  value->SetString("popuplation_id", population_id);
   return value;
 }
 

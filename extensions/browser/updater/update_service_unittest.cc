@@ -2,22 +2,29 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "extensions/browser/updater/update_service.h"
+
 #include <stddef.h>
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/notreached.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
+#include "base/time/time.h"
 #include "base/values.h"
 #include "components/crx_file/id_util.h"
 #include "components/update_client/crx_update_item.h"
@@ -35,19 +42,15 @@
 #include "extensions/browser/updater/extension_downloader.h"
 #include "extensions/browser/updater/extension_update_data.h"
 #include "extensions/browser/updater/uninstall_ping_sender.h"
-#include "extensions/browser/updater/update_service.h"
 #include "extensions/common/extension_builder.h"
 #include "extensions/common/extension_features.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/common/extension_urls.h"
-#include "extensions/common/manifest_url_handlers.h"
-#include "extensions/common/value_builder.h"
+#include "extensions/common/manifest_handlers/manifest_url_handlers.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace {
-
-using UpdateClientEvents = update_client::UpdateClient::Observer::Events;
 
 class FakeUpdateClient : public update_client::UpdateClient {
  public:
@@ -58,7 +61,7 @@ class FakeUpdateClient : public update_client::UpdateClient {
 
   // Returns the data we've gotten from the CrxDataCallback for ids passed to
   // the Update function.
-  std::vector<absl::optional<update_client::CrxComponent>>* data() {
+  std::vector<std::optional<update_client::CrxComponent>>* data() {
     return &data_;
   }
 
@@ -85,7 +88,9 @@ class FakeUpdateClient : public update_client::UpdateClient {
     if (observer)
       observers_.push_back(observer);
   }
+
   void RemoveObserver(Observer* observer) override {}
+
   base::RepeatingClosure Install(
       const std::string& id,
       CrxDataCallback crx_data_callback,
@@ -93,11 +98,21 @@ class FakeUpdateClient : public update_client::UpdateClient {
       update_client::Callback callback) override {
     return base::DoNothing();
   }
+
   void Update(const std::vector<std::string>& ids,
               CrxDataCallback crx_data_callback,
               CrxStateChangeCallback crx_state_change_callback,
               bool is_foreground,
               update_client::Callback callback) override;
+
+  void CheckForUpdate(const std::string& id,
+                      CrxDataCallback crx_data_callback,
+                      CrxStateChangeCallback crx_state_change_callback,
+                      bool is_foreground,
+                      update_client::Callback callback) override {
+    NOTREACHED();
+  }
+
   bool GetCrxUpdateState(
       const std::string& id,
       update_client::CrxUpdateItem* update_item) const override {
@@ -114,16 +129,26 @@ class FakeUpdateClient : public update_client::UpdateClient {
       update_item->custom_updatecheck_data = custom_attributes;
     return true;
   }
+
   bool IsUpdating(const std::string& id) const override { return false; }
+
   void Stop() override {}
-  void SendUninstallPing(const update_client::CrxComponent& crx_component,
-                         int reason,
-                         update_client::Callback callback) override {
+
+  bool Cancel(const std::string& id) override { return false; }
+
+  void SendPing(const update_client::CrxComponent& crx_component,
+                PingParams ping_params,
+                update_client::Callback callback) override {
     uninstall_pings_.emplace_back(crx_component.app_id, crx_component.version,
-                                  reason);
+                                  ping_params.extra_code1);
   }
 
-  void set_delay_update() { delay_update_ = true; }
+  void CleanupStaleDownloads(base::Time older_than,
+                             base::OnceClosure callback) override {}
+
+  void set_delay_update(base::RepeatingClosure on_update) {
+    delay_update_ = on_update;
+  }
 
   void set_is_malware_update_item() { is_malware_update_item_ = true; }
 
@@ -131,9 +156,8 @@ class FakeUpdateClient : public update_client::UpdateClient {
     allowlist_state = state;
   }
 
-  bool delay_update() const { return delay_update_; }
-
   UpdateRequest& update_request(int index) { return delayed_requests_[index]; }
+
   int num_update_requests() const {
     return static_cast<int>(delayed_requests_.size());
   }
@@ -197,29 +221,35 @@ class FakeUpdateClient : public update_client::UpdateClient {
     Finish(request);
   }
 
-  std::vector<absl::optional<update_client::CrxComponent>> data_;
+  std::vector<std::optional<update_client::CrxComponent>> data_;
   std::vector<UninstallPing> uninstall_pings_;
-  std::vector<Observer*> observers_;
+  std::vector<raw_ptr<Observer, VectorExperimental>> observers_;
 
-  bool delay_update_;
+  base::RepeatingClosure delay_update_;
   bool is_malware_update_item_ = false;
   extensions::AllowlistState allowlist_state = extensions::ALLOWLIST_UNDEFINED;
   std::vector<UpdateRequest> delayed_requests_;
 };
 
-FakeUpdateClient::FakeUpdateClient() : delay_update_(false) {}
+FakeUpdateClient::FakeUpdateClient() = default;
 
 void FakeUpdateClient::Update(const std::vector<std::string>& ids,
                               CrxDataCallback crx_data_callback,
                               CrxStateChangeCallback crx_state_change_callback,
                               bool is_foreground,
                               update_client::Callback callback) {
-  data_ = std::move(crx_data_callback).Run(ids);
+  std::move(crx_data_callback)
+      .Run(
+          ids,
+          base::BindLambdaForTesting(
+              [&](const std::vector<std::optional<update_client::CrxComponent>>&
+                      output) { data_ = output; }));
 
   UpdateRequest request{ids, crx_state_change_callback, std::move(callback)};
 
-  if (delay_update()) {
+  if (delay_update_) {
     delayed_requests_.push_back(std::move(request));
+    delay_update_.Run();
   } else {
     RunUpdate(request);
   }
@@ -252,13 +282,13 @@ class FakeExtensionSystem : public MockExtensionSystem {
   ~FakeExtensionSystem() override = default;
 
   struct InstallUpdateRequest {
-    InstallUpdateRequest(const std::string& extension_id,
+    InstallUpdateRequest(const ExtensionId& extension_id,
                          const base::FilePath& temp_dir,
                          bool install_immediately)
         : extension_id(extension_id),
           temp_dir(temp_dir),
           install_immediately(install_immediately) {}
-    std::string extension_id;
+    ExtensionId extension_id;
     base::FilePath temp_dir;
     bool install_immediately;
   };
@@ -272,27 +302,25 @@ class FakeExtensionSystem : public MockExtensionSystem {
   }
 
   // ExtensionSystem override
-  void InstallUpdate(const std::string& extension_id,
+  void InstallUpdate(const ExtensionId& extension_id,
                      const std::string& public_key,
                      const base::FilePath& temp_dir,
                      bool install_immediately,
                      InstallUpdateCallback install_update_callback) override {
     base::DeletePathRecursively(temp_dir);
-    install_requests_.push_back(
-        InstallUpdateRequest(extension_id, temp_dir, install_immediately));
+    install_requests_.emplace_back(extension_id, temp_dir, install_immediately);
     if (!next_install_callback_.is_null()) {
       std::move(next_install_callback_).Run();
     }
-    std::move(install_update_callback).Run(absl::nullopt);
+    std::move(install_update_callback).Run(std::nullopt);
   }
 
   void PerformActionBasedOnOmahaAttributes(
-      const std::string& extension_id,
-      const base::Value& attributes_value) override {
+      const ExtensionId& extension_id,
+      const base::DictValue& attributes) override {
     ExtensionRegistry* registry = ExtensionRegistry::Get(browser_context());
     scoped_refptr<const Extension> extension =
         ExtensionBuilder("1").SetVersion("1.2").SetID(extension_id).Build();
-    const base::Value::Dict& attributes = attributes_value.GetDict();
     const bool is_malware = attributes.FindBool("_malware").value_or(false);
     if (is_malware) {
       registry->AddDisabled(extension);
@@ -300,7 +328,7 @@ class FakeExtensionSystem : public MockExtensionSystem {
       registry->AddEnabled(extension);
     }
 
-    const absl::optional<bool> maybe_allowlisted =
+    const std::optional<bool> maybe_allowlisted =
         attributes.FindBool("_esbAllowlist");
     if (maybe_allowlisted) {
       extension_allowlist_states_[extension_id] =
@@ -309,13 +337,8 @@ class FakeExtensionSystem : public MockExtensionSystem {
     }
   }
 
-  bool FinishDelayedInstallationIfReady(const std::string& extension_id,
-                                        bool install_immediately) override {
-    return false;
-  }
-
-  AllowlistState GetExtensionAllowlistState(const std::string& extension_id) {
-    if (!base::Contains(extension_allowlist_states_, extension_id))
+  AllowlistState GetExtensionAllowlistState(const ExtensionId& extension_id) {
+    if (!extension_allowlist_states_.contains(extension_id))
       return ALLOWLIST_UNDEFINED;
 
     return extension_allowlist_states_[extension_id];
@@ -360,15 +383,44 @@ class UpdateServiceTest : public ExtensionsTest {
                           const base::FilePath& relative_path,
                           const std::string& content) {
     base::FilePath full_path = directory.Append(relative_path);
-    if (!CreateDirectory(full_path.DirName()))
-      return false;
-    int result = base::WriteFile(full_path, content.data(), content.size());
-    return (static_cast<size_t>(result) == content.size());
+    return base::CreateDirectory(full_path.DirName()) &&
+           base::WriteFile(full_path, content);
   }
 
   FakeExtensionSystem* extension_system() {
     return static_cast<FakeExtensionSystem*>(
         fake_extension_system_factory_.GetForBrowserContext(browser_context()));
+  }
+
+  void StartUpdateCheck(
+      bool delay,
+      ExtensionUpdateCheckParams params,
+      base::RepeatingCallback<void(const std::string&, const base::Version&)>
+          found_callback,
+      bool& called_back) {
+    base::RunLoop loop;
+    if (delay) {
+      update_client()->set_delay_update(loop.QuitClosure());
+    }
+    update_service()->StartUpdateCheck(
+        params, found_callback,
+        base::BindLambdaForTesting([&]() {
+          called_back = true;
+        }).Then(delay ? base::DoNothing() : loop.QuitClosure()));
+    loop.Run();
+  }
+
+  void StartUpdateCheck(bool delay,
+                        ExtensionUpdateCheckParams params,
+                        bool& found_update,
+                        bool& called_back) {
+    StartUpdateCheck(
+        delay, params,
+        base::BindLambdaForTesting(
+            [&](const std::string& id, const base::Version& version) {
+              found_update = true;
+            }),
+        called_back);
   }
 
   void BasicUpdateOperations(bool install_immediately,
@@ -412,9 +464,8 @@ class UpdateServiceTest : public ExtensionsTest {
             found_version = version;
           });
     }
-    update_service()->StartUpdateCheck(
-        update_check_params, update_found_callback,
-        base::BindOnce([](bool* executed) { *executed = true; }, &executed));
+    StartUpdateCheck(false, update_check_params, update_found_callback,
+                     executed);
     ASSERT_TRUE(executed);
     if (provide_update_found_callback) {
       EXPECT_EQ(found_id, extension1->id());
@@ -428,27 +479,6 @@ class UpdateServiceTest : public ExtensionsTest {
     update_client::CrxInstaller* installer = data->at(0)->installer.get();
     ASSERT_NE(installer, nullptr);
 
-    // The GetInstalledFile method is used when processing differential updates
-    // to get a path to an existing file in an extension. We want to test a
-    // number of scenarios to be user we handle invalid relative paths, don't
-    // accidentally return paths outside the extension's dir, etc.
-    base::FilePath tmp;
-    EXPECT_TRUE(installer->GetInstalledFile(foo_js.MaybeAsASCII(), &tmp));
-    EXPECT_EQ(temp_dir.GetPath().Append(foo_js), tmp) << tmp.value();
-
-    EXPECT_TRUE(installer->GetInstalledFile(bar_html.MaybeAsASCII(), &tmp));
-    EXPECT_EQ(temp_dir.GetPath().Append(bar_html), tmp) << tmp.value();
-
-    EXPECT_FALSE(installer->GetInstalledFile("does_not_exist", &tmp));
-    EXPECT_FALSE(installer->GetInstalledFile("does/not/exist", &tmp));
-    EXPECT_FALSE(installer->GetInstalledFile("/does/not/exist", &tmp));
-    EXPECT_FALSE(installer->GetInstalledFile("C:\\tmp", &tmp));
-
-    base::FilePath system_temp_dir;
-    ASSERT_TRUE(base::GetTempDir(&system_temp_dir));
-    EXPECT_FALSE(
-        installer->GetInstalledFile(system_temp_dir.MaybeAsASCII(), &tmp));
-
     // Test the install callback.
     base::ScopedTempDir new_version_dir;
     ASSERT_TRUE(new_version_dir.CreateUniqueTempDir());
@@ -459,8 +489,10 @@ class UpdateServiceTest : public ExtensionsTest {
         base::BindOnce(
             [](bool* done, const update_client::CrxInstaller::Result& result) {
               *done = true;
-              EXPECT_EQ(0, result.error);
-              EXPECT_EQ(0, result.extended_error);
+              EXPECT_EQ(result.result.category,
+                        update_client::ErrorCategory::kNone);
+              EXPECT_EQ(result.result.code, 0);
+              EXPECT_EQ(result.result.extra, 0);
             },
             &done));
 
@@ -480,7 +512,7 @@ class UpdateServiceTest : public ExtensionsTest {
   }
 
  private:
-  raw_ptr<UpdateService> update_service_ = nullptr;
+  raw_ptr<UpdateService, DanglingUntriaged> update_service_ = nullptr;
   scoped_refptr<FakeUpdateClient> update_client_;
   MockExtensionSystemFactory<FakeExtensionSystem>
       fake_extension_system_factory_;
@@ -560,27 +592,20 @@ TEST_F(UpdateServiceTest, UninstallPings) {
 }
 
 TEST_F(UpdateServiceTest, CheckOmahaMalwareAttributes) {
-  std::string extension_id = crx_file::id_util::GenerateId("id");
+  ExtensionId extension_id = crx_file::id_util::GenerateId("id");
   ExtensionRegistry* registry = ExtensionRegistry::Get(browser_context());
   scoped_refptr<const Extension> extension1 =
       ExtensionBuilder("1").SetVersion("1.2").SetID(extension_id).Build();
   EXPECT_TRUE(registry->AddEnabled(extension1));
 
   update_client()->set_is_malware_update_item();
-  update_client()->set_delay_update();
 
   ExtensionUpdateCheckParams update_check_params;
   update_check_params.update_info[extension_id] = ExtensionUpdateData();
 
   bool executed = false;
   bool found_update = false;
-  update_service()->StartUpdateCheck(
-      update_check_params,
-      base::BindLambdaForTesting(
-          [&found_update](const std::string& id, const base::Version& version) {
-            found_update = true;
-          }),
-      base::BindOnce([](bool* executed) { *executed = true; }, &executed));
+  StartUpdateCheck(true, update_check_params, found_update, executed);
   EXPECT_FALSE(found_update);
   EXPECT_FALSE(executed);
 
@@ -602,25 +627,18 @@ TEST_F(UpdateServiceTest, CheckOmahaMalwareAttributes) {
 }
 
 TEST_F(UpdateServiceTest, CheckOmahaAllowlistAttributes) {
-  std::string extension_id = crx_file::id_util::GenerateId("id");
+  ExtensionId extension_id = crx_file::id_util::GenerateId("id");
   scoped_refptr<const Extension> extension1 =
       ExtensionBuilder("1").SetVersion("1.2").SetID(extension_id).Build();
 
   update_client()->set_allowlist_state(extensions::ALLOWLIST_ALLOWLISTED);
-  update_client()->set_delay_update();
 
   ExtensionUpdateCheckParams update_check_params;
   update_check_params.update_info[extension_id] = ExtensionUpdateData();
 
   bool executed = false;
   bool found_update = false;
-  update_service()->StartUpdateCheck(
-      update_check_params,
-      base::BindLambdaForTesting(
-          [&found_update](const std::string& id, const base::Version& version) {
-            found_update = true;
-          }),
-      base::BindOnce([](bool* executed) { *executed = true; }, &executed));
+  StartUpdateCheck(true, update_check_params, found_update, executed);
   EXPECT_FALSE(found_update);
   EXPECT_FALSE(executed);
 
@@ -634,26 +652,19 @@ TEST_F(UpdateServiceTest, CheckOmahaAllowlistAttributes) {
 }
 
 TEST_F(UpdateServiceTest, CheckNoOmahaAttributes) {
-  std::string extension_id = crx_file::id_util::GenerateId("id");
+  ExtensionId extension_id = crx_file::id_util::GenerateId("id");
   ExtensionRegistry* registry = ExtensionRegistry::Get(browser_context());
   scoped_refptr<const Extension> extension1 =
       ExtensionBuilder("1").SetVersion("1.2").SetID(extension_id).Build();
   EXPECT_TRUE(registry->AddDisabled(extension1));
 
-  update_client()->set_delay_update();
 
   ExtensionUpdateCheckParams update_check_params;
   update_check_params.update_info[extension_id] = ExtensionUpdateData();
 
   bool found_update = false;
   bool executed = false;
-  update_service()->StartUpdateCheck(
-      update_check_params,
-      base::BindLambdaForTesting(
-          [&found_update](const std::string& id, const base::Version& version) {
-            found_update = true;
-          }),
-      base::BindOnce([](bool* executed) { *executed = true; }, &executed));
+  StartUpdateCheck(true, update_check_params, found_update, executed);
   EXPECT_FALSE(found_update);
   EXPECT_FALSE(executed);
 
@@ -673,7 +684,6 @@ TEST_F(UpdateServiceTest, CheckNoOmahaAttributes) {
 
 TEST_F(UpdateServiceTest, InProgressUpdate_Successful) {
   base::HistogramTester histogram_tester;
-  update_client()->set_delay_update();
   ExtensionUpdateCheckParams update_check_params;
 
   // Extensions with empty IDs will be ignored.
@@ -685,13 +695,7 @@ TEST_F(UpdateServiceTest, InProgressUpdate_Successful) {
 
   bool found_update = false;
   bool executed = false;
-  update_service()->StartUpdateCheck(
-      update_check_params,
-      base::BindLambdaForTesting(
-          [&found_update](const std::string& id, const base::Version& version) {
-            found_update = true;
-          }),
-      base::BindOnce([](bool* executed) { *executed = true; }, &executed));
+  StartUpdateCheck(true, update_check_params, found_update, executed);
   EXPECT_FALSE(found_update);
   EXPECT_FALSE(executed);
 
@@ -707,7 +711,6 @@ TEST_F(UpdateServiceTest, InProgressUpdate_Successful) {
 // lead to incorrect behaviour: corrupted extension won't be reinstalled.
 TEST_F(UpdateServiceTest, InProgressUpdate_DuplicateWithDifferentData) {
   base::HistogramTester histogram_tester;
-  update_client()->set_delay_update();
   ExtensionUpdateCheckParams uc1, uc2;
   uc1.update_info["A"] = ExtensionUpdateData();
 
@@ -717,27 +720,13 @@ TEST_F(UpdateServiceTest, InProgressUpdate_DuplicateWithDifferentData) {
 
   bool found_update1 = false;
   bool executed1 = false;
-  update_service()->StartUpdateCheck(
-      uc1,
-      base::BindLambdaForTesting(
-          [&found_update1](const std::string& id,
-                           const base::Version& version) {
-            found_update1 = true;
-          }),
-      base::BindOnce([](bool* executed) { *executed = true; }, &executed1));
+  StartUpdateCheck(true, uc1, found_update1, executed1);
   EXPECT_FALSE(found_update1);
   EXPECT_FALSE(executed1);
 
   bool found_update2 = false;
   bool executed2 = false;
-  update_service()->StartUpdateCheck(
-      uc2,
-      base::BindLambdaForTesting(
-          [&found_update2](const std::string& id,
-                           const base::Version& version) {
-            found_update2 = true;
-          }),
-      base::BindOnce([](bool* executed) { *executed = true; }, &executed2));
+  StartUpdateCheck(true, uc2, found_update2, executed2);
   EXPECT_FALSE(found_update2);
   EXPECT_FALSE(executed2);
 
@@ -767,7 +756,6 @@ TEST_F(UpdateServiceTest, InProgressUpdate_DuplicateWithDifferentData) {
 TEST_F(UpdateServiceTest, InProgressUpdate_NonOverlapped) {
   // 2 non-overallped update requests.
   base::HistogramTester histogram_tester;
-  update_client()->set_delay_update();
   ExtensionUpdateCheckParams uc1, uc2;
 
   uc1.update_info["A"] = ExtensionUpdateData();
@@ -779,27 +767,13 @@ TEST_F(UpdateServiceTest, InProgressUpdate_NonOverlapped) {
 
   bool found_update1 = false;
   bool executed1 = false;
-  update_service()->StartUpdateCheck(
-      uc1,
-      base::BindLambdaForTesting(
-          [&found_update1](const std::string& id,
-                           const base::Version& version) {
-            found_update1 = true;
-          }),
-      base::BindOnce([](bool* executed) { *executed = true; }, &executed1));
+  StartUpdateCheck(true, uc1, found_update1, executed1);
   EXPECT_FALSE(found_update1);
   EXPECT_FALSE(executed1);
 
   bool found_update2 = false;
   bool executed2 = false;
-  update_service()->StartUpdateCheck(
-      uc2,
-      base::BindLambdaForTesting(
-          [&found_update2](const std::string& id,
-                           const base::Version& version) {
-            found_update2 = true;
-          }),
-      base::BindOnce([](bool* executed) { *executed = true; }, &executed2));
+  StartUpdateCheck(true, uc2, found_update2, executed2);
   EXPECT_FALSE(found_update2);
   EXPECT_FALSE(executed2);
 

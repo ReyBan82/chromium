@@ -33,6 +33,7 @@
 #include "third_party/blink/renderer/core/svg/svg_parser_utilities.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/heap/visitor.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
@@ -51,24 +52,13 @@ SVGNumberOptionalNumber* SVGNumberOptionalNumber::Clone() const {
                                                        second_number_->Clone());
 }
 
-SVGPropertyBase* SVGNumberOptionalNumber::CloneForAnimation(
-    const String& value) const {
-  float x, y;
-  if (!ParseNumberOptionalNumber(value, x, y)) {
-    x = y = 0;
-  }
-
-  return MakeGarbageCollected<SVGNumberOptionalNumber>(
-      MakeGarbageCollected<SVGNumber>(x), MakeGarbageCollected<SVGNumber>(y));
-}
-
 String SVGNumberOptionalNumber::ValueAsString() const {
   if (first_number_->Value() == second_number_->Value()) {
     return String::Number(first_number_->Value());
   }
 
-  return String::Number(first_number_->Value()) + " " +
-         String::Number(second_number_->Value());
+  return StrCat({String::Number(first_number_->Value()), " ",
+                 String::Number(second_number_->Value())});
 }
 
 SVGParsingError SVGNumberOptionalNumber::SetValueAsString(const String& value) {
@@ -90,13 +80,14 @@ void SVGNumberOptionalNumber::SetInitial(unsigned value) {
   second_number_->SetInitial(value);
 }
 
-void SVGNumberOptionalNumber::Add(const SVGPropertyBase* other,
+bool SVGNumberOptionalNumber::Add(const SVGPropertyBase* other,
                                   const SVGElement* context_element) {
   auto* other_number_optional_number = To<SVGNumberOptionalNumber>(other);
   first_number_->Add(other_number_optional_number->FirstNumber(),
                      context_element);
   second_number_->Add(other_number_optional_number->SecondNumber(),
                       context_element);
+  return true;
 }
 
 void SVGNumberOptionalNumber::CalculateAnimatedValue(

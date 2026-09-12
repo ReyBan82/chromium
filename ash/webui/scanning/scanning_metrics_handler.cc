@@ -54,7 +54,7 @@ void ScanningMetricsHandler::RegisterMessages() {
 }
 
 void ScanningMetricsHandler::HandleRecordNumScanSettingChanges(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
 
   CHECK_EQ(1U, args.size());
@@ -63,7 +63,7 @@ void ScanningMetricsHandler::HandleRecordNumScanSettingChanges(
 }
 
 void ScanningMetricsHandler::HandleRecordScanCompleteAction(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
 
   CHECK_EQ(1U, args.size());
@@ -73,32 +73,31 @@ void ScanningMetricsHandler::HandleRecordScanCompleteAction(
 }
 
 void ScanningMetricsHandler::HandleRecordScanJobSettings(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
 
   CHECK_EQ(1U, args.size());
-  const base::Value& scan_job_settings = args[0];
-  CHECK(scan_job_settings.is_dict());
+  const base::DictValue& scan_job_settings = args[0].GetDict();
 
   base::UmaHistogramEnumeration(
       "Scanning.ScanJobSettings.Source",
       static_cast<mojo_ipc::SourceType>(
-          scan_job_settings.FindIntPath(kSourceType).value()));
+          scan_job_settings.FindInt(kSourceType).value()));
   base::UmaHistogramEnumeration(
       "Scanning.ScanJobSettings.FileType",
       static_cast<mojo_ipc::FileType>(
-          scan_job_settings.FindIntPath(kFileType).value()));
+          scan_job_settings.FindInt(kFileType).value()));
   base::UmaHistogramEnumeration(
       "Scanning.ScanJobSettings.ColorMode",
       static_cast<mojo_ipc::ColorMode>(
-          scan_job_settings.FindIntPath(kColorMode).value()));
+          scan_job_settings.FindInt(kColorMode).value()));
   base::UmaHistogramEnumeration(
       "Scanning.ScanJobSettings.PageSize",
       static_cast<mojo_ipc::PageSize>(
-          scan_job_settings.FindIntPath(kPageSize).value()));
+          scan_job_settings.FindInt(kPageSize).value()));
   const scanning::ScanJobSettingsResolution resolution =
       scanning::GetResolutionEnumValue(
-          scan_job_settings.FindIntPath(kResolution).value());
+          scan_job_settings.FindInt(kResolution).value());
   if (resolution != scanning::ScanJobSettingsResolution::kUnexpectedDpi) {
     base::UmaHistogramEnumeration("Scanning.ScanJobSettings.Resolution",
                                   resolution);
@@ -106,7 +105,7 @@ void ScanningMetricsHandler::HandleRecordScanJobSettings(
 }
 
 void ScanningMetricsHandler::HandleRecordNumCompletedScans(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
 
   CHECK_EQ(1U, args.size());

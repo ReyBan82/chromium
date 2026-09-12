@@ -6,16 +6,19 @@
 #define COMPONENTS_ZOOM_ZOOM_CONTROLLER_H_
 
 #include <memory>
+#include <optional>
 
+#include "base/callback_list.h"
 #include "base/compiler_specific.h"
+#include "base/containers/flat_map.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "components/prefs/pref_member.h"
 #include "content/public/browser/host_zoom_map.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents_user_data.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class ZoomControllerTest;
 
@@ -28,7 +31,7 @@ class ZoomObserver;
 
 class ZoomRequestClient : public base::RefCounted<ZoomRequestClient> {
  public:
-  ZoomRequestClient() {}
+  ZoomRequestClient() = default;
 
   ZoomRequestClient(const ZoomRequestClient&) = delete;
   ZoomRequestClient& operator=(const ZoomRequestClient&) = delete;
@@ -36,16 +39,27 @@ class ZoomRequestClient : public base::RefCounted<ZoomRequestClient> {
   virtual bool ShouldSuppressBubble() const = 0;
 
  protected:
-  virtual ~ZoomRequestClient() {}
+  virtual ~ZoomRequestClient() = default;
 
  private:
   friend class base::RefCounted<ZoomRequestClient>;
 };
 
-// Per-tab class to manage zoom changes and the Omnibox zoom icon. Lives on the
+// A lock that disables zoom for the WebContents associated with the
+// ZoomController as long as it is held.
+class ZoomDisableLock {
+ public:
+  virtual ~ZoomDisableLock() = default;
+
+ protected:
+  ZoomDisableLock() = default;
+};
+
+// ZoomController manages zoom changes and the Omnibox zoom icon. It can be
+// created for main frames and subframes. Creating for subframes allows those
+// frames to have zoom behavior independent from the main frame's. Lives on the
 // UI thread.
-class ZoomController : public content::WebContentsObserver,
-                       public content::WebContentsUserData<ZoomController> {
+class ZoomController : public content::WebContentsObserver {
  public:
   // Defines how zoom changes are handled.
   enum ZoomMode {
@@ -75,16 +89,24 @@ class ZoomController : public content::WebContentsObserver,
 
   struct ZoomChangedEventData {
     ZoomChangedEventData(content::WebContents* web_contents,
+                         content::FrameTreeNodeId ftn_id,
                          double old_zoom_level,
                          double new_zoom_level,
                          ZoomController::ZoomMode zoom_mode,
                          bool can_show_bubble)
         : web_contents(web_contents),
+          frame_tree_node_id(ftn_id),
           old_zoom_level(old_zoom_level),
           new_zoom_level(new_zoom_level),
           zoom_mode(zoom_mode),
           can_show_bubble(can_show_bubble) {}
     raw_ptr<content::WebContents> web_contents;
+    // Since there can be multiple ZoomControllers for a given WebContents,
+    // include the FrameTreeNodeId to uniquely identify which one created this
+    // struct. One case where a single WebContents will have multiple
+    // ZoomControllers is in a GuestView with features::kGuestViewMPArch
+    // enabled.
+    content::FrameTreeNodeId frame_tree_node_id;
     double old_zoom_level;
     double new_zoom_level;
     ZoomController::ZoomMode zoom_mode;
@@ -95,6 +117,28 @@ class ZoomController : public content::WebContentsObserver,
   // a simple, safe and reliable method to find the current zoom level for a
   // given WebContents*.
   static double GetZoomLevelForWebContents(content::WebContents* web_contents);
+
+  // Used to create a ZoomController for the primary mainframe of
+  // `web_contents`.
+  static ZoomController* CreateForWebContents(
+      content::WebContents* web_contents);
+
+  // Use to create a ZoomController for a subframe in `web_contents`. The
+  // specified `rfh_id` must be for a local-root RenderFrameHost.
+  static ZoomController* CreateForWebContentsAndRenderFrameHost(
+      content::WebContents* web_contents,
+      content::GlobalRenderFrameHostId rfh_id);
+
+  // Retrieves the ZoomController for `web_contents` primary mainframe if it
+  // exists, otherwise returns nullptr.
+  static ZoomController* FromWebContents(
+      const content::WebContents* web_contents);
+
+  // Retrieves the ZoomController for `web_contents` and the specified `rfh_id`
+  // if it exists, otherwise returns nullptr.
+  static ZoomController* FromWebContentsAndRenderFrameHost(
+      const content::WebContents* web_contents,
+      content::GlobalRenderFrameHostId rfh_id);
 
   ZoomController(const ZoomController&) = delete;
   ZoomController& operator=(const ZoomController&) = delete;
@@ -150,6 +194,11 @@ class ZoomController : public content::WebContentsObserver,
   // Sets the zoom mode, which defines zoom behavior (see enum ZoomMode).
   void SetZoomMode(ZoomMode zoom_mode);
 
+  // Creates a lock that disables zoom. Zoom is disabled as long as the lock
+  // is alive. When all locks are destroyed, the zoom mode is restored to what
+  // it was.
+  std::unique_ptr<ZoomDisableLock> CreateZoomDisableLock();
+
   // Set and query whether or not the page scale factor is one.
   void SetPageScaleFactorIsOneForTesting(bool is_one);
   bool PageScaleFactorIsOne() const;
@@ -161,15 +210,53 @@ class ZoomController : public content::WebContentsObserver,
   void RenderFrameHostChanged(content::RenderFrameHost* old_host,
                               content::RenderFrameHost* new_host) override;
   void OnPageScaleFactorChanged(float page_scale_factor) override;
+  void FrameDeleted(content::FrameTreeNodeId ftn_id) override;
 
  protected:
   // Protected for testing.
-  explicit ZoomController(content::WebContents* web_contents);
+  explicit ZoomController(content::WebContents* web_contents,
+                          content::RenderFrameHost* rfh);
 
  private:
-  friend class content::WebContentsUserData<ZoomController>;
   friend class ::ZoomControllerTest;
+  class DisableLockImpl;
 
+  // A class to (i) be owned by WebContents as UserData, and (ii) own and manage
+  // all the ZoomControllers in that WebContents.
+  class Manager : public content::WebContentsUserData<Manager> {
+   public:
+    explicit Manager(content::WebContents* web_contents);
+    ~Manager() override;
+
+    ZoomController* GetZoomController(
+        const content::GlobalRenderFrameHostId& rfh_id) const;
+
+    void AddZoomControllerIfNecessary(
+        content::WebContents* web_contents,
+        const content::GlobalRenderFrameHostId& rfh_id);
+
+    // Called from ZoomController to notify that one of the ZoomControllers has
+    // had its frame deleted, meaning the ZoomCOntroller itself should be
+    // deleted.
+    void FrameDeleted(content::FrameTreeNodeId ftn_id);
+
+   private:
+    friend class content::WebContentsUserData<Manager>;
+
+    // The map is keyed on FrameTreeNodeId, but this class will
+    // have to update the map to account for frames being deleted. The
+    // ZoomController object will call out to the manager to provide the
+    // details.
+    base::flat_map<content::FrameTreeNodeId, std::unique_ptr<ZoomController>>
+        zoom_controller_map_;
+
+    WEB_CONTENTS_USER_DATA_KEY_DECL();
+  };
+
+  // Note: this function uses WebContents::UnsafeFindFrameByFrameTreeNodeId,
+  // so the RenderFrameHost* returned should be used immediately, and not
+  // stored.
+  content::RenderFrameHost* GetRenderFrameHost() const;
   void ResetZoomModeOnNavigationIfNeeded(const GURL& url);
   void OnZoomLevelChanged(const content::HostZoomMap::ZoomLevelChange& change);
 
@@ -178,6 +265,18 @@ class ZoomController : public content::WebContentsObserver,
   // meaning the change should apply to ~all sites. If it is not empty, the
   // change only affects sites with the given host.
   void UpdateState(const std::string& host);
+
+  // Applies a zoom mode change immediately, bypassing the disable-lock
+  // guard in SetZoomMode(). Only the lock plumbing (and SetZoomMode()
+  // itself, when no locks are held) should call this.
+  void SetZoomModeInternal(ZoomMode new_mode);
+
+  void AddDisableLock();
+  void RemoveDisableLock();
+
+  // Stores the FrameTreeNodeId of the RenderFrameHost this ZoomController was
+  // created with.
+  const content::FrameTreeNodeId frame_tree_node_id_;
 
   // True if changes to zoom level can trigger the zoom notification bubble.
   bool can_show_bubble_ = true;
@@ -208,9 +307,21 @@ class ZoomController : public content::WebContentsObserver,
   bool last_page_scale_factor_was_one_ = true;
 
   // If set, this value is returned in PageScaleFactorIsOne.
-  absl::optional<bool> page_scale_factor_is_one_for_testing_;
+  std::optional<bool> page_scale_factor_is_one_for_testing_;
 
-  WEB_CONTENTS_USER_DATA_KEY_DECL();
+  // The number of active ZoomDisableLocks. Zoom is disabled as long as this
+  // count is greater than 0.
+  int zoom_disable_lock_count_ = 0;
+
+  // The zoom mode to restore once all locks are released: the mode active when
+  // the first lock was acquired, or the most recently requested mode if
+  // SetZoomMode() was called while locked.
+  ZoomMode saved_zoom_mode_ = ZOOM_MODE_DEFAULT;
+
+  // Used to produce weak pointers for ZoomDisableLocks to safely detect
+  // ZoomController destruction. Must be the last member variable to ensure it
+  // is destroyed first.
+  base::WeakPtrFactory<ZoomController> weak_ptr_factory_{this};
 };
 
 }  // namespace zoom

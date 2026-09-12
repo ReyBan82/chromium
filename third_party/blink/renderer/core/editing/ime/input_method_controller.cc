@@ -26,15 +26,20 @@
 
 #include "third_party/blink/renderer/core/editing/ime/input_method_controller.h"
 
+#include <optional>
 #include <tuple>
 
+#include "base/feature_list.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/mojom/input/focus_type.mojom-blink.h"
+#include "third_party/blink/public/web/web_frame_widget.h"
+#include "third_party/blink/public/web/web_local_frame.h"
+#include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/dom_node_ids.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/dom/events/event_dispatcher.h"
 #include "third_party/blink/renderer/core/dom/events/scoped_event_queue.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
 #include "third_party/blink/renderer/core/dom/range.h"
 #include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/editing/commands/delete_selection_command.h"
@@ -45,6 +50,7 @@
 #include "third_party/blink/renderer/core/editing/frame_selection.h"
 #include "third_party/blink/renderer/core/editing/ime/edit_context.h"
 #include "third_party/blink/renderer/core/editing/markers/document_marker_controller.h"
+#include "third_party/blink/renderer/core/editing/markers/spell_check_marker.h"
 #include "third_party/blink/renderer/core/editing/markers/suggestion_marker_properties.h"
 #include "third_party/blink/renderer/core/editing/reveal_selection_scope.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
@@ -55,8 +61,11 @@
 #include "third_party/blink/renderer/core/events/composition_event.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/frame/local_frame_client.h"
+#include "third_party/blink/renderer/core/html/canvas/html_canvas_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_text_area_element.h"
+#include "third_party/blink/renderer/core/input/context_menu_allowed_scope.h"
 #include "third_party/blink/renderer/core/input/event_handler.h"
 #include "third_party/blink/renderer/core/input_type_names.h"
 #include "third_party/blink/renderer/core/keywords.h"
@@ -64,8 +73,11 @@
 #include "third_party/blink/renderer/core/layout/layout_theme.h"
 #include "third_party/blink/renderer/core/page/focus_controller.h"
 #include "third_party/blink/renderer/core/page/page.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
+
+using mojom::blink::FormControlType;
 
 namespace {
 
@@ -103,7 +115,7 @@ AtomicString GetInputModeAttribute(Element* element) {
 
   // TODO(dtapuska): We may wish to restrict this to a yet to be proposed
   // <contenteditable> or <richtext> element Mozilla discussed at TPAC 2016.
-  return element->FastGetAttribute(html_names::kInputmodeAttr).LowerASCII();
+  return element->FastGetAttribute(html_names::kInputmodeAttr).ToAsciiLower();
 }
 
 AtomicString GetEnterKeyHintAttribute(Element* element) {
@@ -124,7 +136,8 @@ AtomicString GetEnterKeyHintAttribute(Element* element) {
   if (!query_attribute)
     return AtomicString();
 
-  return element->FastGetAttribute(html_names::kEnterkeyhintAttr).LowerASCII();
+  return element->FastGetAttribute(html_names::kEnterkeyhintAttr)
+      .ToAsciiLower();
 }
 
 AtomicString GetVirtualKeyboardPolicyAttribute(Element* element) {
@@ -139,7 +152,7 @@ AtomicString GetVirtualKeyboardPolicyAttribute(Element* element) {
   if (virtual_keyboard_policy_value.IsNull())
     return AtomicString();
 
-  return virtual_keyboard_policy_value.LowerASCII();
+  return virtual_keyboard_policy_value.ToAsciiLower();
 }
 
 constexpr int kInvalidDeletionLength = -1;
@@ -147,21 +160,21 @@ constexpr bool IsInvalidDeletionLength(const int length) {
   return length == kInvalidDeletionLength;
 }
 
-int CalculateBeforeDeletionLengthsInCodePoints(
-    const String& text,
-    const int before_length_in_code_points,
-    const int selection_start) {
+int CalculateBeforeDeletionLengthsInCodePoints(const String& text,
+                                               int before_length_in_code_points,
+                                               int selection_start) {
   DCHECK_GE(before_length_in_code_points, 0);
   DCHECK_GE(selection_start, 0);
   DCHECK_LE(selection_start, static_cast<int>(text.length()));
 
-  const UChar* u_text = text.Characters16();
+  base::span<const UChar> u_text = text.Span16();
   BackwardCodePointStateMachine backward_machine;
   int counter = before_length_in_code_points;
   int deletion_start = selection_start;
   while (counter > 0 && deletion_start > 0) {
     const TextSegmentationMachineState state =
-        backward_machine.FeedPrecedingCodeUnit(u_text[deletion_start - 1]);
+        backward_machine.FeedPrecedingCodeUnit(
+            u_text[static_cast<size_t>(deletion_start - 1)]);
     // According to Android's InputConnection spec, we should do nothing if
     // |text| has invalid surrogate pair in the deletion range.
     if (state == TextSegmentationMachineState::kInvalid)
@@ -179,19 +192,18 @@ int CalculateBeforeDeletionLengthsInCodePoints(
   return -offset;
 }
 
-int CalculateAfterDeletionLengthsInCodePoints(
-    const String& text,
-    const int after_length_in_code_points,
-    const int selection_end) {
+int CalculateAfterDeletionLengthsInCodePoints(const String& text,
+                                              int after_length_in_code_points,
+                                              int selection_end) {
   DCHECK_GE(after_length_in_code_points, 0);
-  DCHECK_GE(selection_end, 0);
-  const int length = text.length();
-  DCHECK_LE(selection_end, length);
+  const auto end = base::checked_cast<wtf_size_t>(selection_end);
+  const wtf_size_t length = text.length();
+  DCHECK_LE(end, length);
 
-  const UChar* u_text = text.Characters16();
+  base::span<const UChar> u_text = text.Span16();
   ForwardCodePointStateMachine forward_machine;
   int counter = after_length_in_code_points;
-  int deletion_end = selection_end;
+  wtf_size_t deletion_end = end;
   while (counter > 0 && deletion_end < length) {
     const TextSegmentationMachineState state =
         forward_machine.FeedFollowingCodeUnit(u_text[deletion_end]);
@@ -208,18 +220,19 @@ int CalculateAfterDeletionLengthsInCodePoints(
     return kInvalidDeletionLength;
 
   const int offset = forward_machine.GetBoundaryOffset();
-  DCHECK_EQ(offset, deletion_end - selection_end);
+  DCHECK_EQ(static_cast<wtf_size_t>(offset), deletion_end - end);
   return offset;
 }
 
-Element* RootEditableElementOfSelection(const FrameSelection& frameSelection) {
-  const SelectionInDOMTree& selection = frameSelection.GetSelectionInDOMTree();
+Element* RootEditableElementOfSelection(const FrameSelection& frame_selection) {
+  const SelectionInDomTree& selection = frame_selection.GetSelectionInDomTree();
   if (selection.IsNone())
     return nullptr;
   // To avoid update layout, we attempt to get root editable element from
   // a position where script/user specified.
-  if (Element* editable = RootEditableElementOf(selection.Base()))
+  if (Element* editable = RootEditableElementOf(selection.Anchor())) {
     return editable;
+  }
 
   // This is work around for applications assumes a position before editable
   // element as editable[1]
@@ -227,11 +240,10 @@ Element* RootEditableElementOfSelection(const FrameSelection& frameSelection) {
 
   // TODO(editing-dev): Use of UpdateStyleAndLayout
   // needs to be audited. see http://crbug.com/590369 for more details.
-  frameSelection.GetDocument().UpdateStyleAndLayout(
+  frame_selection.GetDocument().UpdateStyleAndLayout(
       DocumentUpdateReason::kEditing);
-  const VisibleSelection& visibleSeleciton =
-      frameSelection.ComputeVisibleSelectionInDOMTree();
-  return RootEditableElementOf(visibleSeleciton.Start());
+  return RootEditableElementOf(
+      frame_selection.ComputeVisibleSelectionInDomTree().Start());
 }
 
 std::pair<ContainerNode*, PlainTextRange> PlainTextRangeForEphemeralRange(
@@ -253,10 +265,10 @@ int ComputeAutocapitalizeFlags(const Element* element) {
   // autocapitalization hint" for the focused element:
   // https://html.spec.whatwg.org/C/#used-autocapitalization-hint
   if (auto* input = DynamicTo<HTMLInputElement>(*html_element)) {
-    const AtomicString& input_type = input->type();
-    if (input_type == input_type_names::kEmail ||
-        input_type == input_type_names::kUrl ||
-        input_type == input_type_names::kPassword) {
+    FormControlType input_type = input->FormControlType();
+    if (input_type == FormControlType::kInputEmail ||
+        input_type == FormControlType::kInputUrl ||
+        input_type == FormControlType::kInputPassword) {
       // The autocapitalize IDL attribute value is ignored for these input
       // types, so we set the None flag.
       return kWebTextInputFlagAutocapitalizeNone;
@@ -265,13 +277,12 @@ int ComputeAutocapitalizeFlags(const Element* element) {
 
   int flags = 0;
 
-  DEFINE_STATIC_LOCAL(const AtomicString, none, ("none"));
   DEFINE_STATIC_LOCAL(const AtomicString, characters, ("characters"));
   DEFINE_STATIC_LOCAL(const AtomicString, words, ("words"));
   DEFINE_STATIC_LOCAL(const AtomicString, sentences, ("sentences"));
 
   const AtomicString& autocapitalize = html_element->autocapitalize();
-  if (autocapitalize == none) {
+  if (autocapitalize == keywords::kNone) {
     flags |= kWebTextInputFlagAutocapitalizeNone;
   } else if (autocapitalize == characters) {
     flags |= kWebTextInputFlagAutocapitalizeCharacters;
@@ -309,6 +320,8 @@ SuggestionMarker::SuggestionType ConvertImeTextSpanType(
     case ImeTextSpan::Type::kComposition:
     case ImeTextSpan::Type::kSuggestion:
       return SuggestionMarker::SuggestionType::kNotMisspelling;
+    case ImeTextSpan::Type::kPreviewStylusGesture:
+      NOTREACHED();
   }
 }
 
@@ -339,11 +352,7 @@ enum class InputMethodController::TypingContinuation { kContinue, kEnd };
 
 InputMethodController::InputMethodController(LocalDOMWindow& window,
                                              LocalFrame& frame)
-    : ExecutionContextLifecycleObserver(&window),
-      frame_(frame),
-      has_composition_(false),
-      last_vk_visibility_request_(
-          ui::mojom::VirtualKeyboardVisibilityRequest::NONE) {}
+    : ExecutionContextLifecycleObserver(&window), frame_(frame) {}
 
 InputMethodController::~InputMethodController() = default;
 
@@ -367,6 +376,10 @@ inline Editor& InputMethodController::GetEditor() const {
 
 LocalFrame& InputMethodController::GetFrame() const {
   return *frame_;
+}
+
+FrameSelection& InputMethodController::Selection() const {
+  return GetFrame().Selection();
 }
 
 void InputMethodController::DispatchCompositionUpdateEvent(LocalFrame& frame,
@@ -404,12 +417,11 @@ void InputMethodController::DispatchBeforeInputFromComposition(
     return;
   // TODO(editing-dev): Pass appropriate |ranges| after it's defined on spec.
   // http://w3c.github.io/editing/input-events.html#dom-inputevent-inputtype
-  const StaticRangeVector* ranges = nullptr;
+  const GCedStaticRangeVector* ranges = nullptr;
   if (auto* node = target->ToNode())
     ranges = TargetRangesForInputEvent(*node);
   InputEvent* before_input_event = InputEvent::CreateBeforeInput(
-      input_type, data, InputTypeIsCancelable(input_type),
-      InputEvent::EventIsComposing::kIsComposing, ranges);
+      input_type, data, InputEvent::EventIsComposing::kIsComposing, ranges);
   target->DispatchEvent(*before_input_event);
 }
 
@@ -446,15 +458,16 @@ void InputMethodController::InsertTextDuringCompositionWithEvents(
   if (!target)
     return;
 
+  DispatchCompositionUpdateEvent(frame, text);
+  // 'compositionupdate' event handler may destroy document.
+  if (!IsAvailable()) {
+    return;
+  }
+
   DispatchBeforeInputFromComposition(
       target, InputEvent::InputType::kInsertCompositionText, text);
 
   // 'beforeinput' event handler may destroy document.
-  if (!IsAvailable())
-    return;
-
-  DispatchCompositionUpdateEvent(frame, text);
-  // 'compositionupdate' event handler may destroy document.
   if (!IsAvailable())
     return;
 
@@ -473,8 +486,10 @@ void InputMethodController::InsertTextDuringCompositionWithEvents(
       if (text.empty())
         TypingCommand::DeleteSelection(*frame.GetDocument(), 0);
       frame.GetDocument()->UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
-      TypingCommand::InsertText(*frame.GetDocument(), text, options,
-                                composition_type, is_incremental_insertion);
+      TypingCommand::InsertText(
+          *frame.GetDocument(), text, options,
+          EditCommand::PasswordEchoBehavior::kEchoIfPasswordEchoTouchEnabled,
+          composition_type, is_incremental_insertion);
       break;
     case TypingCommand::TextCompositionType::kTextCompositionCancel:
       // TODO(editing-dev): Use TypingCommand::insertText after TextEvent was
@@ -501,20 +516,16 @@ void InputMethodController::Clear() {
 }
 
 void InputMethodController::ClearImeTextSpansByType(ImeTextSpan::Type type,
-                                                    unsigned text_start,
-                                                    unsigned text_end) {
+                                                    wtf_size_t text_start,
+                                                    wtf_size_t text_end) {
   Element* target = GetDocument().FocusedElement();
   if (!target)
     return;
 
-  Element* editable = GetFrame()
-                          .Selection()
-                          .ComputeVisibleSelectionInDOMTreeDeprecated()
-                          .RootEditableElement();
+  Element* editable =
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (!editable)
     return;
-
-  DCHECK(!GetDocument().NeedsLayoutTreeUpdate());
 
   const EphemeralRange range =
       PlainTextRange(text_start, text_end).CreateRange(*editable);
@@ -536,6 +547,10 @@ void InputMethodController::ClearImeTextSpansByType(ImeTextSpan::Type type,
       GetDocument().Markers().RemoveMarkersInRange(
           range, DocumentMarker::MarkerTypes::Composition());
       break;
+    case ImeTextSpan::Type::kPreviewStylusGesture:
+      GetDocument().Markers().RemoveMarkersInRange(
+          range, DocumentMarker::MarkerTypes::PreviewStylusGesture());
+      break;
   }
 }
 
@@ -550,6 +565,22 @@ void InputMethodController::SelectComposition() const {
   if (range.IsNull())
     return;
 
+  // When we select the composition (to be able to replace it), we must not
+  // claim that the selection is the result of an input event, even though
+  // the act of committing the composition _is_ an input event in itself.
+  // Otherwise, X11 clients would interpret the selection as a command to
+  // replace the primary selection (on the clipboard) with the contents
+  // of the composition.
+  bool old_handling_input_event = false;
+  WebFrameWidget* widget = nullptr;
+  if (GetFrame().Client() && GetFrame().Client()->GetWebFrame()) {
+    widget = GetFrame().Client()->GetWebFrame()->FrameWidget();
+  }
+  if (widget) {
+    old_handling_input_event = widget->HandlingInputEvent();
+    widget->SetHandlingInputEvent(false);
+  }
+
   // The composition can start inside a composed character sequence, so we have
   // to override checks. See <http://bugs.webkit.org/show_bug.cgi?id=15781>
 
@@ -558,8 +589,12 @@ void InputMethodController::SelectComposition() const {
   // SetShouldClearTypingStyle(true), which will cause problems applying
   // formatting during composition. See https://crbug.com/803278.
   GetFrame().Selection().SetSelection(
-      SelectionInDOMTree::Builder().SetBaseAndExtent(range).Build(),
+      SelectionInDomTree::Builder().SetBaseAndExtent(range).Build(),
       SetSelectionOptions());
+
+  if (widget) {
+    widget->SetHandlingInputEvent(old_handling_input_event);
+  }
 }
 
 bool IsTextTooLongAt(const Position& position) {
@@ -595,16 +630,13 @@ bool InputMethodController::FinishComposingText(
   if (confirm_behavior == kKeepSelection) {
     // Do not dismiss handles even if we are moving selection, because we will
     // eventually move back to the old selection offsets.
-    const bool is_handle_visible = GetFrame().Selection().IsHandleVisible();
+    const bool is_handle_visible = Selection().IsHandleVisible();
 
     // Maintain to direction of the original selection as it affects how the
     // selection can be extended.
     const PlainTextRange& old_offsets = GetSelectionOffsets();
     const bool is_forward_selection =
-        GetFrame()
-            .Selection()
-            .ComputeVisibleSelectionInDOMTreeDeprecated()
-            .IsBaseFirst();
+        Selection().ComputeVisibleSelectionInDomTree().IsAnchorFirst();
     RevealSelectionScope reveal_selection_scope(GetFrame());
 
     if (is_too_long) {
@@ -622,11 +654,11 @@ bool InputMethodController::FinishComposingText(
         EphemeralRangeForOffsets(old_offsets);
     if (old_selection_range.IsNull())
       return false;
-    const SelectionInDOMTree& selection =
-        is_forward_selection ? SelectionInDOMTree::Builder()
+    const SelectionInDomTree& selection =
+        is_forward_selection ? SelectionInDomTree::Builder()
                                    .SetAsForwardSelection(old_selection_range)
                                    .Build()
-                             : SelectionInDOMTree::Builder()
+                             : SelectionInDomTree::Builder()
                                    .SetAsBackwardSelection(old_selection_range)
                                    .Build();
     GetFrame().Selection().SetSelection(
@@ -663,28 +695,73 @@ bool InputMethodController::CommitText(
     const String& text,
     const Vector<ImeTextSpan>& ime_text_spans,
     int relative_caret_position) {
+  bool result;
   if (HasComposition()) {
-    return ReplaceCompositionAndMoveCaret(text, relative_caret_position,
-                                          ime_text_spans);
+    result = ReplaceCompositionAndMoveCaret(text, relative_caret_position,
+                                            ime_text_spans);
+  } else {
+    result =
+        InsertTextAndMoveCaret(text, relative_caret_position, ime_text_spans);
   }
 
-  return InsertTextAndMoveCaret(text, relative_caret_position, ime_text_spans);
+  // 'compositionend' event handler could remove current frame.
+  if (result && IsAvailable()) {
+    if (Node* focused_element = GetDocument().FocusedElement()) {
+      if (AXObjectCache* cache = GetDocument().ExistingAXObjectCache()) {
+        cache->HandleCommitText(focused_element, text.length());
+      }
+    }
+  }
+
+  return result;
 }
 
-bool InputMethodController::ReplaceText(const String& text,
-                                        PlainTextRange range) {
+bool InputMethodController::ReplaceTextAndKeepSelection(
+    const String& text,
+    const Vector<ImeTextSpan>& ime_text_spans,
+    PlainTextRange range) {
   EventQueueScope scope;
   const PlainTextRange old_selection(GetSelectionOffsets());
-  if (!SetSelectionOffsets(range))
+  if (!SetSelectionOffsets(range)) {
     return false;
-  if (!InsertText(text))
+  }
+  if (!InsertText(text)) {
     return false;
+  }
+
+  // TODO(editing-dev): The use of UpdateStyleAndLayout
+  // needs to be audited.  see http://crbug.com/590369 for more details.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+  Element* root_editable_element =
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
+  if (root_editable_element) {
+    AddImeTextSpans(ime_text_spans, root_editable_element, range.Start());
+  }
+
   wtf_size_t selection_delta = text.length() - range.length();
   wtf_size_t start = old_selection.Start();
   wtf_size_t end = old_selection.End();
   return SetSelectionOffsets(
       {start >= range.End() ? start + selection_delta : start,
        end >= range.End() ? end + selection_delta : end});
+}
+
+bool InputMethodController::ReplaceTextAndMoveCaret(
+    const String& text,
+    PlainTextRange range,
+    int relative_caret_position) {
+  EventQueueScope scope;
+  if (!SetSelectionOffsets(range))
+    return false;
+  if (!InsertText(text))
+    return false;
+
+  // TODO(editing-dev): The use of UpdateStyleAndLayout
+  // needs to be audited.  see http://crbug.com/590369 for more details.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+  return SetSelectionOffsets(
+      {range.Start() + text.length() + relative_caret_position,
+       range.Start() + text.length() + relative_caret_position});
 }
 
 bool InputMethodController::ReplaceComposition(const String& text) {
@@ -699,11 +776,9 @@ bool InputMethodController::ReplaceComposition(const String& text) {
   // Select the text that will be deleted or replaced.
   SelectComposition();
 
-  if (GetFrame()
-          .Selection()
-          .ComputeVisibleSelectionInDOMTreeDeprecated()
-          .IsNone())
+  if (Selection().ComputeVisibleSelectionInDomTree().IsNone()) {
     return false;
+  }
 
   if (!IsAvailable())
     return false;
@@ -735,7 +810,7 @@ static int ComputeAbsoluteCaretPosition(int text_start,
 void InputMethodController::AddImeTextSpans(
     const Vector<ImeTextSpan>& ime_text_spans,
     ContainerNode* base_element,
-    unsigned offset_in_plain_chars) {
+    wtf_size_t offset_in_plain_chars) {
   for (const auto& ime_text_span : ime_text_spans) {
     wtf_size_t ime_text_span_start =
         offset_in_plain_chars + ime_text_span.StartOffset();
@@ -758,6 +833,11 @@ void InputMethodController::AddImeTextSpans(
             ephemeral_line_range, ime_text_span.UnderlineColor(),
             ime_text_span.Thickness(), underline_style,
             ime_text_span.TextColor(), ime_text_span.BackgroundColor());
+        break;
+      }
+      case ImeTextSpan::Type::kPreviewStylusGesture: {
+        GetDocument().Markers().AddPreviewStylusGestureMarker(
+            ephemeral_line_range, ime_text_span.BackgroundColor());
         break;
       }
       case ImeTextSpan::Type::kAutocorrect:
@@ -801,6 +881,8 @@ void InputMethodController::AddImeTextSpans(
                 .SetBackgroundColor(ime_text_span.BackgroundColor())
                 .SetRemoveOnFinishComposing(
                     ime_text_span.NeedsRemovalOnFinishComposing())
+                .SetShouldHideSuggestionMenu(
+                    ime_text_span.ShouldHideSuggestionMenu())
                 .Build());
         break;
     }
@@ -812,10 +894,7 @@ bool InputMethodController::ReplaceCompositionAndMoveCaret(
     int relative_caret_position,
     const Vector<ImeTextSpan>& ime_text_spans) {
   Element* root_editable_element =
-      GetFrame()
-          .Selection()
-          .ComputeVisibleSelectionInDOMTreeDeprecated()
-          .RootEditableElement();
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (!root_editable_element)
     return false;
   DCHECK(HasComposition());
@@ -870,11 +949,11 @@ bool InputMethodController::InsertTextAndMoveCaret(
       return false;
   }
 
+  // TODO(editing-dev): The use of UpdateStyleAndLayout
+  // needs to be audited. see http://crbug.com/590369 for more details.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
   Element* root_editable_element =
-      GetFrame()
-          .Selection()
-          .ComputeVisibleSelectionInDOMTreeDeprecated()
-          .RootEditableElement();
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (root_editable_element) {
     AddImeTextSpans(ime_text_spans, root_editable_element, text_start);
   }
@@ -888,13 +967,15 @@ void InputMethodController::CancelComposition() {
   if (!HasComposition())
     return;
 
+  // TODO(editing-dev): Use of UpdateStyleAndLayout
+  // needs to be audited. see http://crbug.com/590369 for more details.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+
   RevealSelectionScope reveal_selection_scope(GetFrame());
 
-  if (GetFrame()
-          .Selection()
-          .ComputeVisibleSelectionInDOMTreeDeprecated()
-          .IsNone())
+  if (Selection().ComputeVisibleSelectionInDomTree().IsNone()) {
     return;
+  }
 
   Clear();
 
@@ -929,7 +1010,8 @@ void InputMethodController::SetComposition(
     const String& text,
     const Vector<ImeTextSpan>& ime_text_spans,
     int selection_start,
-    int selection_end) {
+    int selection_end,
+    mojom::blink::ImeState ime_state) {
   RevealSelectionScope reveal_selection_scope(GetFrame());
 
   // Updates styles before setting selection for composition to prevent
@@ -939,19 +1021,17 @@ void InputMethodController::SetComposition(
 
   SelectComposition();
 
-  if (GetFrame()
-          .Selection()
-          .ComputeVisibleSelectionInDOMTreeDeprecated()
-          .IsNone())
+  // TODO(editing-dev): The use of UpdateStyleAndLayout
+  // needs to be audited. see http://crbug.com/590369 for more details.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+
+  if (Selection().ComputeVisibleSelectionInDomTree().IsNone()) {
     return;
+  }
 
   Element* target = GetDocument().FocusedElement();
   if (!target)
     return;
-
-  // TODO(editing-dev): The use of UpdateStyleAndLayout
-  // needs to be audited. see http://crbug.com/590369 for more details.
-  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
 
   PlainTextRange selected_range = CreateSelectionRangeForSetComposition(
       selection_start, selection_end, text.length());
@@ -1027,7 +1107,7 @@ void InputMethodController::SetComposition(
   // the stack could end up not corresponding to the TypingCommand. Make sure we
   // don't crash in these cases (it's unclear what the composition range should
   // be set to in these cases, so we don't worry too much about that).
-  SelectionInDOMTree selection;
+  SelectionInDomTree selection;
   if (GetEditor().GetUndoStack().CanUndo()) {
     const UndoStep* undo_step = *GetEditor().GetUndoStack().UndoSteps().begin();
     const SelectionForUndoStep& undo_selection = undo_step->EndingSelection();
@@ -1036,26 +1116,33 @@ void InputMethodController::SetComposition(
   }
 
   // Find out what node has the composition now.
-  const Position base =
-      MostForwardCaretPosition(selection.Base(), kCanSkipOverEditingBoundary);
-  Node* base_node = base.AnchorNode();
-  if (!base_node || !base_node->IsTextNode())
+  const Position anchor =
+      MostForwardCaretPosition(selection.Anchor(), kCanSkipOverEditingBoundary);
+  Node* anchor_node = anchor.AnchorNode();
+  if (!anchor_node || !anchor_node->IsTextNode()) {
     return;
+  }
 
-  const Position extent = selection.Extent();
-  Node* extent_node = extent.AnchorNode();
+  const Position focus = selection.Focus();
+  Node* focus_node = focus.AnchorNode();
 
-  unsigned extent_offset = extent.ComputeOffsetInContainerNode();
-  unsigned base_offset = base.ComputeOffsetInContainerNode();
+  wtf_size_t focus_offset = focus.ComputeOffsetInContainerNode();
+  wtf_size_t anchor_offset = anchor.ComputeOffsetInContainerNode();
 
   has_composition_ = true;
   if (!composition_range_)
     composition_range_ = Range::Create(GetDocument());
-  composition_range_->setStart(base_node, base_offset);
-  composition_range_->setEnd(extent_node, extent_offset);
+  composition_range_->setStart(anchor_node, anchor_offset);
+  composition_range_->setEnd(focus_node, focus_offset);
+  if (Node* focused_element = GetDocument().FocusedElement()) {
+    if (AXObjectCache* cache = GetDocument().ExistingAXObjectCache()) {
+      cache->HandleSetComposition(focused_element, ime_state);
+    }
+  }
 
-  if (base_node->GetLayoutObject())
-    base_node->GetLayoutObject()->SetShouldDoFullPaintInvalidation();
+  if (anchor_node->GetLayoutObject()) {
+    anchor_node->GetLayoutObject()->SetShouldDoFullPaintInvalidation();
+  }
 
   // TODO(editing-dev): The use of UpdateStyleAndLayout
   // needs to be audited. see http://crbug.com/590369 for more details.
@@ -1093,7 +1180,7 @@ void InputMethodController::SetComposition(
         CompositionEphemeralRange(), Color::kTransparent,
         ui::mojom::ImeTextSpanThickness::kThin,
         ui::mojom::ImeTextSpanUnderlineStyle::kSolid, Color::kTransparent,
-        LayoutTheme::GetTheme().PlatformDefaultCompositionBackgroundColor());
+        LayoutTheme::PlatformDefaultCompositionBackgroundColor());
     return;
   }
 
@@ -1117,8 +1204,8 @@ PlainTextRange InputMethodController::CreateSelectionRangeForSetComposition(
 
 void InputMethodController::SetCompositionFromExistingText(
     const Vector<ImeTextSpan>& ime_text_spans,
-    unsigned composition_start,
-    unsigned composition_end) {
+    wtf_size_t composition_start,
+    wtf_size_t composition_end) {
   Element* target = GetDocument().FocusedElement();
   if (!target)
     return;
@@ -1126,14 +1213,13 @@ void InputMethodController::SetCompositionFromExistingText(
   if (!HasComposition() && !DispatchCompositionStartEvent(""))
     return;
 
-  Element* editable = GetFrame()
-                          .Selection()
-                          .ComputeVisibleSelectionInDOMTreeDeprecated()
-                          .RootEditableElement();
+  // TODO(editing-dev): The use of UpdateStyleAndLayout
+  // needs to be audited.  see http://crbug.com/590369 for more details.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+  Element* editable =
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (!editable)
     return;
-
-  DCHECK(!GetDocument().NeedsLayoutTreeUpdate());
 
   const EphemeralRange range =
       PlainTextRange(composition_start, composition_end).CreateRange(*editable);
@@ -1157,26 +1243,28 @@ void InputMethodController::SetCompositionFromExistingText(
     composition_range_ = Range::Create(GetDocument());
   composition_range_->setStart(range.StartPosition());
   composition_range_->setEnd(range.EndPosition());
+  if (Node* focused_element = GetDocument().FocusedElement()) {
+    if (AXObjectCache* cache = GetDocument().ExistingAXObjectCache()) {
+      cache->HandleSetComposition(focused_element,
+                                  mojom::blink::ImeState::kNone);
+    }
+  }
 
   DispatchCompositionUpdateEvent(GetFrame(), ComposingText());
 }
 
 void InputMethodController::AddImeTextSpansToExistingText(
     const Vector<ImeTextSpan>& ime_text_spans,
-    unsigned text_start,
-    unsigned text_end) {
+    wtf_size_t text_start,
+    wtf_size_t text_end) {
   Element* target = GetDocument().FocusedElement();
   if (!target)
     return;
 
-  Element* editable = GetFrame()
-                          .Selection()
-                          .ComputeVisibleSelectionInDOMTreeDeprecated()
-                          .RootEditableElement();
+  Element* editable =
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (!editable)
     return;
-
-  DCHECK(!GetDocument().NeedsLayoutTreeUpdate());
 
   const EphemeralRange range =
       PlainTextRange(text_start, text_end).CreateRange(*editable);
@@ -1204,8 +1292,8 @@ String InputMethodController::ComposingText() const {
 }
 
 PlainTextRange InputMethodController::GetSelectionOffsets() const {
-  const EphemeralRange range = FirstEphemeralRangeOf(
-      GetFrame().Selection().ComputeVisibleSelectionInDOMTreeDeprecated());
+  const EphemeralRange range =
+      FirstEphemeralRangeOf(Selection().ComputeVisibleSelectionInDomTree());
   if (range.IsNull())
     return PlainTextRange();
   const ContainerNode& element =
@@ -1219,50 +1307,64 @@ EphemeralRange InputMethodController::EphemeralRangeForOffsets(
   if (offsets.IsNull())
     return EphemeralRange();
   Element* root_editable_element =
-      GetFrame()
-          .Selection()
-          .ComputeVisibleSelectionInDOMTreeDeprecated()
-          .RootEditableElement();
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (!root_editable_element)
     return EphemeralRange();
-
-  DCHECK(!GetDocument().NeedsLayoutTreeUpdate());
 
   return offsets.CreateRange(*root_editable_element);
 }
 
 bool InputMethodController::SetSelectionOffsets(
     const PlainTextRange& selection_offsets) {
-  return SetSelectionOffsets(selection_offsets, TypingContinuation::kEnd);
+  return SetSelectionOffsets(selection_offsets, TypingContinuation::kEnd,
+                             /*show_handle=*/false,
+                             /*show_context_menu=*/false);
 }
 
 bool InputMethodController::SetSelectionOffsets(
     const PlainTextRange& selection_offsets,
-    TypingContinuation typing_continuation) {
+    TypingContinuation typing_continuation,
+    bool show_handle,
+    bool show_context_menu) {
   const EphemeralRange range = EphemeralRangeForOffsets(selection_offsets);
   if (range.IsNull())
     return false;
 
   GetFrame().Selection().SetSelection(
-      SelectionInDOMTree::Builder().SetBaseAndExtent(range).Build(),
+      SelectionInDomTree::Builder().SetBaseAndExtent(range).Build(),
       SetSelectionOptions::Builder()
           .SetShouldCloseTyping(typing_continuation == TypingContinuation::kEnd)
+          .SetShouldShowHandle(show_handle)
           .Build());
+
+  if (show_context_menu) {
+    ContextMenuAllowedScope scope;
+    GetFrame().GetEventHandler().ShowNonLocatedContextMenu(
+        /*override_target_element=*/nullptr,
+        ui::mojom::blink::MenuSourceType::kTouch);
+  }
   return true;
 }
 
 bool InputMethodController::SetEditableSelectionOffsets(
-    const PlainTextRange& selection_offsets) {
+    const PlainTextRange& selection_offsets,
+    bool show_handle,
+    bool show_context_menu) {
   return SetEditableSelectionOffsets(selection_offsets,
-                                     TypingContinuation::kEnd);
+                                     TypingContinuation::kEnd, show_handle,
+                                     show_context_menu);
 }
 
 bool InputMethodController::SetEditableSelectionOffsets(
     const PlainTextRange& selection_offsets,
-    TypingContinuation typing_continuation) {
+    TypingContinuation typing_continuation,
+    bool show_handle,
+    bool show_context_menu) {
   if (!GetEditor().CanEdit())
     return false;
-  return SetSelectionOffsets(selection_offsets, typing_continuation);
+
+  return SetSelectionOffsets(selection_offsets, typing_continuation,
+                             show_handle, show_context_menu);
 }
 
 void InputMethodController::RemoveSuggestionMarkerInCompositionRange() {
@@ -1281,10 +1383,7 @@ PlainTextRange InputMethodController::CreateRangeForSelection(
   end = std::max(end, start);
 
   Element* root_editable_element =
-      GetFrame()
-          .Selection()
-          .ComputeVisibleSelectionInDOMTreeDeprecated()
-          .RootEditableElement();
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (!root_editable_element)
     return PlainTextRange();
   const EphemeralRange& range =
@@ -1316,8 +1415,9 @@ PlainTextRange InputMethodController::CreateRangeForSelection(
 }
 
 bool InputMethodController::DeleteSelection() {
-  if (!GetFrame().Selection().ComputeVisibleSelectionInDOMTree().IsRange())
+  if (!Selection().ComputeVisibleSelectionInDomTree().IsRange()) {
     return true;
+  }
 
   Node* target = GetFrame().GetDocument()->FocusedElement();
   if (target) {
@@ -1330,6 +1430,9 @@ bool InputMethodController::DeleteSelection() {
       return false;
   }
 
+  // TODO(editing-dev): The use of UpdateStyleAndLayout
+  // needs to be audited.  see http://crbug.com/590369 for more details.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
   TypingCommand::DeleteSelection(GetDocument());
 
   // Frame could have been destroyed by the input event.
@@ -1337,8 +1440,8 @@ bool InputMethodController::DeleteSelection() {
 }
 
 bool InputMethodController::DeleteSelectionWithoutAdjustment() {
-  const SelectionInDOMTree& selection_in_dom_tree =
-      GetFrame().Selection().GetSelectionInDOMTree();
+  const SelectionInDomTree& selection_in_dom_tree =
+      GetFrame().Selection().GetSelectionInDomTree();
   if (selection_in_dom_tree.IsCaret())
     return true;
 
@@ -1405,6 +1508,7 @@ void InputMethodController::ExtendSelectionAndDelete(int before, int after) {
   // only the last code-point so that it's possible for a user to correct
   // a composition without starting it from the beginning.
   // http://crbug.com/37993
+  VisibleSelection visible_selection;
   do {
     if (!SetSelectionOffsets(PlainTextRange(
             std::max(static_cast<int>(selection_offsets.Start()) - before, 0),
@@ -1413,13 +1517,11 @@ void InputMethodController::ExtendSelectionAndDelete(int before, int after) {
     if (before == 0)
       break;
     ++before;
-  } while (GetFrame()
-                   .Selection()
-                   .ComputeVisibleSelectionInDOMTreeDeprecated()
-                   .Start() == GetFrame()
-                                   .Selection()
-                                   .ComputeVisibleSelectionInDOMTreeDeprecated()
-                                   .End() &&
+    // TODO(editing-dev): The use of UpdateStyleAndLayout
+    // needs to be audited.  see http://crbug.com/590369 for more details.
+    GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+    visible_selection = Selection().ComputeVisibleSelectionInDomTree();
+  } while (visible_selection.Start() == visible_selection.End() &&
            before <= static_cast<int>(selection_offsets.Start()));
   // TODO(editing-dev): Find a way to distinguish Forward and Backward.
   std::ignore = DeleteSelection();
@@ -1435,15 +1537,13 @@ void InputMethodController::DeleteSurroundingText(int before, int after) {
   if (selection_offsets.IsNull())
     return;
   Element* const root_editable_element =
-      GetFrame()
-          .Selection()
-          .ComputeVisibleSelectionInDOMTreeDeprecated()
-          .RootEditableElement();
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (!root_editable_element)
     return;
   int selection_start = static_cast<int>(selection_offsets.Start());
   int selection_end = static_cast<int>(selection_offsets.End());
 
+  std::optional<PlainTextRange> overridden_selection = std::nullopt;
   // Select the text to be deleted before SelectionState::kStart.
   if (before > 0 && selection_start > 0) {
     // In case of exceeding the left boundary.
@@ -1459,6 +1559,22 @@ void InputMethodController::DeleteSurroundingText(int before, int after) {
 
     selection_end = selection_end - (selection_start - start);
     selection_start = start;
+
+    // Required to prevent crashes during asynchronous Autofill filling flows
+    // where the keyboard remains active.
+    GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+
+    // The deletion above leaves the caret at [`start`, `start`], so to check if
+    // a listener changed the selection range we need to compare the start and
+    // end of the range against that value.
+    const PlainTextRange current_selection_offsets(GetSelectionOffsets());
+    if (!current_selection_offsets.IsNull() &&
+        (current_selection_offsets.Start() !=
+             static_cast<wtf_size_t>(selection_start) ||
+         current_selection_offsets.End() !=
+             static_cast<wtf_size_t>(selection_start))) {
+      overridden_selection.emplace(current_selection_offsets);
+    }
   }
 
   // Select the text to be deleted after SelectionState::kEnd.
@@ -1474,10 +1590,37 @@ void InputMethodController::DeleteSurroundingText(int before, int after) {
     const int end =
         PlainTextRange::Create(*root_editable_element, valid_range).End();
 
+    // TODO(editing-dev): The use of UpdateStyleAndLayout
+    // needs to be audited.  see http://crbug.com/590369 for more details.
+    GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
     if (!SetSelectionOffsets(PlainTextRange(selection_end, end)))
       return;
     if (!DeleteSelectionWithoutAdjustment())
       return;
+    const PlainTextRange current_selection_offsets(GetSelectionOffsets());
+    // The deletion above leaves the caret at [`end`, `end`], so to check if
+    // a listener changed the selection range we need to compare the start and
+    // end of the range against that value.
+    if (!current_selection_offsets.IsNull() &&
+        !overridden_selection.has_value() &&
+        (current_selection_offsets.Start() !=
+             static_cast<wtf_size_t>(selection_end) ||
+         current_selection_offsets.End() !=
+             static_cast<wtf_size_t>(selection_end))) {
+      overridden_selection.emplace(current_selection_offsets);
+    }
+  }
+
+  // TODO(editing-dev): The use of UpdateStyleAndLayout
+  // needs to be audited.  see http://crbug.com/590369 for more details.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+
+  // Check if the selection was modified by event listeners (e.g., via
+  // setSelectionRange in JavaScript). If so, respect the new selection
+  // instead of restoring the original one.
+  if (overridden_selection.has_value()) {
+    selection_start = overridden_selection->Start();
+    selection_end = overridden_selection->End();
   }
 
   SetSelectionOffsets(PlainTextRange(selection_start, selection_end));
@@ -1489,6 +1632,11 @@ void InputMethodController::DeleteSurroundingTextInCodePoints(int before,
   DCHECK_GE(after, 0);
   if (!GetEditor().CanEdit())
     return;
+
+  // Required to prevent crashes during asynchronous Autofill filling flows
+  // where the keyboard remains active.
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+
   const PlainTextRange selection_offsets(GetSelectionOffsets());
   if (selection_offsets.IsNull())
     return;
@@ -1522,6 +1670,23 @@ void InputMethodController::DeleteSurroundingTextInCodePoints(int before,
     return;
 
   return DeleteSurroundingText(before_length, after_length);
+}
+
+void InputMethodController::ExtendSelectionAndReplace(
+    int before,
+    int after,
+    const String& replacement_text) {
+  const PlainTextRange selection_offsets(GetSelectionOffsets());
+  if (selection_offsets.IsNull() || before < 0 || after < 0) {
+    return;
+  }
+
+  ReplaceTextAndMoveCaret(
+      replacement_text,
+      PlainTextRange(
+          std::max(static_cast<int>(selection_offsets.Start()) - before, 0),
+          selection_offsets.End() + after),
+      /*relative_caret_position=*/0);
 }
 
 void InputMethodController::GetLayoutBounds(gfx::Rect* control_bounds,
@@ -1591,17 +1756,18 @@ WebTextInputInfo InputMethodController::TextInputInfo() const {
 
   // TODO(editing-dev): The use of UpdateStyleAndLayout
   // needs to be audited.  see http://crbug.com/590369 for more details.
-  const EphemeralRange& first_range = FirstEphemeralRangeOf(
-      GetFrame().Selection().ComputeVisibleSelectionInDOMTreeDeprecated());
+  GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kEditing);
+  const EphemeralRange& first_range =
+      FirstEphemeralRangeOf(Selection().ComputeVisibleSelectionInDomTree());
 
   DocumentLifecycle::DisallowTransitionScope disallow_transition(
       GetDocument().Lifecycle());
 
   if (const Node* start_node = first_range.StartPosition().AnchorNode()) {
-    if (start_node->GetComputedStyle() &&
-        !start_node->GetComputedStyle()->IsHorizontalWritingMode()) {
-      if (RuntimeEnabledFeatures::ImeVerticalFlagEnabled())
-        info.flags |= kWebTextInputFlagVertical;
+    const ComputedStyle* style =
+        GetComputedStyleForElementOrLayoutObject(*start_node);
+    if (style && !style->IsHorizontalWritingMode()) {
+      info.flags |= kWebTextInputFlagVertical;
     }
   }
 
@@ -1640,19 +1806,44 @@ int InputMethodController::TextInputFlags() const {
 
   int flags = 0;
 
-  const AtomicString& autocomplete =
-      element->FastGetAttribute(html_names::kAutocompleteAttr);
-  if (autocomplete == "on")
-    flags |= kWebTextInputFlagAutocompleteOn;
-  else if (autocomplete == "off")
-    flags |= kWebTextInputFlagAutocompleteOff;
+  if (const AtomicString& autocomplete =
+          element->FastGetAttribute(html_names::kAutocompleteAttr)) {
+    if (EqualIgnoringAsciiCase(autocomplete, keywords::kOn)) {
+      flags |= kWebTextInputFlagAutocompleteOn;
+    } else if (EqualIgnoringAsciiCase(autocomplete, keywords::kOff)) {
+      flags |= kWebTextInputFlagAutocompleteOff;
+    }
+  }
 
-  const AtomicString& autocorrect =
-      element->FastGetAttribute(html_names::kAutocorrectAttr);
-  if (autocorrect == "on")
-    flags |= kWebTextInputFlagAutocorrectOn;
-  else if (autocorrect == "off")
-    flags |= kWebTextInputFlagAutocorrectOff;
+  if (RuntimeEnabledFeatures::WebAutocorrectByDefaultEnabled()) {
+    if (auto* html_element = DynamicTo<HTMLElement>(element)) {
+      // https://html.spec.whatwg.org/multipage/interaction.html#autocorrection
+      // The used autocorrection state is always On or Off (HTMLElement::
+      // autocorrect()), but several IME backends honor only the Off flag and
+      // otherwise apply their own (enabled) default. Treat Off as authoritative
+      // while emitting On only when the element explicitly requests it.
+      if (!html_element->autocorrect()) {
+        flags |= kWebTextInputFlagAutocorrectOff;
+      } else if (html_element->FastHasAttribute(html_names::kAutocorrectAttr)) {
+        // An explicit attribute that is present here resolves to On: an "off"
+        // value (or a URL/Email/Password type) already took the Off branch
+        // above, and the attribute's invalid and empty value defaults are both
+        // On.
+        flags |= kWebTextInputFlagAutocorrectOn;
+      }
+    }
+  } else {
+    // Without the feature, only an explicit autocorrect attribute sets a flag;
+    // the used-state defaulting and form-owner inheritance are not applied.
+    if (const AtomicString& autocorrect =
+            element->FastGetAttribute(html_names::kAutocorrectAttr)) {
+      if (EqualIgnoringAsciiCase(autocorrect, keywords::kOn)) {
+        flags |= kWebTextInputFlagAutocorrectOn;
+      } else if (EqualIgnoringAsciiCase(autocorrect, keywords::kOff)) {
+        flags |= kWebTextInputFlagAutocorrectOff;
+      }
+    }
+  }
 
   SpellcheckAttributeState spellcheck = element->GetSpellcheckAttributeState();
   if (spellcheck == kSpellcheckAttributeTrue)
@@ -1665,6 +1856,16 @@ int InputMethodController::TextInputFlags() const {
   if (auto* input = DynamicTo<HTMLInputElement>(element)) {
     if (input->HasBeenPasswordField())
       flags |= kWebTextInputFlagHasBeenPasswordField;
+  }
+
+  if (element->HasBeenHeuristicCustomPasswordCSS()) {
+    flags |= kWebTextInputFlagHasBeenCustomPassword;
+  }
+
+  if (auto* text_control = DynamicTo<TextControlElement>(element)) {
+    if (text_control->HasBeenHeuristicCustomPasswordJS()) {
+      flags |= kWebTextInputFlagHasBeenCustomPassword;
+    }
   }
 
   return flags;
@@ -1683,12 +1884,12 @@ int InputMethodController::ComputeWebTextInputNextPreviousFlags() const {
     return kWebTextInputFlagNone;
 
   int flags = kWebTextInputFlagNone;
-  if (page->GetFocusController().NextFocusableElementForImeAndAutofill(
+  if (page->GetFocusController().NextFocusableElementForIme(
           element, mojom::blink::FocusType::kForward)) {
     flags |= kWebTextInputFlagHaveNextFocusableElement;
   }
 
-  if (page->GetFocusController().NextFocusableElementForImeAndAutofill(
+  if (page->GetFocusController().NextFocusableElementForIme(
           element, mojom::blink::FocusType::kBackward)) {
     flags |= kWebTextInputFlagHavePreviousFocusableElement;
   }
@@ -1761,19 +1962,32 @@ void InputMethodController::SetVirtualKeyboardVisibilityRequest(
     ui::mojom::VirtualKeyboardVisibilityRequest vk_visibility_request) {
   // show/hide API behavior is only applicable for elements/editcontexts that
   // have manual VK policy.
-  if ((VirtualKeyboardPolicyOfFocusedElement() ==
-       ui::mojom::VirtualKeyboardPolicy::MANUAL) ||
-      (GetActiveEditContext() &&
-       GetActiveEditContext()->IsVirtualKeyboardPolicyManual())) {
+  if (VirtualKeyboardPolicyOfFocusedElement() ==
+      ui::mojom::VirtualKeyboardPolicy::MANUAL) {
     last_vk_visibility_request_ = vk_visibility_request;
   }  // else we don't change the last VK visibility request.
 }
 
 DOMNodeId InputMethodController::NodeIdOfFocusedElement() const {
-  return DOMNodeIds::IdForNode(GetDocument().FocusedElement());
+  Element* element = GetDocument().FocusedElement();
+  return element ? element->GetDomNodeId() : kInvalidDOMNodeId;
 }
 
 WebTextInputType InputMethodController::TextInputType() const {
+  if (!IsAvailable()) {
+    return kWebTextInputTypeNone;
+  }
+
+  // Since selection can never go inside a <canvas> element, if the user is
+  // editing inside a <canvas> with EditContext we need to handle that case
+  // directly before looking at the selection position.
+  if (GetActiveEditContext()) {
+    Element* element = GetDocument().FocusedElement();
+    if (IsA<HTMLCanvasElement>(element)) {
+      return kWebTextInputTypeContentEditable;
+    }
+  }
+
   if (!GetFrame().Selection().IsAvailable()) {
     // "mouse-capture-inside-shadow.html" reaches here.
     return kWebTextInputTypeNone;
@@ -1785,35 +1999,35 @@ WebTextInputType InputMethodController::TextInputType() const {
   if (!RootEditableElementOfSelection(GetFrame().Selection()))
     return kWebTextInputTypeNone;
 
-  if (!IsAvailable())
-    return kWebTextInputTypeNone;
-
   Element* element = GetDocument().FocusedElement();
-  if (!element)
+  if (!element) {
     return kWebTextInputTypeNone;
+  }
 
   if (auto* input = DynamicTo<HTMLInputElement>(*element)) {
-    const AtomicString& type = input->type();
+    FormControlType type = input->FormControlType();
 
     if (input->IsDisabledOrReadOnly())
       return kWebTextInputTypeNone;
 
-    if (type == input_type_names::kPassword)
-      return kWebTextInputTypePassword;
-    if (type == input_type_names::kSearch)
-      return kWebTextInputTypeSearch;
-    if (type == input_type_names::kEmail)
-      return kWebTextInputTypeEmail;
-    if (type == input_type_names::kNumber)
-      return kWebTextInputTypeNumber;
-    if (type == input_type_names::kTel)
-      return kWebTextInputTypeTelephone;
-    if (type == input_type_names::kUrl)
-      return kWebTextInputTypeURL;
-    if (type == input_type_names::kText)
-      return kWebTextInputTypeText;
-
-    return kWebTextInputTypeNone;
+    switch (type) {
+      case FormControlType::kInputPassword:
+        return kWebTextInputTypePassword;
+      case FormControlType::kInputSearch:
+        return kWebTextInputTypeSearch;
+      case FormControlType::kInputEmail:
+        return kWebTextInputTypeEmail;
+      case FormControlType::kInputNumber:
+        return kWebTextInputTypeNumber;
+      case FormControlType::kInputTelephone:
+        return kWebTextInputTypeTelephone;
+      case FormControlType::kInputUrl:
+        return kWebTextInputTypeURL;
+      case FormControlType::kInputText:
+        return kWebTextInputTypeText;
+      default:
+        return kWebTextInputTypeNone;
+    }
   }
 
   if (auto* textarea = DynamicTo<HTMLTextAreaElement>(*element)) {
@@ -1853,24 +2067,22 @@ void InputMethodController::Trace(Visitor* visitor) const {
   ExecutionContextLifecycleObserver::Trace(visitor);
 }
 
-WebVector<ui::ImeTextSpan> InputMethodController::GetImeTextSpans() const {
+std::vector<ui::ImeTextSpan> InputMethodController::GetImeTextSpans() const {
   DCHECK(!GetDocument().NeedsLayoutTreeUpdate());
   Element* target = GetDocument().FocusedElement();
   if (!target)
-    return WebVector<ui::ImeTextSpan>();
+    return std::vector<ui::ImeTextSpan>();
 
-  Element* editable = GetFrame()
-                          .Selection()
-                          .ComputeVisibleSelectionInDOMTreeDeprecated()
-                          .RootEditableElement();
+  Element* editable =
+      Selection().ComputeVisibleSelectionInDomTree().RootEditableElement();
   if (!editable)
-    return WebVector<ui::ImeTextSpan>();
+    return std::vector<ui::ImeTextSpan>();
 
-  WebVector<ui::ImeTextSpan> ime_text_spans;
+  std::vector<ui::ImeTextSpan> ime_text_spans;
 
   const EphemeralRange range = EphemeralRange::RangeOfContents(*editable);
   if (range.IsNull())
-    return WebVector<ui::ImeTextSpan>();
+    return std::vector<ui::ImeTextSpan>();
 
   // MarkersIntersectingRange() might be expensive. In practice, we hope we will
   // only check one node for the range.
@@ -1904,6 +2116,47 @@ WebVector<ui::ImeTextSpan> InputMethodController::GetImeTextSpans() const {
     }
   }
 
+#if BUILDFLAG(IS_ANDROID)
+  if (base::FeatureList::IsEnabled(
+          blink::features::kAndroidSpellcheckFullApiBlink)) {
+    const HeapVector<std::pair<Member<const Text>, Member<DocumentMarker>>>&
+        spelling_node_marker_pairs =
+            GetDocument().Markers().MarkersIntersectingRange(
+                ToEphemeralRangeInFlatTree(range),
+                DocumentMarker::MarkerTypes::Misspelling());
+
+    for (const std::pair<Member<const Text>, Member<DocumentMarker>>&
+             node_marker_pair : spelling_node_marker_pairs) {
+      SpellCheckMarker* marker =
+          To<SpellCheckMarker>(node_marker_pair.second.Get());
+      const Text* node = node_marker_pair.first;
+
+      // Spelling markers can only be grammar or spelling type. Hence if not
+      // grammar then default to spelling.
+      const ImeTextSpan::Type type =
+          (marker->GetType() == DocumentMarker::kGrammar)
+              ? ImeTextSpan::Type::kGrammarSuggestion
+              : ImeTextSpan::Type::kMisspellingSuggestion;
+      Vector<String> suggestions =
+          marker->Description().SplitSkippingEmpty('\n');
+
+      const EphemeralRange& marker_ephemeral_range =
+          EphemeralRange(Position(node, marker->StartOffset()),
+                         Position(node, marker->EndOffset()));
+      const PlainTextRange& marker_plain_text_range =
+          cached_text_input_info_.GetPlainTextRange(marker_ephemeral_range);
+
+      ime_text_spans.emplace_back(
+          ImeTextSpan(type, marker_plain_text_range.Start(),
+                      marker_plain_text_range.End(), Color::kTransparent,
+                      ImeTextSpanThickness::kNone,
+                      ImeTextSpanUnderlineStyle::kNone, Color::kTransparent,
+                      Color::kTransparent, Color::kTransparent, false, false,
+                      suggestions, marker->ShouldHideSuggestionMenu())
+              .ToUiImeTextSpan());
+    }
+  }
+#endif
   return ime_text_spans;
 }
 

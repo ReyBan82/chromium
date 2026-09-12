@@ -14,6 +14,7 @@ import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.Acces
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_CUT;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_EXPAND;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_FOCUS;
+import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_HIDE_TOOLTIP;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_IME_ENTER;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_NEXT_AT_MOVEMENT_GRANULARITY;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_NEXT_HTML_ELEMENT;
@@ -34,6 +35,8 @@ import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.Acces
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_SET_SELECTION;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_SET_TEXT;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_SHOW_ON_SCREEN;
+import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.AccessibilityActionCompat.ACTION_SHOW_TOOLTIP;
+import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.EXTRA_DATA_TEXT_CHARACTER_LOCATION_IN_WINDOW_KEY;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.MOVEMENT_GRANULARITY_CHARACTER;
 import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.MOVEMENT_GRANULARITY_LINE;
@@ -43,24 +46,48 @@ import static androidx.core.view.accessibility.AccessibilityNodeInfoCompat.MOVEM
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.Rect;
-import android.os.Build;
+import android.graphics.Typeface;
 import android.os.Bundle;
+import android.os.SystemClock;
+import android.text.ParcelableSpan;
 import android.text.SpannableString;
+import android.text.TextUtils;
+import android.text.style.AbsoluteSizeSpan;
+import android.text.style.BackgroundColorSpan;
+import android.text.style.ForegroundColorSpan;
 import android.text.style.LocaleSpan;
+import android.text.style.StrikethroughSpan;
+import android.text.style.StyleSpan;
+import android.text.style.SubscriptSpan;
 import android.text.style.SuggestionSpan;
+import android.text.style.SuperscriptSpan;
+import android.text.style.TypefaceSpan;
 import android.text.style.URLSpan;
+import android.text.style.UnderlineSpan;
+import android.util.SparseArray;
 import android.view.View;
-import android.view.accessibility.AccessibilityNodeInfo;
 
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.SelectionCompat;
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat.SelectionPositionCompat;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
 
-import java.util.Calendar;
-import java.util.Collections;
+import org.chromium.ax.mojom.TextPosition;
+import org.chromium.ax.mojom.TextStyle;
+import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.content_public.browser.ContentFeatureList;
+import org.chromium.content_public.browser.ContentFeatureMap;
+import org.chromium.ui.accessibility.AccessibilityFeatures;
+import org.chromium.ui.accessibility.AccessibilityFeaturesMap;
+
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * Basic helper class to build AccessibilityNodeInfo objects for the WebContents in Chrome. This
@@ -68,6 +95,7 @@ import java.util.Locale;
  * construct objects for the virtual view hierarchy to provide to the Android framework.
  */
 @JNINamespace("content")
+@NullMarked
 public class AccessibilityNodeInfoBuilder {
     // Constants defined for AccessibilityNodeInfo Bundle extras keys. These values are Chromium
     // specific, and allow Chromium-based browsers to provide richer information to AT. These
@@ -82,18 +110,39 @@ public class AccessibilityNodeInfoBuilder {
     public static final String EXTRAS_KEY_HAS_IMAGE = "AccessibilityNodeInfo.hasImage";
     public static final String EXTRAS_KEY_HINT = "AccessibilityNodeInfo.hint";
     public static final String EXTRAS_KEY_OFFSCREEN = "AccessibilityNodeInfo.offscreen";
-    public static final String EXTRAS_KEY_ROLE_DESCRIPTION =
-            "AccessibilityNodeInfo.roleDescription";
     public static final String EXTRAS_KEY_SUPPORTED_ELEMENTS =
             "ACTION_ARGUMENT_HTML_ELEMENT_STRING_VALUES";
     public static final String EXTRAS_KEY_TARGET_URL = "AccessibilityNodeInfo.targetUrl";
+
+    // Keys used for Bundle extras of parent relative bounds values, without screen clipping.
     public static final String EXTRAS_KEY_UNCLIPPED_TOP = "AccessibilityNodeInfo.unclippedTop";
-    public static final String EXTRAS_KEY_UNCLIPPED_LEFT = "AccessibilityNodeInfo.unclippedLeft";
     public static final String EXTRAS_KEY_UNCLIPPED_BOTTOM =
             "AccessibilityNodeInfo.unclippedBottom";
+    public static final String EXTRAS_KEY_UNCLIPPED_LEFT = "AccessibilityNodeInfo.unclippedLeft";
+    public static final String EXTRAS_KEY_UNCLIPPED_RIGHT = "AccessibilityNodeInfo.unclippedRight";
     public static final String EXTRAS_KEY_UNCLIPPED_WIDTH = "AccessibilityNodeInfo.unclippedWidth";
     public static final String EXTRAS_KEY_UNCLIPPED_HEIGHT =
             "AccessibilityNodeInfo.unclippedHeight";
+
+    // Keys used for Bundle extras of page absolute bounds values, without screen clipping.
+    public static final String EXTRAS_KEY_PAGE_ABSOLUTE_LEFT =
+            "AccessibilityNodeInfo.pageAbsoluteLeft";
+
+    public static final String EXTRA_SELECTION_START_OFFSET_TYPE =
+            "androidx.view.accessibility.AccessibilityNodeInfoCompat.SELECTION_START_OFFSET_TYPE";
+    public static final String EXTRA_SELECTION_END_OFFSET_TYPE =
+            "androidx.view.accessibility.AccessibilityNodeInfoCompat.SELECTION_END_OFFSET_TYPE";
+
+    public static final int OFFSET_TYPE_TEXT = 0;
+    public static final int OFFSET_TYPE_CHILD = 1;
+
+    public static final String EXTRAS_KEY_PAGE_ABSOLUTE_TOP =
+            "AccessibilityNodeInfo.pageAbsoluteTop";
+    public static final String EXTRAS_KEY_PAGE_ABSOLUTE_WIDTH =
+            "AccessibilityNodeInfo.pageAbsoluteWidth";
+    public static final String EXTRAS_KEY_PAGE_ABSOLUTE_HEIGHT =
+            "AccessibilityNodeInfo.pageAbsoluteHeight";
+
     public static final String EXTRAS_KEY_URL = "url";
 
     // Constants defined for requests to add extra data to AccessibilityNodeInfo objects. These
@@ -103,25 +152,16 @@ public class AccessibilityNodeInfoBuilder {
             "AccessibilityNodeInfo.requestImageData";
     public static final String EXTRAS_KEY_IMAGE_DATA = "AccessibilityNodeInfo.imageData";
 
-    // Static instances of the two types of extra data keys that can be added to nodes.
-    private static final List<String> sTextCharacterLocation =
-            Collections.singletonList(EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY);
+    // Match AccessibilityNodeInfo.EXTRA_DATA_REQUEST_LAYOUT_BASED_ACTIONS_KEY.
+    // TODO(crbug.com/484387130) Pull definition from AndroidX instead, when available.
+    public static final String EXTRAS_KEY_REQUEST_LAYOUT_BASED_ACTIONS =
+            "android.view.accessibility.extra.DATA_REQUEST_LAYOUT_BASED_ACTIONS_KEY";
 
-    private static final List<String> sRequestImageData =
-            Collections.singletonList(EXTRAS_DATA_REQUEST_IMAGE_DATA_KEY);
+    public static final String ACCESSIBILITY_SPANNABLE_CREATION_TIME =
+            "Accessibility.Android.Performance.SpannableCreationTime2";
+    private static final int MAX_TIME_BUCKET = 5 * 1000; // 5,000 microseconds = 5ms.
 
-    // Throttle time for content invalid utterances. Content invalid will only be announced at most
-    // once per this time interval in milliseconds for a given focused node.
-    private static final int CONTENT_INVALID_THROTTLE_DELAY = 4500;
-
-    // These track the last focused content invalid view id and the last time we reported content
-    // invalid for that node. Used to ensure we report content invalid on a node once per interval.
-    private int mLastContentInvalidViewId;
-    private long mLastContentInvalidUtteranceTime;
-
-    /**
-     * Delegate interface for any client that wants to use the node builder.
-     */
+    /** Delegate interface for any client that wants to use the node builder. */
     interface BuilderDelegate {
         // The view that contains the content this builder is used for.
         View getView();
@@ -136,13 +176,18 @@ public class AccessibilityNodeInfoBuilder {
         int currentAccessibilityFocusId();
 
         // The language tag String provided by the default Locale of the device.
+        @Nullable
         String getLanguageTag();
 
         // Comma separate value of HTML tags that a given node can traverse by.
+        @Nullable
         String getSupportedHtmlTags();
 
         // Set of coordinates for providing the correct size and scroll of the View.
         AccessibilityDelegate.AccessibilityCoordinates getAccessibilityCoordinates();
+
+        // The set of rects that are occluding the view.
+        SparseArray<Rect> getOccludingRects();
     }
 
     public final BuilderDelegate mDelegate;
@@ -160,14 +205,29 @@ public class AccessibilityNodeInfoBuilder {
     }
 
     @CalledByNative
-    private void setAccessibilityNodeInfoBooleanAttributes(AccessibilityNodeInfoCompat node,
-            int virtualViewId, boolean checkable, boolean checked, boolean clickable,
-            boolean contentInvalid, boolean enabled, boolean focusable, boolean focused,
-            boolean hasImage, boolean password, boolean scrollable, boolean selected,
-            boolean visibleToUser) {
+    private void setAccessibilityNodeInfoBooleanAttributes(
+            AccessibilityNodeInfoCompat node,
+            int virtualViewId,
+            boolean checkable,
+            boolean clickable,
+            boolean contentInvalid,
+            boolean enabled,
+            boolean editable,
+            boolean focusable,
+            boolean focused,
+            boolean hasImage,
+            boolean password,
+            boolean scrollable,
+            boolean selected,
+            boolean textSelectable,
+            boolean visibleToUser,
+            boolean hasCharacterLocations,
+            boolean isRequired,
+            boolean isHeading,
+            boolean hasLayoutBasedActions) {
         node.setCheckable(checkable);
-        node.setChecked(checked);
         node.setClickable(clickable);
+        node.setEditable(editable);
         node.setEnabled(enabled);
         node.setFocusable(focusable);
         node.setFocused(focused);
@@ -175,72 +235,88 @@ public class AccessibilityNodeInfoBuilder {
         node.setScrollable(scrollable);
         node.setSelected(selected);
         node.setVisibleToUser(visibleToUser);
+        node.setFieldRequired(isRequired);
+        node.setContentInvalid(contentInvalid);
+        node.setHeading(isHeading);
 
-        // In the special case that we have invalid content on a focused field, we only want to
-        // report that to the user at most once per {@link CONTENT_INVALID_THROTTLE_DELAY} time
-        // interval, to be less jarring to the user.
-        if (contentInvalid && focused) {
-            if (virtualViewId == mLastContentInvalidViewId) {
-                // If we are focused on the same node as before, check if it has been longer than
-                // our delay since our last utterance, and if so, report invalid content and update
-                // our last reported time, otherwise suppress reporting content invalid.
-                if (Calendar.getInstance().getTimeInMillis() - mLastContentInvalidUtteranceTime
-                        >= CONTENT_INVALID_THROTTLE_DELAY) {
-                    mLastContentInvalidUtteranceTime = Calendar.getInstance().getTimeInMillis();
-                    node.setContentInvalid(true);
-                }
-            } else {
-                // When we are focused on a new node, report as normal and track new time.
-                mLastContentInvalidViewId = virtualViewId;
-                mLastContentInvalidUtteranceTime = Calendar.getInstance().getTimeInMillis();
-                node.setContentInvalid(true);
-            }
-        } else {
-            // For non-focused fields we want to set contentInvalid as normal.
-            node.setContentInvalid(contentInvalid);
+        if (ContentFeatureMap.isEnabled(
+                ContentFeatureList.ACCESSIBILITY_SET_SELECTABLE_ON_ALL_NODES_WITH_TEXT)) {
+            node.setTextSelectable(textSelectable);
         }
 
+        List<String> availableExtraData = new ArrayList<>();
         if (hasImage) {
             Bundle bundle = node.getExtras();
             bundle.putCharSequence(EXTRAS_KEY_HAS_IMAGE, "true");
+            availableExtraData.add(EXTRAS_DATA_REQUEST_IMAGE_DATA_KEY);
         }
 
-        node.setMovementGranularities(MOVEMENT_GRANULARITY_CHARACTER | MOVEMENT_GRANULARITY_WORD
-                | MOVEMENT_GRANULARITY_LINE | MOVEMENT_GRANULARITY_PARAGRAPH);
+        if (hasCharacterLocations) {
+            availableExtraData.add(EXTRA_DATA_TEXT_CHARACTER_LOCATION_KEY);
+            availableExtraData.add(EXTRA_DATA_TEXT_CHARACTER_LOCATION_IN_WINDOW_KEY);
+        }
+
+        if (clickable && !hasLayoutBasedActions) {
+            availableExtraData.add(EXTRAS_KEY_REQUEST_LAYOUT_BASED_ACTIONS);
+        }
+
+        node.setAvailableExtraData(availableExtraData);
+
+        node.setMovementGranularities(
+                MOVEMENT_GRANULARITY_CHARACTER
+                        | MOVEMENT_GRANULARITY_WORD
+                        | MOVEMENT_GRANULARITY_LINE
+                        | MOVEMENT_GRANULARITY_PARAGRAPH);
 
         boolean isAF = mDelegate.currentAccessibilityFocusId() == virtualViewId;
         node.setAccessibilityFocused(isAF);
     }
 
     @CalledByNative
-    private void addAccessibilityNodeInfoActions(AccessibilityNodeInfoCompat node,
-            int virtualViewId, boolean canScrollForward, boolean canScrollBackward,
-            boolean canScrollUp, boolean canScrollDown, boolean canScrollLeft,
-            boolean canScrollRight, boolean clickable, boolean editableText, boolean enabled,
-            boolean focusable, boolean focused, boolean isCollapsed, boolean isExpanded,
-            boolean hasNonEmptyValue, boolean hasNonEmptyInnerText, boolean isSeekControl,
-            boolean isForm) {
+    private void addAccessibilityNodeInfoActions(
+            AccessibilityNodeInfoCompat node,
+            int virtualViewId,
+            boolean canScrollForward,
+            boolean canScrollBackward,
+            boolean canScrollUp,
+            boolean canScrollDown,
+            boolean canScrollLeft,
+            boolean canScrollRight,
+            boolean clickable,
+            boolean isText,
+            boolean enabled,
+            boolean editable,
+            boolean focusable,
+            boolean focused,
+            boolean isCollapsed,
+            boolean isExpanded,
+            boolean hasNonEmptyValue,
+            boolean hasNonEmptyInnerText,
+            boolean isSeekControl,
+            boolean unused_isForm,
+            boolean hasTooltip,
+            boolean isTooltipShown) {
         node.addAction(ACTION_NEXT_HTML_ELEMENT);
         node.addAction(ACTION_PREVIOUS_HTML_ELEMENT);
         node.addAction(ACTION_SHOW_ON_SCREEN);
         node.addAction(ACTION_CONTEXT_CLICK);
-        // We choose to not add ACTION_LONG_CLICK to nodes to prevent verbose utterances.
 
         if (hasNonEmptyInnerText) {
             node.addAction(ACTION_NEXT_AT_MOVEMENT_GRANULARITY);
             node.addAction(ACTION_PREVIOUS_AT_MOVEMENT_GRANULARITY);
         }
 
-        if (editableText && enabled) {
-            // TODO: don't support actions that modify it if it's read-only (but
-            // SET_SELECTION and COPY are okay).
-            node.addAction(ACTION_SET_TEXT);
-            node.addAction(ACTION_PASTE);
-            node.addAction(ACTION_IME_ENTER);
-
+        if (isText && enabled) {
+            if (editable) {
+                node.addAction(ACTION_SET_TEXT);
+                node.addAction(ACTION_PASTE);
+                node.addAction(ACTION_IME_ENTER);
+            }
             if (hasNonEmptyValue) {
                 node.addAction(ACTION_SET_SELECTION);
-                node.addAction(ACTION_CUT);
+                if (editable) {
+                    node.addAction(ACTION_CUT);
+                }
                 node.addAction(ACTION_COPY);
             }
         }
@@ -302,14 +378,40 @@ public class AccessibilityNodeInfoBuilder {
         if (isSeekControl) {
             node.addAction(ACTION_SET_PROGRESS);
         }
+
+        if (hasTooltip) {
+            if (isTooltipShown) {
+                node.addAction(ACTION_HIDE_TOOLTIP);
+            } else {
+                node.addAction(ACTION_SHOW_TOOLTIP);
+            }
+        }
     }
 
     @CalledByNative
-    private void setAccessibilityNodeInfoBaseAttributes(AccessibilityNodeInfoCompat node,
-            int virtualViewId, int parentId, String className, String role, String roleDescription,
-            String hint, String targetUrl, boolean canOpenPopup, boolean multiLine, int inputType,
-            int liveRegion, String errorMessage, int clickableScore, String display,
-            String brailleLabel, String brailleRoleDescription) {
+    private void setAccessibilityNodeInfoBaseAttributes(
+            AccessibilityNodeInfoCompat node,
+            int virtualViewId,
+            int parentId,
+            String className,
+            String role,
+            String roleDescription,
+            String hint,
+            String tooltipText,
+            String targetUrl,
+            boolean canOpenPopup,
+            boolean multiLine,
+            int inputType,
+            int liveRegion,
+            String errorMessage,
+            int clickableScore,
+            String display,
+            String brailleLabel,
+            String brailleRoleDescription,
+            int expandedState,
+            int checked,
+            int[] labelledByIds) {
+        node.setUniqueId(String.valueOf(virtualViewId));
         node.setClassName(className);
 
         Bundle bundle = node.getExtras();
@@ -320,7 +422,12 @@ public class AccessibilityNodeInfoBuilder {
             bundle.putCharSequence(EXTRAS_KEY_BRAILLE_ROLE_DESCRIPTION, brailleRoleDescription);
         }
         bundle.putCharSequence(EXTRAS_KEY_CHROME_ROLE, role);
-        bundle.putCharSequence(EXTRAS_KEY_ROLE_DESCRIPTION, roleDescription);
+
+        if (!roleDescription.isEmpty()) {
+            node.setRoleDescription(roleDescription);
+        }
+
+        // We added the hint Bundle extra pre Android-O, and keep it to not risk breaking changes.
         bundle.putCharSequence(EXTRAS_KEY_HINT, hint);
         if (!display.isEmpty()) {
             bundle.putCharSequence(EXTRAS_KEY_CSS_DISPLAY, display);
@@ -340,14 +447,23 @@ public class AccessibilityNodeInfoBuilder {
         node.setDismissable(false); // No concept of "dismissable" on the web currently.
         node.setMultiLine(multiLine);
         node.setInputType(inputType);
+        node.setHintText(hint);
+        node.setTooltipText(tooltipText);
+        node.setExpandedState(expandedState);
 
-        // Deliberately don't call setLiveRegion because TalkBack speaks
-        // the entire region anytime it changes. Instead Chrome will
-        // call announceLiveRegionText() only on the nodes that change.
-        // node.setLiveRegion(liveRegion);
+        // If we have deprecated TYPE_ANNOUNCEMENT or enabled the new live region behavior, we
+        // should properly mark live region root nodes.
+        // Otherwise, we choose to use AnnounceLiveRegionText() to make this announcement for us.
+        // TODO(crbug.com/507858294): Remove the following flags after a period of stability in
+        // several stable releases.
+        if (ContentFeatureMap.isEnabled(ContentFeatureList.ACCESSIBILITY_DEPRECATE_TYPE_ANNOUNCE)
+                || ContentFeatureMap.isEnabled(
+                        ContentFeatureList.ACCESSIBILITY_IMPROVE_LIVE_REGION_ANNOUNCE)) {
+            node.setLiveRegion(liveRegion);
+        }
 
         // We only apply the |errorMessage| if {@link setAccessibilityNodeInfoBooleanAttributes}
-        // set |contentInvalid| to true based on throttle delay.
+        // set |contentInvalid| to true.
         if (node.isContentInvalid()) {
             node.setError(errorMessage);
         }
@@ -356,37 +472,172 @@ public class AccessibilityNodeInfoBuilder {
         if (clickableScore > 0) {
             bundle.putInt(EXTRAS_KEY_CLICKABLE_SCORE, clickableScore);
         }
+
+        node.setChecked(checked);
+
+        for (int id : labelledByIds) {
+            node.addLabeledBy(mDelegate.getView(), id);
+        }
     }
 
     @SuppressLint("NewApi")
     @CalledByNative
-    protected void setAccessibilityNodeInfoText(AccessibilityNodeInfoCompat node, String text,
-            boolean annotateAsLink, boolean isEditableText, String language, int[] suggestionStarts,
-            int[] suggestionEnds, String[] suggestions, String stateDescription) {
-        CharSequence computedText = computeText(
-                text, annotateAsLink, language, suggestionStarts, suggestionEnds, suggestions);
+    protected void setAccessibilityNodeInfoText(
+            AccessibilityNodeInfoCompat node,
+            String text,
+            String targetUrl,
+            boolean annotateAsLink,
+            String language,
+            int[] suggestionStarts,
+            int[] suggestionEnds,
+            String[] suggestions,
+            String stateDescription,
+            String containerTitle,
+            String contentDescription,
+            String supplementalDescription) {
+        long now = SystemClock.elapsedRealtimeNanos() / 1000;
+
+        CharSequence computedText =
+                computeText(
+                        text,
+                        targetUrl,
+                        annotateAsLink,
+                        language,
+                        suggestionStarts,
+                        suggestionEnds,
+                        suggestions);
 
         // We add the stateDescription attribute when it is non-null and not empty.
         if (stateDescription != null && !stateDescription.isEmpty()) {
             node.setStateDescription(stateDescription);
         }
 
+        // We add the containerTitle attribute when it is non-null and not empty.
+        if (containerTitle != null && !containerTitle.isEmpty()) {
+            node.setContainerTitle(containerTitle);
+        }
+
+        // We add the contentDescription attribute when it is non-null and not empty.
+        if (contentDescription != null && !contentDescription.isEmpty()) {
+            node.setContentDescription(contentDescription);
+        }
+
+        // We add the supplementalDescription attribute when it is non-null and not empty.
+        if (supplementalDescription != null && !supplementalDescription.isEmpty()) {
+            node.setSupplementalDescription(supplementalDescription);
+        }
+
         // We expose the nested structure of links, which results in the roles of all nested nodes
-        // being read. Use content description in the case of links to prevent verbose TalkBack
+        // being read. Use content description in the case of links to prevent verbose TalkBack.
         if (annotateAsLink) {
-            node.setContentDescription(computedText);
+            // If our previously assigned contentDescription is null or empty, assign the
+            // computedText as our contentDescription instead.
+            if (contentDescription == null || contentDescription.isEmpty()) {
+                node.setContentDescription(computedText.toString());
+            }
         } else {
             node.setText(computedText);
         }
+
+        recordTimeToCreateSpannables(now);
     }
 
     @CalledByNative
-    protected void setAccessibilityNodeInfoLocation(AccessibilityNodeInfoCompat node,
-            final int virtualViewId, int absoluteLeft, int absoluteTop, int parentRelativeLeft,
-            int parentRelativeTop, int width, int height, boolean isOffscreen) {
+    protected void setAccessibilityNodeInfoText(
+            AccessibilityNodeInfoCompat node,
+            String text,
+            boolean annotateAsLink,
+            String stateDescription,
+            String containerTitle,
+            String contentDescription,
+            String supplementalDescription,
+            Map<String, int[][]> suggestions,
+            Map<String, int[][]> links,
+            Map<Float, int[][]> textSizes,
+            Map<Integer, int[][]> textStyles,
+            Map<Integer, int[][]> textPositions,
+            Map<Integer, int[][]> foregroundColors,
+            Map<Integer, int[][]> backgroundColors,
+            Map<String, int[][]> fontFamilies,
+            Map<String, int[][]> locales) {
+        assert AccessibilityFeaturesMap.isEnabled(
+                        AccessibilityFeatures.ACCESSIBILITY_TEXT_FORMATTING)
+                : "setAccessibilityNodeInfoText with text styling information was called when"
+                        + " feature was not enabled.";
+
+        long now = SystemClock.elapsedRealtimeNanos() / 1000;
+
+        CharSequence computedText =
+                computeText(
+                        text,
+                        suggestions,
+                        links,
+                        textSizes,
+                        textStyles,
+                        textPositions,
+                        foregroundColors,
+                        backgroundColors,
+                        fontFamilies,
+                        locales);
+
+        // We add the stateDescription attribute when it is non-null and not empty.
+        if (stateDescription != null && !stateDescription.isEmpty()) {
+            node.setStateDescription(stateDescription);
+        }
+
+        // We add the containerTitle attribute when it is non-null and not empty.
+        if (containerTitle != null && !containerTitle.isEmpty()) {
+            node.setContainerTitle(containerTitle);
+        }
+
+        // We add the contentDescription attribute when it is non-null and not empty.
+        if (contentDescription != null && !contentDescription.isEmpty()) {
+            node.setContentDescription(contentDescription);
+        }
+
+        // We add the supplementalDescription attribute when it is non-null and not empty.
+        if (supplementalDescription != null && !supplementalDescription.isEmpty()) {
+            node.setSupplementalDescription(supplementalDescription);
+        }
+
+        // We expose the nested structure of links, which results in the roles of all nested nodes
+        // being read. Use content description in the case of links to prevent verbose TalkBack
+        if (annotateAsLink && (contentDescription == null || contentDescription.isEmpty())) {
+            node.setContentDescription(computedText.toString());
+        } else {
+            node.setText(computedText);
+        }
+
+        recordTimeToCreateSpannables(now);
+    }
+
+    private void recordTimeToCreateSpannables(long startTime) {
+        RecordHistogram.recordCustomTimesHistogram(
+                ACCESSIBILITY_SPANNABLE_CREATION_TIME,
+                (SystemClock.elapsedRealtimeNanos() / 1000) - startTime,
+                1,
+                MAX_TIME_BUCKET,
+                100);
+    }
+
+    @CalledByNative
+    protected void setAccessibilityNodeInfoLocation(
+            AccessibilityNodeInfoCompat node,
+            final int virtualViewId,
+            int absoluteLeft,
+            int absoluteTop,
+            int parentRelativeLeft,
+            int parentRelativeTop,
+            int width,
+            int height,
+            boolean isOffscreen) {
         // First set the bounds in parent.
-        Rect boundsInParent = new Rect(parentRelativeLeft, parentRelativeTop,
-                parentRelativeLeft + width, parentRelativeTop + height);
+        Rect boundsInParent =
+                new Rect(
+                        parentRelativeLeft,
+                        parentRelativeTop,
+                        parentRelativeLeft + width,
+                        parentRelativeTop + height);
         if (virtualViewId == mDelegate.currentRootId()) {
             // Offset of the web content relative to the View.
             AccessibilityDelegate.AccessibilityCoordinates ac =
@@ -396,7 +647,12 @@ public class AccessibilityNodeInfoBuilder {
         node.setBoundsInParent(boundsInParent);
 
         Rect rect = new Rect(absoluteLeft, absoluteTop, absoluteLeft + width, absoluteTop + height);
-        convertWebRectToAndroidCoordinates(rect, node.getExtras());
+        convertWebRectToAndroidCoordinates(
+                rect,
+                node.getExtras(),
+                mDelegate.getAccessibilityCoordinates(),
+                mDelegate.getView(),
+                /* isScreenCoordinates= */ true);
 
         node.setBoundsInScreen(rect);
 
@@ -410,21 +666,49 @@ public class AccessibilityNodeInfoBuilder {
             if (node.getExtras().containsKey(EXTRAS_KEY_OFFSCREEN)) {
                 node.getExtras().remove(EXTRAS_KEY_OFFSCREEN);
             }
+
+            if (AccessibilityFeaturesMap.isEnabled(
+                    AccessibilityFeatures.ACCESSIBILITY_HANDLE_OCCLUDING_VIEWS)) {
+                AccessibilityNodeInfoUtils.updateNodeForOcclusion(
+                        node, mDelegate.getOccludingRects());
+            }
         }
     }
 
     @CalledByNative
     protected void setAccessibilityNodeInfoCollectionInfo(
-            AccessibilityNodeInfoCompat node, int rowCount, int columnCount, boolean hierarchical) {
-        node.setCollectionInfo(AccessibilityNodeInfoCompat.CollectionInfoCompat.obtain(
-                rowCount, columnCount, hierarchical));
+            AccessibilityNodeInfoCompat node,
+            int rowCount,
+            int columnCount,
+            boolean hierarchical,
+            int selectionMode) {
+        node.setCollectionInfo(
+                AccessibilityNodeInfoCompat.CollectionInfoCompat.obtain(
+                        rowCount, columnCount, hierarchical, selectionMode));
     }
 
     @CalledByNative
-    protected void setAccessibilityNodeInfoCollectionItemInfo(AccessibilityNodeInfoCompat node,
-            int rowIndex, int rowSpan, int columnIndex, int columnSpan, boolean heading) {
-        node.setCollectionItemInfo(AccessibilityNodeInfoCompat.CollectionItemInfoCompat.obtain(
-                rowIndex, rowSpan, columnIndex, columnSpan, heading));
+    protected void setAccessibilityNodeInfoCollectionItemInfo(
+            AccessibilityNodeInfoCompat node,
+            int rowIndex,
+            int rowSpan,
+            int columnIndex,
+            int columnSpan,
+            int sortDirection) {
+        AccessibilityNodeInfoCompat.CollectionItemInfoCompat.Builder builder =
+                new AccessibilityNodeInfoCompat.CollectionItemInfoCompat.Builder();
+
+        builder.setRowIndex(rowIndex)
+                .setRowSpan(rowSpan)
+                .setColumnIndex(columnIndex)
+                .setColumnSpan(columnSpan);
+
+        if (sortDirection
+                != AccessibilityNodeInfoCompat.CollectionItemInfoCompat.SORT_DIRECTION_NONE) {
+            builder.setSortDirection(sortDirection);
+        }
+
+        node.setCollectionItemInfo(builder.build());
     }
 
     @CalledByNative
@@ -441,24 +725,6 @@ public class AccessibilityNodeInfoBuilder {
     }
 
     @CalledByNative
-    protected void setAccessibilityNodeInfoOAttributes(AccessibilityNodeInfoCompat node,
-            boolean hasCharacterLocations, boolean hasImage, String hint) {
-        node.setHintText(hint);
-
-        // Work-around a gap in the Android API, that |AccessibilityNodeInfoCompat| class does not
-        // have the setAvailableExtraData method, so unwrap the node and call it directly.
-        // TODO(mschillaci): Remove unwrapping and SDK version req once Android API is updated.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (hasCharacterLocations) {
-                ((AccessibilityNodeInfo) node.getInfo())
-                        .setAvailableExtraData(sTextCharacterLocation);
-            } else if (hasImage) {
-                ((AccessibilityNodeInfo) node.getInfo()).setAvailableExtraData(sRequestImageData);
-            }
-        }
-    }
-
-    @CalledByNative
     protected void setAccessibilityNodeInfoPaneTitle(
             AccessibilityNodeInfoCompat node, String title) {
         node.setPaneTitle(title);
@@ -467,8 +733,34 @@ public class AccessibilityNodeInfoBuilder {
     @CalledByNative
     protected void setAccessibilityNodeInfoSelectionAttrs(
             AccessibilityNodeInfoCompat node, int startIndex, int endIndex) {
-        node.setEditable(true);
         node.setTextSelection(startIndex, endIndex);
+    }
+
+    @CalledByNative
+    protected void setAccessibilityNodeInfoExtendedSelectionAttrs(
+            AccessibilityNodeInfoCompat node,
+            int startVirtualViewId,
+            int startOffset,
+            int startOffsetType,
+            int endVirtualViewId,
+            int endOffset,
+            int endOffsetType) {
+        node.setSelection(
+                new SelectionCompat(
+                        new SelectionPositionCompat(
+                                mDelegate.getView(), startVirtualViewId, startOffset),
+                        new SelectionPositionCompat(
+                                mDelegate.getView(), endVirtualViewId, endOffset)));
+        node.getExtras().putInt(EXTRA_SELECTION_START_OFFSET_TYPE, startOffsetType);
+        node.getExtras().putInt(EXTRA_SELECTION_END_OFFSET_TYPE, endOffsetType);
+    }
+
+    @CalledByNative
+    protected void clearAccessibilityNodeInfoExtendedSelectionAttrs(
+            AccessibilityNodeInfoCompat node) {
+        node.setSelection(null);
+        node.getExtras().remove(EXTRA_SELECTION_START_OFFSET_TYPE);
+        node.getExtras().remove(EXTRA_SELECTION_END_OFFSET_TYPE);
     }
 
     @CalledByNative
@@ -477,65 +769,221 @@ public class AccessibilityNodeInfoBuilder {
         info.getExtras().putByteArray(EXTRAS_KEY_IMAGE_DATA, imageData);
     }
 
-    private CharSequence computeText(String text, boolean annotateAsLink, String language,
-            int[] suggestionStarts, int[] suggestionEnds, String[] suggestions) {
-        CharSequence charSequence = text;
-        if (annotateAsLink) {
+    private CharSequence computeText(
+            String text,
+            String targetUrl,
+            boolean annotateAsLink,
+            String language,
+            int[] suggestionStarts,
+            int[] suggestionEnds,
+            String[] suggestions) {
+
+        boolean needsSpannable =
+                annotateAsLink
+                        || (!language.isEmpty() && !language.equals(mDelegate.getLanguageTag()))
+                        || (suggestionStarts != null && suggestionStarts.length > 0);
+
+        if (needsSpannable) {
             SpannableString spannable = new SpannableString(text);
-            spannable.setSpan(new URLSpan(""), 0, spannable.length(), 0);
-            charSequence = spannable;
-        }
-        if (!language.isEmpty() && !language.equals(mDelegate.getLanguageTag())) {
-            SpannableString spannable;
-            if (charSequence instanceof SpannableString) {
-                spannable = (SpannableString) charSequence;
-            } else {
-                spannable = new SpannableString(charSequence);
+            if (annotateAsLink) {
+                spannable.setSpan(new URLSpan(targetUrl), 0, spannable.length(), 0);
             }
-            Locale locale = Locale.forLanguageTag(language);
-            spannable.setSpan(new LocaleSpan(locale), 0, spannable.length(), 0);
-            charSequence = spannable;
-        }
-
-        if (suggestionStarts != null && suggestionStarts.length > 0) {
-            assert suggestionEnds != null;
-            assert suggestionEnds.length == suggestionStarts.length;
-            assert suggestions != null;
-            assert suggestions.length == suggestionStarts.length;
-
-            SpannableString spannable;
-            if (charSequence instanceof SpannableString) {
-                spannable = (SpannableString) charSequence;
-            } else {
-                spannable = new SpannableString(charSequence);
+            if (!language.isEmpty() && !language.equals(mDelegate.getLanguageTag())) {
+                Locale locale = Locale.forLanguageTag(language);
+                spannable.setSpan(new LocaleSpan(locale), 0, spannable.length(), 0);
+            }
+            if (suggestionStarts != null && suggestionStarts.length > 0) {
+                addSuggestionSpans(spannable, suggestionStarts, suggestionEnds, suggestions);
             }
 
-            int spannableLen = spannable.length();
-            for (int i = 0; i < suggestionStarts.length; i++) {
-                int start = suggestionStarts[i];
-                int end = suggestionEnds[i];
-                // Ignore any spans outside the range of the spannable string.
-                if (start < 0 || start > spannableLen || end < 0 || end > spannableLen
-                        || start > end) {
-                    continue;
-                }
-
-                String[] suggestionArray = new String[1];
-                suggestionArray[0] = suggestions[i];
-                int flags = SuggestionSpan.FLAG_MISSPELLED;
-                SuggestionSpan suggestionSpan =
-                        new SuggestionSpan(mDelegate.getContext(), suggestionArray, flags);
-                spannable.setSpan(suggestionSpan, start, end, 0);
-            }
-            charSequence = spannable;
+            return spannable;
         }
 
-        return charSequence;
+        // TODO(mschillaci): Consider if we can remove the `needsSpannable` check above and always
+        // return a SpannableString instead of sometimes a String without a performance impact.
+        return text;
     }
 
-    protected void convertWebRectToAndroidCoordinates(Rect rect, Bundle extras) {
+    private CharSequence computeText(
+            String text,
+            Map<String, int[][]> suggestions,
+            Map<String, int[][]> links,
+            Map<Float, int[][]> textSizes,
+            Map<Integer, int[][]> textStyles,
+            Map<Integer, int[][]> textPositions,
+            Map<Integer, int[][]> foregroundColors,
+            Map<Integer, int[][]> backgroundColors,
+            Map<String, int[][]> fontFamilies,
+            Map<String, int[][]> locales) {
+        assert AccessibilityFeaturesMap.isEnabled(
+                        AccessibilityFeatures.ACCESSIBILITY_TEXT_FORMATTING)
+                : "computeText with text styling information was called when feature was not"
+                        + " enabled.";
+
+        // We previously would only create a SpannableString if needed, and would check each of
+        // these specific cases within a separate if statement. Since every piece of text must have
+        // a color, size, background color, etc, we are always making spans so we have removed that
+        // extra check and will always return a Spannable.
+        SpannableString spannable = new SpannableString(text);
+        addSpans(
+                spannable,
+                suggestions,
+                (suggestion) -> {
+                    int flags = SuggestionSpan.FLAG_MISSPELLED;
+                    return new SuggestionSpan(
+                            mDelegate.getContext(), new String[] {suggestion}, flags);
+                });
+        addSpans(
+                spannable,
+                links,
+                (link) -> {
+                    return new URLSpan(link);
+                });
+        addSpans(
+                spannable,
+                textSizes,
+                (textSize) -> {
+                    // TODO: aluh - This is already checked in C++, do we need to check again?
+                    // Zero font size is valid in CSS, which makes text invisible.
+                    if (textSize >= 0) {
+                        return new AbsoluteSizeSpan(Math.round(textSize));
+                    }
+                    return null;
+                });
+        addSpans(
+                spannable,
+                textStyles,
+                (textStyle) -> {
+                    if (textStyle == TextStyle.BOLD) {
+                        return new StyleSpan(Typeface.BOLD);
+                    } else if (textStyle == TextStyle.ITALIC) {
+                        return new StyleSpan(Typeface.ITALIC);
+                    } else if (textStyle == TextStyle.UNDERLINE) {
+                        return new UnderlineSpan();
+                    } else if (textStyle == TextStyle.LINE_THROUGH) {
+                        return new StrikethroughSpan();
+                    }
+                    return null;
+                });
+        addSpans(
+                spannable,
+                textPositions,
+                (textPosition) -> {
+                    if (textPosition == TextPosition.SUBSCRIPT) {
+                        return new SubscriptSpan();
+                    } else if (textPosition == TextPosition.SUPERSCRIPT) {
+                        return new SuperscriptSpan();
+                    }
+                    return null;
+                });
+        addSpans(
+                spannable,
+                foregroundColors,
+                (foregroundColor) -> {
+                    return new ForegroundColorSpan(foregroundColor);
+                });
+        addSpans(
+                spannable,
+                backgroundColors,
+                (backgroundColor) -> {
+                    return new BackgroundColorSpan(backgroundColor);
+                });
+        addSpans(
+                spannable,
+                fontFamilies,
+                (fontFamily) -> {
+                    // TODO: aluh - This is already checked in C++, do we need to check again?
+                    if (!fontFamily.isEmpty()) {
+                        return new TypefaceSpan(fontFamily);
+                    }
+                    return null;
+                });
+        addSpans(
+                spannable,
+                locales,
+                (locale) -> {
+                    if (!locale.isEmpty() && !locale.equals(mDelegate.getLanguageTag())) {
+                        return new LocaleSpan(Locale.forLanguageTag(locale));
+                    }
+                    return null;
+                });
+
+        return spannable;
+    }
+
+    private void addSuggestionSpans(
+            SpannableString spannable,
+            int[] suggestionStarts,
+            int[] suggestionEnds,
+            String[] suggestions) {
+        assert suggestionEnds != null;
+        assert suggestionEnds.length == suggestionStarts.length;
+        assert suggestions != null;
+        assert suggestions.length == suggestionStarts.length;
+
+        for (int i = 0; i < suggestionStarts.length; i++) {
+            int start = suggestionStarts[i];
+            int end = suggestionEnds[i];
+            // Ignore any spans outside the range of the spannable string.
+            if (!isRangeInSpannable(spannable, start, end)) {
+                continue;
+            }
+
+            int flags = SuggestionSpan.FLAG_MISSPELLED;
+            SuggestionSpan suggestionSpan =
+                    new SuggestionSpan(
+                            mDelegate.getContext(), new String[] {suggestions[i]}, flags);
+            spannable.setSpan(suggestionSpan, start, end, 0);
+        }
+    }
+
+    private boolean isValidAttributeRanges(int[][] ranges) {
+        return ranges != null
+                && ranges.length == 2
+                && ranges[0] != null
+                && ranges[1] != null
+                && ranges[0].length > 0
+                && ranges[0].length == ranges[1].length;
+    }
+
+    private boolean isRangeInSpannable(SpannableString spannable, int start, int end) {
+        return start <= end && start >= 0 && end <= spannable.length();
+    }
+
+    @FunctionalInterface
+    private interface SpanFactory<T> {
+        @Nullable ParcelableSpan createSpan(T param);
+    }
+
+    private <T> void addSpans(
+            SpannableString spannable, Map<T, int[][]> attributes, SpanFactory<T> spanFactory) {
+        if (attributes != null) {
+            attributes.forEach(
+                    (value, ranges) -> {
+                        if (isValidAttributeRanges(ranges)) {
+                            for (int i = 0; i < ranges[0].length; i++) {
+                                int start = ranges[0][i];
+                                int end = ranges[1][i];
+                                if (isRangeInSpannable(spannable, start, end)) {
+                                    ParcelableSpan span = spanFactory.createSpan(value);
+                                    if (span != null) {
+                                        spannable.setSpan(span, start, end, 0);
+                                    }
+                                }
+                            }
+                        }
+                    });
+        }
+    }
+
+    public static void convertWebRectToAndroidCoordinates(
+            Rect rect,
+            @Nullable Bundle extras,
+            AccessibilityDelegate.AccessibilityCoordinates accessibilityCoordinates,
+            View view,
+            boolean isScreenCoordinates) {
         // Offset by the scroll position.
-        AccessibilityDelegate.AccessibilityCoordinates ac = mDelegate.getAccessibilityCoordinates();
+        AccessibilityDelegate.AccessibilityCoordinates ac = accessibilityCoordinates;
         rect.offset(-(int) ac.getScrollX(), -(int) ac.getScrollY());
 
         // Convert CSS (web) pixels to Android View pixels
@@ -549,19 +997,134 @@ public class AccessibilityNodeInfoBuilder {
 
         // Finally offset by the location of the view within the screen.
         final int[] viewLocation = new int[2];
-        mDelegate.getView().getLocationOnScreen(viewLocation);
-        rect.offset(viewLocation[0], viewLocation[1]);
+        view.getLocationOnScreen(viewLocation);
+        // Only offset the view location when the screen coordinates are requested.
+        // For window coordinates, no need to offset the view location.
+        if (isScreenCoordinates) {
+            rect.offset(viewLocation[0], viewLocation[1]);
+        }
 
-        // Clip to the viewport bounds, and add unclipped values to the Bundle.
-        int viewportRectTop = viewLocation[1] + (int) ac.getContentOffsetYPix();
-        int viewportRectBottom = viewportRectTop + ac.getLastFrameViewportHeightPixInt();
-        if (rect.top < viewportRectTop) {
+        // TODO(mschillaci): This block is the same per-node and is purely viewport dependent,
+        //                   pull this out into a reusable object for simplicity/performance.
+        // rect is the unclipped values, but we need to clip to viewport bounds. The original
+        // unclipped values will be placed in the Bundle extras.
+        int clippedTop = viewLocation[1] + (int) ac.getContentOffsetYPix();
+        int clippedBottom = clippedTop + ac.getLastFrameViewportHeightPixInt();
+        // There is currently no x offset, y offset comes from tab bar / browser controls.
+        int clippedLeft = viewLocation[0];
+        int clippedRight = clippedLeft + ac.getLastFrameViewportWidthPixInt();
+
+        if (extras != null) {
+            // Always provide the unclipped bounds in the Bundle for any interested downstream
+            // client.
             extras.putInt(EXTRAS_KEY_UNCLIPPED_TOP, rect.top);
-            rect.top = viewportRectTop;
-        }
-        if (rect.bottom > viewportRectBottom) {
             extras.putInt(EXTRAS_KEY_UNCLIPPED_BOTTOM, rect.bottom);
-            rect.bottom = viewportRectBottom;
+            extras.putInt(EXTRAS_KEY_UNCLIPPED_LEFT, rect.left);
+            extras.putInt(EXTRAS_KEY_UNCLIPPED_RIGHT, rect.right);
+            extras.putInt(EXTRAS_KEY_UNCLIPPED_WIDTH, rect.width());
+            extras.putInt(EXTRAS_KEY_UNCLIPPED_HEIGHT, rect.height());
         }
+
+        if (rect.top < clippedTop) {
+            rect.top = clippedTop;
+        } else if (rect.top > clippedBottom) {
+            rect.top = clippedBottom;
+        }
+
+        if (rect.bottom > clippedBottom) {
+            rect.bottom = clippedBottom;
+        } else if (rect.bottom < clippedTop) {
+            rect.bottom = clippedTop;
+        }
+
+        if (rect.left < clippedLeft) {
+            rect.left = clippedLeft;
+        } else if (rect.left > clippedRight) {
+            rect.left = clippedRight;
+        }
+
+        if (rect.right > clippedRight) {
+            rect.right = clippedRight;
+        } else if (rect.right < clippedLeft) {
+            rect.right = clippedLeft;
+        }
+    }
+
+    private @Nullable String getAndroidMathTagFromHtmlTag(String htmlTag) {
+        switch (htmlTag) {
+            case "math":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_MATH;
+            case "mfrac":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_FRACTION;
+            case "mi":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_IDENTIFIER;
+            case "mmultiscripts":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_MULTISCRIPTS;
+            case "none":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_NONE_SCRIPT;
+            case "mn":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_NUMBER;
+            case "mo":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_OPERATOR;
+            case "mover":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_OVER;
+            case "mprescripts":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_PRESCRIPT_DELIMITER;
+            case "mroot":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_ROOT;
+            case "mrow":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_ROW;
+            case "msqrt":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_SQUARE_ROOT;
+            case "ms":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_STRING_LITERAL;
+            case "msub":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_SUB;
+            case "msubsup":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_SUB_SUP;
+            case "msup":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_SUP;
+            case "mtable":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_TABLE;
+            case "mtd":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_TABLE_CELL;
+            case "mtr":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_TABLE_ROW;
+            case "mtext":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_TEXT;
+            case "munder":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_UNDER;
+            case "munderover":
+                return AccessibilityNodeInfoCompat.MathInfoCompat.MATH_TAG_UNDER_OVER;
+            default:
+                return null;
+        }
+    }
+
+    @CalledByNative
+    private void setAccessibilityNodeInfoMathAttributes(
+            AccessibilityNodeInfoCompat node,
+            String mathHtmlTag,
+            @Nullable String mathIntent,
+            @Nullable String mathArg) {
+        String androidMathTag = getAndroidMathTagFromHtmlTag(mathHtmlTag);
+
+        // If the role is not a supported math tag, do nothing.
+        if (androidMathTag == null) return;
+
+        AccessibilityNodeInfoCompat.MathInfoCompat mathInfo =
+                new AccessibilityNodeInfoCompat.MathInfoCompat(androidMathTag);
+
+        if (!TextUtils.isEmpty(mathIntent)) {
+            mathInfo.putAttribute(
+                    AccessibilityNodeInfoCompat.MathInfoCompat.MATH_ATTRIBUTE_INTENT, mathIntent);
+        }
+
+        if (!TextUtils.isEmpty(mathArg)) {
+            mathInfo.putAttribute(
+                    AccessibilityNodeInfoCompat.MathInfoCompat.MATH_ATTRIBUTE_ARG, mathArg);
+        }
+
+        node.setStructuredDataInfo(mathInfo);
     }
 }

@@ -10,8 +10,8 @@
 #include "base/no_destructor.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
-#include "content/browser/font_unique_name_lookup/font_unique_name_lookup.h"
-#include "content/public/common/content_features.h"
+#include "content/browser/font_unique_name_lookup/font_unique_name_lookup_android.h"
+#include "content/common/features.h"
 #include "mojo/public/cpp/bindings/callback_helpers.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 
@@ -19,7 +19,6 @@ namespace content {
 
 FontUniqueNameLookupService::FontUniqueNameLookupService()
     : font_unique_name_lookup_(::content::FontUniqueNameLookup::GetInstance()) {
-  DCHECK(base::FeatureList::IsEnabled(features::kFontSrcLocalMatching));
 }
 
 FontUniqueNameLookupService::~FontUniqueNameLookupService() {}
@@ -43,7 +42,8 @@ FontUniqueNameLookupService::GetTaskRunner() {
 
 void FontUniqueNameLookupService::GetUniqueNameLookupTable(
     GetUniqueNameLookupTableCallback callback) {
-  DCHECK(GetTaskRunner()->RunsTasksInCurrentSequence());
+  CHECK(GetTaskRunner()->RunsTasksInCurrentSequence(),
+        base::NotFatalUntil::M159);
   if (font_unique_name_lookup_->IsValid()) {
     std::move(callback).Run(font_unique_name_lookup_->DuplicateMemoryRegion());
   } else {
@@ -54,7 +54,8 @@ void FontUniqueNameLookupService::GetUniqueNameLookupTable(
 
 void FontUniqueNameLookupService::GetUniqueNameLookupTableIfAvailable(
     GetUniqueNameLookupTableIfAvailableCallback callback) {
-  DCHECK(GetTaskRunner()->RunsTasksInCurrentSequence());
+  CHECK(GetTaskRunner()->RunsTasksInCurrentSequence(),
+        base::NotFatalUntil::M159);
 
   base::ReadOnlySharedMemoryRegion invalid_region;
   callback = mojo::WrapCallbackWithDefaultInvokeIfNotRun(

@@ -266,6 +266,92 @@ TEST_F(MacScrollbarAnimatorTest, EnterTrack) {
   EXPECT_EQ(scrollbar_->GetThumbWidth(), kUnexpandedWidth);
 }
 
+TEST_F(MacScrollbarAnimatorTest, DeferFadeOutAndDidScroll) {
+  // The scrollbar_ starts as invisible.
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 0.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+
+  // Scroll with the mouse not in the track with deferring fade-out.
+  EXPECT_CALL(client_, IsMouseInScrollbarFrameRect()).WillOnce(Return(false));
+  EXPECT_CALL(client_, SetHidden(false));
+  EXPECT_CALL(client_, SetThumbNeedsDisplay());
+  scrollbar_->FadeInScrollbar(/*defer_fade_out=*/true);
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 1.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+  EXPECT_EQ(scrollbar_->GetThumbWidth(), kUnexpandedWidth);
+
+  // Fast-forward until just before the timeout threshold is hit.
+  EXPECT_CALL(client_, SetThumbNeedsDisplay()).Times(0);
+  task_environment_.FastForwardBy(kTimeToFadeOut);
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 1.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+
+  // Fast-forward again until just before the timeout threshold is hit.
+  EXPECT_CALL(client_, SetThumbNeedsDisplay()).Times(0);
+  task_environment_.FastForwardBy(kTimeToFadeOut);
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 1.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+
+  // begin deferred fade out animation.
+  scrollbar_->FadeOutScrollbarIfNeeded();
+
+  // Fast-forward again until just before the timeout threshold is hit.
+  EXPECT_CALL(client_, SetThumbNeedsDisplay()).Times(0);
+  task_environment_.FastForwardBy(kTimeToFadeOut);
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 1.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+
+  // Fast-forward through half of the fade-out animation.
+  EXPECT_CALL(client_, SetThumbNeedsDisplay()).WillRepeatedly(Return());
+  task_environment_.FastForwardBy(kAnimationTime / 2);
+  EXPECT_GT(scrollbar_->GetThumbAlpha(), 0.f);
+  EXPECT_LT(scrollbar_->GetThumbAlpha(), 1.f);
+  EXPECT_EQ(scrollbar_->GetThumbWidth(), kUnexpandedWidth);
+
+  // Fast-forward through past the end of the fade-out animation. The scrollbar_
+  // should be hidden.
+  EXPECT_CALL(client_, SetHidden(true));
+  task_environment_.FastForwardBy(kAnimationTime);
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 0.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+}
+
+TEST_F(MacScrollbarAnimatorTest, FadeInScrollbarWithoutDeferringFadeOut) {
+  // The scrollbar_ starts as invisible.
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 0.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+
+  // Scroll with the mouse not in the track without deferring fade-out.
+  EXPECT_CALL(client_, IsMouseInScrollbarFrameRect()).WillOnce(Return(false));
+  EXPECT_CALL(client_, SetHidden(false));
+  EXPECT_CALL(client_, SetThumbNeedsDisplay());
+  scrollbar_->FadeInScrollbar(/*defer_fade_out=*/false);
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 1.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+  EXPECT_EQ(scrollbar_->GetThumbWidth(), kUnexpandedWidth);
+
+  // Fast-forward until just before the timeout threshold is hit. Because
+  // fade-out is not deferred, the fade-out animation begins.
+  EXPECT_CALL(client_, SetThumbNeedsDisplay()).Times(0);
+  task_environment_.FastForwardBy(kTimeToFadeOut);
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 1.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+
+  // Fast-forward through half of the fade-out animation.
+  EXPECT_CALL(client_, SetThumbNeedsDisplay()).WillRepeatedly(Return());
+  task_environment_.FastForwardBy(kAnimationTime / 2);
+  EXPECT_GT(scrollbar_->GetThumbAlpha(), 0.f);
+  EXPECT_LT(scrollbar_->GetThumbAlpha(), 1.f);
+  EXPECT_EQ(scrollbar_->GetThumbWidth(), kUnexpandedWidth);
+
+  // Fast-forward through past the end of the fade-out animation. The
+  // scrollbar_ should be hidden.
+  EXPECT_CALL(client_, SetHidden(true));
+  task_environment_.FastForwardBy(kAnimationTime);
+  EXPECT_EQ(scrollbar_->GetThumbAlpha(), 0.f);
+  EXPECT_EQ(scrollbar_->GetTrackAlpha(), 0.f);
+}
+
 }  // namespace
 
 }  // namespace ui

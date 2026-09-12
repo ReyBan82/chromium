@@ -9,10 +9,6 @@
 #include "testing/gtest_mac.h"
 #include "testing/platform_test.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 @protocol TestObserver
 
 @required
@@ -29,12 +25,12 @@
 @end
 
 // Implements only the required methods in the TestObserver protocol.
-@interface TestPartialObserver : NSObject<TestObserver>
+@interface TestPartialObserver : NSObject <TestObserver>
 @property(nonatomic, readonly) BOOL requiredMethodInvoked;
 @end
 
 // Implements all the methods in the TestObserver protocol.
-@interface TestCompleteObserver : TestPartialObserver<TestObserver>
+@interface TestCompleteObserver : TestPartialObserver <TestObserver>
 @property(nonatomic, readonly) BOOL optionalMethodInvoked;
 @end
 
@@ -44,11 +40,15 @@
 - (instancetype)init NS_UNAVAILABLE;
 @end
 
+@interface TestCircularObserver : NSObject <TestObserver>
+- (void)setObservers:(CRBProtocolObservers*)observer;
+@end
+
 namespace {
 
 class CRBProtocolObserversTest : public PlatformTest {
  public:
-  CRBProtocolObserversTest() {}
+  CRBProtocolObserversTest() = default;
 
  protected:
   void SetUp() override {
@@ -66,12 +66,15 @@ class CRBProtocolObserversTest : public PlatformTest {
 
     mutate_observer_ = [[TestMutateObserver alloc] initWithObserver:observers_];
     EXPECT_FALSE([mutate_observer_ requiredMethodInvoked]);
+
+    circular_observer_ = [[TestCircularObserver alloc] init];
   }
 
   CRBProtocolObservers<TestObserver>* observers_;
   TestPartialObserver* partial_observer_;
   TestCompleteObserver* complete_observer_;
   TestMutateObserver* mutate_observer_;
+  TestCircularObserver* circular_observer_;
 };
 
 // Verifies basic functionality of -[CRBProtocolObservers addObserver:] and
@@ -122,14 +125,9 @@ TEST_F(CRBProtocolObserversTest, WeakReference) {
 
   [observers_ addObserver:partial_observer_];
 
-  // Need an autorelease pool here, because
-  // -[CRBProtocolObservers forwardInvocation:] creates a temporary
-  // autoreleased array that holds all the observers.
-  @autoreleasepool {
-    [observers_ requiredMethod];
-    EXPECT_TRUE([partial_observer_ requiredMethodInvoked]);
-    partial_observer_ = nil;
-  }
+  [observers_ requiredMethod];
+  EXPECT_TRUE([partial_observer_ requiredMethodInvoked]);
+  partial_observer_ = nil;
 
   EXPECT_FALSE(weak_observer);
 }
@@ -221,17 +219,25 @@ TEST_F(CRBProtocolObserversTest, IgnoresDeallocedObservers) {
 
   [observers_ addObserver:partial_observer_];
 
-  // Need an autorelease pool here, because
-  // -[CRBProtocolObservers forwardInvocation:] creates a temporary
-  // autoreleased array that holds all the observers.
-  @autoreleasepool {
-    [observers_ requiredMethod];
-    EXPECT_TRUE([partial_observer_ requiredMethodInvoked]);
-    partial_observer_ = nil;
-  }
+  [observers_ requiredMethod];
+  EXPECT_TRUE([partial_observer_ requiredMethodInvoked]);
+  partial_observer_ = nil;
 
   EXPECT_FALSE(weak_observer);
   // This shouldn't crash.
+  [observers_ requiredMethod];
+}
+
+// Verifies that CRBProtocolObservers does not extend lifetime of the
+// observers when calling methods.
+TEST_F(CRBProtocolObserversTest, InvokingMethodDoesNotRetainObservers) {
+  __weak TestCircularObserver* weak_observer = circular_observer_;
+  EXPECT_TRUE(weak_observer);
+
+  [circular_observer_ setObservers:observers_];
+  circular_observer_ = nil;
+
+  EXPECT_FALSE(weak_observer);
   [observers_ requiredMethod];
 }
 
@@ -288,7 +294,6 @@ TEST_F(CRBProtocolObserversTest, IgnoresDeallocedObservers) {
 
 - (instancetype)init {
   NOTREACHED();
-  return nil;
 }
 
 - (void)mutateByAddingObserver:(id<TestObserver>)observer {
@@ -305,6 +310,33 @@ TEST_F(CRBProtocolObserversTest, IgnoresDeallocedObservers) {
 
 - (void)nestedMutateByRemovingObserver:(id<TestObserver>)observer {
   [_observers mutateByRemovingObserver:observer];
+}
+
+@end
+
+@implementation TestCircularObserver {
+  id _observers;
+}
+
+- (void)setObservers:(CRBProtocolObservers*)observer {
+  if (_observers) {
+    [_observers removeObserver:self];
+  }
+  _observers = observer;
+  if (_observers) {
+    [_observers addObserver:self];
+    [_observers requiredMethod];
+  }
+}
+
+- (void)requiredMethod {
+  if (_observers) {
+    [self reset];
+  }
+}
+
+- (void)reset {
+  [_observers removeObserver:self];
 }
 
 @end

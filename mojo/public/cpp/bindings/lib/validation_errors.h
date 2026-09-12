@@ -5,9 +5,12 @@
 #ifndef MOJO_PUBLIC_CPP_BINDINGS_LIB_VALIDATION_ERRORS_H_
 #define MOJO_PUBLIC_CPP_BINDINGS_LIB_VALIDATION_ERRORS_H_
 
+#include <stddef.h>
+
 #include "base/component_export.h"
-#include "base/functional/callback.h"
-#include "base/logging.h"
+#include "base/dcheck_is_on.h"
+#include "base/functional/callback_forward.h"
+#include "mojo/public/cpp/bindings/lib/send_validation_type.h"
 
 namespace mojo {
 
@@ -16,6 +19,18 @@ class Message;
 namespace internal {
 
 class ValidationContext;
+
+struct ArrayIndexError {
+  const char* message;
+  size_t size;
+  size_t index;
+};
+
+struct ArrayExpectedSizeError {
+  const char* message;
+  size_t size;
+  size_t expected_size;
+};
 
 enum ValidationError {
   // There is no validation error.
@@ -82,7 +97,17 @@ const char* ValidationErrorToString(ValidationError error);
 COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
 void ReportValidationError(ValidationContext* context,
                            ValidationError error,
-                           const char* description = nullptr);
+                           const char* details = nullptr);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void ReportValidationError(ValidationContext* context,
+                           ValidationError error,
+                           const ArrayIndexError& details);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void ReportValidationError(ValidationContext* context,
+                           ValidationError error,
+                           const ArrayExpectedSizeError& details);
 
 COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
 void ReportValidationErrorForMessage(mojo::Message* message,
@@ -91,85 +116,41 @@ void ReportValidationErrorForMessage(mojo::Message* message,
                                      unsigned int method_ordinal,
                                      bool is_response);
 
-// This class may be used by tests to suppress validation error logging. This is
-// not thread-safe and must only be instantiated on the main thread with no
-// other threads using Mojo bindings at the time of construction or destruction.
-class COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
-    ScopedSuppressValidationErrorLoggingForTests {
- public:
-  ScopedSuppressValidationErrorLoggingForTests();
-
-  ScopedSuppressValidationErrorLoggingForTests(
-      const ScopedSuppressValidationErrorLoggingForTests&) = delete;
-  ScopedSuppressValidationErrorLoggingForTests& operator=(
-      const ScopedSuppressValidationErrorLoggingForTests&) = delete;
-
-  ~ScopedSuppressValidationErrorLoggingForTests();
-
- private:
-  const bool was_suppressed_;
-};
-
-// Only used by validation tests and when there is only one thread doing message
-// validation.
-class COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
-    ValidationErrorObserverForTesting {
- public:
-  explicit ValidationErrorObserverForTesting(base::RepeatingClosure callback);
-
-  ValidationErrorObserverForTesting(const ValidationErrorObserverForTesting&) =
-      delete;
-  ValidationErrorObserverForTesting& operator=(
-      const ValidationErrorObserverForTesting&) = delete;
-
-  ~ValidationErrorObserverForTesting();
-
-  ValidationError last_error() const { return last_error_; }
-  void set_last_error(ValidationError error) {
-    last_error_ = error;
-    callback_.Run();
-  }
-
- private:
-  ValidationError last_error_;
-  base::RepeatingClosure callback_;
-};
-
-// Used only by MOJO_INTERNAL_DLOG_SERIALIZATION_WARNING. Don't use it directly.
-//
-// The function returns true if the error is recorded (by a
-// SerializationWarningObserverForTesting object), false otherwise.
 COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
-bool ReportSerializationWarning(ValidationError error);
+bool GetIsValidationErrorLoggingSuppressedForTesting();
 
-// Only used by serialization tests and when there is only one thread doing
-// message serialization.
-class COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
-    SerializationWarningObserverForTesting {
- public:
-  SerializationWarningObserverForTesting();
-
-  SerializationWarningObserverForTesting(
-      const SerializationWarningObserverForTesting&) = delete;
-  SerializationWarningObserverForTesting& operator=(
-      const SerializationWarningObserverForTesting&) = delete;
-
-  ~SerializationWarningObserverForTesting();
-
-  ValidationError last_warning() const { return last_warning_; }
-  void set_last_warning(ValidationError error) { last_warning_ = error; }
-
- private:
-  ValidationError last_warning_;
-};
-
-// Used to record that Deserialize() of a Mojo string failed because it was not
-// valid UTF-8.
 COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
-void RecordInvalidStringDeserialization();
+void SetIsValidationErrorLoggingSuppressedForTesting(bool suppress_logging);
 
-}  // namespace internal
-}  // namespace mojo
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void SetSerializationWarningCallbackForTesting(
+    base::RepeatingCallback<void(ValidationError, SendValidation)>* callback);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void SetValidationErrorCallbackForTesting(
+    base::RepeatingCallback<void(ValidationError)>* callback);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void HandleSerializationError(ValidationError error, const char* details);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void HandleSerializationError(ValidationError error,
+                              const ArrayIndexError& details);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void HandleSerializationError(ValidationError error,
+                              const ArrayExpectedSizeError& details);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void HandleSerializationWarning(ValidationError error, const char* details);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void HandleSerializationWarning(ValidationError error,
+                                const ArrayIndexError& details);
+
+COMPONENT_EXPORT(MOJO_CPP_BINDINGS_BASE)
+void HandleSerializationWarning(ValidationError error,
+                                const ArrayExpectedSizeError& details);
 
 // In debug build, logs a serialization warning if |condition| evaluates to
 // true:
@@ -177,14 +158,45 @@ void RecordInvalidStringDeserialization();
 //     records |error| in it;
 //   - otherwise, logs a fatal-level message.
 // |error| is the validation error that will be triggered by the receiver
-// of the serialzation result.
+// of the serialization result.
 //
 // In non-debug build, does nothing (not even compiling |condition|).
-#define MOJO_INTERNAL_DLOG_SERIALIZATION_WARNING(condition, error,    \
-                                                 description)         \
-  DLOG_IF(FATAL, (condition) && !ReportSerializationWarning(error))   \
-      << "The outgoing message will trigger "                         \
-      << ValidationErrorToString(error) << " at the receiving side (" \
-      << description << ")."
+#define MOJO_INTERNAL_DLOG_SERIALIZATION_WARNING(condition, error, details) \
+  if (DCHECK_IS_ON() && !(condition)) {                                     \
+    HandleSerializationWarning(error, details);                             \
+  }
+
+// If |condition| evaluates to true:
+//   - if there is a SerializationWarningObserverForTesting object alive,
+//     records |error| in it;
+//   - if there is no SerializationWarningObserverForTesting, then it will CHECK
+// |error| is the validation error that will be triggered by the receiver
+// of the serialization result.
+//
+// By checking the condition first, we delay evaluating the details.
+#define MOJO_INTERNAL_CHECK_SERIALIZATION_ERROR(condition, error, details) \
+  if (!(condition)) {                                                      \
+    HandleSerializationError(error, details);                              \
+  }
+
+#define RUNTIME_MOJO_INTERNAL_CHECK_SERIALIZATION(send_validation, condition, \
+                                                  error, details)             \
+  if (send_validation == mojo::internal::SendValidation::kFatal) {            \
+    MOJO_INTERNAL_CHECK_SERIALIZATION_ERROR(condition, error, details);       \
+  } else if (send_validation == mojo::internal::SendValidation::kWarning) {   \
+    MOJO_INTERNAL_DLOG_SERIALIZATION_WARNING(condition, error, details);      \
+  }
+
+#define MOJO_INTERNAL_CHECK_SERIALIZATION(send_validation, condition, error, \
+                                          details)                           \
+  if constexpr (send_validation == mojo::internal::SendValidation::kFatal) { \
+    MOJO_INTERNAL_CHECK_SERIALIZATION_ERROR(condition, error, details);      \
+  } else if constexpr (send_validation ==                                    \
+                       mojo::internal::SendValidation::kWarning) {           \
+    MOJO_INTERNAL_DLOG_SERIALIZATION_WARNING(condition, error, details);     \
+  }
+
+}  // namespace internal
+}  // namespace mojo
 
 #endif  // MOJO_PUBLIC_CPP_BINDINGS_LIB_VALIDATION_ERRORS_H_

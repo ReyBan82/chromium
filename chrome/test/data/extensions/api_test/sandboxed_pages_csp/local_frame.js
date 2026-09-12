@@ -3,9 +3,10 @@
 // found in the LICENSE file.
 
 onmessage = function(e) {
-  var data = JSON.parse(e.data);
-  if (data[0] != 'sandboxed frame msg')
+  const data = JSON.parse(e.data);
+  if (data[0] !== 'sandboxed frame msg') {
     return;
-  var param = data[1];
+  }
+  const param = data[1];
   e.source.postMessage(JSON.stringify(['local frame msg', param]), '*');
 };

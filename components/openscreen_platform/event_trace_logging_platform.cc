@@ -15,6 +15,7 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/trace_event/trace_event.h"
 #include "third_party/openscreen/src/platform/base/error.h"
+#include "third_party/perfetto/include/perfetto/tracing/track.h"
 
 namespace openscreen_platform {
 
@@ -48,22 +49,22 @@ void EventTraceLoggingPlatform::LogTrace(
   // track the duration for profiling reasons as well as the error code, and
   // ignore the trace ID hierarchy (which is difficult to parse as a user
   // anyway).
-  TRACE_EVENT_INSTANT2(
-      kOpenscreenTraceLoggingCategory, event.name, TRACE_EVENT_SCOPE_THREAD,
+  TRACE_EVENT_INSTANT(
+      kOpenscreenTraceLoggingCategory, perfetto::StaticString(event.name),
       "event", event.ToString(), "duration",
       base::StrCat({base::NumberToString(total_runtime), "µs"}));
 }
 
 void EventTraceLoggingPlatform::LogAsyncStart(openscreen::TraceEvent event) {
-  TRACE_EVENT_NESTABLE_ASYNC_BEGIN1(kOpenscreenTraceLoggingCategory, event.name,
-                                    TRACE_ID_LOCAL(event.ids.current), "event",
-                                    event.ToString());
+  TRACE_EVENT_BEGIN(
+      kOpenscreenTraceLoggingCategory, perfetto::StaticString(event.name),
+      perfetto::Track(event.ids.current), "event", event.ToString());
 }
 
 void EventTraceLoggingPlatform::LogAsyncEnd(openscreen::TraceEvent event) {
-  TRACE_EVENT_NESTABLE_ASYNC_END1(kOpenscreenTraceLoggingCategory, event.name,
-                                  TRACE_ID_LOCAL(event.ids.current), "event",
-                                  event.ToString());
+  TRACE_EVENT_END(kOpenscreenTraceLoggingCategory,
+                  perfetto::Track(event.ids.current), "event",
+                  event.ToString());
 }
 
 }  // namespace openscreen_platform

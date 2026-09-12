@@ -9,8 +9,9 @@
 #include "base/functional/callback.h"
 #include "base/run_loop.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
-#include "services/device/public/mojom/sensor_provider.mojom-blink.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/mojom/sensor/web_sensor_provider.mojom-blink.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/cross_variant_mojo_util.h"
 #include "third_party/blink/renderer/core/dom/events/event_target.h"
 #include "third_party/blink/renderer/core/dom/events/native_event_listener.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
@@ -41,6 +42,30 @@ class SyncEventListener final : public NativeEventListener {
 
 }  // namespace
 
+// FakeWebSensorProvider
+
+FakeWebSensorProvider::FakeWebSensorProvider() {
+  mojo::PendingRemote<device::mojom::blink::SensorProvider> pending_remote;
+  sensor_provider_.Bind(
+      ToCrossVariantMojoType(pending_remote.InitWithNewPipeAndPassReceiver()));
+  sensor_provider_remote_.Bind(std::move(pending_remote));
+}
+
+FakeWebSensorProvider::~FakeWebSensorProvider() = default;
+
+void FakeWebSensorProvider::Bind(
+    mojo::PendingReceiver<mojom::blink::WebSensorProvider> receiver) {
+  receiver_.Bind(std::move(receiver));
+}
+
+void FakeWebSensorProvider::GetSensor(device::mojom::blink::SensorType type,
+                                      bool user_gesture,
+                                      GetSensorCallback callback) {
+  sensor_provider_remote_->GetSensor(type, mojo::NullReceiver(),
+                                     /*initially_suspended=*/false,
+                                     std::move(callback));
+}
+
 // SensorTestContext
 
 SensorTestContext::SensorTestContext()
@@ -48,15 +73,16 @@ SensorTestContext::SensorTestContext()
   // Necessary for SensorProxy::ShouldSuspendUpdates() to work correctly.
   testing_scope_.GetPage().GetFocusController().SetFocused(true);
 
+  // TODO(https://crbug.com/521917543): avoid UnretainedException().
   testing_scope_.GetFrame().GetBrowserInterfaceBroker().SetBinderForTesting(
-      device::mojom::blink::SensorProvider::Name_,
-      WTF::BindRepeating(&SensorTestContext::BindSensorProviderRequest,
-                         WTF::Unretained(this)));
+      mojom::blink::WebSensorProvider::Name_,
+      BindRepeating(&SensorTestContext::BindSensorProviderRequest,
+                    blink::subtle::UnretainedException(this)));
 }
 
 SensorTestContext::~SensorTestContext() {
   testing_scope_.GetFrame().GetBrowserInterfaceBroker().SetBinderForTesting(
-      device::mojom::blink::SensorProvider::Name_, {});
+      mojom::blink::WebSensorProvider::Name_, {});
 }
 
 ExecutionContext* SensorTestContext::GetExecutionContext() const {
@@ -69,15 +95,16 @@ ScriptState* SensorTestContext::GetScriptState() const {
 
 void SensorTestContext::BindSensorProviderRequest(
     mojo::ScopedMessagePipeHandle handle) {
-  sensor_provider_.Bind(
-      mojo::PendingReceiver<device::mojom::SensorProvider>(std::move(handle)));
+  fake_web_sensor_provider_.Bind(
+      mojo::PendingReceiver<mojom::blink::WebSensorProvider>(
+          std::move(handle)));
 }
 
 // SensorTestUtils
 
 // static
 void SensorTestUtils::WaitForEvent(EventTarget* event_target,
-                                   const WTF::AtomicString& event_type) {
+                                   const AtomicString& event_type) {
   base::RunLoop run_loop;
   auto* event_listener =
       MakeGarbageCollected<SyncEventListener>(run_loop.QuitClosure());

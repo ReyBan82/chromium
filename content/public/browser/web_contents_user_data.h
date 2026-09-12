@@ -64,6 +64,17 @@ class WebContentsUserData : public base::SupportsUserData::Data {
 
   // Retrieves the instance of type T that was attached to the specified
   // WebContents (via CreateForWebContents above) and returns it. If no instance
+  // of the type was attached, creates one and returns it.
+  template <typename... Args>
+  static T* GetOrCreateForWebContents(WebContents* contents, Args&&... args) {
+    if (!FromWebContents(contents)) {
+      CreateForWebContents(contents, std::forward<Args>(args)...);
+    }
+    return FromWebContents(contents);
+  }
+
+  // Retrieves the instance of type T that was attached to the specified
+  // WebContents (via CreateForWebContents above) and returns it. If no instance
   // of the type was attached, returns nullptr.
   static T* FromWebContents(WebContents* contents) {
     DCHECK(contents);
@@ -79,16 +90,17 @@ class WebContentsUserData : public base::SupportsUserData::Data {
   // Returns the WebContents associated with `this` object of a subclass
   // which inherits from WebContentsUserData.
   //
-  // The returned `WebContents` is guaranteed to live as long as `this`
-  // WebContentsUserData (due to how UserData works - WebContents
-  // owns `this` UserData).
+  // The reference is not invalidated during the destruction of `this`
+  // WebContentsUserData. That is because the destructor of `this` is called by
+  // ~SupportsUserData(), at which time ~WebContents() has already run.
   content::WebContents& GetWebContents() { return *web_contents_; }
   const content::WebContents& GetWebContents() const { return *web_contents_; }
 
  private:
   // This is a pointer (rather than a reference) to ensure that go/miracleptr
   // can cover this field (see also //base/memory/raw_ptr.md).
-  const raw_ptr<content::WebContents> web_contents_ = nullptr;
+  const raw_ptr<content::WebContents, DanglingUntriaged> web_contents_ =
+      nullptr;
 };
 
 // This macro declares a static variable inside the class that inherits from

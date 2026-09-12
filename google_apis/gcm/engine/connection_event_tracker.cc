@@ -4,7 +4,6 @@
 
 #include "google_apis/gcm/engine/connection_event_tracker.h"
 
-#include "base/metrics/histogram_macros.h"
 #include "base/time/time.h"
 #include "net/base/network_change_notifier.h"
 
@@ -20,10 +19,7 @@ namespace gcm {
 
 ConnectionEventTracker::ConnectionEventTracker() = default;
 
-ConnectionEventTracker::~ConnectionEventTracker() {
-  UMA_HISTOGRAM_ENUMERATION("GCM.PendingConnectionEventsAtShutdown",
-                            completed_events_.size(), kMaxClientEvents + 1);
-}
+ConnectionEventTracker::~ConnectionEventTracker() = default;
 
 bool ConnectionEventTracker::IsEventInProgress() const {
   return current_event_.has_time_connection_started_ms();
@@ -32,7 +28,8 @@ bool ConnectionEventTracker::IsEventInProgress() const {
 void ConnectionEventTracker::StartConnectionAttempt() {
   // TODO(harkness): Can we dcheck here that there is not an in progress
   // connection?
-  current_event_.set_time_connection_started_ms(base::Time::Now().ToJavaTime());
+  current_event_.set_time_connection_started_ms(
+      base::Time::Now().InMillisecondsSinceUnixEpoch());
   // The connection type is passed to the server and stored there, so the
   // values should remain consistent.
   current_event_.set_network_type(
@@ -49,7 +46,8 @@ void ConnectionEventTracker::EndConnectionAttempt() {
   }
 
   // Current event is finished, so add it to our list of completed events.
-  current_event_.set_time_connection_ended_ms(base::Time::Now().ToJavaTime());
+  current_event_.set_time_connection_ended_ms(
+      base::Time::Now().InMillisecondsSinceUnixEpoch());
   completed_events_.push_back(current_event_);
   current_event_.Clear();
 }
@@ -60,7 +58,7 @@ void ConnectionEventTracker::ConnectionAttemptSucceeded() {
   // updated to a failed connection.
   current_event_.set_type(mcs_proto::ClientEvent::SUCCESSFUL_CONNECTION);
   current_event_.set_time_connection_established_ms(
-      base::Time::Now().ToJavaTime());
+      base::Time::Now().InMillisecondsSinceUnixEpoch());
 
   // A completed connection means that the old client event data has now been
   // sent to GCM. Delete old data.

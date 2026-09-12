@@ -14,18 +14,19 @@
 
 #include "absl/base/internal/sysinfo.h"
 
-#ifndef _WIN32
-#include <sys/types.h>
-#include <unistd.h>
-#endif
-
 #include <thread>  // NOLINT(build/c++11)
 #include <unordered_set>
 #include <vector>
 
 #include "gtest/gtest.h"
+#include "absl/base/config.h"
 #include "absl/synchronization/barrier.h"
 #include "absl/synchronization/mutex.h"
+
+#ifndef _WIN32
+#include <sys/types.h>
+#include <unistd.h>
+#endif
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -39,12 +40,6 @@ TEST(SysinfoTest, NumCPUs) {
 
 TEST(SysinfoTest, GetTID) {
   EXPECT_EQ(GetTID(), GetTID());  // Basic compile and equality test.
-#ifdef __native_client__
-  // Native Client has a race condition bug that leads to memory
-  // exaustion when repeatedly creating and joining threads.
-  // https://bugs.chromium.org/p/nativeclient/issues/detail?id=1027
-  return;
-#endif
   // Test that TIDs are unique to each thread.
   // Uses a few loops to exercise implementations that reallocate IDs.
   for (int i = 0; i < 10; ++i) {
@@ -59,7 +54,7 @@ TEST(SysinfoTest, GetTID) {
       threads.push_back(std::thread([&]() {
         pid_t id = GetTID();
         {
-          MutexLock lock(&mutex);
+          MutexLock lock(mutex);
           ASSERT_TRUE(tids.find(id) == tids.end());
           tids.insert(id);
         }

@@ -9,9 +9,10 @@
 #include <map>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "base/notreached.h"
+#include "base/notimplemented.h"
 
 namespace {
 // TODO(jamiewalch): Use the correct DPI for the mode: http://crbug.com/172405.
@@ -131,11 +132,12 @@ std::list<ScreenResolution> DesktopResizerWin::GetSupportedResolutions(
 
 void DesktopResizerWin::SetResolution(const ScreenResolution& resolution,
                                       webrtc::ScreenId screen_id) {
-  if (best_mode_for_resolution_.count(resolution) == 0) {
+  auto it = best_mode_for_resolution_.find(resolution);
+  if (it == best_mode_for_resolution_.end()) {
     return;
   }
 
-  DEVMODE new_mode = best_mode_for_resolution_[resolution];
+  DEVMODE new_mode = it->second;
   DWORD result = ChangeDisplaySettings(&new_mode, CDS_FULLSCREEN);
   if (result != DISP_CHANGE_SUCCESSFUL) {
     LOG(ERROR) << "SetResolution failed: " << result;
@@ -182,8 +184,9 @@ void DesktopResizerWin::UpdateBestModeForResolution(
   //   current frequency.
   // - Otherwise, prefer modes with a higher frequency.
   ScreenResolution candidate_resolution = GetModeResolution(candidate_mode);
-  if (best_mode_for_resolution_.count(candidate_resolution) != 0) {
-    DEVMODE best_mode = best_mode_for_resolution_[candidate_resolution];
+  if (auto it = best_mode_for_resolution_.find(candidate_resolution);
+      it != best_mode_for_resolution_.end()) {
+    DEVMODE best_mode = it->second;
 
     bool best_mode_matches_initial_orientation =
         (initial_mode_.dmDisplayOrientation & DM_DISPLAYORIENTATION) &&
@@ -255,12 +258,10 @@ bool DesktopResizerWin::IsResizeSupported() {
 bool DesktopResizerWin::GetPrimaryDisplayMode(DWORD mode_number,
                                               DWORD flags,
                                               DEVMODE* mode) {
-  memset(mode, 0, sizeof(DEVMODE));
-  mode->dmSize = sizeof(DEVMODE);
-  if (!EnumDisplaySettingsEx(nullptr, mode_number, mode, flags)) {
-    return false;
-  }
-  return true;
+  *mode = {
+      .dmSize = sizeof(DEVMODE),
+  };
+  return EnumDisplaySettingsEx(nullptr, mode_number, mode, flags);
 }
 
 // static

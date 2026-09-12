@@ -2,25 +2,29 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/error_reporting/chrome_js_error_report_processor.h"
-
+#include <optional>
+#include <string>
 #include <utility>
 
+#include "base/containers/span.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback_helpers.h"
 #include "base/path_service.h"
-#include "base/strings/escape.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/system/sys_info.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
+#include "chrome/browser/error_reporting/chrome_js_error_report_processor.h"
 #include "chrome/common/chrome_paths.h"
 #include "components/upload_list/crash_upload_list.h"
+#include "net/base/url_util.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
+#include "services/network/public/mojom/fetch_api.mojom-shared.h"
 #include "url/gurl.h"
 
 namespace {
@@ -35,7 +39,7 @@ void ChromeJsErrorReportProcessor::OnRequestComplete(
     std::unique_ptr<network::SimpleURLLoader> url_loader,
     base::ScopedClosureRunner callback_runner,
     base::Time report_time,
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   if (response_body) {
     DVLOG(1) << "Uploaded crash report. ID: " << *response_body;
     base::ThreadPool::PostTaskAndReply(
@@ -48,17 +52,6 @@ void ChromeJsErrorReportProcessor::OnRequestComplete(
   }
   // callback_runner may implicitly run the callback when we reach this line if
   // we didn't add a task to update the report database.
-}
-
-std::string ChromeJsErrorReportProcessor::BuildPostRequestQueryString(
-    const ParameterMap& params) {
-  std::vector<std::string> query_parts;
-  for (const auto& kv : params) {
-    query_parts.push_back(base::StrCat(
-        {kv.first, "=",
-         base::EscapeQueryParamValue(kv.second, /*use_plus=*/false)}));
-  }
-  return base::JoinString(query_parts, "&");
 }
 
 void ChromeJsErrorReportProcessor::UpdateReportDatabase(
@@ -82,8 +75,7 @@ void ChromeJsErrorReportProcessor::UpdateReportDatabase(
   std::string line = base::StrCat({base::NumberToString(report_time.ToTimeT()),
                                    ",", remote_report_id, "\n"});
   // WriteAtCurrentPos because O_APPEND.
-  if (upload_log.WriteAtCurrentPos(line.c_str(), line.length()) !=
-      static_cast<int>(line.length())) {
+  if (!upload_log.WriteAtCurrentPosAndCheck(base::as_byte_span(line))) {
     DVLOG(1) << "Could not write to upload.log";
     return;
   }
@@ -100,7 +92,7 @@ std::string ChromeJsErrorReportProcessor::GetCrashEndpointStaging() {
 // On non-Chrome OS platforms, send the report directly.
 void ChromeJsErrorReportProcessor::SendReport(
     ParameterMap params,
-    absl::optional<std::string> stack_trace,
+    std::optional<std::string> stack_trace,
     bool send_to_production_servers,
     base::ScopedClosureRunner callback_runner,
     base::Time report_time,
@@ -109,11 +101,15 @@ void ChromeJsErrorReportProcessor::SendReport(
                                           ? GetCrashEndpoint()
                                           : GetCrashEndpointStaging();
 
-  const GURL url(base::StrCat(
-      {crash_endpoint_string, "?", BuildPostRequestQueryString(params)}));
+  GURL url(crash_endpoint_string);
+  for (const auto& [key, value] : params) {
+    url = net::AppendQueryParameter(url, key, value);
+  }
+
   auto resource_request = std::make_unique<network::ResourceRequest>();
   resource_request->method = "POST";
   resource_request->url = url;
+  resource_request->credentials_mode = network::mojom::CredentialsMode::kOmit;
 
   const auto traffic_annotation =
       net::DefineNetworkTrafficAnnotation("javascript_report_error", R"(
@@ -121,13 +117,14 @@ void ChromeJsErrorReportProcessor::SendReport(
         sender: "JavaScript error reporter"
         description:
           "Chrome can send JavaScript errors that occur within built-in "
-          "component extensions and chrome:// webpages. If enabled, the error "
-          "message, along with information about Chrome and the operating "
-          "system, is sent to Google for debugging."
+          "component extensions, chrome:// webpages and DevTools. If enabled, "
+          "the error message, along with information about Chrome and the "
+          "operating system, is sent to Google for debugging."
         trigger:
           "A JavaScript error occurs in a Chrome component extension (an "
           "extension bundled with the Chrome browser, not downloaded "
-          "separately) or in certain chrome:// webpages."
+          "separately) or in certain chrome:// webpages or "
+          "in Chrome DevTools (devtools:// pages)."
         data:
           "The JavaScript error message, the version and channel of Chrome, "
           "the URL of the extension or webpage, the line and column number of "

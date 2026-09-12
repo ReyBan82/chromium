@@ -4,14 +4,27 @@
 
 #include "components/autofill/core/browser/metrics/stored_profile_metrics.h"
 
+#include <stddef.h>
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+#include "base/check_op.h"
+#include "base/containers/span.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/strcat.h"
+#include "base/time/time.h"
+#include "components/autofill/core/browser/country_type.h"
+#include "components/autofill/core/browser/data_model/addresses/autofill_profile.h"
+#include "components/autofill/core/browser/field_types.h"
+#include "components/autofill/core/browser/metrics/autofill_metrics_util.h"
 #include "components/autofill/core/common/autofill_clock.h"
-#include "components/autofill/core/common/autofill_features.h"
+#include "components/autofill/core/common/autofill_constants.h"
 
 namespace autofill::autofill_metrics {
 
-void LogStoredProfileCountStatistics(AutofillProfileSourceCategory category,
+void LogStoredProfileCountStatistics(AutofillProfileRecordTypeCategory category,
                                      const StoredProfileCounts& counts) {
   const std::string kSuffix = GetProfileCategorySuffix(category);
 
@@ -30,49 +43,68 @@ void LogStoredProfileCountStatistics(AutofillProfileSourceCategory category,
   base::UmaHistogramPercentage(
       "Autofill.StoredProfileUsedPercentage." + kSuffix,
       100 * used / counts.total);
-  // `kAccount` profiles are guaranteed to have a country, so this metric is
-  // only tracked for the `kLocalOrSyncable` category. For this reason `kSuffix`
-  // is not applied to the metrics name either.
-  if (category == AutofillProfileSourceCategory::kLocalOrSyncable) {
-    base::UmaHistogramCounts1M("Autofill.StoredProfileWithoutCountryCount",
-                               counts.without_country);
-  }
 }
 
-void LogStoredProfileDaysSinceLastUse(AutofillProfileSourceCategory category,
-                                      size_t days) {
+void LogStoredProfileDaysSinceLastUse(
+    AutofillProfileRecordTypeCategory category,
+    size_t days) {
   base::UmaHistogramCounts1000(
       base::StrCat({"Autofill.DaysSinceLastUse.StoredProfile.",
                     GetProfileCategorySuffix(category)}),
       days);
 }
 
-void LogStoredProfileMetrics(const std::vector<AutofillProfile*>& profiles) {
+void LogStoredProfileMetrics(
+    const std::vector<const AutofillProfile*>& profiles) {
   const base::Time now = AutofillClock::Now();
   // Counts stored profile metrics for all profile of the given `category` and
   // emits UMA metrics for them.
-  auto count_and_log = [&](AutofillProfileSourceCategory category) {
+  auto count_and_log = [&](AutofillProfileRecordTypeCategory category) {
     StoredProfileCounts counts;
     for (const AutofillProfile* profile : profiles) {
       if (category != GetCategoryOfProfile(*profile)) {
         continue;
       }
-      const base::TimeDelta time_since_last_use = now - profile->use_date();
+      const base::TimeDelta time_since_last_use =
+          now - profile->usage_history().use_date();
       LogStoredProfileDaysSinceLastUse(category, time_since_last_use.InDays());
       counts.total++;
       counts.disused += time_since_last_use > kDisusedDataModelTimeDelta;
-      counts.without_country += profile->HasRawInfo(ADDRESS_HOME_COUNTRY);
     }
     LogStoredProfileCountStatistics(category, counts);
   };
 
-  count_and_log(AutofillProfileSourceCategory::kLocalOrSyncable);
-  // These metrics are only relevant when kAccount profiles are loaded.
-  if (base::FeatureList::IsEnabled(
-          features::kAutofillAccountProfilesUnionView)) {
-    count_and_log(AutofillProfileSourceCategory::kAccountChrome);
-    count_and_log(AutofillProfileSourceCategory::kAccountNonChrome);
-  }
+  count_and_log(AutofillProfileRecordTypeCategory::kLocalOrSyncable);
+  count_and_log(AutofillProfileRecordTypeCategory::kAccountChrome);
+  count_and_log(AutofillProfileRecordTypeCategory::kAccountNonChrome);
+  count_and_log(AutofillProfileRecordTypeCategory::kAccountHome);
+  count_and_log(AutofillProfileRecordTypeCategory::kAccountWork);
+  count_and_log(AutofillProfileRecordTypeCategory::kAccountNameEmail);
+
+  // Update the metrics when adding a new address type.
+  static_assert(AutofillProfile::RecordType::kMaxValue ==
+                AutofillProfile::RecordType::kAccountNameEmail);
+
+  base::UmaHistogramCounts1M("Autofill.StoredProfileCount.Total",
+                             profiles.size());
+
+  base::UmaHistogramCounts1M(
+      "Autofill.StoredProfileCount.TotalPostalAddressProfiles",
+      std::ranges::count_if(profiles, [](const AutofillProfile* p) {
+        return autofill_metrics::IsPostalAddress(*p);
+      }));
+}
+
+void LogStoredProfileCountWithAlternativeName(
+    base::span<const AutofillProfile* const> profiles) {
+  size_t count =
+      std::ranges::count_if(profiles, [](const AutofillProfile* profile) {
+        return profile->GetAddressCountryCode() == AddressCountryCode("JP") &&
+               profile->HasInfo(ALTERNATIVE_FULL_NAME);
+      });
+
+  base::UmaHistogramCounts100("Autofill.StoredProfileCount.WithAlternativeName",
+                              count);
 }
 
 }  // namespace autofill::autofill_metrics

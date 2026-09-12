@@ -4,17 +4,14 @@
 
 #include "chrome/browser/ui/performance_controls/battery_saver_bubble_delegate.h"
 
-#include "chrome/browser/performance_manager/public/user_tuning/user_performance_tuning_manager.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/performance_manager/public/user_tuning/battery_saver_mode_manager.h"
 #include "chrome/browser/ui/chrome_pages.h"
 #include "chrome/browser/ui/performance_controls/battery_saver_bubble_observer.h"
 #include "chrome/common/webui_url_constants.h"
 
 BatterySaverBubbleDelegate::BatterySaverBubbleDelegate(
-    Browser* browser,
     BatterySaverBubbleObserver* observer)
-    : browser_(browser), observer_(observer) {
-  DCHECK(browser);
+    : observer_(observer) {
   DCHECK(observer);
 }
 
@@ -25,7 +22,7 @@ void BatterySaverBubbleDelegate::OnWindowClosing() {
 
 void BatterySaverBubbleDelegate::OnSessionOffClicked() {
   action_type_ = BatterySaverBubbleActionType::kTurnOffNow;
-  auto* manager = performance_manager::user_tuning::
-      UserPerformanceTuningManager::GetInstance();
+  auto* manager =
+      performance_manager::user_tuning::BatterySaverModeManager::GetInstance();
   manager->SetTemporaryBatterySaverDisabledForSession(true);
 }

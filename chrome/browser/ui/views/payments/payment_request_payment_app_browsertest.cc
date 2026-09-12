@@ -2,27 +2,31 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/notreached.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/views/payments/payment_request_browsertest_base.h"
 #include "chrome/browser/ui/views/payments/payment_request_dialog_view_ids.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "chrome/test/payments/payment_app_install_util.h"
-#include "components/autofill/core/browser/autofill_test_utils.h"
+#include "components/autofill/core/browser/test_utils/autofill_test_util.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
-#include "components/network_session_configurator/common/network_switches.h"
 #include "components/payments/content/service_worker_payment_app_finder.h"
+#include "components/payments/content/service_worker_payment_app_finder_test_api.h"
+#include "components/payments/content/test_payment_manifest_downloader.h"
 #include "components/payments/core/features.h"
-#include "components/payments/core/test_payment_manifest_downloader.h"
 #include "components/permissions/permission_request_manager.h"
 #include "content/public/browser/browser_context.h"
+#include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/storage_partition.h"
+#include "content/public/browser/weak_document_ptr.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/common/content_features.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -30,9 +34,19 @@
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace payments {
+namespace {
+using IconInstall = test::PaymentAppInstallUtil::IconInstall;
+}  // namespace
 
 class PaymentRequestPaymentAppTest : public PaymentRequestBrowserTestBase {
  public:
+  enum class PaymentApp {
+    kAlicePay,
+    kBobPay,
+    kKylePay,
+    kFrankPay,
+  };
+
   PaymentRequestPaymentAppTest(const PaymentRequestPaymentAppTest&) = delete;
   PaymentRequestPaymentAppTest& operator=(const PaymentRequestPaymentAppTest&) =
       delete;
@@ -42,11 +56,13 @@ class PaymentRequestPaymentAppTest : public PaymentRequestBrowserTestBase {
       : alicepay_(net::EmbeddedTestServer::TYPE_HTTPS),
         bobpay_(net::EmbeddedTestServer::TYPE_HTTPS),
         frankpay_(net::EmbeddedTestServer::TYPE_HTTPS),
-        kylepay_(net::EmbeddedTestServer::TYPE_HTTPS) {}
+        kylepay_(net::EmbeddedTestServer::TYPE_HTTPS) {
+    SetBypassUserInteractionForTesting();
+  }
 
   permissions::PermissionRequestManager* GetPermissionRequestManager() {
     return permissions::PermissionRequestManager::FromWebContents(
-        browser()->tab_strip_model()->GetActiveWebContents());
+        browser()->GetTabStripModel()->GetActiveWebContents());
   }
 
   // Starts the test severs.
@@ -62,38 +78,49 @@ class PaymentRequestPaymentAppTest : public PaymentRequestBrowserTestBase {
         permissions::PermissionRequestManager::ACCEPT_ALL);
   }
 
-  void InstallAlicePayForMethod(const std::string& method_name) {
-    ASSERT_TRUE(
-        PaymentAppInstallUtil::InstallPaymentAppForPaymentMethodIdentifier(
-            *GetActiveWebContents(),
-            alicepay_.GetURL("alicepay.test", "/app1/app.js"), method_name,
-            PaymentAppInstallUtil::IconInstall::kWithIcon));
+  GURL GetPaymentAppURL(PaymentApp app, const std::string& path = "/") const {
+    switch (app) {
+      case PaymentApp::kAlicePay:
+        return alicepay_.GetURL("alicepay.test", path);
+      case PaymentApp::kBobPay:
+        return bobpay_.GetURL("bobpay.test", path);
+      case PaymentApp::kKylePay:
+        return kylepay_.GetURL("kylepay.test", path);
+      case PaymentApp::kFrankPay:
+        return frankpay_.GetURL("frankpay.test", path);
+    }
+    return GURL();
   }
 
-  void InstallBobPayForMethod(const std::string& method_name) {
-    ASSERT_TRUE(
-        PaymentAppInstallUtil::InstallPaymentAppForPaymentMethodIdentifier(
-            *GetActiveWebContents(),
-            bobpay_.GetURL("bobpay.test", "/app1/app.js"), method_name,
-            PaymentAppInstallUtil::IconInstall::kWithIcon));
+  std::string GetServiceWorkerScriptPath(PaymentApp app) const {
+    switch (app) {
+      case PaymentApp::kAlicePay:
+      case PaymentApp::kBobPay:
+        return "/app1/app.js";
+      case PaymentApp::kKylePay:
+        return "/app.js";
+      case PaymentApp::kFrankPay:
+        NOTREACHED()
+            << "PaymentApp::kFrankPay does not have a service worker script.";
+    }
+    NOTREACHED();
   }
 
-  void InstallKylePayAndEnableDelegations() {
-    ASSERT_TRUE(
-        PaymentAppInstallUtil::InstallPaymentAppForPaymentMethodIdentifier(
-            *GetActiveWebContents(), kylepay_.GetURL("kylepay.test", "/app.js"),
-            /*payment_method_identifier=*/"https://kylepay.test",
-            PaymentAppInstallUtil::IconInstall::kWithIcon));
-    ASSERT_TRUE(ui_test_utils::NavigateToURL(
-        browser(), kylepay_.GetURL("kylepay.test", "/")));
-    ASSERT_EQ("success",
-              content::EvalJs(GetActiveWebContents(), "enableDelegations()"));
+  void InstallPaymentAppForMethod(PaymentApp app,
+                                  const std::string& method_name,
+                                  content::RenderFrameHost* frame) {
+    ASSERT_TRUE(frame);
+    GURL sw_url = GetPaymentAppURL(app, GetServiceWorkerScriptPath(app));
+    ASSERT_TRUE(sw_url.is_valid());
+    ASSERT_TRUE(test::PaymentAppInstallUtil::
+                    InstallPaymentAppForPaymentMethodIdentifier(
+                        *frame, sw_url, method_name, IconInstall::kWithIcon));
   }
 
   void BlockAlicePay() {
-    GURL origin =
-        alicepay_.GetURL("alicepay.test", "/app1/").DeprecatedGetOriginAsURL();
-    HostContentSettingsMapFactory::GetForProfile(browser()->profile())
+    GURL origin = GetPaymentAppURL(PaymentApp::kAlicePay, "/app1/")
+                      .DeprecatedGetOriginAsURL();
+    HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile())
         ->SetContentSettingDefaultScope(origin, origin,
                                         ContentSettingsType::PAYMENT_HANDLER,
                                         CONTENT_SETTING_BLOCK);
@@ -103,25 +130,31 @@ class PaymentRequestPaymentAppTest : public PaymentRequestBrowserTestBase {
   // app scope. Must be called while on the page that will invoke the
   // PaymentRequest API, because ServiceWorkerPaymentAppFinder is owned by the
   // page.
-  void SetDownloaderAndIgnorePortInOriginComparisonForTesting() {
+  void SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+      content::RenderFrameHost* frame) {
     content::WebContents* web_contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
+        content::WebContents::FromRenderFrameHost(frame);
+    CHECK(web_contents);
+    mojo::Remote<network::mojom::URLLoaderFactory> renderer_url_loader_factory;
+    frame->CreateNetworkServiceDefaultFactory(
+        renderer_url_loader_factory.BindNewPipeAndPassReceiver());
     auto downloader = std::make_unique<TestDownloader>(
-        GetCSPCheckerForTests(), web_contents->GetBrowserContext()
-                                     ->GetDefaultStoragePartition()
-                                     ->GetURLLoaderFactoryForBrowserProcess());
+        GetCSPCheckerForTests(),
+        web_contents->GetBrowserContext()
+            ->GetDefaultStoragePartition()
+            ->GetURLLoaderFactoryForBrowserProcess(),
+        std::move(renderer_url_loader_factory), frame->GetWeakDocumentPtr());
     downloader->AddTestServerURL("https://alicepay.test/",
-                                 alicepay_.GetURL("alicepay.test", "/"));
+                                 GetPaymentAppURL(PaymentApp::kAlicePay));
     downloader->AddTestServerURL("https://bobpay.test/",
-                                 bobpay_.GetURL("bobpay.test", "/"));
+                                 GetPaymentAppURL(PaymentApp::kBobPay));
     downloader->AddTestServerURL("https://frankpay.test/",
-                                 frankpay_.GetURL("frankpay.test", "/"));
+                                 GetPaymentAppURL(PaymentApp::kFrankPay));
     downloader->AddTestServerURL("https://kylepay.test/",
-                                 kylepay_.GetURL("kylepay.test", "/"));
-    ServiceWorkerPaymentAppFinder::GetOrCreateForCurrentDocument(
-        web_contents->GetPrimaryMainFrame())
-        ->SetDownloaderAndIgnorePortInOriginComparisonForTesting(
-            std::move(downloader));
+                                 GetPaymentAppURL(PaymentApp::kKylePay));
+    test_api(
+        ServiceWorkerPaymentAppFinder::GetOrCreateForCurrentDocument(frame))
+        .SetDownloaderAndIgnorePortInOriginComparison(std::move(downloader));
   }
 
  private:
@@ -154,18 +187,21 @@ class PaymentRequestPaymentAppTest : public PaymentRequestBrowserTestBase {
 
 // Test payment request methods are not supported by the payment app.
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, NotSupportedError) {
-  InstallAlicePayForMethod("https://frankpay.test");
+  InstallPaymentAppForMethod(PaymentApp::kAlicePay, "https://frankpay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
 
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("false",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_THAT(
         content::EvalJs(GetActiveWebContents(), "buy();").ExtractString(),
@@ -176,7 +212,8 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, NotSupportedError) {
 
   // Repeat should have identical results.
   {
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     NavigateTo("/payment_request_bobpay_test.html");
 
@@ -185,7 +222,8 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, NotSupportedError) {
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_THAT(
         content::EvalJs(GetActiveWebContents(), "buy();").ExtractString(),
@@ -197,18 +235,21 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, NotSupportedError) {
 
 // Test CanMakePayment and payment request can be fulfilled.
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, PayWithAlicePay) {
-  InstallAlicePayForMethod("https://alicepay.test");
+  InstallPaymentAppForMethod(PaymentApp::kAlicePay, "https://alicepay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
 
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("true",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ(
         "https://alicepay.test\n{\n  \"transactionId\": \"123\"\n}",
@@ -218,14 +259,16 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, PayWithAlicePay) {
   // Repeat should have identical results.
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("true",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ(
         "https://alicepay.test\n{\n  \"transactionId\": \"123\"\n}",
@@ -233,21 +276,76 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, PayWithAlicePay) {
   }
 }
 
+// Same as PayWithAlicePay except the test tests that CanMakePayment and payment
+// request can be fulfilled in an iframe, instead of the main frame.
+IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, PayWithAlicePayInIframe) {
+  NavigateTo("/payment_request_main.html");
+  content::RenderFrameHost* iframe =
+      content::ChildFrameAt(GetActiveWebContents()->GetPrimaryMainFrame(), 0);
+  ASSERT_TRUE(iframe);
+
+  {
+    GURL iframe_url =
+        https_server()->GetURL("a.com", "/payment_request_bobpay_test.html");
+    EXPECT_TRUE(content::NavigateIframeToURL(GetActiveWebContents(), "test",
+                                             iframe_url));
+    iframe =
+        content::ChildFrameAt(GetActiveWebContents()->GetPrimaryMainFrame(), 0);
+    ASSERT_TRUE(iframe);
+    InstallPaymentAppForMethod(PaymentApp::kAlicePay, "https://alicepay.test",
+                               iframe);
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(iframe);
+
+    EXPECT_EQ("true", content::EvalJs(iframe, "canMakePayment();"));
+
+    // A new payment request will be created below, so call
+    // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(iframe);
+
+    EXPECT_EQ("https://alicepay.test\n{\n  \"transactionId\": \"123\"\n}",
+              content::EvalJs(iframe, "buy();").ExtractString());
+  }
+
+  // Repeat should have identical results.
+  {
+    GURL iframe_url =
+        https_server()->GetURL("a.com", "/payment_request_bobpay_test.html");
+    EXPECT_TRUE(content::NavigateIframeToURL(GetActiveWebContents(), "test",
+                                             iframe_url));
+    iframe =
+        content::ChildFrameAt(GetActiveWebContents()->GetPrimaryMainFrame(), 0);
+    ASSERT_TRUE(iframe);
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(iframe);
+
+    EXPECT_EQ("true", content::EvalJs(iframe, "canMakePayment();"));
+
+    // A new payment request will be created below, so call
+    // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(iframe);
+
+    EXPECT_EQ("https://alicepay.test\n{\n  \"transactionId\": \"123\"\n}",
+              content::EvalJs(iframe, "buy();").ExtractString());
+  }
+}
+
 // Test CanMakePayment and payment request can be fulfilled in incognito mode.
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, PayWithAlicePayIncognito) {
   SetIncognito();
-  InstallAlicePayForMethod("https://alicepay.test");
+  InstallPaymentAppForMethod(PaymentApp::kAlicePay, "https://alicepay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
 
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("true",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ(
         "https://alicepay.test\n{\n  \"transactionId\": \"123\"\n}",
@@ -257,14 +355,16 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, PayWithAlicePayIncognito) {
   // Repeat should have identical results.
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("true",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ(
         "https://alicepay.test\n{\n  \"transactionId\": \"123\"\n}",
@@ -274,18 +374,21 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, PayWithAlicePayIncognito) {
 
 // Test payment apps are not available if they are blocked.
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, BlockAlicePay) {
-  InstallAlicePayForMethod("https://alicepay.test");
+  InstallPaymentAppForMethod(PaymentApp::kAlicePay, "https://alicepay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
   BlockAlicePay();
 
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("false",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_THAT(
         content::EvalJs(GetActiveWebContents(), "buy();").ExtractString(),
@@ -297,14 +400,16 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, BlockAlicePay) {
   // Repeat should have identical results.
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("false",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_THAT(
         content::EvalJs(GetActiveWebContents(), "buy();").ExtractString(),
@@ -316,18 +421,21 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, BlockAlicePay) {
 
 // Test https://bobpay.test can not be used by https://alicepay.test
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, CanNotPayWithBobPay) {
-  InstallAlicePayForMethod("https://bobpay.test");
+  InstallPaymentAppForMethod(PaymentApp::kAlicePay, "https://bobpay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
 
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("false",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_THAT(
         content::EvalJs(GetActiveWebContents(), "buy();").ExtractString(),
@@ -339,14 +447,16 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest, CanNotPayWithBobPay) {
   // Repeat should have identical results.
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_EQ("false",
               content::EvalJs(GetActiveWebContents(), "canMakePayment();"));
 
     // A new payment request will be created below, so call
     // SetDownloaderAndIgnorePortInOriginComparisonForTesting again.
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     EXPECT_THAT(
         content::EvalJs(GetActiveWebContents(), "buy();").ExtractString(),
@@ -362,6 +472,7 @@ class PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip
   PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip() {
     feature_list_.InitWithFeatures(
         {
+            payments::features::kPaymentRequestMandatoryPaymentAppUi,
             payments::features::kWebPaymentsSingleAppUiSkip,
             ::features::kServiceWorkerPaymentApps,
         },
@@ -375,20 +486,22 @@ class PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
                        SkipUIEnabledWithBobPay) {
   base::HistogramTester histogram_tester;
-  InstallBobPayForMethod("https://bobpay.test");
+  InstallPaymentAppForMethod(PaymentApp::kBobPay, "https://bobpay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
 
   {
     NavigateTo("/payment_request_bobpay_ui_skip_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     // Since the skip UI flow is available, the request will complete without
     // interaction besides hitting "pay" on the website.
     ResetEventWaiterForSequence(
         {DialogEvent::PROCESSING_SPINNER_SHOWN,
          DialogEvent::PROCESSING_SPINNER_HIDDEN, DialogEvent::DIALOG_OPENED,
-         DialogEvent::PROCESSING_SPINNER_SHOWN, DialogEvent::DIALOG_CLOSED});
+         DialogEvent::LOADING_VIEW_SHOWN, DialogEvent::DIALOG_CLOSED});
     ASSERT_TRUE(content::ExecJs(GetActiveWebContents(), "buy()"));
-    WaitForObservedEvent();
+    ASSERT_TRUE(WaitForObservedEvent());
 
     ExpectBodyContains({"bobpay.test"});
   }
@@ -397,11 +510,13 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
 IN_PROC_BROWSER_TEST_F(
     PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
     SkipUIDEnabledWithSingleAvailableAppAndMultipleAcceptedMethods) {
-  InstallBobPayForMethod("https://bobpay.test");
+  InstallPaymentAppForMethod(PaymentApp::kBobPay, "https://bobpay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
 
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     // Even though both bobpay.test and alicepay.test methods are requested,
     // since only bobpay is installed skip UI is enabled.
@@ -413,23 +528,26 @@ IN_PROC_BROWSER_TEST_F(
 
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
                        SkipUIDisabledWithMultipleAvailableApp) {
-  InstallBobPayForMethod("https://bobpay.test");
-  InstallAlicePayForMethod("https://alicepay.test");
+  InstallPaymentAppForMethod(PaymentApp::kBobPay, "https://bobpay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
+  InstallPaymentAppForMethod(PaymentApp::kAlicePay, "https://alicepay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
 
   {
     NavigateTo("/payment_request_bobpay_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     // Skip UI is disabled since both bobpay.test and alicepay.test methods are
     // requested and both apps are installed.
     ResetEventWaiterForDialogOpened();
     content::ExecuteScriptAsync(GetActiveWebContents(), "buy()");
-    WaitForObservedEvent();
+    ASSERT_TRUE(WaitForObservedEvent());
 
     // Click on pay.
     EXPECT_TRUE(IsPayButtonEnabled());
     ResetEventWaiterForSequence(
-        {DialogEvent::PROCESSING_SPINNER_SHOWN, DialogEvent::DIALOG_CLOSED});
+        {DialogEvent::LOADING_VIEW_SHOWN, DialogEvent::DIALOG_CLOSED});
     ClickOnDialogViewAndWait(DialogViewID::PAY_BUTTON, dialog_view());
 
     // Depending on which installation completes first the preselected app can
@@ -441,12 +559,20 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
 
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
                        SkipUIEnabledWhenSingleAppCanProvideAllInfo) {
-  InstallBobPayForMethod("https://bobpay.test");
-  InstallKylePayAndEnableDelegations();
+  InstallPaymentAppForMethod(PaymentApp::kBobPay, "https://bobpay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
+  InstallPaymentAppForMethod(PaymentApp::kKylePay, "https://kylepay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
+  // Enable delegations for Kyle pay.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GetPaymentAppURL(PaymentApp::kKylePay)));
+  ASSERT_EQ("success",
+            content::EvalJs(GetActiveWebContents(), "enableDelegations()"));
 
   {
     NavigateTo("/payment_request_bobpay_and_cards_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     // Even though two methods are requested and both apps are installed, skip
     // UI is enabled since only KylePay can provide all requested information
@@ -454,13 +580,13 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
     ResetEventWaiterForSequence(
         {DialogEvent::PROCESSING_SPINNER_SHOWN,
          DialogEvent::PROCESSING_SPINNER_HIDDEN, DialogEvent::DIALOG_OPENED,
-         DialogEvent::PROCESSING_SPINNER_SHOWN, DialogEvent::DIALOG_CLOSED});
+         DialogEvent::LOADING_VIEW_SHOWN, DialogEvent::DIALOG_CLOSED});
     ASSERT_TRUE(content::ExecJs(
         GetActiveWebContents(),
         "testPaymentMethods([{supportedMethods: 'https://bobpay.test'}, "
         "{supportedMethods: 'https://kylepay.test'}], true /*= "
         "requestShippingContact */)"));
-    WaitForObservedEvent();
+    ASSERT_TRUE(WaitForObservedEvent());
 
     ExpectBodyContains({"kylepay.test"});
   }
@@ -468,13 +594,15 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
 
 IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
                        SkipUIDisabledWithRequestedPayerEmail) {
-  InstallBobPayForMethod("https://bobpay.test");
+  InstallPaymentAppForMethod(PaymentApp::kBobPay, "https://bobpay.test",
+                             GetActiveWebContents()->GetPrimaryMainFrame());
   autofill::AutofillProfile profile(autofill::test::GetFullProfile());
   AddAutofillProfile(profile);
 
   {
     NavigateTo("/payment_request_bobpay_ui_skip_test.html");
-    SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+    SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+        GetActiveWebContents()->GetPrimaryMainFrame());
 
     // Since the skip UI flow is not available because the payer's email is
     // requested and bobpay cannot proivde it, the request will complete only
@@ -484,12 +612,12 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTestWithPaymentHandlersAndUiSkip,
     const std::string click_buy_button_js =
         "(function() { "
         "document.getElementById('buyWithRequestedEmail').click(); })();";
-    ASSERT_TRUE(content::ExecuteScript(web_contents, click_buy_button_js));
-    WaitForObservedEvent();
+    ASSERT_TRUE(content::ExecJs(web_contents, click_buy_button_js));
+    ASSERT_TRUE(WaitForObservedEvent());
     EXPECT_TRUE(IsPayButtonEnabled());
 
     ResetEventWaiterForSequence(
-        {DialogEvent::PROCESSING_SPINNER_SHOWN, DialogEvent::DIALOG_CLOSED});
+        {DialogEvent::LOADING_VIEW_SHOWN, DialogEvent::DIALOG_CLOSED});
     ClickOnDialogViewAndWait(DialogViewID::PAY_BUTTON, dialog_view());
 
     ExpectBodyContains({"bobpay.test"});
@@ -503,13 +631,15 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestPaymentAppTest,
   // payment app which handles both shipping address and payer's contact
   // information.
   NavigateTo("/payment_request_bobpay_and_cards_test.html");
-  SetDownloaderAndIgnorePortInOriginComparisonForTesting();
+  SetDownloaderAndIgnorePortInOriginComparisonForTesting(
+      GetActiveWebContents()->GetPrimaryMainFrame());
   ResetEventWaiterForDialogOpened();
-  ASSERT_TRUE(content::ExecuteScript(
+  ASSERT_TRUE(content::ExecJs(
       GetActiveWebContents(),
       "testPaymentMethods([{supportedMethods: 'https://kylepay.test/webpay'}], "
-      "true /*= requestShippingContact */);"));
-  WaitForObservedEvent();
+      "true /*= requestShippingContact */);",
+      content::EXECUTE_SCRIPT_NO_RESOLVE_PROMISES));
+  ASSERT_TRUE(WaitForObservedEvent());
 
   // Pay button should be enabled without any autofill profiles since the
   // selected payment instrument (kylepay) handles all merchant required

@@ -7,13 +7,12 @@
 
 #include <stdint.h>
 
-#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_span.h"
 
 namespace sandbox {
 
 const wchar_t kNtdllName[] = L"ntdll.dll";
 const wchar_t kKerneldllName[] = L"kernel32.dll";
-const wchar_t kKernelBasedllName[] = L"kernelbase.dll";
 
 // Defines the supported C++ types encoding to numeric id. Like a simplified
 // RTTI. Note that true C++ RTTI will not work because the types are not
@@ -22,48 +21,13 @@ enum ArgType {
   INVALID_TYPE = 0,
   WCHAR_TYPE,
   UINT32_TYPE,
-  UNISTR_TYPE,
   VOIDPTR_TYPE,
-  INPTR_TYPE,
   INOUTPTR_TYPE,
   LAST_TYPE
 };
 
 // Encapsulates a pointer to a buffer and the size of the buffer.
-class CountedBuffer {
- public:
-  CountedBuffer(void* buffer, uint32_t size) : size_(size), buffer_(buffer) {}
-
-  uint32_t Size() const { return size_; }
-
-  void* Buffer() const { return buffer_; }
-
- private:
-  uint32_t size_;
-  raw_ptr<void> buffer_;
-};
-
-// Helper class to convert void-pointer packed ints for both
-// 32 and 64 bit builds. This construct is non-portable.
-class IPCInt {
- public:
-  explicit IPCInt(void* buffer) { buffer_.vp = buffer; }
-
-  explicit IPCInt(uint32_t i32) {
-    buffer_.vp = nullptr;
-    buffer_.i32 = i32;
-  }
-
-  uint32_t As32Bit() const { return buffer_.i32; }
-
-  void* AsVoidPtr() const { return buffer_.vp; }
-
- private:
-  union U {
-    void* vp;
-    uint32_t i32;
-  } buffer_;
-};
+using CountedBuffer = base::raw_span<uint8_t>;
 
 }  // namespace sandbox
 

@@ -24,19 +24,21 @@ class ScreenAIComponentInstallerPolicy : public ComponentInstallerPolicy {
 
   static void DeleteComponent();
 
+  static std::string GetOmahaId();
+
  private:
   // ComponentInstallerPolicy::
   bool SupportsGroupPolicyEnabledComponentUpdates() const override;
   bool RequiresNetworkEncryption() const override;
   update_client::CrxInstaller::Result OnCustomInstall(
-      const base::Value::Dict& manifest,
+      const base::DictValue& manifest,
       const base::FilePath& install_dir) override;
   void OnCustomUninstall() override;
-  bool VerifyInstallation(const base::Value::Dict& manifest,
+  bool VerifyInstallation(const base::DictValue& manifest,
                           const base::FilePath& install_dir) const override;
   void ComponentReady(const base::Version& version,
                       const base::FilePath& install_dir,
-                      base::Value::Dict manifest) override;
+                      base::DictValue manifest) override;
   base::FilePath GetRelativeInstallDir() const override;
   void GetHash(std::vector<uint8_t>* hash) const override;
   std::string GetName() const override;
@@ -44,9 +46,14 @@ class ScreenAIComponentInstallerPolicy : public ComponentInstallerPolicy {
 };
 
 // Call once during startup to make the component update service aware of
-// the ScreenAI component.
-void RegisterScreenAIComponent(ComponentUpdateService* cus,
-                               PrefService* local_state);
+// the ScreenAI component. Only registers the component if the component is
+// expected to be used, otherwise removes it if it exists from before.
+void ManageScreenAIComponentRegistration(ComponentUpdateService* cus,
+                                         PrefService* local_state);
+
+// Called if ScreenAI component should be installed based on a user trigger of
+// a required functionality.
+void RegisterScreenAIComponent(ComponentUpdateService* cus);
 
 }  // namespace component_updater
 

@@ -12,10 +12,13 @@
 #include "build/build_config.h"
 #include "media/capture/mojom/video_capture_types.mojom-blink.h"
 #include "media/capture/video_capture_types.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/common/features.h"
+#include "third_party/blink/public/mojom/mediastream/media_stream.mojom-blink.h"
+#include "third_party/blink/public/mojom/mediastream/media_stream.mojom-shared.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+#include "third_party/blink/renderer/core/dom/dom_exception.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/modules/mediastream/media_stream_constraints_util.h"
 #include "third_party/blink/renderer/platform/scheduler/public/thread.h"
@@ -23,6 +26,8 @@
 #include "third_party/blink/renderer/platform/wtf/functional.h"
 
 namespace blink {
+
+using mojom::blink::MediaStreamRequestResult;
 
 MediaStreamVideoCapturerSource::MediaStreamVideoCapturerSource(
     scoped_refptr<base::SingleThreadTaskRunner> main_task_runner,
@@ -55,6 +60,20 @@ MediaStreamVideoCapturerSource::MediaStreamVideoCapturerSource(
   SetStopCallback(std::move(stop_callback));
   SetDevice(device);
   SetDeviceRotationDetection(true /* enabled */);
+  switch (device.type) {
+    case mojom::blink::MediaStreamType::DEVICE_VIDEO_CAPTURE:
+      capture_params_.request_type =
+          media::CaptureSourceRequestType::kGetUserMedia;
+      break;
+    case mojom::blink::MediaStreamType::DISPLAY_VIDEO_CAPTURE:
+    case mojom::blink::MediaStreamType::DISPLAY_VIDEO_CAPTURE_THIS_TAB:
+      capture_params_.request_type =
+          media::CaptureSourceRequestType::kGetDisplayMedia;
+      break;
+    default:
+      capture_params_.request_type = media::CaptureSourceRequestType::kUnknown;
+      break;
+  }
 }
 
 MediaStreamVideoCapturerSource::~MediaStreamVideoCapturerSource() {
@@ -75,12 +94,6 @@ void MediaStreamVideoCapturerSource::OnSourceCanDiscardAlpha(
 void MediaStreamVideoCapturerSource::RequestRefreshFrame() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   source_->RequestRefreshFrame();
-}
-
-void MediaStreamVideoCapturerSource::OnFrameDropped(
-    media::VideoCaptureFrameDropReason reason) {
-  DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  source_->OnFrameDropped(reason);
 }
 
 void MediaStreamVideoCapturerSource::OnLog(const std::string& message) {
@@ -106,19 +119,26 @@ void MediaStreamVideoCapturerSource::OnCapturingLinkSecured(bool is_secure) {
 }
 
 void MediaStreamVideoCapturerSource::StartSourceImpl(
-    VideoCaptureDeliverFrameCB frame_callback,
-    EncodedVideoFrameCB encoded_frame_callback,
-    VideoCaptureCropVersionCB crop_version_callback) {
+    MediaStreamVideoSourceCallbacks media_stream_callbacks) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
 
   state_ = kStarting;
-  frame_callback_ = std::move(frame_callback);
-  crop_version_callback_ = std::move(crop_version_callback);
 
+  frame_callback_ = media_stream_callbacks.deliver_frame_cb;
+  capture_version_callback_ = media_stream_callbacks.capture_version_cb;
+  frame_dropped_callback_ = media_stream_callbacks.frame_dropped_cb;
+
+  VideoCaptureCallbacks video_capture_callbacks;
+  video_capture_callbacks.deliver_frame_cb =
+      std::move(media_stream_callbacks.deliver_frame_cb);
+  video_capture_callbacks.capture_version_cb =
+      std::move(media_stream_callbacks.capture_version_cb);
+  video_capture_callbacks.frame_dropped_cb =
+      std::move(media_stream_callbacks.frame_dropped_cb);
   source_->StartCapture(
-      capture_params_, frame_callback_, crop_version_callback_,
-      WTF::BindRepeating(&MediaStreamVideoCapturerSource::OnRunStateChanged,
-                         weak_factory_.GetWeakPtr(), capture_params_));
+      capture_params_, std::move(video_capture_callbacks),
+      blink::BindRepeating(&MediaStreamVideoCapturerSource::OnRunStateChanged,
+                           weak_factory_.GetWeakPtr(), capture_params_));
 }
 
 media::VideoCaptureFeedbackCB
@@ -143,7 +163,7 @@ void MediaStreamVideoCapturerSource::StopSourceForRestartImpl() {
   // Force state update for nondevice sources, since they do not
   // automatically update state after StopCapture().
   if (device().type == mojom::blink::MediaStreamType::NO_SERVICE)
-    OnRunStateChanged(capture_params_, RunState::kStopped);
+    OnRunStateChanged(capture_params_, VideoCaptureRunState::kStopped);
 }
 
 void MediaStreamVideoCapturerSource::RestartSourceImpl(
@@ -152,13 +172,19 @@ void MediaStreamVideoCapturerSource::RestartSourceImpl(
   media::VideoCaptureParams new_capture_params = capture_params_;
   new_capture_params.requested_format = new_format;
   state_ = kRestarting;
+
+  VideoCaptureCallbacks video_capture_callbacks;
+  video_capture_callbacks.deliver_frame_cb = frame_callback_;
+  video_capture_callbacks.capture_version_cb = capture_version_callback_;
+  video_capture_callbacks.frame_dropped_cb = frame_dropped_callback_;
+
   source_->StartCapture(
-      new_capture_params, frame_callback_, crop_version_callback_,
-      WTF::BindRepeating(&MediaStreamVideoCapturerSource::OnRunStateChanged,
-                         weak_factory_.GetWeakPtr(), new_capture_params));
+      new_capture_params, std::move(video_capture_callbacks),
+      blink::BindRepeating(&MediaStreamVideoCapturerSource::OnRunStateChanged,
+                           weak_factory_.GetWeakPtr(), new_capture_params));
 }
 
-absl::optional<media::VideoCaptureFormat>
+std::optional<media::VideoCaptureFormat>
 MediaStreamVideoCapturerSource::GetCurrentFormat() const {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   return capture_params_.requested_format;
@@ -168,12 +194,6 @@ void MediaStreamVideoCapturerSource::ChangeSourceImpl(
     const MediaStreamDevice& new_device) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
   DCHECK(device_capturer_factory_callback_);
-
-  if (!base::FeatureList::IsEnabled(
-          features::kAllowSourceSwitchOnPausedVideoMediaStream) &&
-      state_ != kStarted) {
-    return;
-  }
 
   if (state_ != kStarted && state_ != kStoppedForRestart) {
     return;
@@ -188,38 +208,53 @@ void MediaStreamVideoCapturerSource::ChangeSourceImpl(
   }
   SetDevice(new_device);
   source_ = device_capturer_factory_callback_.Run(new_device.session_id());
+
+  capture_params_.capture_version_source += 1;
+  sub_capture_version_ = 0;
+
+  VideoCaptureCallbacks video_capture_callbacks;
+  video_capture_callbacks.deliver_frame_cb = frame_callback_;
+  video_capture_callbacks.capture_version_cb = capture_version_callback_;
+  video_capture_callbacks.frame_dropped_cb = frame_dropped_callback_;
   source_->StartCapture(
-      capture_params_, frame_callback_, crop_version_callback_,
-      WTF::BindRepeating(&MediaStreamVideoCapturerSource::OnRunStateChanged,
-                         weak_factory_.GetWeakPtr(), capture_params_));
+      capture_params_, std::move(video_capture_callbacks),
+      blink::BindRepeating(&MediaStreamVideoCapturerSource::OnRunStateChanged,
+                           weak_factory_.GetWeakPtr(), capture_params_));
 }
 
-#if !BUILDFLAG(IS_ANDROID)
-void MediaStreamVideoCapturerSource::Crop(
-    const base::Token& crop_id,
-    uint32_t crop_version,
-    base::OnceCallback<void(media::mojom::CropRequestResult)> callback) {
+void MediaStreamVideoCapturerSource::ApplySubCaptureTarget(
+    media::mojom::blink::SubCaptureTargetType type,
+    const base::Token& sub_capture_target,
+    uint32_t sub_capture_version,
+    base::OnceCallback<void(media::mojom::ApplySubCaptureTargetResult)>
+        callback) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  const absl::optional<base::UnguessableToken>& session_id =
+  const std::optional<base::UnguessableToken>& session_id =
       device().serializable_session_id();
   if (!session_id.has_value()) {
-    std::move(callback).Run(media::mojom::CropRequestResult::kErrorGeneric);
+    std::move(callback).Run(
+        media::mojom::ApplySubCaptureTargetResult::kErrorGeneric);
     return;
   }
-  GetMediaStreamDispatcherHost()->Crop(session_id.value(), crop_id,
-                                       crop_version, std::move(callback));
+  GetMediaStreamDispatcherHost()->ApplySubCaptureTarget(
+      session_id.value(), type, sub_capture_target, sub_capture_version,
+      std::move(callback));
 }
 
-absl::optional<uint32_t> MediaStreamVideoCapturerSource::GetNextCropVersion() {
+media::CaptureVersion MediaStreamVideoCapturerSource::GetCaptureVersion()
+    const {
+  return media::CaptureVersion(capture_params_.capture_version_source,
+                               sub_capture_version_);
+}
+
+std::optional<media::CaptureVersion>
+MediaStreamVideoCapturerSource::GetNextCaptureVersion() {
   if (NumTracks() != 1) {
-    return absl::nullopt;
+    return std::nullopt;
   }
-  return ++current_crop_version_;
-}
-#endif
 
-uint32_t MediaStreamVideoCapturerSource::GetCropVersion() const {
-  return current_crop_version_;
+  return media::CaptureVersion(capture_params_.capture_version_source,
+                               ++sub_capture_version_);
 }
 
 base::WeakPtr<MediaStreamVideoSource>
@@ -227,25 +262,56 @@ MediaStreamVideoCapturerSource::GetWeakPtr() {
   return weak_factory_.GetWeakPtr();
 }
 
+bool MediaStreamVideoCapturerSource::AllowsVideoThreadTypeOverride() const {
+  switch (device().type) {
+    case mojom::blink::MediaStreamType::NO_SERVICE:
+    case mojom::blink::MediaStreamType::GUM_TAB_AUDIO_CAPTURE:
+    case mojom::blink::MediaStreamType::DISPLAY_AUDIO_CAPTURE:
+    case mojom::blink::MediaStreamType::DEVICE_AUDIO_CAPTURE:
+    case mojom::blink::MediaStreamType::GUM_DESKTOP_AUDIO_CAPTURE:
+    case mojom::blink::MediaStreamType::NUM_MEDIA_TYPES:
+      return false;
+    case mojom::blink::MediaStreamType::DEVICE_VIDEO_CAPTURE:
+    case mojom::blink::MediaStreamType::GUM_TAB_VIDEO_CAPTURE:
+    case mojom::blink::MediaStreamType::GUM_DESKTOP_VIDEO_CAPTURE:
+    case mojom::blink::MediaStreamType::DISPLAY_VIDEO_CAPTURE:
+    case mojom::blink::MediaStreamType::DISPLAY_VIDEO_CAPTURE_THIS_TAB:
+    case mojom::blink::MediaStreamType::DISPLAY_VIDEO_CAPTURE_SET:
+      return true;
+  }
+}
+
 void MediaStreamVideoCapturerSource::OnRunStateChanged(
     const media::VideoCaptureParams& new_capture_params,
-    RunState run_state) {
+    VideoCaptureRunState run_state) {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  bool is_running = (run_state == RunState::kRunning);
+  bool is_running = (run_state == VideoCaptureRunState::kRunning);
   switch (state_) {
     case kStarting:
       source_->OnLog("MediaStreamVideoCapturerSource sending OnStartDone");
       if (is_running) {
         state_ = kStarted;
         DCHECK(capture_params_ == new_capture_params);
-        OnStartDone(mojom::blink::MediaStreamRequestResult::OK);
+        OnStartDone(MediaStreamRequestResult::OK);
       } else {
         state_ = kStopped;
-        auto result = (run_state == RunState::kSystemPermissionsError)
-                          ? mojom::blink::MediaStreamRequestResult::
-                                SYSTEM_PERMISSION_DENIED
-                          : mojom::blink::MediaStreamRequestResult::
-                                TRACK_START_FAILURE_VIDEO;
+        MediaStreamRequestResult result;
+        switch (run_state) {
+          case VideoCaptureRunState::kSystemPermissionsError:
+            result = MediaStreamRequestResult::PERMISSION_DENIED_BY_SYSTEM;
+            break;
+          case VideoCaptureRunState::kCameraBusyError:
+            result = MediaStreamRequestResult::DEVICE_IN_USE;
+            break;
+          case VideoCaptureRunState::kStartTimeoutError:
+            result = MediaStreamRequestResult::START_TIMEOUT;
+            break;
+          case VideoCaptureRunState::kStopped:
+            result = MediaStreamRequestResult::TRACK_START_FAILURE_VIDEO;
+            break;
+          case VideoCaptureRunState::kRunning:
+            NOTREACHED();
+        }
         OnStartDone(result);
       }
       break;

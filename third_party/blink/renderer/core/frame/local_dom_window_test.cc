@@ -30,11 +30,14 @@
 
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 
+#include "base/test/scoped_feature_list.h"
 #include "services/network/public/cpp/web_sandbox_flags.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/common/loader/referrer_utils.h"
 #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink-forward.h"
+#include "third_party/blink/public/web/web_window_features.h"
 #include "third_party/blink/renderer/bindings/core/v8/isolated_world_csp.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/core/execution_context/agent.h"
@@ -42,12 +45,11 @@
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/inspector/console_message.h"
 #include "third_party/blink/renderer/core/inspector/console_message_storage.h"
+#include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
 #include "third_party/blink/renderer/core/testing/mock_policy_container_host.h"
 #include "third_party/blink/renderer/core/testing/page_test_base.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
-#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/scheduler/public/event_loop.h"
-#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
 #include "third_party/blink/renderer/platform/wtf/threading.h"
@@ -63,29 +65,25 @@ class LocalDOMWindowTest : public PageTestBase {
   void NavigateWithSandbox(
       const KURL& url,
       WebSandboxFlags sandbox_flags = WebSandboxFlags::kAll) {
-    auto params = WebNavigationParams::CreateWithHTMLStringForTesting(
-        /*html=*/"", url);
+    auto params = WebNavigationParams::CreateWithEmptyHTMLForTesting(url);
     MockPolicyContainerHost mock_policy_container_host;
     params->policy_container = std::make_unique<blink::WebPolicyContainer>(
         blink::WebPolicyContainerPolicies(),
         mock_policy_container_host.BindNewEndpointAndPassDedicatedRemote());
     params->policy_container->policies.sandbox_flags = sandbox_flags;
+    params->initiator_state_token = InitiatorStateToken();
+    if ((params->policy_container->policies.sandbox_flags &
+         network::mojom::blink::WebSandboxFlags::kOrigin) !=
+        network::mojom::blink::WebSandboxFlags::kNone) {
+      params->origin_to_commit =
+          SecurityOrigin::Create(url)->DeriveNewOpaqueOrigin();
+    }
     GetFrame().Loader().CommitNavigation(std::move(params),
                                          /*extra_data=*/nullptr);
     test::RunPendingTasks();
     ASSERT_EQ(url.GetString(), GetDocument().Url().GetString());
   }
 };
-
-TEST_F(LocalDOMWindowTest, AttachExecutionContext) {
-  auto* scheduler = GetFrame().GetFrameScheduler();
-  auto* window = GetFrame().DomWindow();
-  EXPECT_TRUE(
-      window->GetAgent()->event_loop()->IsSchedulerAttachedForTest(scheduler));
-  window->FrameDestroyed();
-  EXPECT_FALSE(
-      window->GetAgent()->event_loop()->IsSchedulerAttachedForTest(scheduler));
-}
 
 TEST_F(LocalDOMWindowTest, referrerPolicyParsing) {
   LocalDOMWindow* window = GetFrame().DomWindow();
@@ -177,6 +175,8 @@ TEST_F(LocalDOMWindowTest, OutgoingReferrer) {
   NavigateTo(KURL("https://www.example.com/hoge#fuga?piyo"));
   EXPECT_EQ("https://www.example.com/hoge",
             GetFrame().DomWindow()->OutgoingReferrer());
+  EXPECT_EQ(KURL("https://www.example.com/hoge"),
+            GetFrame().DomWindow()->OutgoingReferrerUrl());
 }
 
 TEST_F(LocalDOMWindowTest, OutgoingReferrerWithUniqueOrigin) {
@@ -185,6 +185,7 @@ TEST_F(LocalDOMWindowTest, OutgoingReferrerWithUniqueOrigin) {
       ~WebSandboxFlags::kAutomaticFeatures & ~WebSandboxFlags::kScripts);
   EXPECT_TRUE(GetFrame().DomWindow()->GetSecurityOrigin()->IsOpaque());
   EXPECT_EQ(String(), GetFrame().DomWindow()->OutgoingReferrer());
+  EXPECT_TRUE(GetFrame().DomWindow()->OutgoingReferrerUrl().IsEmpty());
 }
 
 TEST_F(LocalDOMWindowTest, EnforceSandboxFlags) {
@@ -204,7 +205,7 @@ TEST_F(LocalDOMWindowTest, EnforceSandboxFlags) {
     url::ScopedSchemeRegistryForTests scoped_registry;
     url::AddStandardScheme("very-special-scheme", url::SCHEME_WITH_HOST);
 #if DCHECK_IS_ON()
-    WTF::SetIsBeforeThreadCreatedForTest();  // Required for next operation:
+    SetIsBeforeThreadCreatedForTest();  // Required for next operation:
 #endif
     SchemeRegistry::RegisterURLSchemeBypassingSecureContextCheck(
         "very-special-scheme");
@@ -239,16 +240,6 @@ TEST_F(LocalDOMWindowTest, EnforceSandboxFlags) {
 TEST_F(LocalDOMWindowTest, UserAgent) {
   EXPECT_EQ(GetFrame().DomWindow()->UserAgent(),
             GetFrame().Loader().UserAgent());
-  {
-    ScopedUserAgentReductionForTest s1(true);
-    EXPECT_EQ(GetFrame().DomWindow()->UserAgent(),
-              GetFrame().Loader().ReducedUserAgent());
-  }
-  {
-    ScopedSendFullUserAgentAfterReductionForTest s1(true);
-    EXPECT_EQ(GetFrame().DomWindow()->UserAgent(),
-              GetFrame().Loader().FullUserAgent());
-  }
 }
 
 // Tests ExecutionContext::GetContentSecurityPolicyForCurrentWorld().
@@ -271,7 +262,7 @@ TEST_F(PageTestBase, CSPForWorld) {
   v8::Isolate* isolate = main_world_script_state->GetIsolate();
 
   constexpr int kIsolatedWorldWithoutCSPId = 1;
-  scoped_refptr<DOMWrapperWorld> world_without_csp =
+  DOMWrapperWorld* world_without_csp =
       DOMWrapperWorld::EnsureIsolatedWorld(isolate, kIsolatedWorldWithoutCSPId);
   ASSERT_TRUE(world_without_csp->IsIsolatedWorld());
   ScriptState* isolated_world_without_csp_script_state =
@@ -279,7 +270,7 @@ TEST_F(PageTestBase, CSPForWorld) {
 
   const char* kIsolatedWorldCSP = "script-src 'none';";
   constexpr int kIsolatedWorldWithCSPId = 2;
-  scoped_refptr<DOMWrapperWorld> world_with_csp =
+  DOMWrapperWorld* world_with_csp =
       DOMWrapperWorld::EnsureIsolatedWorld(isolate, kIsolatedWorldWithCSPId);
   ASSERT_TRUE(world_with_csp->IsIsolatedWorld());
   ScriptState* isolated_world_with_csp_script_state =
@@ -320,33 +311,146 @@ TEST_F(PageTestBase, CSPForWorld) {
 }
 
 TEST_F(LocalDOMWindowTest, ConsoleMessageCategory) {
-  auto unknown_location = CaptureSourceLocation(String(), 0, 0);
+  auto* unknown_location = CaptureSourceLocation(String(), 0, 0);
   auto* console_message = MakeGarbageCollected<ConsoleMessage>(
       mojom::blink::ConsoleMessageSource::kJavaScript,
-      mojom::blink::ConsoleMessageLevel::kError, "Kaboom!",
-      std::move(unknown_location));
+      mojom::blink::ConsoleMessageLevel::kError, "Kaboom!", unknown_location);
   console_message->SetCategory(mojom::blink::ConsoleMessageCategory::Cors);
   auto* window = GetFrame().DomWindow();
   window->AddConsoleMessageImpl(console_message, false);
   auto* message_storage = &GetFrame().GetPage()->GetConsoleMessageStorage();
   EXPECT_EQ(1u, message_storage->size());
-  for (WTF::wtf_size_t i = 0; i < message_storage->size(); ++i) {
+  for (wtf_size_t i = 0; i < message_storage->size(); ++i) {
     EXPECT_EQ(mojom::blink::ConsoleMessageCategory::Cors,
               *message_storage->at(i)->Category());
   }
 }
-TEST_F(LocalDOMWindowTest, NavigationId) {
-  EXPECT_EQ(1u, GetFrame().DomWindow()->GetNavigationId());
-  GetFrame().DomWindow()->IncrementNavigationId();
-  EXPECT_EQ(2u, GetFrame().DomWindow()->GetNavigationId());
-  GetFrame().DomWindow()->IncrementNavigationId();
-  EXPECT_EQ(3u, GetFrame().DomWindow()->GetNavigationId());
+
+TEST_F(LocalDOMWindowTest, StorageAccessApiStatus) {
+  EXPECT_EQ(GetFrame().DomWindow()->GetStorageAccessApiStatus(),
+            net::StorageAccessApiStatus::kNone);
+  GetFrame().DomWindow()->SetStorageAccessApiStatus(
+      net::StorageAccessApiStatus::kAccessViaAPI);
+  EXPECT_EQ(GetFrame().DomWindow()->GetStorageAccessApiStatus(),
+            net::StorageAccessApiStatus::kAccessViaAPI);
 }
 
-TEST_F(LocalDOMWindowTest, HasStorageAccess) {
-  EXPECT_FALSE(GetFrame().DomWindow()->HasStorageAccess());
-  GetFrame().DomWindow()->SetHasStorageAccess();
-  EXPECT_TRUE(GetFrame().DomWindow()->HasStorageAccess());
+TEST_F(LocalDOMWindowTest, CanExecuteScriptsDuringDetach) {
+  GetFrame().Loader().DetachDocument();
+  EXPECT_NE(GetFrame().DomWindow(), nullptr);
+
+  // When detach has started and FrameLoader::document_loader_ is nullptr, but
+  // the window hasn't been detached from its frame yet, CanExecuteScripts()
+  // should return false and not crash.
+  // This case is reachable when the only thing blocking a main frame's load
+  // event from firing is an iframe's load event, and that iframe is detached,
+  // thus unblocking the load event. If the detaching window is accessed inside
+  // a load event listener in that case, we may call CanExecuteScripts() in this
+  // partially-detached state.
+  // See crbug.com/350874762, crbug.com/41482536 and crbug.com/41484859.
+  EXPECT_FALSE(
+      GetFrame().DomWindow()->CanExecuteScripts(kAboutToExecuteScript));
+}
+
+TEST_F(LocalDOMWindowTest, AlwaysOnTop) {
+  LocalDOMWindow* window = GetFrame().DomWindow();
+  EXPECT_FALSE(window->alwaysOnTop());
+
+  GetFrame().GetPage()->SetAlwaysOnTop(true);
+  EXPECT_TRUE(window->alwaysOnTop());
+
+  GetFrame().GetPage()->SetAlwaysOnTop(false);
+  EXPECT_FALSE(window->alwaysOnTop());
+}
+
+TEST_F(LocalDOMWindowTest, OutgoingReferrerUrlCaching) {
+  // 1. With feature enabled
+  {
+    base::test::ScopedFeatureList scoped_feature_list;
+    scoped_feature_list.InitAndEnableFeature(
+        features::kCacheDocumentOutgoingReferrer);
+
+    NavigateTo(KURL("https://www.example.com/hoge#fuga?piyo"));
+    LocalDOMWindow* window = GetFrame().DomWindow();
+    Document* doc = window->document();
+
+    // Cache should be empty initially.
+    EXPECT_FALSE(doc->IsOutgoingReferrerUrlCachedForTesting());
+
+    KURL expected("https://www.example.com/hoge");
+    EXPECT_EQ(expected, doc->OutgoingReferrerUrl());
+
+    // Cache should be populated now.
+    EXPECT_TRUE(doc->IsOutgoingReferrerUrlCachedForTesting());
+
+    // Verify subsequent call.
+    EXPECT_EQ(expected, doc->OutgoingReferrerUrl());
+    EXPECT_TRUE(doc->IsOutgoingReferrerUrlCachedForTesting());
+
+    // Mutate the document's URL (which should invalidate the cache).
+    KURL new_url("https://www.example.com/bar#foo");
+    doc->SetURL(new_url);
+
+    EXPECT_FALSE(doc->IsOutgoingReferrerUrlCachedForTesting());
+
+    KURL expected_new("https://www.example.com/bar");
+    EXPECT_EQ(expected_new, doc->OutgoingReferrerUrl());
+    EXPECT_TRUE(doc->IsOutgoingReferrerUrlCachedForTesting());
+  }
+
+  // 2. With feature disabled
+  {
+    base::test::ScopedFeatureList scoped_feature_list;
+    scoped_feature_list.InitAndDisableFeature(
+        features::kCacheDocumentOutgoingReferrer);
+
+    NavigateTo(KURL("https://www.example.com/hoge#fuga?piyo"));
+    LocalDOMWindow* window = GetFrame().DomWindow();
+    Document* doc = window->document();
+
+    EXPECT_FALSE(doc->IsOutgoingReferrerUrlCachedForTesting());
+
+    KURL expected("https://www.example.com/hoge");
+    EXPECT_EQ(expected, doc->OutgoingReferrerUrl());
+
+    // With the feature disabled, the cache should never be populated.
+    EXPECT_FALSE(doc->IsOutgoingReferrerUrlCachedForTesting());
+  }
+}
+
+class LocalDOMWindowWithSubframeTest : public RenderingTest {
+ public:
+  LocalDOMWindowWithSubframeTest()
+      : RenderingTest(MakeGarbageCollected<SingleChildLocalFrameClient>()) {}
+};
+
+TEST_F(LocalDOMWindowWithSubframeTest, OutgoingReferrerUrlSrcdoc) {
+  NavigateTo(KURL("https://www.example.com/parent.html"));
+  SetBodyInnerHTML(R"HTML(
+    <iframe id="child" srcdoc="hello"></iframe>
+  )HTML");
+  LocalFrame& child = ChildFrame();
+  auto params =
+      WebNavigationParams::CreateWithEmptyHTMLForTesting(KURL("about:srcdoc"));
+  MockPolicyContainerHost mock_policy_container_host;
+  params->policy_container = std::make_unique<blink::WebPolicyContainer>(
+      blink::WebPolicyContainerPolicies(),
+      mock_policy_container_host.BindNewEndpointAndPassDedicatedRemote());
+  params->initiator_state_token = InitiatorStateToken();
+  child.Loader().CommitNavigation(std::move(params), /*extra_data=*/nullptr);
+  test::RunPendingTasks();
+
+  LocalDOMWindow* child_window = child.DomWindow();
+  ASSERT_NE(child_window, nullptr);
+
+  ASSERT_TRUE(child_window->document()->IsSrcdocDocument());
+
+  // The child's URL should be about:srcdoc.
+  EXPECT_EQ(KURL("about:srcdoc"), child_window->document()->Url());
+
+  // Its outgoing referrer URL should walk up to the parent frame's URL.
+  EXPECT_EQ(KURL("https://www.example.com/parent.html"),
+            child_window->OutgoingReferrerUrl());
 }
 
 }  // namespace blink

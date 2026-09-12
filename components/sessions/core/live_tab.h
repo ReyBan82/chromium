@@ -5,8 +5,10 @@
 #ifndef COMPONENTS_SESSIONS_CORE_LIVE_TAB_H_
 #define COMPONENTS_SESSIONS_CORE_LIVE_TAB_H_
 
+#include "base/memory/weak_ptr.h"
 #include "components/sessions/core/serialized_navigation_entry.h"
 #include "components/sessions/core/serialized_user_agent_override.h"
+#include "components/sessions/core/session_id.h"
 #include "components/sessions/core/sessions_export.h"
 #include "components/sessions/core/tab_restore_service.h"
 
@@ -20,6 +22,9 @@ class SESSIONS_EXPORT LiveTab {
  public:
   virtual ~LiveTab();
 
+  // Returns the unique SessionID of the tab.
+  virtual SessionID GetSessionID() const = 0;
+
   // Methods that return information about the navigation state of the tab.
   virtual bool IsInitialBlankNavigation() = 0;
   virtual int GetCurrentEntryIndex() = 0;
@@ -29,12 +34,16 @@ class SESSIONS_EXPORT LiveTab {
   virtual int GetEntryCount() = 0;
 
   // Returns any platform-specific data that should be associated with the
-  // TabRestoreService::Tab corresponding to this instance. The default
+  // tab_restore::Tab corresponding to this instance. The default
   // implementation returns null.
-  virtual std::unique_ptr<PlatformSpecificTabData> GetPlatformSpecificTabData();
+  virtual std::unique_ptr<tab_restore::PlatformSpecificTabData>
+  GetPlatformSpecificTabData();
 
   // Returns the user agent override, if any.
   virtual SerializedUserAgentOverride GetUserAgentOverride() = 0;
+
+  // Returns a WeakPtr that is invalidated when the tab is destroyed.
+  virtual base::WeakPtr<LiveTab> GetWeakPtr() = 0;
 };
 
 }  // namespace sessions

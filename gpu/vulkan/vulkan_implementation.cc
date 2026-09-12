@@ -8,13 +8,16 @@
 #include "gpu/vulkan/vulkan_device_queue.h"
 #include "gpu/vulkan/vulkan_function_pointers.h"
 #include "gpu/vulkan/vulkan_instance.h"
+#include "gpu/vulkan/vulkan_util.h"
 
 namespace gpu {
 
 VulkanImplementation::VulkanImplementation(bool use_swiftshader,
-                                           bool allow_protected_memory)
+                                           bool allow_protected_memory,
+                                           bool force_native)
     : use_swiftshader_(use_swiftshader),
-      allow_protected_memory_(allow_protected_memory) {}
+      allow_protected_memory_(allow_protected_memory),
+      force_native_(force_native) {}
 
 VulkanImplementation::~VulkanImplementation() {}
 
@@ -35,7 +38,7 @@ std::unique_ptr<VulkanDeviceQueue> CreateVulkanDeviceQueue(
       vulkan_implementation->GetOptionalDeviceExtensions();
 
   if (instance->is_from_angle()) {
-    if (!device_queue->InitializeFromANGLE()) {
+    if (!device_queue->InitializeFromANGLE(is_thread_safe)) {
       device_queue->Destroy();
       return nullptr;
     }
@@ -51,6 +54,29 @@ std::unique_ptr<VulkanDeviceQueue> CreateVulkanDeviceQueue(
   }
 
   return device_queue;
+}
+
+VkSemaphore VulkanImplementation::CreateExternalSemaphore(VkDevice vk_device) {
+  return CreateExternalVkSemaphore(vk_device, GetExternalSemaphoreHandleType());
+}
+
+VkSemaphore VulkanImplementation::ImportSemaphoreHandle(
+    VkDevice vk_device,
+    SemaphoreHandle sync_handle) {
+  return ImportVkSemaphoreHandle(vk_device, std::move(sync_handle));
+}
+
+SemaphoreHandle VulkanImplementation::GetSemaphoreHandle(
+    VkDevice vk_device,
+    VkSemaphore vk_semaphore) {
+  return GetVkSemaphoreHandle(vk_device, vk_semaphore,
+                              GetExternalSemaphoreHandleType());
+}
+
+bool VulkanImplementation::IsExternalSemaphoreSupported(
+    VulkanDeviceQueue* device_queue) {
+  return IsVkExternalSemaphoreHandleTypeSupported(
+      device_queue, GetExternalSemaphoreHandleType());
 }
 
 }  // namespace gpu

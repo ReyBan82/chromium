@@ -19,7 +19,7 @@ void TestPreferences::Reset() {
   minimum_font_size = 0;
   allow_file_access_from_file_urls = true;
   allow_running_of_insecure_content = true;
-  default_text_encoding_name = WebString::FromUTF8("ISO-8859-1");
+  default_text_encoding_name = WebString("ISO-8859-1");
   experimental_css_grid_layout_enabled = true;
   java_script_can_access_clipboard = true;
   supports_multiple_windows = true;
@@ -41,7 +41,6 @@ void TestPreferences::Reset() {
   web_security_enabled = true;
   disable_reading_from_canvas = false;
   strict_mixed_content_checking = false;
-  strict_powerful_feature_restrictions = false;
   spatial_navigation_enabled = false;
 }
 

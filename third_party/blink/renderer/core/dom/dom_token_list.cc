@@ -28,6 +28,7 @@
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/html/parser/html_parser_idioms.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
@@ -45,10 +46,11 @@ bool CheckTokenWithWhitespace(const String& token,
                               ExceptionState& exception_state) {
   if (token.Find(IsHTMLSpace) == kNotFound)
     return true;
-  exception_state.ThrowDOMException(DOMExceptionCode::kInvalidCharacterError,
-                                    "The token provided ('" + token +
-                                        "') contains HTML space characters, "
-                                        "which are not valid in tokens.");
+  exception_state.ThrowDOMException(
+      DOMExceptionCode::kInvalidCharacterError,
+      StrCat({"The token provided ('", token,
+              "') contains HTML space characters, which are not valid in "
+              "tokens."}));
   return false;
 }
 
@@ -79,9 +81,10 @@ bool CheckTokensSyntax(const Vector<String>& tokens,
 }  // anonymous namespace
 
 void DOMTokenList::Trace(Visitor* visitor) const {
+  visitor->Trace(token_set_);
   visitor->Trace(element_);
   ScriptWrappable::Trace(visitor);
-  ElementRareDataField::Trace(visitor);
+  NodeRareDataField::Trace(visitor);
 }
 
 // https://dom.spec.whatwg.org/#concept-domtokenlist-validation
@@ -135,17 +138,10 @@ bool DOMTokenList::toggle(const AtomicString& token,
   if (!CheckTokenSyntax(token, exception_state))
     return false;
 
-  // 4. If context object’s token set[token] exists, then:
-  if (contains(token)) {
-    // 1. If force is either not given or is false, then remove token from
-    // context object’s token set.
-    RemoveTokens(Vector<String>({token}));
-    return false;
-  }
-  // 5. Otherwise, if force not given or is true, append token to context
-  // object’s token set and set result to true.
-  AddTokens(Vector<String>({token}));
-  return true;
+  // Steps 4-5: ToggleToken() flips presence in a single scan.
+  bool added = token_set_.ToggleToken(token);
+  UpdateWithTokenSet(token_set_);
+  return added;
 }
 
 // https://dom.spec.whatwg.org/#dom-domtokenlist-toggle
@@ -155,19 +151,9 @@ bool DOMTokenList::toggle(const AtomicString& token,
   if (!CheckTokenSyntax(token, exception_state))
     return false;
 
-  // 4. If context object’s token set[token] exists, then:
-  if (contains(token)) {
-    // 1. If force is either not given or is false, then remove token from
-    // context object’s token set.
-    if (!force)
-      RemoveTokens(Vector<String>({token}));
-  } else {
-    // 5. Otherwise, if force not given or is true, append token to context
-    // object’s token set and set result to true.
-    if (force)
-      AddTokens(Vector<String>({token}));
-  }
-
+  // Steps 4-5: SetTokenPresence() decides and acts in a single scan.
+  if (token_set_.SetTokenPresence(token, force))
+    UpdateWithTokenSet(token_set_);
   return force;
 }
 
@@ -228,7 +214,7 @@ bool DOMTokenList::replace(const AtomicString& token,
 
 bool DOMTokenList::supports(const AtomicString& token,
                             ExceptionState& exception_state) {
-  return ValidateTokenValue(token.LowerASCII(), exception_state);
+  return ValidateTokenValue(token.ToAsciiLower(), exception_state);
 }
 
 // https://dom.spec.whatwg.org/#dom-domtokenlist-add

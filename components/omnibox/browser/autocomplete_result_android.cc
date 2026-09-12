@@ -11,18 +11,18 @@
 #include "base/android/jni_android.h"
 #include "base/android/jni_array.h"
 #include "base/android/jni_string.h"
-#include "base/containers/contains.h"
 #include "base/debug/crash_logging.h"
 #include "base/debug/dump_without_crashing.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
-#include "components/omnibox/browser/jni_headers/AutocompleteResult_jni.h"
 #include "components/omnibox/browser/search_suggestion_parser.h"
-#include "components/query_tiles/android/tile_conversion_bridge.h"
 #include "url/android/gurl_android.h"
 
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "components/omnibox/browser/jni_headers/AutocompleteResult_jni.h"
+
+using base::android::JavaRef;
 using base::android::ScopedJavaLocalRef;
 using base::android::ToJavaBooleanArray;
 using base::android::ToJavaByteArray;
@@ -51,6 +51,8 @@ enum class MatchVerificationPoint {
   DELETE_MATCH = 3,
   GROUP_BY_SEARCH_VS_URL_BEFORE = 4,
   GROUP_BY_SEARCH_VS_URL_AFTER = 5,
+  ON_TOUCH_MATCH = 6,
+  GET_MATCHING_TAB = 7,
 };
 
 const char* MatchVerificationPointToString(int verification_point) {
@@ -65,9 +67,14 @@ const char* MatchVerificationPointToString(int verification_point) {
       return "Group/Before";
     case MatchVerificationPoint::GROUP_BY_SEARCH_VS_URL_AFTER:
       return "Group/After";
-    default:
+    case MatchVerificationPoint::ON_TOUCH_MATCH:
+      return "OnTouch";
+    case MatchVerificationPoint::GET_MATCHING_TAB:
+      return "GetMatchingTab";
+    case MatchVerificationPoint::INVALID:
       return "Invalid";
   }
+  NOTREACHED();
 }
 
 bool sInvalidMatchMetricsUploaded = false;
@@ -86,7 +93,8 @@ void ReportInvalidMatchData(std::string debug_info, int verification_point) {
 }  // namespace
 
 ScopedJavaLocalRef<jobject> AutocompleteResult::GetOrCreateJavaObject(
-    JNIEnv* env) const {
+    JNIEnv* env,
+    const TemplateURLService* template_url_service) const {
   // Short circuit if we already built the java object.
   if (java_result_)
     return ScopedJavaLocalRef<jobject>(java_result_);
@@ -108,7 +116,8 @@ ScopedJavaLocalRef<jobject> AutocompleteResult::GetOrCreateJavaObject(
   ScopedJavaLocalRef<jintArray> j_group_ids = ToJavaIntArray(env, group_ids);
 
   java_result_ = Java_AutocompleteResult_fromNative(
-      env, reinterpret_cast<intptr_t>(this), BuildJavaMatches(env),
+      env, reinterpret_cast<intptr_t>(this),
+      BuildJavaMatches(env, template_url_service),
       ToJavaByteArray(env, serialized_groups_info));
 
   return ScopedJavaLocalRef<jobject>(java_result_);
@@ -124,50 +133,30 @@ void AutocompleteResult::DestroyJavaObject() const {
 }
 
 ScopedJavaLocalRef<jobjectArray> AutocompleteResult::BuildJavaMatches(
-    JNIEnv* env) const {
+    JNIEnv* env,
+    const TemplateURLService* template_url_service) const {
   jclass clazz = AutocompleteMatch::GetClazz(env);
-  ScopedJavaLocalRef<jobjectArray> j_matches(
+  auto j_matches = jni_zero::AdoptRef(
       env, env->NewObjectArray(matches_.size(), clazz, nullptr));
   base::android::CheckException(env);
 
   for (size_t index = 0; index < matches_.size(); ++index) {
     env->SetObjectArrayElement(
         j_matches.obj(), index,
-        matches_[index].GetOrCreateJavaObject(env).obj());
+        matches_[index].GetOrCreateJavaObject(env, template_url_service).obj());
   }
 
   return j_matches;
 }
 
-void AutocompleteResult::GroupSuggestionsBySearchVsURL(JNIEnv* env,
-                                                       int first_index,
-                                                       int last_index) {
-  if (first_index == last_index)
-    return;
-  const int num_elements = matches_.size();
-  if (first_index < 0 || last_index <= first_index ||
-      last_index > num_elements) {
-    DCHECK(false) << "Range [" << first_index << "; " << last_index
-                  << ") is not valid for grouping; accepted range: [0; "
-                  << num_elements << ").";
-    return;
-  }
-
-  auto range_start = const_cast<ACMatches&>(matches_).begin();
-  GroupSuggestionsBySearchVsURL(range_start + first_index,
-                                range_start + last_index);
-  Java_AutocompleteResult_updateMatches(env, java_result_,
-                                        BuildJavaMatches(env));
-}
-
 bool AutocompleteResult::VerifyCoherency(
     JNIEnv* env,
-    const JavaParamRef<jlongArray>& j_matches_array,
-    jint match_index,
-    jint verification_point) {
+    const JavaRef<jlongArray>& j_matches_array,
+    int32_t match_index,
+    int32_t verification_point) {
   DCHECK(j_matches_array);
 
-  std::vector<jlong> j_matches;
+  std::vector<int64_t> j_matches;
   base::android::JavaLongArrayToLongVector(env, j_matches_array, &j_matches);
 
   if (j_matches.size() != size()) {
@@ -222,3 +211,5 @@ bool AutocompleteResult::VerifyCoherency(
                             MatchVerificationResult::COUNT);
   return true;
 }
+
+DEFINE_JNI(AutocompleteResult)

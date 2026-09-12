@@ -42,6 +42,8 @@ class AssertPageLoadMetricsObserver final
       const GURL& currently_committed_url) override;
   ObservePolicy OnPrerenderStart(content::NavigationHandle* navigation_handle,
                                  const GURL& currently_committed_url) override;
+  ObservePolicy OnNavigationHandleTimingUpdated(
+      content::NavigationHandle* navigation_handle) override;
   ObservePolicy OnRedirect(
       content::NavigationHandle* navigation_handle) override;
 
@@ -49,7 +51,6 @@ class AssertPageLoadMetricsObserver final
   ObservePolicy OnCommit(content::NavigationHandle* navigation_handle) override;
   void DidActivatePrerenderedPage(
       content::NavigationHandle* navigation_handle) override;
-
   // Termination-like events
   void OnFailedProvisionalLoad(
       const page_load_metrics::FailedProvisionalLoadInfo&
@@ -64,6 +65,7 @@ class AssertPageLoadMetricsObserver final
   // Override to inspect
   ObservePolicy ShouldObserveMimeType(
       const std::string& mime_type) const override;
+  ObservePolicy ShouldObserveScheme(const GURL& url) const override;
 
   // Events for navigations that are not related to PageLoadMetricsObserver's
   // lifetime
@@ -91,6 +93,15 @@ class AssertPageLoadMetricsObserver final
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnParseStop(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
+
+  void OnConnectStart(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override;
+  void OnConnectEnd(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override;
+  void OnDomainLookupStart(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override;
+  void OnDomainLookupEnd(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnDomContentLoadedEventStart(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnLoadEventStart(
@@ -100,6 +111,10 @@ class AssertPageLoadMetricsObserver final
   void OnFirstImagePaintInPage(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnFirstContentfulPaintInPage(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override;
+  void OnMonotonicFirstPaintInPage(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override;
+  void OnMonotonicFirstContentfulPaintInPage(
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
   void OnFirstPaintAfterBackForwardCacheRestoreInPage(
       const page_load_metrics::mojom::BackForwardCacheTiming& timing,
@@ -119,11 +134,11 @@ class AssertPageLoadMetricsObserver final
   void OnUserInput(
       const blink::WebInputEvent& event,
       const page_load_metrics::mojom::PageLoadTiming& timing) override;
-  void OnPageInputTimingUpdate(uint64_t num_interactions,
-                               uint64_t num_input_events) override;
-  void OnInputTimingUpdate(
+  void OnPageEventTimingUpdate(uint64_t num_interactions) override;
+  void OnEventTimingUpdate(
       content::RenderFrameHost* subframe_rfh,
-      const page_load_metrics::mojom::InputTiming& input_timing_delta) override;
+      const std::vector<page_load_metrics::mojom::EventTimingPtr>&
+          event_timings) override;
 
   // Page render data update
   void OnPageRenderDataUpdate(
@@ -139,25 +154,32 @@ class AssertPageLoadMetricsObserver final
   // RenderFrameHost and FrameTreeNode deletion
   void OnRenderFrameDeleted(
       content::RenderFrameHost* render_frame_host) override;
-  void OnSubFrameDeleted(int frame_tree_node_id) override;
+  void OnSubFrameDeleted(content::FrameTreeNodeId frame_tree_node_id) override;
 
   // The method below are not well investigated.
   //
-  // TODO(https://crbug.com/1350891): Add more assertions.
+  // TODO(crbug.com/40856776): Add more assertions.
   void OnRestoreFromBackForwardCache(
       const page_load_metrics::mojom::PageLoadTiming& timing,
       content::NavigationHandle* navigation_handle) override {}
-  void OnSoftNavigationCountUpdated() override {}
+  void OnSoftNavigationFirstContentfulPaint(
+      const page_load_metrics::mojom::SoftNavigationMetrics&
+          soft_navigation_metrics) override {}
+  void OnSoftNavigationCompleted(const page_load_metrics::SoftNavigationData&
+                                     soft_navigation_data) override {}
+  void OnSoftNavigationLargestContentfulPaint(uint64_t num_soft_lcps) override {
+  }
   void OnCpuTimingUpdate(
       content::RenderFrameHost* subframe_rfh,
       const page_load_metrics::mojom::CpuTiming& timing) override {}
   void OnLoadingBehaviorObserved(content::RenderFrameHost* rfh,
                                  int behavior_flags) override {}
+  void OnJavaScriptFrameworksObserved(
+      content::RenderFrameHost* rfh,
+      const blink::JavaScriptFrameworkDetectionResult&) override {}
   void OnFeaturesUsageObserved(
       content::RenderFrameHost* rfh,
       const std::vector<blink::UseCounterFeature>& features) override {}
-  void SetUpSharedMemoryForSmoothness(
-      const base::ReadOnlySharedMemoryRegion& shared_memory) override {}
   void OnResourceDataUseObserved(
       content::RenderFrameHost* rfh,
       const std::vector<page_load_metrics::mojom::ResourceDataUpdatePtr>&
@@ -165,38 +187,53 @@ class AssertPageLoadMetricsObserver final
   void MediaStartedPlaying(
       const content::WebContentsObserver::MediaPlayerInfo& video_type,
       content::RenderFrameHost* render_frame_host) override {}
-  void OnMainFrameIntersectionRectChanged(
-      content::RenderFrameHost* rfh,
-      const gfx::Rect& main_frame_intersection_rect) override {}
+  void OnMainFrameRectChanged(const gfx::Rect& main_frame_rect) override {}
   void OnMainFrameViewportRectChanged(
       const gfx::Rect& main_frame_viewport_rect) override {}
-  void OnMainFrameImageAdRectsChanged(const base::flat_map<int, gfx::Rect>&
-                                          main_frame_image_ad_rects) override {}
+  void OnMainFrameAdRectsChanged(
+      const base::flat_map<int, gfx::Rect>& main_frame_ad_rects) override {}
   void OnLoadedResource(const page_load_metrics::ExtraRequestCompleteInfo&
                             extra_request_complete_info) override {}
+  void DidLoadResourceFromMemoryCache(
+      const page_load_metrics::MemoryResourceLoadInfo&
+          memory_resource_load_info) override {}
   void FrameReceivedUserActivation(
       content::RenderFrameHost* render_frame_host) override {}
   void FrameDisplayStateChanged(content::RenderFrameHost* render_frame_host,
                                 bool is_display_none) override {}
   void FrameSizeChanged(content::RenderFrameHost* render_frame_host,
                         const gfx::Size& frame_size) override {}
-  void OnCookiesRead(const GURL& url,
-                     const GURL& first_party_url,
-                     const net::CookieList& cookie_list,
-                     bool blocked_by_policy) override {}
-  void OnCookieChange(const GURL& url,
-                      const GURL& first_party_url,
-                      const net::CanonicalCookie& cookie,
-                      bool blocked_by_policy) override {}
+  void OnCookiesRead(
+      const GURL& url,
+      const GURL& first_party_url,
+      bool blocked_by_policy,
+      bool is_ad_tagged,
+      const net::CookieSettingOverrides& cookie_setting_overrides,
+      bool is_partitioned_access) override {}
+  void OnCookieChange(
+      const GURL& url,
+      const GURL& first_party_url,
+      const net::CanonicalCookie& cookie,
+      bool blocked_by_policy,
+      bool is_ad_tagged,
+      const net::CookieSettingOverrides& cookie_setting_overrides,
+      bool is_partitioned_access) override {}
   void OnStorageAccessed(const GURL& url,
                          const GURL& first_party_url,
                          bool blocked_by_policy,
                          page_load_metrics::StorageType access_type) override {}
-  void OnPrefetchLikely() override {}
-  void DidActivatePortal(base::TimeTicks activation_time) override {}
-  void OnV8MemoryChanged(const std::vector<page_load_metrics::MemoryUpdate>&
-                             memory_updates) override {}
   void OnSharedStorageWorkletHostCreated() override {}
+  void OnSharedStorageSelectURLCalled() override {}
+  void OnCustomUserTimingMarkObserved(
+      const std::vector<page_load_metrics::mojom::CustomUserTimingMarkPtr>&
+          timings) override {}
+  void OnPrimaryPageRenderProcessGone() override {}
+  void OnUserTimingMarkFullyLoaded(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override {}
+  void OnUserTimingMarkFullyVisible(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override {}
+  void OnUserTimingMarkInteractive(
+      const page_load_metrics::mojom::PageLoadTiming& timing) override {}
 
   // Reference implementations duplicated from PageLoadMetricsObserver
   ObservePolicy ShouldObserveMimeTypeByDefault(
@@ -218,6 +255,7 @@ class AssertPageLoadMetricsObserver final
   mutable bool destructing_ = false;
   bool backforwardcache_entering_ = false;
   bool backforwardcache_entered_ = false;
+  bool in_prerendering_ = false;
 };
 
 #endif  // COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_ASSERT_PAGE_LOAD_METRICS_OBSERVER_H_

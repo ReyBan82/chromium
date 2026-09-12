@@ -4,19 +4,16 @@
 
 package org.chromium.media;
 
-import static android.content.Context.UI_MODE_SERVICE;
-
 import android.annotation.SuppressLint;
-import android.app.UiModeManager;
 import android.content.Context;
-import android.content.res.Configuration;
 import android.graphics.Point;
 import android.os.Build;
 import android.text.TextUtils;
 import android.view.Display;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
+import org.chromium.base.DeviceInfo;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -29,6 +26,7 @@ import java.util.ArrayList;
  * workaround for this problem.
  * Note: This code is copied from androidx.core.view.DisplayCompat.
  */
+@NullMarked
 public final class DisplayCompat {
     private static final int DISPLAY_SIZE_4K_WIDTH = 3840;
     private static final int DISPLAY_SIZE_4K_HEIGHT = 2160;
@@ -45,10 +43,8 @@ public final class DisplayCompat {
      * @return an array of supported modes where at least one of the modes is native which
      * contains the physical display size
      */
-    @NonNull
     @SuppressLint("ArrayReturn")
-    public static ModeCompat[] getSupportedModes(
-            @NonNull Context context, @NonNull Display display) {
+    public static ModeCompat[] getSupportedModes(Context context, Display display) {
         Point physicalDisplaySize = getPhysicalDisplaySize(context, display);
         // Display.Mode class and display.getSupportedModes() exist
         Display.Mode[] supportedModes = display.getSupportedModes();
@@ -72,28 +68,15 @@ public final class DisplayCompat {
     }
 
     /**
-     * Returns whether the app is running on a TV device
-     *
-     * @return true iff the app is running on a TV device
-     */
-    public static boolean isTv(@NonNull Context context) {
-        // See https://developer.android.com/training/tv/start/hardware.html#runtime-check.
-        UiModeManager uiModeManager = (UiModeManager) context.getSystemService(UI_MODE_SERVICE);
-        return uiModeManager != null
-                && uiModeManager.getCurrentModeType() == Configuration.UI_MODE_TYPE_TELEVISION;
-    }
-
-    /**
-     * Parses a string which represents the display-size which contains 'x' as a delimiter
-     * between two integers representing the display's width and height and returns the
-     * display size as a Point object.
+     * Parses a string which represents the display-size which contains 'x' as a delimiter between
+     * two integers representing the display's width and height and returns the display size as a
+     * Point object.
      *
      * @param displaySize a string
      * @return a Point object containing the size in x and y direction in pixels
      * @throws NumberFormatException in case the integers cannot be parsed
      */
-    private static Point parseDisplaySize(@NonNull String displaySize)
-            throws NumberFormatException {
+    private static Point parseDisplaySize(String displaySize) throws NumberFormatException {
         String[] displaySizeParts = displaySize.trim().split("x", -1);
         if (displaySizeParts.length == 2) {
             int width = Integer.parseInt(displaySizeParts[0]);
@@ -111,8 +94,7 @@ public final class DisplayCompat {
      * @param name the name of the system property
      * @return the result string or null if an exception occurred
      */
-    @Nullable
-    private static String getSystemProperty(String name) {
+    private static @Nullable String getSystemProperty(String name) {
         try {
             @SuppressLint("PrivateApi")
             Class<?> systemProperties = Class.forName("android.os.SystemProperties");
@@ -143,9 +125,8 @@ public final class DisplayCompat {
      *
      * @return the physical display size, in pixels or null if the information is not available
      */
-    @Nullable
-    private static Point parsePhysicalDisplaySizeFromSystemProperties(
-            @NonNull String property, @NonNull Display display) {
+    private static @Nullable Point parsePhysicalDisplaySizeFromSystemProperties(
+            String property, Display display) {
         if (display.getDisplayId() == Display.DEFAULT_DISPLAY) {
             // Check the system property for display size. From API 28 treble may prevent the
             // system from writing sys.display-size so we check vendor.display-size instead.
@@ -166,19 +147,16 @@ public final class DisplayCompat {
     /**
      * Gets the physical size of the given display in pixels. The size is collected in the
      * following order:
-     * 1) sys.display-size if API < 28 (P) and the system-property is set
-     * 2) vendor.display-size if API >= 28 (P) and the system-property is set
-     * 3) physical width and height from display.getMode() for API >= 23
-     * 4) display.getRealSize() for API >= 17
-     * 5) display.getSize()
+     * 1) the system-property is set
+     * 2) physical width and height from display.getMode()
+     * 3) display.getRealSize()
+     * 4) display.getSize()
      *
      * @return the physical display size, in pixels
      */
-    private static Point getPhysicalDisplaySize(
-            @NonNull Context context, @NonNull Display display) {
-        Point displaySize = Build.VERSION.SDK_INT < Build.VERSION_CODES.P
-                ? parsePhysicalDisplaySizeFromSystemProperties("sys.display-size", display)
-                : parsePhysicalDisplaySizeFromSystemProperties("vendor.display-size", display);
+    private static Point getPhysicalDisplaySize(Context context, Display display) {
+        Point displaySize =
+                parsePhysicalDisplaySizeFromSystemProperties("vendor.display-size", display);
         if (displaySize != null) {
             return displaySize;
         } else if (isSonyBravia4kTv(context)) {
@@ -201,8 +179,9 @@ public final class DisplayCompat {
      *
      * @return true if the display is a Sony BRAVIA TV that supports 4k
      */
-    private static boolean isSonyBravia4kTv(@NonNull Context context) {
-        return isTv(context) && "Sony".equals(Build.MANUFACTURER)
+    private static boolean isSonyBravia4kTv(Context context) {
+        return DeviceInfo.isTV()
+                && "Sony".equals(Build.MANUFACTURER)
                 && Build.MODEL.startsWith("BRAVIA")
                 && context.getPackageManager().hasSystemFeature("com.sony.dtv.hardware.panel.qfhd");
     }
@@ -213,7 +192,7 @@ public final class DisplayCompat {
      * resolution of a display.
      */
     public static final class ModeCompat {
-        private final Display.Mode mMode;
+        private final Display.@Nullable Mode mMode;
         private final Point mPhysicalDisplaySize;
         private final boolean mIsNative;
 
@@ -224,7 +203,7 @@ public final class DisplayCompat {
          * @param physicalDisplaySize a Point object representing the display size in pixels
          *                            (Point.x horizontal and Point.y vertical size)
          */
-        ModeCompat(@NonNull Point physicalDisplaySize) {
+        ModeCompat(Point physicalDisplaySize) {
             if (physicalDisplaySize == null) {
                 throw new NullPointerException("physicalDisplaySize == null");
             }
@@ -240,7 +219,7 @@ public final class DisplayCompat {
          *
          * @param mode a Display.Mode object
          */
-        ModeCompat(@NonNull Display.Mode mode, boolean isNative) {
+        ModeCompat(Display.Mode mode, boolean isNative) {
             if (mode == null) {
                 throw new NullPointerException("Display.Mode == null, can't wrap a null reference");
             }
@@ -275,8 +254,7 @@ public final class DisplayCompat {
          * @return the wrapped Display.Mode object or null if there was no matching mode for the
          * native resolution.
          */
-        @Nullable
-        public Display.Mode toMode() {
+        public Display.@Nullable Mode toMode() {
             return mMode;
         }
 

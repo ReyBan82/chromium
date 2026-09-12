@@ -81,8 +81,11 @@ class StandaloneInstallerConfigurator {
 
   // Dictionary is parsed from the installer data argument which is set only for
   // MSIs.
-  base::Value::Dict installer_data_dictionary_;
+  base::DictValue installer_data_dictionary_;
 };
+
+// Restricts DLL loads to either full paths or %SYSTEM32%.
+bool EnableSecureDllLoading();
 
 }  // namespace credential_provider
 

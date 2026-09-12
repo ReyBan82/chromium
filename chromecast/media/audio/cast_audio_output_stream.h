@@ -14,12 +14,9 @@
 #include "base/timer/timer.h"
 #include "build/build_config.h"
 #include "chromecast/base/task_runner_impl.h"
-#include "chromecast/common/mojom/multiroom.mojom.h"
-#include "chromecast/external_mojo/external_service_support/external_connector.h"
 #include "media/audio/audio_io.h"
 #include "media/base/audio_parameters.h"
 #include "media/base/audio_timestamp_helper.h"
-#include "mojo/public/cpp/bindings/remote.h"
 
 namespace chromecast {
 namespace media {
@@ -28,20 +25,15 @@ class CmaAudioOutputStream;
 class CastAudioManagerHelper;
 
 // Chromecast implementation of AudioOutputStream.
-// This class forwards to MixerService if valid
-// |mixer_service_connection_factory| is passed in on the construction call,
-// for a lower latency audio playback (using MixerServiceWrapper). Otherwise,
-// when a nullptr is passed in as |mixer_service_connection_factory| it forwards
-// to CMA backend (using CmaWrapper).
+// This class forwards to CmaAudioOutputStream for audio playback.
 //
-// In either case, involved components live on two threads:
+// Involved components live on two threads:
 // 1. Audio thread
 //    |CastAudioOutputStream|
-//    Where the object gets construction from AudioManager.
+//    Where the object gets constructed from AudioManager.
 //    How the object gets controlled from AudioManager.
-// 2. Media thread or an IO thread opened within |AudioOutputStream|.
-//    |CastAudioOutputStream::CmaWrapper| or |MixerServiceWrapper| lives on
-//    this thread.
+// 2. Media thread
+//    |CmaAudioOutputStream| lives on this thread.
 //
 // The interface between AudioManager and AudioOutputStream is synchronous, so
 // in order to allow asynchronous thread hops, we:
@@ -50,13 +42,11 @@ class CastAudioManagerHelper;
 //
 // The individual thread states should nearly always be the same. The only time
 // they are expected to be different is when the audio thread has executed a
-// task and posted to the media thread/IO thread, but the media thread has not
+// task and posted to the media thread, but the media thread has not
 // executed yet.
 //
-// The below illustrates the case when CMA backend is used for playback.
-//
-//  Audio Thread |CAOS|                         Media Thread |CmaWrapper|
-//  ¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯                         ¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯
+//  Audio Thread |CAOS|                         Media Thread |CmaAudioOutputStream|
+//  ¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯                         ¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯¯
 //  *[ Closed ]                                 *[ Closed ]
 //      |                                           |
 //      |                                           |
@@ -79,22 +69,13 @@ class CastAudioManagerHelper;
 //   ( released)
 // *  Initial states.
 // ** Final states.
-//
-// When MixerService is used in place of CMA backend, the state transition is
-// similar but a little simpler.
-// MixerServiceWrapper creates a new mixer service connection at Start() and
-// destroys the connection at Stop(). When the volume is adjusted between a
-// Stop() and the next Start(), the volume is recorded and then applied to the
-// mixer service connection after the connection is established on the Start()
-// call.
 
 // TODO(b/117980762): CastAudioOutputStream should be refactored
 // to be more unit test friendly. And the unit tests can be improved.
 
 class CastAudioOutputStream : public ::media::AudioOutputStream {
  public:
-  // When nullptr is passed as |mixer_service_connection_factory|, CmaWrapper
-  // will be used for audio playback.
+
   // |device_id_or_group_id| describes either the |device_id_| or |group_id_|.
   // If the |device_id_or_group_id| matches a valid device_id then the
   // |group_id_| is filled in empty. If the |device_id_or_group_id_| does not
@@ -104,8 +85,7 @@ class CastAudioOutputStream : public ::media::AudioOutputStream {
   // ::media::AudioDeviceDescription::kCommunicationsId.
   CastAudioOutputStream(CastAudioManagerHelper* audio_manager,
                         const ::media::AudioParameters& audio_params,
-                        const std::string& device_id_or_group_id,
-                        bool use_mixer_service);
+                        const std::string& device_id_or_group_id);
 
   CastAudioOutputStream(const CastAudioOutputStream&) = delete;
   CastAudioOutputStream& operator=(const CastAudioOutputStream&) = delete;
@@ -132,29 +112,17 @@ class CastAudioOutputStream : public ::media::AudioOutputStream {
   class MixerServiceWrapper;
 
   void FinishClose();
-  void OnGetMultiroomInfo(const std::string& application_session_id,
-                          chromecast::mojom::MultiroomInfoPtr multiroom_info);
 
   double volume_;
   AudioOutputState audio_thread_state_;
   CastAudioManagerHelper* const audio_manager_;
-  external_service_support::ExternalConnector* const connector_;
   const ::media::AudioParameters audio_params_;
   // Valid |device_id_| are kDefaultDeviceId, and kCommunicationsDeviceId
   const std::string device_id_;
   // |group_id_|s are uuids mapped to session_ids for multizone. Should be an
   // empty string if group_id is unused.
   const std::string group_id_;
-  const bool use_mixer_service_;
-  mojo::Remote<chromecast::mojom::MultiroomManager> multiroom_manager_;
   std::unique_ptr<CmaAudioOutputStream> cma_wrapper_;
-  std::unique_ptr<MixerServiceWrapper> mixer_service_wrapper_;
-
-  // Hold bindings to Start and SetVolume if they were called before Open
-  // completed. After initialization has finished, these bindings will be
-  // called.
-  base::OnceCallback<void()> pending_start_;
-  base::OnceCallback<void()> pending_volume_;
 
   THREAD_CHECKER(audio_thread_checker_);
   base::WeakPtr<CastAudioOutputStream> audio_weak_this_;

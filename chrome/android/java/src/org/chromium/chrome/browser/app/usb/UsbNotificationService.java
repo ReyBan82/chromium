@@ -4,13 +4,15 @@
 
 package org.chromium.chrome.browser.app.usb;
 
+import org.chromium.base.SplitCompatService;
 import org.chromium.build.annotations.IdentifierNameString;
-import org.chromium.chrome.browser.base.SplitCompatService;
+import org.chromium.build.annotations.NullMarked;
 
 /** See {@link UsbNotificationServiceImpl}. */
+@NullMarked
 public class UsbNotificationService extends SplitCompatService {
-    @IdentifierNameString
-    private static String sImplClassName =
+    @SuppressWarnings("FieldCanBeFinal") // @IdentifierNameString requires non-final
+    private static @IdentifierNameString String sImplClassName =
             "org.chromium.chrome.browser.app.usb.UsbNotificationServiceImpl";
 
     public UsbNotificationService() {

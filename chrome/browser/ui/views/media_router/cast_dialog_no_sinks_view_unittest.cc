@@ -5,12 +5,15 @@
 #include "chrome/browser/ui/views/media_router/cast_dialog_no_sinks_view.h"
 
 #include <memory>
+#include <string_view>
 
-#include "base/run_loop.h"
-#include "chrome/test/views/chrome_test_views_delegate.h"
+#include "base/test/scoped_feature_list.h"
+#include "chrome/browser/media/router/media_router_feature.h"
+#include "chrome/grit/generated_resources.h"
 #include "chrome/test/views/chrome_views_test_base.h"
-#include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/l10n/l10n_util.h"
+#include "ui/views/accessibility/view_accessibility.h"
 
 namespace media_router {
 
@@ -26,7 +29,8 @@ class CastDialogNoSinksViewTest : public ChromeViewsTestBase {
 
   void SetUp() override {
     ChromeViewsTestBase::SetUp();
-    no_sinks_view_ = std::make_unique<CastDialogNoSinksView>(nullptr);
+    no_sinks_view_ = std::make_unique<CastDialogNoSinksView>(
+        nullptr, /*permission_rejected*/ false);
   }
 
  protected:
@@ -36,11 +40,14 @@ class CastDialogNoSinksViewTest : public ChromeViewsTestBase {
   const views::View* get_icon() const {
     return no_sinks_view_->icon_for_testing();
   }
-  const std::u16string& get_label_text() const {
+  std::u16string_view get_label_text() const {
     return no_sinks_view_->label_text_for_testing();
   }
 
- private:
+  const std::u16string& get_permission_rejected_label_text() const {
+    return no_sinks_view_->permission_rejected_label_text_for_testing();
+  }
+
   std::unique_ptr<CastDialogNoSinksView> no_sinks_view_;
 };
 
@@ -59,6 +66,62 @@ TEST_F(CastDialogNoSinksViewTest, SwitchViews) {
   EXPECT_FALSE(running());
   EXPECT_NE(initial_icon, get_icon());
   EXPECT_NE(initial_title, get_label_text());
+  EXPECT_EQ(l10n_util::GetStringUTF16(IDS_MEDIA_ROUTER_NO_DEVICES_FOUND_BUTTON),
+            get_icon()->GetAccessibleName());
+  EXPECT_EQ(ax::mojom::Role::kLink,
+            get_icon()->GetViewAccessibility().GetCachedRole());
+}
+
+class CastDialogNoSinksViewWithPermissionIssueTest
+    : public CastDialogNoSinksViewTest {
+  void SetUp() override {
+    ChromeViewsTestBase::SetUp();
+
+    scoped_feature_list_.InitAndEnableFeature(
+        media_router::kShowCastPermissionRejectedError);
+    no_sinks_view_ = std::make_unique<CastDialogNoSinksView>(
+        nullptr, /*permission_rejected*/ true);
+  }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+TEST_F(CastDialogNoSinksViewWithPermissionIssueTest, CreateView) {
+  EXPECT_FALSE(running());
+  EXPECT_EQ(l10n_util::GetStringFUTF16(
+                IDS_MEDIA_ROUTER_LOCAL_DISCOVERY_PERMISSION_REJECTED_LABEL,
+                l10n_util::GetStringUTF16(
+                    IDS_MEDIA_ROUTER_LOCAL_DISCOVERY_PERMISSION_REJECTED_LINK)),
+            get_permission_rejected_label_text());
+  EXPECT_EQ(l10n_util::GetStringUTF16(
+                IDS_MEDIA_ROUTER_LOCAL_DISCOVERY_PERMISSION_REJECTED_BUTTON),
+            get_icon()->GetAccessibleName());
+  EXPECT_EQ(ax::mojom::Role::kLink,
+            get_icon()->GetViewAccessibility().GetCachedRole());
+}
+
+TEST_F(CastDialogNoSinksViewTest, FocusIconShowsBubble) {
+  task_environment()->FastForwardBy(
+      media_router::CastDialogNoSinksView::kSearchWaitTime);
+  views::View* icon = const_cast<views::View*>(get_icon());
+  EXPECT_NE(icon, nullptr);
+
+  // We need a widget for FocusManager to work.
+  auto widget = std::make_unique<views::Widget>();
+  views::Widget::InitParams params =
+      CreateParams(views::Widget::InitParams::Ownership::CLIENT_OWNS_WIDGET,
+                   views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
+  widget->Init(std::move(params));
+  widget->SetContentsView(std::move(no_sinks_view_));
+
+  views::FocusManager* focus_manager = widget->GetFocusManager();
+  focus_manager->SetFocusedViewWithReason(
+      icon, views::FocusManager::FocusChangeReason::kFocusTraversal);
+
+  // We cannot easily check if the bubble is shown without exposing internals,
+  // but we can verify it doesn't crash.
+  // TODO(crbug.com/478008776): Add verification for bubble visibility.
 }
 
 }  // namespace media_router

@@ -10,16 +10,16 @@
 // Configuration parameters for LottieAnimation.
 @interface LottieAnimationConfiguration : NSObject
 
-// Path to the json animation file.
-@property(nonatomic, copy) NSString* path;
-// Subdirectory to the json animation file.
-@property(nonatomic, copy) NSString* subdirectory;
-// Configuration parameters for LottieAnimation.
-@property(nonatomic, strong) UIView* view;
+// Name of the animation file.
+@property(nonatomic, copy) NSString* animationName;
 // The bundle in which the animation is located.
 @property(nonatomic, strong) NSBundle* bundle;
-// The loop behavior of the animation.
-@property(nonatomic, assign) CGFloat loopAnimationCount;
+// Whether the animation should loop or not. Default is NO.
+@property(nonatomic, assign) BOOL shouldLoop;
+// Whether the main thread should be forced-used to render the animation. This
+// has negatif performance impact on the animation but is required to use some
+// programmatic features (like the gradient). Default is NO.
+@property(nonatomic, assign) BOOL forceUseMainThread;
 
 @end
 

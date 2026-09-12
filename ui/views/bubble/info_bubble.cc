@@ -7,11 +7,14 @@
 #include <memory>
 #include <utility>
 
+#include "base/functional/bind.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/views/bubble/bubble_border.h"
+#include "ui/views/bubble/bubble_dialog_delegate_view.h"
 #include "ui/views/bubble/bubble_frame_view.h"
 #include "ui/views/controls/label.h"
 #include "ui/views/layout/fill_layout.h"
@@ -27,37 +30,33 @@ constexpr int kBubbleBorderVisibleWidth = 1;
 
 }  // namespace
 
-class InfoBubbleFrame : public BubbleFrameView {
- public:
-  explicit InfoBubbleFrame(const gfx::Insets& content_margins)
-      : BubbleFrameView(gfx::Insets(), content_margins) {}
-
-  InfoBubbleFrame(const InfoBubbleFrame&) = delete;
-  InfoBubbleFrame& operator=(const InfoBubbleFrame&) = delete;
-
-  ~InfoBubbleFrame() override = default;
-
-  gfx::Rect GetAvailableScreenBounds(const gfx::Rect& rect) const override {
-    return available_bounds_;
-  }
-
-  void set_available_bounds(const gfx::Rect& available_bounds) {
-    available_bounds_ = available_bounds;
-  }
-
- private:
-  // Bounds that this frame should try to keep bubbles within (screen coords).
-  gfx::Rect available_bounds_;
-};
-
 InfoBubble::InfoBubble(View* anchor,
                        BubbleBorder::Arrow arrow,
                        const std::u16string& message)
-    : BubbleDialogDelegateView(anchor, arrow) {
-  DialogDelegate::SetButtons(ui::DIALOG_BUTTON_NONE);
+    : BubbleDialogDelegateView(anchor,
+                               arrow,
+                               views::BubbleBorder::DIALOG_SHADOW,
+                               true) {
+  DialogDelegate::SetButtons(static_cast<int>(ui::mojom::DialogButton::kNone));
 
-  set_margins(LayoutProvider::Get()->GetInsetsMetric(
-      InsetsMetric::INSETS_TOOLTIP_BUBBLE));
+  set_available_screen_bounds_callback(base::BindRepeating(
+      [](const InfoBubble* bubble, const gfx::Rect& rect) {
+        // Anchor widget can be null during destruction or if the anchor is
+        // cleared.
+        return bubble->anchor_widget()
+                   ? bubble->anchor_widget()->GetWindowBoundsInScreen()
+                   : gfx::Rect();
+      },
+      base::Unretained(this)));
+
+  auto* layout_provider = LayoutProvider::Get();
+  set_frame_margins({
+      .contents =
+          layout_provider->GetInsetsMetric(InsetsMetric::INSETS_TOOLTIP_BUBBLE),
+      .title = gfx::Insets(),
+      .footnote =
+          layout_provider->GetInsetsMetric(InsetsMetric::INSETS_TOOLTIP_BUBBLE),
+  });
   SetCanActivate(false);
   SetAccessibleWindowRole(ax::mojom::Role::kAlertDialog);
   // TODO(pbos): This hacks around a bug where focus order in the parent dialog
@@ -81,47 +80,38 @@ void InfoBubble::Show() {
 
 void InfoBubble::Hide() {
   Widget* widget = GetWidget();
-  if (widget && !widget->IsClosed())
+  if (widget && !widget->IsClosed()) {
     widget->Close();
+  }
 }
 
-std::unique_ptr<NonClientFrameView> InfoBubble::CreateNonClientFrameView(
-    Widget* widget) {
-  DCHECK(!frame_);
-  auto frame = std::make_unique<InfoBubbleFrame>(margins());
-  frame->set_available_bounds(anchor_widget()->GetWindowBoundsInScreen());
-  auto border = std::make_unique<BubbleBorder>(arrow(), GetShadow());
-  border->SetColor(color());
-  frame->SetBubbleBorder(std::move(border));
-  frame_ = frame.get();
+std::unique_ptr<FrameView> InfoBubble::CreateFrameView(Widget* widget) {
+  auto frame = BubbleDialogDelegateView::CreateFrameView(widget);
+  static_cast<BubbleFrameView*>(frame.get())->SetContentMargins(margins());
   return frame;
 }
 
-gfx::Size InfoBubble::CalculatePreferredSize() const {
-  if (preferred_width_ == 0)
-    return BubbleDialogDelegateView::CalculatePreferredSize();
+gfx::Size InfoBubble::CalculatePreferredSize(
+    const SizeBounds& available_size) const {
+  if (preferred_width_ == 0) {
+    return BubbleDialogDelegateView::CalculatePreferredSize(available_size);
+  }
 
   int pref_width = preferred_width_;
-  pref_width -= frame_->GetInsets().width();
+  pref_width -= GetBubbleFrameView()->GetInsets().width();
   pref_width -= 2 * kBubbleBorderVisibleWidth;
-  return gfx::Size(pref_width, GetHeightForWidth(pref_width));
-}
-
-void InfoBubble::OnWidgetBoundsChanged(Widget* widget,
-                                       const gfx::Rect& new_bounds) {
-  BubbleDialogDelegateView::OnWidgetBoundsChanged(widget, new_bounds);
-  if (anchor_widget() == widget)
-    frame_->set_available_bounds(widget->GetWindowBoundsInScreen());
+  return gfx::Size(pref_width, GetLayoutManager()->GetPreferredHeightForWidth(
+                                   this, pref_width));
 }
 
 void InfoBubble::UpdatePosition() {
   Widget* const widget = GetWidget();
-  if (!widget)
+  if (!widget) {
     return;
+  }
 
   if (anchor_widget()->IsVisible() &&
       !GetAnchorView()->GetVisibleBounds().IsEmpty()) {
-    SizeToContents();
     widget->SetVisibilityChangedAnimationsEnabled(true);
     widget->ShowInactive();
   } else {
@@ -130,7 +120,7 @@ void InfoBubble::UpdatePosition() {
   }
 }
 
-BEGIN_METADATA(InfoBubble, BubbleDialogDelegateView)
+BEGIN_METADATA(InfoBubble)
 END_METADATA
 
 }  // namespace views

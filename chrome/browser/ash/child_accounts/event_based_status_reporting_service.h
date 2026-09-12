@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_ASH_CHILD_ACCOUNTS_EVENT_BASED_STATUS_REPORTING_SERVICE_H_
 #define CHROME_BROWSER_ASH_CHILD_ACCOUNTS_EVENT_BASED_STATUS_REPORTING_SERVICE_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/app_list/arc/arc_app_list_prefs.h"
 #include "chrome/browser/ash/child_accounts/screen_time_controller.h"
@@ -72,7 +73,8 @@ class EventBasedStatusReportingService
   void OnSessionStateChanged() override;
 
   // network::NetworkConnectionTracker::NetworkConnectionObserver:
-  void OnConnectionChanged(network::mojom::ConnectionType type) override;
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   // PowerManagerClient::Observer:
   void SuspendDone(base::TimeDelta duration) override;
@@ -90,7 +92,7 @@ class EventBasedStatusReportingService
   // KeyedService:
   void Shutdown() override;
 
-  content::BrowserContext* const context_;
+  const raw_ptr<content::BrowserContext, DanglingUntriaged> context_;
   bool session_just_started_ = true;
 };
 

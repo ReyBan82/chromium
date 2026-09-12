@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -39,16 +16,17 @@ import java.util.List;
 import java.util.RandomAccess;
 
 /**
- * An implementation of {@link LazyStringList} that wraps an ArrayList. Each element is one of
- * String, ByteString, or byte[]. It caches the last one requested which is most likely the one
- * needed next. This minimizes memory usage while satisfying the most common use cases.
+ * An implementation of {@link LazyStringList} that wraps an {@link ArrayList}. Each element is one
+ * of {@link String}, {@link ByteString}, or {@code byte[]}. It caches the last one requested which
+ * is most likely the one needed next. This minimizes memory usage while satisfying the most common
+ * use cases.
  *
- * <p><strong>Note that this implementation is not synchronized.</strong> If multiple threads access
- * an <tt>ArrayList</tt> instance concurrently, and at least one of the threads modifies the list
- * structurally, it <i>must</i> be synchronized externally. (A structural modification is any
- * operation that adds or deletes one or more elements, or explicitly resizes the backing array;
- * merely setting the value of an element is not a structural modification.) This is typically
- * accomplished by synchronizing on some object that naturally encapsulates the list.
+ * <p><b>Note that this implementation is not synchronized.</b> If multiple threads access an {@link
+ * ArrayList} instance concurrently, and at least one of the threads modifies the list structurally,
+ * it <i>must</i> be synchronized externally. (A structural modification is any operation that adds
+ * or deletes one or more elements, or explicitly resizes the backing array; merely setting the
+ * value of an element is not a structural modification.) This is typically accomplished by
+ * synchronizing on some object that naturally encapsulates the list.
  *
  * <p>If the implementation is accessed via concurrent reads, this is thread safe. Conversions are
  * done in a thread safe manner. It's possible that the conversion may happen more than once if two
@@ -61,23 +39,29 @@ import java.util.RandomAccess;
 public class LazyStringArrayList extends AbstractProtobufList<String>
     implements LazyStringList, RandomAccess {
 
-  private static final LazyStringArrayList EMPTY_LIST = new LazyStringArrayList();
+  private static final LazyStringArrayList EMPTY_LIST = new LazyStringArrayList(false);
 
-  static {
-    EMPTY_LIST.makeImmutable();
-  }
-
-  static LazyStringArrayList emptyList() {
+  /** Returns an empty immutable {@code LazyStringArrayList} instance */
+  public static LazyStringArrayList emptyList() {
     return EMPTY_LIST;
   }
 
-  // For compatibility with older runtimes.
-  public static final LazyStringList EMPTY = EMPTY_LIST;
+  /**
+   * For compatibility with older runtimes.
+   *
+   * @deprecated use {@link #emptyList()} instead
+   */
+  @Deprecated public static final LazyStringList EMPTY = emptyList();
 
   private final List<Object> list;
 
   public LazyStringArrayList() {
     this(DEFAULT_CAPACITY);
+  }
+
+  private LazyStringArrayList(boolean isMutable) {
+    super(isMutable);
+    this.list = Collections.emptyList();
   }
 
   public LazyStringArrayList(int initialCapacity) {
@@ -135,13 +119,6 @@ public class LazyStringArrayList extends AbstractProtobufList<String>
   }
 
   @Override
-  public String set(int index, String s) {
-    ensureIsMutable();
-    Object o = list.set(index, s);
-    return asString(o);
-  }
-
-  @Override
   public void add(int index, String element) {
     ensureIsMutable();
     list.add(index, element);
@@ -161,55 +138,12 @@ public class LazyStringArrayList extends AbstractProtobufList<String>
   }
 
   @Override
-  public boolean addAll(Collection<? extends String> c) {
-    // The default implementation of AbstractCollection.addAll(Collection)
-    // delegates to add(Object). This implementation instead delegates to
-    // addAll(int, Collection), which makes a special case for Collections
-    // which are instances of LazyStringList.
-    return addAll(size(), c);
-  }
-
-  @Override
-  public boolean addAll(int index, Collection<? extends String> c) {
+  @CanIgnoreReturnValue
+  public boolean add(String element) {
     ensureIsMutable();
-    // When copying from another LazyStringList, directly copy the underlying
-    // elements rather than forcing each element to be decoded to a String.
-    Collection<?> collection =
-        c instanceof LazyStringList ? ((LazyStringList) c).getUnderlyingElements() : c;
-    boolean ret = list.addAll(index, collection);
+    list.add(element);
     modCount++;
-    return ret;
-  }
-
-  @Override
-  public boolean addAllByteString(Collection<? extends ByteString> values) {
-    ensureIsMutable();
-    boolean ret = list.addAll(values);
-    modCount++;
-    return ret;
-  }
-
-  @Override
-  public boolean addAllByteArray(Collection<byte[]> c) {
-    ensureIsMutable();
-    boolean ret = list.addAll(c);
-    modCount++;
-    return ret;
-  }
-
-  @Override
-  public String remove(int index) {
-    ensureIsMutable();
-    Object o = list.remove(index);
-    modCount++;
-    return asString(o);
-  }
-
-  @Override
-  public void clear() {
-    ensureIsMutable();
-    list.clear();
-    modCount++;
+    return true;
   }
 
   @Override
@@ -223,6 +157,63 @@ public class LazyStringArrayList extends AbstractProtobufList<String>
   public void add(byte[] element) {
     ensureIsMutable();
     list.add(element);
+    modCount++;
+  }
+
+  @Override
+  @CanIgnoreReturnValue
+  public boolean addAll(Collection<? extends String> c) {
+    // The default implementation of AbstractCollection.addAll(Collection)
+    // delegates to add(Object). This implementation instead delegates to
+    // addAll(int, Collection), which makes a special case for Collections
+    // which are instances of LazyStringList.
+    return addAll(size(), c);
+  }
+
+  @Override
+  @CanIgnoreReturnValue
+  public boolean addAll(int index, Collection<? extends String> c) {
+    ensureIsMutable();
+    // When copying from another LazyStringList, directly copy the underlying
+    // elements rather than forcing each element to be decoded to a String.
+    Collection<?> collection =
+        c instanceof LazyStringList ? ((LazyStringList) c).getUnderlyingElements() : c;
+    boolean ret = list.addAll(index, collection);
+    modCount++;
+    return ret;
+  }
+
+  @Override
+  @CanIgnoreReturnValue
+  public boolean addAllByteString(Collection<? extends ByteString> values) {
+    ensureIsMutable();
+    boolean ret = list.addAll(values);
+    modCount++;
+    return ret;
+  }
+
+  @Override
+  @CanIgnoreReturnValue
+  public boolean addAllByteArray(Collection<byte[]> c) {
+    ensureIsMutable();
+    boolean ret = list.addAll(c);
+    modCount++;
+    return ret;
+  }
+
+  @Override
+  @CanIgnoreReturnValue
+  public String remove(int index) {
+    ensureIsMutable();
+    Object o = list.remove(index);
+    modCount++;
+    return asString(o);
+  }
+
+  @Override
+  public void clear() {
+    ensureIsMutable();
+    list.clear();
     modCount++;
   }
 
@@ -252,13 +243,16 @@ public class LazyStringArrayList extends AbstractProtobufList<String>
   }
 
   @Override
-  public void set(int index, ByteString s) {
-    setAndReturn(index, s);
+  @CanIgnoreReturnValue
+  public String set(int index, String s) {
+    ensureIsMutable();
+    Object o = list.set(index, s);
+    return asString(o);
   }
 
-  private Object setAndReturn(int index, ByteString s) {
-    ensureIsMutable();
-    return list.set(index, s);
+  @Override
+  public void set(int index, ByteString s) {
+    setAndReturn(index, s);
   }
 
   @Override
@@ -266,6 +260,13 @@ public class LazyStringArrayList extends AbstractProtobufList<String>
     setAndReturn(index, s);
   }
 
+  @CanIgnoreReturnValue
+  private Object setAndReturn(int index, ByteString s) {
+    ensureIsMutable();
+    return list.set(index, s);
+  }
+
+  @CanIgnoreReturnValue
   private Object setAndReturn(int index, byte[] s) {
     ensureIsMutable();
     return list.set(index, s);

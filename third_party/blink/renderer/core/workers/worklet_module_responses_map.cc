@@ -4,8 +4,9 @@
 
 #include "third_party/blink/renderer/core/workers/worklet_module_responses_map.h"
 
+#include <optional>
+
 #include "base/task/single_thread_task_runner.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/renderer/platform/scheduler/public/post_cross_thread_task.h"
 #include "third_party/blink/renderer/platform/wtf/cross_thread_functional.h"
 
@@ -23,7 +24,7 @@ void WorkletModuleResponsesMap::Entry::AddClient(
     ModuleScriptFetcher::Client* client,
     scoped_refptr<base::SingleThreadTaskRunner> client_task_runner) {
   // Clients can be added only while a module script is being fetched.
-  DCHECK_EQ(state_, State::kFetching);
+  CHECK_EQ(state_, State::kFetching);
   clients_.insert(client, client_task_runner);
 }
 
@@ -31,34 +32,39 @@ void WorkletModuleResponsesMap::Entry::AddClient(
 // "fetch a worklet script" algorithm:
 // https://drafts.css-houdini.org/worklets/#fetch-a-worklet-script
 void WorkletModuleResponsesMap::Entry::SetParams(
-    const absl::optional<ModuleScriptCreationParams>& params) {
-  DCHECK_EQ(state_, State::kFetching);
+    ModuleScriptCreationParams params) {
+  CHECK_EQ(state_, State::kFetching);
 
-  if (params) {
-    state_ = State::kFetched;
+  state_ = State::kFetched;
 
-    // Step 7: "Let response be the result of fetch when it asynchronously
-    // completes."
-    // Step 8: "Set the value of the entry in cache whose key is url to
-    // response, and asynchronously complete this algorithm with response."
-    params_.emplace(params->IsolatedCopy());
-    DCHECK(params_->IsSafeToSendToAnotherThread());
-    for (auto& it : clients_) {
-      PostCrossThreadTask(
-          *it.value, FROM_HERE,
-          CrossThreadBindOnce(&ModuleScriptFetcher::Client::OnFetched, it.key,
-                              *params));
-    }
-  } else {
-    state_ = State::kFailed;
-    // TODO(nhiroki): Add |error_messages| to the context's message storage.
-    for (auto& it : clients_) {
-      PostCrossThreadTask(
-          *it.value, FROM_HERE,
-          CrossThreadBindOnce(&ModuleScriptFetcher::Client::OnFailed, it.key));
-    }
+  // Step 7: "Let response be the result of fetch when it asynchronously
+  // completes."
+  // Step 8: "Set the value of the entry in cache whose key is url to
+  // response, and asynchronously complete this algorithm with response."
+  params_or_error_.emplace(params.IsolatedCopy());
+  CHECK(std::get<ModuleScriptCreationParams>(*params_or_error_)
+            .IsSafeToSendToAnotherThread());
+  for (auto& it : clients_) {
+    PostCrossThreadTask(
+        *it.value, FROM_HERE,
+        CrossThreadBindOnce(&ModuleScriptFetcher::Client::OnFetched, it.key,
+                            params.IsolatedCopy()));
   }
 
+  clients_.clear();
+}
+
+void WorkletModuleResponsesMap::Entry::SetError(WorkletModuleError error) {
+  CHECK_EQ(state_, State::kFetching);
+  state_ = State::kFailed;
+
+  params_or_error_.emplace(error);
+  // TODO(nhiroki): Add |error_messages| to the context's message storage.
+  for (auto& it : clients_) {
+    PostCrossThreadTask(
+        *it.value, FROM_HERE,
+        CrossThreadBindOnce(&ModuleScriptFetcher::Client::OnFailed, it.key));
+  }
   clients_.clear();
 }
 
@@ -78,8 +84,8 @@ bool WorkletModuleResponsesMap::GetEntry(
   DCHECK_NE(module_type, ModuleType::kInvalid);
   if (!is_available_ || !IsValidURL(url)) {
     client_task_runner->PostTask(
-        FROM_HERE, WTF::BindOnce(&ModuleScriptFetcher::Client::OnFailed,
-                                 WrapPersistent(client)));
+        FROM_HERE, BindOnce(&ModuleScriptFetcher::Client::OnFailed,
+                            WrapPersistent(client)));
     return true;
   }
 
@@ -98,15 +104,14 @@ bool WorkletModuleResponsesMap::GetEntry(
         // complete this algorithm with that entry's value, and abort these
         // steps."
         client_task_runner->PostTask(
-            FROM_HERE,
-            WTF::BindOnce(&ModuleScriptFetcher::Client::OnFetched,
-                          WrapPersistent(client), entry->GetParams()));
+            FROM_HERE, BindOnce(&ModuleScriptFetcher::Client::OnFetched,
+                                WrapPersistent(client), entry->GetParams()));
         return true;
       case Entry::State::kFailed:
         // Module fetching failed before. Abort following steps.
         client_task_runner->PostTask(
-            FROM_HERE, WTF::BindOnce(&ModuleScriptFetcher::Client::OnFailed,
-                                     WrapPersistent(client)));
+            FROM_HERE, BindOnce(&ModuleScriptFetcher::Client::OnFailed,
+                                WrapPersistent(client)));
         return true;
     }
     NOTREACHED();
@@ -124,17 +129,50 @@ bool WorkletModuleResponsesMap::GetEntry(
   return false;
 }
 
+std::optional<WorkletModuleError> WorkletModuleResponsesMap::GetEntryError(
+    const KURL& url,
+    ModuleType module_type) {
+  base::AutoLock locker(lock_);
+  if (!IsValidURL(url)) {
+    return std::nullopt;
+  }
+
+  auto it = entries_.find(std::make_pair(url, module_type));
+  if (it != entries_.end()) {
+    Entry* entry = it->value.get();
+    if (entry->GetState() == Entry::State::kFailed) {
+      return entry->GetError();
+    }
+  }
+  return std::nullopt;
+}
+
 void WorkletModuleResponsesMap::SetEntryParams(
     const KURL& url,
     ModuleType module_type,
-    const absl::optional<ModuleScriptCreationParams>& params) {
+    ModuleScriptCreationParams params) {
   base::AutoLock locker(lock_);
   if (!is_available_)
     return;
 
-  DCHECK(entries_.Contains(std::make_pair(url, module_type)));
-  Entry* entry = entries_.find(std::make_pair(url, module_type))->value.get();
-  entry->SetParams(params);
+  auto it = entries_.find(std::make_pair(url, module_type));
+  CHECK(it != entries_.end());
+  Entry* entry = it->value.get();
+  entry->SetParams(std::move(params));
+}
+
+void WorkletModuleResponsesMap::SetEntryError(const KURL& url,
+                                              ModuleType module_type,
+                                              WorkletModuleError error) {
+  base::AutoLock locker(lock_);
+  if (!is_available_) {
+    return;
+  }
+
+  auto it = entries_.find(std::make_pair(url, module_type));
+  CHECK(it != entries_.end());
+  Entry* entry = it->value.get();
+  entry->SetError(std::move(error));
 }
 
 void WorkletModuleResponsesMap::Dispose() {
@@ -144,7 +182,8 @@ void WorkletModuleResponsesMap::Dispose() {
   for (auto& it : entries_) {
     switch (it.value->GetState()) {
       case Entry::State::kFetching:
-        it.value->SetParams(absl::nullopt);
+        it.value->SetError(
+            WorkletModuleError{WorkletModuleError::Type::kDisposed});
         break;
       case Entry::State::kFetched:
       case Entry::State::kFailed:

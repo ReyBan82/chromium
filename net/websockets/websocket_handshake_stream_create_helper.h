@@ -11,7 +11,9 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "net/base/net_export.h"
+#include "net/quic/quic_chromium_client_session.h"
 #include "net/websockets/websocket_handshake_stream_base.h"
 #include "net/websockets/websocket_stream.h"
 
@@ -21,13 +23,15 @@ class WebSocketStreamRequestAPI;
 class SpdySession;
 class WebSocketBasicHandshakeStream;
 class WebSocketEndpointLockManager;
+class ClientSocketHandle;
 
 // Implementation of WebSocketHandshakeStreamBase::CreateHelper. This class is
 // used in the implementation of WebSocketStream::CreateAndConnectStream() and
 // is not intended to be used by itself.
 //
-// Holds the information needed to construct a
-// WebSocketBasicHandshakeStreamBase.
+// Holds the information needed to construct a WebSocketHandshakeStreamBase
+// subclass (such as WebSocketBasicHandshakeStream,
+// WebSocketHttp2HandshakeStream, or WebSocketHttp3HandshakeStream).
 class NET_EXPORT_PRIVATE WebSocketHandshakeStreamCreateHelper
     : public WebSocketHandshakeStreamBase::CreateHelper {
  public:
@@ -62,10 +66,9 @@ class NET_EXPORT_PRIVATE WebSocketHandshakeStreamCreateHelper
       std::set<std::string> dns_aliases) override;
 
  private:
-  const raw_ptr<WebSocketStream::ConnectDelegate, DanglingUntriaged>
-      connect_delegate_;
+  const raw_ptr<WebSocketStream::ConnectDelegate> connect_delegate_;
   const std::vector<std::string> requested_subprotocols_;
-  const raw_ptr<WebSocketStreamRequestAPI, DanglingUntriaged> request_;
+  const raw_ptr<WebSocketStreamRequestAPI> request_;
 };
 
 }  // namespace net

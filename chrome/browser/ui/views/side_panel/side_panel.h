@@ -5,38 +5,84 @@
 #ifndef CHROME_BROWSER_UI_VIEWS_SIDE_PANEL_SIDE_PANEL_H_
 #define CHROME_BROWSER_UI_VIEWS_SIDE_PANEL_SIDE_PANEL_H_
 
+#include <memory>
+#include <optional>
+
+#include "base/callback_list.h"
 #include "base/memory/raw_ptr.h"
+#include "chrome/browser/ui/animation/browser_animation_types.h"
+#include "chrome/browser/ui/side_panel/side_panel_entry.h"
+#include "chrome/browser/ui/side_panel/side_panel_enums.h"
 #include "components/prefs/pref_change_registrar.h"
+#include "ui/base/interaction/element_tracker.h"
 #include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/gfx/animation/slide_animation.h"
+#include "ui/gfx/geometry/rounded_corners_f.h"
 #include "ui/views/accessible_pane_view.h"
+#include "ui/views/animation/animation_delegate_views.h"
 #include "ui/views/controls/resize_area_delegate.h"
-#include "ui/views/view_observer.h"
+#include "ui/views/view_utils.h"
 
 class BrowserView;
 
 class SidePanel : public views::AccessiblePaneView,
-                  public views::ViewObserver,
                   public views::ResizeAreaDelegate {
+  METADATA_HEADER(SidePanel, views::AccessiblePaneView)
+
  public:
   // Determines the side from which the side panel will appear.
   // LTR / RTL conversions are handled in
   // BrowserViewLayout::LayoutSidePanelView. As such, left will always be on the
   // left side of the browser regardless of LTR / RTL mode.
-  enum HorizontalAlignment { kAlignLeft = 0, kAlignRight };
-
-  METADATA_HEADER(SidePanel);
-  explicit SidePanel(BrowserView* browser_view,
-                     HorizontalAlignment horizontal_alignment =
-                         HorizontalAlignment::kAlignRight);
+  enum class HorizontalAlignment { kLeft = 0, kRight };
+  explicit SidePanel(BrowserView* browser_view);
   SidePanel(const SidePanel&) = delete;
   SidePanel& operator=(const SidePanel&) = delete;
   ~SidePanel() override;
 
+  DECLARE_CLASS_CUSTOM_ELEMENT_EVENT_TYPE(kOpenAnimationCompletedEvent);
+  DECLARE_CLASS_CUSTOM_ELEMENT_EVENT_TYPE(kCloseAnimationCompletedEvent);
+
   void SetPanelWidth(int width);
-  void SetHorizontalAlignment(HorizontalAlignment alignment);
-  HorizontalAlignment GetHorizontalAlignment();
-  bool IsRightAligned();
+  void UpdateWidthOnEntryChanged();
+  void UpdateSidePanelWidthPref(const std::string& panel_id, int width);
+  void UpdateHorizontalAlignment(
+      std::optional<SidePanelEntryId> entry_id = std::nullopt);
+  double GetAnimationValue() const;
+  gfx::RoundedCornersF background_radii() const { return background_radii_; }
+  void SetBackgroundRadii(const gfx::RoundedCornersF& radii);
+  HorizontalAlignment horizontal_alignment() const {
+    return horizontal_alignment_;
+  }
+  bool IsRightAligned() const;
   gfx::Size GetMinimumSize() const override;
+  bool IsClosing();
+  void DisableAnimationsForTesting() { animations_disabled_ = true; }
+  void SetKeyboardResized(bool keyboard_resized) {
+    keyboard_resized_ = keyboard_resized;
+  }
+  // Returns the bounds between |content_starting_bounds_| and the content
+  // bounds in the provided |side_panel_final_bounds| for the current animation
+  // state.
+  gfx::Rect GetContentAnimationBounds(const gfx::Rect& side_panel_final_bounds);
+
+  template <typename T>
+  T* GetHeaderView() {
+    return views::AsViewClass<T>(header_view_);
+  }
+
+  // Add a header view that gets painted over the side panel border. The top
+  // border area grows to accommodate the additional height of the header,
+  // pushing the other side panel content down.
+  void AddHeaderView(std::unique_ptr<views::View> view);
+  void RemoveHeaderView();
+
+  // Gets the upper bound of the content area size if the side panel is shown
+  // right now. If the side panel is not showing, returns the minimum width
+  // and browser view height minus the padding insets. The actual content
+  // size will be smaller than the returned result when the side panel header
+  // is shown, for example.
+  gfx::Size GetContentSizeUpperBound() const;
 
   // views::ResizeAreaDelegate:
   void OnResize(int resize_amount, bool done_resizing) override;
@@ -45,19 +91,63 @@ class SidePanel : public views::AccessiblePaneView,
   // panel has been resized since metrics were last logged.
   void RecordMetricsIfResized();
 
+  void SetCurrentEntryType(SidePanelType type);
+  SidePanelType GetCurrentEntryType() const;
+
+  // Reflects the current state of the visibility of the side panel.
+  enum class State { kClosed, kOpening, kOpen, kClosing };
+  State state() const { return state_; }
+
+  // These two methods are the only mechanism to change visibility of the side
+  // panel. `animated` may be ignored.
+  void Open(bool animated);
+  void Close(bool animated);
+
+  // This should only be set just before executing Open() when a content
+  // transition is required. It will be reset when the transition ends, or
+  // if it is canceled via `ResetSidePanelAnimationContent()`.
+  void set_animation_starting_bounds_for_content(
+      const gfx::Rect& content_starting_bounds) {
+    content_starting_bounds_ = content_starting_bounds;
+  }
+  // Reparents the side panel animation content to the |content_parent_view_|
+  // and resets the animation.
+  void ResetSidePanelAnimationContent();
+
+  // This is the parent view for the contents of the side panel.
+  views::View* GetContentParentView();
+
+  views::View* resize_area_for_testing() { return resize_area_; }
+
+  // Sets or clears the visible area to clip the side panel and its children to.
+  // If null, no clipping is performed.
+  //
+  // Since things can move around in the UI, should be called every frame after
+  // layout but before rendering (typically in
+  // `BrowserLayoutImpl::DoPostLayoutVisualAdjustments()`).
+  void SetClipToVisibleArea(
+      const std::optional<gfx::Rect>& clip_to_visible_area);
+
  private:
-  void UpdateVisibility();
+  // This method is the shared implementation of Open/Close.
+  void UpdateVisibility(bool should_be_open, bool animated);
+
+  double GetAnimationValueFor(BrowserAnimationSequence which) const;
+
+  bool ShouldShowAnimation() const;
+  void AnnounceResize();
 
   // views::View:
-  void ChildVisibilityChanged(View* child) override;
+  void OnBoundsChanged(const gfx::Rect& previous_bounds) override;
 
-  // views::ViewObserver:
-  void OnChildViewAdded(View* observed_view, View* child) override;
-  void OnChildViewRemoved(View* observed_view, View* child) override;
+  void OnAnimationProgressed(const BrowserAnimationController* controller,
+                             BrowserAnimationUpdate status);
 
-  const raw_ptr<View> border_view_;
   const raw_ptr<BrowserView> browser_view_;
-  const raw_ptr<View> resize_area_;
+  SidePanelType current_entry_type_ = SidePanelType::kToolbar;
+  raw_ptr<views::View> resize_area_ = nullptr;
+  raw_ptr<views::View> header_view_ = nullptr;
+  raw_ptr<views::View> content_parent_view_;
 
   // -1 if a side panel resize is not in progress, otherwise the width of the
   // side panel when the current resize was initiated.
@@ -66,12 +156,28 @@ class SidePanel : public views::AccessiblePaneView,
   // Should be true if the side panel was resized since metrics were last
   // logged.
   bool did_resize_ = false;
+  // Should be true if we have resized via keyboard and have not announced the
+  // resize for accessibility users.
+  bool keyboard_resized_ = false;
+
+  bool animations_disabled_ = false;
+
+  // Starting bounds for the side panel content if kOpenWithContentTransition
+  // animation is shown.
+  std::optional<gfx::Rect> content_starting_bounds_;
+
+  gfx::RoundedCornersF background_radii_;
 
   // Keeps track of the side the side panel will appear on (left or right).
   HorizontalAlignment horizontal_alignment_;
 
   // Observes and listens to side panel alignment changes.
   PrefChangeRegistrar pref_change_registrar_;
+
+  State state_ = State::kClosed;
+
+  // Subscription for animation updates.
+  base::CallbackListSubscription animation_subscription_;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_SIDE_PANEL_SIDE_PANEL_H_

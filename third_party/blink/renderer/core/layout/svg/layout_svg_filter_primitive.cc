@@ -27,6 +27,11 @@
 
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_filter_primitive.h"
 
+#include "third_party/blink/renderer/core/layout/svg/svg_layout_info.h"
+#include "third_party/blink/renderer/core/svg/svg_fe_diffuse_lighting_element.h"
+#include "third_party/blink/renderer/core/svg/svg_fe_drop_shadow_element.h"
+#include "third_party/blink/renderer/core/svg/svg_fe_flood_element.h"
+#include "third_party/blink/renderer/core/svg/svg_fe_specular_lighting_element.h"
 #include "third_party/blink/renderer/core/svg/svg_filter_primitive_standard_attributes.h"
 
 namespace blink {
@@ -36,7 +41,7 @@ LayoutSVGFilterPrimitive::LayoutSVGFilterPrimitive(
     : LayoutObject(filter_primitive_element) {}
 
 static bool CurrentColorChanged(StyleDifference diff, const StyleColor& color) {
-  return diff.TextDecorationOrColorChanged() && color.IsCurrentColor();
+  return diff.text_decoration_or_color_changed && color.DependsOnCurrentColor();
 }
 
 static void CheckForColorChange(SVGFilterPrimitiveStandardAttributes& element,
@@ -44,10 +49,10 @@ static void CheckForColorChange(SVGFilterPrimitiveStandardAttributes& element,
                                 StyleDifference diff,
                                 const StyleColor& old_color,
                                 const StyleColor& new_color) {
-  // If the <color> change from/to 'currentcolor' then invalidate the filter
-  // chain so that it is rebuilt. (Makes sure the 'tainted' flag is
+  // If the <color> change from/to depending on 'currentcolor' then invalidate
+  // the filter chain so that it is rebuilt. (Makes sure the 'tainted' flag is
   // propagated.)
-  if (new_color.IsCurrentColor() != old_color.IsCurrentColor()) {
+  if (new_color.DependsOnCurrentColor() != old_color.DependsOnCurrentColor()) {
     element.Invalidate();
     return;
   }
@@ -55,40 +60,46 @@ static void CheckForColorChange(SVGFilterPrimitiveStandardAttributes& element,
     element.PrimitiveAttributeChanged(attr_name);
 }
 
-void LayoutSVGFilterPrimitive::WillBeDestroyed() {
+void LayoutSVGFilterPrimitive::WillBeDestroyed(const ComputedStyle* style) {
   NOT_DESTROYED();
   auto& element = To<SVGFilterPrimitiveStandardAttributes>(*GetNode());
   element.Invalidate();
-  LayoutObject::WillBeDestroyed();
+  LayoutObject::WillBeDestroyed(style);
 }
 
-void LayoutSVGFilterPrimitive::StyleDidChange(StyleDifference diff,
-                                              const ComputedStyle* old_style) {
+void LayoutSVGFilterPrimitive::StyleDidChange(
+    StyleDifference diff,
+    const ComputedStyle* old_style,
+    const ComputedStyle& new_style,
+    const StyleChangeContext& style_change_context) {
   NOT_DESTROYED();
   if (!old_style)
     return;
   auto& element = To<SVGFilterPrimitiveStandardAttributes>(*GetNode());
-  const ComputedStyle& style = StyleRef();
   if (IsA<SVGFEFloodElement>(element) || IsA<SVGFEDropShadowElement>(element)) {
     CheckForColorChange(element, svg_names::kFloodColorAttr, diff,
-                        old_style->FloodColor(), style.FloodColor());
-    if (style.FloodOpacity() != old_style->FloodOpacity())
+                        old_style->FloodColor(), new_style.FloodColor());
+    if (new_style.FloodOpacity() != old_style->FloodOpacity()) {
       element.PrimitiveAttributeChanged(svg_names::kFloodOpacityAttr);
+    }
   } else if (IsA<SVGFEDiffuseLightingElement>(element) ||
              IsA<SVGFESpecularLightingElement>(element)) {
     CheckForColorChange(element, svg_names::kLightingColorAttr, diff,
-                        old_style->LightingColor(), style.LightingColor());
+                        old_style->LightingColor(), new_style.LightingColor());
   }
-  if (style.ColorInterpolationFilters() !=
+  if (new_style.ColorInterpolationFilters() !=
       old_style->ColorInterpolationFilters()) {
     element.PrimitiveAttributeChanged(
         svg_names::kColorInterpolationFiltersAttr);
   }
 }
 
-void LayoutSVGFilterPrimitive::UpdateLayout() {
+SVGLayoutResult LayoutSVGFilterPrimitive::UpdateSVGLayout(
+    const SVGLayoutInfo&) {
   NOT_DESTROYED();
   ClearNeedsLayout();
+  return SVGLayoutResult(/*bounds_changed=*/false,
+                         /*has_viewport_dependence=*/false);
 }
 
 }  // namespace blink

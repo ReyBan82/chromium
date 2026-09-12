@@ -56,12 +56,21 @@ TEST(ClientSocketPool, GroupIdOperators) {
   const SchemefulSite kSiteA(GURL("http://a.test/"));
   const SchemefulSite kSiteB(GURL("http://b.test/"));
   const NetworkAnonymizationKey kNetworkAnonymizationKeys[] = {
-      NetworkAnonymizationKey(kSiteA, kSiteA, /*is_cross_site=*/false),
-      NetworkAnonymizationKey(kSiteB, kSiteB, /*is_cross_site=*/false),
+      NetworkAnonymizationKey::CreateSameSite(kSiteA),
+      NetworkAnonymizationKey::CreateSameSite(kSiteB),
   };
 
   const SecureDnsPolicy kDisableSecureDnsValues[] = {SecureDnsPolicy::kAllow,
                                                      SecureDnsPolicy::kDisable};
+
+  const handles::NetworkHandle kNetworkHandles[] = {
+      handles::kInvalidNetworkHandle,
+      // Some arbitrary network handle.
+      1,
+      // Another arbitrary network handle. This makes sure that we're not just
+      // comparing handle vs invalid handle, but also distinct valid handles.
+      23,
+  };
 
   // All previously created |group_ids|. They should all be less than the
   // current group under consideration.
@@ -80,23 +89,27 @@ TEST(ClientSocketPool, GroupIdOperators) {
                kNetworkAnonymizationKeys) {
             SCOPED_TRACE(network_anonymization_key.ToDebugString());
             for (const auto& secure_dns_policy : kDisableSecureDnsValues) {
-              ClientSocketPool::GroupId group_id(
-                  url::SchemeHostPort(scheme, host, port), privacy_mode,
-                  network_anonymization_key, secure_dns_policy);
-              for (const auto& lower_group_id : group_ids) {
-                EXPECT_FALSE(lower_group_id == group_id);
-                EXPECT_TRUE(lower_group_id < group_id);
-                EXPECT_FALSE(group_id < lower_group_id);
+              for (const auto& network_handle : kNetworkHandles) {
+                SCOPED_TRACE(network_handle);
+                ClientSocketPool::GroupId group_id(
+                    url::SchemeHostPort(scheme, host, port), privacy_mode,
+                    network_anonymization_key, secure_dns_policy,
+                    /*disable_cert_network_fetches=*/false, network_handle);
+                for (const auto& lower_group_id : group_ids) {
+                  EXPECT_FALSE(lower_group_id == group_id);
+                  EXPECT_TRUE(lower_group_id < group_id);
+                  EXPECT_FALSE(group_id < lower_group_id);
+                }
+
+                group_ids.push_back(group_id);
+
+                // Compare |group_id| to itself. Use two different copies of
+                // |group_id|'s value, since to protect against bugs where an
+                // object only equals itself.
+                EXPECT_TRUE(group_ids.back() == group_id);
+                EXPECT_FALSE(group_ids.back() < group_id);
+                EXPECT_FALSE(group_id < group_ids.back());
               }
-
-              group_ids.push_back(group_id);
-
-              // Compare |group_id| to itself. Use two different copies of
-              // |group_id|'s value, since to protect against bugs where an
-              // object only equals itself.
-              EXPECT_TRUE(group_ids.back() == group_id);
-              EXPECT_FALSE(group_ids.back() < group_id);
-              EXPECT_FALSE(group_id < group_ids.back());
             }
           }
         }
@@ -114,59 +127,83 @@ TEST(ClientSocketPool, GroupIdToString) {
             ClientSocketPool::GroupId(
                 url::SchemeHostPort(url::kHttpScheme, "foo", 80),
                 PrivacyMode::PRIVACY_MODE_DISABLED, NetworkAnonymizationKey(),
-                SecureDnsPolicy::kAllow)
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+                handles::kInvalidNetworkHandle)
                 .ToString());
   EXPECT_EQ("http://bar:443 <null>",
             ClientSocketPool::GroupId(
                 url::SchemeHostPort(url::kHttpScheme, "bar", 443),
                 PrivacyMode::PRIVACY_MODE_DISABLED, NetworkAnonymizationKey(),
-                SecureDnsPolicy::kAllow)
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+                handles::kInvalidNetworkHandle)
                 .ToString());
   EXPECT_EQ("pm/http://bar <null>",
             ClientSocketPool::GroupId(
                 url::SchemeHostPort(url::kHttpScheme, "bar", 80),
                 PrivacyMode::PRIVACY_MODE_ENABLED, NetworkAnonymizationKey(),
-                SecureDnsPolicy::kAllow)
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+                handles::kInvalidNetworkHandle)
                 .ToString());
 
   EXPECT_EQ("https://foo:80 <null>",
             ClientSocketPool::GroupId(
                 url::SchemeHostPort(url::kHttpsScheme, "foo", 80),
                 PrivacyMode::PRIVACY_MODE_DISABLED, NetworkAnonymizationKey(),
-                SecureDnsPolicy::kAllow)
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+                handles::kInvalidNetworkHandle)
                 .ToString());
   EXPECT_EQ("https://bar <null>",
             ClientSocketPool::GroupId(
                 url::SchemeHostPort(url::kHttpsScheme, "bar", 443),
                 PrivacyMode::PRIVACY_MODE_DISABLED, NetworkAnonymizationKey(),
-                SecureDnsPolicy::kAllow)
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+                handles::kInvalidNetworkHandle)
                 .ToString());
   EXPECT_EQ("pm/https://bar:80 <null>",
             ClientSocketPool::GroupId(
                 url::SchemeHostPort(url::kHttpsScheme, "bar", 80),
                 PrivacyMode::PRIVACY_MODE_ENABLED, NetworkAnonymizationKey(),
-                SecureDnsPolicy::kAllow)
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+                handles::kInvalidNetworkHandle)
                 .ToString());
 
-  EXPECT_EQ("https://foo <https://foo.test>",
+  EXPECT_EQ("https://foo <https://foo.test cross_site>",
             ClientSocketPool::GroupId(
                 url::SchemeHostPort(url::kHttpsScheme, "foo", 443),
                 PrivacyMode::PRIVACY_MODE_DISABLED,
-                NetworkAnonymizationKey(SchemefulSite(GURL("https://foo.test")),
-                                        SchemefulSite(GURL("https://bar.test")),
-                                        /*is_cross_site=*/true),
-                SecureDnsPolicy::kAllow)
+                NetworkAnonymizationKey::CreateCrossSite(
+                    SchemefulSite(GURL("https://foo.test"))),
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+                handles::kInvalidNetworkHandle)
                 .ToString());
 
-  EXPECT_EQ("dsd/pm/https://bar:80 <null>",
+  EXPECT_EQ(
+      "dsd/pm/https://bar:80 <null>",
+      ClientSocketPool::GroupId(
+          url::SchemeHostPort(url::kHttpsScheme, "bar", 80),
+          PrivacyMode::PRIVACY_MODE_ENABLED, NetworkAnonymizationKey(),
+          SecureDnsPolicy::kDisable, /*disable_cert_network_fetches=*/false,
+          handles::kInvalidNetworkHandle)
+          .ToString());
+
+  EXPECT_EQ("disable_cert_network_fetches/pm/https://bar:80 <null>",
             ClientSocketPool::GroupId(
                 url::SchemeHostPort(url::kHttpsScheme, "bar", 80),
                 PrivacyMode::PRIVACY_MODE_ENABLED, NetworkAnonymizationKey(),
-                SecureDnsPolicy::kDisable)
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/true,
+                handles::kInvalidNetworkHandle)
+                .ToString());
+
+  EXPECT_EQ("target_network=1/https://bar:80 <null>",
+            ClientSocketPool::GroupId(
+                url::SchemeHostPort(url::kHttpsScheme, "bar", 80),
+                PrivacyMode::PRIVACY_MODE_DISABLED, NetworkAnonymizationKey(),
+                SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+                /*target_network=*/1)
                 .ToString());
 }
 
-TEST(ClientSocketPool, PartitionConnectionsByNetworkIsolationKeyDisabled) {
+TEST(ClientSocketPool, SplitHostCacheByNetworkIsolationKeyDisabled) {
   const SchemefulSite kSiteFoo(GURL("https://foo.com"));
   const SchemefulSite kSiteBar(GURL("https://bar.com"));
   base::test::ScopedFeatureList feature_list;
@@ -176,17 +213,19 @@ TEST(ClientSocketPool, PartitionConnectionsByNetworkIsolationKeyDisabled) {
   ClientSocketPool::GroupId group_id1(
       url::SchemeHostPort(url::kHttpsScheme, "foo", 443),
       PrivacyMode::PRIVACY_MODE_DISABLED,
-      NetworkAnonymizationKey(kSiteFoo, kSiteFoo, /*is_cross_site=*/false),
-      SecureDnsPolicy::kAllow);
+      NetworkAnonymizationKey::CreateSameSite(kSiteFoo),
+      SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+      handles::kInvalidNetworkHandle);
 
   ClientSocketPool::GroupId group_id2(
       url::SchemeHostPort(url::kHttpsScheme, "foo", 443),
       PrivacyMode::PRIVACY_MODE_DISABLED,
-      NetworkAnonymizationKey(kSiteBar, kSiteBar, /*is_cross_site=*/false),
-      SecureDnsPolicy::kAllow);
+      NetworkAnonymizationKey::CreateSameSite(kSiteBar),
+      SecureDnsPolicy::kAllow, /*disable_cert_network_fetches=*/false,
+      handles::kInvalidNetworkHandle);
 
-  EXPECT_FALSE(group_id1.network_anonymization_key().IsFullyPopulated());
-  EXPECT_FALSE(group_id2.network_anonymization_key().IsFullyPopulated());
+  EXPECT_TRUE(group_id1.network_anonymization_key().IsEmpty());
+  EXPECT_TRUE(group_id2.network_anonymization_key().IsEmpty());
   EXPECT_EQ(group_id1.network_anonymization_key(),
             group_id2.network_anonymization_key());
   EXPECT_EQ(group_id1, group_id2);

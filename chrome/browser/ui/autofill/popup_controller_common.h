@@ -6,8 +6,10 @@
 #define CHROME_BROWSER_UI_AUTOFILL_POPUP_CONTROLLER_COMMON_H_
 
 #include "base/i18n/rtl.h"
+#include "components/autofill/core/browser/ui/popup_open_enums.h"
+#include "components/autofill/core/common/unique_ids.h"
 #include "ui/gfx/geometry/rect_f.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace autofill {
 
@@ -15,21 +17,41 @@ namespace autofill {
 // the pop-up bounds, text direction and container view.
 struct PopupControllerCommon {
  public:
-  PopupControllerCommon(const gfx::RectF& element_bounds,
-                        base::i18n::TextDirection text_direction,
-                        gfx::NativeView container_view);
+  PopupControllerCommon(
+      LocalFrameToken frame_token,
+      gfx::RectF element_bounds,
+      base::i18n::TextDirection text_direction,
+      PopupAnchorType anchor_type = PopupAnchorType::kField,
+      bool show_tabbed_popup = false,
+      bool prefer_prev_arrow_side_on_suggestions_update = false);
+  PopupControllerCommon(const PopupControllerCommon&);
+  PopupControllerCommon(PopupControllerCommon&&);
+  PopupControllerCommon& operator=(const PopupControllerCommon&);
+  PopupControllerCommon& operator=(PopupControllerCommon&&);
 
   ~PopupControllerCommon();
 
-  // The bounds of the text element that is the focus of the popup.
+  // The frame in which the popup is anchored. Typically this is the frame of
+  // the field on which the user triggered Autofill.
+  LocalFrameToken frame_token;
+
+  // The bounds of the DOM element that is the focus of the popup.
   // These coordinates are in screen space.
   gfx::RectF element_bounds;
 
   // The direction of the <input>.
   base::i18n::TextDirection text_direction;
 
-  // Weak reference
-  gfx::NativeView container_view;
+  // The type of the element to anchor the popup on.
+  PopupAnchorType anchor_type;
+
+  // True if the popup should contain a tabbed pane.
+  bool show_tabbed_popup;
+
+  // True if the popup should prefer the previous arrow side when suggestions
+  // are updated. This avoids unnecessary jumping when the popup is updated,
+  // unless the popup would otherwise go out of bounds.
+  bool prefer_prev_arrow_side_on_suggestions_update;
 };
 
 }  // namespace autofill

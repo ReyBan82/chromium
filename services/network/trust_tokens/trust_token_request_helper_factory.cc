@@ -5,6 +5,7 @@
 #include "services/network/trust_tokens/trust_token_request_helper_factory.h"
 
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include "base/metrics/histogram_functions.h"
@@ -16,6 +17,7 @@
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/trust_token_http_headers.h"
 #include "services/network/public/cpp/trust_token_parameterization.h"
+#include "services/network/public/mojom/network_context_client.mojom.h"
 #include "services/network/public/mojom/trust_tokens.mojom-shared.h"
 #include "services/network/trust_tokens/boringssl_trust_token_issuance_cryptographer.h"
 #include "services/network/trust_tokens/boringssl_trust_token_redemption_cryptographer.h"
@@ -35,7 +37,7 @@ namespace {
 
 using Outcome = internal::TrustTokenRequestHelperFactoryOutcome;
 
-base::StringPiece OutcomeToString(Outcome outcome) {
+std::string_view OutcomeToString(Outcome outcome) {
   switch (outcome) {
     case Outcome::kSuccessfullyCreatedAnIssuanceHelper:
       return "Successfully created an issuance helper";
@@ -63,12 +65,10 @@ void LogOutcome(const net::NetLogWithSource& log,
       base::StrCat({"Net.TrustTokens.RequestHelperFactoryOutcome.",
                     internal::TrustTokenOperationTypeToString(operation)}),
       outcome);
-  log.EndEvent(net::NetLogEventType::TRUST_TOKEN_OPERATION_REQUESTED,
-               [outcome]() {
-                 base::Value ret(base::Value::Type::DICT);
-                 ret.SetStringKey("outcome", OutcomeToString(outcome));
-                 return ret;
-               });
+  log.EndEvent(
+      net::NetLogEventType::TRUST_TOKEN_OPERATION_REQUESTED, [outcome]() {
+        return base::DictValue().Set("outcome", OutcomeToString(outcome));
+      });
 }
 
 }  // namespace
@@ -102,7 +102,7 @@ void TrustTokenRequestHelperFactory::CreateTrustTokenHelperForRequest(
     return;
   }
 
-  for (base::StringPiece header : TrustTokensRequestHeaders()) {
+  for (std::string_view header : TrustTokensRequestHeaders()) {
     if (headers.HasHeader(header)) {
       LogOutcome(
           net_log, params.operation,
@@ -112,7 +112,7 @@ void TrustTokenRequestHelperFactory::CreateTrustTokenHelperForRequest(
     }
   }
 
-  absl::optional<SuitableTrustTokenOrigin> maybe_top_frame_origin =
+  std::optional<SuitableTrustTokenOrigin> maybe_top_frame_origin =
       SuitableTrustTokenOrigin::Create(top_frame_origin);
   if (!maybe_top_frame_origin) {
     LogOutcome(net_log, params.operation, Outcome::kUnsuitableTopFrameOrigin);
@@ -143,7 +143,6 @@ void TrustTokenRequestHelperFactory::ConstructHelperUsingStore(
                  Outcome::kSuccessfullyCreatedAnIssuanceHelper);
       auto helper = std::make_unique<TrustTokenRequestIssuanceHelper>(
           std::move(top_frame_origin), store, key_commitment_getter_,
-          params->custom_key_commitment, params->custom_issuer,
           std::make_unique<BoringsslTrustTokenIssuanceCryptographer>(),
           std::move(net_log));
       std::move(done).Run(TrustTokenStatusOrRequestHelper(
@@ -157,8 +156,7 @@ void TrustTokenRequestHelperFactory::ConstructHelperUsingStore(
                  Outcome::kSuccessfullyCreatedARedemptionHelper);
       auto helper = std::make_unique<TrustTokenRequestRedemptionHelper>(
           std::move(top_frame_origin), params->refresh_policy, store,
-          key_commitment_getter_, params->custom_key_commitment,
-          params->custom_issuer,
+          key_commitment_getter_,
           std::make_unique<BoringsslTrustTokenRedemptionCryptographer>(),
           std::move(net_log));
       std::move(done).Run(TrustTokenStatusOrRequestHelper(
@@ -176,7 +174,7 @@ void TrustTokenRequestHelperFactory::ConstructHelperUsingStore(
 
       std::vector<SuitableTrustTokenOrigin> issuers;
       for (url::Origin& potentially_unsuitable_issuer : params->issuers) {
-        absl::optional<SuitableTrustTokenOrigin> maybe_issuer =
+        std::optional<SuitableTrustTokenOrigin> maybe_issuer =
             SuitableTrustTokenOrigin::Create(
                 std::move(potentially_unsuitable_issuer));
         if (!maybe_issuer) {

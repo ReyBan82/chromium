@@ -13,35 +13,45 @@
 #include "base/sanitizer_buildflags.h"
 #include "build/build_config.h"
 
-namespace base {
-namespace debug {
-
-#if defined(ADDRESS_SANITIZER) || BUILDFLAG(IS_HWASAN)
+namespace base::debug {
 
 // Generates an heap buffer overflow.
-BASE_EXPORT NOINLINE void AsanHeapOverflow();
+NOINLINE BASE_EXPORT void AsanHeapOverflow();
 
 // Generates an heap buffer underflow.
-BASE_EXPORT NOINLINE void AsanHeapUnderflow();
+NOINLINE BASE_EXPORT void AsanHeapUnderflow();
 
-// Generates an use after free.
-BASE_EXPORT NOINLINE void AsanHeapUseAfterFree();
+// Generates a use-after-free by allocating a heap array, freeing it, and then
+// attempting to read from the freed memory.
+NOINLINE BASE_EXPORT void AsanHeapUseAfterFree();
 
+// Generates a use-after-free by dereferencing a pointer that points to a member
+// of a freed allocation. Specifically, it allocates a pointer-to-pointer on
+// the heap pointing to a stack variable, frees the heap allocation, reads the
+// stack variable address from the freed heap memory (UaF), and then
+// dereferences that address.
+//
+// This is useful when debugging zapping-based memory protections like
+// MiracleObject. The inner pointer gets overwritten with the zapping pattern
+// and invalidated upon quarantine. Dereferencing the zapped pointer results in
+// a deterministic crash.
+NOINLINE BASE_EXPORT void AsanHeapMemberDereferenceAfterFree();
+
+#if defined(ADDRESS_SANITIZER) || BUILDFLAG(IS_HWASAN)
 // The "corrupt-block" and "corrupt-heap" classes of bugs is specific to
 // Windows.
 #if BUILDFLAG(IS_WIN)
 // Corrupts a memory block and makes sure that the corruption gets detected when
 // we try to free this block.
-BASE_EXPORT NOINLINE void AsanCorruptHeapBlock();
+NOINLINE BASE_EXPORT void AsanCorruptHeapBlock();
 
 // Corrupts the heap and makes sure that the corruption gets detected when a
 // crash occur.
-BASE_EXPORT NOINLINE void AsanCorruptHeap();
+NOINLINE BASE_EXPORT void AsanCorruptHeap();
 
 #endif  // BUILDFLAG(IS_WIN)
 #endif  // ADDRESS_SANITIZER
 
-}  // namespace debug
-}  // namespace base
+}  // namespace base::debug
 
 #endif  // BASE_DEBUG_ASAN_INVALID_ACCESS_H_

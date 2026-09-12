@@ -4,8 +4,8 @@
 
 #include "chrome/browser/ui/webui/ash/login/gesture_navigation_screen_handler.h"
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "chrome/browser/ash/login/screens/gesture_navigation_screen.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
 
 namespace ash {
@@ -19,12 +19,19 @@ void GestureNavigationScreenHandler::Show() {
   ShowInWebUI();
 }
 
+base::WeakPtr<GestureNavigationScreenView>
+GestureNavigationScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
+}
+
 void GestureNavigationScreenHandler::DeclareLocalizedValues(
     ::login::LocalizedValuesBuilder* builder) {
   builder->Add("gestureNavigationIntroTitle",
                IDS_OOBE_GESTURE_NAVIGATION_INTRO_TITLE);
   builder->Add("gestureNavigationIntroNextButton",
                IDS_OOBE_GESTURE_NAVIGATION_INTRO_NEXT_BUTTON);
+  builder->Add("gestureNavigationIntroSkipButton",
+               IDS_OOBE_GESTURE_NAVIGATION_INTRO_SKIP);
   builder->Add("gestureNavigationIntroGoHomeItem",
                IDS_OOBE_GESTURE_NAVIGATION_INTRO_GO_HOME);
   builder->Add("gestureNavigationIntroSwitchAppItem",

@@ -22,7 +22,7 @@ namespace cronet {
 class HostCachePersistenceManagerTest : public testing::Test {
  protected:
   void SetUp() override {
-    cache_ = net::HostCache::CreateDefaultCache();
+    cache_ = std::make_unique<net::HostCache>(/*max_entries=*/1000);
     pref_service_ = std::make_unique<TestingPrefServiceSimple>();
     pref_service_->registry()->RegisterListPref(kPrefName);
   }
@@ -37,9 +37,9 @@ class HostCachePersistenceManagerTest : public testing::Test {
   // a write, and the HostCache's interaction with its PersistenceDelegate is
   // assumed to work (it's tested in net/dns/host_cache_unittest.cc).
   void WriteToCache(const std::string& host) {
-    net::HostCache::Key key(host, net::DnsQueryType::UNSPECIFIED, 0,
-                            net::HostResolverSource::ANY,
-                            net::NetworkAnonymizationKey());
+    net::HostCache::Key key(
+        host, net::DnsQueryType::UNSPECIFIED, 0, net::HostResolverSource::ANY,
+        net::NetworkAnonymizationKey(), net::handles::kInvalidNetworkHandle);
     net::HostCache::Entry entry(net::OK, /*ip_endpoints=*/{}, /*aliases=*/{},
                                 net::HostCache::Entry::SOURCE_UNKNOWN);
     cache_->Set(key, entry, base::TimeTicks::Now(), base::Seconds(1));
@@ -65,13 +65,16 @@ class HostCachePersistenceManagerTest : public testing::Test {
 
     net::HostCache::Key key1("1.test", net::DnsQueryType::UNSPECIFIED, 0,
                              net::HostResolverSource::ANY,
-                             net::NetworkAnonymizationKey());
+                             net::NetworkAnonymizationKey(),
+                             net::handles::kInvalidNetworkHandle);
     net::HostCache::Key key2("2.test", net::DnsQueryType::UNSPECIFIED, 0,
                              net::HostResolverSource::ANY,
-                             net::NetworkAnonymizationKey());
+                             net::NetworkAnonymizationKey(),
+                             net::handles::kInvalidNetworkHandle);
     net::HostCache::Key key3("3.test", net::DnsQueryType::UNSPECIFIED, 0,
                              net::HostResolverSource::ANY,
-                             net::NetworkAnonymizationKey());
+                             net::NetworkAnonymizationKey(),
+                             net::handles::kInvalidNetworkHandle);
     net::HostCache::Entry entry(net::OK, /*ip_endpoints=*/{}, /*aliases=*/{},
                                 net::HostCache::Entry::SOURCE_UNKNOWN);
 
@@ -79,7 +82,7 @@ class HostCachePersistenceManagerTest : public testing::Test {
     temp_cache.Set(key2, entry, base::TimeTicks::Now(), base::Seconds(1));
     temp_cache.Set(key3, entry, base::TimeTicks::Now(), base::Seconds(1));
 
-    base::Value::List list;
+    base::ListValue list;
     temp_cache.GetList(list, false /* include_stale */,
                        net::HostCache::SerializationType::kRestorable);
     pref_service_->SetList(kPrefName, std::move(list));

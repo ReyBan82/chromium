@@ -7,6 +7,8 @@
 #include <memory>
 #include <utility>
 
+#include "ash/public/cpp/login_screen.h"
+#include "ash/public/cpp/login_screen_model.h"
 #include "base/check.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
@@ -14,13 +16,13 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/values.h"
-#include "chrome/browser/ash/login/ui/views/user_board_view.h"
-#include "chrome/browser/ash/login/users/chrome_user_manager.h"
+#include "chrome/browser/ash/login/helper.h"
+#include "chrome/browser/ash/login/lock_screen_utils.h"
 #include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/browser/browser_process_platform_part.h"
+#include "chrome/browser/ui/ash/login/login_screen_client_impl.h"
 #include "chrome/browser/ui/webui/ash/login/l10n_util.h"
 #include "components/account_id/account_id.h"
+#include "components/application_locale_storage/application_locale_storage.h"
 #include "components/policy/core/common/cloud/cloud_policy_core.h"
 #include "components/policy/core/common/cloud/cloud_policy_store.h"
 #include "components/policy/core/common/policy_map.h"
@@ -30,16 +32,28 @@
 #include "components/user_manager/user.h"
 #include "components/user_manager/user_manager.h"
 #include "components/user_manager/user_type.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 
 namespace ash {
 
 ChromeUserSelectionScreen::ChromeUserSelectionScreen(
+    PrefService* local_state,
+    const ApplicationLocaleStorage* application_locale_storage,
+    scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+    const policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
+    const user_manager::MultiUserSignInPolicyController*
+        multi_user_sign_in_policy_controller,
+    system::SystemClock* system_clock,
     DisplayedScreen display_type)
-    : UserSelectionScreen(display_type) {
+    : UserSelectionScreen(local_state,
+                          application_locale_storage,
+                          std::move(shared_url_loader_factory),
+                          browser_policy_connector_ash,
+                          multi_user_sign_in_policy_controller,
+                          system_clock,
+                          display_type) {
   device_local_account_policy_service_ =
-      g_browser_process->platform_part()
-          ->browser_policy_connector_ash()
-          ->GetDeviceLocalAccountPolicyService();
+      browser_policy_connector_ash->GetDeviceLocalAccountPolicyService();
   if (device_local_account_policy_service_) {
     device_local_account_policy_service_->AddObserver(this);
   }
@@ -57,8 +71,9 @@ void ChromeUserSelectionScreen::Init(const user_manager::UserList& users) {
   // Retrieve the current policy for all users.
   for (user_manager::UserList::const_iterator it = users.begin();
        it != users.end(); ++it) {
-    if ((*it)->GetType() == user_manager::USER_TYPE_PUBLIC_ACCOUNT)
+    if ((*it)->GetType() == user_manager::UserType::kPublicAccount) {
       OnPolicyUpdated((*it)->GetAccountId().GetUserEmail());
+    }
   }
 }
 
@@ -80,7 +95,7 @@ void ChromeUserSelectionScreen::OnDeviceLocalAccountsChanged() {
 
 void ChromeUserSelectionScreen::CheckForPublicSessionDisplayNameChange(
     policy::DeviceLocalAccountPolicyBroker* broker) {
-  user_manager::KnownUser known_user(g_browser_process->local_state());
+  user_manager::KnownUser known_user(&local_state_.get());
   const AccountId account_id = known_user.GetAccountId(
       broker->user_id(), std::string() /* id */, AccountType::UNKNOWN);
   DCHECK(account_id.is_valid());
@@ -95,7 +110,8 @@ void ChromeUserSelectionScreen::CheckForPublicSessionDisplayNameChange(
 
   if (!display_name.empty()) {
     // If a new display name was set by policy, notify the UI about it.
-    view_->SetPublicSessionDisplayName(account_id, display_name);
+    LoginScreen::Get()->GetModel()->SetPublicSessionDisplayName(account_id,
+                                                                display_name);
     return;
   }
 
@@ -112,7 +128,7 @@ void ChromeUserSelectionScreen::CheckForPublicSessionDisplayNameChange(
 
 void ChromeUserSelectionScreen::CheckForPublicSessionLocalePolicyChange(
     policy::DeviceLocalAccountPolicyBroker* broker) {
-  user_manager::KnownUser known_user(g_browser_process->local_state());
+  user_manager::KnownUser known_user(&local_state_.get());
   const AccountId account_id = known_user.GetAccountId(
       broker->user_id(), std::string() /* id */, AccountType::UNKNOWN);
   DCHECK(account_id.is_valid());
@@ -127,8 +143,6 @@ void ChromeUserSelectionScreen::CheckForPublicSessionLocalePolicyChange(
          entry->value(base::Value::Type::LIST)->GetList()) {
       if (!locale_entry.is_string()) {
         NOTREACHED();
-        new_recommended_locales.clear();
-        break;
       }
       new_recommended_locales.push_back(locale_entry.GetString());
     }
@@ -149,18 +163,19 @@ void ChromeUserSelectionScreen::CheckForPublicSessionLocalePolicyChange(
 void ChromeUserSelectionScreen::CheckIfFullManagementDisclosureNeeded(
     policy::DeviceLocalAccountPolicyBroker* broker) {
   SetPublicSessionShowFullManagementDisclosure(
-      ChromeUserManager::Get()->IsFullManagementDisclosureNeeded(broker));
+      ash::login::IsFullManagementDisclosureNeeded(local_state_.get(), broker));
 }
 
 void ChromeUserSelectionScreen::SetPublicSessionDisplayName(
     const AccountId& account_id) {
   const user_manager::User* user =
       user_manager::UserManager::Get()->FindUser(account_id);
-  if (!user || user->GetType() != user_manager::USER_TYPE_PUBLIC_ACCOUNT)
+  if (!user || user->GetType() != user_manager::UserType::kPublicAccount) {
     return;
+  }
 
-  view_->SetPublicSessionDisplayName(account_id,
-                                     base::UTF16ToUTF8(user->GetDisplayName()));
+  LoginScreen::Get()->GetModel()->SetPublicSessionDisplayName(
+      account_id, base::UTF16ToUTF8(user->GetDisplayName()));
 }
 
 void ChromeUserSelectionScreen::SetPublicSessionLocales(
@@ -171,15 +186,15 @@ void ChromeUserSelectionScreen::SetPublicSessionLocales(
 
   // Construct the list of available locales. This list consists of the
   // recommended locales, followed by all others.
-  base::Value::List available_locales =
-      GetUILanguageList(&recommended_locales, std::string(),
-                        input_method::InputMethodManager::Get());
+  base::ListValue available_locales = GetUILanguageList(
+      application_locale_storage_->Get(), &recommended_locales, std::string(),
+      input_method::InputMethodManager::Get());
 
   // Set the initially selected locale to the first recommended locale that is
   // actually available or the current UI locale if none of them are available.
   const std::string default_locale =
       FindMostRelevantLocale(recommended_locales, available_locales,
-                             g_browser_process->GetApplicationLocale());
+                             application_locale_storage_->Get());
 
   // Set a flag to indicate whether the list of recommended locales contains at
   // least two entries. This is used to decide whether the public session pod
@@ -188,14 +203,20 @@ void ChromeUserSelectionScreen::SetPublicSessionLocales(
   const bool two_or_more_recommended_locales = recommended_locales.size() >= 2;
 
   // Notify the UI.
-  view_->SetPublicSessionLocales(account_id, std::move(available_locales),
-                                 default_locale,
-                                 two_or_more_recommended_locales);
+  LoginScreen::Get()->GetModel()->SetPublicSessionLocales(
+      account_id,
+      lock_screen_utils::FromListValueToLocaleItem(
+          std::move(available_locales)),
+      default_locale, two_or_more_recommended_locales);
+
+  // Send a request to get keyboard layouts for `default_locale`.
+  LoginScreenClientImpl::Get()->RequestPublicSessionKeyboardLayouts(
+      account_id, default_locale);
 }
 
 void ChromeUserSelectionScreen::SetPublicSessionShowFullManagementDisclosure(
     bool show_full_management_disclosure) {
-  view_->SetPublicSessionShowFullManagementDisclosure(
+  LoginScreen::Get()->GetModel()->SetPublicSessionShowFullManagementDisclosure(
       show_full_management_disclosure);
 }
 

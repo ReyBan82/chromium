@@ -5,24 +5,27 @@
 #include "chrome/browser/feedback/system_logs/log_sources/chrome_internal_log_source.h"
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "base/check_deref.h"
+#include "base/command_line.h"
+#include "base/debug/dump_without_crashing.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/json/json_string_value_serializer.h"
 #include "base/logging.h"
 #include "base/path_service.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
-#include "base/strings/stringprintf.h"
 #include "base/system/sys_info.h"
-#include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "build/branding_buildflags.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/extensions/chrome_content_browser_client_extensions_part.h"
 #include "chrome/browser/google/google_brand.h"
@@ -31,43 +34,57 @@
 #include "chrome/common/channel_info.h"
 #include "components/feedback/system_logs/system_logs_source.h"
 #include "components/prefs/pref_service.h"
-#include "components/sync/driver/sync_internals_util.h"
-#include "components/sync/driver/sync_service.h"
+#include "components/sync/service/sync_internals_util.h"
+#include "components/sync/service/sync_service.h"
 #include "content/public/browser/browser_thread.h"
+#include "content/public/browser/gpu_data_manager.h"
 #include "extensions/browser/api/power/power_api.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/common/api/power.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_set.h"
+#include "gpu/config/gpu_finch_features.h"
 #include "ui/display/types/display_constants.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "ash/public/ash_interfaces.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/constants/ash_login_pref_names.h"
+#include "ash/display/cros_display_config.h"
+#include "ash/shell.h"
+#include "base/i18n/time_formatting.h"
 #include "chrome/browser/ash/arc/arc_util.h"
 #include "chrome/browser/ash/arc/policy/arc_policy_bridge.h"
-#include "chrome/browser/ash/crosapi/browser_manager.h"
-#include "chrome/browser/ash/crosapi/browser_util.h"
 #include "chrome/browser/ash/login/demo_mode/demo_session.h"
-#include "chrome/browser/ash/login/login_pref_names.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
 #include "chrome/browser/metrics/chromeos_metrics_provider.h"
 #include "chrome/browser/metrics/enrollment_status.h"
 #include "chromeos/ash/components/dbus/spaced/spaced_client.h"
+#include "chromeos/ash/components/login/auth/auth_events_recorder.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
 #include "chromeos/ash/components/settings/cros_settings_names.h"
 #include "chromeos/ash/components/system/statistics_provider.h"
 #include "chromeos/version/version_loader.h"
+#include "third_party/icu/source/i18n/unicode/timezone.h"
 #endif
 
 #if BUILDFLAG(IS_WIN)
 #include "base/win/win_util.h"
+#include "base/win/windows_version.h"
+#include "ui/base/win/hidden_window.h"
+
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
+#include "base/strings/stringprintf.h"
 #include "chrome/browser/google/google_update_win.h"
 #endif
-#include "ui/base/win/hidden_window.h"
 #endif
 
 #if BUILDFLAG(IS_MAC)
 #include "base/mac/mac_util.h"
+#include "chrome/browser/updater/updater.h"
+#endif
+
+#if !BUILDFLAG(IS_CHROMEOS)
+#include "base/base64.h"
+#include "base/feature_list.h"
+#include "components/variations/net/variations_command_line.h"
 #endif
 
 namespace system_logs {
@@ -78,13 +95,9 @@ constexpr char kSyncDataKey[] = "about_sync_data";
 constexpr char kExtensionsListKey[] = "extensions";
 constexpr char kPowerApiListKey[] = "chrome.power extensions";
 constexpr char kChromeVersionTag[] = "CHROME VERSION";
+constexpr char kSkiaGraphiteStatusKey[] = "skia_graphite_status";
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-constexpr char kLacrosChromeVersionPrefix[] = "Lacros ";
-#endif
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-constexpr char kAshChromeVersionPrefix[] = "Ash ";
+#if BUILDFLAG(IS_CHROMEOS)
 constexpr char kArcPolicyComplianceReportKey[] =
     "CHROMEOS_ARC_POLICY_COMPLIANCE_REPORT";
 constexpr char kArcDpcVersionKey[] = "CHROMEOS_ARC_DPC_VERSION";
@@ -98,33 +111,39 @@ constexpr char kLTSChromeVersionPrefix[] = "LTS ";
 constexpr char kArcStatusKey[] = "CHROMEOS_ARC_STATUS";
 constexpr char kMonitorInfoKey[] = "monitor_info";
 constexpr char kAccountTypeKey[] = "account_type";
-constexpr char kLacrosStatus[] = "lacros_status";
 constexpr char kDemoModeConfigKey[] = "demo_mode_config";
 constexpr char kOnboardingTime[] = "ONBOARDING_TIME";
 constexpr char kFreeDiskSpace[] = "FREE_DISK_SPACE";
 constexpr char kTotalDiskSpace[] = "TOTAL_DISK_SPACE";
-constexpr char kChronosHomeDirectory[] = "/home/user/chronos";
+constexpr char kChronosHomeDirectory[] = "/home/chronos/user";
+constexpr char kFailedKnowledgeFactorAttempts[] =
+    "FAILED_KNOWLEDGE_FACTOR_ATTEMPTS";
+constexpr char kRecordedAuthEvents[] = "RECORDED_AUTH_EVENTS";
 #else
 constexpr char kOsVersionTag[] = "OS VERSION";
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(IS_WIN)
 constexpr char kUsbKeyboardDetected[] = "usb_keyboard_detected";
 constexpr char kIsEnrolledToDomain[] = "enrolled_to_domain";
 constexpr char kInstallerBrandCode[] = "installer_brand_code";
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-constexpr char kUpdateErrorCode[] = "update_error_code";
-constexpr char kUpdateHresult[] = "update_hresult";
 constexpr char kInstallResultCode[] = "install_result_code";
 constexpr char kInstallLocation[] = "install_location";
 #endif
 #endif  // BUILDFLAG(IS_WIN)
 
-#if BUILDFLAG(IS_MAC)
+#if (BUILDFLAG(IS_WIN) && BUILDFLAG(GOOGLE_CHROME_BRANDING)) || \
+    BUILDFLAG(IS_MAC)
+constexpr char kUpdateErrorCode[] = "update_error_code";
+constexpr char kUpdateHresult[] = "update_hresult";
+#endif
+
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
 constexpr char kCpuArch[] = "cpu_arch";
 #endif
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 
 std::string GetPrimaryAccountTypeString() {
   DCHECK(user_manager::UserManager::Get());
@@ -136,25 +155,22 @@ std::string GetPrimaryAccountTypeString() {
     return "none";
 
   switch (primary_user->GetType()) {
-    case user_manager::USER_TYPE_REGULAR:
+    case user_manager::UserType::kRegular:
       return "regular";
-    case user_manager::USER_TYPE_GUEST:
+    case user_manager::UserType::kGuest:
       return "guest";
-    case user_manager::USER_TYPE_PUBLIC_ACCOUNT:
+    case user_manager::UserType::kPublicAccount:
       return "public_account";
-    case user_manager::USER_TYPE_KIOSK_APP:
+    case user_manager::UserType::kKioskChromeApp:
       return "kiosk_app";
-    case user_manager::USER_TYPE_CHILD:
+    case user_manager::UserType::kChild:
       return "child";
-    case user_manager::USER_TYPE_ARC_KIOSK_APP:
-      return "arc_kiosk_app";
-    case user_manager::USER_TYPE_ACTIVE_DIRECTORY:
-      return "active_directory";
-    case user_manager::USER_TYPE_WEB_KIOSK_APP:
+    case user_manager::UserType::kKioskWebApp:
       return "web_kiosk_app";
-    case user_manager::NUM_USER_TYPES:
-      NOTREACHED();
-      break;
+    case user_manager::UserType::kKioskIWA:
+      return "kiosk_iwa";
+    case user_manager::UserType::kKioskArcvmApp:
+      return "kiosk_arcvm_app";
   }
   return std::string();
 }
@@ -171,24 +187,24 @@ std::string GetEnrollmentStatusString() {
   }
 }
 
-std::string GetDisplayInfoString(
-    const crosapi::mojom::DisplayUnitInfo& display_info) {
+std::string GetDisplayInfoString(const ash::DisplayUnitInfo& display_info) {
   std::string entry;
-  if (!display_info.name.empty())
+  if (!display_info.name.empty()) {
     base::StringAppendF(&entry, "%s : ", display_info.name.c_str());
-  if (!display_info.edid)
-    return entry;
-  const crosapi::mojom::Edid& edid = *display_info.edid;
-  if (!edid.manufacturer_id.empty()) {
-    base::StringAppendF(&entry, "Manufacturer: %s - ",
-                        edid.manufacturer_id.c_str());
   }
-  if (!edid.product_id.empty()) {
-    base::StringAppendF(&entry, "Product ID: %s - ", edid.product_id.c_str());
-  }
-  if (edid.year_of_manufacture != display::kInvalidYearOfManufacture) {
-    base::StringAppendF(&entry, "Year of Manufacture: %d",
-                        edid.year_of_manufacture);
+  if (display_info.edid.has_value()) {
+    const ash::Edid& edid = *display_info.edid;
+    if (!edid.manufacturer_id.empty()) {
+      base::StringAppendF(&entry, "Manufacturer: %s - ",
+                          edid.manufacturer_id.c_str());
+    }
+    if (!edid.product_id.empty()) {
+      base::StringAppendF(&entry, "Product ID: %s - ", edid.product_id.c_str());
+    }
+    if (edid.year_of_manufacture != display::kInvalidYearOfManufacture) {
+      base::StringAppendF(&entry, "Year of Manufacture: %d",
+                          edid.year_of_manufacture);
+    }
   }
   return entry;
 }
@@ -199,17 +215,16 @@ void PopulateEntriesAsync(std::unique_ptr<SystemLogsResponse> response,
   auto populate_entries = [](SystemLogsResponse* response) {
     DCHECK(response);
 
-    ash::system::StatisticsProvider* stats =
-        ash::system::StatisticsProvider::GetInstance();
+    auto* stats = ash::system::StatisticsProvider::GetInstance();
     DCHECK(stats);
 
     // Get the HWID.
-    absl::optional<base::StringPiece> hwid =
+    std::optional<std::string_view> hwid =
         stats->GetMachineStatistic(ash::system::kHardwareClassKey);
-    if (!hwid) {
-      VLOG(1) << "Couldn't get machine statistic 'hardware_class'.";
-    } else {
+    if (hwid) {
       response->emplace(kHWIDKey, std::string(hwid.value()));
+    } else {
+      VLOG(1) << "Couldn't get machine statistic 'hardware_class'.";
     }
 
     // Get the firmware version.
@@ -229,11 +244,10 @@ void PopulateDiskSpaceLogsAsync(std::unique_ptr<SystemLogsResponse> response,
                                 SysLogsSourceCallback callback) {
   auto on_get_free_disk_space = [](std::unique_ptr<SystemLogsResponse> response,
                                    SysLogsSourceCallback callback,
-                                   absl::optional<int64_t> free_space) {
+                                   std::optional<int64_t> free_space) {
     auto on_get_total_disk_space =
         [](std::unique_ptr<SystemLogsResponse> response,
-           SysLogsSourceCallback callback,
-           absl::optional<int64_t> total_space) {
+           SysLogsSourceCallback callback, std::optional<int64_t> total_space) {
           if (total_space.has_value()) {
             response->emplace(kTotalDiskSpace,
                               base::NumberToString(total_space.value()));
@@ -267,25 +281,26 @@ void PopulateDiskSpaceLogsAsync(std::unique_ptr<SystemLogsResponse> response,
 }
 
 // Called from the main (UI) thread, invokes |callback| when complete.
-void PopulateMonitorInfoAsync(
-    crosapi::mojom::CrosDisplayConfigController* cros_display_config_ptr,
-    SystemLogsResponse* response,
-    base::OnceCallback<void()> callback) {
-  cros_display_config_ptr->GetDisplayUnitInfoList(
-      false /* single_unified */,
-      base::BindOnce(
-          [](SystemLogsResponse* response, base::OnceCallback<void()> callback,
-             std::vector<crosapi::mojom::DisplayUnitInfoPtr> info_list) {
-            std::string entry;
-            for (const crosapi::mojom::DisplayUnitInfoPtr& info : info_list) {
-              if (!entry.empty())
-                base::StringAppendF(&entry, "\n");
-              entry += GetDisplayInfoString(*info);
-            }
-            response->emplace(kMonitorInfoKey, entry);
-            std::move(callback).Run();
-          },
-          response, std::move(callback)));
+void PopulateMonitorInfoAsync(SystemLogsResponse* response,
+                              base::OnceCallback<void()> callback) {
+  if (ash::Shell::HasInstance()) {
+    std::vector<ash::DisplayUnitInfo> info_list =
+        ash::Shell::Get()->cros_display_config()->GetDisplayUnitInfoList(
+            /*single_unified=*/false);
+    std::string entry;
+    for (const auto& info : info_list) {
+      if (!entry.empty()) {
+        base::StringAppendF(&entry, "\n");
+      }
+      entry += GetDisplayInfoString(info);
+    }
+    response->emplace(kMonitorInfoKey, entry);
+    std::move(callback).Run();
+  } else {
+    // TODO(crbug.com/485123493): Remove once confirmed this does/doesn't
+    // happen.
+    base::debug::DumpWithoutCrashing();
+  }
 }
 
 void OnPopulateMonitorInfoAsync(std::unique_ptr<SystemLogsResponse> response,
@@ -293,14 +308,14 @@ void OnPopulateMonitorInfoAsync(std::unique_ptr<SystemLogsResponse> response,
   PopulateDiskSpaceLogsAsync(std::move(response), std::move(callback));
 }
 
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 std::string GetChromeVersionString() {
   // Version of the current running browser.
   std::string browser_version =
       chrome::GetVersionString(chrome::WithExtendedStable(true));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // If the device is receiving LTS updates, add a prefix to the version string.
   // The value of the policy is ignored here.
   std::string value;
@@ -308,19 +323,7 @@ std::string GetChromeVersionString() {
       ash::CrosSettings::Get()->GetString(ash::kReleaseLtsTag, &value);
   if (is_lts)
     browser_version = kLTSChromeVersionPrefix + browser_version;
-
-  // If lacros-chrome is allowed & supported, and launched before, which
-  // is indicated by |browser_version| in BrowserManager being set to non-empty
-  // string during lacros startup, attach its version in the chrome
-  // version string.
-  if (crosapi::browser_util::IsLacrosEnabled() &&
-      !crosapi::BrowserManager::Get()->browser_version().empty()) {
-    std::string lacros_version =
-        crosapi::BrowserManager::Get()->browser_version();
-    return kLacrosChromeVersionPrefix + lacros_version + ", " +
-           kAshChromeVersionPrefix + browser_version;
-  }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
   return browser_version;
 }
 
@@ -367,20 +370,51 @@ std::string MacCpuArchAsString() {
       return "arm64";
   }
 }
-#endif
+#endif  // BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_WIN)
+std::string WinCpuArchAsString() {
+#if defined(ARCH_CPU_ARM64)
+  return "arm64";
+#else
+  bool emulated = base::win::OSInfo::IsRunningEmulatedOnArm64();
+#if defined(ARCH_CPU_X86)
+  if (emulated) {
+    return "32-bit emulated";
+  }
+  return "32-bit";
+#else   // defined(ARCH_CPU_X86)
+  if (emulated) {
+    return "64-bit emulated";
+  }
+  return "64-bit";
+#endif  // defined(ARCH_CPU_X86)
+#endif  // defined(ARCH_CPU_ARM64)
+}
+
+void PopulateUsbKeyboardDetected(std::unique_ptr<SystemLogsResponse> response,
+                                 SysLogsSourceCallback callback) {
+  auto on_keyboard_check = [](std::unique_ptr<SystemLogsResponse> response,
+                              SysLogsSourceCallback callback, bool result,
+                              std::string reason) {
+    reason.insert(0, result ? "Keyboard Detected:\n" : "No Keyboard:\n");
+    response->emplace(kUsbKeyboardDetected, reason);
+    std::move(callback).Run(std::move(response));
+  };
+
+  base::win::IsDeviceSlateWithKeyboard(
+      ui::GetHiddenWindow(),
+      base::BindOnce(on_keyboard_check, std::move(response),
+                     std::move(callback)));
+}
+#endif  // BUILDFLAG(IS_WIN)
 
 }  // namespace
 
 ChromeInternalLogSource::ChromeInternalLogSource()
-    : SystemLogsSource("ChromeInternal") {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  ash::BindCrosDisplayConfigController(
-      cros_display_config_.BindNewPipeAndPassReceiver());
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
-}
+    : SystemLogsSource("ChromeInternal") {}
 
-ChromeInternalLogSource::~ChromeInternalLogSource() {
-}
+ChromeInternalLogSource::~ChromeInternalLogSource() = default;
 
 void ChromeInternalLogSource::Fetch(SysLogsSourceCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
@@ -389,33 +423,61 @@ void ChromeInternalLogSource::Fetch(SysLogsSourceCallback callback) {
   auto response = std::make_unique<SystemLogsResponse>();
   response->emplace(kChromeVersionTag, GetChromeVersionString());
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
+  // On ChromeOS, the kOsVersionTag information will be pulled in from the
+  // LSB_RELEASE. Add ChromeOS-specific information here.
   response->emplace(kChromeEnrollmentTag, GetEnrollmentStatusString());
+#elif BUILDFLAG(IS_MAC)
+  std::string os_version =
+      base::StrCat({base::SysInfo::OperatingSystemName(), ": ",
+                    base::SysInfo::OperatingSystemVersion(), " (",
+                    base::SysInfo::OperatingSystemBuildVersion(), ")"});
+  response->emplace(kOsVersionTag, os_version);
 #else
-  // On ChromeOS, this will be pulled in from the LSB_RELEASE.
-  std::string os_version = base::SysInfo::OperatingSystemName() + ": " +
-                           base::SysInfo::OperatingSystemVersion();
+  std::string os_version =
+      base::StrCat({base::SysInfo::OperatingSystemName(), ": ",
+                    base::SysInfo::OperatingSystemVersion()});
   response->emplace(kOsVersionTag, os_version);
 #endif
 
   PopulateSyncLogs(response.get());
   PopulateExtensionInfoLogs(response.get());
   PopulatePowerApiLogs(response.get());
+#if !BUILDFLAG(IS_CHROMEOS)
+  if (base::FeatureList::IsEnabled(variations::kFeedbackIncludeVariations)) {
+    PopulateVariations(response.get());
+  }
+#endif
 #if BUILDFLAG(IS_WIN)
-  PopulateUsbKeyboardDetected(response.get());
   PopulateEnrolledToDomain(response.get());
   PopulateInstallerBrandCode(response.get());
+#endif
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
   PopulateLastUpdateState(response.get());
 #endif
 
 #if BUILDFLAG(IS_MAC)
   response->emplace(kCpuArch, MacCpuArchAsString());
+#elif BUILDFLAG(IS_WIN)
+  response->emplace(kCpuArch, WinCpuArchAsString());
 #endif
+
+  std::string skia_graphite_status = "unknown";
+  if (content::GpuDataManager::GetInstance()->IsEssentialGpuInfoAvailable()) {
+    if (content::GpuDataManager::GetInstance()->GetFeatureStatus(
+            gpu::GPU_FEATURE_TYPE_SKIA_GRAPHITE) ==
+        gpu::kGpuFeatureStatusEnabled) {
+      skia_graphite_status = "enabled";
+    } else {
+      skia_graphite_status = "disabled";
+    }
+  }
+  response->emplace(kSkiaGraphiteStatusKey, skia_graphite_status);
 
   if (ProfileManager::GetLastUsedProfile()->IsChild())
     response->emplace("account_type", "child");
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Store ARC enabled status.
   bool is_arc_enabled = arc::IsArcPlayStoreEnabledForProfile(
       ProfileManager::GetLastUsedProfile());
@@ -424,24 +486,32 @@ void ChromeInternalLogSource::Fetch(SysLogsSourceCallback callback) {
     PopulateArcPolicyStatus(response.get());
   }
   response->emplace(kAccountTypeKey, GetPrimaryAccountTypeString());
-  response->emplace(kLacrosStatus, crosapi::browser_util::IsLacrosEnabled()
-                                       ? "enabled"
-                                       : "disabled");
-  response->emplace(kDemoModeConfigKey, ash::DemoSession::DemoConfigToString(
-                                            ash::DemoSession::GetDemoConfig()));
+  response->emplace(
+      kDemoModeConfigKey,
+      ash::DemoSession::DemoConfigToString(ash::DemoSession::GetDemoConfig(
+          CHECK_DEREF(g_browser_process->local_state()))));
+  response->emplace(
+      kFailedKnowledgeFactorAttempts,
+      base::NumberToString(ash::AuthEventsRecorder::Get()
+                               ->knowledge_factor_auth_failure_count()));
+  response->emplace(kRecordedAuthEvents,
+                    ash::AuthEventsRecorder::Get()->GetAuthEventsLog());
   PopulateLocalStateSettings(response.get());
   PopulateOnboardingTime(response.get());
 
   // Chain asynchronous fetchers: PopulateMonitorInfoAsync,
   // PopulateEntriesAsync, PopulateDiskSpaceAsync
   PopulateMonitorInfoAsync(
-      cros_display_config_.get(), response.get(),
-      base::BindOnce(&OnPopulateMonitorInfoAsync, std::move(response),
-                     std::move(callback)));
+      response.get(), base::BindOnce(&OnPopulateMonitorInfoAsync,
+                                     std::move(response), std::move(callback)));
+#elif BUILDFLAG(IS_WIN)
+  // Fetch keyboard info then run callback. Keyboard info may require some
+  // expensive WMI queries which should not run on the UI thread.
+  PopulateUsbKeyboardDetected(std::move(response), std::move(callback));
 #else
   // On other platforms, we're done. Invoke the callback.
   std::move(callback).Run(std::move(response));
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void ChromeInternalLogSource::PopulateSyncLogs(SystemLogsResponse* response) {
@@ -457,7 +527,7 @@ void ChromeInternalLogSource::PopulateSyncLogs(SystemLogsResponse* response) {
     return;
 
   // Add sync logs to |response|.
-  base::Value::Dict sync_logs = syncer::sync_ui_util::ConstructAboutInformation(
+  base::DictValue sync_logs = syncer::sync_ui_util::ConstructAboutInformation(
       syncer::sync_ui_util::IncludeSensitiveData(false),
       SyncServiceFactory::GetForProfile(profile),
       chrome::GetChannelName(chrome::WithExtendedStable(true)));
@@ -517,15 +587,29 @@ void ChromeInternalLogSource::PopulatePowerApiLogs(
     response->emplace(kPowerApiListKey, info);
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
+void ChromeInternalLogSource::PopulateVariations(SystemLogsResponse* response) {
+  std::vector<uint8_t> ciphertext;
+  auto status =
+      variations::VariationsCommandLine::GetForCurrentProcess().EncryptToString(
+          &ciphertext);
+  if (status == variations::VariationsStateEncryptionStatus::kSuccess) {
+    std::string base64_encoded =
+        base::Base64Encode(std::string(ciphertext.begin(), ciphertext.end()));
+    response->emplace("variations", base64_encoded);
+  }
+}
+#endif
+
+#if BUILDFLAG(IS_CHROMEOS)
 void ChromeInternalLogSource::PopulateLocalStateSettings(
     SystemLogsResponse* response) {
   // Extract the "settings" entry in the local state and serialize back to
   // a string.
-  base::Value::Dict local_state =
+  base::DictValue local_state =
       g_browser_process->local_state()->GetPreferenceValues(
           PrefService::EXCLUDE_DEFAULTS);
-  const base::Value::Dict* local_state_settings =
+  const base::DictValue* local_state_settings =
       local_state.FindDict(kSettingsKey);
   if (!local_state_settings) {
     VLOG(1) << "Failed to extract the settings entry from Local State.";
@@ -572,18 +656,9 @@ void ChromeInternalLogSource::PopulateOnboardingTime(
                                        exploded.month, exploded.day_of_month));
 }
 
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 #if BUILDFLAG(IS_WIN)
-void ChromeInternalLogSource::PopulateUsbKeyboardDetected(
-    SystemLogsResponse* response) {
-  std::string reason;
-  bool result =
-      base::win::IsKeyboardPresentOnSlate(ui::GetHiddenWindow(), &reason);
-  reason.insert(0, result ? "Keyboard Detected:\n" : "No Keyboard:\n");
-  response->emplace(kUsbKeyboardDetected, reason);
-}
-
 void ChromeInternalLogSource::PopulateEnrolledToDomain(
     SystemLogsResponse* response) {
   response->emplace(kIsEnrolledToDomain, base::win::IsEnrolledToDomain()
@@ -602,7 +677,7 @@ void ChromeInternalLogSource::PopulateInstallerBrandCode(
 void ChromeInternalLogSource::PopulateLastUpdateState(
     SystemLogsResponse* response) {
 #if BUILDFLAG(GOOGLE_CHROME_BRANDING)
-  const absl::optional<UpdateState> update_state = GetLastUpdateState();
+  const std::optional<UpdateState> update_state = GetLastUpdateState();
   if (!update_state)
     return;  // There is nothing to include if no update check has completed.
 
@@ -622,5 +697,24 @@ void ChromeInternalLogSource::PopulateLastUpdateState(
 #endif  // BUILDFLAG(GOOGLE_CHROME_BRANDING)
 }
 #endif  // BUILDFLAG(IS_WIN)
+
+#if BUILDFLAG(IS_MAC)
+void ChromeInternalLogSource::PopulateLastUpdateState(
+    SystemLogsResponse* response) {
+  const std::optional<updater::mojom::UpdateState> update_state =
+      updater::GetLastOnDemandUpdateState();
+  if (!update_state) {
+    return;  // There is nothing to include if no update check has completed.
+  }
+  response->emplace(
+      kUpdateErrorCode,
+      base::StrCat(
+          {base::NumberToString(static_cast<int>(update_state->error_category)),
+           "/", base::NumberToString(update_state->error_code)}));
+  // `extra_code1` is not an HRESULT on macOS, but has similar semantics.
+  response->emplace(kUpdateHresult,
+                    base::NumberToString(update_state->extra_code1));
+}
+#endif  // BUILDFLAG(IS_MAC)
 
 }  // namespace system_logs

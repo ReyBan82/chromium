@@ -5,6 +5,8 @@
 #include "services/network/trust_tokens/trust_token_key_commitment_controller.h"
 
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 #include "base/functional/bind.h"
@@ -18,7 +20,6 @@
 #include "services/network/public/mojom/url_loader.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
 #include "services/network/trust_tokens/trust_token_parameterization.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -115,7 +116,7 @@ void TrustTokenKeyCommitmentController::HandleRedirect(
 }
 
 void TrustTokenKeyCommitmentController::HandleResponseBody(
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   DCHECK(parser_);
 
   int error = url_loader_->NetError();

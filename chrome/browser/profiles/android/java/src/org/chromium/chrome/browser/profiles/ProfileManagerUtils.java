@@ -6,28 +6,45 @@ package org.chromium.chrome.browser.profiles;
 
 import android.os.SystemClock;
 
-import org.chromium.base.TraceEvent;
-import org.chromium.base.annotations.NativeMethods;
-import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
-import org.chromium.chrome.browser.preferences.SharedPreferencesManager;
+import androidx.annotation.VisibleForTesting;
 
-/**
- * A utility class for applying operations on all loaded profiles.
- */
+import org.jni_zero.NativeMethods;
+
+import org.chromium.base.ResettersForTesting;
+import org.chromium.base.TraceEvent;
+import org.chromium.base.shared_preferences.SharedPreferencesManager;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.preferences.ChromePreferenceKeys;
+import org.chromium.chrome.browser.preferences.ChromeSharedPreferences;
+
+/** A utility class for applying operations on all loaded profiles. */
+@NullMarked
 public class ProfileManagerUtils {
     private static final long BOOT_TIMESTAMP_MARGIN_MS = 1000;
+
+    private static @Nullable Runnable sFlushPersistentDataHookForTesting;
 
     /**
      * Commits pending writes for all loaded profiles. The host activity should call this during its
      * onPause() handler to ensure all state is saved when the app is suspended.
      */
     public static void flushPersistentDataForAllProfiles() {
+        if (sFlushPersistentDataHookForTesting != null) {
+            sFlushPersistentDataHookForTesting.run();
+            return;
+        }
         try {
             TraceEvent.begin("ProfileManagerUtils.commitPendingWritesForAllProfiles");
             ProfileManagerUtilsJni.get().flushPersistentDataForAllProfiles();
         } finally {
             TraceEvent.end("ProfileManagerUtils.commitPendingWritesForAllProfiles");
         }
+    }
+
+    public static void setFlushPersistentDataCallbackForTesting(@Nullable Runnable callback) {
+        sFlushPersistentDataHookForTesting = callback;
+        ResettersForTesting.register(() -> sFlushPersistentDataHookForTesting = null);
     }
 
     /**
@@ -38,7 +55,7 @@ public class ProfileManagerUtils {
      * since the updated timestamp is immediately saved.
      */
     public static void removeSessionCookiesForAllProfiles() {
-        SharedPreferencesManager preferences = SharedPreferencesManager.getInstance();
+        SharedPreferencesManager preferences = ChromeSharedPreferences.getInstance();
         long lastKnownBootTimestamp =
                 preferences.readLong(ChromePreferenceKeys.PROFILES_BOOT_TIMESTAMP, 0);
         long bootTimestamp = System.currentTimeMillis() - SystemClock.uptimeMillis();
@@ -52,9 +69,11 @@ public class ProfileManagerUtils {
         }
     }
 
+    @VisibleForTesting(otherwise = VisibleForTesting.PACKAGE_PRIVATE)
     @NativeMethods
-    interface Natives {
+    public interface Natives {
         void flushPersistentDataForAllProfiles();
+
         void removeSessionCookiesForAllProfiles();
     }
 }

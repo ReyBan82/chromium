@@ -4,9 +4,9 @@
 
 #include "third_party/blink/renderer/modules/mediasource/same_thread_media_source_attachment.h"
 
-#include "base/memory/scoped_refptr.h"
-#include "base/types/pass_key.h"
 #include "third_party/blink/renderer/core/html/media/html_media_element.h"
+#include "third_party/blink/renderer/core/html/track/audio_track_list.h"
+#include "third_party/blink/renderer/core/html/track/video_track_list.h"
 #include "third_party/blink/renderer/modules/mediasource/attachment_creation_pass_key_provider.h"
 #include "third_party/blink/renderer/modules/mediasource/media_source.h"
 #include "third_party/blink/renderer/modules/mediasource/same_thread_media_source_tracer.h"
@@ -274,7 +274,11 @@ void SameThreadMediaSourceAttachment::Close(MediaSourceTracer* tracer) {
 
 WebTimeRanges SameThreadMediaSourceAttachment::BufferedInternal(
     MediaSourceTracer* tracer) const {
-  VerifyCalledWhileContextsAliveForDebugging();
+  // The ordering of MediaSource versus HTMLMediaElement context destruction
+  // notification is nondeterminate.
+  if (media_source_context_destroyed_) {
+    return {};
+  }
 
   // Since the attached MediaSource, HTMLMediaElement and the element's player's
   // underlying demuxer are all owned by the main thread in this SameThread
@@ -311,7 +315,11 @@ void SameThreadMediaSourceAttachment::OnTrackChanged(MediaSourceTracer* tracer,
 void SameThreadMediaSourceAttachment::OnElementTimeUpdate(double time) {
   DVLOG(3) << __func__ << " this=" << this << ", time=" << time;
 
-  VerifyCalledWhileContextsAliveForDebugging();
+  // The ordering of MediaSource versus HTMLMediaElement context destruction
+  // notification is nondeterminate.
+  if (media_source_context_destroyed_) {
+    return;
+  }
 
   recent_element_time_ = time;
 }

@@ -30,14 +30,23 @@
 
 #include "third_party/blink/renderer/modules/crypto/crypto_result_impl.h"
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/web_crypto_algorithm.h"
 #include "third_party/blink/renderer/bindings/core/v8/dictionary.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_throw_dom_exception.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_crypto_key.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_crypto_key_pair.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_encapsulated_bits.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_encapsulated_key.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_json_web_key.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_union_arraybuffer_jsonwebkey.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_union_cryptokey_cryptokeypair.h"
 #include "third_party/blink/renderer/core/dom/dom_exception.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
@@ -51,8 +60,8 @@
 namespace blink {
 
 static void RejectWithTypeError(const String& error_details,
-                                ScriptPromiseResolver* resolver) {
-  // Duplicate some of the checks done by ScriptPromiseResolver.
+                                ScriptPromiseResolverBase* resolver) {
+  // Duplicate some of the checks done by ScriptPromiseResolverBase.
   if (!resolver->GetExecutionContext() ||
       resolver->GetExecutionContext()->IsContextDestroyed())
     return;
@@ -61,32 +70,6 @@ static void RejectWithTypeError(const String& error_details,
   v8::Isolate* isolate = resolver->GetScriptState()->GetIsolate();
   resolver->Reject(V8ThrowException::CreateTypeError(isolate, error_details));
 }
-
-class CryptoResultImpl::Resolver final : public ScriptPromiseResolver {
- public:
-  static Resolver* Create(ScriptState* script_state, CryptoResultImpl* result) {
-    Resolver* resolver = MakeGarbageCollected<Resolver>(script_state, result);
-    resolver->KeepAliveWhilePending();
-    return resolver;
-  }
-
-  Resolver(ScriptState* script_state, CryptoResultImpl* result)
-      : ScriptPromiseResolver(script_state), result_(result) {}
-
-  void ContextDestroyed() override {
-    result_->Cancel();
-    result_ = nullptr;
-    ScriptPromiseResolver::ContextDestroyed();
-  }
-
-  void Trace(Visitor* visitor) const override {
-    visitor->Trace(result_);
-    ScriptPromiseResolver::Trace(visitor);
-  }
-
- private:
-  Member<CryptoResultImpl> result_;
-};
 
 ExceptionCode WebCryptoErrorToExceptionCode(WebCryptoErrorType error_type) {
   switch (error_type) {
@@ -103,17 +86,6 @@ ExceptionCode WebCryptoErrorToExceptionCode(WebCryptoErrorType error_type) {
     case kWebCryptoErrorTypeType:
       return ToExceptionCode(ESErrorType::kTypeError);
   }
-
-  NOTREACHED();
-  return 0;
-}
-
-CryptoResultImpl::CryptoResultImpl(ScriptState* script_state)
-    : resolver_(Resolver::Create(script_state, this)),
-      cancel_(base::MakeRefCounted<CryptoResultCancel>()) {
-  // Sync cancellation state.
-  if (ExecutionContext::From(script_state)->IsContextDestroyed())
-    Cancel();
 }
 
 CryptoResultImpl::~CryptoResultImpl() {
@@ -122,6 +94,7 @@ CryptoResultImpl::~CryptoResultImpl() {
 
 void CryptoResultImpl::Trace(Visitor* visitor) const {
   visitor->Trace(resolver_);
+  ExecutionContextLifecycleObserver::Trace(visitor);
   CryptoResult::Trace(visitor);
 }
 
@@ -153,48 +126,60 @@ void CryptoResultImpl::CompleteWithError(WebCryptoErrorType error_type,
         static_cast<DOMExceptionCode>(exception_code), error_details));
   } else {
     NOTREACHED();
-    resolver_->Reject(V8ThrowDOMException::CreateOrDie(
-        resolver_script_state->GetIsolate(), DOMExceptionCode::kUnknownError,
-        error_details));
   }
   ClearResolver();
 }
 
-void CryptoResultImpl::CompleteWithBuffer(const void* bytes,
-                                          unsigned bytes_size) {
+void CryptoResultImpl::CompleteWithBuffer(base::span<const uint8_t> bytes) {
   if (!resolver_)
     return;
 
-  resolver_->Resolve(DOMArrayBuffer::Create(bytes, bytes_size));
+  auto* buffer = DOMArrayBuffer::Create(bytes);
+  if (detailed_type_ == DetailedResolverType::kArrayBuffer) {
+    resolver_->DowncastTo<DOMArrayBuffer>()->Resolve(buffer);
+  } else if (detailed_type_ ==
+             DetailedResolverType::kUnionArrayBufferJsonWebKey) {
+    resolver_->DowncastTo<V8UnionArrayBufferOrJsonWebKey>()->Resolve(buffer);
+  } else {
+    NOTREACHED();
+  }
   ClearResolver();
 }
 
-void CryptoResultImpl::CompleteWithJson(const char* utf8_data,
-                                        unsigned length) {
+void CryptoResultImpl::CompleteWithJson(std::string_view utf8_data) {
   if (!resolver_)
     return;
 
   ScriptState* script_state = resolver_->GetScriptState();
-  v8::Isolate* isolate = script_state->GetIsolate();
   ScriptState::Scope scope(script_state);
 
-  if (length > v8::String::kMaxLength) {
+  if (utf8_data.size() > v8::String::kMaxLength) {
     // TODO(crbug.com/1316976): this should probably raise an exception instead.
     LOG(FATAL) << "Result string is longer than v8::String::kMaxLength";
   }
 
-  v8::Local<v8::String> json_string =
-      v8::String::NewFromUtf8(isolate, utf8_data, v8::NewStringType::kNormal,
-                              length)
-          .ToLocalChecked();
+  v8::TryCatch try_catch(script_state->GetIsolate());
+  v8::Local<v8::Value> json_dictionary =
+      FromJSONString(script_state, String::FromUtf8(utf8_data));
 
-  v8::TryCatch exception_catcher(isolate);
-  v8::Local<v8::Value> json_dictionary;
-  if (v8::JSON::Parse(script_state->GetContext(), json_string)
-          .ToLocal(&json_dictionary))
-    resolver_->Resolve(json_dictionary);
-  else
-    resolver_->Reject(exception_catcher.Exception());
+  CHECK_EQ(detailed_type_, DetailedResolverType::kUnionArrayBufferJsonWebKey);
+
+  if (try_catch.HasCaught()) {
+    resolver_->Reject(try_catch.Exception());
+    ClearResolver();
+    return;
+  }
+
+  ExceptionState exception_state(script_state->GetIsolate());
+  JsonWebKey* json_web_key = NativeValueTraits<JsonWebKey>::NativeValue(
+      script_state->GetIsolate(), json_dictionary, exception_state);
+
+  if (try_catch.HasCaught()) {
+    resolver_->Reject(try_catch.Exception());
+  } else {
+    resolver_->DowncastTo<V8UnionArrayBufferOrJsonWebKey>()->Resolve(
+        json_web_key);
+  }
   ClearResolver();
 }
 
@@ -202,7 +187,7 @@ void CryptoResultImpl::CompleteWithBoolean(bool b) {
   if (!resolver_)
     return;
 
-  resolver_->Resolve(b);
+  resolver_->DowncastTo<IDLBoolean>()->Resolve(b);
   ClearResolver();
 }
 
@@ -210,46 +195,75 @@ void CryptoResultImpl::CompleteWithKey(const WebCryptoKey& key) {
   if (!resolver_)
     return;
 
-  resolver_->Resolve(MakeGarbageCollected<CryptoKey>(key));
+  auto* result = MakeGarbageCollected<CryptoKey>(key);
+  resolver_->DowncastTo<CryptoKey>()->Resolve(result);
   ClearResolver();
 }
 
-void CryptoResultImpl::CompleteWithKeyPair(const WebCryptoKey& public_key,
-                                           const WebCryptoKey& private_key) {
-  if (!resolver_)
+void CryptoResultImpl::CompleteWithKeyForGenerateKey(const WebCryptoKey& key) {
+  if (!resolver_) {
     return;
+  }
+
+  auto* result = MakeGarbageCollected<CryptoKey>(key);
+  resolver_->DowncastTo<V8UnionCryptoKeyOrCryptoKeyPair>()->Resolve(result);
+  ClearResolver();
+}
+
+void CryptoResultImpl::CompleteWithKeyPairForGenerateKey(
+    const WebCryptoKey& public_key,
+    const WebCryptoKey& private_key) {
+  if (!resolver_) {
+    return;
+  }
+
+  auto* result = CryptoKeyPair::Create();
+  result->setPublicKey(MakeGarbageCollected<CryptoKey>(public_key));
+  result->setPrivateKey(MakeGarbageCollected<CryptoKey>(private_key));
+
+  resolver_->DowncastTo<V8UnionCryptoKeyOrCryptoKeyPair>()->Resolve(result);
+  ClearResolver();
+}
+
+void CryptoResultImpl::CompleteWithEncapsulatedKey(
+    const WebCryptoKey& shared_key,
+    base::span<const uint8_t> ciphertext) {
+  if (!resolver_) {
+    return;
+  }
 
   ScriptState* script_state = resolver_->GetScriptState();
   ScriptState::Scope scope(script_state);
 
-  V8ObjectBuilder key_pair(script_state);
+  auto* result = EncapsulatedKey::Create();
+  result->setSharedKey(MakeGarbageCollected<CryptoKey>(shared_key));
+  result->setCiphertext(DOMArrayBuffer::Create(ciphertext));
 
-  key_pair.Add("publicKey",
-               ScriptValue::From(script_state,
-                                 MakeGarbageCollected<CryptoKey>(public_key)));
-  key_pair.Add("privateKey",
-               ScriptValue::From(script_state,
-                                 MakeGarbageCollected<CryptoKey>(private_key)));
-
-  resolver_->Resolve(key_pair.V8Value());
+    resolver_->DowncastTo<EncapsulatedKey>()->Resolve(result);
   ClearResolver();
 }
 
-void CryptoResultImpl::CompleteWithError(ExceptionState& exception_state) {
-  if (!resolver_)
+void CryptoResultImpl::CompleteWithEncapsulatedBits(
+    base::span<const uint8_t> shared_key,
+    base::span<const uint8_t> ciphertext) {
+  if (!resolver_) {
     return;
+  }
 
-  resolver_->Reject(exception_state);
+  ScriptState* script_state = resolver_->GetScriptState();
+  ScriptState::Scope scope(script_state);
+
+  auto* result = EncapsulatedBits::Create();
+  result->setSharedKey(DOMArrayBuffer::Create(shared_key));
+  result->setCiphertext(DOMArrayBuffer::Create(ciphertext));
+
+    resolver_->DowncastTo<EncapsulatedBits>()->Resolve(result);
   ClearResolver();
 }
 
 void CryptoResultImpl::Cancel() {
   cancel_->Cancel();
   ClearResolver();
-}
-
-ScriptPromise CryptoResultImpl::Promise() {
-  return resolver_ ? resolver_->Promise() : ScriptPromise();
 }
 
 }  // namespace blink

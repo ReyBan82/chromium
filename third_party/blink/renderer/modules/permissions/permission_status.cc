@@ -5,21 +5,38 @@
 #include "third_party/blink/renderer/modules/permissions/permission_status.h"
 
 #include "third_party/blink/public/mojom/frame/lifecycle.mojom-shared.h"
+#include "third_party/blink/public/mojom/permissions/permission.mojom-shared.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_permission_state.h"
+#include "third_party/blink/renderer/bindings/modules/v8/v8_permission_name.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/modules/event_target_modules_names.h"
+#include "third_party/blink/renderer/modules/permissions/geolocation_permission_status.h"
 #include "third_party/blink/renderer/modules/permissions/permission_status_listener.h"
+#include "third_party/blink/renderer/modules/permissions/permission_utils.h"
+#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
 // static
 PermissionStatus* PermissionStatus::Take(PermissionStatusListener* listener,
-                                         ScriptPromiseResolver* resolver) {
+                                         ScriptPromiseResolverBase* resolver) {
   ExecutionContext* execution_context = resolver->GetExecutionContext();
-  PermissionStatus* permission_status =
-      MakeGarbageCollected<PermissionStatus>(listener, execution_context);
+  PermissionStatus* permission_status;
+  if (RuntimeEnabledFeatures::
+          ApproximateGeolocationPermissionAccuracyModeEnabled(
+              execution_context) &&
+      listener->permission_name() ==
+          mojom::blink::PermissionName::GEOLOCATION) {
+    permission_status = MakeGarbageCollected<GeolocationPermissionStatus>(
+        listener, execution_context);
+  } else {
+    permission_status =
+        MakeGarbageCollected<PermissionStatus>(listener, execution_context);
+  }
   permission_status->UpdateStateIfNeeded();
   permission_status->StartListening();
   return permission_status;
@@ -27,7 +44,8 @@ PermissionStatus* PermissionStatus::Take(PermissionStatusListener* listener,
 
 PermissionStatus::PermissionStatus(PermissionStatusListener* listener,
                                    ExecutionContext* execution_context)
-    : ExecutionContextLifecycleStateObserver(execution_context),
+    : ActiveScriptWrappable<PermissionStatus>({}),
+      ExecutionContextLifecycleStateObserver(execution_context),
       listener_(listener) {}
 
 PermissionStatus::~PermissionStatus() = default;
@@ -43,8 +61,7 @@ ExecutionContext* PermissionStatus::GetExecutionContext() const {
 void PermissionStatus::AddedEventListener(
     const AtomicString& event_type,
     RegisteredEventListener& registered_listener) {
-  EventTargetWithInlineData::AddedEventListener(event_type,
-                                                registered_listener);
+  EventTarget::AddedEventListener(event_type, registered_listener);
 
   if (!listener_)
     return;
@@ -57,8 +74,7 @@ void PermissionStatus::AddedEventListener(
 void PermissionStatus::RemovedEventListener(
     const AtomicString& event_type,
     const RegisteredEventListener& registered_listener) {
-  EventTargetWithInlineData::RemovedEventListener(event_type,
-                                                  registered_listener);
+  EventTarget::RemovedEventListener(event_type, registered_listener);
   if (!listener_)
     return;
 
@@ -85,16 +101,26 @@ void PermissionStatus::ContextLifecycleStateChanged(
     StopListening();
 }
 
-String PermissionStatus::state() const {
-  if (!listener_)
-    return String();
+V8PermissionState PermissionStatus::state() const {
+  if (!listener_) {
+    return V8PermissionState(V8PermissionState::Enum::kDenied);
+  }
   return listener_->state();
 }
 
-String PermissionStatus::name() const {
+String PermissionStatus::name(ScriptState* script_state) const {
   if (!listener_)
     return String();
-  return listener_->name();
+  mojom::blink::PermissionName permission_name = listener_->permission_name();
+  if (permission_name ==
+          mojom::blink::PermissionName::GEOLOCATION_APPROXIMATE &&
+      !RuntimeEnabledFeatures::ApproximateGeolocationPermissionAPIEnabled(
+          ExecutionContext::From(script_state))) {
+    // "geolocation-approximate" should not be exposed if
+    // ApproximateGeolocationPermissionAPI is disabled.
+    return PermissionNameToString(mojom::blink::PermissionName::GEOLOCATION);
+  }
+  return PermissionNameToString(permission_name);
 }
 
 void PermissionStatus::StartListening() {
@@ -109,7 +135,8 @@ void PermissionStatus::StopListening() {
   listener_->RemoveObserver(this);
 }
 
-void PermissionStatus::OnPermissionStatusChange(MojoPermissionStatus status) {
+void PermissionStatus::OnPermissionStatusChange(
+    MojoPermissionStatusWithDetails status) {
   // https://www.w3.org/TR/permissions/#onchange-attribute
   // 1. If this's relevant global object is a Window object, then:
   // - Let document be status's relevant global object's associated Document.
@@ -128,7 +155,7 @@ void PermissionStatus::OnPermissionStatusChange(MojoPermissionStatus status) {
 
 void PermissionStatus::Trace(Visitor* visitor) const {
   visitor->Trace(listener_);
-  EventTargetWithInlineData::Trace(visitor);
+  EventTarget::Trace(visitor);
   ExecutionContextLifecycleStateObserver::Trace(visitor);
   PermissionStatusListener::Observer::Trace(visitor);
 }

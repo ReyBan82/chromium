@@ -21,45 +21,31 @@ blink::mojom::FrameOwnerElementType EnumTraits<
       return blink::mojom::FrameOwnerElementType::kEmbed;
     case blink::FrameOwnerElementType::kFrame:
       return blink::mojom::FrameOwnerElementType::kFrame;
-    case blink::FrameOwnerElementType::kPortal:
-      return blink::mojom::FrameOwnerElementType::kPortal;
     case blink::FrameOwnerElementType::kFencedframe:
       return blink::mojom::FrameOwnerElementType::kFencedframe;
     case blink::FrameOwnerElementType::kNone:
       return blink::mojom::FrameOwnerElementType::kNone;
   }
   NOTREACHED();
-  return blink::mojom::FrameOwnerElementType::kFrame;
 }
 
-bool EnumTraits<blink::mojom::FrameOwnerElementType,
-                blink::FrameOwnerElementType>::
-    FromMojom(blink::mojom::FrameOwnerElementType input,
-              blink::FrameOwnerElementType* output) {
+blink::FrameOwnerElementType
+EnumTraits<blink::mojom::FrameOwnerElementType, blink::FrameOwnerElementType>::
+    FromMojom(blink::mojom::FrameOwnerElementType input) {
   switch (input) {
     case blink::mojom::FrameOwnerElementType::kIframe:
-      *output = blink::FrameOwnerElementType::kIframe;
-      return true;
+      return blink::FrameOwnerElementType::kIframe;
     case blink::mojom::FrameOwnerElementType::kObject:
-      *output = blink::FrameOwnerElementType::kObject;
-      return true;
+      return blink::FrameOwnerElementType::kObject;
     case blink::mojom::FrameOwnerElementType::kEmbed:
-      *output = blink::FrameOwnerElementType::kEmbed;
-      return true;
+      return blink::FrameOwnerElementType::kEmbed;
     case blink::mojom::FrameOwnerElementType::kFrame:
-      *output = blink::FrameOwnerElementType::kFrame;
-      return true;
-    case blink::mojom::FrameOwnerElementType::kPortal:
-      *output = blink::FrameOwnerElementType::kPortal;
-      return true;
+      return blink::FrameOwnerElementType::kFrame;
     case blink::mojom::FrameOwnerElementType::kFencedframe:
-      *output = blink::FrameOwnerElementType::kFencedframe;
-      return true;
+      return blink::FrameOwnerElementType::kFencedframe;
     case blink::mojom::FrameOwnerElementType::kNone:
-      *output = blink::FrameOwnerElementType::kFrame;
-      return false;
+      NOTREACHED();
   }
-  *output = blink::FrameOwnerElementType::kFrame;
-  return false;
+  NOTREACHED();
 }
 }  // namespace mojo

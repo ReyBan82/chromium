@@ -66,7 +66,7 @@ blink::mojom::FetchAPIRequestPtr TypeConverter<
   // We put the request body data into |output->body| rather than
   // |output->blob|. The |blob| is used in cases without
   // network::ResourceRequest involved. See fetch_api_request.mojom.
-  // We leave |output->body| as absl::nullopt when |input.request_body| is
+  // We leave |output->body| as std::nullopt when |input.request_body| is
   // nullptr.
   if (input.request_body)
     output->body = input.request_body;
@@ -85,9 +85,7 @@ blink::mojom::FetchAPIRequestPtr TypeConverter<
   output->redirect_mode = input.redirect_mode;
   output->destination =
       static_cast<network::mojom::RequestDestination>(input.destination);
-  output->is_reload = ui::PageTransitionCoreTypeIs(
-      static_cast<ui::PageTransition>(input.transition_type),
-      ui::PAGE_TRANSITION_RELOAD);
+  output->is_reload = input.is_reload_navigation;
   output->integrity = input.fetch_integrity;
   output->priority = input.priority;
   output->fetch_window_id = input.fetch_window_id;
@@ -98,8 +96,8 @@ blink::mojom::FetchAPIRequestPtr TypeConverter<
   if (input.trust_token_params) {
     output->trust_token_params = input.trust_token_params->Clone();
   }
-  output->target_address_space =
-      static_cast<network::mojom::IPAddressSpace>(input.target_address_space);
+  output->target_address_space = static_cast<network::mojom::IPAddressSpace>(
+      input.required_ip_address_space);
   return output;
 }
 

@@ -6,16 +6,17 @@
 #define SERVICES_VIZ_PUBLIC_CPP_COMPOSITING_COMPOSITOR_RENDER_PASS_MOJOM_TRAITS_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/check.h"
+#include "base/types/expected.h"
 #include "components/viz/common/quads/compositor_render_pass.h"
 #include "components/viz/common/surfaces/subtree_capture_id.h"
+#include "mojo/public/cpp/bindings/deserialization_error.h"
 #include "services/viz/public/cpp/compositing/copy_output_request_mojom_traits.h"
 #include "services/viz/public/cpp/compositing/quads_mojom_traits.h"
 #include "services/viz/public/mojom/compositing/compositor_render_pass.mojom-shared.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "ui/gfx/ipc/color/gfx_param_traits.h"
 #include "ui/gfx/mojom/rrect_f_mojom_traits.h"
 #include "ui/gfx/mojom/transform_mojom_traits.h"
 
@@ -55,7 +56,7 @@ struct StructTraits<viz::mojom::CompositorRenderPassDataView,
     return input->backdrop_filters;
   }
 
-  static const absl::optional<gfx::RRectF>& backdrop_filter_bounds(
+  static const std::optional<SkPath>& backdrop_filter_bounds(
       const std::unique_ptr<viz::CompositorRenderPass>& input) {
     return input->backdrop_filter_bounds;
   }
@@ -72,9 +73,12 @@ struct StructTraits<viz::mojom::CompositorRenderPassDataView,
     return input->subtree_size;
   }
 
-  static viz::ViewTransitionElementResourceId
+  static std::optional<viz::ViewTransitionElementResourceId>
   view_transition_element_resource_id(
       const std::unique_ptr<viz::CompositorRenderPass>& input) {
+    if (!input->view_transition_element_resource_id.IsValid()) {
+      return std::nullopt;
+    }
     return input->view_transition_element_resource_id;
   }
 
@@ -113,8 +117,9 @@ struct StructTraits<viz::mojom::CompositorRenderPassDataView,
     return input->quad_list;
   }
 
-  static bool Read(viz::mojom::CompositorRenderPassDataView data,
-                   std::unique_ptr<viz::CompositorRenderPass>* out);
+  static base::expected<void, DeserializationError> Read(
+      viz::mojom::CompositorRenderPassDataView data,
+      std::unique_ptr<viz::CompositorRenderPass>* out);
 };
 
 }  // namespace mojo

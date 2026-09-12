@@ -6,21 +6,26 @@
 #define ASH_SYSTEM_MEDIA_MEDIA_NOTIFICATION_PROVIDER_H_
 
 #include <memory>
+#include <string>
 
 #include "ash/ash_export.h"
-#include "third_party/skia/include/core/SkColor.h"
+#include "base/memory/weak_ptr.h"
+#include "ui/views/view.h"
 
 namespace global_media_controls {
 class MediaItemManager;
+class MediaItemUIDeviceSelector;
+class MediaItemUIFooter;
+enum class GlobalMediaControlsEntryPoint;
 }  // namespace global_media_controls
 
-namespace media_message_center {
-struct NotificationTheme;
-}  // namespace media_message_center
+namespace url {
+class Origin;
+}
 
-namespace views {
-class View;
-}  // namespace views
+namespace media_message_center {
+class MediaNotificationItem;
+}  // namespace media_message_center
 
 namespace ash {
 
@@ -47,25 +52,55 @@ class ASH_EXPORT MediaNotificationProvider {
   // True if there are active frozen media session notifications.
   virtual bool HasFrozenNotifications() = 0;
 
-  // Returns a MediaNotificationListView populated with the correct
-  // MediaNotificationContainerImpls. Used to populate the dialog on the Ash
-  // shelf.
+  // Returns a MediaNotificationListView that will show a list of
+  // MediaItemUIView for all the active media items. If
+  // `show_devices_for_item_id` is not empty, when the list shows the item for
+  // this ID, it will expand the casting device list too.
   virtual std::unique_ptr<views::View> GetMediaNotificationListView(
       int separator_thickness,
-      bool should_clip_height) = 0;
-
-  // Returns a MediaNotificationContainerimplView for the active MediaSession.
-  // Displayed in the quick settings of the Ash shelf.
-  virtual std::unique_ptr<views::View> GetActiveMediaNotificationView() = 0;
+      bool should_clip_height,
+      global_media_controls::GlobalMediaControlsEntryPoint entry_point,
+      const std::string& show_devices_for_item_id = "") = 0;
 
   // Used for ash to notify the bubble is closing.
   virtual void OnBubbleClosing() = 0;
 
-  // Set the color theme of media notification view.
-  virtual void SetColorTheme(
-      const media_message_center::NotificationTheme& color_theme) = 0;
-
   virtual global_media_controls::MediaItemManager* GetMediaItemManager() = 0;
+
+  // Performs initialization that must be done after the user session is
+  // initialized.
+  virtual void OnPrimaryUserSessionStarted() {}
+
+  // Use MediaNotificationProvider as a bridge to add/remove a given
+  // MediaItemManager to/from CastMediaNotificationProducerKeyedService, since
+  // the service lives on chrome/browser/ui/ash.
+  virtual void AddMediaItemManagerToCastService(
+      global_media_controls::MediaItemManager* media_item_manager) {}
+  virtual void RemoveMediaItemManagerFromCastService(
+      global_media_controls::MediaItemManager* media_item_manager) {}
+
+  // Use MediaNotificationProvider as a bridge to build a device selector view
+  // for the given media notification item with id. `show_devices` indicates
+  // whether the view should show the devices by default.
+  virtual std::unique_ptr<global_media_controls::MediaItemUIDeviceSelector>
+  BuildDeviceSelectorView(
+      const std::string& id,
+      base::WeakPtr<media_message_center::MediaNotificationItem> item,
+      global_media_controls::GlobalMediaControlsEntryPoint entry_point,
+      bool show_devices = false) = 0;
+
+  // Use MediaNotificationProvider as a bridge to build a footer view for the
+  // given media notification item.
+  virtual std::unique_ptr<global_media_controls::MediaItemUIFooter>
+  BuildFooterView(
+      const std::string& id,
+      base::WeakPtr<media_message_center::MediaNotificationItem> item) = 0;
+
+  // Use MediaNotificationProvider as a bridge to update the source origin of a
+  // media notification item.
+  virtual void UpdateMediaItemSourceOrigin(
+      const std::string& id,
+      const std::optional<url::Origin>& origin) = 0;
 };
 
 }  // namespace ash

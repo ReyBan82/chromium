@@ -15,7 +15,7 @@
 // Any change to this class should also be reflected on
 // `ProfileKeyedServiceFactory`.
 // For simplicity the unit tests are found in
-// profile_keyed_service_factory_unittests.cc.
+// profile_keyed_service_factory_unittest.cc.
 class RefcountedProfileKeyedServiceFactory
     : public RefcountedBrowserContextKeyedServiceFactory {
  public:
@@ -47,4 +47,4 @@ class RefcountedProfileKeyedServiceFactory
   const ProfileSelections profile_selections_;
 };
 
-#endif  // !CHROME_BROWSER_PROFILES_REFCOUNTED_PROFILE_KEYED_SERVICE_FACTORY_H_
+#endif  // CHROME_BROWSER_PROFILES_REFCOUNTED_PROFILE_KEYED_SERVICE_FACTORY_H_

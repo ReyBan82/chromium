@@ -5,14 +5,12 @@
 #ifndef BASE_SUPPORTS_USER_DATA_H_
 #define BASE_SUPPORTS_USER_DATA_H_
 
-#include <map>
 #include <memory>
+#include <utility>
 
 #include "base/base_export.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/sequence_checker.h"
-#include "third_party/abseil-cpp/absl/container/flat_hash_map.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
 
 namespace base {
 
@@ -29,6 +27,16 @@ class BASE_EXPORT SupportsUserData {
   // Derive from this class and add your own data members to associate extra
   // information with this object. Alternatively, add this as a public base
   // class to any class with a virtual destructor.
+  //
+  // Destructors of `Data` subclasses must not use or refer to their `host`
+  // object. Since `SupportsUserData` relies on inheritance, `Data` instances
+  // are destroyed after the `SupportsUserData` subclass's destructor has
+  // already run and its fields are destroyed.
+  //
+  // One workaround is to explicitly call `ClearAllUserData()` in the
+  // destructor of the `SupportsUserData` subclass, but this does not
+  // completely solve the issue, as new `Data` instances can still be
+  // registered after a call to `ClearAllUserData()`.
   class BASE_EXPORT Data {
    public:
     virtual ~Data() = default;
@@ -42,6 +50,7 @@ class BASE_EXPORT SupportsUserData {
   // NOTE: SetUserData() with an empty unique_ptr behaves the same as
   // RemoveUserData().
   Data* GetUserData(const void* key) const;
+  [[nodiscard]] std::unique_ptr<Data> TakeUserData(const void* key);
   void SetUserData(const void* key, std::unique_ptr<Data> data);
   void RemoveUserData(const void* key);
 
@@ -59,19 +68,18 @@ class BASE_EXPORT SupportsUserData {
  protected:
   virtual ~SupportsUserData();
 
-  // Clear all user data from this object. This can be used if the subclass
-  // needs to provide reset functionality.
+  // Clear all user data from this object. Can be used for reset or in a
+  // subclass destructor to destroy Data before derived state is torn down.
   void ClearAllUserData();
 
- private:
-  // Currently a variant for A/B testing purposes.
-  using DataMap = std::map<const void*, std::unique_ptr<Data>>;
-  using FlatDataMap = absl::flat_hash_map<const void*, std::unique_ptr<Data>>;
-  using MapVariants = absl::variant<DataMap, FlatDataMap>;
+  // Returns the number of Data objects attached to this object.
+  size_t UserDataCount() const;
 
-  // Externally-defined data accessible by key.
-  MapVariants user_data_;
-  // Guards usage of |user_data_|
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+  bool in_clear_ = false;
+  // Guards usage of |impl_|
   SEQUENCE_CHECKER(sequence_checker_);
 };
 
@@ -82,16 +90,15 @@ class UserDataAdapter : public SupportsUserData::Data {
  public:
   static T* Get(const SupportsUserData* supports_user_data, const void* key) {
     UserDataAdapter* data =
-      static_cast<UserDataAdapter*>(supports_user_data->GetUserData(key));
+        static_cast<UserDataAdapter*>(supports_user_data->GetUserData(key));
     return data ? static_cast<T*>(data->object_.get()) : nullptr;
   }
 
-  explicit UserDataAdapter(T* object) : object_(object) {}
+  explicit UserDataAdapter(scoped_refptr<T> object)
+      : object_(std::move(object)) {}
   UserDataAdapter(const UserDataAdapter&) = delete;
   UserDataAdapter& operator=(const UserDataAdapter&) = delete;
   ~UserDataAdapter() override = default;
-
-  T* release() { return object_.release(); }
 
  private:
   scoped_refptr<T> const object_;

@@ -2,6 +2,7 @@ include_rules = [
   "+components/grit/components_resources.h",
   "+components/infobars",
   "+components/language",
+  "+components/language_detection/core",
   "+components/pref_registry",
   "+components/prefs",
   "+components/strings/grit/components_locale_settings.h",
@@ -14,6 +15,7 @@ include_rules = [
   "+services/network/public/cpp",
   "+services/network/public/mojom",
   "+ui",
+  "+third_party/fuzztest",
   "+third_party/metrics_proto",
 
   # Translate is a layered component; subdirectories must explicitly introduce

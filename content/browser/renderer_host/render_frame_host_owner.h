@@ -9,15 +9,11 @@
 #include <vector>
 
 #include "build/build_config.h"
-#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "content/public/browser/frame_type.h"
 #include "services/network/public/mojom/referrer_policy.mojom-forward.h"
 #include "third_party/blink/public/mojom/frame/user_activation_update_types.mojom-forward.h"
 #include "third_party/blink/public/mojom/loader/referrer.mojom-forward.h"
 #include "ui/base/page_transition_types.h"
-
-#if !BUILDFLAG(IS_ANDROID)
-#include "third_party/blink/public/mojom/webauthn/virtual_authenticator.mojom-forward.h"
-#endif
 
 class GURL;
 
@@ -32,20 +28,20 @@ class Origin;
 namespace content {
 
 class CrossOriginEmbedderPolicyReporter;
+class DocumentIsolationPolicyReporter;
 class NavigationRequest;
 class Navigator;
 class RenderFrameHostManager;
 class RenderFrameHostImpl;
-class SubresourceWebBundleNavigationInfo;
 
 // An interface for RenderFrameHostImpl to communicate with FrameTreeNode owning
 // it (e.g. to initiate or cancel a navigation in the frame).
 //
 // As main RenderFrameHostImpl can be moved between different FrameTreeNodes
-// (i.e.during prerender activations), RenderFrameHostImpl should not reference
-// FrameTreeNode directly to prevent accident violation of implicit "associated
-// FTN stays the same" assumptions. Instead, a targeted interface is exposed
-// instead.
+// (i.e. during prerender activations), RenderFrameHostImpl should not reference
+// FrameTreeNode directly to prevent accidental violation of implicit
+// "associated FTN stays the same" assumptions. Instead, a targeted interface is
+// exposed.
 //
 // If you need to store information which should persist during prerender
 // activations and same-BrowsingContext navigations, consider using
@@ -55,20 +51,9 @@ class RenderFrameHostOwner {
   RenderFrameHostOwner() = default;
   virtual ~RenderFrameHostOwner() = default;
 
-  // A RenderFrameHost started loading:
-  //
-  // - `should_show_loading_ui` indicates whether the loading indicator UI
-  //   should be shown or not. It must be true for:
-  //   * cross-document navigations
-  //   * navigations intercepted by the navigation API's intercept().
-  //
-  // - `was_previously_loading` is false if the FrameTree was not loading
-  //   before. The caller is required to provide this boolean as the delegate
-  //   should only be notified if the FrameTree went from non-loading to loading
-  //   state. However, when it is called, the FrameTree should be in a loading
-  //   state.
-  virtual void DidStartLoading(bool should_show_loading_ui,
-                               bool was_previously_loading) = 0;
+  // A RenderFrameHost started loading.
+  virtual void DidStartLoading(
+      LoadingState previous_frame_tree_loading_state) = 0;
 
   // A RenderFrameHost in this owner stopped loading.
   virtual void DidStopLoading() = 0;
@@ -100,7 +85,11 @@ class RenderFrameHostOwner {
   // has been consumed, in response to an event in the renderer process.
   virtual void DidConsumeHistoryUserActivation() = 0;
 
-  // Creates a NavigationRequest  for a synchronous navigation that has
+  // Called when document.open occurs, which causes the frame to no longer be in
+  // an initial empty document state.
+  virtual void DidOpenDocumentInputStream() = 0;
+
+  // Creates a NavigationRequest for a synchronous navigation that has
   // committed in the renderer process. Those are:
   // - same-document renderer-initiated navigations.
   // - synchronous about:blank navigations.
@@ -110,7 +99,8 @@ class RenderFrameHostOwner {
       bool is_same_document,
       const GURL& url,
       const url::Origin& origin,
-      const absl::optional<GURL>& initiator_base_url,
+      const std::optional<url::Origin>& initiator_origin,
+      const std::optional<GURL>& initiator_base_url,
       const net::IsolationInfo& isolation_info_for_subresources,
       blink::mojom::ReferrerPtr referrer,
       const ui::PageTransition& transition,
@@ -121,30 +111,27 @@ class RenderFrameHostOwner {
       const std::vector<GURL>& redirects,
       const GURL& original_url,
       std::unique_ptr<CrossOriginEmbedderPolicyReporter> coep_reporter,
-      std::unique_ptr<SubresourceWebBundleNavigationInfo>
-          subresource_web_bundle_navigation_info,
-      int http_response_code) = 0;
+      std::unique_ptr<DocumentIsolationPolicyReporter> dip_reporter,
+      int http_response_code,
+      base::TimeTicks actual_navigation_start) = 0;
 
   // Cancels the navigation owned by the FrameTreeNode.
   // Note: this does not cancel navigations that are owned by the current or
   // speculative RenderFrameHosts.
-  virtual void CancelNavigation() = 0;
+  virtual void CancelNavigation(NavigationDiscardReason reason) = 0;
+
+  // Reset every non-speculative navigation in this frame, and its descendants.
+  // This is called after outermost main frame has been discarded.
+  //
+  // This takes into account:
+  // - Non-pending commit NavigationRequest owned by the FrameTreeNode
+  // - Pending commit NavigationRequest owned by the current RenderFrameHost
+  virtual void ResetNavigationsForDiscard() = 0;
 
   // Return the iframe.credentialless attribute value.
   virtual bool Credentialless() const = 0;
 
-  // Stores the payload that will be sent as part of an automatic beacon. Right
-  // now only the "reserved.top_navigation" beacon is supported.
-  virtual void SetFencedFrameAutomaticBeaconReportEventData(
-      const std::string& event_data,
-      const std::vector<blink::FencedFrame::ReportingDestination>&
-          destination) = 0;
-
-#if !BUILDFLAG(IS_ANDROID)
-  virtual void GetVirtualAuthenticatorManager(
-      mojo::PendingReceiver<blink::test::mojom::VirtualAuthenticatorManager>
-          receiver) = 0;
-#endif
+  virtual FrameType GetCurrentFrameType() const = 0;
 };
 
 }  // namespace content

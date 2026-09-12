@@ -4,7 +4,12 @@
 
 package org.chromium.chrome.browser.ui.appmenu;
 
+import android.view.View;
+
 import androidx.annotation.IntDef;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -14,38 +19,81 @@ import java.lang.annotation.RetentionPolicy;
  * AppMenuObservers about these actions. This interface may be used by classes outside of app_menu
  * to interact with the app menu.
  */
+@NullMarked
 public interface AppMenuHandler {
-    @IntDef({AppMenuItemType.STANDARD, AppMenuItemType.TITLE_BUTTON,
-            AppMenuItemType.THREE_BUTTON_ROW, AppMenuItemType.FOUR_BUTTON_ROW,
-            AppMenuItemType.FIVE_BUTTON_ROW})
+    @IntDef({
+        AppMenuItemType.STANDARD,
+        AppMenuItemType.STANDARD_NO_ICON,
+        AppMenuItemType.TITLE_BUTTON,
+        AppMenuItemType.BUTTON_ROW,
+        AppMenuItemType.MENU_ITEM_WITH_SUBMENU,
+        AppMenuItemType.MENU_ITEM_WITH_SUBMENU_NO_ICON,
+        AppMenuItemType.SUBMENU_HEADER,
+        AppMenuItemType.DIVIDER,
+        AppMenuItemType.BOOKMARK,
+        AppMenuItemType.TAB,
+        AppMenuItemType.RECENT_ENTRY,
+        AppMenuItemType.RECENT_ENTRY_NO_ICON,
+        AppMenuItemType.EMPTY,
+        AppMenuItemType.HEADER
+    })
     @Retention(RetentionPolicy.SOURCE)
-    public @interface AppMenuItemType {
-        /**
-         * Regular Android menu item that contains a title and an icon if icon is specified.
-         */
+    @interface AppMenuItemType {
+        /** Regular Android menu item that contains a title and an icon if icon is specified. */
         int STANDARD = 0;
+
+        /**
+         * Regular Android menu item that contains only a title, without an icon or start padding.
+         */
+        int STANDARD_NO_ICON = 1;
+
         /**
          * Menu item that has two buttons, the first one is a title and the second one is an icon.
          * It is different from the regular menu item because it contains two separate buttons.
          */
-        int TITLE_BUTTON = 1;
+        int TITLE_BUTTON = 2;
+
         /**
-         * Menu item that has three buttons. Every one of these buttons is displayed as an icon.
+         * Menu item that has multiple buttons (no more than 5). Every one of these buttons is
+         * displayed as an icon.
          */
-        int THREE_BUTTON_ROW = 2;
-        /**
-         * Menu item that has four buttons. Every one of these buttons is displayed as an icon.
-         */
-        int FOUR_BUTTON_ROW = 3;
-        /**
-         * Menu item that has five buttons. Every one of these buttons is displayed as an icon.
-         */
-        int FIVE_BUTTON_ROW = 4;
+        int BUTTON_ROW = 3;
+
+        /** Menu item that when contains submenus. */
+        int MENU_ITEM_WITH_SUBMENU = 4;
+
+        /** Menu item that contains submenus, without an icon or start padding. */
+        int MENU_ITEM_WITH_SUBMENU_NO_ICON = 5;
+
+        /** The header for submenus when submenus are displayed in drilldown. */
+        int SUBMENU_HEADER = 6;
+
+        /** A divider item to distinguish between menu item groupings. */
+        int DIVIDER = 7;
+
+        /** A bookmark item. */
+        int BOOKMARK = 8;
+
+        /** A tab item for tab groups. */
+        int TAB = 9;
+
+        /** A recent entry item. */
+        int RECENT_ENTRY = 10;
+
+        /** A recent entry item with no icon. */
+        int RECENT_ENTRY_NO_ICON = 11;
+
+        /** An item indicating that a submenu is empty. */
+        int EMPTY = 12;
+
+        /** A header item. */
+        int HEADER = 13;
+
         /**
          * The number of menu item types specified above. If you add a menu item type you MUST
          * increment this.
          */
-        int NUM_ENTRIES = 5;
+        int NUM_ENTRIES = 14;
     }
 
     /**
@@ -56,30 +104,47 @@ public interface AppMenuHandler {
 
     /**
      * Removes the observer from the App Menu.
+     *
      * @param observer Observer that should no longer be notified about App Menu changes.
      */
     void removeObserver(AppMenuObserver observer);
 
     /**
-     * Notifies the menu that the contents of the menu item specified by {@code menuRowId} have
-     * changed.  This should be called if icons, titles, etc. are changing for a particular menu
-     * item while the menu is open.
-     * @param menuRowId The id of the menu item to change.  This must be a row id and not a child
-     *                  id.
-     */
-    void menuItemContentChanged(int menuRowId);
-
-    /**
-     * Calls attention to this menu and a particular item in it.  The menu will only stay
-     * highlighted for one menu usage.  After that the highlight will be cleared.
+     * Calls attention to this menu and a particular item in it. The menu will only stay highlighted
+     * for one menu usage. After that the highlight will be cleared.
+     *
      * @param highlightItemId The id of a menu item to highlight or {@code null} to turn off the
-     *                        highlight.
+     *     highlight.
      */
     void setMenuHighlight(Integer highlightItemId);
 
     /**
-     * Clears the menu highlight.
+     * Overloaded setMenuHighlight method to control whether the menu button itself is highlighted
+     * or not.
+     *
+     * @param highlightItemId The id of a menu item to highlight or {@code null} to turn off the
+     *     highlight.
+     * @param shouldHighlightMenuButton Whether the triple dot app menu button should be
+     *     highlighted.
      */
+    void setMenuHighlight(Integer highlightItemId, boolean shouldHighlightMenuButton);
+
+    /**
+     * Overloaded setMenuHighlight method to control whether the menu is highlighted, and whether
+     * the menu list should automatically scroll the item into view when shown.
+     *
+     * @param highlightItemId The id of a menu item to highlight or {@code null} to turn off the
+     *     highlight.
+     * @param shouldHighlightMenuButton Whether the triple dot app menu button should be
+     *     highlighted.
+     * @param shouldScroll Whether the list should automatically scroll the item into view.
+     */
+    default void setMenuHighlight(
+            Integer highlightItemId, boolean shouldHighlightMenuButton, boolean shouldScroll) {
+        setMenuHighlight(highlightItemId, shouldHighlightMenuButton);
+    }
+
+    /** Clears the menu highlight. */
     void clearMenuHighlight();
 
     /**
@@ -87,10 +152,30 @@ public interface AppMenuHandler {
      */
     boolean isAppMenuShowing();
 
-    /**
-     * Requests to hide the App Menu.
-     */
+    /** Requests to hide the App Menu. */
     void hideAppMenu();
+
+    /**
+     * Show the app menu.
+     *
+     * @param anchorView Anchor view used for the popup
+     * @param startDragging Whether dragging is started
+     * @return True, if the menu is shown, false, if menu is not shown.
+     */
+    boolean showAppMenu(@Nullable View anchorView, boolean startDragging);
+
+    /**
+     * Show the app menu.
+     *
+     * @param anchorView Anchor view used for the popup
+     * @param startDragging Whether dragging is started
+     * @param isFromBottomBar Whether the menu is anchored to the bottom bar
+     * @return True, if the menu is shown, false, if menu is not shown.
+     */
+    default boolean showAppMenu(
+            @Nullable View anchorView, boolean startDragging, boolean isFromBottomBar) {
+        return showAppMenu(anchorView, startDragging);
+    }
 
     /**
      * @return A new {@link AppMenuButtonHelper} to hook up to a view containing a menu button.
@@ -98,7 +183,14 @@ public interface AppMenuHandler {
     AppMenuButtonHelper createAppMenuButtonHelper();
 
     /**
-     * Call to cause a redraw when an item in the app menu changes.
+     * @return {@link AppMenuPropertiesDelegate} that builds the menu list.
      */
-    void invalidateAppMenu();
+    AppMenuPropertiesDelegate getMenuPropertiesDelegate();
+
+    /**
+     * Sets the content description text for the app menu view.
+     *
+     * @param desc Content description.
+     */
+    void setContentDescription(@Nullable String desc);
 }

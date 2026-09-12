@@ -9,22 +9,25 @@
 #include <string>
 
 #include "ash/public/cpp/locale_update_controller.h"
-#include "ash/public/cpp/system_tray_observer.h"
+#include "ash/system/tray/system_tray_observer.h"
 #include "base/callback_list.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
-#include "chrome/browser/ash/accessibility/accessibility_manager.h"
-#include "chrome/browser/ash/login/oobe_quick_start/target_device_bootstrap_controller.h"
 #include "chrome/browser/ash/login/screens/base_screen.h"
 #include "chrome/browser/ash/login/screens/chromevox_hint/chromevox_hint_detector.h"
 #include "chrome/browser/ash/login/wizard_context.h"
 #include "ui/base/ime/ash/input_method_manager.h"
 
+class ApplicationLocaleStorage;
+class PrefService;
+
 namespace ash {
 
 class InputEventsBlocker;
 class WelcomeView;
+struct AccessibilityStatusEventDetails;
 
 namespace locale_util {
 struct LanguageSwitchResult;
@@ -68,16 +71,20 @@ class WelcomeScreen : public BaseScreen,
   };
 
   enum class Result {
-    NEXT,
-    NEXT_OS_INSTALL,
-    SETUP_DEMO,
-    ENABLE_DEBUGGING,
-    QUICK_START
+    kNext,
+    kNextOSInstall,
+    kSetupDemo,
+    kEnableDebugging,
+    kQuickStart
   };
 
   using ScreenExitCallback = base::RepeatingCallback<void(Result result)>;
 
-  WelcomeScreen(base::WeakPtr<WelcomeView> view,
+  // `local_state` and `application_locale_storage` must be non-null and must
+  // outlive `this`.
+  WelcomeScreen(PrefService* local_state,
+                ApplicationLocaleStorage* application_locale_storage,
+                base::WeakPtr<WelcomeView> view,
                 const ScreenExitCallback& exit_callback);
 
   WelcomeScreen(const WelcomeScreen&) = delete;
@@ -110,7 +117,7 @@ class WelcomeScreen : public BaseScreen,
   void AddObserver(Observer* observer);
   void RemoveObserver(Observer* observer);
 
-  const base::Value::Dict& GetConfigurationForTesting() const {
+  const base::DictValue& GetConfigurationForTesting() const {
     return context()->configuration;
   }
 
@@ -125,7 +132,7 @@ class WelcomeScreen : public BaseScreen,
   // BaseScreen:
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& action_id) override;
+  void OnUserAction(const base::ListValue& action_id) override;
   bool HandleAccelerator(LoginAcceleratorAction action) override;
 
   void CancelChromeVoxHintIdleDetection();
@@ -141,8 +148,7 @@ class WelcomeScreen : public BaseScreen,
                           Profile* profile,
                           bool show_message) override;
 
-  void OnFeatureSupportStatusDetermined(
-      quick_start::TargetDeviceConnectionBroker::FeatureSupportStatus status);
+  void SetQuickStartButtonVisibility(bool visible);
 
   // Handlers for various user actions:
   // Proceed with common user flow.
@@ -164,7 +170,7 @@ class WelcomeScreen : public BaseScreen,
           language_switch_result);
 
   // Callback for ResolveUILanguageList() (from l10n_util).
-  void OnLanguageListResolved(base::Value::List new_language_list,
+  void OnLanguageListResolved(base::ListValue new_language_list,
                               const std::string& new_language_list_locale,
                               const std::string& new_selected_language);
 
@@ -175,18 +181,19 @@ class WelcomeScreen : public BaseScreen,
   void NotifyLocaleChange();
   void OnLocaleChangeResult(LocaleNotificationResult result);
 
-  // Updates the local variable according to the existence of the Chromad
-  // migration flag file. Then, simulates a user action, if the flag is set and
-  // the screen is not hidden.
-  void UpdateChromadMigrationOobeFlow(bool exists);
-
   void OnAccessibilityStatusChanged(
       const AccessibilityStatusEventDetails& details);
   void UpdateA11yState();
 
+  // Starts the QuickStart flow
+  void OnQuickStartClicked();
+
   // Adds data to the OOBE.WelcomeScreen.UserChangedLocale metric and calls
   // exit_callback with given Result
   void Exit(Result result) const;
+
+  const raw_ref<PrefService> local_state_;
+  const raw_ref<ApplicationLocaleStorage> application_locale_storage_;
 
   base::WeakPtr<WelcomeView> view_;
   ScreenExitCallback exit_callback_;
@@ -199,16 +206,13 @@ class WelcomeScreen : public BaseScreen,
   // The exact language code selected by user in the menu.
   std::string selected_language_code_;
 
+  // Whether the QuickStart entry point visibility has already been determined.
+  // This flag prevents duplicate histogram entries.
+  bool has_emitted_quick_start_visible = false;
+
   base::ObserverList<Observer>::Unchecked observers_;
 
-  // This local flag should be true if the OOBE flow is operating as part of the
-  // Chromad to cloud device migration. If so, this screen should be skipped.
-  bool is_chromad_migration_oobe_flow_ = false;
-
   base::CallbackListSubscription accessibility_subscription_;
-
-  base::WeakPtr<quick_start::TargetDeviceBootstrapController>
-      bootstrap_controller_;
 
   // WeakPtrFactory used to schedule and cancel tasks related to language update
   // in this object.

@@ -8,10 +8,6 @@
 
 #import "base/test/ios/wait_util.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 using base::test::ios::kWaitForUIElementTimeout;
 
 namespace {
@@ -64,6 +60,20 @@ NSDictionary<NSString*, NSArray<NSString*>*>* TextToButtonsOfKnownSystemAlerts(
           @[ @"OK", @"Allow" ],
       @"Unable to activate Touch ID on this iPhone." : @[ @"OK" ],
       @"Like to Access the Microphone" : @[ @"OK" ],
+      @"to access your microphone" : @[ @"Allow", @"OK" ],
+      @"to access your camera" : @[ @"Allow", @"OK" ],
+      @"Edit Home Screen" : @[ @"Dismiss" ],
+      @"Apple ID Verification" : @[ @"Not Now" ],
+      @"iPhone is not Activated" : @[ @"Dismiss" ],
+      @"Account Verification" : @[ @"Not Now" ],
+      @"to find devices on local networks" : @[ @"Allow" ],
+      @"Not Installed" : @[ @"OK" ],
+      @"No SIM Card Installed" : @[ @"OK" ],
+      @"Set Up Cellular" : @[ @"Not Now" ],
+      @"to add photos and videos to your photo library" :
+          @[ @"Allow", @"OK", @"Add Photos Only" ],
+      @"to access your photo library" :
+          @[ @"Allow", @"OK", @"Allow Access to All Photos" ],
     };
   });
   return text_to_buttons;

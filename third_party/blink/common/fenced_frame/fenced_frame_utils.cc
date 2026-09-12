@@ -5,13 +5,22 @@
 #include "third_party/blink/public/common/fenced_frame/fenced_frame_utils.h"
 
 #include <cstring>
+#include <string_view>
 
-#include "base/guid.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/string_util.h"
+#include "base/uuid.h"
 #include "net/base/url_util.h"
 #include "third_party/blink/public/common/frame/fenced_frame_sandbox_flags.h"
 #include "url/gurl.h"
+
+namespace {
+
+bool IsHttpLocalhost(const GURL& url) {
+  return url.SchemeIs(url::kHttpScheme) && net::IsLocalhost(url);
+}
+
+}  // namespace
 
 namespace blink {
 
@@ -19,20 +28,20 @@ bool IsValidFencedFrameURL(const GURL& url) {
   if (!url.is_valid())
     return false;
   return (url.SchemeIs(url::kHttpsScheme) || url.IsAboutBlank() ||
-          net::IsLocalhost(url)) &&
+          IsHttpLocalhost(url)) &&
          !url.parsed_for_possibly_invalid_spec().potentially_dangling_markup;
 }
 
-const char kURNUUIDprefix[] = "urn:uuid:";
+const char kUrnUuidPrefix[] = "urn:uuid:";
 
 bool IsValidUrnUuidURL(const GURL& url) {
   if (!url.is_valid())
     return false;
   const std::string& spec = url.spec();
-  return base::StartsWith(spec, kURNUUIDprefix,
+  return base::StartsWith(spec, kUrnUuidPrefix,
                           base::CompareCase::INSENSITIVE_ASCII) &&
-         base::GUID::ParseCaseInsensitive(
-             base::StringPiece(spec).substr(std::strlen(kURNUUIDprefix)))
+         base::Uuid::ParseCaseInsensitive(
+             std::string_view(spec).substr(std::strlen(kUrnUuidPrefix)))
              .is_valid();
 }
 

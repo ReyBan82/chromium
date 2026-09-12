@@ -19,6 +19,7 @@
 #include "base/strings/stringprintf.h"
 #include "net/base/ip_address.h"
 #include "net/base/net_errors.h"
+#include "net/base/network_handle.h"
 #include "net/log/net_log_source.h"
 #include "net/socket/tcp_client_socket.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
@@ -31,16 +32,12 @@ const char kHostTransportCommand[] = "host:transport:%s";
 const char kLocalhost[] = "127.0.0.1";
 
 std::string EncodeMessage(const std::string& message) {
-  static const char kHexChars[] = "0123456789ABCDEF";
-
   size_t length = message.length();
-  std::string result(4, '\0');
-  char b = reinterpret_cast<const char*>(&length)[1];
-  result[0] = kHexChars[(b >> 4) & 0xf];
-  result[1] = kHexChars[b & 0xf];
-  b = reinterpret_cast<const char*>(&length)[0];
-  result[2] = kHexChars[(b >> 4) & 0xf];
-  result[3] = kHexChars[b & 0xf];
+  CHECK_LE(length, 0xffffu);
+  std::string result;
+  result.reserve(4);
+  base::AppendHexEncodedByte(static_cast<uint8_t>(length >> 8), result);
+  base::AppendHexEncodedByte(static_cast<uint8_t>(length & 0xff), result);
   return result + message;
 }
 
@@ -134,7 +131,7 @@ class AdbQuerySocket : AdbClientSocket {
 
   void OnResponse(int result, const std::string& response) {
     if (++current_query_ < queries_.size()) {
-      SendNextQuery(net::OK);
+      SendNextQuery(result);
     } else {
       std::move(callback_).Run(result, response);
       delete this;
@@ -175,8 +172,7 @@ AdbClientSocket::AdbClientSocket(int port)
     : host_(kLocalhost), port_(port) {
 }
 
-AdbClientSocket::~AdbClientSocket() {
-}
+AdbClientSocket::~AdbClientSocket() = default;
 
 void AdbClientSocket::RunConnectCallback(int result) {
   std::move(connect_callback_).Run(result);
@@ -192,7 +188,11 @@ void AdbClientSocket::Connect(net::CompletionOnceCallback callback) {
   net::AddressList address_list =
       net::AddressList::CreateFromIPAddress(ip_address, port_);
   socket_ = std::make_unique<net::TCPClientSocket>(
-      address_list, nullptr, nullptr, nullptr, net::NetLogSource());
+      address_list, nullptr, nullptr, nullptr, net::NetLogSource(),
+      // There are currently no use cases for targeting a network when
+      // forwarding via devtools. This will need to be reconsidered if a need
+      // arises.
+      net::handles::kInvalidNetworkHandle);
   connect_callback_ = std::move(callback);
   int result = socket_->Connect(base::BindOnce(
       &AdbClientSocket::RunConnectCallback, base::Unretained(this)));
@@ -247,8 +247,8 @@ void AdbClientSocket::ReadResponse(CommandCallback callback,
     std::move(callback).Run(result, "IO error");
     return;
   }
-  scoped_refptr<net::IOBuffer> response_buffer =
-      base::MakeRefCounted<net::IOBuffer>(kBufferSize);
+  auto response_buffer =
+      base::MakeRefCounted<net::IOBufferWithSize>(kBufferSize);
   auto split_callback = base::SplitOnceCallback(
       base::BindOnce(&AdbClientSocket::OnResponseHeader, base::Unretained(this),
                      std::move(callback), is_void, response_buffer));

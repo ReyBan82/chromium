@@ -6,21 +6,39 @@
 
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
-#include "chrome/browser/apps/app_service/app_launch_params.h"
+#include "ash/public/cpp/app_menu_constants.h"
+#include "ash/strings/grit/ash_strings.h"
+#include "base/functional/callback_helpers.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
-#include "chrome/browser/ash/bruschetta/bruschetta_features.h"
+#include "chrome/browser/apps/app_service/menu_util.h"
 #include "chrome/browser/ash/bruschetta/bruschetta_launcher.h"
 #include "chrome/browser/ash/bruschetta/bruschetta_service.h"
+#include "chrome/browser/ash/bruschetta/bruschetta_service_factory.h"
 #include "chrome/browser/ash/bruschetta/bruschetta_util.h"
 #include "chrome/browser/ash/crostini/crostini_manager.h"
+#include "chrome/browser/ash/crostini/crostini_util.h"
+#include "chrome/browser/ash/file_manager/fileapi_util.h"
+#include "chrome/browser/ash/file_manager/path_util.h"
+#include "chrome/browser/ash/guest_os/guest_os_launcher.h"
 #include "chrome/browser/ash/guest_os/guest_os_registry_service.h"
+#include "chrome/browser/ash/guest_os/guest_os_session_tracker.h"
+#include "chrome/browser/ash/guest_os/guest_os_session_tracker_factory.h"
+#include "chrome/browser/ash/guest_os/guest_os_share_path.h"
+#include "chrome/browser/ash/guest_os/guest_os_share_path_factory.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/ash/shelf/chrome_shelf_controller.h"
 #include "chrome/browser/ui/ash/shelf/shelf_spinner_controller.h"
 #include "chrome/browser/ui/ash/shelf/shelf_spinner_item_controller.h"
+#include "chrome/grit/chrome_unscaled_resources.h"
+#include "chrome/grit/generated_resources.h"
+#include "components/services/app_service/public/cpp/app_launch_params.h"
 #include "components/services/app_service/public/cpp/app_types.h"
+#include "components/services/app_service/public/cpp/intent.h"
+#include "ui/base/window_open_disposition.h"
+#include "ui/display/types/display_constants.h"
 
 namespace apps {
 
@@ -33,39 +51,91 @@ void AddSpinner(const std::string& app_id) {
   }
 }
 
+// It's safe to remove a non-existent spinner.
 void RemoveSpinner(const std::string& app_id) {
   if (auto* chrome_controller = ChromeShelfController::instance()) {
     chrome_controller->GetShelfSpinnerController()->CloseSpinner(app_id);
   }
 }
 
+void OnLaunchFailed(const std::string& app_id,
+                    LaunchCallback callback,
+                    const std::string& reason) {
+  LOG(ERROR) << "Failed to launch Bruschetta app " << app_id << ": " << reason;
+  RemoveSpinner(app_id);
+  std::move(callback).Run(LaunchResult::kFailed);
+}
+
+void OnSharePathForLaunchApplication(
+    Profile* profile,
+    const std::string& app_id,
+    guest_os::GuestOsRegistryService::Registration registration,
+    const guest_os::GuestId container_id,
+    int64_t display_id,
+    const std::vector<std::string>& args,
+    LaunchCallback callback,
+    bool success,
+    const std::string& failure_reason) {
+  if (!success) {
+    OnLaunchFailed(app_id, std::move(callback),
+                   "Failed to share paths with Bruschetta: " + failure_reason);
+    return;
+  }
+  guest_os::launcher::LaunchApplication(
+      profile, container_id, std::move(registration), display_id, args,
+      base::BindOnce(
+          [](const std::string& app_id, LaunchCallback callback, bool success,
+             const std::string& failure_reason) {
+            if (!success) {
+              OnLaunchFailed(app_id, std::move(callback), failure_reason);
+              return;
+            }
+            RemoveSpinner(app_id);
+            std::move(callback).Run(LaunchResult::kSuccess);
+          },
+          app_id, std::move(callback)));
+}
+
 void LaunchApplication(
     Profile* profile,
     const std::string& app_id,
     guest_os::GuestOsRegistryService::Registration registration,
-    int64_t display_id) {
+    int64_t display_id,
+    const std::vector<guest_os::LaunchArg> args,
+    LaunchCallback callback) {
   // TODO(b/265601951): Handle window permissions. Crostini uses
   // AppServiceAppWindowCrostiniTracker::OnAppLaunchRequested for this.
-  // TODO(b/245412929): Share paths to files.
-  const guest_os::GuestId container_id(registration.VmType(),
-                                       registration.VmName(),
-                                       registration.ContainerName());
 
-  std::vector<std::string> files;
-  // TODO(b/265601951): Factor this out of CrostiniManager.
-  crostini::CrostiniManager::GetForProfile(profile)->LaunchContainerApplication(
-      container_id, registration.DesktopFileId(), files,
-      registration.IsScaled(),
-      base::BindOnce(
-          [](const std::string& app_id, bool success,
-             const std::string& failure_reason) {
-            if (!success) {
-              LOG(ERROR) << "Failed to launch Bruschetta app " << app_id << ": "
-                         << failure_reason;
-            }
-            RemoveSpinner(app_id);
-          },
-          app_id));
+  // Get vm_info because we need seneschal_server_handle.
+  const std::string& vm_name = registration.VmName();
+  auto vm_info =
+      guest_os::GuestOsSessionTrackerFactory::GetForProfile(profile)->GetVmInfo(
+          vm_name);
+  if (!vm_info) {
+    OnLaunchFailed(app_id, std::move(callback),
+                   "Bruschetta VM not running: " + vm_name);
+    return;
+  }
+
+  const guest_os::GuestId container_id(registration.ToGuestId());
+  auto* share_path = guest_os::GuestOsSharePathFactory::GetForProfile(profile);
+  auto paths_or_error = share_path->ConvertArgsToPathsToShare(
+      registration, args, bruschetta::BruschettaChromeOSBaseDirectory(),
+      /*map_crostini_home=*/false);
+  if (std::holds_alternative<std::string>(paths_or_error)) {
+    OnLaunchFailed(app_id, std::move(callback),
+                   std::get<std::string>(paths_or_error));
+    return;
+  }
+  const auto& paths =
+      std::get<guest_os::GuestOsSharePath::PathsToShare>(paths_or_error);
+  share_path->SharePaths(
+      vm_name, vm_info->seneschal_server_handle(),
+      std::move(paths.paths_to_share),
+      base::BindOnce(OnSharePathForLaunchApplication, profile, app_id,
+                     std::move(registration), std::move(container_id),
+                     display_id, std::move(paths.launch_args),
+                     std::move(callback)));
 }
 
 }  // namespace
@@ -73,7 +143,7 @@ void LaunchApplication(
 BruschettaApps::BruschettaApps(AppServiceProxy* proxy) : GuestOSApps(proxy) {}
 
 bool BruschettaApps::CouldBeAllowed() const {
-  return bruschetta::BruschettaFeatures::Get()->IsEnabled();
+  return true;
 }
 
 apps::AppType BruschettaApps::AppType() const {
@@ -84,34 +154,36 @@ guest_os::VmType BruschettaApps::VmType() const {
   return guest_os::VmType::BRUSCHETTA;
 }
 
-void BruschettaApps::LoadIcon(const std::string& app_id,
-                              const IconKey& icon_key,
-                              IconType icon_type,
-                              int32_t size_hint_in_dip,
-                              bool allow_placeholder_icon,
-                              apps::LoadIconCallback callback) {
-  // TODO(b/247636749): Consider creating IDR_LOGO_BRUSCHETTA_DEFAULT
-  // to replace IconKey::kInvalidResourceId.
-  registry()->LoadIcon(app_id, icon_key, icon_type, size_hint_in_dip,
-                       allow_placeholder_icon, IconKey::kInvalidResourceId,
-                       std::move(callback));
+int BruschettaApps::DefaultIconResourceId() const {
+  return IDR_LOGO_BRUSCHETTA_DEFAULT;
 }
 
 void BruschettaApps::Launch(const std::string& app_id,
                             int32_t event_flags,
                             LaunchSource launch_source,
                             WindowInfoPtr window_info) {
+  LaunchAppWithIntent(app_id, event_flags, /*intent=*/nullptr, launch_source,
+                      std::move(window_info), /*callback=*/base::DoNothing());
+}
+
+void BruschettaApps::LaunchAppWithIntent(const std::string& app_id,
+                                         int32_t event_flags,
+                                         IntentPtr intent,
+                                         LaunchSource launch_source,
+                                         WindowInfoPtr window_info,
+                                         LaunchCallback callback) {
   const int64_t display_id =
       window_info ? window_info->display_id : display::kInvalidDisplayId;
-  absl::optional<guest_os::GuestOsRegistryService::Registration> registration =
+  std::optional<guest_os::GuestOsRegistryService::Registration> registration =
       registry()->GetRegistration(app_id);
   if (!registration) {
     // TODO(b/247638226): RecordAppLaunchHistogram(kUnknown) to collect usage
     // stats for failed launches.
-    LOG(ERROR) << "BruschettaApps::Launch called with an unknown app_id: "
-               << app_id;
+    OnLaunchFailed(app_id, std::move(callback),
+                   "Unknown Bruschetta app_id: " + app_id);
     return;
   }
+
   // TODO(b/247638226): RecordAppLaunchHistogram(kRegisteredApp) to collect
   // usage stats for successful launches.
 
@@ -120,40 +192,62 @@ void BruschettaApps::Launch(const std::string& app_id,
 
   // Start the bruschetta VM if necessary.
   const std::string& vm_name = registration->VmName();
-  auto launcher =
-      bruschetta::BruschettaService::GetForProfile(profile())->GetLauncher(
-          vm_name);
+  auto launcher = bruschetta::BruschettaServiceFactory::GetForProfile(profile())
+                      ->GetLauncher(vm_name);
   if (!launcher) {
-    LOG(ERROR) << "Unknown Bruschetta VM name: " << vm_name;
+    OnLaunchFailed(app_id, std::move(callback),
+                   "Unknown Bruschetta VM name: " + vm_name);
     return;
   }
+  auto args = ArgsFromIntent(intent.get());
   AddSpinner(app_id);
   launcher->EnsureRunning(base::BindOnce(
       [](Profile* profile, const std::string& app_id,
          guest_os::GuestOsRegistryService::Registration registration,
-         int64_t display_id, const std::string& vm_name,
+         int64_t display_id, const std::vector<guest_os::LaunchArg> args,
+         const std::string& vm_name, LaunchCallback callback,
          bruschetta::BruschettaResult result) {
         if (result != bruschetta::BruschettaResult::kSuccess) {
-          LOG(ERROR) << "Failed to start Bruschetta VM " << vm_name << ": "
-                     << bruschetta::BruschettaResultString(result);
-          RemoveSpinner(app_id);
+          OnLaunchFailed(app_id, std::move(callback),
+                         "Failed to start Bruschetta VM " + vm_name + ": " +
+                             bruschetta::BruschettaResultString(result));
           return;
         }
-        LaunchApplication(profile, app_id, std::move(registration), display_id);
+        LaunchApplication(profile, app_id, std::move(registration), display_id,
+                          std::move(args), std::move(callback));
       },
-      profile(), app_id, std::move(registration.value()), display_id, vm_name));
-}
-
-void BruschettaApps::LaunchAppWithParams(AppLaunchParams&& params,
-                                         LaunchCallback callback) {
-  // TODO(b/265601951): Implement this.
+      profile(), app_id, std::move(registration.value()), display_id,
+      std::move(args), vm_name, std::move(callback)));
 }
 
 void BruschettaApps::CreateAppOverrides(
     const guest_os::GuestOsRegistryService::Registration& registration,
     App* app) {
   // TODO(b/247638042): Implement IsUninstallable and use it here.
-  // TODO(b/245412929): Implement intent filter and use it here.
+}
+
+void BruschettaApps::GetMenuModel(
+    const std::string& app_id,
+    MenuType menu_type,
+    int64_t display_id,
+    base::OnceCallback<void(MenuItems)> callback) {
+  MenuItems menu_items;
+
+  if (menu_type == MenuType::kShelf) {
+    AddCommandItem(ash::APP_CONTEXT_MENU_NEW_WINDOW, IDS_APP_LIST_NEW_WINDOW,
+                   menu_items);
+  }
+
+  if (ShouldAddOpenItem(app_id, menu_type, profile())) {
+    AddCommandItem(ash::LAUNCH_NEW, IDS_APP_CONTEXT_MENU_ACTIVATE_ARC,
+                   menu_items);
+  }
+
+  if (ShouldAddCloseItem(app_id, menu_type, profile())) {
+    AddCommandItem(ash::MENU_CLOSE, IDS_SHELF_CONTEXT_MENU_CLOSE, menu_items);
+  }
+
+  std::move(callback).Run(std::move(menu_items));
 }
 
 }  // namespace apps

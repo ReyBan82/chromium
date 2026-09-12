@@ -37,7 +37,9 @@ void PushVideoStreamSubscriptionImpl::SetOnClosedHandler(
 }
 
 void PushVideoStreamSubscriptionImpl::OnDeviceStartSucceededWithSettings(
-    const media::VideoCaptureParams& settings) {
+    const media::VideoCaptureParams& settings,
+    Device* device) {
+  device_ = device;
   if (status_ != Status::kCreationCallbackNotYetRun) {
     // Creation callback has already been run from a previous device start.
     return;
@@ -78,9 +80,10 @@ void PushVideoStreamSubscriptionImpl::Activate() {
 }
 
 void PushVideoStreamSubscriptionImpl::Suspend(SuspendCallback callback) {
-  if (status_ != Status::kActive)
+  if (status_ != Status::kActive) {
+    std::move(callback).Run();
     return;
-
+  }
   broadcaster_->SuspendClient(broadcaster_client_id_);
   status_ = Status::kSuspended;
   std::move(callback).Run();
@@ -175,6 +178,20 @@ void PushVideoStreamSubscriptionImpl::ProcessFeedback(
     case Status::kActive:           // Fall through.
     case Status::kSuspended:
       device_->ProcessFeedback(feedback);
+      return;
+  }
+}
+
+void PushVideoStreamSubscriptionImpl::InvalidateBuffers() {
+  switch (status_) {
+    case Status::kCreationCallbackNotYetRun:  // Fall through.
+    case Status::kClosed:
+      // Ignore the call.
+      return;
+    case Status::kNotYetActivated:  // Fall through.
+    case Status::kActive:           // Fall through.
+    case Status::kSuspended:
+      device_->InvalidateBuffers();
       return;
   }
 }

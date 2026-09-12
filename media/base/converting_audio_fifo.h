@@ -5,8 +5,9 @@
 #ifndef MEDIA_BASE_CONVERTING_AUDIO_FIFO_H_
 #define MEDIA_BASE_CONVERTING_AUDIO_FIFO_H_
 
+#include <memory>
+
 #include "base/containers/circular_deque.h"
-#include "base/functional/callback.h"
 #include "base/sequence_checker.h"
 #include "media/base/audio_converter.h"
 #include "media/base/audio_parameters.h"
@@ -15,19 +16,19 @@
 namespace media {
 
 class AudioBus;
+class AudioBusPool;
 class ChannelMixer;
 
 // FIFO which uses an AudioConverter to convert input frames into an output
 // format. When enough input frames are pushed into the FIFO, it converts them
-// synchronously, and pushes that output via its |output_callback_|.
+// synchronously, and notifies the availability of that output via its
+// |output_ready_callback_|.
 class MEDIA_EXPORT ConvertingAudioFifo final
     : public AudioConverter::InputCallback {
  public:
-  using OuputCallback = base::RepeatingCallback<void(AudioBus*)>;
-
   ConvertingAudioFifo(const AudioParameters& input_params,
                       const AudioParameters& converted_params,
-                      OuputCallback output_callback);
+                      bool use_input_bus_pool = false);
 
   ConvertingAudioFifo(const ConvertingAudioFifo&) = delete;
   ConvertingAudioFifo& operator=(const ConvertingAudioFifo&) = delete;
@@ -35,8 +36,24 @@ class MEDIA_EXPORT ConvertingAudioFifo final
   ~ConvertingAudioFifo() override;
 
   // Adds inputs into the FIFO. `input_bus` must have the same sample rate as
-  // |input_params_|, but the number of channels or frames can be different.
+  // `input_params_`, but the number of channels or frames can be different.
+  // When input pooling is enabled, the channel count must match as well.
   void Push(std::unique_ptr<AudioBus> input_bus);
+
+  base::TimeDelta GetBufferedInputDuration() const;
+
+  // Returns whether there is any available converted output.
+  bool HasOutput();
+
+  // Gets the current output.
+  const AudioBus* PeekOutput();
+
+  // Releases the current output.
+  void PopOutput();
+
+  // Returns an AudioBus from the input audio bus pool. Can only be used when
+  // input pooling is enabled.
+  std::unique_ptr<AudioBus> GetInputAudioBus();
 
   // Forces all remaining frames to be converted, ouputing silence in case there
   // isn't enough data. Noop if there aren't any available frames.
@@ -58,13 +75,15 @@ class MEDIA_EXPORT ConvertingAudioFifo final
   // |output_params_| fills |dest|.
   void Convert();
 
-  // Returns an AudioBus with the same number of channels as |input_params_|,
-  // mixing |audio_bus| if necessary.
+  // Returns an AudioBus with the same number of channels as `input_params_`,
+  // mixing `audio_bus` if necessary. No mixing is performed when input
+  // pooling is enabled, and the channel count must match exactly.
   std::unique_ptr<AudioBus> EnsureExpectedChannelCount(
       std::unique_ptr<AudioBus> audio_bus);
 
-  // Callbacks through which converted frames are delivered.
-  const OuputCallback output_callback_;
+  // Removes the front input bus, inserting it into the input pool for reuse if
+  // pooling is enabled.
+  void PopInputs();
 
   const AudioParameters input_params_;
   const AudioParameters converted_params_;
@@ -93,14 +112,21 @@ class MEDIA_EXPORT ConvertingAudioFifo final
   std::unique_ptr<AudioConverter> converter_
       GUARDED_BY_CONTEXT(sequence_checker_);
 
-  // Destination bus for the |converter_|.
-  std::unique_ptr<AudioBus> converted_audio_bus_
+  base::circular_deque<std::unique_ptr<AudioBus>> pending_outputs_
+      GUARDED_BY_CONTEXT(sequence_checker_);
+  std::unique_ptr<AudioBusPool> output_pool_
       GUARDED_BY_CONTEXT(sequence_checker_);
 
   // All current input frames.
   base::circular_deque<std::unique_ptr<AudioBus>> inputs_
       GUARDED_BY_CONTEXT(sequence_checker_);
+  std::unique_ptr<AudioBusPool> input_pool_
+      GUARDED_BY_CONTEXT(sequence_checker_);
 
+  // Supports construction on one sequence and usage on another.
+  // `construction_sequence_checker_` validates the construction sequence, and
+  // `sequence_checker_` validates the processing sequence.
+  SEQUENCE_CHECKER(construction_sequence_checker_);
   SEQUENCE_CHECKER(sequence_checker_);
 };
 

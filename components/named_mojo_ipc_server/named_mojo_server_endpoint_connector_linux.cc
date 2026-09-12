@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/named_mojo_ipc_server/named_mojo_server_endpoint_connector.h"
+
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 
 #include <memory>
@@ -10,7 +13,6 @@
 
 #include "base/check.h"
 #include "base/files/file_descriptor_watcher_posix.h"
-#include "base/functional/callback_forward.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/sequence_checker.h"
@@ -19,7 +21,6 @@
 #include "base/threading/sequence_bound.h"
 #include "components/named_mojo_ipc_server/connection_info.h"
 #include "components/named_mojo_ipc_server/endpoint_options.h"
-#include "components/named_mojo_ipc_server/named_mojo_server_endpoint_connector.h"
 #include "mojo/public/cpp/platform/platform_channel_server_endpoint.h"
 #include "mojo/public/cpp/platform/socket_utils_posix.h"
 
@@ -72,7 +73,8 @@ void NamedMojoServerEndpointConnectorLinux::OnSocketReady() {
   int fd = server_endpoint_.platform_handle().GetFD().get();
 
   base::ScopedFD connection_fd;
-  bool success = mojo::AcceptSocketConnection(fd, &connection_fd);
+  bool success = mojo::AcceptSocketConnection(fd, &connection_fd,
+                                              options_.require_same_peer_user);
   if (!success) {
     LOG(ERROR) << "AcceptSocketConnection failed.";
     return;
@@ -104,13 +106,23 @@ void NamedMojoServerEndpointConnectorLinux::OnSocketReady() {
 bool NamedMojoServerEndpointConnectorLinux::TryStart() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
+  mojo::NamedPlatformChannel::Options options;
+  options.server_name = options_.server_name;
   mojo::PlatformChannelServerEndpoint server_endpoint =
-      mojo::NamedPlatformChannel({options_.server_name}).TakeServerEndpoint();
+      mojo::NamedPlatformChannel(options).TakeServerEndpoint();
   if (!server_endpoint.is_valid()) {
     return false;
   }
 
   server_endpoint_ = std::move(server_endpoint);
+  if (!options_.require_same_peer_user) {
+    // Allow any user to write to the UDS. fchmod doesn't work after bind(), so
+    // we need to call chmod on the socket filename, which is the server name.
+    if (chmod(options_.server_name.c_str(), 0o666) != 0) {
+      PLOG(ERROR) << "chmod failed";
+      return false;
+    }
+  }
   read_watcher_controller_ = base::FileDescriptorWatcher::WatchReadable(
       server_endpoint_.platform_handle().GetFD().get(),
       base::BindRepeating(&NamedMojoServerEndpointConnectorLinux::OnSocketReady,

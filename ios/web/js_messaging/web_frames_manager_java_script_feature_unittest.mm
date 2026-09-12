@@ -16,10 +16,6 @@
 #import "testing/gtest/include/gtest/gtest.h"
 #import "third_party/ocmock/OCMock/OCMock.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 namespace {
 
 // Message command sent when a frame becomes available.
@@ -54,10 +50,10 @@ class WebFramesManagerJavaScriptFeatureTest : public WebTestWithWebState {
         .andReturn(
             base::SysUTF8ToNSString(web_frame->GetSecurityOrigin().host()));
     OCMStub([security_origin port])
-        .andReturn(web_frame->GetSecurityOrigin().EffectiveIntPort());
+        .andReturn(web_frame->GetSecurityOrigin().port());
     OCMStub([security_origin protocol])
-        .andReturn(
-            base::SysUTF8ToNSString(web_frame->GetSecurityOrigin().scheme()));
+        .andReturn(base::SysUTF8ToNSString(
+            web_frame->GetSecurityOrigin().scheme()));
 
     // Mock WKFrameInfo.
     WKFrameInfo* frame_info = OCMClassMock([WKFrameInfo class]);
@@ -74,7 +70,9 @@ class WebFramesManagerJavaScriptFeatureTest : public WebTestWithWebState {
     OCMStub([message name]).andReturn(kFrameBecameAvailableMessageName);
     OCMStub([message webView]).andReturn(web_view_);
 
-    WebFramesManagerJavaScriptFeature::FromBrowserState(GetBrowserState())
+    WebFramesManagerJavaScriptFeature::Container::FromBrowserState(
+        GetBrowserState())
+        ->FeatureForContentWorld(ContentWorld::kPageContentWorld)
         ->FrameAvailableMessageReceived(message);
   }
 
@@ -87,10 +85,10 @@ class WebFramesManagerJavaScriptFeatureTest : public WebTestWithWebState {
         .andReturn(
             base::SysUTF8ToNSString(web_frame->GetSecurityOrigin().host()));
     OCMStub([security_origin port])
-        .andReturn(web_frame->GetSecurityOrigin().EffectiveIntPort());
+        .andReturn(web_frame->GetSecurityOrigin().port());
     OCMStub([security_origin protocol])
-        .andReturn(
-            base::SysUTF8ToNSString(web_frame->GetSecurityOrigin().scheme()));
+        .andReturn(base::SysUTF8ToNSString(
+            web_frame->GetSecurityOrigin().scheme()));
 
     // Mock WKFrameInfo.
     WKFrameInfo* frame_info = OCMClassMock([WKFrameInfo class]);
@@ -105,18 +103,20 @@ class WebFramesManagerJavaScriptFeatureTest : public WebTestWithWebState {
     OCMStub([message name]).andReturn(kFrameBecameUnavailableMessageName);
     OCMStub([message webView]).andReturn(web_view_);
 
-    WebFramesManagerJavaScriptFeature::FromBrowserState(GetBrowserState())
+    WebFramesManagerJavaScriptFeature::Container::FromBrowserState(
+        GetBrowserState())
+        ->FeatureForContentWorld(ContentWorld::kPageContentWorld)
         ->FrameUnavailableMessageReceived(message);
   }
 
   WebFramesManagerImpl& GetPageWorldWebFramesManager() {
-    return WebStateImpl::FromWebState(web_state())->GetWebFramesManagerImpl();
+    return WebStateImpl::FromWebState(web_state())
+        ->GetWebFramesManagerImpl(ContentWorld::kPageContentWorld);
   }
 
   void SetUp() override {
     WebTestWithWebState::SetUp();
-    WebViewWebStateMap::FromBrowserState(GetBrowserState())
-        ->SetAssociatedWebViewForWebState(web_view_, web_state());
+    SetAssociatedWebViewForWebState(web_view_, web_state());
   }
 
   WKWebView* web_view_ = nil;
@@ -253,16 +253,14 @@ TEST_F(WebFramesManagerJavaScriptFeatureTest, MultipleWebFrame) {
 }
 
 // Tests that WebFramesManagerImpl will ignore JS messages from previous
-// WKWebView after WebViewWebStateMap is updated with a new WKWebView.
+// WKWebView after the WebView has been disassociated from the WebState.
 TEST_F(WebFramesManagerJavaScriptFeatureTest, OnWebViewUpdated) {
   SendFrameBecameAvailableMessage(main_frame_.get());
   SendFrameBecameAvailableMessage(frame_1_.get());
   EXPECT_EQ(2ul, GetPageWorldWebFramesManager().GetAllWebFrames().size());
 
-  // Update the WKWebView associated with web_state().
-  WKWebView* web_view_2 = OCMClassMock([WKWebView class]);
-  WebViewWebStateMap::FromBrowserState(GetBrowserState())
-      ->SetAssociatedWebViewForWebState(web_view_2, web_state());
+  // Disassociate the WebView from the WebState.
+  ClearAssociatedWebViewForWebState(web_view_, web_state());
   WebStateImpl::FromWebState(web_state())->RemoveAllWebFrames();
 
   // Send JS message of loaded/unloaded web frames in previous WKWebView (i.e.

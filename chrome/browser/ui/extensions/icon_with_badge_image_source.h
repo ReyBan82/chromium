@@ -16,7 +16,7 @@
 namespace gfx {
 class RenderText;
 class Size;
-}
+}  // namespace gfx
 
 namespace ui {
 class ColorProvider;
@@ -82,7 +82,7 @@ class IconWithBadgeImageSource : public gfx::CanvasImageSource {
   // the current material design mode (See ToolbarActionsBar::GetViewSize()). In
   // all cases, our badges and decorations should be positions at the corners of
   // the area where the icon exists (ignoring all the paddings).
-  // https://crbug.com/831946.
+  // https://crbug.com/40571346.
   gfx::Rect GetIconAreaRect() const;
 
   GetColorProviderCallback get_color_provider_callback_;
@@ -105,8 +105,8 @@ class IconWithBadgeImageSource : public gfx::CanvasImageSource {
 
   // Whether or not to paint a decoration to indicate that the extension has
   // had actions blocked.
-  // TODO(crbug.com/1352298): Remove once kExtensionsMenuAccessControl is rolled
-  // out.
+  // TODO(crbug.com/40857680): Remove once kExtensionsMenuAccessControl is
+  // rolled out.
   bool paint_blocked_actions_decoration_ = false;
 };
 

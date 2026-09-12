@@ -2,11 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/win/atl.h"  // Must be before UIAutomationCore.h
-
-#include <UIAutomationClient.h>
-#include <UIAutomationCore.h>
-#include <UIAutomationCoreApi.h>
+#include "ui/accessibility/platform/ax_platform_node_textrangeprovider_win.h"
 
 #include <memory>
 #include <tuple>
@@ -14,10 +10,7 @@
 
 #include "base/at_exit.h"
 #include "base/i18n/icu_util.h"
-#include "base/test/scoped_feature_list.h"
-#include "base/win/atl.h"
 #include "base/win/scoped_bstr.h"
-#include "base/win/scoped_safearray.h"
 #include "base/win/scoped_variant.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/accessibility/ax_node.h"
@@ -33,9 +26,12 @@
 #include "ui/accessibility/ax_tree_update.h"
 #include "ui/accessibility/platform/ax_fragment_root_delegate_win.h"
 #include "ui/accessibility/platform/ax_fragment_root_win.h"
-#include "ui/accessibility/platform/ax_platform_node_textrangeprovider_win.h"
+#include "ui/accessibility/platform/ax_platform_for_test.h"
 #include "ui/accessibility/platform/test_ax_node_wrapper.h"
-#include "ui/accessibility/test_ax_tree_manager.h"
+
+#include <UIAutomationClient.h>
+#include <UIAutomationCore.h>
+#include <UIAutomationCoreApi.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -95,13 +91,12 @@ void GetTextRangeProviderFromTextNode(
 
   text_provider->get_DocumentRange(&text_range_provider);
 
-  ComPtr<ui::AXPlatformNodeTextRangeProviderWin> text_range_provider_interal;
-  text_range_provider->QueryInterface(
-      IID_PPV_ARGS(&text_range_provider_interal));
   ui::AXPlatformNode* ax_platform_node =
       AXPlatformNodeFromNode(tree, text_node);
-  text_range_provider_interal->SetOwnerForTesting(
-      static_cast<ui::AXPlatformNodeWin*>(ax_platform_node));
+  static_cast<ui::AXPlatformNodeTextRangeProviderWin*>(
+      text_range_provider.Get())
+      ->SetOwnerForTesting(
+          static_cast<ui::AXPlatformNodeWin*>(ax_platform_node));
 }
 
 void CallComparisonAPIs(const ComPtr<ITextRangeProvider>& text_range,
@@ -163,7 +158,7 @@ void MutateTextRangeProvider(ComPtr<ITextRangeProvider>& text_range,
                                         GenerateEndpoint(fuzz_data.NextByte()));
         return;
       }
-      ABSL_FALLTHROUGH_INTENDED;
+      [[fallthrough]];
     case TextRangeMutation::kExpandToEnclosingUnit:
       text_range->ExpandToEnclosingUnit(unit);
       return;
@@ -184,6 +179,7 @@ void MutateTextRangeProvider(ComPtr<ITextRangeProvider>& text_range,
 struct Environment {
   Environment() { CHECK(base::i18n::InitializeICU()); }
   base::AtExitManager at_exit_manager;
+  ui::AXPlatformForTest ax_platform_for_test;
 };
 
 // Entry point for LibFuzzer.

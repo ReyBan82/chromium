@@ -37,12 +37,12 @@
 #include "third_party/blink/renderer/core/html/html_frame_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/input/event_handler.h"
+#include "third_party/blink/renderer/core/layout/frame_set_layout_data.h"
 #include "third_party/blink/renderer/core/layout/layout_frame_set.h"
-#include "third_party/blink/renderer/core/layout/layout_object_factory.h"
-#include "third_party/blink/renderer/core/layout/ng/frame_set_layout_data.h"
-#include "third_party/blink/renderer/core/layout/ng/layout_ng_frame_set.h"
-#include "third_party/blink/renderer/core/layout/ng/ng_physical_box_fragment.h"
+#include "third_party/blink/renderer/core/layout/layout_object_inlines.h"
+#include "third_party/blink/renderer/core/layout/physical_box_fragment.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 
 namespace blink {
 
@@ -51,9 +51,7 @@ namespace {
 constexpr int kDefaultBorderThicknessPx = 6;
 
 const Vector<LayoutUnit>& ColumnSizes(const LayoutBox& box) {
-  if (const auto* legacy = DynamicTo<LayoutFrameSet>(box))
-    return legacy->Columns().sizes_;
-  DCHECK(IsA<LayoutNGFrameSet>(box));
+  DCHECK(IsA<LayoutFrameSet>(box));
   // |object| should have only 1 physical fragment because <frameset> is
   // monolithic.
   const auto* data = box.GetPhysicalFragment(0)->GetFrameSetLayoutData();
@@ -62,9 +60,7 @@ const Vector<LayoutUnit>& ColumnSizes(const LayoutBox& box) {
 }
 
 const Vector<LayoutUnit>& RowSizes(const LayoutBox& box) {
-  if (const auto* legacy = DynamicTo<LayoutFrameSet>(box))
-    return legacy->Rows().sizes_;
-  DCHECK(IsA<LayoutNGFrameSet>(box));
+  DCHECK(IsA<LayoutFrameSet>(box));
   // |object| should have only 1 physical fragment because <frameset> is
   // monolithic.
   const auto* data = box.GetPhysicalFragment(0)->GetFrameSetLayoutData();
@@ -90,10 +86,13 @@ bool HTMLFrameSetElement::IsPresentationAttribute(
 void HTMLFrameSetElement::CollectStyleForPresentationAttribute(
     const QualifiedName& name,
     const AtomicString& value,
-    MutableCSSPropertyValueSet* style) {
-  if (name == html_names::kBordercolorAttr)
-    AddHTMLColorToStyle(style, CSSPropertyID::kBorderColor, value);
-  else
+    HeapVector<CSSPropertyValue, 8>& style) {
+  if (name == html_names::kBordercolorAttr) {
+    AddHTMLColorToStyle(style, CSSPropertyID::kBorderLeftColor, value);
+    AddHTMLColorToStyle(style, CSSPropertyID::kBorderRightColor, value);
+    AddHTMLColorToStyle(style, CSSPropertyID::kBorderBottomColor, value);
+    AddHTMLColorToStyle(style, CSSPropertyID::kBorderTopColor, value);
+  } else
     HTMLElement::CollectStyleForPresentationAttribute(name, value, style);
 }
 
@@ -121,11 +120,11 @@ void HTMLFrameSetElement::ParseAttribute(
     DirtyEdgeInfo();
   } else if (name == html_names::kFrameborderAttr) {
     if (!value.IsNull()) {
-      if (EqualIgnoringASCIICase(value, "no") ||
-          EqualIgnoringASCIICase(value, "0")) {
+      if (EqualIgnoringAsciiCase(value, "no") ||
+          EqualIgnoringAsciiCase(value, "0")) {
         frameborder_ = false;
-      } else if (EqualIgnoringASCIICase(value, "yes") ||
-                 EqualIgnoringASCIICase(value, "1")) {
+      } else if (EqualIgnoringAsciiCase(value, "yes") ||
+                 EqualIgnoringAsciiCase(value, "1")) {
         frameborder_ = true;
       }
     } else {
@@ -140,7 +139,7 @@ void HTMLFrameSetElement::ParseAttribute(
     DirtyEdgeInfo();
   } else if (name == html_names::kBorderAttr) {
     if (!value.IsNull()) {
-      border_ = value.ToInt();
+      border_ = StringToIntLoose(value).value_or(0);
     } else {
       border_.reset();
     }
@@ -254,12 +253,6 @@ void HTMLFrameSetElement::ParseAttribute(
   } else if (name == html_names::kOnlanguagechangeAttr) {
     GetDocument().SetWindowAttributeEventListener(
         event_type_names::kLanguagechange,
-        JSEventHandlerForContentAttribute::Create(GetExecutionContext(), name,
-                                                  value));
-  } else if (RuntimeEnabledFeatures::PortalsEnabled(GetExecutionContext()) &&
-             name == html_names::kOnportalactivateAttr) {
-    GetDocument().SetWindowAttributeEventListener(
-        event_type_names::kPortalactivate,
         JSEventHandlerForContentAttribute::Create(GetExecutionContext(), name,
                                                   value));
   } else if (RuntimeEnabledFeatures::TimeZoneChangeEventEnabled() &&
@@ -414,11 +407,10 @@ bool HTMLFrameSetElement::LayoutObjectIsNeeded(
 }
 
 LayoutObject* HTMLFrameSetElement::CreateLayoutObject(
-    const ComputedStyle& style,
-    LegacyLayout legacy) {
+    const ComputedStyle& style) {
   if (style.ContentBehavesAsNormal())
-    return LayoutObjectFactory::CreateFrameSet(*this, style, legacy);
-  return LayoutObject::CreateObject(this, style, legacy);
+    return MakeGarbageCollected<LayoutFrameSet>(this);
+  return LayoutObject::CreateObject(this, style);
 }
 
 void HTMLFrameSetElement::AttachLayoutTree(AttachContext& context) {
@@ -430,7 +422,7 @@ void HTMLFrameSetElement::AttachLayoutTree(AttachContext& context) {
 void HTMLFrameSetElement::DefaultEventHandler(Event& evt) {
   auto* mouse_event = DynamicTo<MouseEvent>(evt);
   if (mouse_event && !NoResize() && GetLayoutObject() &&
-      GetLayoutObject()->IsFrameSetIncludingNG()) {
+      GetLayoutObject()->IsFrameSet()) {
     if (UserResize(*mouse_event)) {
       evt.SetDefaultHandled();
       return;
@@ -449,15 +441,13 @@ Node::InsertionNotificationRequest HTMLFrameSetElement::InsertedInto(
   return HTMLElement::InsertedInto(insertion_point);
 }
 void HTMLFrameSetElement::WillRecalcStyle(const StyleRecalcChange) {
+  // TODO(futhark): This makes no sense at all. Any style changes should trigger
+  // layout and paint invalidation as a result of the style recalc. With that
+  // fixed, WillRecalcStyle() can be removed.
   if (NeedsStyleRecalc() && GetLayoutObject()) {
-    if (GetForceReattachLayoutTree()) {
-      // Adding a frameset to the top layer for fullscreen forces a reattach.
-      SetNeedsReattachLayoutTree();
-    } else {
-      GetLayoutObject()->SetNeedsLayoutAndFullPaintInvalidation(
-          layout_invalidation_reason::kStyleChange);
-    }
-    ClearNeedsStyleRecalc();
+    // fast/frames/ tests for border invalidation rely on this in order to pass
+    GetLayoutObject()->SetNeedsLayoutAndFullPaintInvalidation(
+        layout_invalidation_reason::kStyleChange);
   }
 }
 

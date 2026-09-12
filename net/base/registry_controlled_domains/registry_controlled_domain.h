@@ -115,19 +115,19 @@
 
 #include <stddef.h>
 
+#include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 
-#include "base/strings/string_piece.h"
+#include "base/containers/span.h"
 #include "net/base/net_export.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class GURL;
 
 namespace url {
 class Origin;
 }
-
-struct DomainRule;
 
 namespace net::registry_controlled_domains {
 
@@ -146,7 +146,7 @@ enum PrivateRegistryFilter {
   INCLUDE_PRIVATE_REGISTRIES
 };
 
-// This enum is a required parameter to the GetRegistryLength functions
+// This enum is a required parameter to the GetRegistry functions
 // declared for this service. Whenever there is no matching rule in the
 // effective-TLD data (or in the default data, if the resource failed to
 // load), the result will be dependent on which enum value was passed in.
@@ -190,8 +190,14 @@ NET_EXPORT std::string GetDomainAndRegistry(const url::Origin& origin,
 // Like the GURL / Origin versions, but takes a host (which is canonicalized
 // internally). Prefer either the GURL or Origin variants instead of this one
 // to avoid needing to re-canonicalize the host.
-NET_EXPORT std::string GetDomainAndRegistry(base::StringPiece host,
+NET_EXPORT std::string GetDomainAndRegistry(std::string_view host,
                                             PrivateRegistryFilter filter);
+
+// Same as above, but returns a StringPiece that is backed by the supplied
+// url::Origin.
+NET_EXPORT std::string_view GetDomainAndRegistryAsStringPiece(
+    const url::Origin& origin,
+    PrivateRegistryFilter filter);
 
 // These convenience functions return true if the two GURLs or Origins both have
 // hosts and one of the following is true:
@@ -200,66 +206,71 @@ NET_EXPORT std::string GetDomainAndRegistry(base::StringPiece host,
 //   URLs.  Note that this means the trailing dot, if any, must match too.
 // Effectively, callers can use this function to check whether the input URLs
 // represent hosts "on the same site".
-NET_EXPORT bool SameDomainOrHost(const GURL& gurl1, const GURL& gurl2,
+NET_EXPORT bool SameDomainOrHost(const GURL& gurl1,
+                                 const GURL& gurl2,
                                  PrivateRegistryFilter filter);
 NET_EXPORT bool SameDomainOrHost(const url::Origin& origin1,
                                  const url::Origin& origin2,
-                                 PrivateRegistryFilter filter);
-// Note: this returns false if |origin2| is not set.
-NET_EXPORT bool SameDomainOrHost(const url::Origin& origin1,
-                                 const absl::optional<url::Origin>& origin2,
                                  PrivateRegistryFilter filter);
 NET_EXPORT bool SameDomainOrHost(const GURL& gurl,
                                  const url::Origin& origin,
                                  PrivateRegistryFilter filter);
 
-// Finds the length in bytes of the registrar portion of the host in the
-// given GURL.  Returns std::string::npos if the GURL is invalid or has no
-// host (e.g. a file: URL).  Returns 0 if the GURL has multiple trailing dots,
-// is an IP address, has no subcomponents, or is itself a recognized registry
-// identifier.  The result is also dependent on the UnknownRegistryFilter.
-// If no matching rule is found in the effective-TLD data (or in
-// the default data, if the resource failed to load), returns 0 if
-// |unknown_filter| is EXCLUDE_UNKNOWN_REGISTRIES, or the length of the last
-// subcomponent if |unknown_filter| is INCLUDE_UNKNOWN_REGISTRIES.
+// Finds the registrar portion of the host in the given GURL.  Returns
+// std::nullopt if the GURL is invalid or has no host (e.g. a file: URL).
+// Returns "" if the GURL has multiple trailing dots, is an IP address, has no
+// subcomponents, or is itself a recognized registry identifier.  The result is
+// also dependent on the UnknownRegistryFilter.  If no matching rule is found in
+// the effective-TLD data (or in the default data, if the resource failed to
+// load), returns "" if |unknown_filter| is EXCLUDE_UNKNOWN_REGISTRIES, or the
+// last subcomponent if |unknown_filter| is INCLUDE_UNKNOWN_REGISTRIES.
+//
+// The returned string_view has the same lifetime as the `gurl` argument.
 //
 // Examples:
-//   http://www.google.com/file.html -> 3                 (com)
-//   http://..google.com/file.html   -> 3                 (com)
-//   http://google.com./file.html    -> 4                 (com)
-//   http://a.b.co.uk/file.html      -> 5                 (co.uk)
-//   file:///C:/bar.html             -> std::string::npos (no host)
-//   http://foo.com../file.html      -> 0                 (multiple trailing
-//                                                         dots)
-//   http://192.168.0.1/file.html    -> 0                 (IP address)
-//   http://bar/file.html            -> 0                 (no subcomponents)
-//   http://co.uk/file.html          -> 0                 (host is a registry)
-//   http://foo.bar/file.html        -> 0 or 3, depending (no rule; assume
-//                                                         bar)
-NET_EXPORT size_t GetRegistryLength(const GURL& gurl,
-                                    UnknownRegistryFilter unknown_filter,
-                                    PrivateRegistryFilter private_filter);
+//   http://www.google.com/file.html -> "com"
+//   http://..google.com/file.html   -> "com"
+//   http://google.com./file.html    -> "com."
+//   http://a.b.co.uk/file.html      -> "co.uk"
+//   file:///C:/bar.html             -> std::nullopt (no host)
+//   http://foo.com../file.html      -> ""           (multiple trailing dots)
+//   http://192.168.0.1/file.html    -> ""           (IP address)
+//   http://bar/file.html            -> ""           (no subcomponents)
+//   http://co.uk/file.html          -> ""           (host is a registry)
+//   http://foo.bar/file.html        -> "" or "bar"  (no rule; assume bar)
+NET_EXPORT std::optional<std::string_view> GetRegistry(
+    const GURL& gurl,
+    UnknownRegistryFilter unknown_filter,
+    PrivateRegistryFilter private_filter);
 
 // Returns true if the given host name has a registry-controlled domain. The
 // host name will be internally canonicalized. Also returns true for invalid
 // host names like "*.google.com" as long as it has a valid registry-controlled
-// portion (see PermissiveGetHostRegistryLength for particulars).
+// portion (see PermissiveGetHostRegistry for particulars).
 NET_EXPORT bool HostHasRegistryControlledDomain(
-    base::StringPiece host,
+    std::string_view host,
     UnknownRegistryFilter unknown_filter,
     PrivateRegistryFilter private_filter);
 
-// Like GetRegistryLength, but takes a previously-canonicalized host instead of
-// a GURL. Prefer the GURL version or HasRegistryControlledDomain to eliminate
-// the possibility of bugs with non-canonical hosts.
+// Returns true if the given host name is a registry identifier. The name should
+// be already canonicalized, and not an IP address. This returns true for
+// registries specified by wildcard rules as well as non-wildcard rules. For
+// example, if there is a wildcard rule of "foo.bar", then "a.foo.bar" is
+// considered a registry identifier.
+NET_EXPORT bool HostIsRegistryIdentifier(std::string_view canon_host,
+                                         PrivateRegistryFilter private_filter);
+
+// Like GetRegistry, but takes a previously-canonicalized host instead of a
+// GURL. Prefer the GURL version or HasRegistryControlledDomain to eliminate the
+// possibility of bugs with non-canonical hosts.
 //
 // If you have a non-canonical host name, use the "Permissive" version instead.
-NET_EXPORT size_t
-GetCanonicalHostRegistryLength(base::StringPiece canon_host,
-                               UnknownRegistryFilter unknown_filter,
-                               PrivateRegistryFilter private_filter);
+NET_EXPORT std::optional<std::string_view> GetCanonicalHostRegistry(
+    std::string_view canon_host,
+    UnknownRegistryFilter unknown_filter,
+    PrivateRegistryFilter private_filter);
 
-// Like GetRegistryLength for a potentially non-canonicalized hostname.  This
+// Like GetRegistry for a potentially non-canonicalized hostname.  This
 // splits the input into substrings at '.' characters, then attempts to
 // piecewise-canonicalize the substrings. After finding the registry length of
 // the concatenated piecewise string, it then maps back to the corresponding
@@ -282,26 +293,24 @@ GetCanonicalHostRegistryLength(base::StringPiece canon_host,
 //
 // The string won't be trimmed, so things like trailing spaces will be
 // considered part of the host and therefore won't match any TLD. It will
-// return std::string::npos like GetRegistryLength() for empty input, but
-// because invalid portions are skipped, it won't return npos in any other case.
-NET_EXPORT size_t
-PermissiveGetHostRegistryLength(base::StringPiece host,
-                                UnknownRegistryFilter unknown_filter,
-                                PrivateRegistryFilter private_filter);
-NET_EXPORT size_t
-PermissiveGetHostRegistryLength(base::StringPiece16 host,
-                                UnknownRegistryFilter unknown_filter,
-                                PrivateRegistryFilter private_filter);
-
-typedef const struct DomainRule* (*FindDomainPtr)(const char *, unsigned int);
+// return std::nullopt like GetRegistry() for empty input, but
+// because invalid portions are skipped, it won't return std::nullopt in any
+// other case.
+NET_EXPORT std::optional<std::string_view> PermissiveGetHostRegistry(
+    std::string_view host,
+    UnknownRegistryFilter unknown_filter,
+    PrivateRegistryFilter private_filter);
+NET_EXPORT std::optional<std::u16string_view> PermissiveGetHostRegistry(
+    std::u16string_view host,
+    UnknownRegistryFilter unknown_filter,
+    PrivateRegistryFilter private_filter);
 
 // Used for unit tests. Uses default domains.
 NET_EXPORT_PRIVATE void ResetFindDomainGraphForTesting();
 
 // Used for unit tests, so that a frozen list of domains is used.
 NET_EXPORT_PRIVATE void SetFindDomainGraphForTesting(
-    const unsigned char* domains,
-    size_t length);
+    base::span<const uint8_t> domains);
 
 }  // namespace net::registry_controlled_domains
 

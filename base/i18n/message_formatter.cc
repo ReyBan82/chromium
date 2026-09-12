@@ -4,6 +4,8 @@
 
 #include "base/i18n/message_formatter.h"
 
+#include <string_view>
+
 #include "base/check.h"
 #include "base/i18n/unicodestring.h"
 #include "base/logging.h"
@@ -16,29 +18,27 @@
 
 using icu::UnicodeString;
 
-namespace base {
-namespace i18n {
-namespace {
-UnicodeString UnicodeStringFromStringPiece(StringPiece str) {
-  return UnicodeString::fromUTF8(
-      icu::StringPiece(str.data(), base::checked_cast<int32_t>(str.size())));
-}
-}  // anonymous namespace
+namespace base::i18n_internal {
 
-namespace internal {
+icu::UnicodeString UnicodeStringFromStringView(std::string_view str) {
+  return icu::UnicodeString::fromUTF8(
+      std::string_view(str.data(), base::checked_cast<int32_t>(str.size())));
+}
+
 MessageArg::MessageArg() : formattable(nullptr) {}
 
 MessageArg::MessageArg(const char* s)
-    : formattable(new icu::Formattable(UnicodeStringFromStringPiece(s))) {}
+    : formattable(new icu::Formattable(UnicodeStringFromStringView(s))) {}
 
-MessageArg::MessageArg(StringPiece s)
-    : formattable(new icu::Formattable(UnicodeStringFromStringPiece(s))) {}
+MessageArg::MessageArg(std::string_view s)
+    : formattable(new icu::Formattable(UnicodeStringFromStringView(s))) {}
 
 MessageArg::MessageArg(const std::string& s)
-    : formattable(new icu::Formattable(UnicodeString::fromUTF8(s))) {}
+    : formattable(new icu::Formattable(icu::UnicodeString::fromUTF8(s))) {}
 
 MessageArg::MessageArg(const std::u16string& s)
-    : formattable(new icu::Formattable(UnicodeString(s.data(), s.size()))) {}
+    : formattable(
+          new icu::Formattable(icu::UnicodeString(s.data(), s.size()))) {}
 
 MessageArg::MessageArg(int i) : formattable(new icu::Formattable(i)) {}
 
@@ -46,31 +46,35 @@ MessageArg::MessageArg(int64_t i) : formattable(new icu::Formattable(i)) {}
 
 MessageArg::MessageArg(double d) : formattable(new icu::Formattable(d)) {}
 
-MessageArg::MessageArg(const Time& t)
-    : formattable(new icu::Formattable(static_cast<UDate>(t.ToJsTime()))) {}
+MessageArg::MessageArg(Time t)
+    : formattable(new icu::Formattable(
+          static_cast<UDate>(t.InMillisecondsFSinceUnixEpoch()))) {}
 
 MessageArg::~MessageArg() = default;
 
 // Tests if this argument has a value, and if so increments *count.
-bool MessageArg::has_value(int *count) const {
-  if (formattable == nullptr)
+bool MessageArg::has_value(int* count) const {
+  if (formattable == nullptr) {
     return false;
+  }
 
   ++*count;
   return true;
 }
 
-}  // namespace internal
+}  // namespace base::i18n_internal
+
+namespace base::i18n {
 
 std::u16string MessageFormatter::FormatWithNumberedArgs(
-    StringPiece16 msg,
-    const internal::MessageArg& arg0,
-    const internal::MessageArg& arg1,
-    const internal::MessageArg& arg2,
-    const internal::MessageArg& arg3,
-    const internal::MessageArg& arg4,
-    const internal::MessageArg& arg5,
-    const internal::MessageArg& arg6) {
+    std::u16string_view msg,
+    const i18n_internal::MessageArg& arg0,
+    const i18n_internal::MessageArg& arg1,
+    const i18n_internal::MessageArg& arg2,
+    const i18n_internal::MessageArg& arg3,
+    const i18n_internal::MessageArg& arg4,
+    const i18n_internal::MessageArg& arg5,
+    const i18n_internal::MessageArg& arg6) {
   int32_t args_count = 0;
   icu::Formattable args[] = {
       arg0.has_value(&args_count) ? *arg0.formattable : icu::Formattable(),
@@ -84,7 +88,7 @@ std::u16string MessageFormatter::FormatWithNumberedArgs(
 
   UnicodeString msg_string(msg.data(), msg.size());
   UErrorCode error = U_ZERO_ERROR;
-  icu::MessageFormat format(msg_string,  error);
+  icu::MessageFormat format(msg_string, error);
   icu::UnicodeString formatted;
   icu::FieldPosition ignore(icu::FieldPosition::DONT_CARE);
   format.format(args, args_count, formatted, ignore, error);
@@ -97,29 +101,29 @@ std::u16string MessageFormatter::FormatWithNumberedArgs(
 }
 
 std::u16string MessageFormatter::FormatWithNamedArgs(
-    StringPiece16 msg,
-    StringPiece name0,
-    const internal::MessageArg& arg0,
-    StringPiece name1,
-    const internal::MessageArg& arg1,
-    StringPiece name2,
-    const internal::MessageArg& arg2,
-    StringPiece name3,
-    const internal::MessageArg& arg3,
-    StringPiece name4,
-    const internal::MessageArg& arg4,
-    StringPiece name5,
-    const internal::MessageArg& arg5,
-    StringPiece name6,
-    const internal::MessageArg& arg6) {
+    std::u16string_view msg,
+    std::string_view name0,
+    const i18n_internal::MessageArg& arg0,
+    std::string_view name1,
+    const i18n_internal::MessageArg& arg1,
+    std::string_view name2,
+    const i18n_internal::MessageArg& arg2,
+    std::string_view name3,
+    const i18n_internal::MessageArg& arg3,
+    std::string_view name4,
+    const i18n_internal::MessageArg& arg4,
+    std::string_view name5,
+    const i18n_internal::MessageArg& arg5,
+    std::string_view name6,
+    const i18n_internal::MessageArg& arg6) {
   icu::UnicodeString names[] = {
-      UnicodeStringFromStringPiece(name0),
-      UnicodeStringFromStringPiece(name1),
-      UnicodeStringFromStringPiece(name2),
-      UnicodeStringFromStringPiece(name3),
-      UnicodeStringFromStringPiece(name4),
-      UnicodeStringFromStringPiece(name5),
-      UnicodeStringFromStringPiece(name6),
+      i18n_internal::UnicodeStringFromStringView(name0),
+      i18n_internal::UnicodeStringFromStringView(name1),
+      i18n_internal::UnicodeStringFromStringView(name2),
+      i18n_internal::UnicodeStringFromStringView(name3),
+      i18n_internal::UnicodeStringFromStringView(name4),
+      i18n_internal::UnicodeStringFromStringView(name5),
+      i18n_internal::UnicodeStringFromStringView(name6),
   };
   int32_t args_count = 0;
   icu::Formattable args[] = {
@@ -146,5 +150,4 @@ std::u16string MessageFormatter::FormatWithNamedArgs(
   return i18n::UnicodeStringToString16(formatted);
 }
 
-}  // namespace i18n
-}  // namespace base
+}  // namespace base::i18n

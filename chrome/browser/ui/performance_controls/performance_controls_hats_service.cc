@@ -4,91 +4,45 @@
 
 #include "chrome/browser/ui/performance_controls/performance_controls_hats_service.h"
 
+#include <algorithm>
+#include <string>
+
+#include "base/byte_size.h"
+#include "base/check.h"
 #include "base/feature_list.h"
-#include "base/logging.h"
+#include "base/functional/callback_helpers.h"
+#include "base/rand_util.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/system/sys_info.h"
+#include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/performance_manager/public/user_tuning/battery_saver_mode_manager.h"
 #include "chrome/browser/performance_manager/public/user_tuning/user_performance_tuning_manager.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/hats/hats_service.h"
 #include "chrome/browser/ui/hats/hats_service_factory.h"
+#include "chrome/common/channel_info.h"
 #include "components/performance_manager/public/features.h"
-#include "components/performance_manager/public/user_tuning/prefs.h"
-#include "components/prefs/pref_service.h"
+
+using performance_manager::features::kPerformanceControlsPPMSurvey;
+using performance_manager::features::kPerformanceControlsPPMSurveyMaxDelay;
+using performance_manager::features::kPerformanceControlsPPMSurveyMinDelay;
+using performance_manager::features::
+    kPerformanceControlsPPMSurveySegmentMaxMemoryGB1;
+using performance_manager::features::
+    kPerformanceControlsPPMSurveySegmentMaxMemoryGB2;
+using performance_manager::features::kPerformanceControlsPPMSurveySegmentName1;
+using performance_manager::features::kPerformanceControlsPPMSurveySegmentName2;
+using performance_manager::features::kPerformanceControlsPPMSurveySegmentName3;
+using performance_manager::features::
+    kPerformanceControlsPPMSurveyUniformSampleValue;
 
 PerformanceControlsHatsService::PerformanceControlsHatsService(Profile* profile)
-    : profile_(profile) {
-  PrefService* local_state = g_browser_process->local_state();
-  if (local_state) {
-    local_pref_registrar_.Init(local_state);
-    if (base::FeatureList::IsEnabled(
-            performance_manager::features::kHighEfficiencyModeAvailable) &&
-        base::FeatureList::IsEnabled(
-            performance_manager::features::
-                kPerformanceControlsHighEfficiencyOptOutSurvey)) {
-      local_pref_registrar_.Add(
-          performance_manager::user_tuning::prefs::kHighEfficiencyModeEnabled,
-          base::BindRepeating(
-              &PerformanceControlsHatsService::OnHighEfficiencyModeChange,
-              base::Unretained(this)));
-    }
-
-    if (base::FeatureList::IsEnabled(
-            performance_manager::features::kBatterySaverModeAvailable) &&
-        base::FeatureList::IsEnabled(
-            performance_manager::features::
-                kPerformanceControlsBatterySaverOptOutSurvey)) {
-      local_pref_registrar_.Add(
-          performance_manager::user_tuning::prefs::kBatterySaverModeState,
-          base::BindRepeating(
-              &PerformanceControlsHatsService::OnBatterySaverModeChange,
-              base::Unretained(this)));
-    }
-  }
-}
-
-PerformanceControlsHatsService::~PerformanceControlsHatsService() {
-  local_pref_registrar_.RemoveAll();
-}
-
-void PerformanceControlsHatsService::OnHighEfficiencyModeChange() {
-  HatsService* hats_service = HatsServiceFactory::GetForProfile(profile_, true);
-  if (!hats_service) {
-    return;
-  }
-
-  PrefService* prefs = g_browser_process->local_state();
-  // A survey for users who have turned off high efficiency mode.
-  if (!prefs->GetBoolean(performance_manager::user_tuning::prefs::
-                             kHighEfficiencyModeEnabled)) {
-    auto* pref = prefs->FindPreference(
-        performance_manager::user_tuning::prefs::kHighEfficiencyModeEnabled);
-    if (!pref->IsManaged() && !pref->IsDefaultValue()) {
-      hats_service->LaunchDelayedSurvey(
-          kHatsSurveyTriggerPerformanceControlsHighEfficiencyOptOut, 10000);
-    }
-  }
-}
-
-void PerformanceControlsHatsService::OnBatterySaverModeChange() {
-  HatsService* hats_service = HatsServiceFactory::GetForProfile(profile_, true);
-  if (!hats_service) {
-    return;
-  }
-
-  // A survey for users who have turned off battery saver.
-  PrefService* prefs = g_browser_process->local_state();
-  if (prefs->GetInteger(
-          performance_manager::user_tuning::prefs::kBatterySaverModeState) ==
-      static_cast<int>(performance_manager::user_tuning::prefs::
-                           BatterySaverModeState::kDisabled)) {
-    auto* pref = prefs->FindPreference(
-        performance_manager::user_tuning::prefs::kBatterySaverModeState);
-    if (!pref->IsManaged()) {
-      hats_service->LaunchDelayedSurvey(
-          kHatsSurveyTriggerPerformanceControlsBatterySaverOptOut, 10000);
-    }
-  }
+    : profile_(profile),
+      delay_before_ppm_survey_(
+          base::RandTimeDelta(kPerformanceControlsPPMSurveyMinDelay.Get(),
+                              kPerformanceControlsPPMSurveyMaxDelay.Get())) {
+  CHECK(delay_before_ppm_survey_.is_positive());
 }
 
 void PerformanceControlsHatsService::OpenedNewTabPage() {
@@ -97,37 +51,75 @@ void PerformanceControlsHatsService::OpenedNewTabPage() {
     return;
   }
 
-  PrefService* prefs = g_browser_process->local_state();
-  const int battery_saver_mode = prefs->GetInteger(
-      performance_manager::user_tuning::prefs::kBatterySaverModeState);
-  const bool high_efficiency_mode = prefs->GetBoolean(
-      performance_manager::user_tuning::prefs::kHighEfficiencyModeEnabled);
+  const bool battery_saver_mode =
+      performance_manager::user_tuning::BatterySaverModeManager::GetInstance()
+          ->IsBatterySaverModeEnabled();
+  const bool memory_saver_mode = performance_manager::user_tuning::
+                                     UserPerformanceTuningManager::GetInstance()
+                                         ->IsMemorySaverModeActive();
 
-  // A general performance survey for all users.
-  if (base::FeatureList::IsEnabled(performance_manager::features::
-                                       kPerformanceControlsPerformanceSurvey)) {
-    hats_service->LaunchSurvey(
-        kHatsSurveyTriggerPerformanceControlsPerformance, base::DoNothing(),
-        base::DoNothing(), {{"high_efficiency_mode", high_efficiency_mode}},
-        {{"battery_saver_mode", base::NumberToString(battery_saver_mode)}});
+  auto launch_survey_if_enabled =
+      [hats_service, battery_saver_mode, memory_saver_mode](
+          const base::Feature& feature, const std::string& trigger,
+          const SurveyBitsData& extra_data = {},
+          const SurveyStringData& string_data = {}) {
+        if (base::FeatureList::IsEnabled(feature)) {
+          SurveyBitsData bits_data = {
+              {kMemorySaverPSDName, memory_saver_mode},
+              {kBatterySaverPSDName, battery_saver_mode}};
+          for (const auto& [key, value] : extra_data) {
+            auto [_, inserted] = bits_data.try_emplace(key, value);
+            CHECK(inserted);
+          }
+          hats_service->LaunchSurvey(trigger, base::DoNothing(),
+                                     base::DoNothing(), bits_data, string_data);
+        }
+      };
+
+  // Survey to correlate UMA metrics with Poor Performance Moments.
+  if (auto ppm_segment_name = GetPPMSurveySegmentName();
+      !ppm_segment_name.empty() && MayLaunchPPMSurvey()) {
+    const std::string channel =
+        chrome::GetChannelName(chrome::WithExtendedStable(false));
+    launch_survey_if_enabled(
+        kPerformanceControlsPPMSurvey, kHatsSurveyTriggerPerformanceControlsPPM,
+        {{kUniformSamplePSDName,
+          kPerformanceControlsPPMSurveyUniformSampleValue.Get()}},
+        {{kPerformanceSegmentPSDName, ppm_segment_name},
+         {kChannelPSDName, channel.empty() ? "stable" : channel}});
   }
+}
 
-  base::Time last_battery_timestamp =
-      performance_manager::user_tuning::UserPerformanceTuningManager::
-          GetInstance()
-              ->GetLastBatteryUsageTimestamp();
-
-  // A battery performance survey for users with a battery-powered device.
-  if (base::FeatureList::IsEnabled(
-          performance_manager::features::
-              kPerformanceControlsBatteryPerformanceSurvey) &&
-      (base::Time::Now() - last_battery_timestamp) <=
-          performance_manager::features::
-              kPerformanceControlsBatterySurveyLookback.Get()) {
-    hats_service->LaunchSurvey(
-        kHatsSurveyTriggerPerformanceControlsBatteryPerformance,
-        base::DoNothing(), base::DoNothing(),
-        {{"high_efficiency_mode", high_efficiency_mode}},
-        {{"battery_saver_mode", base::NumberToString(battery_saver_mode)}});
+bool PerformanceControlsHatsService::MayLaunchPPMSurvey() const {
+  base::TimeDelta current_delay = base::Time::Now() - profile_->GetStartTime();
+  if (current_delay < delay_before_ppm_survey_) {
+    return false;
   }
+  // Allow an extra minute in case the random delay is right at the end of the
+  // range.
+  base::TimeDelta max_delay =
+      std::max(kPerformanceControlsPPMSurveyMaxDelay.Get(),
+               delay_before_ppm_survey_ + base::Minutes(1));
+  if (current_delay > max_delay) {
+    return false;
+  }
+  return true;
+}
+
+std::string PerformanceControlsHatsService::GetPPMSurveySegmentName() {
+  base::ByteSize system_ram = memory_amount_for_testing_.value_or(
+      base::SysInfo::AmountOfTotalPhysicalMemory());
+  base::ByteSize max_memory1 =
+      base::GiB(kPerformanceControlsPPMSurveySegmentMaxMemoryGB1.Get());
+  base::ByteSize max_memory2 =
+      base::GiB(kPerformanceControlsPPMSurveySegmentMaxMemoryGB2.Get());
+  if (max_memory1.is_zero() || system_ram <= max_memory1) {
+    // Segment 1 has no upper bound, or the system RAM is in its bounds.
+    return kPerformanceControlsPPMSurveySegmentName1.Get();
+  }
+  if (max_memory2.is_zero() || system_ram <= max_memory2) {
+    // Segment 2 has no upper bound, or the system RAM is in its bounds.
+    return kPerformanceControlsPPMSurveySegmentName2.Get();
+  }
+  return kPerformanceControlsPPMSurveySegmentName3.Get();
 }

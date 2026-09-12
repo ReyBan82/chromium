@@ -8,6 +8,7 @@
 #include "build/build_config.h"
 #include "chrome/common/url_constants.h"
 #include "components/sessions/core/serialized_navigation_entry.h"
+#include "content/public/browser/navigation_entry.h"
 #include "content/public/common/referrer.h"
 
 #if BUILDFLAG(IS_ANDROID)
@@ -37,7 +38,7 @@ void ChangeDestination(const GURL& new_destination_url,
 
 }  // namespace
 
-ChromeSerializedNavigationDriver::~ChromeSerializedNavigationDriver() {}
+ChromeSerializedNavigationDriver::~ChromeSerializedNavigationDriver() = default;
 
 // static
 ChromeSerializedNavigationDriver*
@@ -67,18 +68,12 @@ void ChromeSerializedNavigationDriver::Sanitize(
   }
 
 #if BUILDFLAG(IS_ANDROID)
-  // Rewrite the old new tab and welcome page URLs to the new NTP URL.
+  // Rewrite the old new tab URL to the new NTP URL.
   if (navigation->virtual_url().SchemeIs(content::kChromeUIScheme) &&
-      (navigation->virtual_url().host_piece() == chrome::kChromeUIWelcomeHost ||
-       navigation->virtual_url().host_piece() == chrome::kChromeUINewTabHost)) {
+      navigation->virtual_url().host() == chrome::kChromeUINewTabHost) {
     ChangeDestination(GURL(chrome::kChromeUINativeNewTabURL), navigation);
-  }
-
-  if (navigation->virtual_url().SchemeIs(content::kChromeUIScheme) &&
-      navigation->virtual_url().host_piece() == chrome::kChromeUIHistoryHost) {
-    ChangeDestination(GURL(chrome::kChromeUINativeHistoryURL), navigation);
   }
 #endif  // BUILDFLAG(IS_ANDROID)
 }
 
-ChromeSerializedNavigationDriver::ChromeSerializedNavigationDriver() {}
+ChromeSerializedNavigationDriver::ChromeSerializedNavigationDriver() = default;

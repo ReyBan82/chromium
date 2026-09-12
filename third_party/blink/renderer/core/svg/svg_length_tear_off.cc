@@ -30,9 +30,13 @@
 
 #include "third_party/blink/renderer/core/svg/svg_length_tear_off.h"
 
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/svg/svg_element.h"
+#include "third_party/blink/renderer/core/svg/svg_length_context.h"
+#include "third_party/blink/renderer/core/svg/svg_zoom_migration.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
@@ -53,10 +57,6 @@ inline bool IsValidLengthUnit(CSSPrimitiveValue::UnitType unit) {
 
 inline bool IsValidLengthUnit(uint16_t type) {
   return IsValidLengthUnit(static_cast<CSSPrimitiveValue::UnitType>(type));
-}
-
-inline bool CanResolveRelativeUnits(const SVGElement* context_element) {
-  return context_element && context_element->isConnected();
 }
 
 inline CSSPrimitiveValue::UnitType ToCSSUnitType(uint16_t type) {
@@ -96,13 +96,55 @@ inline uint16_t ToInterfaceConstant(CSSPrimitiveValue::UnitType type) {
 }
 
 bool HasExposedLengthUnit(const SVGLength& length) {
-  if (length.IsCalculated())
+  if (!length.IsNumericValue()) {
     return false;
+  }
 
   CSSPrimitiveValue::UnitType unit = length.NumericLiteralType();
   return IsValidLengthUnit(unit) ||
          unit == CSSPrimitiveValue::UnitType::kUnknown ||
          unit == CSSPrimitiveValue::UnitType::kUserUnits;
+}
+
+bool EnsureResolvable(SVGElement* context_element, bool needs_layout) {
+  if (!context_element || !context_element->isConnected()) {
+    return false;
+  }
+  Document& document = context_element->GetDocument();
+  if (needs_layout) {
+    document.UpdateStyleAndLayoutForNode(context_element,
+                                         DocumentUpdateReason::kJavaScript);
+  } else {
+    document.UpdateStyleAndLayoutTreeForElement(
+        context_element, DocumentUpdateReason::kJavaScript);
+  }
+  return true;
+}
+
+bool EnsureResolvable(const SVGLength& length, SVGElement* context_element) {
+  if (!length.IsRelative()) {
+    return true;
+  }
+  const bool needs_layout = length.IsPercentage() || !length.IsNumericValue();
+  return EnsureResolvable(context_element, needs_layout);
+}
+
+bool EnsureResolvable(const SVGLength& length,
+                      CSSPrimitiveValue::UnitType other_unit_type,
+                      SVGElement* context_element) {
+  if (!length.IsRelative() &&
+      !CSSPrimitiveValue::IsRelativeUnit(other_unit_type)) {
+    return true;
+  }
+  const bool needs_layout =
+      length.IsPercentage() || !length.IsNumericValue() ||
+      other_unit_type == CSSPrimitiveValue::UnitType::kPercentage;
+  return EnsureResolvable(context_element, needs_layout);
+}
+
+void ThrowUnresolvableRelativeLength(ExceptionState& exception_state) {
+  exception_state.ThrowDOMException(DOMExceptionCode::kNotSupportedError,
+                                    "Could not resolve relative length.");
 }
 
 }  // namespace
@@ -118,13 +160,19 @@ SVGLengthMode SVGLengthTearOff::UnitMode() {
 }
 
 float SVGLengthTearOff::value(ExceptionState& exception_state) {
-  if (Target()->IsRelative() && !CanResolveRelativeUnits(ContextElement())) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kNotSupportedError,
-                                      "Could not resolve relative length.");
+  // Return 0 for unparsed values.
+  // See https://github.com/w3c/svgwg/issues/1038
+  if (Target()->AsCSSValue().IsUnparsedDeclaration()) {
     return 0;
   }
-  SVGLengthContext length_context(ContextElement());
-  return Target()->Value(length_context);
+  SVGElement* context_element = ContextElement();
+  if (!EnsureResolvable(*Target(), context_element)) {
+    ThrowUnresolvableRelativeLength(exception_state);
+    return 0;
+  }
+  SVGLengthContext length_context(context_element);
+  return NoopWillBeInvScaleScalar(Target()->Value(length_context),
+                                  length_context.GetZoom());
 }
 
 void SVGLengthTearOff::setValue(float value, ExceptionState& exception_state) {
@@ -132,22 +180,28 @@ void SVGLengthTearOff::setValue(float value, ExceptionState& exception_state) {
     ThrowReadOnly(exception_state);
     return;
   }
-  if (Target()->IsRelative() && !CanResolveRelativeUnits(ContextElement())) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kNotSupportedError,
-                                      "Could not resolve relative length.");
-    return;
-  }
-  SVGLengthContext length_context(ContextElement());
-  if (Target()->IsCalculated())
+  if (!Target()->IsNumericValue() || Target()->HasContainerRelativeUnits()) {
     Target()->SetValueAsNumber(value);
-  else
-    Target()->SetValue(value, length_context);
-  CommitChange();
+  } else {
+    SVGElement* context_element = ContextElement();
+    if (!EnsureResolvable(*Target(), context_element)) {
+      ThrowUnresolvableRelativeLength(exception_state);
+      return;
+    }
+    SVGLengthContext length_context(context_element);
+    const float zoomed_value_in_units =
+        length_context.ConvertValueFromUserUnits(
+            NoopWillBeScaleScalar(value, length_context.GetZoom()),
+            Target()->UnitMode(), Target()->NumericLiteralType());
+    Target()->SetValueInSpecifiedUnits(zoomed_value_in_units);
+  }
+  CommitChange(SVGPropertyCommitReason::kUpdated);
 }
 
 float SVGLengthTearOff::valueInSpecifiedUnits() {
-  if (Target()->IsCalculated())
+  if (!Target()->IsNumericValue()) {
     return 0;
+  }
   return Target()->ValueInSpecifiedUnits();
 }
 
@@ -158,11 +212,12 @@ void SVGLengthTearOff::setValueInSpecifiedUnits(
     ThrowReadOnly(exception_state);
     return;
   }
-  if (Target()->IsCalculated())
+  if (!Target()->IsNumericValue()) {
     Target()->SetValueAsNumber(value);
-  else
+  } else {
     Target()->SetValueInSpecifiedUnits(value);
-  CommitChange();
+  }
+  CommitChange(SVGPropertyCommitReason::kUpdated);
 }
 
 String SVGLengthTearOff::valueAsString() {
@@ -179,10 +234,10 @@ void SVGLengthTearOff::setValueAsString(const String& str,
   if (status != SVGParseStatus::kNoError) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
-        "The value provided ('" + str + "') is invalid.");
+        StrCat({"The value provided ('", str, "') is invalid."}));
     return;
   }
-  CommitChange();
+  CommitChange(SVGPropertyCommitReason::kUpdated);
 }
 
 void SVGLengthTearOff::newValueSpecifiedUnits(uint16_t unit_type,
@@ -195,13 +250,13 @@ void SVGLengthTearOff::newValueSpecifiedUnits(uint16_t unit_type,
   if (!IsValidLengthUnit(unit_type)) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kNotSupportedError,
-        "Cannot set value with unknown or invalid units (" +
-            String::Number(unit_type) + ").");
+        StrCat({"Cannot set value with unknown or invalid units (",
+                String::Number(unit_type), ")."}));
     return;
   }
   Target()->NewValueSpecifiedUnits(ToCSSUnitType(unit_type),
                                    value_in_specified_units);
-  CommitChange();
+  CommitChange(SVGPropertyCommitReason::kUpdated);
 }
 
 void SVGLengthTearOff::convertToSpecifiedUnits(
@@ -214,20 +269,24 @@ void SVGLengthTearOff::convertToSpecifiedUnits(
   if (!IsValidLengthUnit(unit_type)) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kNotSupportedError,
-        "Cannot convert to unknown or invalid units (" +
-            String::Number(unit_type) + ").");
+        StrCat({"Cannot convert to unknown or invalid units (",
+                String::Number(unit_type), ")."}));
     return;
   }
-  if ((Target()->IsRelative() ||
-       CSSPrimitiveValue::IsRelativeUnit(ToCSSUnitType(unit_type))) &&
-      !CanResolveRelativeUnits(ContextElement())) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kNotSupportedError,
-                                      "Could not resolve relative length.");
+  // Cannot convert unparsed values.
+  // See https://github.com/w3c/svgwg/issues/1038
+  if (Target()->AsCSSValue().IsUnparsedDeclaration()) {
+    ThrowUnresolvableRelativeLength(exception_state);
     return;
   }
-  SVGLengthContext length_context(ContextElement());
+  SVGElement* context_element = ContextElement();
+  if (!EnsureResolvable(*Target(), ToCSSUnitType(unit_type), context_element)) {
+    ThrowUnresolvableRelativeLength(exception_state);
+    return;
+  }
+  SVGLengthContext length_context(context_element);
   Target()->ConvertToSpecifiedUnits(ToCSSUnitType(unit_type), length_context);
-  CommitChange();
+  CommitChange(SVGPropertyCommitReason::kUpdated);
 }
 
 SVGLengthTearOff::SVGLengthTearOff(SVGLength* target,

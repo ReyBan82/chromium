@@ -3,26 +3,46 @@
 // found in the LICENSE file.
 
 import '../controls/settings_toggle_button.js';
-import './tab_discard_exception_list.js';
+import 'chrome://resources/cr_elements/cr_link_row/cr_link_row.js';
+import 'chrome://resources/cr_elements/cr_shared_style.css.js';
+import '../settings_page/settings_section.js';
+import '../settings_shared.css.js';
+import './tab_discard/exception_list.js';
 
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {PrefService} from '/shared/settings/prefs2/pref_service.js';
+import {PrefServiceObserverMixinLit} from '/shared/settings/prefs2/pref_service_observer_mixin_lit.js';
+import {HelpBubbleMixinLit} from 'chrome://resources/cr_components/help_bubble/help_bubble_mixin_lit.js';
+import {OpenWindowProxyImpl} from 'chrome://resources/js/open_window_proxy.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
-import {SettingsToggleButtonElement} from '../controls/settings_toggle_button.js';
-import {PrefsMixin} from '../prefs/prefs_mixin.js';
+import type {SettingsToggleButtonElement} from '../controls/settings_toggle_button.js';
+import {loadTimeData} from '../i18n_setup.js';
+import {routes} from '../route.js';
+import {Router} from '../router.js';
+import {getCss as getSettingsSharedCss} from '../settings_shared_lit.css.js';
 
-import {PerformanceMetricsProxy, PerformanceMetricsProxyImpl} from './performance_metrics_proxy.js';
-import {getTemplate} from './performance_page.html.js';
-import {TabDiscardExceptionListElement} from './tab_discard_exception_list.js';
+import {PerformanceBrowserProxyImpl, PerformanceFeedbackCategory} from './performance_browser_proxy.js';
+import type {PerformanceMetricsProxy} from './performance_metrics_proxy.js';
+import {PerformanceMetricsProxyImpl} from './performance_metrics_proxy.js';
+import {getHtml} from './performance_page.html.js';
+import type {ExceptionListElement} from './tab_discard/exception_list.js';
 
-export const HIGH_EFFICIENCY_MODE_PREF =
-    'performance_tuning.high_efficiency_mode.enabled';
+export const DISCARD_RING_PREF =
+    'performance_tuning.discard_ring_treatment.enabled';
 
-const SettingsPerformancePageElementBase = PrefsMixin(PolymerElement);
+export const PERFORMANCE_INTERVENTION_NOTIFICATION_PREF =
+    'performance_tuning.intervention_notification.enabled';
+
+// browser_element_identifiers constants
+const INACTIVE_TAB_SETTING_ELEMENT_ID = 'kInactiveTabSettingElementId';
+
+const SettingsPerformancePageElementBase =
+    HelpBubbleMixinLit(PrefServiceObserverMixinLit(CrLitElement));
 
 export interface SettingsPerformancePageElement {
   $: {
-    tabDiscardExceptionsList: TabDiscardExceptionListElement,
-    toggleButton: SettingsToggleButtonElement,
+    exceptionList: ExceptionListElement,
   };
 }
 
@@ -32,16 +52,72 @@ export class SettingsPerformancePageElement extends
     return 'settings-performance-page';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return [
+      getSettingsSharedCss(),
+    ];
+  }
+
+  override render() {
+    return getHtml.bind(this)();
   }
 
   private metricsProxy_: PerformanceMetricsProxy =
       PerformanceMetricsProxyImpl.getInstance();
 
-  private onChange_() {
-    this.metricsProxy_.recordHighEfficiencyModeChanged(
-        this.getPref<boolean>(HIGH_EFFICIENCY_MODE_PREF).value);
+  override firstUpdated(changedProperties: PropertyValues<this>) {
+    super.firstUpdated(changedProperties);
+    const discardRingTreatmentToggleButton =
+        this.shadowRoot.querySelector<SettingsToggleButtonElement>(
+            '#discardRingTreatmentToggleButton');
+    if (discardRingTreatmentToggleButton) {
+      this.registerHelpBubble(
+          INACTIVE_TAB_SETTING_ELEMENT_ID,
+          discardRingTreatmentToggleButton.getBubbleAnchor());
+    }
+  }
+
+  protected onDiscardRingChange_() {
+    this.metricsProxy_.recordDiscardRingTreatmentEnabledChanged(
+        PrefService.getInstance().getPref<boolean>(DISCARD_RING_PREF).value);
+  }
+
+  protected onDiscardRingTreatmentSubLabelLinkClicked_() {
+    OpenWindowProxyImpl.getInstance().openUrl(
+        loadTimeData.getString('discardRingTreatmentLearnMoreUrl'));
+  }
+
+  protected onPerformanceInterventionSubLabelLinkClicked_() {
+    OpenWindowProxyImpl.getInstance().openUrl(
+        loadTimeData.getString('performanceInterventionLearnMoreUrl'));
+  }
+
+  protected onTabHoverPreviewCardLinkClick_(): void {
+    Router.getInstance().navigateTo(routes.APPEARANCE);
+  }
+
+  protected onPerformanceInterventionToggleButtonChange_() {
+    this.metricsProxy_.recordPerformanceInterventionToggleButtonChanged(
+        PrefService.getInstance()
+            .getPref<boolean>(PERFORMANCE_INTERVENTION_NOTIFICATION_PREF)
+            .value);
+  }
+
+  protected showSendFeedbackButton_(): boolean {
+    // <if expr="_google_chrome">
+    return true;
+    // </if>
+    // <if expr="not _google_chrome">
+    return false;
+    // </if>
+  }
+
+  protected onSendFeedback_(_e: Event) {
+    // <if expr="_google_chrome">
+    _e.stopPropagation();
+    PerformanceBrowserProxyImpl.getInstance().openFeedbackDialog(
+        PerformanceFeedbackCategory.NOTIFICATIONS);
+    // </if>
   }
 }
 
@@ -50,6 +126,8 @@ declare global {
     'settings-performance-page': SettingsPerformancePageElement;
   }
 }
+
+export {SettingsPerformancePageElement as PerformancePageElement};
 
 customElements.define(
     SettingsPerformancePageElement.is, SettingsPerformancePageElement);

@@ -5,9 +5,15 @@
 module network.mojom;
 
 import "services/network/public/mojom/cookie_manager.mojom";
+import "mojo/public/mojom/base/shared_memory.mojom";
+import "mojo/public/mojom/base/time.mojom";
 import "services/network/public/mojom/site_for_cookies.mojom";
+import "services/network/public/mojom/storage_access_api.mojom";
 import "url/mojom/url.mojom";
 import "url/mojom/origin.mojom";
+
+const uint64 kInvalidCookieVersion = 0;
+const uint64 kInitialCookieVersion = 1;
 
 enum CookieMatchType {
   EQUALS,
@@ -36,6 +42,35 @@ enum RestrictedCookieManagerRole {
   NETWORK
 };
 
+// Affects whether a cookie will be partitioned or unpartitioned. Note that it
+// is up to the RestrictedCookieManager to choose an appropriate partition key,
+// if any; this enum is advisory only.
+enum RestrictedCookiePartition {
+  // The cookie _may_ be unpartitioned.
+  UNPARTITIONED,
+  // The cookie _may_ be partitioned.
+  PARTITIONED,
+};
+
+// These params mostly mirror those of `CanonicalCookie::CreateSanitizedCookie`.
+// Note that the URL is passed separately via
+// `RestrictedCookieManager::SetCanonicalCookie`, and that the
+// RestrictedCanonicalCookieParams do not specify the PartitionKey.
+struct RestrictedCanonicalCookieParams {
+  string name;
+  string value;
+  string domain;
+  string path;
+  mojo_base.mojom.Time creation;
+  mojo_base.mojom.Time expires;
+  mojo_base.mojom.Time last_access;
+  bool secure;
+  bool http_only;
+  network.mojom.CookieSameSite same_site;
+  network.mojom.CookiePriority priority;
+  RestrictedCookiePartition partitioned;
+};
+
 // Capability to access the cookie store on behalf of a single origin.
 //
 // Instances of this interface are restricted to a single origin, and will
@@ -60,8 +95,9 @@ interface RestrictedCookieManager {
   // in service workers. |top_frame_origin| is the actual origin of the top
   // level frame or the script url for service workers. |site_for_cookies| is
   // used to determine if a cookie is accessed in a third-party context.
-  // |top_frame_origin| is used to check for content settings.
-  // |has_storage_access| is used to opt-in to using Storage Access API
+  // |top_frame_origin| is used to check for content settings. |is_ad_tagged|
+  // indicates whether this cookie access is being used for advertising.
+  // |storage_access_api_status| is used to opt-in to using Storage Access API
   // permission grants. (Note: it does *not* grant access on its own, but rather
   // allows an existing permission grant to be used, if one exists.)
   // |options| filters the returned list of cookies. The returned cookies
@@ -72,46 +108,52 @@ interface RestrictedCookieManager {
   GetAllForUrl(
       url.mojom.Url url, SiteForCookies site_for_cookies,
       url.mojom.Origin top_frame_origin,
-      bool has_storage_access,
-      CookieManagerGetOptions options) => (
+      StorageAccessApiStatus storage_access_api_status,
+      CookieManagerGetOptions options,
+      bool is_ad_tagged,
+      bool apply_devtools_overrides,
+      // Proxied restricted cookie managers need a way to signal to the
+      // restricted cookie manager that we need to filter out 3PCs.
+      // This is because we know of at least one case where this can
+      // be configured _per_ aw contents and the standard way of
+      // configuring this per cookie settings (from each browser
+      // context), is not sufficient.
+      bool force_disable_third_party_cookies) => (
       array<CookieWithAccessResult> cookies);
 
-  // Sets a canonical cookie. |status| must be an inclusion status as defined
-  // by the C++ net::CookieInclusionStatus::IsInclude() method. It is expected
-  // that exclusion reasons have been taken care of on the renderer side.
-  SetCanonicalCookie(CanonicalCookie cookie,
+  // Sets a canonical cookie.
+  SetCanonicalCookie(RestrictedCanonicalCookieParams canonical_cookie_params,
                      url.mojom.Url url,
                      SiteForCookies site_for_cookies,
                      url.mojom.Origin top_frame_origin,
-                     bool has_storage_access,
-                     CookieInclusionStatus status) => (bool success);
+                     StorageAccessApiStatus storage_access_api_status,
+                     bool is_ad_tagged,
+                     bool apply_devtools_overrides) => (bool success);
 
   // Subscribes to changes in the cookies transmitted in a request to an URL.
   //
   // The subscription is canceled by closing the pipe.
   AddChangeListener(url.mojom.Url url, SiteForCookies site_for_cookies,
                     url.mojom.Origin top_frame_origin,
-                    bool has_storage_access,
+                    StorageAccessApiStatus storage_access_api_status,
                     pending_remote<CookieChangeListener> listener) => ();
 
   // Sets a cookie.  If setting of this cookie is not permitted either by web
   // platform rules, or user preferences, the attempt will be silently ignored.
-  // This does not extend to passing in a |url| that does not match the origin
+  // This does not extend to passing in a `url` that does not match the origin
   // RestrictedCookieManager is bound to --- that will be treated as the
   // renderer violating security rules.
   //
   // The implementation may block, e.g. while cookies are still being loaded, or
   // to serialize with other operations.
-  //
-  // The booleans that are returned indicate if the site for cookies and top
-  // frame origin provided to this method from the renderer match the browser's
-  // own site for cookies and top-frame origin.
-  [Sync]
-  SetCookieFromString(url.mojom.Url url, SiteForCookies site_for_cookies,
-                      url.mojom.Origin top_frame_origin,
-                      bool has_storage_access,
-                      string cookie) => (
-                      bool site_for_cookies_ok, bool top_frame_origin_ok);
+  SetCookieFromString(
+      url.mojom.Url url,
+      SiteForCookies site_for_cookies,
+      url.mojom.Origin top_frame_origin,
+      StorageAccessApiStatus storage_access_api_status,
+      bool is_ad_tagged,
+      bool apply_devtools_overrides,
+      string cookie);
 
   // Used to get cookies for the given URL. Cookies that are blocked by user
   // preferences will be skipped, down to potentially returning an empty string.
@@ -120,11 +162,36 @@ interface RestrictedCookieManager {
   //
   // Passing in |url| that does not match the origin RestrictedCookieManager
   // is bounded to will be treated as the renderer violating security rules.
+  //
+  // This function also sets up shared memory communication with the requester
+  // when get_version_shared_memory is true. This allows the requester to get
+  // versioning information without suffering the overhead of a full IPC.
+  //
+  // |version_buffer| is a handle to a shared memory region that only
+  // contains a single 64 bit atomic integer used as a cookie version number.
+  // The number is read from renderers and incremented monotonically from the
+  // network process when cookie state changes. It can be null if
+  // |get_version_shared_memory| was false or if initialization of the region
+  // failed. |version| contains the cookie version at the time of returning the
+  // string.
   [Sync]
   GetCookiesString(url.mojom.Url url,
                    SiteForCookies site_for_cookies,
                    url.mojom.Origin top_frame_origin,
-                   bool has_storage_access) => (
+                   StorageAccessApiStatus storage_access_api_status,
+                   bool get_version_shared_memory,
+                   bool is_ad_tagged,
+                   bool apply_devtools_overrides,
+                   // Proxied restricted cookie managers need a way to signal to
+                   // the restricted cookie manager that we need to filter out
+                   // 3PCs.
+                   // This is because we know of at least one case where this
+                   // can be configured _per_ aw contents and the standard way
+                   // of configuring this per cookie settings (from each
+                   // browser context), is not sufficient.
+                   bool force_disable_third_party_cookies) => (
+                   uint64 version,
+                   mojo_base.mojom.ReadOnlySharedMemoryRegion? version_buffer,
                    string cookies);
 
   // Used to check if cookies are enabled for the given URL in context of a
@@ -137,5 +204,7 @@ interface RestrictedCookieManager {
       url.mojom.Url url,
       SiteForCookies site_for_cookies,
       url.mojom.Origin top_frame_origin,
-      bool has_storage_access) => (bool cookies_enabled);
+      StorageAccessApiStatus storage_access_api_status,
+      bool apply_devtools_overrides)
+      => (bool cookies_enabled);
 };

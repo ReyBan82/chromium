@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "base/containers/flat_set.h"
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/threading/thread_checker.h"
 #include "chrome/browser/ash/input_method/assistive_window_controller.h"
@@ -20,9 +22,13 @@
 #include "chrome/browser/ash/input_method/candidate_window_controller.h"
 #include "chrome/browser/ash/input_method/ime_service_connector.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chromeos/ash/components/login/session/session_termination_manager.h"
 #include "ui/base/ime/ash/input_method_manager.h"
 #include "ui/base/ime/ash/input_method_util.h"
 #include "ui/base/ime/ash/text_input_method.h"
+
+class ApplicationLocaleStorage;
+class PrefService;
 
 namespace ash {
 
@@ -37,10 +43,13 @@ struct AssistiveWindow;
 
 namespace input_method {
 
+class InputMethodPersistence;
+
 // The implementation of InputMethodManager.
 class InputMethodManagerImpl : public InputMethodManager,
                                public CandidateWindowController::Observer,
-                               public AssistiveWindowControllerDelegate {
+                               public AssistiveWindowControllerDelegate,
+                               public ash::SessionTerminationManager::Observer {
  public:
   class StateImpl : public InputMethodManager::State {
    public:
@@ -82,6 +91,9 @@ class InputMethodManagerImpl : public InputMethodManager,
     void EnableLoginLayouts(
         const std::string& language_code,
         const std::vector<std::string>& initial_layouts) override;
+    void EnableOobeInputMethods(
+        const std::string& language_code,
+        const std::vector<std::string>& initial_input_methods) override;
     void DisableNonLockScreenLayouts() override;
     void GetInputMethodExtensions(InputMethodDescriptors* result) override;
     InputMethodDescriptors GetEnabledInputMethodsSortedByLocalizedDisplayNames()
@@ -91,8 +103,8 @@ class InputMethodManagerImpl : public InputMethodManager,
     const InputMethodDescriptor* GetInputMethodFromId(
         const std::string& input_method_id) const override;
     size_t GetNumEnabledInputMethods() const override;
-    void SetEnabledExtensionImes(std::vector<std::string>* ids) override;
-    void SetInputMethodLoginDefault() override;
+    void SetEnabledExtensionImes(base::span<const std::string> ids) override;
+    void SetInputMethodLoginDefault(bool is_in_oobe_context) override;
     void SetInputMethodLoginDefaultFromVPD(const std::string& locale,
                                            const std::string& layout) override;
     void SwitchToNextInputMethod() override;
@@ -133,9 +145,17 @@ class InputMethodManagerImpl : public InputMethodManager,
     const InputMethodDescriptor* LookupInputMethod(
         const std::string& input_method_id);
 
-    Profile* const profile_;
+    // Replaces currently enabled input methnods ids list with the
+    // |input_methods_to_enable|. Initializes candidate window controller and
+    // activates first entry of |initial_input_methods| if caller's state is in
+    // the active state and |initial_input_methods| is not empty.
+    void FinalizeInputMethodsEnabling(
+        std::vector<std::string>& input_methods_to_enable,
+        const std::vector<std::string>& initial_input_methods);
 
-    InputMethodManagerImpl* const manager_;
+    const raw_ptr<Profile, DanglingUntriaged> profile_;
+
+    const raw_ptr<InputMethodManagerImpl, DanglingUntriaged> manager_;
 
     std::string last_used_input_method_id_;
 
@@ -175,10 +195,16 @@ class InputMethodManagerImpl : public InputMethodManager,
   // Constructs an InputMethodManager instance. The client is responsible for
   // calling |SetUISessionState| in response to relevant changes in browser
   // state.
-  InputMethodManagerImpl(std::unique_ptr<InputMethodDelegate> delegate,
+  //
+  // `local_state` must be non-null, and must outlive `this`.
+  // `application_locale_storage` must be non-null, and must outlive `this`.
+  InputMethodManagerImpl(PrefService* local_state,
+                         ApplicationLocaleStorage* application_locale_manager,
+                         std::unique_ptr<InputMethodDelegate> delegate,
                          std::unique_ptr<ComponentExtensionIMEManagerDelegate>
                              component_extension_ime_manager_delegate,
-                         bool enable_extension_loading);
+                         bool enable_extension_loading,
+                         std::unique_ptr<ImeKeyboard> ime_keyboard);
 
   InputMethodManagerImpl(const InputMethodManagerImpl&) = delete;
   InputMethodManagerImpl& operator=(const InputMethodManagerImpl&) = delete;
@@ -188,8 +214,6 @@ class InputMethodManagerImpl : public InputMethodManager,
   // Sets |candidate_window_controller_|.
   void SetCandidateWindowControllerForTesting(
       CandidateWindowController* candidate_window_controller);
-  // Sets |keyboard_|.
-  void SetImeKeyboardForTesting(ImeKeyboard* keyboard);
 
   // InputMethodManager override:
   void AddObserver(InputMethodManager::Observer* observer) override;
@@ -205,6 +229,9 @@ class InputMethodManagerImpl : public InputMethodManager,
   void ActivateInputMethodMenuItem(const std::string& key) override;
   void ConnectInputEngineManager(
       mojo::PendingReceiver<ime::mojom::InputEngineManager> receiver) override;
+  void BindInputMethodUserDataService(
+      mojo::PendingReceiver<ime::mojom::InputMethodUserDataService> receiver)
+      override;
   bool IsISOLevel5ShiftUsedByCurrentInputMethod() const override;
   bool IsAltGrUsedByCurrentInputMethod() const override;
   bool ArePositionalShortcutsUsedByCurrentInputMethod() const override;
@@ -224,20 +251,27 @@ class InputMethodManagerImpl : public InputMethodManager,
   InputMethodUtil* GetInputMethodUtil() override;
   ComponentExtensionIMEManager* GetComponentExtensionIMEManager() override;
   bool IsLoginKeyboard(const std::string& layout) const override;
-  bool MigrateInputMethods(std::vector<std::string>* input_method_ids) override;
+  std::string GetMigratedInputMethodID(
+      const std::string& input_method_id) override;
+  bool GetMigratedInputMethodIDs(
+      std::vector<std::string>* input_method_ids) override;
   scoped_refptr<InputMethodManager::State> CreateNewState(
       Profile* profile) override;
   scoped_refptr<InputMethodManager::State> GetActiveIMEState() override;
   void SetState(scoped_refptr<InputMethodManager::State> state) override;
   void ImeMenuActivationChanged(bool is_active) override;
 
-  void OnAppTerminating();
-
  private:
+  // ash::SessionTerminationManager::Observer:
+  void OnAppTerminating() override;
+
   // CandidateWindowController::Observer overrides:
   void CandidateClicked(int index) override;
   void CandidateWindowOpened() override;
   void CandidateWindowClosed() override;
+
+  // Notifies all observers that the input method has been changed.
+  void NotifyInputMethodChanged(bool show_message, bool success);
 
   // AssistiveWindowControllerDelegate overrides:
   void AssistiveWindowButtonClicked(
@@ -271,7 +305,16 @@ class InputMethodManagerImpl : public InputMethodManager,
   // Request that the virtual keyboard be reloaded.
   void ReloadKeyboard();
 
+  const raw_ref<PrefService> local_state_;
+  const raw_ref<const ApplicationLocaleStorage> application_locale_storage_;
+
   std::unique_ptr<InputMethodDelegate> delegate_;
+
+  std::unique_ptr<InputMethodPersistence> persistence_;
+
+  base::ScopedObservation<ash::SessionTerminationManager,
+                          ash::SessionTerminationManager::Observer>
+      session_termination_observation_{this};
 
   // A list of objects that monitor the manager.
   base::ObserverList<InputMethodManager::Observer>::Unchecked observers_;
@@ -313,7 +356,8 @@ class InputMethodManagerImpl : public InputMethodManager,
   uint32_t features_enabled_state_;
 
   // The engine map from extension_id to an engine.
-  using EngineMap = std::map<std::string, TextInputMethod*>;
+  using EngineMap =
+      std::map<std::string, raw_ptr<TextInputMethod, CtnExperimental>>;
   using ProfileEngineMap = std::map<Profile*, EngineMap, ProfileCompare>;
   ProfileEngineMap engine_map_;
 
@@ -322,8 +366,6 @@ class InputMethodManagerImpl : public InputMethodManager,
       map<Profile*, std::unique_ptr<ImeServiceConnector>, ProfileCompare>
           ImeServiceConnectorMap;
   ImeServiceConnectorMap ime_service_connectors_;
-
-  base::CallbackListSubscription on_app_terminating_subscription_;
 };
 
 }  // namespace input_method

@@ -4,6 +4,8 @@
 
 #include "cc/paint/paint_image.h"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <sstream>
 #include <utility>
@@ -15,17 +17,28 @@
 #include "cc/paint/paint_image_builder.h"
 #include "cc/paint/paint_image_generator.h"
 #include "cc/paint/paint_record.h"
-#include "cc/paint/paint_worklet_input.h"
 #include "cc/paint/skia_paint_image_generator.h"
+#include "cc/paint/texture_backing.h"
+#include "third_party/skia/include/core/SkBitmap.h"
+#include "third_party/skia/include/core/SkCPURecorder.h"
 #include "third_party/skia/include/core/SkColorSpace.h"
-#include "third_party/skia/include/gpu/GrBackendSurface.h"
+#include "third_party/skia/include/core/SkImage.h"
+#include "third_party/skia/include/core/SkImageInfo.h"
+#include "third_party/skia/include/core/SkPixmap.h"
+#include "third_party/skia/include/core/SkRefCnt.h"
+#include "third_party/skia/include/core/SkSize.h"
+#include "third_party/skia/include/core/SkYUVAPixmaps.h"
+#include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
+#include "third_party/skia/include/private/SkGainmapInfo.h"
+#include "ui/gfx/color_space.h"
 #include "ui/gfx/geometry/skia_conversions.h"
+#include "ui/gfx/hdr_metadata.h"
 
 namespace cc {
 namespace {
-base::AtomicSequenceNumber g_next_image_id;
-base::AtomicSequenceNumber g_next_image_content_id;
-base::AtomicSequenceNumber g_next_generator_client_id;
+base::AtomicSequenceNumberT<int64_t> g_next_image_id;
+base::AtomicSequenceNumberT<int64_t> g_next_image_content_id;
+base::AtomicSequenceNumberT<int64_t> g_next_generator_client_id;
 }  // namespace
 
 const PaintImage::Id PaintImage::kNonLazyStableId = -1;
@@ -40,6 +53,14 @@ ImageHeaderMetadata::ImageHeaderMetadata(const ImageHeaderMetadata& other) =
 ImageHeaderMetadata& ImageHeaderMetadata::operator=(
     const ImageHeaderMetadata& other) = default;
 ImageHeaderMetadata::ImageHeaderMetadata::~ImageHeaderMetadata() = default;
+
+AnimatedImageFrameIndexMap::AnimatedImageFrameIndexMap() = default;
+AnimatedImageFrameIndexMap::AnimatedImageFrameIndexMap(
+    base::sorted_unique_t sorted_unique,
+    container_type entries)
+    : base::flat_map<PaintImage::Id, size_t>(sorted_unique,
+                                             std::move(entries)) {}
+AnimatedImageFrameIndexMap::~AnimatedImageFrameIndexMap() = default;
 
 PaintImage::PaintImage() = default;
 PaintImage::PaintImage(const PaintImage& other) = default;
@@ -61,9 +82,7 @@ bool PaintImage::IsSameForTesting(const PaintImage& other) const {
          completion_state_ == other.completion_state_ &&
          is_multipart_ == other.is_multipart_ &&
          texture_backing_ == other.texture_backing_ &&
-         paint_worklet_input_ == other.paint_worklet_input_;
-  // Do not check may_be_lcp_candidate_ as it should not affect any rendering
-  // operation, only metrics collection.
+         deferred_paint_record_ == other.deferred_paint_record_;
 }
 
 // static
@@ -103,7 +122,7 @@ PaintImage PaintImage::CreateFromBitmap(SkBitmap bitmap) {
 
   return PaintImageBuilder::WithDefault()
       .set_id(PaintImage::GetNextId())
-      .set_image(SkImage::MakeFromBitmap(bitmap),
+      .set_image(SkImages::RasterFromBitmap(bitmap),
                  PaintImage::GetNextContentId())
       .TakePaintImage();
 }
@@ -114,7 +133,11 @@ const sk_sp<SkImage>& PaintImage::GetSkImage() const {
 
 sk_sp<SkImage> PaintImage::GetSwSkImage() const {
   if (texture_backing_) {
-    return texture_backing_->GetSkImageViaReadback();
+    auto image = texture_backing_->GetSkImageViaReadback();
+    if (image && reinterpret_as_srgb_) {
+      image = image->reinterpretColorSpace(SkColorSpace::MakeSRGB());
+    }
+    return image;
   } else if (cached_sk_image_ && cached_sk_image_->isTextureBacked()) {
     return cached_sk_image_->makeNonTextureImage();
   }
@@ -132,8 +155,19 @@ bool PaintImage::readPixels(const SkImageInfo& dst_info,
                             int src_x,
                             int src_y) const {
   if (texture_backing_) {
-    return texture_backing_->readPixels(dst_info, dst_pixels, dst_row_bytes,
-                                        src_x, src_y);
+    auto dst_info_adjusted = dst_info;
+    if (reinterpret_as_srgb_) {
+      // To reinterpret the read pixels as sRGB, set `dst_info_adjusted`'s
+      // color space to match the texture's space. This only works when the
+      // caller expects sRGB pixels.
+      CHECK(!dst_info.colorSpace() ||
+            SkColorSpace::Equals(dst_info.colorSpace(),
+                                 SkColorSpace::MakeSRGB().get()));
+      dst_info_adjusted = dst_info.makeColorSpace(
+          texture_backing_->GetSkImageInfo().refColorSpace());
+    }
+    return texture_backing_->readPixels(dst_info_adjusted, dst_pixels,
+                                        dst_row_bytes, src_x, src_y);
   } else if (cached_sk_image_) {
     return cached_sk_image_->readPixels(dst_info, dst_pixels, dst_row_bytes,
                                         src_x, src_y);
@@ -141,19 +175,30 @@ bool PaintImage::readPixels(const SkImageInfo& dst_info,
   return false;
 }
 
-SkImageInfo PaintImage::GetSkImageInfo() const {
-  if (paint_image_generator_) {
-    return paint_image_generator_->GetSkImageInfo();
-  } else if (texture_backing_) {
-    return texture_backing_->GetSkImageInfo();
-  } else if (cached_sk_image_) {
-    return cached_sk_image_->imageInfo();
-  } else if (paint_worklet_input_) {
-    auto size = paint_worklet_input_->GetSize();
-    return SkImageInfo::MakeUnknown(base::ClampCeil(size.width()),
-                                    base::ClampCeil(size.height()));
-  } else {
-    return SkImageInfo::MakeUnknown();
+SkImageInfo PaintImage::GetSkImageInfo(AuxImage aux_image) const {
+  switch (aux_image) {
+    case AuxImage::kDefault:
+      if (paint_image_generator_) {
+        const auto info = paint_image_generator_->GetSkImageInfo();
+        return reinterpret_as_srgb_
+                   ? info.makeColorSpace(SkColorSpace::MakeSRGB())
+                   : info;
+      } else if (texture_backing_) {
+        const auto info = texture_backing_->GetSkImageInfo();
+        return reinterpret_as_srgb_
+                   ? info.makeColorSpace(SkColorSpace::MakeSRGB())
+                   : info;
+      } else if (cached_sk_image_) {
+        return cached_sk_image_->imageInfo();
+      } else if (deferred_paint_record_) {
+        auto size = deferred_paint_record_->GetSize();
+        return SkImageInfo::MakeUnknown(base::ClampCeil(size.width()),
+                                        base::ClampCeil(size.height()));
+      }
+      return SkImageInfo::MakeUnknown();
+    case AuxImage::kGainmap:
+      DCHECK(gainmap_paint_image_generator_);
+      return gainmap_paint_image_generator_->GetSkImageInfo();
   }
 }
 
@@ -162,9 +207,30 @@ gpu::Mailbox PaintImage::GetMailbox() const {
   return texture_backing_->GetMailbox();
 }
 
+void PaintImage::BindTextureBacking(
+    scoped_refptr<TextureBackingContext> context) const {
+  DCHECK(texture_backing_);
+  texture_backing_->Bind(std::move(context));
+}
+
+void PaintImage::UnbindTextureBacking() const {
+  DCHECK(texture_backing_);
+  texture_backing_->Unbind();
+}
+
+const scoped_refptr<PaintWorkletInput> PaintImage::GetPaintWorkletInput()
+    const {
+  if (!IsPaintWorklet()) {
+    return nullptr;
+  }
+  scoped_refptr<PaintWorkletInput> paint_worklet_input(
+      static_cast<PaintWorkletInput*>(deferred_paint_record().get()));
+  return paint_worklet_input;
+}
+
 bool PaintImage::IsOpaque() const {
   if (IsPaintWorklet())
-    return paint_worklet_input_->KnownToBeOpaque();
+    return deferred_paint_record_->KnownToBeOpaque();
   return GetSkImageInfo().isOpaque();
 }
 
@@ -174,56 +240,89 @@ void PaintImage::CreateSkImage() {
   if (sk_image_) {
     cached_sk_image_ = sk_image_;
   } else if (paint_record_) {
-    cached_sk_image_ = SkImage::MakeFromPicture(
+    cached_sk_image_ = SkImages::DeferredFromPicture(
         paint_record_->ToSkPicture(gfx::RectToSkRect(paint_record_rect_)),
         SkISize::Make(paint_record_rect_.width(), paint_record_rect_.height()),
-        nullptr, nullptr, SkImage::BitDepth::kU8, SkColorSpace::MakeSRGB());
+        nullptr, nullptr, SkImages::BitDepth::kU8, SkColorSpace::MakeSRGB());
   } else if (paint_image_generator_) {
-    cached_sk_image_ =
-        SkImage::MakeFromGenerator(std::make_unique<SkiaPaintImageGenerator>(
-            paint_image_generator_, kDefaultFrameIndex,
-            kDefaultGeneratorClientId));
-  } else if (texture_backing_) {
-    cached_sk_image_ = texture_backing_->GetAcceleratedSkImage();
+    cached_sk_image_ = SkImages::DeferredFromGenerator(
+        std::make_unique<SkiaPaintImageGenerator>(paint_image_generator_,
+                                                  kDefaultFrameIndex,
+                                                  kDefaultGeneratorClientId));
+    if (reinterpret_as_srgb_) {
+      cached_sk_image_ =
+          cached_sk_image_->reinterpretColorSpace(SkColorSpace::MakeSRGB());
+    }
   }
 }
 
-SkISize PaintImage::GetSupportedDecodeSize(
-    const SkISize& requested_size) const {
-  if (paint_image_generator_)
-    return paint_image_generator_->GetSupportedDecodeSize(requested_size);
-  return SkISize::Make(width(), height());
+SkISize PaintImage::GetSupportedDecodeSize(const SkISize& requested_size,
+                                           AuxImage aux_image) const {
+  switch (aux_image) {
+    case AuxImage::kDefault:
+      if (paint_image_generator_) {
+        return paint_image_generator_->GetSupportedDecodeSize(requested_size);
+      }
+      return SkISize::Make(width(), height());
+    case AuxImage::kGainmap:
+      if (gainmap_paint_image_generator_) {
+        return gainmap_paint_image_generator_->GetSupportedDecodeSize(
+            requested_size);
+      }
+      // Note that this is different from the default image behavior.
+      return SkISize(0, 0);
+  }
 }
 
 bool PaintImage::Decode(SkPixmap pixmap,
                         size_t frame_index,
+                        AuxImage aux_image,
                         GeneratorClientId client_id) const {
   // We only support decode to supported decode size.
-  DCHECK(pixmap.dimensions() == GetSupportedDecodeSize(pixmap.dimensions()));
-
-  if (paint_image_generator_) {
-    return DecodeFromGenerator(pixmap, frame_index, client_id);
+  DCHECK(pixmap.dimensions() ==
+         GetSupportedDecodeSize(pixmap.dimensions(), aux_image));
+  switch (aux_image) {
+    case AuxImage::kDefault:
+      if (reinterpret_as_srgb_) {
+        // To reinterpret the generated pixels as sRGB, set `pixmap`'s color
+        // space to match the generator's space. This only works when the
+        // caller expects sRGB pixels.
+        CHECK(!pixmap.colorSpace() ||
+              SkColorSpace::Equals(pixmap.colorSpace(),
+                                   SkColorSpace::MakeSRGB().get()));
+        pixmap.setColorSpace(
+            paint_image_generator_->GetSkImageInfo().refColorSpace());
+      }
+      if (paint_image_generator_) {
+        return paint_image_generator_->GetPixels(pixmap, frame_index, client_id,
+                                                 stable_id());
+      }
+      return DecodeFromSkImage(pixmap, frame_index, client_id);
+    case AuxImage::kGainmap:
+      DCHECK(gainmap_paint_image_generator_);
+      return gainmap_paint_image_generator_->GetPixels(pixmap, frame_index,
+                                                       client_id, stable_id());
   }
-  return DecodeFromSkImage(pixmap, frame_index, client_id);
 }
 
 bool PaintImage::DecodeYuv(const SkYUVAPixmaps& pixmaps,
                            size_t frame_index,
+                           AuxImage aux_image,
                            GeneratorClientId client_id) const {
+  // This function assumes that the color space being applied to `pixmaps`
+  // is the same color space returned by `GetSkImageInfo()`.
   DCHECK(pixmaps.isValid());
-  DCHECK(paint_image_generator_);
   const uint32_t lazy_pixel_ref = stable_id();
-  return paint_image_generator_->GetYUVAPlanes(pixmaps, frame_index,
-                                               lazy_pixel_ref, client_id);
-}
-
-bool PaintImage::DecodeFromGenerator(SkPixmap pixmap,
-                                     size_t frame_index,
-                                     GeneratorClientId client_id) const {
-  DCHECK(paint_image_generator_);
-  const uint32_t lazy_pixel_ref = stable_id();
-  return paint_image_generator_->GetPixels(pixmap, frame_index, client_id,
-                                           lazy_pixel_ref);
+  switch (aux_image) {
+    case AuxImage::kDefault:
+      DCHECK(paint_image_generator_);
+      return paint_image_generator_->GetYUVAPlanes(pixmaps, frame_index,
+                                                   lazy_pixel_ref, client_id);
+    case AuxImage::kGainmap:
+      DCHECK(gainmap_paint_image_generator_);
+      return gainmap_paint_image_generator_->GetYUVAPlanes(
+          pixmaps, frame_index, lazy_pixel_ref, client_id);
+  }
 }
 
 bool PaintImage::DecodeFromSkImage(SkPixmap pixmap,
@@ -233,7 +332,7 @@ bool PaintImage::DecodeFromSkImage(SkPixmap pixmap,
   auto image = GetSkImageForFrame(frame_index, client_id);
   DCHECK(image);
   if (color_space) {
-    image = image->makeColorSpace(color_space, nullptr);
+    image = image->makeColorSpace(skcpu::Recorder::TODO(), color_space, {});
     if (!image)
       return false;
   }
@@ -241,7 +340,7 @@ bool PaintImage::DecodeFromSkImage(SkPixmap pixmap,
 }
 
 bool PaintImage::ShouldAnimate() const {
-  return animation_type_ == AnimationType::ANIMATED &&
+  return animation_type_ == AnimationType::kAnimated &&
          repetition_count_ != kAnimationNone && FrameCount() > 1;
 }
 
@@ -268,35 +367,34 @@ bool PaintImage::IsTextureBacked() const {
   return false;
 }
 
-void PaintImage::FlushPendingSkiaOps() {
-  if (texture_backing_)
-    texture_backing_->FlushPendingSkiaOps();
+gfx::Size PaintImage::GetSize(AuxImage aux_image) const {
+  return gfx::SkISizeToSize(GetSkISize(aux_image));
 }
 
-gfx::ContentColorUsage PaintImage::GetContentColorUsage(bool* is_hlg) const {
-  if (is_hlg)
-    *is_hlg = false;
-
+gfx::ContentColorUsage PaintImage::GetContentColorUsage() const {
   // Right now, JS paint worklets can only be in sRGB
-  if (paint_worklet_input_)
+  if (IsPaintWorklet()) {
     return gfx::ContentColorUsage::kSRGB;
+  }
+
+  // Gainmap images are always HDR.
+  if (HasGainmapInfo()) {
+    return gfx::ContentColorUsage::kHDR;
+  }
 
   const auto* color_space = GetSkImageInfo().colorSpace();
 
   // Assume the image will be sRGB if we don't know yet.
-  if (!color_space || color_space->isSRGB())
+  if (!color_space || color_space->isSRGB()) {
     return gfx::ContentColorUsage::kSRGB;
+  }
 
   skcms_TransferFunction fn;
-  if (!color_space->isNumericalTransferFn(&fn)) {
-    if (skcms_TransferFunction_isPQish(&fn))
-      return gfx::ContentColorUsage::kHDR;
-
-    if (skcms_TransferFunction_isHLGish(&fn)) {
-      if (is_hlg)
-        *is_hlg = true;
-      return gfx::ContentColorUsage::kHDR;
-    }
+  color_space->transferFn(&fn);
+  if (skcms_TransferFunction_isPQish(&fn) ||
+      skcms_TransferFunction_isHLGish(&fn) ||
+      skcms_TransferFunction_isPQ(&fn) || skcms_TransferFunction_isHLG(&fn)) {
+    return gfx::ContentColorUsage::kHDR;
   }
 
   // If it's not HDR and not SRGB, report it as WCG.
@@ -311,18 +409,31 @@ const ImageHeaderMetadata* PaintImage::GetImageHeaderMetadata() const {
 
 bool PaintImage::IsYuv(
     const SkYUVAPixmapInfo::SupportedDataTypes& supported_data_types,
+    AuxImage aux_image,
     SkYUVAPixmapInfo* info) const {
   SkYUVAPixmapInfo temp_info;
   if (!info)
     info = &temp_info;
+
   // ImageDecoder will fill out the SkYUVColorSpace in |info| depending on the
   // codec's specification.
-  return paint_image_generator_ &&
-         paint_image_generator_->QueryYUVA(supported_data_types, info);
+  switch (aux_image) {
+    case AuxImage::kDefault:
+      return paint_image_generator_ &&
+             paint_image_generator_->QueryYUVA(supported_data_types, info);
+    case AuxImage::kGainmap:
+      return gainmap_paint_image_generator_ &&
+             gainmap_paint_image_generator_->QueryYUVA(supported_data_types,
+                                                       info);
+  }
+}
+
+bool PaintImage::NeedsLayer() const {
+  return IsPaintWorklet() && deferred_paint_record_->NeedsLayer();
 }
 
 const std::vector<FrameMetadata>& PaintImage::GetFrameMetadata() const {
-  DCHECK_EQ(animation_type_, AnimationType::ANIMATED);
+  DCHECK_EQ(animation_type_, AnimationType::kAnimated);
   DCHECK(paint_image_generator_);
 
   return paint_image_generator_->GetFrameMetadata();
@@ -355,8 +466,11 @@ sk_sp<SkImage> PaintImage::GetSkImageForFrame(
     return GetSwSkImage();
 
   sk_sp<SkImage> image =
-      SkImage::MakeFromGenerator(std::make_unique<SkiaPaintImageGenerator>(
+      SkImages::DeferredFromGenerator(std::make_unique<SkiaPaintImageGenerator>(
           paint_image_generator_, index, client_id));
+  if (image && reinterpret_as_srgb_) {
+    image = image->reinterpretColorSpace(SkColorSpace::MakeSRGB());
+  }
   return image;
 }
 
@@ -370,8 +484,8 @@ std::string PaintImage::ToString() const {
       << " animation_type_: " << static_cast<int>(animation_type_)
       << " completion_state_: " << static_cast<int>(completion_state_)
       << " is_multipart_: " << is_multipart_
-      << " may_be_lcp_candidate_: " << may_be_lcp_candidate_
-      << " is YUV: " << IsYuv(SkYUVAPixmapInfo::SupportedDataTypes::All());
+      << " has gainmap: " << HasGainmapInfo() << " is YUV: "
+      << IsYuv(SkYUVAPixmapInfo::SupportedDataTypes::All(), AuxImage::kDefault);
   return str.str();
 }
 
@@ -394,6 +508,20 @@ std::string PaintImage::FrameKey::ToString() const {
   str << "content_id: " << content_id_ << ","
       << "frame_index: " << frame_index_;
   return str.str();
+}
+
+float PaintImage::GetMaximumRenderedHdrHeadroom() const {
+  if (HasGainmapInfo()) {
+    const SkGainmapInfo& gainmap_info = GetGainmapInfo();
+    float max_ratio = std::max({gainmap_info.fGainmapRatioMax[0],
+                                gainmap_info.fGainmapRatioMax[1],
+                                gainmap_info.fGainmapRatioMax[2]});
+    return std::log2(max_ratio);
+  }
+  if (color_space() && gfx::ColorSpace(*color_space()).IsHDR()) {
+    return std::log2(gfx::HdrMetadataExtendedRange::kDefaultHdrHeadroom);
+  }
+  return 0.0f;
 }
 
 }  // namespace cc

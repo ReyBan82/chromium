@@ -6,20 +6,17 @@
 
 #include <memory>
 
-#include "base/functional/callback.h"
 #include "cc/paint/paint_flags.h"
 #include "components/strings/grit/components_strings.h"
-#include "components/vector_icons/vector_icons.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/gfx/canvas.h"
-#include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/geometry/point_f.h"
 #include "ui/gfx/geometry/size.h"
-#include "ui/gfx/paint_vector_icon.h"
-#include "ui/views/background.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/controls/button/button.h"
 #include "ui/views/controls/image_view.h"
 #include "ui/views/layout/fill_layout.h"
@@ -33,18 +30,22 @@ const SkColor kButtonBackgroundColor = SkColorSetARGB(0xcc, 0x28, 0x2c, 0x32);
 constexpr int kCloseIconSize = 24;
 
 class CloseFullscreenButton : public views::Button {
+  METADATA_HEADER(CloseFullscreenButton, views::Button)
+
  public:
-  METADATA_HEADER(CloseFullscreenButton);
   explicit CloseFullscreenButton(PressedCallback callback)
       : views::Button(std::move(callback)) {
     std::unique_ptr<views::ImageView> close_image_view =
         std::make_unique<views::ImageView>();
-    close_image_view->SetImage(gfx::CreateVectorIcon(
-        views::kIcCloseIcon, kCloseIconSize, SK_ColorWHITE));
+    close_image_view->SetImage(ui::ImageModel::FromVectorIcon(
+        features::IsRoundedIconsEnabled() ? views::kCloseIcon
+                                          : views::kIcCloseOldIcon,
+        SK_ColorWHITE, kCloseIconSize));
     // Not focusable by default, only for accessibility.
     SetFocusBehavior(FocusBehavior::ACCESSIBLE_ONLY);
-    SetAccessibleName(l10n_util::GetStringUTF16(IDS_EXIT_FULLSCREEN_MODE));
-    AddChildView(close_image_view.release());
+    GetViewAccessibility().SetName(
+        l10n_util::GetStringUTF16(IDS_EXIT_FULLSCREEN_MODE));
+    AddChildViewRaw(close_image_view.release());
     SetLayoutManager(std::make_unique<views::FillLayout>());
   }
   CloseFullscreenButton(const CloseFullscreenButton&) = delete;
@@ -62,7 +63,7 @@ class CloseFullscreenButton : public views::Button {
   }
 };
 
-BEGIN_METADATA(CloseFullscreenButton, views::Button)
+BEGIN_METADATA(CloseFullscreenButton)
 END_METADATA
 
 }  // namespace
@@ -78,5 +79,5 @@ FullscreenControlView::FullscreenControlView(
 
 FullscreenControlView::~FullscreenControlView() = default;
 
-BEGIN_METADATA(FullscreenControlView, views::View)
+BEGIN_METADATA(FullscreenControlView)
 END_METADATA

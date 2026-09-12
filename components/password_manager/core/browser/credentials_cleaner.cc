@@ -4,18 +4,18 @@
 
 #include "components/password_manager/core/browser/credentials_cleaner.h"
 
-#include "base/containers/cxx20_erase.h"
+#include <vector>
+
 #include "components/password_manager/core/browser/password_form.h"
 #include "url/gurl.h"
 
 namespace password_manager {
 
 // static
-std::vector<std::unique_ptr<PasswordForm>>
-CredentialsCleaner::RemoveNonHTTPOrHTTPSForms(
-    std::vector<std::unique_ptr<PasswordForm>> forms) {
-  base::EraseIf(forms, [](const auto& form) {
-    return !GURL(form->signon_realm).SchemeIsHTTPOrHTTPS();
+std::vector<PasswordForm> CredentialsCleaner::RemoveNonHTTPOrHTTPSForms(
+    std::vector<PasswordForm> forms) {
+  std::erase_if(forms, [](const PasswordForm& form) {
+    return !GURL(form.signon_realm).SchemeIsHTTPOrHTTPS();
   });
 
   return forms;

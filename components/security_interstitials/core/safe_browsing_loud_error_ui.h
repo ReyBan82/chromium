@@ -27,7 +27,6 @@ class SafeBrowsingLoudErrorUI
  public:
   SafeBrowsingLoudErrorUI(
       const GURL& request_url,
-      const GURL& main_frame_url,
       BaseSafeBrowsingErrorUI::SBInterstitialReason reason,
       const BaseSafeBrowsingErrorUI::SBErrorDisplayOptions& display_options,
       const std::string& app_locale,
@@ -41,7 +40,7 @@ class SafeBrowsingLoudErrorUI
   ~SafeBrowsingLoudErrorUI() override;
 
   // Implement BaseSafeBrowsingErrorUI.
-  void PopulateStringsForHtml(base::Value::Dict& load_time_data) override;
+  void PopulateStringsForHtml(base::DictValue& load_time_data) override;
   void HandleCommand(SecurityInterstitialCommand command) override;
 
   int GetHTMLTemplateId() const override;
@@ -49,12 +48,19 @@ class SafeBrowsingLoudErrorUI
  private:
   // Fills the passed dictionary with the values to be passed to the template
   // when creating the HTML.
-  void PopulateExtendedReportingOption(base::Value::Dict& load_time_data);
-  void PopulateMalwareLoadTimeData(base::Value::Dict& load_time_data);
-  void PopulateHarmfulLoadTimeData(base::Value::Dict& load_time_data);
-  void PopulatePhishingLoadTimeData(base::Value::Dict& load_time_data);
-  void PopulateBillingLoadTimeData(base::Value::Dict& load_time_data);
-  void PopulateEnhancedProtectionMessage(base::Value::Dict& load_time_data);
+  void PopulateExtendedReportingOption(base::DictValue& load_time_data);
+  void PopulateMalwareLoadTimeData(base::DictValue& load_time_data);
+  void PopulateHarmfulLoadTimeData(base::DictValue& load_time_data);
+  void PopulatePhishingLoadTimeData(base::DictValue& load_time_data);
+  void PopulateBillingLoadTimeData(base::DictValue& load_time_data);
+  void PopulateEnhancedProtectionMessage(base::DictValue& load_time_data);
+
+  // Handle update to interstitial_interaction_data_ when a command occurs.
+  void UpdateInterstitialInteractionData(SecurityInterstitialCommand command);
+
+  void OpenHelpCenter(bool always_open_in_new_tab);
+  void OpenDiagnostic(bool always_open_in_new_tab);
+  void ReportPhishingError(bool always_open_in_new_tab);
 
   const bool created_prior_to_navigation_;
 };

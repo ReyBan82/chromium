@@ -2,9 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/chromeos/ui_mode.gni")
-
-assert(is_chromeos_ash, "Non-ChromeOS builds cannot depend on //ash")
+assert(is_chromeos, "Non-ChromeOS builds cannot depend on //ash")
 
 static_library("backend") {
   sources = [
@@ -36,6 +34,8 @@ static_library("backend") {
     "session_log_async_helper.h",
     "session_log_handler.cc",
     "session_log_handler.h",
+    "system/connectivity_problem_formatter.cc",
+    "system/connectivity_problem_formatter.h",
     "system/cpu_usage_data.cc",
     "system/cpu_usage_data.h",
     "system/cros_healthd_helpers.cc",
@@ -46,11 +46,13 @@ static_library("backend") {
     "system/system_data_provider.h",
     "system/system_routine_controller.cc",
     "system/system_routine_controller.h",
+    "system/system_routine_controller_delegate.cc",
+    "system/system_routine_controller_delegate.h",
   ]
 
   deps = [
     "//ash",
-    "//ash/constants:constants",
+    "//ash/constants",
     "//ash/public/cpp",
     "//ash/webui/diagnostics_ui/mojom",
     "//base",
@@ -63,14 +65,14 @@ static_library("backend") {
     "//chromeos/dbus/power",
     "//chromeos/dbus/power:power_manager_proto",
     "//chromeos/services/network_config/public/cpp",
+    "//chromeos/services/network_health/public/mojom",
     "//chromeos/strings/",
     "//content/public/browser",
-    "//services/data_decoder/public/cpp",
     "//services/device/public/mojom",
     "//ui/base",
     "//ui/base/ime/ash",
-    "//ui/chromeos/events",
     "//ui/display/manager",
+    "//ui/events/ash",
     "//ui/events/devices",
     "//ui/events/ozone",
     "//ui/events/ozone/evdev:event_device_info",
@@ -80,6 +82,10 @@ static_library("backend") {
     "//ui/web_dialogs",
     "//ui/webui",
   ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }
 
 source_set("unit_tests") {
@@ -96,7 +102,10 @@ source_set("unit_tests") {
     "input/keyboard_input_data_event_watcher_unittest.cc",
     "session_log_async_helper_unittest.cc",
     "session_log_handler_unittest.cc",
+    "system/connectivity_problem_formatter_unittest.cc",
     "system/cpu_usage_data_unittest.cc",
+    "system/fake_system_routine_controller_delegate.cc",
+    "system/fake_system_routine_controller_delegate.h",
     "system/power_manager_client_conversions_unittest.cc",
     "system/system_data_provider_unittest.cc",
     "system/system_routine_controller_unittest.cc",
@@ -115,26 +124,31 @@ source_set("unit_tests") {
     "//chromeos/ash/components:test_support",
     "//chromeos/ash/components/dbus:test_support",
     "//chromeos/ash/components/dbus/shill",
-    "//chromeos/ash/components/login/login_state:login_state",
-    "//chromeos/ash/components/mojo_service_manager",
+    "//chromeos/ash/components/login/login_state",
+    "//chromeos/ash/components/mojo_service_manager:test_support",
     "//chromeos/ash/components/system",
-    "//chromeos/ash/services/cros_healthd/public/cpp",
+    "//chromeos/ash/services/cros_healthd/public/cpp:test_support",
     "//chromeos/ash/services/cros_healthd/public/mojom",
     "//chromeos/ash/services/network_config",
     "//chromeos/ash/services/network_config:in_process_instance",
     "//chromeos/dbus/power",
     "//chromeos/dbus/power:power_manager_proto",
+    "//chromeos/services/network_health/public/mojom",
     "//components/onc",
     "//components/prefs:test_support",
+    "//components/proxy_config",
+    "//components/session_manager/core",
+    "//components/session_manager/test:test_support",
     "//components/sync_preferences:test_support",
+    "//components/user_manager:test_support",
     "//content/test:test_support",
     "//dbus",
     "//device/udev_linux:test_support",
-    "//services/data_decoder/public/cpp:test_support",
     "//services/device/public/cpp:test_support",
     "//testing/gtest",
-    "//ui/chromeos/events",
-    "//ui/events/devices:devices",
+    "//ui/events/ash",
+    "//ui/events/ash:test_support",
+    "//ui/events/devices",
     "//ui/events/devices:test_support",
     "//ui/events/ozone",
     "//ui/events/ozone/evdev:event_device_info_test_utils",
@@ -143,4 +157,8 @@ source_set("unit_tests") {
     "//ui/views:test_support",
     "//ui/webui",
   ]
+
+  # TODO(crbug.com/40031409): Fix code that adds exit-time destructors and
+  # enable the diagnostic by removing this line.
+  configs += [ "//build/config/compiler:no_exit_time_destructors" ]
 }

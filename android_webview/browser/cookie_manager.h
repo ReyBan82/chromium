@@ -8,17 +8,19 @@
 #include <memory>
 #include <vector>
 
+#include "android_webview/browser/aw_cookie_access_policy.h"
 #include "base/android/jni_array.h"
 #include "base/android/scoped_java_ref.h"
 #include "base/containers/circular_deque.h"
 #include "base/files/file_path.h"
+#include "base/gtest_prod_util.h"
 #include "base/no_destructor.h"
 #include "base/thread_annotations.h"
 #include "base/threading/thread.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/remote.h"
-#include "services/network/public/mojom/cookie_manager.mojom-forward.h"
 #include "services/network/public/mojom/cookie_manager.mojom.h"
+#include "services/network/public/mojom/network_context.mojom.h"
 
 class GURL;
 
@@ -32,6 +34,8 @@ class CanonicalCookie;
 }
 
 namespace android_webview {
+
+class AwBrowserContext;
 
 // CookieManager creates and owns WebView's CookieStore, in addition to handling
 // calls into the CookieStore from Java.
@@ -85,7 +89,14 @@ namespace android_webview {
 // disk until the flush is complete.
 class CookieManager {
  public:
-  static CookieManager* GetInstance();
+  static CookieManager* GetDefaultInstance();
+
+  // If you want to construct the CookieManager for the default profile, use a
+  // null parent_context, as the default AwBrowserContext does not own its
+  // CookieManager (for legacy reasons). All non-default profile CookieManagers
+  // are owned by an AwBrowserContext - a non-null parent_context.
+  explicit CookieManager(AwBrowserContext* parent_context);
+  ~CookieManager();
 
   CookieManager(const CookieManager&) = delete;
   CookieManager& operator=(const CookieManager&) = delete;
@@ -98,63 +109,44 @@ class CookieManager {
   void SetMojoCookieManager(
       mojo::PendingRemote<network::mojom::CookieManager> cookie_manager_remote);
 
+  // Non-blocking version of SetMojoCookieManager that uses a callback to signal
+  // when the provisional cookie store has been closed and it's safe for the
+  // Network Service to open the cookie database. This prevents race conditions
+  // where both the provisional store and Network Service try to access the same
+  // SQLite database file simultaneously.
+  void SetMojoCookieManagerNonBlocking(
+      mojo::PendingRemote<network::mojom::CookieManager> cookie_manager_remote,
+      mojo::PendingRemote<network::mojom::CookieStoreReadyCallback>
+          ready_callback);
+
+  base::android::ScopedJavaLocalRef<jobject> GetJavaCookieManager();
+
   // Configure whether or not this CookieManager should workaround cookies
   // specified for insecure URLs with the 'Secure' directive. See
   // |workaround_http_secure_cookies_| for the default behavior. This should not
   // be needed in production, as the default is the desirable behavior.
-  void SetWorkaroundHttpSecureCookiesForTesting(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      jboolean allow);
-  void SetShouldAcceptCookies(JNIEnv* env,
-                              const base::android::JavaParamRef<jobject>& obj,
-                              jboolean accept);
-  jboolean GetShouldAcceptCookies(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  void SetCookie(JNIEnv* env,
-                 const base::android::JavaParamRef<jobject>& obj,
-                 const base::android::JavaParamRef<jstring>& url,
-                 const base::android::JavaParamRef<jstring>& value,
-                 const base::android::JavaParamRef<jobject>& java_callback);
-  void SetCookieSync(JNIEnv* env,
-                     const base::android::JavaParamRef<jobject>& obj,
-                     const base::android::JavaParamRef<jstring>& url,
-                     const base::android::JavaParamRef<jstring>& value);
+  void SetWorkaroundHttpSecureCookiesForTesting(JNIEnv* env, bool allow);
+  void SetShouldAcceptCookies(JNIEnv* env, bool accept);
+  bool GetShouldAcceptCookies(JNIEnv* env);
+  void SetCookie(const std::string& url,
+                 const std::string& value,
+                 base::OnceCallback<void(bool)> callback);
+  void SetCookieSync(const std::string& url, const std::string& value);
 
-  base::android::ScopedJavaLocalRef<jstring> GetCookie(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jstring>& url);
+  std::string GetCookie(const std::string& url);
 
-  base::android::ScopedJavaLocalRef<jobjectArray> GetCookieInfo(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jstring>& url);
+  std::vector<std::string> GetCookieInfo(const std::string& url);
 
-  void RemoveAllCookies(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jobject>& java_callback);
-  void RemoveSessionCookies(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jobject>& java_callback);
-  void RemoveAllCookiesSync(JNIEnv* env,
-                            const base::android::JavaParamRef<jobject>& obj);
-  void RemoveSessionCookiesSync(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
-  void RemoveExpiredCookies(JNIEnv* env,
-                            const base::android::JavaParamRef<jobject>& obj);
-  void FlushCookieStore(JNIEnv* env,
-                        const base::android::JavaParamRef<jobject>& obj);
-  jboolean HasCookies(JNIEnv* env,
-                      const base::android::JavaParamRef<jobject>& obj);
+  void RemoveAllCookies(JNIEnv* env, base::OnceCallback<void(bool)> callback);
+  void RemoveSessionCookies(JNIEnv* env,
+                            base::OnceCallback<void(bool)> callback);
+  void RemoveAllCookiesSync(JNIEnv* env);
+  void RemoveSessionCookiesSync(JNIEnv* env);
+  void RemoveExpiredCookies(JNIEnv* env);
+  void FlushCookieStore(JNIEnv* env);
+  bool HasCookies(JNIEnv* env);
   bool GetAllowFileSchemeCookies();
-  jboolean GetAllowFileSchemeCookies(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj);
+  bool GetAllowFileSchemeCookies(JNIEnv* env);
 
   // Configures whether CookieManager and WebView instances will honor requests
   // to set cookies for file:// scheme URLs. This method must be called (and
@@ -165,18 +157,17 @@ class CookieManager {
   // guarantee (otherwise other mojo::Remote<network::mojom::CookieManager>
   // instances might be able to modify the underlying net::CookieStore before
   // this call finishes.
-  void SetAllowFileSchemeCookies(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      jboolean allow);
+  void SetAllowFileSchemeCookies(JNIEnv* env, bool allow);
 
   base::FilePath GetCookieStorePath();
 
- private:
-  friend class base::NoDestructor<CookieManager>;
+  AwCookieAccessPolicy* cookie_access_policy() {
+    return &cookie_access_policy_;
+  }
 
-  CookieManager();
-  ~CookieManager();
+ private:
+  FRIEND_TEST_ALL_PREFIXES(CookieManagerTest,
+                           DeferredProvisionalStoreCloseInInvokeQueue);
 
   // Returns the CookieStore, creating it if necessary. This must only be called
   // on the CookieStore TaskRunner.
@@ -185,7 +176,7 @@ class CookieManager {
   // Gets the Network Service CookieManager if it's been passed via
   // |SetMojoCookieManager|. Otherwise (if Network Service is disabled or
   // content layer has not yet initialized the NetworkContext), this returns
-  // nullptr (and |GetCookieStore| should be used installed). This must only be
+  // nullptr (and |GetCookieStore| should be used instead). This must only be
   // called on the CookieStore TaskRunner.
   network::mojom::CookieManager* GetMojoCookieManager();
 
@@ -222,12 +213,37 @@ class CookieManager {
 
   void FlushCookieStoreAsyncHelper(base::OnceClosure complete);
 
-  void SetMojoCookieManagerAsync(
+  void SetMojoCookieManagerOnCookieThread(
       mojo::PendingRemote<network::mojom::CookieManager> cookie_manager_remote,
       base::OnceClosure complete);
-  void SwapMojoCookieManagerAsync(
+  void SwapMojoCookieManagerOnCookieThread(
       mojo::PendingRemote<network::mojom::CookieManager> cookie_manager_remote,
       base::OnceClosure complete);
+
+  // Non-blocking handoff helpers.
+  void SetMojoCookieManagerNonBlockingOnCookieThread(
+      mojo::PendingRemote<network::mojom::CookieManager> cookie_manager_remote,
+      mojo::PendingRemote<network::mojom::CookieStoreReadyCallback>
+          ready_callback);
+  void CloseProvisionalStoreAndSignalReady(
+      mojo::PendingRemote<network::mojom::CookieManager> cookie_manager_remote,
+      mojo::PendingRemote<network::mojom::CookieStoreReadyCallback>
+          ready_callback);
+  void OnProvisionalStoreClosed(
+      mojo::PendingRemote<network::mojom::CookieManager> cookie_manager_remote,
+      mojo::PendingRemote<network::mojom::CookieStoreReadyCallback>
+          ready_callback);
+
+  // Called when a provisional store operation completes. If we're waiting to
+  // close and this was the last operation, proceeds with closing the store.
+  void OnProvisionalStoreOperationComplete();
+
+  // Actually closes the provisional store and signals ready. Called either
+  // immediately if no operations are pending, or deferred until all complete.
+  void DoCloseProvisionalStoreAndSignalReady(
+      mojo::PendingRemote<network::mojom::CookieManager> cookie_manager_remote,
+      mojo::PendingRemote<network::mojom::CookieStoreReadyCallback>
+          ready_callback);
 
   void HasCookiesAsyncHelper(bool* result, base::OnceClosure complete);
   void HasCookiesCompleted(base::OnceClosure complete,
@@ -241,12 +257,27 @@ class CookieManager {
   void SetAllowFileSchemeCookiesCompleted(base::OnceClosure complete,
                                           bool allow,
                                           bool can_change_schemes);
-  void MigrateCookieStorePath();
 
   // The client hint cache should be cleared if cookies are cleared, but if
   // cookies are cleared before the browser starts we need a way flag the
   // need to clear them later.
   void ClearClientHintsCachedPerOriginMapIfNeeded();
+
+  // Returns the AwBrowserContext associated with the same profile as this
+  // CookieManager. For the default profile, the AwBrowserContext is not
+  // guaranteed to be initialized, so it may be null.
+  AwBrowserContext* GetContext() const;
+  // Get the storage path for the profile this CookieManager is associated with.
+  base::FilePath GetContextPath() const;
+
+  // Java object reference.
+  base::android::ScopedJavaGlobalRef<jobject> java_obj_;
+
+  // If this is the CookieManager for the default profile this will be null,
+  // otherwise it will point to the non-default AwBrowserContext which owns the
+  // CookieManager.
+  const raw_ptr<AwBrowserContext> parent_context_;
+
   bool should_clear_client_hints_cached_per_origin_map_{false};
 
   base::FilePath cookie_store_path_;
@@ -278,6 +309,10 @@ class CookieManager {
   // |cookie_store_task_runner_|.
   bool setting_new_mojo_cookie_manager_;
 
+  // The cookie access policy is responsible for configuring when WebView allows
+  // cookies both globally, and per request.
+  AwCookieAccessPolicy cookie_access_policy_;
+
   // |tasks_| is a queue we manage, to allow us to delay tasks until after
   // SetMojoCookieManager()'s work is done. This is modified on different
   // threads, so accesses must be guarded by |task_queue_lock_|.
@@ -286,6 +321,24 @@ class CookieManager {
 
   // The CookieManager shared with the NetworkContext.
   mojo::Remote<network::mojom::CookieManager> mojo_cookie_manager_;
+
+  // Tracks the number of in-flight operations on the provisional cookie store.
+  // This is used during handoff to ensure all operations complete before
+  // destroying the provisional store. Only accessed on
+  // |cookie_store_task_runner_|.
+  int pending_provisional_store_operations_ = 0;
+
+  // Set to true when we're waiting for pending operations to complete before
+  // closing the provisional store. Only accessed on
+  // |cookie_store_task_runner_|.
+  bool waiting_to_close_provisional_store_ = false;
+
+  // Saved remotes for deferred close when waiting for pending operations.
+  // Only accessed on |cookie_store_task_runner_|.
+  mojo::PendingRemote<network::mojom::CookieManager>
+      deferred_cookie_manager_remote_;
+  mojo::PendingRemote<network::mojom::CookieStoreReadyCallback>
+      deferred_ready_callback_;
 };
 
 }  // namespace android_webview

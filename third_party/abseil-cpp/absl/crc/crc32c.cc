@@ -14,8 +14,10 @@
 
 #include "absl/crc/crc32c.h"
 
+#include <cstddef>
 #include <cstdint>
 
+#include "absl/base/config.h"
 #include "absl/crc/internal/crc.h"
 #include "absl/crc/internal/crc32c.h"
 #include "absl/crc/internal/crc_memcpy.h"
@@ -53,10 +55,6 @@ crc32c_t ExtendCrc32cInternal(crc32c_t initial_crc,
 }
 
 }  // namespace crc_internal
-
-crc32c_t ComputeCrc32c(absl::string_view buf) {
-  return ExtendCrc32c(crc32c_t{0}, buf);
-}
 
 crc32c_t ExtendCrc32cByZeroes(crc32c_t initial_crc, size_t length) {
   uint32_t crc = static_cast<uint32_t>(initial_crc) ^ kCRC32Xor;

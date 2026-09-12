@@ -10,6 +10,7 @@
 #include <list>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -17,18 +18,17 @@
 
 #include "base/component_export.h"
 #include "base/containers/lru_cache.h"
-#include "base/feature_list.h"
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback_forward.h"
-#include "base/functional/callback_helpers.h"
 #include "base/gtest_prod_util.h"
-#include "base/memory/memory_pressure_listener.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/memory_coordinator/async_memory_consumer_registration.h"
+#include "base/memory_coordinator/memory_consumer.h"
+#include "base/memory_coordinator/utils.h"
 #include "base/time/time.h"
 #include "storage/browser/blob/blob_storage_constants.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class TaskRunner;
@@ -51,7 +51,8 @@ class ShareableFileReference;
 // * Maintaining an LRU of memory items to choose candidates to page to disk
 //   (NotifyMemoryItemsUsed).
 // This class can only be interacted with on the IO thread.
-class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController {
+class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController
+    : public base::MemoryConsumer {
  public:
   enum class Strategy {
     // We don't have enough memory for this blob.
@@ -122,7 +123,7 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController {
   BlobMemoryController(const BlobMemoryController&) = delete;
   BlobMemoryController& operator=(const BlobMemoryController&) = delete;
 
-  ~BlobMemoryController();
+  ~BlobMemoryController() override;
 
   // Disables file paging. This cancels all pending file creations and paging
   // operations. Reason is recorded in UMA.
@@ -186,7 +187,7 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController {
   void GrowFileAllocation(ShareableFileReference* file_reference,
                           uint64_t delta);
 
-  using DiskSpaceFuncPtr = int64_t (*)(const base::FilePath&);
+  using DiskSpaceFuncPtr = std::optional<int64_t> (*)(const base::FilePath&);
 
   void set_testing_disk_space(DiskSpaceFuncPtr disk_space_function) {
     disk_space_function_ = disk_space_function;
@@ -210,7 +211,6 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController {
   class FileQuotaAllocationTask;
   class MemoryQuotaAllocationTask;
 
-  FRIEND_TEST_ALL_PREFIXES(BlobMemoryControllerTest, OnMemoryPressure);
   // So this (and only this) class can call CalculateBlobStorageLimits().
   friend class content::ChromeBlobStorageContext;
 
@@ -242,8 +242,7 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController {
       uint64_t min_page_file_size);
 
   // Schedule paging until our memory usage is below our memory limit.
-  void MaybeScheduleEvictionUntilSystemHealthy(
-      base::MemoryPressureListener::MemoryPressureLevel level);
+  void MaybeScheduleEvictionUntilSystemHealthy(base::MemoryLimit memory_limit);
 
   // Called when we've completed evicting a list of items to disk. This is where
   // we swap the bytes items for file items, and update our bookkeeping.
@@ -253,8 +252,9 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController {
       size_t total_items_size,
       std::pair<FileCreationInfo, int64_t /* avail_disk */> result);
 
-  void OnMemoryPressure(
-      base::MemoryPressureListener::MemoryPressureLevel memory_pressure_level);
+  // MemoryConsumer implementation:
+  void OnUpdateMemoryLimit() override;
+  void OnReleaseMemory() override;
 
   void GrantMemoryAllocations(
       std::vector<scoped_refptr<ShareableBlobDataItem>>* items,
@@ -276,12 +276,13 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController {
   // Store that we set manual limits so we don't accidentally override them with
   // our configuration task.
   bool manual_limits_set_ = false;
+  BlobStorageLimits base_limits_;
   BlobStorageLimits limits_;
   bool did_schedule_limit_calculation_ = false;
   bool did_calculate_storage_limits_ = false;
   std::vector<base::OnceClosure> on_calculate_limits_callbacks_;
 
-  absl::optional<uint64_t> amount_of_memory_for_testing_;
+  std::optional<uint64_t> amount_of_memory_for_testing_;
 
   // Memory bookkeeping. These numbers are all disjoint.
   // This is the amount of memory we're using for blobs in RAM, including the
@@ -318,7 +319,7 @@ class COMPONENT_EXPORT(STORAGE_BROWSER) BlobMemoryController {
   // item to the recent_item_cache_ above.
   std::unordered_set<uint64_t> items_paging_to_file_;
 
-  base::MemoryPressureListener memory_pressure_listener_;
+  base::AsyncMemoryConsumerRegistration memory_consumer_registration_;
 
   base::WeakPtrFactory<BlobMemoryController> weak_factory_{this};
 };

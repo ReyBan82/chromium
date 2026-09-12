@@ -7,7 +7,6 @@
 #include <set>
 #include <string>
 
-#include "base/strings/string_piece.h"
 #include "net/base/url_util.h"
 #include "net/dns/dns_names_util.h"
 #include "net/dns/public/dns_protocol.h"
@@ -28,7 +27,7 @@ std::set<std::string> FixUpDnsAliases(const std::set<std::string>& aliases) {
     std::string canonicalized_alias;
     url::StdStringCanonOutput output(&canonicalized_alias);
     url::CanonHostInfo host_info;
-    url::CanonicalizeHostVerbose(alias.data(), url::Component(0, alias.size()),
+    url::CanonicalizeHostVerbose(alias, url::Component(0, alias.size()),
                                  &output, &host_info);
 
     if (host_info.family == url::CanonHostInfo::Family::BROKEN) {

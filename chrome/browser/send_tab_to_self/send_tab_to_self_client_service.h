@@ -6,62 +6,56 @@
 #define CHROME_BROWSER_SEND_TAB_TO_SELF_SEND_TAB_TO_SELF_CLIENT_SERVICE_H_
 
 #include <string>
-#include <vector>
 
+#include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
-#include "chrome/browser/send_tab_to_self/receiving_ui_handler.h"
+#include "base/scoped_observation.h"
 #include "components/keyed_service/core/keyed_service.h"
+#include "components/send_tab_to_self/receiving_ui_handler.h"
 #include "components/send_tab_to_self/send_tab_to_self_model.h"
 #include "components/send_tab_to_self/send_tab_to_self_model_observer.h"
 
-class Profile;
-
 namespace send_tab_to_self {
-class ReceivingUiHandlerRegistry;
-class SendTabToSelfEntry;
-class SendTabToSelfModel;
 
 // Service that listens for SendTabToSelf model changes and calls UI
 // handlers to update the UI accordingly.
+// TODO(crbug.com/519101926): Consider moving this service to
+// components/send_tab_to_self to allow iOS to use it and unify the receiving
+// flow.
 class SendTabToSelfClientService : public KeyedService,
                                    public SendTabToSelfModelObserver {
  public:
-  SendTabToSelfClientService(Profile* profile, SendTabToSelfModel* model);
+  // `model` must outlive this object. `receiving_ui_handler` must be usable
+  // until this keyed service is Shutdown() (in particular it cannot depend on
+  // any services that are instantiated after this one).
+  SendTabToSelfClientService(
+      std::unique_ptr<ReceivingUiHandler> receiving_ui_handler,
+      SendTabToSelfModel* model);
 
   SendTabToSelfClientService(const SendTabToSelfClientService&) = delete;
   SendTabToSelfClientService& operator=(const SendTabToSelfClientService&) =
       delete;
+  ~SendTabToSelfClientService() override;
 
   void Shutdown() override;
 
-  // Keeps track of when the model is loaded so that updates to the
-  // model can be pushed afterwards.
-  void SendTabToSelfModelLoaded() override;
   // Updates the UI to reflect the new entries. Calls the handlers
   // registered through ReceivingUIRegistry.
-  void EntriesAddedRemotely(
-      const std::vector<const SendTabToSelfEntry*>& new_entries) override;
+  void OnEntriesAddedRemotely(
+      base::span<const SendTabToSelfEntry* const> new_entries) override;
   // Updates the UI to reflect the removal of entries. Calls the handlers
   // registered through ReceivingUIRegistry.
-  void EntriesRemovedRemotely(const std::vector<std::string>& guids) override;
+  void OnEntriesRemovedRemotely(base::span<const std::string> guids) override;
 
- protected:
-  ~SendTabToSelfClientService() override;
-
-  // Sets up the ReceivingUiHandlerRegistry.
-  virtual void SetupHandlerRegistry(Profile* profile);
-
-  // Returns a vector containing the registered ReceivingUiHandlers.
-  virtual const std::vector<std::unique_ptr<ReceivingUiHandler>>& GetHandlers()
-      const;
+  // Returns the registered ReceivingUiHandler.
+  ReceivingUiHandler* GetReceivingUiHandler() const;
 
  private:
-  // Owned by the SendTabToSelfSyncService which should outlive this class
-  raw_ptr<SendTabToSelfModel> model_;
-  // Singleton instance not owned by this class
-  raw_ptr<ReceivingUiHandlerRegistry> registry_;
-  // Profile for which this service is associated.
-  raw_ptr<Profile> profile_;
+  // The model outlives this object, so this is fine.
+  base::ScopedObservation<SendTabToSelfModel, SendTabToSelfModelObserver>
+      model_observation_{this};
+  // Reset on Shutdown().
+  std::unique_ptr<ReceivingUiHandler> receiving_ui_handler_;
 };
 
 }  // namespace send_tab_to_self

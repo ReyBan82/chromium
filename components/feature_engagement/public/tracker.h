@@ -5,28 +5,59 @@
 #ifndef COMPONENTS_FEATURE_ENGAGEMENT_PUBLIC_TRACKER_H_
 #define COMPONENTS_FEATURE_ENGAGEMENT_PUBLIC_TRACKER_H_
 
+#include <concepts>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/supports_user_data.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
+#include "base/types/pass_key.h"
 #include "build/build_config.h"
+#include "components/feature_engagement/public/configuration.h"
+#include "components/feature_engagement/public/configuration_provider.h"
+#include "components/feature_engagement/public/default_session_controller.h"
 #include "components/keyed_service/core/keyed_service.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if BUILDFLAG(IS_ANDROID)
 #include "base/android/jni_android.h"
 #endif  // BUILDFLAG(IS_ANDROID)
 
+namespace base {
+class Clock;
+class CommandLine;
+}
+
 namespace leveldb_proto {
 class ProtoDatabaseProvider;
 }
 
+class PrefService;
+
+namespace user_education {
+class FeaturePromoControllerImpl;
+class FeaturePromoLifecycle;
+}  // namespace user_education
+
+class UserEducationInternalsPageHandlerImpl;
+
 namespace feature_engagement {
+
+class Configuration;
+class FeatureActivation;
+class NonIphPromo;
+class Tracker;
+class SessionController;
+
+// Creates a Tracker that is usable for a demo mode. `feature_activation`
+// decides which features are enabled.
+std::unique_ptr<Tracker> CreateDemoModeTracker(
+    FeatureActivation feature_activation);
 
 // A handle for the display lock. While this is unreleased, no in-product help
 // can be displayed.
@@ -42,6 +73,34 @@ class DisplayLockHandle {
 
  private:
   ReleaseCallback release_callback_;
+};
+
+// A class that can export events from another tracking system to the Tracker so
+// they can be migrated.
+class TrackerEventExporter {
+ public:
+  // Struct to hold data about one event to migrate. |day| should be the number
+  // of days since the UNIX epoch.
+  struct EventData {
+   public:
+    std::string event_name;
+    uint32_t day;
+
+    EventData(std::string event_name, uint32_t day)
+        : event_name(event_name), day(day) {}
+  };
+
+  virtual ~TrackerEventExporter() = default;
+
+  // The tracker will call this once its own initialization has mostly completed
+  // to ask for any new events to add.
+  using ExportEventsCallback =
+      base::OnceCallback<void(const std::vector<EventData> events)>;
+
+  // Asks the class to load any events to export and provide them back to the
+  // tracker via |callback|. |callback| must be called on the same thread that
+  // this method was invoked on.
+  virtual void ExportEvents(ExportEventsCallback callback) = 0;
 };
 
 // The Tracker provides a backend for displaying feature
@@ -108,17 +167,107 @@ class Tracker : public KeyedService, public base::SupportsUserData {
   using OnInitializedCallback = base::OnceCallback<void(bool success)>;
 
   // The |storage_dir| is the path to where all local storage will be.
-  // The |bakground_task_runner| will be used for all disk reads and writes.
-  static Tracker* Create(
+  // The |background_task_runner| will be used for all disk reads and writes.
+  // If `configuration_providers` is not specified, a default set of providers
+  // will be provided.
+  static std::unique_ptr<Tracker> Create(
       const base::FilePath& storage_dir,
+      const base::FilePath& device_storage_dir,
+      PrefService* pref_service,
       const scoped_refptr<base::SequencedTaskRunner>& background_task_runner,
-      leveldb_proto::ProtoDatabaseProvider* db_provider);
+      leveldb_proto::ProtoDatabaseProvider* db_provider,
+      std::unique_ptr<TrackerEventExporter> event_exporter,
+      const ConfigurationProviderList& configuration_providers =
+          GetDefaultConfigurationProviders(),
+      std::unique_ptr<SessionController> session_controller =
+          std::make_unique<DefaultSessionController>());
+  // Possibly adds a command line argument for a child browser process to
+  // communicate what IPH are allowed in a testing environment. Has no effect if
+  // IPH behavior is not being modified for testing. If specific IPH features
+  // are explicitly allowed for the test, may add those to the --enable-features
+  // command line parameter as well (will add it if not present).
+  static void PropagateTestStateToChildProcess(base::CommandLine& command_line);
 
   Tracker(const Tracker&) = delete;
   Tracker& operator=(const Tracker&) = delete;
 
   // Must be called whenever an event happens.
   virtual void NotifyEvent(const std::string& event) = 0;
+
+#if !BUILDFLAG(IS_ANDROID)
+  // Notifies that the "used" event for `feature` has happened.
+  virtual void NotifyUsedEvent(const base::Feature& feature) = 0;
+
+  // Erases all event data associated with a particular `feature`, including -
+  // but not limited to - trigger and used event data.
+  //
+  // This method is used by specific internals and test code.
+  template <typename T>
+    requires std::same_as<T, UserEducationInternalsPageHandlerImpl>
+  void ClearEventData(const base::Feature& feature, base::PassKey<T>) {
+    ClearEventData(feature);
+  }
+
+  // Retrieves the configuration.
+  template <typename T>
+    requires std::same_as<T, UserEducationInternalsPageHandlerImpl>
+  const Configuration* GetConfiguration(base::PassKey<T>) const {
+    return GetConfiguration();
+  }
+
+  // Retrieves information about each event condition and event count associated
+  // with a feature. The count will reflect the time window in EventConfig.
+  using EventList = std::vector<std::pair<EventConfig, int>>;
+  virtual EventList ListEvents(const base::Feature& feature) const = 0;
+#endif
+
+  // DESKTOP AND SHARED DESKTOP/MOBILE API
+
+  // These methods are only used by a limited number of classes in and around
+  // `components/user_education`.
+  //
+  // If you want to interact with the feature engagement system directly on
+  // desktop, use `NonIphPromo`, which allows you to create and configure custom
+  // promos in a way that is safe and compatible with IPH.
+
+  // See `ShouldTriggerHelpUI(const base::Feature& feature)` below for
+  // documentation.
+  template <typename T>
+    requires std::same_as<T, user_education::FeaturePromoControllerImpl> ||
+             std::same_as<T, NonIphPromo>
+  [[nodiscard]] inline bool ShouldTriggerHelpUI(const base::Feature& feature,
+                                                base::PassKey<T>) {
+    return ShouldTriggerHelpUI(feature);
+  }
+
+  // See `WouldTriggerHelpUI(const base::Feature& feature)` below for
+  // documentation.
+  template <typename T>
+    requires std::same_as<T, user_education::FeaturePromoControllerImpl> ||
+             std::same_as<T, UserEducationInternalsPageHandlerImpl> ||
+             std::same_as<T, NonIphPromo>
+  inline bool WouldTriggerHelpUI(const base::Feature& feature,
+                                 base::PassKey<T>) const {
+    return WouldTriggerHelpUI(feature);
+  }
+
+  // See `Dismissed(const base::Feature& feature)` below for documentation.
+  template <typename T>
+    requires std::same_as<T, user_education::FeaturePromoControllerImpl> ||
+             std::same_as<T, user_education::FeaturePromoLifecycle> ||
+             std::same_as<T, NonIphPromo>
+  inline void Dismissed(const base::Feature& feature, base::PassKey<T>) {
+    Dismissed(feature);
+  }
+
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC) || BUILDFLAG(IS_LINUX)
+  // TODO(https://crbug.com/511194274): For now, allow calling the base API in
+  // chromeos-only code; remove the exception for ChromeOS when we've migrated
+  // those calls.
+ protected:
+#endif
+
+  // BEGIN MOBILE-ONLY API
 
   // This function must be called whenever the triggering condition for a
   // specific feature happens. Returns true iff the display of the in-product
@@ -179,7 +328,17 @@ class Tracker : public KeyedService, public base::SupportsUserData {
   // the Dismissed(..) method.
   virtual void DismissedWithSnooze(
       const base::Feature& feature,
-      absl::optional<SnoozeAction> snooze_action) = 0;
+      std::optional<SnoozeAction> snooze_action) = 0;
+
+#if !BUILDFLAG(IS_ANDROID)
+
+  // Erases all event data associated with a particular `feature`, including -
+  // but not limited to - trigger and used event data.
+  //
+  // This method is used by specific internals and test code.
+  virtual void ClearEventData(const base::Feature& feature) = 0;
+
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Acquiring a display lock means that no in-product help can be displayed
   // while it is held. To release the lock, delete the handle.
@@ -201,7 +360,7 @@ class Tracker : public KeyedService, public base::SupportsUserData {
   virtual void SetPriorityNotification(const base::Feature& feature) = 0;
 
   // Called to get if there is a pending priority notification to be shown next.
-  virtual absl::optional<std::string> GetPendingPriorityNotification() = 0;
+  virtual std::optional<std::string> GetPendingPriorityNotification() = 0;
 
   // Called by the client to register a handler for priority notifications. This
   // will essentially contain the code to spin up an IPH.
@@ -213,6 +372,9 @@ class Tracker : public KeyedService, public base::SupportsUserData {
   virtual void UnregisterPriorityNotificationHandler(
       const base::Feature& feature) = 0;
 
+  // END OF MOBILE-ONLY API
+
+ public:
   // Returns whether the tracker has been successfully initialized. During
   // startup, this will be false until the internal models have been loaded at
   // which point it is set to true if the initialization was successful. The
@@ -228,7 +390,48 @@ class Tracker : public KeyedService, public base::SupportsUserData {
   // invoked exactly one time.
   virtual void AddOnInitializedCallback(OnInitializedCallback callback) = 0;
 
+#if BUILDFLAG(IS_CHROMEOS)
+  // Updates the config of a specific feature after initialization. The new
+  // config will replace the existing config.
+  // Calling this method requires the Tracker to already have been initialized.
+  // See IsInitialized() and AddOnInitializedCallback(...) for how to ensure
+  // the call to this is delayed.
+  virtual void UpdateConfig(const base::Feature& feature,
+                            const ConfigurationProvider* provider) = 0;
+#endif
+
+  // Returns the configuration associated with the tracker for testing purposes.
+  const Configuration* GetConfigurationForTesting() const {
+    return GetConfiguration();
+  }
+
+  // Set a testing clock for the tracker. It's recommended to use a
+  // SimpleTestClock, so we can advance the clock in test.
+  virtual void SetClockForTesting(const base::Clock& clock,
+                                  base::Time initial_now) = 0;
+
+  // Returns whether any features are disabled/enabled for testing.
+  virtual bool IsInFeatureTestMode() const = 0;
+
+  // Returns the default set of configuration providers.
+  static ConfigurationProviderList GetDefaultConfigurationProviders();
+
+  // The following are provided for compatibility on desktop.
+
+  [[nodiscard]] inline bool ShouldTriggerHelpUIForTesting(
+      const base::Feature& feature) {
+    return ShouldTriggerHelpUI(feature);
+  }
+  inline bool WouldTriggerHelpUIForTesting(const base::Feature& feature) const {
+    return WouldTriggerHelpUI(feature);
+  }
+  inline void DismissedForTesting(const base::Feature& feature) {
+    Dismissed(feature);
+  }
+
  protected:
+  virtual const Configuration* GetConfiguration() const = 0;
+
   Tracker() = default;
 };
 

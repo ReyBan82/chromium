@@ -22,13 +22,13 @@ class ClipboardRestrictionServiceTest : public testing::Test {
   ClipboardRestrictionService* service() { return service_.get(); }
 
  protected:
-  void SetPolicy(absl::optional<std::vector<std::string>> enable_patterns,
-                 absl::optional<std::vector<std::string>> disable_patterns,
+  void SetPolicy(std::optional<std::vector<std::string>> enable_patterns,
+                 std::optional<std::vector<std::string>> disable_patterns,
                  int min_data_size = 100) {
-    base::Value::Dict pref_dict;
+    base::DictValue pref_dict;
 
     if (enable_patterns) {
-      base::Value::List enable_list;
+      base::ListValue enable_list;
       for (auto& p : *enable_patterns) {
         enable_list.Append(std::move(p));
       }
@@ -36,7 +36,7 @@ class ClipboardRestrictionServiceTest : public testing::Test {
     }
 
     if (disable_patterns) {
-      base::Value::List disable_list;
+      base::ListValue disable_list;
       for (auto& p : *disable_patterns) {
         disable_list.Append(std::move(p));
       }
@@ -50,8 +50,7 @@ class ClipboardRestrictionServiceTest : public testing::Test {
   }
 
   void CreateService() {
-    service_ = std::unique_ptr<ClipboardRestrictionService>(
-        new ClipboardRestrictionService(&pref_service_));
+    service_ = std::make_unique<ClipboardRestrictionService>(&pref_service_);
   }
 
  private:

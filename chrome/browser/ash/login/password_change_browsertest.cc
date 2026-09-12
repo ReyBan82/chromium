@@ -3,79 +3,76 @@
 // found in the LICENSE file.
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
+#include "ash/constants/ash_login_pref_names.h"
 #include "ash/public/cpp/login_screen_test_api.h"
+#include "ash/public/cpp/notification_utils.h"
+#include "ash/public/cpp/reauth_reason.h"
+#include "ash/shell.h"
 #include "base/auto_reset.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/json/values_util.h"
 #include "base/run_loop.h"
 #include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/threading/thread_restrictions.h"
-#include "chrome/browser/ash/login/existing_user_controller.h"
+#include "base/timer/timer.h"
 #include "chrome/browser/ash/login/login_manager_test.h"
 #include "chrome/browser/ash/login/reauth_stats.h"
 #include "chrome/browser/ash/login/session/user_session_manager.h"
-#include "chrome/browser/ash/login/session/user_session_manager_test_api.h"
 #include "chrome/browser/ash/login/signin/signin_error_notifier.h"
+#include "chrome/browser/ash/login/signin/token_handle_store_factory.h"
 #include "chrome/browser/ash/login/signin/token_handle_util.h"
-#include "chrome/browser/ash/login/signin_specifics.h"
+#include "chrome/browser/ash/login/test/auth_ui_utils.h"
 #include "chrome/browser/ash/login/test/cryptohome_mixin.h"
-#include "chrome/browser/ash/login/test/js_checker.h"
-#include "chrome/browser/ash/login/test/local_state_mixin.h"
 #include "chrome/browser/ash/login/test/login_manager_mixin.h"
 #include "chrome/browser/ash/login/test/oobe_screen_waiter.h"
 #include "chrome/browser/ash/login/test/oobe_window_visibility_waiter.h"
-#include "chrome/browser/ash/login/test/session_manager_state_waiter.h"
-#include "chrome/browser/ash/login/ui/login_display_host.h"
+#include "chrome/browser/ash/login/test/user_auth_config.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/lifetime/termination_notification.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
-#include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/profiles/profile_manager_observer.h"
-#include "chrome/browser/ui/webui/ash/login/gaia_password_changed_screen_handler.h"
+#include "chrome/browser/ui/ash/login/login_display_host.h"
 #include "chrome/browser/ui/webui/ash/login/gaia_screen_handler.h"
 #include "chrome/browser/ui/webui/ash/login/oobe_ui.h"
 #include "chrome/test/base/fake_gaia_mixin.h"
-#include "chrome/test/base/interactive_test_utils.h"
+#include "chrome/test/base/mixin_based_in_process_browser_test.h"
 #include "chromeos/ash/components/cryptohome/cryptohome_parameters.h"
-#include "chromeos/ash/components/dbus/cryptohome/UserDataAuth.pb.h"
-#include "chromeos/ash/components/dbus/userdataauth/fake_cryptohome_misc_client.h"
 #include "chromeos/ash/components/dbus/userdataauth/fake_userdataauth_client.h"
-#include "chromeos/ash/components/dbus/userdataauth/userdataauth_client.h"
 #include "chromeos/ash/components/login/auth/public/user_context.h"
 #include "chromeos/ash/components/login/auth/stub_authenticator.h"
-#include "chromeos/ash/components/login/auth/stub_authenticator_builder.h"
 #include "components/account_id/account_id.h"
 #include "components/user_manager/known_user.h"
+#include "components/user_manager/user.h"
 #include "components/user_manager/user_manager.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_launcher.h"
-#include "content/public/test/test_utils.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "google_apis/gaia/gaia_id.h"
+#include "ui/events/keycodes/keyboard_codes_posix.h"
+#include "ui/events/test/event_generator.h"
+#include "ui/message_center/message_center.h"
 
 namespace ash {
 
 namespace {
 
 constexpr char kUserEmail[] = "test-user@gmail.com";
-constexpr char kGaiaID[] = "111111";
+constexpr GaiaId::Literal kGaiaID("111111");
+constexpr char kProfileSigninNotificationId[] = "chrome://settings/signin/";
 constexpr char kTokenHandle[] = "test_token_handle";
 constexpr char kTestingFileName[] = "testing-file.txt";
+constexpr char kTokenHandleLastCheckedPref[] = "TokenHandleLastChecked";
+constexpr char kTokenHandlePref[] = "PasswordTokenHandle";
+constexpr char kTokenHandleStatusPref[] = "TokenHandleStatus";
+constexpr char kTokenHandleStatusStale[] = "stale";
 
-const test::UIPath kPasswordStep = {"gaia-password-changed", "passwordStep"};
-const test::UIPath kOldPasswordInput = {"gaia-password-changed",
-                                        "oldPasswordInput"};
-const test::UIPath kSendPasswordButton = {"gaia-password-changed", "next"};
-const test::UIPath kForgotPassword = {"gaia-password-changed",
-                                      "forgotPasswordLink"};
-const test::UIPath kTryAgain = {"gaia-password-changed", "tryAgain"};
-const test::UIPath kProceedAnyway = {"gaia-password-changed", "proceedAnyway"};
-const test::UIPath kCancel = {"gaia-password-changed", "cancel"};
+constexpr char kTestTokenHandle[] = "test-token-handle";
+
+using AuthOp = FakeUserDataAuthClient::Operation;
 
 }  // namespace
 
@@ -85,10 +82,6 @@ class PasswordChangeTestBase : public LoginManagerTest {
   ~PasswordChangeTestBase() override = default;
 
  protected:
-  virtual UserContext GetTestUserContext() {
-    return login_mixin_.CreateDefaultUserContext(test_user_info_);
-  }
-
   void OpenGaiaDialog(const AccountId& account_id) {
     EXPECT_FALSE(LoginScreenTestApi::IsOobeDialogVisible());
     EXPECT_TRUE(LoginScreenTestApi::IsForcedOnlineSignin(account_id));
@@ -97,10 +90,7 @@ class PasswordChangeTestBase : public LoginManagerTest {
     EXPECT_TRUE(LoginScreenTestApi::IsOobeDialogVisible());
   }
 
-  void WaitForPasswordChangeScreen() {
-    OobeScreenWaiter(GaiaPasswordChangedView::kScreenId).Wait();
-    OobeWindowVisibilityWaiter(true).Wait();
-
+  void ExpectButtonsState() {
     EXPECT_FALSE(LoginScreenTestApi::IsShutdownButtonShown());
     EXPECT_FALSE(LoginScreenTestApi::IsGuestButtonShown());
     EXPECT_FALSE(LoginScreenTestApi::IsAddUserButtonShown());
@@ -110,44 +100,8 @@ class PasswordChangeTestBase : public LoginManagerTest {
   const AccountId test_account_id_ =
       AccountId::FromUserEmailGaiaId(kUserEmail, kGaiaID);
   const LoginManagerMixin::TestUserInfo test_user_info_{
-      test_account_id_, user_manager::UserType::USER_TYPE_REGULAR,
-      user_manager::User::OAuthTokenStatus::OAUTH2_TOKEN_STATUS_INVALID};
-  LoginManagerMixin login_mixin_{&mixin_host_, {test_user_info_}};
-};
-
-// Test fixture that uses a stub authenticator.
-//
-// Prefer using `PasswordChangeTest` for new tests instead.
-class PasswordChangeStubAuthTest : public PasswordChangeTestBase {
- protected:
-  // Sets up UserSessionManager to use stub authenticator that reports a
-  // password change, and attempts login.
-  // Password changed OOBE dialog is expected to show up after calling this.
-  void SetUpStubAuthenticatorAndAttemptLogin(const std::string& old_password) {
-    EXPECT_TRUE(LoginScreenTestApi::IsOobeDialogVisible());
-    UserContext user_context = GetTestUserContext();
-
-    auto authenticator_builder =
-        std::make_unique<StubAuthenticatorBuilder>(user_context);
-    authenticator_builder->SetUpPasswordChange(
-        old_password,
-        base::BindRepeating(
-            &PasswordChangeStubAuthTest::HandleDataRecoveryStatusChange,
-            base::Unretained(this)));
-    login_mixin_.AttemptLoginUsingAuthenticator(
-        user_context, std::move(authenticator_builder));
-  }
-
-  StubAuthenticator::DataRecoveryStatus data_recovery_status_ =
-      StubAuthenticator::DataRecoveryStatus::kNone;
-
- private:
-  void HandleDataRecoveryStatusChange(
-      StubAuthenticator::DataRecoveryStatus status) {
-    EXPECT_EQ(StubAuthenticator::DataRecoveryStatus::kNone,
-              data_recovery_status_);
-    data_recovery_status_ = status;
-  }
+      test_account_id_,
+      test::UserAuthConfig::Create(test::kDefaultAuthSetup).RequireReauth()};
 };
 
 // Test fixture that uses a fake UserDataAuth in order to simulate password
@@ -157,22 +111,22 @@ class PasswordChangeTest : public PasswordChangeTestBase {
   PasswordChangeTest() = default;
 
   void SetUpOnMainThread() override {
-    PasswordChangeTestBase::SetUpOnMainThread();
     // Make `FakeUserDataAuthClient` perform actual password checks when
     // handling authentication requests. This is necessary for triggering the
     // password change UI flow.
     FakeUserDataAuthClient::TestApi::Get()->set_enable_auth_check(true);
-  }
-
-  void AddFakeUser(const std::string& password) {
-    cryptohome_.MarkUserAsExisting(test_account_id_);
-    cryptohome_.AddGaiaPassword(test_account_id_, password);
-    CreateTestingFile();
+    PasswordChangeTestBase::SetUpOnMainThread();
+    fake_gaia_.SetupFakeGaiaForLoginWithDefaults();
   }
 
   bool TestingFileExists() const {
     base::ScopedAllowBlockingForTesting allow_blocking;
     return base::PathExists(GetTestingFilePath());
+  }
+
+  void CreateTestingFile() {
+    base::ScopedAllowBlockingForTesting allow_blocking;
+    EXPECT_TRUE(base::WriteFile(GetTestingFilePath(), /*data=*/""));
   }
 
   void SetGaiaScreenCredentials(const AccountId& account_id,
@@ -184,11 +138,19 @@ class PasswordChangeTest : public PasswordChangeTestBase {
                                   FakeGaiaMixin::kEmptyUserServices);
   }
 
+  CryptohomeMixin cryptohome_{&mixin_host_};
+  FakeGaiaMixin fake_gaia_{&mixin_host_};
+  LoginManagerMixin login_mixin_{&mixin_host_,
+                                 {test_user_info_},
+                                 &fake_gaia_,
+                                 &cryptohome_};
+  base::AutoReset<bool> branded_build{&WizardContext::g_is_branded_build, true};
+
  private:
   base::FilePath GetTestingFilePath() const {
     auto account_identifier =
         cryptohome::CreateAccountIdentifierFromAccountId(test_account_id_);
-    absl::optional<base::FilePath> profile_dir =
+    std::optional<base::FilePath> profile_dir =
         FakeUserDataAuthClient::TestApi::Get()->GetUserProfileDir(
             account_identifier);
     if (!profile_dir) {
@@ -197,31 +159,29 @@ class PasswordChangeTest : public PasswordChangeTestBase {
     }
     return profile_dir.value().AppendASCII(kTestingFileName);
   }
-
-  void CreateTestingFile() {
-    base::ScopedAllowBlockingForTesting allow_blocking;
-    EXPECT_TRUE(base::WriteFile(GetTestingFilePath(), /*data=*/""));
-  }
-
-  CryptohomeMixin cryptohome_{&mixin_host_};
-  FakeGaiaMixin fake_gaia_{&mixin_host_};
 };
 
-IN_PROC_BROWSER_TEST_F(PasswordChangeTest, MigrateOldCryptohome) {
-  AddFakeUser("old user password");
+IN_PROC_BROWSER_TEST_F(PasswordChangeTest, UpdateGaiaPassword) {
+  CreateTestingFile();
   OpenGaiaDialog(test_account_id_);
 
   base::HistogramTester histogram_tester;
-  SetGaiaScreenCredentials(test_account_id_, "new user password");
-  WaitForPasswordChangeScreen();
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
+
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+  ExpectButtonsState();
+
   histogram_tester.ExpectBucketCount("Login.PasswordChanged.ReauthReason",
                                      ReauthReason::kOther, 1);
 
-  test::OobeJS().CreateVisibilityWaiter(true, kPasswordStep)->Wait();
+  // Fill out and submit the old password.
+  test::PasswordChangedTypeOldPassword(
+      test_user_info_.auth_config.online_password);
+  test::PasswordChangedSubmitOldPassword();
 
-  // Fill out and submit the old password passed to the userdataauth.
-  test::OobeJS().TypeIntoPath("old user password", kOldPasswordInput);
-  test::OobeJS().ClickOnPath(kSendPasswordButton);
+  test::CreatePasswordUpdateNoticePageWaiter()->Wait();
+  test::PasswordUpdateNoticeExpectDone();
+  test::PasswordUpdateNoticeDoneAction();
 
   // User session should start, and whole OOBE screen is expected to be hidden.
   OobeWindowVisibilityWaiter(false).Wait();
@@ -230,52 +190,61 @@ IN_PROC_BROWSER_TEST_F(PasswordChangeTest, MigrateOldCryptohome) {
   EXPECT_TRUE(TestingFileExists());
 }
 
-IN_PROC_BROWSER_TEST_F(PasswordChangeStubAuthTest, SubmitOnEnterKeyPressed) {
+IN_PROC_BROWSER_TEST_F(PasswordChangeTest, SubmitOnEnterKeyPressed) {
   OpenGaiaDialog(test_account_id_);
 
   base::HistogramTester histogram_tester;
-  SetUpStubAuthenticatorAndAttemptLogin("old user password");
-  WaitForPasswordChangeScreen();
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+  ExpectButtonsState();
+
   histogram_tester.ExpectBucketCount("Login.PasswordChanged.ReauthReason",
                                      ReauthReason::kOther, 1);
 
-  test::OobeJS().CreateVisibilityWaiter(true, kPasswordStep)->Wait();
+  // Fill out and submit the old password, using "ENTER" key.
+  test::PasswordChangedTypeOldPassword(
+      test_user_info_.auth_config.online_password);
 
-  // Fill out and submit the old password passed to the stub authenticator.
-  test::OobeJS().TypeIntoPath("old user password", kOldPasswordInput);
-  ASSERT_TRUE(ui_test_utils::SendKeyPressToWindowSync(
-      nullptr, ui::VKEY_RETURN, false /* control */, false /* shift */,
-      false /* alt */, false /* command */));
+  ui::test::EventGenerator generator(ash::Shell::GetPrimaryRootWindow());
+  generator.PressKey(ui::VKEY_RETURN, 0);
+
+  test::CreatePasswordUpdateNoticePageWaiter()->Wait();
+  test::PasswordUpdateNoticeExpectDone();
+  test::PasswordUpdateNoticeDoneAction();
 
   // User session should start, and whole OOBE screen is expected to be hidden,
   OobeWindowVisibilityWaiter(false).Wait();
-  EXPECT_EQ(StubAuthenticator::DataRecoveryStatus::kRecovered,
-            data_recovery_status_);
+  EXPECT_TRUE(
+      FakeUserDataAuthClient::Get()->WasCalled<AuthOp::kUpdateAuthFactor>());
 
   login_mixin_.WaitForActiveSession();
 }
 
 IN_PROC_BROWSER_TEST_F(PasswordChangeTest, RetryOnWrongPassword) {
-  AddFakeUser("old user password");
+  CreateTestingFile();
   OpenGaiaDialog(test_account_id_);
   OobeScreenWaiter(GaiaView::kScreenId).Wait();
-  SetGaiaScreenCredentials(test_account_id_, "new password");
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
 
-  WaitForPasswordChangeScreen();
-  test::OobeJS().CreateVisibilityWaiter(true, kPasswordStep)->Wait();
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+  ExpectButtonsState();
 
   // Fill out and submit the old password passed to the fake userdataauth.
-  test::OobeJS().TypeIntoPath("incorrect old user password", kOldPasswordInput);
-  test::OobeJS().ClickOnPath(kSendPasswordButton);
-  // Expect the UI to report failure.
-  test::OobeJS()
-      .CreateWaiter(test::GetOobeElementPath(kOldPasswordInput) + ".invalid")
-      ->Wait();
-  test::OobeJS().ExpectEnabledPath(kPasswordStep);
+  test::PasswordChangedTypeOldPassword("incorrect old user password");
+  test::PasswordChangedSubmitOldPassword();
+  // Expect the UI to report failure, but stay on the same page.
+  test::PasswordChangedInvalidPasswordFeedback()->Wait();
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+  ExpectButtonsState();
 
   // Submit the correct password.
-  test::OobeJS().TypeIntoPath("old user password", kOldPasswordInput);
-  test::OobeJS().ClickOnPath(kSendPasswordButton);
+  test::PasswordChangedTypeOldPassword(
+      test_user_info_.auth_config.online_password);
+  test::PasswordChangedSubmitOldPassword();
+
+  test::CreatePasswordUpdateNoticePageWaiter()->Wait();
+  test::PasswordUpdateNoticeExpectDone();
+  test::PasswordUpdateNoticeDoneAction();
 
   // User session should start, and whole OOBE screen is expected to be hidden.
   OobeWindowVisibilityWaiter(false).Wait();
@@ -284,128 +253,304 @@ IN_PROC_BROWSER_TEST_F(PasswordChangeTest, RetryOnWrongPassword) {
 }
 
 IN_PROC_BROWSER_TEST_F(PasswordChangeTest, SkipDataRecovery) {
-  AddFakeUser("old user password");
+  CreateTestingFile();
   OpenGaiaDialog(test_account_id_);
-  SetGaiaScreenCredentials(test_account_id_, "new password");
-  WaitForPasswordChangeScreen();
-  test::OobeJS().CreateVisibilityWaiter(true, kPasswordStep)->Wait();
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
 
-  // Click forgot password link.
-  test::OobeJS().ClickOnPath(kForgotPassword);
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+  ExpectButtonsState();
 
-  test::OobeJS().CreateDisplayedWaiter(false, kPasswordStep)->Wait();
+  // Click forgot password button.
+  test::PasswordChangedForgotPasswordAction();
+  test::LocalDataLossWarningPageWaiter()->Wait();
 
-  test::OobeJS().ExpectVisiblePath(kTryAgain);
-  test::OobeJS().ExpectVisiblePath(kProceedAnyway);
+  test::LocalDataLossWarningPageExpectGoBack();
+  test::LocalDataLossWarningPageExpectRemove();
 
   // Click "Proceed anyway".
-  test::OobeJS().ClickOnPath(kProceedAnyway);
+  test::LocalDataLossWarningPageRemoveAction();
 
-  // User session should start, and whole OOBE screen is expected to be hidden.
-  OobeWindowVisibilityWaiter(false).Wait();
+  // With cryptohome recovery we re-create session and re-run onboarding.
+  test::UserOnboardingWaiter()->Wait();
 
-  login_mixin_.WaitForActiveSession();
   EXPECT_FALSE(TestingFileExists());
 }
 
-IN_PROC_BROWSER_TEST_F(PasswordChangeStubAuthTest,
-                       TryAgainAfterForgetLinkClick) {
+IN_PROC_BROWSER_TEST_F(PasswordChangeTest, TryAgainAfterForgetLinkClick) {
   OpenGaiaDialog(test_account_id_);
-  SetUpStubAuthenticatorAndAttemptLogin("old user password");
-  WaitForPasswordChangeScreen();
-  test::OobeJS().CreateDisplayedWaiter(true, kPasswordStep)->Wait();
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
 
-  // Click forgot password link.
-  test::OobeJS().ClickOnPath(kForgotPassword);
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+  ExpectButtonsState();
 
-  test::OobeJS().CreateDisplayedWaiter(false, kPasswordStep)->Wait();
+  // Click forgot password button.
+  test::PasswordChangedForgotPasswordAction();
+  test::LocalDataLossWarningPageWaiter()->Wait();
 
-  test::OobeJS().ExpectVisiblePath(kTryAgain);
-  test::OobeJS().ExpectVisiblePath(kProceedAnyway);
+  test::LocalDataLossWarningPageExpectGoBack();
+  test::LocalDataLossWarningPageExpectRemove();
 
   // Go back to old password input by clicking Try Again.
-  test::OobeJS().ClickOnPath(kTryAgain);
+  test::LocalDataLossWarningPageGoBackAction();
 
-  test::OobeJS().CreateDisplayedWaiter(true, kPasswordStep)->Wait();
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+  ExpectButtonsState();
 
   // Enter and submit the correct password.
-  test::OobeJS().TypeIntoPath("old user password", kOldPasswordInput);
-  test::OobeJS().ClickOnPath(kSendPasswordButton);
+  test::PasswordChangedTypeOldPassword(
+      test_user_info_.auth_config.online_password);
+  test::PasswordChangedSubmitOldPassword();
+
+  test::CreatePasswordUpdateNoticePageWaiter()->Wait();
+  test::PasswordUpdateNoticeExpectDone();
+  test::PasswordUpdateNoticeDoneAction();
 
   // User session should start, and whole OOBE screen is expected to be hidden,
   OobeWindowVisibilityWaiter(false).Wait();
-  EXPECT_EQ(StubAuthenticator::DataRecoveryStatus::kRecovered,
-            data_recovery_status_);
+  EXPECT_TRUE(
+      FakeUserDataAuthClient::Get()->WasCalled<AuthOp::kUpdateAuthFactor>());
 
   login_mixin_.WaitForActiveSession();
 }
 
-IN_PROC_BROWSER_TEST_F(PasswordChangeStubAuthTest, ClosePasswordChangedDialog) {
+IN_PROC_BROWSER_TEST_F(PasswordChangeTest, ClosePasswordChangedDialog) {
   OpenGaiaDialog(test_account_id_);
-  SetUpStubAuthenticatorAndAttemptLogin("old user password");
-  WaitForPasswordChangeScreen();
-  test::OobeJS().CreateVisibilityWaiter(true, kPasswordStep)->Wait();
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
 
-  test::OobeJS().TypeIntoPath("old user password", kOldPasswordInput);
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+  ExpectButtonsState();
+
+  test::PasswordChangedTypeOldPassword(
+      test_user_info_.auth_config.online_password);
+  // Switch to "Forgot password" step.
+  test::PasswordChangedForgotPasswordAction();
+
+  test::LocalDataLossWarningPageWaiter()->Wait();
+  test::LocalDataLossWarningPageCancelAction();
   // Click the close button.
-  test::OobeJS().ClickOnPath(kCancel);
 
   OobeWindowVisibilityWaiter(false).Wait();
-  EXPECT_EQ(StubAuthenticator::DataRecoveryStatus::kNone,
-            data_recovery_status_);
+  EXPECT_FALSE(
+      FakeUserDataAuthClient::Get()->WasCalled<AuthOp::kUpdateAuthFactor>());
 
-  ExistingUserController::current_controller()->Login(GetTestUserContext(),
-                                                      SigninSpecifics());
-  OobeWindowVisibilityWaiter(true).Wait();
-  OobeScreenWaiter(GaiaPasswordChangedView::kScreenId).Wait();
+  OpenGaiaDialog(test_account_id_);
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
+
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
 }
 
-class PasswordChangeTokenCheck : public PasswordChangeStubAuthTest {
+// Verifies that AutoWipe is triggered when the
+// `kDeviceOnlinePasswordMismatchBehavior` pref is set to 1.
+IN_PROC_BROWSER_TEST_F(PasswordChangeTest,
+                       DeviceOnlinePasswordMismatchBehavior_AutoWipe) {
+  CreateTestingFile();
+  OpenGaiaDialog(test_account_id_);
+
+  // Set the AutoWipe behavior in Local State.
+  g_browser_process->local_state()->SetInteger(
+      ash::prefs::kDeviceOnlinePasswordMismatchBehavior,
+      static_cast<int>(DeviceOnlinePasswordMismatchBehavior::kAutoWipe));
+
+  // Mark the test user as enterprise managed so the AutoWipe policy triggers.
+  user_manager::KnownUser known_user(g_browser_process->local_state());
+  known_user.SetIsEnterpriseManaged(test_account_id_, true);
+
+  // Skip post-login screens to reach ACTIVE session state immediately after
+  // wipe.
+  login_mixin_.SkipPostLoginScreens();
+
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
+
+  // Wait for the cryptohome removal to be triggered asynchronously.
+  {
+    base::RunLoop run_loop;
+    base::RepeatingTimer timer;
+    timer.Start(
+        FROM_HERE, base::Milliseconds(100),
+        base::BindRepeating(
+            [](base::RunLoop* run_loop) {
+              if (FakeUserDataAuthClient::Get()->WasCalled<AuthOp::kRemove>()) {
+                run_loop->Quit();
+              }
+            },
+            &run_loop));
+    // Fail the test if wipe doesn't happen within 10 seconds.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, run_loop.QuitClosure(), base::Seconds(10));
+    run_loop.Run();
+  }
+
+  // Verify that the cryptohome was actually removed.
+  EXPECT_TRUE(FakeUserDataAuthClient::Get()->WasCalled<AuthOp::kRemove>());
+  EXPECT_FALSE(TestingFileExists());
+
+  // Wait for active session to fully stabilize before concluding the test to
+  // avoid dangling profile pointers during teardown.
+  login_mixin_.WaitForActiveSession();
+}
+
+// Verifies that recovery/enter-old-password screen is shown when the
+// `kDeviceOnlinePasswordMismatchBehavior` pref is set to 0 (default).
+IN_PROC_BROWSER_TEST_F(PasswordChangeTest,
+                       DeviceOnlinePasswordMismatchBehavior_Default) {
+  CreateTestingFile();
+  OpenGaiaDialog(test_account_id_);
+
+  // Set the default behavior in Local State.
+  g_browser_process->local_state()->SetInteger(
+      ash::prefs::kDeviceOnlinePasswordMismatchBehavior,
+      static_cast<int>(DeviceOnlinePasswordMismatchBehavior::kDefault));
+
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
+
+  // Verify that we land on the Enter Old Password screen.
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+
+  // Verify that the cryptohome was NOT removed.
+  EXPECT_FALSE(FakeUserDataAuthClient::Get()->WasCalled<AuthOp::kRemove>());
+  EXPECT_TRUE(TestingFileExists());
+}
+
+// Verifies that AutoWipe is NOT triggered when the user is a consumer,
+// even if the `kDeviceOnlinePasswordMismatchBehavior` pref is set to 1.
+IN_PROC_BROWSER_TEST_F(PasswordChangeTest,
+                       DeviceOnlinePasswordMismatchBehavior_AutoWipe_Consumer) {
+  CreateTestingFile();
+  OpenGaiaDialog(test_account_id_);
+
+  // Set the AutoWipe behavior in Local State.
+  g_browser_process->local_state()->SetInteger(
+      ash::prefs::kDeviceOnlinePasswordMismatchBehavior,
+      static_cast<int>(DeviceOnlinePasswordMismatchBehavior::kAutoWipe));
+
+  // Explicitly ensure the test user is marked as a consumer.
+  user_manager::KnownUser known_user(g_browser_process->local_state());
+  known_user.SetIsEnterpriseManaged(test_account_id_, false);
+
+  SetGaiaScreenCredentials(test_account_id_, test::kNewPassword);
+
+  // Verify that we land on the Enter Old Password screen instead of wiping.
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+
+  // Verify that the cryptohome was NOT removed.
+  EXPECT_FALSE(FakeUserDataAuthClient::Get()->WasCalled<AuthOp::kRemove>());
+  EXPECT_TRUE(TestingFileExists());
+}
+
+class PasswordChangeTokenCheck : public PasswordChangeTest {
  public:
   PasswordChangeTokenCheck() {
     login_mixin_.AppendRegularUsers(1);
     user_with_invalid_token_ = login_mixin_.users().back().account_id;
     ignore_sync_errors_for_test_ =
         SigninErrorNotifier::IgnoreSyncErrorsForTesting();
+    UserDataAuthClient::InitializeFake();
   }
 
  protected:
-  // PasswordChangeStubAuthTest:
-  void SetUpInProcessBrowserTestFixture() override {
-    PasswordChangeStubAuthTest::SetUpInProcessBrowserTestFixture();
-    TokenHandleUtil::SetInvalidTokenForTesting(kTokenHandle);
-  }
-  void TearDownInProcessBrowserTestFixture() override {
-    TokenHandleUtil::SetInvalidTokenForTesting(nullptr);
-    PasswordChangeStubAuthTest::TearDownInProcessBrowserTestFixture();
+  // PasswordChangeTest:
+  void SetUpOnMainThread() override {
+    PasswordChangeTest::SetUpOnMainThread();
+    token_handle_store_ = TokenHandleStoreFactory::Get()->GetTokenHandleStore();
+    token_handle_store_->SetInvalidTokenForTesting(kTokenHandle);
   }
 
-  UserContext GetTestUserContext() override {
-    return login_mixin_.CreateDefaultUserContext(
-        LoginManagerMixin::TestUserInfo(
-            user_with_invalid_token_,
-            user_manager::UserType::USER_TYPE_REGULAR));
+  void TearDownOnMainThread() override {
+    token_handle_store_->SetInvalidTokenForTesting(nullptr);
+    token_handle_store_ = nullptr;
+    LoginManagerTest::TearDownOnMainThread();
+  }
+
+  const message_center::Notification* FindProfileSigninNotification() {
+    const user_manager::User* active_user =
+        user_manager::UserManager::Get()->GetActiveUser();
+    return message_center::MessageCenter::Get()->FindVisibleNotificationById(
+        CreateUserScopedNotificationId(kProfileSigninNotificationId,
+                                       active_user->username_hash()));
   }
 
   AccountId user_with_invalid_token_;
+  raw_ptr<TokenHandleStore> token_handle_store_;
   std::unique_ptr<base::AutoReset<bool>> ignore_sync_errors_for_test_;
 };
 
 IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheck, LoginScreenPasswordChange) {
-  TokenHandleUtil::StoreTokenHandle(user_with_invalid_token_, kTokenHandle);
+  token_handle_store_->StoreTokenHandle(user_with_invalid_token_, kTokenHandle);
+
+  EXPECT_FALSE(
+      LoginScreenTestApi::IsForcedOnlineSignin(user_with_invalid_token_));
   // Focus triggers token check.
   LoginScreenTestApi::FocusUser(user_with_invalid_token_);
+  EXPECT_TRUE(
+      LoginScreenTestApi::IsForcedOnlineSignin(user_with_invalid_token_));
 
   OpenGaiaDialog(user_with_invalid_token_);
+
   base::HistogramTester histogram_tester;
-  SetUpStubAuthenticatorAndAttemptLogin("old user password");
-  WaitForPasswordChangeScreen();
+
+  SetGaiaScreenCredentials(user_with_invalid_token_, test::kNewPassword);
+
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+
+  histogram_tester.ExpectBucketCount("Login.PasswordChanged.ReauthReason",
+                                     ReauthReason::kInvalidTokenHandle, 1);
+}
+
+class PasswordChangeTokenCheckStaleToken : public PasswordChangeTest {
+ public:
+  PasswordChangeTokenCheckStaleToken() {
+    // Disable feature to trigger old code path.
+    scoped_feature_list_.InitAndDisableFeature(features::kUseTokenHandleStore);
+    login_mixin_.AppendRegularUsers(1);
+    user_with_stale_token_ = login_mixin_.users().back().account_id;
+    ignore_sync_errors_for_test_ =
+        SigninErrorNotifier::IgnoreSyncErrorsForTesting();
+    UserDataAuthClient::InitializeFake();
+  }
+
+ protected:
+  // PasswordChangeTest:
+  void SetUpOnMainThread() override {
+    PasswordChangeTest::SetUpOnMainThread();
+    user_manager::KnownUser known_user(g_browser_process->local_state());
+
+    known_user.SetStringPref(user_with_stale_token_, kTokenHandlePref,
+                             kTestTokenHandle);
+    known_user.SetStringPref(user_with_stale_token_, kTokenHandleStatusPref,
+                             kTokenHandleStatusStale);
+  }
+
+  void TearDownOnMainThread() override {
+    LoginManagerTest::TearDownOnMainThread();
+  }
+
+  AccountId user_with_stale_token_;
+  std::unique_ptr<base::AutoReset<bool>> ignore_sync_errors_for_test_;
+  base::test::ScopedFeatureList scoped_feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheckStaleToken,
+                       LoginScreenPasswordChange) {
+  EXPECT_FALSE(
+      LoginScreenTestApi::IsForcedOnlineSignin(user_with_stale_token_));
+  // Focus triggers token check.
+  LoginScreenTestApi::FocusUser(user_with_stale_token_);
+  EXPECT_TRUE(LoginScreenTestApi::IsForcedOnlineSignin(user_with_stale_token_));
+
+  OpenGaiaDialog(user_with_stale_token_);
+
+  base::HistogramTester histogram_tester;
+
+  SetGaiaScreenCredentials(user_with_stale_token_, test::kNewPassword);
+
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+
   histogram_tester.ExpectBucketCount("Login.PasswordChanged.ReauthReason",
                                      ReauthReason::kInvalidTokenHandle, 1);
 }
 
 IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheck, LoginScreenNoPasswordChange) {
-  TokenHandleUtil::StoreTokenHandle(user_with_invalid_token_, kTokenHandle);
+  token_handle_store_->StoreTokenHandle(user_with_invalid_token_, kTokenHandle);
   // Focus triggers token check.
   LoginScreenTestApi::FocusUser(user_with_invalid_token_);
 
@@ -418,29 +563,6 @@ IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheck, LoginScreenNoPasswordChange) {
                                      ReauthReason::kInvalidTokenHandle, 1);
 }
 
-// Helper class to create NotificationDisplayServiceTester before notification
-// in the session shown.
-class ProfileWaiter : public ProfileManagerObserver {
- public:
-  ProfileWaiter() { g_browser_process->profile_manager()->AddObserver(this); }
-  // ProfileManagerObserver:
-  void OnProfileAdded(Profile* profile) override {
-    g_browser_process->profile_manager()->RemoveObserver(this);
-    display_service_ =
-        std::make_unique<NotificationDisplayServiceTester>(profile);
-    run_loop_.Quit();
-  }
-
-  std::unique_ptr<NotificationDisplayServiceTester> Wait() {
-    run_loop_.Run();
-    return std::move(display_service_);
-  }
-
- private:
-  std::unique_ptr<NotificationDisplayServiceTester> display_service_;
-  base::RunLoop run_loop_;
-};
-
 // Tests token handle check on the session start.
 IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheck, PRE_Session) {
   // Focus triggers token check. User does not have stored token, so online
@@ -449,33 +571,27 @@ IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheck, PRE_Session) {
   ASSERT_FALSE(
       LoginScreenTestApi::IsForcedOnlineSignin(user_with_invalid_token_));
 
-  // Store invalid token to triger notification in the session.
-  TokenHandleUtil::StoreTokenHandle(user_with_invalid_token_, kTokenHandle);
+  // Store invalid token to trigger notification in the session.
+  token_handle_store_->StoreTokenHandle(user_with_invalid_token_, kTokenHandle);
   // Make token not "checked recently".
-  TokenHandleUtil::SetLastCheckedPrefForTesting(user_with_invalid_token_,
-                                                base::Time());
+  user_manager::KnownUser known_user(g_browser_process->local_state());
+  known_user.SetPath(user_with_invalid_token_, kTokenHandleLastCheckedPref,
+                     base::TimeToValue(base::Time()));
 
-  ProfileWaiter waiter;
   login_mixin_.LoginWithDefaultContext(login_mixin_.users().back());
-  // We need to replace notification service very early to intercept reauth
-  // notification.
-  auto display_service_tester = waiter.Wait();
 
   login_mixin_.WaitForActiveSession();
 
-  std::vector<message_center::Notification> notifications =
-      display_service_tester->GetDisplayedNotificationsForType(
-          NotificationHandler::Type::TRANSIENT);
-  ASSERT_EQ(notifications.size(), 1u);
+  const message_center::Notification* notification =
+      FindProfileSigninNotification();
+  ASSERT_TRUE(notification);
 
   // Click on notification should trigger Chrome restart.
   base::RunLoop exit_waiter;
   auto subscription =
       browser_shutdown::AddAppTerminatingCallback(exit_waiter.QuitClosure());
 
-  display_service_tester->SimulateClick(NotificationHandler::Type::TRANSIENT,
-                                        notifications[0].id(), absl::nullopt,
-                                        absl::nullopt);
+  message_center::MessageCenter::Get()->ClickOnNotification(notification->id());
   exit_waiter.Run();
 }
 
@@ -485,8 +601,11 @@ IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheck, Session) {
   OpenGaiaDialog(user_with_invalid_token_);
 
   base::HistogramTester histogram_tester;
-  SetUpStubAuthenticatorAndAttemptLogin("old user password");
-  WaitForPasswordChangeScreen();
+
+  SetGaiaScreenCredentials(user_with_invalid_token_, test::kNewPassword);
+
+  test::CreateOldPasswordEnterPageWaiter()->Wait();
+
   histogram_tester.ExpectBucketCount("Login.PasswordChanged.ReauthReason",
                                      ReauthReason::kInvalidTokenHandle, 1);
 }
@@ -494,35 +613,41 @@ IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheck, Session) {
 // Notification should not be triggered because token was checked on the login
 // screen - recently.
 IN_PROC_BROWSER_TEST_F(PasswordChangeTokenCheck, TokenRecentlyChecked) {
-  TokenHandleUtil::StoreTokenHandle(user_with_invalid_token_, kTokenHandle);
-  // Focus triggers token check.
+  token_handle_store_->StoreTokenHandle(user_with_invalid_token_, kTokenHandle);
+
+  // Focus triggers token check and opens online
   LoginScreenTestApi::FocusUser(user_with_invalid_token_);
   OpenGaiaDialog(user_with_invalid_token_);
 
-  ProfileWaiter waiter;
   login_mixin_.LoginWithDefaultContext(login_mixin_.users().back());
-  // We need to replace notification service very early to intercept reauth
-  // notification.
-  auto display_service_tester = waiter.Wait();
 
   login_mixin_.WaitForActiveSession();
 
-  std::vector<message_center::Notification> notifications =
-      display_service_tester->GetDisplayedNotificationsForType(
-          NotificationHandler::Type::TRANSIENT);
-  ASSERT_EQ(notifications.size(), 0u);
+  ASSERT_FALSE(FindProfileSigninNotification());
 }
 
 class TokenAfterCrash : public MixinBasedInProcessBrowserTest {
  public:
   TokenAfterCrash() {
     login_mixin_.set_session_restore_enabled();
-    login_mixin_.set_should_obtain_handles(true);
+    login_mixin_.SetShouldObtainHandle(true);
     login_mixin_.AppendRegularUsers(1);
+    UserDataAuthClient::InitializeFake();
+  }
+
+  void SetUpOnMainThread() override {
+    MixinBasedInProcessBrowserTest::SetUpOnMainThread();
+    token_handle_store_ = TokenHandleStoreFactory::Get()->GetTokenHandleStore();
+  }
+
+  void TearDownOnMainThread() override {
+    token_handle_store_ = nullptr;
+    MixinBasedInProcessBrowserTest::TearDownOnMainThread();
   }
 
  protected:
   LoginManagerMixin login_mixin_{&mixin_host_};
+  raw_ptr<TokenHandleStore> token_handle_store_;
 };
 
 // Test that token handle is downloaded on browser crash.
@@ -534,7 +659,7 @@ IN_PROC_BROWSER_TEST_F(TokenAfterCrash, PRE_NoToken) {
   EXPECT_TRUE(UserSessionManager::GetInstance()
                   ->token_handle_backfill_tried_for_testing());
   // Token should not be there as there are no real auth data.
-  EXPECT_TRUE(TokenHandleUtil::ShouldObtainHandle(user_info.account_id));
+  EXPECT_TRUE(token_handle_store_->ShouldObtainHandle(user_info.account_id));
 }
 
 IN_PROC_BROWSER_TEST_F(TokenAfterCrash, NoToken) {
@@ -542,7 +667,7 @@ IN_PROC_BROWSER_TEST_F(TokenAfterCrash, NoToken) {
   EXPECT_TRUE(UserSessionManager::GetInstance()
                   ->token_handle_backfill_tried_for_testing());
   // Token should not be there as there are no real auth data.
-  EXPECT_TRUE(TokenHandleUtil::ShouldObtainHandle(user_info.account_id));
+  EXPECT_TRUE(token_handle_store_->ShouldObtainHandle(user_info.account_id));
 }
 
 // Test that token handle is not downloaded on browser crash because it's
@@ -555,11 +680,11 @@ IN_PROC_BROWSER_TEST_F(TokenAfterCrash, PRE_ValidToken) {
   EXPECT_TRUE(UserSessionManager::GetInstance()
                   ->token_handle_backfill_tried_for_testing());
   // Token should not be there as there are no real auth data.
-  EXPECT_TRUE(TokenHandleUtil::ShouldObtainHandle(user_info.account_id));
+  EXPECT_TRUE(token_handle_store_->ShouldObtainHandle(user_info.account_id));
 
   // Emulate successful token fetch.
-  TokenHandleUtil::StoreTokenHandle(user_info.account_id, kTokenHandle);
-  EXPECT_FALSE(TokenHandleUtil::ShouldObtainHandle(user_info.account_id));
+  token_handle_store_->StoreTokenHandle(user_info.account_id, kTokenHandle);
+  EXPECT_FALSE(token_handle_store_->ShouldObtainHandle(user_info.account_id));
 }
 
 IN_PROC_BROWSER_TEST_F(TokenAfterCrash, ValidToken) {
@@ -568,48 +693,8 @@ IN_PROC_BROWSER_TEST_F(TokenAfterCrash, ValidToken) {
                    ->token_handle_backfill_tried_for_testing());
 }
 
-class RotationTokenTest : public LoginManagerTest {
- public:
-  RotationTokenTest() {
-    login_mixin_.AppendRegularUsers(1);
-    account_id_ = login_mixin_.users()[0].account_id;
-  }
-
- protected:
-  LoginManagerMixin login_mixin_{&mixin_host_};
-  AccountId account_id_;
-};
-
-// Test verifies one-time rotation for the token handle.
-IN_PROC_BROWSER_TEST_F(RotationTokenTest, PRE_Rotated) {
-  TokenHandleUtil::StoreTokenHandle(account_id_, kTokenHandle);
-
-  user_manager::KnownUser known_user(g_browser_process->local_state());
-  // Emulate state before rotation.
-  known_user.RemovePref(account_id_, "TokenHandleRotated");
-
-  // Focus should not trigger online login.
-  LoginScreenTestApi::FocusUser(account_id_);
-  ASSERT_FALSE(LoginScreenTestApi::IsForcedOnlineSignin(account_id_));
-
-  // Should be considered for rotation.
-  EXPECT_TRUE(TokenHandleUtil::ShouldObtainHandle(account_id_));
-
-  login_mixin_.LoginWithDefaultContext(login_mixin_.users().back());
-  login_mixin_.WaitForActiveSession();
-
-  // Emulate obtaining token handle.
-  TokenHandleUtil::StoreTokenHandle(account_id_, kTokenHandle);
-}
-
-IN_PROC_BROWSER_TEST_F(RotationTokenTest, Rotated) {
-  // Token should not be considered for rotation..
-  EXPECT_FALSE(TokenHandleUtil::ShouldObtainHandle(account_id_));
-}
-
 class IgnoreOldTokenTest
     : public LoginManagerTest,
-      public LocalStateMixin::Delegate,
       public ::testing::WithParamInterface<bool> /* isManagedUser */ {
  public:
   IgnoreOldTokenTest() {
@@ -619,32 +704,23 @@ class IgnoreOldTokenTest
       login_mixin_.AppendRegularUsers(1);
 
     account_id_ = login_mixin_.users()[0].account_id;
+    UserDataAuthClient::InitializeFake();
   }
 
-  // LocalStateMixin::Delegate:
-  void SetUpLocalState() override {
-    TokenHandleUtil::StoreTokenHandle(account_id_, kTokenHandle);
+  void PreRunTestOnMainThread() override {
+    // Token is used in some set up done in PreRunTestOnMainThread(),
+    // so set it up earlier than the timing.
+    token_handle_store_ = TokenHandleStoreFactory::Get()->GetTokenHandleStore();
+    token_handle_store_->StoreTokenHandle(account_id_, kTokenHandle);
+    token_handle_store_->SetInvalidTokenForTesting(kTokenHandle);
 
-    if (content::IsPreTest()) {
-      // Keep `TokenHandleRotated` flag to disable logic of neglecting not
-      // rotated token.
-      return;
-    }
-
-    user_manager::KnownUser known_user(g_browser_process->local_state());
-    // Emulate token was not rotated.
-    known_user.RemovePref(account_id_, "TokenHandleRotated");
+    LoginManagerTest::PreRunTestOnMainThread();
   }
 
-  // LoginManagerTest:
-  void SetUpInProcessBrowserTestFixture() override {
-    LoginManagerTest::SetUpInProcessBrowserTestFixture();
-    TokenHandleUtil::SetInvalidTokenForTesting(kTokenHandle);
-  }
-
-  void TearDownInProcessBrowserTestFixture() override {
-    TokenHandleUtil::SetInvalidTokenForTesting(nullptr);
-    LoginManagerTest::TearDownInProcessBrowserTestFixture();
+  void TearDownOnMainThread() override {
+    token_handle_store_->SetInvalidTokenForTesting(nullptr);
+    token_handle_store_ = nullptr;
+    LoginManagerTest::TearDownOnMainThread();
   }
 
  protected:
@@ -653,21 +729,21 @@ class IgnoreOldTokenTest
   LoginManagerMixin login_mixin_{&mixin_host_};
   AccountId account_id_;
 
-  LocalStateMixin local_state_mixin_{&mixin_host_, this};
+  raw_ptr<TokenHandleStore> token_handle_store_;
 };
 
-// Verify case when a user got token invalidated on a previous version and then
-// updated to the version when not rotated tokens are ignored for managed users.
+// Verify case when a user got token invalidated on a pre-rotated version and
+// then never re-authenticated. Such scenario should now lead to an online
+// sign-in and fetching a new token handle.
 IN_PROC_BROWSER_TEST_P(IgnoreOldTokenTest, PRE_IgnoreNotRotated) {
   ASSERT_TRUE(LoginScreenTestApi::IsForcedOnlineSignin(account_id_));
 }
 
-// Old tokens should be ignored for managed users. Regular users should be
-// forced to go through online signin.
+// If any pre-rotated token handle is still left for either regular or managed
+// user it will verified as invalid and lead to online re-authenication.
 IN_PROC_BROWSER_TEST_P(IgnoreOldTokenTest, IgnoreNotRotated) {
-  ASSERT_NE(TokenHandleUtil::HasToken(account_id_), IsManagedUser());
-  ASSERT_NE(LoginScreenTestApi::IsForcedOnlineSignin(account_id_),
-            IsManagedUser());
+  ASSERT_TRUE(token_handle_store_->HasToken(account_id_));
+  ASSERT_TRUE(LoginScreenTestApi::IsForcedOnlineSignin(account_id_));
 }
 
 INSTANTIATE_TEST_SUITE_P(All, IgnoreOldTokenTest, testing::Bool());

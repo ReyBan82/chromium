@@ -9,8 +9,11 @@ import android.content.res.Configuration;
 import android.util.AttributeSet;
 import android.view.View;
 
-import org.chromium.base.BuildInfo;
+import org.chromium.base.DeviceInfo;
 import org.chromium.base.metrics.RecordUserAction;
+import org.chromium.build.annotations.Initializer;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.download.home.list.ListItem;
 import org.chromium.chrome.browser.download.internal.R;
 import org.chromium.components.browser_ui.widget.displaystyle.UiConfig;
@@ -18,11 +21,11 @@ import org.chromium.components.browser_ui.widget.selectable_list.SelectableListT
 
 import java.util.List;
 
-/**
- * Handles toolbar functionality for the download home.
- */
+/** Handles toolbar functionality for the download home. */
+@NullMarked
 public class DownloadHomeToolbar extends SelectableListToolbar<ListItem> {
-    private UiConfig mUiConfig;
+    private @Nullable UiConfig mUiConfig;
+    private View mListContentView;
 
     public DownloadHomeToolbar(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -32,10 +35,11 @@ public class DownloadHomeToolbar extends SelectableListToolbar<ListItem> {
     @Override
     protected void onFinishInflate() {
         super.onFinishInflate();
-        post(() -> {
-            mUiConfig = new UiConfig(this);
-            configureWideDisplayStyle(mUiConfig);
-        });
+        post(
+                () -> {
+                    mUiConfig = new UiConfig(this);
+                    configureWideDisplayStyle(mUiConfig);
+                });
     }
 
     @Override
@@ -44,10 +48,17 @@ public class DownloadHomeToolbar extends SelectableListToolbar<ListItem> {
         if (mUiConfig != null) mUiConfig.updateDisplayStyle();
     }
 
+    @Override
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+        super.onSizeChanged(w, h, oldw, oldh);
+        if (mUiConfig != null) mUiConfig.updateDisplayStyle();
+    }
+
     /**
      * Removes a menu item from the toolbar.
+     *
      * @param menuItemId The menu item to be removed. Nothing happens if there is no menu item
-     *                   associated with this ID.
+     *     associated with this ID.
      */
     public void removeMenuItem(int menuItemId) {
         getMenu().removeItem(menuItemId);
@@ -67,24 +78,48 @@ public class DownloadHomeToolbar extends SelectableListToolbar<ListItem> {
             if (shareButton != null) {
                 // Sharing functionality that leads directly to the Android share sheet is
                 // currently disabled.
-                if (BuildInfo.getInstance().isAutomotive) {
+                if (DeviceInfo.isAutomotive()) {
                     shareButton.setVisibility(View.GONE);
                 } else {
-                    shareButton.setContentDescription(getResources().getQuantityString(
-                            R.plurals.accessibility_share_selected_items, numSelected,
-                            numSelected));
+                    shareButton.setContentDescription(
+                            getResources()
+                                    .getQuantityString(
+                                            R.plurals.accessibility_share_selected_items,
+                                            numSelected,
+                                            numSelected));
                 }
             }
 
             View deleteButton = findViewById(R.id.selection_mode_delete_menu_id);
             if (deleteButton != null) {
-                deleteButton.setContentDescription(getResources().getQuantityString(
-                        R.plurals.accessibility_remove_selected_items, numSelected, numSelected));
+                deleteButton.setContentDescription(
+                        getResources()
+                                .getQuantityString(
+                                        R.plurals.accessibility_remove_selected_items,
+                                        numSelected,
+                                        numSelected));
             }
 
             if (!wasSelectionEnabled) {
                 RecordUserAction.record("Android.DownloadManager.SelectionEstablished");
             }
         }
+    }
+
+    // SelectableListToolbar implementation.
+    @Override
+    protected boolean handleEnterKeyPress() {
+        return getMenu().performIdentifierAction(R.id.search_menu_id, 0);
+    }
+
+    @Override
+    protected View getNextFocusForward() {
+        // Move focus to list content view.
+        return mListContentView;
+    }
+
+    @Initializer
+    void setListContentView(View listContentView) {
+        mListContentView = listContentView;
     }
 }

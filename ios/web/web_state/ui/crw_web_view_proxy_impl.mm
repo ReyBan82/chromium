@@ -5,26 +5,25 @@
 #import "ios/web/web_state/ui/crw_web_view_proxy_impl.h"
 
 #import "base/check.h"
-#import "ios/web/common/crw_content_view.h"
 #import "ios/web/public/ui/crw_web_view_scroll_view_proxy.h"
+#import "ios/web/web_state/ui/crw_content_view.h"
 #import "ios/web/web_state/ui/crw_web_controller.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ios/web/web_state/ui/crw_web_view_content_view.h"
 
 namespace {
 
 // Returns the first responder in the subviews of `view`, or nil if no view in
 // the subtree is the first responder.
 UIView* GetFirstResponderSubview(UIView* view) {
-  if ([view isFirstResponder])
+  if ([view isFirstResponder]) {
     return view;
+  }
 
   for (UIView* subview in [view subviews]) {
     UIView* firstResponder = GetFirstResponderSubview(subview);
-    if (firstResponder)
+    if (firstResponder) {
       return firstResponder;
+    }
   }
 
   return nil;
@@ -44,8 +43,9 @@ UIView* GetFirstResponderSubview(UIView* view) {
 @implementation CRWWebViewScrollViewProxy (ContentInsetsAlgebra)
 
 - (void)cr_addInsets:(UIEdgeInsets)insets {
-  if (UIEdgeInsetsEqualToEdgeInsets(insets, UIEdgeInsetsZero))
+  if (UIEdgeInsetsEqualToEdgeInsets(insets, UIEdgeInsetsZero)) {
     return;
+  }
 
   UIEdgeInsets currentInsets = [self contentInset];
   currentInsets.top += insets.top;
@@ -75,6 +75,8 @@ UIView* GetFirstResponderSubview(UIView* view) {
   CRWWebViewScrollViewProxy* _contentViewScrollViewProxy;
 }
 @synthesize contentView = _contentView;
+@synthesize ignoreObscuredInsets = _ignoreObscuredInsets;
+@dynamic keyboardVisible;
 
 - (instancetype)initWithWebController:(CRWWebController*)webController {
   self = [super init];
@@ -99,6 +101,14 @@ UIView* GetFirstResponderSubview(UIView* view) {
     (BOOL)allowsBackForwardNavigationGestures {
   _webController.allowsBackForwardNavigationGestures =
       allowsBackForwardNavigationGestures;
+}
+
+- (BOOL)allowsLinkPreview {
+  return _webController.allowsLinkPreview;
+}
+
+- (void)setAllowsLinkPreview:(BOOL)allowsLinkPreview {
+  _webController.allowsLinkPreview = allowsLinkPreview;
 }
 
 - (CGRect)bounds {
@@ -129,14 +139,6 @@ UIView* GetFirstResponderSubview(UIView* view) {
   return [_contentView gestureRecognizers];
 }
 
-- (void)addGestureRecognizer:(UIGestureRecognizer*)gestureRecognizer {
-  [_contentView addGestureRecognizer:gestureRecognizer];
-}
-
-- (void)removeGestureRecognizer:(UIGestureRecognizer*)gestureRecognizer {
-  [_contentView removeGestureRecognizer:gestureRecognizer];
-}
-
 - (BOOL)shouldUseViewContentInset {
   SEL shouldUseInsetSelector = @selector(shouldUseViewContentInset);
   return [_contentView respondsToSelector:shouldUseInsetSelector] &&
@@ -152,8 +154,9 @@ UIView* GetFirstResponderSubview(UIView* view) {
 
 - (void)registerInsets:(UIEdgeInsets)insets forCaller:(id)caller {
   NSValue* callerValue = [NSValue valueWithNonretainedObject:caller];
-  if ([_registeredInsets objectForKey:callerValue])
+  if ([_registeredInsets objectForKey:callerValue]) {
     [self unregisterInsetsForCaller:caller];
+  }
   [self.scrollViewProxy cr_addInsets:insets];
   [_registeredInsets setObject:[NSValue valueWithUIEdgeInsets:insets]
                         forKey:callerValue];
@@ -187,28 +190,42 @@ UIView* GetFirstResponderSubview(UIView* view) {
   return [_contentView addSubview:view];
 }
 
-- (UIView*)keyboardAccessory {
-  if (!_contentView)
-    return nil;
+- (BOOL)isKeyboardVisible {
+  if (!_contentView) {
+    return NO;
+  }
   UIView* firstResponder = GetFirstResponderSubview(_contentView);
-  return firstResponder.inputAccessoryView;
+  return firstResponder.inputAccessoryView != nil;
 }
 
 - (BOOL)becomeFirstResponder {
   return [_contentView becomeFirstResponder];
 }
 
-- (void)surfaceSizeChanged {
-  [_webController surfaceSizeChanged];
-}
-
-- (void)showMenuWithItems:(NSArray<CRWContextMenuItem*>*)items
-                     rect:(CGRect)rect {
-  [_webController showMenuWithItems:items rect:rect];
-}
-
 - (BOOL)isWebPageInFullscreenMode {
   return [_webController isWebPageInFullscreenMode];
+}
+
+- (UIEdgeInsets)obscuredInsets {
+  return _contentView.obscuredInsets;
+}
+
+- (void)setObscuredInsets:(UIEdgeInsets)obscuredInsets {
+  [self setObscuredInsets:obscuredInsets initialVelocity:0.0];
+}
+
+- (void)setObscuredInsets:(UIEdgeInsets)obscuredInsets
+          initialVelocity:(CGFloat)initialVelocity {
+  if (_ignoreObscuredInsets) {
+    return;
+  }
+  [_contentView setObscuredInsets:obscuredInsets
+                  initialVelocity:initialVelocity];
+}
+
+- (void)setMinimumViewportInset:(UIEdgeInsets)minInset
+           maximumViewportInset:(UIEdgeInsets)maxInset {
+  [_contentView setMinimumViewportInset:minInset maximumViewportInset:maxInset];
 }
 
 @end

@@ -6,14 +6,20 @@
 #define UI_VIEWS_CONTROLS_NATIVE_NATIVE_VIEW_HOST_H_
 
 #include <memory>
+#include <optional>
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "ui/gfx/native_widget_types.h"
+#include "base/memory/raw_ptr.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/views/view.h"
 
 namespace gfx {
+class Rect;
 class RoundedCornersF;
 }
+
+namespace ui {
+class Layer;
+}  // namespace ui
 
 namespace views {
 namespace test {
@@ -24,16 +30,16 @@ class NativeViewHostWrapper;
 
 // If a NativeViewHost's native view is a Widget, this native window
 // property is set on the widget, pointing to the owning NativeViewHost.
-extern const char kWidgetNativeViewHostKey[];
+inline constexpr char kWidgetNativeViewHostKey[] = "WidgetNativeViewHost";
 
 // A View type that hosts a gfx::NativeView. The bounds of the native view are
 // kept in sync with the bounds of this view as it is moved and sized.
 // Under the hood, a platform-specific NativeViewHostWrapper implementation does
 // the platform-specific work of manipulating the underlying OS widget type.
 class VIEWS_EXPORT NativeViewHost : public View {
- public:
-  METADATA_HEADER(NativeViewHost);
+  METADATA_HEADER(NativeViewHost, View)
 
+ public:
   NativeViewHost();
 
   NativeViewHost(const NativeViewHost&) = delete;
@@ -57,14 +63,9 @@ class VIEWS_EXPORT NativeViewHost : public View {
   // Sets the corner radii for clipping gfx::NativeView. Returns true on success
   // or false if the platform doesn't support the operation. This method calls
   // SetCustomMask internally.
-  bool SetCornerRadii(const gfx::RoundedCornersF& corner_radii);
+  bool SetNativeViewCornerRadii(const gfx::RoundedCornersF& corner_radii);
+  gfx::RoundedCornersF GetNativeViewCornerRadii() const;
 
-  // Sets the custom layer mask for clipping gfx::NativeView. Returns true on
-  // success or false if the platform doesn't support the operation.
-  // NB: This does not interact nicely with fast_resize.
-  // TODO(tluk): This is currently only being used to apply rounded corners in
-  // ash code. Migrate existing use to SetCornerRadii().
-  bool SetCustomMask(std::unique_ptr<ui::LayerOwner> mask);
 
   // Sets the height of the top region where the gfx::NativeView shouldn't be
   // targeted. This will be used when another view is covering there
@@ -77,6 +78,11 @@ class VIEWS_EXPORT NativeViewHost : public View {
   // occur. Pass an empty size to revert to the default behavior, where the
   // NatieView's size always equals this View's size.
   void SetNativeViewSize(const gfx::Size& size);
+
+  // Sets the external clip rect of the native view. Returns true if the clip
+  // rect changed.
+  bool SetNativeViewClipRect(const gfx::Rect& clip_rect);
+  gfx::Rect GetNativeViewClipRect() const;
 
   // Returns the container that contains this host's native view. Returns null
   // if there's no attached native view or it has no container.
@@ -98,23 +104,48 @@ class VIEWS_EXPORT NativeViewHost : public View {
   void set_fast_resize(bool fast_resize) { fast_resize_ = fast_resize; }
   bool fast_resize() const { return fast_resize_; }
 
+  // Set whether the native view's layer should be managed by views.
+  // If set to true, NativeViewHost will manually manage the layer.
+  // If set to false, the native view's layer will be managed by its parent
+  // window's layer.
+  void SetLayerManagedByViews(bool managed);
+  bool layer_managed_by_views() const { return layer_managed_by_views_; }
+
+  // Set whether NativeViewHost should create a layer for views management.
+  // This only has effect when layer_managed_by_views() is true.
+  // If set to false, the host view must already have a layer.
+  void SetCreateLayer(bool create_layer);
+  bool create_layer() const { return create_layer_; }
+
   gfx::NativeView native_view() const { return native_view_; }
 
   void NativeViewDestroyed();
 
   // Sets the desired background color for repainting when the view is clipped.
   // Defaults to transparent color if unset.
-  void SetBackgroundColorWhenClipped(absl::optional<SkColor> color);
+  void SetBackgroundColorWhenClipped(std::optional<SkColor> color);
+
+  // Returns the ui::Layer backing the attached gfx::NativeView.
+  // DEPRECATED: Use layer() or native_view()->layer() instead.
+  ui::Layer* GetUILayer();
+
+  // Normally, all events relevant to here are routed to the corresponding
+  // native view directly, and no handling needs to be done at Views level.
+  // Some applications, however, forward events at Views layer, at which point
+  // they would normally end up ignored here. This method provides a way of
+  // intercepting mouse events with these circumstances.
+  void SetMouseEventFallback(ui::EventHandler* handler);
 
   // Overridden from View:
-  void Layout() override;
+  void Layout(PassKey) override;
   void OnPaint(gfx::Canvas* canvas) override;
   void VisibilityChanged(View* starting_from, bool is_visible) override;
   void OnFocus() override;
   gfx::NativeViewAccessible GetNativeViewAccessible() override;
   ui::Cursor GetCursor(const ui::MouseEvent& event) override;
   void SetVisible(bool visible) override;
-  bool OnMousePressed(const ui::MouseEvent& event) override;
+  void OnMouseMoved(const ui::MouseEvent& event) override;
+  void OnMouseEvent(ui::MouseEvent* event) override;
 
  protected:
   bool GetNeedsNotificationWhenVisibleBoundsChange() const override;
@@ -135,11 +166,7 @@ class VIEWS_EXPORT NativeViewHost : public View {
   void ClearFocus();
 
   // The attached native view. There is exactly one native_view_ attached.
-  gfx::NativeView native_view_ = nullptr;
-
-  // A platform-specific wrapper that does the OS-level manipulation of the
-  // attached gfx::NativeView.
-  std::unique_ptr<NativeViewHostWrapper> native_wrapper_;
+  gfx::NativeView native_view_ = gfx::NativeView();
 
   // The actual size of the NativeView, or an empty size if no scaling of the
   // NativeView should occur.
@@ -149,8 +176,24 @@ class VIEWS_EXPORT NativeViewHost : public View {
   // in the setter/accessor above.
   bool fast_resize_ = false;
 
+  // True if the native view's layer is managed by views.
+  bool layer_managed_by_views_;
+
+  // True if NativeViewHost should create a layer for views management.
+  bool create_layer_ = true;
+
   // The color to use for repainting the background when the view is clipped.
-  absl::optional<SkColor> background_color_when_clipped_;
+  std::optional<SkColor> background_color_when_clipped_;
+
+  // A platform-specific wrapper that does the OS-level manipulation of the
+  // attached gfx::NativeView.
+  // This must be declared last because its destructor (which destroys the
+  // wrapper) depends on other members of NativeViewHost (like
+  // `layer_managed_by_views_` and `native_view_`) which must not be destroyed
+  // yet.
+  std::unique_ptr<NativeViewHostWrapper> native_wrapper_;
+
+  raw_ptr<ui::EventHandler> mouse_event_fallback_ = nullptr;
 };
 
 }  // namespace views

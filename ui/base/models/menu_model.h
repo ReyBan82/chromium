@@ -5,29 +5,50 @@
 #ifndef UI_BASE_MODELS_MENU_MODEL_H_
 #define UI_BASE_MODELS_MENU_MODEL_H_
 
+#include <cstddef>
+#include <optional>
 #include <string>
 
 #include "base/component_export.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "build/build_config.h"
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/base/models/menu_model_delegate.h"
 #include "ui/base/models/menu_separator_types.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/color/color_id.h"
+#include "ui/gfx/native_ui_types.h"
+
+// For the friend class below only.
+class OmniboxContextMenuController;
 
 namespace gfx {
 class FontList;
 }
 
+namespace views {
+class MenuModelAdapter;
+namespace examples {
+class ExampleMenuModel;
+}  // namespace examples
+
+}  // namespace views
 namespace ui {
 
 class Accelerator;
 class ButtonMenuItemModel;
 class ImageModel;
+class SimpleMenuModel;
+
+// The new badge type that can be displayed next to a menu item to promote a
+// feature.
+enum class NewBadgeType {
+  kNew,
+  kPreview,
+};
 
 // An interface implemented by an object that provides the content of a menu.
-class COMPONENT_EXPORT(UI_BASE) MenuModel
-    : public base::SupportsWeakPtr<MenuModel> {
+class COMPONENT_EXPORT(UI_BASE) MenuModel {
  public:
   // The type of item.
   enum ItemType {
@@ -45,14 +66,36 @@ class COMPONENT_EXPORT(UI_BASE) MenuModel
                        // selected.
   };
 
+  // ID to use for TYPE_TITLE items.
+  static constexpr int kTitleId = -2;
+
+  class MinorIconOnRightPasskey {
+   public:
+    MinorIconOnRightPasskey() = delete;
+    ~MinorIconOnRightPasskey() = default;
+
+   private:
+    // DO NOT ADD TO THIS LIST!
+    // These cases are exclusively the ones allowed to use the feature.
+    friend class ::OmniboxContextMenuController;
+    friend class ::views::MenuModelAdapter;
+    friend class ::ui::SimpleMenuModel;
+    // This item is here merely for testing and example of this feature.
+    friend class ::views::examples::ExampleMenuModel;
+
+    explicit MinorIconOnRightPasskey(size_t index) : index_(index) {}
+
+    size_t index() const { return index_; }
+
+    const size_t index_;
+  };
+
   MenuModel();
 
   virtual ~MenuModel();
 
-  // Returns true if any of the items within the model have icons. Not all
-  // platforms support icons in menus natively and so this is a hint for
-  // triggering a custom rendering mode.
-  virtual bool HasIcons() const = 0;
+  // This must be implemented by the most concrete class.
+  virtual base::WeakPtr<MenuModel> AsWeakPtr() = 0;
 
   // Returns the number of items in the menu.
   virtual size_t GetItemCount() const = 0;
@@ -66,6 +109,17 @@ class COMPONENT_EXPORT(UI_BASE) MenuModel
   // Returns the command id of the item at the specified index.
   virtual int GetCommandIdAt(size_t index) const = 0;
 
+#if BUILDFLAG(IS_ANDROID)
+  // Returns the explicit display order of the item at the specified index.
+  // This is primarily used by Android UI bridges (such as MenuModelBridge) to
+  // intersperse and sort C++ menu items among Java-defined menu items in
+  // selection or context dropdown menus. Any non-negative value represents an
+  // explicit sort order (sorted in ascending order), while any negative value
+  // (defaulting to -1) indicates that no specific ordering is set and the item
+  // should fall back to default placement.
+  virtual int GetDisplayOrderAt(size_t index) const;
+#endif
+
   // Returns the label of the item at the specified index.
   virtual std::u16string GetLabelAt(size_t index) const = 0;
 
@@ -77,9 +131,17 @@ class COMPONENT_EXPORT(UI_BASE) MenuModel
   // is rendered to the right of the label and using the font GetLabelFontAt().
   virtual std::u16string GetMinorTextAt(size_t index) const;
 
-  // Returns the minor icon of the item at the specified index. The minor icon
-  // is rendered to the left of the minor text.
+  // Returns true if the minor text at the specified index should be treated as
+  // a URL when rendering the menu item.
+  virtual bool GetMinorTextIsUrlAt(size_t index) const;
+
+  // Returns the minor icon of the item at the specified index. By default, the
+  // minor icon is rendered to the left of the minor text.
   virtual ImageModel GetMinorIconAt(size_t index) const;
+
+  // Returns whether the minor icon of the item at the specified index is
+  // rendered to the right of the minor text.
+  virtual bool GetMinorIconOnRight(MinorIconOnRightPasskey) const;
 
   // Returns true if the menu item (label/sublabel/icon) at the specified
   // index can change over the course of the menu's lifetime. If this function
@@ -102,6 +164,10 @@ class COMPONENT_EXPORT(UI_BASE) MenuModel
   // there is a shortcut accelerator for the item, false otherwise.
   virtual bool GetAcceleratorAt(size_t index,
                                 ui::Accelerator* accelerator) const = 0;
+
+  // Returns whether an accelerator should be shown next to menu item
+  // disregarding of the platform.
+  virtual bool GetForceShowAcceleratorForItemAt(size_t index) const;
 
   // Returns the checked state of the item at the specified index.
   virtual bool IsItemCheckedAt(size_t index) const = 0;
@@ -131,6 +197,11 @@ class COMPONENT_EXPORT(UI_BASE) MenuModel
   // to show off to users (items marked as new will receive a "New" badge when
   // the appropriate flag is enabled).
   virtual bool IsNewFeatureAt(size_t index) const;
+
+  // Returns the badge type the menu item at `index` should should show when the
+  // appropriate flag is enabled. Returns std::nullopt if the menu item
+  // shouldn't show a badge.
+  virtual std::optional<NewBadgeType> GetNewBadgeTypeAt(size_t index) const;
 
   // Returns an application-window-unique identifier that can be used to track
   // the menu item irrespective of menu-specific command IDs.
@@ -170,6 +241,10 @@ class COMPONENT_EXPORT(UI_BASE) MenuModel
   static bool GetModelAndIndexForCommandId(int command_id,
                                            MenuModel** model,
                                            size_t* index);
+
+  virtual std::optional<ui::ColorId> GetForegroundColorId(size_t index);
+  virtual std::optional<ui::ColorId> GetSubmenuBackgroundColorId(size_t index);
+  virtual std::optional<ui::ColorId> GetSelectedBackgroundColorId(size_t index);
 
  private:
   // MenuModelDelegate. Weak. Could be null.

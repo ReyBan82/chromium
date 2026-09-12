@@ -3,136 +3,131 @@
 // found in the LICENSE file.
 
 import 'chrome://resources/cr_elements/cr_checkbox/cr_checkbox.js';
+import 'chrome://resources/cr_elements/cr_collapse/cr_collapse.js';
 import 'chrome://resources/cr_elements/cr_toggle/cr_toggle.js';
 import 'chrome://resources/cr_elements/policy/cr_policy_indicator.js';
-import 'chrome://resources/polymer/v3_0/iron-collapse/iron-collapse.js';
-import './strings.m.js';
+import '/strings.m.js';
+import './button_label.js';
 
-import {DomRepeatEvent, PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
 
-import {getTemplate} from './cards.html.js';
-import {ChromeCartProxy} from './chrome_cart_proxy.js';
-import {CustomizeChromePageHandlerInterface, ModuleSettings} from './customize_chrome.mojom-webui.js';
+import {getCss} from './cards.css.js';
+import {getHtml} from './cards.html.js';
+import {CustomizeChromeAction, recordCustomizeChromeAction} from './common.js';
+import type {ModuleSettings} from './customize_chrome.mojom-webui.js';
 import {CustomizeChromeApiProxy} from './customize_chrome_api_proxy.js';
+
+export interface CardsElement {
+  $: {
+    showToggleContainer: HTMLElement,
+  };
+}
 
 /*
  * Element that lets the user configure module status and settings. From a UI
  * standpoint, we refer to modules as cards.
  */
-export class CardsElement extends PolymerElement {
+export class CardsElement extends CrLitElement {
   static get is() {
     return 'customize-chrome-cards';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
       /** The list of modules that can be enabled or disabled on the NTP. */
-      modules_: Array,
+      modules_: {type: Array},
 
       /** Whether the modules are customizable or not. */
-      show_: Boolean,
+      show_: {type: Boolean},
 
       /** Whether the modules are managed by admin policies or not. */
-      managedByPolicy_: Boolean,
+      managedByPolicy_: {type: Boolean},
 
-      // Discount checkbox is a workaround for crbug.com/1199465 and will be
-      // removed after module customization is better defined. Please avoid
-      // using similar pattern for other features.
-      discountCheckbox_: {
-        type: Boolean,
-        value: false,
-      },
-
-      discountCheckboxEligible_: {
-        type: Boolean,
-        value: false,
-      },
-
-      initialized_: {
-        type: Boolean,
-        value: false,
-      },
+      initialized_: {type: Boolean},
     };
   }
 
-  static get observers() {
-    return ['modulesChanged_(modules_.*)'];
-  }
+  protected accessor modules_: ModuleSettings[] = [];
+  protected accessor show_: boolean = false;
+  protected accessor managedByPolicy_: boolean = false;
 
-  private modules_: ModuleSettings[];
-  private show_: boolean;
-  private managedByPolicy_: boolean;
-  private pageHandler_: CustomizeChromePageHandlerInterface;
+  private apiProxy_: CustomizeChromeApiProxy =
+      CustomizeChromeApiProxy.getInstance();
   private setModulesSettingsListenerId_: number|null = null;
-  private discountCheckbox_: boolean;
-  private discountCheckboxEligible_: boolean;
-  private initialized_: boolean;
-
-  constructor() {
-    super();
-    this.pageHandler_ = CustomizeChromeApiProxy.getInstance().handler;
-  }
+  protected accessor initialized_: boolean = false;
 
   override connectedCallback() {
     super.connectedCallback();
     this.setModulesSettingsListenerId_ =
-        CustomizeChromeApiProxy.getInstance()
-            .callbackRouter.setModulesSettings.addListener(
-                (modulesSettings: ModuleSettings[], managed: boolean,
-                 visible: boolean) => {
-                  this.show_ = visible;
-                  this.managedByPolicy_ = managed;
-                  this.modules_ = modulesSettings;
-                  this.initialized_ = true;
-                });
-    this.pageHandler_.updateModulesSettings();
+        this.apiProxy_.callbackRouter.setModulesSettings.addListener(
+            (modulesSettings: ModuleSettings[], managed: boolean,
+             visible: boolean) => {
+              this.show_ = visible;
+              this.managedByPolicy_ = managed;
+              this.modules_ = modulesSettings;
+              this.initialized_ = true;
+            });
+    this.apiProxy_.handler.updateModulesSettings();
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
-    CustomizeChromeApiProxy.getInstance().callbackRouter.removeListener(
+    this.apiProxy_.callbackRouter.removeListener(
         this.setModulesSettingsListenerId_!);
   }
 
-  private modulesChanged_() {
-    if (this.modules_.some(module => module.id === 'chrome_cart')) {
-      ChromeCartProxy.getHandler().getDiscountToggleVisible().then(
-          ({toggleVisible}) => {
-            this.discountCheckboxEligible_ = toggleVisible;
-          });
+  private setShow_(show: boolean) {
+    recordCustomizeChromeAction(
+        CustomizeChromeAction.SHOW_CARDS_TOGGLE_CLICKED);
+    this.show_ = show;
+    this.apiProxy_.handler.setModulesVisible(this.show_);
+  }
 
-      ChromeCartProxy.getHandler().getDiscountEnabled().then(({enabled}) => {
-        this.discountCheckbox_ = enabled;
-      });
+  protected onShowChange_(e: CustomEvent<boolean>) {
+    this.setShow_(e.detail);
+  }
+
+  protected onShowToggleClick_() {
+    if (this.managedByPolicy_) {
+      return;
     }
+
+    this.setShow_(!this.show_);
   }
 
-  private onShowChange_(e: CustomEvent<boolean>) {
-    this.show_ = e.detail;
-    this.pageHandler_.setModulesVisible(this.show_);
-  }
-
-  private onCardStatusChange_(e: DomRepeatEvent<ModuleSettings, CustomEvent>) {
-    const id: string = e.model.item.id;
-    const checked: boolean = e.detail;
-    this.pageHandler_.setModuleDisabled(id, !checked);
+  private setModuleStatus(index: number, enabled: boolean) {
+    const module = this.modules_[index]!;
+    module.enabled = enabled;
+    this.requestUpdate();
+    const id = module.id;
+    this.apiProxy_.handler.setModuleDisabled(id, !enabled);
+    const metricBase = `NewTabPage.Modules.${enabled ? 'Enabled' : 'Disabled'}`;
+    chrome.metricsPrivate.recordSparseValueWithPersistentHash(metricBase, id);
     chrome.metricsPrivate.recordSparseValueWithPersistentHash(
-        'NewTabPage.Modules.' + (checked ? 'Enabled' : 'Disabled'), id);
+        `${metricBase}.Customize`, id);
   }
 
-  private showDiscountCheckbox_(
-      id: string, checked: boolean, eligible: boolean): boolean {
-    return id === 'chrome_cart' && checked && eligible;
+  protected onCardCheckboxChange_(e: CustomEvent<boolean>) {
+    const index = Number((e.currentTarget as HTMLElement).dataset['index']);
+    this.setModuleStatus(index, /*checked= */ e.detail);
   }
 
-  private onDiscountCheckboxChange_() {
-    if (this.discountCheckboxEligible_) {
-      ChromeCartProxy.getHandler().setDiscountEnabled(this.discountCheckbox_);
+  protected onCardClick_(e: Event) {
+    if (this.managedByPolicy_) {
+      return;
     }
+
+    const index = Number((e.currentTarget as HTMLElement).dataset['index']);
+    const module = this.modules_[index]!;
+    this.setModuleStatus(index, !module.enabled);
   }
 }
 

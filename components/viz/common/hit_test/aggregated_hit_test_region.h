@@ -9,7 +9,7 @@
 
 #include "components/viz/common/hit_test/hit_test_region_list.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
-#include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/geometry/rrect_f.h"
 #include "ui/gfx/geometry/transform.h"
 
 namespace viz {
@@ -30,7 +30,7 @@ struct AggregatedHitTestRegion {
   AggregatedHitTestRegion(
       const FrameSinkId& frame_sink_id,
       uint32_t flags,
-      const gfx::Rect& rect,
+      const gfx::RRectF& rect,
       const gfx::Transform& transform,
       int32_t child_count,
       uint32_t async_hit_test_reasons = AsyncHitTestReasons::kNotAsyncHitTest)
@@ -45,6 +45,9 @@ struct AggregatedHitTestRegion {
               !!async_hit_test_reasons);
   }
 
+  friend bool operator==(const AggregatedHitTestRegion&,
+                         const AggregatedHitTestRegion&) = default;
+
   // The FrameSinkId corresponding to this region.  Events that match
   // are routed to this surface.
   FrameSinkId frame_sink_id;
@@ -55,8 +58,9 @@ struct AggregatedHitTestRegion {
   // AsyncHitTestReasons to indicate why we are doing slow path hit testing.
   uint32_t async_hit_test_reasons = AsyncHitTestReasons::kNotAsyncHitTest;
 
-  // The rectangle that defines the region in parent region's coordinate space.
-  gfx::Rect rect;
+  // The rounded rectangle that defines the region in parent region's coordinate
+  // space.
+  gfx::RRectF rect;
 
   // The number of children including their children below this entry.
   // If this element is not matched then child_count elements can be skipped
@@ -64,17 +68,6 @@ struct AggregatedHitTestRegion {
   int32_t child_count = 0;
 
   gfx::Transform transform;
-
-  bool operator==(const AggregatedHitTestRegion& rhs) const {
-    return (frame_sink_id == rhs.frame_sink_id && flags == rhs.flags &&
-            async_hit_test_reasons == rhs.async_hit_test_reasons &&
-            rect == rhs.rect && child_count == rhs.child_count &&
-            transform == rhs.transform);
-  }
-
-  bool operator!=(const AggregatedHitTestRegion& other) const {
-    return !(*this == other);
-  }
 };
 
 }  // namespace viz

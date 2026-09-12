@@ -6,9 +6,8 @@
 
 #include <cstdint>
 
-#include "base/allocator/partition_allocator/partition_alloc_constants.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
-#include "base/functional/callback_forward.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/memory/scoped_refptr.h"
@@ -20,6 +19,8 @@
 #include "content/public/browser/browser_thread.h"
 #include "mojo/public/cpp/base/big_buffer.h"
 #include "net/base/io_buffer.h"
+#include "net/base/net_errors.h"
+#include "partition_alloc/partition_alloc_constants.h"
 #include "storage/browser/file_system/file_system_context.h"
 #include "storage/browser/file_system/file_system_operation_runner.h"
 #include "storage/browser/file_system/file_system_url.h"
@@ -36,7 +37,7 @@ void ReadOnIOThread(scoped_refptr<storage::FileSystemContext> context,
                     scoped_refptr<storage::BigIOBuffer> buffer,
                     scoped_refptr<base::SequencedTaskRunner> reply_runner,
                     base::OnceCallback<void(int)> callback) {
-  DCHECK_CURRENTLY_ON(content::BrowserThread::IO);
+  CHECK_CURRENTLY_ON(content::BrowserThread::IO, base::NotFatalUntil::M159);
 
   auto wrapped_callback =
       base::BindPostTask(std::move(reply_runner), std::move(callback));
@@ -72,8 +73,8 @@ FileSystemAccessFileDelegateHostImpl::FileSystemAccessFileDelegateHostImpl(
     mojo::PendingReceiver<blink::mojom::FileSystemAccessFileDelegateHost>
         receiver)
     : manager_(manager), url_(url), receiver_(this, std::move(receiver)) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(manager_);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  CHECK(manager_, base::NotFatalUntil::M159);
   receiver_.set_disconnect_handler(
       base::BindOnce(&FileSystemAccessFileDelegateHostImpl::OnDisconnect,
                      base::Unretained(this)));
@@ -106,7 +107,7 @@ void FileSystemAccessFileDelegateHostImpl::Read(int64_t offset,
   // Chrome will be allowed to contiguously allocate at once.
   int max_bytes_to_read =
       std::min(bytes_to_read,
-               base::saturated_cast<int>(partition_alloc::MaxDirectMapped()));
+               base::saturated_cast<int>(partition_alloc::MaxAllocationSize()));
 
   auto buffer = base::MakeRefCounted<storage::BigIOBuffer>(max_bytes_to_read);
 
@@ -127,7 +128,7 @@ void FileSystemAccessFileDelegateHostImpl::DidRead(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   if (rv < 0) {
-    std::move(callback).Run(absl::optional<mojo_base::BigBuffer>(),
+    std::move(callback).Run(std::optional<mojo_base::BigBuffer>(),
                             storage::NetErrorToFileError(rv),
                             /*bytes_read=*/0);
     return;
@@ -139,7 +140,7 @@ void FileSystemAccessFileDelegateHostImpl::DidRead(
   // information across processes.
   if (static_cast<size_t>(bytes_read) < result.size()) {
     size_t bytes_to_fill = result.size() - static_cast<size_t>(bytes_read);
-    memset(result.data() + bytes_read, 0, bytes_to_fill);
+    UNSAFE_TODO(memset(result.data() + bytes_read, 0, bytes_to_fill));
   }
 
   std::move(callback).Run(std::move(result), base::File::Error::FILE_OK,
@@ -171,7 +172,7 @@ void FileSystemAccessFileDelegateHostImpl::DidWrite(WriteState* state,
                                                     bool complete) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  DCHECK(state);
+  CHECK(state, base::NotFatalUntil::M159);
   state->bytes_written += bytes;
   if (complete) {
     // This cast is guaranteed to be safe because the data buffer we're writing
@@ -197,7 +198,9 @@ void FileSystemAccessFileDelegateHostImpl::GetLength(
             std::move(callback).Run(file_error, 0);
           },
           std::move(callback)),
-      url(), storage::FileSystemOperation::GET_METADATA_FIELD_SIZE);
+      url(),
+      storage::FileSystemOperation::GetMetadataFieldSet(
+          {storage::FileSystemOperation::GetMetadataField::kSize}));
 }
 
 void FileSystemAccessFileDelegateHostImpl::SetLength(

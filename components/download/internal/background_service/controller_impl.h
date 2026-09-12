@@ -7,6 +7,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -29,7 +30,6 @@
 #include "components/download/public/background_service/download_params.h"
 #include "components/download/public/background_service/navigation_monitor.h"
 #include "components/download/public/task/task_scheduler.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace download {
 
@@ -122,7 +122,7 @@ class ControllerImpl : public Controller,
   Controller::State GetControllerState() override;
   const StartupStatus& GetStartupStatus() override;
   LogSource::EntryDetailsList GetServiceDownloads() override;
-  absl::optional<EntryDetails> GetServiceDownload(
+  std::optional<EntryDetails> GetServiceDownload(
       const std::string& guid) override;
 
   // MemoryDumpProvider implementation.
@@ -144,6 +144,9 @@ class ControllerImpl : public Controller,
   // Checks if initialization is complete and successful.  If so, completes the
   // internal state initialization.
   void AttemptToFinalizeSetup();
+
+  // Posts a task to execute AttemptToFinalizeSetup().
+  void PostAttemptToFinalizeSetup();
 
   // Called when setup and recovery failed.  Shuts down the service and notifies
   // the Clients.
@@ -202,7 +205,6 @@ class ControllerImpl : public Controller,
 
   // Handles and clears any pending task finished callbacks.
   void HandleTaskFinished(DownloadTaskType task_type,
-                          bool needs_reschedule,
                           stats::ScheduledTaskStatus status);
   void OnCompleteCleanupTask();
 
@@ -220,9 +222,8 @@ class ControllerImpl : public Controller,
 
   void HandleExternalDownload(const std::string& guid, bool active);
   void PrepareToStartDownload(Entry* entry);
-  void OnDownloadReadyToStart(
-      const std::string& guid,
-      scoped_refptr<network::ResourceRequestBody> post_body);
+  void OnDownloadReadyToStart(const std::string& guid,
+                              DownloadRequestParameters params);
 
   // Postable methods meant to just be pass throughs to Client APIs.  This is
   // meant to help prevent reentrancy.
@@ -264,7 +265,7 @@ class ControllerImpl : public Controller,
   std::unique_ptr<Configuration> config_;
   ServiceConfigImpl service_config_;
   std::unique_ptr<Logger> logger_;
-  raw_ptr<LogSink> log_sink_;
+  raw_ptr<LogSink, DanglingUntriaged> log_sink_;
   std::unique_ptr<ClientSet> clients_;
   std::unique_ptr<DownloadDriver> driver_;
   std::unique_ptr<Model> model_;
@@ -280,6 +281,7 @@ class ControllerImpl : public Controller,
   StartupStatus startup_status_;
   std::set<std::string> externally_active_downloads_;
   std::set<std::string> pending_uploads_;
+  std::set<std::string> guids_with_custom_request_params_;
   std::map<std::string, DownloadParams::StartCallback> start_callbacks_;
   std::map<DownloadTaskType, TaskFinishedCallback> task_finished_callbacks_;
   base::CancelableOnceClosure cancel_downloads_callback_;

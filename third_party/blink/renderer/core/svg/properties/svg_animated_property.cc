@@ -46,11 +46,11 @@ SVGAnimatedPropertyBase::SVGAnimatedPropertyBase(
       // used here. See static_assert in header.
       css_property_id_(static_cast<unsigned>(css_property_id)),
       initial_value_storage_(initial_value),
-      base_value_needs_synchronization_(false),
+      content_attribute_state_(kNotSet),
       context_element_(context_element),
       attribute_name_(attribute_name) {
   DCHECK(context_element_);
-  DCHECK(attribute_name_ != QualifiedName::Null());
+  DCHECK((*attribute_name_) != QualifiedName::Null());
   DCHECK_EQ(GetType(), type);
   DCHECK_EQ(CssPropertyId(), css_property_id);
   DCHECK_EQ(initial_value_storage_, initial_value);
@@ -66,29 +66,33 @@ bool SVGAnimatedPropertyBase::NeedsSynchronizeAttribute() const {
   // DOM attribute synchronization is only needed if a change has been made
   // through the JavaScript IDL attribute (via a tear-off or primitive). This
   // prevents unnecessary attribute creation on the target element.
-  return base_value_needs_synchronization_;
+  return content_attribute_state_ == kUnsynchronizedValue ||
+         content_attribute_state_ == kUnsynchronizedRemoval;
 }
 
 void SVGAnimatedPropertyBase::SynchronizeAttribute() {
   AtomicString value(BaseValueBase().ValueAsString());
-  context_element_->SetSynchronizedLazyAttribute(attribute_name_, value);
-  base_value_needs_synchronization_ = false;
+  context_element_->SetSynchronizedLazyAttribute(*attribute_name_, value);
+  DCHECK(NeedsSynchronizeAttribute());
+  SetContentAttributeState(value.IsNull() ? kNotSet : kHasValue);
 }
 
-void SVGAnimatedPropertyBase::BaseValueChanged() {
+const CSSValue* SVGAnimatedPropertyBase::CssValue() const {
+  NOTREACHED();
+}
+
+void SVGAnimatedPropertyBase::BaseValueChanged(
+    BaseValueChangeType change_type) {
   DCHECK(context_element_);
-  DCHECK(attribute_name_ != QualifiedName::Null());
-  base_value_needs_synchronization_ = true;
+  DCHECK((*attribute_name_) != QualifiedName::Null());
+  SetContentAttributeState(change_type == BaseValueChangeType::kRemoved
+                               ? kUnsynchronizedRemoval
+                               : kUnsynchronizedValue);
   context_element_->BaseValueChanged(*this);
 }
 
-void SVGAnimatedPropertyBase::EnsureAnimValUpdated() {
-  DCHECK(context_element_);
-  context_element_->EnsureAttributeAnimValUpdated();
-}
-
 bool SVGAnimatedPropertyBase::IsSpecified() const {
-  return IsAnimating() || ContextElement()->hasAttribute(AttributeName());
+  return HasContentAttribute() || IsAnimating();
 }
 
 }  // namespace blink

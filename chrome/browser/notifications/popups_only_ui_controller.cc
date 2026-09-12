@@ -14,7 +14,7 @@ PopupsOnlyUiController::PopupsOnlyUiController()
 
   // Initialize collection after calling message_center_->AddObserver to ensure
   // the correct order of observers. (PopupsOnlyUiController has to be called
-  // before MessagePopupCollection, see crbug.com/901350)
+  // before MessagePopupCollection, see crbug.com/41424101)
   popup_collection_ =
       std::make_unique<message_center::DesktopMessagePopupCollection>();
 }
@@ -41,8 +41,8 @@ void PopupsOnlyUiController::OnNotificationUpdated(
 
 void PopupsOnlyUiController::OnNotificationClicked(
     const std::string& notification_id,
-    const absl::optional<int>& button_index,
-    const absl::optional<std::u16string>& reply) {
+    const std::optional<int>& button_index,
+    const std::optional<std::u16string>& reply) {
   if (popups_visible_)
     ShowOrHidePopupBubbles();
 }

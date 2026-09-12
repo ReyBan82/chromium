@@ -16,6 +16,7 @@
 #include "components/dom_distiller/core/article_distillation_update.h"
 #include "components/dom_distiller/core/article_entry.h"
 #include "components/dom_distiller/core/distiller.h"
+#include "components/dom_distiller/core/distiller_page.h"
 #include "components/dom_distiller/core/proto/distilled_page.pb.h"
 
 class GURL;
@@ -54,6 +55,10 @@ class ViewRequestDelegate : public base::CheckedObserver {
 
   // Called when an article that is currently under distillation is updated.
   virtual void OnArticleUpdated(ArticleDistillationUpdate article_update) = 0;
+
+  // Called when page distillation fails with a specific safety or parsing
+  // reason.
+  virtual void OnDistillationFailed(DistillationParseResult reason) {}
 };
 
 // A TaskTracker manages the various tasks related to viewing, saving,
@@ -86,8 +91,12 @@ class TaskTracker {
   ~TaskTracker();
 
   // |factory| will not be stored after this call.
+  // |distiller_page| the page environment used to load and distill the content.
+  // |use_cache| whether the distilled article should be saved to the
+  // DistilledContentStore upon completion.
   void StartDistiller(DistillerFactory* factory,
-                      std::unique_ptr<DistillerPage> distiller_page);
+                      std::unique_ptr<DistillerPage> distiller_page,
+                      bool use_cache);
   void StartBlobFetcher();
 
   void AddSaveCallback(SaveCallback callback);
@@ -109,7 +118,9 @@ class TaskTracker {
       const ArticleDistillationUpdate& article_update);
 
   void OnDistillerFinished(
-      std::unique_ptr<DistilledArticleProto> distilled_article);
+      bool use_cache,
+      std::unique_ptr<DistilledArticleProto> distilled_article,
+      DistillationParseResult result);
   void OnBlobFetched(bool success,
                      std::unique_ptr<DistilledArticleProto> distilled_article);
 

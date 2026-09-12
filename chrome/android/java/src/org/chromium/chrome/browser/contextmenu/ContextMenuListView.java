@@ -7,21 +7,59 @@ package org.chromium.chrome.browser.contextmenu;
 import android.content.Context;
 import android.util.AttributeSet;
 import android.view.View;
+import android.widget.ListAdapter;
 import android.widget.ListView;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.R;
+import org.chromium.chrome.browser.contextmenu.ContextMenuCoordinator.ContextMenuItemType;
+import org.chromium.ui.UiUtils;
+
+import java.util.Set;
 
 /**
  * A custom ListView to be able to set width and height using the contents. Width and height are
  * constrained to make sure the view fits the screen size with margins.
  */
+@NullMarked
 public class ContextMenuListView extends ListView {
-    // Whether the max width of this list view is limited by screen width.
-    private final boolean mLimitedByScreenWidth;
+    private final int mMinWidth;
+    private final int mMaxWidth;
+    private final int mFlyoutMaxWidth;
+    private final int mLateralMargin;
+
+    // Measured width of list items. Used by popup, dialog, and flyout context menus.
+    private int mCalculatedItemWidth;
+
+    // Whether this ListView is used for a flyout submenu.
+    private boolean mIsFlyout;
 
     public ContextMenuListView(Context context, AttributeSet attrs) {
         super(context, attrs);
-        mLimitedByScreenWidth = ContextMenuUtils.usePopupContextMenuForContext(context);
+        mMinWidth = getResources().getDimensionPixelSize(R.dimen.menu_width_min);
+        mMaxWidth = getResources().getDimensionPixelSize(R.dimen.menu_width_max);
+        mFlyoutMaxWidth = getResources().getDimensionPixelSize(R.dimen.flyout_menu_max_width);
+        mLateralMargin = getResources().getDimensionPixelSize(R.dimen.menu_horizontal_margin);
+    }
+
+    /** Sets whether this ListView represents a flyout submenu. */
+    public void setIsFlyout(boolean isFlyout) {
+        mIsFlyout = isFlyout;
+        if (mIsFlyout && getAdapter() != null && mCalculatedItemWidth == 0) {
+            mCalculatedItemWidth =
+                    UiUtils.computeListAdapterContentDimensions(
+                            getAdapter(), this, Set.of(ContextMenuItemType.HEADER))[0];
+        }
+    }
+
+    @Override
+    public void setAdapter(ListAdapter adapter) {
+        super.setAdapter(adapter);
+        if (adapter != null) {
+            mCalculatedItemWidth =
+                    UiUtils.computeListAdapterContentDimensions(
+                            getAdapter(), this, Set.of(ContextMenuItemType.HEADER))[0];
+        }
     }
 
     @Override
@@ -38,24 +76,19 @@ public class ContextMenuListView extends ListView {
      */
     private int calculateWidth() {
         final int windowWidthPx = getResources().getDisplayMetrics().widthPixels;
-        final int maxWidthFromRes =
-                getResources().getDimensionPixelSize(R.dimen.context_menu_max_width);
-        final int lateralMargin =
-                getResources().getDimensionPixelSize(R.dimen.context_menu_lateral_margin);
 
-        // This ListView should be inside a FrameLayout with the menu_bg_tinted background. Since
-        // the background is a 9-patch, it gets some extra padding automatically, and we should
-        // take it into account when calculating the width here.
-        final View frame = ((View) getParent());
+        // This ListView is inside a FrameLayout (context_menu_frame) with a background drawable.
+        // The background may have padding that we need to account for when calculating width.
+        final View frame = ((View) getParent().getParent());
         assert frame.getId() == R.id.context_menu_frame;
-        final int parentLateralPadding = frame.getPaddingLeft();
-        final int maxWidth = Math.min(maxWidthFromRes, frame.getMeasuredWidth());
+        final int parentLateralPadding = frame.getPaddingLeft() + frame.getPaddingRight();
 
-        // When context menu is a popup, the max width with windowWidth - 2 * lateralMargin does not
-        // applied since it is presented in a popup window. See https://crbug.com/1314675.
-        if (mLimitedByScreenWidth) {
-            return maxWidth - 2 * parentLateralPadding;
-        }
-        return Math.min(maxWidth, windowWidthPx - 2 * lateralMargin) - 2 * parentLateralPadding;
+        int contentWidth = mCalculatedItemWidth + parentLateralPadding;
+        int maxAllowedWidth = mIsFlyout ? mFlyoutMaxWidth : mMaxWidth;
+        int menuWidth =
+                UiUtils.computeMenuWidth(
+                        contentWidth, mMinWidth, maxAllowedWidth, mLateralMargin, windowWidthPx);
+
+        return Math.max(0, menuWidth - parentLateralPadding);
     }
 }

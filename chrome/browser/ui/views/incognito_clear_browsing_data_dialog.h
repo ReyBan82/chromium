@@ -12,17 +12,14 @@
 
 class Profile;
 
-namespace views {
-class View;
-}  // namespace views
-
 class IncognitoClearBrowsingDataDialog
     : public IncognitoClearBrowsingDataDialogInterface,
       public views::BubbleDialogDelegateView {
- public:
-  METADATA_HEADER(IncognitoClearBrowsingDataDialog);
+  METADATA_HEADER(IncognitoClearBrowsingDataDialog,
+                  views::BubbleDialogDelegateView)
 
-  IncognitoClearBrowsingDataDialog(views::View* anchor_view,
+ public:
+  IncognitoClearBrowsingDataDialog(views::BubbleAnchor anchor,
                                    Profile* incognito_profile,
                                    Type type);
   IncognitoClearBrowsingDataDialog(

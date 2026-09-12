@@ -2,29 +2,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from . import config
+import argparse
+
+from signing import config, model, standard_invoker
 
 
 class TestConfig(config.CodeSignConfig):
-
-    def __init__(self,
-                 identity='[IDENTITY]',
-                 installer_identity='[INSTALLER-IDENTITY]',
-                 notary_user='[NOTARY-USER]',
-                 notary_password='[NOTARY-PASSWORD]',
-                 **kwargs):
-        if 'notary_team_id' not in kwargs:
-            kwargs['notary_team_id'] = '[NOTARY-TEAM]'
-        super(TestConfig, self).__init__(identity, installer_identity,
-                                         notary_user, notary_password, **kwargs)
+    def __init__(self, **kwargs):
+        config_args = {
+            'invoker': TestInvoker.factory_with_args(),
+            'identity': '[IDENTITY]',
+            'installer_identity': '[INSTALLER-IDENTITY]',
+        }
+        config_args.update(kwargs)
+        super(TestConfig, self).__init__(**config_args)
 
     @staticmethod
     def is_chrome_branded():
         return True
 
-    @staticmethod
-    def enable_updater():
+    @property
+    def enable_updater(self):
         return True
+
+    @property
+    def use_static_angle(self):
+        return False
 
     @property
     def app_product(self):
@@ -50,20 +53,31 @@ class TestConfig(config.CodeSignConfig):
     def run_spctl_assess(self):
         return True
 
+    @property
+    def main_executable_pinned_geometry(self):
+        return None
+
 
 class TestConfigNonChromeBranded(TestConfig):
-
     @staticmethod
     def is_chrome_branded():
         return False
 
-    @staticmethod
-    def enable_updater():
+    @property
+    def enable_updater(self):
         return False
 
 
 class TestConfigInjectGetTaskAllow(TestConfig):
-
     @property
     def inject_get_task_allow_entitlement(self):
         return True
+
+
+class TestInvoker(standard_invoker.Invoker):
+    @staticmethod
+    def factory_with_args(**kwargs):
+        if 'notary_arg' not in kwargs:
+            kwargs['notary_arg'] = []
+        args = argparse.Namespace(**kwargs)
+        return lambda config: TestInvoker(args, config)

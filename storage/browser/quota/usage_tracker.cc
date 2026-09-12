@@ -28,18 +28,17 @@ struct UsageTracker::AccumulateInfo {
 UsageTracker::UsageTracker(
     QuotaManagerImpl* quota_manager_impl,
     const base::flat_map<mojom::QuotaClient*, QuotaClientType>& client_types,
-    blink::mojom::StorageType type,
     scoped_refptr<SpecialStoragePolicy> special_storage_policy)
-    : quota_manager_impl_(quota_manager_impl), type_(type) {
-  DCHECK(quota_manager_impl_);
+    : quota_manager_impl_(quota_manager_impl) {
+  CHECK(quota_manager_impl_, base::NotFatalUntil::M148);
 
   for (const auto& client_and_type : client_types) {
     mojom::QuotaClient* client = client_and_type.first;
     QuotaClientType client_type = client_and_type.second;
-    client_tracker_map_[client_type].push_back(
-        std::make_unique<ClientUsageTracker>(this, client, type,
-                                             special_storage_policy));
-    client_tracker_count_ += 1;
+    auto [it, inserted] = client_tracker_map_.insert(
+        std::make_pair(client_type, std::make_unique<ClientUsageTracker>(
+                                        this, client, special_storage_policy)));
+    CHECK(inserted);
   }
 }
 
@@ -53,9 +52,8 @@ void UsageTracker::GetGlobalUsage(UsageCallback callback) {
   if (global_usage_callbacks_.size() > 1)
     return;
 
-  quota_manager_impl_->GetBucketsForType(
-      type_, base::BindOnce(&UsageTracker::DidGetBucketsForType,
-                            weak_factory_.GetWeakPtr()));
+  quota_manager_impl_->GetAllBuckets(base::BindOnce(
+      &UsageTracker::DidGetAllBuckets, weak_factory_.GetWeakPtr()));
 }
 
 void UsageTracker::GetStorageKeyUsageWithBreakdown(
@@ -69,16 +67,15 @@ void UsageTracker::GetStorageKeyUsageWithBreakdown(
     return;
 
   quota_manager_impl_->GetBucketsForStorageKey(
-      storage_key, type_,
-      base::BindOnce(&UsageTracker::DidGetBucketsForStorageKey,
-                     weak_factory_.GetWeakPtr(), storage_key));
+      storage_key, base::BindOnce(&UsageTracker::DidGetBucketsForStorageKey,
+                                  weak_factory_.GetWeakPtr(), storage_key));
 }
 
 void UsageTracker::GetBucketUsageWithBreakdown(
     const BucketLocator& bucket,
     UsageWithBreakdownCallback callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(bucket.id);
+  CHECK(bucket.id, base::NotFatalUntil::M148);
   std::vector<UsageWithBreakdownCallback>& bucket_callbacks =
       bucket_usage_callbacks_[bucket];
   bucket_callbacks.emplace_back(std::move(callback));
@@ -88,52 +85,43 @@ void UsageTracker::GetBucketUsageWithBreakdown(
   auto info = std::make_unique<AccumulateInfo>();
   auto* info_ptr = info.get();
   base::RepeatingClosure barrier = base::BarrierClosure(
-      client_tracker_count_,
+      client_tracker_map_.size(),
       base::BindOnce(&UsageTracker::FinallySendBucketUsageWithBreakdown,
                      weak_factory_.GetWeakPtr(), std::move(info), bucket));
 
-  for (const auto& client_type_and_trackers : client_tracker_map_) {
-    for (const auto& client_tracker : client_type_and_trackers.second) {
-      client_tracker->GetBucketsUsage(
-          {bucket},
-          // base::Unretained usage is safe here because BarrierClosure holds
-          // the std::unque_ptr that keeps AccumulateInfo alive, and the
-          // BarrierClosure will outlive all the AccumulateClientGlobalUsage
-          // closures.
-          base::BindOnce(&UsageTracker::AccumulateClientUsageWithBreakdown,
-                         weak_factory_.GetWeakPtr(), barrier,
-                         base::Unretained(info_ptr),
-                         client_type_and_trackers.first));
-    }
+  for (const auto& [client_type, client_tracker] : client_tracker_map_) {
+    client_tracker->GetBucketsUsage(
+        {bucket},
+        // base::Unretained usage is safe here because BarrierClosure holds
+        // the std::unque_ptr that keeps AccumulateInfo alive, and the
+        // BarrierClosure will outlive all the AccumulateClientGlobalUsage
+        // closures.
+        base::BindOnce(&UsageTracker::AccumulateClientUsageWithBreakdown,
+                       weak_factory_.GetWeakPtr(), barrier,
+                       base::Unretained(info_ptr), client_type));
   }
 }
 
 void UsageTracker::UpdateBucketUsageCache(QuotaClientType client_type,
                                           const BucketLocator& bucket,
-                                          int64_t delta) {
+                                          std::optional<int64_t> delta) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(client_tracker_map_.count(client_type));
 
-  for (const auto& client_tracker : client_tracker_map_[client_type])
-    client_tracker->UpdateBucketUsageCache(bucket, delta);
+  GetClient(client_type).UpdateBucketUsageCache(bucket, delta);
 }
 
 void UsageTracker::DeleteBucketCache(QuotaClientType client_type,
                                      const BucketLocator& bucket) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(client_tracker_map_.count(client_type));
-  DCHECK_EQ(bucket.type, type_);
 
-  for (const auto& client_tracker : client_tracker_map_[client_type])
-    client_tracker->DeleteBucketCache(bucket);
+  GetClient(client_type).DeleteBucketCache(bucket);
 }
 
 int64_t UsageTracker::GetCachedUsage() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   int64_t usage = 0;
-  for (const auto& client_type_and_trackers : client_tracker_map_) {
-    for (const auto& client_tracker : client_type_and_trackers.second)
-      usage += client_tracker->GetCachedUsage();
+  for (const auto& [client_type, client_tracker] : client_tracker_map_) {
+    usage += client_tracker->GetCachedUsage();
   }
   return usage;
 }
@@ -141,12 +129,11 @@ int64_t UsageTracker::GetCachedUsage() const {
 std::map<std::string, int64_t> UsageTracker::GetCachedHostsUsage() const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   std::map<std::string, int64_t> host_usage;
-  for (const auto& client_type_and_trackers : client_tracker_map_) {
-    for (const auto& client_tracker : client_type_and_trackers.second) {
-      std::map<std::string, int64_t> client_host_usage =
-          client_tracker->GetCachedHostsUsage();
-      for (const auto& host_and_usage : client_host_usage)
-        host_usage[host_and_usage.first] += host_and_usage.second;
+  for (const auto& [client_type, client_tracker] : client_tracker_map_) {
+    const ClientUsageTracker::BucketUsageMap& usage_map =
+        client_tracker->GetCachedBucketsUsage();
+    for (const auto& [bucket, usage] : usage_map) {
+      host_usage[bucket.storage_key.origin().host()] += usage;
     }
   }
   return host_usage;
@@ -156,32 +143,41 @@ std::map<blink::StorageKey, int64_t> UsageTracker::GetCachedStorageKeysUsage()
     const {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   std::map<blink::StorageKey, int64_t> storage_key_usage;
-  for (const auto& client_type_and_trackers : client_tracker_map_) {
-    for (const auto& client_tracker : client_type_and_trackers.second) {
-      std::map<blink::StorageKey, int64_t> client_storage_key_usage =
-          client_tracker->GetCachedStorageKeysUsage();
-      for (const auto& storage_key_and_usage : client_storage_key_usage)
-        storage_key_usage[storage_key_and_usage.first] +=
-            storage_key_and_usage.second;
+  for (const auto& [client_type, client_tracker] : client_tracker_map_) {
+    const ClientUsageTracker::BucketUsageMap& usage_map =
+        client_tracker->GetCachedBucketsUsage();
+    for (const auto& [bucket, usage] : usage_map) {
+      storage_key_usage[bucket.storage_key] += usage;
     }
   }
   return storage_key_usage;
+}
+
+std::map<BucketLocator, int64_t> UsageTracker::GetCachedBucketsUsage() const {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  std::map<BucketLocator, int64_t> aggregated_usage;
+  for (const auto& [client_type, client_tracker] : client_tracker_map_) {
+    const ClientUsageTracker::BucketUsageMap& usage_map =
+        client_tracker->GetCachedBucketsUsage();
+    for (const auto& [bucket, usage] : usage_map) {
+      aggregated_usage[bucket] += usage;
+    }
+  }
+  return aggregated_usage;
 }
 
 void UsageTracker::SetUsageCacheEnabled(QuotaClientType client_type,
                                         const blink::StorageKey& storage_key,
                                         bool enabled) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(client_tracker_map_.count(client_type));
-  for (const auto& client_tracker : client_tracker_map_[client_type])
-    client_tracker->SetUsageCacheEnabled(storage_key, enabled);
+
+  GetClient(client_type).SetUsageCacheEnabled(storage_key, enabled);
 }
 
-void UsageTracker::DidGetBucketsForType(
-    QuotaErrorOr<std::set<BucketInfo>> result) {
+void UsageTracker::DidGetAllBuckets(QuotaErrorOr<std::set<BucketInfo>> result) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto info = std::make_unique<AccumulateInfo>();
-  if (!result.ok()) {
+  if (!result.has_value()) {
     // Return with invalid values on error.
     info->usage = -1;
     info->unlimited_usage = -1;
@@ -200,22 +196,20 @@ void UsageTracker::DidGetBucketsForType(
 
   auto* info_ptr = info.get();
   base::RepeatingClosure barrier = base::BarrierClosure(
-      client_tracker_count_,
+      client_tracker_map_.size(),
       base::BindOnce(&UsageTracker::FinallySendGlobalUsage,
                      weak_factory_.GetWeakPtr(), std::move(info)));
 
-  for (const auto& client_type_and_trackers : client_tracker_map_) {
-    for (const auto& client_tracker : client_type_and_trackers.second) {
-      client_tracker->GetBucketsUsage(
-          bucket_locators,
-          // base::Unretained usage is safe here because BarrierClosure holds
-          // the std::unque_ptr that keeps AccumulateInfo alive, and the
-          // BarrierClosure will outlive all the AccumulateClientGlobalUsage
-          // closures.
-          base::BindOnce(&UsageTracker::AccumulateClientGlobalUsage,
-                         weak_factory_.GetWeakPtr(), barrier,
-                         base::Unretained(info_ptr)));
-    }
+  for (const auto& [client_type, client_tracker] : client_tracker_map_) {
+    client_tracker->GetBucketsUsage(
+        bucket_locators,
+        // base::Unretained usage is safe here because BarrierClosure holds
+        // the std::unque_ptr that keeps AccumulateInfo alive, and the
+        // BarrierClosure will outlive all the AccumulateClientGlobalUsage
+        // closures.
+        base::BindOnce(&UsageTracker::AccumulateClientGlobalUsage,
+                       weak_factory_.GetWeakPtr(), barrier,
+                       base::Unretained(info_ptr)));
   }
 }
 
@@ -224,7 +218,7 @@ void UsageTracker::DidGetBucketsForStorageKey(
     QuotaErrorOr<std::set<BucketInfo>> result) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   auto info = std::make_unique<AccumulateInfo>();
-  if (!result.ok()) {
+  if (!result.has_value()) {
     // Return with invalid values on error.
     info->usage = -1;
     info->unlimited_usage = -1;
@@ -243,23 +237,20 @@ void UsageTracker::DidGetBucketsForStorageKey(
 
   auto* info_ptr = info.get();
   base::RepeatingClosure barrier = base::BarrierClosure(
-      client_tracker_count_,
+      client_tracker_map_.size(),
       base::BindOnce(&UsageTracker::FinallySendStorageKeyUsageWithBreakdown,
                      weak_factory_.GetWeakPtr(), std::move(info), storage_key));
 
-  for (const auto& client_type_and_trackers : client_tracker_map_) {
-    for (const auto& client_tracker : client_type_and_trackers.second) {
-      client_tracker->GetBucketsUsage(
-          bucket_locators,
-          // base::Unretained usage is safe here because BarrierClosure holds
-          // the std::unque_ptr that keeps AccumulateInfo alive, and the
-          // BarrierClosure will outlive all the AccumulateClientGlobalUsage
-          // closures.
-          base::BindOnce(&UsageTracker::AccumulateClientUsageWithBreakdown,
-                         weak_factory_.GetWeakPtr(), barrier,
-                         base::Unretained(info_ptr),
-                         client_type_and_trackers.first));
-    }
+  for (const auto& [client_type, client_tracker] : client_tracker_map_) {
+    client_tracker->GetBucketsUsage(
+        bucket_locators,
+        // base::Unretained usage is safe here because BarrierClosure holds
+        // the std::unque_ptr that keeps AccumulateInfo alive, and the
+        // BarrierClosure will outlive all the AccumulateClientGlobalUsage
+        // closures.
+        base::BindOnce(&UsageTracker::AccumulateClientUsageWithBreakdown,
+                       weak_factory_.GetWeakPtr(), barrier,
+                       base::Unretained(info_ptr), client_type));
   }
 }
 
@@ -269,8 +260,8 @@ void UsageTracker::AccumulateClientGlobalUsage(
     int64_t total_usage,
     int64_t unlimited_usage) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_GE(unlimited_usage, 0);
-  DCHECK_GE(total_usage, unlimited_usage);
+  CHECK_GE(unlimited_usage, 0, base::NotFatalUntil::M148);
+  CHECK_GE(total_usage, unlimited_usage, base::NotFatalUntil::M148);
 
   info->usage += total_usage;
   info->unlimited_usage += unlimited_usage;
@@ -285,17 +276,14 @@ void UsageTracker::AccumulateClientUsageWithBreakdown(
     int64_t total_usage,
     int64_t unlimited_usage) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_GE(unlimited_usage, 0);
-  DCHECK_GE(total_usage, unlimited_usage);
+  CHECK_GE(unlimited_usage, 0, base::NotFatalUntil::M148);
+  CHECK_GE(total_usage, unlimited_usage, base::NotFatalUntil::M148);
 
   info->usage += total_usage;
 
   switch (client) {
     case QuotaClientType::kFileSystem:
       info->usage_breakdown->fileSystem += total_usage;
-      break;
-    case QuotaClientType::kDatabase:
-      info->usage_breakdown->webSql += total_usage;
       break;
     case QuotaClientType::kIndexedDatabase:
       info->usage_breakdown->indexedDatabase += total_usage;
@@ -309,13 +297,6 @@ void UsageTracker::AccumulateClientUsageWithBreakdown(
     case QuotaClientType::kBackgroundFetch:
       info->usage_breakdown->backgroundFetch += total_usage;
       break;
-    case QuotaClientType::kMediaLicense:
-      // Media license data does not count against quota and should always
-      // report 0 usage.
-      // TODO(crbug.com/1305441): Consider counting media license data against
-      // quota.
-      DCHECK_EQ(total_usage, 0);
-      break;
   }
 
   std::move(barrier_callback).Run();
@@ -324,8 +305,8 @@ void UsageTracker::AccumulateClientUsageWithBreakdown(
 void UsageTracker::FinallySendGlobalUsage(
     std::unique_ptr<AccumulateInfo> info) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_GE(info->unlimited_usage, -1);
-  DCHECK_GE(info->usage, info->unlimited_usage);
+  CHECK_GE(info->unlimited_usage, -1, base::NotFatalUntil::M148);
+  CHECK_GE(info->usage, info->unlimited_usage, base::NotFatalUntil::M148);
 
   // Moving callbacks out of the original vector early handles the case where a
   // callback makes a new quota call.
@@ -345,8 +326,9 @@ void UsageTracker::FinallySendStorageKeyUsageWithBreakdown(
 
   std::vector<UsageWithBreakdownCallback> pending_callbacks;
   pending_callbacks.swap(it->second);
-  DCHECK(pending_callbacks.size() > 0) << "storage_key_usage_callbacks_ should "
-                                          "only have non-empty callback lists";
+  CHECK(pending_callbacks.size() > 0, base::NotFatalUntil::M148)
+      << "storage_key_usage_callbacks_ should "
+         "only have non-empty callback lists";
   storage_key_usage_callbacks_.erase(it);
 
   for (auto& callback : pending_callbacks)
@@ -363,12 +345,18 @@ void UsageTracker::FinallySendBucketUsageWithBreakdown(
 
   std::vector<UsageWithBreakdownCallback> pending_callbacks;
   pending_callbacks.swap(it->second);
-  DCHECK(pending_callbacks.size() > 0)
+  CHECK(pending_callbacks.size() > 0, base::NotFatalUntil::M148)
       << "bucket_usage_callbacks_ should only have non-empty callback lists";
   bucket_usage_callbacks_.erase(it);
 
   for (auto& callback : pending_callbacks)
     std::move(callback).Run(info->usage, info->usage_breakdown->Clone());
+}
+
+ClientUsageTracker& UsageTracker::GetClient(QuotaClientType type) {
+  auto iter = client_tracker_map_.find(type);
+  CHECK(iter != client_tracker_map_.end());
+  return *iter->second;
 }
 
 }  // namespace storage

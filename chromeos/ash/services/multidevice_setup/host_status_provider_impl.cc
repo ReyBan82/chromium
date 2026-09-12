@@ -60,12 +60,11 @@ HostStatusProviderImpl::HostStatusProviderImpl(
     : eligible_host_devices_provider_(eligible_host_devices_provider),
       host_backend_delegate_(host_backend_delegate),
       host_verifier_(host_verifier),
-      device_sync_client_(device_sync_client),
       current_status_and_device_(mojom::HostStatus::kNoEligibleHosts,
-                                 absl::nullopt /* host_device */) {
-  host_backend_delegate_->AddObserver(this);
-  host_verifier_->AddObserver(this);
-  device_sync_client_->AddObserver(this);
+                                 std::nullopt /* host_device */) {
+  host_backend_delegate_observation_.Observe(host_backend_delegate);
+  host_verifier_observation_.Observe(host_verifier);
+  eligible_host_devices_observation_.Observe(eligible_host_devices_provider);
 
   CheckForUpdatedStatusAndNotifyIfChanged(
       /*force_notify_host_status_change=*/false);
@@ -77,11 +76,7 @@ HostStatusProviderImpl::HostStatusProviderImpl(
                           base::Unretained(this)));
 }
 
-HostStatusProviderImpl::~HostStatusProviderImpl() {
-  host_backend_delegate_->RemoveObserver(this);
-  host_verifier_->RemoveObserver(this);
-  device_sync_client_->RemoveObserver(this);
-}
+HostStatusProviderImpl::~HostStatusProviderImpl() = default;
 
 HostStatusProvider::HostStatusWithDevice
 HostStatusProviderImpl::GetHostWithStatus() const {
@@ -103,7 +98,7 @@ void HostStatusProviderImpl::OnHostVerified() {
       /*force_notify_host_status_change=*/false);
 }
 
-void HostStatusProviderImpl::OnNewDevicesSynced() {
+void HostStatusProviderImpl::OnEligibleDevicesSynced() {
   CheckForUpdatedStatusAndNotifyIfChanged(
       /*force_notify_host_status_change=*/true);
 }
@@ -164,11 +159,11 @@ HostStatusProviderImpl::GetCurrentStatus() {
   if (!eligible_host_devices_provider_->GetEligibleHostDevices().empty()) {
     return HostStatusWithDevice(
         mojom::HostStatus::kEligibleHostExistsButNoHostSet,
-        absl::nullopt /* host_device */);
+        std::nullopt /* host_device */);
   }
 
   return HostStatusWithDevice(mojom::HostStatus::kNoEligibleHosts,
-                              absl::nullopt /* host_device */);
+                              std::nullopt /* host_device */);
 }
 
 void HostStatusProviderImpl::RecordMultiDeviceHostStatus() {

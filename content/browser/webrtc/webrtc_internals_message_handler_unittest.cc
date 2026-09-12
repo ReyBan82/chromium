@@ -9,7 +9,6 @@
 
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
-#include "content/browser/child_process_security_policy_impl.h"
 #include "content/browser/webrtc/webrtc_internals.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/url_constants.h"
@@ -26,7 +25,6 @@ namespace {
 static const GlobalRenderFrameHostId kFrameId = {20, 30};
 static const int kPid = 35;
 static const int kLid = 75;
-static const char kConstraints[] = "c";
 static const char kRtcConfiguration[] = "r";
 static const char kUrl[] = "u";
 
@@ -84,7 +82,7 @@ TEST_F(WebRtcInternalsMessageHandlerTest, DontRunJSBeforeNavigationCommitted) {
 
   NavigateAndCommit(example_url);
   webrtc_internals.OnPeerConnectionAdded(kFrameId, kPid, kLid, kUrl,
-                                         kRtcConfiguration, kConstraints);
+                                         kRtcConfiguration);
   base::RunLoop().RunUntilIdle();
 
   auto navigation = content::NavigationSimulator::CreateBrowserInitiated(

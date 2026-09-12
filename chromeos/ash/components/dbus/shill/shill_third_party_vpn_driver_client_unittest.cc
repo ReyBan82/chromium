@@ -9,6 +9,7 @@
 #include <string>
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/test_future.h"
 #include "chromeos/ash/components/dbus/shill/shill_client_unittest_base.h"
@@ -61,7 +62,8 @@ class ShillThirdPartyVpnDriverClientTest : public ShillClientUnittestBase {
   }
 
  protected:
-  ShillThirdPartyVpnDriverClient* client_ = nullptr;  // Unowned
+  raw_ptr<ShillThirdPartyVpnDriverClient, DanglingUntriaged> client_ =
+      nullptr;  // Unowned
 };
 
 TEST_F(ShillThirdPartyVpnDriverClientTest, PlatformSignal) {
@@ -79,9 +81,7 @@ TEST_F(ShillThirdPartyVpnDriverClientTest, PlatformSignal) {
                                 shill::kOnPacketReceivedFunction);
   {
     dbus::MessageWriter writer(&preceived_signal);
-    writer.AppendArrayOfBytes(
-        reinterpret_cast<const uint8_t*>(data_packet.data()),
-        data_packet.size());
+    writer.AppendArrayOfBytes(base::as_byte_span(data_packet));
   }
 
   // Expect each signal to be triggered once.
@@ -133,7 +133,7 @@ TEST_F(ShillThirdPartyVpnDriverClientTest, SetParameters) {
   dbus::MessageWriter writer(response.get());
   writer.AppendString(kResponse);
 
-  base::Value::Dict parameters;
+  base::DictValue parameters;
   const std::string kAddress("1.1.1.1");
   parameters.Set(shill::kAddressParameterThirdPartyVpn, kAddress);
 

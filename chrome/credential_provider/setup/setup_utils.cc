@@ -46,19 +46,19 @@ const char kMsiJsonPath[] = "distribution.msi";
 const wchar_t kMsiInstall[] = L"msi";
 
 // Parses the json data and returns it as a dictionary. If the json data isn't
-// valid, returns absl::nullopt.
-absl::optional<base::Value::Dict> ParseDistributionPreferences(
+// valid, returns std::nullopt.
+std::optional<base::DictValue> ParseDistributionPreferences(
     const std::string& json_data) {
   JSONStringValueDeserializer json(json_data);
   std::string error;
   std::unique_ptr<base::Value> root(json.Deserialize(nullptr, &error));
   if (!root.get()) {
     LOGFN(WARNING) << "Failed to parse initial prefs file: " << error;
-    return absl::nullopt;
+    return std::nullopt;
   }
   if (!root->is_dict()) {
     LOGFN(WARNING) << "Failed to parse installer data file";
-    return absl::nullopt;
+    return std::nullopt;
   }
   return std::move(*root).TakeDict();
 }
@@ -68,7 +68,7 @@ absl::optional<base::Value::Dict> ParseDistributionPreferences(
 StandaloneInstallerConfigurator::StandaloneInstallerConfigurator()
     : is_msi_installation_(false) {}
 
-StandaloneInstallerConfigurator::~StandaloneInstallerConfigurator() {}
+StandaloneInstallerConfigurator::~StandaloneInstallerConfigurator() = default;
 
 // static
 StandaloneInstallerConfigurator**
@@ -125,7 +125,7 @@ void StandaloneInstallerConfigurator::ConfigureInstallationType(
 
 std::wstring StandaloneInstallerConfigurator::GetCurrentDate() {
   static const wchar_t kDateFormat[] = L"yyyyMMdd";
-  wchar_t date_str[std::size(kDateFormat)] = {0};
+  wchar_t date_str[std::size(kDateFormat)] = {};
   int len = GetDateFormatW(LOCALE_INVARIANT, 0, nullptr, kDateFormat, date_str,
                            std::size(date_str));
   if (len) {
@@ -311,7 +311,7 @@ bool StandaloneInstallerConfigurator::InitializeFromInstallerData(
     return false;
   }
 
-  absl::optional<base::Value::Dict> prefs =
+  std::optional<base::DictValue> prefs =
       ParseDistributionPreferences(json_data);
   if (!prefs) {
     LOGFN(WARNING) << "Installer data isn't formatted correctly";
@@ -321,6 +321,16 @@ bool StandaloneInstallerConfigurator::InitializeFromInstallerData(
   installer_data_dictionary_ = std::move(prefs).value();
 
   return true;
+}
+
+bool EnableSecureDllLoading() {
+#if defined(COMPONENT_BUILD)
+  const DWORD directory_flags = LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+#else
+  const DWORD directory_flags = LOAD_LIBRARY_SEARCH_SYSTEM32;
+#endif
+
+  return ::SetDefaultDllDirectories(directory_flags);
 }
 
 }  // namespace credential_provider

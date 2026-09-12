@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "mojo/public/cpp/bindings/remote.h"
+
 #include <stdint.h>
 
+#include <optional>
 #include <tuple>
 #include <utility>
 
@@ -25,7 +28,6 @@
 #include "mojo/public/cpp/bindings/associated_receiver_set.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
-#include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/remote_set.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
 #include "mojo/public/cpp/bindings/shared_associated_remote.h"
@@ -34,12 +36,11 @@
 #include "mojo/public/cpp/bindings/tests/remote_unittest.test-mojom.h"
 #include "mojo/public/cpp/bindings/unique_receiver_set.h"
 #include "mojo/public/cpp/system/wait.h"
-#include "mojo/public/interfaces/bindings/tests/math_calculator.mojom.h"
-#include "mojo/public/interfaces/bindings/tests/sample_interfaces.mojom.h"
-#include "mojo/public/interfaces/bindings/tests/sample_service.mojom.h"
-#include "mojo/public/interfaces/bindings/tests/scoping.mojom.h"
+#include "mojo/public/interfaces/bindings/tests/math_calculator.test-mojom.h"
+#include "mojo/public/interfaces/bindings/tests/sample_interfaces.test-mojom.h"
+#include "mojo/public/interfaces/bindings/tests/sample_service.test-mojom.h"
+#include "mojo/public/interfaces/bindings/tests/scoping.test-mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace mojo {
 namespace test {
@@ -105,8 +106,9 @@ class MathCalculatorUI {
  private:
   void Output(base::OnceClosure closure, double output) {
     output_ = output;
-    if (closure)
+    if (closure) {
       std::move(closure).Run();
+    }
   }
 
   Remote<math::Calculator> calculator_;
@@ -200,8 +202,9 @@ class IntegerAccessorImpl : public sample::IntegerAccessor {
   }
   void SetInteger(int64_t data, sample::Enum type) override {
     integer_ = data;
-    if (closure_)
+    if (closure_) {
       std::move(closure_).Run();
+    }
   }
 
   int64_t integer_;
@@ -734,6 +737,36 @@ TEST_P(RemoteTest, Fusion) {
   EXPECT_TRUE(called);
 }
 
+TEST_P(RemoteTest, MessageFilter) {
+  PendingRemote<sample::PingTest> pending_remote;
+  PingTestImpl impl(pending_remote.InitWithNewPipeAndPassReceiver());
+  Remote<sample::PingTest> remote(std::move(pending_remote));
+
+  class Filter : public MessageFilter {
+   public:
+    bool WillDispatch(Message* message) override {
+      ++num_calls;
+      return true;
+    }
+
+    void DidDispatchOrReject(Message* message, bool accepted) override {}
+
+    int num_calls = 0;
+  };
+
+  auto filter = std::make_unique<Filter>();
+  Filter* filter_handle = filter.get();
+  remote.SetFilter(std::move(filter));
+
+  for (int i = 0; i < 10; ++i) {
+    base::RunLoop loop;
+    remote->Ping(loop.QuitClosure());
+    loop.Run();
+  }
+
+  EXPECT_EQ(10, filter_handle->num_calls);
+}
+
 void Fail() {
   FAIL() << "Unexpected connection error";
 }
@@ -835,6 +868,16 @@ TEST_P(RemoteTest, PendingReceiverResetWithReason) {
   pending_receiver.ResetWithReason(88u, "greetings");
 
   run_loop.Run();
+}
+
+TEST_P(RemoteTest, PendingReceiverResetWithReasonAfterDisconnect) {
+  Remote<math::Calculator> calc;
+  auto pending_receiver = calc.BindNewPipeAndPassReceiver();
+
+  calc.reset();
+  // Ensure no crashes occur when ResetWithReason is called after the other
+  // side has disconnected.
+  pending_receiver.ResetWithReason(0u, "not-used");
 }
 
 TEST_P(RemoteTest, CallbackIsPassedRemote) {
@@ -969,14 +1012,16 @@ class SequenceCheckerImpl : public mojom::SequenceChecker {
   }
 
   void GetNextExpectedValue(GetNextExpectedValueCallback callback) override {
-    for (auto& client : clients_)
+    for (auto& client : clients_) {
       client->OnNextExpectedValueQueried(next_expected_value_);
+    }
     std::move(callback).Run(next_expected_value_);
   }
 
   void Quit(QuitCallback callback) override {
-    for (auto& client : clients_)
+    for (auto& client : clients_) {
       client->OnQuit();
+    }
 
     // Destroys `this`, so we don't bother responding.
     DCHECK(quit_callback_);
@@ -1105,7 +1150,8 @@ TEST_P(RemoteTest, SharedRemoteSyncCallWithPendingEventOnSameThread) {
 }
 
 // Flaky on all platforms. https://crbug.com/1224768
-TEST_P(RemoteTest, DISABLED_DisconnectDuringOffThreadSyncWaitWithUnprocessedTasks) {
+TEST_P(RemoteTest,
+       DISABLED_DisconnectDuringOffThreadSyncWaitWithUnprocessedTasks) {
   // Regression test for https://crbug.com/1223628.
   //
   // This tests a fairly obscure edge case where one or more message tasks is
@@ -1307,7 +1353,7 @@ TEST_P(RemoteTest, SharedRemoteSyncCallsFromBoundNonConstructionSequence) {
 }
 
 TEST_P(RemoteTest, RemoteSet) {
-  std::vector<absl::optional<MathCalculatorImpl>> impls(4);
+  std::vector<std::optional<MathCalculatorImpl>> impls(4);
 
   PendingRemote<math::Calculator> remote0;
   PendingRemote<math::Calculator> remote1;
@@ -1468,7 +1514,7 @@ class LargeMessageTestImpl : public mojom::LargeMessageTest {
   Receiver<mojom::LargeMessageTest> receiver_;
 };
 
-// TODO(crbug.com/1329178): Flaky on Linux/ASAN, Mac, and Fuchsia bots.
+// TODO(crbug.com/40226674): Flaky on Linux/ASAN, Mac, and Fuchsia bots.
 TEST_P(RemoteTest, DISABLED_SendVeryLargeMessages) {
   Remote<mojom::LargeMessageTest> remote;
   LargeMessageTestImpl impl(remote.BindNewPipeAndPassReceiver());

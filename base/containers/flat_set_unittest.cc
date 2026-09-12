@@ -4,16 +4,20 @@
 
 #include "base/containers/flat_set.h"
 
+#include <list>
+#include <ranges>
 #include <string>
+#include <vector>
 
 #include "base/memory/ptr_util.h"
 #include "base/test/move_only_int.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/abseil-cpp/absl/hash/hash_testing.h"
 
 // A flat_set is basically a interface to flat_tree. So several basic
 // operations are tested to make sure things are set up properly, but the bulk
-// of the tests are in flat_tree_unittests.cc.
+// of the tests are in flat_tree_unittest.cc.
 
 using ::testing::ElementsAre;
 
@@ -50,18 +54,123 @@ TEST(FlatSet, IncompleteType) {
   A a;
 }
 
-TEST(FlatSet, RangeConstructor) {
-  flat_set<int>::value_type input_vals[] = {1, 1, 1, 2, 2, 2, 3, 3, 3};
+TEST(FlatSet, IteratorConstructor) {
+  int input_vals[] = {1, 1, 1, 2, 2, 2, 3, 3, 3};
 
+  // Copy-from iterators.
   flat_set<int> cont(std::begin(input_vals), std::end(input_vals));
   EXPECT_THAT(cont, ElementsAre(1, 2, 3));
+
+  std::list<MoveOnlyInt> input_list;
+  input_list.emplace_back(1);
+  input_list.emplace_back(1);  // Duplicate.
+  input_list.emplace_back(2);
+  input_list.emplace_back(3);
+  input_list.emplace_back(3);  // Duplicate.
+  input_list.emplace_back(4);
+
+  // Move-from iterators.
+  flat_set<MoveOnlyInt> orig(std::make_move_iterator(input_list.begin()),
+                             std::make_move_iterator(input_list.end()));
+
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(1)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(2)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(3)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(4)));
+
+  // List contains original number of moved-from elements.
+  EXPECT_THAT(input_list, ElementsAre(0, 0, 0, 0, 0, 0));
+}
+
+TEST(FlatSet, RangesToConstruction) {
+  int input_vals[] = {1, 1, 1, 2, 2, 2, 3, 3, 3};
+
+  // Copy from range.
+  EXPECT_THAT(std::ranges::to<flat_set<int>>(input_vals), ElementsAre(1, 2, 3));
+
+  std::list<MoveOnlyInt> input_list;
+  input_list.emplace_back(1);
+  input_list.emplace_back(1);  // Duplicate.
+  input_list.emplace_back(2);
+  input_list.emplace_back(3);
+  input_list.emplace_back(3);  // Duplicate.
+  input_list.emplace_back(4);
+
+  // Move from range.
+  auto orig =
+      std::ranges::to<flat_set<MoveOnlyInt>>(std::views::as_rvalue(input_list));
+
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(1)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(2)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(3)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(4)));
+
+  // List contains original number of moved-from elements.
+  EXPECT_THAT(input_list, ElementsAre(0, 0, 0, 0, 0, 0));
+}
+
+TEST(FlatSet, RangeConstructor) {
+  std::array<int, 9> input_vals = {1, 1, 1, 2, 2, 2, 3, 3, 3};
+
+  // Copy-from range.
+  flat_set<int> cont(std::from_range, input_vals);
+  EXPECT_THAT(cont, ElementsAre(1, 2, 3));
+
+  std::list<MoveOnlyInt> input_list;
+  input_list.emplace_back(1);
+  input_list.emplace_back(1);  // Duplicate.
+  input_list.emplace_back(2);
+  input_list.emplace_back(3);
+  input_list.emplace_back(3);  // Duplicate.
+  input_list.emplace_back(4);
+
+  // Move-from range
+  flat_set<MoveOnlyInt> orig(std::from_range,
+                             std::views::as_rvalue(input_list));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(1)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(2)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(3)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(4)));
+
+  // List contains original number of moved-from elements.
+  EXPECT_THAT(input_list, ElementsAre(0, 0, 0, 0, 0, 0));
+}
+
+TEST(FlatSet, SortedUninqueRangeConstructor) {
+  std::array<int, 3> input_vals = {1, 2, 3};
+
+  // Copy-from range.
+  flat_set<int> cont(std::from_range, base::sorted_unique, input_vals);
+  EXPECT_THAT(cont, ElementsAre(1, 2, 3));
+
+  std::list<MoveOnlyInt> input_list;
+  input_list.emplace_back(1);
+  input_list.emplace_back(2);
+  input_list.emplace_back(3);
+  input_list.emplace_back(4);
+
+  // Move-from list
+  flat_set<MoveOnlyInt> orig(std::from_range, base::sorted_unique,
+                             std::views::as_rvalue(input_list));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(1)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(2)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(3)));
+  EXPECT_EQ(1U, orig.count(MoveOnlyInt(4)));
+
+  // List contains original number of moved-from elements.
+  EXPECT_THAT(input_list, ElementsAre(0, 0, 0, 0));
 }
 
 TEST(FlatSet, MoveConstructor) {
-  int input_range[] = {1, 2, 3, 4};
+  std::vector<MoveOnlyInt> input_vec;
+  input_vec.emplace_back(1);
+  input_vec.emplace_back(1);  // Duplicate.
+  input_vec.emplace_back(2);
+  input_vec.emplace_back(3);
+  input_vec.emplace_back(3);  // Duplicate.
+  input_vec.emplace_back(4);
 
-  flat_set<MoveOnlyInt> original(std::begin(input_range),
-                                 std::end(input_range));
+  flat_set<MoveOnlyInt> original(std::move(input_vec));
   flat_set<MoveOnlyInt> moved(std::move(original));
 
   EXPECT_EQ(1U, moved.count(MoveOnlyInt(1)));
@@ -153,6 +262,21 @@ TEST(FlatSet, UsingInitializerList) {
   s.upper_bound({11});
   s1.upper_bound({12});
   s.erase({13});
+}
+
+TEST(FlatSet, AbslHashValue) {
+  using Set = flat_set<std::string>;
+  EXPECT_TRUE(absl::VerifyTypeImplementsAbslHashCorrectly({
+      // These two are identical.
+      Set({"a", "b", "c"}),
+      Set({"a", "b", "c"}),
+      // `flat_set` is ordered, so this is also identical.
+      Set({"c", "b", "a"}),
+      // Different content.
+      Set({"a", "b"}),
+      Set({}),
+      Set({"z"}),
+  }));
 }
 
 }  // namespace base

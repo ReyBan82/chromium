@@ -7,16 +7,25 @@
 #include "build/build_config.h"
 #include "content/browser/renderer_host/render_widget_host_impl.h"
 #include "ui/compositor/compositor.h"
+#include "ui/display/screen.h"
 
 #if defined(USE_AURA)
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #endif
 
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ui/display/screen.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+#if BUILDFLAG(IS_WIN)
+#include "ui/display/win/screen_win.h"
+#endif  // BUILDFLAG(IS_WIN)
+
 namespace content {
 
 FlingScheduler::FlingScheduler(RenderWidgetHostImpl* host) : host_(host) {
-  DCHECK(host);
+  CHECK(host, base::NotFatalUntil::M152);
 }
 
 FlingScheduler::~FlingScheduler() {
@@ -25,8 +34,8 @@ FlingScheduler::~FlingScheduler() {
 }
 
 void FlingScheduler::ScheduleFlingProgress(
-    base::WeakPtr<FlingController> fling_controller) {
-  DCHECK(fling_controller);
+    base::WeakPtr<input::FlingController> fling_controller) {
+  CHECK(fling_controller, base::NotFatalUntil::M152);
   fling_controller_ = fling_controller;
   // Don't do anything if a ui::Compositor is already being observed.
   if (observed_compositor_)
@@ -40,18 +49,39 @@ void FlingScheduler::ScheduleFlingProgress(
 }
 
 void FlingScheduler::DidStopFlingingOnBrowser(
-    base::WeakPtr<FlingController> fling_controller) {
-  DCHECK(fling_controller);
+    base::WeakPtr<input::FlingController> fling_controller) {
+  CHECK(fling_controller, base::NotFatalUntil::M152);
   if (observed_compositor_) {
     observed_compositor_->RemoveAnimationObserver(this);
     observed_compositor_ = nullptr;
   }
   fling_controller_ = nullptr;
-  host_->DidStopFlinging();
+  host_->GetRenderInputRouter()->DidStopFlinging();
 }
 
-bool FlingScheduler::NeedsBeginFrameForFlingProgress() {
-  return !GetCompositor();
+bool FlingScheduler::ProgressFlingOnFlingStart() {
+  return GetCompositor();
+}
+
+bool FlingScheduler::ShouldUseMobileFlingCurve() {
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
+  return true;
+#elif BUILDFLAG(IS_CHROMEOS)
+  CHECK(display::Screen::Get());
+  return display::Screen::Get()->InTabletMode();
+#else
+  return false;
+#endif
+}
+
+gfx::Vector2dF FlingScheduler::GetPixelsPerInch(
+    const gfx::PointF& position_in_screen) {
+#if BUILDFLAG(IS_WIN)
+  return display::win::GetScreenWin()->GetPixelsPerInch(position_in_screen);
+#else
+  return gfx::Vector2dF(input::kDefaultPixelsPerInch,
+                        input::kDefaultPixelsPerInch);
+#endif
 }
 
 void FlingScheduler::ProgressFlingOnBeginFrameIfneeded(
@@ -75,13 +105,13 @@ ui::Compositor* FlingScheduler::GetCompositor() {
 }
 
 void FlingScheduler::OnAnimationStep(base::TimeTicks timestamp) {
-  DCHECK(observed_compositor_);
+  CHECK(observed_compositor_, base::NotFatalUntil::M152);
   if (fling_controller_)
     fling_controller_->ProgressFling(timestamp);
 }
 
 void FlingScheduler::OnCompositingShuttingDown(ui::Compositor* compositor) {
-  DCHECK_EQ(observed_compositor_, compositor);
+  CHECK_EQ(observed_compositor_, compositor, base::NotFatalUntil::M152);
   observed_compositor_->RemoveAnimationObserver(this);
   observed_compositor_ = nullptr;
 }

@@ -24,19 +24,22 @@
 
 #include <string.h>
 
+#include <concepts>
 #include <limits>
 #include <memory>
 #include <type_traits>
 #include <utility>
 
+#include "partition_alloc/buildflags.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/forward.h"
 #include "third_party/blink/renderer/platform/wtf/hash_functions.h"
 #include "third_party/blink/renderer/platform/wtf/hash_table_deleted_value_type.h"
 #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
 #include "third_party/blink/renderer/platform/wtf/type_traits.h"
+#include "third_party/blink/renderer/platform/wtf/wtf_size_t.h"
 
-namespace WTF {
+namespace blink {
 
 // A hash traits type is required for a type when the type is used as the key
 // or value of a HashTable-based classes. See documentation in
@@ -49,7 +52,8 @@ namespace WTF {
 //   template parameters of HashTable-based classes.
 // The former is preferred if the hash traits defines the default hash behavior
 // of the type. The latter is suitable when a type has multiple hash behaviors,
-// e.g. CaseFoldingHashTraits defines an alternative hash behavior of strings.
+// e.g. IgnoringAsciiCaseHashTraits defines an alternative hash behavior of
+// strings.
 //
 // This file contains definitions of hash traits for integral types,
 // floating-point types, enums, raw and smart pointers, std::pair, etc.
@@ -61,7 +65,7 @@ namespace WTF {
 // A simple hash traits type for a key type can be like:
 //   template <>
 //   HashTraits<KeyType> : GenericHashTraits<KeyType> {
-//     static unsigned GetHash(const KeyType& key) { ...; }
+//     static uint32_t GetHash(const KeyType& key) { ...; }
 //     static KeyType EmptyValue() { ...; }
 //     static KeyType DeletedValue() { ...; }
 //   };
@@ -98,7 +102,7 @@ struct GenericHashTraitsBase {
 
   // Computes the hash code.
   // This is for key types only.
-  static unsigned GetHash(const T&) = delete;
+  static uint32_t GetHash(const T&) = delete;
 
   // Whether two values are equal. By default, operator== is used.
   // This is for key types only.
@@ -118,7 +122,7 @@ struct GenericHashTraitsBase {
 
   // Defines the empty value which is used to fill unused slots in the hash
   // table. This function is preferred to IsEmptyValue() when the empty value
-  // can be represented with a value that can be safely and trivially
+  // can be represented with a value that can be safely and cheaply
   // compared/assigned to another value. By default, the default constructor
   // is used.
   static T EmptyValue() { return T(); }
@@ -142,8 +146,7 @@ struct GenericHashTraitsBase {
   // define either this function or both IsDeletedValue() and
   // ConstructDeletedValue(). This function is preferred to IsDeletedValue()
   // and ConstructDeletedValue() when the deleted value can be represented with
-  // a value that can be safely and trivially compared/assigned to another
-  // value.
+  // a value that can be safely and cheaply compared/assigned to another value.
   // This is for key types only.
   // NOTE: The destructor of the returned value *may not* be called, so the
   // value should not own any dynamically allocated resources.
@@ -169,23 +172,14 @@ struct GenericHashTraitsBase {
 
   // The starting table size. Can be overridden when we know beforehand that a
   // hash table will have at least N entries.
-#if defined(MEMORY_TOOL_REPLACES_ALLOCATOR)
+#if PA_BUILDFLAG(MEMORY_TOOL_REPLACES_ALLOCATOR)
   // The allocation pool for nodes is one big chunk that ASAN has no insight
   // into, so it can cloak errors. Make it as small as possible to force nodes
   // to be allocated individually where ASAN can see them.
-  static constexpr unsigned kMinimumTableSize = 1;
+  static constexpr wtf_size_t kMinimumTableSize = 1;
 #else
-  static constexpr unsigned kMinimumTableSize = 8;
+  static constexpr wtf_size_t kMinimumTableSize = 8;
 #endif
-
-  // When a hash table backing store is traced, its elements will be
-  // traced if their class type has a trace method. However, weak-referenced
-  // elements should not be traced then, but handled by the weak processing
-  // phase that follows.
-  template <typename U = void>
-  struct IsTraceableInCollection {
-    static constexpr bool value = IsTraceable<T>::value && !IsWeak<T>::value;
-  };
 
   // The NeedsToForbidGCOnMove flag is used to make the hash table move
   // operations safe when GC is enabled: if a move constructor invokes
@@ -195,23 +189,29 @@ struct GenericHashTraitsBase {
   struct NeedsToForbidGCOnMove {
     // TODO(yutak): Consider using of std:::is_trivially_move_constructible
     // when it is accessible.
-    static constexpr bool value = !std::is_pod<T>::value;
+    static constexpr bool value =
+        !std::is_trivial_v<T> || !std::is_standard_layout_v<T>;
   };
 
   // The kCanTraceConcurrently value is used by Oilpan concurrent marking. Only
   // type for which HashTraits<T>::kCanTraceConcurrently is true can be traced
   // on a concurrent thread.
   static constexpr bool kCanTraceConcurrently = false;
+  // Used by Oilpan compaction. Only types that return true here will be
+  // compacted.
+  static constexpr bool kSupportsCompaction = false;
 };
 
 template <typename T, auto empty_value, auto deleted_value>
 struct IntOrEnumHashTraits : internal::GenericHashTraitsBase<T> {
   static_assert(std::is_integral_v<T> || std::is_enum_v<T>);
-  static unsigned GetHash(T key) { return WTF::HashInt(key); }
+  static uint32_t GetHash(T key) { return blink::HashInt(key); }
   static constexpr bool kEmptyValueIsZero =
       static_cast<int64_t>(empty_value) == 0;
   static constexpr T EmptyValue() { return static_cast<T>(empty_value); }
   static constexpr T DeletedValue() { return static_cast<T>(deleted_value); }
+
+  static constexpr bool kSupportsCompaction = true;
 };
 
 }  // namespace internal
@@ -226,13 +226,12 @@ struct IntHashTraits
 
 // Default traits for an enum type.  0 is very popular, and -1 is also popular.
 // So we use -128 and -127.
-template <typename T, auto empty_value = -128, auto deleted_value = -127>
-struct EnumHashTraits
-    : internal::IntOrEnumHashTraits<T, empty_value, deleted_value> {
+template <typename T>
+struct EnumHashTraits : internal::IntOrEnumHashTraits<T, -128, -127> {
   static_assert(std::is_enum_v<T>);
 };
 
-template <typename T, typename Enable = void>
+template <typename T>
 struct GenericHashTraits : internal::GenericHashTraitsBase<T> {
   static_assert(!std::is_integral_v<T>);
   static_assert(!std::is_enum_v<T>);
@@ -240,22 +239,24 @@ struct GenericHashTraits : internal::GenericHashTraitsBase<T> {
 };
 
 template <typename T>
-struct GenericHashTraits<T, std::enable_if_t<std::is_integral_v<T>>>
-    : IntHashTraits<T> {};
+  requires std::integral<T>
+struct GenericHashTraits<T> : IntHashTraits<T> {};
 
 template <typename T>
-struct GenericHashTraits<T, std::enable_if_t<std::is_enum_v<T>>>
-    : EnumHashTraits<T> {};
+  requires std::is_enum_v<T>
+struct GenericHashTraits<T> : EnumHashTraits<T> {};
 
 template <typename T>
-struct GenericHashTraits<T, std::enable_if_t<std::is_floating_point_v<T>>>
-    : internal::GenericHashTraitsBase<T> {
-  static unsigned GetHash(T key) { return HashFloat(key); }
+  requires std::floating_point<T>
+struct GenericHashTraits<T> : internal::GenericHashTraitsBase<T> {
+  static uint32_t GetHash(T key) { return HashFloat(key); }
   static bool Equal(T a, T b) { return FloatEqualForHash(a, b); }
   static constexpr T EmptyValue() { return std::numeric_limits<T>::infinity(); }
   static constexpr T DeletedValue() {
     return -std::numeric_limits<T>::infinity();
   }
+
+  static constexpr bool kSupportsCompaction = true;
 };
 
 // Default integral traits disallow both 0 and max as keys -- use these traits
@@ -267,16 +268,16 @@ struct IntWithZeroKeyHashTraits
                     std::numeric_limits<T>::max() - 1> {};
 
 // This hash traits can be used in cases where the key is already a good hash.
-struct AlreadyHashedTraits : GenericHashTraits<unsigned> {
-  static unsigned GetHash(unsigned key) { return key; }
+struct AlreadyHashedTraits : GenericHashTraits<uint32_t> {
+  static uint32_t GetHash(uint32_t key) { return key; }
 };
-struct AlreadyHashedWithZeroKeyTraits : IntWithZeroKeyHashTraits<unsigned> {
-  static unsigned GetHash(unsigned key) { return key; }
+struct AlreadyHashedWithZeroKeyTraits : IntWithZeroKeyHashTraits<uint32_t> {
+  static uint32_t GetHash(uint32_t key) { return key; }
 };
 
 template <typename P>
 struct GenericHashTraits<P*> : internal::GenericHashTraitsBase<P*> {
-  static unsigned GetHash(P* key) { return HashPointer(key); }
+  static uint32_t GetHash(P* key) { return HashPointer(key); }
   static constexpr bool kEmptyValueIsZero = true;
   static constexpr P* DeletedValue() { return reinterpret_cast<P*>(-1); }
 };
@@ -288,8 +289,8 @@ struct GenericHashTraits<scoped_refptr<P>>
                 "Unexpected RefPtr size."
                 " RefPtr needs to be single pointer to support deleted value.");
 
-  static unsigned GetHash(P* key) { return HashPointer(key); }
-  static unsigned GetHash(const scoped_refptr<P>& key) {
+  static uint32_t GetHash(P* key) { return HashPointer(key); }
+  static uint32_t GetHash(const scoped_refptr<P>& key) {
     return GetHash(key.get());
   }
 
@@ -343,8 +344,8 @@ struct GenericHashTraits<scoped_refptr<P>>
 template <typename T>
 struct GenericHashTraits<std::unique_ptr<T>>
     : internal::GenericHashTraitsBase<std::unique_ptr<T>> {
-  static unsigned GetHash(T* key) { return HashPointer(key); }
-  static unsigned GetHash(const std::unique_ptr<T>& key) {
+  static uint32_t GetHash(T* key) { return HashPointer(key); }
+  static uint32_t GetHash(const std::unique_ptr<T>& key) {
     return GetHash(key.get());
   }
 
@@ -371,7 +372,7 @@ struct GenericHashTraits<std::unique_ptr<T>>
   static void ConstructDeletedValue(std::unique_ptr<T>& slot) {
     // Dirty trick: implant an invalid pointer to unique_ptr. Destructor isn't
     // called for deleted buckets, so this is okay.
-    new (NotNullTag::kNotNull, &slot)
+    new (base::NotNullTag::kNotNull, &slot)
         std::unique_ptr<T>(reinterpret_cast<T*>(1u));
   }
   static bool IsDeletedValue(const std::unique_ptr<T>& value) {
@@ -390,10 +391,19 @@ struct GenericHashTraits<std::unique_ptr<T>>
 template <typename T>
 struct HashTraits : GenericHashTraits<T> {};
 
+// Helper to avoid HashTraits<uint32_t> sentinel values (0 and 0xFFFFFFFF)
+// by turning them into 1.
+constexpr uint32_t EnsureValidHash(uint32_t hash) {
+  return (hash == HashTraits<uint32_t>::EmptyValue() ||
+          hash == HashTraits<uint32_t>::DeletedValue())
+             ? 1
+             : hash;
+}
+
 // This hash traits type requires the following methods in class T, unless
 // the corresponding hash traits method is overridden:
 //   // Computes the hash code, for GetHash().
-//   unsigned GetHash() const;
+//   uint32_t GetHash() const;
 //   // Creates the deleted value, for ConstructDeletedValue().
 //   T(HashTableDeletedValueType);
 //   // Checks if `this` is a deleted value, for IsDeletedValue().
@@ -403,14 +413,14 @@ struct HashTraits : GenericHashTraits<T> {};
 template <typename T>
 struct SimpleClassHashTraits : GenericHashTraits<T> {
   static_assert(std::is_class_v<T>);
-  static unsigned GetHash(const T& key) { return key.GetHash(); }
+  static uint32_t GetHash(const T& key) { return key.GetHash(); }
   static constexpr bool kEmptyValueIsZero = true;
   template <typename U = void>
   struct NeedsToForbidGCOnMove {
     static constexpr bool value = false;
   };
   static void ConstructDeletedValue(T& slot) {
-    new (NotNullTag::kNotNull, &slot) T(kHashTableDeletedValue);
+    new (base::NotNullTag::kNotNull, &slot) T(kHashTableDeletedValue);
   }
   static bool IsDeletedValue(const T& value) {
     return value.IsHashTableDeletedValue();
@@ -423,41 +433,37 @@ struct HashTraits<String>;
 
 namespace internal {
 
-template <typename Traits, typename Enabled = void>
+template <typename Traits>
 struct HashTraitsEmptyValueChecker {
   static bool IsEmptyValue(const typename Traits::TraitType& value) {
     return value == Traits::EmptyValue();
   }
 };
 template <typename Traits>
-struct HashTraitsEmptyValueChecker<
-    Traits,
-    std::enable_if_t<
-        std::is_same_v<decltype(Traits::IsEmptyValue(
-                           std::declval<typename Traits::TraitType>())),
-                       bool>>> {
+  requires requires(const typename Traits::TraitType& t) {
+    { Traits::IsEmptyValue(t) } -> std::same_as<bool>;
+  }
+struct HashTraitsEmptyValueChecker<Traits> {
   static bool IsEmptyValue(const typename Traits::TraitType& value) {
     return Traits::IsEmptyValue(value);
   }
 };
 
-template <typename Traits, typename Enabled = void>
+template <typename Traits>
 struct HashTraitsDeletedValueHelper {
   static bool IsDeletedValue(const typename Traits::TraitType& value) {
     return value == Traits::DeletedValue();
   }
   static void ConstructDeletedValue(typename Traits::TraitType& slot) {
-    static_assert(std::is_trivially_destructible_v<typename Traits::TraitType>);
-    slot = Traits::DeletedValue();
+    new (base::NotNullTag::kNotNull, &slot)
+        typename Traits::TraitType(Traits::DeletedValue());
   }
 };
 template <typename Traits>
-struct HashTraitsDeletedValueHelper<
-    Traits,
-    std::enable_if_t<
-        std::is_same_v<decltype(Traits::IsDeletedValue(
-                           std::declval<typename Traits::TraitType>())),
-                       bool>>> {
+  requires requires(const typename Traits::TraitType& t) {
+    { Traits::IsDeletedValue(t) } -> std::same_as<bool>;
+  }
+struct HashTraitsDeletedValueHelper<Traits> {
   static bool IsDeletedValue(const typename Traits::TraitType& value) {
     return Traits::IsDeletedValue(value);
   }
@@ -504,7 +510,7 @@ template <typename T,
               std::remove_reference_t<decltype(std::declval<T>().*field)>>>
 struct OneFieldHashTraits : GenericHashTraits<T> {
   using TraitType = T;
-  static unsigned GetHash(const T& p) { return FieldTraits::GetHash(p.*field); }
+  static uint32_t GetHash(const T& p) { return FieldTraits::GetHash(p.*field); }
   static bool Equal(const T& a, const T& b) {
     return FieldTraits::Equal(a.*field, b.*field);
   }
@@ -525,21 +531,14 @@ struct OneFieldHashTraits : GenericHashTraits<T> {
     return IsHashTraitsDeletedValue<FieldTraits>(value.*field);
   }
 
-  static constexpr unsigned kMinimumTableSize = FieldTraits::kMinimumTableSize;
-
-  template <typename U = void>
-  struct IsTraceableInCollection {
-    static const bool value = IsTraceableInCollectionTrait<FieldTraits>::value;
-  };
+  static constexpr wtf_size_t kMinimumTableSize =
+      FieldTraits::kMinimumTableSize;
 
   template <typename U = void>
   struct NeedsToForbidGCOnMove {
     static const bool value =
         FieldTraits::template NeedsToForbidGCOnMove<>::value;
   };
-
-  static constexpr bool kCanTraceConcurrently =
-      FieldTraits::kCanTraceConcurrently;
 };
 
 // A HashTraits type for T to delegate all HashTraits API to two fields.
@@ -553,7 +552,7 @@ template <
         std::remove_reference_t<decltype(std::declval<T>().*second_field)>>>
 struct TwoFieldsHashTraits : OneFieldHashTraits<T, first_field, FirstTraits> {
   using TraitType = T;
-  static unsigned GetHash(const T& p) {
+  static uint32_t GetHash(const T& p) {
     return HashInts(FirstTraits::GetHash(p.*first_field),
                     SecondTraits::GetHash(p.*second_field));
   }
@@ -580,26 +579,11 @@ struct TwoFieldsHashTraits : OneFieldHashTraits<T, first_field, FirstTraits> {
   // the first field, inherited from OneFieldHashTraits.
 
   template <typename U = void>
-  struct IsTraceableInCollection {
-    static const bool value =
-        IsTraceableInCollectionTrait<FirstTraits>::value ||
-        IsTraceableInCollectionTrait<SecondTraits>::value;
-  };
-
-  template <typename U = void>
   struct NeedsToForbidGCOnMove {
     static const bool value =
         FirstTraits::template NeedsToForbidGCOnMove<>::value ||
         SecondTraits::template NeedsToForbidGCOnMove<>::value;
   };
-
-  // Even non-traceable keys need to have their trait set. This is because
-  // non-traceable keys still need to be processed concurrently for checking
-  // empty/deleted state.
-  static constexpr bool kCanTraceConcurrently =
-      FirstTraits::kCanTraceConcurrently &&
-      (SecondTraits::kCanTraceConcurrently ||
-       !IsTraceable<typename SecondTraits::TraitType>::value);
 };
 
 template <typename FirstTraitsArg,
@@ -622,22 +606,10 @@ struct HashTraits<std::pair<First, Second>>
 
 // Shortcut of HashTraits<T>::GetHash(), which can deduct T automatically.
 template <typename T>
-unsigned GetHash(const T& key) {
+uint32_t GetHash(const T& key) {
   return HashTraits<T>::GetHash(key);
 }
 
-}  // namespace WTF
-
-using WTF::AlreadyHashedTraits;
-using WTF::AlreadyHashedWithZeroKeyTraits;
-using WTF::EnumHashTraits;
-using WTF::GenericHashTraits;
-using WTF::HashTraits;
-using WTF::IntHashTraits;
-using WTF::IntWithZeroKeyHashTraits;
-using WTF::OneFieldHashTraits;
-using WTF::PairHashTraits;
-using WTF::SimpleClassHashTraits;
-using WTF::TwoFieldsHashTraits;
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_HASH_TRAITS_H_

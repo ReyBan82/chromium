@@ -33,13 +33,11 @@
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_hash.h"
 
-namespace WTF {
+namespace blink {
 
 template <>
 struct HashTraits<AtomicString> : SimpleClassHashTraits<AtomicString> {
-  static unsigned GetHash(const AtomicString& key) {
-    return key.Impl()->ExistingHash();
-  }
+  static uint32_t GetHash(const AtomicString& key) { return key.Hash(); }
 
   static constexpr bool kSafeToCompareToEmptyOrDeleted = false;
 
@@ -61,6 +59,6 @@ struct HashTraits<AtomicString> : SimpleClassHashTraits<AtomicString> {
   }
 };
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_ATOMIC_STRING_HASH_H_

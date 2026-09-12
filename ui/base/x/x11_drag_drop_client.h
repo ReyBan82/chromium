@@ -9,12 +9,13 @@
 
 #include "base/component_export.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/timer/timer.h"
 #include "ui/base/dragdrop/mojom/drag_drop_types.mojom-shared.h"
 #include "ui/base/x/selection_utils.h"
 #include "ui/base/x/x11_drag_context.h"
 #include "ui/gfx/geometry/point.h"
-#include "ui/gfx/native_widget_types.h"
+#include "ui/gfx/native_ui_types.h"
 #include "ui/gfx/x/xproto.h"
 
 namespace ui {
@@ -42,7 +43,7 @@ class COMPONENT_EXPORT(UI_BASE_X) XDragDropClient {
    public:
     // Get the window being dragged. This window should be ignored when finding
     // the topmost window.
-    virtual absl::optional<gfx::AcceleratedWidget> GetDragWidget() = 0;
+    virtual std::optional<gfx::AcceleratedWidget> GetDragWidget() = 0;
 
     // Updates the drag status by the new position. Returns the drag operations
     // possible at that position.
@@ -251,6 +252,8 @@ class COMPONENT_EXPORT(UI_BASE_X) XDragDropClient {
   // only if we have previously received a status message from
   // |source_current_window_|.
   bool status_received_since_enter_ = false;
+
+  base::WeakPtrFactory<XDragDropClient> weak_factory_{this};
 };
 
 }  // namespace ui

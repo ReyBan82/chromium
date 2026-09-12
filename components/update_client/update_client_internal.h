@@ -11,10 +11,14 @@
 #include <vector>
 
 #include "base/containers/circular_deque.h"
+#include "base/containers/flat_map.h"
+#include "base/containers/flat_set.h"
 #include "base/functional/callback_forward.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/sequence_checker.h"
+#include "base/time/time.h"
 #include "components/update_client/crx_downloader.h"
 #include "components/update_client/update_checker.h"
 #include "components/update_client/update_client.h"
@@ -44,6 +48,11 @@ class UpdateClientImpl : public UpdateClient {
       CrxDataCallback crx_data_callback,
       CrxStateChangeCallback crx_state_change_callback,
       Callback callback) override;
+  void CheckForUpdate(const std::string& id,
+                      CrxDataCallback crx_data_callback,
+                      CrxStateChangeCallback crx_state_change_callback,
+                      bool is_foreground,
+                      Callback callback) override;
   void Update(const std::vector<std::string>& ids,
               CrxDataCallback crx_data_callback,
               CrxStateChangeCallback crx_state_change_callback,
@@ -53,21 +62,25 @@ class UpdateClientImpl : public UpdateClient {
                          CrxUpdateItem* update_item) const override;
   bool IsUpdating(const std::string& id) const override;
   void Stop() override;
-  void SendUninstallPing(const CrxComponent& crx_component,
-                         int reason,
-                         Callback callback) override;
+  bool Cancel(const std::string& id) override;
+  void SendPing(const CrxComponent& crx_component,
+                PingParams ping_params,
+                Callback callback) override;
+  void CleanupStaleDownloads(base::Time older_than,
+                             base::OnceClosure callback) override;
 
  private:
   ~UpdateClientImpl() override;
 
   void RunTask(scoped_refptr<Task> task);
   void OnTaskComplete(Callback callback, scoped_refptr<Task> task, Error error);
-
-  void NotifyObservers(Observer::Events event, const std::string& id);
+  void NotifyObservers(const CrxUpdateItem& item);
+  void RunOrEnqueueTask(scoped_refptr<Task> task);
+  void StartTask(scoped_refptr<Task> task);
 
   SEQUENCE_CHECKER(sequence_checker_);
 
-  // True if Stop method has been called.
+  // True if `Stop()` has been called.
   bool is_stopped_ = false;
 
   scoped_refptr<Configurator> config_;
@@ -84,9 +97,16 @@ class UpdateClientImpl : public UpdateClient {
   // tasks are running. In addition, concurrent install tasks for the same id
   // are not allowed.
   std::set<scoped_refptr<Task>> tasks_;
+
+  // The ids that `Cancel()` was called for, keyed by the task they belong to.
+  // The cancellation is applied to the update engine once the task has
+  // started, since the engine does not know the task before that.
+  base::flat_map<scoped_refptr<Task>, base::flat_set<std::string>>
+      pending_cancellations_;
   scoped_refptr<PingManager> ping_manager_;
   scoped_refptr<UpdateEngine> update_engine_;
   base::ObserverList<Observer>::Unchecked observer_list_;
+  base::WeakPtrFactory<UpdateClientImpl> weak_ptr_factory_{this};
 };
 
 }  // namespace update_client

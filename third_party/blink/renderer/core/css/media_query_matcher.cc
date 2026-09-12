@@ -19,8 +19,12 @@
 
 #include "third_party/blink/renderer/core/css/media_query_matcher.h"
 
+#include "third_party/blink/public/common/features.h"
+#include "third_party/blink/public/common/metrics/document_update_reason.h"
+#include "third_party/blink/public/mojom/favicon/favicon_url.mojom-blink.h"
 #include "third_party/blink/renderer/core/css/media_list.h"
 #include "third_party/blink/renderer/core/css/media_query_evaluator.h"
+#include "third_party/blink/renderer/core/css/media_query_exp.h"
 #include "third_party/blink/renderer/core/css/media_query_list.h"
 #include "third_party/blink/renderer/core/css/media_query_list_event.h"
 #include "third_party/blink/renderer/core/css/media_query_list_listener.h"
@@ -76,6 +80,20 @@ MediaQueryList* MediaQueryMatcher::MatchMedia(const String& query) {
     return nullptr;
   }
 
+  // TODO(crbug.com/326992301) Check if there are other cases where we might
+  // need to force layout to make the initial media-query values in sync.
+  // This condition could probably be much simpler, but we are trying to
+  // preserve existing (possibly buggy) behavior until the implications are
+  // entirely clear.
+  if (document_->IsActive() && document_->IsLoadCompleted() &&
+      document_->HaveRenderBlockingStylesheetsLoaded() &&
+      !document_->View()->DidFirstLayout() && !document_->LoadEventStarted() &&
+      !document_->IsInMainFrame()) {
+    // If this is a subframe, and it did not perform a layout yet,
+    // we have to force layout here as a starting value for media queries.
+    document_->UpdateStyleAndLayout(DocumentUpdateReason::kUnknown);
+  }
+
   MediaQuerySet* media =
       MediaQuerySet::Create(query, document_->GetExecutionContext());
   return MakeGarbageCollected<MediaQueryList>(document_->GetExecutionContext(),
@@ -118,7 +136,8 @@ void MediaQueryMatcher::MediaFeaturesChanged() {
 
   // Update favicon and theme color when a media query value has changed.
   if (document_->GetFrame()) {
-    document_->GetFrame()->UpdateFaviconURL();
+    document_->GetFrame()->UpdateFaviconURL(
+        mojom::blink::FaviconUpdateReason::kMediaQueryChange);
     document_->GetFrame()->DidChangeThemeColor(
         /*update_theme_color_cache=*/false);
   }

@@ -15,6 +15,7 @@
 #include "base/memory/unsafe_shared_memory_region.h"
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
+#include "base/synchronization/waitable_event.h"
 #include "base/task/sequenced_task_runner.h"
 #include "components/chromeos_camera/mojo_mjpeg_decode_accelerator.h"
 #include "gpu/config/gpu_info.h"
@@ -74,9 +75,6 @@ class CAPTURE_EXPORT VideoCaptureJpegDecoderImpl
 
   // Returns true if the decoding of last frame is not finished yet.
   bool IsDecoding_Locked() const;
-
-  // Records |decoder_status_| to histogram.
-  void RecordInitDecodeUMA_Locked();
 
   void DestroyDecoderOnIOThread(base::WaitableEvent* event);
 

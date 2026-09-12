@@ -9,11 +9,12 @@
 
 import './ambient/ambient_preview_large_element.js';
 
-import {isAmbientModeAllowed, isDarkLightModeEnabled, isPersonalizationJellyEnabled, isRgbKeyboardSupported} from './load_time_booleans.js';
+import {getShouldShowTimeOfDayBanner} from './ambient/ambient_controller.js';
+import {isRgbKeyboardSupported} from './load_time_booleans.js';
 import {getTemplate} from './personalization_main_element.html.js';
 import {WithPersonalizationStore} from './personalization_store.js';
 
-export class PersonalizationMain extends WithPersonalizationStore {
+export class PersonalizationMainElement extends WithPersonalizationStore {
   static get is() {
     return 'personalization-main';
   }
@@ -25,26 +26,28 @@ export class PersonalizationMain extends WithPersonalizationStore {
   static get properties() {
     return {
       path: String,
-      isDarkLightModeEnabled_: {
-        type: Boolean,
-        value() {
-          return isDarkLightModeEnabled();
-        },
-      },
-      shouldShowAmbientPreview_: {
-        type: Boolean,
-        value() {
-          return isAmbientModeAllowed() || isPersonalizationJellyEnabled();
-        },
-      },
       isRgbKeyboardSupported_: {
         type: Boolean,
         value() {
           return isRgbKeyboardSupported();
         },
       },
+      shouldShowTimeOfDayBanner_: Boolean,
     };
+  }
+
+  declare private shouldShowTimeOfDayBanner_: boolean;
+
+  override connectedCallback() {
+    super.connectedCallback();
+    this.watch<PersonalizationMainElement['shouldShowTimeOfDayBanner_']>(
+        'shouldShowTimeOfDayBanner_',
+        state => state.ambient.shouldShowTimeOfDayBanner);
+    this.updateFromStore();
+
+    getShouldShowTimeOfDayBanner(this.getStore());
   }
 }
 
-customElements.define(PersonalizationMain.is, PersonalizationMain);
+customElements.define(
+    PersonalizationMainElement.is, PersonalizationMainElement);

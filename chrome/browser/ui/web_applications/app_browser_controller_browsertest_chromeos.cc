@@ -2,14 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/ui/web_applications/app_browser_controller.h"
-
 #include <memory>
 
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/ash/system_web_apps/test_support/test_system_web_app_installation.h"
 #include "chrome/browser/devtools/protocol/browser_handler.h"
 #include "chrome/browser/extensions/extension_browsertest.h"
@@ -17,33 +14,42 @@
 #include "chrome/browser/themes/theme_properties.h"
 #include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_list.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
+#include "chrome/browser/ui/browser_web_contents_delegate/browser_web_contents_delegate.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/extensions/application_launch.h"
+#include "chrome/browser/ui/extensions/extensions_container.h"
+#include "chrome/browser/ui/tab_ui_helper.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
+#include "chrome/browser/ui/web_applications/app_browser_controller.h"
 #include "chrome/browser/ui/web_applications/test/web_app_browsertest_util.h"
+#include "chrome/browser/ui/window_feature_controller/window_feature_controller.h"
 #include "chrome/browser/ui/window_sizer/window_sizer.h"
 #include "chrome/browser/web_applications/web_app_constants.h"
 #include "chrome/browser/web_applications/web_app_install_info.h"
 #include "chrome/browser/web_applications/web_app_install_manager.h"
-#include "chrome/browser/web_applications/web_app_provider.h"
 #include "chrome/browser/web_applications/web_app_utils.h"
 #include "chrome/common/webui_url_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "chromeos/ash/components/browser_delegate/browser_delegate.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 #include "content/public/test/test_utils.h"
 #include "content/public/test/theme_change_waiter.h"
 #include "extensions/browser/extension_registry.h"
 #include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/display/types/display_constants.h"
 
 namespace {
-SkColor GetFrameColor(Browser* browser) {
-  CustomThemeSupplier* theme = browser->app_controller()->GetThemeSupplier();
+SkColor GetFrameColor(BrowserWindowInterface* browser) {
+  CustomThemeSupplier* theme =
+      web_app::AppBrowserController::From(browser)->GetThemeSupplier();
   SkColor result;
   EXPECT_TRUE(theme->GetColor(ThemeProperties::COLOR_FRAME_ACTIVE, &result));
   return result;
@@ -55,7 +61,8 @@ namespace web_app {
 class LoadFinishedWaiter : public TabStripModelObserver,
                            public content::WebContentsObserver {
  public:
-  explicit LoadFinishedWaiter(Browser* browser) : browser_(browser) {
+  explicit LoadFinishedWaiter(BrowserWindowInterface* browser)
+      : browser_(browser) {
     browser_->tab_strip_model()->AddObserver(this);
   }
 
@@ -72,8 +79,9 @@ class LoadFinishedWaiter : public TabStripModelObserver,
       TabStripModel* tab_strip_model,
       const TabStripModelChange& change,
       const TabStripSelectionChange& selection) override {
-    if (selection.active_tab_changed())
+    if (selection.active_tab_changed()) {
       content::WebContentsObserver::Observe(selection.new_contents);
+    }
   }
 
   // content::WebContentsObserver:
@@ -86,25 +94,26 @@ class LoadFinishedWaiter : public TabStripModelObserver,
   }
 
  private:
-  raw_ptr<Browser> browser_;
+  raw_ptr<BrowserWindowInterface> browser_ = nullptr;
   SkColor color_at_navigation_;
   base::RunLoop run_loop_;
 };
 
-class AppBrowserControllerBrowserTest : public InProcessBrowserTest {
+class AppBrowserControllerBrowserTestCrOs : public InProcessBrowserTest {
  public:
-  AppBrowserControllerBrowserTest()
+  AppBrowserControllerBrowserTestCrOs()
       : test_system_web_app_installation_(
             ash::TestSystemWebAppInstallation::SetUpTabbedMultiWindowApp()) {}
-  AppBrowserControllerBrowserTest(const AppBrowserControllerBrowserTest&) =
-      delete;
-  AppBrowserControllerBrowserTest& operator=(
-      const AppBrowserControllerBrowserTest&) = delete;
+  AppBrowserControllerBrowserTestCrOs(
+      const AppBrowserControllerBrowserTestCrOs&) = delete;
+  AppBrowserControllerBrowserTestCrOs& operator=(
+      const AppBrowserControllerBrowserTestCrOs&) = delete;
 
  protected:
   Profile* profile() {
-    if (!profile_)
-      profile_ = browser()->profile();
+    if (!profile_) {
+      profile_ = browser()->GetProfile();
+    }
     return profile_;
   }
 
@@ -112,7 +121,7 @@ class AppBrowserControllerBrowserTest : public InProcessBrowserTest {
     test_system_web_app_installation_->WaitForAppInstall();
   }
 
-  Browser* LaunchMockApp() {
+  BrowserWindowInterface* LaunchMockApp() {
     app_browser_ = web_app::LaunchWebAppBrowser(
         profile(), test_system_web_app_installation_->GetAppId());
     tabbed_app_url_ = test_system_web_app_installation_->GetAppUrl();
@@ -129,24 +138,26 @@ class AppBrowserControllerBrowserTest : public InProcessBrowserTest {
     EXPECT_TRUE(params.has_value());
     params->disposition = WindowOpenDisposition::NEW_POPUP;
 
-    app_browser_ = ash::LaunchSystemWebAppImpl(
+    ash::BrowserDelegate* delegate = ash::LaunchSystemWebAppImpl(
         profile(), test_system_web_app_installation_->GetType(),
         test_system_web_app_installation_->GetAppUrl(), *params);
+    app_browser_ = delegate ? &delegate->GetBrowser() : nullptr;
   }
 
-  Browser* LaunchMockSWA() {
+  BrowserWindowInterface* LaunchMockSWA() {
     auto params = ash::CreateSystemWebAppLaunchParams(
         profile(), test_system_web_app_installation_->GetType(),
         display::kInvalidDisplayId);
     EXPECT_TRUE(params.has_value());
     params->disposition = WindowOpenDisposition::NEW_WINDOW;
 
-    return ash::LaunchSystemWebAppImpl(
+    ash::BrowserDelegate* delegate = ash::LaunchSystemWebAppImpl(
         profile(), test_system_web_app_installation_->GetType(),
         test_system_web_app_installation_->GetAppUrl(), *params);
+    return delegate ? &delegate->GetBrowser() : nullptr;
   }
 
-  Browser* InstallAndLaunchMockApp() {
+  BrowserWindowInterface* InstallAndLaunchMockApp() {
     InstallMockSystemWebApp();
     return LaunchMockApp();
   }
@@ -156,7 +167,7 @@ class AppBrowserControllerBrowserTest : public InProcessBrowserTest {
     LaunchMockPopup();
   }
 
-  Browser* InstallAndLaunchMockSWA() {
+  BrowserWindowInterface* InstallAndLaunchMockSWA() {
     InstallMockSystemWebApp();
     return LaunchMockSWA();
   }
@@ -167,8 +178,9 @@ class AppBrowserControllerBrowserTest : public InProcessBrowserTest {
         ->GetVisibleURL();
   }
 
-  raw_ptr<Profile, DanglingUntriaged> profile_ = nullptr;
-  raw_ptr<Browser, DanglingUntriaged> app_browser_ = nullptr;
+  raw_ptr<Profile, AcrossTasksDanglingUntriaged> profile_ = nullptr;
+  raw_ptr<BrowserWindowInterface, AcrossTasksDanglingUntriaged> app_browser_ =
+      nullptr;
   GURL tabbed_app_url_;
 
  private:
@@ -176,15 +188,18 @@ class AppBrowserControllerBrowserTest : public InProcessBrowserTest {
       test_system_web_app_installation_;
 };
 
-IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, TabsTest) {
+IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTestCrOs, TabsTest) {
   InstallAndLaunchMockApp();
 
-  EXPECT_TRUE(app_browser_->SupportsWindowFeature(Browser::FEATURE_TABSTRIP));
+  EXPECT_TRUE(
+      WindowFeatureController::From(app_browser_.get())
+          ->SupportsWindowFeature(
+              WindowFeatureController::WindowFeature::kFeatureTabStrip));
 
   // No favicons shown for web apps.
-  EXPECT_FALSE(
-      app_browser_->tab_strip_model()->delegate()->ShouldDisplayFavicon(
-          app_browser_->tab_strip_model()->GetActiveWebContents()));
+  tabs::TabInterface* const tab_interface =
+      app_browser_->tab_strip_model()->GetActiveTab();
+  EXPECT_FALSE(TabUIHelper::From(tab_interface)->ShouldDisplayFavicon());
 
   // Tabbed PWAs only open URLs within the scope of the app. The manifest is
   // another URL besides |tabbed_app_url_| in scope.
@@ -196,7 +211,7 @@ IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, TabsTest) {
   EXPECT_EQ(app_browser_->tab_strip_model()->count(), 2);
   EXPECT_EQ(GetActiveTabURL(), manifest);
   // Create tab3 with default URL, check URL, number of tabs.
-  chrome::NewTab(app_browser_);
+  chrome::NewTab(app_browser_, NewTabTypes::kNoUserAction);
   EXPECT_EQ(app_browser_->tab_strip_model()->count(), 3);
   EXPECT_EQ(GetActiveTabURL(), tabbed_app_url_);
   // Switch to tab1, check URL.
@@ -221,44 +236,48 @@ IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, TabsTest) {
   EXPECT_EQ(GetActiveTabURL(), tabbed_app_url_);
 
   // Enter tab fullscreen, check tab strip not supported.
-  static_cast<content::WebContentsDelegate*>(app_browser_)
+  BrowserWebContentsDelegate::From(app_browser_.get())
       ->EnterFullscreenModeForTab(app_browser_->tab_strip_model()
                                       ->GetActiveWebContents()
                                       ->GetPrimaryMainFrame(),
                                   {});
-  EXPECT_FALSE(app_browser_->SupportsWindowFeature(Browser::FEATURE_TABSTRIP));
+  EXPECT_FALSE(
+      WindowFeatureController::From(app_browser_.get())
+          ->SupportsWindowFeature(
+              WindowFeatureController::WindowFeature::kFeatureTabStrip));
 }
 
-IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, NonAppUrl) {
+IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTestCrOs, NonAppUrl) {
   InstallAndLaunchMockApp();
 
   // Check we have 2 browsers: |browser()| and |app_browser_|.
-  EXPECT_EQ(BrowserList::GetInstance()->size(), 2u);
+  EXPECT_EQ(GlobalBrowserCollection::GetInstance()->GetSize(), 2u);
   EXPECT_NE(browser(), app_browser_);
-  EXPECT_TRUE(browser()->is_type_normal());
+  EXPECT_EQ(browser()->GetType(), BrowserWindowInterface::Type::TYPE_NORMAL);
   EXPECT_EQ(browser()->tab_strip_model()->count(), 1);
   EXPECT_EQ(
       browser()->tab_strip_model()->GetActiveWebContents()->GetVisibleURL(),
       "about:blank");
-  EXPECT_TRUE(app_browser_->is_type_app());
+  EXPECT_EQ(app_browser_->GetType(), BrowserWindowInterface::Type::TYPE_APP);
   EXPECT_EQ(app_browser_->tab_strip_model()->count(), 1);
   EXPECT_EQ(GetActiveTabURL(), tabbed_app_url_);
 
   // Create tab2 with URL not from app, it will open in the NORMAL browser.
-  chrome::AddTabAt(app_browser_, GURL(chrome::kChromeUINewTabURL), -1, true);
-  EXPECT_EQ(BrowserList::GetInstance()->size(), 2u);
+  chrome::AddTabAt(app_browser_, chrome::ChromeUINewTabURLAsGURL(), -1, true);
+  EXPECT_EQ(GlobalBrowserCollection::GetInstance()->GetSize(), 2u);
   EXPECT_NE(browser(), app_browser_);
-  EXPECT_TRUE(browser()->is_type_normal());
+  EXPECT_EQ(browser()->GetType(), BrowserWindowInterface::Type::TYPE_NORMAL);
   EXPECT_EQ(browser()->tab_strip_model()->count(), 2);
   EXPECT_EQ(
       browser()->tab_strip_model()->GetActiveWebContents()->GetVisibleURL(),
       "chrome://newtab/");
-  EXPECT_TRUE(app_browser_->is_type_app());
+  EXPECT_EQ(app_browser_->GetType(), BrowserWindowInterface::Type::TYPE_APP);
   EXPECT_EQ(app_browser_->tab_strip_model()->count(), 1);
   EXPECT_EQ(GetActiveTabURL(), tabbed_app_url_);
 }
 
-IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, TabLoadNoThemeChange) {
+IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTestCrOs,
+                       TabLoadNoThemeChange) {
   InstallAndLaunchMockApp();
   EXPECT_EQ(app_browser_->tab_strip_model()->count(), 1);
   // Frame gets manifest theme immediately.
@@ -269,8 +288,10 @@ IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, TabLoadNoThemeChange) {
       app_browser_->tab_strip_model()->GetActiveWebContents();
   content::ThemeChangeWaiter theme_waiter(web_contents);
   EXPECT_TRUE(content::ExecJs(web_contents, R"(
-      document.documentElement.innerHTML =
-          '<meta name="theme-color" content="yellow">';
+      const el = document.createElement("meta");
+      el.setAttribute("name", "theme-color");
+      el.setAttribute("content", "yellow");
+      document.documentElement.appendChild(el);
   )",
                               content::EXECUTE_SCRIPT_DEFAULT_OPTIONS,
                               /*world_id=*/1));
@@ -279,7 +300,7 @@ IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, TabLoadNoThemeChange) {
 
   // Second tab keeps dynamic theme until loaded.
   LoadFinishedWaiter load_waiter(app_browser_);
-  chrome::NewTab(app_browser_);
+  chrome::NewTab(app_browser_, NewTabTypes::kNoUserAction);
   load_waiter.Wait();
   EXPECT_EQ(app_browser_->tab_strip_model()->count(), 2);
   EXPECT_EQ(load_waiter.GetColorAtNavigation(), SK_ColorYELLOW);
@@ -292,49 +313,50 @@ IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, TabLoadNoThemeChange) {
   EXPECT_EQ(GetFrameColor(app_browser_), SK_ColorGREEN);
 }
 
-// App Popups are only used on Chrome OS. See https://crbug.com/1060917.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest,
+IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTestCrOs,
                        WhiteThemeForSystemAppPopup) {
   InstallAndLaunchMockPopup();
-  EXPECT_FALSE(app_browser_->app_controller()->GetThemeColor().has_value());
+  EXPECT_FALSE(web_app::AppBrowserController::From(app_browser_)
+                   ->GetThemeColor()
+                   .has_value());
 }
 
-IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest, Shutdown) {
+IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTestCrOs, Shutdown) {
   // Cache profile before browser() closes.
   profile();
   InstallMockSystemWebApp();
 
   BrowserHandler handler(nullptr, std::string());
+  ui_test_utils::BrowserDestroyedObserver observer(browser());
   handler.Close();
-  ui_test_utils::WaitForBrowserToClose();
+  observer.Wait();
 
   LaunchMockPopup();
   EXPECT_EQ(app_browser_, nullptr);
 }
 
-IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest,
+IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTestCrOs,
                        ReuseBrowserForSystemAppPopup) {
   InstallAndLaunchMockPopup();
   // We should have the original browser for this BrowserTest, plus new popup.
-  EXPECT_EQ(BrowserList::GetInstance()->size(), 2u);
+  EXPECT_EQ(GlobalBrowserCollection::GetInstance()->GetSize(), 2u);
   InstallAndLaunchMockPopup();
-  EXPECT_EQ(BrowserList::GetInstance()->size(), 2u);
+  EXPECT_EQ(GlobalBrowserCollection::GetInstance()->GetSize(), 2u);
 }
 
-IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest,
+IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTestCrOs,
                        OpenMultipleBrowsersForMultiWindowSWA) {
-  Browser* first_browser = InstallAndLaunchMockSWA();
+  BrowserWindowInterface* first_browser = InstallAndLaunchMockSWA();
   // We should have the original browser for this BrowserTest, plus a new one,
   // offset by a tasteful amount.
   EXPECT_NE(nullptr, first_browser);
-  EXPECT_EQ(BrowserList::GetInstance()->size(), 2u);
-  Browser* second_browser = LaunchMockSWA();
+  EXPECT_EQ(GlobalBrowserCollection::GetInstance()->GetSize(), 2u);
+  BrowserWindowInterface* second_browser = LaunchMockSWA();
   EXPECT_NE(nullptr, second_browser);
-  EXPECT_EQ(BrowserList::GetInstance()->size(), 3u);
+  EXPECT_EQ(GlobalBrowserCollection::GetInstance()->GetSize(), 3u);
 
-  auto bounds1 = first_browser->window()->GetRestoredBounds();
-  auto bounds2 = second_browser->window()->GetRestoredBounds();
+  auto bounds1 = first_browser->GetWindow()->GetRestoredBounds();
+  auto bounds2 = second_browser->GetWindow()->GetRestoredBounds();
   // We've already hit the bottom bounds, so the y axis didn't move.
   EXPECT_EQ(bounds1.x() + WindowSizer::kWindowTilePixels, bounds2.x());
 
@@ -342,23 +364,22 @@ IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest,
   bool hit_the_bottom_right = false;
   gfx::Rect previous_bounds = bounds2;
   for (int i = 0; i < 10; i++) {
-    Browser* next_browser = LaunchMockSWA();
-    if (previous_bounds == next_browser->window()->GetRestoredBounds()) {
+    BrowserWindowInterface* next_browser = LaunchMockSWA();
+    if (previous_bounds == next_browser->GetWindow()->GetRestoredBounds()) {
       hit_the_bottom_right = true;
       break;
     }
-    previous_bounds = next_browser->window()->GetRestoredBounds();
+    previous_bounds = next_browser->GetWindow()->GetRestoredBounds();
   }
 
   EXPECT_TRUE(hit_the_bottom_right);
 }
 
-IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTest,
+IN_PROC_BROWSER_TEST_F(AppBrowserControllerBrowserTestCrOs,
                        NoExtensionsContainerExists) {
   InstallAndLaunchMockPopup();
-  EXPECT_EQ(app_browser_->window()->GetExtensionsContainer(), nullptr);
+  EXPECT_EQ(ExtensionsContainer::From(*app_browser_), nullptr);
 }
-#endif
 
 class AppBrowserControllerChromeUntrustedBrowserTest
     : public InProcessBrowserTest {
@@ -368,12 +389,12 @@ class AppBrowserControllerChromeUntrustedBrowserTest
             ash::TestSystemWebAppInstallation::SetUpChromeUntrustedApp()) {}
 
  protected:
-  Browser* InstallAndLaunchMockApp() {
+  BrowserWindowInterface* InstallAndLaunchMockApp() {
     test_system_web_app_installation_->WaitForAppInstall();
-    Browser* app_browser = web_app::LaunchWebAppBrowser(
-        browser()->profile(), test_system_web_app_installation_->GetAppId());
+    BrowserWindowInterface* app_browser = web_app::LaunchWebAppBrowser(
+        browser()->GetProfile(), test_system_web_app_installation_->GetAppId());
     CHECK(content::NavigateToURL(
-        app_browser->tab_strip_model()->GetActiveWebContents(),
+        app_browser->GetTabStripModel()->GetActiveWebContents(),
         test_system_web_app_installation_->GetAppUrl()));
     return app_browser;
   }
@@ -385,8 +406,9 @@ class AppBrowserControllerChromeUntrustedBrowserTest
 
 IN_PROC_BROWSER_TEST_F(AppBrowserControllerChromeUntrustedBrowserTest,
                        DoesNotShowToolbar) {
-  Browser* app_browser = InstallAndLaunchMockApp();
-  EXPECT_FALSE(app_browser->app_controller()->ShouldShowCustomTabBar());
+  BrowserWindowInterface* app_browser = InstallAndLaunchMockApp();
+  EXPECT_FALSE(web_app::AppBrowserController::From(app_browser)
+                   ->ShouldShowCustomTabBar());
 }
 
 }  // namespace web_app

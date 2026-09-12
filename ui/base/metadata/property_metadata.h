@@ -5,11 +5,14 @@
 #ifndef UI_BASE_METADATA_PROPERTY_METADATA_H_
 #define UI_BASE_METADATA_PROPERTY_METADATA_H_
 
+#include <concepts>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
 #include "base/component_export.h"
+#include "base/notreached.h"
 #include "ui/base/class_property.h"
 #include "ui/base/metadata/base_type_conversion.h"
 #include "ui/base/metadata/metadata_cache.h"
@@ -19,23 +22,11 @@ namespace ui {
 namespace metadata {
 namespace internal {
 
-template <typename TSource, typename TTarget, typename = void>
-struct DeRefHelper {
-  static TTarget Get(TSource value) { return value; }
-};
-
-template <typename TSource, typename TTarget>
-struct DeRefHelper<
-    TSource,
-    TTarget,
-    typename std::enable_if<!std::is_same<TSource, TTarget>::value>::type> {
-  static TTarget Get(TSource value) { return *value; }
-};
-
 template <typename TKey, typename TValue>
 struct ClassPropertyMetaDataTypeHelper;
 
 template <typename TKValue_, typename TValue_>
+  requires(std::same_as<TKValue_, TValue_> || std::same_as<TKValue_, TValue_*>)
 struct ClassPropertyMetaDataTypeHelper<const ui::ClassProperty<TKValue_>* const,
                                        TValue_> {
   using TKValue = TKValue_;
@@ -46,7 +37,13 @@ struct ClassPropertyMetaDataTypeHelper<const ui::ClassProperty<TKValue_>* const,
   // This is useful for owned propertyies like ui::ClassProperty<gfx::Insets*>
   // where we want to inspect the actual value, rather than the pointer.
   static TValue DeRef(TKValue value) {
-    return DeRefHelper<TKValue, TValue>::Get(value);
+    if constexpr (std::same_as<TKValue, TValue*>) {
+      return *value;
+    }
+    if constexpr (std::same_as<TKValue, TValue>) {
+      return value;
+    }
+    NOTREACHED();
   }
 };
 
@@ -82,19 +79,22 @@ class ObjectPropertyReadOnlyMetaData : public ui::metadata::MemberMetaDataBase {
   ~ObjectPropertyReadOnlyMetaData() override = default;
 
   std::u16string GetValueAsString(void* obj) const override {
-    if (!kTypeIsSerializable && !kTypeIsReadOnly)
-      return std::u16string();
-    return TConverter::ToString((internal::AsClass<TClass>(obj)->*Get)());
+    if constexpr (kTypeIsSerializable || kTypeIsReadOnly) {
+      return TConverter::ToString((internal::AsClass<TClass>(obj)->*Get)());
+    }
+    return std::u16string();
   }
 
   ui::metadata::PropertyFlags GetPropertyFlags() const override {
-    return kTypeIsSerializable ? (ui::metadata::PropertyFlags::kReadOnly |
-                                  ui::metadata::PropertyFlags::kSerializable)
-                               : ui::metadata::PropertyFlags::kReadOnly;
+    if constexpr (kTypeIsSerializable) {
+      return ui::metadata::PropertyFlags::kReadOnly |
+             ui::metadata::PropertyFlags::kSerializable;
+    }
+    return ui::metadata::PropertyFlags::kReadOnly;
   }
 
-  const char* GetMemberNamePrefix() const override {
-    return TConverter::PropertyNamePrefix();
+  std::string_view GetMemberNamePrefix() const override {
+    return TConverter::property_name_prefix;
   }
 
  private:
@@ -127,33 +127,44 @@ class ObjectPropertyMetaData
   ObjectPropertyMetaData& operator=(const ObjectPropertyMetaData&) = delete;
   ~ObjectPropertyMetaData() override = default;
 
+ private:
+  static constexpr bool kTypeIsSerializable = TConverter::is_serializable;
+  static constexpr bool kTypeIsReadOnly = TConverter::is_read_only;
+
+ public:
+  static_assert(
+      !kTypeIsSerializable || !kTypeIsReadOnly,
+      "Do not use read-only view types (such as std::string_view, "
+      "std::u16string_view, or const char*) as the property_type in "
+      "ADD_PROPERTY_METADATA. Use owned types (e.g. std::u16string) or use "
+      "ADD_READONLY_PROPERTY_METADATA instead.");
+
   void SetValueAsString(void* obj, const std::u16string& new_value) override {
-    if (!kTypeIsSerializable || kTypeIsReadOnly)
-      return;
-    if (absl::optional<TValue> result = TConverter::FromString(new_value)) {
-      (internal::AsClass<TClass>(obj)->*Set)(std::move(result.value()));
+    if constexpr (kTypeIsSerializable && !kTypeIsReadOnly) {
+      if (std::optional<TValue> result = TConverter::FromString(new_value)) {
+        (internal::AsClass<TClass>(obj)->*Set)(std::move(result.value()));
+      }
     }
   }
 
   ui::metadata::MemberMetaDataBase::ValueStrings GetValidValues()
       const override {
-    if (!kTypeIsSerializable)
-      return {};
-    return TConverter::GetValidStrings();
+    if constexpr (kTypeIsSerializable) {
+      return TConverter::GetValidStrings();
+    }
+    return {};
   }
 
   ui::metadata::PropertyFlags GetPropertyFlags() const override {
     ui::metadata::PropertyFlags flags = ui::metadata::PropertyFlags::kEmpty;
-    if (kTypeIsSerializable)
+    if constexpr (kTypeIsSerializable) {
       flags = flags | ui::metadata::PropertyFlags::kSerializable;
-    if (kTypeIsReadOnly)
+    }
+    if constexpr (kTypeIsReadOnly) {
       flags = flags | ui::metadata::PropertyFlags::kReadOnly;
+    }
     return flags;
   }
-
- private:
-  static constexpr bool kTypeIsSerializable = TConverter::is_serializable;
-  static constexpr bool kTypeIsReadOnly = TConverter::is_read_only;
 };
 
 // Represents metadata for a ui::ClassProperty attached on a class instance.
@@ -189,17 +200,19 @@ class ClassPropertyMetaData : public ui::metadata::MemberMetaDataBase {
   }
 
   void SetValueAsString(void* obj, const std::u16string& new_value) override {
-    absl::optional<TValue> value = TConverter::FromString(new_value);
+    std::optional<TValue> value = TConverter::FromString(new_value);
     if (value)
       internal::AsClass<TClass>(obj)->SetProperty(key_, *value);
   }
 
   ui::metadata::PropertyFlags GetPropertyFlags() const override {
     ui::metadata::PropertyFlags flags = ui::metadata::PropertyFlags::kEmpty;
-    if (kTypeIsSerializable)
+    if constexpr (kTypeIsSerializable) {
       flags = flags | ui::metadata::PropertyFlags::kSerializable;
-    if (kTypeIsReadOnly)
+    }
+    if constexpr (kTypeIsReadOnly) {
       flags = flags | ui::metadata::PropertyFlags::kReadOnly;
+    }
     return flags;
   }
 

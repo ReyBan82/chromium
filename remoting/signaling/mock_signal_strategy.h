@@ -8,36 +8,56 @@
 #include <memory>
 
 #include "remoting/proto/ftl/v1/chromoting_message.pb.h"
+#include "remoting/signaling/ftl_signal_strategy.h"
 #include "remoting/signaling/iq_sender.h"
 #include "remoting/signaling/signal_strategy.h"
 #include "remoting/signaling/signaling_address.h"
 #include "testing/gmock/include/gmock/gmock.h"
-#include "third_party/libjingle_xmpp/xmllite/xmlelement.h"
 
 namespace remoting {
 
 class MockSignalStrategy : public SignalStrategy {
  public:
-  MockSignalStrategy(const SignalingAddress& address);
+  explicit MockSignalStrategy(const SignalingAddress& address);
   ~MockSignalStrategy() override;
 
-  MOCK_METHOD0(Connect, void());
-  MOCK_METHOD0(Disconnect, void());
-  MOCK_CONST_METHOD0(GetState, State());
-  MOCK_CONST_METHOD0(GetError, Error());
-  MOCK_METHOD1(AddListener, void(Listener* listener));
-  MOCK_METHOD1(RemoveListener, void(Listener* listener));
-  MOCK_METHOD0(GetNextId, std::string());
-  MOCK_METHOD2(SendMessage,
-               bool(const SignalingAddress& destination_address,
-                    const ftl::ChromotingMessage& message));
+  MOCK_METHOD(void, Connect, (), (override));
+  MOCK_METHOD(void, Disconnect, (), (override));
+  MOCK_METHOD(State, GetState, (), (const, override));
+  MOCK_METHOD(Error, GetError, (), (const, override));
+  MOCK_METHOD(void, AddListener, (Listener * listener), (override));
+  MOCK_METHOD(void, RemoveListener, (Listener * listener), (override));
+  MOCK_METHOD(std::string, GetNextId, (), (override));
+  MOCK_METHOD(bool, SendMessage, (JingleMessage && message), (override));
+  MOCK_METHOD(bool, SendReply, (JingleMessageReply && message), (override));
 
-  // GMock currently doesn't support move-only arguments, so we have
-  // to use this hack here.
-  MOCK_METHOD1(SendStanzaPtr, bool(jingle_xmpp::XmlElement* stanza));
-  bool SendStanza(std::unique_ptr<jingle_xmpp::XmlElement> stanza) override {
-    return SendStanzaPtr(stanza.release());
-  }
+  const SignalingAddress& GetLocalAddress() const override;
+
+ private:
+  SignalingAddress local_address_;
+};
+
+class MockFtlSignalStrategy : public FtlSignalStrategy {
+ public:
+  explicit MockFtlSignalStrategy(const SignalingAddress& address);
+  ~MockFtlSignalStrategy() override;
+
+  MOCK_METHOD(void, Connect, (), (override));
+  MOCK_METHOD(void, Disconnect, (), (override));
+  MOCK_METHOD(State, GetState, (), (const, override));
+  MOCK_METHOD(Error, GetError, (), (const, override));
+  MOCK_METHOD(void, AddListener, (Listener * listener), (override));
+  MOCK_METHOD(void, RemoveListener, (Listener * listener), (override));
+  MOCK_METHOD(std::string, GetNextId, (), (override));
+  MOCK_METHOD(bool, SendMessage, (JingleMessage && message), (override));
+  MOCK_METHOD(bool, SendReply, (JingleMessageReply && message), (override));
+  MOCK_METHOD(bool,
+              SendFtlMessage,
+              (const SignalingAddress& destination_address,
+               ftl::ChromotingMessage&& message),
+              (override));
+  MOCK_METHOD(void, AddFtlListener, (FtlListener * listener), (override));
+  MOCK_METHOD(void, RemoveFtlListener, (FtlListener * listener), (override));
 
   const SignalingAddress& GetLocalAddress() const override;
 

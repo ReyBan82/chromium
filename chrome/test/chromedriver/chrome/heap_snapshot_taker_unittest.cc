@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "chrome/test/chromedriver/chrome/heap_snapshot_taker.h"
 
 #include <stddef.h>
 
+#include <array>
 #include <list>
 #include <memory>
 #include <string>
@@ -18,7 +20,7 @@
 
 namespace {
 
-const char* const chunks[] = {"{\"a\": 1,", "\"b\": 2}"};
+constexpr auto chunks = std::to_array<const char*>({"{\"a\": 1,", "\"b\": 2}"});
 
 base::Value GetSnapshotAsValue() {
   return base::Value("{\"a\": 1,\"b\": 2}");
@@ -31,12 +33,12 @@ class DummyDevToolsClient : public StubDevToolsClient {
         error_after_events_(error_after_events),
         uid_(1),
         disabled_(false) {}
-  ~DummyDevToolsClient() override {}
+  ~DummyDevToolsClient() override = default;
 
   bool IsDisabled() { return disabled_; }
 
   Status SendAddHeapSnapshotChunkEvent() {
-    base::Value::Dict event_params;
+    base::DictValue event_params;
     event_params.Set("uid", uid_);
     for (size_t i = 0; i < std::size(chunks); ++i) {
       event_params.Set("chunk", chunks[i]);
@@ -50,7 +52,7 @@ class DummyDevToolsClient : public StubDevToolsClient {
 
   // Overridden from DevToolsClient:
   Status SendCommand(const std::string& method,
-                     const base::Value::Dict& params) override {
+                     const base::DictValue& params) override {
     if (!disabled_)
       disabled_ = method == "Debugger.disable";
     if (method == method_ && !error_after_events_)
@@ -115,4 +117,3 @@ TEST(HeapSnapshotTaker, ErrorBeforeWhenReceivingSnapshot) {
   ASSERT_FALSE(snapshot.get());
   ASSERT_TRUE(client.IsDisabled());
 }
-

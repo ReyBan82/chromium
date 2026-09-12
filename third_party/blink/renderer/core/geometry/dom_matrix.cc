@@ -12,12 +12,12 @@
 namespace blink {
 
 DOMMatrix* DOMMatrix::Create() {
-  return MakeGarbageCollected<DOMMatrix>(gfx::Transform());
+  return MakeGarbageCollected<DOMMatrix>(gfx::Transform(), true);
 }
 
 DOMMatrix* DOMMatrix::Create(ExecutionContext* execution_context,
                              ExceptionState& exception_state) {
-  return MakeGarbageCollected<DOMMatrix>(gfx::Transform());
+  return MakeGarbageCollected<DOMMatrix>(gfx::Transform(), true);
 }
 
 DOMMatrix* DOMMatrix::Create(
@@ -34,7 +34,8 @@ DOMMatrix* DOMMatrix::Create(
         return nullptr;
       }
 
-      DOMMatrix* matrix = MakeGarbageCollected<DOMMatrix>(gfx::Transform());
+      DOMMatrix* matrix =
+          MakeGarbageCollected<DOMMatrix>(gfx::Transform(), true);
       matrix->SetMatrixValueFromString(execution_context, init->GetAsString(),
                                        exception_state);
       return matrix;
@@ -49,12 +50,11 @@ DOMMatrix* DOMMatrix::Create(
             "for a 3D matrix.");
         return nullptr;
       }
-      return MakeGarbageCollected<DOMMatrix>(sequence, sequence.size());
+      return MakeGarbageCollected<DOMMatrix>(base::span(sequence));
     }
   }
 
   NOTREACHED();
-  return nullptr;
 }
 
 DOMMatrix* DOMMatrix::Create(DOMMatrixReadOnly* other,
@@ -62,8 +62,9 @@ DOMMatrix* DOMMatrix::Create(DOMMatrixReadOnly* other,
   return MakeGarbageCollected<DOMMatrix>(other->Matrix(), other->is2D());
 }
 
-DOMMatrix* DOMMatrix::CreateForSerialization(double sequence[], int size) {
-  return MakeGarbageCollected<DOMMatrix>(sequence, size);
+DOMMatrix* DOMMatrix::CreateForSerialization(
+    base::span<const double> sequence) {
+  return MakeGarbageCollected<DOMMatrix>(sequence);
 }
 
 DOMMatrix* DOMMatrix::fromFloat32Array(NotShared<DOMFloat32Array> float32_array,
@@ -74,8 +75,7 @@ DOMMatrix* DOMMatrix::fromFloat32Array(NotShared<DOMFloat32Array> float32_array,
         "for a 3D matrix.");
     return nullptr;
   }
-  return MakeGarbageCollected<DOMMatrix>(
-      float32_array->Data(), static_cast<int>(float32_array->length()));
+  return MakeGarbageCollected<DOMMatrix>(float32_array->AsSpan());
 }
 
 DOMMatrix* DOMMatrix::fromFloat64Array(NotShared<DOMFloat64Array> float64_array,
@@ -86,13 +86,11 @@ DOMMatrix* DOMMatrix::fromFloat64Array(NotShared<DOMFloat64Array> float64_array,
         "for a 3D matrix.");
     return nullptr;
   }
-  return MakeGarbageCollected<DOMMatrix>(
-      float64_array->Data(), static_cast<int>(float64_array->length()));
+  return MakeGarbageCollected<DOMMatrix>(float64_array->AsSpan());
 }
 
 template <typename T>
-DOMMatrix::DOMMatrix(T sequence, int size)
-    : DOMMatrixReadOnly(sequence, size) {}
+DOMMatrix::DOMMatrix(base::span<T> sequence) : DOMMatrixReadOnly(sequence) {}
 
 DOMMatrix::DOMMatrix(const gfx::Transform& matrix, bool is2d)
     : DOMMatrixReadOnly(matrix, is2d) {}

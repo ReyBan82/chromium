@@ -41,6 +41,8 @@ struct FileHandlerMatch {
 };
 
 struct FileHandlers : public Extension::ManifestData {
+  static const char* kManifestDataKey;
+
   FileHandlers();
   ~FileHandlers() override;
 
@@ -60,6 +62,12 @@ class FileHandlersParser : public ManifestHandler {
   ~FileHandlersParser() override;
 
   bool Parse(Extension* extension, std::u16string* error) override;
+
+  // Validation for Web File Handlers. This method was added for MV3 to enable
+  // successful loading with warnings, instead of failing to load with errors.
+  bool Validate(const Extension& extension,
+                std::string* error,
+                std::vector<InstallWarning>* warnings) const override;
 
  private:
   base::span<const char* const> Keys() const override;

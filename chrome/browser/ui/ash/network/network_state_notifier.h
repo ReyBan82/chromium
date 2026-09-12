@@ -6,10 +6,12 @@
 #define CHROME_BROWSER_UI_ASH_NETWORK_NETWORK_STATE_NOTIFIER_H_
 
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
@@ -17,7 +19,6 @@
 #include "chromeos/ash/components/network/network_connection_observer.h"
 #include "chromeos/ash/components/network/network_state_handler.h"
 #include "chromeos/ash/components/network/network_state_handler_observer.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 
@@ -27,8 +28,6 @@ class SystemTrayClient;
 // This class provides user notifications in the following cases:
 // 1. ShowNetworkConnectError() gets called after any user initiated connect
 //    failure. This will handle displaying an error notification.
-//    TODO(stevenjb): convert this class to use the new MessageCenter
-//    notification system.
 // 2. It observes NetworkState changes to generate notifications when a
 //    Cellular network is out of credits.
 // 3. Generates a notification when VPN is disconnected not as a result of
@@ -50,6 +49,10 @@ class NetworkStateNotifier : public NetworkConnectionObserver,
   void ShowNetworkConnectErrorForGuid(const std::string& error_name,
                                       const std::string& guid);
 
+  // Shows a notification indicating the device is unlocked by the carrier and
+  // can now connect to any available cellular network.
+  void ShowCarrierUnlockNotification();
+
   // Show a mobile activation error notification.
   void ShowMobileActivationErrorForGuid(const std::string& guid);
 
@@ -60,6 +63,7 @@ class NetworkStateNotifier : public NetworkConnectionObserver,
   static const char kNetworkConnectNotificationId[];
   static const char kNetworkActivateNotificationId[];
   static const char kNetworkOutOfCreditsNotificationId[];
+  static const char kNetworkCarrierUnlockNotificationId[];
 
  private:
   friend class NetworkStateNotifierTest;
@@ -72,7 +76,8 @@ class NetworkStateNotifier : public NetworkConnectionObserver,
   };
 
   // NetworkConnectionObserver
-  void ConnectToNetworkRequested(const std::string& service_path) override;
+  ConnectToNetworkRequestVerdict ConnectToNetworkRequested(
+      const std::string& service_path) override;
   void ConnectSucceeded(const std::string& service_path) override;
   void ConnectFailed(const std::string& service_path,
                      const std::string& error_name) override;
@@ -92,12 +97,12 @@ class NetworkStateNotifier : public NetworkConnectionObserver,
   void OnConnectErrorGetProperties(
       const std::string& error_name,
       const std::string& service_path,
-      absl::optional<base::Value::Dict> shill_properties);
+      std::optional<base::DictValue> shill_properties);
 
   void ShowConnectErrorNotification(
       const std::string& error_name,
       const std::string& service_path,
-      absl::optional<base::Value::Dict> shill_properties);
+      std::optional<base::DictValue> shill_properties);
 
   void ShowVpnDisconnectedNotification(VpnDetails* vpn);
 
@@ -115,11 +120,13 @@ class NetworkStateNotifier : public NetworkConnectionObserver,
   // Shows the network settings for |network_id|.
   void ShowNetworkSettings(const std::string& network_id);
   void ShowSimUnlockSettings();
+  void ShowMobileDataSubpage();
+  void ShowApnSettings(const std::string& network_id);
 
   // Shows the carrier account detail page for |network_id|.
   void ShowCarrierAccountDetail(const std::string& network_id);
 
-  SystemTrayClient* system_tray_client_ = nullptr;
+  raw_ptr<SystemTrayClient, DanglingUntriaged> system_tray_client_ = nullptr;
 
   // The details of the connected VPN network if any, otherwise null.
   // Used for displaying the VPN disconnected notification.

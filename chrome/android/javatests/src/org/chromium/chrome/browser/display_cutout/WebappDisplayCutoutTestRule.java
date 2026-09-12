@@ -6,10 +6,9 @@ package org.chromium.chrome.browser.display_cutout;
 
 import android.content.Intent;
 import android.net.Uri;
-import android.os.Build;
-import android.support.test.InstrumentationRegistry;
 
-import androidx.annotation.RequiresApi;
+import androidx.test.core.app.ApplicationProvider;
+import androidx.test.platform.app.InstrumentationRegistry;
 
 import org.hamcrest.Matchers;
 import org.junit.runner.Description;
@@ -19,6 +18,7 @@ import org.chromium.base.test.util.Criteria;
 import org.chromium.base.test.util.CriteriaHelper;
 import org.chromium.blink.mojom.DisplayMode;
 import org.chromium.chrome.browser.browserservices.intents.WebappConstants;
+import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.webapps.WebappActivity;
 
 import java.lang.annotation.ElementType;
@@ -26,28 +26,32 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
-/**
- * Custom test rule for simulating a {@link WebappActivity} with a Display Cutout.
- */
-@RequiresApi(Build.VERSION_CODES.P)
+/** Custom test rule for simulating a {@link WebappActivity} with a Display Cutout. */
 public class WebappDisplayCutoutTestRule extends DisplayCutoutTestRule<WebappActivity> {
     /** Test data for the test webapp. */
     private static final String WEBAPP_ID = "webapp_id";
+
     private static final String WEBAPP_NAME = "webapp name";
     private static final String WEBAPP_SHORT_NAME = "webapp short name";
 
     /** The maximum waiting time to start {@link WebActivity} in ms. */
     private static final long STARTUP_TIMEOUT = 10000L;
 
-    /**
-     * Contains test specific configuration for launching {@link WebappActivity}.
-     */
+    /** Contains test specific configuration for launching {@link WebappActivity}. */
     @Target(ElementType.METHOD)
     @Retention(RetentionPolicy.RUNTIME)
     public @interface TestConfiguration {
         @DisplayMode.EnumType
         int displayMode();
+
+        /**
+         * Whether to observe the real {@link ActivityDisplayCutoutModeSupplier} attached to the
+         * activity's window instead of a test-supplied one.
+         */
+        boolean useRealBrowserCutoutSupplier() default false;
     }
+
+    private TestConfiguration mTestConfiguration;
 
     public WebappDisplayCutoutTestRule() {
         super(WebappActivity.class);
@@ -55,23 +59,26 @@ public class WebappDisplayCutoutTestRule extends DisplayCutoutTestRule<WebappAct
 
     @Override
     public Statement apply(final Statement base, Description description) {
-        return new Statement() {
-            @Override
-            public void evaluate() throws Throwable {
-                TestConfiguration config = description.getAnnotation(TestConfiguration.class);
+        mTestConfiguration = description.getAnnotation(TestConfiguration.class);
+        return super.apply(base, description);
+    }
 
-                startWebappActivity(config.displayMode());
-                setUp();
+    @Override
+    protected void startActivity() {
+        startWebappActivity(mTestConfiguration.displayMode());
+    }
 
-                base.evaluate();
-                tearDown();
-            }
-        };
+    @Override
+    protected TestDisplayCutoutController createDisplayCutoutController(Tab tab) {
+        if (mTestConfiguration.useRealBrowserCutoutSupplier()) {
+            return TestDisplayCutoutController.createWithRealBrowserCutoutSupplier(tab);
+        }
+        return super.createDisplayCutoutController(tab);
     }
 
     private void startWebappActivity(@DisplayMode.EnumType int displayMode) {
         Intent intent =
-                new Intent(InstrumentationRegistry.getTargetContext(), WebappActivity.class);
+                new Intent(ApplicationProvider.getApplicationContext(), WebappActivity.class);
         intent.setData(Uri.parse(WebappActivity.WEBAPP_SCHEME + "://" + WEBAPP_ID));
         intent.putExtra(WebappConstants.EXTRA_ID, WEBAPP_ID);
         intent.putExtra(WebappConstants.EXTRA_URL, getTestURL());
@@ -82,10 +89,14 @@ public class WebappDisplayCutoutTestRule extends DisplayCutoutTestRule<WebappAct
         launchActivity(intent);
 
         InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-        CriteriaHelper.pollInstrumentationThread(() -> {
-            Criteria.checkThat(getActivity().getActivityTab(), Matchers.notNullValue());
-            Criteria.checkThat(getActivity().getActivityTab().isLoading(), Matchers.is(false));
-        }, STARTUP_TIMEOUT, CriteriaHelper.DEFAULT_POLLING_INTERVAL);
+        CriteriaHelper.pollInstrumentationThread(
+                () -> {
+                    Criteria.checkThat(getActivity().getActivityTab(), Matchers.notNullValue());
+                    Criteria.checkThat(
+                            getActivity().getActivityTab().isLoading(), Matchers.is(false));
+                },
+                STARTUP_TIMEOUT,
+                CriteriaHelper.DEFAULT_POLLING_INTERVAL);
         InstrumentationRegistry.getInstrumentation().waitForIdleSync();
 
         waitForActivityNativeInitializationComplete();

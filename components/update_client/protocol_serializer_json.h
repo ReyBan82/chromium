@@ -11,6 +11,11 @@
 
 namespace update_client {
 
+namespace switches {
+inline constexpr char kComponentUpdaterCompatProtocols[] =
+    "component-updater-compat-protocols";
+}  // namespace switches
+
 class ProtocolSerializerJSON final : public ProtocolSerializer {
  public:
   ProtocolSerializerJSON() = default;

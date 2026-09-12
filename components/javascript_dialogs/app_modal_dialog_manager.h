@@ -9,9 +9,12 @@
 
 #include "base/functional/callback.h"
 #include "base/gtest_prod_util.h"
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "components/javascript_dialogs/app_modal_dialog_controller.h"
+#include "components/javascript_dialogs/app_modal_dialog_manager_delegate.h"
 #include "content/public/browser/javascript_dialog_manager.h"
+
+class GURL;
 
 namespace url {
 class Origin;
@@ -21,13 +24,14 @@ namespace javascript_dialogs {
 
 class ExtensionsClient;
 class AppModalViewFactory;
+class AppModalDialogManagerDelegate;
 
 class AppModalDialogManager : public content::JavaScriptDialogManager {
  public:
   // A factory method to create and returns a platform-specific dialog class.
   // The returned object should own itself.
-  using AppModalViewFactory =
-      base::RepeatingCallback<AppModalDialogView*(AppModalDialogController*)>;
+  using AppModalViewFactory = base::RepeatingCallback<AppModalDialogView*(
+      std::unique_ptr<AppModalDialogController>)>;
 
   static AppModalDialogManager* GetInstance();
 
@@ -44,6 +48,8 @@ class AppModalDialogManager : public content::JavaScriptDialogManager {
   // access to extensions functionality. This sets a client interface to
   // access //extensions.
   void SetExtensionsClient(std::unique_ptr<ExtensionsClient> extensions_client);
+
+  void SetDelegate(std::unique_ptr<AppModalDialogManagerDelegate> delegate);
 
   // Gets the title for a dialog.
   std::u16string GetTitle(content::WebContents* web_contents,
@@ -76,9 +82,14 @@ class AppModalDialogManager : public content::JavaScriptDialogManager {
   void CancelDialogs(content::WebContents* web_contents,
                      bool reset_state) override;
 
+  static std::u16string GetSiteFrameTitle(
+      const GURL& main_frame_url,
+      const url::Origin& main_frame_origin,
+      const url::Origin& alerting_frame_origin);
+
  private:
   FRIEND_TEST_ALL_PREFIXES(AppModalDialogManagerTest, GetTitle);
-  friend struct base::DefaultSingletonTraits<AppModalDialogManager>;
+  friend class base::NoDestructor<AppModalDialogManager>;
 
   AppModalDialogManager();
   ~AppModalDialogManager() override;
@@ -90,15 +101,15 @@ class AppModalDialogManager : public content::JavaScriptDialogManager {
                       bool success,
                       const std::u16string& user_input);
 
-  static std::u16string GetTitleImpl(const url::Origin& main_frame_origin,
-                                     const url::Origin& alerting_frame_origin);
-
   // Mapping between the WebContents and their extra data. The key
   // is a void* because the pointer is just a cookie and is never dereferenced.
   AppModalDialogController::ExtraDataMap javascript_dialog_extra_data_;
 
   AppModalViewFactory view_factory_;
+
   std::unique_ptr<ExtensionsClient> extensions_client_;
+
+  std::unique_ptr<AppModalDialogManagerDelegate> delegate_;
 };
 
 }  // namespace javascript_dialogs

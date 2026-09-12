@@ -4,8 +4,10 @@
 
 #include "ash/public/cpp/test/test_saved_desk_delegate.h"
 
+#include <algorithm>
+
 #include "ash/public/cpp/desk_template.h"
-#include "base/containers/contains.h"
+#include "ash/public/cpp/window_properties.h"
 #include "components/app_restore/app_launch_info.h"
 #include "ui/aura/client/aura_constants.h"
 #include "ui/aura/window.h"
@@ -21,6 +23,15 @@ TestSavedDeskDelegate::~TestSavedDeskDelegate() = default;
 void TestSavedDeskDelegate::GetAppLaunchDataForSavedDesk(
     aura::Window* window,
     GetAppLaunchDataCallback callback) const {
+  if (window) {
+    if (const std::string* app_id = window->GetProperty(kAppIDKey)) {
+      if (app_ids_with_app_launch_info_.contains(*app_id)) {
+        std::move(callback).Run(std::make_unique<app_restore::AppLaunchInfo>(
+            *app_id, /*window_id=*/0));
+        return;
+      }
+    }
+  }
   std::move(callback).Run({});
 }
 
@@ -28,26 +39,31 @@ desks_storage::DeskModel* TestSavedDeskDelegate::GetDeskModel() {
   return desk_model_;
 }
 
-bool TestSavedDeskDelegate::IsIncognitoWindow(aura::Window* window) const {
-  return false;
+desks_storage::AdminTemplateService*
+TestSavedDeskDelegate::GetAdminTemplateService() {
+  return admin_template_service_;
 }
 
-absl::optional<gfx::ImageSkia>
+bool TestSavedDeskDelegate::IsWindowPersistable(aura::Window* window) const {
+  return true;
+}
+
+std::optional<gfx::ImageSkia>
 TestSavedDeskDelegate::MaybeRetrieveIconForSpecialIdentifier(
     const std::string& identifier,
     const ui::ColorProvider* color_provider) const {
-  return absl::nullopt;
+  return std::nullopt;
 }
-
-void TestSavedDeskDelegate::GetFaviconForUrl(
-    const std::string& page_url,
-    base::OnceCallback<void(const gfx::ImageSkia&)> callback,
-    base::CancelableTaskTracker* tracker) const {}
 
 void TestSavedDeskDelegate::GetIconForAppId(
     const std::string& app_id,
     int desired_icon_size,
-    base::OnceCallback<void(const gfx::ImageSkia&)> callback) const {}
+    base::OnceCallback<void(const gfx::ImageSkia&)> callback) const {
+  // `default_app_icon_` will be null if not set.
+  if (!default_app_icon_.isNull()) {
+    std::move(callback).Run(default_app_icon_);
+  }
+}
 
 void TestSavedDeskDelegate::LaunchAppsFromSavedDesk(
     std::unique_ptr<DeskTemplate> saved_desk) {}
@@ -62,7 +78,7 @@ std::string TestSavedDeskDelegate::GetAppShortName(const std::string& app_id) {
 }
 
 bool TestSavedDeskDelegate::IsAppAvailable(const std::string& app_id) const {
-  return !base::Contains(unavailable_app_ids_, app_id);
+  return !std::ranges::contains(unavailable_app_ids_, app_id);
 }
 
 }  // namespace ash

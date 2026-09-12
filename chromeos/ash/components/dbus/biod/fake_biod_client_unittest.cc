@@ -8,6 +8,7 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/test_simple_task_runner.h"
@@ -45,9 +46,18 @@ class FakeBiodClientTest : public testing::Test {
   // TestGetRecordsForUser.
   std::vector<dbus::ObjectPath> GetRecordsForUser(const std::string& user_id) {
     std::vector<dbus::ObjectPath> enrollment_paths;
+    bool enrollment_success = false;
+    auto enrollment_callback =
+        [](std::vector<dbus::ObjectPath>& enrollment_paths,
+           bool& enrollment_success, const std::vector<dbus::ObjectPath>& paths,
+           bool success) {
+          test_utils::CopyObjectPathArray(&enrollment_paths, paths);
+          enrollment_success = success;
+        };
+
     fake_biod_client_.GetRecordsForUser(
-        user_id,
-        base::BindOnce(&test_utils::CopyObjectPathArray, &enrollment_paths));
+        user_id, base::BindOnce(enrollment_callback, std::ref(enrollment_paths),
+                                std::ref(enrollment_success)));
     task_runner_->RunUntilIdle();
     return enrollment_paths;
   }
@@ -94,8 +104,9 @@ class FakeBiodClientTest : public testing::Test {
     for (int i = 0; i < scans; ++i) {
       std::string scan = kTestScan;
       base::ReplaceSubstringsAfterOffset(
-          &scan, 0, "#", std::to_string(num_test_fingerprints_));
-      base::ReplaceSubstringsAfterOffset(&scan, 0, "$", std::to_string(i));
+          &scan, 0, "#", base::NumberToString(num_test_fingerprints_));
+      base::ReplaceSubstringsAfterOffset(&scan, 0, "$",
+                                         base::NumberToString(i));
       fingerprint.push_back(scan);
     }
     return fingerprint;
@@ -308,12 +319,8 @@ TEST_F(FakeBiodClientTest, TestGetAndSetRecordLabels) {
 
   EnrollFingerprint(kTestUserId, kLabelOne, GenerateTestFingerprint(2));
   EnrollFingerprint(kTestUserId, kLabelTwo, GenerateTestFingerprint(2));
-  EXPECT_EQ(2u, GetRecordsForUser(kTestUserId).size());
-  std::vector<dbus::ObjectPath> enrollment_paths;
-  fake_biod_client_.GetRecordsForUser(
-      kTestUserId,
-      base::BindOnce(&test_utils::CopyObjectPathArray, &enrollment_paths));
-  task_runner_->RunUntilIdle();
+  std::vector<dbus::ObjectPath> enrollment_paths =
+      GetRecordsForUser(kTestUserId);
   EXPECT_EQ(2u, enrollment_paths.size());
 
   // Verify the labels we get using GetLabel are the same as the one we

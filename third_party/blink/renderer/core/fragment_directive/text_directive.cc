@@ -4,22 +4,28 @@
 
 #include "third_party/blink/renderer/core/fragment_directive/text_directive.h"
 
+#include "third_party/blink/renderer/bindings/core/v8/v8_directive_type.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_text_directive_options.h"
 #include "third_party/blink/renderer/core/fragment_directive/text_fragment_finder.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
 // static
-TextDirective* TextDirective::Create(const String& directive_value) {
+TextDirective* TextDirective::Create(const String& directive_value,
+                                     Behavior behavior) {
   auto selector = TextFragmentSelector::FromTextDirective(directive_value);
   if (selector.Type() == TextFragmentSelector::kInvalid)
     return nullptr;
 
-  return MakeGarbageCollected<TextDirective>(selector);
+  return MakeGarbageCollected<TextDirective>(selector, behavior);
 }
 
-TextDirective::TextDirective(const TextFragmentSelector& selector)
-    : SelectorDirective(Directive::kText), selector_(selector) {}
+TextDirective::TextDirective(const TextFragmentSelector& selector,
+                             Behavior behavior)
+    : SelectorDirective(Directive::kText),
+      selector_(selector),
+      behavior_(behavior) {}
 
 TextDirective::~TextDirective() = default;
 
@@ -77,7 +83,7 @@ void TextDirective::Trace(Visitor* visitor) const {
 }
 
 String TextDirective::ToStringImpl() const {
-  return type() + "=" + selector_.ToString();
+  return StrCat({type().AsStringView(), "=", selector_.ToString()});
 }
 
 }  // namespace blink

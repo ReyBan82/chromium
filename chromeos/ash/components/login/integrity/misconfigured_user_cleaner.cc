@@ -4,73 +4,108 @@
 
 #include "chromeos/ash/components/login/integrity/misconfigured_user_cleaner.h"
 
+#include "ash/constants/ash_switches.h"
 #include "ash/public/cpp/session/session_controller.h"
+#include "base/command_line.h"
+#include "base/dcheck_is_on.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
+#include "base/task/single_thread_task_runner.h"
 #include "chromeos/ash/components/cryptohome/cryptohome_parameters.h"
 #include "chromeos/ash/components/cryptohome/userdataauth_util.h"
 #include "chromeos/ash/components/dbus/cryptohome/UserDataAuth.pb.h"
 #include "chromeos/ash/components/dbus/session_manager/session_manager_client.h"
 #include "chromeos/ash/components/login/auth/mount_performer.h"
+#include "chromeos/ash/components/login/auth/public/authentication_error.h"
+#include "chromeos/dbus/power/power_manager_client.h"
 #include "components/prefs/pref_service.h"
 #include "components/user_manager/user_directory_integrity_manager.h"
 
 namespace ash {
 
-MisconfiguredUserCleaner::MisconfiguredUserCleaner(PrefService* local_state)
+MisconfiguredUserCleaner::MisconfiguredUserCleaner(
+    PrefService* local_state,
+    SessionController* session_controller)
     : local_state_(local_state),
+      session_controller_(session_controller),
       mount_performer_(std::make_unique<MountPerformer>()) {}
 MisconfiguredUserCleaner::~MisconfiguredUserCleaner() = default;
 
 void MisconfiguredUserCleaner::CleanMisconfiguredUser() {
   user_manager::UserDirectoryIntegrityManager integrity_manager(local_state_);
-  absl::optional<AccountId> incomplete_user =
-      integrity_manager.GetMisconfiguredUser();
+  std::optional<AccountId> misconfigured_user =
+      integrity_manager.GetMisconfiguredUserAccountId();
 
-  if (!incomplete_user.has_value()) {
-    return;
+  if (misconfigured_user.has_value()) {
+    LOG(ERROR) << "Found a user without credentials set up at creation.";
+    auto strategy = integrity_manager.GetMisconfiguredUserCleanupStrategy();
+    DoCleanup(integrity_manager, misconfigured_user.value(), strategy);
+  }
+}
+
+void MisconfiguredUserCleaner::ScheduleCleanup() {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&MisconfiguredUserCleaner::CleanMisconfiguredUser,
+                     weak_factory_.GetWeakPtr()));
+}
+
+void MisconfiguredUserCleaner::DoCleanup(
+    user_manager::UserDirectoryIntegrityManager& integrity_manager,
+    const AccountId& account_id,
+    user_manager::UserDirectoryIntegrityManager::CleanupStrategy strategy) {
+  bool ignore_owner_in_tests =
+      base::CommandLine::ForCurrentProcess()->HasSwitch(
+          ash::switches::kCryptohomeIgnoreCleanupOwnershipForTesting);
+  if (strategy == user_manager::UserDirectoryIntegrityManager::CleanupStrategy::
+                      kSilentPowerwash) {
+    if (!ignore_owner_in_tests) {
+      LOG(WARNING) << "User is owner, removing the user requires powerwash.";
+      // user is owner, TPM ownership was established, powerwash the device.
+      SessionManagerClient::Get()->StartDeviceWipe(
+          base::BindOnce(&MisconfiguredUserCleaner::OnStartDeviceWipe,
+                         weak_factory_.GetWeakPtr()));
+      return;
+    }
+    LOG(WARNING) << "Treating owner user as non-owner due to test-only switch";
   }
 
-  auto* session_controller = SessionController::Get();
-  auto is_enterprise_managed = session_controller->IsEnterpriseManaged();
-  absl::optional<int> existing_users_count =
-      session_controller->GetExistingUsersCount();
-  if (!existing_users_count.has_value()) {
-    // We were not able to get the number of existing users, log error.
-    LOG(ERROR) << "Unable to retrieve the number of existing users";
-  } else if (!is_enterprise_managed && existing_users_count.value() == 0) {
-    // user is owner, TPM ownership was established, powerwash the device.
-    SessionManagerClient::Get()->StartDeviceWipe();
+  LOG(WARNING) << "User is non-owner, trigger user removal.";
+  bool safe_to_remove_user = base::CommandLine::ForCurrentProcess()->HasSwitch(
+      ash::switches::kFirstExecAfterBoot);
+  // If we got to this point after user have signed in since last reboot (e.g.
+  // if Chrome have crashed right after starting user session), user removal
+  // might fail. Trigger a reboot without clearing prefs, it guarantees that
+  // this code would be called again after the reboot.
+  if (safe_to_remove_user) {
+    integrity_manager.RemoveUser(account_id);
+    integrity_manager.ClearPrefs();
   } else {
-    // non-owner, simply remove the homedir.
-    cryptohome::AccountIdentifier identifier =
-        cryptohome::CreateAccountIdentifierFromAccountId(
-            incomplete_user.value());
-
-    RemoveUserDirectory(identifier);
+#if DCHECK_IS_ON()
+    LOG(ERROR) << "\n\n\n\n\n==== Misconfigured User Data Detected ===\n"
+               << " Pass --first-exec-after-boot to remove the misconfigured "
+                  "data\n\n\n";
+#endif
+    chromeos::PowerManagerClient::Get()->RequestRestart(
+        power_manager::RequestRestartReason::REQUEST_RESTART_OTHER,
+        "Restarting for logged-in misconfigured user removal");
   }
 }
 
-void MisconfiguredUserCleaner::RemoveUserDirectory(
-    const cryptohome::AccountIdentifier& user) {
-  mount_performer_->RemoveUserDirectoryByIdentifier(
-      user, base::BindOnce(&MisconfiguredUserCleaner::OnCleanMisconfiguredUser,
-                           weak_factory_.GetWeakPtr()));
-}
-
-void MisconfiguredUserCleaner::OnCleanMisconfiguredUser(
-    absl::optional<AuthenticationError> error) {
-  if (error.has_value()) {
-    // TODO(b/239420309): add retry logic.
-    LOG(ERROR) << "Unable to clean misconfigured user's directory "
-               << error->get_cryptohome_code();
+void MisconfiguredUserCleaner::OnStartDeviceWipe(bool result) {
+  if (!result) {
+    // If powerwash was not triggered, this could be due to session manager
+    // either not getting the request, or session manager ignoring the request
+    // because we are already in session.
+    // In both cases, a restart would re-trigger misconfigured user cleanup as
+    // `incomplete_login_user_account` pref would still be present in local
+    // state.
+    chromeos::PowerManagerClient::Get()->RequestRestart(
+        power_manager::RequestRestartReason::REQUEST_RESTART_OTHER,
+        "Restarting for logged-in misconfigured user owner cleanup");
   }
-
-  // User cleanup successful, clear prefs.
-  user_manager::UserDirectoryIntegrityManager integrity_manager(local_state_);
-  integrity_manager.ClearKnownUserPrefs();
-  integrity_manager.ClearPrefs();
 }
 
 }  // namespace ash

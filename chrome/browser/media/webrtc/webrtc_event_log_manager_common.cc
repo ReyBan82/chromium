@@ -4,28 +4,34 @@
 
 #include "chrome/browser/media/webrtc/webrtc_event_log_manager_common.h"
 
-#include <cctype>
+#include <algorithm>
 #include <limits>
+#include <string_view>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/unguessable_token.h"
-#include "build/chromeos_buildflags.h"
+#include "base/uuid.h"
+#include "build/build_config.h"
 #include "chrome/browser/policy/profile_policy_connector.h"
 #include "chrome/browser/profiles/profile.h"
 #include "components/policy/core/common/policy_service.h"
+#include "components/webrtc_logging/browser/text_log_list.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_process_host.h"
+#include "third_party/abseil-cpp/absl/strings/ascii.h"
 #include "third_party/zlib/zlib.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #include "components/user_manager/user.h"
 #include "components/user_manager/user_type.h"
@@ -44,6 +50,9 @@ const size_t kWebRtcEventLogIdLength = 32;
 const size_t kMinWebRtcEventLogWebAppId = 1;
 const size_t kMaxWebRtcEventLogWebAppId = 99;
 
+const size_t kSameSiteWebAppId = 1;
+const size_t kCrossSiteWebAppId = 99;
+
 // Sentinel value for an invalid web-app ID.
 const size_t kInvalidWebRtcEventLogWebAppId = 0;
 static_assert(kInvalidWebRtcEventLogWebAppId < kMinWebRtcEventLogWebAppId ||
@@ -54,8 +63,8 @@ const char kRemoteBoundWebRtcEventLogFileNamePrefix[] = "webrtc_event_log";
 
 // Important! These values may be relied on by web-apps. Do not change.
 const char kStartRemoteLoggingFailureAlreadyLogging[] = "Already logging.";
-const char kStartRemoteLoggingFailureDeadRenderProcessHost[] =
-    "RPH already dead.";
+// const char OBSOLETE_kStartRemoteLoggingFailureDeadRenderProcessHost[] =
+//     "RPH already dead.";
 const char kStartRemoteLoggingFailureFeatureDisabled[] = "Feature disabled.";
 const char kStartRemoteLoggingFailureFileCreationError[] =
     "Could not create file.";
@@ -76,6 +85,7 @@ const char kStartRemoteLoggingFailureUnknownOrInactivePeerConnection[] =
     "Unknown or inactive peer connection.";
 const char kStartRemoteLoggingFailureUnlimitedSizeDisallowed[] =
     "Unlimited size disallowed.";
+const char kBrowserContextNotFound[] = "BrowserContext not found.";
 
 const BrowserContextId kNullBrowserContextId =
     reinterpret_cast<BrowserContextId>(nullptr);
@@ -106,7 +116,7 @@ constexpr size_t kWebAppIdLength = 2;
 class Budget {
  public:
   // If !max.has_value(), the budget is unlimited.
-  explicit Budget(absl::optional<size_t> max) : max_(max), current_(0) {}
+  explicit Budget(std::optional<size_t> max) : max_(max), current_(0) {}
 
   // Check whether the budget allows consuming an additional |consumed| of
   // the resource.
@@ -138,7 +148,7 @@ class Budget {
   }
 
  private:
-  const absl::optional<size_t> max_;
+  const std::optional<size_t> max_;
   size_t current_;
 };
 
@@ -148,7 +158,7 @@ class BaseLogFileWriter : public LogFileWriter {
   // If !max_file_size_bytes.has_value(), an unlimited writer is created.
   // If it has a value, it must be at least MinFileSizeBytes().
   BaseLogFileWriter(const base::FilePath& path,
-                    absl::optional<size_t> max_file_size_bytes);
+                    std::optional<size_t> max_file_size_bytes);
 
   ~BaseLogFileWriter() override;
 
@@ -208,7 +218,7 @@ class BaseLogFileWriter : public LogFileWriter {
 };
 
 BaseLogFileWriter::BaseLogFileWriter(const base::FilePath& path,
-                                     absl::optional<size_t> max_file_size_bytes)
+                                     std::optional<size_t> max_file_size_bytes)
     : task_runner_(base::SequencedTaskRunner::GetCurrentDefault()),
       path_(path),
       state_(State::PRE_INIT),
@@ -231,7 +241,7 @@ bool BaseLogFileWriter::Init() {
   DCHECK(task_runner_->RunsTasksInCurrentSequence());
   DCHECK_EQ(state(), State::PRE_INIT);
 
-  // TODO(crbug.com/775415): Use a temporary filename which will indicate
+  // TODO(crbug.com/40545136): Use a temporary filename which will indicate
   // incompletion, and rename to something that is eligible for upload only
   // on an orderly and successful Close().
 
@@ -340,17 +350,14 @@ bool BaseLogFileWriter::WriteInternal(const std::string& input, bool metadata) {
   // numeric_limits<int>::max() bytes at a time.
   DCHECK_LE(input.length(),
             static_cast<size_t>(std::numeric_limits<int>::max()));
-  const int input_len = static_cast<int>(input.length());
 
-  int written = file_.WriteAtCurrentPos(input.c_str(), input_len);
-  if (written != input_len) {
+  if (!file_.WriteAtCurrentPosAndCheck(base::as_byte_span(input))) {
     LOG(WARNING) << "WebRTC event log couldn't be written to the "
                     "locally stored file in its entirety.";
     return false;
   }
 
-  budget_.Consume(static_cast<size_t>(written));
-
+  budget_.Consume(input.length());
   return true;
 }
 
@@ -366,7 +373,7 @@ bool BaseLogFileWriter::Finalize() {
 class GzippedLogFileWriter : public BaseLogFileWriter {
  public:
   GzippedLogFileWriter(const base::FilePath& path,
-                       absl::optional<size_t> max_file_size_bytes,
+                       std::optional<size_t> max_file_size_bytes,
                        std::unique_ptr<LogCompressor> compressor);
 
   ~GzippedLogFileWriter() override = default;
@@ -386,7 +393,7 @@ class GzippedLogFileWriter : public BaseLogFileWriter {
 
 GzippedLogFileWriter::GzippedLogFileWriter(
     const base::FilePath& path,
-    absl::optional<size_t> max_file_size_bytes,
+    std::optional<size_t> max_file_size_bytes,
     std::unique_ptr<LogCompressor> compressor)
     : BaseLogFileWriter(path, max_file_size_bytes),
       compressor_(std::move(compressor)) {
@@ -451,7 +458,6 @@ bool GzippedLogFileWriter::Write(const std::string& input) {
   }
 
   NOTREACHED();
-  return false;  // Appease compiler.
 }
 
 bool GzippedLogFileWriter::Finalize() {
@@ -480,7 +486,7 @@ bool GzippedLogFileWriter::Finalize() {
 class GzipLogCompressor : public LogCompressor {
  public:
   GzipLogCompressor(
-      absl::optional<size_t> max_size_bytes,
+      std::optional<size_t> max_size_bytes,
       std::unique_ptr<CompressedSizeEstimator> compressed_size_estimator);
 
   ~GzipLogCompressor() override;
@@ -506,8 +512,8 @@ class GzipLogCompressor : public LogCompressor {
   // Returns the budget left after reserving the GZIP overhead.
   // Optionals without a value, both in the parameters as well as in the
   // return value of the function, signal an unlimited amount.
-  static absl::optional<size_t> SizeAfterOverheadReservation(
-      absl::optional<size_t> max_size_bytes);
+  static std::optional<size_t> SizeAfterOverheadReservation(
+      std::optional<size_t> max_size_bytes);
 
   // Compresses |input| into |output|, while observing the budget (unless
   // !budgeted). If |last|, also closes the stream.
@@ -522,16 +528,15 @@ class GzipLogCompressor : public LogCompressor {
   State state_;
   Budget budget_;
   std::unique_ptr<CompressedSizeEstimator> compressed_size_estimator_;
-  z_stream stream_;
+  z_stream stream_ = {};
 };
 
 GzipLogCompressor::GzipLogCompressor(
-    absl::optional<size_t> max_size_bytes,
+    std::optional<size_t> max_size_bytes,
     std::unique_ptr<CompressedSizeEstimator> compressed_size_estimator)
     : state_(State::PRE_HEADER),
       budget_(SizeAfterOverheadReservation(max_size_bytes)),
       compressed_size_estimator_(std::move(compressed_size_estimator)) {
-  memset(&stream_, 0, sizeof(z_stream));
   // Using (MAX_WBITS + 16) triggers the creation of a GZIP header.
   const int result =
       deflateInit2(&stream_, Z_DEFAULT_COMPRESSION, Z_DEFLATED, MAX_WBITS + 16,
@@ -584,7 +589,6 @@ LogCompressor::Result GzipLogCompressor::Compress(const std::string& input,
   }
 
   NOTREACHED();
-  return Result::ERROR_ENCOUNTERED;  // Appease compiler.
 }
 
 bool GzipLogCompressor::CreateFooter(std::string* output) {
@@ -612,10 +616,10 @@ bool GzipLogCompressor::CreateFooter(std::string* output) {
   return true;
 }
 
-absl::optional<size_t> GzipLogCompressor::SizeAfterOverheadReservation(
-    absl::optional<size_t> max_size_bytes) {
+std::optional<size_t> GzipLogCompressor::SizeAfterOverheadReservation(
+    std::optional<size_t> max_size_bytes) {
   if (!max_size_bytes.has_value()) {
-    return absl::optional<size_t>();
+    return std::optional<size_t>();
   } else {
     DCHECK_GE(max_size_bytes.value(), kGzipHeaderBytes + kGzipFooterBytes);
     return max_size_bytes.value() - (kGzipHeaderBytes + kGzipFooterBytes);
@@ -736,14 +740,12 @@ bool GzipLogCompressor::Deflate(int flush, std::string* output) {
 // Given a string with a textual representation of a web-app ID, return the
 // ID in integer form. If the textual representation does not name a valid
 // web-app ID, return kInvalidWebRtcEventLogWebAppId.
-size_t ExtractWebAppId(base::StringPiece str) {
+size_t ExtractWebAppId(std::string_view str) {
   DCHECK_EQ(str.length(), kWebAppIdLength);
 
   // Avoid leading '+', etc.
-  for (size_t i = 0; i < str.length(); i++) {
-    if (!std::isdigit(str[i])) {
-      return kInvalidWebRtcEventLogWebAppId;
-    }
+  if (!std::ranges::all_of(str, absl::ascii_isdigit)) {
+    return kInvalidWebRtcEventLogWebAppId;
   }
 
   size_t result;
@@ -771,13 +773,13 @@ size_t BaseLogFileWriterFactory::MinFileSizeBytes() const {
   return 0;
 }
 
-base::FilePath::StringPieceType BaseLogFileWriterFactory::Extension() const {
+base::FilePath::StringViewType BaseLogFileWriterFactory::Extension() const {
   return kWebRtcEventLogUncompressedExtension;
 }
 
 std::unique_ptr<LogFileWriter> BaseLogFileWriterFactory::Create(
     const base::FilePath& path,
-    absl::optional<size_t> max_file_size_bytes) const {
+    std::optional<size_t> max_file_size_bytes) const {
   if (max_file_size_bytes.has_value() &&
       max_file_size_bytes.value() < MinFileSizeBytes()) {
     LOG(WARNING) << "Max size (" << max_file_size_bytes.value()
@@ -820,7 +822,7 @@ size_t GzipLogCompressorFactory::MinSizeBytes() const {
 }
 
 std::unique_ptr<LogCompressor> GzipLogCompressorFactory::Create(
-    absl::optional<size_t> max_size_bytes) const {
+    std::optional<size_t> max_size_bytes) const {
   if (max_size_bytes.has_value() && max_size_bytes.value() < MinSizeBytes()) {
     LOG(WARNING) << "Max size (" << max_size_bytes.value()
                  << ") below minimum size (" << MinSizeBytes() << ").";
@@ -841,13 +843,13 @@ size_t GzippedLogFileWriterFactory::MinFileSizeBytes() const {
   return gzip_compressor_factory_->MinSizeBytes();
 }
 
-base::FilePath::StringPieceType GzippedLogFileWriterFactory::Extension() const {
+base::FilePath::StringViewType GzippedLogFileWriterFactory::Extension() const {
   return kWebRtcEventLogGzippedExtension;
 }
 
 std::unique_ptr<LogFileWriter> GzippedLogFileWriterFactory::Create(
     const base::FilePath& path,
-    absl::optional<size_t> max_file_size_bytes) const {
+    std::optional<size_t> max_file_size_bytes) const {
   if (max_file_size_bytes.has_value() &&
       max_file_size_bytes.value() < MinFileSizeBytes()) {
     LOG(WARNING) << "Size below allowed minimum.";
@@ -888,7 +890,8 @@ BrowserContextId GetBrowserContextId(
   return reinterpret_cast<BrowserContextId>(browser_context);
 }
 
-BrowserContextId GetBrowserContextId(int render_process_id) {
+BrowserContextId GetBrowserContextId(
+    content::ChildProcessId render_process_id) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   content::RenderProcessHost* const host =
@@ -907,11 +910,10 @@ base::FilePath GetRemoteBoundWebRtcEventLogsDir(
   return browser_context_dir.Append(kRemoteBoundLogSubDirectory);
 }
 
-base::FilePath WebRtcEventLogPath(
-    const base::FilePath& remote_logs_dir,
-    const std::string& log_id,
-    size_t web_app_id,
-    const base::FilePath::StringPieceType& extension) {
+base::FilePath WebRtcEventLogPath(const base::FilePath& remote_logs_dir,
+                                  const std::string& log_id,
+                                  size_t web_app_id,
+                                  base::FilePath::StringViewType extension) {
   DCHECK_GE(web_app_id, kMinWebRtcEventLogWebAppId);
   DCHECK_LE(web_app_id, kMaxWebRtcEventLogWebAppId);
 
@@ -927,14 +929,11 @@ base::FilePath WebRtcEventLogPath(
 }
 
 bool IsValidRemoteBoundLogFilename(const std::string& filename) {
-  // The -1 is because of the implict \0.
   const size_t kPrefixLength =
       std::size(kRemoteBoundWebRtcEventLogFileNamePrefix) - 1;
 
-  // [prefix]_[web_app_id]_[log_id]
-  const size_t expected_length =
-      kPrefixLength + 1 + kWebAppIdLength + 1 + kWebRtcEventLogIdLength;
-  if (filename.length() != expected_length) {
+  if (filename.length() <
+      kPrefixLength + 1 + kWebAppIdLength + 1 + kWebRtcEventLogIdLength) {
     return false;
   }
 
@@ -946,7 +945,7 @@ bool IsValidRemoteBoundLogFilename(const std::string& filename) {
   }
   index += kPrefixLength;
 
-  // Expect underscore between prefix and web-app ID.
+  // Expect underscore.
   if (filename[index] != '_') {
     return false;
   }
@@ -954,27 +953,52 @@ bool IsValidRemoteBoundLogFilename(const std::string& filename) {
 
   // Expect web-app-ID.
   const size_t web_app_id =
-      ExtractWebAppId(base::StringPiece(&filename[index], kWebAppIdLength));
+      ExtractWebAppId(std::string_view(&filename[index], kWebAppIdLength));
   if (web_app_id == kInvalidWebRtcEventLogWebAppId) {
     return false;
   }
   index += kWebAppIdLength;
 
-  // Expect underscore between web-app ID and log ID.
+  // Expect underscore.
   if (filename[index] != '_') {
     return false;
   }
   index += 1;
 
-  // Expect log ID.
-  const std::string log_id = filename.substr(index);
-  DCHECK_EQ(log_id.length(), kWebRtcEventLogIdLength);
-  const char* const log_id_chars = "0123456789ABCDEF";
-  if (filename.find_first_not_of(log_id_chars, index) != std::string::npos) {
-    return false;
-  }
+  // The rest of the string must contain at least the log ID.
+  const std::string rest = filename.substr(index);
 
-  return true;
+  if (rest.length() == kWebRtcEventLogIdLength) {
+    // Extension API format: rest is log_id.
+    return base::ContainsOnlyChars(rest, "0123456789ABCDEF");
+  } else {
+    // New format: rest is diagnostic_uuid + "_" + session_id.
+    const size_t underscore_pos = rest.find('_');
+    if (underscore_pos == std::string::npos) {
+      return false;
+    }
+
+    const std::string diagnostic_uuid = rest.substr(0, underscore_pos);
+    std::string session_id = rest.substr(underscore_pos + 1);
+
+    if (base::EndsWith(session_id, "_local", base::CompareCase::SENSITIVE)) {
+      session_id = session_id.substr(0, session_id.length() - 6);
+    }
+
+    if (session_id.empty()) {
+      return false;
+    }
+
+    if (!base::ContainsOnlyChars(session_id, "0123456789")) {
+      return false;
+    }
+
+    if (!base::Uuid::ParseCaseInsensitive(diagnostic_uuid).is_valid()) {
+      return false;
+    }
+
+    return true;
+  }
 }
 
 bool IsValidRemoteBoundLogFilePath(const base::FilePath& path) {
@@ -982,8 +1006,18 @@ bool IsValidRemoteBoundLogFilePath(const base::FilePath& path) {
   return IsValidRemoteBoundLogFilename(filename);
 }
 
+bool IsLocalOnlyRemoteBoundLogFilename(const std::string& filename) {
+  return IsValidRemoteBoundLogFilename(filename) &&
+         base::EndsWith(filename, "_local", base::CompareCase::SENSITIVE);
+}
+
+bool IsLocalOnlyRemoteBoundLogFilePath(const base::FilePath& path) {
+  const std::string filename = path.BaseName().RemoveExtension().MaybeAsASCII();
+  return IsLocalOnlyRemoteBoundLogFilename(filename);
+}
+
 base::FilePath GetWebRtcEventLogHistoryFilePath(const base::FilePath& path) {
-  // TODO(crbug.com/775415): Check for validity (after fixing unit tests).
+  // TODO(crbug.com/40545136): Check for validity (after fixing unit tests).
   return path.RemoveExtension().AddExtension(kWebRtcEventLogHistoryExtension);
 }
 
@@ -995,8 +1029,12 @@ std::string ExtractRemoteBoundWebRtcEventLogLocalIdFromPath(
     return std::string();
   }
 
-  DCHECK_GE(filename.length(), kWebRtcEventLogIdLength);
-  return filename.substr(filename.length() - kWebRtcEventLogIdLength);
+  const size_t kPrefixLength =
+      std::size(kRemoteBoundWebRtcEventLogFileNamePrefix) - 1;
+  const size_t log_id_start = kPrefixLength + 1 + kWebAppIdLength + 1;
+
+  DCHECK_GE(filename.length(), log_id_start);
+  return filename.substr(log_id_start);
 }
 
 size_t ExtractRemoteBoundWebRtcEventLogWebAppIdFromPath(
@@ -1014,14 +1052,19 @@ size_t ExtractRemoteBoundWebRtcEventLogWebAppIdFromPath(
   // The +1 is for the underscore between the prefix and the web-app ID.
   // Length verified by above call to IsValidRemoteBoundLogFilename().
   DCHECK_GE(filename.length(), kPrefixLength + 1 + kWebAppIdLength);
-  base::StringPiece id_str(&filename[kPrefixLength + 1], kWebAppIdLength);
+  std::string_view id_str(&filename[kPrefixLength + 1], kWebAppIdLength);
 
   return ExtractWebAppId(id_str);
 }
 
-bool DoesProfileDefaultToLoggingEnabled(const Profile* const profile) {
+bool DoesProfileDefaultToLoggingEnabled(const Profile* const profile,
+                                        webrtc_logging::ApiType api_type) {
+  if (api_type == webrtc_logging::ApiType::kWeb) {
+    return false;
+  }
+
 // For Chrome OS, exclude special profiles and users.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   const user_manager::User* user =
       ash::ProfileHelper::Get()->GetUserByProfile(profile);
   // We do not log an error here since this can happen in several cases,
@@ -1030,7 +1073,7 @@ bool DoesProfileDefaultToLoggingEnabled(const Profile* const profile) {
     return false;
   }
   const user_manager::UserType user_type = user->GetType();
-  if (user_type != user_manager::USER_TYPE_REGULAR) {
+  if (user_type != user_manager::UserType::kRegular) {
     return false;
   }
   if (ash::ProfileHelper::IsEphemeralUserProfile(profile)) {

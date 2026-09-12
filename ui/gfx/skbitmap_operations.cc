@@ -7,15 +7,21 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
 #include <algorithm>
+#include <array>
 
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/containers/auto_spanification_helper.h"
+#include "base/containers/span.h"
+#include "skia/ext/pmcolor_utils.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/skia/include/core/SkColorFilter.h"
-#include "third_party/skia/include/core/SkColorPriv.h"
 #include "third_party/skia/include/core/SkUnPreMultiply.h"
 #include "third_party/skia/include/effects/SkImageFilters.h"
+#include "third_party/skia/include/private/chromium/SkPMColor.h"
 #include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/size.h"
@@ -35,8 +41,8 @@ SkBitmap SkBitmapOperations::CreateInvertedBitmap(const SkBitmap& image) {
   inverted.allocN32Pixels(image.width(), image.height());
 
   for (int y = 0; y < image.height(); ++y) {
-    uint32_t* image_row = image.getAddr32(0, y);
-    uint32_t* dst_row = inverted.getAddr32(0, y);
+    base::span<uint32_t> image_row = UNSAFE_SKBITMAP_GETADDR32(image, 0, y);
+    base::span<uint32_t> dst_row = UNSAFE_SKBITMAP_GETADDR32(inverted, 0, y);
 
     for (int x = 0; x < image.width(); ++x) {
       uint32_t image_pixel = image_row[x];
@@ -72,9 +78,9 @@ SkBitmap SkBitmapOperations::CreateBlendedBitmap(const SkBitmap& first,
   double first_alpha = 1 - alpha;
 
   for (int y = 0; y < first.height(); ++y) {
-    uint32_t* first_row = first.getAddr32(0, y);
-    uint32_t* second_row = second.getAddr32(0, y);
-    uint32_t* dst_row = blended.getAddr32(0, y);
+    base::span<uint32_t> first_row = UNSAFE_SKBITMAP_GETADDR32(first, 0, y);
+    base::span<uint32_t> second_row = UNSAFE_SKBITMAP_GETADDR32(second, 0, y);
+    base::span<uint32_t> dst_row = UNSAFE_SKBITMAP_GETADDR32(blended, 0, y);
 
     for (int x = 0; x < first.width(); ++x) {
       uint32_t first_pixel = first_row[x];
@@ -108,14 +114,13 @@ SkBitmap SkBitmapOperations::CreateMaskedBitmap(const SkBitmap& rgb,
   masked.allocN32Pixels(rgb.width(), rgb.height());
 
   for (int y = 0; y < masked.height(); ++y) {
-    uint32_t* rgb_row = rgb.getAddr32(0, y);
-    uint32_t* alpha_row = alpha.getAddr32(0, y);
-    uint32_t* dst_row = masked.getAddr32(0, y);
+    base::span<uint32_t> rgb_row = UNSAFE_SKBITMAP_GETADDR32(rgb, 0, y);
+    base::span<uint32_t> alpha_row = UNSAFE_SKBITMAP_GETADDR32(alpha, 0, y);
+    base::span<uint32_t> dst_row = UNSAFE_SKBITMAP_GETADDR32(masked, 0, y);
 
     for (int x = 0; x < masked.width(); ++x) {
-      unsigned alpha32 = SkGetPackedA32(alpha_row[x]);
-      unsigned scale = SkAlpha255To256(alpha32);
-      dst_row[x] = SkAlphaMulQ(rgb_row[x], scale);
+      unsigned alpha32 = SkPMColorGetA(alpha_row[x]);
+      dst_row[x] = skia::ScaleChannelsByAlpha(rgb_row[x], alpha32);
     }
   }
 
@@ -138,9 +143,10 @@ SkBitmap SkBitmapOperations::CreateButtonBackground(SkColor color,
   double bg_b = SkColorGetB(color) * (bg_a / 255.0);
 
   for (int y = 0; y < mask.height(); ++y) {
-    uint32_t* dst_row = background.getAddr32(0, y);
-    uint32_t* image_row = image.getAddr32(0, y % image.height());
-    uint32_t* mask_row = mask.getAddr32(0, y);
+    base::span<uint32_t> dst_row = UNSAFE_SKBITMAP_GETADDR32(background, 0, y);
+    base::span<uint32_t> image_row =
+        UNSAFE_SKBITMAP_GETADDR32(image, 0, y % image.height());
+    base::span<uint32_t> mask_row = UNSAFE_SKBITMAP_GETADDR32(mask, 0, y);
 
     for (int x = 0; x < mask.width(); ++x) {
       uint32_t image_pixel = image_row[x % image.width()];
@@ -210,9 +216,8 @@ namespace HSLShift {
 // Routine used to process a line; typically specialized for specific kinds of
 // HSL shifts (to optimize).
 typedef void (*LineProcessor)(const color_utils::HSL&,
-                              const SkPMColor*,
-                              SkPMColor*,
-                              int width);
+                              base::span<const SkPMColor>,
+                              base::span<SkPMColor>);
 
 enum OperationOnH { kOpHNone = 0, kOpHShift, kNumHOps };
 enum OperationOnS { kOpSNone = 0, kOpSDec, kOpSInc, kNumSOps };
@@ -225,10 +230,9 @@ const double epsilon = 0.0005;
 
 // Line processor: default/universal (i.e., old-school).
 void LineProcDefault(const color_utils::HSL& hsl_shift,
-                     const SkPMColor* in,
-                     SkPMColor* out,
-                     int width) {
-  for (int x = 0; x < width; x++) {
+                     base::span<const SkPMColor> in,
+                     base::span<SkPMColor> out) {
+  for (size_t x = 0; x < in.size(); x++) {
     out[x] = SkPreMultiplyColor(color_utils::HSLShift(
         SkUnPreMultiply::PMColorToColor(in[x]), hsl_shift));
   }
@@ -236,20 +240,18 @@ void LineProcDefault(const color_utils::HSL& hsl_shift,
 
 // Line processor: no-op (i.e., copy).
 void LineProcCopy(const color_utils::HSL& hsl_shift,
-                  const SkPMColor* in,
-                  SkPMColor* out,
-                  int width) {
+                  base::span<const SkPMColor> in,
+                  base::span<SkPMColor> out) {
   DCHECK(hsl_shift.h < 0);
   DCHECK(hsl_shift.s < 0 || fabs(hsl_shift.s - 0.5) < HSLShift::epsilon);
   DCHECK(hsl_shift.l < 0 || fabs(hsl_shift.l - 0.5) < HSLShift::epsilon);
-  memcpy(out, in, static_cast<size_t>(width) * sizeof(out[0]));
+  out.copy_from(in);
 }
 
 // Line processor: H no-op, S no-op, L decrease.
 void LineProcHnopSnopLdec(const color_utils::HSL& hsl_shift,
-                          const SkPMColor* in,
-                          SkPMColor* out,
-                          int width) {
+                          base::span<const SkPMColor> in,
+                          base::span<SkPMColor> out) {
   const uint32_t den = 65536;
 
   DCHECK(hsl_shift.h < 0);
@@ -257,23 +259,22 @@ void LineProcHnopSnopLdec(const color_utils::HSL& hsl_shift,
   DCHECK(hsl_shift.l <= 0.5 - HSLShift::epsilon && hsl_shift.l >= 0);
 
   uint32_t ldec_num = static_cast<uint32_t>(hsl_shift.l * 2 * den);
-  for (int x = 0; x < width; x++) {
-    uint32_t a = SkGetPackedA32(in[x]);
-    uint32_t r = SkGetPackedR32(in[x]);
-    uint32_t g = SkGetPackedG32(in[x]);
-    uint32_t b = SkGetPackedB32(in[x]);
+  for (size_t x = 0; x < in.size(); x++) {
+    uint32_t a = SkPMColorGetA(in[x]);
+    uint32_t r = SkPMColorGetR(in[x]);
+    uint32_t g = SkPMColorGetG(in[x]);
+    uint32_t b = SkPMColorGetB(in[x]);
     r = r * ldec_num / den;
     g = g * ldec_num / den;
     b = b * ldec_num / den;
-    out[x] = SkPackARGB32(a, r, g, b);
+    out[x] = SkPMColorSetARGB(a, r, g, b);
   }
 }
 
 // Line processor: H no-op, S no-op, L increase.
 void LineProcHnopSnopLinc(const color_utils::HSL& hsl_shift,
-                          const SkPMColor* in,
-                          SkPMColor* out,
-                          int width) {
+                          base::span<const SkPMColor> in,
+                          base::span<SkPMColor> out) {
   const uint32_t den = 65536;
 
   DCHECK(hsl_shift.h < 0);
@@ -281,15 +282,15 @@ void LineProcHnopSnopLinc(const color_utils::HSL& hsl_shift,
   DCHECK(hsl_shift.l >= 0.5 + HSLShift::epsilon && hsl_shift.l <= 1);
 
   uint32_t linc_num = static_cast<uint32_t>((hsl_shift.l - 0.5) * 2 * den);
-  for (int x = 0; x < width; x++) {
-    uint32_t a = SkGetPackedA32(in[x]);
-    uint32_t r = SkGetPackedR32(in[x]);
-    uint32_t g = SkGetPackedG32(in[x]);
-    uint32_t b = SkGetPackedB32(in[x]);
+  for (size_t x = 0; x < in.size(); x++) {
+    uint32_t a = SkPMColorGetA(in[x]);
+    uint32_t r = SkPMColorGetR(in[x]);
+    uint32_t g = SkPMColorGetG(in[x]);
+    uint32_t b = SkPMColorGetB(in[x]);
     r += (a - r) * linc_num / den;
     g += (a - g) * linc_num / den;
     b += (a - b) * linc_num / den;
-    out[x] = SkPackARGB32(a, r, g, b);
+    out[x] = SkPMColorSetARGB(a, r, g, b);
   }
 }
 
@@ -318,20 +319,19 @@ void LineProcHnopSnopLinc(const color_utils::HSL& hsl_shift,
 
 // Line processor: H no-op, S decrease, L no-op.
 void LineProcHnopSdecLnop(const color_utils::HSL& hsl_shift,
-                          const SkPMColor* in,
-                          SkPMColor* out,
-                          int width) {
+                          base::span<const SkPMColor> in,
+                          base::span<SkPMColor> out) {
   DCHECK(hsl_shift.h < 0);
   DCHECK(hsl_shift.s >= 0 && hsl_shift.s <= 0.5 - HSLShift::epsilon);
   DCHECK(hsl_shift.l < 0 || fabs(hsl_shift.l - 0.5) < HSLShift::epsilon);
 
   const int32_t denom = 65536;
   int32_t s_numer = static_cast<int32_t>(hsl_shift.s * 2 * denom);
-  for (int x = 0; x < width; x++) {
-    int32_t a = static_cast<int32_t>(SkGetPackedA32(in[x]));
-    int32_t r = static_cast<int32_t>(SkGetPackedR32(in[x]));
-    int32_t g = static_cast<int32_t>(SkGetPackedG32(in[x]));
-    int32_t b = static_cast<int32_t>(SkGetPackedB32(in[x]));
+  for (size_t x = 0; x < in.size(); x++) {
+    int32_t a = static_cast<int32_t>(SkPMColorGetA(in[x]));
+    int32_t r = static_cast<int32_t>(SkPMColorGetR(in[x]));
+    int32_t g = static_cast<int32_t>(SkPMColorGetG(in[x]));
+    int32_t b = static_cast<int32_t>(SkPMColorGetB(in[x]));
 
     int32_t vmax, vmin;
     if (r > g) {  // This uses 3 compares rather than 4.
@@ -349,15 +349,14 @@ void LineProcHnopSdecLnop(const color_utils::HSL& hsl_shift,
     r = (denom_l + r * s_numer - s_numer_l) / denom;
     g = (denom_l + g * s_numer - s_numer_l) / denom;
     b = (denom_l + b * s_numer - s_numer_l) / denom;
-    out[x] = SkPackARGB32(a, r, g, b);
+    out[x] = SkPMColorSetARGB(a, r, g, b);
   }
 }
 
 // Line processor: H no-op, S decrease, L decrease.
 void LineProcHnopSdecLdec(const color_utils::HSL& hsl_shift,
-                          const SkPMColor* in,
-                          SkPMColor* out,
-                          int width) {
+                          base::span<const SkPMColor> in,
+                          base::span<SkPMColor> out) {
   DCHECK(hsl_shift.h < 0);
   DCHECK(hsl_shift.s >= 0 && hsl_shift.s <= 0.5 - HSLShift::epsilon);
   DCHECK(hsl_shift.l >= 0 && hsl_shift.l <= 0.5 - HSLShift::epsilon);
@@ -366,11 +365,11 @@ void LineProcHnopSdecLdec(const color_utils::HSL& hsl_shift,
   const int32_t denom = 1024;
   int32_t l_numer = static_cast<int32_t>(hsl_shift.l * 2 * denom);
   int32_t s_numer = static_cast<int32_t>(hsl_shift.s * 2 * denom);
-  for (int x = 0; x < width; x++) {
-    int32_t a = static_cast<int32_t>(SkGetPackedA32(in[x]));
-    int32_t r = static_cast<int32_t>(SkGetPackedR32(in[x]));
-    int32_t g = static_cast<int32_t>(SkGetPackedG32(in[x]));
-    int32_t b = static_cast<int32_t>(SkGetPackedB32(in[x]));
+  for (size_t x = 0; x < in.size(); x++) {
+    int32_t a = static_cast<int32_t>(SkPMColorGetA(in[x]));
+    int32_t r = static_cast<int32_t>(SkPMColorGetR(in[x]));
+    int32_t g = static_cast<int32_t>(SkPMColorGetG(in[x]));
+    int32_t b = static_cast<int32_t>(SkPMColorGetB(in[x]));
 
     int32_t vmax, vmin;
     if (r > g) {  // This uses 3 compares rather than 4.
@@ -388,15 +387,14 @@ void LineProcHnopSdecLdec(const color_utils::HSL& hsl_shift,
     r = (denom_l + r * s_numer - s_numer_l) * l_numer / (denom * denom);
     g = (denom_l + g * s_numer - s_numer_l) * l_numer / (denom * denom);
     b = (denom_l + b * s_numer - s_numer_l) * l_numer / (denom * denom);
-    out[x] = SkPackARGB32(a, r, g, b);
+    out[x] = SkPMColorSetARGB(a, r, g, b);
   }
 }
 
 // Line processor: H no-op, S decrease, L increase.
 void LineProcHnopSdecLinc(const color_utils::HSL& hsl_shift,
-                          const SkPMColor* in,
-                          SkPMColor* out,
-                          int width) {
+                          base::span<const SkPMColor> in,
+                          base::span<SkPMColor> out) {
   DCHECK(hsl_shift.h < 0);
   DCHECK(hsl_shift.s >= 0 && hsl_shift.s <= 0.5 - HSLShift::epsilon);
   DCHECK(hsl_shift.l >= 0.5 + HSLShift::epsilon && hsl_shift.l <= 1);
@@ -405,11 +403,11 @@ void LineProcHnopSdecLinc(const color_utils::HSL& hsl_shift,
   const int32_t denom = 1024;
   int32_t l_numer = static_cast<int32_t>((hsl_shift.l - 0.5) * 2 * denom);
   int32_t s_numer = static_cast<int32_t>(hsl_shift.s * 2 * denom);
-  for (int x = 0; x < width; x++) {
-    int32_t a = static_cast<int32_t>(SkGetPackedA32(in[x]));
-    int32_t r = static_cast<int32_t>(SkGetPackedR32(in[x]));
-    int32_t g = static_cast<int32_t>(SkGetPackedG32(in[x]));
-    int32_t b = static_cast<int32_t>(SkGetPackedB32(in[x]));
+  for (size_t x = 0; x < in.size(); x++) {
+    int32_t a = static_cast<int32_t>(SkPMColorGetA(in[x]));
+    int32_t r = static_cast<int32_t>(SkPMColorGetR(in[x]));
+    int32_t g = static_cast<int32_t>(SkPMColorGetG(in[x]));
+    int32_t b = static_cast<int32_t>(SkPMColorGetB(in[x]));
 
     int32_t vmax, vmin;
     if (r > g) {  // This uses 3 compares rather than 4.
@@ -431,46 +429,51 @@ void LineProcHnopSdecLinc(const color_utils::HSL& hsl_shift,
     r = (r * denom + (a * denom - r) * l_numer) / (denom * denom);
     g = (g * denom + (a * denom - g) * l_numer) / (denom * denom);
     b = (b * denom + (a * denom - b) * l_numer) / (denom * denom);
-    out[x] = SkPackARGB32(a, r, g, b);
+    out[x] = SkPMColorSetARGB(a, r, g, b);
   }
 }
 
-const LineProcessor kLineProcessors[kNumHOps][kNumSOps][kNumLOps] = {
-  { // H: kOpHNone
-    { // S: kOpSNone
-      LineProcCopy,         // L: kOpLNone
-      LineProcHnopSnopLdec, // L: kOpLDec
-      LineProcHnopSnopLinc  // L: kOpLInc
-    },
-    { // S: kOpSDec
-      LineProcHnopSdecLnop, // L: kOpLNone
-      LineProcHnopSdecLdec, // L: kOpLDec
-      LineProcHnopSdecLinc  // L: kOpLInc
-    },
-    { // S: kOpSInc
-      LineProcDefault, // L: kOpLNone
-      LineProcDefault, // L: kOpLDec
-      LineProcDefault  // L: kOpLInc
-    }
-  },
-  { // H: kOpHShift
-    { // S: kOpSNone
-      LineProcDefault, // L: kOpLNone
-      LineProcDefault, // L: kOpLDec
-      LineProcDefault  // L: kOpLInc
-    },
-    { // S: kOpSDec
-      LineProcDefault, // L: kOpLNone
-      LineProcDefault, // L: kOpLDec
-      LineProcDefault  // L: kOpLInc
-    },
-    { // S: kOpSInc
-      LineProcDefault, // L: kOpLNone
-      LineProcDefault, // L: kOpLDec
-      LineProcDefault  // L: kOpLInc
-    }
-  }
-};
+const std::array<
+    std::array<std::array<const LineProcessor, kNumLOps>, kNumSOps>,
+    kNumHOps>
+    kLineProcessors = {{{{// H: kOpHNone
+                          {{
+                              // S: kOpSNone
+                              LineProcCopy,          // L: kOpLNone
+                              LineProcHnopSnopLdec,  // L: kOpLDec
+                              LineProcHnopSnopLinc   // L: kOpLInc
+                          }},
+                          {{
+                              // S: kOpSDec
+                              LineProcHnopSdecLnop,  // L: kOpLNone
+                              LineProcHnopSdecLdec,  // L: kOpLDec
+                              LineProcHnopSdecLinc   // L: kOpLInc
+                          }},
+                          {{
+                              // S: kOpSInc
+                              LineProcDefault,  // L: kOpLNone
+                              LineProcDefault,  // L: kOpLDec
+                              LineProcDefault   // L: kOpLInc
+                          }}}},
+                        {{// H: kOpHShift
+                          {{
+                              // S: kOpSNone
+                              LineProcDefault,  // L: kOpLNone
+                              LineProcDefault,  // L: kOpLDec
+                              LineProcDefault   // L: kOpLInc
+                          }},
+                          {{
+                              // S: kOpSDec
+                              LineProcDefault,  // L: kOpLNone
+                              LineProcDefault,  // L: kOpLDec
+                              LineProcDefault   // L: kOpLInc
+                          }},
+                          {{
+                              // S: kOpSInc
+                              LineProcDefault,  // L: kOpLNone
+                              LineProcDefault,  // L: kOpLDec
+                              LineProcDefault   // L: kOpLInc
+                          }}}}}};
 
 }  // namespace HSLShift
 }  // namespace
@@ -514,10 +517,12 @@ SkBitmap SkBitmapOperations::CreateHSLShiftedBitmap(
 
   // Loop through the pixels of the original bitmap.
   for (int y = 0; y < bitmap.height(); ++y) {
-    SkPMColor* pixels = bitmap.getAddr32(0, y);
-    SkPMColor* tinted_pixels = shifted.getAddr32(0, y);
+    base::span<const SkPMColor> pixels =
+        UNSAFE_SKBITMAP_GETADDR32(bitmap, 0, y);
+    base::span<SkPMColor> tinted_pixels =
+        UNSAFE_SKBITMAP_GETADDR32(shifted, 0, y);
 
-    (*line_proc)(hsl_shift, pixels, tinted_pixels, bitmap.width());
+    (*line_proc)(hsl_shift, pixels, tinted_pixels);
   }
 
   return shifted;
@@ -538,8 +543,9 @@ SkBitmap SkBitmapOperations::CreateTiledBitmap(const SkBitmap& source,
     while (y_pix < 0)
       y_pix += source.height();
 
-    uint32_t* source_row = source.getAddr32(0, y_pix);
-    uint32_t* dst_row = cropped.getAddr32(0, y);
+    base::span<uint32_t> source_row =
+        UNSAFE_SKBITMAP_GETADDR32(source, 0, y_pix);
+    base::span<uint32_t> dst_row = UNSAFE_SKBITMAP_GETADDR32(cropped, 0, y);
 
     for (int x = 0; x < dst_w; ++x) {
       int x_pix = (src_x + x) % source.width();
@@ -586,12 +592,14 @@ SkBitmap SkBitmapOperations::DownsampleByTwo(const SkBitmap& bitmap) {
 
   for (int dest_y = 0; dest_y < result.height(); ++dest_y) {
     const int src_y = dest_y << 1;
-    const SkPMColor* SK_RESTRICT cur_src0 = bitmap.getAddr32(0, src_y);
-    const SkPMColor* SK_RESTRICT cur_src1 = cur_src0;
+    base::span<const SkPMColor> cur_src0 =
+        UNSAFE_SKBITMAP_GETADDR32(bitmap, 0, src_y);
+    base::span<const SkPMColor> cur_src1 = cur_src0;
     if (src_y + 1 < bitmap.height())
-      cur_src1 = bitmap.getAddr32(0, src_y + 1);
+      cur_src1 = UNSAFE_SKBITMAP_GETADDR32(bitmap, 0, src_y + 1);
 
-    SkPMColor* SK_RESTRICT cur_dst = result.getAddr32(0, dest_y);
+    base::span<SkPMColor> cur_dst =
+        UNSAFE_SKBITMAP_GETADDR32(result, 0, dest_y);
 
     for (int dest_x = 0; dest_x <= resultLastX; ++dest_x) {
       // This code is based on downsampleby2_proc32 in SkBitmap.cpp. It is very
@@ -625,10 +633,17 @@ SkBitmap SkBitmapOperations::DownsampleByTwo(const SkBitmap& bitmap) {
       // |ag| has the alpha and green channels shifted right by 8 bits from
       // there they should end up, so shifting left by 6 gives them in the
       // correct position divided by 4.
-      *cur_dst++ = ((rb >> 2) & 0xFF00FF) | ((ag << 6) & 0xFF00FF00);
+      (base::PostIncrementSpan(cur_dst))[0] =
+          ((rb >> 2) & 0xFF00FF) | ((ag << 6) & 0xFF00FF00);
 
-      cur_src0 += 2;
-      cur_src1 += 2;
+      // Avoid incrementing past the end of the bitmap.
+      if (cur_src0.size() >= 2u) {
+        cur_src0 = cur_src0.subspan(2u);
+        cur_src1 = cur_src1.subspan(2u);
+      } else {
+        cur_src0 = {};
+        cur_src1 = {};
+      }
     }
   }
 
@@ -671,7 +686,7 @@ SkBitmap SkBitmapOperations::CreateTransposedBitmap(const SkBitmap& image) {
   transposed.allocN32Pixels(image.height(), image.width());
 
   for (int y = 0; y < image.height(); ++y) {
-    uint32_t* image_row = image.getAddr32(0, y);
+    base::span<uint32_t> image_row = UNSAFE_SKBITMAP_GETADDR32(image, 0, y);
     for (int x = 0; x < image.width(); ++x) {
       uint32_t* dst = transposed.getAddr32(y, x);
       *dst = image_row[x];
@@ -719,8 +734,7 @@ SkBitmap SkBitmapOperations::CreateDropShadow(
                    SkIntToScalar(shadow_margin.top()));
 
   SkPaint paint;
-  for (size_t i = 0; i < shadows.size(); ++i) {
-    const gfx::ShadowValue& shadow = shadows[i];
+  for (const auto& shadow : shadows) {
     SkBitmap shadow_image = SkBitmapOperations::CreateColorMask(bitmap,
                                                                 shadow.color());
 
@@ -775,7 +789,6 @@ SkBitmap SkBitmapOperations::Rotate(const SkBitmap& source,
   canvas.translate(-SkFloatToScalar(source.width() * 0.5f),
                    -SkFloatToScalar(source.height() * 0.5f));
   canvas.drawImage(source.asImage(), 0, 0);
-  canvas.flush();
 
   return result;
 }

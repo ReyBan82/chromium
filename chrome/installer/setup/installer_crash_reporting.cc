@@ -8,11 +8,13 @@
 #include <memory>
 #include <vector>
 
+#include "base/base_paths.h"
 #include "base/command_line.h"
 #include "base/debug/leak_annotations.h"
 #include "base/files/file_path.h"
 #include "base/notreached.h"
 #include "base/path_service.h"
+#include "base/strings/to_string.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/version.h"
 #include "base/win/registry.h"
@@ -20,7 +22,9 @@
 #include "chrome/install_static/install_details.h"
 #include "chrome/installer/setup/installer_crash_reporter_client.h"
 #include "chrome/installer/setup/installer_state.h"
-#include "chrome/installer/util/google_update_settings.h"
+#include "chrome/installer/util/logging_installer.h"
+#include "chrome/updater/updater_scope.h"
+#include "chrome/updater/util/path_util.h"
 #include "components/crash/core/app/crashpad.h"
 #include "components/crash/core/common/crash_key.h"
 #include "components/crash/core/common/crash_keys.h"
@@ -40,12 +44,16 @@ const char* OperationToString(InstallerState::Operation operation) {
       break;
   }
   NOTREACHED();
-  return "";
 }
 
-// Retrieve the SYSTEM version of TEMP. We do this instead of GetTempPath so
-// that both elevated and SYSTEM runs share the same directory.
+// Returns `SystemTemp` if available. Otherwise, retrieves the SYSTEM version of
+// TEMP. We do this instead of GetTempPath so that both elevated and SYSTEM runs
+// share the same directory.
 bool GetSystemTemp(base::FilePath* temp) {
+  if (base::PathService::Get(base::DIR_SYSTEM_TEMP, temp)) {
+    return true;
+  }
+
   base::win::RegKey reg_key(
       HKEY_LOCAL_MACHINE,
       L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
@@ -59,7 +67,8 @@ bool GetSystemTemp(base::FilePath* temp) {
 
 }  // namespace
 
-void ConfigureCrashReporting(const InstallerState& installer_state) {
+void ConfigureCrashReporting(const InitialPreferences& initial_prefs,
+                             const InstallerState& installer_state) {
   // This is inspired by work done in various parts of Chrome startup to connect
   // to the crash service. Since the installer does not split its work between
   // a stub .exe and a main .dll, crash reporting can be configured in one place
@@ -85,14 +94,22 @@ void ConfigureCrashReporting(const InstallerState& installer_state) {
     }
   }
 
-  crash_reporter::InitializeCrashpadWithEmbeddedHandler(
-      true, "Chrome Installer", "", base::FilePath());
+  std::vector<base::FilePath> attachments;
+  attachments.push_back(GetLogFilePath(initial_prefs));
+  const updater::UpdaterScope updater_scope =
+      installer_state.system_install() ? updater::UpdaterScope::kSystem
+                                       : updater::UpdaterScope::kUser;
+  if (auto path = updater::GetLogFilePath(updater_scope);
+      path.has_value() && !path->empty()) {
+    attachments.push_back(*std::move(path));
+  }
+  if (auto path = updater::GetHistoryLogFilePath(updater_scope);
+      path.has_value() && !path->empty()) {
+    attachments.push_back(*std::move(path));
+  }
 
-  // Set up the metrics client id (a la child_process_logging::Init()).
-  std::unique_ptr<metrics::ClientInfo> client_info =
-      GoogleUpdateSettings::LoadMetricsClientInfo();
-  if (client_info)
-    crash_keys::SetMetricsClientIdFromGUID(client_info->client_id);
+  crash_reporter::InitializeCrashpadWithEmbeddedHandler(
+      true, "Chrome Installer", "", base::FilePath(), attachments);
 }
 
 void SetInitialCrashKeys(const InstallerState& state) {
@@ -102,7 +119,7 @@ void SetInitialCrashKeys(const InstallerState& state) {
   operation.Set(OperationToString(state.operation()));
 
   static CrashKeyString<6> is_system_level("system-level");
-  is_system_level.Set(state.system_install() ? "true" : "false");
+  is_system_level.Set(base::ToString(state.system_install()));
 
   // This is a Windows registry key, which maxes out at 255 chars.
   static CrashKeyString<256> state_crash_key("state-key");
@@ -111,7 +128,7 @@ void SetInitialCrashKeys(const InstallerState& state) {
     state_crash_key.Set(base::WideToUTF8(state_key));
 
   // Set crash keys containing the registry values used to determine Chrome's
-  // update channel at process startup; see https://crbug.com/579504.
+  // update channel at process startup; see https://crbug.com/41235563.
   const auto& details = install_static::InstallDetails::Get();
 
   static CrashKeyString<50> ap_value("ap");

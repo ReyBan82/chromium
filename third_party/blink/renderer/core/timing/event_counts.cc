@@ -5,6 +5,7 @@
 #include "third_party/blink/renderer/core/timing/event_counts.h"
 
 #include "third_party/blink/renderer/core/event_type_names.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string_hash.h"
 #include "third_party/blink/renderer/platform/wtf/wtf.h"
@@ -19,8 +20,7 @@ class EventCountsIterationSource final
 
   bool FetchNextItem(ScriptState* script_state,
                      String& map_key,
-                     uint64_t& map_value,
-                     ExceptionState&) override {
+                     uint64_t& map_value) override {
     if (iterator_ == map_->Map().end())
       return false;
     map_key = iterator_->key;
@@ -42,7 +42,9 @@ class EventCountsIterationSource final
 
 void EventCounts::Add(const AtomicString& event_type) {
   auto iterator = event_count_map_.find(event_type);
-  DCHECK_NE(iterator, event_count_map_.end());
+  if (iterator == event_count_map_.end()) {
+    return;
+  }
   iterator->value++;
 }
 
@@ -92,17 +94,21 @@ EventCounts::EventCounts() {
   for (const auto& type : event_types) {
     event_count_map_.insert(type, 0u);
   }
+  if (RuntimeEnabledFeatures::NavigationEventTimingEnabled()) {
+    event_count_map_.insert(event_type_names::kNavigate, 0u);
+    event_count_map_.insert(event_type_names::kPopstate, 0u);
+    event_count_map_.insert(event_type_names::kHashchange, 0u);
+  }
 }
 
 PairSyncIterable<EventCounts>::IterationSource*
-EventCounts::CreateIterationSource(ScriptState*, ExceptionState&) {
+EventCounts::CreateIterationSource(ScriptState*) {
   return MakeGarbageCollected<EventCountsIterationSource>(*this);
 }
 
 bool EventCounts::GetMapEntry(ScriptState*,
                               const String& key,
-                              uint64_t& value,
-                              ExceptionState&) {
+                              uint64_t& value) {
   auto it = event_count_map_.find(AtomicString(key));
   if (it == event_count_map_.end())
     return false;

@@ -6,23 +6,42 @@
 
 #include <algorithm>
 
+#include "base/check_is_test.h"
+#include "base/feature_list.h"
+#include "base/location.h"
 #include "base/logging.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/strings/stringprintf.h"
+#include "components/os_crypt/async/common/encryptor.h"
 #include "sql/transaction.h"
-
-// Current version number.  Note: when changing the current version number,
-// corresponding changes must happen in the unit tests, and new migration test
-// added.  See `WebDatabaseMigrationTest::kCurrentTestedVersionNumber`.
-// static
-const int WebDatabase::kCurrentVersionNumber = 111;
-
-const int WebDatabase::kDeprecatedVersionNumber = 82;
 
 const base::FilePath::CharType WebDatabase::kInMemoryPath[] =
     FILE_PATH_LITERAL(":memory");
 
 namespace {
 
-const int kCompatibleVersionNumber = 106;
+// Limits the duration of transaction to the scope of their modifications. Avoid
+// keeping pending transactions and pending modifications outside of their
+// scope.
+//
+// TODO(6175955): When this is launched, replace
+// `WebDatabase::AcquireTransaction()` with the typical pattern:
+//     sql::Transaction transaction(db());
+//     if (!transaction.Begin()) {...}
+BASE_FEATURE(kSqlScopedTransactionWebDatabase,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kSqlWALModeOnWebDatabase, base::FEATURE_DISABLED_BY_DEFAULT);
+
+void LogInitResult(WebDatabase::InitResult result) {
+  base::UmaHistogramEnumeration("WebDatabase.InitResult", result);
+}
+
+// Version 151 writes tuples to one of `autofill::EntityTable`'s tables that
+// are not processed correctly by clients with version 150. As a result,
+// some `autofill::EntityInstance`s on these old clients would be incomplete.
+constexpr int kCompatibleVersionNumber = 151;
 
 // Change the version number and possibly the compatibility version of
 // |meta_table_|.
@@ -40,41 +59,69 @@ const int kCompatibleVersionNumber = 106;
 sql::InitStatus FailedMigrationTo(int version_num) {
   LOG(WARNING) << "Unable to update web database to version " << version_num
                << ".";
-  NOTREACHED();
+  base::UmaHistogramExactLinear("WebDatabase.FailedMigrationToVersion",
+                                version_num,
+                                WebDatabase::kCurrentVersionNumber + 1);
+  LogInitResult(WebDatabase::InitResult::kMigrationError);
   return sql::INIT_FAILURE;
 }
 
 }  // namespace
 
 WebDatabase::WebDatabase()
-    : db_({// Run the database in exclusive mode. Nobody else should be
-           // accessing the database while we're running, and this will give
-           // somewhat improved perf.
-           .exclusive_locking = true,
-           // We don't store that much data in the tables so use a small page
-           // size. This provides a large benefit for empty tables (which is
-           // very likely with the tables we create).
-           .page_size = 2048,
-           // We shouldn't have much data and what access we currently have is
-           // quite infrequent. So we go with a small cache size.
-           .cache_size = 32}) {}
+    : db_(sql::DatabaseOptions()
+              .set_wal_mode(
+                  base::FeatureList::IsEnabled(kSqlWALModeOnWebDatabase))
+              // We don't store that much data in the tables so use a small page
+              // size. This provides a large benefit for empty tables (which is
+              // very likely with the tables we create).
+              .set_page_size(2048)
+              // We shouldn't have much data and what access we currently have
+              // is quite infrequent. So we go with a small cache size.
+              .set_cache_size(32),
+          /*tag=*/"Web"),
+      use_scoped_transaction_(
+          base::FeatureList::IsEnabled(kSqlScopedTransactionWebDatabase)) {}
 
-WebDatabase::~WebDatabase() = default;
+WebDatabase::~WebDatabase() {
+  for (auto& [key, table] : tables_) {
+    table->Shutdown();
+  }
+}
 
 void WebDatabase::AddTable(WebDatabaseTable* table) {
   tables_[table->GetTypeKey()] = table;
 }
 
 WebDatabaseTable* WebDatabase::GetTable(WebDatabaseTable::TypeKey key) {
-  return tables_[key];
+  WebDatabaseTable* table = tables_[key];
+  CHECK(table);
+  return table;
 }
 
 void WebDatabase::BeginTransaction() {
-  db_.BeginTransaction();
+  if (!use_scoped_transaction_) {
+    db_.BeginTransactionDeprecated();
+  }
 }
 
 void WebDatabase::CommitTransaction() {
-  db_.CommitTransaction();
+  if (!use_scoped_transaction_) {
+    db_.CommitTransactionDeprecated();
+  }
+}
+
+std::unique_ptr<sql::Transaction> WebDatabase::AcquireTransaction() {
+  if (use_scoped_transaction_) {
+    // Only one active transaction at the time is allowed.
+    DCHECK(!db_.HasActiveTransactions());
+    auto transaction = std::make_unique<sql::Transaction>(&db_);
+    if (transaction->Begin()) {
+      return transaction;
+    }
+  }
+
+  return nullptr;
 }
 
 std::string WebDatabase::GetDiagnosticInfo(int extended_error,
@@ -86,46 +133,59 @@ sql::Database* WebDatabase::GetSQLConnection() {
   return &db_;
 }
 
-sql::InitStatus WebDatabase::Init(const base::FilePath& db_name) {
-  db_.set_histogram_tag("Web");
+sql::InitStatus WebDatabase::Init(
+    const base::FilePath& db_name,
+    scoped_refptr<const os_crypt_async::Encryptor> encryptor) {
+  // Only unit tests whose tables don't use any crypto for their tables pass in
+  // a null encryptor.
+  if (!encryptor) {
+    CHECK_IS_TEST();
+  }
 
   if ((db_name.value() == kInMemoryPath) ? !db_.OpenInMemory()
                                          : !db_.Open(db_name)) {
+    LogInitResult(InitResult::kCouldNotOpen);
     return sql::INIT_FAILURE;
   }
+  DCHECK(db_.is_open());
 
   // Clobber really old databases.
   static_assert(kDeprecatedVersionNumber < kCurrentVersionNumber,
                 "Deprecation version must be less than current");
-  sql::MetaTable::RazeIfIncompatible(
-      &db_, /*lowest_supported_version=*/kDeprecatedVersionNumber + 1,
-      kCurrentVersionNumber);
+  if (sql::MetaTable::RazeIfIncompatible(
+          &db_, /*lowest_supported_version=*/kDeprecatedVersionNumber + 1,
+          kCurrentVersionNumber) == sql::RazeIfIncompatibleResult::kFailed) {
+    LogInitResult(InitResult::kCouldNotRazeIncompatibleVersion);
+    return sql::INIT_FAILURE;
+  }
 
   // Scope initialization in a transaction so we can't be partially
   // initialized.
   sql::Transaction transaction(&db_);
-  if (!transaction.Begin())
+  if (!transaction.Begin()) {
+    LogInitResult(InitResult::kFailedToBeginInitTransaction);
     return sql::INIT_FAILURE;
+  }
 
   // Version check.
-  if (!meta_table_.Init(&db_, kCurrentVersionNumber, kCompatibleVersionNumber))
+  if (!meta_table_.Init(&db_, kCurrentVersionNumber,
+                        kCompatibleVersionNumber)) {
+    LogInitResult(InitResult::kMetaTableInitFailed);
     return sql::INIT_FAILURE;
-  if (meta_table_.GetCompatibleVersionNumber() > kCurrentVersionNumber) {
-    LOG(WARNING) << "Web database is too new.";
-    return sql::INIT_TOO_NEW;
   }
 
   // Initialize the tables.
   for (const auto& table : tables_) {
-    table.second->Init(&db_, &meta_table_);
+    table.second->Init(&db_, &meta_table_, encryptor);
   }
 
   // If the file on disk is an older database version, bring it up to date.
   // If the migration fails we return an error to caller and do not commit
   // the migration.
   sql::InitStatus migration_status = MigrateOldVersionsAsNeeded();
-  if (migration_status != sql::INIT_OK)
+  if (migration_status != sql::INIT_OK) {
     return migration_status;
+  }
 
   // Create the desired SQL tables if they do not already exist.
   // It's important that this happen *after* the migration code runs.
@@ -134,11 +194,20 @@ sql::InitStatus WebDatabase::Init(const base::FilePath& db_name) {
   for (const auto& table : tables_) {
     if (!table.second->CreateTablesIfNecessary()) {
       LOG(WARNING) << "Unable to initialize the web database.";
+      LogInitResult(InitResult::kFailedToCreateTable);
       return sql::INIT_FAILURE;
     }
   }
 
-  return transaction.Commit() ? sql::INIT_OK : sql::INIT_FAILURE;
+  bool result = transaction.Commit();
+  if (!result) {
+    LogInitResult(InitResult::kFailedToCommitInitTransaction);
+    return sql::INIT_FAILURE;
+  }
+
+  LogInitResult(InitResult::kSuccess);
+  DCHECK(db_.is_open());
+  return sql::INIT_OK;
 }
 
 sql::InitStatus WebDatabase::MigrateOldVersionsAsNeeded() {
@@ -174,6 +243,9 @@ sql::InitStatus WebDatabase::MigrateOldVersionsAsNeeded() {
         return FailedMigrationTo(next_version);
       }
     }
+    base::UmaHistogramExactLinear("WebDatabase.SucceededMigrationToVersion",
+                                  next_version,
+                                  WebDatabase::kCurrentVersionNumber + 1);
   }
   return sql::INIT_OK;
 }
@@ -191,6 +263,9 @@ bool WebDatabase::MigrateToVersion(int version,
     case 105:
       *update_compatible_version = true;
       return MigrateToVersion105DropIbansTable();
+    case 154:
+      *update_compatible_version = true;
+      return MigrateToVersion154DropPlusAddressTables();
   }
 
   return true;
@@ -214,4 +289,15 @@ bool WebDatabase::MigrateToVersion79DropLoginsTable() {
 
 bool WebDatabase::MigrateToVersion105DropIbansTable() {
   return db_.Execute("DROP TABLE IF EXISTS ibans");
+}
+
+bool WebDatabase::MigrateToVersion154DropPlusAddressTables() {
+  sql::Transaction transaction(&db_);
+  return transaction.Begin() &&
+         db_.Execute("DROP TABLE IF EXISTS plus_addresses") &&
+         db_.Execute(
+             "DROP TABLE IF EXISTS plus_address_sync_model_type_state") &&
+         db_.Execute(
+             "DROP TABLE IF EXISTS plus_address_sync_entity_metadata") &&
+         transaction.Commit();
 }

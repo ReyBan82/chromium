@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "base/files/scoped_temp_dir.h"
+#include "base/functional/callback_helpers.h"
 #include "base/test/gmock_callback_support.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/mock_callback.h"
@@ -69,7 +70,7 @@ class MockBackgroundDownloadTaskHelper : public BackgroundDownloadTaskHelper {
 // Test fixture for BackgroundDownloadServiceImpl.
 class BackgroundDownloadServiceImplTest : public PlatformTest {
  protected:
-  BackgroundDownloadServiceImplTest() {}
+  BackgroundDownloadServiceImplTest() = default;
   ~BackgroundDownloadServiceImplTest() override = default;
 
   void SetUp() override {
@@ -93,7 +94,7 @@ class BackgroundDownloadServiceImplTest : public PlatformTest {
         std::move(file_monitor), dir_.GetPath(), std::move(logger), &log_sink_,
         &clock_);
     ON_CALL(*file_monitor_, DeleteUnknownFiles(_, _, _))
-        .WillByDefault(RunOnceCallback<2>());
+        .WillByDefault(base::test::RunOnceCallbackRepeatedly<2>());
     service_->Initialize(base::DoNothing());
   }
 

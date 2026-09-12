@@ -4,9 +4,18 @@
 
 #include "ash/shelf/shelf_bubble.h"
 
+#include <memory>
+
 #include "ash/public/cpp/shell_window_ids.h"
+#include "base/functional/bind.h"
+#include "third_party/skia/include/core/SkColor.h"
 #include "ui/accessibility/ax_enums.mojom.h"
 #include "ui/aura/window.h"
+#include "ui/base/metadata/metadata_header_macros.h"
+#include "ui/base/metadata/metadata_impl_macros.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
+#include "ui/display/screen.h"
+#include "ui/gfx/geometry/rounded_corners_f.h"
 #include "ui/views/bubble/bubble_frame_view.h"
 
 namespace {
@@ -28,44 +37,52 @@ views::BubbleBorder::Arrow GetArrow(ash::ShelfAlignment alignment) {
 
 namespace ash {
 
-ShelfBubble::ShelfBubble(views::View* anchor, ShelfAlignment alignment)
-    : views::BubbleDialogDelegateView(anchor, GetArrow(alignment)),
-      background_animator_(
-          /* Don't pass the Shelf so the translucent color is always used. */
-          nullptr,
-          Shell::Get()->wallpaper_controller()) {
-  // Bubbles that use transparent colors should not paint their ClientViews to a
-  // layer as doing so could result in visual artifacts.
-  SetPaintClientToLayer(false);
-  SetButtons(ui::DIALOG_BUTTON_NONE);
-  background_animator_.Init(ShelfBackgroundType::kDefaultBg);
-  background_animator_.AddObserver(this);
+ShelfBubble::ShelfBubble(
+    views::View* anchor,
+    ShelfAlignment alignment,
+    bool for_tooltip,
+    std::optional<views::BubbleBorder::Arrow> arrow_position)
+    : views::BubbleDialogDelegateView(
+          anchor,
+          arrow_position.value_or(GetArrow(alignment))),
+      for_tooltip_(for_tooltip) {
+  SetBackgroundColor(SK_ColorTRANSPARENT);
+  SetButtons(static_cast<int>(ui::mojom::DialogButton::kNone));
+  SetUseAnchorWindowBounds(false);
+  set_frame_margins({.title = gfx::Insets()});
+
+  if (for_tooltip_) {
+    set_available_screen_bounds_callback(
+        base::BindRepeating([](const gfx::Rect& rect) {
+          return display::Screen::Get()
+              ->GetDisplayNearestPoint(rect.CenterPoint())
+              .bounds();
+        }));
+  }
 
   // Place the bubble in the same display as the anchor.
   set_parent_window(
       anchor_widget()->GetNativeWindow()->GetRootWindow()->GetChildById(
           kShellWindowId_SettingBubbleContainer));
+
   // We override the role because the base class sets it to alert dialog,
   // which results in each tooltip title being announced twice on screen
   // readers each time it is shown.
   SetAccessibleWindowRole(ax::mojom::Role::kDialog);
 }
 
-ShelfBubble::~ShelfBubble() {
-  background_animator_.RemoveObserver(this);
-}
+ShelfBubble::~ShelfBubble() = default;
 
 void ShelfBubble::CreateBubble() {
   // Actually create the bubble.
   views::BubbleDialogDelegateView::CreateBubble(this);
 
   // Settings that should only be changed just after bubble creation.
-  GetBubbleFrameView()->SetCornerRadius(border_radius_);
-  GetBubbleFrameView()->SetBackgroundColor(color());
+  GetBubbleFrameView()->SetRoundedCorners(gfx::RoundedCornersF(border_radius_));
+  GetBubbleFrameView()->SetBackgroundColor(background_color());
 }
 
-void ShelfBubble::UpdateShelfBackground(SkColor color) {
-  set_color(color);
-}
+BEGIN_METADATA(ShelfBubble)
+END_METADATA
 
 }  // namespace ash

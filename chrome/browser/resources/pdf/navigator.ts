@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {BrowserApi} from './browser_api.js';
-import {OpenPdfParams, OpenPdfParamsParser} from './open_pdf_params_parser.js';
-import {Viewport} from './viewport.js';
+import type {BrowserApi} from './browser_api.js';
+import type {OpenPdfParams, OpenPdfParamsParser} from './open_pdf_params_parser.js';
+import type {Viewport} from './viewport.js';
 
 // NavigatorDelegate for calling browser-specific functions to do the actual
 // navigating.
@@ -74,8 +74,22 @@ export class NavigatorDelegateImpl implements NavigatorDelegate {
   }
 }
 
+// Interface for the Navigator that navigates to links inside or outside the
+// PDF.
+export interface PdfNavigator {
+  /**
+   * Function to navigate to the given URL. This might involve navigating
+   * within the PDF page or opening a new url (in the same tab or a new tab).
+   * @param disposition The window open disposition when navigating to the new
+   *     URL.
+   * @return When navigation has completed (used for testing).
+   */
+  navigate(urlString: string, disposition: WindowOpenDisposition):
+      Promise<void>;
+}
+
 // Navigator for navigating to links inside or outside the PDF.
-export class PdfNavigator {
+export class PdfNavigatorImpl implements PdfNavigator {
   private originalUrl_: URL|null = null;
   private viewport_: Viewport;
   private paramsParser_: OpenPdfParamsParser;
@@ -275,4 +289,4 @@ export enum WindowOpenDisposition {
 
 // Export on |window| such that scripts injected from pdf_extension_test.cc can
 // access it.
-Object.assign(window, {PdfNavigator, WindowOpenDisposition});
+Object.assign(window, {PdfNavigatorImpl, WindowOpenDisposition});

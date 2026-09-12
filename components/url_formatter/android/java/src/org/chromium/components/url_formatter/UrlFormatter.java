@@ -8,28 +8,31 @@ import android.text.TextUtils;
 
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
-import org.chromium.build.annotations.MainDex;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.url.GURL;
 import org.chromium.url.Origin;
 
-/**
- * Wrapper for utilities in url_formatter.
- */
+/** Wrapper for utilities in url_formatter. */
 @JNINamespace("url_formatter::android")
-@MainDex
+@NullMarked
 public final class UrlFormatter {
     /**
      * Refer to url_formatter::FixupURL.
      *
+     * <pre>
      * Given a URL-like string, returns a possibly-invalid GURL. For example:
      *  - "google.com" -> "http://google.com/"
      *  - "about:" -> "chrome://version/"
      *  - "//mail.google.com:/" -> "file:///mail.google.com:/"
      *  - "0x100.0" -> "http://0x100.0/" (invalid)
+     * </pre>
      */
-    public static GURL fixupUrl(String uri) {
+    public static GURL fixupUrl(@Nullable String uri) {
         if (TextUtils.isEmpty(uri)) return GURL.emptyGURL();
         GURL.ensureNativeInitializedForGURL();
         return UrlFormatterJni.get().fixupUrl(uri);
@@ -197,7 +200,8 @@ public final class UrlFormatter {
      * @param schemeDisplay Specifies how to display the scheme.
      * @return The formatted URL.
      */
-    public static String formatUrlForSecurityDisplay(GURL url, @SchemeDisplay int schemeDisplay) {
+    public static String formatUrlForSecurityDisplay(
+            @Nullable GURL url, @SchemeDisplay int schemeDisplay) {
         if (url == null) return "";
         return UrlFormatterJni.get().formatUrlForSecurityDisplay(url, schemeDisplay);
     }
@@ -230,22 +234,45 @@ public final class UrlFormatter {
      * @deprecated Please use {@link #formatUrlForSecurityDisplay(GURL, int)} instead.
      */
     @Deprecated
-    public static String formatUrlForSecurityDisplay(String uri, @SchemeDisplay int schemeDisplay) {
+    public static String formatUrlForSecurityDisplay(@Nullable String uri, @SchemeDisplay int schemeDisplay) {
         return UrlFormatterJni.get().formatStringUrlForSecurityDisplay(uri, schemeDisplay);
     }
 
-    @VisibleForTesting
+    @VisibleForTesting(otherwise = VisibleForTesting.PACKAGE_PRIVATE)
     @NativeMethods
     public interface Natives {
-        GURL fixupUrl(String url);
-        String formatUrlForDisplayOmitScheme(String url);
-        String formatUrlForDisplayOmitHTTPScheme(String url);
-        String formatUrlForDisplayOmitSchemeOmitTrivialSubdomains(String url);
-        String formatUrlForDisplayOmitSchemePathAndTrivialSubdomains(GURL url);
-        String formatUrlForDisplayOmitUsernamePassword(String url);
-        String formatUrlForCopy(String url);
-        String formatUrlForSecurityDisplay(GURL url, @SchemeDisplay int schemeDisplay);
-        String formatOriginForSecurityDisplay(Origin origin, @SchemeDisplay int schemeDisplay);
-        String formatStringUrlForSecurityDisplay(String url, @SchemeDisplay int schemeDisplay);
+        @JniType("GURL")
+        GURL fixupUrl(@JniType("std::string") String url);
+
+        @JniType("std::u16string")
+        String formatUrlForDisplayOmitScheme(@JniType("std::string") String url);
+
+        @JniType("std::u16string")
+        String formatUrlForDisplayOmitHTTPScheme(@JniType("std::string") String url);
+
+        @JniType("std::u16string")
+        String formatUrlForDisplayOmitSchemeOmitTrivialSubdomains(
+                @JniType("std::string") String url);
+
+        @JniType("std::u16string")
+        String formatUrlForDisplayOmitSchemePathAndTrivialSubdomains(@JniType("GURL") GURL url);
+
+        @JniType("std::u16string")
+        String formatUrlForDisplayOmitUsernamePassword(@JniType("std::string") String url);
+
+        @JniType("std::u16string")
+        String formatUrlForCopy(@JniType("std::string") String url);
+
+        @JniType("std::u16string")
+        String formatUrlForSecurityDisplay(
+                @JniType("GURL") GURL url, @SchemeDisplay int schemeDisplay);
+
+        @JniType("std::u16string")
+        String formatOriginForSecurityDisplay(
+                @JniType("url::Origin") Origin origin, @SchemeDisplay int schemeDisplay);
+
+        @JniType("std::u16string")
+        String formatStringUrlForSecurityDisplay(
+                @JniType("std::string") @Nullable String url, @SchemeDisplay int schemeDisplay);
     }
 }

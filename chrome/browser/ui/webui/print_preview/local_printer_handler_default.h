@@ -14,6 +14,13 @@
 #include "base/values.h"
 #include "chrome/browser/ui/webui/print_preview/printer_handler.h"
 #include "printing/backend/print_backend.h"
+#include "printing/buildflags/buildflags.h"
+
+#if BUILDFLAG(ENABLE_OOP_PRINTING)
+#include "base/memory/weak_ptr.h"
+#include "base/time/time.h"
+#include "chrome/services/printing/public/mojom/print_backend_service.mojom.h"
+#endif
 
 namespace base {
 class TaskRunner;
@@ -44,23 +51,45 @@ class LocalPrinterHandlerDefault : public PrinterHandler {
   void StartGetCapability(const std::string& destination_id,
                           GetCapabilityCallback callback) override;
   void StartPrint(const std::u16string& job_title,
-                  base::Value::Dict settings,
+                  base::DictValue settings,
                   scoped_refptr<base::RefCountedMemory> print_data,
                   PrintCallback callback) override;
 
  private:
   static PrinterList EnumeratePrintersOnBlockingTaskRunner(
       const std::string& locale);
-  static base::Value::Dict FetchCapabilitiesOnBlockingTaskRunner(
+  static base::DictValue FetchCapabilitiesOnBlockingTaskRunner(
       const std::string& device_name,
       const std::string& locale);
   static std::string GetDefaultPrinterOnBlockingTaskRunner(
       const std::string& locale);
 
+#if BUILDFLAG(ENABLE_OOP_PRINTING)
+  void OnDidGetDefaultPrinterNameFromPrintBackendService(
+      base::TimeTicks query_start_time,
+      DefaultPrinterCallback callback,
+      mojom::PrintBackendService::GetDefaultPrinterNameResult result);
+  void OnDidEnumeratePrintersFromPrintBackendService(
+      base::TimeTicks query_start_time,
+      AddedPrintersCallback added_printers_callback,
+      GetPrintersDoneCallback done_callback,
+      mojom::PrintBackendService::EnumeratePrintersResult result);
+  void OnDidFetchCapabilitiesFromPrintBackendService(
+      const std::string& device_name,
+      bool elevated_privileges,
+      base::TimeTicks query_start_time,
+      GetCapabilityCallback callback,
+      mojom::PrintBackendService::FetchCapabilitiesResult result);
+#endif
+
   const raw_ptr<content::WebContents> preview_web_contents_;
 
   // TaskRunner for blocking tasks. Threading behavior is platform-specific.
   scoped_refptr<base::TaskRunner> const task_runner_;
+
+#if BUILDFLAG(ENABLE_OOP_PRINTING)
+  base::WeakPtrFactory<LocalPrinterHandlerDefault> weak_ptr_factory_{this};
+#endif
 };
 
 }  // namespace printing

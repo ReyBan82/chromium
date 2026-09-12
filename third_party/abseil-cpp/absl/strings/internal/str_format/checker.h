@@ -16,11 +16,15 @@
 #define ABSL_STRINGS_INTERNAL_STR_FORMAT_CHECKER_H_
 
 #include <algorithm>
+#include <cstddef>
 
 #include "absl/base/attributes.h"
+#include "absl/base/config.h"
+#include "absl/base/const_init.h"
 #include "absl/strings/internal/str_format/arg.h"
 #include "absl/strings/internal/str_format/constexpr_parser.h"
 #include "absl/strings/internal/str_format/extension.h"
+#include "absl/strings/string_view.h"
 
 // Compile time check support for entry points.
 
@@ -28,11 +32,9 @@
 // We disable format checker under vscode intellisense compilation.
 // See https://github.com/microsoft/vscode-cpptools/issues/3683 for
 // more details.
-#if ABSL_HAVE_ATTRIBUTE(enable_if) && !defined(__native_client__) && \
-    !defined(__INTELLISENSE__)
+#if ABSL_HAVE_ATTRIBUTE(enable_if) && !defined(__INTELLISENSE__)
 #define ABSL_INTERNAL_ENABLE_FORMAT_CHECKER 1
-#endif  // ABSL_HAVE_ATTRIBUTE(enable_if) && !defined(__native_client__) &&
-        // !defined(__INTELLISENSE__)
+#endif  // ABSL_HAVE_ATTRIBUTE(enable_if) && !defined(__INTELLISENSE__)
 #endif  // ABSL_INTERNAL_ENABLE_FORMAT_CHECKER
 
 namespace absl {

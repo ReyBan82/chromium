@@ -76,8 +76,8 @@ TEST_F(ElementFragmentAnchorTest, FocusHandlerRunBeforeRaf) {
   // Click on the anchor element. This will cause a synchronous same-document
   // navigation. The fragment shouldn't activate yet as parsing will be blocked
   // due to the unloaded stylesheet.
-  auto* anchor =
-      To<HTMLAnchorElement>(GetDocument().getElementById("anchorlink"));
+  auto* anchor = To<HTMLAnchorElement>(
+      GetDocument().getElementById(AtomicString("anchorlink")));
   anchor->click();
   ASSERT_EQ(GetDocument().body(), GetDocument().ActiveElement())
       << "Active element changed while rendering is blocked";
@@ -88,15 +88,15 @@ TEST_F(ElementFragmentAnchorTest, FocusHandlerRunBeforeRaf) {
 
   // Now that the document has fully parsed the anchor should invoke at this
   // point.
-  ASSERT_EQ(GetDocument().getElementById("bottom"),
+  ASSERT_EQ(GetDocument().getElementById(AtomicString("bottom")),
             GetDocument().ActiveElement());
 
   // The background color shouldn't yet be updated.
   ASSERT_EQ(GetDocument()
                 .body()
                 ->GetLayoutObject()
-                ->Style()
-                ->VisitedDependentColor(GetCSSPropertyBackgroundColor())
+                ->StyleRef()
+                .VisitedDependentColor(GetCSSPropertyBackgroundColor())
                 .NameForLayoutTreeAsText(),
             Color(255, 0, 0).NameForLayoutTreeAsText());
 
@@ -107,8 +107,8 @@ TEST_F(ElementFragmentAnchorTest, FocusHandlerRunBeforeRaf) {
   EXPECT_EQ(GetDocument()
                 .body()
                 ->GetLayoutObject()
-                ->Style()
-                ->VisitedDependentColor(GetCSSPropertyBackgroundColor())
+                ->StyleRef()
+                .VisitedDependentColor(GetCSSPropertyBackgroundColor())
                 .NameForLayoutTreeAsText(),
             Color(0, 255, 0).NameForLayoutTreeAsText());
 }
@@ -145,15 +145,17 @@ TEST_F(ElementFragmentAnchorTest, IframeFragmentNoLayoutUntilLoad) {
     )HTML");
   Compositor().BeginFrame();
 
-  HTMLFrameOwnerElement* iframe =
-      To<HTMLFrameOwnerElement>(GetDocument().getElementById("child"));
+  HTMLFrameOwnerElement* iframe = To<HTMLFrameOwnerElement>(
+      GetDocument().getElementById(AtomicString("child")));
   ScrollableArea* child_viewport =
       iframe->contentDocument()->View()->LayoutViewport();
-  Element* fragment = iframe->contentDocument()->getElementById("fragment");
+  Element* fragment =
+      iframe->contentDocument()->getElementById(AtomicString("fragment"));
 
   gfx::Rect fragment_rect_in_frame =
       fragment->GetLayoutObject()->AbsoluteBoundingBoxRect();
-  gfx::Rect viewport_rect(child_viewport->VisibleContentRect().size());
+  gfx::Rect viewport_rect(
+      child_viewport->VisibleContentRect(kExcludeScrollbars).size());
 
   EXPECT_TRUE(viewport_rect.Contains(fragment_rect_in_frame))
       << "Fragment element at [" << fragment_rect_in_frame.ToString()
@@ -201,19 +203,21 @@ TEST_F(ElementFragmentAnchorTest, IframeFragmentDirtyLayoutAfterLoad) {
       <div id="fragment">fragment content</div>
     )HTML");
 
-  HTMLFrameOwnerElement* iframe =
-      To<HTMLFrameOwnerElement>(GetDocument().getElementById("child"));
-  iframe->setAttribute(html_names::kStyleAttr, "width:100px");
+  HTMLFrameOwnerElement* iframe = To<HTMLFrameOwnerElement>(
+      GetDocument().getElementById(AtomicString("child")));
+  iframe->setAttribute(html_names::kStyleAttr, AtomicString("width:100px"));
 
   Compositor().BeginFrame();
 
   ScrollableArea* child_viewport =
       iframe->contentDocument()->View()->LayoutViewport();
-  Element* fragment = iframe->contentDocument()->getElementById("fragment");
+  Element* fragment =
+      iframe->contentDocument()->getElementById(AtomicString("fragment"));
 
   gfx::Rect fragment_rect_in_frame =
       fragment->GetLayoutObject()->AbsoluteBoundingBoxRect();
-  gfx::Rect viewport_rect(child_viewport->VisibleContentRect().size());
+  gfx::Rect viewport_rect(
+      child_viewport->VisibleContentRect(kExcludeScrollbars).size());
 
   EXPECT_TRUE(viewport_rect.Contains(fragment_rect_in_frame))
       << "Fragment element at [" << fragment_rect_in_frame.ToString()
@@ -249,7 +253,7 @@ TEST_F(ElementFragmentAnchorTest, AnchorRemovedBeforeBeginFrameCrash) {
                   ->anchor_node_.Get());
 
   // Remove the fragment anchor from the DOM and perform GC.
-  GetDocument().getElementById("anchor")->remove();
+  GetDocument().getElementById(AtomicString("anchor"))->remove();
   ThreadState::Current()->CollectAllGarbageForTesting();
 
   EXPECT_TRUE(GetDocument().View()->GetFragmentAnchor());
@@ -266,6 +270,10 @@ TEST_F(ElementFragmentAnchorTest, AnchorRemovedBeforeBeginFrameCrash) {
   // When the document finishes loading, it does a synchronous layout update,
   // which should clear LocalFrameView::fragment_anchor_ ...
   EXPECT_FALSE(GetDocument().View()->GetFragmentAnchor());
+
+  // Allow any enqueued animation frame tasks to run
+  // so their resources can be cleaned up.
+  Compositor().BeginFrame();
 
   // Non-crash is considered a pass.
 }
@@ -296,7 +304,8 @@ TEST_F(ElementFragmentAnchorTest, SVGDocumentDoesntCreateFragment) {
       </svg>
     )SVG");
 
-  auto* img = To<HTMLImageElement>(GetDocument().getElementById("image"));
+  auto* img =
+      To<HTMLImageElement>(GetDocument().getElementById(AtomicString("image")));
   auto* svg = To<SVGImage>(img->CachedImage()->GetImage());
   auto* view =
       DynamicTo<LocalFrameView>(svg->GetPageForTesting()->MainFrame()->View());
@@ -336,12 +345,13 @@ TEST_F(ElementFragmentAnchorTest, HasURLEncodedCharacters) {
   Compositor().BeginFrame();
 
   ScrollableArea* viewport = GetDocument().View()->LayoutViewport();
-  Element* fragment = GetDocument().getElementById(u"\u00F6");
+  Element* fragment = GetDocument().getElementById(AtomicString(u"\u00F6"));
   ASSERT_NE(nullptr, fragment);
 
   gfx::Rect fragment_rect_in_frame =
       fragment->GetLayoutObject()->AbsoluteBoundingBoxRect();
-  gfx::Rect viewport_rect(viewport->VisibleContentRect().size());
+  gfx::Rect viewport_rect(
+      viewport->VisibleContentRect(kExcludeScrollbars).size());
 
   EXPECT_TRUE(viewport_rect.Contains(fragment_rect_in_frame))
       << "Fragment element at [" << fragment_rect_in_frame.ToString()

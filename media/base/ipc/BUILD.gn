@@ -11,13 +11,11 @@ source_set("ipc") {
 
   public_deps = [
     "//ipc",
-    "//ui/gfx/ipc/color",
+    "//media",
   ]
   deps = [
     "//base",
-    "//media",
     "//ui/gfx/ipc",
     "//ui/gfx/ipc/geometry",
-    "//ui/gfx/ipc/skia",
   ]
 }

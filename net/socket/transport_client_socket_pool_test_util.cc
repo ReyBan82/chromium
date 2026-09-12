@@ -5,6 +5,7 @@
 #include "net/socket/transport_client_socket_pool_test_util.h"
 
 #include <stdint.h>
+
 #include <string>
 #include <utility>
 
@@ -12,6 +13,7 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/memory/weak_ptr.h"
+#include "base/notimplemented.h"
 #include "base/notreached.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
@@ -50,10 +52,7 @@ class MockConnectClientSocket : public TransportClientSocket {
   MockConnectClientSocket& operator=(const MockConnectClientSocket&) = delete;
 
   // TransportClientSocket implementation.
-  int Bind(const net::IPEndPoint& local_addr) override {
-    NOTREACHED();
-    return ERR_FAILED;
-  }
+  int Bind(const net::IPEndPoint& local_addr) override { NOTREACHED(); }
   // StreamSocket implementation.
   int Connect(CompletionOnceCallback callback) override {
     connected_ = true;
@@ -79,8 +78,9 @@ class MockConnectClientSocket : public TransportClientSocket {
   const NetLogWithSource& NetLog() const override { return net_log_; }
 
   bool WasEverUsed() const override { return false; }
-  bool WasAlpnNegotiated() const override { return false; }
-  NextProto GetNegotiatedProtocol() const override { return kProtoUnknown; }
+  NextProto GetNegotiatedProtocol() const override {
+    return NextProto::kProtoUnknown;
+  }
   bool GetSSLInfo(SSLInfo* ssl_info) override { return false; }
   int64_t GetTotalReceivedBytes() const override {
     NOTIMPLEMENTED();
@@ -122,10 +122,7 @@ class MockFailingClientSocket : public TransportClientSocket {
   MockFailingClientSocket& operator=(const MockFailingClientSocket&) = delete;
 
   // TransportClientSocket implementation.
-  int Bind(const net::IPEndPoint& local_addr) override {
-    NOTREACHED();
-    return ERR_FAILED;
-  }
+  int Bind(const net::IPEndPoint& local_addr) override { NOTREACHED(); }
 
   // StreamSocket implementation.
   int Connect(CompletionOnceCallback callback) override {
@@ -145,8 +142,9 @@ class MockFailingClientSocket : public TransportClientSocket {
   const NetLogWithSource& NetLog() const override { return net_log_; }
 
   bool WasEverUsed() const override { return false; }
-  bool WasAlpnNegotiated() const override { return false; }
-  NextProto GetNegotiatedProtocol() const override { return kProtoUnknown; }
+  NextProto GetNegotiatedProtocol() const override {
+    return NextProto::kProtoUnknown;
+  }
   bool GetSSLInfo(SSLInfo* ssl_info) override { return false; }
   int64_t GetTotalReceivedBytes() const override {
     NOTIMPLEMENTED();
@@ -180,12 +178,15 @@ class MockTriggerableClientSocket : public TransportClientSocket {
  public:
   // |connect_error| indicates whether the socket should successfully complete
   // or fail.
-  MockTriggerableClientSocket(const AddressList& addrlist,
-                              Error connect_error,
-                              net::NetLog* net_log)
+  MockTriggerableClientSocket(
+      const AddressList& addrlist,
+      Error connect_error,
+      net::NetLog* net_log,
+      std::optional<base::TimeDelta> connect_autocallback_delay = std::nullopt)
       : connect_error_(connect_error),
         addrlist_(addrlist),
-        net_log_(NetLogWithSource::Make(net_log, NetLogSourceType::SOCKET)) {}
+        net_log_(NetLogWithSource::Make(net_log, NetLogSourceType::SOCKET)),
+        connect_autocallback_delay_(connect_autocallback_delay) {}
 
   MockTriggerableClientSocket(const MockTriggerableClientSocket&) = delete;
   MockTriggerableClientSocket& operator=(const MockTriggerableClientSocket&) =
@@ -204,9 +205,8 @@ class MockTriggerableClientSocket : public TransportClientSocket {
       Error connect_error,
       net::NetLog* net_log) {
     auto socket = std::make_unique<MockTriggerableClientSocket>(
-        addrlist, connect_error, net_log);
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, socket->GetConnectCallback());
+        addrlist, connect_error, net_log,
+        /*connect_autocallback_delay=*/base::TimeDelta());
     return std::move(socket);
   }
 
@@ -216,9 +216,7 @@ class MockTriggerableClientSocket : public TransportClientSocket {
       const base::TimeDelta& delay,
       net::NetLog* net_log) {
     auto socket = std::make_unique<MockTriggerableClientSocket>(
-        addrlist, connect_error, net_log);
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
-        FROM_HERE, socket->GetConnectCallback(), delay);
+        addrlist, connect_error, net_log, /*connect_autocallback_delay=*/delay);
     return std::move(socket);
   }
 
@@ -232,15 +230,16 @@ class MockTriggerableClientSocket : public TransportClientSocket {
   }
 
   // TransportClientSocket implementation.
-  int Bind(const net::IPEndPoint& local_addr) override {
-    NOTREACHED();
-    return ERR_FAILED;
-  }
+  int Bind(const net::IPEndPoint& local_addr) override { NOTREACHED(); }
 
   // StreamSocket implementation.
   int Connect(CompletionOnceCallback callback) override {
     DCHECK(callback_.is_null());
     callback_ = std::move(callback);
+    if (connect_autocallback_delay_) {
+      base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+          FROM_HERE, GetConnectCallback(), *connect_autocallback_delay_);
+    }
     return ERR_IO_PENDING;
   }
 
@@ -264,8 +263,9 @@ class MockTriggerableClientSocket : public TransportClientSocket {
   const NetLogWithSource& NetLog() const override { return net_log_; }
 
   bool WasEverUsed() const override { return false; }
-  bool WasAlpnNegotiated() const override { return false; }
-  NextProto GetNegotiatedProtocol() const override { return kProtoUnknown; }
+  NextProto GetNegotiatedProtocol() const override {
+    return NextProto::kProtoUnknown;
+  }
   bool GetSSLInfo(SSLInfo* ssl_info) override { return false; }
   int64_t GetTotalReceivedBytes() const override {
     NOTIMPLEMENTED();
@@ -300,6 +300,10 @@ class MockTriggerableClientSocket : public TransportClientSocket {
   const AddressList addrlist_;
   NetLogWithSource net_log_;
   CompletionOnceCallback callback_;
+
+  // If non-null, posts a task with this delay to run the connect callback on
+  // Connect().
+  const std::optional<base::TimeDelta> connect_autocallback_delay_;
 
   base::WeakPtrFactory<MockTriggerableClientSocket> weak_factory_{this};
 };
@@ -345,7 +349,7 @@ void SetIPv6Address(IPEndPoint* address) {
 
 MockTransportClientSocketFactory::Rule::Rule(
     Type type,
-    absl::optional<std::vector<IPEndPoint>> expected_addresses,
+    std::optional<std::vector<IPEndPoint>> expected_addresses,
     Error connect_error)
     : type(type),
       expected_addresses(std::move(expected_addresses)),
@@ -369,25 +373,30 @@ MockTransportClientSocketFactory::~MockTransportClientSocketFactory() = default;
 std::unique_ptr<DatagramClientSocket>
 MockTransportClientSocketFactory::CreateDatagramClientSocket(
     DatagramSocket::BindType bind_type,
+    handles::NetworkHandle target_network,
     NetLog* net_log,
     const NetLogSource& source) {
+  // Currently this is not used to test any multi-network scenarios. This means
+  // that it is safe to always ignore `target_network`.
   NOTREACHED();
-  return nullptr;
 }
 
 std::unique_ptr<TransportClientSocket>
 MockTransportClientSocketFactory::CreateTransportClientSocket(
     const AddressList& addresses,
+    handles::NetworkHandle target_network,
     std::unique_ptr<SocketPerformanceWatcher> /* socket_performance_watcher */,
     NetworkQualityEstimator* /* network_quality_estimator */,
     NetLog* /* net_log */,
     const NetLogSource& /* source */) {
+  // Currently this is not used to test any multi-network scenarios. This means
+  // that it is safe to always ignore `target_network`.
   allocation_count_++;
 
   Rule rule(client_socket_type_);
   if (!rules_.empty()) {
     rule = rules_.front();
-    rules_ = rules_.subspan(1);
+    rules_ = rules_.subspan<1>();
   }
 
   if (rule.expected_addresses) {
@@ -433,7 +442,6 @@ MockTransportClientSocketFactory::CreateTransportClientSocket(
     }
     default:
       NOTREACHED();
-      return std::make_unique<MockConnectClientSocket>(addresses, net_log_);
   }
 }
 

@@ -9,6 +9,7 @@
 
 #include "third_party/blink/public/mojom/choosers/color_chooser.mojom-blink.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
 
@@ -16,17 +17,17 @@ namespace blink {
 
 class AbortSignal;
 class ColorSelectionOptions;
+class ColorSelectionResult;
 enum class DOMExceptionCode;
 class ExceptionState;
+class LocalDOMWindow;
 class ScopedAbortState;
-class ScriptPromise;
-class ScriptPromiseResolver;
 
 // The EyeDropper API enables developers to use a browser-supplied eyedropper
 // in their web applications. This feature is still
 // under development, and is not part of the standard. It can be enabled
 // by passing --enable-blink-features=EyeDropperAPI. See
-// https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/EyeDropper/explainer.md
+// https://github.com/WICG/eyedropper-api/blob/main/README.md
 // for more details.
 class EyeDropper final : public ScriptWrappable {
   DEFINE_WRAPPERTYPEINFO();
@@ -40,9 +41,9 @@ class EyeDropper final : public ScriptWrappable {
 
   // Opens the eyedropper and replaces the cursor with a browser-defined
   // preview.
-  ScriptPromise open(ScriptState*,
-                     const ColorSelectionOptions*,
-                     ExceptionState&);
+  ScriptPromise<ColorSelectionResult> open(ScriptState*,
+                                           const ColorSelectionOptions*,
+                                           ExceptionState&);
 
   void Trace(Visitor*) const override;
 
@@ -51,15 +52,19 @@ class EyeDropper final : public ScriptWrappable {
 
   void AbortCallback(AbortSignal* signal);
   void EyeDropperResponseHandler(std::unique_ptr<ScopedAbortState>,
-                                 ScriptPromiseResolver*,
+                                 ScriptPromiseResolver<ColorSelectionResult>*,
                                  bool,
                                  uint32_t);
   void EndChooser(std::unique_ptr<ScopedAbortState>);
-  void RejectPromiseHelper(DOMExceptionCode, const WTF::String&);
+  void RejectPromiseHelper(DOMExceptionCode, const String&);
+
+  // Clears the per-window "eye dropper is open" flag if this instance set it.
+  void ClearWindowEyeDropper();
 
   HeapMojoRemote<mojom::blink::EyeDropperChooser> eye_dropper_chooser_;
-  Member<ScriptPromiseResolver> resolver_;
-  Member<AbortSignal> signal_;
+  Member<ScriptPromiseResolver<ColorSelectionResult>> resolver_;
+  // The window whose "open" flag this instance set, so it can be cleared.
+  WeakMember<LocalDOMWindow> open_window_;
 };
 
 }  // namespace blink

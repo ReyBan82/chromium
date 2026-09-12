@@ -11,15 +11,15 @@
 
 namespace syncer {
 
-base::Value::Dict ProgressMarkerMapToValueDict(
+base::DictValue ProgressMarkerMapToValueDict(
     const ProgressMarkerMap& marker_map) {
-  base::Value::Dict value;
-  for (const auto& [model_type, progress_marker] : marker_map) {
+  base::DictValue value;
+  for (const auto& [data_type, progress_marker] : marker_map) {
     std::string printable_payload;
     base::EscapeJSONString(progress_marker, false /* put_in_quotes */,
                            &printable_payload);
-    base::Base64Encode(printable_payload, &printable_payload);
-    value.Set(ModelTypeToDebugString(model_type), printable_payload);
+    printable_payload = base::Base64Encode(printable_payload);
+    value.Set(DataTypeToDebugString(data_type), printable_payload);
   }
   return value;
 }

@@ -5,12 +5,15 @@
 #ifndef EXTENSIONS_BROWSER_URL_REQUEST_UTIL_H_
 #define EXTENSIONS_BROWSER_URL_REQUEST_UTIL_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 
-#include "base/strings/string_piece.h"
+#include "content/public/common/child_process_id.h"
 #include "services/network/public/mojom/fetch_api.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/page_transition_types.h"
+
+class GURL;
 
 namespace network {
 struct ResourceRequest;
@@ -32,11 +35,12 @@ bool AllowCrossRendererResourceLoad(
     const network::ResourceRequest& request,
     network::mojom::RequestDestination destination,
     ui::PageTransition page_transition,
-    int child_id,
+    content::ChildProcessId child_id,
     bool is_incognito,
     const Extension* extension,
     const ExtensionSet& extensions,
     const ProcessMap& process_map,
+    const GURL& upstream_url,
     bool* allowed);
 
 // Helper method that is called by both AllowCrossRendererResourceLoad and
@@ -48,7 +52,7 @@ bool AllowCrossRendererResourceLoadHelper(bool is_guest,
                                           const Extension* extension,
                                           const Extension* owner_extension,
                                           const std::string& partition_id,
-                                          base::StringPiece resource_path,
+                                          std::string_view resource_path,
                                           ui::PageTransition page_transition,
                                           bool* allowed);
 

@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "third_party/blink/renderer/modules/device_orientation/device_orientation_event_pump.h"
+
 #include <string.h>
 
 #include <memory>
@@ -9,8 +11,11 @@
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "services/device/public/cpp/test/fake_sensor_and_provider.h"
+#include "services/device/public/mojom/sensor_provider.mojom-blink.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/public/mojom/sensor/web_sensor_provider.mojom-blink.h"
 #include "third_party/blink/public/platform/cross_variant_mojo_util.h"
 #include "third_party/blink/public/platform/scheduler/test/renderer_scheduler_test_support.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
@@ -18,9 +23,10 @@
 #include "third_party/blink/renderer/core/frame/platform_event_controller.h"
 #include "third_party/blink/renderer/core/testing/dummy_page_holder.h"
 #include "third_party/blink/renderer/modules/device_orientation/device_orientation_data.h"
-#include "third_party/blink/renderer/modules/device_orientation/device_orientation_event_pump.h"
 #include "third_party/blink/renderer/modules/device_orientation/device_sensor_entry.h"
+#include "third_party/blink/renderer/modules/sensor/sensor_test_utils.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace {
 
@@ -113,9 +119,9 @@ class DeviceOrientationEventPumpTest : public testing::Test {
   void SetUp() override {
     page_holder_ = std::make_unique<DummyPageHolder>();
 
-    mojo::PendingRemote<device::mojom::blink::SensorProvider> sensor_provider;
-    sensor_provider_.Bind(ToCrossVariantMojoType(
-        sensor_provider.InitWithNewPipeAndPassReceiver()));
+    mojo::PendingRemote<mojom::blink::WebSensorProvider> sensor_provider;
+    fake_sensor_provider_.Bind(
+        sensor_provider.InitWithNewPipeAndPassReceiver());
     auto* orientation_pump = MakeGarbageCollected<DeviceOrientationEventPump>(
         page_holder_->GetFrame(), false /* absolute */);
     orientation_pump->SetSensorProviderForTesting(std::move(sensor_provider));
@@ -133,12 +139,15 @@ class DeviceOrientationEventPumpTest : public testing::Test {
 
   MockDeviceOrientationController* controller() { return controller_.Get(); }
 
-  FakeSensorProvider* sensor_provider() { return &sensor_provider_; }
+  FakeSensorProvider* sensor_provider() {
+    return fake_sensor_provider_.sensor_provider();
+  }
 
  private:
+  test::TaskEnvironment task_environment_;
   Persistent<MockDeviceOrientationController> controller_;
   std::unique_ptr<DummyPageHolder> page_holder_;
-  FakeSensorProvider sensor_provider_;
+  FakeWebSensorProvider fake_sensor_provider_;
 };
 
 TEST_F(DeviceOrientationEventPumpTest, SensorIsActive) {
@@ -580,9 +589,9 @@ class DeviceAbsoluteOrientationEventPumpTest : public testing::Test {
   void SetUp() override {
     page_holder_ = std::make_unique<DummyPageHolder>();
 
-    mojo::PendingRemote<device::mojom::blink::SensorProvider> sensor_provider;
-    sensor_provider_.Bind(ToCrossVariantMojoType(
-        sensor_provider.InitWithNewPipeAndPassReceiver()));
+    mojo::PendingRemote<mojom::blink::WebSensorProvider> sensor_provider;
+    fake_sensor_provider_.Bind(
+        sensor_provider.InitWithNewPipeAndPassReceiver());
     auto* absolute_orientation_pump =
         MakeGarbageCollected<DeviceOrientationEventPump>(
             page_holder_->GetFrame(), true /* absolute */);
@@ -601,12 +610,15 @@ class DeviceAbsoluteOrientationEventPumpTest : public testing::Test {
 
   MockDeviceOrientationController* controller() { return controller_.Get(); }
 
-  FakeSensorProvider* sensor_provider() { return &sensor_provider_; }
+  FakeSensorProvider* sensor_provider() {
+    return fake_sensor_provider_.sensor_provider();
+  }
 
  private:
+  test::TaskEnvironment task_environment_;
   Persistent<MockDeviceOrientationController> controller_;
   std::unique_ptr<DummyPageHolder> page_holder_;
-  FakeSensorProvider sensor_provider_;
+  FakeWebSensorProvider fake_sensor_provider_;
 };
 
 TEST_F(DeviceAbsoluteOrientationEventPumpTest, SensorIsActive) {

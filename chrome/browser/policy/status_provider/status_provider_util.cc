@@ -6,27 +6,29 @@
 
 #include "base/values.h"
 #include "chrome/browser/enterprise/identifiers/profile_id_service_factory.h"
-#include "chrome/browser/profiles/profiles_state.h"
 #include "components/enterprise/browser/identifiers/profile_id_service.h"
 #include "components/policy/core/browser/webui/policy_status_provider.h"
+#include "components/policy/resources/webui/mojom/policy.mojom.h"
 #include "google_apis/gaia/gaia_auth_util.h"
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/policy/off_hours/device_off_hours_controller.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/ash/settings/device_settings_service.h"
-#include "chrome/browser/ui/managed_ui.h"
+#include "chrome/browser/enterprise/browser_management/management_identity.h"
+#include "chromeos/components/kiosk/kiosk_utils.h"
 #include "components/user_manager/user_manager.h"
 #else
 #include "chrome/browser/enterprise/util/affiliation.h"
-#include "components/enterprise/browser/controller/browser_dm_token_storage.h"
+#include "chrome/browser/policy/dm_token_utils.h"
 #endif
 
 const char kDevicePolicyStatusDescription[] = "statusDevice";
 const char kUserPolicyStatusDescription[] = "statusUser";
 
-void SetDomainExtractedFromUsername(base::Value::Dict& dict) {
+void SetDomainExtractedFromUsername(base::DictValue& dict) {
 #if BUILDFLAG(IS_CHROMEOS)
-  if (profiles::IsKioskSession()) {
+  if (chromeos::IsKioskSession()) {
     // In kiosk session `username` is a website (for web kiosk) or an app id
     // (for ChromeApp kiosk). Since it's not a proper email address, it's
     // impossible to extract the domain name from it.
@@ -39,57 +41,70 @@ void SetDomainExtractedFromUsername(base::Value::Dict& dict) {
     dict.Set(policy::kDomainKey, gaia::ExtractDomainName(*username));
 }
 
-void GetUserAffiliationStatus(base::Value::Dict* dict, Profile* profile) {
-  CHECK(profile);
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  const user_manager::User* user =
-      ash::ProfileHelper::Get()->GetUserByProfile(profile);
-  if (!user)
+void SetDomainExtractedFromUsername(policy::mojom::StatusPtr& status) {
+#if BUILDFLAG(IS_CHROMEOS)
+  if (chromeos::IsKioskSession()) {
+    // In kiosk session `username` is a website (for web kiosk) or an app id
+    // (for ChromeApp kiosk). Since it's not a proper email address, it's
+    // impossible to extract the domain name from it.
     return;
-  dict->Set("isAffiliated", user->IsAffiliated());
-#else
-  // Don't show affiliation status if the browser isn't enrolled in CBCM.
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  if (!profile->IsMainProfile())
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
-  {
-    if (!policy::BrowserDMTokenStorage::Get()->RetrieveDMToken().is_valid())
-      return;
   }
-  dict->Set("isAffiliated",
-            chrome::enterprise_util::IsProfileAffiliated(profile));
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
+
+  const auto& username = status->username;
+  if (username.has_value() && !username->empty()) {
+    status->domain = gaia::ExtractDomainName(username.value());
+  }
 }
 
-void SetProfileId(base::Value::Dict* dict, Profile* profile) {
+std::optional<bool> GetUserAffiliationStatus(Profile* profile) {
+  CHECK(profile);
+
+#if BUILDFLAG(IS_CHROMEOS)
+  const user_manager::User* user =
+      ash::ProfileHelper::Get()->GetUserByProfile(profile);
+  if (!user) {
+    return std::nullopt;
+  }
+  return user->IsAffiliated();
+#else
+  // Don't show affiliation status if the browser isn't enrolled in CBCM.
+  if (!policy::GetDMToken(profile).is_valid()) {
+    return std::nullopt;
+  }
+  return enterprise_util::IsProfileAffiliated(profile);
+#endif  // BUILDFLAG(IS_CHROMEOS)
+}
+
+std::optional<std::string> GetProfileId(Profile* profile) {
   CHECK(profile);
   auto* profile_id_service =
       enterprise::ProfileIdServiceFactory::GetForProfile(profile);
-  if (!profile_id_service)
-    return;
+  if (!profile_id_service) {
+    return std::nullopt;
+  }
 
-  auto profile_id = profile_id_service->GetProfileId();
-  if (profile_id)
-    dict->Set("profileId", profile_id.value());
+  return profile_id_service->GetProfileId();
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-void GetOffHoursStatus(base::Value::Dict* dict) {
+#if BUILDFLAG(IS_CHROMEOS)
+std::optional<bool> GetOffHoursStatus() {
   policy::off_hours::DeviceOffHoursController* off_hours_controller =
       ash::DeviceSettingsService::Get()->device_off_hours_controller();
   if (off_hours_controller) {
-    dict->Set("isOffHoursActive", off_hours_controller->is_off_hours_mode());
+    return off_hours_controller->is_off_hours_mode();
+  } else {
+    return std::nullopt;
   }
 }
 
-void GetUserManager(base::Value::Dict* dict, Profile* profile) {
+void GetUserManager(base::DictValue* dict, Profile* profile) {
   CHECK(profile);
 
-  absl::optional<std::string> account_manager =
-      chrome::GetAccountManagerIdentity(profile);
+  std::optional<std::string> account_manager =
+      GetAccountManagerIdentity(profile);
   if (account_manager) {
     dict->Set(policy::kEnterpriseDomainManagerKey, *account_manager);
   }
 }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)

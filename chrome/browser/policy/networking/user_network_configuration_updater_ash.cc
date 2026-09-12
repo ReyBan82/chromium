@@ -86,10 +86,9 @@ bool UserNetworkConfigurationUpdaterAsh::
   if (!policy_value)
     return false;
 
-  base::Value::List certificates_value;
+  base::ListValue certificates_value;
   chromeos::onc::ParseAndValidateOncForImport(
       policy_value->GetString(), onc::ONC_SOURCE_USER_POLICY,
-      /*passphrase=*/std::string(),
       /*network_configs=*/nullptr, /*global_network_config=*/nullptr,
       &certificates_value);
   chromeos::onc::OncParsedCertificates onc_parsed_certificates(
@@ -119,8 +118,8 @@ UserNetworkConfigurationUpdaterAsh::UserNetworkConfigurationUpdaterAsh(
   // responsible for creating it. This requires |GetNSSCertDatabaseForProfile|
   // call, which is not safe before the profile initialization is finalized.
   // Thus, listen for OnProfileInitializationComplete notification, on which
-  // |cert_importer_| creation should start. https://crbug.com/171406
-  // TODO(crbug.com/1038437): Investigate if this is still required.
+  // |cert_importer_| creation should start. https://crbug.com/40299450
+  // TODO(crbug.com/40113187): Investigate if this is still required.
   profile_observation_.Observe(profile);
 
   // Make sure that the |NetworkCertLoader| which makes certificates available
@@ -151,8 +150,8 @@ void UserNetworkConfigurationUpdaterAsh::ImportClientCertificates() {
 }
 
 void UserNetworkConfigurationUpdaterAsh::ApplyNetworkPolicy(
-    base::Value::List network_configs_onc,
-    base::Value::Dict global_network_config) {
+    const base::ListValue& network_configs_onc,
+    const base::DictValue& global_network_config) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(user_);
 
@@ -164,10 +163,9 @@ void UserNetworkConfigurationUpdaterAsh::ApplyNetworkPolicy(
       ash::UserSessionManager::PasswordConsumingService::kNetwork,
       save_password);
 
-  network_config_handler_->SetPolicy(
-      onc_source_, user_->username_hash(),
-      base::Value(std::move(network_configs_onc)),
-      base::Value(std::move(global_network_config)));
+  network_config_handler_->SetPolicy(onc_source_, user_->username_hash(),
+                                     network_configs_onc,
+                                     global_network_config);
 }
 
 void UserNetworkConfigurationUpdaterAsh::OnProfileInitializationComplete(
@@ -176,7 +174,7 @@ void UserNetworkConfigurationUpdaterAsh::OnProfileInitializationComplete(
   profile_observation_.Reset();
   // Note: This unsafely grabs a persistent reference to the `NssService`'s
   // `NSSCertDatabase`, which may be invalidated once `profile` is shut down.
-  // TODO(https://crbug.com/1186373): Provide better lifetime guarantees and
+  // TODO(crbug.com/40753707): Provide better lifetime guarantees and
   // pass the `NssCertDatabaseGetter` to the `CertificateImporterImpl`.
   content::GetIOThreadTaskRunner({})->PostTask(
       FROM_HERE,

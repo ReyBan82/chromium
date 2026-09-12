@@ -4,28 +4,21 @@
 
 #include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 
-#include "testing/gtest/include/gtest/gtest.h"
 #include <cstring>
 
-namespace WTF {
+#include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+
+namespace blink {
+
+#define EXPECT_PARSED_VALUE(parser, string, options, expected_value) \
+  EXPECT_EQ(parser(String(string).Span8(), options), expected_value)
 
 TEST(StringToNumberTest, CharactersToInt) {
-#define EXPECT_VALID(string, options, expectedValue)                    \
-  do {                                                                  \
-    bool ok;                                                            \
-    int value = CharactersToInt(reinterpret_cast<const LChar*>(string), \
-                                std::strlen(string), options, &ok);     \
-    EXPECT_TRUE(ok);                                                    \
-    EXPECT_EQ(value, expectedValue);                                    \
-  } while (false)
-
-#define EXPECT_INVALID(string, options)                     \
-  do {                                                      \
-    bool ok;                                                \
-    CharactersToInt(reinterpret_cast<const LChar*>(string), \
-                    std::strlen(string), options, &ok);     \
-    EXPECT_FALSE(ok);                                       \
-  } while (false)
+#define EXPECT_VALID(string, options, expected_value) \
+  EXPECT_PARSED_VALUE(CharactersToInt, string, options, expected_value)
+#define EXPECT_INVALID(string, options) \
+  EXPECT_PARSED_VALUE(CharactersToInt, string, options, std::nullopt)
 
   constexpr auto kStrict = NumberParsingOptions::Strict();
   EXPECT_VALID("1", kStrict, 1);
@@ -93,22 +86,10 @@ TEST(StringToNumberTest, CharactersToInt) {
 }
 
 TEST(StringToNumberTest, CharactersToUInt) {
-#define EXPECT_VALID(string, options, expectedValue)                          \
-  do {                                                                        \
-    bool ok;                                                                  \
-    unsigned value = CharactersToUInt(reinterpret_cast<const LChar*>(string), \
-                                      std::strlen(string), options, &ok);     \
-    EXPECT_TRUE(ok);                                                          \
-    EXPECT_EQ(value, expectedValue);                                          \
-  } while (false)
-
-#define EXPECT_INVALID(string, options)                      \
-  do {                                                       \
-    bool ok;                                                 \
-    CharactersToUInt(reinterpret_cast<const LChar*>(string), \
-                     std::strlen(string), options, &ok);     \
-    EXPECT_FALSE(ok);                                        \
-  } while (false)
+#define EXPECT_VALID(string, options, expected_value) \
+  EXPECT_PARSED_VALUE(CharactersToUInt, string, options, expected_value)
+#define EXPECT_INVALID(string, options) \
+  EXPECT_PARSED_VALUE(CharactersToUInt, string, options, std::nullopt)
 
   constexpr auto kStrict = NumberParsingOptions::Strict();
   constexpr auto kAcceptMinusZeroForUnsigned =
@@ -176,24 +157,12 @@ TEST(StringToNumberTest, CharactersToUInt) {
 }
 
 TEST(StringToNumberTest, HexCharactersToUInt) {
-#define EXPECT_VALID(string, expectedValue)                          \
-  do {                                                               \
-    bool ok;                                                         \
-    unsigned value = HexCharactersToUInt(                            \
-        reinterpret_cast<const LChar*>(string), std::strlen(string), \
-        NumberParsingOptions::Strict(), &ok);                        \
-    EXPECT_TRUE(ok);                                                 \
-    EXPECT_EQ(value, expectedValue);                                 \
-  } while (false)
-
-#define EXPECT_INVALID(string)                                               \
-  do {                                                                       \
-    bool ok;                                                                 \
-    HexCharactersToUInt(reinterpret_cast<const LChar*>(string),              \
-                        std::strlen(string), NumberParsingOptions::Strict(), \
-                        &ok);                                                \
-    EXPECT_FALSE(ok);                                                        \
-  } while (false)
+#define EXPECT_VALID(string, expected_value)       \
+  EXPECT_PARSED_VALUE(HexCharactersToUInt, string, \
+                      NumberParsingOptions::Strict(), expected_value)
+#define EXPECT_INVALID(string)                     \
+  EXPECT_PARSED_VALUE(HexCharactersToUInt, string, \
+                      NumberParsingOptions::Strict(), std::nullopt)
 
   EXPECT_VALID("1", 1u);
   EXPECT_VALID("a", 0xAu);
@@ -225,11 +194,10 @@ TEST(StringToNumberTest, HexCharactersToUInt) {
 #undef EXPECT_INVALID
 }
 
-NumberParsingResult ParseUInt(const char* str, unsigned* value) {
+NumberParsingResult ParseUInt(const String str, unsigned* value) {
   NumberParsingResult result;
   *value =
-      CharactersToUInt(reinterpret_cast<const LChar*>(str), std::strlen(str),
-                       NumberParsingOptions::Strict(), &result);
+      CharactersToUInt(str.Span8(), NumberParsingOptions::Strict(), &result);
   return result;
 }
 
@@ -243,19 +211,14 @@ TEST(StringToNumberTest, NumberParsingState) {
   EXPECT_EQ(NumberParsingResult::kSuccess, ParseUInt("10", &value));
 }
 
-void ParseDouble(const char* str, double expected_value) {
-  bool ok;
-  double value = CharactersToDouble(reinterpret_cast<const LChar*>(str),
-                                    std::strlen(str), &ok);
-  EXPECT_TRUE(ok) << "\"" << str << "\"";
-  EXPECT_EQ(expected_value, value);
+void ParseDouble(const String& str, double expected_value) {
+  EXPECT_EQ(expected_value, CharactersToDouble(str.Span8()))
+      << "\"" << str << "\"";
 }
 
-void FailToParseDouble(const char* str) {
-  bool ok;
-  CharactersToDouble(reinterpret_cast<const LChar*>(str), std::strlen(str),
-                     &ok);
-  EXPECT_FALSE(ok) << "\"" << str << "\"";
+void FailToParseDouble(const String& str) {
+  EXPECT_FALSE(CharactersToDouble(str.Span8()).has_value())
+      << "\"" << str << "\"";
 }
 
 TEST(StringToNumberTest, CharactersToDouble) {
@@ -291,10 +254,9 @@ TEST(StringToNumberTest, CharactersToDouble) {
   FailToParseDouble("1e.3");
 }
 
-size_t ParseDouble(const char* str) {
+size_t ParseDouble(const String& str) {
   size_t parsed;
-  CharactersToDouble(reinterpret_cast<const LChar*>(str), std::strlen(str),
-                     parsed);
+  CharactersToDouble(str.Span8(), parsed);
   return parsed;
 }
 
@@ -313,18 +275,14 @@ TEST(StringToNumberTest, CharactersToDoubleParsedLength) {
   EXPECT_EQ(7u, ParseDouble("1.234e1"));
 }
 
-void ParseFloat(const char* str, float expected_value) {
-  bool ok;
-  float value = CharactersToFloat(reinterpret_cast<const LChar*>(str),
-                                  std::strlen(str), &ok);
-  EXPECT_TRUE(ok) << "\"" << str << "\"";
-  EXPECT_EQ(expected_value, value);
+void ParseFloat(const String& str, float expected_value) {
+  EXPECT_EQ(expected_value, CharactersToFloat(str.Span8()))
+      << "\"" << str << "\"";
 }
 
-void FailToParseFloat(const char* str) {
-  bool ok;
-  CharactersToFloat(reinterpret_cast<const LChar*>(str), std::strlen(str), &ok);
-  EXPECT_FALSE(ok) << "\"" << str << "\"";
+void FailToParseFloat(const String& str) {
+  EXPECT_FALSE(CharactersToFloat(str.Span8()).has_value())
+      << "\"" << str << "\"";
 }
 
 TEST(StringToNumberTest, CharactersToFloat) {
@@ -362,10 +320,9 @@ TEST(StringToNumberTest, CharactersToFloat) {
   FailToParseFloat("1e.3");
 }
 
-size_t ParseFloat(const char* str) {
+size_t ParseFloat(const String& str) {
   size_t parsed;
-  CharactersToFloat(reinterpret_cast<const LChar*>(str), std::strlen(str),
-                    parsed);
+  CharactersToFloat(str.Span8(), parsed);
   return parsed;
 }
 
@@ -384,4 +341,6 @@ TEST(StringToNumberTest, CharactersToFloatParsedLength) {
   EXPECT_EQ(7u, ParseFloat("1.234e1"));
 }
 
-}  // namespace WTF
+#undef EXPECT_PARSED_VALUE
+
+}  // namespace blink

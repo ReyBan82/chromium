@@ -8,12 +8,16 @@
 
 #include <stdint.h>
 
+#include <array>
+#include <atomic>
 #include <memory>
+#include <optional>
+#include <string>
 
-#include "base/atomicops.h"
 #include "base/location.h"
 #include "base/memory/ref_counted.h"
 #include "base/no_destructor.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
@@ -23,6 +27,7 @@
 #include "base/task/thread_pool.h"
 #include "base/threading/thread_restrictions.h"
 #include "build/build_config.h"
+#include "net/http/http_response_headers.h"
 #include "rlz/lib/assert.h"
 #include "rlz/lib/lib_values.h"
 #include "rlz/lib/machine_id.h"
@@ -39,28 +44,6 @@
 #include "base/time/time.h"
 #endif
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_WIN_INET)
-
-#include <windows.h>
-#include <wininet.h>
-
-namespace {
-
-class InternetHandle {
- public:
-  InternetHandle(HINTERNET handle) { handle_ = handle; }
-  ~InternetHandle() { if (handle_) InternetCloseHandle(handle_); }
-  operator HINTERNET() const { return handle_; }
-  bool operator!() const { return (handle_ == NULL); }
-
- private:
-  HINTERNET handle_;
-};
-
-}  // namespace
-
-#else
-
 #include "base/functional/bind.h"
 #include "base/run_loop.h"
 #include "base/time/time.h"
@@ -68,17 +51,16 @@ class InternetHandle {
 #include "net/traffic_annotation/network_traffic_annotation.h"
 #include "url/gurl.h"
 
-#endif
-
 namespace rlz_lib {
 
-using base::subtle::AtomicWord;
-
 bool FinancialPing::FormRequest(Product product,
-    const AccessPoint* access_points, const char* product_signature,
-    const char* product_brand, const char* product_id,
-    const char* product_lang, bool exclude_machine_id,
-    std::string* request) {
+                                base::span<const AccessPoint> access_points,
+                                std::string_view product_signature,
+                                std::string_view product_brand,
+                                std::string_view product_id,
+                                std::string_view product_lang,
+                                bool exclude_machine_id,
+                                std::string* request) {
   if (!request) {
     ASSERT_STRING("FinancialPing::FormRequest: request is NULL");
     return false;
@@ -91,13 +73,8 @@ bool FinancialPing::FormRequest(Product product,
   if (!store || !store->HasAccess(RlzValueStore::kReadAccess))
     return false;
 
-  if (!access_points) {
-    ASSERT_STRING("FinancialPing::FormRequest: access_points is NULL");
-    return false;
-  }
-
-  if (!product_signature) {
-    ASSERT_STRING("FinancialPing::FormRequest: product_signature is NULL");
+  if (product_signature.empty()) {
+    ASSERT_STRING("FinancialPing::FormRequest: product_signature is empty");
     return false;
   }
 
@@ -108,64 +85,63 @@ bool FinancialPing::FormRequest(Product product,
     }
   }
 
-  base::StringAppendF(request, "%s?", kFinancialPingPath);
+  base::StrAppend(request,
+                  {kFinancialPingPath, "?", kProductSignatureCgiVariable, "=",
+                   product_signature});
 
-  // Add the signature, brand, product id and language.
-  base::StringAppendF(request, "%s=%s", kProductSignatureCgiVariable,
-                      product_signature);
-  if (product_brand)
-    base::StringAppendF(request, "&%s=%s", kProductBrandCgiVariable,
-                        product_brand);
+  if (!product_brand.empty()) {
+    base::StrAppend(request,
+                    {"&", kProductBrandCgiVariable, "=", product_brand});
+  }
 
-  if (product_id)
-    base::StringAppendF(request, "&%s=%s", kProductIdCgiVariable, product_id);
+  if (!product_id.empty()) {
+    base::StrAppend(request, {"&", kProductIdCgiVariable, "=", product_id});
+  }
 
-  if (product_lang)
-    base::StringAppendF(request, "&%s=%s", kProductLanguageCgiVariable,
-                        product_lang);
+  if (!product_lang.empty()) {
+    base::StrAppend(request,
+                    {"&", kProductLanguageCgiVariable, "=", product_lang});
+  }
 
   // Add the product events.
-  char cgi[kMaxCgiLength + 1];
-  cgi[0] = 0;
-  bool has_events = GetProductEventsAsCgi(product, cgi, std::size(cgi));
-  if (has_events)
-    base::StringAppendF(request, "&%s", cgi);
+  std::optional<std::string> events_cgi = GetProductEventsAsCgi(product);
+  if (events_cgi) {
+    base::StrAppend(request, {"&", *events_cgi});
+  }
 
   // If we don't have any events, we should ping all the AP's on the system
   // that we know about and have a current RLZ value, even if they are not
   // used by this product.
-  AccessPoint all_points[LAST_ACCESS_POINT];
-  if (!has_events) {
-    char rlz[kMaxRlzLength + 1];
-    int idx = 0;
+  std::array<AccessPoint, LAST_ACCESS_POINT> all_points{};
+  size_t idx = 0;
+  if (!events_cgi) {
     for (int ap = NO_ACCESS_POINT + 1; ap < LAST_ACCESS_POINT; ap++) {
-      rlz[0] = 0;
       AccessPoint point = static_cast<AccessPoint>(ap);
-      if (GetAccessPointRlz(point, rlz, std::size(rlz)) && rlz[0] != '\0')
+      std::optional<std::string> rlz = GetAccessPointRlz(point);
+      if (rlz && !rlz->empty()) {
         all_points[idx++] = point;
+      }
     }
-    all_points[idx] = NO_ACCESS_POINT;
   }
 
   // Add the RLZ's and the DCC if needed. This is the same as get PingParams.
   // This will also include the RLZ Exchange Protocol CGI Argument.
-  cgi[0] = 0;
-  if (GetPingParams(product, has_events ? access_points : all_points, cgi,
-                    std::size(cgi)))
-    base::StringAppendF(request, "&%s", cgi);
+  if (std::optional<std::string> ping_params = GetPingParams(
+          product,
+          events_cgi ? access_points : base::span(all_points).first(idx))) {
+    base::StrAppend(request, {"&", *ping_params});
+  }
 
-  if (has_events && !exclude_machine_id) {
+  if (events_cgi && !exclude_machine_id) {
     std::string machine_id;
     if (GetMachineId(&machine_id)) {
-      base::StringAppendF(request, "&%s=%s", kMachineIdCgiVariable,
-                          machine_id.c_str());
+      base::StrAppend(request, {"&", kMachineIdCgiVariable, "=", machine_id});
     }
   }
 
   return true;
 }
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
 namespace {
 
 // A waitable event used to detect when either:
@@ -217,25 +193,19 @@ class RefCountedWaitableEvent
 // RefCountedWaitableEvent when the load completes.
 void OnURLLoadComplete(std::unique_ptr<network::SimpleURLLoader> url_loader,
                        scoped_refptr<RefCountedWaitableEvent> event,
-                       std::unique_ptr<std::string> response_body) {
+                       std::optional<std::string> response_body) {
   int response_code = -1;
   if (url_loader->ResponseInfo() && url_loader->ResponseInfo()->headers) {
     response_code = url_loader->ResponseInfo()->headers->response_code();
   }
 
-  std::string response;
-  if (response_body) {
-    response = std::move(*response_body);
-  }
-
-  event->SignalFetchComplete(response_code, std::move(response));
+  event->SignalFetchComplete(response_code,
+                             std::move(response_body).value_or(""));
 }
 
 bool send_financial_ping_interrupted_for_test = false;
 
 }  // namespace
-
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
 
 // The signal for the current ping request. It can be used to cancel the request
 // in case of a shutdown.
@@ -248,12 +218,11 @@ scoped_refptr<RefCountedWaitableEvent>& GetPingResultEvent() {
 // The pointer to URLRequestContextGetter used by FinancialPing::PingServer().
 // It is atomic pointer because it can be accessed and modified by multiple
 // threads.
-AtomicWord g_URLLoaderFactory;
+std::atomic<network::mojom::URLLoaderFactory*> g_URLLoaderFactory;
 
 bool FinancialPing::SetURLLoaderFactory(
     network::mojom::URLLoaderFactory* factory) {
-  base::subtle::Release_Store(&g_URLLoaderFactory,
-                              reinterpret_cast<AtomicWord>(factory));
+  g_URLLoaderFactory.store(factory, std::memory_order_release);
   scoped_refptr<RefCountedWaitableEvent> event = GetPingResultEvent();
   if (!factory && event) {
     send_financial_ping_interrupted_for_test = true;
@@ -262,21 +231,20 @@ bool FinancialPing::SetURLLoaderFactory(
   return true;
 }
 
-#endif
-
 void PingRlzServer(std::string url,
                    scoped_refptr<RefCountedWaitableEvent> event) {
   // Copy the pointer to stack because g_URLLoaderFactory may be set to NULL
   // in different thread. The instance is guaranteed to exist while
   // the method is running.
   network::mojom::URLLoaderFactory* url_loader_factory =
-      reinterpret_cast<network::mojom::URLLoaderFactory*>(
-          base::subtle::Acquire_Load(&g_URLLoaderFactory));
+      g_URLLoaderFactory.load(std::memory_order_acquire);
 
   // Browser shutdown will cause the factory to be reset to NULL.
   // ShutdownCheck will catch this.
-  if (!url_loader_factory)
+  if (!url_loader_factory) {
+    event->SignalFetchComplete(-1, "");
     return;
+  }
 
   net::NetworkTrafficAnnotationTag traffic_annotation =
       net::DefineNetworkTrafficAnnotation("rlz_ping", R"(
@@ -309,6 +277,13 @@ void PingRlzServer(std::string url,
   auto url_loader = network::SimpleURLLoader::Create(
       std::move(resource_request), traffic_annotation);
 
+  constexpr int kMaxNetworkRetries = 3;
+  url_loader->SetRetryOptions(
+      kMaxNetworkRetries,
+      network::SimpleURLLoader::RetryMode::RETRY_ON_5XX |
+          network::SimpleURLLoader::RETRY_ON_NETWORK_CHANGE |
+          network::SimpleURLLoader::RETRY_ON_NAME_NOT_RESOLVED);
+
   // Pass ownership of the loader to the bound function. Otherwise the load will
   // be canceled when the SimpleURLLoader object is destroyed.
   auto* url_loader_ptr = url_loader.get();
@@ -317,7 +292,6 @@ void PingRlzServer(std::string url,
       base::BindOnce(&OnURLLoadComplete, std::move(url_loader),
                      std::move(event)));
 }
-#endif
 
 FinancialPing::PingResponse FinancialPing::PingServer(const char* request,
                                                       std::string* response) {
@@ -326,59 +300,6 @@ FinancialPing::PingResponse FinancialPing::PingServer(const char* request,
 
   response->clear();
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_WIN_INET)
-  // Initialize WinInet.
-  InternetHandle inet_handle = InternetOpenA(kFinancialPingUserAgent,
-                                             INTERNET_OPEN_TYPE_PRECONFIG,
-                                             NULL, NULL, 0);
-  if (!inet_handle)
-    return PING_FAILURE;
-
-  // Open network connection.
-  InternetHandle connection_handle = InternetConnectA(inet_handle,
-      kFinancialServer, kFinancialPort, "", "", INTERNET_SERVICE_HTTP,
-      INTERNET_FLAG_NO_CACHE_WRITE, 0);
-  if (!connection_handle)
-    return PING_FAILURE;
-
-  // Prepare the HTTP request.
-  const DWORD kFlags = INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_NO_COOKIES |
-                       INTERNET_FLAG_SECURE;
-  InternetHandle http_handle =
-      HttpOpenRequestA(connection_handle, "GET", request, NULL, NULL,
-                       kFinancialPingResponseObjects, kFlags, NULL);
-  if (!http_handle)
-    return PING_FAILURE;
-
-  // Timeouts are probably:
-  // INTERNET_OPTION_SEND_TIMEOUT, INTERNET_OPTION_RECEIVE_TIMEOUT
-
-  // Send the HTTP request. Note: Fails if user is working in off-line mode.
-  if (!HttpSendRequest(http_handle, NULL, 0, NULL, 0))
-    return PING_FAILURE;
-
-  // Check the response status.
-  DWORD status;
-  DWORD status_size = sizeof(status);
-  if (!HttpQueryInfo(http_handle, HTTP_QUERY_STATUS_CODE |
-                     HTTP_QUERY_FLAG_NUMBER, &status, &status_size, NULL) ||
-      200 != status)
-    return PING_FAILURE;
-
-  // Get the response text.
-  std::unique_ptr<char[]> buffer(new char[kMaxPingResponseLength]);
-  if (buffer.get() == NULL)
-    return PING_FAILURE;
-
-  DWORD bytes_read = 0;
-  while (InternetReadFile(http_handle, buffer.get(), kMaxPingResponseLength,
-                          &bytes_read) && bytes_read > 0) {
-    response->append(buffer.get(), bytes_read);
-    bytes_read = 0;
-  };
-
-  return PING_SUCCESSFUL;
-#else
   std::string url =
       base::StringPrintf("https://%s%s", kFinancialServer, request);
 
@@ -409,6 +330,7 @@ FinancialPing::PingResponse FinancialPing::PingServer(const char* request,
     return PING_FAILURE;
 
   if (event->GetResponseCode() == -1) {
+    send_financial_ping_interrupted_for_test = true;
     return PING_SHUTDOWN;
   } else if (event->GetResponseCode() != 200) {
     return PING_FAILURE;
@@ -416,7 +338,6 @@ FinancialPing::PingResponse FinancialPing::PingServer(const char* request,
 
   *response = event->TakeResponse();
   return PING_SUCCESSFUL;
-#endif
 }
 
 bool FinancialPing::IsPingTime(Product product, bool no_delay) {
@@ -425,25 +346,25 @@ bool FinancialPing::IsPingTime(Product product, bool no_delay) {
   if (!store || !store->HasAccess(RlzValueStore::kReadAccess))
     return false;
 
-  int64_t last_ping = 0;
-  if (!store->ReadPingTime(product, &last_ping))
+  std::optional<int64_t> last_ping = store->ReadPingTime(product);
+  if (!last_ping) {
     return true;
+  }
 
   uint64_t now = GetSystemTimeAsInt64();
-  int64_t interval = now - last_ping;
+  int64_t interval = now - *last_ping;
 
   // If interval is negative, clock was probably reset. So ping.
   if (interval < 0)
     return true;
 
   // Check if this product has any unreported events.
-  char cgi[kMaxCgiLength + 1];
-  cgi[0] = 0;
-  bool has_events = GetProductEventsAsCgi(product, cgi, std::size(cgi));
-  if (no_delay && has_events)
+  std::optional<std::string> cgi = GetProductEventsAsCgi(product);
+  if (no_delay && cgi) {
     return true;
+  }
 
-  return interval >= (has_events ? kEventsPingInterval : kNoEventsPingInterval);
+  return interval >= (cgi ? kEventsPingInterval : kNoEventsPingInterval);
 }
 
 
@@ -466,7 +387,6 @@ bool FinancialPing::ClearLastPingTime(Product product) {
   return store->ClearPingTime(product);
 }
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
 namespace test {
 
 void ResetSendFinancialPingInterrupted() {
@@ -478,6 +398,5 @@ bool WasSendFinancialPingInterrupted() {
 }
 
 }  // namespace test
-#endif
 
 }  // namespace rlz_lib

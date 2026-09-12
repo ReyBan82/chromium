@@ -6,11 +6,7 @@
 
 #import <ostream>
 
-#import "base/check_op.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "base/logging.h"
 
 namespace {
 // Returns a pointer style with a hover effect with a slight tint and no pointer
@@ -39,11 +35,13 @@ UIPointerStyle* CreateHighlightEffectRectShapePointerStyle(UIButton* button) {
 UIButtonPointerStyleProvider CreateDefaultEffectCirclePointerStyleProvider() {
   return ^UIPointerStyle*(UIButton* button, UIPointerEffect* proposedEffect,
                           UIPointerShape* proposedShape) {
-    DCHECK_EQ(button.frame.size.width, button.frame.size.height)
-        << "Pointer shape cannot be a circle since button is not square";
-    UIPointerShape* shape =
-        [UIPointerShape shapeWithRoundedRect:button.frame
-                                cornerRadius:button.frame.size.width / 2];
+    CGRect frame = button.frame;
+    if (abs(frame.size.width - frame.size.height) > 0.5) {
+      LOG(ERROR) << "Button frame for circular pointer isn't square: ("
+                 << frame.size.width << " x " << frame.size.height << ")";
+    }
+    UIBezierPath* path = [UIBezierPath bezierPathWithOvalInRect:frame];
+    UIPointerShape* shape = [UIPointerShape shapeWithPath:path];
     return [UIPointerStyle styleWithEffect:proposedEffect shape:shape];
   };
 }
@@ -51,15 +49,17 @@ UIButtonPointerStyleProvider CreateDefaultEffectCirclePointerStyleProvider() {
 UIButtonPointerStyleProvider CreateLiftEffectCirclePointerStyleProvider() {
   return ^UIPointerStyle*(UIButton* button, UIPointerEffect* proposedEffect,
                           UIPointerShape* proposedShape) {
-    DCHECK_EQ(button.frame.size.width, button.frame.size.height)
-        << "Pointer shape cannot be a circle since button is not square";
+    CGRect frame = button.frame;
+    if (abs(frame.size.width - frame.size.height) > 0.5) {
+      LOG(ERROR) << "Button frame for circular pointer isn't square: ("
+                 << frame.size.width << " x " << frame.size.height << ")";
+    }
     UITargetedPreview* preview =
         [[UITargetedPreview alloc] initWithView:button];
     UIPointerLiftEffect* effect =
         [UIPointerLiftEffect effectWithPreview:preview];
-    UIPointerShape* shape =
-        [UIPointerShape shapeWithRoundedRect:button.frame
-                                cornerRadius:button.frame.size.width / 2];
+    UIBezierPath* path = [UIBezierPath bezierPathWithOvalInRect:frame];
+    UIPointerShape* shape = [UIPointerShape shapeWithPath:path];
     return [UIPointerStyle styleWithEffect:effect shape:shape];
   };
 }
@@ -67,9 +67,10 @@ UIButtonPointerStyleProvider CreateLiftEffectCirclePointerStyleProvider() {
 UIButtonPointerStyleProvider CreateOpaqueButtonPointerStyleProvider() {
   return ^UIPointerStyle*(UIButton* button, UIPointerEffect* proposedEffect,
                           UIPointerShape* proposedShape) {
-    DCHECK(button.backgroundColor &&
-           button.backgroundColor != [UIColor clearColor])
-        << "Expected an opaque background for button.";
+    if (!button.backgroundColor ||
+        button.backgroundColor == [UIColor clearColor]) {
+      LOG(ERROR) << "Expected an opaque background for button.";
+    }
     return CreateHoverEffectNoShapePointerStyle(button);
   };
 }
@@ -77,9 +78,10 @@ UIButtonPointerStyleProvider CreateOpaqueButtonPointerStyleProvider() {
 UIButtonPointerStyleProvider CreateTransparentButtonPointerStyleProvider() {
   return ^UIPointerStyle*(UIButton* button, UIPointerEffect* proposedEffect,
                           UIPointerShape* proposedShape) {
-    DCHECK(!button.backgroundColor ||
-           button.backgroundColor == [UIColor clearColor])
-        << "Expected a transparent background for button.";
+    if (button.backgroundColor &&
+        button.backgroundColor != [UIColor clearColor]) {
+      LOG(ERROR) << "Expected a transparent background for button.";
+    }
     return CreateHighlightEffectRectShapePointerStyle(button);
   };
 }
@@ -135,8 +137,9 @@ CreateOpaqueOrTransparentButtonPointerStyleProvider() {
 
 - (UIPointerStyle*)pointerInteraction:(UIPointerInteraction*)interaction
                        styleForRegion:(UIPointerRegion*)region {
-  if (!interaction.view.window)
+  if (!interaction.view.window) {
     return nil;
+  }
 
   UIPointerHoverEffect* effect = [UIPointerHoverEffect
       effectWithPreview:[[UITargetedPreview alloc]

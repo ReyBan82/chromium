@@ -14,6 +14,7 @@
 #include "base/logging.h"
 #include "base/memory/writable_shared_memory_region.h"
 #include "media/audio/fuchsia/audio_manager_fuchsia.h"
+#include "media/base/audio_bus.h"
 #include "media/base/audio_sample_types.h"
 #include "media/base/audio_timestamp_helper.h"
 
@@ -23,34 +24,34 @@ namespace {
 
 const uint32_t kBufferId = 0;
 
-absl::optional<fuchsia::media::AudioRenderUsage> GetStreamUsage(
+fuchsia::media::AudioRenderUsage2 GetStreamUsage(
     const AudioParameters& parameters) {
-  int usage_flags = parameters.effects() &
-                    (AudioParameters::FUCHSIA_RENDER_USAGE_BACKGROUND |
-                     AudioParameters::FUCHSIA_RENDER_USAGE_MEDIA |
-                     AudioParameters::FUCHSIA_RENDER_USAGE_INTERRUPTION |
-                     AudioParameters::FUCHSIA_RENDER_USAGE_SYSTEM_AGENT |
-                     AudioParameters::FUCHSIA_RENDER_USAGE_COMMUNICATION);
-  switch (usage_flags) {
+  using AudioRenderUsage2 = fuchsia::media::AudioRenderUsage2;
+
+  const int usage =
+      parameters.effects() & AudioParameters::FUCHSIA_RENDER_USAGE_MASK;
+  switch (usage) {
     case AudioParameters::FUCHSIA_RENDER_USAGE_BACKGROUND:
-      return fuchsia::media::AudioRenderUsage::BACKGROUND;
+      return AudioRenderUsage2::BACKGROUND;
     case AudioParameters::FUCHSIA_RENDER_USAGE_MEDIA:
-      return fuchsia::media::AudioRenderUsage::MEDIA;
+      return AudioRenderUsage2::MEDIA;
     case AudioParameters::FUCHSIA_RENDER_USAGE_INTERRUPTION:
-      return fuchsia::media::AudioRenderUsage::INTERRUPTION;
+      return AudioRenderUsage2::INTERRUPTION;
     case AudioParameters::FUCHSIA_RENDER_USAGE_SYSTEM_AGENT:
-      return fuchsia::media::AudioRenderUsage::SYSTEM_AGENT;
+      return AudioRenderUsage2::SYSTEM_AGENT;
     case AudioParameters::FUCHSIA_RENDER_USAGE_COMMUNICATION:
-      return fuchsia::media::AudioRenderUsage::COMMUNICATION;
-    case 0:
+      return AudioRenderUsage2::COMMUNICATION;
+    case AudioParameters::FUCHSIA_RENDER_USAGE_ACCESSIBILITY:
+      return AudioRenderUsage2::ACCESSIBILITY;
+    case AudioParameters::FUCHSIA_RENDER_USAGE_UNKNOWN:
       // If the usage flags are not set then use COMMUNICATION for WebRTC and
       // MEDIA for everything else.
-      if (parameters.latency_tag() == AudioLatency::LATENCY_RTC)
-        return fuchsia::media::AudioRenderUsage::COMMUNICATION;
-      return fuchsia::media::AudioRenderUsage::MEDIA;
+      return (parameters.latency_tag() == AudioLatency::Type::kRtc)
+                 ? AudioRenderUsage2::COMMUNICATION
+                 : AudioRenderUsage2::MEDIA;
     default:
-      DLOG(FATAL) << "More than one FUCHSIA_RENDER_USAGE flag is set";
-      return absl::nullopt;
+      NOTREACHED() << "Invalid FUCHSIA_RENDER_USAGE value: "
+                   << (usage >> AudioParameters::FUCHSIA_RENDER_USAGE_SHIFT);
   }
 }
 
@@ -80,10 +81,7 @@ bool AudioOutputStreamFuchsia::Open() {
   audio_renderer_.set_error_handler(
       fit::bind_member(this, &AudioOutputStreamFuchsia::OnRendererError));
 
-  auto usage = GetStreamUsage(parameters_);
-  if (!usage)
-    return false;
-  audio_renderer_->SetUsage(usage.value());
+  audio_renderer_->SetUsage2(GetStreamUsage(parameters_));
 
   // Inform the |audio_renderer_| of the format required by the caller.
   fuchsia::media::AudioStreamType format;
@@ -196,6 +194,13 @@ bool AudioOutputStreamFuchsia::InitializePayloadBuffer() {
 }
 
 void AudioOutputStreamFuchsia::OnMinLeadTimeChanged(int64_t min_lead_time) {
+  // AudioRenderer may initially send `min_lead_time=0`. This event can be
+  // ignored. It's expected to send a valid value soon after processing
+  // `SetPcmStreamType()`. See fxbug.dev/122532.
+  if (min_lead_time <= 0) {
+    return;
+  }
+
   bool min_lead_time_was_unknown = !min_lead_time_.has_value();
 
   min_lead_time_ = base::Nanoseconds(min_lead_time);
@@ -276,20 +281,20 @@ void AudioOutputStreamFuchsia::PumpSamples() {
   }
 
   // Request more samples from |callback_|.
-  int frames_filled = callback_->OnMoreData(delay, now, {}, audio_bus_.get());
-  DCHECK_EQ(frames_filled, audio_bus_->frames());
+  const int frames_filled =
+      callback_->OnMoreData(delay, now, {}, audio_bus_.get());
+  CHECK_EQ(frames_filled, audio_bus_->frames());
 
   audio_bus_->Scale(volume_);
 
   // Save samples to the |payload_buffer_|.
-  size_t packet_size = parameters_.GetBytesPerBuffer(kSampleFormatF32);
-  DCHECK_LE(payload_buffer_pos_ + packet_size, payload_buffer_.size());
+  const size_t packet_size = parameters_.GetBytesPerBuffer(kSampleFormatF32);
+
+  auto dest_span = payload_buffer_.GetMemoryAsSpan<uint8_t>().subspan(
+      payload_buffer_pos_, packet_size);
 
   // We skip clipping since that occurs at the shared memory boundary.
-  audio_bus_->ToInterleaved<Float32SampleTypeTraitsNoClip>(
-      audio_bus_->frames(),
-      reinterpret_cast<float*>(static_cast<uint8_t*>(payload_buffer_.memory()) +
-                               payload_buffer_pos_));
+  audio_bus_->ToInterleavedBytes<Float32SampleTypeTraitsNoClip>(dest_span);
 
   // Send a new packet.
   fuchsia::media::StreamPacket packet;

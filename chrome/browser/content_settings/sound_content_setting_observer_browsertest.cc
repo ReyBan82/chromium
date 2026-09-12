@@ -9,7 +9,7 @@
 #include "base/test/scoped_feature_list.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/content_settings/browser/page_specific_content_settings.h"
@@ -166,7 +166,7 @@ class MultipleFramesObserver : public content::WebContentsObserver {
   // it searches for the main frame and return it. Otherwise, it returns a
   // sub frame.
   TestAutoplayConfigurationClient* GetTestClient(bool request_main_frame) {
-    return GetTestClient(base::BindLambdaForTesting(
+    return GetTestClientWithFilter(base::BindLambdaForTesting(
         [&request_main_frame](content::RenderFrameHost* rfh) {
           bool is_main_frame = rfh->GetMainFrame() == rfh;
           return request_main_frame ? is_main_frame : !is_main_frame;
@@ -174,19 +174,10 @@ class MultipleFramesObserver : public content::WebContentsObserver {
   }
 
   TestAutoplayConfigurationClient* GetTestClientForFencedFrame() {
-    return GetTestClient(
-        [](content::RenderFrameHost* rfh) { return rfh->IsFencedFrameRoot(); });
-  }
-
-  using Filter = base::RepeatingCallback<bool(content::RenderFrameHost*)>;
-  TestAutoplayConfigurationClient* GetTestClient(Filter filter) {
-    for (auto& client : frame_to_client_map_) {
-      if (filter.Run(client.first)) {
-        return client.second.get();
-      }
-    }
-    NOTREACHED();
-    return nullptr;
+    return GetTestClientWithFilter(
+        base::BindLambdaForTesting([](content::RenderFrameHost* rfh) {
+          return rfh->IsFencedFrameRoot();
+        }));
   }
 
  private:
@@ -197,6 +188,16 @@ class MultipleFramesObserver : public content::WebContentsObserver {
             blink::mojom::AutoplayConfigurationClient::Name_,
             base::BindRepeating(&TestAutoplayConfigurationClient::BindReceiver,
                                 base::Unretained(client)));
+  }
+
+  using Filter = base::RepeatingCallback<bool(content::RenderFrameHost*)>;
+  TestAutoplayConfigurationClient* GetTestClientWithFilter(Filter filter) {
+    for (auto& client : frame_to_client_map_) {
+      if (filter.Run(client.first)) {
+        return client.second.get();
+      }
+    }
+    NOTREACHED();
   }
 
   std::map<content::RenderFrameHost*,
@@ -243,7 +244,7 @@ IN_PROC_BROWSER_TEST_F(SoundContentSettingObserverBrowserTest,
   // Configures to check `logged_site_muted_ukm_` in
   // SoundContentSettingObserver.
   HostContentSettingsMap* content_settings =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+      HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
   content_settings->SetDefaultContentSetting(ContentSettingsType::SOUND,
                                              CONTENT_SETTING_BLOCK);
 
@@ -254,8 +255,7 @@ IN_PROC_BROWSER_TEST_F(SoundContentSettingObserverBrowserTest,
   base::RunLoop run_loop;
   TestAudioStateObserver audio_state_observer(web_contents(),
                                               run_loop.QuitClosure());
-  EXPECT_EQ("OK", content::EvalJs(web_contents(), "StartOscillator();",
-                                  content::EXECUTE_SCRIPT_USE_MANUAL_REPLY));
+  EXPECT_EQ("OK", content::EvalJs(web_contents(), "StartOscillator();"));
   run_loop.Run();
 
   SoundContentSettingObserver* observer =
@@ -265,7 +265,8 @@ IN_PROC_BROWSER_TEST_F(SoundContentSettingObserverBrowserTest,
 
   // Loads a page in the prerender.
   auto prerender_url = embedded_test_server()->GetURL("/simple.html");
-  int host_id = prerender_helper()->AddPrerender(prerender_url);
+  content::PrerenderHostId host_id =
+      prerender_helper()->AddPrerender(prerender_url);
   content::test::PrerenderHostObserver host_observer(*web_contents(), host_id);
   // The prerendering should not affect the current status.
   EXPECT_TRUE(observer->HasLoggedSiteMutedUkmForTesting());
@@ -293,7 +294,7 @@ IN_PROC_BROWSER_TEST_F(SoundContentSettingObserverBrowserTest,
   // Configures SoundContentSettingObserver.
   GURL url = embedded_test_server()->GetURL("/simple.html");
   HostContentSettingsMap* content_settings =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
+      HostContentSettingsMapFactory::GetForProfile(browser()->GetProfile());
   content_settings->SetContentSettingDefaultScope(
       url, url, ContentSettingsType::SOUND, CONTENT_SETTING_ALLOW);
 
@@ -311,7 +312,8 @@ IN_PROC_BROWSER_TEST_F(SoundContentSettingObserverBrowserTest,
   // Loads a page in the prerender.
   prerender_helper()->AddPrerenderAsync(prerender_url);
   registry_observer.WaitForTrigger(prerender_url);
-  auto host_id = prerender_helper()->GetHostForUrl(prerender_url);
+  content::PrerenderHostId host_id =
+      prerender_helper()->GetHostForUrl(prerender_url);
 
   // Adds the expected url and flag for the main frame.
   observer.GetTestClient(true)->AddExpectedOriginAndFlags(
@@ -347,62 +349,6 @@ IN_PROC_BROWSER_TEST_F(SoundContentSettingObserverBrowserTest,
   EXPECT_TRUE(host_observer.was_activated());
 }
 
-class SoundContentSettingObserverFencedFrameBrowserTest
-    : public InProcessBrowserTest {
- public:
-  SoundContentSettingObserverFencedFrameBrowserTest() = default;
-  ~SoundContentSettingObserverFencedFrameBrowserTest() override = default;
 
-  void SetUpOnMainThread() override {
-    InProcessBrowserTest::SetUpOnMainThread();
-    https_server_.ServeFilesFromSourceDirectory(GetChromeTestDataDir());
-  }
 
-  content::test::FencedFrameTestHelper& fenced_frame_test_helper() {
-    return fenced_frame_test_helper_;
-  }
 
-  content::WebContents* web_contents() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
-  }
-
-  net::EmbeddedTestServer& https_server() { return https_server_; }
-
- private:
-  content::test::FencedFrameTestHelper fenced_frame_test_helper_;
-  base::test::ScopedFeatureList feature_list_;
-  net::EmbeddedTestServer https_server_{net::EmbeddedTestServer::TYPE_HTTPS};
-};
-
-IN_PROC_BROWSER_TEST_F(SoundContentSettingObserverFencedFrameBrowserTest,
-                       AddAutoplayFlagsInFencedFrame) {
-  // Sets up the embedded test server to serve the test javascript file.
-  net::test_server::EmbeddedTestServerHandle test_server_handle;
-  ASSERT_TRUE(test_server_handle = https_server().StartAndReturnHandle());
-
-  // Configures SoundContentSettingObserver and explicitly allows the SOUND
-  // setting for the primary page's URL.
-  GURL url = https_server().GetURL("/simple.html");
-  HostContentSettingsMap* content_settings =
-      HostContentSettingsMapFactory::GetForProfile(browser()->profile());
-  content_settings->SetContentSettingDefaultScope(
-      url, url, ContentSettingsType::SOUND, CONTENT_SETTING_ALLOW);
-
-  // Loads a simple page.
-  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
-
-  auto fenced_frame_url = https_server().GetURL("/fenced_frames/title1.html");
-
-  // Creates MultipleFramesObserver to observe fenced frame creation and
-  // intercept AddAutoplayFlags() for it.
-  MultipleFramesObserver observer{web_contents(), 1};
-
-  // Create a fenced frame and wait for the autoplay flag to be set.
-  fenced_frame_test_helper().CreateFencedFrameAsync(
-      web_contents()->GetPrimaryMainFrame(), fenced_frame_url);
-  observer.WaitForFencedFrame();
-  observer.GetTestClientForFencedFrame()->AddExpectedOriginAndFlags(
-      url::Origin::Create(fenced_frame_url),
-      blink::mojom::kAutoplayFlagUserException);
-  observer.GetTestClientForFencedFrame()->WaitForAddAutoplayFlags();
-}

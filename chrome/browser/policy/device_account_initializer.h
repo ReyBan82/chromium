@@ -6,16 +6,21 @@
 #define CHROME_BROWSER_POLICY_DEVICE_ACCOUNT_INITIALIZER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
 #include "components/policy/core/common/cloud/cloud_policy_client.h"
 #include "components/policy/core/common/cloud/cloud_policy_constants.h"
 #include "components/policy/core/common/cloud/cloud_policy_store.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 #include "google_apis/gaia/gaia_oauth_client.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+namespace network {
+class SharedURLLoaderFactory;
+}  // namespace network
 
 namespace policy {
 
@@ -44,7 +49,7 @@ class DeviceAccountInitializer : public CloudPolicyClient::Observer,
     // Called when an error happens during token fetching. `dm_status` is
     // nullopt if error happened before requesting device management service.
     virtual void OnDeviceAccountTokenFetchError(
-        absl::optional<DeviceManagementStatus> dm_status) = 0;
+        std::optional<DeviceManagementStatus> dm_status) = 0;
 
     // Called when an error happens during token saving.
     virtual void OnDeviceAccountTokenStoreError() = 0;
@@ -59,14 +64,13 @@ class DeviceAccountInitializer : public CloudPolicyClient::Observer,
 
     // Returns the oauth scopes for which to request auth codes.
     virtual std::set<std::string> GetRobotOAuthScopes() = 0;
-
-    // Returns a url loader factory that the DeviceAccountInitializer will use
-    // for GAIA requests.
-    virtual scoped_refptr<network::SharedURLLoaderFactory>
-    GetURLLoaderFactory() = 0;
   };
 
-  DeviceAccountInitializer(CloudPolicyClient* client, Delegate* delegate);
+  // `shared_url_loader_factory` is used for GAIA requests. It must be non-null.
+  DeviceAccountInitializer(
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      CloudPolicyClient* client,
+      Delegate* delegate);
   DeviceAccountInitializer(const DeviceAccountInitializer&) = delete;
   DeviceAccountInitializer& operator=(const DeviceAccountInitializer&) = delete;
   ~DeviceAccountInitializer() override;
@@ -84,8 +88,6 @@ class DeviceAccountInitializer : public CloudPolicyClient::Observer,
   void Stop();
 
   // CloudPolicyClient::Observer:
-  void OnPolicyFetched(CloudPolicyClient* client) override;
-  void OnRegistrationStateChanged(CloudPolicyClient* client) override;
   void OnClientError(CloudPolicyClient* client) override;
 
   // GaiaOAuthClient::Delegate:
@@ -104,6 +106,9 @@ class DeviceAccountInitializer : public CloudPolicyClient::Observer,
   // Handles the fetching auth codes for robot accounts during enrollment.
   void OnRobotAuthCodesFetched(DeviceManagementStatus status,
                                const std::string& auth_code);
+
+  const scoped_refptr<network::SharedURLLoaderFactory>
+      shared_url_loader_factory_;
 
   // Owned by this class owner.
   raw_ptr<CloudPolicyClient> client_;

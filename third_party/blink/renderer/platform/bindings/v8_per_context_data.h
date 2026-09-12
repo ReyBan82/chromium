@@ -33,6 +33,8 @@
 
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "gin/public/context_holder.h"
 #include "gin/public/gin_embedders.h"
 #include "third_party/blink/renderer/platform/bindings/scoped_persistent.h"
@@ -48,6 +50,10 @@
 
 namespace blink {
 
+namespace scheduler {
+class EventLoop;
+}  // namespace scheduler
+
 class V8DOMActivityLogger;
 class V8PerContextData;
 struct WrapperTypeInfo;
@@ -57,27 +63,30 @@ struct WrapperTypeInfo;
 class PLATFORM_EXPORT V8PerContextData final
     : public GarbageCollected<V8PerContextData> {
  public:
-  explicit V8PerContextData(v8::Local<v8::Context>);
+  V8PerContextData(v8::Local<v8::Context>, scheduler::EventLoop*);
   V8PerContextData(const V8PerContextData&) = delete;
   V8PerContextData& operator=(const V8PerContextData&) = delete;
-
-  static V8PerContextData* From(v8::Local<v8::Context>);
 
   ~V8PerContextData();
 
   void Trace(Visitor* visitor) const;
   void Dispose();
 
+  scheduler::EventLoop* GetEventLoop() const { return event_loop_.get(); }
+
   v8::Local<v8::Context> GetContext() { return context_.NewLocal(isolate_); }
 
   // To create JS Wrapper objects, we create a cache of a 'boiler plate'
   // object, and then simply Clone that object each time we need a new one.
   // This is faster than going through the full object creation process.
-  v8::Local<v8::Object> CreateWrapperFromCache(const WrapperTypeInfo* type) {
-    auto it = wrapper_boilerplates_.find(type);
-    return it != wrapper_boilerplates_.end()
-               ? it->value->Clone()
-               : CreateWrapperFromCacheSlowCase(type);
+  v8::Local<v8::Object> CreateWrapperFromCache(v8::Isolate* isolate,
+                                               const WrapperTypeInfo* type) {
+    if (auto it = wrapper_boilerplates_.find(type);
+        it != wrapper_boilerplates_.end()) {
+      v8::Local<v8::Object> obj = it->value.Get(isolate_);
+      return obj->Clone(isolate);
+    }
+    return CreateWrapperFromCacheSlowCase(isolate, type);
   }
 
   // Returns the interface object that is appropriately initialized (e.g.
@@ -114,10 +123,11 @@ class PLATFORM_EXPORT V8PerContextData final
   Data* GetData(const char* key);
 
  private:
-  v8::Local<v8::Object> CreateWrapperFromCacheSlowCase(const WrapperTypeInfo*);
+  v8::Local<v8::Object> CreateWrapperFromCacheSlowCase(v8::Isolate*,
+                                                       const WrapperTypeInfo*);
   v8::Local<v8::Function> ConstructorForTypeSlowCase(const WrapperTypeInfo*);
 
-  v8::Isolate* const isolate_;
+  const raw_ptr<v8::Isolate> isolate_;
 
   // For each possible type of wrapper, we keep a boilerplate object.
   // The boilerplate is used to create additional wrappers of the same type.
@@ -132,10 +142,12 @@ class PLATFORM_EXPORT V8PerContextData final
   ScopedPersistent<v8::Context> context_;
 
   // This is owned by a static hash map in V8DOMActivityLogger.
-  V8DOMActivityLogger* activity_logger_;
+  raw_ptr<V8DOMActivityLogger, DanglingUntriaged> activity_logger_;
 
   using DataMap = HeapHashMap<const char*, Member<Data>>;
   DataMap data_map_;
+
+  raw_ptr<scheduler::EventLoop> event_loop_;
 };
 
 }  // namespace blink

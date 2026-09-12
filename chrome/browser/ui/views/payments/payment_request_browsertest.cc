@@ -2,32 +2,32 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/payments/content/payment_request.h"
+
 #include <vector>
 
-#include "base/strings/utf_string_conversions.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/ui/browser.h"
+#include "base/test/metrics/histogram_tester.h"
+#include "base/test/scoped_feature_list.h"
 #include "chrome/browser/ui/browser_commands.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/test/test_browser_dialog.h"
+#include "chrome/browser/ui/views/payments/payment_app_loading_view.h"
 #include "chrome/browser/ui/views/payments/payment_request_browsertest_base.h"
 #include "chrome/browser/ui/views/payments/payment_request_dialog_view_ids.h"
+#include "chrome/browser/ui/views/payments/payment_request_dialog_view_test_api.h"
 #include "chrome/common/webui_url_constants.h"
 #include "chrome/test/base/ui_test_utils.h"
-#include "components/autofill/core/browser/autofill_test_utils.h"
-#include "components/autofill/core/browser/data_model/autofill_profile.h"
-#include "components/autofill/core/browser/data_model/credit_card.h"
-#include "components/payments/content/payment_request.h"
+#include "components/payments/core/features.h"
 #include "components/web_modal/web_contents_modal_dialog_manager.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "testing/gmock/include/gmock/gmock.h"
-#include "ui/views/controls/link.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/views/controls/styled_label.h"
 #include "url/gurl.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chrome/browser/ash/system_web_apps/system_web_app_manager.h"
-#include "chrome/browser/web_applications/web_app_provider.h"
 #endif
 
 namespace payments {
@@ -73,21 +73,21 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestNoShippingTest, OpenAndNavigateTo404) {
   OpenPaymentRequestDialog();
   ResetEventWaiter(DialogEvent::DIALOG_CLOSED);
   NavigateTo("/non-existent.html");
-  WaitForObservedEvent();
+  ASSERT_TRUE(WaitForObservedEvent());
 }
 
 IN_PROC_BROWSER_TEST_F(PaymentRequestNoShippingTest, OpenAndNavigateToSame) {
   OpenPaymentRequestDialog();
   ResetEventWaiter(DialogEvent::DIALOG_CLOSED);
   NavigateTo("/payment_request_no_shipping_test.html");
-  WaitForObservedEvent();
+  ASSERT_TRUE(WaitForObservedEvent());
 }
 
 IN_PROC_BROWSER_TEST_F(PaymentRequestNoShippingTest, OpenAndReload) {
   OpenPaymentRequestDialog();
   ResetEventWaiter(DialogEvent::DIALOG_CLOSED);
   chrome::Reload(browser(), WindowOpenDisposition::CURRENT_TAB);
-  WaitForObservedEvent();
+  ASSERT_TRUE(WaitForObservedEvent());
 }
 
 IN_PROC_BROWSER_TEST_F(PaymentRequestNoShippingTest, OpenAndClickCancel) {
@@ -106,7 +106,9 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestNoShippingTest,
                            /*wait_for_animation=*/false);
 }
 
-IN_PROC_BROWSER_TEST_F(PaymentRequestNoShippingTest, InactiveBrowserWindow) {
+// TODO(crbug.com/40924925): Fix and re-enable.
+IN_PROC_BROWSER_TEST_F(PaymentRequestNoShippingTest,
+                       DISABLED_InactiveBrowserWindow) {
   std::string a_method_name;
   InstallPaymentApp("a.com", "/payment_request_success_responder.js",
                     &a_method_name);
@@ -169,9 +171,9 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestAbortTest, OpenThenAbort) {
   content::WebContents* web_contents = GetActiveWebContents();
   const std::string click_buy_button_js =
       "(function() { document.getElementById('abort').click(); })();";
-  ASSERT_TRUE(content::ExecuteScript(web_contents, click_buy_button_js));
+  ASSERT_TRUE(content::ExecJs(web_contents, click_buy_button_js));
 
-  WaitForObservedEvent();
+  ASSERT_TRUE(WaitForObservedEvent());
 
   ExpectBodyContains({"Aborted"});
 
@@ -253,9 +255,9 @@ using PaymentRequestSettingsLinkTest = PaymentRequestBrowserTestBase;
 
 // Tests that clicking the settings link brings the user to settings.
 IN_PROC_BROWSER_TEST_F(PaymentRequestSettingsLinkTest, ClickSettingsLink) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Install the Settings App.
-  ash::SystemWebAppManager::GetForTest(browser()->profile())
+  ash::SystemWebAppManager::GetForTest(browser()->GetProfile())
       ->InstallSystemAppsForTesting();
 #endif
 
@@ -286,5 +288,175 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestSettingsLinkTest, ClickSettingsLink) {
       std::string(chrome::kChromeUISettingsURL) + chrome::kPaymentsSubPage,
       new_tab_contents->GetVisibleURL().spec());
 }
+
+class PaymentRequestMandatoryUiEnabledTest
+    : public PaymentRequestBrowserTestBase {
+ public:
+  PaymentRequestMandatoryUiEnabledTest() {
+    feature_list_.InitAndEnableFeature(
+        payments::features::kPaymentRequestMandatoryPaymentAppUi);
+  }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+};
+
+IN_PROC_BROWSER_TEST_F(PaymentRequestMandatoryUiEnabledTest, AsyncCloseDialog) {
+  // Installs two apps so that the Payment Request UI will be shown.
+  std::string a_method_name;
+  InstallPaymentApp("a.com", "/payment_request_success_responder.js",
+                    &a_method_name);
+  std::string b_method_name;
+  InstallPaymentApp("b.com", "/payment_request_success_responder.js",
+                    &b_method_name);
+
+  NavigateTo("/payment_request_no_shipping_test.html");
+  InvokePaymentRequestUIWithJs(content::JsReplace(
+      "buyWithMethods([{supportedMethods:$1}, {supportedMethods:$2}]);",
+      a_method_name, b_method_name));
+
+  // The dialog is open, so we should have 1 payment request.
+  EXPECT_EQ(1U, GetPaymentRequests().size());
+
+  ResetEventWaiter(DialogEvent::DIALOG_CLOSED);
+  // Call CloseDialog, it should asynchronously close widget.
+  dialog_view()->CloseDialog();
+  // Since close dialog is async, the PaymentRequest should still be alive
+  // immediately after the call.
+  EXPECT_EQ(1U, GetPaymentRequests().size());
+  ASSERT_TRUE(WaitForObservedEvent());
+
+  // Now the PaymentRequest should be deleted.
+  EXPECT_TRUE(GetPaymentRequests().empty());
+}
+
+IN_PROC_BROWSER_TEST_F(PaymentRequestMandatoryUiEnabledTest,
+                       ShowAndHideLoadingView) {
+  base::HistogramTester histogram_tester;
+  std::string a_method_name;
+  InstallPaymentApp("a.com", "/payment_request_success_responder.js",
+                    &a_method_name);
+  std::string b_method_name;
+  InstallPaymentApp("b.com", "/payment_request_success_responder.js",
+                    &b_method_name);
+
+  NavigateTo("/payment_request_no_shipping_test.html");
+  InvokePaymentRequestUIWithJs(content::JsReplace(
+      "buyWithMethods([{supportedMethods:$1}, {supportedMethods:$2}]);",
+      a_method_name, b_method_name));
+
+  EXPECT_EQ(1U, GetPaymentRequests().size());
+  EXPECT_TRUE(test_api(dialog_view()).view_stack()->GetVisible());
+  EXPECT_EQ(nullptr, test_api(dialog_view()).loading_view_overlay());
+
+  ResetEventWaiter(DialogEvent::LOADING_VIEW_SHOWN);
+  dialog_view()->ShowLoadingView();
+  ASSERT_TRUE(WaitForObservedEvent());
+
+  PaymentAppLoadingView* loading_view =
+      test_api(dialog_view()).loading_view_overlay();
+  ASSERT_NE(nullptr, loading_view);
+  EXPECT_TRUE(loading_view->GetVisible());
+  EXPECT_FALSE(test_api(dialog_view()).view_stack()->GetVisible());
+
+  ResetEventWaiter(DialogEvent::LOADING_VIEW_HIDDEN);
+  dialog_view()->HideLoadingView();
+  ASSERT_TRUE(WaitForObservedEvent());
+
+  EXPECT_EQ(nullptr, test_api(dialog_view()).loading_view_overlay());
+  EXPECT_TRUE(test_api(dialog_view()).view_stack()->GetVisible());
+
+  histogram_tester.ExpectTotalCount(
+      "PaymentRequest.MandatoryPaymentAppUi.LoadingViewShownDuration.Completed",
+      1);
+  histogram_tester.ExpectTotalCount(
+      "PaymentRequest.MandatoryPaymentAppUi.LoadingViewShownDuration.Aborted",
+      0);
+}
+
+IN_PROC_BROWSER_TEST_F(PaymentRequestMandatoryUiEnabledTest,
+                       ShowAndAbortLoadingView) {
+  base::HistogramTester histogram_tester;
+  std::string a_method_name;
+  InstallPaymentApp("a.com", "/payment_request_success_responder.js",
+                    &a_method_name);
+  std::string b_method_name;
+  InstallPaymentApp("b.com", "/payment_request_success_responder.js",
+                    &b_method_name);
+
+  NavigateTo("/payment_request_no_shipping_test.html");
+  InvokePaymentRequestUIWithJs(content::JsReplace(
+      "buyWithMethods([{supportedMethods:$1}, {supportedMethods:$2}]);",
+      a_method_name, b_method_name));
+
+  EXPECT_EQ(1U, GetPaymentRequests().size());
+  EXPECT_TRUE(test_api(dialog_view()).view_stack()->GetVisible());
+  EXPECT_EQ(nullptr, test_api(dialog_view()).loading_view_overlay());
+
+  ResetEventWaiter(DialogEvent::LOADING_VIEW_SHOWN);
+  dialog_view()->ShowLoadingView();
+  ASSERT_TRUE(WaitForObservedEvent());
+
+  PaymentAppLoadingView* loading_view =
+      test_api(dialog_view()).loading_view_overlay();
+  ASSERT_NE(nullptr, loading_view);
+  EXPECT_TRUE(loading_view->GetVisible());
+
+  ResetEventWaiter(DialogEvent::DIALOG_CLOSED);
+  dialog_view()->CloseDialog();
+  ASSERT_TRUE(WaitForObservedEvent());
+
+  histogram_tester.ExpectTotalCount(
+      "PaymentRequest.MandatoryPaymentAppUi.LoadingViewShownDuration.Completed",
+      0);
+  histogram_tester.ExpectTotalCount(
+      "PaymentRequest.MandatoryPaymentAppUi.LoadingViewShownDuration.Aborted",
+      1);
+}
+
+// Hiding the loading view is delayed by a timer. If the dialog closes while
+// the timer is still waiting, OnDialogClosed() destroys view_stack_ first.
+// When RemoveLoadingView() runs, it normally touches view_stack_ to restore its
+// visibility and request focus. This test ensures that RemoveLoadingView()
+// safely handles a null/destroyed view_stack_ without crashing.
+IN_PROC_BROWSER_TEST_F(PaymentRequestMandatoryUiEnabledTest,
+                       RemoveLoadingViewAfterOnDialogClosedDoesNotCrash) {
+  std::string a_method_name;
+  InstallPaymentApp("a.com", "/payment_request_success_responder.js",
+                    &a_method_name);
+  std::string b_method_name;
+  InstallPaymentApp("b.com", "/payment_request_success_responder.js",
+                    &b_method_name);
+
+  NavigateTo("/payment_request_no_shipping_test.html");
+  InvokePaymentRequestUIWithJs(content::JsReplace(
+      "buyWithMethods([{supportedMethods:$1}, {supportedMethods:$2}]);",
+      a_method_name, b_method_name));
+
+  EXPECT_EQ(1U, GetPaymentRequests().size());
+  EXPECT_TRUE(test_api(dialog_view()).view_stack()->GetVisible());
+  EXPECT_EQ(nullptr, test_api(dialog_view()).loading_view_overlay());
+
+  ResetEventWaiter(DialogEvent::LOADING_VIEW_SHOWN);
+  dialog_view()->ShowLoadingView();
+  ASSERT_TRUE(WaitForObservedEvent());
+
+  PaymentAppLoadingView* loading_view =
+      test_api(dialog_view()).loading_view_overlay();
+  ASSERT_NE(nullptr, loading_view);
+  EXPECT_TRUE(loading_view->GetVisible());
+
+  PaymentRequestDialogView* dialog = dialog_view();
+
+  ResetEventWaiter(DialogEvent::DIALOG_CLOSED);
+  dialog->CloseDialog();
+  ASSERT_TRUE(WaitForObservedEvent());
+
+  EXPECT_EQ(nullptr, test_api(dialog).view_stack());
+
+  test_api(dialog).RemoveLoadingView();
+  EXPECT_EQ(nullptr, test_api(dialog).loading_view_overlay());
+}
+
 }  // namespace
 }  // namespace payments

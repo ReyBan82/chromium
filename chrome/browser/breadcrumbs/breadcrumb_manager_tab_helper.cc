@@ -12,15 +12,16 @@
 #include "components/security_state/core/security_state.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/web_contents.h"
+#include "ui/base/page_transition_types.h"
 #include "url/gurl.h"
 
 namespace {
 
 bool IsNtpUrl(const GURL& url) {
-  const std::string origin = url.DeprecatedGetOriginAsURL().spec();
-  return origin == chrome::kChromeUINewTabURL ||
-         origin == chrome::kChromeUINewTabPageURL ||
-         origin == chrome::kChromeUINewTabPageThirdPartyURL;
+  const GURL origin = url.DeprecatedGetOriginAsURL();
+  return origin == chrome::ChromeUINewTabURLAsGURL() ||
+         origin == chrome::ChromeUINewTabPageURLAsGURL() ||
+         origin.spec() == chrome::kChromeUINewTabPageThirdPartyURL;
 }
 
 }  // namespace
@@ -28,15 +29,22 @@ bool IsNtpUrl(const GURL& url) {
 BreadcrumbManagerTabHelper::BreadcrumbManagerTabHelper(
     content::WebContents* web_contents)
     : breadcrumbs::BreadcrumbManagerTabHelper(
-          infobars::ContentInfoBarManager::FromWebContents(web_contents)),
+          infobars::ContentInfoBarManager::FromWebContents(web_contents),
+          breadcrumbs::BreadcrumbManagerTabHelper::ReserveUniqueId()),
       content::WebContentsObserver(web_contents),
       content::WebContentsUserData<BreadcrumbManagerTabHelper>(*web_contents) {}
 
 BreadcrumbManagerTabHelper::~BreadcrumbManagerTabHelper() = default;
 
 void BreadcrumbManagerTabHelper::PlatformLogEvent(const std::string& event) {
+  // web_contents() securely returns nullptr if the WebContents is tearing down.
+  // Events emitted by other UserData objects during destruction are ignored.
+  if (!web_contents()) {
+    return;
+  }
+
   BreadcrumbManagerKeyedServiceFactory::GetForBrowserContext(
-      GetWebContents().GetBrowserContext())
+      web_contents()->GetBrowserContext())
       ->AddEvent(event);
 }
 
@@ -86,9 +94,7 @@ void BreadcrumbManagerTabHelper::DidChangeVisibleSecurityState() {
       visible_security_state->displayed_mixed_content;
 
   security_state::SecurityLevel security_level =
-      security_state::GetSecurityLevel(
-          *visible_security_state,
-          /*used_policy_installed_certificate=*/false);
+      security_state::GetSecurityLevel(*visible_security_state);
   const bool security_style_authentication_broken =
       security_level == security_state::SecurityLevel::DANGEROUS;
 

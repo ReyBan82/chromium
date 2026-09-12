@@ -6,8 +6,8 @@
 
 #include "base/task/bind_post_task.h"
 #include "base/task/sequenced_task_runner.h"
-#include "components/cast_streaming/public/remoting_message_factories.h"
 #include "media/base/demuxer.h"
+#include "media/cast/openscreen/remoting_message_factories.h"
 #include "media/remoting/receiver.h"
 #include "media/remoting/receiver_controller.h"
 #include "media/remoting/stream_provider.h"
@@ -82,7 +82,7 @@ void RemotingRendererFactory::OnReceivedRpc(
   if (message->proc() == openscreen::cast::RpcMessage::RPC_ACQUIRE_RENDERER)
     OnAcquireRenderer(std::move(message));
   else
-    VLOG(1) << __func__ << ": Unknow RPC message. proc=" << message->proc();
+    VLOG(1) << __func__ << ": Unknown RPC message. proc=" << message->proc();
 }
 
 void RemotingRendererFactory::OnAcquireRenderer(
@@ -116,8 +116,8 @@ void RemotingRendererFactory::OnAcquireRendererDone(int receiver_rpc_handle) {
   DVLOG(3) << __func__
            << ": Issues RPC_ACQUIRE_RENDERER_DONE RPC message. remote_handle="
            << remote_renderer_handle_ << " rpc_handle=" << receiver_rpc_handle;
-  auto rpc = cast_streaming::remoting::CreateMessageForAcquireRendererDone(
-      receiver_rpc_handle);
+  auto rpc =
+      media::cast::CreateMessageForAcquireRendererDone(receiver_rpc_handle);
   rpc->set_handle(remote_renderer_handle_);
   rpc_messenger_->SendMessageToRemote(*rpc);
 

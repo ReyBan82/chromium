@@ -39,11 +39,7 @@ mojom::DeviceInfoPtr Device::ConstructDeviceInfoStruct(
       base::UTF16ToUTF8(device->GetNameForDisplay());
   device_info->address = device->GetAddress();
   device_info->is_gatt_connected = device->IsGattConnected();
-
-  if (device->GetInquiryRSSI()) {
-    device_info->rssi = mojom::RSSIWrapper::New();
-    device_info->rssi->value = device->GetInquiryRSSI().value();
-  }
+  device_info->rssi = device->GetInquiryRSSI();
 
   std::vector<device::BluetoothUUID> service_uuids;
   for (auto& uuid : device->GetUUIDs())
@@ -117,7 +113,7 @@ void Device::GetCharacteristics(const std::string& service_id,
   device::BluetoothRemoteGattService* service =
       device->GetGattService(service_id);
   if (service == nullptr) {
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
@@ -130,6 +126,7 @@ void Device::GetCharacteristics(const std::string& service_id,
     characteristic_info->id = characteristic->GetIdentifier();
     characteristic_info->uuid = characteristic->GetUUID();
     characteristic_info->properties = characteristic->GetProperties();
+    characteristic_info->permissions = characteristic->GetPermissions();
 
     characteristics.push_back(std::move(characteristic_info));
   }
@@ -148,7 +145,7 @@ void Device::ReadValueForCharacteristic(
       device->GetGattService(service_id);
   if (service == nullptr) {
     std::move(callback).Run(mojom::GattResult::SERVICE_NOT_FOUND,
-                            absl::nullopt /* value */);
+                            std::nullopt /* value */);
     return;
   }
 
@@ -156,7 +153,7 @@ void Device::ReadValueForCharacteristic(
       service->GetCharacteristic(characteristic_id);
   if (characteristic == nullptr) {
     std::move(callback).Run(mojom::GattResult::CHARACTERISTIC_NOT_FOUND,
-                            absl::nullopt /* value */);
+                            std::nullopt /* value */);
     return;
   }
 
@@ -203,21 +200,21 @@ void Device::GetDescriptors(const std::string& service_id,
                             GetDescriptorsCallback callback) {
   device::BluetoothDevice* device = adapter_->GetDevice(GetAddress());
   if (!device) {
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
   device::BluetoothRemoteGattService* service =
       device->GetGattService(service_id);
   if (!service) {
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
   device::BluetoothRemoteGattCharacteristic* characteristic =
       service->GetCharacteristic(characteristic_id);
   if (!characteristic) {
-    std::move(callback).Run(absl::nullopt);
+    std::move(callback).Run(std::nullopt);
     return;
   }
 
@@ -247,7 +244,7 @@ void Device::ReadValueForDescriptor(const std::string& service_id,
       device->GetGattService(service_id);
   if (!service) {
     std::move(callback).Run(mojom::GattResult::SERVICE_NOT_FOUND,
-                            absl::nullopt /* value */);
+                            std::nullopt /* value */);
     return;
   }
 
@@ -255,7 +252,7 @@ void Device::ReadValueForDescriptor(const std::string& service_id,
       service->GetCharacteristic(characteristic_id);
   if (!characteristic) {
     std::move(callback).Run(mojom::GattResult::CHARACTERISTIC_NOT_FOUND,
-                            absl::nullopt /* value */);
+                            std::nullopt /* value */);
     return;
   }
 
@@ -263,7 +260,7 @@ void Device::ReadValueForDescriptor(const std::string& service_id,
       characteristic->GetDescriptor(descriptor_id);
   if (!descriptor) {
     std::move(callback).Run(mojom::GattResult::DESCRIPTOR_NOT_FOUND,
-                            absl::nullopt /* value */);
+                            std::nullopt /* value */);
     return;
   }
 
@@ -345,12 +342,12 @@ mojom::ServiceInfoPtr Device::ConstructServiceInfoStruct(
 
 void Device::OnReadRemoteCharacteristic(
     ReadValueForCharacteristicCallback callback,
-    absl::optional<device::BluetoothGattService::GattErrorCode> error_code,
+    std::optional<device::BluetoothGattService::GattErrorCode> error_code,
     const std::vector<uint8_t>& value) {
   if (error_code.has_value()) {
     std::move(callback).Run(
         mojo::ConvertTo<mojom::GattResult>(error_code.value()),
-        absl::nullopt /* value */);
+        std::nullopt /* value */);
     return;
   }
   std::move(callback).Run(mojom::GattResult::SUCCESS, std::move(value));
@@ -369,12 +366,12 @@ void Device::OnWriteRemoteCharacteristicError(
 
 void Device::OnReadRemoteDescriptor(
     ReadValueForDescriptorCallback callback,
-    absl::optional<device::BluetoothGattService::GattErrorCode> error_code,
+    std::optional<device::BluetoothGattService::GattErrorCode> error_code,
     const std::vector<uint8_t>& value) {
   if (error_code.has_value()) {
     std::move(callback).Run(
         mojo::ConvertTo<mojom::GattResult>(error_code.value()),
-        /*value=*/absl::nullopt);
+        /*value=*/std::nullopt);
     return;
   }
   std::move(callback).Run(mojom::GattResult::SUCCESS, std::move(value));

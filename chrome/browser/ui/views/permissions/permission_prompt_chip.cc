@@ -3,15 +3,14 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/ui/views/permissions/permission_prompt_chip.h"
+
 #include <algorithm>
 #include <memory>
-#include "base/containers/contains.h"
+
 #include "base/functional/bind.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/ranges/algorithm.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_view.h"
-#include "chrome/browser/ui/views/permissions/chip_controller.h"
-#include "chrome/grit/generated_resources.h"
+#include "chrome/browser/ui/views/permissions/chip/chip_controller.h"
 #include "components/permissions/features.h"
 #include "components/permissions/permission_prompt.h"
 #include "components/permissions/permission_util.h"
@@ -20,30 +19,33 @@
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/permission_controller.h"
 #include "content/public/browser/web_contents.h"
-#include "permission_prompt_chip_model.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
 #include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/bubble/bubble_dialog_delegate_view.h"
 
-PermissionPromptChip::PermissionPromptChip(Browser* browser,
-                                           content::WebContents* web_contents,
+PermissionPromptChip::PermissionPromptChip(content::WebContents* web_contents,
                                            Delegate* delegate)
-    : PermissionPromptDesktop(browser, web_contents, delegate),
-      delegate_(delegate) {
-  DCHECK(delegate_);
-  LocationBarView* lbv = GetLocationBarView();
-  if (!lbv->chip_controller()->chip()) {
-    lbv->CreateChip();
+    : PermissionPromptDesktop(web_contents, delegate) {
+  DCHECK(delegate);
+  LocationBar* lb = GetLocationBar();
+
+  // Before showing a chip make sure the LocationBar is in a valid state. That
+  // fixes a bug when a chip overlays the padlock icon.
+  lb->InvalidateLayout();
+
+  if (delegate->ShouldCurrentRequestUseQuietUI()) {
+    delegate->PreIgnoreQuietPrompt();
   }
 
-  if (delegate->ShouldCurrentRequestUseQuietUI())
-    PreemptivelyResolvePermissionRequest(web_contents, delegate);
-
-  chip_controller_ = lbv->chip_controller();
-  chip_controller_->ShowPermissionPrompt(web_contents, delegate->GetWeakPtr());
+  chip_controller_ = lb->GetChipController();
+  chip_controller_->ShowPermissionPrompt(delegate->GetWeakPtr());
 }
 
-PermissionPromptChip::~PermissionPromptChip() = default;
+PermissionPromptChip::~PermissionPromptChip() {
+  if (chip_controller_) {
+    chip_controller_->ResetPermissionRequestChip();
+  }
+}
 
 bool PermissionPromptChip::UpdateAnchor() {
   if (UpdateBrowser()) {
@@ -52,18 +54,17 @@ bool PermissionPromptChip::UpdateAnchor() {
     return false;
   }
 
-  LocationBarView* lbv = GetLocationBarView();
+  LocationBar* lb = GetLocationBar();
 
-  if (!lbv || !lbv->IsInitialized()) {
+  if (!lb || !lb->IsInitialized()) {
     return false;  // view should be recreated
   }
 
-  const bool is_location_bar_drawn =
-      lbv->IsDrawn() && !lbv->GetWidget()->IsFullscreen();
+  const bool is_location_bar_drawn = lb->IsDrawn() && !lb->IsFullscreen();
   if (chip_controller_->IsPermissionPromptChipVisible() &&
       !is_location_bar_drawn) {
     chip_controller_->ResetPermissionPromptChip();
-    if (delegate_) {
+    if (delegate()) {
       return false;
     }
   }
@@ -85,53 +86,20 @@ PermissionPromptChip::GetPromptDisposition() const {
       LOCATION_BAR_LEFT_CHIP_AUTO_BUBBLE;
 }
 
-views::Widget* PermissionPromptChip::GetPromptBubbleWidgetForTesting() {
-  CHECK_IS_TEST();
-  LocationBarView* lbv = GetLocationBarView();
-
+std::optional<gfx::Rect> PermissionPromptChip::GetViewBoundsInScreen() const {
   return chip_controller_->IsPermissionPromptChipVisible() &&
-                 lbv->chip_controller()->IsBubbleShowing()
-             ? lbv->chip_controller()->GetBubbleWidget()
-             : nullptr;
+                 chip_controller_->IsBubbleShowing()
+             ? std::make_optional<gfx::Rect>(chip_controller_->GetBubbleWidget()
+                                                 ->GetWindowBoundsInScreen())
+             : std::nullopt;
 }
 
-void PermissionPromptChip::PreemptivelyResolvePermissionRequest(
-    content::WebContents* web_contents,
-    Delegate* delegate) {
-  if (base::FeatureList::IsEnabled(permissions::features::kFailFastQuietChip)) {
-    DCHECK(delegate->ShouldCurrentRequestUseQuietUI());
+views::Widget* PermissionPromptChip::GetPromptBubbleWidgetForTesting() {
+  CHECK_IS_TEST();
+  LocationBar* lb = GetLocationBar();
 
-    bool is_subscribed_to_permission_change_event = true;
-    content::PermissionController* permission_controller =
-        web_contents->GetBrowserContext()->GetPermissionController();
-
-    // If at least one RFH is not subscribed to the PermissionChange event, we
-    // should not preemptively resolve a prompt.
-    for (auto* request : delegate->Requests()) {
-      content::RenderFrameHost* rfh =
-          content::RenderFrameHost::FromID(request->get_requesting_frame_id());
-      if (rfh == nullptr)
-        return;
-
-      ContentSettingsType type = request->GetContentSettingsType();
-
-      blink::PermissionType permission_type =
-          permissions::PermissionUtil::ContentSettingTypeToPermissionType(type);
-
-      // Pre-ignore is allowed only for the quiet chip. The quiet chip is
-      // enabled only for `NOTIFICATIONS` and `GEOLOCATION`.
-      DCHECK(permission_type == blink::PermissionType::NOTIFICATIONS ||
-             permission_type == blink::PermissionType::GEOLOCATION);
-
-      is_subscribed_to_permission_change_event &=
-          permission_controller->IsSubscribedToPermissionChangeEvent(
-              permission_type, rfh);
-    }
-
-    if (is_subscribed_to_permission_change_event) {
-      // This will resolve a promise so an origin is not waiting for the user's
-      // decision.
-      delegate->PreIgnoreQuietPrompt();
-    }
-  }
+  return chip_controller_->IsPermissionPromptChipVisible() &&
+                 lb->GetChipController()->IsBubbleShowing()
+             ? lb->GetChipController()->GetBubbleWidget()
+             : nullptr;
 }

@@ -30,24 +30,42 @@
 
 #include "third_party/blink/renderer/core/svg/svg_geometry_element.h"
 
-#include "third_party/blink/renderer/core/css/style_change_reason.h"
+#include <cmath>
+#include <limits>
+
+#include "third_party/blink/renderer/bindings/core/v8/v8_dom_point_init.h"
+#include "third_party/blink/renderer/core/css/css_identifier_value.h"
+#include "third_party/blink/renderer/core/css/css_numeric_literal_value.h"
+#include "third_party/blink/renderer/core/css/css_primitive_value.h"
+#include "third_party/blink/renderer/core/geometry/dom_point.h"
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_path.h"
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_shape.h"
 #include "third_party/blink/renderer/core/layout/svg/svg_layout_support.h"
 #include "third_party/blink/renderer/core/svg/svg_animated_number.h"
+#include "third_party/blink/renderer/core/svg/svg_length_functions.h"
 #include "third_party/blink/renderer/core/svg/svg_point_tear_off.h"
+#include "third_party/blink/renderer/core/svg/svg_zoom_migration.h"
 #include "third_party/blink/renderer/core/svg_names.h"
-#include "third_party/blink/renderer/platform/graphics/stroke_data.h"
+#include "third_party/blink/renderer/platform/geometry/path_builder.h"
+#include "third_party/blink/renderer/platform/geometry/stroke_data.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/transforms/affine_transform.h"
 
 namespace blink {
 
 class SVGAnimatedPathLength final : public SVGAnimatedNumber {
  public:
   explicit SVGAnimatedPathLength(SVGGeometryElement* context_element)
-      : SVGAnimatedNumber(context_element,
-                          svg_names::kPathLengthAttr,
-                          MakeGarbageCollected<SVGNumber>()) {}
+      : SVGAnimatedNumber(
+            context_element,
+            svg_names::kPathLengthAttr,
+            MakeGarbageCollected<SVGNumber>(),
+            RuntimeEnabledFeatures::SvgPathLengthCssPropertyEnabled()
+                ? CSSPropertyID::kPathLength
+                : CSSPropertyID::kInvalid) {}
+
+  const CSSValue* CssValue() const final;
 
   SVGParsingError AttributeChanged(const String& value) override {
     SVGParsingError parse_status = SVGAnimatedNumber::AttributeChanged(value);
@@ -57,21 +75,45 @@ class SVGAnimatedPathLength final : public SVGAnimatedNumber {
   }
 };
 
+const CSSValue* SVGAnimatedPathLength::CssValue() const {
+  DCHECK(HasPresentationAttributeMapping());
+  // A negative animated value is an error; treat it as 'none'.
+  if (CurrentValue()->Value() < 0) {
+    return CSSIdentifierValue::Create(CSSValueID::kNone);
+  }
+  return CSSNumericLiteralValue::Create(CurrentValue()->Value(),
+                                        CSSPrimitiveValue::UnitType::kPixels);
+}
+
 SVGGeometryElement::SVGGeometryElement(const QualifiedName& tag_name,
                                        Document& document,
                                        ConstructionType construction_type)
-    : SVGGraphicsElement(tag_name, document, construction_type),
-      path_length_(MakeGarbageCollected<SVGAnimatedPathLength>(this)) {
-  AddToPropertyMap(path_length_);
+    : SVGGraphicsElement(tag_name, document, construction_type) {}
+
+SVGAnimatedNumber& SVGGeometryElement::EnsurePathLength() const {
+  if (!path_length_) {
+    path_length_ = MakeGarbageCollected<SVGAnimatedPathLength>(
+        const_cast<SVGGeometryElement*>(this));
+  }
+  return *path_length_;
+}
+
+SVGAnimatedNumber* SVGGeometryElement::pathLength() const {
+  return &EnsurePathLength();
 }
 
 void SVGGeometryElement::SvgAttributeChanged(
     const SvgAttributeChangedParams& params) {
   const QualifiedName& attr_name = params.name;
   if (attr_name == svg_names::kPathLengthAttr) {
-    SVGElement::InvalidationGuard invalidation_guard(this);
-    if (LayoutObject* layout_object = GetLayoutObject())
+    CHECK(path_length_);
+    if (RuntimeEnabledFeatures::SvgPathLengthCssPropertyEnabled()) {
+      UpdatePresentationAttributeStyle(*path_length_);
+      return;
+    }
+    if (LayoutObject* layout_object = GetLayoutObject()) {
       MarkForLayoutAndParentResourceInvalidation(*layout_object);
+    }
     return;
   }
 
@@ -83,7 +125,12 @@ void SVGGeometryElement::Trace(Visitor* visitor) const {
   SVGGraphicsElement::Trace(visitor);
 }
 
-bool SVGGeometryElement::isPointInFill(SVGPointTearOff* point) const {
+bool SVGGeometryElement::isPointInFill(const DOMPointInit* point) const {
+  // If either of the x or y properties on point are infinite or NaN, then the
+  // method must return false.
+  if (!std::isfinite(point->x()) || !std::isfinite(point->y())) {
+    return false;
+  }
   GetDocument().UpdateStyleAndLayoutForNode(this,
                                             DocumentUpdateReason::kJavaScript);
 
@@ -92,13 +139,21 @@ bool SVGGeometryElement::isPointInFill(SVGPointTearOff* point) const {
   const LayoutObject* layout_object = GetLayoutObject();
   if (!layout_object)
     return false;
+  const ComputedStyle& style = layout_object->StyleRef();
 
   // Path::Contains will reject points with a non-finite component.
-  WindRule fill_rule = layout_object->StyleRef().FillRule();
-  return AsPath().Contains(point->Target()->Value(), fill_rule);
+  gfx::PointF local_point(ClampTo<float>(point->x()),
+                          ClampTo<float>(point->y()));
+  local_point = NoopWillBeScalePoint(local_point, style.EffectiveZoom());
+  return AsPath().Contains(local_point, style.FillRule());
 }
 
-bool SVGGeometryElement::isPointInStroke(SVGPointTearOff* point) const {
+bool SVGGeometryElement::isPointInStroke(const DOMPointInit* point) const {
+  // If either of the x or y properties on point are infinite or NaN, then the
+  // method must return false.
+  if (!std::isfinite(point->x()) || !std::isfinite(point->y())) {
+    return false;
+  }
   GetDocument().UpdateStyleAndLayoutForNode(this,
                                             DocumentUpdateReason::kJavaScript);
 
@@ -108,42 +163,51 @@ bool SVGGeometryElement::isPointInStroke(SVGPointTearOff* point) const {
   if (!layout_object)
     return false;
   const auto& layout_shape = To<LayoutSVGShape>(*layout_object);
+  const ComputedStyle& style = layout_shape.StyleRef();
+
+  PathBuilder path = AsMutablePath();
+  gfx::PointF local_point(ClampTo<float>(point->x()),
+                          ClampTo<float>(point->y()));
+  local_point = NoopWillBeScalePoint(local_point, style.EffectiveZoom());
 
   AffineTransform root_transform;
-
-  Path path = AsPath();
-  gfx::PointF local_point = point->Target()->Value();
   if (layout_shape.HasNonScalingStroke()) {
     const AffineTransform transform =
-        layout_shape.ComputeNonScalingStrokeTransform();
+        layout_shape.ComputeNonScalingStrokeTransform(
+            LayoutSVGShape::NonScalingStrokeTransformMode::kClearTranslation);
     path.Transform(transform);
     local_point = transform.MapPoint(local_point);
 
-    // Un-scale to get back to the root-transform (cheaper than re-computing
-    // the root transform from scratch).
-    root_transform.Scale(layout_shape.StyleRef().EffectiveZoom())
-        .PreConcat(transform);
+    if (RuntimeEnabledFeatures::SvgNewZoomEnabled()) {
+      root_transform = transform;
+    } else {
+      // Un-scale to get back to the root-transform (cheaper than re-computing
+      // the root transform from scratch).
+      root_transform.Scale(style.EffectiveZoom()).PreConcat(transform);
+    }
   } else {
     root_transform = layout_shape.ComputeRootTransform();
   }
 
   StrokeData stroke_data;
   SVGLayoutSupport::ApplyStrokeStyleToStrokeData(
-      stroke_data, layout_shape.StyleRef(), layout_shape,
-      PathLengthScaleFactor());
+      stroke_data, style, layout_shape, PathLengthScaleFactor());
 
   // Path::StrokeContains will reject points with a non-finite component.
-  return path.StrokeContains(local_point, stroke_data, root_transform);
+  return path.Finalize().StrokeContains(local_point, stroke_data,
+                                        root_transform);
 }
 
-Path SVGGeometryElement::ToClipPath() const {
-  Path path = AsPath();
+Path SVGGeometryElement::ToClipPath(
+    const AffineTransform* clip_transform) const {
+  PathBuilder path = AsMutablePath();
   path.Transform(CalculateTransform(SVGElement::kIncludeMotionTransform));
+  if (clip_transform) {
+    path.Transform(*clip_transform);
+  }
 
-  DCHECK(GetLayoutObject());
-  DCHECK(GetLayoutObject()->Style());
-  path.SetWindRule(GetLayoutObject()->StyleRef().ClipRule());
-  return path;
+  path.SetWindRule(ComputedStyleRef().ClipRule());
+  return path.Finalize();
 }
 
 float SVGGeometryElement::getTotalLength(ExceptionState& exception_state) {
@@ -151,12 +215,18 @@ float SVGGeometryElement::getTotalLength(ExceptionState& exception_state) {
                                             DocumentUpdateReason::kJavaScript);
 
   if (!GetLayoutObject()) {
-    exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
-                                      "This element is non-rendered element.");
-    return 0;
+    // Even if no layout object is available, we may still be able to compute
+    // length using styles.
+    if (!EnsureComputedStyle()) {
+      exception_state.ThrowDOMException(
+          DOMExceptionCode::kInvalidStateError,
+          "This element is non-rendered element.");
+      return 0;
+    }
   }
 
-  return AsPath().length();
+  const ComputedStyle& style = ComputedStyleRef();
+  return NoopWillBeInvScaleScalar(AsPath().length(), style.EffectiveZoom());
 }
 
 SVGPointTearOff* SVGGeometryElement::getPointAtLength(
@@ -172,23 +242,24 @@ SVGPointTearOff* SVGGeometryElement::getPointAtLength(
     return nullptr;
   }
 
-  const Path& path = AsPath();
-
+  const Path path = AsPath();
   if (path.IsEmpty()) {
     exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
                                       "The element's path is empty.");
     return nullptr;
   }
 
+  const ComputedStyle& style = ComputedStyleRef();
   if (length < 0) {
     length = 0;
   } else {
+    length = NoopWillBeScaleScalar(length, style.EffectiveZoom());
     float computed_length = path.length();
     if (length > computed_length)
       length = computed_length;
   }
   gfx::PointF point = path.PointAtLength(length);
-
+  point = NoopWillBeInvScalePoint(point, style.EffectiveZoom());
   return SVGPointTearOff::CreateDetached(point);
 }
 
@@ -197,13 +268,26 @@ float SVGGeometryElement::ComputePathLength() const {
 }
 
 float SVGGeometryElement::AuthorPathLength() const {
-  if (!pathLength()->IsSpecified())
+  if (RuntimeEnabledFeatures::SvgPathLengthCssPropertyEnabled()) {
+    const ComputedStyle* style =
+        const_cast<SVGGeometryElement*>(this)->EnsureComputedStyle();
+    if (!style || style->PathLength().IsNone()) {
+      return std::numeric_limits<float>::quiet_NaN();
+    }
+    // path-length cannot be a percentage, so the dimension is unused. This
+    // also divides out the effective zoom to keep the author value stable.
+    return ValueForLength(style->PathLength(), *style, /*dimension=*/0);
+  }
+  // Read from the animated SVG attribute directly.
+  if (!path_length_ || !path_length_->IsSpecified()) {
     return std::numeric_limits<float>::quiet_NaN();
-  float author_path_length = pathLength()->CurrentValue()->Value();
+  }
+  float author_path_length = path_length_->CurrentValue()->Value();
   // https://svgwg.org/svg2-draft/paths.html#PathLengthAttribute
   // "A negative value is an error"
-  if (author_path_length < 0)
+  if (author_path_length < 0) {
     return std::numeric_limits<float>::quiet_NaN();
+  }
   return author_path_length;
 }
 
@@ -211,7 +295,6 @@ float SVGGeometryElement::PathLengthScaleFactor() const {
   float author_path_length = AuthorPathLength();
   if (std::isnan(author_path_length))
     return 1;
-  DCHECK(GetLayoutObject());
   return PathLengthScaleFactor(ComputePathLength(), author_path_length);
 }
 
@@ -234,25 +317,53 @@ float SVGGeometryElement::PathLengthScaleFactor(float computed_path_length,
 }
 
 void SVGGeometryElement::GeometryPresentationAttributeChanged(
-    const QualifiedName& attr_name) {
-  InvalidateSVGPresentationAttributeStyle();
-  SetNeedsStyleRecalc(kLocalStyleChange,
-                      StyleChangeReasonForTracing::FromAttribute(attr_name));
+    const SVGAnimatedPropertyBase& property) {
+  UpdatePresentationAttributeStyle(property);
   GeometryAttributeChanged();
 }
 
 void SVGGeometryElement::GeometryAttributeChanged() {
-  SVGElement::InvalidationGuard invalidation_guard(this);
   if (auto* layout_object = To<LayoutSVGShape>(GetLayoutObject())) {
     layout_object->SetNeedsShapeUpdate();
     MarkForLayoutAndParentResourceInvalidation(*layout_object);
+  } else {
+    NotifyIncomingReferences([](SVGElement& element) {
+      DCHECK(element.GetLayoutObject());
+      MarkForLayoutAndParentResourceInvalidation(*element.GetLayoutObject());
+    });
+  }
+  NotifyResourceClients();
+}
+
+LayoutObject* SVGGeometryElement::CreateLayoutObject(const ComputedStyle&) {
+  // By default, any subclass is expected to do path-based drawing.
+  return MakeGarbageCollected<LayoutSVGPath>(this);
+}
+
+SVGAnimatedPropertyBase* SVGGeometryElement::PropertyFromAttribute(
+    const QualifiedName& attribute_name) const {
+  if (attribute_name == svg_names::kPathLengthAttr) {
+    return &EnsurePathLength();
+  } else {
+    return SVGGraphicsElement::PropertyFromAttribute(attribute_name);
   }
 }
 
-LayoutObject* SVGGeometryElement::CreateLayoutObject(const ComputedStyle&,
-                                                     LegacyLayout) {
-  // By default, any subclass is expected to do path-based drawing.
-  return MakeGarbageCollected<LayoutSVGPath>(this);
+void SVGGeometryElement::SynchronizeAllSVGAttributes() const {
+  if (path_length_) {
+    SVGAnimatedPropertyBase* attrs[]{path_length_.Get()};
+    SynchronizeListOfSVGAttributes(attrs);
+  }
+  SVGGraphicsElement::SynchronizeAllSVGAttributes();
+}
+
+void SVGGeometryElement::CollectExtraStyleForPresentationAttribute(
+    HeapVector<CSSPropertyValue, 8>& style) {
+  if (RuntimeEnabledFeatures::SvgPathLengthCssPropertyEnabled() &&
+      path_length_) {
+    AddAnimatedPropertyToPresentationAttributeStyle(*path_length_, style);
+  }
+  SVGGraphicsElement::CollectExtraStyleForPresentationAttribute(style);
 }
 
 }  // namespace blink

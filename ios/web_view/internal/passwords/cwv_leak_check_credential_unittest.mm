@@ -2,20 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#import "ios/web_view/internal/passwords/cwv_leak_check_credential_internal.h"
-
 #import "base/strings/utf_string_conversions.h"
 #import "components/password_manager/core/browser/password_form.h"
+#import "components/password_manager/core/browser/password_string.h"
+#import "ios/web_view/internal/passwords/cwv_leak_check_credential_internal.h"
 #import "ios/web_view/internal/passwords/cwv_password_internal.h"
 #import "testing/gtest/include/gtest/gtest.h"
 #import "testing/gtest_mac.h"
 #import "testing/platform_test.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 using password_manager::LeakCheckCredential;
+using password_manager::PasswordString;
 
 namespace ios_web_view {
 
@@ -31,12 +28,12 @@ class CWVLeakCheckCredentialTest : public PlatformTest {
     password_form.username_element = u"Email";
     password_form.username_value = username;
     password_form.password_element = u"Passwd";
-    password_form.password_value = password;
+    password_form.password_value = PasswordString(std::u16string(password));
     password_form.submit_element = u"signIn";
     password_form.signon_realm = "http://www.example.com/";
     password_form.scheme = password_manager::PasswordForm::Scheme::kHtml;
     password_form.blocked_by_user = false;
-    password_form.encrypted_password = base::UTF16ToUTF8(password);
+    password_form.keychain_identifier = base::UTF16ToUTF8(password);
 
     return [[CWVPassword alloc] initWithPasswordForm:password_form];
   }

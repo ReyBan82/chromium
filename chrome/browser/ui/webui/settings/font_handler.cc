@@ -5,6 +5,7 @@
 #include "chrome/browser/ui/webui/settings/font_handler.h"
 
 #include <stddef.h>
+
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,7 +17,6 @@
 #include "build/build_config.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser_finder.h"
 #include "chrome/common/pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/font_list_async.h"
@@ -35,7 +35,7 @@ FontHandler::FontHandler(Profile* profile) {
 #endif
 }
 
-FontHandler::~FontHandler() {}
+FontHandler::~FontHandler() = default;
 
 void FontHandler::RegisterMessages() {
   web_ui()->RegisterMessageCallback(
@@ -49,7 +49,7 @@ void FontHandler::OnJavascriptDisallowed() {
   weak_ptr_factory_.InvalidateWeakPtrs();
 }
 
-void FontHandler::HandleFetchFontsData(const base::Value::List& args) {
+void FontHandler::HandleFetchFontsData(const base::ListValue& args) {
   CHECK_EQ(1U, args.size());
   const std::string& callback_id = args[0].GetString();
 
@@ -60,11 +60,11 @@ void FontHandler::HandleFetchFontsData(const base::Value::List& args) {
 }
 
 void FontHandler::FontListHasLoaded(std::string callback_id,
-                                    base::Value::List list) {
+                                    base::ListValue list) {
   // Font list. Selects the directionality for the fonts in the given list.
   for (auto& i : list) {
     DCHECK(i.is_list());
-    base::Value::List& font = i.GetList();
+    base::ListValue& font = i.GetList();
 
     DCHECK(font.size() >= 2u && font[1].is_string());
     std::u16string value = base::UTF8ToUTF16(font[1].GetString());
@@ -73,7 +73,7 @@ void FontHandler::FontListHasLoaded(std::string callback_id,
     font.Append(has_rtl_chars ? "rtl" : "ltr");
   }
 
-  base::Value::Dict response;
+  base::DictValue response;
   response.Set("fontList", std::move(list));
 
   ResolveJavascriptCallback(base::Value(callback_id), response);

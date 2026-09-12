@@ -7,7 +7,7 @@ import 'chrome://resources/polymer/v3_0/paper-tooltip/paper-tooltip.js';
 import './diagnostics_shared.css.js';
 import './icons.html.js';
 
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {getTemplate} from './data_point.html.js';
@@ -61,11 +61,11 @@ export class DataPointElement extends PolymerElement {
     };
   }
 
-  header: string;
-  value: string;
-  tooltipText: string;
-  warningState: boolean;
-  orientation: string;
+  declare header: string;
+  declare value: string;
+  declare tooltipText: string;
+  declare warningState: boolean;
+  declare orientation: string;
 
   protected getValueClass(): string {
     return this.warningState ? 'value text-red' : 'value';

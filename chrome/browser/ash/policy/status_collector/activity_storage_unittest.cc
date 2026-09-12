@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "base/time/time.h"
+#include "chrome/test/base/testing_browser_process.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/testing_pref_service.h"
@@ -14,32 +15,37 @@
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
+namespace policy {
+
+namespace {
+
 using ::testing::AllOf;
 using ::testing::Property;
 using ::testing::UnorderedElementsAre;
 
-namespace em = enterprise_management;
+namespace em = ::enterprise_management;
 
-namespace {
 constexpr char kPrefName[] = "pref-name";
-}  // namespace
 
-namespace policy {
+}  // namespace
 
 class ActivityStorageTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    local_state_.registry()->RegisterDictionaryPref(kPrefName);
-    storage_ = std::make_unique<ActivityStorage>(&local_state_, kPrefName,
+    TestingPrefServiceSimple* local_state =
+        TestingBrowserProcess::GetGlobal()->GetTestingLocalState();
+    local_state->registry()->RegisterDictionaryPref(kPrefName);
+    storage_ = std::make_unique<ActivityStorage>(local_state, kPrefName,
                                                  base::Days(0));
   }
 
   static testing::Matcher<em::TimePeriod> EqActivity(
       const base::Time start_time,
       const base::Time end_time) {
-    return AllOf(
-        Property(&em::TimePeriod::start_timestamp, start_time.ToJavaTime()),
-        Property(&em::TimePeriod::end_timestamp, end_time.ToJavaTime()));
+    return AllOf(Property(&em::TimePeriod::start_timestamp,
+                          start_time.InMillisecondsSinceUnixEpoch()),
+                 Property(&em::TimePeriod::end_timestamp,
+                          end_time.InMillisecondsSinceUnixEpoch()));
   }
 
   base::Time MakeLocalTime(const std::string& time_string) {
@@ -58,7 +64,6 @@ class ActivityStorageTest : public ::testing::Test {
 
  private:
   content::BrowserTaskEnvironment task_environment_;
-  TestingPrefServiceSimple local_state_;
   std::unique_ptr<ActivityStorage> storage_;
 };
 
@@ -109,8 +114,8 @@ TEST_F(ActivityStorageTest, TrimActivityPeriods) {
                                MakeLocalTime("29-MAR-2020 8:30pm"), "id1");
 
   storage()->TrimActivityPeriods(
-      MakeUTCTime("26-MAR-2020 3:00am").ToJavaTime(),
-      MakeUTCTime("28-MAR-2020 2:00am").ToJavaTime());
+      MakeUTCTime("26-MAR-2020 3:00am").InMillisecondsSinceUnixEpoch(),
+      MakeUTCTime("28-MAR-2020 2:00am").InMillisecondsSinceUnixEpoch());
 
   auto activity_periods = storage()->GetActivityPeriods();
   EXPECT_THAT(

@@ -32,7 +32,7 @@ class CastWindowTreeHostAura;
 class CastWindowManagerAura : public CastWindowManager,
                               public aura::client::WindowParentingClient {
  public:
-  explicit CastWindowManagerAura(bool enable_input);
+  CastWindowManagerAura();
 
   CastWindowManagerAura(const CastWindowManagerAura&) = delete;
   CastWindowManagerAura& operator=(const CastWindowManagerAura&) = delete;
@@ -60,7 +60,8 @@ class CastWindowManagerAura : public CastWindowManager,
 
   // aura::client::WindowParentingClient implementation:
   aura::Window* GetDefaultParent(aura::Window* window,
-                                 const gfx::Rect& bounds) override;
+                                 const gfx::Rect& bounds,
+                                 const int64_t display_id) override;
 
   CastWindowTreeHostAura* window_tree_host() const;
   CastGestureHandler* GetGestureHandler() const;
@@ -69,7 +70,6 @@ class CastWindowManagerAura : public CastWindowManager,
   }
 
  private:
-  const bool enable_input_;
 
   std::unique_ptr<CastWindowTreeHostAura> window_tree_host_;
   std::unique_ptr<aura::client::DefaultCaptureClient> capture_client_;

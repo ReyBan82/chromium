@@ -8,6 +8,7 @@ list.
 
 from grit.gather import interface
 from grit import clique
+from grit import constants
 from grit import exception
 from grit import tclib
 
@@ -43,13 +44,11 @@ class SkeletonGatherer(interface.GathererBase):
     return self.text_
 
   def Escape(self, text):
-    '''Subclasses can override.  Base impl is identity.
-    '''
+    '''Subclasses can override.  Base impl is identity.'''
     return text
 
   def UnEscape(self, text):
-    '''Subclasses can override. Base impl is identity.
-    '''
+    '''Subclasses can override. Base impl is identity.'''
     return text
 
   def GetTextualIds(self):
@@ -65,8 +64,13 @@ class SkeletonGatherer(interface.GathererBase):
     resource section.'''
     return [x for x in self.skeleton_ if isinstance(x, clique.MessageClique)]
 
-  def Translate(self, lang, pseudo_if_not_available=True,
-                skeleton_gatherer=None, fallback_to_english=False):
+  def Translate(
+    self,
+    lang,
+    pseudo_if_not_available=True,
+    skeleton_gatherer=None,
+    fallback_to_english=False,
+  ):
     if len(self.skeleton_) == 0:
       raise exception.NotReady()
     if skeleton_gatherer:
@@ -77,19 +81,23 @@ class SkeletonGatherer(interface.GathererBase):
       if isinstance(self.skeleton_[ix], str):
         if skeleton_gatherer:
           # Make sure the skeleton is like the original
-          assert (isinstance(skeleton_gatherer.skeleton_[ix], str))
+          assert isinstance(skeleton_gatherer.skeleton_[ix], str)
           out.append(skeleton_gatherer.skeleton_[ix])
         else:
           out.append(self.skeleton_[ix])
       else:
         if skeleton_gatherer:  # Make sure the skeleton is like the original
-          assert (not isinstance(skeleton_gatherer.skeleton_[ix], str))
-        msg = self.skeleton_[ix].MessageForLanguage(lang,
-                                                    pseudo_if_not_available,
-                                                    fallback_to_english)
+          assert not isinstance(skeleton_gatherer.skeleton_[ix], str)
+        msg = self.skeleton_[ix].MessageForLanguageAndGender(
+          lang,
+          constants.DEFAULT_GENDER,
+          pseudo_if_not_available,
+          fallback_to_english,
+        )
 
         def MyEscape(text):
           return self.Escape(text)
+
         text = msg.GetRealContent(escaping_function=MyEscape)
         out.append(text)
     return ''.join(out)
@@ -118,8 +126,9 @@ class SkeletonGatherer(interface.GathererBase):
     if self.single_message_:
       self.single_message_.AppendText(unescaped_text)
     else:
-      self.skeleton_.append(self.uberclique.MakeClique(
-        tclib.Message(text=unescaped_text)))
+      self.skeleton_.append(
+        self.uberclique.MakeClique(tclib.Message(text=unescaped_text))
+      )
       self.translatable_chunk_ = True
 
   def SubstituteMessages(self, substituter):

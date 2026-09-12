@@ -2,12 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "testing/perf/luci_test_result.h"
 
 #include <utility>
 
 #include "base/check.h"
 #include "base/files/file_util.h"
+#include "base/i18n/time_formatting.h"
 #include "base/json/json_writer.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
@@ -33,16 +35,6 @@ constexpr char kKeyTags[] = "tags";
 constexpr char kKeyKey[] = "key";
 constexpr char kKeyValue[] = "value";
 
-// Returns iso timeformat string of |time| in UTC.
-std::string ToUtcIsoTime(base::Time time) {
-  base::Time::Exploded utc_exploded;
-  time.UTCExplode(&utc_exploded);
-  return base::StringPrintf(
-      "%d-%02d-%02dT%02d:%02d:%02d.%03dZ", utc_exploded.year,
-      utc_exploded.month, utc_exploded.day_of_month, utc_exploded.hour,
-      utc_exploded.minute, utc_exploded.second, utc_exploded.millisecond);
-}
-
 std::string ToString(LuciTestResult::Status status) {
   using Status = LuciTestResult::Status;
   switch (status) {
@@ -65,7 +57,7 @@ base::Value ToValue(const LuciTestResult::Artifact& artifact) {
   // One and only one of the two optional fields must have value.
   DCHECK(artifact.file_path.has_value() != artifact.contents.has_value());
 
-  base::Value::Dict dict;
+  base::DictValue dict;
 
   if (artifact.file_path.has_value()) {
     dict.Set(kKeyFilePath, artifact.file_path->AsUTF8Unsafe());
@@ -79,13 +71,13 @@ base::Value ToValue(const LuciTestResult::Artifact& artifact) {
 }
 
 base::Value ToValue(const LuciTestResult& result) {
-  base::Value::Dict test_report;
+  base::DictValue test_report;
 
-  base::Value::Dict* test_result = test_report.EnsureDict(kKeyTestResult);
+  base::DictValue* test_result = test_report.EnsureDict(kKeyTestResult);
   test_result->Set(kKeyTestPath, result.test_path());
 
   if (!result.extra_variant_pairs().empty()) {
-    base::Value::Dict* variant_dict = test_result->EnsureDict(kKeyVariant);
+    base::DictValue* variant_dict = test_result->EnsureDict(kKeyVariant);
     for (const auto& pair : result.extra_variant_pairs())
       variant_dict->Set(pair.first, pair.second);
   }
@@ -94,7 +86,8 @@ base::Value ToValue(const LuciTestResult& result) {
   test_result->Set(kKeyExpected, result.is_expected());
 
   if (!result.start_time().is_null()) {
-    test_result->Set(kKeyStartTime, ToUtcIsoTime(result.start_time()));
+    test_result->Set(kKeyStartTime,
+                     base::TimeFormatAsIso8601(result.start_time()));
   }
   if (!result.duration().is_zero()) {
     test_result->Set(
@@ -103,16 +96,16 @@ base::Value ToValue(const LuciTestResult& result) {
   }
 
   if (!result.output_artifacts().empty()) {
-    base::Value::Dict* artifacts_dict =
+    base::DictValue* artifacts_dict =
         test_result->EnsureDict(kKeyOutputArtifacts);
     for (const auto& pair : result.output_artifacts())
       artifacts_dict->Set(pair.first, ToValue(pair.second));
   }
 
   if (!result.tags().empty()) {
-    base::Value::List* tags_list = test_result->EnsureList(kKeyTags);
+    base::ListValue* tags_list = test_result->EnsureList(kKeyTags);
     for (const auto& tag : result.tags()) {
-      base::Value::Dict tag_dict;
+      base::DictValue tag_dict;
       tag_dict.Set(kKeyKey, tag.key);
       tag_dict.Set(kKeyValue, tag.value);
       tags_list->Append(std::move(tag_dict));
@@ -227,8 +220,7 @@ void LuciTestResult::AddTag(const std::string& key, const std::string& value) {
 
 void LuciTestResult::WriteToFile(const base::FilePath& result_file) const {
   const std::string json = ToJson(*this);
-  const int json_size = json.size();
-  CHECK(WriteFile(result_file, json.data(), json_size) == json_size);
+  CHECK(WriteFile(result_file, json));
 }
 
 }  // namespace perf_test

@@ -4,6 +4,7 @@
 
 #include "chrome/browser/ash/app_list/search/omnibox/omnibox_answer_result.h"
 
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -13,15 +14,14 @@
 #include "chrome/browser/ash/app_list/app_list_controller_delegate.h"
 #include "chrome/browser/ash/app_list/search/common/icon_constants.h"
 #include "chrome/browser/ash/app_list/search/common/search_result_util.h"
+#include "chrome/browser/ash/app_list/search/omnibox/omnibox_types.h"
 #include "chrome/browser/ash/app_list/search/omnibox/omnibox_util.h"
 #include "chrome/browser/bitmap_fetcher/bitmap_fetcher.h"
-#include "chrome/browser/chromeos/launcher_search/search_util.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chromeos/crosapi/mojom/launcher_search.mojom.h"
 #include "components/omnibox/browser/vector_icons.h"
 #include "extensions/common/image_util.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/base/window_open_disposition_utils.h"
 #include "ui/gfx/color_palette.h"
 #include "ui/gfx/image/image_skia_operations.h"
@@ -34,7 +34,6 @@ namespace {
 using Tag = ash::SearchResultTag;
 using TextItem = ash::SearchResultTextItem;
 using TextType = ash::SearchResultTextItemType;
-using CrosApiSearchResult = crosapi::mojom::SearchResult;
 
 constexpr char kOmniboxAnswerSchema[] = "omnibox_answer://";
 
@@ -43,25 +42,31 @@ ChromeSearchResult::IconInfo CreateAnswerIconInfo(
   const auto icon = gfx::ImageSkiaOperations::CreateImageWithCircleBackground(
       kAnswerCardIconDimension / 2, gfx::kGoogleBlue300,
       gfx::CreateVectorIcon(vector_icon, gfx::kGoogleGrey900));
-  return ChromeSearchResult::IconInfo(icon, kAnswerCardIconDimension);
+  return ChromeSearchResult::IconInfo(ui::ImageModel::FromImageSkia(icon),
+                                      kAnswerCardIconDimension);
 }
 
-// Convert from our Mojo answer type to the corresponding Omnibox icon.
-const gfx::VectorIcon& AnswerTypeToVectorIcon(
-    CrosApiSearchResult::AnswerType type) {
+// Convert from answer type to the corresponding Omnibox icon.
+const gfx::VectorIcon& AnswerTypeToVectorIcon(OmniboxResultAnswerType type) {
   switch (type) {
-    case CrosApiSearchResult::AnswerType::kCurrency:
-      return omnibox::kAnswerCurrencyIcon;
-    case CrosApiSearchResult::AnswerType::kDictionary:
-      return omnibox::kAnswerDictionaryIcon;
-    case CrosApiSearchResult::AnswerType::kFinance:
-      return omnibox::kAnswerFinanceIcon;
-    case CrosApiSearchResult::AnswerType::kSunrise:
-      return omnibox::kAnswerSunriseIcon;
-    case CrosApiSearchResult::AnswerType::kTranslation:
-      return omnibox::kAnswerTranslationIcon;
-    case CrosApiSearchResult::AnswerType::kWhenIs:
-      return omnibox::kAnswerWhenIsIcon;
+    case OmniboxResultAnswerType::kCurrency:
+      return features::IsRoundedIconsEnabled()
+                 ? omnibox::kAutorenewIcon
+                 : omnibox::kAnswerCurrencyOldIcon;
+    case OmniboxResultAnswerType::kDictionary:
+      return features::IsRoundedIconsEnabled()
+                 ? omnibox::kBookIcon
+                 : omnibox::kAnswerDictionaryOldIcon;
+    case OmniboxResultAnswerType::kFinance:
+      return features::IsRoundedIconsEnabled() ? omnibox::kSwapVertIcon
+                                               : omnibox::kAnswerFinanceOldIcon;
+    case OmniboxResultAnswerType::kSunrise:
+      return features::IsRoundedIconsEnabled() ? omnibox::kWbSunnyFilledIcon
+                                               : omnibox::kAnswerSunriseOldIcon;
+    case OmniboxResultAnswerType::kTranslation:
+      return features::IsRoundedIconsEnabled()
+                 ? omnibox::kTranslateIcon
+                 : omnibox::kAnswerTranslationOldIcon;
     default:
       return omnibox::kAnswerDefaultIcon;
   }
@@ -71,14 +76,14 @@ const gfx::VectorIcon& AnswerTypeToVectorIcon(
 // SuggestionAnswer::TextFields. For example, a text field containing "26°C" is
 // converted into the pair ("26", "°C"), and a text field containing "-5°F" is
 // converted into the pair ("-5", "°F").
-absl::optional<std::pair<std::u16string, std::u16string>> GetTemperature(
-    const absl::optional<std::u16string>& text) {
+std::optional<std::pair<std::u16string, std::u16string>> GetTemperature(
+    const std::optional<std::u16string>& text) {
   if (!text.has_value() || text->empty())
-    return absl::nullopt;
+    return std::nullopt;
 
   size_t digits_end = text->find_last_of(u"0123456789");
   if (digits_end == std::u16string::npos)
-    return absl::nullopt;
+    return std::nullopt;
 
   size_t unit_start = digits_end + 1;
   return std::make_pair(text->substr(0, unit_start), text->substr(unit_start));
@@ -87,7 +92,7 @@ absl::optional<std::pair<std::u16string, std::u16string>> GetTemperature(
 // Converts the given text into a TextItem and appends it to the supplied
 // vector.
 void AppendTextItem(const std::u16string& line,
-                    const CrosApiSearchResult::TextType type,
+                    OmniboxTextType type,
                     std::vector<TextItem>& text_vector) {
   if (line.empty()) {
     return;
@@ -119,7 +124,7 @@ std::u16string ComputeAccessibleName(
 OmniboxAnswerResult::OmniboxAnswerResult(
     Profile* profile,
     AppListControllerDelegate* list_controller,
-    crosapi::mojom::SearchResultPtr search_result,
+    std::unique_ptr<OmniboxResultData> search_result,
     const std::u16string& query)
     : profile_(profile),
       list_controller_(list_controller),
@@ -134,19 +139,14 @@ OmniboxAnswerResult::OmniboxAnswerResult(
   SetResultType(ResultType::kOmnibox);
   SetCategory(Category::kSearchAndAssistant);
 
-  // mojo::StructPtr DCHECKs non-null on dereference.
-  DCHECK(search_result_->stripped_destination_url.has_value());
   set_id(kOmniboxAnswerSchema +
-         search_result_->stripped_destination_url->spec());
+         search_result_->stripped_destination_url.spec());
 
   SetMetricsType(IsCalculatorResult() ? ash::OMNIBOX_CALCULATOR
                                       : ash::OMNIBOX_ANSWER);
 
   // Derive relevance from omnibox relevance and normalize it to [0, 1].
   set_relevance(search_result_->relevance / kMaxOmniboxScore);
-
-  if (crosapi::OptionalBoolIsTrue(search_result_->is_omnibox_search))
-    SetIsOmniboxSearch(true);
 
   UpdateIcon();
   UpdateTitleAndDetails();
@@ -163,10 +163,8 @@ OmniboxAnswerResult::~OmniboxAnswerResult() {
 }
 
 void OmniboxAnswerResult::Open(int event_flags) {
-  DCHECK(search_result_->destination_url.has_value());
-  list_controller_->OpenURL(profile_, *search_result_->destination_url,
-                            crosapi::PageTransitionToUiPageTransition(
-                                search_result_->page_transition),
+  list_controller_->OpenURL(profile_, search_result_->destination_url,
+                            search_result_->page_transition,
                             ui::DispositionFromEventFlags(event_flags));
 }
 
@@ -177,7 +175,9 @@ void OmniboxAnswerResult::OnColorModeChanged(bool dark_mode_enabled) {
 
 void OmniboxAnswerResult::UpdateIcon() {
   if (IsCalculatorResult()) {
-    SetIcon(CreateAnswerIconInfo(omnibox::kCalculatorIcon));
+    SetIcon(CreateAnswerIconInfo(features::IsRoundedIconsEnabled()
+                                     ? omnibox::kEqualIcon
+                                     : omnibox::kCalculatorOldIcon));
   } else if (IsWeatherResult() &&
              search_result_->image_url.value_or(GURL()).is_valid()) {
     // Weather icons are downloaded. Check this first so that the local
@@ -256,24 +256,22 @@ void OmniboxAnswerResult::OnFetchComplete(const GURL& url,
     return;
 
   DCHECK(IsWeatherResult());
-  IconInfo icon_info(gfx::ImageSkia::CreateFrom1xBitmap(*bitmap),
+  IconInfo icon_info(ui::ImageModel::FromImageSkia(
+                         gfx::ImageSkia::CreateFrom1xBitmap(*bitmap)),
                      kAnswerCardIconDimension);
   SetIcon(icon_info);
 }
 
 bool OmniboxAnswerResult::IsCalculatorResult() const {
-  return search_result_->answer_type ==
-         CrosApiSearchResult::AnswerType::kCalculator;
+  return search_result_->answer_type == OmniboxResultAnswerType::kCalculator;
 }
 
 bool OmniboxAnswerResult::IsDictionaryResult() const {
-  return search_result_->answer_type ==
-         CrosApiSearchResult::AnswerType::kDictionary;
+  return search_result_->answer_type == OmniboxResultAnswerType::kDictionary;
 }
 
 bool OmniboxAnswerResult::IsWeatherResult() const {
-  return search_result_->answer_type ==
-         CrosApiSearchResult::AnswerType::kWeather;
+  return search_result_->answer_type == OmniboxResultAnswerType::kWeather;
 }
 
 }  // namespace app_list

@@ -60,12 +60,12 @@ TEST(URLRequestJobFactoryTest, NoProtocolHandler) {
       base::test::TaskEnvironment::MainThreadType::IO);
   TestDelegate delegate;
   auto request_context = CreateTestURLRequestContextBuilder()->Build();
-  std::unique_ptr<URLRequest> request(
-      request_context->CreateRequest(GURL("foo://bar"), DEFAULT_PRIORITY,
-                                     &delegate, TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> request(request_context->CreateRequest(
+      GURL("foo://bar"), DEFAULT_PRIORITY, &delegate,
+      TRAFFIC_ANNOTATION_FOR_TESTS, net::handles::kInvalidNetworkHandle));
   request->Start();
 
-  base::RunLoop().Run();
+  delegate.RunUntilComplete();
   EXPECT_EQ(ERR_UNKNOWN_URL_SCHEME, delegate.request_status());
 }
 
@@ -77,12 +77,12 @@ TEST(URLRequestJobFactoryTest, BasicProtocolHandler) {
   context_builder->SetProtocolHandler("foo",
                                       std::make_unique<DummyProtocolHandler>());
   auto request_context = context_builder->Build();
-  std::unique_ptr<URLRequest> request(
-      request_context->CreateRequest(GURL("foo://bar"), DEFAULT_PRIORITY,
-                                     &delegate, TRAFFIC_ANNOTATION_FOR_TESTS));
+  std::unique_ptr<URLRequest> request(request_context->CreateRequest(
+      GURL("foo://bar"), DEFAULT_PRIORITY, &delegate,
+      TRAFFIC_ANNOTATION_FOR_TESTS, net::handles::kInvalidNetworkHandle));
   request->Start();
 
-  base::RunLoop().Run();
+  delegate.RunUntilComplete();
   EXPECT_EQ(OK, delegate.request_status());
 }
 

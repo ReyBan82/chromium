@@ -11,9 +11,7 @@
 #include "chrome/browser/ash/file_system_provider/request_dispatcher.h"
 #include "extensions/browser/event_router.h"
 
-namespace ash {
-namespace file_system_provider {
-namespace operations {
+namespace ash::file_system_provider::operations {
 
 namespace {
 
@@ -24,13 +22,12 @@ Operation::Operation(RequestDispatcher* dispatcher,
                      const ProvidedFileSystemInfo& file_system_info)
     : file_system_info_(file_system_info), request_dispatcher_(dispatcher) {}
 
-Operation::~Operation() {
-}
+Operation::~Operation() = default;
 
 bool Operation::SendEvent(int request_id,
                           extensions::events::HistogramValue histogram_value,
                           const std::string& event_name,
-                          base::Value::List event_args) {
+                          base::ListValue event_args) {
   auto event = std::make_unique<extensions::Event>(histogram_value, event_name,
                                                    std::move(event_args));
   return request_dispatcher_->DispatchRequest(
@@ -42,6 +39,4 @@ void Operation::OnAbort(int request_id) {
                                      file_system_info_.file_system_id());
 }
 
-}  // namespace operations
-}  // namespace file_system_provider
-}  // namespace ash
+}  // namespace ash::file_system_provider::operations

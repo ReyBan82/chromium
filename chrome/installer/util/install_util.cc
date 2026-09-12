@@ -7,15 +7,19 @@
 
 #include "chrome/installer/util/install_util.h"
 
+#include <windows.h>
+
 #include <shellapi.h>
 #include <shlobj.h>
 
 #include <algorithm>
 #include <iterator>
+#include <string_view>
 
 #include "base/check.h"
 #include "base/check_op.h"
 #include "base/command_line.h"
+#include "base/files/file_enumerator.h"
 #include "base/files/file_util.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_macros.h"
@@ -334,6 +338,27 @@ bool InstallUtil::IsStartMenuShortcutWithActivatorGuidInstalled() {
 }
 
 // static
+bool InstallUtil::IsRunningAsInteractiveUser() {
+  // Get the SID for interactive user.
+  DWORD sid_size = SECURITY_MAX_SID_SIZE;
+  uint8_t sid_bytes[SECURITY_MAX_SID_SIZE] = {};
+  SID* interactive_sid = reinterpret_cast<SID*>(sid_bytes);
+  if (!::CreateWellKnownSid(WinInteractiveSid, nullptr, interactive_sid,
+                            &sid_size)) {
+    PLOG(ERROR) << "Failed to create well known SID";
+    return false;
+  }
+
+  BOOL is_member = FALSE;
+  if (!::CheckTokenMembership(nullptr, interactive_sid, &is_member)) {
+    PLOG(ERROR) << "Failed to check token membership for WinInteractiveSid";
+    return false;
+  }
+
+  return is_member;
+}
+
+// static
 std::wstring InstallUtil::GetToastActivatorRegistryPath() {
   return L"Software\\Classes\\CLSID\\" +
          base::win::WStringFromGUID(install_static::GetToastActivatorClsid());
@@ -389,7 +414,7 @@ void InstallUtil::AppendModeAndChannelSwitches(
 // static
 std::wstring InstallUtil::GetCurrentDate() {
   static const wchar_t kDateFormat[] = L"yyyyMMdd";
-  wchar_t date_str[std::size(kDateFormat)] = {0};
+  wchar_t date_str[std::size(kDateFormat)] = {};
   int len = GetDateFormatW(LOCALE_INVARIANT, 0, nullptr, kDateFormat, date_str,
                            std::size(date_str));
   if (len) {
@@ -402,7 +427,7 @@ std::wstring InstallUtil::GetCurrentDate() {
 }
 
 // static
-absl::optional<base::Version> InstallUtil::GetDowngradeVersion() {
+std::optional<base::Version> InstallUtil::GetDowngradeVersion() {
   RegKey key;
   std::wstring downgrade_version;
   if (key.Open(install_static::IsSystemInstall() ? HKEY_LOCAL_MACHINE
@@ -412,11 +437,11 @@ absl::optional<base::Version> InstallUtil::GetDowngradeVersion() {
       key.ReadValue(installer::kRegDowngradeVersion, &downgrade_version) !=
           ERROR_SUCCESS ||
       downgrade_version.empty()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   base::Version version(base::WideToASCII(downgrade_version));
   if (!version.IsValid())
-    return absl::nullopt;
+    return std::nullopt;
   return version;
 }
 
@@ -460,8 +485,8 @@ InstallUtil::GetCloudManagementDmTokenLocation(
 
   base::win::RegKey key;
   if (read_only) {
-    key.Open(HKEY_LOCAL_MACHINE, key_path.c_str(),
-             KEY_QUERY_VALUE | wow_access);
+    (void)key.Open(HKEY_LOCAL_MACHINE, key_path.c_str(),
+                   KEY_QUERY_VALUE | wow_access);
   } else {
     auto result = key.Create(HKEY_LOCAL_MACHINE, key_path.c_str(),
                              KEY_SET_VALUE | wow_access);
@@ -486,8 +511,8 @@ InstallUtil::GetDeviceTrustSigningKeyLocation(ReadOnly read_only) {
       .append(L"\\DeviceTrust");
   base::win::RegKey key;
   if (read_only) {
-    key.Open(HKEY_LOCAL_MACHINE, key_path.c_str(),
-             KEY_QUERY_VALUE | KEY_WOW64_64KEY);
+    (void)key.Open(HKEY_LOCAL_MACHINE, key_path.c_str(),
+                   KEY_QUERY_VALUE | KEY_WOW64_64KEY);
   } else {
     auto result = key.Create(HKEY_LOCAL_MACHINE, key_path.c_str(),
                              KEY_SET_VALUE | KEY_WOW64_64KEY);
@@ -511,7 +536,7 @@ std::wstring InstallUtil::GetCloudManagementEnrollmentToken() {
   // way for administrators to enroll chrome throughout their fleet by pushing
   // this token via SCCM.
   // TODO(rogerta): This may not be the best place for the helpers dealing with
-  // the enrollment and/or DM tokens.  See crbug.com/823852 for details.
+  // the enrollment and/or DM tokens.  See crbug.com/41377717 for details.
   RegKey key;
   std::wstring value;
   for (const auto& key_and_value :
@@ -562,11 +587,6 @@ std::wstring InstallUtil::GetShortcutName() {
 }
 
 // static
-std::wstring InstallUtil::GetChromeShortcutDirNameDeprecated() {
-  return GetShortcutName();
-}
-
-// static
 std::wstring InstallUtil::GetChromeAppsShortcutDirName() {
   // IDS_APP_SHORTCUTS_SUBDIR_NAME is automatically mapped to the mode-specific
   // dir name; see MODE_SPECIFIC_STRINGS in prebuild/create_string_rc.py.
@@ -579,10 +599,10 @@ std::wstring InstallUtil::GetLongAppDescription() {
 }
 
 // static
-std::wstring InstallUtil::GuidToSquid(base::WStringPiece guid) {
+std::wstring InstallUtil::GuidToSquid(std::wstring_view guid) {
   std::wstring squid;
   squid.reserve(32);
-  auto* input = guid.begin();
+  auto input = guid.begin();
   auto output = std::back_inserter(squid);
 
   // Reverse-copy relevant characters, skipping separators.
@@ -598,4 +618,40 @@ std::wstring InstallUtil::GuidToSquid(base::WStringPiece guid) {
   std::reverse_copy(input + 32, input + 34, output);
   std::reverse_copy(input + 34, input + 36, output);
   return squid;
+}
+
+// static
+base::FilePath InstallUtil::GetLatestInstalledComponentDir(
+    const base::FilePath& application_dir,
+    std::string_view crx_id,
+    base::Version* version) {
+  if (application_dir.empty() || crx_id.empty()) {
+    return base::FilePath();
+  }
+  base::FilePath component_root = application_dir.AppendASCII(crx_id);
+  base::Version highest_version;
+  base::FilePath latest_dir;
+
+  base::FileEnumerator file_enumerator(component_root, /*recursive=*/false,
+                                       base::FileEnumerator::DIRECTORIES);
+  file_enumerator.ForEach([&highest_version,
+                           &latest_dir](const base::FilePath& path) {
+    base::Version dir_version(path.BaseName().MaybeAsASCII());
+    if (!dir_version.IsValid()) {
+      return;
+    }
+    // Manifest.json must be present to be considered valid.
+    if (!base::PathExists(path.Append(FILE_PATH_LITERAL("manifest.json")))) {
+      return;
+    }
+    if (!highest_version.IsValid() || dir_version > highest_version) {
+      highest_version = std::move(dir_version);
+      latest_dir = path;
+    }
+  });
+
+  if (version && highest_version.IsValid()) {
+    *version = std::move(highest_version);
+  }
+  return latest_dir;
 }

@@ -4,9 +4,9 @@
 
 #include "chrome/browser/ui/webui/ash/login/guest_tos_screen_handler.h"
 
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "chrome/browser/ash/login/oobe_screen.h"
 #include "chrome/browser/ash/login/screens/guest_tos_screen.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
 
 namespace ash {
@@ -34,10 +34,14 @@ void GuestTosScreenHandler::DeclareLocalizedValues(
 
 void GuestTosScreenHandler::Show(const std::string& google_eula_url,
                                  const std::string& cros_eula_url) {
-  base::Value::Dict data;
+  base::DictValue data;
   data.Set("googleEulaUrl", google_eula_url);
   data.Set("crosEulaUrl", cros_eula_url);
   ShowInWebUI(std::move(data));
+}
+
+base::WeakPtr<GuestTosScreenView> GuestTosScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 }  // namespace ash

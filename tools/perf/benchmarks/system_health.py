@@ -17,13 +17,12 @@ import page_sets
 
 
 SYSTEM_HEALTH_BENCHMARK_UMA = [
-    'EventLatency.FirstGestureScrollUpdate.Touchscreen.TotalLatency',
-    'EventLatency.FirstGestureScrollUpdate.Wheel.TotalLatency',
-    'EventLatency.GestureScrollUpdate.Touchscreen.TotalLatency',
-    'EventLatency.GestureScrollUpdate.Wheel.TotalLatency',
-    'Graphics.Smoothness.PercentDroppedFrames3.AllSequences',
-    'Memory.GPU.PeakMemoryUsage2.Scroll',
-    'Memory.GPU.PeakMemoryUsage2.PageLoad',
+  'EventLatency.FirstGestureScrollUpdate.TotalLatency2',
+  'EventLatency.GestureScrollUpdate.TotalLatency2',
+  'Graphics.Smoothness.PercentDroppedFrames3.AllSequences',
+  'Memory.GPU.PeakMemoryUsage2.Scroll',
+  'Memory.GPU.PeakMemoryUsage2.PageLoad',
+  'Memory.Experimental.Renderer2.Small.Malloc.BRPQuarantined',
 ]
 
 
@@ -42,9 +41,11 @@ class _CommonSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
 
   @classmethod
   def AddBenchmarkCommandLineArgs(cls, parser):
-    parser.add_option('--allow-software-compositing', action='store_true',
-                      help='If set, allows the benchmark to run with software '
-                           'compositing.')
+    parser.add_argument(
+      '--allow-software-compositing',
+      action='store_true',
+      help='If set, allows the benchmark to run with software compositing.',
+    )
 
   @classmethod
   def ProcessCommandLineArgs(cls, parser, args):
@@ -52,7 +53,8 @@ class _CommonSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
 
   def CreateCoreTimelineBasedMeasurementOptions(self):
     cat_filter = chrome_trace_category_filter.ChromeTraceCategoryFilter(
-        filter_string='rail,toplevel,uma')
+      filter_string='rail,toplevel,uma,disabled-by-default-histogram_samples'
+    )
     cat_filter.AddIncludedCategory('accessibility')
     # Needed for the metric reported by page.
     cat_filter.AddIncludedCategory('blink.user_timing')
@@ -65,8 +67,10 @@ class _CommonSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
     options.config.enable_chrome_trace = True
     options.config.enable_cpu_trace = True
     options.config.chrome_trace_config.EnableUMAHistograms(
-        *SYSTEM_HEALTH_BENCHMARK_UMA)
-    options.SetTimelineBasedMetrics([
+      *SYSTEM_HEALTH_BENCHMARK_UMA
+    )
+    options.SetTimelineBasedMetrics(
+      [
         'accessibilityMetric',
         'blinkResourceMetric',
         'consoleErrorMetric',
@@ -78,8 +82,10 @@ class _CommonSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
         # Unless --experimentatil-tbmv3-metric flag is used, the following tbmv3
         # metrics do nothing.
         'tbmv3:accessibility_metric',
+        'tbmv3:uma_metrics',
         'tbmv3:cpu_time_metric',
-    ])
+      ]
+    )
     loading_metrics_category.AugmentOptionsForLoadingMetrics(options)
     # The EQT metric depends on the same categories as the loading metric.
     options.AddTimelineBasedMetric('expectedQueueingTimeMetric')
@@ -94,10 +100,14 @@ class _CommonSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
     # record new system health benchmarks. We do not want to support software
     # compositing for recording, so for now we will just check for the existence
     # the flag. We will review updating Catapult at a later point.
-    if (hasattr(self, 'allow_software_compositing')
-        and self.allow_software_compositing) or self.NeedsSoftwareCompositing():
-      logging.warning('Allowing software compositing. Some of the reported '
-                      'metrics will have unreliable values.')
+    if (
+      hasattr(self, 'allow_software_compositing')
+      and self.allow_software_compositing
+    ) or self.NeedsSoftwareCompositing():
+      logging.warning(
+        'Allowing software compositing. Some of the reported '
+        'metrics will have unreliable values.'
+      )
     else:
       options.AppendExtraBrowserArgs('--disable-software-compositing-fallback')
 
@@ -105,17 +115,17 @@ class _CommonSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
     return page_sets.SystemHealthStorySet(platform=self.PLATFORM)
 
 
-@benchmark.Info(emails=['charliea@chromium.org', 'sullivan@chromium.org',
-                        'tdresser@chromium.org',
-                        'chrome-speed-metrics-dev@chromium.org'],
-                component='Speed>Metrics>SystemHealthRegressions',
-                documentation_url='https://bit.ly/system-health-benchmarks')
+@benchmark.Info(
+  emails=['kouhei@chromium.org'],
+  component='Speed>Metrics>SystemHealthRegressions',
+  documentation_url='https://bit.ly/system-health-benchmarks',
+)
 class DesktopCommonSystemHealth(_CommonSystemHealthBenchmark):
   """Desktop Chrome Energy System Health Benchmark."""
+
   PLATFORM = 'desktop'
-  # TODO(rmhasan): Remove the SUPPORTED_PLATFORMS lists.
-  # SUPPORTED_PLATFORMS is deprecated, please put system specifier tags
-  # from expectations.config in SUPPORTED_PLATFORM_TAGS.
+  # TODO(johnchen): Remove either the SUPPORTED_PLATFORMS or
+  # SUPPORTED_PLATFORMS_TAGS lists. Only one is necessary.
   SUPPORTED_PLATFORM_TAGS = [platforms.DESKTOP]
   SUPPORTED_PLATFORMS = [story.expectations.ALL_DESKTOP]
 
@@ -124,23 +134,24 @@ class DesktopCommonSystemHealth(_CommonSystemHealthBenchmark):
     return 'system_health.common_desktop'
 
   def CreateCoreTimelineBasedMeasurementOptions(self):
-    options = super(DesktopCommonSystemHealth,
-                    self).CreateCoreTimelineBasedMeasurementOptions()
+    options = super(
+      DesktopCommonSystemHealth, self
+    ).CreateCoreTimelineBasedMeasurementOptions()
     options.config.chrome_trace_config.SetTraceBufferSizeInKb(400 * 1024)
     return options
 
 
-@benchmark.Info(emails=['charliea@chromium.org', 'sullivan@chromium.org',
-                        'tdresser@chromium.org',
-                        'chrome-speed-metrics-dev@chromium.org'],
-                component='Speed>Metrics>SystemHealthRegressions',
-                documentation_url='https://bit.ly/system-health-benchmarks')
+@benchmark.Info(
+  emails=['kouhei@chromium.org'],
+  component='Speed>Metrics>SystemHealthRegressions',
+  documentation_url='https://bit.ly/system-health-benchmarks',
+)
 class MobileCommonSystemHealth(_CommonSystemHealthBenchmark):
   """Mobile Chrome Energy System Health Benchmark."""
+
   PLATFORM = 'mobile'
-  # TODO(rmhasan): Remove the SUPPORTED_PLATFORMS lists.
-  # SUPPORTED_PLATFORMS is deprecated, please put system specifier tags
-  # from expectations.config in SUPPORTED_PLATFORM_TAGS.
+  # TODO(johnchen): Remove either the SUPPORTED_PLATFORMS or
+  # SUPPORTED_PLATFORMS_TAGS lists. Only one is necessary.
   SUPPORTED_PLATFORM_TAGS = [platforms.MOBILE]
   SUPPORTED_PLATFORMS = [story.expectations.ALL_MOBILE]
 
@@ -152,8 +163,11 @@ class MobileCommonSystemHealth(_CommonSystemHealthBenchmark):
     super(MobileCommonSystemHealth, self).SetExtraBrowserOptions(options)
     # Force online state for the offline indicator so it doesn't show and affect
     # the benchmarks on bots, which are offline by default.
-    options.AppendExtraBrowserArgs(
-        '--force-online-connection-state-for-indicator')
+    extra_args = [
+      '--force-online-connection-state-for-indicator',
+      '--disable-ntp-theme-promo-bottom-sheet',
+    ]
+    options.AppendExtraBrowserArgs(extra_args)
 
 
 class _MemorySystemHealthBenchmark(perf_benchmark.PerfBenchmark):
@@ -164,42 +178,46 @@ class _MemorySystemHealthBenchmark(perf_benchmark.PerfBenchmark):
 
   https://goo.gl/Jek2NL.
   """
+
   options = {'pageset_repeat': 3}
 
   def CreateCoreTimelineBasedMeasurementOptions(self):
     cat_filter = chrome_trace_category_filter.ChromeTraceCategoryFilter(
-        filter_string='-*,disabled-by-default-memory-infra')
+      filter_string='-*,disabled-by-default-memory-infra'
+    )
     # Needed for the console error metric.
     cat_filter.AddIncludedCategory('v8.console')
     options = timeline_based_measurement.Options(cat_filter)
     options.config.enable_android_graphics_memtrack = True
-    options.SetTimelineBasedMetrics([
-      'consoleErrorMetric',
-      'memoryMetric'
-    ])
+    options.SetTimelineBasedMetrics(['consoleErrorMetric', 'memoryMetric'])
     # Setting an empty memory dump config disables periodic dumps.
     options.config.chrome_trace_config.SetMemoryDumpConfig(
-        chrome_trace_config.MemoryDumpConfig())
+      chrome_trace_config.MemoryDumpConfig()
+    )
     return options
 
   def CreateStorySet(self, options):
-    return page_sets.SystemHealthStorySet(platform=self.PLATFORM,
-                                          take_memory_measurement=True)
+    return page_sets.SystemHealthStorySet(
+      platform=self.PLATFORM, take_memory_measurement=True
+    )
 
 
-MEMORY_DEBUGGING_BLURB = "See https://bit.ly/2CpMhze for more information" \
-                         " on debugging memory metrics."
+MEMORY_DEBUGGING_BLURB = (
+  "See https://bit.ly/2CpMhze for more information on debugging memory metrics."
+)
 
 
-@benchmark.Info(emails=['pasko@chromium.org', 'lizeb@chromium.org'],
-                documentation_url='https://bit.ly/system-health-benchmarks',
-                info_blurb=MEMORY_DEBUGGING_BLURB)
+@benchmark.Info(
+  emails=['pasko@chromium.org', 'lizeb@chromium.org'],
+  documentation_url='https://bit.ly/system-health-benchmarks',
+  info_blurb=MEMORY_DEBUGGING_BLURB,
+)
 class DesktopMemorySystemHealth(_MemorySystemHealthBenchmark):
   """Desktop Chrome Memory System Health Benchmark."""
+
   PLATFORM = 'desktop'
-  # TODO(rmhasan): Remove the SUPPORTED_PLATFORMS lists.
-  # SUPPORTED_PLATFORMS is deprecated, please put system specifier tags
-  # from expectations.config in SUPPORTED_PLATFORM_TAGS.
+  # TODO(johnchen): Remove either the SUPPORTED_PLATFORMS or
+  # SUPPORTED_PLATFORMS_TAGS lists. Only one is necessary.
   SUPPORTED_PLATFORM_TAGS = [platforms.DESKTOP]
   SUPPORTED_PLATFORMS = [story.expectations.ALL_DESKTOP]
 
@@ -208,15 +226,17 @@ class DesktopMemorySystemHealth(_MemorySystemHealthBenchmark):
     return 'system_health.memory_desktop'
 
 
-@benchmark.Info(emails=['pasko@chromium.org', 'lizeb@chromium.org'],
-                documentation_url='https://bit.ly/system-health-benchmarks',
-                info_blurb=MEMORY_DEBUGGING_BLURB)
+@benchmark.Info(
+  emails=['pasko@chromium.org', 'lizeb@chromium.org'],
+  documentation_url='https://bit.ly/system-health-benchmarks',
+  info_blurb=MEMORY_DEBUGGING_BLURB,
+)
 class MobileMemorySystemHealth(_MemorySystemHealthBenchmark):
   """Mobile Chrome Memory System Health Benchmark."""
+
   PLATFORM = 'mobile'
-  # TODO(rmhasan): Remove the SUPPORTED_PLATFORMS lists.
-  # SUPPORTED_PLATFORMS is deprecated, please put system specifier tags
-  # from expectations.config in SUPPORTED_PLATFORM_TAGS.
+  # TODO(johnchen): Remove either the SUPPORTED_PLATFORMS or
+  # SUPPORTED_PLATFORMS_TAGS lists. Only one is necessary.
   SUPPORTED_PLATFORM_TAGS = [platforms.MOBILE]
   SUPPORTED_PLATFORMS = [story.expectations.ALL_MOBILE]
 
@@ -230,27 +250,31 @@ class MobileMemorySystemHealth(_MemorySystemHealthBenchmark):
     options.flush_os_page_caches_on_start = True
     # Force online state for the offline indicator so it doesn't show and affect
     # the benchmarks on bots, which are offline by default.
-    options.AppendExtraBrowserArgs(
-        '--force-online-connection-state-for-indicator')
+    extra_args = [
+      '--force-online-connection-state-for-indicator',
+      '--disable-ntp-theme-promo-bottom-sheet',
+    ]
+    options.AppendExtraBrowserArgs(extra_args)
 
   @classmethod
   def Name(cls):
     return 'system_health.memory_mobile'
 
 
-@benchmark.Info(emails=['oksamyt@chromium.org', 'torne@chromium.org',
-                        'changwan@chromium.org'],
-                component='Mobile>WebView>Perf')
+@benchmark.Info(
+  emails=['torne@chromium.org', 'ptrucinskas@chromium.org'],
+  component='Mobile>WebView>Perf',
+)
 class WebviewStartupSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
   """Webview startup time benchmark
 
   Benchmark that measures how long WebView takes to start up
   and load a blank page.
   """
+
   options = {'pageset_repeat': 20}
-  # TODO(rmhasan): Remove the SUPPORTED_PLATFORMS lists.
-  # SUPPORTED_PLATFORMS is deprecated, please put system specifier tags
-  # from expectations.config in SUPPORTED_PLATFORM_TAGS.
+  # TODO(johnchen): Remove either the SUPPORTED_PLATFORMS or
+  # SUPPORTED_PLATFORMS_TAGS lists. Only one is necessary.
   SUPPORTED_PLATFORM_TAGS = [platforms.ANDROID_WEBVIEW]
   SUPPORTED_PLATFORMS = [story.expectations.ANDROID_WEBVIEW]
 
@@ -261,7 +285,7 @@ class WebviewStartupSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
     options = timeline_based_measurement.Options()
     options.SetTimelineBasedMetrics(['webviewStartupMetric'])
     options.config.enable_atrace_trace = True
-    # TODO(crbug.com/1028882): Recording a Chrome trace at the same time as
+    # TODO(crbug.com/40109346): Recording a Chrome trace at the same time as
     # atrace causes events to stack incorrectly. Fix this by recording a
     # system+Chrome trace via system perfetto on the device instead.
     options.config.enable_chrome_trace = False
@@ -271,29 +295,3 @@ class WebviewStartupSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
   @classmethod
   def Name(cls):
     return 'system_health.webview_startup'
-
-
-@benchmark.Info(emails=['tmrts@chromium.org', 'mlippautz@chromium.org'],
-                component='Blink',
-                documentation_url='https://bit.ly/36XBtpn')
-class PCScanSystemHealthBenchmark(perf_benchmark.PerfBenchmark):
-  """PCScan feature benchmark
-
-  Benchmark that enables PCScan feature.
-  """
-  options = {'pageset_repeat': 20}
-  SUPPORTED_PLATFORM_TAGS = [platforms.DESKTOP, platforms.MOBILE]
-  SUPPORTED_PLATFORMS = [
-      story.expectations.ALL_DESKTOP, story.expectations.ALL_MOBILE
-  ]
-
-  def CreateStorySet(self, options):
-    return page_sets.SystemHealthPCScanStorySet()
-
-  @classmethod
-  def Name(cls):
-    return 'system_health.pcscan'
-
-  def SetExtraBrowserOptions(self, options):
-    options.AppendExtraBrowserArgs(
-        '--enable-features=PartitionAllocPCScanBrowserOnly')

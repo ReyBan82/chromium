@@ -12,13 +12,18 @@ import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.os.Process;
 import android.os.RemoteException;
-import android.support.test.InstrumentationRegistry;
 
 import androidx.annotation.NonNull;
+import androidx.test.core.app.ApplicationProvider;
+import androidx.test.platform.app.InstrumentationRegistry;
 import androidx.test.uiautomator.UiDevice;
 import androidx.test.uiautomator.UiObject2;
 
+import org.hamcrest.Matchers;
+
 import org.chromium.base.Log;
+import org.chromium.base.test.util.Criteria;
+import org.chromium.base.test.util.CriteriaHelper;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -29,16 +34,17 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Callable;
 
-/**
- *  Allows tests to perform UI actions.
- */
+/** Allows tests to perform UI actions. */
 public class UiAutomatorUtils {
     private static final String TAG = "UiAutomatorUtils";
     private static final int SWIPE_STEPS_PER_SECOND = 200;
     private static final int MAX_SWIPES = 30;
     private static final float DEFAULT_SWIPE_SECONDS_PER_PAGE = 0.2f;
     private static final float DEFAULT_SWIPE_SCREEN_FRACTION = 0.6f;
+    private static final long WAIT_TIMEOUT_MS = 20000L;
+    private static final long UI_CHECK_INTERVAL = 1000L;
     private static final long SHORT_CLICK_DURATION = 10L;
     private static final long LONG_CLICK_DURATION = 1000L;
     // Give applications more time to launch.
@@ -48,8 +54,8 @@ public class UiAutomatorUtils {
     // clicking, steps is one of the parameters to drag.
     public static final int CLICK_STEPS_PER_SECOND = 100;
 
-    private UiDevice mDevice;
-    private UiLocatorHelper mLocatorHelper;
+    private final UiDevice mDevice;
+    private final UiLocatorHelper mLocatorHelper;
 
     private static class LazyHolder {
         static final UiAutomatorUtils sInstance = new UiAutomatorUtils();
@@ -70,24 +76,25 @@ public class UiAutomatorUtils {
 
     /**
      * Launch application.
+     *
      * @param packageName Package name of the application.
      */
     public void launchApplication(String packageName) {
-        Log.d(TAG, "Launching " + packageName);
+        Log.d(TAG, "Launching %s", packageName);
         launchApplication(packageName, LAUNCH_TIMEOUT_MS);
     }
 
     /**
      * Stops the application.
+     *
      * @param packageName Package name of the application to stop.
      */
     public void stopApplication(String packageName) {
-        Log.d(TAG, "Stopping " + packageName);
+        Log.d(TAG, "Stopping %s", packageName);
         try {
             executeShellCommand("am force-stop " + packageName);
         } catch (IOException e) {
-            Log.d(TAG, "Failed to stop " + packageName);
-            e.printStackTrace();
+            Log.d(TAG, "Failed to stop %s", packageName, e);
         }
     }
 
@@ -105,11 +112,12 @@ public class UiAutomatorUtils {
 
     /**
      * Takes device screenshot and saves it to screenShotFile.
+     *
      * @param screenShotFile Where the screenshot should be saved.
      */
     public void takeScreenShot(@NonNull File screenShotFile) {
         if (mDevice.takeScreenshot(screenShotFile)) {
-            Log.d(TAG, "Screenshot successfully saved to " + screenShotFile.getAbsolutePath());
+            Log.d(TAG, "Screenshot successfully saved to %s", screenShotFile.getAbsolutePath());
         } else {
             Log.e(TAG, "Screenshot unsuccessful " + screenShotFile.getAbsolutePath());
         }
@@ -123,9 +131,13 @@ public class UiAutomatorUtils {
      */
     public void clickOutsideOf(@NonNull IUi2Locator locator) {
         Rect bounds = getBounds(locator);
-        Log.d(TAG,
-                "Clicking outside of bounds with Bottom:" + bounds.bottom + " Top:" + bounds.top
-                        + " Left:" + bounds.left + " Right:" + bounds.right);
+        Log.d(
+                TAG,
+                "Clicking outside of bounds with Bottom: %d Top: %d Left: %d Right: %d",
+                bounds.bottom,
+                bounds.top,
+                bounds.left,
+                bounds.right);
         clickOutsideOfArea(bounds.left, bounds.top, bounds.right, bounds.bottom);
     }
 
@@ -159,7 +171,11 @@ public class UiAutomatorUtils {
     private void clickDurationInternal(IUi2Locator locator, long duration) {
         UiObject2 object2 = mLocatorHelper.getOne(locator);
         Point center = object2.getVisibleCenter();
-        mDevice.swipe(center.x, center.y, center.x, center.y,
+        mDevice.swipe(
+                center.x,
+                center.y,
+                center.x,
+                center.y,
                 (int) (CLICK_STEPS_PER_SECOND * duration / 1000L));
     }
 
@@ -176,19 +192,21 @@ public class UiAutomatorUtils {
     /**
      * Copied over from UiAutomator UiDevice v18.0.1, it was removed for some reason, but is useful.
      * Executes a shell command using shell user identity, and return the standard output in string.
-     * <p>
-     * Calling function with large amount of output will have memory impacts, and the function call
-     * will block if the command executed is blocking.
+     *
+     * <p>Calling function with large amount of output will have memory impacts, and the function
+     * call will block if the command executed is blocking.
+     *
      * <p>Note: calling this function requires API level 21 or above
+     *
      * @param cmd Command to run
-     * @return    The standard output of the command
-     * @throws IOException
+     * @return The standard output of the command
      * @since API Level 21
      */
     public String executeShellCommand(@NonNull String cmd) throws IOException {
         ParcelFileDescriptor pfd =
-                InstrumentationRegistry.getInstrumentation().getUiAutomation().executeShellCommand(
-                        cmd);
+                InstrumentationRegistry.getInstrumentation()
+                        .getUiAutomation()
+                        .executeShellCommand(cmd);
         byte[] buf = new byte[512];
         int bytesRead;
         FileInputStream fis = new ParcelFileDescriptor.AutoCloseInputStream(pfd);
@@ -235,9 +253,9 @@ public class UiAutomatorUtils {
 
     /**
      * Performs the swipe up gesture repeatedly until a locator is found.
-     * @param locator  locator that will stop the swipe if found on screen.
-     * @param stopLocator  locator that will cause an UiLocationException if found before locator.
-     * @throws UiLocationException
+     *
+     * @param locator locator that will stop the swipe if found on screen.
+     * @param stopLocator locator that will cause an UiLocationException if found before locator.
      */
     public void swipeUpVerticallyUntilFound(IUi2Locator locator, IUi2Locator stopLocator) {
         swipeVerticallyUntilFound(locator, stopLocator, DEFAULT_SWIPE_SCREEN_FRACTION);
@@ -245,9 +263,9 @@ public class UiAutomatorUtils {
 
     /**
      * Performs the swipe down gesture repeatedly until a locator is found.
-     * @param locator     locator that will stop the swipe if found on screen.
+     *
+     * @param locator locator that will stop the swipe if found on screen.
      * @param stopLocator locator that will cause an UiLocationException if found before locator.
-     * @throws UiLocationException
      */
     public void swipeDownVerticallyUntilFound(IUi2Locator locator, IUi2Locator stopLocator) {
         swipeVerticallyUntilFound(locator, stopLocator, -DEFAULT_SWIPE_SCREEN_FRACTION);
@@ -296,7 +314,63 @@ public class UiAutomatorUtils {
     }
 
     /**
+     * Dumps crash logs (native tombstones, crash buffer logcat, and filtered system crash logs) to
+     * logcat.
+     */
+    public void dumpCrashLogs() {
+        // 1. Dump native tombstones from /data/tombstones/
+        try {
+            String tombstoneList = executeShellCommand("ls -t /data/tombstones");
+            if (tombstoneList != null && !tombstoneList.trim().isEmpty()) {
+                String[] files = tombstoneList.split("\\s+");
+                if (files.length > 0 && !files[0].trim().isEmpty()) {
+                    String latestTombstone = files[0].trim();
+                    if (latestTombstone.startsWith("tombstone")) {
+                        Log.e(TAG, "=== CRASH TOMBSTONE: " + latestTombstone + " ===");
+                        String tombstoneContent =
+                                executeShellCommand("cat /data/tombstones/" + latestTombstone);
+                        for (String line : tombstoneContent.split("\n")) {
+                            Log.e(TAG, line);
+                        }
+                    }
+                }
+            }
+        } catch (Exception ex) {
+            Log.e(TAG, "Failed to extract tombstone from /data/tombstones", ex);
+        }
+
+        // 2. Dump the Android crash buffer (native debuggerd & Java uncaught exceptions)
+        try {
+            String crashLog = executeShellCommand("logcat -d -b crash");
+            if (crashLog != null && !crashLog.trim().isEmpty()) {
+                Log.e(TAG, "=== LOGCAT CRASH BUFFER ===");
+                for (String line : crashLog.split("\n")) {
+                    Log.e(TAG, line);
+                }
+            }
+        } catch (Exception ex) {
+            Log.e(TAG, "Failed to dump logcat crash buffer", ex);
+        }
+
+        // 3. Dump recent fatal signals/logs from DEBUG and AndroidRuntime tags
+        try {
+            String debugLog =
+                    executeShellCommand(
+                            "logcat -d -s DEBUG:V AndroidRuntime:E chromium:E cr_*:E -t 200");
+            if (debugLog != null && !debugLog.trim().isEmpty()) {
+                Log.e(TAG, "=== FILTERED SYSTEM CRASH LOGS ===");
+                for (String line : debugLog.split("\n")) {
+                    Log.e(TAG, line);
+                }
+            }
+        } catch (Exception ex) {
+            Log.e(TAG, "Failed to dump filtered debug logcat", ex);
+        }
+    }
+
+    /**
      * Prints the UiAutomator window hierarchy to logcat.
+     *
      * @param message A leading message for the debug log.
      */
     public void printWindowHierarchy(String message) {
@@ -312,12 +386,46 @@ public class UiAutomatorUtils {
         }
     }
 
+    public void waitUntilAnyVisible(IUi2Locator... locators) {
+        CriteriaHelper.pollInstrumentationThread(
+                toNotSatisfiedRunnable(
+                        () -> {
+                            for (IUi2Locator locator : locators) {
+                                if (mLocatorHelper.isOnScreen(locator)) {
+                                    return true;
+                                }
+                            }
+                            return false;
+                        },
+                        "No Chrome views on screen. (i.e. Chrome has crashed "
+                                + "on startup). Look at earlier logs for the actual "
+                                + "crash stacktrace."),
+                WAIT_TIMEOUT_MS,
+                UI_CHECK_INTERVAL);
+    }
+
+    private static Runnable toNotSatisfiedRunnable(
+            Callable<Boolean> criteria, String failureReason) {
+        return () -> {
+            try {
+                boolean isSatisfied = criteria.call();
+                Criteria.checkThat(failureReason, isSatisfied, Matchers.is(true));
+            } catch (RuntimeException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        };
+    }
+
     private void launchApplication(String packageName, long timeout) {
-        Context context = InstrumentationRegistry.getContext();
+        Context context = ApplicationProvider.getApplicationContext();
         final Intent intent = context.getPackageManager().getLaunchIntentForPackage(packageName);
         if (intent == null) {
-            throw new IllegalStateException("Could not get intent to launch " + packageName
-                    + ", please ensure that it is installed");
+            throw new IllegalStateException(
+                    "Could not get intent to launch "
+                            + packageName
+                            + ", please ensure that it is installed");
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK | Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivity(intent);
@@ -328,9 +436,6 @@ public class UiAutomatorUtils {
     }
 
     // positive fraction indicates swipe up
-    /**
-     * @throws UiLocationException
-     */
     private void swipeVerticallyUntilFound(
             IUi2Locator locator, IUi2Locator stopLocator, float fractionOfScreen) {
         if (mLocatorHelper.isOnScreen(locator)) return;
@@ -421,10 +526,12 @@ public class UiAutomatorUtils {
         int h = mDevice.getDisplayHeight();
         int startY = h / 2 - (int) (fractionOfScreen / 2f * h);
         int stopY = startY + (int) (fractionOfScreen * h);
-        int steps = (int) (DEFAULT_SWIPE_SECONDS_PER_PAGE * Math.abs(fractionOfScreen)
-                * SWIPE_STEPS_PER_SECOND);
-        Log.d(TAG,
-                "Swiping vertically from " + stopY + " to " + startY + " in " + steps + " steps");
+        int steps =
+                (int)
+                        (DEFAULT_SWIPE_SECONDS_PER_PAGE
+                                * Math.abs(fractionOfScreen)
+                                * SWIPE_STEPS_PER_SECOND);
+        Log.d(TAG, "Swiping vertically from %d to %d in %d steps", stopY, startY, steps);
         mDevice.swipe(x, stopY, x, startY, steps);
     }
 
@@ -454,8 +561,8 @@ public class UiAutomatorUtils {
 
     private File getTempFile(String prefix, String suffix) throws IOException {
         File cacheDir = Environment.getExternalStorageDirectory();
-        Log.d(TAG, "Create temp file in: " + cacheDir);
-        Log.d(TAG, "My user id: " + Process.myUid());
+        Log.d(TAG, "Create temp file in: %s", cacheDir);
+        Log.d(TAG, "My user id: %d", Process.myUid());
         return File.createTempFile(prefix, suffix, cacheDir);
     }
 
@@ -478,8 +585,7 @@ public class UiAutomatorUtils {
                 strings.add(line);
             }
         }
-        Log.d(TAG,
-                "readAllFromFile read " + strings.size() + " lines from " + file.getAbsolutePath());
+        Log.d(TAG, "readAllFromFile read %d lines from %s", strings.size(), file.getAbsolutePath());
         return strings;
     }
 }

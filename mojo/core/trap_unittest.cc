@@ -2,25 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "mojo/public/c/system/trap.h"
+
 #include <stdint.h>
 
+#include <array>
 #include <map>
 #include <memory>
 #include <set>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/memory/ptr_util.h"
-#include "base/rand_util.h"
 #include "base/synchronization/waitable_event.h"
 #include "base/test/bind.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/simple_thread.h"
 #include "base/time/time.h"
-#include "mojo/core/embedder/embedder.h"
 #include "mojo/core/test/mojo_test_base.h"
 #include "mojo/public/c/system/data_pipe.h"
-#include "mojo/public/c/system/trap.h"
 #include "mojo/public/c/system/types.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -79,10 +80,11 @@ class TriggerHelper {
     }
 
     void Notify(const MojoTrapEvent& event) {
-      if (event.result == MOJO_RESULT_CANCELLED && cancel_callback_)
+      if (event.result == MOJO_RESULT_CANCELLED && cancel_callback_) {
         std::move(cancel_callback_).Run();
-      else
+      } else {
         callback_.Run(event);
+      }
     }
 
    private:
@@ -1127,109 +1129,6 @@ TEST_F(TrapTest, ExplicitRemoveOtherTriggerWithinEventHandler) {
   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(d));
 }
 
-TEST_F(TrapTest, NestedCancellation) {
-  if (IsMojoIpczEnabled()) {
-    GTEST_SKIP() << "This test expects trap handlers to be reentrant in some "
-                 << "edge cases, which is an unsafe artifact of pre-ipcz Mojo "
-                 << "that is unsupported by MojoIpcz. This case should not be "
-                 << "relevant to any current production usage.";
-  }
-
-  MojoHandle a, b;
-  CreateMessagePipe(&a, &b);
-
-  MojoHandle c, d;
-  CreateMessagePipe(&c, &d);
-
-  static const char kTestMessageToA[] = "hey a";
-  static const char kTestMessageToC[] = "hey c";
-  static const char kTestMessageToD[] = "hey d";
-
-  // This is a tricky test. It establishes a trigger on |b| using one trap and
-  // triggers on |c| and |d| using another trap.
-  //
-  // A message is written to |d| to activate |c|'s trigger, and the resuling
-  // event handler invocation does the folllowing:
-  //   1. Writes to |a| to eventually activate |b|'s trigger.
-  //   2. Rearms |c|'s trap.
-  //   3. Writes to |d| to eventually activate |c|'s trigger again.
-  //
-  // Meanwhile, |b|'s event handler removes |c|'s trigger altogether before
-  // writing to |c| to activate |d|'s trigger.
-  //
-  // The net result should be that |c|'s trigger only gets activated once (from
-  // the first write to |d| above) and everyone else gets notified as expected.
-
-  MojoHandle b_trap;
-  MojoHandle cd_trap;
-  TriggerHelper helper;
-  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&b_trap));
-  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&cd_trap));
-
-  base::WaitableEvent wait(base::WaitableEvent::ResetPolicy::MANUAL,
-                           base::WaitableEvent::InitialState::NOT_SIGNALED);
-  uintptr_t readable_d_context =
-      helper.CreateContext([&](const MojoTrapEvent& event) {
-        EXPECT_EQ(MOJO_RESULT_OK, event.result);
-        EXPECT_EQ(kTestMessageToD, ReadMessage(d));
-        wait.Signal();
-      });
-
-  int num_expected_c_notifications = 1;
-  uintptr_t readable_c_context =
-      helper.CreateContext([&](const MojoTrapEvent& event) {
-        EXPECT_EQ(MOJO_RESULT_OK, event.result);
-        EXPECT_GT(num_expected_c_notifications--, 0);
-
-        // Trigger an eventual |readable_b_context| notification.
-        WriteMessage(a, kTestMessageToA);
-
-        EXPECT_EQ(kTestMessageToC, ReadMessage(c));
-        EXPECT_EQ(MOJO_RESULT_OK,
-                  MojoArmTrap(cd_trap, nullptr, nullptr, nullptr));
-
-        // Trigger another eventual |readable_c_context| notification.
-        WriteMessage(d, kTestMessageToC);
-      });
-
-  uintptr_t readable_b_context =
-      helper.CreateContext([&](const MojoTrapEvent& event) {
-        EXPECT_EQ(MOJO_RESULT_OK,
-                  MojoRemoveTrigger(cd_trap, readable_c_context, nullptr));
-
-        EXPECT_EQ(MOJO_RESULT_OK,
-                  MojoArmTrap(cd_trap, nullptr, nullptr, nullptr));
-
-        WriteMessage(c, kTestMessageToD);
-      });
-
-  EXPECT_EQ(MOJO_RESULT_OK,
-            MojoAddTrigger(b_trap, b, MOJO_HANDLE_SIGNAL_READABLE,
-                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
-                           readable_b_context, nullptr));
-  EXPECT_EQ(MOJO_RESULT_OK,
-            MojoAddTrigger(cd_trap, c, MOJO_HANDLE_SIGNAL_READABLE,
-                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
-                           readable_c_context, nullptr));
-  EXPECT_EQ(MOJO_RESULT_OK,
-            MojoAddTrigger(cd_trap, d, MOJO_HANDLE_SIGNAL_READABLE,
-                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
-                           readable_d_context, nullptr));
-
-  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(b_trap, nullptr, nullptr, nullptr));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(cd_trap, nullptr, nullptr, nullptr));
-
-  WriteMessage(d, kTestMessageToC);
-  wait.Wait();
-
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(cd_trap));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b_trap));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(c));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(d));
-}
-
 TEST_F(TrapTest, RemoveSelfWithinEventHandler) {
   MojoHandle a, b;
   CreateMessagePipe(&a, &b);
@@ -1438,124 +1337,6 @@ TEST_F(TrapTest, OtherThreadRemovesTriggerDuringEventHandler) {
   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
 }
 
-TEST_F(TrapTest, TriggersRemoveEachOtherWithinEventHandlers) {
-  if (IsMojoIpczEnabled()) {
-    GTEST_SKIP() << "This test deadlocks with MojoIpcz, because it expects "
-                 << "trap handlers to be re-entrant in some edge cases. Not "
-                 << "relevant to any current production usage.";
-  }
-
-  MojoHandle a, b;
-  CreateMessagePipe(&a, &b);
-
-  static const char kTestMessageToA[] = "hey a";
-  static const char kTestMessageToB[] = "hey b";
-
-  base::WaitableEvent wait_for_a_to_notify(
-      base::WaitableEvent::ResetPolicy::MANUAL,
-      base::WaitableEvent::InitialState::NOT_SIGNALED);
-  base::WaitableEvent wait_for_b_to_notify(
-      base::WaitableEvent::ResetPolicy::MANUAL,
-      base::WaitableEvent::InitialState::NOT_SIGNALED);
-  base::WaitableEvent wait_for_a_to_cancel(
-      base::WaitableEvent::ResetPolicy::MANUAL,
-      base::WaitableEvent::InitialState::NOT_SIGNALED);
-  base::WaitableEvent wait_for_b_to_cancel(
-      base::WaitableEvent::ResetPolicy::MANUAL,
-      base::WaitableEvent::InitialState::NOT_SIGNALED);
-
-  MojoHandle a_trap;
-  MojoHandle b_trap;
-  TriggerHelper helper;
-  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&a_trap));
-  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&b_trap));
-
-  // We set up two traps, one triggered on |a| readability and one triggered on
-  // |b| readability. Each removes the other's trigger from within its own event
-  // handler. This should be safe, i.e., it should not deadlock in spite of the
-  // fact that we also guarantee mutually exclusive event handler invocation
-  // (including cancellations) on any given trap.
-  bool a_cancelled = false;
-  bool b_cancelled = false;
-  static uintptr_t readable_b_context;
-  uintptr_t readable_a_context = helper.CreateContextWithCancel(
-      [&](const MojoTrapEvent& event) {
-        EXPECT_EQ(MOJO_RESULT_OK, event.result);
-        EXPECT_EQ(kTestMessageToA, ReadMessage(a));
-
-        // Our removal from the other handler may delete this lambda and
-        // invalidate its captures. Copy the references we need first.
-        base::WaitableEvent& wait_for_b = wait_for_b_to_notify;
-        MojoHandle b_trap_handle = b_trap;
-        uintptr_t b_context = readable_b_context;
-        wait_for_a_to_notify.Signal();
-
-        wait_for_b.Wait();
-        EXPECT_EQ(MOJO_RESULT_OK,
-                  MojoRemoveTrigger(b_trap_handle, b_context, nullptr));
-        EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b_trap_handle));
-      },
-      [&] {
-        a_cancelled = true;
-        wait_for_a_to_cancel.Signal();
-        wait_for_b_to_cancel.Wait();
-      });
-
-  readable_b_context = helper.CreateContextWithCancel(
-      [&](const MojoTrapEvent& event) {
-        EXPECT_EQ(MOJO_RESULT_OK, event.result);
-        EXPECT_EQ(kTestMessageToB, ReadMessage(b));
-
-        // Our removal from the other handler may delete this lambda and
-        // invalidate its captures. Copy the references we need first.
-        base::WaitableEvent& wait_for_a = wait_for_a_to_notify;
-        MojoHandle a_trap_handle = a_trap;
-        uintptr_t a_context = readable_a_context;
-        wait_for_b_to_notify.Signal();
-
-        wait_for_a.Wait();
-        EXPECT_EQ(MOJO_RESULT_OK,
-                  MojoRemoveTrigger(a_trap_handle, a_context, nullptr));
-        EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a_trap_handle));
-      },
-      [&] {
-        b_cancelled = true;
-        wait_for_b_to_cancel.Signal();
-        wait_for_a_to_cancel.Wait();
-      });
-
-  EXPECT_EQ(MOJO_RESULT_OK,
-            MojoAddTrigger(a_trap, a, MOJO_HANDLE_SIGNAL_READABLE,
-                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
-                           readable_a_context, nullptr));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(a_trap, nullptr, nullptr, nullptr));
-  EXPECT_EQ(MOJO_RESULT_OK,
-            MojoAddTrigger(b_trap, b, MOJO_HANDLE_SIGNAL_READABLE,
-                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
-                           readable_b_context, nullptr));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(b_trap, nullptr, nullptr, nullptr));
-
-  ThreadedRunner runner(base::BindOnce(
-      [](MojoHandle b) { WriteMessage(b, kTestMessageToA); }, b));
-  runner.Start();
-
-  // To enforce that the two traps run concurrently, wait until the WriteMessage
-  // above has made a readable before firing the readable trap on b.
-  wait_for_a_to_notify.Wait();
-
-  WriteMessage(a, kTestMessageToB);
-
-  wait_for_a_to_cancel.Wait();
-  wait_for_b_to_cancel.Wait();
-  runner.Join();
-
-  EXPECT_TRUE(a_cancelled);
-  EXPECT_TRUE(b_cancelled);
-
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
-}
-
 TEST_F(TrapTest, AlwaysCancel) {
   // Basic sanity check to ensure that all possible ways to remove a trigger
   // result in a final MOJO_RESULT_CANCELLED notification.
@@ -1610,7 +1391,7 @@ TEST_F(TrapTest, ArmFailureCirculation) {
 
   constexpr size_t kNumTestPipes = 100;
   constexpr size_t kNumTestHandles = kNumTestPipes * 2;
-  MojoHandle handles[kNumTestHandles];
+  std::array<MojoHandle, kNumTestHandles> handles;
 
   // Create a bunch of pipes and make sure they're all readable.
   for (size_t i = 0; i < kNumTestPipes; ++i) {
@@ -1645,67 +1426,10 @@ TEST_F(TrapTest, ArmFailureCirculation) {
     ready_contexts.insert(blocking_event.trigger_context);
   }
 
-  for (size_t i = 0; i < kNumTestHandles; ++i)
+  for (size_t i = 0; i < kNumTestHandles; ++i) {
     EXPECT_EQ(MOJO_RESULT_OK, MojoClose(handles[i]));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(t));
-}
-
-TEST_F(TrapTest, TriggerOnUnsatisfiedSignals) {
-  if (IsMojoIpczEnabled()) {
-    GTEST_SKIP() << "Monitoring for unsatisfied signals is not supported by "
-                 << "MojoIpcz.";
   }
-
-  MojoHandle a, b;
-  CreateMessagePipe(&a, &b);
-
-  base::WaitableEvent wait(base::WaitableEvent::ResetPolicy::MANUAL,
-                           base::WaitableEvent::InitialState::NOT_SIGNALED);
-  TriggerHelper helper;
-  const uintptr_t readable_a_context =
-      helper.CreateContext([&](const MojoTrapEvent& event) {
-        EXPECT_EQ(MOJO_RESULT_OK, event.result);
-        wait.Signal();
-      });
-
-  MojoHandle t;
-  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&t));
-  EXPECT_EQ(MOJO_RESULT_OK,
-            MojoAddTrigger(t, a, MOJO_HANDLE_SIGNAL_READABLE,
-                           MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
-                           readable_a_context, nullptr));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(t, nullptr, nullptr, nullptr));
-
-  const char kMessage[] = "this is not a message";
-
-  WriteMessage(b, kMessage);
-  wait.Wait();
-
-  // Now we know |a| is readable. Remove the trigger and add a new one to watch
-  // for a not-readable state.
   EXPECT_EQ(MOJO_RESULT_OK, MojoClose(t));
-  const uintptr_t not_readable_a_context =
-      helper.CreateContext([&](const MojoTrapEvent& event) {
-        EXPECT_EQ(MOJO_RESULT_OK, event.result);
-        wait.Signal();
-      });
-  EXPECT_EQ(MOJO_RESULT_OK, helper.CreateTrap(&t));
-  EXPECT_EQ(MOJO_RESULT_OK,
-            MojoAddTrigger(t, a, MOJO_HANDLE_SIGNAL_READABLE,
-                           MOJO_TRIGGER_CONDITION_SIGNALS_UNSATISFIED,
-                           not_readable_a_context, nullptr));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(t, nullptr, nullptr, nullptr));
-
-  // This should not block, because the event should be signaled by
-  // |not_readable_a_context| when we read the only available message off of
-  // |a|.
-  wait.Reset();
-  EXPECT_EQ(kMessage, ReadMessage(a));
-  wait.Wait();
-
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(t));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(b));
-  EXPECT_EQ(MOJO_RESULT_OK, MojoClose(a));
 }
 
 TEST_F(TrapTest, TriggerDuringDestruction) {
@@ -1747,121 +1471,109 @@ TEST_F(TrapTest, TriggerDuringDestruction) {
   MojoClose(b);
 }
 
-base::RepeatingClosure g_do_random_thing_callback;
+TEST_F(TrapTest, RaceDispatchAndBlockedCancel) {
+  // Regression test for https://crbug.com/1508753. This bug was caused by
+  // reordering of a MOJO_RESULT_CANCELLED event to before some other event for
+  // the same trap context, violating an API constraint that must be upheld for
+  // memory safety in application code. The scenario which could elicit the bug
+  // was as follows:
+  //
+  //   1. A single trap is watching two pipes, P and Q.
+  //   2. Thread A closes pipe P, triggering a CANCELLED event.
+  //   3. Thread A re-arms the trap from within the CANCELLED event handler.
+  //   4. Thread B changes Q's state to elicit a event for Q (not CANCELLED).
+  //   5. Thread B dispatch is blocked because thread A is still dispatching.
+  //   6. Before thread B gets a chance to be scheduled, thread A closes Q.
+  //   7. Thread A dispatches a CANCELLED event for Q.
+  //   8. Thread B is scheduled and proceeds to dispatch its Q event. [BAD]
 
-void ReadAllMessages(const MojoTrapEvent* event) {
-  if (event->result == MOJO_RESULT_OK) {
-    MojoHandle handle = static_cast<MojoHandle>(event->trigger_context);
-    MojoMessageHandle message;
-    while (MojoReadMessage(handle, nullptr, &message) == MOJO_RESULT_OK)
-      MojoDestroyMessage(message);
-  }
+  struct State;
 
-  constexpr size_t kNumRandomThingsToDoOnNotify = 5;
-  for (size_t i = 0; i < kNumRandomThingsToDoOnNotify; ++i)
-    g_do_random_thing_callback.Run();
-}
+  struct Pipe {
+    explicit Pipe(State* state) : state(state) { CreateMessagePipe(&a, &b); }
 
-MojoHandle RandomHandle(MojoHandle* handles, size_t size) {
-  return handles[base::RandInt(0, static_cast<int>(size) - 1)];
-}
+    uintptr_t context() const { return reinterpret_cast<uintptr_t>(this); }
 
-void DoRandomThing(MojoHandle* traps,
-                   size_t num_traps,
-                   MojoHandle* watched_handles,
-                   size_t num_watched_handles) {
-  switch (base::RandInt(0, 10)) {
-    case 0:
-      MojoClose(RandomHandle(traps, num_traps));
-      break;
-    case 1:
-      MojoClose(RandomHandle(watched_handles, num_watched_handles));
-      break;
-    case 2:
-    case 3:
-    case 4: {
-      MojoMessageHandle message;
-      ASSERT_EQ(MOJO_RESULT_OK, MojoCreateMessage(nullptr, &message));
-      ASSERT_EQ(MOJO_RESULT_OK,
-                MojoSetMessageContext(message, 1, nullptr, nullptr, nullptr));
-      MojoWriteMessage(RandomHandle(watched_handles, num_watched_handles),
-                       message, nullptr);
-      break;
-    }
-    case 5:
-    case 6: {
-      MojoHandle t = RandomHandle(traps, num_traps);
-      MojoHandle h = RandomHandle(watched_handles, num_watched_handles);
-      MojoAddTrigger(t, h, MOJO_HANDLE_SIGNAL_READABLE,
-                     MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
-                     static_cast<uintptr_t>(h), nullptr);
-      break;
-    }
-    case 7:
-    case 8: {
-      uint32_t num_blocking_events = 1;
-      MojoTrapEvent blocking_event = {sizeof(blocking_event)};
-      if (MojoArmTrap(RandomHandle(traps, num_traps), nullptr,
-                      &num_blocking_events,
-                      &blocking_event) == MOJO_RESULT_FAILED_PRECONDITION &&
-          blocking_event.result == MOJO_RESULT_OK) {
-        ReadAllMessages(&blocking_event);
+    MojoHandle a;
+    MojoHandle b;
+    bool trigger_cancelled = false;
+
+    // Back-reference to common state so it's reachable from the event handler.
+    const raw_ptr<State> state;
+  };
+
+  struct State {
+    Pipe pipe0{this};
+    Pipe pipe1{this};
+    MojoHandle trap;
+    base::WaitableEvent event;
+  };
+  State state;
+
+  // NOTE: + to turn the lambda into a function pointer.
+  const MojoTrapEventHandler event_handler = +[](const MojoTrapEvent* event) {
+    auto& pipe = *reinterpret_cast<Pipe*>(event->trigger_context);
+    auto& state = *pipe.state;
+
+    // If the bug is present, this expectation can fail flakily. No event should
+    // fire for a pipe after its watch has been cancelled.
+    EXPECT_FALSE(pipe.trigger_cancelled);
+
+    if (event->result == MOJO_RESULT_CANCELLED) {
+      pipe.trigger_cancelled = true;
+
+      if (&pipe == &state.pipe0) {
+        // When pipe0's watch is cancelled (on the main thread by closure down
+        // below) we re-arm the trap immediately. This must succeed because
+        // `pipe1.a` is now the only handle being watched, and it's still in an
+        // uninteresting state.
+        EXPECT_EQ(MOJO_RESULT_OK,
+                  MojoArmTrap(state.trap, nullptr, nullptr, nullptr));
+
+        // Unblock the other thread so it can elicit a trap event on pipe1 now
+        // that the trap is re-armed. It will still block just before
+        // dispatching as long as we're still in this event handler on the main
+        // thread.
+        state.event.Signal();
+
+        // A nice long delay to make it very likely for the waiting
+        // ThreadedRunner to progress right up to its event dispatch.
+        base::PlatformThread::Sleep(base::Milliseconds(10));
+
+        // Trigger cancellation for pipe1 by closing its `a`. This will queue a
+        // CANCELLED event to fire on the same thread immediately after we
+        // return from this handler.
+        MojoClose(state.pipe1.a);
       }
-      break;
     }
-    case 9:
-    case 10: {
-      MojoHandle t = RandomHandle(traps, num_traps);
-      MojoHandle h = RandomHandle(watched_handles, num_watched_handles);
-      MojoRemoveTrigger(t, static_cast<uintptr_t>(h), nullptr);
-      break;
-    }
-    default:
-      NOTREACHED();
-      break;
-  }
-}
+  };
 
-TEST_F(TrapTest, ConcurrencyStressTest) {
-  // Regression test for https://crbug.com/740044. Exercises racy usage of the
-  // trap API to weed out potential crashes.
-  if (IsMojoIpczEnabled()) {
-    GTEST_SKIP() << "This test relies on implementation assumptions which are "
-                 << "invalid when MojoIpcz is enabled; namely that it's safe "
-                 << "to attempt operations on invalid handles.";
-  }
+  EXPECT_EQ(MOJO_RESULT_OK,
+            MojoCreateTrap(event_handler, nullptr, &state.trap));
+  EXPECT_EQ(
+      MOJO_RESULT_OK,
+      MojoAddTrigger(state.trap, state.pipe0.a, MOJO_HANDLE_SIGNAL_READABLE,
+                     MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
+                     state.pipe0.context(), nullptr));
+  EXPECT_EQ(
+      MOJO_RESULT_OK,
+      MojoAddTrigger(state.trap, state.pipe1.a, MOJO_HANDLE_SIGNAL_READABLE,
+                     MOJO_TRIGGER_CONDITION_SIGNALS_SATISFIED,
+                     state.pipe1.context(), nullptr));
+  EXPECT_EQ(MOJO_RESULT_OK, MojoArmTrap(state.trap, nullptr, nullptr, nullptr));
 
-  constexpr size_t kNumTraps = 50;
-  constexpr size_t kNumWatchedHandles = 50;
-  static_assert(kNumWatchedHandles % 2 == 0, "Invalid number of test handles.");
+  ThreadedRunner close_pipe1_b(base::BindLambdaForTesting([&] {
+    state.event.Wait();
+    MojoClose(state.pipe1.b);
+  }));
+  close_pipe1_b.Start();
 
-  constexpr size_t kNumThreads = 10;
-  static constexpr size_t kNumOperationsPerThread = 400;
+  // Trigger cancellation of the watch on `pipe0.a`. See event_handler above.
+  MojoClose(state.pipe0.a);
 
-  MojoHandle traps[kNumTraps];
-  MojoHandle watched_handles[kNumWatchedHandles];
-  g_do_random_thing_callback = base::BindRepeating(
-      &DoRandomThing, traps, kNumTraps, watched_handles, kNumWatchedHandles);
-
-  for (size_t i = 0; i < kNumTraps; ++i)
-    MojoCreateTrap(&ReadAllMessages, nullptr, &traps[i]);
-  for (size_t i = 0; i < kNumWatchedHandles; i += 2)
-    CreateMessagePipe(&watched_handles[i], &watched_handles[i + 1]);
-
-  std::unique_ptr<ThreadedRunner> threads[kNumThreads];
-  for (size_t i = 0; i < kNumThreads; ++i) {
-    threads[i] = std::make_unique<ThreadedRunner>(base::BindOnce([] {
-      for (size_t i = 0; i < kNumOperationsPerThread; ++i)
-        g_do_random_thing_callback.Run();
-    }));
-    threads[i]->Start();
-  }
-  for (size_t i = 0; i < kNumThreads; ++i)
-    threads[i]->Join();
-  for (size_t i = 0; i < kNumTraps; ++i)
-    MojoClose(traps[i]);
-  for (size_t i = 0; i < kNumWatchedHandles; ++i)
-    MojoClose(watched_handles[i]);
+  close_pipe1_b.Join();
+  MojoClose(state.pipe0.b);
+  MojoClose(state.trap);
 }
 
 }  // namespace

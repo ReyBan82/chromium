@@ -5,7 +5,7 @@
 #include "ash/accessibility/ui/accessibility_layer.h"
 
 #include "ui/aura/window.h"
-#include "ui/compositor/layer.h"
+#include "ui/compositor/layer_textured.h"
 #include "ui/compositor/paint_recorder.h"
 #include "ui/gfx/canvas.h"
 
@@ -52,7 +52,7 @@ void AccessibilityLayer::CreateOrUpdateLayer(aura::Window* root_window,
   if (!layer_ || root_window != root_window_) {
     root_window_ = root_window;
     ui::Layer* root_layer = root_window->layer();
-    layer_ = std::make_unique<ui::Layer>(ui::LAYER_TEXTURED);
+    layer_ = std::make_unique<ui::LayerTextured>();
     layer_->SetName(layer_name);
     layer_->SetFillsBoundsOpaquely(false);
     root_layer->Add(layer_.get());

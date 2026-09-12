@@ -6,8 +6,6 @@
 
 #include "base/command_line.h"
 #include "base/time/time.h"
-#include "chrome/browser/browser_process.h"
-#include "chrome/common/pref_names.h"
 #include "chromeos/ash/components/dbus/dbus_thread_manager.h"
 #include "chromeos/ash/components/network/network_handler.h"
 #include "chromeos/ash/components/network/network_state.h"
@@ -41,10 +39,11 @@ void SetTimestampFromTime(em::AppInstallReportLogEvent* event,
 }  // namespace
 
 ArcAppInstallEventLogCollector::ArcAppInstallEventLogCollector(
+    PrefService* local_state,
     Delegate* delegate,
     Profile* profile,
     const std::set<std::string>& pending_packages)
-    : InstallEventLogCollectorBase(profile),
+    : InstallEventLogCollectorBase(local_state, profile),
       delegate_(delegate),
       pending_packages_(pending_packages) {
   // Might not be available in unit test.
@@ -101,62 +100,12 @@ void ArcAppInstallEventLogCollector::SuspendDone(
 }
 
 void ArcAppInstallEventLogCollector::OnConnectionStateChanged(
-    network::mojom::ConnectionType type) {
+    net::NetworkChangeNotifier::ConnectionType type) {
   std::unique_ptr<em::AppInstallReportLogEvent> event =
       std::make_unique<em::AppInstallReportLogEvent>();
   event->set_event_type(em::AppInstallReportLogEvent::CONNECTIVITY_CHANGE);
   event->set_online(online_);
   delegate_->AddForAllPackages(std::move(event));
-}
-
-void ArcAppInstallEventLogCollector::OnCloudDpsRequested(
-    base::Time time,
-    const std::set<std::string>& package_names) {
-  for (const std::string& package_name : package_names) {
-    auto event = std::make_unique<em::AppInstallReportLogEvent>();
-    event->set_event_type(em::AppInstallReportLogEvent::CLOUDDPS_REQUEST);
-    SetTimestampFromTime(event.get(), time);
-    delegate_->Add(package_name, true /* gather_disk_space_info */,
-                   std::move(event));
-  }
-}
-
-void ArcAppInstallEventLogCollector::OnCloudDpsSucceeded(
-    base::Time time,
-    const std::set<std::string>& package_names) {
-  for (const std::string& package_name : package_names) {
-    auto event = std::make_unique<em::AppInstallReportLogEvent>();
-    event->set_event_type(em::AppInstallReportLogEvent::CLOUDDPS_RESPONSE);
-    SetTimestampFromTime(event.get(), time);
-    // Leave clouddps_response untouched.
-    delegate_->Add(package_name, true /* gather_disk_space_info */,
-                   std::move(event));
-  }
-}
-
-void ArcAppInstallEventLogCollector::OnCloudDpsFailed(
-    base::Time time,
-    const std::string& package_name,
-    arc::mojom::InstallErrorReason reason) {
-  auto event = std::make_unique<em::AppInstallReportLogEvent>();
-  event->set_event_type(em::AppInstallReportLogEvent::CLOUDDPS_RESPONSE);
-  SetTimestampFromTime(event.get(), time);
-  event->set_clouddps_response(static_cast<int>(reason));
-  delegate_->Add(package_name, true /* gather_disk_space_info */,
-                 std::move(event));
-}
-
-void ArcAppInstallEventLogCollector::OnReportForceInstallMainLoopFailed(
-    base::Time time,
-    const std::set<std::string>& package_names) {
-  for (const std::string& package_name : package_names) {
-    auto event = std::make_unique<em::AppInstallReportLogEvent>();
-    event->set_event_type(
-        em::AppInstallReportLogEvent::CLOUDDPC_MAIN_LOOP_FAILED);
-    SetTimestampFromTime(event.get(), time);
-    delegate_->Add(package_name, true /* gather_disk_space_info */,
-                   std::move(event));
-  }
 }
 
 void ArcAppInstallEventLogCollector::OnInstallationStarted(
@@ -173,7 +122,8 @@ void ArcAppInstallEventLogCollector::OnInstallationStarted(
 
 void ArcAppInstallEventLogCollector::OnInstallationFinished(
     const std::string& package_name,
-    bool success) {
+    bool success,
+    bool is_launchable_app) {
   if (!pending_packages_.count(package_name)) {
     return;
   }

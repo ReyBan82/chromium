@@ -4,15 +4,16 @@
 
 #import "ios/chrome/test/ios_chrome_unit_test_suite.h"
 
+#import "base/memory/memory_pressure_listener_registry.h"
 #import "base/metrics/user_metrics.h"
 #import "base/path_service.h"
 #import "base/test/test_simple_task_runner.h"
 #import "components/breadcrumbs/core/breadcrumb_manager.h"
 #import "components/breadcrumbs/core/crash_reporter_breadcrumb_observer.h"
 #import "components/content_settings/core/common/content_settings_pattern.h"
-#import "ios/chrome/browser/browser_state/browser_state_keyed_service_factories.h"
-#import "ios/chrome/browser/paths/paths.h"
-#import "ios/chrome/browser/url/chrome_url_constants.h"
+#import "ios/chrome/browser/profile/model/keyed_service_factories.h"
+#import "ios/chrome/browser/shared/model/paths/paths.h"
+#import "ios/chrome/browser/shared/model/url/chrome_url_constants.h"
 #import "ios/chrome/test/testing_application_context.h"
 #import "ios/components/webui/web_ui_url_constants.h"
 #import "ios/public/provider/chrome/browser/app_utils/app_utils_api.h"
@@ -21,10 +22,6 @@
 #import "ui/base/resource/resource_bundle.h"
 #import "ui/base/ui_base_paths.h"
 #import "url/url_util.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace {
 
@@ -43,8 +40,11 @@ class IOSChromeUnitTestSuiteInitializer
   void OnTestStart(const testing::TestInfo& test_info) override {
     ios::provider::Initialize();
 
+    memory_pressure_registry_ =
+        std::make_unique<base::MemoryPressureListenerRegistry>();
+
     DCHECK(!GetApplicationContext());
-    application_context_.reset(new TestingApplicationContext);
+    application_context_ = std::make_unique<TestingApplicationContext>();
   }
 
   void OnTestEnd(const testing::TestInfo& test_info) override {
@@ -52,10 +52,14 @@ class IOSChromeUnitTestSuiteInitializer
     application_context_.reset();
 
     breadcrumbs::BreadcrumbManager::GetInstance().ResetForTesting();
+
+    memory_pressure_registry_.reset();
   }
 
  private:
   std::unique_ptr<ApplicationContext> application_context_;
+  std::unique_ptr<base::MemoryPressureListenerRegistry>
+      memory_pressure_registry_;
 };
 
 }  // namespace
@@ -69,6 +73,17 @@ IOSChromeUnitTestSuite::~IOSChromeUnitTestSuite() {}
 void IOSChromeUnitTestSuite::Initialize() {
   url::AddStandardScheme(kChromeUIScheme, url::SCHEME_WITH_HOST);
 
+  // Force unittests to run using en-US so if testing string output will work
+  // regardless of the system language.
+  ui::ResourceBundle::InitSharedInstanceWithLocale(
+      "en-US", nullptr, ui::ResourceBundle::LOAD_COMMON_RESOURCES);
+  base::FilePath resources_pack_path;
+  base::PathService::Get(base::DIR_ASSETS, &resources_pack_path);
+  resources_pack_path =
+      resources_pack_path.Append(FILE_PATH_LITERAL("resources.pak"));
+  ui::ResourceBundle::GetSharedInstance().AddDataPackFromPath(
+      resources_pack_path, ui::kScaleFactorNone);
+
   // Add an additional listener to do the extra initialization for unit tests.
   // It will be started before the base class listeners and ended after the
   // base class listeners.
@@ -79,9 +94,9 @@ void IOSChromeUnitTestSuite::Initialize() {
   // Call the superclass Initialize() method after adding the listener.
   web::WebTestSuite::Initialize();
 
-  // Ensure that all BrowserStateKeyedServiceFactories are built before any
-  // test is run so that the dependencies are correctly resolved.
-  EnsureBrowserStateKeyedServiceFactoriesBuilt();
+  // Ensure that all KeyedServiceFactories are built before any test is run so
+  // that the dependencies are correctly resolved.
+  EnsureProfileKeyedServiceFactoriesBuilt();
 
   // Register a SingleThreadTaskRunner for base::RecordAction as overridding
   // it in individual tests is unsafe (as there is no way to unregister).
@@ -89,5 +104,5 @@ void IOSChromeUnitTestSuite::Initialize() {
 
   ios::RegisterPathProvider();
   ui::RegisterPathProvider();
-  ContentSettingsPattern::SetNonWildcardDomainNonPortSchemes(nullptr, 0);
+  ContentSettingsPattern::SetNonWildcardDomainNonPortSchemes({});
 }

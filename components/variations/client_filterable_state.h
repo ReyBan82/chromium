@@ -5,14 +5,17 @@
 #ifndef COMPONENTS_VARIATIONS_CLIENT_FILTERABLE_STATE_H_
 #define COMPONENTS_VARIATIONS_CLIENT_FILTERABLE_STATE_H_
 
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <string>
 
 #include "base/component_export.h"
+#include "base/containers/flat_set.h"
 #include "base/functional/callback.h"
 #include "base/time/time.h"
 #include "base/version.h"
 #include "components/variations/proto/study.pb.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace variations {
 
@@ -29,26 +32,12 @@ enum class RestrictionPolicy {
 };
 
 using IsEnterpriseFunction = base::OnceCallback<bool()>;
+using GoogleGroupsFunction = base::OnceCallback<base::flat_set<uint64_t>()>;
+using EnterpriseGroupsFunction =
+    base::OnceCallback<base::flat_set<std::string>()>;
 
 // A container for all of the client state which is used for filtering studies.
 struct COMPONENT_EXPORT(VARIATIONS) ClientFilterableState {
-  static Study::Platform GetCurrentPlatform();
-
-  // base::Version used in {min,max}_os_version filtering.
-  static base::Version GetOSVersion();
-
-  explicit ClientFilterableState(IsEnterpriseFunction is_enterprise_function);
-
-  ClientFilterableState(const ClientFilterableState&) = delete;
-  ClientFilterableState& operator=(const ClientFilterableState&) = delete;
-
-  ~ClientFilterableState();
-
-  // Whether this is an enterprise client. Always false on android, iOS, and
-  // linux. Determined by VariationsServiceClient::IsEnterprise for windows,
-  // chromeOs, and mac.
-  bool IsEnterprise() const;
-
   // The system locale.
   std::string locale;
 
@@ -78,6 +67,9 @@ struct COMPONENT_EXPORT(VARIATIONS) ClientFilterableState {
   // identify models of devices.
   std::string hardware_class;
 
+  // The hardware manufacturer of the device.
+  std::string hardware_manufacturer;
+
   // Whether this is a low-end device. Currently only supported on Android.
   // Based on base::SysInfo::IsLowEndDevice().
   bool is_low_end_device = false;
@@ -85,24 +77,79 @@ struct COMPONENT_EXPORT(VARIATIONS) ClientFilterableState {
   // The country code to use for studies configured with session consistency.
   std::string session_consistency_country;
 
+  // The administrative area code (geo_level1) to use for studies configured
+  // with session consistency.
+  std::string session_consistency_geolevel1;
+
   // The country code to use for studies configured with permanent consistency.
   std::string permanent_consistency_country;
 
   // The restriction applied to Chrome through the "ChromeVariations" policy.
   RestrictionPolicy policy_restriction = RestrictionPolicy::NO_RESTRICTIONS;
 
-  // The list of Google groups that one of more signed-in syncing users are a
-  // a member of.
-  // Each value is the Gaia ID of the google group.
-  // TODO(b/264838828): populate this field.
-  std::set<uint64_t> google_groups;
+  static std::unique_ptr<ClientFilterableState> CreateWithIsEnterprise(
+      IsEnterpriseFunction is_enterprise_function);
+
+  static std::unique_ptr<ClientFilterableState> CreateWithGoogleGroups(
+      GoogleGroupsFunction google_groups_function);
+
+  static std::unique_ptr<ClientFilterableState> CreateWithEnterpriseGroups(
+      EnterpriseGroupsFunction enterprise_groups_function);
+
+  ClientFilterableState();
+
+  ClientFilterableState(IsEnterpriseFunction is_enterprise_function,
+                        GoogleGroupsFunction google_groups_function,
+                        EnterpriseGroupsFunction enterprise_groups_function);
+
+  ClientFilterableState(const ClientFilterableState&) = delete;
+  ClientFilterableState& operator=(const ClientFilterableState&) = delete;
+
+  ~ClientFilterableState();
+
+  // Whether this is an enterprise client. Always false on Android, iOS, and
+  // Linux. Determined by VariationsServiceClient::IsEnterprise() for Windows,
+  // ChromeOS, and Mac.
+  bool IsEnterprise() const;
+
+  // The list of Google groups that one or more signed-in syncing users are a
+  // a member of. Each value is the Gaia ID of the Google group.
+  base::flat_set<uint64_t> GoogleGroups() const;
+
+  // The list of enterprise groups that browser or one or more profiles are a
+  // member of.
+  base::flat_set<std::string> EnterpriseGroups() const;
+
+  static Study::Platform GetCurrentPlatform();
+
+  // base::Version used in {min,max}_os_version filtering.
+  static base::Version GetOSVersion();
+
+  // Returns the hardware class string used for hardware_class filtering.
+  static std::string GetHardwareClass();
+
+  // Returns the hardware manufacturer string used for hardware_manufacturer
+  // filtering. Currently only implemented on Android.
+  static std::string GetHardwareManufacturer();
 
  private:
   // Evaluating enterprise status negatively affects performance, so we only
   // evaluate it if needed (i.e. if a study is filtering by enterprise) and at
   // most once.
   mutable IsEnterpriseFunction is_enterprise_function_;
-  mutable absl::optional<bool> is_enterprise_;
+  mutable std::optional<bool> is_enterprise_;
+
+  // Evaluating group memberships involves parsing data received from Chrome
+  // Sync server.  For safe rollout we do this only for studies that require
+  // inspecting group memberships (and for efficiency we do it only once.)
+  mutable GoogleGroupsFunction google_groups_function_;
+  mutable std::optional<base::flat_set<uint64_t>> google_groups_;
+
+  // Evaluating enterprise groups memberships involves parsing data received
+  // from DM Server. For safe rollout we do this only for studies that require
+  // inspecting enterprise group memberships.
+  mutable EnterpriseGroupsFunction enterprise_groups_function_;
+  mutable std::optional<base::flat_set<std::string>> enterprise_groups_;
 };
 
 }  // namespace variations

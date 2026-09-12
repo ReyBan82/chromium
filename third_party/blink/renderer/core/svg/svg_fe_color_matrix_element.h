@@ -39,6 +39,10 @@ class SVGFEColorMatrixElement final
  public:
   explicit SVGFEColorMatrixElement(Document&);
 
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFEColorMatrixElement;
+  }
+
   SVGAnimatedNumberList* values() { return values_.Get(); }
   SVGAnimatedString* in1() { return in1_.Get(); }
   SVGAnimatedEnumeration<ColorMatrixType>* type() { return type_.Get(); }
@@ -50,6 +54,10 @@ class SVGFEColorMatrixElement final
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override { return false; }
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumberList> values_;
   Member<SVGAnimatedString> in1_;

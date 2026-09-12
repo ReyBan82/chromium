@@ -12,34 +12,33 @@
 #include "base/functional/bind.h"
 #include "base/path_service.h"
 #include "base/run_loop.h"
+#include "base/scoped_observation.h"
 #include "base/strings/stringprintf.h"
 #include "base/threading/thread_restrictions.h"
 #include "base/version.h"
 #include "chrome/browser/ash/policy/login/signin_profile_extensions_policy_test_base.h"
-#include "chrome/browser/extensions/crx_installer.h"
-#include "chrome/browser/extensions/extension_service.h"
+#include "chrome/browser/extensions/install_tracker_factory.h"
 #include "chrome/browser/policy/extension_force_install_mixin.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/chrome_paths.h"
 #include "components/version_info/version_info.h"
 #include "content/public/browser/browser_context.h"
-#include "content/public/browser/notification_details.h"
-#include "content/public/browser/notification_source.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_launcher.h"
 #include "content/public/test/test_utils.h"
-#include "extensions/browser/extension_host_test_helper.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_registry.h"
-#include "extensions/browser/extension_system.h"
 #include "extensions/browser/extension_util.h"
-#include "extensions/browser/notification_types.h"
+#include "extensions/browser/install_observer.h"
+#include "extensions/browser/install_tracker.h"
 #include "extensions/browser/test_extension_registry_observer.h"
-#include "extensions/browser/update_observer.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/extension_id.h"
 #include "extensions/common/extension_set.h"
 #include "extensions/common/features/feature_channel.h"
 #include "extensions/common/mojom/view_type.mojom.h"
 #include "extensions/common/switches.h"
+#include "extensions/test/extension_test_message_listener.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
 
@@ -97,91 +96,39 @@ base::FilePath GetNoImmediateUpdateExtensionPath(const std::string& version) {
 
 // Observer that allows waiting for an installation failure of a specific
 // extension/app.
-// TODO(emaxx): Extract this into a more generic helper class for using in other
-// tests.
-class ExtensionInstallErrorObserver final {
+class ExtensionInstallErrorObserver : public extensions::InstallObserver {
  public:
-  ExtensionInstallErrorObserver(const Profile* profile,
+  ExtensionInstallErrorObserver(Profile* profile,
                                 const std::string& extension_id)
-      : profile_(profile),
-        extension_id_(extension_id),
-        notification_observer_(
-            extensions::NOTIFICATION_EXTENSION_INSTALL_ERROR,
-            base::BindRepeating(
-                &ExtensionInstallErrorObserver::IsNotificationRelevant,
-                base::Unretained(this))) {}
+      : extension_id_(extension_id) {
+    auto* tracker =
+        extensions::InstallTrackerFactory::GetForBrowserContext(profile);
+    CHECK(tracker);
+    observation_.Observe(tracker);
+  }
 
   ExtensionInstallErrorObserver(const ExtensionInstallErrorObserver&) = delete;
   ExtensionInstallErrorObserver& operator=(
       const ExtensionInstallErrorObserver&) = delete;
 
-  void Wait() { notification_observer_.Wait(); }
+  void Wait() { run_loop_.Run(); }
 
- private:
-  // Callback which is used for |WindowedNotificationObserver| for checking
-  // whether the condition being awaited is met.
-  bool IsNotificationRelevant(
-      const content::NotificationSource& source,
-      const content::NotificationDetails& details) const {
-    extensions::CrxInstaller* const crx_installer =
-        content::Source<extensions::CrxInstaller>(source).ptr();
-    return crx_installer->profile() == profile_ &&
-           crx_installer->extension()->id() == extension_id_;
-  }
-
-  const Profile* const profile_;
-  const std::string extension_id_;
-  content::WindowedNotificationObserver notification_observer_;
-};
-
-// Observer that allows waiting until the specified version of the given
-// extension/app gets available for an update.
-class ExtensionUpdateAvailabilityObserver final
-    : public extensions::UpdateObserver {
- public:
-  ExtensionUpdateAvailabilityObserver(Profile* profile,
-                                      const std::string& extension_id,
-                                      const base::Version& awaited_version)
-      : profile_(profile),
-        extension_id_(extension_id),
-        awaited_version_(awaited_version) {
-    extensions::ExtensionSystem::Get(profile_)
-        ->extension_service()
-        ->AddUpdateObserver(this);
-  }
-
-  ExtensionUpdateAvailabilityObserver(
-      const ExtensionUpdateAvailabilityObserver&) = delete;
-  ExtensionUpdateAvailabilityObserver& operator=(
-      const ExtensionUpdateAvailabilityObserver&) = delete;
-
-  ~ExtensionUpdateAvailabilityObserver() override {
-    extensions::ExtensionSystem::Get(profile_)
-        ->extension_service()
-        ->RemoveUpdateObserver(this);
-  }
-
-  // Should be called no more than once.
-  void Wait() {
-    // Note that the expected event could have already been observed before this
-    // point, in which case the run loop will exit immediately.
-    run_loop_.Run();
-  }
-
-  void OnAppUpdateAvailable(const extensions::Extension* extension) override {
-    if (extension->id() == extension_id_ &&
-        extension->version() == awaited_version_) {
+  // extensions::InstallObserver:
+  void OnFinishCrxInstall(content::BrowserContext* context,
+                          const base::FilePath& source_file,
+                          const std::string& extension_id,
+                          const extensions::Extension* extension,
+                          bool success) override {
+    if (extension_id == extension_id_) {
       run_loop_.Quit();
     }
   }
 
-  void OnChromeUpdateAvailable() override {}
-
  private:
-  Profile* const profile_;
-  const std::string extension_id_;
-  const base::Version awaited_version_;
   base::RunLoop run_loop_;
+  const extensions::ExtensionId extension_id_;
+  base::ScopedObservation<extensions::InstallTracker, InstallObserver>
+      observation_{this};
 };
 
 // Class for testing sign-in profile apps/extensions.
@@ -209,7 +156,7 @@ class SigninProfileExtensionsPolicyTest
 
 }  // namespace
 
-// Tests that a allowlisted app gets installed.
+// Tests that an allowlisted app gets installed.
 IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsPolicyTest,
                        AllowlistedAppInstallation) {
   EXPECT_TRUE(extension_force_install_mixin_.ForceInstallFromCrx(
@@ -240,7 +187,7 @@ IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsPolicyTest,
       kNotAllowlistedAppId));
 }
 
-// Tests that a allowlisted extension is installed. Force-installed extensions
+// Tests that an allowlisted extension is installed. Force-installed extensions
 // on the sign-in screen should also automatically have the
 // |login_screen_extension| type.
 IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsPolicyTest,
@@ -278,8 +225,7 @@ IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsPolicyTest,
 // Tests that the extension system enables non-standard extensions in the
 // sign-in profile.
 IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsPolicyTest, ExtensionsEnabled) {
-  EXPECT_TRUE(extensions::ExtensionSystem::Get(GetInitialProfile())
-                  ->extension_service()
+  EXPECT_TRUE(extensions::ExtensionRegistrar::Get(GetInitialProfile())
                   ->extensions_enabled());
 }
 
@@ -323,7 +269,7 @@ IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsPolicyTest,
   EXPECT_TRUE(extension_force_install_mixin_.ForceInstallFromCrx(
       base::PathService::CheckedGet(chrome::DIR_TEST_DATA)
           .AppendASCII(kAllowlistedExtensionCrxPath),
-      ExtensionForceInstallMixin::WaitMode::kBackgroundPageFirstLoad));
+      ExtensionForceInstallMixin::WaitMode::kLoad));
 
   content::StoragePartition* storage_partition_for_app =
       extensions::util::GetStoragePartitionForExtensionId(
@@ -502,11 +448,6 @@ class SigninProfileExtensionsAutoUpdatePolicyTest
         std::make_unique<extensions::TestExtensionRegistryObserver>(
             extensions::ExtensionRegistry::Get(GetInitialProfile()),
             kNoImmediateUpdateExtensionId);
-    test_extension_latest_version_update_available_observer_ =
-        std::make_unique<ExtensionUpdateAvailabilityObserver>(
-            GetInitialProfile(), kNoImmediateUpdateExtensionId,
-            base::Version(kNoImmediateUpdateExtensionLatestVersion));
-
     const std::string version = content::IsPreTest()
                                     ? kNoImmediateUpdateExtensionOlderVersion
                                     : kNoImmediateUpdateExtensionLatestVersion;
@@ -518,17 +459,12 @@ class SigninProfileExtensionsAutoUpdatePolicyTest
   }
 
   void TearDownOnMainThread() override {
-    test_extension_latest_version_update_available_observer_.reset();
     test_extension_registry_observer_.reset();
     SigninProfileExtensionsPolicyTest::TearDownOnMainThread();
   }
 
   void WaitForTestExtensionLoaded() {
     test_extension_registry_observer_->WaitForExtensionLoaded();
-  }
-
-  void WaitForTestExtensionLatestVersionUpdateAvailable() {
-    test_extension_latest_version_update_available_observer_->Wait();
   }
 
   base::Version GetTestExtensionVersion() const {
@@ -543,8 +479,6 @@ class SigninProfileExtensionsAutoUpdatePolicyTest
  private:
   std::unique_ptr<extensions::TestExtensionRegistryObserver>
       test_extension_registry_observer_;
-  std::unique_ptr<ExtensionUpdateAvailabilityObserver>
-      test_extension_latest_version_update_available_observer_;
 };
 
 // This is the first preparation step for the actual test. Here the old version
@@ -565,7 +499,7 @@ IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsAutoUpdatePolicyTest,
 IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsAutoUpdatePolicyTest, PRE_Test) {
   // Let the extensions system load the previously fetched version before
   // starting to serve the newer version, to avoid hitting flaky DCHECKs in the
-  // extensions system internals (see https://crbug.com/810799).
+  // extensions system internals (see https://crbug.com/41369768).
   WaitForTestExtensionLoaded();
   EXPECT_EQ(GetTestExtensionVersion(),
             base::Version(kNoImmediateUpdateExtensionOlderVersion));
@@ -574,6 +508,9 @@ IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsAutoUpdatePolicyTest, PRE_Test) {
   // fetch this version due to the retry mechanism when the fetch request to the
   // update servers was failing. We verify that the new version eventually gets
   // fetched and becomes available for an update.
+  ExtensionTestMessageListener update_available_listener(
+      kNoImmediateUpdateExtensionLatestVersion);
+  update_available_listener.set_extension_id(kNoImmediateUpdateExtensionId);
   EXPECT_TRUE(extension_force_install_mixin_.UpdateFromSourceDir(
       GetNoImmediateUpdateExtensionPath(
           kNoImmediateUpdateExtensionLatestVersion),
@@ -581,15 +518,13 @@ IN_PROC_BROWSER_TEST_F(SigninProfileExtensionsAutoUpdatePolicyTest, PRE_Test) {
       ExtensionForceInstallMixin::UpdateWaitMode::kNone));
   extension_force_install_mixin_.SetServerErrorMode(
       ExtensionForceInstallMixin::ServerErrorMode::kNone);
-  WaitForTestExtensionLatestVersionUpdateAvailable();
 
-  // The running extension should stay at the older version, since it ignores
-  // update notifications and never idles, and also the browser is expected to
-  // not force immediate updates.
-  // Note: There's no reliable way to test that the preliminary autoupdate
-  // doesn't happen, but doing RunUntilIdle() at this point should make the test
-  // at least flaky in case a bug is introduced somewhere.
-  base::RunLoop().RunUntilIdle();
+  // The running extension reports the offered version after handling the
+  // update notification. It should remain on the old version until Chrome
+  // restarts.
+  ASSERT_TRUE(update_available_listener.WaitUntilSatisfied());
+  EXPECT_EQ(kNoImmediateUpdateExtensionLatestVersion,
+            update_available_listener.message());
   EXPECT_EQ(GetTestExtensionVersion(),
             base::Version(kNoImmediateUpdateExtensionOlderVersion));
 }

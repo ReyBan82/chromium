@@ -15,11 +15,11 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.io.UnsupportedEncodingException;
 import java.net.MalformedURLException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -38,11 +38,11 @@ import javax.net.ssl.SSLContext;
  * for loopback testing without the need to setup TCP forwarding to the
  * host computer.
  */
-public class WebServer {
+public class WebServer implements AutoCloseable {
     private static final String TAG = "WebServer";
 
-    private static Set<WebServer> sInstances = new HashSet<>();
-    private static Set<WebServer> sSecureInstances = new HashSet<>();
+    private static final Set<WebServer> sInstances = new HashSet<>();
+    private static final Set<WebServer> sSecureInstances = new HashSet<>();
 
     private final ServerThread mServerThread;
     private String mServerUri;
@@ -60,9 +60,9 @@ public class WebServer {
         if (body == null) {
             body = new byte[0];
         }
-        output.write(("HTTP/1.1 " + status + "\r\nContent-Length: " + String.valueOf(body.length)
-                + "\r\n\r\n")
-                             .getBytes());
+        output.write(
+                String.format("HTTP/1.1 %s\r\nContent-Length: %s\r\n\r\n", status, body.length)
+                        .getBytes());
         output.write(body);
         output.flush();
     }
@@ -71,11 +71,13 @@ public class WebServer {
     public static class HTTPHeader {
         public final String key;
         public final String value;
+
         /** Constructs an HTTP header. */
         public HTTPHeader(String key, String value) {
             this.key = key;
             this.value = value;
         }
+
         /**
          * Parse an HTTP header from a string line. Returns null if the line is not a valid HTTP
          * header.
@@ -121,11 +123,7 @@ public class WebServer {
             }
             if (mBody != null) {
                 builder.append("\r\n");
-                try {
-                    builder.append(new String(mBody, "UTF-8"));
-                } catch (UnsupportedEncodingException e) {
-                    builder.append("<binary body, length=").append(mBody.length).append(">\r\n");
-                }
+                builder.append(new String(mBody, StandardCharsets.UTF_8));
             }
             return builder.toString();
         }
@@ -196,18 +194,14 @@ public class WebServer {
         public static HTTPRequest parse(InputStream stream) throws InvalidRequest, IOException {
             boolean firstLine = true;
             HTTPRequest req = new HTTPRequest();
-            ArrayList<HTTPHeader> mHeaders = new ArrayList<HTTPHeader>();
+            ArrayList<HTTPHeader> headers = new ArrayList<HTTPHeader>();
             ByteArrayOutputStream line = new ByteArrayOutputStream();
             for (int b = stream.read(); b != -1; b = stream.read()) {
                 if (b == '\r') {
                     int next = stream.read();
                     if (next == '\n') {
                         String lineString;
-                        try {
-                            lineString = new String(line.toByteArray(), "UTF-8");
-                        } catch (UnsupportedEncodingException e) {
-                            throw new InvalidRequest();
-                        }
+                        lineString = new String(line.toByteArray(), StandardCharsets.UTF_8);
                         line.reset();
                         if (firstLine) {
                             String[] parts = lineString.split(" ", 3);
@@ -224,7 +218,7 @@ public class WebServer {
                             }
                             HTTPHeader header = HTTPHeader.parseLine(lineString);
                             if (header != null) {
-                                mHeaders.add(header);
+                                headers.add(header);
                             }
                         }
                     } else if (next == -1) {
@@ -241,7 +235,7 @@ public class WebServer {
                 if (line.size() == 0) return null;
                 throw new InvalidRequest();
             }
-            req.mHeaders = mHeaders.toArray(new HTTPHeader[0]);
+            req.mHeaders = headers.toArray(new HTTPHeader[0]);
             int contentLength = -1;
             if (req.mMethod.equals("GET") || req.mMethod.equals("HEAD")) {
                 contentLength = 0;
@@ -252,7 +246,7 @@ public class WebServer {
             }
             if (contentLength >= 0) {
                 byte[] content = new byte[contentLength];
-                for (int offset = 0; offset < contentLength;) {
+                for (int offset = 0; offset < contentLength; ) {
                     int bytesRead = stream.read(content, offset, contentLength);
                     if (bytesRead == -1) { // short read, keep truncated content.
                         content = Arrays.copyOf(content, offset);
@@ -262,13 +256,13 @@ public class WebServer {
                 }
                 req.mBody = content;
             } else if (hasChunkedTransferEncoding(req)) {
-                ByteArrayOutputStream mBody = new ByteArrayOutputStream();
+                ByteArrayOutputStream body = new ByteArrayOutputStream();
                 byte[] buffer = new byte[1000];
                 int bytesRead;
                 while ((bytesRead = stream.read(buffer, 0, buffer.length)) != -1) {
-                    mBody.write(buffer, 0, bytesRead);
+                    body.write(buffer, 0, bytesRead);
                 }
-                req.mBody = mBody.toByteArray();
+                req.mBody = body.toByteArray();
             }
             return req;
         }
@@ -290,33 +284,40 @@ public class WebServer {
 
     /** Handle an HTTP request. Calls |mRequestHandler| if set. */
     private void handleRequest(HTTPRequest request, OutputStream stream) {
-        assert Thread.currentThread()
-                == mServerThread : "handleRequest called from non-server thread";
+        assert Thread.currentThread() == mServerThread
+                : "handleRequest called from non-server thread";
         if (mRequestHandler != null) {
             mRequestHandler.handleRequest(request, stream);
         }
     }
 
-    public void setServerHost(String hostname) {
+    /** Changes the host name - returns the fully qualified origin */
+    public String setServerHost(String hostname) {
         try {
-            mServerUri = new java.net
-                                 .URI(mSsl ? "https" : "http", null, hostname,
-                                         mServerThread.mSocket.getLocalPort(), null, null, null)
-                                 .toString();
+            mServerUri =
+                    new java.net.URI(
+                                    mSsl ? "https" : "http",
+                                    null,
+                                    hostname,
+                                    mServerThread.mSocket.getLocalPort(),
+                                    null,
+                                    null,
+                                    null)
+                            .toString();
+            return mServerUri;
         } catch (java.net.URISyntaxException e) {
             Log.wtf(TAG, e.getMessage());
+            return null;
         }
     }
 
     /**
-     * Create and start a local HTTP server instance. Additional must only be true
-     * if an instance was already created. You are responsible for calling
-     * shutdown() on each instance you create.
+     * Create and start a local HTTP server instance. Additional must only be true if an instance
+     * was already created. You are responsible for calling shutdown() on each instance you create.
      *
      * @param port Port number the server must use, or 0 to automatically choose a free port.
      * @param ssl True if the server should be using secure sockets.
      * @param additional True if creating an additional server instance.
-     * @throws Exception
      */
     public WebServer(int port, boolean ssl, boolean additional) throws Exception {
         mPort = port;
@@ -325,16 +326,24 @@ public class WebServer {
         if (mSsl) {
             if ((additional && WebServer.sSecureInstances.isEmpty())
                     || (!additional && !WebServer.sSecureInstances.isEmpty())) {
-                throw new IllegalStateException("There are " + WebServer.sSecureInstances.size()
-                        + " SSL WebServer instances. Expected " + (additional ? ">=1" : "0")
-                        + " because additional is " + additional);
+                throw new IllegalStateException(
+                        "There are "
+                                + WebServer.sSecureInstances.size()
+                                + " SSL WebServer instances. Expected "
+                                + (additional ? ">=1" : "0")
+                                + " because additional is "
+                                + additional);
             }
         } else {
             if ((additional && WebServer.sInstances.isEmpty())
                     || (!additional && !WebServer.sInstances.isEmpty())) {
-                throw new IllegalStateException("There are " + WebServer.sSecureInstances.size()
-                        + " WebServer instances. Expected " + (additional ? ">=1" : "0")
-                        + " because additional is " + additional);
+                throw new IllegalStateException(
+                        "There are "
+                                + WebServer.sSecureInstances.size()
+                                + " WebServer instances. Expected "
+                                + (additional ? ">=1" : "0")
+                                + " because additional is "
+                                + additional);
             }
         }
         mServerThread = new ServerThread(mPort, mSsl);
@@ -354,15 +363,12 @@ public class WebServer {
      *
      * @param port Port number the server must use, or 0 to automatically choose a free port.
      * @param ssl True if the server should be using secure sockets.
-     * @throws Exception
      */
     public WebServer(int port, boolean ssl) throws Exception {
         this(port, ssl, false);
     }
 
-    /**
-     * Terminate the http server.
-     */
+    /** Terminate the http server. */
     public void shutdown() {
         if (mSsl) {
             WebServer.sSecureInstances.remove(this);
@@ -379,6 +385,15 @@ public class WebServer {
         } catch (InterruptedException | IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    /**
+     * Make the WebServer AutoCloseable.
+     * Calls the shutdown method.
+     */
+    @Override
+    public void close() {
+        shutdown();
     }
 
     public String getBaseUrl() {
@@ -398,45 +413,47 @@ public class WebServer {
     }
 
     private class ServerThread extends Thread {
-        private final boolean mIsSsl;
+
         private ServerSocket mSocket;
         private SSLContext mSslContext;
 
         private final Object mLock = new Object();
+
         @GuardedBy("mLock")
         private boolean mIsCancelled;
+
         @GuardedBy("mLock")
         private Socket mCurrentRequestSocket;
 
         /**
-         * Defines the keystore contents for the server, BKS version. Holds just a
-         * single self-generated key. The subject name is "Test Server".
+         * Defines the keystore contents for the server, BKS version. Holds just a single
+         * self-generated key. The subject name is "Test Server".
          */
         private static final String SERVER_KEYS_BKS =
                 "AAAAAQAAABQDkebzoP1XwqyWKRCJEpn/t8dqIQAABDkEAAVteWtleQAAARpYl20nAAAAAQAFWC41"
-                + "MDkAAAJNMIICSTCCAbKgAwIBAgIESEfU1jANBgkqhkiG9w0BAQUFADBpMQswCQYDVQQGEwJVUzET"
-                + "MBEGA1UECBMKQ2FsaWZvcm5pYTEMMAoGA1UEBxMDTVRWMQ8wDQYDVQQKEwZHb29nbGUxEDAOBgNV"
-                + "BAsTB0FuZHJvaWQxFDASBgNVBAMTC1Rlc3QgU2VydmVyMB4XDTA4MDYwNTExNTgxNFoXDTA4MDkw"
-                + "MzExNTgxNFowaTELMAkGA1UEBhMCVVMxEzARBgNVBAgTCkNhbGlmb3JuaWExDDAKBgNVBAcTA01U"
-                + "VjEPMA0GA1UEChMGR29vZ2xlMRAwDgYDVQQLEwdBbmRyb2lkMRQwEgYDVQQDEwtUZXN0IFNlcnZl"
-                + "cjCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA0LIdKaIr9/vsTq8BZlA3R+NFWRaH4lGsTAQy"
-                + "DPMF9ZqEDOaL6DJuu0colSBBBQ85hQTPa9m9nyJoN3pEi1hgamqOvQIWcXBk+SOpUGRZZFXwniJV"
-                + "zDKU5nE9MYgn2B9AoiH3CSuMz6HRqgVaqtppIe1jhukMc/kHVJvlKRNy9XMCAwEAATANBgkqhkiG"
-                + "9w0BAQUFAAOBgQC7yBmJ9O/eWDGtSH9BH0R3dh2NdST3W9hNZ8hIa8U8klhNHbUCSSktZmZkvbPU"
-                + "hse5LI3dh6RyNDuqDrbYwcqzKbFJaq/jX9kCoeb3vgbQElMRX8D2ID1vRjxwlALFISrtaN4VpWzV"
-                + "yeoHPW4xldeZmoVtjn8zXNzQhLuBqX2MmAAAAqwAAAAUvkUScfw9yCSmALruURNmtBai7kQAAAZx"
-                + "4Jmijxs/l8EBaleaUru6EOPioWkUAEVWCxjM/TxbGHOi2VMsQWqRr/DZ3wsDmtQgw3QTrUK666sR"
-                + "MBnbqdnyCyvM1J2V1xxLXPUeRBmR2CXorYGF9Dye7NkgVdfA+9g9L/0Au6Ugn+2Cj5leoIgkgApN"
-                + "vuEcZegFlNOUPVEs3SlBgUF1BY6OBM0UBHTPwGGxFBBcetcuMRbUnu65vyDG0pslT59qpaR0TMVs"
-                + "P+tcheEzhyjbfM32/vwhnL9dBEgM8qMt0sqF6itNOQU/F4WGkK2Cm2v4CYEyKYw325fEhzTXosck"
-                + "MhbqmcyLab8EPceWF3dweoUT76+jEZx8lV2dapR+CmczQI43tV9btsd1xiBbBHAKvymm9Ep9bPzM"
-                + "J0MQi+OtURL9Lxke/70/MRueqbPeUlOaGvANTmXQD2OnW7PISwJ9lpeLfTG0LcqkoqkbtLKQLYHI"
-                + "rQfV5j0j+wmvmpMxzjN3uvNajLa4zQ8l0Eok9SFaRr2RL0gN8Q2JegfOL4pUiHPsh64WWya2NB7f"
-                + "V+1s65eA5ospXYsShRjo046QhGTmymwXXzdzuxu8IlnTEont6P4+J+GsWk6cldGbl20hctuUKzyx"
-                + "OptjEPOKejV60iDCYGmHbCWAzQ8h5MILV82IclzNViZmzAapeeCnexhpXhWTs+xDEYSKEiG/camt"
-                + "bhmZc3BcyVJrW23PktSfpBQ6D8ZxoMfF0L7V2GQMaUg+3r7ucrx82kpqotjv0xHghNIm95aBr1Qw"
-                + "1gaEjsC/0wGmmBDg1dTDH+F1p9TInzr3EFuYD0YiQ7YlAHq3cPuyGoLXJ5dXYuSBfhDXJSeddUkl"
-                + "k1ufZyOOcskeInQge7jzaRfmKg3U94r+spMEvb0AzDQVOKvjjo1ivxMSgFRZaDb/4qw=";
+                    + "MDkAAAJNMIICSTCCAbKgAwIBAgIESEfU1jANBgkqhkiG9w0BAQUFADBpMQswCQYDVQQGEwJVUzET"
+                    + "MBEGA1UECBMKQ2FsaWZvcm5pYTEMMAoGA1UEBxMDTVRWMQ8wDQYDVQQKEwZHb29nbGUxEDAOBgNV"
+                    + "BAsTB0FuZHJvaWQxFDASBgNVBAMTC1Rlc3QgU2VydmVyMB4XDTA4MDYwNTExNTgxNFoXDTA4MDkw"
+                    + "MzExNTgxNFowaTELMAkGA1UEBhMCVVMxEzARBgNVBAgTCkNhbGlmb3JuaWExDDAKBgNVBAcTA01U"
+                    + "VjEPMA0GA1UEChMGR29vZ2xlMRAwDgYDVQQLEwdBbmRyb2lkMRQwEgYDVQQDEwtUZXN0IFNlcnZl"
+                    + "cjCBnzANBgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA0LIdKaIr9/vsTq8BZlA3R+NFWRaH4lGsTAQy"
+                    + "DPMF9ZqEDOaL6DJuu0colSBBBQ85hQTPa9m9nyJoN3pEi1hgamqOvQIWcXBk+SOpUGRZZFXwniJV"
+                    + "zDKU5nE9MYgn2B9AoiH3CSuMz6HRqgVaqtppIe1jhukMc/kHVJvlKRNy9XMCAwEAATANBgkqhkiG"
+                    + "9w0BAQUFAAOBgQC7yBmJ9O/eWDGtSH9BH0R3dh2NdST3W9hNZ8hIa8U8klhNHbUCSSktZmZkvbPU"
+                    + "hse5LI3dh6RyNDuqDrbYwcqzKbFJaq/jX9kCoeb3vgbQElMRX8D2ID1vRjxwlALFISrtaN4VpWzV"
+                    + "yeoHPW4xldeZmoVtjn8zXNzQhLuBqX2MmAAAAqwAAAAUvkUScfw9yCSmALruURNmtBai7kQAAAZx"
+                    + "4Jmijxs/l8EBaleaUru6EOPioWkUAEVWCxjM/TxbGHOi2VMsQWqRr/DZ3wsDmtQgw3QTrUK666sR"
+                    + "MBnbqdnyCyvM1J2V1xxLXPUeRBmR2CXorYGF9Dye7NkgVdfA+9g9L/0Au6Ugn+2Cj5leoIgkgApN"
+                    + "vuEcZegFlNOUPVEs3SlBgUF1BY6OBM0UBHTPwGGxFBBcetcuMRbUnu65vyDG0pslT59qpaR0TMVs"
+                    + "P+tcheEzhyjbfM32/vwhnL9dBEgM8qMt0sqF6itNOQU/F4WGkK2Cm2v4CYEyKYw325fEhzTXosck"
+                    + "MhbqmcyLab8EPceWF3dweoUT76+jEZx8lV2dapR+CmczQI43tV9btsd1xiBbBHAKvymm9Ep9bPzM"
+                    + "J0MQi+OtURL9Lxke/70/MRueqbPeUlOaGvANTmXQD2OnW7PISwJ9lpeLfTG0LcqkoqkbtLKQLYHI"
+                    + "rQfV5j0j+wmvmpMxzjN3uvNajLa4zQ8l0Eok9SFaRr2RL0gN8Q2JegfOL4pUiHPsh64WWya2NB7f"
+                    + "V+1s65eA5ospXYsShRjo046QhGTmymwXXzdzuxu8IlnTEont6P4+J+GsWk6cldGbl20hctuUKzyx"
+                    + "OptjEPOKejV60iDCYGmHbCWAzQ8h5MILV82IclzNViZmzAapeeCnexhpXhWTs+xDEYSKEiG/camt"
+                    + "bhmZc3BcyVJrW23PktSfpBQ6D8ZxoMfF0L7V2GQMaUg+3r7ucrx82kpqotjv0xHghNIm95aBr1Qw"
+                    + "1gaEjsC/0wGmmBDg1dTDH+F1p9TInzr3EFuYD0YiQ7YlAHq3cPuyGoLXJ5dXYuSBfhDXJSeddUkl"
+                    + "k1ufZyOOcskeInQge7jzaRfmKg3U94r+spMEvb0AzDQVOKvjjo1ivxMSgFRZaDb/4qw=";
 
         private static final String PASSWORD = "android";
 
@@ -489,13 +506,13 @@ public class WebServer {
 
         public ServerThread(int port, boolean ssl) throws Exception {
             super("ServerThread");
-            mIsSsl = ssl;
+            boolean isSsl = ssl;
             // If tests are run back-to-back, it may take time for the port to become available.
             // Retry a few times with a sleep to wait for the port.
             int retry = 3;
             while (true) {
                 try {
-                    if (mIsSsl) {
+                    if (isSsl) {
                         mSslContext = SSLContext.getInstance("TLS");
                         mSslContext.init(getKeyManagers(), null, null);
                         mSocket = mSslContext.getServerSocketFactory().createServerSocket(port);

@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// https://wicg.github.io/feature-policy/#the-policy-object
+// https://w3c.github.io/webappsec-permissions-policy/#the-policy-object
 [
   Exposed=Window,
-  ImplementedAs=DOMFeaturePolicy
-] interface FeaturePolicy {
+  ImplementedAs=DOMFeaturePolicy,
+  LegacyWindowAlias=FeaturePolicy
+] interface PermissionsPolicy {
   [MeasureAs=FeaturePolicyJSAPI, CallWith=ScriptState] boolean allowsFeature(DOMString feature, optional DOMString origin);
-  [HighEntropy=Direct, MeasureAs=FeaturePolicyJSAPI, CallWith=ScriptState] sequence<DOMString> features();
+  [MeasureAs=FeaturePolicyJSAPI, CallWith=ScriptState] sequence<DOMString> features();
   [MeasureAs=FeaturePolicyJSAPI, CallWith=ScriptState] sequence<DOMString> allowedFeatures();
   [MeasureAs=FeaturePolicyJSAPI, CallWith=ScriptState] sequence<DOMString> getAllowlistForFeature(DOMString feature);
 };

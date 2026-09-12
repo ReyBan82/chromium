@@ -4,13 +4,14 @@
 
 package org.chromium.chrome.browser.profiles;
 
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.components.embedder_support.simple_factory_key.SimpleFactoryKeyHandle;
 
-/**
- * Wrapper that allows passing a ProfileKey reference around in the Java layer.
- */
+/** Wrapper that allows passing a ProfileKey reference around in the Java layer. */
+@NullMarked
 public class ProfileKey implements SimpleFactoryKeyHandle {
     /** Whether this wrapper corresponds to an off the record ProfileKey. */
     private final boolean mIsOffTheRecord;
@@ -18,21 +19,12 @@ public class ProfileKey implements SimpleFactoryKeyHandle {
     /** Pointer to the Native-side ProfileKey. */
     private long mNativeProfileKeyAndroid;
 
-    private ProfileKey(long nativeProfileKeyAndroid) {
-        mNativeProfileKeyAndroid = nativeProfileKeyAndroid;
-        mIsOffTheRecord = ProfileKeyJni.get().isOffTheRecord(mNativeProfileKeyAndroid);
-    }
+    private long mNativeSimpleFactoryKey;
 
-    /**
-     * Returns the regular (i.e., not off-the-record) profile key.
-     *
-     * Note: The function name uses the "last used" terminology for consistency with
-     * profile_manager.cc which supports multiple regular profiles.
-     */
-    public static ProfileKey getLastUsedRegularProfileKey() {
-        // TODO(mheikal): Assert at least reduced mode is started when https://crbug.com/973241 is
-        // fixed.
-        return ProfileKeyJni.get().getLastUsedRegularProfileKey();
+    private ProfileKey(long nativeProfileKeyAndroid, long nativeSimpleFactoryKey) {
+        mNativeProfileKeyAndroid = nativeProfileKeyAndroid;
+        mNativeSimpleFactoryKey = nativeSimpleFactoryKey;
+        mIsOffTheRecord = ProfileKeyJni.get().isOffTheRecord(mNativeProfileKeyAndroid);
     }
 
     /**
@@ -61,17 +53,18 @@ public class ProfileKey implements SimpleFactoryKeyHandle {
 
     @Override
     public long getNativeSimpleFactoryKeyPointer() {
-        return ProfileKeyJni.get().getSimpleFactoryKeyPointer(mNativeProfileKeyAndroid);
+        return mNativeSimpleFactoryKey;
     }
 
     @CalledByNative
-    private static ProfileKey create(long nativeProfileKeyAndroid) {
-        return new ProfileKey(nativeProfileKeyAndroid);
+    private static ProfileKey create(long nativeProfileKeyAndroid, long nativeSimpleFactoryKey) {
+        return new ProfileKey(nativeProfileKeyAndroid, nativeSimpleFactoryKey);
     }
 
     @CalledByNative
     private void onNativeDestroyed() {
         mNativeProfileKeyAndroid = 0;
+        mNativeSimpleFactoryKey = 0;
     }
 
     @CalledByNative
@@ -81,9 +74,8 @@ public class ProfileKey implements SimpleFactoryKeyHandle {
 
     @NativeMethods
     interface Natives {
-        ProfileKey getLastUsedRegularProfileKey();
         ProfileKey getOriginalKey(long nativeProfileKeyAndroid);
+
         boolean isOffTheRecord(long nativeProfileKeyAndroid);
-        long getSimpleFactoryKeyPointer(long nativeProfileKeyAndroid);
     }
 }

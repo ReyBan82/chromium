@@ -5,7 +5,11 @@
 #include "net/http/http_auth_handler_digest.h"
 
 #include <string>
+#include <string_view>
 
+#include "base/files/file_path.h"
+#include "base/path_service.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "net/base/net_errors.h"
@@ -19,6 +23,7 @@
 #include "net/test/gtest_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/fuzztest/src/fuzztest/fuzztest.h"
 #include "url/gurl.h"
 #include "url/scheme_host_port.h"
 
@@ -95,8 +100,8 @@ bool RespondToChallenge(HttpAuth::Target target,
 
 }  // namespace
 
-
 TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
+  // clang-format off
   static const struct {
     // The challenge string.
     const char* challenge;
@@ -108,7 +113,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
     const char* parsed_domain;
     const char* parsed_opaque;
     bool parsed_stale;
-    int parsed_algorithm;
+    HttpAuthHandlerDigest::Algorithm parsed_algorithm;
     int parsed_qop;
   } tests[] = {
     { // Check that a minimal challenge works correctly.
@@ -119,7 +124,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -131,7 +136,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -144,7 +149,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -156,7 +161,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -170,7 +175,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED,
     },
 
@@ -182,7 +187,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -195,7 +200,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -207,7 +212,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -220,7 +225,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -233,7 +238,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_MD5,
+      HttpAuthHandlerDigest::Algorithm::MD5,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -245,7 +250,43 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_MD5_SESS,
+      HttpAuthHandlerDigest::Algorithm::MD5_SESS,
+      HttpAuthHandlerDigest::QOP_UNSPECIFIED,
+    },
+
+    { // Check that that SHA-256 is a supported algorithm.
+      "Digest nonce=\"xyz\", algorithm=SHA-256, realm=\"Oblivion\"",
+      true,
+      "Oblivion",
+      "xyz",
+      "",
+      "",
+      false,
+      HttpAuthHandlerDigest::Algorithm::SHA256,
+      HttpAuthHandlerDigest::QOP_UNSPECIFIED
+    },
+
+    { // Check that that SHA-256-sess is a supported algorithm.
+      "Digest nonce=\"xyz\", algorithm=SHA-256-sess, realm=\"Oblivion\"",
+      true,
+      "Oblivion",
+      "xyz",
+      "",
+      "",
+      false,
+      HttpAuthHandlerDigest::Algorithm::SHA256_SESS,
+      HttpAuthHandlerDigest::QOP_UNSPECIFIED
+    },
+
+    { // Check that md5-sess is a supported algorithm.
+      "Digest nonce=\"xyz\", algorithm=\"md5-sess\", realm=\"Oblivion\"",
+      true,
+      "Oblivion",
+      "xyz",
+      "",
+      "",
+      false,
+      HttpAuthHandlerDigest::Algorithm::MD5_SESS,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED,
     },
 
@@ -257,7 +298,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_AUTH
     },
 
@@ -269,7 +310,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -281,7 +322,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_AUTH
     },
 
@@ -293,7 +334,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_AUTH
     },
 
@@ -305,7 +346,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "foobar",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -318,7 +359,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "foobar",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -331,7 +372,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "http://intranet.example.com/protection",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -344,7 +385,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "http://intranet.example.com/protection http://www.google.com",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
 
@@ -356,10 +397,11 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
       "",
       "",
       false,
-      HttpAuthHandlerDigest::ALGORITHM_UNSPECIFIED,
+      HttpAuthHandlerDigest::Algorithm::UNSPECIFIED,
       HttpAuthHandlerDigest::QOP_UNSPECIFIED
     },
   };
+  // clang-format on
 
   url::SchemeHostPort scheme_host_port(GURL("http://www.example.com"));
   auto factory = std::make_unique<HttpAuthHandlerDigest::Factory>();
@@ -396,6 +438,7 @@ TEST(HttpAuthHandlerDigestTest, ParseChallenge) {
 }
 
 TEST(HttpAuthHandlerDigestTest, AssembleCredentials) {
+  // clang-format off
   static const struct {
     const char* req_method;
     const char* req_path;
@@ -406,14 +449,14 @@ TEST(HttpAuthHandlerDigestTest, AssembleCredentials) {
     int nonce_count;
     const char* expected_creds;
   } tests[] = {
-    { // MD5 with username/password
+    { // MD5 (default) with username/password
       "GET",
       "/test/drealm1",
 
       // Challenge
       "Digest realm=\"DRealm1\", "
       "nonce=\"claGgoRXBAA=7583377687842fdb7b56ba0555d175baa0b800e3\", "
-      "algorithm=MD5, qop=\"auth\"",
+      "qop=\"auth\"",
 
       "foo", "bar", // username/password
       "082c875dcb2ca740", // cnonce
@@ -422,7 +465,7 @@ TEST(HttpAuthHandlerDigestTest, AssembleCredentials) {
       // Authorization
       "Digest username=\"foo\", realm=\"DRealm1\", "
       "nonce=\"claGgoRXBAA=7583377687842fdb7b56ba0555d175baa0b800e3\", "
-      "uri=\"/test/drealm1\", algorithm=MD5, "
+      "uri=\"/test/drealm1\", "
       "response=\"bcfaa62f1186a31ff1b474a19a17cf57\", "
       "qop=auth, nc=00000001, cnonce=\"082c875dcb2ca740\""
     },
@@ -524,8 +567,87 @@ TEST(HttpAuthHandlerDigestTest, AssembleCredentials) {
       "nonce=\"AAAAAAAA\", uri=\"/\", algorithm=MD5-sess, "
       "response=\"cbc1139821ee7192069580570c541a03\", "
       "qop=auth, nc=00000001, cnonce=\"15c07961ed8575c4\""
-    }
+    },
+
+    { // RFC MD5 (https://www.rfc-editor.org/rfc/rfc7616#section-3.9.1)
+      "GET",
+      "/dir/index.html",
+
+      // Challenge
+      "Digest realm=\"http-auth@example.org\", "
+      "qop=\"auth, auth-int\", "
+      "algorithm=MD5, "
+      "nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\","
+      "opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\"",
+
+      "Mufasa", "Circle of Life", // Username/password
+      "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ", // cnonce
+      1, // nc
+
+      // Authorization
+      "Digest username=\"Mufasa\", realm=\"http-auth@example.org\", "
+      "nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\", "
+      "uri=\"/dir/index.html\", algorithm=MD5, "
+      "response=\"8ca523f5e9506fed4657c9700eebdbec\", "
+      "opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\", "
+      "qop=auth, nc=00000001, "
+      "cnonce=\"f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ\""
+    },
+
+    { // RFC SHA-256 (https://www.rfc-editor.org/rfc/rfc7616#section-3.9.1)
+      "GET",
+      "/dir/index.html",
+
+      // Challenge
+      "Digest realm=\"http-auth@example.org\", "
+      "qop=\"auth, auth-int\", "
+      "algorithm=SHA-256, "
+      "nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\","
+      "opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\"",
+
+      "Mufasa", "Circle of Life", // Username/password
+      "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ", // cnonce
+      1, // nc
+
+      // Authorization
+      "Digest username=\"Mufasa\", realm=\"http-auth@example.org\", "
+      "nonce=\"7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v\", "
+      "uri=\"/dir/index.html\", algorithm=SHA-256, "
+      "response=\"753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1\", "
+      "opaque=\"FQhe/qaU925kfnzjCev0ciny7QMkPqMAFRtzCUYo5tdS\", "
+      "qop=auth, nc=00000001, "
+      "cnonce=\"f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ\""
+    },
+
+    { // RFC SHA-256 and userhash
+      "GET",
+      "/doe.json",
+
+      // Challenge
+      "Digest realm=\"api@example.org\", "
+      "qop=\"auth\", "
+      "algorithm=SHA-256, "
+      "nonce=\"5TsQWLVdgBdmrQ0XsxbDODV+57QdFR34I9HAbC/RVvkK\", "
+      "opaque=\"HRPCssKJSGjCrkzDg8OhwpzCiGPChXYjwrI2QmXDnsOS\", "
+      "charset=UTF-8, userhash=true",
+
+      "J\xc3\xa4s\xc3\xb8n Doe", "Secret, or not?", // Username/password
+      "NTg6RKcb9boFIAS3KrFK9BGeh+iDa/sm6jUMp2wds69v", // cnonce
+      0x123, // nc
+
+      // Authorization
+      "Digest username=\"5a1a8a47df5c298551b9b42ba9b05835174a5bd7d511ff7fe9191d8e946fc4e7\", "
+      "realm=\"api@example.org\", "
+      "nonce=\"5TsQWLVdgBdmrQ0XsxbDODV+57QdFR34I9HAbC/RVvkK\", "
+      "uri=\"/doe.json\", algorithm=SHA-256, "
+      "response=\"61baba8a218e4b207f158ed9b9b3a95ed940c1872ef3ff4522eb10110720a145\", "
+      "opaque=\"HRPCssKJSGjCrkzDg8OhwpzCiGPChXYjwrI2QmXDnsOS\", "
+      "qop=auth, nc=00000123, "
+      "cnonce=\"NTg6RKcb9boFIAS3KrFK9BGeh+iDa/sm6jUMp2wds69v\", "
+      "userhash=true"
+    },
   };
+  // clang-format on
   url::SchemeHostPort scheme_host_port(GURL("http://www.example.com"));
   auto factory = std::make_unique<HttpAuthHandlerDigest::Factory>();
   for (const auto& test : tests) {
@@ -543,8 +665,8 @@ TEST(HttpAuthHandlerDigestTest, AssembleCredentials) {
         static_cast<HttpAuthHandlerDigest*>(handler.get());
     std::string creds = digest->AssembleCredentials(
         test.req_method, test.req_path,
-        AuthCredentials(base::ASCIIToUTF16(test.username),
-                        base::ASCIIToUTF16(test.password)),
+        AuthCredentials(base::UTF8ToUTF16(test.username),
+                        base::UTF8ToUTF16(test.password)),
         test.cnonce, test.nonce_count);
 
     EXPECT_STREQ(test.expected_creds, creds.c_str());
@@ -565,27 +687,23 @@ TEST(HttpAuthHandlerDigest, HandleAnotherChallenge) {
       host_resolver.get(), &handler);
   EXPECT_THAT(rv, IsOk());
   ASSERT_TRUE(handler.get() != nullptr);
-  HttpAuthChallengeTokenizer tok_default(default_challenge.begin(),
-                                         default_challenge.end());
+  HttpAuthChallengeTokenizer tok_default(default_challenge);
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_REJECT,
             handler->HandleAnotherChallenge(&tok_default));
 
   std::string stale_challenge = default_challenge + ", stale=true";
-  HttpAuthChallengeTokenizer tok_stale(stale_challenge.begin(),
-                                       stale_challenge.end());
+  HttpAuthChallengeTokenizer tok_stale(stale_challenge);
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_STALE,
             handler->HandleAnotherChallenge(&tok_stale));
 
   std::string stale_false_challenge = default_challenge + ", stale=false";
-  HttpAuthChallengeTokenizer tok_stale_false(stale_false_challenge.begin(),
-                                             stale_false_challenge.end());
+  HttpAuthChallengeTokenizer tok_stale_false(stale_false_challenge);
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_REJECT,
             handler->HandleAnotherChallenge(&tok_stale_false));
 
   std::string realm_change_challenge =
       "Digest realm=\"SomethingElse\", nonce=\"nonce-value2\"";
-  HttpAuthChallengeTokenizer tok_realm_change(realm_change_challenge.begin(),
-                                              realm_change_challenge.end());
+  HttpAuthChallengeTokenizer tok_realm_change(realm_change_challenge);
   EXPECT_EQ(HttpAuth::AUTHORIZATION_RESULT_DIFFERENT_REALM,
             handler->HandleAnotherChallenge(&tok_realm_change));
 }
@@ -706,5 +824,43 @@ TEST(HttpAuthHandlerDigest, RespondToChallengeOpaque) {
             auth_token);
 }
 
+void DigestAuthDoesNotCrash(std::string_view challenge_suffix,
+                            std::string_view followup_suffix) {
+  std::string challenge = base::StrCat({"Digest ", challenge_suffix});
 
-} // namespace net
+  // Dummies
+  SSLInfo null_ssl_info;
+  url::SchemeHostPort scheme_host_port(GURL("https://foo.test/"));
+  auto host_resolver = std::make_unique<MockHostResolver>();
+  HttpAuthHandlerDigest::Factory factory;
+  std::unique_ptr<HttpAuthHandler> handler;
+  factory.CreateAuthHandlerFromString(challenge, HttpAuth::AUTH_SERVER,
+                                      null_ssl_info, NetworkAnonymizationKey(),
+                                      scheme_host_port, NetLogWithSource(),
+                                      host_resolver.get(), &handler);
+
+  if (!handler) {
+    return;
+  }
+
+  std::string followup = base::StrCat({"Digest ", followup_suffix});
+  HttpAuthChallengeTokenizer tokenizer(followup);
+  handler->HandleAnotherChallenge(&tokenizer);
+}
+
+std::vector<std::string> ReadDigestFuzzerDictionary() {
+  return fuzztest::ReadDictionaryFromFile(
+      base::PathService::CheckedGet(base::DIR_SRC_TEST_DATA_ROOT)
+          .AppendASCII("net/data/fuzzer_dictionaries/"
+                       "net_http_auth_handler_digest_fuzzer.dict")
+          .AsUTF8Unsafe());
+}
+
+FUZZ_TEST(HttpAuthHandlerDigestTest, DigestAuthDoesNotCrash)
+    .WithDomains(
+        // Pass the function as a pointer so the dictionary file is available
+        // for android after InitAndroidTestPaths runs.
+        fuzztest::String().WithDictionary(ReadDigestFuzzerDictionary),
+        fuzztest::String().WithDictionary(ReadDigestFuzzerDictionary));
+
+}  // namespace net

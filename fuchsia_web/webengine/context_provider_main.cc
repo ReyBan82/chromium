@@ -4,9 +4,9 @@
 
 #include "fuchsia_web/webengine/context_provider_main.h"
 
+#include <lib/inspect/component/cpp/component.h>
 #include <lib/sys/cpp/component_context.h>
 #include <lib/sys/cpp/outgoing_directory.h>
-#include <lib/sys/inspect/cpp/component.h>
 
 #include "base/command_line.h"
 #include "base/fuchsia/process_context.h"
@@ -49,11 +49,12 @@ int ContextProviderMain() {
 
   LogComponentStartWithVersion("WebEngine context_provider");
 
-  ContextProviderImpl context_provider;
-
-  // Publish the ContextProvider and Debug services.
   sys::OutgoingDirectory* const directory =
       base::ComponentContextForProcess()->outgoing().get();
+
+  ContextProviderImpl context_provider(*directory);
+
+  // Publish the ContextProvider and Debug services.
   base::ScopedServiceBinding<fuchsia::web::ContextProvider> context_binding(
       directory, &context_provider);
   base::ScopedServiceBinding<fuchsia::web::Debug> debug_hub_binding(
@@ -62,8 +63,8 @@ int ContextProviderMain() {
       directory, context_provider.debug_api());
 
   // Publish version information for this component to Inspect.
-  sys::ComponentInspector inspect(base::ComponentContextForProcess());
-  fuchsia_component_support::PublishVersionInfoToInspect(&inspect);
+  inspect::ComponentInspector inspect(async_get_default_dispatcher(), {});
+  fuchsia_component_support::PublishVersionInfoToInspect(&inspect.root());
 
   // Serve outgoing directory only after publishing all services.
   directory->ServeFromStartupInfo();

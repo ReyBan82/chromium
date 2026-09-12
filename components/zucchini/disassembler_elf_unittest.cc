@@ -7,11 +7,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <random>
 #include <string>
 #include <vector>
 
-#include "base/ranges/algorithm.h"
+#include "base/memory/raw_ptr.h"
 #include "components/zucchini/test_utils.h"
 #include "components/zucchini/type_elf.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -39,7 +40,7 @@ TEST(DisassemblerElfTest, IsTargetOffsetInElfSectionList) {
     }
     // The interface to IsTargetOffsetInElfSectionList() takes a list of
     // pointers (since data can be casted from images), so make the conversion.
-    std::vector<const FakeElfShdr*> ptr_list;
+    std::vector<raw_ptr<const FakeElfShdr>> ptr_list;
     for (const FakeElfShdr& header : sorted_list)
       ptr_list.push_back(&header);
     std::string result;
@@ -148,7 +149,7 @@ TEST(DisassemblerElfTest, QuickDetect) {
     elf::Elf32_Ehdr header = {};
     auto e_ident =
         ParseHexString("7F 45 4C 46 01 01 01 00 00 00 00 00 00 00 00 00");
-    base::ranges::copy(e_ident, header.e_ident);
+    std::ranges::copy(e_ident, header.e_ident);
     header.e_type = elf::ET_EXEC;
     header.e_machine = elf::EM_386;
     header.e_version = 1;
@@ -163,7 +164,7 @@ TEST(DisassemblerElfTest, QuickDetect) {
     elf::Elf64_Ehdr header = {};
     auto e_ident =
         ParseHexString("7F 45 4C 46 02 01 01 00 00 00 00 00 00 00 00 00");
-    base::ranges::copy(e_ident, header.e_ident);
+    std::ranges::copy(e_ident, header.e_ident);
     header.e_type = elf::ET_EXEC;
     header.e_machine = elf::EM_X86_64;
     header.e_version = 1;

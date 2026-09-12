@@ -5,25 +5,28 @@
 #ifndef MEDIA_FILTERS_MAC_AUDIO_TOOLBOX_AUDIO_DECODER_H_
 #define MEDIA_FILTERS_MAC_AUDIO_TOOLBOX_AUDIO_DECODER_H_
 
-#include <memory>
-
 #include <AudioToolbox/AudioToolbox.h>
 
+#include <memory>
+
+#include "base/apple/scoped_typeref.h"
 #include "base/memory/free_deleter.h"
 #include "media/base/audio_bus.h"
 #include "media/base/audio_decoder.h"
 #include "media/base/audio_decoder_config.h"
+#include "media/base/audio_discard_helper.h"
 #include "media/base/media_export.h"
 
 namespace media {
-class AudioBufferMemoryPool;
-class AudioDiscardHelper;
+
+class LimitingAudioQueue;
+class MediaLog;
 
 // Audio decoder based on macOS's AudioToolbox API. The AudioToolbox
 // API is required to decode codecs that aren't supported by Chromium.
 class MEDIA_EXPORT AudioToolboxAudioDecoder : public AudioDecoder {
  public:
-  AudioToolboxAudioDecoder();
+  explicit AudioToolboxAudioDecoder(std::unique_ptr<MediaLog> media_log);
 
   AudioToolboxAudioDecoder(const AudioToolboxAudioDecoder&) = delete;
   AudioToolboxAudioDecoder& operator=(const AudioToolboxAudioDecoder&) = delete;
@@ -48,31 +51,33 @@ class MEDIA_EXPORT AudioToolboxAudioDecoder : public AudioDecoder {
     static void Release(AudioConverterRef converter);
   };
   using ScopedAudioConverterRef =
-      base::ScopedTypeRef<AudioConverterRef, ScopedAudioConverterRefTraits>;
+      base::apple::ScopedTypeRef<AudioConverterRef,
+                                 ScopedAudioConverterRefTraits>;
 
-  bool CreateAACDecoder(const AudioDecoderConfig& config);
+  bool CreateDecoder(const AudioDecoderConfig& config);
+
+  void OnOutputReady(AudioDiscardHelper::TimeInfo time_info,
+                     scoped_refptr<AudioBuffer> output_buffer);
+
+  std::unique_ptr<MediaLog> media_log_;
 
   // "Converter" for turning encoded samples into raw audio.
   ScopedAudioConverterRef decoder_;
-
-  // Actual channel count and layout from decoder, may be different than config.
-  uint32_t channel_count_ = 0u;
-  ChannelLayout channel_layout_ = CHANNEL_LAYOUT_UNSUPPORTED;
-
-  // Actual sample rate from the decoder, may be different than config.
-  uint32_t sample_rate_ = 0u;
 
   // Callback that delivers output frames.
   OutputCB output_cb_;
 
   std::unique_ptr<AudioDiscardHelper> discard_helper_;
 
-  // Pool which helps avoid thrashing memory when returning audio buffers.
-  scoped_refptr<AudioBufferMemoryPool> pool_;
+  std::unique_ptr<LimitingAudioQueue> limiter_queue_;
 
   // Staging structures for receiving decoded data.
   std::unique_ptr<AudioBus> output_bus_;
   std::unique_ptr<AudioBufferList, base::FreeDeleter> output_buffer_list_;
+
+  // Keeps track of the last input timestamp to use for output generated during
+  // flush (EOS).
+  base::TimeDelta last_input_timestamp_ = kNoTimestamp;
 };
 
 }  // namespace media

@@ -13,7 +13,11 @@
 #include "base/synchronization/lock.h"
 #include "base/task/task_runner.h"
 #include "base/time/time.h"
-#include "content/browser/metrics/histogram_subscriber.h"
+#include "components/metrics/histogram_subscriber.h"
+
+namespace metrics {
+class MetricsNameMapper;
+}
 
 namespace content {
 
@@ -47,7 +51,7 @@ namespace content {
 // outstanding sequence number, the pickled data is accepted into the browser,
 // but there is no impact on the counters.
 
-class HistogramSynchronizer : public HistogramSubscriber {
+class HistogramSynchronizer : public metrics::HistogramSubscriber {
  public:
   enum ProcessHistogramRequester {
     UNKNOWN,
@@ -104,6 +108,7 @@ class HistogramSynchronizer : public HistogramSubscriber {
   // number. This method is accessible on UI thread.
   void OnHistogramDataCollected(
       int sequence_number,
+      bool is_webium_renderer,
       const std::vector<std::string>& pickled_histograms) override;
 
   // Set the |callback_task_runner_| and |callback_| members. If these members
@@ -145,6 +150,8 @@ class HistogramSynchronizer : public HistogramSubscriber {
   // The sequence number used by the most recent asynchronous update request to
   // contact all processes.
   int async_sequence_number_ GUARDED_BY(lock_);
+
+  std::unique_ptr<metrics::MetricsNameMapper> webium_metrics_name_mapper_;
 };
 
 }  // namespace content

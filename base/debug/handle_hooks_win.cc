@@ -9,6 +9,8 @@
 #include <psapi.h>
 #include <stddef.h>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
 #include "base/numerics/safe_conversions.h"
@@ -54,8 +56,7 @@ BOOL WINAPI DuplicateHandleHook(HANDLE source_process,
 
 }  // namespace
 
-namespace base {
-namespace debug {
+namespace base::debug {
 
 namespace {
 
@@ -89,16 +90,18 @@ bool AutoProtectMemory::ChangeProtection(void* address, size_t bytes) {
 
   // Change the page protection so that we can write.
   MEMORY_BASIC_INFORMATION memory_info;
-  if (!VirtualQuery(address, &memory_info, sizeof(memory_info)))
+  if (!VirtualQuery(address, &memory_info, sizeof(memory_info))) {
     return false;
+  }
 
   DWORD is_executable = (PAGE_EXECUTE | PAGE_EXECUTE_READ |
                          PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY) &
                         memory_info.Protect;
 
   DWORD protect = is_executable ? PAGE_EXECUTE_READWRITE : PAGE_READWRITE;
-  if (!VirtualProtect(address, bytes, protect, &old_protect_))
+  if (!VirtualProtect(address, bytes, protect, &old_protect_)) {
     return false;
+  }
 
   changed_ = true;
   address_ = address;
@@ -107,8 +110,9 @@ bool AutoProtectMemory::ChangeProtection(void* address, size_t bytes) {
 }
 
 void AutoProtectMemory::RevertProtection() {
-  if (!changed_)
+  if (!changed_) {
     return;
+  }
 
   DCHECK(address_);
   DCHECK(bytes_);
@@ -126,23 +130,28 @@ void EATPatch(HMODULE module,
               const char* function_name,
               void* new_function,
               void** old_function) {
-  if (!module)
+  if (!module) {
     return;
+  }
 
   base::win::PEImage pe(module);
-  if (!pe.VerifyMagic())
+  if (!pe.VerifyMagic()) {
     return;
+  }
 
   DWORD* eat_entry = pe.GetExportEntry(function_name);
-  if (!eat_entry)
+  if (!eat_entry) {
     return;
+  }
 
-  if (!(*old_function))
+  if (!(*old_function)) {
     *old_function = pe.RVAToAddr(*eat_entry);
+  }
 
   AutoProtectMemory memory;
-  if (!memory.ChangeProtection(eat_entry, sizeof(DWORD)))
+  if (!memory.ChangeProtection(eat_entry, sizeof(DWORD))) {
     return;
+  }
 
   // Perform the patch.
   *eat_entry =
@@ -151,20 +160,17 @@ void EATPatch(HMODULE module,
 }
 #endif  // defined(ARCH_CPU_32_BITS)
 
-// Performs an IAT interception.
-std::unique_ptr<base::win::IATPatchFunction> IATPatch(HMODULE module,
-                                                      const char* function_name,
-                                                      void* new_function,
-                                                      void** old_function) {
-  if (!module)
-    return nullptr;
-
-  auto patch = std::make_unique<base::win::IATPatchFunction>();
+// Implementation function because a function with __try cannot have object
+// unwinding: https://crbug.com/481661206.
+void IATPatchImpl(HMODULE module,
+                  const char* function_name,
+                  void* new_function,
+                  std::unique_ptr<base::win::IATPatchFunction>& patch) {
   __try {
     // There is no guarantee that |module| is still loaded at this point.
     if (patch->PatchFromModule(module, "kernel32.dll", function_name,
                                new_function)) {
-      return nullptr;
+      patch.reset();
     }
   } __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
                GetExceptionCode() == EXCEPTION_GUARD_PAGE ||
@@ -173,6 +179,21 @@ std::unique_ptr<base::win::IATPatchFunction> IATPatch(HMODULE module,
                   : EXCEPTION_CONTINUE_SEARCH) {
     // Leak the patch.
     std::ignore = patch.release();
+  }
+}
+
+// Performs an IAT interception.
+std::unique_ptr<base::win::IATPatchFunction> IATPatch(HMODULE module,
+                                                      const char* function_name,
+                                                      void* new_function,
+                                                      void** old_function) {
+  if (!module) {
+    return nullptr;
+  }
+
+  auto patch = std::make_unique<base::win::IATPatchFunction>();
+  IATPatchImpl(module, function_name, new_function, patch);
+  if (!patch) {
     return nullptr;
   }
 
@@ -188,22 +209,25 @@ std::unique_ptr<base::win::IATPatchFunction> IATPatch(HMODULE module,
 
 // static
 void HandleHooks::AddIATPatch(HMODULE module) {
-  if (!module)
+  if (!module) {
     return;
+  }
 
   auto close_handle_patch =
       IATPatch(module, "CloseHandle", reinterpret_cast<void*>(&CloseHandleHook),
                reinterpret_cast<void**>(&g_close_function));
-  if (!close_handle_patch)
+  if (!close_handle_patch) {
     return;
+  }
   // This is intentionally leaked.
   std::ignore = close_handle_patch.release();
 
   auto duplicate_handle_patch = IATPatch(
       module, "DuplicateHandle", reinterpret_cast<void*>(&DuplicateHandleHook),
       reinterpret_cast<void**>(&g_duplicate_function));
-  if (!duplicate_handle_patch)
+  if (!duplicate_handle_patch) {
     return;
+  }
   // This is intentionally leaked.
   std::ignore = duplicate_handle_patch.release();
 }
@@ -230,13 +254,14 @@ void HandleHooks::PatchLoadedModules() {
                             kSize * sizeof(HMODULE), &returned)) {
     return;
   }
-  returned /= sizeof(HMODULE);
-  returned = std::min(kSize, returned);
-
-  for (DWORD current = 0; current < returned; current++) {
-    AddIATPatch(modules[current]);
+  const size_t modules_count =
+      std::min<size_t>(kSize, returned / sizeof(HMODULE));
+  // SAFETY: Trust that ::EnumProcessModules returns the number of bytes it said
+  // it did, and that `modules_count` is calculated correctly.
+  auto modules_span = UNSAFE_BUFFERS(base::span(modules.get(), modules_count));
+  for (DWORD current = 0; current < modules_count; current++) {
+    AddIATPatch(modules_span[current]);
   }
 }
 
-}  // namespace debug
-}  // namespace base
+}  // namespace base::debug

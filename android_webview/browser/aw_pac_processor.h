@@ -7,7 +7,12 @@
 
 #include <android/multinetwork.h>
 
+#include <optional>
+#include <string>
+#include <vector>
+
 #include "base/android/scoped_java_ref.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/threading/thread.h"
 #include "net/log/net_log_with_source.h"
@@ -26,22 +31,14 @@ class AwPacProcessor {
   AwPacProcessor& operator=(const AwPacProcessor&) = delete;
 
   ~AwPacProcessor();
-  void DestroyNative(JNIEnv* env,
-                     const base::android::JavaParamRef<jobject>& obj);
+  void DestroyNative();
 
-  jboolean SetProxyScript(JNIEnv* env,
-                          const base::android::JavaParamRef<jobject>& obj,
-                          const base::android::JavaParamRef<jstring>& jscript);
-  bool SetProxyScript(std::string script);
-  base::android::ScopedJavaLocalRef<jstring> MakeProxyRequest(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jstring>& jurl);
+  bool SetProxyScript(const std::string& script);
+  std::optional<std::string> MakeProxyRequest(const std::string& url);
   bool MakeProxyRequest(std::string url, std::string* result);
   void SetNetworkAndLinkAddresses(
-      JNIEnv* env,
       net_handle_t net_handle,
-      const base::android::JavaParamRef<jobjectArray>& addresses);
+      const std::vector<std::string>& string_link_addresses);
 
  private:
   void Destroy(base::WaitableEvent* event);
@@ -62,7 +59,7 @@ class AwPacProcessor {
   std::unique_ptr<proxy_resolver::ProxyResolverV8Tracing> proxy_resolver_;
   std::unique_ptr<HostResolver> host_resolver_;
 
-  std::set<Job*> jobs_;
+  std::set<raw_ptr<Job, SetExperimental>> jobs_;
 };
 }  // namespace android_webview
 

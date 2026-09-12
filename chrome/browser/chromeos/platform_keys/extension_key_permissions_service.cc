@@ -7,6 +7,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,26 +17,16 @@
 #include "base/functional/callback.h"
 #include "base/logging.h"
 #include "base/values.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/ash/platform_keys/key_permissions/key_permissions_service_impl.h"
-#include "chrome/browser/chromeos/platform_keys/platform_keys.h"
-#include "chromeos/crosapi/mojom/keystore_service.mojom.h"
+#include "chrome/browser/ash/platform_keys/keystore_service.h"
+#include "chrome/browser/ash/platform_keys/keystore_service_factory.h"
+#include "chromeos/ash/components/platform_keys/keystore_types.h"
+#include "chromeos/ash/components/platform_keys/platform_keys.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/core/common/policy_namespace.h"
 #include "components/policy/core/common/policy_service.h"
 #include "components/policy/policy_constants.h"
 #include "extensions/browser/state_store.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#include "chrome/browser/profiles/profile.h"
-#include "chromeos/lacros/lacros_service.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ash/crosapi/keystore_service_ash.h"
-#include "chrome/browser/ash/crosapi/keystore_service_factory_ash.h"
-#endif  // #if BUILDFLAG(IS_CHROMEOS_ASH)
 
 namespace chromeos::platform_keys {
 
@@ -46,14 +37,15 @@ const char kStateStoreSignUnlimited[] = "signUnlimited";
 
 const char kPolicyAllowCorporateKeyUsage[] = "allowCorporateKeyUsage";
 
-bool ContainsTag(uint64_t tags, crosapi::mojom::KeyTag value) {
+bool ContainsTag(uint64_t tags, chromeos::KeyTag value) {
   return tags & static_cast<uint64_t>(value);
 }
 
-const base::Value::Dict* GetKeyPermissionsMap(
+const base::DictValue* GetKeyPermissionsMap(
     policy::PolicyService* const profile_policies) {
-  if (!profile_policies)
+  if (!profile_policies) {
     return nullptr;
+  }
 
   const policy::PolicyMap& policies = profile_policies->GetPolicies(
       policy::PolicyNamespace(policy::POLICY_DOMAIN_CHROME, std::string()));
@@ -67,14 +59,16 @@ const base::Value::Dict* GetKeyPermissionsMap(
 }
 
 bool GetCorporateKeyUsageFromPref(
-    const base::Value::Dict* key_permissions_for_ext) {
-  if (!key_permissions_for_ext)
+    const base::DictValue* key_permissions_for_ext) {
+  if (!key_permissions_for_ext) {
     return false;
+  }
 
   const base::Value* allow_corporate_key_usage =
       key_permissions_for_ext->Find(kPolicyAllowCorporateKeyUsage);
-  if (!allow_corporate_key_usage || !allow_corporate_key_usage->is_bool())
+  if (!allow_corporate_key_usage || !allow_corporate_key_usage->is_bool()) {
     return false;
+  }
   return allow_corporate_key_usage->GetBool();
 }
 
@@ -83,18 +77,21 @@ bool GetCorporateKeyUsageFromPref(
 bool PolicyAllowsCorporateKeyUsageForExtension(
     const std::string& extension_id,
     policy::PolicyService* const profile_policies) {
-  if (!profile_policies)
+  if (!profile_policies) {
     return false;
+  }
 
-  const base::Value::Dict* key_permissions_map =
+  const base::DictValue* key_permissions_map =
       GetKeyPermissionsMap(profile_policies);
-  if (!key_permissions_map)
+  if (!key_permissions_map) {
     return false;
+  }
 
-  const base::Value::Dict* key_permissions_for_ext =
+  const base::DictValue* key_permissions_for_ext =
       key_permissions_map->FindDict(extension_id);
-  if (!key_permissions_for_ext)
+  if (!key_permissions_for_ext) {
     return false;
+  }
 
   bool allow_corporate_key_usage =
       GetCorporateKeyUsageFromPref(key_permissions_for_ext);
@@ -108,35 +105,21 @@ bool PolicyAllowsCorporateKeyUsageForExtension(
 //
 // KeystoreService is expected to always outlive ExtensionKeyPermissionsService
 // because ExtensionKeyPermissionsService instances are owned by
-// ExtensionPlatformKeysService and:
-//
-// For Lacros-Chrome it returns a remote mojo implementation owned by
-// LacrosService (that is created before the start of the main loop and should
-// outlive ExtensionPlatformKeysService).
-//
-// For Ash-Chrome the factory can return:
-// * an instance owned by CrosapiManager (that is created before profiles and
-// should outlive ExtensionPlatformKeysService)
-// * or an appropriate keyed service that will always exist
-// during ExtensionPlatformKeysService lifetime (because of KeyedService
-// dependencies).
-crosapi::mojom::KeystoreService* GetKeystoreService(
+// ExtensionPlatformKeysService and the factory returns an appropriate keyed
+// service that will always exist during ExtensionPlatformKeysService lifetime
+// (because of KeyedService dependencies).
+ash::KeystoreService* GetKeystoreService(
     content::BrowserContext* browser_context) {
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  // TODO(b/191958380): Lift the restriction when *.platformKeys.* APIs are
-  // implemented for secondary profiles in Lacros.
-  CHECK(Profile::FromBrowserContext(browser_context)->IsMainProfile())
-      << "Attempted to use an incorrect profile. Please file a bug at "
-         "https://bugs.chromium.org/ if this happens.";
-  return chromeos::LacrosService::Get()
-      ->GetRemote<crosapi::mojom::KeystoreService>()
-      .get();
-#endif  // #if BUILDFLAG(IS_CHROMEOS_LACROS)
+  return ash::KeystoreServiceFactory::GetForBrowserContext(browser_context);
+}
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-  return crosapi::KeystoreServiceFactoryAsh::GetForBrowserContext(
-      browser_context);
-#endif  // #if BUILDFLAG(IS_CHROMEOS_LACROS)
+// Returns whether `app_id` looks like it's probably an Android package name
+// rather than a Chrome extension ID or web app ID.
+bool LooksLikeAndroidPackageName(const std::string& app_id) {
+  // Android package names are required to contain at least one period (see
+  // validateName() in PackageParser.java), while Chrome extension IDs and web
+  // app IDs contain only characters in [a-p].
+  return app_id.contains('.');
 }
 
 }  // namespace
@@ -144,7 +127,7 @@ crosapi::mojom::KeystoreService* GetKeystoreService(
 ExtensionKeyPermissionsService::ExtensionKeyPermissionsService(
     const std::string& extension_id,
     extensions::StateStore* extensions_state_store,
-    base::Value::List state_store_value,
+    base::ListValue state_store_value,
     policy::PolicyService* profile_policies,
     content::BrowserContext* browser_context)
     : extension_id_(extension_id),
@@ -165,65 +148,74 @@ ExtensionKeyPermissionsService::GetStateStoreEntry(
   for (KeyEntry& entry : state_store_entries_) {
     // For every ASN.1 value there is exactly one DER encoding, so it is fine to
     // compare the DER (or its base64 encoding).
-    if (entry.spki_b64 == public_key_spki_der_b64)
+    if (entry.spki_b64 == public_key_spki_der_b64) {
       return &entry;
+    }
   }
 
   state_store_entries_.emplace_back(public_key_spki_der_b64);
   return &state_store_entries_.back();
 }
 
-void ExtensionKeyPermissionsService::CanUseKeyForSigning(
+void ExtensionKeyPermissionsService::CanUseKey(
     const std::vector<uint8_t>& public_key_spki_der,
-    CanUseKeyForSigningCallback callback) {
+    bool is_sign_operation,
+    ExtensionKeyPermissionQueryCallback callback) {
   KeyEntry* matching_entry =
       GetStateStoreEntry(base::Base64Encode(public_key_spki_der));
 
   // In any case, we allow the generating extension to use the generated key a
-  // single time for signing arbitrary data. The reason is, that the extension
+  // single time for signing arbitrary data. The reason is that the extension
   // usually has to sign a certification request containing the public key in
   // order to obtain a certificate for the key.
   // That means, once a certificate authority generated a certificate for the
   // key, the generating extension doesn't have access to the key anymore,
   // except if explicitly permitted by the administrator.
-  if (matching_entry->sign_once) {
+  // Note: Semantically, `sign_once` can only be set for asymmetric keys used to
+  // sign data. Any other key type should have that corresponding field unset
+  // (which defaults to false).
+  if (is_sign_operation && matching_entry->sign_once) {
     std::move(callback).Run(/*allowed=*/true);
     return;
   }
 
-  auto bound_callback = base::BindOnce(
-      &ExtensionKeyPermissionsService::CanUseKeyForSigningWithFlags,
-      weak_factory_.GetWeakPtr(), std::move(callback),
-      matching_entry->sign_unlimited);
+  auto bound_callback =
+      base::BindOnce(&ExtensionKeyPermissionsService::CanUseKeyWithFlags,
+                     weak_factory_.GetWeakPtr(), std::move(callback),
+                     is_sign_operation, matching_entry->sign_unlimited);
   keystore_service_->GetKeyTags(public_key_spki_der, std::move(bound_callback));
 }
 
-void ExtensionKeyPermissionsService::CanUseKeyForSigningWithFlags(
-    CanUseKeyForSigningCallback callback,
+void ExtensionKeyPermissionsService::CanUseKeyWithFlags(
+    ExtensionKeyPermissionQueryCallback callback,
+    bool is_sign_operation,
     bool sign_unlimited_allowed,
-    crosapi::mojom::GetKeyTagsResultPtr key_tags) {
-  if (key_tags->is_error()) {
+    chromeos::GetKeyTagsResult key_tags) {
+  if (!key_tags.has_value()) {
     LOG(ERROR) << "Failed to check if the key is corporate: "
-               << KeystoreErrorToString(key_tags->get_error());
+               << KeystoreErrorToString(key_tags.error());
     std::move(callback).Run(/*allowed=*/false);
     return;
   }
 
   // Usage of corporate keys is solely determined by policy. The user must not
   // circumvent this decision.
-  if (ContainsTag(key_tags->get_tags(), crosapi::mojom::KeyTag::kCorporate)) {
+  if (ContainsTag(*key_tags, chromeos::KeyTag::kCorporate)) {
     std::move(callback).Run(/*allowed=*/PolicyAllowsCorporateKeyUsage());
     return;
   }
 
-  // Only permissions for keys that are not designated for corporate usage are
-  // determined by user decisions.
-  std::move(callback).Run(sign_unlimited_allowed);
+  // Only signing permissions for keys that are not designated for corporate
+  // usage are determined by user decisions.
+  // Note: Similarly to `sign_once`, `sign_unlimited` can only be set for
+  // asymmetric keys used to sign data. Any other key type should have that
+  // corresponding field unset (which defaults to false).
+  std::move(callback).Run(is_sign_operation && sign_unlimited_allowed);
 }
 
 void ExtensionKeyPermissionsService::SetKeyUsedForSigning(
     const std::vector<uint8_t>& public_key_spki_der,
-    SetKeyUsedForSigningCallback callback) {
+    ExtensionKeyPermissionOperationCallback callback) {
   KeyEntry* matching_entry =
       GetStateStoreEntry(base::Base64Encode(public_key_spki_der));
   matching_entry->sign_once = false;
@@ -231,51 +223,45 @@ void ExtensionKeyPermissionsService::SetKeyUsedForSigning(
 
   // Return success.
   std::move(callback).Run(/*is_error=*/false,
-                          /*error=*/crosapi::mojom::KeystoreError::kUnknown);
+                          /*error=*/chromeos::KeystoreError::kUnknown);
 }
 
 void ExtensionKeyPermissionsService::RegisterKeyForCorporateUsage(
     const std::vector<uint8_t>& public_key_spki_der,
-    RegisterKeyForCorporateUsageCallback callback) {
-  KeyEntry* matching_entry =
-      GetStateStoreEntry(base::Base64Encode(public_key_spki_der));
-
-  if (matching_entry->sign_once) {
-    VLOG(1) << "Key is already allowed for signing, skipping.";
-    // Return success.
-    std::move(callback).Run(/*is_error=*/false,
-                            /*error=*/crosapi::mojom::KeystoreError::kUnknown);
-    return;
-  }
-
-  matching_entry->sign_once = true;
-  WriteToStateStore();
-
+    ExtensionKeyPermissionOperationCallback callback) {
   keystore_service_->AddKeyTags(
-      public_key_spki_der,
-      static_cast<uint64_t>(crosapi::mojom::KeyTag::kCorporate),
+      public_key_spki_der, static_cast<uint64_t>(chromeos::KeyTag::kCorporate),
       std::move(callback));
 }
 
-void ExtensionKeyPermissionsService::SetUserGrantedPermission(
-    const std::vector<uint8_t>& public_key_spki_der,
-    SetUserGrantedPermissionCallback callback) {
-  keystore_service_->CanUserGrantPermissionForKey(
-      public_key_spki_der,
-      base::BindOnce(
-          &ExtensionKeyPermissionsService::SetUserGrantedPermissionWithFlag,
-          weak_factory_.GetWeakPtr(), public_key_spki_der,
-          std::move(callback)));
+void ExtensionKeyPermissionsService::RegisterOneTimeSigningPermissionForKey(
+    const std::vector<uint8_t>& public_key_spki_der) {
+  KeyEntry* matching_entry =
+      GetStateStoreEntry(base::Base64Encode(public_key_spki_der));
+
+  matching_entry->sign_once = true;
+  WriteToStateStore();
 }
 
-void ExtensionKeyPermissionsService::SetUserGrantedPermissionWithFlag(
+void ExtensionKeyPermissionsService::SetUserGrantedSigningPermission(
     const std::vector<uint8_t>& public_key_spki_der,
-    SetUserGrantedPermissionCallback callback,
+    ExtensionKeyPermissionOperationCallback callback) {
+  keystore_service_->CanUserGrantPermissionForKey(
+      public_key_spki_der,
+      base::BindOnce(&ExtensionKeyPermissionsService::
+                         SetUserGrantedSigningPermissionWithFlag,
+                     weak_factory_.GetWeakPtr(), public_key_spki_der,
+                     std::move(callback)));
+}
+
+void ExtensionKeyPermissionsService::SetUserGrantedSigningPermissionWithFlag(
+    const std::vector<uint8_t>& public_key_spki_der,
+    ExtensionKeyPermissionOperationCallback callback,
     bool can_user_grant_permission) {
   if (!can_user_grant_permission) {
     std::move(callback).Run(
         /*is_error=*/true,
-        crosapi::mojom::KeystoreError::kGrantKeyPermissionForExtension);
+        chromeos::KeystoreError::kGrantKeyPermissionForExtension);
     return;
   }
 
@@ -286,7 +272,7 @@ void ExtensionKeyPermissionsService::SetUserGrantedPermissionWithFlag(
     VLOG(1) << "Key is already allowed for signing, skipping.";
     // Return success.
     std::move(callback).Run(/*is_error=*/false,
-                            /*error=*/crosapi::mojom::KeystoreError::kUnknown);
+                            /*error=*/chromeos::KeystoreError::kUnknown);
     return;
   }
 
@@ -294,7 +280,7 @@ void ExtensionKeyPermissionsService::SetUserGrantedPermissionWithFlag(
   WriteToStateStore();
   // Return success.
   std::move(callback).Run(/*is_error=*/false,
-                          /*error=*/crosapi::mojom::KeystoreError::kUnknown);
+                          /*error=*/chromeos::KeystoreError::kUnknown);
 }
 
 bool ExtensionKeyPermissionsService::PolicyAllowsCorporateKeyUsage() const {
@@ -308,7 +294,7 @@ void ExtensionKeyPermissionsService::WriteToStateStore() {
 }
 
 void ExtensionKeyPermissionsService::KeyEntriesFromState(
-    const base::Value::List& state) {
+    const base::ListValue& state) {
   state_store_entries_.clear();
 
   for (const auto& entry : state) {
@@ -321,10 +307,11 @@ void ExtensionKeyPermissionsService::KeyEntriesFromState(
       new_entry.sign_once = true;
       state_store_entries_.push_back(new_entry);
     } else if (entry.is_dict()) {
-      const base::Value::Dict& dict_entry = entry.GetDict();
+      const base::DictValue& dict_entry = entry.GetDict();
       const std::string* spki_b64_str = dict_entry.FindString(kStateStoreSPKI);
-      if (spki_b64_str)
+      if (spki_b64_str) {
         spki_b64 = *spki_b64_str;
+      }
       KeyEntry new_entry(spki_b64);
       new_entry.sign_once = dict_entry.FindBool(kStateStoreSignOnce)
                                 .value_or(new_entry.sign_once);
@@ -339,14 +326,15 @@ void ExtensionKeyPermissionsService::KeyEntriesFromState(
   }
 }
 
-base::Value::List ExtensionKeyPermissionsService::KeyEntriesToState() {
-  base::Value::List new_state;
+base::ListValue ExtensionKeyPermissionsService::KeyEntriesToState() {
+  base::ListValue new_state;
   for (const KeyEntry& entry : state_store_entries_) {
     // Drop entries that the extension doesn't have any permissions for anymore.
-    if (!entry.sign_once && !entry.sign_unlimited)
+    if (!entry.sign_once && !entry.sign_unlimited) {
       continue;
+    }
 
-    base::Value::Dict new_entry;
+    base::DictValue new_entry;
     new_entry.Set(kStateStoreSPKI, entry.spki_b64);
     // Omit writing default values, namely |false|.
     if (entry.sign_once) {
@@ -362,24 +350,29 @@ base::Value::List ExtensionKeyPermissionsService::KeyEntriesToState() {
 
 // static
 std::vector<std::string>
-ExtensionKeyPermissionsService::GetCorporateKeyUsageAllowedAppIds(
+ExtensionKeyPermissionsService::GetCorporateKeyUsageAllowedAndroidAppIds(
     policy::PolicyService* const profile_policies) {
   std::vector<std::string> permissions;
 
-  const base::Value::Dict* key_permissions_service_map =
+  const base::DictValue* key_permissions_service_map =
       GetKeyPermissionsMap(profile_policies);
-  if (!key_permissions_service_map)
+  if (!key_permissions_service_map) {
     return permissions;
+  }
 
   for (const auto item : *key_permissions_service_map) {
-    const auto& app_id = item.first;
-    const base::Value::Dict* key_permissions_service_for_app =
+    const std::string& app_id = item.first;
+    if (!LooksLikeAndroidPackageName(app_id)) {
+      continue;
+    }
+    const base::DictValue* key_permissions_service_for_app =
         item.second.GetIfDict();
     if (!key_permissions_service_for_app) {
       continue;
     }
-    if (GetCorporateKeyUsageFromPref(key_permissions_service_for_app))
+    if (GetCorporateKeyUsageFromPref(key_permissions_service_for_app)) {
       permissions.push_back(app_id);
+    }
   }
   return permissions;
 }

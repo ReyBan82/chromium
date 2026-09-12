@@ -7,6 +7,7 @@
 
 #include <map>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/files/file_path.h"
@@ -21,22 +22,17 @@ using ServerCache = std::map<std::string, std::string>;
 // Splits raw HTTP request text into a pair, where the first element represent
 // the head with headers and the second element represents the body that
 // contains the data payload.
-std::pair<std::string, std::string> SplitHTTP(const std::string& http_text);
+std::pair<std::string, std::string> SplitHTTP(std::string_view http_text);
 
 // Streams in text format. For consistency, taken from anonymous namespace in
-// components/autofill/core/browser/autofill_download_manager.cc
+// components/autofill/core/browser/crowdsourcing/autofill_crowdsourcing_manager.cc
 std::ostream& operator<<(std::ostream& out,
-                         const autofill::AutofillQueryContents& query);
-std::ostream& operator<<(std::ostream& out,
-                         const autofill::AutofillPageQueryRequest& query);
+                         const AutofillPageQueryRequest& query);
 
 // Streams in text format. For consistency, taken from anonymous namespace in
 // components/autofill/core/browser/form_structure.cc
-std::ostream& operator<<(
-    std::ostream& out,
-    const autofill::AutofillQueryResponseContents& response);
 std::ostream& operator<<(std::ostream& out,
-                         const autofill::AutofillQueryResponse& response);
+                         const AutofillQueryResponse& response);
 enum class RequestType {
   kQueryProtoGET,
   kQueryProtoPOST,
@@ -54,7 +50,7 @@ bool GetResponseForQuery(const ServerCache& cache,
 // using the cached responses from the wpr archive. The valid values match the
 // enum AutofillServerBehaviorType below. Options are:
 // SavedCache, ProductionServer, or OnlyLocalHeuristics.
-constexpr char kAutofillServerBehaviorParam[] = "autofill-server-type";
+inline constexpr char kAutofillServerBehaviorParam[] = "autofill-server-type";
 enum class AutofillServerBehaviorType {
   kSavedCache,          // Uses cached responses. This is the Default.
   kProductionServer,    // Connects to live Autofill Server for recommendations.

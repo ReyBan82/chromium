@@ -4,6 +4,8 @@
 
 #include "chrome/common/apps/platform_apps/chrome_apps_api_provider.h"
 
+#include <string_view>
+
 #include "chrome/common/apps/platform_apps/api/api_features.h"
 #include "chrome/common/apps/platform_apps/api/generated_schemas.h"
 #include "chrome/common/apps/platform_apps/api/permission_features.h"
@@ -47,7 +49,7 @@ bool ChromeAppsAPIProvider::IsAPISchemaGenerated(const std::string& name) {
   return api::ChromeAppsGeneratedSchemas::IsGenerated(name);
 }
 
-base::StringPiece ChromeAppsAPIProvider::GetAPISchema(const std::string& name) {
+std::string_view ChromeAppsAPIProvider::GetAPISchema(const std::string& name) {
   return api::ChromeAppsGeneratedSchemas::Get(name);
 }
 
@@ -58,7 +60,8 @@ void ChromeAppsAPIProvider::RegisterPermissions(
       base::span<const extensions::Alias>());
 }
 
-void ChromeAppsAPIProvider::RegisterManifestHandlers() {
+void ChromeAppsAPIProvider::RegisterManifestHandlers(
+    extensions::ManifestHandlerRegistry* registry) {
   // No apps-specific manifest handlers (yet).
 }
 

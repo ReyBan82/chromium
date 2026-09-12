@@ -6,6 +6,14 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <string>
+
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/strings/string_number_conversions.h"
+
 namespace {
 
 // Returns true if the given two ASCII characters are same (ignoring case).
@@ -30,16 +38,19 @@ bool HexEncode(const void* bytes, size_t size, wchar_t* str, size_t str_size) {
     return false;
   }
 
-  static const wchar_t kHexChars[] = L"0123456789ABCDEF";
-
-  str[size * 2] = L'\0';
-
-  for (size_t i = 0; i < size; ++i) {
-    char b = reinterpret_cast<const char*>(bytes)[i];
-    str[(i * 2)] = kHexChars[(b >> 4) & 0xf];
-    str[(i * 2) + 1] = kHexChars[b & 0xf];
-  }
-
+  // SAFETY: The caller guarantees `bytes` points to at least `size` bytes.
+  // TODO(crbug.com/40284755): Change this helper to take a
+  // `base::span<const uint8_t>` and migrate callers so this `UNSAFE_BUFFERS`
+  // construction can be removed.
+  // We need to pass the data to `base::HexEncode()`, which now takes a span.
+  // Since we only have a raw pointer + explicit length here, we must construct
+  // a view from them; this is safe because `bytes_ptr` is treated as a byte
+  // pointer and we only read up to `size` bytes.
+  const uint8_t* const bytes_ptr = reinterpret_cast<const uint8_t*>(bytes);
+  const auto bytes_span = UNSAFE_BUFFERS(base::span(bytes_ptr, size));
+  const std::string hex = base::HexEncode(bytes_span);
+  std::ranges::copy(hex, str);
+  UNSAFE_TODO(str[size * 2]) = L'\0';
   return true;
 }
 
@@ -48,7 +59,7 @@ size_t SafeStrLen(const wchar_t* str, size_t alloc_size) {
     return 0;
   }
   size_t len = 0;
-  while (--alloc_size && str[len] != L'\0') {
+  while (--alloc_size && UNSAFE_TODO(str[len]) != L'\0') {
     ++len;
   }
   return len;
@@ -61,7 +72,7 @@ bool SafeStrCopy(wchar_t* dest, size_t dest_size, const wchar_t* src) {
 
   wchar_t* write = dest;
   for (size_t remaining = dest_size; remaining != 0; --remaining) {
-    if ((*write++ = *src++) == L'\0') {
+    if ((*UNSAFE_TODO(write++) = *UNSAFE_TODO(src++)) == L'\0') {
       return true;
     }
   }
@@ -74,7 +85,7 @@ bool SafeStrCopy(wchar_t* dest, size_t dest_size, const wchar_t* src) {
   // want to mutate the string in case the caller handles the error of a
   // failed concatenation.  For example:
   //
-  // wchar_t buf[5] = {0};
+  // wchar_t buf[5] = {};
   // if (!SafeStrCat(buf, _countof(buf), kLongName))
   //   SafeStrCat(buf, _countof(buf), kShortName);
   //
@@ -89,7 +100,7 @@ bool SafeStrCat(wchar_t* dest, size_t dest_size, const wchar_t* src) {
   // Use SafeStrLen instead of lstrlen just in case the |dest| buffer isn't
   // terminated.
   size_t str_len = SafeStrLen(dest, dest_size);
-  return SafeStrCopy(dest + str_len, dest_size - str_len, src);
+  return SafeStrCopy(UNSAFE_TODO(dest + str_len), dest_size - str_len, src);
 }
 
 bool StrStartsWith(const wchar_t* str, const wchar_t* start_str) {
@@ -97,8 +108,8 @@ bool StrStartsWith(const wchar_t* str, const wchar_t* start_str) {
     return false;
   }
 
-  for (int i = 0; start_str[i] != L'\0'; ++i) {
-    if (!EqualASCIICharI(str[i], start_str[i])) {
+  for (int i = 0; UNSAFE_TODO(start_str[i]) != L'\0'; ++i) {
+    if (!EqualASCIICharI(UNSAFE_TODO(str[i]), UNSAFE_TODO(start_str[i]))) {
       return false;
     }
   }
@@ -111,19 +122,16 @@ const wchar_t* GetNameFromPathExt(const wchar_t* path, size_t size) {
     return path;
   }
 
-  const wchar_t* current = &path[size - 1];
+  const wchar_t* current = &UNSAFE_TODO(path[size - 1]);
   while (current != path && L'\\' != *current) {
-    --current;
+    UNSAFE_TODO(--current);
   }
 
   // If no path separator found, just return |path|.
   // Otherwise, return a pointer right after the separator.
-  return ((current == path) && (L'\\' != *current)) ? current : (current + 1);
-}
-
-wchar_t* GetNameFromPathExt(wchar_t* path, size_t size) {
-  return const_cast<wchar_t*>(
-      GetNameFromPathExt(const_cast<const wchar_t*>(path), size));
+  return ((current == path) && (L'\\' != *current))
+             ? current
+             : (UNSAFE_TODO(current + 1));
 }
 
 }  // namespace updater

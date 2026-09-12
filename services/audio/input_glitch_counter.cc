@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "services/audio/input_glitch_counter.h"
+
+#include <cinttypes>
 #include <cstddef>
 #include <utility>
 
@@ -27,7 +29,8 @@ enum class AudioGlitchResult {
 
 InputGlitchCounter::InputGlitchCounter(
     base::RepeatingCallback<void(const std::string&)> log_callback)
-    : log_callback_(std::move(log_callback)) {
+    : id_(base::UnguessableToken::Create()),
+      log_callback_(std::move(log_callback)) {
   // Reserve one minutes worth of complete samples (assuming 10ms buffers) to
   // hopefully avoid allocating them on the realtime thread.
   complete_samples_.reserve(6);
@@ -56,8 +59,12 @@ InputGlitchCounter::~InputGlitchCounter() {
                                     : AudioGlitchResult::kGlitches);
 
   std::string log_string = base::StringPrintf(
-      "AISW: number of detected audio glitches: %" PRIuS " out of %" PRIuS,
-      global_sample_.dropped_data_count_, write_count_);
+      "AISW::%s => (number of detected audio glitches: %" PRIu64
+      " out of %" PRIu64
+      ") "
+      " [id=%s]",
+      __func__, global_sample_.dropped_data_count_, write_count_,
+      id_.ToString().c_str());
   log_callback_.Run(log_string);
 
   if (write_count_ < kSampleInterval) {

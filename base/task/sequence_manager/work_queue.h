@@ -5,14 +5,16 @@
 #ifndef BASE_TASK_SEQUENCE_MANAGER_WORK_QUEUE_H_
 #define BASE_TASK_SEQUENCE_MANAGER_WORK_QUEUE_H_
 
+#include <optional>
+
 #include "base/base_export.h"
 #include "base/containers/intrusive_heap.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/task/sequence_manager/fence.h"
 #include "base/task/sequence_manager/sequenced_task_source.h"
 #include "base/task/sequence_manager/task_queue_impl.h"
 #include "base/values.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 namespace sequence_manager {
@@ -33,6 +35,14 @@ class WorkQueueSets;
 // throttling mechanisms.
 class BASE_EXPORT WorkQueue {
  public:
+  enum class RemoveCancelledTasksPolicy {
+    // Removes cancelled tasks at the front of the queue. This is most efficient
+    // as it doesn't traverse all tasks in the queue.
+    kFront,
+    // Removes all cancelled tasks. This requires traversing all the queue.
+    kAll
+  };
+
   using QueueType = internal::TaskQueueImpl::WorkQueueType;
 
   // Note |task_queue| can be null if queue_type is kNonNestable.
@@ -48,14 +58,14 @@ class BASE_EXPORT WorkQueue {
   // Assigns the current set index.
   void AssignSetIndex(size_t work_queue_set_index);
 
-  Value::List AsValue(TimeTicks now) const;
+  ListValue AsValue(TimeTicks now) const;
 
   // Returns true if the |tasks_| is empty. This method ignores any fences.
   bool Empty() const { return tasks_.empty(); }
 
   // Returns the front task's TaskOrder if `tasks_` is non-empty and a fence
   // hasn't been reached, otherwise returns nullopt.
-  absl::optional<TaskOrder> GetFrontTaskOrder() const;
+  std::optional<TaskOrder> GetFrontTaskOrder() const;
 
   // Returns the first task in this queue or null if the queue is empty. This
   // method ignores any fences.
@@ -83,9 +93,9 @@ class BASE_EXPORT WorkQueue {
 
     explicit TaskPusher(WorkQueue* work_queue);
 
-    // `work_queue_` is not a raw_ptr<...> for performance reasons (based on
-    // analysis of sampling profiler data and tab_search:top100:2020).
-    RAW_PTR_EXCLUSION WorkQueue* work_queue_;
+    // Uses UnprotectedInRelease: Performance reasons (based on analysis of
+    // sampling profiler data and tab_search:top100:2020).
+    raw_ptr<WorkQueue, UnprotectedInRelease> work_queue_ = nullptr;
 
     const bool was_empty_;
   };
@@ -105,16 +115,14 @@ class BASE_EXPORT WorkQueue {
 
   size_t Size() const { return tasks_.size(); }
 
-  size_t Capacity() const { return tasks_.capacity(); }
-
   // Pulls a task off the |tasks_| and informs the WorkQueueSets.  If the
   // task removed had an enqueue order >= the current fence then WorkQueue
   // pretends to be empty as far as the WorkQueueSets is concerned.
   Task TakeTaskFromWorkQueue();
 
-  // Removes all canceled tasks from the head of the list. Returns true if any
-  // tasks were removed.
-  bool RemoveAllCanceledTasksFromFront();
+  // Removes cancelled tasks from the queue. Returns true if any tasks were
+  // removed.
+  bool RemoveCancelledTasks(RemoveCancelledTasksPolicy policy);
 
   const char* name() const { return name_; }
 
@@ -152,9 +160,6 @@ class BASE_EXPORT WorkQueue {
   // Otherwise returns false.
   bool BlockedByFence() const;
 
-  // Shrinks |tasks_| if it's wasting memory.
-  void MaybeShrinkQueue();
-
   // Test support function. This should not be used in production code.
   void PopTaskForTesting();
 
@@ -163,13 +168,17 @@ class BASE_EXPORT WorkQueue {
   void CollectTasksOlderThan(TaskOrder reference,
                              std::vector<const Task*>* result) const;
 
-  bool RemoveAllCancelledTasksFromFrontImpl();
-
   bool InsertFenceImpl(Fence fence);
 
   TaskQueueImpl::TaskDeque tasks_;
-  raw_ptr<WorkQueueSets> work_queue_sets_ = nullptr;  // NOT OWNED.
-  const raw_ptr<TaskQueueImpl> task_queue_;           // NOT OWNED.
+  // Uses UnprotectedInRelease: Performance reasons (based on analysis of
+  // speedometer3).
+  raw_ptr<WorkQueueSets, UnprotectedInRelease> work_queue_sets_ =
+      nullptr;  // NOT OWNED.
+  // RAW_PTR_EXCLUSION: TaskQueueImpl is in the raw_ptr-unsupported types list
+  // in raw_ptr.h (perf-sensitive; see crbug.com/335556942). It is excluded
+  // globally, so we cannot use raw_ptr/raw_ref even with UnprotectedInRelease.
+  RAW_PTR_EXCLUSION TaskQueueImpl* const task_queue_ = nullptr;  // NOT OWNED.
   size_t work_queue_set_index_ = 0;
 
   // Iff the queue isn't empty (or appearing to be empty due to a fence) then
@@ -177,7 +186,7 @@ class BASE_EXPORT WorkQueue {
   // an IntrusiveHeap inside the WorkQueueSet.
   HeapHandle heap_handle_;
   const char* const name_;
-  absl::optional<Fence> fence_;
+  std::optional<Fence> fence_;
   const QueueType queue_type_;
 };
 

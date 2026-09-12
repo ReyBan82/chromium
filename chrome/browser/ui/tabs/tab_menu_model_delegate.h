@@ -7,7 +7,13 @@
 
 #include <vector>
 
-class Browser;
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
+
+namespace tab_groups {
+class TabGroupSyncService;
+}  // namespace tab_groups
+
+class BrowserWindowInterface;
 
 ///////////////////////////////////////////////////////////////////////////////
 //
@@ -23,10 +29,26 @@ class Browser;
 ///////////////////////////////////////////////////////////////////////////////
 class TabMenuModelDelegate {
  public:
-  virtual ~TabMenuModelDelegate() {}
+  DECLARE_USER_DATA(TabMenuModelDelegate);
 
-  // Get the list of existing windows that tabs can be moved to.
-  virtual std::vector<Browser*> GetExistingWindowsForMoveMenu() = 0;
+  // `host` is the UnownedUserDataHost of the browser window this delegate
+  // serves.
+  explicit TabMenuModelDelegate(ui::UnownedUserDataHost& host);
+  virtual ~TabMenuModelDelegate();
+
+  // Returns the delegate for `browser`, or null if it does not have one.
+  static TabMenuModelDelegate* From(BrowserWindowInterface* browser);
+
+  // Returns a list of other existing browser windows that can accept menu
+  // operations (i.e. Move tab to new window, Add tab to group) that are not the
+  // current browser this was called on.
+  virtual std::vector<BrowserWindowInterface*> GetOtherBrowserWindows(
+      bool is_app) = 0;
+
+  virtual tab_groups::TabGroupSyncService* GetTabGroupSyncService() = 0;
+
+ private:
+  ui::ScopedUnownedUserData<TabMenuModelDelegate> scoped_unowned_user_data_;
 };
 
 #endif  // CHROME_BROWSER_UI_TABS_TAB_MENU_MODEL_DELEGATE_H_

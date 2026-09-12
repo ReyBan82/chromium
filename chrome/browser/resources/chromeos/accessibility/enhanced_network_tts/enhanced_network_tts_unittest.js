@@ -12,7 +12,7 @@ EnhancedNetworkTtsUnitTest = class extends EnhancedNetworkTE2ETestBase {
   testGenPreamble() {
     super.testGenPreamble();
     super.testGenPreambleCommon(
-        'kSelectToSpeakExtensionId', true /* failOnConsoleError */);
+        'kEnhancedNetworkTtsExtensionId', true /* failOnConsoleError */);
   }
 };
 
@@ -34,7 +34,7 @@ SYNC_TEST_F(
       const bufferSize = 400;
       const audioStreamOptions = {bufferSize, sampleRate};
       const decodedAudioData =
-          await EnhancedNetworkTts.decodeAudioDataAtSampleRate(
+          await enhancedNetworkTts.decodeAudioDataAtSampleRateForTesting(
               generateTestBufferData(), sampleRate);
       // Each buffer corresponds to 0.04s.
       const expectedBuffers = [
@@ -135,20 +135,23 @@ SYNC_TEST_F(
       const testAudioLength = 0.2135;
       let sampleRate = 4000;
 
-      let audioBuffer = await EnhancedNetworkTts.decodeAudioDataAtSampleRate(
-          generateTestBufferData(), sampleRate);
+      let audioBuffer =
+          await enhancedNetworkTts.decodeAudioDataAtSampleRateForTesting(
+              generateTestBufferData(), sampleRate);
       assertEquals(
           audioBuffer.length, Math.floor(testAudioLength * sampleRate));
 
       sampleRate = 6000;
-      audioBuffer = await EnhancedNetworkTts.decodeAudioDataAtSampleRate(
-          generateTestBufferData(), sampleRate);
+      audioBuffer =
+          await enhancedNetworkTts.decodeAudioDataAtSampleRateForTesting(
+              generateTestBufferData(), sampleRate);
       assertEquals(
           audioBuffer.length, Math.floor(testAudioLength * sampleRate));
 
       sampleRate = 10000;
-      audioBuffer = await EnhancedNetworkTts.decodeAudioDataAtSampleRate(
-          generateTestBufferData(), sampleRate);
+      audioBuffer =
+          await enhancedNetworkTts.decodeAudioDataAtSampleRateForTesting(
+              generateTestBufferData(), sampleRate);
       assertEquals(
           audioBuffer.length, Math.floor(testAudioLength * sampleRate));
     });
@@ -182,7 +185,7 @@ SYNC_TEST_F(
       const sampleRate = 10000;
       const decodedAudioDataLength = testAudioLength * sampleRate;  // 2135
       const decodedAudioData =
-          await EnhancedNetworkTts.decodeAudioDataAtSampleRate(
+          await enhancedNetworkTts.decodeAudioDataAtSampleRateForTesting(
               generateTestBufferData(), sampleRate);
       assertEquals(decodedAudioData.length, decodedAudioDataLength);
 
@@ -291,7 +294,7 @@ function generateTestBufferData() {
     74,  40,  33,  234, 158, 16,  44,  104, 9,   73,  154, 65,  180, 184, 46,
     212, 58,  33,  41,  158, 252, 16,  100, 140, 106, 65,  21,  168, 221,
   ];
-  return new Uint8Array(testData).buffer;
+  return testData;
 }
 
 /**

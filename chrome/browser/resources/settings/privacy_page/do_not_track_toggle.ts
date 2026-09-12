@@ -4,13 +4,16 @@
 
 import 'chrome://resources/cr_elements/cr_button/cr_button.js';
 import 'chrome://resources/cr_elements/cr_dialog/cr_dialog.js';
-import '../settings_shared.css.js';
 import '../controls/settings_toggle_button.js';
+import '../icons.html.js';
+import '../settings_shared.css.js';
 
+import {I18nMixin} from 'chrome://resources/cr_elements/i18n_mixin.js';
 import {focusWithoutInk} from 'chrome://resources/js/focus_without_ink.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
-import {SettingsToggleButtonElement} from '../controls/settings_toggle_button.js';
+import type {SettingsToggleButtonElement} from '../controls/settings_toggle_button.js';
+import {loadTimeData} from '../i18n_setup.js';
 import {MetricsBrowserProxyImpl, PrivacyElementInteractions} from '../metrics_browser_proxy.js';
 
 import {getTemplate} from './do_not_track_toggle.html.js';
@@ -21,7 +24,10 @@ export interface SettingsDoNotTrackToggleElement {
   };
 }
 
-export class SettingsDoNotTrackToggleElement extends PolymerElement {
+const SettingsDoNotTrackToggleElementBase = I18nMixin(PolymerElement);
+
+export class SettingsDoNotTrackToggleElement extends
+    SettingsDoNotTrackToggleElementBase {
   static get is() {
     return 'settings-do-not-track-toggle';
   }
@@ -44,11 +50,24 @@ export class SettingsDoNotTrackToggleElement extends PolymerElement {
         type: Boolean,
         value: false,
       },
+
+      showUniversalOptOutSettings_: {
+        type: Boolean,
+        value: () => loadTimeData.getBoolean('showUniversalOptOutSettings'),
+      },
+
+      doNotTrackSublabel_: {
+        type: String,
+        computed:
+            'computeDoNotTrackToggleSubLabel_(showUniversalOptOutSettings_)',
+      },
     };
   }
 
-  prefs: {enable_do_not_track: chrome.settingsPrivate.PrefObject};
-  private showDialog_: boolean;
+  declare prefs: {enable_do_not_track: chrome.settingsPrivate.PrefObject};
+  declare private showDialog_: boolean;
+  declare private showUniversalOptOutSettings_: boolean;
+  declare private doNotTrackSublabel_: string;
 
   private onDomChange_() {
     if (this.showDialog_) {
@@ -79,14 +98,14 @@ export class SettingsDoNotTrackToggleElement extends PolymerElement {
   }
 
   private onDialogClosed_() {
-    focusWithoutInk(this.$.toggle);
+    focusWithoutInk(this.toggle_);
   }
 
   /**
    * Handles the shared proxy confirmation dialog 'Confirm' button.
    */
   private onDialogConfirm_() {
-    this.$.toggle.sendPrefChange();
+    this.toggle_.sendPrefChange();
     this.closeDialog_();
   }
 
@@ -95,8 +114,20 @@ export class SettingsDoNotTrackToggleElement extends PolymerElement {
    * event.
    */
   private onDialogCancel_() {
-    this.$.toggle.resetToPrefValue();
+    this.toggle_.resetToPrefValue();
     this.closeDialog_();
+  }
+
+  private computeDoNotTrackToggleSubLabel_(): string {
+    return this.i18n(
+        this.showUniversalOptOutSettings_ ?
+            'trackingProtectionDoNotTrackDisclaimerToggleSubLabel' :
+            'trackingProtectionDoNotTrackToggleSubLabel');
+  }
+
+  private get toggle_(): SettingsToggleButtonElement {
+    return this.shadowRoot!.querySelector<SettingsToggleButtonElement>(
+        '#toggle')!;
   }
 }
 

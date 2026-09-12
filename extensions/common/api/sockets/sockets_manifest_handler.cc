@@ -25,7 +25,7 @@ bool SocketsManifestHandler::Parse(Extension* extension,
   if (!data)
     return false;
 
-  extension->SetManifestData(manifest_keys::kSockets, std::move(data));
+  extension->SetManifestData(std::move(data));
   return true;
 }
 
@@ -35,7 +35,7 @@ ManifestPermission* SocketsManifestHandler::CreatePermission() {
 
 ManifestPermission* SocketsManifestHandler::CreateInitialRequiredPermission(
     const Extension* extension) {
-  SocketsManifestData* data = SocketsManifestData::Get(extension);
+  const SocketsManifestData* data = SocketsManifestData::Get(extension);
   if (data)
     return data->permission()->Clone().release();
   return nullptr;

@@ -6,8 +6,11 @@
 #define GPU_COMMAND_BUFFER_SERVICE_SHARED_IMAGE_EXTERNAL_VK_IMAGE_BACKING_FACTORY_H_
 
 #include <vulkan/vulkan_core.h>
+
 #include <memory>
 
+#include "gpu/command_buffer/common/shared_image_info.h"
+#include "gpu/command_buffer/common/shared_image_usage.h"
 #include "gpu/command_buffer/service/shared_image/external_vk_image_backing.h"
 #include "gpu/command_buffer/service/shared_image/shared_image_backing_factory.h"
 #include "gpu/gpu_gles2_export.h"
@@ -25,7 +28,8 @@ class GPU_GLES2_EXPORT ExternalVkImageBackingFactory
     : public SharedImageBackingFactory {
  public:
   explicit ExternalVkImageBackingFactory(
-      scoped_refptr<SharedContextState> context_state);
+      scoped_refptr<SharedContextState> context_state,
+      bool enable_webgpu_on_vk_via_gl_interop);
 
   ExternalVkImageBackingFactory(const ExternalVkImageBackingFactory&) = delete;
   ExternalVkImageBackingFactory& operator=(
@@ -36,40 +40,38 @@ class GPU_GLES2_EXPORT ExternalVkImageBackingFactory
   // SharedImageBackingFactory implementation.
   std::unique_ptr<SharedImageBacking> CreateSharedImage(
       const Mailbox& mailbox,
-      viz::SharedImageFormat format,
+      const SharedImageInfo& si_info,
       SurfaceHandle surface_handle,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
       bool is_thread_safe) override;
   std::unique_ptr<SharedImageBacking> CreateSharedImage(
       const Mailbox& mailbox,
-      viz::SharedImageFormat format,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage,
+      const SharedImageInfo& si_info,
+      bool is_thread_safe,
       base::span<const uint8_t> pixel_data) override;
   std::unique_ptr<SharedImageBacking> CreateSharedImage(
       const Mailbox& mailbox,
-      gfx::GpuMemoryBufferHandle handle,
-      gfx::BufferFormat format,
-      gfx::BufferPlane plane,
-      const gfx::Size& size,
-      const gfx::ColorSpace& color_space,
-      GrSurfaceOrigin surface_origin,
-      SkAlphaType alpha_type,
-      uint32_t usage) override;
-  bool IsSupported(uint32_t usage,
+      const SharedImageInfo& si_info,
+      bool is_thread_safe,
+      gfx::GpuMemoryBufferHandle handle) override;
+  std::unique_ptr<SharedImageBacking> CreateSharedImage(
+      const Mailbox& mailbox,
+      const SharedImageInfo& si_info,
+      SurfaceHandle surface_handle,
+      bool is_thread_safe,
+      gfx::BufferUsage buffer_usage) override;
+
+  bool IsSupported(SharedImageUsageSet usage,
                    viz::SharedImageFormat format,
                    const gfx::Size& size,
                    bool thread_safe,
                    gfx::GpuMemoryBufferType gmb_type,
                    GrContextType gr_context_type,
                    base::span<const uint8_t> pixel_data) override;
+  bool IsSupportedForAccessStream(SharedImageAccessStream stream,
+                                  viz::SharedImageFormat format,
+                                  const AccessParams* params) const override;
+
+  SharedImageBackingType GetBackingType() override;
 
  private:
   VkResult CreateExternalVkImage(VkFormat format,
@@ -80,7 +82,8 @@ class GPU_GLES2_EXPORT ExternalVkImageBackingFactory
 
   bool CanImportGpuMemoryBuffer(gfx::GpuMemoryBufferType memory_buffer_type);
 
-  scoped_refptr<SharedContextState> context_state_;
+  const scoped_refptr<SharedContextState> context_state_;
+  const bool enable_webgpu_on_vk_via_gl_interop_;
   std::unique_ptr<VulkanCommandPool> command_pool_;
 
   // Map VkImageUsageFlags flags based on VkFormat for VK_IMAGE_TILING_OPTIMAL.

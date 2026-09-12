@@ -4,34 +4,38 @@
 
 #import "ios/web/web_state/web_state_impl_realized_web_state.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import <string_view>
 
 #import "base/check.h"
 #import "base/compiler_specific.h"
 #import "base/functional/bind.h"
+#import "base/functional/callback_helpers.h"
 #import "base/metrics/histogram_macros.h"
+#import "base/strings/string_util.h"
 #import "base/strings/sys_string_conversions.h"
+#import "base/strings/utf_string_conversions.h"
 #import "base/time/time.h"
+#import "base/trace_event/named_trigger.h"
+#import "components/security_state/core/security_state.h"
 #import "ios/web/common/features.h"
-#import "ios/web/js_messaging/web_frames_manager_impl.h"
+#import "ios/web/js_messaging/java_script_feature_manager.h"
 #import "ios/web/js_messaging/web_view_js_utils.h"
 #import "ios/web/navigation/crw_error_page_helper.h"
 #import "ios/web/navigation/navigation_context_impl.h"
 #import "ios/web/navigation/navigation_item_impl.h"
 #import "ios/web/navigation/navigation_manager_impl.h"
-#import "ios/web/navigation/session_storage_builder.h"
 #import "ios/web/navigation/wk_navigation_util.h"
 #import "ios/web/public/browser_state.h"
 #import "ios/web/public/favicon/favicon_url.h"
-#import "ios/web/public/js_messaging/content_world.h"
 #import "ios/web/public/js_messaging/web_frame.h"
+#import "ios/web/public/js_messaging/web_frames_manager.h"
 #import "ios/web/public/navigation/navigation_item.h"
 #import "ios/web/public/navigation/web_state_policy_decider.h"
 #import "ios/web/public/security/certificate_policy_cache.h"
-#import "ios/web/public/session/crw_session_storage.h"
-#import "ios/web/public/session/serializable_user_data_manager.h"
+#import "ios/web/public/session/proto/metadata.pb.h"
+#import "ios/web/public/session/proto/navigation.pb.h"
+#import "ios/web/public/session/proto/proto_util.h"
+#import "ios/web/public/session/proto/storage.pb.h"
 #import "ios/web/public/ui/java_script_dialog_presenter.h"
 #import "ios/web/public/web_client.h"
 #import "ios/web/public/web_state_delegate.h"
@@ -45,84 +49,166 @@
 #import "ios/web/web_state/ui/crw_web_view_navigation_proxy.h"
 #import "ios/web/webui/web_ui_ios_controller_factory_registry.h"
 #import "ios/web/webui/web_ui_ios_impl.h"
-#import "ui/gfx/geometry/rect_f.h"
-#import "ui/gfx/image/image.h"
+#import "net/http/http_util.h"
 #import "url/gurl.h"
 #import "url/url_constants.h"
 
 namespace web {
 
+class WebStateImpl::RealizedWebState::PendingSession {
+ public:
+  PendingSession(proto::WebStateStorage storage,
+                 std::u16string page_title,
+                 GURL page_visible_url,
+                 FaviconStatus favicon_status);
+
+  PendingSession(const PendingSession&) = delete;
+  PendingSession& operator=(const PendingSession&) = delete;
+
+  ~PendingSession() = default;
+
+  const proto::WebStateStorage& storage() const { return storage_; }
+
+  const FaviconStatus& favicon_status() const { return favicon_status_; }
+  void set_favicon_status(const FaviconStatus& favicon_status) {
+    favicon_status_ = favicon_status;
+  }
+
+  const std::u16string& page_title() const { return page_title_; }
+
+  const GURL& page_visible_url() const { return page_visible_url_; }
+
+ private:
+  // The WebStateStorage is only needed to implement SerializeToProto() while
+  // the navigation history restoration is in progress for the legacy session
+  // serialization logic.
+  // TODO(crbug.com/40945317): Remove it once the feature has launched.
+  const proto::WebStateStorage storage_;
+  const std::u16string page_title_;
+  const GURL page_visible_url_;
+  FaviconStatus favicon_status_;
+};
+
+WebStateImpl::RealizedWebState::PendingSession::PendingSession(
+    proto::WebStateStorage storage,
+    std::u16string page_title,
+    GURL page_visible_url,
+    FaviconStatus favicon_status)
+    : storage_(std::move(storage)),
+      page_title_(std::move(page_title)),
+      page_visible_url_(std::move(page_visible_url)),
+      favicon_status_(std::move(favicon_status)) {}
+
 #pragma mark - WebStateImpl::RealizedWebState public methods
 
-WebStateImpl::RealizedWebState::RealizedWebState(WebStateImpl* owner)
+WebStateImpl::RealizedWebState::RealizedWebState(WebStateImpl* owner,
+                                                 base::Time creation_time,
+                                                 WebStateID unique_identifier)
     : owner_(owner),
       interface_binder_(owner),
-      user_agent_type_(UserAgentType::AUTOMATIC) {
+      creation_time_(creation_time),
+      user_agent_type_(UserAgentType::AUTOMATIC),
+      unique_identifier_(unique_identifier) {
   DCHECK(owner_);
+  DCHECK(unique_identifier_.valid());
 }
 
 WebStateImpl::RealizedWebState::~RealizedWebState() = default;
 
-void WebStateImpl::RealizedWebState::Init(const CreateParams& params,
-                                          CRWSessionStorage* session_storage,
-                                          FaviconStatus favicon_status) {
-  created_with_opener_ = params.created_with_opener;
-  navigation_manager_ = std::make_unique<NavigationManagerImpl>();
-  favicon_status_ = std::move(favicon_status);
+void WebStateImpl::RealizedWebState::Init(BrowserState* browser_state,
+                                          base::Time last_active_time,
+                                          bool created_with_opener) {
+  created_with_opener_ = created_with_opener;
+  last_active_time_ = last_active_time;
 
-  navigation_manager_->SetDelegate(this);
-  navigation_manager_->SetBrowserState(params.browser_state);
+  navigation_manager_ =
+      std::make_unique<NavigationManagerImpl>(browser_state, this);
   web_controller_ = [[CRWWebController alloc] initWithWebState:owner_];
 
-  // Restore session history last because NavigationManagerImpl relies on
-  // CRWWebController to restore history into the web view.
-  if (session_storage) {
-    // Session storage restore is asynchronous because it involves a page
-    // load in WKWebView. Temporarily cache the restored session so it can
-    // be returned if BuildSessionStorage() or GetTitle() is called before
-    // the actual restoration completes. This can happen to inactive tabs
-    // when a navigation in the current tab triggers the serialization of
-    // all tabs and when user clicks on tab switcher without switching to
-    // a tab.
-    restored_session_storage_ = session_storage;
-    SessionStorageBuilder::ExtractSessionState(*owner_, *navigation_manager_,
-                                               restored_session_storage_);
+  certificate_policy_cache_ =
+      std::make_unique<SessionCertificatePolicyCacheImpl>(browser_state);
+}
 
-    // Update the BrowserState's CertificatePolicyCache with the newly
-    // restored policy cache entries.
-    DCHECK(certificate_policy_cache_);
-    certificate_policy_cache_->UpdateCertificatePolicyCache(
-        web::BrowserState::GetCertificatePolicyCache(params.browser_state));
+void WebStateImpl::RealizedWebState::InitWithProto(
+    BrowserState* browser_state,
+    base::Time last_active_time,
+    std::u16string page_title,
+    GURL page_visible_url,
+    FaviconStatus favicon_status,
+    proto::WebStateStorage storage,
+    NativeSessionFetcher session_fetcher) {
+  last_active_time_ = last_active_time;
+  user_agent_type_ = UserAgentTypeFromProto(storage.user_agent());
+  created_with_opener_ = storage.has_opener();
 
-    // Load the stable identifier. Must not be empty or nil.
-    DCHECK(session_storage.stableIdentifier.length);
-    stable_identifier_ = [session_storage.stableIdentifier copy];
+  // Session storage restore is asynchronous because it involves a page
+  // load in WKWebView. Temporarily cache the restored session so it can
+  // be returned if SerializeToProto() or GetTitle() is called before the
+  // actual restoration completes. This can happen to inactive tabs when
+  // a navigation in the current tab triggers the serialization of all
+  // tabs and when user clicks on tab switcher without switching to a tab.
+  restored_session_ = std::make_unique<PendingSession>(
+      std::move(storage), std::move(page_title), std::move(page_visible_url),
+      std::move(favicon_status));
 
-    // Restore the last active time, even if it is null, as that would mean
-    // the session predates M-99 (when the last active time started to be
-    // saved in CRWSessionStorage) and thus the WebState can be considered
-    // "infinitely" old.
-    last_active_time_ = session_storage.lastActiveTime;
+  // The restoration of the session history in NavigationManagerImpl needs
+  // the WebState to have a valid CRWWebController, so create both objects
+  // before starting the restoration.
+  navigation_manager_ =
+      std::make_unique<NavigationManagerImpl>(browser_state, this);
+  web_controller_ = [[CRWWebController alloc] initWithWebState:owner_];
 
-    // Restore the last active time, even if it is null, as that would mean
-    // the session predates M-107 (when the creation time started to be saved in
-    // CRWSessionStorage) and thus the WebState can be considered "infinitely"
-    // old.
-    creation_time_ = session_storage.creationTime;
+  // Restore the navigation history from the storage.
+  navigation_manager_->SetNativeSessionFetcher(std::move(session_fetcher));
+  navigation_manager_->RestoreFromProto(
+      restored_session_->storage().navigation());
+
+  // Create the certificate policy cache with data from storage and update
+  // the cache with the restored data.
+  certificate_policy_cache_ =
+      std::make_unique<SessionCertificatePolicyCacheImpl>(
+          browser_state, restored_session_->storage().certs_cache());
+  certificate_policy_cache_->UpdateCertificatePolicyCache();
+}
+
+void WebStateImpl::RealizedWebState::SerializeToProto(
+    proto::WebStateStorage& storage) const {
+  if (restored_session_) {
+    // If the WebState has recently transitioned from unrealized to realized
+    // state but the initial navigation has not been committed yet, return a
+    // copy of the data loaded from storage.
+    storage = restored_session_->storage();
   } else {
-    certificate_policy_cache_ =
-        std::make_unique<SessionCertificatePolicyCacheImpl>(
-            params.browser_state);
+    // Ensure state is synchronized between CRWWebController and
+    // NavigationManagerImpl before starting the serialization.
+    [web_controller_ recordStateInHistory];
 
-    // Generate a random stable identifier. Ensure it is immutable.
-    stable_identifier_ = [[[NSUUID UUID] UUIDString] copy];
-
-    creation_time_ = base::Time::Now();
+    storage.set_has_opener(created_with_opener_);
+    storage.set_user_agent(UserAgentTypeToProto(user_agent_type_));
+    navigation_manager_->SerializeToProto(*storage.mutable_navigation());
+    certificate_policy_cache_->SerializeToProto(*storage.mutable_certs_cache());
   }
 
-  // Let CreateParams override the last active time.
-  if (!params.last_active_time.is_null())
-    last_active_time_ = params.last_active_time;
+  // Fill the WebStateMetadataStorage from the WebStateStorage and the current
+  // instance information (creation time, last active time, ...).
+  proto::WebStateMetadataStorage& metadata = *storage.mutable_metadata();
+  SerializeTimeToProto(creation_time_, *metadata.mutable_creation_time());
+  SerializeTimeToProto(last_active_time_, *metadata.mutable_last_active_time());
+
+  const proto::NavigationStorage& navigation = storage.navigation();
+  metadata.set_navigation_item_count(navigation.items_size());
+  const int index = navigation.last_committed_item_index();
+  if (0 <= index && index < navigation.items_size()) {
+    const proto::NavigationItemStorage& item = navigation.items(index);
+    const std::string& virtual_url = item.virtual_url();
+
+    proto::PageMetadataStorage& page_metadata = *metadata.mutable_active_page();
+    page_metadata.set_page_url(virtual_url.empty() ? item.url() : virtual_url);
+    page_metadata.set_page_title(item.title());
+  }
+
+  // The metadata must always be non-default at this point.
+  DCHECK(storage.has_metadata());
 }
 
 void WebStateImpl::RealizedWebState::TearDown() {
@@ -132,12 +218,15 @@ void WebStateImpl::RealizedWebState::TearDown() {
   // implementations depends on accessing web state during destruction.
   ClearWebUI();
 
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.WebStateDestroyed(owner_);
-  for (auto& observer : policy_deciders())
+  }
+  for (auto& observer : policy_deciders()) {
     observer.WebStateDestroyed();
-  for (auto& observer : policy_deciders())
+  }
+  for (auto& observer : policy_deciders()) {
     observer.ResetWebState();
+  }
   SetDelegate(nullptr);
 }
 
@@ -148,18 +237,6 @@ WebStateImpl::RealizedWebState::GetNavigationManager() const {
 
 NavigationManagerImpl& WebStateImpl::RealizedWebState::GetNavigationManager() {
   return *navigation_manager_;
-}
-
-const WebFramesManagerImpl&
-WebStateImpl::RealizedWebState::GetPageWorldWebFramesManager() const {
-  return WebFramesManagerImpl::FromWebState(owner_,
-                                            ContentWorld::kPageContentWorld);
-}
-
-WebFramesManagerImpl&
-WebStateImpl::RealizedWebState::GetPageWorldWebFramesManager() {
-  return WebFramesManagerImpl::FromWebState(owner_,
-                                            ContentWorld::kPageContentWorld);
 }
 
 const SessionCertificatePolicyCacheImpl&
@@ -202,37 +279,69 @@ void WebStateImpl::RealizedWebState::OnNavigationStarted(
   // confusion about the origin of a dialog.
   ClearDialogs();
 
-  // Navigation manager loads internal URLs to restore session history and
-  // create back-forward entries for WebUI. Do not trigger external callbacks.
-  if ([CRWErrorPageHelper isErrorPageFileURL:context->GetUrl()] ||
-      wk_navigation_util::IsRestoreSessionUrl(context->GetUrl())) {
+  // Navigation manager loads internal URLs to create back-forward entries for
+  // WebUI. Do not trigger external callbacks.
+  if ([CRWErrorPageHelper isErrorPageFileURL:context->GetUrl()]) {
     return;
   }
 
-  for (auto& observer : observers())
+  base::trace_event::EmitNamedTrigger("navigation-start");
+
+  base::WeakPtr<NavigationContextImpl> weak_context = context->GetWeakPtr();
+  for (auto& observer : observers()) {
+    // Observers might cancel this navigation, destroying the context. Guard
+    // against that by checking if the context is still alive.
+    if (!weak_context && base::FeatureList::IsEnabled(
+                             features::kDetectDestroyedNavigationContexts)) {
+      break;
+    }
     observer.DidStartNavigation(owner_, context);
+  }
 }
 
 void WebStateImpl::RealizedWebState::OnNavigationRedirected(
     NavigationContextImpl* context) {
-  for (auto& observer : observers())
+  base::WeakPtr<NavigationContextImpl> weak_context = context->GetWeakPtr();
+  for (auto& observer : observers()) {
+    // Observers might cancel this navigation, destroying the context. Guard
+    // against that by checking if the context is still alive.
+    if (!weak_context && base::FeatureList::IsEnabled(
+                             features::kDetectDestroyedNavigationContexts)) {
+      break;
+    }
     observer.DidRedirectNavigation(owner_, context);
+  }
 }
 
 void WebStateImpl::RealizedWebState::OnNavigationFinished(
     NavigationContextImpl* context) {
-  // Navigation manager loads internal URLs to restore session history and
-  // create back-forward entries for WebUI. Do not trigger external callbacks.
-  if ([CRWErrorPageHelper isErrorPageFileURL:context->GetUrl()] ||
-      wk_navigation_util::IsRestoreSessionUrl(context->GetUrl())) {
+  // Navigation manager loads internal URLs to create back-forward entries for
+  // WebUI. Do not trigger external callbacks.
+  if ([CRWErrorPageHelper isErrorPageFileURL:context->GetUrl()]) {
     return;
   }
 
-  for (auto& observer : observers())
+  // Clear provisional WebUI if the navigation was cancelled/failed, or if it
+  // committed to a non-WebUI page.
+  if (web_ui_ && (!context->HasCommitted() ||
+                  !web::GetWebClient()->IsAppSpecificURL(context->GetUrl()))) {
+    ClearWebUI();
+  }
+
+  const bool same_document = context->IsSameDocument();
+  base::WeakPtr<NavigationContextImpl> weak_context = context->GetWeakPtr();
+  for (auto& observer : observers()) {
+    // Observers might cancel this navigation, destroying the context. Guard
+    // against that by checking if the context is still alive.
+    if (!weak_context && base::FeatureList::IsEnabled(
+                             features::kDetectDestroyedNavigationContexts)) {
+      break;
+    }
     observer.DidFinishNavigation(owner_, context);
+  }
 
   // Update cached_favicon_urls_.
-  if (!context->IsSameDocument()) {
+  if (!same_document) {
     // Favicons are not valid after document change. Favicon URLs will be
     // refetched by CRWWebController and passed to OnFaviconUrlUpdated.
     cached_favicon_urls_.clear();
@@ -246,59 +355,62 @@ void WebStateImpl::RealizedWebState::OnNavigationFinished(
 }
 
 void WebStateImpl::RealizedWebState::OnBackForwardStateChanged() {
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.DidChangeBackForwardState(owner_);
+  }
 }
 
 void WebStateImpl::RealizedWebState::OnTitleChanged() {
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.TitleWasSet(owner_);
+  }
 }
 
 void WebStateImpl::RealizedWebState::OnRenderProcessGone() {
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.RenderProcessGone(owner_);
+  }
 }
 
 void WebStateImpl::RealizedWebState::SetIsLoading(bool is_loading) {
-  if (is_loading == is_loading_)
+  if (is_loading == is_loading_) {
     return;
+  }
 
   is_loading_ = is_loading;
 
   if (is_loading) {
-    for (auto& observer : observers())
+    for (auto& observer : observers()) {
       observer.DidStartLoading(owner_);
+    }
   } else {
-    for (auto& observer : observers())
+    for (auto& observer : observers()) {
       observer.DidStopLoading(owner_);
+    }
   }
 }
 
 void WebStateImpl::RealizedWebState::OnPageLoaded(const GURL& url,
                                                   bool load_success) {
-  // Navigation manager loads internal URLs to restore session history and
-  // create back-forward entries for WebUI. Do not trigger external callbacks.
-  if (wk_navigation_util::IsWKInternalUrl(url))
-    return;
-
   PageLoadCompletionStatus load_completion_status =
       load_success ? PageLoadCompletionStatus::SUCCESS
                    : PageLoadCompletionStatus::FAILURE;
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.PageLoaded(owner_, load_completion_status);
+  }
 }
 
 void WebStateImpl::RealizedWebState::OnFaviconUrlUpdated(
     const std::vector<FaviconURL>& candidates) {
   cached_favicon_urls_ = candidates;
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.FaviconUrlUpdated(owner_, candidates);
+  }
 }
 
 void WebStateImpl::RealizedWebState::CreateWebUI(const GURL& url) {
   if (HasWebUI()) {
-    if (web_ui_->GetController()->GetHost() == url.host()) {
+    if (web_ui_->GetController()->GetHost() == url.GetHost()) {
       // Don't recreate webUI for the same host.
       return;
     }
@@ -317,8 +429,8 @@ bool WebStateImpl::RealizedWebState::HasWebUI() const {
 
 void WebStateImpl::RealizedWebState::HandleWebUIMessage(
     const GURL& source_url,
-    base::StringPiece message,
-    const base::Value::List& args) {
+    std::string_view message,
+    const base::ListValue& args) {
   if (!HasWebUI()) {
     return;
   }
@@ -346,8 +458,9 @@ void WebStateImpl::RealizedWebState::ShouldAllowRequest(
     policy_decider.ShouldAllowRequest(request, request_info,
                                       policy_decider_callback);
     num_decisions_requested++;
-    if (request_state_tracker_ptr->DeterminedFinalResult())
+    if (request_state_tracker_ptr->DeterminedFinalResult()) {
       break;
+    }
   }
 
   request_state_tracker_ptr->FinishedRequestingDecisions(
@@ -370,8 +483,9 @@ void WebStateImpl::RealizedWebState::ShouldAllowResponse(
     policy_decider.ShouldAllowResponse(response, response_info,
                                        policy_decider_callback);
     num_decisions_requested++;
-    if (response_state_tracker_ptr->DeterminedFinalResult())
+    if (response_state_tracker_ptr->DeterminedFinalResult()) {
       break;
+    }
   }
 
   response_state_tracker_ptr->FinishedRequestingDecisions(
@@ -399,21 +513,24 @@ WebStateImpl::RealizedWebState::GetUserAgentForSessionRestoration() const {
 }
 
 void WebStateImpl::RealizedWebState::SendChangeLoadProgress(double progress) {
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.LoadProgressChanged(owner_, progress);
+  }
 }
 
 void WebStateImpl::RealizedWebState::ShowRepostFormWarningDialog(
+    FormWarningType warning_type,
     base::OnceCallback<void(bool)> callback) {
   if (delegate_) {
-    delegate_->ShowRepostFormWarningDialog(owner_, std::move(callback));
+    delegate_->ShowRepostFormWarningDialog(owner_, warning_type,
+                                           std::move(callback));
   } else {
     std::move(callback).Run(true);
   }
 }
 
 void WebStateImpl::RealizedWebState::RunJavaScriptAlertDialog(
-    const GURL& origin_url,
+    const url::Origin& origin,
     NSString* message_text,
     base::OnceClosure callback) {
   JavaScriptDialogPresenter* presenter =
@@ -425,12 +542,12 @@ void WebStateImpl::RealizedWebState::RunJavaScriptAlertDialog(
 
   running_javascript_dialog_ = true;
   presenter->RunJavaScriptAlertDialog(
-      owner_, origin_url, message_text,
+      owner_, origin, message_text,
       WrapCallbackForJavaScriptDialog(std::move(callback)));
 }
 
 void WebStateImpl::RealizedWebState::RunJavaScriptConfirmDialog(
-    const GURL& origin_url,
+    const url::Origin& origin,
     NSString* message_text,
     base::OnceCallback<void(bool success)> callback) {
   JavaScriptDialogPresenter* presenter =
@@ -442,12 +559,12 @@ void WebStateImpl::RealizedWebState::RunJavaScriptConfirmDialog(
 
   running_javascript_dialog_ = true;
   presenter->RunJavaScriptConfirmDialog(
-      owner_, origin_url, message_text,
+      owner_, origin, message_text,
       WrapCallbackForJavaScriptDialog(std::move(callback)));
 }
 
 void WebStateImpl::RealizedWebState::RunJavaScriptPromptDialog(
-    const GURL& origin_url,
+    const url::Origin& origin,
     NSString* message_text,
     NSString* default_prompt_text,
     base::OnceCallback<void(NSString* user_input)> callback) {
@@ -460,7 +577,7 @@ void WebStateImpl::RealizedWebState::RunJavaScriptPromptDialog(
 
   running_javascript_dialog_ = true;
   presenter->RunJavaScriptPromptDialog(
-      owner_, origin_url, message_text, default_prompt_text,
+      owner_, origin, message_text, default_prompt_text,
       WrapCallbackForJavaScriptDialog(std::move(callback)));
 }
 
@@ -483,7 +600,7 @@ WebState* WebStateImpl::RealizedWebState::CreateNewWebState(
 void WebStateImpl::RealizedWebState::OnAuthRequired(
     NSURLProtectionSpace* protection_space,
     NSURLCredential* proposed_credential,
-    WebStateDelegate::AuthCallback callback) {
+    WebStateDelegate::HTTPAuthCallback callback) {
   if (delegate_) {
     delegate_->OnAuthRequired(owner_, protection_space, proposed_credential,
                               std::move(callback));
@@ -492,40 +609,36 @@ void WebStateImpl::RealizedWebState::OnAuthRequired(
   }
 }
 
-void WebStateImpl::RealizedWebState::WebFrameBecameAvailable(
-    std::unique_ptr<WebFrame> frame) {
-  WebFrame* frame_ptr = frame.get();
-  bool success = GetPageWorldWebFramesManager().AddFrame(std::move(frame));
-  if (!success) {
-    // Frame was not added, do not notify observers.
-    return;
+void WebStateImpl::RealizedWebState::OnAuthRequired(
+    NSURLProtectionSpace* protection_space,
+    WebStateDelegate::ClientCertAuthCallback callback) {
+  if (delegate_) {
+    delegate_->OnAuthRequired(owner_, protection_space, std::move(callback));
+  } else {
+    std::move(callback).Run(nil);
   }
-
-  for (auto& observer : observers())
-    observer.WebFrameDidBecomeAvailable(owner_, frame_ptr);
 }
 
-void WebStateImpl::RealizedWebState::WebFrameBecameUnavailable(
-    const std::string& frame_id) {
-  WebFrame* frame = GetPageWorldWebFramesManager().GetFrameWithId(frame_id);
-  if (!frame) {
-    return;
+void WebStateImpl::RealizedWebState::OnProxyAuthChallenge(
+    NSURLProtectionSpace* protection_space,
+    NSURLCredential* proposed_credential,
+    NSURLResponse* failure_response,
+    WebStateDelegate::ProxyAuthCallback callback) {
+  if (delegate_) {
+    delegate_->OnProxyAuthChallenge(owner_, protection_space,
+                                    proposed_credential, failure_response,
+                                    std::move(callback));
+  } else {
+    std::move(callback).Run(nil, nil, nil);
   }
-
-  NotifyObserversAndRemoveWebFrame(frame);
 }
 
 void WebStateImpl::RealizedWebState::RetrieveExistingFrames() {
-  // This call must be sent to the webstate directly, because the result of this
-  // call will create the WebFrames. (Thus, the WebFrames do not yet exist and
-  // can not be used to call JavaScript.)
-  [web_controller_ executeJavaScript:@"__gCrWeb.message.getExistingFrames();"
-                   completionHandler:nil];
-}
-
-void WebStateImpl::RealizedWebState::RemoveAllWebFrames() {
-  for (WebFrame* frame : GetPageWorldWebFramesManager().GetAllWebFrames()) {
-    NotifyObserversAndRemoveWebFrame(frame);
+  JavaScriptFeatureManager* feature_manager =
+      JavaScriptFeatureManager::FromBrowserState(owner_->GetBrowserState());
+  for (JavaScriptContentWorld* world : feature_manager->GetAllContentWorlds()) {
+    [web_controller_
+        retrieveExistingFramesInContentWorld:world->GetWKContentWorld()];
   }
 }
 
@@ -534,10 +647,12 @@ WebStateDelegate* WebStateImpl::RealizedWebState::GetDelegate() {
 }
 
 void WebStateImpl::RealizedWebState::SetDelegate(WebStateDelegate* delegate) {
-  if (delegate == delegate_)
+  if (delegate == delegate_) {
     return;
-  if (delegate_)
+  }
+  if (delegate_) {
     delegate_->Detach(owner_);
+  }
   delegate_ = delegate;
   if (delegate_) {
     delegate_->Attach(owner_);
@@ -575,24 +690,28 @@ base::Time WebStateImpl::RealizedWebState::GetCreationTime() const {
 }
 
 void WebStateImpl::RealizedWebState::WasShown() {
-  if (IsVisible())
+  if (IsVisible()) {
     return;
+  }
 
   // Update last active time when the WebState transition to visible.
   last_active_time_ = base::Time::Now();
 
   [web_controller_ wasShown];
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.WasShown(owner_);
+  }
 }
 
 void WebStateImpl::RealizedWebState::WasHidden() {
-  if (!IsVisible())
+  if (!IsVisible()) {
     return;
+  }
 
   [web_controller_ wasHidden];
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.WasHidden(owner_);
+  }
 }
 
 void WebStateImpl::RealizedWebState::SetKeepRenderProcessAlive(
@@ -604,38 +723,36 @@ BrowserState* WebStateImpl::RealizedWebState::GetBrowserState() const {
   return navigation_manager_->GetBrowserState();
 }
 
-NSString* WebStateImpl::RealizedWebState::GetStableIdentifier() const {
-  return [stable_identifier_ copy];
+WebStateID WebStateImpl::RealizedWebState::GetUniqueIdentifier() const {
+  return unique_identifier_;
 }
 
 void WebStateImpl::RealizedWebState::OpenURL(
     const WebState::OpenURLParams& params) {
   DCHECK(Configured());
-  if (delegate_)
+  if (delegate_) {
     delegate_->OpenURLFromWebState(owner_, params);
+  }
 }
 
 void WebStateImpl::RealizedWebState::Stop() {
-  if (navigation_manager_->IsRestoreSessionInProgress()) {
-    // Do not interrupt session restoration process. For embedder session
-    // restoration is opaque and WebState acts like it's idle.
-    return;
-  }
   [web_controller_ stopLoading];
 }
 
-CRWSessionStorage* WebStateImpl::RealizedWebState::BuildSessionStorage() {
-  [web_controller_ recordStateInHistory];
-  if (restored_session_storage_) {
-    // UserData can be updated in an uncommitted WebState. Even if a WebState
-    // hasn't been restored, its opener value may have changed.
-    restored_session_storage_.userData =
-        SerializableUserDataManager::FromWebState(owner_)
-            ->GetUserDataForSession();
-    return restored_session_storage_;
+std::optional<std::string>
+WebStateImpl::RealizedWebState::GetUserAgentOverride() const {
+  return user_agent_override_;
+}
+
+void WebStateImpl::RealizedWebState::SetUserAgentOverride(
+    std::optional<std::string> ua_override) {
+  if (ua_override && !net::HttpUtil::IsValidHeaderValue(*ua_override)) {
+    return;
   }
-  return SessionStorageBuilder::BuildStorage(*owner_, *navigation_manager_,
-                                             *certificate_policy_cache_);
+  if (ua_override && ua_override->empty()) {
+    ua_override = std::nullopt;
+  }
+  user_agent_override_ = std::move(ua_override);
 }
 
 void WebStateImpl::RealizedWebState::LoadData(NSData* data,
@@ -658,16 +775,12 @@ bool WebStateImpl::RealizedWebState::ContentIsHTML() const {
 }
 
 const std::u16string& WebStateImpl::RealizedWebState::GetTitle() const {
-  DCHECK(Configured());
-  // Empty string returned by reference if there is no navigation item.
-  // It is safe to return a function level static as they are thread-safe.
-  static const std::u16string kEmptyString16;
-  // TODO(crbug.com/1270778): Implement the NavigationManager logic necessary
-  // to match the WebContents implementation of this method.
-  NavigationItem* item = navigation_manager_->GetLastCommittedItem();
-  // Display title for the visible item makes more sense.
-  item = navigation_manager_->GetVisibleItem();
-  return item ? item->GetTitleForDisplay() : kEmptyString16;
+  if (restored_session_) [[unlikely]] {
+    return restored_session_->page_title();
+  }
+
+  NavigationItem* item = navigation_manager_->GetVisibleItem();
+  return item ? item->GetTitleForDisplay() : base::EmptyString16();
 }
 
 bool WebStateImpl::RealizedWebState::IsLoading() const {
@@ -675,9 +788,6 @@ bool WebStateImpl::RealizedWebState::IsLoading() const {
 }
 
 double WebStateImpl::RealizedWebState::GetLoadingProgress() const {
-  if (navigation_manager_->IsRestoreSessionInProgress())
-    return 0.0;
-
   return [web_controller_ loadingProgress];
 }
 
@@ -698,24 +808,42 @@ bool WebStateImpl::RealizedWebState::IsWebPageInFullscreenMode() const {
 }
 
 const FaviconStatus& WebStateImpl::RealizedWebState::GetFaviconStatus() const {
-  NavigationItem* item = navigation_manager_->GetLastCommittedItem();
-  if (item) {
-    const FaviconStatus& favicon_status = item->GetFaviconStatus();
-    if (favicon_status.valid) {
-      return favicon_status;
-    }
+  if (restored_session_) [[unlikely]] {
+    return restored_session_->favicon_status();
   }
 
-  return favicon_status_;
+  static const FaviconStatus no_favicon;
+  NavigationItem* item = navigation_manager_->GetLastCommittedItem();
+  return item ? item->GetFaviconStatus() : no_favicon;
 }
 
 void WebStateImpl::RealizedWebState::SetFaviconStatus(
     const FaviconStatus& favicon_status) {
-  NavigationItem* item = navigation_manager_->GetLastCommittedItem();
-  if (item) {
-    item->SetFaviconStatus(favicon_status);
-    favicon_status_ = FaviconStatus{};
+  if (restored_session_) [[unlikely]] {
+    restored_session_->set_favicon_status(favicon_status);
+    return;
   }
+
+  if (NavigationItem* item = navigation_manager_->GetLastCommittedItem()) {
+    item->SetFaviconStatus(favicon_status);
+  }
+}
+
+bool WebStateImpl::RealizedWebState::IsCustomOpenPanelSupported() const {
+  return supports_custom_open_panel_;
+}
+
+void WebStateImpl::RealizedWebState::SetCustomOpenPanelSupported(
+    bool supports) {
+  if (supports_custom_open_panel_ == supports) {
+    return;
+  }
+  supports_custom_open_panel_ = supports;
+  // TODO(crbug.com/500705261): WebKit only checks the methods implemented in
+  // the UIDelegate when setting the delegate. Resetting the delegate forces
+  // WebKit to re-call respondToSelector: and check if a custom implementation
+  // of openPanel is provided.
+  [web_controller_ refreshUIDelegateMethodCache];
 }
 
 int WebStateImpl::RealizedWebState::GetNavigationItemCount() const {
@@ -723,43 +851,35 @@ int WebStateImpl::RealizedWebState::GetNavigationItemCount() const {
 }
 
 const GURL& WebStateImpl::RealizedWebState::GetVisibleURL() const {
+  if (restored_session_) [[unlikely]] {
+    return restored_session_->page_visible_url();
+  }
+
   NavigationItem* item = navigation_manager_->GetVisibleItem();
   return item ? item->GetVirtualURL() : GURL::EmptyGURL();
 }
 
 const GURL& WebStateImpl::RealizedWebState::GetLastCommittedURL() const {
+  if (restored_session_) [[unlikely]] {
+    return restored_session_->page_visible_url();
+  }
+
   NavigationItem* item = navigation_manager_->GetLastCommittedItem();
   return item ? item->GetVirtualURL() : GURL::EmptyGURL();
 }
 
-GURL WebStateImpl::RealizedWebState::GetCurrentURL(
-    URLVerificationTrustLevel* trust_level) const {
-  if (!trust_level) {
-    auto ignore_trust = URLVerificationTrustLevel::kNone;
-    return [web_controller_ currentURLWithTrustLevel:&ignore_trust];
-  }
-  GURL result = [web_controller_ currentURLWithTrustLevel:trust_level];
-
+std::optional<GURL>
+WebStateImpl::RealizedWebState::GetLastCommittedURLIfTrusted() const {
   NavigationItemImpl* item = navigation_manager_->GetLastCommittedItemImpl();
-  GURL lastCommittedURL = item ? item->GetURL() : GURL();
+  if (!item || item->IsUntrusted()) {
+    return std::nullopt;
+  }
 
-  bool equalOrigins;
-  if (result.SchemeIs(url::kAboutScheme) &&
-      GetWebClient()->IsAppSpecificURL(GetLastCommittedURL())) {
-    // This special case is added for any app specific URLs that have been
-    // rewritten to about:// URLs.  In this case, an about scheme does not have
-    // an origin to compare, only a path.
-    equalOrigins = result.path() == lastCommittedURL.path();
-  } else {
-    equalOrigins = result.DeprecatedGetOriginAsURL() ==
-                   lastCommittedURL.DeprecatedGetOriginAsURL();
-  }
-  UMA_HISTOGRAM_BOOLEAN("Web.CurrentOriginEqualsLastCommittedOrigin",
-                        equalOrigins);
-  if (!equalOrigins || (item && item->IsUntrusted())) {
-    *trust_level = URLVerificationTrustLevel::kMixed;
-  }
-  return result;
+  return item->GetVirtualURL();
+}
+
+GURL WebStateImpl::RealizedWebState::GetCurrentURL() const {
+  return [web_controller_ currentURL];
 }
 
 id<CRWWebViewProxy> WebStateImpl::RealizedWebState::GetWebViewProxy() const {
@@ -767,8 +887,9 @@ id<CRWWebViewProxy> WebStateImpl::RealizedWebState::GetWebViewProxy() const {
 }
 
 void WebStateImpl::RealizedWebState::DidChangeVisibleSecurityState() {
-  for (auto& observer : observers())
+  for (auto& observer : observers()) {
     observer.DidChangeVisibleSecurityState(owner_);
+  }
 }
 
 WebState::InterfaceBinder*
@@ -790,28 +911,22 @@ bool WebStateImpl::RealizedWebState::CanTakeSnapshot() const {
   return !running_javascript_dialog_;
 }
 
-void WebStateImpl::RealizedWebState::TakeSnapshot(const gfx::RectF& rect,
+void WebStateImpl::RealizedWebState::TakeSnapshot(const CGRect rect,
                                                   SnapshotCallback callback) {
   DCHECK(CanTakeSnapshot());
   // Move the callback to a __block pointer, which will be in scope as long
   // as the callback is retained.
   __block SnapshotCallback shared_callback = std::move(callback);
-  [web_controller_ takeSnapshotWithRect:rect.ToCGRect()
+  [web_controller_ takeSnapshotWithRect:rect
                              completion:^(UIImage* snapshot) {
-                               shared_callback.Run(gfx::Image(snapshot));
+                               shared_callback.Run(snapshot);
                              }];
 }
 
 void WebStateImpl::RealizedWebState::CreateFullPagePdf(
     base::OnceCallback<void(NSData*)> callback) {
-  // Move the callback to a __block pointer, which will be in scope as long
-  // as the callback is retained.
-  __block base::OnceCallback<void(NSData*)> callback_for_block =
-      std::move(callback);
-  [web_controller_
-      createFullPagePDFWithCompletion:^(NSData* pdf_document_data) {
-        std::move(callback_for_block).Run(pdf_document_data);
-      }];
+  [web_controller_ createFullPagePDFWithCompletion:base::CallbackToBlock(
+                                                       std::move(callback))];
 }
 
 void WebStateImpl::RealizedWebState::CloseMediaPresentations() {
@@ -826,8 +941,9 @@ void WebStateImpl::RealizedWebState::CloseWebState() {
 
 bool WebStateImpl::RealizedWebState::SetSessionStateData(NSData* data) {
   bool state_set = [web_controller_ setSessionStateData:data];
-  if (!state_set)
+  if (!state_set) {
     return false;
+  }
 
   // If this fails (e.g., see crbug.com/1019672 for a previous failure), this
   // may be a bug in WebKit session restoration, or a bug in generating the
@@ -843,19 +959,12 @@ bool WebStateImpl::RealizedWebState::SetSessionStateData(NSData* data) {
           failedNavigationURLFromErrorPageFileURL:item->GetURL()]);
     }
   }
+
+  web::GetWebClient()->CleanupNativeRestoreURLs(owner_);
   return true;
 }
 
 NSData* WebStateImpl::RealizedWebState::SessionStateData() const {
-  // Don't mix safe and unsafe session restoration -- if a webState still
-  // has unrestored targetUrl pages, leave it that way.
-  for (int i = 0; i < navigation_manager_->GetItemCount(); i++) {
-    NavigationItem* item = navigation_manager_->GetItemAtIndex(i);
-    if (wk_navigation_util::IsRestoreSessionUrl(item->GetURL())) {
-      return nil;
-    }
-  }
-
   return [web_controller_ sessionStateData];
 }
 
@@ -884,18 +993,31 @@ void WebStateImpl::RealizedWebState::OnStateChangedForPermission(
 
 void WebStateImpl::RealizedWebState::RequestPermissionsWithDecisionHandler(
     NSArray<NSNumber*>* permissions,
+    const GURL& origin,
     PermissionDecisionHandler web_view_decision_handler) {
-  bool delegate_can_handle_decision = false;
+  if (!security_state::IsSchemeCryptographic(origin) &&
+      !security_state::IsOriginLocalhostOrFile(origin)) {
+    web_view_decision_handler(WKPermissionDecisionDeny);
+    return;
+  }
   if (delegate_) {
     WebStatePermissionDecisionHandler web_state_decision_handler =
-        ^(BOOL allowed) {
-          allowed ? web_view_decision_handler(WKPermissionDecisionGrant)
-                  : web_view_decision_handler(WKPermissionDecisionDeny);
+        ^(PermissionDecision decision) {
+          switch (decision) {
+            case PermissionDecisionShowDefaultPrompt:
+              web_view_decision_handler(WKPermissionDecisionPrompt);
+              break;
+            case PermissionDecisionGrant:
+              web_view_decision_handler(WKPermissionDecisionGrant);
+              break;
+            case PermissionDecisionDeny:
+              web_view_decision_handler(WKPermissionDecisionDeny);
+              break;
+          }
         };
-    delegate_can_handle_decision = delegate_->HandlePermissionsDecisionRequest(
-        owner_, permissions, web_state_decision_handler);
-  }
-  if (!delegate_can_handle_decision) {
+    delegate_->HandlePermissionsDecisionRequest(owner_, permissions,
+                                                web_state_decision_handler);
+  } else {
     web_view_decision_handler(WKPermissionDecisionPrompt);
   }
 }
@@ -932,13 +1054,14 @@ void WebStateImpl::RealizedWebState::Reload() {
 
 void WebStateImpl::RealizedWebState::OnNavigationItemCommitted(
     NavigationItem* item) {
-  if (wk_navigation_util::IsWKInternalUrl(item->GetURL()))
-    return;
-
   // A committed navigation item indicates that NavigationManager has a new
   // valid session history so should invalidate the cached restored session
   // history.
-  restored_session_storage_ = nil;
+  if (restored_session_) [[unlikely]] {
+    item->SetFaviconStatus(restored_session_->favicon_status());
+    item->SetTitle(restored_session_->page_title());
+    restored_session_.reset();
+  }
 }
 
 WebState* WebStateImpl::RealizedWebState::GetWebState() {
@@ -952,8 +1075,9 @@ void WebStateImpl::RealizedWebState::SetWebStateUserAgent(
 
 id<CRWWebViewNavigationProxy>
 WebStateImpl::RealizedWebState::GetWebViewNavigationProxy() const {
-  if (UNLIKELY(web_view_for_testing_))
+  if (web_view_for_testing_) [[unlikely]] {
     return web_view_for_testing_;
+  }
 
   return [web_controller_ webViewNavigationProxy];
 }
@@ -961,12 +1085,18 @@ WebStateImpl::RealizedWebState::GetWebViewNavigationProxy() const {
 void WebStateImpl::RealizedWebState::GoToBackForwardListItem(
     WKBackForwardListItem* wk_item,
     NavigationItem* item,
-    NavigationInitiationType type,
+    BackForwardNavigationType navigation_type,
+    NavigationInitiationType initiation_type,
     bool has_user_gesture) {
   return [web_controller_ goToBackForwardListItem:wk_item
                                    navigationItem:item
-                         navigationInitiationType:type
+                        backForwardNavigationType:navigation_type
+                         navigationInitiationType:initiation_type
                                    hasUserGesture:has_user_gesture];
+}
+
+void WebStateImpl::RealizedWebState::UpdateSSLStatusForCurrentNavigationItem() {
+  [web_controller_ updateSSLStatusForCurrentNavigationItem];
 }
 
 void WebStateImpl::RealizedWebState::RemoveWebView() {
@@ -979,26 +1109,21 @@ NavigationItemImpl* WebStateImpl::RealizedWebState::GetPendingItem() {
 
 #pragma mark - WebStateImpl::RealizedWebState private methods
 
-void WebStateImpl::RealizedWebState::NotifyObserversAndRemoveWebFrame(
-    WebFrame* frame) {
-  for (auto& observer : observers())
-    observer.WebFrameWillBecomeUnavailable(owner_, frame);
-
-  GetPageWorldWebFramesManager().RemoveFrameWithId(frame->GetFrameId());
-}
-
 std::unique_ptr<WebUIIOS> WebStateImpl::RealizedWebState::CreateWebUIIOS(
     const GURL& url) {
   WebUIIOSControllerFactory* factory =
       WebUIIOSControllerFactoryRegistry::GetInstance();
-  if (!factory)
+  if (!factory) {
     return nullptr;
+  }
   std::unique_ptr<WebUIIOS> web_ui = std::make_unique<WebUIIOSImpl>(owner_);
   auto controller = factory->CreateWebUIIOSControllerForURL(web_ui.get(), url);
-  if (!controller)
+  if (!controller) {
     return nullptr;
+  }
 
   web_ui->SetController(std::move(controller));
+
   return web_ui;
 }
 

@@ -5,13 +5,17 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_WIDGET_INPUT_WIDGET_INPUT_HANDLER_IMPL_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_WIDGET_INPUT_WIDGET_INPUT_HANDLER_IMPL_H_
 
+#include <variant>
+
 #include "base/memory/weak_ptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "build/build_config.h"
+#include "cc/input/browser_controls_offset_tag_modifications.h"
 #include "cc/input/browser_controls_state.h"
-#include "mojo/public/cpp/bindings/associated_receiver.h"
+#include "mojo/public/cpp/bindings/direct_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "third_party/blink/public/common/input/web_coalesced_input_event.h"
+#include "third_party/blink/public/mojom/dom/dom_node_id.mojom-blink.h"
 #include "third_party/blink/public/mojom/input/input_handler.mojom-blink.h"
 
 namespace blink {
@@ -50,21 +54,30 @@ class WidgetInputHandlerImpl : public mojom::blink::WidgetInputHandler {
                          const gfx::Range& range,
                          int32_t start,
                          int32_t end,
+                         mojom::blink::ImeState ime_state,
+                         mojom::blink::DOMNodeIdPtr target_dom_node_id,
                          ImeSetCompositionCallback callback) override;
   void ImeCommitText(const String& text,
                      const Vector<ui::ImeTextSpan>& ime_text_spans,
                      const gfx::Range& range,
                      int32_t relative_cursor_position,
+                     mojom::blink::DOMNodeIdPtr target_dom_node_id,
                      ImeCommitTextCallback callback) override;
+  void PasteIntoNode(const String& text,
+                     mojom::blink::DOMNodeIdPtr target_dom_node_id) override;
   void ImeFinishComposingText(bool keep_selection) override;
   void RequestTextInputStateUpdate() override;
   void RequestCompositionUpdates(bool immediate_request,
                                  bool monitor_request) override;
-  void DispatchEvent(std::unique_ptr<WebCoalescedInputEvent>,
-                     DispatchEventCallback callback) override;
+  void DispatchEvent(
+      std::unique_ptr<WebCoalescedInputEvent> event,
+      std::optional<std::unique_ptr<blink::WebCoalescedInputEvent>>
+          original_event_for_gesture,
+      DispatchEventCallback callback) override;
   void DispatchNonBlockingEvent(
       std::unique_ptr<WebCoalescedInputEvent>) override;
   void WaitForInputProcessed(WaitForInputProcessedCallback callback) override;
+  void PingMainThread(PingMainThreadCallback callback) override;
 #if BUILDFLAG(IS_ANDROID)
   void AttachSynchronousCompositor(
       mojo::PendingRemote<mojom::blink::SynchronousCompositorControlHost>
@@ -77,9 +90,12 @@ class WidgetInputHandlerImpl : public mojom::blink::WidgetInputHandler {
   void GetFrameWidgetInputHandler(
       mojo::PendingAssociatedReceiver<mojom::blink::FrameWidgetInputHandler>
           interface_request) override;
-  void UpdateBrowserControlsState(cc::BrowserControlsState constraints,
-                                  cc::BrowserControlsState current,
-                                  bool animate) override;
+  void UpdateBrowserControlsState(
+      cc::BrowserControlsState constraints,
+      cc::BrowserControlsState current,
+      bool animate,
+      const std::optional<cc::BrowserControlsOffsetTagModifications>&
+          offset_tag_modifications) override;
 
   void InputWasProcessed();
 
@@ -101,7 +117,9 @@ class WidgetInputHandlerImpl : public mojom::blink::WidgetInputHandler {
   // killed before we actually fully process the input.
   WaitForInputProcessedCallback input_processed_ack_;
 
-  mojo::Receiver<mojom::blink::WidgetInputHandler> receiver_{this};
+  using Receiver = mojo::Receiver<mojom::blink::WidgetInputHandler>;
+  using DirectReceiver = mojo::DirectReceiver<mojom::blink::WidgetInputHandler>;
+  std::variant<std::monostate, Receiver, DirectReceiver> receiver_;
 
   base::WeakPtrFactory<WidgetInputHandlerImpl> weak_ptr_factory_{this};
 };

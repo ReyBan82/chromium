@@ -12,15 +12,20 @@
 #include <string>
 #include <vector>
 
-#include "ash/components/arc/mojom/file_system.mojom-forward.h"
-#include "ash/components/arc/session/connection_observer.h"
+#include "base/containers/lru_cache.h"
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
+#include "base/threading/sequence_bound.h"
+#include "chrome/browser/ash/arc/fileapi/arc_content_url_allowlist.h"
 #include "chrome/browser/ash/arc/fileapi/arc_file_system_bridge.h"
 #include "chrome/browser/ash/arc/session/arc_session_manager_observer.h"
+#include "chromeos/ash/experiences/arc/mojom/file_system.mojom-forward.h"
+#include "chromeos/ash/experiences/arc/session/connection_observer.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "storage/browser/file_system/watcher_manager.h"
+#include "url/gurl.h"
 
 class BrowserContextKeyedServiceFactory;
 
@@ -33,6 +38,17 @@ class BrowserContext;
 }  // namespace content
 
 namespace arc {
+
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+// LINT.IfChange(ArcContentUrlGrantAccessResult)
+enum class ArcContentUrlGrantAccessResult {
+  kSuccess = 0,
+  kNoBrowserContext = 1,
+  kNoOperationRunner = 2,
+  kMaxValue = kNoOperationRunner,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/arc/enums.xml)
 
 class ArcBridgeService;
 
@@ -115,9 +131,13 @@ class ArcFileSystemOperationRunner
   // This instance will run all operations immediately without deferring by
   // default. Also, deferring can be enabled/disabled by calling
   // SetShouldDefer() from friend classes.
+  // `content_url_allowlist_cache_size` specifies the maximum capacity of the
+  // in-memory LRU cache inside `ArcContentUrlAllowlist`.
   static std::unique_ptr<ArcFileSystemOperationRunner> CreateForTesting(
       content::BrowserContext* context,
-      ArcBridgeService* bridge_service);
+      ArcBridgeService* bridge_service,
+      size_t content_url_allowlist_cache_size =
+          ArcContentUrlAllowlist::kLruCacheDefaultMaxSize);
 
   // Returns Factory instance for ArcFileSystemOperationRunner.
   static BrowserContextKeyedServiceFactory* GetFactory();
@@ -134,6 +154,11 @@ class ArcFileSystemOperationRunner
   // Adds or removes observers.
   void AddObserver(Observer* observer);
   void RemoveObserver(Observer* observer);
+
+  // Records `url` as a content URL that may be passed to the file system
+  // instance via the URL-based operations below. URLs that were not recorded
+  // via this method are rejected.
+  void GrantAccessToContentUrl(const GURL& url);
 
   // Runs file system operations. See file_system.mojom for documentation.
   void GetFileSize(const GURL& url, GetFileSizeCallback callback);
@@ -209,9 +234,14 @@ class ArcFileSystemOperationRunner
   friend class ArcFileSystemOperationRunnerTest;
   friend class ash::RecentArcMediaSourceTest;
 
-  ArcFileSystemOperationRunner(content::BrowserContext* context,
-                               ArcBridgeService* bridge_service,
-                               bool set_should_defer_by_events);
+  // `content_url_allowlist_cache_size` specifies the maximum capacity of the
+  // in-memory LRU cache inside `ArcContentUrlAllowlist`.
+  ArcFileSystemOperationRunner(
+      content::BrowserContext* context,
+      ArcBridgeService* bridge_service,
+      bool set_should_defer_by_events,
+      size_t content_url_allowlist_cache_size =
+          ArcContentUrlAllowlist::kLruCacheDefaultMaxSize);
 
   void OnWatcherAdded(const WatcherCallback& watcher_callback,
                       AddWatcherCallback callback,
@@ -225,9 +255,34 @@ class ArcFileSystemOperationRunner
   // deferring.
   void SetShouldDefer(bool should_defer);
 
+  // Returns whether `url` was previously recorded via
+  // GrantAccessToContentUrl().
+  void IsContentUrlAccessible(const GURL& url,
+                              base::OnceCallback<void(bool)> callback);
+
+  void GetFileSizeAfterAccessCheck(const GURL& url,
+                                   GetFileSizeCallback callback,
+                                   bool accessible);
+  void GetMimeTypeAfterAccessCheck(const GURL& url,
+                                   GetMimeTypeCallback callback,
+                                   bool accessible);
+  void OpenThumbnailAfterAccessCheck(const GURL& url,
+                                     const gfx::Size& size,
+                                     OpenThumbnailCallback callback,
+                                     bool accessible);
+  void OpenFileSessionToWriteAfterAccessCheck(
+      const GURL& url,
+      OpenFileSessionToWriteCallback callback,
+      bool accessible);
+  void OpenFileSessionToReadAfterAccessCheck(
+      const GURL& url,
+      OpenFileSessionToReadCallback callback,
+      bool accessible);
+
   // Maybe nullptr in unittests.
-  content::BrowserContext* const context_;
-  ArcBridgeService* const arc_bridge_service_;  // Owned by ArcServiceManager
+  const raw_ptr<content::BrowserContext> context_;
+  const raw_ptr<ArcBridgeService>
+      arc_bridge_service_;  // Owned by ArcServiceManager
 
   // Indicates if this instance should enable/disable deferring by events.
   // Usually true, but set to false in unit tests.
@@ -240,6 +295,9 @@ class ArcFileSystemOperationRunner
 
   // List of deferred operations.
   std::vector<base::OnceClosure> deferred_operations_;
+
+  // Two-level cache of content URLs that have been granted access.
+  ArcContentUrlAllowlist content_url_allowlist_;
 
   // Map from a watcher ID to a watcher callback.
   std::map<int64_t, WatcherCallback> watcher_callbacks_;

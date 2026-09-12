@@ -14,6 +14,8 @@ source_set("public") {
     "display_agent.h",
     "features.cc",
     "features.h",
+    "finds_agent.cc",
+    "finds_agent.h",
     "icon_bundle.cc",
     "icon_bundle.h",
     "impression_detail.cc",
@@ -21,6 +23,8 @@ source_set("public") {
     "notification_background_task_scheduler.h",
     "notification_data.cc",
     "notification_data.h",
+    "notification_entry.cc",
+    "notification_entry.h",
     "notification_params.cc",
     "notification_params.h",
     "notification_schedule_service.h",
@@ -36,13 +40,22 @@ source_set("public") {
     "schedule_service_utils.h",
     "throttle_config.cc",
     "throttle_config.h",
+    "tips_agent.cc",
+    "tips_agent.h",
     "user_action_handler.h",
   ]
 
-  deps = [
+  public_deps = [
     "//base",
+    "//chrome/browser/tips/core:types",
+  ]
+  deps = [
+    "//chrome/app:generated_resources",
+    "//chrome/common",
     "//components/keyed_service/core",
+    "//components/pref_registry",
     "//skia",
+    "//ui/base",
   ]
 }
 
@@ -57,9 +70,11 @@ source_set("unit_tests") {
   sources = [ "schedule_service_utils_unittest.cc" ]
 
   deps = [
+    "//chrome/app:generated_resources",
     "//chrome/browser/notifications/scheduler/public",
     "//chrome/browser/notifications/scheduler/test:test_lib",
     "//chrome/browser/notifications/scheduler/test:test_support",
     "//testing/gtest",
+    "//ui/base",
   ]
 }

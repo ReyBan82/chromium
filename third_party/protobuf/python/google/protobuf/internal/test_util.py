@@ -1,32 +1,9 @@
 # Protocol Buffers - Google's data interchange format
 # Copyright 2008 Google Inc.  All rights reserved.
-# https://developers.google.com/protocol-buffers/
 #
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are
-# met:
-#
-#     * Redistributions of source code must retain the above copyright
-# notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above
-# copyright notice, this list of conditions and the following disclaimer
-# in the documentation and/or other materials provided with the
-# distribution.
-#     * Neither the name of Google Inc. nor the names of its
-# contributors may be used to endorse or promote products derived from
-# this software without specific prior written permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-# "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-# A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-# OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file or at
+# https://developers.google.com/open-source/licenses/bsd
 
 """Utilities for Python proto2 tests.
 
@@ -36,24 +13,27 @@ This is intentionally modeled on C++ code in
 
 __author__ = 'robinson@google.com (Will Robinson)'
 
+import importlib.resources
 import numbers
 import operator
 import os.path
 
+from google.protobuf import testdata
 from google.protobuf import unittest_import_pb2
 from google.protobuf import unittest_pb2
 
 try:
-  long        # Python 2
+  long  # Python 2
 except NameError:
   long = int  # Python 3
 
 
-# Tests whether the given TestAllTypes message is proto2 or not.
+# Tests whether the given TestAllTypes message is
+# protobuf_unittest.TestAllTypes or not.
 # This is used to gate several fields/features that only exist
-# for the proto2 version of the message.
+# for the protobuf_unittest version of the message.
 def IsProto2(message):
-  return message.DESCRIPTOR.syntax == "proto2"
+  return message.DESCRIPTOR.full_name == 'proto2_unittest.TestAllTypes'
 
 
 def SetAllNonLazyFields(message):
@@ -67,36 +47,42 @@ def SetAllNonLazyFields(message):
   # Optional fields.
   #
 
-  message.optional_int32    = 101
-  message.optional_int64    = 102
-  message.optional_uint32   = 103
-  message.optional_uint64   = 104
-  message.optional_sint32   = 105
-  message.optional_sint64   = 106
-  message.optional_fixed32  = 107
-  message.optional_fixed64  = 108
+  message.optional_int32 = 101
+  message.optional_int64 = 102
+  message.optional_uint32 = 103
+  message.optional_uint64 = 104
+  message.optional_sint32 = 105
+  message.optional_sint64 = 106
+  message.optional_fixed32 = 107
+  message.optional_fixed64 = 108
   message.optional_sfixed32 = 109
   message.optional_sfixed64 = 110
-  message.optional_float    = 111
-  message.optional_double   = 112
-  message.optional_bool     = True
-  message.optional_string   = u'115'
-  message.optional_bytes    = b'116'
+  message.optional_float = 111
+  message.optional_double = 112
+  message.optional_bool = True
+  message.optional_string = '115'
+  message.optional_bytes = b'116'
 
   if IsProto2(message):
     message.optionalgroup.a = 117
   message.optional_nested_message.bb = 118
   message.optional_foreign_message.c = 119
-  message.optional_import_message.d = 120
-  message.optional_public_import_message.e = 126
+  if hasattr(message, 'optional_import_message'):
+    message.optional_import_message.d = 120
+  if hasattr(message, 'optional_public_import_message'):
+    message.optional_public_import_message.e = 126
+  if hasattr(message, 'optional_proto2_message'):
+    SetAllFields(message.optional_proto2_message)
 
   message.optional_nested_enum = unittest_pb2.TestAllTypes.BAZ
   message.optional_foreign_enum = unittest_pb2.FOREIGN_BAZ
   if IsProto2(message):
     message.optional_import_enum = unittest_import_pb2.IMPORT_BAZ
 
-  message.optional_string_piece = u'124'
-  message.optional_cord = u'125'
+  message.optional_string_piece = '124'
+  message.optional_cord = '125'
+  if hasattr(message, 'optional_bytes_cord'):
+    message.optional_bytes_cord = b'optional bytes cord'
 
   #
   # Repeated fields.
@@ -115,14 +101,15 @@ def SetAllNonLazyFields(message):
   message.repeated_float.append(211)
   message.repeated_double.append(212)
   message.repeated_bool.append(True)
-  message.repeated_string.append(u'215')
+  message.repeated_string.append('215')
   message.repeated_bytes.append(b'216')
 
   if IsProto2(message):
     message.repeatedgroup.add().a = 217
   message.repeated_nested_message.add().bb = 218
   message.repeated_foreign_message.add().c = 219
-  message.repeated_import_message.add().d = 220
+  if hasattr(message, 'repeated_import_message'):
+    message.repeated_import_message.add().d = 220
   message.repeated_lazy_message.add().bb = 227
 
   message.repeated_nested_enum.append(unittest_pb2.TestAllTypes.BAR)
@@ -130,8 +117,8 @@ def SetAllNonLazyFields(message):
   if IsProto2(message):
     message.repeated_import_enum.append(unittest_import_pb2.IMPORT_BAR)
 
-  message.repeated_string_piece.append(u'224')
-  message.repeated_cord.append(u'225')
+  message.repeated_string_piece.append('224')
+  message.repeated_cord.append('225')
 
   # Add a second one of each field and set value by index.
   message.repeated_int32.append(0)
@@ -147,7 +134,7 @@ def SetAllNonLazyFields(message):
   message.repeated_float.append(0)
   message.repeated_double.append(0)
   message.repeated_bool.append(True)
-  message.repeated_string.append(u'0')
+  message.repeated_string.append('0')
   message.repeated_bytes.append(b'0')
   message.repeated_int32[1] = 301
   message.repeated_int64[1] = 302
@@ -162,14 +149,15 @@ def SetAllNonLazyFields(message):
   message.repeated_float[1] = 311
   message.repeated_double[1] = 312
   message.repeated_bool[1] = False
-  message.repeated_string[1] = u'315'
+  message.repeated_string[1] = '315'
   message.repeated_bytes[1] = b'316'
 
   if IsProto2(message):
     message.repeatedgroup.add().a = 317
   message.repeated_nested_message.add().bb = 318
   message.repeated_foreign_message.add().c = 319
-  message.repeated_import_message.add().d = 320
+  if hasattr(message, 'repeated_import_message'):
+    message.repeated_import_message.add().d = 320
   message.repeated_lazy_message.add().bb = 327
 
   message.repeated_nested_enum.append(unittest_pb2.TestAllTypes.BAR)
@@ -178,8 +166,8 @@ def SetAllNonLazyFields(message):
   if IsProto2(message):
     message.repeated_import_enum.append(unittest_import_pb2.IMPORT_BAZ)
 
-  message.repeated_string_piece.append(u'324')
-  message.repeated_cord.append(u'325')
+  message.repeated_string_piece.append('324')
+  message.repeated_cord.append('325')
 
   #
   # Fields that have defaults.
@@ -212,12 +200,15 @@ def SetAllNonLazyFields(message):
   message.oneof_uint32 = 601
   message.oneof_nested_message.bb = 602
   message.oneof_string = '603'
-  message.oneof_bytes = b'604'
+  if hasattr(message, 'oneof_bytes'):
+    message.oneof_bytes = b'604'
 
 
 def SetAllFields(message):
   SetAllNonLazyFields(message)
   message.optional_lazy_message.bb = 127
+  if hasattr(message, 'optional_unverified_lazy_message'):
+    message.optional_unverified_lazy_message.bb = 128
 
 
 def SetAllExtensions(message):
@@ -248,7 +239,7 @@ def SetAllExtensions(message):
   extensions[pb2.optional_float_extension] = 111
   extensions[pb2.optional_double_extension] = 112
   extensions[pb2.optional_bool_extension] = True
-  extensions[pb2.optional_string_extension] = u'115'
+  extensions[pb2.optional_string_extension] = '115'
   extensions[pb2.optional_bytes_extension] = b'116'
 
   extensions[pb2.optionalgroup_extension].a = 117
@@ -257,14 +248,16 @@ def SetAllExtensions(message):
   extensions[pb2.optional_import_message_extension].d = 120
   extensions[pb2.optional_public_import_message_extension].e = 126
   extensions[pb2.optional_lazy_message_extension].bb = 127
+  extensions[pb2.optional_unverified_lazy_message_extension].bb = 128
 
   extensions[pb2.optional_nested_enum_extension] = pb2.TestAllTypes.BAZ
   extensions[pb2.optional_nested_enum_extension] = pb2.TestAllTypes.BAZ
   extensions[pb2.optional_foreign_enum_extension] = pb2.FOREIGN_BAZ
   extensions[pb2.optional_import_enum_extension] = import_pb2.IMPORT_BAZ
 
-  extensions[pb2.optional_string_piece_extension] = u'124'
-  extensions[pb2.optional_cord_extension] = u'125'
+  extensions[pb2.optional_string_piece_extension] = '124'
+  extensions[pb2.optional_cord_extension] = '125'
+  extensions[pb2.optional_bytes_cord_extension] = b'optional bytes cord'
 
   #
   # Repeated fields.
@@ -283,7 +276,7 @@ def SetAllExtensions(message):
   extensions[pb2.repeated_float_extension].append(211)
   extensions[pb2.repeated_double_extension].append(212)
   extensions[pb2.repeated_bool_extension].append(True)
-  extensions[pb2.repeated_string_extension].append(u'215')
+  extensions[pb2.repeated_string_extension].append('215')
   extensions[pb2.repeated_bytes_extension].append(b'216')
 
   extensions[pb2.repeatedgroup_extension].add().a = 217
@@ -296,8 +289,8 @@ def SetAllExtensions(message):
   extensions[pb2.repeated_foreign_enum_extension].append(pb2.FOREIGN_BAR)
   extensions[pb2.repeated_import_enum_extension].append(import_pb2.IMPORT_BAR)
 
-  extensions[pb2.repeated_string_piece_extension].append(u'224')
-  extensions[pb2.repeated_cord_extension].append(u'225')
+  extensions[pb2.repeated_string_piece_extension].append('224')
+  extensions[pb2.repeated_cord_extension].append('225')
 
   # Append a second one of each field.
   extensions[pb2.repeated_int32_extension].append(301)
@@ -313,7 +306,7 @@ def SetAllExtensions(message):
   extensions[pb2.repeated_float_extension].append(311)
   extensions[pb2.repeated_double_extension].append(312)
   extensions[pb2.repeated_bool_extension].append(False)
-  extensions[pb2.repeated_string_extension].append(u'315')
+  extensions[pb2.repeated_string_extension].append('315')
   extensions[pb2.repeated_bytes_extension].append(b'316')
 
   extensions[pb2.repeatedgroup_extension].add().a = 317
@@ -326,8 +319,8 @@ def SetAllExtensions(message):
   extensions[pb2.repeated_foreign_enum_extension].append(pb2.FOREIGN_BAZ)
   extensions[pb2.repeated_import_enum_extension].append(import_pb2.IMPORT_BAZ)
 
-  extensions[pb2.repeated_string_piece_extension].append(u'324')
-  extensions[pb2.repeated_cord_extension].append(u'325')
+  extensions[pb2.repeated_string_piece_extension].append('324')
+  extensions[pb2.repeated_cord_extension].append('325')
 
   #
   # Fields with defaults.
@@ -346,19 +339,19 @@ def SetAllExtensions(message):
   extensions[pb2.default_float_extension] = 411
   extensions[pb2.default_double_extension] = 412
   extensions[pb2.default_bool_extension] = False
-  extensions[pb2.default_string_extension] = u'415'
+  extensions[pb2.default_string_extension] = '415'
   extensions[pb2.default_bytes_extension] = b'416'
 
   extensions[pb2.default_nested_enum_extension] = pb2.TestAllTypes.FOO
   extensions[pb2.default_foreign_enum_extension] = pb2.FOREIGN_FOO
   extensions[pb2.default_import_enum_extension] = import_pb2.IMPORT_FOO
 
-  extensions[pb2.default_string_piece_extension] = u'424'
+  extensions[pb2.default_string_piece_extension] = '424'
   extensions[pb2.default_cord_extension] = '425'
 
   extensions[pb2.oneof_uint32_extension] = 601
   extensions[pb2.oneof_nested_message_extension].bb = 602
-  extensions[pb2.oneof_string_extension] = u'603'
+  extensions[pb2.oneof_string_extension] = '603'
   extensions[pb2.oneof_bytes_extension] = b'604'
 
 
@@ -377,6 +370,7 @@ def SetAllFieldsAndExtensions(message):
 
 def ExpectAllFieldsAndExtensionsInOrder(serialized):
   """Ensures that serialized is the serialization we expect for a message
+
   filled with SetAllFieldsAndExtensions().  (Specifically, ensures that the
   serialization is in canonical, tag-number order).
   """
@@ -441,6 +435,7 @@ def ExpectAllFieldsSet(test_case, message):
 
   test_case.assertTrue(message.HasField('optional_string_piece'))
   test_case.assertTrue(message.HasField('optional_cord'))
+  test_case.assertTrue(message.HasField('optional_bytes_cord'))
 
   test_case.assertEqual(101, message.optional_int32)
   test_case.assertEqual(102, message.optional_int64)
@@ -465,14 +460,16 @@ def ExpectAllFieldsSet(test_case, message):
   test_case.assertEqual(120, message.optional_import_message.d)
   test_case.assertEqual(126, message.optional_public_import_message.e)
   test_case.assertEqual(127, message.optional_lazy_message.bb)
+  test_case.assertEqual(128, message.optional_unverified_lazy_message.bb)
 
-  test_case.assertEqual(unittest_pb2.TestAllTypes.BAZ,
-                        message.optional_nested_enum)
-  test_case.assertEqual(unittest_pb2.FOREIGN_BAZ,
-                        message.optional_foreign_enum)
+  test_case.assertEqual(
+      unittest_pb2.TestAllTypes.BAZ, message.optional_nested_enum
+  )
+  test_case.assertEqual(unittest_pb2.FOREIGN_BAZ, message.optional_foreign_enum)
   if IsProto2(message):
-    test_case.assertEqual(unittest_import_pb2.IMPORT_BAZ,
-                          message.optional_import_enum)
+    test_case.assertEqual(
+        unittest_import_pb2.IMPORT_BAZ, message.optional_import_enum
+    )
 
   # -----------------------------------------------------------------
 
@@ -528,13 +525,16 @@ def ExpectAllFieldsSet(test_case, message):
   test_case.assertEqual(220, message.repeated_import_message[0].d)
   test_case.assertEqual(227, message.repeated_lazy_message[0].bb)
 
-  test_case.assertEqual(unittest_pb2.TestAllTypes.BAR,
-                        message.repeated_nested_enum[0])
-  test_case.assertEqual(unittest_pb2.FOREIGN_BAR,
-                        message.repeated_foreign_enum[0])
+  test_case.assertEqual(
+      unittest_pb2.TestAllTypes.BAR, message.repeated_nested_enum[0]
+  )
+  test_case.assertEqual(
+      unittest_pb2.FOREIGN_BAR, message.repeated_foreign_enum[0]
+  )
   if IsProto2(message):
-    test_case.assertEqual(unittest_import_pb2.IMPORT_BAR,
-                          message.repeated_import_enum[0])
+    test_case.assertEqual(
+        unittest_import_pb2.IMPORT_BAR, message.repeated_import_enum[0]
+    )
 
   test_case.assertEqual(301, message.repeated_int32[1])
   test_case.assertEqual(302, message.repeated_int64[1])
@@ -559,13 +559,16 @@ def ExpectAllFieldsSet(test_case, message):
   test_case.assertEqual(320, message.repeated_import_message[1].d)
   test_case.assertEqual(327, message.repeated_lazy_message[1].bb)
 
-  test_case.assertEqual(unittest_pb2.TestAllTypes.BAZ,
-                        message.repeated_nested_enum[1])
-  test_case.assertEqual(unittest_pb2.FOREIGN_BAZ,
-                        message.repeated_foreign_enum[1])
+  test_case.assertEqual(
+      unittest_pb2.TestAllTypes.BAZ, message.repeated_nested_enum[1]
+  )
+  test_case.assertEqual(
+      unittest_pb2.FOREIGN_BAZ, message.repeated_foreign_enum[1]
+  )
   if IsProto2(message):
-    test_case.assertEqual(unittest_import_pb2.IMPORT_BAZ,
-                          message.repeated_import_enum[1])
+    test_case.assertEqual(
+        unittest_import_pb2.IMPORT_BAZ, message.repeated_import_enum[1]
+    )
 
   # -----------------------------------------------------------------
 
@@ -606,12 +609,15 @@ def ExpectAllFieldsSet(test_case, message):
     test_case.assertEqual('415', message.default_string)
     test_case.assertEqual(b'416', message.default_bytes)
 
-    test_case.assertEqual(unittest_pb2.TestAllTypes.FOO,
-                          message.default_nested_enum)
-    test_case.assertEqual(unittest_pb2.FOREIGN_FOO,
-                          message.default_foreign_enum)
-    test_case.assertEqual(unittest_import_pb2.IMPORT_FOO,
-                          message.default_import_enum)
+    test_case.assertEqual(
+        unittest_pb2.TestAllTypes.FOO, message.default_nested_enum
+    )
+    test_case.assertEqual(
+        unittest_pb2.FOREIGN_FOO, message.default_foreign_enum
+    )
+    test_case.assertEqual(
+        unittest_import_pb2.IMPORT_FOO, message.default_import_enum
+    )
 
 
 def GoldenFile(filename):
@@ -626,18 +632,27 @@ def GoldenFile(filename):
       return open(full_path, 'rb')
     path = os.path.join(path, '..')
 
-  # Search internally.
-  path = '.'
-  full_path = os.path.join(path, 'third_party/py/google/protobuf/testdata',
-                           filename)
+  # Search for cross-repo path.
+  full_path = os.path.join(
+      'external/com_google_protobuf/src/google/protobuf/testdata', filename
+  )
   if os.path.exists(full_path):
     # Found it.  Load the golden file from the testdata directory.
     return open(full_path, 'rb')
 
+  try:
+    full_path = importlib.resources.files(testdata) / filename
+    if os.path.exists(full_path):
+      return open(full_path, 'rb')
+  except AttributeError:
+    # Fallback for Python < 3.9
+    return importlib.resources.open_binary(testdata, filename)
+
   raise RuntimeError(
       'Could not find golden files.  This test must be run from within the '
       'protobuf source package so that it can read test data files from the '
-      'C++ source tree.')
+      'C++ source tree.'
+  )
 
 
 def GoldenFileData(filename):
@@ -665,8 +680,9 @@ def SetAllPackedFields(message):
   message.packed_float.extend([611.0, 711.0])
   message.packed_double.extend([612.0, 712.0])
   message.packed_bool.extend([True, False])
-  message.packed_enum.extend([unittest_pb2.FOREIGN_BAR,
-                              unittest_pb2.FOREIGN_BAZ])
+  message.packed_enum.extend(
+      [unittest_pb2.FOREIGN_BAR, unittest_pb2.FOREIGN_BAZ]
+  )
 
 
 def SetAllPackedExtensions(message):
@@ -691,8 +707,9 @@ def SetAllPackedExtensions(message):
   extensions[pb2.packed_float_extension].extend([611.0, 711.0])
   extensions[pb2.packed_double_extension].extend([612.0, 712.0])
   extensions[pb2.packed_bool_extension].extend([True, False])
-  extensions[pb2.packed_enum_extension].extend([unittest_pb2.FOREIGN_BAR,
-                                                unittest_pb2.FOREIGN_BAZ])
+  extensions[pb2.packed_enum_extension].extend(
+      [unittest_pb2.FOREIGN_BAR, unittest_pb2.FOREIGN_BAZ]
+  )
 
 
 def SetAllUnpackedFields(message):
@@ -714,8 +731,9 @@ def SetAllUnpackedFields(message):
   message.unpacked_float.extend([611.0, 711.0])
   message.unpacked_double.extend([612.0, 712.0])
   message.unpacked_bool.extend([True, False])
-  message.unpacked_enum.extend([unittest_pb2.FOREIGN_BAR,
-                                unittest_pb2.FOREIGN_BAZ])
+  message.unpacked_enum.extend(
+      [unittest_pb2.FOREIGN_BAR, unittest_pb2.FOREIGN_BAZ]
+  )
 
 
 class NonStandardInteger(numbers.Integral):

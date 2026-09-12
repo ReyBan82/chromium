@@ -31,13 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_PUBLIC_PLATFORM_MAC_WEB_SCROLLBAR_THEME_H_
 #define THIRD_PARTY_BLINK_PUBLIC_PLATFORM_MAC_WEB_SCROLLBAR_THEME_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
+
 #include "third_party/blink/public/platform/web_common.h"
 
 namespace blink {
-
-// This enum must match NSScrollerStyle in the 10.7 SDK.
-enum ScrollerStyle { kScrollerStyleLegacy = 0, kScrollerStyleOverlay = 1 };
 
 class WebScrollbarTheme {
  public:
@@ -46,14 +44,11 @@ class WebScrollbarTheme {
   // NSUserDefaults.
   // |autoscrollButtonDelay| is the current value of NSScrollerButtonPeriod from
   // NSUserDefaults.
-  // |preferredScrollerStyle| is the current value of +[NSScroller
-  // preferredScrollerStyle].
   // |redraw| is true if the update requires a redraw to include the change.
   // |jump_on_track_click| is the current value of AppleScrollerPagingBehavior.
   BLINK_EXPORT static void UpdateScrollbarsWithNSDefaults(
-      absl::optional<float> initial_button_delay,
-      absl::optional<float> autoscroll_button_delay,
-      ScrollerStyle preferred_scroller_style,
+      std::optional<float> initial_button_delay,
+      std::optional<float> autoscroll_button_delay,
       bool redraw,
       bool jump_on_track_click);
 };

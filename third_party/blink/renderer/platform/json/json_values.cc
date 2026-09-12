@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "base/compiler_specific.h"
 #include "base/notreached.h"
 #include "third_party/blink/renderer/platform/wtf/decimal.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
@@ -71,9 +72,8 @@ inline bool EscapeChar(UChar c, StringBuilder* dst) {
   return true;
 }
 
-const LChar kHexDigits[17] = "0123456789ABCDEF";
-
 void AppendUnsignedAsHex(UChar number, StringBuilder* dst) {
+  constexpr auto kHexDigits = base::span_from_cstring("0123456789ABCDEF");
   dst->Append("\\u");
   for (size_t i = 0; i < 4; ++i) {
     dst->Append(kHexDigits[(number & 0xF000) >> 12]);
@@ -88,18 +88,13 @@ void WriteIndent(int depth, StringBuilder* output) {
 
 }  // anonymous namespace
 
-const char kJSONNullString[] = "null";
-const char kJSONTrueString[] = "true";
-const char kJSONFalseString[] = "false";
-
-void EscapeStringForJSON(const String& str, StringBuilder* dst) {
+void EscapeStringForJSON(const StringView& str, StringBuilder* dst) {
   for (unsigned i = 0; i < str.length(); ++i) {
-    UChar c = str[i];
+    // SAFETY: length check above.
+    UChar c = UNSAFE_BUFFERS(str[i]);
     if (!EscapeChar(c, dst)) {
-      if (c < 32 || c > 126 || c == '<' || c == '>') {
+      if (c < 32 || c == '<' || c == '>') {
         // 1. Escaping <, > to prevent script execution.
-        // 2. Technically, we could also pass through c > 126 as UTF8, but this
-        //    is also optional. It would also be a pain to implement here.
         AppendUnsignedAsHex(c, dst);
       } else {
         dst->Append(c);
@@ -108,16 +103,16 @@ void EscapeStringForJSON(const String& str, StringBuilder* dst) {
   }
 }
 
-void DoubleQuoteStringForJSON(const String& str, StringBuilder* dst) {
+void DoubleQuoteStringForJSON(const StringView& str, StringBuilder* dst) {
   dst->Append('"');
   EscapeStringForJSON(str, dst);
   dst->Append('"');
 }
 
-String JSONValue::QuoteString(const String& input) {
+String JSONValue::QuoteString(const StringView& input) {
   StringBuilder builder;
   DoubleQuoteStringForJSON(input, &builder);
-  return builder.ToString();
+  return builder.ReleaseString();
 }
 
 bool JSONValue::AsBoolean(bool*) const {
@@ -152,7 +147,7 @@ String JSONValue::ToPrettyJSONString() const {
 
 void JSONValue::WriteJSON(StringBuilder* output) const {
   DCHECK(type_ == kTypeNull);
-  output->Append(kJSONNullString, 4);
+  output->Append(base::byte_span_from_cstring(kJSONNullString));
 }
 
 void JSONValue::PrettyWriteJSON(StringBuilder* output) const {
@@ -200,12 +195,12 @@ void JSONBasicValue::WriteJSON(StringBuilder* output) const {
          GetType() == kTypeDouble);
   if (GetType() == kTypeBoolean) {
     if (bool_value_)
-      output->Append(kJSONTrueString, 4);
+      output->Append(base::byte_span_from_cstring(kJSONTrueString));
     else
-      output->Append(kJSONFalseString, 5);
+      output->Append(base::byte_span_from_cstring(kJSONFalseString));
   } else if (GetType() == kTypeDouble) {
     if (!std::isfinite(double_value_)) {
-      output->Append(kJSONNullString, 4);
+      output->Append(base::byte_span_from_cstring(kJSONNullString));
       return;
     }
     output->Append(Decimal::FromDouble(double_value_).ToString());
@@ -225,7 +220,6 @@ std::unique_ptr<JSONValue> JSONBasicValue::Clone() const {
     default:
       NOTREACHED();
   }
-  return nullptr;
 }
 
 bool JSONString::AsString(String* output) const {
@@ -244,35 +238,35 @@ std::unique_ptr<JSONValue> JSONString::Clone() const {
 
 JSONObject::~JSONObject() = default;
 
-void JSONObject::SetBoolean(const String& name, bool value) {
-  SetValue(name, std::make_unique<JSONBasicValue>(value));
+bool JSONObject::SetBoolean(const String& name, bool value) {
+  return SetValue(name, std::make_unique<JSONBasicValue>(value));
 }
 
-void JSONObject::SetInteger(const String& name, int value) {
-  SetValue(name, std::make_unique<JSONBasicValue>(value));
+bool JSONObject::SetInteger(const String& name, int value) {
+  return SetValue(name, std::make_unique<JSONBasicValue>(value));
 }
 
-void JSONObject::SetDouble(const String& name, double value) {
-  SetValue(name, std::make_unique<JSONBasicValue>(value));
+bool JSONObject::SetDouble(const String& name, double value) {
+  return SetValue(name, std::make_unique<JSONBasicValue>(value));
 }
 
-void JSONObject::SetString(const String& name, const String& value) {
-  SetValue(name, std::make_unique<JSONString>(value));
+bool JSONObject::SetString(const String& name, const String& value) {
+  return SetValue(name, std::make_unique<JSONString>(value));
 }
 
-void JSONObject::SetValue(const String& name,
+bool JSONObject::SetValue(const String& name,
                           std::unique_ptr<JSONValue> value) {
-  Set(name, value);
+  return Set(name, value);
 }
 
-void JSONObject::SetObject(const String& name,
+bool JSONObject::SetObject(const String& name,
                            std::unique_ptr<JSONObject> value) {
-  Set(name, value);
+  return Set(name, value);
 }
 
-void JSONObject::SetArray(const String& name,
+bool JSONObject::SetArray(const String& name,
                           std::unique_ptr<JSONArray> value) {
-  Set(name, value);
+  return Set(name, value);
 }
 
 bool JSONObject::GetBoolean(const String& name, bool* output) const {

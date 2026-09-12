@@ -4,12 +4,14 @@
 
 #include "chrome/browser/downgrade/snapshot_manager.h"
 
-#include "base/containers/adapters.h"
+#include <ranges>
+
 #include "base/files/file.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/strings/string_number_conversions.h"
+#include "chrome/browser/downgrade/downgrade_manager_delegate.h"
 #include "chrome/browser/downgrade/downgrade_utils.h"
 #include "chrome/browser/downgrade/snapshot_file_collector.h"
 #include "chrome/browser/downgrade/user_data_downgrade.h"
@@ -19,35 +21,35 @@ namespace downgrade {
 
 namespace {
 
-constexpr base::FilePath::StringPieceType kSomeFolder =
+constexpr base::FilePath::StringViewType kSomeFolder =
     FILE_PATH_LITERAL("Some Folder");
-constexpr base::FilePath::StringPieceType kSomeFile =
+constexpr base::FilePath::StringViewType kSomeFile =
     FILE_PATH_LITERAL("Some File");
-constexpr base::FilePath::StringPieceType kSomeFolderFile =
+constexpr base::FilePath::StringViewType kSomeFolderFile =
     FILE_PATH_LITERAL("A File");
-constexpr base::FilePath::StringPieceType kSomeSubFolder =
+constexpr base::FilePath::StringViewType kSomeSubFolder =
     FILE_PATH_LITERAL("Some Sub Folder");
-constexpr base::FilePath::StringPieceType kSomeSubFile =
+constexpr base::FilePath::StringViewType kSomeSubFile =
     FILE_PATH_LITERAL("Some Sub File");
 
-constexpr base::FilePath::StringPieceType kUserDataFolder =
+constexpr base::FilePath::StringViewType kUserDataFolder =
     FILE_PATH_LITERAL("User Data Folder");
-constexpr base::FilePath::StringPieceType kProfileDataFolder =
+constexpr base::FilePath::StringViewType kProfileDataFolder =
     FILE_PATH_LITERAL("Profile Data Folder");
-constexpr base::FilePath::StringPieceType kUserDataFile =
+constexpr base::FilePath::StringViewType kUserDataFile =
     FILE_PATH_LITERAL("User Data File");
-constexpr base::FilePath::StringPieceType kProfileDataFile =
+constexpr base::FilePath::StringViewType kProfileDataFile =
     FILE_PATH_LITERAL("Profile Data File");
-constexpr base::FilePath::StringPieceType kProfileDataJournalFile =
+constexpr base::FilePath::StringViewType kProfileDataJournalFile =
     FILE_PATH_LITERAL("Profile Data File-journal");
-constexpr base::FilePath::StringPieceType kProfileDataExtFile =
+constexpr base::FilePath::StringViewType kProfileDataExtFile =
     FILE_PATH_LITERAL("Profile Data File.ext");
-constexpr base::FilePath::StringPieceType kProfileDataExtWalFile =
+constexpr base::FilePath::StringViewType kProfileDataExtWalFile =
     FILE_PATH_LITERAL("Profile Data File.ext-wal");
-constexpr base::FilePath::StringPieceType kProfileDataExtShmFile =
+constexpr base::FilePath::StringViewType kProfileDataExtShmFile =
     FILE_PATH_LITERAL("Profile Data File.ext-shm");
 
-constexpr std::array<base::FilePath::StringPieceType, 3>
+constexpr std::array<base::FilePath::StringViewType, 3>
     kProfileDirectoryBaseNames = {FILE_PATH_LITERAL("Default"),
                                   FILE_PATH_LITERAL("Profile 1"),
                                   FILE_PATH_LITERAL("Profile 2")};
@@ -111,33 +113,30 @@ class TestFolderAndFiles {
 
 }  // namespace
 
-class TestSnapshotManager : public SnapshotManager {
+class TestDowngradeManagerDelegate : public DowngradeManagerDelegate {
  public:
-  explicit TestSnapshotManager(base::FilePath path) : SnapshotManager(path) {}
-  ~TestSnapshotManager() = default;
+  TestDowngradeManagerDelegate() = default;
+  ~TestDowngradeManagerDelegate() override = default;
 
- private:
-  std::vector<SnapshotItemDetails> GetUserSnapshotItemDetails() const override {
+  int GetMaxNumberOfSnapshots() const override { return 3; }
+  bool UserDataSnapshotEnabled() const override { return true; }
+  base::FilePath GetDiskCacheDir() const override { return base::FilePath(); }
+
+  std::vector<SnapshotItemDetails> GetUserDataSnapshotItems() const override {
     return std::vector<SnapshotItemDetails>{
         SnapshotItemDetails(base::FilePath(kUserDataFile),
-                            SnapshotItemDetails::ItemType::kFile, 0,
-                            SnapshotItemId::kMaxValue),
+                            SnapshotItemDetails::ItemType::kFile, 0),
         SnapshotItemDetails(base::FilePath(kUserDataFolder),
-                            SnapshotItemDetails::ItemType::kDirectory, 0,
-                            SnapshotItemId::kMaxValue)};
+                            SnapshotItemDetails::ItemType::kDirectory, 0)};
   }
-  std::vector<SnapshotItemDetails> GetProfileSnapshotItemDetails()
-      const override {
+  std::vector<SnapshotItemDetails> GetProfileSnapshotItems() const override {
     return std::vector<SnapshotItemDetails>{
         SnapshotItemDetails(base::FilePath(kProfileDataFile),
-                            SnapshotItemDetails::ItemType::kFile, 0,
-                            SnapshotItemId::kMaxValue),
+                            SnapshotItemDetails::ItemType::kFile, 0),
         SnapshotItemDetails(base::FilePath(kProfileDataExtFile),
-                            SnapshotItemDetails::ItemType::kFile, 0,
-                            SnapshotItemId::kMaxValue),
+                            SnapshotItemDetails::ItemType::kFile, 0),
         SnapshotItemDetails(base::FilePath(kProfileDataFolder),
-                            SnapshotItemDetails::ItemType::kDirectory, 0,
-                            SnapshotItemId::kMaxValue)};
+                            SnapshotItemDetails::ItemType::kDirectory, 0)};
   }
 };
 
@@ -207,7 +206,8 @@ TEST_F(SnapshotManagerTest, TakeSnapshot) {
     ASSERT_NO_FATAL_FAILURE(TestFolderAndFiles::CreateFilesAndFolders(path));
   }
 
-  TestSnapshotManager snapshot_manager(user_data_dir());
+  TestDowngradeManagerDelegate delegate;
+  SnapshotManager snapshot_manager(user_data_dir(), &delegate);
   snapshot_manager.TakeSnapshot(version);
 
   auto snapshot_dir = GetSnapshotDirectory(version);
@@ -270,7 +270,8 @@ TEST_F(SnapshotManagerTest, RestoreSnapshotOlderVersionAvailable) {
         TestFolderAndFiles::CreateFilesAndFolders(profile_folder));
   }
 
-  SnapshotManager snapshot_manager(user_data_dir());
+  TestDowngradeManagerDelegate delegate;
+  SnapshotManager snapshot_manager(user_data_dir(), &delegate);
   snapshot_manager.RestoreSnapshot(base::Version("11.0.0"));
 
   EXPECT_TRUE(TestFolderAndFiles::AllPathExists(user_data_dir()));
@@ -306,7 +307,8 @@ TEST_F(SnapshotManagerTest, RestoreSnapshotTargetVersionAvailable) {
         TestFolderAndFiles::CreateFilesAndFolders(profile_folder));
   }
 
-  SnapshotManager snapshot_manager(user_data_dir());
+  TestDowngradeManagerDelegate delegate;
+  SnapshotManager snapshot_manager(user_data_dir(), &delegate);
   snapshot_manager.RestoreSnapshot(version);
 
   EXPECT_TRUE(TestFolderAndFiles::AllPathExists(user_data_dir()));
@@ -348,7 +350,8 @@ TEST_F(SnapshotManagerTest, RestoreSnapshotIgnoresIncompleteSnapshots) {
         TestFolderAndFiles::CreateFilesAndFolders(profile_folder));
   }
 
-  SnapshotManager snapshot_manager(user_data_dir());
+  TestDowngradeManagerDelegate delegate;
+  SnapshotManager snapshot_manager(user_data_dir(), &delegate);
   snapshot_manager.RestoreSnapshot(newer_version);
 
   EXPECT_TRUE(TestFolderAndFiles::AllPathExists(user_data_dir()));
@@ -388,9 +391,10 @@ TEST_F(SnapshotManagerTest, PurgeInvalidAndOldSnapshotsKeepsMaxValidSnapshots) {
   }
 
   int max_number_of_snapshots = 3;
-  SnapshotManager snapshot_manager(user_data_dir());
+  TestDowngradeManagerDelegate delegate;
+  SnapshotManager snapshot_manager(user_data_dir(), &delegate);
   snapshot_manager.PurgeInvalidAndOldSnapshots(max_number_of_snapshots,
-                                               absl::nullopt);
+                                               std::nullopt);
 
   const base::FilePath deletion_directory =
       user_data_dir()
@@ -404,7 +408,7 @@ TEST_F(SnapshotManagerTest, PurgeInvalidAndOldSnapshotsKeepsMaxValidSnapshots) {
   }
 
   // Only 3 valid snapshots remains
-  for (const base::FilePath& path : base::Reversed(valid_snapshot_paths)) {
+  for (const base::FilePath& path : std::views::reverse(valid_snapshot_paths)) {
     EXPECT_EQ(base::PathExists(path), max_number_of_snapshots != 0);
     EXPECT_EQ(!base::PathExists(deletion_directory.Append(path.BaseName())),
               max_number_of_snapshots != 0);
@@ -425,9 +429,10 @@ TEST_F(SnapshotManagerTest, PurgeInvalidAndOldSnapshotsKeepsValidSnapshots) {
   }
 
   int max_number_of_snapshots = 3;
-  SnapshotManager snapshot_manager(user_data_dir());
+  TestDowngradeManagerDelegate delegate;
+  SnapshotManager snapshot_manager(user_data_dir(), &delegate);
   snapshot_manager.PurgeInvalidAndOldSnapshots(max_number_of_snapshots,
-                                               absl::nullopt);
+                                               std::nullopt);
 
   for (const auto& path : valid_snapshot_paths)
     EXPECT_TRUE(base::PathExists(path));
@@ -449,7 +454,8 @@ TEST_F(SnapshotManagerTest,
   }
 
   int max_number_of_snapshots = 1;
-  SnapshotManager snapshot_manager(user_data_dir());
+  TestDowngradeManagerDelegate delegate;
+  SnapshotManager snapshot_manager(user_data_dir(), &delegate);
   snapshot_manager.PurgeInvalidAndOldSnapshots(max_number_of_snapshots, 20);
 
   EXPECT_TRUE(base::PathExists(valid_snapshot_paths[0]));

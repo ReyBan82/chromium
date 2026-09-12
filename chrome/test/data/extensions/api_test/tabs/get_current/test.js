@@ -1,28 +1,34 @@
-var assertEq = chrome.test.assertEq;
+// Copyright 2023 The Chromium Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+const assertEq = chrome.test.assertEq;
 
 function pageUrl(letter) {
-  return chrome.extension.getURL(letter + ".html");
+  return chrome.runtime.getURL(`${letter}.html`);
 }
 
-function onCompleteGetCurrentTab(tab) {
-  assertEq(tab.url, pageUrl("a"));
-  chrome.tabs.remove(tab.id, function() {
-    chrome.test.succeed();
-  });
-}
+chrome.runtime.onMessage.addListener(
+    function listener(tab, sender, sendResponse) {
+      chrome.runtime.onMessage.removeListener(listener);
+      assertEq(tab.url, pageUrl('a'));
+      chrome.tabs.remove(tab.id, function() {
+        chrome.test.succeed();
+      });
+    });
 
 chrome.test.runTests([
   function backgroundPageGetCurrentTab() {
     chrome.tabs.getCurrent(function(tab) {
-      // There should be no tab.
+      // There should be no current tab.
       assertEq(tab, undefined);
       chrome.test.succeed();
     });
   },
 
   function openedTabGetCurrentTab() {
-    chrome.tabs.create({url: pageUrl("a")});
-    // Completes with onCompleteGetCurrentTab, which is triggered by
-    // the onload of a.html .
-  }
+    chrome.tabs.create({url: pageUrl('a')});
+    // Completes in the onMessage listener, which is triggered by the
+    // load of a.html.
+  },
 ]);

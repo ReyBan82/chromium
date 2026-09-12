@@ -7,49 +7,46 @@
 #include <list>
 #include <vector>
 
+#include "ash/public/cpp/autotest_desks_api.h"
 #include "base/command_line.h"
 #include "base/functional/callback_helpers.h"
 #include "base/strings/string_number_conversions.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/ash/crostini/crostini_util.h"
 #include "chrome/browser/ash/system_web_apps/system_web_app_manager.h"
 #include "chrome/browser/ash/system_web_apps/test_support/system_web_app_browsertest_base.h"
 #include "chrome/browser/ash/system_web_apps/test_support/test_system_web_app_installation.h"
 #include "chrome/browser/browser_process.h"
-#include "chrome/browser/chrome_notification_types.h"
 #include "chrome/browser/defaults.h"
 #include "chrome/browser/prefs/session_startup_pref.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/sessions/session_restore_test_helper.h"
+#include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
+#include "chrome/browser/ui/browser_init_state.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
+#include "chrome/browser/ui/browser_window/public/create_browser_window.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
+#include "chrome/browser/ui/window_metadata/window_metadata_controller.h"
 #include "chrome/browser/web_applications/web_app_helpers.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/test_launcher_utils.h"
+#include "chrome/test/base/ui_test_utils.h"
+#include "chromeos/ui/wm/desks/desks_helper.h"
 #include "components/prefs/pref_service.h"
 #include "components/sessions/core/serialized_navigation_entry_test_helper.h"
-#include "content/public/browser/notification_service.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
-#include "ui/wm/core/wm_core_switches.h"
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "ash/public/cpp/autotest_desks_api.h"
-#include "chromeos/ui/wm/desks/desks_helper.h"
-#endif
-
-#if defined(USE_AURA)
 #include "ui/aura/client/aura_constants.h"
-#endif
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
+#include "ui/wm/core/wm_core_switches.h"
 
 namespace {
 const char* test_app_name1 = "TestApp1";
 const char* test_app_name2 = "TestApp2";
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
 // Activates the desk at |index| and waits for its async operations to complete.
 void SwitchToDesk(int index) {
   base::RunLoop run_loop;
@@ -71,7 +68,6 @@ void RemoveInactiveDesks() {
   // This should not be reached.
   ADD_FAILURE();
 }
-#endif
 
 }  // namespace
 
@@ -79,50 +75,48 @@ class SessionRestoreTestChromeOS : public InProcessBrowserTest {
  public:
   SessionRestoreTestChromeOS()
       : faster_animations_(
-            ui::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
-  ~SessionRestoreTestChromeOS() override {}
+            gfx::ScopedAnimationDurationScaleMode::ZERO_DURATION) {}
+  ~SessionRestoreTestChromeOS() override = default;
 
  protected:
   void SetUpDefaultCommandLine(base::CommandLine* command_line) override {
-    base::CommandLine default_command_line(base::CommandLine::NO_PROGRAM);
-    InProcessBrowserTest::SetUpDefaultCommandLine(&default_command_line);
+    InProcessBrowserTest::SetUpDefaultCommandLine(command_line);
 
     // Animations have caused crashes in session restore in the past but are
     // usually disabled in tests. Remove --wm-window-animations-disabled to
     // re-enable animations.
-    test_launcher_utils::RemoveCommandLineSwitch(
-        default_command_line, wm::switches::kWindowAnimationsDisabled,
-        command_line);
+    command_line->RemoveSwitch(wm::switches::kWindowAnimationsDisabled);
   }
 
-  Browser* CreateBrowserWithParams(Browser::CreateParams params) {
-    Browser* browser = Browser::Create(params);
+  BrowserWindowInterface* CreateBrowserWithParams(
+      BrowserWindowCreateParams params) {
+    BrowserWindowInterface* browser = CreateBrowserWindow(std::move(params));
     AddBlankTabAndShow(browser);
     return browser;
   }
 
-  Browser::CreateParams CreateParamsForApp(const std::string& name,
-                                           bool trusted) {
-    return Browser::CreateParams::CreateForApp(name, trusted, gfx::Rect(),
-                                               profile(), true);
+  BrowserWindowCreateParams CreateParamsForApp(const std::string& name,
+                                               bool trusted) {
+    return BrowserWindowCreateParams::CreateForApp(
+        name, trusted, gfx::Rect(), profile(), /*user_gesture=*/true);
   }
 
-  Browser::CreateParams CreateParamsForAppPopup(const std::string& name,
-                                                bool trusted) {
-    return Browser::CreateParams::CreateForAppPopup(name, trusted, gfx::Rect(),
-                                                    profile(), true);
+  BrowserWindowCreateParams CreateParamsForAppPopup(const std::string& name,
+                                                    bool trusted) {
+    return BrowserWindowCreateParams::CreateForAppPopup(
+        name, trusted, gfx::Rect(), profile(), /*user_gesture=*/true);
   }
 
   // Turn on session restore before we restart.
   void TurnOnSessionRestore() {
     SessionStartupPref::SetStartupPref(
-        browser()->profile(), SessionStartupPref(SessionStartupPref::LAST));
+        browser()->GetProfile(), SessionStartupPref(SessionStartupPref::LAST));
   }
 
-  Profile* profile() { return browser()->profile(); }
+  Profile* profile() { return browser()->GetProfile(); }
 
  private:
-  ui::ScopedAnimationDurationScaleMode faster_animations_;
+  gfx::ScopedAnimationDurationScaleMode faster_animations_;
 };
 
 // Thse tests are in pairs. The PRE_ test creates some browser windows and
@@ -133,26 +127,29 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, PRE_RestoreBrowserWindows) {
   // One browser window is always created by default.
   EXPECT_TRUE(browser());
   // Create a second normal browser window.
-  CreateBrowserWithParams(Browser::CreateParams(profile(), true));
+  CreateBrowserWithParams(
+      BrowserWindowCreateParams(profile(), /*from_user_gesture=*/true));
   // Create a third incognito browser window which should not get restored.
-  CreateBrowserWithParams(Browser::CreateParams(
-      profile()->GetPrimaryOTRProfile(/*create_if_needed=*/true), true));
+  CreateBrowserWithParams(BrowserWindowCreateParams(
+      profile()->GetPrimaryOTRProfile(/*create_if_needed=*/true),
+      /*from_user_gesture=*/true));
   TurnOnSessionRestore();
 }
 
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, RestoreBrowserWindows) {
   size_t total_count = 0;
   size_t incognito_count = 0;
-  for (auto* browser : *BrowserList::GetInstance()) {
-    ++total_count;
-    if (browser->profile()->IsOffTheRecord())
-      ++incognito_count;
-  }
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [&total_count, &incognito_count](BrowserWindowInterface* browser) {
+        ++total_count;
+        if (browser->GetProfile()->IsOffTheRecord()) {
+          ++incognito_count;
+        }
+        return true;
+      });
   EXPECT_EQ(2u, total_count);
   EXPECT_EQ(0u, incognito_count);
 }
-
-#if BUILDFLAG(IS_CHROMEOS_ASH)
 
 // Assigns three browser windows to three different desks.
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS,
@@ -164,25 +161,26 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS,
   // A browser window is always created to the current desk, which
   // is the first desk by default.
   EXPECT_TRUE(browser());
-  browser()->SetWindowUserTitle("0");
+  WindowMetadataController::From(browser())->SetWindowUserTitle("0");
 
   // Create a second normal browser window in the second desk by
   // setting window workspace property.
   SwitchToDesk(1);
-  Browser* browser_desk1 =
-      CreateBrowserWithParams(Browser::CreateParams(profile(), true));
-  browser_desk1->SetWindowUserTitle("1");
-  browser_desk1->window()->GetNativeWindow()->SetProperty(
+  BrowserWindowInterface* browser_desk1 = CreateBrowserWithParams(
+      BrowserWindowCreateParams(profile(), /*from_user_gesture=*/true));
+  WindowMetadataController::From(browser_desk1)->SetWindowUserTitle("1");
+  browser_desk1->GetWindow()->GetNativeWindow()->SetProperty(
       aura::client::kWindowWorkspaceKey, 1);
 
   // Create a third normal browser window in the third desk
   // specified with params.initial_workspace.
   SwitchToDesk(2);
-  Browser::CreateParams browser_desk2_params =
-      Browser::CreateParams(profile(), true);
+  BrowserWindowCreateParams browser_desk2_params(profile(),
+                                                 /*from_user_gesture=*/true);
   browser_desk2_params.initial_workspace = "2";
-  Browser* browser_desk2 = CreateBrowserWithParams(browser_desk2_params);
-  browser_desk2->SetWindowUserTitle("2");
+  BrowserWindowInterface* browser_desk2 =
+      CreateBrowserWithParams(std::move(browser_desk2_params));
+  WindowMetadataController::From(browser_desk2)->SetWindowUserTitle("2");
 
   TurnOnSessionRestore();
 }
@@ -191,29 +189,35 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS,
 // verifies that the fourth window is visible on all desks after being restored.
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS,
                        RestoreBrowserWindowsToDesks) {
-  auto* browser_list = BrowserList::GetInstance();
-  ASSERT_EQ(3u, browser_list->size());
+  ASSERT_EQ(3u, GlobalBrowserCollection::GetInstance()->GetSize());
 
   // The first, second and third browser should restore to the first, second
   // and third desk, consecutively.
   for (int i = 0; i < 3; i++) {
-    auto* browser = browser_list->get(i);
-    int desk_index = 0;
-    ASSERT_TRUE(base::StringToInt(browser->initial_workspace(), &desk_index));
-    // Verify that browser i_th with title i, has initial_workspace equals to
-    // desk i_th.
-    ASSERT_EQ(i, desk_index);
-    ASSERT_EQ(base::NumberToString(i), browser->user_title());
+    // Verify that the browser with title i, has initial_workspace equal to desk
+    // i.
+    BrowserWindowInterface* const browser =
+        ui_test_utils::FindMatchingBrowsers(
+            [&](BrowserWindowInterface* browser) {
+              int desk_index = 0;
+              EXPECT_TRUE(base::StringToInt(
+                  BrowserInitState::From(browser)->initial_workspace(),
+                  &desk_index));
+              return desk_index == i;
+            })
+            .front();
+    ASSERT_TRUE(browser);
+    ASSERT_EQ(base::NumberToString(i),
+              WindowMetadataController::From(browser)->user_title());
 
     // Check that a browser window is restored to the right desk i_th.
     ASSERT_TRUE(ash::AutotestDesksApi().IsWindowInDesk(
-        browser->window()->GetNativeWindow(), desk_index));
-    int workspace = browser->window()->GetNativeWindow()->GetProperty(
+        browser->GetWindow()->GetNativeWindow(), i));
+    int workspace = browser->GetWindow()->GetNativeWindow()->GetProperty(
         aura::client::kWindowWorkspaceKey);
-    ASSERT_EQ(desk_index,
-              workspace == aura::client::kWindowWorkspaceUnassignedWorkspace
-                  ? 0
-                  : workspace);
+    ASSERT_EQ(i, workspace == aura::client::kWindowWorkspaceUnassignedWorkspace
+                     ? 0
+                     : workspace);
   }
 
   RemoveInactiveDesks();
@@ -227,26 +231,25 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS,
   ash::AutotestDesksApi().CreateNewDesk();
 
   // Create a browser that is visible on all desks.
-  Browser::CreateParams visible_on_all_desks_browser_params =
-      Browser::CreateParams(profile(), true);
+  BrowserWindowCreateParams visible_on_all_desks_browser_params(
+      profile(), /*from_user_gesture=*/true);
   visible_on_all_desks_browser_params.initial_visible_on_all_workspaces_state =
       true;
-  Browser* visible_on_all_desks_browser =
-      CreateBrowserWithParams(visible_on_all_desks_browser_params);
+  BrowserWindowInterface* visible_on_all_desks_browser =
+      CreateBrowserWithParams(std::move(visible_on_all_desks_browser_params));
 
   // Ensure the visible on all desks browser has the right properties.
   auto* visible_on_all_desks_window =
-      visible_on_all_desks_browser->window()->GetNativeWindow();
+      visible_on_all_desks_browser->GetWindow()->GetNativeWindow();
   ASSERT_TRUE(visible_on_all_desks_window->GetProperty(
                   aura::client::kWindowWorkspaceKey) ==
               aura::client::kWindowWorkspaceVisibleOnAllWorkspaces);
-  ASSERT_TRUE(chromeos::DesksHelper::Get(visible_on_all_desks_window)
-                  ->BelongsToActiveDesk(visible_on_all_desks_window));
+  ASSERT_TRUE(chromeos::DesksHelper::Get()->BelongsToActiveDesk(
+      visible_on_all_desks_window));
 
   // Check that there are two browsers, the default one and the visible on all
   // desks browser.
-  auto* browser_list = BrowserList::GetInstance();
-  ASSERT_EQ(2u, browser_list->size());
+  ASSERT_EQ(2u, GlobalBrowserCollection::GetInstance()->GetSize());
 
   TurnOnSessionRestore();
 }
@@ -256,27 +259,28 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS,
                        RestoreAllDesksBrowserWindow) {
   // There should be two browsers restored, the default browser and the all
   // desks browser.
-  auto* browser_list = BrowserList::GetInstance();
-  ASSERT_EQ(2u, browser_list->size());
+  ASSERT_EQ(2u, GlobalBrowserCollection::GetInstance()->GetSize());
 
   // Check that the visible on all desks browser is restored properly.
-  auto* visible_on_all_desks_browser = browser_list->get(1);
-  auto* visible_on_all_desks_window =
-      visible_on_all_desks_browser->window()->GetNativeWindow();
+  BrowserWindowInterface* const visible_on_all_desks_browser =
+      ui_test_utils::FindMatchingBrowsers([&](BrowserWindowInterface* browser) {
+        return browser->GetWindow()->GetNativeWindow()->GetProperty(
+                   aura::client::kWindowWorkspaceKey) ==
+               aura::client::kWindowWorkspaceVisibleOnAllWorkspaces;
+      }).front();
+  ASSERT_TRUE(visible_on_all_desks_browser);
+  EXPECT_EQ("", BrowserInitState::From(visible_on_all_desks_browser)
+                    ->initial_workspace());
 
-  EXPECT_EQ("", visible_on_all_desks_browser->initial_workspace());
-
-  EXPECT_TRUE(visible_on_all_desks_window->GetProperty(
-                  aura::client::kWindowWorkspaceKey) ==
-              aura::client::kWindowWorkspaceVisibleOnAllWorkspaces);
   // Visible on all desks windows should always reside on the active desk,
   // even if there is a desk switch.
-  EXPECT_TRUE(chromeos::DesksHelper::Get(visible_on_all_desks_window)
-                  ->BelongsToActiveDesk(visible_on_all_desks_window));
+  aura::Window* const visible_on_all_desks_window =
+      visible_on_all_desks_browser->GetWindow()->GetNativeWindow();
+  EXPECT_TRUE(chromeos::DesksHelper::Get()->BelongsToActiveDesk(
+      visible_on_all_desks_window));
 
   RemoveInactiveDesks();
 }
-#endif
 
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, PRE_RestoreAppsV1) {
   // Create a trusted app.
@@ -294,13 +298,19 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, RestoreAppsV1) {
   size_t total_count = 0;
   size_t app1_count = 0;
   size_t app2_count = 0;
-  for (auto* browser : *BrowserList::GetInstance()) {
-    ++total_count;
-    if (browser->app_name() == test_app_name1)
-      ++app1_count;
-    if (browser->app_name() == test_app_name2)
-      ++app2_count;
-  }
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [&total_count, &app1_count,
+       &app2_count](BrowserWindowInterface* browser) {
+        ++total_count;
+        const std::string& app_name =
+            BrowserInitState::From(browser)->create_params().app_name;
+        if (app_name == test_app_name1) {
+          ++app1_count;
+        } else if (app_name == test_app_name2) {
+          ++app2_count;
+        }
+        return true;
+      });
   EXPECT_EQ(1u, app1_count);
   EXPECT_EQ(2u, app2_count);   // Only the trusted app windows are restored.
   EXPECT_EQ(4u, total_count);  // Default browser() + 3 app windows
@@ -322,13 +332,19 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, RestoreAppsPopup) {
   size_t total_count = 0;
   size_t app1_count = 0;
   size_t app2_count = 0;
-  for (auto* browser : *BrowserList::GetInstance()) {
-    ++total_count;
-    if (browser->app_name() == test_app_name1)
-      ++app1_count;
-    if (browser->app_name() == test_app_name2)
-      ++app2_count;
-  }
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [&total_count, &app1_count,
+       &app2_count](BrowserWindowInterface* browser) {
+        ++total_count;
+        const std::string& app_name =
+            BrowserInitState::From(browser)->create_params().app_name;
+        if (app_name == test_app_name1) {
+          ++app1_count;
+        } else if (app_name == test_app_name2) {
+          ++app2_count;
+        }
+        return true;
+      });
   EXPECT_EQ(1u, app1_count);
   EXPECT_EQ(2u, app2_count);   // Only the trusted app windows are restored.
   EXPECT_EQ(4u, total_count);  // Default browser() + 3 app windows
@@ -336,7 +352,8 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, RestoreAppsPopup) {
 
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, PRE_RestoreNoDevtools) {
   // Create devtools.
-  CreateBrowserWithParams(Browser::CreateParams::CreateForDevTools(profile()));
+  CreateBrowserWithParams(
+      BrowserWindowCreateParams::CreateForDevTools(profile()));
 
   TurnOnSessionRestore();
 }
@@ -344,11 +361,14 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, PRE_RestoreNoDevtools) {
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, RestoreNoDevtools) {
   size_t total_count = 0;
   size_t devtools_count = 0;
-  for (auto* browser : *BrowserList::GetInstance()) {
-    ++total_count;
-    if (browser->is_type_devtools())
-      ++devtools_count;
-  }
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [&total_count, &devtools_count](BrowserWindowInterface* browser) {
+        ++total_count;
+        if (browser->GetType() == BrowserWindowInterface::TYPE_DEVTOOLS) {
+          ++devtools_count;
+        }
+        return true;
+      });
   EXPECT_EQ(1u, total_count);
   EXPECT_EQ(0u, devtools_count);
 }
@@ -357,81 +377,90 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, PRE_RestoreMaximized) {
   // One browser window is always created by default.
   ASSERT_TRUE(browser());
   // Create a second browser window and maximize it.
-  Browser* browser2 =
-      CreateBrowserWithParams(Browser::CreateParams(profile(), true));
-  browser2->window()->Maximize();
+  BrowserWindowInterface* browser2 = CreateBrowserWithParams(
+      BrowserWindowCreateParams(profile(), /*from_user_gesture=*/true));
+  browser2->GetWindow()->Maximize();
 
   // Create two app windows and maximize the second one.
-  Browser* app_browser1 =
+  BrowserWindowInterface* app_browser1 =
       CreateBrowserWithParams(CreateParamsForApp(test_app_name1, true));
-  Browser* app_browser2 =
+  BrowserWindowInterface* app_browser2 =
       CreateBrowserWithParams(CreateParamsForApp(test_app_name2, true));
-  app_browser2->window()->Maximize();
+  app_browser2->GetWindow()->Maximize();
 
   // Create two app popup windows and maximize the second one.
-  Browser* app_popup_browser1 =
+  BrowserWindowInterface* app_popup_browser1 =
       CreateBrowserWithParams(CreateParamsForAppPopup(test_app_name1, true));
-  Browser* app_popup_browser2 =
+  BrowserWindowInterface* app_popup_browser2 =
       CreateBrowserWithParams(CreateParamsForAppPopup(test_app_name2, true));
-  app_popup_browser2->window()->Maximize();
+  app_popup_browser2->GetWindow()->Maximize();
 
-  EXPECT_FALSE(browser()->window()->IsMaximized());
-  EXPECT_TRUE(browser2->window()->IsMaximized());
-  EXPECT_FALSE(app_browser1->window()->IsMaximized());
-  EXPECT_TRUE(app_browser2->window()->IsMaximized());
-  EXPECT_FALSE(app_popup_browser1->window()->IsMaximized());
-  EXPECT_TRUE(app_popup_browser2->window()->IsMaximized());
+  EXPECT_FALSE(browser()->GetWindow()->IsMaximized());
+  EXPECT_TRUE(browser2->GetWindow()->IsMaximized());
+  EXPECT_FALSE(app_browser1->GetWindow()->IsMaximized());
+  EXPECT_TRUE(app_browser2->GetWindow()->IsMaximized());
+  EXPECT_FALSE(app_popup_browser1->GetWindow()->IsMaximized());
+  EXPECT_TRUE(app_popup_browser2->GetWindow()->IsMaximized());
 
   TurnOnSessionRestore();
 }
 
-// https://crbug.com/1216209
+// https://crbug.com/40770352
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, DISABLED_RestoreMaximized) {
   size_t total_count = 0;
   size_t app1_maximized_count = 0;
   size_t app2_maximized_count = 0;
   size_t total_maximized_count = 0;
-  for (auto* browser : *BrowserList::GetInstance()) {
-    ++total_count;
-    if (browser->window()->IsMaximized()) {
-      ++total_maximized_count;
-      if (browser->app_name() == test_app_name1)
-        ++app1_maximized_count;
-      if (browser->app_name() == test_app_name2)
-        ++app2_maximized_count;
-    }
-  }
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [&total_count, &app1_maximized_count, &app2_maximized_count,
+       &total_maximized_count](BrowserWindowInterface* browser) {
+        ++total_count;
+        if (browser->GetWindow()->IsMaximized()) {
+          ++total_maximized_count;
+          const std::string& app_name =
+              BrowserInitState::From(browser)->create_params().app_name;
+          if (app_name == test_app_name1) {
+            ++app1_maximized_count;
+          } else if (app_name == test_app_name2) {
+            ++app2_maximized_count;
+          }
+        }
+        return true;
+      });
   EXPECT_EQ(6u, total_count);
   EXPECT_EQ(0u, app1_maximized_count);
   EXPECT_EQ(2u, app2_maximized_count);  // One TYPE_APP + One TYPE_APP_POPUP
   EXPECT_EQ(3u, total_maximized_count);
 }
 
-// Test for crash when restoring minimized windows. http://crbug.com/679513.
+// Test for crash when restoring minimized windows. http://crbug.com/40500647.
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, PRE_RestoreMinimized) {
   // One browser window is always created by default.
   ASSERT_TRUE(browser());
-  browser()->window()->Minimize();
+  browser()->GetWindow()->Minimize();
 
-  Browser* browser2 =
-      CreateBrowserWithParams(Browser::CreateParams(profile(), true));
-  browser2->window()->Minimize();
+  BrowserWindowInterface* browser2 = CreateBrowserWithParams(
+      BrowserWindowCreateParams(profile(), /*from_user_gesture=*/true));
+  browser2->GetWindow()->Minimize();
 
-  EXPECT_TRUE(browser()->window()->IsMinimized());
-  EXPECT_TRUE(browser2->window()->IsMinimized());
+  EXPECT_TRUE(browser()->GetWindow()->IsMinimized());
+  EXPECT_TRUE(browser2->GetWindow()->IsMinimized());
 
   TurnOnSessionRestore();
 }
 
-// https://crbug.com/1216209
+// https://crbug.com/40770352
 IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, DISABLED_RestoreMinimized) {
   size_t total_count = 0;
   size_t minimized_count = 0;
-  for (auto* browser : *BrowserList::GetInstance()) {
-    ++total_count;
-    if (browser->window()->IsMinimized())
-      ++minimized_count;
-  }
+  ForEachCurrentBrowserWindowInterfaceOrderedByActivation(
+      [&total_count, &minimized_count](BrowserWindowInterface* browser) {
+        ++total_count;
+        if (browser->GetWindow()->IsMinimized()) {
+          ++minimized_count;
+        }
+        return true;
+      });
   EXPECT_EQ(2u, total_count);
   // Chrome OS always activates the last browser windows on login to remind
   // users they have a browser running instead of just showing them an empty
@@ -440,20 +469,20 @@ IN_PROC_BROWSER_TEST_F(SessionRestoreTestChromeOS, DISABLED_RestoreMinimized) {
 }
 
 class SystemWebAppSessionRestoreTestChromeOS
-    : public ash::SystemWebAppManagerBrowserTest {
+    : public TestProfileTypeMixin<ash::SystemWebAppBrowserTestBase> {
  public:
-  SystemWebAppSessionRestoreTestChromeOS()
-      : SystemWebAppManagerBrowserTest(/*install_mock=*/false) {
-    maybe_installation_ =
+  SystemWebAppSessionRestoreTestChromeOS() {
+    auto installation =
         ash::TestSystemWebAppInstallation::SetUpStandaloneSingleWindowApp();
-    maybe_installation_->set_update_policy(
+    installation->set_update_policy(
         ash::SystemWebAppManager::UpdatePolicy::kOnVersionChange);
+    SetSystemWebAppInstallation(std::move(installation));
   }
 
   ~SystemWebAppSessionRestoreTestChromeOS() override = default;
 
  protected:
-  size_t GetNumBrowsers() { return BrowserList::GetInstance()->size(); }
+  SessionRestoreTestHelper waiter_;
 };
 
 IN_PROC_BROWSER_TEST_P(SystemWebAppSessionRestoreTestChromeOS,
@@ -461,33 +490,28 @@ IN_PROC_BROWSER_TEST_P(SystemWebAppSessionRestoreTestChromeOS,
   // Wait for the app to install, launch, and load, otherwise the app might not
   // be restored.
   WaitForTestSystemAppInstall();
-  LaunchApp(GetMockAppType());
+  LaunchApp(GetAppType());
 
-  auto app_params = Browser::CreateParams::CreateForApp(
-      test_app_name1, true, gfx::Rect(), browser()->profile(), true);
-  Browser* app_browser = Browser::Create(app_params);
-  AddBlankTabAndShow(app_browser);
-
-  // There should be three browsers:
-  //   1. The SWA browser
-  //   2. The |test_app_name1| browser
-  //   3. The main browser window
-  EXPECT_EQ(3u, GetNumBrowsers());
+  // Should have one SWA window and one default browser window.
+  EXPECT_TRUE(ash::FindSystemWebAppBrowser(
+      browser()->GetProfile(), GetAppType(), ash::BrowserType::kApp));
+  EXPECT_EQ(2u, GlobalBrowserCollection::GetInstance()->GetSize());
 
   SessionStartupPref::SetStartupPref(
-      browser()->profile(), SessionStartupPref(SessionStartupPref::LAST));
+      browser()->GetProfile(), SessionStartupPref(SessionStartupPref::LAST));
 }
 
 IN_PROC_BROWSER_TEST_P(SystemWebAppSessionRestoreTestChromeOS,
                        OmitSystemWebApps) {
-  // There should only be two browsers:
-  //  1. The |test_app_name1| browser
-  //  2. The main browser window
-  EXPECT_EQ(2u, GetNumBrowsers());
-  for (auto* browser : *BrowserList::GetInstance()) {
-    EXPECT_TRUE(browser->app_name().empty() ||
-                browser->app_name() == test_app_name1);
-  }
+  waiter_.Wait();
+
+  // Should have only one default browser window.
+  //
+  // Session restore doesn't go through system web app launch path, so system
+  // web app utils like `FindSystemWebAppBrowser` might not recognize such
+  // windows as a SWA browser window. Therefore we count the number of browser
+  // windows here instead of trying to find one.
+  EXPECT_EQ(1u, GlobalBrowserCollection::GetInstance()->GetSize());
 }
 
 INSTANTIATE_SYSTEM_WEB_APP_MANAGER_TEST_SUITE_REGULAR_PROFILE_P(

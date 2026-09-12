@@ -5,7 +5,9 @@
 #include "components/password_manager/core/browser/credential_manager_pending_prevent_silent_access_task.h"
 
 #include "components/password_manager/core/browser/password_form.h"
-#include "components/password_manager/core/browser/password_store_interface.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
+#include "components/password_manager/core/browser/password_store/password_store_util.h"
 
 namespace password_manager {
 
@@ -29,27 +31,27 @@ void CredentialManagerPendingPreventSilentAccessTask::AddOrigin(
   }
 }
 
-void CredentialManagerPendingPreventSilentAccessTask::OnGetPasswordStoreResults(
-    std::vector<std::unique_ptr<PasswordForm>> results) {
-  // This class overrides OnGetPasswordStoreResultsFrom() (the version of this
-  // method that also receives the originating store), so the store-less version
-  // never gets called.
-  NOTREACHED();
-}
-
 void CredentialManagerPendingPreventSilentAccessTask::
-    OnGetPasswordStoreResultsFrom(
+    OnGetPasswordStoreResultsOrErrorFrom(
         PasswordStoreInterface* store,
-        std::vector<std::unique_ptr<PasswordForm>> results) {
-  for (const auto& form : results) {
-    if (!form->skip_zero_click) {
-      form->skip_zero_click = true;
-      store->UpdateLogin(*form);
+        base::expected<std::vector<StoredCredential>, PasswordStoreBackendError>
+            results_or_error) {
+  std::vector<StoredCredential> results =
+      GetLoginsOrEmptyListOnFailure(std::move(results_or_error));
+  for (auto& form : results) {
+    if (form.match_type == PasswordForm::MatchType::kGrouped ||
+        form.blocked_by_user) {
+      continue;
+    }
+    if (!form.skip_zero_click) {
+      form.skip_zero_click = true;
+      store->UpdateLogin(std::move(form));
     }
   }
   pending_requests_--;
-  if (!pending_requests_)
+  if (!pending_requests_) {
     delegate_->DoneRequiringUserMediation();
+  }
 }
 
 }  // namespace password_manager

@@ -5,14 +5,12 @@
 #ifndef CHROME_BROWSER_ANDROID_METRICS_UMA_SESSION_STATS_H_
 #define CHROME_BROWSER_ANDROID_METRICS_UMA_SESSION_STATS_H_
 
-#include <jni.h>
 #include <stdint.h>
 
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "base/android/scoped_java_ref.h"
 #include "base/no_destructor.h"
 #include "base/time/time.h"
 #include "components/variations/synthetic_trials.h"
@@ -20,10 +18,8 @@
 // The native part of java UmaSessionStats class. This is a singleton.
 class UmaSessionStats {
  public:
-  void UmaResumeSession(JNIEnv* env,
-                        const base::android::JavaParamRef<jobject>& obj);
-  void UmaEndSession(JNIEnv* env,
-                     const base::android::JavaParamRef<jobject>& obj);
+  void UmaResumeSession();
+  void UmaEndSession();
 
   // Called before an UMA log is completed to record associated metrics.
   void ProvideCurrentSessionData();
@@ -45,6 +41,11 @@ class UmaSessionStats {
       variations::SyntheticTrialAnnotationMode annotation_mode);
 
   static bool IsBackgroundSessionStartForTesting();
+
+  // Reads counters Chrome.UMA.OnPostCreateCounter2 and
+  // Chrome.UMA.OnResumeCounter2 that are written to in ChromeActivity.java. The
+  // counters are encoded in an enum histogram, emitted and reset to 0.
+  static void EmitAndResetCounters();
 
  private:
   friend class base::NoDestructor<UmaSessionStats>;
@@ -88,6 +89,7 @@ class UmaSessionStats {
 
   SessionTimeTracker session_time_tracker_;
   int active_session_count_ = 0;
+  bool closing_active_session_ = false;
 };
 
 #endif  // CHROME_BROWSER_ANDROID_METRICS_UMA_SESSION_STATS_H_

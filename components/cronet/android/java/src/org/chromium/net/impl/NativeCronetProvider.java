@@ -11,14 +11,19 @@ import org.chromium.net.CronetEngine;
 import org.chromium.net.CronetProvider;
 import org.chromium.net.ExperimentalCronetEngine;
 import org.chromium.net.ICronetEngineBuilder;
+import org.chromium.net.impl.CronetLogger.CronetSource;
 
 import java.util.Arrays;
 
 /**
- * Implementation of {@link CronetProvider} that creates {@link CronetEngine.Builder}
- * for building the native implementation of {@link CronetEngine}.
+ * Implementation of {@link CronetProvider} that creates {@link CronetEngine.Builder} for building
+ * the native implementation of {@link CronetEngine}.
  */
 public class NativeCronetProvider extends CronetProvider {
+    public static final String OVERRIDE_NATIVE_CRONET_WITH_HTTPENGINE_FLAG =
+            "Cronet_OverrideNativeCronetWithHttpEngine";
+    private final HttpEngineNativeProvider mHttpEngineProvider;
+
     /**
      * Constructor.
      *
@@ -27,12 +32,17 @@ public class NativeCronetProvider extends CronetProvider {
     @UsedByReflection("CronetProvider.java")
     public NativeCronetProvider(Context context) {
         super(context);
+        mHttpEngineProvider = new HttpEngineNativeProvider(mContext);
     }
 
     @Override
     public CronetEngine.Builder createBuilder() {
-        ICronetEngineBuilder impl = new NativeCronetEngineBuilderWithLibraryLoaderImpl(mContext);
-        return new ExperimentalCronetEngine.Builder(impl);
+        if (shouldUseHttpEngine()) {
+            return mHttpEngineProvider.createBuilder();
+        } else {
+            ICronetEngineBuilder impl = new NativeCronetEngineBuilderImpl(mContext);
+            return new ExperimentalCronetEngine.Builder(impl);
+        }
     }
 
     @Override
@@ -42,11 +52,23 @@ public class NativeCronetProvider extends CronetProvider {
 
     @Override
     public String getVersion() {
-        return ImplVersion.getCronetVersion();
+        return shouldUseHttpEngine()
+                ? mHttpEngineProvider.getVersion()
+                : ImplVersion.getCronetVersion();
     }
 
     @Override
     public boolean isEnabled() {
+        // Check for the presence of the NativeCronetProviderSentinel class. See the comments on
+        // NativeCronetProviderSentinel for why we do this.
+        try {
+            Class.forName(
+                    this.getClass().getName() + "Sentinel",
+                    /* initialize= */ false,
+                    this.getClass().getClassLoader());
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
         return true;
     }
 
@@ -59,6 +81,16 @@ public class NativeCronetProvider extends CronetProvider {
     public boolean equals(Object other) {
         return other == this
                 || (other instanceof NativeCronetProvider
-                           && this.mContext.equals(((NativeCronetProvider) other).mContext));
+                        && this.mContext.equals(((NativeCronetProvider) other).mContext));
+    }
+
+    private boolean shouldUseHttpEngine() {
+        if (!HttpEngineNativeProvider.isHttpEngineAvailable()) return false;
+        var shouldForceHttpEngine =
+                HttpFlagsForImpl.getHttpFlags(
+                                mContext, CronetSource.CRONET_SOURCE_STATICALLY_LINKED)
+                        .flags()
+                        .get(OVERRIDE_NATIVE_CRONET_WITH_HTTPENGINE_FLAG);
+        return shouldForceHttpEngine != null && shouldForceHttpEngine.getBoolValue();
     }
 }

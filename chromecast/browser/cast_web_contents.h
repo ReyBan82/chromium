@@ -5,7 +5,9 @@
 #ifndef CHROMECAST_BROWSER_CAST_WEB_CONTENTS_H_
 #define CHROMECAST_BROWSER_CAST_WEB_CONTENTS_H_
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/containers/flat_set.h"
@@ -26,7 +28,6 @@
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/bindings/remote_set.h"
 #include "services/service_manager/public/cpp/interface_provider.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/common/messaging/web_message_port.h"
 #include "ui/gfx/geometry/rect.h"
 #include "url/gurl.h"
@@ -39,10 +40,6 @@ class WebContents;
 namespace media_control {
 class MediaBlocker;
 }  // namespace media_control
-
-namespace url_rewrite {
-class UrlRequestRewriteRulesManager;
-}  // namespace url_rewrite
 
 namespace chromecast {
 
@@ -186,8 +183,6 @@ class CastWebContents : public mojom::CastWebContents {
   // TODO(seantopping): Hide this, clients shouldn't use WebContents directly.
   virtual content::WebContents* web_contents() const = 0;
   virtual PageState page_state() const = 0;
-  virtual url_rewrite::UrlRequestRewriteRulesManager*
-  url_rewrite_rules_manager() = 0;
   virtual const media_control::MediaBlocker* media_blocker() const = 0;
 
   // mojom::CastWebContents implementation:
@@ -201,11 +196,9 @@ class CastWebContents : public mojom::CastWebContents {
                             additional_feature_permission_origins) override = 0;
   void SetGroupInfo(const std::string& session_id,
                     bool is_multizone_launch) override = 0;
-  void AddRendererFeatures(base::Value::Dict features) override = 0;
+  void AddRendererFeatures(base::DictValue features) override = 0;
   void SetInterfacesForRenderer(mojo::PendingRemote<mojom::RemoteInterfaces>
                                     remote_interfaces) override = 0;
-  void SetUrlRewriteRules(
-      url_rewrite::mojom::UrlRequestRewriteRulesPtr rules) override = 0;
   void LoadUrl(const GURL& url) override = 0;
   void ClosePage() override = 0;
   void SetWebVisibilityAndPaint(bool visible) override = 0;
@@ -246,7 +239,7 @@ class CastWebContents : public mojom::CastWebContents {
   // precedence in the injection order will be preserved.
   // |script| and |id| must be non-empty string.
   virtual void AddBeforeLoadJavaScript(uint64_t id,
-                                       base::StringPiece script) = 0;
+                                       std::string_view script) = 0;
 
   // Posts a message to the frame's onMessage handler.
   //
@@ -281,10 +274,6 @@ class CastWebContents : public mojom::CastWebContents {
 
   // Locally-registered interfaces which are exposed to render frames.
   virtual InterfaceBundle* local_interfaces() = 0;
-
-  // Returns true if WebSQL database is configured enabled for this
-  // CastWebContents.
-  virtual bool is_websql_enabled() = 0;
 
   // Returns true if mixer audio is enabled.
   virtual bool is_mixer_audio_enabled() = 0;

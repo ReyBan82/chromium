@@ -6,15 +6,17 @@
 #define NET_EXTRAS_SQLITE_SQLITE_PERSISTENT_STORE_BACKEND_BASE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
+#include "base/component_export.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_forward.h"
 #include "base/memory/ref_counted.h"
 #include "base/thread_annotations.h"
+#include "sql/database.h"
 #include "sql/meta_table.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace base {
 class Location;
@@ -46,7 +48,7 @@ namespace net {
 // - overridden DoCommit() to actually handle the logic of committing
 //   pending operations to the database,
 // - optionally overridden Record*() to record the appropriate metrics.
-class SQLitePersistentStoreBackendBase
+class COMPONENT_EXPORT(NET_EXTRAS) SQLitePersistentStoreBackendBase
     : public base::RefCountedThreadSafe<SQLitePersistentStoreBackendBase> {
  public:
   SQLitePersistentStoreBackendBase(const SQLitePersistentStoreBackendBase&) =
@@ -65,19 +67,24 @@ class SQLitePersistentStoreBackendBase
   // Set the callback that will be run at the beginning of Commit.
   void SetBeforeCommitCallback(base::RepeatingClosure callback);
 
+  bool IsInitializedForTesting() const { return initialized_; }
+  bool IsClosedForTesting() const { return closed_; }
+
  protected:
   friend class base::RefCountedThreadSafe<SQLitePersistentStoreBackendBase>;
 
   // |current_version_number| and |compatible_version_number| must be greater
   // than 0, as per //sql/meta_table.h. |background_task_runner| should be
-  // non-null.
+  // non-null. If |enable_exclusive_access| is true then the sqlite3 database
+  // will be opened with exclusive flag.
   SQLitePersistentStoreBackendBase(
       const base::FilePath& path,
-      std::string histogram_tag,
+      sql::Database::Tag histogram_tag,
       const int current_version_number,
       const int compatible_version_number,
       scoped_refptr<base::SequencedTaskRunner> background_task_runner,
-      scoped_refptr<base::SequencedTaskRunner> client_task_runner);
+      scoped_refptr<base::SequencedTaskRunner> client_task_runner,
+      bool enable_exclusive_access);
 
   virtual ~SQLitePersistentStoreBackendBase();
 
@@ -94,9 +101,9 @@ class SQLitePersistentStoreBackendBase
   // Embedder-specific database upgrade statements. Returns the version number
   // that the database ends up at, or returns nullopt on error. This is called
   // during MigrateDatabaseSchema() which is called during InitializeDatabase(),
-  // and returning |absl::nullopt| will cause the initialization process to fail
+  // and returning |std::nullopt| will cause the initialization process to fail
   // and stop.
-  virtual absl::optional<int> DoMigrateDatabaseSchema() = 0;
+  virtual std::optional<int> DoMigrateDatabaseSchema() = 0;
 
   // Initializes the desired table(s) of the database, e.g. by creating them or
   // checking that they already exist. Returns whether the tables exist.
@@ -131,6 +138,8 @@ class SQLitePersistentStoreBackendBase
   void PostClientTask(const base::Location& origin, base::OnceClosure task);
 
   sql::Database* db() { return db_.get(); }
+  const base::FilePath& path() const { return path_; }
+
   sql::MetaTable* meta_table() { return &meta_table_; }
 
   base::SequencedTaskRunner* background_task_runner() {
@@ -168,13 +177,16 @@ class SQLitePersistentStoreBackendBase
   sql::MetaTable meta_table_;
 
   // The identifying prefix for metrics.
-  const std::string histogram_tag_;
+  const sql::Database::Tag histogram_tag_;
 
   // Whether the database has been initialized.
   bool initialized_ = false;
 
   // Whether the KillDatabase callback has been scheduled.
   bool corruption_detected_ = false;
+
+  // Whether Close() has been called.
+  bool closed_ = false;
 
   // Current version number of the database. Must be greater than 0.
   const int current_version_number_;
@@ -185,6 +197,10 @@ class SQLitePersistentStoreBackendBase
 
   const scoped_refptr<base::SequencedTaskRunner> background_task_runner_;
   const scoped_refptr<base::SequencedTaskRunner> client_task_runner_;
+
+  // If true, then sqlite will be requested to open the file with exclusive
+  // access.
+  const bool enable_exclusive_access_;
 
   // Callback to be run before Commit.
   base::RepeatingClosure before_commit_callback_

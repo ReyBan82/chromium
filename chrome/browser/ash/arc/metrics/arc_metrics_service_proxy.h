@@ -5,9 +5,10 @@
 #ifndef CHROME_BROWSER_ASH_ARC_METRICS_ARC_METRICS_SERVICE_PROXY_H_
 #define CHROME_BROWSER_ASH_ARC_METRICS_ARC_METRICS_SERVICE_PROXY_H_
 
-#include "ash/components/arc/metrics/arc_metrics_service.h"
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ash/app_list/arc/arc_app_list_prefs.h"
 #include "chrome/browser/ash/arc/session/arc_session_manager_observer.h"
+#include "chromeos/ash/experiences/arc/metrics/arc_metrics_service.h"
 #include "components/keyed_service/core/keyed_service.h"
 
 namespace content {
@@ -20,7 +21,7 @@ class ArcBridgeService;
 
 // Proxy to ArcMetricsService for functionalities that depend on code under
 // chrome/browser. Should be merged into ArcMetricsService once dependency
-// issues are cleared. TODO(crbug.com/903048): Remove the proxy.
+// issues are cleared. TODO(crbug.com/206361184): Remove the proxy.
 class ArcMetricsServiceProxy : public KeyedService,
                                public ArcAppListPrefs::Observer,
                                public ArcSessionManagerObserver,
@@ -60,8 +61,8 @@ class ArcMetricsServiceProxy : public KeyedService,
   static void EnsureFactoryBuilt();
 
  private:
-  ArcAppListPrefs* const arc_app_list_prefs_;
-  ArcMetricsService* const arc_metrics_service_;
+  const raw_ptr<ArcAppListPrefs> arc_app_list_prefs_;
+  const raw_ptr<ArcMetricsService> arc_metrics_service_;
 };
 
 }  // namespace arc

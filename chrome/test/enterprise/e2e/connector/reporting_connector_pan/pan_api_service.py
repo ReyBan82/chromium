@@ -13,6 +13,8 @@ from typing import Any, Dict, Sequence, Tuple
 
 import requests
 
+from .. import Verifyable
+from .. import VerifyContent
 from .pan_event import PanEvent
 
 
@@ -22,7 +24,7 @@ PENDING = 1
 IGNORE = 2  # this value is ignored
 
 
-class PanApiService(object):
+class PanApiService(Verifyable):
   """This class handles retrieving events from a Palo Auto Network server.
 
 
@@ -30,10 +32,12 @@ class PanApiService(object):
       /Cortex-XDR-API-Reference/Get-XQL-Query-Results-Stream
   """
 
-  def __init__(self,
-               credentials: str,
-               event_limit: int = 10,
-               relative_time_in_minutes: int = 60):
+  def __init__(
+    self,
+    credentials: str,
+    event_limit: int = 10,
+    relative_time_in_minutes: int = 60,
+  ):
     """Construct a PanApiService instance.
 
     Args:
@@ -51,6 +55,28 @@ class PanApiService(object):
     except json.JSONDecodeError:
       logging.debug("Decoding PanApiService credentials JSON has failed")
 
+  def TryVerify(self, content: VerifyContent) -> bool:
+    """Method to be called repeated until success or timeout."""
+    event_to_query = PanEvent(
+      type="badNavigationEvent",
+      device_id=content.device_id,
+      reason="MALWARE",
+      url="http://testsafebrowsing.appspot.com/s/malware.html",
+    )
+    logging.info("Event to look for: %s" % event_to_query)
+    match_found = False
+
+    self.start_xdr_query()
+    self.get_xdr_query_results()
+    events = self.get_events()
+    event_string = "\n".join(str(v) for v in events)
+    logging.info(f"Events logged:\n{event_string}")
+    if self.query_for_event(event_to_query):
+      logging.info("Matched event found\n")
+      match_found = True
+    self.stop_xdr_query()
+    return match_found
+
   def _reset_ids(self):
     """Resets all the internal ids."""
     self._query_id = None
@@ -60,9 +86,9 @@ class PanApiService(object):
     api_key = self._credentials["api_key"]
     api_key_id = self._credentials["api_key_id"]
     # Generate a 64 bytes random string
-    nonce = "".join([
-        secrets.choice(string.ascii_letters + string.digits) for _ in range(64)
-    ])
+    nonce = "".join(
+      [secrets.choice(string.ascii_letters + string.digits) for _ in range(64)]
+    )
     # Get the current timestamp as milliseconds.
     timestamp = int(datetime.now(timezone.utc).timestamp()) * 1000
     # Generate the auth key:
@@ -73,11 +99,11 @@ class PanApiService(object):
     api_key_hash = hashlib.sha256(auth_key).hexdigest()
     # Generate HTTP call headers
     return {
-        "x-xdr-timestamp": str(timestamp),
-        "x-xdr-nonce": nonce,
-        "x-xdr-auth-id": str(api_key_id),
-        "Authorization": api_key_hash,
-        "Content-Type": "application/json",
+      "x-xdr-timestamp": str(timestamp),
+      "x-xdr-nonce": nonce,
+      "x-xdr-auth-id": str(api_key_id),
+      "Authorization": api_key_hash,
+      "Content-Type": "application/json",
     }
 
   def query_for_event(self, ev: PanEvent) -> bool:
@@ -87,10 +113,10 @@ class PanApiService(object):
       # convert it to a dict
       inner_event = json.loads(event["event"])
       pe = PanEvent(
-          type=inner_event["event"],
-          device_id=inner_event["device_id"],
-          reason=inner_event["reason"] if "reason" in inner_event else "",
-          url=inner_event["url"],
+        type=inner_event["event"],
+        device_id=inner_event["device_id"],
+        reason=inner_event["reason"] if "reason" in inner_event else "",
+        url=inner_event["url"] if "url" in inner_event else "",
       )
       if ev == pe:
         return True
@@ -110,23 +136,24 @@ class PanApiService(object):
     self._reset_ids()
     xdr_dataset = self._credentials["xdr_dataset"]
     url = (
-        self._credentials["api_server"] +
-        r"/public_api/v1/xql/start_xql_query/")
+      self._credentials["api_server"] + r"/public_api/v1/xql/start_xql_query/"
+    )
     headers = self._generate_headers()
     parameters = {}
     request_data = {}
     request_data["query"] = (
-        r"dataset=%s | fields event, time | sort desc _time | limit %d " %
-        (xdr_dataset, self._event_limit))
+      r"dataset=%s | fields event, time | sort desc _time | limit %d "
+      % (xdr_dataset, self._event_limit)
+    )
     request_data["tenants"] = ""
     # Only query for the last self.relative_time hours
     request_data["timeframe"] = {"relativeTime": self._relative_time}
     parameters["request_data"] = request_data
 
     res = requests.post(
-        url=url,
-        headers=headers,
-        json=parameters,
+      url=url,
+      headers=headers,
+      json=parameters,
     )
     j = res.json()
     if res.status_code == 200:
@@ -140,8 +167,8 @@ class PanApiService(object):
       raise RuntimeError("query_id is None. Must call start_xdr_query() first.")
 
     url = (
-        self._credentials["api_server"] +
-        r"/public_api/v1/xql/get_query_results/")
+      self._credentials["api_server"] + r"/public_api/v1/xql/get_query_results/"
+    )
     headers = self._generate_headers()
     parameters = {}
     request_data = {}
@@ -152,9 +179,9 @@ class PanApiService(object):
     parameters["request_data"] = request_data
 
     res = requests.post(
-        url=url,
-        headers=headers,
-        json=parameters,
+      url=url,
+      headers=headers,
+      json=parameters,
     )
     j = res.json()
     code = IGNORE
@@ -170,7 +197,8 @@ class PanApiService(object):
             self._events.append(event)
         else:  # has > 1000 events, gives up
           raise RuntimeError(
-              "No data in reply/results. Stream is not supported.")
+            "No data in reply/results. Stream is not supported."
+          )
         code = SUCCESS
 
     return res.status_code, code

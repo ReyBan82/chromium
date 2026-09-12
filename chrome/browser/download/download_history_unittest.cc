@@ -9,17 +9,18 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "base/functional/bind.h"
-#include "base/guid.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/rand_util.h"
 #include "base/stl_util.h"
 #include "base/test/scoped_feature_list.h"
+#include "base/uuid.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/download/public/common/download_features.h"
 #include "components/download/public/common/download_utils.h"
@@ -35,10 +36,13 @@
 #include "content/public/test/test_utils.h"
 #include "extensions/buildflags/buildflags.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
 #include "chrome/browser/extensions/api/downloads/downloads_api.h"
+#endif
+
+#if !BUILDFLAG(IS_ANDROID)
+#include "chrome/browser/download/download_item_web_app_data.h"
 #endif
 
 using testing::_;
@@ -91,11 +95,11 @@ class FakeHistoryAdapter : public DownloadHistory::HistoryAdapter {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     CHECK(expect_query_downloads_.has_value());
 
-    // Use swap to reset the absl::optional<...> to a known state before
-    // moving the value (moving the value out of a absl::optional<...>
-    // does not reset it to absl::nullopt).
+    // Use swap to reset the std::optional<...> to a known state before
+    // moving the value (moving the value out of a std::optional<...>
+    // does not reset it to std::nullopt).
     using std::swap;
-    absl::optional<std::vector<history::DownloadRow>> rows;
+    std::optional<std::vector<history::DownloadRow>> rows;
     swap(rows, expect_query_downloads_);
 
     std::move(callback).Run(std::move(*rows));
@@ -183,7 +187,7 @@ class FakeHistoryAdapter : public DownloadHistory::HistoryAdapter {
   void ExpectNoDownloadsRemoved() {
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     content::RunAllPendingInMessageLoop(content::BrowserThread::UI);
-    EXPECT_EQ(0, static_cast<int>(remove_downloads_.size()));
+    EXPECT_EQ(0u, remove_downloads_.size());
   }
 
   void ExpectDownloadsRemoved(const IdSet& ids) {
@@ -201,7 +205,7 @@ class FakeHistoryAdapter : public DownloadHistory::HistoryAdapter {
   bool should_commit_immediately_ = false;
   base::OnceClosure create_download_callback_;
   history::DownloadRow update_download_;
-  absl::optional<std::vector<history::DownloadRow>> expect_query_downloads_;
+  std::optional<std::vector<history::DownloadRow>> expect_query_downloads_;
   IdSet remove_downloads_;
   history::DownloadRow create_download_row_;
 };
@@ -222,7 +226,11 @@ class DownloadHistoryTest : public testing::Test {
   DownloadHistoryTest& operator=(const DownloadHistoryTest&) = delete;
 
  protected:
-  void TearDown() override { download_history_.reset(); }
+  void TearDown() override {
+    history_ = nullptr;
+    manager_observer_ = nullptr;
+    download_history_.reset();
+  }
 
   NiceMock<content::MockDownloadManager>& manager() { return *manager_.get(); }
   download::MockDownloadItem& item(size_t index) { return *items_[index]; }
@@ -242,7 +250,7 @@ class DownloadHistoryTest : public testing::Test {
         row.guid, history::ToContentDownloadId(row.id), row.current_path,
         row.target_path, row.url_chain, row.referrer_url,
         row.embedder_download_data, row.tab_url, row.tab_referrer_url,
-        absl::nullopt, row.mime_type, row.original_mime_type, row.start_time,
+        std::nullopt, row.mime_type, row.original_mime_type, row.start_time,
         row.end_time, row.etag, row.last_modified, row.received_bytes,
         row.total_bytes, std::string(),
         history::ToContentDownloadState(row.state),
@@ -384,7 +392,7 @@ class DownloadHistoryTest : public testing::Test {
         download::DOWNLOAD_INTERRUPT_REASON_NONE);
     row->id =
         history::ToHistoryDownloadId(static_cast<uint32_t>(items_.size() + 1));
-    row->guid = base::GenerateGUID();
+    row->guid = base::Uuid::GenerateRandomV4().AsLowercaseString();
     row->opened = false;
     row->last_access_time = now;
     row->transient = false;
@@ -465,12 +473,18 @@ class DownloadHistoryTest : public testing::Test {
     EXPECT_CALL(manager(), GetDownload(row->id))
         .WillRepeatedly(Return(&item(index)));
     EXPECT_CALL(item(index), IsTemporary()).WillRepeatedly(Return(false));
-#if BUILDFLAG(ENABLE_EXTENSIONS)
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
     new extensions::DownloadedByExtension(&item(index), row->by_ext_id,
                                           row->by_ext_name);
 #endif
+#if !BUILDFLAG(IS_ANDROID)
+    if (!row->by_web_app_id.empty()) {
+      DownloadItemWebAppData::CreateAndAttachToItem(&item(index),
+                                                    row->by_web_app_id);
+    }
+#endif
 
-    std::vector<download::DownloadItem*> items;
+    std::vector<raw_ptr<download::DownloadItem, VectorExperimental>> items;
     for (size_t i = 0; i < items_.size(); ++i) {
       items.push_back(&item(i));
     }
@@ -850,6 +864,31 @@ TEST_F(DownloadHistoryTest, CreateInProgressDownload) {
   EXPECT_FALSE(DownloadHistory::IsPersisted(&item(0)));
 }
 
+// Test that in-progress save package updates are only persisted when fields
+// actually change.
+TEST_F(DownloadHistoryTest, InProgressSavePackageNoopSecondUpdate) {
+  CreateDownloadHistory({});
+
+  history::DownloadRow row;
+  InitBasicItem(FILE_PATH_LITERAL("/foo/bar.pdf"), "http://example.com/bar.pdf",
+                "http://example.com/referrer.html",
+                download::DownloadItem::IN_PROGRESS, &row);
+  EXPECT_CALL(item(0), IsSavePackageDownload()).WillRepeatedly(Return(true));
+
+  // Save package downloads are persisted even while in progress.
+  CallOnDownloadCreated(0);
+  ExpectDownloadCreated(row);
+
+  EXPECT_CALL(item(0), GetReceivedBytes()).WillRepeatedly(Return(200));
+  item(0).NotifyObserversDownloadUpdated();
+  row.received_bytes = 200;
+  ExpectDownloadUpdated(row, false);
+
+  // No additional update should be issued if the state is unchanged.
+  item(0).NotifyObserversDownloadUpdated();
+  ExpectNoDownloadUpdated();
+}
+
 // Test that in-progress download already in history will be updated once it
 // becomes non-resumable.
 TEST_F(DownloadHistoryTest, InProgressHistoryItemBecomesNonResumable) {
@@ -901,7 +940,7 @@ TEST_F(DownloadHistoryTest, CreateLargeDataURLCompletedItem) {
 
   history::DownloadRow row;
   std::string data_url = "data:text/html,";
-  data_url.append(std::string(2048, 'a'));
+  data_url.append(std::string(10000, 'a'));
   InitBasicItem(FILE_PATH_LITERAL("/foo/bar.pdf"), data_url.c_str(),
                 "http://example.com/referrer.html",
                 download::DownloadItem::IN_PROGRESS, &row);
@@ -915,7 +954,7 @@ TEST_F(DownloadHistoryTest, CreateLargeDataURLCompletedItem) {
   EXPECT_CALL(item(0), GetState())
       .WillRepeatedly(Return(download::DownloadItem::COMPLETE));
   row.state = history::DownloadState::COMPLETE;
-  data_url.resize(1024);
+  data_url.resize(8192);
   row.url_chain.back() = GURL(data_url);
   item(0).NotifyObserversDownloadUpdated();
   ExpectDownloadCreated(row);
@@ -988,5 +1027,26 @@ TEST_F(DownloadHistoryTest,
   EXPECT_TRUE(DownloadHistory::IsPersisted(&item(0)));
   EXPECT_TRUE(DownloadHistory::IsPersisted(&item(1)));
 }
+
+#if !BUILDFLAG(IS_ANDROID)
+// Test that web app id is inserted into history.
+TEST_F(DownloadHistoryTest, ByWebAppId) {
+  // Create a fresh item not from download DB
+  CreateDownloadHistory({});
+
+  history::DownloadRow row;
+  row.by_web_app_id = "by_web_app_id";
+  InitBasicItem(FILE_PATH_LITERAL("/foo/bar.pdf"), "http://example.com/bar.pdf",
+                "http://example.com/referrer.html",
+                download::DownloadItem::COMPLETE, &row);
+
+  EXPECT_CALL(item(0), IsDone()).WillRepeatedly(Return(true));
+
+  CallOnDownloadCreated(0);
+  ExpectDownloadCreated(row);
+  EXPECT_TRUE(DownloadHistory::IsPersisted(&item(0)));
+  EXPECT_NE(DownloadItemWebAppData::Get(&item(0)), nullptr);
+}
+#endif
 
 }  // anonymous namespace

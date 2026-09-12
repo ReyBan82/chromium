@@ -10,12 +10,12 @@
 #include "chrome/browser/ui/webui/version/version_util_win.h"
 #include "content/public/browser/web_ui.h"
 
-VersionHandlerWindows::VersionHandlerWindows() {}
+VersionHandlerWindows::VersionHandlerWindows() = default;
 
-VersionHandlerWindows::~VersionHandlerWindows() {}
+VersionHandlerWindows::~VersionHandlerWindows() = default;
 
 void VersionHandlerWindows::HandleRequestVersionInfo(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   VersionHandler::HandleRequestVersionInfo(args);
 
   // Start the asynchronous load of the versions.

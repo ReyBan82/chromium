@@ -26,23 +26,6 @@ namespace content {
 
 namespace {
 
-// Returns the histogram suffix for the given |event| type.
-std::string HistogramSuffixForEventType(ServiceWorkerMetrics::EventType event) {
-  switch (event) {
-    case ServiceWorkerMetrics::EventType::BACKGROUND_FETCH_ABORT:
-      return "AbortEvent";
-    case ServiceWorkerMetrics::EventType::BACKGROUND_FETCH_CLICK:
-      return "ClickEvent";
-    case ServiceWorkerMetrics::EventType::BACKGROUND_FETCH_FAIL:
-      return "FailEvent";
-    case ServiceWorkerMetrics::EventType::BACKGROUND_FETCH_SUCCESS:
-      return "SuccessEvent";
-    default:
-      NOTREACHED();
-      return std::string();
-  }
-}
-
 // Returns a human-readable string for the given |event| type.
 std::string EventTypeToString(ServiceWorkerMetrics::EventType event) {
   switch (event) {
@@ -56,34 +39,7 @@ std::string EventTypeToString(ServiceWorkerMetrics::EventType event) {
       return "BackgroundFetchSuccessEvent";
     default:
       NOTREACHED();
-      return std::string();
   }
-}
-
-// Records the result of a dispatched Background Fetch event.
-void RecordDispatchResult(
-    ServiceWorkerMetrics::EventType event,
-    BackgroundFetchEventDispatcher::DispatchResult result) {
-  std::string histogram_name = "BackgroundFetch.EventDispatchResult." +
-                               HistogramSuffixForEventType(event);
-
-  // Used because the |histogram_name| is not a constant.
-  base::UmaHistogramEnumeration(
-      histogram_name, result,
-      BackgroundFetchEventDispatcher::DISPATCH_RESULT_COUNT);
-}
-
-// Records the failure reason of a failed dispatch for |metric_name|.
-void RecordFailureResult(ServiceWorkerMetrics::EventType event,
-                         const char* metric_name,
-                         blink::ServiceWorkerStatusCode service_worker_status) {
-  std::string event_type = HistogramSuffixForEventType(event);
-  std::string histogram_name =
-      base::StringPrintf("BackgroundFetch.EventDispatchFailure.%s.%s",
-                         metric_name, event_type.c_str());
-
-  // Used because the |histogram_name| is not a constant.
-  base::UmaHistogramEnumeration(histogram_name, service_worker_status);
 }
 
 }  // namespace
@@ -91,25 +47,24 @@ void RecordFailureResult(ServiceWorkerMetrics::EventType event,
 BackgroundFetchEventDispatcher::BackgroundFetchEventDispatcher(
     BackgroundFetchContext* background_fetch_context,
     scoped_refptr<ServiceWorkerContextWrapper> service_worker_context,
-    DevToolsBackgroundServicesContextImpl* devtools_context)
+    DevToolsBackgroundServicesContextImpl& devtools_context)
     : background_fetch_context_(background_fetch_context),
       service_worker_context_(std::move(service_worker_context)),
-      devtools_context_(devtools_context) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(background_fetch_context_);
-  DCHECK(devtools_context_);
+      devtools_context_(&devtools_context) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
+  CHECK(background_fetch_context_, base::NotFatalUntil::M158);
 }
 
 BackgroundFetchEventDispatcher::~BackgroundFetchEventDispatcher() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
 }
 
 void BackgroundFetchEventDispatcher::DispatchBackgroundFetchCompletionEvent(
     const BackgroundFetchRegistrationId& registration_id,
     blink::mojom::BackgroundFetchRegistrationDataPtr registration_data,
     base::OnceClosure finished_closure) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(registration_data);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
+  CHECK(registration_data, base::NotFatalUntil::M158);
 
   auto registration = blink::mojom::BackgroundFetchRegistration::New(
       std::move(registration_data),
@@ -118,16 +73,18 @@ void BackgroundFetchEventDispatcher::DispatchBackgroundFetchCompletionEvent(
 
   switch (registration->registration_data->failure_reason) {
     case blink::mojom::BackgroundFetchFailureReason::NONE:
-      DCHECK_EQ(registration->registration_data->result,
-                blink::mojom::BackgroundFetchResult::SUCCESS);
+      CHECK_EQ(registration->registration_data->result,
+               blink::mojom::BackgroundFetchResult::SUCCESS,
+               base::NotFatalUntil::M158);
       DispatchBackgroundFetchSuccessEvent(registration_id,
                                           std::move(registration),
                                           std::move(finished_closure));
       return;
     case blink::mojom::BackgroundFetchFailureReason::CANCELLED_FROM_UI:
     case blink::mojom::BackgroundFetchFailureReason::CANCELLED_BY_DEVELOPER:
-      DCHECK_EQ(registration->registration_data->result,
-                blink::mojom::BackgroundFetchResult::FAILURE);
+      CHECK_EQ(registration->registration_data->result,
+               blink::mojom::BackgroundFetchResult::FAILURE,
+               base::NotFatalUntil::M158);
       DispatchBackgroundFetchAbortEvent(registration_id,
                                         std::move(registration),
                                         std::move(finished_closure));
@@ -137,8 +94,9 @@ void BackgroundFetchEventDispatcher::DispatchBackgroundFetchCompletionEvent(
     case blink::mojom::BackgroundFetchFailureReason::SERVICE_WORKER_UNAVAILABLE:
     case blink::mojom::BackgroundFetchFailureReason::QUOTA_EXCEEDED:
     case blink::mojom::BackgroundFetchFailureReason::DOWNLOAD_TOTAL_EXCEEDED:
-      DCHECK_EQ(registration->registration_data->result,
-                blink::mojom::BackgroundFetchResult::FAILURE);
+      CHECK_EQ(registration->registration_data->result,
+               blink::mojom::BackgroundFetchResult::FAILURE,
+               base::NotFatalUntil::M158);
       DispatchBackgroundFetchFailEvent(registration_id, std::move(registration),
                                        std::move(finished_closure));
       return;
@@ -150,7 +108,7 @@ void BackgroundFetchEventDispatcher::DispatchBackgroundFetchAbortEvent(
     const BackgroundFetchRegistrationId& registration_id,
     blink::mojom::BackgroundFetchRegistrationPtr registration,
     base::OnceClosure finished_closure) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
 
   LogBackgroundFetchCompletionForDevTools(
       registration_id, ServiceWorkerMetrics::EventType::BACKGROUND_FETCH_ABORT,
@@ -168,8 +126,8 @@ void BackgroundFetchEventDispatcher::DoDispatchBackgroundFetchAbortEvent(
     blink::mojom::BackgroundFetchRegistrationPtr registration,
     scoped_refptr<ServiceWorkerVersion> service_worker_version,
     int request_id) {
-  DCHECK(service_worker_version);
-  DCHECK(registration);
+  CHECK(service_worker_version, base::NotFatalUntil::M158);
+  CHECK(registration, base::NotFatalUntil::M158);
   service_worker_version->endpoint()->DispatchBackgroundFetchAbortEvent(
       std::move(registration),
       service_worker_version->CreateSimpleEventCallback(request_id));
@@ -179,8 +137,8 @@ void BackgroundFetchEventDispatcher::DispatchBackgroundFetchClickEvent(
     const BackgroundFetchRegistrationId& registration_id,
     blink::mojom::BackgroundFetchRegistrationDataPtr registration_data,
     base::OnceClosure finished_closure) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(registration_data);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
+  CHECK(registration_data, base::NotFatalUntil::M158);
 
   auto registration = blink::mojom::BackgroundFetchRegistration::New(
       std::move(registration_data),
@@ -199,8 +157,8 @@ void BackgroundFetchEventDispatcher::DoDispatchBackgroundFetchClickEvent(
     blink::mojom::BackgroundFetchRegistrationPtr registration,
     scoped_refptr<ServiceWorkerVersion> service_worker_version,
     int request_id) {
-  DCHECK(service_worker_version);
-  DCHECK(registration);
+  CHECK(service_worker_version, base::NotFatalUntil::M158);
+  CHECK(registration, base::NotFatalUntil::M158);
   service_worker_version->endpoint()->DispatchBackgroundFetchClickEvent(
       std::move(registration),
       service_worker_version->CreateSimpleEventCallback(request_id));
@@ -210,7 +168,7 @@ void BackgroundFetchEventDispatcher::DispatchBackgroundFetchFailEvent(
     const BackgroundFetchRegistrationId& registration_id,
     blink::mojom::BackgroundFetchRegistrationPtr registration,
     base::OnceClosure finished_closure) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
 
   LogBackgroundFetchCompletionForDevTools(
       registration_id, ServiceWorkerMetrics::EventType::BACKGROUND_FETCH_FAIL,
@@ -228,8 +186,8 @@ void BackgroundFetchEventDispatcher::DoDispatchBackgroundFetchFailEvent(
     blink::mojom::BackgroundFetchRegistrationPtr registration,
     scoped_refptr<ServiceWorkerVersion> service_worker_version,
     int request_id) {
-  DCHECK(service_worker_version);
-  DCHECK(registration);
+  CHECK(service_worker_version, base::NotFatalUntil::M158);
+  CHECK(registration, base::NotFatalUntil::M158);
   service_worker_version->endpoint()->DispatchBackgroundFetchFailEvent(
       std::move(registration),
       service_worker_version->CreateSimpleEventCallback(request_id));
@@ -239,7 +197,7 @@ void BackgroundFetchEventDispatcher::DispatchBackgroundFetchSuccessEvent(
     const BackgroundFetchRegistrationId& registration_id,
     blink::mojom::BackgroundFetchRegistrationPtr registration,
     base::OnceClosure finished_closure) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
 
   LogBackgroundFetchCompletionForDevTools(
       registration_id,
@@ -259,8 +217,8 @@ void BackgroundFetchEventDispatcher::DoDispatchBackgroundFetchSuccessEvent(
     blink::mojom::BackgroundFetchRegistrationPtr registration,
     scoped_refptr<ServiceWorkerVersion> service_worker_version,
     int request_id) {
-  DCHECK(service_worker_version);
-  DCHECK(registration);
+  CHECK(service_worker_version, base::NotFatalUntil::M158);
+  CHECK(registration, base::NotFatalUntil::M158);
   service_worker_version->endpoint()->DispatchBackgroundFetchSuccessEvent(
       std::move(registration),
       service_worker_version->CreateSimpleEventCallback(request_id));
@@ -292,7 +250,7 @@ void BackgroundFetchEventDispatcher::StartActiveWorkerForDispatch(
   }
 
   ServiceWorkerVersion* service_worker_version = registration->active_version();
-  DCHECK(service_worker_version);
+  CHECK(service_worker_version, base::NotFatalUntil::M158);
 
   service_worker_version->RunAfterStartWorker(
       event,
@@ -326,26 +284,6 @@ void BackgroundFetchEventDispatcher::DidDispatchEvent(
     base::OnceClosure finished_closure,
     DispatchPhase dispatch_phase,
     blink::ServiceWorkerStatusCode service_worker_status) {
-  // Record the histograms tracking event dispatching success.
-  switch (dispatch_phase) {
-    case DispatchPhase::FINDING:
-      RecordDispatchResult(event, DISPATCH_RESULT_CANNOT_FIND_WORKER);
-      RecordFailureResult(event, "FindWorker", service_worker_status);
-      break;
-    case DispatchPhase::STARTING:
-      RecordDispatchResult(event, DISPATCH_RESULT_CANNOT_START_WORKER);
-      RecordFailureResult(event, "StartWorker", service_worker_status);
-      break;
-    case DispatchPhase::DISPATCHING:
-      if (service_worker_status != blink::ServiceWorkerStatusCode::kOk) {
-        RecordDispatchResult(event, DISPATCH_RESULT_CANNOT_DISPATCH_EVENT);
-        RecordFailureResult(event, "Dispatch", service_worker_status);
-      } else {
-        RecordDispatchResult(event, DISPATCH_RESULT_SUCCESS);
-      }
-      break;
-  }
-
   std::move(finished_closure).Run();
 }
 
@@ -353,7 +291,8 @@ void BackgroundFetchEventDispatcher::LogBackgroundFetchCompletionForDevTools(
     const BackgroundFetchRegistrationId& registration_id,
     ServiceWorkerMetrics::EventType event_type,
     blink::mojom::BackgroundFetchFailureReason failure_reason) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
+  CHECK(devtools_context_);
 
   if (!devtools_context_->IsRecording(
           DevToolsBackgroundService::kBackgroundFetch)) {
@@ -374,6 +313,10 @@ void BackgroundFetchEventDispatcher::LogBackgroundFetchCompletionForDevTools(
       DevToolsBackgroundService::kBackgroundFetch,
       /* event_name= */ "Background Fetch completed",
       /* instance_id= */ registration_id.developer_id(), metadata);
+}
+
+void BackgroundFetchEventDispatcher::Shutdown() {
+  devtools_context_ = nullptr;
 }
 
 }  // namespace content

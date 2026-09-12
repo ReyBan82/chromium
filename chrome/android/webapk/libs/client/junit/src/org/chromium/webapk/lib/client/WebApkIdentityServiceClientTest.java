@@ -14,25 +14,17 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.Shadows;
-import org.robolectric.android.util.concurrent.RoboExecutorService;
-import org.robolectric.annotation.Config;
-import org.robolectric.annotation.LooperMode;
 import org.robolectric.shadows.ShadowApplication;
-import org.robolectric.shadows.ShadowLooper;
 
-import org.chromium.base.task.PostTask;
 import org.chromium.base.task.TaskTraits;
+import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.components.webapk.lib.common.WebApkMetaDataKeys;
-import org.chromium.testing.local.LocalRobolectricTestRunner;
 import org.chromium.webapk.lib.common.identity_service.IIdentityService;
 import org.chromium.webapk.test.WebApkTestHelper;
 
-/**
- * Unit tests for {@link org.chromium.webapk.lib.client.WebApkIdentityServiceClient}.
- */
-@RunWith(LocalRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
-@LooperMode(LooperMode.Mode.LEGACY)
+/** Unit tests for {@link org.chromium.webapk.lib.client.WebApkIdentityServiceClient}. */
+@RunWith(BaseRobolectricTestRunner.class)
 public class WebApkIdentityServiceClientTest {
     static final String BROWSER_PACKAGE_NAME = "org.chromium.test";
 
@@ -55,7 +47,7 @@ public class WebApkIdentityServiceClientTest {
 
     /** Mocks the Identity service of a WebAPK. */
     private static class TestIdentityService extends IIdentityService.Stub {
-        private String mRuntimeHost;
+        private final String mRuntimeHost;
 
         public TestIdentityService(String runtimeHost) {
             mRuntimeHost = runtimeHost;
@@ -70,26 +62,28 @@ public class WebApkIdentityServiceClientTest {
     @Before
     public void setUp() {
         mShadowApplication = Shadows.shadowOf(RuntimeEnvironment.application);
-        PostTask.setPrenativeThreadPoolExecutorForTesting(new RoboExecutorService());
+        WebApkIdentityServiceClient.resetForTesting();
     }
 
     @After
     public void tearDown() {
         WebApkIdentityServiceClient.disconnectAll(RuntimeEnvironment.application);
-        PostTask.resetPrenativeThreadPoolExecutorForTesting();
     }
 
     /**
-     * Tests that for WebAPKs with shell APK version lower than the
-     * {@link WebApkIdentityServiceClient#SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST},
-     * the backs-WebAPK-check returns false if the browser does NOT match the WebAPK's runtime host
+     * Tests that for WebAPKs with shell APK version lower than the {@link
+     * WebApkIdentityServiceClient#SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST}, the
+     * backs-WebAPK-check returns false if the browser does NOT match the WebAPK's runtime host
      * specified in the metaData.
      */
     @Test
     public void testReturnsFalseWhenNotMatchRuntimeHostBeforeIntroduceHostBrowserSwitchLogic() {
-        registerWebApk(ANOTHER_BROWSER_PACKAGE_NAME /*webApkRuntimeHost*/,
+        registerWebApk(
+                /* runtimeHost= */ ANOTHER_BROWSER_PACKAGE_NAME,
                 WebApkIdentityServiceClient.SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST - 1
-                /*shellApkVersion*/);
+                /* shellApkVersion= */ );
+        mShadowApplication.setComponentNameAndServiceForBindService(
+                new ComponentName(WEBAPK_PACKAGE_NAME, ""), null);
         mShadowApplication.declareActionUnbindable(
                 WebApkIdentityServiceClient.ACTION_WEBAPK_IDENTITY_SERVICE);
 
@@ -97,16 +91,19 @@ public class WebApkIdentityServiceClientTest {
     }
 
     /**
-     * Tests that for WebAPKs with shell APK version lower than the
-     * {@link WebApkIdentityServiceClient#SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST},
-     * the backs-WebAPK-check returns true if the browser matches the WebAPK's runtime host
-     * specified in the metaData.
+     * Tests that for WebAPKs with shell APK version lower than the {@link
+     * WebApkIdentityServiceClient#SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST}, the
+     * backs-WebAPK-check returns true if the browser matches the WebAPK's runtime host specified in
+     * the metaData.
      */
     @Test
     public void testReturnsTrueWhenMatchesRuntimeHostBeforeIntroduceHostBrowserSwitchLogic() {
-        registerWebApk(BROWSER_PACKAGE_NAME /*webApkRuntimeHost*/,
+        registerWebApk(
+                /* runtimeHost= */ BROWSER_PACKAGE_NAME,
                 WebApkIdentityServiceClient.SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST - 1
-                /*shellApkVersion*/);
+                /* shellApkVersion= */ );
+        mShadowApplication.setComponentNameAndServiceForBindService(
+                new ComponentName(WEBAPK_PACKAGE_NAME, ""), null);
         mShadowApplication.declareActionUnbindable(
                 WebApkIdentityServiceClient.ACTION_WEBAPK_IDENTITY_SERVICE);
 
@@ -114,15 +111,18 @@ public class WebApkIdentityServiceClientTest {
     }
 
     /**
-     * Tests that for WebAPKs with shell APK version equal or higher than the
-     * {@link WebApkIdentityServiceClient#SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST} but
-     * doesn't have Identity Service, the backs-WebAPK-check returns false.
+     * Tests that for WebAPKs with shell APK version equal or higher than the {@link
+     * WebApkIdentityServiceClient#SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST} but doesn't
+     * have Identity Service, the backs-WebAPK-check returns false.
      */
     @Test
     public void testBacksWebApkCheckForWebApkWithHostBrowserSwitchLogicButWithoutIdentityService() {
-        registerWebApk(BROWSER_PACKAGE_NAME /*webApkRuntimeHost*/,
+        registerWebApk(
+                /* runtimeHost= */ BROWSER_PACKAGE_NAME,
                 WebApkIdentityServiceClient.SHELL_APK_VERSION_SUPPORTING_SWITCH_RUNTIME_HOST
-                /*shellApkVersion*/);
+                /* shellApkVersion= */ );
+        mShadowApplication.setComponentNameAndServiceForBindService(
+                new ComponentName(WEBAPK_PACKAGE_NAME, ""), null);
         mShadowApplication.declareActionUnbindable(
                 WebApkIdentityServiceClient.ACTION_WEBAPK_IDENTITY_SERVICE);
 
@@ -136,7 +136,7 @@ public class WebApkIdentityServiceClientTest {
     @Test
     public void testReturnsFalseWhenDoesNotMatchRuntimeHostProvidedByIdentityService() {
         // The shell APK version doesn't matter as long as the WebAPK has an Identity service.
-        registerWebApk(BROWSER_PACKAGE_NAME /*webApkSpecifiedRuntimeHost*/, 0 /*shellApkVersion*/);
+        registerWebApk(/* runtimeHost= */ BROWSER_PACKAGE_NAME, /* shellApkVersion= */ 0);
         mShadowApplication.setComponentNameAndServiceForBindService(
                 new ComponentName(WEBAPK_PACKAGE_NAME, ""),
                 new TestIdentityService(ANOTHER_BROWSER_PACKAGE_NAME));
@@ -151,11 +151,10 @@ public class WebApkIdentityServiceClientTest {
     @Test
     public void testReturnsTrueWhenMatchesRuntimeHostProvidedByIdentityService() {
         // The shell APK version doesn't matter as long as the WebAPK has an Identity service.
-        registerWebApk(
-                ANOTHER_BROWSER_PACKAGE_NAME /*webApkSpecifiedRuntimeHost*/, 0 /*shellApkVersion*/);
+        registerWebApk(/* runtimeHost= */ ANOTHER_BROWSER_PACKAGE_NAME, /* shellApkVersion= */ 0);
         mShadowApplication.setComponentNameAndServiceForBindService(
                 new ComponentName(WEBAPK_PACKAGE_NAME, ""),
-                new TestIdentityService(BROWSER_PACKAGE_NAME /*realRuntimeHost*/));
+                new TestIdentityService(/* runtimeHost= */ BROWSER_PACKAGE_NAME));
 
         Assert.assertTrue(doesBrowserBackWebApk());
     }
@@ -166,7 +165,7 @@ public class WebApkIdentityServiceClientTest {
         bundle.putString(WebApkMetaDataKeys.RUNTIME_HOST, runtimeHost);
         bundle.putInt(WebApkMetaDataKeys.SHELL_APK_VERSION, shellApkVersion);
         WebApkTestHelper.registerWebApkWithMetaData(
-                WEBAPK_PACKAGE_NAME, bundle, null /* shareTargetMetaData */);
+                WEBAPK_PACKAGE_NAME, bundle, /* shareTargetMetaData= */ null);
     }
 
     /** Checks whether the browser backs the WebAPK. */
@@ -175,7 +174,7 @@ public class WebApkIdentityServiceClientTest {
         WebApkIdentityServiceClient.getInstance(TaskTraits.BEST_EFFORT_MAY_BLOCK)
                 .checkBrowserBacksWebApkAsync(
                         RuntimeEnvironment.application, WEBAPK_PACKAGE_NAME, callback);
-        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        RobolectricUtil.runAllBackgroundAndUiIncludingDelayed();
 
         Assert.assertTrue(callback.mIsCalled);
         return callback.mResult;

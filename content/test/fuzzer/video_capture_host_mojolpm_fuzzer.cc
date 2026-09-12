@@ -3,30 +3,39 @@
 // found in the LICENSE file.
 
 #include <stdint.h>
+
 #include <memory>
 #include <string>
 #include <utility>
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ref.h"
 #include "base/no_destructor.h"
 #include "base/run_loop.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
+#include "base/test/test_future.h"
 #include "base/threading/thread.h"
-#include "content/browser/renderer_host/media/fake_video_capture_provider.h"
+#include "content/browser/media/media_devices_util.h"  // nogncheck
+#include "content/browser/media/media_internals.h"     // nogncheck
+#include "content/browser/renderer_host/media/fake_video_capture_provider.h"  // nogncheck
 #include "content/browser/renderer_host/media/in_process_video_capture_provider.h"  // nogncheck
 #include "content/browser/renderer_host/media/media_stream_manager.h"  // nogncheck
 #include "content/browser/renderer_host/media/media_stream_ui_proxy.h"  // nogncheck
+#include "content/browser/renderer_host/media/service_video_capture_provider.h"  // nogncheck
 #include "content/browser/renderer_host/media/video_capture_host.h"  // nogncheck
 #include "content/browser/renderer_host/media/video_capture_manager.h"  // nogncheck
+#include "content/browser/renderer_host/media/video_capture_provider_switcher.h"  // nogncheck
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
+#include "content/public/browser/global_routing_id.h"
+#include "content/public/browser/media_device_id.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/test_browser_context.h"
+#include "content/public/test/test_content_browser_client.h"
 #include "content/test/fuzzer/mojolpm_fuzzer_support.h"
 #include "content/test/fuzzer/video_capture_host_mojolpm_fuzzer.pb.h"
-#include "content/test/test_content_browser_client.h"
 #include "media/audio/audio_system_impl.h"
 #include "media/audio/mock_audio_manager.h"
 #include "media/audio/test_audio_thread.h"
@@ -40,7 +49,8 @@
 #include "third_party/blink/public/common/mediastream/media_devices.h"
 #include "third_party/libprotobuf-mutator/src/src/libfuzzer/libfuzzer_macro.h"
 
-const char* kCmdline[] = {"video_capture_host_mojolpm_fuzzer", nullptr};
+constexpr const char* kCmdline[] = {"video_capture_host_mojolpm_fuzzer",
+                                    nullptr};
 
 // Describe all the devices (as descriptors).
 const uint32_t kNumDeviceDescriptors = 4;
@@ -154,7 +164,9 @@ class VideoCaptureHostTestcase {
   // Create and bind a new instance for fuzzing. This needs to make sure that
   // the new instance has been created and bound on the correct sequence
   // before returning.
-  void AddVideoCaptureHost(uint32_t id, uint32_t render_process_id);
+  void AddVideoCaptureHost(uint32_t id,
+                           uint32_t render_process_id,
+                           uint32_t routing_id);
 
   // This wraps `HandleRemoteAction`, making the call for the correct device.
   // As it requires specifying the `render_process_id` and `device_index`.
@@ -176,7 +188,8 @@ class VideoCaptureHostTestcase {
                                                 uint32_t device_index);
 
   // The proto message describing the test actions to perform.
-  const content::fuzzing::video_capture_host::proto::Testcase& testcase_;
+  const raw_ref<const content::fuzzing::video_capture_host::proto::Testcase>
+      testcase_;
 
   // Apply a reasonable upper-bound on testcase complexity to avoid timeouts.
   const int max_action_count_ = 512;
@@ -240,21 +253,21 @@ VideoCaptureHostTestcase::~VideoCaptureHostTestcase() {
 
 bool VideoCaptureHostTestcase::IsFinished() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  return next_sequence_idx_ >= testcase_.sequence_indexes_size();
+  return next_sequence_idx_ >= testcase_->sequence_indexes_size();
 }
 
 void VideoCaptureHostTestcase::NextAction() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  if (next_sequence_idx_ < testcase_.sequence_indexes_size()) {
-    auto sequence_idx = testcase_.sequence_indexes(next_sequence_idx_++);
+  if (next_sequence_idx_ < testcase_->sequence_indexes_size()) {
+    auto sequence_idx = testcase_->sequence_indexes(next_sequence_idx_++);
     const auto& sequence =
-        testcase_.sequences(sequence_idx % testcase_.sequences_size());
+        testcase_->sequences(sequence_idx % testcase_->sequences_size());
     for (auto action_idx : sequence.action_indexes()) {
-      if (!testcase_.actions_size() || ++action_count_ > max_action_count_) {
+      if (!testcase_->actions_size() || ++action_count_ > max_action_count_) {
         return;
       }
       const auto& action =
-          testcase_.actions(action_idx % testcase_.actions_size());
+          testcase_->actions(action_idx % testcase_->actions_size());
       if (action.ByteSizeLong() > max_action_size_) {
         return;
       }
@@ -276,7 +289,8 @@ void VideoCaptureHostTestcase::NextAction() {
         case Action::kNewVideoCaptureHost: {
           AddVideoCaptureHost(
               action.new_video_capture_host().id(),
-              action.new_video_capture_host().render_process_id());
+              action.new_video_capture_host().render_process_id(),
+              action.new_video_capture_host().routing_id());
         } break;
 
         case Action::kVideoCaptureHostDeviceRemoteAction: {
@@ -357,12 +371,22 @@ void VideoCaptureHostTestcase::SetUpOnUIThread() {
   video_capture_device_factory->SetV4L2EnvironmentForTesting(
       std::move(fake_v4l2_impl), std::move(fake_device_provider));
 
+  // Ensure MediaInternals is created on the UI thread before starting the
+  // MediaStreamManager instance.
+  content::MediaInternals::GetInstance();
+
+  auto fake_video_capture_provider =
+      std::make_unique<content::FakeVideoCaptureProvider>(
+          std::move(video_capture_device_factory));
+  auto screencapture_video_capture_provider =
+      content::InProcessVideoCaptureProvider::CreateInstanceForScreenCapture(
+          base::SingleThreadTaskRunner::GetCurrentDefault());
+
   media_stream_manager_ = std::make_unique<content::MediaStreamManager>(
       audio_system_.get(),
-      content::InProcessVideoCaptureProvider::CreateInstance(
-          std::make_unique<media::VideoCaptureSystemImpl>(
-              std::move(video_capture_device_factory)),
-          audio_manager_->GetTaskRunner(), base::DoNothing()));
+      std::make_unique<content::VideoCaptureProviderSwitcher>(
+          std::move(fake_video_capture_provider),
+          std::move(screencapture_video_capture_provider)));
 }
 
 void VideoCaptureHostTestcase::SetUpOnIOThreadSecond() {
@@ -375,7 +399,8 @@ void VideoCaptureHostTestcase::OpenSession(int render_process_id,
                                            int requester_id,
                                            int page_request_id) {
   // We get `salt_and_origin` on the UI Thread, and use it on the IO thread.
-  content::MediaDeviceSaltAndOrigin salt_and_origin;
+  content::MediaDeviceSaltAndOrigin salt_and_origin =
+      content::MediaDeviceSaltAndOrigin::Empty();
   {
     base::RunLoop run_loop{base::RunLoop::Type::kNestableTasksAllowed};
     content::GetUIThreadTaskRunner({})->PostTaskAndReply(
@@ -402,8 +427,11 @@ void VideoCaptureHostTestcase::OpenSessionOnUIThread(
     int render_process_id,
     int render_frame_id,
     content::MediaDeviceSaltAndOrigin* out_salt_and_origin) {
-  *out_salt_and_origin =
-      content::GetMediaDeviceSaltAndOrigin(render_process_id, render_frame_id);
+  base::test::TestFuture<const content::MediaDeviceSaltAndOrigin&> future;
+  content::GetMediaDeviceSaltAndOrigin(
+      content::GlobalRenderFrameHostId(render_process_id, render_frame_id),
+      future.GetCallback());
+  *out_salt_and_origin = future.Get();
 }
 
 void VideoCaptureHostTestcase::OpenSessionOnIOThread(
@@ -419,13 +447,13 @@ void VideoCaptureHostTestcase::OpenSessionOnIOThread(
     base::RunLoop run_loop{base::RunLoop::Type::kNestableTasksAllowed};
     content::MediaDevicesManager::BoolDeviceTypes devices_to_enumerate;
     devices_to_enumerate[static_cast<size_t>(
-        MediaDeviceType::MEDIA_VIDEO_INPUT)] = true;
+        MediaDeviceType::kMediaVideoInput)] = true;
     media_stream_manager_->media_devices_manager()->EnumerateDevices(
         devices_to_enumerate,
         base::BindOnce(&VideoCaptureHostTestcase::VideoInputDevicesEnumerated,
                        base::Unretained(this), run_loop.QuitClosure(),
-                       salt_and_origin.device_id_salt, salt_and_origin.origin,
-                       &video_devices));
+                       salt_and_origin.device_id_salt(),
+                       salt_and_origin.origin(), &video_devices));
 
     run_loop.Run();
   }
@@ -435,7 +463,7 @@ void VideoCaptureHostTestcase::OpenSessionOnIOThread(
        device_index++) {
     base::RunLoop run_loop{base::RunLoop::Type::kNestableTasksAllowed};
     media_stream_manager_->OpenDevice(
-        render_process_id, render_frame_id, requester_id, page_request_id,
+        {render_process_id, render_frame_id}, requester_id, page_request_id,
         video_devices[device_index].device_id,
         blink::mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE, salt_and_origin,
         base::BindOnce(&VideoCaptureHostTestcase::OnDeviceOpened,
@@ -491,10 +519,9 @@ void VideoCaptureHostTestcase::VideoInputDevicesEnumerated(
     blink::WebMediaDeviceInfoArray* out,
     const content::MediaDeviceEnumeration& enumeration) {
   for (const auto& info :
-       enumeration[static_cast<size_t>(MediaDeviceType::MEDIA_VIDEO_INPUT)]) {
+       enumeration[static_cast<size_t>(MediaDeviceType::kMediaVideoInput)]) {
     std::string device_id =
-        content::MediaStreamManager::GetHMACForMediaDeviceID(
-            salt, security_origin, info.device_id);
+        content::GetHMACForMediaDeviceID(salt, security_origin, info.device_id);
     out->push_back(
         blink::WebMediaDeviceInfo(device_id, info.label, std::string()));
   }
@@ -516,43 +543,22 @@ void VideoCaptureHostTestcase::OnDeviceOpened(
 }
 
 void VideoCaptureHostTestcase::AddVideoCaptureHost(uint32_t id,
-                                                   uint32_t render_process_id) {
+                                                   uint32_t render_process_id,
+                                                   uint32_t routing_id) {
   mojo::Remote<::media::mojom::VideoCaptureHost> remote;
   auto receiver = remote.BindNewPipeAndPassReceiver();
 
   base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);
   content::GetIOThreadTaskRunner({})->PostTaskAndReply(
       FROM_HERE,
-      base::BindOnce(&content::VideoCaptureHost::Create, render_process_id,
-                     media_stream_manager_.get(), std::move(receiver)),
+      base::BindOnce(
+          &content::VideoCaptureHost::Create,
+          content::GlobalRenderFrameHostId(render_process_id, routing_id),
+          media_stream_manager_.get(), std::move(receiver)),
       run_loop.QuitClosure());
   run_loop.Run();
 
   mojolpm::GetContext()->AddInstance(id, std::move(remote));
-}
-
-/* Matches signature of a mojolpm::ToProto implementation, which has not been
- * implemented yet, to be replaced once that is done.
- * see "mojo/public/mojom/base/unguessable_token.mojom-mojolpm.h"
- */
-bool ToProto(const ::base::UnguessableToken& input,
-             mojolpm::mojo_base::mojom::UnguessableToken& output) {
-  if (output.has_new_()) {
-    output.mutable_new_()->set_id(1UL);
-    output.mutable_new_()->set_m_low(input.GetLowForSerialization());
-    output.mutable_new_()->set_m_high(input.GetHighForSerialization());
-    return true;
-  }
-  auto allocated_new = std::make_unique<
-      mojolpm::mojo_base::mojom::UnguessableToken_ProtoStruct>();
-
-  allocated_new->set_id(1UL);
-  allocated_new->set_m_low(input.GetLowForSerialization());
-  allocated_new->set_m_high(input.GetHighForSerialization());
-
-  // passes ownership of `allocated_new`
-  output.set_allocated_new_(allocated_new.release());
-  return true;
 }
 
 void VideoCaptureHostTestcase::HandleDeviceRemoteAction(
@@ -602,8 +608,9 @@ VideoCaptureHostTestcase::RemoteActionInjectSessionId(
       return remote_method_action;
   }
 
-  if (!ToProto(token, *m_session_id))
+  if (!mojolpm::ToProto(token, *m_session_id)) {
     return remote_method_action;
+  }
   return remote_method_action_mutable;
 }
 

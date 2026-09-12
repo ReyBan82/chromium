@@ -7,6 +7,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/base64.h"
@@ -16,10 +17,12 @@
 #include "base/memory/ref_counted_memory.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/strings/to_string.h"
 #include "base/token.h"
 #include "content/browser/devtools/devtools_background_services_context_impl.h"
 #include "content/browser/payments/payment_app_context_impl.h"
 #include "content/browser/payments/payment_app_installer.h"
+#include "content/browser/payments/payment_handler_web_contents_observer.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
 #include "content/browser/service_worker/service_worker_metrics.h"
 #include "content/browser/service_worker/service_worker_version.h"
@@ -28,6 +31,7 @@
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/devtools_background_services_context.h"
+#include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/common/content_features.h"
@@ -78,16 +82,12 @@ void AddModifiersToMap(const std::vector<PaymentDetailsModifierPtr>& modifiers,
 }
 
 std::string EncodeIcon(const SkBitmap& app_icon) {
-  std::string string_encoded_icon;
   if (app_icon.empty())
-    return string_encoded_icon;
+    return "";
 
   gfx::Image decoded_image = gfx::Image::CreateFrom1xBitmap(app_icon);
   scoped_refptr<base::RefCountedMemory> raw_data = decoded_image.As1xPNGBytes();
-  base::Base64Encode(
-      base::StringPiece(raw_data->front_as<char>(), raw_data->size()),
-      &string_encoded_icon);
-  return string_encoded_icon;
+  return base::Base64Encode(*raw_data);
 }
 
 void CheckRegistrationSuccess(base::OnceCallback<void(bool success)> callback,
@@ -100,20 +100,8 @@ void CheckRegistrationSuccess(base::OnceCallback<void(bool success)> callback,
 // static
 PaymentAppProvider* PaymentAppProvider::GetOrCreateForWebContents(
     WebContents* payment_request_web_contents) {
-  return PaymentAppProviderImpl::GetOrCreateForWebContents(
+  return WebContentsUserData<PaymentAppProviderImpl>::GetOrCreateForWebContents(
       payment_request_web_contents);
-}
-
-// static
-PaymentAppProviderImpl* PaymentAppProviderImpl::GetOrCreateForWebContents(
-    WebContents* payment_request_web_contents) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  auto* data =
-      PaymentAppProviderImpl::FromWebContents(payment_request_web_contents);
-  if (!data)
-    PaymentAppProviderImpl::CreateForWebContents(payment_request_web_contents);
-
-  return PaymentAppProviderImpl::FromWebContents(payment_request_web_contents);
 }
 
 void PaymentAppProviderImpl::InvokePaymentApp(
@@ -124,9 +112,8 @@ void PaymentAppProviderImpl::InvokePaymentApp(
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   DCHECK(payment_request_web_contents_);
 
-  scoped_refptr<DevToolsBackgroundServicesContextImpl> dev_tools =
-      GetDevTools(sw_origin);
-  if (dev_tools) {
+  if (DevToolsBackgroundServicesContextImpl* dev_tools =
+          GetDevTools(sw_origin)) {
     std::map<std::string, std::string> data = {
         {"Merchant Top Origin", event_data->top_origin.spec()},
         {"Merchant Payment Request Origin",
@@ -150,12 +137,12 @@ void PaymentAppProviderImpl::InvokePaymentApp(
       partition->GetServiceWorkerContext();
 
   event_dispatcher_->InvokePayment(registration_id, sw_origin,
-                                   std::move(dev_tools),
                                    std::move(service_worker_context),
                                    std::move(event_data), std::move(callback));
 }
 
 void PaymentAppProviderImpl::InstallAndInvokePaymentApp(
+    GlobalRenderFrameHostId requesting_frame_id,
     PaymentRequestEventDataPtr event_data,
     const std::string& app_name,
     const SkBitmap& app_icon,
@@ -180,9 +167,8 @@ void PaymentAppProviderImpl::InstallAndInvokePaymentApp(
   }
 
   url::Origin sw_origin = url::Origin::Create(sw_scope);
-  scoped_refptr<DevToolsBackgroundServicesContextImpl> dev_tools =
-      GetDevTools(sw_origin);
-  if (dev_tools) {
+  if (DevToolsBackgroundServicesContextImpl* dev_tools =
+          GetDevTools(sw_origin)) {
     std::map<std::string, std::string> data = {
         {"Merchant Top Origin", event_data->top_origin.spec()},
         {"Merchant Payment Request Origin",
@@ -191,7 +177,7 @@ void PaymentAppProviderImpl::InstallAndInvokePaymentApp(
         {"Payment Handler Name", app_name},
         {"Service Worker JavaScript File URL", sw_js_url.spec()},
         {"Service Worker Scope", sw_scope.spec()},
-        {"Service Worker Uses Cache", sw_use_cache ? "true" : "false"},
+        {"Service Worker Uses Cache", base::ToString(sw_use_cache)},
     };
     dev_tools->LogBackgroundServiceEvent(
         /*service_worker_registration_id=*/-1,
@@ -201,22 +187,23 @@ void PaymentAppProviderImpl::InstallAndInvokePaymentApp(
   }
 
   PaymentAppInstaller::Install(
-      payment_request_web_contents_, app_name, EncodeIcon(app_icon), sw_js_url,
-      sw_scope, sw_use_cache, method, supported_delegations,
+      payment_request_web_contents_, requesting_frame_id, app_name,
+      EncodeIcon(app_icon), sw_js_url, sw_scope, sw_use_cache, method,
+      supported_delegations,
       base::BindOnce(&PaymentAppProviderImpl::OnInstallPaymentApp,
                      weak_ptr_factory_.GetWeakPtr(), sw_origin,
                      std::move(event_data), std::move(registration_id_callback),
                      std::move(callback)));
 }
 
-void PaymentAppProviderImpl::UpdatePaymentAppIcon(
+void PaymentAppProviderImpl::UpdatePaymentAppMetadata(
     int64_t registration_id,
     const std::string& instrument_key,
     const std::string& name,
     const std::string& string_encoded_icon,
     const std::string& method_name,
     const SupportedDelegations& supported_delegations,
-    PaymentAppProvider::UpdatePaymentAppIconCallback callback) {
+    PaymentAppProvider::UpdatePaymentAppMetadataCallback callback) {
   StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
       payment_request_web_contents_->GetBrowserContext()
           ->GetDefaultStoragePartition());
@@ -238,9 +225,8 @@ void PaymentAppProviderImpl::CanMakePayment(
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   DCHECK(payment_request_web_contents_);
 
-  scoped_refptr<DevToolsBackgroundServicesContextImpl> dev_tools =
-      GetDevTools(sw_origin);
-  if (dev_tools) {
+  if (DevToolsBackgroundServicesContextImpl* dev_tools =
+          GetDevTools(sw_origin)) {
     std::map<std::string, std::string> data = {
         {"Merchant Top Origin", event_data->top_origin.spec()},
         {"Merchant Payment Request Origin",
@@ -260,7 +246,7 @@ void PaymentAppProviderImpl::CanMakePayment(
       partition->GetServiceWorkerContext();
 
   event_dispatcher_->CanMakePayment(registration_id, sw_origin,
-                                    payment_request_id, std::move(dev_tools),
+                                    payment_request_id,
                                     std::move(service_worker_context),
                                     std::move(event_data), std::move(callback));
 }
@@ -272,9 +258,8 @@ void PaymentAppProviderImpl::AbortPayment(int64_t registration_id,
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   DCHECK(payment_request_web_contents_);
 
-  scoped_refptr<DevToolsBackgroundServicesContextImpl> dev_tools =
-      GetDevTools(sw_origin);
-  if (dev_tools) {
+  if (DevToolsBackgroundServicesContextImpl* dev_tools =
+          GetDevTools(sw_origin)) {
     dev_tools->LogBackgroundServiceEvent(
         registration_id, blink::StorageKey::CreateFirstParty(sw_origin),
         DevToolsBackgroundService::kPaymentHandler, "Abort payment",
@@ -288,7 +273,7 @@ void PaymentAppProviderImpl::AbortPayment(int64_t registration_id,
       partition->GetServiceWorkerContext();
 
   event_dispatcher_->AbortPayment(
-      registration_id, sw_origin, payment_request_id, std::move(dev_tools),
+      registration_id, sw_origin, payment_request_id,
       std::move(service_worker_context), std::move(callback));
 }
 
@@ -301,10 +286,19 @@ void PaymentAppProviderImpl::SetOpenedWindow(
   DCHECK(!payment_handler_window_);
 
   payment_handler_window_ = payment_handler_web_contents->GetWeakPtr();
+
+  payment_handler_disconnected_for_test_ = false;
+  payment_handler_web_contents_observer_ =
+      std::make_unique<PaymentHandlerWebContentsObserver>(
+          payment_handler_web_contents,
+          base::BindOnce(&PaymentAppProviderImpl::OnPaymentHandlerDisconnected,
+                         weak_ptr_factory_.GetWeakPtr()));
 }
 
 void PaymentAppProviderImpl::CloseOpenedWindow() {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+
+  payment_handler_web_contents_observer_.reset();
 
   if (payment_handler_window_)
     payment_handler_window_->Close();
@@ -324,21 +318,47 @@ void PaymentAppProviderImpl::InstallPaymentAppForTesting(
     const GURL& service_worker_javascript_file_url,
     const GURL& service_worker_scope,
     const std::string& payment_method_identifier,
+    GlobalRenderFrameHostId requesting_frame_id,
     base::OnceCallback<void(bool success)> callback) {
   CHECK(service_worker_javascript_file_url.is_valid());
   CHECK(service_worker_scope.is_valid());
   CHECK(!payment_method_identifier.empty());
 
   PaymentAppInstaller::Install(
-      payment_request_web_contents_, /*app_name=*/"Test App Name",
-      EncodeIcon(app_icon), service_worker_javascript_file_url,
-      service_worker_scope, /*use_cache=*/false, payment_method_identifier,
+      payment_request_web_contents_, requesting_frame_id,
+      /*app_name=*/"Test App Name", EncodeIcon(app_icon),
+      service_worker_javascript_file_url, service_worker_scope,
+      /*use_cache=*/false, payment_method_identifier,
       content::SupportedDelegations(),
       base::BindOnce(&CheckRegistrationSuccess, std::move(callback)));
 }
 
-scoped_refptr<DevToolsBackgroundServicesContextImpl>
-PaymentAppProviderImpl::GetDevTools(const url::Origin& sw_origin) {
+void PaymentAppProviderImpl::SetRegistrationId(int64_t registration_id) {
+  registration_id_ = registration_id;
+}
+
+void PaymentAppProviderImpl::OnPaymentHandlerDisconnected() {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+
+  payment_handler_disconnected_for_test_ = true;
+  payment_handler_web_contents_observer_.reset();
+  StoragePartitionImpl* partition = static_cast<StoragePartitionImpl*>(
+      payment_request_web_contents_->GetBrowserContext()
+          ->GetDefaultStoragePartition());
+  ServiceWorkerContextWrapper* service_worker_context =
+      partition->GetServiceWorkerContext();
+  service_worker_context->FindReadyRegistrationForIdOnly(
+      registration_id_,
+      base::BindOnce([](blink::ServiceWorkerStatusCode find_status,
+                        scoped_refptr<ServiceWorkerRegistration> registration) {
+        if (registration && registration->active_version()) {
+          registration->active_version()->OnPaymentHandlerDisconnect();
+        }
+      }));
+}
+
+DevToolsBackgroundServicesContextImpl* PaymentAppProviderImpl::GetDevTools(
+    const url::Origin& sw_origin) {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   DCHECK(payment_request_web_contents_);
   auto* storage_partition =
@@ -348,7 +368,7 @@ PaymentAppProviderImpl::GetDevTools(const url::Origin& sw_origin) {
   if (!storage_partition)
     return nullptr;
 
-  scoped_refptr<DevToolsBackgroundServicesContextImpl> dev_tools =
+  DevToolsBackgroundServicesContextImpl* dev_tools =
       static_cast<DevToolsBackgroundServicesContextImpl*>(
           storage_partition->GetDevToolsBackgroundServicesContext());
   return dev_tools && dev_tools->IsRecording(
@@ -381,12 +401,11 @@ void PaymentAppProviderImpl::OnInstallPaymentApp(
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
   DCHECK(payment_request_web_contents_);
 
-  scoped_refptr<DevToolsBackgroundServicesContextImpl> dev_tools =
-      GetDevTools(sw_origin);
-  if (dev_tools) {
+  if (DevToolsBackgroundServicesContextImpl* dev_tools =
+          GetDevTools(sw_origin)) {
     std::map<std::string, std::string> data = {
         {"Payment Handler Install Success",
-         registration_id >= 0 ? "true" : "false"},
+         base::ToString(registration_id >= 0)},
     };
     dev_tools->LogBackgroundServiceEvent(
         registration_id, blink::StorageKey::CreateFirstParty(sw_origin),

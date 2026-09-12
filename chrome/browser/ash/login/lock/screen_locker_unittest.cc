@@ -6,36 +6,39 @@
 
 #include <memory>
 
+#include "ash/login/test_login_screen.h"
 #include "ash/public/cpp/login_screen_model.h"
 #include "ash/public/cpp/login_types.h"
+#include "base/check_deref.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/ptr_util.h"
-#include "chrome/browser/ash/accessibility/accessibility_manager.h"
-#include "chrome/browser/ash/input_method/mock_input_method_manager_impl.h"
-#include "chrome/browser/ash/lock_screen_apps/state_controller.h"
+#include "base/memory/raw_ptr.h"
+#include "chrome/browser/ash/certificate_provider/certificate_provider_service.h"
+#include "chrome/browser/ash/certificate_provider/certificate_provider_service_factory.h"
+#include "chrome/browser/ash/login/lock/screen_locker_controller.h"
+#include "chrome/browser/ash/login/quick_unlock/pin_backend.h"
+#include "chrome/browser/ash/login/session/user_session_manager.h"
 #include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
-#include "chrome/browser/ash/settings/device_settings_test_helper.h"
+#include "chrome/browser/ash/settings/scoped_test_device_settings_service.h"
 #include "chrome/browser/ash/settings/scoped_testing_cros_settings.h"
-#include "chrome/browser/certificate_provider/certificate_provider_service.h"
-#include "chrome/browser/certificate_provider/certificate_provider_service_factory.h"
+#include "chrome/browser/ash/system/system_clock.h"
+#include "chrome/browser/global_features.h"
 #include "chrome/browser/profiles/profile_manager.h"
-#include "chrome/browser/ui/ash/accessibility/fake_accessibility_controller.h"
 #include "chrome/browser/ui/ash/assistant/assistant_browser_delegate_impl.h"
-#include "chrome/browser/ui/ash/login_screen_client_impl.h"
-#include "chrome/browser/ui/ash/session_controller_client_impl.h"
-#include "chrome/browser/ui/ash/test_login_screen.h"
-#include "chrome/browser/ui/ash/test_session_controller.h"
+#include "chrome/browser/ui/ash/login/login_screen_client_impl.h"
+#include "chrome/browser/ui/ash/login/user_adding_screen.h"
+#include "chrome/browser/ui/ash/session/session_controller_client_impl.h"
+#include "chrome/browser/ui/ash/session/test_session_controller.h"
 #include "chrome/common/chrome_constants.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chrome/test/base/testing_profile_manager.h"
-#include "chromeos/ash/components/audio/cras_audio_handler.h"
 #include "chromeos/ash/components/cryptohome/system_salt_getter.h"
-#include "chromeos/ash/components/dbus/audio/cras_audio_client.h"
 #include "chromeos/ash/components/dbus/biod/biod_client.h"
 #include "chromeos/ash/components/dbus/concierge/concierge_client.h"
+#include "chromeos/ash/components/dbus/session_manager/session_manager_client.h"
 #include "chromeos/ash/components/dbus/userdataauth/cryptohome_misc_client.h"
 #include "chromeos/ash/components/dbus/userdataauth/userdataauth_client.h"
 #include "chromeos/ash/components/install_attributes/stub_install_attributes.h"
@@ -45,16 +48,17 @@
 #include "chromeos/dbus/tpm_manager/tpm_manager_client.h"
 #include "components/account_id/account_id.h"
 #include "components/keyed_service/core/keyed_service.h"
+#include "components/session_manager/core/fake_session_manager_delegate.h"
 #include "components/session_manager/core/session_manager.h"
+#include "components/user_manager/multi_user/multi_user_sign_in_policy_controller.h"
 #include "components/user_manager/scoped_user_manager.h"
-#include "content/public/browser/audio_service.h"
 #include "content/public/test/browser_task_environment.h"
 #include "device/bluetooth/dbus/bluez_dbus_manager.h"
-#include "media/audio/test_audio_thread.h"
-#include "services/audio/public/cpp/sounds/audio_stream_handler.h"
-#include "services/audio/public/cpp/sounds/sounds_manager.h"
-#include "services/audio/public/cpp/sounds/test_data.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
+#include "services/network/test/test_url_loader_factory.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/ime/ash/mock_input_method_manager_impl.h"
 
 namespace ash {
 namespace {
@@ -76,12 +80,14 @@ class ScreenLockerUnitTest : public testing::Test {
   ~ScreenLockerUnitTest() override = default;
 
   void SetUp() override {
+    session_manager_ = std::make_unique<session_manager::SessionManager>(
+        std::make_unique<session_manager::FakeSessionManagerDelegate>());
     ConciergeClient::InitializeFake(/*fake_cicerone_client=*/nullptr);
     BiodClient::InitializeFake();
-    CrasAudioClient::InitializeFake();
     chromeos::TpmManagerClient::InitializeFake();
     CryptohomeMiscClient::InitializeFake();
     UserDataAuthClient::InitializeFake();
+    SessionManagerClient::InitializeFake();
 
     // MojoSystemInfoDispatcher dependency:
     bluez::BluezDBusManager::GetSetterForTesting();
@@ -89,9 +95,31 @@ class ScreenLockerUnitTest : public testing::Test {
     // Initialize SessionControllerClientImpl and dependencies:
     LoginState::Initialize();
 
-    fake_user_manager_ = new FakeChromeUserManager;
-    scoped_user_manager_ = std::make_unique<user_manager::ScopedUserManager>(
-        base::WrapUnique(fake_user_manager_));
+    TestingBrowserProcess::GetGlobal()->SetSharedURLLoaderFactory(
+        test_url_loader_factory_.GetSafeWeakWrapper());
+
+    fake_user_manager_.Reset(std::make_unique<ash::FakeChromeUserManager>());
+    session_manager_->OnUserManagerCreated(fake_user_manager_.Get());
+    multi_user_sign_in_policy_controller_ =
+        std::make_unique<user_manager::MultiUserSignInPolicyController>(
+            TestingBrowserProcess::GetGlobal()->local_state(),
+            fake_user_manager_.Get());
+    system_clock_ = std::make_unique<ash::system::SystemClock>();
+    user_session_manager_ = std::make_unique<UserSessionManager>(
+        TestingBrowserProcess::GetGlobal()->local_state(),
+        TestingBrowserProcess::GetGlobal()
+            ->GetFeatures()
+            ->application_locale_storage(),
+        TestingBrowserProcess::GetGlobal()->shared_url_loader_factory(),
+        TestingBrowserProcess::GetGlobal()
+            ->platform_part()
+            ->browser_policy_connector_ash(),
+        TestingBrowserProcess::GetGlobal()
+            ->platform_part()
+            ->component_manager_ash());
+
+    quick_unlock::PinBackend::Initialize(
+        TestingBrowserProcess::GetGlobal()->local_state());
 
     testing_profile_manager_ = std::make_unique<TestingProfileManager>(
         TestingBrowserProcess::GetGlobal());
@@ -107,66 +135,95 @@ class ScreenLockerUnitTest : public testing::Test {
     user_profile_ = testing_profile_manager_->CreateTestingProfile(
         test_account_id_.GetUserEmail());
 
-    session_controller_client_ =
-        std::make_unique<SessionControllerClientImpl>();
+    session_controller_client_ = std::make_unique<SessionControllerClientImpl>(
+        CHECK_DEREF(TestingBrowserProcess::GetGlobal()->local_state()));
     session_controller_client_->Init();
+
+    login_screen_client_ = std::make_unique<LoginScreenClientImpl>(
+        TestingBrowserProcess::GetGlobal()->local_state());
 
     // Initialize AssistantBrowserDelegate:
     assistant_delegate_ = std::make_unique<AssistantBrowserDelegateImpl>();
 
-    // Initialize AccessibilityManager and dependencies:
-    observer_ = std::make_unique<audio::TestObserver>((base::DoNothing()));
-    audio::AudioStreamHandler::SetObserverForTesting(observer_.get());
-
-    audio::SoundsManager::Create(content::GetAudioServiceStreamFactoryBinder());
     input_method::InputMethodManager::Initialize(
         // Owned by InputMethodManager
         new input_method::MockInputMethodManagerImpl());
-    CrasAudioHandler::InitializeForTesting();
-    AccessibilityManager::Initialize();
 
     // Initialize ScreenLocker dependencies:
     SystemSaltGetter::Initialize();
-  }
-
-  void CreateSessionForUser(bool is_public_account) {
-    if (is_public_account) {
-      fake_user_manager_->AddPublicAccountUser(test_account_id_);
-    } else {
-      fake_user_manager_->AddUser(test_account_id_);
-    }
-    fake_user_manager_->LoginUser(test_account_id_);
-
-    ASSERT_TRUE(user_manager::UserManager::Get()->GetPrimaryUser());
-    ASSERT_TRUE(ProfileManager::GetActiveUserProfile() == user_profile_);
-    session_manager::SessionManager::Get()->CreateSession(
-        test_account_id_, test_account_id_.GetUserEmail(), false);
+    screen_locker_controller_ = std::make_unique<ScreenLockerController>(
+        TestingBrowserProcess::GetGlobal()->local_state(),
+        TestingBrowserProcess::GetGlobal()
+            ->GetFeatures()
+            ->application_locale_storage(),
+        TestingBrowserProcess::GetGlobal()->shared_url_loader_factory(),
+        TestingBrowserProcess::GetGlobal()
+            ->platform_part()
+            ->browser_policy_connector_ash(),
+        SessionManagerClient::Get(), &session_termination_manager_,
+        session_manager_.get(), fake_user_manager_.Get(),
+        UserAddingScreen::Get(), multi_user_sign_in_policy_controller_.get(),
+        system_clock_.get());
   }
 
   void TearDown() override {
-    SystemSaltGetter::Shutdown();
-    AccessibilityManager::Shutdown();
-    CrasAudioHandler::Shutdown();
-    input_method::InputMethodManager::Shutdown();
-    audio::SoundsManager::Shutdown();
-    audio::AudioStreamHandler::SetObserverForTesting(nullptr);
-    observer_.reset();
+    screen_locker_controller_.reset();
     assistant_delegate_.reset();
+    user_session_manager_->Shutdown();
 
+    login_screen_client_.reset();
     session_controller_client_.reset();
 
+    user_profile_ = nullptr;
     testing_profile_manager_.reset();
-    scoped_user_manager_.reset();
+
+    input_method::InputMethodManager::Shutdown();
+
+    user_session_manager_.reset();
+    session_manager_.reset();
+    system_clock_.reset();
+    multi_user_sign_in_policy_controller_.reset();
+    fake_user_manager_.Reset();
     base::RunLoop().RunUntilIdle();
 
+    TestingBrowserProcess::GetGlobal()->SetSharedURLLoaderFactory(nullptr);
+
     LoginState::Shutdown();
+    SessionManagerClient::Shutdown();
     bluez::BluezDBusManager::Shutdown();
     UserDataAuthClient::Shutdown();
     CryptohomeMiscClient::Shutdown();
     chromeos::TpmManagerClient::Shutdown();
-    CrasAudioClient::Shutdown();
     BiodClient::Shutdown();
     ConciergeClient::Shutdown();
+    SystemSaltGetter::Shutdown();
+
+    // TODO(crbug.com/498416395): We should refactor PinBackend and
+    // shutdown/destroy it in the reverse order of initialization.
+    quick_unlock::PinBackend::Shutdown();
+  }
+
+  void CreateSessionForUser(bool is_public_account) {
+    ASSERT_FALSE(user_manager::UserManager::Get()->GetPrimaryUser());
+    user_manager::User* user = nullptr;
+    if (is_public_account) {
+      user = fake_user_manager_->AddPublicAccountUser(test_account_id_);
+    } else {
+      user = fake_user_manager_->AddUser(test_account_id_);
+    }
+    auto* session_manager = session_manager::SessionManager::Get();
+    session_manager->CreateSession(user->GetAccountId(),
+                                   user->GetAccountId().GetUserEmail(),
+                                   /*new_user=*/false,
+                                   /*has_active_session=*/false);
+    auto* primary_user = user_manager::UserManager::Get()->GetPrimaryUser();
+    ASSERT_TRUE(primary_user);
+    ProfileHelper::Get()->SetUserToProfileMappingForTesting(primary_user,
+                                                            user_profile_);
+    fake_user_manager_->SimulateUserProfileLoad(test_account_id_);
+    session_manager->NotifyUserProfileLoaded(test_account_id_);
+
+    ASSERT_TRUE(ProfileManager::GetActiveUserProfile() == user_profile_);
   }
 
  protected:
@@ -175,61 +232,84 @@ class ScreenLockerUnitTest : public testing::Test {
   // Needed for main loop and posting async tasks.
   content::BrowserTaskEnvironment task_environment_;
 
-  // ViewsScreenLocker dependencies:
-  lock_screen_apps::StateController state_controller_;
+  network::TestURLLoaderFactory test_url_loader_factory_;
+
   // * MojoSystemInfoDispatcher dependencies:
   ScopedTestingCrosSettings scoped_testing_cros_settings_;
   system::ScopedFakeStatisticsProvider fake_statictics_provider_;
   // * ChromeUserSelectionScreen dependencies:
   ScopedStubInstallAttributes test_install_attributes_;
 
-  // ScreenLocker dependencies:
-  // * AccessibilityManager dependencies:
-  FakeAccessibilityController fake_accessibility_controller_;
-  // * LoginScreenClientImpl dependencies:
-  session_manager::SessionManager session_manager_;
-  TestLoginScreen test_login_screen_;
-  LoginScreenClientImpl login_screen_client_;
-
   // * SessionControllerClientImpl dependencies:
-  FakeChromeUserManager* fake_user_manager_ = nullptr;
-  std::unique_ptr<user_manager::ScopedUserManager> scoped_user_manager_;
+  user_manager::TypedScopedUserManager<ash::FakeChromeUserManager>
+      fake_user_manager_;
+  std::unique_ptr<session_manager::SessionManager> session_manager_;
+  std::unique_ptr<UserSessionManager> user_session_manager_;
   std::unique_ptr<TestingProfileManager> testing_profile_manager_;
-  Profile* user_profile_ = nullptr;
+  raw_ptr<TestingProfile> user_profile_ = nullptr;
+  std::unique_ptr<user_manager::MultiUserSignInPolicyController>
+      multi_user_sign_in_policy_controller_;
+  std::unique_ptr<ash::system::SystemClock> system_clock_;
 
-  ScopedDeviceSettingsTestHelper device_settings_test_helper_;
+  // ScreenLocker dependencies:
+  // * LoginScreenClientImpl dependencies:
+  TestLoginScreen test_login_screen_;
+  std::unique_ptr<LoginScreenClientImpl> login_screen_client_;
+
+  ScopedTestDeviceSettingsService device_settings_service_;
   TestSessionController test_session_controller_;
   std::unique_ptr<SessionControllerClientImpl> session_controller_client_;
   std::unique_ptr<AssistantBrowserDelegateImpl> assistant_delegate_;
   SessionTerminationManager session_termination_manager_;
-
-  std::unique_ptr<audio::TestObserver> observer_;
+  std::unique_ptr<ScreenLockerController> screen_locker_controller_;
 };
 
 // Chrome notifies Ash when screen is locked. Ash is responsible for suspending
 // the device.
 TEST_F(ScreenLockerUnitTest, VerifyAshIsNotifiedOfScreenLocked) {
   CreateSessionForUser(/*is_public_account=*/false);
-
   EXPECT_EQ(0, test_session_controller_.lock_animation_complete_call_count());
-  ScreenLocker::Show();
+
+  // Show the lock screen.
+  ScreenLockerController::Get().ShowLockScreen();
   base::RunLoop().RunUntilIdle();
+  ASSERT_TRUE(ScreenLockerController::Get().screen_locker());
+  EXPECT_TRUE(ScreenLockerController::Get().screen_locker()->locked());
   EXPECT_EQ(1, test_session_controller_.lock_animation_complete_call_count());
-  ScreenLocker::Hide();
-  // Needed to perform internal cleanup scheduled in ScreenLocker::Hide()
+
+  // Hide the lock screen.
+  ScreenLockerController::Get().HideLockScreen();
+  // Needed to perform internal cleanup scheduled in HideLockScreen()
+  base::RunLoop().RunUntilIdle();
+  EXPECT_FALSE(ScreenLockerController::Get().screen_locker());
+}
+
+// Tests that `GetUsersToShow()` returns a list with one user when the user is
+// regular.
+TEST_F(ScreenLockerUnitTest, GetUsersToShowRegular) {
+  CreateSessionForUser(/*is_public_account=*/false);
+
+  ScreenLockerController::Get().ShowLockScreen();
+  base::RunLoop().RunUntilIdle();
+  EXPECT_EQ(
+      ScreenLockerController::Get().screen_locker()->GetUsersToShow().size(),
+      1u);
+  ScreenLockerController::Get().HideLockScreen();
+  // Needed to perform internal cleanup scheduled in HideLockScreen()
   base::RunLoop().RunUntilIdle();
 }
 
 // Tests that `GetUsersToShow()` returns an empty list when the user is a
 // Managed Guest Session.
-TEST_F(ScreenLockerUnitTest, GetUsersToShow) {
+TEST_F(ScreenLockerUnitTest, GetUsersToShowPublicAccount) {
   CreateSessionForUser(/*is_public_account=*/true);
 
-  ScreenLocker::Show();
+  ScreenLockerController::Get().ShowLockScreen();
   base::RunLoop().RunUntilIdle();
-  EXPECT_TRUE(ScreenLocker::default_screen_locker()->GetUsersToShow().empty());
-  ScreenLocker::Hide();
-  // Needed to perform internal cleanup scheduled in ScreenLocker::Hide()
+  EXPECT_TRUE(
+      ScreenLockerController::Get().screen_locker()->GetUsersToShow().empty());
+  ScreenLockerController::Get().HideLockScreen();
+  // Needed to perform internal cleanup scheduled in HideLockScreen()
   base::RunLoop().RunUntilIdle();
 }
 

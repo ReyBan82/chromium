@@ -50,11 +50,11 @@ struct DialInternalMessage {
   // Returns a DialInternalMessage for |message|. If |message| is not a valid
   // custom DIAL launch internal message, returns nullptr and sets |error| with
   // an error reason.
-  static std::unique_ptr<DialInternalMessage> From(base::Value::Dict message,
+  static std::unique_ptr<DialInternalMessage> From(base::DictValue message,
                                                    std::string* error);
 
   DialInternalMessage(DialInternalMessageType type,
-                      absl::optional<base::Value> body,
+                      std::optional<base::Value> body,
                       const std::string& client_id,
                       int sequence_number);
 
@@ -64,7 +64,7 @@ struct DialInternalMessage {
   ~DialInternalMessage();
 
   DialInternalMessageType type;
-  absl::optional<base::Value> body;
+  std::optional<base::Value> body;
   std::string client_id;
   int sequence_number;
 };
@@ -78,7 +78,7 @@ struct CustomDialLaunchMessageBody {
   CustomDialLaunchMessageBody();
   CustomDialLaunchMessageBody(
       bool do_launch,
-      const absl::optional<std::string>& launch_parameter);
+      const std::optional<std::string>& launch_parameter);
   CustomDialLaunchMessageBody(const CustomDialLaunchMessageBody& other);
   ~CustomDialLaunchMessageBody();
 
@@ -88,7 +88,7 @@ struct CustomDialLaunchMessageBody {
   // If |do_launch| is |true|, optional launch parameter to include with the
   // launch (POST) request. This overrides the launch parameter that was
   // specified in the MediaSource (if any).
-  absl::optional<std::string> launch_parameter;
+  std::optional<std::string> launch_parameter;
 };
 
 class DialInternalMessageUtil final {
@@ -146,15 +146,15 @@ class DialInternalMessageUtil final {
       const std::string& client_id,
       int sequence_number,
       const std::string& error_message,
-      absl::optional<int> http_error_code = absl::nullopt) const;
+      std::optional<int> http_error_code = std::nullopt) const;
 
  private:
-  base::Value::Dict CreateReceiver(const MediaSinkInternal& sink) const;
-  base::Value::Dict CreateReceiverActionBody(const MediaSinkInternal& sink,
-                                             DialReceiverAction action) const;
-  base::Value::Dict CreateNewSessionBody(const std::string& app_name,
-                                         const MediaSinkInternal& sink) const;
-  base::Value::Dict CreateDialAppInfoBody(
+  base::DictValue CreateReceiver(const MediaSinkInternal& sink) const;
+  base::DictValue CreateReceiverActionBody(const MediaSinkInternal& sink,
+                                           DialReceiverAction action) const;
+  base::DictValue CreateNewSessionBody(const std::string& app_name,
+                                       const MediaSinkInternal& sink) const;
+  base::DictValue CreateDialAppInfoBody(
       const MediaSinkInternal& sink,
       const ParsedDialAppInfo& app_info) const;
 
@@ -163,7 +163,7 @@ class DialInternalMessageUtil final {
   // corresponding request, then its |sequence_number| is an invalid value of
   // -1.
   base::Value CreateDialMessageCommon(DialInternalMessageType type,
-                                      base::Value::Dict body,
+                                      base::DictValue body,
                                       const std::string& client_id,
                                       int sequence_number = -1) const;
 

@@ -16,7 +16,7 @@ namespace ipcz::reference_drivers {
 namespace {
 
 TEST(MultiprocessReferenceDriverTest, SendDeactivated) {
-  const IpczDriver& driver = kMultiprocessReferenceDriver;
+  const IpczDriver& driver = GetMultiprocessReferenceDriver();
   IpczDriverHandle a, b;
   EXPECT_EQ(IPCZ_RESULT_OK,
             driver.CreateTransports(IPCZ_INVALID_DRIVER_HANDLE,
@@ -24,8 +24,11 @@ TEST(MultiprocessReferenceDriverTest, SendDeactivated) {
                                     nullptr, &a, &b));
 
   // Activate and immediately deactivate the transport.
-  auto handler = +[](IpczHandle, const void*, size_t, const IpczDriverHandle*,
-                     size_t, uint32_t, const void*) { return IPCZ_RESULT_OK; };
+  auto handler =
+      +[](IpczHandle, const void*, size_t, const IpczDriverHandle*, size_t,
+          uint32_t, const struct IpczTransportActivityOptions*) {
+        return IPCZ_RESULT_OK;
+      };
   EXPECT_EQ(IPCZ_RESULT_OK,
             driver.ActivateTransport(a, IPCZ_INVALID_HANDLE, handler,
                                      IPCZ_NO_FLAGS, nullptr));

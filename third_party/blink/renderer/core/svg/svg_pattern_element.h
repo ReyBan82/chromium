@@ -21,7 +21,6 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_PATTERN_ELEMENT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_SVG_SVG_PATTERN_ELEMENT_H_
 
-#include "third_party/blink/renderer/core/inspector/inspector_trace_events.h"
 #include "third_party/blink/renderer/core/svg/svg_animated_enumeration.h"
 #include "third_party/blink/renderer/core/svg/svg_element.h"
 #include "third_party/blink/renderer/core/svg/svg_fit_to_view_box.h"
@@ -38,12 +37,14 @@ class SVGAnimatedTransformList;
 
 class SVGPatternElement final : public SVGElement,
                                 public SVGURIReference,
-                                public SVGTests,
                                 public SVGFitToViewBox {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   explicit SVGPatternElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGPatternElement;
+  }
 
   AffineTransform LocalCoordinateSpaceTransform(CTMScope) const override;
 
@@ -72,7 +73,11 @@ class SVGPatternElement final : public SVGElement,
     return pattern_content_units_.Get();
   }
 
-  void InvalidatePattern(LayoutInvalidationReasonForTracing);
+  // SVGTests mixin forwarders.
+  SVGStringListTearOff* requiredExtensions();
+  SVGStringListTearOff* systemLanguage();
+
+  void InvalidatePattern();
   void InvalidateDependentPatterns();
 
   PatternAttributes CollectPatternAttributes() const;
@@ -81,12 +86,7 @@ class SVGPatternElement final : public SVGElement,
   void Trace(Visitor*) const override;
 
  private:
-  bool IsValid() const override { return SVGTests::IsValid(); }
-
-  void CollectStyleForPresentationAttribute(
-      const QualifiedName&,
-      const AtomicString&,
-      MutableCSSPropertyValueSet*) override;
+  bool IsValid() const override { return !tests_ || tests_->IsValid(); }
 
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   InsertionNotificationRequest InsertedInto(ContainerNode&) final;
@@ -96,9 +96,17 @@ class SVGPatternElement final : public SVGElement,
   void BuildPendingResource() override;
   void ClearResourceReferences();
 
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
   bool SelfHasRelativeLengths() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
+  void CollectExtraStyleForPresentationAttribute(
+      HeapVector<CSSPropertyValue, 8>& style) override;
+
+  SVGTests& EnsureSvgTests() const;
 
   Member<SVGAnimatedLength> x_;
   Member<SVGAnimatedLength> y_;
@@ -109,6 +117,7 @@ class SVGPatternElement final : public SVGElement,
   Member<SVGAnimatedEnumeration<SVGUnitTypes::SVGUnitType>>
       pattern_content_units_;
   Member<IdTargetObserver> target_id_observer_;
+  mutable Member<SVGTests> tests_;
 };
 
 }  // namespace blink

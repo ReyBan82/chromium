@@ -17,6 +17,7 @@
 #include "ash/strings/grit/ash_strings.h"
 #include "components/vector_icons/vector_icons.h"
 #include "ui/base/l10n/l10n_util.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/message_center/message_center.h"
 #include "ui/message_center/public/cpp/notification.h"
 #include "ui/message_center/public/cpp/notification_types.h"
@@ -67,13 +68,14 @@ void DetachableBaseNotificationController::
       CreateSystemNotificationPtr(
           message_center::NOTIFICATION_TYPE_SIMPLE,
           kBaseRequiresUpdateNotificationId, title, message, std::u16string(),
-          GURL(),
           message_center::NotifierId(
               message_center::NotifierType::SYSTEM_COMPONENT,
               kDetachableBaseNotifierId,
               NotificationCatalogName::kDetachableBaseRequiresUpdate),
           message_center::RichNotificationData(), nullptr,
-          vector_icons::kNotificationWarningIcon,
+          ::features::IsRoundedIconsEnabled()
+              ? vector_icons::kInfoFilledIcon
+              : vector_icons::kNotificationWarningOldIcon,
           message_center::SystemNotificationWarningLevel::CRITICAL_WARNING);
   // Set system priority so the notification gets shown when the user session is
   // blocked.
@@ -143,12 +145,15 @@ void DetachableBaseNotificationController::ShowPairingNotificationIfNeeded() {
   std::unique_ptr<message_center::Notification> notification =
       CreateSystemNotificationPtr(
           message_center::NOTIFICATION_TYPE_SIMPLE, kBaseChangedNotificationId,
-          title, message, std::u16string(), GURL(),
+          title, message, std::u16string(),
           message_center::NotifierId(
               message_center::NotifierType::SYSTEM_COMPONENT,
               kDetachableBaseNotifierId,
               NotificationCatalogName::kDetachableBasePairingNotification),
-          options, nullptr, vector_icons::kNotificationWarningIcon,
+          options, nullptr,
+          ::features::IsRoundedIconsEnabled()
+              ? vector_icons::kInfoFilledIcon
+              : vector_icons::kNotificationWarningOldIcon,
           message_center::SystemNotificationWarningLevel::CRITICAL_WARNING);
 
   message_center::MessageCenter::Get()->AddNotification(

@@ -4,8 +4,7 @@
 
 #include "chrome/browser/enterprise/reporting/browser_report_generator_android.h"
 
-#include <utility>
-
+#include "base/android/apk_info.h"
 #include "base/files/file_path.h"
 #include "base/path_service.h"
 #include "base/strings/utf_string_conversions.h"
@@ -14,6 +13,7 @@
 #include "chrome/browser/profiles/profile_attributes_storage.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/common/channel_info.h"
+#include "components/enterprise/browser/reporting/reporting_features.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 #include "components/version_info/version_info.h"
 
@@ -26,6 +26,10 @@ BrowserReportGeneratorAndroid::BrowserReportGeneratorAndroid() = default;
 BrowserReportGeneratorAndroid::~BrowserReportGeneratorAndroid() = default;
 
 std::string BrowserReportGeneratorAndroid::GetExecutablePath() {
+  if (base::FeatureList::IsEnabled(kCbcmAndroidPackageNameIdentifier)) {
+    return base::android::apk_info::package_name();
+  }
+
   base::FilePath path;
   return base::PathService::Get(base::DIR_EXE, &path) ? path.AsUTF8Unsafe()
                                                       : std::string();
@@ -55,13 +59,6 @@ bool BrowserReportGeneratorAndroid::IsExtendedStableChannel() {
 void BrowserReportGeneratorAndroid::GenerateBuildStateInfo(
     em::BrowserReport* report) {
   // Not used on Android because there is no in-app auto-update.
-}
-
-void BrowserReportGeneratorAndroid::GeneratePluginsIfNeeded(
-    ReportCallback callback,
-    std::unique_ptr<em::BrowserReport> report) {
-  // There are no plugins on Android
-  std::move(callback).Run(std::move(report));
 }
 
 }  // namespace enterprise_reporting

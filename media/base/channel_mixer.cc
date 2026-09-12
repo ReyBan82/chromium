@@ -15,28 +15,20 @@
 
 namespace media {
 
-ChannelMixer::ChannelMixer(ChannelLayout input_layout,
-                           ChannelLayout output_layout) {
-  Initialize(input_layout,
-             ChannelLayoutToChannelCount(input_layout),
-             output_layout,
-             ChannelLayoutToChannelCount(output_layout));
+ChannelMixer::ChannelMixer(const ChannelLayoutConfig& input_config,
+                           const ChannelLayoutConfig& output_config) {
+  Initialize(input_config, output_config);
 }
 
 ChannelMixer::ChannelMixer(
     const AudioParameters& input, const AudioParameters& output) {
-  Initialize(input.channel_layout(),
-             input.channels(),
-             output.channel_layout(),
-             output.channels());
+  Initialize(input.channel_layout_config(), output.channel_layout_config());
 }
 
-void ChannelMixer::Initialize(
-    ChannelLayout input_layout, int input_channels,
-    ChannelLayout output_layout, int output_channels) {
+void ChannelMixer::Initialize(const ChannelLayoutConfig& input_config,
+                              const ChannelLayoutConfig& output_config) {
   // Create the transformation matrix
-  ChannelMixingMatrix matrix_builder(input_layout, input_channels,
-                                     output_layout, output_channels);
+  ChannelMixingMatrix matrix_builder(input_config, output_config);
   remapping_ = matrix_builder.CreateTransformationMatrix(&matrix_);
 }
 
@@ -55,18 +47,24 @@ void ChannelMixer::TransformPartial(const AudioBus* input,
   CHECK_LE(frame_count, input->frames());
   CHECK_LE(frame_count, output->frames());
 
+  if (frame_count <= 0) {
+    return;
+  }
   // Zero initialize |output| so we're accumulating from zero.
   output->ZeroFrames(frame_count);
 
   // If we're just remapping we can simply copy the correct input to output.
   if (remapping_) {
+    const size_t frames = static_cast<size_t>(frame_count);
+
     for (int output_ch = 0; output_ch < output->channels(); ++output_ch) {
+      auto output_channel = output->channel(output_ch);
       for (int input_ch = 0; input_ch < input->channels(); ++input_ch) {
         float scale = matrix_[output_ch][input_ch];
         if (scale > 0) {
           DCHECK_EQ(scale, 1.0f);
-          memcpy(output->channel(output_ch), input->channel(input_ch),
-                 sizeof(*output->channel(output_ch)) * frame_count);
+          output_channel.first(frames).copy_from_nonoverlapping(
+              input->channel(input_ch).first(frames));
           break;
         }
       }
@@ -75,13 +73,15 @@ void ChannelMixer::TransformPartial(const AudioBus* input,
   }
 
   for (int output_ch = 0; output_ch < output->channels(); ++output_ch) {
+    auto output_channel = output->channel(output_ch);
     for (int input_ch = 0; input_ch < input->channels(); ++input_ch) {
       float scale = matrix_[output_ch][input_ch];
       // Scale should always be positive.  Don't bother scaling by zero.
       DCHECK_GE(scale, 0);
+      const size_t frames = static_cast<size_t>(frame_count);
       if (scale > 0) {
-        vector_math::FMAC(input->channel(input_ch), scale, frame_count,
-                          output->channel(output_ch));
+        vector_math::FMAC(input->channel(input_ch).first(frames), scale,
+                          output_channel.first(frames));
       }
     }
   }

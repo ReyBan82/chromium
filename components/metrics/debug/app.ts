@@ -1,15 +1,24 @@
 // Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+// <if expr="is_ios">
+import 'chrome://resources/js/ios/web_ui.js';
+// </if>
 
+import '/strings.m.js';
 import 'chrome://resources/cr_elements/cr_tab_box/cr_tab_box.js';
+import './field_trials.js';
+import './private_metrics.js';
+import './runtime_mutable_features.js';
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {addWebUiListener} from 'chrome://resources/js/cr.js';
 import {CustomElement} from 'chrome://resources/js/custom_element.js';
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
 
 import {getTemplate} from './app.html.js';
-import {KeyValue, Log, LogData, MetricsInternalsBrowserProxy, MetricsInternalsBrowserProxyImpl} from './browser_proxy.js';
+import type {KeyValue, Log, LogData, MetricsInternalsBrowserProxy, SeedType} from './browser_proxy.js';
+import {MetricsInternalsBrowserProxyImpl} from './browser_proxy.js';
 import {getEventsPeekString, logEventToString, sizeToString, timestampToString, umaLogTypeToString} from './log_utils.js';
 
 /**
@@ -23,6 +32,22 @@ const EMPTY_LOG: Log = {
   size: -1,
   events: [],
 };
+
+/**
+ * An empty log. It is appended to a UKM logs table when there are no logs.
+ */
+const EMPTY_UKM_LOG: Log = {
+  hash: 'N/A',
+  timestamp: '',
+  size: -1,
+  events: [],
+};
+
+/**
+ * The maximum length of a value in the seed info table. Values longer than
+ * this will be truncated with an ellipsis.
+ */
+const VALUE_LENGTH_LIMIT = 64;
 
 export class MetricsInternalsAppElement extends CustomElement {
   static get is(): string {
@@ -47,6 +72,7 @@ export class MetricsInternalsAppElement extends CustomElement {
    */
   private previousVariationsSummaryData_: string = '';
   private previousUmaSummaryData_: string = '';
+  private previousUkmSummaryData_: string = '';
 
   constructor() {
     super();
@@ -61,24 +87,66 @@ export class MetricsInternalsAppElement extends CustomElement {
     return this.browserProxy_.getUmaLogData(/*includeLogProtoData*/ true);
   }
 
+  /**
+   * Returns UKM logs data (with their proto) as a JSON string. Used when
+   * exporting UKM logs data. Returns a promise.
+   */
+  getUkmLogsExportContent(): Promise<string> {
+    return this.browserProxy_.getUkmLogData(/*includeLogProtoData*/ true);
+  }
+
   private async init_(): Promise<void> {
+    this.syncTabsWithUrlHash_();
+
     // Fetch variations summary data and set up a recurring timer.
     await this.updateVariationsSummary_();
     setInterval(() => this.updateVariationsSummary_(), 3000);
+
+    // Fetch stored latest and safe seeds info and set up a listener for the
+    // buttons for refreshing the data.
+    await this.updateStoredSeedInfo_('Latest');
+    const fetchStoredLatestSeedInfoButton =
+        this.getRequiredElement('#fetch-stored-latest-seed-info');
+    assert(fetchStoredLatestSeedInfoButton);
+    fetchStoredLatestSeedInfoButton.addEventListener(
+        'click', () => this.updateStoredSeedInfo_('Latest'));
+
+    await this.updateStoredSeedInfo_('Safe');
+    const fetchStoredSafeSeedInfoButton =
+        this.getRequiredElement('#fetch-stored-safe-seed-info');
+    assert(fetchStoredSafeSeedInfoButton);
+    fetchStoredSafeSeedInfoButton.addEventListener(
+        'click', () => this.updateStoredSeedInfo_('Safe'));
 
     // Fetch UMA summary data and set up a recurring timer.
     await this.updateUmaSummary_();
     setInterval(() => this.updateUmaSummary_(), 3000);
 
     // Set up the UMA table caption.
-    const umaTableCaption = this.$('#uma-table-caption') as HTMLElement;
+    const umaTableCaption = this.getRequiredElement('#uma-table-caption');
     const isUsingMetricsServiceObserver =
         await this.browserProxy_.isUsingMetricsServiceObserver();
-    umaTableCaption.textContent = isUsingMetricsServiceObserver ?
+    let firstPartOfCaption = isUsingMetricsServiceObserver ?
         'List of all UMA logs closed since browser startup.' :
         'List of UMA logs closed since opening this page. Starting the browser \
         with the --export-uma-logs-to-file command line flag will instead show \
         all logs closed since browser startup.';
+    firstPartOfCaption += ' See ';
+    const linkInCaptionNode = document.createElement('a');
+    linkInCaptionNode.appendChild(document.createTextNode('documentation'));
+    linkInCaptionNode.href =
+        'https://chromium.googlesource.com/chromium/src/components/metrics/+/HEAD/debug/README.md';
+    // Don't clobber the current page.  The current page (in release builds)
+    // shows only the logs since the page was opened.  We don't want to allow
+    // the current page to be navigated away from lest useful logs be lost.
+    linkInCaptionNode.target = '_blank';
+    const secondPartOfCaption =
+        ' for more information about this debug page and tools for working \
+         with the exported logs.';
+    umaTableCaption.appendChild(document.createTextNode(firstPartOfCaption));
+    umaTableCaption.appendChild(linkInCaptionNode);
+    umaTableCaption.appendChild(document.createTextNode(secondPartOfCaption));
+
 
     // Set up a listener for UMA logs. Also update UMA log data immediately in
     // case there are logs that we already have data on.
@@ -87,8 +155,82 @@ export class MetricsInternalsAppElement extends CustomElement {
     await this.updateUmaLogsData_();
 
     // Set up the UMA "Export logs" button.
-    const exportUmaLogsButton = this.$('#export-uma-logs') as HTMLElement;
+    const exportUmaLogsButton = this.getRequiredElement('#export-uma-logs');
     exportUmaLogsButton.addEventListener('click', () => this.exportUmaLogs_());
+
+    // Fetch UKM summary data and set up a recurring timer.
+    await this.updateUkmSummary_();
+    setInterval(() => this.updateUkmSummary_(), 3000);
+
+    // Set up the UKM table caption.
+    const ukmTableCaption = this.getRequiredElement('#ukm-table-caption');
+    const isUsingUkmServiceObserver =
+        await this.browserProxy_.isUsingUkmServiceObserver();
+    const ukmServiceObserverCaption =
+        'List of all UKM logs closed since browser startup.';
+    const ephemeralUkmObserverCaption =
+        'List of UKM logs closed since opening this page. Starting the browser \
+        with the --export-ukm-logs-to-file command line flag will instead show \
+        all logs closed since browser startup.';
+    let firstPartOfUkmCaption = isUsingUkmServiceObserver ?
+        ukmServiceObserverCaption :
+        ephemeralUkmObserverCaption;
+    firstPartOfUkmCaption += ' See ';
+    const ukmLinkInCaptionNode = document.createElement('a');
+    ukmLinkInCaptionNode.appendChild(document.createTextNode('documentation'));
+    ukmLinkInCaptionNode.href =
+        'https://chromium.googlesource.com/chromium/src/components/metrics/+/HEAD/debug/README.md';
+    ukmLinkInCaptionNode.target = '_blank';
+    const secondPartOfUkmCaption =
+        ' for more information about this debug page and tools for working \
+         with the exported logs.';
+    ukmTableCaption.appendChild(document.createTextNode(firstPartOfUkmCaption));
+    ukmTableCaption.appendChild(ukmLinkInCaptionNode);
+    ukmTableCaption.appendChild(
+        document.createTextNode(secondPartOfUkmCaption));
+
+    // Set up a listener for UKM logs. Also update UKM log data immediately in
+    // case there are logs that we already have data on.
+    addWebUiListener(
+        'ukm-log-created-or-event', () => this.updateUkmLogsData_());
+    await this.updateUkmLogsData_();
+
+    // Set up the UKM "Export logs" button.
+    const exportUkmLogsButton = this.getRequiredElement('#export-ukm-logs');
+    exportUkmLogsButton.addEventListener('click', () => this.exportUkmLogs_());
+
+    if (!loadTimeData.getBoolean('enablePrivateMetricsTab')) {
+      this.getRequiredElement('#private-metrics-tab').style.display = 'none';
+      this.getRequiredElement('#private-metrics-panel').style.display = 'none';
+    }
+  }
+
+  /**
+   * Synchronize the selected tab and the URL hash. Allows, for example,
+   * chrome://metrics-internals#variations to directly open the variations tab.
+   */
+  private syncTabsWithUrlHash_() {
+    const tabUrlHashes: string[] = [
+      '#uma',
+      '#ukm',
+      '#variations',
+      '#field-trials',
+      '#runtime-mutable-features',
+      '#private-metrics',
+    ];
+
+    const tabBox = this.shadowRoot!.querySelector('cr-tab-box')!;
+    tabBox.addEventListener(
+        'selected-index-change', (e: CustomEvent<number>) => {
+          window.location.hash = tabUrlHashes[e.detail] || '';
+        });
+
+    if (window.location.hash.startsWith('#')) {
+      const entryIndex = tabUrlHashes.indexOf(window.location.hash);
+      if (entryIndex >= 0) {
+        tabBox.setAttribute('selected-index', String(entryIndex));
+      }
+    }
   }
 
   /**
@@ -114,7 +256,8 @@ export class MetricsInternalsAppElement extends CustomElement {
     // Clear the table first.
     tableBody.replaceChildren();
 
-    const template = this.$('#summary-row-template') as HTMLTemplateElement;
+    const template =
+        this.getRequiredElement<HTMLTemplateElement>('#summary-row-template');
     for (const info of summary) {
       const row = template.content.cloneNode(true) as HTMLElement;
       const [key, value] = row.querySelectorAll('td');
@@ -130,13 +273,46 @@ export class MetricsInternalsAppElement extends CustomElement {
   }
 
   /**
+   * Fills the passed table element with the given seed info.
+   */
+  private updateSeedInfoTable_(tableBody: HTMLElement, summary: KeyValue[]):
+      void {
+    // Clear the table first.
+    tableBody.replaceChildren();
+
+    const template =
+        this.getRequiredElement<HTMLTemplateElement>('#seed-info-row-template');
+    for (const info of summary) {
+      const row = template.content.cloneNode(true) as HTMLElement;
+      const [key, value, copy] = row.querySelectorAll('td');
+
+      assert(key);
+      key.textContent = info.key;
+
+      assert(value);
+      if (info.value.length > VALUE_LENGTH_LIMIT) {
+        value.textContent = info.value.substring(0, VALUE_LENGTH_LIMIT) + '...';
+      } else {
+        value.textContent = info.value;
+      }
+
+      assert(copy);
+      const copyButton = copy.querySelector('button');
+      assert(copyButton);
+      copyButton.addEventListener('click', () => {
+        navigator.clipboard.writeText(info.value);
+      });
+
+      tableBody.appendChild(row);
+    }
+  }
+
+  /**
    * Fetches variations summary data and updates the view.
    */
   private async updateVariationsSummary_(): Promise<void> {
     const summary: KeyValue[] =
         await this.browserProxy_.fetchVariationsSummary();
-    const variationsSummaryTableBody =
-        this.$('#variations-summary-body') as HTMLElement;
 
     // Don't re-render the table if the data has not changed.
     const newDataString = summary.toString();
@@ -145,7 +321,26 @@ export class MetricsInternalsAppElement extends CustomElement {
     }
 
     this.previousVariationsSummaryData_ = newDataString;
+    const variationsSummaryTableBody =
+        this.getRequiredElement('#variations-summary-body');
     this.updateSummaryTable_(variationsSummaryTableBody, summary);
+  }
+
+  /**
+   * Fetches stored seed info and updates the view for the given seed type.
+   */
+  private async updateStoredSeedInfo_(seedType: SeedType): Promise<void> {
+    const seedTypeKey = seedType.toLowerCase();
+    const refreshButton =
+        this.getRequiredElement(`#fetch-stored-${seedTypeKey}-seed-info`);
+    assert(refreshButton);
+    refreshButton.setAttribute('disabled', '');
+    const storedSeedInfo: KeyValue[] =
+        await this.browserProxy_.fetchStoredSeedInfo(seedType);
+    const storedSeedInfoTableBody =
+        this.getRequiredElement(`#stored-${seedTypeKey}-seed-info-body`);
+    this.updateSeedInfoTable_(storedSeedInfoTableBody, storedSeedInfo);
+    refreshButton.removeAttribute('disabled');
   }
 
   /**
@@ -166,22 +361,59 @@ export class MetricsInternalsAppElement extends CustomElement {
   }
 
   /**
+   * Fetches UKM summary data and updates the view.
+   */
+  private async updateUkmSummary_(): Promise<void> {
+    const summary: KeyValue[] = await this.browserProxy_.fetchUkmSummary();
+    const ukmSummaryTableBody = this.$('#ukm-summary-body') as HTMLElement;
+
+    // Don't re-render the table if the data has not changed.
+    const newDataString = summary.toString();
+    if (newDataString === this.previousUkmSummaryData_) {
+      return;
+    }
+
+    this.previousUkmSummaryData_ = newDataString;
+    this.updateSummaryTable_(ukmSummaryTableBody, summary);
+  }
+
+  /**
    * Fills the passed table element with the given logs.
    */
-  private updateLogsTable_(tableBody: HTMLElement, logs: Log[]): void {
+  private updateLogsTable_(
+      tableBody: HTMLElement, logs: Log[], templateId: string,
+      isUkm: boolean = false): void {
     // Clear the table first.
     tableBody.replaceChildren();
 
-    const template = this.$('#uma-log-row-template') as HTMLTemplateElement;
+    const template = this.getRequiredElement<HTMLTemplateElement>(templateId);
 
     // Iterate through the logs in reverse order so that the most recent log
     // shows up first.
     for (const log of logs.slice(0).reverse()) {
       const row = template.content.cloneNode(true) as HTMLElement;
-      const [type, hash, timestamp, size, events] = row.querySelectorAll('td');
+      let hash: Element|null|undefined = null;
+      let timestamp: Element|null|undefined = null;
+      let size: Element|null|undefined = null;
+      let events: Element|null|undefined = null;
 
-      assert(type);
-      type.textContent = umaLogTypeToString(log.type);
+      if (!isUkm) {
+        const [typeCell, hashCell, timestampCell, sizeCell, eventsCell] =
+            row.querySelectorAll('td');
+        assert(typeCell);
+        typeCell.textContent = umaLogTypeToString(log.type);
+        hash = hashCell;
+        timestamp = timestampCell;
+        size = sizeCell;
+        events = eventsCell;
+      } else {
+        const [hashCell, timestampCell, sizeCell, eventsCell] =
+            row.querySelectorAll('td');
+        hash = hashCell;
+        timestamp = timestampCell;
+        size = sizeCell;
+        events = eventsCell;
+      }
 
       assert(hash);
       hash.textContent = log.hash;
@@ -233,8 +465,28 @@ export class MetricsInternalsAppElement extends CustomElement {
     // We don't compare the new data with the old data to prevent re-renderings
     // because this should only be called when there is an actual change.
 
-    const umaLogsTableBody = this.$('#uma-logs-body') as HTMLElement;
-    this.updateLogsTable_(umaLogsTableBody, logs.logs);
+    const umaLogsTableBody = this.getRequiredElement('#uma-logs-body');
+    this.updateLogsTable_(
+        umaLogsTableBody, logs.logs, '#uma-log-row-template', false);
+  }
+
+  /**
+   * Fetches the latest UKM logs and renders them. This is called when the page
+   * is loaded and whenever there is a log that created or changed.
+   */
+  private async updateUkmLogsData_(): Promise<void> {
+    const logsData: string =
+        await this.browserProxy_.getUkmLogData(/*includeLogProtoData=*/ false);
+    const logs: LogData = JSON.parse(logsData);
+    // If there are no logs, append an empty log. This is purely for aesthetic
+    // reasons. Otherwise, the table may look confusing.
+    if (!logs.logs.length) {
+      logs.logs = [EMPTY_UKM_LOG];
+    }
+
+    const ukmLogsTableBody = this.getRequiredElement('#ukm-logs-body');
+    this.updateLogsTable_(
+        ukmLogsTableBody, logs.logs, '#ukm-log-row-template', true);
   }
 
   /**
@@ -247,6 +499,19 @@ export class MetricsInternalsAppElement extends CustomElement {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(file);
     a.download = `uma_logs_${new Date().getTime()}.json`;
+    a.click();
+  }
+
+  /**
+   * Exports the accumulated UKM logs, including their proto data, as a JSON
+   * file. This will initiate a download.
+   */
+  private async exportUkmLogs_(): Promise<void> {
+    const logsData: string = await this.getUkmLogsExportContent();
+    const file = new Blob([logsData], {type: 'text/plain'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(file);
+    a.download = `ukm_logs_${new Date().getTime()}.json`;
     a.click();
   }
 }

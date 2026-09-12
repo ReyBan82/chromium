@@ -6,13 +6,13 @@
 
 #include <map>
 #include <set>
+#include <string_view>
 #include <utility>
 
 #include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "components/feed/core/proto/v2/wire/content_id.pb.h"
@@ -24,14 +24,17 @@
 #include "components/feed/core/v2/test/test_util.h"
 #include "components/feed/feed_feature_list.h"
 #include "components/leveldb_proto/testing/fake_db.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace feed {
 namespace {
+using testing::ElementsAre;
+using testing::Pair;
 
 using LoadStreamResult = FeedStore::LoadStreamResult;
 
-std::string KeyForContentId(base::StringPiece prefix,
+std::string KeyForContentId(std::string_view prefix,
                             const feedwire::ContentId& content_id) {
   return base::StrCat({prefix, content_id.content_domain(), ",",
                        base::NumberToString(content_id.type()), ",",
@@ -60,6 +63,13 @@ feedstore::StoredAction MakeAction(int32_t id) {
   feedstore::StoredAction action;
   action.set_id(id);
   return action;
+}
+
+feedstore::DocView CreateDocView(uint64_t docid, int64_t view_time_millis) {
+  feedstore::DocView view;
+  view.set_docid(docid);
+  view.set_view_time_millis(view_time_millis);
+  return view;
 }
 
 }  // namespace
@@ -250,134 +260,6 @@ TEST_F(FeedStoreTest, OverwriteStream) {
   EXPECT_STRINGS_EQUAL(want, StoreToString());
 }
 
-TEST_F(FeedStoreTest, OverwriteStreamWebFeed) {
-  MakeFeedStore({});
-  CallbackReceiver<bool> receiver;
-  // TODO(harringtond): find a long term fix for assumptions about
-  // kTestTimeEpoch value.
-  store_->OverwriteStream(StreamType(StreamKind::kFollowing),
-                          MakeTypicalInitialModelState(), receiver.Bind());
-  fake_db_->UpdateCallback(true);
-
-  ASSERT_TRUE(receiver.GetResult());
-
-  constexpr char want[] = R"([S/w] {
-  stream_data {
-    content_id {
-      content_domain: "root"
-    }
-    root_event_id: "\b{"
-    next_page_token: "page-2"
-    shared_state_ids {
-      content_domain: "render_data"
-    }
-    stream_key: "w"
-    content_hashes {
-      hashes: 1403410510
-    }
-    content_hashes {
-      hashes: 1084072211
-    }
-  }
-}
-[T/w/0] {
-  stream_structures {
-    stream_key: "w"
-    structures {
-      operation: 1
-    }
-    structures {
-      operation: 2
-      content_id {
-        content_domain: "root"
-      }
-      type: 1
-    }
-    structures {
-      operation: 2
-      content_id {
-        content_domain: "content"
-        type: 3
-      }
-      parent_id {
-        content_domain: "root"
-      }
-      type: 4
-    }
-    structures {
-      operation: 2
-      content_id {
-        content_domain: "stories"
-        type: 4
-      }
-      parent_id {
-        content_domain: "content"
-        type: 3
-      }
-      type: 3
-    }
-    structures {
-      operation: 2
-      content_id {
-        content_domain: "content"
-        type: 3
-        id: 1
-      }
-      parent_id {
-        content_domain: "root"
-      }
-      type: 4
-    }
-    structures {
-      operation: 2
-      content_id {
-        content_domain: "stories"
-        type: 4
-        id: 1
-      }
-      parent_id {
-        content_domain: "content"
-        type: 3
-        id: 1
-      }
-      type: 3
-    }
-  }
-}
-[c/w/stories,4,0] {
-  content {
-    content_id {
-      content_domain: "stories"
-      type: 4
-    }
-    frame: "f:0"
-    stream_key: "w"
-  }
-}
-[c/w/stories,4,1] {
-  content {
-    content_id {
-      content_domain: "stories"
-      type: 4
-      id: 1
-    }
-    frame: "f:1"
-    stream_key: "w"
-  }
-}
-[s/w/render_data,0,0] {
-  shared_state {
-    content_id {
-      content_domain: "render_data"
-    }
-    shared_state_data: "ss:0"
-    stream_key: "w"
-  }
-}
-)";
-  EXPECT_STRINGS_EQUAL(want, StoreToString());
-}
-
 TEST_F(FeedStoreTest, OverwriteStreamOverwritesData) {
   MakeFeedStore({});
   // Insert some junk that should be removed.
@@ -450,21 +332,6 @@ TEST_F(FeedStoreTest, LoadStreamNoData) {
   EXPECT_FALSE(receiver.GetResult()->stream_data.has_content_id());
 }
 
-TEST_F(FeedStoreTest, LoadStreamIgnoresADifferentStreamType) {
-  MakeFeedStore({});
-  store_->OverwriteStream(StreamType(StreamKind::kForYou),
-                          MakeTypicalInitialModelState(), base::DoNothing());
-  fake_db_->UpdateCallback(true);
-
-  CallbackReceiver<LoadStreamResult> receiver;
-  store_->LoadStream(StreamType(StreamKind::kFollowing), receiver.Bind());
-  fake_db_->LoadCallback(true);
-
-  ASSERT_TRUE(receiver.GetResult());
-  EXPECT_FALSE(receiver.GetResult()->stream_data.has_content_id());
-  EXPECT_TRUE(receiver.GetResult()->stream_structures.empty());
-}
-
 TEST_F(FeedStoreTest, WriteOperations) {
   MakeFeedStore({});
   CallbackReceiver<LoadStreamResult> receiver;
@@ -519,9 +386,9 @@ TEST_F(FeedStoreTest, ReadNonexistentContentAndSharedStates) {
                       cr.Bind());
   fake_db_->LoadCallback(true);
 
-  ASSERT_NE(cr.GetResult<0>(), absl::nullopt);
+  ASSERT_NE(cr.GetResult<0>(), std::nullopt);
   EXPECT_EQ(cr.GetResult<0>()->size(), 0ul);
-  ASSERT_NE(cr.GetResult<1>(), absl::nullopt);
+  ASSERT_NE(cr.GetResult<1>(), std::nullopt);
   EXPECT_EQ(cr.GetResult<1>()->size(), 0ul);
 }
 
@@ -554,9 +421,9 @@ TEST_F(FeedStoreTest, ReadContentAndSharedStates) {
                       shared_state_ids, cr.Bind());
   fake_db_->LoadCallback(true);
 
-  ASSERT_NE(cr.GetResult<0>(), absl::nullopt);
+  ASSERT_NE(cr.GetResult<0>(), std::nullopt);
   std::vector<feedstore::Content> content = *cr.GetResult<0>();
-  ASSERT_NE(cr.GetResult<1>(), absl::nullopt);
+  ASSERT_NE(cr.GetResult<1>(), std::nullopt);
   std::vector<feedstore::StreamSharedState> shared_states = *cr.GetResult<1>();
 
   ASSERT_EQ(content.size(), 2ul);
@@ -575,9 +442,9 @@ TEST_F(FeedStoreTest, ReadContentAndSharedStates) {
                       shared_state_ids, cr.Bind());
   fake_db_->LoadCallback(false);
 
-  ASSERT_NE(cr.GetResult<0>(), absl::nullopt);
+  ASSERT_NE(cr.GetResult<0>(), std::nullopt);
   EXPECT_EQ(cr.GetResult<0>()->size(), 0ul);
-  ASSERT_NE(cr.GetResult<1>(), absl::nullopt);
+  ASSERT_NE(cr.GetResult<1>(), std::nullopt);
   EXPECT_EQ(cr.GetResult<1>()->size(), 0ul);
 }
 
@@ -590,7 +457,7 @@ TEST_F(FeedStoreTest, ReadActions) {
   CallbackReceiver<std::vector<feedstore::StoredAction>> receiver;
   store_->ReadActions(receiver.Bind());
   fake_db_->LoadCallback(true);
-  ASSERT_NE(absl::nullopt, receiver.GetResult());
+  ASSERT_NE(std::nullopt, receiver.GetResult());
   std::vector<feedstore::StoredAction> result =
       std::move(*receiver.GetResult());
 
@@ -601,7 +468,7 @@ TEST_F(FeedStoreTest, ReadActions) {
   receiver.Clear();
   store_->ReadActions(receiver.Bind());
   fake_db_->LoadCallback(false);
-  ASSERT_NE(absl::nullopt, receiver.GetResult());
+  ASSERT_NE(std::nullopt, receiver.GetResult());
   result = std::move(*receiver.GetResult());
   EXPECT_EQ(0ul, result.size());
 }
@@ -622,7 +489,7 @@ TEST_F(FeedStoreTest, WriteActions) {
   receiver.GetResult().reset();
   store_->WriteActions({action}, receiver.Bind());
   fake_db_->UpdateCallback(false);
-  EXPECT_NE(receiver.GetResult(), absl::nullopt);
+  EXPECT_NE(receiver.GetResult(), std::nullopt);
   EXPECT_EQ(receiver.GetResult().value(), false);
 }
 
@@ -643,7 +510,7 @@ TEST_F(FeedStoreTest, RemoveActions) {
   receiver.GetResult().reset();
   store_->RemoveActions(ids, receiver.Bind());
   fake_db_->UpdateCallback(false);
-  EXPECT_NE(receiver.GetResult(), absl::nullopt);
+  EXPECT_NE(receiver.GetResult(), std::nullopt);
   EXPECT_EQ(receiver.GetResult().value(), false);
 }
 
@@ -750,204 +617,87 @@ TEST_F(FeedStoreTest, UpgradeFromStreamSchemaV0) {
             StoredKeys());
 }
 
-TEST_F(FeedStoreTest, WriteRecommendedFeedsAndReadThem) {
+TEST_F(FeedStoreTest, WriteDocView) {
   MakeFeedStore({});
-
-  CallbackReceiver<> receiver;
-  feedstore::RecommendedWebFeedIndex index;
-  index.add_entries()->set_web_feed_id("foo");
-  *index.mutable_entries(0)->add_matchers() =
-      MakeWebFeedInfo("foo").matchers(0);
-  index.add_entries()->set_web_feed_id("bar");
-  *index.mutable_entries(1)->add_matchers() =
-      MakeWebFeedInfo("bar").matchers(0);
-
-  store_->WriteRecommendedFeeds(
-      index, {MakeWebFeedInfo("foo"), MakeWebFeedInfo("bar")}, receiver.Bind());
-
+  feedstore::DocView dv = CreateDocView(10, 11);
+  store_->WriteDocView(dv);
   fake_db_->UpdateCallback(true);
 
-  ASSERT_TRUE(receiver.called());
-
-  CallbackReceiver<FeedStore::WebFeedStartupData> startup_callback;
-  store_->ReadWebFeedStartupData(startup_callback.Bind());
-  fake_db_->LoadCallback(true);
-
-  ASSERT_TRUE(startup_callback.GetResult());
-
-  // Check that we can load the stored data.
-  std::string want = R"({
-  entries {
-    matchers {
-      criteria {
-        text: "foo.com"
-        criteria_type: 2
-      }
-    }
-    web_feed_id: "foo"
-  }
-  entries {
-    matchers {
-      criteria {
-        text: "bar.com"
-        criteria_type: 2
-      }
-    }
-    web_feed_id: "bar"
-  }
-}
-)";
-  EXPECT_STRINGS_EQUAL(
-      want, ToTextProto(startup_callback.GetResult()->recommended_feed_index));
-
-  CallbackReceiver<std::unique_ptr<feedstore::WebFeedInfo>> foo_callback;
-  store_->ReadRecommendedWebFeedInfo("id_foo", foo_callback.Bind());
-  fake_db_->GetCallback(true);
-  ASSERT_TRUE(foo_callback.GetResult());
-  ASSERT_TRUE(*foo_callback.GetResult());
-  EXPECT_STRINGS_EQUAL(R"({
-  web_feed_id: "id_foo"
-  title: "Title foo"
-  visit_uri: "https://foo.com"
-  favicon {
-    url: "http://favicon/foo"
-  }
-  follower_count: 123
-  matchers {
-    criteria {
-      text: "foo.com"
-      criteria_type: 2
-    }
+  EXPECT_EQ(R"([v/10/11] {
+  doc_view {
+    docid: 10
+    view_time_millis: 11
   }
 }
 )",
-                       ToTextProto(**foo_callback.GetResult()));
+            StoreToString());
+}
 
-  CallbackReceiver<std::unique_ptr<feedstore::WebFeedInfo>> bar_callback;
-  store_->ReadRecommendedWebFeedInfo("id_bar", bar_callback.Bind());
-  fake_db_->GetCallback(true);
-  ASSERT_TRUE(bar_callback.GetResult());
-  ASSERT_TRUE(*bar_callback.GetResult());
-  EXPECT_STRINGS_EQUAL(R"({
-  web_feed_id: "id_bar"
-  title: "Title bar"
-  visit_uri: "https://bar.com"
-  favicon {
-    url: "http://favicon/bar"
-  }
-  follower_count: 123
-  matchers {
-    criteria {
-      text: "bar.com"
-      criteria_type: 2
-    }
+TEST_F(FeedStoreTest, RemoveDocViewsNotExist) {
+  MakeFeedStore({});
+  feedstore::DocView dv = CreateDocView(10, 11);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+
+  // docid doesn't match
+  store_->RemoveDocViews({CreateDocView(11, 11)});
+  fake_db_->UpdateCallback(true);
+
+  EXPECT_EQ(R"([v/10/11] {
+  doc_view {
+    docid: 10
+    view_time_millis: 11
   }
 }
 )",
-                       ToTextProto(**bar_callback.GetResult()));
+            StoreToString());
 }
 
-TEST_F(FeedStoreTest, WriteSubscribedFeeds) {
+TEST_F(FeedStoreTest, RemoveDocViewsDoesExist) {
   MakeFeedStore({});
-
-  CallbackReceiver<> receiver;
-  feedstore::SubscribedWebFeeds subscribed_web_feeds;
-  *subscribed_web_feeds.add_feeds() = MakeWebFeedInfo("foo");
-  *subscribed_web_feeds.add_feeds() = MakeWebFeedInfo("bar");
-
-  store_->WriteSubscribedFeeds(subscribed_web_feeds, receiver.Bind());
-
+  feedstore::DocView dv = CreateDocView(10, 9000);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+  dv.set_docid(11);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+  dv.set_docid(12);
+  store_->WriteDocView(dv);
   fake_db_->UpdateCallback(true);
 
-  ASSERT_TRUE(receiver.called());
+  store_->RemoveDocViews({CreateDocView(10, 9000), CreateDocView(12, 9000)});
+  fake_db_->UpdateCallback(true);
+  ASSERT_THAT(db_entries_, ElementsAre(Pair("v/11/9000", EqualsTextProto(R"({
+  doc_view {
+    docid: 11
+    view_time_millis: 9000
+  }
+})"))));
+}
 
-  CallbackReceiver<FeedStore::WebFeedStartupData> startup_callback;
-  store_->ReadWebFeedStartupData(startup_callback.Bind());
+TEST_F(FeedStoreTest, ReadDocViews) {
+  MakeFeedStore({});
+  feedstore::DocView dv;
+  dv.set_docid(0);
+  dv.set_view_time_millis(11);
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+  dv.set_docid(std::numeric_limits<uint64_t>::max());
+  store_->WriteDocView(dv);
+  fake_db_->UpdateCallback(true);
+
+  CallbackReceiver<std::vector<feedstore::DocView>> result;
+  store_->ReadDocViews(result.Bind());
   fake_db_->LoadCallback(true);
 
-  ASSERT_TRUE(startup_callback.called());
-
-  std::string want = R"({
-  feeds {
-    web_feed_id: "id_foo"
-    title: "Title foo"
-    visit_uri: "https://foo.com"
-    favicon {
-      url: "http://favicon/foo"
-    }
-    follower_count: 123
-    matchers {
-      criteria {
-        text: "foo.com"
-        criteria_type: 2
-      }
-    }
-  }
-  feeds {
-    web_feed_id: "id_bar"
-    title: "Title bar"
-    visit_uri: "https://bar.com"
-    favicon {
-      url: "http://favicon/bar"
-    }
-    follower_count: 123
-    matchers {
-      criteria {
-        text: "bar.com"
-        criteria_type: 2
-      }
-    }
-  }
-}
-)";
-  EXPECT_STRINGS_EQUAL(
-      want, ToTextProto(startup_callback.GetResult()->subscribed_web_feeds));
-}
-
-TEST_F(FeedStoreTest, ReadWebFeedStartupDataNotPresent) {
-  MakeFeedStore({});
-
-  CallbackReceiver<FeedStore::WebFeedStartupData> startup_callback;
-  store_->ReadWebFeedStartupData(startup_callback.Bind());
-  fake_db_->LoadCallback(true);
-
-  ASSERT_TRUE(startup_callback.called());
-
-  EXPECT_STRINGS_EQUAL(
-      "{\n}\n",
-      ToTextProto(startup_callback.GetResult()->subscribed_web_feeds));
-  EXPECT_STRINGS_EQUAL(
-      "{\n}\n",
-      ToTextProto(startup_callback.GetResult()->recommended_feed_index));
-}
-
-TEST_F(FeedStoreTest, ReadRecommendedWebFeedInfoNotPresent) {
-  MakeFeedStore({});
-
-  CallbackReceiver<std::unique_ptr<feedstore::WebFeedInfo>> callback;
-  store_->ReadRecommendedWebFeedInfo("id_foo", callback.Bind());
-  fake_db_->GetCallback(true);
-
-  ASSERT_TRUE(callback.GetResult());
-  ASSERT_FALSE(*callback.GetResult());
-}
-
-TEST_F(FeedStoreTest, ClearAllStreamData) {
-  // Write stream records to store.
-  MakeFeedStore({});
-  store_->OverwriteStream(StreamType(StreamKind::kSingleWebFeed, "A"),
-                          MakeTypicalInitialModelState(), base::DoNothing());
-  fake_db_->UpdateCallback(true);
-  ASSERT_NE("", StoreToString());
-
-  // ClearAll() and verify the DB is empty.
-  CallbackReceiver<bool> receiver;
-  store_->ClearAllStreamData(StreamKind::kSingleWebFeed, receiver.Bind());
-  fake_db_->UpdateCallback(true);
-
-  ASSERT_TRUE(receiver.GetResult());
-  EXPECT_TRUE(*receiver.GetResult());
-  EXPECT_EQ("", StoreToString());
+  ASSERT_TRUE(result.GetResult());
+  ASSERT_THAT(*result.GetResult(), ElementsAre(EqualsTextProto(R"({
+  view_time_millis: 11
+})"),
+                                               EqualsTextProto(R"({
+  docid: 18446744073709551615
+  view_time_millis: 11
+})")));
 }
 
 }  // namespace feed

@@ -1,11 +1,13 @@
 Name: XNNPACK
 Short Name: xnnpack
 URL: https://github.com/google/xnnpack
-Version: 659147817805d17c7be2d60bd7bbca7e780f9c82
-Date: 2023/01/30
-License: BSD
+Version: N/A
+Revision: 3c4596adb505f51c042ee14e76731b9004524b1a
+Update Mechanism: Manual
+License: BSD-3-Clause
 License File: src/LICENSE
 Security Critical: Yes
+Shipped: yes
 
 Description:
 XNNPACK is a highly optimized library of floating-point neural network inference

@@ -14,59 +14,57 @@
 
 #include "absl/strings/str_split.h"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <initializer_list>
+#include <iterator>
 #include <list>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
-#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/base/dynamic_annotations.h"
 #include "absl/base/macros.h"
 #include "absl/container/btree_map.h"
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/node_hash_map.h"
-#include "absl/strings/numbers.h"
+#include "absl/hash/hash.h"
+#include "absl/strings/string_view.h"
 
 namespace {
 
 using ::testing::ElementsAre;
+using ::testing::IsEmpty;
 using ::testing::Pair;
 using ::testing::UnorderedElementsAre;
 
 TEST(Split, TraitsTest) {
-  static_assert(!absl::strings_internal::SplitterIsConvertibleTo<int>::value,
-                "");
+  static_assert(!absl::strings_internal::SplitterIsConvertibleTo<int>::value);
   static_assert(
-      !absl::strings_internal::SplitterIsConvertibleTo<std::string>::value, "");
+      !absl::strings_internal::SplitterIsConvertibleTo<std::string>::value);
   static_assert(absl::strings_internal::SplitterIsConvertibleTo<
-                    std::vector<std::string>>::value,
-                "");
-  static_assert(
-      !absl::strings_internal::SplitterIsConvertibleTo<std::vector<int>>::value,
-      "");
-  static_assert(absl::strings_internal::SplitterIsConvertibleTo<
-                    std::vector<absl::string_view>>::value,
-                "");
-  static_assert(absl::strings_internal::SplitterIsConvertibleTo<
-                    std::map<std::string, std::string>>::value,
-                "");
-  static_assert(absl::strings_internal::SplitterIsConvertibleTo<
-                    std::map<absl::string_view, absl::string_view>>::value,
-                "");
+                std::vector<std::string>>::value);
   static_assert(!absl::strings_internal::SplitterIsConvertibleTo<
-                    std::map<int, std::string>>::value,
-                "");
+                std::vector<int>>::value);
+  static_assert(absl::strings_internal::SplitterIsConvertibleTo<
+                std::vector<absl::string_view>>::value);
+  static_assert(absl::strings_internal::SplitterIsConvertibleTo<
+                std::map<std::string, std::string>>::value);
+  static_assert(absl::strings_internal::SplitterIsConvertibleTo<
+                std::map<absl::string_view, absl::string_view>>::value);
   static_assert(!absl::strings_internal::SplitterIsConvertibleTo<
-                    std::map<std::string, int>>::value,
-                "");
+                std::map<int, std::string>>::value);
+  static_assert(!absl::strings_internal::SplitterIsConvertibleTo<
+                std::map<std::string, int>>::value);
 }
 
 // This tests the overall split API, which is made up of the absl::StrSplit()
@@ -212,7 +210,7 @@ TEST(Split, APIExamples) {
     std::multimap<std::string, std::string> m =
         absl::StrSplit("a,1,b,2,a,3", ',');
     EXPECT_EQ(3, m.size());
-    auto it = m.find("a");
+    auto it = m.lower_bound("a");
     EXPECT_EQ("1", it->second);
     ++it;
     EXPECT_EQ("3", it->second);
@@ -394,6 +392,12 @@ void TestPairConversionOperator(const Splitter& splitter) {
   EXPECT_EQ(p, (std::pair<FirstType, SecondType>("a", "b")));
 }
 
+template <typename StringType, typename Splitter>
+void TestArrayConversionOperator(const Splitter& splitter) {
+  std::array<StringType, 2> a = splitter;
+  EXPECT_THAT(a, ElementsAre("a", "b"));
+}
+
 TEST(Splitter, ConversionOperator) {
   auto splitter = absl::StrSplit("a,b,c,d", ',');
 
@@ -412,6 +416,9 @@ TEST(Splitter, ConversionOperator) {
   TestConversionOperator<absl::btree_multiset<absl::string_view>>(splitter);
   TestConversionOperator<absl::btree_multiset<std::string>>(splitter);
   TestConversionOperator<std::unordered_set<std::string>>(splitter);
+  TestConversionOperator<
+      std::unordered_set<absl::string_view, absl::Hash<absl::string_view>>>(
+      splitter);
 
   // Tests conversion to map-like objects.
 
@@ -445,6 +452,15 @@ TEST(Splitter, ConversionOperator) {
       splitter);
   TestMapConversionOperator<std::unordered_map<std::string, std::string>>(
       splitter);
+  TestMapConversionOperator<std::unordered_map<
+      absl::string_view, absl::string_view, absl::Hash<absl::string_view>>>(
+      splitter);
+  TestMapConversionOperator<std::unordered_map<absl::string_view, std::string,
+                                               absl::Hash<absl::string_view>>>(
+      splitter);
+  TestMapConversionOperator<std::unordered_map<std::string, absl::string_view,
+                                               absl::Hash<absl::string_view>>>(
+      splitter);
   TestMapConversionOperator<
       absl::node_hash_map<absl::string_view, absl::string_view>>(splitter);
   TestMapConversionOperator<
@@ -464,6 +480,10 @@ TEST(Splitter, ConversionOperator) {
   TestPairConversionOperator<absl::string_view, std::string>(splitter);
   TestPairConversionOperator<std::string, absl::string_view>(splitter);
   TestPairConversionOperator<std::string, std::string>(splitter);
+
+  // Tests conversion to std::array
+  TestArrayConversionOperator<std::string>(splitter);
+  TestArrayConversionOperator<absl::string_view>(splitter);
 }
 
 // A few additional tests for conversion to std::pair. This conversion is
@@ -504,6 +524,41 @@ TEST(Splitter, ToPair) {
     std::pair<std::string, std::string> p = absl::StrSplit("a,b,c", ',');
     EXPECT_EQ("a", p.first);
     EXPECT_EQ("b", p.second);
+    // "c" is omitted.
+  }
+}
+
+// std::array tests similar to std::pair tests above, testing fewer, exactly,
+// or more elements than the array size.
+TEST(Splitter, ToArray) {
+  {
+    // Empty string
+    std::array<std::string, 2> p = absl::StrSplit("", ',');
+    EXPECT_THAT(p, ElementsAre("", ""));
+  }
+
+  {
+    // Only first
+    std::array<std::string, 2> p = absl::StrSplit("a", ',');
+    EXPECT_THAT(p, ElementsAre("a", ""));
+  }
+
+  {
+    // Only second
+    std::array<std::string, 2> p = absl::StrSplit(",b", ',');
+    EXPECT_THAT(p, ElementsAre("", "b"));
+  }
+
+  {
+    // First and second.
+    std::array<std::string, 2> p = absl::StrSplit("a,b", ',');
+    EXPECT_THAT(p, ElementsAre("a", "b"));
+  }
+
+  {
+    // First and second and then more stuff that will be ignored.
+    std::array<std::string, 2> p = absl::StrSplit("a,b,c", ',');
+    EXPECT_THAT(p, ElementsAre("a", "b"));
     // "c" is omitted.
   }
 }
@@ -604,7 +659,7 @@ TEST(Split, Temporary) {
   // destroyed, if the splitter keeps a reference to the string's contents,
   // it'll reference freed memory instead of just dead on-stack memory.
   const char input[] = "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u";
-  EXPECT_LT(sizeof(std::string), ABSL_ARRAYSIZE(input))
+  EXPECT_LT(sizeof(std::string), std::size(input))
       << "Input should be larger than fits on the stack.";
 
   // This happens more often in C++11 as part of a range-based for loop.
@@ -919,6 +974,45 @@ TEST(Delimiter, ByAnyChar) {
   EXPECT_FALSE(IsFoundAt("a", empty, 0));
   EXPECT_TRUE(IsFoundAt("ab", empty, 1));
   EXPECT_TRUE(IsFoundAt("abc", empty, 1));
+}
+
+//
+// Tests for ByAsciiWhitespace
+//
+TEST(Split, ByAsciiWhitespace) {
+  using absl::ByAsciiWhitespace;
+  using absl::SkipEmpty;
+  std::vector<absl::string_view> results;
+
+  results = absl::StrSplit("aaaa\n", ByAsciiWhitespace());
+  EXPECT_THAT(results, ElementsAre("aaaa", ""));
+
+  results = absl::StrSplit("aaaa\n", ByAsciiWhitespace(), SkipEmpty());
+  EXPECT_THAT(results, ElementsAre("aaaa"));
+
+  results = absl::StrSplit(" ", ByAsciiWhitespace());
+  EXPECT_THAT(results, ElementsAre("", ""));
+
+  results = absl::StrSplit(" ", ByAsciiWhitespace(), SkipEmpty());
+  EXPECT_THAT(results, IsEmpty());
+
+  results = absl::StrSplit("a", ByAsciiWhitespace());
+  EXPECT_THAT(results, ElementsAre("a"));
+
+  results = absl::StrSplit("", ByAsciiWhitespace());
+  EXPECT_THAT(results, ElementsAre(""));
+
+  results = absl::StrSplit("", ByAsciiWhitespace(), SkipEmpty());
+  EXPECT_THAT(results, IsEmpty());
+
+  results = absl::StrSplit("a b\tc\n  d\n", ByAsciiWhitespace());
+  EXPECT_THAT(results, ElementsAre("a", "b", "c", "", "", "d", ""));
+
+  results = absl::StrSplit("a b\tc\n  d  \n", ByAsciiWhitespace(), SkipEmpty());
+  EXPECT_THAT(results, ElementsAre("a", "b", "c", "d"));
+
+  results = absl::StrSplit("a\t\n\v\f\r b", ByAsciiWhitespace(), SkipEmpty());
+  EXPECT_THAT(results, ElementsAre("a", "b"));
 }
 
 //

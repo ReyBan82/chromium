@@ -5,27 +5,32 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_BLUETOOTH_BLUETOOTH_ADVERTISING_EVENT_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_BLUETOOTH_BLUETOOTH_ADVERTISING_EVENT_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <optional>
+
 #include "third_party/blink/public/mojom/bluetooth/web_bluetooth.mojom-blink-forward.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
+#include "third_party/blink/renderer/modules/modules_export.h"
 
 namespace blink {
 
 class BluetoothDevice;
 class BluetoothManufacturerDataMap;
 class BluetoothServiceDataMap;
+class DOMWrapperWorld;
 
-class BluetoothAdvertisingEvent final : public Event {
+class MODULES_EXPORT BluetoothAdvertisingEvent final : public Event {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
   BluetoothAdvertisingEvent(
       const AtomicString& event_type,
       BluetoothDevice* device,
-      mojom::blink::WebBluetoothAdvertisingEventPtr advertising_event);
+      mojom::blink::WebBluetoothAdvertisingEventPtr advertising_event,
+      const DOMWrapperWorld* world);
 
   ~BluetoothAdvertisingEvent() override;
 
+  bool CanBeDispatchedInWorld(const DOMWrapperWorld&) const override;
   void Trace(Visitor*) const override;
 
   const AtomicString& InterfaceName() const override;
@@ -33,9 +38,9 @@ class BluetoothAdvertisingEvent final : public Event {
   BluetoothDevice* device() const;
   const String& name() const;
   const Vector<String>& uuids() const;
-  absl::optional<uint16_t> appearance() const { return appearance_; }
-  absl::optional<int8_t> txPower() const { return txPower_; }
-  absl::optional<int8_t> rssi() const { return rssi_; }
+  std::optional<uint16_t> appearance() const { return appearance_; }
+  std::optional<int8_t> txPower() const { return txPower_; }
+  std::optional<int8_t> rssi() const { return rssi_; }
   BluetoothManufacturerDataMap* manufacturerData() const;
   BluetoothServiceDataMap* serviceData() const;
 
@@ -43,11 +48,12 @@ class BluetoothAdvertisingEvent final : public Event {
   Member<BluetoothDevice> device_;
   String name_;
   Vector<String> uuids_;
-  absl::optional<uint16_t> appearance_;
-  absl::optional<int8_t> txPower_;
-  absl::optional<int8_t> rssi_;
+  std::optional<uint16_t> appearance_;
+  std::optional<int8_t> txPower_;
+  std::optional<int8_t> rssi_;
   const Member<BluetoothManufacturerDataMap> manufacturer_data_map_;
   const Member<BluetoothServiceDataMap> service_data_map_;
+  Member<const DOMWrapperWorld> world_;
 };
 
 }  // namespace blink

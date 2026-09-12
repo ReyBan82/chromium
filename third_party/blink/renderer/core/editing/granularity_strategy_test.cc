@@ -43,7 +43,7 @@ class GranularityStrategyTest : public EditingTestBase {
   void SetUp() override;
 
   Text* AppendTextNode(const String& data);
-  void SetInnerHTML(const char*);
+  void SetInnerHtmlWithoutTrustedTypes(const char*);
   // Parses the text node, appending the info to letter_pos_ and word_middles_.
   void ParseText(Text*);
   void ParseText(const TextNodeVector&);
@@ -91,8 +91,10 @@ Text* GranularityStrategyTest::AppendTextNode(const String& data) {
   return text;
 }
 
-void GranularityStrategyTest::SetInnerHTML(const char* html_content) {
-  GetDocument().documentElement()->setInnerHTML(String::FromUTF8(html_content));
+void GranularityStrategyTest::SetInnerHtmlWithoutTrustedTypes(
+    const char* html_content) {
+  GetDocument().documentElement()->SetInnerHTMLWithoutTrustedTypes(
+      String::FromUtf8(html_content));
   UpdateAllLifecyclePhasesForTest();
 }
 
@@ -112,10 +114,10 @@ void GranularityStrategyTest::ParseText(const TextNodeVector& text_nodes) {
       letter_pos_.push_back(VisiblePositionToContentsPoint(
           CreateVisiblePosition(Position(text, i))));
       char c = str[i];
-      if (IsASCIIAlphanumeric(c) && !word_started) {
+      if (IsAsciiAlphanumeric(c) && !word_started) {
         word_start_index = i + word_start_index_offset;
         word_started = true;
-      } else if (!IsASCIIAlphanumeric(c) && word_started) {
+      } else if (!IsAsciiAlphanumeric(c) && word_started) {
         gfx::Point word_middle((letter_pos_[word_start_index].x() +
                                 letter_pos_[i + word_start_index_offset].x()) /
                                    2,
@@ -138,7 +140,7 @@ void GranularityStrategyTest::ParseText(const TextNodeVector& text_nodes) {
 }
 
 Text* GranularityStrategyTest::SetupTranslateZ(String str) {
-  SetInnerHTML(
+  SetInnerHtmlWithoutTrustedTypes(
       "<html>"
       "<head>"
       "<style>"
@@ -153,7 +155,7 @@ Text* GranularityStrategyTest::SetupTranslateZ(String str) {
       "</html>");
 
   Text* text = GetDocument().createTextNode(str);
-  Element* div = GetDocument().getElementById("mytext");
+  Element* div = GetDocument().getElementById(AtomicString("mytext"));
   div->AppendChild(text);
 
   UpdateAllLifecyclePhasesForTest();
@@ -163,7 +165,7 @@ Text* GranularityStrategyTest::SetupTranslateZ(String str) {
 }
 
 Text* GranularityStrategyTest::SetupTransform(String str) {
-  SetInnerHTML(
+  SetInnerHtmlWithoutTrustedTypes(
       "<html>"
       "<head>"
       "<style>"
@@ -178,7 +180,7 @@ Text* GranularityStrategyTest::SetupTransform(String str) {
       "</html>");
 
   Text* text = GetDocument().createTextNode(str);
-  Element* div = GetDocument().getElementById("mytext");
+  Element* div = GetDocument().getElementById(AtomicString("mytext"));
   div->AppendChild(text);
 
   UpdateAllLifecyclePhasesForTest();
@@ -188,7 +190,7 @@ Text* GranularityStrategyTest::SetupTransform(String str) {
 }
 
 Text* GranularityStrategyTest::SetupRotate(String str) {
-  SetInnerHTML(
+  SetInnerHtmlWithoutTrustedTypes(
       "<html>"
       "<head>"
       "<style>"
@@ -203,7 +205,7 @@ Text* GranularityStrategyTest::SetupRotate(String str) {
       "</html>");
 
   Text* text = GetDocument().createTextNode(str);
-  Element* div = GetDocument().getElementById("mytext");
+  Element* div = GetDocument().getElementById(AtomicString("mytext"));
   div->AppendChild(text);
 
   UpdateAllLifecyclePhasesForTest();
@@ -221,7 +223,7 @@ void GranularityStrategyTest::SetupTextSpan(String str1,
   Text* text2 = GetDocument().createTextNode(str2);
   Text* text3 = GetDocument().createTextNode(str3);
   auto* span = MakeGarbageCollected<HTMLSpanElement>(GetDocument());
-  Element* div = GetDocument().getElementById("mytext");
+  Element* div = GetDocument().getElementById(AtomicString("mytext"));
   div->AppendChild(text1);
   div->AppendChild(span);
   span->AppendChild(text2);
@@ -254,7 +256,7 @@ void GranularityStrategyTest::SetupTextSpan(String str1,
     p2 = Position(text3, sel_end - str1.length() - str2.length());
 
   Selection().SetSelection(
-      SelectionInDOMTree::Builder().SetBaseAndExtent(p1, p2).Build(),
+      SelectionInDomTree::Builder().SetBaseAndExtent(p1, p2).Build(),
       SetSelectionOptions());
 }
 
@@ -263,7 +265,7 @@ void GranularityStrategyTest::SetupVerticalAlign(String str1,
                                                  String str3,
                                                  wtf_size_t sel_begin,
                                                  wtf_size_t sel_end) {
-  SetInnerHTML(
+  SetInnerHtmlWithoutTrustedTypes(
       "<html>"
       "<head>"
       "<style>"
@@ -285,7 +287,7 @@ void GranularityStrategyTest::SetupFontSize(String str1,
                                             String str3,
                                             wtf_size_t sel_begin,
                                             wtf_size_t sel_end) {
-  SetInnerHTML(
+  SetInnerHtmlWithoutTrustedTypes(
       "<html>"
       "<head>"
       "<style>"
@@ -482,7 +484,7 @@ TEST_F(GranularityStrategyTest, Character) {
   // "Foo B^a|>r Baz," (^ means base, | means extent, , < means start, and >
   // means end).
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 5), Position(text, 6))
           .Build(),
       SetSelectionOptions());
@@ -504,7 +506,7 @@ TEST_F(GranularityStrategyTest, DirectionRotate) {
   // "Foo B^a|>r Baz," (^ means base, | means extent, , < means start, and >
   // means end).
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 5), Position(text, 6))
           .Build(),
       SetSelectionOptions());
@@ -528,7 +530,7 @@ TEST_F(GranularityStrategyTest, DirectionExpandTranslateZ) {
   // "abcdef ghij kl mno^p|>qr stuvwi inm  mnii," (^ means base, | means extent,
   // < means start, and > means end).
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 18), Position(text, 19))
           .Build(),
       SetSelectionOptions());
@@ -541,7 +543,7 @@ TEST_F(GranularityStrategyTest, DirectionExpandTransform) {
   // "abcdef ghij kl mno^p|>qr stuvwi inm  mnii," (^ means base, | means extent,
   // < means start, and > means end).
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 18), Position(text, 19))
           .Build(),
       SetSelectionOptions());
@@ -566,7 +568,7 @@ TEST_F(GranularityStrategyTest, DirectionExpandFontSizes) {
 TEST_F(GranularityStrategyTest, DirectionShrinkTranslateZ) {
   Text* text = SetupTranslateZ("abcdef ghij kl mnopqr iiinmni, abc");
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 18), Position(text, 21))
           .Build(),
       SetSelectionOptions());
@@ -577,7 +579,7 @@ TEST_F(GranularityStrategyTest, DirectionShrinkTranslateZ) {
 TEST_F(GranularityStrategyTest, DirectionShrinkTransform) {
   Text* text = SetupTransform("abcdef ghij kl mnopqr iiinmni, abc");
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 18), Position(text, 21))
           .Build(),
       SetSelectionOptions());
@@ -600,7 +602,7 @@ TEST_F(GranularityStrategyTest, DirectionShrinkFontSizes) {
 TEST_F(GranularityStrategyTest, DirectionSwitchSideTranslateZ) {
   Text* text = SetupTranslateZ("abcd efgh ijkl mnopqr iiinmni, abc");
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 18), Position(text, 21))
           .Build(),
       SetSelectionOptions());
@@ -611,7 +613,7 @@ TEST_F(GranularityStrategyTest, DirectionSwitchSideTranslateZ) {
 TEST_F(GranularityStrategyTest, DirectionSwitchSideTransform) {
   Text* text = SetupTransform("abcd efgh ijkl mnopqr iiinmni, abc");
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 18), Position(text, 21))
           .Build(),
       SetSelectionOptions());
@@ -647,7 +649,7 @@ TEST_F(GranularityStrategyTest, DirectionSwitchSideWordGranularityThenShrink) {
   // "abcd efgh ijkl mno^pqr|> iiin, abc" (^ means base, | means extent, < means
   // start, and > means end).
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 18), Position(text, 21))
           .Build(),
       SetSelectionOptions());
@@ -686,7 +688,7 @@ TEST_F(GranularityStrategyTest, DirectionSwitchStartOnBoundary) {
   // "ab cd efghijkl ^mnopqr |>stuvwi inm," (^ means base and | means extent,
   // > means end).
   Selection().SetSelection(
-      SelectionInDOMTree::Builder()
+      SelectionInDomTree::Builder()
           .SetBaseAndExtent(Position(text, 15), Position(text, 22))
           .Build(),
       SetSelectionOptions());
@@ -699,17 +701,17 @@ TEST_F(GranularityStrategyTest, DirectionSwitchStartOnBoundary) {
 TEST_F(GranularityStrategyTest, UpdateExtentWithNullPositionForCharacter) {
   GetDummyPageHolder().GetFrame().GetSettings()->SetSelectionStrategy(
       SelectionStrategy::kCharacter);
-  GetDocument().body()->setInnerHTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(
       "<div id=host></div><div id=sample>ab</div>");
   // Simulate VIDEO element which has a RANGE as slider of video time.
-  Element* const host = GetDocument().getElementById("host");
+  Element* const host = GetDocument().getElementById(AtomicString("host"));
   ShadowRoot& shadow_root =
-      host->AttachShadowRootInternal(ShadowRootType::kOpen);
-  shadow_root.setInnerHTML("<input type=range>");
-  Element* const sample = GetDocument().getElementById("sample");
+      host->AttachShadowRootForTesting(ShadowRootMode::kOpen);
+  shadow_root.SetInnerHTMLWithoutTrustedTypes("<input type=range>");
+  Element* const sample = GetDocument().getElementById(AtomicString("sample"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
-  const SelectionInDOMTree& selection_in_dom_tree =
-      SelectionInDOMTree::Builder()
+  const SelectionInDomTree& selection_in_dom_tree =
+      SelectionInDomTree::Builder()
           .Collapse(Position(sample->firstChild(), 2))
           .Build();
   Selection().SetSelection(selection_in_dom_tree,
@@ -732,22 +734,22 @@ TEST_F(GranularityStrategyTest, UpdateExtentWithNullPositionForCharacter) {
   // Point to RANGE inside shadow root to get null position from
   // |visiblePositionForContentsPoint()|.
   Selection().MoveRangeSelectionExtent(gfx::Point(0, 0));
-  EXPECT_EQ(selection_in_dom_tree, Selection().GetSelectionInDOMTree());
+  EXPECT_EQ(selection_in_dom_tree, Selection().GetSelectionInDomTree());
 }
 
 // For http://crbug.com/704529
 TEST_F(GranularityStrategyTest, UpdateExtentWithNullPositionForDirectional) {
-  GetDocument().body()->setInnerHTML(
+  GetDocument().body()->SetInnerHTMLWithoutTrustedTypes(
       "<div id=host></div><div id=sample>ab</div>");
   // Simulate VIDEO element which has a RANGE as slider of video time.
-  Element* const host = GetDocument().getElementById("host");
+  Element* const host = GetDocument().getElementById(AtomicString("host"));
   ShadowRoot& shadow_root =
-      host->AttachShadowRootInternal(ShadowRootType::kOpen);
-  shadow_root.setInnerHTML("<input type=range>");
-  Element* const sample = GetDocument().getElementById("sample");
+      host->AttachShadowRootForTesting(ShadowRootMode::kOpen);
+  shadow_root.SetInnerHTMLWithoutTrustedTypes("<input type=range>");
+  Element* const sample = GetDocument().getElementById(AtomicString("sample"));
   GetDocument().UpdateStyleAndLayout(DocumentUpdateReason::kTest);
-  const SelectionInDOMTree& selection_in_dom_tree =
-      SelectionInDOMTree::Builder()
+  const SelectionInDomTree& selection_in_dom_tree =
+      SelectionInDomTree::Builder()
           .Collapse(Position(sample->firstChild(), 2))
           .Build();
   Selection().SetSelection(selection_in_dom_tree,
@@ -771,26 +773,26 @@ TEST_F(GranularityStrategyTest, UpdateExtentWithNullPositionForDirectional) {
   // |visiblePositionForContentsPoint()|.
   Selection().MoveRangeSelectionExtent(gfx::Point(0, 0));
 
-  EXPECT_EQ(selection_in_dom_tree, Selection().GetSelectionInDOMTree());
+  EXPECT_EQ(selection_in_dom_tree, Selection().GetSelectionInDomTree());
 }
 
 // For http://crbug.com/974728
 TEST_F(GranularityStrategyTest, UpdateExtentWithNullNextWordBound) {
-  const SelectionInDOMTree selection = SetSelectionTextToBody(
+  const SelectionInDomTree selection = SetSelectionTextToBody(
       "<style>body { margin: 0; padding: 0; font: 10px monospace; }</style>"
       "<div contenteditable id=target></div>|def^");
   Selection().SetSelection(selection, SetSelectionOptions());
 
   // Move inside content editable
   ASSERT_EQ(
-      Position(*GetDocument().getElementById("target"), 0),
+      Position(*GetDocument().getElementById(AtomicString("target")), 0),
       CreateVisiblePosition(PositionForContentsPointRespectingEditingBoundary(
                                 gfx::Point(0, 0), &GetFrame()))
           .DeepEquivalent())
       << "We extend selection inside content editable.";
   Selection().MoveRangeSelectionExtent(gfx::Point(0, 0));
 
-  EXPECT_EQ(selection, Selection().GetSelectionInDOMTree());
+  EXPECT_EQ(selection, Selection().GetSelectionInDomTree());
 }
 
 }  // namespace blink

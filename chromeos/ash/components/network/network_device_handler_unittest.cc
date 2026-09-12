@@ -3,11 +3,13 @@
 // found in the LICENSE file.
 
 #include <memory>
+#include <optional>
 
 #include "ash/constants/ash_features.h"
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
@@ -24,7 +26,6 @@
 #include "chromeos/ash/components/network/network_handler_test_helper.h"
 #include "chromeos/ash/components/network/network_state_handler.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 #include "third_party/cros_system_api/dbus/shill/dbus-constants.h"
 
@@ -71,7 +72,7 @@ class NetworkDeviceHandlerTest : public testing::Test {
                            "cellular1");
     device_test->AddDevice(kDefaultWifiDevicePath, shill::kTypeWifi, "wifi1");
 
-    base::Value::List test_ip_configs;
+    base::ListValue test_ip_configs;
     test_ip_configs.Append("ip_config1");
     device_test->SetDeviceProperty(kDefaultWifiDevicePath,
                                    shill::kIPConfigsProperty,
@@ -107,18 +108,13 @@ class NetworkDeviceHandlerTest : public testing::Test {
   void SuccessCallback() { result_ = kResultSuccess; }
 
   void GetPropertiesCallback(const std::string& device_path,
-                             absl::optional<base::Value::Dict> properties) {
+                             std::optional<base::DictValue> properties) {
     if (!properties) {
       result_ = kResultFailure;
       return;
     }
     result_ = kResultSuccess;
     properties_ = std::move(properties.value());
-  }
-
-  void StringSuccessCallback(const std::string& result) {
-    VLOG(1) << "StringSuccessCallback: " << result;
-    result_ = result;
   }
 
   void GetDeviceProperties(const std::string& device_path,
@@ -143,11 +139,11 @@ class NetworkDeviceHandlerTest : public testing::Test {
  protected:
   base::test::SingleThreadTaskEnvironment task_environment_;
   std::string result_;
-  ShillDeviceClient* fake_device_client_ = nullptr;
+  raw_ptr<ShillDeviceClient, DanglingUntriaged> fake_device_client_ = nullptr;
   std::unique_ptr<NetworkDeviceHandler> network_device_handler_;
   std::unique_ptr<NetworkStateHandler> network_state_handler_;
   std::unique_ptr<NetworkHandlerTestHelper> network_handler_test_helper_;
-  base::Value::Dict properties_;
+  base::DictValue properties_;
 };
 
 TEST_F(NetworkDeviceHandlerTest, GetDeviceProperties) {
@@ -169,7 +165,7 @@ TEST_F(NetworkDeviceHandlerTest, SetDeviceProperty) {
   // GetDeviceProperties should return the value set by SetDeviceProperty.
   GetDeviceProperties(kDefaultCellularDevicePath, kResultSuccess);
 
-  absl::optional<int> interval =
+  std::optional<int> interval =
       properties_.FindInt(shill::kScanIntervalProperty);
   EXPECT_TRUE(interval.has_value());
   EXPECT_EQ(1, interval.value());
@@ -215,7 +211,7 @@ TEST_F(NetworkDeviceHandlerTest, CellularAllowRoaming) {
 
   GetDeviceProperties(kDefaultCellularDevicePath, kResultSuccess);
 
-  absl::optional<bool> policy_allow_roaming =
+  std::optional<bool> policy_allow_roaming =
       properties_.FindBool(shill::kCellularPolicyAllowRoamingProperty);
   EXPECT_TRUE(policy_allow_roaming.has_value());
   EXPECT_TRUE(policy_allow_roaming.value());

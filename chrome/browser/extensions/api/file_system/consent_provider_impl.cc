@@ -14,7 +14,7 @@
 #include "build/chromeos_buildflags.h"
 #include "chrome/browser/extensions/api/file_system/request_file_system_notification.h"
 #include "chrome/browser/profiles/profiles_state.h"
-#include "chrome/browser/ui/extensions/extensions_dialogs.h"
+#include "chrome/browser/ui/views/extensions/dialogs/request_file_system_dialog.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents.h"
 #include "extensions/browser/app_window/app_window.h"
@@ -24,10 +24,11 @@
 #include "extensions/common/api/file_system.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest_handlers/kiosk_mode_info.h"
+#include "ui/base/mojom/dialog_button.mojom.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "chrome/browser/ash/file_manager/app_id.h"
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chromeos/ash/components/file_manager/app_id.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace extensions {
 
@@ -36,15 +37,16 @@ namespace {
 // List of allowlisted component apps and extensions by their ids for
 // chrome.fileSystem.requestFileSystem.
 const char* const kRequestFileSystemComponentAllowlist[] = {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     file_manager::kFileManagerAppId, file_manager::kImageLoaderExtensionId,
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
     // TODO(henryhsu,b/110126438): Remove this extension id, and add it only
     // for tests.
     "pkplfbidichfdicaijlchgnapepdginl"  // Testing extensions.
 };
 
-ui::DialogButton g_auto_dialog_button_for_test = ui::DIALOG_BUTTON_NONE;
+ui::mojom::DialogButton g_auto_dialog_button_for_test =
+    ui::mojom::DialogButton::kNone;
 
 // Gets a WebContents instance handle for a current window of a platform app
 // with |app_id|. If not found, then returns NULL.
@@ -60,16 +62,16 @@ content::WebContents* GetWebContentsForAppId(Profile* profile,
 // |callback|.
 void DialogResultToConsent(
     file_system_api::ConsentProviderImpl::ConsentCallback callback,
-    ui::DialogButton button) {
+    ui::mojom::DialogButton button) {
   switch (button) {
-    case ui::DIALOG_BUTTON_NONE:
+    case ui::mojom::DialogButton::kNone:
       std::move(callback).Run(ConsentProvider::CONSENT_IMPOSSIBLE);
       break;
-    case ui::DIALOG_BUTTON_OK:
+    case ui::mojom::DialogButton::kOk:
       std::move(callback).Run(ConsentProvider::CONSENT_GRANTED);
       break;
     // The following is wired to both Cancel and Close callbacks.
-    case ui::DIALOG_BUTTON_CANCEL:
+    case ui::mojom::DialogButton::kCancel:
       std::move(callback).Run(ConsentProvider::CONSENT_REJECTED);
       break;
   }
@@ -158,7 +160,7 @@ ConsentProviderDelegate::~ConsentProviderDelegate() = default;
 
 // static
 void ConsentProviderDelegate::SetAutoDialogButtonForTest(
-    ui::DialogButton button) {
+    ui::mojom::DialogButton button) {
   g_auto_dialog_button_for_test = button;
 }
 
@@ -180,7 +182,8 @@ void ConsentProviderDelegate::ShowDialog(
   // Reject if |profile_| is gone.
   if (!profile_) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(std::move(callback), ui::DIALOG_BUTTON_NONE));
+        FROM_HERE,
+        base::BindOnce(std::move(callback), ui::mojom::DialogButton::kNone));
     return;
   }
 
@@ -196,18 +199,20 @@ void ConsentProviderDelegate::ShowDialog(
 
   // If there is no web contents handle, then the method is most probably
   // executed from a background page.
-  if (!web_contents)
+  if (!web_contents) {
     web_contents = GetWebContentsForAppId(profile_, extension_id);
+  }
 
   if (!web_contents) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(std::move(callback), ui::DIALOG_BUTTON_NONE));
+        FROM_HERE,
+        base::BindOnce(std::move(callback), ui::mojom::DialogButton::kNone));
     return;
   }
 
   // Short circuit the user consent dialog for tests. This is far from a pretty
   // code design.
-  if (g_auto_dialog_button_for_test != ui::DIALOG_BUTTON_NONE) {
+  if (g_auto_dialog_button_for_test != ui::mojom::DialogButton::kNone) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(std::move(callback),
                                   /*result=*/g_auto_dialog_button_for_test));
@@ -226,8 +231,9 @@ void ConsentProviderDelegate::ShowNotification(
     const std::string& volume_label,
     bool writable) {
   // Skip if |profile_| is gone.
-  if (!profile_)
+  if (!profile_) {
     return;
+  }
 
   ShowNotificationForAutoGrantedRequestFileSystem(profile_, extension_id,
                                                   extension_name, volume_id,
@@ -243,8 +249,9 @@ bool ConsentProviderDelegate::IsAutoLaunched(const Extension& extension) {
 bool ConsentProviderDelegate::IsAllowlistedComponent(
     const Extension& extension) {
   for (auto* allowlisted_id : kRequestFileSystemComponentAllowlist) {
-    if (extension.id().compare(allowlisted_id) == 0)
+    if (extension.id().compare(allowlisted_id) == 0) {
       return true;
+    }
   }
   return false;
 }

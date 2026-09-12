@@ -22,13 +22,19 @@ CSSIdentifierValue* CSSIdentifierValue::Create(CSSValueID value_id) {
 }
 
 String CSSIdentifierValue::CustomCSSText() const {
-  return AtomicString(getValueName(value_id_));
+  return GetCSSValueNameAs<AtomicString>(value_id_);
 }
 
 CSSIdentifierValue::CSSIdentifierValue(CSSValueID value_id)
     : CSSValue(kIdentifierClass), value_id_(value_id) {
   // TODO(sashab): Add a DCHECK_NE(valueID, CSSValueID::kInvalid) once no code
   // paths cause this to happen.
+}
+
+CSSIdentifierValue::CSSIdentifierValue(CSSValueID value_id, bool was_quirky)
+    : CSSValue(kIdentifierClass), value_id_(value_id) {
+  DCHECK_NE(value_id, CSSValueID::kInvalid);
+  was_quirky_ = was_quirky;
 }
 
 CSSIdentifierValue::CSSIdentifierValue(const Length& length)
@@ -43,8 +49,8 @@ CSSIdentifierValue::CSSIdentifierValue(const Length& length)
     case Length::kMaxContent:
       value_id_ = CSSValueID::kMaxContent;
       break;
-    case Length::kFillAvailable:
-      value_id_ = CSSValueID::kWebkitFillAvailable;
+    case Length::kStretch:
+      value_id_ = CSSValueID::kStretch;
       break;
     case Length::kFitContent:
       value_id_ = CSSValueID::kFitContent;
@@ -52,18 +58,14 @@ CSSIdentifierValue::CSSIdentifierValue(const Length& length)
     case Length::kContent:
       value_id_ = CSSValueID::kContent;
       break;
-    case Length::kExtendToZoom:
-      value_id_ = CSSValueID::kInternalExtendToZoom;
-      break;
     case Length::kPercent:
     case Length::kFixed:
     case Length::kCalculated:
-    case Length::kDeviceWidth:
-    case Length::kDeviceHeight:
+    case Length::kFlex:
     case Length::kMinIntrinsic:
     case Length::kNone:
+    case Length::kOverlapJoin:
       NOTREACHED();
-      break;
   }
 }
 

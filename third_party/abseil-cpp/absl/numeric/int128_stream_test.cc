@@ -12,12 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "absl/numeric/int128.h"
-
+#include <cstddef>
+#include <cstdint>
+#include <ios>
+#include <limits>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "gtest/gtest.h"
+#include "absl/numeric/int128.h"
+#include "absl/strings/str_cat.h"
 
 namespace {
 
@@ -87,6 +92,9 @@ constexpr std::ios::fmtflags kBase = std::ios::showbase;
 constexpr std::ios::fmtflags kPos = std::ios::showpos;
 
 void CheckUint128Case(const Uint128TestCase& test_case) {
+  if (test_case.flags == kDec && test_case.width == 0) {
+    EXPECT_EQ(absl::StrCat(test_case.value), test_case.expected);
+  }
   std::ostringstream os;
   os.flags(test_case.flags);
   os.width(test_case.width);
@@ -131,11 +139,11 @@ TEST(Uint128, OStreamValueTest) {
                     "2000000000000000000000000000000000000000000"});
   CheckUint128Case({absl::MakeUint128(0x8000000000000000, 0), kHex,
                     /*width = */ 0, "80000000000000000000000000000000"});
-  CheckUint128Case({absl::kuint128max, kDec, /*width = */ 0,
+  CheckUint128Case({absl::Uint128Max(), kDec, /*width = */ 0,
                     "340282366920938463463374607431768211455"});
-  CheckUint128Case({absl::kuint128max, kOct, /*width = */ 0,
+  CheckUint128Case({absl::Uint128Max(), kOct, /*width = */ 0,
                     "3777777777777777777777777777777777777777777"});
-  CheckUint128Case({absl::kuint128max, kHex, /*width = */ 0,
+  CheckUint128Case({absl::Uint128Max(), kHex, /*width = */ 0,
                     "ffffffffffffffffffffffffffffffff"});
 }
 
@@ -155,6 +163,9 @@ struct Int128TestCase {
 };
 
 void CheckInt128Case(const Int128TestCase& test_case) {
+  if (test_case.flags == kDec && test_case.width == 0) {
+    EXPECT_EQ(absl::StrCat(test_case.value), test_case.expected);
+  }
   std::ostringstream os;
   os.flags(test_case.flags);
   os.width(test_case.width);

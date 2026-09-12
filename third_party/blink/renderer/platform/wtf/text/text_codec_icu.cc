@@ -26,204 +26,247 @@
 
 #include "third_party/blink/renderer/platform/wtf/text/text_codec_icu.h"
 
-#include <memory>
-
 #include <unicode/ucnv.h>
 #include <unicode/ucnv_cb.h>
 
+#include <memory>
+
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/feature_list.h"
 #include "base/memory/ptr_util.h"
 #include "base/notreached.h"
+#include "base/types/to_address.h"
 #include "third_party/blink/public/common/features.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_view.h"
 #include "third_party/blink/renderer/platform/wtf/text/text_codec_cjk.h"
+#include "third_party/blink/renderer/platform/wtf/text/text_codec_utf16.h"
+#include "third_party/blink/renderer/platform/wtf/text/text_codec_utf8.h"
 #include "third_party/blink/renderer/platform/wtf/threading.h"
 
-namespace WTF {
+namespace blink {
 
 const size_t kConversionBufferSize = 16384;
 
-ICUConverterWrapper::~ICUConverterWrapper() {
+IcuConverterWrapper::~IcuConverterWrapper() {
   if (converter)
     ucnv_close(converter);
 }
 
-static UConverter*& CachedConverterICU() {
-  return WtfThreading().CachedConverterICU().converter;
+static UConverter*& CachedConverterIcu() {
+  return WtfThreading().CachedConverterIcu().converter;
 }
 
-std::unique_ptr<TextCodec> TextCodecICU::Create(const TextEncoding& encoding,
-                                                const void*) {
-  return base::WrapUnique(new TextCodecICU(encoding));
+std::unique_ptr<TextCodec> TextCodecIcu::Create(const TextEncoding& encoding) {
+  return base::WrapUnique(new TextCodecIcu(encoding));
 }
 
 namespace {
-bool IncludeAlias(const char* alias) {
+bool IncludeAlias(std::string_view alias) {
 #if !defined(USING_SYSTEM_ICU)
   // Chromium's build of ICU includes *-html aliases to manage the encoding
   // labels defined in the Encoding Standard, but these must not be
   // web-exposed.
-  const char* kSuffix = "-html";
-  const size_t kSuffixLength = 5;
-  size_t alias_length = strlen(alias);
-  if ((alias_length >= kSuffixLength) &&
-      !strcmp(alias + alias_length - kSuffixLength, kSuffix))
+  if (alias.ends_with("-html")) {
     return false;
+  }
 #endif
   return true;
 }
+
+const char* GetStandardName(const char* name) {
+  UErrorCode error = U_ZERO_ERROR;
+#if !defined(USING_SYSTEM_ICU)
+  const char* primary_standard = "HTML";
+  const char* secondary_standard = "MIME";
+#else
+  const char* primary_standard = "MIME";
+  const char* secondary_standard = "IANA";
+#endif
+  const char* standard_name =
+      ucnv_getStandardName(name, primary_standard, &error);
+  if (U_FAILURE(error) || !standard_name) {
+    error = U_ZERO_ERROR;
+    // Try IANA to pick up 'windows-12xx' and other names
+    // which are not preferred MIME names but are widely used.
+    standard_name = ucnv_getStandardName(name, secondary_standard, &error);
+    if (U_FAILURE(error) || !standard_name) {
+      return nullptr;
+    }
+  }
+
+#if defined(USING_SYSTEM_ICU)
+  // A number of these aliases are handled in Chrome's copy of ICU, but
+  // Chromium can be compiled with the system ICU.
+  //
+  // 1. Treat GB2312 encoding as GBK (its more modern superset), to match other
+  //    browsers.
+  // 2. On the Web, GB2312 is encoded as EUC-CN or HZ, while ICU provides a
+  //    native encoding for encoding GB_2312-80 and several others. So, we need
+  //    to override this behavior, too.
+  if (!strcmp(standard_name, "GB2312") ||
+      !strcmp(standard_name, "GB_2312-80")) {
+    return "GBK";
+    // Similarly, EUC-KR encodings all map to an extended version, but
+    // per HTML5, the canonical name still should be EUC-KR.
+  }
+  if (!strcmp(standard_name, "EUC-KR") || !strcmp(standard_name, "KSC_5601") ||
+      !strcmp(standard_name, "cp1363")) {
+    return "EUC-KR";
+    // And so on.
+  }
+  if (EqualIgnoringAsciiCase(standard_name, "iso-8859-9")) {
+    // This name is returned in different case by ICU 3.2 and 3.6.
+    return "windows-1254";
+  }
+  if (!strcmp(standard_name, "TIS-620")) {
+    return "windows-874";
+  }
+#endif
+  return standard_name;
+}
+
+bool ShouldSkipEncoding(StringView canonical_name) {
+#if defined(USING_SYSTEM_ICU)
+  // Explicitly do not support UTF-32. https://crbug.com/417850
+  // Bundled ICU does not return these names.
+  if (canonical_name == "UTF-32" || canonical_name == "UTF-32LE" ||
+      canonical_name == "UTF-32BE") {
+    return true;
+  }
+#endif
+
+  return TextCodecCjk::IsSupported(canonical_name) ||
+         TextCodecUtf16::IsSupported(canonical_name) ||
+         TextCodecUtf8::IsSupported(canonical_name);
+}
 }  // namespace
 
-void TextCodecICU::RegisterEncodingNames(EncodingNameRegistrar registrar) {
+void TextCodecIcu::RegisterEncodingNames(EncodingNameRegistrar registrar) {
   // We register Hebrew with logical ordering using a separate name.
   // Otherwise, this would share the same canonical name as the
   // visual ordering case, and then TextEncoding could not tell them
   // apart; ICU treats these names as synonyms.
-  registrar("ISO-8859-8-I", "ISO-8859-8-I");
+  AtomicString iso_8859_8_i("ISO-8859-8-I");
+  registrar("ISO-8859-8-I", iso_8859_8_i);
 
-  const bool is_text_codec_cjk_enabled =
-      base::FeatureList::IsEnabled(blink::features::kTextCodecCJKEnabled);
   int32_t num_encodings = ucnv_countAvailable();
   for (int32_t i = 0; i < num_encodings; ++i) {
     const char* name = ucnv_getAvailableName(i);
+    const char* standard_name = GetStandardName(name);
+    if (!standard_name) {
+      continue;
+    }
+
+    // Avoid codecs supported by other classes or explicitly unsupported by
+    // Blink.
+    AtomicString canonical_name(standard_name);
+    if (ShouldSkipEncoding(canonical_name)) {
+      continue;
+    }
+
+    registrar(standard_name, canonical_name);
+
     UErrorCode error = U_ZERO_ERROR;
-#if !defined(USING_SYSTEM_ICU)
-    const char* primary_standard = "HTML";
-    const char* secondary_standard = "MIME";
-#else
-    const char* primary_standard = "MIME";
-    const char* secondary_standard = "IANA";
-#endif
-    const char* standard_name =
-        ucnv_getStandardName(name, primary_standard, &error);
-    if (U_FAILURE(error) || !standard_name) {
-      error = U_ZERO_ERROR;
-      // Try IANA to pick up 'windows-12xx' and other names
-      // which are not preferred MIME names but are widely used.
-      standard_name = ucnv_getStandardName(name, secondary_standard, &error);
-      if (U_FAILURE(error) || !standard_name)
-        continue;
-    }
-
-#if defined(USING_SYSTEM_ICU)
-    // Explicitly do not support UTF-32. https://crbug.com/417850
-    // Bundled ICU does not return these names.
-    if (!strcmp(standard_name, "UTF-32") ||
-        !strcmp(standard_name, "UTF-32LE") ||
-        !strcmp(standard_name, "UTF-32BE")) {
-      continue;
-    }
-#endif
-    // Avoid codecs supported by `TextCodecCJK`.
-    if (is_text_codec_cjk_enabled && TextCodecCJK::IsSupported(standard_name)) {
-      continue;
-    }
-
-// A number of these aliases are handled in Chrome's copy of ICU, but
-// Chromium can be compiled with the system ICU.
-
-// 1. Treat GB2312 encoding as GBK (its more modern superset), to match other
-//    browsers.
-// 2. On the Web, GB2312 is encoded as EUC-CN or HZ, while ICU provides a native
-//    encoding for encoding GB_2312-80 and several others. So, we need to
-//    override this behavior, too.
-#if defined(USING_SYSTEM_ICU)
-    if (!strcmp(standard_name, "GB2312") ||
-        !strcmp(standard_name, "GB_2312-80")) {
-      standard_name = "GBK";
-    // Similarly, EUC-KR encodings all map to an extended version, but
-    // per HTML5, the canonical name still should be EUC-KR.
-    } else if (!strcmp(standard_name, "EUC-KR") ||
-               !strcmp(standard_name, "KSC_5601") ||
-               !strcmp(standard_name, "cp1363")) {
-      standard_name = "EUC-KR";
-    // And so on.
-    } else if (EqualIgnoringASCIICase(standard_name, "iso-8859-9")) {
-      // This name is returned in different case by ICU 3.2 and 3.6.
-      standard_name = "windows-1254";
-    } else if (!strcmp(standard_name, "TIS-620")) {
-      standard_name = "windows-874";
-    }
-#endif
-
-    // Avoid registering codecs registered by
-    // `TextCodecCJK::RegisterEncodingNames`.
-    if (!is_text_codec_cjk_enabled ||
-        !TextCodecCJK::IsSupported(standard_name)) {
-      registrar(standard_name, standard_name);
-    }
-
     uint16_t num_aliases = ucnv_countAliases(name, &error);
     DCHECK(U_SUCCESS(error));
-    if (U_SUCCESS(error))
+    if (U_SUCCESS(error)) {
       for (uint16_t j = 0; j < num_aliases; ++j) {
         error = U_ZERO_ERROR;
         const char* alias = ucnv_getAlias(name, j, &error);
         DCHECK(U_SUCCESS(error));
-        if (U_SUCCESS(error) && alias != standard_name && IncludeAlias(alias))
-          registrar(alias, standard_name);
+        if (U_SUCCESS(error) && alias != standard_name && IncludeAlias(alias)) {
+          registrar(alias, canonical_name);
+        }
       }
+    }
   }
 
   // These two entries have to be added here because ICU's converter table
   // cannot have both ISO-8859-8-I and ISO-8859-8.
-  registrar("csISO88598I", "ISO-8859-8-I");
-  registrar("logical", "ISO-8859-8-I");
+  registrar("csISO88598I", iso_8859_8_i);
+  registrar("logical", iso_8859_8_i);
 
 #if defined(USING_SYSTEM_ICU)
+  AtomicString x_mac_cyrillic("x-mac-cyrillic");
+  AtomicString big5("Big5");
+  AtomicString gbk("GBK");
+  AtomicString euc_kr("EUC-KR");
+  AtomicString iso_8859_2("ISO-8859-2");
+  AtomicString iso_8859_3("ISO-8859-3");
+  AtomicString iso_8859_4("ISO-8859-4");
+  AtomicString iso_8859_5("ISO-8859-5");
+  AtomicString iso_8859_6("ISO-8859-6");
+  AtomicString iso_8859_7("ISO-8859-7");
+  AtomicString iso_8859_8("ISO-8859-8");
+  AtomicString iso_8859_10("ISO-8859-10");
+  AtomicString iso_8859_13("ISO-8859-13");
+  AtomicString iso_8859_14("ISO-8859-14");
+  AtomicString iso_8859_15("ISO-8859-15");
+  AtomicString windows_874("windows-874");
+  AtomicString windows_1250("windows-1250");
+  AtomicString windows_1251("windows-1251");
+  AtomicString windows_1253("windows-1253");
+  AtomicString windows_1254("windows-1254");
+  AtomicString windows_1255("windows-1255");
+  AtomicString windows_1256("windows-1256");
+  AtomicString windows_1257("windows-1257");
+  AtomicString windows_1258("windows-1258");
+  AtomicString koi8_r("KOI8-R");
+
   // Additional alias for MacCyrillic not present in ICU.
-  registrar("maccyrillic", "x-mac-cyrillic");
+  registrar("maccyrillic", x_mac_cyrillic);
 
   // Additional aliases that historically were present in the encoding
   // table in WebKit on Macintosh that don't seem to be present in ICU.
   // Perhaps we can prove these are not used on the web and remove them.
   // Or perhaps we can get them added to ICU.
-  registrar("x-mac-roman", "macintosh");
-  registrar("x-mac-ukrainian", "x-mac-cyrillic");
-  registrar("cn-big5", "Big5");
-  registrar("x-x-big5", "Big5");
-  registrar("cn-gb", "GBK");
-  registrar("csgb231280", "GBK");
-  registrar("x-euc-cn", "GBK");
-  registrar("x-gbk", "GBK");
-  registrar("koi", "KOI8-R");
-  registrar("visual", "ISO-8859-8");
-  registrar("winarabic", "windows-1256");
-  registrar("winbaltic", "windows-1257");
-  registrar("wincyrillic", "windows-1251");
-  registrar("iso-8859-11", "windows-874");
-  registrar("iso8859-11", "windows-874");
-  registrar("dos-874", "windows-874");
-  registrar("wingreek", "windows-1253");
-  registrar("winhebrew", "windows-1255");
-  registrar("winlatin2", "windows-1250");
-  registrar("winturkish", "windows-1254");
-  registrar("winvietnamese", "windows-1258");
-  registrar("x-cp1250", "windows-1250");
-  registrar("x-cp1251", "windows-1251");
-  registrar("x-euc", "EUC-JP");
-  registrar("x-windows-949", "EUC-KR");
-  registrar("KSC5601", "EUC-KR");
-  registrar("x-uhc", "EUC-KR");
-  registrar("shift-jis", "Shift_JIS");
+  registrar("x-mac-roman", AtomicString("macintosh"));
+  registrar("x-mac-ukrainian", x_mac_cyrillic);
+  registrar("cn-big5", big5);
+  registrar("x-x-big5", big5);
+  registrar("cn-gb", gbk);
+  registrar("csgb231280", gbk);
+  registrar("x-euc-cn", gbk);
+  registrar("x-gbk", gbk);
+  registrar("koi", koi8_r);
+  registrar("visual", iso_8859_8);
+  registrar("winarabic", windows_1256);
+  registrar("winbaltic", windows_1257);
+  registrar("wincyrillic", windows_1251);
+  registrar("iso-8859-11", windows_874);
+  registrar("iso8859-11", windows_874);
+  registrar("dos-874", windows_874);
+  registrar("wingreek", windows_1253);
+  registrar("winhebrew", windows_1255);
+  registrar("winlatin2", windows_1250);
+  registrar("winturkish", windows_1254);
+  registrar("winvietnamese", windows_1258);
+  registrar("x-cp1250", windows_1250);
+  registrar("x-cp1251", windows_1251);
+  registrar("x-euc", AtomicString("EUC-JP"));
+  registrar("x-windows-949", euc_kr);
+  registrar("KSC5601", euc_kr);
+  registrar("x-uhc", euc_kr);
+  registrar("shift-jis", AtomicString("Shift_JIS"));
 
   // Alternative spelling of ISO encoding names.
-  registrar("ISO8859-1", "ISO-8859-1");
-  registrar("ISO8859-2", "ISO-8859-2");
-  registrar("ISO8859-3", "ISO-8859-3");
-  registrar("ISO8859-4", "ISO-8859-4");
-  registrar("ISO8859-5", "ISO-8859-5");
-  registrar("ISO8859-6", "ISO-8859-6");
-  registrar("ISO8859-7", "ISO-8859-7");
-  registrar("ISO8859-8", "ISO-8859-8");
-  registrar("ISO8859-8-I", "ISO-8859-8-I");
-  registrar("ISO8859-9", "ISO-8859-9");
-  registrar("ISO8859-10", "ISO-8859-10");
-  registrar("ISO8859-13", "ISO-8859-13");
-  registrar("ISO8859-14", "ISO-8859-14");
-  registrar("ISO8859-15", "ISO-8859-15");
+  registrar("ISO8859-1", AtomicString("ISO-8859-1"));
+  registrar("ISO8859-2", iso_8859_2);
+  registrar("ISO8859-3", iso_8859_3);
+  registrar("ISO8859-4", iso_8859_4);
+  registrar("ISO8859-5", iso_8859_5);
+  registrar("ISO8859-6", iso_8859_6);
+  registrar("ISO8859-7", iso_8859_7);
+  registrar("ISO8859-8", iso_8859_8);
+  registrar("ISO8859-8-I", iso_8859_8_i);
+  registrar("ISO8859-9", AtomicString("ISO-8859-9"));
+  registrar("ISO8859-10", iso_8859_10);
+  registrar("ISO8859-13", iso_8859_13);
+  registrar("ISO8859-14", iso_8859_14);
+  registrar("ISO8859-15", iso_8859_15);
   // No need to have an entry for ISO8859-16. ISO-8859-16 has just one label
   // listed in WHATWG Encoding Living Standard, http://encoding.spec.whatwg.org/
 
@@ -231,87 +274,75 @@ void TextCodecICU::RegisterEncodingNames(EncodingNameRegistrar registrar) {
   // and Firefox (as of Oct 2014), but not in the upstream ICU.
   // Three entries for windows-1252 need not be listed here because
   // TextCodecLatin1 registers them.
-  registrar("csiso58gb231280", "GBK");
-  registrar("csiso88596e", "ISO-8859-6");
-  registrar("csiso88596i", "ISO-8859-6");
-  registrar("csiso88598e", "ISO-8859-8");
-  registrar("gb_2312", "GBK");
-  registrar("iso88592", "ISO-8859-2");
-  registrar("iso88593", "ISO-8859-3");
-  registrar("iso88594", "ISO-8859-4");
-  registrar("iso88595", "ISO-8859-5");
-  registrar("iso88596", "ISO-8859-6");
-  registrar("iso88597", "ISO-8859-7");
-  registrar("iso88598", "ISO-8859-8");
-  registrar("iso88599", "windows-1254");
-  registrar("iso885910", "ISO-8859-10");
-  registrar("iso885911", "windows-874");
-  registrar("iso885913", "ISO-8859-13");
-  registrar("iso885914", "ISO-8859-14");
-  registrar("iso885915", "ISO-8859-15");
-  registrar("iso_8859-2", "ISO-8859-2");
-  registrar("iso_8859-3", "ISO-8859-3");
-  registrar("iso_8859-4", "ISO-8859-4");
-  registrar("iso_8859-5", "ISO-8859-5");
-  registrar("iso_8859-6", "ISO-8859-6");
-  registrar("iso_8859-7", "ISO-8859-7");
-  registrar("iso_8859-8", "ISO-8859-8");
-  registrar("iso_8859-9", "windows-1254");
-  registrar("iso_8859-15", "ISO-8859-15");
-  registrar("koi8_r", "KOI8-R");
-  registrar("x-cp1253", "windows-1253");
-  registrar("x-cp1254", "windows-1254");
-  registrar("x-cp1255", "windows-1255");
-  registrar("x-cp1256", "windows-1256");
-  registrar("x-cp1257", "windows-1257");
-  registrar("x-cp1258", "windows-1258");
+  registrar("csiso58gb231280", gbk);
+  registrar("csiso88596e", iso_8859_6);
+  registrar("csiso88596i", iso_8859_6);
+  registrar("csiso88598e", iso_8859_8);
+  registrar("gb_2312", gbk);
+  registrar("iso88592", iso_8859_2);
+  registrar("iso88593", iso_8859_3);
+  registrar("iso88594", iso_8859_4);
+  registrar("iso88595", iso_8859_5);
+  registrar("iso88596", iso_8859_6);
+  registrar("iso88597", iso_8859_7);
+  registrar("iso88598", iso_8859_8);
+  registrar("iso88599", windows_1254);
+  registrar("iso885910", iso_8859_10);
+  registrar("iso885911", windows_874);
+  registrar("iso885913", iso_8859_13);
+  registrar("iso885914", iso_8859_14);
+  registrar("iso885915", iso_8859_15);
+  registrar("iso_8859-2", iso_8859_2);
+  registrar("iso_8859-3", iso_8859_3);
+  registrar("iso_8859-4", iso_8859_4);
+  registrar("iso_8859-5", iso_8859_5);
+  registrar("iso_8859-6", iso_8859_6);
+  registrar("iso_8859-7", iso_8859_7);
+  registrar("iso_8859-8", iso_8859_8);
+  registrar("iso_8859-9", windows_1254);
+  registrar("iso_8859-15", iso_8859_15);
+  registrar("koi8_r", koi8_r);
+  registrar("x-cp1253", windows_1253);
+  registrar("x-cp1254", windows_1254);
+  registrar("x-cp1255", windows_1255);
+  registrar("x-cp1256", windows_1256);
+  registrar("x-cp1257", windows_1257);
+  registrar("x-cp1258", windows_1258);
 #endif
 }
 
-void TextCodecICU::RegisterCodecs(TextCodecRegistrar registrar) {
+void TextCodecIcu::RegisterCodecs(TextCodecRegistrar registrar) {
   // See comment above in registerEncodingNames.
-  registrar("ISO-8859-8-I", Create, nullptr);
+  registrar("ISO-8859-8-I", Create);
 
-  const bool is_text_codec_cjk_enabled =
-      base::FeatureList::IsEnabled(blink::features::kTextCodecCJKEnabled);
   int32_t num_encodings = ucnv_countAvailable();
   for (int32_t i = 0; i < num_encodings; ++i) {
     const char* name = ucnv_getAvailableName(i);
-    UErrorCode error = U_ZERO_ERROR;
-    const char* standard_name = ucnv_getStandardName(name, "MIME", &error);
-    if (!U_SUCCESS(error) || !standard_name) {
-      error = U_ZERO_ERROR;
-      standard_name = ucnv_getStandardName(name, "IANA", &error);
-      if (!U_SUCCESS(error) || !standard_name)
-        continue;
-    }
-#if defined(USING_SYSTEM_ICU)
-    // Explicitly do not support UTF-32. https://crbug.com/417850
-    // Bundled ICU does not return these names.
-    if (!strcmp(standard_name, "UTF-32") ||
-        !strcmp(standard_name, "UTF-32LE") ||
-        !strcmp(standard_name, "UTF-32BE")) {
+    const char* standard_name = GetStandardName(name);
+    if (!standard_name) {
       continue;
     }
-#endif
-    // Avoid codecs supported by `TextCodecCJK`.
-    if (is_text_codec_cjk_enabled && TextCodecCJK::IsSupported(standard_name)) {
+
+    // Avoid codecs supported by other classes or explicitly unsupported by
+    // Blink.
+    StringView canonical_name(standard_name);
+    if (ShouldSkipEncoding(canonical_name)) {
       continue;
     }
-    registrar(standard_name, Create, nullptr);
+    registrar(standard_name, Create);
   }
 }
 
-TextCodecICU::TextCodecICU(const TextEncoding& encoding)
+TextCodecIcu::TextCodecIcu(const TextEncoding& encoding)
     : encoding_(encoding) {}
 
-TextCodecICU::~TextCodecICU() {
-  ReleaseICUConverter();
+TextCodecIcu::~TextCodecIcu() {
+  ReleaseIcuConverter();
 }
 
-void TextCodecICU::ReleaseICUConverter() const {
+void TextCodecIcu::ReleaseIcuConverter() const {
   if (converter_icu_) {
-    UConverter*& cached_converter = CachedConverterICU();
+    UConverter*& cached_converter = CachedConverterIcu();
     if (cached_converter)
       ucnv_close(cached_converter);
     cached_converter = converter_icu_;
@@ -319,18 +350,18 @@ void TextCodecICU::ReleaseICUConverter() const {
   }
 }
 
-void TextCodecICU::CreateICUConverter() const {
+void TextCodecIcu::CreateIcuConverter() const {
   DCHECK(!converter_icu_);
 
 #if defined(USING_SYSTEM_ICU)
-  const char* name = encoding_.GetName();
+  const AtomicString& name = encoding_.GetName();
   needs_gbk_fallbacks_ =
       name[0] == 'G' && name[1] == 'B' && name[2] == 'K' && !name[3];
 #endif
 
   UErrorCode err;
 
-  UConverter*& cached_converter = CachedConverterICU();
+  UConverter*& cached_converter = CachedConverterIcu();
   if (cached_converter) {
     err = U_ZERO_ERROR;
     const char* cached_name = ucnv_getName(cached_converter, &err);
@@ -342,25 +373,29 @@ void TextCodecICU::CreateICUConverter() const {
   }
 
   err = U_ZERO_ERROR;
-  converter_icu_ = ucnv_open(encoding_.GetName(), &err);
+  converter_icu_ = ucnv_open(encoding_.GetName().Utf8().c_str(), &err);
   DLOG_IF(ERROR, err == U_AMBIGUOUS_ALIAS_WARNING)
       << "ICU ambiguous alias warning for encoding: " << encoding_.GetName();
   if (converter_icu_)
     ucnv_setFallback(converter_icu_, true);
 }
 
-int TextCodecICU::DecodeToBuffer(UChar* target,
-                                 UChar* target_limit,
-                                 const char*& source,
-                                 const char* source_limit,
-                                 int32_t* offsets,
-                                 bool flush,
-                                 UErrorCode& err) {
-  UChar* target_start = target;
+size_t TextCodecIcu::DecodeToBuffer(base::span<UChar> target,
+                                    base::span<const char>& source,
+                                    bool flush,
+                                    UErrorCode& err) {
+  auto* source_ptr = source.data();
+  auto* target_ptr = target.data();
   err = U_ZERO_ERROR;
-  ucnv_toUnicode(converter_icu_, &target, target_limit, &source, source_limit,
-                 offsets, flush, &err);
-  return static_cast<int>(target - target_start);
+  // SAFETY: unsafe function call to c function ucnv_toUnicode,
+  // it's safe when `ucnv_toUnicode` stays in the span.
+  UNSAFE_BUFFERS({
+    ucnv_toUnicode(converter_icu_, &target_ptr, base::to_address(target.end()),
+                   &source_ptr, base::to_address(source.end()), nullptr, flush,
+                   &err);
+  });
+  source = source.subspan(static_cast<size_t>(source_ptr - source.data()));
+  return static_cast<size_t>(target_ptr - target.data());
 }
 
 class ErrorCallbackSetter final {
@@ -396,14 +431,13 @@ class ErrorCallbackSetter final {
   UConverterToUCallback saved_action_;
 };
 
-String TextCodecICU::Decode(const char* bytes,
-                            wtf_size_t length,
+String TextCodecIcu::Decode(base::span<const uint8_t> data,
                             FlushBehavior flush,
                             bool stop_on_error,
                             bool& saw_error) {
   // Get a converter for the passed-in encoding.
   if (!converter_icu_) {
-    CreateICUConverter();
+    CreateIcuConverter();
     DCHECK(converter_icu_);
     if (!converter_icu_) {
       DLOG(ERROR)
@@ -417,26 +451,22 @@ String TextCodecICU::Decode(const char* bytes,
   StringBuilder result;
 
   UChar buffer[kConversionBufferSize];
-  UChar* buffer_limit = buffer + kConversionBufferSize;
-  const char* source = reinterpret_cast<const char*>(bytes);
-  const char* source_limit = source + length;
-  int32_t* offsets = nullptr;
+  auto buffer_span = base::span(buffer);
+  auto source_span = base::as_chars(data);
   UErrorCode err = U_ZERO_ERROR;
 
   do {
-    int uchars_decoded =
-        DecodeToBuffer(buffer, buffer_limit, source, source_limit, offsets,
-                       flush != FlushBehavior::kDoNotFlush, err);
-    result.Append(buffer, uchars_decoded);
+    size_t uchars_decoded = DecodeToBuffer(
+        buffer_span, source_span, flush != FlushBehavior::kDoNotFlush, err);
+    result.Append(buffer_span.first(uchars_decoded));
   } while (err == U_BUFFER_OVERFLOW_ERROR);
 
   if (U_FAILURE(err)) {
     // flush the converter so it can be reused, and not be bothered by this
     // error.
     do {
-      DecodeToBuffer(buffer, buffer_limit, source, source_limit, offsets, true,
-                     err);
-    } while (source < source_limit);
+      DecodeToBuffer(buffer_span, source_span, /*flush=*/true, err);
+    } while (!source_span.empty());
     saw_error = true;
   }
 
@@ -444,21 +474,22 @@ String TextCodecICU::Decode(const char* bytes,
   // Chrome's copy of ICU does not have the issue described below.
   return result.ToString();
 #else
-  String resultString = result.ToString();
+  String result_string = result.ToString();
 
   // <http://bugs.webkit.org/show_bug.cgi?id=17014>
   // Simplified Chinese pages use the code A3A0 to mean "full-width space", but
   // ICU decodes it as U+E5E5.
-  if (!strcmp(encoding_.GetName(), "GBK")) {
-    if (EqualIgnoringASCIICase(encoding_.GetName(), "gb18030"))
-      resultString.Replace(0xE5E5, kIdeographicSpaceCharacter);
+  if (encoding_.GetName() != "GBK") {
+    if (EqualIgnoringAsciiCase(encoding_.GetName(), "gb18030")) {
+      result_string.Replace(0xE5E5, uchar::kIdeographicSpace);
+    }
     // Make GBK compliant to the encoding spec and align with GB18030
-    resultString.Replace(0x01F9, 0xE7C8);
+    result_string.Replace(0x01F9, 0xE7C8);
     // FIXME: Once https://www.w3.org/Bugs/Public/show_bug.cgi?id=28740#c3
     // is resolved, add U+1E3F => 0xE7C7.
   }
 
-  return resultString;
+  return result_string;
 #endif
 }
 
@@ -489,13 +520,11 @@ static void FormatEscapedEntityCallback(const void* context,
   if (reason == UCNV_UNASSIGNED) {
     *err = U_ZERO_ERROR;
 
-    UnencodableReplacementArray entity;
-    uint32_t entity_len =
-        TextCodec::GetUnencodableReplacement(code_point, handling, entity);
-    String entity_u(entity, entity_len);
+    String entity_u(TextCodec::GetUnencodableReplacement(code_point, handling));
     entity_u.Ensure16Bit();
     const UChar* entity_u_pointers[2] = {
-        entity_u.Characters16(), entity_u.Characters16() + entity_u.length(),
+        entity_u.Span16().data(),
+        base::to_address(entity_u.Span16().end()),
     };
     ucnv_cbFromUWriteUChars(from_u_args, entity_u_pointers,
                             entity_u_pointers[1], 0, err);
@@ -514,7 +543,7 @@ static void NumericEntityCallback(const void* context,
                                   UErrorCode* err) {
   FormatEscapedEntityCallback(context, from_u_args, code_units, length,
                               code_point, reason, err,
-                              kEntitiesForUnencodables);
+                              UnencodableHandling::kXmlCharRef);
 }
 
 // Invalid character handler when writing escaped entities in CSS encoding for
@@ -529,7 +558,7 @@ static void CssEscapedEntityCallback(const void* context,
                                      UErrorCode* err) {
   FormatEscapedEntityCallback(context, from_u_args, code_units, length,
                               code_point, reason, err,
-                              kCSSEncodedEntitiesForUnencodables);
+                              UnencodableHandling::kCssEscape);
 }
 
 // Invalid character handler when writing escaped entities in HTML/XML encoding
@@ -544,7 +573,7 @@ static void UrlEscapedEntityCallback(const void* context,
                                      UErrorCode* err) {
   FormatEscapedEntityCallback(context, from_u_args, code_units, length,
                               code_point, reason, err,
-                              kURLEncodedEntitiesForUnencodables);
+                              UnencodableHandling::kUrlEncodedCharRef);
 }
 
 #if defined(USING_SYSTEM_ICU)
@@ -644,43 +673,12 @@ static void NotReachedEntityCallback(const void* context,
   NOTREACHED();
 }
 
-class TextCodecInput final {
-  STACK_ALLOCATED();
-
- public:
-  TextCodecInput(const TextEncoding& encoding,
-                 const UChar* characters,
-                 wtf_size_t length)
-      : begin_(characters), end_(characters + length) {}
-
-  TextCodecInput(const TextEncoding& encoding,
-                 const LChar* characters,
-                 wtf_size_t length) {
-    buffer_.ReserveInitialCapacity(length);
-    for (wtf_size_t i = 0; i < length; ++i)
-      buffer_.push_back(characters[i]);
-    begin_ = buffer_.data();
-    end_ = begin_ + buffer_.size();
-  }
-
-  const UChar* begin() const { return begin_; }
-  const UChar* end() const { return end_; }
-
- private:
-  const UChar* begin_;
-  const UChar* end_;
-  Vector<UChar> buffer_;
-};
-
-std::string TextCodecICU::EncodeInternal(const TextCodecInput& input,
+std::string TextCodecIcu::EncodeInternal(base::span<const UChar> input,
                                          UnencodableHandling handling) {
-  const UChar* source = input.begin();
-  const UChar* end = input.end();
-
   UErrorCode err = U_ZERO_ERROR;
 
   switch (handling) {
-    case kEntitiesForUnencodables:
+    case UnencodableHandling::kXmlCharRef:
 #if !defined(USING_SYSTEM_ICU)
       ucnv_setFromUCallBack(converter_icu_, NumericEntityCallback, nullptr,
                             nullptr, nullptr, &err);
@@ -691,7 +689,7 @@ std::string TextCodecICU::EncodeInternal(const TextCodecInput& input,
           0, 0, &err);
 #endif
       break;
-    case kURLEncodedEntitiesForUnencodables:
+    case UnencodableHandling::kUrlEncodedCharRef:
 #if !defined(USING_SYSTEM_ICU)
       ucnv_setFromUCallBack(converter_icu_, UrlEscapedEntityCallback, nullptr,
                             nullptr, nullptr, &err);
@@ -702,7 +700,7 @@ std::string TextCodecICU::EncodeInternal(const TextCodecInput& input,
                             0, 0, 0, &err);
 #endif
       break;
-    case kCSSEncodedEntitiesForUnencodables:
+    case UnencodableHandling::kCssEscape:
 #if !defined(USING_SYSTEM_ICU)
       ucnv_setFromUCallBack(converter_icu_, CssEscapedEntityCallback, nullptr,
                             nullptr, nullptr, &err);
@@ -713,10 +711,10 @@ std::string TextCodecICU::EncodeInternal(const TextCodecInput& input,
                             0, 0, 0, &err);
 #endif
       break;
-    case kNoUnencodables:
-      DCHECK(encoding_ == UTF16BigEndianEncoding() ||
-             encoding_ == UTF16LittleEndianEncoding() ||
-             encoding_ == UTF8Encoding());
+    case UnencodableHandling::kNone:
+      DCHECK(encoding_ == Utf16BigEndianEncoding() ||
+             encoding_ == Utf16LittleEndianEncoding() ||
+             encoding_ == Utf8Encoding());
       ucnv_setFromUCallBack(converter_icu_, NotReachedEntityCallback, nullptr,
                             nullptr, nullptr, &err);
       break;
@@ -726,50 +724,52 @@ std::string TextCodecICU::EncodeInternal(const TextCodecInput& input,
   if (U_FAILURE(err))
     return std::string();
 
+  const UChar* source = input.data();
+  const UChar* end = base::to_address(input.end());
   Vector<char> result;
-  wtf_size_t size = 0;
   do {
-    char buffer[kConversionBufferSize];
-    char* target = buffer;
-    char* target_limit = target + kConversionBufferSize;
+    std::array<char, kConversionBufferSize> buffer;
+    char* target = buffer.data();
+    char* target_limit = base::to_address(buffer.end());
     err = U_ZERO_ERROR;
     ucnv_fromUnicode(converter_icu_, &target, target_limit, &source, end,
                      nullptr, true, &err);
-    wtf_size_t count = static_cast<wtf_size_t>(target - buffer);
-    result.Grow(size + count);
-    memcpy(result.data() + size, buffer, count);
-    size += count;
+    wtf_size_t count = static_cast<wtf_size_t>(target - buffer.data());
+    result.append_range(base::span(buffer).first(count));
   } while (err == U_BUFFER_OVERFLOW_ERROR);
 
-  return std::string(result.data(), size);
+  return std::string(result.data(), result.size());
 }
 
-template <typename CharType>
-std::string TextCodecICU::EncodeCommon(const CharType* characters,
-                                       wtf_size_t length,
+std::string TextCodecIcu::EncodeCommon(base::span<const UChar> characters,
                                        UnencodableHandling handling) {
-  if (!length)
+  if (characters.empty()) {
     return "";
+  }
 
-  if (!converter_icu_)
-    CreateICUConverter();
-  if (!converter_icu_)
+  if (!converter_icu_) {
+    CreateIcuConverter();
+  }
+  if (!converter_icu_) {
     return std::string();
+  }
 
-  TextCodecInput input(encoding_, characters, length);
-  return EncodeInternal(input, handling);
+  return EncodeInternal(characters, handling);
 }
 
-std::string TextCodecICU::Encode(const UChar* characters,
-                                 wtf_size_t length,
+std::string TextCodecIcu::Encode(base::span<const UChar> characters,
                                  UnencodableHandling handling) {
-  return EncodeCommon(characters, length, handling);
+  return EncodeCommon(characters, handling);
 }
 
-std::string TextCodecICU::Encode(const LChar* characters,
-                                 wtf_size_t length,
+std::string TextCodecIcu::Encode(base::span<const LChar> characters,
                                  UnencodableHandling handling) {
-  return EncodeCommon(characters, length, handling);
+  Vector<UChar> buffer;
+  buffer.ReserveInitialCapacity(
+      base::checked_cast<wtf_size_t>(characters.size()));
+  buffer.append_range(characters);
+  base::span<const UChar> span(buffer);
+  return EncodeCommon(span, handling);
 }
 
-}  // namespace WTF
+}  // namespace blink

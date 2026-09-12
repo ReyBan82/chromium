@@ -4,10 +4,11 @@
 
 import 'chrome://resources/mojo/url/mojom/origin.mojom-webui.js';
 
-import {assert, assertNotReached} from 'chrome://resources/js/assert_ts.js';
+import {assert, assertNotReached} from 'chrome://resources/js/assert.js';
 import {PromiseResolver} from 'chrome://resources/js/promise_resolver.js';
 
-import {MediaEngagementConfig, MediaEngagementScoreDetails, MediaEngagementScoreDetailsProvider, MediaEngagementScoreDetailsProviderRemote} from './media_engagement_score_details.mojom-webui.js';
+import type {MediaEngagementConfig, MediaEngagementScoreDetails, MediaEngagementScoreDetailsProviderRemote} from './media_engagement_score_details.mojom-webui.js';
+import {MediaEngagementScoreDetailsProvider} from './media_engagement_score_details.mojom-webui.js';
 
 // Allow a function to be provided by tests, which will be called when
 // the page has been populated with media engagement details.
@@ -21,7 +22,7 @@ let detailsProvider: MediaEngagementScoreDetailsProviderRemote|null = null;
 let info: MediaEngagementScoreDetails[]|null = null;
 let engagementTableBody: HTMLElement|null = null;
 let sortReverse: boolean = true;
-let sortKey: string = 'totalScore';
+let sortKey: keyof MediaEngagementScoreDetails = 'totalScore';
 let configTableBody: HTMLElement|null = null;
 let showNoPlaybacks: boolean = false;
 
@@ -33,21 +34,21 @@ function createRow(rowInfo: MediaEngagementScoreDetails): DocumentFragment {
   assert(template);
   const td = template.content.querySelectorAll('td');
 
-  td[0]!.textContent = rowInfo.origin.scheme + '://' + rowInfo.origin.host;
+  td[0].textContent = rowInfo.origin.scheme + '://' + rowInfo.origin.host;
   if (rowInfo.origin.scheme === 'http' && rowInfo.origin.port !== 80) {
-    td[0]!.textContent += ':' + rowInfo.origin.port;
+    td[0].textContent += ':' + rowInfo.origin.port;
   } else if (rowInfo.origin.scheme === 'https' && rowInfo.origin.port !== 443) {
-    td[0]!.textContent += ':' + rowInfo.origin.port;
+    td[0].textContent += ':' + rowInfo.origin.port;
   }
 
-  td[1]!.textContent = rowInfo.visits.toString();
-  td[2]!.textContent = rowInfo.mediaPlaybacks.toString();
-  td[3]!.textContent = rowInfo.lastMediaPlaybackTime ?
+  td[1].textContent = rowInfo.visits.toString();
+  td[2].textContent = rowInfo.mediaPlaybacks.toString();
+  td[3].textContent = rowInfo.lastMediaPlaybackTime ?
       new Date(rowInfo.lastMediaPlaybackTime).toISOString() :
       '';
-  td[4]!.textContent = rowInfo.isHigh ? 'Yes' : 'No';
-  td[5]!.textContent = rowInfo.totalScore ? rowInfo.totalScore.toFixed(2) : '0';
-  td[6]!.querySelectorAll<HTMLElement>('.engagement-bar')[0]!.style.width =
+  td[4].textContent = rowInfo.isHigh ? 'Yes' : 'No';
+  td[5].textContent = rowInfo.totalScore ? rowInfo.totalScore.toFixed(2) : '0';
+  td[6].querySelectorAll<HTMLElement>('.engagement-bar')[0].style.width =
       (rowInfo.totalScore * 50) + 'px';
   return document.importNode(template.content, true);
 }
@@ -80,7 +81,7 @@ function sortInfo() {
  *     |b|, a positive number otherwise.
  */
 function compareTableItem(
-    sortKey: string, a: MediaEngagementScoreDetails,
+    sortKey: keyof MediaEngagementScoreDetails, a: MediaEngagementScoreDetails,
     b: MediaEngagementScoreDetails): number {
   // Compare the hosts of the origin ignoring schemes.
   if (sortKey === 'origin') {
@@ -89,11 +90,9 @@ function compareTableItem(
 
   if (sortKey === 'visits' || sortKey === 'mediaPlaybacks' ||
       sortKey === 'lastMediaPlaybackTime' || sortKey === 'totalScore' ||
-      sortKey === 'audiblePlaybacks' || sortKey === 'significantPlaybacks' ||
-      sortKey === 'highScoreChanges' || sortKey === 'mediaElementPlaybacks' ||
-      sortKey === 'audioContextPlaybacks' || sortKey === 'isHigh') {
-    const val1 = (a as {[key: string]: any})[sortKey];
-    const val2 = (b as {[key: string]: any})[sortKey];
+      sortKey === 'isHigh') {
+    const val1 = a[sortKey];
+    const val2 = b[sortKey];
 
     return (val1 as number) - (val2 as number);
   }
@@ -110,8 +109,8 @@ function createConfigRow(name: string, value: number|string): DocumentFragment {
   const template = document.querySelector<HTMLTemplateElement>('#configrow');
   assert(template);
   const td = template.content.querySelectorAll('td');
-  td[0]!.textContent = name;
-  td[1]!.textContent = value.toString();
+  td[0].textContent = name;
+  td[1].textContent = value.toString();
   return document.importNode(template.content, true);
 }
 
@@ -208,14 +207,14 @@ document.addEventListener('DOMContentLoaded', function() {
   assert(engagementTableHeader);
   const headers = engagementTableHeader.children;
   for (let i = 0; i < headers.length; i++) {
-    headers[i]!.addEventListener('click', (e) => {
+    headers[i].addEventListener('click', (e) => {
       const target = e.target as HTMLElement;
       const newSortKey = target.getAttribute('sort-key');
       if (sortKey === newSortKey) {
         sortReverse = !sortReverse;
       } else {
         assert(newSortKey);
-        sortKey = newSortKey;
+        sortKey = newSortKey as keyof MediaEngagementScoreDetails;
         sortReverse = false;
       }
       const oldSortColumn = document.querySelector<HTMLElement>('.sort-column');

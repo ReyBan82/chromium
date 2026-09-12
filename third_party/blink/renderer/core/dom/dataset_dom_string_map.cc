@@ -34,13 +34,15 @@
 namespace blink {
 
 static bool IsValidAttributeName(const String& name) {
-  if (!name.StartsWith("data-"))
+  if (!name.starts_with("data-")) {
     return false;
+  }
 
   unsigned length = name.length();
   for (unsigned i = 5; i < length; ++i) {
-    if (IsASCIIUpper(name[i]))
+    if (IsAsciiUpper(name[i])) {
       return false;
+    }
   }
 
   return true;
@@ -55,8 +57,8 @@ static String ConvertAttributeNameToPropertyName(const String& name) {
     if (character != '-') {
       string_builder.Append(character);
     } else {
-      if ((i + 1 < length) && IsASCIILower(name[i + 1])) {
-        string_builder.Append(ToASCIIUpper(name[i + 1]));
+      if ((i + 1 < length) && IsAsciiLower(name[i + 1])) {
+        string_builder.Append(ToAsciiUpper(name[i + 1]));
         ++i;
       } else {
         string_builder.Append(character);
@@ -68,62 +70,62 @@ static String ConvertAttributeNameToPropertyName(const String& name) {
 }
 
 template <typename CharType1, typename CharType2>
-static bool PropertyNameMatchesAttributeName(const CharType1* property_name,
-                                             const CharType2* attribute_name,
-                                             unsigned property_length,
-                                             unsigned attribute_length) {
-  unsigned a = 5;
-  unsigned p = 0;
+static bool PropertyNameMatchesAttributeName(
+    base::span<const CharType1> property_name,
+    base::span<const CharType2> attribute_name) {
+  size_t a = 5;
+  size_t p = 0;
   bool word_boundary = false;
-  while (a < attribute_length && p < property_length) {
-    if (attribute_name[a] == '-' && a + 1 < attribute_length &&
-        IsASCIILower(attribute_name[a + 1])) {
+  while (a < attribute_name.size() && p < property_name.size()) {
+    const CharType2 current_attribute_char = attribute_name[a];
+    if (current_attribute_char == '-' && a + 1 < attribute_name.size() &&
+        IsAsciiLower(attribute_name[a + 1])) {
       word_boundary = true;
     } else {
-      if ((word_boundary ? ToASCIIUpper(attribute_name[a])
-                         : attribute_name[a]) != property_name[p])
+      const CharType2 current_attribute_char_to_compare =
+          word_boundary ? ToAsciiUpper(current_attribute_char)
+                        : current_attribute_char;
+      if (current_attribute_char_to_compare != property_name[p]) {
         return false;
+      }
       p++;
       word_boundary = false;
     }
     a++;
   }
 
-  return (a == attribute_length && p == property_length);
+  return (a == attribute_name.size() && p == property_name.size());
 }
 
 static bool PropertyNameMatchesAttributeName(const String& property_name,
                                              const String& attribute_name) {
-  if (!attribute_name.StartsWith("data-"))
+  if (!attribute_name.starts_with("data-")) {
     return false;
-
-  unsigned property_length = property_name.length();
-  unsigned attribute_length = attribute_name.length();
-
-  if (property_name.Is8Bit()) {
-    if (attribute_name.Is8Bit())
-      return PropertyNameMatchesAttributeName(
-          property_name.Characters8(), attribute_name.Characters8(),
-          property_length, attribute_length);
-    return PropertyNameMatchesAttributeName(property_name.Characters8(),
-                                            attribute_name.Characters16(),
-                                            property_length, attribute_length);
   }
 
-  if (attribute_name.Is8Bit())
-    return PropertyNameMatchesAttributeName(property_name.Characters16(),
-                                            attribute_name.Characters8(),
-                                            property_length, attribute_length);
-  return PropertyNameMatchesAttributeName(property_name.Characters16(),
-                                          attribute_name.Characters16(),
-                                          property_length, attribute_length);
+  if (property_name.Is8Bit()) {
+    if (attribute_name.Is8Bit()) {
+      return PropertyNameMatchesAttributeName(property_name.Span8(),
+                                              attribute_name.Span8());
+    }
+    return PropertyNameMatchesAttributeName(property_name.Span8(),
+                                            attribute_name.Span16());
+  }
+
+  if (attribute_name.Is8Bit()) {
+    return PropertyNameMatchesAttributeName(property_name.Span16(),
+                                            attribute_name.Span8());
+  }
+  return PropertyNameMatchesAttributeName(property_name.Span16(),
+                                          attribute_name.Span16());
 }
 
 static bool IsValidPropertyName(const String& name) {
   unsigned length = name.length();
   for (unsigned i = 0; i < length; ++i) {
-    if (name[i] == '-' && (i + 1 < length) && IsASCIILower(name[i + 1]))
+    if (name[i] == '-' && (i + 1 < length) && IsAsciiLower(name[i + 1])) {
       return false;
+    }
   }
   return true;
 }
@@ -137,9 +139,9 @@ static AtomicString ConvertPropertyNameToAttributeName(const String& name) {
   unsigned length = name.length();
   for (unsigned i = 0; i < length; ++i) {
     UChar character = name[i];
-    if (IsASCIIUpper(character)) {
+    if (IsAsciiUpper(character)) {
       builder.Append('-');
-      builder.Append(ToASCIILower(character));
+      builder.Append(ToAsciiLower(character));
     } else {
       builder.Append(character);
     }
@@ -181,7 +183,7 @@ void DatasetDOMStringMap::SetItem(const String& name,
   if (!IsValidPropertyName(name)) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kSyntaxError,
-        "'" + name + "' is not a valid property name.");
+        StrCat({"'", name, "' is not a valid property name."}));
     return;
   }
 
@@ -202,7 +204,7 @@ bool DatasetDOMStringMap::DeleteItem(const String& name) {
 
 void DatasetDOMStringMap::Trace(Visitor* visitor) const {
   visitor->Trace(element_);
-  ElementRareDataField::Trace(visitor);
+  NodeRareDataField::Trace(visitor);
   DOMStringMap::Trace(visitor);
 }
 

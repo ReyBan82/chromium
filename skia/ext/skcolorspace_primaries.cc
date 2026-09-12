@@ -2,11 +2,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "skia/ext/skcolorspace_primaries.h"
 
+#include <array>
 #include <iomanip>
 #include <sstream>
 
+#include "skia/ext/geometry.h"
+#include "third_party/skia/include/core/SkColorSpace.h"
+#include "third_party/skia/include/core/SkPoint.h"
+
+#if !defined(SKIA_COLOR_SPACE_PRIMARIES_OPERATOR_EQUAL)
 bool operator==(const SkColorSpacePrimaries& a,
                 const SkColorSpacePrimaries& b) {
   return a.fRX == b.fRX && a.fRY == b.fRY && a.fGX == b.fGX && a.fGY == b.fGY &&
@@ -17,26 +24,29 @@ bool operator!=(const SkColorSpacePrimaries& a,
                 const SkColorSpacePrimaries& b) {
   return !(a == b);
 }
+#endif
 
 namespace skia {
 
 std::string SkColorSpacePrimariesToString(
     const SkColorSpacePrimaries& primaries) {
-  if (primaries == SkNamedPrimariesExt::kInvalid)
+  if (primaries == SkNamedPrimariesExt::kInvalid) {
     return "invalid";
+  }
 
   std::stringstream ss;
   ss << std::fixed << std::setprecision(4);
   ss << "{";
-  if (primaries == SkNamedPrimariesExt::kSRGB)
+  if (primaries == SkNamedPrimariesExt::kSRGB) {
     ss << "name:'srgb', ";
-  else if (primaries == SkNamedPrimariesExt::kP3)
+  } else if (primaries == SkNamedPrimariesExt::kP3) {
     ss << "name:'p3', ";
-  else if (primaries == SkNamedPrimariesExt::kRec2020)
+  } else if (primaries == SkNamedPrimaries::kRec2020) {
     ss << "name:'rec2020', ";
+  }
   ss << "r:[" << primaries.fRX << ", " << primaries.fRY << "], ";
   ss << "g:[" << primaries.fGX << ", " << primaries.fGY << "], ";
-  ss << "b:[" << primaries.fBX << ", " << primaries.fRY << "], ";
+  ss << "b:[" << primaries.fBX << ", " << primaries.fBY << "], ";
   ss << "w:[" << primaries.fWX << ", " << primaries.fWY << "]";
   ss << "}";
   return ss.str();
@@ -66,6 +76,35 @@ SkColorSpacePrimaries GetD65PrimariesFromToXYZD50Matrix(
   primaries.fWX = kD65_X;
   primaries.fWY = kD65_Y;
   return primaries;
+}
+
+float FractionGamutCovered(const SkColorSpacePrimaries& a,
+                           const SkColorSpacePrimaries& b) {
+  std::array<SkPoint, 3> a_pts = {
+      SkPoint::Make(a.fRX, a.fRY),
+      SkPoint::Make(a.fGX, a.fGY),
+      SkPoint::Make(a.fBX, a.fBY),
+  };
+  std::array<SkPoint, 3> b_pts = {
+      SkPoint::Make(b.fRX, b.fRY),
+      SkPoint::Make(b.fGX, b.fGY),
+      SkPoint::Make(b.fBX, b.fBY),
+  };
+  return FractionTriangleCovered(a_pts, b_pts);
+}
+
+float FractionGamutCovered(const SkColorSpace* a,
+                           const SkColorSpacePrimaries& b) {
+  if (!a) {
+    return 0.f;
+  }
+  skcms_Matrix3x3 to_XYZD50;
+  if (!a->toXYZD50(&to_XYZD50)) {
+    return 0.f;
+  }
+  const SkColorSpacePrimaries a_primaries =
+      GetD65PrimariesFromToXYZD50Matrix(to_XYZD50);
+  return FractionGamutCovered(a_primaries, b);
 }
 
 }  // namespace skia

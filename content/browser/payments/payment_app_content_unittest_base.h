@@ -11,7 +11,7 @@
 #include "content/browser/payments/payment_manager.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/mojom/payments/payment_app.mojom.h"
+#include "third_party/blink/public/mojom/payments/payment_app_events.mojom.h"
 #include "url/gurl.h"
 
 namespace blink {
@@ -36,6 +36,10 @@ class PaymentAppContentUnitTestBase : public testing::Test {
   ~PaymentAppContentUnitTestBase() override;
 
   BrowserContext* browser_context();
+  int64_t RegisterAndActivateServiceWorker(const GURL& scope_url,
+                                           const GURL& sw_script_url);
+  PaymentManager* CreateUninitializedPaymentManager(const GURL& scope_url,
+                                                    const GURL& sw_script_url);
   PaymentManager* CreatePaymentManager(const GURL& scope_url,
                                        const GURL& sw_script_url);
   void UnregisterServiceWorker(const GURL& scope_url,
@@ -46,13 +50,15 @@ class PaymentAppContentUnitTestBase : public testing::Test {
   const GURL& last_sw_scope_url() const;
 
   void SetNoPaymentRequestResponseImmediately();
-  void RespondPendingPaymentRequest();
+  void RespondPendingPaymentRequest(
+      payments::mojom::PaymentHandlerResponsePtr response);
+
+  PaymentAppContextImpl* payment_app_context();
 
  private:
   class PaymentAppForWorkerTestHelper;
 
   StoragePartitionImpl* storage_partition();
-  PaymentAppContextImpl* payment_app_context();
 
   std::unique_ptr<BrowserTaskEnvironment> task_environment_;
   std::unique_ptr<PaymentAppForWorkerTestHelper> worker_helper_;

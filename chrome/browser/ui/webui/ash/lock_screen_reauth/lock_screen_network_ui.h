@@ -5,9 +5,10 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_ASH_LOCK_SCREEN_REAUTH_LOCK_SCREEN_NETWORK_UI_H_
 #define CHROME_BROWSER_UI_WEBUI_ASH_LOCK_SCREEN_REAUTH_LOCK_SCREEN_NETWORK_UI_H_
 
+#include "ash/constants/webui_url_constants.h"
+#include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "chrome/browser/ui/webui/ash/lock_screen_reauth/lock_screen_network_handler.h"
-#include "chrome/common/webui_url_constants.h"
 #include "chromeos/services/network_config/public/mojom/cros_network_config.mojom-forward.h"
 #include "content/public/browser/webui_config.h"
 #include "content/public/common/url_constants.h"
@@ -25,7 +26,7 @@ class LockScreenNetworkUIConfig
  public:
   LockScreenNetworkUIConfig()
       : DefaultWebUIConfig(content::kChromeUIScheme,
-                           chrome::kChromeUILockScreenNetworkHost) {}
+                           ash::kChromeUILockScreenNetworkHost) {}
 
   bool IsWebUIEnabled(content::BrowserContext* browser_context) override;
 };
@@ -36,7 +37,7 @@ class LockScreenNetworkUI : public ui::MojoWebDialogUI {
   explicit LockScreenNetworkUI(content::WebUI* web_ui);
   ~LockScreenNetworkUI() override;
 
-  base::Value::Dict GetLocalizedStrings();
+  base::DictValue GetLocalizedStrings();
 
   // Instantiates implementation of the mojom::CrosNetworkConfig mojo interface
   // passing the pending receiver that will be internally bound.
@@ -50,7 +51,7 @@ class LockScreenNetworkUI : public ui::MojoWebDialogUI {
 
  private:
   // The main message handler owned by the corresponding WebUI.
-  NetworkConfigMessageHandler* main_handler_;
+  raw_ptr<NetworkConfigMessageHandler> main_handler_;
 
   WEB_UI_CONTROLLER_TYPE_DECL();
 };

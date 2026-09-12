@@ -4,7 +4,7 @@
 
 #include "third_party/blink/renderer/modules/payments/payment_event_data_conversion.h"
 
-#include "third_party/blink/public/mojom/payments/payment_app.mojom-blink.h"
+#include "third_party/blink/public/mojom/payments/payment_app_events.mojom-blink.h"
 #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_payment_currency_amount.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_payment_details_modifier.h"
@@ -43,19 +43,18 @@ PaymentDetailsModifier* ToPaymentDetailsModifier(
   return modifier;
 }
 
-ScriptValue StringDataToScriptValue(ScriptState* script_state,
-                                    const String& stringified_data) {
-  if (!script_state->ContextIsValid())
-    return ScriptValue();
+void MaybeSetData(ScriptState* script_state,
+                  PaymentMethodData* method_data,
+                  const String& stringified_data) {
+  if (!script_state->ContextIsValid()) {
+    return;
+  }
 
   ScriptState::Scope scope(script_state);
-  v8::Local<v8::Value> v8_value;
-  if (!v8::JSON::Parse(script_state->GetContext(),
-                       V8String(script_state->GetIsolate(), stringified_data))
-           .ToLocal(&v8_value)) {
-    return ScriptValue();
+  auto v8_json = FromJSONString(script_state, stringified_data);
+  if (!v8_json.IsEmpty()) {
+    method_data->setData(ScriptObject(script_state->GetIsolate(), v8_json));
   }
-  return ScriptValue(script_state->GetIsolate(), v8_value);
 }
 
 PaymentMethodData* ToPaymentMethodData(
@@ -64,10 +63,7 @@ PaymentMethodData* ToPaymentMethodData(
   DCHECK(data);
   PaymentMethodData* method_data = PaymentMethodData::Create();
   method_data->setSupportedMethod(data->supported_method);
-  ScriptValue v8_data =
-      StringDataToScriptValue(script_state, data->stringified_data);
-  if (!v8_data.IsEmpty())
-    method_data->setData(std::move(v8_data));
+  MaybeSetData(script_state, method_data, data->stringified_data);
   return method_data;
 }
 
@@ -80,16 +76,16 @@ PaymentOptions* ToPaymentOptions(
   payment_options->setRequestPayerPhone(options->request_payer_phone);
   payment_options->setRequestShipping(options->request_shipping);
 
-  String shipping_type = "";
+  V8PaymentShippingType::Enum shipping_type;
   switch (options->shipping_type) {
     case payments::mojom::PaymentShippingType::SHIPPING:
-      shipping_type = "shipping";
+      shipping_type = V8PaymentShippingType::Enum::kShipping;
       break;
     case payments::mojom::PaymentShippingType::DELIVERY:
-      shipping_type = "delivery";
+      shipping_type = V8PaymentShippingType::Enum::kDelivery;
       break;
     case payments::mojom::PaymentShippingType::PICKUP:
-      shipping_type = "pickup";
+      shipping_type = V8PaymentShippingType::Enum::kPickup;
       break;
   }
   payment_options->setShippingType(shipping_type);

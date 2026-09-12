@@ -10,8 +10,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
+#include <array>
 #include <memory>
+#include <string_view>
 
 #include "base/check_op.h"
 #include "base/posix/eintr_wrapper.h"
@@ -53,12 +56,13 @@ int ProcUtil::CountOpenFds(int proc_fd) {
   int count = 0;
   struct dirent* de;
   while ((de = readdir(dir.get()))) {
-    if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+    const std::string_view d_name(de->d_name);
+    if (d_name == "." || d_name == "..") {
       continue;
     }
 
     int fd_num;
-    CHECK(base::StringToInt(de->d_name, &fd_num));
+    CHECK(base::StringToInt(d_name, &fd_num));
     if (fd_num == proc_fd || fd_num == proc_self_fd) {
       continue;
     }
@@ -69,7 +73,7 @@ int ProcUtil::CountOpenFds(int proc_fd) {
 }
 
 bool ProcUtil::HasOpenDirectory(int proc_fd) {
-  DCHECK_LE(0, proc_fd);
+  CHECK_LE(0, proc_fd);
   int proc_self_fd =
       openat(proc_fd, "self/fd/", O_DIRECTORY | O_RDONLY | O_CLOEXEC);
 
@@ -82,19 +86,33 @@ bool ProcUtil::HasOpenDirectory(int proc_fd) {
 
   struct dirent* de;
   while ((de = readdir(dir.get()))) {
-    if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+    const std::string_view d_name(de->d_name);
+    if (d_name == "." || d_name == "..") {
       continue;
     }
 
     int fd_num;
-    CHECK(base::StringToInt(de->d_name, &fd_num));
+    CHECK(base::StringToInt(d_name, &fd_num));
     if (fd_num == proc_fd || fd_num == proc_self_fd) {
       continue;
     }
 
     struct stat s;
     // It's OK to use proc_self_fd here, fstatat won't modify it.
-    PCHECK(fstatat(proc_self_fd, de->d_name, &s, 0) == 0);
+    int stat_res = fstatat(proc_self_fd, de->d_name, &s, 0);
+    // Check for stale symlinks and skip them if they meet certain criteria.
+    // See crbug.com/362595425
+    if (stat_res == -1 && errno == ESTALE && de->d_type == DT_LNK) {
+      static constexpr std::string_view kStalePrefix = "/google/cog/";
+      std::array<char, PATH_MAX> filename;
+      const ssize_t len = readlinkat(proc_self_fd, de->d_name, filename.data(),
+                                     filename.size());
+      if (len > 0 && std::string_view(filename.data(), static_cast<size_t>(len))
+                         .starts_with(kStalePrefix)) {
+        continue;
+      }
+    }
+    PCHECK(stat_res == 0);
     if (S_ISDIR(s.st_mode)) {
       return true;
     }

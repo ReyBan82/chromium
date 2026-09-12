@@ -50,7 +50,9 @@ void SimNetwork::DidReceiveResponse(URLLoaderClient* client,
                                     const WebURLResponse& response) {
   auto it = requests_.find(response.CurrentRequestUrl().GetString());
   if (it == requests_.end()) {
-    client->DidReceiveResponse(response);
+    client->DidReceiveResponse(response,
+                               /*body=*/mojo::ScopedDataPipeConsumerHandle(),
+                               /*cached_metadata=*/std::nullopt);
     return;
   }
   DCHECK(it->value);
@@ -59,10 +61,9 @@ void SimNetwork::DidReceiveResponse(URLLoaderClient* client,
 }
 
 void SimNetwork::DidReceiveData(URLLoaderClient* client,
-                                const char* data,
-                                size_t data_length) {
+                                base::span<const char> data) {
   if (!current_request_)
-    client->DidReceiveData(data, data_length);
+    client->DidReceiveDataForTesting(data);
 }
 
 void SimNetwork::DidFail(URLLoaderClient* client,
@@ -86,7 +87,7 @@ void SimNetwork::DidFinishLoading(URLLoaderClient* client,
   if (!current_request_) {
     client->DidFinishLoading(finish_time, total_encoded_data_length,
                              total_encoded_body_length,
-                             total_decoded_body_length, false);
+                             total_decoded_body_length);
     return;
   }
   current_request_ = nullptr;
@@ -131,6 +132,23 @@ bool SimNetwork::FillNavigationParamsResponse(WebNavigationParams* params) {
   params->response.SetHttpStatusCode(request->response_http_status_);
   for (const auto& http_header : request->response_http_headers_)
     params->response.AddHttpHeaderField(http_header.key, http_header.value);
+
+  // SimTest mock navigations default to being origin-keyed unless the
+  // "Origin-Agent-Cluster: ?0" HTTP header is explicitly provided.
+  bool origin_keyed = true;
+  auto it_oac = request->response_http_headers_.find("Origin-Agent-Cluster");
+  if (it_oac != request->response_http_headers_.end() &&
+      it_oac->value == "?0") {
+    origin_keyed = false;
+  }
+
+  if (origin_keyed) {
+    WebOriginKeyedAgentClusterKey origin_key;
+    origin_key.origin = WebSecurityOrigin::Create(params->url);
+    params->agent_cluster_key = WebAgentClusterKey(origin_key);
+  } else {
+    params->agent_cluster_key = WebAgentClusterKey(params->url);
+  }
 
   auto body_loader = std::make_unique<StaticDataNavigationBodyLoader>();
   request->UsedForNavigation(body_loader.get());

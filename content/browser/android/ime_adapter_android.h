@@ -45,62 +45,57 @@ class RenderWidgetHostViewAndroid;
 // corresponding host view.
 class CONTENT_EXPORT ImeAdapterAndroid : public RenderWidgetHostConnector {
  public:
-  ImeAdapterAndroid(JNIEnv* env,
-                    const base::android::JavaParamRef<jobject>& obj,
-                    WebContents* web_contents);
+  explicit ImeAdapterAndroid(WebContents* web_contents);
   ~ImeAdapterAndroid() override;
 
+  void Destroy(JNIEnv* env);
+
   // Called from java -> native
-  bool SendKeyEvent(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&,
-      const base::android::JavaParamRef<jobject>& original_key_event,
-      int type,
-      int modifiers,
-      jlong time_ms,
-      int key_code,
-      int scan_code,
-      bool is_system_key,
-      int unicode_text);
+  void Initialize(JNIEnv* env);
+  bool SendKeyEvent(JNIEnv* env,
+                    const base::android::JavaRef<jobject>& original_key_event,
+                    int type,
+                    int modifiers,
+                    int64_t time_ms,
+                    int key_code,
+                    int scan_code,
+                    bool is_system_key,
+                    int unicode_text);
   void SetComposingText(JNIEnv* env,
-                        const base::android::JavaParamRef<jobject>& obj,
-                        const base::android::JavaParamRef<jobject>& text,
-                        const base::android::JavaParamRef<jstring>& text_str,
-                        int relative_cursor_pos);
+                        const base::android::JavaRef<jobject>& obj,
+                        const base::android::JavaRef<jobject>& text,
+                        const base::android::JavaRef<jstring>& text_str,
+                        int relative_cursor_pos,
+                        bool is_text_suggestion_selected);
   void CommitText(JNIEnv* env,
-                  const base::android::JavaParamRef<jobject>& obj,
-                  const base::android::JavaParamRef<jobject>& text,
-                  const base::android::JavaParamRef<jstring>& text_str,
+                  const base::android::JavaRef<jobject>& obj,
+                  const base::android::JavaRef<jobject>& text,
+                  const base::android::JavaRef<jstring>& text_str,
                   int relative_cursor_pos);
-  void FinishComposingText(JNIEnv* env,
-                           const base::android::JavaParamRef<jobject>&);
-  void SetEditableSelectionOffsets(JNIEnv*,
-                                   const base::android::JavaParamRef<jobject>&,
-                                   int start,
-                                   int end);
-  void SetComposingRegion(JNIEnv*,
-                          const base::android::JavaParamRef<jobject>&,
-                          int start,
-                          int end);
-  void DeleteSurroundingText(JNIEnv*,
-                             const base::android::JavaParamRef<jobject>&,
-                             int before,
-                             int after);
-  void DeleteSurroundingTextInCodePoints(
-      JNIEnv*,
-      const base::android::JavaParamRef<jobject>&,
-      int before,
-      int after);
-  void RequestCursorUpdate(JNIEnv*,
-                           const base::android::JavaParamRef<jobject>&,
-                           bool immediateRequest,
-                           bool monitorRequest);
-  bool RequestTextInputStateUpdate(JNIEnv*,
-                                   const base::android::JavaParamRef<jobject>&);
-  void HandleStylusWritingGestureAction(
-      JNIEnv*,
-      const base::android::JavaParamRef<jobject>&,
-      const base::android::JavaParamRef<jobject>&);
+  void ReplaceText(JNIEnv* env,
+                   const base::android::JavaRef<jobject>& obj,
+                   int start,
+                   int end,
+                   const base::android::JavaRef<jobject>& text,
+                   const base::android::JavaRef<jstring>& text_str,
+                   int relative_cursor_pos);
+  void FinishComposingText(JNIEnv* env);
+  void SetEditableSelectionOffsets(JNIEnv*, int start, int end);
+  void SetComposingRegion(JNIEnv*, int start, int end);
+  void DeleteSurroundingText(JNIEnv*, int before, int after);
+  void DeleteSurroundingTextInCodePoints(JNIEnv*, int before, int after);
+  void RequestCursorUpdate(JNIEnv*, bool immediateRequest, bool monitorRequest);
+  bool RequestTextInputStateUpdate(JNIEnv*);
+  void HandleStylusWritingGestureAction(JNIEnv*,
+                                        const int32_t,
+                                        const base::android::JavaRef<jobject>&);
+  void CancelPreviewGesture();
+
+  void OnStylusWritingGestureActionCompleted(
+      int,
+      blink::mojom::HandwritingGestureResult);
+
+  void SetImeRenderWidgetHost();
 
   // RendetWidgetHostConnector implementation.
   void UpdateRenderProcessConnection(
@@ -116,41 +111,50 @@ class CONTENT_EXPORT ImeAdapterAndroid : public RenderWidgetHostConnector {
   void CancelComposition();
   void FocusedNodeChanged(bool is_editable_node,
                           const gfx::Rect& node_bounds_in_screen);
-  void SetCharacterBounds(const std::vector<gfx::RectF>& rects);
-  // Requests to start stylus writing and returns true if successful.
-  bool RequestStartStylusWriting();
+  // Check if stylus writing can be started.
+  bool ShouldInitiateStylusWriting();
 
   void OnEditElementFocusedForStylusWriting(
       const gfx::Rect& focused_edit_bounds,
       const gfx::Rect& caret_bounds);
 
+  bool InsertMediaFromBytes(JNIEnv* env,
+                            const base::android::JavaRef<jbyteArray>& bytes,
+                            const base::android::JavaRef<jstring>& extension);
+
   base::android::ScopedJavaLocalRef<jobject> java_ime_adapter_for_testing(
-      JNIEnv* env) {
-    return java_ime_adapter_.get(env);
-  }
+      JNIEnv* env);
 
   void UpdateState(const ui::mojom::TextInputState& state);
   void UpdateOnTouchDown();
 
-  void AdvanceFocusForIME(JNIEnv*,
-                          const base::android::JavaParamRef<jobject>&,
-                          jint);
+  void AdvanceFocusForIME(JNIEnv*, int32_t);
+
+  base::android::ScopedJavaLocalRef<jobjectArray> GetSupportedMimeTypes(
+      JNIEnv*);
+
+  void PerformSpellCheck(JNIEnv* env);
+
+  void AppendAutocorrectUnderlineSpan(JNIEnv* env, int32_t start, int32_t end);
+
+  void ClearAllAutocorrectUnderlineSpans(JNIEnv* env);
 
  private:
+  base::android::ScopedJavaLocalRef<jobject> GetJavaObject(JNIEnv* env);
   RenderWidgetHostImpl* GetFocusedWidget();
   RenderFrameHost* GetFocusedFrame();
   blink::mojom::FrameWidgetInputHandler* GetFocusedFrameWidgetInputHandler();
   std::vector<ui::ImeTextSpan> GetImeTextSpansFromJava(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jobject>& text,
+      const base::android::JavaRef<jobject>& obj,
+      const base::android::JavaRef<jobject>& text,
       const std::u16string& text16);
 
   gfx::SizeF old_viewport_size_;
 
   // Current RenderWidgetHostView connected to this instance. Can be null.
   raw_ptr<RenderWidgetHostViewAndroid> rwhva_;
-  JavaObjectWeakGlobalRef java_ime_adapter_;
+  base::WeakPtrFactory<ImeAdapterAndroid> weak_factory_{this};
 };
 
 }  // namespace content

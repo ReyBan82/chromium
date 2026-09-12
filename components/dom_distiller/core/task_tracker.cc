@@ -44,9 +44,9 @@ TaskTracker::~TaskTracker() {
   DCHECK(viewers_.empty());
 }
 
-void TaskTracker::StartDistiller(
-    DistillerFactory* factory,
-    std::unique_ptr<DistillerPage> distiller_page) {
+void TaskTracker::StartDistiller(DistillerFactory* factory,
+                                 std::unique_ptr<DistillerPage> distiller_page,
+                                 bool use_cache) {
   if (distiller_) {
     return;
   }
@@ -56,11 +56,11 @@ void TaskTracker::StartDistiller(
   GURL url(entry_.pages[0]);
   DCHECK(url.is_valid());
 
-  distiller_ = factory->CreateDistillerForUrl(url);
+  distiller_ = factory->CreateDistiller();
   distiller_->DistillPage(
       url, std::move(distiller_page),
       base::BindOnce(&TaskTracker::OnDistillerFinished,
-                     weak_ptr_factory_.GetWeakPtr()),
+                     weak_ptr_factory_.GetWeakPtr(), use_cache),
       base::BindRepeating(&TaskTracker::OnArticleDistillationUpdated,
                           weak_ptr_factory_.GetWeakPtr()));
 }
@@ -147,13 +147,27 @@ void TaskTracker::ScheduleSaveCallbacks(bool distillation_succeeded) {
 }
 
 void TaskTracker::OnDistillerFinished(
-    std::unique_ptr<DistilledArticleProto> distilled_article) {
+    bool use_cache,
+    std::unique_ptr<DistilledArticleProto> distilled_article,
+    DistillationParseResult result) {
+  // If content is already ready (e.g. loaded from the BlobFetcher), we ignore
+  // the distiller's failure since we already have the successful result.
   if (content_ready_) {
     return;
   }
 
+  if (result != DistillationParseResult::kSuccess) {
+    // We notify viewers of the specific failure reason, but we do not return
+    // early here. We must proceed to clean up the `distiller_` and call
+    // `ContentSourceFinished()` to notify legacy viewers of the failure
+    // (via an empty article).
+    for (auto& viewer : viewers_) {
+      viewer.OnDistillationFailed(result);
+    }
+  }
+
   DistilledArticleReady(std::move(distilled_article));
-  if (content_ready_) {
+  if (content_ready_ && use_cache) {
     AddDistilledContentToStore(*distilled_article_);
   }
 

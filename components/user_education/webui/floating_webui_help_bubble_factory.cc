@@ -7,54 +7,28 @@
 #include "components/user_education/views/help_bubble_factory_views.h"
 #include "components/user_education/views/help_bubble_view.h"
 #include "components/user_education/webui/help_bubble_handler.h"
-#include "components/user_education/webui/tracked_element_webui.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/base/interaction/element_tracker.h"
-#include "ui/base/interaction/framework_specific_implementation.h"
+#include "ui/base/interaction/safe_castable.h"
 #include "ui/views/controls/webview/webview.h"
 #include "ui/views/view_utils.h"
 #include "ui/views/widget/widget.h"
+#include "ui/webui/tracked_element/tracked_element_handler.h"
+#include "ui/webui/tracked_element/tracked_element_web_ui.h"
 
 namespace user_education {
 
 namespace {
 
-// Searches `from_view` recursively (depth-first) for a WebView with `contents`.
-views::WebView* FindWebViewWithContentsRecursive(
-    views::View* from_view,
-    const content::WebContents* contents) {
-  auto* const web_view = views::AsViewClass<views::WebView>(from_view);
-  if (web_view && web_view->web_contents() == contents) {
-    return web_view;
-  }
-
-  for (auto* const child_view : from_view->children()) {
-    auto* const result = FindWebViewWithContentsRecursive(child_view, contents);
-    if (result) {
-      return result;
-    }
-  }
-
-  return nullptr;
-}
-
 // Attempts to extract the host WebView from `element`; returns null if
-// `element` is not a TrackedElementWebUI or the host view cannot be determined.
+// `element` is not a TrackedElementWebUI or the host view
+// cannot be determined.
 views::WebView* GetWebViewForElement(const ui::TrackedElement* element) {
-  if (!element->IsA<TrackedElementWebUI>()) {
-    return nullptr;
+  if (const auto* const element_webui =
+          element->AsA<ui::TrackedElementWebUI>()) {
+    return element_webui->GetWebView();
   }
-  const auto* const element_webui = element->AsA<TrackedElementWebUI>();
-  auto* const contents = element_webui->handler()->GetWebContents();
-  if (!contents) {
-    return nullptr;
-  }
-  auto* const widget = views::Widget::GetWidgetForNativeWindow(
-      contents->GetTopLevelNativeWindow());
-  if (!widget) {
-    return nullptr;
-  }
-  return FindWebViewWithContentsRecursive(widget->GetContentsView(), contents);
+  return nullptr;
 }
 
 }  // namespace
@@ -64,7 +38,7 @@ FloatingWebUIHelpBubbleFactory::FloatingWebUIHelpBubbleFactory(
     : HelpBubbleFactoryViews(delegate) {}
 FloatingWebUIHelpBubbleFactory::~FloatingWebUIHelpBubbleFactory() = default;
 
-DEFINE_FRAMEWORK_SPECIFIC_METADATA(FloatingWebUIHelpBubbleFactory)
+DEFINE_SAFE_CAST_TARGET(FloatingWebUIHelpBubbleFactory)
 
 std::unique_ptr<HelpBubble> FloatingWebUIHelpBubbleFactory::CreateBubble(
     ui::TrackedElement* element,
@@ -72,9 +46,12 @@ std::unique_ptr<HelpBubble> FloatingWebUIHelpBubbleFactory::CreateBubble(
   internal::HelpBubbleAnchorParams anchor;
   anchor.view = GetWebViewForElement(element);
   anchor.rect = element->GetScreenBounds();
-  auto result = CreateBubbleImpl(element, anchor, std::move(params));
-  element->AsA<TrackedElementWebUI>()->handler()->OnFloatingHelpBubbleCreated(
-      element->identifier(), result.get());
+  auto result = CreateBubbleImpl(element, anchor, std::move(params), nullptr);
+  element->AsA<ui::TrackedElementWebUI>()
+      ->handler()
+      ->GetHelpBubbleHandler()
+      ->OnFloatingHelpBubbleCreated(element->AsA<ui::TrackedElementWebUI>(),
+                                    result.get());
   return result;
 }
 

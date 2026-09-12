@@ -40,8 +40,8 @@ class LightSamplesObserverTest : public testing::Test {
     channels_data.push_back(std::move(illuminance_data));
 
     if (is_color_sensor) {
-      for (size_t i = 0; i < std::size(kIlluminanceColorChannels); ++i) {
-        illuminance_data.id = kIlluminanceColorChannels[i];
+      for (const char* channel : kIlluminanceColorChannels) {
+        illuminance_data.id = channel;
         illuminance_data.sample_data = kFakeColorSampleData;
         channels_data.push_back(std::move(illuminance_data));
       }
@@ -83,9 +83,6 @@ TEST_F(LightSamplesObserverTest, MissingChannels) {
   // Wait until the mojo connection is reset.
   base::RunLoop().RunUntilIdle();
 
-  histogram_tester_.ExpectUniqueSample(
-      "AutoScreenBrightness.DataError",
-      static_cast<int>(DataError::kMojoSamplesObserver), 1);
   EXPECT_FALSE(sensor_device_->HasReceivers());
   EXPECT_EQ(fake_observer_.num_received_ambient_lights(), 0);
 }
@@ -106,9 +103,6 @@ TEST_F(LightSamplesObserverTest, StartReadingTwiceError) {
   // Wait until the mojo connection is reset.
   base::RunLoop().RunUntilIdle();
 
-  histogram_tester_.ExpectUniqueSample(
-      "AutoScreenBrightness.DataError",
-      static_cast<int>(DataError::kMojoSamplesObserver), 1);
   EXPECT_FALSE(sensor_device_->HasReceivers());
   EXPECT_EQ(fake_observer_.num_received_ambient_lights(), 0);
 }

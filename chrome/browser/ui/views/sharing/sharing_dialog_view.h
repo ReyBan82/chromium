@@ -9,9 +9,10 @@
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
-#include "chrome/browser/sharing/sharing_dialog.h"
-#include "chrome/browser/sharing/sharing_dialog_data.h"
 #include "chrome/browser/ui/views/location_bar/location_bar_bubble_delegate_view.h"
+#include "components/sharing_message/sharing_dialog.h"
+#include "components/sharing_message/sharing_dialog_data.h"
+#include "ui/base/metadata/metadata_header_macros.h"
 
 namespace views {
 class StyledLabel;
@@ -22,9 +23,11 @@ enum class SharingDialogType;
 
 class SharingDialogView : public SharingDialog,
                           public LocationBarBubbleDelegateView {
+  METADATA_HEADER(SharingDialogView, LocationBarBubbleDelegateView)
+
  public:
-  // Bubble will be anchored to |anchor_view|.
-  SharingDialogView(views::View* anchor_view,
+  // Bubble will be anchored to `anchor`.
+  SharingDialogView(views::BubbleAnchor anchor,
                     content::WebContents* web_contents,
                     SharingDialogData data);
 
@@ -44,8 +47,6 @@ class SharingDialogView : public SharingDialog,
   void AddedToWidget() override;
 
   static views::BubbleDialogDelegateView* GetAsBubble(SharingDialog* dialog);
-  static views::BubbleDialogDelegateView* GetAsBubbleForClickToCall(
-      SharingDialog* dialog);
 
   SharingDialogType GetDialogType() const;
 

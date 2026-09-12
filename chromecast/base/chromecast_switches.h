@@ -16,11 +16,16 @@ namespace switches {
 extern const char kSwitchValueTrue[];
 extern const char kSwitchValueFalse[];
 
-// Url to upload crash data to.
+// Switches for crash_uploader
 extern const char kCrashServerUrl[];
+extern const char kCrashUploaderDaemon[];
+extern const char kCrashReportProductName[];
 
 // Disable Crash Reporting
 extern const char kDisableCrashReporter[];
+
+// Disable Crashpad forwarding
+extern const char kDisableCrashpadForwarding[];
 
 // Path to dumpstate binary to be used for crash reporting.
 // This gives Chromium's crash reporter the flexibility to switch
@@ -82,7 +87,6 @@ extern const char kForceMediaResolutionHeight[];
 extern const char kForceMediaResolutionWidth[];
 
 // UI switches
-extern const char kEnableInput[];
 extern const char kSystemGestureStartWidth[];
 extern const char kSystemGestureStartHeight[];
 extern const char kBottomSystemGestureStartHeight[];
@@ -100,6 +104,7 @@ extern const char kCastMemoryPressureCriticalFraction[];
 extern const char kCastMemoryPressureModerateFraction[];
 
 extern const char kDisableMojoRenderer[];
+extern const char kForceMojoRenderer[];
 
 // OTA update related switches.
 extern const char kForceUpdateRemoteUrl[];
@@ -112,6 +117,9 @@ extern const char kUseCastBrowserPrefConfig[];
 extern const char kInProcessBroker[];
 
 extern const char kCastMojoBrokerPath[];
+
+// Allows specifying the base::ASSETS dir for Cast via commandline.
+extern const char kCastAssetsDir[];
 
 }  // namespace switches
 

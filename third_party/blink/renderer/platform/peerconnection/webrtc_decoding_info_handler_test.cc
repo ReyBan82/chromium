@@ -10,6 +10,9 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/memory/ptr_util.h"
+#include "base/memory/raw_ptr.h"
+#include "media/video/mock_gpu_video_accelerator_factories.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/web_string.h"
@@ -23,7 +26,6 @@
 namespace blink {
 
 namespace {
-using Params = webrtc::SdpVideoFormat::Parameters;
 const webrtc::SdpVideoFormat kVideoFormatVp9{"VP9"};
 const webrtc::SdpVideoFormat kVideoFormatFoo{"Foo"};
 
@@ -36,8 +38,9 @@ class MockVideoDecoderFactory : public webrtc::VideoDecoderFactory {
  public:
   // webrtc::VideoDecoderFactory implementation:
   MOCK_METHOD(std::unique_ptr<webrtc::VideoDecoder>,
-              CreateVideoDecoder,
-              (const webrtc::SdpVideoFormat& format),
+              Create,
+              (const webrtc::Environment&,
+               const webrtc::SdpVideoFormat& format),
               (override));
   MOCK_METHOD(std::vector<webrtc::SdpVideoFormat>,
               GetSupportedFormats,
@@ -45,7 +48,9 @@ class MockVideoDecoderFactory : public webrtc::VideoDecoderFactory {
               (const));
   MOCK_METHOD(webrtc::VideoDecoderFactory::CodecSupport,
               QueryCodecSupport,
-              (const webrtc::SdpVideoFormat& format, bool spatial_scalability),
+              (const webrtc::SdpVideoFormat& format,
+               bool spatial_scalability,
+               std::optional<webrtc::Resolution> resolution),
               (const, override));
 };
 
@@ -74,41 +79,56 @@ class MediaCapabilitiesDecodingInfoCallback {
 
 }  // namespace
 
-typedef webrtc::VideoDecoderFactory::CodecSupport CodecSupport;
+using CodecSupport = webrtc::VideoDecoderFactory::CodecSupport;
 
 class WebrtcDecodingInfoHandlerTests : public ::testing::Test {
  public:
-  WebrtcDecodingInfoHandlerTests()
-      : mock_video_decoder_factory_(new MockVideoDecoderFactory()),
-        video_decoder_factory_(mock_video_decoder_factory_),
-        audio_decoder_factory_(blink::CreateWebrtcAudioDecoderFactory()) {}
-
-  void SetUp() override {}
+  static std::unique_ptr<WebrtcDecodingInfoHandler> CreateHandler(
+      std::unique_ptr<webrtc::VideoDecoderFactory> video_decoder_factory,
+      webrtc::scoped_refptr<webrtc::AudioDecoderFactory> audio_decoder_factory,
+      media::GpuVideoAcceleratorFactories* gpu_factories = nullptr) {
+    return base::WrapUnique(new WebrtcDecodingInfoHandler(
+        std::move(video_decoder_factory), std::move(audio_decoder_factory),
+        gpu_factories));
+  }
 
   void VerifyDecodingInfo(
-      const absl::optional<webrtc::SdpAudioFormat> sdp_audio_format,
-      const absl::optional<webrtc::SdpVideoFormat> sdp_video_format,
-      const bool video_spatial_scalability,
-      const CodecSupport support) {
+      const std::optional<webrtc::SdpAudioFormat>& sdp_audio_format,
+      const std::optional<webrtc::SdpVideoFormat>& sdp_video_format,
+      bool video_spatial_scalability,
+      const CodecSupport& support,
+      std::optional<gfx::Size> video_resolution = std::nullopt) {
+    auto video_decoder_factory = std::make_unique<MockVideoDecoderFactory>();
+    webrtc::scoped_refptr<webrtc::AudioDecoderFactory> audio_decoder_factory =
+        blink::CreateWebrtcAudioDecoderFactory();
     if (sdp_video_format) {
-      ON_CALL(*mock_video_decoder_factory_, QueryCodecSupport)
+      std::optional<webrtc::Resolution> expected_resolution;
+      if (video_resolution) {
+        expected_resolution = {video_resolution->width(),
+                               video_resolution->height()};
+      }
+      ON_CALL(*video_decoder_factory, QueryCodecSupport)
           .WillByDefault(
-              testing::Invoke([sdp_video_format, video_spatial_scalability,
-                               support](const webrtc::SdpVideoFormat& format,
-                                        bool spatial_scalability) {
+              [sdp_video_format, video_spatial_scalability, expected_resolution,
+               support](const webrtc::SdpVideoFormat& format,
+                        bool spatial_scalability,
+                        std::optional<webrtc::Resolution> resolution) {
                 EXPECT_TRUE(format.IsSameCodec(*sdp_video_format));
                 EXPECT_EQ(spatial_scalability, video_spatial_scalability);
+                EXPECT_EQ(resolution, expected_resolution);
                 return support;
-              }));
-      EXPECT_CALL(*mock_video_decoder_factory_, QueryCodecSupport)
+              });
+      EXPECT_CALL(*video_decoder_factory, QueryCodecSupport)
           .Times(::testing::AtMost(1));
     }
-    WebrtcDecodingInfoHandler decoding_info_handler(
-        std::move(video_decoder_factory_), audio_decoder_factory_);
+    std::unique_ptr<WebrtcDecodingInfoHandler> decoding_info_handler =
+        CreateHandler(std::move(video_decoder_factory), audio_decoder_factory,
+                      /*gpu_factories=*/nullptr);
     MediaCapabilitiesDecodingInfoCallback decoding_info_callback;
 
-    decoding_info_handler.DecodingInfo(
+    decoding_info_handler->DecodingInfo(
         sdp_audio_format, sdp_video_format, video_spatial_scalability,
+        video_resolution,
         base::BindOnce(
             &MediaCapabilitiesDecodingInfoCallback::OnWebrtcDecodingInfoSupport,
             base::Unretained(&decoding_info_callback)));
@@ -119,24 +139,18 @@ class WebrtcDecodingInfoHandlerTests : public ::testing::Test {
     EXPECT_EQ(decoding_info_callback.IsPowerEfficient(),
               support.is_power_efficient);
   }
-
- protected:
-  std::vector<webrtc::AudioCodecSpec> kSupportedAudioCodecs;
-  MockVideoDecoderFactory* mock_video_decoder_factory_;
-  std::unique_ptr<webrtc::VideoDecoderFactory> video_decoder_factory_;
-  rtc::scoped_refptr<webrtc::AudioDecoderFactory> audio_decoder_factory_;
 };
 
 TEST_F(WebrtcDecodingInfoHandlerTests, BasicAudio) {
   VerifyDecodingInfo(
-      kAudioFormatOpus, /*sdp_video_format=*/absl::nullopt,
+      kAudioFormatOpus, /*sdp_video_format=*/std::nullopt,
       /*video_spatial_scalability=*/false,
       CodecSupport{/*is_supported=*/true, /*is_power_efficient=*/true});
 }
 
 TEST_F(WebrtcDecodingInfoHandlerTests, UnsupportedAudio) {
   VerifyDecodingInfo(
-      kAudioFormatFoo, /*sdp_video_format=*/absl::nullopt,
+      kAudioFormatFoo, /*sdp_video_format=*/std::nullopt,
       /*video_spatial_scalability=*/false,
       CodecSupport{/*is_supported=*/false, /*is_power_efficient=*/false});
 }
@@ -147,28 +161,28 @@ TEST_F(WebrtcDecodingInfoHandlerTests, UnsupportedAudio) {
 // callback.
 TEST_F(WebrtcDecodingInfoHandlerTests, BasicVideo) {
   VerifyDecodingInfo(
-      /*sdp _audio_format=*/absl::nullopt, kVideoFormatVp9,
+      /*sdp_audio_format=*/std::nullopt, kVideoFormatVp9,
       /*video_spatial_scalability=*/false,
       CodecSupport{/*is_supported=*/true, /*is_power_efficient=*/false});
 }
 
 TEST_F(WebrtcDecodingInfoHandlerTests, BasicVideoPowerEfficient) {
   VerifyDecodingInfo(
-      /*sdp _audio_format=*/absl::nullopt, kVideoFormatVp9,
+      /*sdp_audio_format=*/std::nullopt, kVideoFormatVp9,
       /*video_spatial_scalability=*/false,
       CodecSupport{/*is_supported=*/true, /*is_power_efficient=*/true});
 }
 
 TEST_F(WebrtcDecodingInfoHandlerTests, UnsupportedVideo) {
   VerifyDecodingInfo(
-      /*sdp _audio_format=*/absl::nullopt, kVideoFormatFoo,
+      /*sdp_audio_format=*/std::nullopt, kVideoFormatFoo,
       /*video_spatial_scalability=*/false,
       CodecSupport{/*is_supported=*/true, /*is_power_efficient=*/false});
 }
 
 TEST_F(WebrtcDecodingInfoHandlerTests, VideoWithReferenceScaling) {
   VerifyDecodingInfo(
-      /*sdp _audio_format=*/absl::nullopt, kVideoFormatVp9,
+      /*sdp_audio_format=*/std::nullopt, kVideoFormatVp9,
       /*video_spatial_scalability=*/true,
       CodecSupport{/*is_supported=*/true, /*is_power_efficient=*/false});
 }
@@ -185,6 +199,78 @@ TEST_F(WebrtcDecodingInfoHandlerTests, SupportedVideoUnsupportedAudio) {
       kAudioFormatFoo, kVideoFormatVp9,
       /*video_spatial_scalability=*/false,
       CodecSupport{/*is_supported=*/false, /*is_power_efficient=*/false});
+}
+
+TEST_F(WebrtcDecodingInfoHandlerTests, GpuDecoderSupportKnown) {
+  auto video_decoder_factory = std::make_unique<MockVideoDecoderFactory>();
+  webrtc::scoped_refptr<webrtc::AudioDecoderFactory> audio_decoder_factory =
+      blink::CreateWebrtcAudioDecoderFactory();
+  media::MockGpuVideoAcceleratorFactories mock_gpu_factories(nullptr);
+
+  EXPECT_CALL(mock_gpu_factories, IsDecoderSupportKnown())
+      .WillRepeatedly(testing::Return(true));
+  EXPECT_CALL(*video_decoder_factory, QueryCodecSupport)
+      .WillOnce(testing::Return(
+          CodecSupport{/*is_supported=*/true, /*is_power_efficient=*/true}));
+
+  std::unique_ptr<WebrtcDecodingInfoHandler> decoding_info_handler =
+      CreateHandler(std::move(video_decoder_factory), audio_decoder_factory,
+                    &mock_gpu_factories);
+  MediaCapabilitiesDecodingInfoCallback decoding_info_callback;
+
+  decoding_info_handler->DecodingInfo(
+      /*sdp_audio_format=*/std::nullopt, kVideoFormatVp9,
+      /*video_spatial_scalability=*/false,
+      /*video_resolution=*/std::nullopt,
+      base::BindOnce(
+          &MediaCapabilitiesDecodingInfoCallback::OnWebrtcDecodingInfoSupport,
+          base::Unretained(&decoding_info_callback)));
+
+  EXPECT_TRUE(decoding_info_callback.IsCalled());
+  EXPECT_TRUE(decoding_info_callback.IsSuccess());
+  EXPECT_TRUE(decoding_info_callback.IsSupported());
+  EXPECT_TRUE(decoding_info_callback.IsPowerEfficient());
+}
+
+TEST_F(WebrtcDecodingInfoHandlerTests, GpuDecoderSupportDeferred) {
+  auto video_decoder_factory = std::make_unique<MockVideoDecoderFactory>();
+  webrtc::scoped_refptr<webrtc::AudioDecoderFactory> audio_decoder_factory =
+      blink::CreateWebrtcAudioDecoderFactory();
+  media::MockGpuVideoAcceleratorFactories mock_gpu_factories(nullptr);
+
+  base::OnceClosure notify_cb;
+  EXPECT_CALL(mock_gpu_factories, IsDecoderSupportKnown())
+      .WillOnce(testing::Return(false))
+      .WillRepeatedly(testing::Return(true));
+  EXPECT_CALL(mock_gpu_factories, NotifyDecoderSupportKnown(testing::_))
+      .WillOnce(
+          [&notify_cb](base::OnceClosure cb) { notify_cb = std::move(cb); });
+  EXPECT_CALL(*video_decoder_factory, QueryCodecSupport)
+      .WillOnce(testing::Return(
+          CodecSupport{/*is_supported=*/true, /*is_power_efficient=*/true}));
+
+  std::unique_ptr<WebrtcDecodingInfoHandler> decoding_info_handler =
+      CreateHandler(std::move(video_decoder_factory), audio_decoder_factory,
+                    &mock_gpu_factories);
+  MediaCapabilitiesDecodingInfoCallback decoding_info_callback;
+
+  decoding_info_handler->DecodingInfo(
+      /*sdp_audio_format=*/std::nullopt, kVideoFormatVp9,
+      /*video_spatial_scalability=*/false,
+      /*video_resolution=*/std::nullopt,
+      base::BindOnce(
+          &MediaCapabilitiesDecodingInfoCallback::OnWebrtcDecodingInfoSupport,
+          base::Unretained(&decoding_info_callback)));
+
+  EXPECT_FALSE(decoding_info_callback.IsCalled());
+  EXPECT_FALSE(notify_cb.is_null());
+
+  std::move(notify_cb).Run();
+
+  EXPECT_TRUE(decoding_info_callback.IsCalled());
+  EXPECT_TRUE(decoding_info_callback.IsSuccess());
+  EXPECT_TRUE(decoding_info_callback.IsSupported());
+  EXPECT_TRUE(decoding_info_callback.IsPowerEfficient());
 }
 
 }  // namespace blink

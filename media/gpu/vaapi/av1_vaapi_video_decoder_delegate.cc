@@ -6,18 +6,21 @@
 
 #include <string.h>
 #include <va/va.h>
+
 #include <algorithm>
 #include <vector>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
 #include "base/memory/scoped_refptr.h"
-#include "build/chromeos_buildflags.h"
 #include "media/gpu/av1_picture.h"
-#include "media/gpu/decode_surface_handler.h"
 #include "media/gpu/vaapi/vaapi_common.h"
+#include "media/gpu/vaapi/vaapi_decode_surface_handler.h"
 #include "media/gpu/vaapi/vaapi_wrapper.h"
 #include "third_party/libgav1/src/src/obu_parser.h"
+#include "third_party/libgav1/src/src/utils/common.h"
 #include "third_party/libgav1/src/src/utils/types.h"
 #include "third_party/libgav1/src/src/warp_prediction.h"
 
@@ -51,15 +54,17 @@ void FillSegmentInfo(VASegmentationStructAV1& va_seg_info,
                 "Invalid feature array size");
   for (size_t i = 0; i < libgav1::kMaxSegments; ++i) {
     for (size_t j = 0; j < libgav1::kSegmentFeatureMax; ++j)
-      va_seg_info.feature_data[i][j] = segmentation.feature_data[i][j];
+      UNSAFE_TODO(va_seg_info.feature_data[i][j]) =
+          UNSAFE_TODO(segmentation.feature_data[i][j]);
   }
   for (size_t i = 0; i < libgav1::kMaxSegments; ++i) {
     uint8_t feature_mask = 0;
     for (size_t j = 0; j < libgav1::kSegmentFeatureMax; ++j) {
-      if (segmentation.feature_enabled[i][j])
+      if (UNSAFE_TODO(segmentation.feature_enabled[i][j])) {
         feature_mask |= 1 << j;
+      }
     }
-    va_seg_info.feature_mask[i] = feature_mask;
+    UNSAFE_TODO(va_seg_info.feature_mask[i]) = feature_mask;
   }
 }
 
@@ -119,19 +124,21 @@ void FillFilmGrainInfo(VAFilmGrainStructAV1& va_film_grain_info,
   COPY_FILM_GRAIN_FIELD3(grain_seed);
   COPY_FILM_GRAIN_FIELD3(num_y_points);
   for (uint8_t i = 0; i < film_grain_params.num_y_points; ++i) {
-    COPY_FILM_GRAIN_FIELD3(point_y_value[i]);
-    COPY_FILM_GRAIN_FIELD3(point_y_scaling[i]);
+    UNSAFE_TODO(COPY_FILM_GRAIN_FIELD3(point_y_value[i]));
+    UNSAFE_TODO(COPY_FILM_GRAIN_FIELD3(point_y_scaling[i]));
   }
 #undef COPY_FILM_GRAIN_FIELD3
   COPY_FILM_GRAIN_FIELD2(num_cb_points, num_u_points);
   for (uint8_t i = 0; i < film_grain_params.num_u_points; ++i) {
-    COPY_FILM_GRAIN_FIELD2(point_cb_value[i], point_u_value[i]);
-    COPY_FILM_GRAIN_FIELD2(point_cb_scaling[i], point_u_scaling[i]);
+    UNSAFE_TODO(COPY_FILM_GRAIN_FIELD2(point_cb_value[i], point_u_value[i]));
+    UNSAFE_TODO(
+        COPY_FILM_GRAIN_FIELD2(point_cb_scaling[i], point_u_scaling[i]));
   }
   COPY_FILM_GRAIN_FIELD2(num_cr_points, num_v_points);
   for (uint8_t i = 0; i < film_grain_params.num_v_points; ++i) {
-    COPY_FILM_GRAIN_FIELD2(point_cr_value[i], point_v_value[i]);
-    COPY_FILM_GRAIN_FIELD2(point_cr_scaling[i], point_v_scaling[i]);
+    UNSAFE_TODO(COPY_FILM_GRAIN_FIELD2(point_cr_value[i], point_v_value[i]));
+    UNSAFE_TODO(
+        COPY_FILM_GRAIN_FIELD2(point_cr_scaling[i], point_v_scaling[i]));
   }
 
   constexpr size_t kAutoRegressionCoeffYSize = 24;
@@ -155,7 +162,8 @@ void FillFilmGrainInfo(VAFilmGrainStructAV1& va_film_grain_info,
   if (film_grain_params.num_y_points > 0) {
     DCHECK_LE(num_pos_y, kAutoRegressionCoeffYSize);
     for (size_t i = 0; i < num_pos_y; ++i)
-      COPY_FILM_GRAIN_FIELD2(ar_coeffs_y[i], auto_regression_coeff_y[i]);
+      UNSAFE_TODO(
+          COPY_FILM_GRAIN_FIELD2(ar_coeffs_y[i], auto_regression_coeff_y[i]));
   }
   if (film_grain_params.chroma_scaling_from_luma ||
       film_grain_params.num_u_points > 0 ||
@@ -164,11 +172,13 @@ void FillFilmGrainInfo(VAFilmGrainStructAV1& va_film_grain_info,
     for (size_t i = 0; i < num_pos_uv; ++i) {
       if (film_grain_params.chroma_scaling_from_luma ||
           film_grain_params.num_u_points > 0) {
-        COPY_FILM_GRAIN_FIELD2(ar_coeffs_cb[i], auto_regression_coeff_u[i]);
+        UNSAFE_TODO(COPY_FILM_GRAIN_FIELD2(ar_coeffs_cb[i],
+                                           auto_regression_coeff_u[i]));
       }
       if (film_grain_params.chroma_scaling_from_luma ||
           film_grain_params.num_v_points > 0) {
-        COPY_FILM_GRAIN_FIELD2(ar_coeffs_cr[i], auto_regression_coeff_v[i]);
+        UNSAFE_TODO(COPY_FILM_GRAIN_FIELD2(ar_coeffs_cr[i],
+                                           auto_regression_coeff_v[i]));
       }
     }
   }
@@ -186,7 +196,7 @@ void FillFilmGrainInfo(VAFilmGrainStructAV1& va_film_grain_info,
 }
 
 void FillGlobalMotionInfo(
-    VAWarpedMotionParamsAV1 va_warped_motion[7],
+    base::span<VAWarpedMotionParamsAV1, 7> va_warped_motion,
     const std::array<libgav1::GlobalMotion, libgav1::kNumReferenceFrameTypes>&
         global_motion) {
   // global_motion[0] (for kReferenceFrameIntra) is not used.
@@ -216,7 +226,7 @@ void FillGlobalMotionInfo(
                       ARRAY_SIZE(gm.params) == 6,
                   "Invalid size of warp motion parameters");
     for (size_t j = 0; j < 6; ++j)
-      va_warped_motion[i].wmmat[j] = gm.params[j];
+      UNSAFE_TODO(va_warped_motion[i].wmmat[j]) = UNSAFE_TODO(gm.params[j]);
     va_warped_motion[i].wmmat[6] = 0;
     va_warped_motion[i].wmmat[7] = 0;
     va_warped_motion[i].invalid = !libgav1::SetupShear(&gm);
@@ -251,16 +261,20 @@ bool FillTileInfo(VADecPictureParameterBufferAV1& va_pic_param,
     const int tile_columns =
         std::min(kVaSizeOfTileWidthAndHeightArray, tile_info.tile_columns);
     for (int i = 0; i < tile_columns; i++) {
-      if (!base::CheckSub<int>(tile_info.tile_column_width_in_superblocks[i], 1)
-               .AssignIfValid(&va_pic_param.width_in_sbs_minus_1[i])) {
+      if (!base::CheckSub<int>(
+               UNSAFE_TODO(tile_info.tile_column_width_in_superblocks[i]), 1)
+               .AssignIfValid(
+                   UNSAFE_TODO(&va_pic_param.width_in_sbs_minus_1[i]))) {
         return false;
       }
     }
     const int tile_rows =
         std::min(kVaSizeOfTileWidthAndHeightArray, tile_info.tile_rows);
     for (int i = 0; i < tile_rows; i++) {
-      if (!base::CheckSub<int>(tile_info.tile_row_height_in_superblocks[i], 1)
-               .AssignIfValid(&va_pic_param.height_in_sbs_minus_1[i])) {
+      if (!base::CheckSub<int>(
+               UNSAFE_TODO(tile_info.tile_row_height_in_superblocks[i]), 1)
+               .AssignIfValid(
+                   UNSAFE_TODO(&va_pic_param.height_in_sbs_minus_1[i]))) {
         return false;
       }
     }
@@ -306,9 +320,9 @@ void FillLoopFilterInfo(VADecPictureParameterBufferAV1& va_pic_param,
                         libgav1::kLoopFilterMaxModeDeltas,
                 "Invalid size of mode deltas array");
   for (size_t i = 0; i < libgav1::kNumReferenceFrameTypes; i++)
-    va_pic_param.ref_deltas[i] = loop_filter.ref_deltas[i];
+    UNSAFE_TODO(va_pic_param.ref_deltas[i]) = loop_filter.ref_deltas[i];
   for (size_t i = 0; i < libgav1::kLoopFilterMaxModeDeltas; i++)
-    va_pic_param.mode_deltas[i] = loop_filter.mode_deltas[i];
+    UNSAFE_TODO(va_pic_param.mode_deltas[i]) = loop_filter.mode_deltas[i];
 }
 
 void FillQuantizationInfo(VADecPictureParameterBufferAV1& va_pic_param,
@@ -369,22 +383,26 @@ void FillCdefInfo(VADecPictureParameterBufferAV1& va_pic_param,
   DCHECK_LE(num_cdef_strengths,
             static_cast<size_t>(libgav1::kMaxCdefStrengths));
   for (size_t i = 0; i < num_cdef_strengths; ++i) {
-    const uint8_t prim_strength = cdef.y_primary_strength[i] >> coeff_shift;
-    uint8_t sec_strength = cdef.y_secondary_strength[i] >> coeff_shift;
+    const uint8_t prim_strength =
+        UNSAFE_TODO(cdef.y_primary_strength[i]) >> coeff_shift;
+    uint8_t sec_strength =
+        UNSAFE_TODO(cdef.y_secondary_strength[i]) >> coeff_shift;
     DCHECK_LE(sec_strength, 4u);
     if (sec_strength == 4)
       sec_strength--;
-    va_pic_param.cdef_y_strengths[i] =
+    UNSAFE_TODO(va_pic_param.cdef_y_strengths[i]) =
         ((prim_strength & 0xf) << 2) | (sec_strength & 0x03);
   }
 
   for (size_t i = 0; i < num_cdef_strengths; ++i) {
-    const uint8_t prim_strength = cdef.uv_primary_strength[i] >> coeff_shift;
-    uint8_t sec_strength = cdef.uv_secondary_strength[i] >> coeff_shift;
+    const uint8_t prim_strength =
+        UNSAFE_TODO(cdef.uv_primary_strength[i]) >> coeff_shift;
+    uint8_t sec_strength =
+        UNSAFE_TODO(cdef.uv_secondary_strength[i]) >> coeff_shift;
     DCHECK_LE(sec_strength, 4u);
     if (sec_strength == 4)
       sec_strength--;
-    va_pic_param.cdef_uv_strengths[i] =
+    UNSAFE_TODO(va_pic_param.cdef_uv_strengths[i]) =
         ((prim_strength & 0xf) << 2) | (sec_strength & 0x03);
   }
 }
@@ -423,7 +441,6 @@ void FillLoopRestorationInfo(VADecPictureParameterBufferAV1& va_pic_param,
       default:
         NOTREACHED() << "Invalid restoration type"
                      << base::strict_cast<int>(lr_type);
-        return 0;
     }
   };
   static_assert(
@@ -442,10 +459,10 @@ void FillLoopRestorationInfo(VADecPictureParameterBufferAV1& va_pic_param,
   const size_t num_planes = libgav1::kMaxPlanes;
   const bool use_loop_restoration =
       std::find_if(std::begin(loop_restoration.type),
-                   std::begin(loop_restoration.type) + num_planes,
+                   UNSAFE_TODO(std::begin(loop_restoration.type) + num_planes),
                    [](const auto type) {
                      return type != libgav1::kLoopRestorationTypeNone;
-                   }) != (loop_restoration.type + num_planes);
+                   }) != (UNSAFE_TODO(loop_restoration.type + num_planes));
   if (!use_loop_restoration)
     return;
   static_assert(libgav1::kPlaneY == 0u && libgav1::kPlaneU == 1u,
@@ -465,7 +482,7 @@ bool FillAV1PictureParameter(const AV1Picture& pic,
                              const libgav1::ObuSequenceHeader& sequence_header,
                              const AV1ReferenceFrameVector& ref_frames,
                              VADecPictureParameterBufferAV1& va_pic_param) {
-  memset(&va_pic_param, 0, sizeof(VADecPictureParameterBufferAV1));
+  UNSAFE_TODO(memset(&va_pic_param, 0, sizeof(VADecPictureParameterBufferAV1)));
   DCHECK_LE(base::strict_cast<uint8_t>(sequence_header.profile), 2u)
       << "Unknown profile: " << base::strict_cast<int>(sequence_header.profile);
   va_pic_param.profile = base::strict_cast<uint8_t>(sequence_header.profile);
@@ -551,23 +568,22 @@ bool FillAV1PictureParameter(const AV1Picture& pic,
 
   const libgav1::ObuFrameHeader& frame_header = pic.frame_header;
   const auto* vaapi_pic = static_cast<const VaapiAV1Picture*>(&pic);
-  DCHECK(!!vaapi_pic->display_va_surface() &&
-         !!vaapi_pic->reconstruct_va_surface());
+  DCHECK_NE(vaapi_pic->display_va_surface_id(), VA_INVALID_SURFACE);
+  DCHECK_NE(vaapi_pic->reconstruct_va_surface_id(), VA_INVALID_SURFACE);
   if (frame_header.film_grain_params.apply_grain) {
-    DCHECK_NE(vaapi_pic->display_va_surface()->id(),
-              vaapi_pic->reconstruct_va_surface()->id())
+    DCHECK_NE(vaapi_pic->display_va_surface_id(),
+              vaapi_pic->reconstruct_va_surface_id())
         << "When using film grain synthesis, the display and reconstruct "
            "surfaces"
         << " should be different.";
-    va_pic_param.current_frame = vaapi_pic->reconstruct_va_surface()->id();
-    va_pic_param.current_display_picture =
-        vaapi_pic->display_va_surface()->id();
+    va_pic_param.current_frame = vaapi_pic->reconstruct_va_surface_id();
+    va_pic_param.current_display_picture = vaapi_pic->display_va_surface_id();
   } else {
-    DCHECK_EQ(vaapi_pic->display_va_surface()->id(),
-              vaapi_pic->reconstruct_va_surface()->id())
+    DCHECK_EQ(vaapi_pic->display_va_surface_id(),
+              vaapi_pic->reconstruct_va_surface_id())
         << "When not using film grain synthesis, the display and reconstruct"
         << " surfaces should be the same.";
-    va_pic_param.current_frame = vaapi_pic->display_va_surface()->id();
+    va_pic_param.current_frame = vaapi_pic->display_va_surface_id();
     va_pic_param.current_display_picture = VA_INVALID_SURFACE;
   }
 
@@ -594,22 +610,24 @@ bool FillAV1PictureParameter(const AV1Picture& pic,
   for (size_t i = 0; i < libgav1::kNumReferenceFrameTypes; ++i) {
     const auto* ref_pic =
         static_cast<const VaapiAV1Picture*>(ref_frames[i].get());
-    va_pic_param.ref_frame_map[i] =
-        ref_pic ? ref_pic->reconstruct_va_surface()->id() : VA_INVALID_SURFACE;
+    UNSAFE_TODO(va_pic_param.ref_frame_map[i]) =
+        ref_pic ? ref_pic->reconstruct_va_surface_id() : VA_INVALID_SURFACE;
   }
 
   // |va_pic_param.ref_frame_idx| doesn't need to be filled in for intra frames
   // (it can be left zero initialized).
   if (!libgav1::IsIntraFrame(frame_header.frame_type)) {
     for (size_t i = 0; i < libgav1::kNumInterReferenceFrameTypes; ++i) {
-      const int8_t index = frame_header.reference_frame_index[i];
+      const int8_t index = UNSAFE_TODO(frame_header.reference_frame_index[i]);
       CHECK_GE(index, 0);
       CHECK_LT(index, libgav1::kNumReferenceFrameTypes);
       // AV1Decoder::CheckAndCleanUpReferenceFrames() ensures that
       // |ref_frames[index]| is valid for all the reference frames needed by the
       // current frame.
-      DCHECK_NE(va_pic_param.ref_frame_map[index], VA_INVALID_SURFACE);
-      va_pic_param.ref_frame_idx[i] = base::checked_cast<uint8_t>(index);
+      UNSAFE_TODO(
+          DCHECK_NE(va_pic_param.ref_frame_map[index], VA_INVALID_SURFACE));
+      UNSAFE_TODO(va_pic_param.ref_frame_idx[i]) =
+          base::checked_cast<uint8_t>(index);
     }
   }
 
@@ -693,7 +711,7 @@ bool FillAV1SliceParameters(
   va_slice_params.resize(num_tiles);
   for (uint16_t tile = 0; tile < num_tiles; ++tile) {
     VASliceParameterBufferAV1& va_tile_param = va_slice_params[tile];
-    memset(&va_tile_param, 0, sizeof(VASliceParameterBufferAV1));
+    UNSAFE_TODO(memset(&va_tile_param, 0, sizeof(VASliceParameterBufferAV1)));
     va_tile_param.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
     va_tile_param.tile_row = tile / base::checked_cast<uint16_t>(tile_columns);
     va_tile_param.tile_column =
@@ -723,7 +741,7 @@ bool FillAV1SliceParameters(
 }  // namespace
 
 AV1VaapiVideoDecoderDelegate::AV1VaapiVideoDecoderDelegate(
-    DecodeSurfaceHandler<VASurface>* const vaapi_dec,
+    VaapiDecodeSurfaceHandler* const vaapi_dec,
     scoped_refptr<VaapiWrapper> vaapi_wrapper,
     ProtectedSessionUpdateCB on_protected_session_update_cb,
     CdmContext* cdm_context,
@@ -744,34 +762,38 @@ AV1VaapiVideoDecoderDelegate::~AV1VaapiVideoDecoderDelegate() {
 scoped_refptr<AV1Picture> AV1VaapiVideoDecoderDelegate::CreateAV1Picture(
     bool apply_grain) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  const auto display_va_surface = vaapi_dec_->CreateSurface();
-  if (!display_va_surface)
+  auto display_va_surface_handle = vaapi_dec_->CreateSurface();
+  if (!display_va_surface_handle) {
     return nullptr;
+  }
 
-  auto reconstruct_va_surface = display_va_surface;
+  // TODO(339518553): Allow not-film grain nullptr |reconstruct_va_surface|.
+  auto reconstruct_va_surface = std::make_unique<VASurfaceHandle>(
+      display_va_surface_handle->id(), base::DoNothing());
   if (apply_grain) {
     // TODO(hiroh): When no surface is available here, this returns nullptr and
     // |display_va_surface| is released. Since the surface is back to the pool,
     // VaapiVideoDecoder will detect that there are surfaces available and will
     // start another decode task which means that CreateSurface() might fail
     // again for |reconstruct_va_surface| since only one surface might have gone
-    // back to the pool (the one for |display_va_surface|). We should avoid this
-    // loop for the sake of efficiency.
+    // back to the pool (the one for |display_va_surface_handle|). We should
+    // avoid this loop for the sake of efficiency.
     reconstruct_va_surface = vaapi_dec_->CreateSurface();
     if (!reconstruct_va_surface)
       return nullptr;
   }
 
   return base::MakeRefCounted<VaapiAV1Picture>(
-      std::move(display_va_surface), std::move(reconstruct_va_surface));
+      std::move(display_va_surface_handle), std::move(reconstruct_va_surface));
 }
 
 bool AV1VaapiVideoDecoderDelegate::OutputPicture(const AV1Picture& pic) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   const auto* vaapi_pic = static_cast<const VaapiAV1Picture*>(&pic);
-  vaapi_dec_->SurfaceReady(vaapi_pic->display_va_surface(),
+  vaapi_dec_->SurfaceReady(vaapi_pic->display_va_surface_id(),
                            vaapi_pic->bitstream_id(), vaapi_pic->visible_rect(),
-                           vaapi_pic->get_colorspace());
+                           vaapi_pic->get_colorspace(),
+                           vaapi_pic->dynamic_hdr_metadata());
   return true;
 }
 
@@ -783,7 +805,7 @@ DecodeStatus AV1VaapiVideoDecoderDelegate::SubmitDecode(
     base::span<const uint8_t> data) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   const DecryptConfig* decrypt_config = pic.decrypt_config();
   if (decrypt_config && !SetDecryptConfig(decrypt_config->Clone()))
     return DecodeStatus::kFail;
@@ -813,7 +835,7 @@ DecodeStatus AV1VaapiVideoDecoderDelegate::SubmitDecode(
         return DecodeStatus::kFail;
     }
   }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
   // libgav1 ensures that tile_columns is >= 0 and <= MAX_TILE_COLS.
   DCHECK_LE(0, pic.frame_header.tile_info.tile_columns);
@@ -859,7 +881,7 @@ DecodeStatus AV1VaapiVideoDecoderDelegate::SubmitDecode(
       {{picture_params_->id(),
         {picture_params_->type(), picture_params_->size(), &pic_param}}};
   buffers.reserve(3 + slice_params.size());
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   if (IsTranscrypted()) {
     CHECK(decrypt_config);
     CHECK_EQ(decrypt_config->subsamples().size(), 2u);
@@ -882,9 +904,10 @@ DecodeStatus AV1VaapiVideoDecoderDelegate::SubmitDecode(
     buffers.push_back(
         {encoded_data->id(),
          {encoded_data->type(), encoded_data->size(),
-          data.data() + decrypt_config->subsamples()[0].clear_bytes}});
+          UNSAFE_TODO(data.data() +
+                      decrypt_config->subsamples()[0].clear_bytes)}});
   } else {
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
     encoded_data = vaapi_wrapper_->CreateVABuffer(VASliceDataBufferType,
                                                   data.size_bytes());
     if (!encoded_data)
@@ -892,14 +915,14 @@ DecodeStatus AV1VaapiVideoDecoderDelegate::SubmitDecode(
     buffers.push_back(
         {encoded_data->id(),
          {encoded_data->type(), encoded_data->size(), data.data()}});
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   }
   if (uses_crypto) {
     buffers.push_back(
         {crypto_params_->id(),
          {crypto_params_->type(), crypto_params_->size(), &crypto_param}});
   }
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
   for (size_t i = 0; i < slice_params.size(); ++i) {
     buffers.push_back({slice_params_va_buffers[i]->id(),
@@ -909,7 +932,7 @@ DecodeStatus AV1VaapiVideoDecoderDelegate::SubmitDecode(
 
   const auto* vaapi_pic = static_cast<const VaapiAV1Picture*>(&pic);
   const bool success = vaapi_wrapper_->MapAndCopyAndExecute(
-      vaapi_pic->reconstruct_va_surface()->id(), buffers);
+      vaapi_pic->reconstruct_va_surface_id(), buffers);
   if (!success && NeedsProtectedSessionRecovery())
     return DecodeStatus::kTryAgain;
 
@@ -920,6 +943,7 @@ DecodeStatus AV1VaapiVideoDecoderDelegate::SubmitDecode(
 }
 
 void AV1VaapiVideoDecoderDelegate::OnVAContextDestructionSoon() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   // Destroy the member ScopedVABuffers below since they refer to a VAContextID
   // that will be destroyed soon.
   picture_params_.reset();

@@ -9,22 +9,21 @@
 #include "base/check.h"
 #include "base/no_destructor.h"
 #include "base/pickle.h"
-#include "base/strings/string_util.h"
+#include "base/unguessable_token.h"
 #include "chrome/browser/profiles/profile.h"
-#include "ui/base/clipboard/clipboard.h"
 
 namespace {
 
 // The MIME type for the clipboard format for BrowserActionDragData.
 const char kClipboardFormatString[] = "chromium/x-browser-actions";
 
-}
+}  // namespace
 
 BrowserActionDragData::BrowserActionDragData()
-    : profile_(nullptr), index_(static_cast<size_t>(-1)) {}
+    : index_(static_cast<size_t>(-1)) {}
 
 BrowserActionDragData::BrowserActionDragData(const std::string& id, int index)
-    : profile_(nullptr), id_(id), index_(index) {}
+    : id_(id), index_(index) {}
 
 bool BrowserActionDragData::GetDropFormats(
     std::set<ui::ClipboardFormatType>* format_types) {
@@ -43,11 +42,11 @@ bool BrowserActionDragData::CanDrop(const ui::OSExchangeData& data,
 }
 
 bool BrowserActionDragData::IsFromProfile(const Profile* profile) const {
-  return profile_ == profile;
+  return profile_unique_token_ == profile->UniqueToken();
 }
 
-void BrowserActionDragData::Write(
-    Profile* profile, ui::OSExchangeData* data) const {
+void BrowserActionDragData::Write(Profile* profile,
+                                  ui::OSExchangeData* data) const {
   DCHECK(data);
   base::Pickle data_pickle;
   WriteToPickle(profile, &data_pickle);
@@ -55,15 +54,19 @@ void BrowserActionDragData::Write(
 }
 
 bool BrowserActionDragData::Read(const ui::OSExchangeData& data) {
-  if (!data.HasCustomFormat(GetBrowserActionFormatType()))
+  if (!data.HasCustomFormat(GetBrowserActionFormatType())) {
     return false;
+  }
 
-  base::Pickle drag_data_pickle;
-  if (!data.GetPickledData(GetBrowserActionFormatType(), &drag_data_pickle))
+  std::optional<base::Pickle> drag_data_pickle =
+      data.GetPickledData(GetBrowserActionFormatType());
+  if (!drag_data_pickle.has_value()) {
     return false;
+  }
 
-  if (!ReadFromPickle(&drag_data_pickle))
+  if (!ReadFromPickle(&drag_data_pickle.value())) {
     return false;
+  }
 
   return true;
 }
@@ -72,14 +75,15 @@ bool BrowserActionDragData::Read(const ui::OSExchangeData& data) {
 const ui::ClipboardFormatType&
 BrowserActionDragData::GetBrowserActionFormatType() {
   static base::NoDestructor<ui::ClipboardFormatType> format(
-      ui::ClipboardFormatType::GetType(kClipboardFormatString));
+      ui::ClipboardFormatType::CustomPlatformType(kClipboardFormatString));
 
   return *format;
 }
 
 void BrowserActionDragData::WriteToPickle(Profile* profile,
                                           base::Pickle* pickle) const {
-  pickle->WriteBytes(&profile, sizeof(profile));
+  pickle->WriteUInt64(profile->UniqueToken().GetHighForSerialization());
+  pickle->WriteUInt64(profile->UniqueToken().GetLowForSerialization());
   pickle->WriteString(id_);
   pickle->WriteUInt64(index_);
 }
@@ -87,17 +91,26 @@ void BrowserActionDragData::WriteToPickle(Profile* profile,
 bool BrowserActionDragData::ReadFromPickle(base::Pickle* pickle) {
   base::PickleIterator data_iterator(*pickle);
 
-  const char* tmp;
-  if (!data_iterator.ReadBytes(&tmp, sizeof(profile_)))
+  uint64_t token_high = 0;
+  uint64_t token_low = 0;
+  if (!data_iterator.ReadUInt64(&token_high) ||
+      !data_iterator.ReadUInt64(&token_low)) {
     return false;
-  memcpy(&profile_, tmp, sizeof(profile_));
+  }
+  auto token = base::UnguessableToken::Deserialize(token_high, token_low);
+  if (!token) {
+    return false;
+  }
+  profile_unique_token_ = *token;
 
-  if (!data_iterator.ReadString(&id_))
+  if (!data_iterator.ReadString(&id_)) {
     return false;
+  }
 
   uint64_t index;
-  if (!data_iterator.ReadUInt64(&index))
+  if (!data_iterator.ReadUInt64(&index)) {
     return false;
+  }
   index_ = static_cast<size_t>(index);
 
   return true;

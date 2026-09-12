@@ -7,6 +7,10 @@
 #ifndef CHROME_INSTALLER_SETUP_INSTALL_H_
 #define CHROME_INSTALLER_SETUP_INSTALL_H_
 
+#include <optional>
+
+#include "build/branding_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/installer/util/util_constants.h"
 
 namespace base {
@@ -46,12 +50,6 @@ enum InstallShortcutLevel {
   // Update if a shortcut level is added.
   INSTALL_SHORTCUT_LEVEL_LAST = ALL_USERS,
 };
-
-// Creates chrome.VisualElementsManifest.xml in |src_path| if
-// |src_path|\VisualElements exists. Returns true unless the manifest is
-// supposed to be created, but fails to be.
-bool CreateVisualElementsManifest(const base::FilePath& src_path,
-                                  const base::Version& version);
 
 // Overwrites shortcuts (desktop, quick launch, and start menu) if they are
 // present on the system.

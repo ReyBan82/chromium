@@ -2,9 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as Common from 'devtools/core/common/common.js';
+import * as BindingsModule from 'devtools/models/bindings/bindings.js';
+import * as Main from 'devtools/entrypoints/main/main.js';
+
 (async function() {
   TestRunner.addResult(`Tests that sourcemap is applied correctly when specified by the respective HTTP header.\n`);
-  await TestRunner.loadLegacyModule('elements'); await TestRunner.loadTestModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   await TestRunner.loadHTML(`
       <div id="container">
@@ -21,8 +27,8 @@
       }
   `);
 
-  Common.settingForTest('cssSourceMapsEnabled').set(true);
-  TestRunner.addSniffer(Bindings.CSSWorkspaceBinding.prototype, 'updateLocations', step1);
+  Main.MainImpl.MainImpl.universeForTest.settings.settingForTest('css-source-maps-enabled').set(true);
+  TestRunner.addSniffer(BindingsModule.CSSWorkspaceBinding.CSSWorkspaceBinding.prototype, 'updateLocations', step1);
   TestRunner.evaluateInPage('addStylesheet()');
 
   function step1() {

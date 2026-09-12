@@ -6,6 +6,17 @@
 
 #include "components/device_signals/core/common/signals_constants.h"
 
+namespace {
+bool IsMatchingCert(
+    const certificate_matching::CertificatePrincipalPattern& cert,
+    const certificate_matching::CertificatePrincipalPattern& other_cert) {
+  return (cert.common_name() == other_cert.common_name() &&
+          cert.locality() == other_cert.locality() &&
+          cert.organization() == other_cert.organization() &&
+          cert.organization_unit() == other_cert.organization_unit());
+}
+}  // namespace
+
 namespace device_signals {
 
 ExecutableMetadata::ExecutableMetadata() = default;
@@ -51,12 +62,29 @@ bool GetFileSystemInfoOptions::operator==(
          compute_executable_metadata == other.compute_executable_metadata;
 }
 
-absl::optional<base::Value> CrowdStrikeSignals::ToValue() const {
-  if (customer_id.empty() && agent_id.empty()) {
-    return absl::nullopt;
+GetCertificateOptions::GetCertificateOptions() = default;
+GetCertificateOptions::GetCertificateOptions(const GetCertificateOptions&) =
+    default;
+GetCertificateOptions& GetCertificateOptions::operator=(
+    const GetCertificateOptions&) = default;
+GetCertificateOptions::~GetCertificateOptions() = default;
+bool GetCertificateOptions::operator==(
+    const GetCertificateOptions& other) const {
+  return IsMatchingCert(issuer_pattern, other.issuer_pattern) &&
+         IsMatchingCert(subject_pattern, other.subject_pattern) &&
+         challenge == other.challenge;
+}
+
+bool CrowdStrikeSignals::IsEmpty() const {
+  return customer_id.empty() && agent_id.empty();
+}
+
+std::optional<base::Value> CrowdStrikeSignals::ToValue() const {
+  if (IsEmpty()) {
+    return std::nullopt;
   }
 
-  base::Value::Dict dict_value;
+  base::DictValue dict_value;
 
   if (!customer_id.empty()) {
     dict_value.Set(names::kCustomerId, customer_id);

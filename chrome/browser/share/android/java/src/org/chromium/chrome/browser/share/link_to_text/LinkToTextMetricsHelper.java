@@ -8,25 +8,26 @@ import androidx.annotation.IntDef;
 
 import org.chromium.base.metrics.RecordHistogram;
 import org.chromium.base.metrics.RecordUserAction;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.share.link_to_text.LinkToTextCoordinator.LinkGeneration;
 
-/**
- * Helper for metrics related to the Link to Text feature.
- */
+/** Helper for metrics related to the Link to Text feature. */
+@NullMarked
 public final class LinkToTextMetricsHelper {
-    @IntDef({LinkToTextDiagnoseStatus.SHOW_SHARINGHUB_FOR_HIGHLIGHT,
-            LinkToTextDiagnoseStatus.REQUEST_SELECTOR, LinkToTextDiagnoseStatus.SELECTOR_RECEIVED,
-            LinkToTextDiagnoseStatus.MAX})
+    @IntDef({
+        LinkToTextDiagnoseStatus.SHOW_SHARINGHUB_FOR_HIGHLIGHT,
+        LinkToTextDiagnoseStatus.REQUEST_SELECTOR,
+        LinkToTextDiagnoseStatus.SELECTOR_RECEIVED,
+        LinkToTextDiagnoseStatus.COUNT
+    })
     public @interface LinkToTextDiagnoseStatus {
         int SHOW_SHARINGHUB_FOR_HIGHLIGHT = 0;
         int REQUEST_SELECTOR = 1;
         int SELECTOR_RECEIVED = 2;
-        int MAX = 3;
+        int COUNT = 3;
     }
 
-    /**
-     *  Private constructor since all the methods in this class are static.
-     */
+    /** Private constructor since all the methods in this class are static. */
     private LinkToTextMetricsHelper() {}
 
     /**
@@ -35,7 +36,7 @@ public final class LinkToTextMetricsHelper {
      * @param linkGenerationStatus The state of the link generation that ended up being shared.
      */
     public static void recordSharedHighlightStateMetrics(@LinkGeneration int linkGenerationStatus) {
-        if (linkGenerationStatus == LinkGeneration.MAX) return;
+        if (linkGenerationStatus == LinkGeneration.COUNT) return;
         switch (linkGenerationStatus) {
             case LinkGeneration.LINK:
                 RecordUserAction.record(
@@ -50,18 +51,22 @@ public final class LinkToTextMetricsHelper {
             default:
                 break;
         }
-        RecordHistogram.recordEnumeratedHistogram("SharedHighlights.AndroidShareSheet.SharedState",
-                linkGenerationStatus, LinkGeneration.MAX);
+        RecordHistogram.recordEnumeratedHistogram(
+                "SharedHighlights.AndroidShareSheet.SharedState",
+                linkGenerationStatus,
+                LinkGeneration.COUNT);
     }
 
     /**
      * Records the metrics about the status of link to text flow.
      *
-     * @param LinkToTextDiagnoseStatus The status of link to text flow.
+     * @param linkToTextDiagnoseStatus The status of link to text flow.
      */
     public static void recordLinkToTextDiagnoseStatus(
             @LinkToTextDiagnoseStatus int linkToTextDiagnoseStatus) {
-        RecordHistogram.recordEnumeratedHistogram("SharedHighlights.LinkToTextDiagnoseStatus",
-                linkToTextDiagnoseStatus, LinkToTextDiagnoseStatus.MAX);
+        RecordHistogram.recordEnumeratedHistogram(
+                "SharedHighlights.LinkToTextDiagnoseStatus",
+                linkToTextDiagnoseStatus,
+                LinkToTextDiagnoseStatus.COUNT);
     }
 }

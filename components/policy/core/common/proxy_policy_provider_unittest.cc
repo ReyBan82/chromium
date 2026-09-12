@@ -101,7 +101,7 @@ TEST_F(ProxyPolicyProviderTest, OwnedDelegate) {
 
 TEST_F(ProxyPolicyProviderTest, RefreshPoliciesUnownedDelegate) {
   EXPECT_CALL(observer_, OnUpdatePolicy(&proxy_provider_));
-  proxy_provider_.RefreshPolicies();
+  proxy_provider_.RefreshPolicies(PolicyFetchReason::kTest);
   Mock::VerifyAndClearExpectations(&observer_);
 
   EXPECT_CALL(observer_, OnUpdatePolicy(&proxy_provider_));
@@ -109,8 +109,8 @@ TEST_F(ProxyPolicyProviderTest, RefreshPoliciesUnownedDelegate) {
   Mock::VerifyAndClearExpectations(&observer_);
 
   EXPECT_CALL(observer_, OnUpdatePolicy(&proxy_provider_)).Times(0);
-  EXPECT_CALL(*mock_provider_, RefreshPolicies());
-  proxy_provider_.RefreshPolicies();
+  EXPECT_CALL(*mock_provider_, RefreshPolicies(PolicyFetchReason::kTest));
+  proxy_provider_.RefreshPolicies(PolicyFetchReason::kTest);
   Mock::VerifyAndClearExpectations(&observer_);
   Mock::VerifyAndClearExpectations(mock_provider_.get());
 
@@ -121,7 +121,7 @@ TEST_F(ProxyPolicyProviderTest, RefreshPoliciesUnownedDelegate) {
 
 TEST_F(ProxyPolicyProviderTest, RefreshPoliciesOwnedDelegate) {
   EXPECT_CALL(observer_, OnUpdatePolicy(&proxy_provider_));
-  proxy_provider_.RefreshPolicies();
+  proxy_provider_.RefreshPolicies(PolicyFetchReason::kTest);
   Mock::VerifyAndClearExpectations(&observer_);
 
   EXPECT_CALL(observer_, OnUpdatePolicy(&proxy_provider_));
@@ -130,14 +130,20 @@ TEST_F(ProxyPolicyProviderTest, RefreshPoliciesOwnedDelegate) {
   Mock::VerifyAndClearExpectations(&observer_);
 
   EXPECT_CALL(observer_, OnUpdatePolicy(&proxy_provider_)).Times(0);
-  EXPECT_CALL(*mock_provider_ptr, RefreshPolicies());
-  proxy_provider_.RefreshPolicies();
+  EXPECT_CALL(*mock_provider_ptr, RefreshPolicies(PolicyFetchReason::kTest));
+  proxy_provider_.RefreshPolicies(PolicyFetchReason::kTest);
   Mock::VerifyAndClearExpectations(&observer_);
   Mock::VerifyAndClearExpectations(mock_provider_ptr);
 
   EXPECT_CALL(observer_, OnUpdatePolicy(&proxy_provider_));
   mock_provider_ptr->UpdatePolicy(PolicyBundle());
   Mock::VerifyAndClearExpectations(&observer_);
+}
+
+TEST_F(ProxyPolicyProviderTest, IsFirstPolicyLoadComplete) {
+  EXPECT_FALSE(proxy_provider_.IsFirstPolicyLoadComplete(POLICY_DOMAIN_CHROME));
+  proxy_provider_.SetUnownedDelegate(nullptr);
+  EXPECT_TRUE(proxy_provider_.IsFirstPolicyLoadComplete(POLICY_DOMAIN_CHROME));
 }
 
 }  // namespace policy

@@ -8,14 +8,8 @@ module media.mojom;
 // request from the renderer, see AudioProcessorControls::GetStats() in this
 // file.
 struct AudioProcessingStats {
-
-  // TODO(https://crbug.com/657632): Numeric values cannot be optional, so add
-  // flags for each of them.
-  bool has_echo_return_loss;
-  double echo_return_loss;
-
-  bool has_echo_return_loss_enhancement;
-  double echo_return_loss_enhancement;
+  double? echo_return_loss;
+  double? echo_return_loss_enhancement;
 };
 
 // Settings for the software audio processing performed in the audio service.
@@ -25,12 +19,12 @@ struct AudioProcessingStats {
 struct AudioProcessingSettings {
   bool echo_cancellation;
   bool noise_suppression;
-  bool transient_noise_suppression;
   bool automatic_gain_control;
-  bool high_pass_filter;
   bool multi_channel_capture_processing;
-  bool stereo_mirroring;
-  bool force_apm_creation;
+  bool use_loopback_aec_reference;
+
+  [EnableIf=chrome_wide_echo_cancellation]
+  bool voice_isolation;
 };
 
 // This interface is hosted in the audio service and called from the renderer.
@@ -51,6 +45,9 @@ interface AudioProcessorControls {
   // Values less than 1 and greater than the input stream capacity are adjusted
   // to the nearest valid number.
   SetPreferredNumCaptureChannels(int32 num_preferred_channels);
+
+  // Enables or disables voice isolation.
+  SetVoiceIsolation(bool enabled);
 };
 
 struct AudioProcessingConfig {

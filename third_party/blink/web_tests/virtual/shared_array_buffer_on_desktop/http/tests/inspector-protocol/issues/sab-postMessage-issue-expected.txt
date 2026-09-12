@@ -7,10 +7,10 @@ Creation issue: {
             sharedArrayBufferIssueDetails : {
                 isWarning : true
                 sourceCodeLocation : {
-                    columnNumber : 18
-                    lineNumber : 0
+                    columnNumber : 48
+                    lineNumber : 1
                     scriptId : <string>
-                    url : 
+                    url :
                 }
                 type : CreationIssue
             }
@@ -26,10 +26,10 @@ Deprecation issue: {
                     frameId : <string>
                 }
                 sourceCodeLocation : {
-                    columnNumber : 18
-                    lineNumber : 0
+                    columnNumber : 48
+                    lineNumber : 1
                     scriptId : <string>
-                    url : 
+                    url :
                 }
                 type : SharedArrayBufferConstructedWithoutIsolation
             }
@@ -43,10 +43,10 @@ Transfer issue: {
             sharedArrayBufferIssueDetails : {
                 isWarning : true
                 sourceCodeLocation : {
-                    columnNumber : 1
+                    columnNumber : 0
                     lineNumber : 0
                     scriptId : <string>
-                    url : 
+                    url :
                 }
                 type : TransferIssue
             }

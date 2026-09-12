@@ -4,17 +4,17 @@
 
 #include "fuchsia_web/runners/cast/api_bindings_client.h"
 
+#include <string_view>
 #include <utility>
 
 #include "base/fuchsia/fuchsia_logging.h"
 #include "base/functional/bind.h"
-#include "base/strings/string_piece.h"
 #include "base/task/single_thread_task_runner.h"
 #include "components/cast/message_port/fuchsia/message_port_fuchsia.h"
 
 namespace {
 
-uint64_t kBindingsIdStart = 0xFF0000;
+constexpr uint64_t kBindingsIdStart = 0xFF0000;
 
 }  // namespace
 
@@ -42,6 +42,22 @@ ApiBindingsClient::~ApiBindingsClient() {
     // Remove all injected scripts using their automatically enumerated IDs.
     for (uint64_t i = 0; i < bindings_->size(); ++i)
       frame_->RemoveBeforeLoadJavaScript(kBindingsIdStart + i);
+  }
+}
+
+void ApiBindingsClient::SetOrigin(const url::Origin& origin) {
+  if (origin_.has_value()) {
+    if (origin.opaque() && origin_->opaque()) {
+      return;
+    }
+    if (origin == *origin_) {
+      return;
+    }
+  }
+  origin_ = origin;
+
+  if (bindings_service_) {
+    bindings_service_->SetOrigin(origin.opaque() ? "" : origin.Serialize());
   }
 }
 
@@ -100,7 +116,7 @@ bool ApiBindingsClient::HasBindings() const {
 }
 
 bool ApiBindingsClient::OnPortConnected(
-    base::StringPiece port_name,
+    std::string_view port_name,
     std::unique_ptr<cast_api_bindings::MessagePort> port) {
   if (!bindings_service_)
     return false;

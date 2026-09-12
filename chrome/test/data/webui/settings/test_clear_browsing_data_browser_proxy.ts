@@ -4,7 +4,7 @@
 
 // clang-format off
 import {webUIListenerCallback} from 'chrome://resources/js/cr.js';
-import {ClearBrowsingDataBrowserProxy, ClearBrowsingDataResult, UpdateSyncStateEvent} from 'chrome://settings/lazy_load.js';
+import type {ClearBrowsingDataBrowserProxy, ClearBrowsingDataResult, TimePeriod, UpdateSyncStateEvent} from 'chrome://settings/lazy_load.js';
 import {TestBrowserProxy} from 'chrome://webui-test/test_browser_proxy.js';
 
 // clang-format on
@@ -14,7 +14,13 @@ export class TestClearBrowsingDataBrowserProxy extends TestBrowserProxy
   private clearBrowsingDataPromise_: Promise<ClearBrowsingDataResult>|null;
 
   constructor() {
-    super(['initialize', 'clearBrowsingData']);
+    super([
+      'initialize',
+      'getSyncState',
+      'clearBrowsingData',
+      'restartCounters',
+      'recordSettingsClearBrowsingDataTimePeriodHistogram',
+    ]);
 
     /**
      * The promise to return from |clearBrowsingData|.
@@ -45,11 +51,20 @@ export class TestClearBrowsingDataBrowserProxy extends TestBrowserProxy
     this.methodCalled('getSyncState');
     return Promise.resolve({
       signedIn: false,
-      syncConsented: false,
       syncingHistory: false,
       shouldShowCookieException: false,
       isNonGoogleDse: false,
       nonGoogleSearchHistoryString: 'somestring',
     });
+  }
+
+  restartCounters(timePeriod: number) {
+    this.methodCalled('restartCounters', timePeriod);
+    return Promise.resolve();
+  }
+
+  recordSettingsClearBrowsingDataTimePeriodHistogram(bucket: TimePeriod) {
+    this.methodCalled(
+        'recordSettingsClearBrowsingDataTimePeriodHistogram', bucket);
   }
 }

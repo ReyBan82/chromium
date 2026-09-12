@@ -10,6 +10,7 @@
 #include "base/notreached.h"
 #include "components/content_capture/browser/content_capture_consumer.h"
 #include "components/content_capture/browser/content_capture_receiver.h"
+#include "components/content_capture/common/content_capture_features.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/global_routing_id.h"
 #include "content/public/browser/navigation_entry.h"
@@ -150,6 +151,17 @@ void OnscreenContentProvider::TitleWasSet(content::NavigationEntry* entry) {
   }
 }
 
+void OnscreenContentProvider::FlushCaptureContent(
+    ContentCaptureReceiver* content_capture_receiver,
+    const ContentCaptureFrame& data) {
+  ContentCaptureSession parent_session;
+  BuildContentCaptureSession(content_capture_receiver, true /* ancestor_only */,
+                             &parent_session);
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
+    consumer->FlushCaptureContent(parent_session, data);
+  }
+}
+
 void OnscreenContentProvider::DidCaptureContent(
     ContentCaptureReceiver* content_capture_receiver,
     const ContentCaptureFrame& data) {
@@ -157,8 +169,9 @@ void OnscreenContentProvider::DidCaptureContent(
   ContentCaptureSession parent_session;
   BuildContentCaptureSession(content_capture_receiver, true /* ancestor_only */,
                              &parent_session);
-  for (auto* consumer : consumers_)
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
     consumer->DidCaptureContent(parent_session, data);
+  }
 }
 
 void OnscreenContentProvider::DidUpdateContent(
@@ -167,8 +180,9 @@ void OnscreenContentProvider::DidUpdateContent(
   ContentCaptureSession parent_session;
   BuildContentCaptureSession(content_capture_receiver, true /* ancestor_only */,
                              &parent_session);
-  for (auto* consumer : consumers_)
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
     consumer->DidUpdateContent(parent_session, data);
+  }
 }
 
 void OnscreenContentProvider::DidRemoveContent(
@@ -179,8 +193,9 @@ void OnscreenContentProvider::DidRemoveContent(
   // |content_capture_receiver| associated frame.
   BuildContentCaptureSession(content_capture_receiver,
                              false /* ancestor_only */, &session);
-  for (auto* consumer : consumers_)
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
     consumer->DidRemoveContent(session, data);
+  }
 }
 
 void OnscreenContentProvider::DidRemoveSession(
@@ -198,8 +213,9 @@ void OnscreenContentProvider::DidRemoveSession(
   if (!BuildContentCaptureSessionLastSeen(content_capture_receiver, &session))
     return;
 
-  for (auto* consumer : consumers_)
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
     consumer->DidRemoveSession(session);
+  }
 }
 
 void OnscreenContentProvider::DidUpdateTitle(
@@ -211,13 +227,15 @@ void OnscreenContentProvider::DidUpdateTitle(
   // Shall only update mainframe's title.
   DCHECK(session.size() == 1);
 
-  for (auto* consumer : consumers_)
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
     consumer->DidUpdateTitle(*session.begin());
+  }
 }
 
 void OnscreenContentProvider::DidUpdateFaviconURL(
     content::RenderFrameHost* render_frame_host,
-    const std::vector<blink::mojom::FaviconURLPtr>& candidates) {
+    const std::vector<blink::mojom::FaviconURLPtr>& candidates,
+    blink::mojom::FaviconUpdateReason reason) {
   if (ContentCaptureReceiver::
           disable_get_favicon_from_web_contents_for_testing()) {
     return;
@@ -242,8 +260,51 @@ void OnscreenContentProvider::DidUpdateFavicon(
 
   // Shall only update mainframe's title.
   DCHECK(session.size() == 1);
-  for (auto* consumer : consumers_)
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
     consumer->DidUpdateFavicon(*session.begin());
+  }
+}
+
+void OnscreenContentProvider::DidUpdateSensitivityScore(
+    float sensitivity_score) {
+  if (!content_capture::features::ShouldSendMetadataForDataShare() ||
+      !ShouldCapture(web_contents()->GetLastCommittedURL())) {
+    return;
+  }
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
+    consumer->DidUpdateSensitivityScore(web_contents()->GetLastCommittedURL(),
+                                        sensitivity_score);
+  }
+}
+
+void OnscreenContentProvider::DidUpdateLanguageDetails(
+    const std::string& detected_language,
+    float language_confidence) {
+  if (!content_capture::features::ShouldSendMetadataForDataShare() ||
+      !ShouldCapture(web_contents()->GetLastCommittedURL())) {
+    return;
+  }
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
+    consumer->DidUpdateLanguageDetails(web_contents()->GetLastCommittedURL(),
+                                       detected_language, language_confidence);
+  }
+}
+
+void OnscreenContentProvider::ClearContentCaptureMetadata() {
+  if (!content_capture::features::ShouldSendMetadataForDataShare()) {
+    return;
+  }
+
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
+    consumer->ClearContentCaptureMetadata();
+  }
+}
+
+void OnscreenContentProvider::DidFinishNavigation(
+    content::NavigationHandle* navigation_handle) {
+  // This signal comes when a navigation finished in the WebContents. Clearing
+  // the Java-side builder.
+  ClearContentCaptureMetadata();
 }
 
 void OnscreenContentProvider::BuildContentCaptureSession(
@@ -297,7 +358,7 @@ bool OnscreenContentProvider::BuildContentCaptureSessionForMainFrame(
 }
 
 bool OnscreenContentProvider::ShouldCapture(const GURL& url) {
-  for (auto* consumer : consumers_) {
+  for (content_capture::ContentCaptureConsumer* consumer : consumers_) {
     if (consumer->ShouldCapture(url))
       return true;
   }

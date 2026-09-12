@@ -7,7 +7,6 @@
 
 #include "base/containers/span.h"
 #include "cc/debug/debug_export.h"
-#include "cc/raster/lcd_text_disallowed_reason.h"
 #include "third_party/skia/include/core/SkColor.h"
 
 namespace cc {
@@ -37,14 +36,11 @@ class CC_DEBUG_EXPORT DebugColors {
   static SkColor4f HighResTileBorderColor();
   static int HighResTileBorderWidth(float device_scale_factor);
 
-  static SkColor4f LowResTileBorderColor();
-  static int LowResTileBorderWidth(float device_scale_factor);
+  static SkColor4f AboveHighResTileBorderColor();
+  static int AboveHighResTileBorderWidth(float device_scale_factor);
 
-  static SkColor4f ExtraHighResTileBorderColor();
-  static int ExtraHighResTileBorderWidth(float device_scale_factor);
-
-  static SkColor4f ExtraLowResTileBorderColor();
-  static int ExtraLowResTileBorderWidth(float device_scale_factor);
+  static SkColor4f BelowHighResTileBorderColor();
+  static int BelowHighResTileBorderWidth(float device_scale_factor);
 
   static SkColor4f MissingTileBorderColor();
   static int MissingTileBorderWidth(float device_scale_factor);
@@ -65,14 +61,22 @@ class CC_DEBUG_EXPORT DebugColors {
   static SkColor4f EvictedTileCheckerboardColor();
   static SkColor4f InvalidatedTileCheckerboardColor();
 
-  static const int kFadeSteps = 50;
+  static constexpr int kFadeSteps = 50;
   static SkColor4f PaintRectBorderColor(int step);
   static int PaintRectBorderWidth();
   static SkColor4f PaintRectFillColor(int step);
 
-  static SkColor4f LayoutShiftRectBorderColor();
+  static SkColor4f LayoutShiftRectBorderColor(int step);
   static int LayoutShiftRectBorderWidth();
   static SkColor4f LayoutShiftRectFillColor(int step);
+
+  static SkColor4f InteractionContentfulPaintRectBorderColor(int step);
+  static int InteractionContentfulPaintRectBorderWidth();
+  static SkColor4f InteractionContentfulPaintRectFillColor(int step);
+
+  static SkColor4f NavigationContentfulPaintRectBorderColor(int step);
+  static int NavigationContentfulPaintRectBorderWidth();
+  static SkColor4f NavigationContentfulPaintRectFillColor(int step);
 
   static SkColor4f PropertyChangedRectBorderColor();
   static int PropertyChangedRectBorderWidth();
@@ -98,21 +102,22 @@ class CC_DEBUG_EXPORT DebugColors {
   static int ScrollEventHandlerRectBorderWidth();
   static SkColor4f ScrollEventHandlerRectFillColor();
 
-  static SkColor4f NonFastScrollableRectBorderColor();
-  static int NonFastScrollableRectBorderWidth();
-  static SkColor4f NonFastScrollableRectFillColor();
+  static SkColor4f MainThreadScrollHitTestRectBorderColor();
+  static int MainThreadScrollHitTestRectBorderWidth();
+  static SkColor4f MainThreadScrollHitTestRectFillColor();
 
-  static SkColor4f MainThreadScrollingReasonRectBorderColor();
-  static int MainThreadScrollingReasonRectBorderWidth();
-  static SkColor4f MainThreadScrollingReasonRectFillColor();
+  static SkColor4f MainThreadScrollRepaintRectBorderColor();
+  static int MainThreadScrollRepaintRectBorderWidth();
+  static SkColor4f MainThreadScrollRepaintRectFillColor();
+
+  static SkColor4f RasterInducingScrollRectBorderColor();
+  static int RasterInducingScrollRectBorderWidth();
+  static SkColor4f RasterInducingScrollRectFillColor();
 
   static SkColor4f LayerAnimationBoundsBorderColor();
   static int LayerAnimationBoundsBorderWidth();
   static SkColor4f LayerAnimationBoundsFillColor();
 
-  static SkColor4f NonPaintedFillColor();
-  static SkColor4f MissingPictureFillColor();
-  static SkColor4f MissingResizeInvalidations();
   static SkColor4f PictureBorderColor();
 
   static base::span<const float> TintCompositedContentColorTransformMatrix();
@@ -129,8 +134,6 @@ class CC_DEBUG_EXPORT DebugColors {
   static SkColor4f FPSDisplaySuccessfulFrame();
   static SkColor4f MemoryDisplayTextColor();
   static SkColor4f PaintTimeDisplayTextAndGraphColor();
-
-  static SkColor4f NonLCDTextHighlightColor(LCDTextDisallowedReason);
 };
 
 }  // namespace cc

@@ -9,23 +9,19 @@
 #include <string>
 
 #include "base/functional/callback_forward.h"
-#include "components/viz/common/quads/compositor_render_pass.h"
+#include "components/viz/common/quads/compositor_frame.h"
 #include "components/viz/common/viz_common_export.h"
+#include "ui/gfx/geometry/vector2d_f.h"
+
+namespace gfx {
+class Transform;
+}  // namespace gfx
 
 namespace viz {
 
 // This class is a collection of utils used by view transition API.
 class VIZ_COMMON_EXPORT TransitionUtils {
  public:
-  // Computes the opacity value of the given target_id as drawn in the root
-  // render pass. It looks through the chain of CompositorRenderPassDrawQuads to
-  // accumulate this value. Note that it is assumed, and not checked, that the
-  // render pass draw quads use "regular" opacity accumulation (i.e. kSrcOver
-  // blend mode).
-  static float ComputeAccumulatedOpacity(
-      const CompositorRenderPassList& render_passes,
-      CompositorRenderPassId target_id);
-
   // Creates a deep copy of |source_pass| retaining all state. |filter_callback|
   // is invoked for each render pass draw quad to let the caller modify the copy
   // of these quads. If the callback returns true the quad is skipped otherwise
@@ -41,8 +37,14 @@ class VIZ_COMMON_EXPORT TransitionUtils {
     return CompositorRenderPassId(id.GetUnsafeValue() + 1);
   }
 
-  static std::string RenderPassListToString(
-      const CompositorRenderPassList& render_passes);
+  // If |full_data| is false, only essential information are included.
+  static std::string CompositorFrameToString(
+      const CompositorFrame& render_passes);
+
+  // Computes subpixel alignment offset from a transform. If the transform is
+  // not a scale or translation, returns a zero vector.
+  static gfx::Vector2dF ComputePixelAlignmentOffset(
+      const gfx::Transform& transform);
 };
 
 }  // namespace viz

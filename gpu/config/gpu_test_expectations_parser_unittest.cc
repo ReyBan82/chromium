@@ -23,8 +23,6 @@ static const struct TestOsWithFamily {
   TestOSEntry version;
   TestOSEntry family;
 } kOSVersionsWithFamily[] = {
-    {{"LEOPARD", GPUTestConfig::kOsMacLeopard}, kOsFamilyMac},
-    {{"SNOWLEOPARD", GPUTestConfig::kOsMacSnowLeopard}, kOsFamilyMac},
     {{"LION", GPUTestConfig::kOsMacLion}, kOsFamilyMac},
     {{"MOUNTAINLION", GPUTestConfig::kOsMacMountainLion}, kOsFamilyMac},
     {{"MAVERICKS", GPUTestConfig::kOsMacMavericks}, kOsFamilyMac},
@@ -37,6 +35,9 @@ static const struct TestOsWithFamily {
     {{"BIGSUR", GPUTestConfig::kOsMacBigSur}, kOsFamilyMac},
     {{"MONTEREY", GPUTestConfig::kOsMacMonterey}, kOsFamilyMac},
     {{"VENTURA", GPUTestConfig::kOsMacVentura}, kOsFamilyMac},
+    {{"SONOMA", GPUTestConfig::kOsMacSonoma}, kOsFamilyMac},
+    {{"SEQUOIA", GPUTestConfig::kOsMacSequoia}, kOsFamilyMac},
+    {{"TAHOE", GPUTestConfig::kOsMacTahoe}, kOsFamilyMac},
     {{"LINUX", GPUTestConfig::kOsLinux}, {"LINUX", GPUTestConfig::kOsLinux}},
     {{"CHROMEOS", GPUTestConfig::kOsChromeOS},
      {"CHROMEOS", GPUTestConfig::kOsChromeOS}},
@@ -170,7 +171,7 @@ TEST_F(GPUTestExpectationsParserTest, ValidUnrelatedTestEntry) {
 
 TEST_F(GPUTestExpectationsParserTest, AllModifiers) {
   const std::string text =
-      "BUG12345 WIN10 LEOPARD SNOWLEOPARD LION MOUNTAINLION "
+      "BUG12345 WIN10 SEQUOIA TAHOE LION MOUNTAINLION "
       "MAVERICKS LINUX CHROMEOS ANDROID "
       "NVIDIA INTEL AMD VMWARE RELEASE DEBUG : MyTest = "
       "PASS FAIL FLAKY TIMEOUT SKIP";
@@ -199,7 +200,7 @@ TEST_P(GPUTestExpectationsParserParamTest, DuplicateModifiers) {
 
 TEST_F(GPUTestExpectationsParserTest, AllModifiersLowerCase) {
   const std::string text =
-      "BUG12345 win10 leopard snowleopard lion linux "
+      "BUG12345 win10 sequoia tahoe lion linux "
       "chromeos android nvidia intel amd vmware release debug : MyTest = "
       "pass fail flaky timeout skip";
 

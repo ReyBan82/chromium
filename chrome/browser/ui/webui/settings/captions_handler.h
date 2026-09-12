@@ -5,7 +5,10 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_SETTINGS_CAPTIONS_HANDLER_H_
 #define CHROME_BROWSER_UI_WEBUI_SETTINGS_CAPTIONS_HANDLER_H_
 
+#include <set>
+
 #include "base/memory/raw_ptr.h"
+#include "base/timer/timer.h"
 #include "chrome/browser/ui/webui/settings/settings_page_ui_handler.h"
 #include "components/soda/constants.h"
 #include "components/soda/soda_installer.h"
@@ -29,8 +32,15 @@ class CaptionsHandler : public SettingsPageUIHandler,
   void OnJavascriptDisallowed() override;
 
  private:
-  void HandleLiveCaptionSectionReady(const base::Value::List& args);
-  void HandleOpenSystemCaptionsDialog(const base::Value::List& args);
+  void HandleLiveCaptionSectionReady(const base::ListValue& args);
+  void HandleOpenSystemCaptionsDialog(const base::ListValue& args);
+  void HandleGetAvailableLanguagePacks(const base::ListValue& args);
+  void HandleGetInstalledLanguagePacks(const base::ListValue& args);
+  void HandleRemoveLanguagePacks(const base::ListValue& args);
+  void HandleInstallLanguagePacks(const base::ListValue& args);
+
+  base::ListValue GetAvailableLanguagePacks();
+  base::ListValue GetInstalledLanguagePacks();
 
   // SodaInstaller::Observer overrides:
   void OnSodaInstalled(speech::LanguageCode language_code) override;
@@ -38,6 +48,11 @@ class CaptionsHandler : public SettingsPageUIHandler,
                           speech::SodaInstaller::ErrorCode error_code) override;
   void OnSodaProgress(speech::LanguageCode language_code,
                       int progress) override;
+  void OnSodaInstallCleanProgress();
+
+  std::set<speech::LanguageCode> newly_installed_languages_;
+
+  base::OneShotTimer installed_string_timer_;
 
   raw_ptr<PrefService> prefs_;
   bool soda_available_ = true;

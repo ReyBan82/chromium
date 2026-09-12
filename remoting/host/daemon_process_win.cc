@@ -6,7 +6,9 @@
 
 #include <stdint.h>
 
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -17,9 +19,13 @@
 #include "base/location.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/process/process.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/task_traits.h"
+#include "base/task/thread_pool.h"
+#include "base/threading/sequence_bound.h"
 #include "base/time/time.h"
 #include "base/values.h"
 #include "base/win/registry.h"
@@ -30,25 +36,30 @@
 #include "mojo/public/cpp/system/message_pipe.h"
 #include "remoting/base/auto_thread.h"
 #include "remoting/base/auto_thread_task_runner.h"
+#include "remoting/base/branding.h"
+#include "remoting/base/crash/crash_reporting_breakpad.h"
+#include "remoting/base/logging.h"
 #include "remoting/base/scoped_sc_handle_win.h"
 #include "remoting/host/base/host_exit_codes.h"
 #include "remoting/host/base/screen_resolution.h"
 #include "remoting/host/base/switches.h"
-#include "remoting/host/branding.h"
+#include "remoting/host/chromoting_host_services_server.h"
+#include "remoting/host/crash/minidump_handler.h"
 #include "remoting/host/desktop_session_win.h"
 #include "remoting/host/host_config.h"
 #include "remoting/host/host_main.h"
 #include "remoting/host/ipc_constants.h"
+#include "remoting/host/mojom/chromoting_host_services.mojom.h"
 #include "remoting/host/mojom/remoting_host.mojom.h"
 #include "remoting/host/pairing_registry_delegate_win.h"
+#include "remoting/host/usage_stats_consent.h"
 #include "remoting/host/win/etw_trace_consumer.h"
 #include "remoting/host/win/host_event_file_logger.h"
 #include "remoting/host/win/host_event_windows_event_logger.h"
 #include "remoting/host/win/launch_process_with_token.h"
 #include "remoting/host/win/security_descriptor.h"
 #include "remoting/host/win/unprivileged_process_delegate.h"
-#include "remoting/host/win/worker_process_launcher.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "remoting/host/worker_process_launcher.h"
 
 using base::win::ScopedHandle;
 
@@ -80,56 +91,62 @@ constexpr wchar_t kLoggingRegistryKeyName[] = L"SOFTWARE\\Chromoting\\logging";
 constexpr wchar_t kLogToFileRegistryValue[] = L"LogToFile";
 constexpr wchar_t kLogToEventLogRegistryValue[] = L"LogToEventLog";
 
+#if defined(OFFICIAL_BUILD)
+constexpr wchar_t kPeerConnectionRegistryKeyName[] =
+    L"SOFTWARE\\Google\\Chrome Remote Desktop\\peer-connection";
+#else
+constexpr wchar_t kPeerConnectionRegistryKeyName[] =
+    L"SOFTWARE\\Chromoting\\peer-connection";
+#endif
+
+constexpr wchar_t kUsePeerConnectionProcessRegistryValue[] =
+    L"UsePeerConnectionProcess";
+
 }  // namespace
 
 namespace remoting {
 
 class WtsTerminalMonitor;
 
-const char* kCopiedSwitchNames[] = {switches::kV, switches::kVModule};
-
 class DaemonProcessWin : public DaemonProcess {
  public:
   DaemonProcessWin(scoped_refptr<AutoThreadTaskRunner> caller_task_runner,
                    scoped_refptr<AutoThreadTaskRunner> io_task_runner,
-                   base::OnceClosure stopped_callback);
+                   StoppedCallback stopped_callback);
 
   DaemonProcessWin(const DaemonProcessWin&) = delete;
   DaemonProcessWin& operator=(const DaemonProcessWin&) = delete;
 
   ~DaemonProcessWin() override;
 
-  // WorkerProcessIpcDelegate implementation.
-  void OnChannelConnected(int32_t peer_pid) override;
-  void OnPermanentError(int exit_code) override;
-  void OnWorkerProcessStopped() override;
-
-  // DaemonProcess overrides.
-  bool OnDesktopSessionAgentAttached(
-      int terminal_id,
-      int session_id,
-      mojo::ScopedMessagePipeHandle desktop_pipe) override;
+  // mojom::ChromotingHostServices implementation.
+  void BindSessionServices(
+      mojo::PendingReceiver<mojom::ChromotingSessionServices> receiver)
+      override;
 
   // If event logging has been configured, creates an ETW trace consumer which
   // listens for logged events from our host processes.  Tracing stops when
-  // |etw_trace_consumer_| is destroyed.  Logging destinations are configured
+  // `etw_trace_consumer_` is destroyed.  Logging destinations are configured
   // via the registry.
   void ConfigureHostLogging();
+
+  // If the user has consented to crash reporting, this method will start a
+  // BreakpadServer instance to handle crashes from the network process.
+  void ConfigureCrashReporting();
+
+  // If configured in the registry, enables the PeerConnection process.
+  void ConfigurePeerConnectionProcess();
 
  protected:
   // DaemonProcess implementation.
   std::unique_ptr<DesktopSession> DoCreateDesktopSession(
       int terminal_id,
-      const ScreenResolution& resolution,
-      bool virtual_terminal) override;
-  void DoCrashNetworkProcess(const base::Location& location) override;
+      const mojom::DesktopSessionOptions& options) override;
   void LaunchNetworkProcess() override;
-  void SendHostConfigToNetworkProcess(
-      const std::string& serialized_config) override;
-  void SendTerminalDisconnected(int terminal_id) override;
+  std::unique_ptr<WorkerProcessLauncher::Delegate>
+  CreatePeerConnectionProcessLauncherDelegate() override;
 
-  // Changes the service start type to 'manual'.
-  void DisableAutoStart();
+  bool OnInitAfterChannelConnected(int32_t peer_pid) override;
 
   // Initializes the pairing registry on the host side.
   bool InitializePairingRegistry();
@@ -138,13 +155,6 @@ class DaemonProcessWin : public DaemonProcess {
   bool OpenPairingRegistry();
 
  private:
-  // Mojo keeps the task runner passed to it alive forever, so an
-  // AutoThreadTaskRunner should not be passed to it. Otherwise, the process may
-  // never shut down cleanly.
-  mojo::core::ScopedIPCSupport ipc_support_;
-
-  std::unique_ptr<WorkerProcessLauncher> network_launcher_;
-
   // Handle of the network process.
   ScopedHandle network_process_;
 
@@ -153,82 +163,32 @@ class DaemonProcessWin : public DaemonProcess {
 
   std::unique_ptr<EtwTraceConsumer> etw_trace_consumer_;
 
-  mojo::AssociatedRemote<mojom::DesktopSessionConnectionEvents>
-      desktop_session_connection_events_;
-  mojo::AssociatedRemote<mojom::RemotingHostControl> remoting_host_control_;
+  base::SequenceBound<MinidumpHandler> minidump_handler_;
+
+  std::optional<bool> use_peer_connection_process_;
 };
 
 DaemonProcessWin::DaemonProcessWin(
     scoped_refptr<AutoThreadTaskRunner> caller_task_runner,
     scoped_refptr<AutoThreadTaskRunner> io_task_runner,
-    base::OnceClosure stopped_callback)
+    StoppedCallback stopped_callback)
     : DaemonProcess(caller_task_runner,
                     io_task_runner,
-                    std::move(stopped_callback)),
-      ipc_support_(io_task_runner->task_runner(),
-                   mojo::core::ScopedIPCSupport::ShutdownPolicy::FAST) {}
+                    std::move(stopped_callback)) {}
 
 DaemonProcessWin::~DaemonProcessWin() = default;
 
-void DaemonProcessWin::OnChannelConnected(int32_t peer_pid) {
+bool DaemonProcessWin::OnInitAfterChannelConnected(int32_t peer_pid) {
   // Obtain the handle of the network process.
   network_process_.Set(OpenProcess(PROCESS_DUP_HANDLE, false, peer_pid));
-  if (!network_process_.IsValid()) {
+  if (!network_process_.is_valid()) {
     CrashNetworkProcess(FROM_HERE);
-    return;
+    return false;
   }
-
-  // Typically the Daemon process is responsible for disconnecting the remote
-  // however in cases where the network process crashes, we want to ensure that
-  // |remoting_host_control_| is reset so it can be reused after the network
-  // process is relaunched.
-  remoting_host_control_.reset();
-  network_launcher_->GetRemoteAssociatedInterface(
-      remoting_host_control_.BindNewEndpointAndPassReceiver());
-  desktop_session_connection_events_.reset();
-  network_launcher_->GetRemoteAssociatedInterface(
-      desktop_session_connection_events_.BindNewEndpointAndPassReceiver());
 
   if (!InitializePairingRegistry()) {
     CrashNetworkProcess(FROM_HERE);
-    return;
-  }
-
-  DaemonProcess::OnChannelConnected(peer_pid);
-}
-
-void DaemonProcessWin::OnPermanentError(int exit_code) {
-  DCHECK(kMinPermanentErrorExitCode <= exit_code &&
-         exit_code <= kMaxPermanentErrorExitCode);
-
-  // Both kInvalidHostIdExitCode and kInvalidOauthCredentialsExitCode are
-  // errors that will never go away with the current config.
-  // Disabling automatic service start until the host is re-enabled and config
-  // updated.
-  if (exit_code == kInvalidHostIdExitCode ||
-      exit_code == kInvalidOauthCredentialsExitCode) {
-    DisableAutoStart();
-  }
-
-  DaemonProcess::OnPermanentError(exit_code);
-}
-
-void DaemonProcessWin::OnWorkerProcessStopped() {
-  // Reset our IPC remote so it's ready to re-init if the network process is
-  // re-launched.
-  remoting_host_control_.reset();
-  desktop_session_connection_events_.reset();
-
-  DaemonProcess::OnWorkerProcessStopped();
-}
-
-bool DaemonProcessWin::OnDesktopSessionAgentAttached(
-    int terminal_id,
-    int session_id,
-    mojo::ScopedMessagePipeHandle desktop_pipe) {
-  if (desktop_session_connection_events_) {
-    desktop_session_connection_events_->OnDesktopSessionAgentAttached(
-        terminal_id, session_id, std::move(desktop_pipe));
+    return false;
   }
 
   return true;
@@ -236,122 +196,87 @@ bool DaemonProcessWin::OnDesktopSessionAgentAttached(
 
 std::unique_ptr<DesktopSession> DaemonProcessWin::DoCreateDesktopSession(
     int terminal_id,
-    const ScreenResolution& resolution,
-    bool virtual_terminal) {
+    const mojom::DesktopSessionOptions& options) {
   DCHECK(caller_task_runner()->BelongsToCurrentThread());
 
-  if (virtual_terminal) {
+  if (options.is_curtained) {
     return DesktopSessionWin::CreateForVirtualTerminal(
-        caller_task_runner(), io_task_runner(), this, terminal_id, resolution);
+        caller_task_runner(), io_task_runner(), this, terminal_id, options);
   } else {
     return DesktopSessionWin::CreateForConsole(
-        caller_task_runner(), io_task_runner(), this, terminal_id, resolution);
+        caller_task_runner(), io_task_runner(), this, terminal_id, options);
   }
-}
-
-void DaemonProcessWin::DoCrashNetworkProcess(const base::Location& location) {
-  DCHECK(caller_task_runner()->BelongsToCurrentThread());
-
-  network_launcher_->Crash(location);
 }
 
 void DaemonProcessWin::LaunchNetworkProcess() {
   DCHECK(caller_task_runner()->BelongsToCurrentThread());
-  DCHECK(!network_launcher_);
 
   // Construct the host binary name.
   base::FilePath host_binary;
   if (!GetInstalledBinaryPath(kHostBinaryName, &host_binary)) {
-    Stop();
+    Stop(kInitializationFailed);
     return;
   }
 
   std::unique_ptr<base::CommandLine> target(new base::CommandLine(host_binary));
-  target->AppendSwitchASCII(kProcessTypeSwitchName, kProcessTypeHost);
+  target->AppendSwitchASCII(kProcessTypeSwitchName, kProcessTypeNetwork);
   target->CopySwitchesFrom(*base::CommandLine::ForCurrentProcess(),
-                           kCopiedSwitchNames, std::size(kCopiedSwitchNames));
+                           kCopiedSwitchNames);
+  if (use_peer_connection_process_.has_value()) {
+    target->AppendSwitchASCII(kUsePeerConnectionProcessSwitch,
+                              *use_peer_connection_process_ ? "true" : "false");
+  }
 
-  std::unique_ptr<UnprivilegedProcessDelegate> delegate(
-      new UnprivilegedProcessDelegate(io_task_runner(), std::move(target)));
-  network_launcher_ =
-      std::make_unique<WorkerProcessLauncher>(std::move(delegate), this);
+  auto delegate = std::make_unique<UnprivilegedProcessDelegate>(
+      io_task_runner(), std::move(target),
+      UnprivilegedProcessDelegate::IntegrityLevel::kLow);
+  // TODO(joedow): Address software-backed cert issues and then configure
+  // this process to run in an app container again.
+  SetNetworkLauncherDelegate(std::move(delegate));
 }
 
-void DaemonProcessWin::SendHostConfigToNetworkProcess(
-    const std::string& serialized_config) {
-  if (!remoting_host_control_) {
-    return;
+std::unique_ptr<WorkerProcessLauncher::Delegate>
+DaemonProcessWin::CreatePeerConnectionProcessLauncherDelegate() {
+  DCHECK(caller_task_runner()->BelongsToCurrentThread());
+
+  base::FilePath host_binary;
+  if (!GetInstalledBinaryPath(kHostBinaryName, &host_binary)) {
+    LOG(ERROR) << "Failed to get installed binary path for PC process.";
+    return nullptr;
   }
 
-  LOG_IF(ERROR, !remoting_host_control_.is_connected())
-      << "IPC channel not connected. HostConfig message will be dropped.";
+  std::unique_ptr<base::CommandLine> target(new base::CommandLine(host_binary));
+  target->AppendSwitchASCII(kProcessTypeSwitchName, kProcessTypePeerConnection);
+  target->CopySwitchesFrom(*base::CommandLine::ForCurrentProcess(),
+                           kCopiedSwitchNames);
 
-  absl::optional<base::Value::Dict> config(
-      HostConfigFromJson(serialized_config));
-  if (!config.has_value()) {
-    LOG(ERROR) << "Invalid host config, shutting down.";
-    OnPermanentError(kInvalidHostConfigurationExitCode);
-    return;
-  }
-
-  remoting_host_control_->ApplyHostConfig(std::move(config.value()));
-}
-
-void DaemonProcessWin::SendTerminalDisconnected(int terminal_id) {
-  if (desktop_session_connection_events_) {
-    desktop_session_connection_events_->OnTerminalDisconnected(terminal_id);
-  }
+  auto delegate = std::make_unique<UnprivilegedProcessDelegate>(
+      io_task_runner(), std::move(target),
+      UnprivilegedProcessDelegate::IntegrityLevel::kUntrusted);
+  delegate->UseAppContainer(L"chromoting.peer_connection");
+  return delegate;
 }
 
 std::unique_ptr<DaemonProcess> DaemonProcess::Create(
     scoped_refptr<AutoThreadTaskRunner> caller_task_runner,
     scoped_refptr<AutoThreadTaskRunner> io_task_runner,
-    base::OnceClosure stopped_callback) {
+    StoppedCallback stopped_callback) {
   auto daemon_process = std::make_unique<DaemonProcessWin>(
       caller_task_runner, io_task_runner, std::move(stopped_callback));
 
   // Configure host logging first so we can capture subsequent events.
   daemon_process->ConfigureHostLogging();
 
+  // Initialize crash reporting before the network process is launched.
+  daemon_process->ConfigureCrashReporting();
+
+  // Check registry to see if the PeerConnection process should be enabled.
+  daemon_process->ConfigurePeerConnectionProcess();
+
+  // Finishes configuring the Daemon process and launches the network process.
   daemon_process->Initialize();
 
   return std::move(daemon_process);
-}
-
-void DaemonProcessWin::DisableAutoStart() {
-  ScopedScHandle scmanager(
-      OpenSCManager(nullptr, SERVICES_ACTIVE_DATABASE,
-                    SC_MANAGER_CONNECT | SC_MANAGER_ENUMERATE_SERVICE));
-  if (!scmanager.IsValid()) {
-    PLOG(INFO) << "Failed to connect to the service control manager";
-    return;
-  }
-
-  DWORD desired_access = SERVICE_CHANGE_CONFIG | SERVICE_QUERY_STATUS;
-  ScopedScHandle service(
-      OpenService(scmanager.Get(), kWindowsServiceName, desired_access));
-  if (!service.IsValid()) {
-    PLOG(INFO) << "Failed to open to the '" << kWindowsServiceName
-               << "' service";
-    return;
-  }
-
-  // Change the service start type to 'manual'. All |nullptr| parameters below
-  // mean that there is no change to the corresponding service parameter.
-  if (!ChangeServiceConfig(service.Get(),
-                           SERVICE_NO_CHANGE,
-                           SERVICE_DEMAND_START,
-                           SERVICE_NO_CHANGE,
-                           nullptr,
-                           nullptr,
-                           nullptr,
-                           nullptr,
-                           nullptr,
-                           nullptr,
-                           nullptr)) {
-    PLOG(INFO) << "Failed to change the '" << kWindowsServiceName
-               << "'service start type to 'manual'";
-  }
 }
 
 bool DaemonProcessWin::InitializePairingRegistry() {
@@ -370,15 +295,15 @@ bool DaemonProcessWin::InitializePairingRegistry() {
       DuplicateRegistryKeyHandle(pairing_registry_privileged_key_);
   base::win::ScopedHandle unprivileged_key =
       DuplicateRegistryKeyHandle(pairing_registry_unprivileged_key_);
-  if (!(privileged_key.IsValid() && unprivileged_key.IsValid())) {
+  if (!(privileged_key.is_valid() && unprivileged_key.is_valid())) {
     return false;
   }
 
-  if (!remoting_host_control_) {
+  if (!IsNetworkProcessReady()) {
     return false;
   }
 
-  remoting_host_control_->InitializePairingRegistry(
+  remoting_host_control()->InitializePairingRegistry(
       mojo::PlatformHandle(std::move(privileged_key)),
       mojo::PlatformHandle(std::move(unprivileged_key)));
 
@@ -470,6 +395,40 @@ bool DaemonProcessWin::OpenPairingRegistry() {
   return true;
 }
 
+void DaemonProcessWin::BindSessionServices(
+    mojo::PendingReceiver<mojom::ChromotingSessionServices> receiver) {
+  DCHECK(caller_task_runner()->BelongsToCurrentThread());
+  if (!IsNetworkProcessReady()) {
+    LOG(ERROR) << "Binding rejected. Network process is not ready.";
+    return;
+  }
+
+  uint32_t peer_session_id =
+      host_services_receivers().current_context()->session_id;
+  const auto& sessions = desktop_sessions();
+  auto it = std::ranges::find_if(sessions, [peer_session_id](const auto& pair) {
+    return static_cast<DesktopSessionWin*>(pair.second.get())
+               ->windows_session_id() == peer_session_id;
+  });
+
+  if (it != sessions.end() && it->second->events_remote()) {
+    it->second->events_remote()->OnSessionServicesClientConnected(
+        std::move(receiver));
+  } else {
+    LOG(WARNING) << "No desktop session found for Windows session ID "
+                 << peer_session_id;
+  }
+}
+
+void DaemonProcessWin::ConfigureCrashReporting() {
+  if (IsUsageStatsAllowed()) {
+    InitializeOopCrashServer();
+
+    minidump_handler_.emplace(base::ThreadPool::CreateSingleThreadTaskRunner(
+        {base::MayBlock(), base::TaskPriority::BEST_EFFORT}));
+  }
+}
+
 void DaemonProcessWin::ConfigureHostLogging() {
   DCHECK(!etw_trace_consumer_);
 
@@ -525,6 +484,26 @@ void DaemonProcessWin::ConfigureHostLogging() {
       AutoThread::CreateWithType(kEtwTracingThreadName, caller_task_runner(),
                                  base::MessagePumpType::IO),
       std::move(loggers));
+}
+
+void DaemonProcessWin::ConfigurePeerConnectionProcess() {
+  base::win::RegKey pc_reg_key;
+  LONG result = pc_reg_key.Open(HKEY_LOCAL_MACHINE,
+                                kPeerConnectionRegistryKeyName, KEY_READ);
+  if (result != ERROR_SUCCESS) {
+    return;
+  }
+
+  DWORD enabled = 0;
+  result =
+      pc_reg_key.ReadValueDW(kUsePeerConnectionProcessRegistryValue, &enabled);
+  if (result != ERROR_SUCCESS) {
+    return;
+  }
+
+  use_peer_connection_process_ = (enabled != 0);
+  HOST_LOG << (*use_peer_connection_process_ ? "Enabling" : "Disabling")
+           << " PeerConnection process via registry configuration.";
 }
 
 }  // namespace remoting

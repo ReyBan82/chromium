@@ -7,52 +7,45 @@
 #include <memory>
 #include <string>
 
+#include "google_apis/gaia/fake_device_management_error_details.h"
 #include "net/base/net_errors.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace {
 
-TEST(GoogleServiceAuthErrorTest, State) {
-  for (GoogleServiceAuthError::State i = GoogleServiceAuthError::NONE;
-       i < GoogleServiceAuthError::NUM_STATES;
-       i = GoogleServiceAuthError::State(i + 1)) {
-    if (!GoogleServiceAuthError::IsValid(i))
-      continue;
-
-    GoogleServiceAuthError error(i);
-    EXPECT_EQ(i, error.state());
-    EXPECT_TRUE(error.error_message().empty());
-
-    if (i == GoogleServiceAuthError::CONNECTION_FAILED)
-      EXPECT_EQ(net::ERR_FAILED, error.network_error());
-    else
-      EXPECT_EQ(net::OK, error.network_error());
-
-    if (i == GoogleServiceAuthError::NONE) {
-      EXPECT_FALSE(error.IsTransientError());
-      EXPECT_FALSE(error.IsPersistentError());
-    } else if ((i == GoogleServiceAuthError::CONNECTION_FAILED) ||
-               (i == GoogleServiceAuthError::SERVICE_UNAVAILABLE) ||
-               (i == GoogleServiceAuthError::REQUEST_CANCELED)) {
-      EXPECT_TRUE(error.IsTransientError());
-      EXPECT_FALSE(error.IsPersistentError());
-    } else {
-      EXPECT_FALSE(error.IsTransientError());
-      EXPECT_TRUE(error.IsPersistentError());
-    }
-
-    if (i == GoogleServiceAuthError::INVALID_GAIA_CREDENTIALS) {
-      EXPECT_EQ(GoogleServiceAuthError::InvalidGaiaCredentialsReason::UNKNOWN,
-                error.GetInvalidGaiaCredentialsReason());
-    }
-  }
-}
-
 TEST(GoogleServiceAuthErrorTest, FromConnectionError) {
   GoogleServiceAuthError error =
       GoogleServiceAuthError::FromConnectionError(net::ERR_TIMED_OUT);
   EXPECT_EQ(GoogleServiceAuthError::CONNECTION_FAILED, error.state());
-  EXPECT_EQ(net::ERR_TIMED_OUT, error.network_error());
+  EXPECT_EQ(net::ERR_TIMED_OUT, error.GetNetworkError());
+  EXPECT_TRUE(error.IsTransientError());
+  EXPECT_FALSE(error.IsPersistentError());
+}
+
+TEST(GoogleServiceAuthErrorTest, FromServiceUnavailable) {
+  GoogleServiceAuthError error =
+      GoogleServiceAuthError::FromServiceUnavailable("Foo");
+  EXPECT_EQ(GoogleServiceAuthError::SERVICE_UNAVAILABLE, error.state());
+  EXPECT_EQ("Foo", error.error_message());
+  EXPECT_TRUE(error.IsTransientError());
+  EXPECT_FALSE(error.IsPersistentError());
+}
+
+TEST(GoogleServiceAuthErrorTest, CreateRequestCanceled) {
+  GoogleServiceAuthError error =
+      GoogleServiceAuthError::CreateRequestCanceled();
+  EXPECT_EQ(GoogleServiceAuthError::REQUEST_CANCELED, error.state());
+  EXPECT_TRUE(error.IsTransientError());
+  EXPECT_FALSE(error.IsPersistentError());
+}
+
+TEST(GoogleServiceAuthErrorTest, FromTokenBindingChallenge) {
+  GoogleServiceAuthError error =
+      GoogleServiceAuthError::FromTokenBindingChallenge("Foo");
+  EXPECT_EQ(GoogleServiceAuthError::CHALLENGE_RESPONSE_REQUIRED, error.state());
+  EXPECT_EQ("Foo", error.GetTokenBindingChallenge());
+  EXPECT_TRUE(error.IsTransientError());
+  EXPECT_FALSE(error.IsPersistentError());
 }
 
 TEST(GoogleServiceAuthErrorTest, FromServiceError) {
@@ -60,6 +53,26 @@ TEST(GoogleServiceAuthErrorTest, FromServiceError) {
       GoogleServiceAuthError::FromServiceError("Foo");
   EXPECT_EQ(GoogleServiceAuthError::SERVICE_ERROR, error.state());
   EXPECT_EQ("Foo", error.error_message());
+  EXPECT_FALSE(error.IsTransientError());
+  EXPECT_TRUE(error.IsPersistentError());
+}
+
+TEST(GoogleServiceAuthErrorTest, FromUnexpectedServiceResponse) {
+  GoogleServiceAuthError error =
+      GoogleServiceAuthError::FromUnexpectedServiceResponse("Foo");
+  EXPECT_EQ(GoogleServiceAuthError::UNEXPECTED_SERVICE_RESPONSE, error.state());
+  EXPECT_EQ("Foo", error.error_message());
+  EXPECT_FALSE(error.IsTransientError());
+  EXPECT_TRUE(error.IsPersistentError());
+}
+
+TEST(GoogleServiceAuthErrorTest, FromDeviceManagementError) {
+  GoogleServiceAuthError error =
+      GoogleServiceAuthError::FromDeviceManagementError(
+          std::make_unique<gaia::FakeDeviceManagementErrorDetails>());
+  EXPECT_EQ(GoogleServiceAuthError::DEVICE_MANAGEMENT_ERROR, error.state());
+  EXPECT_FALSE(error.IsTransientError());
+  EXPECT_TRUE(error.IsPersistentError());
 }
 
 TEST(GoogleServiceAuthErrorTest, FromInvalidGaiaCredentialsReason) {
@@ -71,13 +84,40 @@ TEST(GoogleServiceAuthErrorTest, FromInvalidGaiaCredentialsReason) {
   EXPECT_EQ(GoogleServiceAuthError::InvalidGaiaCredentialsReason::
                 CREDENTIALS_REJECTED_BY_SERVER,
             error.GetInvalidGaiaCredentialsReason());
+  EXPECT_FALSE(error.IsTransientError());
+  EXPECT_TRUE(error.IsPersistentError());
   EXPECT_EQ("Invalid credentials (credentials rejected by server).",
             error.ToString());
 }
 
+TEST(GoogleServiceAuthErrorTest, FromScopeLimitedUnrecoverableErrorReason) {
+  GoogleServiceAuthError error =
+      GoogleServiceAuthError::FromScopeLimitedUnrecoverableErrorReason(
+          GoogleServiceAuthError::ScopeLimitedUnrecoverableErrorReason::
+              kAdminPolicyEnforced);
+  EXPECT_EQ(GoogleServiceAuthError::SCOPE_LIMITED_UNRECOVERABLE_ERROR,
+            error.state());
+  EXPECT_EQ(GoogleServiceAuthError::ScopeLimitedUnrecoverableErrorReason::
+                kAdminPolicyEnforced,
+            error.GetScopeLimitedUnrecoverableErrorReason());
+  EXPECT_FALSE(error.IsTransientError());
+  EXPECT_TRUE(error.IsPersistentError());
+  EXPECT_EQ("OAuth scope error (admin policy enforced).", error.ToString());
+}
+
+TEST(GoogleServiceAuthErrorTest, CreateAccountNotFound) {
+  GoogleServiceAuthError error =
+      GoogleServiceAuthError::CreateAccountNotFound();
+  EXPECT_EQ(GoogleServiceAuthError::ACCOUNT_NOT_FOUND, error.state());
+  EXPECT_FALSE(error.IsTransientError());
+  EXPECT_TRUE(error.IsPersistentError());
+}
+
 TEST(GoogleServiceAuthErrorTest, AuthErrorNone) {
-  EXPECT_EQ(GoogleServiceAuthError(GoogleServiceAuthError::NONE),
-            GoogleServiceAuthError::AuthErrorNone());
+  GoogleServiceAuthError error = GoogleServiceAuthError::AuthErrorNone();
+  EXPECT_EQ(GoogleServiceAuthError::NONE, error.state());
+  EXPECT_FALSE(error.IsTransientError());
+  EXPECT_FALSE(error.IsPersistentError());
 }
 
 }  // namespace

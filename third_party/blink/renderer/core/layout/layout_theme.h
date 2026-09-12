@@ -27,6 +27,7 @@
 #include "third_party/blink/public/mojom/frame/color_scheme.mojom-blink-forward.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/css_value_keywords.h"
+#include "third_party/blink/renderer/core/html/forms/input_type.h"
 #include "third_party/blink/renderer/platform/graphics/color.h"
 #include "third_party/blink/renderer/platform/theme_types.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
@@ -34,14 +35,16 @@
 #include "third_party/blink/renderer/platform/wtf/ref_counted.h"
 #include "ui/gfx/geometry/size.h"
 
+namespace ui {
+class ColorProvider;
+}
+
 namespace blink {
 
 class ComputedStyle;
 class ComputedStyleBuilder;
-class Document;
 class Element;
 class File;
-class FontDescription;
 class LocalFrame;
 class Node;
 class ThemePainter;
@@ -50,7 +53,7 @@ class CORE_EXPORT LayoutTheme : public RefCounted<LayoutTheme> {
   USING_FAST_MALLOC(LayoutTheme);
 
  protected:
-  LayoutTheme();
+  LayoutTheme() = default;
 
  public:
   virtual ~LayoutTheme() = default;
@@ -66,7 +69,7 @@ class CORE_EXPORT LayoutTheme : public RefCounted<LayoutTheme> {
   // selection of control size based off the font, the disabling of appearance
   // when certain other properties like "border" are set, or if the appearance
   // is not supported by the theme.
-  void AdjustStyle(const Element*, ComputedStyleBuilder&);
+  void AdjustStyle(const Element&, ComputedStyleBuilder&);
 
   // The remaining methods should be implemented by the platform-specific
   // portion of the theme, e.g., layout_theme_mac.mm for macOS.
@@ -78,14 +81,14 @@ class CORE_EXPORT LayoutTheme : public RefCounted<LayoutTheme> {
 
   // Whether or not the control has been styled enough by the author to disable
   // the native appearance.
-  virtual bool IsControlStyled(ControlPart part,
+  virtual bool IsControlStyled(AppearanceValue appearance,
                                const ComputedStyleBuilder&) const;
 
   bool ShouldDrawDefaultFocusRing(const Node*, const ComputedStyle&) const;
 
   // A method asking if the platform is able to show a calendar picker for a
   // given input type.
-  virtual bool SupportsCalendarPicker(const AtomicString&) const;
+  virtual bool SupportsCalendarPicker(InputType::Type) const;
 
   // Text selection colors.
   Color ActiveSelectionBackgroundColor(
@@ -99,7 +102,7 @@ class CORE_EXPORT LayoutTheme : public RefCounted<LayoutTheme> {
   virtual void SetSelectionColors(Color active_background_color,
                                   Color active_foreground_color,
                                   Color inactive_background_color,
-                                  Color inactive_foreground_color) {}
+                                  Color inactive_foreground_color);
 
   // List box selection colors
   Color ActiveListBoxSelectionBackgroundColor(
@@ -119,34 +122,37 @@ class CORE_EXPORT LayoutTheme : public RefCounted<LayoutTheme> {
   // Highlight and text colors for TextMatches.
   Color PlatformTextSearchHighlightColor(
       bool active_match,
-      mojom::blink::ColorScheme color_scheme) const;
+      bool in_forced_colors,
+      mojom::blink::ColorScheme color_scheme,
+      const ui::ColorProvider* color_provider,
+      bool can_expose_accent_color) const;
   Color PlatformTextSearchColor(bool active_match,
-                                mojom::blink::ColorScheme color_scheme) const;
+                                bool in_forced_colors,
+                                mojom::blink::ColorScheme color_scheme,
+                                const ui::ColorProvider* color_provider,
+                                bool can_expose_accent_color) const;
 
   virtual Color FocusRingColor(mojom::blink::ColorScheme color_scheme) const;
-  virtual Color PlatformFocusRingColor() const { return Color(0, 0, 0); }
   void SetCustomFocusRingColor(const Color&);
-  static Color TapHighlightColor();
 
-  virtual Color PlatformTapHighlightColor() const {
-    return LayoutTheme::kDefaultTapHighlightColor;
-  }
-  virtual Color PlatformDefaultCompositionBackgroundColor() const {
+  virtual Color TapHighlightColor() const { return kDefaultTapHighlightColor; }
+
+  static Color PlatformDefaultCompositionBackgroundColor() {
     return kDefaultCompositionBackgroundColor;
   }
   void PlatformColorsDidChange();
   virtual void ColorSchemeDidChange();
-  void ColorProvidersDidChange();
 
   void SetCaretBlinkInterval(base::TimeDelta);
   virtual base::TimeDelta CaretBlinkInterval() const;
 
-  // System fonts and colors for CSS.
-  void SystemFont(CSSValueID system_font_id, FontDescription&, const Document*);
+  // System colors for CSS.
   virtual Color SystemColor(CSSValueID,
-                            mojom::blink::ColorScheme color_scheme) const;
+                            mojom::blink::ColorScheme color_scheme,
+                            const ui::ColorProvider* color_provider,
+                            bool can_expose_accent_color) const;
 
-  virtual void AdjustSliderThumbSize(ComputedStyleBuilder&) const;
+  void AdjustSliderThumbSize(ComputedStyleBuilder&) const;
 
   virtual int PopupInternalPaddingStart(const ComputedStyle&) const {
     return 0;
@@ -159,18 +165,6 @@ class CORE_EXPORT LayoutTheme : public RefCounted<LayoutTheme> {
     return 0;
   }
 
-  // Returns size of one slider tick mark for a horizontal track.
-  // For vertical tracks we rotate it and use it. i.e. Width is always length
-  // along the track.
-  virtual gfx::Size SliderTickSize() const = 0;
-  // Returns the distance of slider tick origin from the slider track center.
-  virtual int SliderTickOffsetFromTrackCenter() const = 0;
-
-  // Functions for <select> elements.
-  virtual bool DelegatesMenuListRendering() const;
-  // This function has no effect for LayoutThemeAndroid, of which
-  // DelegatesMenuListRendering() always returns true.
-  void SetDelegatesMenuListRenderingForTesting(bool flag);
   virtual bool PopsMenuByArrowKeys() const { return false; }
   virtual bool PopsMenuByReturnKey() const { return true; }
 
@@ -178,29 +172,38 @@ class CORE_EXPORT LayoutTheme : public RefCounted<LayoutTheme> {
 
   virtual bool SupportsSelectionForegroundColors() const { return true; }
 
-  // Adjust style as per platform selection.
-  virtual void AdjustControlPartStyle(ComputedStyleBuilder&);
-
   virtual bool IsAccentColorCustomized(
-      mojom::blink::ColorScheme color_scheme) const {
-    return false;
-  }
+      mojom::blink::ColorScheme color_scheme) const;
+
   // GetSystemAccentColor returns transparent unless there is a special value
   // from the OS color scheme.
   virtual Color GetSystemAccentColor(
-      mojom::blink::ColorScheme color_scheme) const {
-    return Color();
-  }
+      mojom::blink::ColorScheme color_scheme) const;
+
   // GetAccentColorOrDefault will return GetAccentColor if there is a value from
-  // the OS, otherwise it will return the default accent color.
-  Color GetAccentColorOrDefault(mojom::blink::ColorScheme color_scheme) const;
+  // the OS and if it is within an installed WebApp scope, otherwise it will
+  // return the default accent color.
+  Color GetAccentColorOrDefault(mojom::blink::ColorScheme color_scheme,
+                                bool can_expose_accent_color) const;
   // GetAccentColorText returns black or white depending on which can be
   // rendered with enough contrast on the result of GetAccentColorOrDefault.
-  Color GetAccentColorText(mojom::blink::ColorScheme color_scheme) const;
+  Color GetAccentColorText(mojom::blink::ColorScheme color_scheme,
+                           bool can_expose_accent_color) const;
 
-  bool InForcedColorsMode() const { return in_forced_colors_mode_; }
+  virtual Color SystemHighlightFromColorProvider(
+      mojom::blink::ColorScheme color_scheme,
+      const ui::ColorProvider* color_provider) const;
 
  protected:
+  static Color active_selection_background_color_;
+  static Color active_selection_foreground_color_;
+  static Color inactive_selection_background_color_;
+  static Color inactive_selection_foreground_color_;
+  static Color active_list_box_selection_background_color_dark_mode_;
+  static Color active_list_box_selection_foreground_color_dark_mode_;
+  static Color inactive_list_box_selection_background_color_dark_mode_;
+  static Color inactive_list_box_selection_foreground_color_dark_mode_;
+
   // The platform selection color.
   virtual Color PlatformActiveSelectionBackgroundColor(
       mojom::blink::ColorScheme color_scheme) const;
@@ -221,53 +224,50 @@ class CORE_EXPORT LayoutTheme : public RefCounted<LayoutTheme> {
       mojom::blink::ColorScheme color_scheme) const;
 
   // Methods for each appearance value.
-  virtual void AdjustCheckboxStyle(ComputedStyleBuilder&) const;
-  virtual void AdjustRadioStyle(ComputedStyleBuilder&) const;
+  void AdjustCheckboxStyle(ComputedStyleBuilder&) const;
+  void AdjustRadioStyle(ComputedStyleBuilder&) const;
 
-  virtual void AdjustButtonStyle(ComputedStyleBuilder&) const;
+  void AdjustPushButtonStyle(ComputedStyleBuilder&) const;
   virtual void AdjustInnerSpinButtonStyle(ComputedStyleBuilder&) const;
 
-  virtual void AdjustMenuListStyle(ComputedStyleBuilder&) const;
-  virtual void AdjustMenuListButtonStyle(ComputedStyleBuilder&) const;
-  virtual void AdjustSliderContainerStyle(const Element&,
-                                          ComputedStyleBuilder&) const;
-  virtual void AdjustSliderThumbStyle(ComputedStyleBuilder&) const;
+  void AdjustMenuListStyle(ComputedStyleBuilder&) const;
+  void AdjustSliderThumbStyle(ComputedStyleBuilder&) const;
   virtual void AdjustSearchFieldCancelButtonStyle(ComputedStyleBuilder&) const;
 
-  bool HasCustomFocusRingColor() const;
-  Color GetCustomFocusRingColor() const;
+  std::optional<Color> CustomFocusRingColor() const {
+    return custom_focus_ring_color_;
+  }
 
   Color DefaultSystemColor(CSSValueID,
-                           mojom::blink::ColorScheme color_scheme) const;
-  Color SystemColorFromNativeTheme(
-      CSSValueID,
-      mojom::blink::ColorScheme color_scheme) const;
+                           mojom::blink::ColorScheme color_scheme,
+                           const ui::ColorProvider* color_provider,
+                           bool can_expose_accent_color) const;
+  Color SystemColorFromColorProvider(CSSValueID,
+                                     mojom::blink::ColorScheme color_scheme,
+                                     const ui::ColorProvider* color_provider,
+                                     bool can_expose_accent_color) const;
 
  private:
   // This function is to be implemented in your platform-specific theme
   // implementation to hand back the appropriate platform theme.
   static LayoutTheme& NativeTheme();
 
-  ControlPart AdjustAppearanceWithAuthorStyle(
-      ControlPart part,
+  AppearanceValue AdjustAppearanceWithAuthorStyle(
+      AppearanceValue appearance,
       const ComputedStyleBuilder& style);
 
-  ControlPart AdjustAppearanceWithElementType(const ComputedStyleBuilder&,
-                                              const Element*);
+  AppearanceValue AdjustAppearanceWithElementType(AppearanceValue appearance,
+                                                  const Element&);
 
   void UpdateForcedColorsState();
 
-  Color custom_focus_ring_color_;
-  bool has_custom_focus_ring_color_;
+  std::optional<Color> custom_focus_ring_color_;
   base::TimeDelta caret_blink_interval_ = base::Milliseconds(500);
-
-  bool delegates_menu_list_rendering_ = false;
-  bool in_forced_colors_mode_ = false;
 
   // This color is expected to be drawn on a semi-transparent overlay,
   // making it more transparent than its alpha value indicates.
   static constexpr Color kDefaultTapHighlightColor =
-      Color::FromRGBA32(0x66000000);
+      Color::FromRGBA32(0x2e000000);  // 18% black.
 
   static constexpr Color kDefaultCompositionBackgroundColor =
       Color::FromRGBA32(0xFFFFDD55);

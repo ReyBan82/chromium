@@ -3,17 +3,16 @@
 // found in the LICENSE file.
 
 package org.chromium.webapk.lib.common;
+import org.chromium.build.annotations.NullMarked;
 
-/**
- * Stores WebAPK related constants.
- */
+/** Stores WebAPK related constants. */
+@NullMarked
 public final class WebApkConstants {
     // WebAPK id prefix. The id is used for storing WebAPK data in Chrome's SharedPreferences.
     public static final String WEBAPK_ID_PREFIX = "webapk-";
 
-    /** These EXTRA_* values must stay in sync with
-     * {@link org.chromium.chrome.browser.ShortcutHelper}.
-     */
+    // These EXTRA_* values must stay in sync with {@link
+    // org.chromium.chrome.browser.ShortcutHelper}.
     public static final String EXTRA_URL = "org.chromium.chrome.browser.webapp_url";
     public static final String EXTRA_SOURCE = "org.chromium.chrome.browser.webapp_source";
     public static final String EXTRA_WEBAPK_PACKAGE_NAME =
@@ -34,6 +33,14 @@ public final class WebApkConstants {
     // Tells the host browser to relaunch the WebAPK.
     public static final String EXTRA_RELAUNCH = "org.chromium.webapk.relaunch";
     public static final String EXTRA_IS_WEBAPK = "org.chromium.webapk.is_webapk";
+    // Extra key telling OpaqueMainActivity to only bring the existing task to the front.
+    public static final String EXTRA_BRING_TO_FRONT = "org.chromium.webapk.bring_to_front";
+    // Component class name of the OpaqueMainActivity in WebAPKs.
+    public static final String WEBAPK_OPAQUE_MAIN_ACTIVITY_CLASS_NAME =
+            "org.chromium.webapk.shell_apk.h2o.H2OOpaqueMainActivity";
+
+    public static final String DEFAULT_NOTIFICATION_CHANNEL_ID = "default_channel_id";
+    public static final String HIGH_PRIORITY_NOTIFICATION_CHANNEL_ID = "default_channel_id_high";
 
     // Must be kept in sync with components/webapps/browser/android/shortcut_info.h.
     public @interface ShortcutSource {

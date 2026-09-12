@@ -31,12 +31,14 @@
 #include "third_party/blink/renderer/platform/wtf/decimal.h"
 
 #include <algorithm>
+#include <array>
 #include <cfloat>
 
 #include "base/notreached.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 
 namespace blink {
 
@@ -58,8 +60,8 @@ class SpecialValueHandler {
     kBothFinite,
     kBothInfinity,
     kEitherNaN,
-    kLHSIsInfinity,
-    kRHSIsInfinity,
+    kLhsIsInfinity,
+    kRhsIsInfinity,
   };
 
   SpecialValueHandler(const Decimal& lhs, const Decimal& rhs);
@@ -71,8 +73,8 @@ class SpecialValueHandler {
 
  private:
   enum Result {
-    kResultIsLHS,
-    kResultIsRHS,
+    kResultIsLhs,
+    kResultIsRhs,
     kResultIsUnknown,
   };
 
@@ -89,25 +91,25 @@ SpecialValueHandler::HandleResult SpecialValueHandler::Handle() {
     return kBothFinite;
 
   if (lhs_.IsNaN()) {
-    result_ = kResultIsLHS;
+    result_ = kResultIsLhs;
     return kEitherNaN;
   }
 
   if (rhs_.IsNaN()) {
-    result_ = kResultIsRHS;
+    result_ = kResultIsRhs;
     return kEitherNaN;
   }
 
   if (lhs_.IsInfinity())
-    return rhs_.IsInfinity() ? kBothInfinity : kLHSIsInfinity;
+    return rhs_.IsInfinity() ? kBothInfinity : kLhsIsInfinity;
 
   DCHECK(rhs_.IsInfinity());
-  return kRHSIsInfinity;
+  return kRhsIsInfinity;
 }
 
 Decimal SpecialValueHandler::Value() const {
-  DCHECK(result_ == kResultIsLHS || result_ == kResultIsRHS);
-  return (result_ == kResultIsLHS) ? lhs_ : rhs_;
+  DCHECK(result_ == kResultIsLhs || result_ == kResultIsRhs);
+  return (result_ == kResultIsLhs) ? lhs_ : rhs_;
 }
 
 // This class is used for 128 bit unsigned integer arithmetic.
@@ -151,13 +153,13 @@ UInt128& UInt128::operator/=(const uint32_t divisor) {
     return *this;
   }
 
-  uint32_t dividend[4];
+  std::array<uint32_t, 4> dividend;
   dividend[0] = LowUInt32(low_);
   dividend[1] = HighUInt32(low_);
   dividend[2] = LowUInt32(high_);
   dividend[3] = HighUInt32(high_);
 
-  uint32_t quotient[4];
+  std::array<uint32_t, 4> quotient;
   uint32_t remainder = 0;
   for (int i = 3; i >= 0; --i) {
     const uint64_t work = MakeUInt64(dividend[i], remainder);
@@ -314,10 +316,10 @@ Decimal Decimal::operator+(const Decimal& rhs) const {
     case SpecialValueHandler::kEitherNaN:
       return handler.Value();
 
-    case SpecialValueHandler::kLHSIsInfinity:
+    case SpecialValueHandler::kLhsIsInfinity:
       return lhs;
 
-    case SpecialValueHandler::kRHSIsInfinity:
+    case SpecialValueHandler::kRhsIsInfinity:
       return rhs;
   }
 
@@ -353,10 +355,10 @@ Decimal Decimal::operator-(const Decimal& rhs) const {
     case SpecialValueHandler::kEitherNaN:
       return handler.Value();
 
-    case SpecialValueHandler::kLHSIsInfinity:
+    case SpecialValueHandler::kLhsIsInfinity:
       return lhs;
 
-    case SpecialValueHandler::kRHSIsInfinity:
+    case SpecialValueHandler::kRhsIsInfinity:
       return Infinity(InvertSign(rhs_sign));
   }
 
@@ -402,15 +404,14 @@ Decimal Decimal::operator*(const Decimal& rhs) const {
     case SpecialValueHandler::kEitherNaN:
       return handler.Value();
 
-    case SpecialValueHandler::kLHSIsInfinity:
+    case SpecialValueHandler::kLhsIsInfinity:
       return rhs.IsZero() ? Nan() : Infinity(result_sign);
 
-    case SpecialValueHandler::kRHSIsInfinity:
+    case SpecialValueHandler::kRhsIsInfinity:
       return lhs.IsZero() ? Nan() : Infinity(result_sign);
   }
 
   NOTREACHED();
-  return Nan();
 }
 
 Decimal Decimal::operator/(const Decimal& rhs) const {
@@ -430,10 +431,10 @@ Decimal Decimal::operator/(const Decimal& rhs) const {
     case SpecialValueHandler::kEitherNaN:
       return handler.Value();
 
-    case SpecialValueHandler::kLHSIsInfinity:
+    case SpecialValueHandler::kLhsIsInfinity:
       return Infinity(result_sign);
 
-    case SpecialValueHandler::kRHSIsInfinity:
+    case SpecialValueHandler::kRhsIsInfinity:
       return Zero(result_sign);
   }
 
@@ -612,7 +613,6 @@ Decimal Decimal::CompareTo(const Decimal& rhs) const {
 
     default:
       NOTREACHED();
-      return Nan();
   }
 }
 
@@ -639,7 +639,7 @@ Decimal Decimal::Floor() const {
 
 Decimal Decimal::FromDouble(double double_value) {
   if (std::isfinite(double_value))
-    return FromString(String::NumberToStringECMAScript(double_value));
+    return FromString(String::NumberToStringEcmaScript(double_value));
 
   if (std::isinf(double_value))
     return Infinity(double_value < 0 ? kNegative : kPositive);
@@ -684,7 +684,7 @@ Decimal Decimal::FromString(const String& str) {
     const int ch = str[index];
     switch (state) {
       case kStateDigit:
-        if (ch >= '0' && ch <= '9') {
+        if (IsAsciiDigit(ch)) {
           if (number_of_digits < kPrecision) {
             ++number_of_digits;
             accumulator *= 10;
@@ -701,7 +701,7 @@ Decimal Decimal::FromString(const String& str) {
 
       case kStateDot:
       case kStateDotDigit:
-        if (ch >= '0' && ch <= '9') {
+        if (IsAsciiDigit(ch)) {
           if (number_of_digits < kPrecision) {
             ++number_of_digits;
             ++number_of_digits_after_dot;
@@ -728,7 +728,7 @@ Decimal Decimal::FromString(const String& str) {
           break;
         }
 
-        if (ch >= '0' && ch <= '9') {
+        if (IsAsciiDigit(ch)) {
           exponent = ch - '0';
           state = kStateEDigit;
           break;
@@ -737,7 +737,7 @@ Decimal Decimal::FromString(const String& str) {
         return Nan();
 
       case kStateEDigit:
-        if (ch >= '0' && ch <= '9') {
+        if (IsAsciiDigit(ch)) {
           exponent *= 10;
           exponent += ch - '0';
           if (exponent > kExponentMax + kPrecision) {
@@ -753,7 +753,7 @@ Decimal Decimal::FromString(const String& str) {
         return Nan();
 
       case kStateESign:
-        if (ch >= '0' && ch <= '9') {
+        if (IsAsciiDigit(ch)) {
           exponent = ch - '0';
           state = kStateEDigit;
           break;
@@ -814,7 +814,6 @@ Decimal Decimal::FromString(const String& str) {
 
       default:
         NOTREACHED();
-        return Nan();
     }
   }
 
@@ -881,9 +880,8 @@ Decimal Decimal::Round() const {
 
 double Decimal::ToDouble() const {
   if (IsFinite()) {
-    bool valid;
-    const double double_value = ToString().ToDouble(&valid);
-    return valid ? double_value : std::numeric_limits<double>::quiet_NaN();
+    return StringToDouble(ToString())
+        .value_or(std::numeric_limits<double>::quiet_NaN());
   }
 
   if (IsInfinity())
@@ -907,7 +905,6 @@ String Decimal::ToString() const {
 
     default:
       NOTREACHED();
-      return "";
   }
 
   StringBuilder builder;

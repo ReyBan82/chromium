@@ -31,7 +31,7 @@ PictureInPictureSession::PictureInPictureSession(
 }
 
 PictureInPictureSession::~PictureInPictureSession() {
-  DCHECK(is_stopping_);
+  CHECK(is_stopping_, base::NotFatalUntil::M159);
 }
 
 void PictureInPictureSession::Stop(StopCallback callback) {
@@ -56,9 +56,14 @@ void PictureInPictureSession::Update(
   GetController().SetShowPlayPauseButton(show_play_pause_button);
 }
 
+void PictureInPictureSession::UpdateMediaPosition(
+    const media_session::MediaPosition& media_position) {
+  GetController().SetMediaPosition(media_position);
+}
+
 void PictureInPictureSession::OnPlayerGone() {
   player_id_.reset();
-  GetController().SetShowPlayPauseButton(false);
+  GetController().SetPlaybackControlsVisibility(false);
 }
 
 void PictureInPictureSession::NotifyWindowResized(const gfx::Size& size) {
@@ -67,7 +72,7 @@ void PictureInPictureSession::NotifyWindowResized(const gfx::Size& size) {
 
 mojo::AssociatedRemote<media::mojom::MediaPlayer>&
 PictureInPictureSession::GetMediaPlayerRemote() {
-  DCHECK(media_player_remote_.is_bound());
+  CHECK(media_player_remote_.is_bound(), base::NotFatalUntil::M159);
   return media_player_remote_;
 }
 
@@ -91,7 +96,7 @@ void PictureInPictureSession::Shutdown() {
 }
 
 void PictureInPictureSession::StopInternal(StopCallback callback) {
-  DCHECK(!is_stopping_);
+  CHECK(!is_stopping_, base::NotFatalUntil::M159);
 
   is_stopping_ = true;
 

@@ -17,9 +17,9 @@ class OsTrialScreenView;
 class OsTrialScreen : public BaseScreen {
  public:
   enum class Result {
-    NEXT_TRY,
-    NEXT_INSTALL,
-    BACK,
+    kNextTry,
+    kNextInstall,
+    kBack,
   };
 
   static std::string GetResultString(Result result);
@@ -35,7 +35,7 @@ class OsTrialScreen : public BaseScreen {
   // BaseScreen:
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
   base::WeakPtr<OsTrialScreenView> view_;
   ScreenExitCallback exit_callback_;

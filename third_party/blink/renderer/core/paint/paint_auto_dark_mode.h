@@ -9,6 +9,7 @@
 #include "third_party/blink/renderer/core/css/properties/longhands.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
 #include "third_party/blink/renderer/platform/graphics/graphics_context.h"
+#include "ui/display/screen_info.h"
 
 namespace blink {
 
@@ -38,10 +39,14 @@ class ImageClassifierHelper {
       DarkModeFilter::ElementRole role =
           DarkModeFilter::ElementRole::kBackground);
 
-  CORE_EXPORT static DarkModeFilter::ImageType GetImageTypeForTesting(
+  CORE_EXPORT static DarkModeFilter::ImageType GetSVGDocumentType(
       LocalFrame& local_frame,
+      const gfx::Rect& size);
+
+  CORE_EXPORT static DarkModeFilter::ImageType GetImageTypeForTesting(
       const gfx::RectF& dest_rect,
-      const gfx::RectF& src_rect);
+      const gfx::RectF& src_rect,
+      float zoom = 1.0f);
 };
 
 }  // namespace blink

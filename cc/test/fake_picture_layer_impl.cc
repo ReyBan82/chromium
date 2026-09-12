@@ -6,11 +6,17 @@
 
 #include <stddef.h>
 
+#include <utility>
 #include <vector>
 
 #include "base/memory/ptr_util.h"
+#include "cc/raster/raster_buffer.h"
+#include "cc/raster/raster_buffer_provider.h"
+#include "cc/resources/resource_pool.h"
 #include "cc/test/fake_raster_source.h"
 #include "cc/tiles/tile.h"
+#include "cc/tiles/tile_draw_info.h"
+#include "cc/trees/layer_tree_host_impl.h"
 #include "cc/trees/layer_tree_impl.h"
 
 namespace cc {
@@ -21,9 +27,10 @@ FakePictureLayerImpl::FakePictureLayerImpl(
     scoped_refptr<RasterSource> raster_source)
     : PictureLayerImpl(tree_impl, id) {
   if (raster_source) {
-    SetBounds(raster_source->GetSize());
+    CHECK(tree_impl->IsSyncTree());
+    SetBounds(raster_source->size());
     SetRasterSource(raster_source, Region());
-  } else {
+  } else if (tree_impl->IsSyncTree()) {
     // Just to avoid crash on null RasterSource when updating tilings.
     SetRasterSource(FakeRasterSource::CreateEmpty(gfx::Size()), Region());
   }
@@ -34,16 +41,17 @@ std::unique_ptr<LayerImpl> FakePictureLayerImpl::CreateLayerImpl(
   return base::WrapUnique(new FakePictureLayerImpl(tree_impl, id()));
 }
 
-void FakePictureLayerImpl::PushPropertiesTo(LayerImpl* layer_impl) {
+void FakePictureLayerImpl::CopyPropertiesTo(LayerImpl* layer_impl) const {
   FakePictureLayerImpl* picture_layer_impl =
       static_cast<FakePictureLayerImpl*>(layer_impl);
   picture_layer_impl->fixed_tile_size_ = fixed_tile_size_;
-  PictureLayerImpl::PushPropertiesTo(layer_impl);
+  PictureLayerImpl::CopyPropertiesTo(layer_impl);
 }
 
-void FakePictureLayerImpl::AppendQuads(viz::CompositorRenderPass* render_pass,
+void FakePictureLayerImpl::AppendQuads(const AppendQuadsContext& context,
+                                       viz::CompositorRenderPass* render_pass,
                                        AppendQuadsData* append_quads_data) {
-  PictureLayerImpl::AppendQuads(render_pass, append_quads_data);
+  PictureLayerImpl::AppendQuads(context, render_pass, append_quads_data);
   ++append_quads_count_;
 }
 
@@ -69,29 +77,12 @@ PictureLayerTiling* FakePictureLayerImpl::HighResTiling() const {
   return result;
 }
 
-PictureLayerTiling* FakePictureLayerImpl::LowResTiling() const {
-  PictureLayerTiling* result = nullptr;
-  for (size_t i = 0; i < tilings_->num_tilings(); ++i) {
-    PictureLayerTiling* tiling = tilings_->tiling_at(i);
-    if (tiling->resolution() == LOW_RESOLUTION) {
-      // There should be only one low res tiling.
-      CHECK(!result);
-      result = tiling;
-    }
-  }
-  return result;
-}
-
 void FakePictureLayerImpl::SetRasterSource(
     scoped_refptr<RasterSource> raster_source,
     const Region& invalidation) {
-  Region invalidation_temp = invalidation;
-  const PictureLayerTilingSet* pending_set = nullptr;
-  const PaintWorkletRecordMap* pending_paint_worklet_records = nullptr;
   set_gpu_raster_max_texture_size(
       layer_tree_impl()->GetDeviceViewport().size());
-  UpdateRasterSource(raster_source, &invalidation_temp, pending_set,
-                     pending_paint_worklet_records);
+  SetRasterSourceForTesting(raster_source, invalidation);
 }
 
 size_t FakePictureLayerImpl::GetNumberOfTilesWithResources() const {
@@ -132,6 +123,7 @@ void FakePictureLayerImpl::SetTileReady(Tile* tile) {
   TileDrawInfo& draw_info = tile->draw_info();
   draw_info.SetSolidColorForTesting(SkColors::kRed);
   DCHECK(draw_info.IsReadyToDraw());
+  NotifyTileStateChanged(tile, /*update_damage=*/true);
 }
 
 void FakePictureLayerImpl::DidBecomeActive() {
@@ -163,9 +155,9 @@ size_t FakePictureLayerImpl::CountTilesRequired(
 
   for (size_t i = 0; i < tilings_->num_tilings(); ++i) {
     PictureLayerTiling* tiling = tilings_->tiling_at(i);
-    if (tiling->resolution() != HIGH_RESOLUTION &&
-        tiling->resolution() != LOW_RESOLUTION)
+    if (tiling->resolution() != HIGH_RESOLUTION) {
       continue;
+    }
 
     for (PictureLayerTiling::CoverageIterator iter(tiling, 1.f, rect); iter;
          ++iter) {
@@ -210,6 +202,32 @@ void FakePictureLayerImpl::ReleaseResources() {
 void FakePictureLayerImpl::ReleaseTileResources() {
   PictureLayerImpl::ReleaseTileResources();
   ++release_tile_resources_count_;
+}
+
+void FakePictureLayerImpl::InitializeTileWithResourceSize(
+    Tile* tile,
+    const gfx::Size& resource_size) {
+  LayerTreeHostImpl* host_impl = layer_tree_impl()->host_impl();
+  ResourcePool* resource_pool = host_impl->resource_pool();
+  RasterBufferProvider* raster_buffer_provider =
+      host_impl->tile_manager()->raster_buffer_provider_for_testing();
+  TileDrawInfo& draw_info = tile->draw_info();
+  ResourcePool::InUsePoolResource resource = resource_pool->AcquireResource(
+      resource_size, host_impl->GetTileFormat(),
+      host_impl->GetTargetColorParams(gfx::ContentColorUsage::kSRGB)
+          .color_space);
+
+  raster_buffer_provider->AcquireBufferForRaster(resource, 0, 0);
+
+  if (resource.backing()) {
+    resource.backing()->CreateSharedImageForTesting();
+    resource.backing()->mailbox_sync_token.Set(
+        gpu::GPU_IO, gpu::CommandBufferId::FromUnsafeValue(1), 1);
+  }
+  resource_pool->PrepareForExport(
+      resource, viz::TransferableResource::ResourceSource::kTest);
+  draw_info.SetResource(std::move(resource), false);
+  draw_info.set_resource_ready_for_draw();
 }
 
 }  // namespace cc

@@ -20,8 +20,12 @@ struct TabSize {
 
   bool IsSpaces() const { return is_spaces_; }
 
-  float GetPixelSize(float space_width) const {
-    return is_spaces_ ? float_value_ * space_width : float_value_;
+  float GetPixelSize(float space_width,
+                     float letter_spacing = 0.0f,
+                     float word_spacing = 0.0f) const {
+    return is_spaces_
+               ? float_value_ * (space_width + letter_spacing + word_spacing)
+               : float_value_;
   }
 
   float float_value_;
@@ -30,10 +34,6 @@ struct TabSize {
 
 inline bool operator==(const TabSize& a, const TabSize& b) {
   return (a.float_value_ == b.float_value_) && (a.is_spaces_ == b.is_spaces_);
-}
-
-inline bool operator!=(const TabSize& a, const TabSize& b) {
-  return !(a == b);
 }
 
 }  // namespace blink

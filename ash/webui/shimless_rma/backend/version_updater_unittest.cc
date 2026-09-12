@@ -8,6 +8,7 @@
 
 #include "ash/constants/ash_features.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/task_environment.h"
 #include "chromeos/ash/components/dbus/update_engine/fake_update_engine_client.h"
 #include "chromeos/ash/components/dbus/update_engine/update_engine.pb.h"
@@ -60,6 +61,7 @@ class VersionUpdaterTest : public testing::Test {
     network_configuration_handler_.reset();
     network_profile_handler_.reset();
     ui_proxy_config_service_.reset();
+    fake_update_engine_client_ = nullptr;
     UpdateEngineClient::Shutdown();
   }
 
@@ -125,8 +127,8 @@ class VersionUpdaterTest : public testing::Test {
     managed_network_configuration_handler_->SetPolicy(
         ::onc::ONC_SOURCE_DEVICE_POLICY,
         /*userhash=*/std::string(),
-        /*network_configs_onc=*/base::Value(base::Value::Type::LIST),
-        /*global_network_config=*/base::Value(base::Value::Type::DICT));
+        /*network_configs_onc=*/base::ListValue(),
+        /*global_network_config=*/base::DictValue());
 
     // Wait until the |managed_network_configuration_handler_| is initialized
     // and set up.
@@ -163,7 +165,7 @@ class VersionUpdaterTest : public testing::Test {
   std::unique_ptr<UIProxyConfigService> ui_proxy_config_service_;
   sync_preferences::TestingPrefServiceSyncable user_prefs_;
   TestingPrefServiceSimple local_state_;
-  FakeUpdateEngineClient* fake_update_engine_client_;
+  raw_ptr<FakeUpdateEngineClient> fake_update_engine_client_;
   update_engine::ErrorCode error_code_;
 
   base::test::TaskEnvironment task_environment_;

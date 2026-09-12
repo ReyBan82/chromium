@@ -3,18 +3,20 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/extensions/api/terminal/startup_status.h"
+
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <vector>
 
+#include "ash/strings/grit/ash_strings.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/strings/strcat.h"
 #include "base/strings/stringprintf.h"
 #include "base/time/time.h"
-#include "chrome/grit/generated_resources.h"
 #include "content/public/browser/browser_thread.h"
 #include "ui/base/l10n/l10n_util.h"
 
@@ -30,7 +32,7 @@ const char kColor2GreenBright[] = "\x1b[1;32m";
 const char kColor3Yellow[] = "\x1b[33m";
 const char kColor5Purple[] = "\x1b[35m";
 const char kEraseInLine[] = "\x1b[K";
-const char kSpinnerCharacters[] = "|/-\\";
+constexpr std::array kSpinnerCharacters = {'|', '/', '-', '\\'};
 
 std::string MoveForward(int i) {
   return base::StringPrintf("\x1b[%dC", i);

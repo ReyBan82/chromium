@@ -8,50 +8,271 @@
 #include <stdint.h>
 
 #include <algorithm>
+#include <optional>
+#include <string_view>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/containers/flat_set.h"
 #include "base/json/json_writer.h"
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
+#include "base/no_destructor.h"
 #include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/values.h"
 #include "chromeos/components/onc/onc_signature.h"
+#include "chromeos/components/onc/onc_utils.h"
 #include "components/crx_file/id_util.h"
 #include "components/device_event_log/device_event_log.h"
 #include "components/onc/onc_constants.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "onc_signature.h"
 
-namespace chromeos {
-namespace onc {
+namespace chromeos::onc {
 
 namespace {
 
 // According to the IEEE 802.11 standard the SSID is a series of 0 to 32 octets.
 const int kMaximumSSIDLengthInBytes = 32;
 
-void AddKeyToList(const char* key, base::Value::List* list) {
-  base::Value key_value(key);
-  if (!base::Contains(*list, key_value)) {
-    list->Append(std::move(key_value));
+// Valid top-level configuration types
+const std::vector<const char*>& GetValidToplevelConfigurationTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::toplevel_config::kUnencryptedConfiguration,
+       ::onc::toplevel_config::kEncryptedConfiguration});
+  return *valid_values;
+}
+
+// Valid network types
+const std::vector<const char*>& GetValidNetworkTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::network_type::kEthernet, ::onc::network_type::kVPN,
+       ::onc::network_type::kWiFi, ::onc::network_type::kCellular,
+       ::onc::network_type::kTether});
+  return *valid_values;
+}
+
+// Valid cellular IP configuration types
+const std::vector<const char*>& GetValidIPConfigTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::network_config::kIPConfigTypeDHCP,
+       ::onc::network_config::kIPConfigTypeStatic});
+  return *valid_values;
+}
+
+// Valid check captive portal values
+const std::vector<const char*>& GetValidCheckCaptivePortalValues() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::check_captive_portal::kTrue, ::onc::check_captive_portal::kFalse,
+       ::onc::check_captive_portal::kHTTPOnly});
+  return *valid_values;
+}
+
+// Valid cellular APN IP types
+const std::vector<const char*>& GetValidAPNIpTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::cellular_apn::kIpTypeAutomatic, ::onc::cellular_apn::kIpTypeIpv4,
+       ::onc::cellular_apn::kIpTypeIpv6, ::onc::cellular_apn::kIpTypeIpv4Ipv6});
+  return *valid_values;
+}
+
+// Valid APN types
+const std::vector<const char*>& GetValidApnTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::cellular_apn::kApnTypeDefault,
+       ::onc::cellular_apn::kApnTypeAttach,
+       ::onc::cellular_apn::kApnTypeTether});
+  return *valid_values;
+}
+
+// Valid ethernet authentications
+const std::vector<const char*>& GetValidEthernetAuthentications() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::ethernet::kAuthenticationNone, ::onc::ethernet::k8021X});
+  return *valid_values;
+}
+
+// Valid network IP config types
+const std::vector<const char*>& GetValidNetworkIPConfigTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::ipconfig::kIPv4, ::onc::ipconfig::kIPv6});
+  return *valid_values;
+}
+
+// Valid Wi-Fi securities
+const std::vector<const char*>& GetValidWiFiSecurities() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::wifi::kSecurityNone, ::onc::wifi::kWEP_PSK,
+       ::onc::wifi::kWEP_8021X, ::onc::wifi::kWPA_PSK, ::onc::wifi::kWPA_EAP});
+  return *valid_values;
+}
+
+// Valid IPSec authentications
+const std::vector<const char*>& GetValidIPsecAuthentications() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::ipsec::kPSK, ::onc::ipsec::kCert, ::onc::ipsec::kEAP});
+  return *valid_values;
+}
+
+// Valid OpenVPN auth retry values
+const std::vector<const char*>& GetValidVPNAuthRetryValues() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::openvpn::kNone, ::onc::openvpn::kInteract,
+       ::onc::openvpn::kNoInteract});
+  return *valid_values;
+}
+
+// Valid OpenVPN cert TLS values
+const std::vector<const char*>& GetValidVPNCertTlsValues() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::openvpn::kNone, ::onc::openvpn::kServer});
+  return *valid_values;
+}
+
+// Valid OpenVPN compression algorithm values
+const std::vector<const char*>& GetValidVPNCompressionAlgorithmValues() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::openvpn_compression_algorithm::kFramingOnly,
+       ::onc::openvpn_compression_algorithm::kLz4,
+       ::onc::openvpn_compression_algorithm::kLz4V2,
+       ::onc::openvpn_compression_algorithm::kLzo,
+       ::onc::openvpn_compression_algorithm::kNone});
+  return *valid_values;
+}
+
+// Valid OpenVPN user auth types
+const std::vector<const char*>& GetValidVPNUserAuthTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::openvpn_user_auth_type::kNone,
+       ::onc::openvpn_user_auth_type::kOTP,
+       ::onc::openvpn_user_auth_type::kPassword,
+       ::onc::openvpn_user_auth_type::kPasswordAndOTP});
+  return *valid_values;
+}
+
+// Valid X.509 types
+const std::vector<const char*>& GetValidX509Types() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::verify_x509::types::kName, ::onc::verify_x509::types::kNamePrefix,
+       ::onc::verify_x509::types::kSubject});
+  return *valid_values;
+}
+
+// Valid allow text messages types
+const std::vector<const char*>& GetValidAllowTextMessagesTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::cellular::kTextMessagesAllow,
+       ::onc::cellular::kTextMessagesSuppress,
+       ::onc::cellular::kTextMessagesUnset});
+  return *valid_values;
+}
+
+// Valid proxy settings types
+const std::vector<const char*>& GetValidProxySettingsTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::proxy::kDirect, ::onc::proxy::kManual, ::onc::proxy::kPAC,
+       ::onc::proxy::kWPAD});
+  return *valid_values;
+}
+
+// Valid EAP inner values
+const std::vector<const char*>& GetValidEAPInnerValues() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::eap::kAutomatic, ::onc::eap::kGTC, ::onc::eap::kMD5,
+       ::onc::eap::kMSCHAPv2, ::onc::eap::kPAP});
+  return *valid_values;
+}
+
+// Valid EAP outer values
+const std::vector<const char*>& GetValidEAPOuterValues() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::eap::kPEAP, ::onc::eap::kEAP_TLS, ::onc::eap::kEAP_TTLS,
+       ::onc::eap::kLEAP, ::onc::eap::kEAP_SIM, ::onc::eap::kEAP_FAST,
+       ::onc::eap::kEAP_AKA});
+  return *valid_values;
+}
+
+// Valid EAP Subject Alternative Name match types
+const std::vector<const char*>& GetValidEAPSubjectAlternativeNameMatchTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::eap_subject_alternative_name_match::kEMAIL,
+       ::onc::eap_subject_alternative_name_match::kDNS,
+       ::onc::eap_subject_alternative_name_match::kURI});
+  return *valid_values;
+}
+
+// Valid certificate types
+const std::vector<const char*>& GetValidCertificateTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::certificate::kClient, ::onc::certificate::kServer,
+       ::onc::certificate::kAuthority});
+  return *valid_values;
+}
+
+// Valid scope types
+const std::vector<const char*>& GetValidScopeTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::scope::kDefault, ::onc::scope::kExtension});
+  return *valid_values;
+}
+
+// All valid EAP types
+const std::vector<const char*>& GetAllValidVPNTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values(
+      {::onc::vpn::kIPsec, ::onc::vpn::kTypeL2TP_IPsec, ::onc::vpn::kOpenVPN,
+       ::onc::vpn::kWireGuard, ::onc::vpn::kThirdPartyVpn, ::onc::vpn::kArcVpn
+
+      });
+  return *valid_values;
+}
+
+// Valid managed EAP types
+const std::vector<const char*>& GetValidManagedVPNTypes() {
+  static const base::NoDestructor<std::vector<const char*>> valid_values({
+      ::onc::vpn::kIPsec,
+      ::onc::vpn::kTypeL2TP_IPsec,
+      ::onc::vpn::kOpenVPN,
+      ::onc::vpn::kWireGuard,
+  });
+  return *valid_values;
+}
+
+void AddKeyToList(const char* key, base::ListValue* list) {
+  if (!list->contains(key)) {
+    list->Append(key);
   }
 }
 
-std::string GetStringFromDict(const base::Value::Dict& dict, const char* key) {
+std::string GetStringFromDict(const base::DictValue& dict, const char* key) {
   const std::string* value = dict.FindString(key);
   return value ? *value : std::string();
 }
 
-bool FieldIsRecommended(const base::Value::Dict& object,
-                        const std::string& field_name) {
-  const base::Value::List* recommended = object.FindList(::onc::kRecommended);
-  return recommended && base::Contains(*recommended, base::Value(field_name));
+base::flat_set<std::string> GetStringsFromDicts(const base::ListValue& dicts,
+                                                const char* key) {
+  base::flat_set<std::string> values;
+  for (const base::Value& dict : dicts) {
+    if (!dict.is_dict()) {
+      continue;
+    }
+
+    const std::string* value = dict.GetDict().FindString(key);
+    if (!value) {
+      continue;
+    }
+
+    values.emplace(*value);
+  }
+  return values;
 }
 
-bool FieldIsSetToValueOrRecommended(const base::Value::Dict& object,
+bool FieldIsRecommended(const base::DictValue& object,
+                        const std::string& field_name) {
+  const base::ListValue* recommended = object.FindList(::onc::kRecommended);
+  return recommended && recommended->contains(field_name);
+}
+
+bool FieldIsSetToValueOrRecommended(const base::DictValue& object,
                                     const std::string& field_name,
                                     const base::Value& expected_value) {
   const base::Value* actual_value = object.Find(field_name);
@@ -59,6 +280,27 @@ bool FieldIsSetToValueOrRecommended(const base::Value::Dict& object,
     return true;
 
   return FieldIsRecommended(object, field_name);
+}
+
+// Determines whether the values associated with a specific key within a list of
+// dictionaries are all unique.
+bool HasUniqueValuesForKeyInDicts(const base::ListValue& dicts,
+                                  const std::string& key) {
+  base::flat_set<base::Value> seen_values;
+  for (const base::Value& dict : dicts) {
+    if (!dict.is_dict()) {
+      return false;
+    }
+
+    const base::Value* value = dict.GetDict().Find(key);
+    if (!value || seen_values.count(*value) > 0) {
+      return false;
+    }
+
+    seen_values.insert(value->Clone());
+  }
+
+  return true;
 }
 
 }  // namespace
@@ -72,25 +314,26 @@ Validator::Validator(bool error_on_unknown_field,
       error_on_wrong_recommended_(error_on_wrong_recommended),
       error_on_missing_field_(error_on_missing_field),
       managed_onc_(managed_onc),
-      log_warnings_(log_warnings),
-      onc_source_(::onc::ONC_SOURCE_NONE) {}
+      log_warnings_(log_warnings) {}
 
 Validator::~Validator() = default;
 
-base::Value Validator::ValidateAndRepairObject(
+std::optional<base::DictValue> Validator::ValidateAndRepairObject(
     const OncValueSignature* object_signature,
-    const base::Value& onc_object,
+    const base::DictValue& onc_object,
     Result* result) {
   CHECK(object_signature);
   *result = VALID;
   bool error = false;
-  base::Value result_value = MapValue(*object_signature, onc_object, &error);
+  base::DictValue result_value =
+      MapObject(*object_signature, onc_object, &error);
   if (error) {
     *result = INVALID;
-    return {};
+    return std::nullopt;
   }
-  if (!validation_issues_.empty())
+  if (!validation_issues_.empty()) {
     *result = VALID_WITH_WARNINGS;
+  }
   return result_value;
 }
 
@@ -112,10 +355,10 @@ base::Value Validator::MapValue(const OncValueSignature& signature,
   return repaired;
 }
 
-base::Value::Dict Validator::MapObject(const OncValueSignature& signature,
-                                       const base::Value::Dict& onc_object,
-                                       bool* error) {
-  base::Value::Dict repaired;
+base::DictValue Validator::MapObject(const OncValueSignature& signature,
+                                     const base::DictValue& onc_object,
+                                     bool* error) {
+  base::DictValue repaired;
   bool valid = ValidateObjectDefault(signature, onc_object, &repaired);
 
   if (valid) {
@@ -123,6 +366,10 @@ base::Value::Dict Validator::MapObject(const OncValueSignature& signature,
       valid = ValidateToplevelConfiguration(&repaired);
     } else if (&signature == &kNetworkConfigurationSignature) {
       valid = ValidateNetworkConfiguration(&repaired);
+    } else if (&signature == &kCellularSignature) {
+      valid = ValidateCellular(&repaired);
+    } else if (&signature == &kCellularApnSignature) {
+      valid = ValidateAPN(&repaired);
     } else if (&signature == &kEthernetSignature) {
       valid = ValidateEthernet(&repaired);
     } else if (&signature == &kIPConfigSignature ||
@@ -154,6 +401,8 @@ base::Value::Dict Validator::MapObject(const OncValueSignature& signature,
       valid = ValidateProxyLocation(&repaired);
     } else if (&signature == &kEAPSignature) {
       valid = ValidateEAP(&repaired);
+    } else if (&signature == &kL2TPSignature) {
+      valid = ValidateL2TP(&repaired);
     } else if (&signature == &kEAPSubjectAlternativeNameMatchSignature) {
       valid = ValidateSubjectAlternativeNameMatch(&repaired);
     } else if (&signature == &kCertificateSignature) {
@@ -163,6 +412,7 @@ base::Value::Dict Validator::MapObject(const OncValueSignature& signature,
     } else if (&signature == &kTetherWithStateSignature) {
       valid = ValidateTether(&repaired);
     }
+
     // StaticIPConfig is not validated here, because its correctness depends
     // on NetworkConfiguration's 'IPAddressConfigType', 'NameServersConfigType'
     // and 'Recommended' fields. It's validated in
@@ -174,7 +424,7 @@ base::Value::Dict Validator::MapObject(const OncValueSignature& signature,
 
   DCHECK(!validation_issues_.empty());
   *error = true;
-  return base::Value::Dict();
+  return base::DictValue();
 }
 
 base::Value Validator::MapField(const std::string& field_name,
@@ -200,12 +450,12 @@ base::Value Validator::MapField(const std::string& field_name,
   return result;
 }
 
-base::Value::List Validator::MapArray(const OncValueSignature& array_signature,
-                                      const base::Value::List& onc_array,
-                                      bool* nested_error) {
+base::ListValue Validator::MapArray(const OncValueSignature& array_signature,
+                                    const base::ListValue& onc_array,
+                                    bool* nested_error) {
   bool nested_error_in_current_array = false;
-  base::Value::List result = Mapper::MapArray(array_signature, onc_array,
-                                              &nested_error_in_current_array);
+  base::ListValue result = Mapper::MapArray(array_signature, onc_array,
+                                            &nested_error_in_current_array);
 
   if (&array_signature == &kNetworkConfigurationListSignature) {
     ValidateEthernetConfigs(&result);
@@ -215,7 +465,8 @@ base::Value::List Validator::MapArray(const OncValueSignature& array_signature,
   // the configuration.
   if (nested_error_in_current_array &&
       &array_signature != &kNetworkConfigurationListSignature &&
-      &array_signature != &kCertificateListSignature) {
+      &array_signature != &kCertificateListSignature &&
+      &array_signature != &kAdminApnListSignature) {
     *nested_error = nested_error_in_current_array;
   }
   return result;
@@ -241,11 +492,11 @@ base::Value Validator::MapEntry(int index,
 }
 
 bool Validator::ValidateObjectDefault(const OncValueSignature& signature,
-                                      const base::Value::Dict& onc_object,
-                                      base::Value::Dict* result) {
+                                      const base::DictValue& onc_object,
+                                      base::DictValue* result) {
   bool found_unknown_field = false;
-  bool nested_error_occured = false;
-  MapFields(signature, onc_object, &found_unknown_field, &nested_error_occured,
+  bool nested_error_occurred = false;
+  MapFields(signature, onc_object, &found_unknown_field, &nested_error_occurred,
             result);
 
   if (found_unknown_field && error_on_unknown_field_) {
@@ -253,18 +504,19 @@ bool Validator::ValidateObjectDefault(const OncValueSignature& signature,
     return false;
   }
 
-  if (nested_error_occured)
+  if (nested_error_occurred) {
     return false;
+  }
 
   return ValidateRecommendedField(signature, result);
 }
 
 bool Validator::ValidateRecommendedField(
     const OncValueSignature& object_signature,
-    base::Value::Dict* result) {
+    base::DictValue* result) {
   CHECK(result);
 
-  absl::optional<base::Value> recommended_value =
+  std::optional<base::Value> recommended_value =
       result->Extract(::onc::kRecommended);
   // This remove passes ownership to |recommended_value|.
   if (!recommended_value) {
@@ -282,12 +534,11 @@ bool Validator::ValidateRecommendedField(
     return true;
   }
 
-  base::Value::List repaired_recommended;
+  base::ListValue repaired_recommended;
   for (const auto& entry : recommended_value->GetList()) {
     const std::string* field_name = entry.GetIfString();
     if (!field_name) {
       NOTREACHED();  // The types of field values are already verified.
-      continue;
     }
 
     const OncFieldSignature* field_signature =
@@ -324,7 +575,7 @@ bool Validator::ValidateRecommendedField(
 }
 
 bool Validator::ValidateClientCertFields(bool allow_cert_type_none,
-                                         base::Value::Dict* result) {
+                                         base::DictValue* result) {
   std::vector<const char*> valid_cert_types = {
       ::onc::client_cert::kRef, ::onc::client_cert::kPattern,
       ::onc::client_cert::kProvisioningProfileId,
@@ -335,7 +586,7 @@ bool Validator::ValidateClientCertFields(bool allow_cert_type_none,
   std::string cert_type =
       GetStringFromDict(*result, ::onc::client_cert::kClientCertType);
 
-  // TODO(https://crbug.com/1049955): Remove the client certificate type empty
+  // TODO(crbug.com/40117885): Remove the client certificate type empty
   // check. Ignored fields should be removed by normalizer before validating.
   if (cert_type.empty())
     return true;
@@ -365,14 +616,14 @@ namespace {
 
 std::string JoinStringRange(const std::vector<const char*>& strings,
                             const std::string& separator) {
-  std::vector<base::StringPiece> string_vector(strings.begin(), strings.end());
+  std::vector<std::string_view> string_vector(strings.begin(), strings.end());
   return base::JoinString(string_vector, separator);
 }
 
 }  // namespace
 
-bool Validator::IsInDevicePolicy(base::Value::Dict* result,
-                                 const std::string& field_name) {
+bool Validator::IsInDevicePolicy(base::DictValue* result,
+                                 std::string_view field_name) {
   if (result->contains(field_name)) {
     if (onc_source_ != ::onc::ONC_SOURCE_DEVICE_POLICY) {
       std::ostringstream msg;
@@ -399,7 +650,7 @@ bool Validator::IsValidValue(const std::string& field_value,
 }
 
 bool Validator::FieldExistsAndHasNoValidValue(
-    const base::Value::Dict& object,
+    const base::DictValue& object,
     const std::string& field_name,
     const std::vector<const char*>& valid_values) {
   const std::string* actual_value = object.FindString(field_name);
@@ -412,11 +663,11 @@ bool Validator::FieldExistsAndHasNoValidValue(
   return !valid;
 }
 
-bool Validator::FieldExistsAndIsNotInRange(const base::Value::Dict& object,
+bool Validator::FieldExistsAndIsNotInRange(const base::DictValue& object,
                                            const std::string& field_name,
                                            int lower_bound,
                                            int upper_bound) {
-  absl::optional<int> actual_value = object.FindInt(field_name);
+  std::optional<int> actual_value = object.FindInt(field_name);
   if (!actual_value || (lower_bound <= actual_value.value() &&
                         actual_value.value() <= upper_bound)) {
     return false;
@@ -432,14 +683,14 @@ bool Validator::FieldExistsAndIsNotInRange(const base::Value::Dict& object,
   return true;
 }
 
-bool Validator::FieldExistsAndIsEmpty(const base::Value::Dict& dict,
+bool Validator::FieldExistsAndIsEmpty(const base::DictValue& dict,
                                       const std::string& field_name) {
   if (!dict.contains(field_name)) {
     return false;
   }
 
   const std::string* maybe_str = dict.FindString(field_name);
-  const base::Value::List* maybe_list = dict.FindList(field_name);
+  const base::ListValue* maybe_list = dict.FindList(field_name);
   if (maybe_str) {
     if (!(*maybe_str).empty()) {
       return false;
@@ -450,7 +701,6 @@ bool Validator::FieldExistsAndIsEmpty(const base::Value::Dict& dict,
     }
   } else {
     NOTREACHED();
-    return false;
   }
 
   path_.push_back(field_name);
@@ -461,7 +711,7 @@ bool Validator::FieldExistsAndIsEmpty(const base::Value::Dict& dict,
   return true;
 }
 
-bool Validator::FieldShouldExistOrBeRecommended(const base::Value::Dict& object,
+bool Validator::FieldShouldExistOrBeRecommended(const base::DictValue& object,
                                                 const std::string& field_name) {
   if (object.contains(field_name) || FieldIsRecommended(object, field_name)) {
     return true;
@@ -474,7 +724,7 @@ bool Validator::FieldShouldExistOrBeRecommended(const base::Value::Dict& object,
   return !error_on_missing_field_;
 }
 
-bool Validator::OnlyOneFieldSet(const base::Value::Dict& object,
+bool Validator::OnlyOneFieldSet(const base::DictValue& object,
                                 const std::string& field_name1,
                                 const std::string& field_name2) {
   if (object.contains(field_name1) && object.contains(field_name2)) {
@@ -488,10 +738,10 @@ bool Validator::OnlyOneFieldSet(const base::Value::Dict& object,
 }
 
 bool Validator::ListFieldContainsValidValues(
-    const base::Value::Dict& object,
+    const base::DictValue& object,
     const std::string& field_name,
     const std::vector<const char*>& valid_values) {
-  const base::Value::List* list = object.FindList(field_name);
+  const base::ListValue* list = object.FindList(field_name);
   if (!list)
     return true;
   path_.push_back(field_name);
@@ -499,7 +749,6 @@ bool Validator::ListFieldContainsValidValues(
     const std::string* value = entry.GetIfString();
     if (!value) {
       NOTREACHED();  // The types of field values are already verified.
-      continue;
     }
     if (!IsValidValue(*value, valid_values)) {
       path_.pop_back();
@@ -510,7 +759,7 @@ bool Validator::ListFieldContainsValidValues(
   return true;
 }
 
-bool Validator::ValidateSSIDAndHexSSID(base::Value::Dict* object) {
+bool Validator::ValidateSSIDAndHexSSID(base::DictValue* object) {
   const std::string kInvalidLength = "Invalid length";
 
   // Check SSID validity.
@@ -573,7 +822,7 @@ bool Validator::ValidateSSIDAndHexSSID(base::Value::Dict* object) {
   return true;
 }
 
-bool Validator::RequireField(const base::Value::Dict& dict,
+bool Validator::RequireField(const base::DictValue& dict,
                              const std::string& field_name) {
   if (dict.contains(field_name)) {
     return true;
@@ -585,12 +834,38 @@ bool Validator::RequireField(const base::Value::Dict& dict,
   return false;
 }
 
-bool Validator::CheckGuidIsUniqueAndAddToSet(const base::Value::Dict& dict,
+bool Validator::CheckAdminAssignedAPNIdsAreNonEmptyAndAddToSet(
+    const base::DictValue& dict,
+    const std::string& key_list_of_ids) {
+  CHECK(key_list_of_ids == ::onc::cellular::kAdminAssignedAPNIds ||
+        key_list_of_ids ==
+            ::onc::global_network_config::kPSIMAdminAssignedAPNIds);
+
+  const base::ListValue* id_list = dict.FindList(key_list_of_ids);
+  if (!id_list) {
+    return true;
+  }
+
+  for (const base::Value& id_value : *id_list) {
+    const std::string id = id_value.GetString();
+    if (id.empty()) {
+      std::ostringstream msg;
+      msg << key_list_of_ids << " must only include non-empty IDs";
+      AddValidationIssue(true /* is_error */, msg.str());
+      return false;
+    }
+    admin_assigned_apn_ids_.emplace(id);
+  }
+  return true;
+}
+
+bool Validator::CheckGuidIsUniqueAndAddToSet(const base::DictValue& dict,
                                              const std::string& key_guid,
                                              std::set<std::string>* guids) {
   const std::string* guid = dict.FindString(key_guid);
-  if (!guid)
+  if (!guid) {
     return true;
+  }
 
   if (guids->count(*guid) != 0) {
     path_.push_back(key_guid);
@@ -605,7 +880,7 @@ bool Validator::CheckGuidIsUniqueAndAddToSet(const base::Value::Dict& dict,
 }
 
 bool Validator::IsGlobalNetworkConfigInUserImport(
-    const base::Value::Dict& onc_object) {
+    const base::DictValue& onc_object) {
   if (onc_source_ == ::onc::ONC_SOURCE_USER_IMPORT &&
       onc_object.contains(
           ::onc::toplevel_config::kGlobalNetworkConfiguration)) {
@@ -618,21 +893,46 @@ bool Validator::IsGlobalNetworkConfigInUserImport(
   return false;
 }
 
-bool Validator::ValidateToplevelConfiguration(base::Value::Dict* result) {
-  const std::vector<const char*> valid_types = {
-      ::onc::toplevel_config::kUnencryptedConfiguration,
-      ::onc::toplevel_config::kEncryptedConfiguration};
+bool Validator::ValidateToplevelConfiguration(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::toplevel_config::kType,
-                                    valid_types))
+                                    GetValidToplevelConfigurationTypes())) {
     return false;
+  }
 
-  if (IsGlobalNetworkConfigInUserImport(*result))
+  base::ListValue* admin_apn_list =
+      result->FindList(::onc::toplevel_config::kAdminAPNList);
+
+  // Enforces unique string identifiers for APNs within the 'AdminAPNList'. Note
+  // that duplicate identifiers may still exist in other APN arrays due to
+  // sources (like the modem or modb) that don't provide unique Ids.
+  if (admin_apn_list) {
+    if (!HasUniqueValuesForKeyInDicts(*admin_apn_list,
+                                      ::onc::cellular_apn::kId)) {
+      AddValidationIssue(/*is_error=*/true,
+                         "APNs in the AdminAPNList do not have unique IDs");
+      return false;
+    }
+
+    base::flat_set<std::string> ids_of_toplevel_apns =
+        GetStringsFromDicts(*admin_apn_list, ::onc::cellular_apn::kId);
+    if (!std::includes(ids_of_toplevel_apns.begin(), ids_of_toplevel_apns.end(),
+                       admin_assigned_apn_ids_.begin(),
+                       admin_assigned_apn_ids_.end())) {
+      AddValidationIssue(/*is_error=*/true,
+                         "Some cellular network configurations have admin APN "
+                         "IDs that are not sourced from the admin");
+      return false;
+    }
+  }
+
+  if (IsGlobalNetworkConfigInUserImport(*result)) {
     return false;
+  }
 
   return true;
 }
 
-bool Validator::ValidateNetworkConfiguration(base::Value::Dict* result) {
+bool Validator::ValidateNetworkConfiguration(base::DictValue* result) {
   const std::string* onc_type =
       result->FindString(::onc::network_config::kType);
   if (onc_type && *onc_type == ::onc::network_type::kWimaxDeprecated) {
@@ -640,22 +940,17 @@ bool Validator::ValidateNetworkConfiguration(base::Value::Dict* result) {
     return true;
   }
 
-  const std::vector<const char*> valid_types = {
-      ::onc::network_type::kEthernet, ::onc::network_type::kVPN,
-      ::onc::network_type::kWiFi,     ::onc::network_type::kCellular,
-      ::onc::network_type::kTether,
-  };
-  const std::vector<const char*> valid_ipconfig_types = {
-      ::onc::network_config::kIPConfigTypeDHCP,
-      ::onc::network_config::kIPConfigTypeStatic};
   if (FieldExistsAndHasNoValidValue(*result, ::onc::network_config::kType,
-                                    valid_types) ||
+                                    GetValidNetworkTypes()) ||
       FieldExistsAndHasNoValidValue(*result,
                                     ::onc::network_config::kIPAddressConfigType,
-                                    valid_ipconfig_types) ||
+                                    GetValidIPConfigTypes()) ||
       FieldExistsAndHasNoValidValue(
           *result, ::onc::network_config::kNameServersConfigType,
-          valid_ipconfig_types) ||
+          GetValidIPConfigTypes()) ||
+      FieldExistsAndHasNoValidValue(*result,
+                                    ::onc::network_config::kCheckCaptivePortal,
+                                    GetValidCheckCaptivePortalValues()) ||
       FieldExistsAndIsEmpty(*result, ::onc::network_config::kGUID)) {
     return false;
   }
@@ -715,11 +1010,51 @@ bool Validator::ValidateNetworkConfiguration(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateEthernet(base::Value::Dict* result) {
-  const std::vector<const char*> valid_authentications = {
-      ::onc::ethernet::kAuthenticationNone, ::onc::ethernet::k8021X};
+bool Validator::ValidateCellular(base::DictValue* result) {
+  if (result->contains(::onc::cellular::kSMDPAddress) &&
+      result->contains(::onc::cellular::kSMDSAddress)) {
+    AddValidationIssue(
+        /*is_error=*/true,
+        R"(The "SMDPAddress" and "SMDSAddress" fields are mutually exclusive.)");
+    return false;
+  }
+
+  if (!CheckAdminAssignedAPNIdsAreNonEmptyAndAddToSet(
+          *result, ::onc::cellular::kAdminAssignedAPNIds)) {
+    return false;
+  }
+
+  return true;
+}
+
+bool Validator::ValidateAPN(base::DictValue* result) {
+  if (!RequireField(*result, ::onc::cellular_apn::kAccessPointName) ||
+      FieldExistsAndIsEmpty(*result, ::onc::cellular_apn::kAccessPointName)) {
+    return false;
+  }
+
+  if (FieldExistsAndHasNoValidValue(*result, ::onc::cellular_apn::kIpType,
+                                    GetValidAPNIpTypes())) {
+    return false;
+  }
+
+  if (FieldExistsAndIsEmpty(*result, ::onc::cellular_apn::kApnTypes) ||
+      !ListFieldContainsValidValues(*result, ::onc::cellular_apn::kApnTypes,
+                                    GetValidApnTypes())) {
+    return false;
+  }
+
+  // TODO(b/333100319): Validate that all APNs with ::onc::cellular_apn::kSource
+  // that are ::onc::cellular_apn::kAdmin or ::onc::cellular_apn::kUi have a
+  // non-empty string ::onc::cellular_apn::kId. This should be done after
+  // kApnPolicies flag is moved to chromeos as it is in ash currently.
+
+  return true;
+}
+
+bool Validator::ValidateEthernet(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::ethernet::kAuthentication,
-                                    valid_authentications)) {
+                                    GetValidEthernetAuthentications())) {
     return false;
   }
 
@@ -732,13 +1067,11 @@ bool Validator::ValidateEthernet(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateIPConfig(base::Value::Dict* result,
-                                 bool require_fields) {
-  const std::vector<const char*> valid_types = {::onc::ipconfig::kIPv4,
-                                                ::onc::ipconfig::kIPv6};
+bool Validator::ValidateIPConfig(base::DictValue* result, bool require_fields) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::ipconfig::kType,
-                                    valid_types))
+                                    GetValidNetworkIPConfigTypes())) {
     return false;
+  }
 
   std::string type = GetStringFromDict(*result, ::onc::ipconfig::kType);
   int lower_bound = 1;
@@ -746,6 +1079,11 @@ bool Validator::ValidateIPConfig(base::Value::Dict* result,
   int upper_bound = (type == ::onc::ipconfig::kIPv4) ? 32 : 128;
   if (FieldExistsAndIsNotInRange(*result, ::onc::ipconfig::kRoutingPrefix,
                                  lower_bound, upper_bound)) {
+    return false;
+  }
+
+  if (FieldExistsAndIsNotInRange(*result, ::onc::ipconfig::kMTU, 0,
+                                 std::numeric_limits<int>::max())) {
     return false;
   }
 
@@ -767,7 +1105,7 @@ bool Validator::ValidateIPConfig(base::Value::Dict* result,
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::NetworkHasCorrectStaticIPConfig(base::Value::Dict* network) {
+bool Validator::NetworkHasCorrectStaticIPConfig(base::DictValue* network) {
   bool must_have_ip_config = FieldIsSetToValueOrRecommended(
       *network, ::onc::network_config::kIPAddressConfigType,
       base::Value(::onc::network_config::kIPConfigTypeStatic));
@@ -781,7 +1119,7 @@ bool Validator::NetworkHasCorrectStaticIPConfig(base::Value::Dict* network) {
   if (!RequireField(*network, ::onc::network_config::kStaticIPConfig))
     return false;
 
-  base::Value::Dict* static_ip_config =
+  base::DictValue* static_ip_config =
       network->FindDict(::onc::network_config::kStaticIPConfig);
   bool valid = true;
   // StaticIPConfig should have all fields required by the corresponding
@@ -794,13 +1132,11 @@ bool Validator::NetworkHasCorrectStaticIPConfig(base::Value::Dict* network) {
   return valid;
 }
 
-bool Validator::ValidateWiFi(base::Value::Dict* result) {
-  const std::vector<const char*> valid_securities = {
-      ::onc::wifi::kSecurityNone, ::onc::wifi::kWEP_PSK,
-      ::onc::wifi::kWEP_8021X, ::onc::wifi::kWPA_PSK, ::onc::wifi::kWPA_EAP};
+bool Validator::ValidateWiFi(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::wifi::kSecurity,
-                                    valid_securities))
+                                    GetValidWiFiSecurities())) {
     return false;
+  }
 
   if (!ValidateSSIDAndHexSSID(result))
     return false;
@@ -825,21 +1161,12 @@ bool Validator::ValidateWiFi(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateVPN(base::Value::Dict* result) {
-  std::vector<const char*> valid_types = {
-      ::onc::vpn::kIPsec,
-      ::onc::vpn::kTypeL2TP_IPsec,
-      ::onc::vpn::kOpenVPN,
-      ::onc::vpn::kWireGuard,
-  };
-
-  if (!managed_onc_) {
-    valid_types.push_back(::onc::vpn::kThirdPartyVpn);
-    valid_types.push_back(::onc::vpn::kArcVpn);
-  }
-
-  if (FieldExistsAndHasNoValidValue(*result, ::onc::vpn::kType, valid_types))
+bool Validator::ValidateVPN(base::DictValue* result) {
+  if (FieldExistsAndHasNoValidValue(
+          *result, ::onc::vpn::kType,
+          managed_onc_ ? GetValidManagedVPNTypes() : GetAllValidVPNTypes())) {
     return false;
+  }
 
   bool all_required_exist = RequireField(*result, ::onc::vpn::kType);
   std::string type = GetStringFromDict(*result, ::onc::vpn::kType);
@@ -861,11 +1188,9 @@ bool Validator::ValidateVPN(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateIPsec(base::Value::Dict* result) {
-  const std::vector<const char*> valid_authentications = {
-      ::onc::ipsec::kPSK, ::onc::ipsec::kCert, ::onc::ipsec::kEAP};
+bool Validator::ValidateIPsec(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::ipsec::kAuthenticationType,
-                                    valid_authentications) ||
+                                    GetValidIPsecAuthentications()) ||
       FieldExistsAndIsEmpty(*result, ::onc::ipsec::kServerCARefs)) {
     return false;
   }
@@ -914,33 +1239,17 @@ bool Validator::ValidateIPsec(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateOpenVPN(base::Value::Dict* result) {
-  const std::vector<const char*> valid_auth_retry_values = {
-      ::onc::openvpn::kNone, ::onc::openvpn::kInteract,
-      ::onc::openvpn::kNoInteract};
-  const std::vector<const char*> valid_cert_tls_values = {
-      ::onc::openvpn::kNone, ::onc::openvpn::kServer};
-  const std::vector<const char*> valid_compression_algorithm_values = {
-      ::onc::openvpn_compression_algorithm::kFramingOnly,
-      ::onc::openvpn_compression_algorithm::kLz4,
-      ::onc::openvpn_compression_algorithm::kLz4V2,
-      ::onc::openvpn_compression_algorithm::kLzo,
-      ::onc::openvpn_compression_algorithm::kNone};
-  const std::vector<const char*> valid_user_auth_types = {
-      ::onc::openvpn_user_auth_type::kNone, ::onc::openvpn_user_auth_type::kOTP,
-      ::onc::openvpn_user_auth_type::kPassword,
-      ::onc::openvpn_user_auth_type::kPasswordAndOTP};
-
+bool Validator::ValidateOpenVPN(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::openvpn::kAuthRetry,
-                                    valid_auth_retry_values) ||
+                                    GetValidVPNAuthRetryValues()) ||
       FieldExistsAndHasNoValidValue(*result, ::onc::openvpn::kRemoteCertTLS,
-                                    valid_cert_tls_values) ||
+                                    GetValidVPNCertTlsValues()) ||
       FieldExistsAndHasNoValidValue(*result,
                                     ::onc::openvpn::kCompressionAlgorithm,
-                                    valid_compression_algorithm_values) ||
+                                    GetValidVPNCompressionAlgorithmValues()) ||
       FieldExistsAndHasNoValidValue(*result,
                                     ::onc::openvpn::kUserAuthenticationType,
-                                    valid_user_auth_types) ||
+                                    GetValidVPNUserAuthTypes()) ||
       FieldExistsAndIsEmpty(*result, ::onc::openvpn::kServerCARefs)) {
     return false;
   }
@@ -952,10 +1261,10 @@ bool Validator::ValidateOpenVPN(base::Value::Dict* result) {
   // properties where appropriate.
   if ((onc_source_ == ::onc::ONC_SOURCE_DEVICE_POLICY ||
        onc_source_ == ::onc::ONC_SOURCE_USER_POLICY)) {
-    base::Value::List* recommended = result->FindList(::onc::kRecommended);
+    base::ListValue* recommended = result->FindList(::onc::kRecommended);
     if (!recommended) {
       recommended =
-          &result->Set(::onc::kRecommended, base::Value::List())->GetList();
+          &result->Set(::onc::kRecommended, base::ListValue())->GetList();
     }
 
     // If kUserAuthenticationType is unspecified, allow Password and OTP.
@@ -988,8 +1297,8 @@ bool Validator::ValidateOpenVPN(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateWireGuard(base::Value::Dict* result) {
-  const base::Value::List* peers = result->FindList(::onc::wireguard::kPeers);
+bool Validator::ValidateWireGuard(base::DictValue* result) {
+  const base::ListValue* peers = result->FindList(::onc::wireguard::kPeers);
   std::ostringstream msg;
   if (!peers) {
     msg << "A " << ::onc::wireguard::kPeers
@@ -1011,35 +1320,29 @@ bool Validator::ValidateWireGuard(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateThirdPartyVPN(base::Value::Dict* result) {
+bool Validator::ValidateThirdPartyVPN(base::DictValue* result) {
   const bool all_required_exist =
       RequireField(*result, ::onc::third_party_vpn::kExtensionID);
 
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateARCVPN(base::Value::Dict* result) {
-  const bool all_required_exist =
-      RequireField(*result, ::onc::arc_vpn::kTunnelChrome);
-
-  return !error_on_missing_field_ || all_required_exist;
+bool Validator::ValidateARCVPN(base::DictValue* result) {
+  return true;
 }
 
-bool Validator::ValidateVerifyX509(base::Value::Dict* result) {
-  const std::vector<const char*> valid_types = {
-      ::onc::verify_x509::types::kName, ::onc::verify_x509::types::kNamePrefix,
-      ::onc::verify_x509::types::kSubject};
-
+bool Validator::ValidateVerifyX509(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::verify_x509::kType,
-                                    valid_types))
+                                    GetValidX509Types())) {
     return false;
+  }
 
   bool all_required_exist = RequireField(*result, ::onc::verify_x509::kName);
 
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateCertificatePattern(base::Value::Dict* result) {
+bool Validator::ValidateCertificatePattern(base::DictValue* result) {
   bool all_required_exist = true;
   if (!result->contains(::onc::client_cert::kSubject) &&
       !result->contains(::onc::client_cert::kIssuer) &&
@@ -1056,10 +1359,10 @@ bool Validator::ValidateCertificatePattern(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateGlobalNetworkConfiguration(base::Value::Dict* result) {
+bool Validator::ValidateGlobalNetworkConfiguration(base::DictValue* result) {
   // Replace the deprecated kBlacklistedHexSSIDs with kBlockedHexSSIDs.
   if (!result->contains(::onc::global_network_config::kBlockedHexSSIDs)) {
-    absl::optional<base::Value> blocked =
+    std::optional<base::Value> blocked =
         result->Extract(::onc::global_network_config::kBlacklistedHexSSIDs);
     if (blocked) {
       result->Set(::onc::global_network_config::kBlockedHexSSIDs,
@@ -1067,46 +1370,57 @@ bool Validator::ValidateGlobalNetworkConfiguration(base::Value::Dict* result) {
     }
   }
 
-  // Validate that kAllowCellularSimLock, kDisableNetworkTypes,
-  // kAllowOnlyPolicyWiFiToConnect, kAllowOnlyPolicyCellularNetworks and
-  // kBlockedHexSSIDs are only allowed in device policy.
-  if (!IsInDevicePolicy(result,
-                        ::onc ::global_network_config::kAllowCellularSimLock) ||
-      !IsInDevicePolicy(result,
-                        ::onc::global_network_config::kDisableNetworkTypes) ||
-      !IsInDevicePolicy(
-          result,
-          ::onc::global_network_config::kAllowOnlyPolicyCellularNetworks) ||
-      !IsInDevicePolicy(
-          result,
-          ::onc::global_network_config::kAllowOnlyPolicyWiFiToConnect) ||
-      !IsInDevicePolicy(result, ::onc::global_network_config::
-                                    kAllowOnlyPolicyWiFiToConnectIfAvailable) ||
-      !IsInDevicePolicy(result,
-                        ::onc::global_network_config::kBlockedHexSSIDs)) {
+  // Validate that these are only allowed in device policy.
+  const std::string_view kDevicePolicyOnlyKeys[] = {
+      ::onc::global_network_config::kAllowTextMessages,
+      ::onc::global_network_config::kAllowCellularSimLock,
+      ::onc::global_network_config::kAllowCellularHotspot,
+      ::onc::global_network_config::kAllowAPNModification,
+      ::onc::global_network_config::kDisableNetworkTypes,
+      ::onc::global_network_config::kAllowOnlyPolicyCellularNetworks,
+      ::onc::global_network_config::kAllowOnlyPolicyWiFiToConnect,
+      ::onc::global_network_config::kAllowOnlyPolicyWiFiToConnectIfAvailable,
+      ::onc::global_network_config::kBlockedHexSSIDs,
+      ::onc::global_network_config::kRecommendedValuesAreEphemeral,
+      ::onc::global_network_config::
+          kUserCreatedNetworkConfigurationsAreEphemeral,
+      ::onc::global_network_config::kDisconnectWiFiOnEthernet};
+  for (std::string_view key : kDevicePolicyOnlyKeys) {
+    if (!IsInDevicePolicy(result, key)) {
+      return false;
+    }
+  }
+
+  std::vector<const char*> valid_network_types = GetValidNetworkTypes();
+  valid_network_types.push_back(::onc::network_config::kWimaxDeprecated);
+
+  // Ensure the list contains only legitimate network type identifiers.
+  if (!ListFieldContainsValidValues(
+          *result, ::onc::global_network_config::kDisableNetworkTypes,
+          valid_network_types)) {
     return false;
   }
 
-  // Ensure the list contains only legitimate network type identifiers.
-  const std::vector<const char*> valid_network_type_values = {
-      ::onc::network_config::kCellular, ::onc::network_config::kEthernet,
-      ::onc::network_config::kTether,   ::onc::network_config::kWiFi,
-      ::onc::network_config::kVPN,      ::onc::network_config::kWimaxDeprecated,
-  };
-  if (!ListFieldContainsValidValues(
-          *result, ::onc::global_network_config::kDisableNetworkTypes,
-          valid_network_type_values)) {
+  // Ensure that AllowTextMessages contains valid types
+  if (FieldExistsAndHasNoValidValue(
+          *result, ::onc::global_network_config::kAllowTextMessages,
+          GetValidAllowTextMessagesTypes())) {
     return false;
   }
+
+  if (!CheckAdminAssignedAPNIdsAreNonEmptyAndAddToSet(
+          *result, ::onc::global_network_config::kPSIMAdminAssignedAPNIds)) {
+    return false;
+  }
+
   return true;
 }
 
-bool Validator::ValidateProxySettings(base::Value::Dict* result) {
-  const std::vector<const char*> valid_types = {
-      ::onc::proxy::kDirect, ::onc::proxy::kManual, ::onc::proxy::kPAC,
-      ::onc::proxy::kWPAD};
-  if (FieldExistsAndHasNoValidValue(*result, ::onc::proxy::kType, valid_types))
+bool Validator::ValidateProxySettings(base::DictValue* result) {
+  if (FieldExistsAndHasNoValidValue(*result, ::onc::proxy::kType,
+                                    GetValidProxySettingsTypes())) {
     return false;
+  }
 
   bool all_required_exist = RequireField(*result, ::onc::proxy::kType);
   std::string type = GetStringFromDict(*result, ::onc::proxy::kType);
@@ -1118,24 +1432,34 @@ bool Validator::ValidateProxySettings(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateProxyLocation(base::Value::Dict* result) {
+bool Validator::ValidateProxyLocation(base::DictValue* result) {
   bool all_required_exist = RequireField(*result, ::onc::proxy::kHost) &&
                             RequireField(*result, ::onc::proxy::kPort);
 
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateEAP(base::Value::Dict* result) {
-  const std::vector<const char*> valid_inner_values = {
-      ::onc::eap::kAutomatic, ::onc::eap::kGTC, ::onc::eap::kMD5,
-      ::onc::eap::kMSCHAPv2, ::onc::eap::kPAP};
-  std::vector<const char*> valid_outer_values = {
-      ::onc::eap::kPEAP,   ::onc::eap::kEAP_TLS, ::onc::eap::kEAP_TTLS,
-      ::onc::eap::kLEAP,   ::onc::eap::kEAP_SIM, ::onc::eap::kEAP_FAST,
-      ::onc::eap::kEAP_AKA};
+bool Validator::ValidateEAP(base::DictValue* result) {
+  // The "${PASSWORD}" placeholder instructs shill to substitute the user's
+  // ChromeOS login password. Only managed policy may set this; reject it from
+  // user-supplied ONC so a user-imported network cannot exfiltrate the login
+  // password to an attacker-controlled RADIUS server.
+  const std::string* password = result->FindString(::onc::eap::kPassword);
+  if (password &&
+      *password == ::onc::substitutes::kPasswordPlaceholderVerbatim &&
+      !::chromeos::onc::IsPolicyOncSource(onc_source_)) {
+    std::ostringstream msg;
+    msg << "EAP.Password placeholder '"
+        << ::onc::substitutes::kPasswordPlaceholderVerbatim
+        << "' is only allowed in policy ONC.";
+    AddValidationIssue(/*is_error=*/true, msg.str());
+    result->Remove(::onc::eap::kPassword);
+    return false;
+  }
 
   // If this EAP dict is in a IPsec dict (i.e., IPsec is the second-to-last
   // element in its path), the only valid method is MSCHAPv2.
+  std::vector<const char*> valid_outer_values = GetValidEAPOuterValues();
   if (path_.size() >= 2) {
     auto it = std::next(path_.rbegin());
     if (*it == ::onc::vpn::kIPsec)
@@ -1143,7 +1467,7 @@ bool Validator::ValidateEAP(base::Value::Dict* result) {
   }
 
   if (FieldExistsAndHasNoValidValue(*result, ::onc::eap::kInner,
-                                    valid_inner_values) ||
+                                    GetValidEAPInnerValues()) ||
       FieldExistsAndHasNoValidValue(*result, ::onc::eap::kOuter,
                                     valid_outer_values) ||
       FieldExistsAndIsEmpty(*result, ::onc::eap::kServerCARefs)) {
@@ -1162,15 +1486,30 @@ bool Validator::ValidateEAP(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateSubjectAlternativeNameMatch(base::Value::Dict* result) {
-  const std::vector<const char*> valid_types = {
-      ::onc::eap_subject_alternative_name_match::kEMAIL,
-      ::onc::eap_subject_alternative_name_match::kDNS,
-      ::onc::eap_subject_alternative_name_match::kURI};
+bool Validator::ValidateL2TP(base::DictValue* result) {
+  // The "${PASSWORD}" placeholder instructs shill to substitute the user's
+  // ChromeOS login password. Only managed policy may set this; reject it from
+  // user-supplied ONC so a user-imported network cannot exfiltrate the login
+  // password to an attacker-controlled RADIUS server.
+  const std::string* password = result->FindString(::onc::l2tp::kPassword);
+  if (password &&
+      *password == ::onc::substitutes::kPasswordPlaceholderVerbatim &&
+      !::chromeos::onc::IsPolicyOncSource(onc_source_)) {
+    std::ostringstream msg;
+    msg << "L2TP.Password placeholder '"
+        << ::onc::substitutes::kPasswordPlaceholderVerbatim
+        << "' is only allowed in policy ONC.";
+    AddValidationIssue(/*is_error=*/true, msg.str());
+    result->Remove(::onc::l2tp::kPassword);
+    return false;
+  }
+  return true;
+}
 
+bool Validator::ValidateSubjectAlternativeNameMatch(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(
           *result, ::onc::eap_subject_alternative_name_match::kType,
-          valid_types)) {
+          GetValidEAPSubjectAlternativeNameMatchTypes())) {
     return false;
   }
 
@@ -1181,12 +1520,9 @@ bool Validator::ValidateSubjectAlternativeNameMatch(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateCertificate(base::Value::Dict* result) {
-  const std::vector<const char*> valid_types = {::onc::certificate::kClient,
-                                                ::onc::certificate::kServer,
-                                                ::onc::certificate::kAuthority};
+bool Validator::ValidateCertificate(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::certificate::kType,
-                                    valid_types) ||
+                                    GetValidCertificateTypes()) ||
       FieldExistsAndIsEmpty(*result, ::onc::certificate::kGUID)) {
     return false;
   }
@@ -1209,6 +1545,21 @@ bool Validator::ValidateCertificate(base::Value::Dict* result) {
     return false;
   }
 
+  if (onc_source_ == ::onc::ONC_SOURCE_USER_IMPORT &&
+      result->contains(::onc::certificate::kTrustBits)) {
+    path_.push_back(::onc::certificate::kTrustBits);
+    std::ostringstream msg;
+    msg << "Field '" << ::onc::certificate::kTrustBits
+        << "' is prohibited in ONC user imports";
+    AddValidationIssue(error_on_unknown_field_, msg.str());
+    path_.pop_back();
+
+    if (error_on_unknown_field_) {
+      return false;
+    }
+    result->Remove(::onc::certificate::kTrustBits);
+  }
+
   all_required_exist &= RequireField(*result, ::onc::certificate::kType);
 
   if (type == ::onc::certificate::kClient)
@@ -1220,11 +1571,9 @@ bool Validator::ValidateCertificate(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateScope(base::Value::Dict* result) {
-  const std::vector<const char*> valid_types = {::onc::scope::kDefault,
-                                                ::onc::scope::kExtension};
+bool Validator::ValidateScope(base::DictValue* result) {
   if (FieldExistsAndHasNoValidValue(*result, ::onc::scope::kType,
-                                    valid_types) ||
+                                    GetValidScopeTypes()) ||
       FieldExistsAndIsEmpty(*result, ::onc::scope::kId)) {
     return false;
   }
@@ -1246,7 +1595,7 @@ bool Validator::ValidateScope(base::Value::Dict* result) {
   return !error_on_missing_field_ || all_required_exist;
 }
 
-bool Validator::ValidateTether(base::Value::Dict* result) {
+bool Validator::ValidateTether(base::DictValue* result) {
   if (FieldExistsAndIsNotInRange(*result, ::onc::tether::kBatteryPercentage, 0,
                                  100) ||
       FieldExistsAndIsNotInRange(*result, ::onc::tether::kSignalStrength, 0,
@@ -1266,7 +1615,7 @@ bool Validator::ValidateTether(base::Value::Dict* result) {
 }
 
 void Validator::ValidateEthernetConfigs(
-    base::Value::List* network_configurations_list) {
+    base::ListValue* network_configurations_list) {
   // Ensures that at most one NetworkConfiguration is effective within these
   // categories:
   // - "Type": "Ethernet" and "Authentication": "None"
@@ -1282,9 +1631,8 @@ void Validator::ValidateEthernetConfigs(
        *network_configurations_list) {
     const std::string* guid = network_configuration.GetDict().FindString(
         ::onc::network_config::kGUID);
-    const base::Value::Dict* ethernet =
-        network_configuration.GetDict().FindDict(
-            ::onc::network_config::kEthernet);
+    const base::DictValue* ethernet = network_configuration.GetDict().FindDict(
+        ::onc::network_config::kEthernet);
     if (!guid || !ethernet)
       continue;
 
@@ -1302,12 +1650,12 @@ void Validator::ValidateEthernetConfigs(
   // last one because that's the one which would be effective, as it would be
   // applies last in shill.
   OnlyKeepLast(network_configurations_list, ethernet_auth_none_guids,
-               /*type_for_messages=*/"Ethernet");
+               /*type=*/"Ethernet");
   OnlyKeepLast(network_configurations_list, ethernet_auth_8021x_guids,
-               /*type_for_messages=*/"Ethernet 802.1x");
+               /*type=*/"Ethernet 802.1x");
 }
 
-void Validator::OnlyKeepLast(base::Value::List* network_configurations_list,
+void Validator::OnlyKeepLast(base::ListValue* network_configurations_list,
                              const std::vector<std::string>& guids,
                              const char* type_for_messages) {
   if (guids.size() < 2)
@@ -1323,9 +1671,9 @@ void Validator::OnlyKeepLast(base::Value::List* network_configurations_list,
 }
 
 void Validator::RemoveNetworkConfigurationWithGuid(
-    base::Value::List* network_configurations_list,
+    base::ListValue* network_configurations_list,
     const std::string& guid_to_remove) {
-  base::Value::List& list = *network_configurations_list;
+  base::ListValue& list = *network_configurations_list;
   for (auto it = list.begin(); it != list.end(); ++it) {
     const std::string* guid =
         it->GetDict().FindString(::onc::network_config::kGUID);
@@ -1353,5 +1701,4 @@ void Validator::AddValidationIssue(bool is_error,
   validation_issues_.push_back({is_error, message});
 }
 
-}  // namespace onc
-}  // namespace chromeos
+}  // namespace chromeos::onc

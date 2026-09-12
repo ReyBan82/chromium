@@ -90,6 +90,14 @@ void EventModelImpl::IncrementEvent(const std::string& event_name,
   store_->WriteEvent(event);
 }
 
+void EventModelImpl::ClearEvent(const std::string& event_name) {
+  DCHECK(ready_);
+
+  Event& event = GetNonConstEvent(event_name);
+  event.clear_events();
+  store_->WriteEvent(event);
+}
+
 void EventModelImpl::IncrementSnooze(const std::string& event_name,
                                      uint32_t current_day,
                                      base::Time current_time) {
@@ -141,7 +149,7 @@ uint32_t EventModelImpl::GetSnoozeCount(const std::string& event_name,
 
 bool EventModelImpl::IsSnoozeDismissed(const std::string& event_name) const {
   const Event* event = GetEvent(event_name);
-  return event ? event->snooze_dismissed() : false;
+  return event && event->snooze_dismissed();
 }
 
 void EventModelImpl::OnStoreLoaded(OnModelInitializationFinished callback,

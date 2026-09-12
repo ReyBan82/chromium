@@ -7,6 +7,8 @@
 #include <memory>
 #include <utility>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "ui/aura/client/capture_delegate.h"
 #include "ui/aura/env.h"
 #include "ui/aura/test/aura_test_base.h"
@@ -14,6 +16,7 @@
 #include "ui/aura/test/test_window_delegate.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_event_dispatcher.h"
+#include "ui/aura/window_observer.h"
 #include "ui/aura/window_tracker.h"
 #include "ui/events/event.h"
 #include "ui/events/event_utils.h"
@@ -27,7 +30,8 @@ namespace {
 
 // aura::client::CaptureDelegate which allows querying whether native capture
 // has been acquired.
-class TestCaptureDelegate : public aura::client::CaptureDelegate {
+class TestCaptureDelegate : public aura::client::CaptureDelegate,
+                            public aura::WindowObserver {
  public:
   TestCaptureDelegate() = default;
 
@@ -37,15 +41,20 @@ class TestCaptureDelegate : public aura::client::CaptureDelegate {
   ~TestCaptureDelegate() override = default;
 
   bool HasNativeCapture() const { return has_capture_; }
-  aura::Window* old_capture() { return old_capture_; }
-  aura::Window* new_capture() { return new_capture_; }
+  const aura::Window* old_capture() const { return old_capture_; }
   void SetDestroyOldCapture(bool destroy) { destroy_old_capture_ = destroy; }
 
   // aura::client::CaptureDelegate:
   void UpdateCapture(aura::Window* old_capture,
                      aura::Window* new_capture) override {
+    if (new_capture_) {
+      new_capture_->RemoveObserver(this);
+    }
     old_capture_ = old_capture;
     new_capture_ = new_capture;
+    if (new_capture_) {
+      new_capture_->AddObserver(this);
+    }
     if (old_capture && destroy_old_capture_)
       delete old_capture;
   }
@@ -53,10 +62,19 @@ class TestCaptureDelegate : public aura::client::CaptureDelegate {
   void SetNativeCapture() override { has_capture_ = true; }
   void ReleaseNativeCapture() override { has_capture_ = false; }
 
+  void OnWindowDestroying(aura::Window* window) override {
+    if (window == new_capture_) {
+      window->RemoveObserver(this);
+      new_capture_ = nullptr;
+    }
+  }
+
  private:
   bool has_capture_ = false;
-  aura::Window* old_capture_ = nullptr;
-  aura::Window* new_capture_ = nullptr;
+  // RAW_PTR_EXCLUSION is used for old_capture_ as it is used to compare the
+  // deleted window.
+  RAW_PTR_EXCLUSION aura::Window* old_capture_ = nullptr;
+  raw_ptr<aura::Window> new_capture_ = nullptr;
   bool destroy_old_capture_ = false;
 };
 
@@ -129,9 +147,9 @@ TEST_F(CaptureControllerTest, ResetMouseEventHandlerOnCapture) {
 
   // Make a synthesized mouse down event. Ensure that the WindowEventDispatcher
   // will dispatch further mouse events to |w1|.
-  ui::MouseEvent mouse_pressed_event(ui::ET_MOUSE_PRESSED, gfx::Point(5, 5),
-                                     gfx::Point(5, 5), ui::EventTimeForNow(), 0,
-                                     0);
+  ui::MouseEvent mouse_pressed_event(ui::EventType::kMousePressed,
+                                     gfx::Point(5, 5), gfx::Point(5, 5),
+                                     ui::EventTimeForNow(), 0, 0);
   DispatchEventUsingWindowDispatcher(&mouse_pressed_event);
   EXPECT_EQ(w1.get(), host()->dispatcher()->mouse_pressed_handler());
 
@@ -214,6 +232,21 @@ TEST_F(CaptureControllerTest, ReparentedWhileCaptured) {
   EXPECT_FALSE(delegate2->HasNativeCapture());
 }
 
+// Test that a call to `PrepareForShutdown()` releases capture from capture
+// window and also prevents capture window from being set afterwards.
+TEST_F(CaptureControllerTest, PrepareForShutdown) {
+  aura::Window* w = CreateNormalWindow(1, root_window(), nullptr);
+  w->SetCapture();
+  EXPECT_EQ(CaptureController::Get()->GetCaptureWindow(), w);
+
+  CaptureController::Get()->PrepareForShutdown();
+  EXPECT_EQ(CaptureController::Get()->GetCaptureWindow(), nullptr);
+
+  w->SetCapture();
+  // Once `PrepareForShutdown()` is called, capture window cannot be set.
+  EXPECT_EQ(CaptureController::Get()->GetCaptureWindow(), nullptr);
+}
+
 // A delegate that deletes a window on scroll cancel gesture event.
 class GestureEventDeleteWindowOnScrollEnd
     : public aura::test::TestWindowDelegate {
@@ -233,8 +266,9 @@ class GestureEventDeleteWindowOnScrollEnd
   // aura::test::TestWindowDelegate:
   void OnGestureEvent(ui::GestureEvent* gesture) override {
     TestWindowDelegate::OnGestureEvent(gesture);
-    if (gesture->type() != ui::ET_GESTURE_SCROLL_END)
+    if (gesture->type() != ui::EventType::kGestureScrollEnd) {
       return;
+    }
     window_.reset();
   }
 
@@ -279,8 +313,8 @@ TEST_F(CaptureControllerTest, GestureResetWithCapture) {
   EXPECT_EQ(nullptr, capture_client->GetCaptureWindow());
 
   // Send a mouse click. We no longer hold capture so this should not crash.
-  ui::MouseEvent mouse_press(ui::ET_MOUSE_PRESSED, gfx::Point(), gfx::Point(),
-                             base::TimeTicks(), 0, 0);
+  ui::MouseEvent mouse_press(ui::EventType::kMousePressed, gfx::Point(),
+                             gfx::Point(), base::TimeTicks(), 0, 0);
   DispatchEventUsingWindowDispatcher(&mouse_press);
 }
 
@@ -293,7 +327,7 @@ TEST_F(CaptureControllerTest, UpdateCaptureDestroysOldCaptureWindow) {
 
   // Since delegate iteration order is not deterministic, use this to assert
   // that the two scenarios below have opposite order.
-  aura::Window* first_old_capture = nullptr;
+  const aura::Window* first_old_capture = nullptr;
 
   {
     // Create a window inside the WindowEventDispatcher.

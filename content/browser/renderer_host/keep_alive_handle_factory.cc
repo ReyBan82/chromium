@@ -10,6 +10,7 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "content/browser/renderer_host/render_process_host_impl.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/content_browser_client.h"
@@ -41,7 +42,8 @@ class KeepAliveHandleImpl final : public blink::mojom::KeepAliveHandle {
     if (!process_host || process_host->AreRefCountsDisabled()) {
       return;
     }
-    process_host->IncrementKeepAliveRefCount(handle_id_);
+    static_cast<RenderProcessHostImpl*>(process_host)
+        ->IncrementKeepAliveRefCount(handle_id_);
   }
   ~KeepAliveHandleImpl() override {
     GetContentClient()->browser()->OnKeepaliveRequestFinished();
@@ -49,7 +51,8 @@ class KeepAliveHandleImpl final : public blink::mojom::KeepAliveHandle {
     if (!process_host || process_host->AreRefCountsDisabled()) {
       return;
     }
-    process_host->DecrementKeepAliveRefCount(handle_id_);
+    static_cast<RenderProcessHostImpl*>(process_host)
+        ->DecrementKeepAliveRefCount(handle_id_);
   }
 
   KeepAliveHandleImpl(const KeepAliveHandleImpl&) = delete;
@@ -93,11 +96,11 @@ class KeepAliveHandleFactory::Context
 
 KeepAliveHandleFactory::KeepAliveHandleFactory(RenderProcessHost* process_host,
                                                base::TimeDelta timeout)
-    : context_(std::make_unique<Context>(process_host->GetID())),
+    : context_(std::make_unique<Context>(process_host->GetDeprecatedID())),
       timeout_(timeout) {}
 
 KeepAliveHandleFactory::~KeepAliveHandleFactory() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M152);
   // Extend the lifetime of `context_` a bit. Note that `context_` has an
   // ability to extend the lifetime of the associated render process.
   GetUIThreadTaskRunner({})->PostDelayedTask(

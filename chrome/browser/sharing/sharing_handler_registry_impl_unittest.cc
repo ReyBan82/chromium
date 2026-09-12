@@ -6,8 +6,11 @@
 
 #include <memory>
 
-#include "chrome/browser/sharing/mock_sharing_message_handler.h"
-#include "chrome/browser/sharing/sharing_device_registration.h"
+#include "base/test/scoped_feature_list.h"
+#include "chrome/common/chrome_features.h"
+#include "components/browser_actuator/public/features.h"
+#include "components/sharing_message/mock_sharing_message_handler.h"
+#include "components/sharing_message/sharing_device_registration.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -15,24 +18,25 @@ namespace {
 
 class FakeSharingDeviceRegistration : public SharingDeviceRegistration {
  public:
-  FakeSharingDeviceRegistration()
-      : SharingDeviceRegistration(/*pref_service=*/nullptr,
-                                  /*sharing_sync_preference=*/nullptr,
-                                  /*vapid_key_manager=*/nullptr,
-                                  /*instance_id_driver=*/nullptr,
-                                  /*sync_service=*/nullptr) {}
+  FakeSharingDeviceRegistration() = default;
   ~FakeSharingDeviceRegistration() override = default;
 
-  bool IsSharedClipboardSupported() const override {
-    return shared_clipboard_supported_;
+  void RegisterDevice(
+      SharingDeviceRegistration::RegistrationCallback callback) override {}
+  void UnregisterDevice(
+      SharingDeviceRegistration::RegistrationCallback callback) override {}
+  bool IsSmsFetcherSupported() const override { return false; }
+  bool IsRemoteCopySupported() const override { return false; }
+  bool IsOptimizationGuidePushNotificationSupported() const override {
+    return false;
   }
-
-  void SetIsSharedClipboardSupported(bool supported) {
-    shared_clipboard_supported_ = supported;
+  bool IsOneTimeTokenBackendNotificationSupported() const override {
+    return false;
   }
-
- private:
-  bool shared_clipboard_supported_ = false;
+  bool IsGlicExperimentalTriggeringSupported() const override { return false; }
+  bool IsBrowserActuatorSupported() const override { return false; }
+  void SetEnabledFeaturesForTesting(
+      std::set<syncer::DeviceInfo::SharingFeature> enabled_features) override {}
 };
 
 class SharingHandlerRegistryImplTest : public testing::Test {
@@ -44,7 +48,7 @@ class SharingHandlerRegistryImplTest : public testing::Test {
     return std::make_unique<SharingHandlerRegistryImpl>(
         /*profile=*/nullptr, &sharing_device_registration_,
         /*message_sender=*/nullptr, /*device_source=*/nullptr,
-        /*sms_fetcher=*/nullptr);
+        /*sms_fetcher=*/nullptr, /*gmail_otp_backend=*/nullptr);
   }
 
  protected:
@@ -54,40 +58,48 @@ class SharingHandlerRegistryImplTest : public testing::Test {
 
 }  // namespace
 
-TEST_F(SharingHandlerRegistryImplTest, SharedClipboard_IsAdded) {
-  sharing_device_registration_.SetIsSharedClipboardSupported(true);
-  auto handler_registry = CreateHandlerRegistry();
-  EXPECT_TRUE(handler_registry->GetSharingHandler(
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage));
-
-  // Default handlers cannot be removed.
-  handler_registry->UnregisterSharingHandler(
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage);
-  EXPECT_TRUE(handler_registry->GetSharingHandler(
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage));
-}
-
-TEST_F(SharingHandlerRegistryImplTest, SharedClipboard_NotAdded) {
-  sharing_device_registration_.SetIsSharedClipboardSupported(false);
+#if !BUILDFLAG(IS_ANDROID)
+TEST_F(SharingHandlerRegistryImplTest, Glic_NotAddedWhenServiceMissing) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(
+      features::kGlicExperimentalTriggering);
   auto handler_registry = CreateHandlerRegistry();
   EXPECT_FALSE(handler_registry->GetSharingHandler(
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage));
+      components_sharing_message::SharingMessage::kGlicExperimentalTriggering));
 }
+#endif  // !BUILDFLAG(IS_ANDROID)
 
-TEST_F(SharingHandlerRegistryImplTest, SharedClipboard_AddRemoveManually) {
-  sharing_device_registration_.SetIsSharedClipboardSupported(false);
+TEST_F(SharingHandlerRegistryImplTest, AddRemoveManually) {
   auto handler_registry = CreateHandlerRegistry();
   EXPECT_FALSE(handler_registry->GetSharingHandler(
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage));
+      components_sharing_message::SharingMessage::kSmsFetchRequest));
 
   handler_registry->RegisterSharingHandler(
       std::make_unique<MockSharingMessageHandler>(),
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage);
+      components_sharing_message::SharingMessage::kSmsFetchRequest);
   EXPECT_TRUE(handler_registry->GetSharingHandler(
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage));
+      components_sharing_message::SharingMessage::kSmsFetchRequest));
 
   handler_registry->UnregisterSharingHandler(
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage);
+      components_sharing_message::SharingMessage::kSmsFetchRequest);
   EXPECT_FALSE(handler_registry->GetSharingHandler(
-      chrome_browser_sharing::SharingMessage::kSharedClipboardMessage));
+      components_sharing_message::SharingMessage::kSmsFetchRequest));
+}
+
+TEST_F(SharingHandlerRegistryImplTest,
+       BrowserActuatorDownstreamMessage_AddedWhenFeatureEnabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndEnableFeature(browser_actuator::kBrowserActuator);
+  auto handler_registry = CreateHandlerRegistry();
+  EXPECT_TRUE(handler_registry->GetSharingHandler(
+      components_sharing_message::SharingMessage::kActuatorDownstreamMessage));
+}
+
+TEST_F(SharingHandlerRegistryImplTest,
+       BrowserActuatorDownstreamMessage_NotAddedWhenFeatureDisabled) {
+  base::test::ScopedFeatureList scoped_feature_list;
+  scoped_feature_list.InitAndDisableFeature(browser_actuator::kBrowserActuator);
+  auto handler_registry = CreateHandlerRegistry();
+  EXPECT_FALSE(handler_registry->GetSharingHandler(
+      components_sharing_message::SharingMessage::kActuatorDownstreamMessage));
 }

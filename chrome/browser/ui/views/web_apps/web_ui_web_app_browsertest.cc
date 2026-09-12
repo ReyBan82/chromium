@@ -4,11 +4,15 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/strings/strcat.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "chrome/browser/ui/views/frame/browser_view.h"
 #include "chrome/browser/ui/views/tabs/tab_strip.h"
 #include "chrome/browser/ui/web_applications/app_browser_controller.h"
 #include "chrome/browser/ui/web_applications/test/web_app_browsertest_util.h"
-#include "chrome/browser/ui/web_applications/web_app_controller_browsertest.h"
+#include "chrome/browser/ui/web_applications/web_app_browsertest_base.h"
 #include "chrome/browser/web_applications/mojom/user_display_mode.mojom.h"
 #include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
 #include "chrome/browser/web_applications/web_app_install_info.h"
@@ -27,40 +31,40 @@ constexpr char kWebUIScheme[] = "chrome://";
 
 namespace web_app {
 
-class WebUIWebAppBrowserTest : public WebAppControllerBrowserTest {
+class WebUIWebAppBrowserTest : public WebAppBrowserTestBase {
  public:
   WebUIWebAppBrowserTest() = default;
   ~WebUIWebAppBrowserTest() override = default;
 
   void SetUp() override {
-    features_.InitAndEnableFeature(
-        password_manager::features::kPasswordManagerRedesign);
     ASSERT_TRUE(embedded_test_server()->Start());
-    WebAppControllerBrowserTest::SetUp();
+    WebAppBrowserTestBase::SetUp();
   }
 
   struct App {
-    AppId id;
+    webapps::AppId id;
     std::string start_url;
-    raw_ptr<Browser> browser;
+    raw_ptr<BrowserWindowInterface> browser;
     raw_ptr<BrowserView> browser_view;
     raw_ptr<content::WebContents> web_contents;
   };
 
   App InstallAndLaunch() {
-    Profile* profile = browser()->profile();
+    Profile* profile = browser()->GetProfile();
     std::string start_url = base::StrCat(
         {kWebUIScheme, password_manager::kChromeUIPasswordManagerHost});
 
-    auto web_app_info = std::make_unique<WebAppInstallInfo>();
-    web_app_info->start_url = GURL(start_url);
+    auto web_app_info =
+        WebAppInstallInfo::CreateWithStartUrlForTesting(GURL(start_url));
     web_app_info->user_display_mode = mojom::UserDisplayMode::kStandalone;
-    AppId app_id = test::InstallWebApp(profile, std::move(web_app_info));
+    webapps::AppId app_id =
+        test::InstallWebApp(profile, std::move(web_app_info));
 
-    Browser* app_browser = ::web_app::LaunchWebAppBrowser(profile, app_id);
+    BrowserWindowInterface* app_browser =
+        ::web_app::LaunchWebAppBrowser(profile, app_id);
     return App{app_id, start_url, app_browser,
                BrowserView::GetBrowserViewForBrowser(app_browser),
-               app_browser->tab_strip_model()->GetActiveWebContents()};
+               app_browser->GetTabStripModel()->GetActiveWebContents()};
   }
 
  private:
@@ -88,10 +92,12 @@ IN_PROC_BROWSER_TEST_F(WebUIWebAppBrowserTest, NavigationsToOtherWebUIs) {
   EXPECT_EQ(app.web_contents->GetVisibleURL(), in_scope_url);
 
   // Check that new web contents belong to the same profile.
-  Browser* new_browser_window = chrome::FindTabbedBrowser(
-      app.browser->profile(), /*match_original_profiles=*/true);
-  EXPECT_EQ(new_web_contents,
-            new_browser_window->tab_strip_model()->GetActiveWebContents());
+  BrowserWindowInterface* browser_window_interface =
+      ProfileBrowserCollection::GetForProfile(app.browser->GetProfile())
+          ->FindTabbedBrowser(/*match_original_profiles=*/true);
+  EXPECT_EQ(
+      new_web_contents,
+      browser_window_interface->GetTabStripModel()->GetActiveWebContents());
   EXPECT_EQ(new_web_contents->GetVisibleURL(), out_of_scope_url);
 }
 

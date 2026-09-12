@@ -4,10 +4,16 @@
 
 #import "base/mac/launch_application.h"
 
+#include <variant>
+
+#include "base/apple/bridging.h"
+#include "base/apple/foundation_util.h"
 #include "base/command_line.h"
 #include "base/functional/callback.h"
 #include "base/logging.h"
-#include "base/mac/foundation_util.h"
+#include "base/mac/launch_services_spi.h"
+#include "base/mac/mac_util.h"
+#include "base/metrics/histogram_functions.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/types/expected.h"
 
@@ -15,9 +21,18 @@ namespace base::mac {
 
 namespace {
 
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+enum class LaunchResult {
+  kSuccess = 0,
+  kSuccessDespiteError = 1,
+  kFailure = 2,
+  kMaxValue = kFailure,
+};
+
 NSArray* CommandLineArgsToArgsArray(const CommandLineArgs& command_line_args) {
   if (const CommandLine* command_line =
-          absl::get_if<CommandLine>(&command_line_args)) {
+          std::get_if<CommandLine>(&command_line_args)) {
     const auto& argv = command_line->argv();
     size_t argc = argv.size();
     DCHECK_GT(argc, 0lu);
@@ -33,12 +48,14 @@ NSArray* CommandLineArgsToArgsArray(const CommandLineArgs& command_line_args) {
   }
 
   if (const std::vector<std::string>* string_vector =
-          absl::get_if<std::vector<std::string>>(&command_line_args)) {
+          std::get_if<std::vector<std::string>>(&command_line_args)) {
     NSMutableArray* args_array =
         [NSMutableArray arrayWithCapacity:string_vector->size()];
     for (const auto& arg : *string_vector) {
       [args_array addObject:base::SysUTF8ToNSString(arg)];
     }
+
+    return args_array;
   }
 
   return @[];
@@ -46,32 +63,42 @@ NSArray* CommandLineArgsToArgsArray(const CommandLineArgs& command_line_args) {
 
 NSWorkspaceOpenConfiguration* GetOpenConfiguration(
     LaunchApplicationOptions options,
-    const CommandLineArgs& command_line_args) API_AVAILABLE(macos(10.15)) {
+    const CommandLineArgs& command_line_args) {
   NSWorkspaceOpenConfiguration* config =
       [NSWorkspaceOpenConfiguration configuration];
+
+  config.arguments = CommandLineArgsToArgsArray(command_line_args);
 
   config.activates = options.activate;
   config.createsNewApplicationInstance = options.create_new_instance;
   config.promptsUserIfNeeded = options.prompt_user_if_needed;
-  config.arguments = CommandLineArgsToArgsArray(command_line_args);
+
+  if (options.hidden_in_background) {
+    config.addsToRecentItems = NO;
+    config.hides = YES;
+    config._additionalLSOpenOptions = @{
+      apple::CFToNSPtrCast(_kLSOpenOptionBackgroundLaunchKey) : @YES,
+    };
+  }
 
   return config;
 }
 
-NSWorkspaceLaunchOptions GetLaunchOptions(LaunchApplicationOptions options) {
-  NSWorkspaceLaunchOptions launch_options = NSWorkspaceLaunchDefault;
+void LogResultAndInvokeCallback(const base::FilePath& app_bundle_path,
+                                bool create_new_instance,
+                                LaunchApplicationCallback callback,
+                                NSRunningApplication* app,
+                                NSError* error) {
+  UmaHistogramEnumeration(
+      "Mac.LaunchApplicationResult",
+      app ? LaunchResult::kSuccess : LaunchResult::kFailure);
 
-  if (!options.activate) {
-    launch_options |= NSWorkspaceLaunchWithoutActivation;
+  if (error) {
+    LOG(ERROR) << base::SysNSStringToUTF8(error.localizedDescription);
+    std::move(callback).Run(nil, error);
+  } else {
+    std::move(callback).Run(app, nil);
   }
-  if (options.create_new_instance) {
-    launch_options |= NSWorkspaceLaunchNewInstance;
-  }
-  if (options.prompt_user_if_needed) {
-    launch_options |= NSWorkspaceLaunchWithErrorPresentation;
-  }
-
-  return launch_options;
 }
 
 }  // namespace
@@ -81,15 +108,17 @@ void LaunchApplication(const base::FilePath& app_bundle_path,
                        const std::vector<std::string>& url_specs,
                        LaunchApplicationOptions options,
                        LaunchApplicationCallback callback) {
-  __block LaunchApplicationCallback callback_block_access = std::move(callback);
+  __block LaunchApplicationCallback callback_block_access =
+      base::BindOnce(&LogResultAndInvokeCallback, app_bundle_path,
+                     options.create_new_instance, std::move(callback));
 
-  NSURL* bundle_url = FilePathToNSURL(app_bundle_path);
+  NSURL* bundle_url = apple::FilePathToNSURL(app_bundle_path);
   if (!bundle_url) {
     dispatch_async(dispatch_get_main_queue(), ^{
       std::move(callback_block_access)
-          .Run(base::unexpected([NSError errorWithDomain:NSCocoaErrorDomain
-                                                    code:NSFileNoSuchFileError
-                                                userInfo:nil]));
+          .Run(nil, [NSError errorWithDomain:NSCocoaErrorDomain
+                                        code:NSFileNoSuchFileError
+                                    userInfo:nil]);
     });
     return;
   }
@@ -103,63 +132,25 @@ void LaunchApplication(const base::FilePath& app_bundle_path,
     }
   }
 
-  if (@available(macOS 10.15, *)) {
-    void (^action_block)(NSRunningApplication*, NSError*) =
-        ^void(NSRunningApplication* app, NSError* error) {
-          dispatch_async(dispatch_get_main_queue(), ^{
-            if (error) {
-              LOG(ERROR) << base::SysNSStringToUTF8(error.localizedDescription);
-              std::move(callback_block_access).Run(base::unexpected(error));
-            } else {
-              std::move(callback_block_access).Run(app);
-            }
-          });
-        };
+  void (^action_block)(NSRunningApplication*, NSError*) =
+      ^void(NSRunningApplication* app, NSError* error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+          std::move(callback_block_access).Run(app, error);
+        });
+      };
 
-    NSWorkspaceOpenConfiguration* configuration =
-        GetOpenConfiguration(options, command_line_args);
+  NSWorkspaceOpenConfiguration* configuration =
+      GetOpenConfiguration(options, command_line_args);
 
-    if (ns_urls) {
-      [NSWorkspace.sharedWorkspace openURLs:ns_urls
-                       withApplicationAtURL:bundle_url
-                              configuration:configuration
-                          completionHandler:action_block];
-    } else {
-      [NSWorkspace.sharedWorkspace openApplicationAtURL:bundle_url
-                                          configuration:configuration
-                                      completionHandler:action_block];
-    }
+  if (ns_urls) {
+    [NSWorkspace.sharedWorkspace openURLs:ns_urls
+                     withApplicationAtURL:bundle_url
+                            configuration:configuration
+                        completionHandler:action_block];
   } else {
-    NSDictionary* configuration = @{
-      NSWorkspaceLaunchConfigurationArguments :
-          CommandLineArgsToArgsArray(command_line_args),
-    };
-
-    NSWorkspaceLaunchOptions launch_options = GetLaunchOptions(options);
-
-    NSError* error = nil;
-    NSRunningApplication* app;
-    if (ns_urls) {
-      app = [NSWorkspace.sharedWorkspace openURLs:ns_urls
-                             withApplicationAtURL:bundle_url
-                                          options:launch_options
-                                    configuration:configuration
-                                            error:&error];
-    } else {
-      app = [NSWorkspace.sharedWorkspace launchApplicationAtURL:bundle_url
-                                                        options:launch_options
-                                                  configuration:configuration
-                                                          error:&error];
-    }
-
-    dispatch_async(dispatch_get_main_queue(), ^{
-      if (error) {
-        LOG(ERROR) << base::SysNSStringToUTF8(error.localizedDescription);
-        std::move(callback_block_access).Run(base::unexpected(error));
-      } else {
-        std::move(callback_block_access).Run(app);
-      }
-    });
+    [NSWorkspace.sharedWorkspace openApplicationAtURL:bundle_url
+                                        configuration:configuration
+                                    completionHandler:action_block];
   }
 }
 

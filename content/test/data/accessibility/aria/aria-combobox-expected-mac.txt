@@ -5,3 +5,13 @@ AXWebArea
 ++AXList
 ++++AXStaticText AXValue='Alabama'
 ++++AXStaticText AXFocused=1 AXValue='Alaska'
+++AXComboBox AXLinkedUIElements=[:9]
+++AXTable
+++++AXRow AXTitle='Grid row'
+++++++AXStaticText AXValue='Grid row'
+++++AXGroup AXSubrole=AXEmptyGroup
+++AXComboBox AXLinkedUIElements=[:14]
+++AXTable
+++++AXRow AXTitle='Treegrid row'
+++++++AXStaticText AXValue='Treegrid row'
+++++AXGroup AXSubrole=AXEmptyGroup

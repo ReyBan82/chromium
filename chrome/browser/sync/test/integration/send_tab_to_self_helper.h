@@ -5,29 +5,42 @@
 #ifndef CHROME_BROWSER_SYNC_TEST_INTEGRATION_SEND_TAB_TO_SELF_HELPER_H_
 #define CHROME_BROWSER_SYNC_TEST_INTEGRATION_SEND_TAB_TO_SELF_HELPER_H_
 
+#include <map>
 #include <string>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
+#include "base/timer/timer.h"
 #include "chrome/browser/sync/test/integration/status_change_checker.h"
+#include "components/autofill/core/browser/foundations/autofill_manager.h"
+#include "components/autofill/core/browser/foundations/scoped_autofill_managers_observation.h"
 #include "components/send_tab_to_self/send_tab_to_self_model_observer.h"
 #include "components/sync_device_info/device_info_tracker.h"
+#include "content/public/test/browser_test_utils.h"
+#include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
+
+namespace content {
+class WebContents;
+}  // namespace content
 
 namespace send_tab_to_self {
 class SendTabToSelfEntry;
+class SendTabToSelfModel;
 class SendTabToSelfSyncService;
 }  // namespace send_tab_to_self
 
 namespace send_tab_to_self_helper {
 
-// Class that allows waiting until a particular |url| is exposed by the
-// SendTabToSelfModel in |service|.
+// Class that allows waiting until a particular `url` is exposed by the
+// SendTabToSelfModel in `service`.
 class SendTabToSelfUrlChecker
     : public StatusChangeChecker,
       public send_tab_to_self::SendTabToSelfModelObserver {
  public:
-  // The caller must ensure that |service| is not null and will outlive this
+  // The caller must ensure that `service` is not null and will outlive this
   // object.
   SendTabToSelfUrlChecker(send_tab_to_self::SendTabToSelfSyncService* service,
                           const GURL& url);
@@ -41,25 +54,27 @@ class SendTabToSelfUrlChecker
   bool IsExitConditionSatisfied(std::ostream* os) override;
 
   // SendTabToSelfModelObserver implementation.
-  void SendTabToSelfModelLoaded() override;
-  void EntriesAddedRemotely(
-      const std::vector<const send_tab_to_self::SendTabToSelfEntry*>&
-          new_entries) override;
-  void EntriesRemovedRemotely(
-      const std::vector<std::string>& guids_removed) override;
+  void OnEntriesAddedRemotely(
+      base::span<const send_tab_to_self::SendTabToSelfEntry* const> new_entries)
+      override;
+  void OnEntriesRemovedRemotely(
+      base::span<const std::string> guids_removed) override;
 
  private:
   const GURL url_;
   const raw_ptr<send_tab_to_self::SendTabToSelfSyncService> service_;
+  base::ScopedObservation<send_tab_to_self::SendTabToSelfModel,
+                          send_tab_to_self::SendTabToSelfModelObserver>
+      observation_{this};
 };
 
-// Class that allows waiting until a particular |url| is marked opened by the
-// SendTabToSelfModel in |service|.
+// Class that allows waiting until a particular `url` is marked opened by the
+// SendTabToSelfModel in `service`.
 class SendTabToSelfUrlOpenedChecker
     : public StatusChangeChecker,
       public send_tab_to_self::SendTabToSelfModelObserver {
  public:
-  // The caller must ensure that |service| is not null and will outlive this
+  // The caller must ensure that `service` is not null and will outlive this
   // object.
   SendTabToSelfUrlOpenedChecker(
       send_tab_to_self::SendTabToSelfSyncService* service,
@@ -75,28 +90,30 @@ class SendTabToSelfUrlOpenedChecker
   bool IsExitConditionSatisfied(std::ostream* os) override;
 
   // SendTabToSelfModelObserver implementation.
-  void SendTabToSelfModelLoaded() override;
-  void EntriesAddedRemotely(
-      const std::vector<const send_tab_to_self::SendTabToSelfEntry*>&
-          new_entries) override;
-  void EntriesRemovedRemotely(
-      const std::vector<std::string>& guids_removed) override;
-  void EntriesOpenedRemotely(
-      const std::vector<const send_tab_to_self::SendTabToSelfEntry*>&
+  void OnEntriesAddedRemotely(
+      base::span<const send_tab_to_self::SendTabToSelfEntry* const> new_entries)
+      override;
+  void OnEntriesRemovedRemotely(
+      base::span<const std::string> guids_removed) override;
+  void OnEntriesOpenedRemotely(
+      base::span<const send_tab_to_self::SendTabToSelfEntry* const>
           opened_entries) override;
 
  private:
   const GURL url_;
   const raw_ptr<send_tab_to_self::SendTabToSelfSyncService> service_;
+  base::ScopedObservation<send_tab_to_self::SendTabToSelfModel,
+                          send_tab_to_self::SendTabToSelfModelObserver>
+      observation_{this};
 };
 
-// Class that allows waiting the number of entries in until |service0|
-// matches the number of entries in |service1|.
+// Class that allows waiting the number of entries in until `service0`
+// matches the number of entries in `service1`.
 class SendTabToSelfModelEqualityChecker
     : public StatusChangeChecker,
       public send_tab_to_self::SendTabToSelfModelObserver {
  public:
-  // The caller must ensure that |service0| and |service1| are not null and
+  // The caller must ensure that `service0` and `service1` are not null and
   // will outlive this object.
   SendTabToSelfModelEqualityChecker(
       send_tab_to_self::SendTabToSelfSyncService* service0,
@@ -113,16 +130,21 @@ class SendTabToSelfModelEqualityChecker
   bool IsExitConditionSatisfied(std::ostream* os) override;
 
   // SendTabToSelfModelObserver implementation.
-  void SendTabToSelfModelLoaded() override;
-  void EntriesAddedRemotely(
-      const std::vector<const send_tab_to_self::SendTabToSelfEntry*>&
-          new_entries) override;
-  void EntriesRemovedRemotely(
-      const std::vector<std::string>& guids_removed) override;
+  void OnEntriesAddedRemotely(
+      base::span<const send_tab_to_self::SendTabToSelfEntry* const> new_entries)
+      override;
+  void OnEntriesRemovedRemotely(
+      base::span<const std::string> guids_removed) override;
 
  private:
   const raw_ptr<send_tab_to_self::SendTabToSelfSyncService> service0_;
   const raw_ptr<send_tab_to_self::SendTabToSelfSyncService> service1_;
+  base::ScopedObservation<send_tab_to_self::SendTabToSelfModel,
+                          send_tab_to_self::SendTabToSelfModelObserver>
+      observation0_{this};
+  base::ScopedObservation<send_tab_to_self::SendTabToSelfModel,
+                          send_tab_to_self::SendTabToSelfModelObserver>
+      observation1_{this};
 };
 
 // Class that allows waiting until the bridge is ready.
@@ -130,7 +152,7 @@ class SendTabToSelfActiveChecker
     : public StatusChangeChecker,
       public send_tab_to_self::SendTabToSelfModelObserver {
  public:
-  // The caller must ensure that |service| is not null and will outlive this
+  // The caller must ensure that `service` is not null and will outlive this
   // object.
   explicit SendTabToSelfActiveChecker(
       send_tab_to_self::SendTabToSelfSyncService* service);
@@ -145,15 +167,17 @@ class SendTabToSelfActiveChecker
   bool IsExitConditionSatisfied(std::ostream* os) override;
 
   // SendTabToSelfModelObserver implementation.
-  void SendTabToSelfModelLoaded() override;
-  void EntriesAddedRemotely(
-      const std::vector<const send_tab_to_self::SendTabToSelfEntry*>&
-          new_entries) override;
-  void EntriesRemovedRemotely(
-      const std::vector<std::string>& guids_removed) override;
+  void OnEntriesAddedRemotely(
+      base::span<const send_tab_to_self::SendTabToSelfEntry* const> new_entries)
+      override;
+  void OnEntriesRemovedRemotely(
+      base::span<const std::string> guids_removed) override;
 
  private:
   const raw_ptr<send_tab_to_self::SendTabToSelfSyncService> service_;
+  base::ScopedObservation<send_tab_to_self::SendTabToSelfModel,
+                          send_tab_to_self::SendTabToSelfModelObserver>
+      observation_{this};
 };
 
 // Class that allows waiting until two devices are ready.
@@ -179,6 +203,9 @@ class SendTabToSelfMultiDeviceActiveChecker
 
  private:
   const raw_ptr<syncer::DeviceInfoTracker> tracker_;
+  base::ScopedObservation<syncer::DeviceInfoTracker,
+                          syncer::DeviceInfoTracker::Observer>
+      observation_{this};
 };
 
 // Class that allows waiting until device has send_tab_to_self disabled.
@@ -199,13 +226,16 @@ class SendTabToSelfDeviceDisabledChecker
  private:
   const raw_ptr<syncer::DeviceInfoTracker> tracker_;
   std::string device_guid_;
+  base::ScopedObservation<syncer::DeviceInfoTracker,
+                          syncer::DeviceInfoTracker::Observer>
+      observation_{this};
 };
 
 class SendTabToSelfUrlDeletedChecker
     : public StatusChangeChecker,
       public send_tab_to_self::SendTabToSelfModelObserver {
  public:
-  // The caller must ensure that |service| is not null and will outlive this
+  // The caller must ensure that `service` is not null and will outlive this
   // object.
   SendTabToSelfUrlDeletedChecker(
       send_tab_to_self::SendTabToSelfSyncService* service,
@@ -222,17 +252,70 @@ class SendTabToSelfUrlDeletedChecker
   bool IsExitConditionSatisfied(std::ostream* os) override;
 
   // SendTabToSelfModelObserver implementation.
-  void SendTabToSelfModelLoaded() override;
-  void EntriesAddedRemotely(
-      const std::vector<const send_tab_to_self::SendTabToSelfEntry*>&
-          new_entries) override;
-  void EntriesRemovedRemotely(
-      const std::vector<std::string>& guids_removed) override;
+  void OnEntriesRemovedRemotely(
+      base::span<const std::string> guids_removed) override;
 
  private:
   const GURL url_;
   const raw_ptr<send_tab_to_self::SendTabToSelfSyncService> service_;
+  base::ScopedObservation<send_tab_to_self::SendTabToSelfModel,
+                          send_tab_to_self::SendTabToSelfModelObserver>
+      observation_{this};
 };
+
+// Class that allows waiting until an element with `element_id` is within the
+// viewport of `web_contents`.
+class SendTabToSelfScrollChecker : public StatusChangeChecker {
+ public:
+  SendTabToSelfScrollChecker(content::WebContents* web_contents,
+                             const std::string& element_id);
+  ~SendTabToSelfScrollChecker() override;
+
+  // StatusChangeChecker implementation.
+  bool IsExitConditionSatisfied(std::ostream* os) override;
+
+ private:
+  const raw_ptr<content::WebContents> web_contents_;
+  const std::string element_id_;
+  base::RepeatingTimer timer_;
+};
+
+// Class that allows waiting until Autofill has seen (cached) the expected
+// forms in `web_contents` and their expected values.
+class AutofillFieldsSeenChecker : public StatusChangeChecker,
+                                  public autofill::AutofillManager::Observer {
+ public:
+  AutofillFieldsSeenChecker(content::WebContents* web_contents,
+                            std::map<std::string, std::string> expected_fields);
+  ~AutofillFieldsSeenChecker() override;
+
+  // StatusChangeChecker implementation.
+  bool IsExitConditionSatisfied(std::ostream* os) override;
+
+  // AutofillManager::Observer implementation.
+  void OnAfterFormsSeen(
+      autofill::AutofillManager& manager,
+      base::span<const autofill::FormGlobalId> updated_forms,
+      base::span<const autofill::FormGlobalId> removed_forms) override;
+  void OnAfterTextFieldValueChanged(autofill::AutofillManager& manager,
+                                    autofill::FormGlobalId form,
+                                    autofill::FieldGlobalId field) override;
+
+ private:
+  const raw_ptr<content::WebContents> web_contents_;
+  const std::map<std::string, std::string> expected_fields_;
+  autofill::ScopedAutofillManagersObservation observation_{this};
+};
+
+// Returns the value of a form field with the given `id` in `web_contents`.
+content::EvalJsResult GetFormFieldValueById(content::WebContents* web_contents,
+                                            const std::string& id);
+
+// Populates a form field with the given `id` in `web_contents` with `value`.
+// Returns an AssertionResult indicating success or failure.
+testing::AssertionResult PopulateFormField(content::WebContents* web_contents,
+                                           const std::string& id,
+                                           const std::string& value);
 
 }  // namespace send_tab_to_self_helper
 

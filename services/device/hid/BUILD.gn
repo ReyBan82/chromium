@@ -2,37 +2,49 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/chromeos/ui_mode.gni")
 import("//build/config/features.gni")
 import("//testing/libfuzzer/fuzzer_test.gni")
 
-source_set("hid") {
-  # HID is not implemented on Android and we want to be particularly careful
-  # about not bloating binary size by accidentially including it.
-  assert(!is_android)
+if (is_android) {
+  import("//build/config/android/rules.gni")
+  import("//third_party/jni_zero/jni_zero.gni")
+}
 
+source_set("hid") {
   sources = [
+    "hid_collection.cc",
+    "hid_collection.h",
     "hid_connection.cc",
     "hid_connection.h",
     "hid_connection_impl.cc",
     "hid_connection_impl.h",
     "hid_device_info.cc",
     "hid_device_info.h",
+    "hid_item_state_table.cc",
+    "hid_item_state_table.h",
     "hid_manager_impl.cc",
     "hid_manager_impl.h",
-    "hid_report_type.h",
+    "hid_report_descriptor.cc",
+    "hid_report_descriptor.h",
+    "hid_report_descriptor_item.cc",
+    "hid_report_descriptor_item.h",
+    "hid_report_item.cc",
+    "hid_report_item.h",
     "hid_service.cc",
     "hid_service.h",
   ]
 
+  configs += [ "//build/config/compiler:wexit_time_destructors" ]
+
   deps = [
     "//base",
-    "//build:chromeos_buildflags",
     "//components/device_event_log",
     "//device/base",
     "//services/device:utility",
     "//services/device/public/cpp/hid",
     "//services/device/public/mojom",
+    "//services/device/public/proto:hid_gcpw_proto",
+    "//third_party/protobuf:protobuf_lite",
   ]
 
   if ((is_linux || is_chromeos) && use_udev) {
@@ -47,7 +59,7 @@ source_set("hid") {
     deps += [ "//device/udev_linux" ]
   }
 
-  if (is_chromeos_ash) {
+  if (is_chromeos) {
     deps += [ "//chromeos/dbus/permission_broker" ]
   }
 
@@ -81,12 +93,44 @@ source_set("hid") {
       "hid_service_fuchsia.h",
     ]
   }
+
+  if (is_android) {
+    sources += [
+      "hid_connection_android.cc",
+      "hid_connection_android.h",
+      "hid_service_android.cc",
+      "hid_service_android.h",
+    ]
+    deps += [ ":jni_headers" ]
+  }
+}
+
+if (is_android) {
+  java_sources_needing_jni = [
+    "android/java/src/org/chromium/device/hid/ChromeHidConnection.java",
+    "android/java/src/org/chromium/device/hid/ChromeHidManager.java",
+  ]
+
+  generate_jni("jni_headers") {
+    sources = java_sources_needing_jni
+  }
+
+  android_library("java") {
+    srcjar_deps = [ ":jni_headers" ]
+    sources = java_sources_needing_jni
+    deps = [
+      "//base:base_java",
+      "//base:flagged_apis_java",
+      "//third_party/androidx:androidx_annotation_annotation_java",
+      "//third_party/jni_zero:jni_zero_java",
+    ]
+  }
 }
 
 fuzzer_test("hid_report_descriptor_fuzzer") {
   sources = [ "hid_report_descriptor_fuzzer.cc" ]
   deps = [
-    "//services/device/public/cpp/hid",
+    ":hid",
     "//services/device/public/mojom",
   ]
   seed_corpus = "fuzz_corpus"

@@ -13,6 +13,7 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/memory/ptr_util.h"
+#include "base/notimplemented.h"
 #include "base/notreached.h"
 #include "base/stl_util.h"
 #include "base/task/sequenced_task_runner.h"
@@ -173,6 +174,11 @@ void BluetoothAdapterWin::RemovePairingDelegateInternal(
 void BluetoothAdapterWin::AdapterStateChanged(
     const BluetoothTaskManagerWin::AdapterState& state) {
   DCHECK(thread_checker_.CalledOnValidThread());
+  // Lifetime: If obtained via BluetoothAdapterFactory::GetClassicAdapter() and
+  // the caller did NOT keep the scoped_refptr<BluetoothAdapter>, running
+  // init_callback_.Run() will release the last reference and destroy |this|.
+  // Use keep_alive to avoid use-after-free issues.
+  scoped_refptr<BluetoothAdapterWin> keep_alive(this);
   name_ = state.name;
   bool was_present = IsPresent();
   bool is_present = !state.address.empty();
@@ -189,6 +195,12 @@ void BluetoothAdapterWin::AdapterStateChanged(
   if (!initialized_) {
     initialized_ = true;
     std::move(init_callback_).Run();
+  }
+
+  // When the Bluetooth adapter is powered off or not present, all Bluetooth
+  // devices should be removed.
+  if (!powered_ || !is_present) {
+    ClearAllDevices();
   }
 }
 
@@ -227,17 +239,16 @@ void BluetoothAdapterWin::DevicesPolled(
   DeviceAddressSet changed_devices =
       base::STLSetIntersection<DeviceAddressSet>(known_devices, new_devices);
   for (const auto& device_state : devices) {
-    if (added_devices.find(device_state->address) != added_devices.end()) {
+    if (added_devices.contains(device_state->address)) {
       auto device_win = std::make_unique<BluetoothDeviceWin>(
           this, *device_state, ui_task_runner_, socket_thread_);
       BluetoothDeviceWin* device_win_raw = device_win.get();
       devices_[device_state->address] = std::move(device_win);
       for (auto& observer : observers_)
         observer.DeviceAdded(this, device_win_raw);
-    } else if (changed_devices.find(device_state->address) !=
-               changed_devices.end()) {
+    } else if (changed_devices.contains(device_state->address)) {
       auto iter = devices_.find(device_state->address);
-      DCHECK(iter != devices_.end());
+      CHECK(iter != devices_.end());
       BluetoothDeviceWin* device_win =
           static_cast<BluetoothDeviceWin*>(iter->second.get());
       if (!device_win->IsEqual(*device_state)) {
@@ -263,7 +274,6 @@ base::WeakPtr<BluetoothAdapter> BluetoothAdapterWin::GetWeakPtr() {
 // BluetoothAdapterWin should override SetPowered() instead.
 bool BluetoothAdapterWin::SetPoweredImpl(bool powered) {
   NOTREACHED();
-  return false;
 }
 
 void BluetoothAdapterWin::UpdateFilter(

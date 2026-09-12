@@ -4,9 +4,12 @@
 
 #include "chrome/services/sharing/nearby/platform/wifi_lan_server_socket.h"
 
+#include <atomic>
 #include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
+#include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
@@ -23,8 +26,7 @@
 #include "services/network/public/mojom/tcp_socket.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace nearby {
-namespace chrome {
+namespace nearby::chrome {
 
 namespace {
 
@@ -46,14 +48,15 @@ class WifiLanServerSocketTest : public testing::Test {
 
   void SetUp() override {
     auto fake_tcp_server_socket =
-        std::make_unique<ash::nearby::FakeTcpServerSocket>();
+        std::make_unique<ash::nearby::FakeTcpServerSocket>(
+            base::SequencedTaskRunner::GetCurrentDefault());
     fake_tcp_server_socket_ = fake_tcp_server_socket.get();
     mojo::PendingRemote<network::mojom::TCPServerSocket> tcp_server_socket;
     tcp_server_socket_self_owned_receiver_ref_ = mojo::MakeSelfOwnedReceiver(
         std::move(fake_tcp_server_socket),
         tcp_server_socket.InitWithNewPipeAndPassReceiver());
 
-    mojo::PendingRemote<sharing::mojom::FirewallHole> firewall_hole;
+    mojo::PendingRemote<::sharing::mojom::FirewallHole> firewall_hole;
     firewall_hole_self_owned_receiver_ref_ = mojo::MakeSelfOwnedReceiver(
         std::make_unique<ash::nearby::FakeFirewallHole>(),
         firewall_hole.InitWithNewPipeAndPassReceiver());
@@ -108,12 +111,13 @@ class WifiLanServerSocketTest : public testing::Test {
   }
 
   base::test::TaskEnvironment task_environment_;
-  size_t num_running_accept_calls_ = 0;
+  std::atomic<size_t> num_running_accept_calls_{0};
   base::OnceClosure on_accept_calls_finished_;
-  ash::nearby::FakeTcpServerSocket* fake_tcp_server_socket_;
+  raw_ptr<ash::nearby::FakeTcpServerSocket, DanglingUntriaged>
+      fake_tcp_server_socket_;
   mojo::SelfOwnedReceiverRef<network::mojom::TCPServerSocket>
       tcp_server_socket_self_owned_receiver_ref_;
-  mojo::SelfOwnedReceiverRef<sharing::mojom::FirewallHole>
+  mojo::SelfOwnedReceiverRef<::sharing::mojom::FirewallHole>
       firewall_hole_self_owned_receiver_ref_;
   std::unique_ptr<WifiLanServerSocket> wifi_lan_server_socket_;
 };
@@ -156,7 +160,7 @@ TEST_F(WifiLanServerSocketTest, Accept_Failure) {
       /*expected_success=*/false,
       /*on_accept_calls_finished=*/run_loop.QuitClosure());
   fake_tcp_server_socket_->FinishNextAccept(net::ERR_FAILED,
-                                            /*remote_addr=*/absl::nullopt);
+                                            /*remote_addr=*/std::nullopt);
   run_loop.Run();
 }
 
@@ -170,7 +174,7 @@ TEST_F(WifiLanServerSocketTest, Accept_Failure_ConcurrentCalls) {
       /*on_accept_calls_finished=*/run_loop.QuitClosure());
   for (size_t thread = 0; thread < kNumThreads; ++thread) {
     fake_tcp_server_socket_->FinishNextAccept(net::ERR_FAILED,
-                                              /*remote_addr=*/absl::nullopt);
+                                              /*remote_addr=*/std::nullopt);
   }
   run_loop.Run();
 }
@@ -276,5 +280,4 @@ TEST_F(WifiLanServerSocketTest, Disconnect_WhileWaitingForAccept_FirewallHole) {
   run_loop.Run();
 }
 
-}  // namespace chrome
-}  // namespace nearby
+}  // namespace nearby::chrome

@@ -10,7 +10,6 @@
 
 #import <memory>
 
-#import "ios/web/security/cert_verification_error.h"
 #import "ios/web/web_state/ui/crw_web_view_handler.h"
 #import "ios/web/web_state/ui/crw_web_view_handler_delegate.h"
 #include "ui/base/page_transition_types.h"
@@ -26,10 +25,13 @@ enum class ErrorRetryCommand;
 struct Referrer;
 class NavigationContextImpl;
 class WKBackForwardListItemHolder;
-}
+}  // namespace web
 
 // CRWWKNavigationHandler uses this protocol to interact with its owner.
 @protocol CRWWKNavigationHandlerDelegate <CRWWebViewHandlerDelegate>
+
+// Returns whether `action` was user initiated.
+- (BOOL)isUserInitiatedAction:(WKNavigationAction*)action;
 
 // Returns associated certificate verificatio controller.
 - (CRWCertVerificationController*)
@@ -64,10 +66,6 @@ class WKBackForwardListItemHolder;
 - (void)navigationHandlerWebProcessDidCrash:
     (CRWWKNavigationHandler*)navigationHandler;
 
-// Instructs the delegate to load current URL.
-- (void)navigationHandler:(CRWWKNavigationHandler*)navigationHandler
-    loadCurrentURLWithRendererInitiatedNavigation:(BOOL)rendererInitiated;
-
 // Notifies the delegate that load has completed.
 - (void)navigationHandler:(CRWWKNavigationHandler*)navigationHandler
     didCompleteLoadWithSuccess:(BOOL)loadSuccess
@@ -75,8 +73,7 @@ class WKBackForwardListItemHolder;
 
 // Resumes download using `webView`
 - (void)resumeDownloadWithData:(NSData*)data
-             completionHandler:(void (^)(WKDownload*))completionHandler
-    API_AVAILABLE(ios(15));
+             completionHandler:(void (^)(WKDownload*))completionHandler;
 
 @end
 
@@ -107,7 +104,7 @@ class WKBackForwardListItemHolder;
 @property(nonatomic, readonly, strong) CRWWKNavigationStates* navigationStates;
 
 // The current page loading phase.
-// TODO(crbug.com/956511): Remove this once refactor is done.
+// TODO(crbug.com/40624624): Remove this once refactor is done.
 @property(nonatomic, readwrite, assign) web::WKNavigationState navigationState;
 
 // Returns the WKBackForwardlistItemHolder of current navigation item.

@@ -13,7 +13,7 @@
 //   limitations under the License.
 
 // Parsing of a POSIX zone spec as described in the TZ part of section 8.3 in
-// http://pubs.opengroup.org/onlinepubs/009695399/basedefs/xbd_chap08.html.
+// https://pubs.opengroup.org/onlinepubs/9799919799/basedefs/V1_chap08.html.
 //
 // The current POSIX spec for America/Los_Angeles is "PST8PDT,M3.2.0,M11.1.0",
 // which would be broken down as ...
@@ -104,7 +104,7 @@ struct PosixTransition {
 
 // The entirety of a POSIX-string specified time-zone rule. The standard
 // abbreviation and offset are always given. If the time zone includes
-// daylight saving, then the daylight abbrevation is non-empty and the
+// daylight saving, then the daylight abbreviation is non-empty and the
 // remaining fields are also valid. Note that the start/end transitions
 // are not ordered---in the southern hemisphere the transition to end
 // daylight time occurs first in any particular year.

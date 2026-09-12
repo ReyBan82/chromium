@@ -5,6 +5,7 @@
 #ifndef COMPONENTS_TRANSLATE_CORE_BROWSER_TRANSLATE_TRIGGER_DECISION_H_
 #define COMPONENTS_TRANSLATE_CORE_BROWSER_TRANSLATE_TRIGGER_DECISION_H_
 
+#include <string>
 #include <vector>
 #include "components/translate/core/browser/translate_browser_metrics.h"
 
@@ -19,6 +20,7 @@ struct TranslateTriggerDecision {
   void PreventAllTriggering();
 
   void PreventAutoTranslate();
+  void ForceAutoTranslate();
   bool can_auto_translate() const;
 
   void PreventShowingUI();
@@ -51,6 +53,7 @@ struct TranslateTriggerDecision {
   bool IsTriggeringPossible() const;
 
   bool ShouldAutoTranslate() const;
+  bool will_force_auto_translate() const { return should_force_auto_translate_; }
 
   // Returns true iff:
   // 1. Showing the UI is disallowed (otherwise it would be chosen over showing
@@ -60,8 +63,6 @@ struct TranslateTriggerDecision {
   // 3. Ranker isn't requesting that the UI be suppressed.
   bool ShouldShowUI() const;
 
-  std::vector<TranslateBrowserMetrics::InitiationStatusType>
-      initiation_statuses;
   std::vector<int> ranker_events;
   std::string auto_translate_target;
   std::string href_translate_source;
@@ -78,6 +79,8 @@ struct TranslateTriggerDecision {
 
   bool can_auto_href_translate_ = true;
   bool can_show_href_translate_ui_ = true;
+
+  bool should_force_auto_translate_ = false;
 
   // Whether the UI should be shown for a predefined target language
   // which was set via SetPredefinedTargetLanguage call.

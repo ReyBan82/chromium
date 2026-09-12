@@ -4,18 +4,18 @@
 
 #include "chrome/browser/page_load_metrics/integration_tests/metric_integration_test.h"
 
-#include "base/test/trace_event_analyzer.h"
+#include "base/test/tracing/trace_event_analyzer.h"
 #include "build/build_config.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/page_load_metrics/browser/page_load_metrics_test_waiter.h"
 #include "components/page_load_metrics/browser/page_load_metrics_util.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
 #include "content/public/test/hit_test_region_observer.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
 
-using absl::optional;
 using base::Bucket;
-using base::Value;
+using std::optional;
 using ShiftFrame = page_load_metrics::PageLoadMetricsTestWaiter::ShiftFrame;
 using trace_analyzer::Query;
 using trace_analyzer::TraceAnalyzer;
@@ -32,11 +32,11 @@ class LayoutInstabilityTest : public MetricIntegrationTest {
               ShiftFrame frame = ShiftFrame::LayoutShiftOnlyInMainFrame,
               uint64_t num_layout_shifts = 1,
               bool check_UKM_UMA_metrics = false);
-  double CheckTraceData(Value::List& expectations, TraceAnalyzer&);
-  void CheckSources(const Value::List& expected_sources,
-                    const Value::List& trace_sources);
+  double CheckTraceData(base::ListValue& expectations, TraceAnalyzer&);
+  void CheckSources(const base::ListValue& expected_sources,
+                    const base::ListValue& trace_sources);
   void CheckUKMAndUMAMetrics(double expect_score);
-  std::pair<double, double> GetCLSFromList(Value::List& entry_records_list);
+  std::pair<double, double> GetCLSFromList(base::ListValue& entry_records_list);
   void CheckUKMAndUMAMetricsWithValues(double totalCls, double normalizedCls);
 
   // Perform hit test and frame waiter to ensure the frame is ready.
@@ -57,29 +57,33 @@ void LayoutInstabilityTest::RunWPT(const std::string& test_file,
   Load("/layout-instability/" + test_file);
 
   // Set layout shift amount expectations from web perf API.
-  base::Value::List expectations;
+  base::ListValue expectations;
   if (frame == ShiftFrame::LayoutShiftOnlyInMainFrame ||
       frame == ShiftFrame::LayoutShiftOnlyInBothFrames) {
-    base::Value value = EvalJs(web_contents(), "cls_run_tests").ExtractList();
-    for (auto& d : value.GetList())
+    base::ListValue value =
+        EvalJs(web_contents(), "cls_run_tests").TakeValue().TakeList();
+    for (auto& d : value) {
       expectations.Append(std::move(d));
+    }
   }
   if (frame == ShiftFrame::LayoutShiftOnlyInSubFrame ||
       frame == ShiftFrame::LayoutShiftOnlyInBothFrames) {
     content::RenderFrameHost* child_frame =
         content::ChildFrameAt(web_contents()->GetPrimaryMainFrame(), 0);
-    base::Value value = EvalJs(child_frame, "cls_run_tests").ExtractList();
-    for (auto& d : value.GetList())
+    base::ListValue value =
+        EvalJs(child_frame, "cls_run_tests").TakeValue().TakeList();
+    for (auto& d : value) {
       expectations.Append(std::move(d));
+    }
   }
-
-  // It compares the trace data of layout shift events with |expectations| and
-  // computes a score that's used to check the UKM and UMA values below.
-  double final_score = CheckTraceData(expectations, *StopTracingAndAnalyze());
 
   waiter->Wait();
   // Finish session.
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GURL("about:blank")));
+
+  // It compares the trace data of layout shift events with |expectations| and
+  // computes a score that's used to check the UKM and UMA values below.
+  double final_score = CheckTraceData(expectations, *StopTracingAndAnalyze());
 
   // We can only verify the layout shift metrics here in UKM and UMA if layout
   // shift only happens in the main frame. For layout shift happens in the
@@ -90,7 +94,7 @@ void LayoutInstabilityTest::RunWPT(const std::string& test_file,
   }
 }
 
-double LayoutInstabilityTest::CheckTraceData(Value::List& expectations,
+double LayoutInstabilityTest::CheckTraceData(base::ListValue& expectations,
                                              TraceAnalyzer& analyzer) {
   double final_score = 0.0;
 
@@ -98,8 +102,8 @@ double LayoutInstabilityTest::CheckTraceData(Value::List& expectations,
   analyzer.FindEvents(Query::EventNameIs("LayoutShift"), &events);
 
   size_t i = 0;
-  for (const Value& expectation_value : expectations) {
-    const Value::Dict& expectation = expectation_value.GetDict();
+  for (const base::Value& expectation_value : expectations) {
+    const base::DictValue& expectation = expectation_value.GetDict();
 
     optional<double> score = expectation.FindDouble("score");
     if (score && *score == 0.0) {
@@ -108,15 +112,15 @@ double LayoutInstabilityTest::CheckTraceData(Value::List& expectations,
     }
 
     EXPECT_LT(i, events.size());
-    Value::Dict data = events[i]->GetKnownArgAsDict("data");
+    base::DictValue data = events[i]->GetKnownArgAsDict("data");
     ++i;
 
     if (score) {
-      const absl::optional<double> traced_score = data.FindDouble("score");
+      const std::optional<double> traced_score = data.FindDouble("score");
       final_score += traced_score.has_value() ? traced_score.value() : 0;
       EXPECT_EQ(*score, final_score);
     }
-    const Value::List* sources = expectation.FindList("sources");
+    const base::ListValue* sources = expectation.FindList("sources");
     if (sources) {
       CheckSources(*sources, *data.FindList("impacted_nodes"));
     }
@@ -126,15 +130,16 @@ double LayoutInstabilityTest::CheckTraceData(Value::List& expectations,
   return final_score;
 }
 
-void LayoutInstabilityTest::CheckSources(const Value::List& expected_sources,
-                                         const Value::List& trace_sources) {
+void LayoutInstabilityTest::CheckSources(
+    const base::ListValue& expected_sources,
+    const base::ListValue& trace_sources) {
   EXPECT_EQ(expected_sources.size(), trace_sources.size());
   size_t i = 0;
-  for (const Value& expected_source : expected_sources) {
-    const Value::Dict& expected_source_dict = expected_source.GetDict();
-    const Value::Dict& trace_source_dict = trace_sources[i++].GetDict();
+  for (const base::Value& expected_source : expected_sources) {
+    const base::DictValue& expected_source_dict = expected_source.GetDict();
+    const base::DictValue& trace_source_dict = trace_sources[i++].GetDict();
     int node_id = *trace_source_dict.FindInt("node_id");
-    if (expected_source_dict.Find("node")->type() == Value::Type::NONE) {
+    if (expected_source_dict.Find("node")->type() == base::Value::Type::NONE) {
       EXPECT_EQ(node_id, 0);
     } else {
       EXPECT_NE(node_id, 0);
@@ -162,7 +167,7 @@ void LayoutInstabilityTest::CheckUKMAndUMAMetrics(double expect_score) {
 }
 
 std::pair<double, double> LayoutInstabilityTest::GetCLSFromList(
-    Value::List& entry_records_list) {
+    base::ListValue& entry_records_list) {
   // cls is the normalized cls value.
   double cls = 0;
 
@@ -260,9 +265,8 @@ IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest, SimpleBlockMovement) {
   Load("/simple_div_movement.html");
 
   // Extract the startTime and score list from watcher_entry_record.
-  base::Value entry_records =
-      EvalJs(web_contents(), "waitForTestFinished()").ExtractList();
-  auto& entry_records_list = entry_records.GetList();
+  base::ListValue entry_records_list =
+      EvalJs(web_contents(), "waitForTestFinished()").TakeValue().TakeList();
 
   // Verify that the entry_records_list has exactly 1 records.
   EXPECT_EQ(1ul, entry_records_list.size());
@@ -280,8 +284,8 @@ IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest, SimpleBlockMovement) {
   CheckUKMAndUMAMetricsWithValues(totalCls, cls);
 }
 
-// TODO(crbug.com/1407011): Flaky on linux.
-#if BUILDFLAG(IS_LINUX)
+// TODO(crbug.com/40916883): Disable this test on Mac.
+#if BUILDFLAG(IS_MAC)
 #define MAYBE_Sources_Enclosure DISABLED_Sources_Enclosure
 #else
 #define MAYBE_Sources_Enclosure Sources_Enclosure
@@ -291,26 +295,15 @@ IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest, MAYBE_Sources_Enclosure) {
          /*num_layout_shifts=*/2);
 }
 
-// TODO(crbug.com/1407011): Flaky on linux.
-#if BUILDFLAG(IS_LINUX)
-#define MAYBE_Sources_MaxImpact DISABLED_Sources_MaxImpact
-#else
-#define MAYBE_Sources_MaxImpact Sources_MaxImpact
-#endif
-IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest, MAYBE_Sources_MaxImpact) {
+// TODO(crbug.com/40250247): Fix and reenable the test.
+IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest, DISABLED_Sources_MaxImpact) {
   RunWPT("sources-maximpact.html");
 }
 
 // This test verifies the layout shift score in the sub-frame is recorded
 // correctly in both UKM and UMA, the layout shift score in sub-frame is
 // calculated by applying a sub-frame weighting factor to the total score.
-// TODO(crbug.com/1407011): disabled on linux for flakiness.
-#if BUILDFLAG(IS_LINUX)
-#define MAYBE_OOPIFSubframeWeighting DISABLED_OOPIFSubframeWeighting
-#else
-#define MAYBE_OOPIFSubframeWeighting OOPIFSubframeWeighting
-#endif
-IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest, MAYBE_OOPIFSubframeWeighting) {
+IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest, OOPIFSubframeWeighting) {
   RunWPT("main-frame.html", ShiftFrame::LayoutShiftOnlyInSubFrame,
          /*num_layout_shifts=*/2);
 
@@ -339,9 +332,8 @@ IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest,
   Load("/one_second_gap.html");
 
   // Extract the startTime and score list from watcher_entry_record.
-  base::Value entry_records =
-      EvalJs(web_contents(), "waitForTestFinished()").ExtractList();
-  auto& entry_records_list = entry_records.GetList();
+  base::ListValue entry_records_list =
+      EvalJs(web_contents(), "waitForTestFinished()").TakeValue().TakeList();
 
   // Verify that the entry_records_list has exactly 2 records.
   EXPECT_EQ(2ul, entry_records_list.size());
@@ -361,15 +353,21 @@ IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest,
   CheckUKMAndUMAMetricsWithValues(totalCls, cls);
 }
 
-// TODO(crbug.com/1400401): Deflake and re-enable this test.
+// TODO(crbug.com/40940689): Disable this test on Win10
+#if BUILDFLAG(IS_WIN)
+#define MAYBE_CumulativeLayoutShift_hadRecentInput \
+  DISABLED_CumulativeLayoutShift_hadRecentInput
+#else
+#define MAYBE_CumulativeLayoutShift_hadRecentInput \
+  CumulativeLayoutShift_hadRecentInput
+#endif
 IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest,
-                       DISABLED_CumulativeLayoutShift_hadRecentInput) {
+                       MAYBE_CumulativeLayoutShift_hadRecentInput) {
   auto waiter = std::make_unique<page_load_metrics::PageLoadMetricsTestWaiter>(
       web_contents());
 
-  // TODO(crbug.com/1403026): Modify the AddPageLayoutShiftExpectation so we can
-  // pass number of layout shift as an argument.
-  waiter->AddPageLayoutShiftExpectation();
+  waiter->AddPageLayoutShiftExpectation(ShiftFrame::LayoutShiftOnlyInMainFrame,
+                                        /*num_layout_shifts=*/1);
   Start();
 
   // Start tracking with layout_shift related information.
@@ -384,9 +382,8 @@ IN_PROC_BROWSER_TEST_F(LayoutInstabilityTest,
   content::SimulateMouseClickOrTapElementWithId(web_contents(), "shifter");
 
   // Extract the startTime and score list from watcher_entry_record.
-  base::Value entry_records =
-      EvalJs(web_contents(), "waitForTestFinished()").ExtractList();
-  auto& entry_records_list = entry_records.GetList();
+  base::ListValue entry_records_list =
+      EvalJs(web_contents(), "waitForTestFinished()").TakeValue().TakeList();
 
   // Verify that the entry_records_list has exactly 2 records.
   EXPECT_EQ(2ul, entry_records_list.size());

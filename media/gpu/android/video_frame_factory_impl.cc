@@ -6,7 +6,6 @@
 
 #include <memory>
 
-#include "base/android/android_image_reader_compat.h"
 #include "base/check_op.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
@@ -38,19 +37,14 @@ gpu::TextureOwner::Mode GetTextureOwnerMode(
   switch (overlay_mode) {
     case VideoFrameFactory::OverlayMode::kDontRequestPromotionHints:
     case VideoFrameFactory::OverlayMode::kRequestPromotionHints:
-      return features::IsAImageReaderEnabled()
-                 ? gpu::TextureOwner::Mode::kAImageReaderInsecure
-                 : gpu::TextureOwner::Mode::kSurfaceTextureInsecure;
+      return gpu::TextureOwner::Mode::kAImageReaderInsecure;
     case VideoFrameFactory::OverlayMode::kSurfaceControlSecure:
-      DCHECK(features::IsAImageReaderEnabled());
       return gpu::TextureOwner::Mode::kAImageReaderSecureSurfaceControl;
     case VideoFrameFactory::OverlayMode::kSurfaceControlInsecure:
-      DCHECK(features::IsAImageReaderEnabled());
       return gpu::TextureOwner::Mode::kAImageReaderInsecureSurfaceControl;
   }
 
   NOTREACHED();
-  return gpu::TextureOwner::Mode::kSurfaceTextureInsecure;
 }
 
 // Run on the GPU main thread to allocate the texture owner, and return it
@@ -65,9 +59,9 @@ static void AllocateTextureOwnerOnGpuThread(
     return;
   }
 
-  std::move(init_cb).Run(
-      gpu::TextureOwner::Create(GetTextureOwnerMode(overlay_mode),
-                                shared_context_state, std::move(drdc_lock)));
+  std::move(init_cb).Run(gpu::TextureOwner::Create(
+      GetTextureOwnerMode(overlay_mode), shared_context_state,
+      std::move(drdc_lock), gpu::TextureOwnerCodecType::kMediaCodec));
 }
 
 }  // namespace
@@ -141,12 +135,14 @@ void VideoFrameFactoryImpl::CreateVideoFrame(
     std::unique_ptr<CodecOutputBuffer> output_buffer,
     base::TimeDelta timestamp,
     gfx::Size natural_size,
+    const gfx::ColorSpace& color_space,
+    const gfx::HDRMetadata& hdr_metadata,
     PromotionHintAggregator::NotifyPromotionHintCB promotion_hint_cb,
     OnceOutputCB output_cb) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  gfx::Size coded_size = output_buffer->size();
-  gfx::Rect visible_rect(coded_size);
+  gfx::Size visible_size = output_buffer->visible_size();
+  gfx::Rect visible_rect(visible_size);
 
   auto output_buffer_renderer = std::make_unique<CodecOutputBufferRenderer>(
       std::move(output_buffer), codec_buffer_wait_coordinator_, GetDrDcLock());
@@ -154,37 +150,41 @@ void VideoFrameFactoryImpl::CreateVideoFrame(
   // The pixel format doesn't matter here as long as it's valid for texture
   // frames. But SkiaRenderer wants to ensure that the format of the resource
   // used here which will eventually create a promise image must match the
-  // format of the resource(SharedImageVideo) used to create fulfill image.
-  // crbug.com/1028746. Since we create all the textures/abstract textures as
-  // well as shared images for video to be of format RGBA, we need to use the
-  // pixel format as ABGR here(which corresponds to 32bpp RGBA).
+  // format of the resource(AndroidVideoImageBacking) used to create fulfill
+  // image. crbug.com/1028746. Since we create all the textures/abstract
+  // textures as well as shared images for video to be of format RGBA, we need
+  // to use the pixel format as ABGR here(which corresponds to 32bpp RGBA).
   VideoPixelFormat pixel_format = PIXEL_FORMAT_ABGR;
 
   // Check that we can create a VideoFrame for this config before trying to
   // create the textures for it.
+  // Note, that we use visible_size in place of the coded size here, because
+  // coded size not known yet.
   if (!VideoFrame::IsValidConfig(pixel_format, VideoFrame::STORAGE_OPAQUE,
-                                 coded_size, visible_rect, natural_size)) {
+                                 visible_size, visible_rect, natural_size)) {
     LOG(ERROR) << __func__ << " unsupported video frame format";
     std::move(output_cb).Run(nullptr);
     return;
   }
 
-  auto image_ready_cb =
-      base::BindOnce(&VideoFrameFactoryImpl::CreateVideoFrame_OnImageReady,
-                     weak_factory_.GetWeakPtr(), std::move(output_cb),
-                     timestamp, natural_size, !!codec_buffer_wait_coordinator_,
-                     std::move(promotion_hint_cb), pixel_format, overlay_mode_,
-                     video_frame_copy_required_, gpu_task_runner_);
+  auto image_ready_cb = base::BindOnce(
+      &VideoFrameFactoryImpl::CreateVideoFrame_OnImageReady,
+      weak_factory_.GetWeakPtr(), std::move(output_cb), timestamp, natural_size,
+      hdr_metadata, !!codec_buffer_wait_coordinator_,
+      std::move(promotion_hint_cb), pixel_format, overlay_mode_,
+      video_frame_copy_required_, gpu_task_runner_);
 
-  RequestImage(std::move(output_buffer_renderer), std::move(image_ready_cb));
+  RequestImage(std::move(output_buffer_renderer), color_space,
+               std::move(image_ready_cb));
 }
 
 void VideoFrameFactoryImpl::RequestImage(
     std::unique_ptr<CodecOutputBufferRenderer> buffer_renderer,
+    const gfx::ColorSpace& image_color_space,
     ImageWithInfoReadyCB image_ready_cb) {
-  auto info_cb =
-      base::BindOnce(&VideoFrameFactoryImpl::CreateVideoFrame_OnFrameInfoReady,
-                     weak_factory_.GetWeakPtr(), std::move(image_ready_cb));
+  auto info_cb = base::BindOnce(
+      &VideoFrameFactoryImpl::CreateVideoFrame_OnFrameInfoReady,
+      weak_factory_.GetWeakPtr(), std::move(image_ready_cb), image_color_space);
 
   frame_info_helper_->GetFrameInfo(std::move(buffer_renderer),
                                    std::move(info_cb));
@@ -192,6 +192,7 @@ void VideoFrameFactoryImpl::RequestImage(
 
 void VideoFrameFactoryImpl::CreateVideoFrame_OnFrameInfoReady(
     ImageWithInfoReadyCB image_ready_cb,
+    gfx::ColorSpace image_color_space,
     std::unique_ptr<CodecOutputBufferRenderer> output_buffer_renderer,
     FrameInfoHelper::FrameInfo frame_info) {
   // If we don't have output buffer here we can't rely on reply from
@@ -201,7 +202,7 @@ void VideoFrameFactoryImpl::CreateVideoFrame_OnFrameInfoReady(
   // all RequestImage, so skip updating image_spec_ in this case.
   if (output_buffer_renderer) {
     image_spec_.coded_size = frame_info.coded_size;
-    image_spec_.color_space = output_buffer_renderer->color_space();
+    image_spec_.color_space = image_color_space;
   } else {
     // It is possible that we come here from RunAfterPendingVideoFrames before
     // CreateVideoFrame was called. In this case we don't have coded_size, but
@@ -227,6 +228,7 @@ void VideoFrameFactoryImpl::CreateVideoFrame_OnImageReady(
     OnceOutputCB output_cb,
     base::TimeDelta timestamp,
     gfx::Size natural_size,
+    gfx::HDRMetadata hdr_metadata,
     bool is_texture_owner_backed,
     PromotionHintAggregator::NotifyPromotionHintCB promotion_hint_cb,
     VideoPixelFormat pixel_format,
@@ -240,8 +242,6 @@ void VideoFrameFactoryImpl::CreateVideoFrame_OnImageReady(
 
   if (!thiz)
     return;
-
-  gfx::ColorSpace color_space = output_buffer_renderer->color_space();
 
   // Initialize the CodecImage to use this output buffer.  Note that we're not
   // on the gpu main thread here, but it's okay since CodecImage is not being
@@ -262,18 +262,11 @@ void VideoFrameFactoryImpl::CreateVideoFrame_OnImageReady(
   // record before we move it into |completion_cb|.
   auto codec_image_holder = std::move(record.codec_image_holder);
 
-  gpu::MailboxHolder mailbox_holders[VideoFrame::kMaxPlanes];
-  mailbox_holders[0] = gpu::MailboxHolder(record.mailbox, gpu::SyncToken(),
-                                          GL_TEXTURE_EXTERNAL_OES);
-
-  auto frame = VideoFrame::WrapNativeTextures(
-      pixel_format, mailbox_holders, VideoFrame::ReleaseMailboxCB(),
-      frame_info.coded_size, frame_info.visible_rect, natural_size, timestamp);
-
-  // For Vulkan.
-  frame->set_ycbcr_info(frame_info.ycbcr_info);
-
-  frame->set_color_space(color_space);
+  CHECK(record.shared_image);
+  scoped_refptr<VideoFrame> frame = VideoFrame::WrapSharedImage(
+      pixel_format, std::move(record.shared_image), gpu::SyncToken(),
+      VideoFrame::ReleaseMailboxCB(), frame_info.visible_rect, natural_size,
+      timestamp);
 
   // If, for some reason, we failed to create a frame, then fail.  Note that we
   // don't need to call |release_cb|; dropping it is okay since the api says so.
@@ -283,28 +276,17 @@ void VideoFrameFactoryImpl::CreateVideoFrame_OnImageReady(
     return;
   }
 
+  // For Vulkan.
+  frame->metadata().ycbcr_info = frame_info.ycbcr_info;
+
+  frame->set_hdr_metadata(hdr_metadata);
+
   frame->metadata().copy_required = video_frame_copy_required;
 
-  const bool is_surface_control =
-      overlay_mode == OverlayMode::kSurfaceControlSecure ||
-      overlay_mode == OverlayMode::kSurfaceControlInsecure;
   const bool wants_promotion_hints =
       overlay_mode == OverlayMode::kRequestPromotionHints;
-
-  bool allow_overlay = false;
-  if (is_surface_control) {
-    DCHECK(is_texture_owner_backed);
-    allow_overlay = true;
-  } else {
-    // We unconditionally mark the picture as overlayable, even if
-    // |!is_texture_owner_backed|, if we want to get hints.  It's
-    // required, else we won't get hints.
-    allow_overlay = !is_texture_owner_backed || wants_promotion_hints;
-  }
-
-  frame->metadata().allow_overlay = allow_overlay;
   frame->metadata().wants_promotion_hint = wants_promotion_hints;
-  frame->metadata().texture_owner = is_texture_owner_backed;
+  frame->metadata().in_surface_view = !is_texture_owner_backed;
 
   // TODO(liberato): if this is run via being dropped, then it would be nice
   // to find that out rather than treating the image as unused.  If the renderer
@@ -354,7 +336,11 @@ void VideoFrameFactoryImpl::RunAfterPendingVideoFrames(
       },
       std::move(closure));
 
-  RequestImage(nullptr, std::move(image_ready_cb));
+  RequestImage(nullptr, gfx::ColorSpace(), std::move(image_ready_cb));
+}
+
+bool VideoFrameFactoryImpl::IsStalled() const {
+  return frame_info_helper_->IsStalled();
 }
 
 }  // namespace media

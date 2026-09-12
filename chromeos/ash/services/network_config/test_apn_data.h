@@ -35,6 +35,8 @@ struct TestApnData {
               std::string onc_authentication,
               chromeos::network_config::mojom::ApnIpType mojo_ip_type,
               std::string onc_ip_type,
+              chromeos::network_config::mojom::ApnSource mojo_source,
+              std::string onc_source,
               const std::vector<chromeos::network_config::mojom::ApnType>&
                   mojo_apn_types,
               const std::vector<std::string>& onc_apn_types);
@@ -57,12 +59,15 @@ struct TestApnData {
   chromeos::network_config::mojom::ApnIpType mojo_ip_type;
   std::string onc_ip_type;
 
+  chromeos::network_config::mojom::ApnSource mojo_source;
+  std::string onc_source;
+
   std::vector<chromeos::network_config::mojom::ApnType> mojo_apn_types;
   std::vector<std::string> onc_apn_types;
 
   chromeos::network_config::mojom::ApnPropertiesPtr AsMojoApn() const;
-  base::Value::Dict AsOncApn() const;
-  base::Value::Dict AsShillApn() const;
+  base::DictValue AsOncApn() const;
+  base::DictValue AsShillApn() const;
   std::string AsApnShillDict() const;
 
   // Verifies that an APN constructed as a Mojo struct matches with the test
@@ -72,7 +77,7 @@ struct TestApnData {
 
   // Verifies that an APN constructed as an ONC dictionary matches with the
   // test APN data.
-  bool OncApnEquals(const base::Value::Dict& onc_apn,
+  bool OncApnEquals(const base::DictValue& onc_apn,
                     bool has_state_field,
                     bool is_password_masked) const;
 };

@@ -7,22 +7,28 @@
 
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include "base/command_line.h"
 #include "base/files/file_path.h"
+#include "base/functional/callback_forward.h"
 #include "base/memory/raw_ptr.h"
 #include "base/strings/strcat.h"
+#include "base/test/test_future.h"
+#include "base/time/time_override.h"
 #include "base/types/strong_alias.h"
 #include "base/values.h"
-#include "chrome/browser/ui/browser.h"
-#include "components/autofill/core/browser/data_model/autofill_profile.h"
-#include "components/autofill/core/browser/data_model/credit_card.h"
-#include "components/autofill/core/browser/test_autofill_clock.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "components/autofill/core/browser/data_model/addresses/autofill_profile.h"
+#include "components/autofill/core/browser/data_model/payments/credit_card.h"
 #include "content/public/browser/browser_context.h"
+#include "content/public/browser/global_routing_id.h"
 #include "content/public/test/browser_test_utils.h"
 #include "services/network/public/cpp/network_switches.h"
+#include "url/gurl.h"
+#include "url/scheme_host_port.h"
 
 namespace content {
 class RenderFrameHost;
@@ -64,7 +70,7 @@ enum ExpectedResult { kPass, kFail };
 struct CapturedSiteParams {
   std::string scenario_dir;
   std::string site_name;
-  absl::optional<int> bug_number;
+  std::optional<int> bug_number;
   ExpectedResult expectation = kPass;
   bool is_disabled = false;
   base::FilePath capture_file_path;
@@ -90,65 +96,47 @@ struct GetParamAsString {
   }
 };
 
-absl::optional<base::FilePath> GetCommandFilePath();
+// Reads the recipe file and returns the recipe as a base::DictValue.
+std::optional<base::DictValue> ReadRecipeFile(
+    const base::FilePath& recipe_file_path);
+
+std::optional<base::FilePath> GetCommandFilePath();
 
 // Prints tips on how to run captured-site tests.
-// |test_file_name| should be without the .cc suffix.
+// `test_file_name` should be without the .cc suffix.
 void PrintInstructions(const char* test_file_name);
 
-// IFrameWaiter
-//
-// IFrameWaiter is an waiter object that waits for an iframe befitting a
-// criteria to appear. The criteria can be the iframe's 'name' attribute,
-// the iframe's origin, or the iframe's full url.
-class IFrameWaiter : public content::WebContentsObserver {
- public:
-  explicit IFrameWaiter(content::WebContents* webcontents);
-
-  IFrameWaiter(const IFrameWaiter&) = delete;
-  IFrameWaiter& operator=(const IFrameWaiter&) = delete;
-
-  ~IFrameWaiter() override;
-  content::RenderFrameHost* WaitForFrameMatchingName(
-      const std::string& name,
-      const base::TimeDelta timeout = default_action_timeout);
-  content::RenderFrameHost* WaitForFrameMatchingOrigin(
-      const GURL origin,
-      const base::TimeDelta timeout = default_action_timeout);
-  content::RenderFrameHost* WaitForFrameMatchingUrl(
-      const GURL url,
-      const base::TimeDelta timeout = default_action_timeout);
-
- private:
-  enum QueryType { NAME, ORIGIN, URL };
-
-  static bool FrameHasOrigin(const GURL& origin,
-                             content::RenderFrameHost* frame);
-
-  // content::WebContentsObserver
-  void RenderFrameCreated(content::RenderFrameHost* render_frame_host) override;
-  void DidFinishLoad(content::RenderFrameHost* render_frame_host,
-                     const GURL& validated_url) override;
-  void FrameNameChanged(content::RenderFrameHost* render_frame_host,
-                        const std::string& name) override;
-
-  QueryType query_type_;
-  base::RunLoop run_loop_;
-  raw_ptr<content::RenderFrameHost> target_frame_;
-  std::string frame_name_;
-  GURL origin_;
-  GURL url_;
-};
+[[nodiscard]] content::RenderFrameHost* WaitForFrameMatchingName(
+    content::WebContents& web_contents,
+    const std::string& name,
+    const base::TimeDelta timeout = default_action_timeout);
+[[nodiscard]] content::RenderFrameHost* WaitForFrameMatchingOrigin(
+    content::WebContents& web_contents,
+    const url::SchemeHostPort& origin,
+    const base::TimeDelta timeout = default_action_timeout);
+[[nodiscard]] content::RenderFrameHost* WaitForFrameMatchingUrl(
+    content::WebContents& web_contents,
+    const GURL& url,
+    const base::TimeDelta timeout = default_action_timeout);
+[[nodiscard]] content::RenderFrameHost* WaitForFrame(
+    content::WebContents& web_contents,
+    base::RepeatingCallback<bool(content::RenderFrameHost*)> predicate,
+    const base::TimeDelta timeout = default_action_timeout);
 
 // WebPageReplayServerWrapper
 
 // WebPageReplayServerWrapper is a helper wrapper that controls the configuring
 // and running the WebPageReplay Server instance.
+// TODO(b/399665693): Consider moving this to a shared WPR utilities code
+// location.
 class WebPageReplayServerWrapper {
  public:
-  explicit WebPageReplayServerWrapper(const bool start_as_replay,
-                                      int hostHttpPort = 8080,
-                                      int hostHttpsPort = 8081);
+  explicit WebPageReplayServerWrapper(
+      bool start_as_replay,
+      int host_http_port = 8080,
+      int host_https_port = 8081,
+      // Passes additional arguments used in the WPR command.
+      std::vector<std::string> extra_args = {});
 
   WebPageReplayServerWrapper(const WebPageReplayServerWrapper&) = delete;
   WebPageReplayServerWrapper& operator=(const WebPageReplayServerWrapper&) =
@@ -172,6 +160,7 @@ class WebPageReplayServerWrapper {
   int host_http_port_;
   int host_https_port_;
   bool start_as_replay_;
+  std::vector<std::string> extra_args_;
 };
 
 class ProfileDataController {
@@ -183,17 +172,16 @@ class ProfileDataController {
   const autofill::AutofillProfile& profile() { return profile_; }
   bool AddAutofillProfileInfo(const std::string& field_type,
                               const std::string& field_value);
-  absl::optional<std::u16string> cvc() const { return cvc_; }
+  std::optional<std::u16string> cvc() const { return cvc_; }
 
  private:
   // If a CVC is available in the Action Recorder receipt, this test uses a
   // server card to autofill the payment form. So the "Enter CVC" dialog will
   // pop up for card autofill. Otherwise, this test uses a local card to
   // autofill the payment form.
-  absl::optional<std::u16string> cvc_;
+  std::optional<std::u16string> cvc_;
   autofill::AutofillProfile profile_;
   autofill::CreditCard card_;
-  std::map<std::string, autofill::ServerFieldType> string_to_field_type_map_;
 };
 
 // TestRecipeReplayChromeFeatureActionExecutor
@@ -222,7 +210,7 @@ class TestRecipeReplayChromeFeatureActionExecutor {
       const std::vector<std::string>& iframe_path,
       const int attempts,
       content::RenderFrameHost* frame,
-      absl::optional<autofill::ServerFieldType> triggered_field_type);
+      std::optional<autofill::FieldType> triggered_field_type);
   virtual bool AddAutofillProfileInfo(const std::string& field_type,
                                       const std::string& field_value);
   virtual bool SetupAutofillProfile();
@@ -235,6 +223,10 @@ class TestRecipeReplayChromeFeatureActionExecutor {
   virtual bool WaitForSaveFallback();
   virtual bool IsChromeShowingPasswordGenerationPrompt();
   virtual bool HasChromeShownSavePasswordPrompt();
+  virtual bool TriggerPasswordChange(const GURL& url);
+  // Waits for specified state of Password Change. Possible correspond to
+  // PasswordChangeDelegate::State.
+  virtual bool WaitForPasswordChangeState(int state);
   virtual bool HasChromeStoredCredential(const std::string& origin,
                                          const std::string& username,
                                          const std::string& password);
@@ -261,10 +253,10 @@ class TestRecipeReplayChromeFeatureActionExecutor {
 //    under the src/chrome/test/data/autofill/captured_sites directory.
 class TestRecipeReplayer {
  public:
-  static const int kHostHttpPort = 8080;
-  static const int kHostHttpsPort = 8081;
-  static const int kHostHttpRecordPort = 8082;
-  static const int kHostHttpsRecordPort = 8083;
+  static constexpr int kHostHttpPort = 8080;
+  static constexpr int kHostHttpsPort = 8081;
+  static constexpr int kHostHttpRecordPort = 8082;
+  static constexpr int kHostHttpsRecordPort = 8083;
 
   enum DomElementReadyState {
     kReadyStatePresent = 0,
@@ -274,21 +266,20 @@ class TestRecipeReplayer {
   };
 
   TestRecipeReplayer(
-      Browser* browser,
+      BrowserWindowInterface* browser,
       TestRecipeReplayChromeFeatureActionExecutor* feature_action_executor);
 
   TestRecipeReplayer(const TestRecipeReplayer&) = delete;
   TestRecipeReplayer& operator=(const TestRecipeReplayer&) = delete;
 
   ~TestRecipeReplayer();
-  void Setup();
-  void Cleanup();
+
   // Replay a test by:
   // 1. Starting a WPR server using the specified capture file.
   // 2. Replaying the specified Test Recipe file.
   bool ReplayTest(const base::FilePath& capture_file_path,
                   const base::FilePath& recipe_file_path,
-                  const absl::optional<base::FilePath>& command_file_path);
+                  const std::optional<base::FilePath>& command_file_path);
 
   const std::vector<testing::AssertionResult> GetValidationFailures() const;
 
@@ -297,11 +288,11 @@ class TestRecipeReplayer {
   static bool ScrollElementIntoView(const std::string& element_xpath,
                                     content::RenderFrameHost* frame);
   static bool PlaceFocusOnElement(const std::string& element_xpath,
-                                  const std::vector<std::string> iframe_path,
+                                  const std::vector<std::string>& iframe_path,
                                   content::RenderFrameHost* frame);
   static bool GetBoundingRectOfTargetElement(
       const std::string& target_element_xpath,
-      const std::vector<std::string> iframe_path,
+      const std::vector<std::string>& iframe_path,
       content::RenderFrameHost* frame,
       gfx::Rect* output_rect);
   static bool SimulateLeftMouseClickAt(
@@ -322,7 +313,7 @@ class TestRecipeReplayer {
       content::RenderFrameHost* frame,
       gfx::Rect* output_rect);
 
-  Browser* browser();
+  BrowserWindowInterface* browser();
 
   TestRecipeReplayChromeFeatureActionExecutor* feature_action_executor();
   WebPageReplayServerWrapper* web_page_replay_server_wrapper();
@@ -334,39 +325,41 @@ class TestRecipeReplayer {
   bool StopWebPageReplayServer(base::Process* web_page_replay_server);
   bool ReplayRecordedActions(
       const base::FilePath& recipe_file_path,
-      const absl::optional<base::FilePath>& command_file_path);
-  bool InitializeBrowserToExecuteRecipe(base::Value::Dict& recipe);
-  bool ExecuteAutofillAction(base::Value::Dict action);
-  bool ExecuteClickAction(base::Value::Dict action);
-  bool ExecuteClickIfNotSeenAction(base::Value::Dict action);
-  bool ExecuteCoolOffAction(base::Value::Dict action);
-  bool ExecuteCloseTabAction(base::Value::Dict action);
-  bool ExecuteHoverAction(base::Value::Dict action);
-  bool ExecuteForceLoadPage(base::Value::Dict action);
-  bool ExecutePressEnterAction(base::Value::Dict action);
-  bool ExecutePressEscapeAction(base::Value::Dict action);
-  bool ExecutePressSpaceAction(base::Value::Dict action);
-  bool ExecuteRunCommandAction(base::Value::Dict action);
-  bool ExecuteSavePasswordAction(base::Value::Dict action);
-  bool ExecuteSelectDropdownAction(base::Value::Dict action);
-  bool ExecuteTypeAction(base::Value::Dict action);
-  bool ExecuteTypePasswordAction(base::Value::Dict action);
-  bool ExecuteUpdatePasswordAction(base::Value::Dict action);
-  bool ExecuteValidateFieldValueAction(base::Value::Dict action);
-  bool ExecuteValidateNoSavePasswordPromptAction(base::Value::Dict action);
-  bool ExecuteValidatePasswordGenerationPromptAction(base::Value::Dict action);
-  bool ExecuteValidateSaveFallbackAction(base::Value::Dict action);
-  bool ExecuteWaitForStateAction(base::Value::Dict action);
-  bool GetTargetHTMLElementXpathFromAction(const base::Value::Dict& action,
+      const std::optional<base::FilePath>& command_file_path);
+  bool InitializeBrowserToExecuteRecipe(base::DictValue& recipe);
+  bool ExecuteAutofillAction(base::DictValue action);
+  bool ExecuteClickAction(base::DictValue action);
+  bool ExecuteClickIfNotSeenAction(base::DictValue action);
+  bool ExecuteCoolOffAction(base::DictValue action);
+  bool ExecuteCloseTabAction(base::DictValue action);
+  bool ExecuteHoverAction(base::DictValue action);
+  bool ExecuteForceLoadPage(base::DictValue action);
+  bool ExecutePressEnterAction(base::DictValue action);
+  bool ExecutePressEscapeAction(base::DictValue action);
+  bool ExecutePressSpaceAction(base::DictValue action);
+  bool ExecuteRunCommandAction(base::DictValue action);
+  bool ExecuteSavePasswordAction(base::DictValue action);
+  bool ExecuteSelectDropdownAction(base::DictValue action);
+  bool ExecuteTypeAction(base::DictValue action);
+  bool ExecuteTypePasswordAction(base::DictValue action);
+  bool ExecuteUpdatePasswordAction(base::DictValue action);
+  bool ExecuteValidateFieldValueAction(base::DictValue action);
+  bool ExecuteValidateNoSavePasswordPromptAction(base::DictValue action);
+  bool ExecuteValidatePasswordGenerationPromptAction(base::DictValue action);
+  bool ExecuteTriggerPasswordChangeAction(base::DictValue action);
+  bool ExecuteWaitForPasswordChangeStateAction(base::DictValue action);
+  bool ExecuteValidateSaveFallbackAction(base::DictValue action);
+  bool ExecuteWaitForStateAction(base::DictValue action);
+  bool GetTargetHTMLElementXpathFromAction(const base::DictValue& action,
                                            std::string* xpath);
-  bool GetTargetFrameFromAction(const base::Value::Dict& action,
+  bool GetTargetFrameFromAction(const base::DictValue& action,
                                 content::RenderFrameHost** frame);
-  bool GetIFramePathFromAction(const base::Value::Dict& action,
+  bool GetIFramePathFromAction(const base::DictValue& action,
                                std::vector<std::string>* iframe_path);
   bool GetTargetHTMLElementVisibilityEnumFromAction(
-      const base::Value::Dict& action,
+      const base::DictValue& action,
       int* visibility_enum_val);
-  bool ExtractFrameAndVerifyElement(const base::Value::Dict& action,
+  bool ExtractFrameAndVerifyElement(const base::DictValue& action,
                                     std::string* xpath,
                                     content::RenderFrameHost** frame,
                                     bool set_focus = false,
@@ -376,12 +369,18 @@ class TestRecipeReplayer {
       const content::ToRenderFrameHost& frame,
       const std::string& element_xpath,
       bool expect_to_be_shown);
+  // When returning true, `frame` points to the RenderFrameHost of the frame
+  // specified in `action`. This is determined dynamically because
+  // WaitForElementToBeReady may need to wait for navigations to finish and the
+  // frame to be loaded.
   bool WaitForElementToBeReady(const std::string& xpath,
                                const int visibility_enum_val,
-                               content::RenderFrameHost* frame,
+                               const base::DictValue& action,
+                               content::RenderFrameHost** frame,
                                bool ignore_failure = false);
   bool WaitForStateChange(
-      content::RenderFrameHost* frame,
+      const base::DictValue& action,
+      content::RenderFrameHost** frame,
       const std::vector<std::string>& state_assertions,
       const base::TimeDelta& timeout = default_action_timeout,
       bool ignore_failure = false);
@@ -405,18 +404,19 @@ class TestRecipeReplayer {
       IgnoreCase ignore_case = IgnoreCase(false));
   void SimulateKeyPressWrapper(content::WebContents* web_contents,
                                ui::DomKey key);
-  void NavigateAwayAndDismissBeforeUnloadDialog();
-  bool HasChromeStoredCredential(const base::Value::Dict& action,
+  bool HasChromeStoredCredential(const base::DictValue& action,
                                  bool* stored_cred);
-  bool OverrideAutofillClock(const base::FilePath capture_file_path);
+  bool OverrideTimeClock(const base::FilePath capture_file_path);
   bool SetupSavedAutofillProfile(
-      base::Value::List saved_autofill_profile_container);
-  bool SetupSavedPasswords(base::Value::List saved_password_list_container);
+      base::ListValue saved_autofill_profile_container);
+  bool SetupSavedPasswords(base::ListValue saved_password_list_container);
 
   // Wait until Chrome finishes loading a page and updating the page's visuals.
   // If Chrome finishes loading a page but continues to paint every half
-  // second, exit after |continuous_paint_timeout| expires since Chrome
+  // second, exit after `continuous_paint_timeout` expires since Chrome
   // finished loading the page.
+  // After calling `WaitTillPageIsIdle()` all RenderFrameHost pointers should
+  // be considered potentially invalid because a navigation may have happened.
   void WaitTillPageIsIdle(
       base::TimeDelta continuous_paint_timeout = default_action_timeout);
   // Wait until Chrome makes at least 1 visual update, or until timeout
@@ -424,16 +424,17 @@ class TestRecipeReplayer {
   // timeout elapses.
   bool WaitForVisualUpdate(base::TimeDelta timeout = visual_update_timeout);
 
-  raw_ptr<Browser> browser_;
+  raw_ptr<BrowserWindowInterface> browser_;
   raw_ptr<TestRecipeReplayChromeFeatureActionExecutor> feature_action_executor_;
   // The Web Page Replay server that serves the captured sites.
   std::unique_ptr<captured_sites_test_utils::WebPageReplayServerWrapper>
-      web_page_replay_server_wrapper_;
+      web_page_replay_server_wrapper_ =
+          std::make_unique<WebPageReplayServerWrapper>(true);
 
   std::vector<testing::AssertionResult> validation_failures_;
 
-  // Overrides the AutofillClock to use the recorded date.
-  autofill::TestAutofillClock test_clock_;
+  // Overrides the TimeClock to use the recorded date.
+  std::unique_ptr<base::subtle::ScopedTimeClockOverrides> time_override_;
 };
 
 }  // namespace captured_sites_test_utils

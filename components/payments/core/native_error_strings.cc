@@ -97,6 +97,12 @@ const char kPaymentManifestCrossSiteRedirectNotAllowed[] =
 const char kPaymentManifestDownloadFailed[] =
     "Unable to download payment manifest \"$1\".";
 
+const char kPaymentManifestDownloadFailedWithNetworkError[] =
+    "Unable to download payment manifest \"$1\". $2 ($3)";
+
+const char kPaymentManifestDownloadFailedWithHttpStatusCode[] =
+    "Unable to download payment manifest \"$1\". HTTP $2 $3.";
+
 const char kPaymentManifestCSPDenied[] =
     "Content Security Policy denied the download of payment manifest \"$1\".";
 
@@ -139,6 +145,9 @@ const char kPaymentHandlerInsecureNavigation[] =
 
 const char kPaymentHandlerInstallFailed[] =
     "Failed to install the payment handler.";
+
+const char kPaymentHandlerInstallFailedForMethod[] =
+    "Failed to install the payment handler for \"$1\".";
 
 const char kPaymentHandlerActivityDied[] =
     "The payment handler is closed because the Android activity is destroyed.";
@@ -186,9 +195,8 @@ const char kCanMakePaymentEventNoExplicitlyVerifiedMethods[] =
 const char kGenericPaymentMethodNotSupportedMessage[] =
     "Payment method not supported.";
 
-const char kNoContentAndNoLinkHeader[] =
-    "No content and no \"Link: rel=payment-method-manifest\" HTTP header found "
-    "at \"$1\".";
+const char kNoLinkHeader[] =
+    "No \"Link: rel=payment-method-manifest\" HTTP header found at \"$1\".";
 
 const char kNoContentInPaymentManifest[] =
     "No content found in payment manifest \"$1\".";
@@ -229,6 +237,18 @@ const char kValidInstrumentIconRequired[] =
 const char kInvalidIcon[] =
     "The \"instrument.icon\" either could not be downloaded or decoded.";
 
+const char kNonUtf8InstrumentDetailsString[] =
+    "The \"secure-payment-confirmation\" method requires the "
+    "\"instrument.details\" field to be UTF8.";
+
+const char kEmptyInstrumentDetailsString[] =
+    "The \"secure-payment-confirmation\" method requires the "
+    "\"instrument.details\" field, if present, to be non-empty.";
+
+const char kTooLongInstrumentDetailsString[] =
+    "The \"secure-payment-confirmation\" method requires the "
+    "\"instrument.details\" field to be at most 4096 characters long.";
+
 const char kRpIdRequired[] =
     "The \"secure-payment-confirmation\" method requires a valid domain in the "
     "\"rpId\" field.";
@@ -240,6 +260,118 @@ const char kPayeeOriginOrPayeeNameRequired[] =
 const char kPayeeOriginMustBeHttps[] =
     "The \"secure-payment-confirmation\" method requires that the "
     "\"payeeOrigin\" field must be https.";
+
+const char kNonNullPaymentEntityLogoRequired[] =
+    "The \"secure-payment-confirmation\" method requires that each entry in "
+    "\"paymentEntitiesLogos\" is non-null.";
+
+extern const char kValidLogoUrlRequired[] =
+    "The \"secure-payment-confirmation\" method requires that each entry in "
+    "\"paymentEntitiesLogos\" has a valid URL in the \"url\" field.";
+
+extern const char kValidLogoUrlSchemeRequired[] =
+    "The \"secure-payment-confirmation\" method requires that each entry in "
+    "\"paymentEntitiesLogos\" has a URL whose scheme is one of \"https\", "
+    "\"http\", or \"data\" in the \"url\" field.";
+
+extern const char kLogoLabelRequired[] =
+    "The \"secure-payment-confirmation\" method requires that each entry in "
+    "\"paymentEntitiesLogos\" has a non-empty \"label\" field.";
+
+const char kSpcDisabledMustBeNull[] =
+    "If the SPC feature is disabled, secure_payment_confirmation must be null";
+
+const char kSpcMustBeOnlyPaymentMethod[] =
+    "If present, \"secure-payment-confirmation\" must be the only payment "
+    "method";
+
+const char kSpcUnsupportedOptions[] =
+    "The \"secure-payment-confirmation\" payment method does not support "
+    "requestPayerName, requestPayerEmail, requestPayerPhone, or "
+    "requestShipping";
+
+const char kSpcEnabledMustNotBeNull[] =
+    "If the SPC feature is enabled, secure_payment_confirmation must not be "
+    "null";
+
+const char kInternalError[] =
+    "An internal error occurred during validation of "
+    "SecurePaymentConfirmationRequest.";
+
+const char kWebAuthnExtensionsNotSupported[] =
+    "The \"secure-payment-confirmation\" method does not support the "
+    "provided WebAuthn extension(s).";
+
+const char kPaymentMethodManifestNotDictionary[] =
+    "Payment method manifest must be a JSON dictionary.";
+
+const char kWebAppManifestNotDictionary[] =
+    "Web app manifest must be a JSON dictionary.";
+
+const char kManifestMemberNotList[] = "\"$1\" must be a list.";
+
+const char kManifestMemberTooManyEntries[] =
+    "\"$1\" must contain at most $2 entries.";
+
+const char kManifestMemberEntriesNotUtf8[] =
+    "Each entry in \"$1\" must be UTF8 string.";
+
+const char kInvalidDefaultApplicationUrl[] =
+    "\"$1\" entry in \"$2\" is not a valid URL with HTTPS scheme and is not a "
+    "valid localhost URL with HTTP scheme.";
+
+const char kSupportedOriginsNotList[] = "\"$1\" must be a list of origins.";
+
+const char kSupportedOriginEntriesNotUtf8[] =
+    "Each entry in \"$1\" must be UTF8 string that starts with \"$2\" or "
+    "\"$3\" (for localhost).";
+
+const char kInvalidSupportedOrigin[] =
+    "\"$1\" entry in \"$2\" is not a valid origin with HTTPS scheme and is not "
+    "a valid localhost origin with HTTP scheme.";
+
+const char kRelatedApplicationsNotListOfDictionaries[] =
+    "\"$1\" must be a list of dictionaries.";
+
+const char kRelatedApplicationsTooManyEntries[] =
+    "\"$1\" must contain at most $2 entries with \"$3\": \"$4\".";
+
+const char kRelatedApplicationMissingMembers[] =
+    "Each \"$1\": \"$2\" entry in \"$3\" must contain \"$4\", \"$5\", and "
+    "\"$6\".";
+
+const char kManifestMemberNotNonEmptyAsciiString[] =
+    "\"$1\" must be a non-empty ASCII string.";
+
+const char kManifestMemberNotNumberString[] =
+    "\"$1\" must be a string convertible into a number.";
+
+const char kFingerprintsNotNonEmptyList[] =
+    "\"$1\" must be a non-empty list of at most $2 items.";
+
+const char kInvalidFingerprintEntry[] =
+    "Each entry in \"$1\" must be a dictionary with \"type\": \"sha256_cert\" "
+    "and a non-empty ASCII string \"value\".";
+
+const char kServiceWorkerNotDictionary[] =
+    "\"$1\" must be a dictionary in your web app manifest.";
+
+const char kServiceWorkerSrcNotNonEmptyUtf8String[] =
+    "\"$1\".\"$2\" must be a non-empty UTF8 string.";
+
+const char kSupportedDelegationsNotNonEmptyList[] =
+    "\"$1.$2\" must be a non-empty list of at most $3 entries.";
+
+const char kDelegationNotPrintableAsciiString[] =
+    "Entries in delegation list must be printable ASCII strings.";
+
+const char kInvalidDelegationValue[] =
+    "\"$1\" is not a valid value in \"$2\" array.";
+
+const char kPaymentMemberMissingSupportedDelegations[] =
+    "\"$1\" member must have \"$2\" list";
+
+const char kPaymentMemberNotDictionary[] = "\"$1\" member must be a dictionary";
 
 }  // namespace errors
 }  // namespace payments

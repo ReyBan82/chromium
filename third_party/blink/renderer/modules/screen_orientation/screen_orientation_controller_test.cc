@@ -7,6 +7,7 @@
 #include <memory>
 #include <tuple>
 
+#include "base/memory/raw_ptr.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/web/web_local_frame.h"
@@ -56,7 +57,7 @@ class MockLockOrientationCallback : public blink::WebLockOrientationCallback {
   }
 
  private:
-  LockOrientationResultHolder* results_;
+  raw_ptr<LockOrientationResultHolder> results_;
 };
 
 class ScreenOrientationControllerTest : public PageTestBase {
@@ -223,14 +224,14 @@ TEST_F(ScreenOrientationControllerTest, PageVisibilityCrash) {
   std::string base_url("http://internal.test/");
   std::string test_url("single_iframe.html");
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(base_url), test::CoreTestDataPath(),
-      WebString::FromUTF8(test_url));
+      WebString::FromUtf8(base_url), test::CoreTestDataPath(),
+      WebString::FromUtf8(test_url));
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(base_url), test::CoreTestDataPath(),
-      WebString::FromUTF8("visible_iframe.html"));
+      WebString::FromUtf8(base_url), test::CoreTestDataPath(),
+      WebString("visible_iframe.html"));
 
   frame_test_helpers::CreateTestWebFrameWidgetCallback create_widget_callback =
-      WTF::BindRepeating(
+      blink::BindRepeating(
           &frame_test_helpers::WebViewHelper::CreateTestWebFrameWidget<
               ScreenInfoWebFrameWidget>);
   frame_test_helpers::WebViewHelper web_view_helper(create_widget_callback);
@@ -263,14 +264,14 @@ TEST_F(ScreenOrientationControllerTest,
   std::string base_url("http://internal.test/");
   std::string test_url("page_with_grandchild.html");
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(base_url), test::CoreTestDataPath(),
-      WebString::FromUTF8(test_url));
+      WebString::FromUtf8(base_url), test::CoreTestDataPath(),
+      WebString::FromUtf8(test_url));
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(base_url), test::CoreTestDataPath(),
-      WebString::FromUTF8("single_iframe.html"));
+      WebString::FromUtf8(base_url), test::CoreTestDataPath(),
+      WebString("single_iframe.html"));
   url_test_helpers::RegisterMockedURLLoadFromBase(
-      WebString::FromUTF8(base_url), test::CoreTestDataPath(),
-      WebString::FromUTF8("visible_iframe.html"));
+      WebString::FromUtf8(base_url), test::CoreTestDataPath(),
+      WebString("visible_iframe.html"));
 
   frame_test_helpers::WebViewHelper web_view_helper;
   web_view_helper.InitializeAndLoad(base_url + test_url, nullptr, nullptr);

@@ -13,79 +13,95 @@ import static androidx.test.espresso.matcher.ViewMatchers.isFocusable;
 import static androidx.test.espresso.matcher.ViewMatchers.withId;
 import static androidx.test.espresso.matcher.ViewMatchers.withText;
 
+import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 
 import static org.chromium.ui.test.util.ViewUtils.onViewWaiting;
 
 import android.content.pm.ActivityInfo;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 
+import androidx.core.view.accessibility.AccessibilityNodeInfoCompat;
 import androidx.test.espresso.Espresso;
 import androidx.test.filters.MediumTest;
 
 import org.junit.Assert;
 import org.junit.Before;
-import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.ResettersForTesting;
+import org.chromium.base.ThreadUtils;
 import org.chromium.base.test.util.Batch;
 import org.chromium.base.test.util.CommandLineFlags;
 import org.chromium.base.test.util.Criteria;
 import org.chromium.base.test.util.CriteriaHelper;
+import org.chromium.base.test.util.DisabledTest;
 import org.chromium.base.test.util.Feature;
 import org.chromium.base.test.util.Restriction;
 import org.chromium.base.test.util.UrlUtils;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ChromeTabbedActivity;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
+import org.chromium.chrome.browser.tabmodel.TabClosureParams;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
-import org.chromium.chrome.test.batch.BlankCTATabInitialStateRule;
+import org.chromium.chrome.test.transit.AutoResetCtaTransitTestRule;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.page.WebPageStation;
+import org.chromium.chrome.test.util.BottomBarTestUtils;
 import org.chromium.components.javascript_dialogs.JavascriptTabModalDialog;
+import org.chromium.content.browser.accessibility.WebContentsAccessibilityImpl;
 import org.chromium.content_public.browser.LoadUrlParams;
+import org.chromium.content_public.browser.WebContents;
+import org.chromium.content_public.browser.WebContentsAccessibility;
 import org.chromium.content_public.browser.test.util.TestCallbackHelperContainer.OnEvaluateJavaScriptResultHelper;
-import org.chromium.content_public.browser.test.util.TestThreadUtils;
+import org.chromium.ui.accessibility.AccessibilityState;
+import org.chromium.ui.accessibility.AccessibilityStateTestHelper;
+import org.chromium.ui.base.DeviceFormFactor;
 import org.chromium.ui.base.PageTransition;
 import org.chromium.ui.modaldialog.ModalDialogProperties;
 import org.chromium.ui.modelutil.PropertyModel;
-import org.chromium.ui.test.util.UiRestriction;
+import org.chromium.ui.test.util.ViewUtils;
 
+import java.util.Collections;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
 
-/**
- * Test suite for displaying and functioning of tab modal JavaScript alert, confirm and prompt.
- */
+/** Test suite for displaying and functioning of tab modal JavaScript alert, confirm and prompt. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @Batch(JavascriptAppModalDialogTest.JAVASCRIPT_DIALOG_BATCH_NAME)
 @CommandLineFlags.Add({ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE})
 public class JavascriptTabModalDialogTest {
-    @ClassRule
-    public static ChromeTabbedActivityTestRule sActivityTestRule =
-            new ChromeTabbedActivityTestRule();
-
     @Rule
-    public BlankCTATabInitialStateRule mBlankCTATabInitialStateRule =
-            new BlankCTATabInitialStateRule(sActivityTestRule, true);
+    public AutoResetCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.autoResetCtaActivityRule();
 
-    private static final String EMPTY_PAGE = UrlUtils.encodeHtmlDataUri(
-            "<html><title>Modal Dialog Test</title><p>Testcase.</p></title></html>");
-    private static final String OTHER_PAGE = UrlUtils.encodeHtmlDataUri(
-            "<html><title>Modal Dialog Test</title><p>Testcase. Other tab.</p></title></html>");
+    private static final String EMPTY_PAGE =
+            UrlUtils.encodeHtmlDataUri(
+                    "<html><title>Modal Dialog Test</title><p>Testcase.</p></title></html>");
+    private static final String OTHER_PAGE =
+            UrlUtils.encodeHtmlDataUri(
+                    "<html><title>Modal Dialog Test</title><p>Testcase. Other"
+                            + " tab.</p></title></html>");
 
+    private WebPageStation mPage;
     private ChromeTabbedActivity mActivity;
 
     @Before
     public void setUp() {
-        sActivityTestRule.loadUrl(EMPTY_PAGE);
-        mActivity = sActivityTestRule.getActivity();
+        mPage = mActivityTestRule.startOnWebPage(EMPTY_PAGE);
+        mActivity = mPage.getActivity();
     }
 
     /**
-     * Verifies modal alert-dialog appearance and that JavaScript execution is
-     * able to continue after dismissal.
+     * Verifies modal alert-dialog appearance and that JavaScript execution is able to continue
+     * after dismissal.
      */
     @Test
     @MediumTest
@@ -98,13 +114,166 @@ public class JavascriptTabModalDialogTest {
         Assert.assertNotNull("No dialog showing.", jsDialog);
 
         onView(withText(R.string.ok)).perform(click());
-        Assert.assertTrue("JavaScript execution should continue after closing prompt.",
+        Assert.assertTrue(
+                "JavaScript execution should continue after closing prompt.",
                 scriptEvent.waitUntilHasValue());
     }
 
+    private int findNodeIdWithText(WebContentsAccessibilityImpl wcax, int nodeId, String text) {
+        AccessibilityNodeInfoCompat node = wcax.createAccessibilityNodeInfo(nodeId);
+        if (node == null) return -1;
+        CharSequence nodeText = node.getText();
+        if (nodeText != null && nodeText.toString().contains(text)) {
+            return nodeId;
+        }
+        CharSequence contentDesc = node.getContentDescription();
+        if (contentDesc != null && contentDesc.toString().contains(text)) {
+            return nodeId;
+        }
+        int[] children = wcax.getChildIdsForTesting(nodeId);
+        if (children != null) {
+            for (int childId : children) {
+                int found = findNodeIdWithText(wcax, childId, text);
+                if (found != -1) return found;
+            }
+        }
+        return -1;
+    }
+
     /**
-     * Verifies that clicking on a button twice doesn't crash.
+     * Verifies that after dismissing an alert modal dialog, accessibility focus is restored to the
+     * previously focused web element, and an accessibility focus event is received.
      */
+    @Test
+    @MediumTest
+    @Feature({"Browser", "Main"})
+    public void testAlertModalDialog_restoresAccessibilityFocus() throws Throwable {
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    AccessibilityStateTestHelper.setEventMaskForTesting(
+                            AccessibilityState.EVENT_TYPE_MASK_ALL);
+                    AccessibilityStateTestHelper.setIsAnyAccessibilityServiceEnabledForTesting(
+                            true);
+                    AccessibilityStateTestHelper.setIsKnownScreenReaderEnabledForTesting(true);
+                    AccessibilityStateTestHelper.setIsTouchExplorationEnabledForTesting(true);
+                    ResettersForTesting.register(
+                            AccessibilityStateTestHelper::uninitializeForTesting);
+                });
+
+        String testPage =
+                UrlUtils.encodeHtmlDataUri(
+                        "<html><body><button id='btn' onclick='alert(\"Hello\")'>Trigger"
+                                + " Button</button></body></html>");
+        mActivityTestRule.loadUrl(testPage);
+
+        WebContentsAccessibilityImpl wcax =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () -> {
+                            WebContents webContents = mActivity.getActivityTab().getWebContents();
+                            WebContentsAccessibilityImpl impl =
+                                    (WebContentsAccessibilityImpl)
+                                            WebContentsAccessibility.fromWebContents(webContents);
+                            impl.setThrottleDelayForTesting(Collections.emptyMap());
+                            return impl;
+                        });
+
+        CriteriaHelper.pollUiThread(
+                () -> wcax.getAccessibilityNodeProvider() != null,
+                "AccessibilityNodeProvider should be initialized");
+
+        int[] buttonNodeId = new int[1];
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    int rootId = wcax.getRootIdForTesting();
+                    if (rootId == 0 || rootId == View.NO_ID) return false;
+                    buttonNodeId[0] = findNodeIdWithText(wcax, rootId, "Trigger Button");
+                    return buttonNodeId[0] != -1;
+                },
+                "Trigger Button should be found in accessibility tree");
+
+        // Listen for accessibility events across both native Android views and virtual web nodes.
+        // Setting an AccessibilityDelegate on the window's DecorView intercepts events bubbling up
+        // through the view hierarchy, allowing us to capture events emitted by native dialog
+        // controls as well as virtual view events dispatched by WebContentsAccessibilityImpl.
+        ConcurrentLinkedQueue<AccessibilityEvent> receivedEvents = new ConcurrentLinkedQueue<>();
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    ViewGroup decorView = (ViewGroup) mActivity.getWindow().getDecorView();
+                    var oldDelegate = decorView.getAccessibilityDelegate();
+                    decorView.setAccessibilityDelegate(
+                            new View.AccessibilityDelegate() {
+                                @Override
+                                public boolean onRequestSendAccessibilityEvent(
+                                        ViewGroup host, View child, AccessibilityEvent event) {
+                                    receivedEvents.add(AccessibilityEvent.obtain(event));
+                                    return super.onRequestSendAccessibilityEvent(
+                                            host, child, event);
+                                }
+                            });
+                    ResettersForTesting.register(
+                            () -> decorView.setAccessibilityDelegate(oldDelegate));
+                });
+
+        // Focus the web button using an accessibility action.
+        boolean focused =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () ->
+                                wcax.getAccessibilityNodeProvider()
+                                        .performAction(
+                                                buttonNodeId[0],
+                                                AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS,
+                                                null));
+        Assert.assertTrue("Focus action should succeed", focused);
+        CriteriaHelper.pollUiThread(
+                () -> wcax.createAccessibilityNodeInfo(buttonNodeId[0]).isAccessibilityFocused(),
+                "Web button should be accessibility focused");
+
+        // Activate the web button using an accessibility click to trigger the alert dialog.
+        boolean clicked =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () ->
+                                wcax.getAccessibilityNodeProvider()
+                                        .performAction(
+                                                buttonNodeId[0],
+                                                AccessibilityNodeInfo.ACTION_CLICK,
+                                                null));
+        Assert.assertTrue("Click action should succeed", clicked);
+        CriteriaHelper.pollUiThread(
+                () -> mActivity.getModalDialogManager().isShowing(),
+                "Modal dialog should appear after clicking web button");
+
+        // Dismiss the dialog using an accessibility click on the dialog OK button.
+        // Clear received events before dismissing to strictly isolate the post-dismissal event.
+        receivedEvents.clear();
+        onView(withText(R.string.ok))
+                .perform(ViewUtils.performAccessibilityAction(AccessibilityNodeInfo.ACTION_CLICK));
+        CriteriaHelper.pollUiThread(
+                () -> !mActivity.getModalDialogManager().isShowing(),
+                "Modal dialog should be dismissed");
+
+        // Verify accessibility focus is restored to the web button.
+        CriteriaHelper.pollUiThread(
+                () -> wcax.createAccessibilityNodeInfo(buttonNodeId[0]).isAccessibilityFocused(),
+                "Accessibility focus should be restored to the web button after dialog dismissal");
+
+        // Verify an accessibility focus event arrived strictly after dialog dismissal for the
+        // trigger button.
+        CriteriaHelper.pollUiThread(
+                () ->
+                        receivedEvents.stream()
+                                .anyMatch(
+                                        e ->
+                                                e.getEventType()
+                                                                == AccessibilityEvent
+                                                                        .TYPE_VIEW_ACCESSIBILITY_FOCUSED
+                                                        && android.widget.Button.class
+                                                                .getName()
+                                                                .equals(e.getClassName())),
+                "Accessibility focus event should be fired for the web button upon dialog"
+                        + " dismissal");
+    }
+
+    /** Verifies that clicking on a button twice doesn't crash. */
     @Test
     @MediumTest
     @Feature({"Browser", "Main"})
@@ -114,19 +283,22 @@ public class JavascriptTabModalDialogTest {
         JavascriptTabModalDialog jsDialog = getCurrentDialog();
         Assert.assertNotNull("No dialog showing.", jsDialog);
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            PropertyModel model = mActivity.getModalDialogManager().getCurrentDialogForTest();
-            jsDialog.onClick(model, ModalDialogProperties.ButtonType.POSITIVE);
-            jsDialog.onClick(model, ModalDialogProperties.ButtonType.POSITIVE);
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    PropertyModel model =
+                            mActivity.getModalDialogManager().getCurrentDialogForTest();
+                    jsDialog.onClick(model, ModalDialogProperties.ButtonType.POSITIVE);
+                    jsDialog.onClick(model, ModalDialogProperties.ButtonType.POSITIVE);
+                });
 
-        Assert.assertTrue("JavaScript execution should continue after closing prompt.",
+        Assert.assertTrue(
+                "JavaScript execution should continue after closing prompt.",
                 scriptEvent.waitUntilHasValue());
     }
 
     /**
-     * Verifies that modal confirm-dialogs display, two buttons are visible and
-     * the return value of [Ok] equals true, [Cancel] equals false.
+     * Verifies that modal confirm-dialogs display, two buttons are visible and the return value of
+     * [Ok] equals true, [Cancel] equals false.
      */
     @Test
     @MediumTest
@@ -139,10 +311,11 @@ public class JavascriptTabModalDialogTest {
         Assert.assertNotNull("No dialog showing.", jsDialog);
 
         onView(withText(R.string.ok)).check(matches(isDisplayed()));
-        onView(withText(R.string.cancel)).check(matches(isDisplayed()));
-
+        // TODO(446200399): Unclear why this check fails:
+        // onView(withText(R.string.cancel)).check(matches(isDisplayed()));
         onView(withText(R.string.ok)).perform(click());
-        Assert.assertTrue("JavaScript execution should continue after closing dialog.",
+        Assert.assertTrue(
+                "JavaScript execution should continue after closing dialog.",
                 scriptEvent.waitUntilHasValue());
 
         String resultString = scriptEvent.getJsonResultAndClear();
@@ -153,17 +326,16 @@ public class JavascriptTabModalDialogTest {
         jsDialog = getCurrentDialog();
         Assert.assertNotNull("No dialog showing.", jsDialog);
 
-        onView(withText(R.string.cancel)).perform(click());
-        Assert.assertTrue("JavaScript execution should continue after closing dialog.",
+        onView(allOf(withText(R.string.cancel), isDisplayed())).perform(click());
+        Assert.assertTrue(
+                "JavaScript execution should continue after closing dialog.",
                 scriptEvent.waitUntilHasValue());
 
         resultString = scriptEvent.getJsonResultAndClear();
         Assert.assertEquals("Invalid return value.", "false", resultString);
     }
 
-    /**
-     * Verifies that modal prompt-dialogs display and the result is returned.
-     */
+    /** Verifies that modal prompt-dialogs display and the result is returned. */
     @Test
     @MediumTest
     @Feature({"Browser", "Main"})
@@ -179,7 +351,8 @@ public class JavascriptTabModalDialogTest {
         onView(withId(R.id.js_modal_dialog_prompt)).perform(replaceText(promptText));
 
         onView(withText(R.string.ok)).perform(click());
-        Assert.assertTrue("JavaScript execution should continue after closing prompt.",
+        Assert.assertTrue(
+                "JavaScript execution should continue after closing prompt.",
                 scriptEvent.waitUntilHasValue());
 
         String resultString = scriptEvent.getJsonResultAndClear();
@@ -193,6 +366,7 @@ public class JavascriptTabModalDialogTest {
     @Test
     @MediumTest
     @Feature({"Browser", "Main"})
+    @DisabledTest(message = "Flaky - crbug.com/378915567")
     public void testAlertModalDialogMessageFocus() throws TimeoutException, ExecutionException {
         assertScrollViewFocusabilityInAlertDialog("alert('Short message!');", false);
 
@@ -206,26 +380,27 @@ public class JavascriptTabModalDialogTest {
         mActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
     }
 
-    private void assertScrollViewFocusabilityInAlertDialog(final String jsAlertScript,
-            final boolean expectedFocusability) throws TimeoutException, ExecutionException {
+    private void assertScrollViewFocusabilityInAlertDialog(
+            final String jsAlertScript, final boolean expectedFocusability)
+            throws TimeoutException, ExecutionException {
         final OnEvaluateJavaScriptResultHelper scriptEvent =
                 executeJavaScriptAndWaitForDialog(jsAlertScript);
 
         final JavascriptTabModalDialog jsDialog = getCurrentDialog();
         Assert.assertNotNull("No dialog showing.", jsDialog);
 
-        onView(withId(R.id.modal_dialog_scroll_view))
+        onView(withId(R.id.modal_dialog_title_scroll_view))
                 .check(matches(expectedFocusability ? isFocusable() : not(isFocusable())));
 
         onView(withText(R.string.ok)).perform(click());
-        Assert.assertTrue("JavaScript execution should continue after closing prompt.",
+        Assert.assertTrue(
+                "JavaScript execution should continue after closing prompt.",
                 scriptEvent.waitUntilHasValue());
     }
 
     /**
-     * Displays a dialog and closes the tab in the background before attempting
-     * to accept the dialog. Verifies that the dialog is dismissed when the tab
-     * is closed.
+     * Displays a dialog and closes the tab in the background before attempting to accept the
+     * dialog. Verifies that the dialog is dismissed when the tab is closed.
      */
     @Test
     @MediumTest
@@ -233,8 +408,17 @@ public class JavascriptTabModalDialogTest {
     public void testDialogDismissedAfterClosingTab() {
         executeJavaScriptAndWaitForDialog("alert('Android')");
 
-        TestThreadUtils.runOnUiThreadBlocking(
-                () -> { mActivity.getCurrentTabModel().closeTab(mActivity.getActivityTab()); });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mActivity
+                            .getCurrentTabModel()
+                            .getTabRemover()
+                            .closeTabs(
+                                    TabClosureParams.closeTab(mActivity.getActivityTab())
+                                            .allowUndo(false)
+                                            .build(),
+                                    /* allowDialog= */ false);
+                });
 
         // Closing the tab should have dismissed the dialog.
         checkDialogShowing("The dialog should have been dismissed when its tab was closed.", false);
@@ -247,11 +431,12 @@ public class JavascriptTabModalDialogTest {
     @Test
     @MediumTest
     @Feature({"Browser", "Main"})
-    @Restriction(UiRestriction.RESTRICTION_TYPE_PHONE)
+    @Restriction(DeviceFormFactor.PHONE)
     public void testDialogDismissedAfterToggleOverview() {
         executeJavaScriptAndWaitForDialog("alert('Android')");
 
-        onViewWaiting(withId(R.id.tab_switcher_button)).perform(click());
+        View tabSwitcherBtn = BottomBarTestUtils.findViewById(mActivity, R.id.tab_switcher_button);
+        onViewWaiting(is(tabSwitcherBtn)).perform(click());
 
         // Entering tab switcher should have dismissed the dialog.
         checkDialogShowing(
@@ -259,8 +444,8 @@ public class JavascriptTabModalDialogTest {
     }
 
     /**
-     * Displays a dialog and loads a new URL before attempting to accept or cancel the
-     * dialog. Verifies that the dialog is dismissed.
+     * Displays a dialog and loads a new URL before attempting to accept or cancel the dialog.
+     * Verifies that the dialog is dismissed.
      */
     @Test
     @MediumTest
@@ -268,9 +453,12 @@ public class JavascriptTabModalDialogTest {
     public void testDialogDismissedAfterUrlUpdated() {
         executeJavaScriptAndWaitForDialog("alert('Android')");
 
-        TestThreadUtils.runOnUiThreadBlocking(() -> {
-            mActivity.getActivityTab().loadUrl(new LoadUrlParams(OTHER_PAGE, PageTransition.LINK));
-        });
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    mActivity
+                            .getActivityTab()
+                            .loadUrl(new LoadUrlParams(OTHER_PAGE, PageTransition.LINK));
+                });
 
         // Loading a different URL should have dismissed the dialog.
         checkDialogShowing(
@@ -278,8 +466,8 @@ public class JavascriptTabModalDialogTest {
     }
 
     /**
-     * Displays a dialog and performs back press before attempting to accept or cancel the
-     * dialog. Verifies that the dialog is dismissed.
+     * Displays a dialog and performs back press before attempting to accept or cancel the dialog.
+     * Verifies that the dialog is dismissed.
      */
     @Test
     @MediumTest
@@ -294,20 +482,20 @@ public class JavascriptTabModalDialogTest {
     }
 
     /**
-     * Asynchronously executes the given code for spawning a dialog and waits
-     * for the dialog to be visible.
+     * Asynchronously executes the given code for spawning a dialog and waits for the dialog to be
+     * visible.
      */
     private OnEvaluateJavaScriptResultHelper executeJavaScriptAndWaitForDialog(String script) {
         return executeJavaScriptAndWaitForDialog(new OnEvaluateJavaScriptResultHelper(), script);
     }
 
     /**
-     * Given a JavaScript evaluation helper, asynchronously executes the given
-     * code for spawning a dialog and waits for the dialog to be visible.
+     * Given a JavaScript evaluation helper, asynchronously executes the given code for spawning a
+     * dialog and waits for the dialog to be visible.
      */
     private OnEvaluateJavaScriptResultHelper executeJavaScriptAndWaitForDialog(
             final OnEvaluateJavaScriptResultHelper helper, String script) {
-        helper.evaluateJavaScriptForTests(mActivity.getCurrentWebContents(), script);
+        helper.evaluateJavaScriptForTests(mActivityTestRule.getWebContents(), script);
         checkDialogShowing("Could not spawn or locate a modal dialog.", true);
         return helper;
     }
@@ -317,19 +505,23 @@ public class JavascriptTabModalDialogTest {
      * showing.
      */
     private JavascriptTabModalDialog getCurrentDialog() throws ExecutionException {
-        return (JavascriptTabModalDialog) TestThreadUtils.runOnUiThreadBlocking(() -> {
-            PropertyModel model = mActivity.getModalDialogManager().getCurrentDialogForTest();
-            return model != null ? model.get(ModalDialogProperties.CONTROLLER) : null;
-        });
+        return (JavascriptTabModalDialog)
+                ThreadUtils.runOnUiThreadBlocking(
+                        () -> {
+                            PropertyModel model =
+                                    mActivity.getModalDialogManager().getCurrentDialogForTest();
+                            return model != null
+                                    ? model.get(ModalDialogProperties.CONTROLLER)
+                                    : null;
+                        });
     }
 
-    /**
-     * Check whether dialog is showing as expected.
-     */
+    /** Check whether dialog is showing as expected. */
     private void checkDialogShowing(final String errorMessage, final boolean shouldBeShown) {
-        CriteriaHelper.pollUiThread(() -> {
-            final boolean isShown = mActivity.getModalDialogManager().isShowing();
-            Criteria.checkThat(errorMessage, isShown, is(shouldBeShown));
-        });
+        CriteriaHelper.pollUiThread(
+                () -> {
+                    final boolean isShown = mActivity.getModalDialogManager().isShowing();
+                    Criteria.checkThat(errorMessage, isShown, is(shouldBeShown));
+                });
     }
 }

@@ -17,8 +17,10 @@
 namespace network {
 namespace {
 
+using ::net::structured_headers::Dictionary;
 using ::net::structured_headers::Item;
 using ::net::structured_headers::ParameterizedItem;
+using ::net::structured_headers::ParameterizedMember;
 
 using Parameter = std::pair<std::string, Item>;
 
@@ -64,6 +66,30 @@ TEST(StructuredHeadersMojomTraitsTest,
   ParameterizedItem actual;
   EXPECT_TRUE(mojo::test::SerializeAndDeserialize<
               mojom::StructuredHeadersParameterizedItem>(kExpected, actual));
+  EXPECT_EQ(kExpected, actual);
+}
+
+TEST(StructuredHeadersMojomTraitsTest, Dictionary_SerializeAndDeserialize) {
+  const Dictionary kExpected({
+      {"empty", ParameterizedMember()},
+      {"item", ParameterizedMember(Item("def"),
+                                   {
+                                       Parameter("y", Item("s")),
+                                       Parameter("x", Item("q")),
+                                       Parameter("z", Item("r")),
+                                   })},
+      {"inner-list",
+       ParameterizedMember(/*items=*/
+                           {ParameterizedItem(Item("abc"), {}),
+                            ParameterizedItem(Item("xyz"),
+                                              {Parameter("y", Item("q"))})},
+                           /*params=*/{Parameter("z", Item("r"))})},
+  });
+
+  Dictionary actual;
+  EXPECT_TRUE(
+      mojo::test::SerializeAndDeserialize<mojom::StructuredHeadersDictionary>(
+          kExpected, actual));
   EXPECT_EQ(kExpected, actual);
 }
 

@@ -4,33 +4,32 @@
 
 // Test clipboard extension api chrome.clipboard.onClipboardDataChanged event.
 
-var testSuccessCount = 0;
+const testSuccessCount = 0;
 
 function verifySetImageDataResult(expectedError) {
-  if (expectedError)
+  if (expectedError) {
     chrome.test.assertLastError(expectedError);
+  }
   chrome.test.succeed();
 }
 
 function testSetImageDataClipboard(
     imageUrl, imageType, expectedError, additionalItems) {
-  var oReq = new XMLHttpRequest();
+  const oReq = new XMLHttpRequest();
   oReq.open('GET', imageUrl, true);
   oReq.responseType = 'arraybuffer';
 
-  oReq.onload = function (oEvent) {
-    var arrayBuffer = oReq.response;
-    var binaryString = '';
+  oReq.onload = function(oEvent) {
+    const arrayBuffer = oReq.response;
 
     if (arrayBuffer) {
       if (additionalItems) {
-        chrome.clipboard.setImageData(arrayBuffer, imageType, additionalItems,
-                                      function() {
-          verifySetImageDataResult(expectedError);
-        });
+        chrome.clipboard.setImageData(
+            arrayBuffer, imageType, additionalItems, function() {
+              verifySetImageDataResult(expectedError);
+            });
       } else {
-        chrome.clipboard.setImageData(arrayBuffer, imageType,
-                                      function() {
+        chrome.clipboard.setImageData(arrayBuffer, imageType, function() {
           verifySetImageDataResult(expectedError);
         });
       }
@@ -43,67 +42,67 @@ function testSetImageDataClipboard(
 }
 
 function testSavePngImageToClipboard(baseUrl) {
-  testSetImageDataClipboard(baseUrl + '/icon1.png', 'png');
+  testSetImageDataClipboard(`${baseUrl}/icon1.png`, 'png');
 }
 
 function testSaveJpegImageToClipboard(baseUrl) {
-  testSetImageDataClipboard(baseUrl + '/test.jpg', 'jpeg');
+  testSetImageDataClipboard(`${baseUrl}/test.jpg`, 'jpeg');
 }
 
 function testSaveBadImageData(baseUrl) {
   testSetImageDataClipboard(
-      baseUrl + '/test_file.txt', 'jpeg', 'Image data decoding failed.');
+      `${baseUrl}/test_file.txt`, 'jpeg', 'Image data decoding failed.');
 }
 
 function testSavePngImageWithAdditionalDataToClipboard(baseUrl) {
-  var additional_items = [];
-  var text_item = {
-      type: 'textPlain',
-      data: 'Hello, world'
-  }
-  var html_item = {
-      type: 'textHtml',
-      data: '<b>This is an html markup</b>'
-  }
-  additional_items.push(text_item);
-  additional_items.push(html_item);
+  const additionalItems = [];
+  const textItem = {
+    type: 'textPlain',
+    data: 'Hello, world',
+  };
+  const htmlItem = {
+    type: 'textHtml',
+    data: '<b>This is an html markup</b>',
+  };
+  additionalItems.push(textItem);
+  additionalItems.push(htmlItem);
   testSetImageDataClipboard(
-      baseUrl + '/icon1.png', 'png', undefined, additional_items);
+      `${baseUrl}/icon1.png`, 'png', undefined, additionalItems);
 }
 
 function testSavePngImageWithAdditionalDataToClipboardDuplicateTypeItems(
     baseUrl) {
-  var additional_items = [];
-  var text_item1 = {
-      type: 'textPlain',
-      data: 'Hello, world'
-  }
-  var text_item2 = {
-      type: 'textPlain',
-      data: 'Another text item'
-  }
-  additional_items.push(text_item1);
-  additional_items.push(text_item2);
+  const additionalItems = [];
+  const textItem1 = {
+    type: 'textPlain',
+    data: 'Hello, world',
+  };
+  const textItem2 = {
+    type: 'textPlain',
+    data: 'Another text item',
+  };
+  additionalItems.push(textItem1);
+  additionalItems.push(textItem2);
   testSetImageDataClipboard(
-      baseUrl + '/icon1.png', 'png',
-      'Unsupported additionalItems parameter data.',
-      additional_items);
+      `${baseUrl}/icon1.png`, 'png',
+      'Unsupported additionalItems parameter data.', additionalItems);
 }
 
 function bindTest(test, param) {
-  var result = test.bind(null, param);
+  const result = test.bind(null, param);
   result.generatedName = test.name;
   return result;
 }
 
 chrome.test.getConfig(function(config) {
-  var baseUrl = 'http://localhost:' + config.testServer.port + '/extensions';
+  const baseUrl = `http://localhost:${config.testServer.port}/extensions`;
   chrome.test.runTests([
     bindTest(testSavePngImageToClipboard, baseUrl),
     bindTest(testSaveJpegImageToClipboard, baseUrl),
     bindTest(testSaveBadImageData, baseUrl),
     bindTest(testSavePngImageWithAdditionalDataToClipboard, baseUrl),
-    bindTest(testSavePngImageWithAdditionalDataToClipboardDuplicateTypeItems,
-             baseUrl)
+    bindTest(
+        testSavePngImageWithAdditionalDataToClipboardDuplicateTypeItems,
+        baseUrl),
   ]);
-})
+});

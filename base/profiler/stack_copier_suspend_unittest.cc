@@ -2,16 +2,19 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/profiler/stack_copier_suspend.h"
+
 #include <algorithm>
 #include <cstring>
 #include <memory>
 #include <numeric>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/raw_ref.h"
+#include "base/profiler/register_context_registers.h"
 #include "base/profiler/stack_buffer.h"
-#include "base/profiler/stack_copier_suspend.h"
 #include "base/profiler/suspendable_thread_delegate.h"
 #include "build/build_config.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -43,10 +46,11 @@ class TestSuspendableThreadDelegate : public SuspendableThreadDelegate {
     bool WasSuccessful() const override { return true; }
   };
 
-  TestSuspendableThreadDelegate(const std::vector<uintptr_t>& fake_stack,
-                                // The register context will be initialized to
-                                // *|thread_context| if non-null.
-                                RegisterContext* thread_context = nullptr)
+  explicit TestSuspendableThreadDelegate(
+      const std::vector<uintptr_t>& fake_stack,
+      // The register context will be initialized to
+      // *|thread_context| if non-null.
+      RegisterContext* thread_context = nullptr)
       : fake_stack_(fake_stack), thread_context_(thread_context) {}
 
   TestSuspendableThreadDelegate(const TestSuspendableThreadDelegate&) = delete;
@@ -58,28 +62,34 @@ class TestSuspendableThreadDelegate : public SuspendableThreadDelegate {
   }
 
   bool GetThreadContext(RegisterContext* thread_context) override {
-    if (thread_context_)
+    if (thread_context_) {
       *thread_context = *thread_context_;
+    }
     // Set the stack pointer to be consistent with the provided fake stack.
-    RegisterContextStackPointer(thread_context) =
-        reinterpret_cast<uintptr_t>(&(*fake_stack_)[0]);
-    RegisterContextInstructionPointer(thread_context) =
-        reinterpret_cast<uintptr_t>((*fake_stack_)[0]);
+    SetRegisterContextStackPointer(
+        thread_context, reinterpret_cast<uintptr_t>(&(*fake_stack_)[0]));
+    SetRegisterContextInstructionPointer(
+        thread_context, reinterpret_cast<uintptr_t>((*fake_stack_)[0]));
     return true;
   }
 
   PlatformThreadId GetThreadId() const override { return PlatformThreadId(); }
 
   uintptr_t GetStackBaseAddress() const override {
-    return reinterpret_cast<uintptr_t>(&(*fake_stack_)[0] +
-                                       fake_stack_->size());
+    return reinterpret_cast<uintptr_t>(
+        UNSAFE_TODO(&(*fake_stack_)[0] + fake_stack_->size()));
   }
 
   bool CanCopyStack(uintptr_t stack_pointer) override { return true; }
 
-  std::vector<uintptr_t*> GetRegistersToRewrite(
+  std::vector<uintptr_t> GetRegisters(
       RegisterContext* thread_context) override {
-    return {&RegisterContextFramePointer(thread_context)};
+    return {RegisterContextFramePointer(thread_context)};
+  }
+
+  void SetRegisters(RegisterContext* thread_context,
+                    const std::vector<uintptr_t>& registers) override {
+    SetRegisterContextFramePointer(thread_context, registers[0]);
   }
 
  private:
@@ -91,9 +101,7 @@ class TestSuspendableThreadDelegate : public SuspendableThreadDelegate {
 
 class TestStackCopierDelegate : public StackCopier::Delegate {
  public:
-  void OnStackCopy() override {
-    on_stack_copy_was_invoked_ = true;
-  }
+  void OnStackCopy() override { on_stack_copy_was_invoked_ = true; }
 
   bool on_stack_copy_was_invoked() const { return on_stack_copy_was_invoked_; }
 
@@ -119,8 +127,8 @@ TEST(StackCopierSuspendTest, CopyStack) {
 
   uintptr_t* stack_copy_bottom =
       reinterpret_cast<uintptr_t*>(stack_buffer.get()->buffer());
-  std::vector<uintptr_t> stack_copy(stack_copy_bottom,
-                                    stack_copy_bottom + stack.size());
+  std::vector<uintptr_t> stack_copy(
+      stack_copy_bottom, UNSAFE_TODO(stack_copy_bottom + stack.size()));
   EXPECT_EQ(stack, stack_copy);
 }
 
@@ -145,8 +153,7 @@ TEST(StackCopierSuspendTest, CopyStackBufferTooSmall) {
       std::make_unique<StackBuffer>((stack.size() - 1) * sizeof(stack[0]));
   // Make the buffer different than the input stack.
   constexpr uintptr_t kBufferInitializer = 100;
-  size_t stack_buffer_elements =
-      stack_buffer->size() / sizeof(stack_buffer->buffer()[0]);
+  size_t stack_buffer_elements = stack_buffer->size();
   std::fill_n(stack_buffer->buffer(), stack_buffer_elements,
               kBufferInitializer);
   uintptr_t stack_top = 0;
@@ -158,8 +165,9 @@ TEST(StackCopierSuspendTest, CopyStackBufferTooSmall) {
 
   uintptr_t* stack_copy_bottom =
       reinterpret_cast<uintptr_t*>(stack_buffer.get()->buffer());
-  std::vector<uintptr_t> stack_copy(stack_copy_bottom,
-                                    stack_copy_bottom + stack_buffer_elements);
+  std::vector<uintptr_t> stack_copy(
+      stack_copy_bottom,
+      UNSAFE_TODO(stack_copy_bottom + stack_buffer_elements));
   // Use the buffer not being overwritten as a proxy for the unwind being
   // aborted.
   EXPECT_THAT(stack_copy, Each(kBufferInitializer));
@@ -184,8 +192,8 @@ TEST(StackCopierSuspendTest, CopyStackAndRewritePointers) {
 
   uintptr_t* stack_copy_bottom =
       reinterpret_cast<uintptr_t*>(stack_buffer.get()->buffer());
-  std::vector<uintptr_t> stack_copy(stack_copy_bottom,
-                                    stack_copy_bottom + stack.size());
+  std::vector<uintptr_t> stack_copy(
+      stack_copy_bottom, UNSAFE_TODO(stack_copy_bottom + stack.size()));
   EXPECT_THAT(stack_copy,
               ElementsAre(reinterpret_cast<uintptr_t>(stack_copy_bottom),
                           reinterpret_cast<uintptr_t>(stack_copy_bottom) +
@@ -231,12 +239,12 @@ TEST(StackCopierSuspendTest, CopyStackDelegateInvoked) {
   EXPECT_TRUE(stack_copier_delegate.on_stack_copy_was_invoked());
 }
 
-TEST(StackCopierSuspendTest, RewriteRegisters) {
+TEST(StackCopierSuspendTest, SetRegisters) {
   std::vector<uintptr_t> stack = {0, 1, 2};
   RegisterContext register_context{};
   TestStackCopierDelegate stack_copier_delegate;
-  RegisterContextFramePointer(&register_context) =
-      reinterpret_cast<uintptr_t>(&stack[1]);
+  SetRegisterContextFramePointer(&register_context,
+                                 reinterpret_cast<uintptr_t>(&stack[1]));
   StackCopierSuspend stack_copier_suspend(
       std::make_unique<TestSuspendableThreadDelegate>(stack,
                                                       &register_context));

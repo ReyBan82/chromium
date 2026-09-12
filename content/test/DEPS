@@ -43,19 +43,11 @@ include_rules = [
 
   # For ProxyServiceMojoTest. Remove once it moves to the network service.
   "+services/network/proxy_service_mojo.h",
+
+  "+third_party/fuzztest",
 ]
 
 specific_include_rules = {
-  "attribution_simulator_impl.cc": [
-    "+components/attribution_reporting",
-  ],
-  "attribution_simulator_input_parser.cc": [
-    "+components/attribution_reporting",
-  ],
-  "attribution_simulator_input_parser_unittest.cc": [
-    "+components/aggregation_service",
-    "+components/attribution_reporting",
-  ],
   "gpu_browsertest_helpers.cc": [
     "+services/viz/public/cpp/gpu/command_buffer_metrics.h",
     "+services/viz/public/cpp/gpu/context_provider_command_buffer.h",
@@ -63,7 +55,8 @@ specific_include_rules = {
   "content_browser_test_test.cc": [
     "+ui/ozone/public/ozone_switches.h",
   ],
-  "test_aggregation_service_impl.cc": [
-    "+components/aggregation_service",
+  "setup_field_trials.cc": [
+    "+components/metrics",
+    "+components/prefs",
   ],
 }

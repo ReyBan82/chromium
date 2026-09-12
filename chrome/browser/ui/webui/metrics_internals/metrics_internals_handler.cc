@@ -7,35 +7,28 @@
 #include "base/functional/bind.h"
 #include "base/values.h"
 #include "chrome/browser/browser_process.h"
-#include "components/metrics/debug/metrics_internals_utils.h"
-#include "components/metrics/metrics_service.h"
-#include "components/metrics/metrics_service_observer.h"
+#include "components/metrics_services_manager/metrics_services_manager.h"
+#include "components/ukm/ukm_service.h"
 
-MetricsInternalsHandler::MetricsInternalsHandler() {
-  if (!ShouldUseMetricsServiceObserver()) {
-    uma_log_observer_ = std::make_unique<metrics::MetricsServiceObserver>(
-        metrics::MetricsServiceObserver::MetricsServiceType::UMA);
-    g_browser_process->metrics_service()->AddLogsObserver(
-        uma_log_observer_.get());
-  }
-}
+// LINT.IfChange(metrics_internals_handler)
 
-MetricsInternalsHandler::~MetricsInternalsHandler() {
-  if (uma_log_observer_) {
-    g_browser_process->metrics_service()->RemoveLogsObserver(
-        uma_log_observer_.get());
-  }
-}
+MetricsInternalsHandler::MetricsInternalsHandler()
+    : base_handler_(std::make_unique<metrics::MetricsInternalsHandlerBase>(
+          this,
+          g_browser_process->metrics_service(),
+          g_browser_process->GetMetricsServicesManager()
+              ? g_browser_process->GetMetricsServicesManager()->GetUkmService()
+              : nullptr,
+          g_browser_process->GetMetricsServicesManager())) {}
+
+MetricsInternalsHandler::~MetricsInternalsHandler() = default;
 
 void MetricsInternalsHandler::OnJavascriptAllowed() {
-  uma_log_notified_subscription_ = GetUmaObserver()->AddNotifiedCallback(
-      base::BindRepeating(&MetricsInternalsHandler::OnUmaLogCreatedOrEvent,
-                          weak_ptr_factory_.GetWeakPtr()));
+  base_handler_->StartObserving();
 }
 
 void MetricsInternalsHandler::OnJavascriptDisallowed() {
-  weak_ptr_factory_.InvalidateWeakPtrs();
-  uma_log_notified_subscription_ = {};
+  base_handler_->StopObserving();
 }
 
 void MetricsInternalsHandler::RegisterMessages() {
@@ -45,6 +38,16 @@ void MetricsInternalsHandler::RegisterMessages() {
           &MetricsInternalsHandler::HandleFetchVariationsSummary,
           base::Unretained(this)));
   web_ui()->RegisterMessageCallback(
+      "fetchStoredLatestSeedInfo",
+      base::BindRepeating(&MetricsInternalsHandler::HandleFetchStoredSeedInfo,
+                          base::Unretained(this),
+                          variations::VariationsSeedStore::SeedType::LATEST));
+  web_ui()->RegisterMessageCallback(
+      "fetchStoredSafeSeedInfo",
+      base::BindRepeating(&MetricsInternalsHandler::HandleFetchStoredSeedInfo,
+                          base::Unretained(this),
+                          variations::VariationsSeedStore::SeedType::SAFE));
+  web_ui()->RegisterMessageCallback(
       "fetchUmaSummary",
       base::BindRepeating(&MetricsInternalsHandler::HandleFetchUmaSummary,
                           base::Unretained(this)));
@@ -53,65 +56,118 @@ void MetricsInternalsHandler::RegisterMessages() {
       base::BindRepeating(&MetricsInternalsHandler::HandleFetchUmaLogsData,
                           base::Unretained(this)));
   web_ui()->RegisterMessageCallback(
+      "fetchUkmSummary",
+      base::BindRepeating(&MetricsInternalsHandler::HandleFetchUkmSummary,
+                          base::Unretained(this)));
+  web_ui()->RegisterMessageCallback(
+      "fetchUkmLogsData",
+      base::BindRepeating(&MetricsInternalsHandler::HandleFetchUkmLogsData,
+                          base::Unretained(this)));
+  web_ui()->RegisterMessageCallback(
       "isUsingMetricsServiceObserver",
       base::BindRepeating(
           &MetricsInternalsHandler::HandleIsUsingMetricsServiceObserver,
           base::Unretained(this)));
+  web_ui()->RegisterMessageCallback(
+      "isUsingUkmServiceObserver",
+      base::BindRepeating(
+          &MetricsInternalsHandler::HandleIsUsingUkmServiceObserver,
+          base::Unretained(this)));
+  web_ui()->RegisterMessageCallback(
+      "fetchEncryptionPublicKey",
+      base::BindRepeating(
+          &MetricsInternalsHandler::HandleFetchEncryptionPublicKey,
+          base::Unretained(this)));
 }
 
-bool MetricsInternalsHandler::ShouldUseMetricsServiceObserver() {
-  return g_browser_process->metrics_service()->logs_event_observer() != nullptr;
+void MetricsInternalsHandler::ResolvePageCallback(
+    const base::ValueView callback_id,
+    const base::ValueView response) {
+  ResolveJavascriptCallback(callback_id, response);
 }
 
-metrics::MetricsServiceObserver* MetricsInternalsHandler::GetUmaObserver() {
-  return ShouldUseMetricsServiceObserver()
-             ? g_browser_process->metrics_service()->logs_event_observer()
-             : uma_log_observer_.get();
+void MetricsInternalsHandler::FireWebUIListener(std::string_view event_name) {
+  content::WebUIMessageHandler::FireWebUIListener(event_name);
+}
+
+void MetricsInternalsHandler::FireWebUIListener(std::string_view event_name,
+                                                const base::ValueView arg1) {
+  content::WebUIMessageHandler::FireWebUIListener(event_name, arg1);
 }
 
 void MetricsInternalsHandler::HandleFetchVariationsSummary(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
-  const base::Value& callback_id = args[0];
-  ResolveJavascriptCallback(
-      callback_id, metrics::GetVariationsSummary(
-                       g_browser_process->GetMetricsServicesManager()));
+  // args[0]: Callback ID.
+  CHECK_EQ(args.size(), 1U);
+  base_handler_->HandleFetchVariationsSummary(args[0]);
+}
+
+void MetricsInternalsHandler::HandleFetchStoredSeedInfo(
+    variations::VariationsSeedStore::SeedType seed_type,
+    const base::ListValue& args) {
+  AllowJavascript();
+  // args[0]: Callback ID.
+  CHECK_EQ(args.size(), 1U);
+  base_handler_->HandleFetchStoredSeedInfo(seed_type, args[0]);
 }
 
 void MetricsInternalsHandler::HandleFetchUmaSummary(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
-  const base::Value& callback_id = args[0];
-  ResolveJavascriptCallback(
-      callback_id,
-      metrics::GetUmaSummary(
-          g_browser_process->GetMetricsServicesManager()->GetMetricsService()));
+  // args[0]: Callback ID.
+  CHECK_EQ(args.size(), 1U);
+  base_handler_->HandleFetchUmaSummary(args[0]);
 }
 
 void MetricsInternalsHandler::HandleFetchUmaLogsData(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
-  // |args| should have two elements: the callback ID, and a bool parameter that
-  // determines whether we should include log proto data.
-  DCHECK_EQ(args.size(), 2U);
-  const base::Value& callback_id = args[0];
-  const bool include_log_proto_data = args[1].GetBool();
+  // args[0]: Callback ID.
+  // args[1]: Whether to include log proto data (bool).
+  CHECK_EQ(args.size(), 2U);
+  base_handler_->HandleFetchUmaLogsData(args[0], args[1].GetBool());
+}
 
-  std::string logs_json;
-  bool result =
-      GetUmaObserver()->ExportLogsAsJson(include_log_proto_data, &logs_json);
-  DCHECK(result);
-  ResolveJavascriptCallback(callback_id, base::Value(std::move(logs_json)));
+void MetricsInternalsHandler::HandleFetchUkmSummary(
+    const base::ListValue& args) {
+  AllowJavascript();
+  // args[0]: Callback ID.
+  CHECK_EQ(args.size(), 1U);
+  base_handler_->HandleFetchUkmSummary(args[0]);
+}
+
+void MetricsInternalsHandler::HandleFetchUkmLogsData(
+    const base::ListValue& args) {
+  AllowJavascript();
+  // args[0]: Callback ID.
+  // args[1]: Whether to include log proto data (bool).
+  CHECK_EQ(args.size(), 2U);
+  base_handler_->HandleFetchUkmLogsData(args[0], args[1].GetBool());
+}
+
+void MetricsInternalsHandler::HandleFetchEncryptionPublicKey(
+    const base::ListValue& args) {
+  AllowJavascript();
+  // args[0]: Callback ID.
+  CHECK_EQ(args.size(), 1U);
+  base_handler_->HandleFetchEncryptionPublicKey(args[0]);
 }
 
 void MetricsInternalsHandler::HandleIsUsingMetricsServiceObserver(
-    const base::Value::List& args) {
+    const base::ListValue& args) {
   AllowJavascript();
-  const base::Value& callback_id = args[0];
-  ResolveJavascriptCallback(callback_id,
-                            base::Value(ShouldUseMetricsServiceObserver()));
+  // args[0]: Callback ID.
+  CHECK_EQ(args.size(), 1U);
+  base_handler_->HandleIsUsingMetricsServiceObserver(args[0]);
 }
 
-void MetricsInternalsHandler::OnUmaLogCreatedOrEvent() {
-  FireWebUIListener("uma-log-created-or-event");
+void MetricsInternalsHandler::HandleIsUsingUkmServiceObserver(
+    const base::ListValue& args) {
+  AllowJavascript();
+  // args[0]: Callback ID.
+  CHECK_EQ(args.size(), 1U);
+  base_handler_->HandleIsUsingUkmServiceObserver(args[0]);
 }
+
+// LINT.ThenChange(//ios/chrome/browser/webui/ui_bundled/metrics_internals/metrics_internals_handler.mm)

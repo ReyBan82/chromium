@@ -1,6 +1,5 @@
 # Overall OWNERS
-johnchen@chromium.org
-wenbinzhang@google.com
+file://infra/config/groups/perf/OWNERS
 
 # For gtest perf tests, perf data upload, and functional tests
 bsheedy@chromium.org
@@ -21,7 +20,6 @@ cbruni@chromium.org
 kouhei@chromium.org
 
 # Perf bot sheriffs can disable stories.
-per-file expectations.config=skyostil@chromium.org
 per-file expectations.config=nuskos@chromium.org
 per-file expectations.config=eseckler@chromium.org
 

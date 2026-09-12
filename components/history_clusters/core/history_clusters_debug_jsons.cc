@@ -6,14 +6,13 @@
 
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
+#include "base/i18n/time_formatting.h"
 #include "base/json/json_writer.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/time/time_to_iso8601.h"
 #include "base/values.h"
 #include "components/history/core/browser/history_types.h"
 #include "components/history_clusters/core/history_clusters_util.h"
@@ -22,9 +21,9 @@ namespace history_clusters {
 
 namespace {
 
-base::Value::Dict GetDebugJSONDictForAnnotatedVisit(
+base::DictValue GetDebugJSONDictForAnnotatedVisit(
     const history::AnnotatedVisit& visit) {
-  base::Value::Dict debug_visit;
+  base::DictValue debug_visit;
   debug_visit.Set("visitId", base::NumberToString(visit.visit_row.visit_id));
   debug_visit.Set("url",
                   visit.content_annotations.search_normalized_url.is_empty()
@@ -63,21 +62,26 @@ base::Value::Dict GetDebugJSONDictForAnnotatedVisit(
                       ? ComputeURLForDeduping(visit.url_row.url()).spec()
                       : visit.content_annotations.search_normalized_url.spec());
   debug_visit.Set("visitSource", base::NumberToString(visit.source));
+  debug_visit.Set("isKnownToSync", visit.visit_row.is_known_to_sync);
+  debug_visit.Set("normalized_url",
+                  visit.content_annotations.search_normalized_url.is_empty()
+                      ? visit.url_row.url().spec()
+                      : visit.content_annotations.search_normalized_url.spec());
 
   // Content annotations.
-  base::Value::List debug_categories;
+  base::ListValue debug_categories;
   for (const auto& category :
        visit.content_annotations.model_annotations.categories) {
-    base::Value::Dict debug_category;
+    base::DictValue debug_category;
     debug_category.Set("name", category.id);
     debug_category.Set("value", category.weight);
     debug_categories.Append(std::move(debug_category));
   }
   debug_visit.Set("categories", std::move(debug_categories));
-  base::Value::List debug_entities;
+  base::ListValue debug_entities;
   for (const auto& entity :
        visit.content_annotations.model_annotations.entities) {
-    base::Value::Dict debug_entity;
+    base::DictValue debug_entity;
     debug_entity.Set("name", entity.id);
     debug_entity.Set("value", entity.weight);
     debug_entities.Append(std::move(debug_entity));
@@ -86,24 +90,30 @@ base::Value::Dict GetDebugJSONDictForAnnotatedVisit(
   debug_visit.Set("visibility",
                   visit.content_annotations.model_annotations.visibility_score);
   debug_visit.Set("searchTerms", visit.content_annotations.search_terms);
+  if (!visit.content_annotations.search_terms.empty()) {
+    debug_visit.Set("hasRelatedSearches",
+                    !visit.content_annotations.related_searches.empty());
+  }
+  debug_visit.Set("hasUrlKeyedImage",
+                  visit.content_annotations.has_url_keyed_image);
   return debug_visit;
 }
 
 }  // namespace
 
 std::string GetDebugTime(const base::Time time) {
-  return time.is_null() ? "null" : base::TimeToISO8601(time);
+  return time.is_null() ? "null" : base::TimeFormatAsIso8601(time);
 }
 
 // Gets a loggable JSON representation of `visits`.
 std::string GetDebugJSONForVisits(
     const std::vector<history::AnnotatedVisit>& visits) {
-  base::Value::List debug_visits_list;
+  base::ListValue debug_visits_list;
   for (auto& visit : visits) {
     debug_visits_list.Append(GetDebugJSONDictForAnnotatedVisit(visit));
   }
 
-  base::Value::Dict debug_value;
+  base::DictValue debug_value;
   debug_value.Set("visits", std::move(debug_visits_list));
   std::string debug_string;
   if (!base::JSONWriter::WriteWithOptions(
@@ -116,37 +126,32 @@ std::string GetDebugJSONForVisits(
 // Gets a loggable JSON representation of `clusters`.
 std::string GetDebugJSONForClusters(
     const std::vector<history::Cluster>& clusters) {
-  base::Value::List debug_clusters_list;
+  base::ListValue debug_clusters_list;
   for (const auto& cluster : clusters) {
-    base::Value::Dict debug_cluster;
-
+    base::DictValue debug_cluster;
+    debug_cluster.Set("id", static_cast<int>(cluster.cluster_id.value()));
     debug_cluster.Set("label", cluster.label.value_or(u""));
-    base::Value::Dict debug_keyword_to_data_map;
+    base::ListValue debug_keywords;
     for (const auto& keyword_data_p : cluster.keyword_to_data_map) {
-      base::Value::List debug_collection;
-      for (const auto& collection : keyword_data_p.second.entity_collections) {
-        debug_collection.Append(collection);
-      }
-      base::Value::Dict debug_keyword_data;
-      debug_keyword_data.Set("collections", std::move(debug_collection));
-      debug_keyword_to_data_map.Set(base::UTF16ToUTF8(keyword_data_p.first),
-                                    std::move(debug_keyword_data));
+      debug_keywords.Append(base::UTF16ToUTF8(keyword_data_p.first));
     }
-    debug_cluster.Set("keyword_to_data_map",
-                      std::move(debug_keyword_to_data_map));
+    debug_cluster.Set("keywords", std::move(debug_keywords));
     debug_cluster.Set("should_show_on_prominent_ui_surfaces",
                       cluster.should_show_on_prominent_ui_surfaces);
     debug_cluster.Set("triggerability_calculated",
                       cluster.triggerability_calculated);
 
-    base::Value::List debug_visits;
+    base::ListValue debug_visits;
     for (const auto& visit : cluster.visits) {
-      base::Value::Dict debug_visit =
+      base::DictValue debug_visit =
           GetDebugJSONDictForAnnotatedVisit(visit.annotated_visit);
       debug_visit.Set("score", visit.score);
+      debug_visit.Set("interaction_state",
+                      history::ClusterVisit::InteractionStateToInt(
+                          visit.interaction_state));
       debug_visit.Set("site_engagement_score", visit.engagement_score);
 
-      base::Value::List debug_duplicate_visits;
+      base::ListValue debug_duplicate_visits;
       for (const auto& duplicate_visit : visit.duplicate_visits)
         debug_duplicate_visits.Append(duplicate_visit.url.spec());
       debug_visit.Set("duplicate_visits", std::move(debug_duplicate_visits));
@@ -158,54 +163,26 @@ std::string GetDebugJSONForClusters(
     debug_clusters_list.Append(std::move(debug_cluster));
   }
 
+  base::DictValue debug_value;
+  debug_value.Set("clusters", std::move(debug_clusters_list));
   std::string debug_string;
   if (!base::JSONWriter::WriteWithOptions(
-          debug_clusters_list, base::JSONWriter::OPTIONS_PRETTY_PRINT,
-          &debug_string)) {
+          debug_value, base::JSONWriter::OPTIONS_PRETTY_PRINT, &debug_string)) {
     debug_string = "Error: Could not write clusters to JSON.";
   }
   return debug_string;
 }
 
-template <typename T>
-std::string GetDebugJSONForUrlKeywordSet(
-    const std::unordered_set<T>& keyword_set) {
-  base::Value::List keyword_list;
-  for (const auto& keyword : keyword_set) {
-    keyword_list.Append(keyword);
-  }
-
-  std::string debug_string;
-  if (!base::JSONWriter::WriteWithOptions(
-          keyword_list, base::JSONWriter::OPTIONS_PRETTY_PRINT,
-          &debug_string)) {
-    debug_string = "Error: Could not write keywords list to JSON.";
-  }
-  return debug_string;
-}
-
-template std::string GetDebugJSONForUrlKeywordSet<std::u16string>(
-    const std::unordered_set<std::u16string>&);
-template std::string GetDebugJSONForUrlKeywordSet<std::string>(
-    const std::unordered_set<std::string>&);
-
 std::string GetDebugJSONForKeywordMap(
     const std::unordered_map<std::u16string, history::ClusterKeywordData>&
         keyword_to_data_map) {
-  base::Value::Dict debug_keyword_to_data_map;
+  base::ListValue debug_keywords;
   for (const auto& keyword_data_p : keyword_to_data_map) {
-    base::Value::List debug_collection;
-    for (const auto& collection : keyword_data_p.second.entity_collections) {
-      debug_collection.Append(collection);
-    }
-    base::Value::Dict debug_keyword_data;
-    debug_keyword_data.Set("collections", std::move(debug_collection));
-    debug_keyword_to_data_map.Set(base::UTF16ToUTF8(keyword_data_p.first),
-                                  std::move(debug_keyword_data));
+    debug_keywords.Append(base::UTF16ToUTF8(keyword_data_p.first));
   }
   std::string debug_string;
   if (!base::JSONWriter::WriteWithOptions(
-          debug_keyword_to_data_map, base::JSONWriter::OPTIONS_PRETTY_PRINT,
+          debug_keywords, base::JSONWriter::OPTIONS_PRETTY_PRINT,
           &debug_string)) {
     debug_string = "Error: Could not write keywords list to JSON.";
   }

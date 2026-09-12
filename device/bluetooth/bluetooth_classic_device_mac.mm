@@ -6,13 +6,17 @@
 
 #include <string>
 
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/hash/hash.h"
+#include "base/notimplemented.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
+#include "components/device_event_log/device_event_log.h"
+#include "device/bluetooth/bluetooth_adapter_mac.h"
 #include "device/bluetooth/bluetooth_socket_mac.h"
 #include "device/bluetooth/public/cpp/bluetooth_address.h"
 #include "device/bluetooth/public/cpp/bluetooth_uuid.h"
@@ -26,17 +30,94 @@
                  outTransmitPowerLevel:(BluetoothHCITransmitPowerLevel*)level;
 @end
 
+// A simple helper class that forwards Bluetooth device disconnect notification
+// to its wrapped |_device|.
+@interface BluetoothDeviceDisconnectListener : NSObject {
+ @private
+  // The BluetoothClassicDeviceMac that owns |self|.
+  raw_ptr<device::BluetoothClassicDeviceMac> _device;
+
+  // The OS mechanism used to subscribe to and unsubscribe from Bluetooth device
+  // disconnect notification.
+  IOBluetoothUserNotification* __weak _disconnectNotification;
+}
+
+- (instancetype)initWithDevice:(device::BluetoothClassicDeviceMac*)device;
+- (void)deviceDisconnected:(IOBluetoothUserNotification*)notification
+                    device:(IOBluetoothDevice*)device;
+- (void)stopListening;
+
+@end
+
+@implementation BluetoothDeviceDisconnectListener
+
+- (instancetype)initWithDevice:(device::BluetoothClassicDeviceMac*)device {
+  if ((self = [super init])) {
+    _device = device;
+
+    _disconnectNotification = [device->device()
+        registerForDisconnectNotification:self
+                                 selector:@selector(deviceDisconnected:
+                                                                device:)];
+    if (!_disconnectNotification) {
+      BLUETOOTH_LOG(ERROR) << "Failed to register for disconnect notification!";
+    }
+  }
+  return self;
+}
+
+- (void)deviceDisconnected:(IOBluetoothUserNotification*)notification
+                    device:(IOBluetoothDevice*)device {
+  // |_device| may have been cleared by the C++ owner during destruction.
+  // This can happen if the OS delivers a late disconnect notification after
+  // the adapter has decided to remove the device and the C++ object is being
+  // torn down. In that case we simply ignore the notification.
+  if (!_device) {
+    return;
+  }
+
+  _device->OnDeviceDisconnected();
+}
+
+- (void)stopListening {
+  [_disconnectNotification unregister];
+
+  // Proactively clear the back-pointer so that any late notifications that
+  // do arrive after the C++ BluetoothClassicDeviceMac has started
+  // destruction will see a null |_device| and become a no-op instead of
+  // dereferencing a freed object.
+  _device = nullptr;
+
+  // Keep self alive for a brief period to allow any already-enqueued
+  // notifications on the main run loop to fire safely (and become no-ops
+  // since _device is now null) rather than hitting a deallocated object.
+  // See FB13705522.
+  __strong auto strongSelf = self;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    (void)strongSelf;
+  });
+}
+
+@end
+
 namespace device {
 namespace {
 
 const char kApiUnavailable[] = "This API is not implemented on this platform.";
 
+base::span<const uint8_t> NSDataAsByteSpan(NSData* data) {
+  // SAFETY: NSData internally guarantees that the safely accessible size of the
+  // memory block pointed to by `bytes` is exactly equal to the value of
+  // `length`.
+  return UNSAFE_BUFFERS(base::span<const uint8_t>(
+      static_cast<const uint8_t*>(data.bytes), data.length));
+}
+
 BluetoothUUID GetUuid(IOBluetoothSDPUUID* sdp_uuid) {
   DCHECK(sdp_uuid);
 
-  const uint8_t* uuid_bytes =
-      reinterpret_cast<const uint8_t*>([sdp_uuid bytes]);
-  std::string uuid_str = base::HexEncode(uuid_bytes, 16);
+  base::span<const uint8_t> uuid_bytes = NSDataAsByteSpan(sdp_uuid);
+  std::string uuid_str = base::HexEncode(uuid_bytes.first(16u));
   DCHECK_EQ(uuid_str.size(), 32U);
   uuid_str.insert(8, "-");
   uuid_str.insert(13, "-");
@@ -61,14 +142,82 @@ BluetoothUUID ExtractUuid(IOBluetoothSDPDataElement* service_class_data) {
 
 }  // namespace
 
+// static
+BluetoothDevice::UUIDList BluetoothClassicDeviceMac::GetUuids(
+    IOBluetoothDevice* device) {
+  BluetoothDevice::UUIDList uuids;
+  for (IOBluetoothSDPServiceRecord* service_record in [device services]) {
+    IOBluetoothSDPDataElement* service_class_data =
+        [service_record getAttributeDataElement:
+                            kBluetoothSDPAttributeIdentifierServiceClassIDList];
+    auto type_descriptor = [service_class_data getTypeDescriptor];
+    if (type_descriptor == kBluetoothSDPDataElementTypeUUID) {
+      IOBluetoothSDPUUID* sdp_uuid =
+          [[service_class_data getUUIDValue] getUUIDWithLength:16];
+      BluetoothUUID uuid = GetUuid(sdp_uuid);
+      if (uuid.IsValid()) {
+        uuids.push_back(uuid);
+      }
+    } else if (type_descriptor ==
+               kBluetoothSDPDataElementTypeDataElementSequence) {
+      BluetoothUUID uuid = ExtractUuid(service_class_data);
+      if (uuid.IsValid()) {
+        uuids.push_back(uuid);
+      }
+    }
+  }
+  return uuids;
+}
+
 BluetoothClassicDeviceMac::BluetoothClassicDeviceMac(
     BluetoothAdapterMac* adapter,
-    IOBluetoothDevice* device)
-    : BluetoothDeviceMac(adapter), device_([device retain]) {
+    BluetoothAdapterMac::DeviceInfo device_info)
+    : BluetoothDeviceMac(adapter),
+      device_(device_info.objc_device),
+      address_(device_info.address),
+      is_paired_(device_info.is_paired),
+      is_connected_(device_info.is_connected),
+      name_(std::move(device_info.name)) {
+  device_uuids_.ReplaceServiceUUIDs(std::move(device_info.uuids));
   UpdateTimestamp();
 }
 
+bool BluetoothClassicDeviceMac::UpdateState(
+    BluetoothAdapterMac::DeviceInfo device_info) {
+  bool changed = false;
+  if (address_ != device_info.address) {
+    address_ = std::move(device_info.address);
+    changed = true;
+  }
+  if (name_ != device_info.name) {
+    name_ = std::move(device_info.name);
+    changed = true;
+  }
+  if (is_paired_ != device_info.is_paired) {
+    is_paired_ = device_info.is_paired;
+    changed = true;
+  }
+  if (is_connected_ != device_info.is_connected) {
+    is_connected_ = device_info.is_connected;
+    changed = true;
+  }
+  if (device_ != device_info.objc_device) {
+    device_ = device_info.objc_device;
+    changed = true;
+  }
+
+  if (device_uuids_.GetUUIDs() != device_info.uuids) {
+    device_uuids_.ReplaceServiceUUIDs(std::move(device_info.uuids));
+    changed = true;
+  }
+
+  UpdateTimestamp();
+  return changed;
+}
+
 BluetoothClassicDeviceMac::~BluetoothClassicDeviceMac() {
+  [disconnect_listener_ stopListening];
+  disconnect_listener_ = nil;
 }
 
 uint32_t BluetoothClassicDeviceMac::GetBluetoothClass() const {
@@ -76,7 +225,7 @@ uint32_t BluetoothClassicDeviceMac::GetBluetoothClass() const {
 }
 
 void BluetoothClassicDeviceMac::CreateGattConnectionImpl(
-    absl::optional<BluetoothUUID> service_uuid) {
+    std::optional<BluetoothUUID> service_uuid) {
   // Classic devices do not support GATT connection.
   DidConnectGatt(ERROR_UNSUPPORTED_DEVICE);
 }
@@ -84,7 +233,7 @@ void BluetoothClassicDeviceMac::CreateGattConnectionImpl(
 void BluetoothClassicDeviceMac::DisconnectGatt() {}
 
 std::string BluetoothClassicDeviceMac::GetAddress() const {
-  return GetDeviceAddress(device_);
+  return address_;
 }
 
 BluetoothDevice::AddressType BluetoothClassicDeviceMac::GetAddressType() const {
@@ -110,24 +259,22 @@ uint16_t BluetoothClassicDeviceMac::GetDeviceID() const {
 }
 
 uint16_t BluetoothClassicDeviceMac::GetAppearance() const {
-  // TODO(crbug.com/588083): Implementing GetAppearance()
+  // TODO(crbug.com/41240161): Implementing GetAppearance()
   // on mac, win, and android platforms for chrome
   NOTIMPLEMENTED();
   return 0;
 }
 
-absl::optional<std::string> BluetoothClassicDeviceMac::GetName() const {
-  if ([device_ name])
-    return base::SysNSStringToUTF8([device_ name]);
-  return absl::nullopt;
+std::optional<std::string> BluetoothClassicDeviceMac::GetName() const {
+  return name_;
 }
 
 bool BluetoothClassicDeviceMac::IsPaired() const {
-  return [device_ isPaired];
+  return is_paired_;
 }
 
 bool BluetoothClassicDeviceMac::IsConnected() const {
-  return [device_ isConnected];
+  return is_connected_;
 }
 
 bool BluetoothClassicDeviceMac::IsGattConnected() const {
@@ -142,35 +289,12 @@ bool BluetoothClassicDeviceMac::IsConnecting() const {
   return false;
 }
 
-BluetoothDevice::UUIDSet BluetoothClassicDeviceMac::GetUUIDs() const {
-  UUIDSet uuids;
-  for (IOBluetoothSDPServiceRecord* service_record in [device_ services]) {
-    IOBluetoothSDPDataElement* service_class_data =
-        [service_record getAttributeDataElement:
-                            kBluetoothSDPAttributeIdentifierServiceClassIDList];
-    auto type_descriptor = [service_class_data getTypeDescriptor];
-    if (type_descriptor == kBluetoothSDPDataElementTypeUUID) {
-      IOBluetoothSDPUUID* sdp_uuid =
-          [[service_class_data getUUIDValue] getUUIDWithLength:16];
-      BluetoothUUID uuid = GetUuid(sdp_uuid);
-      if (uuid.IsValid())
-        uuids.insert(uuid);
-    } else if (type_descriptor ==
-               kBluetoothSDPDataElementTypeDataElementSequence) {
-      BluetoothUUID uuid = ExtractUuid(service_class_data);
-      if (uuid.IsValid())
-        uuids.insert(uuid);
-    }
-  }
-  return uuids;
+std::optional<int8_t> BluetoothClassicDeviceMac::GetInquiryRSSI() const {
+  return std::nullopt;
 }
 
-absl::optional<int8_t> BluetoothClassicDeviceMac::GetInquiryRSSI() const {
-  return absl::nullopt;
-}
-
-absl::optional<int8_t> BluetoothClassicDeviceMac::GetInquiryTxPower() const {
-  return absl::nullopt;
+std::optional<int8_t> BluetoothClassicDeviceMac::GetInquiryTxPower() const {
+  return std::nullopt;
 }
 
 bool BluetoothClassicDeviceMac::ExpectingPinCode() const {
@@ -190,24 +314,7 @@ bool BluetoothClassicDeviceMac::ExpectingConfirmation() const {
 
 void BluetoothClassicDeviceMac::GetConnectionInfo(
     ConnectionInfoCallback callback) {
-  ConnectionInfo connection_info;
-  if (![device_ isConnected]) {
-    std::move(callback).Run(connection_info);
-    return;
-  }
-
-  connection_info.rssi = [device_ rawRSSI];
-  // The API guarantees that +127 is returned in case the RSSI is not readable:
-  // http://goo.gl/bpURYv
-  if (connection_info.rssi == 127)
-    connection_info.rssi = kUnknownPower;
-
-  connection_info.transmit_power =
-      GetHostTransmitPower(kReadCurrentTransmitPowerLevel);
-  connection_info.max_transmit_power =
-      GetHostTransmitPower(kReadMaximumTransmitPowerLevel);
-
-  std::move(callback).Run(connection_info);
+  NOTIMPLEMENTED();
 }
 
 void BluetoothClassicDeviceMac::SetConnectionLatency(
@@ -257,8 +364,7 @@ void BluetoothClassicDeviceMac::ConnectToService(
     ConnectToServiceCallback callback,
     ConnectToServiceErrorCallback error_callback) {
   scoped_refptr<BluetoothSocketMac> socket = BluetoothSocketMac::CreateSocket();
-  socket->Connect(device_.get(), uuid,
-                  base::BindOnce(std::move(callback), socket),
+  socket->Connect(device_, uuid, base::BindOnce(std::move(callback), socket),
                   std::move(error_callback));
 }
 
@@ -275,29 +381,6 @@ base::Time BluetoothClassicDeviceMac::GetLastUpdateTime() const {
   return last_update_time_;
 }
 
-int BluetoothClassicDeviceMac::GetHostTransmitPower(
-    BluetoothHCITransmitPowerLevelType power_level_type) const {
-  IOBluetoothHostController* controller =
-      [IOBluetoothHostController defaultController];
-
-  // Bail if the undocumented API is unavailable on this machine.
-  SEL selector = @selector(BluetoothHCIReadTransmitPowerLevel:
-                                                       inType:
-                                        outTransmitPowerLevel:);
-  if (![controller respondsToSelector:selector])
-    return kUnknownPower;
-
-  BluetoothHCITransmitPowerLevel power_level;
-  IOReturn result =
-      [controller BluetoothHCIReadTransmitPowerLevel:[device_ connectionHandle]
-                                              inType:power_level_type
-                               outTransmitPowerLevel:&power_level];
-  if (result != kIOReturnSuccess)
-    return kUnknownPower;
-
-  return power_level;
-}
-
 // static
 std::string BluetoothClassicDeviceMac::GetDeviceAddress(
     IOBluetoothDevice* device) {
@@ -307,6 +390,22 @@ std::string BluetoothClassicDeviceMac::GetDeviceAddress(
 
 bool BluetoothClassicDeviceMac::IsLowEnergyDevice() {
   return false;
+}
+
+void BluetoothClassicDeviceMac::OnDeviceDisconnected() {
+  BLUETOOTH_LOG(EVENT) << "Device disconnected: name: "
+                       << this->GetNameForDisplay()
+                       << " address: " << this->GetAddress();
+  is_connected_ = false;
+  GetAdapter()->NotifyDeviceChanged(this);
+}
+
+void BluetoothClassicDeviceMac::StartListeningDisconnectEvent() {
+  if (!device_ || disconnect_listener_) {
+    return;
+  }
+  disconnect_listener_ =
+      [[BluetoothDeviceDisconnectListener alloc] initWithDevice:this];
 }
 
 }  // namespace device

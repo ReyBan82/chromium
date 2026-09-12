@@ -16,16 +16,17 @@
 #include <unistd.h>
 
 #include <string>
+#include <tuple>
 #include <vector>
 
+#include "base/apple/bundle_locations.h"
+#include "base/apple/osstatus_logging.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/files/file_path.h"
-#include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
 #include "base/logging.h"
-#include "base/mac/bundle_locations.h"
 #include "base/mac/launch_application.h"
-#include "base/mac/mac_logging.h"
-#include "base/mac/scoped_nsobject.h"
 #include "base/path_service.h"
 #include "base/posix/eintr_wrapper.h"
 #include "base/process/launch.h"
@@ -91,15 +92,18 @@ bool RelaunchApp(const std::vector<std::string>& args) {
   }
 
   std::vector<std::string> relauncher_args;
-  return RelaunchAppWithHelper(child_path.value(), relauncher_args, args);
+  return RelaunchAppAtPathWithHelper(child_path, base::apple::OuterBundlePath(),
+                                     relauncher_args, args);
 }
 
-bool RelaunchAppWithHelper(const std::string& helper,
-                           const std::vector<std::string>& relauncher_args,
-                           const std::vector<std::string>& args) {
+bool RelaunchAppAtPathWithHelper(
+    const base::FilePath& helper,
+    const base::FilePath& app_bundle,
+    const std::vector<std::string>& relauncher_args,
+    const std::vector<std::string>& args) {
   std::vector<std::string> relaunch_args;
   relaunch_args.reserve(relauncher_args.size() + args.size() + 4);
-  relaunch_args.push_back(helper);
+  relaunch_args.push_back(helper.value());
   relaunch_args.push_back(RelauncherTypeArg());
 
   // If this application isn't in the foreground, the relaunched one shouldn't
@@ -113,10 +117,10 @@ bool RelaunchAppWithHelper(const std::string& helper,
 
   relaunch_args.push_back(kRelauncherArgSeparator);
 
-  // The first item of `args` is the path to the executable, but launch APIs
-  // require the path to the bundle. Rather than try to derive the bundle path
-  // from the executable path, substitute in the bundle path.
-  relaunch_args.push_back(base::mac::OuterBundlePath().value());
+  // The relauncher uses base::mac::LaunchApplication, which requires a URL to
+  // the bundle. Therefore, substitute in the bundle path as the first
+  // "argument"; RelauncherMain is expecting it and will handle it specifically.
+  relaunch_args.push_back(app_bundle.value());
   for (size_t i = 1; i < args.size(); ++i) {
     // Strip any PSN arguments, as they apply to a specific process.
     if (args[i].compare(0, strlen(kPSNArg), kPSNArg) != 0 &&
@@ -259,22 +263,23 @@ int RelauncherMain(content::MainFunctionParams main_parameters) {
     // passed to main(), so use those. Access them through _NSGetArgc and
     // _NSGetArgv because NXArgc and NXArgv are normally only available to a
     // main executable via crt1.o and this code will run from a dylib, and
-    // because of http://crbug.com/139902.
+    // because of http://crbug.com/40249743.
     const int* argcp = _NSGetArgc();
     if (!argcp) {
       NOTREACHED();
-      return 1;
     }
     int argc = *argcp;
 
     const char* const* const* argvp = _NSGetArgv();
     if (!argvp) {
       NOTREACHED();
-      return 1;
     }
     const char* const* argv = *argvp;
 
-    if (argc < 4 || RelauncherTypeArg() != argv[1]) {
+    // SAFETY: _NSGetArgv() returns a pointer to an array of size argc.
+    auto args = UNSAFE_BUFFERS(base::span(argv, static_cast<size_t>(argc)));
+
+    if (args.size() < 4 || RelauncherTypeArg() != args[1]) {
       LOG(ERROR) << "relauncher process invoked with unexpected arguments";
       return 1;
     }
@@ -297,9 +302,9 @@ int RelauncherMain(content::MainFunctionParams main_parameters) {
     std::string relaunch_executable;
     const std::string relauncher_dmg_device_arg =
         base::StringPrintf("--%s=", switches::kRelauncherProcessDMGDevice);
-    for (int argv_index = 2; argv_index < argc; ++argv_index) {
-      const std::string arg(argv[argv_index]);
-
+    // Discard the first two arguments (executable name and relauncher type).
+    std::ignore = args.take_first(2u);
+    for (const std::string arg : args) {
       // Strip any -psn_ arguments, as they apply to a specific process.
       if (arg.compare(0, strlen(kPSNArg), kPSNArg) == 0) {
         continue;
@@ -339,16 +344,14 @@ int RelauncherMain(content::MainFunctionParams main_parameters) {
         {.activate = activate,
          .create_new_instance = true,
          .prompt_user_if_needed = true},
-        base::BindOnce(
-            [](base::expected<NSRunningApplication*, NSError*> result) {
-              if (!result.has_value()) {
-                LOG(ERROR) << "Failed to relaunch: "
-                           << base::SysNSStringToUTF8(
-                                  result.error().description);
-              }
+        base::BindOnce([](NSRunningApplication* app, NSError* error) {
+          if (error) {
+            LOG(ERROR) << "Failed to relaunch: "
+                       << base::SysNSStringToUTF8(error.description);
+          }
 
-              CFRunLoopStop(CFRunLoopGetMain());
-            }));
+          CFRunLoopStop(CFRunLoopGetMain());
+        }));
 
     // This is running the main thread.
     CFRunLoopRun();

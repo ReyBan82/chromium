@@ -31,25 +31,22 @@ class ComponentsHandler : public content::WebUIMessageHandler,
   void OnJavascriptDisallowed() override;
 
   // Callback for the "requestComponentsData" message.
-  void HandleRequestComponentsData(const base::Value::List& args);
+  void HandleRequestComponentsData(const base::ListValue& args);
 
   // Callback for the "checkUpdate" message.
-  void HandleCheckUpdate(const base::Value::List& args);
+  void HandleCheckUpdate(const base::ListValue& args);
+
+  // Callback for the "uninstallComponent" message.
+  void HandleUninstallComponent(const base::ListValue& args);
 
   // ServiceObserver implementation.
-  void OnEvent(Events event, const std::string& id) override;
-
-#if BUILDFLAG(IS_CHROMEOS)
-  // Callback for the "crosUrlComponentsRedirect" message.
-  void HandleCrosUrlComponentsRedirect(const base::Value::List& args);
-#endif
+  void OnEvent(const update_client::CrxUpdateItem& item) override;
 
  private:
-  static std::u16string ComponentEventToString(Events event);
   static std::u16string ServiceStatusToString(
       update_client::ComponentState state);
 
-  base::Value::List LoadComponents();
+  base::ListValue LoadComponents();
   void OnDemandUpdate(const std::string& component_id);
 
   // Weak pointer; injected for testing.

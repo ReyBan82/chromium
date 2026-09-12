@@ -5,11 +5,14 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_COMPOSITING_PROPERTY_TREE_MANAGER_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_COMPOSITING_PROPERTY_TREE_MANAGER_H_
 
+#include <optional>
+
+#include "cc/input/main_thread_scrolling_reason.h"
 #include "cc/layers/layer_collections.h"
 #include "third_party/blink/renderer/platform/graphics/compositor_element_id.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_vector.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
 #include "third_party/blink/renderer/platform/wtf/hash_set.h"
-#include "third_party/blink/renderer/platform/wtf/vector.h"
 
 namespace cc {
 class ClipTree;
@@ -26,6 +29,7 @@ enum class RenderSurfaceReason : uint8_t;
 
 namespace gfx {
 class PointF;
+class RRectF;
 }
 
 namespace blink {
@@ -37,6 +41,9 @@ class ScrollPaintPropertyNode;
 class SynthesizedClip;
 class TransformPaintPropertyNode;
 
+using StackTransformPaintPropertyNodeVector =
+    HeapVector<Member<const TransformPaintPropertyNode>, 32>;
+
 class PropertyTreeManagerClient {
  public:
   virtual ~PropertyTreeManagerClient() = default;
@@ -46,12 +53,16 @@ class PropertyTreeManagerClient {
       bool needs_layer,
       CompositorElementId& mask_isolation_id,
       CompositorElementId& mask_effect_id) = 0;
+  virtual bool NeedsCompositedScrolling(
+      const TransformPaintPropertyNode& scroll_translation) const = 0;
+  virtual bool ShouldForceMainThreadRepaint(
+      const TransformPaintPropertyNode& scroll_translation) const = 0;
 };
 
 // Mutates a cc property tree to reflect Blink paint property tree
 // state. Intended for use by PaintArtifactCompositor.
 class PropertyTreeManager {
-  DISALLOW_NEW();
+  STACK_ALLOCATED();
 
  public:
   PropertyTreeManager(PropertyTreeManagerClient&,
@@ -98,18 +109,27 @@ class PropertyTreeManager {
   // Returns the compositor transform node id. If a compositor transform node
   // does not exist, it is created. Any transforms that are for scroll offset
   // translation will ensure the associated scroll node exists.
+  // TODO(ScrollUnification): Remove the code that ensures the scroll node.
   int EnsureCompositorTransformNode(const TransformPaintPropertyNode&);
   int EnsureCompositorClipNode(const ClipPaintPropertyNode&);
-  // Ensure the compositor scroll node using the associated scroll offset
-  // translation.
-  int EnsureCompositorScrollNode(
-      const TransformPaintPropertyNode& scroll_offset_translation);
+
+  // Ensure the compositor scroll and transform nodes for a scroll translation
+  // transform node. Returns the id of the scroll node.
+  int EnsureCompositorScrollAndTransformNode(
+      const TransformPaintPropertyNode& scroll_translation);
 
   // Same as above but marks the scroll nodes as being the viewport.
-  int EnsureCompositorInnerScrollNode(
-      const TransformPaintPropertyNode& scroll_offset_translation);
-  int EnsureCompositorOuterScrollNode(
-      const TransformPaintPropertyNode& scroll_offset_translation);
+  int EnsureCompositorInnerScrollAndTransformNode(
+      const TransformPaintPropertyNode& scroll_translation);
+  int EnsureCompositorOuterScrollAndTransformNode(
+      const TransformPaintPropertyNode& scroll_translation);
+
+  // Ensures a cc::ScrollNode for a scroll translation node.
+  // transform_id of the cc::ScrollNode is set to kInvalidPropertyNodeId.
+  // To associate the cc::ScrollNode to a cc::TransformNode, use
+  // EnsureCompositorScrollAndTransformNode() instead of this function or after
+  // this function.
+  int EnsureCompositorScrollNode(const TransformPaintPropertyNode&);
 
   int EnsureCompositorPageScaleTransformNode(const TransformPaintPropertyNode&);
 
@@ -144,6 +164,9 @@ class PropertyTreeManager {
   static bool DirectlyUpdatePageScaleTransform(
       cc::LayerTreeHost&,
       const TransformPaintPropertyNode&);
+  static void DirectlyUpdateScrollingContentsCullRect(
+      cc::LayerTreeHost&,
+      const ScrollPaintPropertyNode&);
 
   // This function only updates the cc scroll tree scroll offset and does not
   // update the cc transform node's scroll offset.
@@ -151,10 +174,22 @@ class PropertyTreeManager {
                                       CompositorElementId,
                                       const gfx::PointF&);
 
-  // Ensures a cc::ScrollNode for all scroll translations.
-  void EnsureCompositorScrollNodes(
-      const Vector<const TransformPaintPropertyNode*>&
-          scroll_translation_nodes);
+  // Sets a bit so that the next commit from main will clear out any unsent
+  // scroll delta that's occurred on the compositor thread since the last
+  // BeginMainFrame. This can be used when Blink wants to ensure a commit will
+  // land on a specific scroll offset in the presence of composited animations.
+  static void DropCompositorScrollDeltaNextCommit(cc::LayerTreeHost&,
+                                                  CompositorElementId);
+
+  static cc::MainThreadRepaintReasons GetMainThreadRepaintReasons(
+      const cc::LayerTreeHost&,
+      const ScrollPaintPropertyNode&);
+  // TODO(crbug.com/40517276): Remove this function after launching
+  // RasterInducingScroll.
+  static bool UsesCompositedScrolling(const cc::LayerTreeHost&,
+                                      const ScrollPaintPropertyNode&);
+  static bool UsesRasterInducingScroll(const cc::LayerTreeHost&,
+                                       const ScrollPaintPropertyNode&);
 
   // Updates conditional render surface reasons for all effect nodes in
   // |GetEffectTree|. Every effect is supposed to have render surface enabled
@@ -166,13 +201,13 @@ class PropertyTreeManager {
   // TODO(crbug.com/504464): There is ongoing work in cc to delay render surface
   // decision until later phase of the pipeline. Remove premature optimization
   // here once the work is ready.
-  void UpdateConditionalRenderSurfaceReasons(const cc::LayerList& layers);
+  void UpdateConditionalRenderSurfaceReasons(
+      const cc::LayerList& layers,
+      const HashSet<int>& layers_having_text,
+      const HashSet<int>& layers_having_video);
 
- private:
-  void SetupRootTransformNode();
-  void SetupRootClipNode();
-  void SetupRootEffectNode();
-  void SetupRootScrollNode();
+  void EnsureCompositorNodesForAnchorPositionAdjustmentContainers(
+      const StackTransformPaintPropertyNodeVector& transforms);
 
   // The type of operation the current cc effect node applies.
   enum CcEffectType {
@@ -190,11 +225,7 @@ class PropertyTreeManager {
     kSyntheticFor2dAxisAlignment = 1 << 1
   };
 
-  static bool SupportsShaderBasedRoundedCorner(
-      const ClipPaintPropertyNode&,
-      CcEffectType type,
-      const EffectPaintPropertyNode* next_effect);
-
+  // This is public for WTF_ALLOW_MOVE_AND_INIT_WITH_MEM_FUNCTIONS.
   // Note: EffectState holds direct references to property nodes. Ordinarily it
   // would be verboten to keep references to data controlled by PropertyTrees,
   // because it evades ProtectedSequenceSynchronizer protections. We allow it in
@@ -202,28 +233,33 @@ class PropertyTreeManager {
   // STACK_ALLOCATED(), and we know that it will not initiate a protected
   // sequence (i.e., call into LayerTreeHost::WillCommit).
   struct EffectState {
-    // The cc effect node that has the corresponding drawing state to the
-    // effect and clip state from the last
-    // SwitchToEffectNodeWithSynthesizedClip.
-    int effect_id;
+    DISALLOW_NEW();
 
-    CcEffectType effect_type;
+   public:
+    EffectState() = default;
 
     // The effect state of the cc effect node. It's never nullptr.
-    const EffectPaintPropertyNode* effect;
+    Member<const EffectPaintPropertyNode> effect;
 
     // The clip state of the cc effect node. This value may be shallower than
     // the one passed into SwitchToEffectNodeWithSynthesizedClip because not
     // every clip needs to be synthesized as cc effect. Is set to output clip of
     // the effect if the type is kEffect, or set to the synthesized clip node.
     // It's never nullptr.
-    const ClipPaintPropertyNode* clip;
+    Member<const ClipPaintPropertyNode> clip;
 
-    // The transform space of this state. It's |&effect->LocalTransformSpace()|
+    // The transform space of this state. It's |&effect->LocalTransformSpace()|z
     // if this state is of kEffect type or synthetic with backdrop filters
     // moved up from the original effect.
     // Otherwise it's |&clip->LocalTransformSpace()|.
-    const TransformPaintPropertyNode* transform;
+    Member<const TransformPaintPropertyNode> transform;
+
+    // The cc effect node that has the corresponding drawing state to the
+    // effect and clip state from the last
+    // SwitchToEffectNodeWithSynthesizedClip.
+    int effect_id;
+
+    CcEffectType effect_type;
 
     // Whether the transform space of this state may be 2d axis misaligned to
     // the containing render surface. As there may be new render surfaces
@@ -239,17 +275,38 @@ class PropertyTreeManager {
     //
     // It's lazily computed if it can't be trivially known when we create this
     // EffectState.
-    enum {
+    enum Alignment {
       kAligned,
       kMisaligned,
       kUnknown,
-    } may_be_2d_axis_misaligned_to_render_surface;
+    };
+    Alignment may_be_2d_axis_misaligned_to_render_surface;
 
     // Whether this effect or an ancestor has a synthetic rounded clip between
     // self and the next render surface. This is used to force a render surface
     // for all ancestor synthetic rounded clips if a descendant is found.
     bool contained_by_non_render_surface_synthetic_rounded_clip;
+
+    void Trace(Visitor* visitor) const {
+      visitor->Trace(effect);
+      visitor->Trace(clip);
+      visitor->Trace(transform);
+    }
   };
+
+ private:
+  void SetupRootTransformNode();
+  void SetupRootClipNode();
+  void SetupRootEffectNode();
+  void SetupRootScrollNode();
+
+  int EnsureCompositorScrollNodeInternal(const ScrollPaintPropertyNode&);
+
+  static std::optional<gfx::RRectF> ShaderBasedRRect(
+      const ClipPaintPropertyNode&,
+      CcEffectType type,
+      const TransformPaintPropertyNode& transform,
+      const EffectPaintPropertyNode* next_effect);
 
   void CollectAnimationElementId(CompositorElementId);
   void BuildEffectNodesRecursively(const EffectPaintPropertyNode& next_effect);
@@ -272,8 +329,7 @@ class PropertyTreeManager {
   void CloseCcEffect();
   void PopulateCcEffectNode(cc::EffectNode&,
                             const EffectPaintPropertyNode& effect,
-                            int output_clip_id,
-                            bool can_be_shared_element_resource);
+                            int output_clip_id);
 
   bool IsCurrentCcEffectSynthetic() const { return current_.effect_type; }
   bool IsCurrentCcEffectSyntheticForNonTrivialClip() const {
@@ -291,20 +347,17 @@ class PropertyTreeManager {
                              const ClipPaintPropertyNode&,
                              const TransformPaintPropertyNode&);
 
-  // Should only be called from EnsureCompositorTransformNode as part of
-  // creating the associated scroll offset transform node.
-  void CreateCompositorScrollNode(
-      const ScrollPaintPropertyNode&,
-      const cc::TransformNode& scroll_offset_translation,
-      bool is_composited);
-
   void UpdatePixelMovingFilterClipExpanders();
 
+  cc::MainThreadRepaintReasons NonCompositedMainThreadRepaintReasons(
+      const TransformPaintPropertyNode& scroll_translation) const;
+
+  // The current effect state. Virtually it's the top of the effect stack if
+  // it and effect_stack_ are treated as a whole stack.
+  EffectState current_;
   PropertyTreeManagerClient& client_;
 
   // Property trees which should be updated by the manager.
-  cc::PropertyTrees& property_trees_;
-
   // See comment above EffectState about holding direct references to data
   // owned by PropertyTrees.
   cc::ClipTree& clip_tree_;
@@ -319,18 +372,12 @@ class PropertyTreeManager {
 
   LayerListBuilder& layer_list_builder_;
 
-  int new_sequence_number_;
-
-  // The current effect state. Virtually it's the top of the effect stack if
-  // it and effect_stack_ are treated as a whole stack.
-  EffectState current_;
-
   // This keep track of cc effect stack. Whenever a new cc effect is nested,
   // a new entry is pushed, and the entry will be popped when the effect closed.
   // Note: This is a "restore stack", i.e. the top element does not represent
   // the current state (which is in current_), but the state prior to most
   // recent push.
-  Vector<EffectState> effect_stack_;
+  HeapVector<EffectState> effect_stack_;
 
   // A set of synthetic clips masks which will be applied if a layer under them
   // is encountered which draws content (and thus necessitates the mask).
@@ -338,9 +385,16 @@ class PropertyTreeManager {
 
   // EnsureCompositorClipNode() collects pixel moving filter clips. We'll set
   // clip_expander of their cc nodes after all effect nodes have been converted.
-  Vector<const ClipPaintPropertyNode*> pixel_moving_filter_clip_expanders_;
+  HeapVector<Member<const ClipPaintPropertyNode>, 16>
+      pixel_moving_filter_clip_expanders_;
+
+  HashSet<CompositorElementId> anchor_position_adjustment_container_ids_;
+  int new_sequence_number_;
 };
 
 }  // namespace blink
+
+WTF_ALLOW_MOVE_AND_INIT_WITH_MEM_FUNCTIONS(
+    blink::PropertyTreeManager::EffectState)
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_GRAPHICS_COMPOSITING_PROPERTY_TREE_MANAGER_H_

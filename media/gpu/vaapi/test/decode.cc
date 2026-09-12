@@ -4,32 +4,35 @@
 
 #include <va/va.h>
 
-#include <iostream>
 #include <fstream>
+#include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 
 #include "base/command_line.h"
 #include "base/files/memory_mapped_file.h"
 #include "base/logging.h"
+#include "base/logging/logging_settings.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
-#include "build/chromeos_buildflags.h"
-#include "media/filters/ivf_parser.h"
+#include "build/build_config.h"
 #include "media/gpu/vaapi/test/av1_decoder.h"
 #include "media/gpu/vaapi/test/h264_decoder.h"
-#if BUILDFLAG(ENABLE_PLATFORM_HEVC)
-#include "media/gpu/vaapi/test/h265_decoder.h"
-#endif
 #include "media/gpu/vaapi/test/shared_va_surface.h"
 #include "media/gpu/vaapi/test/vaapi_device.h"
 #include "media/gpu/vaapi/test/video_decoder.h"
 #include "media/gpu/vaapi/test/vp8_decoder.h"
 #include "media/gpu/vaapi/test/vp9_decoder.h"
 #include "media/gpu/vaapi/va_stubs.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "media/media_buildflags.h"
+#include "media/parsers/ivf_parser.h"
 #include "ui/gfx/geometry/size.h"
+
+#if BUILDFLAG(ENABLE_PLATFORM_HEVC)
+#include "media/gpu/vaapi/test/h265_decoder.h"
+#endif
 
 using media::vaapi_test::Av1Decoder;
 using media::vaapi_test::H264Decoder;
@@ -44,7 +47,7 @@ using media::vaapi_test::Vp9Decoder;
 using media_gpu_vaapi::InitializeStubs;
 using media_gpu_vaapi::kModuleVa;
 using media_gpu_vaapi::kModuleVa_drm;
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 using media_gpu_vaapi::kModuleVa_prot;
 #endif
 using media_gpu_vaapi::StubPathMap;
@@ -60,7 +63,8 @@ constexpr char kUsageMsg[] =
     "           [--out-prefix=<path prefix of decoded frame PNGs>]\n"
     "           [--md5[=<checksum path>]]\n"
     "           [--visible]\n"
-    "           [--loop]\n"
+    "           [--loop[=<n>]]\n"
+    "           [--progress]\n"
     "           [--v=<log verbosity>]\n"
     "           [--help]\n";
 
@@ -113,13 +117,17 @@ constexpr char kHelpMsg[] =
     "    --visible\n"
     "        Optional. If specified, applies post-decode processing (PNG\n"
     "        output, md5 hash) only to visible frames.\n"
-    "    --loop\n"
-    "        Optional. If specified, loops decoding until terminated\n"
-    "        externally or until an error occurs, at which point execution\n"
-    "        will immediately terminate.\n"
+    "    --loop[=<n>]\n"
+    "        Optional. If specified with a value, loops decoding specified\n"
+    "        times. If specified without, loops until terminated externally\n"
+    "        or until an error occurs, at which point execution will\n"
+    "        immediately terminate.\n"
     "        If specified with --frames, loops decoding that number of\n"
     "        leading frames. If specified with --out-prefix, loops decoding,\n"
     "        but only saves the first iteration of decoded frames.\n"
+    "    --progress\n"
+    "        Optional. If specified, prints each frame number before it is\n"
+    "        decoded.\n"
     "    --help\n"
     "        Display this help message and exit.\n";
 
@@ -131,20 +139,19 @@ std::unique_ptr<VideoDecoder> CreateDecoder(
     const std::string& codec,
     const VaapiDevice& va_device,
     SharedVASurface::FetchPolicy fetch_policy,
-    const uint8_t* stream_data,
-    size_t stream_len) {
+    base::span<const uint8_t> stream) {
   if (codec == "H264")
-    return std::make_unique<H264Decoder>(stream_data, stream_len, va_device,
-                                         fetch_policy);
+    return std::make_unique<H264Decoder>(stream.data(), stream.size(),
+                                         va_device, fetch_policy);
 #if BUILDFLAG(ENABLE_PLATFORM_HEVC)
   if (codec == "H265")
-    return std::make_unique<H265Decoder>(stream_data, stream_len, va_device,
-                                         fetch_policy);
+    return std::make_unique<H265Decoder>(stream.data(), stream.size(),
+                                         va_device, fetch_policy);
 #endif
 
   auto ivf_parser = std::make_unique<media::IvfParser>();
   media::IvfFileHeader file_header{};
-  if (!ivf_parser->Initialize(stream_data, stream_len, &file_header)) {
+  if (!ivf_parser->Initialize(stream, &file_header)) {
     LOG(ERROR) << "Couldn't initialize IVF parser";
     return nullptr;
   }
@@ -163,7 +170,7 @@ std::unique_ptr<VideoDecoder> CreateDecoder(
   return nullptr;
 }
 
-absl::optional<SharedVASurface::FetchPolicy> GetFetchPolicy(
+std::optional<SharedVASurface::FetchPolicy> GetFetchPolicy(
     const VaapiDevice& va_device,
     const std::string& fetch_policy) {
   // Always use kGetImage for AMD devices.
@@ -171,7 +178,7 @@ absl::optional<SharedVASurface::FetchPolicy> GetFetchPolicy(
   const std::string va_vendor_string = vaQueryVendorString(va_device.display());
   if (base::StartsWith(va_vendor_string, "Mesa Gallium driver",
                        base::CompareCase::SENSITIVE)) {
-    LOG(INFO) << "AMD driver detected, forcing vaGetImage";
+    LOG(WARNING) << "AMD driver detected, forcing vaGetImage";
     return SharedVASurface::FetchPolicy::kGetImage;
   }
 
@@ -183,7 +190,7 @@ absl::optional<SharedVASurface::FetchPolicy> GetFetchPolicy(
     return SharedVASurface::FetchPolicy::kGetImage;
 
   LOG(ERROR) << "Unrecognized fetch policy " << fetch_policy;
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace
@@ -245,7 +252,7 @@ int main(int argc, char** argv) {
   const std::string va_suffix(base::NumberToString(VA_MAJOR_VERSION + 1));
   paths[kModuleVa].push_back(std::string("libva.so.") + va_suffix);
   paths[kModuleVa_drm].push_back(std::string("libva-drm.so.") + va_suffix);
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   paths[kModuleVa_prot].push_back(std::string("libva.so.") + va_suffix);
 #endif
   if (!InitializeStubs(paths)) {
@@ -262,6 +269,15 @@ int main(int argc, char** argv) {
 
   const VaapiDevice va_device;
   const bool loop_decode = cmd->HasSwitch("loop");
+  const std::string loops = cmd->GetSwitchValueASCII("loop");
+  int n_loops;
+  if (loops.empty()) {
+    n_loops = 0;
+  } else if (!base::StringToInt(loops, &n_loops) || n_loops <= 0) {
+    LOG(ERROR) << "Number of times to loop decode must be positive integer, "
+               << "got " << frames;
+    return EXIT_FAILURE;
+  }
   bool first_loop = true;
 
   const auto fetch_policy =
@@ -270,15 +286,19 @@ int main(int argc, char** argv) {
     return EXIT_FAILURE;
   }
 
+  const bool show_progress = cmd->HasSwitch("progress");
+
   do {
-    const std::unique_ptr<VideoDecoder> dec = CreateDecoder(
-        codec, va_device, *fetch_policy, stream.data(), stream.length());
+    const std::unique_ptr<VideoDecoder> dec =
+        CreateDecoder(codec, va_device, *fetch_policy, stream.bytes());
     if (!dec) {
       LOG(ERROR) << "Failed to create decoder for file: " << video_path;
       return EXIT_FAILURE;
     }
 
     for (int i = 0; i < n_frames || n_frames == 0; i++) {
+      LOG_IF(INFO, show_progress) << "Decoding frame " << i;
+
       const VideoDecoder::Result res = dec->DecodeNextFrame();
 
       if (res == VideoDecoder::kEOStream) {
@@ -302,7 +322,8 @@ int main(int argc, char** argv) {
     }
 
     first_loop = false;
-  } while (loop_decode);
+    n_loops--;
+  } while (loop_decode && (loops.empty() || n_loops > 0));
 
   LOG(INFO) << "Done reading.";
 

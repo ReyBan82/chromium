@@ -3,154 +3,98 @@
 // found in the LICENSE file.
 
 import 'chrome://resources/cr_elements/cr_button/cr_button.js';
-import 'chrome://resources/cr_elements/cr_hidden_style.css.js';
-import './iframe.js';
 import './doodle_share_dialog.js';
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
+import {assert} from 'chrome://resources/js/assert.js';
 import {skColorToRgba} from 'chrome://resources/js/color_utils.js';
-import {EventTracker} from 'chrome://resources/js/event_tracker.js';
-import {SkColor} from 'chrome://resources/mojo/skia/public/mojom/skcolor.mojom-webui.js';
-import {Url} from 'chrome://resources/mojo/url/mojom/url.mojom-webui.js';
-import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
+import {CrLitElement} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {PropertyValues} from 'chrome://resources/lit/v3_0/lit.rollup.js';
+import type {SkColor} from 'chrome://resources/mojo/skia/public/mojom/skcolor.mojom-webui.js';
+import type {Url} from 'chrome://resources/mojo/url/mojom/url.mojom-webui.js';
 
-import {IframeElement} from './iframe.js';
-import {getTemplate} from './logo.html.js';
-import {Doodle, DoodleImageType, DoodleShareChannel, ImageDoodle, PageHandlerRemote} from './new_tab_page.mojom-webui.js';
+import {getCss} from './logo.css.js';
+import {getHtml} from './logo.html.js';
+import type {Doodle, DoodleShareChannel, ImageDoodle, PageHandlerRemote, Theme} from './new_tab_page.mojom-webui.js';
+import {DoodleImageType} from './new_tab_page.mojom-webui.js';
 import {NewTabPageProxy} from './new_tab_page_proxy.js';
 import {$$} from './utils.js';
 import {WindowProxy} from './window_proxy.js';
 
-const SHARE_BUTTON_SIZE_PX: number = 26;
-
 // Shows the Google logo or a doodle if available.
-export class LogoElement extends PolymerElement {
+export class LogoElement extends CrLitElement {
   static get is() {
     return 'ntp-logo';
   }
 
-  static get template() {
-    return getTemplate();
+  static override get styles() {
+    return getCss();
   }
 
-  static get properties() {
+  override render() {
+    return getHtml.bind(this)();
+  }
+
+  static override get properties() {
     return {
       /**
        * If true displays the Google logo single-colored.
        */
       singleColored: {
-        reflectToAttribute: true,
-        type: Boolean,
-        value: false,
-      },
-
-      /**
-       * If true displays the dark mode doodle if possible.
-       */
-      dark: {
-        observer: 'onDarkChange_',
+        reflect: true,
         type: Boolean,
       },
 
       /**
-       * The NTP's background color. If null or undefined the NTP does not have
-       * a single background color, e.g. when a background image is set.
+       * Used to determine if we should display a dark mode doodle.
        */
-      backgroundColor: Object,
+      theme: {type: Object},
 
-      loaded_: Boolean,
-
-      doodle_: Object,
-
-      imageDoodle_: {
-        observer: 'onImageDoodleChange_',
-        computed: 'computeImageDoodle_(dark, doodle_)',
-        type: Object,
-      },
-
-      showLogo_: {
-        computed: 'computeShowLogo_(loaded_, showDoodle_)',
-        type: Boolean,
-      },
-
-      showDoodle_: {
-        computed: 'computeShowDoodle_(doodle_, imageDoodle_)',
-        type: Boolean,
-      },
+      loaded_: {type: Boolean},
+      doodle_: {type: Object},
+      imageDoodle_: {type: Object},
+      showLogo_: {type: Boolean},
+      showDoodle_: {type: Boolean},
 
       doodleBoxed_: {
-        reflectToAttribute: true,
+        reflect: true,
         type: Boolean,
-        computed: 'computeDoodleBoxed_(backgroundColor, imageDoodle_)',
       },
 
-      imageUrl_: {
-        computed: 'computeImageUrl_(imageDoodle_)',
-        type: String,
-      },
-
-      showAnimation_: {
+      showTightDoodleBoxing_: {
+        reflect: true,
         type: Boolean,
-        value: false,
       },
 
-      animationUrl_: {
-        computed: 'computeAnimationUrl_(imageDoodle_)',
-        type: String,
+      useGoogleLogo26_: {
+        reflect: true,
+        type: Boolean,
       },
 
-      iframeUrl_: {
-        computed: 'computeIframeUrl_(doodle_)',
-        type: String,
-      },
-
-      duration_: {
-        observer: 'onDurationHeightWidthChange_',
-        type: String,
-      },
-
-      height_: {
-        observer: 'onDurationHeightWidthChange_',
-        type: String,
-      },
-
-      width_: {
-        observer: 'onDurationHeightWidthChange_',
-        type: String,
-      },
-
-      expanded_: Boolean,
-
-      showShareDialog_: Boolean,
-
-      imageDoodleTabIndex_: {
-        type: Number,
-        computed: 'computeImageDoodleTabIndex_(doodle_, showAnimation_)',
-      },
+      imageUrl_: {type: String},
+      showAnimation_: {type: Boolean},
+      showShareDialog_: {type: Boolean},
+      imageDoodleTabIndex_: {type: Number},
     };
   }
 
-  singleColored: boolean;
-  dark: boolean;
-  backgroundColor: SkColor;
-  private loaded_: boolean;
-  private doodle_: Doodle|null;
-  private imageDoodle_: ImageDoodle|null;
-  private showLogo_: boolean;
-  private showDoodle_: boolean;
-  private doodleBoxed_: boolean;
-  private imageUrl_: string;
-  private showAnimation_: boolean;
-  private animationUrl_: string;
-  private iframeUrl_: string;
-  private duration_: string;
-  private height_: string;
-  private width_: string;
-  private expanded_: boolean;
-  private showShareDialog_: boolean;
-  private imageDoodleTabIndex_: number;
+  accessor singleColored: boolean = false;
+  accessor theme: Theme|null = null;
+  private accessor loaded_: boolean = false;
+  protected accessor doodle_: Doodle|null = null;
+  protected accessor imageDoodle_: ImageDoodle|null = null;
+  protected accessor showLogo_: boolean = false;
+  protected accessor showDoodle_: boolean = false;
+  private accessor doodleBoxed_: boolean = false;
+  protected accessor showTightDoodleBoxing_: boolean =
+      loadTimeData.getBoolean('animatedDoodlesEnabled');
+  protected accessor useGoogleLogo26_: boolean =
+      loadTimeData.getBoolean('useGoogleLogo26');
+  protected accessor imageUrl_: string = '';
+  protected accessor showAnimation_: boolean = false;
+  protected accessor showShareDialog_: boolean = false;
+  protected accessor imageDoodleTabIndex_: number = -1;
 
-  private eventTracker_: EventTracker = new EventTracker();
   private pageHandler_: PageHandlerRemote;
   private imageClickParams_: string|null = null;
   private interactionLogUrl_: Url|null = null;
@@ -164,105 +108,95 @@ export class LogoElement extends PolymerElement {
     this.pageHandler_.getDoodle().then(({doodle}) => {
       this.doodle_ = doodle;
       this.loaded_ = true;
-      if (this.doodle_ && this.doodle_.interactive) {
-        this.width_ = `${this.doodle_.interactive.width}px`;
-        this.height_ = `${this.doodle_.interactive.height}px`;
-      }
     });
   }
 
   override connectedCallback() {
     super.connectedCallback();
-    this.eventTracker_.add(window, 'message', ({data}: MessageEvent) => {
-      if (data['cmd'] === 'resizeDoodle') {
-        assert(data.duration);
-        this.duration_ = data.duration;
-        assert(data.height);
-        this.height_ = data.height;
-        assert(data.width);
-        this.width_ = data.width;
-        this.expanded_ = true;
-      } else if (data['cmd'] === 'sendMode') {
-        this.sendMode_();
-      }
-    });
-    // Make sure the doodle gets the mode in case it has already requested it.
-    this.sendMode_();
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
-    this.eventTracker_.removeAll();
   }
 
-  override ready() {
-    super.ready();
+  override willUpdate(changedProperties: PropertyValues<this>) {
+    super.willUpdate(changedProperties);
+
+    this.imageDoodle_ = this.computeImageDoodle_();
+    this.imageUrl_ = this.computeImageUrl_();
+    this.showAnimation_ = this.computeShowAnimation_();
+    this.showDoodle_ = this.computeShowDoodle_();
+    this.showLogo_ = this.computeShowLogo_();
+    this.doodleBoxed_ = this.computeDoodleBoxed_();
+    this.imageDoodleTabIndex_ = this.computeImageDoodleTabIndex_();
+  }
+
+  override firstUpdated() {
     performance.measure('logo-creation', 'logo-creation-start');
   }
 
+  override updated(changedProperties: PropertyValues<this>) {
+    super.updated(changedProperties);
+
+    const changedPrivateProperties =
+        changedProperties as Map<PropertyKey, unknown>;
+
+    if (changedPrivateProperties.has('imageDoodle_')) {
+      this.onImageDoodleChange_();
+    }
+  }
+
   private onImageDoodleChange_() {
-    const shareButton = this.imageDoodle_ && this.imageDoodle_.shareButton;
-    if (shareButton) {
-      const height = this.imageDoodle_!.height;
-      const width = this.imageDoodle_!.width;
-      this.updateStyles({
-        '--ntp-logo-share-button-background-color':
-            skColorToRgba(shareButton.backgroundColor),
-        '--ntp-logo-share-button-height':
-            `${SHARE_BUTTON_SIZE_PX / height * 100}%`,
-        '--ntp-logo-share-button-width':
-            `${SHARE_BUTTON_SIZE_PX / width * 100}%`,
-        '--ntp-logo-share-button-x': `${shareButton.x / width * 100}%`,
-        '--ntp-logo-share-button-y': `${shareButton.y / height * 100}%`,
-      });
-    } else {
-      this.updateStyles({
-        '--ntp-logo-share-button-background-color': null,
-        '--ntp-logo-share-button-height': null,
-        '--ntp-logo-share-button-width': null,
-        '--ntp-logo-share-button-x': null,
-        '--ntp-logo-share-button-y': null,
-      });
-    }
     if (this.imageDoodle_) {
-      this.updateStyles({
-        '--ntp-logo-box-color':
-            skColorToRgba(this.imageDoodle_.backgroundColor),
-      });
+      this.style.setProperty(
+          '--ntp-logo-box-color',
+          skColorToRgba(this.imageDoodle_.backgroundColor));
     } else {
-      this.updateStyles({
-        '--ntp-logo-box-color': null,
-      });
+      this.style.removeProperty('--ntp-logo-box-color');
     }
-    // Stop the animation (if it is running) and reset logging params since
-    // mode change constitutes a new doodle session.
-    this.showAnimation_ = false;
+    // Users can enable/disable animated Doodles through accessibility settings,
+    // therefore we need to keep the showAnimation_ property in sync.
+    this.showAnimation_ = this.computeShowAnimation_();
     this.imageClickParams_ = null;
     this.interactionLogUrl_ = null;
     this.shareId_ = null;
   }
 
   private computeImageDoodle_(): ImageDoodle|null {
-    return this.doodle_ && this.doodle_.image &&
-        (this.dark ? this.doodle_.image.dark : this.doodle_.image.light) ||
+    return this.doodle_ && this.doodle_.image && this.theme &&
+        (this.theme.isDark ? this.doodle_.image.dark :
+                             this.doodle_.image.light) ||
         null;
   }
 
   private computeShowLogo_(): boolean {
-    return !!this.loaded_ && !this.showDoodle_;
+    return this.loaded_ && !this.showDoodle_;
   }
 
   private computeShowDoodle_(): boolean {
-    return !!this.imageDoodle_ ||
-        /* We hide interactive doodles when offline. Otherwise, the iframe
-           would show an ugly error page. */
-        !!this.doodle_ && !!this.doodle_.interactive && window.navigator.onLine;
+    return !!this.imageDoodle_;
+  }
+
+  /**
+   * @returns The NTP's background color or null if the NTP does not have
+   * a single background color, e.g. when a background image is set.
+   */
+  private computeBackgroundColor_(): SkColor|null {
+    if (!this.theme || !!this.theme.backgroundImage) {
+      return null;
+    }
+
+    return this.theme.backgroundColor;
   }
 
   private computeDoodleBoxed_(): boolean {
-    return !this.backgroundColor ||
-        !!this.imageDoodle_ &&
-        this.imageDoodle_.backgroundColor.value !== this.backgroundColor.value;
+    if (!this.imageDoodle_) {
+      return false;
+    }
+
+    const backgroundColor = this.computeBackgroundColor_();
+    return !backgroundColor ||
+        this.imageDoodle_.backgroundColor.value !== backgroundColor.value;
   }
 
   /**
@@ -270,36 +204,17 @@ export class LogoElement extends PolymerElement {
    * clicking preview image of animated doodle. Otherwise, opens
    * doodle-associated URL in new tab/window.
    */
-  private onImageClick_() {
-    if ($$<HTMLElement>(this, '#imageDoodle')!.tabIndex < 0) {
+  protected onImageClick_() {
+    if ($$<HTMLElement>(this, '#imageContainer')!.tabIndex < 0) {
       return;
     }
-    if (this.isCtaImageShown_()) {
-      this.showAnimation_ = true;
-      this.pageHandler_.onDoodleImageClicked(
-          DoodleImageType.kCta, this.interactionLogUrl_);
 
-      // TODO(tiborg): This is technically not correct since we don't know if
-      // the animation has loaded yet. However, since the animation is loaded
-      // inside an iframe retrieving the proper load signal is not trivial. In
-      // practice this should be good enough but we could improve that in the
-      // future.
-      this.logImageRendered_(
-          DoodleImageType.kAnimation,
-          this.imageDoodle_!.animationImpressionLogUrl!);
-
-      if (!this.doodle_!.image!.onClickUrl) {
-        $$<HTMLElement>(this, '#imageDoodle')!.blur();
-      }
-
-      return;
-    }
     assert(this.doodle_!.image!.onClickUrl);
     this.pageHandler_.onDoodleImageClicked(
         this.showAnimation_ ? DoodleImageType.kAnimation :
                               DoodleImageType.kStatic,
-        null);
-    const onClickUrl = new URL(this.doodle_!.image!.onClickUrl!.url);
+        this.interactionLogUrl_);
+    const onClickUrl = new URL(this.doodle_!.image!.onClickUrl);
     if (this.imageClickParams_) {
       for (const param of new URLSearchParams(this.imageClickParams_)) {
         onClickUrl.searchParams.append(param[0], param[1]);
@@ -308,10 +223,10 @@ export class LogoElement extends PolymerElement {
     WindowProxy.getInstance().open(onClickUrl.toString());
   }
 
-  private onImageLoad_() {
+  protected onImageLoad_() {
     this.logImageRendered_(
-        this.isCtaImageShown_() ? DoodleImageType.kCta :
-                                  DoodleImageType.kStatic,
+        this.showAnimation_ ? DoodleImageType.kAnimation :
+                              DoodleImageType.kStatic,
         this.imageDoodle_!.imageImpressionLogUrl);
   }
 
@@ -324,86 +239,40 @@ export class LogoElement extends PolymerElement {
     this.shareId_ = shareId;
   }
 
-  private onImageKeydown_(e: KeyboardEvent) {
+  protected onImageKeydown_(e: KeyboardEvent) {
     if ([' ', 'Enter'].includes(e.key)) {
       this.onImageClick_();
     }
   }
 
-  private onShare_(e: CustomEvent<DoodleShareChannel>) {
+  protected onShare_(e: CustomEvent<DoodleShareChannel>) {
     const doodleId =
-        new URL(this.doodle_!.image!.onClickUrl!.url).searchParams.get('ct');
+        new URL(this.doodle_!.image!.onClickUrl!).searchParams.get('ct');
     if (!doodleId) {
       return;
     }
     this.pageHandler_.onDoodleShared(e.detail, doodleId, this.shareId_);
   }
 
-  private isCtaImageShown_(): boolean {
-    return !this.showAnimation_ && !!this.imageDoodle_ &&
-        !!this.imageDoodle_.animationUrl;
-  }
-
-  /**
-   * Sends a postMessage to the interactive doodle whether the  current theme is
-   * dark or light. Won't do anything if we don't have an interactive doodle or
-   * we haven't been told yet whether the current theme is dark or light.
-   */
-  private sendMode_() {
-    const iframe = $$<IframeElement>(this, '#iframe');
-    if (this.dark === undefined || !iframe) {
-      return;
-    }
-    iframe.postMessage({cmd: 'changeMode', dark: this.dark});
-  }
-
-  private onDarkChange_() {
-    this.sendMode_();
-  }
-
   private computeImageUrl_(): string {
-    return this.imageDoodle_ ? this.imageDoodle_.imageUrl.url : '';
+    return this.imageDoodle_ ? this.imageDoodle_.imageUrl : '';
   }
 
-  private computeAnimationUrl_(): string {
-    return this.imageDoodle_ && this.imageDoodle_.animationUrl ?
-        `chrome-untrusted://new-tab-page/image?${
-            this.imageDoodle_.animationUrl.url}` :
-        '';
+  private computeShowAnimation_(): boolean {
+    return !!this.imageDoodle_?.animationUrl;
   }
 
-  private computeIframeUrl_(): string {
-    if (this.doodle_ && this.doodle_.interactive) {
-      const url = new URL(this.doodle_.interactive.url.url);
-      url.searchParams.append('theme_messages', '0');
-      return url.href;
-    } else {
-      return '';
-    }
-  }
-
-  private onShareButtonClick_(e: Event) {
+  protected onShareButtonClick_(e: Event) {
     e.stopPropagation();
     this.showShareDialog_ = true;
   }
 
-  private onShareDialogClose_() {
+  protected onShareDialogClose_() {
     this.showShareDialog_ = false;
   }
 
-  private onDurationHeightWidthChange_() {
-    this.updateStyles({
-      '--duration': this.duration_,
-      '--height': this.height_,
-      '--width': this.width_,
-    });
-  }
-
   private computeImageDoodleTabIndex_(): number {
-    return (this.doodle_ && this.doodle_.image &&
-            (this.isCtaImageShown_() || this.doodle_.image.onClickUrl)) ?
-        0 :
-        -1;
+    return (this.doodle_?.image?.onClickUrl) ? 0 : -1;
   }
 }
 

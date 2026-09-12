@@ -48,7 +48,7 @@ class V8MIDIPortDeviceState;
 using MIDIPortConnectionState = V8MIDIPortConnectionState::Enum;
 using MIDIPortType = V8MIDIPortType::Enum;
 
-class MIDIPort : public EventTargetWithInlineData,
+class MIDIPort : public EventTarget,
                  public ActiveScriptWrappable<MIDIPort>,
                  public ExecutionContextLifecycleObserver {
   DEFINE_WRAPPERTYPEINFO();
@@ -57,15 +57,15 @@ class MIDIPort : public EventTargetWithInlineData,
   ~MIDIPort() override = default;
 
   V8MIDIPortConnectionState connection() const;
-  String id() const { return id_; }
-  String manufacturer() const { return manufacturer_; }
-  String name() const { return name_; }
+  const String& id() const { return id_; }
+  const String& manufacturer() const { return manufacturer_; }
+  const String& name() const { return name_; }
   V8MIDIPortDeviceState state() const;
   V8MIDIPortType type() const;
-  String version() const { return version_; }
+  const String& version() const { return version_; }
 
-  ScriptPromise open(ScriptState*);
-  ScriptPromise close(ScriptState*);
+  ScriptPromise<MIDIPort> open(ScriptState*);
+  ScriptPromise<MIDIPort> close(ScriptState*);
 
   midi::mojom::PortState GetState() const { return state_; }
   void SetState(midi::mojom::PortState);
@@ -97,16 +97,18 @@ class MIDIPort : public EventTargetWithInlineData,
            midi::mojom::PortState);
 
   void open();
-  bool IsOpening() { return running_open_count_; }
-  MIDIAccess* midiAccess() const { return access_; }
+  bool IsOpening() const { return running_open_count_; }
+  MIDIAccess* midiAccess() const { return access_.Get(); }
 
  private:
-  void OpenAsynchronously(ScriptPromiseResolver*);
+  void OpenAsynchronously(ScriptPromiseResolver<MIDIPort>*);
   virtual void DidOpen(bool opened) {}
-  void CloseAsynchronously(ScriptPromiseResolver*);
+  void CloseAsynchronously(ScriptPromiseResolver<MIDIPort>*);
 
-  ScriptPromise Accept(ScriptState*);
+  ScriptPromise<MIDIPort> Accept(ScriptState*);
 
+  // Dispatches or buffers statechange events for both this port and its parent
+  // MIDIAccess depending on page visibility.
   void SetStates(midi::mojom::PortState, MIDIPortConnectionState);
 
   String id_;
@@ -116,7 +118,7 @@ class MIDIPort : public EventTargetWithInlineData,
   String version_;
   Member<MIDIAccess> access_;
   midi::mojom::PortState state_;
-  MIDIPortConnectionState connection_;
+  MIDIPortConnectionState connection_ = MIDIPortConnectionState::kClosed;
   unsigned running_open_count_ = 0;
 };
 

@@ -42,6 +42,7 @@
 
 namespace blink {
 
+class Element;
 class HTMLSelectElement;
 class LocalFrame;
 class WebMouseEvent;
@@ -60,7 +61,6 @@ class CORE_EXPORT ExternalPopupMenu final
   // FIXME: public only for test access. Need to revert once gtest
   // helpers from chromium are available for blink.
   static void GetPopupMenuInfo(HTMLSelectElement&,
-                               int32_t* item_height,
                                double* font_size,
                                int32_t* selected_item,
                                Vector<mojom::blink::MenuItemPtr>* menu_items,
@@ -68,6 +68,7 @@ class CORE_EXPORT ExternalPopupMenu final
                                bool* allow_multiple_selection);
   static int ToPopupMenuItemIndex(int index, HTMLSelectElement&);
   static int ToExternalPopupMenuItemIndex(int index, HTMLSelectElement&);
+  static float GetDprForSizeAdjustment(const Element& owner_element);
 
   void Trace(Visitor*) const override;
 

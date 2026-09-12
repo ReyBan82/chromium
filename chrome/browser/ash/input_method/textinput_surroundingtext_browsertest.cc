@@ -4,9 +4,8 @@
 
 #include "base/strings/utf_string_conversions.h"
 #include "chrome/browser/ash/input_method/textinput_test_helper.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/test/base/interactive_test_utils.h"
+#include "chrome/test/base/chrome_test_path_utils.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
@@ -22,7 +21,7 @@ using TextInput_SurroundingTextChangedTest = TextInputTestBase;
 IN_PROC_BROWSER_TEST_F(TextInput_SurroundingTextChangedTest,
                        SurroundingTextChangedWithInsertText) {
   TextInputTestHelper helper(GetInputMethod());
-  GURL url = ui_test_utils::GetTestUrl(
+  GURL url = chrome_test_utils::GetTestUrl(
       base::FilePath(FILE_PATH_LITERAL("textinput")),
       base::FilePath(FILE_PATH_LITERAL("simple_textarea.html")));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -62,7 +61,7 @@ IN_PROC_BROWSER_TEST_F(TextInput_SurroundingTextChangedTest,
 IN_PROC_BROWSER_TEST_F(TextInput_SurroundingTextChangedTest,
                        SurroundingTextChangedWithComposition) {
   TextInputTestHelper helper(GetInputMethod());
-  GURL url = ui_test_utils::GetTestUrl(
+  GURL url = chrome_test_utils::GetTestUrl(
       base::FilePath(FILE_PATH_LITERAL("textinput")),
       base::FilePath(FILE_PATH_LITERAL("simple_textarea.html")));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
@@ -102,7 +101,7 @@ IN_PROC_BROWSER_TEST_F(TextInput_SurroundingTextChangedTest,
 IN_PROC_BROWSER_TEST_F(TextInput_SurroundingTextChangedTest,
                        FocusToTextContainingTextAreaByClickingCase) {
   TextInputTestHelper helper(GetInputMethod());
-  GURL url = ui_test_utils::GetTestUrl(
+  GURL url = chrome_test_utils::GetTestUrl(
       base::FilePath(FILE_PATH_LITERAL("textinput")),
       base::FilePath(FILE_PATH_LITERAL("textarea_with_preset_text.html")));
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));

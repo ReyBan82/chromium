@@ -49,11 +49,17 @@ import java.util.TreeMap;
  *
  * // Assert
  * histogramWatcher.assertExpected();
+ *
+ * Alternatively, Java's try-with-resources can be used to wrap the act block to make the assert
+ * implicit. This can be especially helpful when a test case needs to create multiple watchers,
+ * as the watcher variables are scoped separately and cannot be accidentally swapped.
+ *
+ * try (HistogramWatcher ignored = HistogramWatcher.newSingleRecordWatcher("Histogram1") {
+ *     [code under test that is expected to record the histogram above]
+ * }
  */
-public class HistogramWatcher {
-    /**
-     * Create a new {@link HistogramWatcher.Builder} to instantiate {@link HistogramWatcher}.
-     */
+public class HistogramWatcher implements AutoCloseable {
+    /** Create a new {@link HistogramWatcher.Builder} to instantiate {@link HistogramWatcher}. */
     public static HistogramWatcher.Builder newBuilder() {
         return new HistogramWatcher.Builder();
     }
@@ -82,17 +88,13 @@ public class HistogramWatcher {
         return newBuilder().expectAnyRecord(histogram).build();
     }
 
-    /**
-     * Builder for {@link HistogramWatcher}. Use to list the expectations of records.
-     */
+    /** Builder for {@link HistogramWatcher}. Use to list the expectations of records. */
     public static class Builder {
         private final Map<HistogramAndValue, Integer> mRecordsExpected = new HashMap<>();
         private final Map<String, Integer> mTotalRecordsExpected = new HashMap<>();
         private final Set<String> mHistogramsAllowedExtraRecords = new HashSet<>();
 
-        /**
-         * Use {@link HistogramWatcher#newBuilder()} to instantiate.
-         */
+        /** Use {@link HistogramWatcher#newBuilder()} to instantiate. */
         private Builder() {}
 
         /**
@@ -100,7 +102,9 @@ public class HistogramWatcher {
          * histograms to calculate the delta later.
          */
         public HistogramWatcher build() {
-            return new HistogramWatcher(mRecordsExpected, mTotalRecordsExpected.keySet(),
+            return new HistogramWatcher(
+                    mRecordsExpected,
+                    mTotalRecordsExpected.keySet(),
                     mHistogramsAllowedExtraRecords);
         }
 
@@ -109,15 +113,15 @@ public class HistogramWatcher {
          * value}.
          */
         public Builder expectBooleanRecord(String histogram, boolean value) {
-            return expectBooleanRecords(histogram, value, 1);
+            return expectBooleanRecordTimes(histogram, value, 1);
         }
 
         /**
          * Add an expectation that {@code histogram} will be recorded a number of {@code times} with
          * a boolean {@code value}.
          */
-        public Builder expectBooleanRecords(String histogram, boolean value, int times) {
-            return expectIntRecords(histogram, value ? 1 : 0, times);
+        public Builder expectBooleanRecordTimes(String histogram, boolean value, int times) {
+            return expectIntRecordTimes(histogram, value ? 1 : 0, times);
         }
 
         /**
@@ -125,25 +129,34 @@ public class HistogramWatcher {
          * value}.
          */
         public Builder expectIntRecord(String histogram, int value) {
-            return expectIntRecords(histogram, value, 1);
+            return expectIntRecordTimes(histogram, value, 1);
+        }
+
+        /**
+         * Add expectations that {@code histogram} will be recorded with each of the int {@code
+         * values} provided.
+         */
+        public Builder expectIntRecords(String histogram, int... values) {
+            for (int value : values) {
+                expectIntRecord(histogram, value);
+            }
+            return this;
         }
 
         /**
          * Add an expectation that {@code histogram} will be recorded a number of {@code times} with
          * an int {@code value}.
          */
-        public Builder expectIntRecords(String histogram, int value, int times) {
-            if (value < 0) {
-                throw new IllegalArgumentException("Histograms cannot record negative values");
-            }
+        public Builder expectIntRecordTimes(String histogram, int value, int times) {
             if (times < 0) {
                 throw new IllegalArgumentException(
                         "Cannot expect records a negative number of times");
             } else if (times == 0) {
-                throw new IllegalArgumentException("Cannot expect records zero times. Use "
-                        + "expectNoRecords() if no records are expected for this histogram. "
-                        + "If only certain values are expected for this histogram, by default "
-                        + "extra records will already raise an assert.");
+                throw new IllegalArgumentException(
+                        "Cannot expect records zero times. Use expectNoRecords() if no records are"
+                            + " expected for this histogram. If only certain values are expected"
+                            + " for this histogram, by default extra records will already raise an"
+                            + " assert.");
             }
             HistogramAndValue histogramAndValue = new HistogramAndValue(histogram, value);
             incrementRecordsExpected(histogramAndValue, times);
@@ -151,29 +164,26 @@ public class HistogramWatcher {
             return this;
         }
 
-        /**
-         * Add an expectation that {@code histogram} will be recorded once with any value.
-         */
+        /** Add an expectation that {@code histogram} will be recorded once with any value. */
         public Builder expectAnyRecord(String histogram) {
-            return expectAnyRecords(histogram, 1);
+            return expectAnyRecordTimes(histogram, 1);
         }
 
         /**
          * Add an expectation that {@code histogram} will be recorded a number of {@code times} with
          * any values.
          */
-        public Builder expectAnyRecords(String histogram, int times) {
+        public Builder expectAnyRecordTimes(String histogram, int times) {
             HistogramAndValue histogramAndValue = new HistogramAndValue(histogram, ANY_VALUE);
             incrementRecordsExpected(histogramAndValue, times);
             incrementTotalRecordsExpected(histogram, times);
             return this;
         }
 
-        /**
-         * Add an expectation that {@code histogram} will not be recorded with any values.
-         */
+        /** Add an expectation that {@code histogram} will not be recorded with any values. */
         public Builder expectNoRecords(String histogram) {
-            if (mTotalRecordsExpected.getOrDefault(histogram, 0) != 0) {
+            Integer recordsAlreadyExpected = mTotalRecordsExpected.get(histogram);
+            if (recordsAlreadyExpected != null && recordsAlreadyExpected != 0) {
                 throw new IllegalStateException(
                         "Cannot expect no records but also expect records in previous calls.");
             }
@@ -203,12 +213,18 @@ public class HistogramWatcher {
         }
 
         private void incrementRecordsExpected(HistogramAndValue histogramAndValue, int increase) {
-            int previousCountExpected = mRecordsExpected.getOrDefault(histogramAndValue, 0);
+            Integer previousCountExpected = mRecordsExpected.get(histogramAndValue);
+            if (previousCountExpected == null) {
+                previousCountExpected = 0;
+            }
             mRecordsExpected.put(histogramAndValue, previousCountExpected + increase);
         }
 
         private void incrementTotalRecordsExpected(String histogram, int increase) {
-            int previousCountExpected = mTotalRecordsExpected.getOrDefault(histogram, 0);
+            Integer previousCountExpected = mTotalRecordsExpected.get(histogram);
+            if (previousCountExpected == null) {
+                previousCountExpected = 0;
+            }
             mTotalRecordsExpected.put(histogram, previousCountExpected + increase);
         }
     }
@@ -221,8 +237,10 @@ public class HistogramWatcher {
 
     private final Map<String, List<HistogramBucket>> mStartingSamples = new HashMap<>();
 
-    private HistogramWatcher(Map<HistogramAndValue, Integer> recordsExpected,
-            Set<String> histogramsWatched, Set<String> histogramsAllowedExtraRecords) {
+    private HistogramWatcher(
+            Map<HistogramAndValue, Integer> recordsExpected,
+            Set<String> histogramsWatched,
+            Set<String> histogramsAllowedExtraRecords) {
         mRecordsExpected = recordsExpected;
         mHistogramsWatched = histogramsWatched;
         mHistogramsAllowedExtraRecords = histogramsAllowedExtraRecords;
@@ -238,10 +256,18 @@ public class HistogramWatcher {
     }
 
     /**
-     * Assert that the watched histograms were recorded as expected.
+     * Implements {@link AutoCloseable}. Note while this interface throws an {@link Exception}, we
+     * do not have to, and this allows call sites that know they're handling a
+     * {@link HistogramWatcher} to not catch or declare an exception either.
      */
+    @Override
+    public void close() {
+        assertExpected();
+    }
+
+    /** Assert that the watched histograms were recorded as expected. */
     public void assertExpected() {
-        assertExpected(/* failureMessage */ null);
+        assertExpected(/* customMessage= */ null);
     }
 
     /**
@@ -296,9 +322,10 @@ public class HistogramWatcher {
                 int expectedCount = expectedValueAndCount.getValue();
                 if (actualBucket.contains(expectedValue)) {
                     expectedRecordsMatchedToActualBucket += expectedCount;
-                    expectedValueAndCount = expectedValuesAndCountsIt.hasNext()
-                            ? expectedValuesAndCountsIt.next()
-                            : null;
+                    expectedValueAndCount =
+                            expectedValuesAndCountsIt.hasNext()
+                                    ? expectedValuesAndCountsIt.next()
+                                    : null;
                 } else {
                     break;
                 }
@@ -323,9 +350,12 @@ public class HistogramWatcher {
         }
 
         boolean allowAnyNumberOfExtraRecords = mHistogramsAllowedExtraRecords.contains(histogram);
-        int expectedExtraRecords =
-                mRecordsExpected.getOrDefault(new HistogramAndValue(histogram, ANY_VALUE), 0);
-        if (!allowAnyNumberOfExtraRecords && actualExtraRecords > expectedExtraRecords
+        Integer expectedExtraRecords =
+                mRecordsExpected.get(new HistogramAndValue(histogram, ANY_VALUE));
+        if (expectedExtraRecords == null) {
+            expectedExtraRecords = 0;
+        }
+        if ((!allowAnyNumberOfExtraRecords && actualExtraRecords > expectedExtraRecords)
                 || actualExtraRecords < expectedExtraRecords) {
             // Expected |extraRecordsExpected| records with any value, found |extraActualRecords|.
             unexpected = true;
@@ -345,11 +375,16 @@ public class HistogramWatcher {
                 actualTotalDelta += actualBucket.mCount;
             }
             String defaultMessage =
-                    String.format("Records for histogram \"%s\" did not match expected.\n"
+                    String.format(
+                            "Records for histogram \"%s\" did not match expected.\n"
                                     + "%s%d record(s) expected: [%s]\n"
                                     + "%d record(s) seen: [%s]",
-                            histogram, atLeastString, expectedTotalDelta, expectedRecordsString,
-                            actualTotalDelta, actualRecordsString);
+                            histogram,
+                            atLeastString,
+                            expectedTotalDelta,
+                            expectedRecordsString,
+                            actualTotalDelta,
+                            actualRecordsString);
             failWithDefaultOrCustomMessage(defaultMessage, customMessage);
         }
     }
@@ -393,12 +428,14 @@ public class HistogramWatcher {
                     // This should not happen as the only transition in bucket schema is from the
                     // CachingUmaRecord (which is as granular as possible, buckets of [n, n+1) )
                     // to NativeUmaRecorder (which has varying granularity).
-                    fail(String.format(
-                            "Histogram bucket bounds before and after the test don't match, cannot "
-                                    + "assert histogram counts.\n"
-                                    + "Before: [%s]\n"
-                                    + "After: [%s]",
-                            bucketsToString(startingBuckets), bucketsToString(finalBuckets)));
+                    fail(
+                            String.format(
+                                    "Histogram bucket bounds before and after the test don't match,"
+                                            + " cannot assert histogram counts.\n"
+                                            + "Before: [%s]\n"
+                                            + "After: [%s]",
+                                    bucketsToString(startingBuckets),
+                                    bucketsToString(finalBuckets)));
                 }
                 if (startBucket.mMin >= finalBucket.mMin) {
                     // Since start.max <= final.max, this means the start bucket is contained in the
@@ -409,10 +446,8 @@ public class HistogramWatcher {
 
             int delta = finalBucket.mCount - totalInEquivalentStartingBuckets;
 
-            if (delta == 0) {
-                // Empty buckets don't need to be printed.
-                continue;
-            } else {
+            // Empty buckets don't need to be printed.
+            if (delta != 0) {
                 deltaBuckets.add(new HistogramBucket(finalBucket.mMin, finalBucket.mMax, delta));
             }
         }
@@ -459,6 +494,24 @@ public class HistogramWatcher {
         } else {
             fail(defaultMessage);
         }
+    }
+
+    /**
+     * Polls the instrumentation thread until the expected histograms are recorded.
+     *
+     * Throws {@link CriteriaNotSatisfiedException} if the polling times out, wrapping the
+     * assertion to printed out the state of the histograms at the last check.
+     */
+    public void pollInstrumentationThreadUntilSatisfied() {
+        CriteriaHelper.pollInstrumentationThread(
+                () -> {
+                    try {
+                        assertExpected();
+                        return true;
+                    } catch (AssertionError e) {
+                        throw new CriteriaNotSatisfiedException(e);
+                    }
+                });
     }
 
     private static class HistogramAndValue {

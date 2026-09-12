@@ -38,6 +38,9 @@ class SVGFECompositeElement final
 
  public:
   explicit SVGFECompositeElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFECompositeElement;
+  }
 
   SVGAnimatedNumber* k1() { return k1_.Get(); }
   SVGAnimatedNumber* k2() { return k2_.Get(); }
@@ -48,7 +51,6 @@ class SVGFECompositeElement final
   SVGAnimatedEnumeration<CompositeOperationType>* svgOperator() {
     return svg_operator_.Get();
   }
-
   void Trace(Visitor*) const override;
 
  private:
@@ -56,6 +58,10 @@ class SVGFECompositeElement final
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override { return false; }
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumber> k1_;
   Member<SVGAnimatedNumber> k2_;

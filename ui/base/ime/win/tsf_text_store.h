@@ -7,7 +7,9 @@
 
 #include <msctf.h>
 #include <wrl/client.h>
+
 #include <deque>
+#include <optional>
 #include <string>
 
 #include "base/component_export.h"
@@ -258,7 +260,8 @@ class COMPONENT_EXPORT(UI_BASE_IME_WIN) TSFTextStore
       ImeKeyEventDispatcher* ime_key_event_dispatcher);
 
   // Removes ImeKeyEventDispatcher pointer.
-  void RemoveImeKeyEventDispatcher();
+  void RemoveImeKeyEventDispatcher(
+      ImeKeyEventDispatcher* ime_key_event_dispatcher);
 
   // Cancels the ongoing composition if exists.
   bool CancelComposition();
@@ -268,6 +271,13 @@ class COMPONENT_EXPORT(UI_BASE_IME_WIN) TSFTextStore
 
   // Sends OnLayoutChange() via |text_store_acp_sink_|.
   void SendOnLayoutChange();
+
+  // Sends a Url change notification via |text_store_acp_sink_| if the current
+  // version of TSF supports empty text stores.
+  bool MaybeSendOnUrlChanged();
+
+  // Sets the flag to indicate TSF support for empty text stores.
+  void UseEmptyTextStore(bool is_enabled);
 
  private:
   friend class TSFTextStoreTest;
@@ -321,12 +331,12 @@ class COMPONENT_EXPORT(UI_BASE_IME_WIN) TSFTextStore
   // Returns if current input method is an IME.
   bool IsInputIME() const;
 
-  // Returns if the active input processor does not support vertical wrirting.
-  bool IsInputProcessorWithoutVerticalWriting() const;
-
   // Gets the style information from the display attribute for the actively
   // composed text.
   void GetStyle(const TF_DISPLAYATTRIBUTE& attribute, ImeTextSpan* span);
+
+  // Indicates if it is a dummy/empty text store without any text capability.
+  bool is_empty_text_store_ = false;
 
   // The reference count of this instance.
   volatile LONG ref_count_ = 0;
@@ -344,8 +354,8 @@ class COMPONENT_EXPORT(UI_BASE_IME_WIN) TSFTextStore
   raw_ptr<TextInputClient> text_input_client_ = nullptr;
 
   // ImeKeyEventDispatcher instance which is used dispatch key events.
-  raw_ptr<ImeKeyEventDispatcher, DanglingUntriaged> ime_key_event_dispatcher_ =
-      nullptr;
+  raw_ptr<ImeKeyEventDispatcher, AcrossTasksDanglingUntriaged>
+      ime_key_event_dispatcher_ = nullptr;
 
   //  |string_buffer_document_| contains all string in current active view.
   //  |string_pending_insertion_| contains only string in current edit session.
@@ -369,6 +379,10 @@ class COMPONENT_EXPORT(UI_BASE_IME_WIN) TSFTextStore
   // |on_start_composition_called_| indicates that OnStartComposition() is
   // called duriing current edit session.
   bool on_start_composition_called_ = false;
+
+  // `on_update_composition_called_` indicates that OnUpdateComposition() is
+  // called during ITextStoreACPSink::OnLockGranted().
+  bool on_update_composition_called_ = false;
 
   // |previous_composition_string_| indicicates composition string in last
   // edit session during same composition. |previous_composition_start_|
@@ -450,6 +464,9 @@ class COMPONENT_EXPORT(UI_BASE_IME_WIN) TSFTextStore
   // Checks for re-entrancy while writing to text input client.
   bool is_tic_write_in_progress_ = false;
 
+  // Checks for re-entrancy while canceling composition.
+  bool is_cancel_composition_in_progress_ = false;
+
   // The type of current lock.
   //   0: No lock.
   //   TS_LF_READ: read-only lock.
@@ -466,6 +483,9 @@ class COMPONENT_EXPORT(UI_BASE_IME_WIN) TSFTextStore
   Microsoft::WRL::ComPtr<ITfContext> context_;
   Microsoft::WRL::ComPtr<ITfInputProcessorProfileMgr>
       input_processor_profile_mgr_;
+
+  // Test override for `IsInputIME()`.
+  std::optional<bool> is_input_ime_for_testing_;
 
   // Current list of requested supported attribute values.
   // Currently the supported attributes are URL and InputScope.

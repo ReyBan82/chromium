@@ -10,11 +10,12 @@
 
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory_coordinator/test_memory_consumer_registry.h"
 #include "base/message_loop/message_pump_type.h"
 #include "base/run_loop.h"
 #include "base/synchronization/lock.h"
+#include "base/test/task_environment.h"
 #include "net/cert/cert_net_fetcher.h"
-#include "net/cert/ct_policy_enforcer.h"
 #include "net/cert/mock_cert_verifier.h"
 #include "net/cert/multi_log_ct_verifier.h"
 #include "net/dns/mock_host_resolver.h"
@@ -79,9 +80,14 @@ struct NetworkThreadState {
   raw_ptr<TestNetworkDelegate> network_delegate;
 };
 
-class CertNetFetcherURLRequestTest : public PlatformTest {
+class CertNetFetcherURLRequestTest : public PlatformTest,
+                                     public WithTaskEnvironment {
  public:
-  CertNetFetcherURLRequestTest() {
+  CertNetFetcherURLRequestTest()
+      : WithTaskEnvironment(base::test::TaskEnvironment::TimeSource::DEFAULT,
+                            // TODO(crbug.com/463794414): Enable the Net Task
+                            // Scheduler on this test.
+                            {features::kNetTaskScheduler}) {
     test_server_.AddDefaultHandlers(base::FilePath(kDocRoot));
     StartNetworkThread();
   }
@@ -195,6 +201,8 @@ class CertNetFetcherURLRequestTest : public PlatformTest {
     done->Signal();
   }
 
+  base::TestMemoryConsumerRegistry test_memory_consumer_registry_;
+
   EmbeddedTestServer test_server_;
   std::unique_ptr<base::Thread> network_thread_;
   scoped_refptr<CertNetFetcherURLRequest> fetcher_;
@@ -204,8 +212,7 @@ class CertNetFetcherURLRequestTest : public PlatformTest {
 
 // Installs URLRequestHangingReadJob handlers and clears them on teardown.
 class CertNetFetcherURLRequestTestWithHangingReadHandler
-    : public CertNetFetcherURLRequestTest,
-      public WithTaskEnvironment {
+    : public CertNetFetcherURLRequestTest {
  protected:
   void SetUp() override { URLRequestHangingReadJob::AddUrlHandler(); }
 
@@ -232,8 +239,7 @@ class SecureDnsInterceptor : public net::URLRequestInterceptor {
 };
 
 class CertNetFetcherURLRequestTestWithSecureDnsInterceptor
-    : public CertNetFetcherURLRequestTest,
-      public WithTaskEnvironment {
+    : public CertNetFetcherURLRequestTest {
  public:
   CertNetFetcherURLRequestTestWithSecureDnsInterceptor() = default;
 

@@ -13,7 +13,7 @@
 
 #include "base/check.h"
 #include "base/check_op.h"
-#include "base/feature_list.h"
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
@@ -30,11 +30,16 @@
 #include "net/base/io_buffer.h"
 #include "net/base/ip_endpoint.h"
 #include "net/base/net_errors.h"
+#include "net/base/network_handle.h"
 #include "net/cookies/static_cookie_policy.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_response_headers.h"
 #include "net/http/http_util.h"
+#include "net/log/net_log_capture_mode.h"
+#include "net/log/net_log_entry.h"
+#include "net/log/net_log_event_type.h"
 #include "net/ssl/ssl_info.h"
+#include "net/storage_access_api/status.h"
 #include "net/url_request/url_request_context.h"
 #include "net/websockets/websocket_basic_stream.h"
 #include "net/websockets/websocket_channel.h"
@@ -42,7 +47,11 @@
 #include "net/websockets/websocket_frame.h"  // for WebSocketFrameHeader::OpCode
 #include "net/websockets/websocket_handshake_request_info.h"
 #include "net/websockets/websocket_handshake_response_info.h"
+#include "services/network/local_network_access_checker.h"
 #include "services/network/public/cpp/features.h"
+#include "services/network/public/cpp/ip_address_space_util.h"
+#include "services/network/public/cpp/local_network_access_check_result.h"
+#include "services/network/public/mojom/url_loader_network_service_observer.mojom.h"
 #include "services/network/throttling/throttling_controller.h"
 #include "services/network/throttling/throttling_network_interceptor.h"
 #include "services/network/websocket_factory.h"
@@ -53,16 +62,13 @@ namespace {
 
 // What is considered a "small message" for the purposes of small message
 // reassembly.
-constexpr uint64_t kSmallMessageThreshhold = 1 << 16;
+constexpr uint64_t kSmallMessageThreshold = 1 << 16;
 
 // The capacity of the data pipe to use for received messages, in bytes. Optimal
-// value depends on the platform.
-#if BUILDFLAG(IS_ANDROID)
-constexpr uint32_t kReceiveDataPipeCapacity = 1 << 16;
-#else
-// |2^n - delta| is better than 2^n on Linux. See crrev.com/c/1792208.
-constexpr uint32_t kReceiveDataPipeCapacity = 131000;
-#endif
+// value depends on the platform. |2^n - delta| is better than 2^n on Linux. See
+// crrev.com/c/1792208.
+constexpr uint32_t kReceiveDataPipeCapacity =
+    BUILDFLAG(IS_ANDROID) ? 1 << 16 : 131000;
 
 // Convert a mojom::WebSocketMessageType to a
 // net::WebSocketFrameHeader::OpCode
@@ -142,6 +148,9 @@ class WebSocket::WebSocketEventHandler final
   // net::WebSocketEventInterface implementation
 
   void OnCreateURLRequest(net::URLRequest* url_request) override;
+  int OnURLRequestConnected(net::URLRequest* request,
+                            const net::TransportInfo& info,
+                            net::CompletionOnceCallback callback) override;
   void OnAddChannelResponse(
       std::unique_ptr<net::WebSocketHandshakeResponseInfo> response,
       const std::string& selected_subprotocol,
@@ -157,7 +166,7 @@ class WebSocket::WebSocketEventHandler final
                      const std::string& reason) override;
   void OnFailChannel(const std::string& message,
                      int net_error,
-                     absl::optional<int> response_code) override;
+                     std::optional<int> response_code) override;
   void OnStartOpeningHandshake(
       std::unique_ptr<net::WebSocketHandshakeRequestInfo> request) override;
   void OnSSLCertificateError(
@@ -172,7 +181,7 @@ class WebSocket::WebSocketEventHandler final
       scoped_refptr<net::HttpResponseHeaders> response_headers,
       const net::IPEndPoint& remote_endpoint,
       base::OnceCallback<void(const net::AuthCredentials*)> callback,
-      absl::optional<net::AuthCredentials>* credentials) override;
+      std::optional<net::AuthCredentials>* credentials) override;
 
  private:
   const raw_ptr<WebSocket> impl_;
@@ -193,10 +202,148 @@ void WebSocket::WebSocketEventHandler::OnCreateURLRequest(
     net::URLRequest* url_request) {
   url_request->SetUserData(WebSocket::kUserDataKey,
                            std::make_unique<UnownedPointer>(impl_));
+  impl_->net_log_source_id_ = url_request->net_log().source().id;
   if (impl_->throttling_profile_id_) {
     impl_->frame_interceptor_ = std::make_unique<WebSocketInterceptor>(
-        url_request->net_log().source().id, impl_->throttling_profile_id_);
+        url_request->net_log().source().id, url_request->url(),
+        impl_->throttling_profile_id_);
   }
+
+  // If the request is to a URL that we can determine is an LNA request from
+  // just the URL, then trigger the LNA prompt. We only trigger this for request
+  // where GetAddressSpaceFromUrl() returns a value as those would also trigger
+  // if and when we move the LNA check to after hostname resolution but before
+  // connection.
+  if (impl_->client_security_state_ &&
+      impl_->client_security_state_->local_network_access_request_policy ==
+          mojom::LocalNetworkAccessRequestPolicy::kPermissionBlock &&
+      impl_->url_loader_network_observer_) {
+    std::optional<mojom::IPAddressSpace> url_address_space =
+        GetAddressSpaceFromUrl(url_request->url());
+    if (url_address_space) {
+      LocalNetworkAccessChecker lna_checker(
+          url_request->url(), impl_->origin_, impl_->required_ip_address_space_,
+          impl_->client_security_state_.get(), impl_->options_);
+      if (lna_checker.CheckAddressSpace(*url_address_space) ==
+          LocalNetworkAccessCheckResult::kLNAPermissionRequired) {
+        // This passes in `TransportType::kDirect`, regardless of how the
+        // request may end up being connected -- the cases where we know this
+        // is an LNA request from the URL alone are ones where we have high
+        // confidence in triggering the LNA prompt.
+        //
+        // Ignoring the result of the permission here because the point of this
+        // call is to get the permission prompt shown if the permission is
+        // "prompt". Later LNA checks will check the permission and use the
+        // result.
+        impl_->url_loader_network_observer_
+            ->OnLocalNetworkAccessPermissionRequired(
+                mojom::TransportType::kDirect, *url_address_space,
+                base::BindOnce(
+                    [](const net::NetLogWithSource& net_log,
+                       const mojom::IPAddressSpace address_space,
+                       mojom::LocalNetworkAccessResult result) {
+                      net_log.AddEvent(
+                          net::NetLogEventType::
+                              LOCAL_NETWORK_ACCESS_PERMISSION_REQUESTED,
+                          [&] {
+                            return base::DictValue()
+                                .Set("address_space",
+                                     IPAddressSpaceToStringPiece(address_space))
+                                .Set("transport_type",
+                                     TransportTypeToStringPiece(
+                                         mojom::TransportType::kDirect))
+                                .Set("result",
+                                     LocalNetworkAccessResultToStringPiece(
+                                         result));
+                          });
+                    },
+                    url_request->net_log(), *url_address_space));
+      }
+    }
+  }
+}
+
+int WebSocket::WebSocketEventHandler::OnURLRequestConnected(
+    net::URLRequest* request,
+    const net::TransportInfo& info,
+    net::CompletionOnceCallback callback) {
+  // Grab Metrics first, then do actual LNA checks.
+  if (impl_->url_loader_network_observer_ &&
+      impl_->required_ip_address_space_ == mojom::IPAddressSpace::kUnknown) {
+    impl_->url_loader_network_observer_->OnWebSocketConnectedToLocalNetwork(
+        request->url(), TransportInfoToIPAddressSpace(info));
+  }
+
+  // Currently this function only does LNA checks, so if those are not enabled,
+  // return net::OK and skip the rest.
+  if (!base::FeatureList::IsEnabled(
+          features::kLocalNetworkAccessChecksWebSockets)) {
+    return net::OK;
+  }
+
+  LocalNetworkAccessChecker checker(
+      request->url(), request->initiator(), impl_->required_ip_address_space_,
+      impl_->client_security_state_.get(), impl_->options_);
+
+  LocalNetworkAccessCheckResult check_result = checker.Check(info);
+  std::optional<mojom::CorsError> cors_error =
+      LocalNetworkAccessCheckResultToCorsError(check_result);
+  if (!cors_error.has_value()) {
+    return net::OK;
+  }
+
+  if (impl_->url_loader_network_observer_ &&
+      check_result == LocalNetworkAccessCheckResult::kLNAPermissionRequired) {
+    impl_->url_loader_network_observer_->OnLocalNetworkAccessPermissionRequired(
+        MapTransportTypeToMojomTransportType(info.type),
+        *checker.ResponseAddressSpace(),
+        base::BindOnce(
+            [](base::WeakPtr<WebSocket> weak_self,
+               const net::NetLogWithSource& net_log,
+               const mojom::TransportType transport_type,
+               const mojom::IPAddressSpace address_space,
+               net::CompletionOnceCallback callback,
+               mojom::LocalNetworkAccessResult result) {
+              if (!weak_self) {
+                // Checking the weak ptr not to call the `callback` after
+                // `this` is destructed. This is needed because the
+                // observer's pipe may outlive `this` and the owner
+                // `WebSocket`.
+                return;
+              }
+
+              net_log.AddEvent(
+                  net::NetLogEventType::
+                      LOCAL_NETWORK_ACCESS_PERMISSION_REQUESTED,
+                  [&] {
+                    return base::DictValue()
+                        .Set("address_space",
+                             IPAddressSpaceToStringPiece(address_space))
+                        .Set("transport_type",
+                             TransportTypeToStringPiece(transport_type))
+                        .Set("result",
+                             LocalNetworkAccessResultToStringPiece(result));
+                  });
+              // Note: The WebSocket handshake request is made with cache mode
+              // "no-store", so they are never cached and this code doesn't
+              // need to handle a kRetryDueToCache result. See
+              // https://websockets.spec.whatwg.org/#websocket-opening-handshake
+              std::move(callback).Run(
+                  result == mojom::LocalNetworkAccessResult::kGranted
+                      ? net::OK
+                      : net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS);
+            },
+            impl_->weak_ptr_factory_.GetWeakPtr(), request->net_log(),
+            MapTransportTypeToMojomTransportType(info.type),
+            *checker.ResponseAddressSpace(), std::move(callback)
+
+                ));
+    return net::ERR_IO_PENDING;
+  }
+
+  // Otherwise, if there was a Local Network Access CORS error, block by
+  // default.
+  return net::ERR_BLOCKED_BY_LOCAL_NETWORK_ACCESS_CHECKS;
 }
 
 void WebSocket::WebSocketEventHandler::OnAddChannelResponse(
@@ -306,7 +453,7 @@ void WebSocket::WebSocketEventHandler::OnDropChannel(
 void WebSocket::WebSocketEventHandler::OnFailChannel(
     const std::string& message,
     int net_error,
-    absl::optional<int> response_code) {
+    std::optional<int> response_code) {
   DVLOG(3) << "WebSocketEventHandler::OnFailChannel @"
            << reinterpret_cast<void*>(this) << " message=\"" << message << "\""
            << " error=" << net_error
@@ -338,8 +485,12 @@ void WebSocket::WebSocketEventHandler::OnStartOpeningHandshake(
   net::HttpRequestHeaders::Iterator it(request->headers);
   while (it.GetNext()) {
     if (!impl_->has_raw_headers_access_ &&
-        base::EqualsCaseInsensitiveASCII(it.name(),
-                                         net::HttpRequestHeaders::kCookie)) {
+        (base::EqualsCaseInsensitiveASCII(it.name(),
+                                          net::HttpRequestHeaders::kCookie) ||
+         base::EqualsCaseInsensitiveASCII(
+             it.name(), net::HttpRequestHeaders::kAuthorization) ||
+         base::EqualsCaseInsensitiveASCII(
+             it.name(), net::HttpRequestHeaders::kProxyAuthorization))) {
       continue;
     }
     mojom::HttpHeaderPtr header(mojom::HttpHeader::New());
@@ -382,11 +533,11 @@ int WebSocket::WebSocketEventHandler::OnAuthRequired(
     scoped_refptr<net::HttpResponseHeaders> response_headers,
     const net::IPEndPoint& remote_endpoint,
     base::OnceCallback<void(const net::AuthCredentials*)> callback,
-    absl::optional<net::AuthCredentials>* credentials) {
+    std::optional<net::AuthCredentials>* credentials) {
   DVLOG(3) << "WebSocketEventHandler::OnAuthRequired"
            << reinterpret_cast<void*>(this);
   if (!impl_->auth_handler_) {
-    *credentials = absl::nullopt;
+    *credentials = std::nullopt;
     return net::OK;
   }
 
@@ -410,10 +561,11 @@ WebSocket::WebSocket(
     WebSocketFactory* factory,
     const GURL& url,
     const std::vector<std::string>& requested_protocols,
-    const net::SiteForCookies& site_for_cookies,
+    net::StorageAccessApiStatus storage_access_api_status,
     const net::IsolationInfo& isolation_info,
     std::vector<mojom::HttpHeaderPtr> additional_headers,
     const url::Origin& origin,
+    network::mojom::ClientSecurityStatePtr client_security_state,
     uint32_t options,
     net::NetworkTrafficAnnotationTag traffic_annotation,
     HasRawHeadersAccess has_raw_headers_access,
@@ -422,21 +574,25 @@ WebSocket::WebSocket(
         url_loader_network_observer,
     mojo::PendingRemote<mojom::WebSocketAuthenticationHandler> auth_handler,
     mojo::PendingRemote<mojom::TrustedHeaderClient> header_client,
-    absl::optional<WebSocketThrottler::PendingConnection>
+    std::optional<WebSocketThrottler::PendingConnection>
         pending_connection_tracker,
     base::TimeDelta delay,
-    const absl::optional<base::UnguessableToken>& throttling_profile_id)
+    const std::optional<base::UnguessableToken>& throttling_profile_id,
+    mojom::IPAddressSpace required_ip_address_space)
     : factory_(factory),
       url_loader_network_observer_(std::move(url_loader_network_observer)),
       handshake_client_(std::move(handshake_client)),
       auth_handler_(std::move(auth_handler)),
       header_client_(std::move(header_client)),
       pending_connection_tracker_(std::move(pending_connection_tracker)),
+      url_(url),
       delay_(delay),
       options_(options),
       traffic_annotation_(traffic_annotation),
       origin_(std::move(origin)),
-      site_for_cookies_(site_for_cookies),
+      client_security_state_(std::move(client_security_state)),
+      required_ip_address_space_(required_ip_address_space),
+      isolation_info_(isolation_info),
       has_raw_headers_access_(has_raw_headers_access),
       writable_watcher_(FROM_HERE,
                         mojo::SimpleWatcher::ArmingPolicy::MANUAL,
@@ -444,8 +600,6 @@ WebSocket::WebSocket(
       readable_watcher_(FROM_HERE,
                         mojo::SimpleWatcher::ArmingPolicy::MANUAL,
                         base::SingleThreadTaskRunner::GetCurrentDefault()),
-      reassemble_short_messages_(base::FeatureList::IsEnabled(
-          network::features::kWebSocketReassembleShortMessages)),
       throttling_profile_id_(throttling_profile_id) {
   DCHECK(handshake_client_);
   // |delay| should be zero if this connection is not throttled.
@@ -464,17 +618,18 @@ WebSocket::WebSocket(
   }
   handshake_client_.set_disconnect_handler(base::BindOnce(
       &WebSocket::OnConnectionError, base::Unretained(this), FROM_HERE));
+
   if (delay_.is_positive()) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
         FROM_HERE,
         base::BindOnce(&WebSocket::AddChannel, weak_ptr_factory_.GetWeakPtr(),
-                       url, requested_protocols, site_for_cookies,
+                       url, requested_protocols, storage_access_api_status,
                        isolation_info, std::move(additional_headers)),
         delay_);
     return;
   }
-  AddChannel(url, requested_protocols, site_for_cookies, isolation_info,
-             std::move(additional_headers));
+  AddChannel(url, requested_protocols, storage_access_api_status,
+             isolation_info, std::move(additional_headers));
 }
 
 WebSocket::~WebSocket() {
@@ -503,8 +658,7 @@ void WebSocket::SendMessage(mojom::WebSocketMessageType type,
   }
   DCHECK(IsKnownEnumValue(type));
 
-  const bool do_not_fragment =
-      reassemble_short_messages_ && data_length <= kSmallMessageThreshhold;
+  const bool do_not_fragment = data_length <= kSmallMessageThreshold;
 
   pending_send_data_frames_.emplace(type, data_length, do_not_fragment);
 
@@ -549,7 +703,7 @@ bool WebSocket::AllowCookies(const GURL& url) const {
     return true;
   }
   return net::StaticCookiePolicy(policy).CanAccessCookies(
-             url, site_for_cookies_) == net::OK;
+             url, isolation_info_.site_for_cookies()) == net::OK;
 }
 
 int WebSocket::OnBeforeStartTransaction(
@@ -557,7 +711,7 @@ int WebSocket::OnBeforeStartTransaction(
     net::NetworkDelegate::OnBeforeStartTransactionCallback callback) {
   if (header_client_) {
     header_client_->OnBeforeSendHeaders(
-        headers,
+        url_, headers,
         base::BindOnce(&WebSocket::OnBeforeSendHeadersComplete,
                        weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
     return net::ERR_IO_PENDING;
@@ -569,10 +723,11 @@ int WebSocket::OnHeadersReceived(
     net::CompletionOnceCallback callback,
     const net::HttpResponseHeaders* original_response_headers,
     scoped_refptr<net::HttpResponseHeaders>* override_response_headers,
-    absl::optional<GURL>* preserve_fragment_on_redirect_url) {
+    std::optional<GURL>* preserve_fragment_on_redirect_url,
+    const std::optional<net::SSLInfo>& ssl_info) {
   if (header_client_) {
     header_client_->OnHeadersReceived(
-        original_response_headers->raw_headers(), net::IPEndPoint(),
+        original_response_headers->raw_headers(), net::IPEndPoint(), ssl_info,
         base::BindOnce(&WebSocket::OnHeadersReceivedComplete,
                        weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                        override_response_headers,
@@ -601,14 +756,15 @@ void WebSocket::OnConnectionError(const base::Location& set_from) {
 void WebSocket::AddChannel(
     const GURL& socket_url,
     const std::vector<std::string>& requested_protocols,
-    const net::SiteForCookies& site_for_cookies,
+    net::StorageAccessApiStatus storage_access_api_status,
     const net::IsolationInfo& isolation_info,
     std::vector<mojom::HttpHeaderPtr> additional_headers) {
   DVLOG(3) << "WebSocket::AddChannel @" << reinterpret_cast<void*>(this)
            << " socket_url=\"" << socket_url << "\" requested_protocols=\""
            << base::JoinString(requested_protocols, ", ") << "\" origin=\""
-           << origin_ << "\" site_for_cookies=\""
-           << site_for_cookies.ToDebugString() << "\"";
+           << origin_ << "\" isolation_info=\"" << isolation_info.DebugString()
+           << "\" storage_access_api_status="
+           << static_cast<int>(storage_access_api_status);
 
   DCHECK(!channel_);
 
@@ -630,9 +786,15 @@ void WebSocket::AddChannel(
       headers_to_pass.SetHeader(header->name, header->value);
     }
   }
-  channel_->SendAddChannelRequest(socket_url, requested_protocols, origin_,
-                                  site_for_cookies, isolation_info,
-                                  headers_to_pass, traffic_annotation_);
+  channel_->SendAddChannelRequest(
+      socket_url, requested_protocols, origin_, storage_access_api_status,
+      isolation_info, headers_to_pass,
+      (options_ & mojom::kWebSocketOptionMaximumPriority)
+          ? net::WebSocketPriorityHint::kMaximum
+          : net::WebSocketPriorityHint::kDefault,
+      traffic_annotation_,
+      // TODO(crbug.com/527777927): Support targeting a network in WebSockets.
+      net::handles::kInvalidNetworkHandle);
 }
 
 void WebSocket::OnWritable(MojoResult result,
@@ -696,17 +858,15 @@ void WebSocket::SendPendingDataFrames(InterruptionReason resume_reason) {
 void WebSocket::SendDataFrame(base::span<const char>* payload) {
   DCHECK_GT(payload->size(), 0u);
   MojoResult begin_result;
-  void* buffer;
-  uint32_t writable_size;
-  while ((writable_size = static_cast<uint32_t>(payload->size())) > 0 &&
-         (begin_result = writable_->BeginWriteData(
-              &buffer, &writable_size, MOJO_WRITE_DATA_FLAG_NONE)) ==
-             MOJO_RESULT_OK) {
-    const uint32_t size_to_write =
-        std::min(writable_size, static_cast<uint32_t>(payload->size()));
+  base::span<uint8_t> buffer;
+  while (payload->size() > 0 && (begin_result = writable_->BeginWriteData(
+                                     payload->size(), MOJO_WRITE_DATA_FLAG_NONE,
+                                     buffer)) == MOJO_RESULT_OK) {
+    const size_t size_to_write = std::min(buffer.size(), payload->size());
     DCHECK_GT(size_to_write, 0u);
 
-    memcpy(buffer, payload->data(), size_to_write);
+    base::as_writable_chars(buffer).copy_prefix_from(
+        payload->first(size_to_write));
     *payload = payload->subspan(size_to_write);
 
     const MojoResult end_result = writable_->EndWriteData(size_to_write);
@@ -758,7 +918,7 @@ void WebSocket::ReadAndSendFromDataPipe(InterruptionReason resume_reason) {
                          base::Unretained(this),
                          InterruptionReason::kInterceptor));
       if (intercept_result == WebSocketInterceptor::kShouldWait) {
-        DCHECK_EQ(outgoing_frames_interrupted_, InterruptionReason::kNone);
+        CHECK_EQ(outgoing_frames_interrupted_, InterruptionReason::kNone);
         outgoing_frames_interrupted_ = InterruptionReason::kInterceptor;
         return;
       }
@@ -779,7 +939,7 @@ void WebSocket::ReadAndSendFromDataPipe(InterruptionReason resume_reason) {
 bool WebSocket::ReadAndSendFrameFromDataPipe(DataFrame* data_frame) {
   while (true) {
     if (data_frame->data_length == 0) {
-      auto data_to_pass = base::MakeRefCounted<net::IOBuffer>(0);
+      auto data_to_pass = base::MakeRefCounted<net::IOBufferWithSize>();
       if (channel_->SendFrame(true, MessageTypeToOpCode(data_frame->type),
                               std::move(data_to_pass),
                               0) == net::WebSocketChannel::CHANNEL_DELETED) {
@@ -789,12 +949,11 @@ bool WebSocket::ReadAndSendFrameFromDataPipe(DataFrame* data_frame) {
       return true;
     }
 
-    const void* buffer;
-    uint32_t readable_size;
-    const MojoResult begin_result = readable_->BeginReadData(
-        &buffer, &readable_size, MOJO_READ_DATA_FLAG_NONE);
+    base::span<const uint8_t> buffer;
+    const MojoResult begin_result =
+        readable_->BeginReadData(MOJO_READ_DATA_FLAG_NONE, buffer);
     if (begin_result == MOJO_RESULT_SHOULD_WAIT) {
-      DCHECK_EQ(outgoing_frames_interrupted_, InterruptionReason::kNone);
+      CHECK_EQ(outgoing_frames_interrupted_, InterruptionReason::kNone);
       outgoing_frames_interrupted_ = InterruptionReason::kMojoPipe;
       if (!blocked_on_websocket_channel_) {
         readable_watcher_.ArmOrNotify();
@@ -804,29 +963,31 @@ bool WebSocket::ReadAndSendFrameFromDataPipe(DataFrame* data_frame) {
     if (begin_result == MOJO_RESULT_FAILED_PRECONDITION) {
       return false;
     }
-    DCHECK_EQ(begin_result, MOJO_RESULT_OK);
+    CHECK_EQ(begin_result, MOJO_RESULT_OK);
 
-    if (readable_size < data_frame->data_length &&
+    if (buffer.size() < data_frame->data_length &&
         data_frame->do_not_fragment && !message_under_reassembly_) {
       // The cast is needed to unambiguously select a constructor on 32-bit
       // platforms.
-      message_under_reassembly_ = base::MakeRefCounted<net::IOBuffer>(
+      message_under_reassembly_ = base::MakeRefCounted<net::IOBufferWithSize>(
           base::checked_cast<size_t>(data_frame->data_length));
-      DCHECK_EQ(bytes_reassembled_, 0u);
+      CHECK_EQ(bytes_reassembled_, 0u);
     }
 
     if (message_under_reassembly_) {
-      const size_t bytes_to_copy =
-          std::min(static_cast<uint64_t>(readable_size),
-                   data_frame->data_length - bytes_reassembled_);
-      memcpy(message_under_reassembly_->data() + bytes_reassembled_, buffer,
-             bytes_to_copy);
+      CHECK_GT(data_frame->data_length, bytes_reassembled_);
+      const size_t bytes_to_copy = std::min(
+          buffer.size(), base::checked_cast<size_t>(data_frame->data_length -
+                                                    bytes_reassembled_));
+      message_under_reassembly_->span()
+          .subspan(bytes_reassembled_)
+          .copy_prefix_from(buffer.first(bytes_to_copy));
       bytes_reassembled_ += bytes_to_copy;
 
       const MojoResult end_result = readable_->EndReadData(bytes_to_copy);
-      DCHECK_EQ(end_result, MOJO_RESULT_OK);
+      CHECK_EQ(end_result, MOJO_RESULT_OK);
 
-      DCHECK_LE(bytes_reassembled_, data_frame->data_length);
+      CHECK_LE(bytes_reassembled_, data_frame->data_length);
       if (bytes_reassembled_ == data_frame->data_length) {
         bytes_reassembled_ = 0;
         blocked_on_websocket_channel_ = true;
@@ -844,11 +1005,13 @@ bool WebSocket::ReadAndSendFrameFromDataPipe(DataFrame* data_frame) {
       continue;
     }
 
-    const size_t size_to_send =
-        std::min(static_cast<uint64_t>(readable_size), data_frame->data_length);
-    auto data_to_pass = base::MakeRefCounted<net::IOBuffer>(size_to_send);
+    const size_t size_to_send = std::min(
+        buffer.size(), base::saturated_cast<size_t>(data_frame->data_length));
+    auto data_to_pass =
+        base::MakeRefCounted<net::IOBufferWithSize>(size_to_send);
+    data_to_pass->span().copy_prefix_from(buffer.first(size_to_send));
+
     const bool is_final = (size_to_send == data_frame->data_length);
-    memcpy(data_to_pass->data(), buffer, size_to_send);
     blocked_on_websocket_channel_ = true;
     if (channel_->SendFrame(is_final, MessageTypeToOpCode(data_frame->type),
                             std::move(data_to_pass), size_to_send) ==
@@ -857,13 +1020,13 @@ bool WebSocket::ReadAndSendFrameFromDataPipe(DataFrame* data_frame) {
       return false;
     }
     const MojoResult end_result = readable_->EndReadData(size_to_send);
-    DCHECK_EQ(end_result, MOJO_RESULT_OK);
+    CHECK_EQ(end_result, MOJO_RESULT_OK);
 
     if (size_to_send == data_frame->data_length) {
       return true;
     }
 
-    DCHECK_GT(data_frame->data_length, size_to_send);
+    CHECK_GT(data_frame->data_length, size_to_send);
     data_frame->type = mojom::WebSocketMessageType::CONTINUATION;
     data_frame->data_length -= size_to_send;
   }
@@ -888,7 +1051,7 @@ void WebSocket::OnSSLCertificateErrorResponse(
 
 void WebSocket::OnAuthRequiredComplete(
     base::OnceCallback<void(const net::AuthCredentials*)> callback,
-    const absl::optional<net::AuthCredentials>& credentials) {
+    const std::optional<net::AuthCredentials>& credentials) {
   DCHECK(!handshake_succeeded_);
   if (!channel_) {
     // Something happened before the authentication response arrives.
@@ -901,7 +1064,8 @@ void WebSocket::OnAuthRequiredComplete(
 void WebSocket::OnBeforeSendHeadersComplete(
     net::NetworkDelegate::OnBeforeStartTransactionCallback callback,
     int result,
-    const absl::optional<net::HttpRequestHeaders>& headers) {
+    const std::optional<net::HttpRequestHeaders>& headers,
+    std::optional<base::DictValue> extended_net_log_events) {
   if (!channel_) {
     // Something happened before the OnBeforeSendHeaders response arrives.
     return;
@@ -912,10 +1076,10 @@ void WebSocket::OnBeforeSendHeadersComplete(
 void WebSocket::OnHeadersReceivedComplete(
     net::CompletionOnceCallback callback,
     scoped_refptr<net::HttpResponseHeaders>* out_headers,
-    absl::optional<GURL>* out_preserve_fragment_on_redirect_url,
+    std::optional<GURL>* out_preserve_fragment_on_redirect_url,
     int result,
-    const absl::optional<std::string>& headers,
-    const absl::optional<GURL>& preserve_fragment_on_redirect_url) {
+    const std::optional<std::string>& headers,
+    const std::optional<GURL>& preserve_fragment_on_redirect_url) {
   if (!channel_) {
     // Something happened before the OnHeadersReceived response arrives.
     return;
@@ -939,6 +1103,41 @@ void WebSocket::Reset() {
 
   // deletes |this|.
   factory_->Remove(this);
+}
+
+void WebSocket::AddActiveEntryIfActive(
+    net::NetLog::ThreadSafeObserver* observer) const {
+  if (!channel_) {
+    return;
+  }
+  // Use kDefault capture mode because observer->GetCaptureMode() cannot be
+  // called before the observer starts observing (see net_log_util.cc for the
+  // same pattern). kDefault always redacts URL credentials, which is the safe
+  // default.
+  net::NetLogEntry entry(
+      net::NetLogEventType::WEBSOCKET_ALIVE, channel_->net_log().source(),
+      net::NetLogEventPhase::BEGIN, channel_->creation_time(),
+      channel_->GetStateAsValue(net::NetLogCaptureMode::kDefault));
+  observer->OnAddEntry(entry);
+}
+
+// static
+bool WebSocket::CompareForNetlog(const WebSocket& lhs, const WebSocket& rhs) {
+  // Put connections without channels (pending/throttled) at the end.
+  if (!lhs.channel_ && !rhs.channel_) {
+    return false;
+  }
+  if (!lhs.channel_) {
+    return false;
+  }
+  if (!rhs.channel_) {
+    return true;
+  }
+  if (lhs.channel_->creation_time() != rhs.channel_->creation_time()) {
+    return lhs.channel_->creation_time() < rhs.channel_->creation_time();
+  }
+  return lhs.channel_->net_log().source().id <
+         rhs.channel_->net_log().source().id;
 }
 
 }  // namespace network

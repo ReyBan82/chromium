@@ -9,15 +9,24 @@
 #include <utility>
 
 #include "base/auto_reset.h"
+#include "base/byte_size.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
+#include "base/memory_coordinator/memory_coordinator_features.h"
+#include "base/memory_coordinator/utils.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/strings/stringprintf.h"
 #include "base/system/sys_info.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/memory_dump_manager.h"
 #include "cc/paint/image_transfer_cache_entry.h"
-#include "gpu/command_buffer/service/service_discardable_manager.h"
+#include "gpu/command_buffer/service/service_utils.h"
+#include "gpu/config/gpu_finch_features.h"
 #include "third_party/skia/include/core/SkImage.h"
-#include "third_party/skia/include/gpu/GrBackendSurface.h"
+#include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
+#include "third_party/skia/include/gpu/ganesh/SkImageGanesh.h"
+#include "third_party/skia/include/gpu/ganesh/gl/GrGLBackendSurface.h"
+#include "third_party/skia/include/gpu/ganesh/gl/GrGLTypes.h"
 #include "ui/gl/trace_util.h"
 
 namespace gpu {
@@ -26,6 +35,53 @@ namespace {
 // Put an arbitrary (high) limit on number of cache entries to prevent
 // unbounded handle growth with tiny entries.
 static size_t kMaxCacheEntries = 2000;
+
+constexpr base::TimeDelta kOldEntryCutoffTimeDelta = base::Seconds(25);
+constexpr base::TimeDelta kOldEntryPruneInterval = base::Seconds(30);
+
+size_t DiscardableCacheSizeLimit() {
+// Cache size values are designed to roughly correspond to existing image cache
+// sizes for 1-1.5 renderers. These will be updated as more types of data are
+// moved to this cache.
+#if BUILDFLAG(IS_ANDROID)
+  const size_t kLowEndCacheSizeBytes = 1024 * 1024;
+  const size_t kNormalCacheSizeBytes = 128 * 1024 * 1024;
+#else
+  const size_t kNormalCacheSizeBytes = 192 * 1024 * 1024;
+  const size_t kLargeCacheSizeBytes = 256 * 1024 * 1024;
+  // Device ram threshold at which we move from a normal cache to a large cache.
+  // While this is a GPU memory cache, we can't read GPU memory reliably, so we
+  // use system ram as a proxy.
+  constexpr base::ByteSize kLargeCacheSizeMemoryThreshold = base::GiB(4);
+#endif  // BUILDFLAG(IS_ANDROID)
+
+#if BUILDFLAG(IS_ANDROID)
+  if (base::SysInfo::IsLowEndDevice()) {
+    return kLowEndCacheSizeBytes;
+  } else {
+    return kNormalCacheSizeBytes;
+  }
+#else
+  if (base::SysInfo::AmountOfTotalPhysicalMemory() <
+      kLargeCacheSizeMemoryThreshold) {
+    return kNormalCacheSizeBytes;
+  } else {
+    return kLargeCacheSizeBytes;
+  }
+#endif
+}
+
+// TODO(crbug.com/465068849): Scale linearly between thresholds in a future CL.
+size_t DiscardableCacheSizeLimitForPressure(size_t base_cache_limit,
+                                            int memory_limit) {
+  if (memory_limit <= base::kCriticalMemoryPressureThreshold) {
+    return 0;
+  }
+  if (memory_limit <= base::kModerateMemoryPressureThreshold) {
+    return base_cache_limit / 4;
+  }
+  return base_cache_limit;
+}
 
 // Alias the image entry to its skia counterpart, taking ownership of the
 // memory and preventing double counting.
@@ -43,16 +99,19 @@ void DumpMemoryForImageTransferCacheEntry(
   dump->AddScalar(MemoryAllocatorDump::kNameSize,
                   MemoryAllocatorDump::kUnitsBytes, entry->CachedSize());
 
-  GrBackendTexture image_backend_texture =
-      entry->image()->getBackendTexture(false /* flushPendingGrContextIO */);
-  GrGLTextureInfo info;
-  if (image_backend_texture.getGLTextureInfo(&info)) {
-    auto guid = gl::GetGLTextureRasterGUIDForTracing(info.fID);
-    pmd->CreateSharedGlobalAllocatorDump(guid);
-    // Importance of 3 gives this dump priority over the dump made by Skia
-    // (importance 2), attributing memory here.
-    const int kImportance = 3;
-    pmd->AddOwnershipEdge(dump->guid(), guid, kImportance);
+  GrBackendTexture image_backend_texture;
+  if (SkImages::GetBackendTextureFromImage(
+          entry->image(), &image_backend_texture,
+          false /* flushPendingGrContextIO */)) {
+    GrGLTextureInfo info;
+    if (GrBackendTextures::GetGLTextureInfo(image_backend_texture, &info)) {
+      auto guid = gl::GetGLTextureRasterGUIDForTracing(info.fID);
+      pmd->CreateSharedGlobalAllocatorDump(guid);
+      // Importance of 3 gives this dump priority over the dump made by Skia
+      // (importance 2), attributing memory here.
+      const int kImportance = 3;
+      pmd->AddOwnershipEdge(dump->guid(), guid, kImportance);
+    }
   }
 }
 
@@ -98,17 +157,19 @@ void DumpMemoryForYUVImageTransferCacheEntry(
     // If entry->image() is backed by multiple textures,
     // getBackendTexture() would end up flattening them to RGB, which is
     // undesirable.
-    GrBackendTexture image_backend_texture =
-        entry->GetPlaneImage(i)->getBackendTexture(
-            false /* flushPendingGrContextIO */);
-    GrGLTextureInfo info;
-    if (image_backend_texture.getGLTextureInfo(&info)) {
-      auto guid = gl::GetGLTextureRasterGUIDForTracing(info.fID);
-      pmd->CreateSharedGlobalAllocatorDump(guid);
-      // Importance of 3 gives this dump priority over the dump made by Skia
-      // (importance 2), attributing memory here.
-      const int kImportance = 3;
-      pmd->AddOwnershipEdge(dump->guid(), guid, kImportance);
+    GrBackendTexture image_backend_texture;
+    if (SkImages::GetBackendTextureFromImage(
+            entry->GetPlaneImage(i), &image_backend_texture,
+            false /* flushPendingGrContextIO */)) {
+      GrGLTextureInfo info;
+      if (GrBackendTextures::GetGLTextureInfo(image_backend_texture, &info)) {
+        auto guid = gl::GetGLTextureRasterGUIDForTracing(info.fID);
+        pmd->CreateSharedGlobalAllocatorDump(guid);
+        // Importance of 3 gives this dump priority over the dump made by Skia
+        // (importance 2), attributing memory here.
+        const int kImportance = 3;
+        pmd->AddOwnershipEdge(dump->guid(), guid, kImportance);
+      }
     }
   }
 }
@@ -116,11 +177,17 @@ void DumpMemoryForYUVImageTransferCacheEntry(
 }  // namespace
 
 ServiceTransferCache::CacheEntryInternal::CacheEntryInternal(
-    absl::optional<ServiceDiscardableHandle> handle,
+    std::optional<ServiceDiscardableHandle> handle,
     std::unique_ptr<cc::ServiceTransferCacheEntry> entry)
     : handle(handle), entry(std::move(entry)) {}
 
-ServiceTransferCache::CacheEntryInternal::~CacheEntryInternal() {}
+ServiceTransferCache::CacheEntryInternal::~CacheEntryInternal() {
+  if (entry) {
+    UMA_HISTOGRAM_COUNTS_1M("GPU.TransferCache.ReusedTimes", num_reuse);
+    UMA_HISTOGRAM_LONG_TIMES("GPU.TransferCache.TimeSinceLastUseOnDelete",
+                             base::TimeTicks::Now() - last_use);
+  }
+}
 
 ServiceTransferCache::CacheEntryInternal::CacheEntryInternal(
     CacheEntryInternal&& other) = default;
@@ -129,11 +196,16 @@ ServiceTransferCache::CacheEntryInternal&
 ServiceTransferCache::CacheEntryInternal::operator=(
     CacheEntryInternal&& other) = default;
 
-ServiceTransferCache::ServiceTransferCache(const GpuPreferences& preferences)
-    : entries_(EntryCache::NO_AUTO_EVICT),
-      cache_size_limit_(preferences.force_gpu_mem_discardable_limit_bytes
-                            ? preferences.force_gpu_mem_discardable_limit_bytes
-                            : DiscardableCacheSizeLimit()),
+ServiceTransferCache::ServiceTransferCache(
+    const GpuPreferences& preferences,
+    base::RepeatingClosure flush_callback)
+    : flush_callback_(std::move(flush_callback)),
+      entries_(EntryCache::NO_AUTO_EVICT),
+      max_cache_size_limit_(
+          preferences.force_gpu_mem_discardable_limit_bytes
+              ? preferences.force_gpu_mem_discardable_limit_bytes
+              : DiscardableCacheSizeLimit()),
+      cache_size_limit_(max_cache_size_limit_),
       max_cache_entries_(kMaxCacheEntries) {
   // In certain cases, SingleThreadTaskRunner::CurrentDefaultHandle isn't set
   // (Android Webview).  Don't register a dump provider in these cases.
@@ -149,21 +221,26 @@ ServiceTransferCache::~ServiceTransferCache() {
       this);
 }
 
-bool ServiceTransferCache::CreateLockedEntry(const EntryKey& key,
-                                             ServiceDiscardableHandle handle,
-                                             GrDirectContext* context,
-                                             base::span<uint8_t> data) {
+bool ServiceTransferCache::CreateLockedEntry(
+    const EntryKey& key,
+    ServiceDiscardableHandle handle,
+    GrDirectContext* context,
+    skgpu::graphite::Recorder* graphite_recorder,
+    base::span<uint8_t> data) {
   auto found = entries_.Peek(key);
-  if (found != entries_.end())
+  if (found != entries_.end()) {
     return false;
+  }
 
   std::unique_ptr<cc::ServiceTransferCacheEntry> entry =
       cc::ServiceTransferCacheEntry::Create(key.entry_type);
-  if (!entry)
+  if (!entry) {
     return false;
+  }
 
-  if (!entry->Deserialize(context, data))
+  if (!entry->Deserialize(context, graphite_recorder, data)) {
     return false;
+  }
 
   total_size_ += entry->CachedSize();
   if (key.entry_type == cc::TransferCacheEntryType::kImage) {
@@ -172,6 +249,7 @@ bool ServiceTransferCache::CreateLockedEntry(const EntryKey& key,
   }
   entries_.Put(key, CacheEntryInternal(handle, std::move(entry)));
   EnforceLimits();
+  MaybePostPruneOldEntries();
   return true;
 }
 
@@ -190,8 +268,9 @@ void ServiceTransferCache::CreateLocalEntry(
     total_image_size_ += entry->CachedSize();
   }
 
-  entries_.Put(key, CacheEntryInternal(absl::nullopt, std::move(entry)));
+  entries_.Put(key, CacheEntryInternal(std::nullopt, std::move(entry)));
   EnforceLimits();
+  MaybePostPruneOldEntries();
 }
 
 bool ServiceTransferCache::UnlockEntry(const EntryKey& key) {
@@ -202,6 +281,7 @@ bool ServiceTransferCache::UnlockEntry(const EntryKey& key) {
   if (!found->second.handle)
     return false;
   found->second.handle->Unlock();
+  MaybePostPruneOldEntries();
   return true;
 }
 
@@ -230,37 +310,112 @@ bool ServiceTransferCache::DeleteEntry(const EntryKey& key) {
 
 cc::ServiceTransferCacheEntry* ServiceTransferCache::GetEntry(
     const EntryKey& key) {
-  auto found = entries_.Get(key);
-  if (found == entries_.end())
+  auto entry = entries_.Get(key);
+  bool found = entry != entries_.end();
+  UMA_HISTOGRAM_BOOLEAN("GPU.TransferCache.EntryFound", found);
+  if (!found) {
     return nullptr;
-  return found->second.entry.get();
+  }
+  base::TimeTicks now = base::TimeTicks::Now();
+  base::TimeDelta last_use_delta = now - entry->second.last_use;
+  if (last_use_delta > entry->second.max_last_use_delta) {
+    entry->second.max_last_use_delta = last_use_delta;
+  }
+  entry->second.last_use = now;
+  entry->second.num_reuse++;
+  UMA_HISTOGRAM_LONG_TIMES("GPU.TransferCache.TimeSinceLastUse",
+                           last_use_delta);
+  UMA_HISTOGRAM_LONG_TIMES("GPU.TransferCache.MaxHistoricalTimeSinceLastUse",
+                           entry->second.max_last_use_delta);
+  return entry->second.entry.get();
 }
 
 void ServiceTransferCache::EnforceLimits() {
+  RemoveOldEntriesUntil([&](EntryCache::reverse_iterator it) {
+    return total_size_ <= cache_size_limit_ &&
+           entries_.size() <= max_cache_entries_;
+  });
+}
+
+void ServiceTransferCache::MaybePostPruneOldEntries() {
+  if (!features::EnablePruneOldTransferCacheEntries()) {
+    return;
+  }
+  if (!base::SingleThreadTaskRunner::HasCurrentDefault()) {
+    // No task runner in unit tests.
+    return;
+  }
+
+  if (prune_old_entries_timer_.IsRunning()) {
+    request_post_prune_old_entries_while_pending_ = true;
+    return;
+  }
+  prune_old_entries_timer_.Start(FROM_HERE, kOldEntryPruneInterval, this,
+                                 &ServiceTransferCache::PruneOldEntries);
+}
+
+void ServiceTransferCache::PruneOldEntries() {
+  base::TimeTicks now = base::TimeTicks::Now();
+
+  int removed_count =
+      RemoveOldEntriesUntil([&](EntryCache::reverse_iterator it) {
+        return now - it->second.last_use < kOldEntryCutoffTimeDelta;
+      });
+  if (removed_count && flush_callback_) {
+    flush_callback_.Run();
+  }
+
+  if (request_post_prune_old_entries_while_pending_) {
+    request_post_prune_old_entries_while_pending_ = false;
+    MaybePostPruneOldEntries();
+  }
+}
+
+int ServiceTransferCache::RemoveOldEntriesUntil(
+    base::FunctionRef<bool(EntryCache::reverse_iterator)> should_stop) {
+  int removed_count = 0;
   for (auto it = entries_.rbegin(); it != entries_.rend();) {
-    if (total_size_ <= cache_size_limit_ &&
-        entries_.size() <= max_cache_entries_) {
-      return;
+    if (should_stop(it)) {
+      break;
     }
     if (it->second.handle && !it->second.handle->Delete()) {
       ++it;
       continue;
     }
-
     total_size_ -= it->second.entry->CachedSize();
     if (it->first.entry_type == cc::TransferCacheEntryType::kImage) {
       total_image_count_--;
       total_image_size_ -= it->second.entry->CachedSize();
     }
     it = entries_.Erase(it);
+    removed_count++;
+  }
+  return removed_count;
+}
+
+void ServiceTransferCache::OnUpdateMemoryLimit(int memory_limit) {
+  if (base::FeatureList::IsEnabled(base::kStatefulMemoryPressure)) {
+    size_t target_limit = gpu::UpdateShaderCacheSizeOnMemoryLimit(
+        max_cache_size_limit_, memory_limit);
+    // Ensure no memory is released during OnUpdateMemoryLimit.
+    cache_size_limit_ = std::max(total_size_, target_limit);
   }
 }
 
-void ServiceTransferCache::PurgeMemory(
-    base::MemoryPressureListener::MemoryPressureLevel memory_pressure_level) {
+void ServiceTransferCache::OnReleaseMemory(int memory_limit) {
+  if (base::FeatureList::IsEnabled(base::kStatefulMemoryPressure)) {
+    // In OnUpdateMemoryLimit(), cache_size_limit_ is clamped to total_size_
+    // to avoid unexpected eviction during subsequent CreateLocalEntry() calls.
+    // When OnReleaseMemory() is called to explicitly free memory, we must
+    // update cache_size_limit_ to the actual target limit before enforcing it.
+    cache_size_limit_ = gpu::UpdateShaderCacheSizeOnMemoryLimit(
+        max_cache_size_limit_, memory_limit);
+    EnforceLimits();
+    return;
+  }
   base::AutoReset<size_t> reset_limit(
-      &cache_size_limit_, DiscardableCacheSizeLimitForPressure(
-                              cache_size_limit_, memory_pressure_level));
+      &cache_size_limit_,
+      DiscardableCacheSizeLimitForPressure(cache_size_limit_, memory_limit));
   EnforceLimits();
 }
 
@@ -274,48 +429,13 @@ void ServiceTransferCache::DeleteAllEntriesForDecoder(int decoder_id) {
   }
 }
 
-bool ServiceTransferCache::CreateLockedHardwareDecodedImageEntry(
-    int decoder_id,
-    uint32_t entry_id,
-    ServiceDiscardableHandle handle,
-    GrDirectContext* context,
-    std::vector<sk_sp<SkImage>> plane_images,
-    SkYUVAInfo::PlaneConfig plane_config,
-    SkYUVAInfo::Subsampling subsampling,
-    SkYUVColorSpace yuv_color_space,
-    size_t buffer_byte_size,
-    bool needs_mips) {
-  EntryKey key(decoder_id, cc::TransferCacheEntryType::kImage, entry_id);
-  auto found = entries_.Peek(key);
-  if (found != entries_.end())
-    return false;
-
-  // Create the service-side image transfer cache entry.
-  auto entry = std::make_unique<cc::ServiceImageTransferCacheEntry>();
-  if (!entry->BuildFromHardwareDecodedImage(
-          context, std::move(plane_images), plane_config, subsampling,
-          yuv_color_space, buffer_byte_size, needs_mips)) {
-    return false;
-  }
-
-  // Insert it in the transfer cache.
-  total_size_ += entry->CachedSize();
-  if (key.entry_type == cc::TransferCacheEntryType::kImage) {
-    total_image_count_++;
-    total_image_size_ += entry->CachedSize();
-  }
-  entries_.Put(key, CacheEntryInternal(handle, std::move(entry)));
-  EnforceLimits();
-  return true;
-}
-
 bool ServiceTransferCache::OnMemoryDump(
     const base::trace_event::MemoryDumpArgs& args,
     base::trace_event::ProcessMemoryDump* pmd) {
   using base::trace_event::MemoryAllocatorDump;
   using base::trace_event::MemoryDumpLevelOfDetail;
 
-  if (args.level_of_detail == MemoryDumpLevelOfDetail::BACKGROUND) {
+  if (args.level_of_detail == MemoryDumpLevelOfDetail::kBackground) {
     std::string dump_name =
         base::StringPrintf("gpu/transfer_cache/cache_0x%" PRIXPTR,
                            reinterpret_cast<uintptr_t>(this));

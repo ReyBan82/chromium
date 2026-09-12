@@ -33,6 +33,8 @@
 
 namespace blink {
 
+class DataTransfer;
+
 class CORE_EXPORT TypingCommand final : public CompositeEditCommand {
  public:
   enum CommandType {
@@ -57,7 +59,7 @@ class CORE_EXPORT TypingCommand final : public CompositeEditCommand {
     kKillRing = 1 << 1,
     kSmartDelete = 1 << 2
   };
-  typedef unsigned Options;
+  using Options = uint8_t;
 
   static void DeleteSelection(Document&, Options = 0);
   static void DeleteKeyPressed(Document&,
@@ -71,22 +73,28 @@ class CORE_EXPORT TypingCommand final : public CompositeEditCommand {
   static void InsertText(Document&,
                          const String&,
                          Options,
+                         PasswordEchoBehavior,
                          TextCompositionType = kTextCompositionNone,
                          const bool is_incremental_insertion = false);
   static void InsertText(
       Document&,
       const String&,
-      const SelectionInDOMTree&,
+      const SelectionInDomTree&,
       Options,
       EditingState*,
+      PasswordEchoBehavior,
       TextCompositionType = kTextCompositionNone,
       const bool is_incremental_insertion = false,
-      InputEvent::InputType = InputEvent::InputType::kInsertText);
+      InputEvent::InputType = InputEvent::InputType::kInsertText,
+      DataTransfer* = nullptr);
   static bool InsertLineBreak(Document&);
   static bool InsertParagraphSeparator(Document&);
   static bool InsertParagraphSeparatorInQuotedContent(Document&);
   static void CloseTyping(LocalFrame*);
   static void CloseTypingIfNeeded(LocalFrame*);
+
+  // Normalizes CRLF and standalone CR to LF for consistent newline handling.
+  static String NormalizeTextForInsertion(const String&);
 
   static TypingCommand* LastTypingCommandIfStillOpenForTyping(LocalFrame*);
   static void UpdateSelectionIfDifferentFromCurrentSelection(TypingCommand*,
@@ -94,10 +102,11 @@ class CORE_EXPORT TypingCommand final : public CompositeEditCommand {
 
   TypingCommand(Document&,
                 CommandType,
-                const String& text = "",
+                const String& text = g_empty_string,
                 Options options = 0,
                 TextGranularity granularity = TextGranularity::kCharacter,
-                TextCompositionType = kTextCompositionNone);
+                TextCompositionType = kTextCompositionNone,
+                DataTransfer* = nullptr);
 
   void InsertTextRunWithoutNewlines(const String& text,
                                     EditingState*);
@@ -162,18 +171,20 @@ class CORE_EXPORT TypingCommand final : public CompositeEditCommand {
 
   CommandType command_type_;
   String text_to_insert_;
-  bool open_for_more_typing_;
+  bool open_for_more_typing_ = true;
   const bool select_inserted_text_;
   bool smart_delete_;
   const TextGranularity granularity_;
   TextCompositionType composition_type_;
   const bool kill_ring_;
   bool preserves_typing_style_;
+  PasswordEchoBehavior password_echo_behavior_ =
+      PasswordEchoBehavior::kDoNotEcho;
 
   // Undoing a series of backward deletes will restore a selection around all of
   // the characters that were deleted, but only if the typing command being
   // undone was opened with a backward delete.
-  bool opened_by_backward_delete_;
+  bool opened_by_backward_delete_ = false;
 
   bool is_incremental_insertion_;
   wtf_size_t selection_start_;

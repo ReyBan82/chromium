@@ -5,42 +5,61 @@
 #ifndef CONTENT_BROWSER_SPEECH_TTS_MAC_H_
 #define CONTENT_BROWSER_SPEECH_TTS_MAC_H_
 
-#include "base/functional/callback.h"
-#include "base/mac/scoped_nsobject.h"
-#include "base/no_destructor.h"
-#include "content/browser/speech/tts_platform_impl.h"
+#import <AVFAudio/AVFAudio.h>
 
-#import <Cocoa/Cocoa.h>
+#include <string>
+#include <vector>
+
+#include "base/functional/callback.h"
+#include "base/no_destructor.h"
+#include "base/sequence_checker.h"
+#include "base/task/task_traits.h"
+#include "base/thread_annotations.h"
+#include "base/threading/sequence_bound.h"
+#include "content/browser/speech/tts_platform_impl.h"
 
 class TtsPlatformImplMac;
 
-@interface ChromeTtsDelegate : NSObject <NSSpeechSynthesizerDelegate>
+class CONTENT_EXPORT TtsPlatformImplMacBackgroundWorker {
+ public:
+  TtsPlatformImplMacBackgroundWorker() = default;
+  TtsPlatformImplMacBackgroundWorker(
+      const TtsPlatformImplMacBackgroundWorker&) = delete;
+  TtsPlatformImplMacBackgroundWorker& operator=(
+      const TtsPlatformImplMacBackgroundWorker&) = delete;
+  ~TtsPlatformImplMacBackgroundWorker() = default;
 
-- (id)initWithPlatformImplMac:(TtsPlatformImplMac*)ttsImplMac;
+  // The installed voices as content::VoiceData, with the system default voice
+  // first, plus that voice's identifier (empty if there is none).
+  struct Voices {
+    Voices();
+    Voices(Voices&&);
+    Voices& operator=(Voices&&);
+    ~Voices();
 
-@end
+    std::vector<content::VoiceData> voices;
+    std::string default_voice_identifier;
+  };
 
-// Subclass of NSSpeechSynthesizer that takes an utterance
-// string on initialization, retains it and only allows it
-// to be spoken once.
-//
-// We construct a new NSSpeechSynthesizer for each utterance, for
-// two reasons:
-// 1. To associate delegate callbacks with a particular utterance,
-//    without assuming anything undocumented about the protocol.
-// 2. To work around https://openradar.appspot.com/13425549,
-//    where Nuance voices don't retain the utterance string and
-//    crash when trying to call willSpeakWord.
-@interface SingleUseSpeechSynthesizer : NSSpeechSynthesizer
+  AVSpeechSynthesisVoice* GetSystemDefaultVoice();
+  std::string GetSystemDefaultVoiceIdentifier();
 
-- (id)initWithUtterance:(NSString*)utterance;
-- (bool)startSpeakingRetainedUtterance;
-- (bool)startSpeakingString:(NSString*)utterance;
+  // Enumerates the installed voices. AVSpeechSynthesisVoice.speechVoices can
+  // take hundreds of milliseconds the first time it is called in a process, so
+  // this must not run on the UI thread.
+  Voices LoadVoices();
+};
+
+@interface ChromeTtsDelegate : NSObject <AVSpeechSynthesizerDelegate>
+
+- (instancetype)initWithPlatformImplMac:(TtsPlatformImplMac*)ttsImplMac;
 
 @end
 
 class TtsPlatformImplMac : public content::TtsPlatformImpl {
  public:
+  static constexpr int kInvalidUtteranceId = -1;
+
   ~TtsPlatformImplMac() override;
 
   TtsPlatformImplMac(const TtsPlatformImplMac&) = delete;
@@ -66,9 +85,11 @@ class TtsPlatformImplMac : public content::TtsPlatformImpl {
 
   void GetVoices(std::vector<content::VoiceData>* out_voices) override;
 
+  void RefreshVoices() override;
+
   // Called by ChromeTtsDelegate when we get a callback from the
   // native speech engine.
-  void OnSpeechEvent(NSSpeechSynthesizer* sender,
+  void OnSpeechEvent(int utterance_id,
                      content::TtsEventType event_type,
                      int char_index,
                      int char_length,
@@ -77,7 +98,8 @@ class TtsPlatformImplMac : public content::TtsPlatformImpl {
   // Get the single instance of this class.
   CONTENT_EXPORT static TtsPlatformImplMac* GetInstance();
 
-  CONTENT_EXPORT static std::vector<content::VoiceData>& VoicesRefForTesting();
+  CONTENT_EXPORT static base::SequenceBound<TtsPlatformImplMacBackgroundWorker>&
+  GetBackgroundWorker();
 
  private:
   friend base::NoDestructor<TtsPlatformImplMac>;
@@ -90,12 +112,37 @@ class TtsPlatformImplMac : public content::TtsPlatformImpl {
                      base::OnceCallback<void(bool)> on_speak_finished,
                      const std::string& parsed_utterance);
 
-  base::scoped_nsobject<SingleUseSpeechSynthesizer> speech_synthesizer_;
-  base::scoped_nsobject<ChromeTtsDelegate> delegate_;
-  int utterance_id_ = -1;
+  // Starts (re)loading the voice list on the background worker. Requests made
+  // while a load is in flight are coalesced into one more load after it.
+  void LoadVoices();
+  void OnVoicesLoaded(TtsPlatformImplMacBackgroundWorker::Voices voices);
+
+  // Checks whether the system default voice changed (the user may have picked
+  // another one in System Settings while away) and reloads the list if so.
+  void UpdateSystemDefaultVoice();
+  void OnGotDefaultVoiceIdentifier(std::string default_voice_identifier);
+  void OnApplicationWillBecomeActive();
+
+  SEQUENCE_CHECKER(sequence_checker_);
+
+  AVSpeechSynthesizer* __strong speech_synthesizer_;
+  ChromeTtsDelegate* __strong delegate_;
+  id __strong application_active_observer_ = nil;
+  int utterance_id_ = kInvalidUtteranceId;
   std::string utterance_;
   int last_char_index_ = 0;
   bool paused_ = false;
+
+  // Empty until the first LoadVoices() completes; PlatformImplInitialized()
+  // is false until then, so TtsController queues utterances and reports no
+  // platform voices in the meantime.
+  std::vector<content::VoiceData> voices_ GUARDED_BY_CONTEXT(sequence_checker_);
+  std::string default_voice_identifier_ GUARDED_BY_CONTEXT(sequence_checker_);
+  bool voices_loaded_ GUARDED_BY_CONTEXT(sequence_checker_) = false;
+  bool is_loading_voices_ GUARDED_BY_CONTEXT(sequence_checker_) = false;
+  bool needs_reload_voices_ GUARDED_BY_CONTEXT(sequence_checker_) = false;
+  bool is_updating_default_voice_ GUARDED_BY_CONTEXT(sequence_checker_) = false;
+  bool received_voices_request_ GUARDED_BY_CONTEXT(sequence_checker_) = false;
 };
 
 #endif  // CONTENT_BROWSER_SPEECH_TTS_MAC_H_

@@ -7,6 +7,7 @@
 
 #include <string>
 
+#include "base/memory/raw_ptr.h"
 #include "chrome/browser/ash/app_list/search/chrome_search_result.h"
 #include "chrome/browser/profiles/profile.h"
 
@@ -14,18 +15,8 @@ namespace app_list {
 
 class SystemInfoAnswerResult : public ChromeSearchResult {
  public:
-  enum class SystemInfoCategory {
-    kUnknown = 0,
-    kSettings = 1,
-    kDiagnostics = 2
-  };
-
-  enum class AnswerCardDisplayType {
-    kUnknown = 0,
-    kBarChart = 1,
-    kTextCard = 2,
-    kMulitElementBarChart = 3
-  };
+  enum class SystemInfoCategory { kSettings, kDiagnostics };
+  enum class SystemInfoCardType { kVersion, kMemory, kStorage, kCPU, kBattery };
 
   SystemInfoAnswerResult(Profile* profile,
                          const std::u16string& query,
@@ -34,8 +25,10 @@ class SystemInfoAnswerResult : public ChromeSearchResult {
                          double relevance_score,
                          const std::u16string& title,
                          const std::u16string& description,
-                         AnswerCardDisplayType card_display_type,
-                         SystemInfoCategory system_info_category);
+                         const std::u16string& accessibility_label,
+                         SystemInfoCategory system_info_category,
+                         SystemInfoCardType system_info_card_type,
+                         const ash::SystemInfoAnswerCardData& answer_card_info);
   SystemInfoAnswerResult(const SystemInfoAnswerResult&) = delete;
   SystemInfoAnswerResult& operator=(const SystemInfoAnswerResult&) = delete;
 
@@ -44,11 +37,16 @@ class SystemInfoAnswerResult : public ChromeSearchResult {
   void Open(int event_flags) override;
 
   void UpdateTitleAndDetails(const std::u16string& title,
-                             const std::u16string& description);
+                             const std::u16string& description,
+                             const std::u16string& accessibility_label);
+
+  void UpdateBarChartPercentage(const double bar_chart_percentage);
 
  private:
   SystemInfoCategory const system_info_category_;
-  Profile* const profile_;
+  SystemInfoCardType const system_info_card_type_;
+  ash::SystemInfoAnswerCardData answer_card_info_;
+  const raw_ptr<Profile> profile_;
   const std::u16string query_;
 
   const std::string url_path_;

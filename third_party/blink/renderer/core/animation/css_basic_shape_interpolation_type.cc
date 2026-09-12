@@ -8,60 +8,52 @@
 #include <utility>
 
 #include "base/memory/ptr_util.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/values_equivalent.h"
 #include "third_party/blink/renderer/core/animation/basic_shape_interpolation_functions.h"
+#include "third_party/blink/renderer/core/animation/shape_property_functions.h"
+#include "third_party/blink/renderer/core/animation/underlying_value_owner.h"
 #include "third_party/blink/renderer/core/css/css_property_names.h"
-#include "third_party/blink/renderer/core/css/css_value_list.h"
 #include "third_party/blink/renderer/core/css/resolver/style_resolver.h"
 #include "third_party/blink/renderer/core/css/resolver/style_resolver_state.h"
 #include "third_party/blink/renderer/core/style/basic_shapes.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
-#include "third_party/blink/renderer/core/style/shape_clip_path_operation.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
 namespace {
 
-const BasicShape* GetBasicShape(const CSSProperty& property,
-                                const ComputedStyle& style) {
-  switch (property.PropertyID()) {
-    case CSSPropertyID::kShapeOutside:
-      if (!style.ShapeOutside())
-        return nullptr;
-      if (style.ShapeOutside()->GetType() != ShapeValue::kShape)
-        return nullptr;
-      if (style.ShapeOutside()->CssBox() != CSSBoxType::kMissing)
-        return nullptr;
-      return style.ShapeOutside()->Shape();
-    case CSSPropertyID::kClipPath: {
-      auto* clip_path_operation =
-          DynamicTo<ShapeClipPathOperation>(style.ClipPath());
-      if (!clip_path_operation)
-        return nullptr;
-      auto* shape = clip_path_operation->GetBasicShape();
-
-      // Path shape is handled by PathInterpolationType.
-      if (shape->GetType() == BasicShape::kStylePathType)
-        return nullptr;
-
-      return shape;
-    }
-    case CSSPropertyID::kObjectViewBox:
-      return style.ObjectViewBox();
-    default:
-      NOTREACHED();
-      return nullptr;
+BasicShapeInfo GetBasicShapeInfo(const CSSProperty& property,
+                                 const ComputedStyle& style) {
+  BasicShapeInfo info =
+      shape_property_functions::GetBasicShape(property, style);
+  if (!info.shape) {
+    return {};
   }
+  switch (info.shape->GetType()) {
+    case BasicShape::kBasicShapeCircleType:
+    case BasicShape::kBasicShapeEllipseType:
+    case BasicShape::kBasicShapeInsetType:
+    case BasicShape::kBasicShapePolygonType:
+      break;
+    default:
+      return {};
+  }
+  return info;
 }
 
 class UnderlyingCompatibilityChecker
     : public CSSInterpolationType::CSSConversionChecker {
  public:
-  UnderlyingCompatibilityChecker(scoped_refptr<const NonInterpolableValue>
-                                     underlying_non_interpolable_value)
-      : underlying_non_interpolable_value_(
-            std::move(underlying_non_interpolable_value)) {}
+  explicit UnderlyingCompatibilityChecker(
+      const NonInterpolableValue* underlying_non_interpolable_value)
+      : underlying_non_interpolable_value_(underlying_non_interpolable_value) {}
+
+  void Trace(Visitor* visitor) const override {
+    CSSInterpolationType::CSSConversionChecker::Trace(visitor);
+    visitor->Trace(underlying_non_interpolable_value_);
+  }
 
  private:
   bool IsValid(const StyleResolverState&,
@@ -71,25 +63,32 @@ class UnderlyingCompatibilityChecker
         *underlying.non_interpolable_value);
   }
 
-  scoped_refptr<const NonInterpolableValue> underlying_non_interpolable_value_;
+  Member<const NonInterpolableValue> underlying_non_interpolable_value_;
 };
 
 class InheritedShapeChecker
     : public CSSInterpolationType::CSSConversionChecker {
  public:
   InheritedShapeChecker(const CSSProperty& property,
-                        scoped_refptr<const BasicShape> inherited_shape)
-      : property_(property), inherited_shape_(std::move(inherited_shape)) {}
+                        const BasicShape* inherited_shape)
+      : property_(property), inherited_shape_(inherited_shape) {}
+
+  void Trace(Visitor* visitor) const override {
+    visitor->Trace(inherited_shape_);
+    CSSInterpolationType::CSSConversionChecker::Trace(visitor);
+  }
 
  private:
   bool IsValid(const StyleResolverState& state,
                const InterpolationValue&) const final {
     return base::ValuesEquivalent(
-        inherited_shape_.get(), GetBasicShape(property_, *state.ParentStyle()));
+        inherited_shape_.Get(),
+        GetBasicShapeInfo(*property_, *state.ParentStyle()).shape);
   }
 
-  const CSSProperty& property_;
-  scoped_refptr<const BasicShape> inherited_shape_;
+  const raw_ref<const CSSProperty, UnprotectedInRelease | DanglingUntriaged>
+      property_;
+  Member<const BasicShape> inherited_shape_;
 };
 
 }  // namespace
@@ -100,9 +99,10 @@ InterpolationValue CSSBasicShapeInterpolationType::MaybeConvertNeutral(
   // const_cast is for taking refs.
   NonInterpolableValue* non_interpolable_value =
       const_cast<NonInterpolableValue*>(
-          underlying.non_interpolable_value.get());
+          underlying.non_interpolable_value.Get());
   conversion_checkers.push_back(
-      std::make_unique<UnderlyingCompatibilityChecker>(non_interpolable_value));
+      MakeGarbageCollected<UnderlyingCompatibilityChecker>(
+          non_interpolable_value));
   return InterpolationValue(
       basic_shape_interpolation_functions::CreateNeutralValue(
           *underlying.non_interpolable_value),
@@ -112,34 +112,31 @@ InterpolationValue CSSBasicShapeInterpolationType::MaybeConvertNeutral(
 InterpolationValue CSSBasicShapeInterpolationType::MaybeConvertInitial(
     const StyleResolverState& state,
     ConversionCheckers&) const {
+  const ComputedStyle& initial_style =
+      state.GetDocument().GetStyleResolver().InitialStyle();
+  auto info = GetBasicShapeInfo(CssProperty(), initial_style);
   return basic_shape_interpolation_functions::MaybeConvertBasicShape(
-      GetBasicShape(CssProperty(),
-                    state.GetDocument().GetStyleResolver().InitialStyle()),
-      1);
+      info, CssProperty(), 1);
 }
 
 InterpolationValue CSSBasicShapeInterpolationType::MaybeConvertInherit(
     const StyleResolverState& state,
     ConversionCheckers& conversion_checkers) const {
-  const BasicShape* shape = GetBasicShape(CssProperty(), *state.ParentStyle());
+  auto info = GetBasicShapeInfo(CssProperty(), *state.ParentStyle());
   conversion_checkers.push_back(
-      std::make_unique<InheritedShapeChecker>(CssProperty(), shape));
+      MakeGarbageCollected<InheritedShapeChecker>(CssProperty(), info.shape));
   return basic_shape_interpolation_functions::MaybeConvertBasicShape(
-      shape, state.ParentStyle()->EffectiveZoom());
+      info, CssProperty(), state.ParentStyle()->EffectiveZoom());
 }
 
 InterpolationValue CSSBasicShapeInterpolationType::MaybeConvertValue(
     const CSSValue& value,
-    const StyleResolverState*,
+    const StyleResolverState&,
     ConversionCheckers&) const {
-  if (!value.IsBaseValueList())
-    return basic_shape_interpolation_functions::MaybeConvertCSSValue(value);
-
-  const auto& list = To<CSSValueList>(value);
-  if (list.length() != 1)
-    return nullptr;
+  BasicShapeCssInfo css_info =
+      shape_property_functions::GetCssBasicShape(CssProperty(), value);
   return basic_shape_interpolation_functions::MaybeConvertCSSValue(
-      list.Item(0));
+      css_info, CssProperty());
 }
 
 PairwiseInterpolationValue CSSBasicShapeInterpolationType::MaybeMergeSingles(
@@ -156,8 +153,9 @@ PairwiseInterpolationValue CSSBasicShapeInterpolationType::MaybeMergeSingles(
 InterpolationValue
 CSSBasicShapeInterpolationType::MaybeConvertStandardPropertyUnderlyingValue(
     const ComputedStyle& style) const {
+  auto info = GetBasicShapeInfo(CssProperty(), style);
   return basic_shape_interpolation_functions::MaybeConvertBasicShape(
-      GetBasicShape(CssProperty(), style), style.EffectiveZoom());
+      info, CssProperty(), style.EffectiveZoom());
 }
 
 void CSSBasicShapeInterpolationType::Composite(
@@ -168,7 +166,7 @@ void CSSBasicShapeInterpolationType::Composite(
   if (!basic_shape_interpolation_functions::ShapesAreCompatible(
           *underlying_value_owner.Value().non_interpolable_value,
           *value.non_interpolable_value)) {
-    underlying_value_owner.Set(*this, value);
+    underlying_value_owner.Set(this, value);
     return;
   }
 
@@ -180,26 +178,12 @@ void CSSBasicShapeInterpolationType::ApplyStandardPropertyValue(
     const InterpolableValue& interpolable_value,
     const NonInterpolableValue* non_interpolable_value,
     StyleResolverState& state) const {
-  scoped_refptr<BasicShape> shape =
-      basic_shape_interpolation_functions::CreateBasicShape(
-          interpolable_value, *non_interpolable_value,
-          state.CssToLengthConversionData());
-  switch (CssProperty().PropertyID()) {
-    case CSSPropertyID::kShapeOutside:
-      state.StyleBuilder().SetShapeOutside(MakeGarbageCollected<ShapeValue>(
-          std::move(shape), CSSBoxType::kMissing));
-      break;
-    case CSSPropertyID::kClipPath:
-      state.StyleBuilder().SetClipPath(
-          ShapeClipPathOperation::Create(std::move(shape)));
-      break;
-    case CSSPropertyID::kObjectViewBox:
-      state.StyleBuilder().SetObjectViewBox(std::move(shape));
-      break;
-    default:
-      NOTREACHED();
-      break;
-  }
+  CHECK(non_interpolable_value);
+  BasicShapeInfo info = basic_shape_interpolation_functions::CreateBasicShape(
+      interpolable_value, *non_interpolable_value,
+      state.CssToLengthConversionData());
+  shape_property_functions::SetBasicShape(CssProperty(), info,
+                                          state.StyleBuilder());
 }
 
 }  // namespace blink

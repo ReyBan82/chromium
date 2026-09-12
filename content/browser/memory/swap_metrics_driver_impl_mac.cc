@@ -8,7 +8,7 @@
 #include <mach/mach_vm.h>
 #include <memory>
 
-#include "base/mac/mach_logging.h"
+#include "base/apple/mach_logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/time/time.h"
 
@@ -41,7 +41,7 @@ SwapMetricsDriverImplMac::UpdateMetricsInternal(base::TimeDelta interval) {
     MACH_DLOG(WARNING, result) << "host_statistics64";
     return SwapMetricsDriver::SwapMetricsUpdateResult::kSwapMetricsUpdateFailed;
   }
-  DCHECK_EQ(HOST_VM_INFO64_COUNT, count);
+  CHECK_EQ(HOST_VM_INFO64_COUNT, count, base::NotFatalUntil::M159);
 
   uint64_t swapins = statistics.swapins - last_swapins_;
   uint64_t swapouts = statistics.swapouts - last_swapouts_;

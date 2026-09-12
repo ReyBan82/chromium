@@ -63,7 +63,7 @@ RenderWidgetHostConnector::Observer::Observer(
 }
 
 RenderWidgetHostConnector::Observer::~Observer() {
-  DCHECK(!active_rwhva_);
+  CHECK(!active_rwhva_, base::NotFatalUntil::M159);
 }
 
 void RenderWidgetHostConnector::Observer::RenderViewReady() {
@@ -80,7 +80,7 @@ void RenderWidgetHostConnector::Observer::RenderFrameHostChanged(
   auto* new_view = new_host ? static_cast<RenderWidgetHostViewBase*>(
                                   new_host->GetRenderWidgetHost()->GetView())
                             : nullptr;
-  DCHECK(!new_view || !new_view->IsRenderWidgetHostViewChildFrame());
+  CHECK(!new_view || !new_view->IsRenderWidgetHostViewChildFrame());
   auto* new_view_android = static_cast<RenderWidgetHostViewAndroid*>(new_view);
   UpdateRenderWidgetHostView(new_view_android);
 }
@@ -98,7 +98,8 @@ void RenderWidgetHostConnector::Observer::DestroyEarly() {
 void RenderWidgetHostConnector::Observer::DoDestroy(
     WebContentsAndroid* web_contents_android) {
   web_contents_android->RemoveDestructionObserver(this);
-  DCHECK(!active_rwhva_ || active_rwhva_ == GetRenderWidgetHostViewAndroid());
+  CHECK(!active_rwhva_ || active_rwhva_ == GetRenderWidgetHostViewAndroid(),
+        base::NotFatalUntil::M159);
   UpdateRenderWidgetHostView(nullptr);
   delete connector_;
 }
@@ -127,8 +128,8 @@ void RenderWidgetHostConnector::Observer::UpdateRenderWidgetHostView(
 RenderWidgetHostViewAndroid*
 RenderWidgetHostConnector::Observer::GetRenderWidgetHostViewAndroid() const {
   RenderWidgetHostView* rwhv = web_contents()->GetRenderWidgetHostView();
-  DCHECK(!rwhv || !static_cast<RenderWidgetHostViewBase*>(rwhv)
-                       ->IsRenderWidgetHostViewChildFrame());
+  CHECK(!rwhv || !static_cast<RenderWidgetHostViewBase*>(rwhv)
+                      ->IsRenderWidgetHostViewChildFrame());
   return static_cast<RenderWidgetHostViewAndroid*>(rwhv);
 }
 

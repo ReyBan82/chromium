@@ -13,6 +13,10 @@
 #include "base/task/single_thread_task_executor.h"
 #include "content/public/browser/browser_main_parts.h"
 
+namespace content {
+class SyntheticTrialSyncer;
+}
+
 namespace crash_reporter {
 class ChildExitObserver;
 }
@@ -21,11 +25,16 @@ namespace metrics {
 class MemoryMetricsLogger;
 }
 
+namespace performance_manager {
+class PerformanceManagerLifetime;
+}
+
 namespace android_webview {
 
 class AwBrowserProcess;
 class AwContentBrowserClient;
 
+// Lifetime: Singleton
 class AwBrowserMainParts : public content::BrowserMainParts {
  public:
   explicit AwBrowserMainParts(AwContentBrowserClient* browser_client);
@@ -38,10 +47,11 @@ class AwBrowserMainParts : public content::BrowserMainParts {
   // Overriding methods from content::BrowserMainParts.
   int PreEarlyInitialization() override;
   int PreCreateThreads() override;
+  void PreCreateMainMessageLoop() override;
   int PreMainMessageLoopRun() override;
   void WillRunMainMessageLoop(
       std::unique_ptr<base::RunLoop>& run_loop) override;
-  void PostCreateThreads() override;
+  int PostCreateThreads() override;
 
  private:
   void RegisterSyntheticTrials();
@@ -52,6 +62,11 @@ class AwBrowserMainParts : public content::BrowserMainParts {
   raw_ptr<AwContentBrowserClient> browser_client_;
 
   std::unique_ptr<metrics::MemoryMetricsLogger> metrics_logger_;
+
+  std::unique_ptr<content::SyntheticTrialSyncer> synthetic_trial_syncer_;
+
+  std::unique_ptr<performance_manager::PerformanceManagerLifetime>
+      performance_manager_lifetime_;
 
   std::unique_ptr<AwBrowserProcess> browser_process_;
   std::unique_ptr<crash_reporter::ChildExitObserver> child_exit_observer_;

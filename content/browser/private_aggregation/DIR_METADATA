@@ -1,4 +1,0 @@
-monorail {
-  component: "Blink>PrivateAggregation"
-}
-team_email: "privacy-sandbox-dev@chromium.org"

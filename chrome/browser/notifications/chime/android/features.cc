@@ -7,14 +7,8 @@
 namespace notifications {
 namespace features {
 
-BASE_FEATURE(kUseChimeAndroidSdk,
-             "UseChimeAndroidSdk",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kUseChimeAndroidSdk, base::FEATURE_DISABLED_BY_DEFAULT);
 
 }  // namespace features
-
-namespace switches {
-const char kDebugChimeNotification[] = "debug-chime-notification";
-}  // namespace switches
 
 }  // namespace notifications

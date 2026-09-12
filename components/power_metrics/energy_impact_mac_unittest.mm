@@ -5,6 +5,7 @@
 #include "components/power_metrics/energy_impact_mac.h"
 
 #include "base/base_paths.h"
+#include "base/compiler_specific.h"
 #include "base/path_service.h"
 #include "components/power_metrics/resource_coalition_mac.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -30,7 +31,7 @@ coalition_resource_usage MakeResourceUsageWithQOS(int qos_level,
                                                   base::TimeDelta cpu_time) {
   coalition_resource_usage result{};
   result.cpu_time_eqos_len = COALITION_NUM_THREAD_QOS_TYPES;
-  result.cpu_time_eqos[qos_level] = cpu_time.InNanoseconds();
+  UNSAFE_TODO(result.cpu_time_eqos[qos_level]) = cpu_time.InNanoseconds();
   return result;
 }
 
@@ -45,7 +46,7 @@ uint64_t NsScaleToTimebase(const mach_timebase_info_data_t& timebase,
 TEST(EnergyImpactTest, ReadCoefficientsFromPath) {
   base::FilePath test_path = GetTestDataPath();
 
-  // Validate that attempting to read from a non-exisent file fails.
+  // Validate that attempting to read from a non-existent file fails.
   auto coefficients = internal::ReadCoefficientsFromPath(
       test_path.Append(FILE_PATH_LITERAL("does-not-exist.plist")));
   EXPECT_FALSE(coefficients.has_value());
@@ -188,17 +189,17 @@ TEST(EnergyImpactTest, ComputeEnergyImpactForResourceUsage_Combined) {
           NsScaleToTimebase(kM1Timebase, base::Milliseconds(4).InNanoseconds()),
       .cpu_time_eqos_len = COALITION_NUM_THREAD_QOS_TYPES,
   };
-  sample.cpu_time_eqos[THREAD_QOS_BACKGROUND] =
+  UNSAFE_TODO(sample.cpu_time_eqos[THREAD_QOS_BACKGROUND]) =
       NsScaleToTimebase(kM1Timebase, base::Milliseconds(100).InNanoseconds());
-  sample.cpu_time_eqos[THREAD_QOS_DEFAULT] =
+  UNSAFE_TODO(sample.cpu_time_eqos[THREAD_QOS_DEFAULT]) =
       NsScaleToTimebase(kM1Timebase, base::Milliseconds(50).InNanoseconds());
-  sample.cpu_time_eqos[THREAD_QOS_UTILITY] =
+  UNSAFE_TODO(sample.cpu_time_eqos[THREAD_QOS_UTILITY]) =
       NsScaleToTimebase(kM1Timebase, base::Milliseconds(100).InNanoseconds());
-  sample.cpu_time_eqos[THREAD_QOS_LEGACY] =
+  UNSAFE_TODO(sample.cpu_time_eqos[THREAD_QOS_LEGACY]) =
       NsScaleToTimebase(kM1Timebase, base::Milliseconds(10).InNanoseconds());
-  sample.cpu_time_eqos[THREAD_QOS_USER_INITIATED] =
+  UNSAFE_TODO(sample.cpu_time_eqos[THREAD_QOS_USER_INITIATED]) =
       NsScaleToTimebase(kM1Timebase, base::Milliseconds(10).InNanoseconds());
-  sample.cpu_time_eqos[THREAD_QOS_USER_INTERACTIVE] =
+  UNSAFE_TODO(sample.cpu_time_eqos[THREAD_QOS_USER_INTERACTIVE]) =
       NsScaleToTimebase(kM1Timebase, base::Milliseconds(10).InNanoseconds());
 
   EXPECT_DOUBLE_EQ(29.66, ComputeEnergyImpactForResourceUsage(

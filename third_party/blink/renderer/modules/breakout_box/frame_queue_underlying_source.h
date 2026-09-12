@@ -5,12 +5,16 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_BREAKOUT_BOX_FRAME_QUEUE_UNDERLYING_SOURCE_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_BREAKOUT_BOX_FRAME_QUEUE_UNDERLYING_SOURCE_H_
 
+#include "base/feature_list.h"
 #include "base/synchronization/lock.h"
 #include "base/task/sequenced_task_runner.h"
+#include "base/threading/platform_thread.h"
 #include "base/threading/thread_checker.h"
+#include "base/time/time.h"
 #include "media/base/audio_buffer.h"
 #include "media/base/video_frame.h"
 #include "third_party/blink/renderer/core/streams/underlying_source_base.h"
+#include "third_party/blink/renderer/core/timing/time_clamper.h"
 #include "third_party/blink/renderer/modules/breakout_box/frame_queue.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/heap/cross_thread_persistent.h"
@@ -19,11 +23,10 @@
 
 namespace blink {
 
+MODULES_EXPORT BASE_DECLARE_FEATURE(kBreakoutBoxInsertVideoCaptureTimestamp);
+
 template <typename NativeFrameType>
-class FrameQueueUnderlyingSource
-    : public UnderlyingSourceBase,
-      public ActiveScriptWrappable<
-          FrameQueueUnderlyingSource<NativeFrameType>> {
+class FrameQueueUnderlyingSource : public UnderlyingSourceBase {
  public:
   using TransferFramesCB = CrossThreadFunction<void(NativeFrameType)>;
 
@@ -33,8 +36,11 @@ class FrameQueueUnderlyingSource
   FrameQueueUnderlyingSource(ScriptState*,
                              wtf_size_t queue_size,
                              std::string device_id,
-                             wtf_size_t frame_pool_size);
-  FrameQueueUnderlyingSource(ScriptState*, wtf_size_t queue_size);
+                             wtf_size_t frame_pool_size,
+                             std::optional<base::ThreadType> thread_type);
+  FrameQueueUnderlyingSource(ScriptState*,
+                             wtf_size_t queue_size,
+                             std::optional<base::ThreadType> thread_type);
   ~FrameQueueUnderlyingSource() override = default;
 
   FrameQueueUnderlyingSource(const FrameQueueUnderlyingSource&) = delete;
@@ -42,12 +48,11 @@ class FrameQueueUnderlyingSource
       delete;
 
   // UnderlyingSourceBase
-  ScriptPromise pull(ScriptState*) override;
-  ScriptPromise Start(ScriptState*) override;
-  ScriptPromise Cancel(ScriptState*, ScriptValue reason) override;
-
-  // ScriptWrappable interface
-  bool HasPendingActivity() const final;
+  ScriptPromise<IDLUndefined> Pull(ScriptState*, ExceptionState&) override;
+  ScriptPromise<IDLUndefined> Start(ScriptState*) override;
+  ScriptPromise<IDLUndefined> Cancel(ScriptState*,
+                                     ScriptValue reason,
+                                     ExceptionState&) override;
 
   // ExecutionLifecycleObserver
   void ContextDestroyed() override;
@@ -64,14 +69,30 @@ class FrameQueueUnderlyingSource
   // Must be called on |realm_task_runner_|.
   virtual bool StartFrameDelivery() = 0;
   virtual void StopFrameDelivery() = 0;
+  virtual void UpdateRealmInfo(base::TimeTicks time_origin,
+                               bool is_cross_origin_isolated) {}
 
   // Delivers a new frame to this source.
   void QueueFrame(NativeFrameType);
 
   int NumPendingPullsForTesting() const;
   double DesiredSizeForTesting() const;
+  uint64_t TotalFrames() const;
+  uint64_t DiscardedFrames() const;
+  uint64_t DiscardedAndQueuedFrames() const;
 
   void Trace(Visitor*) const override;
+
+  std::optional<base::ThreadType> GetRealmThreadTypeLeasedForTesting() const {
+    if (realm_thread_type_lease_) {
+      return realm_thread_type_lease_->thread_type();
+    }
+    return std::nullopt;
+  }
+
+  void SetRealmIsBoostableContextForTesting(bool is_boostable) {
+    realm_is_boostable_context_ = is_boostable;
+  }
 
  protected:
   // Initializes a new FrameQueueUnderlyingSource containing a
@@ -89,7 +110,9 @@ class FrameQueueUnderlyingSource
   // queue. Must be called on |realm_task_runner_|.
   void TransferSource(
       CrossThreadPersistent<FrameQueueUnderlyingSource<NativeFrameType>>
-          transferred_source);
+          transferred_source,
+      base::TimeTicks time_origin = base::TimeTicks(),
+      bool is_cross_origin_isolated = false);
 
   // Due to a potential race condition between |transferred_source_|'s heap
   // being destroyed and the Close() method being called, we need to explicitly
@@ -118,11 +141,13 @@ class FrameQueueUnderlyingSource
   enum class NewFrameAction { kPush, kReplace, kDrop };
   NewFrameAction AnalyzeNewFrameLocked(
       const NativeFrameType& media_frame,
-      const absl::optional<NativeFrameType>& old_frame);
+      const std::optional<NativeFrameType>& old_frame);
 
   // Creates a JS frame (VideoFrame or AudioData) backed by |media_frame|.
   // Must be called on |realm_task_runner_|.
   ScriptWrappable* MakeBlinkFrame(NativeFrameType media_frame);
+
+  void EnqueueBlinkFrame(ScriptWrappable* blink_frame) const;
 
   bool is_closed_ = false;
 
@@ -142,7 +167,10 @@ class FrameQueueUnderlyingSource
   // transferred stream.
   CrossThreadPersistent<FrameQueueUnderlyingSource<NativeFrameType>>
       transferred_source_ GUARDED_BY(lock_);
+  bool transferred_source_cleared_ GUARDED_BY(lock_) = false;
   int num_pending_pulls_ GUARDED_BY(lock_) = 0;
+  uint64_t total_frames_ GUARDED_BY(lock_) = 0;
+  uint64_t discarded_frames_ GUARDED_BY(lock_) = 0;
   // When nonempty, |device_id_| is used to monitor all frames queued by this
   // source or exposed to JS via the stream connected to this source.
   // Frame monitoring applies only to video. Audio is never monitored.
@@ -150,6 +178,16 @@ class FrameQueueUnderlyingSource
   // Maximum number of distinct frames allowed to be used by this source.
   // This limit applies only when |device_id_| is nonempty.
   const wtf_size_t frame_pool_size_ = 0;
+
+  // If not null, `thread_type_` is used to initialize a
+  // RaiseThreadTypeLease on forwarding frames.
+  const std::optional<base::ThreadType> thread_type_;
+  std::optional<base::PlatformThread::RaiseThreadTypeLease>
+      realm_thread_type_lease_;
+  bool realm_is_boostable_context_;
+
+  std::optional<base::TimeTicks> first_frame_ticks_;
+  TimeClamper time_clamper_;
 };
 
 template <>

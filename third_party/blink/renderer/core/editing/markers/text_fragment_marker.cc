@@ -4,10 +4,12 @@
 
 #include "third_party/blink/renderer/core/editing/markers/text_fragment_marker.h"
 
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
+
 namespace blink {
 
-TextFragmentMarker::TextFragmentMarker(unsigned start_offset,
-                                       unsigned end_offset)
+TextFragmentMarker::TextFragmentMarker(wtf_size_t start_offset,
+                                       wtf_size_t end_offset)
     : HighlightPseudoMarker(start_offset, end_offset) {}
 
 DocumentMarker::MarkerType TextFragmentMarker::GetType() const {

@@ -6,6 +6,7 @@
 #define SERVICES_NETWORK_PUBLIC_CPP_NET_LOG_MOJOM_TRAITS_H_
 
 #include "mojo/public/cpp/bindings/enum_traits.h"
+#include "net/log/file_net_log_observer.h"
 #include "net/log/net_log_capture_mode.h"
 #include "net/log/net_log_event_type.h"
 #include "services/network/public/mojom/net_log.mojom-shared.h"
@@ -16,16 +17,24 @@ template <>
 struct EnumTraits<network::mojom::NetLogCaptureMode, net::NetLogCaptureMode> {
   static network::mojom::NetLogCaptureMode ToMojom(
       net::NetLogCaptureMode capture_mode);
-  static bool FromMojom(network::mojom::NetLogCaptureMode capture_mode,
-                        net::NetLogCaptureMode* out);
+  static net::NetLogCaptureMode FromMojom(
+      network::mojom::NetLogCaptureMode capture_mode);
 };
 
 template <>
 struct EnumTraits<network::mojom::NetLogEventPhase, net::NetLogEventPhase> {
   static network::mojom::NetLogEventPhase ToMojom(
       net::NetLogEventPhase capture_mode);
-  static bool FromMojom(network::mojom::NetLogEventPhase capture_mode,
-                        net::NetLogEventPhase* out);
+  static net::NetLogEventPhase FromMojom(
+      network::mojom::NetLogEventPhase capture_mode);
+};
+
+template <>
+struct EnumTraits<network::mojom::NetLogFileFormat, net::NetLogFileFormat> {
+  static network::mojom::NetLogFileFormat ToMojom(
+      net::NetLogFileFormat file_format);
+  static net::NetLogFileFormat FromMojom(
+      network::mojom::NetLogFileFormat file_format);
 };
 
 }  // namespace mojo

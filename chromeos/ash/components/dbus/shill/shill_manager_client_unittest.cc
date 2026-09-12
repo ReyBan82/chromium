@@ -5,11 +5,13 @@
 #include "chromeos/ash/components/dbus/shill/shill_manager_client.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/bind.h"
 #include "base/test/test_future.h"
@@ -19,7 +21,6 @@
 #include "dbus/object_path.h"
 #include "dbus/values_util.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 
 using testing::_;
@@ -69,7 +70,8 @@ class ShillManagerClientTest : public ShillClientUnittestBase {
   }
 
  protected:
-  ShillManagerClient* client_ = nullptr;  // Unowned convenience pointer.
+  raw_ptr<ShillManagerClient, DanglingUntriaged> client_ =
+      nullptr;  // Unowned convenience pointer.
 };
 
 TEST_F(ShillManagerClientTest, PropertyChanged) {
@@ -117,20 +119,19 @@ TEST_F(ShillManagerClientTest, GetProperties) {
   writer.CloseContainer(&array_writer);
 
   // Create the expected value.
-  base::Value::Dict expected_value;
+  base::DictValue expected_value;
   expected_value.Set(shill::kArpGatewayProperty, true);
   // Set expectations.
   PrepareForMethodCall(shill::kGetPropertiesFunction,
                        base::BindRepeating(&ExpectNoArgument), response.get());
 
   // Prepare result callback to get the properties.
-  base::test::TestFuture<absl::optional<base::Value::Dict>>
-      get_properties_result;
+  base::test::TestFuture<std::optional<base::DictValue>> get_properties_result;
   // Call method.
   client_->GetProperties(get_properties_result.GetCallback());
-  absl::optional<base::Value::Dict> result = get_properties_result.Take();
+  std::optional<base::DictValue> result = get_properties_result.Take();
   EXPECT_TRUE(result.has_value());
-  const base::Value::Dict& result_value = result.value();
+  const base::DictValue& result_value = result.value();
   EXPECT_EQ(expected_value, result_value);
 }
 
@@ -162,11 +163,11 @@ TEST_F(ShillManagerClientTest, GetNetworksForGeolocation) {
   writer.CloseContainer(&type_dict_writer);
 
   // Create the expected value.
-  base::Value::Dict property_dict;
+  base::DictValue property_dict;
   property_dict.Set(shill::kGeoMacAddressProperty, "01:23:45:67:89:AB");
-  base::Value::List type_entry_list;
+  base::ListValue type_entry_list;
   type_entry_list.Append(std::move(property_dict));
-  base::Value::Dict type_dict;
+  base::DictValue type_dict;
   type_dict.Set("wifi", std::move(type_entry_list));
 
   // Set expectations.
@@ -174,13 +175,13 @@ TEST_F(ShillManagerClientTest, GetNetworksForGeolocation) {
                        base::BindRepeating(&ExpectNoArgument), response.get());
 
   // Prepare result callback to get the networks dictionary.
-  base::test::TestFuture<absl::optional<base::Value::Dict>> get_networks_result;
+  base::test::TestFuture<std::optional<base::DictValue>> get_networks_result;
   // Call method.
   client_->GetNetworksForGeolocation(get_networks_result.GetCallback());
   // Check if result is as expected.
-  absl::optional<base::Value::Dict> result = get_networks_result.Take();
+  std::optional<base::DictValue> result = get_networks_result.Take();
   EXPECT_TRUE(result.has_value());
-  const base::Value::Dict& result_value = result.value();
+  const base::DictValue& result_value = result.value();
   EXPECT_EQ(type_dict, result_value);
 }
 
@@ -303,7 +304,7 @@ TEST_F(ShillManagerClientTest, ConfigureService) {
   dbus::MessageWriter writer(response.get());
   writer.AppendObjectPath(object_path);
   // Create the argument dictionary.
-  base::Value::Dict arg = CreateExampleServiceProperties();
+  base::DictValue arg = CreateExampleServiceProperties();
   // Use a variant valued dictionary rather than a string valued one.
   const bool string_valued = false;
   // Set expectations.
@@ -331,7 +332,7 @@ TEST_F(ShillManagerClientTest, GetService) {
   dbus::MessageWriter writer(response.get());
   writer.AppendObjectPath(object_path);
   // Create the argument dictionary.
-  base::Value::Dict arg = CreateExampleServiceProperties();
+  base::DictValue arg = CreateExampleServiceProperties();
   // Use a variant valued dictionary rather than a string valued one.
   const bool string_valued = false;
   // Set expectations.
@@ -378,6 +379,58 @@ TEST_F(ShillManagerClientTest, SetTetheringEnabled) {
   EXPECT_FALSE(error_result.IsReady());
 }
 
+TEST_F(ShillManagerClientTest, EnableTethering) {
+  const char kEnabledResult[] = "success";
+  const shill::WiFiInterfacePriority kPriority =
+      shill::WiFiInterfacePriority::OS_REQUEST;
+
+  // Create response.
+  std::unique_ptr<dbus::Response> response(dbus::Response::CreateEmpty());
+  dbus::MessageWriter writer(response.get());
+  writer.AppendString(kEnabledResult);
+
+  // Set expectation.
+  PrepareForMethodCall(shill::kEnableTetheringFunction,
+                       base::BindRepeating(&ExpectUint32Argument,
+                                           static_cast<uint32_t>(kPriority)),
+                       response.get());
+  // Call method.
+  base::test::TestFuture<std::string> enable_tethering_result;
+  base::test::TestFuture<std::string, std::string> error_result;
+  client_->EnableTethering(
+      kPriority, enable_tethering_result.GetCallback<const std::string&>(),
+      error_result.GetCallback<const std::string&, const std::string&>());
+  const std::string& enabled_result = enable_tethering_result.Get();
+  EXPECT_EQ(kEnabledResult, enabled_result);
+  // The EnableTethering() error callback should not be invoked after
+  // successful completion.
+  EXPECT_FALSE(error_result.IsReady());
+}
+
+TEST_F(ShillManagerClientTest, DisableTethering) {
+  const char kDisabledResult[] = "success";
+
+  // Create response.
+  std::unique_ptr<dbus::Response> response(dbus::Response::CreateEmpty());
+  dbus::MessageWriter writer(response.get());
+  writer.AppendString(kDisabledResult);
+
+  // Set expectation.
+  PrepareForMethodCall(shill::kDisableTetheringFunction,
+                       base::BindRepeating(&ExpectNoArgument), response.get());
+  // Call method.
+  base::test::TestFuture<std::string> disable_tethering_result;
+  base::test::TestFuture<std::string, std::string> error_result;
+  client_->DisableTethering(
+      disable_tethering_result.GetCallback<const std::string&>(),
+      error_result.GetCallback<const std::string&, const std::string&>());
+  const std::string& disabled_result = disable_tethering_result.Get();
+  EXPECT_EQ(kDisabledResult, disabled_result);
+  // The DisableTethering() error callback should not be invoked after
+  // successful completion.
+  EXPECT_FALSE(error_result.IsReady());
+}
+
 TEST_F(ShillManagerClientTest, CheckTetheringReadiness) {
   const char kReadinessResult[] = "not_ready";
 
@@ -400,6 +453,142 @@ TEST_F(ShillManagerClientTest, CheckTetheringReadiness) {
   // The CheckTetheringReadiness() error callback should not be invoked after
   // successful completion.
   EXPECT_FALSE(error_result.IsReady());
+}
+
+TEST_F(ShillManagerClientTest, CreateP2PGroup) {
+  const char kShillId[] = "sample_shill_id";
+  const char kCreateGroupResult[] = "success";
+
+  const char kSSID[] = "test_ssid";
+  const char kPassphrase[] = "test_password";
+  const int kFrequency = 3;
+  const shill::WiFiInterfacePriority kPriority =
+      shill::WiFiInterfacePriority::FOREGROUND_WITHOUT_FALLBACK;
+
+  // Create response.
+  base::DictValue result_dictionary;
+  result_dictionary.Set("shill_id", kShillId);
+  result_dictionary.Set("result", kCreateGroupResult);
+
+  std::unique_ptr<dbus::Response> response(dbus::Response::CreateEmpty());
+  dbus::MessageWriter writer(response.get());
+  AppendValueDataAsVariant(&writer, result_dictionary);
+
+  // Create input dictionary
+  base::DictValue input_dictionary;
+  input_dictionary.Set(shill::kP2PDeviceSSID, kSSID);
+  input_dictionary.Set(shill::kP2PDevicePassphrase, kPassphrase);
+  input_dictionary.Set(shill::kP2PDeviceFrequency, kFrequency);
+  input_dictionary.Set(shill::kP2PDevicePriority, static_cast<int>(kPriority));
+
+  // Set expectation.
+  const bool string_valued = false;
+  PrepareForMethodCall(shill::kCreateP2PGroupFunction,
+                       base::BindRepeating(&ExpectValueDictionaryArgument,
+                                           &input_dictionary, string_valued),
+                       response.get());
+
+  base::test::TestFuture<base::DictValue> create_p2p_group_result;
+  base::test::TestFuture<std::string, std::string> error_result;
+  client_->CreateP2PGroup(
+      ShillManagerClient::CreateP2PGroupParameter(kSSID, kPassphrase,
+                                                  kFrequency, kPriority),
+      create_p2p_group_result.GetCallback<base::DictValue>(),
+      error_result.GetCallback<const std::string&, const std::string&>());
+  EXPECT_EQ(create_p2p_group_result.Get(), result_dictionary);
+}
+
+TEST_F(ShillManagerClientTest, ConnectToP2PGroup) {
+  const char kShillId[] = "sample_shill_id";
+  const char kConnectToGroupResult[] = "success";
+
+  const char kSSID[] = "test_ssid";
+  const char kPassphrase[] = "test_passphrase";
+  const int kFrequency = 3;
+
+  // Create response.
+  base::DictValue result_dictionary;
+  result_dictionary.Set("shill_id", kShillId);
+  result_dictionary.Set("result", kConnectToGroupResult);
+
+  std::unique_ptr<dbus::Response> response(dbus::Response::CreateEmpty());
+  dbus::MessageWriter writer(response.get());
+  AppendValueDataAsVariant(&writer, result_dictionary);
+
+  // Create input dictionary
+  base::DictValue input_dictionary;
+  input_dictionary.Set(shill::kP2PDeviceSSID, kSSID);
+  input_dictionary.Set(shill::kP2PDevicePassphrase, kPassphrase);
+  input_dictionary.Set(shill::kP2PDeviceFrequency, kFrequency);
+  input_dictionary.Set(shill::kP2PDevicePriority, 2);
+
+  // Set expectation.
+  const bool string_valued = false;
+  PrepareForMethodCall(shill::kConnectToP2PGroupFunction,
+                       base::BindRepeating(&ExpectValueDictionaryArgument,
+                                           &input_dictionary, string_valued),
+                       response.get());
+
+  base::test::TestFuture<base::DictValue> connect_to_p2p_group_result;
+  base::test::TestFuture<std::string, std::string> error_result;
+  client_->ConnectToP2PGroup(
+      ShillManagerClient::ConnectP2PGroupParameter(kSSID, kPassphrase,
+                                                   kFrequency, std::nullopt),
+      connect_to_p2p_group_result.GetCallback<base::DictValue>(),
+      error_result.GetCallback<const std::string&, const std::string&>());
+  EXPECT_EQ(connect_to_p2p_group_result.Get(), result_dictionary);
+}
+
+TEST_F(ShillManagerClientTest, DestroyP2PGroup) {
+  const int kShillId = 57;
+  const char kDestroyGroupResult[] = "success";
+
+  // Create response.
+  base::DictValue result_dictionary;
+  result_dictionary.Set("shill_id", kShillId);
+  result_dictionary.Set("result", kDestroyGroupResult);
+
+  std::unique_ptr<dbus::Response> response(dbus::Response::CreateEmpty());
+  dbus::MessageWriter writer(response.get());
+  AppendValueDataAsVariant(&writer, result_dictionary);
+
+  // Set expectation.
+  PrepareForMethodCall(shill::kDestroyP2PGroupFunction,
+                       base::BindRepeating(&ExpectIntArgument, kShillId),
+                       response.get());
+
+  base::test::TestFuture<base::DictValue> destroy_p2p_group_result;
+  base::test::TestFuture<std::string, std::string> error_result;
+  client_->DestroyP2PGroup(
+      kShillId, destroy_p2p_group_result.GetCallback<base::DictValue>(),
+      error_result.GetCallback<const std::string&, const std::string&>());
+  EXPECT_EQ(destroy_p2p_group_result.Get(), result_dictionary);
+}
+
+TEST_F(ShillManagerClientTest, DisconnectFromP2PGroup) {
+  const int kShillId = 57;
+  const char kDisconnectFromGroupResult[] = "success";
+
+  // Create response.
+  base::DictValue result_dictionary;
+  result_dictionary.Set("shill_id", kShillId);
+  result_dictionary.Set("result", kDisconnectFromGroupResult);
+
+  std::unique_ptr<dbus::Response> response(dbus::Response::CreateEmpty());
+  dbus::MessageWriter writer(response.get());
+  AppendValueDataAsVariant(&writer, result_dictionary);
+
+  // Set expectation.
+  PrepareForMethodCall(shill::kDisconnectFromP2PGroupFunction,
+                       base::BindRepeating(&ExpectIntArgument, kShillId),
+                       response.get());
+
+  base::test::TestFuture<base::DictValue> disconnect_from_p2p_group_result;
+  base::test::TestFuture<std::string, std::string> error_result;
+  client_->DisconnectFromP2PGroup(
+      kShillId, disconnect_from_p2p_group_result.GetCallback<base::DictValue>(),
+      error_result.GetCallback<const std::string&, const std::string&>());
+  EXPECT_EQ(disconnect_from_p2p_group_result.Get(), result_dictionary);
 }
 
 }  // namespace ash

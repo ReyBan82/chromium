@@ -6,14 +6,12 @@
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/run_loop.h"
 #include "base/test/gtest_util.h"
 #include "base/unguessable_token.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "components/paint_preview/browser/compositor_utils.h"
 #include "components/paint_preview/browser/paint_preview_base_service_test_factory.h"
@@ -78,8 +76,8 @@ class PaintPreviewCompositorBrowserTest : public InProcessBrowserTest {
  protected:
   void CreateServiceInstance() {
     key_ = std::make_unique<SimpleFactoryKey>(
-        browser()->profile()->GetPath(),
-        browser()->profile()->IsOffTheRecord());
+        browser()->GetProfile()->GetPath(),
+        browser()->GetProfile()->IsOffTheRecord());
     PaintPreviewBaseServiceTestFactory::GetInstance()->SetTestingFactory(
         key_.get(),
         base::BindRepeating(&PaintPreviewBaseServiceTestFactory::Build));
@@ -125,8 +123,8 @@ IN_PROC_BROWSER_TEST_F(PaintPreviewCompositorBrowserTest, CompositorCreate) {
       compositor_service->CreateCompositor(loop.QuitClosure()));
   loop.Run();
   EXPECT_TRUE(compositor_service->HasActiveClients());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor->Token()));
   EXPECT_TRUE(IsBoundAndConnected(compositor.get()));
   compositor.reset();
 
@@ -147,8 +145,8 @@ IN_PROC_BROWSER_TEST_F(PaintPreviewCompositorBrowserTest,
   loop_0.Run();
   EXPECT_TRUE(compositor_service->HasActiveClients());
   EXPECT_EQ(1U, compositor_service->ActiveClientsForTesting().size());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor_0->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor_0->Token()));
 
   EXPECT_TRUE(IsBoundAndConnected(compositor_0.get()));
 
@@ -158,16 +156,16 @@ IN_PROC_BROWSER_TEST_F(PaintPreviewCompositorBrowserTest,
   loop_1.Run();
   EXPECT_TRUE(compositor_service->HasActiveClients());
   EXPECT_EQ(2U, compositor_service->ActiveClientsForTesting().size());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor_1->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor_1->Token()));
   EXPECT_TRUE(IsBoundAndConnected(compositor_1.get()));
   EXPECT_NE(compositor_0->Token(), compositor_1->Token());
 
   compositor_0.reset();
   EXPECT_TRUE(compositor_service->HasActiveClients());
   EXPECT_EQ(1U, compositor_service->ActiveClientsForTesting().size());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor_1->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor_1->Token()));
 
   compositor_1.reset();
   EXPECT_FALSE(compositor_service->HasActiveClients());
@@ -187,8 +185,8 @@ IN_PROC_BROWSER_TEST_F(PaintPreviewCompositorBrowserTest,
       compositor_service->CreateCompositor(loop.QuitClosure()));
   loop.Run();
   EXPECT_TRUE(compositor_service->HasActiveClients());
-  EXPECT_TRUE(base::Contains(compositor_service->ActiveClientsForTesting(),
-                             compositor->Token()));
+  EXPECT_TRUE(compositor_service->ActiveClientsForTesting().contains(
+      compositor->Token()));
   EXPECT_TRUE(IsBoundAndConnected(compositor.get()));
 
   base::RunLoop disconnect_loop;

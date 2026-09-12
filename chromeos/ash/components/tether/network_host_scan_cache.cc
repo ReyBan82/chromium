@@ -4,7 +4,9 @@
 
 #include "chromeos/ash/components/tether/network_host_scan_cache.h"
 
-#include "base/containers/contains.h"
+#include <algorithm>
+
+#include "base/notimplemented.h"
 #include "chromeos/ash/components/multidevice/logging/logging.h"
 #include "chromeos/ash/components/network/network_state.h"
 #include "chromeos/ash/components/network/network_state_handler.h"
@@ -22,12 +24,11 @@ NetworkHostScanCache::NetworkHostScanCache(
     : network_state_handler_(network_state_handler),
       tether_host_response_recorder_(tether_host_response_recorder),
       device_id_tether_network_guid_map_(device_id_tether_network_guid_map) {
-  tether_host_response_recorder_->AddObserver(this);
+  tether_host_response_recorder_observer_.Observe(
+      tether_host_response_recorder_);
 }
 
-NetworkHostScanCache::~NetworkHostScanCache() {
-  tether_host_response_recorder_->RemoveObserver(this);
-}
+NetworkHostScanCache::~NetworkHostScanCache() = default;
 
 void NetworkHostScanCache::SetHostScanResult(const HostScanCacheEntry& entry) {
   if (!ExistsInCache(entry.tether_network_guid)) {
@@ -119,7 +120,7 @@ bool NetworkHostScanCache::HasConnectedToHost(
           tether_network_guid);
   std::vector<std::string> connected_device_ids =
       tether_host_response_recorder_->GetPreviouslyConnectedHostIds();
-  return base::Contains(connected_device_ids, device_id);
+  return std::ranges::contains(connected_device_ids, device_id);
 }
 
 }  // namespace tether

@@ -6,11 +6,14 @@
 
 #include "base/logging.h"
 #include "base/values.h"
-#include "build/chromeos_buildflags.h"
-#include "chrome/browser/policy/profile_policy_connector.h"
+#include "build/build_config.h"
+#include "chrome/browser/policy/profile_policy_connector.h"  // nogncheck crbug.com/40258930
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/profiles/profiles_state.h"
 #include "content/public/browser/browser_thread.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chromeos/components/mgs/managed_guest_session_utils.h"
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 namespace apps {
 
@@ -33,7 +36,7 @@ std::string DetermineUserType(Profile* profile) {
     return kUserTypeChild;
   if (profile->GetProfilePolicyConnector()->IsManaged()) {
 #if BUILDFLAG(IS_CHROMEOS)
-    if (profiles::IsPublicSession()) {
+    if (chromeos::IsManagedGuestSession()) {
       return kUserTypeManagedGuest;
     }
 #endif  // BUILDFLAG(IS_CHROMEOS)
@@ -44,9 +47,9 @@ std::string DetermineUserType(Profile* profile) {
 
 bool UserTypeMatchesJsonUserType(const std::string& user_type,
                                  const std::string& app_id,
-                                 const base::Value::Dict& json_root,
-                                 const base::Value::List* default_user_types) {
-  const base::Value::List* value = json_root.FindList(kKeyUserType);
+                                 const base::DictValue& json_root,
+                                 const base::ListValue* default_user_types) {
+  const base::ListValue* value = json_root.FindList(kKeyUserType);
   if (!value) {
     if (!default_user_types) {
       LOG(ERROR) << "Json has no user type filter for " << app_id << ".";

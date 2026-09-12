@@ -22,16 +22,12 @@ struct PLATFORM_EXPORT SchedulingPolicy {
   struct DisableBackForwardCache {};
   struct DisableAlignWakeUps {};
 
-  struct ValidPolicies {
-    ValidPolicies(DisableAggressiveThrottling);
-    ValidPolicies(DisableBackForwardCache);
-    ValidPolicies(DisableAlignWakeUps);
-  };
+  using ValidPolicies = base::ParameterPack<DisableAggressiveThrottling,
+                                            DisableBackForwardCache,
+                                            DisableAlignWakeUps>;
 
-  template <class... ArgTypes,
-            class CheckArgumentsAreValid = std::enable_if_t<
-                base::trait_helpers::AreValidTraits<ValidPolicies,
-                                                    ArgTypes...>::value>>
+  template <class... ArgTypes>
+    requires base::trait_helpers::AreValidTraits<ValidPolicies, ArgTypes...>
   constexpr SchedulingPolicy(ArgTypes... args)
       : disable_aggressive_throttling(
             base::trait_helpers::HasTrait<DisableAggressiveThrottling,

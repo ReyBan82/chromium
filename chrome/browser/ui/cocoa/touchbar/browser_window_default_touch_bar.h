@@ -6,15 +6,14 @@
 #define CHROME_BROWSER_UI_COCOA_TOUCHBAR_BROWSER_WINDOW_DEFAULT_TOUCH_BAR_H_
 
 #import <Cocoa/Cocoa.h>
-#include <os/availability.h>
 
 class BookmarkTabHelperObserver;
-class Browser;
+class BrowserWindowInterface;
 @class BrowserWindowTouchBarController;
 
 // Provides a default touch bar for the browser window. This class implements
 // the NSTouchBarDelegate and handles the items in the touch bar.
-@interface BrowserWindowDefaultTouchBar : NSObject<NSTouchBarDelegate>
+@interface BrowserWindowDefaultTouchBar : NSObject <NSTouchBarDelegate>
 // True is the current page is loading. Used to determine if a stop or reload
 // button should be provided.
 @property(nonatomic, assign) BOOL isPageLoading;
@@ -28,9 +27,9 @@ class Browser;
 // True if the forward button is enabled.
 @property(nonatomic, assign) BOOL canGoForward;
 
-@property(nonatomic, assign) BrowserWindowTouchBarController* controller;
+@property(nonatomic, weak) BrowserWindowTouchBarController* controller;
 
-@property(nonatomic) Browser* browser;
+@property(nonatomic) BrowserWindowInterface* browser;
 
 // Creates and returns a touch bar for the browser window.
 - (NSTouchBar*)makeTouchBar;

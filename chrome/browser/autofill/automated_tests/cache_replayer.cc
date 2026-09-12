@@ -5,6 +5,7 @@
 #include "chrome/browser/autofill/automated_tests/cache_replayer.h"
 
 #include <algorithm>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -13,14 +14,13 @@
 #include "base/base64url.h"
 #include "base/cancelable_callback.h"
 #include "base/command_line.h"
-#include "base/containers/contains.h"
 #include "base/files/file_util.h"
 #include "base/json/json_reader.h"
 #include "base/memory/raw_ptr.h"
+#include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/test/bind.h"
@@ -106,8 +106,7 @@ bool CheckNodeType(const base::Value* node,
   return true;
 }
 
-// Parse AutofillQueryContents or AutofillQueryResponseContents from the given
-// |http_text|.
+// Parse AutofillQueryResponse from the given |http_text|.
 template <class T>
 ErrorOr<T> ParseProtoContents(const std::string& http_text) {
   T proto_contents;
@@ -121,34 +120,34 @@ ErrorOr<T> ParseProtoContents(const std::string& http_text) {
 
 // Gets base64 encoded query parameter from the URL.
 ErrorOr<std::string> GetQueryParameter(const GURL& url) {
-  std::string value = url.path();
+  std::string value = url.GetPath();
   if (value.find(kApiServerQueryPath) != 0) {
     // This situation will never happen if check for the query path is
     // done before calling this function.
     return base::unexpected(
-        base::StrCat({"could not get any value from query path in "
-                      "Query GET URL: ",
-                      url.spec()}));
+        "could not get any value from query path in Query GET URL: " +
+        url.spec());
   }
   size_t slash = value.find('/', strlen(kApiServerQueryPath));
   if (slash != std::string::npos) {
-    return base::ok(value.substr(slash + 1));
+    return base::ok(std::move(value).substr(slash + 1));
   } else {
     return base::unexpected(
-        base::StrCat({"could not get any value from query path in "
-                      "Query GET URL: ",
-                      url.spec()}));
+        "could not get any value from query path in Query GET URL: " +
+        url.spec());
   }
 }
 
 // Returns whether the |url| points to a GET or POST query, or neither.
 RequestType GetRequestTypeFromURL(const GURL& url) {
-  if (url.host() != kApiServerDomain ||
-      url.path().find(kApiServerQueryPath) != 0) {
+  std::string url_path = url.GetPath();
+  if (url.GetHost() != kApiServerDomain ||
+      url_path.find(kApiServerQueryPath) != 0) {
     return RequestType::kNone;
   }
 
-  std::string path = url.path().substr(strlen(kApiServerQueryPath));
+  std::string_view path =
+      std::string_view(url_path).substr(strlen(kApiServerQueryPath));
   return path == ":get" || path == ":get/" ? RequestType::kQueryProtoPOST
                                            : RequestType::kQueryProtoGET;
 }
@@ -167,7 +166,7 @@ ErrorOr<AutofillPageQueryRequest> GetAutofillQueryFromGETQueryURL(
                              &decoded_query)) {
     return base::unexpected(base::StrCat(
         {"could not base64-decode value of path in Query GET URL: \"",
-         query_parameter->c_str(), "\""}));
+         *query_parameter, "\""}));
   }
   return ParseProtoContents<AutofillPageQueryRequest>(decoded_query);
 }
@@ -183,7 +182,7 @@ std::string GetStringFromDataElements(
     // Provide the length of the bytes explicitly, not to rely on the null
     // termination.
     const auto piece = element.As<network::DataElementBytes>().AsStringPiece();
-    result.append(piece.data(), piece.size());
+    result.append(piece);
   }
   return result;
 }
@@ -212,11 +211,10 @@ ErrorOr<std::string> PeelAutofillPageResourceQueryRequestWrapper(
 // Gets Query request proto content from HTTP POST body.
 ErrorOr<AutofillPageQueryRequest> GetAutofillQueryFromPOSTQuery(
     const network::ResourceRequest& resource_request) {
-  ErrorOr<std::string> query = PeelAutofillPageResourceQueryRequestWrapper(
-      GetStringFromDataElements(resource_request.request_body->elements()));
-  if (!query.has_value())
-    return base::unexpected(query.error());
-  return ParseProtoContents<AutofillPageQueryRequest>(query.value());
+  return PeelAutofillPageResourceQueryRequestWrapper(
+             GetStringFromDataElements(
+                 resource_request.request_body->elements()))
+      .and_then(ParseProtoContents<AutofillPageQueryRequest>);
 }
 
 bool IsSingleFormRequest(const AutofillPageQueryRequest& query) {
@@ -225,8 +223,8 @@ bool IsSingleFormRequest(const AutofillPageQueryRequest& query) {
 
 // Validates, retrieves, and decodes node |node_name| from |request_node| and
 // returns it in |decoded_value|. Returns false if unsuccessful.
-bool RetrieveValueFromRequestNode(const base::Value::Dict& request_node,
-                                  const std::string node_name,
+bool RetrieveValueFromRequestNode(const base::DictValue& request_node,
+                                  const std::string& node_name,
                                   std::string* decoded_value) {
   // Get and check field node string.
   std::string serialized_value;
@@ -249,29 +247,24 @@ bool RetrieveValueFromRequestNode(const base::Value::Dict& request_node,
   return true;
 }
 
-// Gets AutofillQueryContents from WPR recorded HTTP request body for POST.
+// Gets AutofillPageQueryRequest from WPR recorded HTTP request body for POST.
 ErrorOr<AutofillPageQueryRequest> GetAutofillQueryFromRequestNode(
-    const base::Value::Dict& request_node) {
+    const base::DictValue& request_node) {
   std::string decoded_request_text;
   if (!RetrieveValueFromRequestNode(request_node, "SerializedRequest",
                                     &decoded_request_text)) {
     return base::unexpected(
         "Unable to retrieve serialized request from WPR request_node");
   }
-  std::string http_text = SplitHTTP(decoded_request_text).second;
-  ErrorOr<std::string> query =
-      PeelAutofillPageResourceQueryRequestWrapper(http_text);
-  if (!query.has_value()) {
-    return base::unexpected(query.error());
-  }
-  http_text = query.value();
-  return ParseProtoContents<AutofillPageQueryRequest>(http_text);
+  std::string http_text = std::move(SplitHTTP(decoded_request_text).second);
+  return PeelAutofillPageResourceQueryRequestWrapper(http_text).and_then(
+      ParseProtoContents<AutofillPageQueryRequest>);
 }
 
-// Gets AutofillQueryResponseContents from WPR recorded HTTP response body.
+// Gets AutofillQueryResponse from WPR recorded HTTP response body.
 // Also populates and returns the split |response_header_text|.
 ErrorOr<AutofillQueryResponse> GetAutofillResponseFromRequestNode(
-    const base::Value::Dict& request_node,
+    const base::DictValue& request_node,
     std::string* response_header_text) {
   std::string compressed_response_text;
   if (!RetrieveValueFromRequestNode(request_node, "SerializedResponse",
@@ -282,13 +275,12 @@ ErrorOr<AutofillQueryResponse> GetAutofillResponseFromRequestNode(
   auto http_pair = SplitHTTP(compressed_response_text);
   std::string decompressed_body;
   if (!compression::GzipUncompress(http_pair.second, &decompressed_body)) {
-    return base::unexpected(
-        base::StrCat({"Could not gzip decompress HTTP response: ",
-                      GetHexString(http_pair.second)}));
+    return base::unexpected("Could not gzip decompress HTTP response: " +
+                            GetHexString(http_pair.second));
   }
 
   // Eventual response needs header information, so lift that as well.
-  *response_header_text = http_pair.first;
+  *response_header_text = std::move(http_pair.first);
 
   // The Api Environment expects the response to be base64 encoded.
   std::string tmp;
@@ -322,7 +314,7 @@ bool FillFormSplitCache(const AutofillPageQueryRequest& query_request,
     std::string key = base::NumberToString(query_form.signature());
     // If already stored a respones for this key, then just advance the
     // current_field by that offset and continue.
-    if (base::Contains((*cache_to_fill), key)) {
+    if (cache_to_fill->contains(key)) {
       VLOG(2) << "Already added key: " << key;
       continue;
     }
@@ -338,8 +330,8 @@ bool FillFormSplitCache(const AutofillPageQueryRequest& query_request,
       continue;
     }
     // Chrome expects the response to be base64 encoded.
-    std::string serialized_response_base64;
-    base::Base64Encode(serialized_response, &serialized_response_base64);
+    std::string serialized_response_base64 =
+        base::Base64Encode(serialized_response);
     std::string compressed_response_body;
     if (!compression::GzipCompress(serialized_response_base64,
                                    &compressed_response_body)) {
@@ -350,7 +342,7 @@ bool FillFormSplitCache(const AutofillPageQueryRequest& query_request,
     std::string http_text =
         MakeHTTPTextFromSplit(response_header_text, compressed_response_body);
 
-    VLOG(1) << "Adding key:" << key
+    VLOG(2) << "Adding key:" << key
             << "\nAnd response:" << individual_form_response;
     (*cache_to_fill)[key] = std::move(http_text);
   }
@@ -376,7 +368,7 @@ ServerCacheReplayer::Status PopulateCacheFromQueryNode(
   bool fail_on_error = FailOnError(options);
   bool split_requests_by_form = SplitRequestsByForm(options);
   for (const base::Value& request : query_node.node->GetList()) {
-    // Get AutofillQueryContents from request.
+    // Get AutofillPageQueryRequest from request.
     bool is_post_request =
         GetRequestTypeFromURL(query_node.url) == RequestType::kQueryProtoPOST;
     ErrorOr<AutofillPageQueryRequest> query_request_statusor =
@@ -398,12 +390,12 @@ ServerCacheReplayer::Status PopulateCacheFromQueryNode(
         if (RetrieveValueFromRequestNode(request.GetDict(),
                                          "SerializedResponse",
                                          &compressed_response_text)) {
-          (*cache_to_fill)[key] = compressed_response_text;
-          VLOG(1) << "Cached response content for key: " << key;
+          (*cache_to_fill)[key] = std::move(compressed_response_text);
+          VLOG(2) << "Cached response content for key: " << key;
           continue;
         }
       } else {
-        // Get AutofillQueryResponseContents and response header text.
+        // Get AutofillQueryResponse and response header text.
         std::string response_header_text;
         ErrorOr<AutofillQueryResponse> query_response_statusor =
             GetAutofillResponseFromRequestNode(request.GetDict(),
@@ -414,7 +406,7 @@ ServerCacheReplayer::Status PopulateCacheFromQueryNode(
           continue;
         }
         // We have a proper request and a proper response, we can populate for
-        // each form in the AutofillQueryContents.
+        // each form in the AutofillPageQueryRequest.
         if (FillFormSplitCache(
                 query_request_statusor.value(), response_header_text,
                 query_response_statusor.value(), cache_to_fill)) {
@@ -424,7 +416,7 @@ ServerCacheReplayer::Status PopulateCacheFromQueryNode(
     }
     // If we've fallen to this level, something went bad with adding the request
     // node. If fail_on_error is set then abort, else log and try the next one.
-    constexpr base::StringPiece status_msg =
+    constexpr std::string_view status_msg =
         "could not cache query node content";
     if (fail_on_error) {
       return ServerCacheReplayer::Status{
@@ -440,7 +432,7 @@ ServerCacheReplayer::Status PopulateCacheFromQueryNode(
 // Finds the Autofill server Query nodes in a dictionary node. The |domain| has
 // to outlive any usage of the returned value node pointers.
 std::vector<QueryNode> FindQueryNodesInDomainDict(
-    const base::Value::Dict& domain,
+    const base::DictValue& domain,
     const std::string& url_prefix) {
   std::vector<QueryNode> nodes;
   for (auto pair : domain) {
@@ -491,11 +483,11 @@ ServerCacheReplayer::Status PopulateCacheFromJSONFile(
 
   {
     std::vector<QueryNode> query_nodes;
-    const base::Value::Dict* root_node_dict = root_node.GetIfDict();
+    const base::DictValue* root_node_dict = root_node.GetIfDict();
     if (root_node_dict) {
-      const base::Value::Dict* requests = root_node_dict->FindDict("Requests");
+      const base::DictValue* requests = root_node_dict->FindDict("Requests");
       if (requests) {
-        const base::Value::Dict* domain_node =
+        const base::DictValue* domain_node =
             requests->FindDict(kApiServerDomain);
         if (domain_node) {
           query_nodes =
@@ -526,7 +518,7 @@ ServerCacheReplayer::Status PopulateCacheFromJSONFile(
           PopulateCacheFromQueryNode(query_node, options, cache_to_fill);
       if (!status.Ok())
         return status;
-      VLOG(1) << "Filled cache with " << cache_to_fill->size()
+      VLOG(2) << "Filled cache with " << cache_to_fill->size()
               << " requests for Query node with URL: " << query_node.url;
     }
   }
@@ -566,7 +558,7 @@ bool RetrieveAndDecompressStoredHTTP(const ServerCache& cache,
     VLOG(1) << "There is no HTTP body to decompress: " << http_text;
     return true;
   }
-  // TODO(crbug.com/945925): Add compression format detection, return an
+  // TODO(crbug.com/40620146): Add compression format detection, return an
   // error if not supported format.
   // Decompress the body.
   std::string decompressed_body;
@@ -598,39 +590,34 @@ AutofillServerBehaviorType ParseAutofillServerBehaviorType() {
                                               "OnlyLocalHeuristics")) {
     return AutofillServerBehaviorType::kOnlyLocalHeuristics;
   } else {
-    CHECK(false) << "Unrecognized command line value give for `"
+    NOTREACHED() << "Unrecognized command line value give for `"
                  << kAutofillServerBehaviorParam << "` argument: `"
                  << autofill_server_option << "`";
-    return AutofillServerBehaviorType::kSavedCache;
   }
 }
 
 // Gives a pair that contains the HTTP text split in 2, where the first
 // element is the HTTP head and the second element is the HTTP body.
-std::pair<std::string, std::string> SplitHTTP(const std::string& http_text) {
+std::pair<std::string, std::string> SplitHTTP(std::string_view http_text) {
   const size_t split_index = http_text.find(kHTTPBodySep);
   if (split_index != std::string::npos) {
-    const size_t sep_length = std::string(kHTTPBodySep).size();
-    std::string head = http_text.substr(0, split_index);
-    std::string body =
+    const size_t sep_length = std::string_view(kHTTPBodySep).size();
+    std::string_view head = http_text.substr(0, split_index);
+    std::string_view body =
         http_text.substr(split_index + sep_length, std::string::npos);
-    return std::make_pair(std::move(head), std::move(body));
+    return std::pair<std::string, std::string>(head, body);
   }
-  return std::make_pair("", "");
+  return {std::string(), std::string()};
 }
 
 // Streams in text format. For consistency, taken from anonymous namespace in
-// components/autofill/core/browser/autofill_download_manager.cc
+// components/autofill/core/browser/crowdsourcing/autofill_crowdsourcing_manager.cc
 std::ostream& operator<<(std::ostream& out,
-                         const autofill::AutofillPageQueryRequest& query) {
+                         const AutofillPageQueryRequest& query) {
   for (const auto& form : query.forms()) {
-    out << "\nForm\n signature: " << form.signature();
+    out << "\nForm signature: " << form.signature();
     for (const auto& field : form.fields()) {
-      out << "\n Field\n  signature: " << field.signature();
-      if (!field.name().empty())
-        out << "\n  name: " << field.name();
-      if (!field.control_type().empty())
-        out << "\n  control_type: " << field.control_type();
+      out << "\n Field signature: " << field.signature();
     }
   }
   return out;
@@ -639,7 +626,7 @@ std::ostream& operator<<(std::ostream& out,
 // Streams in text format. For consistency, taken from anonymous namespace in
 // components/autofill/core/browser/form_structure.cc
 std::ostream& operator<<(std::ostream& out,
-                         const autofill::AutofillQueryResponse& response) {
+                         const AutofillQueryResponse& response) {
   for (const auto& form : response.form_suggestions()) {
     out << "\nForm";
     for (const auto& field : form.field_suggestions()) {
@@ -716,7 +703,7 @@ bool GetResponseForQuery(const ServerCacheReplayer& cache_replayer,
   bool split_requests_by_form = cache_replayer.split_requests_by_form();
   std::string combined_key = GetKeyFromQuery(query);
 
-  if (base::Contains(cache, combined_key)) {
+  if (cache.contains(combined_key)) {
     VLOG(1) << "Retrieving response for " << combined_key;
     std::string decompressed_http_response;
     if (!RetrieveAndDecompressStoredHTTP(cache, combined_key,
@@ -739,7 +726,7 @@ bool GetResponseForQuery(const ServerCacheReplayer& cache_replayer,
   bool first_loop = true;
   for (const auto& form : GetFormsRef(query)) {
     std::string key = base::NumberToString(form.signature());
-    if (!base::Contains(cache, key)) {
+    if (!cache.contains(key)) {
       VLOG(2) << "Stubbing in fields for uncached key `" << key << "`.";
       CreateEmptyResponseForFormQuery(form, &combined_form_response);
       continue;
@@ -784,9 +771,7 @@ bool GetResponseForQuery(const ServerCacheReplayer& cache_replayer,
     return false;
   }
   // The Api Environment expects the response body to be base64 encoded.
-  std::string tmp;
-  base::Base64Encode(serialized_response, &tmp);
-  serialized_response = tmp;
+  serialized_response = base::Base64Encode(serialized_response);
 
   VLOG(1) << "Retrieving stitched response for " << combined_key;
   *http_text = MakeHTTPTextFromSplit(response_header_text, serialized_response);
@@ -813,7 +798,7 @@ ServerUrlLoader::ServerUrlLoader(
   CHECK(cache_replayer_);
 }
 
-ServerUrlLoader::~ServerUrlLoader() {}
+ServerUrlLoader::~ServerUrlLoader() = default;
 
 bool WriteNotFoundResponse(
     content::URLLoaderInterceptor::RequestParams* params) {
@@ -878,7 +863,7 @@ bool InterceptAutofillRequestHelper(
   auto http_pair = SplitHTTP(http_response);
   content::URLLoaderInterceptor::WriteResponse(
       http_pair.first, http_pair.second, params->client.get());
-  VLOG(1) << "Giving back response from cache";
+  VLOG(2) << "Giving back response from cache";
   return true;
 }
 
@@ -886,8 +871,9 @@ bool ServerUrlLoader::InterceptAutofillRequest(
     content::URLLoaderInterceptor::RequestParams* params) {
   const network::ResourceRequest& resource_request = params->url_request;
   const GURL& request_url = resource_request.url;
-  bool api_query_request = (request_url.host() == kApiServerDomain &&
-                            request_url.path().find(kApiServerQueryPath) == 0);
+  bool api_query_request =
+      (request_url.GetHost() == kApiServerDomain &&
+       request_url.GetPath().find(kApiServerQueryPath) == 0);
   if (api_query_request) {
     // Check what the set behavior type is.
     //   For Production Server, return false to say don't intercept.

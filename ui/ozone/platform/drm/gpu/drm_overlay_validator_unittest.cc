@@ -11,9 +11,13 @@
 #include <algorithm>
 #include <memory>
 #include <utility>
+#include <variant>
 
+#include "base/memory/raw_ptr.h"
 #include "base/test/task_environment.h"
+#include "components/viz/common/resources/shared_image_format.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gfx/gpu_fence.h"
 #include "ui/gfx/linux/drm_util_linux.h"
@@ -25,9 +29,9 @@
 #include "ui/ozone/platform/drm/gpu/drm_device_manager.h"
 #include "ui/ozone/platform/drm/gpu/drm_framebuffer.h"
 #include "ui/ozone/platform/drm/gpu/drm_window.h"
+#include "ui/ozone/platform/drm/gpu/fake_drm_device.h"
 #include "ui/ozone/platform/drm/gpu/hardware_display_controller.h"
 #include "ui/ozone/platform/drm/gpu/hardware_display_plane.h"
-#include "ui/ozone/platform/drm/gpu/mock_drm_device.h"
 #include "ui/ozone/platform/drm/gpu/screen_manager.h"
 #include "ui/ozone/public/overlay_surface_candidate.h"
 
@@ -82,7 +86,7 @@ class DrmOverlayValidatorTest : public testing::Test {
     CommitRequest commit_request;
 
     DrmOverlayPlaneList modeset_planes;
-    modeset_planes.emplace_back(CreateBuffer(), nullptr);
+    modeset_planes.push_back(DrmOverlayPlane::TestPlane(CreateBuffer()));
 
     controller->GetModesetProps(&commit_request, modeset_planes, kDefaultMode,
                                 /*enable_vrr=*/false);
@@ -122,11 +126,11 @@ class DrmOverlayValidatorTest : public testing::Test {
 
   base::test::SingleThreadTaskEnvironment task_environment_{
       base::test::SingleThreadTaskEnvironment::MainThreadType::UI};
-  scoped_refptr<MockDrmDevice> drm_;
-  MockGbmDevice* gbm_ = nullptr;
+  scoped_refptr<FakeDrmDevice> drm_;
+  raw_ptr<MockGbmDevice> gbm_ = nullptr;
   std::unique_ptr<ScreenManager> screen_manager_;
   std::unique_ptr<DrmDeviceManager> drm_device_manager_;
-  DrmWindow* window_;
+  raw_ptr<DrmWindow, DanglingUntriaged> window_;
   std::unique_ptr<DrmOverlayValidator> overlay_validator_;
   std::vector<OverlaySurfaceCandidate> overlay_params_;
   DrmOverlayPlaneList plane_list_;
@@ -146,7 +150,7 @@ void DrmOverlayValidatorTest::SetUp() {
 
   auto gbm = std::make_unique<MockGbmDevice>();
   gbm_ = gbm.get();
-  drm_ = new MockDrmDevice(std::move(gbm));
+  drm_ = new FakeDrmDevice(std::move(gbm));
 }
 
 void DrmOverlayValidatorTest::InitDrmStatesAndControllers(
@@ -155,42 +159,36 @@ void DrmOverlayValidatorTest::InitDrmStatesAndControllers(
   size_t plane_count = crtc_states[0].planes.size();
   for (const auto& crtc_state : crtc_states) {
     ASSERT_EQ(plane_count, crtc_state.planes.size())
-        << "MockDrmDevice::CreateStateWithDefaultObjects currently expects the "
+        << "FakeDrmDevice::CreateStateWithDefaultObjects currently expects the "
            "same number of planes per CRTC";
   }
 
-  auto drm_state = MockDrmDevice::MockDrmState::CreateStateWithAllProperties();
+  drm_->ResetStateWithAllProperties();
 
-  // Set up the default format property ID for the cursor planes:
-  drm_->SetPropertyBlob(MockDrmDevice::AllocateInFormatsBlob(
-      kInFormatsBlobIdBase, {DRM_FORMAT_XRGB8888}, {}));
-
-  uint32_t blob_id = kInFormatsBlobIdBase + 1;
   std::vector<uint32_t> crtc_ids;
   for (const auto& crtc_state : crtc_states) {
-    const auto& crtc = drm_state.AddCrtcAndConnector().first;
-    crtc_ids.push_back(crtc.id);
+    uint32_t crtc_id = drm_->AddCrtcAndConnector().first.id;
+    crtc_ids.push_back(crtc_id);
 
     for (size_t i = 0; i < crtc_state.planes.size(); ++i) {
-      uint32_t new_blob_id = blob_id++;
-      drm_->SetPropertyBlob(MockDrmDevice::AllocateInFormatsBlob(
-          new_blob_id, crtc_state.planes[i].formats, {}));
+      auto in_formats_blob =
+          drm_->CreateInFormatsBlob(crtc_state.planes[i].formats, {});
 
-      auto& plane = drm_state.AddPlane(
-          crtc.id, i == 0 ? DRM_PLANE_TYPE_PRIMARY : DRM_PLANE_TYPE_OVERLAY);
-      plane.SetProp(kInFormatsPropId, new_blob_id);
+      auto& plane = drm_->AddPlane(
+          crtc_id, i == 0 ? DRM_PLANE_TYPE_PRIMARY : DRM_PLANE_TYPE_OVERLAY);
+      drm_->AddProperty(
+          plane.id, {.id = kInFormatsPropId, .value = in_formats_blob->id()});
     }
   }
 
   for (const auto& movable_plane : movable_planes) {
-    uint32_t new_blob_id = blob_id++;
-    drm_->SetPropertyBlob(MockDrmDevice::AllocateInFormatsBlob(
-        new_blob_id, movable_plane.formats, {}));
-    auto& plane = drm_state.AddPlane(crtc_ids, DRM_PLANE_TYPE_OVERLAY);
-    plane.SetProp(kInFormatsPropId, new_blob_id);
+    auto in_formats_blob = drm_->CreateInFormatsBlob(movable_plane.formats, {});
+    auto& plane = drm_->AddPlane(crtc_ids, DRM_PLANE_TYPE_OVERLAY);
+    drm_->AddProperty(plane.id,
+                      {.id = kInFormatsPropId, .value = in_formats_blob->id()});
   }
 
-  drm_->InitializeState(drm_state, /*use_atomic=*/true);
+  drm_->InitializeState(/*use_atomic=*/true);
 
   SetupControllers();
 }
@@ -202,12 +200,13 @@ void DrmOverlayValidatorTest::SetupControllers() {
   screen_manager_ = std::make_unique<ScreenManager>();
   screen_manager_->AddDisplayController(drm_, primary_crtc_id,
                                         primary_connector_id);
-  std::vector<ScreenManager::ControllerConfigParams> controllers_to_enable;
+  std::vector<ControllerConfigParams> controllers_to_enable;
   controllers_to_enable.emplace_back(
       1 /*display_id*/, drm_, primary_crtc_id, primary_connector_id,
       gfx::Point(), std::make_unique<drmModeModeInfo>(kDefaultMode));
   screen_manager_->ConfigureDisplayControllers(
-      controllers_to_enable, display::kTestModeset | display::kCommitModeset);
+      controllers_to_enable, {display::ModesetFlag::kTestModeset,
+                              display::ModesetFlag::kCommitModeset});
 
   drm_device_manager_ = std::make_unique<DrmDeviceManager>(nullptr);
 
@@ -229,7 +228,7 @@ void DrmOverlayValidatorTest::SetupControllers() {
   primary_candidate.buffer_size = primary_rect_.size();
   primary_candidate.display_rect = gfx::RectF(primary_rect_);
   primary_candidate.is_opaque = true;
-  primary_candidate.format = gfx::BufferFormat::BGRX_8888;
+  primary_candidate.format = viz::SinglePlaneFormat::kBGRX_8888;
   primary_candidate.overlay_handled = true;
   overlay_params_.push_back(primary_candidate);
   AddPlane(primary_candidate);
@@ -239,7 +238,7 @@ void DrmOverlayValidatorTest::SetupControllers() {
   overlay_candidate.display_rect = gfx::RectF(overlay_rect_);
   overlay_candidate.plane_z_order = 1;
   primary_candidate.is_opaque = true;
-  overlay_candidate.format = gfx::BufferFormat::BGRX_8888;
+  overlay_candidate.format = viz::SinglePlaneFormat::kBGRX_8888;
   overlay_candidate.overlay_handled = true;
   overlay_params_.push_back(overlay_candidate);
   AddPlane(overlay_candidate);
@@ -249,9 +248,10 @@ void DrmOverlayValidatorTest::AddPlane(const OverlaySurfaceCandidate& params) {
   scoped_refptr<DrmDevice> drm = window_->GetController()->GetDrmDevice();
 
   scoped_refptr<DrmFramebuffer> drm_framebuffer = CreateOverlayBuffer(
-      GetFourCCFormatFromBufferFormat(params.format), params.buffer_size);
+      GetFourCCFormatFromSharedImageFormat(params.format), params.buffer_size);
   plane_list_.emplace_back(
-      std::move(drm_framebuffer), params.plane_z_order, params.transform,
+      std::move(drm_framebuffer), params.color_space, params.plane_z_order,
+      std::get<gfx::OverlayTransform>(params.transform), gfx::Rect(),
       gfx::ToNearestRect(params.display_rect), params.crop_rect, true, nullptr);
 }
 
@@ -259,6 +259,12 @@ void DrmOverlayValidatorTest::TearDown() {
   std::unique_ptr<DrmWindow> window =
       screen_manager_->RemoveWindow(kDefaultWidgetHandle);
   window->Shutdown();
+  // Destroy the DrmWindow before destroying the ScreenManager.
+  window = nullptr;
+
+  // Need to ensure ScreenManager is destructed before PlaneManager.
+  screen_manager_ = nullptr;
+  drm_->ResetPlaneManagerForTesting();
 }
 
 TEST_F(DrmOverlayValidatorTest, WindowWithNoController) {
@@ -336,7 +342,7 @@ TEST_F(DrmOverlayValidatorTest, OverlayFormat_YUV) {
   overlay_params_.back().display_rect = gfx::RectF(overlay_rect_);
   overlay_params_.back().crop_rect = crop_rect;
   overlay_params_.back().is_opaque = false;
-  overlay_params_.back().format = gfx::BufferFormat::YUV_420_BIPLANAR;
+  overlay_params_.back().format = viz::MultiPlaneFormat::kNV12;
   plane_list_.pop_back();
   AddPlane(overlay_params_.back());
 
@@ -356,7 +362,7 @@ TEST_F(DrmOverlayValidatorTest, RejectYUVBuffersIfNotSupported) {
 
   overlay_params_.back().buffer_size = overlay_rect_.size();
   overlay_params_.back().display_rect = gfx::RectF(overlay_rect_);
-  overlay_params_.back().format = gfx::BufferFormat::YUV_420_BIPLANAR;
+  overlay_params_.back().format = viz::MultiPlaneFormat::kNV12;
   plane_list_.pop_back();
   AddPlane(overlay_params_.back());
 
@@ -389,7 +395,7 @@ TEST_F(DrmOverlayValidatorTest,
   plane_list_.back().crop_rect = crop_rect;
 
   std::vector<OverlaySurfaceCandidate> validated_params = overlay_params_;
-  validated_params.back().format = gfx::BufferFormat::YUV_420_BIPLANAR;
+  validated_params.back().format = viz::MultiPlaneFormat::kNV12;
   std::vector<OverlayStatus> returns =
       overlay_validator_->TestPageFlip(validated_params, DrmOverlayPlaneList());
   EXPECT_EQ(2u, returns.size());
@@ -422,7 +428,7 @@ TEST_F(DrmOverlayValidatorTest,
   plane_list_.back().crop_rect = crop_rect;
 
   std::vector<OverlaySurfaceCandidate> validated_params = overlay_params_;
-  validated_params.back().format = gfx::BufferFormat::YUV_420_BIPLANAR;
+  validated_params.back().format = viz::MultiPlaneFormat::kNV12;
   std::vector<OverlayStatus> returns =
       overlay_validator_->TestPageFlip(validated_params, DrmOverlayPlaneList());
   EXPECT_EQ(2u, returns.size());
@@ -451,7 +457,7 @@ TEST_F(DrmOverlayValidatorTest,
   plane_list_.back().crop_rect = crop_rect;
 
   std::vector<OverlaySurfaceCandidate> validated_params = overlay_params_;
-  validated_params.back().format = gfx::BufferFormat::YUV_420_BIPLANAR;
+  validated_params.back().format = viz::MultiPlaneFormat::kNV12;
 
   std::vector<OverlayStatus> returns =
       overlay_validator_->TestPageFlip(validated_params, DrmOverlayPlaneList());

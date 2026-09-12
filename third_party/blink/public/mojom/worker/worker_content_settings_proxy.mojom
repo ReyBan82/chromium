@@ -25,5 +25,5 @@ interface WorkerContentSettingsProxy {
 
   // Returns whether the worker is allowed access to the file system.
   [Sync]
-  RequestFileSystemAccessSync() => (bool result);
+  AllowFileSystem() => (bool result);
 };

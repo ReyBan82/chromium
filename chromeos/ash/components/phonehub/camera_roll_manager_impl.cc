@@ -5,6 +5,7 @@
 #include "chromeos/ash/components/phonehub/camera_roll_manager_impl.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -21,10 +22,8 @@
 #include "chromeos/ash/components/phonehub/util/histogram_util.h"
 #include "chromeos/ash/services/secure_channel/public/cpp/client/connection_manager.h"
 #include "chromeos/ash/services/secure_channel/public/mojom/secure_channel_types.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 namespace {
 
@@ -38,22 +37,17 @@ CameraRollManagerImpl::CameraRollManagerImpl(
     multidevice_setup::MultiDeviceSetupClient* multidevice_setup_client,
     secure_channel::ConnectionManager* connection_manager,
     std::unique_ptr<CameraRollDownloadManager> camera_roll_download_manager)
-    : message_receiver_(message_receiver),
-      message_sender_(message_sender),
+    : message_sender_(message_sender),
       multidevice_setup_client_(multidevice_setup_client),
       connection_manager_(connection_manager),
       camera_roll_download_manager_(std::move(camera_roll_download_manager)),
       thumbnail_decoder_(std::make_unique<CameraRollThumbnailDecoderImpl>()) {
-  message_receiver->AddObserver(this);
-  multidevice_setup_client_->AddObserver(this);
-  connection_manager_->AddObserver(this);
+  message_receiver_observation_.Observe(message_receiver);
+  multidevice_setup_client_observation_.Observe(multidevice_setup_client);
+  connection_manager_observation_.Observe(connection_manager);
 }
 
-CameraRollManagerImpl::~CameraRollManagerImpl() {
-  message_receiver_->RemoveObserver(this);
-  multidevice_setup_client_->RemoveObserver(this);
-  connection_manager_->RemoveObserver(this);
-}
+CameraRollManagerImpl::~CameraRollManagerImpl() = default;
 
 void CameraRollManagerImpl::DownloadItem(
     const proto::CameraRollItemMetadata& item_metadata) {
@@ -83,7 +77,7 @@ void CameraRollManagerImpl::OnFetchCameraRollItemDataResponseReceived(
 void CameraRollManagerImpl::OnPayloadFilesCreated(
     const proto::FetchCameraRollItemDataResponse& response,
     CameraRollDownloadManager::CreatePayloadFilesResult result,
-    absl::optional<secure_channel::mojom::PayloadFilesPtr> payload_files) {
+    std::optional<secure_channel::mojom::PayloadFilesPtr> payload_files) {
   switch (result) {
     case CameraRollDownloadManager::CreatePayloadFilesResult::kSuccess:
       connection_manager_->RegisterPayloadFile(
@@ -323,5 +317,4 @@ void CameraRollManagerImpl::ComputeAndUpdateUiState() {
   NotifyCameraRollViewUiStateUpdated();
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

@@ -15,13 +15,18 @@ import android.view.ViewGroup.LayoutParams;
 import android.widget.Button;
 import android.widget.TextView;
 
+import androidx.annotation.ColorInt;
 import androidx.annotation.VisibleForTesting;
 
 import org.chromium.base.UserData;
+import org.chromium.base.UserDataHost;
 import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.chrome.browser.tab.Tab.LoadUrlResult;
 import org.chromium.components.ui_metrics.SadTabEvent;
 import org.chromium.content_public.browser.LoadUrlParams;
-import org.chromium.ui.text.NoUnderlineClickableSpan;
+import org.chromium.ui.text.ChromeClickableSpan;
 import org.chromium.ui.text.SpanApplier;
 import org.chromium.ui.text.SpanApplier.SpanInfo;
 import org.chromium.ui.widget.ChromeBulletSpan;
@@ -29,15 +34,16 @@ import org.chromium.url.GURL;
 
 /**
  * Represent the sad tab displayed in place of a crashed renderer. Instantiated on the first
- * |show()| request from a Tab, and destroyed together with it.
- * TODO(crbug.com/1161348): Consider moving this to its own target.
+ * |show()| request from a Tab, and destroyed together with it. TODO(crbug.com/40162422): Consider
+ * moving this to its own target.
  */
-public class SadTab extends EmptyTabObserver implements UserData, TabViewProvider {
+@NullMarked
+public class SadTab implements TabObserver, UserData, TabViewProvider {
     private static final Class<SadTab> USER_DATA_KEY = SadTab.class;
 
     private final Tab mTab;
 
-    private View mView;
+    private @Nullable View mView;
 
     /**
      * Counts the number of successive refreshes on the sad tab page. The count is is reset after a
@@ -53,11 +59,12 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
         return sadTab;
     }
 
-    public static SadTab get(Tab tab) {
-        return tab.getUserDataHost().getUserData(USER_DATA_KEY);
+    public static @Nullable SadTab get(Tab tab) {
+        UserDataHost host = tab.getUserDataHost();
+        return host != null ? host.getUserData(USER_DATA_KEY) : null;
     }
 
-    public static boolean isShowing(Tab tab) {
+    public static boolean isShowing(@Nullable Tab tab) {
         if (tab == null || !tab.isInitialized()) return false;
         SadTab sadTab = get(tab);
         return sadTab != null ? sadTab.isShowing() : false;
@@ -69,17 +76,25 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
         mTab.addObserver(this);
     }
 
-    /**
-     * Constructs and shows a sad tab (Aw, Snap!).
-     */
+    /** Constructs and shows a sad tab (Aw, Snap!). */
     public void show(Context context, Runnable suggestionAction, Runnable buttonAction) {
         if (mTab.getWebContents() == null) return;
 
-        // Make sure we are not adding the "Aw, snap" view over an existing one.
-        assert mView == null;
+        if (mView != null) {
+            assert !mTab.getTabViewManager().isShowing(this);
+            // SadTab was requested to show but TabContentManager may have queued it in favor
+            // of a tab view of other type such as |TabViewProvider.Type.SUSPENDED_TAB| or
+            // |PAINT_PREVIEW}|. Just return and wait for the SadTab's turn to show up.
+            return;
+        }
         mSadTabSuccessiveRefreshCounter++;
-        mView = createView(context, suggestionAction, buttonAction, showSendFeedbackView(),
-                mTab.isIncognito());
+        mView =
+                createView(
+                        context,
+                        suggestionAction,
+                        buttonAction,
+                        showSendFeedbackView(),
+                        mTab.isIncognito());
 
         mTab.getTabViewManager().addTabViewProvider(this);
     }
@@ -93,9 +108,7 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
         return mSadTabSuccessiveRefreshCounter >= 2;
     }
 
-    /**
-     * Removes the sad tab view if present.
-     */
+    /** Removes the sad tab view if present. */
     @VisibleForTesting
     public void removeIfPresent() {
         mTab.getTabViewManager().removeTabViewProvider(this);
@@ -112,7 +125,7 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
     // TabObserver
 
     @Override
-    public void onLoadUrl(Tab tab, LoadUrlParams params, int loadType) {
+    public void onLoadUrl(Tab tab, LoadUrlParams params, LoadUrlResult loadUrlResult) {
         removeIfPresent();
     }
 
@@ -135,18 +148,27 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
         mTab.removeObserver(this);
     }
 
+    @Override
+    public @ColorInt int getBackgroundColor(Context context) {
+        return context.getColor(R.color.baseline_neutral_90);
+    }
+
     /**
      * @param context Context this sad tab is shown with.
      * @param suggestionAction {@link Runnable} to be executed when user clicks "try these
-     *                        suggestions".
-     * @param buttonAction {@link Runnable} to be executed when the button is pressed.
-     *                     (e.g., refreshing the page or sending feedback)
+     *     suggestions".
+     * @param buttonAction {@link Runnable} to be executed when the button is pressed. (e.g.,
+     *     refreshing the page or sending feedback)
      * @param showSendFeedbackView Whether to show the "send feedback" version of the Sad Tab view.
      * @param isIncognito Whether the Sad Tab view is being showin in an incognito tab.
      * @return A {@link View} instance which is used in place of a crashed renderer.
      */
-    protected View createView(Context context, final Runnable suggestionAction,
-            Runnable buttonAction, boolean showSendFeedbackView, boolean isIncognito) {
+    protected View createView(
+            Context context,
+            final Runnable suggestionAction,
+            Runnable buttonAction,
+            boolean showSendFeedbackView,
+            boolean isIncognito) {
         // Inflate Sad tab and initialize.
         LayoutInflater inflater =
                 (LayoutInflater) context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
@@ -154,28 +176,31 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
         sadTabView.setLayoutParams(
                 new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
-        TextView titleText = (TextView) sadTabView.findViewById(R.id.sad_tab_title);
+        TextView titleText = sadTabView.findViewById(R.id.sad_tab_title);
         int titleTextId =
                 showSendFeedbackView ? R.string.sad_tab_reload_title : R.string.sad_tab_title;
         titleText.setText(titleTextId);
 
         if (showSendFeedbackView) intializeSuggestionsViews(context, sadTabView, isIncognito);
 
-        TextView messageText = (TextView) sadTabView.findViewById(R.id.sad_tab_message);
+        TextView messageText = sadTabView.findViewById(R.id.sad_tab_message);
         messageText.setText(getHelpMessage(context, suggestionAction, showSendFeedbackView));
         messageText.setMovementMethod(LinkMovementMethod.getInstance());
 
-        Button button = (Button) sadTabView.findViewById(R.id.sad_tab_button);
-        int buttonTextId = showSendFeedbackView ? R.string.sad_tab_send_feedback_label
-                                                : R.string.sad_tab_reload_label;
+        Button button = sadTabView.findViewById(R.id.sad_tab_button);
+        int buttonTextId =
+                showSendFeedbackView
+                        ? R.string.sad_tab_send_feedback_label
+                        : R.string.sad_tab_reload_label;
         button.setText(buttonTextId);
-        button.setOnClickListener(new OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                recordEvent(showSendFeedbackView, SadTabEvent.BUTTON_CLICKED);
-                buttonAction.run();
-            }
-        });
+        button.setOnClickListener(
+                new OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        recordEvent(showSendFeedbackView, SadTabEvent.BUTTON_CLICKED);
+                        buttonAction.run();
+                    }
+                });
 
         recordEvent(showSendFeedbackView, SadTabEvent.DISPLAYED);
 
@@ -184,17 +209,21 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
 
     /**
      * Construct and return help message to be displayed on R.id.sad_tab_message.
+     *
      * @param context Context of the resulting Sad Tab view. This is needed to load the strings.
-     * @param suggestionAction Action to be executed when user clicks "try these suggestions"
-     *                         or "learn more".
+     * @param suggestionAction Action to be executed when user clicks "try these suggestions" or
+     *     "learn more".
      * @return Help message to be displayed on R.id.sad_tab_message.
      */
     private static CharSequence getHelpMessage(
             Context context, final Runnable suggestionAction, final boolean showSendFeedback) {
-        NoUnderlineClickableSpan linkSpan = new NoUnderlineClickableSpan(context, (view) -> {
-            recordEvent(showSendFeedback, SadTabEvent.HELP_LINK_CLICKED);
-            suggestionAction.run();
-        });
+        ChromeClickableSpan linkSpan =
+                new ChromeClickableSpan(
+                        context,
+                        (view) -> {
+                            recordEvent(showSendFeedback, SadTabEvent.HELP_LINK_CLICKED);
+                            suggestionAction.run();
+                        });
 
         if (showSendFeedback) {
             SpannableString learnMoreLink =
@@ -202,8 +231,10 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
             learnMoreLink.setSpan(linkSpan, 0, learnMoreLink.length(), 0);
             return learnMoreLink;
         } else {
-            String helpMessage = context.getString(R.string.sad_tab_message) + "\n\n"
-                    + context.getString(R.string.sad_tab_suggestions);
+            String helpMessage =
+                    context.getString(R.string.sad_tab_message)
+                            + "\n\n"
+                            + context.getString(R.string.sad_tab_suggestions);
             return SpanApplier.applySpans(helpMessage, new SpanInfo("<link>", "</link>", linkSpan));
         }
     }
@@ -221,7 +252,7 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
         suggestionsTitle.setVisibility(View.VISIBLE);
         suggestionsTitle.setText(R.string.sad_tab_reload_try);
 
-        TextView suggestions = (TextView) sadTabView.findViewById(R.id.sad_tab_suggestions);
+        TextView suggestions = sadTabView.findViewById(R.id.sad_tab_suggestions);
         suggestions.setVisibility(View.VISIBLE);
 
         SpannableStringBuilder spannableString = new SpannableStringBuilder();
@@ -258,15 +289,14 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
     private static void recordEvent(boolean sendFeedbackView, int event) {
         if (sendFeedbackView) {
             RecordHistogram.recordEnumeratedHistogram(
-                    "Tabs.SadTab.Feedback.Event", event, SadTabEvent.MAX_SAD_TAB_EVENT);
+                    "Tabs.SadTab.Feedback.Event", event, SadTabEvent.COUNT);
         } else {
             RecordHistogram.recordEnumeratedHistogram(
-                    "Tabs.SadTab.Reload.Event", event, SadTabEvent.MAX_SAD_TAB_EVENT);
+                    "Tabs.SadTab.Reload.Event", event, SadTabEvent.COUNT);
         }
     }
 
     // Bare minimum set up so |isShowing| returns true.
-    @VisibleForTesting
     public static void initForTesting(Tab tab, SadTab sadTab) {
         tab.getUserDataHost().setUserData(USER_DATA_KEY, sadTab);
     }
@@ -277,7 +307,7 @@ public class SadTab extends EmptyTabObserver implements UserData, TabViewProvide
     }
 
     @Override
-    public View getView() {
+    public @Nullable View getView() {
         return mView;
     }
 }

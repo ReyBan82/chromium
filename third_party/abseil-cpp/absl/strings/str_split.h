@@ -40,11 +40,14 @@
 #include <map>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "absl/base/config.h"
 #include "absl/base/internal/raw_logging.h"
 #include "absl/base/macros.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/internal/str_split_internal.h"
 #include "absl/strings/string_view.h"
 #include "absl/strings/strip.h"
@@ -127,7 +130,25 @@ class ByString {
   absl::string_view Find(absl::string_view text, size_t pos) const;
 
  private:
-  const std::string delimiter_;
+  std::string delimiter_;
+};
+
+// ByAsciiWhitespace
+//
+// A sub-string delimiter that splits by ASCII whitespace
+// (space, tab, vertical tab, formfeed, linefeed, or carriage return).
+// Note: you probably want to use absl::SkipEmpty() as well!
+//
+// This class is equivalent to ByAnyChar with ASCII whitespace chars.
+//
+// Example:
+//
+//   std::vector<std::string> v = absl::StrSplit(
+//       "a b\tc\n  d  \n", absl::ByAsciiWhitespace(), absl::SkipEmpty());
+//   // v[0] == "a", v[1] == "b", v[2] == "c", v[3] == "d"
+class ByAsciiWhitespace {
+ public:
+  absl::string_view Find(absl::string_view text, size_t pos) const;
 };
 
 // ByChar
@@ -259,7 +280,7 @@ template <typename Delimiter>
 class MaxSplitsImpl {
  public:
   MaxSplitsImpl(Delimiter delimiter, int limit)
-      : delimiter_(delimiter), limit_(limit), count_(0) {}
+      : delimiter_(std::move(delimiter)), limit_(limit), count_(0) {}
   absl::string_view Find(absl::string_view text, size_t pos) {
     if (count_++ == limit_) {
       return absl::string_view(text.data() + text.size(),
@@ -364,16 +385,16 @@ struct SkipEmpty {
 //   // v[0] == " a ", v[1] == " ", v[2] == "b"
 struct SkipWhitespace {
   bool operator()(absl::string_view sp) const {
-    sp = absl::StripAsciiWhitespace(sp);
+    sp = absl::StripLeadingAsciiWhitespace(sp);
     return !sp.empty();
   }
 };
 
 template <typename T>
 using EnableSplitIfString =
-    typename std::enable_if<std::is_same<T, std::string>::value ||
-                            std::is_same<T, const std::string>::value,
-                            int>::type;
+    std::enable_if_t<std::is_same_v<T, std::string> ||
+                         std::is_same_v<T, const std::string>,
+                     int>;
 
 //------------------------------------------------------------------------------
 //                                  StrSplit()
@@ -381,11 +402,16 @@ using EnableSplitIfString =
 
 // StrSplit()
 //
-// Splits a given string based on the provided `Delimiter` object, returning the
-// elements within the type specified by the caller. Optionally, you may pass a
-// `Predicate` to `StrSplit()` indicating whether to include or exclude the
-// resulting element within the final result set. (See the overviews for
-// Delimiters and Predicates above.)
+// Splits a string into a sequence of substrings identified by `Delimiter`. The
+// input is processed sequentially from beginning to end, and each resulting
+// substring is filtered by an optional `Predicate` before inclusion in the
+// result set. `StrSplit()` returns a lazy range that preserves the substrings
+// original order and is convertible to the collection type specified by the
+// caller.
+//
+// Optionally, you may pass a `Predicate` to `StrSplit()` indicating whether to
+// include or exclude the resulting element within the final result set. (See
+// the overviews for Delimiters and Predicates above.)
 //
 // Example:
 //
@@ -426,8 +452,10 @@ using EnableSplitIfString =
 // behavior works for:
 //
 // 1) All standard STL containers including `std::vector`, `std::list`,
-//    `std::deque`, `std::set`,`std::multiset`, 'std::map`, and `std::multimap`
+//    `std::deque`, `std::set`,`std::multiset`, 'std::map`, and `std::multimap`.
 // 2) `std::pair` (which is not actually a container). See below.
+// 3) `std::array`, which is a container but has different behavior due to its
+//    fixed size. See below.
 //
 // Example:
 //
@@ -438,10 +466,12 @@ using EnableSplitIfString =
 //   // Stores results in a std::set<std::string>, which also performs
 //   // de-duplication and orders the elements in ascending order.
 //   std::set<std::string> a = absl::StrSplit("b,a,c,a,b", ',');
-//   // v[0] == "a", v[1] == "b", v[2] = "c"
+//   // a[0] == "a", a[1] == "b", a[2] == "c"
 //
-//   // `StrSplit()` can be used within a range-based for loop, in which case
-//   // each element will be of type `absl::string_view`.
+//   // `StrSplit()` can be used within a range-based for-loop, in which case
+//   // each element will be of type `absl::string_view`. The elements will
+//   // returned in the order in which they appear in the original string
+//   // without any other transformation, e.g. no de-duplication is performed.
 //   std::vector<std::string> v;
 //   for (const auto sv : absl::StrSplit("a,b,c", ',')) {
 //     if (sv != "b") v.emplace_back(sv);
@@ -468,6 +498,21 @@ using EnableSplitIfString =
 //   // Stores first two split strings as the members in a std::pair.
 //   std::pair<std::string, std::string> p = absl::StrSplit("a,b,c", ',');
 //   // p.first == "a", p.second == "b"       // "c" is omitted.
+//
+//
+// Splitting to `std::array` is similar to splitting to `std::pair`, but for
+// N elements instead of two; missing elements are filled with the empty string
+// and extra elements are discarded.
+//
+// Examples:
+//
+//   // Stores first two split strings as the elements in a std::array.
+//   std::array<std::string, 2> a = absl::StrSplit("a,b,c", ',');
+//   // a[0] == "a", a[1] == "b"   // "c" is omitted.
+//
+//   // The second element is empty.
+//   std::array<std::string, 2> a = absl::StrSplit("a,", ',');
+//   // a[0] == "a", a[1] == ""
 //
 // The `StrSplit()` function can be used multiple times to perform more
 // complicated splitting logic, such as intelligently parsing key-value pairs.
@@ -526,7 +571,7 @@ StrSplit(strings_internal::ConvertibleToStringView text, Delimiter d,
       typename strings_internal::SelectDelimiter<Delimiter>::type;
   return strings_internal::Splitter<DelimiterType, Predicate,
                                     absl::string_view>(
-      text.value(), DelimiterType(d), std::move(p));
+      text.value(), DelimiterType(std::move(d)), std::move(p));
 }
 
 template <typename Delimiter, typename Predicate, typename StringType,

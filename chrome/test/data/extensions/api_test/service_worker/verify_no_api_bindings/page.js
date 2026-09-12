@@ -2,18 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var worker = null;
-var FAILURE_MESSAGE = 'FAILURE';
+let worker = null;
+const FAILURE_MESSAGE = 'FAILURE';
 
 window.runServiceWorker = function() {
-  navigator.serviceWorker.register('sw.js').then(function() {
-    return navigator.serviceWorker.ready;
-  }).then(function(registration) {
-    worker = registration.active;
-    chrome.test.sendMessage('WORKER STARTED');
-  }).catch(function(err) {
-    chrome.test.sendMessage(FAILURE_MESSAGE);
-  });
+  navigator.serviceWorker.register('sw.js')
+      .then(function() {
+        return navigator.serviceWorker.ready;
+      })
+      .then(function(registration) {
+        worker = registration.active;
+        chrome.test.sendMessage('WORKER STARTED');
+      })
+      .catch(function(err) {
+        chrome.test.sendMessage(FAILURE_MESSAGE);
+      });
 };
 
 window.testSendMessage = function() {
@@ -21,7 +24,7 @@ window.testSendMessage = function() {
     chrome.test.sendMessage(FAILURE_MESSAGE);
     return;
   }
-  var channel = new MessageChannel();
+  const channel = new MessageChannel();
   channel.port1.onmessage = function(e) {
     chrome.test.sendMessage(e.data);
   };

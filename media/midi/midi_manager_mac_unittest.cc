@@ -10,6 +10,7 @@
 
 #include <memory>
 
+#include "base/containers/span.h"
 #include "base/run_loop.h"
 #include "base/synchronization/lock.h"
 #include "base/test/task_environment.h"
@@ -22,8 +23,6 @@ namespace {
 
 using mojom::PortState;
 using mojom::Result;
-
-void Noop(const MIDIPacketList*, void*, void*) {}
 
 class FakeMidiManagerClient : public MidiManagerClient {
  public:
@@ -67,8 +66,7 @@ class FakeMidiManagerClient : public MidiManagerClient {
   }
 
   void ReceiveMidiData(uint32_t port_index,
-                       const uint8_t* data,
-                       size_t size,
+                       base::span<const uint8_t> data,
                        base::TimeTicks timestamp) override {}
   void AccumulateMidiBytesSent(size_t size) override {}
   void Detach() override {}
@@ -133,14 +131,7 @@ class MidiManagerMacTest : public ::testing::Test {
   base::test::SingleThreadTaskEnvironment task_environment_;
 };
 
-// TODO(crbug.com/1413900): The created device isn't notified to
-// MidiManagerMac on iOS.
-#if BUILDFLAG(IS_IOS)
-#define MAYBE_MidiNotification DISABLED_MidiNotification
-#else
-#define MAYBE_MidiNotification MidiNotification
-#endif
-TEST_F(MidiManagerMacTest, MAYBE_MidiNotification) {
+TEST_F(MidiManagerMacTest, MidiNotification) {
   std::unique_ptr<FakeMidiManagerClient> client(new FakeMidiManagerClient);
   StartSession(client.get());
 
@@ -155,8 +146,10 @@ TEST_F(MidiManagerMacTest, MAYBE_MidiNotification) {
   EXPECT_EQ(noErr, status);
 
   MIDIEndpointRef ep = 0;
-  status = MIDIDestinationCreate(
-      midi_client, CFSTR("DestinationTest"), Noop, nullptr, &ep);
+  status = MIDIDestinationCreateWithProtocol(
+      midi_client, CFSTR("DestinationTest"), kMIDIProtocol_1_0, &ep,
+      ^(const MIDIEventList* evtlist, void* srcConnRefCon){
+      });
   EXPECT_EQ(noErr, status);
   SInt32 id;
   status = MIDIObjectGetIntegerProperty(ep, kMIDIPropertyUniqueID, &id);

@@ -5,13 +5,13 @@
 #include "chrome/utility/image_writer/image_writer_handler.h"
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "chrome/services/removable_storage_writer/public/mojom/removable_storage_writer.mojom.h"
 #include "chrome/utility/image_writer/error_message_strings.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace {
 
@@ -106,7 +106,7 @@ void ImageWriterHandler::SendProgress(int64_t progress) {
 }
 
 void ImageWriterHandler::SendSucceeded() {
-  client_->Complete(absl::nullopt);
+  client_->Complete(std::nullopt);
   client_.reset();
 }
 
@@ -136,7 +136,7 @@ bool ImageWriterHandler::ShouldResetImageWriter(const base::FilePath& image,
 
   // When writing and verifying the same file on the same device, keep
   // the file handles open; do not reset them since that can cause the
-  // operation to fail in unexpected ways: crbug.com/352442#c7
+  // operation to fail in unexpected ways: crbug.com/40355836#comment8
   return false;
 }
 

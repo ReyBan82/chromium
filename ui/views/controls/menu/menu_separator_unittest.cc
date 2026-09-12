@@ -7,7 +7,10 @@
 #include <memory>
 
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/accessibility/ax_enums.mojom.h"
+#include "ui/accessibility/ax_node_data.h"
 #include "ui/base/models/menu_separator_types.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/controls/menu/menu_config.h"
 #include "ui/views/test/view_metadata_test_utils.h"
 #include "ui/views/test/views_test_base.h"
@@ -30,6 +33,39 @@ TEST_F(MenuSeparatorTest, TypeChangeEffect) {
   separator->SetType(ui::MenuSeparatorType::DOUBLE_SEPARATOR);
   separator->SizeToPreferredSize();
   EXPECT_EQ(config.double_separator_height, separator->height());
+}
+
+TEST_F(MenuSeparatorTest, AccessibleRole) {
+  auto separator = std::make_unique<MenuSeparator>();
+
+  IgnoreMissingWidgetForTestingScopedSetter a11y_ignore_missing_widget_(
+      separator->GetViewAccessibility());
+
+  ui::AXNodeData data;
+  separator->GetViewAccessibility().GetAccessibleNodeData(&data);
+  EXPECT_EQ(data.role, ax::mojom::Role::kMenuItemSeparator);
+  EXPECT_EQ(separator->GetViewAccessibility().GetCachedRole(),
+            ax::mojom::Role::kMenuItemSeparator);
+}
+
+TEST_F(MenuSeparatorTest, MenuItemSeparatorType) {
+  auto separator = std::make_unique<MenuSeparator>(
+      ui::MenuSeparatorType::MENU_ITEM_SEPARATOR);
+  test::TestViewMetadata(separator.get());
+  EXPECT_EQ(separator->GetType(), ui::MenuSeparatorType::MENU_ITEM_SEPARATOR);
+  separator->SizeToPreferredSize();
+  const MenuConfig& config = MenuConfig::instance();
+  EXPECT_EQ(config.double_separator_thickness, separator->height());
+
+  EXPECT_FALSE(separator->GetColorId().has_value());
+  separator->SetColorId(ui::kColorMenuBackground);
+  EXPECT_EQ(separator->GetColorId(), ui::kColorMenuBackground);
+
+  auto separator_with_color = std::make_unique<MenuSeparator>(
+      ui::MenuSeparatorType::MENU_ITEM_SEPARATOR, ui::kColorMenuBackground);
+  EXPECT_EQ(separator_with_color->GetType(),
+            ui::MenuSeparatorType::MENU_ITEM_SEPARATOR);
+  EXPECT_EQ(separator_with_color->GetColorId(), ui::kColorMenuBackground);
 }
 
 }  // namespace views

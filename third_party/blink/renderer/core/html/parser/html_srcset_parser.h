@@ -35,6 +35,7 @@
 #include "base/check_op.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_view.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
@@ -134,6 +135,11 @@ class ImageCandidate {
   int resource_width_;
   OriginAttribute origin_attribute_;
 };
+
+void ParseImageCandidatesFromSrcsetAttribute(
+    const String& attribute,
+    Vector<ImageCandidate>& image_candidates,
+    Document* document = nullptr);
 
 ImageCandidate BestFitSourceForSrcsetAttribute(float device_scale_factor,
                                                float source_size,

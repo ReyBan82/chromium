@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {BookmarkElement, BookmarkManagerApiProxyImpl, BookmarksAppElement, BookmarksFolderNodeElement, BookmarksItemElement, BookmarksListElement, BrowserProxyImpl, DndManager, DragInfo, overrideFolderOpenerTimeoutDelay, setDebouncerForTesting} from 'chrome://bookmarks/bookmarks.js';
-import {middleOfNode, topLeftOfNode} from 'chrome://resources/polymer/v3_0/iron-test-helpers/mock-interactions.js';
-import {flush} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
+import type {BookmarkElement, BookmarksAppElement, BookmarksFolderNodeElement, BookmarksItemElement, BookmarksListElement, DndManager} from 'chrome://bookmarks/bookmarks.js';
+import {BookmarkManagerApiProxyImpl, BrowserProxyImpl, DragInfo, overrideFolderOpenerTimeoutDelay, PermanentFolderType, setDebouncerForTesting} from 'chrome://bookmarks/bookmarks.js';
 import {assertDeepEquals, assertEquals, assertFalse, assertNotReached, assertTrue} from 'chrome://webui-test/chai_assert.js';
-import {flushTasks} from 'chrome://webui-test/polymer_test_util.js';
+import {middleOfNode, topLeftOfNode} from 'chrome://webui-test/mouse_mock_interactions.js';
+import {eventToPromise, microtasksFinished} from 'chrome://webui-test/test_util.js';
 
 import {TestBookmarkManagerApiProxy} from './test_bookmark_manager_api_proxy.js';
 import {TestBookmarksBrowserProxy} from './test_browser_proxy.js';
@@ -17,7 +17,6 @@ import {createFolder, createItem, findFolderNode, getAllFoldersOpenState, normal
 suite('drag and drop', function() {
   let app: BookmarksAppElement;
   let list: BookmarksListElement;
-  let rootFolderNode: BookmarksFolderNodeElement;
   let store: TestStore;
   let dndManager: DndManager;
   let bookmarkManagerApi: TestBookmarkManagerApiProxy;
@@ -30,11 +29,20 @@ suite('drag and drop', function() {
   }
 
   function getFolderNode(id: string) {
-    return findFolderNode(rootFolderNode, id) as BookmarksFolderNodeElement;
+    const topLevelNodes =
+        app.shadowRoot.querySelectorAll<BookmarksFolderNodeElement>(
+            'bookmarks-folder-node');
+    for (const node of topLevelNodes) {
+      const found = findFolderNode(node, id);
+      if (found) {
+        return found;
+      }
+    }
+    assertNotReached();
   }
 
   function getListItem(id: string) {
-    const items = list.root!.querySelectorAll('bookmarks-item');
+    const items = list.shadowRoot.querySelectorAll('bookmarks-item');
     for (let i = 0; i < items.length; i++) {
       if (items[i]!.itemId === id) {
         return items[i] as BookmarksItemElement;
@@ -50,8 +58,8 @@ suite('drag and drop', function() {
       bubbles: true,
       cancelable: true,
       composed: true,
-      clientX: xy!.x,
-      clientY: xy!.y,
+      clientX: xy.x,
+      clientY: xy.y,
       // Make this a primary input.
       buttons: 1,
     };
@@ -124,8 +132,10 @@ suite('drag and drop', function() {
               createItem('13'),
               createFolder('14', []),
               createFolder('15', []),
-            ]),
-        createFolder('2', []));
+            ],
+            {permanentFolderType: PermanentFolderType.kBookmarkBar}),
+        createFolder(
+            '2', [], {permanentFolderType: PermanentFolderType.kOther}));
     store = new TestStore({
       nodes: nodes,
       folderOpenState: getAllFoldersOpenState(nodes),
@@ -141,17 +151,20 @@ suite('drag and drop', function() {
     app = document.createElement('bookmarks-app');
     replaceBody(app);
     list =
-        app.shadowRoot!.querySelector('bookmarks-list') as BookmarksListElement;
-    rootFolderNode = app.shadowRoot!.querySelector('bookmarks-folder-node') as
-        BookmarksFolderNodeElement;
+        app.shadowRoot.querySelector<BookmarksListElement>('bookmarks-list')!;
     dndManager = app.getDndManagerForTesting() as DndManager;
     dndManager!.setTimerProxyForTesting(new TestTimerProxy());
 
     // Wait for the API listener to call the browser proxy, since this
     // indicates initialization is done.
-    return testBrowserProxy.whenCalled('getIncognitoAvailability').then(() => {
-      flush();
-    });
+    return Promise
+        .all([
+          testBrowserProxy.whenCalled('getIncognitoAvailability'),
+          eventToPromise('viewport-filled', list.$.list),
+        ])
+        .then(() => {
+          return microtasksFinished();
+        });
   });
 
   test('dragInfo isDraggingFolderToDescendant', function() {
@@ -370,7 +383,7 @@ suite('drag and drop', function() {
     // displayed lists.
     store.data.selectedFolder = '111';
     store.notifyObservers();
-    flush();
+    await eventToPromise('viewport-filled', list.$.list);
 
     bookmarkManagerApi.onDragEnter.callListeners(createDragData(['11']));
     dragTarget = getListItem('1111');
@@ -403,7 +416,7 @@ suite('drag and drop', function() {
     assertDragStyle(dragTarget, DragStyle.BELOW);
   });
 
-  // This is a regression test for https://crbug.com/974525.
+  // This is a regression test for https://crbug.com/41465126.
   test(
       'drag bookmark that is not in selected folder but in search result',
       async function() {
@@ -448,7 +461,7 @@ suite('drag and drop', function() {
     store.data.folderOpenState.set('14', false);
     store.data.folderOpenState.set('15', false);
     store.notifyObservers();
-    flush();
+    await microtasksFinished();
 
     const dragElement = getFolderNode('15');
     await simulateDragStart(dragElement);
@@ -456,19 +469,19 @@ suite('drag and drop', function() {
     // Dragging onto folders without children doesn't open the folder.
     let dragTarget = getFolderNode('14');
     move(dragTarget);
-    await flushTasks();
+    await microtasksFinished();
     assertFalse(dragTarget.isOpen);
 
     // Dragging onto itself doesn't open the folder.
     move(dragElement);
-    await flushTasks();
+    await microtasksFinished();
     assertFalse(dragElement.isOpen);
 
     // Dragging onto an open folder doesn't affect the folder.
     dragTarget = getFolderNode('1');
     assertTrue(dragTarget.isOpen);
     move(dragTarget);
-    await flushTasks();
+    await microtasksFinished();
     assertTrue(dragTarget.isOpen);
 
     dragTarget = getFolderNode('11');
@@ -476,25 +489,25 @@ suite('drag and drop', function() {
     // Dragging off of a closed folder doesn't open it.
     move(dragTarget);
     move(list);
-    await flushTasks();
+    await microtasksFinished();
     assertFalse(dragTarget.isOpen);
 
     // Dragging onto a folder with DragStyle.BELOW doesn't open it.
     move(dragTarget, bottomRightOfNode(dragTarget));
     assertDragStyle(dragTarget, DragStyle.BELOW);
-    await flushTasks();
+    await microtasksFinished();
     assertFalse(dragTarget.isOpen);
 
     // Dragging onto a folder with DragStyle.ABOVE doesn't open it.
     move(dragTarget, topLeftOfNode(dragTarget));
     assertDragStyle(dragTarget, DragStyle.ABOVE);
-    await flushTasks();
+    await microtasksFinished();
     assertFalse(dragTarget.isOpen);
 
     // Dragging onto a closed folder with children opens it.
     move(dragTarget);
     assertDragStyle(dragTarget, DragStyle.ON);
-    await flushTasks();
+    await microtasksFinished();
     assertTrue(dragTarget.isOpen);
   });
 
@@ -518,7 +531,7 @@ suite('drag and drop', function() {
     dispatchDragEvent('dragend', dragElement);
   });
 
-  test('cannot drag items when editing is disabled', async function() {
+  test('cannot drag items when editing is disabled', function() {
     store.data.prefs.canEdit = false;
     store.notifyObservers();
 
@@ -528,8 +541,8 @@ suite('drag and drop', function() {
     assertFalse(dndManager.getDragInfoForTesting()!.isDragValid());
   });
 
-  test('cannot start dragging unmodifiable items', async function() {
-    store.data.nodes['2']!.unmodifiable = 'managed';
+  test('cannot start dragging unmodifiable items', function() {
+    store.data.nodes['2']!.permanentFolderType = PermanentFolderType.kManaged;
     store.notifyObservers();
 
     let dragElement = getFolderNode('1');
@@ -541,8 +554,8 @@ suite('drag and drop', function() {
     assertFalse(dndManager.getDragInfoForTesting()!.isDragValid());
   });
 
-  test('cannot drag onto folders with unmodifiable children', async function() {
-    store.data.nodes['2']!.unmodifiable = 'managed';
+  test('cannot drag onto managed folders', async function() {
+    store.data.nodes['2']!.permanentFolderType = PermanentFolderType.kManaged;
     store.notifyObservers();
 
     const dragElement = getListItem('12');

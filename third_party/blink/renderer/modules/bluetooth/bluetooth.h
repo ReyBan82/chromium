@@ -5,11 +5,15 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_MODULES_BLUETOOTH_BLUETOOTH_H_
 #define THIRD_PARTY_BLINK_RENDERER_MODULES_BLUETOOTH_BLUETOOTH_H_
 
+#include <optional>
+
 #include "third_party/blink/public/mojom/bluetooth/web_bluetooth.mojom-blink-forward.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+#include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/core/page/page_visibility_observer.h"
 #include "third_party/blink/renderer/modules/bluetooth/bluetooth_advertising_event.h"
 #include "third_party/blink/renderer/modules/bluetooth/bluetooth_device.h"
+#include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
 #include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
@@ -19,18 +23,20 @@
 #include "third_party/blink/renderer/platform/supplementable.h"
 
 namespace blink {
-
+class BluetoothDevice;
+class BluetoothLEScan;
 class BluetoothLEScanOptions;
+class DOMWrapperWorld;
 class ExceptionState;
-class RequestDeviceOptions;
 class Navigator;
-class ScriptPromise;
+class RequestDeviceOptions;
 class ScriptState;
 
-class Bluetooth final : public EventTargetWithInlineData,
-                        public Supplement<Navigator>,
-                        public PageVisibilityObserver,
-                        public mojom::blink::WebBluetoothAdvertisementClient {
+class MODULES_EXPORT Bluetooth final
+    : public EventTarget,
+      public Supplement<Navigator>,
+      public PageVisibilityObserver,
+      public mojom::blink::WebBluetoothAdvertisementClient {
   DEFINE_WRAPPERTYPEINFO();
 
  public:
@@ -43,15 +49,16 @@ class Bluetooth final : public EventTargetWithInlineData,
   ~Bluetooth() override;
 
   // IDL exposed bluetooth interface:
-  ScriptPromise getAvailability(ScriptState*, ExceptionState&);
-  ScriptPromise getDevices(ScriptState*, ExceptionState&);
-  ScriptPromise requestDevice(ScriptState*,
-                              const RequestDeviceOptions*,
-                              ExceptionState&);
+  ScriptPromise<IDLBoolean> getAvailability(ScriptState*, ExceptionState&);
+  ScriptPromise<IDLSequence<BluetoothDevice>> getDevices(ScriptState*,
+                                                         ExceptionState&);
+  ScriptPromise<BluetoothDevice> requestDevice(ScriptState*,
+                                               const RequestDeviceOptions*,
+                                               ExceptionState&);
 
-  ScriptPromise requestLEScan(ScriptState*,
-                              const BluetoothLEScanOptions*,
-                              ExceptionState&);
+  ScriptPromise<BluetoothLEScan> requestLEScan(ScriptState*,
+                                               const BluetoothLEScanOptions*,
+                                               ExceptionState&);
 
   bool IsServiceBound() const { return service_.is_bound(); }
   mojom::blink::WebBluetoothService* Service() { return service_.get(); }
@@ -78,33 +85,85 @@ class Bluetooth final : public EventTargetWithInlineData,
       mojom::blink::WebBluetoothAdvertisingEventPtr advertising_event);
 
  private:
-  BluetoothDevice* GetBluetoothDeviceRepresentingDevice(
-      mojom::blink::WebBluetoothDevicePtr,
+  friend class BluetoothTestHelper;
+
+  // Helper class to wrap a world-specific BluetoothDevice cache.
+  // Used when `WebBluetoothWorldIsolatedCache` feature is enabled to isolate
+  // BluetoothDevice instances per DOMWrapperWorld.
+  class BluetoothDeviceCache final
+      : public GarbageCollected<BluetoothDeviceCache> {
+   public:
+    void Trace(Visitor* visitor) const;
+    HeapHashMap<String, WeakMember<BluetoothDevice>>& DeviceCache() {
+      return device_cache_;
+    }
+
+   private:
+    HeapHashMap<String, WeakMember<BluetoothDevice>> device_cache_;
+  };
+
+  HeapHashMap<String, WeakMember<BluetoothDevice>>& GetOrCreateWorldDeviceCache(
+      DOMWrapperWorld& world);
+
+  // Gets or creates a BluetoothDevice instance in the cache specific to
+  // `world`.
+  BluetoothDevice* GetOrCreateBluetoothDevice(
+      DOMWrapperWorld& world,
+      const mojom::blink::WebBluetoothDevicePtr&,
+      ExecutionContext*);
+  // Helper that extracts the DOMWrapperWorld from `script_state` and calls the
+  // world-specific GetOrCreateBluetoothDevice overload.
+  BluetoothDevice* GetOrCreateBluetoothDevice(
+      ScriptState*,
+      const mojom::blink::WebBluetoothDevicePtr&,
+      ExecutionContext*);
+  // Legacy fallback: gets or creates a device using the shared, non-isolated
+  // cache (used when `WebBluetoothWorldIsolatedCache` is disabled).
+  BluetoothDevice* GetOrCreateBluetoothDevice(
+      const mojom::blink::WebBluetoothDevicePtr&,
       ExecutionContext*);
 
-  void GetDevicesCallback(ScriptPromiseResolver*,
+  void GetDevicesCallback(ScriptPromiseResolver<IDLSequence<BluetoothDevice>>*,
                           Vector<mojom::blink::WebBluetoothDevicePtr>);
 
-  void RequestDeviceCallback(ScriptPromiseResolver*,
+  void RequestDeviceCallback(ScriptPromiseResolver<BluetoothDevice>*,
                              mojom::blink::WebBluetoothResult,
                              mojom::blink::WebBluetoothDevicePtr);
 
   void RequestScanningCallback(
-      ScriptPromiseResolver*,
+      ScriptPromiseResolver<BluetoothLEScan>*,
       mojo::ReceiverId,
       mojom::blink::WebBluetoothRequestLEScanOptionsPtr,
       mojom::blink::WebBluetoothResult);
 
   void EnsureServiceConnection(ExecutionContext*);
 
-  // Map of device ids to BluetoothDevice objects.
-  // Ensures only one BluetoothDevice instance represents each
-  // Bluetooth device inside a single global object.
+  // Map of V8 worlds to their respective BluetoothDeviceCache.
+  // Used when `WebBluetoothWorldIsolatedCache` is enabled to ensure only one
+  // BluetoothDevice instance represents each Bluetooth device inside a single
+  // global object per world.
+  HeapHashMap<WeakMember<DOMWrapperWorld>, Member<BluetoothDeviceCache>>
+      device_caches_;
+
+  // Map of device IDs to BluetoothDevice objects.
+  // Legacy fallback: used when `WebBluetoothWorldIsolatedCache` is disabled.
+  // Ensures only one BluetoothDevice instance represents each Bluetooth device
+  // inside a single global object globally (shared across all worlds).
   HeapHashMap<String, Member<BluetoothDevice>> device_instance_map_;
 
   HeapMojoAssociatedReceiverSet<mojom::blink::WebBluetoothAdvertisementClient,
                                 Bluetooth>
       client_receivers_;
+
+  // Map of active scan Mojo ReceiverIds to their initiating V8 worlds.
+  // Used when `WebBluetoothWorldIsolatedCache` is enabled to safely route
+  // events from the frame-shared `WebBluetoothServiceImpl` Mojo pipe to the
+  // correct isolated world.
+  HeapHashMap<mojo::ReceiverId, WeakMember<DOMWrapperWorld>>
+      client_receiver_world_map_;
+
+  // Test-only fake receiver ID to bypass Mojo dispatch context in unit tests.
+  std::optional<mojo::ReceiverId> fake_current_receiver_for_testing_;
 
   // HeapMojoRemote objects are associated with a ContextLifecycleNotifier and
   // cleaned up automatically when it is destroyed.

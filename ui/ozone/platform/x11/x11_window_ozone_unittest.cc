@@ -2,24 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ui/ozone/platform/x11/x11_window.h"
-#include "ui/platform_window/extensions/x11_extension_delegate.h"
-
 #include <memory>
 #include <utility>
 
+#include "base/nix/xdg_util.h"
 #include "base/run_loop.h"
+#include "base/test/run_until.h"
 #include "base/test/task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/x/x11_util.h"
 #include "ui/display/display.h"
 #include "ui/display/screen_base.h"
 #include "ui/events/devices/x11/touch_factory_x11.h"
 #include "ui/events/event.h"
 #include "ui/events/platform/x11/x11_event_source.h"
 #include "ui/events/test/events_test_utils_x11.h"
+#include "ui/gfx/x/atom_cache.h"
 #include "ui/gfx/x/event.h"
+#include "ui/ozone/platform/x11/x11_window.h"
 #include "ui/ozone/platform/x11/x11_window_manager.h"
 #include "ui/ozone/test/mock_platform_window_delegate.h"
+#include "ui/platform_window/extensions/x11_extension_delegate.h"
 #include "ui/platform_window/platform_window_delegate.h"
 #include "ui/platform_window/platform_window_init_properties.h"
 
@@ -128,7 +131,7 @@ TEST_F(X11WindowOzoneTest, SendPlatformEventToRightTarget) {
   auto window = CreatePlatformWindow(&delegate, bounds, &widget, nullptr);
 
   ScopedXI2Event xi_event;
-  xi_event.InitGenericButtonEvent(kPointerDeviceId, ET_MOUSE_PRESSED,
+  xi_event.InitGenericButtonEvent(kPointerDeviceId, EventType::kMousePressed,
                                   gfx::Point(218, 290), EF_NONE);
 
   // First check events can be received by a target window.
@@ -136,7 +139,7 @@ TEST_F(X11WindowOzoneTest, SendPlatformEventToRightTarget) {
   EXPECT_CALL(delegate, DispatchEvent(_)).WillOnce(CloneEvent(&event));
 
   DispatchXEvent(xi_event, widget);
-  EXPECT_EQ(ET_MOUSE_PRESSED, event->type());
+  EXPECT_EQ(EventType::kMousePressed, event->type());
   testing::Mock::VerifyAndClearExpectations(&delegate);
 
   MockPlatformWindowDelegate delegate_2;
@@ -152,7 +155,7 @@ TEST_F(X11WindowOzoneTest, SendPlatformEventToRightTarget) {
   EXPECT_CALL(delegate_2, DispatchEvent(_)).WillOnce(CloneEvent(&event));
 
   DispatchXEvent(xi_event, widget_2);
-  EXPECT_EQ(ET_MOUSE_PRESSED, event->type());
+  EXPECT_EQ(EventType::kMousePressed, event->type());
 
   EXPECT_CALL(delegate, OnClosed()).Times(1);
   EXPECT_CALL(delegate_2, OnClosed()).Times(1);
@@ -175,7 +178,7 @@ TEST_F(X11WindowOzoneTest, SendPlatformEventToCapturedWindow) {
       CreatePlatformWindow(&delegate_2, bounds_2, &widget_2, nullptr);
 
   ScopedXI2Event xi_event;
-  xi_event.InitGenericButtonEvent(kPointerDeviceId, ET_MOUSE_PRESSED,
+  xi_event.InitGenericButtonEvent(kPointerDeviceId, EventType::kMousePressed,
                                   gfx::Point(218, 290), EF_NONE);
 
   // Set capture to the second window, but send an event to another window
@@ -188,7 +191,7 @@ TEST_F(X11WindowOzoneTest, SendPlatformEventToCapturedWindow) {
 
   DispatchXEvent(xi_event, widget);
   EXPECT_TRUE(event.get());
-  EXPECT_EQ(ET_MOUSE_PRESSED, event->type());
+  EXPECT_EQ(EventType::kMousePressed, event->type());
   EXPECT_EQ(gfx::Point(-277, 215), event->AsLocatedEvent()->location());
 }
 
@@ -216,10 +219,10 @@ TEST_F(X11WindowOzoneTest, GetWindowFromAcceleratedWigets) {
   EXPECT_EQ(nullptr, window_manager()->GetWindow(widget_2));
 }
 
-// This test case ensures that OnMouseEnter is called once when a mouse location
-// moved to the window, and |window_mouse_currently_on_| is properly reset when
-// the window is deleted.
-TEST_F(X11WindowOzoneTest, MouseEnterAndDelete) {
+// This test case ensures that OnCursorUpdate is called once when a mouse
+// location moved to the window, and |window_mouse_currently_on_| is properly
+// reset when the window is deleted.
+TEST_F(X11WindowOzoneTest, CursorUpdateEnterAndDelete) {
   gfx::Rect bounds_1(0, 0, 100, 100);
   MockPlatformWindowDelegate delegate_1;
   gfx::AcceleratedWidget widget_1;
@@ -232,12 +235,12 @@ TEST_F(X11WindowOzoneTest, MouseEnterAndDelete) {
   auto window_2 =
       CreatePlatformWindow(&delegate_2, bounds_2, &widget_2, nullptr);
 
-  EXPECT_CALL(delegate_1, OnMouseEnter()).Times(1);
+  EXPECT_CALL(delegate_1, OnCursorUpdate()).Times(1);
   window_manager()->MouseOnWindow(static_cast<X11Window*>(window_1.get()));
-  // The mouse is already on window_1, and this should not call OnMouseEnter.
+  // The mouse is already on window_1, and this should not call OnCursorUpdate.
   window_manager()->MouseOnWindow(static_cast<X11Window*>(window_1.get()));
 
-  EXPECT_CALL(delegate_2, OnMouseEnter()).Times(1);
+  EXPECT_CALL(delegate_2, OnCursorUpdate()).Times(1);
   window_manager()->MouseOnWindow(static_cast<X11Window*>(window_2.get()));
 
   EXPECT_EQ(window_2.get(),
@@ -245,10 +248,10 @@ TEST_F(X11WindowOzoneTest, MouseEnterAndDelete) {
 
   // Dispatch Event on window 1 while event is captured on window 2.
   ::testing::Mock::VerifyAndClearExpectations(&delegate_1);
-  EXPECT_CALL(delegate_1, OnMouseEnter()).Times(1);
+  EXPECT_CALL(delegate_1, OnCursorUpdate()).Times(1);
   window_2->SetCapture();
   ScopedXI2Event xi_event;
-  xi_event.InitGenericButtonEvent(kPointerDeviceId, ET_MOUSE_PRESSED,
+  xi_event.InitGenericButtonEvent(kPointerDeviceId, EventType::kMousePressed,
                                   gfx::Point(0, 0), EF_NONE);
   DispatchXEvent(xi_event, widget_1);
   EXPECT_EQ(window_1.get(),
@@ -272,7 +275,9 @@ class FakeX11ExtensionDelegateForSize : public X11ExtensionDelegate {
     return false;
   }
 #endif
-  bool IsOverrideRedirect() const override { return false; }
+  bool IsOverrideRedirect(const X11Extension& x11_extension) const override {
+    return false;
+  }
   gfx::Rect GetGuessedFullScreenSizeInPx() const override {
     return guessed_size_px_;
   }
@@ -297,6 +302,70 @@ TEST_F(X11WindowOzoneTest, SetFullscreen) {
       OnBoundsChanged(testing::Eq(PlatformWindowDelegate::BoundsChange{true})));
 
   window->SetFullscreen(true, display::kInvalidDisplayId);
+}
+
+
+TEST_F(X11WindowOzoneTest, StartupIdProperty) {
+  // Set a startup ID.
+  const std::string kStartupId = "test-startup-id-123";
+  base::nix::SetActivationToken(kStartupId);
+
+  MockPlatformWindowDelegate delegate;
+  gfx::AcceleratedWidget widget;
+  // CreatePlatformWindow calls Initialize, which should consume the token
+  // and set the _NET_STARTUP_ID property.
+  auto window = CreatePlatformWindow(&delegate, gfx::Rect(0, 0, 100, 100),
+                                     &widget, nullptr);
+
+  // Verify that the token was consumed from global state.
+  EXPECT_FALSE(base::nix::TakeXdgActivationToken().has_value());
+
+  x11::Window xid = static_cast<x11::Window>(widget);
+
+  // Read the _NET_STARTUP_ID property from the window.
+  scoped_refptr<base::RefCountedMemory> data;
+  x11::Atom type;
+  ASSERT_TRUE(GetRawBytesOfProperty(xid, x11::GetAtom("_NET_STARTUP_ID"),
+                                    &data, &type));
+
+  EXPECT_EQ(type, x11::GetAtom("UTF8_STRING"));
+  std::string value(reinterpret_cast<const char*>(data->data()), data->size());
+  EXPECT_EQ(value, kStartupId);
+}
+
+TEST_F(X11WindowOzoneTest, StartupIdPropertyFromInitProperties) {
+  const std::string kStartupId = "test-startup-id-properties";
+  const std::string kGlobalToken = "global-token-should-not-be-used";
+  base::nix::SetActivationToken(kGlobalToken);
+
+  MockPlatformWindowDelegate delegate;
+  gfx::AcceleratedWidget widget;
+  EXPECT_CALL(delegate, OnAcceleratedWidgetAvailable(_))
+      .WillOnce(StoreWidget(&widget));
+
+  PlatformWindowInitProperties properties;
+  properties.bounds = gfx::Rect(0, 0, 100, 100);
+  properties.startup_id = kStartupId;
+
+  auto window = std::make_unique<X11Window>(&delegate);
+  window->Initialize(std::move(properties));
+
+  // Verify that the global token was NOT consumed.
+  auto global_token = base::nix::TakeXdgActivationToken();
+  ASSERT_TRUE(global_token.has_value());
+  EXPECT_EQ(global_token.value(), kGlobalToken);
+
+  x11::Window xid = static_cast<x11::Window>(widget);
+
+  // Read the _NET_STARTUP_ID property from the window.
+  scoped_refptr<base::RefCountedMemory> data;
+  x11::Atom type;
+  ASSERT_TRUE(GetRawBytesOfProperty(xid, x11::GetAtom("_NET_STARTUP_ID"),
+                                    &data, &type));
+
+  EXPECT_EQ(type, x11::GetAtom("UTF8_STRING"));
+  std::string value(reinterpret_cast<const char*>(data->data()), data->size());
+  EXPECT_EQ(value, kStartupId);
 }
 
 }  // namespace ui

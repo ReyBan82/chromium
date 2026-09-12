@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_DOWNLOAD_DOWNLOAD_TARGET_DETERMINER_DELEGATE_H_
 #define CHROME_BROWSER_DOWNLOAD_DOWNLOAD_TARGET_DETERMINER_DELEGATE_H_
 
+#include <optional>
 #include <string>
 
 #include "base/functional/callback_forward.h"
@@ -14,10 +15,14 @@
 #include "components/download/public/common/download_item.h"
 #include "components/download/public/common/download_path_reservation_tracker.h"
 #include "components/download/public/common/download_utils.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "ui/shell_dialogs/selected_file_info.h"
 
 namespace base {
 class FilePath;
+}
+
+namespace content {
+class WebContents;
 }
 
 // Delegate for DownloadTargetDeterminer. The delegate isn't owned by
@@ -46,13 +51,11 @@ class DownloadTargetDeterminerDelegate {
       download::DownloadPathReservationTracker::ReservedPathCallback;
 
   // Callback to be invoked when RequestConfirmation() completes.
-  // |virtual_path|: The path chosen by the user. If the user cancels the file
-  //    selection, then this parameter will be the empty path. On Chrome OS,
-  //    this path may contain virtual mount points if the user chose a virtual
-  //    path (e.g. Google Drive).
+  // |selected_file_info|: The file chosen by the user, or a value with an empty
+  // path if the user cancels the file selection.
   using ConfirmationCallback =
       base::OnceCallback<void(DownloadConfirmationResult,
-                              const base::FilePath& virtual_path)>;
+                              const ui::SelectedFileInfo& selected_file_info)>;
 
   // Callback to be invoked when RequestIncognitoWarningConfirmation()
   // completes.
@@ -88,9 +91,9 @@ class DownloadTargetDeterminerDelegate {
 
   // Reserve |virtual_path|. This is expected to check the following:
   // - Whether |virtual_path| can be written to by the user. If not, the
-  //   |virtual_path| can be changed to writeable path if necessary.
+  //   |virtual_path| can be changed to writable path if necessary.
   // - If |conflict_action| is UNIQUIFY then |virtual_path| should be
-  //   modified so that the new path is writeable and unique. If
+  //   modified so that the new path is writable and unique. If
   //   |conflict_action| is PROMPT, then in the event of a conflict,
   //   |callback| should be invoked with |success| set to |false| in
   //   order to force a prompt. |virtual_path| may or may not be
@@ -105,6 +108,7 @@ class DownloadTargetDeterminerDelegate {
       bool create_directory,
       download::DownloadPathReservationTracker::FilenameConflictAction
           conflict_action,
+      const base::FilePath& containment_directory,
       ReservedPathCallback callback) = 0;
 
   // Display a prompt to the user requesting that a download target be chosen.
@@ -117,6 +121,7 @@ class DownloadTargetDeterminerDelegate {
   // Display a message prompt to the user containing an incognito warning.
   // Should invoke |callback| upon completion.
   virtual void RequestIncognitoWarningConfirmation(
+      content::WebContents* web_contents,
       IncognitoWarningConfirmationCallback callback) = 0;
 #endif
   // If |virtual_path| is not a local path, should return a possibly temporary

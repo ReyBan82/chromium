@@ -2,62 +2,43 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "content/browser/preloading/prefetch/prefetch_network_context.h"
-
+#include "base/memory/scoped_refptr.h"
 #include "base/test/scoped_feature_list.h"
-#include "content/browser/preloading/prefetch/prefetch_features.h"
+#include "content/browser/preloading/prefetch/prefetch_isolated_network_context.h"
+#include "content/browser/preloading/prefetch/prefetch_request.h"
 #include "content/browser/preloading/prefetch/prefetch_service.h"
+#include "content/browser/preloading/prefetch/prefetch_test_util_internal.h"
 #include "content/browser/preloading/prefetch/prefetch_type.h"
+#include "content/browser/preloading/prefetch/prefetch_url_loader_factory_utils.h"
+#include "content/public/browser/browser_context.h"
+#include "content/public/browser/child_process_host.h"
+#include "content/public/browser/preloading_trigger_type.h"
 #include "content/public/browser/render_process_host.h"
-#include "content/public/common/content_client.h"
+#include "content/public/common/content_features.h"
+#include "content/public/test/navigation_simulator.h"
 #include "content/public/test/test_renderer_host.h"
-#include "content/test/test_content_browser_client.h"
-#include "testing/gmock/include/gmock/gmock.h"
-#include "testing/gtest/include/gtest/gtest.h"
 
 namespace content {
 namespace {
 
-class ScopedMockContentBrowserClient : public TestContentBrowserClient {
- public:
-  ScopedMockContentBrowserClient() {
-    old_browser_client_ = SetBrowserClientForTesting(this);
-  }
+// "arg" type is `url::Origin`.
+// `url` type is `GURL`.
+MATCHER_P(IsSameOriginWith, url, "") {
+  return arg.IsSameOriginWith(url);
+}
 
-  ~ScopedMockContentBrowserClient() override {
-    EXPECT_EQ(this, SetBrowserClientForTesting(old_browser_client_));
-  }
-
-  MOCK_METHOD(
-      bool,
-      WillCreateURLLoaderFactory,
-      (BrowserContext * browser_context,
-       RenderFrameHost* frame,
-       int render_process_id,
-       URLLoaderFactoryType type,
-       const url::Origin& request_initiator,
-       absl::optional<int64_t> navigation_id,
-       ukm::SourceIdObj ukm_source_id,
-       mojo::PendingReceiver<network::mojom::URLLoaderFactory>*
-           factory_receiver,
-       mojo::PendingRemote<network::mojom::TrustedURLLoaderHeaderClient>*
-           header_client,
-       bool* bypass_redirect_checks,
-       bool* disable_secure_dns,
-       network::mojom::URLLoaderFactoryOverridePtr* factory_override),
-      (override));
-
- private:
-  raw_ptr<ContentBrowserClient> old_browser_client_;
-};
+// "arg" type is `net::IsolationInfo`.
+MATCHER(IsEmptyIsolationInfo, "") {
+  return arg.IsEmpty();
+}
 
 class PrefetchNetworkContextTest : public RenderViewHostTestHarness {
  public:
   void SetUp() override {
     RenderViewHostTestHarness::SetUp();
 
-    test_content_browser_client_ =
-        std::make_unique<ScopedMockContentBrowserClient>();
+    test_content_browser_client_ = std::make_unique<
+        ::testing::StrictMock<ScopedMockContentBrowserClient>>();
 
     prefetch_service_ = std::make_unique<PrefetchService>(browser_context());
   }
@@ -82,69 +63,116 @@ class PrefetchNetworkContextTest : public RenderViewHostTestHarness {
 
 TEST_F(PrefetchNetworkContextTest, CreateIsolatedURLLoaderFactory) {
   const GURL kReferringUrl = GURL("https://test.referring.origin.com");
+  NavigationSimulator::NavigateAndCommitFromBrowser(web_contents(),
+                                                    kReferringUrl);
 
-  EXPECT_CALL(
-      *test_content_browser_client(),
-      WillCreateURLLoaderFactory(
-          testing::NotNull(), main_rfh(), main_rfh()->GetProcess()->GetID(),
-          ContentBrowserClient::URLLoaderFactoryType::kPrefetch,
-          testing::ResultOf(
-              [&kReferringUrl](const url::Origin& request_initiator) {
-                return request_initiator.IsSameOriginWith(kReferringUrl);
-              },
-              true),
-          testing::Eq(absl::nullopt),
-          ukm::SourceIdObj::FromInt64(main_rfh()->GetPageUkmSourceId()),
-          testing::NotNull(), testing::NotNull(), testing::NotNull(),
-          testing::IsNull(), testing::IsNull()))
-      .WillOnce(testing::Return(false));
+  EXPECT_CALL(*test_content_browser_client(),
+              WillCreateURLLoaderFactory(
+                  testing::NotNull(), main_rfh(),
+                  main_rfh()->GetProcess()->GetDeprecatedID(),
+                  ContentBrowserClient::URLLoaderFactoryType::kPrefetch,
+                  IsSameOriginWith(kReferringUrl), IsEmptyIsolationInfo(),
+                  testing::Eq(std::nullopt),
+                  ukm::SourceIdObj::FromInt64(main_rfh()->GetPageUkmSourceId()),
+                  testing::_, testing::NotNull(), testing::NotNull(),
+                  testing::IsNull(), testing::IsNull(), testing::IsNull(),
+                  /*is_for_network_service=*/true));
 
-  blink::mojom::Referrer referring_origin;
-  referring_origin.url = kReferringUrl;
-
-  std::unique_ptr<PrefetchNetworkContext> prefetch_network_context =
-      std::make_unique<PrefetchNetworkContext>(
-          prefetch_service(),
-          PrefetchType(/*use_isolated_network_context=*/true,
-                       /*use_prefetch_proxy=*/false,
-                       blink::mojom::SpeculationEagerness::kEager),
-          referring_origin, main_rfh()->GetGlobalId());
-
-  prefetch_network_context->GetURLLoaderFactory();
+  // Unused fields are marked as `{}`.
+  auto prefetch_request = PrefetchRequest::CreateRendererInitiated(
+      *static_cast<RenderFrameHostImpl*>(main_rfh()),
+      /*referring_document_token=*/{}, /*url=*/{},
+      PrefetchType(PreloadingTriggerType::kSpeculationRule,
+                   /*use_prefetch_proxy=*/false,
+                   blink::mojom::SpeculationEagerness::kImmediate),
+      /*referrer=*/{},
+      /*speculation_rules_tags=*/{},
+      /*no_vary_search_hint=*/{},
+      /*priority=*/{},
+      /*prefetch_document_manager=*/{},
+      PreloadPipelineInfo::Create(
+          /*planned_max_preloading_type=*/PreloadingType::kPrefetch));
+  // For now we just need to create the context but don't use it.
+  std::ignore = std::make_unique<PrefetchIsolatedNetworkContext>(
+      prefetch_service()->CreateIsolatedNetworkContextForTesting(
+          /*is_proxy_required_when_cross_origin=*/false),
+      *prefetch_request);
 }
 
 TEST_F(PrefetchNetworkContextTest,
        CreateURLLoaderFactoryInDefaultNetworkContext) {
   const GURL kReferringUrl = GURL("https://test.referring.origin.com");
+  NavigationSimulator::NavigateAndCommitFromBrowser(web_contents(),
+                                                    kReferringUrl);
+
+  EXPECT_CALL(*test_content_browser_client(),
+              WillCreateURLLoaderFactory(
+                  testing::NotNull(), main_rfh(),
+                  main_rfh()->GetProcess()->GetDeprecatedID(),
+                  ContentBrowserClient::URLLoaderFactoryType::kPrefetch,
+                  IsSameOriginWith(kReferringUrl), IsEmptyIsolationInfo(),
+                  testing::Eq(std::nullopt),
+                  ukm::SourceIdObj::FromInt64(main_rfh()->GetPageUkmSourceId()),
+                  testing::_, testing::NotNull(), testing::NotNull(),
+                  testing::IsNull(), testing::IsNull(), testing::IsNull(),
+                  /*is_for_network_service=*/true));
+
+  // Unused fields are marked as `{}`.
+  auto prefetch_request = PrefetchRequest::CreateRendererInitiated(
+      *static_cast<RenderFrameHostImpl*>(main_rfh()),
+      /*referring_document_token=*/{}, /*url=*/{},
+      PrefetchType(PreloadingTriggerType::kSpeculationRule,
+                   /*use_prefetch_proxy=*/false,
+                   blink::mojom::SpeculationEagerness::kImmediate),
+      /*referrer=*/{},
+      /*speculation_rules_tags=*/{},
+      /*no_vary_search_hint=*/{},
+      /*priority=*/{},
+      /*prefetch_document_manager=*/{},
+      PreloadPipelineInfo::Create(
+          /*planned_max_preloading_type=*/PreloadingType::kPrefetch));
+  CreatePrefetchURLLoaderFactory(prefetch_request->browser_context()
+                                     ->GetDefaultStoragePartition()
+                                     ->GetNetworkContext(),
+                                 *prefetch_request);
+}
+
+TEST_F(PrefetchNetworkContextTest,
+       CreateURLLoaderFactoryForBrowserInitiatedTriggersNetworkContext) {
+  const GURL kReferringUrl = GURL("https://test.referring.origin.com");
+  const url::Origin kReferringOrigin = url::Origin::Create(kReferringUrl);
 
   EXPECT_CALL(
       *test_content_browser_client(),
       WillCreateURLLoaderFactory(
-          testing::NotNull(), main_rfh(), main_rfh()->GetProcess()->GetID(),
+          testing::NotNull(), testing::IsNull(),
+          testing::Eq(content::ChildProcessHost::kInvalidUniqueID),
           ContentBrowserClient::URLLoaderFactoryType::kPrefetch,
-          testing::ResultOf(
-              [&kReferringUrl](const url::Origin request_initiator) {
-                return request_initiator.IsSameOriginWith(kReferringUrl);
-              },
-              true),
-          testing::Eq(absl::nullopt),
-          ukm::SourceIdObj::FromInt64(main_rfh()->GetPageUkmSourceId()),
-          testing::NotNull(), testing::NotNull(), testing::NotNull(),
-          testing::IsNull(), testing::IsNull()))
-      .WillOnce(testing::Return(false));
+          IsSameOriginWith(kReferringUrl), IsEmptyIsolationInfo(),
+          testing::Eq(std::nullopt), testing::Eq(ukm::kInvalidSourceIdObj),
+          testing::_, testing::NotNull(), testing::NotNull(), testing::IsNull(),
+          testing::IsNull(), testing::IsNull(),
+          /*is_for_network_service=*/true));
 
-  blink::mojom::Referrer referring_origin;
-  referring_origin.url = kReferringUrl;
-
-  std::unique_ptr<PrefetchNetworkContext> prefetch_network_context =
-      std::make_unique<PrefetchNetworkContext>(
-          prefetch_service(),
-          PrefetchType(/*use_isolated_network_context=*/false,
-                       /*use_prefetch_proxy=*/false,
-                       blink::mojom::SpeculationEagerness::kEager),
-          referring_origin, main_rfh()->GetGlobalId());
-
-  prefetch_network_context->GetURLLoaderFactory();
+  // Unused fields are marked as `{}`.
+  auto prefetch_request =
+      PrefetchRequest::CreateBrowserInitiatedWithoutWebContents(
+          browser_context(),
+          /*url=*/{},
+          PrefetchType(PreloadingTriggerType::kEmbedder,
+                       /*use_prefetch_proxy=*/false),
+          test::kPreloadingEmbedderHistogramSuffixForTesting,
+          /*referrer=*/{},
+          /*javascript_enabled=*/{}, kReferringOrigin,
+          /*no_vary_search_hint=*/{},
+          /*priority=*/{},
+          PreloadPipelineInfo::Create(
+              /*planned_max_preloading_type=*/content::PreloadingType::
+                  kPrefetch));
+  CreatePrefetchURLLoaderFactory(prefetch_request->browser_context()
+                                     ->GetDefaultStoragePartition()
+                                     ->GetNetworkContext(),
+                                 *prefetch_request);
 }
 
 }  // namespace

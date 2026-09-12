@@ -29,6 +29,8 @@
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
 #include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h"
 #include "third_party/blink/renderer/core/html/canvas/html_canvas_element.h"
+#include "third_party/blink/renderer/core/layout/layout_object_inlines.h"
+#include "third_party/blink/renderer/core/layout/layout_replaced.h"
 #include "third_party/blink/renderer/core/layout/layout_view.h"
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/paint/html_canvas_painter.h"
@@ -36,25 +38,30 @@
 namespace blink {
 
 LayoutHTMLCanvas::LayoutHTMLCanvas(HTMLCanvasElement* element)
-    : LayoutReplaced(element, LayoutSize(element->Size())) {
+    : LayoutReplaced(element), natural_size_(PhysicalSize(element->Size())) {
   View()->GetFrameView()->SetIsVisuallyNonEmpty();
 }
 
 void LayoutHTMLCanvas::PaintReplaced(const PaintInfo& paint_info,
                                      const PhysicalOffset& paint_offset) const {
   NOT_DESTROYED();
+  if (ChildPaintBlockedByDisplayLock()) {
+    return;
+  }
   HTMLCanvasPainter(*this).PaintReplaced(paint_info, paint_offset);
 }
 
 void LayoutHTMLCanvas::CanvasSizeChanged() {
   NOT_DESTROYED();
   gfx::Size canvas_size = To<HTMLCanvasElement>(GetNode())->Size();
-  LayoutSize zoomed_size = LayoutSize(canvas_size) * StyleRef().EffectiveZoom();
+  PhysicalSize zoomed_size = PhysicalSize(canvas_size);
+  zoomed_size.Scale(StyleRef().EffectiveZoom());
 
-  if (zoomed_size == IntrinsicSize())
+  if (zoomed_size == natural_size_) {
     return;
+  }
 
-  SetIntrinsicSize(zoomed_size);
+  natural_size_ = zoomed_size;
 
   if (!Parent())
     return;
@@ -63,8 +70,17 @@ void LayoutHTMLCanvas::CanvasSizeChanged() {
   SetNeedsLayout(layout_invalidation_reason::kSizeChanged);
 }
 
+PhysicalNaturalSizingInfo LayoutHTMLCanvas::GetNaturalDimensions() const {
+  NOT_DESTROYED();
+  return PhysicalNaturalSizingInfo::MakeFixed(natural_size_);
+}
+
 bool LayoutHTMLCanvas::DrawsBackgroundOntoContentLayer() const {
+  NOT_DESTROYED();
   auto* canvas = To<HTMLCanvasElement>(GetNode());
+  if (canvas->IsInCanvasSubtree() && canvas->layoutSubtree()) {
+    return false;
+  }
   if (canvas->SurfaceLayerBridge())
     return false;
   CanvasRenderingContext* context = canvas->RenderingContext();
@@ -84,23 +100,48 @@ void LayoutHTMLCanvas::InvalidatePaint(
     const PaintInvalidatorContext& context) const {
   NOT_DESTROYED();
   auto* element = To<HTMLCanvasElement>(GetNode());
-  if (element->IsDirty())
-    element->DoDeferredPaintInvalidation();
+  if (element->IsDirty()) {
+    if (element->DoDeferredPaintInvalidation() &&
+        !element->ShouldSkipPaintInvalidation()) {
+      GetMutableForPainting().SetShouldDoFullPaintInvalidation(
+          PaintInvalidationReason::kLayout);
+    }
+  }
 
   LayoutReplaced::InvalidatePaint(context);
 }
 
-void LayoutHTMLCanvas::StyleDidChange(StyleDifference diff,
-                                      const ComputedStyle* old_style) {
+void LayoutHTMLCanvas::StyleDidChange(
+    StyleDifference diff,
+    const ComputedStyle* old_style,
+    const ComputedStyle& new_style,
+    const StyleChangeContext& style_change_context) {
   NOT_DESTROYED();
-  LayoutReplaced::StyleDidChange(diff, old_style);
-  To<HTMLCanvasElement>(GetNode())->StyleDidChange(old_style, StyleRef());
+  LayoutReplaced::StyleDidChange(diff, old_style, new_style,
+                                 style_change_context);
+  To<HTMLCanvasElement>(GetNode())->StyleDidChange(old_style, new_style);
 }
 
-void LayoutHTMLCanvas::WillBeDestroyed() {
+void LayoutHTMLCanvas::WillBeDestroyed(const ComputedStyle* style) {
   NOT_DESTROYED();
-  LayoutReplaced::WillBeDestroyed();
+  LayoutReplaced::WillBeDestroyed(style);
   To<HTMLCanvasElement>(GetNode())->LayoutObjectDestroyed();
+}
+
+void LayoutHTMLCanvas::Trace(Visitor* visitor) const {
+  visitor->Trace(children_);
+  LayoutReplaced::Trace(visitor);
+}
+
+bool LayoutHTMLCanvas::IsChildAllowed(LayoutObject* child,
+                                      const ComputedStyle& style) const {
+  NOT_DESTROYED();
+  if (!IsA<Element>(GetNode()) || child->IsText()) {
+    return false;
+  }
+
+  const auto* canvas = To<HTMLCanvasElement>(GetNode());
+  return canvas->layoutSubtree();
 }
 
 }  // namespace blink

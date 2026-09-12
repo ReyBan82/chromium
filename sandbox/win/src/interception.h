@@ -17,16 +17,14 @@
 #include "base/gtest_prod_util.h"
 #include "base/memory/raw_ptr_exclusion.h"
 #include "base/memory/raw_ref.h"
+#include "base/types/expected.h"
+#include "sandbox/win/src/interception_internal.h"
 #include "sandbox/win/src/interceptors.h"
 #include "sandbox/win/src/sandbox_types.h"
 
 namespace sandbox {
 
 class TargetProcess;
-
-// Internal structures used for communication between the broker and the target.
-struct DllPatchInfo;
-struct DllInterceptionData;
 
 // The InterceptionManager executes on the parent application, and it is in
 // charge of setting up the desired interceptions, and placing the Interception
@@ -115,14 +113,6 @@ class InterceptionManager {
                              const void* replacement_code_address,
                              InterceptorId id);
 
-  // Patches function_name inside dll_name to point to
-  // replacement_function_name.
-  bool AddToPatchedFunctions(const wchar_t* dll_name,
-                             const char* function_name,
-                             InterceptionType interception_type,
-                             const char* replacement_function_name,
-                             InterceptorId id);
-
   // The interception agent will unload the dll with dll_name.
   bool AddToUnloadModules(const wchar_t* dll_name);
 
@@ -149,7 +139,6 @@ class InterceptionManager {
     InterceptorId id;                 // Interceptor id.
     std::wstring dll;                 // Name of dll to intercept.
     std::string function;             // Name of function to intercept.
-    std::string interceptor;          // Name of interceptor function.
     // Interceptor's entry point. Not a raw_ptr<> as it will always point at
     // a function like `TargetNtOpenThread64`.
     RAW_PTR_EXCLUSION const void* interceptor_address;
@@ -200,21 +189,17 @@ class InterceptionManager {
   ResultCode PatchNtdll(bool hot_patch_needed);
 
   // Peforms the actual interceptions on ntdll.
-  // thunks is the memory to store all the thunks for this dll (on the child),
-  // and dll_data is a local buffer to hold global dll interception info.
-  // Returns SBOX_ALL_OK on success.
-  ResultCode PatchClientFunctions(DllInterceptionData* thunks,
-                                  size_t thunk_bytes,
-                                  DllInterceptionData* dll_data);
+  // thunks is the memory to store all the thunks for this dll (on the child).
+  // On success, returns info about the intercepted functions.
+  base::expected<PatchClientResultData, ResultCode> PatchClientFunctions(
+      DllInterceptionData* thunks,
+      size_t thunk_bytes);
 
   // The process to intercept.
   const raw_ref<TargetProcess> child_;
   // Holds all interception info until the call to initialize (perform the
   // actual patch).
   std::list<InterceptionData> interceptions_;
-
-  // Keep track of patches added by name.
-  bool names_used_;
 };
 
 // This macro simply calls interception_manager.AddToPatchedFunctions with

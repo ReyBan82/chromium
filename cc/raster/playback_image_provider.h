@@ -6,6 +6,7 @@
 #define CC_RASTER_PLAYBACK_IMAGE_PROVIDER_H_
 
 #include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "cc/cc_export.h"
 #include "cc/paint/image_id.h"
 #include "cc/paint/image_provider.h"
@@ -19,7 +20,7 @@ class ImageDecodeCache;
 // decoded images for raster from the ImageDecodeCache.
 class CC_EXPORT PlaybackImageProvider : public ImageProvider {
  public:
-  enum class RasterMode { kSoftware, kGpu, kOop };
+  enum class RasterMode { kSoftware, kGpu };
   struct CC_EXPORT Settings {
     Settings();
     Settings(const Settings&) = delete;
@@ -34,7 +35,8 @@ class CC_EXPORT PlaybackImageProvider : public ImageProvider {
 
     // The frame index to use for the given image id. If no index is provided,
     // the frame index provided in the PaintImage will be used.
-    base::flat_map<PaintImage::Id, size_t> image_to_current_frame_index;
+    scoped_refptr<const AnimatedImageFrameIndexMap>
+        image_to_current_frame_index;
 
     // Indicates the raster backend that will be consuming the decoded images.
     RasterMode raster_mode = RasterMode::kSoftware;
@@ -43,7 +45,7 @@ class CC_EXPORT PlaybackImageProvider : public ImageProvider {
   // If no settings are provided, all images are skipped during rasterization.
   PlaybackImageProvider(ImageDecodeCache* cache,
                         const TargetColorParams& target_color_params,
-                        absl::optional<Settings>&& settings);
+                        std::optional<Settings>&& settings);
   PlaybackImageProvider(const PlaybackImageProvider&) = delete;
   PlaybackImageProvider(PlaybackImageProvider&& other);
   ~PlaybackImageProvider() override;
@@ -55,10 +57,15 @@ class CC_EXPORT PlaybackImageProvider : public ImageProvider {
   ImageProvider::ScopedResult GetRasterContent(
       const DrawImage& draw_image) override;
 
+  void SetAnimatedImageFrameIndexes(
+      scoped_refptr<const AnimatedImageFrameIndexMap> index_map);
+
  private:
-  ImageDecodeCache* cache_;
+  // RAW_PTR_EXCLUSION: ImageDecodeCache is marked as not supported by raw_ptr.
+  // See raw_ptr.h for more information.
+  RAW_PTR_EXCLUSION ImageDecodeCache* cache_ = nullptr;
   TargetColorParams target_color_params_;
-  absl::optional<Settings> settings_;
+  std::optional<Settings> settings_;
 };
 
 }  // namespace cc

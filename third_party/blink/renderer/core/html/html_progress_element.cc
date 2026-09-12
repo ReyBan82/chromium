@@ -25,11 +25,11 @@
 #include "third_party/blink/renderer/core/html/parser/html_parser_idioms.h"
 #include "third_party/blink/renderer/core/html/shadow/progress_shadow_element.h"
 #include "third_party/blink/renderer/core/html_names.h"
-#include "third_party/blink/renderer/core/layout/layout_object_factory.h"
 #include "third_party/blink/renderer/core/layout/layout_progress.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 
 namespace blink {
 
@@ -39,26 +39,49 @@ const double HTMLProgressElement::kInvalidPosition = -2;
 HTMLProgressElement::HTMLProgressElement(Document& document)
     : HTMLElement(html_names::kProgressTag, document), value_(nullptr) {
   UseCounter::Count(document, WebFeature::kProgressElement);
+  SetHasCustomStyleCallbacks();
   EnsureUserAgentShadowRoot();
 }
 
 HTMLProgressElement::~HTMLProgressElement() = default;
 
 LayoutObject* HTMLProgressElement::CreateLayoutObject(
-    const ComputedStyle& style,
-    LegacyLayout legacy) {
+    const ComputedStyle& style) {
+  if (style.IsVerticalWritingMode()) {
+    UseCounter::Count(GetDocument(), WebFeature::kVerticalFormControls);
+  }
   if (!style.HasEffectiveAppearance()) {
     UseCounter::Count(GetDocument(),
                       WebFeature::kProgressElementWithNoneAppearance);
-    return LayoutObject::CreateObject(this, style, legacy);
+    return LayoutObject::CreateObject(this, style);
   }
   UseCounter::Count(GetDocument(),
                     WebFeature::kProgressElementWithProgressBarAppearance);
-  return LayoutObjectFactory::CreateProgress(this, style, legacy);
+  return MakeGarbageCollected<LayoutProgress>(*this);
 }
 
 LayoutProgress* HTMLProgressElement::GetLayoutProgress() const {
   return DynamicTo<LayoutProgress>(GetLayoutObject());
+}
+
+void HTMLProgressElement::DidRecalcStyle(const StyleRecalcChange change) {
+  HTMLElement::DidRecalcStyle(change);
+  const ComputedStyle* style = GetComputedStyle();
+  if (style) {
+    bool is_horizontal = style->IsHorizontalWritingMode();
+    bool is_ltr = style->IsLeftToRightDirection();
+    if (is_horizontal && is_ltr) {
+      UseCounter::Count(GetDocument(),
+                        WebFeature::kProgressElementHorizontalLtr);
+    } else if (is_horizontal && !is_ltr) {
+      UseCounter::Count(GetDocument(),
+                        WebFeature::kProgressElementHorizontalRtl);
+    } else if (is_ltr) {
+      UseCounter::Count(GetDocument(), WebFeature::kProgressElementVerticalLtr);
+    } else {
+      UseCounter::Count(GetDocument(), WebFeature::kProgressElementVerticalRtl);
+    }
+  }
 }
 
 void HTMLProgressElement::ParseAttribute(
@@ -81,7 +104,8 @@ void HTMLProgressElement::AttachLayoutTree(AttachContext& context) {
 }
 
 double HTMLProgressElement::value() const {
-  double value = GetFloatingPointAttribute(html_names::kValueAttr);
+  double value =
+      ParseHTMLFloatingPointNumber(getAttribute(html_names::kValueAttr), 0);
   // Otherwise, if the parsed value was greater than or equal to the maximum
   // value, then the current value of the progress bar is the maximum value
   // of the progress bar. Otherwise, if parsing the value attribute's value
@@ -95,7 +119,8 @@ void HTMLProgressElement::setValue(double value) {
 }
 
 double HTMLProgressElement::max() const {
-  double max = GetFloatingPointAttribute(html_names::kMaxAttr);
+  double max =
+      ParseHTMLFloatingPointNumber(getAttribute(html_names::kMaxAttr), 1);
   // Otherwise, if the element has no max attribute, or if it has one but
   // parsing it resulted in an error, or if the parsed value was less than or
   // equal to zero, then the maximum value of the progress bar is 1.0.
@@ -103,9 +128,10 @@ double HTMLProgressElement::max() const {
 }
 
 void HTMLProgressElement::setMax(double max) {
-  // FIXME: The specification says we should ignore the input value if it is
-  // inferior or equal to 0.
-  SetFloatingPointAttribute(html_names::kMaxAttr, max > 0 ? max : 1);
+  if (max <= 0) {
+    return;
+  }
+  SetFloatingPointAttribute(html_names::kMaxAttr, max);
 }
 
 double HTMLProgressElement::position() const {
@@ -155,6 +181,14 @@ void HTMLProgressElement::SetInlineSizePercentage(double position) const {
                                  CSSPrimitiveValue::UnitType::kPercentage);
   value_->SetInlineStyleProperty(CSSPropertyID::kBlockSize, 100,
                                  CSSPrimitiveValue::UnitType::kPercentage);
+}
+
+bool HTMLProgressElement::SupportsBaseAppearanceInternal(
+    BaseAppearanceValue value) const {
+  if (!RuntimeEnabledFeatures::AppearanceBaseEnabled()) {
+    return false;
+  }
+  return value == Element::BaseAppearanceValue::kBase;
 }
 
 }  // namespace blink

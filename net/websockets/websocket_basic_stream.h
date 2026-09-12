@@ -5,10 +5,14 @@
 #ifndef NET_WEBSOCKETS_WEBSOCKET_BASIC_STREAM_H_
 #define NET_WEBSOCKETS_WEBSOCKET_BASIC_STREAM_H_
 
+#include <stddef.h>
+#include <stdint.h>
+
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "base/containers/heap_array.h"
 #include "base/containers/queue.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/time/time.h"
@@ -16,18 +20,24 @@
 #include "net/base/net_export.h"
 #include "net/log/net_log_with_source.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
+#include "net/websockets/websocket_chunk_assembler.h"
+#include "net/websockets/websocket_frame.h"
 #include "net/websockets/websocket_frame_parser.h"
 #include "net/websockets/websocket_stream.h"
+
+namespace base {
+class TimeTicks;
+}  // namespace base
 
 namespace net {
 
 class ClientSocketHandle;
-class DrainableIOBuffer;
 class GrowableIOBuffer;
 class IOBuffer;
 class IOBufferWithSize;
 struct WebSocketFrame;
 struct WebSocketFrameChunk;
+struct NetworkTrafficAnnotationTag;
 
 // Implementation of WebSocketStream for non-multiplexed ws:// connections (or
 // the physical side of a multiplexed ws:// connection).
@@ -88,16 +98,25 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
   };
 
   // Adapter that allows WebSocketBasicStream to use
-  // either a TCP/IP or TLS socket, or an HTTP/2 stream.
+  // a TCP/IP or TLS socket, an HTTP/2 stream, or an HTTP/3 stream.
   class Adapter {
    public:
     virtual ~Adapter() = default;
     virtual int Read(IOBuffer* buf,
                      int buf_len,
                      CompletionOnceCallback callback) = 0;
+    // Writes `buf_len` bytes of `buf`, all of it or none of it: returns
+    // `buf_len`, or ERR_IO_PENDING and later runs `callback` with `buf_len`, or
+    // a network error. A partial byte count is never reported, so an
+    // implementation that cannot write everything at once must do the
+    // remaining writes itself. `buf` must remain valid until the write
+    // completes. `is_final_write` is true when this is the last data that will
+    // ever be written, so an implementation may close the send side once the
+    // whole buffer has been consumed.
     virtual int Write(
         IOBuffer* buf,
         int buf_len,
+        bool is_final_write,
         CompletionOnceCallback callback,
         const NetworkTrafficAnnotationTag& traffic_annotation) = 0;
     virtual void Disconnect() = 0;
@@ -155,16 +174,6 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
   void OnReadComplete(std::vector<std::unique_ptr<WebSocketFrame>>* frames,
                       int result);
 
-  // Writes until |buffer| is fully drained (in which case returns OK) or a
-  // socket write returns asynchronously or returns an error.  If returns
-  // ERR_IO_PENDING, then |write_callback_| will be called with result later.
-  int WriteEverything(const scoped_refptr<DrainableIOBuffer>& buffer);
-
-  // Called when a write completes.  Tries to write more.
-  // Might call |write_callback_|.
-  void OnWriteComplete(const scoped_refptr<DrainableIOBuffer>& buffer,
-                       int result);
-
   // Attempts to parse the output of a read as WebSocket frames. On success,
   // returns OK and places the frame(s) in |frames|.
   int HandleReadResult(int result,
@@ -178,52 +187,18 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
       std::vector<std::unique_ptr<WebSocketFrameChunk>>* frame_chunks,
       std::vector<std::unique_ptr<WebSocketFrame>>* frames);
 
-  // Converts a |chunk| to a |frame|. |*frame| should be NULL on entry to this
-  // method. If |chunk| is an incomplete control frame, or an empty middle
-  // frame, then |*frame| may still be NULL on exit. If an invalid control frame
-  // is found, returns ERR_WS_PROTOCOL_ERROR and the stream is no longer
-  // usable. Otherwise returns OK (even if frame is still NULL).
-  int ConvertChunkToFrame(std::unique_ptr<WebSocketFrameChunk> chunk,
-                          std::unique_ptr<WebSocketFrame>* frame);
-
-  // Creates a frame based on the value of |is_final_chunk|, |data| and
-  // |current_frame_header_|. Clears |current_frame_header_| if |is_final_chunk|
-  // is true. |data| may be NULL if the frame has an empty payload. A frame in
-  // the middle of a message with no data is not useful; in this case the
-  // returned frame will be NULL. Otherwise, |current_frame_header_->opcode| is
-  // set to Continuation after use if it was Text or Binary, in accordance with
-  // WebSocket RFC6455 section 5.4.
-  std::unique_ptr<WebSocketFrame> CreateFrame(bool is_final_chunk,
-                                              base::span<const char> data);
-
-  // Adds |data_buffer| to the end of |incomplete_control_frame_body_|, applying
-  // bounds checks.
-  void AddToIncompleteControlFrameBody(base::span<const char> data);
-
   // Storage for pending reads.
   scoped_refptr<IOBufferWithSize> read_buffer_;
 
   // The best read buffer size for the current throughput.
   size_t target_read_buffer_size_;
 
-  // The connection, wrapped in a ClientSocketHandle so that we can prevent it
-  // from being returned to the pool.
+  // The connection adapter wrapping the underlying transport (TCP/TLS socket,
+  // HTTP/2 stream, or HTTP/3 stream).
   std::unique_ptr<Adapter> connection_;
 
-  // Frame header for the frame currently being received. Only non-NULL while we
-  // are processing the frame. If the frame arrives in multiple chunks, it can
-  // remain non-NULL until additional chunks arrive. If the header of the frame
-  // was invalid, this is set to NULL, the channel is failed, and subsequent
-  // chunks of the same frame will be ignored.
-  std::unique_ptr<WebSocketFrameHeader> current_frame_header_;
-
-  // Although it should rarely happen in practice, a control frame can arrive
-  // broken into chunks. This variable provides storage for a partial control
-  // frame until the rest arrives. It will be empty the rest of the time.
-  std::vector<char> incomplete_control_frame_body_;
-  // Storage for payload of combined (see |incomplete_control_frame_body_|)
-  // control frame.
-  std::vector<char> complete_control_frame_body_;
+  // Storage for payload of multiple control frames.
+  std::vector<base::HeapArray<uint8_t>> control_frame_payloads_;
 
   // Only used during handshake. Some data may be left in this buffer after the
   // handshake, in which case it will be picked up during the first call to
@@ -237,7 +212,7 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
   // parses frames.
   WebSocketFrameParser parser_;
 
-  // The negotated sub-protocol, or empty for none.
+  // The negotiated sub-protocol, or empty for none.
   const std::string sub_protocol_;
 
   // The extensions negotiated with the remote server.
@@ -257,8 +232,10 @@ class NET_EXPORT_PRIVATE WebSocketBasicStream final : public WebSocketStream {
   WebSocketMaskingKeyGeneratorFunction generate_websocket_masking_key_;
 
   // User callback saved for asynchronous writes and reads.
-  CompletionOnceCallback write_callback_;
   CompletionOnceCallback read_callback_;
+
+  // Used to assemble FrameChunks into Frames.
+  WebSocketChunkAssembler chunk_assembler_;
 };
 
 }  // namespace net

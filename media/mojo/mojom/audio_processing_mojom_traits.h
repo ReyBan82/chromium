@@ -4,8 +4,11 @@
 #ifndef MEDIA_MOJO_MOJOM_AUDIO_PROCESSING_MOJOM_TRAITS_H_
 #define MEDIA_MOJO_MOJOM_AUDIO_PROCESSING_MOJOM_TRAITS_H_
 
+#include <optional>
+
 #include "media/base/audio_processing.h"
 #include "media/base/audio_processor_controls.h"
+#include "media/media_buildflags.h"
 #include "media/mojo/mojom/audio_processing.mojom-shared.h"
 #include "mojo/public/cpp/bindings/struct_traits.h"
 
@@ -15,20 +18,13 @@ template <>
 struct StructTraits<media::mojom::AudioProcessingStatsDataView,
                     media::AudioProcessingStats> {
  public:
-  static bool has_echo_return_loss(const media::AudioProcessingStats& input) {
-    return input.echo_return_loss.has_value();
-  }
-  static double echo_return_loss(const media::AudioProcessingStats& input) {
-    return input.echo_return_loss.value_or(0.0);
-  }
-
-  static bool has_echo_return_loss_enhancement(
+  static std::optional<double> echo_return_loss(
       const media::AudioProcessingStats& input) {
-    return input.echo_return_loss_enhancement.has_value();
+    return input.echo_return_loss;
   }
-  static double echo_return_loss_enhancement(
+  static std::optional<double> echo_return_loss_enhancement(
       const media::AudioProcessingStats& input) {
-    return input.echo_return_loss_enhancement.value_or(0.0);
+    return input.echo_return_loss_enhancement;
   }
 
   static bool Read(media::mojom::AudioProcessingStatsDataView input,
@@ -45,26 +41,22 @@ struct StructTraits<media::mojom::AudioProcessingSettingsDataView,
   static bool noise_suppression(const media::AudioProcessingSettings& s) {
     return s.noise_suppression;
   }
-  static bool transient_noise_suppression(
-      const media::AudioProcessingSettings& s) {
-    return s.transient_noise_suppression;
-  }
   static bool automatic_gain_control(const media::AudioProcessingSettings& s) {
     return s.automatic_gain_control;
-  }
-  static bool high_pass_filter(const media::AudioProcessingSettings& s) {
-    return s.high_pass_filter;
   }
   static bool multi_channel_capture_processing(
       const media::AudioProcessingSettings& s) {
     return s.multi_channel_capture_processing;
   }
-  static bool stereo_mirroring(const media::AudioProcessingSettings& s) {
-    return s.stereo_mirroring;
+  static bool use_loopback_aec_reference(
+      const media::AudioProcessingSettings& s) {
+    return s.use_loopback_aec_reference;
   }
-  static bool force_apm_creation(const media::AudioProcessingSettings& s) {
-    return s.force_apm_creation;
+#if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
+  static bool voice_isolation(const media::AudioProcessingSettings& s) {
+    return s.voice_isolation;
   }
+#endif
   static bool Read(media::mojom::AudioProcessingSettingsDataView input,
                    media::AudioProcessingSettings* out_settings);
 };

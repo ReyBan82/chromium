@@ -42,7 +42,7 @@ class TestBrowserThread;
 // To synchronously run tasks from the shared message loop:
 //
 // ... until there are no undelayed tasks in the shared message loop:
-//    base::RunLoop::RunUntilIdle();
+//    base::RunLoop().RunUntilIdle();
 //
 // ... until there are no undelayed tasks in the shared message loop, in
 // ThreadPool (excluding tasks not posted from the shared message loop's thread
@@ -101,7 +101,7 @@ class TestBrowserThread;
 //     template <typename... TaskEnvironmentTraits>
 //     explicit FooBase(TaskEnvironmentTraits&&... traits)
 //         : task_environment_(
-//               absl::in_place,
+//               std::in_place,
 //               std::forward<TaskEnvironmentTraits>(traits)...) {}
 //
 //     // Alternatively a subclass may pass this tag to ask this FooBase not to
@@ -113,7 +113,7 @@ class TestBrowserThread;
 //    protected:
 //     // Use this protected member directly from the test body to drive tasks
 //     // posted within a FooBase-based test.
-//     absl::optional<base::test::TaskEnvironment> task_environment_;
+//     std::optional<base::test::TaskEnvironment> task_environment_;
 //   };
 //
 //   class ChromeFooBase : public FooBase {
@@ -139,20 +139,17 @@ class BrowserTaskEnvironment : public base::test::TaskEnvironment {
   // remove this.
   static constexpr MainThreadType IO_MAINLOOP = MainThreadType::IO;
 
-  struct ValidTraits {
-    ValidTraits(TaskEnvironment::ValidTraits);
-    ValidTraits(Options);
-  };
+  using ValidTraits =
+      base::ConcatParameterPacks<base::test::TaskEnvironment::ValidTraits,
+                                 base::ParameterPack<Options>>;
 
   // Constructor which accepts zero or more traits to configure the
   // TaskEnvironment and optionally request a real IO thread. Unlike
   // TaskEnvironment the default MainThreadType for
   // BrowserTaskEnvironment is MainThreadType::UI.
-  template <
-      typename... TaskEnvironmentTraits,
-      class CheckArgumentsAreValid = std::enable_if_t<
-          base::trait_helpers::AreValidTraits<ValidTraits,
-                                              TaskEnvironmentTraits...>::value>>
+  template <typename... TaskEnvironmentTraits>
+    requires base::trait_helpers::AreValidTraits<ValidTraits,
+                                                 TaskEnvironmentTraits...>
   NOINLINE explicit BrowserTaskEnvironment(TaskEnvironmentTraits... traits)
       : BrowserTaskEnvironment(
             CreateTaskEnvironmentWithPriorities(
@@ -170,6 +167,11 @@ class BrowserTaskEnvironment : public base::test::TaskEnvironment {
   // RunLoop+QuitClosure() to await an async condition.
   void RunIOThreadUntilIdle();
 
+  // Winds down the BrowserTaskExecutor. After this no tasks posted to browser
+  // task queues will be executed. This is normally handled by the destructor,
+  // but tests can call this early to test shutdown behaviour.
+  void ShutdownBrowserTaskExecutor();
+
   BrowserTaskEnvironment(const BrowserTaskEnvironment&) = delete;
   BrowserTaskEnvironment& operator=(const BrowserTaskEnvironment&) = delete;
 
@@ -186,7 +188,7 @@ class BrowserTaskEnvironment : public base::test::TaskEnvironment {
 
   void Init();
 
-  static constexpr bool UseRealIOThread(absl::optional<Options> options) {
+  static constexpr bool UseRealIOThread(std::optional<Options> options) {
     if (!options)
       return false;
     return *options == Options::REAL_IO_THREAD;

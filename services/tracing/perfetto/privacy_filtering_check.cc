@@ -10,7 +10,10 @@
 
 #include "base/check.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/logging.h"
+#include "base/strings/string_view_util.h"
 #include "services/tracing/perfetto/privacy_filtered_fields-inl.h"
 #include "third_party/perfetto/include/perfetto/protozero/proto_utils.h"
 #include "third_party/perfetto/protos/perfetto/trace/interned_data/interned_data.pbzero.h"
@@ -30,9 +33,10 @@ using protozero::ProtoDecoder;
 
 // Find the index of |value| in |arr|.
 int FindIndexOfValue(const int* const arr, uint32_t value) {
-  for (unsigned i = 0; arr[i] != -1; ++i) {
-    if (static_cast<int>(value) == arr[i])
+  for (unsigned i = 0; UNSAFE_TODO(arr[i]) != -1; ++i) {
+    if (static_cast<int>(value) == UNSAFE_TODO(arr[i])) {
       return i;
+    }
   }
   return -1;
 }
@@ -50,10 +54,6 @@ void LogDisallowedField(std::vector<uint32_t>* parent_ids, uint32_t field_id) {
 }
 #endif  // DCHECK_IS_ON()
 
-uint8_t* OffsetToPtr(size_t offset, std::string& str) {
-  DCHECK_LT(offset, str.size());
-  return reinterpret_cast<uint8_t*>(&str[0] + offset);
-}
 
 // Recursively copies the |proto|'s accepted field IDs including all sub
 // messages, over to |output|. Keeps track of |parent_ids| - field id in parent
@@ -72,11 +72,12 @@ bool FilterProtoRecursively(const MessageInfo* root,
   const size_t out_msg_start_offset = output.size();
 
   proto->Reset();
-  const uint8_t* current_field_start = proto->begin();
-  const uint8_t* next_field_start = nullptr;
-  for (auto f = proto->ReadField(); f.valid();
-       f = proto->ReadField(), current_field_start = next_field_start) {
-    next_field_start = proto->begin() + proto->read_offset();
+  base::span<const uint8_t> remaining_proto = base::span(*proto);
+  for (auto f = proto->ReadField(); f.valid(); f = proto->ReadField()) {
+    // ReadField() advanced the internal decoder pointer. The field we just read
+    // is the difference between the previous remaining bytes and the current.
+    base::span<const uint8_t> field_span = remaining_proto.take_first(
+        remaining_proto.size() - proto->bytes_left());
 
     // If the field is not available in the accepted fields, then skip copying.
     int index = FindIndexOfValue(root->accepted_field_ids, f.id());
@@ -92,29 +93,25 @@ bool FilterProtoRecursively(const MessageInfo* root,
     // POD. If it's a nested message, then the message description will be
     // part of |sub_messages| list. If the message description is nullptr, then
     // assume it is POD.
-    if (!root->sub_messages || root->sub_messages[index] == nullptr) {
-      // PODs can just be copied over to output. Packed fields can be treated
-      // just like primitive fields, by just copying over the full data. Note
-      // that there cannot be packed nested messages. Note that we cannot use
-      // |f.data()| here since it does not include the preamble (field id and
-      // possibly length), so we need to keep track of |current_field_start|.
-      output.append(current_field_start, next_field_start);
+    if (!root->sub_messages ||
+        UNSAFE_TODO(root->sub_messages[index]) == nullptr) {
+      //  PODs can just be copied over to output. Packed fields can be treated
+      //  just like primitive fields, by just copying over the full data. Note
+      //  that there cannot be packed nested messages. Note that we cannot use
+      //  |f.data()| here since it does not include the preamble (field id and
+      //  possibly length), so we need to use |field_span|.
+      output.append(base::as_string_view(field_span));
     } else {
       // Make recursive call to filter the nested message.
       ProtoDecoder decoder(f.data(), f.size());
       parent_ids->push_back(f.id());
       has_blocked_fields |= FilterProtoRecursively(
-          root->sub_messages[index], &decoder, parent_ids, output);
+          UNSAFE_TODO(root->sub_messages[index]), &decoder, parent_ids, output);
       parent_ids->pop_back();
     }
   }
 
   const uint32_t payload_size = output.size() - out_msg_start_offset;
-
-  // If there are any fields added, only then write the message to output.
-  if (payload_size == 0) {
-    return has_blocked_fields;
-  }
 
   // The format is <field id><payload size><message data>.
   // This function wrote the payload of the current message starting from the
@@ -122,28 +119,38 @@ bool FilterProtoRecursively(const MessageInfo* root,
   // after moving the payload by the size of the preamble.
   const uint32_t field_id =
       protozero::proto_utils::MakeTagLengthDelimited(parent_ids->back());
-  uint8_t field_id_buf[protozero::proto_utils::kMaxTagEncodedSize];
-  uint8_t* field_id_end =
-      protozero::proto_utils::WriteVarInt(field_id, field_id_buf);
-  const uint8_t field_id_length = field_id_end - field_id_buf;
+  std::array<uint8_t, protozero::proto_utils::kMaxTagEncodedSize +
+                          protozero::proto_utils::kMessageLengthFieldSize>
+      storage = {};
+  auto [field_id_max_storage, payload_size_max_storage] =
+      base::span(storage)
+          .split_at<protozero::proto_utils::kMaxTagEncodedSize>();
+  uint8_t* const field_id_end = protozero::proto_utils::WriteVarInt(
+      field_id, field_id_max_storage.data());
+  auto field_id_buf = field_id_max_storage.first(
+      static_cast<size_t>(field_id_end - field_id_max_storage.data()));
 
-  uint8_t payload_size_buf[protozero::proto_utils::kMessageLengthFieldSize];
-  uint8_t* payload_size_end =
-      protozero::proto_utils::WriteVarInt(payload_size, payload_size_buf);
-  const uint8_t payload_size_length = payload_size_end - payload_size_buf;
+  uint8_t* const payload_size_end = protozero::proto_utils::WriteVarInt(
+      payload_size, payload_size_max_storage.data());
+  auto payload_size_buf = payload_size_max_storage.first(
+      static_cast<size_t>(payload_size_end - payload_size_max_storage.data()));
+  const size_t preamble_size = payload_size_buf.size() + field_id_buf.size();
+  output.append(preamble_size, 0);
+  auto message_span =
+      base::as_writable_byte_span(output).subspan(out_msg_start_offset);
 
-  // Resize |output| and move the payload, by size of the preamble.
-  const size_t out_payload_start_offset =
-      out_msg_start_offset + field_id_length + payload_size_length;
-  output.append(field_id_length + payload_size_length, 0);
-  memmove(OffsetToPtr(out_payload_start_offset, output),
-          OffsetToPtr(out_msg_start_offset, output), payload_size);
+  if (payload_size != 0) {
+    // Move the payload to make room for the preamble at the beginning.
+    // message_span is [original_payload][empty_space]
+    // destination is [empty_space][final_payload_position]
+    message_span.subspan(preamble_size)
+        .copy_from(message_span.first(payload_size));
+  }
 
-  // Insert field id and payload length.
-  memcpy(OffsetToPtr(out_msg_start_offset, output), field_id_buf,
-         field_id_length);
-  memcpy(OffsetToPtr(out_msg_start_offset + field_id_length, output),
-         payload_size_buf, payload_size_length);
+  auto [field_id_dest, payload_size_dest] =
+      message_span.take_first(preamble_size).split_at(field_id_buf.size());
+  field_id_dest.copy_from(field_id_buf);
+  payload_size_dest.copy_from(payload_size_buf);
 
   return has_blocked_fields;
 }

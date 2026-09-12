@@ -258,11 +258,11 @@ class GCM_EXPORT MCSClient {
   uint64_t security_token_;
 
   // Factory for creating new connections and connection handlers.
-  raw_ptr<ConnectionFactory> connection_factory_;
+  raw_ptr<ConnectionFactory, DanglingUntriaged> connection_factory_;
 
   // Connection handler to handle all over-the-wire protocol communication
   // with the mobile connection server.
-  raw_ptr<ConnectionHandler> connection_handler_;
+  raw_ptr<ConnectionHandler, DanglingUntriaged> connection_handler_;
 
   // -----  Reliablie Message Queue section -----
   // Note: all queues/maps are ordered from oldest (front/begin) message to
@@ -273,7 +273,8 @@ class GCM_EXPORT MCSClient {
   base::circular_deque<MCSPacketInternal> to_resend_;
 
   // Map of collapse keys to their pending messages.
-  std::map<CollapseKey, ReliablePacketInfo*> collapse_key_map_;
+  std::map<CollapseKey, raw_ptr<ReliablePacketInfo, CtnExperimental>>
+      collapse_key_map_;
 
   // Last device_to_server stream id acknowledged by the server.
   StreamId last_device_to_server_stream_id_received_;
@@ -303,7 +304,7 @@ class GCM_EXPORT MCSClient {
   PersistentIdList restored_unackeds_server_ids_;
 
   // The GCM persistent store. Not owned.
-  raw_ptr<GCMStore> gcm_store_;
+  raw_ptr<GCMStore, DanglingUntriaged> gcm_store_;
 
   const scoped_refptr<base::SequencedTaskRunner> io_task_runner_;
 

@@ -8,6 +8,7 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "chromeos/ash/components/tether/synchronous_shutdown_object_container.h"
 
 namespace ash {
@@ -52,10 +53,10 @@ class FakeSynchronousShutdownObjectContainer
  private:
   base::OnceClosure deletion_callback_;
 
-  ActiveHost* active_host_ = nullptr;
-  HostScanCache* host_scan_cache_ = nullptr;
-  HostScanScheduler* host_scan_scheduler_ = nullptr;
-  TetherDisconnector* tether_disconnector_ = nullptr;
+  raw_ptr<ActiveHost> active_host_ = nullptr;
+  raw_ptr<HostScanCache> host_scan_cache_ = nullptr;
+  raw_ptr<HostScanScheduler> host_scan_scheduler_ = nullptr;
+  raw_ptr<TetherDisconnector> tether_disconnector_ = nullptr;
 };
 
 }  // namespace tether

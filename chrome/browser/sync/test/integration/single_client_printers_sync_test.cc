@@ -7,94 +7,132 @@
 #include "chrome/browser/ash/printing/printers_sync_bridge.h"
 #include "chrome/browser/sync/test/integration/printers_helper.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
-#include "chrome/browser/sync/test/integration/updated_progress_marker_checker.h"
 #include "chromeos/printing/printer_configuration.h"
+#include "components/sync/base/features.h"
 #include "content/public/test/browser_test.h"
+#include "testing/gmock/include/gmock/gmock.h"
 
 using printers_helper::AddPrinter;
+using printers_helper::CreateTestPrinter;
 using printers_helper::CreateTestPrinterSpecifics;
 using printers_helper::EditPrinterDescription;
 using printers_helper::GetPrinterCount;
 using printers_helper::GetPrinterStore;
-using printers_helper::GetVerifierPrinterCount;
-using printers_helper::GetVerifierPrinterStore;
-using printers_helper::ProfileContainsSamePrintersAsVerifier;
+using printers_helper::MatchesPrinter;
 using printers_helper::RemovePrinter;
+using printers_helper::ServerPrinterMatchChecker;
+using testing::ElementsAre;
+using testing::IsEmpty;
 
 namespace {
 
-class SingleClientPrintersSyncTest : public SyncTest {
+class SingleClientPrintersSyncTest
+    : public SyncTest,
+      public testing::WithParamInterface<SyncTest::SetupSyncMode> {
  public:
-  SingleClientPrintersSyncTest() : SyncTest(SINGLE_CLIENT) {}
+  SingleClientPrintersSyncTest() : SyncTest(SINGLE_CLIENT) {
+    if (GetSetupSyncMode() == SetupSyncMode::kSyncTransportOnly) {
+      features_.InitAndEnableFeature(
+          syncer::kReplaceSyncPromosWithSignInPromos);
+    }
+  }
   ~SingleClientPrintersSyncTest() override = default;
 
-  bool UseVerifier() override {
-    // TODO(crbug.com/1137770): rewrite tests to not use verifier.
+  bool SetupClients() override {
+    if (!SyncTest::SetupClients()) {
+      return false;
+    }
+
+    printers_helper::WaitForPrinterStoreToLoad(GetProfile(0));
     return true;
   }
+
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return GetParam();
+  }
+
+ private:
+  base::test::ScopedFeatureList features_;
 };
 
+INSTANTIATE_TEST_SUITE_P(
+    ,
+    SingleClientPrintersSyncTest,
+    // TODO(crbug.com/509847617): Use GetSyncTestModes() when the sync
+    // integration tests get parameterized on ChromeOS.
+    testing::Values(SyncTest::SetupSyncMode::kSyncTransportOnly,
+                    SyncTest::SetupSyncMode::kSyncTheFeature),
+    testing::PrintToStringParamName());
+
 // Verify that printers aren't added with a sync call.
-IN_PROC_BROWSER_TEST_F(SingleClientPrintersSyncTest, NoPrinters) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
-  ASSERT_TRUE(UpdatedProgressMarkerChecker(GetSyncService(0)).Wait());
-  EXPECT_TRUE(ProfileContainsSamePrintersAsVerifier(0));
+IN_PROC_BROWSER_TEST_P(SingleClientPrintersSyncTest, NoPrinters) {
+  ASSERT_TRUE(SetupSync());
+  EXPECT_EQ(0, GetPrinterCount(0));
+  EXPECT_TRUE(ServerPrinterMatchChecker(IsEmpty()).Wait());
 }
 
-// Verify syncing doesn't randomly remove a printer.
-IN_PROC_BROWSER_TEST_F(SingleClientPrintersSyncTest, SingleNewPrinter) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+IN_PROC_BROWSER_TEST_P(SingleClientPrintersSyncTest, SingleNewPrinter) {
+  ASSERT_TRUE(SetupSync());
 
-  ASSERT_EQ(0, GetVerifierPrinterCount());
+  AddPrinter(GetPrinterStore(0), CreateTestPrinter(0));
+  EXPECT_EQ(1, GetPrinterCount(0));
 
-  AddPrinter(GetPrinterStore(0), printers_helper::CreateTestPrinter(0));
-  AddPrinter(GetVerifierPrinterStore(), printers_helper::CreateTestPrinter(0));
-  ASSERT_EQ(1, GetPrinterCount(0));
-  ASSERT_EQ(1, GetVerifierPrinterCount());
-
-  ASSERT_TRUE(UpdatedProgressMarkerChecker(GetSyncService(0)).Wait());
-  EXPECT_EQ(1, GetVerifierPrinterCount());
-  EXPECT_TRUE(ProfileContainsSamePrintersAsVerifier(0));
+  EXPECT_TRUE(ServerPrinterMatchChecker(
+                  ElementsAre(MatchesPrinter(CreateTestPrinter(0))))
+                  .Wait());
 }
 
-// Verify editing a printer doesn't add it.
-IN_PROC_BROWSER_TEST_F(SingleClientPrintersSyncTest, EditPrinter) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+// Verify editing a printer updates the server entity.
+IN_PROC_BROWSER_TEST_P(SingleClientPrintersSyncTest, EditPrinter) {
+  ASSERT_TRUE(SetupSync());
 
-  AddPrinter(GetPrinterStore(0), printers_helper::CreateTestPrinter(0));
-  AddPrinter(GetVerifierPrinterStore(), printers_helper::CreateTestPrinter(0));
+  AddPrinter(GetPrinterStore(0), CreateTestPrinter(0));
+  ASSERT_TRUE(ServerPrinterMatchChecker(
+                  ElementsAre(MatchesPrinter(CreateTestPrinter(0))))
+                  .Wait());
 
   ASSERT_TRUE(
       EditPrinterDescription(GetPrinterStore(0), 0, "Updated description"));
 
   EXPECT_EQ(1, GetPrinterCount(0));
-  EXPECT_EQ(1, GetVerifierPrinterCount());
-  EXPECT_FALSE(ProfileContainsSamePrintersAsVerifier(0));
+
+  chromeos::Printer expected_printer = CreateTestPrinter(0);
+  expected_printer.set_description("Updated description");
+  EXPECT_TRUE(
+      ServerPrinterMatchChecker(ElementsAre(MatchesPrinter(expected_printer)))
+          .Wait());
 }
 
 // Verify that removing a printer works.
-IN_PROC_BROWSER_TEST_F(SingleClientPrintersSyncTest, RemovePrinter) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+IN_PROC_BROWSER_TEST_P(SingleClientPrintersSyncTest, RemovePrinter) {
+  ASSERT_TRUE(SetupSync());
 
-  AddPrinter(GetPrinterStore(0), printers_helper::CreateTestPrinter(0));
-  EXPECT_EQ(1, GetPrinterCount(0));
+  AddPrinter(GetPrinterStore(0), CreateTestPrinter(0));
+  ASSERT_EQ(1, GetPrinterCount(0));
+  ASSERT_TRUE(ServerPrinterMatchChecker(
+                  ElementsAre(MatchesPrinter(CreateTestPrinter(0))))
+                  .Wait());
 
   RemovePrinter(GetPrinterStore(0), 0);
   EXPECT_EQ(0, GetPrinterCount(0));
+  EXPECT_TRUE(ServerPrinterMatchChecker(IsEmpty()).Wait());
 }
 
 // Verify that merging data added before sync works.
-IN_PROC_BROWSER_TEST_F(SingleClientPrintersSyncTest, AddBeforeSetup) {
+IN_PROC_BROWSER_TEST_P(SingleClientPrintersSyncTest, AddBeforeSetup) {
   ASSERT_TRUE(SetupClients());
 
-  AddPrinter(GetPrinterStore(0), printers_helper::CreateTestPrinter(0));
-  EXPECT_EQ(1, GetPrinterCount(0));
+  AddPrinter(GetPrinterStore(0), CreateTestPrinter(0));
+  ASSERT_EQ(1, GetPrinterCount(0));
 
-  EXPECT_TRUE(SetupSync()) << "SetupSync() failed.";
+  ASSERT_TRUE(SetupSync());
+  EXPECT_TRUE(ServerPrinterMatchChecker(
+                  ElementsAre(MatchesPrinter(CreateTestPrinter(0))))
+                  .Wait());
 }
 
 // Verify that adding a print server printer retains the print server URI.
-IN_PROC_BROWSER_TEST_F(SingleClientPrintersSyncTest, AddPrintServerPrinter) {
+IN_PROC_BROWSER_TEST_P(SingleClientPrintersSyncTest, AddPrintServerPrinter) {
   ASSERT_TRUE(SetupClients());
   const char kServerAddress[] = "ipp://192.168.1.1:631";
 
@@ -108,7 +146,7 @@ IN_PROC_BROWSER_TEST_F(SingleClientPrintersSyncTest, AddPrintServerPrinter) {
 
   // Start the sync.
   ASSERT_TRUE(SetupSync());
-  absl::optional<sync_pb::PrinterSpecifics> spec_printer =
+  std::optional<sync_pb::PrinterSpecifics> spec_printer =
       bridge->GetPrinter(spec_printer_id);
   ASSERT_TRUE(spec_printer);
 

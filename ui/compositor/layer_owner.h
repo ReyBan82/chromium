@@ -29,7 +29,8 @@ class COMPOSITOR_EXPORT LayerOwner {
     virtual ~Observer() = default;
   };
 
-  explicit LayerOwner(std::unique_ptr<Layer> layer = nullptr);
+  explicit LayerOwner();
+  explicit LayerOwner(std::unique_ptr<Layer> layer);
 
   LayerOwner(const LayerOwner&) = delete;
   LayerOwner& operator=(const LayerOwner&) = delete;
@@ -78,6 +79,7 @@ class COMPOSITOR_EXPORT LayerOwner {
   // e.g. fading it out when it is destroyed.
   std::unique_ptr<Layer> layer_owner_;
   raw_ptr<Layer> layer_ = nullptr;
+  bool recreating_layer_ = false;
 
   base::ObserverList<Observer>::Unchecked observers_;
 };

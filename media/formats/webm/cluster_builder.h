@@ -9,25 +9,35 @@
 
 #include <memory>
 
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
+#include "base/containers/span_writer.h"
+#include "base/numerics/safe_conversions.h"
+
 namespace media {
 
 class Cluster {
  public:
   Cluster() = delete;
 
-  Cluster(std::unique_ptr<uint8_t[]> data, int size);
+  // The size of the `bytes_used` might be less size of `data`.
+  Cluster(base::HeapArray<uint8_t> data, int bytes_used);
 
   Cluster(const Cluster&) = delete;
   Cluster& operator=(const Cluster&) = delete;
 
   ~Cluster();
 
-  const uint8_t* data() const { return data_.get(); }
-  int size() const { return size_; }
+  int bytes_used() const { return bytes_used_; }
+
+  // Returns a span over the `bytes_used()` valid bytes of the cluster.
+  base::span<const uint8_t> AsSpan() const {
+    return data_.first(base::checked_cast<size_t>(bytes_used_));
+  }
 
  private:
-  std::unique_ptr<uint8_t[]> data_;
-  int size_;
+  base::HeapArray<uint8_t> data_;
+  const int bytes_used_;
 };
 
 class ClusterBuilder {
@@ -43,21 +53,18 @@ class ClusterBuilder {
   void AddSimpleBlock(int track_num,
                       int64_t timecode,
                       int flags,
-                      const uint8_t* data,
-                      int size);
+                      base::span<const uint8_t> data);
   void AddBlockGroup(int track_num,
                      int64_t timecode,
                      int duration,
                      int flags,
                      bool is_key_frame,
-                     const uint8_t* data,
-                     int size);
+                     base::span<const uint8_t> data);
   void AddBlockGroupWithoutBlockDuration(int track_num,
                                          int64_t timecode,
                                          int flags,
                                          bool is_key_frame,
-                                         const uint8_t* data,
-                                         int size);
+                                         base::span<const uint8_t> data);
 
   std::unique_ptr<Cluster> Finish();
   std::unique_ptr<Cluster> FinishWithUnknownSize();
@@ -69,21 +76,18 @@ class ClusterBuilder {
                              int duration,
                              int flags,
                              bool is_key_frame,
-                             const uint8_t* data,
-                             int size);
+                             base::span<const uint8_t> data);
   void Reset();
-  void ExtendBuffer(int bytes_needed);
-  void UpdateUInt64(int offset, int64_t value);
-  void WriteBlock(uint8_t* buf,
+  void ExtendBuffer(size_t bytes_needed);
+  void UpdateUInt64(size_t offset, int64_t value);
+  void WriteBlock(base::SpanWriter<uint8_t>& writer,
                   int track_num,
                   int64_t timecode,
                   int flags,
-                  const uint8_t* data,
-                  int size);
+                  base::span<const uint8_t> data);
 
-  std::unique_ptr<uint8_t[]> buffer_;
-  int buffer_size_;
-  int bytes_used_;
+  base::HeapArray<uint8_t> buffer_;
+  size_t bytes_used_;
   int64_t cluster_timecode_;
 };
 

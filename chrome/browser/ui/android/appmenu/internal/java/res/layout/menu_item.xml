@@ -6,28 +6,42 @@ found in the LICENSE file.
 -->
 <!-- Layout for each item in the menu popup -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    style="@style/AppMenuItem"
+    style="@style/OverflowMenuItem"
     android:layout_width="match_parent"
-    android:layout_height="?android:attr/listPreferredItemHeightSmall"
+    android:layout_height="wrap_content"
     android:orientation="horizontal" >
 
     <TextView
         android:id="@+id/menu_item_text"
         style="@style/AppMenuItemText"
+        android:textAppearance="@style/TextAppearance.DensityAdaptive.TextLarge.Primary"
         android:layout_weight="1"
         android:layout_width="wrap_content"
-        android:layout_height="match_parent"
+        android:layout_height="wrap_content"
         android:layout_gravity="start"
+        android:minHeight="?attr/listItemHeight"
         android:duplicateParentState="true" />
 
-    <org.chromium.ui.widget.ChromeImageView
+    <ImageView
         android:id="@+id/menu_item_icon"
         android:layout_weight="0"
-        android:layout_width="wrap_content"
-        android:layout_height="match_parent"
-        android:layout_gravity="end"
+        android:layout_width="?attr/listItemIconSize"
+        android:layout_height="?attr/listItemIconSize"
+        android:layout_gravity="end|center_vertical"
         android:gravity="center_vertical"
         android:tint="@macro/default_icon_color_secondary"
         android:duplicateParentState="true"
         android:importantForAccessibility="no" />
+
+    <ImageView
+        android:id="@+id/menu_item_end_icon"
+        android:layout_weight="0"
+        android:layout_width="?attr/listItemIconSize"
+        android:layout_height="?attr/listItemIconSize"
+        android:layout_gravity="end|center_vertical"
+        android:gravity="center_vertical"
+        android:tint="@macro/default_icon_color_secondary"
+        android:duplicateParentState="true"
+        android:importantForAccessibility="no"
+        android:visibility="gone" />
 </LinearLayout>

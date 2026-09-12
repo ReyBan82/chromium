@@ -5,8 +5,9 @@
 #include "components/policy/core/common/cloud/cloud_external_data_manager.h"
 
 #include "base/strings/strcat.h"
+#include "base/strings/string_view_util.h"
 #include "components/policy/core/common/cloud/cloud_policy_store.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 
 namespace policy {
 
@@ -17,11 +18,6 @@ CloudExternalDataManager::MetadataEntry::MetadataEntry(const std::string& url,
                                                        const std::string& hash)
     : url(url),
       hash(hash) {
-}
-
-bool CloudExternalDataManager::MetadataEntry::operator!=(
-    const MetadataEntry& other) const {
-  return url != other.url || hash != other.hash;
 }
 
 CloudExternalDataManager::MetadataKey::MetadataKey() = default;
@@ -42,8 +38,8 @@ bool CloudExternalDataManager::MetadataKey::operator<(
 
 // Hashing to avoid future parsing of this string
 std::string CloudExternalDataManager::MetadataKey::ToString() const {
-  return base::StrCat(
-      {crypto::SHA256HashString(policy), crypto::SHA256HashString(field_name)});
+  return base::StrCat({base::as_string_view(crypto::hash::Sha256(policy)),
+                       base::as_string_view(crypto::hash::Sha256(field_name))});
 }
 
 CloudExternalDataManager::CloudExternalDataManager() : policy_store_(nullptr) {}

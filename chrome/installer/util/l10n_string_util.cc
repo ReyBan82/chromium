@@ -6,23 +6,34 @@
 
 #include "chrome/installer/util/l10n_string_util.h"
 
+#include <windows.h>
+
 #include <stdint.h>
 
 #include <algorithm>
 #include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "base/check.h"
+#include "base/compiler_specific.h"
+#include "base/containers/buffer_iterator.h"
+#include "base/containers/heap_array.h"
+#include "base/containers/span.h"
+#include "base/debug/alias.h"
 #include "base/functional/bind.h"
+#include "base/i18n/win/embedded_i18n/language_selector.h"
 #include "base/no_destructor.h"
 #include "base/notreached.h"
+#include "base/numerics/checked_math.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/strings/strcat.h"
+#include "base/strings/strcat_win.h"
 #include "base/strings/string_util.h"
-#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/win/atl.h"
-#include "base/win/embedded_i18n/language_selector.h"
+#include "base/win/current_module.h"
+#include "base/win/shlwapi.h"
 #include "chrome/install_static/install_details.h"
 #include "chrome/install_static/install_modes.h"
 #include "chrome/installer/util/google_update_settings.h"
@@ -30,10 +41,9 @@
 
 namespace {
 
-constexpr base::win::i18n::LanguageSelector::LangToOffset
-    kLanguageOffsetPairs[] = {
+constexpr base::i18n::LanguageSelector::LangToOffset kLanguageOffsetPairs[] = {
 #define HANDLE_LANGUAGE(l_, o_) {L## #l_, o_},
-        DO_LANGUAGES
+    DO_LANGUAGES
 #undef HANDLE_LANGUAGE
 };
 
@@ -45,8 +55,8 @@ std::wstring GetPreferredLanguageFromGoogleUpdate() {
   return language;
 }
 
-const base::win::i18n::LanguageSelector& GetLanguageSelector() {
-  static base::NoDestructor<base::win::i18n::LanguageSelector> instance(
+const base::i18n::LanguageSelector& GetLanguageSelector() {
+  static base::NoDestructor<base::i18n::LanguageSelector> instance(
       GetPreferredLanguageFromGoogleUpdate(), kLanguageOffsetPairs);
   return *instance;
 }
@@ -57,7 +67,7 @@ installer::TranslationDelegate* g_translation_delegate = nullptr;
 
 namespace installer {
 
-TranslationDelegate::~TranslationDelegate() {}
+TranslationDelegate::~TranslationDelegate() = default;
 
 void SetTranslationDelegate(TranslationDelegate* delegate) {
   g_translation_delegate = delegate;
@@ -70,19 +80,73 @@ std::wstring GetLocalizedString(int base_message_id) {
   if (g_translation_delegate)
     return g_translation_delegate->GetLocalizedString(base_message_id);
 
-  std::wstring localized_string;
+  const auto& language_selector = GetLanguageSelector();
+  const auto language_offset = language_selector.offset();
+  const UINT message_id = base::checked_cast<UINT>(
+      base::CheckAdd(base_message_id, language_offset).ValueOrDie());
 
-  UINT message_id = base::checked_cast<UINT>(base_message_id +
-                                             GetLanguageSelector().offset());
-  const ATLSTRINGRESOURCEIMAGE* image =
-      AtlGetStringResourceImage(_AtlBaseModule.GetModuleInstance(), message_id);
-  if (image) {
-    localized_string = std::wstring(image->achString, image->nLength);
-  } else {
-    NOTREACHED() << "Unable to find resource id " << message_id;
+  // Strings are bundled up in batches of 16; one resource per bundle; see
+  // https://devblogs.microsoft.com/oldnewthing/20040130-00/?p=40813. Find the
+  // bundle containing the desired string.
+  HGLOBAL bundle_data_handle = nullptr;
+  const uint8_t* bundle_data = nullptr;
+  DWORD bundle_size = 0;
+  const uint16_t bundle_id = (message_id >> 4) + 1;
+  auto* const bundle_handle =
+      ::FindResourceW(CURRENT_MODULE(), MAKEINTRESOURCEW(bundle_id), RT_STRING);
+  if (bundle_handle != nullptr) {
+    bundle_data_handle = ::LoadResource(CURRENT_MODULE(), bundle_handle);
+    if (bundle_data_handle != nullptr) {
+      bundle_data =
+          reinterpret_cast<const uint8_t*>(::LockResource(bundle_data_handle));
+      if (bundle_data != nullptr) {
+        // The bundle is a sequence of ATLSTRINGRESOURCEIMAGE structures, which
+        // are each a DWORD length followed by that many wide characters.
+        bundle_size = ::SizeofResource(CURRENT_MODULE(), bundle_handle);
+        base::BufferIterator<const uint8_t> UNSAFE_TODO(
+            iterator(bundle_data, bundle_size));
+        // Scan forward in the bundle past all preceding messages.
+        for (int index = message_id & 0xF; index; --index) {
+          if (const auto* length = iterator.Object<const WORD>(); length) {
+            iterator.Span<wchar_t>(*length);
+          }
+        }
+        // Return a copy of the string.
+        if (const auto* length = iterator.Object<const WORD>(); length) {
+          if (*length == 0) {
+            return std::wstring();
+          }
+          if (auto string = iterator.Span<wchar_t>(*length); !string.empty()) {
+            return std::wstring(string.data(), *length);
+          }
+        }
+      }
+    }
   }
 
-  return localized_string;
+  // Debugging aid for https://crbug.com/40929723.
+  auto last_error = ::GetLastError();
+  base::debug::Alias(&last_error);
+  base::debug::Alias(&base_message_id);
+  base::debug::Alias(&language_offset);
+  base::debug::Alias(&message_id);
+  base::debug::Alias(&bundle_handle);
+  base::debug::Alias(&bundle_data_handle);
+  base::debug::Alias(&bundle_data);
+  base::debug::Alias(&bundle_size);
+  std::wstring selected_translation_wide =
+      base::ASCIIToWide(language_selector.selected_translation().tag_string());
+  DEBUG_ALIAS_FOR_WCHARCSTR(selected_translation,
+                            selected_translation_wide.c_str(), 16);
+  NOTREACHED() << "Unable to find resource id " << message_id;
+}
+
+std::wstring GetLocalizedStringF(int base_message_id,
+                                 std::vector<std::wstring> replacements) {
+  // Replacements start at index 1, corresponding to placeholder `$1`.
+  replacements.insert(replacements.begin(), {});
+  return base::ReplaceStringPlaceholders(GetLocalizedString(base_message_id),
+                                         replacements, /*offsets=*/{});
 }
 
 // Here we generate the url spec with the Microsoft res:// scheme which is
@@ -94,7 +158,8 @@ std::wstring GetLocalizedEulaResource() {
     return L"";
 
   // The resource names are more or less the upcased language names.
-  std::wstring language(GetLanguageSelector().selected_translation());
+  std::wstring language = base::ASCIIToWide(
+      GetLanguageSelector().selected_translation().tag_string());
   std::replace(language.begin(), language.end(), L'-', L'_');
   language = base::ToUpperASCII(language);
 
@@ -107,22 +172,23 @@ std::wstring GetLocalizedEulaResource() {
 
   // Spaces and DOS paths must be url encoded.
   std::wstring url_path =
-      base::StringPrintf(L"res://%ls/#23/%ls", full_exe_path, resource.c_str());
+      base::StrCat({L"res://", full_exe_path, L"/#23/", resource});
 
   // The cast is safe because url_path has limited length
   // (see the definition of full_exe_path and resource).
   DCHECK(std::numeric_limits<uint32_t>::max() > (url_path.size() * 3));
   DWORD count = static_cast<DWORD>(url_path.size() * 3);
-  std::unique_ptr<wchar_t[]> url_canon(new wchar_t[count]);
-  HRESULT hr = ::UrlCanonicalizeW(url_path.c_str(), url_canon.get(), &count,
+  auto url_canon = base::HeapArray<wchar_t>::WithSize(count);
+  HRESULT hr = ::UrlCanonicalizeW(url_path.c_str(), url_canon.data(), &count,
                                   URL_ESCAPE_UNSAFE);
   if (SUCCEEDED(hr))
-    return std::wstring(url_canon.get());
+    return std::wstring(url_canon.data());
   return url_path;
 }
 
 std::wstring GetCurrentTranslation() {
-  return GetLanguageSelector().selected_translation();
+  return base::ASCIIToWide(
+      GetLanguageSelector().selected_translation().tag_string());
 }
 
 int GetBaseMessageIdForMode(int base_message_id) {
@@ -152,8 +218,8 @@ int GetBaseMessageIdForMode(int base_message_id) {
   }
 
   // Return the variant of |base_message_id| for the current mode.
-  return mode_strings[install_static::InstallDetails::Get()
-                          .install_mode_index()];
+  return UNSAFE_TODO(
+      mode_strings)[install_static::InstallDetails::Get().install_mode_index()];
 }
 
 }  // namespace installer

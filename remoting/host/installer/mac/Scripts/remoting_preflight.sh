@@ -11,12 +11,15 @@ SERVICE_NAME=org.chromium.chromoting
 HOST_BUNDLE_NAME=@@HOST_BUNDLE_NAME@@
 CONFIG_FILE="$HELPERTOOLS/$SERVICE_NAME.json"
 OLD_SCRIPT_FILE="$HELPERTOOLS/$SERVICE_NAME.me2me.sh"
+HOST_BUNDLE_PATH="$HELPERTOOLS/$HOST_BUNDLE_NAME"
 HOST_SERVICE_BINARY="$HELPERTOOLS/$HOST_BUNDLE_NAME/Contents/MacOS/remoting_me2me_host_service"
 USERS_TMP_FILE="$HOST_SERVICE_BINARY.users"
 PLIST=/Library/LaunchAgents/org.chromium.chromoting.plist
+BROKER_PLIST=/Library/LaunchDaemons/org.chromium.chromoting.broker.plist
 ENABLED_FILE="$HELPERTOOLS/$SERVICE_NAME.me2me_enabled"
 ENABLED_FILE_BACKUP="$ENABLED_FILE.backup"
 PREF_PANE=/Library/PreferencePanes/ChromeRemoteDesktop.prefPane
+BROKER_SERVICE_TARGET="system/org.chromium.chromoting.broker"
 
 # In case of errors, log the fact, but continue to unload launchd jobs as much
 # as possible. When finished, this preflight script should exit successfully in
@@ -43,28 +46,12 @@ function find_login_window_for_user {
   ps -ec -u "$user" -o comm,pid | awk '$1 == "loginwindow" { print $2; exit }'
 }
 
-# Return 0 (true) if the current OS is El Capitan (OS X 10.11) or newer.
-function is_el_capitan_or_newer {
-  local full_version=$(sw_vers -productVersion)
-
-  # Split the OS version into an array.
-  local version
-  IFS='.' read -a version <<< "${full_version}"
-  local v0="${version[0]}"
-  local v1="${version[1]}"
-  if [[ $v0 -gt 10 || ( $v0 -eq 10 && $v1 -ge 11 ) ]]; then
-    return 0
-  else
-    return 1
-  fi
-}
-
 trap on_error ERR
 
 logger Running Chrome Remote Desktop preflight script @@VERSION@@
 
-# If there is an _enabled file, rename it while upgrading.
 if [[ -f "$ENABLED_FILE" ]]; then
+  # If there is an _enabled file, rename it while upgrading.
   logger Moving _enabled file
   mv "$ENABLED_FILE" "$ENABLED_FILE_BACKUP"
 fi
@@ -79,15 +66,32 @@ if [[ -f "$OLD_SCRIPT_FILE" ]]; then
   cp "$OLD_SCRIPT_FILE" "$INSTALLER_TEMP/script_backup"
 fi
 
-# Stop and unload the service for each user currently running the service, and
-# record the user IDs so the service can be restarted for the same users in the
+# Record the user IDs so the service can be restarted for the same users in the
 # postflight script.
 rm -f "$USERS_TMP_FILE"
 
 for uid in $(find_users_with_active_hosts); do
-  logger Unloading service for user "$uid"
   if [[ -n "$uid" ]]; then
     echo "$uid" >> "$USERS_TMP_FILE"
+  fi
+done
+
+# Send SIGUSR2 before unloading the service to allow host processes to shut down
+# cleanly after notifying clients.
+logger "Sending SIGUSR2 to Chrome Remote Desktop host service..."
+pkill -USR2 -f "^$HOST_SERVICE_BINARY" || true
+# Wait up to 5 seconds for the host processes to shut down cleanly.
+for i in {1..10}; do
+  if ! pgrep -f "^$HOST_SERVICE_BINARY" > /dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+
+# Stop and unload the service for each user that was running the service.
+if [[ -f "$USERS_TMP_FILE" ]]; then
+  for uid in $(sort "$USERS_TMP_FILE" | uniq); do
+    logger Unloading service for user "$uid"
     if [[ "$uid" = "0" ]]; then
       context="LoginWindow"
     else
@@ -96,29 +100,25 @@ for uid in $(find_users_with_active_hosts); do
 
     stop="launchctl stop $SERVICE_NAME"
     unload="launchctl unload -w -S $context $PLIST"
-
-    if is_el_capitan_or_newer; then
-      bootstrap_user="launchctl asuser $uid"
-    else
-      # Load the launchd agent in the bootstrap context of user $uid's
-      # graphical session, so that screen-capture and input-injection can
-      # work. To do this, find the PID of a process which is running in that
-      # context. The loginwindow process is a good candidate since the user
-      # (if logged in to a session) will definitely be running it.
-      pid="$(find_login_window_for_user "$uid")"
-      if [[ ! -n "$pid" ]]; then
-        exit 1
-      fi
-      sudo_user="sudo -u #$uid"
-      bootstrap_user="launchctl bsexec $pid"
-    fi
+    bootstrap_user="launchctl asuser $uid"
 
     logger $bootstrap_user $sudo_user $stop
     $bootstrap_user $sudo_user $stop
     logger $bootstrap_user $sudo_user $unload
     $bootstrap_user $sudo_user $unload
-  fi
-done
+  done
+fi
+
+logger Unloading broker service
+logger launchctl bootout $BROKER_SERVICE_TARGET
+launchctl bootout $BROKER_SERVICE_TARGET
+
+# Processes such as the native messaging hosts may keep running after the
+# binaries get updated, causing unexpected issues. So we kill them to prevent
+# the issues.
+logger Killing all processes in $HOST_BUNDLE_PATH
+logger pkill -9 -f "^$HOST_BUNDLE_PATH"'.*$'
+pkill -9 -f "^$HOST_BUNDLE_PATH"'.*$'
 
 # The installer no longer includes a preference-pane applet, so remove any
 # pref-pane from a previous installation.

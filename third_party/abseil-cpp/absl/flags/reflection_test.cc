@@ -15,18 +15,21 @@
 
 #include "absl/flags/reflection.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "absl/flags/declare.h"
+#include "absl/flags/config.h"
 #include "absl/flags/flag.h"
-#include "absl/flags/internal/commandlineflag.h"
-#include "absl/flags/marshalling.h"
 #include "absl/memory/memory.h"
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
 
 ABSL_FLAG(int, int_flag, 1, "int_flag help");
 ABSL_FLAG(std::string, string_flag, "dflt", "string_flag help");
@@ -36,7 +39,12 @@ namespace {
 
 class ReflectionTest : public testing::Test {
  protected:
-  void SetUp() override { flag_saver_ = absl::make_unique<absl::FlagSaver>(); }
+  void SetUp() override {
+#if ABSL_FLAGS_STRIP_NAMES
+    GTEST_SKIP() << "This test requires flag names to be present";
+#endif
+    flag_saver_ = std::make_unique<absl::FlagSaver>();
+  }
   void TearDown() override { flag_saver_.reset(); }
 
  private:

@@ -10,16 +10,19 @@
 #include "base/memory/raw_ptr.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/sequenced_task_runner.h"
+#include "build/build_config.h"
 #include "chrome/browser/download/download_commands.h"
 #include "chrome/browser/download/download_ui_model.h"
-#include "chrome/browser/image_decoder/image_decoder.h"
-#include "chrome/browser/ui/browser.h"
+#if BUILDFLAG(IS_CHROMEOS)
+#include "chrome/browser/image_decoder/image_decoder.h"  // nogncheck crbug.com/40147906
+#endif
 #include "components/download/public/common/download_item.h"
 #include "components/offline_items_collection/core/offline_item.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/message_center/public/cpp/notification_delegate.h"
 #include "ui/native_theme/native_theme.h"
 
+class BrowserWindowInterface;
 class SkBitmap;
 
 namespace test {
@@ -63,8 +66,8 @@ class DownloadItemNotification : public ImageDecoder::ImageRequest,
 
   // NotificationObserver:
   void Close(bool by_user) override;
-  void Click(const absl::optional<int>& button_index,
-             const absl::optional<std::u16string>& reply) override;
+  void Click(const std::optional<int>& button_index,
+             const std::optional<std::u16string>& reply) override;
 
  private:
   friend class test::DownloadItemNotificationTest;
@@ -112,9 +115,7 @@ class DownloadItemNotification : public ImageDecoder::ImageRequest,
   bool IsScanning() const;
   bool AllowedToOpenWhileScanning() const;
 
-  bool IsGalleryAppPdfEditNotificationEligible() const;
-
-  Browser* GetBrowser() const;
+  BrowserWindowInterface* GetBrowser() const;
   Profile* profile() const;
 
   // Returns the list of possible extra (all except the default) actions.
@@ -134,13 +135,6 @@ class DownloadItemNotification : public ImageDecoder::ImageRequest,
   // Flag if the notification has been closed or not. Setting this flag
   // prevents updates after close.
   bool closed_ = false;
-
-  // Flag if the notification has been suppressed or not. A notification being
-  // suppressed means that there is some special restriction imposed which is
-  // preventing a notification that would otherwise display from doing so, e.g.
-  // holding space in-progress downloads integration causes suppression of most
-  // download in-progress notifications.
-  bool suppressed_ = false;
 
   // Flag to indicate that a review dialog is open for the user to accept or
   // bypass an enterprise warning on the download. If this is true, the "Review"

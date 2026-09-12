@@ -1,5 +1,4 @@
 // META: global=window,worker
-// META: script=/common/get-host-info.sub.js
 // META: script=resources/webtransport-test-helpers.sub.js
 
 // Write datagrams until the producer receives the AbortSignal.
@@ -20,6 +19,20 @@ async function write_datagrams(writer, signal) {
     writer.write(encoder.encode(token));
     counter++;
   }
+  return sentTokens;
+}
+
+// Write N datagrams without waiting, then wait for them
+async function write_N_datagrams(writer, n) {
+  const encoder = new TextEncoder();
+  const sentTokens = [];
+  const promises = [];
+  while (sentTokens.length < n) {
+    const token = sentTokens.length.toString();
+    sentTokens.push(token);
+    promises.push(writer.write(encoder.encode(token)));
+  }
+  await Promise.all(promises);
   return sentTokens;
 }
 
@@ -86,7 +99,7 @@ promise_test(async t => {
   const wt = new WebTransport(webtransport_url('echo.py'));
   await wt.ready;
 
-  const writer = wt.datagrams.writable.getWriter();
+  const writer = wt.datagrams.createWritable().getWriter();
   const reader = wt.datagrams.readable.getReader();
 
   const controller = new AbortController();
@@ -106,10 +119,10 @@ promise_test(async t => {
 
 promise_test(async t => {
   // Establish a WebTransport session.
-  const wt = new WebTransport(webtransport_url('echo.py'));
+  const wt = new WebTransport(webtransport_url('echo.py'), { 'datagramsReadableType' : 'bytes' });
   await wt.ready;
 
-  const writer = wt.datagrams.writable.getWriter();
+  const writer = wt.datagrams.createWritable().getWriter();
   const reader = wt.datagrams.readable.getReader({ mode: 'byob' });
 
   const controller = new AbortController();
@@ -132,11 +145,17 @@ promise_test(async t => {
 }, 'Successfully reading datagrams with BYOB reader.');
 
 promise_test(async t => {
-  // Establish a WebTransport session.
   const wt = new WebTransport(webtransport_url('echo.py'));
   await wt.ready;
+  assert_throws_js(TypeError, () => { wt.datagrams.readable.getReader({ mode: 'byob' }) });
+}, 'Reading datagrams with BYOB reader without datagramsReadableType should fail.');
 
-  const writer = wt.datagrams.writable.getWriter();
+promise_test(async t => {
+  // Establish a WebTransport session.
+  const wt = new WebTransport(webtransport_url('echo.py'), { 'datagramsReadableType' : 'bytes' });
+  await wt.ready;
+
+  const writer = wt.datagrams.createWritable().getWriter();
   const reader = wt.datagrams.readable.getReader({ mode: 'byob' });
 
   const controller = new AbortController();
@@ -156,19 +175,70 @@ promise_test(async t => {
 }, 'Reading datagrams with insufficient buffer should be rejected.');
 
 promise_test(async t => {
+  // Establish a WebTransport session.
+  const wt = new WebTransport(webtransport_url('echo_datagram_length.py'));
+  await wt.ready;
+
+  const writer = wt.datagrams.createWritable().getWriter();
+  const reader = wt.datagrams.readable.getReader();
+
+  // Write and read max-size datagram.
+  const maxDatagramSize = wt.datagrams.maxDatagramSize;
+  await writer.write(new Uint8Array(maxDatagramSize));
+
+  // the server should echo the datagram length encoded in JSON
+  const { value: token, done } = await reader.read();
+  assert_false(done);
+
+  const decoder = new TextDecoder();
+  const datagramStr = decoder.decode(token);
+  const jsonObject = JSON.parse(datagramStr);
+  assert_equals(jsonObject['length'], maxDatagramSize);
+}, 'Transfer max-size datagram');
+
+promise_test(async t => {
+  // Establish a WebTransport session.
+  const wt = new WebTransport(webtransport_url('echo.py'));
+  await wt.ready;
+
+  const writer = wt.datagrams.createWritable().getWriter();
+  const reader = wt.datagrams.readable.getReader();
+
+  let maxDatagramSize = wt.datagrams.maxDatagramSize;
+
+  while (true) {
+    // Write and read max-size datagram.
+    await writer.write(new Uint8Array(maxDatagramSize + 1));
+    // This should resolve with no datagram sent, which is hard to test for.
+    // Wait for incoming datagrams to arrive, and if they do, fail.
+    const result = await Promise.race([reader.read(), wait(500)]);
+    if (result === undefined) {
+      return; // Success, no datagram received, exit the test early.
+    }
+
+    // Maybe QUIC's PMTUD increased the max-size datagram in the meantime. If
+    // so, try again.
+    const currentMaxDatagramSize = wt.datagrams.maxDatagramSize;
+    assert_greater_than(currentMaxDatagramSize, maxDatagramSize);
+    maxDatagramSize = currentMaxDatagramSize;
+  }
+}, 'Fail to transfer max-size+1 datagram, handle PMTUD increases');
+
+promise_test(async t => {
   // Make a WebTransport connection, but session is not necessarily established.
   const wt = new WebTransport(webtransport_url('echo.py'));
 
-  const writer = wt.datagrams.writable.getWriter();
+  const writer = wt.datagrams.createWritable().getWriter();
   const reader = wt.datagrams.readable.getReader();
 
   const controller = new AbortController();
   const signal = controller.signal;
 
   // Write and read datagrams.
-  const N = 1;
+  const N = 5;
+  wt.datagrams.outgoingMaxBufferedDatagrams = N;
   const [sentTokens, receivedTokens] = await Promise.all([
-      write_datagrams(writer, signal),
+      write_N_datagrams(writer, N),
       read_datagrams(reader, controller, N)
   ]);
 
@@ -186,9 +256,9 @@ promise_test(async t => {
   await wt.ready;
 
   const N = 5;
-  wt.datagrams.outgoingHighWaterMark = N;
+  wt.datagrams.outgoingMaxBufferedDatagrams = N;
 
-  const writer = wt.datagrams.writable.getWriter();
+  const writer = wt.datagrams.createWritable().getWriter();
   const encoder = new TextEncoder();
 
   // Write N-1 datagrams.
@@ -223,7 +293,7 @@ promise_test(async t => {
 
   // Make sure writer.ready is resolved eventually.
   await writer.ready;
-}, 'Datagram\'s outgoingHighWaterMark correctly regulates written datagrams');
+}, 'Datagram\'s outgoingMaxBufferedDatagrams correctly regulates written datagrams');
 
 promise_test(async t => {
   // Establish a WebTransport session.
@@ -231,9 +301,9 @@ promise_test(async t => {
   await wt.ready;
 
   const N = 5;
-  wt.datagrams.incomingHighWaterMark = N;
+  wt.datagrams.incomingMaxBufferedDatagrams = N;
 
-  const writer = wt.datagrams.writable.getWriter();
+  const writer = wt.datagrams.createWritable().getWriter();
   const encoder = new TextEncoder();
 
   // Write 10*N datagrams.
@@ -266,6 +336,66 @@ promise_test(async t => {
   }
 
   // Check that the receivedDatagrams is less than or equal to the
-  // incomingHighWaterMark.
+  // incomingMaxBufferedDatagrams.
   assert_less_than_equal(receivedDatagrams, N);
-}, 'Datagrams read is less than or equal to the incomingHighWaterMark');
+}, 'Datagrams read is less than or equal to the incomingMaxBufferedDatagrams');
+
+promise_test(async t => {
+  // Establish a WebTransport session.
+  const wt = new WebTransport(webtransport_url('echo.py'));
+  await wt.ready;
+
+  assert_equals(wt.datagrams.incomingMaxAge, null);
+  assert_equals(wt.datagrams.outgoingMaxAge, null);
+
+  wt.datagrams.incomingMaxAge = 5;
+  assert_equals(wt.datagrams.incomingMaxAge, 5);
+  wt.datagrams.outgoingMaxAge = 5;
+  assert_equals(wt.datagrams.outgoingMaxAge, 5);
+
+  assert_throws_js(RangeError, () => { wt.datagrams.incomingMaxAge = -1; });
+  assert_throws_js(RangeError, () => { wt.datagrams.outgoingMaxAge = -1; });
+  assert_throws_js(RangeError, () => { wt.datagrams.incomingMaxAge = NaN; });
+  assert_throws_js(RangeError, () => { wt.datagrams.outgoingMaxAge = NaN; });
+
+  wt.datagrams.incomingMaxAge = 0;
+  assert_equals(wt.datagrams.incomingMaxAge, null);
+  wt.datagrams.outgoingMaxAge = 0;
+  assert_equals(wt.datagrams.outgoingMaxAge, null);
+}, 'Datagram MaxAge getters/setters work correctly');
+
+promise_test(async t => {
+  // Establish a WebTransport session.
+  const wt = new WebTransport(webtransport_url('echo.py'));
+  await wt.ready;
+
+  // Initial values are implementation-defined
+  assert_greater_than_equal(wt.datagrams.incomingMaxBufferedDatagrams, 1);
+  assert_greater_than_equal(wt.datagrams.outgoingMaxBufferedDatagrams, 1);
+
+  wt.datagrams.incomingMaxBufferedDatagrams = 5;
+  assert_equals(wt.datagrams.incomingMaxBufferedDatagrams, 5);
+  wt.datagrams.outgoingMaxBufferedDatagrams = 5;
+  assert_equals(wt.datagrams.outgoingMaxBufferedDatagrams, 5);
+
+  // With unsigned long type, -1 coerces to 2^32 - 1 (4294967295)
+  wt.datagrams.incomingMaxBufferedDatagrams = -1;
+  assert_equals(wt.datagrams.incomingMaxBufferedDatagrams, 4294967295);
+  wt.datagrams.outgoingMaxBufferedDatagrams = -1;
+  assert_equals(wt.datagrams.outgoingMaxBufferedDatagrams, 4294967295);
+
+  // NaN coerces to 0, then clamped to 1
+  wt.datagrams.incomingMaxBufferedDatagrams = NaN;
+  assert_equals(wt.datagrams.incomingMaxBufferedDatagrams, 1);
+  wt.datagrams.outgoingMaxBufferedDatagrams = NaN;
+  assert_equals(wt.datagrams.outgoingMaxBufferedDatagrams, 1);
+
+  wt.datagrams.incomingMaxBufferedDatagrams = 0.5;
+  assert_equals(wt.datagrams.incomingMaxBufferedDatagrams, 1);
+  wt.datagrams.outgoingMaxBufferedDatagrams = 0.5;
+  assert_equals(wt.datagrams.outgoingMaxBufferedDatagrams, 1);
+  wt.datagrams.incomingMaxBufferedDatagrams = 0;
+  assert_equals(wt.datagrams.incomingMaxBufferedDatagrams, 1);
+  wt.datagrams.outgoingMaxBufferedDatagrams = 0;
+  assert_equals(wt.datagrams.outgoingMaxBufferedDatagrams, 1);
+}, 'Datagram MaxBufferedDatagrams getters/setters work correctly');

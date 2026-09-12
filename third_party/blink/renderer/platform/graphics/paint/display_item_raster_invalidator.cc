@@ -80,13 +80,12 @@ void DisplayItemRasterInvalidator::Generate() {
   }
 
   // Invalidate remaining unmatched (disappeared or uncacheable) old items.
-  for (auto it = old_display_items_.begin(); it != old_display_items_.end();
-       ++it) {
-    if (old_display_items_matched[static_cast<wtf_size_t>(
-            it - old_display_items_.begin())])
+  wtf_size_t i = 0;
+  for (const auto& old_item : old_display_items_) {
+    if (old_display_items_matched[i++]) {
       continue;
+    }
 
-    const auto& old_item = *it;
     if (old_item.DrawsContent() || old_item.IsTombstone()) {
       clients_to_invalidate.insert(old_item.ClientId(), OldAndNewDisplayItems())
           .stored_value->value.old_visual_rect.Union(old_item.VisualRect());
@@ -104,13 +103,18 @@ DisplayItemIterator DisplayItemRasterInvalidator::MatchNewDisplayItemInOldChunk(
     DisplayItemIterator& next_old_item_to_match) {
   if (!new_item.IsCacheable())
     return old_display_items_.end();
+  // SAFETY: next_old_item_to_match is checked against end() in the loop
+  // condition.
   for (; next_old_item_to_match != old_display_items_.end();
-       next_old_item_to_match++) {
+       UNSAFE_BUFFERS(next_old_item_to_match++)) {
     const auto& old_item = *next_old_item_to_match;
     if (!old_item.IsCacheable())
       continue;
-    if (old_item.GetId() == new_item.GetId())
-      return next_old_item_to_match++;
+    if (old_item.GetId() == new_item.GetId()) {
+      // SAFETY: next_old_item_to_match is not at end() because we just accessed
+      // it above.
+      return UNSAFE_BUFFERS(next_old_item_to_match++);
+    }
     // Add the skipped old item into index.
     old_display_items_index_
         .insert(old_item.ClientId(), Vector<DisplayItemIterator>())
@@ -134,11 +138,7 @@ void DisplayItemRasterInvalidator::AddRasterInvalidation(
     PaintInvalidationReason reason,
     RasterInvalidator::ClientIsOldOrNew old_or_new) {
   gfx::Rect r = invalidator_.ClipByLayerBounds(mapper_.MapVisualRect(rect));
-  if (r.IsEmpty())
-    return;
-
-  invalidator_.AddRasterInvalidation(raster_invalidation_function_, r,
-                                     client_id, reason, old_or_new);
+  invalidator_.AddRasterInvalidation(r, client_id, reason, old_or_new);
 }
 
 void DisplayItemRasterInvalidator::GenerateRasterInvalidation(

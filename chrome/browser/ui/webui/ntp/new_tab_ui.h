@@ -9,15 +9,25 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
+#include "chrome/common/webui_url_constants.h"
 #include "content/public/browser/url_data_source.h"
 #include "content/public/browser/web_ui_controller.h"
+#include "content/public/browser/webui_config.h"
+#include "content/public/common/url_constants.h"
 
 class GURL;
+class NewTabUI;
 class Profile;
 
-namespace user_prefs {
-class PrefRegistrySyncable;
-}
+class NewTabUIConfig : public content::DefaultWebUIConfig<NewTabUI> {
+ public:
+  NewTabUIConfig()
+      : DefaultWebUIConfig(content::kChromeUIScheme,
+                           chrome::kChromeUINewTabHost) {}
+
+  // content::WebUIConfig:
+  bool IsWebUIEnabled(content::BrowserContext* browser_context) override;
+};
 
 // The WebUIController used for the incognito and guest mode New Tab page.
 class NewTabUI : public content::WebUIController {
@@ -29,8 +39,6 @@ class NewTabUI : public content::WebUIController {
 
   ~NewTabUI() override;
 
-  static void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
-
   // Checks whether the given URL points to an NTP WebUI. Note that this only
   // applies to incognito and guest mode NTPs - you probably want to check
   // search::NavEntryIsInstantNTP too!
@@ -40,13 +48,13 @@ class NewTabUI : public content::WebUIController {
 
   // Adds "url", "title", and "direction" keys on incoming dictionary, setting
   // title as the url as a fallback on empty title.
-  static void SetUrlTitleAndDirection(base::Value::Dict* dictionary,
+  static void SetUrlTitleAndDirection(base::DictValue* dictionary,
                                       const std::u16string& title,
                                       const GURL& gurl);
 
   // Adds "full_name" and "full_name_direction" keys on incoming dictionary.
   static void SetFullNameAndDirection(const std::u16string& full_name,
-                                      base::Value::Dict* dictionary);
+                                      base::DictValue* dictionary);
 
  private:
   class NewTabHTMLSource : public content::URLDataSource {
@@ -71,7 +79,7 @@ class NewTabUI : public content::WebUIController {
 
    private:
     // Pointer back to the original profile.
-    raw_ptr<Profile> profile_;
+    raw_ptr<Profile, FlakyDanglingUntriaged> profile_;
   };
 
   void OnShowBookmarkBarChanged();

@@ -5,6 +5,8 @@
 #ifndef MEDIA_CAPTURE_MOJOM_VIDEO_CAPTURE_TYPES_MOJOM_TRAITS_H_
 #define MEDIA_CAPTURE_MOJOM_VIDEO_CAPTURE_TYPES_MOJOM_TRAITS_H_
 
+#include <optional>
+
 #include "media/base/video_facing.h"
 #include "media/capture/mojom/video_capture_types.mojom-shared.h"
 #include "media/capture/video/video_capture_device_descriptor.h"
@@ -16,13 +18,23 @@ namespace mojo {
 
 template <>
 struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
+    EnumTraits<media::mojom::CaptureSourceRequestType,
+               media::CaptureSourceRequestType> {
+  static media::mojom::CaptureSourceRequestType ToMojom(
+      media::CaptureSourceRequestType input);
+  static media::CaptureSourceRequestType FromMojom(
+      media::mojom::CaptureSourceRequestType input);
+};
+
+template <>
+struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
     EnumTraits<media::mojom::ResolutionChangePolicy,
                media::ResolutionChangePolicy> {
   static media::mojom::ResolutionChangePolicy ToMojom(
       media::ResolutionChangePolicy policy);
 
-  static bool FromMojom(media::mojom::ResolutionChangePolicy input,
-                        media::ResolutionChangePolicy* out);
+  static media::ResolutionChangePolicy FromMojom(
+      media::mojom::ResolutionChangePolicy input);
 };
 
 template <>
@@ -31,8 +43,8 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
   static media::mojom::PowerLineFrequency ToMojom(
       media::PowerLineFrequency frequency);
 
-  static bool FromMojom(media::mojom::PowerLineFrequency input,
-                        media::PowerLineFrequency* out);
+  static media::PowerLineFrequency FromMojom(
+      media::mojom::PowerLineFrequency input);
 };
 
 template <>
@@ -40,8 +52,8 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
     EnumTraits<media::mojom::VideoCapturePixelFormat, media::VideoPixelFormat> {
   static media::mojom::VideoCapturePixelFormat ToMojom(
       media::VideoPixelFormat input);
-  static bool FromMojom(media::mojom::VideoCapturePixelFormat input,
-                        media::VideoPixelFormat* output);
+  static media::VideoPixelFormat FromMojom(
+      media::mojom::VideoCapturePixelFormat input);
 };
 
 template <>
@@ -51,8 +63,8 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
   static media::mojom::VideoCaptureBufferType ToMojom(
       media::VideoCaptureBufferType buffer_type);
 
-  static bool FromMojom(media::mojom::VideoCaptureBufferType input,
-                        media::VideoCaptureBufferType* out);
+  static media::VideoCaptureBufferType FromMojom(
+      media::mojom::VideoCaptureBufferType input);
 };
 
 template <>
@@ -61,8 +73,8 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
   static media::mojom::VideoCaptureError ToMojom(
       media::VideoCaptureError buffer_type);
 
-  static bool FromMojom(media::mojom::VideoCaptureError input,
-                        media::VideoCaptureError* out);
+  static media::VideoCaptureError FromMojom(
+      media::mojom::VideoCaptureError input);
 };
 
 template <>
@@ -72,24 +84,31 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
   static media::mojom::VideoCaptureFrameDropReason ToMojom(
       media::VideoCaptureFrameDropReason buffer_type);
 
-  static bool FromMojom(media::mojom::VideoCaptureFrameDropReason input,
-                        media::VideoCaptureFrameDropReason* out);
+  static media::VideoCaptureFrameDropReason FromMojom(
+      media::mojom::VideoCaptureFrameDropReason input);
 };
 
 template <>
 struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
     EnumTraits<media::mojom::VideoFacingMode, media::VideoFacingMode> {
   static media::mojom::VideoFacingMode ToMojom(media::VideoFacingMode input);
-  static bool FromMojom(media::mojom::VideoFacingMode input,
-                        media::VideoFacingMode* output);
+  static media::VideoFacingMode FromMojom(media::mojom::VideoFacingMode input);
 };
 
 template <>
 struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
     EnumTraits<media::mojom::VideoCaptureApi, media::VideoCaptureApi> {
   static media::mojom::VideoCaptureApi ToMojom(media::VideoCaptureApi input);
-  static bool FromMojom(media::mojom::VideoCaptureApi input,
-                        media::VideoCaptureApi* output);
+  static media::VideoCaptureApi FromMojom(media::mojom::VideoCaptureApi input);
+};
+
+template <>
+struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
+    EnumTraits<media::mojom::CameraAvailability, media::CameraAvailability> {
+  static media::mojom::CameraAvailability ToMojom(
+      media::CameraAvailability input);
+  static media::CameraAvailability FromMojom(
+      media::mojom::CameraAvailability input);
 };
 
 template <>
@@ -98,8 +117,8 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
                media::VideoCaptureTransportType> {
   static media::mojom::VideoCaptureTransportType ToMojom(
       media::VideoCaptureTransportType input);
-  static bool FromMojom(media::mojom::VideoCaptureTransportType input,
-                        media::VideoCaptureTransportType* output);
+  static media::VideoCaptureTransportType FromMojom(
+      media::mojom::VideoCaptureTransportType input);
 };
 
 template <>
@@ -176,6 +195,16 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
     return params.is_high_dpi_enabled;
   }
 
+  static uint32_t capture_version_source(
+      const media::VideoCaptureParams& params) {
+    return params.capture_version_source;
+  }
+
+  static media::CaptureSourceRequestType request_type(
+      const media::VideoCaptureParams& params) {
+    return params.request_type;
+  }
+
   static bool Read(media::mojom::VideoCaptureParamsDataView data,
                    media::VideoCaptureParams* out);
 };
@@ -202,6 +231,11 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
   static media::VideoFacingMode facing_mode(
       const media::VideoCaptureDeviceDescriptor& input) {
     return input.facing;
+  }
+
+  static std::optional<media::CameraAvailability> availability(
+      const media::VideoCaptureDeviceDescriptor& input) {
+    return input.availability;
   }
 
   static media::VideoCaptureApi capture_api(
@@ -263,17 +297,15 @@ struct COMPONENT_EXPORT(MEDIA_CAPTURE_MOJOM_TRAITS)
     return feedback.require_mapped_frame;
   }
 
-  static const std::vector<gfx::Size>& mapped_sizes(
+  // Deprecated.
+  static std::vector<gfx::Size> DEPRECATED_mapped_sizes(
       const media::VideoCaptureFeedback& feedback) {
-    return feedback.mapped_sizes;
+    return std::vector<gfx::Size>();
   }
 
-  static bool has_frame_id(const media::VideoCaptureFeedback& feedback) {
-    return feedback.frame_id.has_value();
-  }
-
-  static int frame_id(const media::VideoCaptureFeedback& feedback) {
-    return feedback.frame_id.value_or(0);
+  static std::optional<int> frame_id(
+      const media::VideoCaptureFeedback& feedback) {
+    return feedback.frame_id;
   }
 
   static bool Read(media::mojom::VideoCaptureFeedbackDataView data,

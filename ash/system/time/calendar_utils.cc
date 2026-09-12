@@ -4,35 +4,52 @@
 
 #include "ash/system/time/calendar_utils.h"
 
-#include <map>
+#include <optional>
 #include <string>
 
-#include "ash/constants/ash_pref_names.h"
+#include "ash/calendar/calendar_client.h"
+#include "ash/calendar/calendar_controller.h"
+#include "ash/constants/ash_features.h"
 #include "ash/session/session_controller_impl.h"
 #include "ash/shell.h"
 #include "ash/style/ash_color_provider.h"
 #include "ash/style/color_util.h"
 #include "ash/system/time/date_helper.h"
+#include "base/i18n/icubridge/calendar.h"
+#include "base/i18n/icubridge/date_time_formatter.h"
+#include "base/i18n/icubridge/icu_bridge.h"
+#include "base/i18n/number_formatting.h"
 #include "base/i18n/time_formatting.h"
-#include "base/strings/string_number_conversions.h"
-#include "base/time/time.h"
-#include "chromeos/ash/components/settings/timezone_settings.h"
-#include "components/prefs/pref_service.h"
-#include "components/user_manager/user_type.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "third_party/icu/source/i18n/unicode/gregocal.h"
+#include "third_party/icu/source/common/unicode/uchar.h"
+#include "ui/chromeos/styles/cros_tokens_color_mappings.h"
 #include "ui/views/layout/table_layout.h"
 
-namespace ash {
+namespace ash::calendar_utils {
 
-namespace calendar_utils {
+namespace {
+
+std::u16string KeepOnlyDigits(const std::u16string& str) {
+  std::u16string result;
+  for (char16_t c : str) {
+    if (u_isdigit(c)) {
+      result.push_back(c);
+    }
+  }
+  return result;
+}
+
+}  // namespace
+
+bool IsMultiCalendarEnabled() {
+  return features::IsMultiCalendarSupportEnabled();
+}
 
 bool IsToday(const base::Time selected_date) {
   return IsTheSameDay(selected_date, base::Time::Now());
 }
 
-bool IsTheSameDay(absl::optional<base::Time> date_a,
-                  absl::optional<base::Time> date_b) {
+bool IsTheSameDay(std::optional<base::Time> date_a,
+                  std::optional<base::Time> date_b) {
   if (!date_a.has_value() || !date_b.has_value()) {
     return false;
   }
@@ -84,23 +101,23 @@ std::u16string FormatInterval(const icu::DateIntervalFormat* formatter,
 }
 
 std::u16string GetMonthDayYear(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->month_day_year_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date, base::i18n::datetime_options::YMD::Long());
 }
 
 std::u16string GetMonthDayYearWeek(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->month_day_year_week_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date, base::i18n::datetime_options::YMDE::Long());
 }
 
 std::u16string GetMonthName(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->month_name_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date, base::i18n::datetime_options::M::Long());
 }
 
 std::u16string GetDayOfMonth(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->day_of_month_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date, base::i18n::datetime_options::D::Short());
 }
 
 std::u16string GetDayIntOfMonth(const base::Time local_date) {
@@ -109,54 +126,72 @@ std::u16string GetDayIntOfMonth(const base::Time local_date) {
 }
 
 std::u16string GetMonthNameAndDayOfMonth(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->month_day_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date, base::i18n::datetime_options::MD::Long());
 }
 
 std::u16string GetTwelveHourClockTime(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->twelve_hour_clock_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date,
+      base::i18n::datetime_options::T::Short()
+          .with_hour_clock_type(base::k12HourClock)
+          .with_time_precision(
+              base::i18n::DateTimeFormatterOptions::TimePrecision::kMinute));
 }
 
 std::u16string GetTwentyFourHourClockTime(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->twenty_four_hour_clock_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date,
+      base::i18n::datetime_options::T::Short()
+          .with_hour_clock_type(base::k24HourClock)
+          .with_time_precision(
+              base::i18n::DateTimeFormatterOptions::TimePrecision::kMinute));
 }
 
 std::u16string GetTimeZone(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->time_zone_formatter(), date);
-}
-
-std::u16string GetDayOfWeek(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->day_of_week_formatter(), date);
+  auto time_zone = base::i18n::TimeZone::Default();
+  return time_zone.GetDisplayName(
+      {.is_day_light = time_zone.InDaylightTime(date),
+       .style = base::i18n::TimeZone::kLong});
 }
 
 std::u16string GetYear(const base::Time date) {
-  return calendar_utils::FormatDate(DateHelper::GetInstance()->year_formatter(),
-                                    date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date, base::i18n::datetime_options::Y::Medium());
 }
 
 std::u16string GetMonthNameAndYear(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->month_name_year_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date, base::i18n::datetime_options::YM::Long());
 }
 
 std::u16string GetTwelveHourClockHours(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->twelve_hour_clock_hours_formatter(), date);
+  return base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+      date, base::i18n::datetime_options::T::Short()
+                .with_hour_clock_type(base::k12HourClock)
+                .with_time_precision(
+                    base::i18n::DateTimeFormatterOptions::TimePrecision::kHour)
+                .with_am_pm_clock_type(base::kDropAmPm));
 }
 
 std::u16string GetTwentyFourHourClockHours(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->twenty_four_hour_clock_hours_formatter(),
-      date);
+  return KeepOnlyDigits(
+      base::i18n::IcuBridge::GetInstance().date_time_formatter().Format(
+          date,
+          base::i18n::datetime_options::T::Short()
+              .with_hour_clock_type(base::k24HourClock)
+              .with_time_precision(
+                  base::i18n::DateTimeFormatterOptions::TimePrecision::kHour)));
 }
 
 std::u16string GetMinutes(const base::Time date) {
-  return calendar_utils::FormatDate(
-      DateHelper::GetInstance()->minutes_formatter(), date);
+  base::Time::Exploded exploded;
+  (date + GetTimeDifference(date)).UTCExplode(&exploded);
+  std::u16string first_digit = (exploded.minute < 10)
+                                   ? base::FormatNumber(0)
+                                   : base::FormatNumber(exploded.minute / 10);
+  std::u16string second_digit = base::FormatNumber(exploded.minute % 10);
+  return first_digit + second_digit;
 }
 
 std::u16string FormatTwelveHourClockTimeInterval(const base::Time& start_time,
@@ -175,13 +210,10 @@ std::u16string FormatTwentyFourHourClockTimeInterval(
 }
 
 void SetUpWeekColumns(views::TableLayout* layout) {
-  layout->AddPaddingColumn(views::TableLayout::kFixedSize, kColumnSetPadding);
   for (int i = 0; i < calendar_utils::kDateInOneWeek; ++i) {
-    layout
-        ->AddColumn(views::LayoutAlignment::kStretch,
-                    views::LayoutAlignment::kStretch, 1.0f,
-                    views::TableLayout::ColumnSize::kFixed, 0, 0)
-        .AddPaddingColumn(views::TableLayout::kFixedSize, kColumnSetPadding);
+    layout->AddColumn(views::LayoutAlignment::kStretch,
+                      views::LayoutAlignment::kStretch, 1.0f,
+                      views::TableLayout::ColumnSize::kFixed, 0, 0);
   }
 }
 
@@ -202,20 +234,18 @@ base::Time GetMinTime(const base::Time d1, const base::Time d2) {
 
 SkColor GetPrimaryTextColor() {
   const ash::AshColorProvider* color_provider = ash::AshColorProvider::Get();
-  return color_provider->GetContentLayerColor(
-      AshColorProvider::ContentLayerType::kTextColorPrimary);
+  return color_provider->GetColor(cros_tokens::kTextColorPrimary);
 }
 
 SkColor GetSecondaryTextColor() {
   const ash::AshColorProvider* color_provider = ash::AshColorProvider::Get();
-  return color_provider->GetContentLayerColor(
-      AshColorProvider::ContentLayerType::kTextColorSecondary);
+  return color_provider->GetColor(cros_tokens::kTextColorSecondary);
 }
 
 SkColor GetDisabledTextColor() {
   const ash::AshColorProvider* color_provider = ash::AshColorProvider::Get();
-  const SkColor primary_color = color_provider->GetContentLayerColor(
-      AshColorProvider::ContentLayerType::kTextColorPrimary);
+  const SkColor primary_color =
+      color_provider->GetColor(cros_tokens::kTextColorPrimary);
   return ColorUtil::GetDisabledColor(primary_color);
 }
 
@@ -253,22 +283,21 @@ ASH_EXPORT base::Time GetStartOfNextMonthUTC(base::Time date) {
   return GetStartOfMonthUTC(GetStartOfMonthUTC(date) + base::Days(33));
 }
 
-ASH_EXPORT bool ShouldFetchEvents() {
+ASH_EXPORT bool ShouldFetchCalendarData() {
   return IsActiveUser() && !IsDisabledByAdmin();
 }
 
 ASH_EXPORT bool IsActiveUser() {
-  absl::optional<user_manager::UserType> user_type =
+  std::optional<user_manager::UserType> user_type =
       Shell::Get()->session_controller()->GetUserType();
-  return (user_type && (*user_type == user_manager::USER_TYPE_REGULAR ||
-                        *user_type == user_manager::USER_TYPE_CHILD)) &&
+  return (user_type && (*user_type == user_manager::UserType::kRegular ||
+                        *user_type == user_manager::UserType::kChild)) &&
          !Shell::Get()->session_controller()->IsUserSessionBlocked();
 }
 
 ASH_EXPORT bool IsDisabledByAdmin() {
-  auto* pref_service =
-      Shell::Get()->session_controller()->GetActivePrefService();
-  return !pref_service->GetBoolean(prefs::kCalendarIntegrationEnabled);
+  const auto* const client = Shell::Get()->calendar_controller()->GetClient();
+  return !client || client->IsDisabledByAdmin();
 }
 
 base::TimeDelta GetTimeDifference(base::Time date) {
@@ -295,18 +324,18 @@ ASH_EXPORT const std::pair<base::Time, base::Time> GetFetchStartEndTimes(
 }
 
 int GetDayOfWeekInt(const base::Time date) {
-  int day_int;
-  if (base::StringToInt(GetDayOfWeek(date), &day_int)) {
-    return day_int;
-  }
-
-  // For a few special locales the day of week is not in a number. In these
-  // cases, use the default day of week from time exploded. For example:
-  // 'pa-PK', it returns '۰۳' for the fourth day of week.
   base::Time date_local = date + GetTimeDifference(date);
   base::Time::Exploded local_date_exploded = GetExplodedUTC(date_local);
-  // Time exploded uses 0-based day of week (0 = Sunday, etc.)
-  return local_date_exploded.day_of_week + 1;
+  const int current_weekday =
+      local_date_exploded.day_of_week + 1;  // 1 = Sunday, etc.
+
+  const int first_weekday =
+      static_cast<int>(base::i18n::IcuBridge::GetInstance()
+                           .calendar()
+                           .GetWeekInformation()
+                           .first_weekday);
+
+  return (current_weekday - first_weekday + 7) % 7 + 1;
 }
 
 bool IsMultiDayEvent(const google_apis::calendar::CalendarEvent* event) {
@@ -376,6 +405,4 @@ const std::tuple<base::Time, base::Time> GetMidnight(const base::Time time) {
   return std::make_tuple(utc_midnight, local_midnight);
 }
 
-}  // namespace calendar_utils
-
-}  // namespace ash
+}  // namespace ash::calendar_utils

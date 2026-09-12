@@ -5,7 +5,7 @@
 #include "base/test/scoped_feature_list.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/features.h"
-#include "third_party/blink/renderer/core/dom/node_computed_style.h"
+#include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/frame/event_handler_registry.h"
 #include "third_party/blink/renderer/core/testing/core_unit_test_helper.h"
 #include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
@@ -34,12 +34,13 @@ TEST_F(StyleAdjusterTest, TouchActionPropagatedAcrossIframes) {
   )HTML");
   UpdateAllLifecyclePhasesForTest();
 
-  Element* target = ChildDocument().getElementById("target");
+  Element* target = ChildDocument().getElementById(AtomicString("target"));
   EXPECT_EQ(TouchAction::kNone,
             target->GetComputedStyle()->EffectiveTouchAction());
 
-  Element* owner = GetDocument().getElementById("owner");
-  owner->setAttribute(html_names::kStyleAttr, "touch-action: auto");
+  Element* owner = GetDocument().getElementById(AtomicString("owner"));
+  owner->setAttribute(html_names::kStyleAttr,
+                      AtomicString("touch-action: auto"));
   UpdateAllLifecyclePhasesForTest();
   EXPECT_EQ(TouchAction::kPinchZoom,
             target->GetComputedStyle()->EffectiveTouchAction());
@@ -56,7 +57,7 @@ TEST_F(StyleAdjusterTest, TouchActionPanningReEnabledByScrollers) {
   )HTML");
   UpdateAllLifecyclePhasesForTest();
 
-  Element* target = GetDocument().getElementById("target");
+  Element* target = GetDocument().getElementById(AtomicString("target"));
   EXPECT_EQ(TouchAction::kManipulation | TouchAction::kInternalPanXScrolls |
                 TouchAction::kInternalNotWritable,
             target->GetComputedStyle()->EffectiveTouchAction());
@@ -73,20 +74,22 @@ TEST_F(StyleAdjusterTest, TouchActionPropagatedWhenAncestorStyleChanges) {
   )HTML");
   UpdateAllLifecyclePhasesForTest();
 
-  Element* target = GetDocument().getElementById("target");
+  Element* target = GetDocument().getElementById(AtomicString("target"));
   EXPECT_EQ(TouchAction::kPanX | TouchAction::kInternalPanXScrolls |
                 TouchAction::kInternalNotWritable,
             target->GetComputedStyle()->EffectiveTouchAction());
 
-  Element* ancestor = GetDocument().getElementById("ancestor");
-  ancestor->setAttribute(html_names::kStyleAttr, "touch-action: pan-y");
+  Element* ancestor = GetDocument().getElementById(AtomicString("ancestor"));
+  ancestor->setAttribute(html_names::kStyleAttr,
+                         AtomicString("touch-action: pan-y"));
   UpdateAllLifecyclePhasesForTest();
   EXPECT_EQ(TouchAction::kPanY | TouchAction::kInternalNotWritable,
             target->GetComputedStyle()->EffectiveTouchAction());
 
   Element* potential_scroller =
-      GetDocument().getElementById("potential-scroller");
-  potential_scroller->setAttribute(html_names::kStyleAttr, "overflow: scroll");
+      GetDocument().getElementById(AtomicString("potential-scroller"));
+  potential_scroller->setAttribute(html_names::kStyleAttr,
+                                   AtomicString("overflow: scroll"));
   UpdateAllLifecyclePhasesForTest();
   EXPECT_EQ(TouchAction::kPan | TouchAction::kInternalPanXScrolls |
                 TouchAction::kInternalNotWritable,
@@ -103,13 +106,14 @@ TEST_F(StyleAdjusterTest, TouchActionRestrictedByLowerAncestor) {
   )HTML");
   UpdateAllLifecyclePhasesForTest();
 
-  Element* target = GetDocument().getElementById("target");
+  Element* target = GetDocument().getElementById(AtomicString("target"));
   EXPECT_EQ(TouchAction::kPanRight | TouchAction::kInternalPanXScrolls |
                 TouchAction::kInternalNotWritable,
             target->GetComputedStyle()->EffectiveTouchAction());
 
-  Element* parent = GetDocument().getElementById("parent");
-  parent->setAttribute(html_names::kStyleAttr, "touch-action: auto");
+  Element* parent = GetDocument().getElementById(AtomicString("parent"));
+  parent->setAttribute(html_names::kStyleAttr,
+                       AtomicString("touch-action: auto"));
   UpdateAllLifecyclePhasesForTest();
   EXPECT_EQ(TouchAction::kPanX | TouchAction::kInternalPanXScrolls |
                 TouchAction::kInternalNotWritable,
@@ -135,35 +139,35 @@ TEST_F(StyleAdjusterTest, TouchActionContentEditableArea) {
   UpdateAllLifecyclePhasesForTest();
 
   EXPECT_EQ(TouchAction::kAuto, GetDocument()
-                                    .getElementById("editable1")
+                                    .getElementById(AtomicString("editable1"))
                                     ->GetComputedStyle()
                                     ->EffectiveTouchAction());
   EXPECT_EQ(TouchAction::kAuto, GetDocument()
-                                    .getElementById("input1")
+                                    .getElementById(AtomicString("input1"))
                                     ->GetComputedStyle()
                                     ->EffectiveTouchAction());
   EXPECT_EQ(TouchAction::kAuto, GetDocument()
-                                    .getElementById("textarea1")
+                                    .getElementById(AtomicString("textarea1"))
                                     ->GetComputedStyle()
                                     ->EffectiveTouchAction());
   EXPECT_EQ(TouchAction::kAuto & ~TouchAction::kInternalPanXScrolls,
             GetDocument()
-                .getElementById("editable2")
+                .getElementById(AtomicString("editable2"))
                 ->GetComputedStyle()
                 ->EffectiveTouchAction());
   EXPECT_EQ(TouchAction::kAuto & ~TouchAction::kInternalPanXScrolls,
             GetDocument()
-                .getElementById("input2")
+                .getElementById(AtomicString("input2"))
                 ->GetComputedStyle()
                 ->EffectiveTouchAction());
   EXPECT_EQ(TouchAction::kAuto & ~TouchAction::kInternalPanXScrolls,
             GetDocument()
-                .getElementById("textarea2")
+                .getElementById(AtomicString("textarea2"))
                 ->GetComputedStyle()
                 ->EffectiveTouchAction());
 
-  Element* target = GetDocument().getElementById("editable1");
-  target->setAttribute(html_names::kContenteditableAttr, "true");
+  Element* target = GetDocument().getElementById(AtomicString("editable1"));
+  target->setAttribute(html_names::kContenteditableAttr, keywords::kTrue);
   UpdateAllLifecyclePhasesForTest();
   EXPECT_EQ(TouchAction::kAuto & ~TouchAction::kInternalPanXScrolls,
             target->GetComputedStyle()->EffectiveTouchAction());
@@ -182,11 +186,11 @@ TEST_F(StyleAdjusterTest, TouchActionNoPanXScrollsWhenNoPanX) {
   )HTML");
   UpdateAllLifecyclePhasesForTest();
 
-  Element* target = GetDocument().getElementById("target");
+  Element* target = GetDocument().getElementById(AtomicString("target"));
   EXPECT_EQ(TouchAction::kPanY | TouchAction::kInternalNotWritable,
             target->GetComputedStyle()->EffectiveTouchAction());
 
-  target->setAttribute(html_names::kContenteditableAttr, "true");
+  target->setAttribute(html_names::kContenteditableAttr, keywords::kTrue);
   UpdateAllLifecyclePhasesForTest();
   EXPECT_EQ(TouchAction::kPanY | TouchAction::kInternalNotWritable,
             target->GetComputedStyle()->EffectiveTouchAction());
@@ -194,7 +198,6 @@ TEST_F(StyleAdjusterTest, TouchActionNoPanXScrollsWhenNoPanX) {
 
 TEST_F(StyleAdjusterTest, TouchActionNotWritableReEnabledByScrollers) {
   base::test::ScopedFeatureList feature_list;
-  feature_list.InitWithFeatures({blink::features::kStylusWritingToInput}, {});
   ScopedStylusHandwritingForTest stylus_handwriting(true);
 
   GetDocument().SetBaseURLOverride(KURL("http://test.com"));
@@ -207,14 +210,13 @@ TEST_F(StyleAdjusterTest, TouchActionNotWritableReEnabledByScrollers) {
   )HTML");
   UpdateAllLifecyclePhasesForTest();
 
-  Element* target = GetDocument().getElementById("target");
+  Element* target = GetDocument().getElementById(AtomicString("target"));
   EXPECT_TRUE((target->GetComputedStyle()->EffectiveTouchAction() &
                TouchAction::kInternalNotWritable) != TouchAction::kNone);
 }
 
 TEST_F(StyleAdjusterTest, TouchActionWritableArea) {
   base::test::ScopedFeatureList feature_list;
-  feature_list.InitWithFeatures({blink::features::kStylusWritingToInput}, {});
   ScopedStylusHandwritingForTest stylus_handwriting(true);
 
   GetDocument().SetBaseURLOverride(KURL("http://test.com"));
@@ -231,19 +233,19 @@ TEST_F(StyleAdjusterTest, TouchActionWritableArea) {
   UpdateAllLifecyclePhasesForTest();
 
   EXPECT_EQ(TouchAction::kAuto, GetDocument()
-                                    .getElementById("editable1")
+                                    .getElementById(AtomicString("editable1"))
                                     ->GetComputedStyle()
                                     ->EffectiveTouchAction());
   EXPECT_EQ(TouchAction::kAuto, GetDocument()
-                                    .getElementById("input1")
+                                    .getElementById(AtomicString("input1"))
                                     ->GetComputedStyle()
                                     ->EffectiveTouchAction());
   EXPECT_EQ(TouchAction::kAuto, GetDocument()
-                                    .getElementById("password1")
+                                    .getElementById(AtomicString("password1"))
                                     ->GetComputedStyle()
                                     ->EffectiveTouchAction());
   EXPECT_EQ(TouchAction::kAuto, GetDocument()
-                                    .getElementById("textarea1")
+                                    .getElementById(AtomicString("textarea1"))
                                     ->GetComputedStyle()
                                     ->EffectiveTouchAction());
 
@@ -255,25 +257,27 @@ TEST_F(StyleAdjusterTest, TouchActionWritableArea) {
     expected_pwd_action &= ~TouchAction::kInternalPanXScrolls;
   }
 
+  EXPECT_EQ(expected_input_action,
+            GetDocument()
+                .getElementById(AtomicString("editable2"))
+                ->GetComputedStyle()
+                ->EffectiveTouchAction());
   EXPECT_EQ(expected_input_action, GetDocument()
-                                       .getElementById("editable2")
-                                       ->GetComputedStyle()
-                                       ->EffectiveTouchAction());
-  EXPECT_EQ(expected_input_action, GetDocument()
-                                       .getElementById("input2")
+                                       .getElementById(AtomicString("input2"))
                                        ->GetComputedStyle()
                                        ->EffectiveTouchAction());
   EXPECT_EQ(expected_pwd_action, GetDocument()
-                                     .getElementById("password2")
+                                     .getElementById(AtomicString("password2"))
                                      ->GetComputedStyle()
                                      ->EffectiveTouchAction());
-  EXPECT_EQ(expected_input_action, GetDocument()
-                                       .getElementById("textarea2")
-                                       ->GetComputedStyle()
-                                       ->EffectiveTouchAction());
+  EXPECT_EQ(expected_input_action,
+            GetDocument()
+                .getElementById(AtomicString("textarea2"))
+                ->GetComputedStyle()
+                ->EffectiveTouchAction());
 
-  Element* target = GetDocument().getElementById("editable1");
-  target->setAttribute(html_names::kContenteditableAttr, "true");
+  Element* target = GetDocument().getElementById(AtomicString("editable1"));
+  target->setAttribute(html_names::kContenteditableAttr, keywords::kTrue);
   UpdateAllLifecyclePhasesForTest();
   EXPECT_EQ(expected_input_action,
             target->GetComputedStyle()->EffectiveTouchAction());
@@ -299,6 +303,73 @@ TEST_F(StyleAdjusterTest, OverflowClipUseCount) {
       GetDocument().IsUseCounted(WebFeature::kOverflowClipAlongEitherAxis));
 }
 
+TEST_F(StyleAdjusterTest, SingleAxisScrollerUseCount) {
+  SetBodyInnerHTML(R"HTML(
+    <div style='overflow: clip'></div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_FALSE(GetDocument().IsUseCounted(WebFeature::kSingleAxisScroller));
+  GetDocument().ClearUseCounterForTesting(WebFeature::kSingleAxisScroller);
+
+  SetBodyInnerHTML(R"HTML(
+    <div style='overflow-x: auto; overflow-y: visible'></div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_FALSE(GetDocument().IsUseCounted(WebFeature::kSingleAxisScroller));
+  GetDocument().ClearUseCounterForTesting(WebFeature::kSingleAxisScroller);
+
+  SetBodyInnerHTML(R"HTML(
+    <div style='overflow-x: clip; overflow-y: hidden'></div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_TRUE(GetDocument().IsUseCounted(WebFeature::kSingleAxisScroller));
+  GetDocument().ClearUseCounterForTesting(WebFeature::kSingleAxisScroller);
+
+  SetBodyInnerHTML(R"HTML(
+    <div style='overflow-x: auto; overflow-y: clip'></div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_TRUE(GetDocument().IsUseCounted(WebFeature::kSingleAxisScroller));
+  GetDocument().ClearUseCounterForTesting(WebFeature::kSingleAxisScroller);
+}
+
+TEST_F(StyleAdjusterTest, SingleAxisScrollerOverscrollBehaviorUseCount) {
+  SetBodyInnerHTML(R"HTML(
+    <div style='overflow-x: clip; overflow-y: auto;
+                overscroll-behavior-y: contain'></div>
+    <div style='overflow-x: scroll; overflow-y: clip;
+                overscroll-behavior-x: contain'></div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_FALSE(GetDocument().IsUseCounted(
+      WebFeature::kSingleAxisScrollerOverscrollBehavior));
+
+  SetBodyInnerHTML(R"HTML(
+    <div style='overflow-x: clip; overflow-y: auto;
+                overscroll-behavior-x: none'></div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_TRUE(GetDocument().IsUseCounted(
+      WebFeature::kSingleAxisScrollerOverscrollBehavior));
+  GetDocument().ClearUseCounterForTesting(
+      WebFeature::kSingleAxisScrollerOverscrollBehavior);
+
+  SetBodyInnerHTML(R"HTML(
+    <div style='overflow-x: scroll; overflow-y: clip;
+                overscroll-behavior-y: contain'></div>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+  EXPECT_TRUE(GetDocument().IsUseCounted(
+      WebFeature::kSingleAxisScrollerOverscrollBehavior));
+}
+
+// crbug.com/392643253
+TEST_F(StyleAdjusterTest, AdjustForDisplayInlinify) {
+  SetBodyInnerHTML(R"HTML(<ruby><video></video><audio></audio></ruby>)HTML");
+  UpdateAllLifecyclePhasesForTest();
+  // Pass if no crashes.
+}
+
 // crbug.com/1216721
 TEST_F(StyleAdjusterTest, AdjustForSVGCrash) {
   SetBodyInnerHTML(R"HTML(
@@ -313,11 +384,98 @@ TEST_F(StyleAdjusterTest, AdjustForSVGCrash) {
 <use id="use1" xlink:href="#text5" class="class1" />
   )HTML");
   UpdateAllLifecyclePhasesForTest();
-  Element* text =
-      GetDocument().getElementById("use1")->GetShadowRoot()->getElementById(
-          "text5");
+  Element* text = GetDocument()
+                      .getElementById(AtomicString("use1"))
+                      ->GetShadowRoot()
+                      ->getElementById(AtomicString("text5"));
   EXPECT_EQ(EDominantBaseline::kHanging,
             text->GetComputedStyle()->CssDominantBaseline());
+}
+
+TEST_F(StyleAdjusterTest, AdjustForCanvasDrawableDescendant) {
+  ScopedCanvasDrawElementForTest forced_canvas_draw_element_feature(true);
+  SetBodyInnerHTML(R"HTML(
+    <style>
+      div { width: 100px; height: 100px; }
+    </style>
+    <canvas id="canvas" width="300" height="300" layoutsubtree>
+      <div id="a">
+        <div id="aa" drawable style="background: red;">
+          <div id="aaa">a1</div>
+          <div id="aab" drawable style="background: green;">
+            <div id="aaba">a2</div>
+          </div>
+          <div id="aac">a3</div>
+          <span id="nested_span" drawable>nested</span>
+        </div>
+        <div id="ab">b1</div>
+      </div>
+      <div id="b" drawable style="background: blue;">
+        <div id="ba" drawable></div>
+      </div>
+      <span id="immediate_span">immediate</span>
+    </canvas>
+  )HTML");
+  UpdateAllLifecyclePhasesForTest();
+  // TODO(paint-dev): Uncomment this check when we stop treating direct children
+  // of a canvas as implicitly `drawable`.
+  // EXPECT_FALSE(GetLayoutObjectByElementId("a")->IsStackingContext());
+  EXPECT_TRUE(GetLayoutObjectByElementId("aa")->IsStackingContext());
+  EXPECT_FALSE(GetLayoutObjectByElementId("aaa")->IsStackingContext());
+  EXPECT_TRUE(GetLayoutObjectByElementId("aab")->IsStackingContext());
+  EXPECT_FALSE(GetLayoutObjectByElementId("aaba")->IsStackingContext());
+  EXPECT_FALSE(GetLayoutObjectByElementId("aac")->IsStackingContext());
+  EXPECT_FALSE(GetLayoutObjectByElementId("ab")->IsStackingContext());
+  EXPECT_TRUE(GetLayoutObjectByElementId("b")->IsStackingContext());
+  EXPECT_TRUE(GetLayoutObjectByElementId("ba")->IsStackingContext());
+  EXPECT_EQ(EDisplay::kBlock,
+            GetLayoutObjectByElementId("immediate_span")->StyleRef().Display());
+  EXPECT_TRUE(
+      GetLayoutObjectByElementId("immediate_span")->IsStackingContext());
+  EXPECT_TRUE(GetLayoutObjectByElementId("immediate_span")
+                  ->CanContainFixedPositionObjects());
+  EXPECT_EQ(EDisplay::kInline,
+            GetLayoutObjectByElementId("nested_span")->StyleRef().Display());
+  EXPECT_TRUE(GetLayoutObjectByElementId("nested_span")->IsStackingContext());
+  EXPECT_TRUE(GetLayoutObjectByElementId("nested_span")
+                  ->CanContainFixedPositionObjects());
+  EXPECT_TRUE(
+      GetLayoutObjectByElementId("aa")->CanContainFixedPositionObjects());
+  EXPECT_FALSE(
+      GetLayoutObjectByElementId("aaa")->CanContainFixedPositionObjects());
+
+  // TODO(paint-dev): Update this to kAuto when direct children are no longer
+  // implicitly drawable.
+  EXPECT_EQ(EIsolation::kIsolate,
+            GetLayoutObjectByElementId("a")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kIsolate,
+            GetLayoutObjectByElementId("aa")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kAuto,
+            GetLayoutObjectByElementId("aaa")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kIsolate,
+            GetLayoutObjectByElementId("aab")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kAuto,
+            GetLayoutObjectByElementId("aaba")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kAuto,
+            GetLayoutObjectByElementId("aac")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kAuto,
+            GetLayoutObjectByElementId("ab")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kIsolate,
+            GetLayoutObjectByElementId("b")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kIsolate,
+            GetLayoutObjectByElementId("ba")->StyleRef().Isolation());
+  EXPECT_EQ(
+      EIsolation::kIsolate,
+      GetLayoutObjectByElementId("immediate_span")->StyleRef().Isolation());
+  EXPECT_EQ(EIsolation::kIsolate,
+            GetLayoutObjectByElementId("nested_span")->StyleRef().Isolation());
+
+  EXPECT_EQ(kContainsNone,
+            GetLayoutObjectByElementId("aa")->StyleRef().Contain());
+  EXPECT_EQ(kContainsNone,
+            GetLayoutObjectByElementId("immediate_span")->StyleRef().Contain());
+  EXPECT_EQ(kContainsNone,
+            GetLayoutObjectByElementId("nested_span")->StyleRef().Contain());
 }
 
 }  // namespace blink

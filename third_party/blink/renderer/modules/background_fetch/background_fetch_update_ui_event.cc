@@ -44,7 +44,7 @@ void BackgroundFetchUpdateUIEvent::Trace(Visitor* visitor) const {
   BackgroundFetchEvent::Trace(visitor);
 }
 
-ScriptPromise BackgroundFetchUpdateUIEvent::updateUI(
+ScriptPromise<IDLUndefined> BackgroundFetchUpdateUIEvent::updateUI(
     ScriptState* script_state,
     const BackgroundFetchUIOptions* ui_options,
     ExceptionState& exception_state) {
@@ -52,13 +52,13 @@ ScriptPromise BackgroundFetchUpdateUIEvent::updateUI(
     // Return a rejected promise as the event is no longer active.
     exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
                                       "ExtendableEvent is no longer active.");
-    return ScriptPromise();
+    return EmptyPromise();
   }
   if (update_ui_called_) {
     // Return a rejected promise as this method should only be called once.
     exception_state.ThrowDOMException(DOMExceptionCode::kInvalidStateError,
                                       "updateUI may only be called once.");
-    return ScriptPromise();
+    return EmptyPromise();
   }
 
   update_ui_called_ = true;
@@ -68,17 +68,17 @@ ScriptPromise BackgroundFetchUpdateUIEvent::updateUI(
     // method on a BackgroundFetchSuccessEvent instance they created themselves.
     // TODO(crbug.com/872768): Figure out if this is the right thing to do
     // vs reacting eagerly.
-    return ScriptPromise();
+    return EmptyPromise();
   }
 
   if (!ui_options->hasTitle() && ui_options->icons().empty()) {
     // Nothing to update, just return a resolved promise.
-    return ScriptPromise::CastUndefined(script_state);
+    return ToResolvedUndefinedPromise(script_state);
   }
 
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(
+  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<IDLUndefined>>(
       script_state, exception_state.GetContext());
-  ScriptPromise promise = resolver->Promise();
+  auto promise = resolver->Promise();
 
   if (ui_options->icons().empty()) {
     DidGetIcon(ui_options->title(), resolver, SkBitmap(),
@@ -89,9 +89,9 @@ ScriptPromise BackgroundFetchUpdateUIEvent::updateUI(
     DCHECK(loader_);
     loader_->Start(BackgroundFetchBridge::From(service_worker_registration_),
                    ExecutionContext::From(script_state), ui_options->icons(),
-                   resolver->WrapCallbackInScriptScope(WTF::BindOnce(
-                       &BackgroundFetchUpdateUIEvent::DidGetIcon,
-                       WrapPersistent(this), ui_options->title())));
+                   resolver->WrapCallbackInScriptScope(
+                       BindOnce(&BackgroundFetchUpdateUIEvent::DidGetIcon,
+                                WrapPersistent(this), ui_options->title())));
   }
 
   return promise;
@@ -99,17 +99,17 @@ ScriptPromise BackgroundFetchUpdateUIEvent::updateUI(
 
 void BackgroundFetchUpdateUIEvent::DidGetIcon(
     const String& title,
-    ScriptPromiseResolver* resolver,
+    ScriptPromiseResolver<IDLUndefined>* resolver,
     const SkBitmap& icon,
     int64_t ideal_to_chosen_icon_size) {
   registration()->UpdateUI(
       title, icon,
-      resolver->WrapCallbackInScriptScope(WTF::BindOnce(
+      resolver->WrapCallbackInScriptScope(BindOnce(
           &BackgroundFetchUpdateUIEvent::DidUpdateUI, WrapPersistent(this))));
 }
 
 void BackgroundFetchUpdateUIEvent::DidUpdateUI(
-    ScriptPromiseResolver* resolver,
+    ScriptPromiseResolver<IDLUndefined>* resolver,
     mojom::blink::BackgroundFetchError error) {
   switch (error) {
     case mojom::blink::BackgroundFetchError::NONE:

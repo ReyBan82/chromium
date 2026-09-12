@@ -1,7 +1,9 @@
 # UI Automation
 
 [UI Automation (UIA)](https://docs.microsoft.com/en-us/windows/win32/winauto/entry-uiauto-win32)
-is the modern accessibility API on Windows.
+is the modern accessibility API on Windows. The Chromium UIA provider is
+currently under development. It can be enabled via the
+`--enable-features=UiaProvider` browser command line switch.
 
 ## Key Features
 
@@ -11,6 +13,9 @@ UI Automation exposes two different sets of interfaces. One is intended for
 clients such as assistive technologies and automation frameworks. The other is
 intended for providers such as UI widget frameworks and applications that render
 their own content. Chromium implements the UI Automation provider APIs.
+
+Chrome also exposes [custom UIA properties](custom_uia_properties.md) for
+information that is not represented by the standard properties.
 
 Clients and providers do not talk directly to one another. Instead, the
 operating system gathers data from providers to present a unified tree view

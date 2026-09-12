@@ -26,8 +26,8 @@ namespace {
 constexpr char kDefaultGattManagerClientUuid[] =
     "e060b902508c485f8b0e27639c7f2d41";
 
-// Default to requesting eatt support with gatt client.
-constexpr bool kDefaultEattSupport = true;
+// Default to not requesting eatt support with gatt client.
+constexpr bool kDefaultEattSupport = false;
 
 void HandleResponse(const char* method, DBusResult<Void> result) {
   if (!result.has_value()) {
@@ -40,6 +40,31 @@ void HandleResponse(const char* method, DBusResult<Void> result) {
 }  // namespace
 
 // Template specializations for dbus parsing
+
+template <>
+bool FlossDBusClient::ReadDBusParam(dbus::MessageReader* reader,
+                                    LeDiscoverableMode* mode) {
+  uint32_t value;
+  if (FlossDBusClient::ReadDBusParam(reader, &value)) {
+    *mode = static_cast<LeDiscoverableMode>(value);
+    return true;
+  }
+
+  return false;
+}
+
+template <>
+const DBusTypeInfo& GetDBusTypeInfo(const LeDiscoverableMode*) {
+  static DBusTypeInfo info{"u", "LeDiscoverableMode"};
+  return info;
+}
+
+template <>
+void FlossDBusClient::WriteDBusParam(dbus::MessageWriter* writer,
+                                     const LeDiscoverableMode& mode) {
+  uint32_t value = static_cast<uint32_t>(mode);
+  WriteDBusParam(writer, value);
+}
 
 template <>
 bool FlossDBusClient::ReadDBusParam(dbus::MessageReader* reader, LePhy* phy) {
@@ -80,13 +105,31 @@ bool FlossDBusClient::ReadDBusParam(dbus::MessageReader* reader,
 template <>
 void FlossDBusClient::WriteDBusParam(dbus::MessageWriter* writer,
                                      const GattStatus& status) {
-  int32_t value = static_cast<int32_t>(status);
+  uint32_t value = static_cast<uint32_t>(status);
   WriteDBusParam(writer, value);
 }
 
 template <>
 const DBusTypeInfo& GetDBusTypeInfo(const GattStatus*) {
   static DBusTypeInfo info{"u", "GattStatus"};
+  return info;
+}
+
+template <>
+bool FlossDBusClient::ReadDBusParam(dbus::MessageReader* reader,
+                                    GattWriteRequestStatus* status) {
+  uint32_t value;
+  if (FlossDBusClient::ReadDBusParam(reader, &value)) {
+    *status = static_cast<GattWriteRequestStatus>(value);
+    return true;
+  }
+
+  return false;
+}
+
+template <>
+const DBusTypeInfo& GetDBusTypeInfo(const GattWriteRequestStatus*) {
+  static DBusTypeInfo info{"u", "GattWriteRequestStatus"};
   return info;
 }
 
@@ -142,6 +185,7 @@ void FlossDBusClient::WriteDBusParam(dbus::MessageWriter* writer,
   dbus::MessageWriter array(nullptr);
 
   writer->OpenArray("{sv}", &array);
+  WriteDictEntry(&array, kUuid, characteristic.uuid);
   WriteDictEntry(&array, kInstanceId, characteristic.instance_id);
   WriteDictEntry(&array, kProperties, characteristic.properties);
   WriteDictEntry(&array, kPermissions, characteristic.permissions);
@@ -234,7 +278,7 @@ GattService::GattService(const GattService&) = default;
 GattService::~GattService() = default;
 
 const char FlossGattManagerClient::kExportedCallbacksPath[] =
-    "/org/chromium/bluetooth/gattclient";
+    "/org/chromium/bluetooth/gatt/callback";
 
 // static
 std::unique_ptr<FlossGattManagerClient> FlossGattManagerClient::Create() {
@@ -249,13 +293,23 @@ FlossGattManagerClient::~FlossGattManagerClient() {
     gatt_server_exported_callback_manager_.UnexportCallback(
         dbus::ObjectPath(kExportedCallbacksPath));
   }
+
+  if (client_id_ != 0) {
+    CallGattMethod<Void>(base::DoNothing(), gatt::kUnregisterClient,
+                         client_id_);
+  }
+  if (server_id_ != 0) {
+    CallGattMethod<Void>(base::DoNothing(), gatt::kUnregisterServer,
+                         server_id_);
+  }
 }
 
 void FlossGattManagerClient::AddObserver(FlossGattClientObserver* observer) {
   gatt_client_observers_.AddObserver(observer);
 }
 
-void FlossGattManagerClient::AddObserver(FlossGattServerObserver* observer) {
+void FlossGattManagerClient::AddServerObserver(
+    FlossGattServerObserver* observer) {
   gatt_server_observers_.AddObserver(observer);
 }
 
@@ -263,16 +317,15 @@ void FlossGattManagerClient::RemoveObserver(FlossGattClientObserver* observer) {
   gatt_client_observers_.RemoveObserver(observer);
 }
 
-void FlossGattManagerClient::RemoveObserver(FlossGattServerObserver* observer) {
+void FlossGattManagerClient::RemoveServerObserver(
+    FlossGattServerObserver* observer) {
   gatt_server_observers_.RemoveObserver(observer);
 }
 
 void FlossGattManagerClient::Connect(ResponseCallback<Void> callback,
                                      const std::string& remote_device,
-                                     const BluetoothTransport& transport) {
-  // Gatt client connections occur immediately instead of when next seen.
-  constexpr bool is_direct = true;
-
+                                     const BluetoothTransport& transport,
+                                     bool is_direct) {
   // Opportunistic connections should be false because we want connections to
   // immediately fail with timeout if it doesn't work out.
   const bool opportunistic = false;
@@ -288,6 +341,20 @@ void FlossGattManagerClient::Disconnect(ResponseCallback<Void> callback,
                                         const std::string& remote_device) {
   CallGattMethod<Void>(std::move(callback), gatt::kClientDisconnect, client_id_,
                        remote_device);
+}
+
+void FlossGattManagerClient::BeginReliableWrite(
+    ResponseCallback<Void> callback,
+    const std::string& remote_device) {
+  CallGattMethod<Void>(std::move(callback), gatt::kBeginReliableWrite,
+                       client_id_, remote_device);
+}
+
+void FlossGattManagerClient::EndReliableWrite(ResponseCallback<Void> callback,
+                                              const std::string& remote_device,
+                                              bool execute) {
+  CallGattMethod<Void>(std::move(callback), gatt::kEndReliableWrite, client_id_,
+                       remote_device, execute);
 }
 
 void FlossGattManagerClient::Refresh(ResponseCallback<Void> callback,
@@ -333,15 +400,14 @@ void FlossGattManagerClient::ReadUsingCharacteristicUuid(
 }
 
 void FlossGattManagerClient::WriteCharacteristic(
-    ResponseCallback<Void> callback,
+    ResponseCallback<GattWriteRequestStatus> callback,
     const std::string& remote_device,
     const int32_t handle,
     const WriteType write_type,
     const AuthRequired auth_required,
-    const std::vector<uint8_t> data) {
-  CallGattMethod<Void>(std::move(callback), gatt::kWriteCharacteristic,
-                       client_id_, remote_device, handle, write_type,
-                       auth_required, data);
+    base::span<const uint8_t> data) {
+  CallGattMethod(std::move(callback), gatt::kWriteCharacteristic, client_id_,
+                 remote_device, handle, write_type, auth_required, data);
 }
 
 void FlossGattManagerClient::ReadDescriptor(ResponseCallback<Void> callback,
@@ -356,7 +422,7 @@ void FlossGattManagerClient::WriteDescriptor(ResponseCallback<Void> callback,
                                              const std::string& remote_device,
                                              const int32_t handle,
                                              const AuthRequired auth_required,
-                                             const std::vector<uint8_t> data) {
+                                             base::span<const uint8_t> data) {
   CallGattMethod<Void>(std::move(callback), gatt::kWriteDescriptor, client_id_,
                        remote_device, handle, auth_required, data);
 }
@@ -412,11 +478,6 @@ void FlossGattManagerClient::UpdateConnectionParameters(
   CallGattMethod<Void>(std::move(callback), gatt::kConnectionParameterUpdate,
                        client_id_, remote_device, min_interval, max_interval,
                        latency, timeout, min_ce_len, max_ce_len);
-}
-
-void FlossGattManagerClient::UnregisterServer(ResponseCallback<Void> callback) {
-  CallGattMethod<Void>(std::move(callback), gatt::kUnregisterServer,
-                       server_id_);
 }
 
 void FlossGattManagerClient::ServerConnect(
@@ -491,11 +552,14 @@ void FlossGattManagerClient::ServerSendNotification(
 
 void FlossGattManagerClient::Init(dbus::Bus* bus,
                                   const std::string& service_name,
-                                  const int adapter_index) {
+                                  const int adapter_index,
+                                  base::Version version,
+                                  base::OnceClosure on_ready) {
   // Set field variables.
   bus_ = bus;
   service_name_ = service_name;
   gatt_adapter_path_ = GenerateGattPath(adapter_index);
+  version_ = version;
 
   // Initialize DBus object proxy.
   dbus::ObjectProxy* object_proxy =
@@ -556,6 +620,9 @@ void FlossGattManagerClient::Init(dbus::Bus* bus,
       gatt::kOnServerServiceAdded,
       &FlossGattServerObserver::GattServerServiceAdded);
   gatt_server_exported_callback_manager_.AddMethod(
+      gatt::kOnServerServiceRemoved,
+      &FlossGattServerObserver::GattServerServiceRemoved);
+  gatt_server_exported_callback_manager_.AddMethod(
       gatt::kOnServerCharacteristicReadRequest,
       &FlossGattServerObserver::GattServerCharacteristicReadRequest);
   gatt_server_exported_callback_manager_.AddMethod(
@@ -603,6 +670,13 @@ void FlossGattManagerClient::Init(dbus::Bus* bus,
     LOG(ERROR) << "Unable to successfully export FlossGattServerObserver.";
     return;
   }
+
+  property_msft_supported_.Init(this, bus_, service_name_, gatt_adapter_path_,
+                                dbus::ObjectPath(kExportedCallbacksPath),
+                                base::DoNothing());
+
+  // Everything is queued for registration so save |on_ready| for later.
+  on_ready_ = std::move(on_ready);
 }
 
 void FlossGattManagerClient::RegisterClient() {
@@ -623,6 +697,12 @@ void FlossGattManagerClient::RegisterServer() {
       dbus::ObjectPath(kExportedCallbacksPath), kDefaultEattSupport);
 }
 
+void FlossGattManagerClient::CompleteInit() {
+  if (client_id_ && server_id_ && on_ready_) {
+    std::move(on_ready_).Run();
+  }
+}
+
 void FlossGattManagerClient::GattClientRegistered(GattStatus status,
                                                   int32_t client_id) {
   if (client_id_ != 0) {
@@ -638,6 +718,7 @@ void FlossGattManagerClient::GattClientRegistered(GattStatus status,
   }
 
   client_id_ = client_id;
+  CompleteInit();
 }
 
 void FlossGattManagerClient::GattClientConnectionState(GattStatus status,
@@ -793,10 +874,10 @@ void FlossGattManagerClient::GattServerRegistered(GattStatus status,
   }
 
   server_id_ = server_id;
+  CompleteInit();
 }
 
-void FlossGattManagerClient::GattServerConnectionState(GattStatus status,
-                                                       int32_t server_id,
+void FlossGattManagerClient::GattServerConnectionState(int32_t server_id,
                                                        bool connected,
                                                        std::string address) {
   if (server_id != server_id_) {
@@ -804,7 +885,7 @@ void FlossGattManagerClient::GattServerConnectionState(GattStatus status,
   }
 
   for (auto& observer : gatt_server_observers_) {
-    observer.GattServerConnectionState(status, server_id, connected, address);
+    observer.GattServerConnectionState(server_id, connected, address);
   }
 }
 
@@ -812,6 +893,13 @@ void FlossGattManagerClient::GattServerServiceAdded(GattStatus status,
                                                     GattService service) {
   for (auto& observer : gatt_server_observers_) {
     observer.GattServerServiceAdded(status, service);
+  }
+}
+
+void FlossGattManagerClient::GattServerServiceRemoved(GattStatus status,
+                                                      int32_t handle) {
+  for (auto& observer : gatt_server_observers_) {
+    observer.GattServerServiceRemoved(status, handle);
   }
 }
 

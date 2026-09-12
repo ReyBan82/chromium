@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/policy/core/common/cloud/device_management_service.h"
+
 #include <stdint.h>
 
 #include <memory>
@@ -13,8 +15,8 @@
 #include "chrome/browser/browser_process.h"
 #include "chrome/browser/net/system_network_context_manager.h"
 #include "chrome/test/base/chrome_test_utils.h"
+#include "chrome/test/base/platform_browser_test.h"
 #include "components/policy/core/common/cloud/cloud_policy_constants.h"
-#include "components/policy/core/common/cloud/device_management_service.h"
 #include "components/policy/core/common/cloud/dm_auth.h"
 #include "components/policy/core/common/cloud/mock_device_management_service.h"
 #include "components/policy/proto/cloud_policy.pb.h"
@@ -24,6 +26,7 @@
 #include "content/public/test/browser_test.h"
 #include "net/base/upload_bytes_element_reader.h"
 #include "net/base/upload_data_stream.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/test/test_url_loader_factory.h"
 #include "services/network/test/test_utils.h"
@@ -133,14 +136,20 @@ class DeviceManagementServiceIntegrationTest
       DeviceManagementService::JobConfiguration::JobType type,
       bool critical,
       DMAuth auth_data,
-      absl::optional<std::string> oauth_token,
+      std::optional<std::string>&& oauth_token,
       const em::DeviceManagementRequest request) {
     std::string payload;
     request.SerializeToString(&payload);
+
+    auto params = DMServerJobConfiguration::CreateParams::WithoutClient(
+        type, service_.get(), kClientID, GetFactory());
+    params.critical = critical;
+    params.auth_data = std::move(auth_data);
+    params.oauth_token = std::move(oauth_token);
+
     std::unique_ptr<FakeJobConfiguration> config =
         std::make_unique<FakeJobConfiguration>(
-            service_.get(), type, kClientID, critical, std::move(auth_data),
-            oauth_token, GetFactory(),
+            std::move(params),
             base::BindOnce(&DeviceManagementServiceIntegrationTest::OnJobDone,
                            base::Unretained(this)),
             base::DoNothing(), base::DoNothing());
@@ -185,7 +194,7 @@ class DeviceManagementServiceIntegrationTest
         em::PolicyOptions::MANDATORY);
     settings.mutable_homepagelocation()->set_value("http://www.chromium.org");
     PolicyStorage* policy_storage = test_server_->policy_storage();
-    policy_storage->SetPolicyPayload(dm_protocol::kChromeUserPolicyType,
+    policy_storage->SetPolicyPayload(dm_protocol::GetChromeUserPolicyType(),
                                      settings.SerializeAsString());
     policy_storage->add_managed_user("*");
     policy_storage->set_robot_api_auth_code("fake_auth_code");
@@ -247,7 +256,7 @@ IN_PROC_BROWSER_TEST_P(DeviceManagementServiceIntegrationTest, PolicyFetch) {
 
   em::DeviceManagementRequest request;
   request.mutable_policy_request()->add_requests()->set_policy_type(
-      dm_protocol::kChromeUserPolicyType);
+      dm_protocol::GetChromeUserPolicyType());
   std::unique_ptr<DeviceManagementService::Job> job =
       StartJob(DeviceManagementService::JobConfiguration::TYPE_POLICY_FETCH,
                false, DMAuth::FromDMToken(token_), "", request);

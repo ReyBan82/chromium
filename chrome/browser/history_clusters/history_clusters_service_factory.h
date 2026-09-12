@@ -5,9 +5,18 @@
 #ifndef CHROME_BROWSER_HISTORY_CLUSTERS_HISTORY_CLUSTERS_SERVICE_FACTORY_H_
 #define CHROME_BROWSER_HISTORY_CLUSTERS_HISTORY_CLUSTERS_SERVICE_FACTORY_H_
 
-#include "base/no_destructor.h"
+#include <memory>
+
 #include "chrome/browser/profiles/profile_keyed_service_factory.h"
-#include "content/public/browser/browser_context.h"
+
+namespace base {
+template <typename T>
+class NoDestructor;
+}  // namespace base
+
+namespace content {
+class BrowserContext;
+}  // namespace content
 
 namespace history_clusters {
 class HistoryClustersService;
@@ -21,17 +30,21 @@ class HistoryClustersServiceFactory : public ProfileKeyedServiceFactory {
   static history_clusters::HistoryClustersService* GetForBrowserContext(
       content::BrowserContext* browser_context);
 
+  static HistoryClustersServiceFactory* GetInstance();
+
   static void EnsureFactoryBuilt();
+
+  // Returns the default factory, useful in tests where it's null by default.
+  static TestingFactory GetDefaultFactory();
 
  private:
   friend base::NoDestructor<HistoryClustersServiceFactory>;
-  static HistoryClustersServiceFactory& GetInstance();
 
   HistoryClustersServiceFactory();
   ~HistoryClustersServiceFactory() override;
 
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
 };
 

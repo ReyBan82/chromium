@@ -11,10 +11,6 @@
 #include "chrome/common/extensions/extension_constants.h"
 #include "content/public/browser/web_ui_message_handler.h"
 
-namespace user_prefs {
-class PrefRegistrySyncable;
-}
-
 class Profile;
 
 class CoreAppLauncherHandler : public content::WebUIMessageHandler {
@@ -26,14 +22,11 @@ class CoreAppLauncherHandler : public content::WebUIMessageHandler {
 
   ~CoreAppLauncherHandler() override;
 
-  // Register app launcher preferences.
-  static void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
-
  private:
   // Callback for the "recordAppLaunchByUrl" message. Takes an escaped URL and
   // a launch source(integer), and if the URL represents an app, records the
   // action for UMA.
-  void HandleRecordAppLaunchByUrl(const base::Value::List& args);
+  void HandleRecordAppLaunchByUrl(const base::ListValue& args);
 
   // Records an app launch in the corresponding |bucket| of the app launch
   // histogram if the |escaped_url| corresponds to an installed app.

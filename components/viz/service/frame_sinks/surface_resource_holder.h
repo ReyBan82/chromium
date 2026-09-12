@@ -32,15 +32,25 @@ class VIZ_SERVICE_EXPORT SurfaceResourceHolder {
 
   void Reset();
   void ReceiveFromChild(const std::vector<TransferableResource>& resources);
-  void RefResources(const std::vector<TransferableResource>& resources);
-  void UnrefResources(std::vector<ReturnedResource> resources);
+  // Returns unhandled reserved resources (with IDs >=
+  // kVizReservedRangeStartId).
+  std::vector<TransferableResource> RefResources(
+      const std::vector<TransferableResource>& resources);
+  // Returns unhandled reserved resources (with IDs >=
+  // kVizReservedRangeStartId).
+  std::vector<ReturnedResourceViz> UnrefResources(
+      std::vector<ReturnedResourceViz> resources);
 
  private:
   raw_ptr<SurfaceResourceHolderClient> client_;
 
   struct ResourceRefs {
+    ResourceRefs();
+    ~ResourceRefs();
+
     int refs_received_from_child = 0;
     int refs_holding_resource_alive = 0;
+    scoped_refptr<gpu::ClientSharedImage> shared_image;
     gpu::SyncToken sync_token;
   };
   // Keeps track of the number of users currently in flight for each resource

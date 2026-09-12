@@ -22,6 +22,52 @@ enum GinEmbedder : uint16_t {
   kEmbedderFuchsia,
 };
 
+enum EmbedderDataTag : uint16_t {
+  // kDefaultTag can be used by embedders that don't use V8 type tagging, e.g.
+  // because they have their own type tagging system, like PDFium.
+  kDefaultEmbedderDataTag,
+  kBlinkScriptState,
+};
+
+enum ExternalPointerTypeTag : uint16_t {
+  kExternalPointerTypeTagDefaultTag = 0,
+  kAppHooksDelegateTag,
+  kAuctionConfigLazyFillerTag,
+  kAuctionV8LoggerTest_TestLazyFillerTag,
+  kBiddingBrowserSignalsLazyFillerTag,
+  kDeprecatedUrlLazyFillerTag,
+  kForDebuggingOnlyBindingsTag,
+  kInterestGroupLazyFillerTag,
+  kPrivateAggregationBindingsTag,
+  kPrivateModelTrainingBindingsTag,
+  kRealTimeReportingBindingsTag,
+  kRegisterAdBeaconBindingsTag,
+  kRegisterAdMacroBindingsTag,
+  kReportBindingsTag,
+  kReportWinBrowserSignalsLazyFillerTag,
+  kSellerBrowserSignalsLazyFillerTag,
+  kSetBidBindingsTag,
+  kSetPriorityBindingsTag,
+  kSetPrioritySignalsOverrideBindingsTag,
+  kWebIDLCompatTestTag,
+  kDeclarativeContentHooksDelegateHandlerCallbackTag,
+  kAPIBindingHandlerCallbackTag,
+  kAPIBindingEventDataTag,
+  kAPIBindingCustomPropertyDataTag,
+  kAPIBindingJSUtilUnittestErrorInfoTag,
+  kEventEmitterUnittestListenerClosureDataTag,
+  kModuleSystemTag,
+  kProxyResolverV8ContextTag,
+  kThreadDebuggerCommonImplTag,
+  kViewTransitionTestDataTag,
+  kViewTransitionTestDocumentTag,
+  kViewTransitionTestBoolTag,
+  kFXJSEFunctionDescriptorTag,
+  kFXJSEClassDescriptorTag,
+  kV8IsolateTag,
+  kLastExternalPointerTypeTag = kV8IsolateTag,
+};
+
 }  // namespace gin
 
 #endif  // GIN_PUBLIC_GIN_EMBEDDERS_H_

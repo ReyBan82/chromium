@@ -2,23 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/task_manager/providers/worker_task_provider.h"
+
 #include <memory>
 #include <vector>
 
 #include "base/command_line.h"
-#include "base/containers/cxx20_erase.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
+#include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/profiles/profile_manager.h"
 #include "chrome/browser/profiles/profile_test_util.h"
 #include "chrome/browser/profiles/profile_window.h"
 #include "chrome/browser/task_manager/providers/task_provider_observer.h"
-#include "chrome/browser/task_manager/providers/worker_task_provider.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_list.h"
 #include "chrome/browser/ui/browser_window.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_features.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface_iterator.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/grit/generated_resources.h"
 #include "chrome/test/base/in_process_browser_test.h"
@@ -36,7 +38,7 @@
 #include "ui/base/l10n/l10n_util.h"
 #include "url/origin.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "ash/constants/ash_switches.h"
 #endif
 
@@ -50,12 +52,12 @@ std::u16string ExpectedTaskTitle(const std::string& title) {
 }
 
 // Get the process id of the active WebContents for the passed |browser|.
-int GetChildProcessID(Browser* browser) {
-  return browser->tab_strip_model()
+int GetChildProcessID(BrowserWindowInterface* browser) {
+  return browser->GetTabStripModel()
       ->GetActiveWebContents()
       ->GetPrimaryMainFrame()
       ->GetProcess()
-      ->GetID();
+      ->GetDeprecatedID();
 }
 
 }  // namespace
@@ -82,7 +84,7 @@ class WorkerTaskProviderBrowserTest : public InProcessBrowserTest,
     task_provider_.reset();
   }
 
-  Browser* CreateNewProfileAndSwitch() {
+  BrowserWindowInterface* CreateNewProfileAndSwitch() {
     ProfileManager* profile_manager = g_browser_process->profile_manager();
     base::FilePath new_path =
         profile_manager->GenerateNextProfileDirectoryPath();
@@ -91,19 +93,20 @@ class WorkerTaskProviderBrowserTest : public InProcessBrowserTest,
 
     profiles::SwitchToProfile(new_path, /* always_create = */ false,
                               base::DoNothing());
-    BrowserList* browser_list = BrowserList::GetInstance();
-    return *browser_list->begin_browsers_ordered_by_activation();
+    return GetLastActiveBrowserWindowInterfaceWithAnyProfile();
   }
 
-  content::ServiceWorkerContext* GetServiceWorkerContext(Browser* browser) {
-    return browser->profile()
+  content::ServiceWorkerContext* GetServiceWorkerContext(
+      BrowserWindowInterface* browser) {
+    return browser->GetProfile()
         ->GetDefaultStoragePartition()
         ->GetServiceWorkerContext();
   }
 
   void WaitUntilTaskCount(uint64_t count) {
-    if (tasks_.size() == count)
+    if (tasks_.size() == count) {
       return;
+    }
 
     expected_task_count_ = count;
     base::RunLoop loop;
@@ -116,39 +119,44 @@ class WorkerTaskProviderBrowserTest : public InProcessBrowserTest,
     DCHECK(task);
     tasks_.push_back(task);
 
-    if (expected_task_count_ == tasks_.size())
+    if (expected_task_count_ == tasks_.size()) {
       StopWaiting();
+    }
   }
 
   void TaskRemoved(Task* task) override {
     DCHECK(task);
-    base::Erase(tasks_, task);
+    std::erase(tasks_, task);
 
-    if (expected_task_count_ == tasks_.size())
+    if (expected_task_count_ == tasks_.size()) {
       StopWaiting();
+    }
   }
 
-  const std::vector<Task*>& tasks() const { return tasks_; }
+  const std::vector<raw_ptr<Task, VectorExperimental>>& tasks() const {
+    return tasks_;
+  }
   TaskProvider* task_provider() const { return task_provider_.get(); }
 
  protected:
   void SetUpCommandLine(base::CommandLine* command_line) override {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     command_line->AppendSwitch(
         ash::switches::kIgnoreUserProfileMappingForTests);
 #endif
   }
 
   void StopWaiting() {
-    if (quit_closure_for_waiting_)
+    if (quit_closure_for_waiting_) {
       std::move(quit_closure_for_waiting_).Run();
+    }
   }
 
  private:
   std::unique_ptr<WorkerTaskProvider> task_provider_;
 
   // Tasks created by |task_provider_|.
-  std::vector<Task*> tasks_;
+  std::vector<raw_ptr<Task, VectorExperimental>> tasks_;
 
   base::OnceClosure quit_closure_for_waiting_;
 
@@ -196,7 +204,7 @@ IN_PROC_BROWSER_TEST_F(WorkerTaskProviderBrowserTest,
   StartUpdating();
 
   EXPECT_TRUE(tasks().empty());
-  Browser* incognito = CreateIncognitoBrowser();
+  BrowserWindowInterface* incognito = CreateIncognitoBrowser();
 
   // Close the default browser.
   CloseBrowserSynchronously(browser());
@@ -204,8 +212,9 @@ IN_PROC_BROWSER_TEST_F(WorkerTaskProviderBrowserTest,
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       incognito, embedded_test_server()->GetURL(
                      "/service_worker/create_service_worker.html")));
-  EXPECT_EQ("DONE", EvalJs(incognito->tab_strip_model()->GetActiveWebContents(),
-                           "register('respond_with_fetch_worker.js');"));
+  EXPECT_EQ("DONE",
+            EvalJs(incognito->GetTabStripModel()->GetActiveWebContents(),
+                   "register('respond_with_fetch_worker.js');"));
   WaitUntilTaskCount(1);
 
   const Task* task = tasks()[0];
@@ -240,7 +249,7 @@ IN_PROC_BROWSER_TEST_F(WorkerTaskProviderBrowserTest,
   const GURL kCreateServiceWorkerURL = embedded_test_server()->GetURL(
       "/service_worker/create_service_worker.html");
 
-  Browser* browser_1 = CreateNewProfileAndSwitch();
+  BrowserWindowInterface* browser_1 = CreateNewProfileAndSwitch();
   content::RenderFrameHost* render_frame_host_1 =
       ui_test_utils::NavigateToURL(browser_1, kCreateServiceWorkerURL);
   ASSERT_EQ(render_frame_host_1->GetLastCommittedURL(),
@@ -249,7 +258,7 @@ IN_PROC_BROWSER_TEST_F(WorkerTaskProviderBrowserTest,
                            "register('respond_with_fetch_worker.js');"));
   WaitUntilTaskCount(1);
 
-  Browser* browser_2 = CreateNewProfileAndSwitch();
+  BrowserWindowInterface* browser_2 = CreateNewProfileAndSwitch();
   content::RenderFrameHost* render_frame_host_2 =
       ui_test_utils::NavigateToURL(browser_2, kCreateServiceWorkerURL);
   ASSERT_EQ(render_frame_host_2->GetLastCommittedURL(),
@@ -326,19 +335,20 @@ IN_PROC_BROWSER_TEST_F(WorkerTaskProviderBrowserTest, CreateExistingTasks) {
 
 // Tests that destroying a profile while updating will correctly remove the
 // existing tasks. An incognito browser is used because a regular profile is
-// never truly destroyed until browser shutdown (See https://crbug.com/88586).
-// TODO(crbug.com/1168407): Fix the flakiness and re-enable this.
+// never truly destroyed until browser shutdown (See
+// https://crbug.com/40594327).
+// TODO(crbug.com/40743320): Fix the flakiness and re-enable this.
 IN_PROC_BROWSER_TEST_F(WorkerTaskProviderBrowserTest,
                        DISABLED_DestroyedProfile) {
   StartUpdating();
 
   EXPECT_TRUE(tasks().empty());
-  Browser* browser = CreateIncognitoBrowser();
+  BrowserWindowInterface* browser = CreateIncognitoBrowser();
 
   ASSERT_TRUE(ui_test_utils::NavigateToURL(
       browser, embedded_test_server()->GetURL(
                    "/service_worker/create_service_worker.html")));
-  EXPECT_EQ("DONE", EvalJs(browser->tab_strip_model()->GetActiveWebContents(),
+  EXPECT_EQ("DONE", EvalJs(browser->GetTabStripModel()->GetActiveWebContents(),
                            "register('respond_with_fetch_worker.js');"));
   WaitUntilTaskCount(1);
 

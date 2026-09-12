@@ -7,7 +7,10 @@ package org.chromium.components.signin.identitymanager;
 import androidx.annotation.IntDef;
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.annotations.CalledByNative;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+
+import org.chromium.build.annotations.NullMarked;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -17,6 +20,8 @@ import java.lang.annotation.RetentionPolicy;
  * org.chromium.components.signin.identitymanager.IdentityManager} This class has a native
  * counterpart called PrimaryAccountChangeEvent.
  */
+@NullMarked
+@JNINamespace("signin")
 public class PrimaryAccountChangeEvent {
     /**
      * This class mirrors the native PrimaryAccountChangeEvent class Type enum from:
@@ -33,31 +38,27 @@ public class PrimaryAccountChangeEvent {
         int CLEARED = 2;
     }
 
-    private final @Type int mEventTypeForConsentLevelSync;
-    private final @Type int mEventTypeForConsentLevelNotRequired;
+    private final @Type int mEventType;
 
     @CalledByNative
     @VisibleForTesting
-    public PrimaryAccountChangeEvent(
-            @Type int eventTypeForConsentLevelNotRequired, @Type int eventTypeForConsentLevelSync) {
-        mEventTypeForConsentLevelNotRequired = eventTypeForConsentLevelNotRequired;
-        mEventTypeForConsentLevelSync = eventTypeForConsentLevelSync;
-        assert mEventTypeForConsentLevelNotRequired != Type.NONE
-                || mEventTypeForConsentLevelSync
-                        != Type.NONE
-            : "PrimaryAccountChangeEvent should not be fired for no-change events";
+    public PrimaryAccountChangeEvent(@Type int eventType) {
+        mEventType = eventType;
+        assert mEventType != Type.NONE
+                : "PrimaryAccountChangeEvent should not be fired for no-change events";
     }
 
     /**
-     * Returns primary account change event type for the corresponding consentLevel.
-     * @param consentLevel The consent level for the primary account change.
-     * @return The event type for the change.
-     *         NONE - No change in primary account for consentLevel.
-     *         SET - A new primary account is set or changed for consentLevel.
-     *         CLEARED - The primary account set for consentLevel is cleared.
+     * Returns primary account change event type.
+     *
+     * @return The event type for the change:
+     *     <ul>
+     *       <li>NONE - No change in primary account.
+     *       <li>SET - A new primary account is set or changed.
+     *       <li>CLEARED - The primary account set is cleared.
+     *     </ul>
      */
-    public @Type int getEventTypeFor(@ConsentLevel int consentLevel) {
-        return consentLevel == ConsentLevel.SYNC ? mEventTypeForConsentLevelSync
-                                                 : mEventTypeForConsentLevelNotRequired;
+    public @Type int getEventTypeFor() {
+        return mEventType;
     }
 }

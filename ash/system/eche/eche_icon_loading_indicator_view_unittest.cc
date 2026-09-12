@@ -5,6 +5,7 @@
 #include "ash/system/eche/eche_icon_loading_indicator_view.h"
 
 #include "ash/test/ash_test_base.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/color/color_id.h"
 #include "ui/color/color_provider.h"
 #include "ui/gfx/canvas.h"
@@ -33,7 +34,8 @@ class EcheIconLoadingIndicatorViewTest : public AshTestBase {
   // AshTestBase:
   void SetUp() override {
     AshTestBase::SetUp();
-    test_widget_ = CreateTestWidget();
+    test_widget_ =
+        CreateTestWidget(views::Widget::InitParams::WIDGET_OWNS_NATIVE_WIDGET);
     icon_ = std::make_unique<views::ImageView>();
     eche_icon_loading_indicatior_view_ =
         test_widget_->GetContentsView()->AddChildView(
@@ -44,8 +46,8 @@ class EcheIconLoadingIndicatorViewTest : public AshTestBase {
   }
 
   void TearDown() override {
-    test_widget_.reset();
     eche_icon_loading_indicatior_view_ = nullptr;
+    test_widget_.reset();
     AshTestBase::TearDown();
   }
 
@@ -55,7 +57,7 @@ class EcheIconLoadingIndicatorViewTest : public AshTestBase {
   }
 
  private:
-  EcheIconLoadingIndicatorView* eche_icon_loading_indicatior_view_;
+  raw_ptr<EcheIconLoadingIndicatorView> eche_icon_loading_indicatior_view_;
   std::unique_ptr<views::Widget> test_widget_;
   std::unique_ptr<views::ImageView> icon_;
 };

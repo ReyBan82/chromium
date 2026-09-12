@@ -7,14 +7,12 @@
 
 #include <string>
 
+#include "components/viz/common/surfaces/tracked_element_rects.h"
 #include "components/viz/common/viz_common_export.h"
-
 #include "ui/gfx/geometry/rect.h"
 #include "ui/gfx/geometry/vector2d.h"
 
 namespace viz {
-
-class CopyOutputResult;
 
 namespace copy_output {
 
@@ -45,35 +43,20 @@ struct VIZ_COMMON_EXPORT RenderPassGeometry {
   // coordinate space. Otherwise undefined.
   gfx::Vector2d readback_offset;
 
+  // Tracked element rects for the CopyOutputRequest, transformed into the
+  // coordinate space of |result_selection|.
+  TrackedElementRects tracked_element_rects;
+
   RenderPassGeometry();
+  RenderPassGeometry(const RenderPassGeometry&);
+  RenderPassGeometry& operator=(const RenderPassGeometry&);
+  RenderPassGeometry(RenderPassGeometry&&);
+  RenderPassGeometry& operator=(RenderPassGeometry&&);
+
   ~RenderPassGeometry();
 
   std::string ToString() const;
 };
-
-// Returns size (in bytes) required to fit luma plane of the |result|. The
-// |result| must not be an empty `CopyOutputResponse`. The pixel format of the
-// |result| must be either I420 or NV12.
-int VIZ_COMMON_EXPORT GetLumaPlaneSize(const CopyOutputResult& result);
-
-// Returns stride (in bytes) of the luma plane of the |result|. The |result|
-// must not be an empty `CopyOutputResponse`. The pixel format of the |result|
-// must be either I420 or NV12.
-int VIZ_COMMON_EXPORT GetLumaPlaneStride(const CopyOutputResult& result);
-
-// Returns size (in bytes) required to fit chroma plane(s) of the |result|. The
-// |result| must not be an empty `CopyOutputResponse`. The pixel format of the
-// |result| must be either I420 or NV12. For NV12, the return value will be the
-// byte size required for an interleaved UV plane. For I420, the return value
-// will be the byte size required for each of the U & V planes.
-int VIZ_COMMON_EXPORT GetChromaPlaneSize(const CopyOutputResult& result);
-
-// Returns stride (in bytes) of the chroma plane(s) of the |result|. The
-// |result| must not be an empty `CopyOutputResponse`. The pixel format of the
-// |result| must be either I420 or NV12. For NV12, the return value will be the
-// stride of an interleaved UV plane. For I420, the return value will be the
-// stride of each of the U & V planes.
-int VIZ_COMMON_EXPORT GetChromaPlaneStride(const CopyOutputResult& result);
 
 }  // namespace copy_output
 }  // namespace viz

@@ -3,8 +3,11 @@
 require_once('test_base.php');
 require_once('test_util.php');
 
+use Google\Protobuf\Internal\CodedOutputStream;
+use Google\Protobuf\PrintOptions;
 use Google\Protobuf\RepeatedField;
 use Google\Protobuf\GPBType;
+use Foo\EmptyAnySerialization;
 use Foo\TestInt32Value;
 use Foo\TestInt64Value;
 use Foo\TestUInt32Value;
@@ -17,6 +20,10 @@ use Foo\TestEnum;
 use Foo\TestLargeFieldNumber;
 use Foo\TestMessage;
 use Foo\TestMessage\Sub;
+use Custom_enum_json\Knight;
+use Custom_enum_json\Knight\Shield;
+use Custom_enum_json\Armor;
+use Google\Protobuf\DescriptorPool;
 use Foo\TestPackedMessage;
 use Foo\TestRandomFieldOrder;
 use Foo\TestUnpackedMessage;
@@ -202,6 +209,68 @@ class EncodeDecodeTest extends TestBase
         $m = new TestStringValue();
         $m->mergeFromJsonString("{\"repeated_field\":[\"a\"]}");
         $this->assertSame("a", $m->getRepeatedField()[0]->getValue());
+    }
+
+    public function testDecodeEnumMapWithUnknownStringValueThrows()
+    {
+        $this->expectException(Exception::class);
+
+        $m = new TestMessage();
+        $m->mergeFromJsonString(
+          "{\"map_int32_enum\":{
+            \"1\": \"ONE\",
+            \"2\": \"UNKNOWN_ENUM\",
+            \"3\": \"ZERO\"
+          }}"
+        );
+    }
+
+    public function testDecodeEnumMapWithUnknownStringValueIgnored()
+    {
+        $m = new TestMessage();
+        $m->mergeFromJsonString(
+          "{\"map_int32_enum\":{
+            \"1\": \"ONE\",
+            \"2\": \"UNKNOWN_ENUM\",
+            \"3\": \"ZERO\"
+          }}",
+          true
+        );
+
+        $this->assertSame(TestEnum::ONE, $m->getMapInt32Enum()["1"]);
+        $this->assertSame(TestEnum::ZERO, $m->getMapInt32Enum()["3"]);
+        $this->assertFalse($m->getMapInt32Enum()->offsetExists(2));
+    }
+
+    public function testDecodeRepeatedEnumWithUnknownStringValueThrows()
+    {
+        $this->expectException(Exception::class);
+
+        $m = new TestMessage();
+        $m->mergeFromJsonString(
+          "{\"repeated_enum\":[
+            \"ONE\",
+            \"UNKNOWN_ENUM\",
+            \"ZERO\"
+          ]}"
+        );
+    }
+
+    public function testDecodeRepeatedEnumWithUnknownStringValueIgnored()
+    {
+        $m = new TestMessage();
+        $m->mergeFromJsonString(
+          "{\"repeated_enum\":[
+            \"ONE\",
+            \"UNKNOWN_ENUM\",
+            \"ZERO\"
+          ]}",
+          true
+        );
+
+        $this->assertSame(2, count($m->getRepeatedEnum()));
+        $this->assertSame(TestEnum::ONE, $m->getRepeatedEnum()[0]);
+        $this->assertSame(TestEnum::ZERO, $m->getRepeatedEnum()[1]);
     }
 
     public function testDecodeMapStringValue()
@@ -538,6 +607,50 @@ class EncodeDecodeTest extends TestBase
         $this->assertEquals(-1, $m->getOptionalInt32());
     }
 
+    public function testInvalidVarintLength() {
+        $this->expectException(Exception::class);
+
+        $m = new TestMessage();
+        $m->mergeFromString(hex2bin("0afaffffff0f"));
+    }
+
+    private function makeRecursiveMessage($depth) {
+        $m = new TestMessage();
+        $m->setOptionalInt32(1);
+        if ($depth == 0) {
+            return $m;
+        }
+        $m->setRecursive($this->makeRecursiveMessage($depth - 1));
+        return $m;
+    }
+
+    public function testRecursiveMessage() {
+        // TODO: shaod - Re-enable this test once the memory leak is fixed.
+        if (getenv("USE_VALGRIND")) {
+            $this->markTestSkipped("skipping for valgrind because of a memory leak");
+        }
+        $payload = $this->makeRecursiveMessage(99)->serializeToString();
+
+        $m = new TestMessage();
+        $m->mergeFromString($payload);
+
+        // If execution reaches this line, it means no exception was thrown.
+        // This assertion prevents PHPUnit from marking the test as risky.
+        $this->assertTrue(true);
+    }
+
+    public function testOverlyRecursiveMessage() {
+        // TODO: shaod - Re-enable this test once the memory leak is fixed.
+        if (getenv("USE_VALGRIND")) {
+            $this->markTestSkipped("skipping for valgrind because of a memory leak");
+        }
+        $this->expectException(Exception::class);
+        $payload = $this->makeRecursiveMessage(101)->serializeToString();
+
+        $m = new TestMessage();
+        $m->mergeFromString($payload);
+    }
+
     public function testRandomFieldOrder()
     {
         $m = new TestRandomFieldOrder();
@@ -682,6 +795,21 @@ class EncodeDecodeTest extends TestBase
         $m->mergeFromString(hex2bin('7201'));
     }
 
+    public function testDecodeInvalidStringDataBadUtf8()
+    {
+        $this->expectException(Exception::class);
+
+        $m = new TestMessage();
+        $m->mergeFromString(hex2bin('720180'));
+    }
+
+    public function testDecodeValidStringData()
+    {
+        $m = new TestMessage();
+        $m->mergeFromString(hex2bin('720161'));
+        $this->assertSame('a', $m->getOptionalString());
+    }
+
     public function testDecodeInvalidBytesLengthMiss()
     {
         $this->expectException(Exception::class);
@@ -744,7 +872,7 @@ class EncodeDecodeTest extends TestBase
     {
         // Test preserve unknown for varint.
         $m = new TestMessage();
-        $from = hex2bin('F80601');  // TODO(teboring): Add a util to encode
+        $from = hex2bin('F80601');  // TODO: Add a util to encode
                                     // varint for better readability
         $m->mergeFromString($from);
         $to = $m->serializeToString();
@@ -989,6 +1117,16 @@ class EncodeDecodeTest extends TestBase
         $m->setNanos(123456789);
         $this->assertEquals("\"2000-01-01T00:00:00.123456789Z\"",
                             $m->serializeToJsonString());
+    }
+
+    public function testEncodeDecodeTimestampConsistency()
+    {
+        $m = new Google\Protobuf\Timestamp();
+        $m->setSeconds(946684800);
+        $m->setNanos(123000000);
+        $m->mergeFromJsonString($m->serializeToJsonString());
+        $this->assertEquals(946684800, $m->getSeconds());
+        $this->assertEquals(123000000, $m->getNanos());
     }
 
     public function testDecodeTopLevelValue()
@@ -1260,6 +1398,58 @@ class EncodeDecodeTest extends TestBase
         $this->assertSame("\"foo.barBaz,qux\"", $m->serializeToJsonString());
     }
 
+    public function testEncodeFieldMaskWithInvalidPath()
+    {
+        $m = new FieldMask();
+        $m->setPaths(["foo.bar__baz"]);
+
+        // On upb this case raises an exception, on pure PHP we currently only
+        // trigger a warning and don't throw an exception.
+        if (extension_loaded('protobuf')) {
+            $this->expectException(Exception::class);
+            $m->serializeToJsonString();
+        } else {
+            $triggered = false;
+            set_error_handler(function($errno, $errstr) use (&$triggered) {
+                $triggered = true;
+                $this->assertStringContainsString("Underscore in FieldMask path must be followed by a lowercase letter", $errstr);
+                return true;
+            }, E_USER_WARNING);
+
+            $result = $m->serializeToJsonString();
+            restore_error_handler();
+
+            $this->assertTrue($triggered, "Warning was not triggered");
+            $this->assertSame("\"foo.barBaz\"", $result);
+        }
+    }
+
+    public function testEncodeFieldMaskWithUppercasePath()
+    {
+        $m = new FieldMask();
+        $m->setPaths(["foo.BarBaz"]);
+
+        // On upb this case raises an exception, on pure PHP we currently only
+        // trigger a warning and don't throw an exception.
+        if (extension_loaded('protobuf')) {
+            $this->expectException(Exception::class);
+            $m->serializeToJsonString();
+        } else {
+            $triggered = false;
+            set_error_handler(function($errno, $errstr) use (&$triggered) {
+                $triggered = true;
+                $this->assertStringContainsString("Field mask element may not have upper-case letter", $errstr);
+                return true;
+            }, E_USER_WARNING);
+
+            $result = $m->serializeToJsonString();
+            restore_error_handler();
+
+            $this->assertTrue($triggered, "Warning was not triggered");
+            $this->assertSame("\"foo.BarBaz\"", $result);
+        }
+    }
+
     public function testDecodeEmptyFieldMask()
     {
         $m = new FieldMask();
@@ -1506,11 +1696,752 @@ class EncodeDecodeTest extends TestBase
         $this->assertEquals($defaultValue, $to->getOneofFieldUnwrapped());
     }
 
-    public function wrappersDataProvider()
+    public static function wrappersDataProvider()
     {
         return [
             [TestInt32Value::class, 1, "1", 0, "0"],
             [TestStringValue::class, "a", "\"a\"", "", "\"\""],
         ];
+    }
+
+    public function testEmptyAnySerialization()
+    {
+        $m = new EmptyAnySerialization();
+
+        $any = new Any();
+        $any->pack($m);
+
+        $data = $any->serializeToJsonString();
+        $this->assertEquals('{"@type":"type.googleapis.com/foo.EmptyAnySerialization"}', $data);
+
+        $any = new Any();
+        $any->mergeFromJsonString($data);
+
+        $m = $any->unpack();
+        $this->assertInstanceOf(EmptyAnySerialization::class, $m);
+        $this->assertEquals('', $m->getA());
+    }
+
+    public function testSerializeToJsonStringNoOption()
+    {
+        $m = new TestMessage();
+
+        $m->setOneofEnum(TestEnum::ONE);
+        $data = $m->serializeToJsonString();
+        $this->assertSame('{"oneofEnum":"ONE"}', $data);
+
+        $n = new TestMessage();
+        $n->mergeFromJsonString($data);
+        $this->assertSame("oneof_enum", $n->getMyOneof());
+        $this->assertSame(TestEnum::ONE, $n->getOneofEnum());
+    }
+
+    /**
+     * @dataProvider serializeToJsonStringOptionsProvider
+     */
+    public function testSerializeToJsonStringWithOptions(int|bool|null $flags, string $expected)
+    {
+        $m = new TestMessage();
+
+        $m->setOneofEnum(TestEnum::ONE);
+        $data = $m->serializeToJsonString($flags);
+        $this->assertSame($expected, $data);
+
+        $n = new TestMessage();
+        $n->mergeFromJsonString($data);
+        $this->assertSame("oneof_enum", $n->getMyOneof());
+        $this->assertSame(TestEnum::ONE, $n->getOneofEnum());
+    }
+
+    public static function serializeToJsonStringOptionsProvider(): array
+    {
+        return [
+            'null' => [
+                null,
+                '{"oneofEnum":"ONE"}',
+            ],
+            'boolean false (BC)' => [
+                false,
+                '{"oneofEnum":"ONE"}',
+            ],
+            'boolean true (BC)' => [
+                true,
+                '{"oneof_enum":"ONE"}',
+            ],
+            'default int' => [
+                0,
+                '{"oneofEnum":"ONE"}',
+            ],
+            'as int' => [
+                PrintOptions::ALWAYS_PRINT_ENUMS_AS_INTS,
+                '{"oneofEnum":1}',
+            ],
+            'preserve' => [
+                PrintOptions::PRESERVE_PROTO_FIELD_NAMES,
+                '{"oneof_enum":"ONE"}',
+            ],
+            'as int + preserve' => [
+                PrintOptions::ALWAYS_PRINT_ENUMS_AS_INTS | PrintOptions::PRESERVE_PROTO_FIELD_NAMES,
+                '{"oneof_enum":1}',
+            ],
+        ];
+    }
+
+    /**
+     * @dataProvider preserveProtoFieldNamesProvider
+     * Backwards Compatibility test for boolean parameter to serializeToJsonString
+     */
+    public function testJsonStringBCPreserveProtoFieldNames(bool $value, $expected)
+    {
+        $m = new TestMessage();
+
+        $m->setOneofEnum(TestEnum::ONE);
+        $data = $m->serializeToJsonString($value);
+        $this->assertSame($expected, $data);
+    }
+
+    public static function preserveProtoFieldNamesProvider(): array
+    {
+        return [
+            [true, '{"oneof_enum":"ONE"}'],
+            [false, '{"oneofEnum":"ONE"}'],
+        ];
+    }
+
+    public function testEmitDefaultsInt32()
+    {
+        $m = new TestMessage();
+        // Without EMIT_DEFAULTS, default values should not be included
+        $this->assertSame("{}", $m->serializeToJsonString());
+
+        // With EMIT_DEFAULTS, default values should be included
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"optionalInt32":0', $json);
+        $this->assertStringContainsString('"optionalUint32":0', $json);
+        $this->assertStringContainsString('"optionalSint32":0', $json);
+    }
+
+    public function testEmitDefaultsInt64()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"optionalInt64":"0"', $json);
+        $this->assertStringContainsString('"optionalUint64":"0"', $json);
+        $this->assertStringContainsString('"optionalSint64":"0"', $json);
+    }
+
+    public function testEmitDefaultsFloat()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"optionalFloat":0', $json);
+        $this->assertStringContainsString('"optionalDouble":0', $json);
+    }
+
+    public function testEmitDefaultsBool()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"optionalBool":false', $json);
+    }
+
+    public function testEmitDefaultsString()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"optionalString":""', $json);
+        $this->assertStringContainsString('"optionalBytes":""', $json);
+    }
+
+    public function testEmitDefaultsEnum()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"optionalEnum":"ZERO"', $json);
+    }
+
+    public function testEmitDefaultsMessage()
+    {
+        $m = new TestMessage();
+        // Messages are not included even with EMIT_DEFAULTS when they are null
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertThat($json, $this->logicalNot($this->stringContains('"optionalMessage"')));
+    }
+
+    public function testEmitDefaultsRepeatedFields()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+
+        // Empty repeated fields should be included as [] with EMIT_DEFAULTS
+        $this->assertStringContainsString('"repeatedInt32":[]', $json);
+        $this->assertStringContainsString('"repeatedString":[]', $json);
+
+        // Non-empty repeated fields are always included
+        $m->setRepeatedInt32([1, 2, 3]);
+        $json2 = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"repeatedInt32":[1,2,3]', $json2);
+    }
+
+    public function testEmitDefaultsMaps()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+
+        // Empty maps should be included as {} with EMIT_DEFAULTS
+        $this->assertStringContainsString('"mapInt32Int32":{}', $json);
+        $this->assertStringContainsString('"mapStringString":{}', $json);
+
+        // Non-empty maps are always included
+        $m->getMapInt32Int32()[1] = 100;
+        $json2 = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"mapInt32Int32":{"1":100}', $json2);
+    }
+
+    public function testEmitDefaultsWithNonDefaultValues()
+    {
+        $m = new TestMessage();
+        $m->setOptionalInt32(42);
+        $m->setOptionalString("test");
+
+        // Non-default values should always be included
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"optionalInt32":42', $json);
+        $this->assertStringContainsString('"optionalString":"test"', $json);
+
+        // Default values should also be included
+        $this->assertStringContainsString('"optionalBool":false', $json);
+        $this->assertStringContainsString('"optionalDouble":0', $json);
+    }
+
+    public function testEmitDefaultsWithPreserveProtoFieldNames()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(
+            PrintOptions::EMIT_DEFAULTS | PrintOptions::PRESERVE_PROTO_FIELD_NAMES
+        );
+
+        // Should use proto field names (with underscores)
+        $this->assertStringContainsString('"optional_int32":0', $json);
+        $this->assertStringContainsString('"optional_string":""', $json);
+        $this->assertStringContainsString('"optional_bool":false', $json);
+    }
+
+    public function testEmitDefaultsWithAlwaysPrintEnumsAsInts()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(
+            PrintOptions::EMIT_DEFAULTS | PrintOptions::ALWAYS_PRINT_ENUMS_AS_INTS
+        );
+
+        // Enum should be printed as integer
+        $this->assertStringContainsString('"optionalEnum":0', $json);
+    }
+
+    public function testEmitDefaultsAllFlags()
+    {
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(
+            PrintOptions::EMIT_DEFAULTS |
+            PrintOptions::PRESERVE_PROTO_FIELD_NAMES |
+            PrintOptions::ALWAYS_PRINT_ENUMS_AS_INTS
+        );
+
+        // Should have all three flag behaviors
+        $this->assertStringContainsString('"optional_int32":0', $json);
+        $this->assertStringContainsString('"optional_enum":0', $json);
+        $this->assertStringContainsString('"optional_bool":false', $json);
+    }
+
+    public function testEmitDefaultsDoesNotAffectParsing()
+    {
+        // Create a message with default values using EMIT_DEFAULTS
+        $m1 = new TestMessage();
+        $json = $m1->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+
+        // Parse it back
+        $m2 = new TestMessage();
+        $m2->mergeFromJsonString($json);
+
+        // All fields should have default values
+        $this->assertSame(0, $m2->getOptionalInt32());
+        $this->assertSame(false, $m2->getOptionalBool());
+        $this->assertSame('', $m2->getOptionalString());
+        $this->assertSame(TestEnum::ZERO, $m2->getOptionalEnum());
+    }
+
+    public function testEmitDefaultsWithSetThenClearedField()
+    {
+        $m = new TestMessage();
+        $m->setOptionalInt32(42);
+        $m->setOptionalInt32(0);  // Set back to default
+
+        // Without EMIT_DEFAULTS, should not be in JSON
+        $json1 = $m->serializeToJsonString();
+        $this->assertSame("{}", $json1);
+
+        // With EMIT_DEFAULTS, should be in JSON
+        $json2 = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"optionalInt32":0', $json2);
+    }
+
+    public function testEmitDefaultsTrueOptionalFieldsWithHazzer()
+    {
+        // True optional fields (proto3 optional) should not be included
+        // even with EMIT_DEFAULTS if they haven't been set
+        $m = new TestMessage();
+        $json = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+
+        // Regular optional (implicit presence) should be included
+        $this->assertStringContainsString('"optionalInt32":0', $json);
+
+        // True optional (explicit presence) should NOT be included if not set
+        $this->assertThat($json, $this->logicalNot($this->stringContains('"trueOptionalInt32"')));
+
+        // But if we set the true optional field, it should be included
+        $m->setTrueOptionalInt32(0);
+        $json2 = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertStringContainsString('"trueOptionalInt32":0', $json2);
+    }
+
+    public function testEmitDefaultsWellKnownTypes()
+    {
+        // Test with wrapper types
+        $m = new Int32Value();
+
+        // Without setting value
+        $json1 = $m->serializeToJsonString();
+        $this->assertSame("0", $json1);
+
+        // With EMIT_DEFAULTS (should behave the same for wrapper types)
+        $json2 = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertSame("0", $json2);
+    }
+
+    public function testEmitDefaultsStructAndListValue()
+    {
+        // Test with ListValue
+        $m = new ListValue();
+
+        // Empty ListValue
+        $json1 = $m->serializeToJsonString();
+        $this->assertSame("[]", $json1);
+
+        // With EMIT_DEFAULTS
+        $json2 = $m->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertSame("[]", $json2);
+
+        // Test with Struct
+        $s = new Struct();
+
+        // Empty Struct
+        $json3 = $s->serializeToJsonString();
+        $this->assertSame("{}", $json3);
+
+        // With EMIT_DEFAULTS
+        $json4 = $s->serializeToJsonString(PrintOptions::EMIT_DEFAULTS);
+        $this->assertSame("{}", $json4);
+    }
+
+    public function testJsonEncodeFloatLocaleIndependent()
+    {
+        $originalLocale = setlocale(LC_NUMERIC, 0);
+        $localeSet = setlocale(LC_NUMERIC, 'de_DE.UTF-8', 'de_DE', 'cs_CZ.UTF-8', 'cs_CZ', 'fr_FR.UTF-8', 'fr_FR');
+        if ($localeSet === false) {
+            $this->markTestSkipped('No locale with comma decimal separator available');
+        }
+
+        try {
+            $m = new FloatValue();
+            $m->setValue(3.14159);
+            $json = $m->serializeToJsonString();
+            $this->assertStringNotContainsString(',', $json);
+            $this->assertStringContainsString('.', $json);
+            $this->assertNotNull(json_decode($json));
+
+            $m2 = new DoubleValue();
+            $m2->setValue(3.141592653589793);
+            $json2 = $m2->serializeToJsonString();
+            $this->assertStringNotContainsString(',', $json2);
+            $this->assertStringContainsString('.', $json2);
+            $this->assertNotNull(json_decode($json2));
+        } finally {
+            setlocale(LC_NUMERIC, $originalLocale);
+        }
+    }
+
+    public function testDecodeRecursionLimit()
+    {
+        // Build a message nested deeper than the default limit of 100.
+        $msg = $this->makeRecursiveMessage(150);
+        $payload = $msg->serializeToString(200);
+
+        // Decoding deeper than the default limit fails without an override
+        try {
+            (new TestMessage())->mergeFromString($payload);
+            $this->fail('Expected an exception for exceeding the recursion limit');
+        } catch (Exception $e) {
+        }
+
+        // Raising the limit lets the deep message parse all the way down.
+        $decoded = new TestMessage();
+        $decoded->mergeFromString($payload, 200);
+
+        $cur = $decoded;
+        for ($i = 0; $i < 150; $i++) {
+            $cur = $cur->getRecursive();
+            $this->assertNotNull($cur);
+        }
+        $this->assertSame(1, $cur->getOptionalInt32());
+    }
+
+    public function testEncodeRecursionLimit()
+    {
+        $msg = $this->makeRecursiveMessage(150);
+
+        // The C extension enforces a depth limit on encode and throws past it;
+        // the pure-PHP encoder has no such guard, so only assert on the C ext.
+        if (extension_loaded('protobuf')) {
+            try {
+                $msg->serializeToString();
+                $this->fail('Expected an exception for exceeding the recursion limit');
+            } catch (Exception $e) {
+                $this->assertStringContainsString('Max nesting exceeded', $e->getMessage());
+            }
+        }
+
+        // Raising the limit lets the deep message serialize.
+        $payload = $msg->serializeToString(200);
+        $this->assertNotEquals('', $payload);
+    }
+
+    public function testInvalidRecursionLimit()
+    {
+        if (!extension_loaded('protobuf')) {
+            $this->markTestSkipped(
+                'recursion_limit range validation is C-extension only');
+        }
+
+        $payload = $this->makeRecursiveMessage(2)->serializeToString();
+
+        $threwNegative = false;
+        try {
+            (new TestMessage())->mergeFromString($payload, -1);
+        } catch (Exception $e) {
+            $threwNegative = true;
+        }
+        $this->assertTrue($threwNegative, 'a negative recursion_limit must throw');
+
+        $threwTooLarge = false;
+        try {
+            $this->makeRecursiveMessage(2)->serializeToString(70000);
+        } catch (Exception $e) {
+            $threwTooLarge = true;
+        }
+        $this->assertTrue($threwTooLarge, 'recursion_limit > 65535 must throw');
+    }
+
+    public function testLargeMessageWithSubMessage()
+    {
+        // 33MB string to exceed the 32MB former limit.
+        $str = str_repeat('a', 33 * 1024 * 1024);
+        $m = new TestMessage();
+        $m->setOptionalString($str);
+        $sub = new Sub();
+        $sub->setA(42);
+        $m->setOptionalMessage($sub);
+
+        $data = $m->serializeToString();
+        $this->assertNotEmpty($data);
+
+        $m2 = new TestMessage();
+        $m2->mergeFromString($data);
+        $this->assertEquals(42, $m2->getOptionalMessage()->getA());
+        $this->assertEquals(33 * 1024 * 1024, strlen($m2->getOptionalString()));
+    }
+
+    public function testSerializeGreatHelm() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_GREAT_HELM);
+        $this->assertEquals(
+            '{"armor":"gr8 helm"}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseGreatHelm() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"gr8 helm"}');
+        $this->assertEquals(Armor::ARMOR_GREAT_HELM, $message->getArmor());
+    }
+
+    public function testParseGorgetDefault() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"ARMOR_GORGET"}');
+        $this->assertEquals(Armor::ARMOR_GORGET, $message->getArmor());
+    }
+
+    public function testParseGorgetNumber() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":2}');
+        $this->assertEquals(Armor::ARMOR_GORGET, $message->getArmor());
+    }
+
+    public function testSerializeGorget() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_GORGET);
+        $this->assertEquals(
+            '{"armor":"ARMOR_GORGET"}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testSerializeGauntlet() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_GAUNTLET);
+        $this->assertEquals(
+            '{"armor":"a\"b"}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseGauntlet() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"a\"b"}');
+        $this->assertEquals(Armor::ARMOR_GAUNTLET, $message->getArmor());
+    }
+
+    public function testParseGauntletRawName() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"ARMOR_GAUNTLET"}');
+        $this->assertEquals(Armor::ARMOR_GAUNTLET, $message->getArmor());
+    }
+
+    public function testSerializePlate() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_PLATE);
+        $this->assertEquals(
+            '{"armor":"\"plate\""}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParsePlate() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"\"plate\""}');
+        $this->assertEquals(Armor::ARMOR_PLATE, $message->getArmor());
+    }
+
+    public function testSerializeCoif() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_COIF);
+        $this->assertEquals(
+            '{"armor":""}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseCoif() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":""}');
+        $this->assertEquals(Armor::ARMOR_COIF, $message->getArmor());
+    }
+
+    public function testSerializePauldron() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_PAULDRON);
+        $this->assertEquals(
+            '{"armor":"p\\taul\\ndron"}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParsePauldron() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"p\\taul\\ndron"}');
+        $this->assertEquals(Armor::ARMOR_PAULDRON, $message->getArmor());
+    }
+
+    public function testSerializeSabaton() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_SABATON);
+        $this->assertEquals(
+            '{"armor":"sabaton"}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseSabaton() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"sabaton"}');
+        $this->assertEquals(Armor::ARMOR_SABATON, $message->getArmor());
+    }
+
+    public function testSerializeSolleret() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_SOLLERET);
+        $this->assertEquals(
+            '{"armor":"sabaton"}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseSolleret() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"sabaton"}');
+        $this->assertEquals(Armor::ARMOR_SOLLERET, $message->getArmor());
+    }
+
+    public function testSerializeHachiMaiDo() {
+        $message = new Knight();
+        $message->setArmor(Armor::ARMOR_HACHI_MAI_DO);
+        $this->assertEquals(
+            '{"armor":"8"}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseHachiMaiDo() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":"8"}');
+        $this->assertEquals(Armor::ARMOR_HACHI_MAI_DO, $message->getArmor());
+    }
+
+    public function testParseHachiMaiDoNumber() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor":8}');
+        $this->assertEquals(Armor::ARMOR_HACHI_MAI_DO, $message->getArmor());
+    }
+
+    public function testCaseSensitiveGauntletParsingFails() {
+        $message = new Knight();
+        $this->expectException(Exception::class);
+        $message->mergeFromJsonString('{"armor":"A\"b"}');
+    }
+
+    public function testCaseSensitiveRawNameParsingFails() {
+        $message = new Knight();
+        $this->expectException(Exception::class);
+        $message->mergeFromJsonString('{"armor":"armor_GAUNtlet"}');
+    }
+
+    public function testSerializeRepeatedEnum() {
+        $message = new Knight();
+        $message->setArmors([Armor::ARMOR_GREAT_HELM, Armor::ARMOR_GORGET]);
+        $this->assertEquals(
+            '{"armors":["gr8 helm","ARMOR_GORGET"]}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseRepeatedEnumStrict() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armors":["gr8 helm","ARMOR_GORGET"]}', false);
+        $this->assertCount(2, $message->getArmors());
+        $this->assertEquals(Armor::ARMOR_GREAT_HELM, $message->getArmors()[0]);
+        $this->assertEquals(Armor::ARMOR_GORGET, $message->getArmors()[1]);
+    }
+
+    public function testParseRepeatedEnumStrictUnknownFails() {
+        $message = new Knight();
+        $this->expectException(Exception::class);
+        $message->mergeFromJsonString('{"armors":["gr8 helm","UNKNOWN_ARMOR"]}', false);
+    }
+
+    public function testParseRepeatedEnumLenient() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armors":["gr8 helm","ARMOR_GORGET"]}', true);
+        $this->assertCount(2, $message->getArmors());
+        $this->assertEquals(Armor::ARMOR_GREAT_HELM, $message->getArmors()[0]);
+        $this->assertEquals(Armor::ARMOR_GORGET, $message->getArmors()[1]);
+    }
+
+    public function testParseRepeatedEnumLenientIgnoresUnknown() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armors":["gr8 helm","UNKNOWN_ARMOR","ARMOR_GORGET"]}', true);
+        $this->assertCount(2, $message->getArmors());
+        $this->assertEquals(Armor::ARMOR_GREAT_HELM, $message->getArmors()[0]);
+        $this->assertEquals(Armor::ARMOR_GORGET, $message->getArmors()[1]);
+    }
+
+    public function testSerializeMapEnum() {
+        $message = new Knight();
+        $message->setArmorMap(['head' => Armor::ARMOR_GREAT_HELM]);
+        $this->assertEquals(
+            '{"armorMap":{"head":"gr8 helm"}}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseMapEnumStrict() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor_map":{"head":"gr8 helm"}}', false);
+        $this->assertEquals(Armor::ARMOR_GREAT_HELM, $message->getArmorMap()['head']);
+    }
+
+    public function testParseMapEnumStrictUnknownFails() {
+        $message = new Knight();
+        $this->expectException(Exception::class);
+        $message->mergeFromJsonString('{"armor_map":{"head":"UNKNOWN_ARMOR"}}', false);
+    }
+
+    public function testParseMapEnumLenient() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor_map":{"head":"gr8 helm"}}', true);
+        $this->assertCount(1, $message->getArmorMap());
+        $this->assertEquals(Armor::ARMOR_GREAT_HELM, $message->getArmorMap()['head']);
+    }
+
+    public function testParseMapEnumLenientIgnoresUnknown() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"armor_map":{"head":"gr8 helm","unknown_key":"UNKNOWN_ARMOR"}}', true);
+        $this->assertCount(1, $message->getArmorMap());
+        $this->assertEquals(Armor::ARMOR_GREAT_HELM, $message->getArmorMap()['head']);
+    }
+
+    public function testSerializeNestedEnumShield() {
+        $message = new Knight();
+        $message->setShield(Shield::SHIELD_BUCKLER);
+        $this->assertEquals(
+            '{"shield":"buckler-custom"}',
+            $message->serializeToJsonString()
+        );
+    }
+
+    public function testParseNestedEnumShieldCustomName() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"shield":"buckler-custom"}');
+        $this->assertEquals(Shield::SHIELD_BUCKLER, $message->getShield());
+    }
+
+    public function testParseNestedEnumShieldRawName() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"shield":"SHIELD_BUCKLER"}');
+        $this->assertEquals(Shield::SHIELD_BUCKLER, $message->getShield());
+    }
+
+    public function testParseNestedEnumShieldNumber() {
+        $message = new Knight();
+        $message->mergeFromJsonString('{"shield":1}');
+        $this->assertEquals(Shield::SHIELD_BUCKLER, $message->getShield());
+    }
+
+    public function testEnumDescriptorReflection() {
+        new Knight();
+        $pool = DescriptorPool::getGeneratedPool();
+
+        $shieldDesc = $pool->getEnumDescriptorByClassName(Shield::class);
+        $this->assertInstanceOf('\Google\Protobuf\EnumDescriptor', $shieldDesc);
+        $this->assertSame(2, $shieldDesc->getValueCount());
+
+        $val0 = $shieldDesc->getValue(0);
+        $this->assertInstanceOf('\Google\Protobuf\EnumValueDescriptor', $val0);
+        $this->assertSame('SHIELD_UNKNOWN', $val0->getName());
+        $this->assertSame(0, $val0->getNumber());
+
+        $val1 = $shieldDesc->getValue(1);
+        $this->assertInstanceOf('\Google\Protobuf\EnumValueDescriptor', $val1);
+        $this->assertSame('SHIELD_BUCKLER', $val1->getName());
+        $this->assertSame(1, $val1->getNumber());
     }
 }

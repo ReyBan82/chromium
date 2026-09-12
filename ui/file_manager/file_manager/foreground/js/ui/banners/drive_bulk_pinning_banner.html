@@ -1,12 +1,18 @@
 <style>
   educational-banner {
-    --feature-icon-bg: url(/foreground/images/files/ui/drive_logo.svg);
+    --feature-icon-src: url(/foreground/images/files/ui/drive_bulk_pinning.svg);
+    --buttons-direction: row-reverse;
+  }
+
+  /* action-button's hover effect is handled by hoverBackground. */
+  cr-button.action-button:hover::part(hoverBackground) {
+    background-color: var(--cros-sys-hover_on_prominent);
+    display: block;
   }
 </style>
-<educational-banner>
-  <span slot="title">TODO: This is currently just a placeholder</span>
-  <span slot="subtitle">TODO: This is currently just a placeholder</span>
-  <cr-button slot="extra-button">
-    Enable
+<educational-banner role="banner" class="tast-bulk-pinning-banner">
+  <span slot="title">$i18n{BULK_PINNING_TITLE}</span>
+  <cr-button slot="extra-button" class="action-button">
+    $i18n{BULK_PINNING_GET_STARTED}
   </cr-button>
 </educational-banner>

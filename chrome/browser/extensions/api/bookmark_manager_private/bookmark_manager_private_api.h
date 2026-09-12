@@ -11,7 +11,8 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
-#include "chrome/browser/extensions/api/bookmarks/bookmarks_api.h"
+#include "chrome/browser/bookmarks/bookmark_model_factory.h"
+#include "chrome/browser/extensions/api/bookmarks_core/bookmarks_function.h"
 #include "chrome/browser/ui/bookmarks/bookmark_tab_helper.h"
 #include "chrome/browser/undo/bookmark_undo_service_factory.h"
 #include "components/bookmarks/browser/base_bookmark_model_observer.h"
@@ -20,10 +21,13 @@
 #include "content/public/browser/web_contents_user_data.h"
 #include "extensions/browser/browser_context_keyed_api_factory.h"
 #include "extensions/browser/event_router.h"
+#include "extensions/browser/event_router_factory.h"
 #include "extensions/browser/extension_function.h"
 #include "ui/shell_dialogs/select_file_dialog.h"
 
 class Profile;
+
+class BookmarkUIOperationsHelperNonMergedSurfaces;
 
 namespace bookmarks {
 struct BookmarkNodeData;
@@ -45,13 +49,13 @@ class BookmarkManagerPrivateEventRouter
 
   // bookmarks::BaseBookmarkModelObserver:
   void BookmarkModelChanged() override;
-  void BookmarkModelBeingDeleted(bookmarks::BookmarkModel* model) override;
+  void BookmarkModelBeingDeleted() override;
 
  private:
   // Helper to actually dispatch an event to extension listeners.
   void DispatchEvent(events::HistogramValue histogram_value,
                      const std::string& event_name,
-                     base::Value::List event_args);
+                     base::ListValue event_args);
 
   // Remembers the previous meta info of a node before it was changed.
   bookmarks::BookmarkNode::MetaInfoMap prev_meta_info_;
@@ -64,6 +68,9 @@ class BookmarkManagerPrivateAPI : public BrowserContextKeyedAPI,
                                   public EventRouter::Observer {
  public:
   explicit BookmarkManagerPrivateAPI(content::BrowserContext* browser_context);
+  BookmarkManagerPrivateAPI(const BookmarkManagerPrivateAPI&) = delete;
+  BookmarkManagerPrivateAPI& operator=(const BookmarkManagerPrivateAPI&) =
+      delete;
   ~BookmarkManagerPrivateAPI() override;
 
   // BrowserContextKeyedService implementation.
@@ -87,6 +94,16 @@ class BookmarkManagerPrivateAPI : public BrowserContextKeyedAPI,
 
   // Created lazily upon OnListenerAdded.
   std::unique_ptr<BookmarkManagerPrivateEventRouter> event_router_;
+};
+
+template <>
+struct BrowserContextFactoryDependencies<BookmarkManagerPrivateAPI> {
+  static void DeclareFactoryDependencies(
+      BrowserContextKeyedAPIFactory<BookmarkManagerPrivateAPI>* factory) {
+    factory->DependsOn(BookmarkModelFactory::GetInstance());
+    factory->DependsOn(BookmarkUndoServiceFactory::GetInstance());
+    factory->DependsOn(EventRouterFactory::GetInstance());
+  }
 };
 
 // Class that handles the drag and drop related chrome.bookmarkManagerPrivate
@@ -123,7 +140,7 @@ class BookmarkManagerPrivateDragEventRouter
   // Helper to actually dispatch an event to extension listeners.
   void DispatchEvent(events::HistogramValue histogram_value,
                      const std::string& event_name,
-                     base::Value::List args);
+                     base::ListValue args);
 
   raw_ptr<Profile> profile_;
   bookmarks::BookmarkNodeData bookmark_drag_data_;
@@ -148,7 +165,7 @@ class BookmarkManagerPrivateCopyFunction
   ~BookmarkManagerPrivateCopyFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateCutFunction
@@ -161,7 +178,7 @@ class BookmarkManagerPrivateCutFunction
   ~BookmarkManagerPrivateCutFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivatePasteFunction
@@ -170,11 +187,22 @@ class BookmarkManagerPrivatePasteFunction
   DECLARE_EXTENSION_FUNCTION("bookmarkManagerPrivate.paste",
                              BOOKMARKMANAGERPRIVATE_PASTE)
 
+  BookmarkManagerPrivatePasteFunction();
+
  protected:
-  ~BookmarkManagerPrivatePasteFunction() override = default;
+  ~BookmarkManagerPrivatePasteFunction() override;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
+
+ private:
+  void OnCanPasteFinished(
+      std::unique_ptr<::BookmarkUIOperationsHelperNonMergedSurfaces> helper,
+      std::optional<std::vector<std::string>> selected_id_list,
+      const std::string& parent_id,
+      bool can_paste);
+  void OnPasteFinished(
+      std::unique_ptr<::BookmarkUIOperationsHelperNonMergedSurfaces> helper);
 };
 
 class BookmarkManagerPrivateCanPasteFunction
@@ -187,7 +215,23 @@ class BookmarkManagerPrivateCanPasteFunction
   ~BookmarkManagerPrivateCanPasteFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
+
+ private:
+  void OnCanPasteFinished(bool can_paste);
+};
+
+class BookmarkManagerPrivateIsActiveTabInSplitFunction
+    : public extensions::BookmarksFunction {
+ public:
+  DECLARE_EXTENSION_FUNCTION("bookmarkManagerPrivate.isActiveTabInSplit",
+                             BOOKMARKMANAGERPRIVATE_ISACTIVETABINSPLIT)
+
+ protected:
+  ~BookmarkManagerPrivateIsActiveTabInSplitFunction() override = default;
+
+  // BookmarksFunction:
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateSortChildrenFunction
@@ -200,7 +244,7 @@ class BookmarkManagerPrivateSortChildrenFunction
   ~BookmarkManagerPrivateSortChildrenFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateStartDragFunction
@@ -213,7 +257,7 @@ class BookmarkManagerPrivateStartDragFunction
   ~BookmarkManagerPrivateStartDragFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateDropFunction
@@ -226,7 +270,7 @@ class BookmarkManagerPrivateDropFunction
   ~BookmarkManagerPrivateDropFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateGetSubtreeFunction
@@ -239,7 +283,7 @@ class BookmarkManagerPrivateGetSubtreeFunction
   ~BookmarkManagerPrivateGetSubtreeFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateRemoveTreesFunction
@@ -252,7 +296,7 @@ class BookmarkManagerPrivateRemoveTreesFunction
   ~BookmarkManagerPrivateRemoveTreesFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateUndoFunction
@@ -265,7 +309,7 @@ class BookmarkManagerPrivateUndoFunction
   ~BookmarkManagerPrivateUndoFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateRedoFunction
@@ -278,7 +322,7 @@ class BookmarkManagerPrivateRedoFunction
   ~BookmarkManagerPrivateRedoFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateOpenInNewTabFunction
@@ -291,7 +335,7 @@ class BookmarkManagerPrivateOpenInNewTabFunction
   ~BookmarkManagerPrivateOpenInNewTabFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateOpenInNewWindowFunction
@@ -304,7 +348,20 @@ class BookmarkManagerPrivateOpenInNewWindowFunction
   ~BookmarkManagerPrivateOpenInNewWindowFunction() override = default;
 
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
+};
+
+class BookmarkManagerPrivateOpenInNewTabGroupFunction
+    : public extensions::BookmarksFunction {
+ public:
+  DECLARE_EXTENSION_FUNCTION("bookmarkManagerPrivate.openInNewTabGroup",
+                             BOOKMARKMANAGERPRIVATE_OPENINNEWTABGROUP)
+
+ protected:
+  ~BookmarkManagerPrivateOpenInNewTabGroupFunction() override = default;
+
+  // BookmarksFunction:
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateIOFunction : public BookmarksFunction,
@@ -312,14 +369,9 @@ class BookmarkManagerPrivateIOFunction : public BookmarksFunction,
  public:
   BookmarkManagerPrivateIOFunction();
 
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override = 0;
-
   // ui::SelectFileDialog::Listener:
-  void MultiFilesSelected(const std::vector<base::FilePath>& files,
-                          void* params) override;
-  void FileSelectionCanceled(void* params) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override = 0;
+  void FileSelectionCanceled() override;
 
   void ShowSelectFileDialog(
       ui::SelectFileDialog::Type type,
@@ -327,6 +379,8 @@ class BookmarkManagerPrivateIOFunction : public BookmarksFunction,
 
  protected:
   ~BookmarkManagerPrivateIOFunction() override;
+
+  void CleanupFileDialog();
 
   scoped_refptr<ui::SelectFileDialog> select_file_dialog_;
 };
@@ -338,16 +392,14 @@ class BookmarkManagerPrivateImportFunction
                              BOOKMARKMANAGERPRIVATE_IMPORT)
 
   // BookmarkManagerIOFunction:
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
 
  protected:
   ~BookmarkManagerPrivateImportFunction() override = default;
 
  private:
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 class BookmarkManagerPrivateExportFunction
@@ -357,15 +409,14 @@ class BookmarkManagerPrivateExportFunction
                              BOOKMARKMANAGERPRIVATE_EXPORT)
 
   // BookmarkManagerIOFunction:
-  void FileSelected(const base::FilePath& path,
-                    int index,
-                    void* params) override;
+  void FileSelected(const ui::SelectedFileInfo& file, int index) override;
+
  protected:
   ~BookmarkManagerPrivateExportFunction() override = default;
 
  private:
   // BookmarksFunction:
-  ResponseValue RunOnReady() override;
+  ResponseAction RunOnReady() override;
 };
 
 }  // namespace extensions

@@ -25,27 +25,20 @@ struct EnumTraits<gl::mojom::GpuPreference, gl::GpuPreference> {
         return gl::mojom::GpuPreference::kHighPerformance;
     }
     NOTREACHED();
-    return gl::mojom::GpuPreference::kDefault;
   }
 
-  static bool FromMojom(gl::mojom::GpuPreference input,
-                        gl::GpuPreference* out) {
+  static gl::GpuPreference FromMojom(gl::mojom::GpuPreference input) {
     switch (input) {
       case gl::mojom::GpuPreference::kNone:
-        *out = gl::GpuPreference::kNone;
-        return true;
+        return gl::GpuPreference::kNone;
       case gl::mojom::GpuPreference::kDefault:
-        *out = gl::GpuPreference::kDefault;
-        return true;
+        return gl::GpuPreference::kDefault;
       case gl::mojom::GpuPreference::kLowPower:
-        *out = gl::GpuPreference::kLowPower;
-        return true;
+        return gl::GpuPreference::kLowPower;
       case gl::mojom::GpuPreference::kHighPerformance:
-        *out = gl::GpuPreference::kHighPerformance;
-        return true;
+        return gl::GpuPreference::kHighPerformance;
     }
     NOTREACHED();
-    return false;
   }
 };
 

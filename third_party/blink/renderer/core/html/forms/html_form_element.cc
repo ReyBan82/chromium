@@ -25,33 +25,45 @@
 
 #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
 
+#include <algorithm>
 #include <limits>
 
 #include "base/auto_reset.h"
 #include "third_party/blink/public/common/security_context/insecure_request_policy.h"
+#include "third_party/blink/public/mojom/devtools/inspector_issue.mojom-blink.h"
 #include "third_party/blink/public/mojom/security_context/insecure_request_policy.mojom-blink.h"
+#include "third_party/blink/public/web/web_form_related_change_type.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_submit_event_init.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_element_radionodelist.h"
 #include "third_party/blink/renderer/core/dom/attribute.h"
 #include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/dom/dom_node_ids.h"
 #include "third_party/blink/renderer/core/dom/element_traversal.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/dom/events/scoped_event_queue.h"
 #include "third_party/blink/renderer/core/dom/node_lists_node_data.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
+#include "third_party/blink/renderer/core/execution_context/agent.h"
 #include "third_party/blink/renderer/core/frame/csp/content_security_policy.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/local_frame_client.h"
 #include "third_party/blink/renderer/core/frame/remote_frame.h"
+#include "third_party/blink/renderer/core/html/collection_type.h"
+#include "third_party/blink/renderer/core/html/custom/ce_reactions_scope.h"
 #include "third_party/blink/renderer/core/html/custom/custom_element.h"
 #include "third_party/blink/renderer/core/html/custom/element_internals.h"
 #include "third_party/blink/renderer/core/html/forms/form_controller.h"
 #include "third_party/blink/renderer/core/html/forms/form_data.h"
 #include "third_party/blink/renderer/core/html/forms/form_data_event.h"
+#include "third_party/blink/renderer/core/html/forms/form_mcp_schema.h"
+#include "third_party/blink/renderer/core/html/forms/html_form_control_element.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_controls_collection.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
+#include "third_party/blink/renderer/core/html/forms/html_submit_button_behavior.h"
 #include "third_party/blink/renderer/core/html/forms/radio_node_list.h"
 #include "third_party/blink/renderer/core/html/forms/submit_event.h"
 #include "third_party/blink/renderer/core/html/html_collection.h"
@@ -62,32 +74,42 @@
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/input_type_names.h"
 #include "third_party/blink/renderer/core/inspector/console_message.h"
+#include "third_party/blink/renderer/core/inspector/inspector_audits_issue.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/loader/form_submission.h"
 #include "third_party/blink/renderer/core/loader/mixed_content_checker.h"
 #include "third_party/blink/renderer/core/page/chrome_client.h"
 #include "third_party/blink/renderer/core/page/page.h"
+#include "third_party/blink/renderer/core/script_tools/model_context_supplement.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/heap/collection_support/heap_hash_map.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/heap/persistent.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "third_party/blink/renderer/platform/json/json_parser.h"
+#include "third_party/blink/renderer/platform/json/json_values.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/wtf/casting.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
+using mojom::blink::FormControlType;
+
 namespace {
 
-bool HasFormInBetween(const Node* root, const Node* descendant) {
-  DCHECK(!IsA<HTMLFormElement>(descendant));
-  // |descendant| might not actually be a descendant of |root|.
-  if (!descendant->IsDescendantOf(root))
-    return false;
-  for (ContainerNode* parent = descendant->parentNode();
-       parent && parent != root; parent = parent->parentNode()) {
-    if (DynamicTo<HTMLFormElement>(parent)) {
-      return true;
+// Invalidates the cache of all form elements that are ancestors of
+// `starting_node` or `starting_node` itself.
+void InvalidateAncestorFormsForAutofill(ContainerNode* starting_node) {
+  for (ContainerNode* node = starting_node; node;
+       node = node->ParentOrShadowHostNode()) {
+    if (HTMLFormElement* form = DynamicTo<HTMLFormElement>(node)) {
+      form->InvalidateListedElementsForAutofill();
     }
   }
-  return false;
 }
 
 }  // namespace
@@ -95,16 +117,13 @@ bool HasFormInBetween(const Node* root, const Node* descendant) {
 HTMLFormElement::HTMLFormElement(Document& document)
     : HTMLElement(html_names::kFormTag, document),
       listed_elements_are_dirty_(false),
-      listed_elements_including_shadow_trees_are_dirty_(false),
+      listed_elements_for_autofill_are_dirty_(false),
       image_elements_are_dirty_(false),
       has_elements_associated_by_parser_(false),
       has_elements_associated_by_form_attribute_(false),
       did_finish_parsing_children_(false),
       is_in_reset_function_(false),
       rel_list_(MakeGarbageCollected<RelList>(this)) {
-  static uint64_t next_unique_renderer_form_id = 1;
-  unique_renderer_form_id_ = next_unique_renderer_form_id++;
-
   UseCounter::Count(document, WebFeature::kFormElement);
 }
 
@@ -114,9 +133,10 @@ void HTMLFormElement::Trace(Visitor* visitor) const {
   visitor->Trace(past_names_map_);
   visitor->Trace(radio_button_group_scope_);
   visitor->Trace(listed_elements_);
-  visitor->Trace(listed_elements_including_shadow_trees_);
+  visitor->Trace(listed_elements_for_autofill_);
   visitor->Trace(image_elements_);
   visitor->Trace(rel_list_);
+  visitor->Trace(active_webmcp_tool_);
   HTMLElement::Trace(visitor);
 }
 
@@ -132,13 +152,328 @@ bool HTMLFormElement::IsValidElement() {
   return true;
 }
 
+bool HTMLFormElement::IsActiveToolSubmitButton(
+    const HTMLFormControlElement* element) const {
+  if (!MatchesToolFormActivePseudoClass()) {
+    return false;
+  }
+  return active_webmcp_tool_->ActiveToolSubmitButton() == element;
+}
+
+bool HTMLFormElement::MatchesToolFormActivePseudoClass() const {
+  return active_webmcp_tool_ && active_webmcp_tool_->CurrentlyRunning();
+}
+
+std::optional<base::UnguessableToken>
+HTMLFormElement::GetActiveWebMCPToolInvocationId() const {
+  return (active_webmcp_tool_ && active_webmcp_tool_->CurrentlyRunning())
+             ? active_webmcp_tool_->InvocationId()
+             : std::nullopt;
+}
+
+void HTMLFormElement::HTMLFormMcpTool::ExecuteTool(
+    const base::UnguessableToken& invocation_id,
+    String input_arguments,
+    base::OnceCallback<void(McpToolCallbackResult)> done_callback) {
+  invocation_id_ = invocation_id;
+  UseCounter::Count(form_->GetDocument(),
+                    WebFeature::kModelContextExecuteDeclarativeTool);
+  bool require_submit_button =
+      !form_->FastHasAttribute(html_names::kToolautosubmitAttr);
+  if (!require_submit_button) {
+    UseCounter::Count(form_->GetDocument(),
+                      WebFeature::kModelContextExecuteDeclarativeAutosubmit);
+  }
+  HTMLFormControlElement* submit_button = nullptr;
+
+  std::optional<ScriptToolError> error;
+  {
+    CEReactionsScope reactions(form_->GetDocument().GetAgent().isolate());
+    error = FillFormControls(input_arguments, require_submit_button,
+                             &submit_button);
+  }
+
+  if (error.has_value()) {
+    return std::move(done_callback).Run(base::unexpected(error.value()));
+  }
+
+  // Success. Now we can either submit the form or focus the submit button.
+  // TODO(masonf): This should key off of the `autosubmit` attribute, and only
+  // submit here if the attribute is present. Else it should just focus the
+  // submit button and then signal the agent to allow user input again.
+  is_currently_running_ = true;
+  active_submit_button_ = submit_button;
+  form_->PseudoStateChanged(CSSSelector::kPseudoToolFormActive);
+  if (submit_button) {
+    submit_button->PseudoStateChanged(CSSSelector::kPseudoToolSubmitActive);
+  }
+  done_callback_ = std::move(done_callback);
+
+  if (require_submit_button) {
+    // Without `toolautosubmit`, we focus the submit button, tell the agent to
+    // allow user input, and wait for the user to submit it.
+    submit_button->Focus();
+    auto* context = ModelContextSupplement::modelContext(form_->GetDocument());
+    context->PauseExecution();
+  } else {
+    // With the `toolautosubmit` attribute, we immediately submit the form.
+    form_->PrepareForSubmission(/*event*/ nullptr, submit_button);
+  }
+}
+
+void HTMLFormElement::HTMLFormMcpTool::CancelTool() {
+  CHECK(is_currently_running_);
+  CallDoneCallback(base::unexpected(
+      ScriptToolError(ScriptToolErrorCode::kToolCancelled,
+                      "Tool execution cancelled by abort signal")));
+}
+
+std::optional<ScriptToolError>
+HTMLFormElement::HTMLFormMcpTool::FillFormControls(
+    const String& input_arguments,
+    bool require_submit_button,
+    HTMLFormControlElement** submit_button) {
+  *submit_button = nullptr;
+  std::unique_ptr<JSONValue> json = ParseJSON(input_arguments);
+  if (!json) {
+    return ScriptToolError(ScriptToolErrorCode::kInvalidInputArguments,
+                           "Failed to parse input string as JSON");
+  }
+
+  std::unique_ptr<JSONObject> json_obj = JSONObject::From(std::move(json));
+  if (!json_obj) {
+    return ScriptToolError(ScriptToolErrorCode::kInvalidInputArguments,
+                           "JSON input arguments must be an object");
+  }
+
+  FormMCPSchema mcp_schema(*form_);
+  *submit_button = mcp_schema.SubmitButton();
+  if (!*submit_button && require_submit_button) {
+    return ScriptToolError(
+        ScriptToolErrorCode::kMissingRequiredSubmitButton,
+        "No submit button was found, but for a form without `toolautosubmit`, "
+        "there must be a submit button");
+  }
+
+  return mcp_schema.FillData(*json_obj);
+}
+
+void HTMLFormElement::HTMLFormMcpTool::CallDoneCallback(
+    McpToolCallbackResult result) {
+  if (done_callback_.is_null()) {
+    return;
+  }
+  std::move(done_callback_).Run(result);
+  is_currently_running_ = false;
+  auto old_submit_button = active_submit_button_;
+  active_submit_button_ = nullptr;
+  invocation_id_ = std::nullopt;
+  form_->PseudoStateChanged(CSSSelector::kPseudoToolFormActive);
+  if (old_submit_button) {
+    old_submit_button->PseudoStateChanged(CSSSelector::kPseudoToolSubmitActive);
+  }
+}
+
+String HTMLFormElement::HTMLFormMcpTool::ComputeInputSchema() {
+  FormMCPSchema mcp_schema(*form_);
+  if (auto json = mcp_schema.ComputeJSON()) {
+    return json->ToJSONString();
+  }
+  return "{}";
+}
+
+void HTMLFormElement::HTMLFormMcpTool::Trace(Visitor* visitor) const {
+  visitor->Trace(form_);
+  visitor->Trace(active_submit_button_);
+}
+
+void HTMLFormElement::HandleWebMcpToolResponse(HTMLFormMcpTool* tool,
+                                               bool resolved,
+                                               ScriptState* script_state,
+                                               ScriptValue value) {
+  CHECK(tool);
+  if (!tool->CurrentlyRunning()) {
+    return;
+  }
+  if (resolved) {
+    String result;
+    if (value.IsObject()) {
+      v8::TryCatch try_catch(script_state->GetIsolate());
+      v8::Local<v8::String> json_string;
+      if (v8::JSON::Stringify(script_state->GetContext(), value.V8Value())
+              .ToLocal(&json_string)) {
+        result = ToBlinkString<String>(script_state->GetIsolate(), json_string,
+                                       kDoNotExternalize);
+      } else {
+        tool->CallDoneCallback(base::unexpected(
+            ScriptToolError(ScriptToolErrorCode::kToolInvocationFailed,
+                            "respondWith promise resolved with an object that "
+                            "could not be serialized to JSON")));
+        return;
+      }
+    }
+
+    if (result.IsNull()) {
+      value.ToString(result);
+    }
+    tool->CallDoneCallback(result);
+  } else {
+    // Promise rejected - error.
+    V8ScriptRunner::ReportException(script_state->GetIsolate(),
+                                    value.V8Value());
+    tool->CallDoneCallback(base::unexpected(
+        ScriptToolError(ScriptToolErrorCode::kToolInvocationFailed,
+                        "respondWith promise was rejected")));
+  }
+}
+
+void HTMLFormElement::ReportInvalidMCPFormIssueIfNeeded(
+    const String& name,
+    const String& description) {
+  if (!isConnected()) {
+    return;
+  }
+  if (name.empty()) {
+    AuditsIssue::ReportGenericIssue(
+        GetDocument().GetFrame(),
+        mojom::blink::GenericIssueErrorType::kFormModelContextMissingToolName,
+        DOMNodeIds::IdForNode(this));
+    return;
+  }
+  CHECK(description.empty());
+  AuditsIssue::ReportGenericIssue(GetDocument().GetFrame(),
+                                  mojom::blink::GenericIssueErrorType::
+                                      kFormModelContextMissingToolDescription,
+                                  DOMNodeIds::IdForNode(this));
+}
+
+// This gets called when a <form> is added or removed from the document, or
+// when `toolname` or `tooldescription` attributes are added, removed, or
+// changed, and when the children of `this` are changed.
+void HTMLFormElement::ScheduleDeclarativeWebMCPToolRegistration() {
+  if (!RuntimeEnabledFeatures::WebMCPEnabled(GetExecutionContext())) {
+    return;
+  }
+  // Declarative WebMCP tools require an active frame to bind to the browser
+  // process. If the document has no frame, there is nothing to schedule.
+  if (!GetDocument().GetFrame()) {
+    return;
+  }
+  // The `<form>` must have *both* the `toolname` and `tooldescription`
+  // attributes, and the form must be document-connected, to qualify for
+  // declarative WebMCP inclusion.
+  String name = FastGetAttribute(html_names::kToolnameAttr);
+  String description = FastGetAttribute(html_names::kTooldescriptionAttr);
+  // `title` is not required to form a valid tool; only `name` and `description`
+  // are required.
+  const bool is_valid_mcp_form = isConnected() && name && description;
+
+  // Only report issues if it is not a valid mcp form and
+  // at least one of name or description is present.
+  // If no name or description are present, ignore.
+  if (!is_valid_mcp_form && (name || description)) {
+    ReportInvalidMCPFormIssueIfNeeded(name, description);
+  }
+
+  // If we are unregistering/removing the tool, do so synchronously and
+  // immediately to ensure DOM safety and correct event sequence.
+  if (!is_valid_mcp_form) {
+    // Cancel the pending registration of `this`, since we no longer represent a
+    // valid tool.
+    mcp_registration_task_.Cancel();
+    if (!active_webmcp_tool_) {
+      return;
+    }
+
+    ModelContext* model_context =
+        ModelContextSupplement::modelContext(GetDocument());
+    if (!active_webmcp_tool_->IsHandlingSubmit()) {
+      active_webmcp_tool_->CallDoneCallback(base::unexpected(
+          ScriptToolError(ScriptToolErrorCode::kToolCancelled,
+                          "Tool execution cancelled, since tool definition "
+                          "was updated")));
+    }
+    model_context->UnregisterTool(active_webmcp_tool_->ToolName());
+
+    active_webmcp_tool_ = nullptr;
+    return;
+  }
+
+  if (!mcp_registration_task_.IsActive()) {
+    mcp_registration_task_ = PostCancellableTask(
+        *GetDocument().GetTaskRunner(TaskType::kDOMManipulation), FROM_HERE,
+        BindOnce(&HTMLFormElement::RegisterDeclarativeWebMCPTool,
+                 WrapWeakPersistent(this)));
+  }
+}
+
+void HTMLFormElement::RegisterDeclarativeWebMCPTool() {
+  CHECK(RuntimeEnabledFeatures::WebMCPEnabled(GetExecutionContext()));
+
+  String name = FastGetAttribute(html_names::kToolnameAttr);
+  String description = FastGetAttribute(html_names::kTooldescriptionAttr);
+  String title = FastGetAttribute(html_names::kTooltitleAttr);
+  const bool has_toolautosubmit =
+      FastHasAttribute(html_names::kToolautosubmitAttr);
+  // We check that `this` is "still" a valid declarative WebMCP form because
+  // last we checked when this method was queued, it was, but that could've
+  // changed.
+  const bool is_still_valid_mcp_form = isConnected() && name && description;
+
+  if (!is_still_valid_mcp_form) {
+    return;
+  }
+
+  ModelContext* model_context =
+      ModelContextSupplement::modelContext(GetDocument());
+
+  if (active_webmcp_tool_) {
+    String new_schema = active_webmcp_tool_->ComputeInputSchema();
+
+    bool tool_attributes_changed =
+        active_webmcp_tool_->ToolName() != name ||
+        active_webmcp_tool_->ToolDescription() != description ||
+        active_webmcp_tool_->ToolTitle() != title ||
+        active_webmcp_tool_->HasToolautosubmit() != has_toolautosubmit;
+    bool schema_changed =
+        active_webmcp_tool_->LastComputedSchema() != new_schema;
+
+    if (!tool_attributes_changed && !schema_changed) {
+      // Nothing changed; this can happen when a non-schema-affecting form
+      // control association or mutation took place.
+      return;
+    }
+
+    // Unregister the old tool to replace it.
+    if (!active_webmcp_tool_->IsHandlingSubmit()) {
+      active_webmcp_tool_->CallDoneCallback(base::unexpected(ScriptToolError(
+          ScriptToolErrorCode::kToolCancelled,
+          "Tool execution cancelled, since tool definition was updated")));
+    }
+    model_context->UnregisterTool(active_webmcp_tool_->ToolName());
+    active_webmcp_tool_ = nullptr;
+  }
+
+  active_webmcp_tool_ = MakeGarbageCollected<HTMLFormMcpTool>(
+      *this, name, description, title, has_toolautosubmit);
+  active_webmcp_tool_->SetLastComputedSchema(
+      active_webmcp_tool_->ComputeInputSchema());
+
+  model_context->RegisterDeclarativeTool(active_webmcp_tool_);
+}
+
 Node::InsertionNotificationRequest HTMLFormElement::InsertedInto(
     ContainerNode& insertion_point) {
   HTMLElement::InsertedInto(insertion_point);
   LogAddElementIfIsolatedWorldAndInDocument("form", html_names::kMethodAttr,
                                             html_names::kActionAttr);
-  if (insertion_point.isConnected())
-    GetDocument().DidAssociateFormControl(this);
+  if (insertion_point.isConnected()) {
+    InvalidateAncestorFormsForAutofill(ParentElementOrShadowRoot());
+    GetDocument().MarkOutermostFormsDirty();
+    GetDocument().DidChangeFormRelatedElementDynamically(
+        this, WebFormRelatedChangeType::kAdd);
+    ScheduleDeclarativeWebMCPToolRegistration();
+  }
   return kInsertionDone;
 }
 
@@ -159,9 +494,9 @@ void HTMLFormElement::RemovedFrom(ContainerNode& insertion_point) {
     } else {
       ListedElement::List elements;
       CollectListedElements(
-          NodeTraversal::HighestAncestorOrSelf(insertion_point), elements);
+          &NodeTraversal::HighestAncestorOrSelf(insertion_point), elements);
       NotifyFormRemovedFromTree(elements, root);
-      CollectListedElements(root, elements);
+      CollectListedElements(&root, elements);
       NotifyFormRemovedFromTree(elements, root);
     }
 
@@ -177,12 +512,20 @@ void HTMLFormElement::RemovedFrom(ContainerNode& insertion_point) {
       NotifyFormRemovedFromTree(images, root);
     }
   }
-  GetDocument().GetFormController().WillDeleteForm(this);
+  GetDocument().EnsureFormController().WillDeleteForm(this);
   HTMLElement::RemovedFrom(insertion_point);
+
+  if (insertion_point.isConnected()) {
+    InvalidateAncestorFormsForAutofill(&insertion_point);
+    GetDocument().MarkOutermostFormsDirty();
+    GetDocument().DidChangeFormRelatedElementDynamically(
+        this, WebFormRelatedChangeType::kRemove);
+    ScheduleDeclarativeWebMCPToolRegistration();
+  }
 }
 
 void HTMLFormElement::HandleLocalEvents(Event& event) {
-  Node* target_node = event.target()->ToNode();
+  Node* target_node = event.RawTarget()->ToNode();
   if (event.eventPhase() != Event::PhaseType::kCapturingPhase && target_node &&
       target_node != this &&
       (event.type() == event_type_names::kSubmit ||
@@ -209,28 +552,41 @@ HTMLElement* HTMLFormElement::item(unsigned index) {
 void HTMLFormElement::SubmitImplicitly(const Event& event,
                                        bool from_implicit_submission_trigger) {
   int submission_trigger_count = 0;
-  bool seen_default_button = false;
   for (ListedElement* element : ListedElements()) {
-    auto* control = DynamicTo<HTMLFormControlElement>(element);
-    if (!control)
+    // Check native form controls.
+    if (auto* control = DynamicTo<HTMLFormControlElement>(element)) {
+      if (control->CanBeSuccessfulSubmitButton()) {
+        if (control->IsSuccessfulSubmitButton()) {
+          control->DispatchSimulatedClick(&event);
+          return;
+        }
+        if (from_implicit_submission_trigger) {
+          // Default (submit) button is not activated; no implicit submission.
+          return;
+        }
+      } else if (control->CanTriggerImplicitSubmission()) {
+        ++submission_trigger_count;
+      }
       continue;
-    if (!seen_default_button && control->CanBeSuccessfulSubmitButton()) {
-      if (from_implicit_submission_trigger)
-        seen_default_button = true;
-      if (control->IsSuccessfulSubmitButton()) {
-        control->DispatchSimulatedClick(&event);
+    }
+
+    // Check custom elements with HTMLSubmitButtonBehavior.
+    HTMLElement& html_element = element->ToHTMLElement();
+    if (auto* behavior = html_element.SubmitBehavior()) {
+      if (!behavior->IsEffectivelyDisabled()) {
+        html_element.DispatchSimulatedClick(&event);
         return;
       }
       if (from_implicit_submission_trigger) {
-        // Default (submit) button is not activated; no implicit submission.
+        // Custom element is disabled; no implicit submission.
         return;
       }
-    } else if (control->CanTriggerImplicitSubmission()) {
-      ++submission_trigger_count;
     }
   }
-  if (from_implicit_submission_trigger && submission_trigger_count == 1)
+
+  if (from_implicit_submission_trigger && submission_trigger_count == 1) {
     PrepareForSubmission(&event, nullptr);
+  }
 }
 
 bool HTMLFormElement::ValidateInteractively() {
@@ -268,24 +624,20 @@ bool HTMLFormElement::ValidateInteractively() {
           "An invalid form control with name='%name' is not focusable.");
       message.Replace("%name", unhandled->GetName());
 
-      ConsoleMessage* console_message = MakeGarbageCollected<ConsoleMessage>(
+      unhandled->ToHTMLElement().AddConsoleMessage(
           mojom::blink::ConsoleMessageSource::kRendering,
           mojom::blink::ConsoleMessageLevel::kError, message);
-      console_message->SetNodes(
-          GetDocument().GetFrame(),
-          {DOMNodeIds::IdForNode(&unhandled->ToHTMLElement())});
-      GetDocument().AddConsoleMessage(console_message);
     }
   }
   return false;
 }
 
-void HTMLFormElement::PrepareForSubmission(
-    const Event* event,
-    HTMLFormControlElement* submit_button) {
+void HTMLFormElement::PrepareForSubmission(const Event* event,
+                                           Element* submitter) {
   LocalFrame* frame = GetDocument().GetFrame();
-  if (!frame || is_submitting_ || in_user_js_submit_event_)
+  if (!frame || is_submitting_ || in_user_js_submit_event_) {
     return;
+  }
 
   if (!isConnected()) {
     GetDocument().AddConsoleMessage(MakeGarbageCollected<ConsoleMessage>(
@@ -301,9 +653,9 @@ void HTMLFormElement::PrepareForSubmission(
         MakeGarbageCollected<ConsoleMessage>(
             mojom::blink::ConsoleMessageSource::kSecurity,
             mojom::blink::ConsoleMessageLevel::kError,
-            "Blocked form submission to '" + attributes_.Action() +
-                "' because the form's frame is sandboxed and the 'allow-forms' "
-                "permission is not set."));
+            StrCat({"Blocked form submission to '", attributes_.Action(),
+                    "' because the form's frame is sandboxed and the "
+                    "'allow-forms' permission is not set."})));
     return;
   }
 
@@ -318,56 +670,176 @@ void HTMLFormElement::PrepareForSubmission(
         GetDocument().AddConsoleMessage(MakeGarbageCollected<ConsoleMessage>(
             mojom::ConsoleMessageSource::kSecurity,
             mojom::ConsoleMessageLevel::kError,
-            "Form submission failed, as the <" + tag_name +
-                "> element named "
-                "'" +
-                element->GetName() +
-                "' was implicitly closed by reaching "
-                "the end of the file. Please add an explicit end tag "
-                "('</" +
-                tag_name + ">')"));
+            StrCat({"Form submission failed, as the <", tag_name,
+                    "> element named '", element->GetName(),
+                    "' was implicitly closed by reaching the end of the "
+                    "file. Please add an explicit end tag ('</",
+                    tag_name, ">')"})));
         DispatchEvent(*Event::Create(event_type_names::kError));
         return;
       }
     }
   }
 
+  for (ListedElement* element : ListedElements()) {
+    if (auto* form_control =
+            DynamicTo<HTMLFormControlElementWithState>(element)) {
+      // After attempting form submission we have to make the controls start
+      // matching :user-valid/:user-invalid. We could do this by calling
+      // SetUserHasEditedTheFieldAndBlurred() even though the user has not
+      // actually taken those actions, but that would have side effects on
+      // autofill.
+      form_control->ForceUserValid();
+    }
+  }
+
   bool should_submit;
+  Member<HTMLFormMcpTool> executing_tool;
+  bool declarative_webmcp_call = false;
   {
     base::AutoReset<bool> submit_event_handler_scope(&in_user_js_submit_event_,
                                                      true);
 
-    bool skip_validation = !GetDocument().GetPage() || NoValidate();
-    if (submit_button && submit_button->FormNoValidate())
-      skip_validation = true;
+    HTMLSubmitButtonBehavior* behavior =
+        submitter ? submitter->SubmitBehavior() : nullptr;
+    // For native form controls, cast `submitter` to get the submit button.
+    // For custom elements with behaviors, `submit_button` will be null.
+    HTMLFormControlElement* submit_button =
+        behavior ? nullptr : DynamicTo<HTMLFormControlElement>(submitter);
+    CHECK(!behavior || !submit_button);
+    CHECK(!behavior ||
+          RuntimeEnabledFeatures::ElementInternalsBehaviorsEnabled());
+
+    bool skip_validation = !GetDocument().GetPage() || NoValidate() ||
+                           (behavior && behavior->formNoValidate()) ||
+                           (submit_button && submit_button->FormNoValidate());
 
     UseCounter::Count(GetDocument(), WebFeature::kFormSubmissionStarted);
     // Interactive validation must be done before dispatching the submit event.
+    // We also re-perform this validation *after* dispatching the submit event.
+    executing_tool = active_webmcp_tool_;
+    declarative_webmcp_call =
+        active_webmcp_tool_ && active_webmcp_tool_->CurrentlyRunning();
+    std::optional<base::AutoReset<bool>> mcp_tool_submit_scope;
+    if (declarative_webmcp_call) {
+      mcp_tool_submit_scope.emplace(&active_webmcp_tool_->is_handling_submit_,
+                                    true);
+    }
+
     if (!skip_validation && !ValidateInteractively()) {
       should_submit = false;
+      if (declarative_webmcp_call) {
+        StringBuilder error_message;
+        error_message.Append("Form validation failed: ");
+
+        for (const auto& control : ListedElements()) {
+          // If the control is a candidate for validation and is currently
+          // invalid
+          if (!control->IsNotCandidateOrValid()) {
+            String name;
+            if (auto* form_control =
+                    DynamicTo<HTMLFormControlElement>(control.Get())) {
+              name = form_control->GetWebMCPParameterName();
+            } else if (auto* element_internals =
+                           DynamicTo<ElementInternals>(control.Get())) {
+              name = element_internals->GetName();
+            } else {
+              name = "{unknown}";
+            }
+            error_message.Append(name);
+            error_message.Append(": ");
+            error_message.Append(control->validationMessage());
+            error_message.Append(". ");
+          }
+        }
+
+        executing_tool->CallDoneCallback(base::unexpected(
+            ScriptToolError(ScriptToolErrorCode::kToolInvocationFailed,
+                            error_message.ToString())));
+      }
     } else {
       frame->Client()->DispatchWillSendSubmitEvent(this);
       SubmitEventInit* submit_event_init = SubmitEventInit::Create();
       submit_event_init->setBubbles(true);
       submit_event_init->setCancelable(true);
-      submit_event_init->setSubmitter(
-          submit_button ? &submit_button->ToHTMLElement() : nullptr);
-      should_submit = DispatchEvent(*MakeGarbageCollected<SubmitEvent>(
-                          event_type_names::kSubmit, submit_event_init)) ==
-                      DispatchEventResult::kNotCanceled;
+      submit_event_init->setSubmitter(DynamicTo<HTMLElement>(submitter));
+      submit_event_init->setComposed(
+          submitter && RuntimeEnabledFeatures::ShadowRootReferenceTargetEnabled(
+                           submitter->GetExecutionContext()));
+      if (declarative_webmcp_call) {
+        CHECK(RuntimeEnabledFeatures::WebMCPEnabled(GetExecutionContext()));
+        submit_event_init->setAgentInvoked(true);
+      }
+      SubmitEvent* submit_event = MakeGarbageCollected<SubmitEvent>(
+          event_type_names::kSubmit, submit_event_init);
+      should_submit =
+          DispatchEvent(*submit_event) == DispatchEventResult::kNotCanceled;
+      // `DispatchEvent()` above could have disconnected `this` from the DOM. In
+      // that case, the form would have been unregistered as a tool,
+      // `active_webmcp_tool_` will be null; there's no need to react to the
+      // Promise held by `SubmitEvent::respondWith()`.
+      //
+      // If `active_webmcp_tool_` is non-null here, but the form gets
+      // unregistered as a tool asynchronously before `promise` fulfills, then
+      // `HandleWebMcpToolResponse()` will handle this appropriately.
+      //
+      // To handle all of this, update the boolean.
+      declarative_webmcp_call =
+          executing_tool && executing_tool->CurrentlyRunning();
+      if (declarative_webmcp_call) {
+        if (auto promise = submit_event->TakeRespondWithPromise()) {
+          // Since we have a promise, respondWith() was called. That should only
+          // work if `preventDefault()` was already called. So we should never
+          // be submitting the form here.
+          CHECK(!should_submit);
+          // Wait for the provided promise to resolve or reject, and then call
+          // the active_webmcp_tool_'s callback with the result.
+
+          std::move(*promise).Then(
+              BindOnce(&HTMLFormElement::HandleWebMcpToolResponse,
+                       WrapPersistent(this),
+                       WrapPersistent(executing_tool.Get()),
+                       /*resolved=*/true),
+              BindOnce(&HTMLFormElement::HandleWebMcpToolResponse,
+                       WrapPersistent(this),
+                       WrapPersistent(executing_tool.Get()),
+                       /*resolved=*/false));
+        } else if (!should_submit) {
+          executing_tool->CallDoneCallback(base::unexpected(ScriptToolError(
+              ScriptToolErrorCode::kToolInvocationFailed,
+              "The site has a programming error: it called "
+              "preventDefault() "
+              "on the 'submit' event, without also calling respondWith() "
+              "with the tool result")));
+        }
+      }
     }
   }
   if (should_submit) {
     // If this form already made a request to navigate another frame which is
     // still pending, then we should cancel that one.
-    if (cancel_last_submission_)
+    if (cancel_last_submission_) {
       std::move(cancel_last_submission_).Run();
-    ScheduleFormSubmission(event, submit_button);
+    }
+    ScheduleFormSubmission(event, submitter);
+    if (executing_tool && executing_tool->CurrentlyRunning()) {
+      CHECK(RuntimeEnabledFeatures::WebMCPEnabled(GetExecutionContext()));
+      // Return a null string to indicate that a navigation has been
+      // triggered.
+      executing_tool->CallDoneCallback(base::ok(String()));
+    }
   }
 }
 
 void HTMLFormElement::submitFromJavaScript() {
   ScheduleFormSubmission(nullptr, nullptr);
+
+  // If a WebMCP tool is running, resolving it here handles the case where
+  // the site manually called form.submit() from inside a submit handler.
+  if (active_webmcp_tool_ && active_webmcp_tool_->CurrentlyRunning()) {
+    CHECK(RuntimeEnabledFeatures::WebMCPEnabled(GetExecutionContext()));
+    active_webmcp_tool_->CallDoneCallback(base::ok(String()));
+  }
 }
 
 void HTMLFormElement::requestSubmit(ExceptionState& exception_state) {
@@ -401,21 +873,18 @@ void HTMLFormElement::requestSubmit(HTMLElement* submitter,
 }
 
 void HTMLFormElement::SubmitDialog(FormSubmission* form_submission) {
-  for (Node* node = this; node; node = node->ParentOrShadowHostNode()) {
-    if (auto* dialog = DynamicTo<HTMLDialogElement>(*node)) {
-      dialog->close(form_submission->Result());
-      return;
-    }
+  if (auto* dialog = Traversal<HTMLDialogElement>::FirstAncestor(*this)) {
+    dialog->close(form_submission->Result());
   }
+  return;
 }
 
-void HTMLFormElement::ScheduleFormSubmission(
-    const Event* event,
-    HTMLFormControlElement* submit_button) {
-  LocalFrameView* view = GetDocument().View();
+void HTMLFormElement::ScheduleFormSubmission(const Event* event,
+                                             Element* submitter) {
   LocalFrame* frame = GetDocument().GetFrame();
-  if (!view || !frame || !frame->GetPage())
+  if (!GetDocument().View() || !frame || !frame->GetPage()) {
     return;
+  }
 
   // https://html.spec.whatwg.org/C/#form-submission-algorithm
   // 2. If form document is not connected, has no associated browsing context,
@@ -438,14 +907,15 @@ void HTMLFormElement::ScheduleFormSubmission(
     return;
   }
 
-  if (is_submitting_)
+  if (is_submitting_) {
     return;
+  }
 
   // Delay dispatching 'close' to dialog until done submitting.
   EventQueueScope scope_for_dialog_close;
   base::AutoReset<bool> submit_scope(&is_submitting_, true);
 
-  if (event && !submit_button) {
+  if (event && !submitter) {
     // In a case of implicit submission without a submit button, 'submit'
     // event handler might add a submit button. We search for a submit
     // button again.
@@ -456,14 +926,20 @@ void HTMLFormElement::ScheduleFormSubmission(
         continue;
       DCHECK(!control->IsActivatedSubmit());
       if (control->IsSuccessfulSubmitButton()) {
-        submit_button = control;
+        submitter = control;
         break;
       }
     }
   }
 
   FormSubmission* form_submission =
-      FormSubmission::Create(this, attributes_, event, submit_button);
+      FormSubmission::Create(this, attributes_, event, submitter);
+  if (!form_submission) {
+    // Form submission is not allowed for some NavigationPolicies, e.g. Link
+    // Preview. If an user triggered such user event for form submission, just
+    // ignores it.
+    return;
+  }
   Frame* target_frame = form_submission->TargetFrame();
 
   // 'formdata' event handlers might disconnect the form.
@@ -483,7 +959,6 @@ void HTMLFormElement::ScheduleFormSubmission(
   DCHECK(form_submission->Method() == FormSubmission::kPostMethod ||
          form_submission->Method() == FormSubmission::kGetMethod);
   DCHECK(form_submission->Data());
-  DCHECK(form_submission->Form());
   if (form_submission->Action().IsEmpty())
     return;
   if (GetExecutionContext()->IsSandboxed(
@@ -494,10 +969,10 @@ void HTMLFormElement::ScheduleFormSubmission(
         MakeGarbageCollected<ConsoleMessage>(
             mojom::blink::ConsoleMessageSource::kSecurity,
             mojom::blink::ConsoleMessageLevel::kError,
-            "Blocked form submission to '" +
-                form_submission->Action().ElidedString() +
-                "' because the form's frame is sandboxed and the 'allow-forms' "
-                "permission is not set."));
+            StrCat({"Blocked form submission to '",
+                    form_submission->Action().ElidedString(),
+                    "' because the form's frame is sandboxed and the "
+                    "'allow-forms' permission is not set."})));
     return;
   }
 
@@ -506,9 +981,9 @@ void HTMLFormElement::ScheduleFormSubmission(
     // All other schemes are checked in the browser.
     //
     // TODO(antoniosartori): Should we keep the 'form-action' check for
-    // javascript: URLs? For 'frame-src' and 'navigate-to', we do not check
-    // javascript: URLs. Reading the specification, it looks like 'form-action'
-    // should not apply to javascript: URLs.
+    // javascript: URLs? For 'frame-src', we do not check javascript: URLs.
+    // Reading the specification, it looks like 'form-action' should not apply
+    // to javascript: URLs.
     if (!GetExecutionContext()->GetContentSecurityPolicy()->AllowFormAction(
             form_submission->Action())) {
       return;
@@ -567,31 +1042,35 @@ void HTMLFormElement::ScheduleFormSubmission(
       target_frame->ScheduleFormSubmission(scheduler, form_submission);
 }
 
-FormData* HTMLFormElement::ConstructEntryList(
-    HTMLFormControlElement* submit_button,
-    const WTF::TextEncoding& encoding) {
+FormData* HTMLFormElement::ConstructEntryList(Element* submitter,
+                                              const TextEncoding& encoding) {
   if (is_constructing_entry_list_) {
     return nullptr;
   }
   auto& form_data = *MakeGarbageCollected<FormData>(encoding);
   base::AutoReset<bool> entry_list_scope(&is_constructing_entry_list_, true);
-  if (submit_button)
-    submit_button->SetActivatedSubmit(true);
+
+  if (submitter) {
+    submitter->SetActivatedSubmit(true);
+  }
+
   for (ListedElement* control : ListedElements()) {
     DCHECK(control);
     HTMLElement& element = control->ToHTMLElement();
     if (!element.IsDisabledFormControl())
       control->AppendToFormData(form_data);
     if (auto* input = DynamicTo<HTMLInputElement>(element)) {
-      if (input->type() == input_type_names::kPassword &&
-          !input->Value().empty())
+      if (input->FormControlType() == FormControlType::kInputPassword &&
+          !input->Value().empty()) {
         form_data.SetContainsPasswordData(true);
+      }
     }
   }
   DispatchEvent(*MakeGarbageCollected<FormDataEvent>(form_data));
 
-  if (submit_button)
-    submit_button->SetActivatedSubmit(false);
+  if (submitter) {
+    submitter->SetActivatedSubmit(false);
+  }
   return &form_data;
 }
 
@@ -619,9 +1098,42 @@ void HTMLFormElement::reset() {
     }
   }
 
+  if (active_webmcp_tool_) {
+    active_webmcp_tool_->CallDoneCallback(base::unexpected(
+        ScriptToolError(ScriptToolErrorCode::kToolCancelled,
+                        "Tool execution cancelled by a form reset")));
+  }
+
   is_in_reset_function_ = false;
   if (frame->GetPage())
     frame->GetPage()->GetChromeClient().FormElementReset(*this);
+}
+
+void HTMLFormElement::AttachLayoutTree(AttachContext& context) {
+  HTMLElement::AttachLayoutTree(context);
+  if (!GetLayoutObject()) {
+    FocusabilityLost();
+  }
+}
+
+void HTMLFormElement::DetachLayoutTree(bool performing_reattach) {
+  HTMLElement::DetachLayoutTree(performing_reattach);
+  if (!performing_reattach) {
+    FocusabilityLost();
+  }
+}
+
+void HTMLFormElement::AttributeChanged(
+    const AttributeModificationParams& params) {
+  const QualifiedName& name = params.name;
+  HTMLElement::AttributeChanged(params);
+  if ((name == html_names::kToolnameAttr ||
+       name == html_names::kTooldescriptionAttr ||
+       name == html_names::kTooltitleAttr ||
+       name == html_names::kToolautosubmitAttr) &&
+      (params.old_value != params.new_value)) {
+    ScheduleDeclarativeWebMCPToolRegistration();
+  }
 }
 
 void HTMLFormElement::ParseAttribute(
@@ -658,8 +1170,7 @@ void HTMLFormElement::ParseAttribute(
     attributes_.SetAcceptCharset(params.new_value);
   } else if (name == html_names::kDisabledAttr) {
     UseCounter::Count(GetDocument(), WebFeature::kFormDisabledAttributePresent);
-  } else if (name == html_names::kRelAttr &&
-             RuntimeEnabledFeatures::FormRelAttributeEnabled()) {
+  } else if (name == html_names::kRelAttr) {
     rel_attribute_ = RelAttribute::kNone;
     rel_list_->DidUpdateAttributeValue(params.old_value, params.new_value);
     if (rel_list_->contains(AtomicString("noreferrer")))
@@ -668,7 +1179,6 @@ void HTMLFormElement::ParseAttribute(
       rel_attribute_ |= RelAttribute::kNoOpener;
     if (rel_list_->contains(AtomicString("opener")))
       rel_attribute_ |= RelAttribute::kOpener;
-
   } else {
     HTMLElement::ParseAttribute(params);
   }
@@ -677,18 +1187,36 @@ void HTMLFormElement::ParseAttribute(
 void HTMLFormElement::Associate(ListedElement& e) {
   listed_elements_are_dirty_ = true;
   listed_elements_.clear();
-  listed_elements_including_shadow_trees_are_dirty_ = true;
-  listed_elements_including_shadow_trees_.clear();
+  listed_elements_for_autofill_are_dirty_ = true;
+  listed_elements_for_autofill_.clear();
   if (e.ToHTMLElement().FastHasAttribute(html_names::kFormAttr))
     has_elements_associated_by_form_attribute_ = true;
+  ScheduleWebMCPSchemaUpdateIfActive();
+  if (RuntimeEnabledFeatures::EmailVerificationStatusIndicatorEnabled(
+          GetExecutionContext())) {
+    if (auto* input_element = DynamicTo<HTMLInputElement>(e.ToHTMLElement())) {
+      if (input_element->IsEmailVerificationTokenField()) {
+        NotifyEmailVerificationTokenFieldChanged();
+      }
+    }
+  }
 }
 
 void HTMLFormElement::Disassociate(ListedElement& e) {
   listed_elements_are_dirty_ = true;
   listed_elements_.clear();
-  listed_elements_including_shadow_trees_are_dirty_ = true;
-  listed_elements_including_shadow_trees_.clear();
+  listed_elements_for_autofill_are_dirty_ = true;
+  listed_elements_for_autofill_.clear();
   RemoveFromPastNamesMap(e.ToHTMLElement());
+  ScheduleWebMCPSchemaUpdateIfActive();
+  if (RuntimeEnabledFeatures::EmailVerificationStatusIndicatorEnabled(
+          GetExecutionContext())) {
+    if (auto* input_element = DynamicTo<HTMLInputElement>(e.ToHTMLElement())) {
+      if (input_element->IsEmailVerificationTokenField()) {
+        NotifyEmailVerificationTokenFieldChanged();
+      }
+    }
+  }
 }
 
 bool HTMLFormElement::IsURLAttribute(const Attribute& attribute) const {
@@ -723,68 +1251,180 @@ HTMLFormControlsCollection* HTMLFormElement::elements() {
   return EnsureCachedCollection<HTMLFormControlsCollection>(kFormControls);
 }
 
-void HTMLFormElement::CollectListedElements(
+// 1. While both autofill and reference target are traversing shadow trees,
+// autofill is traversing shadow trees "inside" the form node, e.g.,
+// <form><x-input></form>, and reference target is traversing shadow trees
+// "outside" the form node, e.g., <x-form referencetarget=realform>
+// <form id=realform></x-form>
+// 2. Since reference target doesn't traverse shadow trees inside the form node,
+// `this->element_` doesn't need to be invalidated in
+// InvalidateAncestorFormsForAutofill which is for autofill scenarios.
+// 3. If a referencing element in a separate shadow tree is added or removed,
+// the element list will be invalidated via Associate/Disassociate methods.
+// 4. TODO(crbug.com/413427414): invalidate the element list when
+// shadowRoot.referenceTarget is changed.
+void HTMLFormElement::CollectListedElementsForReferenceTarget(
     const Node& root,
     ListedElement::List& elements,
-    ListedElement::List* elements_including_shadow_trees,
-    bool in_shadow_tree) const {
-  DCHECK(!in_shadow_tree || elements_including_shadow_trees);
-  if (!in_shadow_tree)
-    elements.clear();
-  for (HTMLElement& element : Traversal<HTMLElement>::StartsAfter(root)) {
+    ListedElement::List* elements_for_autofill) const {
+  CHECK(RuntimeEnabledFeatures::ShadowRootReferenceTargetEnabled(
+      GetDocument().GetExecutionContext()));
+  for (HTMLElement& element : Traversal<HTMLElement>::DescendantsOf(root)) {
     if (ListedElement* listed_element = ListedElement::From(element)) {
-      // If there is a <form> in between |root| and |listed_element|, then we
-      // shouldn't include it in |elements_including_shadow_trees| in order to
-      // prevent multiple forms from "owning" the same |listed_element| as shown
-      // by their |elements_including_shadow_trees|. |elements| doesn't have
-      // this problem because it can check |listed_element->Form()|.
-      if (in_shadow_tree && !HasFormInBetween(&root, &element) &&
-          !listed_element->Form()) {
-        elements_including_shadow_trees->push_back(listed_element);
-      } else if (listed_element->Form() == this) {
+      if (listed_element->Form() == this) {
         elements.push_back(listed_element);
-        if (elements_including_shadow_trees)
-          elements_including_shadow_trees->push_back(listed_element);
+      }
+
+      // TODO(crbug.com/414338073): optimize the perf (currently the traversal
+      // is O(n-logn)) by checking whether we've descended into `this`
+      if (elements_for_autofill &&
+          (listed_element->Form() == this ||
+           element.IsDescendantOrShadowDescendantOf(this))) {
+        elements_for_autofill->push_back(listed_element);
       }
     }
-    if (elements_including_shadow_trees && element.AuthorShadowRoot() &&
-        !HasFormInBetween(in_shadow_tree ? &root : this, &element)) {
-      const Node& shadow = *element.AuthorShadowRoot();
-      CollectListedElements(shadow, elements, elements_including_shadow_trees,
+
+    if (element.AuthorShadowRoot()) {
+      bool should_traverse_shadow_for_autofill =
+          elements_for_autofill &&
+          element.IsDescendantOrShadowDescendantOf(this);
+      bool should_traverse_shadow_for_reference_target =
+          element.GetShadowReferenceTarget(html_names::kFormAttr) == this;
+      if (should_traverse_shadow_for_autofill ||
+          should_traverse_shadow_for_reference_target) {
+        CollectListedElementsForReferenceTarget(
+            *element.AuthorShadowRoot(), elements, elements_for_autofill);
+      }
+    }
+  }
+}
+
+void HTMLFormElement::CollectListedElements(
+    const Node* root,
+    ListedElement::List& elements,
+    ListedElement::List* elements_for_autofill,
+    bool in_shadow_tree) const {
+  CHECK(root);
+  DCHECK(!in_shadow_tree || elements_for_autofill);
+  HeapVector<Member<HTMLFormElement>> nested_forms;
+  if (!in_shadow_tree) {
+    elements.clear();
+    if (elements_for_autofill) {
+      for (HTMLFormElement& nested_form :
+           Traversal<HTMLFormElement>::DescendantsOf(*this)) {
+        nested_forms.push_back(nested_form);
+      }
+    }
+  }
+
+  // We flatten elements of nested forms into `elements_for_autofill`.
+  // If one of the nested forms has an element associated by form attribute,
+  // that element may be outside of `root`'s subtree and we need to start at the
+  // root node.
+  const bool nested_forms_have_form_associated_elements =
+      std::ranges::any_of(nested_forms, [](const auto& form) {
+        return form->has_elements_associated_by_form_attribute_ ||
+               form->has_elements_associated_by_parser_;
+      });
+  if (nested_forms_have_form_associated_elements && isConnected()) {
+    root = &GetTreeScope().RootNode();
+  }
+
+  // A performance optimization - if `root_is_descendant` is true,
+  // then we can save some checks whether elements that we are traversing are
+  // descendants of `this`.
+  const bool root_is_descendant = in_shadow_tree || root == this;
+
+  for (HTMLElement& element : Traversal<HTMLElement>::DescendantsOf(*root)) {
+    if (ListedElement* listed_element = ListedElement::From(element)) {
+      // Autofill only considers outermost forms. We therefore include all form
+      // control descendants of the form whose elements we collect in
+      // `elements_for_autofill`, even if their closest ancestor is a
+      // different form.
+      // `elements` does not have this complication because it can check
+      // `listed_element->Form()`.
+      if (in_shadow_tree) {
+        elements_for_autofill->push_back(listed_element);
+      } else if (listed_element->Form() == this) {
+        elements.push_back(listed_element);
+        if (elements_for_autofill) {
+          elements_for_autofill->push_back(listed_element);
+        }
+      } else if (std::ranges::contains(nested_forms, listed_element->Form())) {
+        elements_for_autofill->push_back(listed_element);
+      }
+    }
+    // Descend recursively into shadow DOM if the following conditions are met:
+    // - We are supposed to gather elements in shadow trees.
+    // - `element` is a shadow host.
+    // - `element` is a shadow-including descendant of `this`. If `root` is a
+    //   descendant of `this`, then that is trivially true.
+    if (elements_for_autofill && element.AuthorShadowRoot() &&
+        (root_is_descendant || element.IsDescendantOf(this))) {
+      CollectListedElements(element.AuthorShadowRoot(), elements,
+                            elements_for_autofill,
                             /*in_shadow_tree=*/true);
     }
   }
 }
 
-// This function should be const conceptually. However we update some fields
-// because of lazy evaluation.
-const ListedElement::List& HTMLFormElement::ListedElements(
-    bool include_shadow_trees) const {
-  if (!RuntimeEnabledFeatures::AutofillShadowDOMEnabled())
-    include_shadow_trees = false;
+const Node* HTMLFormElement::GetListedElementsScope() const {
+  HTMLFormElement* mutable_this = const_cast<HTMLFormElement*>(this);
+  Node* scope = mutable_this;
+  if (has_elements_associated_by_parser_) {
+    scope = &NodeTraversal::HighestAncestorOrSelf(*mutable_this);
+  }
+  if (isConnected() && has_elements_associated_by_form_attribute_) {
+    scope = &GetTreeScope().RootNode();
+  }
+  return scope;
+}
+
+const Node* HTMLFormElement::GetReferenceTargetScope() const {
+  if (!RuntimeEnabledFeatures::ShadowRootReferenceTargetEnabled(
+          GetDocument().GetExecutionContext())) {
+    return nullptr;
+  }
+
+  HTMLFormElement* mutable_this = const_cast<HTMLFormElement*>(this);
+  const Node* reference_target_scope = nullptr;
+  Element* host = mutable_this->OwnerShadowHost();
+  while (host && host->GetShadowReferenceTarget(html_names::kFormAttr) ==
+                     mutable_this) {
+    reference_target_scope = &host->GetTreeScope().RootNode();
+    host = host->OwnerShadowHost();
+  }
+  return reference_target_scope;
+}
+
+const ListedElement::List& HTMLFormElement::CollectAndCacheListedElements(
+    bool collect_for_autofill) const {
   bool collect_shadow_inputs =
-      include_shadow_trees && listed_elements_including_shadow_trees_are_dirty_;
+      collect_for_autofill && listed_elements_for_autofill_are_dirty_;
 
   if (listed_elements_are_dirty_ || collect_shadow_inputs) {
     HTMLFormElement* mutable_this = const_cast<HTMLFormElement*>(this);
-    Node* scope = mutable_this;
-    if (has_elements_associated_by_parser_)
-      scope = &NodeTraversal::HighestAncestorOrSelf(*mutable_this);
-    if (isConnected() && has_elements_associated_by_form_attribute_)
-      scope = &GetTreeScope().RootNode();
-    DCHECK(scope);
     mutable_this->listed_elements_.clear();
-    mutable_this->listed_elements_including_shadow_trees_.clear();
-    CollectListedElements(
-        *scope, mutable_this->listed_elements_,
-        collect_shadow_inputs
-            ? &mutable_this->listed_elements_including_shadow_trees_
-            : nullptr);
+    mutable_this->listed_elements_for_autofill_.clear();
+    ListedElement::List* elements_for_autofill =
+        collect_shadow_inputs ? &mutable_this->listed_elements_for_autofill_
+                              : nullptr;
+    // If this form is a reference target, we need to traverse the scope that
+    // includes the highest shadow host.
+    if (const Node* reference_target_scope = GetReferenceTargetScope()) {
+      CollectListedElementsForReferenceTarget(*reference_target_scope,
+                                              mutable_this->listed_elements_,
+                                              elements_for_autofill);
+    } else {
+      CollectListedElements(GetListedElementsScope(),
+                            mutable_this->listed_elements_,
+                            elements_for_autofill);
+    }
     mutable_this->listed_elements_are_dirty_ = false;
-    mutable_this->listed_elements_including_shadow_trees_are_dirty_ =
+    mutable_this->listed_elements_for_autofill_are_dirty_ =
         !collect_shadow_inputs;
   }
-  return include_shadow_trees ? listed_elements_including_shadow_trees_
+  return collect_for_autofill ? listed_elements_for_autofill_
                               : listed_elements_;
 }
 
@@ -793,7 +1433,7 @@ void HTMLFormElement::CollectImageElements(
     HeapVector<Member<HTMLImageElement>>& elements) {
   elements.clear();
   for (HTMLImageElement& image :
-       Traversal<HTMLImageElement>::StartsAfter(root)) {
+       Traversal<HTMLImageElement>::DescendantsOf(root)) {
     if (image.formOwner() == this)
       elements.push_back(&image);
   }
@@ -842,13 +1482,14 @@ void HTMLFormElement::setMethod(const AtomicString& value) {
   setAttribute(html_names::kMethodAttr, value);
 }
 
-HTMLFormControlElement* HTMLFormElement::FindDefaultButton() const {
+Element* HTMLFormElement::FindDefaultButton() const {
   for (ListedElement* element : ListedElements()) {
-    auto* control = DynamicTo<HTMLFormControlElement>(element);
-    if (!control)
-      continue;
-    if (control->CanBeSuccessfulSubmitButton())
+    if (auto* control = DynamicTo<HTMLFormControlElement>(element);
+        control && control->CanBeSuccessfulSubmitButton()) {
       return control;
+    } else if (element->ToHTMLElement().SubmitBehavior()) {
+      return &element->ToHTMLElement();
+    }
   }
   return nullptr;
 }
@@ -911,6 +1552,10 @@ Element* HTMLFormElement::ElementFromPastNamesMap(
   return element;
 }
 
+bool HTMLFormElement::PastNamesEmpty() const {
+  return !past_names_map_;
+}
+
 void HTMLFormElement::AddToPastNamesMap(Element* element,
                                         const AtomicString& past_name) {
   if (past_name.empty())
@@ -947,8 +1592,16 @@ void HTMLFormElement::GetNamedElements(
   }
 }
 
+bool HTMLFormElement::HasNamedElements(const AtomicString& name) {
+  // http://www.whatwg.org/specs/web-apps/current-work/multipage/forms.html#dom-form-nameditem
+  if (elements()->HasNamedItems(name)) {
+    return true;
+  }
+  return ElementFromPastNamesMap(name);
+}
+
 bool HTMLFormElement::ShouldAutocomplete() const {
-  return !EqualIgnoringASCIICase(
+  return !EqualIgnoringAsciiCase(
       FastGetAttribute(html_names::kAutocompleteAttr), "off");
 }
 
@@ -962,11 +1615,23 @@ bool HTMLFormElement::HasRel(RelAttribute relation) const {
 
 void HTMLFormElement::FinishParsingChildren() {
   HTMLElement::FinishParsingChildren();
-  GetDocument().GetFormController().RestoreControlStateIn(*this);
+  GetDocument().EnsureFormController().RestoreControlStateIn(*this);
   did_finish_parsing_children_ = true;
 }
 
-V8UnionElementOrRadioNodeList* HTMLFormElement::AnonymousNamedGetter(
+void HTMLFormElement::ChildrenChanged(const ChildrenChange& change) {
+  HTMLElement::ChildrenChanged(change);
+  ScheduleDeclarativeWebMCPToolRegistration();
+}
+
+bool HTMLFormElement::HasAnyNamedProperties() const {
+  const auto* elements =
+      CachedCollection<HTMLFormControlsCollection>(kFormControls);
+  return (elements && !elements->NamedItemsEmpty()) || !PastNamesEmpty();
+}
+
+V8UnionElementOrRadioNodeList::Ret HTMLFormElement::AnonymousNamedGetter(
+    ScriptState* script_state,
     const AtomicString& name) {
   // Call getNamedElements twice, first time check if it has a value
   // and let HTMLFormElement update its cache.
@@ -975,7 +1640,7 @@ V8UnionElementOrRadioNodeList* HTMLFormElement::AnonymousNamedGetter(
     HeapVector<Member<Element>> elements;
     GetNamedElements(name, elements);
     if (elements.empty())
-      return nullptr;
+      return {};
   }
 
   // Second call may return different results from the first call,
@@ -1001,10 +1666,15 @@ V8UnionElementOrRadioNodeList* HTMLFormElement::AnonymousNamedGetter(
     }
   }
   if (elements.size() == 1) {
-    return MakeGarbageCollected<V8UnionElementOrRadioNodeList>(elements[0]);
+    return V8UnionElementOrRadioNodeList::Ret(script_state, elements[0]);
   }
-  return MakeGarbageCollected<V8UnionElementOrRadioNodeList>(
-      GetRadioNodeList(name, only_match_img));
+  return V8UnionElementOrRadioNodeList::Ret(
+      script_state, GetRadioNodeList(name, only_match_img));
+}
+
+bool HTMLFormElement::NamedPropertyQuery(const AtomicString& name,
+                                         ExceptionState&) {
+  return HasNamedElements(name);
 }
 
 void HTMLFormElement::InvalidateDefaultButtonStyle() const {
@@ -1019,8 +1689,52 @@ void HTMLFormElement::InvalidateDefaultButtonStyle() const {
   }
 }
 
-void HTMLFormElement::InvalidateListedElementsIncludingShadowTrees() {
-  listed_elements_including_shadow_trees_are_dirty_ = true;
+void HTMLFormElement::InvalidateListedElementsForAutofill() {
+  listed_elements_for_autofill_are_dirty_ = true;
+}
+
+void HTMLFormElement::InvalidateListedElements() {
+  listed_elements_are_dirty_ = true;
+  listed_elements_.clear();
+  listed_elements_for_autofill_are_dirty_ = true;
+  listed_elements_for_autofill_.clear();
+}
+
+void HTMLFormElement::UseCountPropertyAccess(
+    v8::Local<v8::Name>& v8_property_name,
+    const v8::PropertyCallbackInfo<v8::Value>& info) {
+  bool hasPropertyInPrototypeChain =
+      !info.Holder()
+           ->GetRealNamedPropertyInPrototypeChain(
+               info.GetIsolate()->GetCurrentContext(), v8_property_name)
+           .IsEmpty();
+
+  UseCounter::Count(
+      GetDocument(),
+      hasPropertyInPrototypeChain
+          ? WebFeature::kDOMClobberedShadowedFormPropertyAccessed
+          : WebFeature::kDOMClobberedNotShadowedFormPropertyAccessed);
+}
+
+void HTMLFormElement::ScheduleWebMCPSchemaUpdateIfActive() {
+  if (!RuntimeEnabledFeatures::WebMCPEnabled(GetExecutionContext())) {
+    return;
+  }
+  if (!active_webmcp_tool_) {
+    return;
+  }
+  ScheduleDeclarativeWebMCPToolRegistration();
+}
+
+void HTMLFormElement::NotifyEmailVerificationTokenFieldChanged() {
+  for (ListedElement* listed_element : ListedElements()) {
+    HTMLElement& html_element = listed_element->ToHTMLElement();
+    if (auto* input_element = DynamicTo<HTMLInputElement>(html_element)) {
+      if (input_element->type() == input_type_names::kEmail) {
+        input_element->UpdateEmailVerificationIndicator();
+      }
+    }
+  }
 }
 
 }  // namespace blink

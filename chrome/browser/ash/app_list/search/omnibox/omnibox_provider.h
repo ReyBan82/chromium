@@ -7,18 +7,21 @@
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/app_list/search/search_provider.h"
 #include "chromeos/ash/components/string_matching/tokenized_string.h"
 #include "components/omnibox/browser/autocomplete_controller.h"
 #include "components/omnibox/browser/favicon_cache.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class AppListControllerDelegate;
 class AutocompleteController;
 class AutocompleteResult;
 class Profile;
+class TemplateURLService;
 
 namespace app_list {
 
@@ -26,8 +29,14 @@ namespace app_list {
 class OmniboxProvider : public SearchProvider,
                         public AutocompleteController::Observer {
  public:
-  explicit OmniboxProvider(Profile* profile,
-                           AppListControllerDelegate* list_controller);
+  // `provider_types` is a bitmap containing AutocompleteProvider::Type values.
+  // `template_url_service` is forwarded to each OmniboxResult so search-engine
+  // descriptions can be formatted. Must not be nullptr and must outlive this
+  // object.
+  OmniboxProvider(Profile* profile,
+                  AppListControllerDelegate* list_controller,
+                  TemplateURLService* template_url_service,
+                  int provider_types);
 
   OmniboxProvider(const OmniboxProvider&) = delete;
   OmniboxProvider& operator=(const OmniboxProvider&) = delete;
@@ -53,11 +62,12 @@ class OmniboxProvider : public SearchProvider,
   void OnResultChanged(AutocompleteController* controller,
                        bool default_match_changed) override;
 
-  Profile* profile_;
-  AppListControllerDelegate* list_controller_;
+  raw_ptr<Profile> profile_;
+  raw_ptr<AppListControllerDelegate> list_controller_;
+  const raw_ref<TemplateURLService> template_url_service_;
 
   std::u16string last_query_;
-  absl::optional<ash::string_matching::TokenizedString> last_tokenized_query_;
+  std::optional<ash::string_matching::TokenizedString> last_tokenized_query_;
   base::TimeTicks query_start_time_;
   AutocompleteInput input_;
 

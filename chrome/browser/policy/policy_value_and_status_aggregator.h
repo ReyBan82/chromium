@@ -1,4 +1,4 @@
-// Copyright 2022 The Chromium Authors. All rights reserved.
+// Copyright 2022 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,13 +10,16 @@
 #include <vector>
 
 #include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/scoped_multi_source_observation.h"
+#include "base/scoped_observation.h"
 #include "base/values.h"
-#include "build/branding_buildflags.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/policy/value_provider/policy_value_provider.h"
+#include "chrome/browser/profiles/profile_observer.h"
 #include "components/policy/core/browser/webui/policy_status_provider.h"
+#include "components/policy/resources/webui/mojom/policy.mojom-forward.h"
 #include "extensions/buildflags/buildflags.h"
 
 class Profile;
@@ -24,16 +27,17 @@ class Profile;
 namespace policy {
 
 extern const char kUserStatusKey[];
-#if BUILDFLAG(IS_CHROMEOS_ASH) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_CHROMEOS)
 extern const char kDeviceStatusKey[];
-#endif  // BUILDFLAG(IS_CHROMEOS_ASH) || BUILDFLAG(IS_CHROMEOS_LACROS)
+#endif  // BUILDFLAG(IS_CHROMEOS)
 
 // PolicyValueAndStatusAggregator is a wrapper class that will contain all the
 // platform-specific PolicyStatusProviders and PolicyValueProviders. It will
 // call GetStatus(), GetValues(), GetNames() on the available providers, merge
 // them and return the dictionary that contains all the available information.
 class PolicyValueAndStatusAggregator : public PolicyValueProvider::Observer,
-                                       public PolicyStatusProvider::Observer {
+                                       public PolicyStatusProvider::Observer,
+                                       public ProfileObserver {
  public:
   class Observer : public base::CheckedObserver {
    public:
@@ -53,13 +57,17 @@ class PolicyValueAndStatusAggregator : public PolicyValueProvider::Observer,
 
   // Returns the dictionary containing the policy metadata available for the
   // platform.
-  base::Value::Dict GetAggregatedPolicyStatus();
+  base::DictValue GetAggregatedPolicyStatus();
+  // TODO: crbug.com/40897784 - replace non-mojo version once all status
+  // providers implement the mojo version of `GetStatus`.
+  base::flat_map<std::string, policy::mojom::StatusPtr>
+  GetAggregatedPolicyStatusMojo();
 
   // Returns the dictionary containing policy names.
-  base::Value::Dict GetAggregatedPolicyNames();
+  base::DictValue GetAggregatedPolicyNames();
 
   // Returns the available policy values.
-  base::Value::Dict GetAggregatedPolicyValues();
+  base::DictValue GetAggregatedPolicyValues();
 
   // Refreshes the policy values by calling Refresh() on all
   // PolicyValueProviders and notifies the observers about policy value and
@@ -74,6 +82,10 @@ class PolicyValueAndStatusAggregator : public PolicyValueProvider::Observer,
 
   // PolicyStatusProvider::Observer implementation.
   void OnPolicyStatusChanged() override;
+
+  // ProfileObserver implementation.
+  // Clears `value_providers_` as they depend on `profile`.
+  void OnProfileWillBeDestroyed(Profile* profile) override;
 
   void AddPolicyValueProvider(
       std::unique_ptr<PolicyValueProvider> value_provider);
@@ -92,7 +104,7 @@ class PolicyValueAndStatusAggregator : public PolicyValueProvider::Observer,
   }
 
  private:
-  PolicyValueAndStatusAggregator();
+  explicit PolicyValueAndStatusAggregator(Profile* profile);
 
   void NotifyValueAndStatusChange();
 
@@ -108,7 +120,8 @@ class PolicyValueAndStatusAggregator : public PolicyValueProvider::Observer,
   // Contains the pointers to PolicyValueProvider which also implement
   // PolicyStatusProvider. The ownership of the instances will be in
   // `status_providers_`.
-  std::vector<PolicyValueProvider*> value_providers_unowned_;
+  std::vector<raw_ptr<PolicyValueProvider, VectorExperimental>>
+      value_providers_unowned_;
   base::ObserverList<Observer> observers_;
   base::ScopedMultiSourceObservation<PolicyValueProvider,
                                      PolicyValueProvider::Observer>
@@ -116,6 +129,7 @@ class PolicyValueAndStatusAggregator : public PolicyValueProvider::Observer,
   base::ScopedMultiSourceObservation<PolicyStatusProvider,
                                      PolicyStatusProvider::Observer>
       policy_status_provider_observations_{this};
+  base::ScopedObservation<Profile, ProfileObserver> profile_observation_{this};
 };
 }  // namespace policy
 

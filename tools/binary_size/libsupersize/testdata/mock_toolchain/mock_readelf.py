@@ -56,11 +56,9 @@ Section Headers:
   [21] .got              PROGBITS       02ddc834 2ddc834 00a7cc 00  WA  0   0  4
   [22] .data             PROGBITS       02de7000 2de7000 018d88 00  WA  0   0 32
   [23] .bss              NOBITS         02dffda0 2dffda0 13d7e8 00  WA  0   0 32
-  [35] .note.gnu.gold-version NOTE     00000000 22700c98 00001c 00      0   0  4
-  [36] .ARM.attributes  ARM_ATTRIBUTES 00000000 22700cb4 00003c 00      0   0  1
-  [37] .symtab           SYMTAB    00000000 22700cf0 105ef20 10     38 901679  4
-  [38] .strtab           STRTAB       00000000 234c4950 213a4fe 00      0   0  1
-  [39] .shstrtab         STRTAB        00000000 257b46da 0001b4 00      0   0  1
+  [24] .part.end         NOBITS         02f3d588 2f3d588 000010 00  WA  0   0 32
+  [25] .ARM.attributes  ARM_ATTRIBUTES  00000000 2f3d598 00003c 00      0   0  1
+  [26] .shstrtab         STRTAB         00000000 257b46da 0001b4 00     0   0  1
 Key to Flags:
   W (write), A (alloc), X (execute), M (merge), S (strings)
   I (info), L (link order), G (group), T (TLS), E (exclude), x (unknown)
@@ -99,7 +97,7 @@ Displaying notes found at file offset 0x226c41e8 with length 0x0000001c:
 """
 
 _OBJECT_OUTPUTS = {
-    'obj/third_party/icu/icuuc/ucnv_ext.o': """\
+  'obj/third_party/icu/icuuc/ucnv_ext.o': """\
 There are 71 section headers, starting at offset 0x3114:
 
 Section Headers:
@@ -131,7 +129,7 @@ Key to Flags:
   I (info), L (link order), G (group), T (TLS), E (exclude), x (unknown)
   O (extra OS processing required) o (OS specific), p (processor specific)
 """,
-    'obj/third_party/WebKit.a': """\
+  'obj/third_party/WebKit.a': """\
 
 File: obj/third_party/WebKit.a(PaintChunker.o)
 There are 68 section headers, starting at offset 0x5650:
@@ -155,7 +153,7 @@ Key to Flags:
   I (info), L (link order), G (group), T (TLS), E (exclude), x (unknown)
   O (extra OS processing required) o (OS specific), p (processor specific)
 """,
-    'obj/base/base/page_allocator.o': """\
+  'obj/base/base/page_allocator.o': """\
 There are 68 section headers, starting at offset 0x5650:
 
 Section Headers:
@@ -163,7 +161,7 @@ Section Headers:
   [ 0]                   NULL            00000000 000000 000000 00      0   0  0
   [ 1] .rodata.str1.1    PROGBITS        00000000 000015 000005 01 AMS  0   0  1
 """,
-    'obj/third_party/ffmpeg/libffmpeg_internal.a': """\
+  'obj/third_party/ffmpeg/libffmpeg_internal.a': """\
 
 File: obj/third_party/ffmpeg/libffmpeg_internal.a(fft_float.o)
 There are 68 section headers, starting at offset 0x5650:
@@ -188,7 +186,7 @@ Key to Flags:
   I (info), L (link order), G (group), T (TLS), E (exclude), x (unknown)
   O (extra OS processing required) o (OS specific), p (processor specific)
 """,
-    '../../third_party/gvr-android-sdk/libgvr_shim_static_arm.a': """\
+  '../../third_party/gvr-android-sdk/libgvr_shim_static_arm.a': """\
 
 File: ../../third_party/gvr-android-sdk/libgvr_shim_static_arm.a(\
 libcontroller_api_impl.a_controller_api_impl.o)

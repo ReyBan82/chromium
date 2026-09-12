@@ -14,31 +14,16 @@
 namespace {
 const char kConsoleMessage[] =
     "A SafeBrowsing warning is pending on this page, so an attempted download "
-    "was cancelled. See https://crbug.com/1081317 for details.";
+    "was cancelled. See https://crbug.com/40691288 for details.";
 }
 
 namespace safe_browsing {
 
 DelayedWarningNavigationThrottle::DelayedWarningNavigationThrottle(
-    content::NavigationHandle* navigation_handle)
-    : content::NavigationThrottle(navigation_handle) {}
+    content::NavigationThrottleRegistry& registry)
+    : content::NavigationThrottle(registry) {}
 
 DelayedWarningNavigationThrottle::~DelayedWarningNavigationThrottle() = default;
-
-std::unique_ptr<DelayedWarningNavigationThrottle>
-DelayedWarningNavigationThrottle::MaybeCreateNavigationThrottle(
-    content::NavigationHandle* navigation_handle) {
-  // If the tab is being no-state prefetched, stop here before it breaks
-  // metrics.
-  content::WebContents* web_contents = navigation_handle->GetWebContents();
-  if (prerender::ChromeNoStatePrefetchContentsDelegate::FromWebContents(
-          web_contents)) {
-    return nullptr;
-  }
-
-  // Otherwise, always insert the throttle for metrics recording.
-  return std::make_unique<DelayedWarningNavigationThrottle>(navigation_handle);
-}
 
 const char* DelayedWarningNavigationThrottle::GetNameForLogging() {
   return "DelayedWarningNavigationThrottle";

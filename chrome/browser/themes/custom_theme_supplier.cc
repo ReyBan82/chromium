@@ -31,7 +31,7 @@ gfx::Image CustomThemeSupplier::GetImageNamed(int id) const {
   return gfx::Image();
 }
 
-base::RefCountedMemory* CustomThemeSupplier::GetRawData(
+scoped_refptr<base::RefCountedMemory> CustomThemeSupplier::GetRawData(
     int idr_id,
     ui::ResourceScaleFactor scale_factor) const {
   return nullptr;
@@ -39,10 +39,6 @@ base::RefCountedMemory* CustomThemeSupplier::GetRawData(
 
 bool CustomThemeSupplier::HasCustomImage(int id) const {
   return false;
-}
-
-bool CustomThemeSupplier::CanUseIncognitoColors() const {
-  return true;
 }
 
 ui::NativeTheme* CustomThemeSupplier::GetNativeTheme() const {

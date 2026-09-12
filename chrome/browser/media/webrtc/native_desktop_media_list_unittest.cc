@@ -8,10 +8,13 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/location.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
@@ -42,7 +45,12 @@
 
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
+
 #include "base/strings/string_util_win.h"
+#endif
+
+#if BUILDFLAG(IS_MAC)
+#include "components/remote_cocoa/browser/scoped_cg_window_id.h"
 #endif
 
 using content::DesktopMediaID;
@@ -51,8 +59,8 @@ using testing::DoAll;
 
 namespace {
 
-// Aura window capture unit tests are not stable. crbug.com/602494 and
-// crbug.com/603823.
+// Aura window capture unit tests are not stable. crbug.com/40464604 and
+// crbug.com/40465249.
 // #define ENABLE_AURA_WINDOW_TESTS
 
 static const int kDefaultWindowCount = 2;
@@ -130,41 +138,47 @@ class MockObserver : public DesktopMediaListObserver {
   MOCK_METHOD0(OnDelegatedSourceListDismissed, void());
 };
 
-class FakeScreenCapturer : public webrtc::DesktopCapturer {
+class FakeScreenCapturer : public ThumbnailCapturer {
  public:
-  FakeScreenCapturer() {}
+  FakeScreenCapturer() = default;
 
   FakeScreenCapturer(const FakeScreenCapturer&) = delete;
   FakeScreenCapturer& operator=(const FakeScreenCapturer&) = delete;
 
-  ~FakeScreenCapturer() override {}
+  ~FakeScreenCapturer() override = default;
 
-  // webrtc::ScreenCapturer implementation.
-  void Start(Callback* callback) override { callback_ = callback; }
+  void SetSourceList(const SourceList& screens) { screens_ = screens; }
+
+  // ThumbnailCapturer implementation.
+  void Start(Consumer* consumer) override { consumer_ = consumer; }
+
+  FrameDeliveryMethod GetFrameDeliveryMethod() const override {
+    return FrameDeliveryMethod::kOnRequest;
+  }
 
   void CaptureFrame() override {
-    DCHECK(callback_);
-    std::unique_ptr<webrtc::DesktopFrame> frame(
-        new webrtc::BasicDesktopFrame(webrtc::DesktopSize(10, 10)));
-    callback_->OnCaptureResult(webrtc::DesktopCapturer::Result::SUCCESS,
+    DCHECK(consumer_);
+    auto frame = std::make_unique<webrtc::BasicDesktopFrame>(
+        webrtc::DesktopSize(10, 10), webrtc::FOURCC_ARGB);
+    consumer_->OnCaptureResult(webrtc::DesktopCapturer::Result::SUCCESS,
                                std::move(frame));
   }
 
   bool GetSourceList(SourceList* screens) override {
-    screens->push_back({0});
+    *screens = screens_;
     return true;
   }
 
   bool SelectSource(SourceId id) override {
-    EXPECT_EQ(0, id);
     return true;
   }
 
  protected:
-  raw_ptr<Callback> callback_;
+  raw_ptr<Consumer> consumer_;
+  SourceList screens_ = {{0}};
 };
 
-class FakeWindowCapturer : public webrtc::DesktopCapturer {
+class FakeWindowCapturer : public ThumbnailCapturer {
  public:
   FakeWindowCapturer() = default;
   explicit FakeWindowCapturer(const webrtc::DesktopCaptureOptions& options)
@@ -173,7 +187,7 @@ class FakeWindowCapturer : public webrtc::DesktopCapturer {
   FakeWindowCapturer(const FakeWindowCapturer&) = delete;
   FakeWindowCapturer& operator=(const FakeWindowCapturer&) = delete;
 
-  ~FakeWindowCapturer() override {}
+  ~FakeWindowCapturer() override = default;
 
   void SetWindowList(const SourceList& list) {
     base::AutoLock lock(window_list_lock_);
@@ -187,20 +201,30 @@ class FakeWindowCapturer : public webrtc::DesktopCapturer {
     frame_values_[window_id] = value;
   }
 
-  // webrtc::WindowCapturer implementation.
-  void Start(Callback* callback) override { callback_ = callback; }
+  // ThumbnailCapturer implementation.
+  void Start(Consumer* consumer) override { consumer_ = consumer; }
+
+  FrameDeliveryMethod GetFrameDeliveryMethod() const override {
+    return FrameDeliveryMethod::kOnRequest;
+  }
 
   void CaptureFrame() override {
-    DCHECK(callback_);
+    DCHECK(consumer_);
 
     base::AutoLock lock(frame_values_lock_);
 
     auto it = frame_values_.find(selected_window_id_);
     int8_t value = (it != frame_values_.end()) ? it->second : 0;
-    std::unique_ptr<webrtc::DesktopFrame> frame(
-        new webrtc::BasicDesktopFrame(webrtc::DesktopSize(10, 10)));
-    memset(frame->data(), value, frame->stride() * frame->size().height());
-    callback_->OnCaptureResult(webrtc::DesktopCapturer::Result::SUCCESS,
+    auto frame = std::make_unique<webrtc::BasicDesktopFrame>(
+        webrtc::DesktopSize(10, 10), webrtc::FOURCC_ARGB);
+    // SAFETY: The size of the frame data is frame->stride() *
+    // frame->size().height(). webrtc::DesktopFrame::data() returns a pointer to
+    // this buffer.
+    auto frame_span = UNSAFE_BUFFERS(base::span(
+        frame->data(),
+        static_cast<size_t>(frame->stride() * frame->size().height())));
+    std::ranges::fill(frame_span, value);
+    consumer_->OnCaptureResult(webrtc::DesktopCapturer::Result::SUCCESS,
                                std::move(frame));
   }
 
@@ -231,10 +255,8 @@ class FakeWindowCapturer : public webrtc::DesktopCapturer {
     return true;
   }
 
-  bool FocusOnSelectedSource() override { return true; }
-
  private:
-  raw_ptr<Callback> callback_;
+  raw_ptr<Consumer> consumer_;
   webrtc::DesktopCaptureOptions options_ =
       webrtc::DesktopCaptureOptions::CreateDefault();
   SourceList window_list_;
@@ -287,8 +309,9 @@ class NativeDesktopMediaListTest : public ChromeViewsTestBase {
 #if defined(USE_AURA)
   views::UniqueWidgetPtr CreateDesktopWidget() {
     views::UniqueWidgetPtr widget(std::make_unique<views::Widget>());
-    views::Widget::InitParams params;
-    params.type = views::Widget::InitParams::TYPE_WINDOW_FRAMELESS;
+    views::Widget::InitParams params(
+        views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
+        views::Widget::InitParams::TYPE_WINDOW_FRAMELESS);
     params.accept_events = false;
     params.native_widget = new views::DesktopNativeWidgetAura(widget.get());
     params.bounds = gfx::Rect(0, 0, 20, 20);
@@ -370,14 +393,15 @@ class NativeDesktopMediaListTest : public ChromeViewsTestBase {
 #endif  // BUILDFLAG(IS_WIN)
     model_ = std::make_unique<NativeDesktopMediaList>(
         DesktopMediaList::Type::kWindow,
-        base::WrapUnique(window_capturer_.get()), add_current_process_windows);
+        base::WrapUnique(window_capturer_.get()), add_current_process_windows,
+        /*auto_show_delegated_source_list=*/true);
   }
 
   void UpdateModel() {
     base::RunLoop run_loop;
-    base::OnceClosure update_callback =
+    base::OnceClosure update_consumer =
         base::BindLambdaForTesting([&]() { run_loop.Quit(); });
-    model_->Update(std::move(update_callback));
+    model_->Update(std::move(update_consumer));
     run_loop.Run();
   }
 
@@ -471,7 +495,7 @@ class NativeDesktopMediaListTest : public ChromeViewsTestBase {
   MockObserver observer_;
 
   // Owned by |model_|;
-  raw_ptr<FakeWindowCapturer> window_capturer_;
+  raw_ptr<FakeWindowCapturer, DanglingUntriaged> window_capturer_;
 
   webrtc::DesktopCapturer::SourceList window_list_;
   std::vector<views::UniqueWidgetPtr> desktop_widgets_;
@@ -795,6 +819,37 @@ TEST_F(NativeDesktopMediaListTest, MinimizedCurrentProcessWindows) {
 }
 #endif  // BUILDFLAG(IS_WIN)
 
+#if BUILDFLAG(IS_MAC)
+TEST_F(NativeDesktopMediaListTest, NonDelegatedScopedCGWindowIDCollision) {
+  CreateCapturerAndModel();
+  model_->SetUpdatePeriod(base::Milliseconds(20));
+
+  constexpr int kTargetWindowId = 12345;
+
+  // 1. Register a ScopedCGWindowID with our target window ID.
+  viz::FrameSinkId frame_sink_id(1, 1);
+  remote_cocoa::ScopedCGWindowID scoped_window_id(kTargetWindowId,
+                                                  frame_sink_id);
+
+  // 2. Set the capturer to return a source with ID kTargetWindowId.
+  webrtc::DesktopCapturer::SourceList sources;
+  webrtc::DesktopCapturer::Source source;
+  source.id = kTargetWindowId;
+  source.title = "Test Window";
+  sources.push_back(source);
+  window_capturer_->SetWindowList(sources);
+
+  // 3. Trigger an update to the model.
+  UpdateModel();
+
+  // 4. Since the capturer is non-delegated (is_source_list_delegated_ is
+  // false), the window_id should be updated to kTargetWindowId via
+  // ScopedCGWindowID.
+  ASSERT_GT(model_->GetSourceCount(), 0);
+  EXPECT_EQ(model_->GetSource(0).id.window_id, kTargetWindowId);
+}
+#endif  // BUILDFLAG(IS_MAC)
+
 class DelegatedFakeScreenCapturer
     : public FakeScreenCapturer,
       public webrtc::DelegatedSourceListController {
@@ -1024,3 +1079,58 @@ TEST_F(NativeDesktopMediaListDelegatedTest, ClearSelectionNoOp) {
   WaitForCapturerTasks();
   EXPECT_EQ(1, capturer_->ensure_visible_call_count());
 }
+
+#if BUILDFLAG(IS_MAC)
+class NativeDesktopMediaListDelegatedWindowTest : public ChromeViewsTestBase {
+ public:
+  NativeDesktopMediaListDelegatedWindowTest() {
+    auto capturer = std::make_unique<DelegatedFakeScreenCapturer>();
+    capturer_ = capturer.get();
+    model_ = std::make_unique<NativeDesktopMediaList>(
+        DesktopMediaList::Type::kWindow, std::move(capturer));
+  }
+
+  ~NativeDesktopMediaListDelegatedWindowTest() override = default;
+
+  void UpdateModel() {
+    base::RunLoop run_loop;
+    base::OnceClosure update_consumer =
+        base::BindLambdaForTesting([&]() { run_loop.Quit(); });
+    model_->Update(std::move(update_consumer));
+    run_loop.Run();
+  }
+
+ protected:
+  MockObserver observer_;
+  std::unique_ptr<NativeDesktopMediaList> model_;
+  raw_ptr<DelegatedFakeScreenCapturer> capturer_;
+};
+
+TEST_F(NativeDesktopMediaListDelegatedWindowTest,
+       DelegatedScopedCGWindowIDCollision) {
+  constexpr int kTargetWindowId = 12345;
+
+  // 1. Register a ScopedCGWindowID with our target window ID.
+  viz::FrameSinkId frame_sink_id(1, 1);
+  remote_cocoa::ScopedCGWindowID scoped_window_id(kTargetWindowId,
+                                                  frame_sink_id);
+
+  // 2. Set the capturer to return a source with ID kTargetWindowId.
+  webrtc::DesktopCapturer::SourceList sources;
+  webrtc::DesktopCapturer::Source source;
+  source.id = kTargetWindowId;
+  source.title = "Test Window";
+  sources.push_back(source);
+  capturer_->SetSourceList(sources);
+
+  // 3. Trigger an update to the model and wait for it to finish.
+  UpdateModel();
+
+  // 4. Since the capturer is delegated (is_source_list_delegated_ is true),
+  // the window_id should NOT be set to kTargetWindowId (it should remain
+  // kNullId).
+  ASSERT_GT(model_->GetSourceCount(), 0);
+  EXPECT_EQ(model_->GetSource(0).id.window_id,
+            content::DesktopMediaID::kNullId);
+}
+#endif  // BUILDFLAG(IS_MAC)

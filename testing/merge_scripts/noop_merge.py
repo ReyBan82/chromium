@@ -3,9 +3,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-from __future__ import print_function
-
-import argparse
 import json
 import shutil
 import sys
@@ -23,8 +20,10 @@ def noop_merge(output_json, jsons_to_merge):
     jsons_to_merge: A list of paths to JSON files.
   """
   if len(jsons_to_merge) > 1:
-    print('Multiple JSONs provided: %s' % (','.join(jsons_to_merge)),
-        file=sys.stderr)
+    print(
+      'Multiple JSONs provided: %s' % (','.join(jsons_to_merge)),
+      file=sys.stderr,
+    )
     return 1
   if jsons_to_merge:
     shutil.copyfile(jsons_to_merge[0], output_json)

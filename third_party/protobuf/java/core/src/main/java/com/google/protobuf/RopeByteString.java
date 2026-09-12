@@ -1,32 +1,9 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
 package com.google.protobuf;
 
@@ -362,6 +339,24 @@ final class RopeByteString extends ByteString {
    */
   @Override
   public ByteString substring(int beginIndex, int endIndex) {
+    return substringNoCopy(beginIndex, endIndex);
+  }
+
+  /**
+   * Takes a substring of this one. This involves recursive descent along the left and right edges
+   * of the substring, and referencing any wholly contained segments in between. Any leaf nodes
+   * entirely uninvolved in the substring will not be referenced by the substring.
+   *
+   * <p>Substrings of {@code length < 2} should result in at most a single recursive call chain,
+   * terminating at a leaf node. Thus the result will be a {@link
+   * com.google.protobuf.ByteString.LeafByteString}.
+   *
+   * @param beginIndex start at this index
+   * @param endIndex the last character is the one before this index
+   * @return substring leaf node or tree
+   */
+  @Override
+  public ByteString substringNoCopy(int beginIndex, int endIndex) {
     final int length = checkRange(beginIndex, endIndex, totalLength);
 
     if (length == 0) {
@@ -477,58 +472,45 @@ final class RopeByteString extends ByteString {
 
   @Override
   public boolean isValidUtf8() {
-    int leftPartial = left.partialIsValidUtf8(Utf8.COMPLETE, 0, leftLength);
-    int state = right.partialIsValidUtf8(leftPartial, 0, right.size());
-    return state == Utf8.COMPLETE;
+    // If every piece is valid UTF-8, then the concatenation of them is also valid UTF-8. Almost
+    // always when this method is called this will be the case.
+    if (allPiecesValidUtf8()) {
+      return true;
+    }
+
+    // There were some individual pieces that were not valid UTF-8. Almost always this will mean
+    // the total string is not valid UTF-8, but it is possible that some pieces were invalid only
+    // due to leading-or-trailing surrogates and that concatenation will make them valid.
+    // We fall back to building the complete byte[] and checking if it is valid UTF-8. This is
+    // expensive but will be executed extremely rarely, and in the rare scenario this is executed
+    // the check will nearly always return false, which will lead to an result in an exception
+    // thrown up the stack, so the real performance implications of this slow check are small.
+    //
+    // There are a number of conditions that could be additionally checked here that could
+    // better optimize for detecting definitely-invalid cases, since the only way that concatenation
+    // helps is in cases of some contiguous span of N invalid pieces. In theory this could just
+    // concatenate and check only those spans, but since this is a very cold path, we do the
+    // simplest thing and check the entire byte array.
+    return Utf8.isValidUtf8(toByteArray());
   }
 
-  @Override
-  protected int partialIsValidUtf8(int state, int offset, int length) {
-    int toIndex = offset + length;
-    if (toIndex <= leftLength) {
-      return left.partialIsValidUtf8(state, offset, length);
-    } else if (offset >= leftLength) {
-      return right.partialIsValidUtf8(state, offset - leftLength, length);
-    } else {
-      int leftLength = this.leftLength - offset;
-      int leftPartial = left.partialIsValidUtf8(state, offset, leftLength);
-      return right.partialIsValidUtf8(leftPartial, 0, length - leftLength);
+  /**
+   * Returns true if all pieces in this rope individually are valid UTF-8. If this returns true,
+   * then the top level Rope is also valid UTF-8. If this returns false, it probably is invalid but
+   * may be valid when pieces are concatenated.
+   */
+  private boolean allPiecesValidUtf8() {
+    PieceIterator pieces = new PieceIterator(this);
+    while (pieces.hasNext()) {
+      if (!pieces.next().isValidUtf8()) {
+        return false;
+      }
     }
+    return true;
   }
 
   // =================================================================
   // equals() and hashCode()
-
-  @Override
-  public boolean equals(Object other) {
-    if (other == this) {
-      return true;
-    }
-    if (!(other instanceof ByteString)) {
-      return false;
-    }
-
-    ByteString otherByteString = (ByteString) other;
-    if (totalLength != otherByteString.size()) {
-      return false;
-    }
-    if (totalLength == 0) {
-      return true;
-    }
-
-    // You don't really want to be calling equals on long strings, but since
-    // we cache the hashCode, we effectively cache inequality. We use the cached
-    // hashCode if it's already computed.  It's arguable we should compute the
-    // hashCode here, and if we're going to be testing a bunch of byteStrings,
-    // it might even make sense.
-    int thisHash = peekCachedHashCode();
-    int thatHash = otherByteString.peekCachedHashCode();
-    if (thisHash != 0 && thatHash != 0 && thisHash != thatHash) {
-      return false;
-    }
-
-    return equalsFragments(otherByteString);
-  }
 
   /**
    * Determines if this string is equal to another of the same length by iterating over the leaf
@@ -537,7 +519,8 @@ final class RopeByteString extends ByteString {
    * @param other string of the same length as this one
    * @return true if the values of this string equals the value of the given one
    */
-  private boolean equalsFragments(ByteString other) {
+  @Override
+  public boolean equalsInternal(ByteString other) {
     int thisOffset = 0;
     Iterator<LeafByteString> thisIter = new PieceIterator(this);
     LeafByteString thisString = thisIter.next();
@@ -877,7 +860,7 @@ final class RopeByteString extends ByteString {
      *
      * <p>This method assumes that all error checking has already happened.
      *
-     * <p>Returns the actual number of bytes read or skipped.
+     * @return The actual number of bytes read or skipped.
      */
     private int readSkipInternal(byte[] b, int offset, int length) {
       int bytesRemaining = length;
@@ -931,7 +914,7 @@ final class RopeByteString extends ByteString {
     public synchronized void reset() {
       // Just reinitialize and skip the specified number of bytes.
       initialize();
-      readSkipInternal(null, 0, mark);
+      int unused = readSkipInternal(null, 0, mark);
     }
 
     /** Common initialization code used by both the constructor and reset() */

@@ -4,16 +4,23 @@
 
 #include "components/js_injection/browser/js_to_browser_messaging.h"
 
-#include "base/containers/contains.h"
+#include <algorithm>
+
+#include "base/containers/flat_map.h"
 #include "base/memory/raw_ptr.h"
+#include "components/back_forward_cache/back_forward_cache_disable.h"
 #include "components/js_injection/browser/web_message.h"
 #include "components/js_injection/browser/web_message_host.h"
 #include "components/js_injection/browser/web_message_host_factory.h"
 #include "components/js_injection/browser/web_message_reply_proxy.h"
 #include "components/js_injection/common/interfaces.mojom-forward.h"
+#include "components/origin_matcher/origin_matcher.h"
 #include "content/public/browser/disallow_activation_reason.h"
+#include "content/public/browser/document_user_data.h"
 #include "content/public/browser/render_process_host.h"
+#include "content/public/browser/weak_document_ptr.h"
 #include "content/public/browser/web_contents.h"
+#include "mojo/public/cpp/bindings/message.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
 #include "third_party/blink/public/common/messaging/message_port_descriptor.h"
 #include "third_party/blink/public/common/messaging/string_message_codec.h"
@@ -32,55 +39,175 @@ namespace {
 // this case we want to let developer to know that local files are not safe,
 // so we still pass "null".
 std::string GetOriginString(const url::Origin& source_origin) {
-  return base::Contains(url::GetLocalSchemes(), source_origin.scheme())
+  return std::ranges::contains(url::GetLocalSchemes(), source_origin.scheme())
              ? "null"
              : source_origin.Serialize();
 }
+
+// Used for queueing messages posted during prerendering. DocumentUserData
+// should be appropriate for managing them as the messages should be discarded
+// when an associated document is gone.
+class JsToBrowserMessagingDocumentUserData
+    : public content::DocumentUserData<JsToBrowserMessagingDocumentUserData> {
+ public:
+  ~JsToBrowserMessagingDocumentUserData() override = default;
+
+  std::vector<std::unique_ptr<WebMessage>> TakeQueuedMessages(
+      const std::u16string& name,
+      int32_t world_id) {
+    auto it = queued_messages_.find({name, world_id});
+    if (it == queued_messages_.end()) {
+      return {};
+    }
+    std::vector<std::unique_ptr<WebMessage>> messages = std::move(it->second);
+    queued_messages_.erase(it);
+    return messages;
+  }
+
+  void QueueMessage(const std::u16string& name,
+                    int32_t world_id,
+                    std::unique_ptr<WebMessage> message) {
+    queued_messages_[{name, world_id}].push_back(std::move(message));
+  }
+
+ private:
+  friend class DocumentUserData<JsToBrowserMessagingDocumentUserData>;
+  using WebMessageListenerKey = std::pair<std::u16string, int32_t>;
+
+  explicit JsToBrowserMessagingDocumentUserData(
+      content::RenderFrameHost* render_frame_host)
+      : content::DocumentUserData<JsToBrowserMessagingDocumentUserData>(
+            render_frame_host) {}
+
+  base::flat_map<WebMessageListenerKey,
+                 std::vector<std::unique_ptr<WebMessage>>>
+      queued_messages_;
+
+  DOCUMENT_USER_DATA_KEY_DECL();
+};
+
+DOCUMENT_USER_DATA_KEY_IMPL(JsToBrowserMessagingDocumentUserData);
 
 }  // namespace
 
 class JsToBrowserMessaging::ReplyProxyImpl : public WebMessageReplyProxy {
  public:
-  ReplyProxyImpl(content::RenderFrameHost* render_frame_host,
-                 mojo::PendingAssociatedRemote<mojom::BrowserToJsMessaging>
-                     java_to_js_messaging)
-      : render_frame_host_(render_frame_host),
-        java_to_js_messaging_(std::move(java_to_js_messaging)) {}
+  ReplyProxyImpl(
+      content::RenderFrameHost* render_frame_host,
+      mojo::PendingAssociatedRemote<mojom::BrowserToJsMessaging>
+          java_to_js_messaging,
+      mojo::SharedAssociatedRemote<mojom::BrowserToJsMessagingFactory> factory)
+      : document_(render_frame_host->GetWeakDocumentPtr()),
+        java_to_js_messaging_(std::move(java_to_js_messaging)),
+        factory_(std::move(factory)) {}
   ReplyProxyImpl(const ReplyProxyImpl&) = delete;
   ReplyProxyImpl& operator=(const ReplyProxyImpl&) = delete;
   ~ReplyProxyImpl() override = default;
 
   // WebMessageReplyProxy:
   void PostWebMessage(blink::WebMessagePayload message) override {
+    if (MaybeEvictBFCache(back_forward_cache::DisabledReasonId::
+                              kPostMessageByWebViewClient)) {
+      // If the document associated with the reply proxy is in BFCache, evict
+      // the page from BFCache. This is because the page can't process the
+      // JS evaluation while frozen due to BFCaching, and if we queue the JS
+      // evaluation, the callers might not expect the message to be delayed for
+      // a long time (or even not sent at all).
+      return;
+    }
+    EnsureBrowserToJsMessaging();
     java_to_js_messaging_->OnPostMessage(std::move(message));
   }
-  bool IsInBackForwardCache() override {
-    return render_frame_host_->GetLifecycleState() ==
-           content::RenderFrameHost::LifecycleState::kInBackForwardCache;
+
+  void ExecuteJavaScript(const std::u16string& java_script,
+                         bool wants_result,
+                         ExecuteJavaScriptResultCallback callback) override {
+    if (MaybeEvictBFCache(back_forward_cache::DisabledReasonId::
+                              kPostMessageByWebViewClient)) {
+      // If the document associated with the reply proxy is in BFCache, evict
+      // the page from BFCache and return that the page was destroyed.
+      // If injection is important, the page back/forward navigation should
+      // trigger a reload for a new message proxy to use for JS injection.
+      if (wants_result) {
+        std::move(callback).Run(base::unexpected(
+            js_injection::mojom::JavaScriptExecutionError::kFrameDestroyed));
+      }
+      return;
+    }
+    EnsureBrowserToJsMessaging();
+    java_to_js_messaging_->OnExecuteJavaScript(java_script, wants_result,
+                                               std::move(callback));
   }
-  content::Page& GetPage() override { return render_frame_host_->GetPage(); }
+
+  void EnsureBrowserToJsMessaging() {
+    if (!java_to_js_messaging_ && factory_) {
+      factory_->SendBrowserToJsMessaging(
+          java_to_js_messaging_.BindNewEndpointAndPassReceiver());
+    }
+  }
+
+  content::Page& GetPage() override {
+    // We can't make up the Page if the document is already destructed. Callers
+    // of this function must ensure to not call this if we're in that state.
+    CHECK(document_.AsRenderFrameHostIfValid());
+    return document_.AsRenderFrameHostIfValid()->GetPage();
+  }
 
  private:
-  raw_ptr<content::RenderFrameHost> render_frame_host_;
+  content::WeakDocumentPtr document_;
   mojo::AssociatedRemote<mojom::BrowserToJsMessaging> java_to_js_messaging_;
+  mojo::SharedAssociatedRemote<mojom::BrowserToJsMessagingFactory> factory_;
+
+  bool MaybeEvictBFCache(back_forward_cache::DisabledReasonId reason) {
+    if (document_.AsRenderFrameHostIfValid() &&
+        document_.AsRenderFrameHostIfValid()->GetLifecycleState() ==
+            content::RenderFrameHost::LifecycleState::kInBackForwardCache) {
+      content::BackForwardCache::DisableForRenderFrameHost(
+          document_.AsRenderFrameHostIfValid(),
+          back_forward_cache::DisabledReason(reason));
+      return true;
+    }
+    return false;
+  }
 };
 
 JsToBrowserMessaging::JsToBrowserMessaging(
     content::RenderFrameHost* render_frame_host,
     mojo::PendingAssociatedReceiver<mojom::JsToBrowserMessaging> receiver,
+    mojo::PendingAssociatedRemote<mojom::BrowserToJsMessagingFactory>
+        browser_to_js_factory,
     WebMessageHostFactory* factory,
-    const OriginMatcher& origin_matcher)
+    const origin_matcher::OriginMatcher& origin_matcher,
+    const std::u16string& name,
+    int32_t world_id)
     : render_frame_host_(render_frame_host),
       connection_factory_(factory),
-      origin_matcher_(origin_matcher) {
+      origin_matcher_(origin_matcher),
+      name_(name),
+      world_id_(world_id),
+      browser_to_js_factory_(std::move(browser_to_js_factory)) {
   receiver_.Bind(std::move(receiver));
 }
 
 JsToBrowserMessaging::~JsToBrowserMessaging() = default;
 
-void JsToBrowserMessaging::OnBackForwardCacheStateChanged() {
-  if (host_)
-    host_->OnBackForwardCacheStateChanged();
+void JsToBrowserMessaging::OnRenderFrameHostActivated() {
+  JsToBrowserMessagingDocumentUserData* data =
+      JsToBrowserMessagingDocumentUserData::GetForCurrentDocument(
+          render_frame_host_);
+  if (!data) {
+    return;
+  }
+
+  if (!host_) {
+    return;
+  }
+
+  std::vector<std::unique_ptr<WebMessage>> queued_messages =
+      data->TakeQueuedMessages(name_, world_id_);
+  for (auto& message : queued_messages) {
+    host_->OnPostMessage(std::move(message));
+  }
 }
 
 void JsToBrowserMessaging::PostMessage(
@@ -88,7 +215,10 @@ void JsToBrowserMessaging::PostMessage(
     std::vector<blink::MessagePortDescriptor> ports) {
   DCHECK(render_frame_host_);
 
-  if (render_frame_host_->IsInactiveAndDisallowActivation(
+  // For prerendering, messages will be queued until activation.
+  if (!render_frame_host_->IsInLifecycleState(
+          content::RenderFrameHost::LifecycleState::kPrerendering) &&
+      render_frame_host_->IsInactiveAndDisallowActivation(
           content::DisallowActivationReasonId::kJsInjectionPostMessage)) {
     return;
   }
@@ -99,6 +229,8 @@ void JsToBrowserMessaging::PostMessage(
   if (!web_contents)
     return;
 
+  const url::Origin top_level_origin =
+      render_frame_host_->GetMainFrame()->GetLastCommittedOrigin();
   // |source_origin| has no race with this PostMessage call, because of
   // associated mojo channel, the committed origin message and PostMessage are
   // in sequence.
@@ -110,43 +242,75 @@ void JsToBrowserMessaging::PostMessage(
 
   // SetBrowserToJsMessaging must be called before this.
   DCHECK(reply_proxy_);
+  reply_proxy_->EnsureBrowserToJsMessaging();
 
   if (!host_) {
+    const std::string top_level_origin_string =
+        GetOriginString(top_level_origin);
     const std::string origin_string = GetOriginString(source_origin);
-    const bool is_main_frame = render_frame_host_->IsInPrimaryMainFrame();
 
-    host_ = connection_factory_->CreateHost(origin_string, is_main_frame,
-                                            reply_proxy_.get());
-#if DCHECK_IS_ON()
+    // Check if this is the main frame of the primary or prerendered page.
+    const bool is_main_frame = !render_frame_host_->GetParentOrOuterDocument();
+
+    host_ =
+        connection_factory_->CreateHost(top_level_origin_string, origin_string,
+                                        is_main_frame, reply_proxy_.get());
+    if (!host_) {
+      return;
+    }
+
+    top_level_origin_string_ = top_level_origin_string;
     origin_string_ = origin_string;
     is_main_frame_ = is_main_frame;
-#endif
-    if (!host_)
-      return;
   }
+
+  // The following checks will only be effective on the second and following
+  // calls to `PostMessage`.
   // The origin and whether this is the main frame should not change once
   // PostMessage() has been received.
-#if DCHECK_IS_ON()
-  DCHECK_EQ(GetOriginString(source_origin), origin_string_);
-  DCHECK_EQ(is_main_frame_, render_frame_host_->IsInPrimaryMainFrame());
-#endif
+  if (top_level_origin_string_ != GetOriginString(top_level_origin)) {
+    mojo::ReportBadMessage("top_level_origin changed after host reset.");
+    return;
+  }
+  if (origin_string_ != GetOriginString(source_origin)) {
+    mojo::ReportBadMessage("source_origin changed after host reset.");
+    return;
+  }
+  if (is_main_frame_ != !render_frame_host_->GetParentOrOuterDocument()) {
+    mojo::ReportBadMessage("is_main_frame changed after host reset.");
+    return;
+  }
+
   std::unique_ptr<WebMessage> web_message = std::make_unique<WebMessage>();
   web_message->message = std::move(message);
   web_message->ports = std::move(ports);
+
+  if (render_frame_host_->IsInLifecycleState(
+          content::RenderFrameHost::LifecycleState::kPrerendering)) {
+    // Queue `WebMessage`s received while prerendering. They are flushed on
+    // `OnRenderFrameHostActivated`.
+    JsToBrowserMessagingDocumentUserData* data =
+        JsToBrowserMessagingDocumentUserData::GetOrCreateForCurrentDocument(
+            render_frame_host_);
+    data->QueueMessage(name_, world_id_, std::move(web_message));
+    return;
+  }
+
   host_->OnPostMessage(std::move(web_message));
 }
 
 void JsToBrowserMessaging::SetBrowserToJsMessaging(
     mojo::PendingAssociatedRemote<mojom::BrowserToJsMessaging>
         java_to_js_messaging) {
-  // TODO(https://crbug.com/1183557): this should really call
+  // TODO(crbug.com/40752101): this should really call
   // IsInactiveAndDisallowReactivation().
 
   // A RenderFrame may inject JsToBrowserMessaging in the JavaScript context
   // more than once because of reusing of RenderFrame.
   host_.reset();
   reply_proxy_ = std::make_unique<ReplyProxyImpl>(
-      render_frame_host_, std::move(java_to_js_messaging));
+      render_frame_host_, std::move(java_to_js_messaging),
+      browser_to_js_factory_);
 }
 
 }  // namespace js_injection

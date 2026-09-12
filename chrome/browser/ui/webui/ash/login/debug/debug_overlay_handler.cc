@@ -6,6 +6,7 @@
 
 #include "ash/constants/ash_switches.h"
 #include "ash/public/cpp/style/dark_light_mode_controller.h"
+#include "ash/public/cpp/wallpaper/wallpaper_controller.h"
 #include "ash/shell.h"
 #include "base/command_line.h"
 #include "base/files/file_path.h"
@@ -41,9 +42,7 @@ void StoreScreenshot(const base::FilePath& screenshot_dir,
   }
   base::FilePath file_path = screenshot_dir.Append(screenshot_name);
 
-  if (static_cast<size_t>(base::WriteFile(
-          file_path, reinterpret_cast<const char*>(png_data->front()),
-          static_cast<int>(png_data->size()))) != png_data->size()) {
+  if (!base::WriteFile(file_path, *png_data)) {
     LOG(ERROR) << "Failed to save screenshot to " << file_path.value();
   } else {
     VLOG(1) << "Saved screenshot to " << file_path.value();
@@ -91,12 +90,11 @@ DebugOverlayHandler::DebugOverlayHandler() {
   add_resolution_to_filename_ =
       command_line->HasSwitch(::switches::kHostWindowBounds);
 
-  base::Time::Exploded now;
-  base::Time::Now().LocalExplode(&now);
-  std::string series_name =
-      base::StringPrintf("%d-%02d-%02d - %02d.%02d.%02d", now.year, now.month,
-                         now.day_of_month, now.hour, now.minute, now.second);
-  screenshot_dir_ = base_dir.Append(series_name);
+  base::Time::Exploded exploded;
+  base::Time::Now().LocalExplode(&exploded);
+  screenshot_dir_ = base_dir.Append(base::StringPrintf(
+      "%04d-%02d-%02d - %02d.%02d.%02d", exploded.year, exploded.month,
+      exploded.day_of_month, exploded.hour, exploded.minute, exploded.second));
 }
 
 DebugOverlayHandler::~DebugOverlayHandler() = default;
@@ -105,6 +103,8 @@ void DebugOverlayHandler::DeclareJSCallbacks() {
   AddCallback("debug.captureScreenshot",
               &DebugOverlayHandler::HandleCaptureScreenshot);
   AddCallback("debug.toggleColorMode", &DebugOverlayHandler::ToggleColorMode);
+  AddCallback("debug.switchWallpaper",
+              &DebugOverlayHandler::HandleSwitchWallpaper);
 }
 
 void DebugOverlayHandler::DeclareLocalizedValues(
@@ -114,8 +114,9 @@ void DebugOverlayHandler::DeclareLocalizedValues(
 
 void DebugOverlayHandler::HandleCaptureScreenshot(const std::string& name) {
   aura::Window::Windows root_windows = Shell::GetAllRootWindows();
-  if (root_windows.size() == 0)
+  if (root_windows.size() == 0) {
     return;
+  }
 
   screenshot_index_++;
   std::string filename_base =
@@ -129,24 +130,51 @@ void DebugOverlayHandler::HandleCaptureScreenshot(const std::string& name) {
       filename.append(base::StringPrintf("- Display %zu", screen));
     }
 
-    if (add_resolution_to_filename_)
+    if (add_resolution_to_filename_) {
       filename.append("_" + rect.size().ToString());
+    }
 
     if (DarkLightModeController::Get()->IsDarkModeEnabled()) {
       filename.append("_dark");
     }
 
     filename.append(".png");
-    ui::GrabWindowSnapshotAsyncPNG(
-        root_window, rect,
-        base::BindOnce(&RunStoreScreenshotOnTaskRunner, screenshot_dir_,
-                       filename));
+    ui::GrabWindowSnapshotAsPNG(root_window, rect,
+                                base::BindOnce(&RunStoreScreenshotOnTaskRunner,
+                                               screenshot_dir_, filename));
   }
 }
 
 void DebugOverlayHandler::ToggleColorMode() {
   DarkLightModeController::Get()->SetDarkModeEnabledForTest(  // IN-TEST
       !DarkLightModeController::Get()->IsDarkModeEnabled());
+}
+
+void DebugOverlayHandler::HandleSwitchWallpaper(const std::string& color) {
+  if (color == "def") {
+    ash::WallpaperController::Get()->ShowOobeWallpaper();
+    return;
+  }
+
+  SkBitmap bitmap;
+  bitmap.allocN32Pixels(1, 1);
+  if (color == "wh") {
+    bitmap.eraseColor(SK_ColorWHITE);
+  } else if (color == "bk") {
+    bitmap.eraseColor(SK_ColorBLACK);
+  } else if (color == "r") {
+    bitmap.eraseColor(SK_ColorRED);
+  } else if (color == "bl") {
+    bitmap.eraseColor(SK_ColorBLUE);
+  } else if (color == "gn") {
+    bitmap.eraseColor(SK_ColorGREEN);
+  } else if (color == "ye") {
+    bitmap.eraseColor(SK_ColorYELLOW);
+  } else {
+    return;
+  }
+  ash::WallpaperController::Get()->ShowOneShotWallpaper(
+      gfx::ImageSkia::CreateFrom1xBitmap(bitmap));
 }
 
 }  // namespace ash

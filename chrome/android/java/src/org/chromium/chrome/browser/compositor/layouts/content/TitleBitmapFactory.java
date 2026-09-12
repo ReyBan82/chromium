@@ -10,95 +10,183 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Paint.FontMetrics;
-import android.graphics.Typeface;
+import android.os.SystemClock;
 import android.text.Layout;
 import android.text.TextPaint;
 import android.text.TextUtils;
-import android.util.Log;
 import android.view.InflateException;
 
-import androidx.appcompat.content.res.AppCompatResources;
+import androidx.annotation.ColorInt;
+import androidx.annotation.Px;
+import androidx.annotation.VisibleForTesting;
 
+import org.chromium.base.Log;
+import org.chromium.base.Token;
+import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
-import org.chromium.ui.UiUtils;
+import org.chromium.chrome.browser.compositor.overlays.strip.StripLayoutGroupTitle;
+import org.chromium.chrome.browser.flags.ChromeFeatureList;
+import org.chromium.chrome.browser.tabmodel.TabModel;
+import org.chromium.components.tab_groups.TabGroupColorId;
+import org.chromium.components.tab_groups.TabGroupColorPickerUtils;
+import org.chromium.ui.util.StyleUtils;
 
-/**
- * A factory that creates text and favicon bitmaps.
- */
+/** A factory that creates text and favicon bitmaps. */
+@NullMarked
 public class TitleBitmapFactory {
     private static final String TAG = "TitleBitmapFactory";
 
-    private static final float TITLE_WIDTH_PERCENTAGE = 1.f;
     // Canvas#drawText() seems to fail when trying to draw 4100 or more characters.
-    // See https://crbug.com/524390/ for more details.
+    // See https://crbug.com/40432863/ for more details.
     private static final int MAX_NUM_TITLE_CHAR = 1000;
 
-    private final int mMaxWidth;
+    // We were drawing up to 1000 characters, but only displaying ~30 in the tab strip. Experiment
+    // with a smaller limit.
+    private static final int SMALLER_MAX_NUM_TITLE_CHAR = 100;
 
-    private final TextPaint mTextPaint;
-    private int mFaviconDimension;
+    private final Canvas mCanvas;
+    private final Paint mFaviconPaint;
+    private final int mMaxTitleWidth;
     private final int mViewHeight;
-    private final float mTextHeight;
-    private final float mTextYOffset;
+    private final int mFaviconDimension;
+    private final boolean mIncognito;
+
+    private final TextPaint mTabTextPaint;
+    private final float mTabTextHeight;
+    private final float mTabTextYOffset;
+
+    private final TextPaint mGroupTextPaint;
+    private final int mGroupTextHeight;
+    private final float mGroupTextYOffset;
+
+    private final TextPaint mButtonTextPaint;
+    private final int mButtonTextHeight;
+    private final float mButtonTextYOffset;
 
     /**
-     * @param context   The current Android's context.
+     * @param context The current Android's context.
      * @param incognito Whether the title are for incognito mode.
+     * @param tabStripHeightPx The height of the tab strip in pixels.
      */
-    public TitleBitmapFactory(Context context, boolean incognito) {
+    public TitleBitmapFactory(Context context, boolean incognito, int tabStripHeightPx) {
         Resources res = context.getResources();
-        int textColor = AppCompatResources
-                                .getColorStateList(context,
-                                        incognito ? R.color.compositor_tab_title_bar_text_incognito
-                                                  : R.color.compositor_tab_title_bar_text)
-                                .getDefaultColor();
-        float textSize = res.getDimension(R.dimen.compositor_tab_title_text_size);
+        mIncognito = incognito;
+
+        mCanvas = new Canvas();
+        mFaviconPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
 
         boolean fakeBoldText = res.getBoolean(R.bool.compositor_tab_title_fake_bold_text);
+        float density = res.getDisplayMetrics().density;
 
-        mTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-        mTextPaint.setColor(textColor);
+        // Tab text properties
+        mTabTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        @ColorInt int incognitoTextColor = 0;
+        if (mIncognito) {
+            incognitoTextColor =
+                    context.getColorStateList(R.color.compositor_tab_title_bar_text_incognito)
+                            .getDefaultColor();
+            mTabTextPaint.setColor(incognitoTextColor);
+        }
+        StyleUtils.applyTextAppearanceToTextPaint(
+                context,
+                mTabTextPaint,
+                R.style.TextAppearance_TextMedium_Primary,
+                /* applyFontFamily= */ true,
+                /* applyTextSize= */ true,
+                !mIncognito);
+        mTabTextPaint.setFakeBoldText(fakeBoldText);
+        mTabTextPaint.density = density;
+        enforceMaxTextHeight(mTabTextPaint, tabStripHeightPx);
 
-        mTextPaint.setTextSize(textSize);
-        mTextPaint.setFakeBoldText(fakeBoldText);
-        mTextPaint.density = res.getDisplayMetrics().density;
+        FontMetrics tabTextFontMetrics = mTabTextPaint.getFontMetrics();
+        mTabTextHeight = (float) Math.ceil(getMaxHeightOfFont(tabTextFontMetrics));
+        mTabTextYOffset = -tabTextFontMetrics.top;
 
-        FontMetrics textFontMetrics = mTextPaint.getFontMetrics();
-        mTextHeight = (float) Math.ceil(textFontMetrics.bottom - textFontMetrics.top);
-        mTextYOffset = -textFontMetrics.top;
+        // Group text properties.
+        mGroupTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        StyleUtils.applyTextAppearanceToTextPaint(
+                context,
+                mGroupTextPaint,
+                R.style.TextAppearance_TextSmall_Primary,
+                /* applyFontFamily= */ true,
+                /* applyTextSize= */ true,
+                /* applyTextColor= */ false);
+        mGroupTextPaint.setFakeBoldText(fakeBoldText);
+        mGroupTextPaint.density = density;
+        float maxGroupTextHeight =
+                tabStripHeightPx - (StripLayoutGroupTitle.TOTAL_MARGIN_HEIGHT * density);
+        enforceMaxTextHeight(mGroupTextPaint, maxGroupTextHeight);
 
+        FontMetrics groupTextFontMetrics = mGroupTextPaint.getFontMetrics();
+        mGroupTextHeight = (int) Math.ceil(groupTextFontMetrics.bottom - groupTextFontMetrics.top);
+        mGroupTextYOffset = -groupTextFontMetrics.top;
+
+        // Button text properties.
+        mButtonTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+        if (mIncognito) {
+            mButtonTextPaint.setColor(incognitoTextColor);
+        }
+        StyleUtils.applyTextAppearanceToTextPaint(
+                context,
+                mButtonTextPaint,
+                R.style.TextAppearance_TextMediumThick_Primary,
+                /* applyFontFamily= */ true,
+                /* applyTextSize= */ true,
+                !mIncognito);
+        mButtonTextPaint.setFakeBoldText(fakeBoldText);
+        mButtonTextPaint.density = density;
+        float maxButtonTextHeight =
+                tabStripHeightPx - res.getDimension(R.dimen.tab_strip_glic_button_margin_height);
+        enforceMaxTextHeight(mButtonTextPaint, maxButtonTextHeight);
+
+        FontMetrics buttonTextFontMetrics = mButtonTextPaint.getFontMetrics();
+        mButtonTextHeight =
+                (int) Math.ceil(buttonTextFontMetrics.bottom - buttonTextFontMetrics.top);
+        mButtonTextYOffset = -buttonTextFontMetrics.top;
+
+        // Favicon properties
         mFaviconDimension = res.getDimensionPixelSize(R.dimen.compositor_tab_title_favicon_size);
-        mViewHeight = (int) Math.max(mFaviconDimension, mTextHeight);
-
-        int width = res.getDisplayMetrics().widthPixels;
-        int height = res.getDisplayMetrics().heightPixels;
-        mMaxWidth = (int) (TITLE_WIDTH_PERCENTAGE * Math.max(width, height));
-
-        // Set the favicon dimension here.
-        mFaviconDimension = Math.min(mMaxWidth, mFaviconDimension);
+        mViewHeight = (int) Math.max(mFaviconDimension, mTabTextHeight);
+        mMaxTitleWidth = res.getDimensionPixelSize(R.dimen.compositor_tab_title_max_width);
     }
 
     /**
      * Generates the favicon bitmap.
      *
-     * @param favicon   The favicon of the tab.
-     * @return          The Bitmap with the favicon.
+     * @param favicon The favicon of the tab.
+     * @return The Bitmap with the favicon.
      */
-    public Bitmap getFaviconBitmap(Bitmap favicon) {
+    public @Nullable Bitmap getFaviconBitmap(Bitmap favicon) {
         assert favicon != null;
         try {
-            Bitmap b = Bitmap.createBitmap(
-                    mFaviconDimension, mFaviconDimension, Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(b);
-            if (favicon.getWidth() > mFaviconDimension || favicon.getHeight() > mFaviconDimension) {
-                float scale = (float) mFaviconDimension
-                        / Math.max(favicon.getWidth(), favicon.getHeight());
-                c.scale(scale, scale);
-            } else {
-                c.translate(Math.round((mFaviconDimension - favicon.getWidth()) / 2.0f),
-                        Math.round((mFaviconDimension - favicon.getHeight()) / 2.0f));
+            Bitmap b =
+                    Bitmap.createBitmap(
+                            mFaviconDimension, mFaviconDimension, Bitmap.Config.ARGB_8888);
+            mCanvas.setBitmap(b);
+            try {
+                // Disable density scaling on the canvas so bitmaps are drawn at their exact pixel
+                // dimensions. This prevents any automatic DPI-based scaling by the canvas.
+                mCanvas.setDensity(Bitmap.DENSITY_NONE);
+
+                mCanvas.save();
+                if (favicon.getWidth() > mFaviconDimension
+                        || favicon.getHeight() > mFaviconDimension) {
+                    float scale =
+                            (float) mFaviconDimension
+                                    / Math.max(favicon.getWidth(), favicon.getHeight());
+                    mCanvas.scale(scale, scale);
+                } else {
+                    mCanvas.translate(
+                            Math.round((mFaviconDimension - favicon.getWidth()) / 2.0f),
+                            Math.round((mFaviconDimension - favicon.getHeight()) / 2.0f));
+                }
+                mCanvas.drawBitmap(favicon, /* left= */ 0, /* top= */ 0, mFaviconPaint);
+                mCanvas.restore();
+            } finally {
+                mCanvas.setBitmap(null);
             }
-            c.drawBitmap(favicon, 0, 0, null);
             return b;
         } catch (OutOfMemoryError ex) {
             Log.e(TAG, "OutOfMemoryError while building favicon texture.");
@@ -110,38 +198,89 @@ public class TitleBitmapFactory {
     }
 
     /**
-     * Generates the title bitmap.
+     * Generates the tab title bitmap.
      *
-     * @param context   Android's UI context.
-     * @param title     The title of the tab.
-     * @param useRobotoMediumStyle    Whether the tab title text style should be TextMediumThick /
-     *         RobotoMedium.
-     * @return          The Bitmap with the title.
+     * @param title The title of the group.
+     * @return The Bitmap with the title.
      */
-    public Bitmap getTitleBitmap(Context context, String title, boolean useRobotoMediumStyle) {
-        try {
-            boolean drawText = !TextUtils.isEmpty(title);
-            int textWidth =
-                    drawText ? (int) Math.ceil(Layout.getDesiredWidth(title, mTextPaint)) : 0;
+    public @Nullable Bitmap getTabTitleBitmap(String title) {
+        return getTitleBitmap(mTabTextPaint, mTabTextHeight, mTabTextYOffset, title);
+    }
 
-            // Use TextMediumThick / RobotoMediumStyle for tab title text style.
-            if (useRobotoMediumStyle) {
-                Typeface RobotoMediumStyle = UiUtils.createRobotoMediumTypeface();
-                mTextPaint.setTypeface(RobotoMediumStyle);
-            }
+    /**
+     * Generates the group title bitmap.
+     *
+     * @param tabModel To fetch tab information from.
+     * @param context The current Android's context.
+     * @param groupId The group ID.
+     * @param title The title of the group.
+     * @return The Bitmap with the title. {@code null} if it cannot be generated.
+     */
+    public @Nullable Bitmap getGroupTitleBitmap(
+            TabModel tabModel, Context context, Token groupId, String title) {
+        if (!tabModel.tabGroupExists(groupId)) return null;
+        @TabGroupColorId int colorId = tabModel.getTabGroupColor(groupId);
+        @ColorInt
+        int color =
+                TabGroupColorPickerUtils.getTabGroupColorPickerItemTextColor(
+                        context, colorId, mIncognito);
+        mGroupTextPaint.setColor(color);
+        return getTitleBitmap(mGroupTextPaint, mGroupTextHeight, mGroupTextYOffset, title);
+    }
+
+    /** Generates a generic button text bitmap using the button text style. */
+    public @Nullable Bitmap getButtonTextBitmap(String title) {
+        return getTitleBitmap(mButtonTextPaint, mButtonTextHeight, mButtonTextYOffset, title);
+    }
+
+    /**
+     * Generates a title bitmap.
+     *
+     * @param textPaint The TextPaint used to create the title bitmap.
+     * @param height The height of the title.
+     * @param yOffset The y-offset of the title.
+     * @param title The title of the tab.
+     * @return The Bitmap with the title.
+     */
+    public @Nullable Bitmap getTitleBitmap(
+            TextPaint textPaint, float height, float yOffset, String title) {
+        try {
+            final long startTime = SystemClock.elapsedRealtime();
+            boolean drawText = !TextUtils.isEmpty(title);
+            int textWidth = drawText ? getTitleWidth(title, textPaint) : 0;
 
             // Minimum 1 width bitmap to avoid createBitmap function's IllegalArgumentException,
             // when textWidth == 0.
-            Bitmap b = Bitmap.createBitmap(Math.max(Math.min(mMaxWidth, textWidth), 1), mViewHeight,
-                    Bitmap.Config.ARGB_8888);
-            Canvas c = new Canvas(b);
-            if (drawText) {
-                c.drawText(title, 0, Math.min(MAX_NUM_TITLE_CHAR, title.length()), 0,
-                        Math.round((mViewHeight - mTextHeight) / 2.0f + mTextYOffset), mTextPaint);
+            Bitmap b =
+                    Bitmap.createBitmap(
+                            Math.max(Math.min(mMaxTitleWidth, textWidth), 1),
+                            mViewHeight,
+                            Bitmap.Config.ARGB_8888);
+            mCanvas.setBitmap(b);
+            try {
+                if (drawText) {
+                    final int maxCharsToDraw =
+                            ChromeFeatureList.sSmallerTabStripTitleLimit.isEnabled()
+                                    ? SMALLER_MAX_NUM_TITLE_CHAR
+                                    : MAX_NUM_TITLE_CHAR;
+                    RecordHistogram.recordCount100Histogram(
+                            "Android.TabStrip.TitleBitmapFactory.getTitleBitmap.Length",
+                            title.length());
+                    mCanvas.drawText(
+                            title,
+                            /* start= */ 0,
+                            /* end= */ Math.min(maxCharsToDraw, title.length()),
+                            /* x= */ 0,
+                            /* y= */ Math.round((mViewHeight - height) / 2.0f + yOffset),
+                            textPaint);
+                }
+            } finally {
+                mCanvas.setBitmap(null);
             }
 
-            // Set bolded tab title text back to normal.
-            mTextPaint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.NORMAL));
+            RecordHistogram.recordTimesHistogram(
+                    "Android.TabStrip.TitleBitmapFactory.getTitleBitmap.Duration",
+                    SystemClock.elapsedRealtime() - startTime);
 
             return b;
         } catch (OutOfMemoryError ex) {
@@ -151,5 +290,41 @@ public class TitleBitmapFactory {
         }
 
         return null;
+    }
+
+    /**
+     * @param titleString The title to measure.
+     * @return The width in px of the title.
+     */
+    public int getTitleWidth(String titleString) {
+        return getTitleWidth(titleString, mGroupTextPaint);
+    }
+
+    /**
+     * @param titleString The button text to measure.
+     * @return The width in px of the button text.
+     */
+    public int getButtonTextWidth(String titleString) {
+        return getTitleWidth(titleString, mButtonTextPaint);
+    }
+
+    private int getTitleWidth(String titleString, TextPaint textPaint) {
+        return (int) Math.ceil(Layout.getDesiredWidth(titleString, textPaint));
+    }
+
+    @VisibleForTesting
+    static void enforceMaxTextHeight(TextPaint textPaint, float tabStripHeightPx) {
+        float effectiveFontHeightPx = getMaxHeightOfFont(textPaint.getFontMetrics());
+        if (effectiveFontHeightPx > tabStripHeightPx) {
+            // Scale down the text to fit the tab strip container if needed.
+            float scaleRatio = tabStripHeightPx / effectiveFontHeightPx;
+            textPaint.setTextSize(textPaint.getTextSize() * scaleRatio);
+        }
+    }
+
+    @VisibleForTesting
+    @Px
+    static float getMaxHeightOfFont(FontMetrics fontMetrics) {
+        return fontMetrics.bottom - fontMetrics.top;
     }
 }

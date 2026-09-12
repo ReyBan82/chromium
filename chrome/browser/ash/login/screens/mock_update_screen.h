@@ -10,11 +10,15 @@
 #include "chrome/browser/ui/webui/ash/login/update_screen_handler.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
+class PrefService;
+
 namespace ash {
 
 class MockUpdateScreen : public UpdateScreen {
  public:
-  MockUpdateScreen(base::WeakPtr<UpdateView> view,
+  // `local_state` must be non-null and must outlive `this`.
+  MockUpdateScreen(PrefService* local_state,
+                   base::WeakPtr<UpdateView> view,
                    ErrorScreen* error_screen,
                    const ScreenExitCallback& exit_callback);
   ~MockUpdateScreen() override;
@@ -25,7 +29,7 @@ class MockUpdateScreen : public UpdateScreen {
   void RunExit(UpdateScreen::Result result);
 };
 
-class MockUpdateView : public UpdateView {
+class MockUpdateView final : public UpdateView {
  public:
   MockUpdateView();
   ~MockUpdateView() override;
@@ -47,6 +51,13 @@ class MockUpdateView : public UpdateView {
   MOCK_METHOD(void, SetCancelUpdateShortcutEnabled, (bool value));
   MOCK_METHOD(void, ShowLowBatteryWarningMessage, (bool value));
   MOCK_METHOD(void, SetAutoTransition, (bool value));
+
+  base::WeakPtr<UpdateView> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
+ private:
+  base::WeakPtrFactory<UpdateView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

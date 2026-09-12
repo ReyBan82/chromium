@@ -7,12 +7,21 @@
 
 #include <utility>
 
+#include "base/memory/raw_ptr.h"
+#include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "base/timer/timer.h"
 #include "chrome/browser/apps/app_service/metrics/app_discovery_metrics.h"
 #include "chrome/browser/apps/app_service/metrics/app_platform_input_metrics.h"
 #include "chrome/browser/apps/app_service/metrics/app_platform_metrics.h"
 #include "chrome/browser/apps/app_service/metrics/website_metrics.h"
 #include "chrome/browser/profiles/profile.h"
+
+namespace base {
+class Clock;
+class TickClock;
+class SequencedTaskRunner;
+}  // namespace base
 
 class PrefRegistrySimple;
 
@@ -27,7 +36,37 @@ extern const char kAppPlatformMetricsDayId[];
 // Chrome OS.
 class AppPlatformMetricsService {
  public:
-  explicit AppPlatformMetricsService(Profile* profile);
+  // Observer that can be used to monitor the lifecycle of certain components
+  // owned by `AppPlatformMetricsService`.
+  class Observer : public base::CheckedObserver {
+   public:
+    Observer() = default;
+    Observer(const Observer&) = delete;
+    Observer& operator=(const Observer&) = delete;
+    ~Observer() override = default;
+
+    // Triggered once the `AppPlatformMetrics` component is initialized.
+    // This enables external components to delay interactions with the
+    // component until it is ready.
+    virtual void OnAppPlatformMetricsInit(
+        AppPlatformMetrics* app_platform_metrics) {}
+
+    // Triggered once the `WebsiteMetrics` component is initialized. This
+    // enables external components to delay interactions with the component
+    // until it is ready.
+    virtual void OnWebsiteMetricsInit(WebsiteMetrics* website_metrics) {}
+
+    // Triggered when the `AppPlatformMetricsService` will be destroyed. This
+    // can be used by observer to unregister itself as an observer as well as
+    // prevent use-after-free errors.
+    virtual void OnAppPlatformMetricsServiceWillBeDestroyed() = 0;
+  };
+
+  AppPlatformMetricsService(
+      Profile* profile,
+      const base::Clock* clock,
+      const base::TickClock* tick_clock,
+      scoped_refptr<base::SequencedTaskRunner> task_runner);
   AppPlatformMetricsService(const AppPlatformMetricsService&) = delete;
   AppPlatformMetricsService& operator=(const AppPlatformMetricsService&) =
       delete;
@@ -40,18 +79,26 @@ class AppPlatformMetricsService {
 
   // Start the timer and check if a new day has arrived.
   void Start(AppRegistryCache& app_registry_cache,
-             InstanceRegistry& instance_registry);
+             InstanceRegistry& instance_registry,
+             apps::AppCapabilityAccessCache& app_capability_access_cache);
 
   apps::AppPlatformMetrics* AppPlatformMetrics() {
     return app_platform_app_metrics_.get();
   }
+
+  apps::WebsiteMetrics* WebsiteMetrics() { return website_metrics_.get(); }
+
+  // Add observer to the observer list.
+  void AddObserver(Observer* observer);
+
+  // Remove observer from the observer list.
+  void RemoveObserver(Observer* observer);
 
   void SetWebsiteMetricsForTesting(
       std::unique_ptr<apps::WebsiteMetrics> website_metrics);
 
  private:
   friend class AppPlatformInputMetricsTest;
-  friend class WebsiteMetricsBrowserTest;
 
   // Helper function to check if a new day has arrived.
   void CheckForNewDay();
@@ -63,7 +110,7 @@ class AppPlatformMetricsService {
   // arrived to report noisy AppKMs events.
   void CheckForNoisyAppKMReportingInterval();
 
-  Profile* const profile_;
+  const raw_ptr<Profile> profile_;
 
   int day_id_;
 
@@ -81,6 +128,13 @@ class AppPlatformMetricsService {
   std::unique_ptr<apps::AppPlatformInputMetrics> app_platform_input_metrics_;
   std::unique_ptr<apps::WebsiteMetrics> website_metrics_;
   std::unique_ptr<apps::AppDiscoveryMetrics> app_discovery_metrics_;
+
+  // List of observers that will be notified of certain component lifecycle
+  // changes.
+  base::ObserverList<Observer> observers_;
+
+  const raw_ref<const base::Clock> clock_;
+  const raw_ref<const base::TickClock> tick_clock_;
 };
 
 }  // namespace apps

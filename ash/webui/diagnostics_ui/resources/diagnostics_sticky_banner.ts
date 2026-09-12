@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'chrome://resources/cr_elements/icons.html.js';
+import 'chrome://resources/ash/common/cr_elements/icons.html.js';
 import 'chrome://resources/polymer/v3_0/iron-icon/iron-icon.js';
 import './diagnostics_shared.css.js';
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import {assert} from 'chrome://resources/js/assert.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
 import {getTemplate} from './diagnostics_sticky_banner.html.js';
@@ -50,9 +50,9 @@ export class DiagnosticsStickyBannerElement extends PolymerElement {
     };
   }
 
-  bannerMessage: string;
-  protected scrollingClass: string;
-  private scrollTimerId: number;
+  declare bannerMessage: string;
+  declare protected scrollingClass: string;
+  declare private scrollTimerId: number;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -79,23 +79,24 @@ export class DiagnosticsStickyBannerElement extends PolymerElement {
    * section. Event will contain message to display on message property of
    * event found on path `event.detail.message`.
    */
-  private showCautionBannerHandler = (e: ShowCautionBannerEvent): void => {
-    assert(e.detail.message);
-    this.bannerMessage = e.detail.message;
-  };
+  private readonly showCautionBannerHandler =
+      (e: ShowCautionBannerEvent): void => {
+        assert(e.detail.message);
+        this.bannerMessage = e.detail.message;
+      };
 
   /**
    * Event callback for 'dismiss-caution-banner' which is triggered from
    * routine-section.
    */
-  private dismissCautionBannerHandler = (): void => {
+  private readonly dismissCautionBannerHandler = (): void => {
     this.bannerMessage = '';
   };
 
   /**
    * Event callback for 'scroll'.
    */
-  private scrollClassHandler = (): void => {
+  private readonly scrollClassHandler = (): void => {
     this.onScroll();
   };
 
@@ -118,6 +119,15 @@ export class DiagnosticsStickyBannerElement extends PolymerElement {
     // for at least 300ms.
     this.scrollTimerId = window.setTimeout(() => this.scrollingClass = '', 300);
   }
+
+  getScrollingClassForTesting(): string {
+    return this.scrollingClass;
+  }
+
+  getScrollTimerIdForTesting(): number {
+    return this.scrollTimerId;
+  }
+
 }
 
 declare global {

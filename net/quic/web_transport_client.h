@@ -5,16 +5,20 @@
 #ifndef NET_QUIC_WEB_TRANSPORT_CLIENT_H_
 #define NET_QUIC_WEB_TRANSPORT_CLIENT_H_
 
+#include <optional>
+#include <string_view>
 #include <vector>
 
 #include "base/memory/scoped_refptr.h"
-#include "base/strings/string_piece.h"
+#include "net/base/completion_once_callback.h"
 #include "net/base/network_anonymization_key.h"
+#include "net/base/network_handle.h"
+#include "net/http/http_request_headers.h"
+#include "net/log/net_log_with_source.h"
 #include "net/quic/web_transport_error.h"
 #include "net/third_party/quiche/src/quiche/quic/core/crypto/web_transport_fingerprint_proof_verifier.h"
 #include "net/third_party/quiche/src/quiche/quic/core/quic_types.h"
 #include "net/third_party/quiche/src/quiche/quic/core/web_transport_interface.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -22,6 +26,7 @@ namespace net {
 
 class HttpResponseHeaders;
 class URLRequestContext;
+class IPEndPoint;
 
 // Diagram of allowed state transitions:
 //
@@ -55,7 +60,7 @@ NET_EXPORT std::ostream& operator<<(std::ostream& os, WebTransportState state);
 // https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3/#section-5
 struct NET_EXPORT WebTransportCloseInfo final {
   WebTransportCloseInfo();
-  WebTransportCloseInfo(uint32_t code, base::StringPiece reason);
+  WebTransportCloseInfo(uint32_t code, std::string_view reason);
   ~WebTransportCloseInfo();
 
   uint32_t code = 0;
@@ -73,25 +78,35 @@ class NET_EXPORT WebTransportClientVisitor {
  public:
   virtual ~WebTransportClientVisitor();
 
+  // Delegating the Local Network Access check to the visitor.
+  //
+  // See https://wicg.github.io/local-network-access/
+  virtual void OnLocalNetworkAccessCheck(const IPEndPoint& server_address,
+                                         const NetLogWithSource& net_log,
+                                         CompletionOnceCallback callback) = 0;
+
   // State change notifiers.
   // CONNECTING -> CONNECTED
+  virtual void OnBeforeConnect(const IPEndPoint& server_address) = 0;
   virtual void OnConnected(
       scoped_refptr<HttpResponseHeaders> response_headers) = 0;
   // CONNECTING -> FAILED
   virtual void OnConnectionFailed(const WebTransportError& error) = 0;
+  // CONNECTING or CONNECTED -> draining notification
+  virtual void OnDraining() = 0;
   // CONNECTED -> CLOSED
   virtual void OnClosed(
-      const absl::optional<WebTransportCloseInfo>& close_info) = 0;
+      const std::optional<WebTransportCloseInfo>& close_info) = 0;
   // CONNECTED -> FAILED
   virtual void OnError(const WebTransportError& error) = 0;
 
   virtual void OnIncomingBidirectionalStreamAvailable() = 0;
   virtual void OnIncomingUnidirectionalStreamAvailable() = 0;
-  virtual void OnDatagramReceived(base::StringPiece datagram) = 0;
+  virtual void OnDatagramReceived(std::string_view datagram) = 0;
   virtual void OnCanCreateNewOutgoingBidirectionalStream() = 0;
   virtual void OnCanCreateNewOutgoingUnidirectionalStream() = 0;
   virtual void OnDatagramProcessed(
-      absl::optional<quic::MessageStatus> status) = 0;
+      std::optional<quic::DatagramStatus> status) = 0;
 };
 
 // Parameters that determine the way WebTransport session is established.
@@ -101,14 +116,43 @@ struct NET_EXPORT WebTransportParameters {
   WebTransportParameters(const WebTransportParameters&);
   WebTransportParameters(WebTransportParameters&&);
 
+  // A hint for what kind of congestion control algorithm the application
+  // prefers. Corresponds to the WebTransportCongestionControl enum in the
+  // W3C WebTransport specification.
+  // https://w3c.github.io/webtransport/#enumdef-webtransportcongestioncontrol
+  enum class CongestionControlHint {
+    kDefault,
+    kThroughput,
+    kLowLatency,
+  };
+
   bool allow_pooling = false;
 
   bool enable_web_transport_http3 = false;
 
   // A vector of fingerprints for expected server certificates, as described in
-  // https://wicg.github.io/web-transport/#dom-quictransportconfiguration-server_certificate_fingerprints
+  // https://w3c.github.io/webtransport/#dom-webtransportoptions-servercertificatehashes
   // When empty, Web PKI is used.
   std::vector<quic::CertificateFingerprint> server_certificate_fingerprints;
+
+  // A vector of strings offered by client as a list of potential subprotocols.
+  // https://w3c.github.io/webtransport/#dom-webtransportoptions-protocols
+  std::vector<std::string> application_protocols;
+
+  // Defaults to kDefault (no algorithm change).
+  CongestionControlHint congestion_control_hint =
+      CongestionControlHint::kDefault;
+
+  // Hints for how many incoming streams the application anticipates the server
+  // creating. When set, the QUIC client advertises these as
+  // initial_max_streams_uni / initial_max_streams_bidi transport parameters.
+  // https://w3c.github.io/webtransport/#dom-webtransportoptions-anticipatedconcurrentincomingunidirectionalstreams
+  std::optional<uint16_t>
+      anticipated_concurrent_incoming_unidirectional_streams;
+  std::optional<uint16_t> anticipated_concurrent_incoming_bidirectional_streams;
+  // Additional HTTP headers to include in the CONNECT request.
+  // https://w3c.github.io/webtransport/#dom-webtransportoptions-headers
+  std::vector<HttpRequestHeaders::HeaderKeyValuePair> additional_headers;
 };
 
 // An abstract base for a WebTransport client.  Most of the useful operations
@@ -126,10 +170,19 @@ class NET_EXPORT WebTransportClient {
   // when the state is CONNECTED. The associated visitor is still waiting for
   // OnClosed or OnError to be called.
   virtual void Close(
-      const absl::optional<WebTransportCloseInfo>& close_info) = 0;
+      const std::optional<WebTransportCloseInfo>& close_info) = 0;
 
-  // session() can be nullptr in states other than CONNECTED.
+  virtual void CloseIfNonceMatches(base::UnguessableToken nonce) = 0;
+
+  // session() can be nullptr in states other than CONNECTED. Do not call
+  // session()->GetMaxDatagramSize() directly because malformed peer settings
+  // can violate its QUICHE-side preconditions. Use GetMaxDatagramSize().
   virtual quic::WebTransportSession* session() = 0;
+
+  // Returns nullopt when the maximum cannot be determined. Zero is a valid
+  // established-session value indicating no non-empty outgoing Datagram
+  // payload fits.
+  virtual std::optional<quic::QuicByteCount> GetMaxDatagramSize() const = 0;
 };
 
 // Creates a WebTransport client for |url| accessed from |origin| with the
@@ -142,6 +195,7 @@ std::unique_ptr<WebTransportClient> CreateWebTransportClient(
     const url::Origin& origin,
     WebTransportClientVisitor* visitor,
     const NetworkAnonymizationKey& anonymization_key,
+    handles::NetworkHandle target_network,
     URLRequestContext* context,
     const WebTransportParameters& parameters);
 

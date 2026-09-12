@@ -6,14 +6,13 @@
 
 #include <string>
 
-#include "ash/wm/window_state.h"
-#include "ash/wm/window_util.h"
-#include "base/base64.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/string_util.h"
 #include "base/values.h"
+#include "borealis_util.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/ash/borealis/borealis_util.h"
@@ -22,137 +21,92 @@
 #include "chrome/browser/ash/guest_os/guest_os_registry_service_factory.h"
 #include "chrome/browser/ash/guest_os/guest_os_shelf_utils.h"
 #include "chrome/browser/profiles/profile.h"
+#include "chromeos/ash/components/borealis/borealis_util.h"
 #include "components/exo/shell_surface_util.h"
 #include "components/prefs/pref_service.h"
 
 namespace borealis {
 
-// TODO(b/244651040): Remove legacy prefix when sommelier changes are complete.
-const char kBorealisWindowPrefixLegacy[] = "org.chromium.borealis.";
-const char kBorealisWindowPrefix[] = "org.chromium.guest_os.borealis.";
-const char kFullscreenClientShellIdLegacy[] =
-    "org.chromium.borealis.wmclass.steam";
-const char kFullscreenClientShellId[] =
-    "org.chromium.guest_os.borealis.wmclass.steam";
 const char kBorealisClientSuffix[] = "wmclass.Steam";
 const char kBorealisAnonymousPrefix[] = "borealis_anon:";
+const int kSteamClientGameId = 769;
 
 namespace {
-DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(std::string, kShelfAppIdKey, nullptr)
+DEFINE_OWNED_UI_CLASS_PROPERTY_KEY(std::string, kShelfAppIdKey)
 
-// Returns an ID for this window (which is the app_id or startup_id, depending
-// on which are set. The ID string is owned by the window.
-const std::string* GetWindowId(const aura::Window* window) {
+// Returns an ID for this window, as set by the Wayland client that created it.
+//
+// Prefers the value set via xdg_toplevel.set_app_id(), if any. Falls back to
+// the value set via zaura_surface.set_startup_id().
+// The ID string is owned by the window.
+const std::string* WaylandWindowId(const aura::Window* window) {
   const std::string* id = exo::GetShellApplicationId(window);
   if (id)
     return id;
   return exo::GetShellStartupId(window);
 }
 
-// Return the app ID of an installed app with the given Borealis ID.
+// Return the GuestOS Shelf App ID of an installed app with the given Steam Game
+// ID.
 //
 // Relies on the Exec line in the desktop entry (.desktop file within the VM)
 // having the expected format.
-std::string BorealisIdToAppId(Profile* profile, unsigned borealis_id) {
+std::string SteamGameIdToShelfAppId(Profile* profile, unsigned steam_game_id) {
   for (const auto& item :
        guest_os::GuestOsRegistryServiceFactory::GetForProfile(profile)
            ->GetRegisteredApps(guest_os::VmType::BOREALIS)) {
-    absl::optional<int> app_id = GetBorealisAppId(item.second.Exec());
-    if (app_id && app_id.value() == static_cast<int>(borealis_id)) {
+    std::optional<int> app_id = ParseSteamGameId(item.second.Exec());
+    if (app_id && app_id.value() == static_cast<int>(steam_game_id)) {
       return item.first;
     }
   }
   return {};
 }
 
-bool IsBorealisWindowIdLegacy(const std::string& window_id) {
-  return base::StartsWith(window_id, borealis::kBorealisWindowPrefixLegacy);
-}
-
-std::string WindowToAppId(Profile* profile, const aura::Window* window) {
-  // The Borealis app ID is the most reliable method, if known.
-  absl::optional<int> borealis_id = GetBorealisAppId(window);
-  if (borealis_id.has_value()) {
-    std::string app_id = BorealisIdToAppId(profile, borealis_id.value());
-    if (!app_id.empty())
+// Return the GuestOS Shelf App ID for the given window.
+std::string ShelfAppId(Profile* profile, const aura::Window* window) {
+  // The Steam Game ID is the most reliable method, if known.
+  std::optional<int> steam_id = SteamGameId(window);
+  if (steam_id.has_value()) {
+    if (steam_id.value() == kSteamClientGameId) {
+      return kClientAppId;
+    }
+    std::string app_id = SteamGameIdToShelfAppId(profile, steam_id.value());
+    if (!app_id.empty()) {
       return app_id;
+    }
   }
 
   // Fall back to GuestOS's logic for associating windows with apps.
-  // The legacy way to do this was to spoof a Crostini app ID. This will be
-  // supported until the new window ID version is fully supported. Once it is,
-  // this replacement will be removed and GetGuestOsShelfAppId should handle
-  // all borealis cases.
-  // TODO(b/244651040): remove the string replacement after new window_id format
-  // is deployed.
-  std::string window_id(*GetWindowId(window));
-  if (IsBorealisWindowIdLegacy(window_id)) {
-    base::ReplaceFirstSubstringAfterOffset(
-        &window_id, 0, borealis::kBorealisWindowPrefixLegacy,
-        "org.chromium.termina.");
-  }
-  std::string guest_os_shelf_app_id =
-      guest_os::GetGuestOsShelfAppId(profile, &window_id, nullptr);
-
-  // If this app is registered by GuestOsRegistry, then it's actually registered
-  // for Borealis.
-  if (!guest_os::IsUnregisteredGuestOsShelfAppId(guest_os_shelf_app_id)) {
-    return guest_os_shelf_app_id;
-  }
-
-  // Unregistered app. Unlike Crostini, we expect all Borealis apps to be
-  // registered, so we consider this a bug.
-  // TODO(cpelling): Log a warning here once this function is memoized.
-  return kBorealisAnonymousPrefix + *GetWindowId(window);
+  // GetGuestOsShelfAppId will handle both registered and anonymous borealis app
+  // windows correctly. For registered apps, it will return a matching shelf app
+  // ID. For unregistered apps, it will return an app_id prefixed with
+  // "borealis_anon:".
+  // TODO(cpelling): Log a warning here once all Steam startup windows and
+  // games are correctly registered.
+  return guest_os::GetGuestOsShelfAppId(profile, WaylandWindowId(window),
+                                        nullptr);
 }
 
 }  // namespace
 
-// static
-bool BorealisWindowManager::IsBorealisWindow(const aura::Window* window) {
-  const std::string* id = GetWindowId(window);
-  if (!id)
-    return false;
-  return IsBorealisWindowId(*id);
-}
-
-// static
-bool BorealisWindowManager::IsBorealisWindowId(const std::string& window_id) {
-  return base::StartsWith(window_id, borealis::kBorealisWindowPrefix) ||
-         base::StartsWith(window_id, borealis::kBorealisWindowPrefixLegacy);
-}
-
-// static
-bool BorealisWindowManager::ShouldNewWindowBeMinimized(
-    const std::string& window_id) {
-  // Only borealis client windows should be minimized.
-  if (!base::EndsWith(window_id, borealis::kBorealisClientSuffix,
-                      base::CompareCase::SENSITIVE)) {
+bool BorealisWindowManager::IsSteamGameWindow(Profile* profile,
+                                              const aura::Window* window) {
+  // Only windows from the Borealis VM can possibly be Steam games.
+  if (!ash::borealis::IsBorealisWindow(window)) {
     return false;
   }
 
-  // We only need to create windows as minimized when the active window is a
-  // borealis window in fullscreen.
-  aura::Window* active_window = ash::window_util::GetActiveWindow();
-  if (!active_window || !IsBorealisWindow(active_window))
-    return false;
-
-  const std::string* active_window_id = GetWindowId(active_window);
-  if (!active_window_id)
-    return false;
-
-  auto* window_state = ash::WindowState::Get(active_window);
-  if (!window_state || !window_state->IsFullscreen())
-    return false;
-
-  // If the fullscreen window is the borealis client, then we allow windows to
-  // take focus.
-  if (*active_window_id == borealis::kFullscreenClientShellId ||
-      *active_window_id == borealis::kFullscreenClientShellIdLegacy) {
+  // Exclude selected windows that are not games, such as Steam client windows.
+  std::string shelf_app_id = ShelfAppId(profile, window);
+  if (IsNonGameBorealisApp(shelf_app_id)) {
     return false;
   }
 
-  return true;
+  // TODO(b/289158975): Exclude game launcher windows.
+
+  // Every other Borealis window with the STEAM_GAME property is a game.
+  return SteamGameId(window).has_value();
 }
 
 // static
@@ -193,7 +147,7 @@ void BorealisWindowManager::RemoveObserver(
 }
 
 std::string BorealisWindowManager::GetShelfAppId(aura::Window* window) {
-  if (!IsBorealisWindow(window)) {
+  if (!ash::borealis::IsBorealisWindow(window)) {
     return {};
   }
 
@@ -207,15 +161,16 @@ std::string BorealisWindowManager::GetShelfAppId(aura::Window* window) {
   }
 
   if (!window->GetProperty(kShelfAppIdKey))
-    window->SetProperty(kShelfAppIdKey, WindowToAppId(profile_, window));
+    window->SetProperty(kShelfAppIdKey, ShelfAppId(profile_, window));
   return *window->GetProperty(kShelfAppIdKey);
 }
 
 void BorealisWindowManager::OnInstanceUpdate(
     const apps::InstanceUpdate& update) {
   aura::Window* window = update.Window();
-  if (!IsBorealisWindow(window))
+  if (!ash::borealis::IsBorealisWindow(window)) {
     return;
+  }
   if (update.IsCreation()) {
     HandleWindowCreation(window, update.AppId());
   } else if (update.IsDestruction()) {
@@ -235,7 +190,9 @@ void BorealisWindowManager::HandleWindowDestruction(aura::Window* window,
     observer.OnWindowFinished(app_id, window);
   }
 
-  base::flat_map<std::string, base::flat_set<aura::Window*>>::iterator iter =
+  base::flat_map<
+      std::string,
+      base::flat_set<raw_ptr<aura::Window, CtnExperimental>>>::iterator iter =
       ids_to_windows_.find(app_id);
   DCHECK(iter != ids_to_windows_.end());
   DCHECK(iter->second.contains(window));

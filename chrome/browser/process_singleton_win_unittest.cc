@@ -13,15 +13,19 @@
 #include "base/command_line.h"
 #include "base/compiler_specific.h"
 #include "base/files/file_path.h"
+#include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/notreached.h"
 #include "base/process/launch.h"
 #include "base/process/process.h"
 #include "base/process/process_handle.h"
-#include "base/strings/stringprintf.h"
+#include "base/strings/string_number_conversions_win.h"
+#include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/multiprocess_test.h"
+#include "base/test/task_environment.h"
 #include "base/time/time.h"
 #include "base/win/scoped_handle.h"
 #include "base/win/wrapped_window_proc.h"
@@ -31,6 +35,7 @@
 #include "content/public/common/result_codes.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "testing/multiprocess_func_list.h"
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
 
 namespace {
 
@@ -39,12 +44,13 @@ const char kContinueEventNameFlag[] = "continue_event_name";
 const char kCreateWindowFlag[] = "create_window";
 const int kErrorResultCode = 0x345;
 
-bool NotificationCallback(const base::CommandLine& command_line,
+const char kLockfile[] = "lockfile";
+
+bool NotificationCallback(base::CommandLine command_line,
                           const base::FilePath& current_directory) {
   // This is never called in this test, but would signal that the singleton
   // notification was successfully handled.
   NOTREACHED();
-  return true;
 }
 
 // The ProcessSingleton kills hung browsers with no visible windows without user
@@ -110,16 +116,18 @@ MULTIPROCESS_TEST_MAIN(ProcessSingletonTestProcessMain) {
 
   base::win::ScopedHandle ready_event(
       ::OpenEvent(EVENT_MODIFY_STATE, FALSE, ready_event_name.c_str()));
-  if (!ready_event.IsValid())
+  if (!ready_event.is_valid()) {
     return kErrorResultCode;
+  }
 
   std::wstring continue_event_name =
       cmd_line->GetSwitchValueNative(kContinueEventNameFlag);
 
   base::win::ScopedHandle continue_event(
       ::OpenEvent(SYNCHRONIZE, FALSE, continue_event_name.c_str()));
-  if (!continue_event.IsValid())
+  if (!continue_event.is_valid()) {
     return kErrorResultCode;
+  }
 
   ScopedVisibleWindow visible_window;
   if (cmd_line->HasSwitch(kCreateWindowFlag)) {
@@ -135,11 +143,13 @@ MULTIPROCESS_TEST_MAIN(ProcessSingletonTestProcessMain) {
     return kErrorResultCode;
 
   // Signal ready and block for the continue event.
-  if (!::SetEvent(ready_event.Get()))
+  if (!::SetEvent(ready_event.get())) {
     return kErrorResultCode;
+  }
 
-  if (::WaitForSingleObject(continue_event.Get(), INFINITE) != WAIT_OBJECT_0)
+  if (::WaitForSingleObject(continue_event.get(), INFINITE) != WAIT_OBJECT_0) {
     return kErrorResultCode;
+  }
 
   return 0;
 }
@@ -153,24 +163,24 @@ class ProcessSingletonTest : public base::MultiProcessTest {
   ProcessSingletonTest& operator=(const ProcessSingletonTest&) = delete;
 
  protected:
-  enum WindowOption { WITH_WINDOW, NO_WINDOW };
+  enum WindowOption { kWithWindow, kNoWindow };
 
   ProcessSingletonTest()
-      : window_option_(NO_WINDOW), should_kill_called_(false) {}
+      : window_option_(kNoWindow), should_kill_called_(false) {}
 
   void SetUp() override {
     ASSERT_NO_FATAL_FAILURE(base::MultiProcessTest::SetUp());
 
     // Drop the process finder notification timeout to one second for testing.
     old_notification_timeout_ =
-        chrome::SetNotificationTimeoutForTesting(base::Seconds(1));
+        SetNotificationTimeoutForTesting(base::Seconds(1));
   }
 
   void TearDown() override {
-    chrome::SetNotificationTimeoutForTesting(old_notification_timeout_);
+    SetNotificationTimeoutForTesting(old_notification_timeout_);
 
     if (browser_victim_.IsValid()) {
-      EXPECT_TRUE(::SetEvent(continue_event_.Get()));
+      EXPECT_TRUE(::SetEvent(continue_event_.get()));
       EXPECT_TRUE(browser_victim_.WaitForExit(nullptr));
     }
 
@@ -183,17 +193,17 @@ class ProcessSingletonTest : public base::MultiProcessTest {
 
     // Create the named "ready" event, this is unique to our process.
     ready_event_name_ =
-        base::StringPrintf(L"ready-event-%d", base::GetCurrentProcId());
+        L"ready-event-" + base::NumberToWString(base::GetCurrentProcId());
     base::win::ScopedHandle ready_event(
         ::CreateEvent(NULL, TRUE, FALSE, ready_event_name_.c_str()));
-    ASSERT_TRUE(ready_event.IsValid());
+    ASSERT_TRUE(ready_event.is_valid());
 
     // Create the named "continue" event, this is unique to our process.
     continue_event_name_ =
-        base::StringPrintf(L"continue-event-%d", base::GetCurrentProcId());
+        L"continue-event-" + base::NumberToWString(base::GetCurrentProcId());
     continue_event_.Set(
         ::CreateEvent(NULL, TRUE, FALSE, continue_event_name_.c_str()));
-    ASSERT_TRUE(continue_event_.IsValid());
+    ASSERT_TRUE(continue_event_.is_valid());
 
     window_option_ = window_option;
 
@@ -203,7 +213,7 @@ class ProcessSingletonTest : public base::MultiProcessTest {
         SpawnChildWithOptions("ProcessSingletonTestProcessMain", options);
 
     // Wait for the ready event (or process exit).
-    HANDLE handles[] = {ready_event.Get(), browser_victim_.Handle()};
+    HANDLE handles[] = {ready_event.get(), browser_victim_.Handle()};
     // The wait should always return because either |ready_event| is signaled or
     // |browser_victim_| died unexpectedly or exited on error.
     DWORD result =
@@ -217,8 +227,9 @@ class ProcessSingletonTest : public base::MultiProcessTest {
     cmd_line.AppendSwitchPath(switches::kUserDataDir, user_data_dir_.GetPath());
     cmd_line.AppendSwitchNative(kReadyEventNameFlag, ready_event_name_);
     cmd_line.AppendSwitchNative(kContinueEventNameFlag, continue_event_name_);
-    if (window_option_ == WITH_WINDOW)
+    if (window_option_ == kWithWindow) {
       cmd_line.AppendSwitch(kCreateWindowFlag);
+    }
 
     return cmd_line;
   }
@@ -271,7 +282,7 @@ class ProcessSingletonTest : public base::MultiProcessTest {
 }  // namespace
 
 TEST_F(ProcessSingletonTest, KillsHungBrowserWithNoWindows) {
-  ASSERT_NO_FATAL_FAILURE(PrepareTest(NO_WINDOW, false));
+  ASSERT_NO_FATAL_FAILURE(PrepareTest(kNoWindow, false));
 
   // As the hung browser has no visible window, it'll be killed without
   // user interaction.
@@ -292,8 +303,6 @@ TEST_F(ProcessSingletonTest, KillsHungBrowserWithNoWindows) {
   histogram_tester().ExpectTotalCount(
       "Chrome.ProcessSingleton.TerminateProcessTime", 1u);
   histogram_tester().ExpectUniqueSample(
-      "Chrome.ProcessSingleton.TerminateProcessErrorCode.Windows", 0, 1u);
-  histogram_tester().ExpectUniqueSample(
       "Chrome.ProcessSingleton.TerminationWaitErrorCode.Windows", 0, 1u);
   histogram_tester().ExpectUniqueSample(
       "Chrome.ProcessSingleton.RemoteHungProcessTerminateReason",
@@ -308,7 +317,7 @@ TEST_F(ProcessSingletonTest, KillsHungBrowserWithNoWindows) {
 }
 
 TEST_F(ProcessSingletonTest, DoesntKillWithoutUserPermission) {
-  ASSERT_NO_FATAL_FAILURE(PrepareTest(WITH_WINDOW, false));
+  ASSERT_NO_FATAL_FAILURE(PrepareTest(kWithWindow, false));
 
   // As the hung browser has a visible window, this should query the user
   // before killing the hung process.
@@ -331,7 +340,7 @@ TEST_F(ProcessSingletonTest, DoesntKillWithoutUserPermission) {
 }
 
 TEST_F(ProcessSingletonTest, KillWithUserPermission) {
-  ASSERT_NO_FATAL_FAILURE(PrepareTest(WITH_WINDOW, true));
+  ASSERT_NO_FATAL_FAILURE(PrepareTest(kWithWindow, true));
 
   // As the hung browser has a visible window, this should query the user
   // before killing the hung process.
@@ -352,8 +361,6 @@ TEST_F(ProcessSingletonTest, KillWithUserPermission) {
   histogram_tester().ExpectTotalCount(
       "Chrome.ProcessSingleton.TerminateProcessTime", 1u);
   histogram_tester().ExpectUniqueSample(
-      "Chrome.ProcessSingleton.TerminateProcessErrorCode.Windows", 0, 1u);
-  histogram_tester().ExpectUniqueSample(
       "Chrome.ProcessSingleton.TerminationWaitErrorCode.Windows", 0, 1u);
   histogram_tester().ExpectUniqueSample(
       "Chrome.ProcessSingleton.RemoteHungProcessTerminateReason",
@@ -365,4 +372,132 @@ TEST_F(ProcessSingletonTest, KillWithUserPermission) {
   EXPECT_TRUE(
       browser_victim()->WaitForExitWithTimeout(base::TimeDelta(), &exit_code));
   EXPECT_EQ(content::RESULT_CODE_HUNG, exit_code);
+}
+
+// Verifies that during ProcessSingleton destruction, the message window
+// is destroyed while the lockfile is STILL actively held by the exiting
+// process.
+TEST_F(ProcessSingletonTest, DeterministicDestructionOrder) {
+  base::ScopedTempDir profile_dir;
+  ASSERT_TRUE(profile_dir.CreateUniqueTempDir());
+
+  // Initialize ProcessSingleton directly with base::NullCallback()
+  auto ps = std::make_unique<ProcessSingleton>(profile_dir.GetPath(),
+                                               base::NullCallback());
+
+  // Acquire the lock (we become the master)
+  ASSERT_TRUE(ps->Create());
+  bool observer_ran = false;
+
+  // Set the observer callback to intercept the exact middle of the destructor
+  ps->SetOnWindowDestroyedCallbackForTesting(base::BindLambdaForTesting([&]() {
+    observer_ran = true;
+    // CHECKPOINT A: The window must be GONE.
+    HWND hwnd = FindRunningChromeWindow(profile_dir.GetPath());
+    EXPECT_EQ(hwnd, nullptr);
+    // CHECKPOINT B: The exiting process MUST still hold the lockfile!
+    base::FilePath lock_file_path =
+        profile_dir.GetPath().AppendASCII(kLockfile);
+    HANDLE lock = ::CreateFile(
+        lock_file_path.value().c_str(), GENERIC_WRITE, 0,  // 0 = No sharing
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+    EXPECT_EQ(lock, INVALID_HANDLE_VALUE);
+    EXPECT_EQ(::GetLastError(), static_cast<DWORD>(ERROR_SHARING_VIOLATION));
+  }));
+
+  // Destroy the singleton. This triggers the destructor and our observer
+  // callback.
+  ps.reset();
+
+  // Verify the observer callback actually executed.
+  EXPECT_TRUE(observer_ran);
+
+  // CHECKPOINT C: Lock is released and the lockfile is deleted.
+  base::FilePath lock_file_path = profile_dir.GetPath().AppendASCII(kLockfile);
+  EXPECT_FALSE(base::PathExists(lock_file_path));
+}
+
+// Verifies that if the lock file is temporarily busy during startup,
+// ProcessSingleton will successfully wait, retry, and acquire it once
+// it is released by the terminating process.
+// (Uses the Sleep Hook to run 100% synchronously and flake-free in 0ms).
+TEST_F(ProcessSingletonTest, LockFileRetrySuccess) {
+  base::ScopedTempDir profile_dir;
+  ASSERT_TRUE(profile_dir.CreateUniqueTempDir());
+  base::FilePath lock_file_path = profile_dir.GetPath().AppendASCII(kLockfile);
+
+  // 1. Lock the lockfile exclusively ourselves to simulate the race.
+  base::File external_lock(::CreateFile(
+      lock_file_path.value().c_str(), GENERIC_WRITE, 0,  // 0 = No sharing
+      NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
+  ASSERT_TRUE(external_lock.IsValid());
+  bool sleep_callback_ran = false;
+
+  // 2. Set the sleep callback to release our lock SYNCHRONOUSLY
+  // instead of physically sleeping the thread.
+  ProcessSingleton::SetSleepCallbackForTesting(
+      base::BindLambdaForTesting([&](base::TimeDelta delay) {
+        sleep_callback_ran = true;
+        external_lock.Close();
+      }));
+  absl::Cleanup cleanup = [&] {
+    ProcessSingleton::SetSleepCallbackForTesting(base::NullCallback());
+  };
+
+  // 3. Create ProcessSingleton directly with base::NullCallback() and trigger
+  // startup.
+  ProcessSingleton ps(profile_dir.GetPath(), base::NullCallback());
+  ProcessSingleton::NotifyResult result = ps.NotifyOtherProcessOrCreate();
+
+  // 4. Verify it successfully started as the master.
+  EXPECT_EQ(result, ProcessSingleton::PROCESS_NONE);
+
+  // Verify that the retry loop was actually entered and the sleep hook ran.
+  EXPECT_TRUE(sleep_callback_ran);
+
+  histogram_tester().ExpectUniqueSample(
+      "Chrome.ProcessSingleton.CreateLockFileWithTimeout.Result", true, 1);
+}
+
+// Verifies that if the lock file remains busy indefinitely, ProcessSingleton
+// will eventually fail with LOCK_ERROR after the 5-second timeout.
+// (Uses Mock Time + the Sleep Hook to run the 5-second timeout instantly in
+// 0ms).
+TEST_F(ProcessSingletonTest, LockFileTimeoutFailure) {
+  // 1. Initialize TaskEnvironment with MOCK_TIME.
+  base::test::TaskEnvironment task_environment(
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME);
+
+  base::ScopedTempDir profile_dir;
+  ASSERT_TRUE(profile_dir.CreateUniqueTempDir());
+  base::FilePath lock_file_path = profile_dir.GetPath().AppendASCII(kLockfile);
+
+  // 2. Lock the lockfile exclusively and keep it locked.
+  base::File external_lock(::CreateFile(
+      lock_file_path.value().c_str(), GENERIC_WRITE, 0,  // 0 = No sharing
+      NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL));
+  ASSERT_TRUE(external_lock.IsValid());
+
+  // 3. Set the sleep callback to fast-forward the VIRTUAL clock
+  // instead of physically sleeping the thread.
+  ProcessSingleton::SetSleepCallbackForTesting(base::BindLambdaForTesting(
+      [&](base::TimeDelta delay) { task_environment.FastForwardBy(delay); }));
+  absl::Cleanup cleanup = [&] {
+    ProcessSingleton::SetSleepCallbackForTesting(base::NullCallback());
+  };
+
+  base::TimeTicks start = base::TimeTicks::Now();
+
+  // 4. Create ProcessSingleton and trigger startup.
+  // This will loop 50 times (50 * 100ms = 5s of virtual time) and fail
+  // instantly.
+  ProcessSingleton ps(profile_dir.GetPath(), base::NullCallback());
+  EXPECT_EQ(ps.NotifyOtherProcessOrCreate(), ProcessSingleton::LOCK_ERROR);
+
+  // 5. Verify that 5 seconds of VIRTUAL time elapsed.
+  EXPECT_GE(base::TimeTicks::Now() - start, base::Seconds(5));
+
+  histogram_tester().ExpectUniqueSample(
+      "Chrome.ProcessSingleton.CreateLockFileWithTimeout.Result", false, 1);
 }

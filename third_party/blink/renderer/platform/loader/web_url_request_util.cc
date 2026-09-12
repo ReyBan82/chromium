@@ -15,6 +15,7 @@
 #include "base/rand_util.h"
 #include "base/time/time.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
+#include "mojo/public/cpp/bindings/remote.h"
 #include "services/network/public/mojom/data_pipe_getter.mojom-blink.h"
 #include "third_party/blink/public/mojom/blob/blob.mojom-blink.h"
 #include "third_party/blink/public/mojom/blob/blob_registry.mojom-blink.h"
@@ -49,8 +50,9 @@ class HeaderFlattener : public WebHTTPHeaderVisitor {
 
     // Skip over referrer headers found in the header map because we already
     // pulled it out as a separate parameter.
-    if (EqualIgnoringASCIICase(wtf_name, "referer"))
+    if (EqualIgnoringAsciiCase(wtf_name, "referer")) {
       return;
+    }
 
     if (!buffer_.empty())
       buffer_.Append("\r\n");
@@ -77,7 +79,7 @@ int GetInitialRequestID() {
   // to something higher like 2^31).
   const int kMin = 0;
   const int kMax = 1 << 20;
-  return base::RandInt(kMin, kMax);
+  return base::RandIntInclusive(kMin, kMax);
 }
 
 }  // namespace
@@ -98,13 +100,12 @@ WebHTTPBody GetWebHTTPBodyForRequestBody(
     switch (element.type()) {
       case network::DataElement::Tag::kBytes: {
         const auto& bytes = element.As<network::DataElementBytes>().bytes();
-        http_body.AppendData(
-            WebData(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+        http_body.AppendData(WebData(bytes));
         break;
       }
       case network::DataElement::Tag::kFile: {
         const auto& file = element.As<network::DataElementFile>();
-        absl::optional<base::Time> modification_time;
+        std::optional<base::Time> modification_time;
         if (!file.expected_modification_time().is_null())
           modification_time = file.expected_modification_time();
         http_body.AppendFileRange(
@@ -122,7 +123,6 @@ WebHTTPBody GetWebHTTPBodyForRequestBody(
       }
       case network::DataElement::Tag::kChunkedDataPipe:
         NOTREACHED();
-        break;
     }
   }
   return http_body;
@@ -152,7 +152,7 @@ scoped_refptr<network::ResourceRequestBody> GetRequestBodyForWebHTTPBody(
   while (httpBody.ElementAt(i++, element)) {
     switch (element.type) {
       case HTTPBodyElementType::kTypeData:
-        request_body->AppendBytes(element.data.Copy().ReleaseVector());
+        request_body->AppendBytes(element.data.Copy());
         break;
       case HTTPBodyElementType::kTypeFile:
         if (element.file_length == -1) {

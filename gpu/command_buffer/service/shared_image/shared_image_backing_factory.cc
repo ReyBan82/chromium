@@ -3,56 +3,77 @@
 // found in the LICENSE file.
 
 #include "gpu/command_buffer/service/shared_image/shared_image_backing_factory.h"
+
+#include "gpu/command_buffer/common/shared_image_usage.h"
 #include "gpu/command_buffer/service/shared_image/shared_image_backing.h"
 
 namespace gpu {
 
-SharedImageBackingFactory::SharedImageBackingFactory(uint32_t valid_usages)
-    : invalid_usages_(~valid_usages) {}
+SharedImageBackingFactory::SharedImageBackingFactory(
+    SharedImageUsageSet valid_usages)
+    : valid_usages_(valid_usages) {}
 
 SharedImageBackingFactory::~SharedImageBackingFactory() = default;
-
-std::unique_ptr<SharedImageBacking>
-SharedImageBackingFactory::CreateSharedImage(
-    const Mailbox& mailbox,
-    viz::SharedImageFormat format,
-    const gfx::Size& size,
-    const gfx::ColorSpace& color_space,
-    GrSurfaceOrigin surface_origin,
-    SkAlphaType alpha_type,
-    uint32_t usage,
-    gfx::GpuMemoryBufferHandle handle) {
-  return nullptr;
-}
 
 base::WeakPtr<SharedImageBackingFactory>
 SharedImageBackingFactory::GetWeakPtr() {
   return weak_ptr_factory_.GetWeakPtr();
 }
 
+std::unique_ptr<SharedImageBacking>
+SharedImageBackingFactory::CreateSharedImage(const Mailbox& mailbox,
+                                             const SharedImageInfo& si_info,
+                                             SurfaceHandle surface_handle,
+                                             bool is_thread_safe) {
+  NOTREACHED();
+}
+std::unique_ptr<SharedImageBacking>
+SharedImageBackingFactory::CreateSharedImage(
+    const Mailbox& mailbox,
+    const SharedImageInfo& si_info,
+    bool is_thread_safe,
+    base::span<const uint8_t> pixel_data) {
+  NOTREACHED();
+}
+std::unique_ptr<SharedImageBacking>
+SharedImageBackingFactory::CreateSharedImage(
+    const Mailbox& mailbox,
+    const SharedImageInfo& si_info,
+    bool is_thread_safe,
+    gfx::GpuMemoryBufferHandle handle) {
+  NOTREACHED();
+}
+std::unique_ptr<SharedImageBacking>
+SharedImageBackingFactory::CreateSharedImage(const Mailbox& mailbox,
+                                             const SharedImageInfo& si_info,
+                                             SurfaceHandle surface_handle,
+                                             bool is_thread_safe,
+                                             gfx::BufferUsage buffer_usage) {
+  NOTREACHED();
+}
+
 bool SharedImageBackingFactory::CanCreateSharedImage(
-    uint32_t usage,
+    SharedImageUsageSet usage,
     viz::SharedImageFormat format,
     const gfx::Size& size,
     bool thread_safe,
     gfx::GpuMemoryBufferType gmb_type,
     GrContextType gr_context_type,
     base::span<const uint8_t> pixel_data) {
-  // TODO(kylechar): Once existing usages are worked out just return false if
-  // !usage_supported.
-  bool usage_supported = (invalid_usages_ & usage) == 0;
-
-  bool is_supported = IsSupported(usage, format, size, thread_safe, gmb_type,
-                                  gr_context_type, pixel_data);
-
-  if (!usage_supported) {
-    // The factory should never report supported with an unsupported usage.
-    CHECK(!is_supported) << " usage=" << CreateLabelForSharedImageUsage(usage)
-                         << ", invalid_usages="
-                         << CreateLabelForSharedImageUsage(invalid_usages_);
+  if (!valid_usages_.HasAll(usage)) {
+    // This factory doesn't support all the usages.
+    return false;
   }
 
-  return is_supported;
+  return IsSupported(usage, format, size, thread_safe, gmb_type,
+                     gr_context_type, pixel_data);
+}
+
+bool SharedImageBackingFactory::IsSupportedForAccessStream(
+    SharedImageAccessStream stream,
+    viz::SharedImageFormat format,
+    const AccessParams* params) const {
+  return true;
 }
 
 void SharedImageBackingFactory::InvalidateWeakPtrsForTesting() {

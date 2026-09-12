@@ -5,11 +5,14 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_BINDINGS_CORE_V8_NATIVE_VALUE_TRAITS_IMPL_H_
 #define THIRD_PARTY_BLINK_RENDERER_BINDINGS_CORE_V8_NATIVE_VALUE_TRAITS_IMPL_H_
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <concepts>
+#include <optional>
+#include <type_traits>
+
 #include "third_party/blink/renderer/bindings/core/v8/idl_types.h"
 #include "third_party/blink/renderer/bindings/core/v8/native_value_traits.h"
+#include "third_party/blink/renderer/bindings/core/v8/pass_as_span.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_iterator.h"
-#include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_trusted_html.h"
@@ -20,30 +23,36 @@
 #include "third_party/blink/renderer/core/trustedtypes/trusted_script.h"
 #include "third_party/blink/renderer/core/trustedtypes/trusted_script_url.h"
 #include "third_party/blink/renderer/core/trustedtypes/trusted_types_util.h"
+#include "third_party/blink/renderer/core/typed_arrays/array_buffer_view_helpers.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_data_view.h"
 #include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
 #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
 #include "third_party/blink/renderer/platform/heap/heap_traits.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+#include "v8/include/v8-fast-api-calls.h"
 
 namespace blink {
 
 class CallbackFunctionBase;
 class CallbackInterfaceBase;
+class CookieListItem;
 class EventListener;
-class FlexibleArrayBufferView;
 class GPUColorTargetState;
 class GPURenderPassColorAttachment;
 class GPUVertexBufferLayout;
 class ScriptWrappable;
 struct WrapperTypeInfo;
 
+struct ToV8UndefinedGenerator {
+  DISALLOW_NEW();
+  using ImplType = ToV8UndefinedGenerator;
+};
+
 namespace bindings {
 
-class DictionaryBase;
 class EnumerationBase;
+class InputDictionaryBase;
 class UnionBase;
-
 CORE_EXPORT void NativeValueTraitsInterfaceNotOfType(
     const WrapperTypeInfo* wrapper_type_info,
     ExceptionState& exception_state);
@@ -112,6 +121,17 @@ struct CORE_EXPORT NativeValueTraits<IDLOptional<IDLAny>>
       v8::Local<v8::Value> value,
       ExceptionState& exception_state) {
     return bindings::NativeValueTraitsAnyAdapter(isolate, value);
+  }
+};
+
+// undefined
+template <>
+struct CORE_EXPORT NativeValueTraits<IDLUndefined>
+    : public NativeValueTraitsBase<IDLUndefined> {
+  static ToV8UndefinedGenerator NativeValue(v8::Isolate*,
+                                            v8::Local<v8::Value>,
+                                            ExceptionState&) {
+    return ToV8UndefinedGenerator();
   }
 };
 
@@ -222,12 +242,14 @@ class CORE_EXPORT NativeValueTraitsStringAdapter {
   NativeValueTraitsStringAdapter(const NativeValueTraitsStringAdapter&) =
       delete;
   NativeValueTraitsStringAdapter(NativeValueTraitsStringAdapter&&) = default;
-  explicit NativeValueTraitsStringAdapter(v8::Local<v8::String> value)
-      : v8_string_(value) {}
-  explicit NativeValueTraitsStringAdapter(const String& value)
-      : wtf_string_(value) {}
-  explicit NativeValueTraitsStringAdapter(int32_t value)
-      : wtf_string_(ToBlinkString(value)) {}
+  explicit NativeValueTraitsStringAdapter(v8::Isolate* isolate,
+                                          v8::Local<v8::String> value)
+      : v8_string_(value), isolate_(isolate) {}
+  explicit NativeValueTraitsStringAdapter(v8::Isolate* isolate,
+                                          const String& value)
+      : isolate_(isolate), wtf_string_(value) {}
+  explicit NativeValueTraitsStringAdapter(v8::Isolate* isolate, int32_t value)
+      : isolate_(isolate), wtf_string_(ToBlinkString(value)) {}
 
   NativeValueTraitsStringAdapter& operator=(
       const NativeValueTraitsStringAdapter&) = delete;
@@ -239,10 +261,11 @@ class CORE_EXPORT NativeValueTraitsStringAdapter {
     return *this;
   }
 
-  void Init(v8::Local<v8::String> value) {
+  void Init(v8::Isolate* isolate, v8::Local<v8::String> value) {
     DCHECK(v8_string_.IsEmpty());
     DCHECK(wtf_string_.IsNull());
     v8_string_ = value;
+    isolate_ = isolate;
   }
 
   // NOLINTNEXTLINE(google-explicit-constructor)
@@ -257,20 +280,25 @@ class CORE_EXPORT NativeValueTraitsStringAdapter {
  private:
   template <class StringType>
   StringType ToString() const {
-    if (LIKELY(!v8_string_.IsEmpty()))
-      return ToBlinkString<StringType>(v8_string_, kExternalize);
+    if (!v8_string_.IsEmpty()) [[likely]] {
+      return ToBlinkString<StringType>(isolate_, v8_string_, kExternalize);
+    }
     return StringType(wtf_string_);
   }
 
   StringView ToStringView() const& {
-    if (LIKELY(!v8_string_.IsEmpty())) {
-      return ToBlinkStringView(v8_string_, string_view_backing_store_,
+    if (!v8_string_.IsEmpty()) [[likely]] {
+      return ToBlinkStringView(isolate_, v8_string_, string_view_backing_store_,
                                kExternalize);
     }
     return wtf_string_;
   }
 
+  // Careful here, ordering some of the members here (mainly the isolate) may
+  // be important in the hot path. Having the isolate the second member showed
+  // a performance gain on MacOS arm (see crbug.com/1482549).
   v8::Local<v8::String> v8_string_;
+  v8::Isolate* isolate_ = nullptr;
   String wtf_string_;
   mutable StringView::StackBackingStore string_view_backing_store_;
 };
@@ -285,11 +313,13 @@ struct NativeValueTraits<IDLByteStringBase<mode>>
       v8::Isolate* isolate,
       v8::Local<v8::Value> value,
       ExceptionState& exception_state) {
-    if (value->IsString() and value.As<v8::String>()->ContainsOnlyOneByte())
-      return bindings::NativeValueTraitsStringAdapter(value.As<v8::String>());
+    if (value->IsString() and value.As<v8::String>()->ContainsOnlyOneByte()) {
+      return bindings::NativeValueTraitsStringAdapter(isolate,
+                                                      value.As<v8::String>());
+    }
     if (value->IsInt32()) {
       return bindings::NativeValueTraitsStringAdapter(
-          value.As<v8::Int32>()->Value());
+          isolate, value.As<v8::Int32>()->Value());
     }
 
     if (mode == bindings::IDLStringConvMode::kNullable) {
@@ -297,10 +327,9 @@ struct NativeValueTraits<IDLByteStringBase<mode>>
         return bindings::NativeValueTraitsStringAdapter();
     }
 
-    v8::TryCatch try_catch(isolate);
+    TryRethrowScope rethrow_scope(isolate, exception_state);
     v8::Local<v8::String> v8_string;
     if (!value->ToString(isolate->GetCurrentContext()).ToLocal(&v8_string)) {
-      exception_state.RethrowV8Exception(try_catch.Exception());
       return bindings::NativeValueTraitsStringAdapter();
     }
     if (!v8_string->ContainsOnlyOneByte()) {
@@ -308,7 +337,7 @@ struct NativeValueTraits<IDLByteStringBase<mode>>
           "String contains non ISO-8859-1 code point.");
       return bindings::NativeValueTraitsStringAdapter();
     }
-    return bindings::NativeValueTraitsStringAdapter(v8_string);
+    return bindings::NativeValueTraitsStringAdapter(isolate, v8_string);
   }
 };
 
@@ -345,29 +374,32 @@ struct NativeValueTraits<IDLStringBase<mode>>
       v8::Isolate* isolate,
       v8::Local<v8::Value> value,
       ExceptionState& exception_state) {
-    if (value->IsString())
-      return bindings::NativeValueTraitsStringAdapter(value.As<v8::String>());
+    if (value->IsString()) {
+      return bindings::NativeValueTraitsStringAdapter(isolate,
+                                                      value.As<v8::String>());
+    }
     if (value->IsInt32()) {
       return bindings::NativeValueTraitsStringAdapter(
-          value.As<v8::Int32>()->Value());
+          isolate, value.As<v8::Int32>()->Value());
     }
 
     if (mode == bindings::IDLStringConvMode::kNullable) {
       if (value->IsNullOrUndefined())
         return bindings::NativeValueTraitsStringAdapter();
     }
-    if (mode == bindings::IDLStringConvMode::kTreatNullAsEmptyString) {
-      if (value->IsNull())
-        return bindings::NativeValueTraitsStringAdapter(g_empty_string);
+    if (mode == bindings::IDLStringConvMode::kLegacyNullToEmptyString) {
+      if (value->IsNull()) {
+        return bindings::NativeValueTraitsStringAdapter(isolate,
+                                                        g_empty_string);
+      }
     }
 
-    v8::TryCatch try_catch(isolate);
+    TryRethrowScope rethrow_scope(isolate, exception_state);
     v8::Local<v8::String> v8_string;
     if (!value->ToString(isolate->GetCurrentContext()).ToLocal(&v8_string)) {
-      exception_state.RethrowV8Exception(try_catch.Exception());
       return bindings::NativeValueTraitsStringAdapter();
     }
-    return bindings::NativeValueTraitsStringAdapter(v8_string);
+    return bindings::NativeValueTraitsStringAdapter(isolate, v8_string);
   }
 };
 
@@ -410,7 +442,7 @@ struct NativeValueTraits<IDLUSVStringBase<mode>>
       return bindings::NativeValueTraitsStringAdapter();
 
     return bindings::NativeValueTraitsStringAdapter(
-        ReplaceUnmatchedSurrogates(string));
+        isolate, ReplaceUnmatchedSurrogates(string));
   }
 };
 
@@ -439,115 +471,6 @@ struct CORE_EXPORT NativeValueTraits<IDLOptional<IDLUSVString>>
   }
 };
 
-template <bindings::IDLStringConvMode mode>
-struct NativeValueTraits<IDLStringStringContextTrustedHTMLBase<mode>>
-    : public NativeValueTraitsBase<
-          IDLStringStringContextTrustedHTMLBase<mode>> {
-  static String NativeValue(v8::Isolate* isolate,
-                            v8::Local<v8::Value> value,
-                            ExceptionState& exception_state,
-                            ExecutionContext* execution_context) {
-    if (TrustedHTML* trusted_html =
-            V8TrustedHTML::ToImplWithTypeCheck(isolate, value)) {
-      return trusted_html->toString();
-    }
-
-    auto&& string = NativeValueTraits<IDLStringBase<mode>>::NativeValue(
-        isolate, value, exception_state);
-    if (exception_state.HadException())
-      return String();
-    return TrustedTypesCheckForHTML(string, execution_context, exception_state);
-  }
-};
-
-template <>
-struct CORE_EXPORT
-    NativeValueTraits<IDLNullable<IDLStringStringContextTrustedHTML>>
-    : public NativeValueTraitsBase<
-          IDLNullable<IDLStringStringContextTrustedHTML>> {
-  static String NativeValue(v8::Isolate* isolate,
-                            v8::Local<v8::Value> value,
-                            ExceptionState& exception_state,
-                            ExecutionContext* execution_context) {
-    return NativeValueTraits<IDLStringStringContextTrustedHTMLBase<
-        bindings::IDLStringConvMode::kNullable>>::
-        NativeValue(isolate, value, exception_state, execution_context);
-  }
-};
-
-template <bindings::IDLStringConvMode mode>
-struct NativeValueTraits<IDLStringStringContextTrustedScriptBase<mode>>
-    : public NativeValueTraitsBase<
-          IDLStringStringContextTrustedScriptBase<mode>> {
-  static String NativeValue(v8::Isolate* isolate,
-                            v8::Local<v8::Value> value,
-                            ExceptionState& exception_state,
-                            ExecutionContext* execution_context) {
-    if (TrustedScript* trusted_script =
-            V8TrustedScript::ToImplWithTypeCheck(isolate, value)) {
-      return trusted_script->toString();
-    }
-
-    auto&& string = NativeValueTraits<IDLStringBase<mode>>::NativeValue(
-        isolate, value, exception_state);
-    if (exception_state.HadException())
-      return String();
-    return TrustedTypesCheckForScript(string, execution_context,
-                                      exception_state);
-  }
-};
-
-template <>
-struct CORE_EXPORT
-    NativeValueTraits<IDLNullable<IDLStringStringContextTrustedScript>>
-    : public NativeValueTraitsBase<
-          IDLNullable<IDLStringStringContextTrustedScript>> {
-  static String NativeValue(v8::Isolate* isolate,
-                            v8::Local<v8::Value> value,
-                            ExceptionState& exception_state,
-                            ExecutionContext* execution_context) {
-    return NativeValueTraits<IDLStringStringContextTrustedScriptBase<
-        bindings::IDLStringConvMode::kNullable>>::
-        NativeValue(isolate, value, exception_state, execution_context);
-  }
-};
-
-template <bindings::IDLStringConvMode mode>
-struct NativeValueTraits<IDLUSVStringStringContextTrustedScriptURLBase<mode>>
-    : public NativeValueTraitsBase<
-          IDLUSVStringStringContextTrustedScriptURLBase<mode>> {
-  static String NativeValue(v8::Isolate* isolate,
-                            v8::Local<v8::Value> value,
-                            ExceptionState& exception_state,
-                            ExecutionContext* execution_context) {
-    if (TrustedScriptURL* trusted_script_url =
-            V8TrustedScriptURL::ToImplWithTypeCheck(isolate, value)) {
-      return trusted_script_url->toString();
-    }
-
-    auto&& string = NativeValueTraits<IDLUSVStringBase<mode>>::NativeValue(
-        isolate, value, exception_state);
-    if (exception_state.HadException())
-      return String();
-    return TrustedTypesCheckForScriptURL(string, execution_context,
-                                         exception_state);
-  }
-};
-
-template <>
-struct CORE_EXPORT
-    NativeValueTraits<IDLNullable<IDLUSVStringStringContextTrustedScriptURL>>
-    : public NativeValueTraitsBase<
-          IDLNullable<IDLUSVStringStringContextTrustedScriptURL>> {
-  static String NativeValue(v8::Isolate* isolate,
-                            v8::Local<v8::Value> value,
-                            ExceptionState& exception_state,
-                            ExecutionContext* execution_context) {
-    return NativeValueTraits<IDLUSVStringStringContextTrustedScriptURLBase<
-        bindings::IDLStringConvMode::kNullable>>::
-        NativeValue(isolate, value, exception_state, execution_context);
-  }
-};
 
 // Buffer source types
 template <>
@@ -690,9 +613,8 @@ struct CORE_EXPORT NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    T,
-    typename std::enable_if_t<std::is_base_of<DOMArrayBufferView, T>::value>> {
+  requires std::derived_from<T, DOMArrayBufferView>
+struct NativeValueTraits<T> {
   // NotShared<T> or MaybeShared<T> should be used instead.
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
@@ -704,9 +626,8 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    IDLNullable<T>,
-    typename std::enable_if_t<std::is_base_of<DOMArrayBufferView, T>::value>> {
+  requires std::derived_from<T, DOMArrayBufferView>
+struct NativeValueTraits<IDLNullable<T>> {
   // NotShared<T> or MaybeShared<T> should be used instead.
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
@@ -718,9 +639,8 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    NotShared<T>,
-    typename std::enable_if_t<std::is_base_of<DOMArrayBufferView, T>::value>>
+  requires std::derived_from<T, DOMArrayBufferView>
+struct NativeValueTraits<NotShared<T>>
     : public NativeValueTraitsBase<NotShared<T>> {
   static NotShared<T> NativeValue(v8::Isolate* isolate,
                                   v8::Local<v8::Value> value,
@@ -733,9 +653,8 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    IDLNullable<NotShared<T>>,
-    typename std::enable_if_t<std::is_base_of<DOMArrayBufferView, T>::value>>
+  requires std::derived_from<T, DOMArrayBufferView>
+struct NativeValueTraits<IDLNullable<NotShared<T>>>
     : public NativeValueTraitsBase<NotShared<T>> {
   static NotShared<T> NativeValue(v8::Isolate* isolate,
                                   v8::Local<v8::Value> value,
@@ -748,9 +667,8 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    MaybeShared<T>,
-    typename std::enable_if_t<std::is_base_of<DOMArrayBufferView, T>::value>>
+  requires std::derived_from<T, DOMArrayBufferView>
+struct NativeValueTraits<MaybeShared<T>>
     : public NativeValueTraitsBase<MaybeShared<T>> {
   static MaybeShared<T> NativeValue(v8::Isolate* isolate,
                                     v8::Local<v8::Value> value,
@@ -763,15 +681,12 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    IDLBufferSourceTypeNoSizeLimit<MaybeShared<T>>,
-    typename std::enable_if_t<std::is_base_of<DOMArrayBufferView, T>::value>>
+  requires std::derived_from<T, DOMArrayBufferView>
+struct NativeValueTraits<IDLBufferSourceTypeNoSizeLimit<MaybeShared<T>>>
     : public NativeValueTraitsBase<MaybeShared<T>> {
-  // FlexibleArrayBufferView uses this in its implementation, so we cannot
-  // delete it.
   static MaybeShared<T> NativeValue(v8::Isolate* isolate,
                                     v8::Local<v8::Value> value,
-                                    ExceptionState& exception_state);
+                                    ExceptionState& exception_state) = delete;
 
   static MaybeShared<T> ArgumentValue(v8::Isolate* isolate,
                                       int argument_index,
@@ -780,9 +695,8 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    IDLNullable<MaybeShared<T>>,
-    typename std::enable_if_t<std::is_base_of<DOMArrayBufferView, T>::value>>
+  requires std::derived_from<T, DOMArrayBufferView>
+struct NativeValueTraits<IDLNullable<MaybeShared<T>>>
     : public NativeValueTraitsBase<MaybeShared<T>> {
   static MaybeShared<T> NativeValue(v8::Isolate* isolate,
                                     v8::Local<v8::Value> value,
@@ -795,9 +709,9 @@ struct NativeValueTraits<
 };
 
 template <typename T>
+  requires std::derived_from<T, DOMArrayBufferView>
 struct NativeValueTraits<
-    IDLNullable<IDLBufferSourceTypeNoSizeLimit<MaybeShared<T>>>,
-    typename std::enable_if_t<std::is_base_of<DOMArrayBufferView, T>::value>>
+    IDLNullable<IDLBufferSourceTypeNoSizeLimit<MaybeShared<T>>>>
     : public NativeValueTraitsBase<MaybeShared<T>> {
   // BufferSourceTypeNoSizeLimit must be used only as arguments.
   static MaybeShared<T> NativeValue(v8::Isolate* isolate,
@@ -810,128 +724,70 @@ struct NativeValueTraits<
                                       ExceptionState& exception_state);
 };
 
-template <typename T>
-struct NativeValueTraits<
-    T,
-    typename std::enable_if_t<
-        std::is_base_of<FlexibleArrayBufferView, T>::value>>
-    : public NativeValueTraitsBase<T> {
-  // FlexibleArrayBufferView must be used only as arguments.
-  static T NativeValue(v8::Isolate* isolate,
-                       v8::Local<v8::Value> value,
-                       ExceptionState& exception_state) = delete;
-
-  static T ArgumentValue(v8::Isolate* isolate,
-                         int argument_index,
-                         v8::Local<v8::Value> value,
-                         ExceptionState& exception_state);
-};
-
-template <typename T>
-struct NativeValueTraits<
-    IDLBufferSourceTypeNoSizeLimit<T>,
-    typename std::enable_if_t<
-        std::is_base_of<FlexibleArrayBufferView, T>::value>>
-    : public NativeValueTraitsBase<T> {
-  // BufferSourceTypeNoSizeLimit and FlexibleArrayBufferView must be used only
-  // as arguments.
-  static T NativeValue(v8::Isolate* isolate,
-                       v8::Local<v8::Value> value,
-                       ExceptionState& exception_state) = delete;
-
-  static T ArgumentValue(v8::Isolate* isolate,
-                         int argument_index,
-                         v8::Local<v8::Value> value,
-                         ExceptionState& exception_state);
-};
-
-template <typename T>
-struct NativeValueTraits<
-    IDLNullable<T>,
-    typename std::enable_if_t<
-        std::is_base_of<FlexibleArrayBufferView, T>::value>>
-    : public NativeValueTraitsBase<T> {
-  // FlexibleArrayBufferView must be used only as arguments.
-  static T NativeValue(v8::Isolate* isolate,
-                       v8::Local<v8::Value> value,
-                       ExceptionState& exception_state) = delete;
-
-  static T ArgumentValue(v8::Isolate* isolate,
-                         int argument_index,
-                         v8::Local<v8::Value> value,
-                         ExceptionState& exception_state);
-};
-
 // object
 template <>
 struct CORE_EXPORT NativeValueTraits<IDLObject>
     : public NativeValueTraitsBase<IDLObject> {
-  static ScriptValue NativeValue(v8::Isolate* isolate,
-                                 v8::Local<v8::Value> value,
-                                 ExceptionState& exception_state) {
-    if (value->IsObject())
-      return ScriptValue(isolate, value);
+  static ScriptObject NativeValue(v8::Isolate* isolate,
+                                  v8::Local<v8::Value> value,
+                                  ExceptionState& exception_state) {
+    if (value->IsObject()) [[likely]] {
+      return ScriptObject(isolate, value);
+    }
     exception_state.ThrowTypeError(
         ExceptionMessages::FailedToConvertJSValue("object"));
-    return ScriptValue();
+    return ScriptObject();
   }
 
-  static ScriptValue ArgumentValue(v8::Isolate* isolate,
-                                   int argument_index,
-                                   v8::Local<v8::Value> value,
-                                   ExceptionState& exception_state) {
-    if (value->IsObject())
-      return ScriptValue(isolate, value);
+  static ScriptObject ArgumentValue(v8::Isolate* isolate,
+                                    int argument_index,
+                                    v8::Local<v8::Value> value,
+                                    ExceptionState& exception_state) {
+    if (value->IsObject()) [[likely]] {
+      return ScriptObject(isolate, value);
+    }
     exception_state.ThrowTypeError(
         ExceptionMessages::ArgumentNotOfType(argument_index, "object"));
-    return ScriptValue();
+    return ScriptObject();
   }
 };
 
 template <>
 struct CORE_EXPORT NativeValueTraits<IDLNullable<IDLObject>>
     : public NativeValueTraitsBase<IDLNullable<IDLObject>> {
-  static ScriptValue NativeValue(v8::Isolate* isolate,
-                                 v8::Local<v8::Value> value,
-                                 ExceptionState& exception_state) {
-    if (value->IsObject())
-      return ScriptValue(isolate, value);
-    if (value->IsNullOrUndefined())
-      return ScriptValue(isolate, v8::Null(isolate));
+  static ScriptObject NativeValue(v8::Isolate* isolate,
+                                  v8::Local<v8::Value> value,
+                                  ExceptionState& exception_state) {
+    if (value->IsObject()) {
+      return ScriptObject(isolate, value);
+    }
+    if (value->IsNullOrUndefined()) {
+      return ScriptObject::CreateNull(isolate);
+    }
     exception_state.ThrowTypeError(
         ExceptionMessages::FailedToConvertJSValue("object"));
-    return ScriptValue();
+    return ScriptObject();
   }
 
-  static ScriptValue ArgumentValue(v8::Isolate* isolate,
-                                   int argument_index,
-                                   v8::Local<v8::Value> value,
-                                   ExceptionState& exception_state) {
-    if (value->IsObject())
-      return ScriptValue(isolate, value);
-    if (value->IsNullOrUndefined())
-      return ScriptValue(isolate, v8::Null(isolate));
+  static ScriptObject ArgumentValue(v8::Isolate* isolate,
+                                    int argument_index,
+                                    v8::Local<v8::Value> value,
+                                    ExceptionState& exception_state) {
+    if (value->IsObject()) {
+      return ScriptObject(isolate, value);
+    }
+    if (value->IsNullOrUndefined()) {
+      return ScriptObject::CreateNull(isolate);
+    }
     exception_state.ThrowTypeError(
         ExceptionMessages::ArgumentNotOfType(argument_index, "object"));
-    return ScriptValue();
-  }
-};
-
-// Promise types
-template <>
-struct CORE_EXPORT NativeValueTraits<IDLPromise>
-    : public NativeValueTraitsBase<IDLPromise> {
-  static ScriptPromise NativeValue(v8::Isolate* isolate,
-                                   v8::Local<v8::Value> value,
-                                   ExceptionState& exception_state) {
-    return ScriptPromise::Cast(ScriptState::From(isolate->GetCurrentContext()),
-                               value);
+    return ScriptObject();
   }
 };
 
 // IDLNullable<IDLPromise> must not be used.
-template <>
-struct NativeValueTraits<IDLNullable<IDLPromise>>;
+template <typename T>
+struct NativeValueTraits<IDLNullable<IDLPromise<T>>>;
 
 // Sequence types
 
@@ -949,9 +805,9 @@ struct NativeValueTraits<IDLNullable<IDLPromise>>;
 //      type (a value type) for years until 2021 January.  This point is very
 //      inconsistent but kept unchanged so far.
 // - IDLNullable<IDLSequence<T>> where T is not traceable
-//   => absl::optional<Vector<T>> as a value type
+//   => std::optional<Vector<T>> as a value type
 // - IDLNullable<IDLSequence<T>> where T is traceable
-//   => HeapVector<T>* as a reference type.  absl::optional<HeapVector<T>> is
+//   => HeapVector<T>* as a reference type.  std::optional<HeapVector<T>> is
 //      not an option because it's not appropriately traceable despite that
 //      the content HeapVector needs tracing.  As same as other
 //      GarbageCollected types, pointer type is used to represent IDL nullable
@@ -963,8 +819,8 @@ struct NativeValueTraits<IDLSequence<T>>
   using typename NativeValueTraitsBase<IDLSequence<T>>::ImplType;
 
   // HeapVector is GarbageCollected, so HeapVector<T>* is used for IDLNullable
-  // while absl::optional<Vector<T>> is used for IDLNullable<Vector<T>>.
-  static constexpr bool has_null_value = WTF::IsTraceable<T>::value;
+  // while std::optional<Vector<T>> is used for IDLNullable<Vector<T>>.
+  static constexpr bool has_null_value = IsTraceableV<T>;
 
   // https://webidl.spec.whatwg.org/#es-sequence
   static ImplType NativeValue(v8::Isolate* isolate,
@@ -1024,15 +880,87 @@ CreateIDLSequenceFromV8ArraySlow(v8::Isolate* isolate,
     return {};
   }
 
-  typename NativeValueTraits<IDLSequence<T>>::ImplType result;
+  using ResultType = typename NativeValueTraits<IDLSequence<T>>::ImplType;
+  ResultType result;
   result.ReserveInitialCapacity(length);
   v8::Local<v8::Context> current_context = isolate->GetCurrentContext();
-  v8::TryCatch try_block(isolate);
+  TryRethrowScope rethrow_scope(isolate, exception_state);
+
+  // Fast path -- we're creating a sequence of script wrappables, which can be
+  // done by directly getting underlying object as long as array types are
+  // homogeneous. With ScriptWrappables, we don't expect to enter JS during
+  // iteration, so we can rely on v8::Array::Iterate() which is much faster than
+  // iterating an array on the client side of the v8. Additionally, for most
+  // subsptyes of ScriptWrappables, we can speed up type checks (see more on
+  // that below next to supports_scriptwrappable_specific_fast_array_iteration
+  // check.
+  if constexpr (std::is_base_of_v<ScriptWrappable, T>) {
+    struct CallbackData {
+      STACK_ALLOCATED();
+
+     public:
+      v8::Isolate* isolate;
+      v8::TypecheckWitness witness;
+      ResultType& result;
+      ExceptionState& exception_state;
+      CallbackData(v8::Isolate* isolate,
+                   ResultType& result,
+                   ExceptionState& exception_state)
+          : isolate(isolate),
+            witness(isolate),
+            result(result),
+            exception_state(exception_state) {}
+    };
+
+    CallbackData callback_data(isolate, result, exception_state);
+    v8::Array::IterationCallback callback = [](uint32_t index,
+                                               v8::Local<v8::Value> v8_element,
+                                               void* data) {
+      CallbackData* callback_data = reinterpret_cast<CallbackData*>(data);
+      v8::Isolate* isolate = callback_data->isolate;
+      // 3.4. Initialize Si to the result of converting nextItem to an IDL value
+      //   of type T.
+      v8::TypecheckWitness& witness = callback_data->witness;
+      // We can speed up type check by taking advantage of V8's type witness,
+      // provided traits' NativeValue implementation doesn't have additional
+      // logic beyond checking the type and calling ToScriptWrappable().
+      if constexpr (
+          NativeValueTraits<
+              T>::supports_scriptwrappable_specific_fast_array_iteration) {
+        if (witness.Matches(v8_element)) {
+          callback_data->result.push_back(
+              ToScriptWrappable<T>(isolate, v8_element.As<v8::Object>()));
+          return v8::Array::CallbackResult::kContinue;
+        }
+      }
+      auto&& element = NativeValueTraits<T>::NativeValue(
+          isolate, v8_element, callback_data->exception_state);
+      if (callback_data->exception_state.HadException()) {
+        // It doesn't matter whether we return `kException` or `kBreak` here,
+        // as that only affects the return value of `v8_array->Iterate()`,
+        // which we are ignoring.
+        return v8::Array::CallbackResult::kException;
+      }
+      if constexpr (
+          NativeValueTraits<
+              T>::supports_scriptwrappable_specific_fast_array_iteration) {
+        witness.Update(v8_element);
+      }
+      callback_data->result.push_back(std::move(element));
+      return v8::Array::CallbackResult::kContinue;
+    };
+    if (!v8_array->Iterate(current_context, callback, &callback_data)
+             .IsJust()) {
+      DCHECK(exception_state.HadException());
+      return {};
+    }
+    return result;
+  }
+
   // Array length may change if array is mutated during iteration.
   for (uint32_t i = 0; i < v8_array->Length(); ++i) {
     v8::Local<v8::Value> v8_element;
     if (!v8_array->Get(current_context, i).ToLocal(&v8_element)) {
-      exception_state.RethrowV8Exception(try_block.Exception());
       return {};
     }
     // 3.4. Initialize Si to the result of converting nextItem to an IDL value
@@ -1043,6 +971,7 @@ CreateIDLSequenceFromV8ArraySlow(v8::Isolate* isolate,
       return {};
     result.push_back(std::move(element));
   }
+
   // 3.2. If next is false, then return an IDL sequence value of type
   //   sequence<T> of length i, where the value of the element at index j is Sj.
   return result;
@@ -1094,7 +1023,8 @@ NativeValueTraits<IDLSequence<T>>::NativeValue(
   // 3. If method is undefined, throw a TypeError.
   // 4. Return the result of creating a sequence from V and method.
   auto script_iterator = ScriptIterator::FromIterable(
-      isolate, value.As<v8::Object>(), exception_state);
+      isolate, value.As<v8::Object>(), exception_state,
+      ScriptIterator::Kind::kSync);
   if (exception_state.HadException())
     return ImplType();
   if (script_iterator.IsNull()) {
@@ -1108,12 +1038,14 @@ NativeValueTraits<IDLSequence<T>>::NativeValue(
       isolate, std::move(script_iterator), exception_state);
 }
 
+// TODO(392817527): Nullable sequences can be implemented as
+// optional<HeapVector> which was previously not allowed as HeapVector was also
+// GarbageCollected.
 template <typename T>
-struct NativeValueTraits<IDLNullable<IDLSequence<T>>,
-                         typename std::enable_if_t<
-                             NativeValueTraits<IDLSequence<T>>::has_null_value>>
-    : public NativeValueTraitsBase<HeapVector<AddMemberIfNeeded<T>>*> {
-  using ImplType = typename NativeValueTraits<IDLSequence<T>>::ImplType*;
+  requires NativeValueTraits<IDLSequence<T>>::has_null_value
+struct NativeValueTraits<IDLNullable<IDLSequence<T>>>
+    : public NativeValueTraitsBase<GCedHeapVector<AddMemberIfNeeded<T>>*> {
+  using ImplType = GCedHeapVector<AddMemberIfNeeded<T>>*;
 
   static ImplType NativeValue(v8::Isolate* isolate,
                               v8::Local<v8::Value> value,
@@ -1125,7 +1057,8 @@ struct NativeValueTraits<IDLNullable<IDLSequence<T>>,
         isolate, value, exception_state);
     if (exception_state.HadException())
       return nullptr;
-    auto* on_heap = MakeGarbageCollected<HeapVector<AddMemberIfNeeded<T>>>();
+    auto* on_heap =
+        MakeGarbageCollected<GCedHeapVector<AddMemberIfNeeded<T>>>();
     on_heap->swap(on_stack);
     return on_heap;
   }
@@ -1141,7 +1074,8 @@ struct NativeValueTraits<IDLNullable<IDLSequence<T>>,
         isolate, argument_index, value, exception_state);
     if (exception_state.HadException())
       return nullptr;
-    auto* on_heap = MakeGarbageCollected<HeapVector<AddMemberIfNeeded<T>>>();
+    auto* on_heap =
+        MakeGarbageCollected<GCedHeapVector<AddMemberIfNeeded<T>>>();
     on_heap->swap(on_stack);
     return on_heap;
   }
@@ -1173,14 +1107,22 @@ struct NativeValueTraits<IDLOptional<IDLSequence<T>>>
 };
 
 // Frozen array types
+//
+// Just for convenience, NativeValueTraits<IDLArray<T>> returns a mutable
+// (Heap)Vector<T> rather than an immutable FrozenArray<T>. It's easy (and cheap
+// when the move semantics is used) to convert a (Heap)Vector<T> to a
+// FrozenArray<T>, but the reverse conversion is not.
+//
+// Note that it's possible that Blink implementation wants to make some
+// modifications on the sequence before making it frozen. Thus this returns
+// a mutable (Heap)Vector.
 template <typename T>
 struct NativeValueTraits<IDLArray<T>>
     : public NativeValueTraits<IDLSequence<T>> {};
 
 template <typename T>
-struct NativeValueTraits<IDLNullable<IDLArray<T>>,
-                         typename std::enable_if_t<
-                             NativeValueTraits<IDLSequence<T>>::has_null_value>>
+  requires NativeValueTraits<IDLSequence<T>>::has_null_value
+struct NativeValueTraits<IDLNullable<IDLArray<T>>>
     : public NativeValueTraits<IDLNullable<IDLSequence<T>>> {};
 
 // Record types
@@ -1205,7 +1147,7 @@ struct NativeValueTraits<IDLRecord<K, V>>
       return ImplType();
     }
     v8::Local<v8::Object> v8_object = v8::Local<v8::Object>::Cast(v8_value);
-    v8::TryCatch block(isolate);
+    TryRethrowScope rethrow_scope(isolate, exception_state);
 
     // "3. Let keys be ? O.[[OwnPropertyKeys]]()."
     v8::Local<v8::Array> keys;
@@ -1218,17 +1160,21 @@ struct NativeValueTraits<IDLRecord<K, V>>
                                        v8::PropertyFilter::ALL_PROPERTIES),
                                    v8::KeyConversionMode::kConvertToString)
              .ToLocal(&keys)) {
-      exception_state.RethrowV8Exception(block.Exception());
       return ImplType();
     }
-    if (keys->Length() > ImplType::MaxCapacity()) {
+
+    // Store the length because we use UncheckedAppend() below and we want to
+    // make sure that the length does not change during the loop.
+    uint32_t length = keys->Length();
+
+    if (length > ImplType::MaxCapacity()) {
       exception_state.ThrowRangeError("Array length exceeds supported limit.");
       return ImplType();
     }
 
     // "2. Let result be a new empty instance of record<K, V>."
     ImplType result;
-    result.ReserveInitialCapacity(keys->Length());
+    result.ReserveInitialCapacity(length);
 
     // The conversion algorithm needs a data structure with fast insertion at
     // the end while at the same time requiring fast checks for previous insert
@@ -1236,11 +1182,10 @@ struct NativeValueTraits<IDLRecord<K, V>>
     // the latter part.
     HashMap<String, uint32_t> seen_keys;
 
-    for (uint32_t i = 0; i < keys->Length(); ++i) {
+    for (uint32_t i = 0; i < length; ++i) {
       // "4. Repeat, for each element key of keys in List order:"
       v8::Local<v8::Value> key;
       if (!keys->Get(context, i).ToLocal(&key)) {
-        exception_state.RethrowV8Exception(block.Exception());
         return ImplType();
       }
 
@@ -1248,7 +1193,6 @@ struct NativeValueTraits<IDLRecord<K, V>>
       v8::Local<v8::Value> desc;
       if (!v8_object->GetOwnPropertyDescriptor(context, key.As<v8::Name>())
                .ToLocal(&desc)) {
-        exception_state.RethrowV8Exception(block.Exception());
         return ImplType();
       }
 
@@ -1276,7 +1220,6 @@ struct NativeValueTraits<IDLRecord<K, V>>
       // "4.2.2. Let value be ? Get(O, key)."
       v8::Local<v8::Value> value;
       if (!v8_object->Get(context, key).ToLocal(&value)) {
-        exception_state.RethrowV8Exception(block.Exception());
         return ImplType();
       }
 
@@ -1289,7 +1232,8 @@ struct NativeValueTraits<IDLRecord<K, V>>
       if (seen_keys.Contains(typed_key)) {
         // "4.2.4. If typedKey is already a key in result, set its value to
         //         typedValue.
-        //         Note: This can happen when O is a proxy object."
+        //         Note: This can happen when K is USVString and key contains
+        //         unpaired surrogates."
         const uint32_t pos = seen_keys.at(typed_key);
         result[pos].second = std::move(typed_value);
       } else {
@@ -1309,10 +1253,8 @@ struct NativeValueTraits<IDLRecord<K, V>>
 
 // Callback function types
 template <typename T>
-struct NativeValueTraits<
-    T,
-    typename std::enable_if_t<std::is_base_of<CallbackFunctionBase, T>::value>>
-    : public NativeValueTraitsBase<T*> {
+  requires std::derived_from<T, CallbackFunctionBase>
+struct NativeValueTraits<T> : public NativeValueTraitsBase<T*> {
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
                         ExceptionState& exception_state) {
@@ -1335,9 +1277,8 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    IDLNullable<T>,
-    typename std::enable_if_t<std::is_base_of<CallbackFunctionBase, T>::value>>
+  requires std::derived_from<T, CallbackFunctionBase>
+struct NativeValueTraits<IDLNullable<T>>
     : public NativeValueTraitsBase<IDLNullable<T>> {
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
@@ -1366,10 +1307,8 @@ struct NativeValueTraits<
 
 // Callback interface types
 template <typename T>
-struct NativeValueTraits<
-    T,
-    typename std::enable_if_t<std::is_base_of<CallbackInterfaceBase, T>::value>>
-    : public NativeValueTraitsBase<T*> {
+  requires std::derived_from<T, CallbackInterfaceBase>
+struct NativeValueTraits<T> : public NativeValueTraitsBase<T*> {
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
                         ExceptionState& exception_state) {
@@ -1391,10 +1330,10 @@ struct NativeValueTraits<
   }
 };
 
+// Interface types
 template <typename T>
-struct NativeValueTraits<
-    IDLNullable<T>,
-    typename std::enable_if_t<std::is_base_of<CallbackInterfaceBase, T>::value>>
+  requires std::derived_from<T, CallbackInterfaceBase>
+struct NativeValueTraits<IDLNullable<T>>
     : public NativeValueTraitsBase<IDLNullable<T>> {
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
@@ -1423,11 +1362,8 @@ struct NativeValueTraits<
 
 // Dictionary types
 template <typename T>
-struct NativeValueTraits<
-    T,
-    typename std::enable_if_t<
-        std::is_base_of<bindings::DictionaryBase, T>::value>>
-    : public NativeValueTraitsBase<T*> {
+  requires std::derived_from<T, bindings::InputDictionaryBase>
+struct NativeValueTraits<T> : public NativeValueTraitsBase<T*> {
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
                         ExceptionState& exception_state) {
@@ -1438,14 +1374,12 @@ struct NativeValueTraits<
 // We don't support nullable dictionary types in general since it's quite
 // confusing and often misused.
 template <typename T>
-struct NativeValueTraits<
-    IDLNullable<T>,
-    typename std::enable_if_t<
-        std::is_base_of<bindings::DictionaryBase, T>::value &&
-        (std::is_same<T, GPUColorTargetState>::value ||
-         std::is_same<T, GPURenderPassColorAttachment>::value ||
-         std::is_same<T, GPUVertexBufferLayout>::value)>>
-    : public NativeValueTraitsBase<T*> {
+  requires std::derived_from<T, bindings::InputDictionaryBase> &&
+           (std::same_as<T, CookieListItem> ||
+            std::same_as<T, GPUColorTargetState> ||
+            std::same_as<T, GPURenderPassColorAttachment> ||
+            std::same_as<T, GPUVertexBufferLayout>)
+struct NativeValueTraits<IDLNullable<T>> : public NativeValueTraitsBase<T*> {
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
                         ExceptionState& exception_state) {
@@ -1457,11 +1391,8 @@ struct NativeValueTraits<
 
 // Enumeration types
 template <typename T>
-struct NativeValueTraits<
-    T,
-    typename std::enable_if_t<
-        std::is_base_of<bindings::EnumerationBase, T>::value>>
-    : public NativeValueTraitsBase<T> {
+  requires std::derived_from<T, bindings::EnumerationBase>
+struct NativeValueTraits<T> : public NativeValueTraitsBase<T> {
   static T NativeValue(v8::Isolate* isolate,
                        v8::Local<v8::Value> value,
                        ExceptionState& exception_state) {
@@ -1471,16 +1402,23 @@ struct NativeValueTraits<
 
 // Interface types
 template <typename T>
-struct NativeValueTraits<
-    T,
-    typename std::enable_if_t<std::is_base_of<ScriptWrappable, T>::value>>
-    : public NativeValueTraitsBase<T*> {
+  requires std::derived_from<T, ScriptWrappable>
+struct NativeValueTraits<T> : public NativeValueTraitsBase<T*> {
+  // This signifies that CreateIDLSequenceFromV8ArraySlow() may apply
+  // certain optimization based on assumptions about `NativeValue()`
+  // implementation below. For subclasses of ScriptWrappable that have
+  // different implementation of NativeValue(), this should remain false.
+  static constexpr bool supports_scriptwrappable_specific_fast_array_iteration =
+      true;
+
   static inline T* NativeValue(v8::Isolate* isolate,
                                v8::Local<v8::Value> value,
                                ExceptionState& exception_state) {
     const WrapperTypeInfo* wrapper_type_info = T::GetStaticWrapperTypeInfo();
-    if (V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info, value))
-      return ToScriptWrappable(value.As<v8::Object>())->template ToImpl<T>();
+    if (V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info,
+                                                     value)) {
+      return ToScriptWrappable<T>(isolate, value.As<v8::Object>());
+    }
 
     bindings::NativeValueTraitsInterfaceNotOfType(wrapper_type_info,
                                                   exception_state);
@@ -1492,8 +1430,10 @@ struct NativeValueTraits<
                                  v8::Local<v8::Value> value,
                                  ExceptionState& exception_state) {
     const WrapperTypeInfo* wrapper_type_info = T::GetStaticWrapperTypeInfo();
-    if (V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info, value))
-      return ToScriptWrappable(value.As<v8::Object>())->template ToImpl<T>();
+    if (V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info,
+                                                     value)) {
+      return ToScriptWrappable<T>(isolate, value.As<v8::Object>());
+    }
 
     bindings::NativeValueTraitsInterfaceNotOfType(
         wrapper_type_info, argument_index, exception_state);
@@ -1502,16 +1442,17 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    IDLNullable<T>,
-    typename std::enable_if_t<std::is_base_of<ScriptWrappable, T>::value>>
+  requires std::derived_from<T, ScriptWrappable>
+struct NativeValueTraits<IDLNullable<T>>
     : public NativeValueTraitsBase<IDLNullable<T>> {
   static inline T* NativeValue(v8::Isolate* isolate,
                                v8::Local<v8::Value> value,
                                ExceptionState& exception_state) {
     const WrapperTypeInfo* wrapper_type_info = T::GetStaticWrapperTypeInfo();
-    if (V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info, value))
-      return ToScriptWrappable(value.As<v8::Object>())->template ToImpl<T>();
+    if (V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info,
+                                                     value)) {
+      return ToScriptWrappable<T>(isolate, value.As<v8::Object>());
+    }
 
     if (value->IsNullOrUndefined())
       return nullptr;
@@ -1526,8 +1467,10 @@ struct NativeValueTraits<
                                  v8::Local<v8::Value> value,
                                  ExceptionState& exception_state) {
     const WrapperTypeInfo* wrapper_type_info = T::GetStaticWrapperTypeInfo();
-    if (V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info, value))
-      return ToScriptWrappable(value.As<v8::Object>())->template ToImpl<T>();
+    if (V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info,
+                                                     value)) {
+      return ToScriptWrappable<T>(isolate, value.As<v8::Object>());
+    }
 
     if (value->IsNullOrUndefined())
       return nullptr;
@@ -1539,10 +1482,8 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    T,
-    typename std::enable_if_t<std::is_base_of<bindings::UnionBase, T>::value>>
-    : public NativeValueTraitsBase<T*> {
+  requires std::derived_from<T, bindings::UnionBase>
+struct NativeValueTraits<T> : public NativeValueTraitsBase<T*> {
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
                         ExceptionState& exception_state) {
@@ -1558,10 +1499,8 @@ struct NativeValueTraits<
 };
 
 template <typename T>
-struct NativeValueTraits<
-    IDLNullable<T>,
-    typename std::enable_if_t<std::is_base_of<bindings::UnionBase, T>::value>>
-    : public NativeValueTraitsBase<T*> {
+  requires std::derived_from<T, bindings::UnionBase>
+struct NativeValueTraits<IDLNullable<T>> : public NativeValueTraitsBase<T*> {
   static T* NativeValue(v8::Isolate* isolate,
                         v8::Local<v8::Value> value,
                         ExceptionState& exception_state) {
@@ -1582,19 +1521,18 @@ struct NativeValueTraits<
 
 // Nullable types
 template <typename InnerType>
-struct NativeValueTraits<
-    IDLNullable<InnerType>,
-    typename std::enable_if_t<!NativeValueTraits<InnerType>::has_null_value>>
+  requires(!NativeValueTraits<InnerType>::has_null_value)
+struct NativeValueTraits<IDLNullable<InnerType>>
     : public NativeValueTraitsBase<IDLNullable<InnerType>> {
   // https://webidl.spec.whatwg.org/#es-nullable-type
   using ImplType =
-      absl::optional<typename NativeValueTraits<InnerType>::ImplType>;
+      std::optional<typename NativeValueTraits<InnerType>::ImplType>;
 
   static ImplType NativeValue(v8::Isolate* isolate,
                               v8::Local<v8::Value> value,
                               ExceptionState& exception_state) {
     if (value->IsNullOrUndefined())
-      return absl::nullopt;
+      return std::nullopt;
     return NativeValueTraits<InnerType>::NativeValue(isolate, value,
                                                      exception_state);
   }
@@ -1604,7 +1542,7 @@ struct NativeValueTraits<
                                 v8::Local<v8::Value> value,
                                 ExceptionState& exception_state) {
     if (value->IsNullOrUndefined())
-      return absl::nullopt;
+      return std::nullopt;
     return NativeValueTraits<InnerType>::ArgumentValue(isolate, argument_index,
                                                        value, exception_state);
   }
@@ -1616,9 +1554,8 @@ struct NativeValueTraits<IDLNullable<IDLNullable<T>>>;
 
 // Optional types
 template <typename T>
-struct NativeValueTraits<IDLOptional<T>,
-                         typename std::enable_if_t<std::is_arithmetic<
-                             typename NativeValueTraits<T>::ImplType>::value>>
+  requires std::is_arithmetic_v<typename NativeValueTraits<T>::ImplType>
+struct NativeValueTraits<IDLOptional<T>>
     : public NativeValueTraitsBase<typename NativeValueTraits<T>::ImplType> {
   using ImplType = typename NativeValueTraits<T>::ImplType;
 
@@ -1640,9 +1577,8 @@ struct NativeValueTraits<IDLOptional<T>,
 };
 
 template <typename T>
-struct NativeValueTraits<IDLOptional<T>,
-                         typename std::enable_if_t<std::is_pointer<
-                             typename NativeValueTraits<T>::ImplType>::value>>
+  requires std::is_pointer_v<typename NativeValueTraits<T>::ImplType>
+struct NativeValueTraits<IDLOptional<T>>
     : public NativeValueTraitsBase<typename NativeValueTraits<T>::ImplType> {
   using ImplType = typename NativeValueTraits<T>::ImplType;
 
@@ -1662,28 +1598,6 @@ struct NativeValueTraits<IDLOptional<T>,
       return nullptr;
     return NativeValueTraits<T>::ArgumentValue(isolate, argument_index, value,
                                                exception_state);
-  }
-};
-
-// Date
-template <>
-struct CORE_EXPORT NativeValueTraits<IDLDate>
-    : public NativeValueTraitsBase<IDLDate> {
-  // IDLDate must be always used as IDLNullable<IDLDate>.
-  static absl::optional<base::Time> NativeValue(
-      v8::Isolate* isolate,
-      v8::Local<v8::Value> value,
-      ExceptionState& exception_state) = delete;
-};
-
-template <>
-struct CORE_EXPORT NativeValueTraits<IDLNullable<IDLDate>>
-    : public NativeValueTraitsBase<IDLNullable<IDLDate>> {
-  static absl::optional<base::Time> NativeValue(
-      v8::Isolate* isolate,
-      v8::Local<v8::Value> value,
-      ExceptionState& exception_state) {
-    return ToCoreNullableDate(isolate, value, exception_state);
   }
 };
 
@@ -1720,6 +1634,142 @@ template <>
 struct NativeValueTraits<IDLNullable<IDLOnBeforeUnloadEventHandler>>;
 template <>
 struct NativeValueTraits<IDLNullable<IDLOnErrorEventHandler>>;
+
+namespace bindings {
+bool CORE_EXPORT ThrowIfResizable(v8::Local<v8::ArrayBuffer> array_buffer,
+                                  ExceptionState& exception_state);
+bool CORE_EXPORT
+ThrowIfResizable(v8::Local<v8::SharedArrayBuffer> shared_array_buffer,
+                 ExceptionState& exception_state);
+}  // namespace bindings
+
+template <typename T>
+  requires std::derived_from<T, PassAsSpanMarkerBase> && (!T::is_typed)
+struct NativeValueTraits<T> : public NativeValueTraitsBase<T> {
+  static void NativeValue(v8::Isolate* isolate,
+                          v8::Local<v8::Value> value,
+                          ExceptionState& exception_state) = delete;
+
+  static bindings::internal::ByteSpanWithInlineStorage<T::perform_detach_check>
+  ArgumentValue(v8::Isolate* isolate,
+                int argument_index,
+                v8::Local<v8::Value> value,
+                ExceptionState& exception_state) {
+    bindings::internal::ByteSpanWithInlineStorage<T::perform_detach_check>
+        result;
+    if (value->IsArrayBuffer()) {
+      v8::Local<v8::ArrayBuffer> array_buffer = value.As<v8::ArrayBuffer>();
+      if (!bindings::ThrowIfResizable(array_buffer, exception_state))
+          [[unlikely]] {
+        return result;
+      }
+      result.MaybeSetArrayBuffer(array_buffer);
+      result.Assign(bindings::internal::GetArrayData(array_buffer));
+      return result;
+    }
+    if (T::allow_shared && value->IsSharedArrayBuffer()) {
+      v8::Local<v8::SharedArrayBuffer> shared_array_buffer =
+          value.As<v8::SharedArrayBuffer>();
+      if (!bindings::ThrowIfResizable(shared_array_buffer, exception_state))
+          [[unlikely]] {
+        return result;
+      }
+      result.Assign(bindings::internal::GetArrayData(shared_array_buffer));
+      return result;
+    }
+    if (value->IsArrayBufferView()) {
+      v8::Local<v8::ArrayBufferView> view = value.As<v8::ArrayBufferView>();
+      if (view->HasBuffer()) {
+        v8::Local<v8::ArrayBuffer> array_buffer = view->Buffer();
+        if (!bindings::ThrowIfResizable(array_buffer, exception_state))
+            [[unlikely]] {
+          return result;
+        }
+        if (!T::allow_shared && array_buffer->GetBackingStore()->IsShared())
+            [[unlikely]] {
+          exception_state.ThrowTypeError(
+              "The provided ArrayBufferView value must not be shared.");
+          return result;
+        }
+        result.MaybeSetArrayBuffer(array_buffer);
+      }
+      result.Assign(view->GetContents(result.GetInlineStorage()));
+      return result;
+    }
+    exception_state.ThrowTypeError(
+        ExceptionMessages::ArgumentNotOfType(argument_index, "ArrayBuffer"));
+    return result;
+  }
+};
+
+template <typename T>
+  requires std::derived_from<T, PassAsSpanMarkerBase> && T::is_typed
+struct NativeValueTraits<T> : public NativeValueTraitsBase<T> {
+  using ElementType = typename T::ElementType;
+
+  static void NativeValue(v8::Isolate* isolate,
+                          v8::Local<v8::Value> value,
+                          ExceptionState& exception_state) = delete;
+
+  static typename T::ReturnType ArgumentValue(v8::Isolate* isolate,
+                                              int argument_index,
+                                              v8::Local<v8::Value> value,
+                                              ExceptionState& exception_state) {
+    typename T::ReturnType result;
+    using Traits = bindings::internal::TypedArrayElementTraits<ElementType>;
+    if (Traits::IsViewOfType(value)) [[likely]] {
+      v8::Local<v8::ArrayBufferView> view = value.As<v8::ArrayBufferView>();
+      if (view->HasBuffer()) {
+        v8::Local<v8::ArrayBuffer> array_buffer = view->Buffer();
+        if (!bindings::ThrowIfResizable(array_buffer, exception_state))
+            [[unlikely]] {
+          return result;
+        }
+        if (!T::allow_shared && array_buffer->GetBackingStore()->IsShared())
+            [[unlikely]] {
+          exception_state.ThrowTypeError(
+              "The provided ArrayBufferView value must not be shared.");
+          return result;
+        }
+        result.MaybeSetArrayBuffer(array_buffer);
+      }
+      result.Assign(view->GetContents(result.GetInlineStorage()));
+      return result;
+    }
+    if constexpr (T::allow_sequence) {
+      auto&& vec = NativeValueTraits<IDLSequence<typename Traits::IDLType>>::
+          ArgumentValue(isolate, argument_index, value, exception_state);
+      if (!exception_state.HadException()) [[likely]] {
+        result.Assign(std::move(vec));
+      }
+      return result;
+    }
+    exception_state.ThrowTypeError(
+        ExceptionMessages::ArgumentNotOfType(argument_index, "TypedArray"));
+    return result;
+  }
+};
+
+template <typename T>
+  requires std::derived_from<T, PassAsSpanMarkerBase>
+struct NativeValueTraits<IDLOptional<T>> : public NativeValueTraitsBase<T> {
+  // PassAsSpan is only applicable to arguments.
+  static void NativeValue(v8::Isolate* isolate,
+                          v8::Local<v8::Value> value,
+                          ExceptionState& exception_state) = delete;
+
+  static std::optional<typename T::ReturnType> ArgumentValue(
+      v8::Isolate* isolate,
+      int argument_index,
+      v8::Local<v8::Value> value,
+      ExceptionState& exception_state) {
+    if (value->IsUndefined()) {
+      return std::nullopt;
+    }
+    return NativeValueTraits<T>::ArgumentValue(isolate, argument_index, value,
+                                               exception_state);
+  }
+};
 
 }  // namespace blink
 

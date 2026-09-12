@@ -6,15 +6,23 @@
 #define CHROME_BROWSER_UI_TABS_TAB_STRIP_MODEL_DELEGATE_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
-#include "chrome/browser/ui/tabs/tab_strip_model.h"
+#include "base/functional/callback_forward.h"
+#include "chrome/browser/ui/tabs/tab_enums.h"
+#include "chrome/common/buildflags.h"
 #include "components/sessions/core/session_id.h"
+#include "components/split_tabs/split_tab_id.h"
 #include "components/tab_groups/tab_group_id.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/tabs/public/tab_interface.h"
 
-class Browser;
+class BrowserWindowInterface;
 class GURL;
+
+namespace tabs {
+class TabModel;
+}
 
 namespace content {
 class WebContents;
@@ -26,6 +34,11 @@ class Rect;
 
 namespace tab_groups {
 class TabGroupId;
+}
+
+namespace split_tabs {
+enum class SplitTabLayout;
+enum class SplitTabCreatedSource;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -42,24 +55,22 @@ class TabGroupId;
 ///////////////////////////////////////////////////////////////////////////////
 class TabStripModelDelegate {
  public:
-  enum {
-    TAB_MOVE_ACTION = 1,
-    TAB_TEAROFF_ACTION = 2
-  };
+  enum { TAB_MOVE_ACTION = 1, TAB_TEAROFF_ACTION = 2 };
 
-  virtual ~TabStripModelDelegate() {}
+  virtual ~TabStripModelDelegate() = default;
 
-  // Adds a tab to the model and loads |url| in the tab. If |url| is an empty
-  // URL, then the new tab-page is loaded instead. An |index| value of -1
+  // Adds a tab to the model and loads `url` in the tab. If `url` is an empty
+  // URL, then the new tab-page is loaded instead. An `index` value of -1
   // means to append the contents to the end of the tab strip.
   virtual void AddTabAt(
       const GURL& url,
       int index,
       bool foreground,
-      absl::optional<tab_groups::TabGroupId> group = absl::nullopt) = 0;
+      std::optional<tab_groups::TabGroupId> group = std::nullopt,
+      bool pinned = false) = 0;
 
   // Asks for a new TabStripModel to be created and the given web contentses to
-  // be added to it. Its size and position are reflected in |window_bounds|.
+  // be added to it. Its size and position are reflected in `window_bounds`.
   // Returns the Browser object representing the newly created window and tab
   // strip. This does not show the window; it's up to the caller to do so.
   //
@@ -72,13 +83,13 @@ class TabStripModelDelegate {
     NewStripContents& operator=(const NewStripContents&) = delete;
     ~NewStripContents();
     NewStripContents(NewStripContents&&);
-    // The WebContents to add.
-    std::unique_ptr<content::WebContents> web_contents;
+    // The TabModel to add.
+    std::unique_ptr<tabs::TabModel> tab;
     // A bitmask of TabStripModel::AddTabTypes to apply to the added contents.
     int add_types = 0;
   };
-  virtual Browser* CreateNewStripWithContents(
-      std::vector<NewStripContents> contentses,
+  virtual BrowserWindowInterface* CreateNewStripWithTabs(
+      std::vector<NewStripContents> tabs,
       const gfx::Rect& window_bounds,
       bool maximize) = 0;
 
@@ -98,37 +109,63 @@ class TabStripModelDelegate {
   virtual bool IsTabStripEditable() = 0;
 
   // Duplicates the contents at the provided index and places it into a new tab.
-  virtual void DuplicateContentsAt(int index) = 0;
+  // Returns the duplicated tab, if duplication succeeds.
+  virtual content::WebContents* DuplicateContentsAt(int index) = 0;
+
+  // Duplicates a split tab.
+  virtual void DuplicateSplit(split_tabs::SplitTabId split) = 0;
 
   // Move the contents at the provided indices into the specified window.
   virtual void MoveToExistingWindow(const std::vector<int>& indices,
                                     int browser_index) = 0;
 
-  // Returns whether the contents at |indices| can be moved from the current
+  // Returns whether the contents at `indices` can be moved from the current
   // tabstrip to a different window.
   virtual bool CanMoveTabsToWindow(const std::vector<int>& indices) = 0;
 
-  // Removes the contents at |indices| from this tab strip and places it into a
+  // Removes the contents at `indices` from this tab strip and places it into a
   // new window.
   virtual void MoveTabsToNewWindow(const std::vector<int>& indices) = 0;
 
-  // Moves all the tabs in the specified |group| to a new window, keeping them
+  // Moves all the tabs in the specified `group` to a new window, keeping them
   // grouped. The group in the new window will have the same appearance as
-  // |group| but a different ID, since IDs can't be shared across windows.
+  // `group` but a different ID, since IDs can't be shared across windows.
   virtual void MoveGroupToNewWindow(const tab_groups::TabGroupId& group) = 0;
 
   // Creates an entry in the historical tab database for the specified
   // WebContents. Returns the tab's unique SessionID if a historical tab was
   // created.
-  virtual absl::optional<SessionID> CreateHistoricalTab(
+  virtual std::optional<SessionID> CreateHistoricalTab(
       content::WebContents* contents) = 0;
 
   // Creates an entry in the historical group database for the specified
-  // |group|.
+  // `group`.
   virtual void CreateHistoricalGroup(const tab_groups::TabGroupId& group) = 0;
+
+  // Creates an entry in the historical split database for the specified
+  // `split_id`.
+  virtual void CreateHistoricalSplit(
+      const split_tabs::SplitTabId& split_id) = 0;
+
+  // Called on group creation after the group has been added to the tabstrip and
+  // all tabs have been added.
+  virtual void GroupAdded(const tab_groups::TabGroupId& group) = 0;
+
+  // Notifies the delegate that a group is about to be closed, and allows it
+  // to perform any preparation necessary.
+  virtual void WillCloseGroup(const tab_groups::TabGroupId& group) = 0;
+
+  // Called before a full split view (both tabs) is closed.
+  virtual void WillCloseSplit(const split_tabs::SplitTabId& split_id) = 0;
 
   // Notifies the tab restore service that the group is no longer closing.
   virtual void GroupCloseStopped(const tab_groups::TabGroupId& group) = 0;
+
+  // Notifies the tab restore service that the split view is done closing.
+  virtual void SplitClosed(const split_tabs::SplitTabId& split_id) = 0;
+
+  // Notifies the tab restore service that the split view is no longer closing.
+  virtual void SplitCloseStopped(const split_tabs::SplitTabId& split_id) = 0;
 
   // Runs any unload listeners associated with the specified WebContents
   // before it is closed. If there are unload listeners that need to be run,
@@ -139,46 +176,80 @@ class TabStripModelDelegate {
       content::WebContents* contents) = 0;
 
   // Returns true if we should run unload listeners before attempts
-  // to close |contents|.
+  // to close `contents`.
   virtual bool ShouldRunUnloadListenerBeforeClosing(
       content::WebContents* contents) = 0;
-
-  // Returns whether favicon should be shown.
-  virtual bool ShouldDisplayFavicon(
-      content::WebContents* web_contents) const = 0;
 
   // Returns whether the delegate allows reloading of WebContents.
   virtual bool CanReload() const = 0;
 
-  // Adds the specified WebContents to read later.
-  virtual void AddToReadLater(content::WebContents* web_contents) = 0;
+  // Adds the vector of WebContents to read later.
+  virtual void AddToReadLater(
+      std::vector<content::WebContents*> web_contentses) = 0;
 
   // Returns whether the tabstrip supports the read later feature.
   virtual bool SupportsReadLater() = 0;
-
-  // Gives the delegate an opportunity to cache (take ownership) of
-  // WebContents before they are destroyed. The delegate takes ownership by way
-  // of using std::move() on the `owned_contents` and resetting `remove_reason`
-  // to kCached. It is expected that any WebContents the delegate takes
-  // ownership of remain valid until the next message is pumped. In other
-  // words, the delegate must not immediately destroy any of the supplied
-  // WebContents.
-  // TODO(https://crbug.com/1234332): Provide active web contents.
-  virtual void CacheWebContents(
-      const std::vector<std::unique_ptr<TabStripModel::DetachedWebContents>>&
-          web_contents) = 0;
-
-  // Follows a web feed for the specified WebContents.
-  virtual void FollowSite(content::WebContents* web_contents) = 0;
-
-  // Unfollows a web feed for the specified WebContents.
-  virtual void UnfollowSite(content::WebContents* web_contents) = 0;
 
   // Returns whether this tab strip model is for a web app.
   virtual bool IsForWebApp() = 0;
 
   // Copies the URL of the given WebContents.
   virtual void CopyURL(content::WebContents* web_contents) = 0;
+
+  // Navigates the web_contents back to the previous page.
+  virtual void GoBack(content::WebContents* web_contents) = 0;
+
+  // Returns whether the web_contents can be navigated back.
+  virtual bool CanGoBack(content::WebContents* web_contents) = 0;
+
+  // Whether the associated window is a normal browser window.
+  virtual bool IsNormalWindow() = 0;
+
+  // Returns the BrowserWindow that owns the TabStripModel. Never changes.
+  virtual BrowserWindowInterface* GetBrowserWindowInterface() = 0;
+
+  // Creates a split view with the active tab and the tabs at `indices`. If
+  // `indices` is empty, a new tab navigated to the split tab empty state page
+  // will be used for the split view instead.
+  virtual void NewSplitTab(std::vector<int> indices,
+                           split_tabs::SplitTabLayout layout,
+                           split_tabs::SplitTabCreatedSource source) = 0;
+
+  // When performing actions to groups, some features may need to show
+  // interstitials before allowing deletion. `groups` is a list of all of the
+  // groups that would be Closed by the `close_callback` which may be called by
+  // the implementation. This should be called with a non empty `group_ids`.
+  // callback will either be executed by the delegate or asynchronously handled.
+  // When true `delete_groups` also deletes any saved groups that are closing.
+  // When false, groups will close normally but continue to be saved.
+  virtual void OnGroupsDestruction(
+      const std::vector<tab_groups::TabGroupId>& group_ids,
+      base::OnceCallback<void()> close_callback,
+      bool delete_groups) = 0;
+
+  virtual void OnRemovingAllTabsFromGroups(
+      const std::vector<tab_groups::TabGroupId>& group_ids,
+      base::OnceCallback<void()> callback) = 0;
+
+  // Glic related delegation (see GlicKeyedService and GlicSharingManager).
+  // Note: 'Pinning' in Glic is a distinct notion.
+
+  // Unpins the specified tabs from all Glic conversations.
+  virtual void GlicUnpinTabsFromAllConversations(
+      base::span<const tabs::TabHandle> tab_handles);
+
+  // Requests closing the specified tab, performing all closability checks,
+  // user prompts (e.g. UnloadController, group deletion dialogs), and fallback
+  // tab creation. If `on_approved` is provided, it is executed once all checks
+  // and prompts pass, before performing default tab destruction.
+  virtual void CloseTab(
+      const tabs::TabInterface* tab,
+      CloseTabSource source,
+      base::OnceCallback<void(CloseTabSource)> on_approved) = 0;
+
+  void CloseTab(const tabs::TabInterface* tab, CloseTabSource source) {
+    CloseTab(tab, source, base::OnceCallback<void(CloseTabSource)>());
+  }
 };
 
 #endif  // CHROME_BROWSER_UI_TABS_TAB_STRIP_MODEL_DELEGATE_H_

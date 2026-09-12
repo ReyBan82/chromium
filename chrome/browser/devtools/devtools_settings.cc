@@ -4,12 +4,13 @@
 
 #include "chrome/browser/devtools/devtools_settings.h"
 
+#include "base/strings/to_string.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/common/pref_names.h"
 #include "components/prefs/scoped_user_pref_update.h"
 
 const char DevToolsSettings::kSyncDevToolsPreferencesFrontendName[] =
-    "sync_preferences";
+    "sync-preferences";
 const bool DevToolsSettings::kSyncDevToolsPreferencesDefault = false;
 
 DevToolsSettings::DevToolsSettings(Profile* profile) : profile_(profile) {
@@ -64,33 +65,33 @@ void DevToolsSettings::Register(const std::string& name,
   remove_update->Remove(name);
 }
 
-base::Value DevToolsSettings::Get() {
-  base::Value::Dict settings;
+base::DictValue DevToolsSettings::Get() {
+  base::DictValue settings;
 
   PrefService* prefs = profile_->GetPrefs();
   // DevTools expects any kind of preference to be a string. Parsing is
   // happening on the frontend.
   settings.Set(
       kSyncDevToolsPreferencesFrontendName,
-      prefs->GetBoolean(prefs::kDevToolsSyncPreferences) ? "true" : "false");
+      base::ToString(prefs->GetBoolean(prefs::kDevToolsSyncPreferences)));
   settings.Merge(prefs->GetDict(prefs::kDevToolsPreferences).Clone());
   settings.Merge(prefs->GetDict(GetDictionaryNameForSyncedPrefs()).Clone());
 
-  return base::Value(std::move(settings));
+  return settings;
 }
 
-absl::optional<base::Value> DevToolsSettings::Get(const std::string& name) {
+std::optional<base::Value> DevToolsSettings::Get(const std::string& name) {
   PrefService* prefs = profile_->GetPrefs();
   if (name == kSyncDevToolsPreferencesFrontendName) {
     // DevTools expects any kind of preference to be a string. Parsing is
     // happening on the frontend.
     bool result = prefs->GetBoolean(prefs::kDevToolsSyncPreferences);
-    return base::Value(result ? "true" : "false");
+    return base::Value(base::ToString(result));
   }
   const char* dict_name = GetDictionaryNameForSettingsName(name);
-  const base::Value::Dict& dict = prefs->GetDict(dict_name);
+  const base::DictValue& dict = prefs->GetDict(dict_name);
   const base::Value* value = dict.Find(name);
-  return value ? absl::optional<base::Value>(value->Clone()) : absl::nullopt;
+  return value ? std::optional<base::Value>(value->Clone()) : std::nullopt;
 }
 
 void DevToolsSettings::Set(const std::string& name, const std::string& value) {
@@ -112,20 +113,60 @@ void DevToolsSettings::Remove(const std::string& name) {
     return;
   }
 
-  ScopedDictPrefUpdate update(profile_->GetPrefs(),
-                              GetDictionaryNameForSettingsName(name));
-  update->Remove(name);
+  PrefService* prefs = profile_->GetPrefs();
+  for (auto* dict_name :
+       {GetDictionaryNameForSyncedPrefs(), prefs::kDevToolsPreferences}) {
+    const base::DictValue& dict = prefs->GetDict(dict_name);
+    if (dict.Find(name)) {
+      ScopedDictPrefUpdate update(profile_->GetPrefs(), dict_name);
+      update->Remove(name);
+    }
+  }
 }
 
 void DevToolsSettings::Clear() {
   profile_->GetPrefs()->SetBoolean(prefs::kDevToolsSyncPreferences,
                                    kSyncDevToolsPreferencesDefault);
-  profile_->GetPrefs()->SetDict(prefs::kDevToolsPreferences,
-                                base::Value::Dict());
+  profile_->GetPrefs()->SetDict(prefs::kDevToolsPreferences, base::DictValue());
   profile_->GetPrefs()->SetDict(prefs::kDevToolsSyncedPreferencesSyncEnabled,
-                                base::Value::Dict());
+                                base::DictValue());
   profile_->GetPrefs()->SetDict(prefs::kDevToolsSyncedPreferencesSyncDisabled,
-                                base::Value::Dict());
+                                base::DictValue());
+}
+
+using devtools::DockSide;
+
+// static
+DockSide DevToolsSettings::GetDockSide(Profile* profile) {
+  if (!profile) {
+    return DockSide::kRight;
+  }
+
+  PrefService* prefs = profile->GetPrefs();
+  for (const char* dict_name : {GetDictionaryNameForSyncedPrefs(profile),
+                                prefs::kDevToolsPreferences}) {
+    const base::DictValue& dict = prefs->GetDict(dict_name);
+    const std::string* value = dict.FindString("currentDockState");
+    if (value) {
+      if (*value == "\"right\"") {
+        return DockSide::kRight;
+      }
+      if (*value == "\"left\"") {
+        return DockSide::kLeft;
+      }
+      if (*value == "\"bottom\"") {
+        return DockSide::kBottom;
+      }
+      if (*value == "\"undocked\"") {
+        return DockSide::kNone;
+      }
+    }
+  }
+  return DockSide::kRight;
+}
+
+DockSide DevToolsSettings::GetDockSide() const {
+  return GetDockSide(profile_);
 }
 
 const char* DevToolsSettings::GetDictionaryNameForSettingsName(
@@ -135,11 +176,17 @@ const char* DevToolsSettings::GetDictionaryNameForSettingsName(
              : prefs::kDevToolsPreferences;
 }
 
-const char* DevToolsSettings::GetDictionaryNameForSyncedPrefs() const {
+// static
+const char* DevToolsSettings::GetDictionaryNameForSyncedPrefs(
+    Profile* profile) {
   const bool isDevToolsSyncEnabled =
-      profile_->GetPrefs()->GetBoolean(prefs::kDevToolsSyncPreferences);
+      profile->GetPrefs()->GetBoolean(prefs::kDevToolsSyncPreferences);
   return isDevToolsSyncEnabled ? prefs::kDevToolsSyncedPreferencesSyncEnabled
                                : prefs::kDevToolsSyncedPreferencesSyncDisabled;
+}
+
+const char* DevToolsSettings::GetDictionaryNameForSyncedPrefs() const {
+  return GetDictionaryNameForSyncedPrefs(profile_);
 }
 
 void DevToolsSettings::DevToolsSyncPreferencesChanged() {
@@ -167,7 +214,7 @@ void DevToolsSettings::DevToolsSyncPreferencesChanged() {
 
   ScopedDictPrefUpdate source_update(profile_->GetPrefs(), source_dictionary);
   ScopedDictPrefUpdate target_update(profile_->GetPrefs(), target_dictionary);
-  base::Value::Dict source_dict;
+  base::DictValue source_dict;
   std::swap(source_dict, *source_update);
   target_update->Merge(std::move(source_dict));
 }

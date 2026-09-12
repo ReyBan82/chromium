@@ -5,9 +5,13 @@
 #ifndef UI_VIEWS_WIDGET_DESKTOP_AURA_WINDOW_EVENT_FILTER_LINUX_H_
 #define UI_VIEWS_WIDGET_DESKTOP_AURA_WINDOW_EVENT_FILTER_LINUX_H_
 
+#include <optional>
+
 #include "base/memory/raw_ptr.h"
+#include "base/scoped_observation.h"
 #include "ui/base/hit_test.h"
 #include "ui/events/event_handler.h"
+#include "ui/gfx/geometry/point.h"
 #include "ui/views/views_export.h"
 
 namespace aura {
@@ -15,6 +19,7 @@ class Window;
 }  // namespace aura
 
 namespace ui {
+class EventTarget;
 class LocatedEvent;
 class MouseEvent;
 class WmMoveResizeHandler;
@@ -45,9 +50,6 @@ class VIEWS_EXPORT WindowEventFilterLinux : public ui::EventHandler {
   // Called when the user clicked the caption area.
   void OnClickedCaption(ui::MouseEvent* event, int previous_click_component);
 
-  // Called when the user clicked the maximize button.
-  void OnClickedMaximizeButton(ui::MouseEvent* event);
-
   void MaybeToggleMaximizedState(aura::Window* window);
 
   // Dispatches a message to the window manager to tell it to act as if a border
@@ -76,6 +78,14 @@ class VIEWS_EXPORT WindowEventFilterLinux : public ui::EventHandler {
   // initial click. Acting on a double click should only occur for matching
   // components.
   int click_component_ = HTNOWHERE;
+
+  // Capture the beginning of a potential drag on caption left-click.
+  // The drag will only happen if the system-provided mouse move threshold is
+  // met.
+  std::optional<gfx::Point> begin_drag_location_;
+
+  base::ScopedObservation<ui::EventTarget, ui::EventHandler>
+      window_observation_{this};
 };
 
 }  // namespace views

@@ -6,11 +6,12 @@
 
 #include <stddef.h>
 
+#include <algorithm>
 #include <iterator>
 #include <set>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
@@ -19,15 +20,21 @@
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "base/observer_list.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_util.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
+#include "base/types/expected_macros.h"
 #include "components/content_settings/core/browser/content_settings_observer.h"
+#include "components/prefs/pref_registry_simple.h"
+#include "components/prefs/pref_service.h"
 #include "components/signin/core/browser/account_reconcilor_delegate.h"
 #include "components/signin/public/base/account_consistency_method.h"
+#include "components/signin/public/base/bound_session_oauth_multilogin_delegate.h"
+#include "components/signin/public/base/consent_level.h"
 #include "components/signin/public/base/signin_client.h"
 #include "components/signin/public/base/signin_metrics.h"
+#include "components/signin/public/base/signin_pref_names.h"
+#include "components/signin/public/base/signin_switches.h"
 #include "components/signin/public/identity_manager/accounts_cookie_mutator.h"
 #include "components/signin/public/identity_manager/accounts_in_cookie_jar_info.h"
 #include "components/signin/public/identity_manager/accounts_mutator.h"
@@ -36,10 +43,10 @@
 #include "google_apis/gaia/gaia_auth_util.h"
 #include "google_apis/gaia/gaia_urls.h"
 #include "google_apis/gaia/google_service_auth_error.h"
-
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#include "components/signin/core/browser/consistency_cookie_manager.h"
-#endif
+#include "mojo/public/cpp/bindings/callback_helpers.h"
+#include "net/base/features.h"
+#include "net/base/net_errors.h"
+#include "net/base/schemeful_site.h"
 
 using signin::AccountReconcilorDelegate;
 using signin::ConsentLevel;
@@ -59,8 +66,8 @@ std::vector<gaia::ListedAccount> FilterUnverifiedAccounts(
     const std::vector<gaia::ListedAccount>& accounts) {
   // Ignore unverified accounts.
   std::vector<gaia::ListedAccount> verified_gaia_accounts;
-  base::ranges::copy_if(accounts, std::back_inserter(verified_gaia_accounts),
-                        &gaia::ListedAccount::verified);
+  std::ranges::copy_if(accounts, std::back_inserter(verified_gaia_accounts),
+                       &gaia::ListedAccount::verified);
   return verified_gaia_accounts;
 }
 
@@ -111,6 +118,10 @@ const char AccountReconcilor::kTriggerNoopHistogramName[] =
 const char AccountReconcilor::kTriggerThrottledHistogramName[] =
     "Signin.Reconciler.Trigger.Throttled";
 
+// static
+const char AccountReconcilor::kCookieJarIsFreshHistogramName[] =
+    "Signin.Reconciler.CookieJar.IsFresh";
+
 AccountReconcilor::Lock::Lock(AccountReconcilor* reconcilor)
     : reconcilor_(reconcilor->weak_factory_.GetWeakPtr()) {
   DCHECK(reconcilor_);
@@ -119,44 +130,11 @@ AccountReconcilor::Lock::Lock(AccountReconcilor* reconcilor)
 
 AccountReconcilor::Lock::~Lock() {
   DCHECK_CALLED_ON_VALID_THREAD(thread_checker_);
-  if (reconcilor_)
+  if (reconcilor_) {
     reconcilor_->DecrementLockCount();
+  }
 }
 
-AccountReconcilor::ScopedSyncedDataDeletion::ScopedSyncedDataDeletion(
-    AccountReconcilor* reconcilor)
-    : reconcilor_(reconcilor->weak_factory_.GetWeakPtr()) {
-  DCHECK(reconcilor_);
-  ++reconcilor_->synced_data_deletion_in_progress_count_;
-}
-
-AccountReconcilor::ScopedSyncedDataDeletion::~ScopedSyncedDataDeletion() {
-  if (!reconcilor_)
-    return;  // The reconcilor was destroyed.
-
-  DCHECK_GT(reconcilor_->synced_data_deletion_in_progress_count_, 0);
-  --reconcilor_->synced_data_deletion_in_progress_count_;
-}
-
-#if BUILDFLAG(IS_CHROMEOS)
-AccountReconcilor::AccountReconcilor(
-    signin::IdentityManager* identity_manager,
-    SigninClient* client,
-    account_manager::AccountManagerFacade* account_manager_facade,
-    std::unique_ptr<signin::AccountReconcilorDelegate> delegate)
-    : delegate_(std::move(delegate)),
-      identity_manager_(identity_manager),
-      client_(client),
-      account_manager_facade_(account_manager_facade) {
-  VLOG(1) << "AccountReconcilor::AccountReconcilor";
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  consistency_cookie_manager_ =
-      std::make_unique<signin::ConsistencyCookieManager>(client_, this);
-#endif  // BUILDFLAG(IS_CHROMEOS_LACROS)
-  // Reconcilor is constructed but not initialized. Call `Initialize()` before
-  // using this object.
-}
-#else
 AccountReconcilor::AccountReconcilor(
     signin::IdentityManager* identity_manager,
     SigninClient* client,
@@ -168,7 +146,6 @@ AccountReconcilor::AccountReconcilor(
   // Reconcilor is constructed but not initialized. Call `Initialize()` before
   // using this object.
 }
-#endif  // BUILDFLAG(IS_CHROMEOS)
 
 AccountReconcilor::~AccountReconcilor() {
   VLOG(1) << "AccountReconcilor::~AccountReconcilor";
@@ -180,17 +157,11 @@ AccountReconcilor::~AccountReconcilor() {
 void AccountReconcilor::RegisterWithAllDependencies() {
   RegisterWithContentSettings();
   RegisterWithIdentityManager();
-#if BUILDFLAG(IS_CHROMEOS)
-  RegisterWithAccountManagerFacade();
-#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void AccountReconcilor::UnregisterWithAllDependencies() {
   UnregisterWithIdentityManager();
   UnregisterWithContentSettings();
-#if BUILDFLAG(IS_CHROMEOS)
-  UnregisterWithAccountManagerFacade();
-#endif  // BUILDFLAG(IS_CHROMEOS)
 }
 
 void AccountReconcilor::Initialize(bool start_reconcile_if_tokens_available) {
@@ -202,19 +173,23 @@ void AccountReconcilor::Initialize(bool start_reconcile_if_tokens_available) {
   if (delegate_->IsReconcileEnabled()) {
     SetState(AccountReconcilorState::kScheduled);
     RegisterWithAllDependencies();
+    FetchDeviceBoundSessions();
 
     // Start a reconcile if the tokens are already loaded.
-    if (start_reconcile_if_tokens_available && IsIdentityManagerReady())
+    if (start_reconcile_if_tokens_available && IsIdentityManagerReady()) {
       StartReconcile(Trigger::kInitialized);
+    }
   }
 }
 
 void AccountReconcilor::EnableReconcile() {
   RegisterWithAllDependencies();
-  if (IsIdentityManagerReady())
+  FetchDeviceBoundSessions();
+  if (IsIdentityManagerReady()) {
     StartReconcile(Trigger::kEnableReconcile);
-  else
+  } else {
     SetState(AccountReconcilorState::kScheduled);
+  }
 }
 
 void AccountReconcilor::DisableReconcile(bool logout_all_accounts) {
@@ -223,18 +198,23 @@ void AccountReconcilor::DisableReconcile(bool logout_all_accounts) {
   SetState(AccountReconcilorState::kInactive);
   UnregisterWithAllDependencies();
 
-  if (logout_all_accounts && !log_out_in_progress)
+  if (logout_all_accounts && !log_out_in_progress) {
     PerformLogoutAllAccountsAction();
+  }
 }
 
 void AccountReconcilor::Shutdown() {
   VLOG(1) << "AccountReconcilor::Shutdown";
-  if (WasShutDown())
+  if (WasShutDown()) {
     return;
+  }
   was_shut_down_ = true;
   DisableReconcile(false /* logout_all_accounts */);
+  client_ = nullptr;
   delegate_.reset();
   DCHECK(WasShutDown());
+  identity_manager_observer_.Reset();
+  identity_manager_ = nullptr;
 }
 
 void AccountReconcilor::RegisterWithContentSettings() {
@@ -242,8 +222,9 @@ void AccountReconcilor::RegisterWithContentSettings() {
   // During re-auth, the reconcilor will get a callback about successful signin
   // even when the profile is already connected.  Avoid re-registering
   // with the token service since this will DCHECK.
-  if (registered_with_content_settings_)
+  if (registered_with_content_settings_) {
     return;
+  }
 
   client_->AddContentSettingsObserver(this);
   registered_with_content_settings_ = true;
@@ -251,8 +232,9 @@ void AccountReconcilor::RegisterWithContentSettings() {
 
 void AccountReconcilor::UnregisterWithContentSettings() {
   VLOG(1) << "AccountReconcilor::UnregisterWithContentSettings";
-  if (!registered_with_content_settings_)
+  if (!registered_with_content_settings_) {
     return;
+  }
 
   client_->RemoveContentSettingsObserver(this);
   registered_with_content_settings_ = false;
@@ -263,47 +245,26 @@ void AccountReconcilor::RegisterWithIdentityManager() {
   // During re-auth, the reconcilor will get a callback about successful signin
   // even when the profile is already connected.  Avoid re-registering
   // with the token service since this will DCHECK.
-  if (registered_with_identity_manager_)
+  if (registered_with_identity_manager_) {
     return;
+  }
 
-  identity_manager_->AddObserver(this);
+  identity_manager_observer_.Observe(identity_manager_);
   registered_with_identity_manager_ = true;
 }
 
 void AccountReconcilor::UnregisterWithIdentityManager() {
   VLOG(1) << "AccountReconcilor::UnregisterWithIdentityManager";
-  if (!registered_with_identity_manager_)
+  if (!registered_with_identity_manager_) {
     return;
+  }
 
-  identity_manager_->RemoveObserver(this);
+  identity_manager_observer_.Reset();
   registered_with_identity_manager_ = false;
 }
 
-#if BUILDFLAG(IS_CHROMEOS)
-void AccountReconcilor::RegisterWithAccountManagerFacade() {
-  if (registered_with_account_manager_facade_)
-    return;
-
-  account_manager_facade_->AddObserver(this);
-  registered_with_account_manager_facade_ = true;
-}
-
-void AccountReconcilor::UnregisterWithAccountManagerFacade() {
-  if (!registered_with_account_manager_facade_)
-    return;
-
-  account_manager_facade_->RemoveObserver(this);
-  registered_with_account_manager_facade_ = false;
-}
-#endif  // BUILDFLAG(IS_CHROMEOS)
-
 AccountReconcilorState AccountReconcilor::GetState() const {
   return state_;
-}
-
-std::unique_ptr<AccountReconcilor::ScopedSyncedDataDeletion>
-AccountReconcilor::GetScopedSyncDataDeletion() {
-  return base::WrapUnique(new ScopedSyncedDataDeletion(this));
 }
 
 void AccountReconcilor::AddObserver(Observer* observer) {
@@ -319,16 +280,29 @@ void AccountReconcilor::OnContentSettingChanged(
     const ContentSettingsPattern& secondary_pattern,
     ContentSettingsTypeSet content_type_set) {
   // If this is not a change to cookie settings, just ignore.
-  if (!content_type_set.Contains(ContentSettingsType::COOKIES))
+  if (!content_type_set.Contains(ContentSettingsType::COOKIES)) {
     return;
+  }
 
   // If this does not affect GAIA, just ignore. The secondary pattern is not
   // needed.
-  if (!primary_pattern.Matches(GaiaUrls::GetInstance()->gaia_url()))
+  if (!primary_pattern.Matches(GaiaUrls::GetInstance()->gaia_url())) {
     return;
+  }
 
   VLOG(1) << "AccountReconcilor::OnContentSettingChanged";
   StartReconcile(Trigger::kCookieSettingChange);
+}
+
+void AccountReconcilor::OnPrimaryAccountChanged(
+    const signin::PrimaryAccountChangeEvent& event_details) {
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+  if (event_details.GetEventTypeFor(ConsentLevel::kSignin) ==
+      signin::PrimaryAccountChangeEvent::Type::kCleared) {
+    VLOG(1) << "AccountReconcilor::OnPrimaryAccountChanged";
+    StartReconcile(Trigger::kPrimaryAccountChanged);
+  }
+#endif  // BUILDFLAG(ENABLE_DICE_SUPPORT)
 }
 
 void AccountReconcilor::OnEndBatchOfRefreshTokenStateChanges() {
@@ -345,7 +319,8 @@ void AccountReconcilor::OnRefreshTokensLoaded() {
 
 void AccountReconcilor::OnErrorStateOfRefreshTokenUpdatedForAccount(
     const CoreAccountInfo& account_info,
-    const GoogleServiceAuthError& error) {
+    const GoogleServiceAuthError& error,
+    signin_metrics::SourceForRefreshTokenOperation token_operation_source) {
   // Gaia cookies may be invalidated server-side and the client does not get any
   // notification when this happens.
   // Gaia cookies derived from refresh tokens are always invalidated server-side
@@ -353,38 +328,47 @@ void AccountReconcilor::OnErrorStateOfRefreshTokenUpdatedForAccount(
   // happens to make sure that the cookies accounts are up-to-date.
   // This should cover well the Mirror and Desktop Identity Consistency cases as
   // the cookies are always bound to the refresh tokens in these cases.
-  if (error != GoogleServiceAuthError::AuthErrorNone())
+  if (error != GoogleServiceAuthError::AuthErrorNone()) {
     identity_manager_->GetAccountsCookieMutator()->TriggerCookieJarUpdate();
+  }
 }
 
 void AccountReconcilor::PerformSetCookiesAction(
-    const signin::MultiloginParameters& parameters) {
+    const signin::MultiloginParameters& parameters,
+    bool is_cookie_upgrade) {
   reconcile_is_noop_ = false;
   VLOG(1) << "AccountReconcilor::PerformSetCookiesAction: "
           << base::JoinString(ToStringList(parameters.accounts_to_send), " ");
-  // Using `Unretained()` is safe here because `IdentityManager` outlives
-  // `AccountReconcilor`.
+
+  std::optional<base::TimeTicks> cookie_upgrade_start_time;
+  if (is_cookie_upgrade) {
+    cookie_upgrade_start_time = base::TimeTicks::Now();
+  }
+
   identity_manager_->GetAccountsCookieMutator()->SetAccountsInCookie(
-      parameters, delegate_->GetGaiaApiSource(),
+      parameters, delegate_->GetGaiaApiSource(is_cookie_upgrade),
       base::BindOnce(&AccountReconcilor::OnSetAccountsInCookieCompleted,
-                     base::Unretained(this), parameters.accounts_to_send));
+                     weak_factory_.GetWeakPtr(), parameters.accounts_to_send,
+                     cookie_upgrade_start_time));
 }
 
 void AccountReconcilor::PerformLogoutAllAccountsAction() {
   reconcile_is_noop_ = false;
   VLOG(1) << "AccountReconcilor::PerformLogoutAllAccountsAction";
   identity_manager_->GetAccountsCookieMutator()->LogOutAllAccounts(
-      delegate_->GetGaiaApiSource(),
+      delegate_->GetGaiaApiSource(/*is_cookie_upgrade=*/false),
       base::BindOnce(&AccountReconcilor::OnLogOutFromCookieCompleted,
                      weak_factory_.GetWeakPtr()));
 }
 
 void AccountReconcilor::StartReconcile(Trigger trigger) {
-  if (WasShutDown())
+  if (WasShutDown()) {
     return;
+  }
 
-  if (is_reconcile_started_)
+  if (is_reconcile_started_) {
     return;
+  }
 
   if (IsReconcileBlocked()) {
     VLOG(1) << "AccountReconcilor::StartReconcile: "
@@ -395,7 +379,7 @@ void AccountReconcilor::StartReconcile(Trigger trigger) {
     return;
   }
 
-  // TODO(crbug.com/967603): remove when root cause is found.
+  // TODO(crbug.com/40629374): remove when root cause is found.
   CHECK(delegate_);
   CHECK(client_);
   if (!delegate_->IsReconcileEnabled() || !client_->AreSigninCookiesAllowed()) {
@@ -409,6 +393,12 @@ void AccountReconcilor::StartReconcile(Trigger trigger) {
     SetState(AccountReconcilorState::kScheduled);
     VLOG(1)
         << "AccountReconcilor::StartReconcile: token service *not* ready yet.";
+    return;
+  }
+
+  // Do not reconcile if device bound sessions are not fetched yet and we
+  // might need them.
+  if (MaybeDeferReconciliationForCookieUpgrade()) {
     return;
   }
 
@@ -444,10 +434,9 @@ void AccountReconcilor::StartReconcile(Trigger trigger) {
   if (trigger_ == Trigger::kForcedReconcile) {
     OnAccountsInCookieUpdated(
         /*accounts_in_cookie_jar_info=*/signin::AccountsInCookieJarInfo(
-            /*accounts_are_fresh_param=*/true,
-            /*signed_in_accounts_param=*/{},
-            /*signed_out_accounts_param=*/{}),
-        /*error=*/GoogleServiceAuthError(GoogleServiceAuthError::NONE));
+            /*accounts_are_fresh=*/true,
+            /*accounts=*/{}),
+        /*error=*/GoogleServiceAuthError::AuthErrorNone());
     return;
   }
 
@@ -456,11 +445,13 @@ void AccountReconcilor::StartReconcile(Trigger trigger) {
   // above).
   signin::AccountsInCookieJarInfo accounts_in_cookie_jar =
       identity_manager_->GetAccountsInCookieJar();
-  if (accounts_in_cookie_jar.accounts_are_fresh) {
-    OnAccountsInCookieUpdated(
-        accounts_in_cookie_jar,
-        GoogleServiceAuthError(GoogleServiceAuthError::NONE));
+  base::UmaHistogramBoolean(kCookieJarIsFreshHistogramName,
+                            accounts_in_cookie_jar.AreAccountsFresh());
+  if (accounts_in_cookie_jar.AreAccountsFresh()) {
+    OnAccountsInCookieUpdated(accounts_in_cookie_jar,
+                              GoogleServiceAuthError::AuthErrorNone());
   }
+
 }
 
 void AccountReconcilor::FinishReconcileWithMultiloginEndpoint(
@@ -492,7 +483,9 @@ void AccountReconcilor::FinishReconcileWithMultiloginEndpoint(
         chrome_accounts, primary_account, gaia_accounts, first_execution_,
         primary_has_error);
   }
-  if (CookieNeedsUpdate(parameters_for_multilogin, gaia_accounts)) {
+  CookieBindingUpgradeStatus upgrade_status = NeedsCookieBindingUpgrade();
+  if (CookieNeedsUpdate(parameters_for_multilogin, gaia_accounts,
+                        upgrade_status)) {
     // Verify the account reconcilor is not trapped into a loop of repeating the
     // same request with the same params.
     if (throttler_.TryMultiloginOperation(parameters_for_multilogin)) {
@@ -509,13 +502,15 @@ void AccountReconcilor::FinishReconcileWithMultiloginEndpoint(
         // is_reconcile_started_ is set to false.
         RecordReconcileOperation(trigger_, Operation::kMultilogin);
         set_accounts_in_progress_ = true;
-        PerformSetCookiesAction(parameters_for_multilogin);
+        bool is_cookie_upgrade =
+            (upgrade_status == CookieBindingUpgradeStatus::kNeedsUpgrade);
+        PerformSetCookiesAction(parameters_for_multilogin, is_cookie_upgrade);
       }
     } else {
       // Too many requests with the same parameters led to a backoff time
       // required between successive identical requests that has not yet passed.
       error_during_last_reconcile_ =
-          GoogleServiceAuthError(GoogleServiceAuthError::REQUEST_CANCELED);
+          GoogleServiceAuthError::CreateRequestCanceled();
       CalculateIfMultiloginReconcileIsDone();
       ScheduleStartReconcileIfChromeAccountsChanged();
       RecordReconcileOperation(trigger_, Operation::kThrottled);
@@ -551,20 +546,18 @@ void AccountReconcilor::OnAccountsInCookieUpdated(
     const signin::AccountsInCookieJarInfo& accounts_in_cookie_jar_info,
     const GoogleServiceAuthError& error) {
   const std::vector<gaia::ListedAccount>& accounts(
-      accounts_in_cookie_jar_info.signed_in_accounts);
-  VLOG(1) << "AccountReconcilor::OnAccountsInCookieUpdated: "
-          << "CookieJar " << accounts.size() << " accounts, "
-          << "Reconcilor's state is " << is_reconcile_started_ << ", "
-          << "Error was " << error.ToString();
+      accounts_in_cookie_jar_info.GetPotentiallyInvalidSignedInAccounts());
+  VLOG(1) << "AccountReconcilor::OnAccountsInCookieUpdated: " << "CookieJar "
+          << accounts.size() << " accounts, " << "Reconcilor's state is "
+          << is_reconcile_started_ << ", " << "Error was " << error.ToString();
 
   // If cookies change while the reconcilor is running, ignore the changes and
-  // let it complete. Adding accounts to the cookie will trigger new
-  // notifications anyway, and these will be handled in a new reconciliation
-  // cycle. See https://crbug.com/923716
-  //
-  // TODO(droger): Should we also check if |logout_in_progress_|?
-  if (set_accounts_in_progress_)
+  // let it complete. Adding accounts or removing accounts on the web will
+  // trigger new notifications anyway, and these will be handled in a new
+  // reconciliation cycle. See https://crbug.com/923716
+  if (set_accounts_in_progress_ || log_out_in_progress_) {
     return;
+  }
 
   if (!is_reconcile_started_) {
     StartReconcile(Trigger::kCookieChange);
@@ -575,8 +568,9 @@ void AccountReconcilor::OnAccountsInCookieUpdated(
     // We may have seen a series of errors during reconciliation. Delegates may
     // rely on the severity of the last seen error (see |OnReconcileError|) and
     // hence do not override a persistent error, if we have seen one.
-    if (!error_during_last_reconcile_.IsPersistentError())
+    if (!error_during_last_reconcile_.IsPersistentError()) {
       error_during_last_reconcile_ = error;
+    }
     SetState(AccountReconcilorState::kError);
     AbortReconcile();
     return;
@@ -596,14 +590,14 @@ void AccountReconcilor::OnAccountsInCookieUpdated(
   // completely remove them from Chrome.
   // Revoking the token for the primary account is not supported (it should be
   // signed out or put to auth error state instead).
-  delegate_->RevokeSecondaryTokensBeforeReconcileIfNeeded();
+  delegate_->RevokeSecondaryTokensForReconcileIfNeeded(verified_gaia_accounts);
 
   std::vector<CoreAccountId> chrome_accounts =
       LoadValidAccountsFromTokenService();
 
   if (!primary_account.empty() &&
       delegate_->ShouldAbortReconcileIfPrimaryHasError() &&
-      !base::Contains(chrome_accounts, primary_account)) {
+      !std::ranges::contains(chrome_accounts, primary_account)) {
     VLOG(1) << "Primary account has error, abort.";
     DCHECK(is_reconcile_started_);
     AbortReconcile();
@@ -616,8 +610,13 @@ void AccountReconcilor::OnAccountsInCookieUpdated(
 }
 
 void AccountReconcilor::OnAccountsCookieDeletedByUserAction() {
-  delegate_->OnAccountsCookieDeletedByUserAction(
-      synced_data_deletion_in_progress_count_ != 0);
+  delegate_->OnAccountsCookieDeletedByUserAction();
+}
+
+void AccountReconcilor::OnIdentityManagerShutdown(
+    signin::IdentityManager* identity_manager) {
+  // Needs to be shutdown before IdentityManager.
+  NOTREACHED(base::NotFatalUntil::M142);
 }
 
 std::vector<CoreAccountId>
@@ -651,7 +650,7 @@ AccountReconcilor::LoadValidAccountsFromTokenService() const {
 void AccountReconcilor::OnReceivedManageAccountsResponse(
     signin::GAIAServiceType service_type) {
 #if !BUILDFLAG(IS_CHROMEOS)
-  // TODO(https://crbug.com/1224872): check if it's still required on Android
+  // TODO(crbug.com/40775484): check if it's still required on Android
   // and iOS.
   if (service_type == signin::GAIA_SERVICE_TYPE_ADDSESSION) {
     identity_manager_->GetAccountsCookieMutator()->TriggerCookieJarUpdate();
@@ -669,8 +668,9 @@ void AccountReconcilor::AbortReconcile() {
 }
 
 void AccountReconcilor::ScheduleStartReconcileIfChromeAccountsChanged() {
-  if (is_reconcile_started_)
+  if (is_reconcile_started_) {
     return;
+  }
 
   if (GetState() == AccountReconcilorState::kScheduled) {
     return;
@@ -694,6 +694,11 @@ void AccountReconcilor::ScheduleStartReconcileIfChromeAccountsChanged() {
 }
 
 #if BUILDFLAG(ENABLE_MIRROR)
+base::RepeatingClosure AccountReconcilor::CreateForceReconcileCallback() {
+  return base::BindRepeating(&AccountReconcilor::ForceReconcile,
+                             weak_factory_.GetWeakPtr());
+}
+
 void AccountReconcilor::ForceReconcile() {
   if (state_ == signin_metrics::AccountReconcilorState::kInactive) {
     VLOG(1) << "Ignoring ForceReconcile request because AccountReconcilor is "
@@ -722,18 +727,26 @@ void AccountReconcilor::ForceReconcile() {
 }
 #endif  // BUILDFLAG(ENABLE_MIRROR)
 
-bool AccountReconcilor::IsIdentityManagerReady() {
+bool AccountReconcilor::IsIdentityManagerReady() const {
   return identity_manager_->AreRefreshTokensLoaded();
 }
 
 void AccountReconcilor::OnSetAccountsInCookieCompleted(
     const std::vector<CoreAccountId>& accounts_to_send,
+    std::optional<base::TimeTicks> cookie_upgrade_start_time,
     signin::SetAccountsInCookieResult result) {
   VLOG(1) << "AccountReconcilor::OnSetAccountsInCookieCompleted: "
           << "Error was " << static_cast<int>(result);
 
-  if (!set_accounts_in_progress_ || !is_reconcile_started_)
+  if (cookie_upgrade_start_time.has_value()) {
+    base::UmaHistogramTimes(
+        "Signin.CookieBinding.UpgradeOAuthMultiloginDuration",
+        base::TimeTicks::Now() - *cookie_upgrade_start_time);
+  }
+
+  if (!set_accounts_in_progress_ || !is_reconcile_started_) {
     return;
+  }
 
   if (IsAnyAccountInErrorState(identity_manager_, accounts_to_send)) {
     // `AccountReconcilor` is supposed to skip accounts with errors while
@@ -753,13 +766,14 @@ void AccountReconcilor::OnSetAccountsInCookieCompleted(
       error_during_last_reconcile_ = GoogleServiceAuthError::AuthErrorNone();
       break;
     case signin::SetAccountsInCookieResult::kTransientError:
-      if (!error_during_last_reconcile_.IsPersistentError())
+      if (!error_during_last_reconcile_.IsPersistentError()) {
         error_during_last_reconcile_ =
-            GoogleServiceAuthError(GoogleServiceAuthError::CONNECTION_FAILED);
+            GoogleServiceAuthError::FromConnectionError(net::ERR_FAILED);
+      }
       break;
     case signin::SetAccountsInCookieResult::kPersistentError:
-      error_during_last_reconcile_ =
-          GoogleServiceAuthError(GoogleServiceAuthError::SERVICE_ERROR);
+      error_during_last_reconcile_ = GoogleServiceAuthError::FromServiceError(
+          "Failed to set accounts in cookies");
       break;
   }
   CalculateIfMultiloginReconcileIsDone();
@@ -772,14 +786,16 @@ void AccountReconcilor::CalculateIfMultiloginReconcileIsDone() {
   VLOG(1) << "AccountReconcilor::CalculateIfMultiloginReconcileIsDone: "
           << "Error was " << error_during_last_reconcile_.ToString();
 
-  if (!is_reconcile_started_)
+  if (!is_reconcile_started_) {
     return;
+  }
 
   bool was_last_reconcile_successful = error_during_last_reconcile_.state() ==
                                        GoogleServiceAuthError::State::NONE;
 
-  if (!was_last_reconcile_successful)
+  if (!was_last_reconcile_successful) {
     delegate_->OnReconcileError(error_during_last_reconcile_);
+  }
 
   is_reconcile_started_ = false;
   timer_->Stop();
@@ -790,8 +806,8 @@ void AccountReconcilor::CalculateIfMultiloginReconcileIsDone() {
 
 void AccountReconcilor::OnLogOutFromCookieCompleted(
     const GoogleServiceAuthError& error) {
-  VLOG(1) << "AccountReconcilor::OnLogOutFromCookieCompleted: "
-          << "Error was " << error.ToString();
+  VLOG(1) << "AccountReconcilor::OnLogOutFromCookieCompleted: " << "Error was "
+          << error.ToString();
 
   // When switching the primary account, there is a sequence of calls to
   // DisableReconclie() followed by EnableReconcile(). This starts a logout call
@@ -809,34 +825,20 @@ void AccountReconcilor::OnLogOutFromCookieCompleted(
   }
 }
 
-#if BUILDFLAG(IS_CHROMEOS)
-void AccountReconcilor::OnAccountUpserted(
-    const account_manager::Account& account) {}
-
-void AccountReconcilor::OnAccountRemoved(
-    const account_manager::Account& account) {}
-
-void AccountReconcilor::OnAuthErrorChanged(
-    const account_manager::AccountKey& account,
-    const GoogleServiceAuthError& error) {}
-
-void AccountReconcilor::OnSigninDialogClosed() {
-  ForceReconcile();
-}
-#endif  // BUILDFLAG(IS_CHROMEOS)
-
 void AccountReconcilor::IncrementLockCount() {
   DCHECK_GE(account_reconcilor_lock_count_, 0);
   ++account_reconcilor_lock_count_;
-  if (account_reconcilor_lock_count_ == 1)
+  if (account_reconcilor_lock_count_ == 1) {
     BlockReconcile();
+  }
 }
 
 void AccountReconcilor::DecrementLockCount() {
   DCHECK_GT(account_reconcilor_lock_count_, 0);
   --account_reconcilor_lock_count_;
-  if (account_reconcilor_lock_count_ == 0)
+  if (account_reconcilor_lock_count_ == 0) {
     UnblockReconcile();
+  }
 }
 
 bool AccountReconcilor::IsReconcileBlocked() const {
@@ -844,12 +846,9 @@ bool AccountReconcilor::IsReconcileBlocked() const {
   return account_reconcilor_lock_count_ > 0;
 }
 
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-signin::ConsistencyCookieManager*
-AccountReconcilor::GetConsistencyCookieManager() {
-  return consistency_cookie_manager_.get();
+GoogleServiceAuthError AccountReconcilor::GetReconcileError() const {
+  return error_during_last_reconcile_;
 }
-#endif
 
 void AccountReconcilor::BlockReconcile() {
   DCHECK(IsReconcileBlocked());
@@ -859,15 +858,17 @@ void AccountReconcilor::BlockReconcile() {
     SetState(AccountReconcilorState::kScheduled);
     reconcile_on_unblock_ = true;
   }
-  for (auto& observer : observer_list_)
+  for (auto& observer : observer_list_) {
     observer.OnBlockReconcile();
+  }
 }
 
 void AccountReconcilor::UnblockReconcile() {
   DCHECK(!IsReconcileBlocked());
   VLOG(1) << "AccountReconcilor::UnblockReconcile.";
-  for (auto& observer : observer_list_)
+  for (auto& observer : observer_list_) {
     observer.OnUnblockReconcile();
+  }
   if (reconcile_on_unblock_) {
     reconcile_on_unblock_ = false;
     StartReconcile(Trigger::kUnblockReconcile);
@@ -885,8 +886,8 @@ void AccountReconcilor::HandleReconcileTimeout() {
   // |GoogleServiceAuthError::State::CONNECTION_FAILED|.
   if (error_during_last_reconcile_.state() ==
       GoogleServiceAuthError::State::NONE) {
-    error_during_last_reconcile_ = GoogleServiceAuthError(
-        GoogleServiceAuthError::State::CONNECTION_FAILED);
+    error_during_last_reconcile_ =
+        GoogleServiceAuthError::FromConnectionError(net::ERR_TIMED_OUT);
   }
 
   // Will stop reconciliation and inform |delegate_| about
@@ -898,7 +899,19 @@ void AccountReconcilor::HandleReconcileTimeout() {
 
 bool AccountReconcilor::CookieNeedsUpdate(
     const signin::MultiloginParameters& parameters,
-    const std::vector<gaia::ListedAccount>& existing_accounts) {
+    const std::vector<gaia::ListedAccount>& existing_accounts,
+    CookieBindingUpgradeStatus upgrade_status) {
+  if (upgrade_status != CookieBindingUpgradeStatus::kNotFirstRun &&
+      upgrade_status != CookieBindingUpgradeStatus::kFeatureNotSupported) {
+    base::UmaHistogramEnumeration("Signin.CookieBinding.NeedsUpgradeStatus",
+                                  upgrade_status);
+  }
+  if (upgrade_status == CookieBindingUpgradeStatus::kNeedsUpgrade) {
+    VLOG(1) << "AccountReconcilor::CookieNeedsUpdate: triggering OAML for "
+               "cookie binding upgrade.";
+    return true;
+  }
+
   if (parameters.mode ==
           gaia::MultiloginMode::MULTILOGIN_UPDATE_COOKIE_ACCOUNTS_ORDER &&
       !existing_accounts.empty() && !parameters.accounts_to_send.empty() &&
@@ -912,19 +925,22 @@ bool AccountReconcilor::CookieNeedsUpdate(
       parameters.accounts_to_send.begin(), parameters.accounts_to_send.end());
   std::set<CoreAccountId> existing_accounts_set;
   for (const gaia::ListedAccount& account : existing_accounts) {
-    if (account.valid)
+    if (account.valid) {
       existing_accounts_set.insert(account.id);
+    }
   }
   return (existing_accounts_set != accounts_to_send_set);
 }
 
 void AccountReconcilor::SetState(AccountReconcilorState state) {
-  if (state == state_)
+  if (state == state_) {
     return;
+  }
 
   state_ = state;
-  for (auto& observer : observer_list_)
+  for (auto& observer : observer_list_) {
     observer.OnStateChanged(state_);
+  }
 }
 
 bool AccountReconcilor::WasShutDown() const {
@@ -950,4 +966,142 @@ void AccountReconcilor::RecordReconcileOperation(Trigger trigger,
       UMA_HISTOGRAM_ENUMERATION(kTriggerThrottledHistogramName, trigger);
       break;
   }
+}
+
+void AccountReconcilor::FetchDeviceBoundSessions() {
+  if (has_standard_device_bound_session_ != signin::Tribool::kUnknown) {
+    return;
+  }
+  bool is_enabled = false;
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+  is_enabled =
+      base::FeatureList::IsEnabled(switches::kEnableCookieBindingCookieUpgrade);
+#endif
+
+  if (!is_enabled) {
+    OnDeviceBoundSessionsFetched(std::nullopt, {});
+    return;
+  }
+
+  network::mojom::DeviceBoundSessionManager* dbsc_manager =
+      client_->GetDeviceBoundSessionManager();
+  if (!dbsc_manager) {
+    OnDeviceBoundSessionsFetched(std::nullopt, {});
+    return;
+  }
+  dbsc_manager->GetAllSessions(mojo::WrapCallbackWithDefaultInvokeIfNotRun(
+      base::BindOnce(&AccountReconcilor::OnDeviceBoundSessionsFetched,
+                     weak_factory_.GetWeakPtr(), base::TimeTicks::Now()),
+      std::vector<net::device_bound_sessions::SessionKey>()));
+}
+
+void AccountReconcilor::OnDeviceBoundSessionsFetched(
+    std::optional<base::TimeTicks> fetch_start_time,
+    const std::vector<net::device_bound_sessions::SessionKey>& sessions) {
+  if (WasShutDown()) {
+    return;
+  }
+
+  if (fetch_start_time.has_value()) {
+    base::UmaHistogramTimes("Signin.CookieBinding.UpgradeSessionFetchDuration",
+                            base::TimeTicks::Now() - *fetch_start_time);
+  }
+
+  bool has_bound_session = false;
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+  net::SchemefulSite google_site =
+      net::SchemefulSite(GaiaUrls::GetInstance()->secure_google_url());
+  has_bound_session =
+      std::ranges::any_of(sessions, [&google_site](const auto& session) {
+        return session.site == google_site &&
+               session.id.value() ==
+                   switches::kCookieBindingUpgradeSessionId.Get();
+      });
+#endif
+  has_standard_device_bound_session_ =
+      signin::TriboolFromBool(has_bound_session);
+
+  if (reconcile_on_device_bound_sessions_fetched_) {
+    reconcile_on_device_bound_sessions_fetched_ = false;
+    StartReconcile(Trigger::kDeviceBoundSessionsFetched);
+  }
+}
+
+base::expected<void, AccountReconcilor::CookieBindingUpgradeStatus>
+AccountReconcilor::CheckCookieBindingUpgradePreconditions() const {
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+  if (!first_execution_) {
+    return base::unexpected(CookieBindingUpgradeStatus::kNotFirstRun);
+  }
+
+  if (!base::FeatureList::IsEnabled(
+          switches::kEnableCookieBindingCookieUpgrade)) {
+    return base::unexpected(CookieBindingUpgradeStatus::kFeatureDisabled);
+  }
+
+  CHECK(IsIdentityManagerReady());
+  std::vector<uint8_t> wrapped_key = identity_manager_->GetWrappedBindingKey();
+  if (wrapped_key.empty()) {
+    return base::unexpected(CookieBindingUpgradeStatus::kNoWrappedKey);
+  }
+  return base::ok();
+#else
+  return base::unexpected(CookieBindingUpgradeStatus::kFeatureNotSupported);
+#endif
+}
+
+AccountReconcilor::CookieBindingUpgradeStatus
+AccountReconcilor::NeedsCookieBindingUpgrade() const {
+#if BUILDFLAG(ENABLE_DICE_SUPPORT)
+  RETURN_IF_ERROR(CheckCookieBindingUpgradePreconditions());
+
+  CHECK_NE(has_standard_device_bound_session_, signin::Tribool::kUnknown);
+  if (has_standard_device_bound_session_ == signin::Tribool::kTrue) {
+    return CookieBindingUpgradeStatus::kHasStandardSession;
+  }
+
+  // Check prototype DBSC sessions (in-memory Chrome layer)
+  std::unique_ptr<signin::BoundSessionOAuthMultiLoginDelegate>
+      prototype_delegate = client_->CreateBoundSessionOAuthMultiloginDelegate();
+  if (prototype_delegate) {
+    const GURL& secure_google_url =
+        GaiaUrls::GetInstance()->secure_google_url();
+    const net::SchemefulSite google_site(secure_google_url);
+    std::vector<std::pair<GURL, std::string>> sessions =
+        prototype_delegate->GetAllSessions();
+    bool has_prototype_sidts = std::ranges::any_of(
+        sessions, [&google_site](const std::pair<GURL, std::string>& session) {
+          return session.first == google_site.GetURL() &&
+                 session.second ==
+                     switches::kCookieBindingUpgradeSessionId.Get();
+        });
+    if (has_prototype_sidts) {
+      return CookieBindingUpgradeStatus::kHasPrototypeSession;
+    }
+  }
+
+  return CookieBindingUpgradeStatus::kNeedsUpgrade;
+#else
+  return CookieBindingUpgradeStatus::kFeatureNotSupported;
+#endif
+}
+
+bool AccountReconcilor::MaybeDeferReconciliationForCookieUpgrade() {
+  RETURN_IF_ERROR(CheckCookieBindingUpgradePreconditions(),
+                  [](auto) { return false; });
+
+  if (!reconciliation_deferred_logged_) {
+    reconciliation_deferred_logged_ = true;
+    base::UmaHistogramBoolean(
+        "Signin.CookieBinding.UpgradeReconciliationDeferredOnStartup",
+        has_standard_device_bound_session_ == signin::Tribool::kUnknown);
+  }
+  if (has_standard_device_bound_session_ == signin::Tribool::kUnknown) {
+    SetState(AccountReconcilorState::kScheduled);
+    VLOG(1) << "AccountReconcilor::MaybeDeferReconciliationForCookieUpgrade: "
+               "device bound sessions *not* fetched yet.";
+    reconcile_on_device_bound_sessions_fetched_ = true;
+    return true;
+  }
+  return false;
 }

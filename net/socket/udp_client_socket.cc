@@ -8,47 +8,130 @@
 #include "build/build_config.h"
 #include "net/base/net_errors.h"
 #include "net/base/network_change_notifier.h"
+#include "net/base/network_handle.h"
+#include "net/base/port_util.h"
+#include "net/socket/datagram_client_socket.h"
 #include "net/traffic_annotation/network_traffic_annotation.h"
 
 namespace net {
 
+namespace {
+
+base::DictValue CreateNetLogUDPConnectParams(const IPEndPoint& address,
+                                             int net_error) {
+  DCHECK_NE(ERR_IO_PENDING, net_error);
+  auto params = base::DictValue().Set("address", address.ToString());
+  if (net_error < 0) {
+    params.Set("net_error", net_error);
+  }
+  return params;
+}
+
+base::DictValue CreateNetLogUDPBindToNetworkParams(
+    handles::NetworkHandle network,
+    int net_error) {
+  DCHECK_NE(ERR_IO_PENDING, net_error);
+  auto params = base::DictValue().Set("network", static_cast<int>(network));
+  if (net_error < 0) {
+    params.Set("net_error", net_error);
+  }
+  return params;
+}
+
+}  // namespace
+
 UDPClientSocket::UDPClientSocket(DatagramSocket::BindType bind_type,
                                  net::NetLog* net_log,
                                  const net::NetLogSource& source,
-                                 handles::NetworkHandle network)
-    : socket_(bind_type, net_log, source), connect_using_network_(network) {}
+                                 handles::NetworkHandle target_network)
+    : net_log_(
+          NetLogWithSource::Make(net_log, NetLogSourceType::UDP_CLIENT_SOCKET)),
+      socket_(bind_type, net_log, net_log_.source()),
+      connect_using_network_(target_network) {
+  net_log_.BeginEventReferencingSource(NetLogEventType::SOCKET_ALIVE, source);
+}
 
-UDPClientSocket::~UDPClientSocket() = default;
+UDPClientSocket::UDPClientSocket(DatagramSocket::BindType bind_type,
+                                 NetLogWithSource source_net_log,
+                                 handles::NetworkHandle target_network)
+    : net_log_(NetLogWithSource::Make(source_net_log.net_log(),
+                                      NetLogSourceType::UDP_CLIENT_SOCKET)),
+      socket_(bind_type, net_log_),
+      connect_using_network_(target_network) {
+  net_log_.BeginEventReferencingSource(NetLogEventType::SOCKET_ALIVE,
+                                       source_net_log.source());
+}
+
+UDPClientSocket::~UDPClientSocket() {
+  net_log_.EndEvent(NetLogEventType::SOCKET_ALIVE);
+}
 
 int UDPClientSocket::Connect(const IPEndPoint& address) {
-  if (connect_using_network_ != handles::kInvalidNetworkHandle)
+  CHECK(!connect_called_);
+  if (!IsPortAllowedForIpEndpoint(address)) {
+    return ERR_UNSAFE_PORT;
+  }
+  if (connect_using_network_ != handles::kInvalidNetworkHandle) {
     return ConnectUsingNetwork(connect_using_network_, address);
+  }
 
-  int rv = socket_.Open(address.GetFamily());
+  connect_called_ = true;
+  int rv = OK;
+  if (!adopted_opened_socket_) {
+    rv = socket_.Open(address.GetFamily());
+    net_log_.AddEventWithNetErrorCode(NetLogEventType::SOCKET_OPEN, rv);
+  }
   if (rv != OK)
     return rv;
-  return socket_.Connect(address);
+  rv = socket_.Connect(address);
+  net_log_.AddEvent(NetLogEventType::SOCKET_CONNECT,
+                    [&] { return CreateNetLogUDPConnectParams(address, rv); });
+  return rv;
 }
 
 int UDPClientSocket::ConnectUsingNetwork(handles::NetworkHandle network,
                                          const IPEndPoint& address) {
+  CHECK(!connect_called_);
+  if (!IsPortAllowedForIpEndpoint(address)) {
+    return ERR_UNSAFE_PORT;
+  }
+  connect_called_ = true;
   if (!NetworkChangeNotifier::AreNetworkHandlesSupported())
     return ERR_NOT_IMPLEMENTED;
-  int rv = socket_.Open(address.GetFamily());
-  if (rv != OK)
+  int rv = OK;
+  if (!adopted_opened_socket_) {
+    rv = socket_.Open(address.GetFamily());
+    net_log_.AddEventWithNetErrorCode(NetLogEventType::SOCKET_OPEN, rv);
+  }
+  if (rv != OK) {
     return rv;
+  }
   rv = socket_.BindToNetwork(network);
+  net_log_.AddEvent(NetLogEventType::SOCKET_BIND_TO_NETWORK, [&] {
+    return CreateNetLogUDPBindToNetworkParams(network, rv);
+  });
   if (rv != OK)
     return rv;
   network_ = network;
-  return socket_.Connect(address);
+  rv = socket_.Connect(address);
+  net_log_.AddEvent(NetLogEventType::SOCKET_CONNECT,
+                    [&] { return CreateNetLogUDPConnectParams(address, rv); });
+  return rv;
 }
 
 int UDPClientSocket::ConnectUsingDefaultNetwork(const IPEndPoint& address) {
+  CHECK(!connect_called_);
+  if (!IsPortAllowedForIpEndpoint(address)) {
+    return ERR_UNSAFE_PORT;
+  }
+  connect_called_ = true;
   if (!NetworkChangeNotifier::AreNetworkHandlesSupported())
     return ERR_NOT_IMPLEMENTED;
-  int rv;
-  rv = socket_.Open(address.GetFamily());
+  int rv = OK;
+  if (!adopted_opened_socket_) {
+    rv = socket_.Open(address.GetFamily());
+    net_log_.AddEventWithNetErrorCode(NetLogEventType::SOCKET_OPEN, rv);
+  }
   if (rv != OK)
     return rv;
   // Calling connect() will bind a socket to the default network, however there
@@ -64,6 +147,9 @@ int UDPClientSocket::ConnectUsingDefaultNetwork(const IPEndPoint& address) {
     if (network == handles::kInvalidNetworkHandle)
       return ERR_INTERNET_DISCONNECTED;
     rv = socket_.BindToNetwork(network);
+    net_log_.AddEvent(NetLogEventType::SOCKET_BIND_TO_NETWORK, [&] {
+      return CreateNetLogUDPBindToNetworkParams(network, rv);
+    });
     // |network| may have disconnected between the call to GetDefaultNetwork()
     // and the call to BindToNetwork(). Loop only if this is the case (|rv| will
     // be ERR_NETWORK_CHANGED).
@@ -73,7 +159,10 @@ int UDPClientSocket::ConnectUsingDefaultNetwork(const IPEndPoint& address) {
   if (rv != OK)
     return rv;
   network_ = network;
-  return socket_.Connect(address);
+  rv = socket_.Connect(address);
+  net_log_.AddEvent(NetLogEventType::SOCKET_CONNECT,
+                    [&] { return CreateNetLogUDPConnectParams(address, rv); });
+  return rv;
 }
 
 int UDPClientSocket::ConnectAsync(const IPEndPoint& address,
@@ -110,6 +199,16 @@ int UDPClientSocket::Read(IOBuffer* buf,
   return socket_.Read(buf, buf_len, std::move(callback));
 }
 
+base::expected<DatagramsMetadata, Error> UDPClientSocket::ReadMultiple(
+    IOBuffer* buf,
+    size_t buf_len,
+    size_t maximum_packet_size,
+    base::OnceCallback<void(base::expected<DatagramsMetadata, Error>)>
+        callback) {
+  return socket_.ReadMultiple(buf, buf_len, maximum_packet_size,
+                              std::move(callback));
+}
+
 int UDPClientSocket::Write(
     IOBuffer* buf,
     int buf_len,
@@ -120,6 +219,7 @@ int UDPClientSocket::Write(
 
 void UDPClientSocket::Close() {
   socket_.Close();
+  adopted_opened_socket_ = false;
 }
 
 int UDPClientSocket::GetPeerAddress(IPEndPoint* address) const {
@@ -140,6 +240,14 @@ int UDPClientSocket::SetSendBufferSize(int32_t size) {
 
 int UDPClientSocket::SetDoNotFragment() {
   return socket_.SetDoNotFragment();
+}
+
+int UDPClientSocket::SetRecvTos() {
+  return socket_.SetRecvTos();
+}
+
+int UDPClientSocket::SetTos(DiffServCodePoint dscp, EcnCodePoint ecn) {
+  return socket_.SetTos(dscp, ecn);
 }
 
 void UDPClientSocket::SetMsgConfirm(bool confirm) {
@@ -172,15 +280,30 @@ void UDPClientSocket::SetIOSNetworkServiceType(int ios_network_service_type) {
 #endif
 }
 
-void UDPClientSocket::SetDontClose(bool dont_close) {
+void UDPClientSocket::RegisterQuicConnectionClosePayload(
+    base::span<uint8_t> payload) {
 #if BUILDFLAG(IS_POSIX)
-  socket_.SetDontClose(dont_close);
+  socket_.RegisterQuicConnectionClosePayload(payload);
 #endif
 }
 
-void UDPClientSocket::AdoptOpenedSocket(AddressFamily address_family,
-                                        SocketDescriptor socket) {
-  socket_.AdoptOpenedSocket(address_family, socket);
+void UDPClientSocket::UnregisterQuicConnectionClosePayload() {
+#if BUILDFLAG(IS_POSIX)
+  socket_.UnregisterQuicConnectionClosePayload();
+#endif
+}
+
+int UDPClientSocket::AdoptOpenedSocket(AddressFamily address_family,
+                                       SocketDescriptor socket) {
+  int rv = socket_.AdoptOpenedSocket(address_family, socket);
+  if (rv == OK) {
+    adopted_opened_socket_ = true;
+  }
+  return rv;
+}
+
+DscpAndEcn UDPClientSocket::GetLastTos() const {
+  return socket_.GetLastTos();
 }
 
 }  // namespace net

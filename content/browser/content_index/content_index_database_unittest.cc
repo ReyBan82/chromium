@@ -10,6 +10,7 @@
 #include "base/test/bind.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "content/browser/service_worker/embedded_worker_test_helper.h"
+#include "content/browser/service_worker/service_worker_context_core.h"
 #include "content/public/browser/content_index_provider.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/test_browser_context.h"
@@ -208,14 +209,13 @@ class ContentIndexDatabaseTest : public ::testing::Test {
       const std::string& description_id) {
     base::RunLoop run_loop;
     std::unique_ptr<ContentIndexEntry> out_entry;
-    database_->GetEntry(service_worker_registration_id_, description_id,
-                        base::BindLambdaForTesting(
-                            [&](absl::optional<ContentIndexEntry> entry) {
-                              if (entry)
-                                out_entry = std::make_unique<ContentIndexEntry>(
-                                    std::move(*entry));
-                              run_loop.Quit();
-                            }));
+    database_->GetEntry(
+        service_worker_registration_id_, description_id,
+        base::BindLambdaForTesting([&](std::optional<ContentIndexEntry> entry) {
+          if (entry)
+            out_entry = std::make_unique<ContentIndexEntry>(std::move(*entry));
+          run_loop.Quit();
+        }));
     run_loop.Run();
     return out_entry;
   }
@@ -251,9 +251,12 @@ class ContentIndexDatabaseTest : public ::testing::Test {
       options.scope = origin.GetURL();
       const blink::StorageKey key = blink::StorageKey::CreateFirstParty(origin);
       base::RunLoop run_loop;
+      auto fetch_client_settings_object =
+          blink::mojom::FetchClientSettingsObject::New();
+      fetch_client_settings_object->policy_container_policies =
+          blink::mojom::PolicyContainerPolicies::New();
       embedded_worker_test_helper_.context()->RegisterServiceWorker(
-          script_url, key, options,
-          blink::mojom::FetchClientSettingsObject::New(),
+          script_url, key, options, std::move(fetch_client_settings_object),
           base::BindOnce(&DidRegisterServiceWorker,
                          &service_worker_registration_id,
                          run_loop.QuitClosure()),
@@ -271,7 +274,7 @@ class ContentIndexDatabaseTest : public ::testing::Test {
 
     {
       base::RunLoop run_loop;
-      embedded_worker_test_helper_.context()->registry()->FindRegistrationForId(
+      embedded_worker_test_helper_.context()->registry().FindRegistrationForId(
           service_worker_registration_id,
           blink::StorageKey::CreateFirstParty(origin),
           base::BindOnce(&DidFindServiceWorkerRegistration,
@@ -373,10 +376,9 @@ TEST_F(ContentIndexDatabaseTest, DeleteNonExistentEntry) {
 TEST_F(ContentIndexDatabaseTest, ProviderUpdated) {
   {
     std::unique_ptr<ContentIndexEntry> out_entry;
-    EXPECT_CALL(*provider(), OnContentAdded(_))
-        .WillOnce(testing::Invoke([&](auto entry) {
-          out_entry = std::make_unique<ContentIndexEntry>(std::move(entry));
-        }));
+    EXPECT_CALL(*provider(), OnContentAdded(_)).WillOnce([&](auto entry) {
+      out_entry = std::make_unique<ContentIndexEntry>(std::move(entry));
+    });
     EXPECT_EQ(AddEntry(CreateDescription("id")),
               blink::mojom::ContentIndexError::NONE);
 
@@ -443,10 +445,9 @@ TEST_F(ContentIndexDatabaseTest, GetEntries) {
 
   std::unique_ptr<ContentIndexEntry> added_entry;
   {
-    EXPECT_CALL(*provider(), OnContentAdded(_))
-        .WillOnce(testing::Invoke([&](auto entry) {
-          added_entry = std::make_unique<ContentIndexEntry>(std::move(entry));
-        }));
+    EXPECT_CALL(*provider(), OnContentAdded(_)).WillOnce([&](auto entry) {
+      added_entry = std::make_unique<ContentIndexEntry>(std::move(entry));
+    });
     EXPECT_EQ(AddEntry(CreateDescription("id")),
               blink::mojom::ContentIndexError::NONE);
     base::RunLoop().RunUntilIdle();
@@ -500,41 +501,6 @@ TEST_F(ContentIndexDatabaseTest, BlockedOriginsCannotRegisterContent) {
   // Registering is OK now.
   EXPECT_EQ(AddEntry(CreateDescription("id4")),
             blink::mojom::ContentIndexError::NONE);
-}
-
-TEST_F(ContentIndexDatabaseTest, UmaRecorded) {
-  base::HistogramTester histogram_tester;
-
-  EXPECT_EQ(AddEntry(CreateDescription("id")),
-            blink::mojom::ContentIndexError::NONE);
-  histogram_tester.ExpectBucketCount("ContentIndex.Database.Add",
-                                     blink::ServiceWorkerStatusCode::kOk, 1);
-
-  EXPECT_FALSE(GetIcons("id").empty());
-  histogram_tester.ExpectBucketCount("ContentIndex.Database.GetIcon",
-                                     blink::ServiceWorkerStatusCode::kOk, 1);
-
-  EXPECT_EQ(GetAllEntries().size(), 1u);
-  histogram_tester.ExpectBucketCount("ContentIndex.Database.GetAllEntries",
-                                     blink::ServiceWorkerStatusCode::kOk, 1);
-
-  EXPECT_EQ(GetDescriptions().size(), 1u);
-  histogram_tester.ExpectBucketCount("ContentIndex.Database.GetDescriptions",
-                                     blink::ServiceWorkerStatusCode::kOk, 1);
-
-  EXPECT_TRUE(GetEntry("id"));
-  histogram_tester.ExpectBucketCount("ContentIndex.Database.GetEntry",
-                                     blink::ServiceWorkerStatusCode::kOk, 1);
-
-  EXPECT_EQ(DeleteEntry("id"), blink::mojom::ContentIndexError::NONE);
-  histogram_tester.ExpectBucketCount("ContentIndex.Database.Delete",
-                                     blink::ServiceWorkerStatusCode::kOk, 1);
-
-  database()->BlockOrigin(origin());
-  AddEntry(CreateDescription("id"));
-  histogram_tester.ExpectBucketCount("ContentIndex.RegistrationBlocked",
-                                     blink::mojom::ContentCategory::HOME_PAGE,
-                                     1);
 }
 
 }  // namespace content

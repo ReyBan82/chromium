@@ -5,16 +5,21 @@
 #ifndef CHROME_BROWSER_ASH_LOGIN_SCREENS_MOCK_ERROR_SCREEN_H_
 #define CHROME_BROWSER_ASH_LOGIN_SCREENS_MOCK_ERROR_SCREEN_H_
 
+#include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/login/screens/error_screen.h"
 #include "chrome/browser/ash/login/screens/network_error.h"
 #include "chrome/browser/ui/webui/ash/login/error_screen_handler.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
+class PrefService;
+
 namespace ash {
 
 class MockErrorScreen : public ErrorScreen {
  public:
-  explicit MockErrorScreen(base::WeakPtr<ErrorScreenView> view);
+  // `local_state` must be non-null and must outlive `this`.
+  MockErrorScreen(const PrefService* local_state,
+                  base::WeakPtr<ErrorScreenView> view);
   ~MockErrorScreen() override;
 
   void FixCaptivePortal() override;
@@ -34,7 +39,7 @@ class MockErrorScreenView : public ErrorScreenView {
   MockErrorScreenView();
   ~MockErrorScreenView() override;
 
-  MOCK_METHOD0(Show, void());
+  MOCK_METHOD1(ShowScreenWithParam, void(bool is_closeable));
   MOCK_METHOD0(Hide, void());
   MOCK_METHOD1(ShowOobeScreen, void(OobeScreenId screen));
   MOCK_METHOD1(SetErrorStateCode, void(NetworkError::ErrorState error_state));
@@ -43,8 +48,12 @@ class MockErrorScreenView : public ErrorScreenView {
   MOCK_METHOD1(SetOfflineSigninAllowed, void(bool value));
   MOCK_METHOD1(SetShowConnectingIndicator, void(bool value));
   MOCK_METHOD1(SetUIState, void(NetworkError::UIState ui_state));
-  MOCK_METHOD1(SetIsPersistentError, void(bool is_persistent));
   MOCK_METHOD0(OnCancelButtonClicked, void());
+
+  base::WeakPtr<ErrorScreenView> AsWeakPtr() override;
+
+ private:
+  base::WeakPtrFactory<ErrorScreenView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

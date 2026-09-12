@@ -6,47 +6,47 @@
 #define CONTENT_BROWSER_ANDROID_TRACING_CONTROLLER_ANDROID_H_
 
 #include <set>
+#include <string>
+#include <string_view>
 
 #include "base/android/jni_weak_ref.h"
-#include "base/files/file_path.h"
 #include "base/memory/weak_ptr.h"
+
+namespace base {
+class FilePath;
+}  // namespace base
 
 namespace content {
 
 // This class implements the native methods of TracingControllerAndroid.java
 class TracingControllerAndroid {
  public:
-  TracingControllerAndroid(JNIEnv* env, jobject obj);
+  TracingControllerAndroid(JNIEnv* env, const jni_zero::JavaRef<jobject>& obj);
 
   TracingControllerAndroid(const TracingControllerAndroid&) = delete;
   TracingControllerAndroid& operator=(const TracingControllerAndroid&) = delete;
 
-  void Destroy(JNIEnv* env, const base::android::JavaParamRef<jobject>& obj);
+  void Destroy(JNIEnv* env);
 
   bool StartTracing(JNIEnv* env,
-                    const base::android::JavaParamRef<jobject>& obj,
-                    const base::android::JavaParamRef<jstring>& categories,
-                    const base::android::JavaParamRef<jstring>& trace_options,
+                    const base::android::JavaRef<jstring>& categories,
+                    const base::android::JavaRef<jstring>& trace_options,
                     bool use_protobuf);
   void StopTracing(JNIEnv* env,
-                   const base::android::JavaParamRef<jobject>& obj,
-                   const base::android::JavaParamRef<jstring>& jfilepath,
+                   const base::android::JavaRef<jstring>& jfilepath,
                    bool compress_file,
                    bool use_protobuf,
-                   const base::android::JavaParamRef<jobject>& callback);
-  bool GetKnownCategoriesAsync(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jobject>& callback);
+                   const base::android::JavaRef<jobject>& callback);
+  bool GetKnownCategoriesAsync(JNIEnv* env,
+                               const base::android::JavaRef<jobject>& callback);
   bool GetTraceBufferUsageAsync(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& obj,
-      const base::android::JavaParamRef<jobject>& callback);
+      const base::android::JavaRef<jobject>& callback);
 
   // Locate the appropriate directory to write the trace to and use it to
   // generate the path. |basename| might be empty, then TracingControllerAndroid
   // will generate an appropriate one as well.
-  static base::FilePath GenerateTracingFilePath(const std::string& basename);
+  static base::FilePath GenerateTracingFilePath(std::string_view basename);
 
  private:
   ~TracingControllerAndroid();

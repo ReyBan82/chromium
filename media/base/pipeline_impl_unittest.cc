@@ -5,6 +5,7 @@
 #include "media/base/pipeline_impl.h"
 
 #include <stddef.h>
+
 #include <memory>
 #include <utility>
 #include <vector>
@@ -12,7 +13,7 @@
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/weak_ptr.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/gmock_callback_support.h"
@@ -21,12 +22,9 @@
 #include "base/threading/simple_thread.h"
 #include "base/time/clock.h"
 #include "base/time/time.h"
-#include "media/base/fake_text_track_stream.h"
 #include "media/base/media_util.h"
 #include "media/base/mock_filters.h"
 #include "media/base/test_helpers.h"
-#include "media/base/text_renderer.h"
-#include "media/base/text_track_config.h"
 #include "media/base/time_delta_interpolator.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "ui/gfx/geometry/size.h"
@@ -105,21 +103,19 @@ class PipelineImplTest : public ::testing::Test {
   };
 
   PipelineImplTest()
-      : demuxer_(new StrictMock<MockDemuxer>()),
-        demuxer_host_(nullptr),
-        scoped_renderer_(new StrictMock<MockRenderer>()),
-        renderer_(scoped_renderer_.get()),
-        renderer_client_(nullptr) {
+      : scoped_renderer_(std::make_unique<StrictMock<MockRenderer>>()),
+        renderer_(scoped_renderer_->AsWeakPtr()),
+        demuxer_(std::make_unique<StrictMock<MockDemuxer>>()) {
     pipeline_ = std::make_unique<PipelineImpl>(
         task_environment_.GetMainThreadTaskRunner(),
         task_environment_.GetMainThreadTaskRunner(),
-        base::BindRepeating(&PipelineImplTest::CreateRenderer,
+        base::BindRepeating(&PipelineImplTest::TakeRenderer,
                             base::Unretained(this)),
         &media_log_);
 
     // SetDemuxerExpectations() adds overriding expectations for expected
     // non-NULL streams.
-    std::vector<DemuxerStream*> empty;
+    std::vector<raw_ptr<DemuxerStream>> empty;
     EXPECT_CALL(*demuxer_, GetAllStreams()).WillRepeatedly(Return(empty));
 
     EXPECT_CALL(*demuxer_, GetTimelineOffset())
@@ -167,9 +163,7 @@ class PipelineImplTest : public ::testing::Test {
 
   std::unique_ptr<StrictMock<MockDemuxerStream>> CreateStream(
       DemuxerStream::Type type) {
-    std::unique_ptr<StrictMock<MockDemuxerStream>> stream(
-        new StrictMock<MockDemuxerStream>(type));
-    return stream;
+    return std::make_unique<StrictMock<MockDemuxerStream>>(type);
   }
 
   // Sets up expectations to allow the renderer to initialize.
@@ -190,7 +184,8 @@ class PipelineImplTest : public ::testing::Test {
   void SetRendererPostStartExpectations() {
     EXPECT_CALL(*renderer_, SetPlaybackRate(0.0));
     EXPECT_CALL(*renderer_, SetVolume(1.0f));
-    EXPECT_CALL(*renderer_, SetWasPlayedWithUserActivation(false));
+    EXPECT_CALL(*renderer_,
+                SetWasPlayedWithUserActivationAndHighMediaEngagement(false));
     EXPECT_CALL(*renderer_, StartPlayingFrom(start_time_))
         .WillOnce(SetBufferingState(&renderer_client_, BUFFERING_HAVE_ENOUGH,
                                     BUFFERING_CHANGE_REASON_UNKNOWN));
@@ -299,25 +294,27 @@ class PipelineImplTest : public ::testing::Test {
     ResetRenderer();
   }
 
-  std::unique_ptr<Renderer> CreateRenderer(
-      absl::optional<RendererType> /* renderer_type */) {
+  std::unique_ptr<Renderer> TakeRenderer(
+      std::optional<RendererType> /* renderer_type */) {
     return std::move(scoped_renderer_);
   }
 
   void ResetRenderer() {
     // |renderer_| has been deleted, replace it.
     scoped_renderer_ = std::make_unique<StrictMock<MockRenderer>>();
-    renderer_ = scoped_renderer_.get();
+    renderer_ = scoped_renderer_->AsWeakPtr();
     EXPECT_CALL(*renderer_, SetPreservesPitch(_)).Times(AnyNumber());
   }
 
   void ExpectResume(const base::TimeDelta& seek_time) {
     ExpectRendererInitialization();
+    EXPECT_CALL(*demuxer_, IsSeekable()).WillOnce(Return(true));
     EXPECT_CALL(*demuxer_, OnSeek(seek_time, _))
         .WillOnce(RunOnceCallback<1>(PIPELINE_OK));
     EXPECT_CALL(*renderer_, SetPlaybackRate(_));
     EXPECT_CALL(*renderer_, SetVolume(_));
-    EXPECT_CALL(*renderer_, SetWasPlayedWithUserActivation(false));
+    EXPECT_CALL(*renderer_,
+                SetWasPlayedWithUserActivationAndHighMediaEngagement(false));
     EXPECT_CALL(*renderer_, StartPlayingFrom(seek_time))
         .WillOnce(SetBufferingState(&renderer_client_, BUFFERING_HAVE_ENOUGH,
                                     BUFFERING_CHANGE_REASON_UNKNOWN));
@@ -362,18 +359,14 @@ class PipelineImplTest : public ::testing::Test {
   std::unique_ptr<PipelineImpl> pipeline_;
   NiceMock<MockCdmContext> cdm_context_;
 
-  std::unique_ptr<StrictMock<MockDemuxer>> demuxer_;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #addr-of
-  RAW_PTR_EXCLUSION DemuxerHost* demuxer_host_;
   std::unique_ptr<StrictMock<MockRenderer>> scoped_renderer_;
-  raw_ptr<StrictMock<MockRenderer>> renderer_;
+  base::WeakPtr<MockRenderer> renderer_;
   std::unique_ptr<StrictMock<MockDemuxerStream>> audio_stream_;
   std::unique_ptr<StrictMock<MockDemuxerStream>> video_stream_;
-  std::vector<DemuxerStream*> streams_;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #addr-of
-  RAW_PTR_EXCLUSION RendererClient* renderer_client_;
+  std::vector<raw_ptr<DemuxerStream>> streams_;
+  std::unique_ptr<StrictMock<MockDemuxer>> demuxer_;
+  raw_ptr<DemuxerHost, DanglingUntriaged> demuxer_host_ = nullptr;
+  raw_ptr<RendererClient, DanglingUntriaged> renderer_client_ = nullptr;
   VideoDecoderConfig video_decoder_config_;
   PipelineMetadata metadata_;
   base::TimeDelta start_time_;
@@ -653,7 +646,8 @@ TEST_F(PipelineImplTest, SetVolumeDuringStartup) {
   // The audio renderer should receive two calls to SetVolume().
   float expected = 0.5f;
   EXPECT_CALL(*renderer_, SetVolume(expected)).Times(2);
-  EXPECT_CALL(*renderer_, SetWasPlayedWithUserActivation(false));
+  EXPECT_CALL(*renderer_,
+              SetWasPlayedWithUserActivationAndHighMediaEngagement(false));
   EXPECT_CALL(callbacks_, OnStart(HasStatusCode(PIPELINE_OK)));
   EXPECT_CALL(callbacks_, OnMetadata(_))
       .WillOnce(RunOnceClosure(base::BindOnce(&PipelineImpl::SetVolume,
@@ -785,6 +779,7 @@ TEST_F(PipelineImplTest, DemuxerErrorDuringSeek) {
 
   double playback_rate = 1.0;
   EXPECT_CALL(*renderer_, SetPlaybackRate(playback_rate));
+  EXPECT_CALL(*demuxer_, SetPlaybackRate(playback_rate));
   pipeline_->SetPlaybackRate(playback_rate);
   base::RunLoop().RunUntilIdle();
 
@@ -897,7 +892,7 @@ TEST_F(PipelineImplTest, GetMediaTime) {
   EXPECT_EQ(kMediaTime, pipeline_->GetMediaTime());
 
   // Media time should not go backwards even if the renderer returns an
-  // errorneous value. PipelineImpl should clamp it to last reported value.
+  // erroneous value. PipelineImpl should clamp it to last reported value.
   EXPECT_CALL(*renderer_, GetMediaTime())
       .WillRepeatedly(Return(base::Seconds(1)));
   EXPECT_EQ(kMediaTime, pipeline_->GetMediaTime());
@@ -1057,7 +1052,8 @@ class PipelineTeardownTest : public PipelineImplTest {
     CreateVideoStream();
     SetDemuxerExpectations(base::Seconds(3000));
     EXPECT_CALL(*renderer_, SetVolume(1.0f));
-    EXPECT_CALL(*renderer_, SetWasPlayedWithUserActivation(false));
+    EXPECT_CALL(*renderer_,
+                SetWasPlayedWithUserActivationAndHighMediaEngagement(false));
 
     if (state == kInitRenderer) {
       if (stop_or_error == kStop) {
@@ -1156,6 +1152,7 @@ class PipelineTeardownTest : public PipelineImplTest {
     PipelineImplTest::DoSuspend();
 
     if (state == kResuming) {
+      EXPECT_CALL(*demuxer_, IsSeekable()).WillOnce(Return(true));
       PipelineImplTest::DoResume(base::TimeDelta());
       return;
     }

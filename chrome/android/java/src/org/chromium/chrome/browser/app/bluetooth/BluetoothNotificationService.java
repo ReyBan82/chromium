@@ -4,13 +4,15 @@
 
 package org.chromium.chrome.browser.app.bluetooth;
 
+import org.chromium.base.SplitCompatService;
 import org.chromium.build.annotations.IdentifierNameString;
-import org.chromium.chrome.browser.base.SplitCompatService;
+import org.chromium.build.annotations.NullMarked;
 
 /** See {@link BluetoothNotificationServiceImpl}. */
+@NullMarked
 public class BluetoothNotificationService extends SplitCompatService {
-    @IdentifierNameString
-    private static String sImplClassName =
+    @SuppressWarnings("FieldCanBeFinal") // @IdentifierNameString requires non-final
+    private static @IdentifierNameString String sImplClassName =
             "org.chromium.chrome.browser.app.bluetooth.BluetoothNotificationServiceImpl";
 
     public BluetoothNotificationService() {

@@ -21,23 +21,24 @@ import android.view.View;
 
 import androidx.core.content.res.ResourcesCompat;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.ui.R;
-import org.chromium.ui.dragdrop.DragAndDropDelegateImpl.DragShadowSpec;
 
 /**
  * A {@link View.DragShadowBuilder} that animate the drag shadow from the original image in the web
- * to the center of the touch point.
- * See go/animated-image-drag-shadow-corner-cases for known edge cases.
+ * to the center of the touch point. See go/animated-image-drag-shadow-corner-cases for known edge
+ * cases.
  */
+@NullMarked
 class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
     /**
-     * Animatable progress for the drag shadow. When the progress is 0, the drag shadow is full
-     * size and the touch point of the original view matches the touch point in the shadow. As
-     * the progress animates to 1, the drag shadow shrinks and translates to have the users
-     * finger in the center of the drag shadow.
+     * Animatable progress for the drag shadow. When the progress is 0, the drag shadow is full size
+     * and the touch point of the original view matches the touch point in the shadow. As the
+     * progress animates to 1, the drag shadow shrinks and translates to have the users finger in
+     * the center of the drag shadow.
      */
     private final FloatProperty<AnimatedImageDragShadowBuilder> mProgressProperty =
-            new FloatProperty<AnimatedImageDragShadowBuilder>("progress") {
+            new FloatProperty<>("progress") {
                 @Override
                 public void setValue(
                         AnimatedImageDragShadowBuilder animatedImageDragShadowBuilder, float v) {
@@ -64,7 +65,6 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
     private final Matrix mTransformMatrix;
     private final View mContainerView;
     private final int mBorderSize;
-    private final boolean mIsTruncated;
 
     private final RectF mStartBounds = new RectF();
     private final RectF mEndBounds = new RectF();
@@ -78,20 +78,27 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
      * @param containerView The container view where the drag starts.
      * @param bitmap The bitmap which represents the shadow image.
      * @param startX The x offset of the touch point relative to the top left corner of the original
-     *         image in the web.
+     *     image in the web.
      * @param startY The y offset of the touch point relative to the top left corner of the original
-     *         image in the web.
+     *     image in the web.
      * @param dragShadowSpec The spec of the drag shadow including its size.
      */
-    public AnimatedImageDragShadowBuilder(View containerView, Bitmap bitmap, float startX,
-            float startY, DragShadowSpec dragShadowSpec) {
+    public AnimatedImageDragShadowBuilder(
+            View containerView,
+            Context context,
+            Bitmap bitmap,
+            float startX,
+            float startY,
+            DragShadowSpec dragShadowSpec) {
         this.mContainerView = containerView;
-        this.mIsTruncated = dragShadowSpec.isTruncated;
         Bitmap croppedDragShadow =
-                ThumbnailUtils.extractThumbnail(bitmap, dragShadowSpec.startWidth,
-                        dragShadowSpec.startHeight, ThumbnailUtils.OPTIONS_RECYCLE_INPUT);
+                ThumbnailUtils.extractThumbnail(
+                        bitmap,
+                        dragShadowSpec.startWidth,
+                        dragShadowSpec.startHeight,
+                        ThumbnailUtils.OPTIONS_RECYCLE_INPUT);
         float resizeRatio = (float) dragShadowSpec.targetWidth / dragShadowSpec.startWidth;
-        Resources res = containerView.getResources();
+        Resources res = context.getResources();
         mProgress = 0f;
 
         mStartBounds.set(0, 0, dragShadowSpec.startWidth, dragShadowSpec.startHeight);
@@ -131,7 +138,7 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
         mPaintBorder = new Paint();
         mPaintBorder.setStyle(Paint.Style.STROKE);
         mPaintBorder.setStrokeWidth(mBorderSize);
-        mPaintBorder.setColor(res.getColor(R.color.baseline_neutral_variant_100_alpha_20));
+        mPaintBorder.setColor(context.getColor(R.color.drag_shadow_outline_color));
         mTransformMatrix = new Matrix();
     }
 
@@ -141,13 +148,14 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
         outShadowTouchPoint.set(Math.round(mEndBounds.centerX()), Math.round(mEndBounds.centerY()));
         ObjectAnimator animator = ObjectAnimator.ofFloat(this, mProgressProperty, 1f);
         animator.setAutoCancel(true);
-        animator.setDuration(mIsTruncated ? 0 : ANIMATION_DURATION_MS);
+        animator.setDuration(ANIMATION_DURATION_MS);
         animator.start();
     }
 
     @Override
     public void onDrawShadow(Canvas canvas) {
-        mCurrentBounds.set(lerp(mStartBounds.left, mEndBounds.left, mProgress),
+        mCurrentBounds.set(
+                lerp(mStartBounds.left, mEndBounds.left, mProgress),
                 lerp(mStartBounds.top, mEndBounds.top, mProgress),
                 lerp(mStartBounds.right, mEndBounds.right, mProgress),
                 lerp(mStartBounds.bottom, mEndBounds.bottom, mProgress));
@@ -160,8 +168,10 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
         canvas.drawRoundRect(mCurrentBounds, cornerRadius, cornerRadius, mPaint);
         // The border stroke is centered at the bounds. To avoid overlap with the shadow, the
         // stroke should be shifted outward half of the border size.
-        mBorderBounds.set(mCurrentBounds.left - mBorderSize / 2f,
-                mCurrentBounds.top - mBorderSize / 2f, mCurrentBounds.right + mBorderSize / 2f,
+        mBorderBounds.set(
+                mCurrentBounds.left - mBorderSize / 2f,
+                mCurrentBounds.top - mBorderSize / 2f,
+                mCurrentBounds.right + mBorderSize / 2f,
                 mCurrentBounds.bottom + mBorderSize / 2f);
         canvas.drawRoundRect(mBorderBounds, cornerRadius, cornerRadius, mPaintBorder);
     }
@@ -177,7 +187,7 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
 
     /**
      * Return the {@link DragShadowSpec} based on the image size and window size.
-     * TODO(crbug.com/1295868): Scale image in C++ before passing into Java.
+     * TODO(crbug.com/40214518): Scale image in C++ before passing into Java.
      */
     static DragShadowSpec getDragShadowSpec(
             Context context, int imageWidth, int imageHeight, int windowWidth, int windowHeight) {
@@ -186,7 +196,8 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
         float startHeight = imageHeight;
         float targetWidth = startWidth;
         float targetHeight = startHeight;
-        boolean isTruncated = false;
+        float truncatedWidth = 0f;
+        float truncatedHeight = 0f;
 
         // Calculate the default scaled width / height.
         final float resizeRatio =
@@ -217,7 +228,7 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
             if (targetHeight > maxHeightPx) {
                 targetHeight = maxHeightPx;
                 startHeight = targetHeight / targetWidth * startWidth;
-                isTruncated = true;
+                truncatedHeight = (imageHeight - startHeight) / 2;
             }
         } else if (targetHeight < minSizePx) {
             float scaleUpRatio = minSizePx / targetHeight;
@@ -226,17 +237,89 @@ class AnimatedImageDragShadowBuilder extends View.DragShadowBuilder {
             if (targetWidth > maxWidthPx) {
                 targetWidth = maxWidthPx;
                 startWidth = targetWidth / targetHeight * startHeight;
-                isTruncated = true;
+                truncatedWidth = (imageWidth - startWidth) / 2;
             }
         }
-        return new DragShadowSpec(Math.round(startWidth), Math.round(startHeight),
-                Math.round(targetWidth), Math.round(targetHeight), isTruncated);
+        return new DragShadowSpec(
+                Math.round(startWidth),
+                Math.round(startHeight),
+                Math.round(targetWidth),
+                Math.round(targetHeight),
+                Math.round(truncatedWidth),
+                Math.round(truncatedHeight));
     }
 
-    /**
-     * Return the minimum size of the drag shadow image.
-     */
+    /** Return the adjusted {@link CursorOffset} based on the drag object size and shadow size. */
+    static CursorOffset adjustCursorOffset(
+            float cursorOffsetX,
+            float cursorOffsetY,
+            int dragObjRectWidth,
+            int dragObjRectHeight,
+            DragShadowSpec dragShadowSpec) {
+        assert dragShadowSpec.truncatedHeight == 0 || dragShadowSpec.truncatedWidth == 0
+                : "Drag shadow should not be truncated in both dimensions";
+        float adjustedOffsetX = cursorOffsetX;
+        float adjustedOffsetY = cursorOffsetY;
+        if (dragShadowSpec.truncatedHeight != 0) {
+            float scaleFactor = (float) dragShadowSpec.startWidth / dragObjRectWidth;
+            adjustedOffsetX *= scaleFactor;
+            adjustedOffsetY *= scaleFactor;
+            adjustedOffsetY -= dragShadowSpec.truncatedHeight;
+            adjustedOffsetY = Math.max(0, adjustedOffsetY);
+            adjustedOffsetY = Math.min(dragShadowSpec.startHeight, adjustedOffsetY);
+            return new CursorOffset(adjustedOffsetX, adjustedOffsetY);
+        }
+        if (dragShadowSpec.truncatedWidth != 0) {
+            float scaleFactor = (float) dragShadowSpec.startHeight / dragObjRectHeight;
+            adjustedOffsetX *= scaleFactor;
+            adjustedOffsetY *= scaleFactor;
+            adjustedOffsetX -= dragShadowSpec.truncatedWidth;
+            adjustedOffsetX = Math.max(0, adjustedOffsetX);
+            adjustedOffsetX = Math.min(dragShadowSpec.startWidth, adjustedOffsetX);
+            return new CursorOffset(adjustedOffsetX, adjustedOffsetY);
+        }
+        float scaleFactor = (float) dragShadowSpec.startWidth / dragObjRectWidth;
+        adjustedOffsetX *= scaleFactor;
+        adjustedOffsetY *= scaleFactor;
+        return new CursorOffset(adjustedOffsetX, adjustedOffsetY);
+    }
+
+    /** Return the minimum size of the drag shadow image. */
     static int getDragShadowMinSize(Resources resources) {
         return resources.getDimensionPixelSize(R.dimen.drag_shadow_min_size);
+    }
+
+    static class DragShadowSpec {
+        public final int startWidth;
+        public final int startHeight;
+        public final int targetWidth;
+        public final int targetHeight;
+        public final int truncatedWidth;
+        public final int truncatedHeight;
+
+        DragShadowSpec(
+                int startWidth,
+                int startHeight,
+                int targetWidth,
+                int targetHeight,
+                int truncatedWidth,
+                int truncatedHeight) {
+            this.startWidth = startWidth;
+            this.startHeight = startHeight;
+            this.targetWidth = targetWidth;
+            this.targetHeight = targetHeight;
+            this.truncatedWidth = truncatedWidth;
+            this.truncatedHeight = truncatedHeight;
+        }
+    }
+
+    static class CursorOffset {
+        public final float x;
+        public final float y;
+
+        CursorOffset(float x, float y) {
+            this.x = x;
+            this.y = y;
+        }
     }
 }

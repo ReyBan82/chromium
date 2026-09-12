@@ -18,18 +18,45 @@ config("cpuinfo_config") {
     # For clog.c.
     "-Wno-unused-result",
 
+    # For src/src/arm/windows/init-by-logical-sys-info.c.
+    "-Wno-tautological-pointer-compare",
+
+    # For src/src/arm/linux/chipset.c.
+    "-Wno-logical-op-parentheses",
+
     # A lot of locations.
     "-Wno-unused-function",
   ]
 
+  if (is_linux && is_component_build) {
+    # Export all symbols when building as a shared library so that the
+    # cpuinfo C API is reachable from other components.
+    cflags += [ "-fvisibility=default" ]
+  }
+
   defines = [
     "_GNU_SOURCE=1",  # Required for CPU_SETSIZE to be available.
     "CPUINFO_INTERNAL=",
+    "CPUINFO_LOG_LEVEL=0",  # CPUINFO_LOG_NONE=0
     "CPUINFO_PRIVATE=",
   ]
 }
 
-source_set("cpuinfo") {
+# Build cpuinfo as a component on Linux to avoid the renderer-sandbox
+# initialization issue for the WebNN TFLite XNNPACK backend because cpuinfo
+# needs to access `/proc/cpuinfo` on that platform, and this must happen before
+# sandbox initialization. The `//content` and `//services/webnn` components are
+# separate shared libraries in a component build; if cpuinfo is statically
+# linked into each, they end up with independent copies of cpuinfo's static
+# state. By building cpuinfo as a single shared library, the initialization
+# performed pre-sandbox in `//content` is visible to `//services/webnn`.
+if (is_linux) {
+  _cpuinfo_target_type = "component"
+} else {
+  _cpuinfo_target_type = "source_set"
+}
+
+target(_cpuinfo_target_type, "cpuinfo") {
   public = [ "src/include/cpuinfo.h" ]
 
   sources = [
@@ -38,6 +65,7 @@ source_set("cpuinfo") {
     "src/src/api.c",
     "src/src/cache.c",
     "src/src/init.c",
+    "src/src/log.c",
   ]
 
   deps = [
@@ -96,11 +124,16 @@ source_set("cpu_specific") {
     ]
   }
 
-  if (current_cpu == "arm" || current_cpu == "arm64") {
+  if (current_cpu == "arm" || current_cpu == "arm64" ||
+      current_cpu == "arm64e") {
     sources = [
       "src/src/arm/cache.c",
       "src/src/arm/uarch.c",
     ]
+  }
+
+  if (current_cpu == "riscv64") {
+    sources = [ "src/src/riscv/uarch.c" ]
   }
 
   # Because "init.c" is reused again, but only has sources in the corresponding
@@ -170,6 +203,14 @@ source_set("cpu_and_os_specific") {
     ]
   }
 
+  if ((is_linux || is_chromeos) && current_cpu == "riscv64") {
+    sources = [
+      "src/src/riscv/linux/init.c",
+      "src/src/riscv/linux/riscv-hw.c",
+      "src/src/riscv/linux/riscv-isa.c",
+    ]
+  }
+
   if (is_android && (current_cpu == "arm" || current_cpu == "arm64")) {
     sources = [
       "src/src/arm/android/properties.c",
@@ -182,7 +223,7 @@ source_set("cpu_and_os_specific") {
       "src/src/arm/linux/midr.c",
     ]
 
-    if (current_cpu == "arm64") {
+    if (current_cpu == "arm64" || current_cpu == "arm64e") {
       sources += [ "src/src/arm/linux/aarch64-isa.c" ]
     } else {
       sources += [ "src/src/arm/linux/aarch32-isa.c" ]
@@ -211,7 +252,8 @@ source_set("cpu_and_os_specific") {
     sources = [ "src/src/x86/mach/init.c" ]
   }
 
-  if ((is_mac || is_ios) && (current_cpu == "arm" || current_cpu == "arm64")) {
+  if ((is_mac || is_ios) && (current_cpu == "arm" || current_cpu == "arm64" ||
+                             current_cpu == "arm64e")) {
     sources = [ "src/src/arm/mach/init.c" ]
   }
 

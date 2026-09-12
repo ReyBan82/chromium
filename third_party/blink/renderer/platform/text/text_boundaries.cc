@@ -26,57 +26,66 @@
 
 #include "third_party/blink/renderer/platform/text/text_boundaries.h"
 
+#include "base/numerics/safe_conversions.h"
 #include "third_party/blink/renderer/platform/text/text_break_iterator.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
 #include "third_party/blink/renderer/platform/wtf/text/unicode.h"
 
 namespace blink {
 
-int FindNextWordForward(const UChar* chars, unsigned len, int position) {
-  TextBreakIterator* it = WordBreakIterator({chars, len});
+wtf_size_t FindNextWordForward(base::span<const UChar> chars,
+                               wtf_size_t position) {
+  TextBreakIterator* it = WordBreakIterator(chars);
 
-  position = it->following(position);
-  while (position != kTextBreakDone) {
+  int len = base::checked_cast<int>(chars.size());
+  int break_position = it->following(base::checked_cast<int>(position));
+  while (break_position != kTextBreakDone) {
     // We stop searching when the character preceeding the break
     // is alphanumeric or underscore.
-    if (position < static_cast<int>(len) &&
-        (WTF::unicode::IsAlphanumeric(chars[position - 1]) ||
-         chars[position - 1] == kLowLineCharacter))
-      return position;
+    const auto prev = base::checked_cast<size_t>(break_position - 1);
+    if (break_position < len && (unicode::IsAlphanumeric(chars[prev]) ||
+                                 chars[prev] == uchar::kLowLine)) {
+      return static_cast<wtf_size_t>(break_position);
+    }
 
-    position = it->following(position);
+    break_position = it->following(break_position);
   }
 
-  return static_cast<int>(len);
+  return static_cast<wtf_size_t>(len);
 }
 
-int FindNextWordBackward(const UChar* chars, unsigned len, int position) {
-  TextBreakIterator* it = WordBreakIterator({chars, len});
+wtf_size_t FindNextWordBackward(base::span<const UChar> chars,
+                                wtf_size_t position) {
+  TextBreakIterator* it = WordBreakIterator(chars);
 
-  position = it->preceding(position);
-  while (position != kTextBreakDone) {
+  int break_position = it->preceding(base::checked_cast<int>(position));
+  while (break_position != kTextBreakDone) {
     // We stop searching when the character following the break
     // is alphanumeric or underscore.
-    if (position > 0 && (WTF::unicode::IsAlphanumeric(chars[position]) ||
-                         chars[position] == kLowLineCharacter))
-      return position;
+    const auto cur = base::checked_cast<size_t>(break_position);
+    if (break_position > 0 && (unicode::IsAlphanumeric(chars[cur]) ||
+                               chars[cur] == uchar::kLowLine)) {
+      return static_cast<wtf_size_t>(break_position);
+    }
 
-    position = it->preceding(position);
+    break_position = it->preceding(break_position);
   }
 
   return 0;
 }
 
-int FindWordStartBoundary(const UChar* chars, unsigned len, int position) {
-  TextBreakIterator* it = WordBreakIterator({chars, len});
-  it->following(position);
-  return it->previous();
+wtf_size_t FindWordStartBoundary(base::span<const UChar> chars,
+                                 wtf_size_t position) {
+  TextBreakIterator* it = WordBreakIterator(chars);
+  it->following(base::checked_cast<int>(position));
+  return static_cast<wtf_size_t>(it->previous());
 }
 
-int FindWordEndBoundary(const UChar* chars, unsigned len, int position) {
-  TextBreakIterator* it = WordBreakIterator({chars, len});
-  int end = it->following(position);
-  return end < 0 ? it->last() : end;
+wtf_size_t FindWordEndBoundary(base::span<const UChar> chars,
+                               wtf_size_t position) {
+  TextBreakIterator* it = WordBreakIterator(chars);
+  int end = it->following(base::checked_cast<int>(position));
+  return static_cast<wtf_size_t>(end < 0 ? it->last() : end);
 }
 
 }  // namespace blink

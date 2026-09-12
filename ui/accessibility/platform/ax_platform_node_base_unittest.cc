@@ -3,8 +3,12 @@
 // found in the LICENSE file.
 
 #include "ui/accessibility/platform/ax_platform_node_base.h"
+
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/accessibility/ax_constants.mojom.h"
+#include "ui/accessibility/platform/ax_platform_for_test.h"
 #include "ui/accessibility/platform/ax_platform_node_unittest.h"
 #include "ui/accessibility/platform/test_ax_node_wrapper.h"
 #include "ui/accessibility/test_ax_tree_update.h"
@@ -19,10 +23,11 @@ void SetIsInvisible(AXTree* tree, int id, bool invisible) {
   AXTreeUpdate update;
   update.nodes.resize(1);
   update.nodes[0] = tree->GetFromId(id)->data();
-  if (invisible)
+  if (invisible) {
     update.nodes[0].AddState(ax::mojom::State::kInvisible);
-  else
+  } else {
     update.nodes[0].RemoveState(ax::mojom::State::kInvisible);
+  }
   tree->Unserialize(update);
 }
 
@@ -41,7 +46,28 @@ TEST_F(AXPlatformNodeTest, GetHypertext) {
   // ++++StaticText "text1" #2
   // ++++StaticText "text2" #3
   // ++++StaticText "text3" #4
-  AXTree* tree = Init({Role::kRootWebArea, {{"text1"}, {"text2"}, {"text3"}}});
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData item1, item2, item3;
+  item1.id = 2;
+  item1.role = ax::mojom::Role::kStaticText;
+  item1.SetName("text1");
+  item2.id = 3;
+  item2.role = ax::mojom::Role::kStaticText;
+  item2.SetName("text2");
+  item3.id = 4;
+  item3.role = ax::mojom::Role::kStaticText;
+  item3.SetName("text3");
+
+  root_data.child_ids = {item1.id, item2.id, item3.id};
+
+  AXTreeUpdate update;
+  update.root_id = 1;
+  update.nodes = {root_data, item1, item2, item3};
+
+  AXTree* tree = Init(update);
 
   // Set an AXMode on the AXPlatformNode as some platforms (auralinux) use it to
   // determine if it should enable accessibility.
@@ -73,11 +99,42 @@ TEST_F(AXPlatformNodeTest, GetHypertextIgnoredContainerSiblings) {
   // ++++StaticText "text2" #5
   // ++genericContainer IGNORED #6
   // ++++StaticText "text3" #7
-  AXTree* tree =
-      Init({Role::kRootWebArea,
-            {{Role::kGenericContainer, State::kIgnored, {{"text1"}}},
-             {Role::kGenericContainer, State::kIgnored, {{"text2"}}},
-             {Role::kGenericContainer, State::kIgnored, {{"text3"}}}}});
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {2, 4, 6};
+
+  AXNodeData container1, container2, container3;
+  container1.id = 2;
+  container1.role = ax::mojom::Role::kGenericContainer;
+  container1.AddState(ax::mojom::State::kIgnored);
+  container1.child_ids = {3};
+  container2.id = 4;
+  container2.role = ax::mojom::Role::kGenericContainer;
+  container2.AddState(ax::mojom::State::kIgnored);
+  container2.child_ids = {5};
+  container3.id = 6;
+  container3.role = ax::mojom::Role::kGenericContainer;
+  container3.AddState(ax::mojom::State::kIgnored);
+  container3.child_ids = {7};
+
+  AXNodeData item1, item2, item3;
+  item1.id = 3;
+  item1.role = ax::mojom::Role::kStaticText;
+  item1.SetName("text1");
+  item2.id = 5;
+  item2.role = ax::mojom::Role::kStaticText;
+  item2.SetName("text2");
+  item3.id = 7;
+  item3.role = ax::mojom::Role::kStaticText;
+  item3.SetName("text3");
+
+  AXTreeUpdate update;
+  update.root_id = 1;
+  update.nodes = {root_data, container1, container2, container3,
+                  item1,     item2,      item3};
+
+  AXTree* tree = Init(update);
 
   // Set an AXMode on the AXPlatformNode as some platforms (auralinux) use it to
   // determine if it should enable accessibility.
@@ -111,8 +168,36 @@ TEST_F(AXPlatformNodeTest, GetTextContentIgnoresInvisibleAndIgnored) {
   // ++kGroup
   // ++++kStaticText "d"
   // ++++kStaticText "e"
-  AXTree* tree =
-      Init({Role::kGroup, {{"a"}, {"b"}, {Role::kGroup, {{"d"}, {"e"}}}}});
+
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kGroup;
+  root_data.child_ids = {2, 3, 4};
+
+  AXNodeData item1, item2, group1, item3, item4;
+  item1.id = 2;
+  item1.role = ax::mojom::Role::kStaticText;
+  item1.SetName("a");
+  item2.id = 3;
+  item2.role = ax::mojom::Role::kStaticText;
+  item2.SetName("b");
+
+  group1.id = 4;
+  group1.role = ax::mojom::Role::kGroup;
+  group1.child_ids = {5, 6};
+
+  item3.id = 5;
+  item3.role = ax::mojom::Role::kStaticText;
+  item3.SetName("d");
+  item4.id = 6;
+  item4.role = ax::mojom::Role::kStaticText;
+  item4.SetName("e");
+
+  AXTreeUpdate update;
+  update.root_id = 1;
+  update.nodes = {root_data, item1, item2, group1, item3, item4};
+
+  AXTree* tree = Init(update);
   auto* root = static_cast<AXPlatformNodeBase*>(
       TestAXNodeWrapper::GetOrCreate(tree, tree->root())->ax_platform_node());
 
@@ -477,10 +562,10 @@ TEST_F(AXPlatformNodeTest, CompareTo) {
   // Test for two nodes that do not share the same root. They should not be
   // comparable.
   AXPlatformNodeDelegate detached_delegate;
-  AXPlatformNodeBase* detached_node = static_cast<AXPlatformNodeBase*>(
-      AXPlatformNode::Create(&detached_delegate));
-  EXPECT_EQ(absl::nullopt, n1->CompareTo(*detached_node));
-  detached_node->Destroy();
+  AXPlatformNode::Pointer detached_node =
+      AXPlatformNode::Create(detached_delegate);
+  EXPECT_EQ(std::nullopt,
+            n1->CompareTo(static_cast<AXPlatformNodeBase&>(*detached_node)));
   detached_node = nullptr;
 
   // Create a test vector of all the tree nodes arranged in a pre-order
@@ -498,7 +583,7 @@ TEST_F(AXPlatformNodeTest, CompareTo) {
       else if (lhs->GetData().id > rhs->GetData().id)
         expected_result = 1;
 
-      EXPECT_NE(absl::nullopt, lhs->CompareTo(*rhs));
+      EXPECT_NE(std::nullopt, lhs->CompareTo(*rhs));
       int actual_result = 0;
       if (lhs->CompareTo(*rhs) < 0)
         actual_result = -1;
@@ -527,9 +612,30 @@ TEST_F(AXPlatformNodeTest, HypertextOffsetFromEndpoint) {
   // ++++kLink
   // ++++++kStaticText "link"
   // ++++++kStaticText "link#2"
-  AXTree* tree =
-      Init({Role::kRootWebArea,
-            {{Role::kParagraph, {{Role::kLink, {{"link"}, {"link#2"}}}}}}});
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {2};
+
+  AXNodeData container1, link1, item1, item2;
+  container1.id = 2;
+  container1.role = ax::mojom::Role::kParagraph;
+  container1.child_ids = {3};
+  link1.id = 3;
+  link1.role = ax::mojom::Role::kLink;
+  link1.child_ids = {4, 5};
+  item1.id = 4;
+  item1.role = ax::mojom::Role::kStaticText;
+  item1.SetName("link");
+  item2.id = 5;
+  item2.role = ax::mojom::Role::kStaticText;
+  item2.SetName("link#2");
+
+  AXTreeUpdate update;
+  update.root_id = 1;
+  update.nodes = {root_data, container1, link1, item1, item2};
+
+  AXTree* tree = Init(update);
   auto* root = static_cast<AXPlatformNodeBase*>(
       TestAXNodeWrapper::GetOrCreate(tree, tree->root())->ax_platform_node());
 
@@ -583,6 +689,180 @@ TEST_F(AXPlatformNodeTest, HypertextOffsetFromEndpoint) {
     EXPECT_EQ(link->GetHypertextOffsetFromEndpoint(link, 0), 0);
     EXPECT_EQ(link->GetHypertextOffsetFromEndpoint(link, 1), 4);
   }
+}
+
+TEST_F(AXPlatformNodeTest, GetTextSelection) {
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {2, 3};
+
+  AXNodeData text1_data;
+  text1_data.id = 2;
+  text1_data.role = ax::mojom::Role::kStaticText;
+  text1_data.SetName("abc");
+
+  AXNodeData text2_data;
+  text2_data.id = 3;
+  text2_data.role = ax::mojom::Role::kStaticText;
+  text2_data.SetName("def");
+
+  AXTreeUpdate update;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, text1_data, text2_data};
+  update.has_tree_data = true;
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+  update.tree_data.sel_anchor_object_id = text1_data.id;
+  update.tree_data.sel_anchor_offset = 1;
+  update.tree_data.sel_focus_object_id = text2_data.id;
+  update.tree_data.sel_focus_offset = 2;
+
+  AXTree* tree = Init(update);
+  ScopedAXModeSetter ax_mode_setter(kAXModeComplete);
+  auto* root = static_cast<AXPlatformNodeBase*>(
+      TestAXNodeWrapper::GetOrCreate(tree, tree->root())->ax_platform_node());
+  auto* text1 = static_cast<AXPlatformNodeBase*>(
+      AXPlatformNode::FromNativeViewAccessible(root->ChildAtIndex(0)));
+  auto* text2 = static_cast<AXPlatformNodeBase*>(
+      AXPlatformNode::FromNativeViewAccessible(root->ChildAtIndex(1)));
+
+  AXPlatformNodeBase::TextSelection selection;
+  EXPECT_EQ(AXPlatformNodeBase::TextSelectionResult::kSuccess,
+            root->GetTextSelection(&selection));
+  EXPECT_EQ(text1, selection.start_object);
+  EXPECT_EQ(1, selection.start_offset);
+  EXPECT_EQ(text2, selection.end_object);
+  EXPECT_EQ(2, selection.end_offset);
+  EXPECT_FALSE(selection.start_is_active);
+
+  AXTreeData tree_data = tree->data();
+  tree_data.sel_is_backward = true;
+  tree_data.sel_anchor_object_id = text2_data.id;
+  tree_data.sel_anchor_offset = 2;
+  tree_data.sel_focus_object_id = text1_data.id;
+  tree_data.sel_focus_offset = 1;
+  tree->UpdateDataForTesting(tree_data);
+
+  EXPECT_EQ(AXPlatformNodeBase::TextSelectionResult::kSuccess,
+            root->GetTextSelection(&selection));
+  EXPECT_EQ(text1, selection.start_object);
+  EXPECT_EQ(1, selection.start_offset);
+  EXPECT_EQ(text2, selection.end_object);
+  EXPECT_EQ(2, selection.end_offset);
+  EXPECT_TRUE(selection.start_is_active);
+
+  tree_data.sel_anchor_offset = ax::mojom::kNoSelectionOffset;
+  tree_data.sel_focus_offset = ax::mojom::kNoSelectionOffset;
+  tree->UpdateDataForTesting(tree_data);
+  EXPECT_EQ(AXPlatformNodeBase::TextSelectionResult::kNoSelection,
+            root->GetTextSelection(&selection));
+}
+
+TEST_F(AXPlatformNodeTest, SetTextSelection) {
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+  root_data.child_ids = {2, 3};
+
+  AXNodeData text1_data;
+  text1_data.id = 2;
+  text1_data.role = ax::mojom::Role::kStaticText;
+  text1_data.SetName("abc");
+
+  AXNodeData text2_data;
+  text2_data.id = 3;
+  text2_data.role = ax::mojom::Role::kStaticText;
+  text2_data.SetName("def");
+
+  AXTreeUpdate update;
+  update.root_id = root_data.id;
+  update.nodes = {root_data, text1_data, text2_data};
+  update.has_tree_data = true;
+  update.tree_data.tree_id = AXTreeID::CreateNewAXTreeID();
+
+  AXTree* tree = Init(update);
+  ScopedAXModeSetter ax_mode_setter(kAXModeComplete);
+  auto* root = static_cast<AXPlatformNodeBase*>(
+      TestAXNodeWrapper::GetOrCreate(tree, tree->root())->ax_platform_node());
+  auto* text1 = static_cast<AXPlatformNodeBase*>(
+      AXPlatformNode::FromNativeViewAccessible(root->ChildAtIndex(0)));
+  auto* text2 = static_cast<AXPlatformNodeBase*>(
+      AXPlatformNode::FromNativeViewAccessible(root->ChildAtIndex(1)));
+
+  AXPlatformNodeBase::TextSelection selection = {
+      .start_object = text1,
+      .start_offset = 1,
+      .end_object = text2,
+      .end_offset = 2,
+  };
+  EXPECT_EQ(AXPlatformNodeBase::TextSelectionResult::kSuccess,
+            root->SetTextSelection(selection));
+  EXPECT_EQ(text1_data.id, tree->data().sel_anchor_object_id);
+  EXPECT_EQ(1, tree->data().sel_anchor_offset);
+  EXPECT_EQ(text2_data.id, tree->data().sel_focus_object_id);
+  EXPECT_EQ(2, tree->data().sel_focus_offset);
+
+  selection.start_is_active = true;
+  EXPECT_EQ(AXPlatformNodeBase::TextSelectionResult::kSuccess,
+            root->SetTextSelection(selection));
+  EXPECT_EQ(text2_data.id, tree->data().sel_anchor_object_id);
+  EXPECT_EQ(2, tree->data().sel_anchor_offset);
+  EXPECT_EQ(text1_data.id, tree->data().sel_focus_object_id);
+  EXPECT_EQ(1, tree->data().sel_focus_offset);
+}
+
+TEST_F(AXPlatformNodeTest, ClearTextSelection) {
+  AXTree* tree = Init(BuildContentEditableWithSelectionRange(1, 2));
+  ScopedAXModeSetter ax_mode_setter(kAXModeComplete);
+  auto* root = static_cast<AXPlatformNodeBase*>(
+      TestAXNodeWrapper::GetOrCreate(tree, tree->root())->ax_platform_node());
+
+  EXPECT_EQ(AXPlatformNodeBase::TextSelectionResult::kSuccess,
+            root->ClearTextSelection());
+  EXPECT_EQ(root->GetData().id, tree->data().sel_anchor_object_id);
+  EXPECT_EQ(ax::mojom::kNoSelectionOffset, tree->data().sel_anchor_offset);
+  EXPECT_EQ(root->GetData().id, tree->data().sel_focus_object_id);
+  EXPECT_EQ(ax::mojom::kNoSelectionOffset, tree->data().sel_focus_offset);
+}
+
+TEST_F(AXPlatformNodeTest, CanvasAnnotationName) {
+  AXNodeData root_data;
+  root_data.id = 1;
+  root_data.role = ax::mojom::Role::kRootWebArea;
+
+  AXNodeData canvas_node;
+  canvas_node.id = 2;
+  canvas_node.role = ax::mojom::Role::kCanvas;
+  canvas_node.AddStringAttribute(ax::mojom::StringAttribute::kCanvasAnnotation,
+                                 "captured_text");
+
+  AXNodeData canvas_node_with_name;
+  canvas_node_with_name.id = 3;
+  canvas_node_with_name.role = ax::mojom::Role::kCanvas;
+  canvas_node_with_name.SetName("author_name");
+  canvas_node_with_name.AddStringAttribute(
+      ax::mojom::StringAttribute::kCanvasAnnotation, "captured_text");
+
+  root_data.child_ids = {canvas_node.id, canvas_node_with_name.id};
+
+  AXTreeUpdate update;
+  update.root_id = 1;
+  update.nodes = {root_data, canvas_node, canvas_node_with_name};
+
+  AXTree* tree = Init(update);
+
+  ScopedAXModeSetter ax_mode_setter(kAXModeComplete);
+
+  AXPlatformNodeBase* root = static_cast<AXPlatformNodeBase*>(
+      TestAXNodeWrapper::GetOrCreate(tree, tree->root())->ax_platform_node());
+
+  AXPlatformNodeBase* canvas = static_cast<AXPlatformNodeBase*>(
+      AXPlatformNode::FromNativeViewAccessible(root->ChildAtIndex(0)));
+  EXPECT_EQ(canvas->GetName(), "captured_text");
+
+  AXPlatformNodeBase* canvas_with_name = static_cast<AXPlatformNodeBase*>(
+      AXPlatformNode::FromNativeViewAccessible(root->ChildAtIndex(1)));
+  EXPECT_EQ(canvas_with_name->GetName(), "author_name. captured_text");
 }
 
 }  // namespace ui

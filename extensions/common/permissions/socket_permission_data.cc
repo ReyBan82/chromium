@@ -5,7 +5,6 @@
 #include "extensions/common/permissions/socket_permission_data.h"
 
 #include <cstdlib>
-#include <memory>
 #include <sstream>
 #include <vector>
 
@@ -82,14 +81,6 @@ SocketPermissionData::SocketPermissionData() = default;
 
 SocketPermissionData::~SocketPermissionData() = default;
 
-bool SocketPermissionData::operator<(const SocketPermissionData& rhs) const {
-  return entry_ < rhs.entry_;
-}
-
-bool SocketPermissionData::operator==(const SocketPermissionData& rhs) const {
-  return entry_ == rhs.entry_;
-}
-
 bool SocketPermissionData::Check(const APIPermission::CheckParam* param) const {
   if (!param)
     return false;
@@ -100,15 +91,16 @@ bool SocketPermissionData::Check(const APIPermission::CheckParam* param) const {
   return entry_.Check(request);
 }
 
-std::unique_ptr<base::Value> SocketPermissionData::ToValue() const {
-  return std::make_unique<base::Value>(GetAsString());
+base::Value SocketPermissionData::ToValue() const {
+  return base::Value(GetAsString());
 }
 
-bool SocketPermissionData::FromValue(const base::Value* value) {
-  if (!value->is_string())
+bool SocketPermissionData::FromValue(const base::Value& value) {
+  if (!value.is_string()) {
     return false;
+  }
 
-  return Parse(value->GetString());
+  return Parse(value.GetString());
 }
 
 SocketPermissionEntry& SocketPermissionData::entry() {

@@ -35,6 +35,7 @@
 #include "third_party/blink/renderer/core/css_value_keywords.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/events/scoped_event_queue.h"
+#include "third_party/blink/renderer/core/dom/focus_params.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/events/keyboard_event.h"
 #include "third_party/blink/renderer/core/events/mouse_event.h"
@@ -53,13 +54,15 @@
 #include "third_party/blink/renderer/core/page/page.h"
 #include "third_party/blink/renderer/core/style/computed_style.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/text/date_components.h"
 #include "third_party/blink/renderer/platform/text/date_time_format.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
-#include "third_party/blink/renderer/platform/wtf/date_math.h"
 #include "ui/base/ui_base_features.h"
 
 namespace blink {
+
+using mojom::blink::FormControlType;
 
 class DateTimeFormatValidator : public DateTimeFormat::TokenHandler {
  public:
@@ -142,23 +145,20 @@ bool DateTimeFormatValidator::ValidateFormat(
 
 DateTimeEditElement*
 MultipleFieldsTemporalInputTypeView::GetDateTimeEditElement() const {
-  auto* element = GetElement().UserAgentShadowRoot()->getElementById(
+  auto* element = GetElement().EnsureShadowSubtree()->getElementById(
       shadow_element_names::kIdDateTimeEdit);
   CHECK(!element || IsA<DateTimeEditElement>(element));
   return To<DateTimeEditElement>(element);
 }
 
-SpinButtonElement* MultipleFieldsTemporalInputTypeView::GetSpinButtonElement()
-    const {
-  auto* element = GetElement().UserAgentShadowRoot()->getElementById(
-      shadow_element_names::kIdSpinButton);
-  CHECK(!element || IsA<SpinButtonElement>(element));
-  return To<SpinButtonElement>(element);
+DateTimeEditElement*
+MultipleFieldsTemporalInputTypeView::GetDateTimeEditElementIfCreated() const {
+  return HasCreatedShadowSubtree() ? GetDateTimeEditElement() : nullptr;
 }
 
 ClearButtonElement* MultipleFieldsTemporalInputTypeView::GetClearButtonElement()
     const {
-  auto* element = GetElement().UserAgentShadowRoot()->getElementById(
+  auto* element = GetElement().EnsureShadowSubtree()->getElementById(
       shadow_element_names::kIdClearButton);
   CHECK(!element || IsA<ClearButtonElement>(element));
   return To<ClearButtonElement>(element);
@@ -166,7 +166,7 @@ ClearButtonElement* MultipleFieldsTemporalInputTypeView::GetClearButtonElement()
 
 PickerIndicatorElement*
 MultipleFieldsTemporalInputTypeView::GetPickerIndicatorElement() const {
-  auto* element = GetElement().UserAgentShadowRoot()->getElementById(
+  auto* element = GetElement().EnsureShadowSubtree()->getElementById(
       shadow_element_names::kIdPickerIndicator);
   CHECK(!element || IsA<PickerIndicatorElement>(element));
   return To<PickerIndicatorElement>(element);
@@ -174,7 +174,7 @@ MultipleFieldsTemporalInputTypeView::GetPickerIndicatorElement() const {
 
 inline bool MultipleFieldsTemporalInputTypeView::ContainsFocusedShadowElement()
     const {
-  return GetElement().UserAgentShadowRoot()->contains(
+  return GetElement().EnsureShadowSubtree()->contains(
       GetElement().GetDocument().FocusedElement());
 }
 
@@ -186,10 +186,8 @@ void MultipleFieldsTemporalInputTypeView::DidBlurFromControl(
   if (ContainsFocusedShadowElement())
     return;
   EventQueueScope scope;
-  // Remove focus ring by CSS "focus" pseudo class.
-  GetElement().SetFocused(false, focus_type);
-  if (SpinButtonElement* spin_button = GetSpinButtonElement())
-    spin_button->ReleaseCapture();
+  // Remove focus ring by CSS "focus" pseudo-class.
+  GetElement().SetFocused(false, focus_type, BlurEventBehavior::kFire);
 }
 
 void MultipleFieldsTemporalInputTypeView::DidFocusOnControl(
@@ -199,9 +197,9 @@ void MultipleFieldsTemporalInputTypeView::DidFocusOnControl(
 
   if (!ContainsFocusedShadowElement())
     return;
-  // Add focus ring by CSS "focus" pseudo class.
+  // Add focus ring by CSS "focus" pseudo-class.
   // FIXME: Setting the focus flag to non-focused element is too tricky.
-  GetElement().SetFocused(true, focus_type);
+  GetElement().SetFocused(true, focus_type, BlurEventBehavior::kFire);
 }
 
 void MultipleFieldsTemporalInputTypeView::EditControlValueChanged() {
@@ -240,41 +238,6 @@ bool MultipleFieldsTemporalInputTypeView::IsEditControlOwnerReadOnly() const {
   return GetElement().IsReadOnly();
 }
 
-void MultipleFieldsTemporalInputTypeView::FocusAndSelectSpinButtonOwner() {
-  if (DateTimeEditElement* edit = GetDateTimeEditElement())
-    edit->FocusIfNoFocus();
-}
-
-bool MultipleFieldsTemporalInputTypeView::
-    ShouldSpinButtonRespondToMouseEvents() {
-  return !GetElement().IsDisabledOrReadOnly();
-}
-
-bool MultipleFieldsTemporalInputTypeView::
-    ShouldSpinButtonRespondToWheelEvents() {
-  if (!ShouldSpinButtonRespondToMouseEvents())
-    return false;
-  if (DateTimeEditElement* edit = GetDateTimeEditElement())
-    return edit->HasFocusedField();
-  return false;
-}
-
-void MultipleFieldsTemporalInputTypeView::SpinButtonStepDown() {
-  if (DateTimeEditElement* edit = GetDateTimeEditElement())
-    edit->StepDown();
-}
-
-void MultipleFieldsTemporalInputTypeView::SpinButtonStepUp() {
-  if (DateTimeEditElement* edit = GetDateTimeEditElement())
-    edit->StepUp();
-}
-
-void MultipleFieldsTemporalInputTypeView::SpinButtonDidReleaseMouseCapture(
-    SpinButtonElement::EventDispatch event_dispatch) {
-  if (event_dispatch == SpinButtonElement::kEventDispatchAllowed)
-    GetElement().DispatchFormControlChangeEvent();
-}
-
 bool MultipleFieldsTemporalInputTypeView::
     IsPickerIndicatorOwnerDisabledOrReadOnly() const {
   return GetElement().IsDisabledOrReadOnly();
@@ -284,6 +247,11 @@ void MultipleFieldsTemporalInputTypeView::PickerIndicatorChooseValue(
     const String& value) {
   if (will_be_destroyed_)
     return;
+
+  // SetUserHasEditedTheFieldAndBlurred is required in order to match
+  // :user-valid/:user-invalid
+  GetElement().SetUserHasEditedTheFieldAndBlurred();
+
   if (value.empty() || GetElement().IsValidValue(value)) {
     GetElement().SetValue(value, TextFieldEventBehavior::kDispatchInputEvent);
     return;
@@ -295,11 +263,11 @@ void MultipleFieldsTemporalInputTypeView::PickerIndicatorChooseValue(
   EventQueueScope scope;
   DateComponents date;
   unsigned end;
-  if (input_type_->FormControlType() == input_type_names::kTime) {
+  if (input_type_->FormControlType() == FormControlType::kInputTime) {
     if (date.ParseTime(value, 0, end) && end == value.length())
       edit->SetOnlyTime(date);
   } else if (input_type_->FormControlType() ==
-             input_type_names::kDatetimeLocal) {
+             FormControlType::kInputDatetimeLocal) {
     if (date.ParseDateTimeLocal(value, 0, end) && end == value.length())
       edit->SetDateTimeLocal(date);
   } else {
@@ -312,6 +280,11 @@ void MultipleFieldsTemporalInputTypeView::PickerIndicatorChooseValue(
     double value) {
   if (will_be_destroyed_)
     return;
+
+  // SetUserHasEditedTheFieldAndBlurred is required in order to match
+  // :user-valid/:user-invalid
+  GetElement().SetUserHasEditedTheFieldAndBlurred();
+
   DCHECK(std::isfinite(value) || std::isnan(value));
   if (std::isnan(value)) {
     GetElement().SetValue(g_empty_string,
@@ -378,19 +351,7 @@ void MultipleFieldsTemporalInputTypeView::Blur() {
 
 void MultipleFieldsTemporalInputTypeView::AdjustStyle(
     ComputedStyleBuilder& builder) {
-  if (!RuntimeEnabledFeatures::DateInputInlineBlockEnabled()) {
-    EDisplay original_display = builder.Display();
-    EDisplay new_display = original_display;
-    if (original_display == EDisplay::kInline ||
-        original_display == EDisplay::kInlineBlock) {
-      new_display = EDisplay::kInlineFlex;
-    } else if (original_display == EDisplay::kBlock) {
-      new_display = EDisplay::kFlex;
-    }
-    builder.SetDisplay(new_display);
-  } else {
-    builder.SetShouldIgnoreOverflowPropertyForInlineBlockBaseline();
-  }
+  builder.SetShouldIgnoreOverflowPropertyForInlineBlockBaseline();
   builder.SetDirection(ComputedTextDirection());
 }
 
@@ -400,21 +361,21 @@ void MultipleFieldsTemporalInputTypeView::CreateShadowSubtree() {
   Document& document = GetElement().GetDocument();
   ContainerNode* container = GetElement().UserAgentShadowRoot();
 
-  if (RuntimeEnabledFeatures::DateInputInlineBlockEnabled()) {
-    auto* container_div = MakeGarbageCollected<HTMLDivElement>(document);
-    container_div->SetShadowPseudoId(
-        shadow_element_names::kPseudoInternalDatetimeContainer);
-    GetElement().UserAgentShadowRoot()->AppendChild(container_div);
-    container = container_div;
-  }
+  auto* container_div = MakeGarbageCollected<HTMLDivElement>(document);
+  container_div->SetShadowPseudoId(
+      shadow_element_names::kPseudoInternalDatetimeContainer);
+  container_div->SetInlineStyleProperty(CSSPropertyID::kUnicodeBidi,
+                                        CSSValueID::kNormal);
+  GetElement().UserAgentShadowRoot()->AppendChild(container_div);
+  container = container_div;
 
   container->AppendChild(
       MakeGarbageCollected<DateTimeEditElement, Document&,
                            DateTimeEditElement::EditControlOwner&>(document,
                                                                    *this));
-  if (LayoutTheme::GetTheme().SupportsCalendarPicker(
-          input_type_->FormControlType()))
+  if (LayoutTheme::GetTheme().SupportsCalendarPicker(input_type_->type())) {
     picker_indicator_is_always_visible_ = true;
+  }
   container->AppendChild(
       MakeGarbageCollected<PickerIndicatorElement, Document&,
                            PickerIndicatorElement::PickerIndicatorOwner&>(
@@ -426,8 +387,6 @@ void MultipleFieldsTemporalInputTypeView::CreateShadowSubtree() {
 void MultipleFieldsTemporalInputTypeView::DestroyShadowSubtree() {
   DCHECK(!is_destroying_shadow_subtree_);
   is_destroying_shadow_subtree_ = true;
-  if (SpinButtonElement* element = GetSpinButtonElement())
-    element->RemoveSpinButtonOwner();
   if (ClearButtonElement* element = GetClearButtonElement())
     element->RemoveClearButtonOwner();
   if (DateTimeEditElement* element = GetDateTimeEditElement())
@@ -438,7 +397,7 @@ void MultipleFieldsTemporalInputTypeView::DestroyShadowSubtree() {
   // If a field element has focus, set focus back to the <input> itself before
   // deleting the field. This prevents unnecessary focusout/blur events.
   if (ContainsFocusedShadowElement())
-    GetElement().Focus();
+    GetElement().Focus(FocusParams(FocusTrigger::kUserGesture));
 
   InputTypeView::DestroyShadowSubtree();
   is_destroying_shadow_subtree_ = false;
@@ -451,12 +410,32 @@ void MultipleFieldsTemporalInputTypeView::HandleClickEvent(MouseEvent& event) {
   }
 }
 
+void MultipleFieldsTemporalInputTypeView::HandleDOMActivateEvent(Event& event) {
+  if (!RuntimeEnabledFeatures::
+          InputMultipleFieldsUIWithPointerChecksEnabled()) {
+    return;
+  }
+  if (GetElement().IsDisabledOrReadOnly() || !GetElement().GetLayoutObject()) {
+    return;
+  }
+  if (!DateTimeChooser::ShouldSubfieldsBeFocusable(
+          GetElement().GetDocument().GetFrame())) {
+    OpenPopupView();
+    event.SetDefaultHandled();
+  }
+}
+
 void MultipleFieldsTemporalInputTypeView::HandleFocusInEvent(
     Element* old_focused_element,
     mojom::blink::FocusType type) {
   DateTimeEditElement* edit = GetDateTimeEditElement();
   if (!edit || is_destroying_shadow_subtree_)
     return;
+  if (RuntimeEnabledFeatures::InputMultipleFieldsUIWithPointerChecksEnabled() &&
+      !DateTimeChooser::ShouldSubfieldsBeFocusable(
+          GetElement().GetDocument().GetFrame())) {
+    return;
+  }
   if (type == mojom::blink::FocusType::kBackward) {
     if (GetElement().GetDocument().GetPage())
       GetElement().GetDocument().GetPage()->GetFocusController().AdvanceFocus(
@@ -469,20 +448,13 @@ void MultipleFieldsTemporalInputTypeView::HandleFocusInEvent(
 }
 
 void MultipleFieldsTemporalInputTypeView::ForwardEvent(Event& event) {
-  if (SpinButtonElement* element = GetSpinButtonElement()) {
-    element->ForwardEvent(event);
-    if (event.DefaultHandled())
-      return;
-  }
-
   if (DateTimeEditElement* edit = GetDateTimeEditElement())
     edit->DefaultEventHandler(event);
 }
 
-void MultipleFieldsTemporalInputTypeView::DisabledAttributeChanged() {
+void MultipleFieldsTemporalInputTypeView::DisabledAttributeChanged(
+    DisabledChangedReason reason) {
   EventQueueScope scope;
-  if (SpinButtonElement* spin_button = GetSpinButtonElement())
-    spin_button->ReleaseCapture();
   if (DateTimeEditElement* edit = GetDateTimeEditElement())
     edit->DisabledStateChanged();
 }
@@ -495,8 +467,8 @@ void MultipleFieldsTemporalInputTypeView::HandleKeydownEvent(
     KeyboardEvent& event) {
   if (!GetElement().IsFocused())
     return;
-  if (picker_indicator_is_visible_ &&
-      ((event.key() == "ArrowDown" && event.getModifierState("Alt")) ||
+  if (picker_indicator_is_visible_ && !GetElement().IsReadOnly() &&
+      ((event.key() == keywords::kArrowDown && event.altKey()) ||
        event.key() == "F4" || event.key() == " ")) {
     OpenPopupView();
     event.SetDefaultHandled();
@@ -505,9 +477,16 @@ void MultipleFieldsTemporalInputTypeView::HandleKeydownEvent(
   }
 }
 
+void MultipleFieldsTemporalInputTypeView::AccessKeyAction(
+    SimulatedClickCreationScope creation_scope) {
+  GetElement().Focus(FocusParams(
+      SelectionBehaviorOnFocus::kReset, mojom::blink::FocusType::kNone, nullptr,
+      FocusOptions::Create(), FocusTrigger::kUserGesture));
+}
+
 bool MultipleFieldsTemporalInputTypeView::HasBadInput() const {
-  DateTimeEditElement* edit = GetDateTimeEditElement();
-  return GetElement().Value().empty() && edit &&
+  DateTimeEditElement* edit = GetDateTimeEditElementIfCreated();
+  return edit && GetElement().Value().empty() &&
          edit->AnyEditableFieldsHaveValues();
 }
 
@@ -517,6 +496,7 @@ AtomicString MultipleFieldsTemporalInputTypeView::LocaleIdentifier() const {
 
 void MultipleFieldsTemporalInputTypeView::
     EditControlDidChangeValueByKeyboard() {
+  GetElement().SetUserHasEditedTheField();
   GetElement().DispatchFormControlChangeEvent();
 }
 
@@ -526,8 +506,6 @@ void MultipleFieldsTemporalInputTypeView::MinOrMaxAttributeChanged() {
 
 void MultipleFieldsTemporalInputTypeView::ReadonlyAttributeChanged() {
   EventQueueScope scope;
-  if (SpinButtonElement* spin_button = GetSpinButtonElement())
-    spin_button->ReleaseCapture();
   if (DateTimeEditElement* edit = GetDateTimeEditElement())
     edit->ReadOnlyStateChanged();
 }
@@ -608,8 +586,8 @@ void MultipleFieldsTemporalInputTypeView::UpdateView() {
   UpdateClearButtonVisibility();
 }
 
-ControlPart MultipleFieldsTemporalInputTypeView::AutoAppearance() const {
-  return kTextFieldPart;
+AppearanceValue MultipleFieldsTemporalInputTypeView::AutoAppearance() const {
+  return AppearanceValue::kTextField;
 }
 
 void MultipleFieldsTemporalInputTypeView::OpenPopupView() {
@@ -618,6 +596,9 @@ void MultipleFieldsTemporalInputTypeView::OpenPopupView() {
 }
 
 void MultipleFieldsTemporalInputTypeView::ClosePopupView() {
+  if (!HasCreatedShadowSubtree()) {
+    return;
+  }
   if (PickerIndicatorElement* picker = GetPickerIndicatorElement())
     picker->ClosePopup();
 }
@@ -626,6 +607,13 @@ bool MultipleFieldsTemporalInputTypeView::HasOpenedPopup() const {
   if (PickerIndicatorElement* picker = GetPickerIndicatorElement())
     return picker->HasOpenedPopup();
 
+  return false;
+}
+
+bool MultipleFieldsTemporalInputTypeView::IsPickerVisible() const {
+  if (PickerIndicatorElement* picker = GetPickerIndicatorElement()) {
+    return picker->IsPickerVisible();
+  }
   return false;
 }
 
@@ -668,15 +656,21 @@ void MultipleFieldsTemporalInputTypeView::ShowPickerIndicator() {
 }
 
 void MultipleFieldsTemporalInputTypeView::FocusAndSelectClearButtonOwner() {
-  GetElement().Focus();
+  CHECK(
+      !RuntimeEnabledFeatures::HTMLInputElementDropWebkitClearButtonEnabled());
+  GetElement().Focus(FocusParams(FocusTrigger::kUserGesture));
 }
 
 bool MultipleFieldsTemporalInputTypeView::
     ShouldClearButtonRespondToMouseEvents() {
+  CHECK(
+      !RuntimeEnabledFeatures::HTMLInputElementDropWebkitClearButtonEnabled());
   return !GetElement().IsDisabledOrReadOnly() && !GetElement().IsRequired();
 }
 
 void MultipleFieldsTemporalInputTypeView::ClearValue() {
+  CHECK(
+      !RuntimeEnabledFeatures::HTMLInputElementDropWebkitClearButtonEnabled());
   GetElement().SetValue("",
                         TextFieldEventBehavior::kDispatchInputAndChangeEvent);
   GetElement().UpdateClearButtonVisibility();
@@ -686,6 +680,8 @@ void MultipleFieldsTemporalInputTypeView::UpdateClearButtonVisibility() {
   ClearButtonElement* clear_button = GetClearButtonElement();
   if (!clear_button)
     return;
+  CHECK(
+      !RuntimeEnabledFeatures::HTMLInputElementDropWebkitClearButtonEnabled());
 
   if (GetElement().IsRequired() ||
       !GetDateTimeEditElement()->AnyEditableFieldsHaveValues()) {
@@ -700,7 +696,7 @@ void MultipleFieldsTemporalInputTypeView::UpdateClearButtonVisibility() {
 }
 
 TextDirection MultipleFieldsTemporalInputTypeView::ComputedTextDirection() {
-  return GetElement().GetLocale().IsRTL() ? TextDirection::kRtl
+  return GetElement().GetLocale().IsRtl() ? TextDirection::kRtl
                                           : TextDirection::kLtr;
 }
 

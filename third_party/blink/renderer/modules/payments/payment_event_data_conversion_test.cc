@@ -6,7 +6,7 @@
 
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/mojom/payments/payment_app.mojom-blink.h"
+#include "third_party/blink/public/mojom/payments/payment_app_events.mojom-blink.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_testing.h"
@@ -15,6 +15,7 @@
 #include "third_party/blink/renderer/bindings/modules/v8/v8_payment_options.h"
 #include "third_party/blink/renderer/bindings/modules/v8/v8_payment_shipping_option.h"
 #include "third_party/blink/renderer/platform/bindings/script_state.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 
 namespace blink {
 namespace {
@@ -22,17 +23,16 @@ namespace {
 static payments::mojom::blink::PaymentCurrencyAmountPtr
 CreatePaymentCurrencyAmountForTest() {
   auto currency_amount = payments::mojom::blink::PaymentCurrencyAmount::New();
-  currency_amount->currency = String::FromUTF8("USD");
-  currency_amount->value = String::FromUTF8("9.99");
+  currency_amount->currency = "USD";
+  currency_amount->value = "9.99";
   return currency_amount;
 }
 
 static payments::mojom::blink::PaymentMethodDataPtr
 CreatePaymentMethodDataForTest() {
   auto method_data = payments::mojom::blink::PaymentMethodData::New();
-  method_data->supported_method = String::FromUTF8("foo");
-  method_data->stringified_data =
-      String::FromUTF8("{\"merchantId\":\"12345\"}");
+  method_data->supported_method = "foo";
+  method_data->stringified_data = "{\"merchantId\":\"12345\"}";
   return method_data;
 }
 
@@ -62,8 +62,8 @@ static payments::mojom::blink::PaymentShippingOptionPtr
 CreateShippingOptionForTest() {
   auto shipping_option = payments::mojom::blink::PaymentShippingOption::New();
   shipping_option->amount = CreatePaymentCurrencyAmountForTest();
-  shipping_option->label = String::FromUTF8("shipping-option-label");
-  shipping_option->id = String::FromUTF8("shipping-option-id");
+  shipping_option->label = "shipping-option-label";
+  shipping_option->id = "shipping-option-id";
   shipping_option->selected = true;
   return shipping_option;
 }
@@ -73,12 +73,12 @@ CreatePaymentRequestEventDataForTest() {
   auto event_data = payments::mojom::blink::PaymentRequestEventData::New();
   event_data->top_origin = KURL("https://example.com");
   event_data->payment_request_origin = KURL("https://example.com");
-  event_data->payment_request_id = String::FromUTF8("payment-request-id");
+  event_data->payment_request_id = "payment-request-id";
   Vector<payments::mojom::blink::PaymentMethodDataPtr> method_data;
   method_data.push_back(CreatePaymentMethodDataForTest());
   event_data->method_data = std::move(method_data);
   event_data->total = CreatePaymentCurrencyAmountForTest();
-  event_data->instrument_key = String::FromUTF8("payment-instrument-key");
+  event_data->instrument_key = "payment-instrument-key";
   event_data->payment_options = CreatePaymentOptionsForTest();
   Vector<payments::mojom::blink::PaymentShippingOptionPtr> shipping_options;
   shipping_options.push_back(CreateShippingOptionForTest());
@@ -87,6 +87,7 @@ CreatePaymentRequestEventDataForTest() {
 }
 
 TEST(PaymentEventDataConversionTest, ToCanMakePaymentEventData) {
+  test::TaskEnvironment task_environment;
   V8TestingScope scope;
   payments::mojom::blink::CanMakePaymentEventDataPtr event_data =
       CreateCanMakePaymentEventDataForTest();
@@ -105,17 +106,17 @@ TEST(PaymentEventDataConversionTest, ToCanMakePaymentEventData) {
   ASSERT_TRUE(data->methodData().front()->hasSupportedMethod());
   ASSERT_EQ("foo", data->methodData().front()->supportedMethod());
   ASSERT_TRUE(data->methodData().front()->hasData());
-  ASSERT_TRUE(data->methodData().front()->data().IsObject());
   String stringified_data = ToBlinkString<String>(
-      v8::JSON::Stringify(
-          scope.GetContext(),
-          data->methodData().front()->data().V8Value().As<v8::Object>())
+      scope.GetIsolate(),
+      v8::JSON::Stringify(scope.GetContext(),
+                          data->methodData().front()->data().V8Object())
           .ToLocalChecked(),
       kDoNotExternalize);
   EXPECT_EQ("{\"merchantId\":\"12345\"}", stringified_data);
 }
 
 TEST(PaymentEventDataConversionTest, ToPaymentRequestEventData) {
+  test::TaskEnvironment task_environment;
   V8TestingScope scope;
   payments::mojom::blink::PaymentRequestEventDataPtr event_data =
       CreatePaymentRequestEventDataForTest();
@@ -137,11 +138,10 @@ TEST(PaymentEventDataConversionTest, ToPaymentRequestEventData) {
   ASSERT_TRUE(data->methodData().front()->hasSupportedMethod());
   ASSERT_EQ("foo", data->methodData().front()->supportedMethod());
   ASSERT_TRUE(data->methodData().front()->hasData());
-  ASSERT_TRUE(data->methodData().front()->data().IsObject());
   String stringified_data = ToBlinkString<String>(
-      v8::JSON::Stringify(
-          scope.GetContext(),
-          data->methodData().front()->data().V8Value().As<v8::Object>())
+      scope.GetIsolate(),
+      v8::JSON::Stringify(scope.GetContext(),
+                          data->methodData().front()->data().V8Object())
           .ToLocalChecked(),
       kDoNotExternalize);
   EXPECT_EQ("{\"merchantId\":\"12345\"}", stringified_data);
@@ -166,7 +166,8 @@ TEST(PaymentEventDataConversionTest, ToPaymentRequestEventData) {
   ASSERT_TRUE(data->paymentOptions()->hasRequestShipping());
   ASSERT_TRUE(data->paymentOptions()->requestShipping());
   ASSERT_TRUE(data->paymentOptions()->hasShippingType());
-  EXPECT_EQ("delivery", data->paymentOptions()->shippingType());
+  EXPECT_EQ(V8PaymentShippingType::Enum::kDelivery,
+            data->paymentOptions()->shippingType());
 
   // shippingOptions
   ASSERT_TRUE(data->hasShippingOptions());

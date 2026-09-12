@@ -28,11 +28,10 @@ class PaymentDetailsModifier {
 
   PaymentDetailsModifier& operator=(const PaymentDetailsModifier& other);
   bool operator==(const PaymentDetailsModifier& other) const;
-  bool operator!=(const PaymentDetailsModifier& other) const;
 
   // Creates a dictionary base::Value with the properties of this
   // PaymentDetailsModifier.
-  base::Value::Dict ToValueDict() const;
+  base::DictValue ToValueDict() const;
 
   // A payment method identifier and any associated payment method specific
   // data. The remaining fields in the PaymentDetailsModifier apply only if the

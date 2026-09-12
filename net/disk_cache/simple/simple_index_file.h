@@ -67,22 +67,17 @@ class NET_EXPORT_PRIVATE SimpleIndexFile {
 
     SimpleIndex::IndexWriteToDiskReason reason() const { return reason_; }
     uint64_t entry_count() const { return entry_count_; }
-    bool has_entry_in_memory_data() const { return version_ >= 8; }
     bool app_cache_has_trailer_prefetch_size() const { return version_ >= 9; }
 
    private:
     FRIEND_TEST_ALL_PREFIXES(IndexMetadataTest, Basics);
     FRIEND_TEST_ALL_PREFIXES(IndexMetadataTest, Serialize);
-    FRIEND_TEST_ALL_PREFIXES(IndexMetadataTest, ReadV6Format);
-    FRIEND_TEST_ALL_PREFIXES(SimpleIndexFileTest, ReadV7Format);
     FRIEND_TEST_ALL_PREFIXES(SimpleIndexFileTest, ReadV8Format);
     FRIEND_TEST_ALL_PREFIXES(SimpleIndexFileTest, ReadV8FormatAppCache);
-    friend class V6IndexMetadataForTest;
-    friend class V7IndexMetadataForTest;
     friend class V8IndexMetadataForTest;
 
     uint64_t magic_number_ = kSimpleIndexMagicNumber;
-    uint32_t version_ = kSimpleVersion;
+    uint32_t version_ = kSimpleIndexFileVersion;
     SimpleIndex::IndexWriteToDiskReason reason_;
     uint64_t entry_count_;
     uint64_t cache_size_;  // Total cache storage size in bytes.
@@ -161,15 +156,33 @@ class NET_EXPORT_PRIVATE SimpleIndexFile {
   static void SerializeFinalData(base::Time cache_modified,
                                  base::Pickle* pickle);
 
-  // Given the contents of an index file |data| of length |data_len|, returns
-  // the corresponding EntrySet. Returns NULL on error.
+  // Given the contents of an index file `data`, returns the corresponding
+  // EntrySet and associated metadata. `out_result->did_load` will return
+  // whether successful or not.
   static void Deserialize(net::CacheType cache_type,
-                          const char* data,
-                          int data_len,
+                          base::span<const uint8_t> data,
                           base::Time* out_cache_last_modified,
                           SimpleIndexLoadResult* out_result);
 
-  // Writes the index file to disk atomically.
+  enum class IndexWriteResult {
+    kSuccess = 0,
+    kFailedToCreateDir = 1,
+    kFailedToGetFileInfo = 2,
+    kFailedToWritePickle = 3,
+    kFailedToReplaceFile = 4,
+    kMaxValue = kFailedToReplaceFile,
+  };
+
+  // Writes the index file to disk atomically. Returns the result.
+  static IndexWriteResult SyncWriteToDiskInternal(
+      std::unique_ptr<BackendFileOperations> file_operations,
+      net::CacheType cache_type,
+      const base::FilePath& cache_directory,
+      const base::FilePath& index_filename,
+      const base::FilePath& temp_index_filename,
+      std::unique_ptr<base::Pickle> pickle);
+
+  // Writes the index file to disk atomically and records UMA.
   static void SyncWriteToDisk(
       std::unique_ptr<BackendFileOperations> file_operations,
       net::CacheType cache_type,

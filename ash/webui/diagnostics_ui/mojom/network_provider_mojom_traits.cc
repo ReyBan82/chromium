@@ -34,35 +34,28 @@ diagnostics_mojom::SecurityType EnumTraits<diagnostics_mojom::SecurityType,
   }
   VLOG(1) << "Unknown security type: " << input;
   NOTREACHED();
-  return diagnostics_mojom::SecurityType::kMinValue;
 }
 
 // static
-bool EnumTraits<diagnostics_mojom::SecurityType,
-                network_config_mojom::SecurityType>::
-    FromMojom(diagnostics_mojom::SecurityType input,
-              network_config_mojom::SecurityType* output) {
+network_config_mojom::SecurityType
+EnumTraits<diagnostics_mojom::SecurityType,
+           network_config_mojom::SecurityType>::
+    FromMojom(diagnostics_mojom::SecurityType input) {
   switch (input) {
     case diagnostics_mojom::SecurityType::kNone:
-      *output = network_config_mojom::SecurityType::kNone;
-      return true;
+      return network_config_mojom::SecurityType::kNone;
     case diagnostics_mojom::SecurityType::kWep8021x:
-      *output = network_config_mojom::SecurityType::kWep8021x;
-      return true;
+      return network_config_mojom::SecurityType::kWep8021x;
     case diagnostics_mojom::SecurityType::kWepPsk:
-      *output = network_config_mojom::SecurityType::kWepPsk;
-      return true;
+      return network_config_mojom::SecurityType::kWepPsk;
     case diagnostics_mojom::SecurityType::kWpaEap:
-      *output = network_config_mojom::SecurityType::kWpaEap;
-      return true;
+      return network_config_mojom::SecurityType::kWpaEap;
     case diagnostics_mojom::SecurityType::kWpaPsk:
-      *output = network_config_mojom::SecurityType::kWpaPsk;
-      return true;
+      return network_config_mojom::SecurityType::kWpaPsk;
   }
   VLOG(1) << "Unknown security type: "
           << static_cast<network_config_mojom::SecurityType>(input);
   NOTREACHED();
-  return false;
 }
 
 // static
@@ -78,26 +71,22 @@ EnumTraits<diagnostics_mojom::AuthenticationType,
   }
   VLOG(1) << "Unknown authentication type: " << input;
   NOTREACHED();
-  return diagnostics_mojom::AuthenticationType::kMinValue;
 }
 
 // static
-bool EnumTraits<diagnostics_mojom::AuthenticationType,
-                network_config_mojom::AuthenticationType>::
-    FromMojom(diagnostics_mojom::AuthenticationType input,
-              network_config_mojom::AuthenticationType* output) {
+network_config_mojom::AuthenticationType
+EnumTraits<diagnostics_mojom::AuthenticationType,
+           network_config_mojom::AuthenticationType>::
+    FromMojom(diagnostics_mojom::AuthenticationType input) {
   switch (input) {
     case diagnostics_mojom::AuthenticationType::kNone:
-      *output = network_config_mojom::AuthenticationType::kNone;
-      return true;
+      return network_config_mojom::AuthenticationType::kNone;
     case diagnostics_mojom::AuthenticationType::k8021x:
-      *output = network_config_mojom::AuthenticationType::k8021x;
-      return true;
+      return network_config_mojom::AuthenticationType::k8021x;
   }
   VLOG(1) << "Unknown authentication type: "
           << static_cast<network_config_mojom::AuthenticationType>(input);
   NOTREACHED();
-  return false;
 }
 
 }  // namespace mojo

@@ -5,9 +5,8 @@
 #include "third_party/blink/renderer/modules/background_sync/sync_manager.h"
 
 #include "base/task/sequenced_task_runner.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/renderer/bindings/core/v8/callback_promise_adapter.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_throw_dom_exception.h"
@@ -22,23 +21,34 @@
 
 namespace blink {
 
-SyncManager::SyncManager(ServiceWorkerRegistration* registration,
-                         scoped_refptr<base::SequencedTaskRunner> task_runner)
+SyncManager::SyncManager(ServiceWorkerRegistration* registration)
     : registration_(registration),
       background_sync_service_(registration->GetExecutionContext()) {
   DCHECK(registration);
-  registration->GetExecutionContext()->GetBrowserInterfaceBroker().GetInterface(
-      background_sync_service_.BindNewPipeAndPassReceiver(task_runner));
 }
 
-ScriptPromise SyncManager::registerFunction(ScriptState* script_state,
-                                            const String& tag,
-                                            ExceptionState& exception_state) {
+mojom::blink::OneShotBackgroundSyncService*
+SyncManager::GetBackgroundSyncServiceRemote() {
+  if (!background_sync_service_.is_bound()) {
+    ExecutionContext* execution_context = registration_->GetExecutionContext();
+    if (execution_context) {
+      execution_context->GetBrowserInterfaceBroker().GetInterface(
+          background_sync_service_.BindNewPipeAndPassReceiver(
+              execution_context->GetTaskRunner(TaskType::kMiscPlatformAPI)));
+    }
+  }
+  return background_sync_service_.get();
+}
+
+ScriptPromise<IDLUndefined> SyncManager::registerFunction(
+    ScriptState* script_state,
+    const String& tag,
+    ExceptionState& exception_state) {
   if (!registration_->active()) {
     exception_state.ThrowDOMException(
         DOMExceptionCode::kInvalidStateError,
         "Registration failed - no active Service Worker");
-    return ScriptPromise();
+    return EmptyPromise();
   }
 
   ExecutionContext* execution_context = ExecutionContext::From(script_state);
@@ -46,57 +56,79 @@ ScriptPromise SyncManager::registerFunction(ScriptState* script_state,
     exception_state.ThrowDOMException(
         DOMExceptionCode::kNotAllowedError,
         "Background Sync is not allowed in fenced frames.");
-    return ScriptPromise();
+    return EmptyPromise();
   }
 
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
-  ScriptPromise promise = resolver->Promise();
+  auto* background_sync_service = GetBackgroundSyncServiceRemote();
+  if (!background_sync_service) {
+    exception_state.ThrowDOMException(
+        DOMExceptionCode::kInvalidStateError,
+        "The service worker registration is not associated with an execution "
+        "context.");
+    return EmptyPromise();
+  }
+
+  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver<IDLUndefined>>(
+      script_state, exception_state.GetContext());
+  auto promise = resolver->Promise();
 
   mojom::blink::SyncRegistrationOptionsPtr sync_registration =
       mojom::blink::SyncRegistrationOptions::New();
   sync_registration->tag = tag;
 
-  background_sync_service_->Register(
+  background_sync_service->Register(
       std::move(sync_registration), registration_->RegistrationId(),
       resolver->WrapCallbackInScriptScope(
-          WTF::BindOnce(&SyncManager::RegisterCallback, WrapPersistent(this))));
+          BindOnce(&SyncManager::RegisterCallback, WrapPersistent(this))));
 
   return promise;
 }
 
-ScriptPromise SyncManager::getTags(ScriptState* script_state) {
+ScriptPromise<IDLSequence<IDLString>> SyncManager::getTags(
+    ScriptState* script_state) {
   ExecutionContext* execution_context = ExecutionContext::From(script_state);
   if (execution_context->IsInFencedFrame()) {
-    return ScriptPromise::RejectWithDOMException(
+    return ScriptPromise<IDLSequence<IDLString>>::RejectWithDOMException(
         script_state, MakeGarbageCollected<DOMException>(
                           DOMExceptionCode::kNotAllowedError,
                           "Background Sync is not allowed in fenced frames."));
   }
 
-  auto* resolver = MakeGarbageCollected<ScriptPromiseResolver>(script_state);
-  ScriptPromise promise = resolver->Promise();
+  auto* background_sync_service = GetBackgroundSyncServiceRemote();
+  if (!background_sync_service) {
+    return ScriptPromise<IDLSequence<IDLString>>::RejectWithDOMException(
+        script_state,
+        MakeGarbageCollected<DOMException>(
+            DOMExceptionCode::kInvalidStateError,
+            "The service worker registration is not associated with an "
+            "execution context."));
+  }
 
-  background_sync_service_->GetRegistrations(
+  auto* resolver =
+      MakeGarbageCollected<ScriptPromiseResolver<IDLSequence<IDLString>>>(
+          script_state);
+  auto promise = resolver->Promise();
+
+  background_sync_service->GetRegistrations(
       registration_->RegistrationId(),
       resolver->WrapCallbackInScriptScope(
-          WTF::BindOnce(&SyncManager::GetRegistrationsCallback)));
+          BindOnce(&SyncManager::GetRegistrationsCallback)));
 
   return promise;
 }
 
 void SyncManager::RegisterCallback(
-    ScriptPromiseResolver* resolver,
+    ScriptPromiseResolver<IDLUndefined>* resolver,
     mojom::blink::BackgroundSyncError error,
     mojom::blink::SyncRegistrationOptionsPtr options) {
   DCHECK(resolver);
   // TODO(iclelland): Determine the correct error message to return in each case
   switch (error) {
     case mojom::blink::BackgroundSyncError::NONE:
+      resolver->Resolve();
       if (!options) {
-        resolver->Resolve(v8::Null(resolver->GetScriptState()->GetIsolate()));
         break;
       }
-      resolver->Resolve();
       // Let the service know that the registration promise is resolved so that
       // it can fire the event.
 
@@ -107,7 +139,6 @@ void SyncManager::RegisterCallback(
       break;
     case mojom::blink::BackgroundSyncError::NOT_FOUND:
       NOTREACHED();
-      break;
     case mojom::blink::BackgroundSyncError::STORAGE:
       resolver->Reject(V8ThrowDOMException::CreateOrDie(
           resolver->GetScriptState()->GetIsolate(),
@@ -136,9 +167,9 @@ void SyncManager::RegisterCallback(
 
 // static
 void SyncManager::GetRegistrationsCallback(
-    ScriptPromiseResolver* resolver,
+    ScriptPromiseResolver<IDLSequence<IDLString>>* resolver,
     mojom::blink::BackgroundSyncError error,
-    WTF::Vector<mojom::blink::SyncRegistrationOptionsPtr> registrations) {
+    Vector<mojom::blink::SyncRegistrationOptionsPtr> registrations) {
   DCHECK(resolver);
   // TODO(iclelland): Determine the correct error message to return in each case
   switch (error) {
@@ -147,7 +178,7 @@ void SyncManager::GetRegistrationsCallback(
       for (const auto& r : registrations) {
         tags.push_back(r->tag);
       }
-      resolver->Resolve(tags);
+      resolver->Resolve(std::move(tags));
       break;
     }
     case mojom::blink::BackgroundSyncError::NOT_FOUND:
@@ -156,7 +187,6 @@ void SyncManager::GetRegistrationsCallback(
       // These errors should never be returned from
       // BackgroundSyncManager::GetRegistrations
       NOTREACHED();
-      break;
     case mojom::blink::BackgroundSyncError::STORAGE:
       resolver->Reject(V8ThrowDOMException::CreateOrDie(
           resolver->GetScriptState()->GetIsolate(),

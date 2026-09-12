@@ -7,11 +7,9 @@
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "content/public/browser/web_contents.h"
-#include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/gfx/animation/linear_animation.h"
 #include "ui/gfx/geometry/rect.h"
-#include "ui/views/controls/image_view.h"
 #include "ui/views/widget/widget.h"
 
 DownloadStartedAnimationViews::DownloadStartedAnimationViews(
@@ -31,7 +29,9 @@ DownloadStartedAnimationViews::DownloadStartedAnimationViews(
 
   popup_ = new views::Widget;
 
-  views::Widget::InitParams params(views::Widget::InitParams::TYPE_POPUP);
+  views::Widget::InitParams params(
+      views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
+      views::Widget::InitParams::TYPE_POPUP);
   params.opacity = views::Widget::InitParams::WindowOpacity::kTranslucent;
   params.accept_events = false;
   params.parent = web_contents->GetNativeView();
@@ -73,5 +73,5 @@ void DownloadStartedAnimationViews::AnimateToState(double state) {
   }
 }
 
-BEGIN_METADATA(DownloadStartedAnimationViews, views::ImageView)
+BEGIN_METADATA(DownloadStartedAnimationViews)
 END_METADATA

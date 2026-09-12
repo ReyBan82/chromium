@@ -57,10 +57,10 @@ std::string GetErrorNameForShillError(const std::string& shill_error_name) {
 
 void GetPropertiesCallback(const std::string& device_path,
                            network_handler::ResultCallback callback,
-                           absl::optional<base::Value::Dict> result) {
+                           std::optional<base::DictValue> result) {
   if (!result) {
     NET_LOG(ERROR) << "GetProperties failed: " << NetworkPathId(device_path);
-    std::move(callback).Run(device_path, absl::nullopt);
+    std::move(callback).Run(device_path, std::nullopt);
     return;
   }
   std::move(callback).Run(device_path, std::move(result));
@@ -141,8 +141,8 @@ void NetworkDeviceHandlerImpl::SetDeviceProperty(
       // NetworkConfigurationUpdater.
       shill::kCellularPolicyAllowRoamingProperty};
 
-  for (size_t i = 0; i < std::size(blocked_properties); ++i) {
-    if (property_name == blocked_properties[i]) {
+  for (const char* blocked_property : blocked_properties) {
+    if (property_name == blocked_property) {
       InvokeErrorCallback(
           device_path, std::move(error_callback),
           "SetDeviceProperty called on blocked property " + property_name);
@@ -308,7 +308,6 @@ void NetworkDeviceHandlerImpl::DeviceListChanged() {
   ApplyCellularAllowRoamingToShill();
   ApplyMACAddressRandomizationToShill();
   ApplyUsbEthernetMacAddressSourceToShill();
-  ApplyUseAttachApnToShill();
   ApplyWakeOnWifiAllowedToShill();
 }
 
@@ -321,7 +320,7 @@ void NetworkDeviceHandlerImpl::Init(
     NetworkStateHandler* network_state_handler) {
   DCHECK(network_state_handler);
   network_state_handler_ = network_state_handler;
-  network_state_handler_observer_.Observe(network_state_handler_);
+  network_state_handler_observer_.Observe(network_state_handler_.get());
 }
 
 void NetworkDeviceHandlerImpl::ApplyCellularAllowRoamingToShill() {
@@ -377,11 +376,11 @@ void NetworkDeviceHandlerImpl::HandleWifiFeatureSupportedProperty(
     std::string support_property_name,
     WifiFeatureSupport* feature_support_to_set,
     const std::string& device_path,
-    absl::optional<base::Value::Dict> properties) {
+    std::optional<base::DictValue> properties) {
   if (!properties) {
     return;
   }
-  absl::optional<bool> supported_val =
+  std::optional<bool> supported_val =
       properties->FindBool(support_property_name);
   if (!supported_val.has_value()) {
     if (base::SysInfo::IsRunningOnChromeOS()) {
@@ -453,25 +452,6 @@ void NetworkDeviceHandlerImpl::ApplyUsbEthernetMacAddressSourceToShill() {
           usb_ethernet_mac_address_source_, network_handler::ErrorCallback()));
 }
 
-void NetworkDeviceHandlerImpl::ApplyUseAttachApnToShill() {
-  NetworkStateHandler::DeviceStateList list;
-  network_state_handler_->GetDeviceListByType(NetworkTypePattern::Cellular(),
-                                              &list);
-  if (list.empty()) {
-    NET_LOG(DEBUG) << "No cellular device available.";
-    return;
-  }
-  for (NetworkStateHandler::DeviceStateList::const_iterator it = list.begin();
-       it != list.end(); ++it) {
-    const DeviceState* device_state = *it;
-
-    SetDevicePropertyInternal(device_state->path(),
-                              shill::kUseAttachAPNProperty,
-                              /*value=*/base::Value(true), base::DoNothing(),
-                              network_handler::ErrorCallback());
-  }
-}
-
 void NetworkDeviceHandlerImpl::OnSetUsbEthernetMacAddressSourceError(
     const std::string& device_path,
     const std::string& device_mac_address,
@@ -493,8 +473,8 @@ bool NetworkDeviceHandlerImpl::IsUsbEnabledDevice(
   return device_state && device_state->link_up() &&
          device_state->Matches(NetworkTypePattern::Ethernet()) &&
          device_state->device_bus_type() == shill::kDeviceBusTypeUsb &&
-         mac_address_change_not_supported_.find(device_state->mac_address()) ==
-             mac_address_change_not_supported_.end();
+         !mac_address_change_not_supported_.contains(
+             device_state->mac_address());
 }
 
 void NetworkDeviceHandlerImpl::UpdatePrimaryEnabledUsbEthernetDevice() {

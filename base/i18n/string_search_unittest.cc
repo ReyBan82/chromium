@@ -6,16 +6,18 @@
 
 #include <stddef.h>
 
+#include <array>
 #include <string>
 #include <vector>
 
+#include "base/i18n/language_tag.h"
 #include "base/i18n/rtl.h"
+#include "base/i18n/test/scoped_icu_locale.h"
 #include "base/strings/utf_string_conversions.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/icu/source/i18n/unicode/usearch.h"
 
-namespace base {
-namespace i18n {
+namespace base::i18n {
 
 #define EXPECT_MATCH_IGNORE_CASE(find_this, in_this, ex_start, ex_len)         \
   {                                                                            \
@@ -105,12 +107,11 @@ namespace i18n {
 // string search is case-sensitive, when normally it should be
 // case-insensitive. In other locales (including en_US which English speakers
 // in the U.S. use), this search would be case-insensitive as expected.
-
 TEST(StringSearchTest, ASCII) {
-  std::string default_locale(uloc_getDefault());
-  bool locale_is_posix = (default_locale == "en_US_POSIX");
-  if (locale_is_posix)
-    SetICUDefaultLocale("en_US");
+  std::optional<ScopedDefaultIcuLocale> locale_override;
+  if (std::string(uloc_getDefault()) == "en_US_POSIX") {
+    locale_override.emplace(GetKnownLanguageTag("en-US"));
+  }
 
   EXPECT_MATCH_IGNORE_CASE(u"hello", u"hello world", 0U, 5U);
 
@@ -134,9 +135,6 @@ TEST(StringSearchTest, ASCII) {
                          0U);
 
   EXPECT_MISS_SENSITIVE(u"case insensitivity", u"CaSe InSeNsItIvItY");
-
-  if (locale_is_posix)
-    SetICUDefaultLocale(default_locale.data());
 }
 
 TEST(StringSearchTest, UnicodeLocaleIndependent) {
@@ -161,8 +159,10 @@ TEST(StringSearchTest, UnicodeLocaleIndependent) {
 
   std::string default_locale(uloc_getDefault());
   bool locale_is_posix = (default_locale == "en_US_POSIX");
-  if (locale_is_posix)
-    SetICUDefaultLocale("en_US");
+  std::optional<ScopedDefaultIcuLocale> locale_override;
+  if (locale_is_posix) {
+    locale_override.emplace(GetKnownLanguageTag("en-US"));
+  }
 
   EXPECT_MATCH_IGNORE_CASE(e_base, e_with_acute_accent, 0U,
                            e_with_acute_accent.size());
@@ -256,9 +256,6 @@ TEST(StringSearchTest, UnicodeLocaleIndependent) {
 
   EXPECT_MATCH_SENSITIVE(a_with_acute_combining_mark,
                          a_with_acute_combining_mark, 0U, 2U);
-
-  if (locale_is_posix)
-    SetICUDefaultLocale(default_locale.data());
 }
 
 TEST(StringSearchTest, UnicodeLocaleDependent) {
@@ -272,36 +269,36 @@ TEST(StringSearchTest, UnicodeLocaleDependent) {
                                                  nullptr));
   EXPECT_TRUE(StringSearch(a_base, a_with_ring, nullptr, nullptr, false, true));
 
-  const char* default_locale = uloc_getDefault();
-  SetICUDefaultLocale("da");
+  {
+    ScopedDefaultIcuLocale scoped_locale(GetKnownLanguageTag("da"));
 
-  EXPECT_FALSE(StringSearchIgnoringCaseAndAccents(a_base, a_with_ring, nullptr,
-                                                  nullptr));
-  EXPECT_FALSE(
-      StringSearch(a_base, a_with_ring, nullptr, nullptr, false, true));
-
-  SetICUDefaultLocale(default_locale);
+    EXPECT_FALSE(StringSearchIgnoringCaseAndAccents(a_base, a_with_ring,
+                                                    nullptr, nullptr));
+    EXPECT_FALSE(
+        StringSearch(a_base, a_with_ring, nullptr, nullptr, false, true));
+  }
 }
 
 TEST(StringSearchTest, SearchBackwards) {
   std::string default_locale(uloc_getDefault());
   bool locale_is_posix = (default_locale == "en_US_POSIX");
-  if (locale_is_posix)
-    SetICUDefaultLocale("en_US");
+  std::optional<ScopedDefaultIcuLocale> locale_override;
+  if (locale_is_posix) {
+    locale_override.emplace(GetKnownLanguageTag("en-US"));
+  }
 
   EXPECT_MATCH_IGNORE_CASE_BACKWARDS(u"ab", u"ABAB", 2U, 2U);
   EXPECT_MATCH_SENSITIVE_BACKWARDS(u"ab", u"abab", 2U, 2U);
   EXPECT_MISS_SENSITIVE_BACKWARDS(u"ab", u"ABAB");
-
-  if (locale_is_posix)
-    SetICUDefaultLocale(default_locale.data());
 }
 
 TEST(StringSearchTest, FixedPatternMultipleSearch) {
   std::string default_locale(uloc_getDefault());
   bool locale_is_posix = (default_locale == "en_US_POSIX");
-  if (locale_is_posix)
-    SetICUDefaultLocale("en_US");
+  std::optional<ScopedDefaultIcuLocale> locale_override;
+  if (locale_is_posix) {
+    locale_override.emplace(GetKnownLanguageTag("en-US"));
+  }
 
   size_t index = 0;
   size_t length = 0;
@@ -329,9 +326,6 @@ TEST(StringSearchTest, FixedPatternMultipleSearch) {
   EXPECT_TRUE(query2.Search(u"hELLo", &index, &length));
   EXPECT_EQ(0U, index);
   EXPECT_EQ(5U, length);
-
-  if (locale_is_posix)
-    SetICUDefaultLocale(default_locale.data());
 }
 
 TEST(StringSearchTest, RepeatingStringSearch) {
@@ -342,15 +336,17 @@ TEST(StringSearchTest, RepeatingStringSearch) {
 
   std::string default_locale(uloc_getDefault());
   bool locale_is_posix = (default_locale == "en_US_POSIX");
-  if (locale_is_posix)
-    SetICUDefaultLocale("en_US");
+  std::optional<ScopedDefaultIcuLocale> locale_override;
+  if (locale_is_posix) {
+    locale_override.emplace(GetKnownLanguageTag("en-US"));
+  }
 
   const char16_t kPattern[] = u"fox";
   const char16_t kTarget[] = u"The quick brown fox jumped over the lazy Fox";
 
   // Case sensitive.
   {
-    const MatchResult kExpectation[] = {{16, 3}};
+    const auto kExpectation = std::to_array<MatchResult>({{16, 3}});
 
     RepeatingStringSearch searcher(kPattern, kTarget, /*case_sensitive=*/true);
     std::vector<MatchResult> results;
@@ -370,7 +366,7 @@ TEST(StringSearchTest, RepeatingStringSearch) {
 
   // Case insensitive.
   {
-    const MatchResult kExpectation[] = {{16, 3}, {41, 3}};
+    const auto kExpectation = std::to_array<MatchResult>({{16, 3}, {41, 3}});
 
     RepeatingStringSearch searcher(kPattern, kTarget, /*case_sensitive=*/false);
     std::vector<MatchResult> results;
@@ -387,10 +383,6 @@ TEST(StringSearchTest, RepeatingStringSearch) {
       EXPECT_EQ(results[i].match_length, kExpectation[i].match_length);
     }
   }
-
-  if (locale_is_posix)
-    SetICUDefaultLocale(default_locale.data());
 }
 
-}  // namespace i18n
-}  // namespace base
+}  // namespace base::i18n

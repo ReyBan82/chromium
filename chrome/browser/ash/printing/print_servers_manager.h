@@ -9,7 +9,6 @@
 #include <vector>
 
 #include "chrome/browser/ash/printing/print_server.h"
-#include "chrome/browser/ash/printing/print_servers_policy_provider.h"
 #include "chrome/browser/ash/printing/printer_detector.h"
 #include "chrome/browser/ash/printing/printer_installation_manager.h"
 #include "chromeos/printing/printer_configuration.h"
@@ -18,6 +17,7 @@
 
 class PrefRegistrySimple;
 class Profile;
+class PrefService;
 
 namespace user_prefs {
 class PrefRegistrySyncable;
@@ -25,8 +25,16 @@ class PrefRegistrySyncable;
 
 namespace ash {
 
+class PrintServersPolicyProvider;
 class PrinterDetector;
 class ServerPrintersProvider;
+
+enum class ServerPrintersFetchingMode {
+  // Use the first 16 print servers.
+  kStandard,
+  // Use print servers selected via ChoosePrintServers().
+  kSingleServerOnly,
+};
 
 struct PrintServersConfig {
   PrintServersConfig();
@@ -34,7 +42,8 @@ struct PrintServersConfig {
   PrintServersConfig(const PrintServersConfig&);
   PrintServersConfig& operator=(const PrintServersConfig&);
 
-  ServerPrintersFetchingMode fetching_mode;
+  ServerPrintersFetchingMode fetching_mode =
+      ServerPrintersFetchingMode::kStandard;
   std::vector<PrintServer> print_servers;
 };
 
@@ -51,7 +60,8 @@ class PrintServersManager {
   };
 
   // Factory function.
-  static std::unique_ptr<PrintServersManager> Create(Profile* profile);
+  static std::unique_ptr<PrintServersManager> Create(PrefService& local_state,
+                                                     Profile* profile);
 
   // Factory function that allows injected dependencies, for testing.
   static std::unique_ptr<PrintServersManager> CreateForTesting(

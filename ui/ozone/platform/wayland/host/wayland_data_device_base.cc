@@ -4,18 +4,27 @@
 
 #include "ui/ozone/platform/wayland/host/wayland_data_device_base.h"
 
+#include <algorithm>
 #include <utility>
 
-#include "base/functional/bind.h"
-#include "base/location.h"
 #include "base/logging.h"
 #include "base/task/task_traits.h"
+#include "base/task/thread_pool.h"
 #include "ui/ozone/platform/wayland/common/wayland_util.h"
 #include "ui/ozone/platform/wayland/host/wayland_connection.h"
 #include "ui/ozone/platform/wayland/host/wayland_data_offer_base.h"
-#include "ui/ozone/platform/wayland/host/wayland_serial_tracker.h"
 
 namespace ui {
+
+namespace {
+
+PlatformClipboard::Data ReadFromFD(base::ScopedFD fd) {
+  std::vector<uint8_t> contents;
+  wl::ReadDataFromFD(std::move(fd), &contents);
+  return base::MakeRefCounted<base::RefCountedBytes>(std::move(contents));
+}
+
+}  // namespace
 
 WaylandDataDeviceBase::WaylandDataDeviceBase(WaylandConnection* connection)
     : connection_(connection) {}
@@ -28,16 +37,22 @@ const std::vector<std::string>& WaylandDataDeviceBase::GetAvailableMimeTypes()
     static std::vector<std::string> dummy;
     return dummy;
   }
-
   return data_offer_->mime_types();
 }
 
 PlatformClipboard::Data WaylandDataDeviceBase::ReadSelectionData(
     const std::string& mime_type) {
-  if (!data_offer_)
+  if (!data_offer_) {
     return {};
+  }
+
+  if (!std::ranges::contains(GetAvailableMimeTypes(), mime_type)) {
+    return {};
+  }
 
   base::ScopedFD fd = data_offer_->Receive(mime_type);
+  connection_->Flush();
+
   if (!fd.is_valid()) {
     DPLOG(ERROR) << "Failed to open file descriptor.";
     return {};
@@ -51,55 +66,35 @@ PlatformClipboard::Data WaylandDataDeviceBase::ReadSelectionData(
   return ReadFromFD(std::move(fd));
 }
 
+void WaylandDataDeviceBase::RequestSelectionData(
+    const std::string& mime_type,
+    PlatformClipboard::RequestDataClosure callback) {
+  if (!data_offer_) {
+    std::move(callback).Run({});
+    return;
+  }
+
+  if (!std::ranges::contains(GetAvailableMimeTypes(), mime_type)) {
+    std::move(callback).Run({});
+    return;
+  }
+
+  base::ScopedFD fd = data_offer_->Receive(mime_type);
+  connection_->Flush();
+
+  if (!fd.is_valid()) {
+    DPLOG(ERROR) << "Failed to open file descriptor.";
+    std::move(callback).Run({});
+    return;
+  }
+
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
+      base::BindOnce(&ReadFromFD, std::move(fd)), std::move(callback));
+}
+
 void WaylandDataDeviceBase::ResetDataOffer() {
   data_offer_.reset();
-}
-
-PlatformClipboard::Data WaylandDataDeviceBase::ReadFromFD(
-    base::ScopedFD fd) const {
-  std::vector<uint8_t> contents;
-  wl::ReadDataFromFD(std::move(fd), &contents);
-  return base::RefCountedBytes::TakeVector(&contents);
-}
-
-void WaylandDataDeviceBase::RegisterDeferredReadCallback() {
-  DCHECK(!deferred_read_callback_);
-
-  deferred_read_callback_.reset(
-      wl_display_sync(connection_->display_wrapper()));
-
-  static constexpr wl_callback_listener kListener = {&DeferredReadCallback};
-
-  wl_callback_add_listener(deferred_read_callback_.get(), &kListener, this);
-
-  connection_->Flush();
-}
-
-void WaylandDataDeviceBase::RegisterDeferredReadClosure(
-    base::OnceClosure closure) {
-  deferred_read_closure_ = std::move(closure);
-}
-
-// static
-void WaylandDataDeviceBase::DeferredReadCallback(void* data,
-                                                 struct wl_callback* cb,
-                                                 uint32_t time) {
-  auto* data_device = static_cast<WaylandDataDeviceBase*>(data);
-  DCHECK(data_device);
-  data_device->DeferredReadCallbackInternal(cb, time);
-}
-
-void WaylandDataDeviceBase::DeferredReadCallbackInternal(struct wl_callback* cb,
-                                                         uint32_t time) {
-  DCHECK(!deferred_read_closure_.is_null());
-
-  // The callback must be reset before invoking the closure because the latter
-  // may want to set another callback.  That typically happens when
-  // non-trivial data types are dropped; they have fallbacks to plain text so
-  // several roundtrips to data are chained.
-  deferred_read_callback_.reset();
-
-  std::move(deferred_read_closure_).Run();
 }
 
 void WaylandDataDeviceBase::NotifySelectionOffer(

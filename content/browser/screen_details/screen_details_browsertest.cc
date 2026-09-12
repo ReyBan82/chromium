@@ -3,9 +3,11 @@
 // found in the LICENSE file.
 
 #include "base/memory/raw_ptr.h"
+#include "base/test/test_future.h"
 #include "build/build_config.h"
 #include "content/browser/permissions/permission_controller_impl.h"
 #include "content/browser/screen_details/screen_details_test_utils.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test.h"
@@ -14,6 +16,7 @@
 #include "content/shell/browser/shell.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
 #include "ui/display/screen_base.h"
+#include "url/origin.h"
 
 namespace content {
 
@@ -24,15 +27,15 @@ IN_PROC_BROWSER_TEST_F(ScreenDetailsTest, GetScreensNoPermission) {
   ASSERT_TRUE(NavigateToURL(shell(), GetTestUrl(nullptr, "empty.html")));
   ASSERT_EQ(true, EvalJs(shell(), "'getScreenDetails' in self"));
   // getScreenDetails() rejects its promise without permission.
-  EXPECT_FALSE(EvalJs(shell(), "await getScreenDetails()").error.empty());
+  EXPECT_FALSE(ExecJs(shell(), "await getScreenDetails()"));
 }
 
-// TODO(crbug.com/1119974): Test ScreenDetails API values with permission.
+// TODO(crbug.com/40145721): Test ScreenDetails API values with permission.
 IN_PROC_BROWSER_TEST_F(ScreenDetailsTest, DISABLED_GetScreensBasic) {
   ASSERT_TRUE(NavigateToURL(shell(), GetTestUrl(nullptr, "empty.html")));
   ASSERT_EQ(true, EvalJs(shell(), "'getScreenDetails' in self"));
   auto result = EvalJs(shell(), content::test::kGetScreenDetailsScript);
-  EXPECT_EQ(content::test::GetExpectedScreenDetails(), result.value);
+  EXPECT_EQ(content::test::GetExpectedScreenDetails(), result);
 }
 
 // Test that screen.isExtended matches the availability of multiple displays.
@@ -40,7 +43,7 @@ IN_PROC_BROWSER_TEST_F(ScreenDetailsTest, IsExtendedBasic) {
   ASSERT_TRUE(NavigateToURL(shell(), GetTestUrl(nullptr, "empty.html")));
   ASSERT_EQ(true, EvalJs(shell(), "'isExtended' in screen"));
   EXPECT_EQ("boolean", EvalJs(shell(), "typeof screen.isExtended"));
-  EXPECT_EQ(display::Screen::GetScreen()->GetNumDisplays() > 1,
+  EXPECT_EQ(display::Screen::Get()->GetNumDisplays() > 1,
             EvalJs(shell(), "screen.isExtended"));
 }
 
@@ -72,16 +75,21 @@ class FakeScreenDetailsTest : public ScreenDetailsTest {
     test_shell_ = CreateBrowser();
   }
 
+  void TearDownOnMainThread() override {
+    test_shell_ = nullptr;
+    ScreenDetailsTest::TearDownOnMainThread();
+  }
+
   display::ScreenBase* screen() { return &screen_; }
   Shell* test_shell() { return test_shell_; }
 
  private:
   display::ScreenBase screen_;
-  raw_ptr<Shell, DanglingUntriaged> test_shell_ = nullptr;
+  raw_ptr<Shell> test_shell_ = nullptr;
 };
 
-// TODO(crbug.com/1042990): Windows crashes static casting to ScreenWin.
-// TODO(crbug.com/1042990): Android requires a GetDisplayNearestView overload.
+// TODO(crbug.com/40115071): Windows crashes static casting to ScreenWin.
+// TODO(crbug.com/40115071): Android requires a GetDisplayNearestView overload.
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN)
 #define MAYBE_GetScreensFaked DISABLED_GetScreensFaked
 #else
@@ -95,9 +103,16 @@ IN_PROC_BROWSER_TEST_F(FakeScreenDetailsTest, MAYBE_GetScreensFaked) {
   PermissionControllerImpl* permission_controller =
       PermissionControllerImpl::FromBrowserContext(
           contents->GetBrowserContext());
+
+  base::test::TestFuture<PermissionControllerImpl::OverrideStatus> future;
+
+  url::Origin origin =
+      contents->GetPrimaryMainFrame()->GetLastCommittedOrigin();
   permission_controller->GrantPermissionOverrides(
-      contents->GetPrimaryMainFrame()->GetLastCommittedOrigin(),
-      {blink::PermissionType::WINDOW_MANAGEMENT});
+      origin, origin, {blink::PermissionType::WINDOW_MANAGEMENT},
+      future.GetCallback());
+  ASSERT_EQ(future.Get(),
+            PermissionControllerImpl::OverrideStatus::kOverrideSet);
 
   screen()->display_list().AddDisplay({1, gfx::Rect(100, 100, 801, 802)},
                                       display::DisplayList::Type::NOT_PRIMARY);
@@ -109,11 +124,11 @@ IN_PROC_BROWSER_TEST_F(FakeScreenDetailsTest, MAYBE_GetScreensFaked) {
 
   EvalJsResult result =
       EvalJs(test_shell(), content::test::kGetScreenDetailsScript);
-  EXPECT_EQ(content::test::GetExpectedScreenDetails(), result.value);
+  EXPECT_EQ(content::test::GetExpectedScreenDetails(), result);
 }
 
-// TODO(crbug.com/1042990): Windows crashes static casting to ScreenWin.
-// TODO(crbug.com/1042990): Android requires a GetDisplayNearestView overload.
+// TODO(crbug.com/40115071): Windows crashes static casting to ScreenWin.
+// TODO(crbug.com/40115071): Android requires a GetDisplayNearestView overload.
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN)
 #define MAYBE_IsExtendedFaked DISABLED_IsExtendedFaked
 #else
@@ -131,15 +146,15 @@ IN_PROC_BROWSER_TEST_F(FakeScreenDetailsTest, MAYBE_IsExtendedFaked) {
   EXPECT_FALSE(EvalJs(test_shell(), "screen.isExtended").ExtractBool());
 }
 
-// TODO(crbug.com/1042990): Windows crashes static casting to ScreenWin.
-// TODO(crbug.com/1042990): Android requires a GetDisplayNearestView overload.
+// TODO(crbug.com/40115071): Windows crashes static casting to ScreenWin.
+// TODO(crbug.com/40115071): Android requires a GetDisplayNearestView overload.
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN)
 #define MAYBE_ScreenOnchangeNoPermission DISABLED_ScreenOnchangeNoPermission
 #else
 #define MAYBE_ScreenOnchangeNoPermission ScreenOnchangeNoPermission
 #endif
 // Sites with no permission only get an event if screen.isExtended changes.
-// TODO(crbug.com/1119974): Need content_browsertests permission controls.
+// TODO(crbug.com/40145721): Need content_browsertests permission controls.
 IN_PROC_BROWSER_TEST_F(FakeScreenDetailsTest,
                        MAYBE_ScreenOnchangeNoPermission) {
   ASSERT_TRUE(NavigateToURL(test_shell(), GetTestUrl(nullptr, "empty.html")));
@@ -182,8 +197,8 @@ IN_PROC_BROWSER_TEST_F(FakeScreenDetailsTest,
   EXPECT_EQ("2", EvalJs(test_shell(), "document.title"));
 }
 
-// TODO(crbug.com/1042990): Windows crashes static casting to ScreenWin.
-// TODO(crbug.com/1042990): Android requires a GetDisplayNearestView overload.
+// TODO(crbug.com/40115071): Windows crashes static casting to ScreenWin.
+// TODO(crbug.com/40115071): Android requires a GetDisplayNearestView overload.
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN)
 #define MAYBE_ScreenOnChangeForIsExtended DISABLED_ScreenOnChangeForIsExtended
 #else
@@ -231,8 +246,8 @@ IN_PROC_BROWSER_TEST_F(FakeScreenDetailsTest,
   EXPECT_EQ("2", EvalJs(test_shell(), "document.title"));
 }
 
-// TODO(crbug.com/1042990): Windows crashes static casting to ScreenWin.
-// TODO(crbug.com/1042990): Android requires a GetDisplayNearestView overload.
+// TODO(crbug.com/40115071): Windows crashes static casting to ScreenWin.
+// TODO(crbug.com/40115071): Android requires a GetDisplayNearestView overload.
 #if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN)
 #define MAYBE_ScreenOnChangeForAttributes DISABLED_ScreenOnChangeForAttributes
 #else

@@ -8,13 +8,14 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
-#include "base/time/time.h"
+#import "base/ios/block_types.h"
+#import "base/time/time.h"
 #import "components/content_settings/core/common/content_settings.h"
-#import "components/sync/base/model_type.h"
-#include "third_party/metrics_proto/user_demographics.pb.h"
+#import "components/sync/base/data_type.h"
+#import "third_party/metrics_proto/user_demographics.pb.h"
 
 @class ElementSelector;
-@class FakeSystemIdentity;
+enum class TipsNotificationType;
 
 @interface JavaScriptExecutionResult : NSObject
 @property(readonly, nonatomic) BOOL success;
@@ -35,10 +36,19 @@
 // YES if the current interface language uses RTL layout.
 + (BOOL)isRTL;
 
+// Returns YES if the application window is in windowed mode (multitasking).
++ (BOOL)isWindowedMode;
+
 // Clears browsing history and waits for history to finish clearing before
 // returning. Returns nil on success, or else an NSError indicating why the
 // operation failed.
 + (NSError*)clearBrowsingHistory;
+
+// Shuts down the network process in order to
+// avoid tests from hanging when clearing browser history. Uses a private WebKit
+// API and should be refactored or removed in the event that there's a different
+// way to address hanging.
++ (void)killWebKitNetworkProcess;
 
 // Clears all web state browsing data and waits to finish clearing before
 // returning. Returns nil on success, otherwise an NSError indicating why
@@ -57,8 +67,15 @@
 // the operation failed.
 + (NSError*)removeBrowsingCache;
 
+// Persists the current list of tabs to disk immediately.
++ (void)saveSessionImmediately;
+
 // Opens `URL` using some connected scene.
 + (void)sceneOpenURL:(NSString*)spec;
+
+// Continues `userActivity` using some connected scene with a specific URL.
++ (void)sceneContinueUserActivityWithType:(NSString*)activityType
+                                      url:(NSString*)urlString;
 
 // Loads the URL `spec` in the current WebState with transition type
 // ui::PAGE_TRANSITION_TYPED and returns without waiting for the page to load.
@@ -67,14 +84,34 @@
 // Returns YES if the current WebState is loading.
 + (BOOL)isLoading;
 
+// Returns YES if any WebState across all foreground tabs is loading.
++ (BOOL)isAnyWebStateLoading;
+
 // Reloads the page without waiting for the page to load.
 + (void)startReloading;
 
-// Loads `URL` as if it was opened from an external application.
-+ (void)openURLFromExternalApp:(NSString*)URL;
-
 // Programmatically dismisses settings screen.
 + (void)dismissSettings;
+
+// Stops primes performance metrics logging by calling into the
+// internal framework (should only be used by performance tests)
++ (void)primesStopLogging;
+
+// Takes a snapshot of memory usage by calling into the internal
+// framework (should only be used by performance tests)
++ (void)primesTakeMemorySnapshot:(NSString*)eventName;
+
+#pragma mark - Profile Utilities (EG2)
+
+// Returns the name (as in `ProfileIOS::GetProfileName()`) of the current
+// profile, more precisely the profile associated with the foreground active
+// scene.
++ (NSString*)currentProfileName;
+
+// Returns the name (as in `ProfileIOS::GetProfileName()`) of the personal
+// profile (as opposed to managed profiles), as per
+// `ProfileAttributesStorageIOS::GetPersonalProfileName()`.
++ (NSString*)personalProfileName;
 
 #pragma mark - Tab Utilities (EG2)
 
@@ -92,11 +129,17 @@
 // Returns the number of open non-incognito tabs.
 + (NSUInteger)mainTabCount [[nodiscard]];
 
+// Returns the number of open inactive tabs.
++ (NSUInteger)inactiveTabCount [[nodiscard]];
+
 // Returns the number of open incognito tabs.
 + (NSUInteger)incognitoTabCount [[nodiscard]];
 
 // Returns the number of open browsers.
 + (NSUInteger)browserCount [[nodiscard]];
+
+// Returns the number of the realized web states from the existing web states.
++ (NSInteger)realizedWebStatesCount [[nodiscard]];
 
 // Simulates a backgrounding.
 // If not succeed returns an NSError indicating  why the
@@ -122,14 +165,30 @@
 // Opens a new tab, and does not wait for animations to complete.
 + (void)openNewTab;
 
+// Opens a new tab with the given URL and attaches the text fragment to its
+// internal NavigationItem to trigger scroll restoration upon page load.
++ (void)openNewTabWithURL:(NSString*)url textFragment:(NSString*)textFragment;
+
+// Opens a new tab with the given URL, text fragment, and marks it as
+// originating from Send Tab To Self with the given entry GUID.
++ (void)openSendTabToSelfNewTabWithURL:(NSString*)url
+                          textFragment:(NSString*)textFragment
+                             entryGUID:(NSString*)guid;
+
+// Opens a new background tab with the given URL, text fragment, and marks it
+// as originating from Send Tab To Self with the given entry GUID.
++ (void)openSendTabToSelfNewBackgroundTabWithURL:(NSString*)url
+                                    textFragment:(NSString*)textFragment
+                                       entryGUID:(NSString*)guid;
+
 // Simulates opening a custom `URL` from another application.
 + (void)simulateExternalAppURLOpeningWithURL:(NSURL*)URL;
 
-// Simulates opening the add account sign-in flow from the web.
-+ (void)simulateAddAccountFromWeb;
-
 // Closes current tab.
 + (void)closeCurrentTab;
+
+// Pins current tab.
++ (void)pinCurrentTab;
 
 // Opens a new incognito tab, and does not wait for animations to complete.
 + (void)openNewIncognitoTab;
@@ -172,6 +231,9 @@
 
 // Returns the index of active tab in normal mode.
 + (NSUInteger)indexOfActiveNormalTab;
+
+// Returns YES if the current active WebState is showing a new tab page.
++ (BOOL)isCurrentTabNTP;
 
 #pragma mark - Window utilities (EG2)
 
@@ -221,6 +283,18 @@
 // Returns the number of open incognito tabs, in window with given number.
 + (NSUInteger)incognitoTabCountInWindowWithNumber:(int)windowNumber;
 
+// Returns a key window from the connected scenes.
++ (UIWindow*)keyWindow;
+
+// Opens the settings menu directly (not via the UI) in the window with the
+// given number. EarlGrey + Multiwindow + SwiftUI (the tools menu) do not play
+// well together, so EG often fails to interact with the tools menu in secondary
+// windows.
++ (void)openSettingsInWindowWithNumber:(int)windowNumber;
+
+// Returns the interface orientation of the scene.
++ (UIInterfaceOrientation)interfaceOrientation;
+
 #pragma mark - WebState Utilities (EG2)
 
 // Attempts to tap the element with `element_id` within window.frames[0] of the
@@ -234,19 +308,8 @@
 // operation failed, otherwise nil.
 + (NSError*)tapWebStateElementWithID:(NSString*)elementID;
 
-// Waits for the current web state to contain an element matching `selector`.
-// If not succeed returns an NSError indicating  why the operation failed,
-// otherwise nil.
-+ (NSError*)waitForWebStateContainingElement:(ElementSelector*)selector;
-
-// Waits for the current web state to no longer contain an element matching
-// `selector`. On failure, returns an NSError, otherwise nil.
-+ (NSError*)waitForWebStateNotContainingElement:(ElementSelector*)selector;
-
-// Waits for the current web state's frames to contain `text`.
-// If not succeed returns an NSError indicating  why the operation failed,
-// otherwise nil.
-+ (NSError*)waitForWebStateContainingTextInIFrame:(NSString*)text;
+// Returns YES if the current WebState's frames contain `text`.
++ (BOOL)webStateContainsTextInIFrame:(NSString*)text;
 
 // Attempts to submit form with `formID` in the current WebState.
 // Returns nil on success, or else an NSError indicating why the operation
@@ -260,28 +323,24 @@
 + (BOOL)webStateContainsText:(NSString*)text;
 
 // Waits for the current WebState to contain loaded image with `imageID`.
-// When loaded, the image element will have the same size as actual image.
-// Returns nil if the condition is met within a timeout, or else an NSError
-// indicating why the operation failed.
-+ (NSError*)waitForWebStateContainingLoadedImage:(NSString*)imageID;
+// Returns YES if the current WebState contains a loaded image with `imageID`.
++ (BOOL)webStateContainsLoadedImage:(NSString*)imageID;
 
-// Waits for the current WebState to contain a blocked image with `imageID`.
-// When blocked, the image element will be smaller than the actual image size.
-// Returns nil if the condition is met within a timeout, or else an NSError
-// indicating why the operation failed.
-+ (NSError*)waitForWebStateContainingBlockedImage:(NSString*)imageID;
+// Returns YES if the current WebState contains a blocked image with `imageID`.
++ (BOOL)webStateContainsBlockedImage:(NSString*)imageID;
 
 // Waits for the web state's scroll view zoom scale to be suitably close (within
 // 0.05) of the expected scale. Returns nil if the condition is met within a
 // timeout, or else an NSError indicating why the operation failed.
-+ (NSError*)waitForWebStateZoomScale:(CGFloat)scale;
+// Returns YES if the current WebState's zoom scale is close to `scale`.
++ (BOOL)webStateZoomScaleCloseTo:(CGFloat)scale;
 
 // Signs the user out from Chrome and then starts clearing the identities.
 //
-// Note: This method does not wait for identities to be cleared from the
-// keychain. To wait for this operation to finish, please use an GREYCondition
-// and wait for +hasIdentities to return NO.
-+ (void)signOutAndClearIdentities;
+// Note: The idendities & browsing data cleanings are executed asynchronously.
+// The completion block should be used if there's a need to wait the end of
+// those operations.
++ (void)signOutAndClearIdentitiesWithCompletion:(ProceduralBlock)completion;
 
 // Returns YES if there is at at least identity in the ChromeIdentityService.
 + (BOOL)hasIdentities;
@@ -298,10 +357,6 @@
 // from the cache even if the Cache-Control response header says otherwise.
 + (NSError*)purgeCachedWebViewPages;
 
-// Returns YES if the current WebState's navigation manager is currently
-// restoring session state.
-+ (BOOL)isRestoreSessionInProgress;
-
 // Returns YES if the current WebState's web view uses the content inset to
 // correctly align the top of the content with the bottom of the top bar.
 + (BOOL)webStateWebViewUsesContentInset;
@@ -312,17 +367,6 @@
 // Stops any pending navigations in all WebStates which are loading.
 + (void)stopAllWebStatesLoading;
 
-#pragma mark - Bookmarks Utilities (EG2)
-
-// Waits for the bookmark internal state to be done loading.
-// If not succeed returns an NSError indicating  why the operation failed,
-// otherwise nil.
-+ (NSError*)waitForBookmarksToFinishinLoading;
-
-// Clears bookmarks. If not succeed returns an NSError indicating  why the
-// operation failed, otherwise nil.
-+ (NSError*)clearBookmarks;
-
 #pragma mark - URL Utilities (EG2)
 
 // Returns the title string to be used for a page with `URL` if that page
@@ -330,30 +374,6 @@
 + (NSString*)displayTitleForURL:(NSString*)URL;
 
 #pragma mark - Sync Utilities (EG2)
-
-// Clears fake sync server data if the server is running.
-+ (void)clearSyncServerData;
-
-// Signs in with `identity` without sync consent.
-+ (void)signInWithoutSyncWithIdentity:(FakeSystemIdentity*)identity;
-
-// Starts the sync server. The server should not be running when calling this.
-+ (void)startSync;
-
-// Stops the sync server. The server should be running when calling this.
-+ (void)stopSync;
-
-// Waits for sync engine to be initialized or not. It doesn't necessarily mean
-// that data types are configured and ready to use. See
-// SyncService::IsEngineInitialized() for details. If not succeeded a GREYAssert
-// is induced.
-+ (NSError*)waitForSyncEngineInitialized:(BOOL)isInitialized
-                             syncTimeout:(base::TimeDelta)timeout;
-
-// Waits for the sync feature to be enabled/disabled. See SyncService::
-// IsSyncFeatureEnabled() for details. If not succeeded a GREYAssert is induced.
-+ (NSError*)waitForSyncFeatureEnabled:(BOOL)isEnabled
-                          syncTimeout:(base::TimeDelta)timeout;
 
 // Waits for sync to become fully active; see
 // SyncService::TransportState::ACTIVE for details. If not succeeded a
@@ -378,8 +398,22 @@
 // real one.
 + (void)tearDownFakeSyncServer;
 
+// Clears fake sync server data if the server is running.
++ (void)clearFakeSyncServerData;
+
+// Ensures that all of the FakeServer's data is persisted to disk. This is
+// useful before app restarts, where otherwise the FakeServer may not get to do
+// its usual on-destruction flush.
++ (void)flushFakeSyncServerToDisk;
+
 // Gets the number of entities of the given `type`.
-+ (int)numberOfSyncEntitiesWithType:(syncer::ModelType)type;
++ (int)numberOfSyncEntitiesWithType:(syncer::DataType)type;
+
+// Forces every request to fail in a way that simulates a network failure.
++ (void)disconnectFakeSyncServerNetwork;
+
+// Undoes the effects of disconnectFakeSyncServerNetwork.
++ (void)connectFakeSyncServerNetwork;
 
 // Injects a bookmark into the fake sync server with `URL` and `title`.
 + (void)addFakeSyncServerBookmarkWithURL:(NSString*)URL title:(NSString*)title;
@@ -392,15 +426,51 @@
                      originator_client_item_id:
                          (NSString*)originator_client_item_id;
 
-// Injects typed URL to sync FakeServer.
-+ (void)addFakeSyncServerTypedURL:(NSString*)URL;
+// Injects a HISTORY visit to the sync FakeServer.
++ (void)addFakeSyncServerHistoryVisit:(NSURL*)URL;
 
 // Injects device info to sync FakeServer.
 + (void)addFakeSyncServerDeviceInfo:(NSString*)deviceName
                lastUpdatedTimestamp:(base::Time)lastUpdatedTimestamp;
 
+// Injects a send tab to self entry to sync FakeServer.
++ (void)addFakeSyncServerSendTabToSelfEntryWithURL:(NSString*)URL
+                                             title:(NSString*)title
+                                        deviceName:(NSString*)deviceName
+                                  targetDeviceGUID:(NSString*)targetDeviceGUID;
+
+// Adds a fake Send Tab To Self entry to the fake sync server and returns its
+// GUID. `formFieldData` is a dictionary where keys are form control names and
+// values are the values to fill.
++ (NSString*)addFakeSendTabToSelfEntryWithURL:(NSString*)url
+                                        title:(NSString*)title
+                                formFieldData:
+                                    (NSDictionary<NSString*, NSString*>*)
+                                        formFieldData;
+
+// Adds a fake Send Tab To Self entry with the given text fragment to the fake
+// sync server and returns its GUID.
++ (NSString*)addFakeSendTabToSelfEntryWithURL:(NSString*)url
+                                        title:(NSString*)title
+                                 textFragment:(NSString*)textFragment;
+
+// Checks if the local Send Tab To Self model contains an entry with the given
+// GUID.
++ (BOOL)hasSendTabToSelfEntryWithGUID:(NSString*)guid;
+
+// Returns the generated text fragment for the given URL, or nil if no entry
+// exists or no fragment is set.
++ (NSString*)textFragmentForSendTabToSelfEntryWithURL:(NSString*)URL;
+
 // Adds typed URL into HistoryService.
 + (void)addHistoryServiceTypedURL:(NSString*)URL;
+
+// Adds typed URL into HistoryService at timestamp `visitTimestamp`.
++ (void)addHistoryServiceTypedURL:(NSString*)URL
+                   visitTimestamp:(base::Time)visitTimestamp;
+
+// Sets the page `title` for `URL` in the History Service.
++ (void)setHistoryServiceTitle:(NSString*)title forPage:(NSString*)URL;
 
 // Deletes typed URL from HistoryService.
 + (void)deleteHistoryServiceTypedURL:(NSString*)URL;
@@ -408,10 +478,10 @@
 // If the provided URL `spec` is either present or not present in HistoryService
 // (depending on `expectPresent`), return YES. If the present status of `spec`
 // is not what is expected, or there is an error, return NO.
-+ (BOOL)isTypedURL:(NSString*)spec presentOnClient:(BOOL)expectPresent;
++ (BOOL)isURL:(NSString*)spec presentOnClient:(BOOL)expectPresent;
 
 // Triggers a sync cycle for a `type`.
-+ (void)triggerSyncCycleForType:(syncer::ModelType)type;
++ (void)triggerSyncCycleForType:(syncer::DataType)type;
 
 // Injects user demographics into the fake sync server. `rawBirthYear` is the
 // true birth year, pre-noise, and the gender corresponds to the proto enum
@@ -461,6 +531,12 @@
 // passphrase to start.
 + (void)addBookmarkWithSyncPassphrase:(NSString*)syncPassphrase;
 
+// Add a sync passphrase requirement to start the sync server.
++ (void)addSyncPassphrase:(NSString*)syncPassphrase;
+
+// Returns whether UserSelectableType::kHistory is among the selected types.
++ (BOOL)isSyncHistoryDataTypeSelected;
+
 #pragma mark - JavaScript Utilities (EG2)
 
 // Executes JavaScript through the WebState's WebFrame and waits for either the
@@ -468,6 +544,12 @@
 // JavaScript exception is thrown, `success` is NO.
 // otherwise returns object representing execution result.
 + (JavaScriptExecutionResult*)executeJavaScript:(NSString*)javaScript;
+
+// Same as -executeJavaScript but executes the script in the isolated world
+// instead of the page content world. This allows interacting with the gcrweb
+// objects that are injected there.
++ (JavaScriptExecutionResult*)executeJavaScriptInIsolatedWorld:
+    (NSString*)javaScript;
 
 // Returns the user agent that should be used for the mobile version.
 + (NSString*)mobileUserAgentString;
@@ -493,17 +575,20 @@
 // Returns YES if UKM feature is enabled.
 + (BOOL)isUKMEnabled [[nodiscard]];
 
-// Returns YES if kSynthesizedRestoreSessionEnabled feature is enabled.
-+ (BOOL)isSynthesizedRestoreSessionEnabled [[nodiscard]];
-
 // Returns YES if kTestFeature is enabled.
 + (BOOL)isTestFeatureEnabled;
+
+// Returns YES if kOverflowMenuHomeCustomizationEntrypoint is enabled.
++ (BOOL)isOverflowMenuHomeCustomizationEntrypointEnabled;
+
+// Returns YES if Fullscreen smooth scrolling is supported.
++ (BOOL)isFullscreenSmoothScrollingSupported;
 
 // Returns YES if DemographicMetricsReporting feature is enabled.
 + (BOOL)isDemographicMetricsReportingEnabled [[nodiscard]];
 
-// Returns YES if the SyncEnableHistoryDataType feature is enabled.
-+ (BOOL)isSyncHistoryDataTypeEnabled [[nodiscard]];
+// Returns YES if ProactiveSuggestionsFramework is enabled.
++ (BOOL)isProactiveSuggestionsFrameworkEnabled [[nodiscard]];
 
 // Returns YES if the `launchSwitch` is found in host app launch switches.
 + (BOOL)appHasLaunchSwitch:(NSString*)launchSwitch;
@@ -513,9 +598,6 @@
 // with custom WebKit frameworks.
 + (BOOL)isCustomWebKitLoadedIfRequested [[nodiscard]];
 
-// Returns YES if error pages are displayed using loadSimulatedRequest.
-+ (BOOL)isLoadSimulatedRequestAPIEnabled [[nodiscard]];
-
 // Returns whether the mobile version of the websites are requested by default.
 + (BOOL)isMobileModeByDefault [[nodiscard]];
 
@@ -523,34 +605,58 @@
 // can, open multiple windows.
 + (BOOL)areMultipleWindowsSupported;
 
-// Returns whether the NewOverflowMenu feature is enabled.
-+ (BOOL)isNewOverflowMenuEnabled;
-
 // Returns whether the UseLensToSearchForImage feature is enabled.
 + (BOOL)isUseLensToSearchForImageEnabled;
 
-// Returns whether the Thumbstrip feature is enabled for window with given
-// number.
-+ (BOOL)isThumbstripEnabledForWindowWithNumber:(int)windowNumber;
+// Returns whether the YourSavedInfoSettingsPageIos feature is enabled.
++ (BOOL)isYourSavedInfoSettingsPageIosEnabled;
 
-// Returns whether the Web Channels feature is enabled.
-+ (BOOL)isWebChannelsEnabled;
+// Returns whether the current layout is showing the bottom omnibox.
++ (BOOL)isCurrentLayoutBottomOmnibox;
 
-// Returns whether SF Symbols are used.
-+ (BOOL)isSFSymbolEnabled;
+// Returns whether chrome next is enabled.
++ (BOOL)isChromeNextEnabled;
+
+// Returns whether overflow menu refactoring on the NTP is enabled.
++ (BOOL)isOverflowMenuNTPRefactorEnabled;
+
 
 #pragma mark - ContentSettings
 
 // Gets the current value of the popup content setting preference for the
-// original browser state.
+// original profile.
 + (ContentSetting)popupPrefValue;
 
 // Sets the popup content setting preference to the given value for the original
-// browser state.
+// profile.
 + (void)setPopupPrefValue:(ContentSetting)value;
 
 // Resets the desktop content setting to its default value.
 + (void)resetDesktopContentSetting;
+
+// Sets the preference value of a content settings type for the original browser
+// state.
++ (void)setContentSetting:(ContentSetting)setting
+    forContentSettingsType:(ContentSettingsType)type;
+
+#pragma mark - Default Utilities (EG2)
+
+// Stores a value for the provided key in NSUserDefaults.
++ (void)setUserDefaultsObject:(id)value forKey:(NSString*)defaultName;
+
+// Removes the object for the provided `key` in NSUserDefaults.
++ (void)removeUserDefaultsObjectForKey:(NSString*)key;
+
+// Returns the value for provided key from NSUserDefaults.
++ (id)userDefaultsObjectForKey:(NSString*)key;
+
+// Creates a `AppGroupCommand` based on the provided text and writes it the
+// shared NSUserDefaults.
++ (void)setAppGroupCommandToSearchText:(NSString*)text;
+
+// Creates an incognito `AppGroupCommand` based on the provided text and writes
+// it the shared NSUserDefaults.
++ (void)setAppGroupCommandToIncognitoSearchText:(NSString*)text;
 
 #pragma mark - Pref Utilities (EG2)
 
@@ -559,21 +665,52 @@
 // returns a Value of type NONE.
 + (NSString*)localStatePrefValue:(NSString*)prefName;
 
-// Sets the integer values for the local state pref with `prefName`. `value`
+// Gets the time value for the local state pref with `prefName`. Local State
+// contains the preferences that are shared between all profiles.
++ (base::Time)localStateTimePref:(NSString*)prefName;
+
+// Sets the integer value for the local state pref with `prefName`. `value`
 // can be either a casted enum or any other numerical value. Local State
-// contains the preferences that are shared between all browser states.
+// contains the preferences that are shared between all profiles.
 + (void)setIntegerValue:(int)value forLocalStatePref:(NSString*)prefName;
 
-// Gets the value of a user pref in the original browser state. Returns a
+// Sets the time value for the local state pref with `prefName`. Local State
+// contains the preferences that are shared between all profiles.
++ (void)setTimeValue:(base::Time)value forLocalStatePref:(NSString*)prefName;
+
+// Sets the time value for the user pref with `prefName` in the original
+// profile.
++ (void)setTimeValue:(base::Time)value forUserPref:(NSString*)prefName;
+
+// Sets the string value for the local state pref with `prefName`. Local State
+// contains the preferences that are shared between all profiles.
++ (void)setStringValue:(NSString*)value forLocalStatePref:(NSString*)prefName;
+
+// Sets the value of a string user pref in the original profile.
++ (void)setStringValue:(NSString*)value forUserPref:(NSString*)prefName;
+
+// Sets the bool value for the local state pref with `prefName`. Local State
+// contains the preferences that are shared between all profiles.
++ (void)setBoolValue:(BOOL)value forLocalStatePref:(NSString*)prefName;
+
+// Gets the value of a user pref in the original profile. Returns a
 // base::Value encoded as a JSON string. If the pref was not registered,
 // returns a Value of type NONE.
 + (NSString*)userPrefValue:(NSString*)prefName;
 
-// Sets the value of a boolean user pref in the original browser state.
+// Sets the value of a boolean user pref in the original profile.
 + (void)setBoolValue:(BOOL)value forUserPref:(NSString*)prefName;
 
-// Sets the value of a integer user pref in the original browser state.
+// Sets the value of a integer user pref in the original profile.
 + (void)setIntegerValue:(int)value forUserPref:(NSString*)prefName;
+
+// Sets the value of a double user pref in the original profile.
++ (void)setDoubleValue:(double)value forUserPref:(NSString*)prefName;
+
+// Returns true if the LocalState Preference is currently using its default
+// value, and has not been set by any higher-priority source (even with the same
+// value).
++ (BOOL)prefWithNameIsDefaultValue:(NSString*)prefName;
 
 // Clears the user pref of |prefName|.
 + (void)clearUserPrefWithName:(NSString*)prefName;
@@ -603,7 +740,9 @@
 // The input is similar to UIKeyCommand parameters, and is designed for testing
 // keyboard shortcuts.
 // Accepts any strings and also UIKeyInput{Up|Down|Left|Right}Arrow and
-// UIKeyInputEscape constants as `input`.
+// UIKeyInputEscape constants as `input`. `flags` must be set to
+// UIKeyModifierShift for things like capital letters or characters like !@#$%
+// etc.
 + (void)simulatePhysicalKeyboardEvent:(NSString*)input
                                 flags:(UIKeyModifierFlags)flags;
 
@@ -628,6 +767,12 @@
 
 // Copies `text` into the clipboard from the app's perspective.
 + (void)copyTextToPasteboard:(NSString*)text;
+
+// Copies `link` into pasteboard as a NSURL.
++ (void)copyLinkAsURLToPasteBoard:(NSString*)link;
+
+// Copies png `data` as image into pasteboard.
++ (void)copyImageToPasteboard:(NSData*)imageData;
 
 #pragma mark - Watcher utilities
 
@@ -654,10 +799,38 @@
 // Copies a chrome:// URL that doesn't require internet connection.
 + (void)copyURLToPasteBoard;
 
-// Disables default browser promo. If a test needs to check a message drop down
-// in a second window, this needs to be disabled or the popup will kill the
-// message.
-+ (void)disableDefaultBrowserPromo;
+#pragma mark - First Run Utilities
+
+// Writes the First Run Sentinel file, used to record that First Run has
+// completed.
++ (void)writeFirstRunSentinel;
+
+// Removes the FirstRun sentinel file.
++ (void)removeFirstRunSentinel;
+
+// Whether the first run sentinel exists.
++ (bool)hasFirstRunSentinel;
+
+#pragma mark - Notification Utilities
+
++ (void)requestTipsNotification:(TipsNotificationType)type;
+
+#pragma mark - Variations Utilities
+
+// Forces an override of the variations stored permanent country.
++ (void)overrideVariationsServiceStoredPermanentCountry:(NSString*)country;
+
+#pragma mark - Shared Tab Groups Utilities
+
+// Waits for the MessagingBackendService to be initialized.
++ (NSError*)waitForMessagingBackendServiceInitialized;
+
+// Returns YES if the view with `accessibilityID` or any of its ancestors is
+// animating.
++ (BOOL)isViewAnimatingWithAccessibilityID:(NSString*)accessibilityID;
+
+// Programmatically crashes the host application.
++ (void)induceCrash;
 
 @end
 

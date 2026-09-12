@@ -6,9 +6,11 @@
 
 #include "third_party/blink/public/web/web_script_source.h"
 #include "third_party/blink/renderer/bindings/core/v8/referrer_script_info.h"
+#include "third_party/blink/renderer/bindings/core/v8/sanitize_script_errors.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_evaluation_result.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/probe/core_probes.h"
 #include "third_party/blink/renderer/platform/bindings/v8_binding.h"
 #include "third_party/blink/renderer/platform/loader/fetch/url_loader/cached_metadata_handler.h"
 
@@ -41,7 +43,7 @@ KURL SanitizeBaseUrl(const KURL& raw_base_url,
   // 2. If muted errors is true, then set baseURL to about:blank.
   // [spec text]
   if (sanitize_script_errors == SanitizeScriptErrors::kSanitize) {
-    return BlankURL();
+    return BlankUrl();
   }
 
   return raw_base_url;
@@ -94,10 +96,10 @@ ClassicScript* ClassicScript::CreateFromResource(
     ScriptResource* resource,
     const ScriptFetchOptions& fetch_options) {
   // Check if we can use the script streamer.
-  ResourceScriptStreamer* streamer;
+  ScriptStreamer* streamer;
   ScriptStreamer::NotStreamingReason not_streamed_reason;
-  std::tie(streamer, not_streamed_reason) = ResourceScriptStreamer::TakeFrom(
-      resource, mojom::blink::ScriptType::kClassic);
+  std::tie(streamer, not_streamed_reason) =
+      ScriptStreamer::TakeFrom(resource, mojom::blink::ScriptType::kClassic);
   DCHECK_EQ(!streamer, not_streamed_reason !=
                            ScriptStreamer::NotStreamingReason::kInvalid);
 
@@ -114,14 +116,14 @@ ClassicScript* ClassicScript::CreateFromResource(
   // We lose the encoding information from ScriptResource.
   // Not sure if that matters.
   return MakeGarbageCollected<ClassicScript>(
-      resource->SourceText(), source_url, base_url, fetch_options,
+      resource->GetSourceText(), source_url, base_url, fetch_options,
       ScriptSourceLocationType::kExternalFile,
       resource->GetResponse().IsCorsSameOrigin()
           ? SanitizeScriptErrors::kDoNotSanitize
           : SanitizeScriptErrors::kSanitize,
       resource->CacheHandler(), TextPosition::MinimumPosition(), streamer,
       not_streamed_reason, cache_consumer,
-      SourceMapUrlFromResponse(resource->GetResponse()), resource);
+      SourceMapUrlFromResponse(resource->GetResponse()));
 }
 
 ClassicScript* ClassicScript::CreateUnspecifiedScript(
@@ -129,18 +131,20 @@ ClassicScript* ClassicScript::CreateUnspecifiedScript(
     ScriptSourceLocationType source_location_type,
     SanitizeScriptErrors sanitize_script_errors) {
   return MakeGarbageCollected<ClassicScript>(
-      ParkableString(source_text.Impl()), KURL(), KURL(), ScriptFetchOptions(),
-      source_location_type, sanitize_script_errors);
+      ParkableString(source_text.Impl()), NullUrl(), NullUrl(),
+      ScriptFetchOptions(), source_location_type, sanitize_script_errors);
 }
 
 ClassicScript* ClassicScript::CreateUnspecifiedScript(
     const WebScriptSource& source,
-    SanitizeScriptErrors sanitize_script_errors) {
+    SanitizeScriptErrors sanitize_script_errors,
+    ScriptStreamer* streamer) {
   return MakeGarbageCollected<ClassicScript>(
       ParkableString(String(source.code).Impl()),
-      StripFragmentIdentifier(source.url), KURL() /* base_url */,
+      StripFragmentIdentifier(source.url), NullUrl() /* base_url */,
       ScriptFetchOptions(), ScriptSourceLocationType::kUnknown,
-      sanitize_script_errors);
+      sanitize_script_errors, nullptr, TextPosition::MinimumPosition(),
+      streamer, ScriptStreamer::NotStreamingReason::kInlineScript);
 }
 
 ClassicScript::ClassicScript(
@@ -155,8 +159,7 @@ ClassicScript::ClassicScript(
     ScriptStreamer* streamer,
     ScriptStreamer::NotStreamingReason not_streaming_reason,
     ScriptCacheConsumer* cache_consumer,
-    const String& source_map_url,
-    ScriptResource* resource_keep_alive)
+    const String& source_map_url)
     : Script(fetch_options,
              SanitizeBaseUrl(base_url, sanitize_script_errors),
              source_url,
@@ -168,15 +171,13 @@ ClassicScript::ClassicScript(
       streamer_(streamer),
       not_streaming_reason_(not_streaming_reason),
       cache_consumer_(cache_consumer),
-      source_map_url_(source_map_url),
-      resource_keep_alive_(resource_keep_alive) {}
+      source_map_url_(source_map_url) {}
 
 void ClassicScript::Trace(Visitor* visitor) const {
   Script::Trace(visitor);
   visitor->Trace(cache_handler_);
   visitor->Trace(streamer_);
   visitor->Trace(cache_consumer_);
-  visitor->Trace(resource_keep_alive_);
 }
 
 v8::Local<v8::Data> ClassicScript::CreateHostDefinedOptions(
@@ -190,17 +191,21 @@ v8::Local<v8::Data> ClassicScript::CreateHostDefinedOptions(
 }
 
 v8::ScriptOrigin ClassicScript::CreateScriptOrigin(v8::Isolate* isolate) const {
+  // Only send the source mapping URL string to v8 if it is not empty.
+  v8::Local<v8::Value> source_map_url_or_null;
+  if (!SourceMapUrl().empty()) {
+    source_map_url_or_null = V8String(isolate, SourceMapUrl());
+  }
   // NOTE: For compatibility with WebCore, ClassicScript's line starts at
   // 1, whereas v8 starts at 0.
   // NOTE(kouhei): Probably this comment is no longer relevant and Blink lines
   // start at 1 only for historic reasons now. I guess we could change it, but
   // there's not much benefit doing so.
   return v8::ScriptOrigin(
-      isolate, V8String(isolate, SourceUrl()),
-      StartPosition().line_.ZeroBasedInt(),
+      V8String(isolate, SourceUrl()), StartPosition().line_.ZeroBasedInt(),
       StartPosition().column_.ZeroBasedInt(),
       GetSanitizeScriptErrors() == SanitizeScriptErrors::kDoNotSanitize, -1,
-      V8String(isolate, SourceMapUrl()),
+      source_map_url_or_null,
       GetSanitizeScriptErrors() == SanitizeScriptErrors::kSanitize,
       false,  // is_wasm
       false,  // is_module
@@ -211,6 +216,14 @@ ScriptEvaluationResult ClassicScript::RunScriptOnScriptStateAndReturnValue(
     ScriptState* script_state,
     ExecuteScriptPolicy policy,
     V8ScriptRunner::RethrowErrorsOption rethrow_errors) {
+  if (!script_state) {
+    return ScriptEvaluationResult::FromClassicNotRun();
+  }
+  bool sanitize = GetSanitizeScriptErrors() == SanitizeScriptErrors::kSanitize;
+  probe::EvaluateScriptBlock probe_scope(*script_state,
+                                         sanitize ? SourceUrl() : BaseUrl(),
+                                         /*module=*/false, sanitize);
+
   return V8ScriptRunner::CompileAndRunScript(script_state, this, policy,
                                              std::move(rethrow_errors));
 }

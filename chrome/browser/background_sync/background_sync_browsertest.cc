@@ -7,8 +7,7 @@
 #include "build/build_config.h"
 #include "chrome/browser/lifetime/application_lifetime.h"
 #include "chrome/browser/lifetime/application_lifetime_desktop.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
@@ -51,7 +50,7 @@ class BackgroundSyncBrowserTest : public InProcessBrowserTest {
     SetUpBrowser(browser());
   }
 
-  void SetUpBrowser(Browser* browser) {
+  void SetUpBrowser(BrowserWindowInterface* browser) {
     // Load the helper page that helps drive these tests.
     ASSERT_TRUE(ui_test_utils::NavigateToURL(
         browser, https_server_->GetURL(kHelperPage)));
@@ -70,17 +69,19 @@ class BackgroundSyncBrowserTest : public InProcessBrowserTest {
 
   // Runs the |script| in the current tab and writes the output to |*result|.
   bool RunScript(const std::string& script, std::string* result) {
-    return content::ExecuteScriptAndExtractString(browser()
-                                                      ->tab_strip_model()
-                                                      ->GetActiveWebContents()
-                                                      ->GetPrimaryMainFrame(),
-                                                  script, result);
+    *result = content::EvalJs(browser()
+                                  ->GetTabStripModel()
+                                  ->GetActiveWebContents()
+                                  ->GetPrimaryMainFrame(),
+                              script)
+                  .ExtractString();
+    return true;
   }
 
   // Intercepts all requests.
   std::unique_ptr<net::test_server::HttpResponse> HandleRequest(
       const net::test_server::HttpRequest& request) {
-    if (request.GetURL().query() == "syncreceived") {
+    if (request.GetURL().GetQuery() == "syncreceived") {
       time_when_sync_event_received_ = base::Time::Now();
     }
 

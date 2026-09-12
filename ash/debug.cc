@@ -5,140 +5,136 @@
 #include "ash/debug.h"
 
 #include <memory>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "ash/public/cpp/debug_utils.h"
-#include "ash/public/cpp/window_properties.h"
 #include "ash/root_window_controller.h"
 #include "ash/shell.h"
-#include "ash/wm/window_properties.h"
-#include "ash/wm/window_state.h"
 #include "ash/wm/window_util.h"
+#include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "cc/debug/layer_tree_debug_state.h"
-#include "ui/accessibility/aura/aura_window_properties.h"
-#include "ui/aura/client/aura_constants.h"
+#include "chromeos/ui/wm/debug_util.h"
+#include "ui/aura/env.h"
+#include "ui/aura/window.h"
+#include "ui/aura/window_delegate.h"
 #include "ui/aura/window_tree_host.h"
+#include "ui/base/hit_test.h"
 #include "ui/compositor/compositor.h"
 #include "ui/compositor/debug_utils.h"
 #include "ui/compositor/layer.h"
+#include "ui/display/screen.h"
 #include "ui/views/debug_utils.h"
 #include "ui/views/widget/widget.h"
+#include "ui/wm/core/coordinate_conversion.h"
+#include "ui/wm/core/window_util.h"
 
 namespace ash {
 namespace debug {
 
+namespace {
+
+void PrintViewHierarchyForWidget(views::Widget* widget,
+                                 std::ostringstream* out) {
+  *out << "Host widget:\n";
+  views::PrintWidgetInformation(*widget, /*detailed*/ true, out);
+  *out << "View hierarchy:\n"
+       << views::PrintViewHierarchy(widget->GetRootView());
+}
+
+aura::Window* GetToplevelWindowUnderMouse() {
+  gfx::Point screen_point = display::Screen::Get()->GetCursorScreenPoint();
+  aura::Window* root = window_util::GetRootWindowAt(screen_point);
+  if (!root) {
+    return nullptr;
+  }
+  gfx::Point local_point = screen_point;
+  ::wm::ConvertPointFromScreen(root, &local_point);
+  aura::Window* target = root->GetEventHandlerForPoint(local_point);
+  if (target) {
+    gfx::Point target_point = local_point;
+    aura::Window::ConvertPointToTarget(root, target, &target_point);
+    int component =
+        target->delegate()
+            ? target->delegate()->GetNonClientComponent(target_point)
+            : HTCLIENT;
+    if (component == HTCLIENT) {
+      return ::wm::GetToplevelWindow(target);
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
 void PrintLayerHierarchy(std::ostringstream* out) {
+  if (aura::Env::GetInstance()->IsMouseButtonDown()) {
+    aura::Window* target_window = GetToplevelWindowUnderMouse();
+    if (target_window && target_window->layer()) {
+      ui::PrintLayerHierarchy(
+          target_window->layer(),
+          RootWindowController::ForWindow(target_window->GetRootWindow())
+              ->GetLastMouseLocationInRoot(),
+          /*print_invisible=*/true, out);
+      return;
+    }
+    *out << "Warning: No window under mouse, falling back to default.\n";
+  }
   for (aura::Window* root : Shell::Get()->GetAllRootWindows()) {
     ui::Layer* layer = root->layer();
     if (layer) {
       ui::PrintLayerHierarchy(
           layer,
           RootWindowController::ForWindow(root)->GetLastMouseLocationInRoot(),
-          out);
+          /*print_invisible=*/true, out);
     }
   }
 }
 
 void PrintViewHierarchy(std::ostringstream* out) {
-  aura::Window* active_window = window_util::GetActiveWindow();
-  if (!active_window)
-    return;
-  views::Widget* widget = views::Widget::GetWidgetForNativeView(active_window);
-  if (!widget)
-    return;
-
-  *out << "Host widget:\n";
-  views::PrintWidgetInformation(*widget, /*detailed*/ true, out);
-  views::PrintViewHierarchy(widget->GetRootView(), out);
-}
-
-void PrintWindowHierarchy(const aura::Window* active_window,
-                          const aura::Window* focused_window,
-                          const aura::Window* capture_window,
-                          aura::Window* window,
-                          int indent,
-                          bool scrub_data,
-                          std::vector<std::string>* out_window_titles,
-                          std::ostringstream* out) {
-  std::string indent_str(indent, ' ');
-  std::string name(window->GetName());
-  if (name.empty())
-    name = "\"\"";
-  const gfx::Vector2dF& subpixel_position_offset =
-      window->layer()->GetSubpixelOffset();
-  *out << indent_str;
-  *out << " [window]";
-  *out << " " << name << " (" << window << ")"
-       << " type=" << window->GetType();
-  int window_id = window->GetId();
-  if (window_id != aura::Window::kInitialId)
-    *out << " id=" << window_id;
-  if (window->GetProperty(kWindowStateKey))
-    *out << " " << WindowState::Get(window)->GetStateType();
-  *out << ((window == active_window) ? " [active]" : "")
-       << ((window == focused_window) ? " [focused]" : "")
-       << ((window == capture_window) ? " [capture]" : "")
-       << (window->GetTransparent() ? " [transparent]" : "")
-       << (window->IsVisible() ? " [visible]" : "") << " "
-       << (window->GetOcclusionState() != aura::Window::OcclusionState::UNKNOWN
-               ? base::UTF16ToUTF8(aura::Window::OcclusionStateToString(
-                                       window->GetOcclusionState()))
-                     .c_str()
-               : "")
-       << " " << window->bounds().ToString();
-  if (!subpixel_position_offset.IsZero())
-    *out << " subpixel offset=" + subpixel_position_offset.ToString();
-  std::string* tree_id = window->GetProperty(ui::kChildAXTreeID);
-  if (tree_id)
-    *out << " ax_tree_id=" << *tree_id;
-
-  std::u16string title(window->GetTitle());
-  if (!title.empty()) {
-    out_window_titles->push_back(base::UTF16ToUTF8(title));
-    if (!scrub_data) {
-      *out << " title=" << title;
+  if (aura::Env::GetInstance()->IsMouseButtonDown()) {
+    aura::Window* target_window = GetToplevelWindowUnderMouse();
+    if (target_window) {
+      views::Widget* widget =
+          views::Widget::GetWidgetForNativeView(target_window);
+      if (widget) {
+        PrintViewHierarchyForWidget(widget, out);
+      }
+      return;
     }
+    *out << "Warning: No window under mouse, falling back to default.\n";
   }
 
-  int app_type = window->GetProperty(aura::client::kAppType);
-  *out << " app_type=" << app_type;
-  std::string* pkg_name = window->GetProperty(ash::kArcPackageNameKey);
-  if (pkg_name)
-    *out << " pkg_name=" << *pkg_name;
-  *out << '\n';
-
-  views::Widget* widget = views::Widget::GetWidgetForNativeView(window);
+  aura::Window* active_window = window_util::GetActiveWindow();
+  if (!active_window) {
+    return;
+  }
+  views::Widget* widget = views::Widget::GetWidgetForNativeView(active_window);
   if (widget) {
-    *out << std::string(indent + 3, ' ');
-    *out << " [widget]";
-    views::PrintWidgetInformation(*widget, /*detailed*/ false, out);
-  }
-
-  for (aura::Window* child : window->children()) {
-    PrintWindowHierarchy(active_window, focused_window, capture_window, child,
-                         indent + 3, scrub_data, out_window_titles, out);
+    PrintViewHierarchyForWidget(widget, out);
   }
 }
 
 std::vector<std::string> PrintWindowHierarchy(std::ostringstream* out,
                                               bool scrub_data) {
-  aura::Window* active_window = window_util::GetActiveWindow();
-  aura::Window* focused_window = window_util::GetFocusedWindow();
-  aura::Window* capture_window = window_util::GetCaptureWindow();
-  aura::Window::Windows roots = Shell::Get()->GetAllRootWindows();
-  std::vector<std::string> window_titles;
-  for (size_t i = 0; i < roots.size(); ++i) {
-    *out << "RootWindow " << i << ":\n";
-    PrintWindowHierarchy(active_window, focused_window, capture_window,
-                         roots[i], 0, scrub_data, &window_titles, out);
+  if (aura::Env::GetInstance()->IsMouseButtonDown()) {
+    aura::Window* target_window = GetToplevelWindowUnderMouse();
+    if (target_window) {
+      return chromeos::wm::PrintWindowHierarchy(
+          aura::Window::Windows{target_window}, scrub_data, out);
+    }
+    *out << "Warning: No window under mouse, falling back to default.\n";
   }
-  return window_titles;
+  return chromeos::wm::PrintWindowHierarchy(Shell::Get()->GetAllRootWindows(),
+                                            scrub_data, out);
 }
 
 void ToggleShowDebugBorders() {
   aura::Window::Windows root_windows = Shell::Get()->GetAllRootWindows();
   std::unique_ptr<cc::DebugBorderTypes> value;
-  for (auto* window : root_windows) {
+  for (aura::Window* window : root_windows) {
     ui::Compositor* compositor = window->GetHost()->compositor();
     cc::LayerTreeDebugState state = compositor->GetLayerTreeDebugState();
     if (!value.get())
@@ -152,7 +148,7 @@ void ToggleShowDebugBorders() {
 void ToggleShowFpsCounter() {
   aura::Window::Windows root_windows = Shell::Get()->GetAllRootWindows();
   std::unique_ptr<bool> value;
-  for (auto* window : root_windows) {
+  for (aura::Window* window : root_windows) {
     ui::Compositor* compositor = window->GetHost()->compositor();
     cc::LayerTreeDebugState state = compositor->GetLayerTreeDebugState();
     if (!value.get())
@@ -165,7 +161,7 @@ void ToggleShowFpsCounter() {
 void ToggleShowPaintRects() {
   aura::Window::Windows root_windows = Shell::Get()->GetAllRootWindows();
   std::unique_ptr<bool> value;
-  for (auto* window : root_windows) {
+  for (aura::Window* window : root_windows) {
     ui::Compositor* compositor = window->GetHost()->compositor();
     cc::LayerTreeDebugState state = compositor->GetLayerTreeDebugState();
     if (!value.get())

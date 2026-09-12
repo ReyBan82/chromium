@@ -11,14 +11,15 @@
 #include "base/android/scoped_java_ref.h"
 #include "content/browser/contacts/contacts_provider.h"
 #include "third_party/blink/public/mojom/contacts/contacts_manager.mojom.h"
+#include "third_party/jni_zero/system_jni_unchecked_exceptions/ByteBuffer_shared_jni.h"
 
 namespace content {
 
-class RenderFrameHostImpl;
+class RenderFrameHost;
 
 class ContactsProviderAndroid : public ContactsProvider {
  public:
-  explicit ContactsProviderAndroid(RenderFrameHostImpl* render_frame_host);
+  explicit ContactsProviderAndroid(RenderFrameHost* render_frame_host);
 
   ContactsProviderAndroid(const ContactsProviderAndroid&) = delete;
   ContactsProviderAndroid& operator=(const ContactsProviderAndroid&) = delete;
@@ -39,17 +40,17 @@ class ContactsProviderAndroid : public ContactsProvider {
   // construction of the contacts list.
   void AddContact(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobjectArray>& names_java,
-      const base::android::JavaParamRef<jobjectArray>& emails_java,
-      const base::android::JavaParamRef<jobjectArray>& tel_java,
-      const base::android::JavaParamRef<jobjectArray>& addresses_java,
-      const base::android::JavaParamRef<jobjectArray>& icons_java);
+      const base::android::JavaRef<JArray<jstring>>& names_java,
+      const base::android::JavaRef<JArray<jstring>>& emails_java,
+      const base::android::JavaRef<JArray<jstring>>& tel_java,
+      const base::android::JavaRef<JArray<JByteBuffer>>& addresses_java,
+      const base::android::JavaRef<JArray<JByteBuffer>>& icons_java);
 
   // Signals the end of adding contacts to the list. The contact list is
   // returned to the web page, the other params are logged via UKM.
   void EndContactsList(JNIEnv* env,
-                       jint percentage_shared,
-                       jint properties_requested);
+                       int32_t percentage_shared,
+                       int32_t properties_requested);
 
   // Signals the end (due to a permission error).
   void EndWithPermissionDenied(JNIEnv* env);

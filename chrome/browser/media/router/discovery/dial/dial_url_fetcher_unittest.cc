@@ -2,9 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/media/router/discovery/dial/dial_url_fetcher.h"
+
 #include <memory>
 #include <string>
 
+#include "base/byte_size.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
@@ -12,7 +15,6 @@
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
 #include "base/test/task_environment.h"
-#include "chrome/browser/media/router/discovery/dial/dial_url_fetcher.h"
 #include "chrome/browser/media/router/test/provider_test_helpers.h"
 #include "chrome/test/base/testing_profile.h"
 #include "content/public/test/browser_task_environment.h"
@@ -49,7 +51,7 @@ class DialURLFetcherTest : public testing::Test {
 
  protected:
   MOCK_METHOD(void, OnSuccess, (const std::string&));
-  MOCK_METHOD(void, OnError, (const std::string&, absl::optional<int>));
+  MOCK_METHOD(void, OnError, (const std::string&, std::optional<int>));
 
   base::test::TaskEnvironment environment_;
   network::TestURLLoaderFactory loader_factory_;
@@ -62,7 +64,7 @@ TEST_F(DialURLFetcherTest, FetchSuccessful) {
   std::string body("<xml>appInfo</xml>");
   EXPECT_CALL(*this, OnSuccess(body));
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   loader_factory_.AddResponse(url_, network::mojom::URLResponseHead::New(),
                               body, status);
   StartGetRequest();
@@ -70,9 +72,8 @@ TEST_F(DialURLFetcherTest, FetchSuccessful) {
   // Verify the request parameters.
   EXPECT_EQ(request_.url, url_);
   EXPECT_EQ(request_.method, "GET");
-  std::string origin_header;
-  EXPECT_TRUE(request_.headers.GetHeader("Origin", &origin_header));
-  EXPECT_TRUE(base::StartsWith(origin_header, "package:"));
+  EXPECT_THAT(request_.headers.GetHeader("Origin"),
+              testing::Optional(testing::StartsWith("package:")));
   EXPECT_TRUE(request_.load_flags & net::LOAD_BYPASS_PROXY);
   EXPECT_TRUE(request_.load_flags & net::LOAD_DISABLE_CACHE);
   EXPECT_EQ(request_.credentials_mode, network::mojom::CredentialsMode::kOmit);
@@ -86,7 +87,7 @@ TEST_F(DialURLFetcherTest, FetchFailsOnMissingAppInfo) {
 
   EXPECT_CALL(*this, OnError(HasSubstr(base::NumberToString(
                                  net::ERR_HTTP_RESPONSE_CODE_FAILURE)),
-                             absl::optional<int>(404)));
+                             std::optional<int>(404)));
   loader_factory_.AddResponse(
       url_, std::move(head), "",
       network::URLLoaderCompletionStatus(net::ERR_HTTP_RESPONSE_CODE_FAILURE),
@@ -105,7 +106,7 @@ TEST_F(DialURLFetcherTest, FetchFailsOnBadAppInfo) {
   EXPECT_CALL(*this, OnError("Invalid response encoding", _));
   std::string body("\xfc\x9c\xbf\x80\xbf\x80");
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = body.size();
+  status.decoded_body_length = base::ByteSize(body.size());
   loader_factory_.AddResponse(url_, network::mojom::URLResponseHead::New(),
                               body, status);
   StartGetRequest();

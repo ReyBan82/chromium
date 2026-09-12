@@ -8,7 +8,6 @@
 
 #include "base/functional/bind.h"
 #include "base/values.h"
-#include "chrome/grit/generated_resources.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/web_ui.h"
 
@@ -27,12 +26,12 @@ void ConflictsHandler::RegisterMessages() {
 }
 
 void ConflictsHandler::HandleRequestModuleList(
-    const base::Value::List& args_list) {
+    const base::ListValue& args_list) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   // Make sure the JS doesn't call 'requestModuleList' more than once.
-  // TODO(739291): It would be better to kill the renderer instead of the
-  // browser for malformed messages.
+  // TODO(crbug.com/40528619): It would be better to kill the renderer instead
+  // of the browser for malformed messages.
   CHECK_EQ(1U, args_list.size());
   module_list_callback_id_ = args_list[0].GetString();  // CHECKs if not string
 
@@ -41,7 +40,7 @@ void ConflictsHandler::HandleRequestModuleList(
                      weak_ptr_factory_.GetWeakPtr()));
 }
 
-void ConflictsHandler::OnConflictsDataFetched(base::Value::Dict results) {
+void ConflictsHandler::OnConflictsDataFetched(base::DictValue results) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   DCHECK(!module_list_callback_id_.empty());
 

@@ -22,6 +22,7 @@ function makeCallable(prototypeMethod) {
 }
 
 function saveMethods(original, safe, methods) {
+  safe.self = original;
   for (var method of methods) {
     safe[method] = makeCallable(original.prototype[method]);
   }
@@ -45,6 +46,7 @@ var SafeMethods = {
   $EventTarget: {},
   $HTMLElement: {},
   $HTMLIFrameElement: {},
+  $Headers: {},
   $MutationObserver: MutationObserver,
   $Node: {},
   $getComputedStyle: window.getComputedStyle,
@@ -60,8 +62,13 @@ saveMethods(Document, SafeMethods.$Document, [
   'webkitCancelFullScreen',
 ]);
 
+saveAccessors(Document, SafeMethods.$Document, [
+  'defaultView',
+]);
+
 saveMethods(Element, SafeMethods.$Element, [
   'attachShadow',
+  'checkVisibility',
   'getAttribute',
   'getBoundingClientRect',
   'hasAttribute',
@@ -85,6 +92,11 @@ saveAccessors(HTMLElement, SafeMethods.$HTMLElement, [
   'innerText',
 ]);
 
+saveMethods(Headers, SafeMethods.$Headers, [
+  'append',
+  'forEach',
+]);
+
 saveAccessors(HTMLIFrameElement, SafeMethods.$HTMLIFrameElement, [
   'contentWindow',
 ]);
@@ -101,6 +113,7 @@ saveMethods(Node, SafeMethods.$Node, [
 
 saveAccessors(Node, SafeMethods.$Node, [
   'parentNode',
+  'ownerDocument',
 ]);
 
 exports.$set('SafeMethods', SafeMethods);

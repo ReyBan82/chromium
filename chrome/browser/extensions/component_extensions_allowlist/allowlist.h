@@ -7,7 +7,10 @@
 
 #include <string>
 
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
+#include "extensions/buildflags/buildflags.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 namespace extensions {
 
@@ -16,25 +19,8 @@ namespace extensions {
 // ADDING NEW EXTENSIONS REQUIRES APPROVAL from Extensions Tech Lead:
 // rdevlin.cronin@chromium.org
 //
-// The main acceptable use of extensions in the default Chrome experience (i.e.
-// not installed explicitly by the user) are to implement things like the
-// history or settings pages. These are things that look like web pages, load
-// in response to explicit user action, and use no resources when not opened.
-//
-// If you are asking for approval to add a new built-in extension to Chrome
-// (whether downloaded with the binary or downloaded later on-demand), check:
-//
-//  - It must not do anything on startup. Loading extensions processes on
-//    startup can significantly slow things down.
-//
-//  - It must not have a background page. Extension processes use a nontrivial
-//    amount of memory that makes them inappropriate for built-in features.
-//
-//  - Avoid event pages. Some events such as navigation will be even worse than
-//    background pages since it will cause the extension to be frequently
-//    loaded and unloaded. Even if your event page is "good" now, it's
-//    something that is easy to regress with inocuous looking changes, so
-//    try to use explicit C++ invocation of the extension when reasonable.
+// For more information on component extensions, see
+// //extensions/docs/component_extensions.md.
 //
 // =============================================================================
 
@@ -44,7 +30,7 @@ bool IsComponentExtensionAllowlisted(const std::string& extension_id);
 // Checks using resource ID of manifest.
 bool IsComponentExtensionAllowlisted(int manifest_resource_id);
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 // Checks using extension id for sign in profile.
 bool IsComponentExtensionAllowlistedForSignInProfile(
     const std::string& extension_id);

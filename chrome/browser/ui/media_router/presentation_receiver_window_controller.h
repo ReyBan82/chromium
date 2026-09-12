@@ -87,6 +87,8 @@ class PresentationReceiverWindowController final
   // PresentationReceiverWindowDelegate overrides.
   void WindowClosed() final;
 
+  void StopAndTerminate();
+
   // content::WebContentsObserver overrides.
   void DidStartNavigation(content::NavigationHandle* handle) final;
   void TitleWasSet(content::NavigationEntry* entry) final;
@@ -97,11 +99,12 @@ class PresentationReceiverWindowController final
   void CloseContents(content::WebContents* source) final;
   bool ShouldSuppressDialogs(content::WebContents* source) final;
   bool ShouldFocusLocationBarByDefault(content::WebContents* source) final;
-  bool ShouldFocusPageAfterCrash() final;
+  bool ShouldFocusPageAfterCrash(content::WebContents* source) final;
   void CanDownload(const GURL& url,
                    const std::string& request_method,
                    base::OnceCallback<void(bool)> callback) final;
   bool IsWebContentsCreationOverridden(
+      content::RenderFrameHost* opener,
       content::SiteInstance* source_site_instance,
       content::mojom::WindowContainerType window_container_type,
       const GURL& opener_url,
@@ -125,6 +128,9 @@ class PresentationReceiverWindowController final
   TitleChangeCallback title_change_callback_;
 
   media_router::PresentationNavigationPolicy navigation_policy_;
+
+  base::WeakPtrFactory<PresentationReceiverWindowController> weak_factory_{
+      this};
 };
 
 #endif  // CHROME_BROWSER_UI_MEDIA_ROUTER_PRESENTATION_RECEIVER_WINDOW_CONTROLLER_H_

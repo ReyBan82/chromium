@@ -5,60 +5,44 @@
 #ifndef SERVICES_DEVICE_PUBLIC_CPP_USB_USB_IDS_H_
 #define SERVICES_DEVICE_PUBLIC_CPP_USB_USB_IDS_H_
 
-#include <stddef.h>
 #include <stdint.h>
-
-#include "base/memory/raw_ptr_exclusion.h"
 
 namespace device {
 
-struct UsbProduct {
-  const uint16_t id;
-  const char* name;
-};
-
-// This structure is used in an array so the cumulative size is significant.
-// Order fields to minimize/eliminate alignment padding.
-// Chose field size based on contained data to further reduce structure size.
-// For example, uint16_t instead of size_t.
-struct UsbVendor {
-  const char* name;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #global-scope
-  RAW_PTR_EXCLUSION const UsbProduct* products;
-  const uint16_t id;
-  const uint16_t product_size;
+// The vendor and product names associated with a USB vendor/product ID pair.
+// A field is nullptr when the corresponding name is not present in the
+// database. The strings are owned by the static lookup table and remain valid
+// for the lifetime of the process.
+struct UsbIdNames {
+  const char* vendor_name = nullptr;
+  const char* product_name = nullptr;
 };
 
 // UsbIds provides a static mapping from a vendor ID to a name, as well as a
 // mapping from a vendor/product ID pair to a product name.
+//
+// The lookup table is shipped as a Chrome resource (IDR_USB_IDS_DATA) and is
+// loaded lazily on first use via ui::ResourceBundle. The first call therefore
+// must happen on a thread that is permitted to do blocking resource loads
+// (i.e. after the browser's resource bundle has been initialized).
 class UsbIds {
  public:
+  UsbIds() = delete;
   UsbIds(const UsbIds&) = delete;
   UsbIds& operator=(const UsbIds&) = delete;
+  ~UsbIds() = delete;
 
-  // Gets the name of the vendor who owns |vendor_id|. Returns NULL if the
+  // Gets the name of the vendor who owns |vendor_id|. Returns nullptr if the
   // specified |vendor_id| does not exist.
   static const char* GetVendorName(uint16_t vendor_id);
 
-  // Gets the name of a product belonging to a specific vendor. If either
-  // |vendor_id| refers to a vendor that does not exist, or |vendor_id| is valid
-  // but |product_id| refers to a product that does not exist, this method
-  // returns NULL.
-  static const char* GetProductName(uint16_t vendor_id, uint16_t product_id);
-
- private:
-  UsbIds();
-  ~UsbIds();
-
-  // Finds the static UsbVendor associated with |vendor_id|. Returns NULL if no
-  // such vendor exists.
-  static const UsbVendor* FindVendor(uint16_t vendor_id);
-
-  // These fields are defined in a generated file. See device/usb/usb.gyp for
-  // more information on how they are generated.
-  static const size_t vendor_size_;
-  static const UsbVendor vendors_[];
+  // Looks up the vendor name for |vendor_id| and the product name for the
+  // |vendor_id|/|product_id| pair in a single lookup. A field of the returned
+  // struct is nullptr when that name does not exist; in particular both fields
+  // are nullptr when |vendor_id| is unknown, and product_name is nullptr when
+  // the vendor is known but the product is not.
+  static UsbIdNames GetVendorAndProductName(uint16_t vendor_id,
+                                            uint16_t product_id);
 };
 
 }  // namespace device

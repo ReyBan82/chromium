@@ -13,9 +13,13 @@
 // The "GGLA" brand is used to test the normal code flow of the code, and the
 // "TEST" brand is used to test the supplementary brand code code flow.
 
+#include "rlz/lib/rlz_lib.h"
+
 #include <stddef.h>
 
+#include <algorithm>
 #include <memory>
+#include <string_view>
 
 #include "base/functional/bind.h"
 #include "base/message_loop/message_pump_type.h"
@@ -23,11 +27,9 @@
 #include "base/strings/stringprintf.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "rlz/lib/financial_ping.h"
 #include "rlz/lib/lib_values.h"
 #include "rlz/lib/net_response_check.h"
-#include "rlz/lib/rlz_lib.h"
 #include "rlz/lib/rlz_lib_clear.h"
 #include "rlz/lib/rlz_value_store.h"
 #include "rlz/test/rlz_test_helpers.h"
@@ -40,23 +42,48 @@
 #include "rlz/win/lib/machine_deal.h"
 #endif
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
-#include "base/mac/scoped_nsautorelease_pool.h"
+#include "base/apple/scoped_nsautorelease_pool.h"
 #include "base/threading/thread.h"
 #include "net/url_request/url_request_test_util.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/public/mojom/url_loader_factory.mojom.h"
 #include "services/network/test/test_url_loader_factory.h"
-#endif
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-#include "base/cxx17_backports.h"
+#if BUILDFLAG(IS_CHROMEOS)
 #include "base/files/important_file_writer.h"
 #include "chromeos/ash/components/dbus/dbus_thread_manager.h"
 #include "chromeos/ash/components/dbus/debug_daemon/debug_daemon_client.h"
 #include "chromeos/ash/components/dbus/debug_daemon/fake_debug_daemon_client.h"
 #include "rlz/chromeos/lib/rlz_value_store_chromeos.h"
 #endif
+
+namespace {
+
+using ::testing::HasSubstr;
+
+const char kProductSignature[] = "swg";
+const char kProductBrand[] = "GGLA";
+const char kProductId[] = "SwgProductId1234";
+const char kProductLang[] = "en-UK";
+
+const rlz_lib::AccessPoint kAccessPoints[] = {rlz_lib::IETB_SEARCH_BOX,
+                                              rlz_lib::NO_ACCESS_POINT,
+                                              rlz_lib::NO_ACCESS_POINT};
+
+const char kDefaultGoodPingResponse[] =
+    "version: 3.0.914.7250\r\n"
+    "url: "
+    "http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
+    "launch-action: custom-action\r\n"
+    "launch-target: SearchWithGoogleUpdate.exe\r\n"
+    "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
+    "rlz: 1R1_____en__252\r\n"
+    "rlzXX: 1R1_____en__250\r\n"
+    "rlzT4  1T4_____en__251\r\n"
+    "rlzT4: 1T4_____en__252\r\n"
+    "rlz\r\n"
+    "crc32: D6FD55A3";
+}  // namespace
 
 class MachineDealCodeHelper
 #if BUILDFLAG(IS_WIN)
@@ -79,77 +106,100 @@ class MachineDealCodeHelper
 
 class RlzLibTest : public RlzLibTestBase {
  protected:
-  void FakeGoodPingResponse(rlz_lib::Product product,
-                            const rlz_lib::AccessPoint* access_points,
-                            const char* product_signature,
-                            const char* product_brand,
-                            const char* product_id,
-                            const char* product_lang,
-                            bool exclude_machine_id,
-                            network::TestURLLoaderFactory* url_loader_factory) {
-    const char kGoodPingResponses[] =
-        "version: 3.0.914.7250\r\n"
-        "url: "
-        "http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
-        "launch-action: custom-action\r\n"
-        "launch-target: SearchWithGoogleUpdate.exe\r\n"
-        "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
-        "rlz: 1R1_____en__252\r\n"
-        "rlzXX: 1R1_____en__250\r\n"
-        "rlzT4  1T4_____en__251\r\n"
-        "rlzT4: 1T4_____en__252\r\n"
-        "rlz\r\n"
-        "crc32: D6FD55A3";
+  void RunUntilIdle() { task_environment_.RunUntilIdle(); }
+
+  bool SendFinancialPing(rlz_lib::Product product, bool exclude_machine_id) {
+    bool success = rlz_lib::SendFinancialPing(
+        product, kAccessPoints, kProductSignature, kProductBrand, kProductId,
+        kProductLang, exclude_machine_id,
+        /* skip_time_check */ true);
+    RunUntilIdle();
+    return success;
+  }
+
+  void FakePingResponse(rlz_lib::Product product,
+                        bool exclude_machine_id,
+                        net::HttpStatusCode http_status_code,
+                        std::string content,
+                        network::TestURLLoaderFactory* url_loader_factory) {
     std::string request;
     EXPECT_TRUE(rlz_lib::FinancialPing::FormRequest(
-        product, access_points, product_signature, product_brand, product_id,
-        product_lang, exclude_machine_id, &request));
+        product, kAccessPoints, kProductSignature, kProductBrand, kProductId,
+        kProductLang, exclude_machine_id, &request));
     std::string url = base::StringPrintf(
         "https://%s%s", rlz_lib::kFinancialServer, request.c_str());
-    url_loader_factory->AddResponse(url, kGoodPingResponses);
+    url_loader_factory->AddResponse(url, content, http_status_code);
+  }
+
+  void FakeGoodPingResponse(rlz_lib::Product product,
+                            bool exclude_machine_id,
+                            network::TestURLLoaderFactory* url_loader_factory) {
+    FakePingResponse(product, exclude_machine_id, net::HttpStatusCode::HTTP_OK,
+                     kDefaultGoodPingResponse, url_loader_factory);
+  }
+
+  void FakeBadPingResponse(rlz_lib::Product product,
+                           bool exclude_machine_id,
+                           net::HttpStatusCode http_status_code,
+                           network::TestURLLoaderFactory* url_loader_factory) {
+    FakePingResponse(product, exclude_machine_id, http_status_code, "",
+                     url_loader_factory);
   }
 
   base::test::TaskEnvironment task_environment_;
 };
 
 TEST_F(RlzLibTest, RecordProductEvent) {
-  char cgi_50[50];
-
   EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S", cgi_50);
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_HOME_PAGE, rlz_lib::INSTALL));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S,W1I", cgi_50);
+  EXPECT_EQ("events=I7S,W1I",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S,W1I", cgi_50);
+  EXPECT_EQ("events=I7S,W1I",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
+
+  EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::CHROME));
+  EXPECT_TRUE(rlz_lib::RecordProductEvent(
+      rlz_lib::CHROME, rlz_lib::CHROME_OMNIBOX, rlz_lib::ENTERPRISE_ENROLLMENT));
+  EXPECT_EQ("events=C1X", rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
+
+  EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::CHROME,
+                                          rlz_lib::CHROME_OMNIBOX,
+                                          rlz_lib::ENTERPRISE_UNENROLLMENT));
+  EXPECT_EQ("events=C1X,C1Y", rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
+
+  ASSERT_TRUE(rlz_lib::RecordProductEvent(
+      rlz_lib::CHROME, rlz_lib::CHROME_OMNIBOX,
+      rlz_lib::ENTERPRISE_ENROLLED_ACTIVATE));
+  EXPECT_EQ("events=C1X,C1Y,C1Z",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
+
+  ASSERT_TRUE(rlz_lib::RecordProductEvent(
+      rlz_lib::CHROME, rlz_lib::CHROME_OMNIBOX,
+      rlz_lib::ENTERPRISE_ENROLLED_FIRST_SEARCH));
+  EXPECT_EQ("events=C1W,C1X,C1Y,C1Z",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
 }
 
 TEST_F(RlzLibTest, ClearProductEvent) {
-  char cgi_50[50];
-
   // Clear 1 of 1 events.
   EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S", cgi_50);
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
   EXPECT_TRUE(rlz_lib::ClearProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
-  EXPECT_FALSE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                              cgi_50, 50));
-  EXPECT_STREQ("", cgi_50);
+  EXPECT_EQ(std::nullopt,
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   // Clear 1 of 2 events.
   EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
@@ -157,84 +207,107 @@ TEST_F(RlzLibTest, ClearProductEvent) {
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_HOME_PAGE, rlz_lib::INSTALL));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S,W1I", cgi_50);
+  EXPECT_EQ("events=I7S,W1I",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
   EXPECT_TRUE(rlz_lib::ClearProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=W1I", cgi_50);
+  EXPECT_EQ("events=W1I",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   // Clear a non-recorded event.
   EXPECT_TRUE(rlz_lib::ClearProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IETB_SEARCH_BOX, rlz_lib::FIRST_SEARCH));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=W1I", cgi_50);
+  EXPECT_EQ("events=W1I",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 }
 
-
 TEST_F(RlzLibTest, GetProductEventsAsCgi) {
-  char cgi_50[50];
-  char cgi_1[1];
+  EXPECT_EQ(std::nullopt,
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
-  EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
+
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_HOME_PAGE, rlz_lib::INSTALL));
-
-  EXPECT_FALSE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                              cgi_1, 1));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S,W1I", cgi_50);
+  EXPECT_EQ("events=I7S,W1I",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 }
 
 TEST_F(RlzLibTest, ClearAllAllProductEvents) {
-  char cgi_50[50];
-
   EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S", cgi_50);
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
-  EXPECT_FALSE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                              cgi_50, 50));
-  EXPECT_STREQ("", cgi_50);
+  EXPECT_EQ(std::nullopt,
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
+}
+
+TEST_F(RlzLibTest, ValueStoreReadPingTimeAndProductEvents) {
+  rlz_lib::ScopedRlzValueStoreLock lock;
+  rlz_lib::RlzValueStore* store = lock.GetStore();
+  ASSERT_TRUE(store);
+
+  EXPECT_TRUE(store->WritePingTime(rlz_lib::TOOLBAR_NOTIFIER, 123456789));
+  EXPECT_EQ(123456789, store->ReadPingTime(rlz_lib::TOOLBAR_NOTIFIER));
+  EXPECT_TRUE(store->ClearPingTime(rlz_lib::TOOLBAR_NOTIFIER));
+#if !BUILDFLAG(IS_CHROMEOS)
+  EXPECT_EQ(std::nullopt, store->ReadPingTime(rlz_lib::TOOLBAR_NOTIFIER));
+#endif
+
+  EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
+  EXPECT_TRUE(store->ReadProductEvents(rlz_lib::TOOLBAR_NOTIFIER).empty());
+
+  EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
+                                          rlz_lib::IE_DEFAULT_SEARCH,
+                                          rlz_lib::SET_TO_GOOGLE));
+  std::vector<std::string> events =
+      store->ReadProductEvents(rlz_lib::TOOLBAR_NOTIFIER);
+  EXPECT_EQ(1u, events.size());
+  EXPECT_EQ("I7S", events[0]);
+
+  EXPECT_TRUE(store->WriteAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, "TestRlz"));
+  EXPECT_EQ("TestRlz", store->ReadAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
+  EXPECT_EQ("TestRlz", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
+  EXPECT_TRUE(store->ClearAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
+  EXPECT_EQ("", store->ReadAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
+  EXPECT_EQ("", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 }
 
 TEST_F(RlzLibTest, SetAccessPointRlz) {
-  char rlz_50[50];
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, ""));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_50, 50));
-  EXPECT_STREQ("", rlz_50);
+  EXPECT_EQ("", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, "IeTbRlz"));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_50, 50));
-  EXPECT_STREQ("IeTbRlz", rlz_50);
+  EXPECT_EQ("IeTbRlz", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 }
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 TEST_F(RlzLibTest, SetAccessPointRlzOnlyOnce) {
-  // On Chrome OS, and RLZ string can ne set only once.
-  char rlz_50[50];
+  // On Chrome OS, an RLZ string can be set only once.
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, "First"));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_50, 50));
-  EXPECT_STREQ("First", rlz_50);
+  EXPECT_EQ("First", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, "Second"));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_50, 50));
-  EXPECT_STREQ("First", rlz_50);
+  EXPECT_EQ("First", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 }
 
 TEST_F(RlzLibTest, UpdateExistingAccessPointRlz) {
+  // This test writes directly to disk to simulate store state and expects the
+  // store to reload it. However, under a global branding lock (active when
+  // SupplementaryBranding is not empty), the in-memory store is reused and
+  // does not reload from disk. Additionally, the production
+  // UpdateExistingAccessPointRlz() has a DCHECK asserting no supplementary
+  // brand is active. Thus, we must skip this test when branding is active.
+  if (!rlz_lib::SupplementaryBranding::GetBrand().empty()) {
+    return;
+  }
+
   const std::string json_data = R"({
    "access_points": {
       "CA": {
@@ -256,68 +329,51 @@ TEST_F(RlzLibTest, UpdateExistingAccessPointRlz) {
   ASSERT_TRUE(base::ImportantFileWriter::WriteFileAtomically(
       base::FilePath(rlz_lib::testing::RlzStoreFilenameStr()), json_data));
   // Verify that the initial values are read correctly.
-  char data[50];
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_OMNIBOX, data, 50));
-  EXPECT_STREQ("1CANPEC_enUS818", data);
-  EXPECT_TRUE(
-      rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_HOME_PAGE, data, 50));
-  EXPECT_STREQ("1CBNPE", data);
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_APP_LIST, data, 50));
-  EXPECT_STREQ("1CANPEC_enUS818", data);
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, data, 50));
-  EXPECT_STREQ("events=CAS", data);
+  EXPECT_EQ("1CANPEC_enUS818",
+            rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_OMNIBOX));
+  EXPECT_EQ("1CBNPE", rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_HOME_PAGE));
+  EXPECT_EQ("1CANPEC_enUS818",
+            rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_APP_LIST));
+  EXPECT_EQ("events=CAS", rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
 
   // Verify that if the brand code doesn't consist of four letters, none of the
   // access point RLZ strings is updated.
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_OMNIBOX, data, 50));
-  EXPECT_STREQ("1CANPEC_enUS818", data);
-  EXPECT_TRUE(
-      rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_HOME_PAGE, data, 50));
-  EXPECT_STREQ("1CBNPE", data);
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_APP_LIST, data, 50));
-  EXPECT_STREQ("1CANPEC_enUS818", data);
+  EXPECT_EQ("1CANPEC_enUS818",
+            rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_OMNIBOX));
+  EXPECT_EQ("1CBNPE", rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_HOME_PAGE));
+  EXPECT_EQ("1CANPEC_enUS818",
+            rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_APP_LIST));
 
   // Update the RLZ strings with a valid brand code. Verify that the RLZ string
   // is updated if it also has valid format.
   EXPECT_TRUE(rlz_lib::UpdateExistingAccessPointRlz("BMGD"));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_OMNIBOX, data, 50));
-  EXPECT_STREQ("1CABMGD_enUS818", data);
+  EXPECT_EQ("1CABMGD_enUS818",
+            rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_OMNIBOX));
   // The RLZ string remains unchanged if it has fewer than seven characters.
-  EXPECT_TRUE(
-      rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_HOME_PAGE, data, 50));
-  EXPECT_STREQ("1CBNPE", data);
+  EXPECT_EQ("1CBNPE", rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_HOME_PAGE));
   // The RLZ string remains unchanged if the access point names don't match.
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_APP_LIST, data, 50));
-  EXPECT_STREQ("1CANPEC_enUS818", data);
+  EXPECT_EQ("1CANPEC_enUS818",
+            rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_APP_LIST));
   // The product events remain unchanged.
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, data, 50));
-  EXPECT_STREQ("events=CAS", data);
+  EXPECT_EQ("events=CAS", rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
 
   // Verify a second update is no-op.
   EXPECT_FALSE(rlz_lib::UpdateExistingAccessPointRlz("BMGD"));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_OMNIBOX, data, 50));
-  EXPECT_STREQ("1CABMGD_enUS818", data);
-  EXPECT_TRUE(
-      rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_HOME_PAGE, data, 50));
-  EXPECT_STREQ("1CBNPE", data);
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_APP_LIST, data, 50));
-  EXPECT_STREQ("1CANPEC_enUS818", data);
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, data, 50));
-  EXPECT_STREQ("events=CAS", data);
+  EXPECT_EQ("1CABMGD_enUS818",
+            rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_OMNIBOX));
+  EXPECT_EQ("1CBNPE", rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_HOME_PAGE));
+  EXPECT_EQ("1CANPEC_enUS818",
+            rlz_lib::GetAccessPointRlz(rlz_lib::CHROMEOS_APP_LIST));
+  EXPECT_EQ("events=CAS", rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
 }
 #endif
 
 TEST_F(RlzLibTest, GetAccessPointRlz) {
-  char rlz_1[1];
-  char rlz_50[50];
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, ""));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_1, 1));
-  EXPECT_STREQ("", rlz_1);
+  EXPECT_EQ("", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, "IeTbRlz"));
-  EXPECT_FALSE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_1, 1));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_50, 50));
-  EXPECT_STREQ("IeTbRlz", rlz_50);
+  EXPECT_EQ("IeTbRlz", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 }
 
 TEST_F(RlzLibTest, GetPingParams) {
@@ -327,14 +383,12 @@ TEST_F(RlzLibTest, GetPingParams) {
       "TbRlzValue"));
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IE_HOME_PAGE, ""));
 
-  char cgi[2048];
   rlz_lib::AccessPoint points[] =
     {rlz_lib::IETB_SEARCH_BOX, rlz_lib::NO_ACCESS_POINT,
      rlz_lib::NO_ACCESS_POINT};
 
-  EXPECT_TRUE(rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points,
-                                     cgi, 2048));
-  EXPECT_STREQ("rep=2&rlz=T4:TbRlzValue", cgi);
+  EXPECT_EQ("rep=2&rlz=T4:TbRlzValue",
+            rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points));
 
 #if BUILDFLAG(IS_WIN)
   EXPECT_TRUE(rlz_lib::MachineDealCode::Set("dcc_value"));
@@ -344,100 +398,92 @@ TEST_F(RlzLibTest, GetPingParams) {
 #endif
 
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, ""));
-  EXPECT_TRUE(rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points,
-                                     cgi, 2048));
-  EXPECT_STREQ("rep=2&rlz=T4:" DCC_PARAM, cgi);
+  EXPECT_EQ("rep=2&rlz=T4:" DCC_PARAM,
+            rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points));
 
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX,
               "TbRlzValue"));
-  EXPECT_FALSE(rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points,
-                                      cgi, 23 + strlen(DCC_PARAM)));
-  EXPECT_STREQ("", cgi);
-  EXPECT_TRUE(rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points,
-                                     cgi, 24 + strlen(DCC_PARAM)));
-  EXPECT_STREQ("rep=2&rlz=T4:TbRlzValue" DCC_PARAM, cgi);
-
-  EXPECT_TRUE(GetAccessPointRlz(rlz_lib::IE_HOME_PAGE, cgi, 2048));
+  EXPECT_EQ("", rlz_lib::GetAccessPointRlz(rlz_lib::IE_HOME_PAGE));
   points[2] = rlz_lib::IE_HOME_PAGE;
-  EXPECT_TRUE(rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points,
-                                     cgi, 2048));
-  EXPECT_STREQ("rep=2&rlz=T4:TbRlzValue" DCC_PARAM, cgi);
+  EXPECT_EQ("rep=2&rlz=T4:TbRlzValue" DCC_PARAM,
+            rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points));
 }
 
 TEST_F(RlzLibTest, IsPingResponseValid) {
   const char* kBadPingResponses[] = {
-    // No checksum.
-    "version: 3.0.914.7250\r\n"
-    "url: http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
-    "launch-action: custom-action\r\n"
-    "launch-target: SearchWithGoogleUpdate.exe\r\n"
-    "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
-    "rlz: 1R1_____en__252\r\n"
-    "rlzXX: 1R1_____en__250\r\n",
+      // No checksum.
+      "version: 3.0.914.7250\r\n"
+      "url: "
+      "http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
+      "launch-action: custom-action\r\n"
+      "launch-target: SearchWithGoogleUpdate.exe\r\n"
+      "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
+      "rlz: 1R1_____en__252\r\n"
+      "rlzXX: 1R1_____en__250\r\n",
 
-    // Invalid checksum.
-    "version: 3.0.914.7250\r\n"
-    "url: http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
-    "launch-action: custom-action\r\n"
-    "launch-target: SearchWithGoogleUpdate.exe\r\n"
-    "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
-    "rlz: 1R1_____en__252\r\n"
-    "rlzXX: 1R1_____en__250\r\n"
-    "rlzT4  1T4_____en__251\r\n"
-    "rlzT4: 1T4_____en__252\r\n"
-    "rlz\r\n"
-    "crc32: B12CC79A",
+      // Invalid checksum.
+      "version: 3.0.914.7250\r\n"
+      "url: "
+      "http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
+      "launch-action: custom-action\r\n"
+      "launch-target: SearchWithGoogleUpdate.exe\r\n"
+      "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
+      "rlz: 1R1_____en__252\r\n"
+      "rlzXX: 1R1_____en__250\r\n"
+      "rlzT4  1T4_____en__251\r\n"
+      "rlzT4: 1T4_____en__252\r\n"
+      "rlz\r\n"
+      "crc32: B12CC79A",
 
-    // Misplaced checksum.
-    "version: 3.0.914.7250\r\n"
-    "url: http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
-    "launch-action: custom-action\r\n"
-    "launch-target: SearchWithGoogleUpdate.exe\r\n"
-    "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
-    "rlz: 1R1_____en__252\r\n"
-    "rlzXX: 1R1_____en__250\r\n"
-    "crc32: B12CC79C\r\n"
-    "rlzT4  1T4_____en__251\r\n"
-    "rlzT4: 1T4_____en__252\r\n"
-    "rlz\r\n",
-
-    NULL
-  };
+      // Misplaced checksum.
+      "version: 3.0.914.7250\r\n"
+      "url: "
+      "http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
+      "launch-action: custom-action\r\n"
+      "launch-target: SearchWithGoogleUpdate.exe\r\n"
+      "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
+      "rlz: 1R1_____en__252\r\n"
+      "rlzXX: 1R1_____en__250\r\n"
+      "crc32: B12CC79C\r\n"
+      "rlzT4  1T4_____en__251\r\n"
+      "rlzT4: 1T4_____en__252\r\n"
+      "rlz\r\n"};
 
   const char* kGoodPingResponses[] = {
-    "version: 3.0.914.7250\r\n"
-    "url: http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
-    "launch-action: custom-action\r\n"
-    "launch-target: SearchWithGoogleUpdate.exe\r\n"
-    "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
-    "rlz: 1R1_____en__252\r\n"
-    "rlzXX: 1R1_____en__250\r\n"
-    "rlzT4  1T4_____en__251\r\n"
-    "rlzT4: 1T4_____en__252\r\n"
-    "rlz\r\n"
-    "crc32: D6FD55A3",
+      "version: 3.0.914.7250\r\n"
+      "url: "
+      "http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
+      "launch-action: custom-action\r\n"
+      "launch-target: SearchWithGoogleUpdate.exe\r\n"
+      "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
+      "rlz: 1R1_____en__252\r\n"
+      "rlzXX: 1R1_____en__250\r\n"
+      "rlzT4  1T4_____en__251\r\n"
+      "rlzT4: 1T4_____en__252\r\n"
+      "rlz\r\n"
+      "crc32: D6FD55A3",
 
-    "version: 3.0.914.7250\r\n"
-    "url: http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
-    "launch-action: custom-action\r\n"
-    "launch-target: SearchWithGoogleUpdate.exe\r\n"
-    "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
-    "rlz: 1R1_____en__252\r\n"
-    "rlzXX: 1R1_____en__250\r\n"
-    "rlzT4  1T4_____en__251\r\n"
-    "rlzT4: 1T4_____en__252\r\n"
-    "rlz\r\n"
-    "crc32: D6FD55A3\r\n"
-    "extradata: not checksummed",
+      "version: 3.0.914.7250\r\n"
+      "url: "
+      "http://www.corp.google.com/~av/45/opt/SearchWithGoogleUpdate.exe\r\n"
+      "launch-action: custom-action\r\n"
+      "launch-target: SearchWithGoogleUpdate.exe\r\n"
+      "signature: c08a3f4438e1442c4fe5678ee147cf6c5516e5d62bb64e\r\n"
+      "rlz: 1R1_____en__252\r\n"
+      "rlzXX: 1R1_____en__250\r\n"
+      "rlzT4  1T4_____en__251\r\n"
+      "rlzT4: 1T4_____en__252\r\n"
+      "rlz\r\n"
+      "crc32: D6FD55A3\r\n"
+      "extradata: not checksummed"};
 
-    NULL
-  };
+  for (const char* response : kBadPingResponses) {
+    EXPECT_FALSE(rlz_lib::IsPingResponseValid(response, nullptr));
+  }
 
-  for (int i = 0; kBadPingResponses[i]; i++)
-    EXPECT_FALSE(rlz_lib::IsPingResponseValid(kBadPingResponses[i], NULL));
-
-  for (int i = 0; kGoodPingResponses[i]; i++)
-    EXPECT_TRUE(rlz_lib::IsPingResponseValid(kGoodPingResponses[i], NULL));
+  for (const char* response : kGoodPingResponses) {
+    EXPECT_TRUE(rlz_lib::IsPingResponseValid(response, nullptr));
+  }
 }
 
 TEST_F(RlzLibTest, ParsePingResponse) {
@@ -472,35 +518,36 @@ TEST_F(RlzLibTest, ParsePingResponse) {
   EXPECT_TRUE(rlz_lib::ParsePingResponse(rlz_lib::TOOLBAR_NOTIFIER,
                                          kPingResponse));
 
-  char value[50];
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, value, 50));
-  EXPECT_STREQ("1T4_____en__252", value);
-  EXPECT_FALSE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                              value, 50));
-  EXPECT_STREQ("", value);
+  EXPECT_EQ("1T4_____en__252",
+            rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
+  EXPECT_EQ(std::nullopt,
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   const char* kPingResponse2 =
     "rlzT4:    1T4_____de__253  \r\n"  // Good with extra spaces.
     "crc32: 321334F5\r\n";
   EXPECT_TRUE(rlz_lib::ParsePingResponse(rlz_lib::TOOLBAR_NOTIFIER,
                                          kPingResponse2));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, value, 50));
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // On Chrome OS, the RLZ string is not modified by response once set.
-  EXPECT_STREQ("1T4_____en__252", value);
+  EXPECT_EQ("1T4_____en__252",
+            rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 #else
-  EXPECT_STREQ("1T4_____de__253", value);
+  EXPECT_EQ("1T4_____de__253",
+            rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 #endif
 
   const char* kPingResponse3 =
     "crc32: 0\r\n";  // Good RLZ - empty response.
   EXPECT_TRUE(rlz_lib::ParsePingResponse(rlz_lib::TOOLBAR_NOTIFIER,
                                          kPingResponse3));
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // On Chrome OS, the RLZ string is not modified by response once set.
-  EXPECT_STREQ("1T4_____en__252", value);
+  EXPECT_EQ("1T4_____en__252",
+            rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 #else
-  EXPECT_STREQ("1T4_____de__253", value);
+  EXPECT_EQ("1T4_____de__253",
+            rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 #endif
 }
 
@@ -534,10 +581,8 @@ TEST_F(RlzLibTest, ParsePingResponseWithStatefulEvents) {
                                          kPingResponse));
 
   // Check all the events sent earlier are cleared.
-  char value[50];
-  EXPECT_FALSE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                              value, 50));
-  EXPECT_STREQ("", value);
+  EXPECT_EQ(std::nullopt,
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   // Record both events (one is stateless and the other is stateful) again.
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
@@ -546,9 +591,8 @@ TEST_F(RlzLibTest, ParsePingResponseWithStatefulEvents) {
       rlz_lib::IE_HOME_PAGE, rlz_lib::INSTALL));
 
   // Check the stateful event won't be sent again while the stateless one will.
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             value, 50));
-  EXPECT_STREQ("events=I7S", value);
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   // Test that stateful events are cleared by ClearAllProductEvents().  After
   // calling it, trying to record a stateful again should result in it being
@@ -556,9 +600,8 @@ TEST_F(RlzLibTest, ParsePingResponseWithStatefulEvents) {
   EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_HOME_PAGE, rlz_lib::INSTALL));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             value, 50));
-  EXPECT_STREQ("events=W1I", value);
+  EXPECT_EQ("events=W1I",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 }
 
 class URLLoaderFactoryRAII {
@@ -574,16 +617,14 @@ TEST_F(RlzLibTest, SendFinancialPing) {
   if (!rlz_lib::SupplementaryBranding::GetBrand().empty())
     return;
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
 #if BUILDFLAG(IS_APPLE)
-  base::mac::ScopedNSAutoreleasePool pool;
+  base::apple::ScopedNSAutoreleasePool pool;
 #endif
 
   network::TestURLLoaderFactory test_url_loader_factory;
 
   URLLoaderFactoryRAII set_factory(
       test_url_loader_factory.GetSafeWeakWrapper().get());
-#endif
 
   MachineDealCodeHelper::Clear();
 #if BUILDFLAG(IS_WIN)
@@ -599,23 +640,44 @@ TEST_F(RlzLibTest, SendFinancialPing) {
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_HOME_PAGE, rlz_lib::INSTALL));
 
-  rlz_lib::AccessPoint points[] =
-    {rlz_lib::IETB_SEARCH_BOX, rlz_lib::NO_ACCESS_POINT,
-     rlz_lib::NO_ACCESS_POINT};
+  // Excluding machine id from requests so that a stable URL is used and
+  // this test can use TestURLLoaderFactory.
+  FakeGoodPingResponse(rlz_lib::TOOLBAR_NOTIFIER,
+                       /* exclude_machine_id */ true, &test_url_loader_factory);
+  // On success, only one request should happen.
+  size_t expected_amount_of_request = 1;
+  EXPECT_TRUE(SendFinancialPing(rlz_lib::TOOLBAR_NOTIFIER,
+                                /* exclude_machine_id */ true));
+  EXPECT_EQ(test_url_loader_factory.total_requests(),
+            expected_amount_of_request);
 
   // Excluding machine id from requests so that a stable URL is used and
   // this test can use TestURLLoaderFactory.
-  FakeGoodPingResponse(rlz_lib::TOOLBAR_NOTIFIER, points, "swg", "GGLA",
-                       "SwgProductId1234", "en-UK",
-                       /* exclude_machine_id */ true, &test_url_loader_factory);
+  FakeBadPingResponse(rlz_lib::TOOLBAR_NOTIFIER,
+                      /* exclude_machine_id */ true,
+                      net::HttpStatusCode::HTTP_FORBIDDEN,
+                      &test_url_loader_factory);
+  // For an error HTTP_FORBIDDEN, the URLLoader should not retries.
+  expected_amount_of_request += 1;
+  EXPECT_FALSE(SendFinancialPing(rlz_lib::TOOLBAR_NOTIFIER,
+                                 /* exclude_machine_id */ true));
+  EXPECT_EQ(test_url_loader_factory.total_requests(),
+            expected_amount_of_request);
 
-  rlz_lib::SendFinancialPing(rlz_lib::TOOLBAR_NOTIFIER, points, "swg", "GGLA",
-                             "SwgProductId1234", "en-UK",
-                             /* exclude_machine_id */ true,
-                             /* skip_time_check */ true);
+  // Excluding machine id from requests so that a stable URL is used and
+  // this test can use TestURLLoaderFactory.
+  FakeBadPingResponse(rlz_lib::TOOLBAR_NOTIFIER,
+                      /* exclude_machine_id */ true,
+                      net::HttpStatusCode::HTTP_SERVICE_UNAVAILABLE,
+                      &test_url_loader_factory);
+  // For an error HTTP_SERVICE_UNAVAILABLE, the URLLoader should try once and
+  // then retry 3 times.
+  expected_amount_of_request += 4;
+  EXPECT_FALSE(SendFinancialPing(rlz_lib::TOOLBAR_NOTIFIER,
+                                 /* exclude_machine_id */ true));
+  EXPECT_EQ(test_url_loader_factory.total_requests(),
+            expected_amount_of_request);
 }
-
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
 
 void ResetURLLoaderFactory() {
   rlz_lib::SetURLLoaderFactory(nullptr);
@@ -627,7 +689,7 @@ TEST_F(RlzLibTest, SendFinancialPingDuringShutdown) {
     return;
 
 #if BUILDFLAG(IS_APPLE)
-  base::mac::ScopedNSAutoreleasePool pool;
+  base::apple::ScopedNSAutoreleasePool pool;
 #endif
 
   base::Thread io_thread("rlz_unittest_io_thread");
@@ -638,24 +700,31 @@ TEST_F(RlzLibTest, SendFinancialPingDuringShutdown) {
   URLLoaderFactoryRAII set_factory(
       test_url_loader_factory.GetSafeWeakWrapper().get());
 
-  rlz_lib::AccessPoint points[] =
-    {rlz_lib::IETB_SEARCH_BOX, rlz_lib::NO_ACCESS_POINT,
-     rlz_lib::NO_ACCESS_POINT};
   rlz_lib::test::ResetSendFinancialPingInterrupted();
   EXPECT_FALSE(rlz_lib::test::WasSendFinancialPingInterrupted());
 
   io_thread.task_runner()->PostTask(FROM_HERE,
                                     base::BindOnce(&ResetURLLoaderFactory));
 
-  rlz_lib::SendFinancialPing(rlz_lib::TOOLBAR_NOTIFIER, points, "swg", "GGLA",
-                             "SwgProductId1234", "en-UK",
-                             /* exclude_machine_id */ false,
-                             /* skip_time_check */ true);
+  SendFinancialPing(rlz_lib::TOOLBAR_NOTIFIER, /* exclude_machine_id */ false);
 
   EXPECT_TRUE(rlz_lib::test::WasSendFinancialPingInterrupted());
   rlz_lib::test::ResetSendFinancialPingInterrupted();
+
+  io_thread.Stop();
+
+  // If PingRlzServer started before SetURLLoaderFactory(nullptr) was called on
+  // io_thread, a pending request was created on base::ThreadPool. Simulate a
+  // response to complete the SimpleURLLoader, then run until idle to ensure all
+  // ThreadPool tasks and Mojo receiver cleanups finish on their own sequence
+  // before `test_url_loader_factory` is destroyed on the main thread.
+  while (test_url_loader_factory.NumPending() > 0) {
+    test_url_loader_factory.SimulateResponseForPendingRequest(
+        test_url_loader_factory.GetPendingRequest(0)->request.url.spec(), "",
+        net::HTTP_NOT_FOUND);
+  }
+  RunUntilIdle();
 }
-#endif
 
 TEST_F(RlzLibTest, ClearProductState) {
   MachineDealCodeHelper::Clear();
@@ -665,8 +734,7 @@ TEST_F(RlzLibTest, ClearProductState) {
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::GD_DESKBAND,
       "GdbRlzValue"));
 
-  rlz_lib::AccessPoint points[] =
-      { rlz_lib::IETB_SEARCH_BOX, rlz_lib::NO_ACCESS_POINT };
+  rlz_lib::AccessPoint points[] = {rlz_lib::IETB_SEARCH_BOX};
 
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
@@ -678,30 +746,23 @@ TEST_F(RlzLibTest, ClearProductState) {
       rlz_lib::GD_DESKBAND,
       rlz_lib::NO_ACCESS_POINT };
 
-  char cgi[2048];
-  EXPECT_TRUE(rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points2,
-                                     cgi, 2048));
-  EXPECT_STREQ("rep=2&rlz=T4:TbRlzValue,D1:GdbRlzValue", cgi);
+  EXPECT_EQ("rep=2&rlz=T4:TbRlzValue,D1:GdbRlzValue",
+            rlz_lib::GetPingParams(rlz_lib::TOOLBAR_NOTIFIER, points2));
 
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi, 2048));
-  std::string events(cgi);
-  EXPECT_LT(0u, events.find("I7S"));
-  EXPECT_LT(0u, events.find("T4I"));
-  EXPECT_LT(0u, events.find("T4R"));
+  std::optional<std::string> events =
+      rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER);
+  ASSERT_TRUE(events);
+  EXPECT_LT(0u, events->find("I7S"));
+  EXPECT_LT(0u, events->find("T4I"));
+  EXPECT_LT(0u, events->find("T4R"));
 
   rlz_lib::ClearProductState(rlz_lib::TOOLBAR_NOTIFIER, points);
 
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX,
-                                         cgi, 2048));
-  EXPECT_STREQ("", cgi);
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::GD_DESKBAND,
-                                         cgi, 2048));
-  EXPECT_STREQ("GdbRlzValue", cgi);
+  EXPECT_EQ("", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
+  EXPECT_EQ("GdbRlzValue", rlz_lib::GetAccessPointRlz(rlz_lib::GD_DESKBAND));
 
-  EXPECT_FALSE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                              cgi, 2048));
-  EXPECT_STREQ("", cgi);
+  EXPECT_EQ(std::nullopt,
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 }
 
 #if BUILDFLAG(IS_WIN)
@@ -827,8 +888,6 @@ TEST_F(RlzLibTest, BrandingRecordProductEvent) {
   if (!rlz_lib::SupplementaryBranding::GetBrand().empty())
     return;
 
-  char cgi_50[50];
-
   // Record different events for the same product with diffrent branding, and
   // make sure that the information remains separate.
   EXPECT_TRUE(rlz_lib::ClearAllProductEvents(rlz_lib::TOOLBAR_NOTIFIER));
@@ -842,22 +901,19 @@ TEST_F(RlzLibTest, BrandingRecordProductEvent) {
 
   EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
       rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::SET_TO_GOOGLE));
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S", cgi_50);
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   {
     rlz_lib::SupplementaryBranding branding("TEST");
     EXPECT_TRUE(rlz_lib::RecordProductEvent(rlz_lib::TOOLBAR_NOTIFIER,
         rlz_lib::IE_DEFAULT_SEARCH, rlz_lib::INSTALL));
-    EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                               cgi_50, 50));
-    EXPECT_STREQ("events=I7I", cgi_50);
+    EXPECT_EQ("events=I7I",
+              rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
   }
 
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             cgi_50, 50));
-  EXPECT_STREQ("events=I7S", cgi_50);
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 }
 
 TEST_F(RlzLibTest, BrandingSetAccessPointRlz) {
@@ -866,27 +922,20 @@ TEST_F(RlzLibTest, BrandingSetAccessPointRlz) {
   if (!rlz_lib::SupplementaryBranding::GetBrand().empty())
     return;
 
-  char rlz_50[50];
-
   // Test that setting RLZ strings with the default brand and a supplementary
   // brand don't overwrite each other.
 
   EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, "IeTbRlz"));
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_50, 50));
-  EXPECT_STREQ("IeTbRlz", rlz_50);
+  EXPECT_EQ("IeTbRlz", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 
   {
     rlz_lib::SupplementaryBranding branding("TEST");
 
     EXPECT_TRUE(rlz_lib::SetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, "SuppRlz"));
-    EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_50,
-                                           50));
-    EXPECT_STREQ("SuppRlz", rlz_50);
+    EXPECT_EQ("SuppRlz", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
   }
 
-  EXPECT_TRUE(rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX, rlz_50, 50));
-  EXPECT_STREQ("IeTbRlz", rlz_50);
-
+  EXPECT_EQ("IeTbRlz", rlz_lib::GetAccessPointRlz(rlz_lib::IETB_SEARCH_BOX));
 }
 
 TEST_F(RlzLibTest, BrandingWithStatefulEvents) {
@@ -933,16 +982,13 @@ TEST_F(RlzLibTest, BrandingWithStatefulEvents) {
                                          kPingResponse));
 
   // Check all the events sent earlier are cleared only for default brand.
-  char value[50];
-  EXPECT_FALSE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                              value, 50));
-  EXPECT_STREQ("", value);
+  EXPECT_EQ(std::nullopt,
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   {
     rlz_lib::SupplementaryBranding branding("TEST");
-    EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                               value, 50));
-    EXPECT_STREQ("events=I7S,W1I", value);
+    EXPECT_EQ("events=I7S,W1I",
+              rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
   }
 
   // Record both events (one is stateless and the other is stateful) again.
@@ -952,23 +998,20 @@ TEST_F(RlzLibTest, BrandingWithStatefulEvents) {
       rlz_lib::IE_HOME_PAGE, rlz_lib::INSTALL));
 
   // Check the stateful event won't be sent again while the stateless one will.
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             value, 50));
-  EXPECT_STREQ("events=I7S", value);
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 
   {
     rlz_lib::SupplementaryBranding branding("TEST");
     EXPECT_TRUE(rlz_lib::ParsePingResponse(rlz_lib::TOOLBAR_NOTIFIER,
                                            kPingResponse));
 
-    EXPECT_FALSE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                                value, 50));
-    EXPECT_STREQ("", value);
+    EXPECT_EQ(std::nullopt,
+              rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
   }
 
-  EXPECT_TRUE(rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER,
-                                             value, 50));
-  EXPECT_STREQ("events=I7S", value);
+  EXPECT_EQ("events=I7S",
+            rlz_lib::GetProductEventsAsCgi(rlz_lib::TOOLBAR_NOTIFIER));
 }
 
 #if BUILDFLAG(IS_POSIX)
@@ -1010,7 +1053,17 @@ TEST_F(ReadonlyRlzDirectoryTest, SupplementaryBrandingDoesNotCrash) {
 }
 
 // Regression test for http://crbug.com/141108
-TEST_F(RlzLibTest, ConcurrentStoreAccessWithProcessExitsWhileLockHeld) {
+#if BUILDFLAG(IS_APPLE)
+// Calling fork() without exec() in a multi-threaded process is not supported on
+// Apple platforms (macOS/iOS) by Apple's Foundation/libdispatch runtime and
+// causes child processes calling Cocoa APIs to crash or deadlock.
+#define MAYBE_ConcurrentStoreAccessWithProcessExitsWhileLockHeld \
+  DISABLED_ConcurrentStoreAccessWithProcessExitsWhileLockHeld
+#else
+#define MAYBE_ConcurrentStoreAccessWithProcessExitsWhileLockHeld \
+  ConcurrentStoreAccessWithProcessExitsWhileLockHeld
+#endif
+TEST_F(RlzLibTest, MAYBE_ConcurrentStoreAccessWithProcessExitsWhileLockHeld) {
   // See the comment at the top of WriteFails.
   if (!rlz_lib::SupplementaryBranding::GetBrand().empty())
     return;
@@ -1078,7 +1131,7 @@ TEST_F(RlzLibTest, LockAcquistionSucceedsButStoreFileCannotBeCreated) {
 
 #endif
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 class ScopedTestDebugDaemonClient : public ash::FakeDebugDaemonClient {
  public:
   ScopedTestDebugDaemonClient() {
@@ -1145,10 +1198,10 @@ TEST_F(RlzLibTest, NoRecordCAFEvent) {
   // Record a first search event, make sure it is written correctly.
   rlz_lib::RecordProductEvent(rlz_lib::CHROME, rlz_lib::CHROMEOS_OMNIBOX,
                               rlz_lib::FIRST_SEARCH);
-  char cgi[256];
-  EXPECT_TRUE(
-      rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, cgi, std::size(cgi)));
-  EXPECT_NE(nullptr, strstr(cgi, "CAF"));
+  std::optional<std::string> cgi =
+      rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME);
+  ASSERT_TRUE(cgi);
+  EXPECT_THAT(*cgi, HasSubstr("CAF"));
 
   // Simulate another user on the machine sending the RLZ ping, so "should send
   // RLZ" is now false.
@@ -1158,16 +1211,14 @@ TEST_F(RlzLibTest, NoRecordCAFEvent) {
 
   // The first search event should no longer appear, so there are no events
   // to report.
-  EXPECT_FALSE(
-      rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, cgi, std::size(cgi)));
+  EXPECT_EQ(std::nullopt, rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
 
   // The event should be permanently deleted, so setting the flag back to
   // true should still not return the event.
   statistics_provider_->SetMachineStatistic(
       ash::system::kShouldSendRlzPingKey,
       ash::system::kShouldSendRlzPingValueTrue);
-  EXPECT_FALSE(
-      rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, cgi, std::size(cgi)));
+  EXPECT_EQ(std::nullopt, rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME));
 }
 
 TEST_F(RlzLibTest, NoRecordCAFEvent2) {
@@ -1181,11 +1232,11 @@ TEST_F(RlzLibTest, NoRecordCAFEvent2) {
                               rlz_lib::INSTALL);
   rlz_lib::RecordProductEvent(rlz_lib::CHROME, rlz_lib::CHROMEOS_OMNIBOX,
                               rlz_lib::FIRST_SEARCH);
-  char cgi[256];
-  EXPECT_TRUE(
-      rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, cgi, std::size(cgi)));
-  EXPECT_NE(nullptr, strstr(cgi, "CAF"));
-  EXPECT_NE(nullptr, strstr(cgi, "CAI"));
+  std::optional<std::string> cgi =
+      rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME);
+  ASSERT_TRUE(cgi);
+  EXPECT_THAT(*cgi, HasSubstr("CAF"));
+  EXPECT_THAT(*cgi, HasSubstr("CAI"));
 
   // Simulate another user on the machine sending the RLZ ping, so "should send
   // RLZ" is now false.
@@ -1194,17 +1245,17 @@ TEST_F(RlzLibTest, NoRecordCAFEvent2) {
       ash::system::kShouldSendRlzPingValueFalse);
 
   // Only the "CAI" event should appear.
-  EXPECT_TRUE(
-      rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, cgi, std::size(cgi)));
-  EXPECT_NE(nullptr, strstr(cgi, "CAI"));
+  cgi = rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME);
+  ASSERT_TRUE(cgi);
+  EXPECT_THAT(*cgi, HasSubstr("CAI"));
 
   // The event should be permanently deleted, so setting the flag back to
   // true should still not return the "CAF" event.
   statistics_provider_->SetMachineStatistic(
       ash::system::kShouldSendRlzPingKey,
       ash::system::kShouldSendRlzPingValueTrue);
-  EXPECT_TRUE(
-      rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME, cgi, std::size(cgi)));
-  EXPECT_NE(nullptr, strstr(cgi, "CAI"));
+  cgi = rlz_lib::GetProductEventsAsCgi(rlz_lib::CHROME);
+  ASSERT_TRUE(cgi);
+  EXPECT_THAT(*cgi, HasSubstr("CAI"));
 }
 #endif

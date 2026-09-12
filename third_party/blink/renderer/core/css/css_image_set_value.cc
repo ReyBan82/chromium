@@ -27,20 +27,13 @@
 
 #include <algorithm>
 
-#include "third_party/blink/public/common/loader/referrer_utils.h"
-#include "third_party/blink/renderer/core/css/css_image_value.h"
-#include "third_party/blink/renderer/core/css/css_numeric_literal_value.h"
-#include "third_party/blink/renderer/core/css/css_primitive_value.h"
-#include "third_party/blink/renderer/core/dom/document.h"
-#include "third_party/blink/renderer/core/execution_context/execution_context.h"
+#include "third_party/blink/renderer/core/css/css_image_set_option_value.h"
+#include "third_party/blink/renderer/core/css/css_length_resolver.h"
+#include "third_party/blink/renderer/core/css/css_value_list.h"
+#include "third_party/blink/renderer/core/css/resolver/style_resolver_state.h"
 #include "third_party/blink/renderer/core/loader/resource/image_resource_content.h"
+#include "third_party/blink/renderer/core/paint/timing/paint_timing.h"
 #include "third_party/blink/renderer/core/style/style_image_set.h"
-#include "third_party/blink/renderer/platform/loader/fetch/fetch_initiator_type_names.h"
-#include "third_party/blink/renderer/platform/loader/fetch/fetch_parameters.h"
-#include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
-#include "third_party/blink/renderer/platform/loader/fetch/resource_loader_options.h"
-#include "third_party/blink/renderer/platform/weborigin/kurl.h"
-#include "third_party/blink/renderer/platform/weborigin/referrer.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 
 namespace blink {
@@ -50,7 +43,8 @@ CSSImageSetValue::CSSImageSetValue()
 
 CSSImageSetValue::~CSSImageSetValue() = default;
 
-const CSSImageSetValue::ImageSetOption& CSSImageSetValue::GetBestOption(
+const CSSImageSetOptionValue* CSSImageSetValue::GetBestOption(
+    const CSSLengthResolver& resolver,
     const float device_scale_factor) {
   // This method is implementing the selection logic described in the
   // "CSS Images Module Level 4" spec:
@@ -73,32 +67,41 @@ const CSSImageSetValue::ImageSetOption& CSSImageSetValue::GetBestOption(
   //      <image-set-option>."
 
   if (options_.empty()) {
-    for (wtf_size_t i = 0, length = this->length(); i < length; ++i) {
-      auto image_index = i;
-
-      ++i;
-      SECURITY_DCHECK(i < length);
-      float resolution = To<CSSPrimitiveValue>(Item(i)).ComputeDotsPerPixel();
-
-      options_.push_back(ImageSetOption{image_index, resolution});
+    for (const auto& i : *this) {
+      auto* option = To<CSSImageSetOptionValue>(i.Get());
+      if (option->IsSupported(resolver)) {
+        options_.push_back(option);
+      }
     }
 
-    std::stable_sort(
-        options_.begin(), options_.end(),
-        [](const ImageSetOption& left, const ImageSetOption& right) {
-          return left.resolution < right.resolution;
-        });
-  }
-
-  for (const auto& image : options_) {
-    if (image.resolution >= device_scale_factor) {
-      return image;
+    if (options_.empty()) {
+      // No supported options were identified in the image-set.
+      // As an optimization in order to avoid having to iterate
+      // through the unsupported options on subsequent calls,
+      // nullptr is inserted in the options_ vector.
+      options_.push_back(nullptr);
+    } else {
+      std::stable_sort(options_.begin(), options_.end(),
+                       [&resolver](auto& left, auto& right) {
+                         return left->ComputedResolution(resolver) <
+                                right->ComputedResolution(resolver);
+                       });
+      auto last = std::unique(options_.begin(), options_.end(),
+                              [&resolver](auto& left, auto& right) {
+                                return left->ComputedResolution(resolver) ==
+                                       right->ComputedResolution(resolver);
+                              });
+      options_.erase(last, options_.end());
     }
   }
 
-  DCHECK(!options_.empty());
+  for (const auto& option : options_) {
+    if (option && option->ComputedResolution(resolver) >= device_scale_factor) {
+      return option.Get();
+    }
+  }
 
-  return options_.back();
+  return options_.back().Get();
 }
 
 bool CSSImageSetValue::IsCachePending(const float device_scale_factor) const {
@@ -112,34 +115,15 @@ StyleImage* CSSImageSetValue::CachedImage(
   return cached_image_.Get();
 }
 
-StyleImage* CSSImageSetValue::CacheImage(
-    const Document& document,
-    const float device_scale_factor,
-    FetchParameters::ImageRequestBehavior image_request_behavior,
-    CrossOriginAttributeValue cross_origin) {
-  if (IsCachePending(device_scale_factor)) {
-    const ImageSetOption& best_option = GetBestOption(device_scale_factor);
-
-    const auto& image_value = To<CSSImageValue>(Item(best_option.index));
-
-    cached_image_ = MakeGarbageCollected<StyleImageSet>(
-        const_cast<CSSImageValue*>(&image_value)
-            ->CacheImage(document, image_request_behavior, cross_origin,
-                         best_option.resolution),
-        this);
-
-    cached_device_scale_factor_ = device_scale_factor;
-  }
+StyleImage* CSSImageSetValue::CacheImage(StyleImage* style_image,
+                                         const float device_scale_factor) {
+  cached_image_ = MakeGarbageCollected<StyleImageSet>(style_image, this);
+  cached_device_scale_factor_ = device_scale_factor;
   return cached_image_.Get();
 }
 
 String CSSImageSetValue::CustomCSSText() const {
   StringBuilder result;
-
-  if (!RuntimeEnabledFeatures::CSSImageSetEnabled()) {
-    result.Append("-webkit-");
-  }
-
   result.Append("image-set(");
 
   for (wtf_size_t i = 0, length = this->length(); i < length; ++i) {
@@ -147,17 +131,11 @@ String CSSImageSetValue::CustomCSSText() const {
       result.Append(", ");
     }
 
-    const CSSValue& image_value = Item(i);
-    result.Append(image_value.CssText());
-    result.Append(' ');
-
-    ++i;
-    SECURITY_DCHECK(i < length);
-    const CSSValue& resolution_value = Item(i);
-    result.Append(resolution_value.CssText());
+    result.Append(Item(i).CssText());
   }
 
   result.Append(')');
+
   return result.ReleaseString();
 }
 
@@ -165,41 +143,68 @@ bool CSSImageSetValue::HasFailedOrCanceledSubresources() const {
   if (!cached_image_) {
     return false;
   }
+
   if (ImageResourceContent* cached_content = cached_image_->CachedImage()) {
     return cached_content->LoadFailedOrCanceled();
   }
+
   return true;
+}
+
+CSSImageSetValue* CSSImageSetValue::ResolveValuesAndCreateCopyIfNeeded(
+    const StyleResolverState& state) const {
+  CSSImageSetValue* new_value = MakeGarbageCollected<CSSImageSetValue>();
+  bool values_changed = false;
+  for (const auto& item : *this) {
+    const auto* option = To<CSSImageSetOptionValue>(item.Get());
+    const CSSValue& image = option->GetImage();
+    const CSSValue& resolved_image = state.ResolveGradients(image);
+    if (&image == &resolved_image) {
+      new_value->Append(*option);
+    } else {
+      values_changed = true;
+      new_value->Append(*MakeGarbageCollected<CSSImageSetOptionValue>(
+          &resolved_image, &option->GetResolution(), option->GetType()));
+    }
+  }
+  if (values_changed) {
+    return new_value;
+  }
+  return nullptr;
+}
+
+const CSSImageSetValue& CSSImageSetValue::ResolveValuesIfNeeded(
+    const StyleResolverState& state) const {
+  if (CSSImageSetValue* resolved = ResolveValuesAndCreateCopyIfNeeded(state)) {
+    return *resolved;
+  }
+  return *this;
+}
+
+CSSImageSetValue& CSSImageSetValue::ResolveValuesIfNeeded(
+    const StyleResolverState& state) {
+  if (CSSImageSetValue* resolved = ResolveValuesAndCreateCopyIfNeeded(state)) {
+    return *resolved;
+  }
+  return *this;
+}
+
+bool CSSImageSetValue::HasRandomFunctions() const {
+  if (CSSValueList::HasRandomFunctions()) {
+    return true;
+  }
+  for (const auto& option : options_) {
+    if (option && option->HasRandomFunctions()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 void CSSImageSetValue::TraceAfterDispatch(blink::Visitor* visitor) const {
   visitor->Trace(cached_image_);
+  visitor->Trace(options_);
   CSSValueList::TraceAfterDispatch(visitor);
-}
-
-CSSImageSetValue* CSSImageSetValue::ComputedCSSValue() {
-  auto* value = MakeGarbageCollected<CSSImageSetValue>();
-  for (auto& item : *this) {
-    auto* image_value = DynamicTo<CSSImageValue>(item.Get());
-    if (image_value != nullptr) {
-      value->Append(*image_value->ComputedCSSValue());
-      continue;
-    }
-
-    auto* resolution = DynamicTo<CSSNumericLiteralValue>(item.Get());
-    if (resolution != nullptr && resolution->IsResolution() &&
-        resolution->GetType() != CSSPrimitiveValue::UnitType::kDotsPerPixel &&
-        RuntimeEnabledFeatures::CSSImageSetEnabled()) {
-      auto* canonical_resolution = CSSNumericLiteralValue::Create(
-          resolution->ComputeDotsPerPixel(),
-          CSSPrimitiveValue::UnitType::kDotsPerPixel);
-      value->Append(*canonical_resolution);
-      continue;
-    }
-
-    value->Append(*item);
-  }
-
-  return value;
 }
 
 }  // namespace blink

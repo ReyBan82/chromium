@@ -19,13 +19,15 @@
 #include "base/task/single_thread_task_runner.h"
 #include "components/payments/content/android/byte_buffer_helper.h"
 #include "components/payments/content/android/csp_checker_android.h"
-#include "components/payments/content/android/jni_headers/PaymentAppServiceBridge_jni.h"
 #include "components/payments/content/android/jni_payment_app.h"
 #include "components/payments/content/android/payment_request_spec.h"
 #include "components/payments/content/payment_app_service.h"
-#include "components/payments/content/payment_manifest_web_data_service.h"
 #include "components/payments/content/payment_request_spec.h"
+#include "components/payments/content/web_payments_web_data_service.h"
+#include "components/payments/core/payment_prefs.h"
+#include "components/prefs/pref_service.h"
 #include "components/url_formatter/elide_url.h"
+#include "components/user_prefs/user_prefs.h"
 #include "components/webauthn/android/internal_authenticator_android.h"
 #include "components/webdata_services/web_data_service_wrapper_factory.h"
 #include "content/public/browser/browser_context.h"
@@ -39,11 +41,13 @@
 #include "url/android/gurl_android.h"
 #include "url/origin.h"
 
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "components/payments/content/android/jni_headers/PaymentAppServiceBridge_jni.h"
+
 namespace {
 using ::base::android::AttachCurrentThread;
 using ::base::android::ConvertJavaStringToUTF8;
 using ::base::android::ConvertUTF8ToJavaString;
-using ::base::android::JavaParamRef;
 using ::base::android::JavaRef;
 using ::base::android::ScopedJavaGlobalRef;
 using ::payments::mojom::PaymentMethodDataPtr;
@@ -69,7 +73,7 @@ void OnPaymentAppCreationError(
   JNIEnv* env = AttachCurrentThread();
   Java_PaymentAppServiceCallback_onPaymentAppCreationError(
       env, jcallback, ConvertUTF8ToJavaString(env, error_message),
-      static_cast<jint>(error_reason));
+      static_cast<int32_t>(error_reason));
 }
 
 void OnDoneCreatingPaymentApps(const JavaRef<jobject>& jcallback) {
@@ -95,18 +99,18 @@ void SetOptOutOffered(const JavaRef<jobject>& jcallback) {
 }  // namespace
 
 /* static */
-void JNI_PaymentAppServiceBridge_Create(
+static void JNI_PaymentAppServiceBridge_Create(
     JNIEnv* env,
-    const JavaParamRef<jobject>& jrender_frame_host,
-    const JavaParamRef<jstring>& jtop_origin,
-    const JavaParamRef<jobject>& jpayment_request_spec,
-    const JavaParamRef<jstring>& jtwa_package_name,
-    // TODO(crbug.com/1209835): Remove jmay_crawl_for_installable_payment_apps,
+    const JavaRef<jobject>& jrender_frame_host,
+    const JavaRef<jstring>& jtop_origin,
+    const JavaRef<jobject>& jpayment_request_spec,
+    const JavaRef<jstring>& jtwa_package_name,
+    // TODO(crbug.com/40182225): Remove jmay_crawl_for_installable_payment_apps,
     // as it is no longer used.
-    jboolean jmay_crawl_for_installable_payment_apps,
-    jboolean jis_off_the_record,
-    jlong native_csp_checker_android,
-    const JavaParamRef<jobject>& jcallback) {
+    bool jmay_crawl_for_installable_payment_apps,
+    bool jis_off_the_record,
+    int64_t native_csp_checker_android,
+    const JavaRef<jobject>& jcallback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
 
   auto* render_frame_host =
@@ -116,9 +120,9 @@ void JNI_PaymentAppServiceBridge_Create(
 
   std::string top_origin = ConvertJavaStringToUTF8(jtop_origin);
 
-  scoped_refptr<payments::PaymentManifestWebDataService> web_data_service =
+  scoped_refptr<payments::WebPaymentsWebDataService> web_data_service =
       webdata_services::WebDataServiceWrapperFactory::
-          GetPaymentManifestWebDataServiceForBrowserContext(
+          GetWebPaymentsWebDataServiceForBrowserContext(
               render_frame_host->GetBrowserContext(),
               ServiceAccessType::EXPLICIT_ACCESS);
 
@@ -188,7 +192,7 @@ PaymentAppServiceBridge* PaymentAppServiceBridge::Create(
     const GURL& top_origin,
     base::WeakPtr<PaymentRequestSpec> spec,
     const std::string& twa_package_name,
-    scoped_refptr<PaymentManifestWebDataService> web_data_service,
+    scoped_refptr<WebPaymentsWebDataService> web_data_service,
     bool is_off_the_record,
     base::WeakPtr<CSPChecker> csp_checker,
     CanMakePaymentCalculatedCallback can_make_payment_calculated_callback,
@@ -269,29 +273,45 @@ PaymentAppServiceBridge::CreateInternalAuthenticator() const {
   // safety precaution to ensure that `RenderFrameDeleted()` will be called at
   // some point.
   return rfh && rfh->IsActive() && rfh->IsRenderFrameLive()
-             ? std::make_unique<InternalAuthenticatorAndroid>(rfh)
+             ? std::make_unique<webauthn::InternalAuthenticatorAndroid>(rfh)
              : nullptr;
 }
 
-scoped_refptr<PaymentManifestWebDataService>
-PaymentAppServiceBridge::GetPaymentManifestWebDataService() const {
-  return payment_manifest_web_data_service_;
+scoped_refptr<WebPaymentsWebDataService>
+PaymentAppServiceBridge::GetWebPaymentsWebDataService() const {
+  return web_payments_web_data_service_;
 }
 
 bool PaymentAppServiceBridge::IsOffTheRecord() const {
   return is_off_the_record_;
 }
 
+bool PaymentAppServiceBridge::PrefsCanMakePayment() const {
+  auto* rfh = content::RenderFrameHost::FromID(frame_routing_id_);
+  if (!rfh) {
+    return false;
+  }
+
+  auto* context = rfh->GetBrowserContext();
+  if (!context) {
+    return false;
+  }
+
+  PrefService* prefs = user_prefs::UserPrefs::Get(context);
+  return prefs && prefs->GetBoolean(payments::kCanMakePaymentEnabled);
+}
+
 base::WeakPtr<ContentPaymentRequestDelegate>
 PaymentAppServiceBridge::GetPaymentRequestDelegate() const {
   // PaymentAppService flow should have short-circuited before this point.
   NOTREACHED();
-  return nullptr;
 }
 
 void PaymentAppServiceBridge::ShowProcessingSpinner() {
   // Java UI determines when the show a spinner itself.
 }
+
+void PaymentAppServiceBridge::ShowLoadingView() {}
 
 base::WeakPtr<PaymentRequestSpec> PaymentAppServiceBridge::GetSpec() const {
   return spec_;
@@ -350,7 +370,7 @@ PaymentAppServiceBridge::PaymentAppServiceBridge(
     const GURL& top_origin,
     base::WeakPtr<PaymentRequestSpec> spec,
     const std::string& twa_package_name,
-    scoped_refptr<PaymentManifestWebDataService> web_data_service,
+    scoped_refptr<WebPaymentsWebDataService> web_data_service,
     bool is_off_the_record,
     base::WeakPtr<CSPChecker> csp_checker,
     CanMakePaymentCalculatedCallback can_make_payment_calculated_callback,
@@ -369,7 +389,7 @@ PaymentAppServiceBridge::PaymentAppServiceBridge(
       frame_security_origin_(render_frame_host->GetLastCommittedOrigin()),
       spec_(spec),
       twa_package_name_(twa_package_name),
-      payment_manifest_web_data_service_(web_data_service),
+      web_payments_web_data_service_(web_data_service),
       is_off_the_record_(is_off_the_record),
       csp_checker_(csp_checker),
       can_make_payment_calculated_callback_(
@@ -384,3 +404,5 @@ PaymentAppServiceBridge::PaymentAppServiceBridge(
       set_opt_out_offered_callback_(std::move(set_opt_out_offered_callback)) {}
 
 }  // namespace payments
+
+DEFINE_JNI(PaymentAppServiceBridge)

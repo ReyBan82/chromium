@@ -21,6 +21,10 @@ SolidColorLayerImpl::SolidColorLayerImpl(LayerTreeImpl* tree_impl, int id)
 
 SolidColorLayerImpl::~SolidColorLayerImpl() = default;
 
+mojom::LayerType SolidColorLayerImpl::GetLayerType() const {
+  return mojom::LayerType::kSolidColor;
+}
+
 std::unique_ptr<LayerImpl> SolidColorLayerImpl::CreateLayerImpl(
     LayerTreeImpl* tree_impl) const {
   return SolidColorLayerImpl::Create(tree_impl, id());
@@ -61,7 +65,8 @@ void SolidColorLayerImpl::AppendSolidQuads(
                force_anti_aliasing_off);
 }
 
-void SolidColorLayerImpl::AppendQuads(viz::CompositorRenderPass* render_pass,
+void SolidColorLayerImpl::AppendQuads(const AppendQuadsContext& context,
+                                      viz::CompositorRenderPass* render_pass,
                                       AppendQuadsData* append_quads_data) {
   viz::SharedQuadState* shared_quad_state =
       render_pass->CreateAndAppendSharedQuadState();
@@ -72,15 +77,11 @@ void SolidColorLayerImpl::AppendQuads(viz::CompositorRenderPass* render_pass,
 
   // TODO(hendrikw): We need to pass the visible content rect rather than
   // |bounds()| here.
-  EffectNode* effect_node = GetEffectTree().Node(effect_tree_index());
+  const EffectNode& effect_node = GetEffectTree().Node(effect_tree_index());
   AppendSolidQuads(render_pass, draw_properties().occlusion_in_content_space,
                    shared_quad_state, gfx::Rect(bounds()), background_color(),
                    !layer_tree_impl()->settings().enable_edge_anti_aliasing,
-                   effect_node->blend_mode, append_quads_data);
-}
-
-const char* SolidColorLayerImpl::LayerTypeAsString() const {
-  return "cc::SolidColorLayerImpl";
+                   effect_node.blend_mode, append_quads_data);
 }
 
 }  // namespace cc

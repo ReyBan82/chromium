@@ -12,10 +12,10 @@
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/network_service_instance.h"
+#include "content/public/browser/network_service_util.h"
 #include "content/public/browser/service_process_host.h"
 #include "content/public/browser/service_process_info.h"
 #include "content/public/common/content_features.h"
-#include "content/public/common/network_service_util.h"
 #include "content/public/test/browser_task_environment.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
@@ -26,7 +26,6 @@
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "net/test/embedded_test_server/http_request.h"
 #include "net/test/embedded_test_server/http_response.h"
-#include "sandbox/features.h"
 #include "sandbox/policy/features.h"
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/transferable_socket.h"
@@ -34,7 +33,7 @@
 #include "services/network/public/mojom/network_service_test.mojom.h"
 
 #if BUILDFLAG(IS_ANDROID)
-#include "base/android/build_info.h"
+#include "base/android/android_info.h"
 #endif
 
 namespace content {
@@ -43,28 +42,25 @@ namespace {
 class TransferableSocketBrowserTest : public ContentBrowserTest {
  public:
   TransferableSocketBrowserTest() {
-    std::vector<base::test::FeatureRef> enabled_features = {
 #if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
       // Network Service Sandboxing is unconditionally enabled on these
       // platforms.
-      sandbox::policy::features::kNetworkServiceSandbox,
-#endif
-    };
-    scoped_feature_list_.InitWithFeatures(
-        enabled_features,
-        /*disabled_features=*/{features::kNetworkServiceInProcess});
+      scoped_feature_list_.InitAndEnableFeature(
+          sandbox::policy::features::kNetworkServiceSandbox);
+#endif  // !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_FUCHSIA)
+      ForceOutOfProcessNetworkService();
   }
 
   void SetUp() override {
 #if BUILDFLAG(IS_WIN)
-    if (!sandbox::features::IsAppContainerSandboxSupported()) {
+    if (!sandbox::policy::features::IsNetworkSandboxSupported()) {
       // On *some* Windows, sandboxing cannot be enabled. We skip all the tests
       // on such platforms.
       GTEST_SKIP();
     }
 #elif BUILDFLAG(IS_ANDROID)
-    if (base::android::BuildInfo::GetInstance()->sdk_int() <
-        base::android::SdkVersion::SDK_VERSION_R) {
+    if (base::android::android_info::sdk_int() <
+        base::android::android_info::SdkVersion::SDK_VERSION_R) {
       // Android below R does not support transfer of sockets.
       GTEST_SKIP();
     }
@@ -81,8 +77,13 @@ class TransferableSocketBrowserTest : public ContentBrowserTest {
   base::test::ScopedFeatureList scoped_feature_list_;
 };
 
+// This test creates a socket in the browser process and connects it to the
+// EmbeddedTestServer. It then transfers the socket to the
+// NetworkServiceTestImpl mojo service running in the network service process,
+// which verifies that it can send a basic HTTP/1.0 request method over the
+// socket.
 IN_PROC_BROWSER_TEST_F(TransferableSocketBrowserTest, TransferSocket) {
-  size_t request_attempts = 0;
+  std::atomic<size_t> request_attempts = 0;
   base::RunLoop server_loop;
   embedded_test_server()->RegisterRequestHandler(base::BindLambdaForTesting(
       [&request_attempts,
@@ -90,7 +91,7 @@ IN_PROC_BROWSER_TEST_F(TransferableSocketBrowserTest, TransferSocket) {
           -> std::unique_ptr<net::test_server::HttpResponse> {
         auto response = std::make_unique<net::test_server::BasicHttpResponse>();
         response->set_code(net::HTTP_OK);
-        request_attempts++;
+        ++request_attempts;
         server_loop.Quit();
         return response;
       }));
@@ -104,9 +105,10 @@ IN_PROC_BROWSER_TEST_F(TransferableSocketBrowserTest, TransferSocket) {
       network_service_pending;
   GetNetworkService()->BindTestInterfaceForTesting(
       network_service_pending.InitWithNewPipeAndPassReceiver());
-  net::TCPSocket socket(nullptr, nullptr, net::NetLogSource());
-  socket.Open(net::AddressFamily::ADDRESS_FAMILY_IPV4);
-  socket.DetachFromThread();
+  std::unique_ptr<net::TCPSocket> socket =
+      net::TCPSocket::Create(nullptr, nullptr, net::NetLogSource());
+  socket->Open(net::AddressFamily::ADDRESS_FAMILY_IPV4);
+  socket->DetachFromThread();
 
   net::IPEndPoint endpoint(net::IPAddress::IPv4Localhost(),
                            embedded_test_server()->port());
@@ -114,7 +116,7 @@ IN_PROC_BROWSER_TEST_F(TransferableSocketBrowserTest, TransferSocket) {
   content::GetIOThreadTaskRunner({})->PostTaskAndReplyWithResult(
       FROM_HERE,
       base::BindOnce(
-          &net::TCPSocket::Connect, base::Unretained(&socket), endpoint,
+          &net::TCPSocket::Connect, base::Unretained(socket.get()), endpoint,
           base::BindLambdaForTesting([&connect_run_loop](int result) {
             EXPECT_EQ(result, net::OK);
             connect_run_loop.Quit();
@@ -126,7 +128,7 @@ IN_PROC_BROWSER_TEST_F(TransferableSocketBrowserTest, TransferSocket) {
         EXPECT_EQ(result, net::ERR_IO_PENDING);
       }));
   connect_run_loop.Run();
-  socket.DetachFromThread();
+  socket->DetachFromThread();
 #if BUILDFLAG(IS_WIN)
   // Obtain the running process id of the network service, as this is needed to
   // duplicate the socket on Windows only.
@@ -140,12 +142,12 @@ IN_PROC_BROWSER_TEST_F(TransferableSocketBrowserTest, TransferSocket) {
   }
   ASSERT_TRUE(network_process.IsValid());
   network::TransferableSocket transferable(
-      socket.ReleaseSocketDescriptorForTesting(), network_process);
+      socket->ReleaseSocketDescriptorForTesting(), network_process.Pid());
 #else
   base::test::TestFuture<net::SocketDescriptor> socket_descriptor;
   GetIOThreadTaskRunner({})->PostTaskAndReplyWithResult(
       FROM_HERE, base::BindLambdaForTesting([&]() {
-        return socket.ReleaseSocketDescriptorForTesting();
+        return socket->ReleaseSocketDescriptorForTesting();
       }),
       socket_descriptor.GetCallback());
   network::TransferableSocket transferable(socket_descriptor.Get());
@@ -162,7 +164,16 @@ IN_PROC_BROWSER_TEST_F(TransferableSocketBrowserTest, TransferSocket) {
     network_service_runloop.Run();
   }
   server_loop.Run();
-  EXPECT_EQ(1U, request_attempts);
+  EXPECT_EQ(1U, request_attempts.load());
+#if BUILDFLAG(IS_MAC)
+  base::RunLoop close_run_loop;
+  content::GetIOThreadTaskRunner({})->PostTask(
+      FROM_HERE, base::BindLambdaForTesting([&]() {
+        socket->Close();
+        close_run_loop.Quit();
+      }));
+  close_run_loop.Run();
+#endif
 }
 
 }  // namespace

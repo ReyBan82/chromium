@@ -10,8 +10,8 @@
 
 #include "base/time/time.h"
 #include "base/values.h"
-#include "components/sync/base/syncer_error.h"
 #include "components/sync/engine/events/protocol_event.h"
+#include "components/sync/engine/syncer_error.h"
 #include "components/sync/protocol/sync.pb.h"
 
 namespace syncer {
@@ -23,7 +23,7 @@ namespace syncer {
 class GetUpdatesResponseEvent : public ProtocolEvent {
  public:
   GetUpdatesResponseEvent(base::Time timestamp,
-                          const sync_pb::ClientToServerResponse& response,
+                          sync_pb::ClientToServerResponse response,
                           SyncerError error);
 
   GetUpdatesResponseEvent(const GetUpdatesResponseEvent&) = delete;
@@ -37,7 +37,7 @@ class GetUpdatesResponseEvent : public ProtocolEvent {
   base::Time GetTimestamp() const override;
   std::string GetType() const override;
   std::string GetDetails() const override;
-  base::Value::Dict GetProtoMessage(bool include_specifics) const override;
+  base::DictValue GetProtoMessage(bool include_specifics) const override;
 
   const base::Time timestamp_;
   const sync_pb::ClientToServerResponse response_;

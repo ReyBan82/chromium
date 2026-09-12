@@ -60,17 +60,16 @@
 #include "net/android/network_change_notifier_android.h"
 
 #include <string>
-#include <unordered_set>
 
-#include "base/android/build_info.h"
+#include "base/android/android_info.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/thread.h"
 #include "net/base/address_tracker_linux.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace net {
 
@@ -96,7 +95,7 @@ class NetworkChangeNotifierAndroid::BlockingThreadObjects {
             base::DoNothing(),
             // We're only interested in tunnel interface changes.
             base::BindRepeating(NotifyNetworkChangeNotifierObservers),
-            std::unordered_set<std::string>()) {}
+            absl::flat_hash_set<std::string>()) {}
   BlockingThreadObjects(const BlockingThreadObjects&) = delete;
   BlockingThreadObjects& operator=(const BlockingThreadObjects&) = delete;
 
@@ -149,9 +148,7 @@ bool NetworkChangeNotifierAndroid::AreNetworkHandlesCurrentlySupported() const {
   // Notifications for API using handles::NetworkHandles and querying using
   // handles::NetworkHandles only implemented for Android versions >= L.
   return force_network_handles_supported_for_testing_ ||
-         (base::android::BuildInfo::GetInstance()->sdk_int() >=
-              base::android::SDK_VERSION_LOLLIPOP &&
-          !delegate_->RegisterNetworkCallbackFailed());
+         !delegate_->RegisterNetworkCallbackFailed();
 }
 
 void NetworkChangeNotifierAndroid::GetCurrentConnectedNetworks(
@@ -223,8 +220,8 @@ NetworkChangeNotifierAndroid::NetworkChangeNotifierAndroid(
   delegate_->RegisterObserver(this);
   // Since Android P, ConnectivityManager's signals include VPNs so we don't
   // need to use AddressTrackerLinux.
-  if (base::android::BuildInfo::GetInstance()->sdk_int() <
-      base::android::SDK_VERSION_P) {
+  if (base::android::android_info::sdk_int() <
+      base::android::android_info::SDK_VERSION_P) {
     // |blocking_thread_objects_| will live on this runner.
     scoped_refptr<base::SequencedTaskRunner> blocking_thread_runner =
         base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock()});

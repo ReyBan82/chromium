@@ -31,6 +31,7 @@
 
 #include "third_party/blink/renderer/core/events/keyboard_event.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 #include "third_party/blink/renderer/platform/wtf/text/unicode.h"
 
 namespace blink {
@@ -45,14 +46,25 @@ static String StripLeadingWhiteSpace(const String& string) {
 
   unsigned i;
   for (i = 0; i < length; ++i) {
-    if (string[i] != kNoBreakSpaceCharacter && !IsSpaceOrNewline(string[i]))
+    if (string[i] != uchar::kNoBreakSpace &&
+        !unicode::IsSpaceOrNewline(string[i])) {
       break;
+    }
   }
 
-  return string.Substring(i, length - i);
+  return string.substr(i, length - i);
+}
+
+// static
+bool TypeAhead::ShouldHandleKeyboardEvent(const KeyboardEvent& keyboard_event) {
+  return keyboard_event.type() == event_type_names::kKeypress &&
+         !keyboard_event.ctrlKey() && !keyboard_event.altKey() &&
+         !keyboard_event.metaKey() &&
+         unicode::IsPrintableChar(keyboard_event.charCode());
 }
 
 int TypeAhead::HandleEvent(const KeyboardEvent& event,
+                           UChar charCode,
                            MatchModeFlags match_mode) {
   if (last_type_time_) {
     if (event.PlatformTimeStamp() < *last_type_time_)
@@ -68,8 +80,7 @@ int TypeAhead::HandleEvent(const KeyboardEvent& event,
   }
   last_type_time_ = event.PlatformTimeStamp();
 
-  UChar c = event.charCode();
-  buffer_.Append(c);
+  buffer_.Append(charCode);
 
   int option_count = data_source_->OptionCount();
   if (option_count < 1)
@@ -77,18 +88,18 @@ int TypeAhead::HandleEvent(const KeyboardEvent& event,
 
   int search_start_offset = 1;
   String prefix;
-  if (match_mode & kCycleFirstChar && c == repeating_char_) {
+  if (match_mode & kCycleFirstChar && charCode == repeating_char_) {
     // The user is likely trying to cycle through all the items starting
     // with this character, so just search on the character.
-    prefix = String(&c, 1u);
-    repeating_char_ = c;
+    prefix = String(base::span_from_ref(charCode));
+    repeating_char_ = charCode;
   } else if (match_mode & kMatchPrefix) {
     prefix = buffer_.ToString();
     if (buffer_.length() > 1) {
       repeating_char_ = 0;
       search_start_offset = 0;
     } else {
-      repeating_char_ = c;
+      repeating_char_ = charCode;
     }
   }
 
@@ -97,26 +108,19 @@ int TypeAhead::HandleEvent(const KeyboardEvent& event,
     int index = (selected < 0 ? 0 : selected) + search_start_offset;
     index %= option_count;
 
-    // Compute a case-folded copy of the prefix string before beginning the
-    // search for a matching element. This code uses foldCase to work around the
-    // fact that String::startWith does not fold non-ASCII characters. This code
-    // can be changed to use startWith once that is fixed.
-    String prefix_with_case_folded(prefix.FoldCase());
     for (int i = 0; i < option_count; ++i, index = (index + 1) % option_count) {
-      // Fold the option string and check if its prefix is equal to the folded
-      // prefix.
-      String text = data_source_->OptionAtIndex(index);
-      if (StripLeadingWhiteSpace(text).FoldCase().StartsWith(
-              prefix_with_case_folded))
+      String text = StripLeadingWhiteSpace(data_source_->OptionAtIndex(index));
+      if (text.StartsWithIgnoringCaseAndAccents(prefix)) {
         return index;
+      }
     }
   }
 
   if (match_mode & kMatchIndex) {
-    bool ok = false;
-    int index = buffer_.ToString().ToInt(&ok);
-    if (index > 0 && index <= option_count)
+    int index = StringToIntLoose(buffer_.ToString()).value_or(0);
+    if (index > 0 && index <= option_count) {
       return index - 1;
+    }
   }
   return -1;
 }

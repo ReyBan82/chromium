@@ -14,19 +14,16 @@ namespace views {
 
 ExternalFocusTracker::ExternalFocusTracker(View* parent_view,
                                            FocusManager* focus_manager)
-    : focus_manager_(focus_manager),
-      parent_view_(parent_view),
+    : parent_view_(parent_view),
       last_focused_view_tracker_(std::make_unique<ViewTracker>()) {
   DCHECK(parent_view);
   // Store the view which is focused when we're created.
-  if (focus_manager_)
-    StartTracking();
+  if (focus_manager) {
+    StartTracking(focus_manager);
+  }
 }
 
-ExternalFocusTracker::~ExternalFocusTracker() {
-  if (focus_manager_)
-    focus_manager_->RemoveFocusChangeListener(this);
-}
+ExternalFocusTracker::~ExternalFocusTracker() = default;
 
 void ExternalFocusTracker::OnWillChangeFocus(View* focused_before,
                                              View* focused_now) {
@@ -42,30 +39,31 @@ void ExternalFocusTracker::OnDidChangeFocus(View* focused_before,
 
 void ExternalFocusTracker::FocusLastFocusedExternalView() {
   View* last_focused_view = last_focused_view_tracker_->view();
-  if (last_focused_view)
+  if (last_focused_view) {
     last_focused_view->RequestFocus();
+  }
 }
 
 void ExternalFocusTracker::SetFocusManager(FocusManager* focus_manager) {
-  if (focus_manager_)
-    focus_manager_->RemoveFocusChangeListener(this);
-  focus_manager_ = focus_manager;
-  if (focus_manager_)
-    StartTracking();
+  focus_manager_observation_.Reset();
+  if (focus_manager) {
+    StartTracking(focus_manager);
+  }
 }
 
 void ExternalFocusTracker::StoreLastFocusedView(View* view) {
   last_focused_view_tracker_->SetView(view);
 }
 
-void ExternalFocusTracker::StartTracking() {
-  View* current_focused_view = focus_manager_->GetFocusedView();
+void ExternalFocusTracker::StartTracking(FocusManager* focus_manager) {
+  View* current_focused_view = focus_manager->GetFocusedView();
   // During focus restore events, it's possible for focus to already be within
   // the parent_view_.
-  if (!parent_view_->Contains(current_focused_view))
+  if (!parent_view_->Contains(current_focused_view)) {
     StoreLastFocusedView(current_focused_view);
+  }
 
-  focus_manager_->AddFocusChangeListener(this);
+  focus_manager_observation_.Observe(focus_manager);
 }
 
 }  // namespace views

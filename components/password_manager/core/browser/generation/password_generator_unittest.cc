@@ -4,6 +4,8 @@
 
 #include "components/password_manager/core/browser/generation/password_generator.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <string>
 
 #include "base/notreached.h"
@@ -40,17 +42,13 @@ bool IsCharInClass(char16_t c, const std::string& class_name) {
   // symbols are treated like other character classes, so the importance of
   // dealing with them here is limited.
   NOTREACHED() << "Don't call IsCharInClass for symbols";
-  return false;
 }
 
 size_t CountCharsInClass(const std::u16string& password,
                          const std::string& class_name) {
-  size_t num = 0;
-  for (char16_t c : password) {
-    if (IsCharInClass(c, class_name))
-      ++num;
-  }
-  return num;
+  return std::ranges::count_if(password, [&class_name](char16_t c) {
+    return IsCharInClass(c, class_name);
+  });
 }
 
 PasswordRequirementsSpec_CharacterClass* GetMutableCharClass(
@@ -68,7 +66,6 @@ PasswordRequirementsSpec_CharacterClass* GetMutableCharClass(
     return spec->mutable_symbols();
   }
   NOTREACHED();
-  return nullptr;
 }
 
 class PasswordGeneratorTest : public testing::Test {
@@ -162,7 +159,7 @@ TEST_F(PasswordGeneratorTest, MinCharFrequenciesRespected) {
 
 TEST_F(PasswordGeneratorTest, MinCharFrequenciesInsane) {
   // Nothing breaks if the min frequencies are way beyond what's possible
-  // with the password length. In this case the generated passwor may contain
+  // with the password length. In this case the generated password may contain
   // just characters of one class but its target length does not increase.
   for (std::string char_class : kAllClassesButSymbols) {
     SCOPED_TRACE(char_class);
@@ -241,8 +238,9 @@ TEST_F(PasswordGeneratorTest, CharacterSetCanBeOverridden) {
   // as an indicator that the override was respected.
   size_t num_as_and_bs = 0;
   for (char16_t c : password) {
-    if (c == 'a' || c == 'b')
+    if (c == 'a' || c == 'b') {
       ++num_as_and_bs;
+    }
   }
   EXPECT_EQ(5u, num_as_and_bs);
 }
@@ -263,10 +261,12 @@ TEST_F(PasswordGeneratorTest, AllCharactersAreGenerated) {
     size_t num_as = 0;
     size_t num_bs = 0;
     for (char16_t c : password) {
-      if (c == 'a')
+      if (c == 'a') {
         ++num_as;
-      if (c == 'b')
+      }
+      if (c == 'b') {
         ++num_bs;
+      }
     }
     if (num_as > 0u && num_bs > 0u) {
       success = true;
@@ -304,6 +304,57 @@ TEST_F(PasswordGeneratorTest, ZeroLength) {
   // If the generated password following the spec is empty, a default spec is
   // applied.
   EXPECT_EQ(kDefaultPasswordLength, GeneratePassword(spec_).length());
+}
+
+TEST_F(PasswordGeneratorTest, SanitizeRequirementsSpecAcceptsValidSpec) {
+  spec_.set_max_length(12u);
+  spec_.set_priority(10u);
+  spec_.mutable_lower_case()->set_min(2u);
+  spec_.mutable_symbols()->set_character_set("!@#");
+  PasswordRequirementsSpec sanitized = SanitizeRequirementsSpec(spec_);
+  EXPECT_EQ(12u, sanitized.max_length());
+  EXPECT_EQ(10u, sanitized.priority());
+  EXPECT_EQ(2u, sanitized.lower_case().min());
+  EXPECT_EQ("!@#", sanitized.symbols().character_set());
+}
+
+TEST_F(PasswordGeneratorTest, SanitizeRequirementsSpecRejectsInvalidSpec) {
+  PasswordRequirementsSpec spec_lower_case;
+  spec_lower_case.mutable_lower_case()->set_character_set("a");
+
+  PasswordRequirementsSpec spec_upper_case;
+  spec_upper_case.mutable_upper_case()->set_character_set("A");
+
+  PasswordRequirementsSpec spec_alphabetic;
+  spec_alphabetic.mutable_alphabetic()->set_character_set("aA");
+
+  PasswordRequirementsSpec spec_numeric;
+  spec_numeric.mutable_numeric()->set_character_set("1");
+
+  PasswordRequirementsSpec spec_short;
+  spec_short.set_max_length(4u);
+
+  PasswordRequirementsSpec spec_symbols_with_letters;
+  spec_symbols_with_letters.mutable_symbols()->set_character_set("!@a");
+
+  PasswordRequirementsSpec spec_no_alphanumeric;
+  spec_no_alphanumeric.mutable_lower_case()->set_max(0u);
+  spec_no_alphanumeric.mutable_upper_case()->set_max(0u);
+  spec_no_alphanumeric.mutable_numeric()->set_max(0u);
+
+  for (auto* spec :
+       {&spec_lower_case, &spec_upper_case, &spec_alphabetic, &spec_numeric,
+        &spec_short, &spec_symbols_with_letters, &spec_no_alphanumeric}) {
+    spec->set_priority(100u);
+    PasswordRequirementsSpec sanitized = SanitizeRequirementsSpec(*spec);
+    EXPECT_FALSE(sanitized.has_priority());
+    EXPECT_FALSE(sanitized.has_max_length());
+    EXPECT_FALSE(sanitized.has_lower_case());
+    EXPECT_FALSE(sanitized.has_upper_case());
+    EXPECT_FALSE(sanitized.has_alphabetic());
+    EXPECT_FALSE(sanitized.has_numeric());
+    EXPECT_FALSE(sanitized.has_symbols());
+  }
 }
 
 }  // namespace

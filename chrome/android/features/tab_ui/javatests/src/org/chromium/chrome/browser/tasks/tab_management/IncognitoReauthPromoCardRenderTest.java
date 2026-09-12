@@ -11,8 +11,6 @@ import static androidx.test.espresso.matcher.ViewMatchers.isDisplayed;
 import static androidx.test.espresso.matcher.ViewMatchers.withId;
 import static androidx.test.espresso.matcher.ViewMatchers.withText;
 
-import static org.chromium.base.test.util.Batch.PER_CLASS;
-import static org.chromium.base.test.util.Restriction.RESTRICTION_TYPE_NON_LOW_END_DEVICE;
 import static org.chromium.chrome.browser.tasks.tab_management.TabUiTestHelper.createTabs;
 import static org.chromium.chrome.browser.tasks.tab_management.TabUiTestHelper.enterTabSwitcher;
 
@@ -32,32 +30,29 @@ import org.chromium.base.test.util.CriteriaHelper;
 import org.chromium.base.test.util.DisabledTest;
 import org.chromium.base.test.util.Feature;
 import org.chromium.base.test.util.Restriction;
+import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ChromeTabbedActivity;
-import org.chromium.chrome.browser.flags.ChromeFeatureList;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
 import org.chromium.chrome.browser.incognito.reauth.IncognitoReauthManager;
-import org.chromium.chrome.tab_ui.R;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.chrome.test.ChromeTabbedActivityTestRule;
+import org.chromium.chrome.test.transit.AutoResetCtaTransitTestRule;
+import org.chromium.chrome.test.transit.ChromeTransitTestRules;
+import org.chromium.chrome.test.transit.page.WebPageStation;
 import org.chromium.chrome.test.util.ActivityTestUtils;
 import org.chromium.chrome.test.util.ChromeRenderTestRule;
-import org.chromium.chrome.test.util.browser.Features;
-import org.chromium.ui.test.util.UiRestriction;
+import org.chromium.ui.base.DeviceFormFactor;
 
 import java.io.IOException;
 
-/**
- * Render tests for incognito re-auth promo message card.
- */
+/** Render tests for incognito re-auth promo message card. */
 @RunWith(ChromeJUnit4ClassRunner.class)
 @CommandLineFlags.Add(ChromeSwitches.DISABLE_FIRST_RUN_EXPERIENCE)
-@Restriction({UiRestriction.RESTRICTION_TYPE_PHONE, RESTRICTION_TYPE_NON_LOW_END_DEVICE})
-@Features.EnableFeatures({ChromeFeatureList.INCOGNITO_REAUTHENTICATION_FOR_ANDROID,
-        ChromeFeatureList.TAB_GROUPS_CONTINUATION_ANDROID})
-@Batch(PER_CLASS)
+@Restriction(DeviceFormFactor.PHONE)
+@Batch(Batch.PER_CLASS)
 public class IncognitoReauthPromoCardRenderTest {
     @Rule
-    public ChromeTabbedActivityTestRule mActivityTestRule = new ChromeTabbedActivityTestRule();
+    public AutoResetCtaTransitTestRule mActivityTestRule =
+            ChromeTransitTestRules.fastAutoResetCtaActivityRule();
 
     @Rule
     public ChromeRenderTestRule mRenderTestRule =
@@ -65,12 +60,14 @@ public class IncognitoReauthPromoCardRenderTest {
                     .setBugComponent(ChromeRenderTestRule.Component.PRIVACY_INCOGNITO)
                     .build();
 
+    private WebPageStation mInitialPage;
+
     @Before
     public void setUp() {
         IncognitoReauthManager.setIsIncognitoReauthFeatureAvailableForTesting(true);
         IncognitoReauthPromoMessageService.setIsPromoEnabledForTesting(true);
-        IncognitoReauthPromoMessageService.sTriggerReviewActionWithoutReauthForTesting = true;
-        mActivityTestRule.startMainActivityOnBlankPage();
+        IncognitoReauthPromoMessageService.setTriggerReviewActionWithoutReauthForTesting(true);
+        mInitialPage = mActivityTestRule.startOnBlankPage();
 
         CriteriaHelper.pollUiThread(
                 mActivityTestRule.getActivity().getTabModelSelector()::isTabStateInitialized);
@@ -78,20 +75,19 @@ public class IncognitoReauthPromoCardRenderTest {
 
     @After
     public void tearDown() {
-        IncognitoReauthManager.setIsIncognitoReauthFeatureAvailableForTesting(null);
-        IncognitoReauthPromoMessageService.setIsPromoEnabledForTesting(null);
-        IncognitoReauthPromoMessageService.sTriggerReviewActionWithoutReauthForTesting = null;
+        ActivityTestUtils.clearActivityOrientation(mActivityTestRule.getActivity());
     }
 
     @Test
     @MediumTest
     @Feature({"RenderTest"})
+    @DisabledTest(message = "https://crbug.com/40873492")
     public void testRenderReauthPromoMessageCard_Portrait() throws IOException {
         final ChromeTabbedActivity cta = mActivityTestRule.getActivity();
 
         createTabs(cta, true, 1);
         enterTabSwitcher(cta);
-        CriteriaHelper.pollUiThread(TabSwitcherCoordinator::hasAppendedMessagesForTesting);
+        CriteriaHelper.pollUiThread(TabSwitcherMessageManager::hasAppendedMessagesForTesting);
         onView(withId(R.id.large_message_card_item)).check(matches(isDisplayed()));
         mRenderTestRule.render(
                 cta.findViewById(R.id.large_message_card_item), "incognito_reauth_promo_portrait");
@@ -100,7 +96,7 @@ public class IncognitoReauthPromoCardRenderTest {
     @Test
     @MediumTest
     @Feature({"RenderTest"})
-    @DisabledTest(message = "https://crbug.com/1376143")
+    @DisabledTest(message = "https://crbug.com/40873492")
     public void testRenderReauthPromoMessageCard_Landscape() throws IOException {
         final ChromeTabbedActivity cta = mActivityTestRule.getActivity();
 
@@ -108,7 +104,7 @@ public class IncognitoReauthPromoCardRenderTest {
         ActivityTestUtils.rotateActivityToOrientation(cta, Configuration.ORIENTATION_LANDSCAPE);
 
         enterTabSwitcher(cta);
-        CriteriaHelper.pollUiThread(TabSwitcherCoordinator::hasAppendedMessagesForTesting);
+        CriteriaHelper.pollUiThread(TabSwitcherMessageManager::hasAppendedMessagesForTesting);
         onView(withId(R.id.large_message_card_item)).check(matches(isDisplayed()));
         mRenderTestRule.render(
                 cta.findViewById(R.id.large_message_card_item), "incognito_reauth_promo_landscape");
@@ -117,12 +113,13 @@ public class IncognitoReauthPromoCardRenderTest {
     @Test
     @MediumTest
     @Feature({"RenderTest"})
+    @DisabledTest(message = "https://crbug.com/40873492")
     public void testRenderReauthPromoMessageCard_Snackbar() throws IOException {
         final ChromeTabbedActivity cta = mActivityTestRule.getActivity();
 
         createTabs(cta, true, 1);
         enterTabSwitcher(cta);
-        CriteriaHelper.pollUiThread(TabSwitcherCoordinator::hasAppendedMessagesForTesting);
+        CriteriaHelper.pollUiThread(TabSwitcherMessageManager::hasAppendedMessagesForTesting);
         onView(withId(R.id.large_message_card_item)).check(matches(isDisplayed()));
         onView(withText(R.string.incognito_reauth_lock_action_text)).perform(click());
         onView(withId(R.id.snackbar)).check(matches(isDisplayed()));

@@ -7,7 +7,6 @@
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/run_loop.h"
-#include "build/chromeos_buildflags.h"
 #include "content/browser/storage_partition_impl.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/installed_payment_apps_finder.h"
@@ -104,12 +103,12 @@ class PaymentAppBrowserTest : public ContentBrowserTest {
   }
 
   std::string RunScript(const std::string& script) {
-    return EvalJs(shell()->web_contents(), script,
-                  EXECUTE_SCRIPT_USE_MANUAL_REPLY)
-        .ExtractString();
+    return EvalJs(shell()->web_contents(), script).ExtractString();
   }
 
-  std::string PopConsoleString() { return RunScript("resultQueue.pop()"); }
+  std::string PopConsoleString() {
+    return RunScript("resultQueue.pop().then(result => String(result))");
+  }
 
   void RegisterPaymentApp() {
     SkBitmap app_icon;
@@ -126,6 +125,7 @@ class PaymentAppBrowserTest : public ContentBrowserTest {
             /*service_worker_scope=*/
             service_worker_javascript_file_url.GetWithoutFilename(),
             /*payment_method_identifier=*/"https://bobpay.com",
+            shell()->web_contents()->GetPrimaryMainFrame()->GetGlobalId(),
             base::BindOnce(&OnPaymentAppInstall, run_loop.QuitClosure(),
                            &success));
     run_loop.Run();
@@ -216,7 +216,6 @@ class PaymentAppBrowserTest : public ContentBrowserTest {
                                            ->GetBrowserContext()
                                            ->GetDefaultStoragePartition())
         ->ClearData(StoragePartition::REMOVE_DATA_MASK_SERVICE_WORKERS,
-                    StoragePartition::QUOTA_MANAGED_STORAGE_MASK_ALL,
                     blink::StorageKey(), base::Time(), base::Time::Max(),
                     run_loop.QuitClosure());
 

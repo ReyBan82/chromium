@@ -4,9 +4,12 @@
 
 #include "remoting/protocol/webrtc_audio_source_adapter.h"
 
+#include <algorithm>
+#include <iterator>
 #include <numeric>
 #include <vector>
 
+#include "base/containers/span.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
@@ -38,14 +41,15 @@ class FakeAudioSink : public webrtc::AudioTrackSinkInterface {
               int sample_rate,
               size_t number_of_channels,
               size_t number_of_samples) override {
-    EXPECT_EQ(kSampleRate, sample_rate);
-    EXPECT_EQ(kBytesPerSample * 8, bits_per_sample);
-    EXPECT_EQ(kChannels, static_cast<int>(number_of_channels));
-    EXPECT_EQ((kSampleRate * kFrameDuration).InSeconds(),
-              static_cast<int>(number_of_samples));
-    const int16_t* samples = reinterpret_cast<const int16_t*>(audio_data);
-    samples_.insert(samples_.end(), samples,
-                    samples + number_of_samples * kChannels);
+    EXPECT_EQ(sample_rate, kSampleRate);
+    EXPECT_EQ(bits_per_sample, kBytesPerSample * 8);
+    EXPECT_EQ(static_cast<int>(number_of_channels), kChannels);
+    EXPECT_EQ(static_cast<int>(number_of_samples),
+              (kSampleRate * kFrameDuration).InSeconds());
+    const int16_t* samples = static_cast<const int16_t*>(audio_data);
+    size_t sample_count = number_of_samples * kChannels;
+    samples_.reserve(samples_.size() + sample_count);
+    std::copy_n(samples, sample_count, std::back_inserter(samples_));
   }
 
   const std::vector<int16_t>& samples() { return samples_; }
@@ -59,8 +63,9 @@ class FakeAudioSink : public webrtc::AudioTrackSinkInterface {
 class WebrtcAudioSourceAdapterTest : public testing::Test {
  public:
   void SetUp() override {
-    audio_source_adapter_ = new rtc::RefCountedObject<WebrtcAudioSourceAdapter>(
-        task_environment_.GetMainThreadTaskRunner());
+    audio_source_adapter_ =
+        new webrtc::RefCountedObject<WebrtcAudioSourceAdapter>(
+            task_environment_.GetMainThreadTaskRunner());
     audio_source_ = new FakeAudioSource();
     audio_source_adapter_->Start(base::WrapUnique(audio_source_.get()));
     audio_source_adapter_->AddSink(&sink_);
@@ -74,7 +79,7 @@ class WebrtcAudioSourceAdapterTest : public testing::Test {
 
  protected:
   base::test::SingleThreadTaskEnvironment task_environment_;
-  raw_ptr<FakeAudioSource> audio_source_;
+  raw_ptr<FakeAudioSource, AcrossTasksDanglingUntriaged> audio_source_;
   scoped_refptr<WebrtcAudioSourceAdapter> audio_source_adapter_;
   FakeAudioSink sink_;
 };
@@ -92,8 +97,8 @@ TEST_F(WebrtcAudioSourceAdapterTest, PartialFrames) {
     }
 
     std::unique_ptr<AudioPacket> packet(new AudioPacket());
-    packet->add_data(reinterpret_cast<char*>(&(data[0])),
-                     num_samples * kChannels * sizeof(int16_t));
+    auto bytes = base::as_bytes(base::span(data));
+    packet->add_data(reinterpret_cast<const char*>(bytes.data()), bytes.size());
     packet->set_encoding(AudioPacket::ENCODING_RAW);
     packet->set_sampling_rate(AudioPacket::SAMPLING_RATE_48000);
     packet->set_bytes_per_sample(AudioPacket::BYTES_PER_SAMPLE_2);
@@ -109,8 +114,8 @@ TEST_F(WebrtcAudioSourceAdapterTest, PartialFrames) {
   ASSERT_EQ(total_samples * kChannels, static_cast<int>(received.size()));
   sample_value = 1;
   for (int i = 0; i < total_samples; ++i) {
-    ASSERT_EQ(sample_value, received[i * kChannels]) << i;
-    ASSERT_EQ(-sample_value, received[i * kChannels + 1]);
+    ASSERT_EQ(received[i * kChannels], sample_value);
+    ASSERT_EQ(received[i * kChannels + 1], -sample_value);
     ++sample_value;
   }
 }

@@ -6,21 +6,15 @@
 
 #include <utility>
 
-#include "chrome/browser/ash/settings/cros_settings.h"
-#include "chrome/browser/ui/ash/wallpaper_controller_client_impl.h"
-#include "components/policy/policy_constants.h"
+#include "base/check_deref.h"
+#include "base/functional/callback_helpers.h"
+#include "chrome/browser/ui/ash/wallpaper/wallpaper_controller_client_impl.h"
 
 namespace policy {
 
 WallpaperImageExternalDataHandler::WallpaperImageExternalDataHandler(
-    ash::CrosSettings* cros_settings,
-    DeviceLocalAccountPolicyService* policy_service)
-    : wallpaper_image_observer_(cros_settings,
-                                policy_service,
-                                key::kWallpaperImage,
-                                this) {
-  wallpaper_image_observer_.Init();
-}
+    PrefService* local_state)
+    : local_state_(CHECK_DEREF(local_state)) {}
 
 WallpaperImageExternalDataHandler::~WallpaperImageExternalDataHandler() =
     default;
@@ -29,7 +23,8 @@ void WallpaperImageExternalDataHandler::OnExternalDataCleared(
     const std::string& policy,
     const std::string& user_id) {
   WallpaperControllerClientImpl::Get()->RemovePolicyWallpaper(
-      CloudExternalDataPolicyHandler::GetAccountId(user_id));
+      CloudExternalDataPolicyObserver::GetAccountId(local_state_.get(),
+                                                    user_id));
 }
 
 void WallpaperImageExternalDataHandler::OnExternalDataFetched(
@@ -38,14 +33,15 @@ void WallpaperImageExternalDataHandler::OnExternalDataFetched(
     std::unique_ptr<std::string> data,
     const base::FilePath& file_path) {
   WallpaperControllerClientImpl::Get()->SetPolicyWallpaper(
-      CloudExternalDataPolicyHandler::GetAccountId(user_id), std::move(data));
+      CloudExternalDataPolicyObserver::GetAccountId(local_state_.get(),
+                                                    user_id),
+      std::move(data));
 }
 
 void WallpaperImageExternalDataHandler::RemoveForAccountId(
-    const AccountId& account_id,
-    base::OnceClosure on_removed) {
-  WallpaperControllerClientImpl::Get()->RemoveUserWallpaper(
-      account_id, std::move(on_removed));
+    const AccountId& account_id) {
+  WallpaperControllerClientImpl::Get()->RemoveUserWallpaper(account_id,
+                                                            base::DoNothing());
 }
 
 }  // namespace policy

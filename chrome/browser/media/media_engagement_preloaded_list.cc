@@ -4,6 +4,12 @@
 
 #include "chrome/browser/media/media_engagement_preloaded_list.h"
 
+#include <cstdint>
+#include <optional>
+
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
+#include "base/containers/to_vector.h"
 #include "base/files/file_util.h"
 #include "base/no_destructor.h"
 #include "base/path_service.h"
@@ -60,10 +66,7 @@ bool MediaEngagementPreloadedList::LoadFromFile(const base::FilePath& path) {
   }
 
   // Copy data from the protobuf message.
-  dafsa_ = std::vector<unsigned char>(
-      message.dafsa().c_str(),
-      message.dafsa().c_str() + message.dafsa().length());
-
+  dafsa_ = base::ToVector(base::as_byte_span(message.dafsa()));
   is_loaded_ = true;
   return true;
 }
@@ -86,8 +89,7 @@ bool MediaEngagementPreloadedList::CheckOriginIsPresent(
   std::string location(origin.host());
 
   // Add :<port> if we use a non-default port.
-  if (origin.port() != url::DefaultPortForScheme(origin.scheme().data(),
-                                                 origin.scheme().length())) {
+  if (origin.port() != url::DefaultPortForScheme(origin.scheme())) {
     location.push_back(':');
     std::string port(base::NumberToString(origin.port()));
     location.append(std::move(port));
@@ -120,7 +122,9 @@ bool MediaEngagementPreloadedList::CheckOriginIsPresent(
 MediaEngagementPreloadedList::DafsaResult
 MediaEngagementPreloadedList::CheckStringIsPresent(
     const std::string& input) const {
-  return static_cast<MediaEngagementPreloadedList::DafsaResult>(
-      net::LookupStringInFixedSet(dafsa_.data(), dafsa_.size(), input.c_str(),
-                                  input.size()));
+  return net::LookupStringInFixedSet(dafsa_, input)
+      .transform([](int result) {
+        return static_cast<MediaEngagementPreloadedList::DafsaResult>(result);
+      })
+      .value_or(DafsaResult::kNotFound);
 }

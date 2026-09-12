@@ -10,6 +10,7 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "media/base/cdm_context.h"
 #include "media/base/demuxer_stream.h"
@@ -26,10 +27,9 @@ DecryptingMediaResource::DecryptingMediaResource(
     scoped_refptr<base::SequencedTaskRunner> task_runner)
     : media_resource_(media_resource),
       cdm_context_(cdm_context),
-      media_log_(media_log),
+      media_log_(MediaLog::CloneSafely(media_log)),
       task_runner_(task_runner) {
   DCHECK(media_resource);
-  DCHECK_EQ(MediaResource::STREAM, media_resource->GetType());
   DCHECK(cdm_context_);
   DCHECK(cdm_context_->GetDecryptor());
   DCHECK(cdm_context_->GetDecryptor()->CanAlwaysDecrypt());
@@ -39,14 +39,10 @@ DecryptingMediaResource::DecryptingMediaResource(
 
 DecryptingMediaResource::~DecryptingMediaResource() = default;
 
-MediaResource::Type DecryptingMediaResource::GetType() const {
-  DCHECK_EQ(MediaResource::STREAM, media_resource_->GetType());
-  return MediaResource::STREAM;
-}
-
-std::vector<DemuxerStream*> DecryptingMediaResource::GetAllStreams() {
-  if (streams_.size())
+std::vector<raw_ptr<DemuxerStream>> DecryptingMediaResource::GetAllStreams() {
+  if (streams_.size()) {
     return streams_;
+  }
 
   return media_resource_->GetAllStreams();
 }
@@ -61,9 +57,9 @@ void DecryptingMediaResource::Initialize(InitCB init_cb, WaitingCB waiting_cb) {
   init_cb_ = std::move(init_cb);
   num_dds_pending_init_ = streams.size();
 
-  for (auto* stream : streams) {
+  for (media::DemuxerStream* stream : streams) {
     auto decrypting_demuxer_stream = std::make_unique<DecryptingDemuxerStream>(
-        task_runner_, media_log_, waiting_cb);
+        task_runner_, media_log_.get(), waiting_cb);
 
     // DecryptingDemuxerStream always invokes the callback asynchronously so
     // that we have no reentrancy issues. "All public APIs and callbacks are

@@ -4,14 +4,19 @@
 
 #include "services/network/public/cpp/proxy_config_mojom_traits.h"
 
+#include "base/debug/dump_without_crashing.h"
+#include "mojo/public/cpp/bindings/scoped_message_error_crash_key.h"
+#include "net/base/proxy_chain.h"
 #include "net/base/proxy_string_util.h"
+#include "net/proxy_resolution/proxy_host_matching_rules.h"
+#include "services/network/public/cpp/network_param_mojom_traits.h"
 #include "url/gurl.h"
 
 namespace mojo {
 
-std::vector<std::string>
-StructTraits<network::mojom::ProxyBypassRulesDataView,
-             net::ProxyBypassRules>::rules(const net::ProxyBypassRules& r) {
+std::vector<std::string> StructTraits<
+    network::mojom::ProxyHostMatchingRulesDataView,
+    net::ProxyHostMatchingRules>::rules(const net::ProxyHostMatchingRules& r) {
   std::vector<std::string> out;
   for (const auto& rule : r.rules()) {
     out.push_back(rule->ToString());
@@ -19,41 +24,34 @@ StructTraits<network::mojom::ProxyBypassRulesDataView,
   return out;
 }
 
-bool StructTraits<network::mojom::ProxyBypassRulesDataView,
-                  net::ProxyBypassRules>::
-    Read(network::mojom::ProxyBypassRulesDataView data,
-         net::ProxyBypassRules* out_proxy_bypass_rules) {
+bool StructTraits<network::mojom::ProxyHostMatchingRulesDataView,
+                  net::ProxyHostMatchingRules>::
+    Read(network::mojom::ProxyHostMatchingRulesDataView data,
+         net::ProxyHostMatchingRules* out_proxy_bypass_rules) {
   std::vector<std::string> rules;
-  if (!data.ReadRules(&rules))
+  if (!data.ReadRules(&rules)) {
     return false;
+  }
   for (const auto& rule : rules) {
-    if (!out_proxy_bypass_rules->AddRuleFromString(rule))
+    if (!out_proxy_bypass_rules->AddRuleFromString(rule)) {
+      mojo::debug::ScopedMessageErrorCrashKey crash_key_value(
+          "AddRuleFromString fault");
+      base::debug::DumpWithoutCrashing();
       return false;
+    }
   }
   return true;
-}
-
-std::vector<std::string>
-StructTraits<network::mojom::ProxyListDataView, net::ProxyList>::proxies(
-    const net::ProxyList& r) {
-  std::vector<std::string> out;
-  for (const auto& proxy : r.GetAll()) {
-    out.push_back(net::ProxyServerToPacResultElement(proxy));
-  }
-  return out;
 }
 
 bool StructTraits<network::mojom::ProxyListDataView, net::ProxyList>::Read(
     network::mojom::ProxyListDataView data,
     net::ProxyList* out_proxy_list) {
-  std::vector<std::string> proxies;
-  if (!data.ReadProxies(&proxies))
+  std::vector<net::ProxyChain> proxy_chains;
+  if (!data.ReadProxies(&proxy_chains)) {
     return false;
-  for (const auto& proxy : proxies) {
-    net::ProxyServer proxy_server = net::PacResultElementToProxyServer(proxy);
-    if (!proxy_server.is_valid())
-      return false;
-    out_proxy_list->AddProxyServer(proxy_server);
+  }
+  for (auto& proxy_chain : proxy_chains) {
+    out_proxy_list->AddProxyChain(std::move(proxy_chain));
   }
   return true;
 }
@@ -72,22 +70,46 @@ EnumTraits<network::mojom::ProxyRulesType, net::ProxyConfig::ProxyRules::Type>::
   return network::mojom::ProxyRulesType::EMPTY;
 }
 
-bool EnumTraits<network::mojom::ProxyRulesType,
-                net::ProxyConfig::ProxyRules::Type>::
-    FromMojom(network::mojom::ProxyRulesType mojo_proxy_rules_type,
-              net::ProxyConfig::ProxyRules::Type* out) {
+net::ProxyConfig::ProxyRules::Type
+EnumTraits<network::mojom::ProxyRulesType, net::ProxyConfig::ProxyRules::Type>::
+    FromMojom(network::mojom::ProxyRulesType mojo_proxy_rules_type) {
   switch (mojo_proxy_rules_type) {
     case network::mojom::ProxyRulesType::EMPTY:
-      *out = net::ProxyConfig::ProxyRules::Type::EMPTY;
-      return true;
+      return net::ProxyConfig::ProxyRules::Type::EMPTY;
     case network::mojom::ProxyRulesType::PROXY_LIST:
-      *out = net::ProxyConfig::ProxyRules::Type::PROXY_LIST;
-      return true;
+      return net::ProxyConfig::ProxyRules::Type::PROXY_LIST;
     case network::mojom::ProxyRulesType::PROXY_LIST_PER_SCHEME:
-      *out = net::ProxyConfig::ProxyRules::Type::PROXY_LIST_PER_SCHEME;
-      return true;
+      return net::ProxyConfig::ProxyRules::Type::PROXY_LIST_PER_SCHEME;
   }
-  return false;
+  NOTREACHED();
+}
+
+network::mojom::ProxyOverrideRuleResult
+EnumTraits<network::mojom::ProxyOverrideRuleResult,
+           net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::Result>::
+    ToMojom(
+        net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::Result result) {
+  switch (result) {
+    case net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kNotFound:
+      return network::mojom::ProxyOverrideRuleResult::kNotFound;
+    case net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::kResolved:
+      return network::mojom::ProxyOverrideRuleResult::kResolved;
+  }
+}
+
+net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::Result
+EnumTraits<network::mojom::ProxyOverrideRuleResult,
+           net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::Result>::
+    FromMojom(network::mojom::ProxyOverrideRuleResult mojom_result) {
+  switch (mojom_result) {
+    case network::mojom::ProxyOverrideRuleResult::kNotFound:
+      return net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::Result::
+          kNotFound;
+    case network::mojom::ProxyOverrideRuleResult::kResolved:
+      return net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition::Result::
+          kResolved;
+  }
+  NOTREACHED();
 }
 
 bool StructTraits<network::mojom::ProxyRulesDataView,
@@ -104,10 +126,59 @@ bool StructTraits<network::mojom::ProxyRulesDataView,
          data.ReadFallbackProxies(&out_proxy_rules->fallback_proxies);
 }
 
+bool StructTraits<network::mojom::DnsProbeConditionDataView,
+                  net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition>::
+    Read(network::mojom::DnsProbeConditionDataView data,
+         net::ProxyConfig::ProxyOverrideRule::DnsProbeCondition* out) {
+  return data.ReadHost(&out->host) && data.ReadResult(&out->result);
+}
+
+bool StructTraits<network::mojom::ProxyOverrideRuleDataView,
+                  net::ProxyConfig::ProxyOverrideRule>::
+    Read(network::mojom::ProxyOverrideRuleDataView data,
+         net::ProxyConfig::ProxyOverrideRule* out) {
+  return data.ReadDestinationMatchers(&out->destination_matchers) &&
+         data.ReadExcludeDestinationMatchers(
+             &out->exclude_destination_matchers) &&
+         data.ReadProxyList(&out->proxy_list) &&
+         data.ReadDnsConditions(&out->dns_conditions) &&
+         !out->destination_matchers.rules().empty() &&
+         !out->proxy_list.IsEmpty();
+}
+
+bool StructTraits<network::mojom::DynamicRoutingRuleDataView,
+                  net::ProxyConfig::DynamicRoutingRule>::
+    Read(network::mojom::DynamicRoutingRuleDataView data,
+         net::ProxyConfig::DynamicRoutingRule* out) {
+  return data.ReadDestinationMatchers(&out->destination_matchers) &&
+         data.ReadProxyList(&out->proxy_list) &&
+         !out->destination_matchers.rules().empty() &&
+         !out->proxy_list.IsEmpty();
+}
+
+bool StructTraits<network::mojom::DynamicRoutingConfigDataView,
+                  net::ProxyConfig::DynamicRoutingConfig>::
+    Read(network::mojom::DynamicRoutingConfigDataView data,
+         net::ProxyConfig::DynamicRoutingConfig* out) {
+  return data.ReadRoutingRules(&out->routing_rules);
+}
 
 bool StructTraits<network::mojom::ProxyConfigDataView, net::ProxyConfig>::Read(
     network::mojom::ProxyConfigDataView data,
     net::ProxyConfig* out_proxy_config) {
+  std::vector<net::ProxyConfig::ProxyOverrideRule> proxy_override_rules;
+  if (!data.ReadProxyOverrideRules(&proxy_override_rules)) {
+    return false;
+  }
+  out_proxy_config->set_proxy_override_rules(std::move(proxy_override_rules));
+
+  net::ProxyConfig::DynamicRoutingConfig dynamic_routing_config;
+  if (!data.ReadDynamicRoutingConfig(&dynamic_routing_config)) {
+    return false;
+  }
+  out_proxy_config->set_dynamic_routing_config(
+      std::move(dynamic_routing_config));
+
   std::string pac_url;
   if (!data.ReadPacUrl(&pac_url) ||
       !data.ReadProxyRules(&out_proxy_config->proxy_rules())) {

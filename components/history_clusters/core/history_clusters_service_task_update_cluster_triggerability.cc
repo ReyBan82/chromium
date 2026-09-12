@@ -23,17 +23,22 @@ HistoryClustersServiceTaskUpdateClusterTriggerability::
         base::WeakPtr<HistoryClustersService> weak_history_clusters_service,
         ClusteringBackend* const backend,
         history::HistoryService* const history_service,
+        bool likely_has_unclustered_visits_or_unprocessed_clusters,
         base::OnceClosure callback)
     : weak_history_clusters_service_(std::move(weak_history_clusters_service)),
       backend_(backend),
       history_service_(history_service),
       callback_(std::move(callback)),
-      task_created_time_(base::Time::Now()) {
+      task_created_time_(base::Time::Now()),
+      likely_has_unclustered_visits_or_unprocessed_clusters_(
+          likely_has_unclustered_visits_or_unprocessed_clusters) {
   DCHECK(weak_history_clusters_service_);
   DCHECK(history_service_);
   DCHECK(backend_);
 
   continuation_params_.continuation_time = task_created_time_;
+  continuation_params_.exhausted_unclustered_visits =
+      !likely_has_unclustered_visits_or_unprocessed_clusters_;
   Start();
 }
 
@@ -79,7 +84,7 @@ void HistoryClustersServiceTaskUpdateClusterTriggerability::Start() {
 void HistoryClustersServiceTaskUpdateClusterTriggerability::
     OnGotAnnotatedVisitsToCluster(
         base::TimeTicks start_time,
-        std::vector<int64_t> old_clusters_unused,
+        std::vector<history::ClusterId> old_clusters_unused,
         std::vector<history::AnnotatedVisit> annotated_visits,
         QueryClustersContinuationParams continuation_params) {
   if (!weak_history_clusters_service_) {
@@ -195,24 +200,44 @@ void HistoryClustersServiceTaskUpdateClusterTriggerability::
     // TODO(manukh): If the most recent cluster is invalid (due to DB
     //  corruption), `GetMostRecentClusters()` will return no clusters. We
     //  should handle this case and not assume we've exhausted history.
-    done_ = true;
-    std::move(callback_).Run();
+    MarkDoneAndRunCallback();
     return;
   }
   continuation_params_.continuation_time =
       clusters.back().GetMostRecentVisit().annotated_visit.visit_row.visit_time;
 
   std::vector<history::Cluster> filtered_clusters;
-  base::ranges::copy_if(clusters, std::back_inserter(filtered_clusters),
-                        [&](const history::Cluster& cluster) {
-                          return !cluster.triggerability_calculated;
-                        });
+  std::ranges::copy_if(std::make_move_iterator(clusters.begin()),
+                       std::make_move_iterator(clusters.end()),
+                       std::back_inserter(filtered_clusters),
+                       [&](const history::Cluster& cluster) {
+                         return !cluster.triggerability_calculated;
+                       });
 
   if (filtered_clusters.empty()) {
-    // Get more persisted clusters and see if the clusters need to be updated if
-    // visits have not been exhausted yet.
-    Start();
+    if (!updated_cluster_triggerability_after_filtered_clusters_empty_) {
+      // If nullopt, set initial state to false.
+      updated_cluster_triggerability_after_filtered_clusters_empty_ = false;
+    }
+
+    if (likely_has_unclustered_visits_or_unprocessed_clusters_) {
+      // Get more persisted clusters and see if the clusters need to be updated
+      // if visits have not been exhausted yet.
+      Start();
+    } else {
+      MarkDoneAndRunCallback();
+    }
     return;
+  }
+
+  updated_cluster_triggerability_ = true;
+
+  if (updated_cluster_triggerability_after_filtered_clusters_empty_) {
+    // If this is a run after all returned clusters had their cluster
+    // triggerability calculated, set this value to true since there were
+    // clusters that did not have their triggerability calculated earlier in the
+    // user's history.
+    updated_cluster_triggerability_after_filtered_clusters_empty_ = true;
   }
 
   backend_->GetClusterTriggerability(
@@ -271,6 +296,24 @@ void HistoryClustersServiceTaskUpdateClusterTriggerability::
       base::TimeTicks::Now() - start_time);
 
   Start();
+}
+
+void HistoryClustersServiceTaskUpdateClusterTriggerability::
+    MarkDoneAndRunCallback() {
+  done_ = true;
+
+  base::UmaHistogramBoolean(
+      "History.Clusters.Backend.UpdateClusterTriggerability."
+      "DidUpdateClusterTriggerability",
+      updated_cluster_triggerability_);
+  if (updated_cluster_triggerability_after_filtered_clusters_empty_) {
+    base::UmaHistogramBoolean(
+        "History.Clusters.Backend.UpdateClusterTriggerability."
+        "DidUpdateClusterTriggerability.AfterFilteredClustersEmpty",
+        *updated_cluster_triggerability_after_filtered_clusters_empty_);
+  }
+
+  std::move(callback_).Run();
 }
 
 }  // namespace history_clusters

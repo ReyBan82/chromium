@@ -5,15 +5,9 @@
 import {assertInstanceof} from '../../assert.js';
 import * as error from '../../error.js';
 import {CrosImageCapture} from '../../mojo/image_capture.js';
-import {
-  CanceledError,
-  ErrorLevel,
-  ErrorType,
-  Facing,
-  PreviewVideo,
-  Resolution,
-} from '../../type.js';
-import {StreamConstraints} from '../stream_constraints.js';
+import type {Facing, PreviewVideo, Resolution} from '../../type.js';
+import {CanceledError, ErrorLevel, ErrorType} from '../../type.js';
+import type {StreamConstraints} from '../stream_constraints.js';
 
 /**
  * Base class for controlling capture sequence in different camera modes.
@@ -60,13 +54,12 @@ export abstract class ModeBase {
 
   /**
    * Stops the ongoing capture operation.
-   *
-   * @return Promise for ongoing capture operation.
    */
   async stopCapture(): Promise<void> {
     this.stop();
     try {
-      await this.capture;
+      // We're intentionally ignoring the returned [Promise<void>].
+      void await this.capture;
     } catch (e) {
       if (e instanceof CanceledError) {
         return;
@@ -83,23 +76,19 @@ export abstract class ModeBase {
 
   /**
    * Adds an observer to save image metadata.
-   *
-   * @return Promise for the operation.
    */
   async addMetadataObserver(): Promise<void> {
     if (this.video.isExpired()) {
       return;
     }
-    this.crosImageCapture.addMetadataObserver();
+    await this.crosImageCapture.addMetadataObserver();
   }
 
   /**
    * Removes the observer that saves metadata.
-   *
-   * @return Promise for the operation.
    */
-  async removeMetadataObserver(): Promise<void> {
-    if (!this.video.isExpired) {
+  removeMetadataObserver(): void {
+    if (!this.video.isExpired()) {
       return;
     }
     this.crosImageCapture.removeMetadataObserver();
@@ -126,9 +115,6 @@ export abstract class ModeBase {
 }
 
 export abstract class ModeFactory {
-  /**
-   * Preview video.
-   */
   protected previewVideo: PreviewVideo|null = null;
 
   /**

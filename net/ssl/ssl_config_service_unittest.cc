@@ -6,8 +6,14 @@
 
 #include <vector>
 
+#include "base/containers/extend.h"
+#include "base/test/scoped_feature_list.h"
+#include "net/base/features.h"
+#include "net/cert/x509_util.h"
+#include "net/test/cert_builder.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/boringssl/src/include/openssl/ssl.h"
 
 namespace net {
 
@@ -22,8 +28,12 @@ class MockSSLConfigService : public SSLConfigService {
   // SSLConfigService implementation
   SSLContextConfig GetSSLContextConfig() override { return config_; }
 
+  EchMode GetEchMode(std::string_view hostname) const override {
+    return EchMode::kOpportunistic;
+  }
+
   bool CanShareConnectionWithClientCerts(
-      const std::string& hostname) const override {
+      std::string_view hostname) const override {
     return false;
   }
 
@@ -48,6 +58,7 @@ class MockSSLConfigServiceObserver : public SSLConfigService::Observer {
 
   MOCK_METHOD0(OnSSLContextConfigChanged, void());
 };
+
 
 }  // namespace
 
@@ -125,7 +136,101 @@ TEST(SSLConfigServiceTest, ConfigUpdatesNotifyObservers) {
   EXPECT_CALL(observer, OnSSLContextConfigChanged()).Times(1);
   mock_service.SetSSLContextConfig(initial_config);
 
+  // Test that changing the named groups config triggers an update.
+  initial_config.supported_named_groups.pop_back();
+  EXPECT_CALL(observer, OnSSLContextConfigChanged()).Times(1);
+  mock_service.SetSSLContextConfig(initial_config);
+
   mock_service.RemoveObserver(&observer);
+}
+
+TEST(SSLContextConfigTest, GetSupportedGroups) {
+  SSLContextConfig config;
+
+  // Verify the defaults.
+  std::vector<uint16_t> expected_supported_groups = {
+      SSL_GROUP_X25519_MLKEM768, SSL_GROUP_X25519, SSL_GROUP_SECP256R1,
+      SSL_GROUP_SECP384R1};
+  std::vector<uint16_t> expected_key_shares = {SSL_GROUP_X25519_MLKEM768,
+                                               SSL_GROUP_X25519};
+
+  EXPECT_EQ(config.GetSupportedGroups(), expected_supported_groups);
+  EXPECT_EQ(config.GetSupportedGroups(/*key_shares_only=*/true),
+            expected_key_shares);
+
+  // Remove the last group, SSL_GROUP_SECP384R1.
+  config.supported_named_groups.pop_back();
+  // It should be removed from the output of GetSupportedGroups().
+  expected_supported_groups.pop_back();
+  EXPECT_EQ(config.GetSupportedGroups(), expected_supported_groups);
+  // The expected key shares are not changed because the removed group was not
+  // configured to send a key share.
+  EXPECT_EQ(config.GetSupportedGroups(/*key_shares_only=*/true),
+            expected_key_shares);
+}
+
+TEST(SSLContextConfigTest, TrustAnchorIDsDisabled) {
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(features::kTLSTrustAnchorIDs);
+
+  SSLContextConfig config;
+
+  EXPECT_FALSE(config.ShouldAdvertiseTrustAnchorIDs());
+
+  config.trust_anchor_ids = {0x00, 0x02, 0x01, 0x11};
+
+  EXPECT_FALSE(config.ShouldAdvertiseTrustAnchorIDs());
+}
+
+TEST(SSLContextConfigTest, RequestServerPadding) {
+  {
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitAndDisableFeature(features::kAddTLSServerHandshakePadding);
+    SSLContextConfig config;
+    EXPECT_EQ(std::nullopt, config.RequestServerPadding());
+  }
+
+  {
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitAndEnableFeatureWithParameters(
+        features::kAddTLSServerHandshakePadding,
+        {{"AddTLSServerHandshakePaddingBytes", "128"}});
+    SSLContextConfig config;
+    EXPECT_EQ(128, config.RequestServerPadding());
+  }
+
+  {
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitAndEnableFeatureWithParameters(
+        features::kAddTLSServerHandshakePadding,
+        {{"AddTLSServerHandshakePaddingBytes", "0"}});
+    SSLContextConfig config;
+    EXPECT_EQ(0, config.RequestServerPadding());
+  }
+}
+
+TEST(SSLContextConfigTest, TrustAnchorIDs) {
+  base::test::ScopedFeatureList feature_list{features::kTLSTrustAnchorIDs};
+  SSLContextConfig config;
+
+  EXPECT_FALSE(config.ShouldAdvertiseTrustAnchorIDs());
+
+  const std::vector<uint8_t> kTaiList1 = {0x00, 0x02, 0x01, 0x11};
+  config.trust_anchor_ids = kTaiList1;
+  EXPECT_TRUE(config.ShouldAdvertiseTrustAnchorIDs());
+  EXPECT_EQ(config.SelectAllTrustAnchorIDs(), kTaiList1);
+
+  const std::vector<uint8_t> kTaiList2 = {0x00, 0x02, 0x01, 0x21};
+  config.time_bound_trust_anchor_ids = TimeBoundTrustAnchorIDs{
+      .max_usable_time = base::Time::Now() + base::Seconds(1000),
+      .trust_anchor_ids = kTaiList2};
+  EXPECT_TRUE(config.ShouldAdvertiseTrustAnchorIDs());
+  EXPECT_EQ(config.SelectAllTrustAnchorIDs(), kTaiList2);
+
+  config.time_bound_trust_anchor_ids->max_usable_time =
+      base::Time::Now() - base::Seconds(10);
+  EXPECT_TRUE(config.ShouldAdvertiseTrustAnchorIDs());
+  EXPECT_EQ(config.SelectAllTrustAnchorIDs(), kTaiList1);
 }
 
 }  // namespace net

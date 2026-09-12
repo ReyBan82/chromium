@@ -6,11 +6,13 @@
 #define COMPONENTS_PAYMENTS_CONTENT_PAYMENT_REQUEST_DISPLAY_MANAGER_H_
 
 #include <memory>
+#include <optional>
 
 #include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "url/gurl.h"
+#include "url/origin.h"
 
 namespace payments {
 
@@ -24,6 +26,23 @@ using PaymentHandlerOpenWindowCallback =
     base::OnceCallback<void(bool /* success */,
                             int /* render_process_id */,
                             int /* render_frame_id */)>;
+
+// Enum of possible outcomes from a call to
+// PaymentRequestDisplayManager::TryShow, used for logging purposes.
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+//
+// LINT.IfChange(PaymentRequestTryShowOutcome)
+enum class PaymentRequestTryShowOutcome {
+  kAbleToShow = 0,
+  kCannotShowUnknownReason = 1,
+  kCannotShowDelegateWasNull = 2,
+  kCannotShowExistingPaymentRequestSameTab = 3,
+  kCannotShowExistingPaymentRequestDifferentTab = 4,
+  kMaxValue = kCannotShowExistingPaymentRequestDifferentTab,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/payment/enums.xml:PaymentRequestTryShowOutcome)
 
 // This KeyedService is responsible for displaying and hiding Payment Request
 // UI. It ensures that only one Payment Request is showing per profile.
@@ -46,8 +65,15 @@ class PaymentRequestDisplayManager : public KeyedService {
     void DisplayPaymentHandlerWindow(const GURL& url,
                                      PaymentHandlerOpenWindowCallback callback);
 
+    // Set the expected origin of the payment handler.
+    void SetPaymentHandlerOrigin(std::optional<url::Origin> origin);
+
     // Returns true after Show() was called.
     bool was_shown() const { return was_shown_; }
+
+    base::WeakPtr<ContentPaymentRequestDelegate> delegate() {
+      return delegate_;
+    }
 
     base::WeakPtr<DisplayHandle> GetWeakPtr();
 
@@ -55,6 +81,7 @@ class PaymentRequestDisplayManager : public KeyedService {
     base::WeakPtr<PaymentRequestDisplayManager> display_manager_;
     base::WeakPtr<ContentPaymentRequestDelegate> delegate_;
     bool was_shown_ = false;
+    std::optional<url::Origin> payment_handler_origin_;
 
     base::WeakPtrFactory<DisplayHandle> weak_ptr_factory_{this};
   };

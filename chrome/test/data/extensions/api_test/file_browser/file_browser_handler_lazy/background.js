@@ -24,9 +24,9 @@
 
 // Initial content of handled files. The content is set in
 // external_filesystem_apitest.cc.
-var kInitialTestFileContent = 'This is some test content.';
+const INITIAL_TEST_FILE_CONTENT = 'This is some test content.';
 // Content written by write test.
-var kTextToWrite = ' Yay!';
+const TEXT_TO_WRITE = ' Yay!';
 
 /**
  * Asserts that |value| equals |expectedValue|. If the assert fails, current
@@ -50,18 +50,18 @@ function assertEqAndRunCallback(expectedValue, value, errorMessage, callback) {
  *     |expectSuccess| and |expectedContent|.
  */
 function readAndExpectContent(entry, expectSuccess, expectedContent, callback) {
-  var error = 'Reading file \'' + entry.fullPath + '\'.';
-  var reader = new FileReader();
+  const error = `Reading file '${entry.fullPath}'.`;
+  const reader = new FileReader();
 
   reader.onload = function() {
     chrome.test.assertTrue(expectSuccess, error);
     assertEqAndRunCallback(expectedContent, reader.result, error, callback);
   };
 
-  entry.file(reader.readAsText.bind(reader),
-             assertEqAndRunCallback.bind(null,
-                 false, expectSuccess, error, callback));
-};
+  entry.file(
+      reader.readAsText.bind(reader),
+      assertEqAndRunCallback.bind(null, false, expectSuccess, error, callback));
+}
 
 /**
  * Attempts to write |content| to the end of the |entry| and verifies that the
@@ -75,21 +75,23 @@ function readAndExpectContent(entry, expectSuccess, expectedContent, callback) {
  *     |expectSuccess|.
  */
 function write(entry, content, expectSuccess, callback) {
-  var error = 'Writing to: \'' + entry.fullPath + '\'.';
+  const error = `Writing to: '${entry.fullPath}'.`;
 
-  entry.createWriter(function(writer) {
-    writer.onerror = assertEqAndRunCallback.bind(null, expectSuccess, false,
-                                                 error, callback);
-    writer.onwrite = assertEqAndRunCallback.bind(null, expectSuccess, true,
-                                                 error, callback);
+  entry.createWriter(
+      function(writer) {
+        writer.onerror = assertEqAndRunCallback.bind(
+            null, expectSuccess, false, error, callback);
+        writer.onwrite = assertEqAndRunCallback.bind(
+            null, expectSuccess, true, error, callback);
 
-    writer.seek(kInitialTestFileContent.length);
-    var blob = new Blob([kTextToWrite], {type: 'text/plain'});
-    writer.write(blob);
-  },
-  assertEqAndRunCallback.bind(null, expectSuccess, false,
-      'Getting writer for: \'' + entry.fullPath + '\'.', callback));
-};
+        writer.seek(INITIAL_TEST_FILE_CONTENT.length);
+        const blob = new Blob([TEXT_TO_WRITE], {type: 'text/plain'});
+        writer.write(blob);
+      },
+      assertEqAndRunCallback.bind(
+          null, expectSuccess, false,
+          `Getting writer for: '${entry.fullPath}'.`, callback));
+}
 
 /**
  * Runs read test.
@@ -98,8 +100,8 @@ function write(entry, content, expectSuccess, callback) {
  * @params {boolean} expectSuccess Whether the read should succeed.
  */
 function readTest(entry, expectSuccess) {
-  readAndExpectContent(entry, expectSuccess, kInitialTestFileContent,
-                       chrome.test.succeed)
+  readAndExpectContent(
+      entry, expectSuccess, INITIAL_TEST_FILE_CONTENT, chrome.test.succeed);
 }
 
 /**
@@ -110,11 +112,12 @@ function readTest(entry, expectSuccess) {
  * fail.
  */
 function getSiblingTest(entry) {
-  var error = 'Got file (\'' + entry.fullPath.concat('.foo') + '\') for which' +
-              'file access was not granted.';
-  entry.filesystem.root.getFile(entry.fullPath.concat('.foo'), {},
-                                function (entry) { chrome.test.fail(error); },
-                                chrome.test.succeed);
+  const error = `Got file ('${entry.fullPath.concat('.foo')}') for which` +
+      'file access was not granted.';
+  entry.filesystem.root.getFile(
+      entry.fullPath.concat('.foo'), {}, function(entry) {
+        chrome.test.fail(error);
+      }, chrome.test.succeed);
 }
 
 /**
@@ -126,15 +129,16 @@ function getSiblingTest(entry) {
  * @param {boolean} expectSuccess Whether the test should succeed.
  */
 function writeTest(entry, expectSuccess) {
-  var verifyFileContent = function() {
-    var expectedContent = kInitialTestFileContent;
-    if (expectSuccess)
-      expectedContent = expectedContent.concat(kTextToWrite);
+  const verifyFileContent = function() {
+    let expectedContent = INITIAL_TEST_FILE_CONTENT;
+    if (expectSuccess) {
+      expectedContent = expectedContent.concat(TEXT_TO_WRITE);
+    }
 
     readAndExpectContent(entry, true, expectedContent, chrome.test.succeed);
   };
 
-  write(entry, kTextToWrite, expectSuccess, verifyFileContent);
+  write(entry, TEXT_TO_WRITE, expectSuccess, verifyFileContent);
 }
 
 /**
@@ -142,29 +146,29 @@ function writeTest(entry, expectSuccess) {
  * handler is received.
  */
 function executeListener(id, details) {
-  if (id == 'ReadWrite') {
-    var fileEntries = details.entries;
-    if (!fileEntries || fileEntries.length != 1) {
+  if (id === 'ReadWrite') {
+    const fileEntries = details.entries;
+    if (!fileEntries || fileEntries.length !== 1) {
       chrome.test.notifyFail('Unexpected file entries size.');
       return;
     }
 
-    var entry = fileEntries[0];
+    const entry = fileEntries[0];
 
     // Run tests for read-write handler.
     chrome.test.runTests([
-        function readReadWrite() {
-          readTest(entry, true);
-        },
-        function getSilblingReadWrite() {
-          getSiblingTest(entry);
-        },
-        function writeReadWrite() {
-          writeTest(entry, true);
-        },
+      function readReadWrite() {
+        readTest(entry, true);
+      },
+      function getSilblingReadWrite() {
+        getSiblingTest(entry);
+      },
+      function writeReadWrite() {
+        writeTest(entry, true);
+      },
     ]);
-  } else if (id != 'ReadOnly') {
-    chrome.test.notifyFail('Unexpected action id: ' + id);
+  } else if (id !== 'ReadOnly') {
+    chrome.test.notifyFail(`Unexpected action id: ${id}`);
     return;
   }
 }

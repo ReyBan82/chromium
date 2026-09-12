@@ -6,14 +6,17 @@
 #define CHROMEOS_DBUS_COMMON_PIPE_READER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
+#include "base/byte_size.h"
 #include "base/component_export.h"
 #include "base/files/scoped_file.h"
 #include "base/functional/callback.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "base/types/expected.h"
+#include "net/base/net_errors.h"
 
 namespace base {
 class TaskRunner;
@@ -37,7 +40,7 @@ namespace chromeos {
 class COMPONENT_EXPORT(CHROMEOS_DBUS_COMMON) PipeReader {
  public:
   using CompletionCallback =
-      base::OnceCallback<void(absl::optional<std::string> data)>;
+      base::OnceCallback<void(std::optional<std::string> data)>;
 
   explicit PipeReader(const scoped_refptr<base::TaskRunner>& task_runner);
 
@@ -56,10 +59,10 @@ class COMPONENT_EXPORT(CHROMEOS_DBUS_COMMON) PipeReader {
  private:
   // Posts a task to read the data from the pipe. Returns
   // net::FileStream::Read()'s result.
-  int RequestRead();
+  base::expected<base::ByteSize, net::Error> RequestRead();
 
   // Called when |io_buffer_| is filled via |data_stream_.Read()|.
-  void OnRead(int byte_count);
+  void OnRead(base::expected<base::ByteSize, net::Error> result);
 
   scoped_refptr<net::IOBufferWithSize> io_buffer_;
   scoped_refptr<base::TaskRunner> task_runner_;

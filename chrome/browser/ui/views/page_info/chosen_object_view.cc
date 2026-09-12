@@ -5,37 +5,31 @@
 #include "chrome/browser/ui/views/page_info/chosen_object_view.h"
 
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include "base/functional/bind.h"
 #include "base/observer_list.h"
 #include "chrome/browser/ui/color/chrome_color_id.h"
-#include "chrome/browser/ui/views/chrome_layout_provider.h"
-#include "chrome/browser/ui/views/chrome_typography.h"
+#include "chrome/browser/ui/views/controls/rich_controls_container_view.h"
 #include "chrome/browser/ui/views/page_info/chosen_object_view_observer.h"
 #include "chrome/browser/ui/views/page_info/page_info_bubble_view.h"
-#include "chrome/browser/ui/views/page_info/page_info_row_view.h"
 #include "chrome/browser/ui/views/page_info/page_info_view_factory.h"
-#include "components/page_info/page_info_delegate.h"
 #include "components/vector_icons/vector_icons.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
-#include "ui/base/resource/resource_bundle.h"
-#include "ui/gfx/color_utils.h"
-#include "ui/resources/grit/ui_resources.h"
+#include "ui/base/ui_base_features.h"
 #include "ui/views/controls/button/image_button.h"
 #include "ui/views/controls/button/image_button_factory.h"
 #include "ui/views/controls/highlight_path_generator.h"
-#include "ui/views/controls/image_view.h"
 #include "ui/views/controls/label.h"
-#include "ui/views/layout/flex_layout.h"
 
 ChosenObjectView::ChosenObjectView(
     std::unique_ptr<PageInfoUI::ChosenObjectInfo> info,
     std::u16string display_name)
     : info_(std::move(info)) {
   SetUseDefaultFillLayout(true);
-  row_view_ = AddChildView(std::make_unique<PageInfoRowView>());
+  row_view_ = AddChildView(std::make_unique<RichControlsContainerView>());
   row_view_->SetTitle(display_name);
 
   // Create the delete button. It is safe to use base::Unretained here
@@ -44,15 +38,15 @@ ChosenObjectView::ChosenObjectView(
       views::CreateVectorImageButton(base::BindRepeating(
           &ChosenObjectView::ExecuteDeleteCommand, base::Unretained(this)));
   delete_button->SetRequestFocusOnPress(true);
-  delete_button->SetTooltipText(
-      l10n_util::GetStringUTF16(info_->ui_info->delete_tooltip_string_id));
+  delete_button->SetTooltipText(l10n_util::GetStringFUTF16(
+      info_->ui_info->delete_tooltip_string_id, display_name));
   views::InstallCircleHighlightPathGenerator(delete_button.get());
 
   // Disable the delete button for policy controlled objects and display the
   // allowed by policy string below for |secondary_label|.
   std::unique_ptr<views::Label> secondary_label;
   if (info_->chooser_object->source ==
-      content_settings::SettingSource::SETTING_SOURCE_POLICY) {
+      content_settings::SettingSource::kPolicy) {
     delete_button->SetEnabled(false);
     row_view_->AddSecondaryLabel(l10n_util::GetStringUTF16(
         info_->ui_info->allowed_by_policy_description_string_id));
@@ -64,24 +58,23 @@ ChosenObjectView::ChosenObjectView(
   delete_button_ = row_view_->AddControl(std::move(delete_button));
 
   UpdateIconImage(/*is_deleted=*/false);
-  // Set flex rule, defined in `PageInfoRowView`, to wrap the subtitle text but
-  // size the parent view to match the content.
-  SetProperty(views::kFlexBehaviorKey,
-              views::FlexSpecification(base::BindRepeating(
-                  &PageInfoRowView::FlexRule, base::Unretained(row_view_))));
+  views::SetImageFromVectorIconWithColor(
+      delete_button_,
+      features::IsRoundedIconsEnabled() ? vector_icons::kCloseIcon
+                                        : vector_icons::kCloseRoundedOldIcon,
+      {kColorPageInfoChosenObjectDeleteButtonIcon,
+       kColorPageInfoChosenObjectDeleteButtonIconDisabled});
+
+  // Set flex rule, defined in `RichControlsContainerView`, to wrap the subtitle
+  // text but size the parent view to match the content.
+  SetProperty(
+      views::kFlexBehaviorKey,
+      views::FlexSpecification(base::BindRepeating(
+          &RichControlsContainerView::FlexRule, base::Unretained(row_view_))));
 }
 
 void ChosenObjectView::AddObserver(ChosenObjectViewObserver* observer) {
   observer_list_.AddObserver(observer);
-}
-
-void ChosenObjectView::OnThemeChanged() {
-  views::View::OnThemeChanged();
-  const ui::ColorProvider* cp = GetColorProvider();
-  views::SetImageFromVectorIconWithColor(
-      delete_button_, vector_icons::kCloseRoundedIcon,
-      cp->GetColor(kColorPageInfoChosenObjectDeleteButtonIcon),
-      cp->GetColor(kColorPageInfoChosenObjectDeleteButtonIconDisabled));
 }
 
 ChosenObjectView::~ChosenObjectView() = default;
@@ -97,7 +90,7 @@ void ChosenObjectView::ExecuteDeleteCommand() {
   // reachable but views::test::ButtonTestApi::NotifyClick doesn't check
   // before executing the PressedCallback.
   if (info_->chooser_object->source ==
-      content_settings::SettingSource::SETTING_SOURCE_POLICY) {
+      content_settings::SettingSource::kPolicy) {
     return;
   }
 
@@ -111,9 +104,8 @@ void ChosenObjectView::ExecuteDeleteCommand() {
   // Hide the row after revoking access.
   SetVisible(false);
 
-  for (ChosenObjectViewObserver& observer : observer_list_) {
-    observer.OnChosenObjectDeleted(*info_);
-  }
+  observer_list_.Notify(&ChosenObjectViewObserver::OnChosenObjectDeleted,
+                        *info_);
 }
 
 void ChosenObjectView::UpdateIconImage(bool is_deleted) const {
@@ -121,5 +113,13 @@ void ChosenObjectView::UpdateIconImage(bool is_deleted) const {
       PageInfoViewFactory::GetChosenObjectIcon(*info_, is_deleted));
 }
 
-BEGIN_METADATA(ChosenObjectView, views::View)
+std::u16string_view ChosenObjectView::GetObjectNameForTesting() const {
+  return row_view_->GetTitleForTesting();  // IN-TEST
+}
+
+views::ImageButton* ChosenObjectView::GetDeleteButtonForTesting() const {
+  return delete_button_;
+}
+
+BEGIN_METADATA(ChosenObjectView)
 END_METADATA

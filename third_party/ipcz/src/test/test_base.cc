@@ -9,7 +9,6 @@
 
 #include "api.h"
 #include "ipcz/ipcz.h"
-#include "ipcz/portal.h"
 #include "ipcz/router.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/abseil-cpp/absl/synchronization/notification.h"
@@ -23,8 +22,7 @@ void CreateNodeChecked(const IpczAPI& ipcz,
                        const IpczDriver& driver,
                        IpczCreateNodeFlags flags,
                        IpczHandle& handle) {
-  const IpczResult result = ipcz.CreateNode(&driver, IPCZ_INVALID_DRIVER_HANDLE,
-                                            flags, nullptr, &handle);
+  const IpczResult result = ipcz.CreateNode(&driver, flags, nullptr, &handle);
   ASSERT_EQ(IPCZ_RESULT_OK, result);
 }
 
@@ -39,11 +37,13 @@ void OpenPortalsChecked(const IpczAPI& ipcz,
 
 }  // namespace
 
-TestBase::TestBase() {
-  IpczGetAPI(&ipcz_);
-}
+TestBase::TestBase() = default;
 
 TestBase::~TestBase() = default;
+
+const IpczAPI& TestBase::ipcz() const {
+  return GetIpczAPI();
+}
 
 void TestBase::Close(IpczHandle handle) {
   ASSERT_EQ(IPCZ_RESULT_OK, ipcz().Close(handle, IPCZ_NO_FLAGS, nullptr));
@@ -77,20 +77,6 @@ IpczResult TestBase::Put(IpczHandle portal,
                          absl::Span<IpczHandle> handles) {
   return ipcz().Put(portal, message.data(), message.size(), handles.data(),
                     handles.size(), IPCZ_NO_FLAGS, nullptr);
-}
-
-IpczResult TestBase::PutWithLimits(IpczHandle portal,
-                                   const IpczPutLimits& limits,
-                                   std::string_view message,
-                                   absl::Span<IpczHandle> handles) {
-  IpczPutLimits sized_limits = limits;
-  sized_limits.size = sizeof(sized_limits);
-  const IpczPutOptions options = {
-      .size = sizeof(options),
-      .limits = &sized_limits,
-  };
-  return ipcz().Put(portal, message.data(), message.size(), handles.data(),
-                    handles.size(), IPCZ_NO_FLAGS, &options);
 }
 
 IpczResult TestBase::Get(IpczHandle portal,
@@ -185,6 +171,12 @@ IpczResult TestBase::WaitToGet(IpczHandle portal,
   return Get(portal, message, handles);
 }
 
+std::string TestBase::WaitToGetString(IpczHandle portal) {
+  std::string message;
+  EXPECT_EQ(IPCZ_RESULT_OK, WaitToGet(portal, &message));
+  return message;
+}
+
 void TestBase::PingPong(IpczHandle portal) {
   EXPECT_EQ(IPCZ_RESULT_OK, Put(portal, {}));
   EXPECT_EQ(IPCZ_RESULT_OK, WaitToGet(portal));
@@ -218,7 +210,7 @@ void TestBase::VerifyEndToEndLocal(IpczHandle a, IpczHandle b) {
 }
 
 void TestBase::WaitForDirectRemoteLink(IpczHandle portal) {
-  const Ref<Router> router = Portal::FromHandle(portal)->router();
+  Router* const router = Router::FromHandle(portal);
   while (!router->IsOnCentralRemoteLink()) {
     using namespace std::chrono_literals;
     std::this_thread::sleep_for(8ms);
@@ -233,8 +225,8 @@ void TestBase::WaitForDirectRemoteLink(IpczHandle portal) {
 }
 
 void TestBase::WaitForDirectLocalLink(IpczHandle a, IpczHandle b) {
-  const Ref<Router> router_a = Portal::FromHandle(a)->router();
-  const Ref<Router> router_b = Portal::FromHandle(b)->router();
+  Router* const router_a = Router::FromHandle(a);
+  Router* const router_b = Router::FromHandle(b);
   while (!router_a->HasLocalPeer(*router_b) &&
          !router_b->HasLocalPeer(*router_a)) {
     using namespace std::chrono_literals;

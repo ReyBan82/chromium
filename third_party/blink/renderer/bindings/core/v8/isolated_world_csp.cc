@@ -54,6 +54,8 @@ class IsolatedWorldCSPDelegate final
     return security_origin_.get();
   }
 
+  bool ScriptSrcExtendedHashesEnabled() override { return false; }
+
   const KURL& Url() const override {
     // This is used to populate violation data's violation url. See
     // https://w3c.github.io/webappsec-csp/#violation-url.
@@ -71,14 +73,15 @@ class IsolatedWorldCSPDelegate final
   // supported.
   void SetSandboxFlags(network::mojom::blink::WebSandboxFlags) override {}
   void SetRequireTrustedTypes() override {}
-  void AddInsecureRequestPolicy(mojom::blink::InsecureRequestPolicy) override {}
+  void ApplyInsecureRequestPolicy(
+      mojom::blink::InsecureRequestPolicy) override {}
+  void NotifyBrowserOfInsecureRequestPolicy(
+      mojom::blink::InsecureRequestPolicy) override {}
 
   // TODO(crbug.com/916885): Figure out if we want to support violation
   // reporting for isolated world CSPs.
-  std::unique_ptr<SourceLocation> GetSourceLocation() override {
-    return nullptr;
-  }
-  absl::optional<uint16_t> GetStatusCode() override { return absl::nullopt; }
+  SourceLocation* GetSourceLocation() override { return nullptr; }
+  std::optional<uint16_t> GetStatusCode() override { return std::nullopt; }
   String GetDocumentReferrer() override { return g_empty_string; }
   void DispatchViolationEvent(const SecurityPolicyViolationEventInit&,
                               Element*) override {
@@ -126,7 +129,7 @@ class IsolatedWorldCSPDelegate final
   }
 
   void DidAddContentSecurityPolicies(
-      WTF::Vector<network::mojom::blink::ContentSecurityPolicyPtr>) override {}
+      Vector<network::mojom::blink::ContentSecurityPolicyPtr>) override {}
 
  private:
   const Member<LocalDOMWindow> window_;

@@ -13,12 +13,12 @@ namespace variations {
 // The result of importing a seed during Android or iOS first run.
 // Note: UMA histogram enum - don't re-order or remove entries.
 enum class FirstRunSeedImportResult {
-  SUCCESS,
-  FAIL_NO_CALLBACK,
-  FAIL_NO_FIRST_RUN_SEED,
-  FAIL_STORE_FAILED,
-  FAIL_INVALID_RESPONSE_DATE,
-  ENUM_SIZE
+  kSuccess = 0,
+  kFailNoCallback = 1,
+  kFailNoFirstRunSeed = 2,
+  kFailStoreFailed = 3,
+  kFailInvalidResponseDate = 4,
+  kMaxValue = kFailInvalidResponseDate
 };
 
 // The result of attempting to load a variations seed during startup.
@@ -27,6 +27,7 @@ enum class FirstRunSeedImportResult {
 // numeric values should never be reused.
 //
 // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.components.variations
+// LINT.IfChange(LoadSeedResult)
 enum class LoadSeedResult {
   kSuccess = 0,
   kEmpty = 1,
@@ -38,13 +39,21 @@ enum class LoadSeedResult {
   kLoadTimedOut = 7,
   kLoadInterrupted = 8,
   kLoadOtherFailure = 9,
-  kMaxValue = kLoadOtherFailure,
+  kExceedsUncompressedSizeLimit = 10,
+  kErrorReadingFile = 11,
+  kSeedInfoParseToProtoError = 12,
+  kZstdContentSizeError = 13,
+  kCorruptZstd = 14,
+  kFileNotFound = 15,
+  kMaxValue = kFileNotFound,
 };
+// LINT.ThenChange(//tools/metrics/histograms/metadata/variations/enums.xml:VariationsSeedLoadResult)
 
 // The result of attempting to store a variations seed received from the server.
 //
 // These values are persisted to logs. Entries should not be renumbered and
 // numeric values should never be reused.
+// LINT.IfChange(StoreSeedResult)
 enum class StoreSeedResult {
   kSuccess = 0,
   // kFailedEmpty = 1,  // Deprecated.
@@ -66,30 +75,61 @@ enum class StoreSeedResult {
   kNonGzipDeltaCount = 13,
   kGzipFullCount = 14,
   kNonGzipFullCount = 15,
-  kMaxValue = kNonGzipFullCount,
+  // The uncompressed size of the seed exceeded the limit.
+  kUncompressedSizeLimitExceeded = 16,
+  kMaxValue = kUncompressedSizeLimitExceeded,
 };
+// LINT.ThenChange(//tools/metrics/histograms/metadata/variations/enums.xml:VariationsSeedStoreResult)
 
 // The result of updating the date associated with an existing stored variations
 // seed.
 // Note: UMA histogram enum - don't re-order or remove entries.
 enum class UpdateSeedDateResult {
-  NO_OLD_DATE,
-  NEW_DATE_IS_OLDER,
-  SAME_DAY,
-  NEW_DAY,
-  ENUM_SIZE
+  kNoOldDate = 0,
+  kNewDateIsOlder = 1,
+  kSameDay = 2,
+  kNewDay = 3,
+  kMaxValue = kNewDay,
 };
 
 // The result of verifying a variation seed's signature.
 // Note: UMA histogram enum - don't re-order or remove entries.
 enum class VerifySignatureResult {
-  MISSING_SIGNATURE,
-  DECODE_FAILED,
-  INVALID_SIGNATURE,
-  INVALID_SEED,
-  VALID_SIGNATURE,
-  ENUM_SIZE
+  kMissingSignature = 0,
+  kDecodeFailed = 1,
+  // kInvalidPublicKey = 2, // no longer used
+  kInvalidSeedSignature = 3,
+  kValidSignature = 4,
+  kMaxValue = kValidSignature,
 };
+
+// The result of attempting to prepare runtime mutable changes from a new seed.
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+// LINT.IfChange(VariationsPrepareRuntimeMutableChangesResult)
+enum class PrepareRuntimeMutableChangesResult {
+  // Reserve the default/uninitialized value. This should not be used.
+  kUnknown = 0,
+  kSuccess = 1,
+  kSimulatedGroupIsNull = 2,
+  kSimulatedGroupNotFound = 3,
+  kNotStrictKillswitch = 4,
+  kNotStartsActive = 5,
+  kNotPermanentConsistency = 6,
+  kAlreadyApplied = 7,
+  kNonRuntimeMutableFeature = 8,
+  kFeatureOverriddenFromCommandLine = 9,
+  kFeaturesNotControlledBySameTrial = 10,
+  kControllingTrialHasOtherFeatures = 11,
+  kTrialNameCollision = 12,
+  kControllingTrialNotFound = 13,
+  kPrepareFeatureStateUpdateFailed = 14,
+  kRuntimeExperimentHasGoogleWebId = 15,
+  kOverriddenTrialHasGoogleWebId = 16,
+  kRuntimeExperimentHasParams = 17,
+  kMaxValue = kRuntimeExperimentHasParams,
+};
+// LINT.ThenChange(//tools/metrics/histograms/metadata/variations/enums.xml:VariationsPrepareRuntimeMutableChangesResult)
 
 // Describes instance manipulations applied to data.
 struct InstanceManipulations {

@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   const {page, session, dp} = await testRunner.startBlank(
       `Tests that browser.Target.setAutoAttach() attaches early to window.open with empty urls.`);
 
@@ -14,7 +14,8 @@
   testRunner.log('Opened popup window');
   const attachedEvent = await target.onceAttachedToTarget();
   testRunner.log('Attached to the popup window, waitingForDebugger=' + attachedEvent.params.waitingForDebugger);
-  const popupSession = new TestRunner.Session(testRunner, attachedEvent.params.sessionId);
+  const popupSession =
+      testRunner.createSessionFor(attachedEvent.params.sessionId);
   popupSession.protocol.Console.enable();
 
   let globalVar = await popupSession.evaluate(`window.globalVar`);

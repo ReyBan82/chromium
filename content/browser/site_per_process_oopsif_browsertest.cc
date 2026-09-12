@@ -2,9 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "base/strings/stringprintf.h"
+#include "base/strings/utf_string_conversions.h"
+#include "content/browser/process_lock.h"
+#include "content/browser/renderer_host/navigation_entry_restore_context_impl.h"
 #include "content/browser/site_per_process_browsertest.h"
-
 #include "content/browser/web_contents/web_contents_impl.h"
+#include "content/common/content_navigation_policy.h"
 #include "content/public/browser/site_isolation_policy.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/test/browser_test.h"
@@ -15,9 +19,111 @@
 #include "content/test/render_document_feature.h"
 #include "net/dns/mock_host_resolver.h"
 #include "third_party/blink/public/common/features.h"
+#include "third_party/blink/public/common/page_state/page_state_serialization.h"
 #include "third_party/blink/public/common/switches.h"
 
 namespace content {
+
+// Test class for tests involving base url inheritance behavior.
+class BaseUrlInheritanceIframeTest : public ContentBrowserTest {
+ public:
+  BaseUrlInheritanceIframeTest() = default;
+
+  void SetUpOnMainThread() override {
+    // Support multiple sites on the test server.
+    host_resolver()->AddRule("*", "127.0.0.1");
+  }
+  void StartEmbeddedServer() {
+    SetupCrossSiteRedirector(embedded_test_server());
+    ASSERT_TRUE(embedded_test_server()->Start());
+  }
+};  // class BaseUrlInheritanceIframeTest
+
+// A test to ensure that a baseURI exceeding chromium's maximum length for urls
+// is not inherited.
+IN_PROC_BROWSER_TEST_F(BaseUrlInheritanceIframeTest,
+                       InheritedBaseUrlIsLessThan2MB) {
+  StartEmbeddedServer();
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+
+  // The following JS modifies the document state so its baseURL exceeds the
+  // maximum length of URL that chromium supports.
+  EXPECT_LT(url::kMaxURLChars, EvalJs(root,
+                                      R"(
+                                        path = "xxxxxxxx";
+                                        for (i = 0; i < 18; i++) {
+                                          path = path + path;
+                                        }
+                                        history.replaceState(
+                                            "", "", "path_" + path);
+                                        document.baseURI
+                                      )")
+                                   .ExtractString()
+                                   .length());
+  // Navigate frame to about:blank. Normally it should inherit its baseURI from
+  // the document initiating the navigation, but since it is too long, no
+  // baseURI is sent, and the about:blank frame falls back to a baseURI of
+  // 'about:blank'.
+  {
+    TestNavigationObserver iframe_observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(root, "location.href = 'about:blank';"));
+    iframe_observer.Wait();
+  }
+  // If we get here without a crash, we didn't hit the CHECK in
+  // NavigationRequest for the initiator base url being either nulopt, or
+  // non-empty.
+  GURL new_frame_url = root->current_frame_host()->GetLastCommittedURL();
+  EXPECT_TRUE(new_frame_url.IsAboutBlank());
+  EXPECT_EQ("about:blank", EvalJs(root, "document.baseURI").ExtractString());
+}
+
+// A test to make sure that restoring a session history entry that was saved
+// with an about:blank subframe never results in an initiator_base_url of
+// an empty string. std::nullopt is expected instead of an empty GURL with
+// legacy base url behavior, or the non-empty initiator base url in the
+// new base url inheritance mode. This test runs in both modes.
+IN_PROC_BROWSER_TEST_F(BaseUrlInheritanceIframeTest,
+                       BaseURLFromSessionHistoryIsNulloptNotEmptyString) {
+  StartEmbeddedServer();
+  GURL main_url(
+      embedded_test_server()->GetURL("a.com", "/page_with_iframe.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child = root->child_at(0);
+  // Navigate child to about:blank.
+  {
+    TestNavigationObserver iframe_observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(child, "location.href = 'about:blank';"));
+    iframe_observer.Wait();
+  }
+  GURL child_frame_url = child->current_frame_host()->GetLastCommittedURL();
+
+  // Save the page state.
+  NavigationControllerImpl& controller = static_cast<NavigationControllerImpl&>(
+      shell()->web_contents()->GetController());
+  NavigationEntryImpl* entry = controller.GetLastCommittedEntry();
+  blink::PageState page_state = entry->GetPageState();
+
+  // Decode the page state so we can inspect what base url value it contains.
+  blink::ExplodedPageState exploded_page_state;
+  ASSERT_TRUE(
+      blink::DecodePageState(page_state.ToEncodedData(), &exploded_page_state));
+  EXPECT_EQ(1U, exploded_page_state.top.children.size());
+  // Make sure the about:blank child has the correct initiator_base_url.
+  GURL initiator_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(exploded_page_state.top.children[0]
+                  .initiator_base_url_string.has_value());
+  EXPECT_EQ(
+      base::UTF8ToUTF16(initiator_url.spec()),
+      exploded_page_state.top.children[0].initiator_base_url_string.value());
+}
 
 // Test class to allow testing srcdoc functionality both with and without
 // `kIsolateSandboxedIframes` enabled. The tests verify the correct operation of
@@ -45,21 +151,59 @@ class SrcdocIsolatedSandboxedIframeTest
   base::test::ScopedFeatureList feature_list_;
 };  // class SrcdocIsolatedSandboxedIframeTest
 
-// Test class to verify that the enterprise policy
-// NewBaseUrlInheritanceBehaviorAllowed can be used to control whether the
-// NewBaseUrlInheritanceBehavior and IsolateSandboxedIframes features can be
-// used.
-class BaseUrlInheritanceBehaviorEnterprisePolicyTest
-    : public SrcdocIsolatedSandboxedIframeTest {
- public:
-  BaseUrlInheritanceBehaviorEnterprisePolicyTest() = default;
+// Test the scenario where a Site A mainframe contains a Site B subframe which
+// in turn has a sandboxed srcdoc frame. If A tries to directly navigate
+// the srcdoc to about:srcdoc, the navigation should be blocked.
+IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
+                       SrcdocNavigationForCrossOriginInitiatorIsBlocked) {
+  StartEmbeddedServer();
+  GURL main_url(
+      embedded_test_server()->GetURL("a.com", "/page_with_iframe.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
 
-  void SetUpCommandLine(base::CommandLine* command_line) override {
-    SrcdocIsolatedSandboxedIframeTest::SetUpCommandLine(command_line);
-    command_line->AppendSwitch(
-        blink::switches::kDisableNewBaseUrlInheritanceBehavior);
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child = root->child_at(0);
+
+  GURL subframe_url(embedded_test_server()->GetURL(
+      "b.com", "/page_with_sandboxed_srcdoc_iframe.html"));
+  {
+    TestNavigationObserver srcdoc_observer(shell()->web_contents());
+    EXPECT_TRUE(NavigateFrameToURL(child, subframe_url));
+    srcdoc_observer.Wait();
   }
-};  // class BaseUrlInheritanceBehaviorEnterprisePolicyTest
+
+  // The srcdoc should have its parent's origin and base url.
+  FrameTreeNode* srcdoc_frame = child->child_at(0);
+  EXPECT_TRUE(
+      srcdoc_frame->current_frame_host()->GetLastCommittedOrigin().opaque());
+  EXPECT_EQ(url::SchemeHostPort(subframe_url),
+            srcdoc_frame->current_frame_host()
+                ->GetLastCommittedOrigin()
+                .GetTupleOrPrecursorTupleIfOpaque());
+  EXPECT_EQ(subframe_url,
+            GURL(EvalJs(srcdoc_frame, "document.baseURI").ExtractString()));
+
+  // Have mainframe attempt to navigate srcdoc to about:srcdoc.
+  {
+    TestNavigationObserver srcdoc_observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(root, "frames[0][0].location.href = 'about:srcdoc';"));
+    srcdoc_observer.Wait();
+  }
+
+  // Check final origin and base url.
+  std::string expected_base_url_str = "chrome-error://chromewebdata/";
+  EXPECT_EQ(expected_base_url_str,
+            EvalJs(srcdoc_frame, "document.baseURI").ExtractString());
+
+  EXPECT_TRUE(
+      srcdoc_frame->current_frame_host()->GetLastCommittedOrigin().opaque());
+    EXPECT_EQ(url::SchemeHostPort(), srcdoc_frame->current_frame_host()
+                                         ->GetLastCommittedOrigin()
+                                         .GetTupleOrPrecursorTupleIfOpaque());
+}
 
 // Out-of-process-sandboxed-iframe (OOPSIF) tests.
 //
@@ -76,6 +220,67 @@ class SitePerProcessIsolatedSandboxedIframeTest
 
  private:
   base::test::ScopedFeatureList feature_list_;
+};
+
+// A test class to test IsolatedSandboxedIframes with and without
+// kOriginKeyedProcessesByDefault enabled.
+class OriginKeyedProcessIsolatedSandboxedIframeTest
+    : public SitePerProcessBrowserTestBase,
+      public ::testing::WithParamInterface<bool> {
+ public:
+  OriginKeyedProcessIsolatedSandboxedIframeTest()
+      : https_server_(net::EmbeddedTestServer::TYPE_HTTPS) {
+    if (GetParam()) {
+      feature_list_.InitWithFeatures(
+          /*enabled_features=*/{blink::features::kIsolateSandboxedIframes,
+                                blink::features::
+                                    kOriginAgentClusterDefaultEnabled,
+                                features::kOriginKeyedProcessesByDefault},
+          /*disabled_features=*/{});
+    } else {
+      // Note: we don't explicitly disable kOriginAgentClusterDefaultEnabled
+      // below, since by itself it shouldn't affect any process model decisions.
+      // It's included above since kOriginKeyedProcessesByDefault requires it.
+      feature_list_.InitWithFeatures(
+          /*enabled_features=*/{blink::features::kIsolateSandboxedIframes},
+          /*disabled_features=*/{features::kOriginKeyedProcessesByDefault});
+    }
+  }
+
+ protected:
+  void SetUpOnMainThread() override {
+    SitePerProcessBrowserTestBase::SetUpOnMainThread();
+    mock_cert_verifier_.mock_cert_verifier()->set_default_result(net::OK);
+    https_server()->AddDefaultHandlers(GetTestDataFilePath());
+    ASSERT_TRUE(https_server()->Start());
+  }
+
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    SitePerProcessBrowserTestBase::SetUpCommandLine(command_line);
+    mock_cert_verifier_.SetUpCommandLine(command_line);
+
+    // This is needed for this test to run properly on platforms where
+    //  --site-per-process isn't the default, such as Android.
+    IsolateAllSitesForTesting(command_line);
+  }
+
+  void SetUpInProcessBrowserTestFixture() override {
+    SitePerProcessBrowserTestBase::SetUpInProcessBrowserTestFixture();
+    mock_cert_verifier_.SetUpInProcessBrowserTestFixture();
+  }
+
+  void TearDownInProcessBrowserTestFixture() override {
+    SitePerProcessBrowserTestBase::TearDownInProcessBrowserTestFixture();
+    mock_cert_verifier_.TearDownInProcessBrowserTestFixture();
+  }
+
+  net::EmbeddedTestServer* https_server() { return &https_server_; }
+
+ private:
+  base::test::ScopedFeatureList feature_list_;
+  // Need an https server because origin-keyed processes require HTTPS.
+  net::EmbeddedTestServer https_server_;
+  content::ContentMockCertVerifier mock_cert_verifier_;
 };
 
 class SitePerProcessNotIsolatedSandboxedIframeTest
@@ -203,6 +408,125 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessNotIsolatedSandboxedIframeTest,
   ASSERT_TRUE(WaitForLoadStop(web_contents()));
 }
 
+// Test that a sandboxed data url is loaded correctly (i.e. doesn't crash) both
+// with and without kOriginKeyedProcessesByDefault enabled.
+IN_PROC_BROWSER_TEST_P(OriginKeyedProcessIsolatedSandboxedIframeTest,
+                       DataUrlLoadsWithoutCrashing) {
+  bool origin_keyed_processes_by_default_enabled = GetParam();
+  EXPECT_EQ(origin_keyed_processes_by_default_enabled,
+            SiteIsolationPolicy::AreOriginKeyedProcessesEnabledByDefault(
+                shell()->web_contents()->GetBrowserContext()));
+  GURL main_url(https_server()->GetURL("foo.a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // Create sandboxed srcdoc child frame, with csp sandbox.
+  TestNavigationObserver iframe_observer(shell()->web_contents());
+  EXPECT_TRUE(ExecJs(shell(),
+                     "var frame = document.createElement('iframe'); "
+                     "frame.sandbox = ''; "
+                     "frame.src = 'data:text/html,foo'; "
+                     "document.body.appendChild(frame);"));
+  iframe_observer.Wait();
+  EXPECT_TRUE(iframe_observer.last_navigation_succeeded());
+
+  // Check frame-tree.
+  FrameTreeNode* root = web_contents()->GetPrimaryFrameTree().root();
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child = root->child_at(0);
+  EXPECT_EQ(network::mojom::WebSandboxFlags::kAll,
+            child->current_frame_host()->active_sandbox_flags());
+  EXPECT_NE(root->current_frame_host()->GetSiteInstance(),
+            child->current_frame_host()->GetSiteInstance());
+
+  const SiteInfo& root_site_info =
+      root->current_frame_host()->GetSiteInstance()->GetSiteInfo();
+  const SiteInfo& child_site_info =
+      child->current_frame_host()->GetSiteInstance()->GetSiteInfo();
+
+  GURL expected_root_site_url = origin_keyed_processes_by_default_enabled
+                                    ? url::Origin::Create(main_url).GetURL()
+                                    : GURL("https://a.com/");
+  if (origin_keyed_processes_by_default_enabled) {
+    EXPECT_TRUE(root_site_info.agent_cluster_key().IsOriginKeyed());
+    EXPECT_EQ(AgentClusterKey::OACStatus::kOriginKeyedByDefault,
+              root_site_info.oac_status());
+  } else {
+    EXPECT_FALSE(root_site_info.agent_cluster_key().IsOriginKeyed());
+    EXPECT_EQ(AgentClusterKey::OACStatus::kSiteKeyedByDefault,
+              root_site_info.oac_status());
+  }
+  EXPECT_EQ(expected_root_site_url, root_site_info.site_url());
+  EXPECT_FALSE(root_site_info.IsSandboxed());
+
+  // Note: unless IsolateSandboxedIframes is disabled, we expect the sandboxed
+  // data-url frame to still have the full origin, since that is what the
+  // frame got from its initiator.
+  GURL expected_child_site_url =
+      (origin_keyed_processes_by_default_enabled ||
+       SiteIsolationPolicy::AreIsolatedSandboxedIframesEnabled())
+          ? url::Origin::Create(main_url).GetURL()
+          : GURL("https://a.com/");
+  if (origin_keyed_processes_by_default_enabled) {
+    EXPECT_TRUE(child_site_info.agent_cluster_key().IsOriginKeyed());
+    EXPECT_EQ(AgentClusterKey::OACStatus::kOriginKeyedByDefault,
+              root_site_info.oac_status());
+  } else {
+    EXPECT_FALSE(child_site_info.agent_cluster_key().IsOriginKeyed());
+    EXPECT_EQ(AgentClusterKey::OACStatus::kSiteKeyedByDefault,
+              root_site_info.oac_status());
+  }
+  EXPECT_EQ(expected_child_site_url, child_site_info.site_url());
+  EXPECT_TRUE(child_site_info.IsSandboxed());
+}
+
+IN_PROC_BROWSER_TEST_P(OriginKeyedProcessIsolatedSandboxedIframeTest,
+                       DataUrlLoadsInFileURL) {
+  bool origin_keyed_processes_by_default_enabled = GetParam();
+  EXPECT_EQ(origin_keyed_processes_by_default_enabled,
+            SiteIsolationPolicy::AreOriginKeyedProcessesEnabledByDefault(
+                shell()->web_contents()->GetBrowserContext()));
+  GURL main_url(GetTestUrl("", "title1.html"));
+  ASSERT_TRUE(main_url.SchemeIsFile());
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // Create sandboxed srcdoc child frame.
+  TestNavigationObserver iframe_observer(shell()->web_contents());
+  EXPECT_TRUE(ExecJs(shell(),
+                     "var frame = document.createElement('iframe'); "
+                     "frame.sandbox = ''; "
+                     "frame.src = 'data:text/html,foo'; "
+                     "document.body.appendChild(frame);"));
+  iframe_observer.Wait();
+  EXPECT_TRUE(iframe_observer.last_navigation_succeeded());
+
+  // Check frame-tree.
+  FrameTreeNode* root = web_contents()->GetPrimaryFrameTree().root();
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child = root->child_at(0);
+  EXPECT_EQ(network::mojom::WebSandboxFlags::kAll,
+            child->current_frame_host()->active_sandbox_flags());
+  EXPECT_NE(root->current_frame_host()->GetSiteInstance(),
+            child->current_frame_host()->GetSiteInstance());
+
+  const SiteInfo& root_site_info =
+      root->current_frame_host()->GetSiteInstance()->GetSiteInfo();
+  const SiteInfo& child_site_info =
+      child->current_frame_host()->GetSiteInstance()->GetSiteInfo();
+
+  GURL expected_root_site_url = GURL("file:///");
+  EXPECT_FALSE(root_site_info.agent_cluster_key().IsOriginKeyed());
+  EXPECT_EQ(AgentClusterKey::OACStatus::kSiteKeyedByDefault,
+            root_site_info.oac_status());
+  EXPECT_EQ(expected_root_site_url, root_site_info.site_url());
+  EXPECT_FALSE(root_site_info.IsSandboxed());
+
+  GURL expected_child_site_url = GURL("file:///");
+  EXPECT_FALSE(child_site_info.agent_cluster_key().IsOriginKeyed());
+  EXPECT_EQ(AgentClusterKey::OACStatus::kSiteKeyedByDefault,
+            root_site_info.oac_status());
+  EXPECT_EQ(expected_child_site_url, child_site_info.site_url());
+  EXPECT_TRUE(child_site_info.IsSandboxed());
+}
 // Test that a srcdoc iframe that receives its sandbox flags from the CSP
 // attribute also gets process isolation. This test starts the same as
 // SitePerProcessNotIsolatedSandboxedIframeTest.SrcdocSandboxFlagsCheck, but in
@@ -231,12 +555,12 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
 }
 
 // A test to verify that an iframe that is sandboxed using the 'csp' attribute
@@ -245,19 +569,15 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
 IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
                        CspIsolatedSandbox) {
   GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
-  // The child needs to have the same origin as the parent.
-  GURL child_url(main_url);
   EXPECT_TRUE(NavigateToURL(shell(), main_url));
 
   // Create csp-sandboxed child frame, same-origin.
   {
-    std::string js_str = base::StringPrintf(
-        "var frame = document.createElement('iframe'); "
-        "frame.csp = 'sandbox'; "
-        "frame.src = '%s'; "
-        "document.body.appendChild(frame);",
-        child_url.spec().c_str());
-    EXPECT_TRUE(ExecJs(shell(), js_str));
+    EXPECT_TRUE(ExecJs(shell(),
+                       "var frame = document.createElement('iframe'); "
+                       "frame.csp = 'sandbox'; "
+                       "frame.srcdoc = '<b>Hello!</b>'; "
+                       "document.body.appendChild(frame);"));
     ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
   }
 
@@ -271,12 +591,12 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
 }
 
 // A test to verify that an iframe with a fully-restrictive sandbox is rendered
@@ -311,12 +631,98 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
+}
+
+// A test to verify that postMessages sent to/from sandboxed frames get
+// delivered properly.
+IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest, PostMessage) {
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  GURL child1_url(embedded_test_server()->GetURL("a.com", "/title2.html"));
+  GURL child2_url(embedded_test_server()->GetURL("b.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // Create sandboxed same-site child frame.
+  {
+    std::string js_str = base::StringPrintf(
+        "var frame = document.createElement('iframe'); "
+        "frame.sandbox = 'allow-scripts'; "
+        "frame.src = '%s'; "
+        "document.body.appendChild(frame);",
+        child1_url.spec().c_str());
+    EXPECT_TRUE(ExecJs(shell(), js_str));
+    ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
+  }
+
+  // Create sandboxed cross-site child frame.
+  {
+    std::string js_str = base::StringPrintf(
+        "var frame = document.createElement('iframe'); "
+        "frame.sandbox = 'allow-scripts'; "
+        "frame.src = '%s'; "
+        "document.body.appendChild(frame);",
+        child2_url.spec().c_str());
+    EXPECT_TRUE(ExecJs(shell(), js_str));
+    ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
+  }
+
+  // Verify test setup.
+  FrameTreeNode* root = web_contents()->GetPrimaryFrameTree().root();
+  ASSERT_EQ(2U, root->child_count());
+  FrameTreeNode* child1 = root->child_at(0);
+  FrameTreeNode* child2 = root->child_at(1);
+  EXPECT_NE(root->current_frame_host()->GetSiteInstance(),
+            child1->current_frame_host()->GetSiteInstance());
+  EXPECT_NE(root->current_frame_host()->GetSiteInstance(),
+            child2->current_frame_host()->GetSiteInstance());
+  EXPECT_TRUE(child1->current_frame_host()
+                  ->GetSiteInstance()
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
+  EXPECT_TRUE(child2->current_frame_host()
+                  ->GetSiteInstance()
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
+
+  // Verify that postMessage works between same-site sandboxed child and its
+  // parent.
+  const std::string kDefinePostMessageReply =
+      "window.addEventListener('message', function(event) {"
+      "  event.source.postMessage(event.data + '-reply', '*');"
+      "});";
+  EXPECT_TRUE(ExecJs(root->current_frame_host(), kDefinePostMessageReply));
+  const std::string kDefineOnMessagePromise =
+      "var onMessagePromise = new Promise(resolve => {"
+      "  window.addEventListener('message', function(event) {"
+      "    resolve(event.data);"
+      "  });"
+      "});";
+  EXPECT_TRUE(ExecJs(child1->current_frame_host(), kDefineOnMessagePromise));
+  EXPECT_TRUE(
+      ExecJs(child1->current_frame_host(), "parent.postMessage('foo', '*');"));
+  EXPECT_EQ("foo-reply",
+            EvalJs(child1->current_frame_host(), "onMessagePromise"));
+
+  // Verify that postMessage works between cross-site sandboxed child and its
+  // parent.
+  EXPECT_TRUE(ExecJs(child2->current_frame_host(), kDefineOnMessagePromise));
+  EXPECT_TRUE(
+      ExecJs(child2->current_frame_host(), "parent.postMessage('bar', '*');"));
+  EXPECT_EQ("bar-reply",
+            EvalJs(child2->current_frame_host(), "onMessagePromise"));
+
+  // Verify that postMessage works between the two sandboxed frames.
+  EXPECT_TRUE(ExecJs(child2->current_frame_host(), kDefinePostMessageReply));
+  EXPECT_TRUE(ExecJs(child1->current_frame_host(), kDefineOnMessagePromise));
+  EXPECT_TRUE(ExecJs(child1->current_frame_host(),
+                     "parent.frames[1].postMessage('baz', '*');"));
+  EXPECT_EQ("baz-reply",
+            EvalJs(child1->current_frame_host(), "onMessagePromise"));
 }
 
 // Test that a sandboxed srcdoc iframe loads properly when its parent's url is
@@ -349,8 +755,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
   auto* parent_site_instance = root->current_frame_host()->GetSiteInstance();
   auto* child_site_instance = child->current_frame_host()->GetSiteInstance();
   EXPECT_NE(parent_site_instance, child_site_instance);
-  EXPECT_TRUE(child_site_instance->GetSiteInfo().is_sandboxed());
-  EXPECT_FALSE(parent_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(child_site_instance->GetSecurityPrincipal().IsSandboxed());
+  EXPECT_FALSE(parent_site_instance->GetSecurityPrincipal().IsSandboxed());
   EXPECT_EQ(embedded_test_server()->GetURL("sub.a.com", "/"),
             child_site_instance->GetSiteInfo().site_url());
   EXPECT_EQ(GURL("http://a.com/"),
@@ -403,7 +809,7 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
   FrameTreeNode* grand_child = child->child_at(0);
   auto* grand_child_site_instance =
       grand_child->current_frame_host()->GetSiteInstance();
-  EXPECT_TRUE(grand_child_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(grand_child_site_instance->GetSecurityPrincipal().IsSandboxed());
   EXPECT_EQ(embedded_test_server()->GetURL("a.foo.com", "/"),
             grand_child_site_instance->GetSiteInfo().site_url());
   EXPECT_EQ(main_url, GetFrameBaseUrl(grand_child->current_frame_host()));
@@ -449,8 +855,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
       sibling->current_frame_host()->GetSiteInstance();
   auto* child_site_instance = child->current_frame_host()->GetSiteInstance();
   EXPECT_NE(sibling_site_instance, child_site_instance);
-  EXPECT_TRUE(child_site_instance->GetSiteInfo().is_sandboxed());
-  EXPECT_FALSE(sibling_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(child_site_instance->GetSecurityPrincipal().IsSandboxed());
+  EXPECT_FALSE(sibling_site_instance->GetSecurityPrincipal().IsSandboxed());
   EXPECT_EQ(embedded_test_server()->GetURL("b.foo.com", "/"),
             child_site_instance->GetSiteInfo().site_url());
   EXPECT_EQ(GURL("http://foo.com/"),
@@ -500,12 +906,12 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
             child1->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child1->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
 
   FrameTreeNode* child2 = root->child_at(1);  // sub.a.com
   EXPECT_EQ(network::mojom::WebSandboxFlags::kAll,
@@ -514,8 +920,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
             child2->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child2->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   // This is the key result for this test: the sandboxed iframes for 'a.com' and
   // 'sub.a.com' should be in different SiteInstances.
   auto* child1_site_instance1 = child1->current_frame_host()->GetSiteInstance();
@@ -560,8 +966,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
   scoped_refptr<SiteInstanceImpl> site_instance1 =
       child->current_frame_host()->GetSiteInstance();
   EXPECT_NE(site_instance_root, site_instance1);
-  EXPECT_TRUE(site_instance1->GetSiteInfo().is_sandboxed());
-  EXPECT_FALSE(site_instance_root->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(site_instance1->GetSecurityPrincipal().IsSandboxed());
+  EXPECT_FALSE(site_instance_root->GetSecurityPrincipal().IsSandboxed());
 
   // Navigate sandboxed frame cross-origin to b.foo.com.
   EXPECT_TRUE(NavigateIframeToURL(
@@ -572,7 +978,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
       child->current_frame_host()->GetSiteInstance();
   EXPECT_NE(site_instance_root, site_instance2);
   EXPECT_NE(site_instance1, site_instance2);
-  EXPECT_NE(site_instance1->GetProcess(), site_instance2->GetProcess());
+  EXPECT_NE(site_instance1->GetOrCreateProcessForTesting(),
+            site_instance2->GetProcess());
 }
 
 // Test that navigating cross-origin from a non-sandboxed iframe to a CSP
@@ -611,7 +1018,7 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
   scoped_refptr<SiteInstanceImpl> site_instance1 =
       child->current_frame_host()->GetSiteInstance();
   EXPECT_EQ(site_instance_root, site_instance1);
-  EXPECT_FALSE(site_instance1->GetSiteInfo().is_sandboxed());
+  EXPECT_FALSE(site_instance1->GetSecurityPrincipal().IsSandboxed());
 
   // Navigate child frame cross-origin to CSP-isolated b.foo.com.
   EXPECT_TRUE(NavigateIframeToURL(shell()->web_contents(), "test_frame",
@@ -623,7 +1030,7 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerOriginIsolatedSandboxedIframeTest,
       child->current_frame_host()->GetSiteInstance();
   EXPECT_NE(site_instance1, site_instance2);
   EXPECT_NE(site_instance1->GetProcess(), site_instance2->GetProcess());
-  EXPECT_TRUE(site_instance2->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(site_instance2->GetSecurityPrincipal().IsSandboxed());
 }
 
 // Check that two same-site sandboxed iframes in unrelated windows share the
@@ -654,12 +1061,12 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
 
   // Set up an unrelated window with the same frame hierarchy.
   Shell* new_shell = CreateBrowser();
@@ -673,12 +1080,12 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
   FrameTreeNode* new_child = new_root->child_at(0);
   EXPECT_TRUE(new_child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(new_root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
 
   // Check that the two sandboxed subframes end up in separate
   // BrowsingInstances but in the same process.
@@ -737,16 +1144,16 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child2->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child1->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_TRUE(child2->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
 }
 
 IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
@@ -787,12 +1194,12 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
   {
     std::string js_str("document.body.innerText;");
     EXPECT_EQ(child_inner_text, EvalJs(child->current_frame_host(), js_str));
@@ -838,8 +1245,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
 
   // Navigate to a page that should get process isolation.
   GURL isolated_child_url(
@@ -849,8 +1256,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
 
   // Navigate back to about:blank, and verify it's put back into the parent's
   // SiteInstance.
@@ -864,8 +1271,47 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_FALSE(child->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
+}
+
+// Ensure a navigation that is from the initial empty document, is main frame,
+// cross-SiteInstance and same-SiteInstanceGroup succeeds.
+IN_PROC_BROWSER_TEST_P(SitePerProcessNotIsolatedSandboxedIframeTest,
+                       CrossSiteInstanceNavigationFromInitialEmptyDocument) {
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // Create sandboxed data: URL which allows scripts and popups.
+  std::string js_str = base::StringPrintf(
+      "var frame = document.createElement('iframe'); "
+      "frame.sandbox = 'allow-scripts allow-popups'; "
+      "frame.src = 'data:text/html,foo'; "
+      "document.body.appendChild(frame);");
+  EXPECT_TRUE(ExecJs(shell(), js_str));
+  ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
+
+  // The data: subframe opens a popup, which inherits the sandbox bit.
+  FrameTreeNode* root = web_contents()->GetPrimaryFrameTree().root();
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child = root->child_at(0);
+  ShellAddedObserver new_shell_observer;
+  std::string js_open_popup = base::StringPrintf("var popup = window.open();");
+  EXPECT_TRUE(ExecJs(child, js_open_popup));
+  Shell* popup_shell = new_shell_observer.GetShell();
+  EXPECT_TRUE(popup_shell);
+
+  // Navigate the popup to the same URL as the main frame. Though the URL is the
+  // same, the sandbox bit means it is not same-SiteInstance.
+  // This navigation is cross-SiteInstance, same-SiteInstanceGroup,
+  // local-to-local, starts from the initial empty document and does not depend
+  // on RenderDocument level.
+  GURL url1(embedded_test_server()->GetURL("a.com", "/title2.html"));
+  std::string js_navigate_popup1 =
+      base::StringPrintf("popup.location = '%s';", url1.spec().c_str());
+  TestNavigationObserver observer2(popup_shell->web_contents());
+  EXPECT_TRUE(ExecJs(child, js_navigate_popup1));
+  observer2.Wait();
 }
 
 // Test to make sure that javascript: urls don't execute in a sandboxed iframe.
@@ -930,14 +1376,128 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
   FrameTreeNode* child = root->child_at(0);
   EXPECT_NE(root->current_frame_host()->GetSiteInstance(),
             child->current_frame_host()->GetSiteInstance());
+
+  // Because the subframe is a data: URL, the process should be locked to the
+  // initiator origin's site, which is the parent in this case. Unlike the
+  // parent, the data: subframe process should be sandboxed.
+  EXPECT_EQ(child->current_frame_host()
+                ->GetProcess()
+                ->GetProcessLock()
+                .GetProcessLockURL(),
+            root->current_frame_host()->GetLastCommittedOrigin().GetURL());
   EXPECT_TRUE(child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
+}
+
+// Verify that a navigation from a sandboxed iframe, with an origin distinct
+// from its parent, to about:blank succeeds.
+IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
+                       SandboxedNavigationToAboutBlank) {
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // Create sandboxed child frame to a different site.
+  GURL child_url(embedded_test_server()->GetURL("b.com", "/title1.html"));
+  {
+    std::string js_str = base::StringPrintf(
+        "var frame = document.createElement('iframe'); "
+        "frame.id = 'test_frame'; "
+        "frame.sandbox = 'allow-scripts'; "
+        "frame.src = '%s'; "
+        "document.body.appendChild(frame);",
+        child_url.spec().c_str());
+    TestNavigationObserver iframe_observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(shell(), js_str));
+    iframe_observer.Wait();
+    EXPECT_TRUE(iframe_observer.last_navigation_succeeded());
+  }
+
+  // Get child's FrameTreeNode.
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child = root->child_at(0);
+  scoped_refptr<SiteInstanceImpl> original_child_site_instance =
+      child->current_frame_host()->GetSiteInstance();
+  EXPECT_TRUE(
+      original_child_site_instance->GetSecurityPrincipal().IsSandboxed());
+
+  {
+    TestNavigationObserver iframe_observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(child, "location.href = 'about:blank';"));
+    iframe_observer.Wait();
+    EXPECT_TRUE(iframe_observer.last_navigation_succeeded());
+  }
+
+  // Verify that child origin is correct. This also helps validate that the
+  // navigation didn't crash.
+  EXPECT_EQ("null", EvalJs(child, "window.origin").ExtractString());
+  // The child should remain in the same SiteInstance.
+  EXPECT_EQ(original_child_site_instance,
+            child->current_frame_host()->GetSiteInstance());
+}
+
+// Verify that a navigation from a sandboxed iframe, with an origin distinct
+// from its parent, to about:blank succeeds. This is a variation on
+// SandboxedNavigationToAboutBlank in which the parent removes the sandbox flag
+// after B has loaded, and before it navigates to about:blank.
+IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
+                       SandboxedNavigationToAboutBlank_SandboxRevokedByParent) {
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+
+  // Create sandboxed child frame to a different site.
+  GURL child_url(embedded_test_server()->GetURL("b.com", "/title1.html"));
+  {
+    std::string js_str = base::StringPrintf(
+        "var frame = document.createElement('iframe'); "
+        "frame.id = 'test_frame'; "
+        "frame.sandbox = 'allow-scripts'; "
+        "frame.src = '%s'; "
+        "document.body.appendChild(frame);",
+        child_url.spec().c_str());
+    TestNavigationObserver iframe_observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(shell(), js_str));
+    iframe_observer.Wait();
+    EXPECT_TRUE(iframe_observer.last_navigation_succeeded());
+  }
+
+  // Get child's FrameTreeNode.
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child = root->child_at(0);
+  scoped_refptr<SiteInstanceImpl> original_child_site_instance =
+      child->current_frame_host()->GetSiteInstance();
+  EXPECT_TRUE(
+      original_child_site_instance->GetSecurityPrincipal().IsSandboxed());
+
+  // The parent removes the iframe's sandbox attribute before the child
+  // self-navigates to about:blank.
+  EXPECT_TRUE(ExecJs(
+      root, "document.querySelector('iframe').removeAttribute('sandbox');"));
+
+  {
+    TestNavigationObserver iframe_observer(shell()->web_contents());
+    EXPECT_TRUE(ExecJs(child, "location.href = 'about:blank';"));
+    iframe_observer.Wait();
+    EXPECT_TRUE(iframe_observer.last_navigation_succeeded());
+  }
+
+  // Verify that child origin is correct. This also helps validate that the
+  // navigation didn't crash.
+  EXPECT_EQ("null", EvalJs(child, "window.origin").ExtractString());
+  // The child should remain in the same SiteInstance.
+  EXPECT_EQ(original_child_site_instance,
+            child->current_frame_host()->GetSiteInstance());
 }
 
 // Test to make sure that an iframe with a data:url is appropriately sandboxed.
@@ -959,14 +1519,23 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
     ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
   }
 
-  // Verify parent and child frames share a SiteInstance
+  // Verify parent and child frames share a non-sandboxed SiteInstanceGroup.
   FrameTreeNode* root = web_contents()->GetPrimaryFrameTree().root();
   ASSERT_EQ(1U, root->child_count());
+  SiteInstanceImpl* root_site_instance =
+      root->current_frame_host()->GetSiteInstance();
   FrameTreeNode* child = root->child_at(0);
-  EXPECT_EQ(root->current_frame_host()->GetSiteInstance(),
-            child->current_frame_host()->GetSiteInstance());
+  SiteInstanceImpl* child_site_instance =
+      child->current_frame_host()->GetSiteInstance();
+  EXPECT_EQ(root_site_instance->group(), child_site_instance->group());
+  if (ShouldCreateSiteInstanceForDataUrls()) {
+    EXPECT_NE(root_site_instance, child_site_instance);
+  } else {
+    EXPECT_EQ(root_site_instance, child_site_instance);
+  }
+  EXPECT_FALSE(child_site_instance->GetSecurityPrincipal().IsSandboxed());
 
-  // Now make subframe sandboxed.
+  // Now make the subframe sandboxed.
   {
     std::string js_str(
         "var frame = document.getElementById('test_frame'); "
@@ -975,12 +1544,30 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
   }
   NavigateFrameToURL(child,
                      embedded_test_server()->GetURL("b.com", "/title1.html"));
-  // Child should now be in a different SiteInstance.
+  url::Origin b_origin = child->current_frame_host()->GetLastCommittedOrigin();
+
+  // Child should now be in a different, sandboxed SiteInstance.
   EXPECT_NE(root->current_frame_host()->GetSiteInstance(),
             child->current_frame_host()->GetSiteInstance());
+  EXPECT_TRUE(child->current_frame_host()
+                  ->GetSiteInstance()
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
 
-  // Go back and ensure the data: URL committed in the same SiteInstance as the
-  // original navigation.
+  // The child process should be in a process of its initiator origin.
+  EXPECT_EQ(child->current_frame_host()
+                ->GetProcess()
+                ->GetProcessLock()
+                .agent_cluster_key()
+                .GetSite(),
+            b_origin.GetTupleOrPrecursorTupleIfOpaque().GetURL());
+
+  // Go back and ensure the data: URL remains sandboxed, and committed in a
+  // different SiteInstance from the original navigation. From the spec:
+  // "Generally speaking, dynamically removing or changing the sandbox attribute
+  // is ill-advised, because it can make it quite hard to reason about what will
+  // be allowed and what will not."
+  // https://html.spec.whatwg.org/multipage/iframe-embed-object.html#attr-iframe-sandbox
   EXPECT_TRUE(web_contents()->GetController().CanGoBack());
   {
     TestFrameNavigationObserver frame_observer(child);
@@ -989,6 +1576,14 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
   }
   EXPECT_NE(root->current_frame_host()->GetSiteInstance(),
             child->current_frame_host()->GetSiteInstance());
+  EXPECT_FALSE(root->current_frame_host()
+                   ->GetSiteInstance()
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
+  EXPECT_TRUE(child->current_frame_host()
+                  ->GetSiteInstance()
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_EQ(GURL(data_url_str),
             child->current_frame_host()->GetLastCommittedURL());
 }
@@ -1072,8 +1667,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
             child->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
 
   // Check grandchild vs. child.
   ASSERT_EQ(1U, child->child_count());
@@ -1117,7 +1712,7 @@ IN_PROC_BROWSER_TEST_P(
             child->effective_frame_policy().sandbox_flags);
   EXPECT_FALSE(parent_site_instance->RequiresDedicatedProcess());
   EXPECT_EQ(parent_site_instance, child_site_instance);
-  EXPECT_FALSE(child_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_FALSE(child_site_instance->GetSecurityPrincipal().IsSandboxed());
 }
 
 // Similar to the NotIsolatedSandbox test, but using a site that requires a
@@ -1157,7 +1752,7 @@ IN_PROC_BROWSER_TEST_P(
   EXPECT_NE(parent_site_instance, child_site_instance);
   EXPECT_NE(parent_site_instance->GetProcess(),
             child_site_instance->GetProcess());
-  EXPECT_TRUE(child_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(child_site_instance->GetSecurityPrincipal().IsSandboxed());
 }
 
 // In this test, a main frame requests sandbox isolation for a site that would
@@ -1190,7 +1785,7 @@ IN_PROC_BROWSER_TEST_P(
   auto* parent_site_instance = root->current_frame_host()->GetSiteInstance();
   auto* child_site_instance = child->current_frame_host()->GetSiteInstance();
   EXPECT_FALSE(parent_site_instance->RequiresDedicatedProcess());
-  EXPECT_FALSE(parent_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_FALSE(parent_site_instance->GetSecurityPrincipal().IsSandboxed());
   // TODO(wjmaclean): It seems weird that the
   // effective_frame_policy().sandbox_flags don't get set in this case. Maybe
   // worth investigating this at some point. https://crbug.com/1346723
@@ -1231,7 +1826,7 @@ IN_PROC_BROWSER_TEST_P(
   auto* parent_site_instance = root->current_frame_host()->GetSiteInstance();
   auto* child_site_instance = child->current_frame_host()->GetSiteInstance();
   EXPECT_TRUE(parent_site_instance->RequiresDedicatedProcess());
-  EXPECT_TRUE(parent_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(parent_site_instance->GetSecurityPrincipal().IsSandboxed());
   // TODO(wjmaclean): It seems weird that the
   // effective_frame_policy().sandbox_flags don't get set in this case. Maybe
   // worth investigating this at some point. https://crbug.com/1346723
@@ -1254,7 +1849,7 @@ IN_PROC_BROWSER_TEST_P(
   EXPECT_TRUE(NavigateToURL(shell(), main_url));
   scoped_refptr<SiteInstanceImpl> site_instance_a =
       web_contents()->GetSiteInstance();
-  EXPECT_FALSE(site_instance_a->GetSiteInfo().is_sandboxed());
+  EXPECT_FALSE(site_instance_a->GetSecurityPrincipal().IsSandboxed());
 
   // Force BrowsingInstance swap to a URL with a CSP sandbox header.
   GURL isolated_url(embedded_test_server()->GetURL(
@@ -1281,7 +1876,7 @@ IN_PROC_BROWSER_TEST_P(
   // This is an edge case we can live with since it only happens with the
   // main frame getting a CSP sandbox, and the main frame does get its own
   // process regardless in this case.
-  EXPECT_FALSE(site_instance_b->GetSiteInfo().is_sandboxed());
+  EXPECT_FALSE(site_instance_b->GetSecurityPrincipal().IsSandboxed());
 }
 
 IN_PROC_BROWSER_TEST_P(
@@ -1321,7 +1916,7 @@ IN_PROC_BROWSER_TEST_P(
   EXPECT_EQ(expected_flags, child->effective_frame_policy().sandbox_flags);
   EXPECT_TRUE(parent_site_instance->RequiresDedicatedProcess());
   EXPECT_NE(parent_site_instance, child_site_instance);
-  EXPECT_TRUE(child_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(child_site_instance->GetSecurityPrincipal().IsSandboxed());
 
   // Sandboxed child calls window.open.
   Shell* new_shell = OpenPopup(child, child_url, "");
@@ -1333,7 +1928,7 @@ IN_PROC_BROWSER_TEST_P(
   auto* new_window_site_instance =
       new_root->current_frame_host()->GetSiteInstance();
   EXPECT_TRUE(new_window_site_instance->RequiresDedicatedProcess());
-  EXPECT_TRUE(new_window_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(new_window_site_instance->GetSecurityPrincipal().IsSandboxed());
   // Note: this assumes per-site mode for sandboxed iframe isolation. If we
   // settle on per-document mode, this will change to EXPECT_NE.
   EXPECT_EQ(child_site_instance, new_window_site_instance);
@@ -1381,12 +1976,12 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerDocumentIsolatedSandboxedIframeTest,
             child1->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child1->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   EXPECT_FALSE(root->current_frame_host()
                    ->GetSiteInstance()
-                   ->GetSiteInfo()
-                   .is_sandboxed());
+                   ->GetSecurityPrincipal()
+                   .IsSandboxed());
 
   FrameTreeNode* child2 = root->child_at(1);  // sub.a.com
   EXPECT_EQ(network::mojom::WebSandboxFlags::kAll,
@@ -1395,8 +1990,8 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerDocumentIsolatedSandboxedIframeTest,
             child2->current_frame_host()->GetSiteInstance());
   EXPECT_TRUE(child2->current_frame_host()
                   ->GetSiteInstance()
-                  ->GetSiteInfo()
-                  .is_sandboxed());
+                  ->GetSecurityPrincipal()
+                  .IsSandboxed());
   // This is the key result for this test: the sandboxed iframes for both child
   // frames should be in different SiteInstances, even though they are
   // same-origin.
@@ -1556,14 +2151,14 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerDocumentIsolatedSandboxedIframeTest,
   FrameTreeNode* child = root->child_at(0);
   scoped_refptr<SiteInstanceImpl> root_site_instance =
       root->current_frame_host()->GetSiteInstance();
-  EXPECT_FALSE(root_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_FALSE(root_site_instance->GetSecurityPrincipal().IsSandboxed());
 
   scoped_refptr<SiteInstanceImpl> child_site_instance1 =
       child->current_frame_host()->GetSiteInstance();
   EXPECT_EQ(network::mojom::WebSandboxFlags::kAll,
             child->effective_frame_policy().sandbox_flags);
   EXPECT_NE(root_site_instance, child_site_instance1);
-  EXPECT_TRUE(child_site_instance1->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(child_site_instance1->GetSecurityPrincipal().IsSandboxed());
 
   // Navigate child same-site, same-origin, same-document.
   {
@@ -1703,13 +2298,13 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessPerDocumentIsolatedSandboxedIframeTest,
   auto* child1_site_instance = child1->current_frame_host()->GetSiteInstance();
   auto* child2_site_instance = child2->current_frame_host()->GetSiteInstance();
 
-  EXPECT_FALSE(root_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_FALSE(root_site_instance->GetSecurityPrincipal().IsSandboxed());
   EXPECT_EQ(network::mojom::WebSandboxFlags::kAll,
             child1->effective_frame_policy().sandbox_flags);
-  EXPECT_TRUE(child1_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(child1_site_instance->GetSecurityPrincipal().IsSandboxed());
   EXPECT_EQ(network::mojom::WebSandboxFlags::kAll,
             child2->effective_frame_policy().sandbox_flags);
-  EXPECT_TRUE(child2_site_instance->GetSiteInfo().is_sandboxed());
+  EXPECT_TRUE(child2_site_instance->GetSecurityPrincipal().IsSandboxed());
   EXPECT_NE(root_site_instance, child1_site_instance);
   EXPECT_NE(root_site_instance, child2_site_instance);
   // Verify siblings have different SiteInstances and processes.
@@ -1750,9 +2345,7 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest, SrcdocIframe) {
   if (SiteIsolationPolicy::AreIsolatedSandboxedIframesEnabled()) {
     EXPECT_EQ(main_url, GetFrameBaseUrl(child->parent()));
   }
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
   EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
 
   // Reset the srcdoc attribute, and verify the FrameTreeNode is updated
@@ -1779,9 +2372,7 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest, SrcdocIframe) {
   // The base url is set on the parent, and not cleared with the child's srcdoc
   // information.
   EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
 
   // Repeat the srcdoc attribute tests from above, but this time using
   // src='about:srcdoc' to make the frame srcdoc.
@@ -1802,9 +2393,7 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest, SrcdocIframe) {
   EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
   EXPECT_EQ(main_url, GetFrameBaseUrl(child2->parent()));
   EXPECT_EQ(main_url, GetFrameBaseUrl(child2->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child2->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child2->current_frame_host()->GetInheritedBaseUrl());
 
   // Reset the src attribute, and verify the FrameTreeNode is updated
   // accordingly.
@@ -1828,9 +2417,7 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest, SrcdocIframe) {
   EXPECT_EQ(GURL(url::kAboutBlankURL), child2->current_url());
   EXPECT_EQ("", child2->srcdoc_value());
   EXPECT_EQ(GURL("about:blank"), child->current_url());
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
 }
 
 // Test that when a frame changes its base url by manipulating its
@@ -1912,9 +2499,7 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
   auto* child = root->child_at(0);
   EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
   EXPECT_EQ(main_url, GetFrameBaseUrl(root->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
 
   // Srcdoc frame changes its base url.
   GURL b_url("http://b.com/");
@@ -1929,9 +2514,7 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
   }
   EXPECT_EQ(main_url, GetFrameBaseUrl(root->current_frame_host()));
   EXPECT_EQ(b_url, GetFrameBaseUrl(child->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
 
   // Root frame adds base element.
   GURL c_url("http://c.com/");
@@ -1946,9 +2529,7 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
   }
   EXPECT_EQ(b_url, GetFrameBaseUrl(child->current_frame_host()));
   EXPECT_EQ(c_url, GetFrameBaseUrl(root->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
 
   // The srcdoc removes its base element.
   {
@@ -1956,15 +2537,8 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
     if (SiteIsolationPolicy::AreIsolatedSandboxedIframesEnabled()) {
       EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
     }
-    if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-      EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
-      EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-    } else {
-      // TODO(wjmaclean): we know this expectation is wrong, and is fixed when
-      // IsNewBaseUrlInheritanceBehaviorEnabled() is true.
-      // https://crbug.com/1356658
-      EXPECT_EQ(c_url, GetFrameBaseUrl(child->current_frame_host()));
-    }
+    EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
+    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
   }
   EXPECT_EQ(c_url, GetFrameBaseUrl(root->current_frame_host()));
 }
@@ -2006,17 +2580,13 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
   auto* child = root->child_at(0);
   EXPECT_EQ(b_url, GetFrameBaseUrl(child->current_frame_host()));
   EXPECT_EQ(b_url, GetFrameBaseUrl(root->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(b_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(b_url, child->current_frame_host()->GetInheritedBaseUrl());
 
   // Remove base element from root.
   EXPECT_TRUE(ExecJs(root, "document.querySelector('base').remove();"));
   EXPECT_EQ(main_url, GetFrameBaseUrl(root->current_frame_host()));
   EXPECT_EQ(b_url, GetFrameBaseUrl(child->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(b_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(b_url, child->current_frame_host()->GetInheritedBaseUrl());
 
   // Reload child. Since the child is initiating the reload, it should reload
   // with the same base url it had before the reload.
@@ -2024,12 +2594,8 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
     EXPECT_TRUE(ExecJs(child, "location.reload();"));
     ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
   }
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(b_url, GetFrameBaseUrl(child->current_frame_host()));
-    EXPECT_EQ(b_url, child->current_frame_host()->GetInheritedBaseUrl());
-  } else {
-    EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
-  }
+  EXPECT_EQ(b_url, GetFrameBaseUrl(child->current_frame_host()));
+  EXPECT_EQ(b_url, child->current_frame_host()->GetInheritedBaseUrl());
 
   // Have the parent initiate the reload. This time the parent's original url
   // should be sent to the child as its base url.
@@ -2040,9 +2606,7 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
     ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
   }
   EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
 }
 
 // A test to verify that the base url stored in RFHI for an about:srcdoc frame
@@ -2068,58 +2632,41 @@ IN_PROC_BROWSER_TEST_P(SrcdocIsolatedSandboxedIframeTest,
   }
   auto* child = root->child_at(0);
   EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
-  if (blink::features::IsNewBaseUrlInheritanceBehaviorEnabled()) {
-    EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
-  }
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
 
+  // Remove the srcdoc attribute from the child frame. This should trigger a
+  // navigation to about:blank.
+  {
+    EXPECT_TRUE(ExecJs(shell(),
+                       "var frame = document.getElementById('child-srcdoc'); "
+                       "frame.removeAttribute('srcdoc'); "));
+    ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
+  }
+  EXPECT_EQ(GURL("about:blank"),
+            child->current_frame_host()->GetLastCommittedURL());
+  EXPECT_EQ(main_url, GetFrameBaseUrl(child->current_frame_host()));
+  EXPECT_EQ(main_url, child->current_frame_host()->GetInheritedBaseUrl());
+
+  // Navigate the subframe to `child_url`. This should remove the inherited base
+  // URL.
   {
     std::string js_str = base::StringPrintf(
         "var frame = document.getElementById('child-srcdoc'); "
-        "frame.removeAttribute('srcdoc'); "
         "frame.src = '%s';",
         child_url.spec().c_str());
     EXPECT_TRUE(ExecJs(shell(), js_str));
     ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
   }
+
+  EXPECT_EQ(child_url, child->current_frame_host()->GetLastCommittedURL());
   EXPECT_EQ(child_url, GetFrameBaseUrl(child->current_frame_host()));
   EXPECT_EQ(GURL(), child->current_frame_host()->GetInheritedBaseUrl());
 }
 
-// This test verifies that using enterprise policy to disable
-// NewBaseUrlInheritanceBehavior effectively disables both
-// the new base url inheritance behavior, and isolation of sandboxed iframes by
-// forcing both AreIsolatedSandboxedIframesEnabled() and
-// IsNewBaseUrlInheritanceBehaviorEnabled() to return false.
-IN_PROC_BROWSER_TEST_P(BaseUrlInheritanceBehaviorEnterprisePolicyTest,
-                       VerifyEnterprisePolicyDisables) {
-  EXPECT_FALSE(SiteIsolationPolicy::AreIsolatedSandboxedIframesEnabled());
-  EXPECT_FALSE(blink::features::IsNewBaseUrlInheritanceBehaviorEnabled());
-
-  // Verify that the about:blank window does not get the base url of its
-  // initiator, which is the expected behavior when the
-  // IsolateSandboxedIframes or NewBaseUrlInheritanceBehavior features are
-  // overridden by the enterprise policy.
-  StartEmbeddedServer();
-  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
-  EXPECT_TRUE(NavigateToURL(shell(), main_url));
-  EXPECT_NE(GURL("about:blank"), GetFrameBaseUrl(shell()));
-
-  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
-                            ->GetPrimaryFrameTree()
-                            .root();
-  ShellAddedObserver new_shell_observer;
-  EXPECT_TRUE(ExecJs(root, "popup = window.open('about:blank');"));
-  Shell* popup = new_shell_observer.GetShell();
-  EXPECT_EQ(GURL("about:blank"), GetFrameBaseUrl(popup));
-}
-
 // A test to verify the initial stages of the initiator base url plumbing work.
 // The test verifies the value propagates as far as NavigationRequest and
-// FrameNavigationEntry. The test is based on
-// SitePerProcessIsolatedSandboxedIframeTest since that will automatically
-// enable the NewBaseUrlInheritanceBehavior.
-IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
-                       VerifyBaseUrlPlumbing) {
+// FrameNavigationEntry.
+IN_PROC_BROWSER_TEST_P(SitePerProcessBrowserTest, VerifyBaseUrlPlumbing) {
   GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
   // The child needs to have the same origin as the parent.
   GURL child_url(main_url);
@@ -2190,9 +2737,114 @@ IN_PROC_BROWSER_TEST_P(SitePerProcessIsolatedSandboxedIframeTest,
   EXPECT_EQ(GURL(), root->current_frame_host()->GetInheritedBaseUrl());
 }
 
+// This test verifies that a renderer process doesn't crash if a srcdoc calls
+// document.write on a mainframe parent.
+IN_PROC_BROWSER_TEST_F(BaseUrlInheritanceIframeTest, SrcdocWritesMainFrame) {
+  StartEmbeddedServer();
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+
+  // Create srcdoc child.
+  EXPECT_TRUE(ExecJs(root,
+                     "var frm = document.createElement('iframe'); "
+                     "frm.srcdoc = 'foo'; "
+                     "document.body.appendChild(frm);"));
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child = root->child_at(0);
+
+  // Have the srcdoc child call document.write on the mainframe-parent.
+  std::string test_str("test-complete");
+  // Since having the child write the parent's document will delete the child,
+  // we use setTimeout to ensure ExecJS returns true, and then wait for the
+  // child's RenderFrameHost to be deleted so we know that the write has
+  // completed. Note: the child's subframe exiting does not mean that its
+  // process, which it shares with the parent, has exited.
+  RenderFrameDeletedObserver observer(child->current_frame_host());
+  EXPECT_TRUE(ExecJs(
+      child, JsReplace("setTimeout(() => { parent.document.write($1); }, 100);",
+                       test_str)));
+  observer.WaitUntilDeleted();
+
+  // But fortunately `root` is still valid.
+  EXPECT_EQ(test_str, EvalJs(root, "document.body.innerText").ExtractString());
+  // If we get here without a crash, we've passed.
+}
+
+// A test to verify that a new about:blank mainframe inherits its base url
+// from its initiator.
+IN_PROC_BROWSER_TEST_F(BaseUrlInheritanceIframeTest, PopupsInheritBaseUrl) {
+  StartEmbeddedServer();
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+
+  ShellAddedObserver new_shell_observer;
+  EXPECT_TRUE(ExecJs(root, "var w = window.open()"));
+  Shell* new_shell = new_shell_observer.GetShell();
+  WebContentsImpl* new_contents =
+      static_cast<WebContentsImpl*>(new_shell->web_contents());
+  EXPECT_TRUE(WaitForLoadStop(new_contents));
+  ASSERT_NE(new_contents, shell()->web_contents());
+
+  // The popup should get the same base URL as its initiator.
+  FrameTreeNode* new_root = new_contents->GetPrimaryFrameTree().root();
+  EXPECT_EQ(EvalJs(root, "document.baseURI").ExtractString(),
+            EvalJs(new_root, "document.baseURI").ExtractString());
+}
+
+IN_PROC_BROWSER_TEST_F(BaseUrlInheritanceIframeTest,
+                       AboutBlankInheritsBaseUrlFromSiblingInitiator) {
+  StartEmbeddedServer();
+  GURL main_url(embedded_test_server()->GetURL("a.com", "/title1.html"));
+  EXPECT_TRUE(NavigateToURL(shell(), main_url));
+  FrameTreeNode* root = static_cast<WebContentsImpl*>(shell()->web_contents())
+                            ->GetPrimaryFrameTree()
+                            .root();
+
+  // Create siblings.
+  EXPECT_TRUE(ExecJs(root,
+                     "var frm = document.createElement('iframe'); "
+                     "frm.src = 'about:blank'; "
+                     "frm.id = 'frm1'; "
+                     "document.body.appendChild(frm);"));
+  ASSERT_EQ(1U, root->child_count());
+  FrameTreeNode* child1 = root->child_at(0);
+
+  EXPECT_TRUE(ExecJs(root,
+                     "var frm = document.createElement('iframe'); "
+                     "frm.id = 'frm2'; "
+                     "document.body.appendChild(frm);"));
+  ASSERT_EQ(2U, root->child_count());
+  FrameTreeNode* child2 = root->child_at(1);
+
+  // First child navigates to about:blank on second child.
+  EXPECT_TRUE(ExecJs(child1,
+                     "var base = document.createElement('base'); "
+                     "base.href = 'https://example.com'; "
+                     "document.head.appendChild(base); "
+                     "window.top.window[1].location.href = 'about:blank';"));
+  ASSERT_TRUE(WaitForLoadStop(shell()->web_contents()));
+  // Make sure second child inherited base url from the first child.
+  EXPECT_EQ(GURL("https://example.com"),
+            GetFrameBaseUrl(child2->current_frame_host()));
+}
+
 INSTANTIATE_TEST_SUITE_P(All,
                          SitePerProcessIsolatedSandboxedIframeTest,
                          testing::ValuesIn(RenderDocumentFeatureLevelValues()));
+INSTANTIATE_TEST_SUITE_P(
+    All,
+    OriginKeyedProcessIsolatedSandboxedIframeTest,
+    testing::Bool(),
+    [](const testing::TestParamInfo<bool>& info) {
+      return info.param ? "OriginKeyedProcessesByDefault_enabled"
+                        : "OriginKeyedProcessesByDefault_disabled";
+    });
 INSTANTIATE_TEST_SUITE_P(All,
                          SitePerProcessNotIsolatedSandboxedIframeTest,
                          testing::ValuesIn(RenderDocumentFeatureLevelValues()));
@@ -2208,12 +2860,6 @@ INSTANTIATE_TEST_SUITE_P(All,
                          testing::ValuesIn(RenderDocumentFeatureLevelValues()));
 INSTANTIATE_TEST_SUITE_P(All,
                          SrcdocIsolatedSandboxedIframeTest,
-                         testing::Bool(),
-                         [](const testing::TestParamInfo<bool>& info) {
-                           return info.param ? "isolated" : "non_isolated";
-                         });
-INSTANTIATE_TEST_SUITE_P(All,
-                         BaseUrlInheritanceBehaviorEnterprisePolicyTest,
                          testing::Bool(),
                          [](const testing::TestParamInfo<bool>& info) {
                            return info.param ? "isolated" : "non_isolated";

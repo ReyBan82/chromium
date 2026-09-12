@@ -7,12 +7,17 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "base/callback_list.h"
 #include "base/check_op.h"
 #include "base/functional/bind.h"
 #include "base/i18n/rtl.h"
+#include "base/logging.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
+#include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/accessibility/ax_action_data.h"
@@ -26,8 +31,9 @@
 #include "ui/base/models/combobox_model_observer.h"
 #include "ui/base/models/menu_model.h"
 #include "ui/base/models/menu_separator_types.h"
+#include "ui/base/mojom/menu_source_type.mojom.h"
 #include "ui/base/ui_base_features.h"
-#include "ui/base/ui_base_types.h"
+#include "ui/color/color_provider.h"
 #include "ui/events/event.h"
 #include "ui/events/types/event_type.h"
 #include "ui/gfx/canvas.h"
@@ -39,6 +45,7 @@
 #include "ui/gfx/image/image.h"
 #include "ui/gfx/range/range.h"
 #include "ui/gfx/scoped_canvas.h"
+#include "ui/views/accessibility/view_accessibility.h"
 #include "ui/views/animation/flood_fill_ink_drop_ripple.h"
 #include "ui/views/animation/ink_drop.h"
 #include "ui/views/animation/ink_drop_host.h"
@@ -48,6 +55,7 @@
 #include "ui/views/controls/button/button_controller.h"
 #include "ui/views/controls/combobox/combobox_util.h"
 #include "ui/views/controls/combobox/empty_combobox_model.h"
+#include "ui/views/controls/focus_ring.h"
 #include "ui/views/controls/menu/menu_config.h"
 #include "ui/views/controls/menu/menu_runner.h"
 #include "ui/views/controls/menu/menu_types.h"
@@ -59,6 +67,7 @@
 #include "ui/views/layout/layout_provider.h"
 #include "ui/views/style/platform_style.h"
 #include "ui/views/style/typography.h"
+#include "ui/views/style/typography_provider.h"
 #include "ui/views/vector_icons.h"
 #include "ui/views/view.h"
 #include "ui/views/widget/widget.h"
@@ -67,35 +76,24 @@ namespace views {
 
 namespace {
 
-class Arrow : public Button {
- public:
-  METADATA_HEADER(Arrow);
+constexpr int kEditableComboboxButtonSize = 24;
+constexpr int kEditableComboboxControlsContainerInsets = 6;
 
+class Arrow : public Button {
+  METADATA_HEADER(Arrow, Button)
+
+ public:
   explicit Arrow(PressedCallback callback) : Button(std::move(callback)) {
-    SetPreferredSize(gfx::Size(GetComboboxArrowContainerWidthAndMargins(),
-                               ComboboxArrowSize().height()));
-    // Similar to Combobox's TransparentButton.
-    SetFocusBehavior(FocusBehavior::NEVER);
+    SetPreferredSize(
+        gfx::Size(kEditableComboboxButtonSize, kEditableComboboxButtonSize));
+
     button_controller()->set_notify_action(
         ButtonController::NotifyAction::kOnPress);
 
-    // TODO(pbos): Share ink-drop configuration code between here and
-    // Combobox's TransparentButton.
-    // Similar to Combobox's TransparentButton.
-    InkDrop::Get(this)->SetMode(views::InkDropHost::InkDropMode::ON);
-    SetHasInkDropActionOnClick(true);
-    InkDrop::UseInkDropForSquareRipple(InkDrop::Get(this),
-                                       /*highlight_on_hover=*/false);
-    InkDrop::Get(this)->SetCreateRippleCallback(base::BindRepeating(
-        [](Button* host) -> std::unique_ptr<views::InkDropRipple> {
-          return std::make_unique<views::FloodFillInkDropRipple>(
-              InkDrop::Get(host), host->size(),
-              InkDrop::Get(host)->GetInkDropCenterBasedOnLastEvent(),
-              style::GetColor(*host, style::CONTEXT_TEXTFIELD,
-                              style::STYLE_PRIMARY),
-              InkDrop::Get(host)->GetVisibleOpacity());
-        },
-        this));
+    ConfigureComboboxButtonInkDrop(this);
+    GetViewAccessibility().SetRole(ax::mojom::Role::kButton);
+    UpdateAccessibleDefaultActionVerb();
+    GetViewAccessibility().SetHasPopup(ax::mojom::HasPopup::kMenu);
   }
   Arrow(const Arrow&) = delete;
   Arrow& operator=(const Arrow&) = delete;
@@ -112,23 +110,48 @@ class Arrow : public Button {
     gfx::Rect arrow_bounds = GetLocalBounds();
     arrow_bounds.ClampToCenteredSize(ComboboxArrowSize());
     // Make sure the arrow use the same color as the text in the combobox.
-    PaintComboboxArrow(style::GetColor(*this, style::CONTEXT_TEXTFIELD,
-                                       GetEnabled() ? style::STYLE_PRIMARY
-                                                    : style::STYLE_DISABLED),
-                       arrow_bounds, canvas);
+    PaintComboboxArrow(
+        GetColorProvider()->GetColor(TypographyProvider::Get().GetColorId(
+            style::CONTEXT_TEXTFIELD, GetEnabledInViewsSubtree()
+                                          ? style::STYLE_PRIMARY
+                                          : style::STYLE_DISABLED)),
+        arrow_bounds, canvas);
   }
 
-  void GetAccessibleNodeData(ui::AXNodeData* node_data) override {
-    node_data->role = ax::mojom::Role::kButton;
-    node_data->SetName(GetAccessibleName());
-    node_data->SetHasPopup(ax::mojom::HasPopup::kMenu);
-    if (GetEnabled()) {
-      node_data->SetDefaultActionVerb(ax::mojom::DefaultActionVerb::kOpen);
+  void UpdateAccessibleDefaultActionVerb() {
+    if (GetEnabledInViewsSubtree()) {
+      GetViewAccessibility().SetDefaultActionVerb(
+          ax::mojom::DefaultActionVerb::kOpen);
+    } else {
+      GetViewAccessibility().RemoveDefaultActionVerb();
     }
+  }
+
+  base::CallbackListSubscription enabled_changed_subscription_ =
+      AddEnabledInViewsSubtreeChangedCallback(
+          base::BindRepeating(&Arrow::UpdateAccessibleDefaultActionVerb,
+                              base::Unretained(this)));
+};
+
+BEGIN_METADATA(Arrow)
+END_METADATA
+
+class ControlElementsContainer final : public BoxLayoutView {
+  METADATA_HEADER(ControlElementsContainer, BoxLayoutView)
+
+ public:
+  ControlElementsContainer() = default;
+  ControlElementsContainer(ControlElementsContainer&) = delete;
+  ControlElementsContainer& operator=(ControlElementsContainer&) = delete;
+  ~ControlElementsContainer() override = default;
+
+ protected:
+  void ChildPreferredSizeChanged(View* child) override {
+    PreferredSizeChanged();
   }
 };
 
-BEGIN_METADATA(Arrow, Button)
+BEGIN_METADATA(ControlElementsContainer)
 END_METADATA
 
 }  // namespace
@@ -140,7 +163,7 @@ std::u16string EditableCombobox::MenuDecorationStrategy::DecorateItemText(
 
 // Adapts a ui::ComboboxModel to a ui::MenuModel to be used by EditableCombobox.
 // Also provides a filtering capability.
-class EditableCombobox::EditableComboboxMenuModel
+class EditableCombobox::EditableComboboxMenuModel final
     : public ui::MenuModel,
       public ui::ComboboxModelObserver {
  public:
@@ -218,6 +241,10 @@ class EditableCombobox::EditableComboboxMenuModel
     observation_.Reset();
   }
 
+  base::WeakPtr<ui::MenuModel> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
   size_t GetItemCount() const override { return items_shown_.size(); }
 
   // ui::MenuModel:
@@ -233,14 +260,6 @@ class EditableCombobox::EditableComboboxMenuModel
     size_t index;
     bool enabled;
   };
-  bool HasIcons() const override {
-    for (size_t i = 0; i < GetItemCount(); ++i) {
-      if (!GetIconAt(i).IsEmpty()) {
-        return true;
-      }
-    }
-    return false;
-  }
 
   ItemType GetTypeAt(size_t index) const override {
     return UseCheckmarks() ? TYPE_CHECK : TYPE_COMMAND;
@@ -289,7 +308,7 @@ class EditableCombobox::EditableComboboxMenuModel
   // The strategy used to customize the display of the dropdown menu.
   std::unique_ptr<MenuDecorationStrategy> decoration_strategy_;
 
-  raw_ptr<EditableCombobox> owner_;            // Weak. Owns |this|.
+  raw_ptr<EditableCombobox> owner_;  // Weak. Owns |this|.
   std::unique_ptr<ui::ComboboxModel> combobox_model_;
 
   // Whether to adapt the items shown to the textfield content.
@@ -307,6 +326,8 @@ class EditableCombobox::EditableComboboxMenuModel
 
   base::ScopedObservation<ui::ComboboxModel, ui::ComboboxModelObserver>
       observation_{this};
+
+  base::WeakPtrFactory<EditableComboboxMenuModel> weak_ptr_factory_{this};
 };
 
 // This class adds itself as the pre-target handler for the RootView of the
@@ -329,14 +350,14 @@ class EditableCombobox::EditableComboboxPreTargetHandler
 
   // ui::EventHandler overrides.
   void OnMouseEvent(ui::MouseEvent* event) override {
-    if (event->type() == ui::ET_MOUSE_PRESSED &&
+    if (event->type() == ui::EventType::kMousePressed &&
         event->button_flags() == event->changed_button_flags()) {
       HandlePressEvent(event->root_location());
     }
   }
 
   void OnTouchEvent(ui::TouchEvent* event) override {
-    if (event->type() == ui::ET_TOUCH_PRESSED) {
+    if (event->type() == ui::EventType::kTouchPressed) {
       HandlePressEvent(event->root_location());
     }
   }
@@ -372,7 +393,7 @@ EditableCombobox::EditableCombobox(
     const int text_context,
     const int text_style,
     const bool display_arrow)
-    : textfield_(new Textfield()),
+    : textfield_(AddChildView(std::make_unique<Textfield>())),
       text_context_(text_context),
       text_style_(text_style),
       filter_on_edit_(filter_on_edit),
@@ -381,20 +402,29 @@ EditableCombobox::EditableCombobox(
   observation_.Observe(textfield_.get());
   textfield_->set_controller(this);
   textfield_->SetFontList(GetFontList());
-  AddChildView(textfield_.get());
+  views::FocusRing::Get(textfield_)->SetOutsetFocusRingDisabled(true);
 
-  control_elements_container_ = AddChildView(std::make_unique<BoxLayoutView>());
+  control_elements_container_ =
+      AddChildView(std::make_unique<ControlElementsContainer>());
   control_elements_container_->SetInsideBorderInsets(
-      gfx::Insets::TLBR(0, 0, 0,
-                        GetComboboxArrowContainerWidthAndMargins() -
-                            GetComboboxArrowContainerWidth()));
-
+      gfx::Insets::TLBR(kEditableComboboxControlsContainerInsets, 0,
+                        kEditableComboboxControlsContainerInsets,
+                        kEditableComboboxControlsContainerInsets));
+  control_elements_container_->SetBetweenChildSpacing(
+      kComboboxArrowPaddingWidth);
+  control_elements_container_observation_.Observe(control_elements_container_);
   if (display_arrow) {
     arrow_ = AddControlElement(std::make_unique<Arrow>(base::BindRepeating(
         &EditableCombobox::ArrowButtonPressed, base::Unretained(this))));
+    // We need this so the arrow icon is not covered when the combo box view is
+    // hovered
+    arrow_->SetPaintToLayer();
+    arrow_->layer()->SetFillsBoundsOpaquely(false);
   }
 
-  SetLayoutManager(std::make_unique<FillLayout>());
+  SetLayoutManager(std::make_unique<DelegatingLayoutManager>(this));
+  GetViewAccessibility().SetRole(ax::mojom::Role::kComboBoxGrouping);
+  GetViewAccessibility().SetValue(GetText());
 }
 
 EditableCombobox::~EditableCombobox() {
@@ -408,19 +438,31 @@ void EditableCombobox::SetModel(std::unique_ptr<ui::ComboboxModel> model) {
       this, std::move(model), filter_on_edit_, show_on_empty_);
 }
 
-const std::u16string& EditableCombobox::GetText() const {
+std::u16string_view EditableCombobox::GetText() const {
   return textfield_->GetText();
 }
 
-void EditableCombobox::SetText(const std::u16string& text) {
+void EditableCombobox::SetText(std::u16string_view text) {
   textfield_->SetText(text);
   // SetText does not actually notify the TextfieldController, so we call the
   // handling code directly.
   HandleNewContent(text);
 }
 
+void EditableCombobox::SetInvalid(bool invalid) {
+  textfield_->SetInvalid(invalid);
+}
+
+std::u16string_view EditableCombobox::GetPlaceholderText() const {
+  return textfield_->GetPlaceholderText();
+}
+
+void EditableCombobox::SetPlaceholderText(std::u16string_view text) {
+  textfield_->SetPlaceholderText(text);
+}
+
 const gfx::FontList& EditableCombobox::GetFontList() const {
-  return style::GetFont(text_context_, text_style_);
+  return TypographyProvider::Get().GetFont(text_context_, text_style_);
 }
 
 void EditableCombobox::SelectRange(const gfx::Range& range) {
@@ -428,14 +470,10 @@ void EditableCombobox::SelectRange(const gfx::Range& range) {
 }
 
 void EditableCombobox::OnAccessibleNameChanged(const std::u16string& new_name) {
-  textfield_->SetAccessibleName(new_name);
+  textfield_->GetViewAccessibility().SetName(new_name);
   if (arrow_) {
-    arrow_->SetAccessibleName(new_name);
+    arrow_->GetViewAccessibility().SetName(new_name);
   }
-}
-
-void EditableCombobox::SetAssociatedLabel(View* labelling_view) {
-  textfield_->SetAssociatedLabel(labelling_view);
 }
 
 void EditableCombobox::SetMenuDecorationStrategy(
@@ -448,18 +486,11 @@ void EditableCombobox::UpdateMenu() {
   menu_model_->UpdateItemsShown();
 }
 
-void EditableCombobox::Layout() {
-  View::Layout();
-  int preferred_width = control_elements_container_->GetPreferredSize().width();
-  control_elements_container_->SetBounds(width() - preferred_width, 0,
-                                         preferred_width, height());
-}
-
-void EditableCombobox::GetAccessibleNodeData(ui::AXNodeData* node_data) {
-  node_data->role = ax::mojom::Role::kComboBoxGrouping;
-
-  node_data->SetName(textfield_->GetAccessibleName());
-  node_data->SetValue(GetText());
+gfx::Size EditableCombobox::CalculatePreferredSize(
+    const SizeBounds& available_size) const {
+  gfx::Size preferred_size = textfield_->GetPreferredSize({});
+  preferred_size.SetToMax(control_elements_container_->GetPreferredSize({}));
+  return preferred_size;
 }
 
 void EditableCombobox::RequestFocus() {
@@ -477,15 +508,15 @@ void EditableCombobox::OnVisibleBoundsChanged() {
 void EditableCombobox::ContentsChanged(Textfield* sender,
                                        const std::u16string& new_contents) {
   HandleNewContent(new_contents);
-  ShowDropDownMenu(ui::MENU_SOURCE_KEYBOARD);
+  ShowDropDownMenu(ui::mojom::MenuSourceType::kKeyboard);
 }
 
 bool EditableCombobox::HandleKeyEvent(Textfield* sender,
                                       const ui::KeyEvent& key_event) {
-  if (key_event.type() == ui::ET_KEY_PRESSED &&
+  if (key_event.type() == ui::EventType::kKeyPressed &&
       (key_event.key_code() == ui::VKEY_UP ||
        key_event.key_code() == ui::VKEY_DOWN)) {
-    ShowDropDownMenu(ui::MENU_SOURCE_KEYBOARD);
+    ShowDropDownMenu(ui::mojom::MenuSourceType::kKeyboard);
     return true;
   }
   return false;
@@ -493,6 +524,15 @@ bool EditableCombobox::HandleKeyEvent(Textfield* sender,
 
 void EditableCombobox::OnViewBlurred(View* observed_view) {
   CloseMenu();
+}
+
+void EditableCombobox::OnViewPreferredSizeChanged(View* observed_view) {
+  // TODO(crbug.com/498077504): Watch for potential layout loops. Calling
+  // UpdateTextfieldInsets() during preferred size changes may trigger
+  // re-entrant or unnecessary second layouts.
+  if (observed_view == control_elements_container_) {
+    UpdateTextfieldInsets();
+  }
 }
 
 void EditableCombobox::OnLayoutIsAnimatingChanged(
@@ -504,7 +544,34 @@ void EditableCombobox::OnLayoutIsAnimatingChanged(
   }
 }
 
+// TODO(crbug.com/329471666): Refactor Textfield to obviate the need for this.
+ProposedLayout EditableCombobox::CalculateProposedLayout(
+    const SizeBounds& size_bounds) const {
+  ProposedLayout layout;
+  layout.host_size =
+      gfx::Size(size_bounds.width().value(), size_bounds.height().value());
+  layout.child_layouts.emplace_back(
+      textfield_.get(), textfield_->GetVisible(),
+      gfx::Rect(0, 0, layout.host_size.width(), layout.host_size.height()));
+  const int preferred_width =
+      control_elements_container_->GetPreferredSize({}).width();
+  layout.child_layouts.emplace_back(
+      control_elements_container_.get(),
+      control_elements_container_->GetVisible(),
+      gfx::Rect(layout.host_size.width() - preferred_width, 0, preferred_width,
+                layout.host_size.height()));
+  return layout;
+}
+
+bool EditableCombobox::ShouldApplyInkDropEffects() {
+  return arrow_ && InkDrop::Get(arrow_) && GetWidget();
+}
+
 void EditableCombobox::CloseMenu() {
+  if (ShouldApplyInkDropEffects()) {
+    InkDrop::Get(arrow_)->AnimateToState(InkDropState::DEACTIVATED, nullptr);
+    InkDrop::Get(arrow_)->GetInkDrop()->SetHovered(arrow_->IsMouseHovered());
+  }
   menu_runner_.reset();
   pre_target_handler_.reset();
 }
@@ -515,12 +582,10 @@ void EditableCombobox::OnItemSelected(size_t index) {
   // SetText does not actually notify the TextfieldController, so we call the
   // handling code directly.
   HandleNewContent(selected_item_text);
-  NotifyAccessibilityEvent(ax::mojom::Event::kValueChanged,
-                           /*send_native_event=*/true);
 }
 
-void EditableCombobox::HandleNewContent(const std::u16string& new_content) {
-  DCHECK(GetText() == new_content);
+void EditableCombobox::HandleNewContent(std::u16string_view new_content) {
+  DCHECK_EQ(GetText(), new_content);
   // We notify |callback_| before updating |menu_model_|'s items shown. This
   // gives the user a chance to modify the ComboboxModel beforehand if they wish
   // to do so.
@@ -533,10 +598,14 @@ void EditableCombobox::HandleNewContent(const std::u16string& new_content) {
     menu_model_->EnableUpdateItemsShown();
   }
   UpdateMenu();
+  GetViewAccessibility().SetValue(GetText());
 }
 
 void EditableCombobox::ArrowButtonPressed(const ui::Event& event) {
   textfield_->RequestFocus();
+  if (ShouldApplyInkDropEffects()) {
+    InkDrop::Get(arrow_)->AnimateToState(InkDropState::ACTIVATED, nullptr);
+  }
   if (menu_runner_ && menu_runner_->IsRunning()) {
     CloseMenu();
   } else {
@@ -544,7 +613,7 @@ void EditableCombobox::ArrowButtonPressed(const ui::Event& event) {
   }
 }
 
-void EditableCombobox::ShowDropDownMenu(ui::MenuSourceType source_type) {
+void EditableCombobox::ShowDropDownMenu(ui::mojom::MenuSourceType source_type) {
   constexpr int kMenuBorderWidthTop = 1;
 
   if (dropdown_blocked_for_animation_) {
@@ -593,10 +662,8 @@ void EditableCombobox::ShowDropDownMenu(ui::MenuSourceType source_type) {
 void EditableCombobox::UpdateTextfieldInsets() {
   textfield_->SetExtraInsets(gfx::Insets::TLBR(
       0, 0, 0,
-      std::max(control_elements_container_->GetPreferredSize().width() -
-                   (features::IsChromeRefresh2023()
-                        ? kComboboxArrowPaddingWidthChromeRefresh2023
-                        : kComboboxArrowPaddingWidth),
+      std::max(control_elements_container_->GetPreferredSize({}).width() -
+                   kComboboxArrowPaddingWidth,
                0)));
 }
 
@@ -613,7 +680,9 @@ const ui::ComboboxModel* EditableCombobox::GetComboboxModel() const {
   return menu_model_->GetComboboxModel();
 }
 
-BEGIN_METADATA(EditableCombobox, View)
+BEGIN_METADATA(EditableCombobox)
+ADD_PROPERTY_METADATA(std::u16string, Text)
+ADD_PROPERTY_METADATA(std::u16string, PlaceholderText)
 END_METADATA
 
 }  // namespace views

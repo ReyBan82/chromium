@@ -18,13 +18,6 @@ error::Error DoBindBufferRange(GLenum target,
                                GLintptr offset,
                                GLsizeiptr size);
 error::Error DoBindFramebuffer(GLenum target, GLuint framebuffer);
-error::Error DoBindImageTexture(GLuint unit,
-                                GLuint texture,
-                                GLint level,
-                                GLboolean layered,
-                                GLint layer,
-                                GLenum access,
-                                GLenum format);
 error::Error DoBindRenderbuffer(GLenum target, GLuint renderbuffer);
 error::Error DoBindSampler(GLuint unit, GLuint sampler);
 error::Error DoBindTexture(GLenum target, GLuint texture);
@@ -85,7 +78,6 @@ error::Error DoCompressedTexImage2D(GLenum target,
                                     GLsizei height,
                                     GLint border,
                                     GLsizei image_size,
-                                    GLsizei data_size,
                                     const void* data);
 error::Error DoCompressedTexSubImage2D(GLenum target,
                                        GLint level,
@@ -95,7 +87,6 @@ error::Error DoCompressedTexSubImage2D(GLenum target,
                                        GLsizei height,
                                        GLenum format,
                                        GLsizei image_size,
-                                       GLsizei data_size,
                                        const void* data);
 error::Error DoCompressedTexImage3D(GLenum target,
                                     GLint level,
@@ -105,7 +96,6 @@ error::Error DoCompressedTexImage3D(GLenum target,
                                     GLsizei depth,
                                     GLint border,
                                     GLsizei image_size,
-                                    GLsizei data_size,
                                     const void* data);
 error::Error DoCompressedTexSubImage3D(GLenum target,
                                        GLint level,
@@ -117,7 +107,6 @@ error::Error DoCompressedTexSubImage3D(GLenum target,
                                        GLsizei depth,
                                        GLenum format,
                                        GLsizei image_size,
-                                       GLsizei data_size,
                                        const void* data);
 error::Error DoContextVisibilityHintCHROMIUM(GLboolean visibility);
 error::Error DoCopyBufferSubData(GLenum readtarget,
@@ -170,27 +159,16 @@ error::Error DoDepthRangef(GLclampf zNear, GLclampf zFar);
 error::Error DoDetachShader(GLuint program, GLuint shader);
 error::Error DoDisable(GLenum cap);
 error::Error DoDisableVertexAttribArray(GLuint index);
-error::Error DoDispatchCompute(GLuint num_groups_x,
-                               GLuint num_groups_y,
-                               GLuint num_groups_z);
-error::Error DoDispatchComputeIndirect(GLintptr offset);
 error::Error DoDrawArrays(GLenum mode, GLint first, GLsizei count);
-error::Error DoDrawArraysIndirect(GLenum mode, const void* offset);
 error::Error DoDrawElements(GLenum mode,
                             GLsizei count,
                             GLenum type,
                             const void* indices);
-error::Error DoDrawElementsIndirect(GLenum mode,
-                                    GLenum type,
-                                    const void* offset);
 error::Error DoEnable(GLenum cap);
 error::Error DoEnableVertexAttribArray(GLuint index);
 error::Error DoFenceSync(GLenum condition, GLbitfield flags, GLuint client_id);
 error::Error DoFinish();
 error::Error DoFlush();
-error::Error DoFlushMappedBufferRange(GLenum target,
-                                      GLintptr offset,
-                                      GLsizeiptr size);
 error::Error DoFramebufferParameteri(GLenum target, GLenum pname, GLint param);
 error::Error DoFramebufferRenderbuffer(GLenum target,
                                        GLenum attachment,
@@ -257,11 +235,6 @@ error::Error DoGetBooleanv(GLenum pname,
                            GLsizei bufsize,
                            GLsizei* length,
                            GLboolean* params);
-error::Error DoGetBooleani_v(GLenum pname,
-                             GLuint index,
-                             GLsizei bufsize,
-                             GLsizei* length,
-                             GLboolean* data);
 error::Error DoGetBufferParameteri64v(GLenum target,
                                       GLenum pname,
                                       GLsizei bufsize,
@@ -272,6 +245,10 @@ error::Error DoGetBufferParameteriv(GLenum target,
                                     GLsizei bufsize,
                                     GLsizei* length,
                                     GLint* params);
+error::Error DoGetBufferSubDataCHROMIUM(GLenum target,
+                                        GLintptr offset,
+                                        GLsizeiptr size,
+                                        void* data);
 error::Error DoGetError(uint32_t* result);
 error::Error DoGetFloatv(GLenum pname,
                          GLsizei bufsize,
@@ -316,32 +293,6 @@ error::Error DoGetProgramiv(GLuint program,
                             GLsizei* length,
                             GLint* params);
 error::Error DoGetProgramInfoLog(GLuint program, std::string* infolog);
-error::Error DoGetProgramInterfaceiv(GLuint program,
-                                     GLenum program_interface,
-                                     GLenum pname,
-                                     GLsizei bufsize,
-                                     GLsizei* length,
-                                     GLint* params);
-error::Error DoGetProgramResourceiv(GLuint program,
-                                    GLenum program_interface,
-                                    GLuint index,
-                                    GLsizei prop_count,
-                                    const GLenum* props,
-                                    GLsizei bufsize,
-                                    GLsizei* length,
-                                    GLint* params);
-error::Error DoGetProgramResourceIndex(GLuint program,
-                                       GLenum program_interface,
-                                       const char* name,
-                                       GLuint* index);
-error::Error DoGetProgramResourceLocation(GLuint program,
-                                          GLenum program_interface,
-                                          const char* name,
-                                          GLint* location);
-error::Error DoGetProgramResourceName(GLuint program,
-                                      GLenum program_interface,
-                                      GLuint index,
-                                      std::string* name);
 error::Error DoGetRenderbufferParameteriv(GLenum target,
                                           GLenum pname,
                                           GLsizei bufsize,
@@ -465,14 +416,40 @@ error::Error DoIsTexture(GLuint texture, uint32_t* result);
 error::Error DoIsTransformFeedback(GLuint transformfeedback, uint32_t* result);
 error::Error DoLineWidth(GLfloat width);
 error::Error DoLinkProgram(GLuint program);
-error::Error DoMemoryBarrierEXT(GLbitfield barriers);
-error::Error DoMemoryBarrierByRegion(GLbitfield barriers);
 error::Error DoMultiDrawBeginCHROMIUM(GLsizei drawcount);
 error::Error DoMultiDrawEndCHROMIUM();
 error::Error DoPauseTransformFeedback();
 error::Error DoPixelStorei(GLenum pname, GLint param);
 error::Error DoPolygonOffset(GLfloat factor, GLfloat units);
 error::Error DoReadBuffer(GLenum src);
+error::Error DoWritePixelsYUVINTERNAL(GLuint src_width,
+                                      GLuint src_height,
+                                      GLuint src_row_bytes_plane1,
+                                      GLuint src_row_bytes_plane2,
+                                      GLuint src_row_bytes_plane3,
+                                      GLuint src_row_bytes_plane4,
+                                      GLuint src_yuv_plane_config,
+                                      GLuint src_yuv_subsampling,
+                                      GLuint src_yuv_datatype,
+                                      GLint shm_id,
+                                      GLuint shm_offset,
+                                      GLuint pixels_offset_plane1,
+                                      GLuint pixels_offset_plane2,
+                                      GLuint pixels_offset_plane3,
+                                      GLuint pixels_offset_plane4);
+error::Error DoReadbackARGBImagePixelsINTERNAL(GLint src_x,
+                                               GLint src_y,
+                                               GLint plane_index,
+                                               GLuint dst_width,
+                                               GLuint dst_height,
+                                               GLuint row_bytes,
+                                               GLuint dst_sk_color_type,
+                                               GLuint dst_sk_alpha_type,
+                                               GLint shm_id,
+                                               GLuint shm_offset,
+                                               GLuint color_space_offset,
+                                               GLuint pixels_offset,
+                                               GLuint mailbox_offset);
 error::Error DoReadPixels(GLint x,
                           GLint y,
                           GLsizei width,
@@ -792,16 +769,6 @@ error::Error DoGetMaxValueInBufferCHROMIUM(GLuint buffer_id,
                                            GLenum type,
                                            GLuint offset,
                                            uint32_t* result);
-error::Error DoEnableFeatureCHROMIUM(const char* feature);
-error::Error DoMapBufferRange(GLenum target,
-                              GLintptr offset,
-                              GLsizeiptr size,
-                              GLbitfield access,
-                              void* ptr,
-                              int32_t data_shm_id,
-                              uint32_t data_shm_offset,
-                              uint32_t* result);
-error::Error DoUnmapBuffer(GLenum target);
 error::Error DoResizeCHROMIUM(GLuint width,
                               GLuint height,
                               GLfloat scale_factor,
@@ -866,10 +833,6 @@ error::Error DoDrawElementsInstancedBaseVertexBaseInstanceANGLE(
     GLint basevertices,
     GLuint baseinstances);
 error::Error DoVertexAttribDivisorANGLE(GLuint index, GLuint divisor);
-error::Error DoProduceTextureDirectCHROMIUM(GLuint texture_client_id,
-                                            const volatile GLbyte* mailbox);
-error::Error DoCreateAndConsumeTextureINTERNAL(GLuint texture_client_id,
-                                               const volatile GLbyte* mailbox);
 error::Error DoBindUniformLocationCHROMIUM(GLuint program,
                                            GLint location,
                                            const char* name);
@@ -885,7 +848,6 @@ error::Error DoWaitSyncTokenCHROMIUM(CommandBufferNamespace namespace_id,
                                      CommandBufferId command_buffer_id,
                                      GLuint64 release_count);
 error::Error DoDrawBuffersEXT(GLsizei count, const volatile GLenum* bufs);
-error::Error DoDiscardBackbufferCHROMIUM();
 
 error::Error DoFlushDriverCachesCHROMIUM();
 error::Error DoMatrixLoadfCHROMIUM(GLenum matrixMode,
@@ -1016,35 +978,45 @@ error::Error DoSetReadbackBufferShadowAllocationINTERNAL(GLuint buffer_id,
                                                          GLuint shm_offset,
                                                          GLuint size);
 error::Error DoMaxShaderCompilerThreadsKHR(GLuint count);
-error::Error DoInitializeDiscardableTextureCHROMIUM(
-    GLuint texture_id,
-    ServiceDiscardableHandle&& discardable_handle);
-error::Error DoUnlockDiscardableTextureCHROMIUM(GLuint texture_id);
-error::Error DoLockDiscardableTextureCHROMIUM(GLuint texture_id);
 error::Error DoCreateAndTexStorage2DSharedImageINTERNAL(
     GLuint client_id,
     const volatile GLbyte* mailbox);
 error::Error DoBeginSharedImageAccessDirectCHROMIUM(GLuint client_id,
                                                     GLenum mode);
 error::Error DoEndSharedImageAccessDirectCHROMIUM(GLuint client_id);
-error::Error DoConvertRGBAToYUVAMailboxesINTERNAL(
+error::Error DoConvertYUVAMailboxesToTextureINTERNAL(
+    GLuint texture,
+    GLenum target,
+    GLuint internal_format,
+    GLenum type,
+    GLint src_x,
+    GLint src_y,
+    GLsizei width,
+    GLsizei height,
+    GLboolean flip_y,
     GLenum yuv_color_space,
     GLenum plane_config,
     GLenum subsampling,
     const volatile GLbyte* mailboxes_in);
-error::Error DoConvertYUVAMailboxesToRGBINTERNAL(
-    GLenum yuv_color_space,
-    GLenum plane_config,
-    GLenum subsampling,
-    const volatile GLbyte* mailboxes_in);
+
 error::Error DoCopySharedImageINTERNAL(GLint xoffset,
                                        GLint yoffset,
                                        GLint x,
                                        GLint y,
                                        GLsizei width,
                                        GLsizei height,
-                                       GLboolean unpack_flip_y,
                                        const volatile GLbyte* mailboxes);
+error::Error DoCopySharedImageToTextureINTERNAL(
+    GLuint texture,
+    GLenum target,
+    GLuint internal_format,
+    GLenum type,
+    GLint src_x,
+    GLint src_y,
+    GLsizei width,
+    GLsizei height,
+    GLboolean is_dst_origin_top_left,
+    const volatile GLbyte* src_mailbox);
 error::Error DoEnableiOES(GLenum target, GLuint index);
 error::Error DoDisableiOES(GLenum target, GLuint index);
 error::Error DoBlendEquationiOES(GLuint buf, GLenum mode);
@@ -1063,5 +1035,51 @@ error::Error DoColorMaskiOES(GLuint buf,
                              GLboolean blue,
                              GLboolean alpha);
 error::Error DoIsEnablediOES(GLenum target, GLuint index, uint32_t* result);
+error::Error DoFramebufferMemorylessPixelLocalStorageANGLE(
+    GLint plane,
+    GLenum internalformat,
+    GLbitfield usage);
+error::Error DoFramebufferTexturePixelLocalStorageANGLE(GLint plane,
+                                                        GLuint backingtexture,
+                                                        GLint level,
+                                                        GLint layer,
+                                                        GLbitfield usage);
+error::Error DoFramebufferPixelLocalClearValuefvANGLE(
+    GLint plane,
+    const volatile GLfloat* value);
+error::Error DoFramebufferPixelLocalClearValueivANGLE(
+    GLint plane,
+    const volatile GLint* value);
+error::Error DoFramebufferPixelLocalClearValueuivANGLE(
+    GLint plane,
+    const volatile GLuint* value);
+error::Error DoBeginPixelLocalStorageANGLE(GLsizei n,
+                                           const volatile GLenum* loadops);
+error::Error DoEndPixelLocalStorageANGLE(GLsizei n,
+                                         const volatile GLenum* storeops);
+error::Error DoEndPixelLocalStorageImplicitANGLE();
+error::Error DoPixelLocalStorageBarrierANGLE();
+error::Error DoFramebufferPixelLocalStorageInterruptANGLE();
+error::Error DoFramebufferPixelLocalStorageRestoreANGLE();
+error::Error DoGetFramebufferPixelLocalStorageParameterfvANGLE(GLint plane,
+                                                               GLenum pname,
+                                                               GLsizei bufsize,
+                                                               GLsizei* length,
+                                                               GLfloat* params);
+error::Error DoGetFramebufferPixelLocalStorageParameterivANGLE(GLint plane,
+                                                               GLenum pname,
+                                                               GLsizei bufsize,
+                                                               GLsizei* length,
+                                                               GLint* params);
+error::Error DoGetFramebufferPixelLocalStorageParameteruivANGLE(GLint plane,
+                                                                GLenum pname,
+                                                                GLsizei bufsize,
+                                                                GLsizei* length,
+                                                                GLuint* params);
 error::Error DoProvokingVertexANGLE(GLenum provokeMode);
+error::Error DoClipControlEXT(GLenum origin, GLenum depth);
+error::Error DoPolygonModeANGLE(GLenum face, GLenum mode);
+error::Error DoPolygonOffsetClampEXT(GLfloat factor,
+                                     GLfloat units,
+                                     GLfloat clamp);
 #endif  // GPU_COMMAND_BUFFER_SERVICE_GLES2_CMD_DECODER_PASSTHROUGH_DOER_PROTOTYPES_H_

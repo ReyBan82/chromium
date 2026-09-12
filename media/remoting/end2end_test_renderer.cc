@@ -13,10 +13,10 @@
 #include "base/functional/callback_helpers.h"
 #include "base/notreached.h"
 #include "base/task/single_thread_task_runner.h"
-#include "components/cast_streaming/public/decoder_buffer_reader.h"
-#include "components/cast_streaming/public/remoting_proto_utils.h"
 #include "media/base/decoder_buffer.h"
 #include "media/base/demuxer_stream.h"
+#include "media/cast/openscreen/decoder_buffer_reader.h"
+#include "media/cast/openscreen/remoting_proto_utils.h"
 #include "media/mojo/common/mojo_data_pipe_read_write.h"
 #include "media/mojo/common/mojo_decoder_buffer_converter.h"
 #include "media/mojo/mojom/remoting.mojom.h"
@@ -53,7 +53,7 @@ class TestStreamSender final : public mojom::RemotingDataStreamSender {
       SendFrameToSinkCallback callback)
       : receiver_(this, std::move(receiver)),
         decoder_buffer_reader_(
-            std::make_unique<cast_streaming::DecoderBufferReader>(
+            std::make_unique<media::cast::DecoderBufferReader>(
                 base::BindRepeating(&TestStreamSender::OnFrameRead,
                                     base::Unretained(this)),
                 std::move(handle))),
@@ -94,7 +94,7 @@ class TestStreamSender final : public mojom::RemotingDataStreamSender {
 
   uint32_t frame_count_ = 0;
   mojo::Receiver<RemotingDataStreamSender> receiver_;
-  std::unique_ptr<cast_streaming::DecoderBufferReader> decoder_buffer_reader_;
+  std::unique_ptr<media::cast::DecoderBufferReader> decoder_buffer_reader_;
   SendFrameCallback read_complete_cb_;
   const DemuxerStream::Type type_;
   const SendFrameToSinkCallback send_frame_to_sink_cb_;
@@ -388,7 +388,7 @@ void End2EndTestRenderer::OnAcquireRendererDone(int receiver_renderer_handle) {
 }
 
 void End2EndTestRenderer::SetLatencyHint(
-    absl::optional<base::TimeDelta> latency_hint) {
+    std::optional<base::TimeDelta> latency_hint) {
   courier_renderer_->SetLatencyHint(latency_hint);
 }
 
@@ -445,18 +445,12 @@ void End2EndTestRenderer::OnMessageFromSink(
   controller_->OnMessageFromSink(*message);
 }
 
-void End2EndTestRenderer::OnSelectedVideoTracksChanged(
-    const std::vector<DemuxerStream*>& enabled_tracks,
+void End2EndTestRenderer::OnTracksChanged(
+    DemuxerStream::Type track_type,
+    DemuxerStream* enabled_track,
     base::OnceClosure change_completed_cb) {
-  courier_renderer_->OnSelectedVideoTracksChanged(
-      enabled_tracks, std::move(change_completed_cb));
-}
-
-void End2EndTestRenderer::OnEnabledAudioTracksChanged(
-    const std::vector<DemuxerStream*>& enabled_tracks,
-    base::OnceClosure change_completed_cb) {
-  courier_renderer_->OnEnabledAudioTracksChanged(
-      enabled_tracks, std::move(change_completed_cb));
+  courier_renderer_->OnTracksChanged(track_type, std::move(enabled_track),
+                                     std::move(change_completed_cb));
 }
 
 }  // namespace remoting

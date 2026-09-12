@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 #include "mojo/public/cpp/base/message_pump_type_mojom_traits.h"
+
+#include "base/notreached.h"
 #include "build/build_config.h"
 
 namespace mojo {
@@ -30,38 +32,31 @@ EnumTraits<mojo_base::mojom::MessagePumpType, base::MessagePumpType>::ToMojom(
 #endif
   }
   NOTREACHED();
-  return mojo_base::mojom::MessagePumpType::kDefault;
 }
 
 // static
-bool EnumTraits<mojo_base::mojom::MessagePumpType, base::MessagePumpType>::
-    FromMojom(mojo_base::mojom::MessagePumpType input,
-              base::MessagePumpType* output) {
+base::MessagePumpType
+EnumTraits<mojo_base::mojom::MessagePumpType, base::MessagePumpType>::FromMojom(
+    mojo_base::mojom::MessagePumpType input) {
   switch (input) {
     case mojo_base::mojom::MessagePumpType::kDefault:
-      *output = base::MessagePumpType::DEFAULT;
-      return true;
+      return base::MessagePumpType::DEFAULT;
     case mojo_base::mojom::MessagePumpType::kUi:
-      *output = base::MessagePumpType::UI;
-      return true;
+      return base::MessagePumpType::UI;
     case mojo_base::mojom::MessagePumpType::kCustom:
-      *output = base::MessagePumpType::CUSTOM;
-      return true;
+      return base::MessagePumpType::CUSTOM;
     case mojo_base::mojom::MessagePumpType::kIo:
-      *output = base::MessagePumpType::IO;
-      return true;
+      return base::MessagePumpType::IO;
 #if BUILDFLAG(IS_ANDROID)
     case mojo_base::mojom::MessagePumpType::kJava:
-      *output = base::MessagePumpType::JAVA;
-      return true;
+      return base::MessagePumpType::JAVA;
 #endif
 #if BUILDFLAG(IS_APPLE)
     case mojo_base::mojom::MessagePumpType::kNsRunloop:
-      *output = base::MessagePumpType::NS_RUNLOOP;
-      return true;
+      return base::MessagePumpType::NS_RUNLOOP;
 #endif
   }
-  return false;
+  NOTREACHED();
 }
 
 }  // namespace mojo

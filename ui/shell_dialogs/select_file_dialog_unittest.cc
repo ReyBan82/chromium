@@ -6,13 +6,16 @@
 
 #include <stddef.h>
 
+#include <array>
+
 #include "testing/gtest/include/gtest/gtest.h"
 
 TEST(ShellDialogs, ShortenFileNameIfNeeded) {
   struct ShortenFileNameTestCase {
     base::FilePath::StringType input;
     base::FilePath::StringType expected;
-  } test_cases[] = {
+  };
+  auto test_cases = std::to_array<ShortenFileNameTestCase>({
       // Paths with short paths/file names don't get shortened.
       {FILE_PATH_LITERAL("folder1111/folder2222/file1.html"),
        FILE_PATH_LITERAL("folder1111/folder2222/file1.html")},
@@ -99,13 +102,14 @@ TEST(ShellDialogs, ShortenFileNameIfNeeded) {
                          "xyz1234abcdefghijklmnopqrstuvwxyz1234abcdefghijklmnop"
                          "qrstuvwxyz1234abcdefghijklmnopqrstuvwxyz1234abcdefghi"
                          "jklmnopqrstuvwxyz1234abcdefghijklmnopqrstuvwxyz1234ab"
-                         "cdefghijklmnopqrstuvwxyz1234ab.abcdefghijkl")}};
+                         "cdefghijklmnopqrstuvwxyz1234ab.abcdefghijkl")},
+  });
 
-  for (size_t i = 0; i < std::size(test_cases); ++i) {
+  for (auto& test_case : test_cases) {
     base::FilePath input =
-        base::FilePath(test_cases[i].input).NormalizePathSeparators();
+        base::FilePath(test_case.input).NormalizePathSeparators();
     base::FilePath output =
-        base::FilePath(test_cases[i].expected).NormalizePathSeparators();
+        base::FilePath(test_case.expected).NormalizePathSeparators();
     EXPECT_EQ(output.value(),
               ui::SelectFileDialog::GetShortenedFilePath(input).value());
     EXPECT_LE(ui::SelectFileDialog::GetShortenedFilePath(input)

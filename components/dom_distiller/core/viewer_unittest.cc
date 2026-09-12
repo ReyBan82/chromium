@@ -6,15 +6,19 @@
 
 #include <memory>
 
+#include "base/test/scoped_feature_list.h"
 #include "components/dom_distiller/core/distilled_page_prefs.h"
 #include "components/dom_distiller/core/distiller_ui_handle.h"
+#include "components/dom_distiller/core/dom_distiller_features.h"
 #include "components/dom_distiller/core/dom_distiller_service.h"
 #include "components/dom_distiller/core/task_tracker.h"
 #include "components/dom_distiller/core/url_constants.h"
 #include "components/dom_distiller/core/url_utils.h"
+#include "components/strings/grit/components_strings.h"
 #include "net/base/url_util.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/l10n/l10n_util.h"
 #include "url/url_util.h"
 
 namespace dom_distiller {
@@ -51,6 +55,13 @@ class TestDomDistillerService : public DomDistillerServiceInterface {
       std::unique_ptr<DistillerPage> distiller_page,
       const GURL&) override {
     return std::unique_ptr<ViewerHandle>(ViewUrlImpl());
+  }
+  MOCK_METHOD0(ViewUrlIgnoreCacheImpl, ViewerHandle*());
+  std::unique_ptr<ViewerHandle> ViewUrlIgnoreCache(
+      ViewRequestDelegate*,
+      std::unique_ptr<DistillerPage> distiller_page,
+      const GURL&) override {
+    return std::unique_ptr<ViewerHandle>(ViewUrlIgnoreCacheImpl());
   }
   std::unique_ptr<DistillerPage> CreateDefaultDistillerPage(
       const gfx::Size& render_view_size) override {
@@ -154,9 +165,94 @@ TEST_F(DomDistillerViewerTest, TestGetDistilledPageFontFamilyJsOutput) {
 }
 
 TEST_F(DomDistillerViewerTest, TestGetDistilledPageFontScalingJsOutput) {
-  std::string kJsFontScaling = "useFontScaling(5);";
-  EXPECT_EQ(kJsFontScaling.compare(viewer::GetDistilledPageFontScalingJs(5)),
-            0);
+  std::string kJsFontScaling = "useFontScaling(5, false);";
+  EXPECT_EQ(
+      kJsFontScaling.compare(viewer::GetDistilledPageFontScalingJs(5, false)),
+      0);
+}
+
+TEST_F(DomDistillerViewerTest, TestGetAddToPageJsEmptyDisplaysDefault) {
+  std::string output = viewer::GetAddToPageJs("");
+  std::string expected_output =
+      "addToPage(\"" +
+      l10n_util::GetStringUTF8(IDS_DOM_DISTILLER_VIEWER_NO_DATA_CONTENT) +
+      "\");";
+  EXPECT_EQ(output, expected_output);
+}
+
+TEST_F(DomDistillerViewerTest, TestGetAddToPageJsDisplaysContent) {
+  std::string output = viewer::GetAddToPageJs("content");
+  EXPECT_EQ(output, "addToPage(\"content\");");
+}
+
+TEST_F(DomDistillerViewerTest, TestGetJavaScriptPinchMinMaxZoom) {
+#if BUILDFLAG(IS_ANDROID)
+  std::string output = viewer::GetJavaScript();
+  EXPECT_THAT(output,
+              testing::ContainsRegex(
+                  "/\\* PINCH_SCALE \\*/ Math\\.max\\(1, Math\\.min\\(2\\.5,"));
+#else
+  std::string output = viewer::GetJavaScript();
+  EXPECT_THAT(output,
+              testing::ContainsRegex(
+                  "/\\* PINCH_SCALE \\*/ Math\\.max\\(0\\.5, Math\\.min\\(2,"));
+#endif
+}
+
+// Tests that GetArticleTemplateHtml includes a nonce-based
+// Content-Security-Policy meta tag when a csp_nonce is provided and
+// use_offline_data is false.
+TEST_F(DomDistillerViewerTest, TestGetArticleTemplateHtmlHasCspWithNonce) {
+  const std::string html = viewer::GetArticleTemplateHtml(
+      mojom::Theme::kLight, mojom::FontFamily::kSansSerif, "test_nonce_12345",
+      /*use_offline_data=*/false);
+  EXPECT_NE(html.find("<meta http-equiv=\"Content-Security-Policy\""),
+            std::string::npos);
+  EXPECT_NE(html.find("script-src 'nonce-test_nonce_12345'"),
+            std::string::npos);
+  EXPECT_NE(html.find("object-src 'none'"), std::string::npos);
+  EXPECT_NE(html.find("form-action 'none'"), std::string::npos);
+
+  // Values added only with use_offline_data should be absent.
+  EXPECT_EQ(html.find("default-src 'none'"), std::string::npos);
+  EXPECT_EQ(html.find("frame-src"), std::string::npos);
+  EXPECT_EQ(html.find("style-src"), std::string::npos);
+  EXPECT_EQ(html.find("font-src"), std::string::npos);
+  EXPECT_EQ(html.find("img-src"), std::string::npos);
+  EXPECT_EQ(html.find("base-uri 'none'"), std::string::npos);
+}
+
+// Tests that GetArticleTemplateHtml omits the Content-Security-Policy meta tag
+// when csp_nonce is empty and use_offline_data is false.
+TEST_F(DomDistillerViewerTest,
+       TestGetArticleTemplateHtmlOmitsCspWhenNonceEmpty) {
+  const std::string html = viewer::GetArticleTemplateHtml(
+      mojom::Theme::kLight, mojom::FontFamily::kSansSerif,
+      /*csp_nonce=*/"", /*use_offline_data=*/false);
+  EXPECT_EQ(html.find("<meta http-equiv=\"Content-Security-Policy\""),
+            std::string::npos);
+}
+
+// Tests that GetArticleTemplateHtml includes the offline
+// Content-Security-Policy meta tag when use_offline_data is true.
+TEST_F(DomDistillerViewerTest, TestGetArticleTemplateHtmlOfflineDataCsp) {
+  const std::string html = viewer::GetArticleTemplateHtml(
+      mojom::Theme::kLight, mojom::FontFamily::kSansSerif, "test_nonce_12345",
+      /*use_offline_data=*/true);
+  EXPECT_NE(html.find("<meta http-equiv=\"Content-Security-Policy\""),
+            std::string::npos);
+  EXPECT_NE(html.find("default-src 'none'"), std::string::npos);
+  EXPECT_NE(html.find("script-src 'nonce-test_nonce_12345'"),
+            std::string::npos);
+  EXPECT_NE(html.find("frame-src https://www.youtube.com"), std::string::npos);
+  EXPECT_NE(html.find("referrer strict-origin-when-cross-origin"),
+            std::string::npos);
+  EXPECT_NE(html.find("style-src 'unsafe-inline' https://fonts.googleapis.com"),
+            std::string::npos);
+  EXPECT_NE(html.find("font-src https://fonts.gstatic.com"), std::string::npos);
+  EXPECT_NE(html.find("img-src data:"), std::string::npos);
+  EXPECT_NE(html.find("form-action 'none'"), std::string::npos);
+  EXPECT_NE(html.find("base-uri 'none'"), std::string::npos);
 }
 
 }  // namespace dom_distiller

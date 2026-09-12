@@ -30,6 +30,8 @@
 
 #include "third_party/blink/renderer/modules/webmidi/midi_output.h"
 
+#include <array>
+
 #include "media/midi/midi_service.mojom-blink.h"
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/execution_context/execution_context.h"
@@ -50,18 +52,18 @@ namespace blink {
 namespace {
 
 DOMUint8Array* ConvertUnsignedDataToUint8Array(
-    Vector<unsigned> unsigned_data,
+    const Vector<unsigned>& unsigned_data,
     ExceptionState& exception_state) {
   DOMUint8Array* array = DOMUint8Array::Create(unsigned_data.size());
-  DOMUint8Array::ValueType* array_data = array->Data();
+  auto array_data = array->ByteSpan();
   for (wtf_size_t i = 0; i < unsigned_data.size(); ++i) {
     if (unsigned_data[i] > 0xff) {
-      exception_state.ThrowTypeError("The value at index " + String::Number(i) +
-                                     " (" + String::Number(unsigned_data[i]) +
-                                     ") is greater than 0xFF.");
+      exception_state.ThrowTypeError(StrCat(
+          {"The value at index ", String::Number(i), " (",
+           String::Number(unsigned_data[i]), ") is greater than 0xFF."}));
       return nullptr;
     }
-    array_data[i] = unsigned_data[i];
+    array_data[i] = static_cast<uint8_t>(unsigned_data[i]);
   }
   return array;
 }
@@ -72,9 +74,8 @@ base::TimeTicks GetTimeOrigin(ExecutionContext* context) {
   if (LocalDOMWindow* window = DynamicTo<LocalDOMWindow>(context)) {
     performance = DOMWindowPerformance::performance(*window);
   } else {
-    DCHECK(context->IsWorkerGlobalScope());
     performance = WorkerGlobalScopePerformance::performance(
-        *static_cast<WorkerGlobalScope*>(context));
+        *To<WorkerGlobalScope>(context));
   }
 
   DCHECK(performance);
@@ -93,59 +94,61 @@ class MessageValidator {
   }
 
  private:
-  MessageValidator(DOMUint8Array* array)
-      : data_(array->Data()), length_(array->length()), offset_(0) {}
+  explicit MessageValidator(DOMUint8Array* array) : data_(array->ByteSpan()) {}
 
   bool Process(ExceptionState& exception_state, bool sysex_enabled) {
-    // data_ is put into a WTF::Vector eventually, which only has wtf_size_t
+    // data_ is put into a Vector eventually, which only has wtf_size_t
     // space.
-    if (!base::CheckedNumeric<wtf_size_t>(length_).IsValid()) {
+    if (!base::CheckedNumeric<wtf_size_t>(data_.size()).IsValid()) {
       exception_state.ThrowRangeError(
           "Data exceeds the maximum supported length");
       return false;
     }
     while (!IsEndOfData() && AcceptRealTimeMessages()) {
       if (!IsStatusByte()) {
-        exception_state.ThrowTypeError("Running status is not allowed " +
-                                       GetPositionString());
+        exception_state.ThrowTypeError(
+            StrCat({"Running status is not allowed ", GetPositionString()}));
         return false;
       }
       if (IsEndOfSysex()) {
         exception_state.ThrowTypeError(
-            "Unexpected end of system exclusive message " +
-            GetPositionString());
+            StrCat({"Unexpected end of system exclusive message ",
+                    GetPositionString()}));
         return false;
       }
       if (IsReservedStatusByte()) {
-        exception_state.ThrowTypeError("Reserved status is not allowed " +
-                                       GetPositionString());
+        exception_state.ThrowTypeError(
+            StrCat({"Reserved status is not allowed ", GetPositionString()}));
         return false;
       }
       if (IsSysex()) {
         if (!sysex_enabled) {
           exception_state.ThrowDOMException(
-              DOMExceptionCode::kInvalidAccessError,
-              "System exclusive message is not allowed " + GetPositionString());
+              DOMExceptionCode::kNotAllowedError,
+              StrCat({"System exclusive message is not allowed ",
+                      GetPositionString()}));
           return false;
         }
         if (!AcceptCurrentSysex()) {
-          if (IsEndOfData())
+          if (IsEndOfData()) {
             exception_state.ThrowTypeError(
                 "System exclusive message is not ended by end of system "
                 "exclusive message.");
-          else
+          } else {
             exception_state.ThrowTypeError(
-                "System exclusive message contains a status byte " +
-                GetPositionString());
+                StrCat({"System exclusive message contains a status byte ",
+                        GetPositionString()}));
+          }
           return false;
         }
       } else {
         if (!AcceptCurrentMessage()) {
-          if (IsEndOfData())
+          if (IsEndOfData()) {
             exception_state.ThrowTypeError("Message is incomplete.");
-          else
-            exception_state.ThrowTypeError("Unexpected status byte " +
-                                           GetPositionString());
+          } else {
+            exception_state.ThrowTypeError(
+                StrCat({"Unexpected status byte ", GetPositionString()}));
+          }
           return false;
         }
       }
@@ -154,21 +157,22 @@ class MessageValidator {
   }
 
  private:
-  bool IsEndOfData() { return offset_ >= length_; }
-  bool IsSysex() { return data_[offset_] == 0xf0; }
-  bool IsSystemMessage() { return data_[offset_] >= 0xf0; }
-  bool IsEndOfSysex() { return data_[offset_] == 0xf7; }
-  bool IsRealTimeMessage() { return data_[offset_] >= 0xf8; }
-  bool IsStatusByte() { return data_[offset_] & 0x80; }
-  bool IsReservedStatusByte() {
+  constexpr bool IsEndOfData() const { return offset_ >= data_.size(); }
+  constexpr bool IsSysex() const { return data_[offset_] == 0xf0; }
+  constexpr bool IsSystemMessage() const { return data_[offset_] >= 0xf0; }
+  constexpr bool IsEndOfSysex() const { return data_[offset_] == 0xf7; }
+  constexpr bool IsRealTimeMessage() const { return data_[offset_] >= 0xf8; }
+  constexpr bool IsStatusByte() const { return data_[offset_] & 0x80; }
+  constexpr bool IsReservedStatusByte() const {
     return data_[offset_] == 0xf4 || data_[offset_] == 0xf5 ||
            data_[offset_] == 0xf9 || data_[offset_] == 0xfd;
   }
 
   bool AcceptRealTimeMessages() {
     for (; !IsEndOfData(); offset_++) {
-      if (IsRealTimeMessage() && !IsReservedStatusByte())
+      if (IsRealTimeMessage() && !IsReservedStatusByte()) {
         continue;
+      }
       return true;
     }
     return false;
@@ -177,16 +181,19 @@ class MessageValidator {
   bool AcceptCurrentSysex() {
     DCHECK(IsSysex());
     for (offset_++; !IsEndOfData(); offset_++) {
-      if (IsReservedStatusByte())
+      if (IsReservedStatusByte()) {
         return false;
-      if (IsRealTimeMessage())
+      }
+      if (IsRealTimeMessage()) {
         continue;
+      }
       if (IsEndOfSysex()) {
         offset_++;
         return true;
       }
-      if (IsStatusByte())
+      if (IsStatusByte()) {
         return false;
+      }
     }
     return false;
   }
@@ -197,24 +204,28 @@ class MessageValidator {
     DCHECK(!IsReservedStatusByte());
     DCHECK(!IsRealTimeMessage());
     DCHECK(!IsEndOfSysex());
-    static const int kChannelMessageLength[7] = {
+    static constexpr std::array<size_t, 7> kChannelMessageLength = {
         3, 3, 3, 3, 2, 2, 3};  // for 0x8*, 0x9*, ..., 0xe*
-    static const int kSystemMessageLength[7] = {
+    static constexpr std::array<size_t, 7> kSystemMessageLength = {
         2, 3, 2, 0, 0, 1, 0};  // for 0xf1, 0xf2, ..., 0xf7
     size_t length = IsSystemMessage()
                         ? kSystemMessageLength[data_[offset_] - 0xf1]
                         : kChannelMessageLength[(data_[offset_] >> 4) - 8];
     offset_++;
     DCHECK_GT(length, 0UL);
-    if (length == 1)
+    if (length == 1) {
       return true;
+    }
     for (size_t count = 1; !IsEndOfData(); offset_++) {
-      if (IsReservedStatusByte())
+      if (IsReservedStatusByte()) {
         return false;
-      if (IsRealTimeMessage())
+      }
+      if (IsRealTimeMessage()) {
         continue;
-      if (IsStatusByte())
+      }
+      if (IsStatusByte()) {
         return false;
+      }
       if (++count == length) {
         offset_++;
         return true;
@@ -223,14 +234,14 @@ class MessageValidator {
     return false;
   }
 
-  String GetPositionString() {
-    return "at index " + String::Number(offset_) + " (" +
-           String::Number(static_cast<uint16_t>(data_[offset_])) + ").";
+  String GetPositionString() const {
+    return StrCat({"at index ", String::Number(offset_), " (",
+                   String::Number(static_cast<uint16_t>(data_[offset_])),
+                   ")."});
   }
 
-  const unsigned char* data_;
-  const size_t length_;
-  size_t offset_;
+  base::span<const uint8_t> data_;
+  size_t offset_ = 0;
 };
 
 }  // namespace
@@ -257,8 +268,9 @@ void MIDIOutput::send(NotShared<DOMUint8Array> array,
                       double timestamp_in_milliseconds,
                       ExceptionState& exception_state) {
   ExecutionContext* context = GetExecutionContext();
-  if (!context)
+  if (!context) {
     return;
+  }
 
   base::TimeTicks timestamp;
   if (timestamp_in_milliseconds == 0.0) {
@@ -270,14 +282,15 @@ void MIDIOutput::send(NotShared<DOMUint8Array> array,
   SendInternal(array.Get(), timestamp, exception_state);
 }
 
-void MIDIOutput::send(Vector<unsigned> unsigned_data,
+void MIDIOutput::send(const Vector<unsigned>& unsigned_data,
                       double timestamp_in_milliseconds,
                       ExceptionState& exception_state) {
-  if (!GetExecutionContext())
+  if (!GetExecutionContext()) {
     return;
+  }
 
-  DOMUint8Array* array = ConvertUnsignedDataToUint8Array(
-      std::move(unsigned_data), exception_state);
+  DOMUint8Array* array =
+      ConvertUnsignedDataToUint8Array(unsigned_data, exception_state);
   if (!array) {
     DCHECK(exception_state.HadException());
     return;
@@ -289,20 +302,22 @@ void MIDIOutput::send(Vector<unsigned> unsigned_data,
 
 void MIDIOutput::send(NotShared<DOMUint8Array> data,
                       ExceptionState& exception_state) {
-  if (!GetExecutionContext())
+  if (!GetExecutionContext()) {
     return;
+  }
 
   DCHECK(data);
   SendInternal(data.Get(), base::TimeTicks::Now(), exception_state);
 }
 
-void MIDIOutput::send(Vector<unsigned> unsigned_data,
+void MIDIOutput::send(const Vector<unsigned>& unsigned_data,
                       ExceptionState& exception_state) {
-  if (!GetExecutionContext())
+  if (!GetExecutionContext()) {
     return;
+  }
 
-  DOMUint8Array* array = ConvertUnsignedDataToUint8Array(
-      std::move(unsigned_data), exception_state);
+  DOMUint8Array* array =
+      ConvertUnsignedDataToUint8Array(unsigned_data, exception_state);
   if (!array) {
     DCHECK(exception_state.HadException());
     return;
@@ -312,15 +327,14 @@ void MIDIOutput::send(Vector<unsigned> unsigned_data,
 }
 
 void MIDIOutput::DidOpen(bool opened) {
-  if (!opened)
+  if (!opened) {
     pending_data_.clear();
+  }
 
   HeapVector<std::pair<Member<DOMUint8Array>, base::TimeTicks>> queued_data;
   queued_data.swap(pending_data_);
-  for (auto& data : queued_data) {
-    midiAccess()->SendMIDIData(
-        port_index_, data.first->Data(),
-        base::checked_cast<wtf_size_t>(data.first->length()), data.second);
+  for (auto& [array, timestamp] : queued_data) {
+    midiAccess()->SendMIDIData(port_index_, array->ByteSpan(), timestamp);
   }
   queued_data.clear();
   DCHECK(pending_data_.empty());
@@ -344,15 +358,14 @@ void MIDIOutput::SendInternal(DOMUint8Array* array,
   open();
 
   if (!MessageValidator::Validate(array, exception_state,
-                                  midiAccess()->sysexEnabled()))
+                                  midiAccess()->sysexEnabled())) {
     return;
+  }
 
   if (IsOpening()) {
     pending_data_.emplace_back(array, timestamp);
   } else {
-    midiAccess()->SendMIDIData(port_index_, array->Data(),
-                               base::checked_cast<wtf_size_t>(array->length()),
-                               timestamp);
+    midiAccess()->SendMIDIData(port_index_, array->ByteSpan(), timestamp);
   }
 }
 

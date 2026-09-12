@@ -5,14 +5,13 @@
 #ifndef COMPONENTS_SERVICES_APP_SERVICE_PUBLIC_CPP_PREFERRED_APPS_IMPL_H_
 #define COMPONENTS_SERVICES_APP_SERVICE_PUBLIC_CPP_PREFERRED_APPS_IMPL_H_
 
-#include <map>
-
 #include "base/containers/queue.h"
 #include "base/files/file_path.h"
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
 #include "components/services/app_service/public/cpp/app_types.h"
 #include "components/services/app_service/public/cpp/intent.h"
@@ -27,7 +26,7 @@ class AppServiceMojomImpl;
 class AppServiceProxyPreferredAppsTest;
 
 // The implementation of the preferred apps to manage the PreferredAppsList.
-class PreferredAppsImpl {
+class PreferredAppsImpl : public PreferredAppsList::Delegate {
  public:
   class Host {
    public:
@@ -36,23 +35,22 @@ class PreferredAppsImpl {
     Host& operator=(const Host&) = delete;
     ~Host() = default;
 
-    // Called when the PreferredAppsList has been loaded from disk, and can
-    // be used to initialize subscribers.
-    // Only implemented in Ash, to support initializing the Lacros copy of the
-    // PreferredAppsList.
-    virtual void InitializePreferredAppsForAllSubscribers() {}
-
-    // Called when changes have been made to the PreferredAppsList which should
-    // be propagated to subscribers.
-    // Only implemented in Ash, to support updating the Lacros copy of the
-    // PreferredAppsList.
-    virtual void OnPreferredAppsChanged(PreferredAppChangesPtr changes) {}
-
     // Notifies the host that the supported links preference for a particular
     // `app_id` was enabled/disabled. Used by the host to notify the app
     // publisher (if any) of the change.
     virtual void OnSupportedLinksPreferenceChanged(const std::string& app_id,
                                                    bool open_in_app) = 0;
+
+    // Returns true if `first_app_id` and `second_app_id` have conflicting
+    // settings for the given filters, which means the older preference must be
+    // disabled.
+    virtual bool QueryConflict(const std::string& first_app_id,
+                               const IntentFilterPtr& first_filter,
+                               const std::string& second_app_id,
+                               const IntentFilterPtr& second_filter) = 0;
+
+    virtual bool IsWebAppInExtendedScope(const GURL& url,
+                                         const std::string& app_id) const = 0;
   };
 
   PreferredAppsImpl(
@@ -64,11 +62,29 @@ class PreferredAppsImpl {
   PreferredAppsImpl(const PreferredAppsImpl&) = delete;
   PreferredAppsImpl& operator=(const PreferredAppsImpl&) = delete;
 
-  ~PreferredAppsImpl();
+  ~PreferredAppsImpl() override;
 
   void RemovePreferredApp(const std::string& app_id);
   void SetSupportedLinksPreference(const std::string& app_id,
                                    IntentFilters all_link_filters);
+
+  // PreferredAppsList::Delegate overrides:
+  bool QueryConflict(const std::string& first_app_id,
+                     const IntentFilterPtr& first_filter,
+                     const std::string& second_app_id,
+                     const IntentFilterPtr& second_filter) override;
+  bool IsWebAppInExtendedScope(const GURL& url,
+                               const std::string& app_id) const override;
+
+  void SetLongestPrefixMatchEnabled(bool enabled) {
+    preferred_apps_list_.SetLongestPrefixMatchEnabled(enabled);
+  }
+#if BUILDFLAG(IS_CHROMEOS)
+  void SetProtocolLinkPreference(const std::string& app_id,
+                                 IntentFilterPtr protocol_link_filter);
+  void RemoveProtocolLinkFilters(const std::string& app_id,
+                                 IntentFilters protocol_link_filters);
+#endif
   void RemoveSupportedLinksPreference(const std::string& app_id);
 
   PreferredAppsListHandle& preferred_apps_list() {
@@ -99,6 +115,12 @@ class PreferredAppsImpl {
   void RemovePreferredAppImpl(const std::string& app_id);
   void SetSupportedLinksPreferenceImpl(const std::string& app_id,
                                        IntentFilters all_link_filters);
+#if BUILDFLAG(IS_CHROMEOS)
+  void SetProtocolLinkPreferenceImpl(const std::string& app_id,
+                                     IntentFilterPtr protocol_link_filter);
+  void RemoveProtocolLinkFiltersImpl(const std::string& app_id,
+                                     IntentFilters protocol_link_filters);
+#endif
   void RemoveSupportedLinksPreferenceImpl(const std::string& app_id);
 
   // `host_` owns `this`.
@@ -124,6 +146,8 @@ class PreferredAppsImpl {
   base::OnceClosure write_completed_for_testing_;
 
   base::queue<base::OnceClosure> pending_preferred_apps_tasks_;
+
+  SEQUENCE_CHECKER(sequence_checker_);
 
   base::WeakPtrFactory<PreferredAppsImpl> weak_ptr_factory_{this};
 };

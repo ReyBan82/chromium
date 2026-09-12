@@ -4,12 +4,9 @@
 
 #import "ios/components/security_interstitials/ios_security_interstitial_java_script_feature.h"
 
+#import "base/strings/string_number_conversions.h"
 #import "ios/components/security_interstitials/ios_blocking_page_tab_helper.h"
 #import "ios/web/public/js_messaging/script_message.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace security_interstitials {
 
@@ -35,7 +32,7 @@ IOSSecurityInterstitialJavaScriptFeature::
 IOSSecurityInterstitialJavaScriptFeature::
     ~IOSSecurityInterstitialJavaScriptFeature() = default;
 
-absl::optional<std::string>
+std::optional<std::string>
 IOSSecurityInterstitialJavaScriptFeature::GetScriptMessageHandlerName() const {
   return kWebUIMessageHandlerName;
 }
@@ -48,11 +45,19 @@ void IOSSecurityInterstitialJavaScriptFeature::ScriptMessageReceived(
     return;
   }
 
-  if (!script_message.body() || !script_message.body()->is_dict()) {
+  // Security interstitials are committed at local file:// URLs. Ignore
+  // messages sent from web origins (e.g., http:// or https://).
+  if (!script_message.request_url() ||
+      !script_message.request_url()->SchemeIsFile()) {
     return;
   }
 
-  const base::Value::Dict& dict = script_message.body()->GetDict();
+  if (!script_message.legacy_body() ||
+      !script_message.legacy_body()->is_dict()) {
+    return;
+  }
+
+  const base::DictValue& dict = script_message.legacy_body()->GetDict();
   const std::string* command = dict.FindString("command");
   if (!command) {
     return;

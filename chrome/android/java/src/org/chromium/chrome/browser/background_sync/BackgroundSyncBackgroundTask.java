@@ -6,8 +6,10 @@ package org.chromium.chrome.browser.background_sync;
 
 import android.content.Context;
 
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.NativeMethods;
+
 import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.chrome.browser.device.DeviceConditions;
 import org.chromium.components.background_task_scheduler.NativeBackgroundTask;
 import org.chromium.components.background_task_scheduler.TaskIds;
@@ -18,6 +20,7 @@ import org.chromium.net.ConnectionType;
  * Handles servicing of Background Sync background tasks coming via
  * background_task_scheduler component.
  */
+@NullMarked
 public class BackgroundSyncBackgroundTask extends NativeBackgroundTask {
     @Override
     public @StartBeforeNativeResult int onStartTaskBeforeNativeLoaded(
@@ -26,8 +29,8 @@ public class BackgroundSyncBackgroundTask extends NativeBackgroundTask {
 
         // Check that we're called with network connectivity.
         @ConnectionType
-        int current_network_type = DeviceConditions.getCurrentNetConnectionType(context);
-        if (current_network_type == ConnectionType.CONNECTION_NONE) {
+        int currentNetworkType = DeviceConditions.getCurrentNetConnectionType(context);
+        if (currentNetworkType == ConnectionType.CONNECTION_NONE) {
             return StartBeforeNativeResult.RESCHEDULE;
         }
 
@@ -38,16 +41,21 @@ public class BackgroundSyncBackgroundTask extends NativeBackgroundTask {
     protected void onStartTaskWithNative(
             Context context, TaskParameters taskParameters, TaskFinishedCallback callback) {
         // Record the delay from soonest expected wakeup time.
-        long delayFromExpectedMs = System.currentTimeMillis()
-                - taskParameters.getExtras().getLong(
-                        BackgroundSyncBackgroundTaskScheduler.SOONEST_EXPECTED_WAKETIME);
+        long delayFromExpectedMs =
+                System.currentTimeMillis()
+                        - taskParameters
+                                .getExtras()
+                                .getLong(
+                                        BackgroundSyncBackgroundTaskScheduler
+                                                .SOONEST_EXPECTED_WAKETIME);
         RecordHistogram.recordLongTimesHistogram(
                 "BackgroundSync.Wakeup.DelayTime", delayFromExpectedMs);
 
         // Call into native code to fire any ready background sync events, and
         // wait for it to finish doing so.
-        BackgroundSyncBackgroundTaskJni.get().fireOneShotBackgroundSyncEvents(
-                () -> { callback.taskFinished(/* needsReschedule= */ false); });
+        BackgroundSyncBackgroundTaskJni.get()
+                .fireOneShotBackgroundSyncEvents(
+                        () -> callback.taskFinished(/* needsReschedule= */ false));
     }
 
     @Override
@@ -67,13 +75,6 @@ public class BackgroundSyncBackgroundTask extends NativeBackgroundTask {
         // It is not called when the task finishes successfully. Reschedule so
         // we can attempt it again.
         return true;
-    }
-
-    @Override
-    public void reschedule(Context context) {
-        BackgroundSyncBackgroundTaskScheduler.getInstance().reschedule(
-                BackgroundSyncBackgroundTaskScheduler.BackgroundSyncTask
-                        .ONE_SHOT_SYNC_CHROME_WAKE_UP);
     }
 
     @NativeMethods

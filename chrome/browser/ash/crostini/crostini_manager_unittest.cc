@@ -8,8 +8,10 @@
 
 #include "ash/constants/ash_features.h"
 #include "base/barrier_closure.h"
+#include "base/files/scoped_temp_file.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/test/bind.h"
@@ -17,9 +19,8 @@
 #include "base/test/scoped_feature_list.h"
 #include "base/test/test_future.h"
 #include "base/time/time.h"
-#include "chrome/browser/ash/crostini/ansible/ansible_management_service.h"
-#include "chrome/browser/ash/crostini/ansible/ansible_management_test_helper.h"
 #include "chrome/browser/ash/crostini/crostini_pref_names.h"
+#include "chrome/browser/ash/crostini/crostini_simple_types.h"
 #include "chrome/browser/ash/crostini/crostini_test_util.h"
 #include "chrome/browser/ash/crostini/crostini_types.mojom-shared.h"
 #include "chrome/browser/ash/crostini/crostini_util.h"
@@ -27,18 +28,12 @@
 #include "chrome/browser/ash/guest_os/guest_os_pref_names.h"
 #include "chrome/browser/ash/guest_os/guest_os_session_tracker.h"
 #include "chrome/browser/ash/guest_os/guest_os_share_path.h"
+#include "chrome/browser/ash/guest_os/guest_os_share_path_factory.h"
 #include "chrome/browser/ash/guest_os/public/guest_os_service.h"
-#include "chrome/browser/ash/guest_os/public/guest_os_wayland_server.h"
+#include "chrome/browser/ash/guest_os/public/guest_os_service_factory.h"
 #include "chrome/browser/ash/login/users/fake_chrome_user_manager.h"
-#include "chrome/browser/ash/policy/handlers/powerwash_requirements_checker.h"
 #include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
-#include "chrome/browser/component_updater/fake_cros_component_manager.h"
-#include "chrome/browser/notifications/notification_display_service_tester.h"
-#include "chrome/browser/notifications/system_notification_helper.h"
-#include "chrome/browser/ui/views/crostini/crostini_ansible_software_config_view.h"
-#include "chrome/common/chrome_features.h"
 #include "chrome/test/base/browser_process_platform_part_test_api_chromeos.h"
-#include "chrome/test/base/scoped_testing_local_state.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chrome/test/base/testing_profile.h"
 #include "chromeos/ash/components/dbus/anomaly_detector/anomaly_detector_client.h"
@@ -48,25 +43,26 @@
 #include "chromeos/ash/components/dbus/cicerone/cicerone_service.pb.h"
 #include "chromeos/ash/components/dbus/cicerone/fake_cicerone_client.h"
 #include "chromeos/ash/components/dbus/concierge/concierge_client.h"
-#include "chromeos/ash/components/dbus/concierge/concierge_service.pb.h"
 #include "chromeos/ash/components/dbus/concierge/fake_concierge_client.h"
 #include "chromeos/ash/components/dbus/debug_daemon/debug_daemon_client.h"
 #include "chromeos/ash/components/dbus/dlcservice/dlcservice_client.h"
 #include "chromeos/ash/components/dbus/seneschal/seneschal_client.h"
 #include "chromeos/ash/components/dbus/session_manager/fake_session_manager_client.h"
-#include "chromeos/ash/components/dbus/userdataauth/fake_cryptohome_misc_client.h"
+#include "chromeos/ash/components/dbus/vm_concierge/concierge_service.pb.h"
 #include "chromeos/ash/components/disks/mock_disk_mount_manager.h"
 #include "components/account_id/account_id.h"
+#include "components/component_updater/ash/fake_component_manager_ash.h"
 #include "components/policy/proto/chrome_device_policy.pb.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/scoped_user_pref_update.h"
 #include "components/user_manager/scoped_user_manager.h"
 #include "content/public/test/browser_task_environment.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "services/device/public/cpp/test/fake_usb_device_manager.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "ui/message_center/message_center.h"
 
 namespace crostini {
 using base::test::TestFuture;
@@ -75,19 +71,11 @@ namespace {
 
 const char kVmName[] = "vm_name";
 const char kContainerName[] = "container_name";
-const char kPackageID[] = "package;1;;";
 constexpr int64_t kDiskSizeBytes = 4ll * 1024 * 1024 * 1024;  // 4 GiB
 const char kTerminaKernelVersion[] =
     "4.19.56-05556-gca219a5b1086 #3 SMP PREEMPT Mon Jul 1 14:36:38 CEST 2019";
 const char kCrostiniCorruptionHistogram[] = "Crostini.FilesystemCorruption";
 constexpr auto kLongTime = base::Days(10);
-
-void ExpectCrostiniResult(base::OnceClosure closure,
-                          CrostiniResult expected_result,
-                          CrostiniResult result) {
-  EXPECT_EQ(expected_result, result);
-  std::move(closure).Run();
-}
 
 class TestRestartObserver : public CrostiniManager::RestartObserver {
  public:
@@ -152,125 +140,110 @@ class CrostiniManagerTest : public testing::Test {
 
   void EnsureTerminaInstalled() {
     TestFuture<CrostiniResult> result_future;
-    crostini_manager()->InstallTermina(result_future.GetCallback(),
-                                       /*is_initial_install=*/false);
+    crostini_manager()->InstallTermina(result_future.GetCallback());
     EXPECT_EQ(result_future.Get(), CrostiniResult::SUCCESS);
   }
 
   CrostiniManagerTest()
       : task_environment_(content::BrowserTaskEnvironment::REAL_IO_THREAD,
                           base::test::TaskEnvironment::TimeSource::MOCK_TIME),
-        local_state_(std::make_unique<ScopedTestingLocalState>(
-            TestingBrowserProcess::GetGlobal())),
         browser_part_(g_browser_process->platform_part()) {
+    scoped_feature_list_.InitWithFeatures({ash::features::kCrostini}, {});
+  }
+
+  CrostiniManagerTest(const CrostiniManagerTest&) = delete;
+  CrostiniManagerTest& operator=(const CrostiniManagerTest&) = delete;
+
+  ~CrostiniManagerTest() override = default;
+
+  void SetUp() override {
+    message_center::MessageCenter::Initialize();
+
     ash::AnomalyDetectorClient::InitializeFake();
     ash::ChunneldClient::InitializeFake();
     ash::CiceroneClient::InitializeFake();
     ash::ConciergeClient::InitializeFake();
     ash::DebugDaemonClient::InitializeFake();
+    ash::DlcserviceClient::InitializeFake();
     ash::SeneschalClient::InitializeFake();
     fake_cicerone_client_ = ash::FakeCiceroneClient::Get();
     fake_concierge_client_ = ash::FakeConciergeClient::Get();
     fake_anomaly_detector_client_ =
         static_cast<ash::FakeAnomalyDetectorClient*>(
             ash::AnomalyDetectorClient::Get());
-  }
 
-  CrostiniManagerTest(const CrostiniManagerTest&) = delete;
-  CrostiniManagerTest& operator=(const CrostiniManagerTest&) = delete;
-
-  ~CrostiniManagerTest() override {
-    ash::AnomalyDetectorClient::Shutdown();
-    ash::SeneschalClient::Shutdown();
-    ash::DebugDaemonClient::Shutdown();
-    ash::ConciergeClient::Shutdown();
-    ash::CiceroneClient::Shutdown();
-    ash::ChunneldClient::Shutdown();
-  }
-
-  void SetUp() override {
     component_manager_ =
-        base::MakeRefCounted<component_updater::FakeCrOSComponentManager>();
+        base::MakeRefCounted<component_updater::FakeComponentManagerAsh>();
     component_manager_->set_supported_components({"cros-termina"});
     component_manager_->ResetComponentState(
         "cros-termina",
-        component_updater::FakeCrOSComponentManager::ComponentInfo(
-            component_updater::CrOSComponentManager::Error::NONE,
+        component_updater::FakeComponentManagerAsh::ComponentInfo(
+            component_updater::ComponentManagerAsh::Error::NONE,
             base::FilePath("/install/path"), base::FilePath("/mount/path")));
-    browser_part_.InitializeCrosComponentManager(component_manager_);
-    ash::DlcserviceClient::InitializeFake();
+    browser_part_.InitializeComponentManager(component_manager_);
 
-    scoped_feature_list_.InitWithFeatures(
-        {features::kCrostini, ash::features::kCrostiniMultiContainer}, {});
-    run_loop_ = std::make_unique<base::RunLoop>();
-    profile_ = std::make_unique<TestingProfile>();
-    crostini_manager_ = CrostiniManager::GetForProfile(profile_.get());
+    TestingBrowserProcess::GetGlobal()
+        ->platform_part()
+        ->InitializeSchedulerConfigurationManager();
+
+    fake_user_manager_.Reset(std::make_unique<ash::FakeChromeUserManager>());
 
     // Login user for crostini, link gaia for DriveFS.
-    auto user_manager = std::make_unique<ash::FakeChromeUserManager>();
-    AccountId account_id = AccountId::FromUserEmailGaiaId(
-        profile()->GetProfileUserName(), "12345");
-    user_manager->AddUser(account_id);
-    user_manager->LoginUser(account_id);
-    scoped_user_manager_ = std::make_unique<user_manager::ScopedUserManager>(
-        std::move(user_manager));
+    AccountId account_id =
+        AccountId::FromUserEmailGaiaId("user@test", GaiaId("12345"));
+    fake_user_manager_->AddUser(account_id);
+    fake_user_manager_->LoginUser(account_id);
+
+    profile_ = std::make_unique<TestingProfile>();
+    crostini_manager_ = CrostiniManager::GetForProfile(profile_.get());
 
     mojo::Remote<device::mojom::UsbDeviceManager> fake_usb_manager;
     fake_usb_manager_.AddReceiver(
         fake_usb_manager.BindNewPipeAndPassReceiver());
 
-    g_browser_process->platform_part()
-        ->InitializeSchedulerConfigurationManager();
-
-    guest_os::GuestOsService::GetForProfile(profile())
-        ->WaylandServer()
-        ->OverrideServerForTesting(vm_tools::launch::TERMINA, nullptr, {});
-
-    ash::CryptohomeMiscClient::InitializeFake();
-    ash::FakeCryptohomeMiscClient::Get()->set_requires_powerwash(false);
-    policy::PowerwashRequirementsChecker::InitializeSynchronouslyForTesting();
-    TestingBrowserProcess::GetGlobal()->SetSystemNotificationHelper(
-        std::make_unique<SystemNotificationHelper>());
-
     vm_tools::cicerone::OsRelease os_release;
     base::HistogramTester histogram_tester{};
-    os_release.set_pretty_name("Debian GNU/Linux 10 (bullseye)");
-    os_release.set_version_id("11");
+    os_release.set_pretty_name("Debian GNU/Linux 12 (bookworm)");
+    os_release.set_version_id("12");
     os_release.set_id("debian");
     fake_cicerone_client_->set_lxd_container_os_release(os_release);
   }
 
   void TearDown() override {
-    ash::CryptohomeMiscClient::Shutdown();
-    g_browser_process->platform_part()->ShutdownSchedulerConfigurationManager();
-    scoped_user_manager_.reset();
     crostini_manager_->Shutdown();
     profile_.reset();
-    run_loop_.reset();
-    ash::DlcserviceClient::Shutdown();
-    browser_part_.ShutdownCrosComponentManager();
+    fake_user_manager_.Reset();
+    TestingBrowserProcess::GetGlobal()
+        ->platform_part()
+        ->ShutdownSchedulerConfigurationManager();
+    browser_part_.ShutdownComponentManager();
     component_manager_.reset();
+
+    ash::SeneschalClient::Shutdown();
+    ash::DlcserviceClient::Shutdown();
+    ash::DebugDaemonClient::Shutdown();
+    ash::ConciergeClient::Shutdown();
+    ash::CiceroneClient::Shutdown();
+    ash::ChunneldClient::Shutdown();
+    ash::AnomalyDetectorClient::Shutdown();
+
+    message_center::MessageCenter::Shutdown();
   }
 
  protected:
-  base::RunLoop* run_loop() { return run_loop_.get(); }
   Profile* profile() { return profile_.get(); }
   CrostiniManager* crostini_manager() { return crostini_manager_; }
   const guest_os::GuestId& container_id() { return container_id_; }
 
-  ash::FakeChromeUserManager* fake_user_manager() const {
-    return static_cast<ash::FakeChromeUserManager*>(
-        user_manager::UserManager::Get());
-  }
+  raw_ptr<ash::FakeCiceroneClient, DanglingUntriaged> fake_cicerone_client_;
+  raw_ptr<ash::FakeConciergeClient, DanglingUntriaged> fake_concierge_client_;
+  raw_ptr<ash::FakeAnomalyDetectorClient, DanglingUntriaged>
+      fake_anomaly_detector_client_;
 
-  ash::FakeCiceroneClient* fake_cicerone_client_;
-  ash::FakeConciergeClient* fake_concierge_client_;
-  ash::FakeAnomalyDetectorClient* fake_anomaly_detector_client_;
-
-  std::unique_ptr<base::RunLoop>
-      run_loop_;  // run_loop_ must be created on the UI thread.
+  user_manager::TypedScopedUserManager<ash::FakeChromeUserManager>
+      fake_user_manager_;
   std::unique_ptr<TestingProfile> profile_;
-  CrostiniManager* crostini_manager_;
+  raw_ptr<CrostiniManager, DanglingUntriaged> crostini_manager_;
   const guest_os::GuestId container_id_ =
       guest_os::GuestId(kCrostiniDefaultVmType, kVmName, kContainerName);
   device::FakeUsbDeviceManager fake_usb_manager_;
@@ -278,9 +251,7 @@ class CrostiniManagerTest : public testing::Test {
   content::BrowserTaskEnvironment task_environment_;
 
  private:
-  std::unique_ptr<user_manager::ScopedUserManager> scoped_user_manager_;
-  std::unique_ptr<ScopedTestingLocalState> local_state_;
-  scoped_refptr<component_updater::FakeCrOSComponentManager> component_manager_;
+  scoped_refptr<component_updater::FakeComponentManagerAsh> component_manager_;
   BrowserProcessPlatformPartTestApi browser_part_;
 };
 
@@ -288,7 +259,7 @@ TEST_F(CrostiniManagerTest, CreateDiskImageEmptyNameError) {
   TestFuture<CrostiniResult, const base::FilePath&> result_future;
 
   crostini_manager()->CreateDiskImage(
-      "", vm_tools::concierge::STORAGE_CRYPTOHOME_ROOT, kDiskSizeBytes,
+      "", {}, vm_tools::concierge::STORAGE_CRYPTOHOME_ROOT, kDiskSizeBytes,
       result_future.GetCallback());
   EXPECT_TRUE(result_future.Wait());
 
@@ -300,7 +271,7 @@ TEST_F(CrostiniManagerTest, CreateDiskImageStorageLocationError) {
   TestFuture<CrostiniResult, const base::FilePath&> result_future;
 
   crostini_manager()->CreateDiskImage(
-      kVmName,
+      kVmName, {},
       vm_tools::concierge::StorageLocation_INT_MIN_SENTINEL_DO_NOT_USE_,
       kDiskSizeBytes, result_future.GetCallback());
   EXPECT_TRUE(result_future.Wait());
@@ -313,7 +284,7 @@ TEST_F(CrostiniManagerTest, CreateDiskImageSuccess) {
   TestFuture<CrostiniResult, const base::FilePath&> result_future;
 
   crostini_manager()->CreateDiskImage(
-      kVmName, vm_tools::concierge::STORAGE_CRYPTOHOME_ROOT, kDiskSizeBytes,
+      kVmName, {}, vm_tools::concierge::STORAGE_CRYPTOHOME_ROOT, kDiskSizeBytes,
       result_future.GetCallback());
   EXPECT_TRUE(result_future.Wait());
 
@@ -325,7 +296,7 @@ TEST_F(CrostiniManagerTest, StartTerminaVmNameError) {
   TestFuture<bool> success_future;
 
   const base::FilePath& disk_path = base::FilePath("unused");
-  crostini_manager()->StartTerminaVm("", disk_path, {}, 0,
+  crostini_manager()->StartTerminaVm("", disk_path, 0,
                                      success_future.GetCallback());
 
   EXPECT_FALSE(success_future.Get());
@@ -338,7 +309,7 @@ TEST_F(CrostiniManagerTest, StartTerminaVmAnomalyDetectorNotConnectedError) {
 
   fake_anomaly_detector_client_->set_guest_file_corruption_signal_connected(
       false);
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
+  crostini_manager()->StartTerminaVm(kVmName, disk_path, 0,
                                      success_future.GetCallback());
 
   EXPECT_FALSE(success_future.Get());
@@ -349,83 +320,11 @@ TEST_F(CrostiniManagerTest, StartTerminaVmDiskPathError) {
   TestFuture<bool> success_future;
   const base::FilePath& disk_path = base::FilePath();
 
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
+  crostini_manager()->StartTerminaVm(kVmName, disk_path, 0,
                                      success_future.GetCallback());
 
   EXPECT_FALSE(success_future.Get());
   EXPECT_EQ(fake_concierge_client_->start_vm_call_count(), 0);
-}
-
-TEST_F(CrostiniManagerTest, StartTerminaVmPowerwashRequestError) {
-  const base::FilePath& disk_path = base::FilePath("unused");
-
-  // Login unaffiliated user.
-  const AccountId account_id(AccountId::FromUserEmailGaiaId(
-      profile()->GetProfileUserName(), "0987654321"));
-  fake_user_manager()->AddUserWithAffiliation(account_id, false);
-  fake_user_manager()->LoginUser(account_id);
-
-  // Set DeviceRebootOnUserSignout to always.
-  ash::ScopedCrosSettingsTestHelper settings_helper{
-      /* create_settings_service=*/false};
-  settings_helper.ReplaceDeviceSettingsProviderWithStub();
-  settings_helper.SetInteger(
-      ash::kDeviceRebootOnUserSignout,
-      enterprise_management::DeviceRebootOnUserSignoutProto::ALWAYS);
-
-  // Set cryptohome requiring powerwash.
-  ash::FakeCryptohomeMiscClient::Get()->set_requires_powerwash(true);
-  policy::PowerwashRequirementsChecker::InitializeSynchronouslyForTesting();
-
-  NotificationDisplayServiceTester notification_service(profile());
-  TestFuture<bool> success_future;
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
-                                     success_future.GetCallback());
-
-  EXPECT_FALSE(success_future.Get());
-  EXPECT_EQ(fake_concierge_client_->start_vm_call_count(), 0);
-
-  auto notification = notification_service.GetNotification(
-      "crostini_powerwash_request_instead_of_run");
-  EXPECT_NE(absl::nullopt, notification);
-}
-
-TEST_F(CrostiniManagerTest,
-       StartTerminaVmPowerwashRequestErrorDueToCryptohomeError) {
-  const base::FilePath& disk_path = base::FilePath("unused");
-
-  // Login unaffiliated user.
-  const AccountId account_id(AccountId::FromUserEmailGaiaId(
-      profile()->GetProfileUserName(), "0987654321"));
-  fake_user_manager()->AddUserWithAffiliation(account_id, false);
-  fake_user_manager()->LoginUser(account_id);
-
-  // Set DeviceRebootOnUserSignout to always.
-  ash::ScopedCrosSettingsTestHelper settings_helper{
-      /* create_settings_service=*/false};
-  settings_helper.ReplaceDeviceSettingsProviderWithStub();
-  settings_helper.SetInteger(
-      ash::kDeviceRebootOnUserSignout,
-      enterprise_management::DeviceRebootOnUserSignoutProto::ALWAYS);
-
-  // Reset cryptohome state to undefined and make cryptohome unavailable.
-  policy::PowerwashRequirementsChecker::ResetForTesting();
-  ash::FakeCryptohomeMiscClient::Get()->SetServiceIsAvailable(false);
-  policy::PowerwashRequirementsChecker::Initialize();
-  ash::FakeCryptohomeMiscClient::Get()->ReportServiceIsNotAvailable();
-
-  NotificationDisplayServiceTester notification_service(profile());
-
-  TestFuture<bool> success_future;
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
-                                     success_future.GetCallback());
-
-  EXPECT_FALSE(success_future.Get());
-  EXPECT_EQ(fake_concierge_client_->start_vm_call_count(), 0);
-
-  auto notification = notification_service.GetNotification(
-      "crostini_powerwash_request_cryptohome_error");
-  EXPECT_NE(absl::nullopt, notification);
 }
 
 TEST_F(CrostiniManagerTest, StartTerminaVmMountError) {
@@ -439,7 +338,7 @@ TEST_F(CrostiniManagerTest, StartTerminaVmMountError) {
 
   EnsureTerminaInstalled();
   TestFuture<bool> success_future;
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
+  crostini_manager()->StartTerminaVm(kVmName, disk_path, 0,
                                      success_future.GetCallback());
 
   EXPECT_FALSE(success_future.Get());
@@ -460,7 +359,7 @@ TEST_F(CrostiniManagerTest, StartTerminaVmMountErrorThenSuccess) {
 
   EnsureTerminaInstalled();
   TestFuture<bool> result_future;
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
+  crostini_manager()->StartTerminaVm(kVmName, disk_path, 0,
                                      result_future.GetCallback());
 
   EXPECT_TRUE(result_future.Get());
@@ -475,7 +374,7 @@ TEST_F(CrostiniManagerTest, StartTerminaVmSuccess) {
 
   EnsureTerminaInstalled();
   TestFuture<bool> result_future;
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
+  crostini_manager()->StartTerminaVm(kVmName, disk_path, 0,
                                      result_future.GetCallback());
 
   EXPECT_TRUE(result_future.Get());
@@ -485,7 +384,6 @@ TEST_F(CrostiniManagerTest, StartTerminaVmSuccess) {
 
 TEST_F(CrostiniManagerTest, StartTerminaVmLowDiskNotification) {
   const base::FilePath& disk_path = base::FilePath("unused");
-  NotificationDisplayServiceTester notification_service(nullptr);
   vm_tools::concierge::StartVmResponse response;
 
   response.set_free_bytes(0);
@@ -496,19 +394,20 @@ TEST_F(CrostiniManagerTest, StartTerminaVmLowDiskNotification) {
 
   EnsureTerminaInstalled();
   TestFuture<bool> result_future;
-  crostini_manager()->StartTerminaVm(DefaultContainerId().vm_name, disk_path,
-                                     {}, 0, result_future.GetCallback());
+  crostini_manager()->StartTerminaVm(DefaultContainerId().vm_name, disk_path, 0,
+                                     result_future.GetCallback());
 
   EXPECT_TRUE(result_future.Get());
   EXPECT_GE(fake_concierge_client_->start_vm_call_count(), 1);
-  auto notification = notification_service.GetNotification("crostini_low_disk");
-  EXPECT_NE(absl::nullopt, notification);
+  auto* notification =
+      message_center::MessageCenter::Get()->FindNotificationById(
+          "crostini_low_disk");
+  EXPECT_NE(nullptr, notification);
 }
 
 TEST_F(CrostiniManagerTest,
        StartTerminaVmLowDiskNotificationNotShownIfNoValue) {
   const base::FilePath& disk_path = base::FilePath("unused");
-  NotificationDisplayServiceTester notification_service(nullptr);
   vm_tools::concierge::StartVmResponse response;
 
   response.set_free_bytes(1234);
@@ -519,13 +418,15 @@ TEST_F(CrostiniManagerTest,
 
   EnsureTerminaInstalled();
   TestFuture<bool> result_future;
-  crostini_manager()->StartTerminaVm(DefaultContainerId().vm_name, disk_path,
-                                     {}, 0, result_future.GetCallback());
+  crostini_manager()->StartTerminaVm(DefaultContainerId().vm_name, disk_path, 0,
+                                     result_future.GetCallback());
 
   EXPECT_TRUE(result_future.Get());
   EXPECT_GE(fake_concierge_client_->start_vm_call_count(), 1);
-  auto notification = notification_service.GetNotification("crostini_low_disk");
-  EXPECT_EQ(absl::nullopt, notification);
+  auto* notification =
+      message_center::MessageCenter::Get()->FindNotificationById(
+          "crostini_low_disk");
+  EXPECT_EQ(nullptr, notification);
 }
 
 TEST_F(CrostiniManagerTest, OnStartTremplinRecordsRunningVm) {
@@ -535,7 +436,7 @@ TEST_F(CrostiniManagerTest, OnStartTremplinRecordsRunningVm) {
   // Start the Vm.
   EnsureTerminaInstalled();
   TestFuture<bool> result_future;
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
+  crostini_manager()->StartTerminaVm(kVmName, disk_path, 0,
                                      result_future.GetCallback());
 
   // Check that the Vm start is not recorded until tremplin starts.
@@ -556,7 +457,7 @@ TEST_F(CrostiniManagerTest, OnStartTremplinHappensEarlier) {
   // Start the Vm.
   EnsureTerminaInstalled();
   TestFuture<bool> result_future;
-  crostini_manager()->StartTerminaVm(kVmName, disk_path, {}, 0,
+  crostini_manager()->StartTerminaVm(kVmName, disk_path, 0,
                                      result_future.GetCallback());
 
   // Check that the Vm start is not recorded until tremplin starts.
@@ -584,123 +485,11 @@ TEST_F(CrostiniManagerTest, StopVmSuccess) {
   EXPECT_GE(fake_concierge_client_->stop_vm_call_count(), 1);
 }
 
-TEST_F(CrostiniManagerTest, InstallLinuxPackageRootAccessError) {
-  FakeCrostiniFeatures crostini_features;
-
-  crostini_features.set_root_access_allowed(false);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackage(container_id(), "/tmp/package.deb",
-                                          result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::INSTALL_LINUX_PACKAGE_FAILED);
-}
-
-TEST_F(CrostiniManagerTest, InstallLinuxPackageSignalNotConnectedError) {
-  fake_cicerone_client_->set_install_linux_package_progress_signal_connected(
-      false);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackage(container_id(), "/tmp/package.deb",
-                                          result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::INSTALL_LINUX_PACKAGE_FAILED);
-}
-
-TEST_F(CrostiniManagerTest, InstallLinuxPackageSignalSuccess) {
-  vm_tools::cicerone::InstallLinuxPackageResponse response;
-
-  response.set_status(vm_tools::cicerone::InstallLinuxPackageResponse::STARTED);
-  fake_cicerone_client_->set_install_linux_package_response(response);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackage(container_id(), "/tmp/package.deb",
-                                          result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::SUCCESS);
-}
-
-TEST_F(CrostiniManagerTest, InstallLinuxPackageSignalFailure) {
-  vm_tools::cicerone::InstallLinuxPackageResponse response;
-  std::string failure_reason = "Unit tests can't install Linux packages!";
-
-  response.set_status(vm_tools::cicerone::InstallLinuxPackageResponse::FAILED);
-  response.set_failure_reason(failure_reason);
-  fake_cicerone_client_->set_install_linux_package_response(response);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackage(container_id(), "/tmp/package.deb",
-                                          result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::INSTALL_LINUX_PACKAGE_FAILED);
-}
-
-TEST_F(CrostiniManagerTest, InstallLinuxPackageSignalOperationBlocked) {
-  vm_tools::cicerone::InstallLinuxPackageResponse response;
-  response.set_status(
-      vm_tools::cicerone::InstallLinuxPackageResponse::INSTALL_ALREADY_ACTIVE);
-  fake_cicerone_client_->set_install_linux_package_response(response);
-
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackage(container_id(), "/tmp/package.deb",
-                                          result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(),
-            CrostiniResult::BLOCKING_OPERATION_ALREADY_ACTIVE);
-}
-
-TEST_F(CrostiniManagerTest, UninstallPackageOwningFileSignalNotConnectedError) {
-  fake_cicerone_client_->set_uninstall_package_progress_signal_connected(false);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->UninstallPackageOwningFile(container_id(), "emacs",
-                                                 result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::UNINSTALL_PACKAGE_FAILED);
-}
-
-TEST_F(CrostiniManagerTest, UninstallPackageOwningFileSignalSuccess) {
-  vm_tools::cicerone::UninstallPackageOwningFileResponse response;
-
-  response.set_status(
-      vm_tools::cicerone::UninstallPackageOwningFileResponse::STARTED);
-  fake_cicerone_client_->set_uninstall_package_owning_file_response(response);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->UninstallPackageOwningFile(container_id(), "emacs",
-                                                 result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::SUCCESS);
-}
-
-TEST_F(CrostiniManagerTest, UninstallPackageOwningFileSignalFailure) {
-  vm_tools::cicerone::UninstallPackageOwningFileResponse response;
-  response.set_status(
-      vm_tools::cicerone::UninstallPackageOwningFileResponse::FAILED);
-  response.set_failure_reason("Didn't feel like it");
-  fake_cicerone_client_->set_uninstall_package_owning_file_response(response);
-
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->UninstallPackageOwningFile(container_id(), "emacs",
-                                                 result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::UNINSTALL_PACKAGE_FAILED);
-}
-
-TEST_F(CrostiniManagerTest, UninstallPackageOwningFileSignalOperationBlocked) {
-  vm_tools::cicerone::UninstallPackageOwningFileResponse response;
-  response.set_status(vm_tools::cicerone::UninstallPackageOwningFileResponse::
-                          BLOCKING_OPERATION_IN_PROGRESS);
-  fake_cicerone_client_->set_uninstall_package_owning_file_response(response);
-
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->UninstallPackageOwningFile(container_id(), "emacs",
-                                                 result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(),
-            CrostiniResult::BLOCKING_OPERATION_ALREADY_ACTIVE);
-}
-
 TEST_F(CrostiniManagerTest, RegisterCreateOptions) {
   guest_os::AddContainerToPrefs(profile_.get(), crostini::DefaultContainerId(),
                                 {});
   CrostiniManager::RestartOptions options;
   options.container_username = "penguininadesert";
-  options.ansible_playbook = base::FilePath("pob.yaml");
   options.disk_size_bytes = 9001;
   options.image_server_url = "https://suspiciouswebsite.com";
   options.image_alias = "nothingtoseehereofficer";
@@ -714,7 +503,6 @@ TEST_F(CrostiniManagerTest, RegisterCreateOptions_FalseWhenExists) {
                                 {});
   CrostiniManager::RestartOptions options;
   options.container_username = "penguininadesert";
-  options.ansible_playbook = base::FilePath("pob.yaml");
   options.disk_size_bytes = 9001;
   options.image_server_url = "https://suspiciouswebsite.com";
   options.image_alias = "nothingtoseehereofficer";
@@ -731,7 +519,6 @@ TEST_F(CrostiniManagerTest, SetCreateOptionsUsed) {
   CrostiniManager::RestartOptions options;
 
   options.container_username = "penguininadesert";
-  options.ansible_playbook = base::FilePath("pob.yaml");
   options.disk_size_bytes = 9001;
   options.image_server_url = "https://suspiciouswebsite.com";
   options.image_alias = "nothingtoseehereofficer";
@@ -755,7 +542,6 @@ TEST_F(CrostiniManagerTest, FetchCreateOptions_MergesSharePaths) {
   options.share_paths = {base::FilePath("ah"), base::FilePath("ah"),
                          base::FilePath("ah"), base::FilePath("ah")};
   options.container_username = "penguininadesert";
-  options.ansible_playbook = base::FilePath("pob.yaml");
   options.disk_size_bytes = 9001;
   options.image_server_url = "https://suspiciouswebsite.com";
   options.image_alias = "nothingtoseehereofficer";
@@ -773,7 +559,6 @@ TEST_F(CrostiniManagerTest, FetchCreateOptions_MergesSharePaths) {
       testing::ContainerEq(std::vector<base::FilePath>(
           {base::FilePath("oh"), base::FilePath("ah"), base::FilePath("ah"),
            base::FilePath("ah"), base::FilePath("ah")})));
-  EXPECT_TRUE(options.ansible_playbook == options2.ansible_playbook);
   EXPECT_TRUE(options.disk_size_bytes == options2.disk_size_bytes);
   EXPECT_TRUE(options.image_server_url == options2.image_server_url);
   EXPECT_TRUE(options.image_alias == options2.image_alias);
@@ -784,7 +569,6 @@ TEST_F(CrostiniManagerTest, FetchCreateOptions_FalseWhenUnused) {
                                 {});
   CrostiniManager::RestartOptions options;
   options.container_username = "penguininadesert";
-  options.ansible_playbook = base::FilePath("pob.yaml");
   options.disk_size_bytes = 9001;
   options.image_server_url = "https://suspiciouswebsite.com";
   options.image_alias = "nothingtoseehereofficer";
@@ -796,7 +580,6 @@ TEST_F(CrostiniManagerTest, FetchCreateOptions_FalseWhenUnused) {
   EXPECT_FALSE(crostini_manager()->FetchCreateOptions(
       crostini::DefaultContainerId(), &options2));
   EXPECT_TRUE(options.container_username == options2.container_username);
-  EXPECT_TRUE(options.ansible_playbook == options2.ansible_playbook);
   EXPECT_TRUE(options.disk_size_bytes == options2.disk_size_bytes);
   EXPECT_TRUE(options.image_server_url == options2.image_server_url);
   EXPECT_TRUE(options.image_alias == options2.image_alias);
@@ -807,7 +590,6 @@ TEST_F(CrostiniManagerTest, FetchCreateOptions_TrueWhenUsed) {
                                 {});
   CrostiniManager::RestartOptions options;
   options.container_username = "penguininadesert";
-  options.ansible_playbook = base::FilePath("pob.yaml");
   options.disk_size_bytes = 9001;
   options.image_server_url = "https://suspiciouswebsite.com";
   options.image_alias = "nothingtoseehereofficer";
@@ -821,7 +603,6 @@ TEST_F(CrostiniManagerTest, FetchCreateOptions_TrueWhenUsed) {
   EXPECT_TRUE(crostini_manager()->FetchCreateOptions(
       crostini::DefaultContainerId(), &options2));
   EXPECT_TRUE(options.container_username == options2.container_username);
-  EXPECT_TRUE(options.ansible_playbook == options2.ansible_playbook);
   EXPECT_TRUE(options.disk_size_bytes == options2.disk_size_bytes);
   EXPECT_TRUE(options.image_server_url == options2.image_server_url);
   EXPECT_TRUE(options.image_alias == options2.image_alias);
@@ -874,9 +655,14 @@ class CrostiniManagerRestartTest : public CrostiniManagerTest,
     run_loop.Run();
   }
 
-  void ExpectRestarterUmaCount(int count) {
+  void ExpectRestarterUmaCount(int count, bool is_install = false) {
     histogram_tester_.ExpectTotalCount("Crostini.Restarter.Started", count);
-    histogram_tester_.ExpectTotalCount("Crostini.RestarterResult", count);
+    if (is_install) {
+      histogram_tester_.ExpectTotalCount("Crostini.RestarterResult.Installer",
+                                         count);
+    } else {
+      histogram_tester_.ExpectTotalCount("Crostini.RestarterResult", count);
+    }
     histogram_tester_.ExpectTotalCount("Crostini.Installer.Started", 0);
   }
 
@@ -890,7 +676,7 @@ class CrostiniManagerRestartTest : public CrostiniManagerTest,
   const CrostiniManager::RestartId uninitialized_id_ =
       CrostiniManager::kUninitializedRestartId;
 
-  ash::disks::MockDiskMountManager* disk_mount_manager_mock_;
+  raw_ptr<ash::disks::MockDiskMountManager> disk_mount_manager_mock_;
   base::HistogramTester histogram_tester_{};
 
   base::RepeatingCallback<void(mojom::InstallerState)> on_stage_started_ =
@@ -1082,12 +868,56 @@ TEST_F(CrostiniManagerRestartTest, CancelDuringStartContainer) {
   EXPECT_FALSE(fake_cicerone_client_->configure_for_arc_sideload_called());
 }
 
-TEST_F(CrostiniManagerRestartTest, TimeoutDuringComponentLoaded) {
-  crostini_manager()->SetInstallTerminaNeverCompletesForTesting(true);
+TEST_F(CrostiniManagerRestartTest, TimeoutWaitingForRestarterStart) {
+  crostini_manager_->AddStoppingVmForTesting(container_id().vm_name);
 
   TestFuture<CrostiniResult> result_future;
   RestartCrostini(container_id(), result_future.GetCallback(), this);
   task_environment_.FastForwardBy(kLongTime);
+  task_environment_.RunUntilIdle();
+
+  EXPECT_EQ(result_future.Get(), CrostiniResult::START_TIMED_OUT);
+
+  EXPECT_EQ(fake_concierge_client_->create_disk_image_call_count(), 0);
+  ExpectRestarterUmaCount(1);
+}
+
+TEST_F(CrostiniManagerRestartTest, TimeoutDuringComponentLoadedFirstInstall) {
+  crostini_manager()->SetInstallTerminaNeverCompletesForTesting(true);
+
+  TestFuture<CrostiniResult> result_future;
+  CrostiniManager::RestartOptions options;
+  options.restart_source = RestartSource::kInstaller;
+  RestartCrostiniWithOptions(container_id(), std::move(options),
+                             result_future.GetCallback());
+  EXPECT_FALSE(result_future.IsReady());
+  task_environment_.FastForwardBy(base::Minutes(30));
+  task_environment_.RunUntilIdle();
+
+  EXPECT_FALSE(result_future.IsReady());
+  task_environment_.FastForwardBy(kLongTime);
+  task_environment_.RunUntilIdle();
+
+  EXPECT_EQ(result_future.Get(),
+            CrostiniResult::INSTALL_IMAGE_LOADER_TIMED_OUT);
+
+  EXPECT_EQ(fake_concierge_client_->create_disk_image_call_count(), 0);
+  EXPECT_FALSE(
+      profile_->GetPrefs()->GetBoolean(crostini::prefs::kCrostiniEnabled));
+  ExpectRestarterUmaCount(1, /*is_install=*/true);
+  histogram_tester_.ExpectTotalCount(
+      "Crostini.RestarterTimeInState2.InstallImageLoader", 1);
+  histogram_tester_.ExpectTotalCount(
+      "Crostini.RestarterTimeInState2.CreateDiskImage", 0);
+}
+
+TEST_F(CrostiniManagerRestartTest,
+       TimeoutDuringComponentLoadedAlreadyInstalled) {
+  crostini_manager()->SetInstallTerminaNeverCompletesForTesting(true);
+
+  TestFuture<CrostiniResult> result_future;
+  RestartCrostini(container_id(), result_future.GetCallback(), this);
+  task_environment_.FastForwardBy(base::Minutes(30));
   task_environment_.RunUntilIdle();
 
   EXPECT_EQ(result_future.Get(),
@@ -1204,33 +1034,6 @@ TEST_F(CrostiniManagerRestartTest, TimeoutWaitingForLxdStarted) {
   EXPECT_GE(fake_concierge_client_->create_disk_image_call_count(), 1);
   EXPECT_GE(fake_concierge_client_->start_vm_call_count(), 1);
   ExpectRestarterUmaCount(1);
-}
-
-TEST_F(CrostiniManagerRestartTest, SameVmDifferentContainerStartsLxdCorrectly) {
-  vm_tools::cicerone::StartLxdResponse response;
-  response.set_status(vm_tools::cicerone::StartLxdResponse::STARTING);
-  fake_cicerone_client_->set_start_lxd_response(response);
-
-  TestFuture<CrostiniResult> result_future_1;
-  RestartCrostini(container_id(), result_future_1.GetCallback(), this);
-
-  auto container_id_2 =
-      guest_os::GuestId(kCrostiniDefaultVmType, kVmName, "other-container");
-  TestFuture<CrostiniResult> result_future_2;
-  RestartCrostini(container_id_2, result_future_2.GetCallback(), this);
-
-  base::RunLoop().RunUntilIdle();
-  EXPECT_FALSE(result_future_1.IsReady());
-  EXPECT_FALSE(result_future_2.IsReady());
-
-  vm_tools::cicerone::StartLxdProgressSignal signal;
-  signal.set_owner_id(CryptohomeIdForProfile(profile()));
-  signal.set_vm_name(kVmName);
-  signal.set_status(vm_tools::cicerone::StartLxdProgressSignal::STARTED);
-  crostini_manager()->OnStartLxdProgress(signal);
-
-  EXPECT_EQ(result_future_1.Get(), CrostiniResult::SUCCESS);
-  EXPECT_EQ(result_future_2.Get(), CrostiniResult::SUCCESS);
 }
 
 TEST_F(CrostiniManagerRestartTest, TimeoutDuringCreateContainer) {
@@ -1530,54 +1333,6 @@ TEST_F(CrostiniManagerRestartTest, InstallHistogramEntries) {
   histogram_tester_.ExpectBucketCount("Crostini.RestarterResult.Installer",
                                       CrostiniResult::VM_START_FAILED, 1);
   histogram_tester_.ExpectTotalCount("Crostini.RestarterResult", 0);
-
-  // Likewise for RestartSource::kMultiContainerCreation
-  TestFuture<CrostiniResult> result_future_3, result_future_4;
-  guest_os::GuestId container_id2("termina", "banana");
-  CrostiniManager::RestartOptions options2;
-  options2.restart_source = RestartSource::kMultiContainerCreation;
-  RestartCrostiniWithOptions(container_id2, std::move(options2),
-                             result_future_3.GetCallback());
-  RestartCrostini(container_id2, result_future_4.GetCallback());
-
-  EXPECT_EQ(result_future_3.Get(), CrostiniResult::VM_START_FAILED);
-  EXPECT_EQ(result_future_4.Get(), CrostiniResult::VM_START_FAILED);
-
-  histogram_tester_.ExpectBucketCount(
-      "Crostini.RestarterResult.MultiContainerCreation",
-      CrostiniResult::VM_START_FAILED, 1);
-  histogram_tester_.ExpectTotalCount("Crostini.RestarterResult.Installer", 1);
-  histogram_tester_.ExpectTotalCount("Crostini.RestarterResult", 0);
-}
-
-TEST_F(CrostiniManagerRestartTest, OsReleaseSetCorrectly) {
-  vm_tools::cicerone::OsRelease os_release;
-  base::HistogramTester histogram_tester{};
-  os_release.set_pretty_name("Debian GNU/Linux 10 (buster)");
-  os_release.set_version_id("10");
-  os_release.set_id("debian");
-  fake_cicerone_client_->set_lxd_container_os_release(os_release);
-
-  TestFuture<CrostiniResult> result_future;
-  RestartCrostini(container_id(), result_future.GetCallback(), this);
-  EXPECT_EQ(result_future.Get(), CrostiniResult::SUCCESS);
-
-  const auto* stored_os_release =
-      crostini_manager()->GetContainerOsRelease(container_id());
-  EXPECT_NE(stored_os_release, nullptr);
-  // Sadly, we can't use MessageDifferencer here because we're using the LITE
-  // API in our protos.
-  EXPECT_EQ(os_release.SerializeAsString(),
-            stored_os_release->SerializeAsString());
-  histogram_tester.ExpectUniqueSample("Crostini.ContainerOsVersion",
-                                      ContainerOsVersion::kDebianBuster, 1);
-
-  // The data for this container should also be stored in prefs.
-  const base::Value* os_release_pref_value = GetContainerPrefValue(
-      profile(), container_id(), guest_os::prefs::kContainerOsVersionKey);
-  EXPECT_NE(os_release_pref_value, nullptr);
-  EXPECT_EQ(os_release_pref_value->GetInt(),
-            static_cast<int>(ContainerOsVersion::kDebianBuster));
 }
 
 TEST_F(CrostiniManagerRestartTest, RestartThenUninstall) {
@@ -1901,19 +1656,16 @@ TEST_F(CrostiniManagerRestartTest, StopAfterLxdAvailableThenFullRestart) {
 
 TEST_F(CrostiniManagerRestartTest, UninstallUnregistersContainers) {
   auto* terminal_registry =
-      guest_os::GuestOsService::GetForProfile(profile_.get())
+      guest_os::GuestOsServiceFactory::GetForProfile(profile_.get())
           ->TerminalProviderRegistry();
-  auto* mount_registry = guest_os::GuestOsService::GetForProfile(profile_.get())
-                             ->MountProviderRegistry();
   auto* share_service =
-      guest_os::GuestOsSharePath::GetForProfile(profile_.get());
+      guest_os::GuestOsSharePathFactory::GetForProfile(profile_.get());
 
   TestFuture<CrostiniResult> restart_result;
   RestartCrostini(container_id(), restart_result.GetCallback());
   EXPECT_EQ(restart_result.Get(), CrostiniResult::SUCCESS);
 
   EXPECT_GT(terminal_registry->List().size(), 0u);
-  EXPECT_GT(mount_registry->List().size(), 0u);
   EXPECT_GT(share_service->ListGuests().size(), 0u);
 
   TestFuture<CrostiniResult> uninstall_result;
@@ -1921,68 +1673,6 @@ TEST_F(CrostiniManagerRestartTest, UninstallUnregistersContainers) {
   EXPECT_EQ(uninstall_result.Get(), CrostiniResult::SUCCESS);
 
   EXPECT_EQ(terminal_registry->List().size(), 0u);
-  EXPECT_EQ(mount_registry->List().size(), 0u);
-  EXPECT_EQ(share_service->ListGuests().size(), 0u);
-}
-
-TEST_F(CrostiniManagerRestartTest,
-       DeleteUnregistersContainersWhenDoesNotExist) {
-  auto* terminal_registry =
-      guest_os::GuestOsService::GetForProfile(profile_.get())
-          ->TerminalProviderRegistry();
-  auto* mount_registry = guest_os::GuestOsService::GetForProfile(profile_.get())
-                             ->MountProviderRegistry();
-  auto* share_service =
-      guest_os::GuestOsSharePath::GetForProfile(profile_.get());
-  vm_tools::cicerone::DeleteLxdContainerResponse response;
-  response.set_status(
-      vm_tools::cicerone::DeleteLxdContainerResponse::DOES_NOT_EXIST);
-  fake_cicerone_client_->set_delete_lxd_container_response_(response);
-
-  TestFuture<CrostiniResult> restart_result;
-  RestartCrostini(container_id(), restart_result.GetCallback());
-  EXPECT_EQ(restart_result.Get(), CrostiniResult::SUCCESS);
-
-  EXPECT_GT(terminal_registry->List().size(), 0u);
-  EXPECT_GT(mount_registry->List().size(), 0u);
-  EXPECT_GT(share_service->ListGuests().size(), 0u);
-
-  TestFuture<bool> delete_result;
-  crostini_manager()->DeleteLxdContainer(container_id(),
-                                         delete_result.GetCallback());
-  EXPECT_EQ(delete_result.Get(), true);
-
-  EXPECT_EQ(terminal_registry->List().size(), 0u);
-  EXPECT_EQ(mount_registry->List().size(), 0u);
-  EXPECT_EQ(share_service->ListGuests().size(), 0u);
-}
-
-TEST_F(CrostiniManagerRestartTest, DeleteUnregistersContainers) {
-  auto* terminal_registry =
-      guest_os::GuestOsService::GetForProfile(profile_.get())
-          ->TerminalProviderRegistry();
-  auto* mount_registry = guest_os::GuestOsService::GetForProfile(profile_.get())
-                             ->MountProviderRegistry();
-  auto* share_service =
-      guest_os::GuestOsSharePath::GetForProfile(profile_.get());
-
-  TestFuture<CrostiniResult> restart_result;
-  RestartCrostini(container_id(), restart_result.GetCallback());
-  EXPECT_EQ(restart_result.Get(), CrostiniResult::SUCCESS);
-
-  EXPECT_GT(terminal_registry->List().size(), 0u);
-  EXPECT_GT(mount_registry->List().size(), 0u);
-  EXPECT_GT(share_service->ListGuests().size(), 0u);
-
-  vm_tools::cicerone::LxdContainerDeletedSignal signal;
-  signal.set_vm_name(container_id().vm_name);
-  signal.set_container_name(container_id().container_name);
-  signal.set_owner_id(CryptohomeIdForProfile(profile()));
-  signal.set_status(vm_tools::cicerone::LxdContainerDeletedSignal::DELETED);
-  crostini_manager()->OnLxdContainerDeleted(signal);
-
-  EXPECT_EQ(terminal_registry->List().size(), 0u);
-  EXPECT_EQ(mount_registry->List().size(), 0u);
   EXPECT_EQ(share_service->ListGuests().size(), 0u);
 }
 
@@ -2047,6 +1737,146 @@ TEST_F(CrostiniManagerEnterpriseReportingTest,
           ->GetPrefs()
           ->GetString(crostini::prefs::kCrostiniLastLaunchTerminaKernelVersion)
           .empty());
+}
+
+TEST_F(CrostiniManagerTest, ExportDiskImageFailure) {
+  base::ScopedTempFile export_path;
+  EXPECT_TRUE(export_path.Create());
+  TestFuture<CrostiniResult> result_future;
+  EXPECT_EQ(fake_concierge_client_->export_disk_image_call_count(), 0);
+
+  vm_tools::concierge::ExportDiskImageResponse failure_response;
+  failure_response.set_status(vm_tools::concierge::DISK_STATUS_FAILED);
+  fake_concierge_client_->set_export_disk_image_response(failure_response);
+
+  crostini_manager()->ExportDiskImage(container_id(), "my_cool_user_id_hash",
+                                      export_path.path(), false,
+                                      result_future.GetCallback());
+
+  EXPECT_EQ(result_future.Get<0>(), CrostiniResult::DISK_IMAGE_FAILED);
+  EXPECT_EQ(fake_concierge_client_->export_disk_image_call_count(), 1);
+}
+
+TEST_F(CrostiniManagerTest, ExportDiskImageNoSpaceFailure) {
+  base::ScopedTempFile export_path;
+  EXPECT_TRUE(export_path.Create());
+  TestFuture<CrostiniResult> result_future;
+  EXPECT_EQ(fake_concierge_client_->export_disk_image_call_count(), 0);
+
+  vm_tools::concierge::DiskImageStatusResponse progress_signal;
+  progress_signal.set_status(vm_tools::concierge::DISK_STATUS_IN_PROGRESS);
+  progress_signal.set_progress(50);
+  vm_tools::concierge::DiskImageStatusResponse no_space_signal;
+  no_space_signal.set_status(vm_tools::concierge::DISK_STATUS_NOT_ENOUGH_SPACE);
+  std::vector<vm_tools::concierge::DiskImageStatusResponse> signals;
+  signals.emplace_back(progress_signal);
+  signals.emplace_back(no_space_signal);
+  fake_concierge_client_->set_disk_image_status_signals(signals);
+
+  crostini_manager()->ExportDiskImage(container_id(), "my_cool_user_id_hash",
+                                      export_path.path(), false,
+                                      result_future.GetSequenceBoundCallback());
+
+  EXPECT_EQ(result_future.Get<0>(), CrostiniResult::DISK_IMAGE_FAILED_NO_SPACE);
+  EXPECT_EQ(fake_concierge_client_->export_disk_image_call_count(), 1);
+}
+
+TEST_F(CrostiniManagerTest, ExportDiskImageSuccess) {
+  base::ScopedTempFile export_path;
+  EXPECT_TRUE(export_path.Create());
+  TestFuture<CrostiniResult> result_future;
+  EXPECT_EQ(fake_concierge_client_->export_disk_image_call_count(), 0);
+
+  vm_tools::concierge::DiskImageStatusResponse progress_signal;
+  progress_signal.set_status(vm_tools::concierge::DISK_STATUS_IN_PROGRESS);
+  progress_signal.set_progress(50);
+  vm_tools::concierge::DiskImageStatusResponse done_signal;
+  done_signal.set_status(vm_tools::concierge::DISK_STATUS_CREATED);
+  std::vector<vm_tools::concierge::DiskImageStatusResponse> signals;
+  signals.emplace_back(progress_signal);
+  signals.emplace_back(done_signal);
+  fake_concierge_client_->set_disk_image_status_signals(signals);
+
+  crostini_manager()->ExportDiskImage(container_id(), "my_cool_user_id_hash",
+                                      export_path.path(), false,
+                                      result_future.GetCallback());
+
+  EXPECT_EQ(result_future.Get<0>(), CrostiniResult::SUCCESS);
+  EXPECT_EQ(fake_concierge_client_->export_disk_image_call_count(), 1);
+}
+
+TEST_F(CrostiniManagerTest, ImportDiskImageFailure) {
+  base::ScopedTempFile import_path;
+  EXPECT_TRUE(import_path.Create());
+  TestFuture<CrostiniResult> result_future;
+  EXPECT_EQ(fake_concierge_client_->import_disk_image_call_count(), 0);
+
+  vm_tools::concierge::ImportDiskImageResponse failure_response;
+  failure_response.set_status(vm_tools::concierge::DISK_STATUS_FAILED);
+  fake_concierge_client_->set_import_disk_image_response(failure_response);
+
+  crostini_manager()->ImportDiskImage(container_id(), "my_cool_user_id_hash",
+                                      import_path.path(),
+                                      result_future.GetCallback());
+
+  EXPECT_EQ(result_future.Get<0>(), CrostiniResult::DISK_IMAGE_FAILED);
+  EXPECT_EQ(fake_concierge_client_->import_disk_image_call_count(), 1);
+}
+
+TEST_F(CrostiniManagerTest, ImportDiskImageNoSpaceFailure) {
+  base::ScopedTempFile import_path;
+  EXPECT_TRUE(import_path.Create());
+  TestFuture<CrostiniResult> result_future;
+  EXPECT_EQ(fake_concierge_client_->import_disk_image_call_count(), 0);
+
+  vm_tools::concierge::DiskImageStatusResponse progress_signal;
+  progress_signal.set_status(vm_tools::concierge::DISK_STATUS_IN_PROGRESS);
+  progress_signal.set_progress(50);
+  vm_tools::concierge::DiskImageStatusResponse no_space_signal;
+  no_space_signal.set_status(vm_tools::concierge::DISK_STATUS_NOT_ENOUGH_SPACE);
+  std::vector<vm_tools::concierge::DiskImageStatusResponse> signals;
+  signals.emplace_back(progress_signal);
+  signals.emplace_back(no_space_signal);
+  fake_concierge_client_->set_disk_image_status_signals(signals);
+
+  vm_tools::concierge::ImportDiskImageResponse response;
+  response.set_status(vm_tools::concierge::DISK_STATUS_IN_PROGRESS);
+  ash::FakeConciergeClient::Get()->set_import_disk_image_response(response);
+
+  crostini_manager()->ImportDiskImage(container_id(), "my_cool_user_id_hash",
+                                      import_path.path(),
+                                      result_future.GetCallback());
+
+  EXPECT_EQ(result_future.Get<0>(), CrostiniResult::DISK_IMAGE_FAILED_NO_SPACE);
+  EXPECT_EQ(fake_concierge_client_->import_disk_image_call_count(), 1);
+}
+
+TEST_F(CrostiniManagerTest, ImportDiskImageSuccess) {
+  base::ScopedTempFile import_path;
+  EXPECT_TRUE(import_path.Create());
+  TestFuture<CrostiniResult> result_future;
+  EXPECT_EQ(fake_concierge_client_->import_disk_image_call_count(), 0);
+
+  vm_tools::concierge::DiskImageStatusResponse progress_signal;
+  progress_signal.set_status(vm_tools::concierge::DISK_STATUS_IN_PROGRESS);
+  progress_signal.set_progress(50);
+  vm_tools::concierge::DiskImageStatusResponse done_signal;
+  done_signal.set_status(vm_tools::concierge::DISK_STATUS_CREATED);
+  std::vector<vm_tools::concierge::DiskImageStatusResponse> signals;
+  signals.emplace_back(progress_signal);
+  signals.emplace_back(done_signal);
+  fake_concierge_client_->set_disk_image_status_signals(signals);
+
+  vm_tools::concierge::ImportDiskImageResponse response;
+  response.set_status(vm_tools::concierge::DISK_STATUS_IN_PROGRESS);
+  ash::FakeConciergeClient::Get()->set_import_disk_image_response(response);
+
+  crostini_manager()->ImportDiskImage(container_id(), "my_cool_user_id_hash",
+                                      import_path.path(),
+                                      result_future.GetCallback());
+
+  EXPECT_EQ(result_future.Get<0>(), CrostiniResult::SUCCESS);
+  EXPECT_EQ(fake_concierge_client_->import_disk_image_call_count(), 1);
 }
 
 TEST_F(CrostiniManagerTest, ExportContainerSuccess) {
@@ -2265,59 +2095,8 @@ TEST_F(CrostiniManagerTest, ImportContainerFailOnVmStop) {
             CrostiniResult::CONTAINER_EXPORT_IMPORT_FAILED_VM_STOPPED);
 }
 
-TEST_F(CrostiniManagerTest, InstallLinuxPackageFromAptSignalNotConnectedError) {
-  fake_cicerone_client_->set_install_linux_package_progress_signal_connected(
-      false);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackageFromApt(container_id(), kPackageID,
-                                                 result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::INSTALL_LINUX_PACKAGE_FAILED);
-}
-
-TEST_F(CrostiniManagerTest, InstallLinuxPackageFromAptSignalSuccess) {
-  vm_tools::cicerone::InstallLinuxPackageResponse response;
-
-  response.set_status(vm_tools::cicerone::InstallLinuxPackageResponse::STARTED);
-  fake_cicerone_client_->set_install_linux_package_response(response);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackageFromApt(container_id(), kPackageID,
-                                                 result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::SUCCESS);
-}
-
-TEST_F(CrostiniManagerTest, InstallLinuxPackageFromAptSignalFailure) {
-  vm_tools::cicerone::InstallLinuxPackageResponse response;
-
-  response.set_status(vm_tools::cicerone::InstallLinuxPackageResponse::FAILED);
-  response.set_failure_reason(
-      "Unit tests can't install Linux package from apt!");
-  fake_cicerone_client_->set_install_linux_package_response(response);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackageFromApt(container_id(), kPackageID,
-                                                 result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(), CrostiniResult::INSTALL_LINUX_PACKAGE_FAILED);
-}
-
-TEST_F(CrostiniManagerTest, InstallLinuxPackageFromAptSignalOperationBlocked) {
-  vm_tools::cicerone::InstallLinuxPackageResponse response;
-
-  response.set_status(
-      vm_tools::cicerone::InstallLinuxPackageResponse::INSTALL_ALREADY_ACTIVE);
-  fake_cicerone_client_->set_install_linux_package_response(response);
-  TestFuture<CrostiniResult> result_future;
-  crostini_manager()->InstallLinuxPackageFromApt(container_id(), kPackageID,
-                                                 result_future.GetCallback());
-
-  EXPECT_EQ(result_future.Get(),
-            CrostiniResult::BLOCKING_OPERATION_ALREADY_ACTIVE);
-}
-
 TEST_F(CrostiniManagerTest, InstallerStatusInitiallyFalse) {
-  EXPECT_FALSE(
-      crostini_manager()->GetCrostiniDialogStatus(DialogType::INSTALLER));
+  EXPECT_FALSE(crostini_manager()->IsCrostiniInstallerOpen());
 }
 
 TEST_F(CrostiniManagerTest, StartContainerSuccess) {
@@ -2354,169 +2133,6 @@ TEST_F(CrostiniManagerTest, StartLxdSuccess) {
   crostini_manager()->StartLxd(kVmName, result_future.GetCallback());
 
   EXPECT_EQ(result_future.Get(), CrostiniResult::SUCCESS);
-}
-
-class CrostiniManagerAnsibleInfraTest : public CrostiniManagerRestartTest {
- public:
-  void SetUp() override {
-    CrostiniManagerTest::SetUp();
-    mock_ansible_management_service_ =
-        AnsibleManagementTestHelper::SetUpMockAnsibleManagementService(
-            profile_.get());
-    ansible_management_test_helper_ =
-        std::make_unique<AnsibleManagementTestHelper>(profile_.get());
-    ansible_management_test_helper_->SetUpAnsibleInfra();
-    SetUpViewsEnvironmentForTesting();
-  }
-
-  void TearDown() override {
-    base::RunLoop().RunUntilIdle();
-
-    TearDownViewsEnvironmentForTesting();
-
-    ansible_management_test_helper_.reset();
-    CrostiniManagerTest::TearDown();
-  }
-
- protected:
-  MockAnsibleManagementService* mock_ansible_management_service() {
-    return mock_ansible_management_service_;
-  }
-
-  std::unique_ptr<AnsibleManagementTestHelper> ansible_management_test_helper_;
-  MockAnsibleManagementService* mock_ansible_management_service_;
-};
-
-TEST_F(CrostiniManagerAnsibleInfraTest, StartContainerFailure) {
-  EXPECT_CALL(*mock_ansible_management_service(), ConfigureContainer).Times(1);
-  ON_CALL(*mock_ansible_management_service(), ConfigureContainer)
-      .WillByDefault([](const guest_os::GuestId& container_id,
-                        base::FilePath playbook,
-                        base::OnceCallback<void(bool success)> callback) {
-        std::move(callback).Run(false);
-      });
-
-  CrostiniManager::RestartOptions ansible_restart;
-  ansible_restart.ansible_playbook = profile_->GetPrefs()->GetFilePath(
-      prefs::kCrostiniAnsiblePlaybookFilePath);
-
-  RestartCrostiniWithOptions(
-      DefaultContainerId(), std::move(ansible_restart),
-      base::BindOnce(&ExpectCrostiniResult, run_loop()->QuitClosure(),
-                     CrostiniResult::CONTAINER_CONFIGURATION_FAILED),
-      this);
-
-  run_loop()->Run();
-}
-
-TEST_F(CrostiniManagerAnsibleInfraTest, StartContainerSuccess) {
-  EXPECT_CALL(*mock_ansible_management_service(), ConfigureContainer).Times(1);
-  ON_CALL(*mock_ansible_management_service(), ConfigureContainer)
-      .WillByDefault([](const guest_os::GuestId& container_id,
-                        base::FilePath playbook,
-                        base::OnceCallback<void(bool success)> callback) {
-        std::move(callback).Run(true);
-      });
-
-  CrostiniManager::RestartOptions ansible_restart;
-  ansible_restart.ansible_playbook = profile_->GetPrefs()->GetFilePath(
-      prefs::kCrostiniAnsiblePlaybookFilePath);
-
-  RestartCrostiniWithOptions(
-      DefaultContainerId(), std::move(ansible_restart),
-      base::BindOnce(&ExpectCrostiniResult, run_loop()->QuitClosure(),
-                     CrostiniResult::SUCCESS),
-      this);
-  run_loop()->Run();
-}
-
-class CrostiniManagerUpgradeContainerTest
-    : public CrostiniManagerTest,
-      public UpgradeContainerProgressObserver {
- public:
-  void SetUp() override {
-    CrostiniManagerTest::SetUp();
-    progress_signal_.set_owner_id(CryptohomeIdForProfile(profile()));
-    progress_signal_.set_vm_name(kVmName);
-    progress_signal_.set_container_name(kContainerName);
-    progress_run_loop_ = std::make_unique<base::RunLoop>();
-    crostini_manager()->AddUpgradeContainerProgressObserver(this);
-  }
-
-  void TearDown() override {
-    crostini_manager()->RemoveUpgradeContainerProgressObserver(this);
-    progress_run_loop_.reset();
-    CrostiniManagerTest::TearDown();
-  }
-
-  void RunUntilUpgradeDone(UpgradeContainerProgressStatus final_status) {
-    final_status_ = final_status;
-    progress_run_loop_->Run();
-  }
-
-  void SendProgressSignal() {
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE,
-        base::BindOnce(&ash::FakeCiceroneClient::NotifyUpgradeContainerProgress,
-                       base::Unretained(fake_cicerone_client_),
-                       progress_signal_));
-  }
-
- protected:
-  // UpgradeContainerProgressObserver
-  void OnUpgradeContainerProgress(
-      const guest_os::GuestId& container_id,
-      UpgradeContainerProgressStatus status,
-      const std::vector<std::string>& messages) override {
-    if (status == final_status_) {
-      progress_run_loop_->Quit();
-    }
-  }
-
-  guest_os::GuestId container_id_ =
-      guest_os::GuestId(kCrostiniDefaultVmType, kVmName, kContainerName);
-
-  UpgradeContainerProgressStatus final_status_ =
-      UpgradeContainerProgressStatus::FAILED;
-
-  vm_tools::cicerone::UpgradeContainerProgressSignal progress_signal_;
-  // must be created on UI thread
-  std::unique_ptr<base::RunLoop> progress_run_loop_;
-};
-
-TEST_F(CrostiniManagerUpgradeContainerTest, UpgradeContainerSuccess) {
-  crostini_manager()->UpgradeContainer(
-      container_id_, ContainerVersion::BUSTER,
-      base::BindOnce(&ExpectCrostiniResult, run_loop()->QuitClosure(),
-                     CrostiniResult::SUCCESS));
-
-  run_loop()->Run();
-
-  progress_signal_.set_status(
-      vm_tools::cicerone::UpgradeContainerProgressSignal::SUCCEEDED);
-
-  SendProgressSignal();
-  RunUntilUpgradeDone(UpgradeContainerProgressStatus::SUCCEEDED);
-}
-
-TEST_F(CrostiniManagerUpgradeContainerTest, CancelUpgradeContainerSuccess) {
-  crostini_manager()->UpgradeContainer(
-      container_id_, ContainerVersion::BUSTER,
-      base::BindOnce(&ExpectCrostiniResult, run_loop()->QuitClosure(),
-                     CrostiniResult::SUCCESS));
-
-  progress_signal_.set_status(
-      vm_tools::cicerone::UpgradeContainerProgressSignal::IN_PROGRESS);
-
-  SendProgressSignal();
-  run_loop()->Run();
-
-  base::RunLoop run_loop2;
-  crostini_manager()->CancelUpgradeContainer(
-      container_id_,
-      base::BindOnce(&ExpectCrostiniResult, run_loop2.QuitClosure(),
-                     CrostiniResult::SUCCESS));
-  run_loop2.Run();
 }
 
 }  // namespace crostini

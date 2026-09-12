@@ -56,12 +56,19 @@ class WebrtcVideoEncoder {
   // The destructor is virtual so that implementations can derive from this
   // class to attach more data to the frame.
   struct FrameStats {
-    FrameStats() = default;
-    FrameStats(const FrameStats&) = default;
-    FrameStats& operator=(const FrameStats&) = default;
-    virtual ~FrameStats() = default;
+    FrameStats();
+    FrameStats(const FrameStats&);
+    FrameStats& operator=(const FrameStats&);
+    virtual ~FrameStats();
 
-    // TODO(crbug.com/1192865): Consolidate all the per-frame statistics
+    // Creates a copy of the frame stats.
+    virtual std::unique_ptr<FrameStats> Clone() const;
+
+    // Resets any timestamps. This is called for top-up frames which are not
+    // caused by input.
+    virtual void ResetTimestamps(base::TimeTicks now);
+
+    // TODO(crbug.com/40175068): Consolidate all the per-frame statistics
     // into a single struct in remoting/protocol.
     base::TimeTicks capture_started_time;
     base::TimeTicks capture_ended_time;
@@ -84,13 +91,15 @@ class WebrtcVideoEncoder {
     ~EncodedFrame();
 
     webrtc::DesktopSize dimensions;
-    rtc::scoped_refptr<webrtc::EncodedImageBuffer> data;
+    webrtc::scoped_refptr<webrtc::EncodedImageBuffer> data;
     bool key_frame;
     int quantizer;
     webrtc::VideoCodecType codec;
     int32_t profile = 0;
 
-    uint32_t rtp_timestamp;
+    uint32_t rtp_timestamp = 0;
+    int64_t capture_time_ms = 0;
+    int64_t ntp_time_ms = 0;
     std::unique_ptr<FrameStats> stats;
     // This rectangle in the input frame will be encoded by the encoder.
     int32_t encoded_rect_width = 0;
@@ -124,8 +133,9 @@ class WebrtcVideoEncoder {
 
   // Encoder configurable settings, may be provided via SDP or OOB via a
   // proprietary message.
-  virtual void SetLosslessEncode(bool want_lossless) {}
-  virtual void SetLosslessColor(bool want_lossless) {}
+  virtual void SetLosslessEncode(bool want_lossless_encode) {}
+  virtual void SetLosslessColor(bool want_lossless_color) {}
+  virtual void SetUseActiveMap(bool use_active_map) {}
   virtual void SetEncoderSpeed(int encoder_speed) {}
 
   // Encode an image stored in |frame|. If frame.updated_region() is empty

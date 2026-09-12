@@ -5,24 +5,17 @@
 #include "chrome/common/extensions/sync_helper.h"
 
 #include "base/logging.h"
+#include "base/notreached.h"
 #include "components/app_constants/constants.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
-#include "extensions/common/features/behavior_feature.h"
-#include "extensions/common/features/feature.h"
-#include "extensions/common/features/feature_provider.h"
 #include "extensions/common/manifest.h"
-#include "extensions/common/manifest_url_handlers.h"
+#include "extensions/common/manifest_handlers/manifest_url_handlers.h"
 
 namespace extensions {
 namespace sync_helper {
 
 bool IsSyncable(const Extension* extension) {
-  const Feature* feature =
-      FeatureProvider::GetBehaviorFeature(behavior_feature::kDoNotSync);
-  if (feature && feature->IsAvailableToExtension(extension).is_available())
-    return false;
-
   // Default apps are not synced because otherwise they will pollute profiles
   // that don't already have them. Specially, if a user doesn't have default
   // apps, creates a new profile (which get default apps) and then enables sync
@@ -45,30 +38,29 @@ bool IsSyncable(const Extension* extension) {
   }
 
   switch (extension->GetType()) {
-    case Manifest::TYPE_EXTENSION:
-    case Manifest::TYPE_HOSTED_APP:
-    case Manifest::TYPE_LEGACY_PACKAGED_APP:
-    case Manifest::TYPE_PLATFORM_APP:
-    case Manifest::TYPE_THEME:
+    case Manifest::Type::kExtension:
+    case Manifest::Type::kHostedApp:
+    case Manifest::Type::kLegacyPackagedApp:
+    case Manifest::Type::kPlatformApp:
+    case Manifest::Type::kTheme:
       return true;
 
-    case Manifest::TYPE_USER_SCRIPT:
+    case Manifest::Type::kUserScript:
       // We only want to sync user scripts with gallery update URLs.
       if (ManifestURL::UpdatesFromGallery(extension))
         return true;
       return false;
 
-    case Manifest::TYPE_UNKNOWN:
-    case Manifest::TYPE_SHARED_MODULE:
-    case Manifest::TYPE_LOGIN_SCREEN_EXTENSION:
-    case Manifest::TYPE_CHROMEOS_SYSTEM_EXTENSION:
+    case Manifest::Type::kUnknown:
+    case Manifest::Type::kSharedModule:
+    case Manifest::Type::kLoginScreenExtension:
+    case Manifest::Type::kChromeOSSystemExtension:
       return false;
 
-    case Manifest::NUM_LOAD_TYPES:
+    case Manifest::Type::kNumLoadTypes:
       NOTREACHED();
   }
   NOTREACHED();
-  return false;
 }
 
 bool IsSyncableComponentExtension(const Extension* extension) {

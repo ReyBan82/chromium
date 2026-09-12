@@ -6,6 +6,7 @@
 
 #include "base/logging.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/time/time.h"
 #include "components/offline_pages/core/offline_clock.h"
 
@@ -14,7 +15,7 @@ namespace offline_pages {
 OfflineEventLogger::OfflineEventLogger()
     : activities_(0), is_logging_(false), client_(nullptr) {}
 
-OfflineEventLogger::~OfflineEventLogger() {}
+OfflineEventLogger::~OfflineEventLogger() = default;
 
 void OfflineEventLogger::Clear() {
   activities_.clear();
@@ -35,24 +36,25 @@ void OfflineEventLogger::GetLogs(std::vector<std::string>* records) {
 
 void OfflineEventLogger::RecordActivity(const std::string& activity) {
   DVLOG(1) << activity;
-  if (!is_logging_ || activity.empty())
+  if (!is_logging_ || activity.empty()) {
     return;
+  }
 
-  base::Time::Exploded current_time;
-  OfflineTimeNow().LocalExplode(&current_time);
-
+  base::Time::Exploded exploded;
+  OfflineTimeNow().LocalExplode(&exploded);
   std::string date_string = base::StringPrintf(
-      "%d %02d %02d %02d:%02d:%02d", current_time.year, current_time.month,
-      current_time.day_of_month, current_time.hour, current_time.minute,
-      current_time.second);
+      "%04d %02d %02d %02d:%02d:%02d: ", exploded.year, exploded.month,
+      exploded.day_of_month, exploded.hour, exploded.minute, exploded.second);
 
-  if (client_)
+  if (client_) {
     client_->CustomLog(activity);
+  }
 
-  if (activities_.size() == kMaxLogCount)
+  if (activities_.size() == kMaxLogCount) {
     activities_.pop_back();
+  }
 
-  activities_.push_front(date_string + ": " + activity);
+  activities_.push_front(date_string + activity);
 }
 
 void OfflineEventLogger::SetClient(Client* client) {

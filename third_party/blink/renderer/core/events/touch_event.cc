@@ -110,6 +110,12 @@ bool TouchEvent::IsTouchEvent() const {
 void TouchEvent::preventDefault() {
   UIEventWithKeyState::preventDefault();
 
+  if (!IsFullyTrusted()) {
+    // The messages below should only be sent for implementation-created
+    // events, not for script-created ones.
+    return;
+  }
+
   // A common developer error is to wait too long before attempting to stop
   // scrolling by consuming a touchmove event. Generate an error if this
   // event is uncancelable.
@@ -120,10 +126,10 @@ void TouchEvent::preventDefault() {
     case PassiveMode::kNotPassiveDefault:
       if (!cancelable()) {
         id = "IgnoredEventCancel";
-        message = "Ignored attempt to cancel a " + type() +
-                  " event with cancelable=false, for example "
-                  "because scrolling is in progress and "
-                  "cannot be interrupted.";
+        message =
+            StrCat({"Ignored attempt to cancel a ", type(),
+                    " event with cancelable=false, for example because "
+                    "scrolling is in progress and cannot be interrupted."});
       }
       break;
     case PassiveMode::kPassiveForcedDocumentLevel:

@@ -6,18 +6,25 @@
 #define CHROME_BROWSER_APPS_APP_SERVICE_METRICS_WEBSITE_METRICS_H_
 
 #include <map>
+#include <optional>
 
 #include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/observer_list.h"
+#include "base/observer_list_types.h"
 #include "base/scoped_multi_source_observation.h"
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
+#include "base/values.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser_list_observer.h"
 #include "chrome/browser/ui/browser_tab_strip_tracker.h"
+#include "chrome/browser/ui/browser_window/public/browser_collection_observer.h"
+#include "chrome/browser/ui/browser_window/public/profile_browser_collection.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history/core/browser/history_service_observer.h"
+#include "components/tabs/public/tab_interface.h"
 #include "components/webapps/browser/banners/app_banner_manager.h"
 #include "content/public/browser/page.h"
 #include "content/public/browser/web_contents.h"
@@ -29,8 +36,16 @@
 #include "ui/wm/public/activation_client.h"
 #include "url/gurl.h"
 
-class Browser;
+namespace base {
+class TickClock;
+}
+
 class Profile;
+
+namespace webapps {
+enum class InstallableWebAppCheckResult;
+struct WebAppBannerData;
+}  // namespace webapps
 
 namespace apps {
 
@@ -44,21 +59,59 @@ extern const char kPromotableKey[];
 
 // WebsiteMetrics monitors creation/deletion of Browser and its
 // TabStripModel to record the website usage time metrics.
-class WebsiteMetrics : public BrowserListObserver,
+class WebsiteMetrics : public BrowserCollectionObserver,
                        public TabStripModelObserver,
                        public aura::WindowObserver,
                        public wm::ActivationChangeObserver,
                        public history::HistoryServiceObserver {
  public:
-  WebsiteMetrics(Profile* profile, int user_type_by_device_type);
+  // Observer that is notified on certain website events like URL opened, URL
+  // closed, etc. Observers are expected to register themselves on session
+  // initialization so they do not miss out on events that happen before they
+  // are registered.
+  class Observer : public base::CheckedObserver {
+   public:
+    Observer() = default;
+    Observer(const Observer&) = delete;
+    Observer& operator=(const Observer&) = delete;
+    ~Observer() override = default;
+
+    // Invoked when a new URL is opened with specified `WebContents`. We also
+    // return the URL that was opened in case there are further updates to
+    // `WebContents` forcing a new URL opened event that will follow as a
+    // separate notification.
+    virtual void OnUrlOpened(const GURL& url_opened,
+                             ::content::WebContents* web_contents) {}
+
+    // Invoked when a URL is closed with specified `WebContents`. `WebContents`
+    // could reflect current URL in case of content navigation, so we also
+    // return the URL that was closed.
+    virtual void OnUrlClosed(const GURL& url_closed,
+                             ::content::WebContents* web_contents) {}
+
+    // Invoked when URL usage metrics are being recorded (per URL that was used,
+    // on a 5 minute interval). `running_time` represents the foreground usage
+    // time in the last 5 minute interval. We do not track usage per
+    // `WebContents` today. There is a possibility of losing out on initial
+    // usage metric records if there are delays in observer registration.
+    virtual void OnUrlUsage(const GURL& url, base::TimeDelta running_time) {}
+
+    // Invoked when the `WebsiteMetrics` component (being observed) is being
+    // destroyed.
+    virtual void OnWebsiteMetricsDestroyed() {}
+  };
+
+  WebsiteMetrics(Profile* profile,
+                 int user_type_by_device_type,
+                 const base::TickClock& tick_clock);
 
   WebsiteMetrics(const WebsiteMetrics&) = delete;
   WebsiteMetrics& operator=(const WebsiteMetrics&) = delete;
 
   ~WebsiteMetrics() override;
 
-  // BrowserListObserver overrides:
-  void OnBrowserAdded(Browser* browser) override;
+  // BrowserCollectionObserver overrides:
+  void OnBrowserCreated(BrowserWindowInterface* browser) override;
 
   // TabStripModelObserver overrides:
   void OnTabStripModelChanged(
@@ -75,8 +128,8 @@ class WebsiteMetrics : public BrowserListObserver,
   void OnWindowDestroying(aura::Window* window) override;
 
   // history::HistoryServiceObserver:
-  void OnURLsDeleted(history::HistoryService* history_service,
-                     const history::DeletionInfo& deletion_info) override;
+  void OnHistoryDeletions(history::HistoryService* history_service,
+                          const history::DeletionInfo& deletion_info) override;
   void HistoryServiceBeingDeleted(
       history::HistoryService* history_service) override;
 
@@ -85,6 +138,9 @@ class WebsiteMetrics : public BrowserListObserver,
 
   // Records the usage time UKM each 2 hours.
   void OnTwoHours();
+
+  void AddObserver(Observer* observer);
+  void RemoveObserver(Observer* observer);
 
  private:
   friend class WebsiteMetricsBrowserTest;
@@ -112,13 +168,23 @@ class WebsiteMetrics : public BrowserListObserver,
     void WebContentsDestroyed() override;
 
     // webapps::AppBannerManager::Observer:
-    void OnInstallableWebAppStatusUpdated() override;
+    void OnInstallableWebAppStatusUpdated(
+        webapps::InstallableWebAppCheckResult result,
+        const std::optional<webapps::WebAppBannerData>& data) override;
 
    private:
-    WebsiteMetrics* owner_;
+    // The AppBannerManager's lifetime is tied to the tab, which can be
+    // destroyed before this observer's WebContents (e.g. when its
+    // TabFeatures-owned manager dies with the closing tab), so stop
+    // observing when the tab detaches.
+    void OnTabWillDetach(tabs::TabInterface* tab,
+                         tabs::TabInterface::DetachReason reason);
+
+    raw_ptr<WebsiteMetrics> owner_;
     base::ScopedObservation<webapps::AppBannerManager,
                             webapps::AppBannerManager::Observer>
         app_banner_manager_observer_{this};
+    base::CallbackListSubscription tab_will_detach_subscription_;
   };
 
   struct UrlInfo {
@@ -135,13 +201,13 @@ class WebsiteMetrics : public BrowserListObserver,
     bool is_activated = false;
     bool promotable = false;
 
-    // Converts the struct UsageTime to base::Value, e.g.:
+    // Converts the struct UsageTime to base::DictValue, e.g.:
     // {
     //    "time": "3600",
     //    "url_content": "scope",
     //    "promotable": "false",
     // }
-    base::Value ConvertToValue() const;
+    base::DictValue ConvertToDict() const;
   };
 
   // Observes the root window's activation client for the OnWindowActivated
@@ -170,7 +236,9 @@ class WebsiteMetrics : public BrowserListObserver,
   // Called by |WebsiteMetrics::ActiveTabWebContentsObserver|.
   virtual void OnWebContentsUpdated(content::WebContents* web_contents);
   virtual void OnInstallableWebAppStatusUpdated(
-      content::WebContents* web_contents);
+      content::WebContents* web_contents,
+      webapps::InstallableWebAppCheckResult result,
+      const std::optional<webapps::WebAppBannerData>& data);
 
   // Adds the url info to `url_infos_`.
   void AddUrlInfo(const GURL& url,
@@ -209,13 +277,18 @@ class WebsiteMetrics : public BrowserListObserver,
 
   const raw_ptr<Profile> profile_;
 
+  base::ScopedObservation<ProfileBrowserCollection, BrowserCollectionObserver>
+      browser_collection_observation_{this};
+
   BrowserTabStripTracker browser_tab_strip_tracker_;
 
   // The map from the window to the active tab contents.
-  base::flat_map<aura::Window*, content::WebContents*> window_to_web_contents_;
+  base::flat_map<aura::Window*, raw_ptr<content::WebContents, CtnExperimental>>
+      window_to_web_contents_;
 
   // The map from the root window's activation client to windows.
-  std::map<wm::ActivationClient*, std::set<aura::Window*>>
+  std::map<wm::ActivationClient*,
+           std::set<raw_ptr<aura::Window, SetExperimental>>>
       activation_client_to_windows_;
 
   std::map<content::WebContents*, std::unique_ptr<ActiveTabWebContentsObserver>>
@@ -252,6 +325,10 @@ class WebsiteMetrics : public BrowserListObserver,
   base::ScopedObservation<history::HistoryService,
                           history::HistoryServiceObserver>
       history_observation_{this};
+
+  base::ObserverList<Observer> observers_;
+
+  const raw_ref<const base::TickClock> tick_clock_;
 
   base::WeakPtrFactory<WebsiteMetrics> weak_factory_{this};
 };

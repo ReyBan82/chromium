@@ -5,9 +5,9 @@
 chrome.test.runTests([
   // Tests that attaching a named event twice will fail.
   function doubleAttach() {
-    function dummy() {};
-    var onClicked = new chrome.Event("browserAction.onClicked");
-    var onClicked2 = new chrome.Event("browserAction.onClicked");
+    function dummy() {}
+    const onClicked = new chrome.Event('browserAction.onClicked');
+    const onClicked2 = new chrome.Event('browserAction.onClicked');
     onClicked.addListener(dummy);
     chrome.test.assertTrue(onClicked.hasListeners());
     try {
@@ -15,8 +15,7 @@ chrome.test.runTests([
       chrome.test.fail();
     } catch (e) {
       chrome.test.assertTrue(
-          e.message.search("already attached") >= 0,
-          e.message);
+          e.message.search('already attached') >= 0, e.message);
     }
     chrome.test.assertFalse(onClicked2.hasListeners());
     onClicked2.removeListener(dummy);
@@ -33,6 +32,6 @@ chrome.test.runTests([
     chrome.browserAction.onClicked.addListener(function() {});
 
     // Test continues in twoPageAttach.html.
-    window.open("twoPageAttach.html");
+    window.open('twoPageAttach.html');
   },
 ]);

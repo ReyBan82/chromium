@@ -7,7 +7,6 @@
 #include <sstream>
 #include <string>
 
-#include "base/containers/contains.h"
 #include "base/i18n/time_formatting.h"
 #include "base/logging.h"
 #include "base/strings/stringprintf.h"
@@ -48,7 +47,8 @@ KeyboardLogData& KeyboardLogData::operator=(KeyboardLogData&&) = default;
 KeyboardLogData::~KeyboardLogData() = default;
 
 KeyboardInputLog::KeyboardInputLog(const base::FilePath& log_base_path)
-    : log_(log_base_path.Append(kKeyboardInputLogFilename)) {}
+    : log_path_(log_base_path.Append(kKeyboardInputLogFilename)),
+      log_(log_path_) {}
 
 KeyboardInputLog::~KeyboardInputLog() = default;
 
@@ -90,11 +90,15 @@ void KeyboardInputLog::CreateLogAndRemoveKeyboard(uint32_t id) {
 }
 
 bool KeyboardInputLog::KeyboardHasBeenAdded(uint32_t id) const {
-  return base::Contains(keyboard_log_data_map_, id);
+  return keyboard_log_data_map_.contains(id);
 }
 
 std::string KeyboardInputLog::GetLogContents() const {
   return log_.GetContents();
+}
+
+base::FilePath KeyboardInputLog::GetLogFilePath() const {
+  return log_path_;
 }
 
 void KeyboardInputLog::Append(const std::string& text) {

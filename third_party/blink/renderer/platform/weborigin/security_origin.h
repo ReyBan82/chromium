@@ -30,13 +30,18 @@
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_WEBORIGIN_SECURITY_ORIGIN_H_
 
 #include <stdint.h>
-#include <memory>
 
-#include "base/gtest_prod_util.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include <memory>
+#include <optional>
+
+#include "base/types/pass_key.h"
+#include "net/base/schemeful_site.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
+#include "third_party/blink/renderer/platform/wtf/forward.h"
+#include "third_party/blink/renderer/platform/wtf/hash_functions_memory.h"
 #include "third_party/blink/renderer/platform/wtf/hash_traits.h"
+#include "third_party/blink/renderer/platform/wtf/ref_counted.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 #include "third_party/blink/renderer/platform/wtf/thread_safe_ref_counted.h"
 #include "url/origin.h"
@@ -44,6 +49,7 @@
 namespace blink {
 
 class KURL;
+class SandboxedOpaqueSecurityOriginCreator;
 
 // An identifier which defines the source of content (e.g. a document) and
 // restricts what other objects it is permitted to access (based on their
@@ -101,6 +107,18 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   static scoped_refptr<SecurityOrigin> CreateFromUrlOrigin(const url::Origin&);
   url::Origin ToUrlOrigin() const;
 
+  // Returns the cached `net::SchemefulSite` for this origin, computing it
+  // on-demand. Equivalent to `net::SchemefulSite(ToUrlOrigin())`.
+  const net::SchemefulSite& GetSchemefulSite() const;
+
+  // Creates an opaque origin with the given nonce and origin. This method can
+  // only be called by SandboxedOpaqueSecurityOriginCreator to ensure proper
+  // access control for nonce-based origins.
+  static scoped_refptr<SecurityOrigin> CreateWithNonce(
+      base::PassKey<SandboxedOpaqueSecurityOriginCreator>,
+      const base::UnguessableToken& nonce,
+      const SecurityOrigin* origin);
+
   SecurityOrigin(const SecurityOrigin&) = delete;
   SecurityOrigin& operator=(const SecurityOrigin&) = delete;
 
@@ -127,9 +145,9 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   void SetDomainFromDOM(const String& new_domain);
   bool DomainWasSetInDOM() const { return domain_was_set_in_dom_; }
 
-  String Protocol() const { return protocol_; }
-  String Host() const { return host_; }
-  String Domain() const { return domain_; }
+  const String& Protocol() const { return protocol_; }
+  const String& Host() const { return host_; }
+  const String& Domain() const { return domain_; }
 
   // Returns the registrable domain if available.
   // For non-tuple origin, IP address URL, and public suffixes, this returns a
@@ -191,6 +209,10 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // cryptographically-authenticated origin, as described in
   // https://w3c.github.io/webappsec-secure-contexts/#is-origin-trustworthy
   bool IsPotentiallyTrustworthy() const;
+
+  // Returns true if this origin's protocol is a WebUI scheme (e.g. chrome://,
+  // chrome-untrusted://, or registered as WebUI).
+  bool IsWebUI() const;
 
   // Returns a human-readable error message describing that a non-secure
   // origin's access to a feature is denied.
@@ -267,6 +289,16 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // When using the string value, it's important to remember that it might be
   // "null". This typically happens when this SecurityOrigin is opaque (e.g. the
   // origin of a sandboxed iframe).
+  //
+  // This should be kept in sync with url::Origin::Serialize().
+  //
+  // TODO(crbug.com/40554285, crbug.com/40467682): Note that there's a subtle
+  // difference in how this function handles file: URL origins compared to
+  // url::Origin::Serialize(). url::Origin always serializes them to "file://",
+  // whereas this function serializes them to "null" or // "file://" depending
+  // on the `allow_file_access_from_file_urls` flag in WebPreferences. This
+  // difference should be cleaned up, along with the workaround for it in
+  // RenderFrameProxyHost::SerializePostMessageSourceOrigin().
   String ToString() const;
   AtomicString ToAtomicString() const;
 
@@ -365,7 +397,10 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
 
   // Only used for document.domain setting. The method should probably be moved
   // if we need it for something more general.
-  static String CanonicalizeHost(const String& host, bool* success);
+  static String CanonicalizeSpecialHost(const String& host, bool* success);
+  static String CanonicalizeHost(const String& host,
+                                 const String& scheme,
+                                 bool* success);
 
   // Return a security origin that is assigned to the agent cluster. This will
   // be a copy of this security origin if the current agent doesn't match the
@@ -380,10 +415,21 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // Returns true if this security origin is serialized to "null".
   bool SerializesAsNull() const;
 
+  // Whether document.open was called in between two different windows, causing
+  // the SecurityOrigin to be shared by both. This is only used to record
+  // metrics.
+  // To be removed after shipping DocumentOpenSandboxInheritanceRemoval feature.
+  void set_aliased_by_document_open() { aliased_by_document_open_ = true; }
+  bool aliased_by_document_open() const { return aliased_by_document_open_; }
+
+  bool block_local_access_from_local_origin() const {
+    return block_local_access_from_local_origin_;
+  }
+
  private:
   // Various serialisation and test routines that need direct nonce access.
   friend struct mojo::UrlOriginAdapter;
-  friend struct WTF::HashTraits<scoped_refptr<const SecurityOrigin>>;
+  friend struct HashTraits<scoped_refptr<const SecurityOrigin>>;
   friend class SecurityOriginTest;
 
   // For calling GetNonceForSerialization().
@@ -408,7 +454,7 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   SecurityOrigin(NewUniqueOpaque, const SecurityOrigin* precursor_origin);
 
   // Create a tuple SecurityOrigin, with parameters via KURL
-  explicit SecurityOrigin(const KURL& url);
+  static scoped_refptr<SecurityOrigin> CreateInternal(const KURL& url);
 
   // Constructs a non-opaque tuple origin, analogously to
   // url::Origin::Origin(url::SchemeHostPort).
@@ -435,13 +481,14 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   const String host_ = g_empty_string;
   String domain_ = g_empty_string;
   const uint16_t port_ = 0;
-  const absl::optional<url::Origin::Nonce> nonce_if_opaque_;
+  const std::optional<url::Origin::Nonce> nonce_if_opaque_;
   bool universal_access_ = false;
   bool domain_was_set_in_dom_ = false;
   bool can_load_local_resources_ = false;
   bool block_local_access_from_local_origin_ = false;
   bool is_opaque_origin_potentially_trustworthy_ = false;
   bool cross_agent_cluster_access_ = false;
+  bool aliased_by_document_open_ = false;
 
   // A security origin can have an empty |agent_cluster_id_|. It occurs in the
   // cases where a security origin hasn't been assigned to a document yet.
@@ -450,11 +497,11 @@ class PLATFORM_EXPORT SecurityOrigin : public RefCounted<SecurityOrigin> {
   // For opaque origins, tracks the non-opaque origin from which the opaque
   // origin is derived.
   const scoped_refptr<const SecurityOrigin> precursor_origin_;
+
+  // Cached value of `GetSchemefulSite()`. Pure function of `const` tuple
+  // members so invalidation is not needed. Not copied; copies recompute lazily.
+  mutable std::unique_ptr<net::SchemefulSite> cached_schemeful_site_;
 };
-
-}  // namespace blink
-
-namespace WTF {
 
 // The default HashTraits of SecurityOrigin implements the "same origin"
 // equality relation between two origins. As such it ignores the domain that
@@ -462,52 +509,50 @@ namespace WTF {
 // equality you'll need to define a custom hash traits type using a different
 // hash function.
 template <>
-struct HashTraits<scoped_refptr<const blink::SecurityOrigin>>
-    : GenericHashTraits<scoped_refptr<const blink::SecurityOrigin>> {
-  static unsigned GetHash(const blink::SecurityOrigin* origin) {
+struct HashTraits<scoped_refptr<const SecurityOrigin>>
+    : GenericHashTraits<scoped_refptr<const SecurityOrigin>> {
+  static uint32_t GetHash(const SecurityOrigin* origin) {
     const base::UnguessableToken* nonce = origin->GetNonceForSerialization();
     size_t nonce_hash = nonce ? base::UnguessableTokenHash()(*nonce) : 0;
 
-    unsigned hash_codes[] = {
-      origin->Protocol().Impl() ? origin->Protocol().Impl()->GetHash() : 0,
-      origin->Host().Impl() ? origin->Host().Impl()->GetHash() : 0,
-      origin->Port(),
+    uint32_t hash_codes[] = {
+        origin->Protocol().Impl() ? origin->Protocol().Impl()->GetHash() : 0,
+        origin->Host().Impl() ? origin->Host().Impl()->GetHash() : 0,
+        origin->Port(),
 #if ARCH_CPU_32_BITS
-      nonce_hash,
+        nonce_hash,
 #elif ARCH_CPU_64_BITS
-      static_cast<unsigned>(nonce_hash),
-      static_cast<unsigned>(nonce_hash >> 32),
+        static_cast<uint32_t>(nonce_hash),
+        static_cast<uint32_t>(nonce_hash >> 32),
 #else
 #error "Unknown bits"
 #endif
     };
-    return StringHasher::HashMemory<sizeof(hash_codes)>(hash_codes);
+    return HashMemory32(base::as_byte_span(hash_codes));
   }
-  static unsigned GetHash(
-      const scoped_refptr<const blink::SecurityOrigin>& origin) {
+  static uint32_t GetHash(const scoped_refptr<const SecurityOrigin>& origin) {
     return GetHash(origin.get());
   }
 
-  static bool Equal(const blink::SecurityOrigin* a,
-                    const blink::SecurityOrigin* b) {
+  static bool Equal(const SecurityOrigin* a, const SecurityOrigin* b) {
     return a->IsSameOriginWith(b);
   }
-  static bool Equal(const blink::SecurityOrigin* a,
-                    const scoped_refptr<const blink::SecurityOrigin>& b) {
+  static bool Equal(const SecurityOrigin* a,
+                    const scoped_refptr<const SecurityOrigin>& b) {
     return Equal(a, b.get());
   }
-  static bool Equal(const scoped_refptr<const blink::SecurityOrigin>& a,
-                    const blink::SecurityOrigin* b) {
+  static bool Equal(const scoped_refptr<const SecurityOrigin>& a,
+                    const SecurityOrigin* b) {
     return Equal(a.get(), b);
   }
-  static bool Equal(const scoped_refptr<const blink::SecurityOrigin>& a,
-                    const scoped_refptr<const blink::SecurityOrigin>& b) {
+  static bool Equal(const scoped_refptr<const SecurityOrigin>& a,
+                    const scoped_refptr<const SecurityOrigin>& b) {
     return Equal(a.get(), b.get());
   }
 
   static constexpr bool kSafeToCompareToEmptyOrDeleted = false;
 };
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WEBORIGIN_SECURITY_ORIGIN_H_

@@ -30,7 +30,7 @@ class TestBase {
   TestBase();
   ~TestBase();
 
-  const IpczAPI& ipcz() const { return ipcz_; }
+  const IpczAPI& ipcz() const;
 
   // Some trivial shorthand methods to access the ipcz API more conveniently.
   void Close(IpczHandle handle);
@@ -42,10 +42,6 @@ class TestBase {
   IpczResult Put(IpczHandle portal,
                  std::string_view message,
                  absl::Span<IpczHandle> handles = {});
-  IpczResult PutWithLimits(IpczHandle portal,
-                           const IpczPutLimits& limits,
-                           std::string_view message,
-                           absl::Span<IpczHandle> handles = {});
 
   // Shorthand for ipcz Get() to retrieve the next available parcel from
   // `portal`.If no parcel is available, or any other condition prevents Get()
@@ -88,6 +84,10 @@ class TestBase {
                        std::string* message = nullptr,
                        absl::Span<IpczHandle> handles = {});
 
+  // Like WaitToGet but expects success and requires the read parcel to have
+  // no handles. Returns the parcel contents as a string.
+  std::string WaitToGetString(IpczHandle portal);
+
   // Sends an empty parcel from `portal` and expects an empty parcel in return.
   void PingPong(IpczHandle portal);
 
@@ -118,8 +118,6 @@ class TestBase {
 
  private:
   static void HandleEvent(const IpczTrapEvent* event);
-
-  IpczAPI ipcz_ = {.size = sizeof(ipcz_)};
 };
 
 }  // namespace ipcz::test::internal

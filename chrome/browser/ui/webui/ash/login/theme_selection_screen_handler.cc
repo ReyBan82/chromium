@@ -5,17 +5,13 @@
 #include "chrome/browser/ui/webui/ash/login/theme_selection_screen_handler.h"
 
 #include "ash/constants/ash_features.h"
+#include "ash/login/resources/grit/ash_login_strings.h"
 #include "chrome/browser/ash/login/oobe_screen.h"
 #include "chrome/browser/ash/login/screens/theme_selection_screen.h"
 #include "chrome/browser/ui/webui/ash/login/base_screen_handler.h"
-#include "chrome/grit/generated_resources.h"
 #include "components/login/localized_values_builder.h"
 
 namespace ash {
-
-namespace {
-constexpr char kSelectedTheme[] = "selectedTheme";
-}
 
 constexpr StaticOobeScreenId ThemeSelectionScreenView::kScreenId;
 
@@ -24,10 +20,13 @@ ThemeSelectionScreenHandler::ThemeSelectionScreenHandler()
 
 ThemeSelectionScreenHandler::~ThemeSelectionScreenHandler() = default;
 
-void ThemeSelectionScreenHandler::Show(const std::string& mode) {
-  base::Value::Dict data;
-  data.Set(kSelectedTheme, mode);
+void ThemeSelectionScreenHandler::Show(base::DictValue data) {
   ShowInWebUI(std::move(data));
+}
+
+base::WeakPtr<ThemeSelectionScreenView>
+ThemeSelectionScreenHandler::AsWeakPtr() {
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 void ThemeSelectionScreenHandler::DeclareLocalizedValues(
@@ -43,6 +42,12 @@ void ThemeSelectionScreenHandler::DeclareLocalizedValues(
   builder->Add("darkThemeDescription", IDS_THEME_DARK_DESCRIPTION);
   builder->Add("autoThemeLabel", IDS_THEME_AUTO_LABEL);
   builder->Add("autoThemeDescription", IDS_THEME_AUTO_DESCRIPTION);
+  builder->Add("choobeThemeSelectionTitle",
+               IDS_OOBE_CHOOBE_THEME_SELECTION_TILE_TITLE);
+
+  if (!features::IsOobeChoobeEnabled()) {
+    builder->Add("choobeReturnButton", IDS_OOBE_CHOOBE_RETURN_BUTTON);
+  }
 }
 
 }  // namespace ash

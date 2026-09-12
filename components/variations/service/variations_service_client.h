@@ -5,14 +5,17 @@
 #ifndef COMPONENTS_VARIATIONS_SERVICE_VARIATIONS_SERVICE_CLIENT_H_
 #define COMPONENTS_VARIATIONS_SERVICE_VARIATIONS_SERVICE_CLIENT_H_
 
+#include <memory>
+#include <optional>
 #include <string>
 
+#include "base/containers/flat_set.h"
+#include "base/files/file_path.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/version.h"
 #include "components/variations/proto/study.pb.h"
 #include "components/variations/seed_response.h"
 #include "components/version_info/channel.h"
-#include "components/version_info/version_info.h"
 
 namespace network {
 class SharedURLLoaderFactory;
@@ -22,13 +25,15 @@ namespace network_time {
 class NetworkTimeTracker;
 }
 
+class PrefService;
+
 namespace variations {
 
 // An abstraction of operations that depend on the embedder's (e.g. Chrome)
 // environment.
 class VariationsServiceClient {
  public:
-  virtual ~VariationsServiceClient() {}
+  virtual ~VariationsServiceClient() = default;
 
   // Returns the version to use for variations seed simulation.
   virtual base::Version GetVersionForSimulation() = 0;
@@ -51,12 +56,20 @@ class VariationsServiceClient {
   // Returns the current form factor of the device.
   virtual Study::FormFactor GetCurrentFormFactor();
 
+  // Returns the directory in which to store variations seed files. Only clients
+  // on platforms that support dedicated seed files should override this.
+  virtual base::FilePath GetVariationsSeedFileDir();
+
   // If a native variations service that directly fetches the seed from the
   // server is implemented, returns the SeedResponse from the native variations
   // seed store, and removes the seed from the native storage given that we can
   // assume that the returned seed would be stored into Chrome Prefs. Otherwise,
   // returns nullptr.
   virtual std::unique_ptr<SeedResponse> TakeSeedFromNativeVariationsSeedStore();
+
+  // If an invalid command-line was specified by the user, flag an error to the
+  // user and exit the process.
+  virtual void ExitWithMessage(const std::string& message);
 
   // Returns whether the client is enterprise.
   // TODO(manukh): crbug.com/1003025. This is inconsistent with UMA which
@@ -71,6 +84,19 @@ class VariationsServiceClient {
   // well. But this could be confusing and could prevent using UMA filters on a
   // non finch-filtered study to analyze the finch-filtered launch potential.
   virtual bool IsEnterprise() = 0;
+
+  // Returns the keys for all the profiles.
+  // Returns std::nullopt if the platform does not support multiple profiles,
+  // which is the default implementation.
+  virtual std::optional<base::flat_set<std::string>> GetAllProfilesKeys(
+      PrefService* local_state);
+
+  // Returns whether Chrome Enterprise Core is supported on this platform.
+  virtual bool IsChromeEnterpriseCoreSupported();
+
+  // Returns whether we verify the variations seed with its signature when we
+  // load the variations seed from disk on startup.
+  virtual bool EnableSignatureVerificationOnLoad();
 
  private:
   // Gets the channel of the embedder. But all variations callers should use

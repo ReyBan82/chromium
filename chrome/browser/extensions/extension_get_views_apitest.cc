@@ -12,10 +12,11 @@
 #include "extensions/test/extension_test_message_listener.h"
 #include "extensions/test/result_catcher.h"
 #include "extensions/test/test_extension_dir.h"
+#include "ui/base/page_transition_types.h"
 
 namespace extensions {
 
-// Failed run on ChromeOS CI builder. https://crbug.com/1245240
+// Failed run on ChromeOS CI builder. https://crbug.com/40788517
 #if BUILDFLAG(IS_CHROMEOS)
 #define MAYBE_GetViews DISABLED_GetViews
 #else
@@ -47,7 +48,7 @@ class ExtensionApiTestWithoutAutomationController : public ExtensionApiTest {
   }
 };
 
-// Regression test for http://crbug.com/1349787.
+// Regression test for http://crbug.com/40856127.
 IN_PROC_BROWSER_TEST_F(ExtensionApiTestWithoutAutomationController,
                        GetWebAccessibleExtensionView) {
   ASSERT_TRUE(embedded_test_server()->Start());

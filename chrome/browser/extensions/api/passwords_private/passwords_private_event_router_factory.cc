@@ -4,7 +4,7 @@
 
 #include "chrome/browser/extensions/api/passwords_private/passwords_private_event_router_factory.h"
 
-#include "chrome/browser/extensions/api/passwords_private/passwords_private_event_router.h"
+#include "chrome/browser/extensions/api/passwords_private/passwords_private_event_router_impl.h"
 #include "content/public/browser/browser_context.h"
 #include "extensions/browser/extension_system_provider.h"
 #include "extensions/browser/extensions_browser_client.h"
@@ -22,23 +22,32 @@ PasswordsPrivateEventRouterFactory::GetForProfile(
 // static
 PasswordsPrivateEventRouterFactory*
 PasswordsPrivateEventRouterFactory::GetInstance() {
-  return base::Singleton<PasswordsPrivateEventRouterFactory>::get();
+  static base::NoDestructor<PasswordsPrivateEventRouterFactory> instance;
+  return instance.get();
 }
 
 PasswordsPrivateEventRouterFactory::PasswordsPrivateEventRouterFactory()
     : ProfileKeyedServiceFactory(
           "PasswordsPrivateEventRouter",
-          ProfileSelections::BuildRedirectedInIncognito()) {
+          ProfileSelections::Builder()
+              .WithRegular(ProfileSelection::kRedirectedToOriginal)
+              // TODO(crbug.com/40257657): Audit whether these should be
+              // redirected or should have their own instance.
+              .WithGuest(ProfileSelection::kRedirectedToOriginal)
+              // TODO(crbug.com/41488885): Check if this service is needed for
+              // Ash Internals.
+              .WithAshInternals(ProfileSelection::kRedirectedToOriginal)
+              .Build()) {
   DependsOn(ExtensionsBrowserClient::Get()->GetExtensionSystemFactory());
 }
 
-PasswordsPrivateEventRouterFactory::
-    ~PasswordsPrivateEventRouterFactory() {
-}
+PasswordsPrivateEventRouterFactory::~PasswordsPrivateEventRouterFactory() =
+    default;
 
-KeyedService* PasswordsPrivateEventRouterFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+PasswordsPrivateEventRouterFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return PasswordsPrivateEventRouter::Create(context);
+  return std::make_unique<PasswordsPrivateEventRouterImpl>(context);
 }
 
 bool PasswordsPrivateEventRouterFactory::

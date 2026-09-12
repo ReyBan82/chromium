@@ -13,6 +13,7 @@
 #include "third_party/blink/renderer/platform/network/http_names.h"
 #include "third_party/blink/renderer/platform/network/mime/mime_type_registry.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
@@ -25,44 +26,44 @@ using WebFeature = mojom::WebFeature;
 // future decisions about which types can be safely be disallowed. Below
 // is a number of constants about which use counters to report.
 
-const WebFeature kApplicationFeatures[2] = {
+const std::array<WebFeature, 2> kApplicationFeatures = {
     WebFeature::kCrossOriginApplicationScript,
     WebFeature::kSameOriginApplicationScript};
 
-const WebFeature kTextFeatures[2] = {WebFeature::kCrossOriginTextScript,
-                                     WebFeature::kSameOriginTextScript};
+const std::array<WebFeature, 2> kTextFeatures = {
+    WebFeature::kCrossOriginTextScript, WebFeature::kSameOriginTextScript};
 
-const WebFeature kApplicationOctetStreamFeatures[2] = {
+const std::array<WebFeature, 2> kApplicationOctetStreamFeatures = {
     WebFeature::kCrossOriginApplicationOctetStream,
     WebFeature::kSameOriginApplicationOctetStream,
 };
 
-const WebFeature kApplicationXmlFeatures[2] = {
+const std::array<WebFeature, 2> kApplicationXmlFeatures = {
     WebFeature::kCrossOriginApplicationXml,
     WebFeature::kSameOriginApplicationXml,
 };
 
-const WebFeature kTextHtmlFeatures[2] = {
+const std::array<WebFeature, 2> kTextHtmlFeatures = {
     WebFeature::kCrossOriginTextHtml,
     WebFeature::kSameOriginTextHtml,
 };
 
-const WebFeature kTextPlainFeatures[2] = {
+const std::array<WebFeature, 2> kTextPlainFeatures = {
     WebFeature::kCrossOriginTextPlain,
     WebFeature::kSameOriginTextPlain,
 };
 
-const WebFeature kTextXmlFeatures[2] = {
+const std::array<WebFeature, 2> kTextXmlFeatures = {
     WebFeature::kCrossOriginTextXml,
     WebFeature::kSameOriginTextXml,
 };
 
-const WebFeature kJsonFeatures[2] = {
+const std::array<WebFeature, 2> kJsonFeatures = {
     WebFeature::kCrossOriginJsonTypeForScript,
     WebFeature::kSameOriginJsonTypeForScript,
 };
 
-const WebFeature kUnknownFeatures[2] = {
+const std::array<WebFeature, 2> kUnknownFeatures = {
     WebFeature::kCrossOriginStrictNosniffWouldBlock,
     WebFeature::kSameOriginStrictNosniffWouldBlock,
 };
@@ -76,10 +77,11 @@ const WebFeature kUnknownFeatures[2] = {
 // expected future blocking of this resource. 'counter' determines which
 // Use counter should be used to count this. 'is_worker_global_scope' is used
 // for choosing 'counter' value.
-bool AllowMimeTypeAsScript(const String& mime_type,
-                           bool same_origin,
-                           AllowedByNosniff::MimeTypeCheck mime_type_check_mode,
-                           WebFeature& counter) {
+static bool AllowMimeTypeAsScript(
+    const String& mime_type,
+    bool same_origin,
+    AllowedByNosniff::MimeTypeCheck mime_type_check_mode,
+    std::optional<WebFeature>& counter) {
   using MimeTypeCheck = AllowedByNosniff::MimeTypeCheck;
 
   // If strict mime type checking for workers is enabled, we'll treat all
@@ -96,19 +98,19 @@ bool AllowMimeTypeAsScript(const String& mime_type,
   // Check for certain non-executable MIME types.
   // See:
   // https://fetch.spec.whatwg.org/#should-response-to-request-be-blocked-due-to-mime-type?
-  if (mime_type.StartsWithIgnoringASCIICase("image/")) {
+  if (mime_type.StartsWithIgnoringAsciiCase("image/")) {
     counter = WebFeature::kBlockedSniffingImageToScript;
     return false;
   }
-  if (mime_type.StartsWithIgnoringASCIICase("audio/")) {
+  if (mime_type.StartsWithIgnoringAsciiCase("audio/")) {
     counter = WebFeature::kBlockedSniffingAudioToScript;
     return false;
   }
-  if (mime_type.StartsWithIgnoringASCIICase("video/")) {
+  if (mime_type.StartsWithIgnoringAsciiCase("video/")) {
     counter = WebFeature::kBlockedSniffingVideoToScript;
     return false;
   }
-  if (mime_type.StartsWithIgnoringASCIICase("text/csv")) {
+  if (mime_type.StartsWithIgnoringAsciiCase("text/csv")) {
     counter = WebFeature::kBlockedSniffingCSVToScript;
     return false;
   }
@@ -123,25 +125,25 @@ bool AllowMimeTypeAsScript(const String& mime_type,
   // we still wish to accept them (or log them using UseCounter, or add a
   // deprecation warning to the console).
 
-  if (EqualIgnoringASCIICase(mime_type, "text/javascript1.6") ||
-      EqualIgnoringASCIICase(mime_type, "text/javascript1.7")) {
+  if (EqualIgnoringAsciiCase(mime_type, "text/javascript1.6") ||
+      EqualIgnoringAsciiCase(mime_type, "text/javascript1.7")) {
     // We've been excluding these legacy values from UseCounter stats since
     // before.
     return true;
   }
 
-  if (mime_type.StartsWithIgnoringASCIICase("application/octet-stream")) {
+  if (mime_type.StartsWithIgnoringAsciiCase("application/octet-stream")) {
     counter = kApplicationOctetStreamFeatures[same_origin];
-  } else if (mime_type.StartsWithIgnoringASCIICase("application/xml")) {
+  } else if (mime_type.StartsWithIgnoringAsciiCase("application/xml")) {
     counter = kApplicationXmlFeatures[same_origin];
-  } else if (mime_type.StartsWithIgnoringASCIICase("text/html")) {
+  } else if (mime_type.StartsWithIgnoringAsciiCase("text/html")) {
     counter = kTextHtmlFeatures[same_origin];
-  } else if (mime_type.StartsWithIgnoringASCIICase("text/plain")) {
+  } else if (mime_type.StartsWithIgnoringAsciiCase("text/plain")) {
     counter = kTextPlainFeatures[same_origin];
-  } else if (mime_type.StartsWithIgnoringCase("text/xml")) {
+  } else if (mime_type.StartsWithIgnoringAsciiCase("text/xml")) {
     counter = kTextXmlFeatures[same_origin];
-  } else if (mime_type.StartsWithIgnoringCase("text/json") ||
-             mime_type.StartsWithIgnoringCase("application/json")) {
+  } else if (mime_type.StartsWithIgnoringAsciiCase("text/json") ||
+             mime_type.StartsWithIgnoringAsciiCase("application/json")) {
     counter = kJsonFeatures[same_origin];
   } else {
     counter = kUnknownFeatures[same_origin];
@@ -157,10 +159,13 @@ bool AllowedByNosniff::MimeTypeAsScript(UseCounter& use_counter,
                                         const ResourceResponse& response,
                                         MimeTypeCheck mime_type_check_mode) {
   // The content type is really only meaningful for `http:`-family schemes.
-  if (!response.CurrentRequestUrl().ProtocolIsInHTTPFamily() &&
-      (response.CurrentRequestUrl().LastPathComponent().EndsWith(".js") ||
-       response.CurrentRequestUrl().LastPathComponent().EndsWith(".mjs"))) {
-    return true;
+  if (!response.CurrentRequestUrl().ProtocolIsInHttpFamily()) {
+    StringView last_path_component =
+        response.CurrentRequestUrl().LastPathComponent();
+    if (last_path_component.ends_with(".js") ||
+        last_path_component.ends_with(".mjs")) {
+      return true;
+    }
   }
 
   // Exclude `data:`, `blob:` and `filesystem:` URLs from MIME checks.
@@ -179,10 +184,11 @@ bool AllowedByNosniff::MimeTypeAsScript(UseCounter& use_counter,
     console_logger->AddConsoleMessage(
         mojom::ConsoleMessageSource::kSecurity,
         mojom::ConsoleMessageLevel::kError,
-        "Refused to execute script from '" +
-            response.CurrentRequestUrl().ElidedString() +
-            "' because its MIME type ('" + mime_type +
-            "') is not executable, and strict MIME type checking is enabled.");
+        StrCat({"Refused to execute script from '",
+                response.CurrentRequestUrl().ElidedString(),
+                "' because its MIME type ('", mime_type,
+                "') is not executable, and strict MIME type checking is "
+                "enabled."}));
     return false;
   }
 
@@ -194,31 +200,31 @@ bool AllowedByNosniff::MimeTypeAsScript(UseCounter& use_counter,
 
   // For any MIME type, we can do three things: accept/reject it, print a
   // warning into the console, and count it using a use counter.
-  const WebFeature kWebFeatureNone = WebFeature::kNumberOfFeatures;
-  WebFeature counter = kWebFeatureNone;
+  std::optional<WebFeature> counter;
   bool allow = AllowMimeTypeAsScript(mime_type, same_origin,
                                      mime_type_check_mode, counter);
 
   // These record usages for two MIME types (without subtypes), per same/cross
   // origin.
-  if (mime_type.StartsWithIgnoringASCIICase("application/")) {
+  if (mime_type.StartsWithIgnoringAsciiCase("application/")) {
     use_counter.CountUse(kApplicationFeatures[same_origin]);
-  } else if (mime_type.StartsWithIgnoringASCIICase("text/")) {
+  } else if (mime_type.StartsWithIgnoringAsciiCase("text/")) {
     use_counter.CountUse(kTextFeatures[same_origin]);
   }
 
   // The code above has made a decision and handed down the result in accept
   // and counter.
-  if (counter != kWebFeatureNone) {
-    use_counter.CountUse(counter);
+  if (counter.has_value()) {
+    use_counter.CountUse(*counter);
   }
   if (!allow) {
     console_logger->AddConsoleMessage(
-        mojom::ConsoleMessageSource::kSecurity,
-        mojom::ConsoleMessageLevel::kError,
-        "Refused to execute script from '" +
-            response.CurrentRequestUrl().ElidedString() +
-            "' because its MIME type ('" + mime_type + "') is not executable.");
+        mojom::blink::ConsoleMessageSource::kSecurity,
+        mojom::blink::ConsoleMessageLevel::kError,
+        StrCat({"Refused to execute script from '",
+                response.CurrentRequestUrl().ElidedString(),
+                "' because its MIME type ('", mime_type,
+                "') is not executable."}));
   } else if (mime_type_check_mode == MimeTypeCheck::kLaxForWorker) {
     bool strict_allow = AllowMimeTypeAsScript(mime_type, same_origin,
                                               MimeTypeCheck::kStrict, counter);
@@ -226,6 +232,29 @@ bool AllowedByNosniff::MimeTypeAsScript(UseCounter& use_counter,
       use_counter.CountUse(WebFeature::kStrictMimeTypeChecksWouldBlockWorker);
   }
   return allow;
+}
+
+bool AllowedByNosniff::MimeTypeAsXMLExternalEntity(
+    ConsoleLogger* console_logger,
+    const ResourceResponse& response) {
+  if (ParseContentTypeOptionsHeader(response.HttpHeaderField(
+          http_names::kXContentTypeOptions)) != kContentTypeOptionsNosniff) {
+    return true;
+  }
+
+  if (MIMETypeRegistry::IsXMLExternalEntityMIMEType(
+          response.HttpContentType())) {
+    return true;
+  }
+
+  console_logger->AddConsoleMessage(
+      mojom::blink::ConsoleMessageSource::kSecurity,
+      mojom::blink::ConsoleMessageLevel::kError,
+      StrCat({"Refused to load XML external entity from '",
+              response.CurrentRequestUrl().ElidedString(),
+              "' because its MIME type ('", response.HttpContentType(),
+              "') is incorrect, and strict MIME type checking is enabled."}));
+  return false;
 }
 
 }  // namespace blink

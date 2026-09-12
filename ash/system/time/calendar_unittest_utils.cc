@@ -8,7 +8,7 @@
 
 #include "ash/ash_export.h"
 #include "base/environment.h"
-#include "base/i18n/time_formatting.h"
+#include "base/functional/callback_helpers.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "google_apis/calendar/calendar_api_response_types.h"
@@ -19,10 +19,8 @@ namespace calendar_test_utils {
 
 ScopedLibcTimeZone::ScopedLibcTimeZone(const std::string& timezone) {
   auto env = base::Environment::Create();
-  std::string old_timezone_value;
-  if (env->GetVar(kTimeZoneEnvVarName, &old_timezone_value)) {
-    old_timezone_ = old_timezone_value;
-  }
+  old_timezone_ = env->GetVar(kTimeZoneEnvVarName);
+
   if (!env->SetVar(kTimeZoneEnvVarName, timezone)) {
     success_ = false;
   }
@@ -38,6 +36,94 @@ ScopedLibcTimeZone::~ScopedLibcTimeZone() {
   }
 }
 
+CalendarListFetchWaiter::CalendarListFetchWaiter(
+    CalendarListModel* calendar_list_model) {
+  scoped_observation_.Observe(calendar_list_model);
+}
+
+CalendarListFetchWaiter::~CalendarListFetchWaiter() = default;
+
+void CalendarListFetchWaiter::Wait() {
+  if (complete_) {
+    return;
+  }
+  run_loop_.Run();
+}
+
+void CalendarListFetchWaiter::OnCalendarListFetchComplete() {
+  complete_ = true;
+  run_loop_.Quit();
+}
+
+CalendarEventsFetchWaiter::CalendarEventsFetchWaiter(
+    CalendarModel* calendar_model,
+    base::Time start_of_month)
+    : match_successful_month_(true), start_of_month_(start_of_month) {
+  scoped_observation_.Observe(calendar_model);
+}
+
+CalendarEventsFetchWaiter::CalendarEventsFetchWaiter(
+    CalendarModel* calendar_model,
+    base::RepeatingCallback<bool()> complete_predicate)
+    : complete_predicate_(std::move(complete_predicate)) {
+  scoped_observation_.Observe(calendar_model);
+}
+
+CalendarEventsFetchWaiter::~CalendarEventsFetchWaiter() = default;
+
+void CalendarEventsFetchWaiter::Wait() {
+  if (IsComplete()) {
+    return;
+  }
+  run_loop_.Run();
+}
+
+void CalendarEventsFetchWaiter::OnEventsFetched(
+    const CalendarModel::FetchingStatus status,
+    const base::Time start_time) {
+  if (match_successful_month_) {
+    complete_ =
+        status == CalendarModel::kSuccess && start_time == start_of_month_;
+  } else {
+    complete_ = complete_predicate_.Run();
+  }
+
+  if (complete_) {
+    run_loop_.Quit();
+  }
+}
+
+bool CalendarEventsFetchWaiter::IsComplete() {
+  return complete_ || (!match_successful_month_ && complete_predicate_.Run());
+}
+
+std::unique_ptr<google_apis::calendar::SingleCalendar> CreateCalendar(
+    const std::string& id,
+    const std::string& summary,
+    const std::string& color_id,
+    bool selected,
+    bool primary) {
+  auto calendar = std::make_unique<google_apis::calendar::SingleCalendar>();
+  calendar->set_id(id);
+  calendar->set_summary(summary);
+  calendar->set_color_id(color_id);
+  calendar->set_selected(selected);
+  calendar->set_primary(primary);
+  return calendar;
+}
+
+std::unique_ptr<google_apis::calendar::CalendarList> CreateMockCalendarList(
+    std::list<std::unique_ptr<google_apis::calendar::SingleCalendar>>
+        calendars) {
+  auto calendar_list = std::make_unique<google_apis::calendar::CalendarList>();
+
+  for (auto& calendar : calendars) {
+    calendar_list->InjectItemForTesting(std::move(calendar));
+  }
+
+  return calendar_list;
+}
+
 std::unique_ptr<google_apis::calendar::CalendarEvent> CreateEvent(
     const char* id,
     const char* summary,
@@ -46,8 +132,8 @@ std::unique_ptr<google_apis::calendar::CalendarEvent> CreateEvent(
     const google_apis::calendar::CalendarEvent::EventStatus event_status,
     const google_apis::calendar::CalendarEvent::ResponseStatus
         self_response_status,
-    const bool all_day_event,
-    const std::string hangout_link) {
+    bool all_day_event,
+    GURL video_conference_url) {
   auto event = std::make_unique<google_apis::calendar::CalendarEvent>();
   base::Time start_time_base, end_time_base;
   google_apis::calendar::DateTime start_time_date, end_time_date;
@@ -71,7 +157,7 @@ std::unique_ptr<google_apis::calendar::CalendarEvent> CreateEvent(
   event->set_status(event_status);
   event->set_self_response_status(self_response_status);
   event->set_all_day_event(all_day_event);
-  event->set_hangout_link(hangout_link);
+  event->set_conference_data_uri(video_conference_url);
   return event;
 }
 
@@ -83,8 +169,8 @@ std::unique_ptr<google_apis::calendar::CalendarEvent> CreateEvent(
     const google_apis::calendar::CalendarEvent::EventStatus event_status,
     const google_apis::calendar::CalendarEvent::ResponseStatus
         self_response_status,
-    const bool all_day_event,
-    const std::string hangout_link) {
+    bool all_day_event,
+    GURL video_conference_url) {
   auto event = std::make_unique<google_apis::calendar::CalendarEvent>();
   google_apis::calendar::DateTime start_time_date, end_time_date;
   event->set_id(id);
@@ -96,7 +182,7 @@ std::unique_ptr<google_apis::calendar::CalendarEvent> CreateEvent(
   event->set_status(event_status);
   event->set_self_response_status(self_response_status);
   event->set_all_day_event(all_day_event);
-  event->set_hangout_link(hangout_link);
+  event->set_conference_data_uri(video_conference_url);
   return event;
 }
 
@@ -111,10 +197,14 @@ std::unique_ptr<google_apis::calendar::EventList> CreateMockEventList(
   return event_list;
 }
 
-ASH_EXPORT bool IsTheSameMonth(const base::Time& date_a,
-                               const base::Time& date_b) {
-  return base::TimeFormatWithPattern(date_a, "MM YYYY") ==
-         base::TimeFormatWithPattern(date_b, "MM YYYY");
+ASH_EXPORT bool IsTheSameMonth(const base::Time date_a,
+                               const base::Time date_b) {
+  base::Time::Exploded exploded_a;
+  date_a.UTCExplode(&exploded_a);
+  base::Time::Exploded exploded_b;
+  date_b.UTCExplode(&exploded_b);
+  return exploded_a.year == exploded_b.year &&
+         exploded_a.month == exploded_b.month;
 }
 
 base::Time GetTimeFromString(const char* start_time) {
@@ -128,10 +218,24 @@ CalendarClientTestImpl::CalendarClientTestImpl() = default;
 
 CalendarClientTestImpl::~CalendarClientTestImpl() = default;
 
+bool CalendarClientTestImpl::IsDisabledByAdmin() const {
+  return is_disabled_by_admin_;
+}
+
+base::OnceClosure CalendarClientTestImpl::GetCalendarList(
+    google_apis::calendar::CalendarListCallback callback) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(std::move(callback), error_, std::move(calendars_)),
+      task_delay_);
+
+  return base::DoNothing();
+}
+
 base::OnceClosure CalendarClientTestImpl::GetEventList(
     google_apis::calendar::CalendarEventListCallback callback,
-    const base::Time& start_time,
-    const base::Time& end_time) {
+    const base::Time start_time,
+    const base::Time end_time) {
   // Give it a little bit of time to mock the api calling. This duration is a
   // little longer than the settle down duration, so in the test after the
   // animation settled down it can still be with `kFetching` status until
@@ -142,6 +246,25 @@ base::OnceClosure CalendarClientTestImpl::GetEventList(
       task_delay_);
 
   return base::DoNothing();
+}
+
+base::OnceClosure CalendarClientTestImpl::GetEventList(
+    google_apis::calendar::CalendarEventListCallback callback,
+    const base::Time start_time,
+    const base::Time end_time,
+    const std::string& calendar_id,
+    const std::string& calendar_color_id) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+      FROM_HERE,
+      base::BindOnce(std::move(callback), error_, std::move(events_)),
+      task_delay_);
+
+  return base::DoNothing();
+}
+
+void CalendarClientTestImpl::SetCalendarList(
+    std::unique_ptr<google_apis::calendar::CalendarList> calendars) {
+  calendars_ = std::move(calendars);
 }
 
 void CalendarClientTestImpl::SetEventList(

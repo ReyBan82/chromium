@@ -6,8 +6,9 @@
 #define CC_TEST_FAKE_LAYER_TREE_HOST_IMPL_H_
 
 #include "base/task/sequenced_task_runner.h"
-#include "cc/test/fake_layer_tree_host_impl_client.h"
+#include "cc/test/fake_layer_tree_host_impl_delegate.h"
 #include "cc/test/fake_rendering_stats_instrumentation.h"
+#include "cc/trees/client_layer_tree_host_impl.h"
 #include "cc/trees/layer_tree_host_impl.h"
 #include "cc/trees/single_thread_proxy.h"
 
@@ -20,7 +21,7 @@ class AnimationHost;
 // will use a Proxy or FakeLayerTreeHost::CreateFakeLayerTreeHostImpl if it
 // doesn't use a Proxy. These will ensure we're not accidentally creating
 // multiple HostImpls.
-class FakeLayerTreeHostImpl : public LayerTreeHostImpl {
+class FakeLayerTreeHostImpl : public ClientLayerTreeHostImpl {
  public:
   FakeLayerTreeHostImpl(TaskRunnerProvider* task_runner_provider,
                         TaskGraphRunner* task_graph_runner);
@@ -35,20 +36,25 @@ class FakeLayerTreeHostImpl : public LayerTreeHostImpl {
   ~FakeLayerTreeHostImpl() override;
 
   void ForcePrepareToDraw() {
-    LayerTreeHostImpl::FrameData frame_data;
+    FrameData frame_data;
     PrepareToDraw(&frame_data);
     DidDrawAllLayers(frame_data);
   }
 
   void CreatePendingTree() override;
+  void EnsureSyncTree();
 
-  void NotifyTileStateChanged(const Tile* tile) override;
+  void NotifyTileStateChanged(const Tile* tile,
+                              bool update_damage,
+                              bool set_needs_redraw) override;
   const viz::BeginFrameArgs& CurrentBeginFrameArgs() const override;
   void AdvanceToNextFrame(base::TimeDelta advance_by);
+  TargetColorParams GetTargetColorParams(
+      gfx::ContentColorUsage content_color_usage) const override;
 
-  using LayerTreeHostImpl::ActivateSyncTree;
-  using LayerTreeHostImpl::prepare_tiles_needed;
+  using ClientLayerTreeHostImpl::ActivateSyncTree;
   using LayerTreeHostImpl::is_likely_to_require_a_draw;
+  using LayerTreeHostImpl::prepare_tiles_needed;
   using LayerTreeHostImpl::RemoveRenderPasses;
 
   bool notify_tile_state_changed_called() const {
@@ -57,15 +63,20 @@ class FakeLayerTreeHostImpl : public LayerTreeHostImpl {
   void set_notify_tile_state_changed_called(bool called) {
     notify_tile_state_changed_called_ = called;
   }
+  void set_target_color_params(
+      std::optional<TargetColorParams> target_color_params) {
+    target_color_params_ = target_color_params;
+  }
 
   AnimationHost* animation_host() const;
 
-  FakeLayerTreeHostImplClient* client() { return &client_; }
+  FakeLayerTreeHostImplDelegate* delegate() { return &delegate_; }
 
  private:
-  FakeLayerTreeHostImplClient client_;
+  FakeLayerTreeHostImplDelegate delegate_;
   FakeRenderingStatsInstrumentation stats_instrumentation_;
   bool notify_tile_state_changed_called_;
+  std::optional<TargetColorParams> target_color_params_;
 };
 
 }  // namespace cc

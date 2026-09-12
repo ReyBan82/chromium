@@ -6,14 +6,15 @@
 
 #include <gtest/gtest.h>
 
+#include "base/containers/span.h"
 #include "base/feature_list.h"
 #include "base/run_loop.h"
 #include "base/test/metrics/histogram_tester.h"
 #include "base/test/scoped_feature_list.h"
+#include "base/test/test_future.h"
+#include "build/build_config.h"
 #include "components/shared_highlighting/core/common/shared_highlighting_features.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/blink/public/platform/scheduler/test/renderer_scheduler_test_support.h"
-#include "third_party/blink/public/platform/scheduler/web_thread_scheduler.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_font_face_descriptors.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_mouse_event_init.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_union_arraybuffer_arraybufferview_string.h"
@@ -23,12 +24,19 @@
 #include "third_party/blink/renderer/core/editing/markers/document_marker_controller.h"
 #include "third_party/blink/renderer/core/editing/selection_template.h"
 #include "third_party/blink/renderer/core/editing/visible_units.h"
+#include "third_party/blink/renderer/core/fragment_directive/fragment_directive.h"
+#include "third_party/blink/renderer/core/fragment_directive/text_directive.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/location.h"
+#include "third_party/blink/renderer/core/frame/visual_viewport.h"
 #include "third_party/blink/renderer/core/html/html_frame_owner_element.h"
+#include "third_party/blink/renderer/core/layout/layout_text.h"
 #include "third_party/blink/renderer/core/loader/document_loader.h"
 #include "third_party/blink/renderer/core/testing/sim/sim_request.h"
 #include "third_party/blink/renderer/core/testing/sim/sim_test.h"
+#include "third_party/blink/renderer/platform/scheduler/public/main_thread_scheduler.h"
+#include "third_party/blink/renderer/platform/scheduler/public/thread_scheduler.h"
 #include "third_party/blink/renderer/platform/testing/unit_test_helpers.h"
 
 namespace blink {
@@ -40,29 +48,23 @@ class TextFragmentHandlerTest : public SimTest {
   void SetUp() override {
     SimTest::SetUp();
     WebView().MainFrameViewWidget()->Resize(gfx::Size(800, 600));
-  }
-
-  void BeginEmptyFrame() {
-    // If a test case doesn't find a match and therefore doesn't schedule the
-    // beforematch event, we should still render a second frame as if we did
-    // schedule the event to retain test coverage.
-    // When the beforematch event is not scheduled, a DCHECK will fail on
-    // BeginFrame() because no event was scheduled, so we schedule an empty task
-    // here.
-    GetDocument().EnqueueAnimationFrameTask(WTF::BindOnce([]() {}));
-    Compositor().BeginFrame();
+    if (WebView().GetPage()) {
+      WebView()
+          .GetPage()
+          ->related_pages_mutation_from_previous_page_finalized_ = true;
+    }
   }
 
   void RunAsyncMatchingTasks() {
-    auto* scheduler =
-        blink::scheduler::WebThreadScheduler::MainThreadScheduler();
-    blink::scheduler::RunIdleTasksForTesting(scheduler, WTF::BindOnce([]() {}));
+    ThreadScheduler::Current()
+        ->ToMainThreadScheduler()
+        ->StartIdlePeriodForTesting();
     RunPendingTasks();
   }
 
   void SetSelection(const Position& start, const Position& end) {
     GetDocument().GetFrame()->Selection().SetSelection(
-        SelectionInDOMTree::Builder().SetBaseAndExtent(start, end).Build(),
+        SelectionInDomTree::Builder().SetBaseAndExtent(start, end).Build(),
         SetSelectionOptions());
   }
 
@@ -81,68 +83,88 @@ class TextFragmentHandlerTest : public SimTest {
   }
 
   String RequestSelector() {
-    bool callback_called = false;
-    String selector;
-    auto lambda =
-        [](bool& callback_called, String& selector,
-           const String& generated_selector,
-           shared_highlighting::LinkGenerationError error,
-           shared_highlighting::LinkGenerationReadyStatus ready_status) {
-          selector = generated_selector;
-          callback_called = true;
-        };
-    auto callback =
-        WTF::BindOnce(lambda, std::ref(callback_called), std::ref(selector));
-    GetTextFragmentHandler().RequestSelector(std::move(callback));
-    base::RunLoop().RunUntilIdle();
+    base::test::TestFuture<const String&,
+                           shared_highlighting::LinkGenerationError,
+                           shared_highlighting::LinkGenerationReadyStatus>
+        future;
+    GetTextFragmentHandler().RequestSelector(future.GetCallback());
+    return future.Get<0>();
+  }
 
-    EXPECT_TRUE(callback_called);
-    return selector;
+  String RequestSelectorForViewportCenter(LocalFrame* frame = nullptr) {
+    return RequestSelectorForViewportCenterFull(frame).selector;
+  }
+
+  String RequestSelectorForSelection(LocalFrame* frame = nullptr) {
+    return RequestSelectorForSelectionFull(frame).selector;
+  }
+
+  struct GenerationResult {
+    String selector;
+    shared_highlighting::LinkGenerationError error;
+    shared_highlighting::LinkGenerationReadyStatus ready_status;
+  };
+
+  GenerationResult RequestSelectorForViewportCenterFull(
+      LocalFrame* frame = nullptr) {
+    if (!frame) {
+      frame = GetDocument().GetFrame();
+    }
+    base::test::TestFuture<const String&,
+                           shared_highlighting::LinkGenerationError,
+                           shared_highlighting::LinkGenerationReadyStatus>
+        future;
+    GetTextFragmentHandler(frame).RequestSelectorForViewportCenter(
+        future.GetCallback());
+
+    GenerationResult result;
+    result.selector = future.Get<0>();
+    result.error = future.Get<1>();
+    result.ready_status = future.Get<2>();
+    return result;
+  }
+
+  GenerationResult RequestSelectorForSelectionFull(
+      LocalFrame* frame = nullptr) {
+    if (!frame) {
+      frame = GetDocument().GetFrame();
+    }
+    base::test::TestFuture<const String&,
+                           shared_highlighting::LinkGenerationError,
+                           shared_highlighting::LinkGenerationReadyStatus>
+        future;
+    GetTextFragmentHandler(frame).RequestSelectorForSelection(
+        future.GetCallback());
+
+    GenerationResult result;
+    result.selector = future.Get<0>();
+    result.error = future.Get<1>();
+    result.ready_status = future.Get<2>();
+    return result;
   }
 
   Vector<String> ExtractTextFragmentsMatches() {
-    bool callback_called = false;
-    Vector<String> target_texts;
-    auto lambda = [](bool& callback_called, Vector<String>& target_texts,
-                     const Vector<String>& fetched_target_texts) {
-      target_texts = fetched_target_texts;
-      callback_called = true;
-    };
-    auto callback = WTF::BindOnce(lambda, std::ref(callback_called),
-                                  std::ref(target_texts));
-
-    GetTextFragmentHandler().ExtractTextFragmentsMatches(std::move(callback));
-
-    EXPECT_TRUE(callback_called);
-    return target_texts;
+    base::test::TestFuture<const Vector<String>&> future;
+    GetTextFragmentHandler().ExtractTextFragmentsMatches(future.GetCallback());
+    return future.Get();
   }
 
   gfx::Rect ExtractFirstTextFragmentsRect() {
-    bool callback_called = false;
-    gfx::Rect text_fragment_rect;
-    auto lambda = [](bool& callback_called, gfx::Rect& text_fragment_rect,
-                     const gfx::Rect& fetched_text_fragment_rect) {
-      text_fragment_rect = fetched_text_fragment_rect;
-      callback_called = true;
-    };
-    auto callback = WTF::BindOnce(lambda, std::ref(callback_called),
-                                  std::ref(text_fragment_rect));
-
-    GetTextFragmentHandler().ExtractFirstFragmentRect(std::move(callback));
-
-    EXPECT_TRUE(callback_called);
-    return text_fragment_rect;
+    base::test::TestFuture<const gfx::Rect&> future;
+    GetTextFragmentHandler().ExtractFirstFragmentRect(future.GetCallback());
+    return future.Get();
   }
 
   void LoadAhem() {
-    scoped_refptr<SharedBuffer> shared_buffer =
+    std::optional<Vector<char>> data =
         test::ReadFromFile(test::CoreTestDataPath("Ahem.ttf"));
+    ASSERT_TRUE(data);
     auto* buffer =
         MakeGarbageCollected<V8UnionArrayBufferOrArrayBufferViewOrString>(
-            DOMArrayBuffer::Create(shared_buffer));
-    FontFace* ahem =
-        FontFace::Create(GetDocument().GetExecutionContext(), "Ahem", buffer,
-                         FontFaceDescriptors::Create());
+            DOMArrayBuffer::Create(base::as_byte_span(*data)));
+    FontFace* ahem = FontFace::Create(GetDocument().GetExecutionContext(),
+                                      AtomicString("Ahem"), buffer,
+                                      FontFaceDescriptors::Create());
 
     ScriptState* script_state =
         ToScriptStateForMainWorld(GetDocument().GetFrame());
@@ -151,10 +173,14 @@ class TextFragmentHandlerTest : public SimTest {
         ->addForBinding(script_state, ahem, exception_state);
   }
 
-  TextFragmentHandler& GetTextFragmentHandler() {
-    if (!GetDocument().GetFrame()->GetTextFragmentHandler())
-      GetDocument().GetFrame()->CreateTextFragmentHandler();
-    return *GetDocument().GetFrame()->GetTextFragmentHandler();
+  TextFragmentHandler& GetTextFragmentHandler(LocalFrame* frame = nullptr) {
+    if (!frame) {
+      frame = GetDocument().GetFrame();
+    }
+    if (!frame->GetTextFragmentHandler()) {
+      frame->CreateTextFragmentHandler();
+    }
+    return *frame->GetTextFragmentHandler();
   }
 
   bool HasTextFragmentHandler(LocalFrame* frame) {
@@ -195,7 +221,6 @@ TEST_F(TextFragmentHandlerTest, RemoveTextFragments) {
   RunAsyncMatchingTasks();
 
   // Render two frames to handle the async step added by the beforematch event.
-  Compositor().BeginFrame();
   Compositor().BeginFrame();
 
   EXPECT_EQ(2u, GetDocument().Markers().Markers().size());
@@ -360,6 +385,7 @@ TEST_F(TextFragmentHandlerTest, ExtractFirstTextFragmentRect) {
   LoadURL(
       "https://example.com/"
       "test.html#:~:text=This,page");
+  LoadAhem();
   request.Complete(R"HTML(
     <!DOCTYPE html>
     <meta name="viewport" content="width=device-width">
@@ -368,13 +394,13 @@ TEST_F(TextFragmentHandlerTest, ExtractFirstTextFragmentRect) {
     <p id="second">with some more text</p>
   )HTML");
   RunAsyncMatchingTasks();
-  LoadAhem();
 
   Compositor().BeginFrame();
 
   EXPECT_EQ(1u, GetDocument().Markers().Markers().size());
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& start = Position(first_paragraph, 0);
   const auto& end = Position(first_paragraph, 19);
   ASSERT_EQ("This is a test page", PlainText(EphemeralRange(start, end)));
@@ -401,6 +427,7 @@ TEST_F(TextFragmentHandlerTest, ExtractFirstTextFragmentRectScroll) {
   SimRequest request("https://example.com/test.html#:~:text=test,page",
                      "text/html");
   LoadURL("https://example.com/test.html#:~:text=test,page");
+  LoadAhem();
   request.Complete(R"HTML(
     <!DOCTYPE html>
     <meta name="viewport" content="initial-scale=4">
@@ -417,26 +444,25 @@ TEST_F(TextFragmentHandlerTest, ExtractFirstTextFragmentRectScroll) {
     <p id="first">This is a test page</p>
   )HTML");
   RunAsyncMatchingTasks();
-  LoadAhem();
 
   Compositor().BeginFrame();
 
   EXPECT_EQ(1u, GetDocument().Markers().Markers().size());
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& start = Position(first_paragraph, 10);
   const auto& end = Position(first_paragraph, 19);
   ASSERT_EQ("test page", PlainText(EphemeralRange(start, end)));
-  gfx::Rect rect(ComputeTextRect(EphemeralRange(start, end)));
-  gfx::Rect expected_rect =
-      GetDocument().GetFrame()->View()->FrameToViewport(rect);
   // ExtractFirstTextFragmentsRect should return the first matched scaled
-  // viewport relative location since the page is loaded zoomed in 4X
-  ASSERT_EQ(gfx::Rect(432, 300, 360, 40), expected_rect);
-
+  // viewport relative location since the page is loaded zoomed in 4X.
   gfx::Rect text_fragment_rect = ExtractFirstTextFragmentsRect();
 
-  EXPECT_EQ(expected_rect, text_fragment_rect);
+  if (RuntimeEnabledFeatures::FractionalScrollOffsetsEnabled()) {
+    EXPECT_EQ(gfx::Rect(432, 298, 360, 40), text_fragment_rect);
+  } else {
+    EXPECT_EQ(gfx::Rect(432, 296, 360, 40), text_fragment_rect);
+  }
 }
 
 TEST_F(TextFragmentHandlerTest, ExtractFirstTextFragmentRectMultipleHighlight) {
@@ -447,6 +473,7 @@ TEST_F(TextFragmentHandlerTest, ExtractFirstTextFragmentRectMultipleHighlight) {
   LoadURL(
       "https://example.com/"
       "test.html#:~:text=test%20page&text=more%20text");
+  LoadAhem();
   request.Complete(R"HTML(
     <!DOCTYPE html>
     <meta name="viewport" content="width=device-width">
@@ -466,13 +493,13 @@ TEST_F(TextFragmentHandlerTest, ExtractFirstTextFragmentRectMultipleHighlight) {
     <p id="second">With some more text</p>
   )HTML");
   RunAsyncMatchingTasks();
-  LoadAhem();
 
   Compositor().BeginFrame();
 
   EXPECT_EQ(2u, GetDocument().Markers().Markers().size());
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& start = Position(first_paragraph, 10);
   const auto& end = Position(first_paragraph, 19);
   ASSERT_EQ("test page", PlainText(EphemeralRange(start, end)));
@@ -497,6 +524,7 @@ TEST_F(TextFragmentHandlerTest,
   LoadURL(
       "https://example.com/"
       "test.html#:~:text=fake&text=test%20page");
+  LoadAhem();
   request.Complete(R"HTML(
     <!DOCTYPE html>
     <meta name="viewport" content="width=device-width">
@@ -515,13 +543,13 @@ TEST_F(TextFragmentHandlerTest,
     <p id="first">This is a test page</p>
   )HTML");
   RunAsyncMatchingTasks();
-  LoadAhem();
 
   Compositor().BeginFrame();
 
   EXPECT_EQ(1u, GetDocument().Markers().Markers().size());
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& start = Position(first_paragraph, 10);
   const auto& end = Position(first_paragraph, 19);
   ASSERT_EQ("test page", PlainText(EphemeralRange(start, end)));
@@ -545,6 +573,7 @@ TEST_F(TextFragmentHandlerTest, RejectExtractFirstTextFragmentRect) {
   LoadURL(
       "https://example.com/"
       "test.html#:~:text=not%20on%20the%20page");
+  LoadAhem();
   request.Complete(R"HTML(
     <!DOCTYPE html>
     <meta name="viewport" content="width=device-width">
@@ -564,7 +593,6 @@ TEST_F(TextFragmentHandlerTest, RejectExtractFirstTextFragmentRect) {
     <p id="second">With some more text</p>
   )HTML");
   RunAsyncMatchingTasks();
-  LoadAhem();
 
   Compositor().BeginFrame();
 
@@ -584,7 +612,8 @@ TEST_F(TextFragmentHandlerTest, CheckPreemptiveGeneration) {
     <p id='first'>First paragraph</p>
     )HTML");
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& selected_start = Position(first_paragraph, 0);
   const auto& selected_end = Position(first_paragraph, 5);
   ASSERT_EQ("First", PlainText(EphemeralRange(selected_start, selected_end)));
@@ -607,7 +636,8 @@ TEST_F(TextFragmentHandlerTest, CheckNoPreemptiveGenerationBlocklist) {
     <p id='first'>First paragraph</p>
     )HTML");
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& selected_start = Position(first_paragraph, 0);
   const auto& selected_end = Position(first_paragraph, 5);
   ASSERT_EQ("First", PlainText(EphemeralRange(selected_start, selected_end)));
@@ -630,9 +660,9 @@ TEST_F(TextFragmentHandlerTest, CheckNoPreemptiveGenerationEditable) {
     <input type="text" id="input" value="default text in input">
     )HTML");
 
-  Node* input_text =
-      FlatTreeTraversal::Next(*GetDocument().getElementById("input"))
-          ->firstChild();
+  Node* input_text = FlatTreeTraversal::Next(
+                         *GetDocument().getElementById(AtomicString("input")))
+                         ->firstChild();
   const auto& selected_start = Position(input_text, 0);
   const auto& selected_end = Position(input_text, 12);
   ASSERT_EQ("default text",
@@ -658,15 +688,15 @@ TEST_F(TextFragmentHandlerTest, SecondGenerationCrash) {
   <p id='p'>First paragraph text</p>
   )HTML");
   GetDocument().UpdateStyleAndLayoutTree();
-  Node* p = GetDocument().getElementById("p");
+  Node* p = GetDocument().getElementById(AtomicString("p"));
   const auto& start = Position(p->lastChild(), 0);
   const auto& end = Position(p->lastChild(), 15);
   ASSERT_EQ("First paragraph", PlainText(EphemeralRange(start, end)));
   SetSelection(start, end);
 
   auto callback =
-      WTF::BindOnce([](const TextFragmentSelector& selector,
-                       shared_highlighting::LinkGenerationError error) {});
+      BindOnce([](const TextFragmentSelector& selector,
+                  shared_highlighting::LinkGenerationError error) {});
   MakeGarbageCollected<TextFragmentSelectorGenerator>(GetDocument().GetFrame())
       ->SetCallbackForTesting(std::move(callback));
 
@@ -688,7 +718,8 @@ TEST_F(TextFragmentHandlerTest, CheckMetrics_Success) {
     <p id='first'>First paragraph text that is longer than 20 chars</p>
     <p id='second'>Second paragraph text</p>
   )HTML");
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& selected_start = Position(first_paragraph, 0);
   const auto& selected_end = Position(first_paragraph, 28);
   ASSERT_EQ("First paragraph text that is",
@@ -711,7 +742,8 @@ TEST_F(TextFragmentHandlerTest, CheckMetrics_Failure) {
     <p id='second'>Second paragraph prefix one two three four five six seven
      eight nine ten to not unique snippet of text followed by suffix</p>
   )HTML");
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& selected_start = Position(first_paragraph, 80);
   const auto& selected_end = Position(first_paragraph, 106);
   ASSERT_EQ("not unique snippet of text",
@@ -722,9 +754,6 @@ TEST_F(TextFragmentHandlerTest, CheckMetrics_Failure) {
 
 TEST_F(TextFragmentHandlerTest,
        ShouldCreateTextFragmentHandlerAndRemoveHighlightForIframes) {
-  base::test::ScopedFeatureList feature_list_;
-  feature_list_.InitAndEnableFeature(
-      shared_highlighting::kSharedHighlightingAmp);
   SimRequest main_request("https://example.com/test.html", "text/html");
   SimRequest child_request("https://example.com/child.html", "text/html");
   LoadURL("https://example.com/test.html");
@@ -749,11 +778,9 @@ TEST_F(TextFragmentHandlerTest,
   )HTML");
   RunAsyncMatchingTasks();
 
-  // Render two frames to handle the async step added by the beforematch event.
   Compositor().BeginFrame();
-  BeginEmptyFrame();
 
-  Element* iframe = GetDocument().getElementById("iframe");
+  Element* iframe = GetDocument().getElementById(AtomicString("iframe"));
   auto* child_frame =
       To<LocalFrame>(To<HTMLFrameOwnerElement>(iframe)->ContentFrame());
 
@@ -790,7 +817,6 @@ TEST_F(TextFragmentHandlerTest, NonMatchingTextDirectiveCreatesHandler) {
   SetLocationHash(GetDocument(), ":~:text=non%20existent%20text");
 
   Compositor().BeginFrame();
-  BeginEmptyFrame();
   RunAsyncMatchingTasks();
 
   ASSERT_EQ(0u, GetDocument().Markers().Markers().size());
@@ -887,7 +913,8 @@ TEST_F(TextFragmentHandlerTest,
     <p id='second'>Second paragraph text</p>
   )HTML");
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& selected_start = Position(first_paragraph, 0);
   const auto& selected_end = Position(first_paragraph, 28);
   ASSERT_EQ("First paragraph text that is",
@@ -917,7 +944,7 @@ TEST_F(TextFragmentHandlerTest,
         callback_called = true;
       };
   auto callback =
-      WTF::BindOnce(lambda, std::ref(callback_called), std::ref(selector));
+      BindOnce(lambda, std::ref(callback_called), std::ref(selector));
   remote->RequestSelector(std::move(callback));
   base::RunLoop().RunUntilIdle();
   EXPECT_TRUE(callback_called);
@@ -959,9 +986,8 @@ TEST_F(TextFragmentHandlerTest,
 
   // Render two frames to handle the async step added by the beforematch event.
   Compositor().BeginFrame();
-  BeginEmptyFrame();
 
-  Element* iframe = GetDocument().getElementById("iframe");
+  Element* iframe = GetDocument().getElementById(AtomicString("iframe"));
   auto* child_frame =
       To<LocalFrame>(To<HTMLFrameOwnerElement>(iframe)->ContentFrame());
   auto* main_frame = GetDocument().GetFrame();
@@ -1006,6 +1032,9 @@ TEST_F(TextFragmentHandlerTest,
 // crbug.com/1266937 Even if |TextFragmentSelectorGenerator| gets reset between
 // generation completion and selector request we should record the correct error
 // code.
+// TODO(https://crbug.com/338340754): It's not clear how useful this behavior is
+// and it prevents us from clearing the TextFragmentHandler and
+// TextFragmentSelectorGenerator entirely between navigations.
 TEST_F(TextFragmentHandlerTest, IfGeneratorResetShouldRecordCorrectError) {
   SimRequest request("https://example.com/test.html", "text/html");
   LoadURL("https://example.com/test.html");
@@ -1016,7 +1045,8 @@ TEST_F(TextFragmentHandlerTest, IfGeneratorResetShouldRecordCorrectError) {
     <p id='second'>Second paragraph text</p>
   )HTML");
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& selected_start = Position(first_paragraph, 5);
   const auto& selected_end = Position(first_paragraph, 6);
   ASSERT_EQ(" ", PlainText(EphemeralRange(selected_start, selected_end)));
@@ -1046,7 +1076,8 @@ TEST_F(TextFragmentHandlerTest, NotGenerated) {
     <p id='second'>Second paragraph text</p>
   )HTML");
 
-  Node* first_paragraph = GetDocument().getElementById("first")->firstChild();
+  Node* first_paragraph =
+      GetDocument().getElementById(AtomicString("first"))->firstChild();
   const auto& selected_start = Position(first_paragraph, 5);
   const auto& selected_end = Position(first_paragraph, 6);
   ASSERT_EQ(" ", PlainText(EphemeralRange(selected_start, selected_end)));
@@ -1058,4 +1089,486 @@ TEST_F(TextFragmentHandlerTest, NotGenerated) {
       shared_highlighting::LinkGenerationError::kNotGenerated;
   EXPECT_EQ(expected_error, GetTextFragmentHandler().error_);
 }
+
+// https://crbug.com/447973114
+TEST_F(TextFragmentHandlerTest, NotGeneratedWithFileInput) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <input type="file">
+  )HTML");
+  GetDocument().GetFrame()->Selection().SelectAll();
+  // This shouldn't crash.
+  TextFragmentHandler::OpenedContextMenuOverSelection(GetDocument().GetFrame());
+
+  EXPECT_EQ(RequestSelector(), "");
+
+  shared_highlighting::LinkGenerationError expected_error =
+      shared_highlighting::LinkGenerationError::kNotGenerated;
+  EXPECT_EQ(expected_error, GetTextFragmentHandler().error_);
+}
+
+TEST_F(TextFragmentHandlerTest, InvalidateOverflowOnRemoval) {
+  SimRequest request(
+      "https://example.com/"
+      "test.html#:~:text=test%20page",
+      "text/html");
+  LoadURL(
+      "https://example.com/"
+      "test.html#:~:text=test%20page");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body {
+        height: 2200px;
+      }
+      #first {
+        position: absolute;
+        top: 1000px;
+      }
+      ::target-text {
+        text-decoration: wavy underline overline green 5px;
+        text-underline-offset: 20px;
+        background-color: transparent;
+      }
+    </style>
+    <p id="first">This is a test page</p>
+  )HTML");
+  RunAsyncMatchingTasks();
+
+  Compositor().BeginFrame();
+
+  EXPECT_EQ(1u, GetDocument().Markers().Markers().size());
+  Text* first_paragraph = To<Text>(
+      GetDocument().getElementById(AtomicString("first"))->firstChild());
+  LayoutText* layout_text = first_paragraph->GetLayoutObject();
+  PhysicalRect marker_rect = layout_text->VisualOverflowRect();
+
+  GetTextFragmentHandler().RemoveFragments();
+  Compositor().BeginFrame();
+
+  EXPECT_EQ(0u, GetDocument().Markers().Markers().size());
+  PhysicalRect removed_rect = layout_text->VisualOverflowRect();
+
+  // Platforms differ in exact sizes, but the relative sizes are sufficient
+  // for testing.
+  EXPECT_EQ(removed_rect.X(), marker_rect.X());
+  EXPECT_GT(removed_rect.Y(), marker_rect.Y());
+  EXPECT_EQ(removed_rect.Width(), marker_rect.Width());
+  EXPECT_GT(marker_rect.Height(), removed_rect.Height());
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForViewportCenter) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      p {
+        margin: 0;
+        padding: 0;
+        font-size: 120px;
+        line-height: 1;
+      }
+    </style>
+    <p>Block 1</p>
+    <p>Block 2</p>
+    <p>Block 3</p>
+    <p>Block 4</p>
+    <p>Block 5</p>
+    <p>Block 6</p>
+  )HTML");
+  Compositor().BeginFrame();
+
+  String selector = RequestSelectorForViewportCenter();
+  // The selector is chosen at ~1/3 of the viewport height (210px), which hits
+  // "Block 2".
+  EXPECT_EQ("Block-,2,-Block%203", selector);
+}
+
+// Verifies that selector generation ignores an existing selection on the page
+// and generates a selector for the reading position (~1/3 of viewport height).
+TEST_F(TextFragmentHandlerTest,
+       RequestSelectorForViewportCenterIgnoresSelection) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      p {
+        margin: 0;
+        padding: 0;
+        font-size: 120px;
+        line-height: 1;
+      }
+    </style>
+    <p>Block 1</p>
+    <p>Block 2</p>
+    <p>Block 3</p>
+    <p>Block 4</p>
+  )HTML");
+  Compositor().BeginFrame();
+
+  // Select "Block 1"
+  Node* text_node =
+      GetDocument().QuerySelector(AtomicString("p"))->firstChild();
+  GetDocument().GetFrame()->Selection().SetSelection(
+      SelectionInDomTree::Builder()
+          .Collapse(Position(text_node, 0))
+          .Extend(Position(text_node, 7))
+          .Build(),
+      SetSelectionOptions());
+
+  String selector = RequestSelectorForViewportCenter();
+  // The selector is chosen at ~1/3 of the viewport height (210px), which hits
+  // "Block 2".
+  EXPECT_EQ("Block-,2,-Block%203", selector);
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForViewportCenterEmptyDocument) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <body></body>
+  )HTML");
+  Compositor().BeginFrame();
+
+  GenerationResult result = RequestSelectorForViewportCenterFull();
+  EXPECT_TRUE(result.selector.empty());
+  EXPECT_EQ(shared_highlighting::LinkGenerationError::kEmptySelection,
+            result.error);
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForSelection) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      p {
+        margin: 0;
+        padding: 0;
+        font-size: 120px;
+        line-height: 1;
+      }
+    </style>
+    <p>Block 1</p>
+    <p>Block 2</p>
+    <p>Block 3</p>
+    <p>Block 4</p>
+  )HTML");
+  Compositor().BeginFrame();
+
+  Node* text_node =
+      GetDocument().QuerySelector(AtomicString("p"))->firstChild();
+  GetDocument().GetFrame()->Selection().SetSelection(
+      SelectionInDomTree::Builder()
+          .Collapse(Position(text_node, 0))
+          .Extend(Position(text_node, 7))
+          .Build(),
+      SetSelectionOptions());
+
+  String selector = RequestSelectorForSelection();
+  EXPECT_EQ("Block%201,-Block%202", selector);
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForSelectionEmptyDocument) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <body></body>
+  )HTML");
+  Compositor().BeginFrame();
+
+  GenerationResult result = RequestSelectorForSelectionFull();
+  EXPECT_TRUE(result.selector.empty());
+  EXPECT_EQ(shared_highlighting::LinkGenerationError::kEmptySelection,
+            result.error);
+}
+
+TEST_F(TextFragmentHandlerTest,
+       RequestSelectorForSelectionResolvesPreviousCallback) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      p {
+        margin: 0;
+        padding: 0;
+        font-size: 120px;
+        line-height: 1;
+      }
+    </style>
+    <p>This is a long enough block of text to be async</p>
+  )HTML");
+  Compositor().BeginFrame();
+
+  Node* text_node =
+      GetDocument().QuerySelector(AtomicString("p"))->firstChild();
+  GetDocument().GetFrame()->Selection().SetSelection(
+      SelectionInDomTree::Builder()
+          .Collapse(Position(text_node, 0))
+          .Extend(Position(text_node, 47))
+          .Build(),
+      SetSelectionOptions());
+
+  base::test::TestFuture<const String&,
+                         shared_highlighting::LinkGenerationError,
+                         shared_highlighting::LinkGenerationReadyStatus>
+      future1;
+  GetTextFragmentHandler().RequestSelectorForSelection(future1.GetCallback());
+
+  base::test::TestFuture<const String&,
+                         shared_highlighting::LinkGenerationError,
+                         shared_highlighting::LinkGenerationReadyStatus>
+      future2;
+  GetTextFragmentHandler().RequestSelectorForSelection(future2.GetCallback());
+
+  // The first callback should be rejected because a new request was made.
+  EXPECT_TRUE(future1.Get<0>().empty());
+  EXPECT_EQ(shared_highlighting::LinkGenerationError::kNotGenerated,
+            future1.Get<1>());
+
+  // The second callback should succeed.
+  EXPECT_EQ(
+      "This%20is%20a%20long%20enough%20block%20of%20text%20to%20be%20async",
+      future2.Get<0>());
+  EXPECT_EQ(shared_highlighting::LinkGenerationError::kNone, future2.Get<1>());
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForViewportCenterNonText) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body { margin: 0; }
+      div { width: 800px; height: 600px; background: blue; }
+    </style>
+    <div></div>
+  )HTML");
+  Compositor().BeginFrame();
+
+  GenerationResult result = RequestSelectorForViewportCenterFull();
+  EXPECT_TRUE(result.selector.empty());
+  EXPECT_EQ(shared_highlighting::LinkGenerationError::kEmptySelection,
+            result.error);
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForViewportCenterLargeImage) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body { margin: 0; }
+      img { width: 800px; height: 600px; }
+    </style>
+    <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==">
+  )HTML");
+  Compositor().BeginFrame();
+
+  GenerationResult result = RequestSelectorForViewportCenterFull();
+  EXPECT_TRUE(result.selector.empty());
+  EXPECT_EQ(shared_highlighting::LinkGenerationError::kEmptySelection,
+            result.error);
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForViewportCenterWithPinchZoom) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      p {
+        margin: 0;
+        padding: 0;
+        font-size: 120px;
+        line-height: 1;
+      }
+    </style>
+    <p>Block 1</p>
+    <p>Block 2</p>
+    <p>Block 3</p>
+    <p>Block 4</p>
+    <p>Block 5</p>
+    <p>Block 6</p>
+  )HTML");
+  Compositor().BeginFrame();
+
+  // Zoom in by 2x.
+  WebView().SetPageScaleFactor(2.0);
+  // Scroll visual viewport to (0, 240) in root frame coordinates.
+  // This means the visual viewport center (in root frame) will be (200, 150 +
+  // 240) = (200, 390). Hits "Block 4".
+  GetDocument().GetPage()->GetVisualViewport().SetLocation(gfx::PointF(0, 240));
+  Compositor().BeginFrame();
+
+  String selector = RequestSelectorForViewportCenter();
+  EXPECT_EQ("Block%203-,Block,-4", selector);
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForViewportCenterWithDPR) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+      }
+      p {
+        margin: 0;
+        padding: 0;
+        font-size: 120px;
+        line-height: 1;
+      }
+    </style>
+    <p>Block 1</p>
+    <p>Block 2</p>
+    <p>Block 3</p>
+    <p>Block 4</p>
+  )HTML");
+  Compositor().BeginFrame();
+
+  // Change device pixel ratio. This shouldn't affect the selector.
+  WebView().MainFrameViewWidget()->SetDeviceScaleFactorForTesting(2.0);
+  Compositor().BeginFrame();
+
+  String selector = RequestSelectorForViewportCenter();
+  // The selector is chosen at ~1/3 of the viewport height (210px), which hits
+  // "Block 2".
+  EXPECT_EQ("Block-,2,-Block%203", selector);
+}
+
+TEST_F(TextFragmentHandlerTest, RequestSelectorForViewportCenterInSubframe) {
+  SimRequest main_request("https://example.com/main.html", "text/html");
+  SimRequest child_request("https://example.com/child.html", "text/html");
+  LoadURL("https://example.com/main.html");
+  main_request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      body { margin: 0; }
+      iframe { width: 800px; height: 600px; border: none; }
+    </style>
+    <iframe id="iframe" src="child.html"></iframe>
+  )HTML");
+  child_request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <style>
+      p { margin: 0; font-size: 120px; }
+    </style>
+    <p>Subframe block</p>
+  )HTML");
+  RunAsyncMatchingTasks();
+  Compositor().BeginFrame();
+
+  // Center of main frame hits the iframe.
+  GenerationResult result = RequestSelectorForViewportCenterFull();
+  EXPECT_TRUE(result.selector.empty());
+  EXPECT_EQ(shared_highlighting::LinkGenerationError::kEmptySelection,
+            result.error);
+
+  // But calling it on the child frame should work.
+  Element* iframe = GetDocument().getElementById(AtomicString("iframe"));
+  LocalFrame* child_frame =
+      To<LocalFrame>(To<HTMLFrameOwnerElement>(iframe)->ContentFrame());
+
+  String child_selector = RequestSelectorForViewportCenter(child_frame);
+  EXPECT_EQ("Subframe-,block", child_selector);
+}
+
+TEST_F(TextFragmentHandlerTest, ScrollDirectiveParsing) {
+  SimRequest request("https://example.com/test.html", "text/html");
+  LoadURL("https://example.com/test.html");
+
+  // Set the text fragment to scroll to on the DocumentLoader.
+  GetDocument().Loader()->SetInternalScrollToTextFragment("test%20page");
+
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <p>This is a test page</p>
+  )HTML");
+  RunAsyncMatchingTasks();
+
+  Compositor().BeginFrame();
+
+  // Scroll directives use kScrollOnly annotation type, which
+  // does NOT add markers.
+  EXPECT_EQ(0u, GetDocument().Markers().Markers().size());
+
+  // And it should NOT apply :target to the common ancestor.
+  EXPECT_EQ(nullptr, GetDocument().CssTarget());
+
+  // However, it should still result in a match internally.
+  const auto& directives = GetDocument().fragmentDirective().items();
+  EXPECT_EQ(0u, directives.size());  // It's no longer added to the JS
+                                     // fragmentDirective items.
+
+  // Verify that the scroll directive is NOT returned by GetExistingSelectors.
+  bool callback_called = false;
+  GetDocument().GetFrame()->GetTextFragmentHandler()->GetExistingSelectors(
+      base::BindOnce(
+          [](bool* callback_called, const Vector<String>& selectors) {
+            *callback_called = true;
+            EXPECT_EQ(0u, selectors.size());
+          },
+          base::Unretained(&callback_called)));
+  EXPECT_TRUE(callback_called);
+}
+
+TEST_F(TextFragmentHandlerTest, GetExistingSelectorsMixedDirectives) {
+  SimRequest request(
+      "https://example.com/"
+      "test.html#:~:text=test",
+      "text/html");
+  LoadURL(
+      "https://example.com/"
+      "test.html#:~:text=test");
+
+  // Set the text fragment to scroll to on the DocumentLoader.
+  GetDocument().Loader()->SetInternalScrollToTextFragment("page");
+
+  request.Complete(R"HTML(
+    <!DOCTYPE html>
+    <p>This is a test page</p>
+  )HTML");
+  RunAsyncMatchingTasks();
+
+  Compositor().BeginFrame();
+
+  // Only the text directive should be returned.
+  bool callback_called = false;
+  GetDocument().GetFrame()->GetTextFragmentHandler()->GetExistingSelectors(
+      base::BindOnce(
+          [](bool* callback_called, const Vector<String>& selectors) {
+            *callback_called = true;
+            ASSERT_EQ(1u, selectors.size());
+            EXPECT_EQ("test", selectors[0]);
+          },
+          base::Unretained(&callback_called)));
+  EXPECT_TRUE(callback_called);
+}
+
 }  // namespace blink

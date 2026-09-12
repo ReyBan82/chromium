@@ -13,8 +13,9 @@ var nativeDeepCopy = requireNative('utils').deepCopy;
  */
 function forEach(obj, f, self) {
   for (var key in obj) {
-    if ($Object.hasOwnProperty(obj, key))
+    if ($Object.hasOwnProperty(obj, key)) {
       $Function.call(f, self, key, obj[key]);
+    }
   }
 }
 
@@ -117,6 +118,14 @@ function expose(publicClass, privateClass, exposed) {
     __proto__: null,
     constructor: publicClass,
   };
+
+  $Object.defineProperty(publicClassPrototype, $Symbol.toStringTag, {
+    __proto__: null,
+    configurable: true,
+    enumerable: false,
+    value: publicClass.name,
+    writable: false,
+  });
 
   if ('functions' in exposed) {
     $Array.forEach(exposed.functions, function(func) {

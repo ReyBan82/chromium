@@ -4,6 +4,7 @@
 
 #include "chromecast/base/chromecast_switches.h"
 
+#include "base/check_op.h"
 #include "base/command_line.h"
 #include "base/logging.h"
 #include "base/strings/string_number_conversions.h"
@@ -21,8 +22,18 @@ const char kSwitchValueFalse[] = "false";
 // Default is "https://clients2.google.com/cr/staging_report" for non prod.
 const char kCrashServerUrl[] = "crash-server-url";
 
+// Switch to enable daemon-mode in crash_uploader.
+const char kCrashUploaderDaemon[] = "daemon";
+
+// Switch to specify product name used when crash_uploader uploads crash report.
+// Default to "Eureka" if not specified.
+const char kCrashReportProductName[] = "product-name";
+
 // Switch to disable Crash reporting
 const char kDisableCrashReporter[] = "disable-crash-reporter";
+
+// Switch to disable Crashpad forwarding
+const char kDisableCrashpadForwarding[] = "disable-crashpad-forwarding";
 
 // Switch to dumpstate binary path.
 const char kDumpstateBinPath[] = "dumpstate-path";
@@ -156,9 +167,6 @@ const char kDesktopWindow1080p[] = "desktop-window-1080p";
 const char kForceMediaResolutionHeight[] = "force-media-resolution-height";
 const char kForceMediaResolutionWidth[] = "force-media-resolution-width";
 
-// Enables input event handling by the window manager.
-const char kEnableInput[] = "enable-input";
-
 // Background color used when Chromium hasn't rendered anything yet.
 const char kCastAppBackgroundColor[] = "cast-app-background-color";
 
@@ -207,6 +215,17 @@ extern const char kCastMemoryPressureModerateFraction[] =
 // of the media service.
 const char kDisableMojoRenderer[] = "disable-mojo-renderer";
 
+// Forces the use of the mojo renderer. In other words, the renderer process
+// will run a mojo renderer and CastRenderer will run in the browser process.
+// This is necessary for devices that use CastRenderer.
+//
+// For this flag to have any effect, note that you must build the cast web
+// runtime with the gn arg "enable_cast_renderer" set to true, and "renderer"
+// must be included in the list "mojo_media_services".
+//
+// This flag has lower priority than "disable-mojo-renderer".
+const char kForceMojoRenderer[] = "force-mojo-renderer";
+
 // Per-product customization of force update UI remote url, also used in
 // testing.
 const char kForceUpdateRemoteUrl[] = "force-update-remote-url";
@@ -231,6 +250,9 @@ const char kInProcessBroker[] = "in-process-broker";
 // Command-line arg to change the Unix domain socket path to connect to the
 // Cast Mojo broker.
 const char kCastMojoBrokerPath[] = "cast-mojo-broker-path";
+
+// Allows specifying the base::ASSETS dir for Cast via commandline.
+const char kCastAssetsDir[] = "cast-assets-dir";
 
 }  // namespace switches
 

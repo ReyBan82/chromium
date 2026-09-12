@@ -31,6 +31,7 @@
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/web_feature.h"
 #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 
 namespace blink {
@@ -48,17 +49,16 @@ unsigned ConvertDeltaMode(const WebMouseWheelEvent& event) {
 }
 
 MouseEventInit* GetMouseEventInitForWheel(const WebMouseWheelEvent& event,
-                                          AbstractView* view) {
+                                          LocalDOMWindow& window) {
   MouseEventInit* initializer = MouseEventInit::Create();
   initializer->setBubbles(true);
   initializer->setCancelable(event.IsCancelable());
-  auto* local_dom_window = DynamicTo<LocalDOMWindow>(view);
-  MouseEvent::SetCoordinatesFromWebPointerProperties(
-      event.FlattenTransform(), local_dom_window, initializer);
+  MouseEvent::SetCoordinatesFromWebPointerProperties(event.FlattenTransform(),
+                                                     &window, initializer);
   initializer->setButton(static_cast<int16_t>(event.button));
   initializer->setButtons(
       MouseEvent::WebInputEventModifiersToButtons(event.GetModifiers()));
-  initializer->setView(view);
+  initializer->setView(&window);
   initializer->setComposed(true);
   initializer->setDetail(event.click_count);
   UIEventWithKeyState::SetFromWebInputEventModifiers(
@@ -74,14 +74,8 @@ MouseEventInit* GetMouseEventInitForWheel(const WebMouseWheelEvent& event,
 }  // namespace
 
 WheelEvent* WheelEvent::Create(const WebMouseWheelEvent& event,
-                               AbstractView* view) {
-  return MakeGarbageCollected<WheelEvent>(event, view);
-}
-
-WheelEvent* WheelEvent::Create(const WebMouseWheelEvent& event,
-                               const gfx::Vector2dF& delta_in_pixels,
-                               AbstractView* view) {
-  return MakeGarbageCollected<WheelEvent>(event, delta_in_pixels, view);
+                               LocalDOMWindow& window) {
+  return MakeGarbageCollected<WheelEvent>(event, window);
 }
 
 WheelEvent::WheelEvent()
@@ -103,25 +97,28 @@ WheelEvent::WheelEvent(const AtomicString& type,
                                      : ClampTo<int32_t>(-static_cast<double>(
                                            initializer->wheelDeltaY()))),
       delta_z_(initializer->deltaZ()),
-      delta_mode_(initializer->deltaMode()) {}
+      delta_mode_(initializer->deltaMode()),
+      is_momentum_(initializer->momentum()) {}
 
-WheelEvent::WheelEvent(const WebMouseWheelEvent& event, AbstractView* view)
+WheelEvent::WheelEvent(const WebMouseWheelEvent& event, LocalDOMWindow& window)
     : MouseEvent(event_type_names::kWheel,
-                 GetMouseEventInitForWheel(event, view),
+                 GetMouseEventInitForWheel(event, window),
                  event.TimeStamp()),
-      wheel_delta_(event.wheel_ticks_x * kTickMultiplier,
-                   event.wheel_ticks_y * kTickMultiplier),
-      delta_x_(-event.DeltaXInRootFrame()),
-      delta_y_(-event.DeltaYInRootFrame()),
+      wheel_delta_(
+          (event.wheel_ticks_x * kTickMultiplier) / window.devicePixelRatio(),
+          (event.wheel_ticks_y * kTickMultiplier) / window.devicePixelRatio()),
+      delta_x_(-event.DeltaXInRootFrame() / window.devicePixelRatio()),
+      delta_y_(-event.DeltaYInRootFrame() / window.devicePixelRatio()),
       delta_z_(0),
       delta_mode_(ConvertDeltaMode(event)),
-      native_event_(event) {}
+      native_event_(event),
+      is_momentum_(event.momentum_phase != WebMouseWheelEvent::kPhaseNone) {}
 
 WheelEvent::WheelEvent(const WebMouseWheelEvent& event,
                        const gfx::Vector2dF& delta_in_pixels,
-                       AbstractView* view)
+                       LocalDOMWindow& window)
     : MouseEvent(event_type_names::kWheel,
-                 GetMouseEventInitForWheel(event, view),
+                 GetMouseEventInitForWheel(event, window),
                  event.TimeStamp()),
       wheel_delta_(event.wheel_ticks_x * kTickMultiplier,
                    event.wheel_ticks_y * kTickMultiplier),
@@ -129,7 +126,8 @@ WheelEvent::WheelEvent(const WebMouseWheelEvent& event,
       delta_y_(delta_in_pixels.y()),
       delta_z_(0),
       delta_mode_(WheelEvent::kDomDeltaPixel),
-      native_event_(event) {}
+      native_event_(event),
+      is_momentum_(event.momentum_phase != WebMouseWheelEvent::kPhaseNone) {}
 
 const AtomicString& WheelEvent::InterfaceName() const {
   return event_interface_names::kWheelEvent;
@@ -145,6 +143,12 @@ bool WheelEvent::IsWheelEvent() const {
 
 void WheelEvent::preventDefault() {
   MouseEvent::preventDefault();
+
+  if (!IsFullyTrusted()) {
+    // The messages below should only be sent for implementation-created
+    // events, not for script-created ones.
+    return;
+  }
 
   PassiveMode passive_mode = HandlingPassive();
   if (passive_mode == PassiveMode::kPassiveForcedDocumentLevel) {

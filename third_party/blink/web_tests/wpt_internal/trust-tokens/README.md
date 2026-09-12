@@ -11,7 +11,7 @@
 
 The trust token WPTs in this directory are JavaScript tests that interact with a Python implementation of a trust token issuer.
 [Python file handlers](https://web-platform-tests.org/writing-tests/python-handlers/index.html) implement the server-side logic for trust token issuance and redemption.
-The supported issuer protocol is `TrustTokenV3VOPRF`.
+The supported issuer protocol is `PrivateStateTokenV1VOPRF`.
 
 Please refer to the [trust token API explainer](https://github.com/WICG/trust-token-api) for details about the API.
 
@@ -23,8 +23,8 @@ Please refer to the [trust token API explainer](https://github.com/WICG/trust-to
 ```json
 {
     "https://web-platform.test:8444": {
-        "TrustTokenV3VOPRF": {
-            "protocol_version": "TrustTokenV3VOPRF",
+        "PrivateStateTokenV1VOPRF": {
+            "protocol_version": "PrivateStateTokenV1VOPRF",
             "id": 1,
             "batchsize": 1,
             "keys": {
@@ -47,10 +47,10 @@ Please refer to the [trust token API explainer](https://github.com/WICG/trust-to
 - `resources/trust_token_issuance.py`
   - Python file handler for token issuance
   - Generates a valid response including a DLEQ proof, which is verified by Chromium
-  - The response is stripped from the `Sec-Trust-Token` header by the browser and is not accessible to JavaScript
+  - The response is stripped from the `Sec-Private-State-Token` header by the browser and is not accessible to JavaScript
 - `resources/trust_token_redemption.py`
   - Python file handler for token redemption
-  - The redemption record in the response is an arbitrary byte string, and it is also stripped from the `Sec-Trust-Token` header by the browser
+  - The redemption record in the response is an arbitrary byte string, and it is also stripped from the `Sec-Private-State-Token` header by the browser
 - `resources/trust_token_send_redemption_record.py`
   - Python file handler for `send-redemption-record` requests
   - Checks for the presence of the `Sec-Redemption-Record` header

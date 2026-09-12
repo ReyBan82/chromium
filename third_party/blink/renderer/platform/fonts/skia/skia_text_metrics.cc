@@ -4,69 +4,89 @@
 
 #include "third_party/blink/renderer/platform/fonts/skia/skia_text_metrics.h"
 
+#include "base/containers/span.h"
 #include "build/build_config.h"
+#include "third_party/blink/renderer/platform/fonts/shaping/harfbuzz_face.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
 #include "third_party/skia/include/core/SkFont.h"
 #include "third_party/skia/include/core/SkPath.h"
+#include "third_party/skia/include/core/SkStrikeRef.h"
 
 namespace blink {
 
-namespace {
-
-template <class T>
-T* advance_by_byte_size(T* p, unsigned byte_size) {
-  return reinterpret_cast<T*>(reinterpret_cast<uint8_t*>(p) + byte_size);
-}
-
-template <class T>
-const T* advance_by_byte_size(const T* p, unsigned byte_size) {
-  return reinterpret_cast<const T*>(reinterpret_cast<const uint8_t*>(p) +
-                                    byte_size);
-}
-
-}  // namespace
-
-void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
+void SkFontGetGlyphWidthForHarfBuzz(const SkStrikeRef& strike_ref,
+                                    bool subpixel,
                                     hb_codepoint_t codepoint,
                                     hb_position_t* width) {
+  // We don't want to compute glyph extents for kUnmatchedVSGlyphId
+  // cases yet. Since we will do that during the second shaping pass,
+  // when VariationSelectorMode is set to kIgnoreVariationSelector.
+  if (codepoint == kUnmatchedVSGlyphId) {
+    return;
+  }
   DCHECK_LE(codepoint, 0xFFFFu);
   CHECK(width);
 
-  SkScalar sk_width;
-  uint16_t glyph = codepoint;
+  SkScalar sk_width = strike_ref.getWidth(static_cast<SkGlyphID>(codepoint));
 
-  font.getWidths(&glyph, 1, &sk_width);
-  if (!font.isSubpixel())
+  if (!subpixel) {
     sk_width = SkScalarRoundToInt(sk_width);
+  }
   *width = SkiaScalarToHarfBuzzPosition(sk_width);
 }
 
-void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
+void SkFontGetGlyphWidthForHarfBuzz(const SkStrikeRef& strike_ref,
+                                    bool subpixel,
                                     unsigned count,
                                     const hb_codepoint_t* glyphs,
-                                    const unsigned glyph_stride,
+                                    unsigned glyph_stride_32,
                                     hb_position_t* advances,
-                                    unsigned advance_stride) {
-  // Batch the call to getWidths because its function entry cost is not
-  // cheap. getWidths accepts multiple glyphd ID, but not from a sparse
-  // array that copy them to a regular array.
-  Vector<Glyph, 256> glyph_array(count);
-  for (unsigned i = 0; i < count;
-       i++, glyphs = advance_by_byte_size(glyphs, glyph_stride)) {
-    glyph_array[i] = *glyphs;
+                                    unsigned advance_stride_32) {
+  if (count == 0) {
+    return;
   }
-  Vector<SkScalar, 256> sk_width_array(count);
-  font.getWidths(glyph_array.data(), count, sk_width_array.data());
+  CHECK(glyphs);
+  CHECK(advances);
 
-  if (!font.isSubpixel()) {
-    for (unsigned i = 0; i < count; i++)
-      sk_width_array[i] = SkScalarRoundToInt(sk_width_array[i]);
-  }
+  static_assert(sizeof(SkScalar) == sizeof(hb_position_t),
+                "SkScalar and hb_position_t must have the same size");
+  SkScalar* advance = reinterpret_cast<float*>(advances);
+  strike_ref.getWidthsStrided(count, glyphs, glyph_stride_32, advance,
+                              advance_stride_32);
 
-  // Copy the results back to the sparse array.
-  for (unsigned i = 0; i < count;
-       i++, advances = advance_by_byte_size(advances, advance_stride)) {
-    *advances = SkiaScalarToHarfBuzzPosition(sk_width_array[i]);
+  // Perform in-place rounding and fixed-point conversion.
+  // SAFETY: See HarfBuzzGetGlyphHorizontalAdvances in harfbuzz_face.cc:
+  // We are interfacing with HarfBuzz and optimize this hot function in
+  // text shaping. HarfBuzz provides the allocated output buffer and
+  // stride information. The incoming count argument is provided by
+  // HarfBuzz and ensure that enough output write buffer space is available
+  // for the given stride.
+  if (subpixel) {
+    if (advance_stride_32 == 1) {
+      for (unsigned i = 0; i < count; ++i) {
+        UNSAFE_BUFFERS(advances[i] = SkiaScalarToHarfBuzzPosition(advance[i]));
+      }
+    } else {
+      for (unsigned i = 0; i < count;
+           i++, UNSAFE_BUFFERS(advance += advance_stride_32)) {
+        UNSAFE_BUFFERS(*reinterpret_cast<hb_position_t*>(advance) =
+                           SkiaScalarToHarfBuzzPosition(*advance));
+      }
+    }
+  } else {
+    if (advance_stride_32 == 1) {
+      for (unsigned i = 0; i < count; ++i) {
+        UNSAFE_BUFFERS(advances[i] = SkiaScalarToHarfBuzzPosition(
+                           SkScalarRoundToScalar(advance[i])));
+      }
+    } else {
+      for (unsigned i = 0; i < count;
+           i++, UNSAFE_BUFFERS(advance += advance_stride_32)) {
+        UNSAFE_BUFFERS(
+            *reinterpret_cast<hb_position_t*>(advance) =
+                SkiaScalarToHarfBuzzPosition(SkScalarRoundToScalar(*advance)));
+      }
+    }
   }
 }
 
@@ -79,6 +99,12 @@ void SkFontGetGlyphWidthForHarfBuzz(const SkFont& font,
 void SkFontGetGlyphExtentsForHarfBuzz(const SkFont& font,
                                       hb_codepoint_t codepoint,
                                       hb_glyph_extents_t* extents) {
+  // We don't want to compute glyph extents for kUnmatchedVSGlyphId
+  // cases yet. Since we will do that during the second shaping pass,
+  // when VariationSelectorMode is set to kIgnoreVariationSelector.
+  if (codepoint == kUnmatchedVSGlyphId) {
+    return;
+  }
   DCHECK_LE(codepoint, 0xFFFFu);
   CHECK(extents);
 
@@ -88,14 +114,13 @@ void SkFontGetGlyphExtentsForHarfBuzz(const SkFont& font,
 #if BUILDFLAG(IS_APPLE)
   // TODO(drott): Remove this once we have better metrics bounds
   // on Mac, https://bugs.chromium.org/p/skia/issues/detail?id=5328
-  SkPath path;
-  if (font.getPath(glyph, &path)) {
-    sk_bounds = path.getBounds();
+  if (const auto path = font.getPath(glyph)) {
+    sk_bounds = path->getBounds();
   } else {
-    font.getBounds(&glyph, 1, &sk_bounds, nullptr);
+    sk_bounds = font.getBounds(glyph, nullptr);
   }
 #else
-  font.getBounds(&glyph, 1, &sk_bounds, nullptr);
+  sk_bounds = font.getBounds(glyph, nullptr);
 #endif
   if (!font.isSubpixel()) {
     // Use roundOut() rather than round() to avoid rendering glyphs
@@ -111,20 +136,18 @@ void SkFontGetGlyphExtentsForHarfBuzz(const SkFont& font,
   extents->height = SkiaScalarToHarfBuzzPosition(-sk_bounds.height());
 }
 
-void SkFontGetBoundsForGlyph(const SkFont& font, Glyph glyph, SkRect* bounds) {
+// Returns path-based bounds for float precision, falling back to
+// font.getBounds() for bitmap-only glyphs (e.g. color emoji) that have no
+// paths.
 #if BUILDFLAG(IS_APPLE)
-  // TODO(drott): Remove this once we have better metrics bounds
-  // on Mac, https://bugs.chromium.org/p/skia/issues/detail?id=5328
-  SkPath path;
-  if (font.getPath(glyph, &path)) {
-    *bounds = path.getBounds();
+static void GetPathBoundsForGlyph(const SkFont& font,
+                                  Glyph glyph,
+                                  SkRect* bounds) {
+  if (const auto path = font.getPath(glyph)) {
+    *bounds = path->getBounds();
   } else {
-    // Fonts like Apple Color Emoji have no paths, fall back to bounds here.
-    font.getBounds(&glyph, 1, bounds, nullptr);
+    *bounds = font.getBounds(glyph, nullptr);
   }
-#else
-  font.getBounds(&glyph, 1, bounds, nullptr);
-#endif
 
   if (!font.isSubpixel()) {
     SkIRect ir;
@@ -132,17 +155,53 @@ void SkFontGetBoundsForGlyph(const SkFont& font, Glyph glyph, SkRect* bounds) {
     bounds->set(ir);
   }
 }
+#endif
+
+void SkFontGetBoundsForGlyph(const SkFont& font, Glyph glyph, SkRect* bounds) {
+#if BUILDFLAG(IS_APPLE)
+  // TODO(drott): Remove this once we have better metrics bounds
+  // on Mac, https://bugs.chromium.org/p/skia/issues/detail?id=5328
+  GetPathBoundsForGlyph(font, glyph, bounds);
+#else
+  *bounds = font.getBounds(glyph, nullptr);
+
+  if (!font.isSubpixel()) {
+    SkIRect ir;
+    bounds->roundOut(&ir);
+    bounds->set(ir);
+  }
+#endif
+}
+
+void SkFontGetPreciseBoundsForGlyph(const SkFont& font,
+                                    Glyph glyph,
+                                    SkRect* bounds) {
+  // Use path-based bounds for float precision. SkGlyph stores bounds as
+  // integers (int16_t/uint16_t) which causes large relative errors for small
+  // font sizes (e.g. 1.5px). Path bounds give exact floating-point values
+  // from the glyph outlines.
+  //
+  // Unlike GetPathBoundsForGlyph / SkFontGetBoundsForGlyph, we intentionally
+  // do NOT round to integers for non-subpixel fonts, because the caller
+  // (canvas TextMetrics) needs float-precision results.
+  if (const auto path = font.getPath(glyph)) {
+    *bounds = path->getBounds();
+  } else {
+    // Bitmap-only glyphs (e.g. color emoji) have no outlines.
+    *bounds = font.getBounds(glyph, nullptr);
+  }
+}
 
 void SkFontGetBoundsForGlyphs(const SkFont& font,
                               const Vector<Glyph, 256>& glyphs,
-                              SkRect* bounds) {
+                              base::span<SkRect> bounds) {
 #if BUILDFLAG(IS_APPLE)
   for (unsigned i = 0; i < glyphs.size(); i++) {
     SkFontGetBoundsForGlyph(font, glyphs[i], &bounds[i]);
   }
 #else
   static_assert(sizeof(Glyph) == 2, "Skia expects 2 bytes glyph id.");
-  font.getBounds(glyphs.data(), glyphs.size(), bounds, nullptr);
+  font.getBounds(glyphs, {bounds.data(), glyphs.size()}, nullptr);
 
   if (!font.isSubpixel()) {
     for (unsigned i = 0; i < glyphs.size(); i++) {
@@ -155,19 +214,12 @@ void SkFontGetBoundsForGlyphs(const SkFont& font,
 }
 
 float SkFontGetWidthForGlyph(const SkFont& font, Glyph glyph) {
-  SkScalar sk_width;
-  font.getWidths(&glyph, 1, &sk_width);
+  SkScalar sk_width = font.getWidth(glyph);
 
   if (!font.isSubpixel())
     sk_width = SkScalarRoundToInt(sk_width);
 
-  return SkScalarToFloat(sk_width);
-}
-
-hb_position_t SkiaScalarToHarfBuzzPosition(SkScalar value) {
-  // We treat HarfBuzz hb_position_t as 16.16 fixed-point.
-  static const int kHbPosition1 = 1 << 16;
-  return ClampTo<int>(value * kHbPosition1);
+  return sk_width;
 }
 
 }  // namespace blink

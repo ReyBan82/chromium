@@ -6,12 +6,14 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "ash/constants/ash_features.h"
 #include "ash/webui/common/backend/plural_string_handler.h"
 #include "ash/webui/common/keyboard_diagram_strings.h"
+#include "ash/webui/common/trusted_types_util.h"
 #include "ash/webui/diagnostics_ui/backend/common/histogram_util.h"
 #include "ash/webui/diagnostics_ui/backend/connectivity/network_health_provider.h"
 #include "ash/webui/diagnostics_ui/backend/diagnostics_manager.h"
@@ -30,11 +32,11 @@
 #include "base/files/file_path.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/strings/string_piece_forward.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "chromeos/ash/components/login/login_state/login_state.h"
+#include "chromeos/constants/chromeos_features.h"
 #include "chromeos/strings/grit/chromeos_strings.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_ui.h"
@@ -43,7 +45,7 @@
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/webui/web_ui_util.h"
 #include "ui/chromeos/strings/network/network_element_localized_strings_provider.h"
-#include "ui/resources/grit/webui_resources.h"
+#include "ui/webui/resources/grit/webui_resources.h"
 
 namespace ash {
 
@@ -60,9 +62,9 @@ diagnostics::metrics::NavigationView GetInitialView(const GURL url) {
   }
 
   // Note: Valid query strings map to strings in the GetUrlForPage located in
-  // chrome/browser/ui/webui/ash/diagnostics_dialog.cc.
-  const std::string& original_query = url.query();  // must outlive |query|.
-  const base::StringPiece& query =
+  // chrome/browser/ui/webui/ash/diagnostics_dialog/diagnostics_dialog.cc.
+  const std::string& original_query = url.GetQuery();  // must outlive |query|.
+  std::string_view query =
       base::TrimString(original_query, " \t", base::TRIM_ALL);
 
   if (base::EqualsCaseInsensitiveASCII(query, "system")) {
@@ -91,8 +93,8 @@ std::u16string GetLinkLabel(int string_id, const char* url) {
   return l10n_util::GetStringFUTF16(string_id, replacements, nullptr);
 }
 
-base::Value::Dict GetDataSourceUpdate() {
-  base::Value::Dict update;
+base::DictValue GetDataSourceUpdate() {
+  base::DictValue update;
   update.Set("settingsLinkText",
              GetLinkLabel(IDS_DIAGNOSTICS_SETTINGS_LINK_TEXT,
                           "chrome://os-settings/"));
@@ -176,11 +178,16 @@ void AddDiagnosticsStrings(content::WebUIDataSource* html_source) {
       {"gatewayCanBePingedRoutineText",
        IDS_NETWORK_DIAGNOSTICS_GATEWAY_CAN_BE_PINGED},
       {"gatewayRoutineText", IDS_NETWORK_DIAGNOSTICS_GATEWAY_GROUP},
+      {"googleServicesConnectivityFailedText",
+       IDS_DIAGNOSTICS_GOOGLE_SERVICES_CONNECTIVITY_FAILED_TEXT},
+      {"googleServicesGroupLabel",
+       IDS_NETWORK_DIAGNOSTICS_GOOGLE_SERVICES_GROUP},
       {"hasSecureWiFiConnectionFailedText",
        IDS_DIAGNOSTICS_HAS_SECURE_WIFI_CONNECTION_FAILED_TEXT},
       {"hasSecureWiFiConnectionRoutineText",
        IDS_NETWORK_DIAGNOSTICS_HAS_SECURE_WIFI_CONNECTION},
       {"hideReportText", IDS_DIAGNOSTICS_HIDE_REPORT_TEXT},
+      {"hideTestDetailsText", IDS_DIAGNOSTICS_HIDE_TEST_DETAILS_TEXT},
       {"httpFirewallFailedText", IDS_DIAGNOSTICS_HTTP_FIREWALL_FAILED_TEXT},
       {"httpFirewallRoutineText", IDS_NETWORK_DIAGNOSTICS_HTTP_FIREWALL},
       {"httpsFirewallFailedText", IDS_DIAGNOSTICS_HTTPS_FIREWALL_FAILED_TEXT},
@@ -297,6 +304,8 @@ void AddDiagnosticsStrings(content::WebUIDataSource* html_source) {
       {"noIpAddressText", IDS_NETWORK_DIAGNOSTICS_NO_IP_ADDRESS_TEXT},
       {"notEnoughAvailableMemoryMessage",
        IDS_DIAGNOSTICS_NOT_ENOUGH_AVAILABLE_MEMORY},
+      {"notEnoughAvailableMemoryCpuMessage",
+       IDS_DIAGNOSTICS_NOT_ENOUGH_AVAILABLE_MEMORY_CPU},
       {"percentageLabel", IDS_DIAGNOSTICS_PERCENTAGE_LABEL},
       {"reconnectLinkText", IDS_DIAGNOSTICS_RECONNECT_LINK_TEXT},
       {"remainingCharge", IDS_DIAGNOSTICS_REMAINING_CHARGE_LABEL},
@@ -314,6 +323,7 @@ void AddDiagnosticsStrings(content::WebUIDataSource* html_source) {
       {"runCpuTestText", IDS_DIAGNOSTICS_CPU_RUN_TESTS_BUTTON_TEXT},
       {"runMemoryTestText", IDS_DIAGNOSTICS_MEMORY_RUN_TESTS_BUTTON_TEXT},
       {"seeReportText", IDS_DIAGNOSTICS_SEE_REPORT_TEXT},
+      {"seeTestDetailsText", IDS_DIAGNOSTICS_SEE_TEST_DETAILS_TEXT},
       {"sessionLog", IDS_DIAGNOSTICS_SESSION_LOG_LABEL},
       {"sessionLogToastTextFailure",
        IDS_DIAGNOSTICS_SESSION_LOG_TOAST_TEXT_FAILURE},
@@ -370,18 +380,14 @@ void SetUpWebUIDataSource(content::WebUIDataSource* source,
                           base::span<const webui::ResourcePath> resources,
                           int default_resource) {
   source->AddResourcePaths(resources);
-  source->AddResourcePath("", default_resource);
+  source->SetDefaultResource(default_resource);
   source->AddResourcePath("test_loader.html", IDR_WEBUI_TEST_LOADER_HTML);
   source->AddResourcePath("test_loader.js", IDR_WEBUI_JS_TEST_LOADER_JS);
   source->AddResourcePath("test_loader_util.js",
                           IDR_WEBUI_JS_TEST_LOADER_UTIL_JS);
   source->AddBoolean("isLoggedIn", LoginState::Get()->IsUserLoggedIn());
-  source->AddBoolean("isInputEnabled",
-                     features::IsInputInDiagnosticsAppEnabled());
   source->AddBoolean("isTouchpadEnabled",
                      features::IsTouchpadInDiagnosticsAppEnabled());
-  source->AddBoolean("isTouchscreenEnabled",
-                     features::IsTouchscreenInDiagnosticsAppEnabled());
 }
 
 void SetUpPluralStringHandler(content::WebUI* web_ui) {
@@ -397,7 +403,8 @@ DiagnosticsDialogUI::DiagnosticsDialogUI(
     const diagnostics::SessionLogHandler::SelectFilePolicyCreator&
         select_file_policy_creator,
     HoldingSpaceClient* holding_space_client,
-    const base::FilePath& log_directory_path)
+    const base::FilePath& log_directory_path,
+    std::unique_ptr<diagnostics::SystemRoutineControllerDelegate> delegate)
     : ui::MojoWebDialogUI(web_ui) {
   content::WebUIDataSource* html_source =
       content::WebUIDataSource::CreateAndAdd(
@@ -405,13 +412,10 @@ DiagnosticsDialogUI::DiagnosticsDialogUI(
           kChromeUIDiagnosticsAppHost);
   html_source->OverrideContentSecurityPolicy(
       network::mojom::CSPDirectiveName::ScriptSrc,
-      "script-src chrome://resources chrome://test chrome://webui-test "
-      "'self';");
-  html_source->DisableTrustedTypesCSP();
+      "script-src chrome://resources chrome://webui-test 'self';");
+  ash::EnableTrustedTypesCSP(html_source);
 
-  const auto resources = base::make_span(kAshDiagnosticsAppResources,
-                                         kAshDiagnosticsAppResourcesSize);
-  SetUpWebUIDataSource(html_source, resources,
+  SetUpWebUIDataSource(html_source, kAshDiagnosticsAppResources,
                        IDR_ASH_DIAGNOSTICS_APP_INDEX_HTML);
 
   SetUpPluralStringHandler(web_ui);
@@ -419,7 +423,7 @@ DiagnosticsDialogUI::DiagnosticsDialogUI(
   auto session_log_handler = std::make_unique<diagnostics::SessionLogHandler>(
       select_file_policy_creator, holding_space_client, log_directory_path);
   diagnostics_manager_ = std::make_unique<diagnostics::DiagnosticsManager>(
-      session_log_handler.get(), web_ui);
+      session_log_handler.get(), web_ui, std::move(delegate));
   web_ui->AddMessageHandler(std::move(session_log_handler));
 
   AddDiagnosticsStrings(html_source);

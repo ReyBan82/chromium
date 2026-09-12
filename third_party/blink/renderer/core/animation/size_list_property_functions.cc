@@ -13,11 +13,10 @@ static const FillLayer* GetFillLayerForSize(const CSSProperty& property,
   switch (property.PropertyID()) {
     case CSSPropertyID::kBackgroundSize:
       return &style.BackgroundLayers();
-    case CSSPropertyID::kWebkitMaskSize:
+    case CSSPropertyID::kMaskSize:
       return &style.MaskLayers();
     default:
       NOTREACHED();
-      return nullptr;
   }
 }
 
@@ -26,11 +25,10 @@ static FillLayer* AccessFillLayerForSize(const CSSProperty& property,
   switch (property.PropertyID()) {
     case CSSPropertyID::kBackgroundSize:
       return &builder.AccessBackgroundLayers();
-    case CSSPropertyID::kWebkitMaskSize:
+    case CSSPropertyID::kMaskSize:
       return &builder.AccessMaskLayers();
     default:
       NOTREACHED();
-      return nullptr;
   }
 }
 
@@ -43,9 +41,14 @@ SizeList SizeListPropertyFunctions::GetInitialSizeList(
 SizeList SizeListPropertyFunctions::GetSizeList(const CSSProperty& property,
                                                 const ComputedStyle& style) {
   SizeList result;
+  // Interpolation is defined on computed values, so this walks the layers the
+  // computed value reports - see FillLayer::NextForComputedValue().
   for (const FillLayer* fill_layer = GetFillLayerForSize(property, style);
-       fill_layer && fill_layer->IsSizeSet(); fill_layer = fill_layer->Next())
+       fill_layer && fill_layer->IsPropertySet(FillLayer::Property::kSize);
+       fill_layer =
+           fill_layer->NextForComputedValue(FillLayer::Property::kSize)) {
     result.push_back(fill_layer->Size());
+  }
   return result;
 }
 

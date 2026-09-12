@@ -144,7 +144,7 @@ class ModuleWatcher {
   // The current callback. Can end up being invoked on any thread.
   OnModuleEventCallback callback_;
   // Used by the DllNotification mechanism.
-  void* dll_notification_cookie_ = nullptr;
+  raw_ptr<void> dll_notification_cookie_ = nullptr;
 
   base::WeakPtrFactory<ModuleWatcher> weak_ptr_factory_{this};
 };

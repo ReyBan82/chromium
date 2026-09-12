@@ -3,12 +3,14 @@
 // found in the LICENSE file.
 
 function test(subresourceUrl) {
-  if (!subresourceUrl)
+  if (!subresourceUrl) {
     return Promise.resolve(self.location.href);
+  }
 
   return fetch(subresourceUrl)
-    .then(() => self.location.href,
-          () => 'Error: failed to fetch ' + subresourceUrl);
+      .then(
+          () => self.location.href,
+          () => `Error: failed to fetch ${subresourceUrl}`);
 }
 
 if ('DedicatedWorkerGlobalScope' in self &&

@@ -5,20 +5,30 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_TRUSTEDTYPES_TRUSTED_TYPES_UTIL_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_TRUSTEDTYPES_TRUSTED_TYPES_UTIL_H_
 
+#include <tuple>
+
+#include "third_party/blink/renderer/bindings/core/v8/v8_set_html_options.h"
+#include "third_party/blink/renderer/bindings/core/v8/v8_set_html_unsafe_options.h"
 #include "third_party/blink/renderer/bindings/core/v8/v8_typedefs.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/script/script_element_base.h"
+#include "third_party/blink/renderer/core/trustedtypes/trusted_types_names.h"
+#include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
 
 class ExceptionState;
 class ExecutionContext;
+class FragmentParserOptions;
 class QualifiedName;
 class ScriptValue;
 class ScriptState;
 class V8UnionStringOrTrustedScript;
-class V8UnionStringTreatNullAsEmptyStringOrTrustedScript;
+class V8UnionStringOrTrustedHTML;
+class V8UnionStringLegacyNullToEmptyStringOrTrustedHTML;
+class V8UnionStringLegacyNullToEmptyStringOrTrustedScript;
+class V8UnionTrustedScriptURLOrUSVString;
 
 enum class SpecificTrustedType {
   kNone,
@@ -29,40 +39,96 @@ enum class SpecificTrustedType {
 
 // Perform Trusted Type checks, with the IDL union types as input. All of these
 // will call String& versions below to do the heavy lifting.
-[[nodiscard]] CORE_EXPORT String
+[[nodiscard]] CORE_EXPORT AtomicString
 TrustedTypesCheckFor(SpecificTrustedType type,
                      const V8TrustedType* trusted,
                      const ExecutionContext* execution_context,
+                     const AtomicString& interface_name,
+                     const AtomicString& property_name,
                      ExceptionState& exception_state);
+[[nodiscard]] CORE_EXPORT String TrustedTypesCheckForHTML(
+    const V8UnionStringLegacyNullToEmptyStringOrTrustedHTML* value,
+    const ExecutionContext* execution_context,
+    const AtomicString& interface_name,
+    const AtomicString& property_name,
+    ExceptionState& exception_state);
+[[nodiscard]] CORE_EXPORT String
+TrustedTypesCheckForHTML(const V8UnionStringOrTrustedHTML* value,
+                         const ExecutionContext* execution_context,
+                         const AtomicString& interface_name,
+                         const AtomicString& property_name,
+                         ExceptionState& exception_state);
 [[nodiscard]] CORE_EXPORT String
 TrustedTypesCheckForScript(const V8UnionStringOrTrustedScript* value,
                            const ExecutionContext* execution_context,
+                           const AtomicString& interface_name,
+                           const AtomicString& property_name,
                            ExceptionState& exception_state);
 [[nodiscard]] CORE_EXPORT String TrustedTypesCheckForScript(
-    const V8UnionStringTreatNullAsEmptyStringOrTrustedScript* value,
+    const V8UnionStringLegacyNullToEmptyStringOrTrustedScript* value,
     const ExecutionContext* execution_context,
+    const AtomicString& interface_name,
+    const AtomicString& property_name,
     ExceptionState& exception_state);
+[[nodiscard]] CORE_EXPORT String
+TrustedTypesCheckForScriptURL(const V8UnionTrustedScriptURLOrUSVString* value,
+                              const ExecutionContext* execution_context,
+                              const AtomicString& interface_name,
+                              const AtomicString& property_name,
+                              ExceptionState& exception_state);
 
 // Perform Trusted Type checks, for a dynamically or statically determined
 // type.
 // Returns the effective value (which may have been modified by the "default"
 // policy.
-[[nodiscard]] String TrustedTypesCheckFor(SpecificTrustedType,
-                                          String,
-                                          const ExecutionContext*,
-                                          ExceptionState&);
+[[nodiscard]] AtomicString TrustedTypesCheckFor(
+    SpecificTrustedType,
+    AtomicString,
+    const ExecutionContext*,
+    const AtomicString& interface_name,
+    const AtomicString& property_name,
+    ExceptionState&);
 [[nodiscard]] CORE_EXPORT String
 TrustedTypesCheckForHTML(const String&,
                          const ExecutionContext*,
+                         const AtomicString& interface_name,
+                         const AtomicString& property_name,
                          ExceptionState&);
 [[nodiscard]] CORE_EXPORT String
 TrustedTypesCheckForScript(const String&,
                            const ExecutionContext*,
+                           const AtomicString& interface_name,
+                           const AtomicString& property_name,
                            ExceptionState&);
 [[nodiscard]] CORE_EXPORT String
 TrustedTypesCheckForScriptURL(const String&,
                               const ExecutionContext*,
+                              const AtomicString& interface_name,
+                              const AtomicString& property_name,
                               ExceptionState&);
+
+[[nodiscard]] CORE_EXPORT String
+TrustedTypesCheckForFragment(const V8UnionStringOrTrustedHTML* html,
+                             FragmentParserOptions& resolved_options,
+                             const ExecutionContext* execution_context,
+                             const AtomicString& interface_name,
+                             const AtomicString& property_name,
+                             ExceptionState& exception_state);
+
+[[nodiscard]] CORE_EXPORT std::tuple<String, FragmentParserOptions>
+TrustedTypesCheckForLegacyFragment(
+    const V8UnionStringLegacyNullToEmptyStringOrTrustedHTML* html,
+    const ExecutionContext* execution_context,
+    const AtomicString& interface_name,
+    const AtomicString& property_name,
+    ExceptionState& exception_state);
+
+[[nodiscard]] CORE_EXPORT std::optional<FragmentParserOptions>
+TrustedTypesCheckForStreaming(FragmentParserOptions options,
+                              const ExecutionContext* execution_context,
+                              const AtomicString& interface_name,
+                              const AtomicString& property_name,
+                              ExceptionState& exception_state);
 
 // Functionally equivalent to TrustedTypesCheckForScript(const String&, ...),
 // but with setup & error handling suitable for the asynchronous execution
@@ -98,7 +164,7 @@ CORE_EXPORT bool RequireTrustedTypesCheck(const ExecutionContext*);
 // user-defined property names. But Trusted Types needs this for any built-in or
 // user-defined attribute/property, and thus must check against a list of known
 // event handlers.
-bool IsTrustedTypesEventHandlerAttribute(const QualifiedName&);
+CORE_EXPORT bool IsTrustedTypesEventHandlerAttribute(const QualifiedName&);
 
 // Return a string, if the passed-in script value is a literal. With "literal"
 // meaning it passes the checks for TrustedType's fromLiteral definition.
@@ -106,7 +172,7 @@ bool IsTrustedTypesEventHandlerAttribute(const QualifiedName&);
 // If an error occurs, this will return a null-String.
 //
 // Spec:
-// https://w3c.github.io/webappsec-trusted-types/dist/spec/#check-templatedness-algorithm
+// https://w3c.github.io/trusted-types/dist/spec/#check-templatedness-algorithm
 String GetTrustedTypesLiteral(const ScriptValue&, ScriptState*);
 
 }  // namespace blink

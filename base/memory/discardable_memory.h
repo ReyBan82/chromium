@@ -64,7 +64,8 @@ class BASE_EXPORT DiscardableMemory {
   virtual void DiscardForTesting() = 0;
 
   // Handy method to simplify calling data() with a reinterpret_cast.
-  template<typename T> T* data_as() const {
+  template <typename T>
+  T* data_as() const {
     return reinterpret_cast<T*>(data());
   }
 
@@ -76,9 +77,6 @@ class BASE_EXPORT DiscardableMemory {
       const char* name,
       trace_event::ProcessMemoryDump* pmd) const = 0;
 };
-
-enum class DiscardableMemoryBacking { kSharedMemory, kMadvFree };
-BASE_EXPORT DiscardableMemoryBacking GetDiscardableMemoryBacking();
 
 }  // namespace base
 

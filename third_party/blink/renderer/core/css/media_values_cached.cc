@@ -6,6 +6,7 @@
 
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "ui/base/mojom/window_show_state.mojom-blink.h"
 
 namespace blink {
 
@@ -47,6 +48,8 @@ MediaValuesCached::MediaValuesCachedData::MediaValuesCachedData(
     available_pointer_types =
         MediaValues::CalculateAvailablePointerTypes(frame);
     primary_hover_type = MediaValues::CalculatePrimaryHoverType(frame);
+    output_device_update_ability_type =
+        MediaValues::CalculateOutputDeviceUpdateAbilityType(frame);
     available_hover_types = MediaValues::CalculateAvailableHoverTypes(frame);
     em_size = MediaValues::CalculateEmSize(frame);
     // Use 0.5em as the fallback for ex, ch, ic, and lh units. CalculateEx()
@@ -66,12 +69,16 @@ MediaValuesCached::MediaValuesCachedData::MediaValuesCachedData(
     three_d_enabled = MediaValues::CalculateThreeDEnabled(frame);
     strict_mode = MediaValues::CalculateStrictMode(frame);
     display_mode = MediaValues::CalculateDisplayMode(frame);
+    window_show_state = MediaValues::CalculateWindowShowState(frame);
+    resizable = MediaValues::CalculateResizable(frame);
     media_type = MediaValues::CalculateMediaType(frame);
     color_gamut = MediaValues::CalculateColorGamut(frame);
     preferred_color_scheme = MediaValues::CalculatePreferredColorScheme(frame);
     preferred_contrast = MediaValues::CalculatePreferredContrast(frame);
     prefers_reduced_motion = MediaValues::CalculatePrefersReducedMotion(frame);
     prefers_reduced_data = MediaValues::CalculatePrefersReducedData(frame);
+    prefers_reduced_transparency =
+        MediaValues::CalculatePrefersReducedTransparency(frame);
     forced_colors = MediaValues::CalculateForcedColors(frame);
     navigation_controls = MediaValues::CalculateNavigationControls(frame);
     horizontal_viewport_segments =
@@ -79,6 +86,8 @@ MediaValuesCached::MediaValuesCachedData::MediaValuesCachedData(
     vertical_viewport_segments =
         MediaValues::CalculateVerticalViewportSegments(frame);
     device_posture = MediaValues::CalculateDevicePosture(frame);
+    inverted_colors = MediaValues::CalculateInvertedColors(frame);
+    scripting = MediaValues::CalculateScripting(frame);
   }
 }
 
@@ -148,6 +157,18 @@ float MediaValuesCached::RootLineHeight(float zoom) const {
   return data_.line_height;
 }
 
+float MediaValuesCached::CapFontSize(float zoom) const {
+  DCHECK_EQ(1.0f, zoom);
+  // For media queries cap units are based on the initial font.
+  return data_.cap_size;
+}
+
+float MediaValuesCached::RcapFontSize(float zoom) const {
+  DCHECK_EQ(1.0f, zoom);
+  // For media queries rcap units are based on the initial font.
+  return data_.cap_size;
+}
+
 double MediaValuesCached::ViewportWidth() const {
   return data_.viewport_width;
 }
@@ -188,6 +209,14 @@ double MediaValuesCached::ContainerHeight() const {
   return SmallViewportHeight();
 }
 
+double MediaValuesCached::ContainerWidth(const ScopedCSSName&) const {
+  return SmallViewportWidth();
+}
+
+double MediaValuesCached::ContainerHeight(const ScopedCSSName&) const {
+  return SmallViewportHeight();
+}
+
 int MediaValuesCached::DeviceWidth() const {
   return data_.device_width;
 }
@@ -212,6 +241,10 @@ int MediaValuesCached::MonochromeBitsPerComponent() const {
   return data_.monochrome_bits_per_component;
 }
 
+bool MediaValuesCached::InvertedColors() const {
+  return data_.inverted_colors;
+}
+
 mojom::blink::PointerType MediaValuesCached::PrimaryPointerType() const {
   return data_.primary_pointer_type;
 }
@@ -222,6 +255,11 @@ int MediaValuesCached::AvailablePointerTypes() const {
 
 mojom::blink::HoverType MediaValuesCached::PrimaryHoverType() const {
   return data_.primary_hover_type;
+}
+
+mojom::blink::OutputDeviceUpdateAbilityType
+MediaValuesCached::OutputDeviceUpdateAbilityType() const {
+  return data_.output_device_update_ability_type;
 }
 
 int MediaValuesCached::AvailableHoverTypes() const {
@@ -242,6 +280,14 @@ const String MediaValuesCached::MediaType() const {
 
 blink::mojom::DisplayMode MediaValuesCached::DisplayMode() const {
   return data_.display_mode;
+}
+
+ui::mojom::blink::WindowShowState MediaValuesCached::WindowShowState() const {
+  return data_.window_show_state;
+}
+
+bool MediaValuesCached::Resizable() const {
+  return data_.resizable;
 }
 
 Document* MediaValuesCached::GetDocument() const {
@@ -280,6 +326,10 @@ bool MediaValuesCached::PrefersReducedData() const {
   return data_.prefers_reduced_data;
 }
 
+bool MediaValuesCached::PrefersReducedTransparency() const {
+  return data_.prefers_reduced_transparency;
+}
+
 ForcedColors MediaValuesCached::GetForcedColors() const {
   return data_.forced_colors;
 }
@@ -296,9 +346,12 @@ int MediaValuesCached::GetVerticalViewportSegments() const {
   return data_.vertical_viewport_segments;
 }
 
-device::mojom::blink::DevicePostureType MediaValuesCached::GetDevicePosture()
-    const {
+mojom::blink::DevicePostureType MediaValuesCached::GetDevicePosture() const {
   return data_.device_posture;
+}
+
+Scripting MediaValuesCached::GetScripting() const {
+  return data_.scripting;
 }
 
 }  // namespace blink

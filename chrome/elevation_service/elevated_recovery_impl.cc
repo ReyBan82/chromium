@@ -5,25 +5,35 @@
 #include "chrome/elevation_service/elevated_recovery_impl.h"
 
 #include <objbase.h>
+
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "base/base_paths.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
 #include "base/files/file_enumerator.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
-#include "base/functional/bind.h"
-#include "base/functional/callback_helpers.h"
+#include "base/json/json_file_value_serializer.h"
 #include "base/logging.h"
 #include "base/path_service.h"
 #include "base/process/launch.h"
 #include "base/process/process.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/values.h"
 #include "base/version.h"
+#include "base/win/registry.h"
 #include "base/win/scoped_process_information.h"
+#include "chrome/elevation_service/elevator.h"
 #include "chrome/install_static/install_util.h"
+#include "chrome/installer/util/google_update_constants.h"
+#include "chrome/installer/util/util_constants.h"
+#include "chrome/windows_services/service_program/scoped_client_impersonation.h"
+#include "components/crx_file/crx_verifier.h"
 #include "third_party/zlib/google/zip.h"
 
 namespace elevation_service {
@@ -49,6 +59,13 @@ constexpr base::FilePath::CharType kRecoveryExeName[] =
 // The hard-coded SHA256 of the SubjectPublicKeyInfo used to sign the Recovery
 // CRX which contains ChromeRecovery.exe.
 std::vector<uint8_t> GetRecoveryCRXHash() {
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kAllowUntrustedRecoveryHashForTesting)) {
+    return std::vector<uint8_t>{0x69, 0xfc, 0x41, 0xf6, 0x17, 0x20, 0xc6, 0x36,
+                                0x92, 0xcd, 0x95, 0x76, 0x69, 0xf6, 0x28, 0xcc,
+                                0xbe, 0x98, 0x4b, 0x93, 0x17, 0xd6, 0x9c, 0xb3,
+                                0x64, 0x0c, 0x0d, 0x25, 0x61, 0xc5, 0x80, 0x1d};
+  }
   return std::vector<uint8_t>{0x5f, 0x94, 0xe0, 0x3c, 0x64, 0x30, 0x9f, 0xbc,
                               0xfe, 0x00, 0x9a, 0x27, 0x3e, 0x52, 0xbf, 0xa5,
                               0x84, 0xb9, 0xb3, 0x75, 0x07, 0x29, 0xde, 0xfa,
@@ -71,12 +88,10 @@ HRESULT OpenCallingProcess(uint32_t proc_id, base::Process* process) {
   DCHECK(proc_id);
   DCHECK(process);
 
-  HRESULT hr = ::CoImpersonateClient();
-  if (FAILED(hr))
-    return hr;
-
-  base::ScopedClosureRunner revert_to_self(
-      base::BindOnce([]() { ::CoRevertToSelf(); }));
+  ScopedClientImpersonation impersonate_client;
+  if (!impersonate_client.is_valid()) {
+    return impersonate_client.result();
+  }
 
   *process = base::Process::OpenWithAccess(proc_id, PROCESS_DUP_HANDLE);
   return process->IsValid() ? S_OK : HRESULTFromLastError();
@@ -90,12 +105,10 @@ HRESULT OpenFileImpersonated(const base::FilePath& file_path,
                              base::File* file) {
   DCHECK(file);
 
-  HRESULT hr = ::CoImpersonateClient();
-  if (FAILED(hr))
-    return hr;
-
-  base::ScopedClosureRunner revert_to_self(
-      base::BindOnce([]() { ::CoRevertToSelf(); }));
+  ScopedClientImpersonation impersonate_client;
+  if (!impersonate_client.is_valid()) {
+    return impersonate_client.result();
+  }
 
   file->Initialize(file_path, flags);
   if (!file->IsValid())
@@ -133,26 +146,31 @@ HRESULT CopyFileImpersonated(const base::FilePath from,
   std::vector<char> buffer(kBufferSize);
 
   for (uint64_t total_bytes_read = 0;;) {
-    const int bytes_read =
-        from_file.ReadAtCurrentPos(buffer.data(), buffer.size());
-    if (bytes_read < 0)
+    const std::optional<size_t> bytes_read =
+        from_file.ReadAtCurrentPos(base::as_writable_byte_span(buffer));
+    if (!bytes_read) {
       return HRESULTFromLastError();
-    if (bytes_read == 0)
+    }
+    if (bytes_read == 0) {
       return S_OK;
+    }
 
-    total_bytes_read += bytes_read;
-    if (total_bytes_read > kMaxFileSize)
+    total_bytes_read += *bytes_read;
+    if (total_bytes_read > kMaxFileSize) {
       return E_INVALIDARG;
+    }
 
-    const int bytes_written = to_file.WriteAtCurrentPos(&buffer[0], bytes_read);
-    if (bytes_written < 0)
+    const std::optional<size_t> bytes_written = to_file.WriteAtCurrentPos(
+        base::as_byte_span(buffer).first(*bytes_read));
+    if (!bytes_written) {
       return HRESULTFromLastError();
-    if (bytes_written != bytes_read)
+    }
+    if (bytes_written != bytes_read) {
       return E_UNEXPECTED;
+    }
   }
 
   NOTREACHED();
-  return S_OK;
 }
 
 // Validates the provided CRX using the |crx_hash|, and if validation succeeds,
@@ -187,9 +205,13 @@ HRESULT ValidateAndUnpackCRX(const base::FilePath& from_crx_path,
   if (!zip::Unzip(to_crx_path, to_dir.GetPath()))
     return E_UNEXPECTED;
 
-  LOG_IF(WARNING, !base::DeleteFile(to_crx_path));
+  if (!base::DeleteFile(to_crx_path)) {
+    PLOG(WARNING) << "Failed to delete " << to_crx_path;
+  }
 
-  LOG_IF(WARNING, !unpacked_crx_dir->Set(to_dir.Take()));
+  if (!unpacked_crx_dir->Set(to_dir.Take())) {
+    LOG(WARNING) << "Failed to transfer ownership of " << to_dir.GetPath();
+  }
   return S_OK;
 }
 
@@ -204,7 +226,9 @@ HRESULT LaunchCmd(const base::CommandLine& command_line,
 
   base::LaunchOptions options = {};
   options.feedback_cursor_off = true;
-  base::GetTempDir(&options.current_directory);
+  if (!base::GetSecureTempDirectory(&options.current_directory)) {
+    return HRESULTFromLastError();
+  }
   base::Process proc = base::LaunchProcess(command_line, options);
   if (!proc.IsValid())
     return HRESULTFromLastError();
@@ -227,34 +251,14 @@ HRESULT LaunchCmd(const base::CommandLine& command_line,
   return S_OK;
 }
 
-HRESULT ValidateCRXArgs(const std::wstring& browser_appid,
-                        const std::wstring& browser_version,
+HRESULT ValidateCRXArgs(const std::wstring& browser_version,
                         const std::wstring& session_id) {
-  if (!browser_appid.empty()) {
-    GUID guid = {};
-    HRESULT hr = ::IIDFromString(browser_appid.c_str(), &guid);
-    if (FAILED(hr))
-      return hr;
-  }
-
   const base::Version version(base::WideToASCII(browser_version));
   if (!version.IsValid())
     return E_INVALIDARG;
 
   GUID session_guid = {};
   return ::IIDFromString(session_id.c_str(), &session_guid);
-}
-
-// Deletes all the files and subdirectories within |directory_path|. Errors are
-// ignored.
-void DeleteDirectoryFiles(const base::FilePath& directory_path) {
-  base::FileEnumerator file_enum(
-      directory_path, false,
-      base::FileEnumerator::FILES | base::FileEnumerator::DIRECTORIES);
-  for (base::FilePath current = file_enum.Next(); !current.empty();
-       current = file_enum.Next()) {
-    base::DeletePathRecursively(current);
-  }
 }
 
 // Schedules deletion after reboot of |dir_name| as well as all the files and
@@ -280,7 +284,7 @@ void ScheduleDirectoryForDeletion(const base::FilePath& dir_name) {
 }
 
 // Returns the ChromeRecovery directory under Google\Chrome. For machine
-// installs, this directory is under %ProgramFiles%, which is writeable only by
+// installs, this directory is under %ProgramFiles%, which is writable only by
 // adminstrators. We use this secure directory to validate and unpack the CRX to
 // prevent tampering.
 HRESULT GetChromeRecoveryDirectory(base::FilePath* dir) {
@@ -301,13 +305,12 @@ HRESULT CleanupChromeRecoveryDirectory() {
   if (FAILED(hr))
     return hr;
 
-  DeleteDirectoryFiles(recovery_dir);
+  base::DeletePathRecursively(recovery_dir);
 
   return S_OK;
 }
 
 HRESULT RunChromeRecoveryCRX(const base::FilePath& crx_path,
-                             const std::wstring& browser_appid,
                              const std::wstring& browser_version,
                              const std::wstring& session_id,
                              uint32_t caller_proc_id,
@@ -315,14 +318,44 @@ HRESULT RunChromeRecoveryCRX(const base::FilePath& crx_path,
   if (crx_path.empty() || !caller_proc_id || !proc_handle)
     return E_INVALIDARG;
 
-  HRESULT hr = ValidateCRXArgs(browser_appid, browser_version, session_id);
+  HRESULT hr = ValidateCRXArgs(browser_version, session_id);
   if (FAILED(hr))
     return hr;
 
+  // Read version autonomously from secured HKLM machine registries based on
+  // AppID. We use the installed app GUID instead of the potentially spoofable
+  // |browser_appid| passed over RPC.
+  base::win::RegKey key(HKEY_LOCAL_MACHINE,
+                        install_static::GetClientsKeyPath().c_str(),
+                        KEY_QUERY_VALUE | KEY_WOW64_32KEY);
+  std::wstring registry_version;
+  if (key.ReadValue(google_update::kRegVersionField, &registry_version) !=
+      ERROR_SUCCESS) {
+    // Fall back on RPC caller version if registry read fails. Registry keys
+    // may be missing or corrupted on severely broken environments that recovery
+    // specifically targets. Note that deliberately modifying the HKLM version
+    // is something that only administrators can do, and medium integrity
+    // attackers cannot natively bypass floor checks by clearing those keys.
+    registry_version = browser_version;
+  }
+  const base::Version registry_version_parsed(
+      base::WideToASCII(registry_version));
+  if (!registry_version_parsed.IsValid()) {
+    return E_FAIL;
+  }
+
+  // Trapping attacks by returning E_ACCESSDENIED on discrepancies.
+  const base::Version browser_version_parsed(
+      base::WideToASCII(browser_version));
+  if (!browser_version_parsed.IsValid() ||
+      browser_version_parsed != registry_version_parsed) {
+    return E_ACCESSDENIED;
+  }
+
   base::CommandLine args(base::CommandLine::NO_PROGRAM);
-  if (!browser_appid.empty())
-    args.AppendSwitchNative("appguid", browser_appid);
-  args.AppendSwitchNative("browser-version", browser_version);
+  args.AppendSwitchNative("appguid", install_static::GetAppGuid());
+  args.AppendSwitchNative(installer::switches::kBrowserVersionSwitch,
+                          browser_version);
   args.AppendSwitchNative("sessionid", session_id);
   args.AppendSwitch("system");
 
@@ -331,14 +364,21 @@ HRESULT RunChromeRecoveryCRX(const base::FilePath& crx_path,
   if (FAILED(hr))
     return hr;
 
-  return RunCRX(crx_path, args,
-                crx_file::VerifierFormat::CRX3_WITH_PUBLISHER_PROOF,
+  crx_file::VerifierFormat format =
+      crx_file::VerifierFormat::CRX3_WITH_PUBLISHER_PROOF;
+  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
+          switches::kAllowUntrustedRecoveryHashForTesting)) {
+    format = crx_file::VerifierFormat::CRX3;
+  }
+
+  return RunCRX(crx_path, args, browser_version_parsed, format,
                 GetRecoveryCRXHash(), unpack_dir,
                 base::FilePath(kRecoveryExeName), caller_proc_id, proc_handle);
 }
 
 HRESULT RunCRX(const base::FilePath& crx_path,
                const base::CommandLine& args,
+               const base::Version& min_crx_version,
                const crx_file::VerifierFormat& crx_format,
                const std::vector<uint8_t>& crx_hash,
                const base::FilePath& unpack_under_path,
@@ -362,6 +402,38 @@ HRESULT RunCRX(const base::FilePath& crx_path,
                             &unpacked_crx_dir);
   if (FAILED(hr))
     return hr;
+
+  const auto manifest = [&]() -> std::optional<base::DictValue> {
+    base::FilePath manifest_path =
+        unpacked_crx_dir.GetPath().Append(FILE_PATH_LITERAL("manifest.json"));
+    if (!base::PathExists(manifest_path)) {
+      return std::nullopt;
+    }
+    JSONFileValueDeserializer deserializer(manifest_path);
+    std::string error;
+    std::unique_ptr<base::Value> root =
+        deserializer.Deserialize(nullptr, &error);
+    if (!root || !root->is_dict()) {
+      return std::nullopt;
+    }
+    return std::move(root->GetDict());
+  }();
+  if (!manifest) {
+    return E_FAIL;
+  }
+  const std::string* manifest_version_str = manifest->FindString("version");
+  if (!manifest_version_str) {
+    return E_FAIL;
+  }
+  const base::Version manifest_version(*manifest_version_str);
+  if (!manifest_version.IsValid()) {
+    return E_FAIL;
+  }
+
+  // Trapping attacks by mapping E_ACCESSDENIED on rollbacks.
+  if (manifest_version < min_crx_version) {
+    return E_ACCESSDENIED;
+  }
 
   const base::FilePath path_and_name =
       unpacked_crx_dir.GetPath().Append(exe_filename);

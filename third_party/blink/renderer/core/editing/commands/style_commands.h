@@ -115,11 +115,11 @@ class CORE_EXPORT StyleCommands {
                                                          Event*,
                                                          EditorCommandSource,
                                                          const String&);
-  static bool ExecuteStyleWithCSS(LocalFrame&,
+  static bool ExecuteStyleWithCss(LocalFrame&,
                                   Event*,
                                   EditorCommandSource,
                                   const String&);
-  static bool ExecuteUseCSS(LocalFrame&,
+  static bool ExecuteUseCss(LocalFrame&,
                             Event*,
                             EditorCommandSource,
                             const String&);
@@ -129,7 +129,7 @@ class CORE_EXPORT StyleCommands {
   static EditingTriState StateBold(LocalFrame&, Event*);
   static EditingTriState StateItalic(LocalFrame&, Event*);
   static EditingTriState StateStrikethrough(LocalFrame&, Event*);
-  static EditingTriState StateStyleWithCSS(LocalFrame&, Event*);
+  static EditingTriState StateStyleWithCss(LocalFrame&, Event*);
   static EditingTriState StateSubscript(LocalFrame&, Event*);
   static EditingTriState StateSuperscript(LocalFrame&, Event*);
   static EditingTriState StateTextWritingDirectionLeftToRight(LocalFrame&,
@@ -155,6 +155,7 @@ class CORE_EXPORT StyleCommands {
   static String ValueFontSizeDelta(const EditorInternalCommand&,
                                    LocalFrame&,
                                    Event*);
+  static String ValueJustify(const EditorInternalCommand&, LocalFrame&, Event*);
 
  private:
   static void ApplyStyle(LocalFrame&,
@@ -198,12 +199,12 @@ class CORE_EXPORT StyleCommands {
                                          CSSPropertyID,
                                          const CSSValue&);
   static bool SelectionStartHasStyle(LocalFrame&, CSSPropertyID, const String&);
-  static String SelectionStartCSSPropertyValue(LocalFrame&, CSSPropertyID);
+  static String SelectionStartCssPropertyValue(LocalFrame&, CSSPropertyID);
   static String ValueStyle(LocalFrame&, CSSPropertyID);
   static bool IsUnicodeBidiNestedOrMultipleEmbeddings(CSSValueID);
 
-  // TODO(editing-dev): We should make |textDirectionForSelection()| to take
-  // |selectionInDOMTree|.
+  // TODO(editing-dev): We should make |TextDirectionForSelection()| to take
+  // |SelectionInDomTree|.
   static mojo_base::mojom::blink::TextDirection
   TextDirectionForSelection(const VisibleSelection&, EditingStyle*, bool&);
   static EditingTriState StateTextWritingDirection(

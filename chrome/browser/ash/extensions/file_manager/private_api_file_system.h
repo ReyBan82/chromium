@@ -16,11 +16,13 @@
 #include <vector>
 
 #include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/types/expected.h"
 #include "chrome/browser/ash/extensions/file_manager/logged_extension_function.h"
 #include "chrome/browser/ash/file_manager/trash_info_validator.h"
-#include "chrome/browser/ash/policy/dlp/dlp_files_controller.h"
+#include "chrome/browser/ash/fileapi/recent_source.h"
+#include "chrome/browser/ash/policy/dlp/dlp_files_controller_ash.h"
 #include "chrome/common/extensions/api/file_manager_private.h"
 #include "chromeos/ash/components/drivefs/mojom/drivefs.mojom-forward.h"
 #include "components/drive/file_errors.h"
@@ -41,26 +43,13 @@ namespace file_manager {
 class EventRouter;
 namespace util {
 struct EntryDefinition;
-typedef std::vector<EntryDefinition> EntryDefinitionList;
+using EntryDefinitionList = std::vector<EntryDefinition>;
 }  // namespace util
 }  // namespace file_manager
 
-namespace drive {
-namespace util {
-class FileStreamMd5Digester;
-}  // namespace util
-
-// File path and its MD5 hash obtained from drive.
-struct HashAndFilePath {
-  std::string hash;
-  base::FilePath path;
-};
-
-namespace policy {
-class DlpFilesController;
-}  // namespace policy
-
-}  // namespace drive
+namespace drive::policy {
+class DlpFilesControllerAsh;
+}  // namespace drive::policy
 
 namespace extensions {
 
@@ -272,21 +261,6 @@ class FileManagerPrivateFormatVolumeFunction : public LoggedExtensionFunction {
   ResponseAction Run() override;
 };
 
-// Implements the chrome.fileManagerPrivate.singlePartitionFormat method.
-// Deletes removable device partitions, create a single partition and format.
-class FileManagerPrivateSinglePartitionFormatFunction
-    : public LoggedExtensionFunction {
- public:
-  DECLARE_EXTENSION_FUNCTION("fileManagerPrivate.singlePartitionFormat",
-                             FILEMANAGERPRIVATE_SINGLEPARTITIONFORMAT)
-
- protected:
-  ~FileManagerPrivateSinglePartitionFormatFunction() override = default;
-
-  // ExtensionFunction overrides.
-  ResponseAction Run() override;
-};
-
 // Implements the chrome.fileManagerPrivate.renameVolume method.
 // Renames Volume given its mount path and new Volume name.
 class FileManagerPrivateRenameVolumeFunction : public LoggedExtensionFunction {
@@ -324,7 +298,7 @@ class FileManagerPrivateInternalGetDisallowedTransfersFunction
       std::unique_ptr<file_manager::util::EntryDefinitionList>
           entry_definition_list);
 
-  Profile* profile_ = nullptr;
+  raw_ptr<Profile> profile_ = nullptr;
 
   std::vector<storage::FileSystemURL> source_urls_;
   storage::FileSystemURL destination_url_;
@@ -347,7 +321,7 @@ class FileManagerPrivateInternalGetDlpMetadataFunction
 
  private:
   void OnGetDlpMetadata(
-      std::vector<policy::DlpFilesController::DlpFileMetadata> dlp_metadata);
+      std::vector<policy::DlpFilesControllerAsh::DlpFileMetadata> dlp_metadata);
 
   std::vector<storage::FileSystemURL> source_urls_;
 };
@@ -420,59 +394,17 @@ class FileManagerPrivateInternalResolveIsolatedEntriesFunction
           entry_definition_list);
 };
 
-class FileManagerPrivateInternalComputeChecksumFunction
-    : public LoggedExtensionFunction {
- public:
-  FileManagerPrivateInternalComputeChecksumFunction();
-
-  DECLARE_EXTENSION_FUNCTION("fileManagerPrivateInternal.computeChecksum",
-                             FILEMANAGERPRIVATEINTERNAL_COMPUTECHECKSUM)
-
- protected:
-  ~FileManagerPrivateInternalComputeChecksumFunction() override;
-
-  // ExtensionFunction overrides.
-  ResponseAction Run() override;
-
- private:
-  scoped_refptr<drive::util::FileStreamMd5Digester> digester_;
-
-  void RespondWith(std::string hash);
-};
-
-// Implements the chrome.fileManagerPrivate.searchFilesByHashes method.
-class FileManagerPrivateSearchFilesByHashesFunction
-    : public LoggedExtensionFunction {
- public:
-  FileManagerPrivateSearchFilesByHashesFunction();
-
-  DECLARE_EXTENSION_FUNCTION("fileManagerPrivate.searchFilesByHashes",
-                             FILEMANAGERPRIVATE_SEARCHFILESBYHASHES)
-
- protected:
-  ~FileManagerPrivateSearchFilesByHashesFunction() override = default;
-
- private:
-  // ExtensionFunction overrides.
-  ResponseAction Run() override;
-
-  // Fallback to walking the filesystem and checking file attributes.
-  std::vector<drive::HashAndFilePath> SearchByAttribute(
-      const std::set<std::string>& hashes,
-      const base::FilePath& dir,
-      const base::FilePath& prefix);
-  void OnSearchByAttribute(const std::set<std::string>& hashes,
-                           const std::vector<drive::HashAndFilePath>& results);
-
-  // Sends a response with |results| to the extension.
-  void OnSearchByHashes(const std::set<std::string>& hashes,
-                        drive::FileError error,
-                        const std::vector<drive::HashAndFilePath>& results);
-};
-
 class FileManagerPrivateInternalSearchFilesFunction
     : public LoggedExtensionFunction {
  public:
+  // The type for matched files. The second element of the pair indicates if the
+  // path is that of a directory (true) or a plain file (false).
+  using FileSearchResults = std::vector<std::pair<base::FilePath, bool>>;
+
+  // A callback on which the results are to be delivered. The results are
+  // expected to be delivered in a single invocation.
+  using OnResultsReadyCallback = base::OnceCallback<void(FileSearchResults)>;
+
   FileManagerPrivateInternalSearchFilesFunction();
 
   DECLARE_EXTENSION_FUNCTION("fileManagerPrivateInternal.searchFiles",
@@ -482,11 +414,33 @@ class FileManagerPrivateInternalSearchFilesFunction
   ~FileManagerPrivateInternalSearchFilesFunction() override = default;
 
  private:
-  // ExtensionFunction overrides.
+  // ExtensionFunction overrides. The launch point of search by name
+  // and search image by keywords.
   ResponseAction Run() override;
 
-  void OnSearchByPatternDone(
-      const std::vector<std::pair<base::FilePath, bool>>& results);
+  // Runs the search files by file name task. Once done invokes the callback.
+  // The root_path is the path to the top level directory which is to be
+  // searched. Only results from this directory and nested directories are
+  // accepted.
+  void RunFileSearchByName(Profile* profile,
+                           base::FilePath root_path,
+                           const std::string& query,
+                           base::Time modified_time,
+                           ash::RecentSource::FileType file_type,
+                           size_t max_results,
+                           OnResultsReadyCallback callback);
+
+  // Runs the search images by query task. Once done invokes the callback.
+  // The root_path is the path to the top level directory which is to be
+  // searched. Only results from this directory and nested directories are
+  // accepted.
+  void RunImageSearchByQuery(base::FilePath root_path,
+                             const std::string& query,
+                             base::Time modified_time,
+                             size_t max_results,
+                             OnResultsReadyCallback callback);
+
+  void OnSearchByPatternDone(std::vector<FileSearchResults> results);
 };
 
 // Implements the chrome.fileManagerPrivate.getDirectorySize method.
@@ -545,6 +499,19 @@ class FileManagerPrivateResumeIOTaskFunction : public ExtensionFunction {
   ResponseAction Run() override;
 };
 
+// Implements the chrome.fileManagerPrivate.dismissIOTask method.
+class FileManagerPrivateDismissIOTaskFunction : public LoggedExtensionFunction {
+ public:
+  DECLARE_EXTENSION_FUNCTION("fileManagerPrivate.dismissIOTask",
+                             FILEMANAGERPRIVATE_DISMISSIOTASK)
+
+ protected:
+  ~FileManagerPrivateDismissIOTaskFunction() override = default;
+
+  // ExtensionFunction overrides
+  ResponseAction Run() override;
+};
+
 // Implements the chrome.fileManagerPrivate.progressPausedTasks method.
 class FileManagerPrivateProgressPausedTasksFunction : public ExtensionFunction {
  public:
@@ -553,6 +520,20 @@ class FileManagerPrivateProgressPausedTasksFunction : public ExtensionFunction {
 
  protected:
   ~FileManagerPrivateProgressPausedTasksFunction() override = default;
+
+  // ExtensionFunction overrides
+  ResponseAction Run() override;
+};
+
+// Implements the chrome.fileManagerPrivate.showPolicyDialog method.
+class FileManagerPrivateShowPolicyDialogFunction
+    : public LoggedExtensionFunction {
+ public:
+  DECLARE_EXTENSION_FUNCTION("fileManagerPrivate.showPolicyDialog",
+                             FILEMANAGERPRIVATE_SHOWPOLICYDIALOG)
+
+ protected:
+  ~FileManagerPrivateShowPolicyDialogFunction() override = default;
 
   // ExtensionFunction overrides
   ResponseAction Run() override;

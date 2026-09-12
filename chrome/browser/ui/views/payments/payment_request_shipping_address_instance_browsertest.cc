@@ -2,17 +2,28 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "base/strings/utf_string_conversions.h"
+#include "base/test/scoped_feature_list.h"
 #include "chrome/browser/ui/views/payments/payment_request_browsertest_base.h"
 #include "chrome/browser/ui/views/payments/payment_request_dialog_view_ids.h"
-#include "components/autofill/core/browser/autofill_test_utils.h"
-#include "components/autofill/core/browser/data_model/autofill_profile.h"
+#include "components/autofill/core/browser/data_model/addresses/autofill_profile.h"
+#include "components/autofill/core/browser/test_utils/autofill_test_util.h"
+#include "components/payments/core/features.h"
 #include "content/public/test/browser_test.h"
 
 namespace payments {
 namespace {
 
-using PaymentRequestShippingAddressInstanceTest = PaymentRequestBrowserTestBase;
+class PaymentRequestShippingAddressInstanceTest
+    : public PaymentRequestBrowserTestBase {
+ protected:
+  PaymentRequestShippingAddressInstanceTest() {
+    SetBypassUserInteractionForTesting();
+  }
+
+ private:
+  base::test::ScopedFeatureList feature_list_{
+      features::kPaymentRequestMandatoryPaymentAppUi};
+};
 
 // If the page creates multiple PaymentRequest objects, it should not crash.
 IN_PROC_BROWSER_TEST_F(PaymentRequestShippingAddressInstanceTest,
@@ -33,9 +44,9 @@ IN_PROC_BROWSER_TEST_F(PaymentRequestShippingAddressInstanceTest,
   // requested. Click on the 'Pay' button and wait for the PaymentHandler to
   // (automatically) handle the payment.
   ResetEventWaiterForSequence(
-      {DialogEvent::PROCESSING_SPINNER_SHOWN, DialogEvent::DIALOG_CLOSED});
+      {DialogEvent::LOADING_VIEW_SHOWN, DialogEvent::DIALOG_CLOSED});
   ClickOnDialogViewAndWait(DialogViewID::PAY_BUTTON, dialog_view());
-  WaitForObservedEvent();
+  ASSERT_TRUE(WaitForObservedEvent());
 
   // Verify that the shippingAddress instance in the request and response were
   // the same object instance.

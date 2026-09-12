@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/byte_size.h"
 #include "base/containers/flat_map.h"
 #include "base/files/file_path.h"
 #include "base/gtest_prod_util.h"
@@ -25,7 +26,6 @@
 #include "third_party/blink/public/mojom/service_worker/navigation_preload_state.mojom.h"
 #include "third_party/blink/public/mojom/service_worker/service_worker_registration_options.mojom.h"
 #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom.h"
-#include "url/gurl.h"
 #include "url/origin.h"
 
 namespace base {
@@ -35,7 +35,6 @@ class Location;
 namespace leveldb {
 class DB;
 class Env;
-class Status;
 class WriteBatch;
 }  // namespace leveldb
 
@@ -46,7 +45,7 @@ namespace storage {
 // file io. The ServiceWorkerStorage class owns this class and
 // is responsible for only calling it serially on background
 // non-IO threads (ala SequencedWorkerPool).
-// TODO(crbug.com/1016064): Update the above comments once the instance of this
+// TODO(crbug.com/40103973): Update the above comments once the instance of this
 // class lives in the Storage Service.
 class ServiceWorkerDatabase {
  public:
@@ -71,7 +70,7 @@ class ServiceWorkerDatabase {
   struct DeletedVersion {
     int64_t registration_id = blink::mojom::kInvalidServiceWorkerRegistrationId;
     int64_t version_id = blink::mojom::kInvalidServiceWorkerVersionId;
-    uint64_t resources_total_size_bytes = 0;
+    base::ByteSize resources_total_size;
     std::vector<int64_t /*=resource_id*/> newly_purgeable_resources;
 
     DeletedVersion();
@@ -101,7 +100,7 @@ class ServiceWorkerDatabase {
 
   // Reads the total resource size stored in the database for |key|.
   Status GetUsageForStorageKey(const blink::StorageKey& key,
-                               int64_t& out_usage);
+                               base::ByteSize& out_usage);
 
   // Reads all registrations from the database. Returns OK if successfully read
   // or not found. Otherwise, returns an error.
@@ -289,8 +288,8 @@ class ServiceWorkerDatabase {
   // Resources are moved to the purgeable list. Returns OK if
   // they are successfully deleted or not found in the database. Otherwise,
   // returns an error.
-  Status DeleteAllDataForStorageKeys(
-      const std::set<blink::StorageKey>& keys,
+  Status DeleteAllDataForOrigins(
+      const std::set<url::Origin>& origins,
       std::vector<int64_t>* newly_purgeable_resources);
 
   // Completely deletes the contents of the database.
@@ -431,6 +430,12 @@ class ServiceWorkerDatabase {
   FRIEND_TEST_ALL_PREFIXES(ServiceWorkerDatabaseTest,
                            DatabaseVersion_CorruptedSchemaVersion);
   FRIEND_TEST_ALL_PREFIXES(ServiceWorkerDatabaseTest, GetNextAvailableIds);
+  FRIEND_TEST_ALL_PREFIXES(
+      ServiceWorkerDatabaseTest,
+      GetNextAvailableIds_MissingMetadataWithRegistrations);
+  FRIEND_TEST_ALL_PREFIXES(
+      ServiceWorkerDatabaseTest,
+      GetNextAvailableIds_MissingMetadataWithRegistrations_FeatureDisabled);
   FRIEND_TEST_ALL_PREFIXES(ServiceWorkerDatabaseTest,
                            Registration_UninitializedDatabase);
   FRIEND_TEST_ALL_PREFIXES(ServiceWorkerDatabaseTest,
@@ -441,6 +446,10 @@ class ServiceWorkerDatabase {
                            NoCrossOriginEmbedderPolicyValue);
   FRIEND_TEST_ALL_PREFIXES(ServiceWorkerDatabaseTest, NoFetchHandlerType);
   FRIEND_TEST_ALL_PREFIXES(ServiceWorkerDatabaseTest, FetchHandlerType);
+  FRIEND_TEST_ALL_PREFIXES(ServiceWorkerDatabaseTest,
+                           RouterRulesLegacyPathname);
+  FRIEND_TEST_ALL_PREFIXES(ServiceWorkerDatabaseTest,
+                           EnsureNetworkAndFetchHandlerSet);
 };
 
 }  // namespace storage

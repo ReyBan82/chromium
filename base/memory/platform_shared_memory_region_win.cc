@@ -8,13 +8,25 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "base/allocator/partition_allocator/page_allocator.h"
+#include <string_view>
+
 #include "base/bits.h"
+#include "base/check.h"
+#include "base/check_op.h"
+#include "base/debug/crash_logging.h"
+#include "base/feature_list.h"
+#include "base/features.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/process/process_handle.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/threading/platform_thread.h"
+#include "base/time/time.h"
+#include "base/types/expected.h"
+#include "partition_alloc/oom.h"
+#include "partition_alloc/page_allocator.h"
 
 namespace base::subtle {
 
@@ -37,6 +49,10 @@ typedef ULONG(__stdcall* NtQuerySectionType)(
     ULONG SectionInformationLength,
     PULONG ResultLength);
 
+// Global hook to override `CreateFileMappingW()` for testing purposes.
+PlatformSharedMemoryRegion::CreateFileMappingCallback
+    g_create_file_mapping_hook = nullptr;
+
 // Checks if the section object is safe to map. At the moment this just means
 // it's not an image section.
 bool IsSectionSafeToMap(HANDLE handle) {
@@ -50,9 +66,26 @@ bool IsSectionSafeToMap(HANDLE handle) {
   ULONG status =
       nt_query_section_func(handle, SectionBasicInformation, &basic_information,
                             sizeof(basic_information), nullptr);
-  if (status)
+  if (status) {
     return false;
+  }
   return (basic_information.Attributes & SEC_IMAGE) != SEC_IMAGE;
+}
+
+// Sets the value of the "SharedMemoryRegionCreationFailure" crash key to
+// `value`, with an optional error code appended to it. The value will be
+// available in the dump if the process crashes at a later point in time.
+void SetSharedMemoryRegionCreationFailureCrashKey(
+    std::string_view value,
+    std::optional<DWORD> last_error = std::nullopt) {
+  static auto* const crash_key = debug::AllocateCrashKeyString(
+      "SharedMemoryRegionCreationFailure", debug::CrashKeySize::Size32);
+  if (last_error.has_value()) {
+    debug::SetCrashKeyString(
+        crash_key, StrCat({value, "|", NumberToString(last_error.value())}));
+  } else {
+    debug::SetCrashKeyString(crash_key, value);
+  }
 }
 
 // Returns a HANDLE on success and |nullptr| on failure.
@@ -68,53 +101,109 @@ bool IsSectionSafeToMap(HANDLE handle) {
 // In order to remove the access control permissions, after being created the
 // handle is duplicated with only the file access permissions.
 HANDLE CreateFileMappingWithReducedPermissions(SECURITY_ATTRIBUTES* sa,
-                                               size_t rounded_size,
+                                               size_t size,
                                                LPCWSTR name) {
-  HANDLE h = CreateFileMapping(INVALID_HANDLE_VALUE, sa, PAGE_READWRITE, 0,
-                               static_cast<DWORD>(rounded_size), name);
+  auto create_file_mapping = [&]() {
+    if (g_create_file_mapping_hook) {
+      return g_create_file_mapping_hook(INVALID_HANDLE_VALUE, sa,
+                                        PAGE_READWRITE, 0,
+                                        static_cast<DWORD>(size), name);
+    }
+    return ::CreateFileMapping(INVALID_HANDLE_VALUE, sa, PAGE_READWRITE, 0,
+                               static_cast<DWORD>(size), name);
+  };
+
+  HANDLE h = create_file_mapping();
+
+  // Retry `CreateFileMappingW()` if the system commit limit is reached.
+  // Attempts up to `kMaxTries` times, waiting `kDelayMs` between attempts.
+  // Calls `TerminateAnotherProcessOnCommitFailure()` to intentionally free up
+  // system memory before retrying.
+  if (!h && ::GetLastError() == ERROR_COMMITMENT_LIMIT &&
+      base::FeatureList::IsEnabled(
+          base::features::kRetryCreateFileMappingOnCommitLimit)) {
+    // This retry mechanic is inspired by the proven OOM handling logic found in
+    // components/memory_pressure/system_memory_pressure_evaluator_win.cc. These
+    // specific variables are chosen to match that existing behavior.
+    constexpr int kMaxTries = 25;
+    constexpr base::TimeDelta kDelay = base::Milliseconds(50);
+
+    for (int tries = 0; tries < kMaxTries; ++tries) {
+      partition_alloc::TerminateAnotherProcessOnCommitFailure();
+      // A process is terminated to free memory. The sleep gives the OS a
+      // chance to liberate pages. This intentionally blocks the thread, but
+      // this emergency path is only entered when an Out-Of-Memory crash is
+      // inevitable.
+      base::PlatformThread::Sleep(kDelay);
+
+      h = create_file_mapping();
+
+      if (h) {
+        break;
+      }
+
+      // If it failed again, but for a different reason than a commit limit,
+      // waiting won't help. Bail out early.
+      if (::GetLastError() != ERROR_COMMITMENT_LIMIT) {
+        break;
+      }
+    }
+  }
+
   if (!h) {
+    SetSharedMemoryRegionCreationFailureCrashKey("create-file-mapping",
+                                                 ::GetLastError());
     return nullptr;
   }
 
   HANDLE h2;
   ProcessHandle process = GetCurrentProcess();
   BOOL success = ::DuplicateHandle(
-      process, h, process, &h2, FILE_MAP_READ | FILE_MAP_WRITE | SECTION_QUERY,
-      FALSE, 0);
+      process, h, process, &h2,
+      FILE_MAP_READ | FILE_MAP_WRITE | SECTION_QUERY | READ_CONTROL, FALSE, 0);
+  const DWORD last_error = ::GetLastError();
   BOOL rv = ::CloseHandle(h);
   DCHECK(rv);
 
   if (!success) {
+    SetSharedMemoryRegionCreationFailureCrashKey("duplicate-handle",
+                                                 last_error);
     return nullptr;
   }
 
+  CHECK(h2);
   return h2;
 }
 
 }  // namespace
 
 // static
-PlatformSharedMemoryRegion PlatformSharedMemoryRegion::Take(
-    win::ScopedHandle handle,
-    Mode mode,
-    size_t size,
-    const UnguessableToken& guid) {
-  if (!handle.is_valid())
+expected<PlatformSharedMemoryRegion, PlatformSharedMemoryRegion::TakeError>
+PlatformSharedMemoryRegion::TakeOrFail(win::ScopedHandle handle,
+                                       Mode mode,
+                                       size_t size,
+                                       const UnguessableToken& guid) {
+  if (!handle.is_valid()) {
     return {};
+  }
 
-  if (size == 0)
+  if (size == 0) {
     return {};
+  }
 
-  if (size > static_cast<size_t>(std::numeric_limits<int>::max()))
+  if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
     return {};
+  }
 
-  if (!IsSectionSafeToMap(handle.get()))
+  if (!IsSectionSafeToMap(handle.get())) {
     return {};
+  }
 
-  CHECK(
-      CheckPlatformHandlePermissionsCorrespondToMode(handle.get(), mode, size));
-
-  return PlatformSharedMemoryRegion(std::move(handle), mode, size, guid);
+  return CheckPlatformHandlePermissionsCorrespondToMode(handle.get(), mode,
+                                                        size)
+      .transform([&] {
+        return PlatformSharedMemoryRegion(std::move(handle), mode, size, guid);
+      });
 }
 
 HANDLE PlatformSharedMemoryRegion::GetPlatformHandle() const {
@@ -126,8 +215,9 @@ bool PlatformSharedMemoryRegion::IsValid() const {
 }
 
 PlatformSharedMemoryRegion PlatformSharedMemoryRegion::Duplicate() const {
-  if (!IsValid())
+  if (!IsValid()) {
     return {};
+  }
 
   CHECK_NE(mode_, Mode::kWritable)
       << "Duplicating a writable shared memory region is prohibited";
@@ -137,16 +227,18 @@ PlatformSharedMemoryRegion PlatformSharedMemoryRegion::Duplicate() const {
   BOOL success =
       ::DuplicateHandle(process, handle_.get(), process, &duped_handle, 0,
                         FALSE, DUPLICATE_SAME_ACCESS);
-  if (!success)
+  if (!success) {
     return {};
+  }
 
   return PlatformSharedMemoryRegion(win::ScopedHandle(duped_handle), mode_,
                                     size_, guid_);
 }
 
 bool PlatformSharedMemoryRegion::ConvertToReadOnly() {
-  if (!IsValid())
+  if (!IsValid()) {
     return false;
+  }
 
   CHECK_EQ(mode_, Mode::kWritable)
       << "Only writable shared memory region can be converted to read-only";
@@ -158,8 +250,9 @@ bool PlatformSharedMemoryRegion::ConvertToReadOnly() {
   BOOL success =
       ::DuplicateHandle(process, handle_copy.get(), process, &duped_handle,
                         FILE_MAP_READ | SECTION_QUERY, FALSE, 0);
-  if (!success)
+  if (!success) {
     return false;
+  }
 
   handle_.Set(duped_handle);
   mode_ = Mode::kReadOnly;
@@ -167,8 +260,9 @@ bool PlatformSharedMemoryRegion::ConvertToReadOnly() {
 }
 
 bool PlatformSharedMemoryRegion::ConvertToUnsafe() {
-  if (!IsValid())
+  if (!IsValid()) {
     return false;
+  }
 
   CHECK_EQ(mode_, Mode::kWritable)
       << "Only writable shared memory region can be converted to unsafe";
@@ -180,17 +274,26 @@ bool PlatformSharedMemoryRegion::ConvertToUnsafe() {
 // static
 PlatformSharedMemoryRegion PlatformSharedMemoryRegion::Create(Mode mode,
                                                               size_t size) {
-  // TODO(crbug.com/210609): NaCl forces us to round up 64k here, wasting 32k
-  // per mapping on average.
-  static const size_t kSectionSize = 65536;
   if (size == 0) {
+    SetSharedMemoryRegionCreationFailureCrashKey("size-zero");
     return {};
   }
 
-  // Aligning may overflow so check that the result doesn't decrease.
+  // Historically, //base aligned sizes to 64k due to NaCl constraints (see
+  // crbug.com/40307662). Windows itself doesn't enforce any alignment on
+  // sizes (internally, it appears to align on page size though).
+  //
+  // However, Windows also has the concept of "allocation granularity", which
+  // is 64K–this is probably the origin of NaCl's constraints. However, even
+  // though NaCl is gone, V8's address space management has many `CHECK()`s
+  // throughout that the size is aligned to allocation granularity–so for now,
+  // preserve the old alignment behavior to avoid breaking V8.
+  static const size_t kSectionSize = 65536;
   size_t rounded_size = bits::AlignUp(size, kSectionSize);
+  // Aligning may overflow so check that the result doesn't decrease.
   if (rounded_size < size ||
       rounded_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    SetSharedMemoryRegionCreationFailureCrashKey("size-too-large");
     return {};
   }
 
@@ -201,12 +304,17 @@ PlatformSharedMemoryRegion PlatformSharedMemoryRegion::Create(Mode mode,
   ACL dacl;
   SECURITY_DESCRIPTOR sd;
   if (!InitializeAcl(&dacl, sizeof(dacl), ACL_REVISION)) {
+    SetSharedMemoryRegionCreationFailureCrashKey("init-acl", ::GetLastError());
     return {};
   }
   if (!InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION)) {
+    SetSharedMemoryRegionCreationFailureCrashKey("init-security-desc",
+                                                 ::GetLastError());
     return {};
   }
   if (!SetSecurityDescriptorDacl(&sd, TRUE, &dacl, FALSE)) {
+    SetSharedMemoryRegionCreationFailureCrashKey("set-security-desc",
+                                                 ::GetLastError());
     return {};
   }
 
@@ -217,13 +325,15 @@ PlatformSharedMemoryRegion PlatformSharedMemoryRegion::Create(Mode mode,
   HANDLE h = CreateFileMappingWithReducedPermissions(
       &sa, rounded_size, name.empty() ? nullptr : as_wcstr(name));
   if (h == nullptr) {
-    // The error is logged within CreateFileMappingWithReducedPermissions().
+    // SetSharedMemoryRegionCreationFailureCrashKey() is invoked inside
+    // CreateFileMappingWithReducedPermissions().
     return {};
   }
 
   win::ScopedHandle scoped_h(h);
   // Check if the shared memory pre-exists.
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
+    SetSharedMemoryRegionCreationFailureCrashKey("already-exists");
     return {};
   }
 
@@ -232,7 +342,8 @@ PlatformSharedMemoryRegion PlatformSharedMemoryRegion::Create(Mode mode,
 }
 
 // static
-bool PlatformSharedMemoryRegion::CheckPlatformHandlePermissionsCorrespondToMode(
+expected<void, PlatformSharedMemoryRegion::TakeError>
+PlatformSharedMemoryRegion::CheckPlatformHandlePermissionsCorrespondToMode(
     PlatformSharedMemoryHandle handle,
     Mode mode,
     size_t size) {
@@ -251,13 +362,11 @@ bool PlatformSharedMemoryRegion::CheckPlatformHandlePermissionsCorrespondToMode(
   bool expected_read_only = mode == Mode::kReadOnly;
 
   if (is_read_only != expected_read_only) {
-    DLOG(ERROR) << "File mapping handle has wrong access rights: it is"
-                << (is_read_only ? " " : " not ") << "read-only but it should"
-                << (expected_read_only ? " " : " not ") << "be";
-    return false;
+    return unexpected(expected_read_only ? TakeError::kExpectedReadOnlyButNot
+                                         : TakeError::kExpectedWritableButNot);
   }
 
-  return true;
+  return ok();
 }
 
 PlatformSharedMemoryRegion::PlatformSharedMemoryRegion(
@@ -266,5 +375,11 @@ PlatformSharedMemoryRegion::PlatformSharedMemoryRegion(
     size_t size,
     const UnguessableToken& guid)
     : handle_(std::move(handle)), mode_(mode), size_(size), guid_(guid) {}
+
+// static
+void PlatformSharedMemoryRegion::SetCreateFileMappingCallbackForTesting(
+    CreateFileMappingCallback callback) {
+  g_create_file_mapping_hook = callback;  // IN-TEST
+}
 
 }  // namespace base::subtle

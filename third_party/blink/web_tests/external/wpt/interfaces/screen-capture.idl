@@ -8,12 +8,13 @@ partial interface MediaDevices {
 };
 
 enum CaptureStartFocusBehavior {
+  "focus-capturing-application",
   "focus-captured-surface",
   "no-focus-change"
 };
 
 [Exposed=Window, SecureContext]
-interface CaptureController {
+interface CaptureController : EventTarget {
   constructor();
   undefined setFocusBehavior(CaptureStartFocusBehavior focusBehavior);
 };
@@ -28,9 +29,24 @@ enum SystemAudioPreferenceEnum {
   "exclude"
 };
 
+enum WindowAudioPreferenceEnum {
+  "system",
+  "window",
+  "exclude"
+};
+
 enum SurfaceSwitchingPreferenceEnum {
   "include",
   "exclude"
+};
+
+enum MonitorTypeSurfacesEnum {
+  "include",
+  "exclude"
+};
+
+enum AudioSelectionPreferenceEnum {
+  "preferred"
 };
 
 dictionary DisplayMediaStreamOptions {
@@ -39,7 +55,10 @@ dictionary DisplayMediaStreamOptions {
   CaptureController controller;
   SelfCapturePreferenceEnum selfBrowserSurface;
   SystemAudioPreferenceEnum systemAudio;
+  WindowAudioPreferenceEnum windowAudio;
   SurfaceSwitchingPreferenceEnum surfaceSwitching;
+  MonitorTypeSurfacesEnum monitorTypeSurfaces;
+  AudioSelectionPreferenceEnum audioSelection;
 };
 
 partial dictionary MediaTrackSupportedConstraints {
@@ -64,6 +83,7 @@ partial dictionary MediaTrackSettings {
   DOMString cursor;
   boolean restrictOwnAudio;
   boolean suppressLocalAudioPlayback;
+  double screenPixelRatio;
 };
 
 partial dictionary MediaTrackCapabilities {

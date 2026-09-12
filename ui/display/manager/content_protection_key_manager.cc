@@ -4,9 +4,9 @@
 
 #include "ui/display/manager/content_protection_key_manager.h"
 
-#include "base/containers/contains.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/display/display_features.h"
-#include "ui/display/manager/display_manager_util.h"
+#include "ui/display/manager/util/display_manager_util.h"
 
 namespace display {
 
@@ -17,7 +17,8 @@ namespace {
 constexpr size_t kHdcpKeySize = 285;
 
 display::DisplaySnapshot* GetDisplayWithIdIfHdcpCapableAndKeyNeeded(
-    const std::vector<display::DisplaySnapshot*>& displays_states,
+    const std::vector<raw_ptr<display::DisplaySnapshot, VectorExperimental>>&
+        displays_states,
     int64_t display_id) {
   for (display::DisplaySnapshot* display : displays_states) {
     if (display->display_id() == display_id) {
@@ -41,7 +42,8 @@ ContentProtectionKeyManager::ContentProtectionKeyManager() = default;
 ContentProtectionKeyManager::~ContentProtectionKeyManager() = default;
 
 void ContentProtectionKeyManager::SetKeyIfRequired(
-    const std::vector<DisplaySnapshot*>& displays_states,
+    const std::vector<raw_ptr<DisplaySnapshot, VectorExperimental>>&
+        displays_states,
     int64_t display_id,
     KeySetCallback on_key_set) {
   DCHECK(!on_key_set.is_null());
@@ -105,8 +107,11 @@ void ContentProtectionKeyManager::OnKeyFetchedFromServer(
 }
 
 void ContentProtectionKeyManager::InjectKeyToKernel(int64_t display_id) {
-  // TODO(markyacoub): Replace and truly inject key to kernel.
-  OnKeyInjectedToKernel(display_id, true);
+  DCHECK(native_display_delegate_);
+  native_display_delegate_->SetHdcpKeyProp(
+      display_id, cached_provisioned_key_,
+      base::BindOnce(&ContentProtectionKeyManager::OnKeyInjectedToKernel,
+                     weak_ptr_factory_.GetWeakPtr(), display_id));
 }
 
 void ContentProtectionKeyManager::OnKeyInjectedToKernel(int64_t display_id,
@@ -118,7 +123,7 @@ void ContentProtectionKeyManager::OnKeyInjectedToKernel(int64_t display_id,
 
 void ContentProtectionKeyManager::TriggerPendingCallbacks(int64_t display_id,
                                                           bool is_key_set) {
-  CHECK(base::Contains(pending_display_callbacks_, display_id));
+  CHECK(pending_display_callbacks_.contains(display_id));
   KeySetCallback callback = std::move(pending_display_callbacks_[display_id]);
   DCHECK(!callback.is_null());
   std::move(callback).Run(is_key_set);

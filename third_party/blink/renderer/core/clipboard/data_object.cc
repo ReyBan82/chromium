@@ -31,49 +31,63 @@
 #include "third_party/blink/renderer/core/clipboard/data_object.h"
 
 #include <utility>
+#include <variant>
 
-#include "base/functional/overloaded.h"
 #include "base/notreached.h"
-#include "third_party/abseil-cpp/absl/types/variant.h"
+#include "base/task/single_thread_task_runner.h"
+#include "third_party/abseil-cpp/absl/functional/overload.h"
+#include "third_party/abseil-cpp/absl/numeric/int128.h"
 #include "third_party/blink/public/platform/file_path_conversion.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/web_drag_data.h"
-#include "third_party/blink/renderer/core/clipboard/clipboard_mime_types.h"
 #include "third_party/blink/renderer/core/clipboard/clipboard_utilities.h"
 #include "third_party/blink/renderer/core/clipboard/dragged_isolated_file_system.h"
 #include "third_party/blink/renderer/core/clipboard/paste_mode.h"
 #include "third_party/blink/renderer/core/clipboard/system_clipboard.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
+#include "third_party/blink/renderer/core/fileapi/file_reader_client.h"
+#include "third_party/blink/renderer/core/fileapi/file_reader_data.h"
+#include "third_party/blink/renderer/core/typed_arrays/array_buffer/array_buffer_contents.h"
 #include "third_party/blink/renderer/platform/blob/blob_data.h"
 #include "third_party/blink/renderer/platform/file_metadata.h"
+#include "third_party/blink/renderer/platform/image-decoders/image_decoder.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/wtf/hash_set.h"
+#include "third_party/blink/renderer/platform/wtf/shared_buffer.h"
+#include "ui/base/clipboard/clipboard_constants.h"
 
 namespace blink {
 
 // static
-DataObject* DataObject::CreateFromClipboard(SystemClipboard* system_clipboard,
+DataObject* DataObject::CreateFromClipboard(ExecutionContext* context,
+                                            SystemClipboard* system_clipboard,
                                             PasteMode paste_mode) {
   DataObject* data_object = Create();
 #if DCHECK_IS_ON()
   HashSet<String> types_seen;
 #endif
-  ClipboardSequenceNumberToken sequence_number =
-      system_clipboard->SequenceNumber();
+  absl::uint128 sequence_number = system_clipboard->SequenceNumber();
   for (const String& type : system_clipboard->ReadAvailableTypes()) {
-    if (paste_mode == PasteMode::kPlainTextOnly && type != kMimeTypeTextPlain)
+    if (paste_mode == PasteMode::kPlainTextOnly &&
+        type != ui::kMimeTypePlainText) {
       continue;
+    }
     mojom::blink::ClipboardFilesPtr files;
-    if (type == kMimeTypeTextURIList) {
+    if (type == ui::kMimeTypeUriList) {
       files = system_clipboard->ReadFiles();
-      // Ignore ReadFiles() result if clipboard sequence number has changed.
-      if (system_clipboard->SequenceNumber() != sequence_number) {
-        files->files.clear();
-      }
-      for (const mojom::blink::DataTransferFilePtr& file : files->files) {
-        data_object->AddFilename(
-            FilePathToString(file->path), FilePathToString(file->display_name),
-            files->file_system_id,
-            base::MakeRefCounted<FileSystemAccessDropData>(
-                std::move(file->file_system_access_token)));
+      if (files) {
+        // Ignore ReadFiles() result if clipboard sequence number has changed.
+        if (system_clipboard->SequenceNumber() != sequence_number) {
+          files->files.clear();
+        } else {
+          for (const mojom::blink::DataTransferFilePtr& file : files->files) {
+            data_object->AddFilename(
+                context, FilePathToString(file->path),
+                FilePathToString(file->display_name), files->file_system_id,
+                base::MakeRefCounted<FileSystemAccessDropData>(
+                    std::move(file->file_system_access_token)));
+          }
+        }
       }
     }
     if (files && !files->files.empty()) {
@@ -89,10 +103,15 @@ DataObject* DataObject::CreateFromClipboard(SystemClipboard* system_clipboard,
   return data_object;
 }
 
+DataObject* DataObject::CreateFromClipboard(SystemClipboard* system_clipboard,
+                                            PasteMode paste_mode) {
+  return CreateFromClipboard(/*context=*/nullptr, system_clipboard, paste_mode);
+}
+
 // static
 DataObject* DataObject::CreateFromString(const String& data) {
   DataObject* data_object = Create();
-  data_object->Add(data, kMimeTypeTextPlain);
+  data_object->Add(data, ui::kMimeTypePlainText);
   return data_object;
 }
 
@@ -110,7 +129,7 @@ uint32_t DataObject::length() const {
 DataObjectItem* DataObject::Item(uint32_t index) {
   if (index >= length())
     return nullptr;
-  return item_list_[index];
+  return item_list_[index].Get();
 }
 
 void DataObject::DeleteItem(uint32_t index) {
@@ -118,6 +137,23 @@ void DataObject::DeleteItem(uint32_t index) {
     return;
   item_list_.EraseAt(index);
   NotifyItemListChanged();
+}
+
+void DataObject::ClearStringItems() {
+  if (item_list_.empty()) {
+    return;
+  }
+
+  wtf_size_t num_items_before = item_list_.size();
+  item_list_.erase(std::remove_if(item_list_.begin(), item_list_.end(),
+                                  [](Member<DataObjectItem> item) {
+                                    return item->Kind() ==
+                                           DataObjectItem::kStringKind;
+                                  }),
+                   item_list_.end());
+  if (num_items_before != item_list_.size()) {
+    NotifyItemListChanged();
+  }
 }
 
 void DataObject::ClearAll() {
@@ -186,9 +222,13 @@ Vector<String> DataObject::Types() const {
     }
   }
   if (contains_files) {
-    results.push_back(kMimeTypeFiles);
+    // The "Files" value that isn't a MIME type but that is inserted into the
+    // types array when files are present in the store item list. See
+    // https://html.spec.whatwg.org/multipage/dnd.html#concept-datatransfer-types.
+    constexpr char kPseudoMimeTypeFiles[] = "Files";
+    results.push_back(kPseudoMimeTypeFiles);
 #if DCHECK_IS_ON()
-    DCHECK(types_seen.insert(kMimeTypeFiles).is_new_entry);
+    DCHECK(types_seen.insert(kPseudoMimeTypeFiles).is_new_entry);
 #endif
   }
   return results;
@@ -204,12 +244,13 @@ String DataObject::GetData(const String& type) const {
 
 void DataObject::SetData(const String& type, const String& data) {
   ClearData(type);
-  if (!Add(data, type))
+  if (!Add(data, type)) {
     NOTREACHED();
+  }
 }
 
 void DataObject::UrlAndTitle(String& url, String* title) const {
-  DataObjectItem* item = FindStringItem(kMimeTypeTextURIList);
+  DataObjectItem* item = FindStringItem(ui::kMimeTypeUriList);
   if (!item)
     return;
   url = ConvertURIListToURL(item->GetAsString());
@@ -218,12 +259,12 @@ void DataObject::UrlAndTitle(String& url, String* title) const {
 }
 
 void DataObject::SetURLAndTitle(const String& url, const String& title) {
-  ClearData(kMimeTypeTextURIList);
+  ClearData(ui::kMimeTypeUriList);
   InternalAddStringItem(DataObjectItem::CreateFromURL(url, title));
 }
 
 void DataObject::HtmlAndBaseURL(String& html, KURL& base_url) const {
-  DataObjectItem* item = FindStringItem(kMimeTypeTextHTML);
+  DataObjectItem* item = FindStringItem(ui::kMimeTypeHtml);
   if (!item)
     return;
   html = item->GetAsString();
@@ -231,8 +272,19 @@ void DataObject::HtmlAndBaseURL(String& html, KURL& base_url) const {
 }
 
 void DataObject::SetHTMLAndBaseURL(const String& html, const KURL& base_url) {
-  ClearData(kMimeTypeTextHTML);
+  ClearData(ui::kMimeTypeHtml);
   InternalAddStringItem(DataObjectItem::CreateFromHTML(html, base_url));
+}
+
+Vector<String> DataObject::Urls() const {
+  Vector<String> results;
+  for (const auto& item : item_list_) {
+    if (item->Kind() == DataObjectItem::kStringKind &&
+        item->GetType() == ui::kMimeTypeUriList) {
+      results.push_back(ConvertURIListToURL(item->GetAsString()));
+    }
+  }
+  return results;
 }
 
 bool DataObject::ContainsFilenames() const {
@@ -253,13 +305,14 @@ Vector<String> DataObject::Filenames() const {
 }
 
 void DataObject::AddFilename(
+    ExecutionContext* context,
     const String& filename,
     const String& display_name,
     const String& file_system_id,
     scoped_refptr<FileSystemAccessDropData> file_system_access_entry) {
   InternalAddFileItem(DataObjectItem::CreateFromFileWithFileSystemId(
-      File::CreateForUserProvidedFile(filename, display_name), file_system_id,
-      std::move(file_system_access_entry)));
+      File::CreateForUserProvidedFile(context, filename, display_name),
+      file_system_id, std::move(file_system_access_entry)));
 }
 
 void DataObject::AddFileSharedBuffer(scoped_refptr<SharedBuffer> buffer,
@@ -277,7 +330,7 @@ DataObject::DataObject() : modifiers_(0) {}
 DataObjectItem* DataObject::FindStringItem(const String& type) const {
   for (const auto& item : item_list_) {
     if (item->Kind() == DataObjectItem::kStringKind && item->GetType() == type)
-      return item;
+      return item.Get();
   }
   return nullptr;
 }
@@ -318,17 +371,18 @@ void DataObject::Trace(Visitor* visitor) const {
 }
 
 // static
-DataObject* DataObject::Create(const WebDragData& data) {
+DataObject* DataObject::Create(ExecutionContext* context,
+                               const WebDragData& data) {
   DataObject* data_object = Create();
   bool has_file_system = false;
 
   for (const WebDragData::Item& item : data.Items()) {
-    absl::visit(
-        base::Overloaded{
+    std::visit(
+        absl::Overload{
             [&](const WebDragData::StringItem& item) {
-              if (String(item.type) == kMimeTypeTextURIList) {
+              if (String(item.type) == ui::kMimeTypeUriList) {
                 data_object->SetURLAndTitle(item.data, item.title);
-              } else if (String(item.type) == kMimeTypeTextHTML) {
+              } else if (String(item.type) == ui::kMimeTypeHtml) {
                 data_object->SetHTMLAndBaseURL(item.data, item.base_url);
               } else {
                 data_object->SetData(item.type, item.data);
@@ -336,8 +390,8 @@ DataObject* DataObject::Create(const WebDragData& data) {
             },
             [&](const WebDragData::FilenameItem& item) {
               has_file_system = true;
-              data_object->AddFilename(item.filename, item.display_name,
-                                       data.FilesystemId(),
+              data_object->AddFilename(context, item.filename,
+                                       item.display_name, data.FilesystemId(),
                                        item.file_system_access_entry);
             },
             [&](const WebDragData::BinaryDataItem& item) {
@@ -379,6 +433,7 @@ DataObject* DataObject::Create(const WebDragData& data) {
   }
 
   data_object->SetFilesystemId(data.FilesystemId());
+  data_object->SetSourceEffectAllowed(data.SourceEffectAllowed());
 
   if (has_file_system)
     DraggedIsolatedFileSystem::PrepareForDataObject(data_object);
@@ -386,9 +441,65 @@ DataObject* DataObject::Create(const WebDragData& data) {
   return data_object;
 }
 
-WebDragData DataObject::ToWebDragData() {
+DataObject* DataObject::Create(const WebDragData& data) {
+  return Create(/*context=*/nullptr, data);
+}
+
+namespace {
+
+// Synchronously reads all bytes from a BlobDataHandle into a SharedBuffer.
+// Used to populate file contents for JS-constructed File objects
+// (e.g. new File([bytes], 'photo.jpg')) during drag start.
+// 256MB matches the upper limit used for synchronous reads in the Clipboard
+// API.
+constexpr size_t kMaxSyncReadSize = 256 * 1024 * 1024;
+scoped_refptr<SharedBuffer> SyncReadBlobDataHandle(
+    scoped_refptr<BlobDataHandle> handle,
+    scoped_refptr<base::SingleThreadTaskRunner> task_runner) {
+  if (!handle || !task_runner) {
+    return nullptr;
+  }
+
+  uint64_t size = handle->size();
+  if (size == 0 || size > kMaxSyncReadSize) {
+    VLOG(1) << "Blob empty or too large for synchronous DND read: " << size;
+    return nullptr;
+  }
+
+  auto [error_code, data] = SyncedFileReaderAccumulator::Load(
+      std::move(handle), std::move(task_runner));
+
+  if (error_code != FileErrorCode::kOK) {
+    return nullptr;
+  }
+
+  ArrayBufferContents contents = std::move(data).AsArrayBufferContents();
+  if (!contents.IsValid() || contents.DataLength() == 0) {
+    return nullptr;
+  }
+
+  return SharedBuffer::Create(contents.ByteSpan());
+}
+
+// Returns true if |buf| begins with magic bytes recognized by ImageDecoder
+// (JPEG, PNG, GIF, WebP, BMP, ICO, etc.). This guards against disguised
+// executables such as new File([exeBytes], 'photo.jpg') — ImageDecoder::Create
+// returns nullptr when the magic bytes do not match any supported image format.
+// No full decode is performed; only the file signature is checked.
+bool IsImageDataValid(scoped_refptr<SharedBuffer> buf) {
+  std::unique_ptr<ImageDecoder> decoder = ImageDecoder::Create(
+      SegmentReader::CreateFromSharedBuffer(buf),
+      /*data_complete=*/true, ImageDecoder::kAlphaPremultiplied,
+      ImageDecoder::kDefaultBitDepth, ColorBehavior::kTag,
+      cc::AuxImage::kDefault, Platform::GetMaxDecodedImageBytes());
+  return decoder != nullptr;
+}
+
+}  // namespace
+
+WebDragData DataObject::ToWebDragData(ExecutionContext* context) {
   WebDragData data;
-  WebVector<WebDragData::Item> item_list(length());
+  std::vector<WebDragData::Item> item_list(length());
 
   for (wtf_size_t i = 0; i < length(); ++i) {
     DataObjectItem* original_item = Item(i);
@@ -427,11 +538,56 @@ WebDragData DataObject::ToWebDragData() {
             file_system_file_item.file_system_id =
                 original_item->FileSystemId();
           } else {
-            // TODO(http://crbug.com/394955): support dragging constructed
-            // Files across renderers.
-            auto& string_item = item_list[i].emplace<WebDragData::StringItem>();
-            string_item.type = "text/plain";
-            string_item.data = file->name();
+            scoped_refptr<SharedBuffer> buf;
+            if (context &&
+                RuntimeEnabledFeatures::DragAndDropJSFileObjectsEnabled(
+                    context)) {
+              scoped_refptr<base::SingleThreadTaskRunner> task_runner =
+                  context->GetTaskRunner(TaskType::kFileReading);
+              buf = SyncReadBlobDataHandle(file->GetBlobDataHandle(),
+                                           std::move(task_runner));
+            }
+            // TODO(crbug.com/510410319): Gate this path on an image MIME type
+            // (e.g. image/*) in addition to magic-byte validation.
+            if (buf && buf->size() > 0 && IsImageDataValid(buf)) {
+              auto& binary_item =
+                  item_list[i].emplace<WebDragData::BinaryDataItem>();
+              binary_item.data = buf;
+              // The image data has been validated, so it is safe to allow the
+              // browser process to access it as file contents. Mark it
+              // accessible so that drops onto frames within the same
+              // WebContents (e.g. a parent frame dropping onto an iframe)
+              // pass the browser-side IsImageAccessibleFromFrame() check.
+              binary_item.image_accessible = true;
+              // Encode the original filename into the source URL path so that
+              // GetAsFile() can recover it via base_url_.LastPathComponent()
+              // at the drop target.
+              if (!file->name().empty()) {
+                String source_url =
+                    StrCat({"https://local/",
+                            EncodeWithUrlEscapeSequences(file->name())});
+                binary_item.source_url = KURL(source_url);
+                String escaped_name = file->name();
+                escaped_name = escaped_name.Replace("\\", "\\\\");
+                escaped_name = escaped_name.Replace("\"", "\\\"");
+                binary_item.content_disposition =
+                    StrCat({"attachment; filename=\"", escaped_name, "\""});
+              }
+
+              const String& name = file->name();
+              wtf_size_t dot_index = name.rfind('.');
+
+              if (dot_index != kNotFound && dot_index + 1 < name.length()) {
+                String ext = name.substr(dot_index + 1);
+                binary_item.filename_extension = ext;
+              }
+            } else {
+              // Fallback: only set the file name as text/plain.
+              auto& string_item =
+                  item_list[i].emplace<WebDragData::StringItem>();
+              string_item.type = "text/plain";
+              string_item.data = file->name();
+            }
           }
         } else {
           NOTREACHED();
@@ -441,6 +597,7 @@ WebDragData DataObject::ToWebDragData() {
     }
   }
   data.SetItems(std::move(item_list));
+  data.SetSourceEffectAllowed(SourceEffectAllowed());
   return data;
 }
 

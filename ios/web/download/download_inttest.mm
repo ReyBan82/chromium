@@ -21,13 +21,9 @@
 #import "net/test/embedded_test_server/http_response.h"
 #import "testing/gtest_mac.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
-using base::test::ios::WaitUntilConditionOrTimeout;
 using base::test::ios::kWaitForDownloadTimeout;
 using base::test::ios::kWaitForPageLoadTimeout;
+using base::test::ios::WaitUntilConditionOrTimeout;
 
 namespace web {
 
@@ -66,6 +62,11 @@ class DownloadTest : public WebTestWithWebState {
     delegate_ =
         std::make_unique<FakeDownloadControllerDelegate>(download_controller());
     server_.RegisterRequestHandler(base::BindRepeating(&GetDownloadResponse));
+  }
+
+  void TearDown() override {
+    delegate_.reset();
+    WebTestWithWebState::TearDown();
   }
 
   DownloadController* download_controller() {

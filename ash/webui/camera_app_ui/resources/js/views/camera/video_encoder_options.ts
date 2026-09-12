@@ -7,11 +7,7 @@ import * as dom from '../../dom.js';
 import {reportError} from '../../error.js';
 import * as expert from '../../expert.js';
 import * as h264 from '../../h264.js';
-import {
-  ErrorLevel,
-  ErrorType,
-  Resolution,
-} from '../../type.js';
+import {ErrorLevel, ErrorType, Resolution} from '../../type.js';
 import * as util from '../../util.js';
 
 /**
@@ -119,9 +115,9 @@ export class VideoEncoderOptions {
     // result video size.
     const max = Math.min(Math.floor(maxBitrate / resolution.area), 15);
     this.bitrateMultiplierInput.max = max.toString();
-    this.bitrateMultiplierInput.value =
-        (this.bitrateMultiplierInput.valueAsNumber || Math.min(max, 2))
-            .toString();
+    if (this.bitrateMultiplierInput.valueAsNumber === 0) {
+      this.bitrateMultiplierInput.value = Math.min(max, 2).toString();
+    }
     this.updateBitrate();
     this.bitrateSlider.hidden = false;
   }

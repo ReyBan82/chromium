@@ -8,35 +8,32 @@
 #include "base/component_export.h"
 #include "base/memory/weak_ptr.h"
 #include "base/values.h"
-#include "chromeos/ash/components/dbus/shill/shill_property_changed_observer.h"
 
 namespace ash {
 
-// Handles setting correct value for shill::kTetheringAllowedProperty property
-// depending on ash::features::kHotspot flag. This Shill property value is
-// updated when the handler initializes or Shill signals a
-// shill::kTetheringAllowedProperty changed. Note, setting this value to true
-// is a pre-requisite of successfully enable/disable hotspot and check
-// tethering readiness in Shill.
-class COMPONENT_EXPORT(CHROMEOS_NETWORK) HotspotAllowedFlagHandler
-    : public ShillPropertyChangedObserver {
+// Handles setting shill::kExperimentalTetheringFunctionality based on the
+// kTetheringExperimentalFunctionality feature flag. This manager property value
+// is updated when the handler initializes and when UpdateFlags() is called.
+class COMPONENT_EXPORT(CHROMEOS_NETWORK) HotspotAllowedFlagHandler {
  public:
   HotspotAllowedFlagHandler();
   HotspotAllowedFlagHandler(const HotspotAllowedFlagHandler&) = delete;
   HotspotAllowedFlagHandler& operator=(const HotspotAllowedFlagHandler&) =
       delete;
-  ~HotspotAllowedFlagHandler() override;
+  ~HotspotAllowedFlagHandler();
 
   void Init();
 
- private:
-  // ShillPropertyChangedObserver overrides
-  void OnPropertyChanged(const std::string& key,
-                         const base::Value& value) override;
+  // Refreshes the kExperimentalTetheringFunctionality flags in shill based on
+  // the current feature flag state.
+  void UpdateFlags();
 
-  // Callback when the SetHotspotAllowed flag operation failed.
-  void OnSetHotspotAllowedFlagFailure(const std::string& error_name,
-                                      const std::string& error_message);
+ private:
+
+  // Callback when set shill manager property operation failed.
+  void OnSetManagerPropertyFailure(const std::string& property_name,
+                                   const std::string& error_name,
+                                   const std::string& error_message);
 
   base::WeakPtrFactory<HotspotAllowedFlagHandler> weak_ptr_factory_{this};
 };

@@ -12,7 +12,6 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.base.test.util.Feature;
@@ -23,15 +22,12 @@ import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 
-/**
- * Unittests for {@link MinidumpUploadCallable}.
- */
+/** Unittests for {@link MinidumpUploader}. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class MinidumpUploaderTest {
-    @Rule
-    public CrashTestRule mTestRule = new CrashTestRule();
+    @Rule public CrashTestRule mTestRule = new CrashTestRule();
     private File mUploadTestFile;
+    private String mOriginalCrashUrl;
 
     /* package */ static class ErrorCodeHttpURLConnectionFactory
             implements HttpURLConnectionFactory {
@@ -66,6 +62,8 @@ public class MinidumpUploaderTest {
 
     @Before
     public void setUp() throws IOException {
+        mOriginalCrashUrl = MinidumpUploader.sCrashUrlString;
+        MinidumpUploader.setCrashUrlStringForTesting("https://clients2.google.com/cr/report");
         mUploadTestFile = new File(mTestRule.getCrashDir(), "crashFile");
         CrashTestRule.setUpMinidumpFile(mUploadTestFile, MinidumpUploaderTestConstants.BOUNDARY);
     }
@@ -73,6 +71,18 @@ public class MinidumpUploaderTest {
     @After
     public void tearDown() throws IOException {
         mUploadTestFile.delete();
+        MinidumpUploader.setCrashUrlStringForTesting(mOriginalCrashUrl);
+    }
+
+    @Test
+    @SmallTest
+    @Feature({"Android-AppBase"})
+    public void testCrashUrlMatchesBranding() {
+        String expectedUrl =
+                org.chromium.build.BuildConfig.IS_CHROME_BRANDED
+                        ? "https://clients2.google.com/cr/report"
+                        : null;
+        Assert.assertEquals(expectedUrl, mOriginalCrashUrl);
     }
 
     // This is a regression test for http://crbug.com/712420
@@ -85,9 +95,8 @@ public class MinidumpUploaderTest {
 
         CrashTestRule.setUpMinidumpFile(mUploadTestFile, boundary);
 
-        HttpURLConnectionFactory httpURLConnectionFactory = new TestHttpURLConnectionFactory() {
-            { mContentType = ""; }
-        };
+        TestHttpURLConnectionFactory httpURLConnectionFactory = new TestHttpURLConnectionFactory();
+        httpURLConnectionFactory.mContentType = "";
 
         MinidumpUploader minidumpUploader = new MinidumpUploader(httpURLConnectionFactory);
         MinidumpUploader.Result result = minidumpUploader.upload(mUploadTestFile);
@@ -105,9 +114,8 @@ public class MinidumpUploaderTest {
 
         CrashTestRule.setUpMinidumpFile(mUploadTestFile, boundary);
 
-        HttpURLConnectionFactory httpURLConnectionFactory = new TestHttpURLConnectionFactory() {
-            { mContentType = expectedContentType; }
-        };
+        TestHttpURLConnectionFactory httpURLConnectionFactory = new TestHttpURLConnectionFactory();
+        httpURLConnectionFactory.mContentType = expectedContentType;
 
         MinidumpUploader minidumpUploader = new MinidumpUploader(httpURLConnectionFactory);
         MinidumpUploader.Result result = minidumpUploader.upload(mUploadTestFile);

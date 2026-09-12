@@ -7,11 +7,19 @@
 #include <algorithm>
 #include <string>
 
+#include "ash/constants/webui_url_constants.h"
 #include "ash/public/cpp/window_backdrop.h"
+#include "base/check_deref.h"
 #include "base/check_op.h"
-#include "chrome/browser/ui/webui/ash/system_web_dialog_delegate.h"
-#include "chrome/common/webui_url_constants.h"
+#include "base/notreached.h"
+#include "chrome/browser/profiles/profile_manager.h"
+#include "chrome/browser/ui/webui/ash/system_web_dialog/system_web_dialog_delegate.h"
+#include "chromeos/ash/experiences/settings_ui/settings_app_manager.h"
+#include "components/session_manager/core/session.h"
+#include "components/session_manager/core/session_manager.h"
+#include "components/user_manager/user_manager.h"
 #include "ui/aura/window.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 #include "ui/base/ui_base_types.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
@@ -23,14 +31,9 @@ namespace ash {
 namespace {
 KerberosInBrowserDialog* g_dialog = nullptr;
 
-constexpr int kKerberosInBrowserDialogWidth = 500;
-constexpr int kKerberosInBrowserDialogHeight = 240;
+constexpr int kKerberosInBrowserDialogWidth = 370;
+constexpr int kKerberosInBrowserDialogHeight = 155;
 }  // namespace
-
-// static
-bool KerberosInBrowserDialog::IsShown() {
-  return g_dialog != nullptr;
-}
 
 void KerberosInBrowserDialog::AdjustWidgetInitParams(
     views::Widget::InitParams* params) {
@@ -39,7 +42,7 @@ void KerberosInBrowserDialog::AdjustWidgetInitParams(
 
 KerberosInBrowserDialog::KerberosInBrowserDialog(
     base::OnceClosure close_dialog_closure)
-    : SystemWebDialogDelegate(GURL(chrome::kChromeUIKerberosInBrowserURL),
+    : SystemWebDialogDelegate(GURL(ash::kChromeUIKerberosInBrowserURL),
                               /*title=*/std::u16string()),
       close_dialog_closure_(std::move(close_dialog_closure)) {
   DCHECK(!g_dialog);
@@ -55,13 +58,39 @@ KerberosInBrowserDialog::~KerberosInBrowserDialog() {
   g_dialog = nullptr;
 }
 
+ui::mojom::ModalType KerberosInBrowserDialog::GetDialogModalType() const {
+  return ui::mojom::ModalType::kSystem;
+}
+
 void KerberosInBrowserDialog::GetDialogSize(gfx::Size* size) const {
   const display::Display display =
-      display::Screen::GetScreen()->GetDisplayNearestWindow(dialog_window());
+      display::Screen::Get()->GetDisplayNearestWindow(dialog_window());
 
   size->SetSize(
       std::min(kKerberosInBrowserDialogWidth, display.work_area().width()),
       std::min(kKerberosInBrowserDialogHeight, display.work_area().height()));
+}
+
+void KerberosInBrowserDialog::OnDialogClosed(const std::string& json_retval) {
+  if (json_retval == "openSettings") {
+    // TODO(crbug.com/447287122): Revisit to check what session user we should
+    // use here.
+    auto* session = session_manager::SessionManager::Get()->GetActiveSession();
+    if (session) {
+      ash::SettingsAppManager::Get()->Open(
+          CHECK_DEREF(user_manager::UserManager::Get()->FindUser(
+              session->account_id())),
+          {.sub_page = "kerberos/kerberosAccounts"});
+    }
+  } else if (!json_retval.empty()) {
+    NOTREACHED();
+  }
+
+  SystemWebDialogDelegate::OnDialogClosed(json_retval);
+}
+
+bool KerberosInBrowserDialog::ShouldShowCloseButton() const {
+  return false;
 }
 
 bool KerberosInBrowserDialog::ShouldShowDialogTitle() const {
@@ -83,6 +112,16 @@ void KerberosInBrowserDialog::Show(base::OnceClosure close_dialog_closure) {
   // ChromeOS is defined.
   WindowBackdrop::Get(g_dialog->dialog_window())
       ->SetBackdropType(WindowBackdrop::BackdropType::kSemiOpaque);
+}
+
+// static
+bool KerberosInBrowserDialog::IsShown() {
+  return g_dialog != nullptr;
+}
+
+// static
+KerberosInBrowserDialog* KerberosInBrowserDialog::GetDialogForTesting() {
+  return g_dialog;
 }
 
 }  // namespace ash

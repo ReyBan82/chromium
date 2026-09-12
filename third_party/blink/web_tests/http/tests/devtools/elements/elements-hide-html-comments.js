@@ -2,9 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {TestRunner} from 'test_runner';
+import {ElementsTestRunner} from 'elements_test_runner';
+
+import * as Common from 'devtools/core/common/common.js';
+import * as Main from 'devtools/entrypoints/main/main.js';
+
 (async function() {
   TestRunner.addResult(`Verifies show/hide HTML comments setting.\n`);
-  await TestRunner.loadLegacyModule('elements'); await TestRunner.loadTestModule('elements_test_runner');
   await TestRunner.showPanel('elements');
   // Add the full html so that comments can be inserted between head and body
   await TestRunner.loadHTML(`
@@ -33,7 +38,7 @@
   function onNodeSelected() {
     TestRunner.addResult('HTML comments shown:');
     ElementsTestRunner.dumpElementsTree();
-    Common.settingForTest('showHTMLComments').set(false);
+    Main.MainImpl.MainImpl.universeForTest.settings.settingForTest('show-html-comments').set(false);
     TestRunner.addResult('\nHTML comments hidden:');
     ElementsTestRunner.dumpElementsTree();
     TestRunner.completeTest();

@@ -4,20 +4,34 @@
 
 #include "services/resource_coordinator/public/cpp/memory_instrumentation/client_process_impl.h"
 
+#include "base/check.h"
 #include "base/containers/flat_map.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/strings/string_piece.h"
+#include "base/logging.h"
+#include "base/not_fatal_until.h"
+#include "base/notreached.h"
+#include "base/process/process.h"
 #include "base/synchronization/lock.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/trace_event/memory_dump_request_args.h"
 #include "build/build_config.h"
 #include "services/resource_coordinator/public/cpp/memory_instrumentation/memory_instrumentation.h"
 #include "services/resource_coordinator/public/cpp/memory_instrumentation/os_metrics.h"
-#include "services/resource_coordinator/public/cpp/memory_instrumentation/tracing_observer.h"
+#include "services/resource_coordinator/public/cpp/memory_instrumentation/tracing_observer_proto.h"
 #include "services/resource_coordinator/public/mojom/memory_instrumentation/memory_instrumentation.mojom.h"
 
 namespace memory_instrumentation {
+
+struct ClientProcessImpl::OSMemoryDumpArgs {
+  OSMemoryDumpArgs();
+  OSMemoryDumpArgs(OSMemoryDumpArgs&&);
+  ~OSMemoryDumpArgs();
+  mojom::MemoryMapOption mmap_option;
+  OSMetrics::MemDumpFlagSet flags;
+  std::vector<base::ProcessId> pids;
+  RequestOSMemoryDumpCallback callback;
+};
 
 // static
 void ClientProcessImpl::CreateInstance(
@@ -66,9 +80,8 @@ ClientProcessImpl::ClientProcessImpl(
           base::Unretained(this)),
       is_browser_process);
 
-  tracing_observer_ = std::make_unique<TracingObserver>(
-      base::trace_event::TraceLog::GetInstance(),
-      base::trace_event::MemoryDumpManager::GetInstance());
+  // Register the memory_instrumentation datasource.
+  TracingObserverProto::GetInstance();
 }
 
 ClientProcessImpl::~ClientProcessImpl() = default;
@@ -87,13 +100,15 @@ void ClientProcessImpl::RequestChromeMemoryDump(
 }
 
 void ClientProcessImpl::OnChromeMemoryDumpDone(
-    bool success,
+    base::trace_event::ProcessMemoryDumpOutcome outcome,
     uint64_t dump_guid,
     std::unique_ptr<base::trace_event::ProcessMemoryDump> process_memory_dump) {
-  DCHECK(success || !process_memory_dump);
+  CHECK(outcome == base::trace_event::ProcessMemoryDumpOutcome::kSuccess ||
+            !process_memory_dump,
+        base::NotFatalUntil::M148);
 
   auto callback_it = pending_chrome_callbacks_.find(dump_guid);
-  DCHECK(callback_it != pending_chrome_callbacks_.end());
+  CHECK(callback_it != pending_chrome_callbacks_.end());
 
   auto callback = std::move(callback_it->second);
   pending_chrome_callbacks_.erase(callback_it);
@@ -107,11 +122,14 @@ void ClientProcessImpl::OnChromeMemoryDumpDone(
   }
 
   if (!process_memory_dump) {
-    DLOG(ERROR) << "Chrome dump request failed";
-    std::move(callback).Run(false, dump_guid, nullptr);
+    // TODO(crbug.com/450929521): In practice, this never happens. Add a CHECK
+    // in a separate CL.
+    std::move(callback).Run(mojom::RequestOutcome::kInProcessMemoryDumpFailed,
+                            dump_guid, nullptr);
     return;
   }
-  std::move(callback).Run(success, dump_guid, std::move(process_memory_dump));
+  std::move(callback).Run(mojom::RequestOutcome::kSuccess, dump_guid,
+                          std::move(process_memory_dump));
 }
 
 void ClientProcessImpl::RequestGlobalMemoryDump_NoCallback(
@@ -137,18 +155,22 @@ void ClientProcessImpl::RequestGlobalMemoryDump_NoCallback(
     coordinator = MemoryInstrumentation::GetInstance()->GetCoordinator();
   coordinator->RequestGlobalMemoryDumpAndAppendToTrace(
       dump_type, level_of_detail,
-      base::trace_event::MemoryDumpDeterminism::NONE,
+      base::trace_event::MemoryDumpDeterminism::kNone,
       mojom::Coordinator::RequestGlobalMemoryDumpAndAppendToTraceCallback());
 }
 
 void ClientProcessImpl::RequestOSMemoryDump(
     mojom::MemoryMapOption mmap_option,
+    const std::vector<mojom::MemDumpFlags>& flags,
     const std::vector<base::ProcessId>& pids,
     RequestOSMemoryDumpCallback callback) {
   OSMemoryDumpArgs args;
   args.mmap_option = mmap_option;
   args.pids = pids;
   args.callback = std::move(callback);
+  for (const auto& flag : flags) {
+    args.flags.Put(flag);
+  }
 
 #if BUILDFLAG(IS_MAC)
   // If the most recent chrome memory dump hasn't finished, wait for that to
@@ -166,24 +188,34 @@ void ClientProcessImpl::RequestOSMemoryDump(
 }
 
 void ClientProcessImpl::PerformOSMemoryDump(OSMemoryDumpArgs args) {
-  bool global_success = true;
+  mojom::RequestOutcome outcome = mojom::RequestOutcome::kSuccess;
   base::flat_map<base::ProcessId, mojom::RawOSMemDumpPtr> results;
   for (const base::ProcessId& pid : args.pids) {
     mojom::RawOSMemDumpPtr result = mojom::RawOSMemDump::New();
     result->platform_private_footprint = mojom::PlatformPrivateFootprint::New();
-    bool success = OSMetrics::FillOSMemoryDump(pid, result.get());
-    if (args.mmap_option != mojom::MemoryMapOption::NONE) {
-      success = success && OSMetrics::FillProcessMemoryMaps(
-                               pid, args.mmap_option, result.get());
-    }
-    if (success) {
-      results[pid] = std::move(result);
+    const base::Process process = pid == base::kNullProcessId
+                                      ? base::Process::Current()
+                                      : base::Process::Open(pid);
+    if (!process.IsValid()) {
+      DLOG(ERROR) << "OS memory dump failed for pid " << pid
+                  << " (OpenProcess)";
+      outcome = mojom::RequestOutcome::kProcessNotFound;
+    } else if (!OSMetrics::FillOSMemoryDump(process.Handle(), args.flags,
+                                            result.get())) {
+      DLOG(ERROR) << "OS memory dump failed for pid " << pid
+                  << " (FillOSMemoryDump)";
+      outcome = mojom::RequestOutcome::kFillOsMemoryDumpFailed;
+    } else if (args.mmap_option != mojom::MemoryMapOption::NONE &&
+               !OSMetrics::FillProcessMemoryMaps(
+                   process.Handle(), args.mmap_option, result.get())) {
+      DLOG(ERROR) << "OS memory dump failed for pid " << pid
+                  << " (FillProcessMemoryMaps)";
+      outcome = mojom::RequestOutcome::kFillProcessMemoryMapsFailed;
     } else {
-      DLOG(ERROR) << "OS memory dump failed for pid " << pid;
+      results[pid] = std::move(result);
     }
-    global_success = global_success && success;
   }
-  std::move(args.callback).Run(global_success, std::move(results));
+  std::move(args.callback).Run(outcome, std::move(results));
 }
 
 ClientProcessImpl::OSMemoryDumpArgs::OSMemoryDumpArgs() = default;

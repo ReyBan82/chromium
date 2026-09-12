@@ -3,17 +3,15 @@ kbr@chromium.org
 vasilyt@chromium.org
 vmiura@chromium.org
 zmo@chromium.org
-sunnyps@chromium.org
-penghuang@chromium.org
-
-# GPU memory buffer implementations.
-per-file *gpu_memory_buffer*=dcastagna@chromium.org
+blundell@chromium.org
+kylechar@chromium.org
 
 # Passthrough command decoder
 per-file *passthrough*=geofflang@chromium.org
 
 # For SharedImages
 vikassoni@chromium.org
+hitawala@chromium.org
 
 # D3D, dcomp, Windows platform integration, etc.
 rafael.cintron@microsoft.com

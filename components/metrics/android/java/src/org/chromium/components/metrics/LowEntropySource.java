@@ -8,29 +8,34 @@ import android.content.SharedPreferences;
 
 import androidx.annotation.MainThread;
 
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+
 import org.chromium.base.ContextUtils;
 import org.chromium.base.ThreadUtils;
-import org.chromium.base.annotations.CalledByNative;
+import org.chromium.build.annotations.NullMarked;
 
 import java.util.Random;
 
 /**
  * Generates a new non-identifying entropy source used to seed persistent activities. Has a static
- * cache so that the new low entropy source value will only be generated on first access.
- * Low entropy source is queried by entropy_source.cc that caches it in prefs. On Android, it is
+ * cache so that the new low entropy source value will only be generated on first access. Low
+ * entropy source is queried by entropy_source.cc that caches it in prefs. On Android, it is
  * generated in Java so that it can be used by FRE experiments when the native is not available yet.
  */
 @MainThread
+@NullMarked
+@JNINamespace("metrics")
 public class LowEntropySource {
     // Should be equal to the value of EntropyState::kMaxLowEntropySize in C++.
     public static final int MAX_LOW_ENTROPY_SIZE = 8000;
 
     private static final class LazyHolder {
-        private static final int LOW_ENTROPY_SOURCE_STATIC_CACHE = generateInternal();
+        private static final int LOW_ENTROPY_SOURCE_STATIC_CACHE = generateValue();
     }
 
     private static final class LazyHolderForPseudo {
-        private static final int PSEUDO_LOW_ENTROPY_SOURCE_STATIC_CACHE = generateInternal();
+        private static final int PSEUDO_LOW_ENTROPY_SOURCE_STATIC_CACHE = generateValue();
     }
 
     private static final String KEY_LOW_ENTROPY_SOURCE_FRE_COMPLETED =
@@ -85,7 +90,8 @@ public class LowEntropySource {
         return LazyHolderForPseudo.PSEUDO_LOW_ENTROPY_SOURCE_STATIC_CACHE;
     }
 
-    private static int generateInternal() {
+    /** Generates a new random low entropy value. */
+    public static int generateValue() {
         return new Random().nextInt(MAX_LOW_ENTROPY_SIZE);
     }
 }

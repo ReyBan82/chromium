@@ -4,18 +4,14 @@
 
 #include "chrome/browser/ui/views/tabs/tab_group_underline.h"
 
-#include <memory>
-#include <utility>
-
 #include "chrome/browser/ui/layout_constants.h"
 #include "chrome/browser/ui/tabs/tab_style.h"
+#include "chrome/browser/ui/views/tabs/common/tab_group_style.h"
 #include "chrome/browser/ui/views/tabs/tab.h"
 #include "chrome/browser/ui/views/tabs/tab_group_header.h"
-#include "chrome/browser/ui/views/tabs/tab_group_style.h"
+#include "chrome/browser/ui/views/tabs/tab_group_style_views.h"
 #include "chrome/browser/ui/views/tabs/tab_group_views.h"
 #include "components/tab_groups/tab_group_id.h"
-#include "components/tab_groups/tab_group_visual_data.h"
-#include "third_party/skia/include/core/SkColor.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
 #include "ui/gfx/canvas.h"
 #include "ui/gfx/geometry/insets.h"
@@ -26,19 +22,16 @@
 
 constexpr int TabGroupUnderline::kStrokeThickness;
 
+// static
+int TabGroupUnderline::GetStrokeInset() {
+  return TabStyle::Get()->GetTabOverlap() -
+         TabGroupStyle::GetTabGroupOverlapAdjustment() + kStrokeThickness;
+}
+
 TabGroupUnderline::TabGroupUnderline(TabGroupViews* tab_group_views,
                                      const tab_groups::TabGroupId& group,
-                                     const TabGroupStyle& style)
+                                     const TabGroupStyleViews& style)
     : tab_group_views_(tab_group_views), group_(group), style_(style) {}
-
-void TabGroupUnderline::OnPaint(gfx::Canvas* canvas) {
-  SkPath path = style_->GetUnderlinePath(GetLocalBounds());
-  cc::PaintFlags flags;
-  flags.setAntiAlias(true);
-  flags.setColor(tab_group_views_->GetGroupColor());
-  flags.setStyle(cc::PaintFlags::kFill_Style);
-  canvas->DrawPath(path, flags);
-}
 
 void TabGroupUnderline::UpdateBounds(const views::View* const leading_view,
                                      const views::View* const trailing_view) {
@@ -63,28 +56,17 @@ void TabGroupUnderline::UpdateBounds(const views::View* const leading_view,
   SetBoundsRect(tab_group_underline_bounds);
 }
 
-gfx::Rect TabGroupUnderline::CalculateTabGroupUnderlineBounds(
-    const views::View* const underline_view,
-    const views::View* const leading_view,
-    const views::View* const trailing_view) const {
-  gfx::RectF leading_bounds = views::View::ConvertRectToTarget(
-      leading_view->parent(), underline_view->parent(),
-      gfx::RectF(leading_view->bounds()));
-  leading_bounds.Inset(gfx::InsetsF(GetInsetsForUnderline(leading_view)));
+void TabGroupUnderline::MaybeSetVisible(const bool visible) {
+  SetVisible(visible && !style_->TabGroupUnderlineShouldBeHidden());
+}
 
-  gfx::RectF trailing_bounds = views::View::ConvertRectToTarget(
-      trailing_view->parent(), underline_view->parent(),
-      gfx::RectF(trailing_view->bounds()));
-  trailing_bounds.Inset(gfx::InsetsF(GetInsetsForUnderline(trailing_view)));
-
-  gfx::Rect group_bounds = ToEnclosingRect(leading_bounds);
-  group_bounds.UnionEvenIfEmpty(ToEnclosingRect(trailing_bounds));
-
-  const int y =
-      group_bounds.height() - GetLayoutConstant(TABSTRIP_TOOLBAR_OVERLAP);
-
-  return gfx::Rect(group_bounds.x(), y - kStrokeThickness, group_bounds.width(),
-                   kStrokeThickness);
+void TabGroupUnderline::OnPaint(gfx::Canvas* canvas) {
+  SkPath path = style_->GetUnderlinePath(GetLocalBounds());
+  cc::PaintFlags flags;
+  flags.setAntiAlias(true);
+  flags.setColor(tab_group_views_->GetGroupColor());
+  flags.setStyle(cc::PaintFlags::kFill_Style);
+  canvas->DrawPath(path, flags);
 }
 
 gfx::Insets TabGroupUnderline::GetInsetsForUnderline(
@@ -113,14 +95,29 @@ gfx::Insets TabGroupUnderline::GetInsetsForUnderline(
   return gfx::Insets::TLBR(0, left_inset, 0, right_inset);
 }
 
-void TabGroupUnderline::MaybeSetVisible(const bool visible) {
-  SetVisible(visible && !style_->TabGroupUnderlineShouldBeHidden());
+gfx::Rect TabGroupUnderline::CalculateTabGroupUnderlineBounds(
+    const views::View* const underline_view,
+    const views::View* const leading_view,
+    const views::View* const trailing_view) const {
+  gfx::RectF leading_bounds = views::View::ConvertRectToTarget(
+      leading_view->parent(), underline_view->parent(),
+      gfx::RectF(leading_view->bounds()));
+  leading_bounds.Inset(gfx::InsetsF(GetInsetsForUnderline(leading_view)));
+
+  gfx::RectF trailing_bounds = views::View::ConvertRectToTarget(
+      trailing_view->parent(), underline_view->parent(),
+      gfx::RectF(trailing_view->bounds()));
+  trailing_bounds.Inset(gfx::InsetsF(GetInsetsForUnderline(trailing_view)));
+
+  gfx::Rect group_bounds = ToEnclosingRect(leading_bounds);
+  group_bounds.UnionEvenIfEmpty(ToEnclosingRect(trailing_bounds));
+
+  int y = group_bounds.bottom() -
+          GetLayoutConstant(LayoutConstant::kTabstripToolbarOverlap);
+
+  return gfx::Rect(group_bounds.x(), y - kStrokeThickness, group_bounds.width(),
+                   kStrokeThickness);
 }
 
-// static
-int TabGroupUnderline::GetStrokeInset() {
-  return TabStyle::GetTabOverlap() + kStrokeThickness;
-}
-
-BEGIN_METADATA(TabGroupUnderline, views::View)
+BEGIN_METADATA(TabGroupUnderline)
 END_METADATA

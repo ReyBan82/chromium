@@ -9,7 +9,6 @@
 #include "base/threading/thread_checker.h"
 #include "components/content_settings/core/browser/content_settings_observer.h"
 #include "components/content_settings/core/browser/content_settings_provider.h"
-#include "components/content_settings/core/common/content_settings_pattern.h"
 
 namespace content_settings {
 
@@ -22,6 +21,7 @@ class ObservableProvider : public ProviderInterface {
   void RemoveObserver(Observer* observer);
 
  protected:
+  // See `content_settings::Observer` for details.
   void NotifyObservers(const ContentSettingsPattern& primary_pattern,
                        const ContentSettingsPattern& secondary_pattern,
                        ContentSettingsType content_type);
@@ -30,7 +30,12 @@ class ObservableProvider : public ProviderInterface {
 
  private:
   base::ThreadChecker thread_checker_;
-  base::ObserverList<Observer, true>::Unchecked observer_list_;
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      Observer,
+      /*check_empty=*/true,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
+      observer_list_;
 };
 
 }  // namespace content_settings

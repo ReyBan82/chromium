@@ -7,6 +7,7 @@
 
 #include "base/containers/flat_map.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "components/signin/public/identity_manager/identity_manager.h"
 #include "google_apis/gaia/google_service_auth_error.h"
 
@@ -43,7 +44,8 @@ class AccessTokenRequests {
 // requests that are made.
 class ProjectorOAuthTokenFetcher {
  public:
-  ProjectorOAuthTokenFetcher();
+  explicit ProjectorOAuthTokenFetcher(
+      signin::IdentityManager* identity_manager);
   ProjectorOAuthTokenFetcher(const ProjectorOAuthTokenFetcher&) = delete;
   ProjectorOAuthTokenFetcher& operator=(const ProjectorOAuthTokenFetcher&) =
       delete;
@@ -63,6 +65,9 @@ class ProjectorOAuthTokenFetcher {
   void GetAccessTokenFor(const std::string& email,
                          AccessTokenRequestCallback callback);
 
+  // Remove the given token in cache.
+  void InvalidateToken(const std::string& token);
+
   // Returns true if there exists a cached token for account with `email`.
   bool HasCachedTokenForTest(const std::string& email);
   bool HasPendingRequestForTest(const std::string& email);
@@ -75,6 +80,9 @@ class ProjectorOAuthTokenFetcher {
   void OnAccessTokenRequestCompleted(const std::string& email,
                                      GoogleServiceAuthError error,
                                      signin::AccessTokenInfo info);
+
+  // The identity manager for the profile that owns the WebUI.
+  const raw_ptr<signin::IdentityManager> identity_manager_;
 
   // Keeps pending requests to fetch access tokens associated with an account.
   // When account fetching is successful, each request is resolved in FIFO

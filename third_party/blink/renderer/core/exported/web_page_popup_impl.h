@@ -31,9 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_EXPORTED_WEB_PAGE_POPUP_IMPL_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_EXPORTED_WEB_PAGE_POPUP_IMPL_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
+#include "services/viz/public/mojom/compositing/compositor_frame_sink.mojom-blink.h"
 #include "third_party/blink/public/mojom/input/pointer_lock_context.mojom-blink-forward.h"
 #include "third_party/blink/public/mojom/input/pointer_lock_result.mojom-blink-forward.h"
 #include "third_party/blink/public/mojom/page/widget.mojom-blink.h"
@@ -108,6 +110,7 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
 
   // WebPagePopup implementation.
   WebDocument GetDocument() override;
+  Handle GetHandle() const override;
 
   // PagePopup implementation.
   void PostMessageToPopup(const String& message) override;
@@ -134,10 +137,15 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
       const display::ScreenInfos& screen_infos,
       PagePopupClient*);
 
+  void ExecuteEditCommand(const String& command, const String& value);
+
+  // The element which created this popup.
+  Element& OwnerElement();
+
  private:
   // WidgetBaseClient overrides:
   void OnCommitRequested() override;
-  void BeginMainFrame(base::TimeTicks last_frame_time) override;
+  void BeginMainFrame(const viz::BeginFrameArgs& args) override;
   void SetSuppressFrameRequestsWorkaroundFor704763Only(bool) final;
   WebInputEventResult DispatchBufferedTouchEvents() override;
   void WillHandleGestureEvent(const WebGestureEvent& event,
@@ -150,7 +158,7 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
       bool event_processed) override;
   bool SupportsBufferedTouchEvents() override { return true; }
   void FocusChanged(mojom::blink::FocusState focus_state) override;
-  void ScheduleAnimation() override;
+  void ScheduleAnimation(cc::BeginMainFrameReason, bool urgent) override;
   void UpdateVisualProperties(
       const VisualProperties& visual_properties) override;
   gfx::Rect ViewportVisibleRect() override;
@@ -167,25 +175,38 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
   // of the WebWidget need to check if close has already been initiated (they
   // can do so by checking |page_|) and not crash! https://crbug.com/906340
   void SetCompositorVisible(bool visible) override;
+  void WarmUpCompositor() override;
   void UpdateLifecycle(WebLifecycleUpdate requested_update,
                        DocumentUpdateReason reason) override;
   void Resize(const gfx::Size&) override;
   WebInputEventResult HandleInputEvent(const WebCoalescedInputEvent&) override;
   void SetFocus(bool) override;
   bool HasFocus() override;
-  WebHitTestResult HitTestResultAt(const gfx::PointF&) override { return {}; }
-  void InitializeCompositing(const display::ScreenInfos& screen_infos,
-                             const cc::LayerTreeSettings* settings) override;
+  WebHitTestResult HitTestResultAt(const gfx::PointF&) override;
+  void InitializeCompositing(
+      const display::ScreenInfos& screen_infos,
+      const cc::LayerTreeSettings* settings,
+      CrossVariantMojoRemote<
+          viz::mojom::blink::CompositorFrameSinkInterfaceBase>
+          initial_frame_sink,
+      CrossVariantMojoReceiver<
+          viz::mojom::blink::CompositorFrameSinkClientInterfaceBase>
+          initial_frame_sink_client,
+      CrossVariantMojoReceiver<
+          mojom::blink::RenderInputRouterClientInterfaceBase>
+          initial_viz_rir_client) override;
   void SetCursor(const ui::Cursor& cursor) override;
   bool HandlingInputEvent() override;
   void SetHandlingInputEvent(bool handling) override;
   void ProcessInputEventSynchronouslyForTesting(
       const WebCoalescedInputEvent&) override;
+  void DispatchNonBlockingEventForTesting(
+      std::unique_ptr<WebCoalescedInputEvent> event) override;
   void UpdateTextInputState() override;
   void UpdateSelectionBounds() override;
   void ShowVirtualKeyboard() override;
   void FlushInputProcessedCallback() override;
-  void CancelCompositionForPepper() override;
+  void CancelComposition() override;
   void ApplyVisualProperties(
       const VisualProperties& visual_properties) override;
   const display::ScreenInfo& GetScreenInfo() override;
@@ -196,7 +217,7 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
   gfx::Rect ViewRect() override;
   void SetScreenRects(const gfx::Rect& widget_screen_rect,
                       const gfx::Rect& window_screen_rect) override;
-  gfx::Size VisibleViewportSizeInDIPs() override;
+  gfx::Size VisibleViewportSize() override;
   bool IsHidden() const override;
 
   // WidgetEventHandler functions
@@ -222,7 +243,7 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
   gfx::Rect GetAnchorRectInScreen() const;
 
   // PagePopup function
-  AXObject* RootAXObject() override;
+  AXObject* RootAXObject(Element* popover_owner) override;
   void SetWindowRect(const gfx::Rect&) override;
 
   WebPagePopupImpl(
@@ -244,17 +265,17 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
 
   gfx::Rect WindowRectInScreen() const;
 
-  void InjectGestureScrollEvent(WebGestureDevice device,
-                                const gfx::Vector2dF& delta,
-                                ui::ScrollGranularity granularity,
-                                cc::ElementId scrollable_area_element_id,
-                                WebInputEvent::Type injected_type);
+  void InjectScrollbarGestureScroll(const gfx::Vector2dF& delta,
+                                    ui::ScrollGranularity granularity,
+                                    cc::ElementId scrollable_area_element_id,
+                                    WebInputEvent::Type injected_type);
 
   void WidgetHostDisconnected();
   void DidSetBounds();
 
   // This is the WebView that opened the popup.
-  WebViewImpl* opener_web_view_ = nullptr;
+  raw_ptr<WebViewImpl, UnprotectedInRelease | DanglingUntriaged>
+      opener_web_view_ = nullptr;
   Persistent<PagePopupChromeClient> chrome_client_;
   Persistent<EmptyLocalFrameClient> local_frame_client_;
   // WebPagePopupImpl wraps its own Page that renders the content in the popup.
@@ -263,7 +284,7 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
   // main LocalFrame with a corresponding non-null LocalFrameView and non-null
   // Document.
   Persistent<Page> page_;
-  PagePopupClient* popup_client_;
+  Persistent<PagePopupClient> popup_client_;
   bool closing_ = false;
 
   scoped_refptr<cc::Layer> root_layer_;
@@ -297,6 +318,8 @@ class CORE_EXPORT WebPagePopupImpl final : public WebPagePopup,
   // Only used for Scroll Unification.
   // Will be set in GestureScrollBegin
   WeakPersistent<Node> scrollable_node_;
+
+  Handle handle_;
 
   friend class WebPagePopup;
   friend class PagePopupChromeClient;

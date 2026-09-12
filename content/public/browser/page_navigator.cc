@@ -5,6 +5,8 @@
 #include "content/public/browser/page_navigator.h"
 
 #include "content/public/browser/navigation_handle.h"
+#include "content/public/browser/site_instance.h"
+#include "services/network/public/cpp/resource_request_body.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "third_party/blink/public/mojom/frame/frame.mojom.h"
 
@@ -38,7 +40,7 @@ OpenURLParams::OpenURLParams(const GURL& url,
 
 OpenURLParams::OpenURLParams(const GURL& url,
                              const Referrer& referrer,
-                             int frame_tree_node_id,
+                             FrameTreeNodeId frame_tree_node_id,
                              WindowOpenDisposition disposition,
                              ui::PageTransition transition,
                              bool is_renderer_initiated)
@@ -63,6 +65,7 @@ OpenURLParams OpenURLParams::FromNavigationHandle(NavigationHandle* handle) {
 
   params.initiator_origin = handle->GetInitiatorOrigin();
   params.initiator_base_url = handle->GetInitiatorBaseUrl();
+  params.initiator_navigation_state = handle->GetInitiatorNavigationState();
   params.source_site_instance = handle->GetSourceSiteInstance();
   params.user_gesture = handle->HasUserGesture();
   params.started_from_context_menu = handle->WasStartedFromContextMenu();
@@ -87,6 +90,20 @@ OpenURLParams OpenURLParams::FromNavigationHandle(NavigationHandle* handle) {
 #if DCHECK_IS_ON()
   DCHECK(params.Valid());
 #endif
+  return params;
+}
+
+// static
+OpenURLParams OpenURLParams::CreateBrowserInitiated(
+    const GURL& url,
+    WindowOpenDisposition disposition,
+    ui::PageTransition transition,
+    const Referrer& referrer,
+    bool started_from_context_menu,
+    FrameTreeNodeId frame_tree_node_id) {
+  OpenURLParams params(url, referrer, frame_tree_node_id, disposition,
+                       transition, /*is_renderer_initiated=*/false);
+  params.started_from_context_menu = started_from_context_menu;
   return params;
 }
 

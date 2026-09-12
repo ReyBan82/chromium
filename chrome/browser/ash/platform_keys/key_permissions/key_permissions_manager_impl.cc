@@ -6,36 +6,35 @@
 
 #include <stdint.h>
 
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "base/containers/contains.h"
+#include "ash/constants/ash_pref_names.h"
 #include "base/containers/queue.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/observer_list_types.h"
 #include "base/time/time.h"
-#include "chrome/browser/ash/platform_keys/key_permissions/key_permissions.pb.h"
 #include "chrome/browser/ash/platform_keys/key_permissions/key_permissions_manager.h"
 #include "chrome/browser/ash/platform_keys/key_permissions/key_permissions_util.h"
 #include "chrome/browser/ash/platform_keys/key_permissions/user_private_token_kpm_service_factory.h"
 #include "chrome/browser/ash/platform_keys/platform_keys_service.h"
 #include "chrome/browser/ash/platform_keys/platform_keys_service_factory.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
-#include "chrome/browser/browser_process.h"
 #include "chrome/browser/chromeos/platform_keys/extension_key_permissions_service.h"
-#include "chrome/browser/chromeos/platform_keys/platform_keys.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/common/pref_names.h"
+#include "chromeos/ash/components/kcer/key_permissions.pb.h"
+#include "chromeos/ash/components/platform_keys/platform_keys.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
 #include "components/policy/core/common/policy_namespace.h"
 #include "components/policy/core/common/policy_service.h"
 #include "components/policy/policy_constants.h"
 #include "components/pref_registry/pref_registry_syncable.h"
 #include "components/prefs/pref_service.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash::platform_keys {
 
@@ -56,14 +55,6 @@ KeyPermissionsManager* g_system_token_kpm_for_testing = nullptr;
 // started as well as the number of times it succeeded and failed.
 const char kMigrationStatusHistogramName[] =
     "ChromeOS.KeyPermissionsManager.Migration";
-// The name of the histogram that counts the number of times the arc usage flags
-// update started as well as the number of times it succeeded and failed.
-const char kArcUsageUpdateStatusHistogramName[] =
-    "ChromeOS.KeyPermissionsManager.ArcUsageUpdate";
-// The name of the histogram that records the time taken to successfully update
-// chaps with the new ARC usage flags.
-const char kArcUsageUpdateTimeHistogramName[] =
-    "ChromeOS.KeyPermissionsManager.ArcUsageUpdateTime";
 
 // These values are logged to UMA. Entries should not be renumbered and
 // numeric values should never be reused. Please keep in sync with
@@ -78,22 +69,23 @@ enum class MigrationStatus {
   kMaxValue = kNecessary,
 };
 
-// These values are logged to UMA. Entries should not be renumbered and
-// numeric values should never be reused. Please keep in sync with
-// MigrationStatus in src/tools/metrics/histograms/enums.xml.
-enum class ArcUsageUpdateStatus {
-  kStarted = 0,
-  kSucceeded = 1,
-  kFailed = 2,
-  kMaxValue = kFailed,
-};
-
 chaps::KeyPermissions CreateKeyPermissions(bool corporate_usage_allowed,
                                            bool arc_usage_allowed) {
   chaps::KeyPermissions key_permissions;
   key_permissions.mutable_key_usages()->set_corporate(corporate_usage_allowed);
   key_permissions.mutable_key_usages()->set_arc(arc_usage_allowed);
   return key_permissions;
+}
+
+void OnArcKeyPermissionsInChapsUpdated(size_t keys_updated,
+                                       Status update_status) {
+  if (update_status == Status::kSuccess) {
+    LOG(WARNING) << "Updating arc key permissions in chaps succeeded, "
+                 << keys_updated << " key(s) updated.";
+  } else {
+    LOG(ERROR) << "Updating arc key permissions in chaps failed, "
+               << keys_updated << " key(s) updated.";
+  }
 }
 
 }  // namespace
@@ -113,8 +105,6 @@ void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::Update(
     UpdateCallback callback) {
   DCHECK(!update_started_) << "Update called more than once for the same "
                               "updater instance.";
-
-  update_start_time_ = base::TimeTicks::Now();
 
   update_started_ = true;
   callback_ = std::move(callback);
@@ -145,7 +135,7 @@ void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::UpdateWithAllKeys(
 
 void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::UpdateNextKey() {
   if (public_key_spki_der_queue_.empty()) {
-    OnUpdateFinished();
+    std::move(callback_).Run(keys_updated_, Status::kSuccess);
     return;
   }
 
@@ -153,26 +143,6 @@ void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::UpdateNextKey() {
   public_key_spki_der_queue_.pop();
 
   UpdatePermissionsForKey(public_key);
-}
-
-void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::
-    OnUpdateFinished() {
-  switch (mode_) {
-    case Mode::kMigratePermissionsFromPrefs: {
-      break;
-    }
-    case Mode::kUpdateArcUsageFlag: {
-      base::UmaHistogramCustomTimes(
-          kArcUsageUpdateTimeHistogramName,
-          /*sample=*/base::TimeTicks::Now() - update_start_time_,
-          /*min=*/base::Milliseconds(1),
-          /*max=*/base::Minutes(5),
-          /*buckets=*/50);
-      break;
-    }
-  }
-
-  std::move(callback_).Run(Status::kSuccess);
 }
 
 void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::
@@ -204,11 +174,11 @@ void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::
 void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::
     UpdatePermissionsForKeyWithCorporateFlag(
         std::vector<uint8_t> public_key_spki_der,
-        absl::optional<bool> corporate_usage_allowed,
+        std::optional<bool> corporate_usage_allowed,
         Status corporate_usage_retrieval_status) {
   if (corporate_usage_retrieval_status != Status::kSuccess) {
     LOG(ERROR) << "Couldn't retrieve corporate usage flag for a key.";
-    std::move(callback_).Run(corporate_usage_retrieval_status);
+    std::move(callback_).Run(keys_updated_, corporate_usage_retrieval_status);
     return;
   }
 
@@ -221,10 +191,8 @@ void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::
   chaps::KeyPermissions key_permissions =
       CreateKeyPermissions(corporate_usage_allowed.value(), arc_usage_allowed);
 
-  std::string public_key_str(public_key_spki_der.begin(),
-                             public_key_spki_der.end());
   key_permissions_manager_->platform_keys_service_->SetAttributeForKey(
-      key_permissions_manager_->token_id_, std::move(public_key_str),
+      key_permissions_manager_->token_id_, std::move(public_key_spki_der),
       KeyAttributeType::kKeyPermissions,
       internal::KeyPermissionsProtoToBytes(key_permissions),
       base::BindOnce(&KeyPermissionsInChapsUpdater::OnKeyPermissionsUpdated,
@@ -237,14 +205,16 @@ void KeyPermissionsManagerImpl::KeyPermissionsInChapsUpdater::
     // Some public keys are not removed from chaps although their corresponding
     // private keys are removed. We continue the migration process if we
     // received kKeyNotFound as a workaround until the keys-clean-up problem is
-    // solved (crbug.com/1096051).
+    // solved (crbug.com/40700534).
     LOG(WARNING) << "Corresponding private key not found. Continuing the "
                     "migration process...";
   } else if (permissions_update_status != Status::kSuccess) {
     LOG(ERROR) << "Couldn't update permissions for a key: "
                << StatusToString(permissions_update_status);
-    std::move(callback_).Run(permissions_update_status);
+    std::move(callback_).Run(keys_updated_, permissions_update_status);
     return;
+  } else {
+    keys_updated_++;
   }
 
   UpdateNextKey();
@@ -282,15 +252,17 @@ void KeyPermissionsManagerImpl::SetSystemTokenKeyPermissionsManagerForTesting(
   g_system_token_kpm_for_testing = system_token_kpm_for_testing;
 }
 
+// static
 std::unique_ptr<KeyPermissionsManager>
-KeyPermissionsManagerImpl::CreateSystemTokenKeyPermissionsManager() {
+KeyPermissionsManagerImpl::CreateSystemTokenKeyPermissionsManager(
+    PrefService* local_state) {
   DCHECK(!g_system_token_key_permissions_manager);
 
   auto system_token_key_permissions_manager =
       std::make_unique<KeyPermissionsManagerImpl>(
           TokenId::kSystem, std::make_unique<SystemTokenArcKpmDelegate>(),
           PlatformKeysServiceFactory::GetInstance()->GetDeviceWideService(),
-          g_browser_process->local_state());
+          local_state);
   g_system_token_key_permissions_manager =
       system_token_key_permissions_manager.get();
   return std::move(system_token_key_permissions_manager);
@@ -299,7 +271,7 @@ KeyPermissionsManagerImpl::CreateSystemTokenKeyPermissionsManager() {
 // static
 void KeyPermissionsManagerImpl::RegisterLocalStatePrefs(
     PrefRegistrySimple* registry) {
-  registry->RegisterBooleanPref(prefs::kKeyPermissionsOneTimeMigrationDone,
+  registry->RegisterBooleanPref(ash::prefs::kKeyPermissionsOneTimeMigrationDone,
                                 /*default_value=*/false);
 }
 
@@ -333,7 +305,7 @@ KeyPermissionsManagerImpl::KeyPermissionsManagerImpl(
 KeyPermissionsManagerImpl::~KeyPermissionsManagerImpl() = default;
 
 void KeyPermissionsManagerImpl::OnGotTokens(
-    std::unique_ptr<std::vector<TokenId>> token_ids,
+    const std::vector<TokenId> token_ids,
     Status status) {
   if (status != Status::kSuccess) {
     LOG(ERROR) << "Error while waiting for token to be ready: "
@@ -341,7 +313,7 @@ void KeyPermissionsManagerImpl::OnGotTokens(
     return;
   }
 
-  if (!base::Contains(*token_ids, token_id_)) {
+  if (!std::ranges::contains(token_ids, token_id_)) {
     LOG(ERROR) << "KeyPermissionsManager doesn't have access to token: "
                << static_cast<int>(token_id_);
     return;
@@ -354,7 +326,7 @@ void KeyPermissionsManagerImpl::OnGotTokens(
     // On initialization, ARC usage allowance for corporate keys may be
     // different than after the one-time migration ends, so we trigger an update
     // in chaps.
-    UpdateKeyPermissionsInChaps();
+    UpdateArcKeyPermissionsInChaps();
   }
 }
 
@@ -402,10 +374,9 @@ void KeyPermissionsManagerImpl::IsKeyAllowedForUsage(
     return;
   }
 
-  std::string public_key_str(public_key_spki_der.begin(),
-                             public_key_spki_der.end());
   platform_keys_service_->GetAttributeForKey(
-      token_id_, std::move(public_key_str), KeyAttributeType::kKeyPermissions,
+      token_id_, std::move(public_key_spki_der),
+      KeyAttributeType::kKeyPermissions,
       base::BindOnce(
           &KeyPermissionsManagerImpl::IsKeyAllowedForUsageWithPermissions,
           weak_ptr_factory_.GetWeakPtr(), std::move(callback), usage));
@@ -417,10 +388,9 @@ void KeyPermissionsManagerImpl::AllowKeyForCorporateUsage(
   chaps::KeyPermissions key_permissions = CreateKeyPermissions(
       /*corporate_usage_allowed=*/true, AreCorporateKeysAllowedForArcUsage());
 
-  std::string public_key_str(public_key_spki_der.begin(),
-                             public_key_spki_der.end());
   platform_keys_service_->SetAttributeForKey(
-      token_id_, std::move(public_key_str), KeyAttributeType::kKeyPermissions,
+      token_id_, std::move(public_key_spki_der),
+      KeyAttributeType::kKeyPermissions,
       internal::KeyPermissionsProtoToBytes(key_permissions),
       std::move(callback));
 }
@@ -428,7 +398,7 @@ void KeyPermissionsManagerImpl::AllowKeyForCorporateUsage(
 void KeyPermissionsManagerImpl::IsKeyAllowedForUsageWithPermissions(
     IsKeyAllowedForUsageCallback callback,
     KeyUsage usage,
-    absl::optional<std::vector<uint8_t>> serialized_key_permissions,
+    std::optional<std::vector<uint8_t>> serialized_key_permissions,
     Status key_attribute_retrieval_status) {
   if (key_attribute_retrieval_status != Status::kSuccess) {
     LOG(ERROR) << "Error while retrieving key permissions: "
@@ -472,34 +442,17 @@ void KeyPermissionsManagerImpl::Shutdown() {
   pref_service_ = nullptr;
 }
 
-void KeyPermissionsManagerImpl::UpdateKeyPermissionsInChaps() {
+void KeyPermissionsManagerImpl::UpdateArcKeyPermissionsInChaps() {
   if (!IsOneTimeMigrationDone()) {
     // This function will always be called after the one-time migration is done.
     return;
   }
 
-  base::UmaHistogramEnumeration(kArcUsageUpdateStatusHistogramName,
-                                ArcUsageUpdateStatus::kStarted);
-
   key_permissions_in_chaps_updater_ =
       std::make_unique<KeyPermissionsInChapsUpdater>(
           KeyPermissionsInChapsUpdater::Mode::kUpdateArcUsageFlag, this);
   key_permissions_in_chaps_updater_->Update(
-      base::BindOnce(&KeyPermissionsManagerImpl::OnKeyPermissionsInChapsUpdated,
-                     weak_ptr_factory_.GetWeakPtr()));
-}
-
-void KeyPermissionsManagerImpl::OnKeyPermissionsInChapsUpdated(
-    Status update_status) {
-  if (update_status != Status::kSuccess) {
-    base::UmaHistogramEnumeration(kArcUsageUpdateStatusHistogramName,
-                                  ArcUsageUpdateStatus::kFailed);
-    LOG(ERROR) << "Updating key permissions in chaps failed.";
-    return;
-  }
-
-  base::UmaHistogramEnumeration(kArcUsageUpdateStatusHistogramName,
-                                ArcUsageUpdateStatus::kSucceeded);
+      base::BindOnce(&OnArcKeyPermissionsInChapsUpdated));
 }
 
 void KeyPermissionsManagerImpl::StartOneTimeMigration() {
@@ -525,6 +478,7 @@ void KeyPermissionsManagerImpl::StartOneTimeMigration() {
 }
 
 void KeyPermissionsManagerImpl::OnOneTimeMigrationDone(
+    size_t keys_udpated,
     Status migration_status) {
   if (migration_status != Status::kSuccess) {
     VLOG(0) << "One-time key permissions migration failed for token: "
@@ -535,21 +489,24 @@ void KeyPermissionsManagerImpl::OnOneTimeMigrationDone(
   }
 
   VLOG(0) << "One-time key permissions migration succeeded for token: "
-          << static_cast<int>(token_id_) << ".";
+          << static_cast<int>(token_id_) << ", keys updated: " << keys_udpated
+          << ".";
   base::UmaHistogramEnumeration(kMigrationStatusHistogramName,
                                 MigrationStatus::kSucceeded);
 
-  pref_service_->SetBoolean(prefs::kKeyPermissionsOneTimeMigrationDone, true);
+  pref_service_->SetBoolean(ash::prefs::kKeyPermissionsOneTimeMigrationDone,
+                            true);
 
   OnReadyForQueries();
 
   // Double-check keys permissions after the migration is done just in case any
   // ARC updates happened during the migration.
-  UpdateKeyPermissionsInChaps();
+  UpdateArcKeyPermissionsInChaps();
 }
 
 bool KeyPermissionsManagerImpl::IsOneTimeMigrationDone() const {
-  return pref_service_->GetBoolean(prefs::kKeyPermissionsOneTimeMigrationDone);
+  return pref_service_->GetBoolean(
+      ash::prefs::kKeyPermissionsOneTimeMigrationDone);
 }
 
 void KeyPermissionsManagerImpl::OnArcUsageAllowanceForCorporateKeysChanged(
@@ -567,7 +524,7 @@ void KeyPermissionsManagerImpl::OnArcUsageAllowanceForCorporateKeysChanged(
   }
 
   arc_usage_allowed_for_corporate_keys_ = allowed;
-  UpdateKeyPermissionsInChaps();
+  UpdateArcKeyPermissionsInChaps();
 }
 
 void KeyPermissionsManagerImpl::OnReadyForQueries() {

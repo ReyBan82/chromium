@@ -4,31 +4,34 @@
 
 #include "components/cronet/url_request_context_config.h"
 
+#include <algorithm>
 #include <memory>
 #include <type_traits>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "base/feature_list.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/logging.h"
+#include "base/memory/ptr_util.h"
+#include "base/metrics/field_trial_params.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "components/cronet/stale_host_resolver.h"
+#include "components/cronet/cronet_proxy_delegate.h"
 #include "net/base/address_family.h"
 #include "net/cert/caching_cert_verifier.h"
 #include "net/cert/cert_verifier.h"
 #include "net/cert/cert_verify_proc.h"
-#include "net/cert/ct_policy_enforcer.h"
-#include "net/cert/ct_policy_status.h"
 #include "net/cert/multi_threaded_cert_verifier.h"
 #include "net/dns/context_host_resolver.h"
 #include "net/dns/host_resolver.h"
 #include "net/dns/mapped_host_resolver.h"
+#include "net/dns/public/insecure_dns_mode.h"
+#include "net/dns/public/secure_dns_mode.h"
+#include "net/dns/stale_host_resolver.h"
 #include "net/http/http_network_session.h"
 #include "net/http/http_server_properties.h"
 #include "net/log/net_log.h"
@@ -36,8 +39,10 @@
 #include "net/quic/set_quic_flag.h"
 #include "net/socket/ssl_client_socket.h"
 #include "net/ssl/ssl_key_logger_impl.h"
+#include "net/third_party/quiche/src/quiche/quic/core/crypto/crypto_protocol.h"
 #include "net/third_party/quiche/src/quiche/quic/core/quic_packets.h"
 #include "net/third_party/quiche/src/quiche/quic/core/quic_tag.h"
+#include "net/third_party/quiche/src/quiche/quic/core/quic_types.h"
 #include "net/url_request/url_request_context_builder.h"
 #include "url/origin.h"
 
@@ -46,6 +51,68 @@
 #endif  // BUILDFLAG(ENABLE_REPORTING)
 
 namespace cronet {
+
+// There's still a risk where setting a tag to be ON does not
+// necessarily mean that it will actually be used as it could be
+// conflicting with another flag, for example: Enable TBBR will indicate
+// that QUICHE should use BBR as a congestion control algorithm. However,
+// if RENO is also declared, then QUICHE will end up using RENO instead of
+// BBR due to how the code is structured. This means that the flag user
+// should be aware of how the tag is used in QUICHE.
+//
+// The above warning applies to both client copts and copts.
+BASE_FEATURE(kOverrideConnectionOptions, base::FEATURE_DISABLED_BY_DEFAULT);
+// The expected format for this flag is comma-separated tags.
+BASE_FEATURE_PARAM(std::string,
+                   kConnectionOptionsForceOn,
+                   &kOverrideConnectionOptions,
+                   "ForceOn",
+                   "");
+// The expected format for this flag is comma-separated tags.
+BASE_FEATURE_PARAM(std::string,
+                   kConnectionOptionsForceOff,
+                   &kOverrideConnectionOptions,
+                   "ForceOff",
+                   "");
+
+BASE_FEATURE(kOverrideClientConnectionOptions,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+// The expected format for this flag is comma-separated tags.
+BASE_FEATURE_PARAM(std::string,
+                   kClientConnectionOptionsForceOn,
+                   &kOverrideClientConnectionOptions,
+                   "ForceOn",
+                   "");
+// The expected format for this flag is comma-separated tags.
+BASE_FEATURE_PARAM(std::string,
+                   kClientConnectionOptionsForceOff,
+                   &kOverrideClientConnectionOptions,
+                   "ForceOff",
+                   "");
+
+// Enables the resolution of hostnames via platform DNS APIs in Cronet.
+BASE_FEATURE(kCronetEnableDnsPlatform, base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE_PARAM(bool,
+                   kCronetEnableDnsPlatformNoSystem,
+                   &kCronetEnableDnsPlatform,
+                   "no_system",
+                   false);
+
+BASE_FEATURE(
+    kCronetMigrateSessionsEarlyV2EnableRetryOnAlternateNetworkBeforeHandshake,
+    base::FEATURE_DISABLED_BY_DEFAULT);
+
+BASE_FEATURE(kCronetInitialDelayForBrokenAlternativeService,
+             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE_PARAM(
+    int,
+    kCronetInitialDelayForBrokenAlternativeServiceSeconds,
+    &kCronetInitialDelayForBrokenAlternativeService,
+    "delay_seconds",
+    // This is currently the default value when quic option is not
+    // specified as per
+    // https://source.chromium.org/chromium/chromium/src/+/main:net/http/broken_alternative_services.cc;l=85;drc=75bb8fdc83f77fdf506208bacd1a1c48e16e8c35.
+    300);
 
 namespace {
 
@@ -81,17 +148,12 @@ const char kQuicMaxMigrationsToNonDefaultNetworkOnWriteError[] =
     "max_migrations_to_non_default_network_on_write_error";
 const char kQuicMaxMigrationsToNonDefaultNetworkOnPathDegrading[] =
     "max_migrations_to_non_default_network_on_path_degrading";
-const char kQuicUserAgentId[] = "user_agent_id";
 const char kQuicMigrateSessionsEarlyV2[] = "migrate_sessions_early_v2";
 const char kQuicRetryOnAlternateNetworkBeforeHandshake[] =
     "retry_on_alternate_network_before_handshake";
-const char kQuicRaceStaleDNSOnConnection[] = "race_stale_dns_on_connection";
 const char kQuicHostWhitelist[] = "host_whitelist";
-const char kQuicEnableSocketRecvOptimization[] =
-    "enable_socket_recv_optimization";
 const char kQuicVersion[] = "quic_version";
 const char kQuicFlags[] = "set_quic_flags";
-const char kQuicIOSNetworkServiceType[] = "ios_network_service_type";
 const char kRetryWithoutAltSvcOnQuicErrors[] =
     "retry_without_alt_svc_on_quic_errors";
 const char kInitialDelayForBrokenAlternativeServiceSeconds[] =
@@ -182,19 +244,6 @@ const char kBidiStreamDetectBrokenConnection[] =
 const char kUseDnsHttpsSvcbFieldTrialName[] = "UseDnsHttpsSvcb";
 const char kUseDnsHttpsSvcbUseAlpn[] = "use_alpn";
 
-// Runtime flag to enable Cronet Telemetry, defaults to false. To enable Cronet
-// Telemetry, this must be set to true alongside the manifest file flag
-// specified by CronetManifest.TELEMETRY_OPT_IN_META_DATA_STR.
-const char kEnableTelemetry[] = "enable_telemetry";
-
-// "goaway_sessions_on_ip_change" is default on for iOS unless overridden via
-// experimental options explicitly.
-#if BUILDFLAG(IS_IOS)
-const bool kDefaultQuicGoAwaySessionsOnIpChange = true;
-#else
-const bool kDefaultQuicGoAwaySessionsOnIpChange = false;
-#endif
-
 // Serializes a base::Value into a string that can be used as the value of
 // JFV-encoded HTTP header [1].  If |value| is a list, we remove the outermost
 // [] delimiters from the result.
@@ -213,7 +262,7 @@ std::string SerializeJFVHeader(const base::Value& value) {
 
 std::vector<URLRequestContextConfig::PreloadedNelAndReportingHeader>
 ParseNetworkErrorLoggingHeaders(
-    const base::Value::List& preloaded_headers_config) {
+    const base::ListValue& preloaded_headers_config) {
   std::vector<URLRequestContextConfig::PreloadedNelAndReportingHeader> result;
   for (const auto& preloaded_header_config : preloaded_headers_config) {
     if (!preloaded_header_config.is_dict())
@@ -243,10 +292,10 @@ ParseNetworkErrorLoggingHeaders(
 // Applies |f| to the value contained by |maybe|, returns empty optional
 // otherwise.
 template <typename T, typename F>
-auto map(absl::optional<T> maybe, F&& f) {
+auto map(std::optional<T> maybe, F&& f) {
   if (!maybe)
-    return absl::optional<std::invoke_result_t<F, T>>();
-  return absl::optional<std::invoke_result_t<F, T>>(f(maybe.value()));
+    return std::optional<std::invoke_result_t<F, T>>();
+  return std::optional<std::invoke_result_t<F, T>>(f(maybe.value()));
 }
 
 }  // namespace
@@ -256,7 +305,7 @@ URLRequestContextConfig::QuicHint::QuicHint(const std::string& host,
                                             int alternate_port)
     : host(host), port(port), alternate_port(alternate_port) {}
 
-URLRequestContextConfig::QuicHint::~QuicHint() {}
+URLRequestContextConfig::QuicHint::~QuicHint() = default;
 
 URLRequestContextConfig::Pkp::Pkp(const std::string& host,
                                   bool include_subdomains,
@@ -265,7 +314,7 @@ URLRequestContextConfig::Pkp::Pkp(const std::string& host,
       include_subdomains(include_subdomains),
       expiration_date(expiration_date) {}
 
-URLRequestContextConfig::Pkp::~Pkp() {}
+URLRequestContextConfig::Pkp::~Pkp() = default;
 
 URLRequestContextConfig::PreloadedNelAndReportingHeader::
     PreloadedNelAndReportingHeader(const url::Origin& origin, std::string value)
@@ -276,7 +325,6 @@ URLRequestContextConfig::PreloadedNelAndReportingHeader::
 
 URLRequestContextConfig::URLRequestContextConfig(
     bool enable_quic,
-    const std::string& quic_user_agent_id,
     bool enable_spdy,
     bool enable_brotli,
     HttpCacheType http_cache,
@@ -285,13 +333,13 @@ URLRequestContextConfig::URLRequestContextConfig(
     const std::string& storage_path,
     const std::string& accept_language,
     const std::string& user_agent,
-    base::Value::Dict experimental_options,
+    base::DictValue experimental_options,
     std::unique_ptr<net::CertVerifier> mock_cert_verifier,
     bool enable_network_quality_estimator,
     bool bypass_public_key_pinning_for_local_trust_anchors,
-    absl::optional<double> network_thread_priority)
+    std::optional<int> network_thread_priority,
+    std::optional<cronet::proto::ProxyOptions> proxy_options)
     : enable_quic(enable_quic),
-      quic_user_agent_id(quic_user_agent_id),
       enable_spdy(enable_spdy),
       enable_brotli(enable_brotli),
       http_cache(http_cache),
@@ -309,17 +357,16 @@ URLRequestContextConfig::URLRequestContextConfig(
       network_thread_priority(network_thread_priority),
       bidi_stream_detect_broken_connection(false),
       heartbeat_interval(base::Seconds(0)),
-      enable_telemetry(false) {
+      proxy_options(std::move(proxy_options)) {
   SetContextConfigExperimentalOptions();
 }
 
-URLRequestContextConfig::~URLRequestContextConfig() {}
+URLRequestContextConfig::~URLRequestContextConfig() = default;
 
 // static
 std::unique_ptr<URLRequestContextConfig>
 URLRequestContextConfig::CreateURLRequestContextConfig(
     bool enable_quic,
-    const std::string& quic_user_agent_id,
     bool enable_spdy,
     bool enable_brotli,
     HttpCacheType http_cache,
@@ -332,8 +379,9 @@ URLRequestContextConfig::CreateURLRequestContextConfig(
     std::unique_ptr<net::CertVerifier> mock_cert_verifier,
     bool enable_network_quality_estimator,
     bool bypass_public_key_pinning_for_local_trust_anchors,
-    absl::optional<double> network_thread_priority) {
-  absl::optional<base::Value::Dict> experimental_options =
+    std::optional<int> network_thread_priority,
+    std::optional<cronet::proto::ProxyOptions> proxy_options) {
+  std::optional<base::DictValue> experimental_options =
       ParseExperimentalOptions(unparsed_experimental_options);
   if (!experimental_options) {
     // For the time being maintain backward compatibility by only failing to
@@ -341,40 +389,40 @@ URLRequestContextConfig::CreateURLRequestContextConfig(
     if (ExperimentalOptionsParsingIsAllowedToFail())
       return nullptr;
     else
-      experimental_options = base::Value::Dict();
+      experimental_options = base::DictValue();
   }
   return base::WrapUnique(new URLRequestContextConfig(
-      enable_quic, quic_user_agent_id, enable_spdy, enable_brotli, http_cache,
-      http_cache_max_size, load_disable_cache, storage_path, accept_language,
-      user_agent, std::move(experimental_options).value(),
-      std::move(mock_cert_verifier), enable_network_quality_estimator,
+      enable_quic, enable_spdy, enable_brotli, http_cache, http_cache_max_size,
+      load_disable_cache, storage_path, accept_language, user_agent,
+      std::move(experimental_options).value(), std::move(mock_cert_verifier),
+      enable_network_quality_estimator,
       bypass_public_key_pinning_for_local_trust_anchors,
-      network_thread_priority));
+      network_thread_priority, std::move(proxy_options)));
 }
 
 // static
-absl::optional<base::Value::Dict>
+std::optional<base::DictValue>
 URLRequestContextConfig::ParseExperimentalOptions(
     std::string unparsed_experimental_options) {
   // From a user perspective no experimental options means an empty string. The
   // underlying code instead expects and empty dictionary. Normalize this.
   if (unparsed_experimental_options.empty())
     unparsed_experimental_options = "{}";
-  DVLOG(1) << "Experimental Options:" << unparsed_experimental_options;
+  VLOG(1) << "Experimental Options:" << unparsed_experimental_options;
   auto parsed_json = base::JSONReader::ReadAndReturnValueWithError(
-      unparsed_experimental_options);
+      unparsed_experimental_options, base::JSON_PARSE_CHROMIUM_EXTENSIONS);
   if (!parsed_json.has_value()) {
     LOG(ERROR) << "Parsing experimental options failed: '"
                << unparsed_experimental_options << "', error "
                << parsed_json.error().message;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
-  base::Value::Dict* experimental_options_dict = parsed_json->GetIfDict();
+  base::DictValue* experimental_options_dict = parsed_json->GetIfDict();
   if (!experimental_options_dict) {
     LOG(ERROR) << "Experimental options string is not a dictionary: "
                << *parsed_json;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   return std::move(*experimental_options_dict);
@@ -397,20 +445,6 @@ void URLRequestContextConfig::SetContextConfigExperimentalOptions() {
       experimental_options.Remove(kBidiStreamDetectBrokenConnection);
     }
   }
-
-  const base::Value* enable_telemetry_value =
-      experimental_options.Find(kEnableTelemetry);
-  if (enable_telemetry_value) {
-    if (!enable_telemetry_value->is_bool()) {
-      LOG(ERROR) << "\"" << kEnableTelemetry << "\" config params \""
-                 << enable_telemetry_value << "\" is not a bool";
-      experimental_options.Remove(kEnableTelemetry);
-      effective_experimental_options.Remove(kEnableTelemetry);
-    } else {
-      enable_telemetry = enable_telemetry_value->GetBool();
-      experimental_options.Remove(kEnableTelemetry);
-    }
-  }
 }
 
 void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
@@ -424,9 +458,34 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
   bool disable_ipv6_on_wifi = false;
   bool nel_enable = false;
   bool is_network_bound = bound_network != net::handles::kInvalidNetworkHandle;
-  absl::optional<net::HostResolver::HttpsSvcbOptions> https_svcb_options;
+  std::optional<net::HostResolver::HttpsSvcbOptions> https_svcb_options;
 
-  StaleHostResolver::StaleOptions stale_dns_options;
+  net::StaleHostResolver::StaleOptions stale_dns_options;
+  // TODO(crbug.com/399372859): Run an experiment to use the default
+  // StaleOptions() values.
+  stale_dns_options.allow_other_network = false;
+  stale_dns_options.max_stale_uses = 0;
+  stale_dns_options.use_stale_on_name_not_resolved = false;
+  stale_dns_options.max_expired_time = base::Milliseconds(0);
+
+  // This is done outside the experimental options loop so that the feature flag
+  // can be applied even if the "QUIC" experimental options are not explicitly
+  // specified.
+  if (base::FeatureList::IsEnabled(
+          kCronetInitialDelayForBrokenAlternativeService)) {
+    quic_params->initial_delay_for_broken_alternative_service = base::Seconds(
+        kCronetInitialDelayForBrokenAlternativeServiceSeconds.Get());
+  } else {
+    const base::Value* quic_value =
+        experimental_options.Find(kQuicFieldTrialName);
+    if (quic_value && quic_value->is_dict()) {
+      quic_params->initial_delay_for_broken_alternative_service =
+          map(quic_value->GetDict().FindInt(
+                  kInitialDelayForBrokenAlternativeServiceSeconds),
+              base::Seconds<int>);
+    }
+  }
+
   const std::string* host_resolver_rules_string;
 
   for (auto iter = experimental_options.begin();
@@ -439,7 +498,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
         continue;
       }
 
-      const base::Value::Dict& quic_args = iter->second.GetDict();
+      const base::DictValue& quic_args = iter->second.GetDict();
       const std::string* quic_version_string =
           quic_args.FindString(kQuicVersion);
       if (quic_version_string) {
@@ -449,7 +508,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
         quic::ParsedQuicVersionVector obsolete_versions =
             net::ObsoleteQuicVersions();
         for (const quic::ParsedQuicVersion& version : supported_versions) {
-          if (!base::Contains(obsolete_versions, version)) {
+          if (!std::ranges::contains(obsolete_versions, version)) {
             filtered_versions.push_back(version);
           }
         }
@@ -504,14 +563,6 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
       quic_params->close_sessions_on_ip_change =
           quic_args.FindBool(kQuicCloseSessionsOnIpChange)
               .value_or(quic_params->close_sessions_on_ip_change);
-      if (quic_params->close_sessions_on_ip_change &&
-          kDefaultQuicGoAwaySessionsOnIpChange) {
-        // "close_sessions_on_ip_change" and "goaway_sessions_on_ip_change"
-        // are mutually exclusive. Turn off the goaway option which is
-        // default on for iOS if "close_sessions_on_ip_change" is set via
-        // experimental options.
-        quic_params->goaway_sessions_on_ip_change = false;
-      }
 
       quic_params->goaway_sessions_on_ip_change =
           quic_args.FindBool(kQuicGoAwaySessionsOnIpChange)
@@ -520,16 +571,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
           quic_args.FindBool(kQuicAllowServerMigration)
               .value_or(quic_params->allow_server_migration);
 
-      const std::string* user_agent_id = quic_args.FindString(kQuicUserAgentId);
-      if (user_agent_id) {
-        quic_params->user_agent_id = *user_agent_id;
-      }
-
-      quic_params->enable_socket_recv_optimization =
-          quic_args.FindBool(kQuicEnableSocketRecvOptimization)
-              .value_or(quic_params->enable_socket_recv_optimization);
-
-      absl::optional<bool> quic_migrate_sessions_on_network_change_v2_in =
+      std::optional<bool> quic_migrate_sessions_on_network_change_v2_in =
           quic_args.FindBool(kQuicMigrateSessionsOnNetworkChangeV2);
       if (quic_migrate_sessions_on_network_change_v2_in.has_value()) {
         quic_params->migrate_sessions_on_network_change_v2 =
@@ -551,7 +593,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
                         ->max_migrations_to_non_default_network_on_path_degrading);
       }
 
-      absl::optional<bool> quic_migrate_idle_sessions_in =
+      std::optional<bool> quic_migrate_idle_sessions_in =
           quic_args.FindBool(kQuicMigrateIdleSessions);
       if (quic_migrate_idle_sessions_in.has_value()) {
         quic_params->migrate_idle_sessions =
@@ -571,14 +613,16 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
               base::Milliseconds<int>)
               .value_or(quic_params->retransmittable_on_wire_timeout);
 
+      if (base::FeatureList::IsEnabled(
+              kCronetMigrateSessionsEarlyV2EnableRetryOnAlternateNetworkBeforeHandshake) &&
+          quic_params->migrate_sessions_early_v2) {
+        quic_params->retry_on_alternate_network_before_handshake = true;
+      }
+
       quic_params->retry_on_alternate_network_before_handshake =
           quic_args.FindBool(kQuicRetryOnAlternateNetworkBeforeHandshake)
               .value_or(
                   quic_params->retry_on_alternate_network_before_handshake);
-
-      quic_params->race_stale_dns_on_connection =
-          quic_args.FindBool(kQuicRaceStaleDNSOnConnection)
-              .value_or(quic_params->race_stale_dns_on_connection);
 
       quic_params->allow_port_migration =
           quic_args.FindBool(kAllowPortMigration)
@@ -587,10 +631,6 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
       quic_params->retry_without_alt_svc_on_quic_errors =
           quic_args.FindBool(kRetryWithoutAltSvcOnQuicErrors)
               .value_or(quic_params->retry_without_alt_svc_on_quic_errors);
-
-      quic_params->initial_delay_for_broken_alternative_service = map(
-          quic_args.FindInt(kInitialDelayForBrokenAlternativeServiceSeconds),
-          base::Seconds<int>);
 
       quic_params->exponential_backoff_on_initial_delay =
           quic_args.FindBool(kExponentialBackoffOnInitialDelay);
@@ -628,10 +668,6 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
           net::SetQuicFlagByName(tokens[0], tokens[1]);
         }
       }
-
-      quic_params->ios_network_service_type =
-          quic_args.FindInt(kQuicIOSNetworkServiceType)
-              .value_or(quic_params->ios_network_service_type);
     } else if (iter->first == kAsyncDnsFieldTrialName) {
       if (!iter->second.is_dict()) {
         LOG(ERROR) << "\"" << iter->first << "\" config params \""
@@ -639,7 +675,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
         effective_experimental_options.Remove(iter->first);
         continue;
       }
-      const base::Value::Dict& async_dns_args = iter->second.GetDict();
+      const base::DictValue& async_dns_args = iter->second.GetDict();
       async_dns_enable =
           async_dns_args.FindBool(kAsyncDnsEnable).value_or(async_dns_enable);
     } else if (iter->first == kStaleDnsFieldTrialName) {
@@ -649,7 +685,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
         effective_experimental_options.Remove(iter->first);
         continue;
       }
-      const base::Value::Dict& stale_dns_args = iter->second.GetDict();
+      const base::DictValue& stale_dns_args = iter->second.GetDict();
       stale_dns_enable =
           stale_dns_args.FindBool(kStaleDnsEnable).value_or(false);
 
@@ -684,8 +720,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
         effective_experimental_options.Remove(iter->first);
         continue;
       }
-      const base::Value::Dict& host_resolver_rules_args =
-          iter->second.GetDict();
+      const base::DictValue& host_resolver_rules_args = iter->second.GetDict();
       host_resolver_rules_string =
           host_resolver_rules_args.FindString(kHostResolverRules);
       host_resolver_rules_enable = !!host_resolver_rules_string;
@@ -696,7 +731,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
         effective_experimental_options.Remove(iter->first);
         continue;
       }
-      const base::Value::Dict& args = iter->second.GetDict();
+      const base::DictValue& args = iter->second.GetDict();
       https_svcb_options = net::HostResolver::HttpsSvcbOptions::FromDict(args);
       session_params->use_dns_https_svcb_alpn =
           args.FindBool(kUseDnsHttpsSvcbUseAlpn)
@@ -708,7 +743,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
         effective_experimental_options.Remove(iter->first);
         continue;
       }
-      const base::Value::Dict& nel_args = iter->second.GetDict();
+      const base::DictValue& nel_args = iter->second.GetDict();
       nel_enable =
           nel_args.FindBool(kNetworkErrorLoggingEnable).value_or(nel_enable);
 
@@ -755,7 +790,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
         continue;
       }
 
-      const base::Value::Dict& nqe_args = iter->second.GetDict();
+      const base::DictValue& nqe_args = iter->second.GetDict();
       const std::string* nqe_option =
           nqe_args.FindString(net::kForceEffectiveConnectionType);
       if (nqe_option) {
@@ -781,23 +816,67 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
     }
   }
 
-  if (async_dns_enable || stale_dns_enable || host_resolver_rules_enable ||
-      disable_ipv6_on_wifi || is_network_bound || https_svcb_options) {
+  auto reconcile_quic_tags = [](quic::QuicTagVector& quic_tags,
+                                const quic::QuicTagVector& tags_to_force_on,
+                                const quic::QuicTagVector& tags_to_force_off) {
+    std::ranges::copy_if(tags_to_force_on, std::back_inserter(quic_tags),
+                         [&](quic::QuicTag tag) {
+                           return !quic::ContainsQuicTag(quic_tags, tag);
+                         });
+    std::erase_if(quic_tags, [&](quic::QuicTag tag) {
+      return quic::ContainsQuicTag(tags_to_force_off, tag);
+    });
+  };
+
+  if (base::FeatureList::IsEnabled(kOverrideClientConnectionOptions)) {
+    reconcile_quic_tags(
+        quic_params->client_connection_options,
+        quic::ParseQuicTagVector(kClientConnectionOptionsForceOn.Get()),
+        quic::ParseQuicTagVector(kClientConnectionOptionsForceOff.Get()));
+  }
+
+  if (base::FeatureList::IsEnabled(kOverrideConnectionOptions)) {
+    reconcile_quic_tags(
+        quic_params->connection_options,
+        quic::ParseQuicTagVector(kConnectionOptionsForceOn.Get()),
+        quic::ParseQuicTagVector(kConnectionOptionsForceOff.Get()));
+  }
+
+  const bool enable_platform_dns =
+      net::features::IsDnsPlatformSupported() &&
+      base::FeatureList::IsEnabled(kCronetEnableDnsPlatform);
+
+  if (enable_platform_dns || async_dns_enable || stale_dns_enable ||
+      host_resolver_rules_enable || disable_ipv6_on_wifi || is_network_bound ||
+      https_svcb_options) {
     net::HostResolver::ManagerOptions host_resolver_manager_options;
-    host_resolver_manager_options.insecure_dns_client_enabled =
-        async_dns_enable;
+    host_resolver_manager_options.insecure_dns_mode =
+        async_dns_enable ? net::InsecureDnsMode::kEnabledBuiltIn
+                         : net::InsecureDnsMode::kDisabled;
     host_resolver_manager_options.check_ipv6_on_wifi = !disable_ipv6_on_wifi;
     if (https_svcb_options) {
       host_resolver_manager_options.https_svcb_options = https_svcb_options;
     }
 
+    if (enable_platform_dns) {
+      host_resolver_manager_options.insecure_dns_mode =
+          kCronetEnableDnsPlatformNoSystem.Get()
+              ? net::InsecureDnsMode::kEnabledPlatformNoSystem
+              : net::InsecureDnsMode::kEnabledPlatform;
+      net::DnsConfigOverrides overrides;
+      // Disabling DoH queries, we only want to use the built-in resolver to
+      // direct queries to the system resolver via platform DNS APIs.
+      overrides.secure_dns_mode = net::SecureDnsMode::kOff;
+      host_resolver_manager_options.dns_config_overrides = overrides;
+    }
+
     if (!is_network_bound) {
       std::unique_ptr<net::HostResolver> host_resolver;
-      // TODO(crbug.com/934402): Consider using a shared HostResolverManager for
-      // Cronet HostResolvers.
+      // TODO(crbug.com/40614970): Consider using a shared HostResolverManager
+      // for Cronet HostResolvers.
       if (stale_dns_enable) {
         DCHECK(!disable_ipv6_on_wifi);
-        host_resolver = std::make_unique<StaleHostResolver>(
+        host_resolver = std::make_unique<net::StaleHostResolver>(
             net::HostResolver::CreateStandaloneContextResolver(
                 net::NetLog::Get(), std::move(host_resolver_manager_options)),
             stale_dns_options);
@@ -843,6 +922,7 @@ void URLRequestContextConfig::SetContextBuilderExperimentalOptions(
 
 void URLRequestContextConfig::ConfigureURLRequestContextBuilder(
     net::URLRequestContextBuilder* context_builder,
+    CronetContext::NetworkTasks* network_tasks,
     net::handles::NetworkHandle bound_network) {
   std::string config_cache;
   if (http_cache != DISABLED) {
@@ -867,11 +947,10 @@ void URLRequestContextConfig::ConfigureURLRequestContextBuilder(
   session_params.enable_quic = enable_quic;
   auto quic_context = std::make_unique<net::QuicContext>();
   if (enable_quic) {
-    quic_context->params()->user_agent_id = quic_user_agent_id;
-    // Note goaway sessions on ip change will be turned on by default
-    // for iOS unless overrided via experiemental options.
-    quic_context->params()->goaway_sessions_on_ip_change =
-        kDefaultQuicGoAwaySessionsOnIpChange;
+    quic_context->params()->goaway_sessions_on_ip_change = false;
+    // Explicitly disable network-change migration on Cronet. This is tracked
+    // at crbug.com/1430096.
+    quic_context->params()->migrate_sessions_on_network_change_v2 = false;
   }
 
   SetContextBuilderExperimentalOptions(context_builder, &session_params,
@@ -880,27 +959,28 @@ void URLRequestContextConfig::ConfigureURLRequestContextBuilder(
   context_builder->set_http_network_session_params(session_params);
   context_builder->set_quic_context(std::move(quic_context));
 
+  if (proxy_options.has_value()) {
+    context_builder->set_proxy_delegate(
+        std::make_unique<CronetProxyDelegate>(*proxy_options, network_tasks));
+  }
+
   if (mock_cert_verifier)
     context_builder->SetCertVerifier(std::move(mock_cert_verifier));
-  // Certificate Transparency is intentionally ignored in Cronet.
-  // See //net/docs/certificate-transparency.md for more details.
-  context_builder->set_ct_policy_enforcer(
-      std::make_unique<net::DefaultCTPolicyEnforcer>());
   // TODO(mef): Use |config| to set cookies.
 }
 
-URLRequestContextConfigBuilder::URLRequestContextConfigBuilder() {}
-URLRequestContextConfigBuilder::~URLRequestContextConfigBuilder() {}
+URLRequestContextConfigBuilder::URLRequestContextConfigBuilder() = default;
+URLRequestContextConfigBuilder::~URLRequestContextConfigBuilder() = default;
 
 std::unique_ptr<URLRequestContextConfig>
 URLRequestContextConfigBuilder::Build() {
   return URLRequestContextConfig::CreateURLRequestContextConfig(
-      enable_quic, quic_user_agent_id, enable_spdy, enable_brotli, http_cache,
-      http_cache_max_size, load_disable_cache, storage_path, accept_language,
-      user_agent, experimental_options, std::move(mock_cert_verifier),
+      enable_quic, enable_spdy, enable_brotli, http_cache, http_cache_max_size,
+      load_disable_cache, storage_path, accept_language, user_agent,
+      experimental_options, std::move(mock_cert_verifier),
       enable_network_quality_estimator,
       bypass_public_key_pinning_for_local_trust_anchors,
-      network_thread_priority);
+      network_thread_priority, std::optional<cronet::proto::ProxyOptions>());
 }
 
 }  // namespace cronet

@@ -8,8 +8,10 @@
 #include <string>
 
 #include "base/functional/callback.h"
+#include "base/gtest_prod_util.h"
 #include "base/values.h"
 #include "base/win/scoped_handle.h"
+#include "url/gurl.h"
 
 namespace credential_provider {
 
@@ -28,7 +30,7 @@ class ScopedUserProfile {
   virtual ~ScopedUserProfile();
 
   // Saves Gaia information to the account's KHCU registry hive.
-  virtual HRESULT SaveAccountInfo(const base::Value& properties);
+  virtual HRESULT SaveAccountInfo(const base::DictValue& properties);
 
  protected:
   // This constructor is used by the derived fake class to bypass the
@@ -36,7 +38,7 @@ class ScopedUserProfile {
   // tests are not running elevated.
   ScopedUserProfile();
 
-  HRESULT ExtractAssociationInformation(const base::Value& properties,
+  HRESULT ExtractAssociationInformation(const base::DictValue& properties,
                                         std::wstring* sid,
                                         std::wstring* id,
                                         std::wstring* email,
@@ -50,6 +52,8 @@ class ScopedUserProfile {
 
  private:
   friend class FakeScopedUserProfileFactory;
+  FRIEND_TEST_ALL_PREFIXES(ScopedUserProfileStaticTest, IsValidPictureUrl);
+  FRIEND_TEST_ALL_PREFIXES(ScopedUserProfileStaticTest, BuildProfilePictureUrl);
 
   bool IsValid();
 
@@ -69,6 +73,17 @@ class ScopedUserProfile {
                     const std::wstring& password);
 
   bool WaitForProfileCreation(const std::wstring& sid);
+
+  // Returns true if the given `picture_url` is a valid Google user content URL.
+  static bool IsValidPictureUrl(const std::wstring& picture_url);
+
+  // Updates the profile pictures for the user with the given `sid`.
+  static HRESULT UpdateProfilePictures(const std::wstring& sid,
+                                       const std::wstring& picture_url,
+                                       bool force_update);
+
+  // Builds a profile picture URL with the specified `size`.
+  static std::string BuildProfilePictureUrl(const GURL& url, size_t size);
 
   base::win::ScopedHandle token_;
 

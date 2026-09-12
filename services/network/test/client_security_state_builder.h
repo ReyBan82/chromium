@@ -5,13 +5,12 @@
 #ifndef SERVICES_NETWORK_TEST_CLIENT_SECURITY_STATE_BUILDER_H_
 #define SERVICES_NETWORK_TEST_CLIENT_SECURITY_STATE_BUILDER_H_
 
-#include "services/network/public/mojom/client_security_state.mojom-forward.h"
 #include "services/network/public/mojom/client_security_state.mojom.h"
 
 namespace network {
 
 namespace mojom {
-enum class PrivateNetworkRequestPolicy;
+enum class LocalNetworkAccessRequestPolicy;
 enum class IPAddressSpace;
 }  // namespace mojom
 
@@ -22,8 +21,8 @@ class ClientSecurityStateBuilder {
   ClientSecurityStateBuilder() = default;
   ~ClientSecurityStateBuilder() = default;
 
-  ClientSecurityStateBuilder& WithPrivateNetworkRequestPolicy(
-      network::mojom::PrivateNetworkRequestPolicy policy);
+  ClientSecurityStateBuilder& WithLocalNetworkAccessRequestPolicy(
+      network::mojom::LocalNetworkAccessRequestPolicy policy);
 
   ClientSecurityStateBuilder& WithIPAddressSpace(
       network::mojom::IPAddressSpace space);
@@ -40,4 +39,4 @@ class ClientSecurityStateBuilder {
 };
 }  // namespace network
 
-#endif  // SERVICES_NETWORK_TEST_TEST_CLIENT_SECURITY_STATE_BUILDER_H_
+#endif  // SERVICES_NETWORK_TEST_CLIENT_SECURITY_STATE_BUILDER_H_

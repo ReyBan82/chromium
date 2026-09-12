@@ -15,6 +15,10 @@ namespace extensions {
 namespace dnr_api = api::declarative_net_request;
 namespace declarative_net_request {
 
+// static
+const char* DNRManifestData::kManifestDataKey =
+    dnr_api::ManifestKeys::kDeclarativeNetRequest;
+
 DNRManifestData::RulesetInfo::RulesetInfo() = default;
 DNRManifestData::RulesetInfo::~RulesetInfo() = default;
 DNRManifestData::RulesetInfo::RulesetInfo(RulesetInfo&&) = default;
@@ -37,12 +41,11 @@ const std::vector<DNRManifestData::RulesetInfo>& DNRManifestData::GetRulesets(
   static const base::NoDestructor<std::vector<DNRManifestData::RulesetInfo>>
       empty_vector;
 
-  Extension::ManifestData* data =
-      extension.GetManifestData(dnr_api::ManifestKeys::kDeclarativeNetRequest);
+  const auto* data = extension.GetManifestData<DNRManifestData>();
   if (!data)
     return *empty_vector;
 
-  return static_cast<DNRManifestData*>(data)->rulesets;
+  return data->rulesets;
 }
 
 const DNRManifestData::ManifestIDToRulesetMap&
@@ -51,24 +54,21 @@ DNRManifestData::GetManifestIDToRulesetMap(const Extension& extension) {
   // the extension didn't specify any rulesets.
   static const base::NoDestructor<ManifestIDToRulesetMap> empty_map;
 
-  Extension::ManifestData* data =
-      extension.GetManifestData(dnr_api::ManifestKeys::kDeclarativeNetRequest);
+  const auto* data = extension.GetManifestData<DNRManifestData>();
   if (!data)
     return *empty_map;
 
-  return static_cast<DNRManifestData*>(data)->manifest_id_to_ruleset_map;
+  return data->manifest_id_to_ruleset_map;
 }
 
 // static
 const DNRManifestData::RulesetInfo& DNRManifestData::GetRuleset(
     const Extension& extension,
     RulesetID ruleset_id) {
-  Extension::ManifestData* data =
-      extension.GetManifestData(dnr_api::ManifestKeys::kDeclarativeNetRequest);
+  const auto* data = extension.GetManifestData<DNRManifestData>();
   DCHECK(data);
 
-  const std::vector<DNRManifestData::RulesetInfo>& rulesets =
-      static_cast<DNRManifestData*>(data)->rulesets;
+  const std::vector<DNRManifestData::RulesetInfo>& rulesets = data->rulesets;
 
   int index = ruleset_id.value() - kMinValidStaticRulesetID.value();
   CHECK_GE(index, 0);

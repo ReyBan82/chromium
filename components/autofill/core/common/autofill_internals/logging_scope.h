@@ -39,8 +39,16 @@ class LogBuffer;
   T(CardUploadDecision)                                                \
   /* The website modified a field */                                   \
   T(WebsiteModifiedFieldValue)                                         \
-  /* Chrome Fast Checkout run. */                                      \
-  T(FastCheckout)
+  /* Touch To Fill UI. */                                              \
+  T(TouchToFill)                                                       \
+  /* Autofill with AI. */                                              \
+  T(AutofillAi)                                                        \
+  /* Autofill Actor. */                                                \
+  T(AutofillActor)                                                     \
+  /* One Time Token. */                                                \
+  T(OneTimeTokens)                                                     \
+  /* AtMemory. */                                                      \
+  T(AtMemory)
 
 // Define a bunch of logging scopes: kContext, kParsing, ...
 #define AUTOFILL_TEMPLATE(NAME) k##NAME,

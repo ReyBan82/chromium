@@ -11,11 +11,13 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
+#include "base/threading/platform_thread.h"
 #include "base/trace_event/trace_event.h"
+#include "components/viz/common/frame_sinks/copy_output_result.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+#include "services/viz/public/cpp/compositing/blit_request_mojom_traits.h"
 #include "services/viz/public/cpp/compositing/copy_output_result_mojom_traits.h"
-#include "services/viz/public/cpp/crash_keys.h"
 
 namespace {
 
@@ -41,10 +43,11 @@ class CopyOutputResultSenderImpl : public viz::mojom::CopyOutputResultSender {
   ~CopyOutputResultSenderImpl() override {
     if (result_callback_) {
       result_callback_task_runner_->PostTask(
-          FROM_HERE, base::BindOnce(std::move(result_callback_),
-                                    std::make_unique<viz::CopyOutputResult>(
-                                        result_format_, result_destination_,
-                                        gfx::Rect(), false)));
+          FROM_HERE,
+          base::BindOnce(std::move(result_callback_),
+                         std::make_unique<viz::CopyOutputResult>(
+                             result_format_, result_destination_,
+                             viz::CopyOutputResult::Error::kUnknown)));
     }
   }
 
@@ -85,13 +88,10 @@ StructTraits<viz::mojom::CopyOutputRequestDataView,
     result_sender(const std::unique_ptr<viz::CopyOutputRequest>& request) {
   mojo::PendingRemote<viz::mojom::CopyOutputResultSender> result_sender;
   auto pending_receiver = result_sender.InitWithNewPipeAndPassReceiver();
-  // Receiving the result requires an expensive deserialize operation, so by
-  // default we want the pipe to operate on the ThreadPool, and then it will
-  // PostTask back to the current sequence.
+  CHECK(request->has_result_task_runner());
   auto impl = std::make_unique<CopyOutputResultSenderImpl>(
       request->result_format(), request->result_destination(),
-      std::move(request->result_callback_),
-      base::SequencedTaskRunner::GetCurrentDefault());
+      std::move(request->result_callback_), request->result_task_runner_);
   auto runner = base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock()});
   runner->PostTask(
       FROM_HERE,
@@ -106,57 +106,63 @@ StructTraits<viz::mojom::CopyOutputRequestDataView,
 }
 
 // static
-bool StructTraits<viz::mojom::CopyOutputRequestDataView,
-                  std::unique_ptr<viz::CopyOutputRequest>>::
+base::expected<void, DeserializationError>
+StructTraits<viz::mojom::CopyOutputRequestDataView,
+             std::unique_ptr<viz::CopyOutputRequest>>::
     Read(viz::mojom::CopyOutputRequestDataView data,
          std::unique_ptr<viz::CopyOutputRequest>* out_p) {
   viz::CopyOutputRequest::ResultFormat result_format;
   if (!data.ReadResultFormat(&result_format))
-    return false;
+    return base::unexpected(DeserializationError());
 
   viz::CopyOutputRequest::ResultDestination result_destination;
   if (!data.ReadResultDestination(&result_destination))
-    return false;
+    return base::unexpected(DeserializationError());
 
   auto result_sender = data.TakeResultSender<
       mojo::PendingRemote<viz::mojom::CopyOutputResultSender>>();
 
   auto request = std::make_unique<viz::CopyOutputRequest>(
       result_format, result_destination,
-      base::BindOnce(SendResult, std::move(result_sender)));
+      base::BindOnce(&SendResult, std::move(result_sender)));
+
+  // Serializing the result requires an expensive copy, so to not block the
+  // any important thread we PostTask onto the threadpool.
+  request->set_result_task_runner(
+      base::ThreadPool::CreateSequencedTaskRunner({base::MayBlock()}));
 
   gfx::Vector2d scale_from;
   if (!data.ReadScaleFrom(&scale_from))
-    return false;
+    return base::unexpected(DeserializationError());
   if (scale_from.x() <= 0) {
-    viz::SetDeserializationCrashKeyString("Invalid readback scale from x");
-    return false;
+    return base::unexpected(DeserializationError());
   }
   if (scale_from.y() <= 0) {
-    viz::SetDeserializationCrashKeyString("Invalid readback scale from y");
-    return false;
+    return base::unexpected(DeserializationError());
   }
   gfx::Vector2d scale_to;
   if (!data.ReadScaleTo(&scale_to))
-    return false;
+    return base::unexpected(DeserializationError());
   if (scale_to.x() <= 0) {
-    viz::SetDeserializationCrashKeyString("Invalid readback scale to x");
-    return false;
+    return base::unexpected(DeserializationError());
   }
   if (scale_to.y() <= 0) {
-    viz::SetDeserializationCrashKeyString("Invalid readback scale to y");
-    return false;
+    return base::unexpected(DeserializationError());
   }
   request->SetScaleRatio(scale_from, scale_to);
 
   if (!data.ReadSource(&request->source_) || !data.ReadArea(&request->area_) ||
       !data.ReadResultSelection(&request->result_selection_)) {
-    return false;
+    return base::unexpected(DeserializationError());
+  }
+
+  if (!data.ReadBlitRequest(&request->blit_request_)) {
+    return base::unexpected(DeserializationError());
   }
 
   *out_p = std::move(request);
 
-  return true;
+  return base::ok();
 }
 
 }  // namespace mojo

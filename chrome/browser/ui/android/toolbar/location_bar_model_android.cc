@@ -5,10 +5,13 @@
 #include "chrome/browser/ui/android/toolbar/location_bar_model_android.h"
 
 #include "base/android/jni_string.h"
-#include "chrome/browser/ui/android/toolbar/jni_headers/LocationBarModel_jni.h"
+#include "base/command_line.h"
+#include "chrome/browser/search/search.h"
+#include "chrome/common/chrome_switches.h"
 #include "chrome/common/url_constants.h"
 #include "chrome/common/webui_url_constants.h"
 #include "components/omnibox/browser/location_bar_model_impl.h"
+#include "components/omnibox/common/omnibox_focus_state.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/ssl_status.h"
 #include "content/public/browser/web_contents.h"
@@ -16,7 +19,9 @@
 #include "ui/base/device_form_factor.h"
 #include "url/android/gurl_android.h"
 
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/browser/ui/android/toolbar/jni_headers/LocationBarModel_jni.h"
+
 using base::android::JavaRef;
 using base::android::ScopedJavaLocalRef;
 
@@ -27,73 +32,54 @@ LocationBarModelAndroid::LocationBarModelAndroid(JNIEnv* env,
                                                  content::kMaxURLDisplayChars)),
       java_object_(obj) {}
 
-LocationBarModelAndroid::~LocationBarModelAndroid() {}
+LocationBarModelAndroid::~LocationBarModelAndroid() = default;
 
-void LocationBarModelAndroid::Destroy(JNIEnv* env,
-                                      const JavaParamRef<jobject>& obj) {
+void LocationBarModelAndroid::Destroy(JNIEnv* env) {
   delete this;
 }
 
 ScopedJavaLocalRef<jstring> LocationBarModelAndroid::GetFormattedFullURL(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj) {
+    JNIEnv* env) {
   return base::android::ConvertUTF16ToJavaString(
       env, location_bar_model_->GetFormattedFullURL());
 }
 
 ScopedJavaLocalRef<jstring> LocationBarModelAndroid::GetURLForDisplay(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj) {
+    JNIEnv* env) {
   return base::android::ConvertUTF16ToJavaString(
       env, location_bar_model_->GetURLForDisplay());
 }
 
 ScopedJavaLocalRef<jobject>
-LocationBarModelAndroid::GetUrlOfVisibleNavigationEntry(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj) {
+LocationBarModelAndroid::GetUrlOfVisibleNavigationEntry(JNIEnv* env) {
   return url::GURLAndroid::FromNativeGURL(env, location_bar_model_->GetURL());
 }
 
-jint LocationBarModelAndroid::GetPageClassification(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& obj,
-    bool is_focused_from_fakebox,
-    bool is_prefetch) {
-  // On phones, the omnibox is not initially shown on the NTP.  In this case,
-  // treat the fakebox like the omnibox.
-  if (ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_PHONE)
-    is_focused_from_fakebox = false;
-
-  // On tablets, the user can choose to focus either the fakebox or the
-  // omnibox.  Chrome distinguishes between the two in order to apply URL
-  // demotion when the user focuses the fakebox (which looks more like a
-  // search box) but not when they focus the omnibox (which looks more
-  // like a URL bar).
-  OmniboxFocusSource source = is_focused_from_fakebox
-                                  ? OmniboxFocusSource::FAKEBOX
-                                  : OmniboxFocusSource::OMNIBOX;
-
-  // TODO: Android does not save the homepage to the native pref, so we will
-  // never get the HOME_PAGE classification. Fix this by overriding IsHomePage.
-  return location_bar_model_->GetPageClassification(source, is_prefetch);
+int32_t LocationBarModelAndroid::GetPageClassification(JNIEnv* env,
+                                                       bool is_prefetch) const {
+  return location_bar_model_->GetPageClassification(is_prefetch);
 }
 
 content::WebContents* LocationBarModelAndroid::GetActiveWebContents() const {
   JNIEnv* env = base::android::AttachCurrentThread();
   ScopedJavaLocalRef<jobject> jweb_contents =
-      Java_LocationBarModel_getActiveWebContents(env, java_object_);
+      Java_LocationBarModel_getWebContents(env, java_object_);
   return content::WebContents::FromJavaWebContents(jweb_contents);
 }
 
 bool LocationBarModelAndroid::IsNewTabPage() const {
   GURL url;
-  if (!GetURL(&url))
+  if (!GetURL(&url)) {
     return false;
+  }
 
   // Android Chrome has its own Instant NTP page implementation.
   if (url.SchemeIs(chrome::kChromeNativeScheme) &&
-      url.host_piece() == chrome::kChromeUINewTabHost) {
+      url.host() == chrome::kChromeUINewTabHost) {
+    return true;
+  }
+  if (search::IsWebUiNtpEnabledForDesktopAndroid() && url.SchemeIs(content::kChromeUIScheme) &&
+      url.host() == chrome::kChromeUINewTabPageHost) {
     return true;
   }
 
@@ -101,6 +87,9 @@ bool LocationBarModelAndroid::IsNewTabPage() const {
 }
 
 // static
-jlong JNI_LocationBarModel_Init(JNIEnv* env, const JavaParamRef<jobject>& obj) {
+static int64_t JNI_LocationBarModel_Init(JNIEnv* env,
+                                         const JavaRef<jobject>& obj) {
   return reinterpret_cast<intptr_t>(new LocationBarModelAndroid(env, obj));
 }
+
+DEFINE_JNI(LocationBarModel)

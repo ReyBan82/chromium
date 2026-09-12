@@ -15,7 +15,7 @@ namespace content {
 std::unique_ptr<CommitDeferringCondition>
 JavaScriptDialogCommitDeferringCondition::MaybeCreate(
     NavigationRequest& navigation_request) {
-  DCHECK(navigation_request.GetWebContents());
+  CHECK(navigation_request.GetWebContents(), base::NotFatalUntil::M158);
   auto& web_contents =
       static_cast<WebContentsImpl&>(*navigation_request.GetWebContents());
   if (!web_contents.JavaScriptDialogDefersNavigations())
@@ -26,7 +26,7 @@ JavaScriptDialogCommitDeferringCondition::MaybeCreate(
   // Note that the modal dialog blocks the renderer and prevents it from
   // processing "CommitNavigation" message, otherwise.
   //
-  // TODO(crbug.com/1299379): Note that fenced frames cannot open modal dialogs
+  // TODO(crbug.com/40215909): Note that fenced frames cannot open modal dialogs
   // so this only affects dialogs outside the fenced frame tree. If this is ever
   // changed then the navigation should be deferred until the dialog is closed.
   if (navigation_request.frame_tree_node()->IsInFencedFrameTree()) {
@@ -71,7 +71,7 @@ JavaScriptDialogCommitDeferringCondition::WillCommitNavigation(
     base::OnceClosure resume) {
   auto* web_contents =
       static_cast<WebContentsImpl*>(GetNavigationHandle().GetWebContents());
-  DCHECK(web_contents);
+  CHECK(web_contents, base::NotFatalUntil::M158);
 
   // It's possible that, depending on the order deferrals are run, the dialog
   // may have been dismissed by the time we run this check. If that's the
@@ -81,6 +81,10 @@ JavaScriptDialogCommitDeferringCondition::WillCommitNavigation(
 
   web_contents->NotifyOnJavaScriptDialogDismiss(std::move(resume));
   return Result::kDefer;
+}
+
+const char* JavaScriptDialogCommitDeferringCondition::TraceEventName() const {
+  return "JavaScriptDialogCommitDeferringCondition";
 }
 
 }  // namespace content

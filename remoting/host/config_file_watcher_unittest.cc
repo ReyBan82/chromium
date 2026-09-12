@@ -34,8 +34,8 @@ class ConfigFileWatcherDelegate : public ConfigFileWatcher::Delegate {
 
   ~ConfigFileWatcherDelegate() override = default;
 
-  MOCK_METHOD1(OnConfigUpdated, void(const std::string&));
-  MOCK_METHOD0(OnConfigWatcherError, void());
+  MOCK_METHOD(void, OnConfigUpdated, (const std::string&), (override));
+  MOCK_METHOD(void, OnConfigWatcherError, (), (override));
 };
 
 }  // namespace
@@ -100,9 +100,7 @@ void ConfigFileWatcherTest::TearDown() {
 // Verifies that the initial notification is delivered.
 TEST_F(ConfigFileWatcherTest, Basic) {
   std::string data("test");
-  EXPECT_NE(base::WriteFile(config_file_, data.c_str(),
-                            static_cast<int>(data.size())),
-            -1);
+  EXPECT_TRUE(base::WriteFile(config_file_, data));
 
   EXPECT_CALL(delegate_, OnConfigUpdated(_))
       .Times(1)
@@ -128,9 +126,7 @@ TEST_F(ConfigFileWatcherTest, Update) {
 
   // Modify the watched file.
   std::string data("test");
-  EXPECT_NE(base::WriteFile(config_file_, data.c_str(),
-                            static_cast<int>(data.size())),
-            -1);
+  EXPECT_TRUE(base::WriteFile(config_file_, data));
 
   run_loop_.Run();
 }

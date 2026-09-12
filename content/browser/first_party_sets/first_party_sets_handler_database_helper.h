@@ -6,6 +6,7 @@
 #define CONTENT_BROWSER_FIRST_PARTY_SETS_FIRST_PARTY_SETS_HANDLER_DATABASE_HELPER_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,7 +18,7 @@
 
 namespace net {
 class FirstPartySetsCacheFilter;
-class FirstPartySetsContextConfig;
+
 class GlobalFirstPartySets;
 class SchemefulSite;
 }  // namespace net
@@ -50,27 +51,25 @@ class CONTENT_EXPORT FirstPartySetsHandlerDatabaseHelper {
   // FPSs info by comparing the combined `old_sets` and `old_config` with the
   // combined `current_sets` and `current_config`. Returns the set of sites
   // that: 1) were in old FPSs but are no longer in current FPSs i.e. leave the
-  // FPSs; or, 2) mapped to a different owner site.
+  // FPSs; or, 2) mapped to a different primary site.
   //
   // This method assumes that the sites were normalized properly when the maps
   // were created. Made public only for testing,
   static base::flat_set<net::SchemefulSite> ComputeSetsDiff(
       const net::GlobalFirstPartySets& old_sets,
-      const net::FirstPartySetsContextConfig& old_config,
-      const net::GlobalFirstPartySets& current_sets,
-      const net::FirstPartySetsContextConfig& current_config);
+      const net::GlobalFirstPartySets& current_sets);
 
   // Gets the list of sites to clear for the `browser_context_id`. This method
-  // wraps a few DB operations: reads the old global sets and policy
-  // customization from DB, call `ComputeSetsDiff` with required inputs to
-  // compute the list of sites to clear, stores the sites into DB, then reads
-  // the final list of sites to be cleared from DB, which can include sites
-  // stored during previous browser runs that did not have state cleared.
-  std::pair<std::vector<net::SchemefulSite>, net::FirstPartySetsCacheFilter>
+  // wraps a few DB operations: reads the old global sets from DB, call
+  // `ComputeSetsDiff` with required inputs to compute the list of sites to
+  // clear, stores the sites into DB, then reads the final list of sites to be
+  // cleared from DB, which can include sites stored during previous browser
+  // runs that did not have state cleared.
+  std::optional<std::pair<std::vector<net::SchemefulSite>,
+                          net::FirstPartySetsCacheFilter>>
   UpdateAndGetSitesToClearForContext(
       const std::string& browser_context_id,
-      const net::GlobalFirstPartySets& current_sets,
-      const net::FirstPartySetsContextConfig& current_config);
+      const net::GlobalFirstPartySets& current_sets);
 
   // Wraps FirstPartySetsDatabase::InsertBrowserContextCleared.
   // Update DB whether site data clearing has been performed for the
@@ -79,11 +78,10 @@ class CONTENT_EXPORT FirstPartySetsHandlerDatabaseHelper {
 
   // Wraps FirstPartySetsDatabase::PersistSets.
   void PersistSets(const std::string& browser_context_id,
-                   const net::GlobalFirstPartySets& sets,
-                   const net::FirstPartySetsContextConfig& config);
+                   const net::GlobalFirstPartySets& sets);
 
-  std::pair<net::GlobalFirstPartySets, net::FirstPartySetsContextConfig>
-  GetGlobalSetsAndConfigForTesting(const std::string& browser_context_id);
+  std::optional<net::GlobalFirstPartySets> GetGlobalSetsForTesting(
+      const std::string& browser_context_id);
 
   // Wraps FirstPartySetsDatabase::HasEntryInBrowserContextClearedForTesting.
   bool HasEntryInBrowserContextsClearedForTesting(

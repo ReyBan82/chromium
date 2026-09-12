@@ -14,62 +14,58 @@ namespace {
 // Escapes special chars that can be part of text fragment directive, including
 // hyphen (-), ampersand (&), and comma (,).
 String EscapeSelectorSpecialCharacters(const String& target_text) {
-  String escaped_str = EncodeWithURLEscapeSequences(target_text);
+  String escaped_str = EncodeWithUrlEscapeSequences(target_text);
   escaped_str.Replace("-", "%2D");
   return escaped_str;
 }
 
 // Used after parsing out individual terms from the full string microsyntax to
 // tell if the resulting string contains only valid characters.
-bool IsValidTerm(const String& term) {
+bool IsValidTerm(const StringView& term) {
   // Should only be called on terms after splitting on ',' and '&', which are
   // also invalid chars.
-  DCHECK_EQ(term.find(','), kNotFound);
-  DCHECK_EQ(term.find('&'), kNotFound);
+  DCHECK(!term.contains(','));
+  DCHECK(!term.contains('&'));
 
   if (term.empty())
     return false;
 
-  wtf_size_t hyphen_pos = term.find('-');
-  return hyphen_pos == kNotFound;
+  return !term.contains('-');
 }
 
-bool IsPrefix(const String& term) {
-  if (term.empty())
-    return false;
-
-  return term[term.length() - 1] == '-';
+bool IsPrefix(const StringView& term) {
+  return term.ends_with('-');
 }
 
-bool IsSuffix(const String& term) {
-  if (term.empty())
-    return false;
-
-  return term[0] == '-';
+bool IsSuffix(const StringView& term) {
+  return term.starts_with('-');
 }
 
 }  // namespace
 
 TextFragmentSelector TextFragmentSelector::FromTextDirective(
-    const String& directive) {
+    const StringView& directive) {
   DEFINE_STATIC_LOCAL(const TextFragmentSelector, kInvalidSelector, (kInvalid));
   SelectorType type;
-  String start;
-  String end;
-  String prefix;
-  String suffix;
+  StringView start;
+  StringView end;
+  StringView prefix;
+  StringView suffix;
 
-  DCHECK_EQ(directive.find('&'), kNotFound);
+  DCHECK(!directive.contains('&'));
 
-  Vector<String> terms;
-  directive.Split(",", true, terms);
+  if (HasInvalidUrlEscapeSequences(directive)) {
+    return kInvalidSelector;
+  }
+
+  Vector<StringView> terms = directive.Split(',');
 
   if (terms.empty() || terms.size() > 4)
     return kInvalidSelector;
 
   if (IsPrefix(terms.front())) {
     prefix = terms.front();
-    prefix = prefix.Left(prefix.length() - 1);
+    prefix.remove_suffix(1);
     terms.erase(terms.begin());
 
     if (!IsValidTerm(prefix) || terms.empty())
@@ -78,7 +74,7 @@ TextFragmentSelector TextFragmentSelector::FromTextDirective(
 
   if (IsSuffix(terms.back())) {
     suffix = terms.back();
-    suffix = suffix.Right(suffix.length() - 1);
+    suffix.remove_prefix(1);
     terms.pop_back();
 
     if (!IsValidTerm(suffix) || terms.empty())
@@ -106,11 +102,11 @@ TextFragmentSelector TextFragmentSelector::FromTextDirective(
 
   DCHECK(terms.empty());
 
-  return TextFragmentSelector(
-      type, DecodeURLEscapeSequences(start, DecodeURLMode::kUTF8),
-      DecodeURLEscapeSequences(end, DecodeURLMode::kUTF8),
-      DecodeURLEscapeSequences(prefix, DecodeURLMode::kUTF8),
-      DecodeURLEscapeSequences(suffix, DecodeURLMode::kUTF8));
+  constexpr auto kMode = DecodeUrlMode::kUtf8;
+  return TextFragmentSelector(type, DecodeUrlEscapeSequences(start, kMode),
+                              DecodeUrlEscapeSequences(end, kMode),
+                              DecodeUrlEscapeSequences(prefix, kMode),
+                              DecodeUrlEscapeSequences(suffix, kMode));
 }
 
 TextFragmentSelector::TextFragmentSelector(SelectorType type,

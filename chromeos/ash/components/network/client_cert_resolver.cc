@@ -8,16 +8,18 @@
 #include <certt.h>  // for (SECCertUsageEnum) certUsageAnyCA
 #include <pk11pub.h>
 
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_util.h"
 #include "base/task/thread_pool.h"
 #include "base/time/clock.h"
@@ -36,7 +38,6 @@
 #include "net/cert/scoped_nss_types.h"
 #include "net/cert/x509_certificate.h"
 #include "net/cert/x509_util_nss.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/cros_system_api/constants/pkcs11_custom_attributes.h"
 #include "third_party/cros_system_api/dbus/service_constants.h"
 
@@ -52,9 +53,8 @@ std::string GetNetworkIdWithGuid(const NetworkState* network_state) {
 
 // Global override for the getter function. This is used for testing purposes.
 // See SetProvisioningIdForCertGetterForTesting for details.
-ClientCertResolver::ProvisioningProfileIdGetter
-    g_provisioning_id_getter_for_testing =
-        ClientCertResolver::ProvisioningProfileIdGetter();
+ClientCertResolver::ProvisioningProfileIdGetter*
+    g_provisioning_id_getter_for_testing = nullptr;
 
 // Describes a network that is configured with |client_cert_config|, which
 // includes the certificate config.
@@ -108,7 +108,7 @@ base::flat_map<std::string, std::string> GetSubstitutionsForCert(
   return substitutions;
 }
 
-absl::optional<ResolvedCert> GetResolvedCert(CERTCertificate* cert) {
+std::optional<ResolvedCert> GetResolvedCert(CERTCertificate* cert) {
   int slot_id = -1;
   std::string pkcs11_id =
       NetworkCertLoader::GetPkcs11IdAndSlotForCert(cert, &slot_id);
@@ -161,15 +161,15 @@ namespace {
 // Returns the nickname of the private key for certificate |cert|, if such a
 // private key is installed. Note that this is not a cheap operation: it
 // iterates all tokens and attempts to look up the private key.
-// A return value of |absl::nullopt| means that no private key could be found
+// A return value of |std::nullopt| means that no private key could be found
 // for |cert|.
 // If a private key could be found for |cert| but it did not have a nickname,
 // will return the empty string.
-absl::optional<std::string> GetPrivateKeyNickname(CERTCertificate* cert) {
+std::optional<std::string> GetPrivateKeyNickname(CERTCertificate* cert) {
   crypto::ScopedSECKEYPrivateKey key(
       PK11_FindKeyByAnyCert(cert, /*wincx=*/nullptr));
   if (!key)
-    return absl::nullopt;
+    return std::nullopt;
 
   std::string key_nickname;
   char* nss_key_nickname = PK11_GetPrivateKeyNickname(key.get());
@@ -253,7 +253,6 @@ struct MatchCertWithCertConfig {
     }
 
     NOTREACHED();
-    return false;
   }
 
   const client_cert::ClientCertConfig cert_config;
@@ -262,6 +261,10 @@ struct MatchCertWithCertConfig {
 // Lookup the issuer certificate of |cert|. If it is available, return the PEM
 // encoding of that certificate. Otherwise return the empty string.
 std::string GetPEMEncodedIssuer(CERTCertificate* cert) {
+  // TODO(https://crbug.com/40554868): remove dependency on NSS and lookup the
+  // issuer directly from NetworkCertLoader's authority_certs(). (Currently
+  // this magically works because NetworkCertLoader stores the certs as NSS
+  // CERTCertificate objects so CERT_FindCertIssuer will find them implicitly.)
   net::ScopedCERTCertificate issuer_handle(
       CERT_FindCertIssuer(cert, PR_Now(), certUsageAnyCA));
   if (!issuer_handle) {
@@ -291,8 +294,10 @@ std::string GetProvisioningIdForCert(CERTCertificate* cert) {
   if (!priv_key)
     return std::string();
 
-  if (!g_provisioning_id_getter_for_testing.is_null())
-    return g_provisioning_id_getter_for_testing.Run(cert);
+  if (g_provisioning_id_getter_for_testing &&
+      !g_provisioning_id_getter_for_testing->is_null()) {
+    return g_provisioning_id_getter_for_testing->Run(cert);
+  }
 
   crypto::ScopedSECItem attribute_value(SECITEM_AllocItem(/*arena=*/nullptr,
                                                           /*item=*/nullptr,
@@ -310,7 +315,7 @@ std::string GetProvisioningIdForCert(CERTCertificate* cert) {
   if (attribute_value->len > 0) {
     std::string id;
     id.assign(attribute_value->data,
-              attribute_value->data + attribute_value->len);
+              UNSAFE_TODO(attribute_value->data + attribute_value->len));
     return id;
   }
 
@@ -341,7 +346,7 @@ void CreateSortedCertAndIssuerList(
     }
     // GetPrivateKeyNickname should be invoked after the checks above for
     // performance reasons.
-    absl::optional<std::string> private_key_nickname =
+    std::optional<std::string> private_key_nickname =
         GetPrivateKeyNickname(cert);
     if (!private_key_nickname.has_value()) {
       // No private key has been found for this certificate.
@@ -396,7 +401,7 @@ std::vector<NetworkAndMatchingCert> FindCertificateMatches(
                 ::onc::ONC_SOURCE_DEVICE_POLICY
             ? &device_wide_client_cert_and_issuers
             : &all_client_cert_and_issuers;
-    auto cert_it = base::ranges::find_if(
+    auto cert_it = std::ranges::find_if(
         *client_certs,
         MatchCertWithCertConfig(network_and_cert_config.cert_config));
     if (cert_it == client_certs->end()) {
@@ -408,7 +413,7 @@ std::vector<NetworkAndMatchingCert> FindCertificateMatches(
       continue;
     }
 
-    absl::optional<ResolvedCert> resolved_cert =
+    std::optional<ResolvedCert> resolved_cert =
         GetResolvedCert(cert_it->cert.get());
     if (!resolved_cert) {
       LOG(ERROR) << "Couldn't determine PKCS#11 ID.";
@@ -456,7 +461,7 @@ void ClientCertResolver::Init(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK(network_state_handler);
   network_state_handler_ = network_state_handler;
-  network_state_handler_observer_.Observe(network_state_handler_);
+  network_state_handler_observer_.Observe(network_state_handler_.get());
 
   DCHECK(managed_network_config_handler);
   managed_network_config_handler_ = managed_network_config_handler;
@@ -484,7 +489,7 @@ bool ClientCertResolver::IsAnyResolveTaskRunning() const {
 bool ClientCertResolver::ResolveClientCertificateSync(
     const client_cert::ConfigType client_cert_type,
     const client_cert::ClientCertConfig& client_cert_config,
-    base::Value::Dict* shill_properties) {
+    base::DictValue* shill_properties) {
   if (!ShouldResolveCert(client_cert_config))
     return false;
 
@@ -505,7 +510,7 @@ bool ClientCertResolver::ResolveClientCertificateSync(
 
   // Search for a certificate matching the pattern, reference or
   // ProvisioningProfileId.
-  std::vector<CertAndIssuer>::iterator cert_it = base::ranges::find_if(
+  std::vector<CertAndIssuer>::iterator cert_it = std::ranges::find_if(
       client_cert_and_issuers, MatchCertWithCertConfig(client_cert_config));
 
   if (cert_it == client_cert_and_issuers.end()) {
@@ -536,10 +541,17 @@ void ClientCertResolver::SetClockForTesting(base::Clock* clock) {
 base::ScopedClosureRunner
 ClientCertResolver::SetProvisioningIdForCertGetterForTesting(
     ProvisioningProfileIdGetter getter) {
-  g_provisioning_id_getter_for_testing = getter;
+  auto persistent_getter =
+      std::make_unique<ProvisioningProfileIdGetter>(std::move(getter));
+  g_provisioning_id_getter_for_testing = persistent_getter.get();
 
-  return base::ScopedClosureRunner(
-      base::BindOnce([]() { g_provisioning_id_getter_for_testing.Reset(); }));
+  return base::ScopedClosureRunner(base::BindOnce(
+      [](std::unique_ptr<ProvisioningProfileIdGetter> old_getter) {
+        if (g_provisioning_id_getter_for_testing == old_getter.get()) {
+          g_provisioning_id_getter_for_testing = nullptr;
+        }
+      },
+      std::move(persistent_getter)));
 }
 
 void ClientCertResolver::NetworkListChanged() {
@@ -641,10 +653,19 @@ void ClientCertResolver::ResolveNetworks(
 
     ::onc::ONCSource onc_source = ::onc::ONC_SOURCE_NONE;
     std::string userhash;
-    const base::Value* policy =
+
+    // crbug.com/362668527: |ClientCertResolver| is responsible for finding the
+    // correct certificate for the network and setting it using
+    // |ManagedNetworkConfigurationHandler::SetResolvedClientCertificate|.
+    // Here it cannot use the kWithRuntimeValues policy because the certificate
+    // pattern there is already replaced with a certificate (or an empty value).
+    // The kOriginal policy cannot be used here because it still contains the
+    // unexpanded placeholders.
+    const base::DictValue* policy =
         managed_network_config_handler_->FindPolicyByGuidAndProfile(
             network->guid(), network->profile_path(),
-            ManagedNetworkConfigurationHandler::PolicyType::kOriginal,
+            ManagedNetworkConfigurationHandler::PolicyType::
+                kWithVariablesExpanded,
             &onc_source, &userhash);
 
     if (!policy) {
@@ -657,7 +678,7 @@ void ClientCertResolver::ResolveNetworks(
 
     VLOG(2) << "Inspecting network " << network->path();
     client_cert::ClientCertConfig cert_config;
-    OncToClientCertConfig(onc_source, policy->GetDict(), &cert_config);
+    OncToClientCertConfig(onc_source, *policy, &cert_config);
 
     // Skip networks that don't have a ClientCertPattern or ClientCertRef.
     if (!ShouldResolveCert(cert_config))

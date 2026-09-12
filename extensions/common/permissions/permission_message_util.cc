@@ -5,6 +5,10 @@
 #include "extensions/common/permissions/permission_message_util.h"
 
 #include <stddef.h>
+
+#include <optional>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/strings/string_split.h"
@@ -42,7 +46,7 @@ std::set<std::string> GetDistinctHosts(const URLPatternSet& host_patterns,
                                        bool exclude_file_scheme) {
   // Each item is a host split into two parts: host without RCDs and
   // current best RCD.
-  typedef base::StringPairs HostVector;
+  using HostVector = base::StringPairs;
   HostVector hosts_best_rcd;
   for (const URLPattern& pattern : host_patterns) {
     if (exclude_file_scheme && pattern.scheme() == url::kFileScheme)
@@ -65,14 +69,14 @@ std::set<std::string> GetDistinctHosts(const URLPatternSet& host_patterns,
     // If the host has an RCD, split it off so we can detect duplicates.
 
     std::string rcd;
-    size_t reg_len =
-        net::registry_controlled_domains::PermissiveGetHostRegistryLength(
+    std::optional<std::string_view> reg =
+        net::registry_controlled_domains::PermissiveGetHostRegistry(
             host, net::registry_controlled_domains::EXCLUDE_UNKNOWN_REGISTRIES,
             net::registry_controlled_domains::EXCLUDE_PRIVATE_REGISTRIES);
-    if (reg_len && reg_len != std::string::npos) {
+    if (reg && !reg->empty()) {
       if (include_rcd)  // else leave rcd empty
-        rcd = host.substr(host.size() - reg_len);
-      host = host.substr(0, host.size() - reg_len);
+        rcd = std::string(*reg);
+      host = host.substr(0, host.size() - reg->size());
     }
 
     // Check if we've already seen this host.

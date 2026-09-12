@@ -7,9 +7,8 @@
 
 #include <stddef.h>
 
-#include <memory>
+#include <optional>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "base/memory/raw_ptr.h"
@@ -18,12 +17,11 @@
 #include "content/public/browser/browser_thread.h"
 #include "device/bluetooth/bluetooth_adapter.h"
 #include "extensions/browser/api/api_resource_manager.h"
-#include "extensions/browser/api/async_api_function.h"
 #include "extensions/browser/api/bluetooth_socket/bluetooth_api_socket.h"
 #include "extensions/browser/extension_function.h"
 #include "extensions/browser/extension_function_histogram_value.h"
 #include "extensions/common/api/bluetooth_socket.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace device {
 class BluetoothSocket;
@@ -58,7 +56,7 @@ class BluetoothSocketAsyncApiFunction : public ExtensionFunction {
   int AddSocket(BluetoothApiSocket* socket);
   BluetoothApiSocket* GetSocket(int api_resource_id);
   void RemoveSocket(int api_resource_id);
-  std::unordered_set<int>* GetSocketIds();
+  absl::flat_hash_set<int>* GetSocketIds();
 
  private:
   raw_ptr<ApiResourceManager<BluetoothApiSocket>> manager_;
@@ -125,10 +123,10 @@ class BluetoothSocketListenFunction : public BluetoothSocketAsyncApiFunction {
   virtual void CreateService(
       scoped_refptr<device::BluetoothAdapter> adapter,
       const device::BluetoothUUID& uuid,
-      const absl::optional<std::string>& name,
+      const std::optional<std::string>& name,
       device::BluetoothAdapter::CreateServiceCallback callback,
       device::BluetoothAdapter::CreateServiceErrorCallback error_callback) = 0;
-  virtual base::Value::List CreateResults() = 0;
+  virtual base::ListValue CreateResults() = 0;
 
   virtual int socket_id() const = 0;
   virtual const std::string& uuid() const = 0;
@@ -162,17 +160,17 @@ class BluetoothSocketListenUsingRfcommFunction
   bool CreateParams() override;
   void CreateService(scoped_refptr<device::BluetoothAdapter> adapter,
                      const device::BluetoothUUID& uuid,
-                     const absl::optional<std::string>& name,
+                     const std::optional<std::string>& name,
                      device::BluetoothAdapter::CreateServiceCallback callback,
                      device::BluetoothAdapter::CreateServiceErrorCallback
                          error_callback) override;
-  base::Value::List CreateResults() override;
+  base::ListValue CreateResults() override;
 
  protected:
   ~BluetoothSocketListenUsingRfcommFunction() override;
 
  private:
-  std::unique_ptr<bluetooth_socket::ListenUsingRfcomm::Params> params_;
+  std::optional<bluetooth_socket::ListenUsingRfcomm::Params> params_;
 };
 
 class BluetoothSocketListenUsingL2capFunction
@@ -190,17 +188,17 @@ class BluetoothSocketListenUsingL2capFunction
   bool CreateParams() override;
   void CreateService(scoped_refptr<device::BluetoothAdapter> adapter,
                      const device::BluetoothUUID& uuid,
-                     const absl::optional<std::string>& name,
+                     const std::optional<std::string>& name,
                      device::BluetoothAdapter::CreateServiceCallback callback,
                      device::BluetoothAdapter::CreateServiceErrorCallback
                          error_callback) override;
-  base::Value::List CreateResults() override;
+  base::ListValue CreateResults() override;
 
  protected:
   ~BluetoothSocketListenUsingL2capFunction() override;
 
  private:
-  std::unique_ptr<bluetooth_socket::ListenUsingL2cap::Params> params_;
+  std::optional<bluetooth_socket::ListenUsingL2cap::Params> params_;
 };
 
 class BluetoothSocketAbstractConnectFunction :
@@ -216,7 +214,7 @@ class BluetoothSocketAbstractConnectFunction :
   ResponseAction Run() override;
 
   // Subclasses should implement this method to connect to the service
-  // registered with |uuid| on the |device|.
+  // registered with `uuid` on the `device`.
   virtual void ConnectToService(device::BluetoothDevice* device,
                                 const device::BluetoothUUID& uuid) = 0;
 
@@ -226,7 +224,7 @@ class BluetoothSocketAbstractConnectFunction :
  private:
   virtual void OnGetAdapter(scoped_refptr<device::BluetoothAdapter> adapter);
 
-  std::unique_ptr<bluetooth_socket::Connect::Params> params_;
+  std::optional<bluetooth_socket::Connect::Params> params_;
   raw_ptr<BluetoothSocketEventDispatcher> socket_event_dispatcher_ = nullptr;
 };
 
@@ -306,7 +304,7 @@ class BluetoothSocketSendFunction : public BluetoothSocketAsyncApiFunction {
   void OnError(BluetoothApiSocket::ErrorReason reason,
                const std::string& message);
 
-  std::unique_ptr<bluetooth_socket::Send::Params> params_;
+  std::optional<bluetooth_socket::Send::Params> params_;
   scoped_refptr<net::IOBuffer> io_buffer_;
   size_t io_buffer_size_;
 };

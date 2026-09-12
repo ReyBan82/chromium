@@ -4,14 +4,19 @@
 
 #include "chrome/browser/spellchecker/spellcheck_service.h"
 
+#include <algorithm>
+#include <optional>
 #include <ostream>
 
 #include "base/command_line.h"
-#include "base/containers/contains.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/memory/raw_ptr.h"
+#include "base/process/kill.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/supports_user_data.h"
+#include "base/test/run_until.h"
 #include "base/test/scoped_feature_list.h"
 #include "build/build_config.h"
 #include "chrome/browser/spellchecker/spellcheck_factory.h"
@@ -22,11 +27,14 @@
 #include "components/prefs/testing_pref_service.h"
 #include "components/spellcheck/browser/pref_names.h"
 #include "components/spellcheck/browser/spellcheck_platform.h"
+#include "components/spellcheck/common/spellcheck.mojom.h"
 #include "components/spellcheck/common/spellcheck_features.h"
 #include "components/user_prefs/user_prefs.h"
 #include "content/public/test/browser_task_environment.h"
+#include "content/public/test/mock_render_process_host.h"
+#include "mojo/public/cpp/bindings/pending_receiver.h"
+#include "mojo/public/cpp/bindings/receiver_set.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 struct TestCase {
   TestCase(
@@ -40,14 +48,14 @@ struct TestCase {
     for (const auto& language : expected_languages) {
       if (!language.empty()) {
         dictionary.language = language;
-        dictionary.used_for_spellcheck =
-            base::Contains(expected_languages_used_for_spellcheck, language);
+        dictionary.used_for_spellcheck = std::ranges::contains(
+            expected_languages_used_for_spellcheck, language);
         expected_dictionaries.push_back(dictionary);
       }
     }
   }
 
-  ~TestCase() {}
+  ~TestCase() = default;
 
   std::string accept_languages;
   std::vector<std::string> spellcheck_dictionaries;
@@ -160,7 +168,7 @@ INSTANTIATE_TEST_SUITE_P(
 TEST_P(SpellcheckServiceUnitTest, GetDictionaries) {
   prefs()->SetString(language::prefs::kAcceptLanguages,
                      GetParam().accept_languages);
-  base::Value::List spellcheck_dictionaries;
+  base::ListValue spellcheck_dictionaries;
   for (const std::string& dictionary : GetParam().spellcheck_dictionaries) {
     spellcheck_dictionaries.Append(dictionary);
   }
@@ -173,6 +181,93 @@ TEST_P(SpellcheckServiceUnitTest, GetDictionaries) {
   EXPECT_EQ(GetParam().expected_dictionaries, dictionaries);
 }
 
+// Observes the SpellChecker interface for a single renderer. A unit test has no
+// real renderers, so the MockRenderProcessHost below is the only host
+// InitForAllRenderers() can find, which makes an Initialize() call
+// unambiguously attributable to it.
+class SpellcheckServiceRendererInitUnitTest
+    : public SpellcheckServiceUnitTestBase,
+      public spellcheck::mojom::SpellChecker {
+ public:
+  SpellcheckServiceRendererInitUnitTest() = default;
+
+  SpellcheckServiceRendererInitUnitTest(
+      const SpellcheckServiceRendererInitUnitTest&) = delete;
+  SpellcheckServiceRendererInitUnitTest& operator=(
+      const SpellcheckServiceRendererInitUnitTest&) = delete;
+
+ protected:
+  void SetUp() override {
+    SpellcheckServiceUnitTestBase::SetUp();
+    SpellcheckService::OverrideBinderForTesting(base::BindRepeating(
+        &SpellcheckServiceRendererInitUnitTest::Bind, base::Unretained(this)));
+    renderer_ = std::make_unique<content::MockRenderProcessHost>(&profile_);
+    renderer_->Init();
+  }
+
+  void TearDown() override {
+    receivers_.Clear();
+    renderer_.reset();
+    SpellcheckService::OverrideBinderForTesting(base::NullCallback());
+  }
+
+  content::MockRenderProcessHost* renderer() { return renderer_.get(); }
+
+  // Waits until at least `count` Initialize() calls have arrived. Returns
+  // false on timeout.
+  [[nodiscard]] bool WaitForInitializeCount(int count) {
+    return base::test::RunUntil(
+        [this, count]() { return initialize_count_ >= count; });
+  }
+
+ private:
+  void Bind(mojo::PendingReceiver<spellcheck::mojom::SpellChecker> receiver) {
+    // A ReceiverSet, not a single Receiver: InitForAllRenderers() may reach
+    // several hosts, and rebinding a single Receiver would close the earlier
+    // pipe before its Initialize() call was delivered, silently losing it.
+    receivers_.Add(this, std::move(receiver));
+  }
+
+  // spellcheck::mojom::SpellChecker:
+  void Initialize(
+      std::vector<spellcheck::mojom::SpellCheckBDictLanguagePtr> dictionaries,
+      const std::vector<std::string>& custom_words,
+      bool enable) override {
+    ++initialize_count_;
+  }
+  void CustomDictionaryChanged(
+      const std::vector<std::string>& words_added,
+      const std::vector<std::string>& words_removed) override {}
+
+  std::unique_ptr<content::MockRenderProcessHost> renderer_;
+  mojo::ReceiverSet<spellcheck::mojom::SpellChecker> receivers_;
+  int initialize_count_ = 0;
+
+#if BUILDFLAG(IS_WIN)
+  // This test assumes the Hunspell code path.
+  spellcheck::ScopedDisableBrowserSpellCheckerForTesting
+      disable_browser_spell_checker_;
+#endif  // BUILDFLAG(IS_WIN)
+};
+
+// A renderer that has been initialized but whose process is still launching has
+// no process handle yet. It must still be initialized, because
+// InitForAllRenderers() is the only path that delivers spellcheck state to a
+// renderer that was contacted before its dictionaries were ready.
+TEST_F(SpellcheckServiceRendererInitUnitTest, ReachesStillLaunchingRenderer) {
+  // Reproduce the window between RenderProcessHostImpl::Init() and
+  // OnProcessLaunched().
+  renderer()->SimulateProcessStillLaunchingForTesting(true);
+  ASSERT_FALSE(renderer()->GetProcess().Handle());
+  ASSERT_TRUE(renderer()->IsInitializedAndNotDead());
+
+  // Flipping the pref runs InitForAllRenderers().
+  prefs()->SetBoolean(spellcheck::prefs::kSpellCheckEnable, false);
+
+  EXPECT_TRUE(WaitForInitializeCount(1))
+      << "a still-launching renderer was never initialized";
+}
+
 #if BUILDFLAG(IS_WIN) && BUILDFLAG(USE_BROWSER_SPELLCHECKER)
 class SpellcheckServiceHybridUnitTestBase
     : public SpellcheckServiceUnitTestBase {
@@ -181,14 +276,10 @@ class SpellcheckServiceHybridUnitTestBase
 
  protected:
   void SetUp() override {
-    InitFeatures();
-
     // Use SetTestingFactoryAndUse to force creation and initialization.
     SpellcheckServiceFactory::GetInstance()->SetTestingFactoryAndUse(
         &profile_, base::BindRepeating(&BuildSpellcheckService));
   }
-
-  virtual void InitFeatures() {}
 
   virtual void InitializeSpellcheckService(
       const std::vector<std::string>& spellcheck_languages_for_testing) {
@@ -219,8 +310,6 @@ class SpellcheckServiceHybridUnitTestBase
   static const std::vector<std::string>
       windows_spellcheck_languages_for_testing_;
 
-  base::test::ScopedFeatureList feature_list_;
-
   raw_ptr<SpellcheckService> spellcheck_service_;
 };
 
@@ -229,7 +318,7 @@ void SpellcheckServiceHybridUnitTestBase::RunGetDictionariesTest(
     const std::vector<std::string> spellcheck_dictionaries,
     const std::vector<SpellcheckService::Dictionary> expected_dictionaries) {
   prefs()->SetString(language::prefs::kAcceptLanguages, accept_languages);
-  base::Value::List spellcheck_dictionaries_list;
+  base::ListValue spellcheck_dictionaries_list;
   for (std::string dict : spellcheck_dictionaries) {
     spellcheck_dictionaries_list.Append(dict);
   }
@@ -333,18 +422,6 @@ const std::vector<std::string> SpellcheckServiceHybridUnitTestBase::
                              // dictionaries.
 };
 
-class GetDictionariesHybridUnitTestNoDelayInit
-    : public SpellcheckServiceHybridUnitTestBase,
-      public testing::WithParamInterface<TestCase> {
- protected:
-  void InitFeatures() override {
-    // Disable kWinDelaySpellcheckServiceInit, as the case where it's enabled
-    // is tested in SpellcheckServiceWindowsDictionaryMappingUnitTestDelayInit.
-    feature_list_.InitAndDisableFeature(
-        spellcheck::kWinDelaySpellcheckServiceInit);
-  }
-};
-
 static const TestCase kHybridGetDictionariesParams[] = {
     // Galician (gl) has only Windows support, no Hunspell dictionary. Croatian
     // (hr) has only Hunspell support, no local Windows dictionary. First
@@ -397,16 +474,6 @@ static const TestCase kHybridGetDictionariesParams[] = {
     TestCase("it,it-IT", {"it", "it-IT"}, {"it", "it-IT"}, {"it", "it-IT"}),
 };
 
-INSTANTIATE_TEST_SUITE_P(TestCases,
-                         GetDictionariesHybridUnitTestNoDelayInit,
-                         testing::ValuesIn(kHybridGetDictionariesParams));
-
-TEST_P(GetDictionariesHybridUnitTestNoDelayInit, GetDictionaries) {
-  RunGetDictionariesTest(GetParam().accept_languages,
-                         GetParam().spellcheck_dictionaries,
-                         GetParam().expected_dictionaries);
-}
-
 struct DictionaryMappingTestCase {
   std::string full_tag;
   std::string expected_accept_language;
@@ -428,18 +495,6 @@ std::ostream& operator<<(std::ostream& out,
 
   return out;
 }
-
-class SpellcheckServiceWindowsDictionaryMappingUnitTest
-    : public SpellcheckServiceHybridUnitTestBase,
-      public testing::WithParamInterface<DictionaryMappingTestCase> {
- protected:
-  void InitFeatures() override {
-    // Disable kWinDelaySpellcheckServiceInit, as the case where it's enabled
-    // is tested in SpellcheckServiceWindowsDictionaryMappingUnitTestDelayInit.
-    feature_list_.InitAndDisableFeature(
-        spellcheck::kWinDelaySpellcheckServiceInit);
-  }
-};
 
 static const DictionaryMappingTestCase kHybridDictionaryMappingsParams[] = {
     DictionaryMappingTestCase({"en-CA", "en-CA", "en-CA", "en", "en"}),
@@ -463,18 +518,6 @@ static const DictionaryMappingTestCase kHybridDictionaryMappingsParams[] = {
     DictionaryMappingTestCase({"pt-BR", "pt-BR", "pt-BR", "pt", "pt"}),
 };
 
-INSTANTIATE_TEST_SUITE_P(TestCases,
-                         SpellcheckServiceWindowsDictionaryMappingUnitTest,
-                         testing::ValuesIn(kHybridDictionaryMappingsParams));
-
-TEST_P(SpellcheckServiceWindowsDictionaryMappingUnitTest, CheckMappings) {
-  RunDictionaryMappingTest(
-      GetParam().full_tag, GetParam().expected_accept_language,
-      GetParam().expected_tag_passed_to_spellcheck,
-      GetParam().expected_accept_language_generic,
-      GetParam().expected_tag_passed_to_spellcheck_generic);
-}
-
 class SpellcheckServiceHybridUnitTestDelayInitBase
     : public SpellcheckServiceHybridUnitTestBase {
  public:
@@ -487,12 +530,6 @@ class SpellcheckServiceHybridUnitTestDelayInitBase
   }
 
  protected:
-  void InitFeatures() override {
-    // Don't initialize the SpellcheckService on browser launch.
-    feature_list_.InitAndEnableFeature(
-        spellcheck::kWinDelaySpellcheckServiceInit);
-  }
-
   void InitializeSpellcheckService(
       const std::vector<std::string>& spellcheck_languages_for_testing)
       override {

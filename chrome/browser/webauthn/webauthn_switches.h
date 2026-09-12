@@ -17,6 +17,9 @@ extern const char kRemoteProxiedRequestsAllowedAdditionalOrigin[];
 // creating a WebAuthn credential.
 extern const char kPermitEnterpriseAttestationOriginList[];
 
+// The domain for Magic Arch.
+extern const char kGpmMagicArchUrlSwitch[];
+
 }  // namespace webauthn::switches
 
 #endif  // CHROME_BROWSER_WEBAUTHN_WEBAUTHN_SWITCHES_H_

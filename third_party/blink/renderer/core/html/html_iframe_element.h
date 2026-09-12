@@ -24,9 +24,9 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_IFRAME_ELEMENT_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_HTML_HTML_IFRAME_ELEMENT_H_
 
+#include "services/network/public/cpp/permissions_policy/permissions_policy_declaration.h"
 #include "services/network/public/mojom/trust_tokens.mojom-blink-forward.h"
 #include "services/network/public/mojom/web_sandbox_flags.mojom-blink.h"
-#include "third_party/blink/public/common/permissions_policy/permissions_policy.h"
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/core/html/html_frame_element_base.h"
 #include "third_party/blink/renderer/core/html/html_iframe_element_sandbox.h"
@@ -45,6 +45,10 @@ class CORE_EXPORT HTMLIFrameElement : public HTMLFrameElementBase,
   explicit HTMLIFrameElement(Document&);
   ~HTMLIFrameElement() override;
 
+  ElementType GetElementType() const final {
+    return ElementType::kHTMLIFrameElement;
+  }
+
   DOMTokenList* sandbox() const;
   // Support JS introspection of frame policy (e.g. permissions policy)
   DOMFeaturePolicy* featurePolicy();
@@ -52,7 +56,7 @@ class CORE_EXPORT HTMLIFrameElement : public HTMLFrameElementBase,
   // Returns attributes that should be checked against Trusted Types
   const AttrNameToTrustedType& GetCheckedAttributeTypes() const override;
 
-  ParsedPermissionsPolicy ConstructContainerPolicy() const override;
+  network::ParsedPermissionsPolicy ConstructContainerPolicy() const override;
   DocumentPolicyFeatureState ConstructRequiredPolicy() const override;
 
   FrameOwnerElementType OwnerType() const final {
@@ -61,7 +65,13 @@ class CORE_EXPORT HTMLIFrameElement : public HTMLFrameElementBase,
 
   bool Credentialless() const override { return credentialless_; }
 
-  bool IsSupportedByRegionCapture() const override { return true; }
+  void CheckPotentialPermissionsPolicyViolation() override;
+
+  void NaturalSizingInfoChanged() override;
+  void ClearLastNaturalSizingInfo() override;
+
+  String srcdoc() const;
+  void setSrcdoc(const V8UnionStringOrTrustedHTML*, ExceptionState&);
 
  private:
   void SetCollapsed(bool) override;
@@ -71,13 +81,13 @@ class CORE_EXPORT HTMLIFrameElement : public HTMLFrameElementBase,
   void CollectStyleForPresentationAttribute(
       const QualifiedName&,
       const AtomicString&,
-      MutableCSSPropertyValueSet*) override;
+      HeapVector<CSSPropertyValue, 8>&) override;
 
   InsertionNotificationRequest InsertedInto(ContainerNode&) override;
   void RemovedFrom(ContainerNode&) override;
 
   bool LayoutObjectIsNeeded(const DisplayStyle&) const override;
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
   bool IsInteractiveContent() const override;
 
@@ -96,6 +106,10 @@ class CORE_EXPORT HTMLIFrameElement : public HTMLFrameElementBase,
 
   AtomicString name_;
   AtomicString required_csp_;
+  // Raw value of the 'connectionallowlist' attribute (unparsed Connection-
+  // Allowlist structured-header syntax), used for Connection-Allowlist embedded
+  // enforcement. Parsed by the browser process.
+  AtomicString required_connection_allowlist_;
   AtomicString allow_;
   AtomicString required_policy_;  // policy attribute
   AtomicString id_;

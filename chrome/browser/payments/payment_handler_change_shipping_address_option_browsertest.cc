@@ -45,7 +45,7 @@ struct TestCase {
         expected_output(expected_output),
         change_type(change_type) {}
 
-  ~TestCase() {}
+  ~TestCase() = default;
 
   const std::string init_test_code;
   const std::string expected_output;
@@ -56,8 +56,9 @@ class PaymentHandlerChangeShippingAddressOptionTest
     : public PaymentRequestPlatformBrowserTestBase,
       public testing::WithParamInterface<TestCase> {
  protected:
-  PaymentHandlerChangeShippingAddressOptionTest() = default;
-  ~PaymentHandlerChangeShippingAddressOptionTest() override = default;
+  PaymentHandlerChangeShippingAddressOptionTest() {
+    SetBypassUserInteractionForTesting();
+  }
 
   void SetUpOnMainThread() override {
     PaymentRequestPlatformBrowserTestBase::SetUpOnMainThread();
@@ -83,8 +84,7 @@ IN_PROC_BROWSER_TEST_P(PaymentHandlerChangeShippingAddressOptionTest, Test) {
 
   std::string actual_output =
       content::EvalJs(GetActiveWebContents(),
-                      "outputChangeShippingAddressOptionReturnValue(request);",
-                      content::EXECUTE_SCRIPT_USE_MANUAL_REPLY)
+                      "outputChangeShippingAddressOptionReturnValue(request);")
           .ExtractString();
 
   // The test expectations are hard-coded, but the embedded test server changes

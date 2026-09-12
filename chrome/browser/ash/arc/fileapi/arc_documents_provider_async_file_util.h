@@ -20,7 +20,7 @@ namespace arc {
 // interface completely. We omit some details which Files app doesn't care.
 // This is for simpicity, but results in layering violation. We should
 // complement the implementations to prepare for general usage in the future.
-// crbug.com/946329.
+// crbug.com/206362799.
 class ArcDocumentsProviderAsyncFileUtil : public storage::AsyncFileUtil {
  public:
   ArcDocumentsProviderAsyncFileUtil();
@@ -50,7 +50,7 @@ class ArcDocumentsProviderAsyncFileUtil : public storage::AsyncFileUtil {
       StatusCallback callback) override;
   void GetFileInfo(std::unique_ptr<storage::FileSystemOperationContext> context,
                    const storage::FileSystemURL& url,
-                   int fields,
+                   GetMetadataFieldSet fields,
                    GetFileInfoCallback callback) override;
   void ReadDirectory(
       std::unique_ptr<storage::FileSystemOperationContext> context,

@@ -24,9 +24,13 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <atomic>
 #include <memory>
+#include <set>
+#include <string_view>
+#include <vector>
 
-#include "base/atomicops.h"
+#include "base/check_op.h"
 #include "base/logging.h"
 #include "base/scoped_generic.h"
 #include "base/strings/stringprintf.h"
@@ -96,7 +100,7 @@ enum class StartupState : int {
 // when the handler is known to have started successfully, or failed to start
 // the value will be updated. The unhandled exception filter will not proceed
 // until one of those two cases happens.
-base::subtle::AtomicWord g_handler_startup_state;
+std::atomic<StartupState> g_handler_startup_state;
 
 // A CRITICAL_SECTION initialized with
 // RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO to force it to be allocated with a
@@ -107,20 +111,18 @@ CRITICAL_SECTION g_critical_section_with_debug_info;
 
 void SetHandlerStartupState(StartupState state) {
   DCHECK(state == StartupState::kSucceeded || state == StartupState::kFailed);
-  base::subtle::Release_Store(&g_handler_startup_state,
-                              static_cast<base::subtle::AtomicWord>(state));
+  g_handler_startup_state.store(state, std::memory_order_release);
 }
 
 StartupState BlockUntilHandlerStartedOrFailed() {
   // Wait until we know the handler has either succeeded or failed to start.
-  base::subtle::AtomicWord startup_state;
-  while (
-      (startup_state = base::subtle::Acquire_Load(&g_handler_startup_state)) ==
-      static_cast<int>(StartupState::kNotReady)) {
+  StartupState startup_state;
+  while ((startup_state = g_handler_startup_state.load(
+              std::memory_order_acquire)) == StartupState::kNotReady) {
     Sleep(1);
   }
 
-  return static_cast<StartupState>(startup_state);
+  return startup_state;
 }
 
 #if defined(ADDRESS_SANITIZER)
@@ -147,7 +149,7 @@ LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_pointers) {
   // Otherwise, we know the handler startup has succeeded, and we can continue.
 
   // Tracks whether a thread has already entered UnhandledExceptionHandler.
-  static base::subtle::AtomicWord have_crashed;
+  static std::atomic<bool> have_crashed;
 
   // This is a per-process handler. While this handler is being invoked, other
   // threads are still executing as usual, so multiple threads could enter at
@@ -161,7 +163,7 @@ LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_pointers) {
   // that we won't save the exception pointers from the second and further
   // crashes, but contention here is very unlikely, and we'll still have a stack
   // that's blocked at this location.
-  if (base::subtle::Barrier_AtomicIncrement(&have_crashed, 1) > 1) {
+  if (have_crashed.exchange(true)) {
     SleepEx(INFINITE, false);
   }
 
@@ -189,6 +191,17 @@ LONG WINAPI UnhandledExceptionHandler(EXCEPTION_POINTERS* exception_pointers) {
 
   return EXCEPTION_CONTINUE_SEARCH;
 }
+
+#if !defined(ADDRESS_SANITIZER)
+LONG WINAPI HandleHeapCorruption(EXCEPTION_POINTERS* exception_pointers) {
+  if (exception_pointers->ExceptionRecord->ExceptionCode ==
+      STATUS_HEAP_CORRUPTION) {
+    return UnhandledExceptionHandler(exception_pointers);
+  }
+
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
 
 void HandleAbortSignal(int signum) {
   DCHECK_EQ(signum, SIGABRT);
@@ -242,25 +255,30 @@ bool IsInheritableHandle(HANDLE handle) {
   return handle_type == FILE_TYPE_DISK || handle_type == FILE_TYPE_PIPE;
 }
 
-// Adds |handle| to |handle_list| if it appears valid, and is not already in
-// |handle_list|.
+// Adds |handle| to |handle_list| if it is valid (not null or
+// INVALID_HANDLE_VALUE) and not already in |handle_list|.
 //
-// Invalid handles (including INVALID_HANDLE_VALUE and null handles) cannot be
-// added to a PPROC_THREAD_ATTRIBUTE_LIST’s PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
-// If INVALID_HANDLE_VALUE appears, CreateProcess() will fail with
-// ERROR_INVALID_PARAMETER. If a null handle appears, the child process will
-// silently not inherit any handles.
+// Invalid handles cannot be added to a PPROC_THREAD_ATTRIBUTE_LIST’s
+// PROC_THREAD_ATTRIBUTE_HANDLE_LIST. If INVALID_HANDLE_VALUE appears,
+// CreateProcess() will fail with ERROR_INVALID_PARAMETER. If a null handle
+// appears, the child process will silently not inherit any handles. If there's
+// a duplicate handle, CreateProcess() fails with ERROR_INVALID_PARAMETER.
+void AddHandleToListIfValid(std::vector<HANDLE>* handle_list, HANDLE handle) {
+  if (handle && handle != INVALID_HANDLE_VALUE &&
+      std::find(handle_list->begin(), handle_list->end(), handle) ==
+          handle_list->end()) {
+    handle_list->push_back(handle);
+  }
+}
+
+// Adds |handle| to |handle_list| if it appears valid and inheritable (as
+// determined by IsInheritableHandle()).
 //
 // Use this function to add handles with uncertain validities.
 void AddHandleToListIfValidAndInheritable(std::vector<HANDLE>* handle_list,
                                           HANDLE handle) {
-  // There doesn't seem to be any documentation of this, but if there's a handle
-  // duplicated in this list, CreateProcess() fails with
-  // ERROR_INVALID_PARAMETER.
-  if (IsInheritableHandle(handle) &&
-      std::find(handle_list->begin(), handle_list->end(), handle) ==
-          handle_list->end()) {
-    handle_list->push_back(handle);
+  if (IsInheritableHandle(handle)) {
+    AddHandleToListIfValid(handle_list, handle);
   }
 }
 
@@ -321,6 +339,7 @@ struct BackgroundHandlerStartThreadData {
       const std::map<std::string, std::string>& annotations,
       const std::vector<std::string>& arguments,
       const std::vector<base::FilePath>& attachments,
+      const std::set<FileHandle>& preserve_file_handles,
       const std::wstring& ipc_pipe,
       ScopedFileHANDLE ipc_pipe_handle)
       : handler(handler),
@@ -330,6 +349,7 @@ struct BackgroundHandlerStartThreadData {
         annotations(annotations),
         arguments(arguments),
         attachments(attachments),
+        preserve_file_handles(preserve_file_handles),
         ipc_pipe(ipc_pipe),
         ipc_pipe_handle(std::move(ipc_pipe_handle)) {}
 
@@ -340,6 +360,7 @@ struct BackgroundHandlerStartThreadData {
   std::map<std::string, std::string> annotations;
   std::vector<std::string> arguments;
   std::vector<base::FilePath> attachments;
+  std::set<FileHandle> preserve_file_handles;
   std::wstring ipc_pipe;
   ScopedFileHANDLE ipc_pipe_handle;
 };
@@ -400,8 +421,7 @@ bool StartHandlerProcess(
   }
   for (const base::FilePath& attachment : data->attachments) {
     AppendCommandLineArgument(
-        FormatArgumentString("attachment", attachment.value()),
-        &command_line);
+        FormatArgumentString("attachment", attachment.value()), &command_line);
   }
 
   ScopedKernelHANDLE this_process(
@@ -428,7 +448,8 @@ bool StartHandlerProcess(
   BOOL rv;
   DWORD creation_flags;
   STARTUPINFOEX startup_info = {};
-  startup_info.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  startup_info.StartupInfo.dwFlags =
+      STARTF_USESTDHANDLES | STARTF_FORCEOFFFEEDBACK;
   startup_info.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
   startup_info.StartupInfo.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
   startup_info.StartupInfo.hStdError = GetStdHandle(STD_ERROR_HANDLE);
@@ -476,7 +497,7 @@ bool StartHandlerProcess(
     }
     proc_thread_attribute_list_owner.reset(startup_info.lpAttributeList);
 
-    handle_list.reserve(8);
+    handle_list.reserve(8 + data->preserve_file_handles.size());
     handle_list.push_back(g_signal_exception);
     handle_list.push_back(g_wer_registration.dump_without_crashing);
     handle_list.push_back(g_wer_registration.dump_completed);
@@ -488,6 +509,14 @@ bool StartHandlerProcess(
                                          startup_info.StartupInfo.hStdOutput);
     AddHandleToListIfValidAndInheritable(&handle_list,
                                          startup_info.StartupInfo.hStdError);
+
+    for (HANDLE handle : data->preserve_file_handles) {
+      if (SetHandleInformation(
+              handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+        AddHandleToListIfValid(&handle_list, handle);
+      }
+    }
+
     rv = update_proc_thread_attribute(
         startup_info.lpAttributeList,
         0,
@@ -508,7 +537,7 @@ bool StartHandlerProcess(
   // invalid command line where the first argument needed by rundll32 is not in
   // the correct format as required in:
   // https://support.microsoft.com/en-ca/help/164787/info-windows-rundll-and-rundll32-interface
-  const base::WStringPiece kRunDll32Exe(L"rundll32.exe");
+  const std::wstring_view kRunDll32Exe(L"rundll32.exe");
   bool is_embedded_in_dll = false;
   if (data->handler.value().size() >= kRunDll32Exe.size() &&
       _wcsicmp(data->handler.value()
@@ -580,35 +609,10 @@ void CommonInProcessInitialization() {
   g_non_crash_dump_lock = new base::Lock();
 }
 
-void RegisterHandlers() {
-  SetUnhandledExceptionFilter(&UnhandledExceptionHandler);
-
-  // The Windows CRT's signal.h lists:
-  // - SIGINT
-  // - SIGILL
-  // - SIGFPE
-  // - SIGSEGV
-  // - SIGTERM
-  // - SIGBREAK
-  // - SIGABRT
-  // SIGILL and SIGTERM are documented as not being generated. SIGBREAK and
-  // SIGINT are for Ctrl-Break and Ctrl-C, and aren't something for which
-  // capturing a dump is warranted. SIGFPE and SIGSEGV are captured as regular
-  // exceptions through the unhandled exception filter. This leaves SIGABRT. In
-  // the standard CRT, abort() is implemented as a synchronous call to the
-  // SIGABRT signal handler if installed, but after doing so, the unhandled
-  // exception filter is not triggered (it instead __fastfail()s). So, register
-  // to handle SIGABRT to catch abort() calls, as client code might use this and
-  // expect it to cause a crash dump. This will only work when the abort()
-  // that's called in client code is the same (or has the same behavior) as the
-  // one in use here.
-  void (*rv)(int) = signal(SIGABRT, HandleAbortSignal);
-  DCHECK_NE(rv, SIG_ERR);
-}
-
 }  // namespace
 
-CrashpadClient::CrashpadClient() : ipc_pipe_(), handler_start_thread_() {}
+CrashpadClient::CrashpadClient()
+    : ipc_pipe_(), handler_start_thread_(), vectored_handler_() {}
 
 CrashpadClient::~CrashpadClient() {}
 
@@ -621,7 +625,8 @@ bool CrashpadClient::StartHandler(
     const std::vector<std::string>& arguments,
     bool restartable,
     bool asynchronous_start,
-    const std::vector<base::FilePath>& attachments) {
+    const std::vector<base::FilePath>& attachments,
+    const std::set<FileHandle>& preserve_file_handles) {
   DCHECK(ipc_pipe_.empty());
 
   // Both the pipe and the signalling events have to be created on the main
@@ -652,6 +657,7 @@ bool CrashpadClient::StartHandler(
                                                    annotations,
                                                    arguments,
                                                    attachments,
+                                                   preserve_file_handles,
                                                    ipc_pipe_,
                                                    std::move(ipc_pipe_handle));
 
@@ -680,6 +686,42 @@ bool CrashpadClient::StartHandler(
     return StartHandlerProcess(
         std::unique_ptr<BackgroundHandlerStartThreadData>(data));
   }
+}
+
+void CrashpadClient::RegisterHandlers() {
+  SetUnhandledExceptionFilter(&UnhandledExceptionHandler);
+
+  // Windows swallows heap corruption failures but we can intercept them with
+  // a vectored exception handler. Note that a vectored exception handler is
+  // not compatible with or generally helpful in ASAN builds (ASAN inserts a
+  // bad dereference at the beginning of the handler, leading to recursive
+  // invocation of the handler).
+#if !defined(ADDRESS_SANITIZER)
+  PVOID handler = AddVectoredExceptionHandler(true, HandleHeapCorruption);
+  vectored_handler_.reset(handler);
+#endif
+
+  // The Windows CRT's signal.h lists:
+  // - SIGINT
+  // - SIGILL
+  // - SIGFPE
+  // - SIGSEGV
+  // - SIGTERM
+  // - SIGBREAK
+  // - SIGABRT
+  // SIGILL and SIGTERM are documented as not being generated. SIGBREAK and
+  // SIGINT are for Ctrl-Break and Ctrl-C, and aren't something for which
+  // capturing a dump is warranted. SIGFPE and SIGSEGV are captured as regular
+  // exceptions through the unhandled exception filter. This leaves SIGABRT. In
+  // the standard CRT, abort() is implemented as a synchronous call to the
+  // SIGABRT signal handler if installed, but after doing so, the unhandled
+  // exception filter is not triggered (it instead __fastfail()s). So, register
+  // to handle SIGABRT to catch abort() calls, as client code might use this and
+  // expect it to cause a crash dump. This will only work when the abort()
+  // that's called in client code is the same (or has the same behavior) as the
+  // one in use here.
+  void (*rv)(int) = signal(SIGABRT, HandleAbortSignal);
+  DCHECK_NE(rv, SIG_ERR);
 }
 
 bool CrashpadClient::SetHandlerIPCPipe(const std::wstring& ipc_pipe) {

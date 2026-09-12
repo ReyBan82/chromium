@@ -7,17 +7,16 @@
 
 chrome.test.runTests([
   function experimental() {
-    chrome.tabs.getSelected(null, function(tab) {
+    chrome.tabs.query({active: true}, function(tabs) {
       try {
         // If/when chrome.experimental.history is moved out of
         // experimental, this test needs to be updated.
-        chrome.experimental.history.getMostVisited(
-          {}, function(results) {
+        chrome.experimental.history.getMostVisited({}, function(results) {
           chrome.test.fail();
         });
       } catch (e) {
         chrome.test.succeed();
       }
     });
-  }
+  },
 ]);

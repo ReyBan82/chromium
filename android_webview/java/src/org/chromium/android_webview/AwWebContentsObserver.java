@@ -4,12 +4,17 @@
 
 package org.chromium.android_webview;
 
+import androidx.annotation.IntDef;
+
 import org.chromium.android_webview.AwContents.VisualStateCallback;
+import org.chromium.android_webview.common.Lifetime;
+import org.chromium.base.metrics.RecordHistogram;
 import org.chromium.base.task.PostTask;
+import org.chromium.base.task.TaskTraits;
 import org.chromium.content_public.browser.GlobalRenderFrameHostId;
 import org.chromium.content_public.browser.LifecycleState;
 import org.chromium.content_public.browser.NavigationHandle;
-import org.chromium.content_public.browser.UiThreadTaskTraits;
+import org.chromium.content_public.browser.Page;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.content_public.browser.WebContentsObserver;
 import org.chromium.content_public.common.ContentUrlConstants;
@@ -19,9 +24,8 @@ import org.chromium.url.GURL;
 
 import java.lang.ref.WeakReference;
 
-/**
- * Routes notifications from WebContents to AwContentsClient and other listeners.
- */
+/** Routes notifications from WebContents to AwContentsClient and other listeners. */
+@Lifetime.WebView
 public class AwWebContentsObserver extends WebContentsObserver {
     // TODO(tobiasjs) similarly to WebContentsObserver.mWebContents, mAwContents
     // needs to be a WeakReference, which suggests that there exists a strong
@@ -55,12 +59,38 @@ public class AwWebContentsObserver extends WebContentsObserver {
     }
 
     @Override
-    public void didFinishLoadInPrimaryMainFrame(GlobalRenderFrameHostId rfhId, GURL url,
-            boolean isKnownValid, @LifecycleState int rfhLifecycleState) {
+    public void didFinishLoadInPrimaryMainFrame(
+            Page page,
+            GlobalRenderFrameHostId rfhId,
+            GURL url,
+            boolean isKnownValid,
+            @LifecycleState int rfhLifecycleState) {
         if (rfhLifecycleState != LifecycleState.ACTIVE) return;
         String validatedUrl = isKnownValid ? url.getSpec() : url.getPossiblyInvalidSpec();
         if (getClientIfNeedToFireCallback(validatedUrl) != null) {
             mLastDidFinishLoadUrl = validatedUrl;
+        }
+
+        AwContents awContents = mAwContents.get();
+        if (awContents != null) {
+            awContents.getNavigationClient().onPageLoadEventFired(page);
+        }
+    }
+
+    @Override
+    public void documentLoadedInPrimaryMainFrame(
+            Page page, GlobalRenderFrameHostId rfhId, @LifecycleState int rfhLifecycleState) {
+        AwContents awContents = mAwContents.get();
+        if (awContents != null) {
+            awContents.getNavigationClient().onPageDOMContentLoadedEventFired(page);
+        }
+    }
+
+    @Override
+    public void didStartLoading(GURL gurl) {
+        AwContents awContents = mAwContents.get();
+        if (awContents != null) {
+            awContents.releaseDragAndDropPermissions();
         }
     }
 
@@ -83,7 +113,10 @@ public class AwWebContentsObserver extends WebContentsObserver {
     }
 
     @Override
-    public void didFailLoad(boolean isInPrimaryMainFrame, @NetError int errorCode, GURL failingGurl,
+    public void didFailLoad(
+            boolean isInPrimaryMainFrame,
+            @NetError int errorCode,
+            GURL failingGurl,
             @LifecycleState int frameLifecycleState) {
         processFailedLoad(isInPrimaryMainFrame, errorCode, failingGurl);
     }
@@ -120,49 +153,127 @@ public class AwWebContentsObserver extends WebContentsObserver {
     }
 
     @Override
+    public void didStartNavigationInPrimaryMainFrame(NavigationHandle navigation) {
+        AwContents awContents = mAwContents.get();
+        if (awContents != null) {
+            awContents.getNavigationClient().onNavigationStarted(navigation);
+        }
+    }
+
+    @Override
+    public void didRedirectNavigation(NavigationHandle navigation) {
+        if (navigation.isInPrimaryMainFrame()) {
+            AwContents awContents = mAwContents.get();
+            if (awContents != null) {
+                awContents.getNavigationClient().onNavigationRedirected(navigation);
+            }
+        }
+    }
+
+    // Used to record the UMA histogram Android.WebView.Navigation.MainFrame. Since these
+    // values are persisted to logs, they should never be renumbered or reused.
+    @IntDef({
+        NavigationType.INITIAL,
+        NavigationType.SAME_DOCUMENT,
+        NavigationType.BROWSER_INITIATED_SAME_ORIGIN,
+        NavigationType.BROWSER_INITIATED_CROSS_ORIGIN,
+        NavigationType.RENDERER_INITIATED_SAME_ORIGIN,
+        NavigationType.RENDERER_INITIATED_CROSS_ORIGIN,
+    })
+    public @interface NavigationType {
+        int INITIAL = 0;
+        int SAME_DOCUMENT = 1;
+        int BROWSER_INITIATED_SAME_ORIGIN = 2;
+        int BROWSER_INITIATED_CROSS_ORIGIN = 3;
+        int RENDERER_INITIATED_SAME_ORIGIN = 4;
+        int RENDERER_INITIATED_CROSS_ORIGIN = 5;
+        int COUNT = 6;
+    }
+
+    private static void recordMainFrameNavigationType(@NavigationType int value) {
+        RecordHistogram.recordEnumeratedHistogram(
+                "Android.WebView.Navigation.MainFrame", value, NavigationType.COUNT);
+    }
+
+    @Override
     public void didFinishNavigationInPrimaryMainFrame(NavigationHandle navigation) {
         String url = navigation.getUrl().getPossiblyInvalidSpec();
         if (navigation.errorCode() != NetError.OK && !navigation.isDownload()) {
             processFailedLoad(true, navigation.errorCode(), navigation.getUrl());
         }
+        AwContentsClient client = mAwContentsClient.get();
+
+        // Invoke synthetic onPageFinished callbacks for duplicate navigations ignored by the
+        // IgnoreDuplicateNavs optimization. Without this optimization, a duplicate request would
+        // cancel the ongoing navigation (net::ERR_ABORTED) and start a new navigation. We mimic
+        // that signal here to maintain backward compatibility for apps that expect a callback for
+        // every attempt, consistent with `processFailedLoad()`.
+        if (client != null) {
+            int ignoredCount = navigation.getIgnoredDuplicateNavigationCount();
+            for (int i = 0; i < ignoredCount; i++) {
+                client.getCallbackHelper().postOnPageFinished(url);
+            }
+        }
+
+        if (navigation.isInPrimaryMainFrame()) {
+            AwContents awContents = mAwContents.get();
+            if (awContents != null) {
+                awContents.getNavigationClient().onNavigationCompleted(navigation);
+            }
+        }
 
         if (!navigation.hasCommitted()) return;
 
+        if (navigation.isInPrimaryMainFrame()) {
+            if (!mCommittedNavigation) {
+                recordMainFrameNavigationType(NavigationType.INITIAL);
+            } else if (navigation.isSameDocument()) {
+                recordMainFrameNavigationType(NavigationType.SAME_DOCUMENT);
+            } else if (navigation.isRendererInitiated()) {
+                if (navigation.isSameOrigin()) {
+                    recordMainFrameNavigationType(NavigationType.RENDERER_INITIATED_SAME_ORIGIN);
+                } else {
+                    recordMainFrameNavigationType(NavigationType.RENDERER_INITIATED_CROSS_ORIGIN);
+                }
+            } else {
+                if (navigation.isSameOrigin()) {
+                    recordMainFrameNavigationType(NavigationType.BROWSER_INITIATED_SAME_ORIGIN);
+                } else {
+                    recordMainFrameNavigationType(NavigationType.BROWSER_INITIATED_CROSS_ORIGIN);
+                }
+            }
+        }
+
         mCommittedNavigation = true;
 
-        AwContentsClient client = mAwContentsClient.get();
+        navigation.getCommittedPage().setUrl(navigation.getUrl());
+
         if (client != null) {
             // OnPageStarted is not called for in-page navigations, which include fragment
             // navigations and navigation from history.push/replaceState.
             // Error page is handled by AwContentsClientBridge.onReceivedError.
-            if (!navigation.isSameDocument() && !navigation.isErrorPage()
-                    && AwFeatureList.pageStartedOnCommitEnabled(navigation.isRendererInitiated())) {
+            if (!navigation.isSameDocument()
+                    && !navigation.isErrorPage()
+                    && AwComputedFlags.pageStartedOnCommitEnabled(
+                            navigation.isRendererInitiated())) {
                 client.getCallbackHelper().postOnPageStarted(url);
             }
 
-            boolean isReload = (navigation.pageTransition() & PageTransition.CORE_MASK)
-                    == PageTransition.RELOAD;
+            boolean isReload =
+                    (navigation.pageTransition() & PageTransition.CORE_MASK)
+                            == PageTransition.RELOAD;
             client.getCallbackHelper().postDoUpdateVisitedHistory(url, isReload);
         }
 
-        // Only invoke the onPageCommitVisible callback when navigating to a different document,
-        // but not when navigating to a different fragment within the same document.
-        if (!navigation.isSameDocument()) {
-            PostTask.postTask(UiThreadTaskTraits.DEFAULT, () -> {
-                AwContents awContents = mAwContents.get();
-                if (awContents != null) {
+        PostTask.postTask(
+                TaskTraits.UI_DEFAULT,
+                () -> {
+                    AwContents awContents = mAwContents.get();
+                    if (awContents == null) return;
+
                     awContents.insertVisualStateCallbackIfNotDestroyed(
-                            0, new VisualStateCallback() {
-                                @Override
-                                public void onComplete(long requestId) {
-                                    AwContentsClient client1 = mAwContentsClient.get();
-                                    if (client1 == null) return;
-                                    client1.onPageCommitVisible(url);
-                                }
-                            });
-                }
-            });
-        }
+                            0, new PageCommitVisibleCallback(navigation));
+                });
 
         if (client != null && navigation.isPrimaryMainFrameFragmentNavigation()) {
             // Note fragment navigations do not have a matching onPageStarted.
@@ -170,7 +281,46 @@ public class AwWebContentsObserver extends WebContentsObserver {
         }
     }
 
+    @Override
+    public void primaryPageChanged(Page page) {
+        // The page has become the primary page. If it was a prerendered page before, make sure we
+        // no longer consider it as one.
+        page.setIsPrerendering(false);
+        // Make sure we track the deletion of this new page.
+        AwContents awContents = mAwContents.get();
+        if (awContents != null) {
+            page.setPageDeletionListener(awContents.getNavigationClient());
+        }
+    }
+
     public boolean didEverCommitNavigation() {
         return mCommittedNavigation;
+    }
+
+    /** Callback that triggers {@code onPageCommitVisible} and {@code onNavigationVisible}. */
+    // Deliberately not static to capture the outer class members so we don't have to
+    // redeclare all the weakReferences.
+    private class PageCommitVisibleCallback extends VisualStateCallback {
+        private final NavigationHandle mNavigation;
+
+        PageCommitVisibleCallback(NavigationHandle navigation) {
+            mNavigation = navigation;
+        }
+
+        @Override
+        public void onComplete(long requestId) {
+            AwContents awContents = mAwContents.get();
+            if (awContents != null) {
+                awContents.getNavigationClient().onNavigationVisible(mNavigation);
+            }
+            // Only invoke the onPageCommitVisible callback when navigating to a different document,
+            // but not when navigating to a different fragment within the same document.
+            if (!mNavigation.isSameDocument()) {
+                AwContentsClient client = mAwContentsClient.get();
+                if (client != null) {
+                    client.onPageCommitVisible(mNavigation.getUrl().getPossiblyInvalidSpec());
+                }
+            }
+        }
     }
 }

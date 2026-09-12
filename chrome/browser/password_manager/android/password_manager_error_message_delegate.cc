@@ -13,10 +13,105 @@
 #include "components/password_manager/core/browser/password_manager_client.h"
 #include "components/password_manager/core/common/password_manager_pref_names.h"
 #include "components/prefs/pref_service.h"
+#include "components/sync/base/features.h"
+#include "components/sync/service/sync_service_utils.h"
 #include "content/public/browser/web_contents.h"
 #include "ui/android/window_android.h"
 #include "ui/aura/window.h"
 #include "ui/base/l10n/l10n_util.h"
+
+namespace {
+
+using PasswordStoreBackendErrorType =
+    password_manager::PasswordStoreBackendErrorType;
+
+// Increase the timeout for the unlock message to 45s from the default 10s.
+constexpr base::TimeDelta kDurationForKeyUnlockMessage = base::Seconds(45);
+
+std::string GetErrorMessageName(PasswordStoreBackendErrorType error_type) {
+  switch (error_type) {
+    case PasswordStoreBackendErrorType::kAuthErrorResolvable:
+      return "AuthErrorResolvable";
+    case PasswordStoreBackendErrorType::kAuthErrorUnresolvable:
+      return "AuthErrorUnresolvable";
+    case PasswordStoreBackendErrorType::kKeyRetrievalRequired:
+      return "KeyRetrievalRequired";
+    case PasswordStoreBackendErrorType::kEmptySecurityDomain:
+      return "EmptySecurityDomain";
+    case PasswordStoreBackendErrorType::kIrretrievableSecurityDomain:
+      return "IrretrievableSecurityDomain";
+    case PasswordStoreBackendErrorType::kUncategorized:
+    case PasswordStoreBackendErrorType::kKeychainError:
+    case PasswordStoreBackendErrorType::kNeedsPassphrase:
+      // Other error types aren't supported.
+      NOTREACHED();
+  }
+}
+
+void RecordDismissalReasonMetrics(PasswordStoreBackendErrorType error_type,
+                                  messages::DismissReason dismiss_reason) {
+  base::UmaHistogramEnumeration("PasswordManager.ErrorMessageDismissalReason." +
+                                    GetErrorMessageName(error_type),
+                                dismiss_reason);
+}
+
+void RecordErrorTypeMetrics(PasswordStoreBackendErrorType error_type) {
+  base::UmaHistogramEnumeration("PasswordManager.ErrorMessageDisplayReason",
+                                error_type);
+}
+
+void SetVerifyItIsYouMessageContent(
+    messages::MessageWrapper* message,
+    password_manager::ErrorMessageFlowType flow_type) {
+  message->SetTitle(l10n_util::GetStringUTF16(IDS_VERIFY_IT_IS_YOU));
+
+  std::u16string description = l10n_util::GetStringUTF16(
+      flow_type == password_manager::ErrorMessageFlowType::kSaveFlow
+          ? IDS_PASSWORD_ERROR_DESCRIPTION_SIGN_UP
+          : IDS_PASSWORD_ERROR_DESCRIPTION_SIGN_IN);
+  message->SetDescription(description);
+
+  message->SetPrimaryButtonText(
+      l10n_util::GetStringUTF16(IDS_PASSWORD_ERROR_VERIFY_BUTTON_TITLE));
+
+  message->SetIconResourceId(ResourceMapper::MapToJavaDrawableId(
+      IDR_ANDORID_MESSAGE_PASSWORD_MANAGER_ERROR));
+
+  message->DisableIconTint();
+}
+
+bool ShouldSaveMessageTimeStamp(PasswordStoreBackendErrorType error_type,
+                                messages::DismissReason dismiss_reason) {
+  if (error_type != PasswordStoreBackendErrorType::kKeyRetrievalRequired) {
+    // For all other errors, the time has already been saved.
+    return false;
+  }
+  // Always check the feature after the error type to enroll only Trusted Vault
+  // users into the experiment.
+  if (!base::FeatureList::IsEnabled(
+          syncer::kSyncTrustedVaultErrorMessageDuration)) {
+    // If the feature is not active, the time has already been saved.
+    return false;
+  }
+  switch (dismiss_reason) {
+    case messages::DismissReason::PRIMARY_ACTION:
+    case messages::DismissReason::SECONDARY_ACTION:
+    case messages::DismissReason::GESTURE:
+    case messages::DismissReason::CLOSE_BUTTON:
+      // The user dismissed the message, save the stamp to not show it again.
+      return true;
+    case messages::DismissReason::TIMER:
+    case messages::DismissReason::DISMISSED_BY_FEATURE:
+    case messages::DismissReason::TAB_SWITCHED:
+    case messages::DismissReason::TAB_DESTROYED:
+    case messages::DismissReason::ACTIVITY_DESTROYED:
+    case messages::DismissReason::SCOPE_DESTROYED:
+    case messages::DismissReason::UNKNOWN:
+      return false;
+  }
+}
+
+}  // namespace
 
 PasswordManagerErrorMessageDelegate::PasswordManagerErrorMessageDelegate(
     std::unique_ptr<PasswordManagerErrorMessageHelperBridge> bridge_)
@@ -37,94 +132,129 @@ void PasswordManagerErrorMessageDelegate::MaybeDisplayErrorMessage(
     content::WebContents* web_contents,
     PrefService* pref_service,
     password_manager::ErrorMessageFlowType flow_type,
-    password_manager::PasswordStoreBackendErrorType error_type,
+    PasswordStoreBackendErrorType error_type,
     base::OnceCallback<void()> dismissal_callback) {
   DCHECK(web_contents);
 
-  if (!helper_bridge_->ShouldShowErrorUI()) {
+  if (!ShouldShowErrorUI(web_contents, error_type)) {
     // Even if no message was technically shown, the owner of `this` should know
     // that it has served its purpose and can be safely destroyed.
     std::move(dismissal_callback).Run();
     return;
   }
 
-  int times_shown = pref_service->GetInteger(
-      password_manager::prefs::kTimesUPMAuthErrorShown);
-  pref_service->SetInteger(password_manager::prefs::kTimesUPMAuthErrorShown,
-                           times_shown + 1);
-
   DCHECK(!message_);
+  message_ =
+      CreateMessage(web_contents, error_type, std::move(dismissal_callback));
+  error_type_ = error_type;
+  // TODO(crbug.com/379762002): Replace all the switches with passing-in
+  // an already customized "handler".
+  switch (error_type) {
+    case PasswordStoreBackendErrorType::kAuthErrorResolvable:
+    case PasswordStoreBackendErrorType::kAuthErrorUnresolvable:
+    case PasswordStoreBackendErrorType::kKeyRetrievalRequired:
+    case PasswordStoreBackendErrorType::kEmptySecurityDomain:
+    case PasswordStoreBackendErrorType::kIrretrievableSecurityDomain:
+      SetVerifyItIsYouMessageContent(message_.get(), flow_type);
+      break;
+    case PasswordStoreBackendErrorType::kUncategorized:
+    case PasswordStoreBackendErrorType::kKeychainError:
+    case PasswordStoreBackendErrorType::kNeedsPassphrase:
+      // Other error types aren't supported.
+      NOTREACHED();
+  }
 
-  CreateMessage(web_contents, flow_type);
-  RecordErrorTypeMetrics(error_type);
   messages::MessageDispatcherBridge::Get()->EnqueueMessage(
       message_.get(), web_contents, messages::MessageScopeType::WEB_CONTENTS,
       messages::MessagePriority::kUrgent);
-  helper_bridge_->SaveErrorUIShownTimestamp();
-  dismissal_callback_ = std::move(dismissal_callback);
+  if (error_type != PasswordStoreBackendErrorType::kKeyRetrievalRequired ||
+      !base::FeatureList::IsEnabled(
+          syncer::kSyncTrustedVaultErrorMessageDuration)) {
+    helper_bridge_->SaveErrorUIShownTimestamp(web_contents);
+  }
 }
 
-void PasswordManagerErrorMessageDelegate::CreateMessage(
+bool PasswordManagerErrorMessageDelegate::ShouldShowErrorUI(
     content::WebContents* web_contents,
-    password_manager::ErrorMessageFlowType flow_type) {
+    password_manager::PasswordStoreBackendErrorType error_type) {
+  switch (error_type) {
+    case PasswordStoreBackendErrorType::kAuthErrorResolvable:
+    case PasswordStoreBackendErrorType::kAuthErrorUnresolvable:
+    case PasswordStoreBackendErrorType::kKeyRetrievalRequired:
+    case PasswordStoreBackendErrorType::kEmptySecurityDomain:
+    case PasswordStoreBackendErrorType::kIrretrievableSecurityDomain:
+      return helper_bridge_->ShouldShowSignInErrorUI(web_contents);
+    case PasswordStoreBackendErrorType::kNeedsPassphrase:
+    case PasswordStoreBackendErrorType::kUncategorized:
+    case PasswordStoreBackendErrorType::kKeychainError:
+      // Other error types aren't supported.
+      NOTREACHED();
+  }
+}
+
+std::unique_ptr<messages::MessageWrapper>
+PasswordManagerErrorMessageDelegate::CreateMessage(
+    content::WebContents* web_contents,
+    PasswordStoreBackendErrorType error_type,
+    base::OnceCallback<void()> dismissal_callback) {
   messages::MessageIdentifier message_id =
       messages::MessageIdentifier::PASSWORD_MANAGER_ERROR;
-  // Binding with base::Unretained(this) is safe here because
-  // PasswordManagerErrorMessageDelegate owns `message_`. Callbacks won't be
-  // called after the current object is destroyed.
-  // It's safe to give a raw pointer to WebContents to the `callback` because
-  // WebContents transitively owns the MessageWrapper so the `message_` can't
-  // outlive `web_contents`.
-  base::OnceClosure callback = base::BindOnce(
-      &PasswordManagerErrorMessageDelegate::HandleSignInButtonClicked,
-      base::Unretained(this), web_contents);
 
-  message_ = std::make_unique<messages::MessageWrapper>(
-      message_id, std::move(callback),
+  base::OnceClosure action_callback = base::BindOnce(
+      &PasswordManagerErrorMessageDelegate::HandleActionButtonClicked,
+      weak_ptr_factory_.GetWeakPtr(), web_contents, error_type);
+
+  messages::MessageWrapper::DismissCallback post_dismissal_callback =
       base::BindOnce(
           &PasswordManagerErrorMessageDelegate::HandleMessageDismissed,
-          base::Unretained(this)));
+          weak_ptr_factory_.GetWeakPtr(), web_contents, error_type)
+          .Then(std::move(dismissal_callback));
 
-  int title_message_id =
-      flow_type == password_manager::ErrorMessageFlowType::kSaveFlow
-          ? IDS_SIGN_IN_TO_SAVE_PASSWORDS
-          : IDS_SIGN_IN_TO_USE_PASSWORDS;
-  message_->SetTitle(l10n_util::GetStringUTF16(title_message_id));
+  RecordErrorTypeMetrics(error_type);
 
-  std::u16string description =
-      l10n_util::GetStringUTF16(IDS_PASSWORD_ERROR_DESCRIPTION);
-  message_->SetDescription(description);
-
-  message_->SetPrimaryButtonText(
-      l10n_util::GetStringUTF16(IDS_PASSWORD_ERROR_SIGN_IN_BUTTON_TITLE));
-
-  message_->SetIconResourceId(ResourceMapper::MapToJavaDrawableId(
-      IDR_ANDORID_MESSAGE_PASSWORD_MANAGER_ERROR));
-  message_->DisableIconTint();
+  auto message = std::make_unique<messages::MessageWrapper>(
+      message_id, std::move(action_callback),
+      std::move(post_dismissal_callback));
+  if (error_type == PasswordStoreBackendErrorType::kKeyRetrievalRequired &&
+      base::FeatureList::IsEnabled(
+          syncer::kSyncTrustedVaultErrorMessageDuration)) {
+    message->SetDuration(kDurationForKeyUnlockMessage.InMilliseconds());
+  }
+  return message;
 }
 
 void PasswordManagerErrorMessageDelegate::HandleMessageDismissed(
+    content::WebContents* web_contents,
+    PasswordStoreBackendErrorType error_type,
     messages::DismissReason dismiss_reason) {
-  RecordDismissalReasonMetrics(dismiss_reason);
+  if (ShouldSaveMessageTimeStamp(error_type, dismiss_reason)) {
+    helper_bridge_->SaveErrorUIShownTimestamp(web_contents);
+  }
+  RecordDismissalReasonMetrics(error_type_, dismiss_reason);
   message_.reset();
-  // Running this callback results in `this` being destroyed, so no other
-  // code should be added beyond this point.
-  std::move(dismissal_callback_).Run();
 }
 
-void PasswordManagerErrorMessageDelegate::HandleSignInButtonClicked(
-    content::WebContents* web_contents) {
-  helper_bridge_->StartUpdateAccountCredentialsFlow(web_contents);
-}
-
-void PasswordManagerErrorMessageDelegate::RecordDismissalReasonMetrics(
-    messages::DismissReason dismiss_reason) {
-  base::UmaHistogramEnumeration("PasswordManager.ErrorMessageDismissalReason",
-                                dismiss_reason, messages::DismissReason::COUNT);
-}
-
-void PasswordManagerErrorMessageDelegate::RecordErrorTypeMetrics(
-    password_manager::PasswordStoreBackendErrorType error_type) {
-  base::UmaHistogramEnumeration("PasswordManager.ErrorMessageDisplayReason",
-                                error_type);
+void PasswordManagerErrorMessageDelegate::HandleActionButtonClicked(
+    content::WebContents* web_contents,
+    PasswordStoreBackendErrorType error) {
+  switch (error) {
+    case PasswordStoreBackendErrorType::kAuthErrorResolvable:
+    case PasswordStoreBackendErrorType::kAuthErrorUnresolvable:
+      helper_bridge_->StartUpdateAccountCredentialsFlow(web_contents);
+      break;
+    case PasswordStoreBackendErrorType::kKeyRetrievalRequired:
+    case PasswordStoreBackendErrorType::kEmptySecurityDomain:
+    case PasswordStoreBackendErrorType::kIrretrievableSecurityDomain:
+      helper_bridge_->StartTrustedVaultKeyRetrievalFlow(
+          web_contents,
+          trusted_vault::TrustedVaultUserActionTriggerForUMA::
+              kPasswordManagerErrorMessage,
+          base::DoNothing());
+      break;
+    case PasswordStoreBackendErrorType::kUncategorized:
+    case PasswordStoreBackendErrorType::kKeychainError:
+    case PasswordStoreBackendErrorType::kNeedsPassphrase:
+      // Other error types aren't supported.
+      NOTREACHED();
+  }
 }

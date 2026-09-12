@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include "base/clang_profiling_buildflags.h"
+#include "base/compiler_specific.h"
 #include "build/build_config.h"
 #include "chrome/installer/mini_installer/mini_installer.h"
 
@@ -50,7 +51,7 @@ __attribute__((used))
 void* memset(void* dest, int c, size_t count) {
   uint8_t* scan = reinterpret_cast<uint8_t*>(dest);
   while (count--)
-    *scan++ = static_cast<uint8_t>(c);
+    *UNSAFE_TODO(scan++) = static_cast<uint8_t>(c);
   return dest;
 }
 
@@ -63,7 +64,7 @@ void* memcpy(void* destination, const void* source, size_t count) {
   auto* dst = reinterpret_cast<uint8_t*>(destination);
   auto* src = reinterpret_cast<const uint8_t*>(source);
   while (count--)
-    *dst++ = *src++;
+    *UNSAFE_TODO(dst++) = *UNSAFE_TODO(src++);
   return destination;
 }
 #endif

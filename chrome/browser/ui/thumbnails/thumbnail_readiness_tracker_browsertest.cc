@@ -8,7 +8,6 @@
 
 #include "base/test/mock_callback.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/browser/web_contents.h"
@@ -101,7 +100,7 @@ IN_PROC_BROWSER_TEST_F(ThumbnailReadinessTrackerBrowserTest,
   content::NavigateIframeToURL(web_contents(), "if", iframe_url);
 }
 
-// Regression test for crbug.com/1120940.
+// Regression test for crbug.com/40715186.
 //
 // Artifical navigations like history.pushState() shouldn't invalidate
 // our thumbnail.
@@ -137,7 +136,7 @@ class ThumbnailReadinessTrackerPrerenderTest
   ~ThumbnailReadinessTrackerPrerenderTest() override = default;
 
   void SetUpOnMainThread() override {
-    prerender_helper_.SetUp(embedded_test_server());
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
     ThumbnailReadinessTrackerBrowserTest::SetUpOnMainThread();
   }
 

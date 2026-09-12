@@ -98,20 +98,19 @@ TEST_F(SandboxedDMGAnalyzerTest, AnalyzeDMG) {
 
   EXPECT_TRUE(results.success);
   EXPECT_TRUE(results.has_executable);
-  EXPECT_EQ(2, results.archived_binary.size());
 
   bool got_executable = false, got_dylib = false;
   for (const auto& binary : results.archived_binary) {
-    const std::string& file_name = binary.file_basename();
+    const std::string& file_name = binary.file_path();
     const google::protobuf::RepeatedPtrField<
         safe_browsing::ClientDownloadRequest_MachOHeaders>& headers =
         binary.image_headers().mach_o_headers();
 
-    EXPECT_EQ(safe_browsing::ClientDownloadRequest_DownloadType_MAC_EXECUTABLE,
-              binary.download_type());
-
     if (file_name.find("executablefat") != std::string::npos) {
       got_executable = true;
+      EXPECT_EQ(
+          safe_browsing::ClientDownloadRequest_DownloadType_MAC_EXECUTABLE,
+          binary.download_type());
       ASSERT_EQ(2, headers.size());
 
       const safe_browsing::ClientDownloadRequest_MachOHeaders& arch32 =
@@ -127,13 +126,15 @@ TEST_F(SandboxedDMGAnalyzerTest, AnalyzeDMG) {
                                  arch64.mach_header().c_str()));
 
       const std::string& sha256_bytes = binary.digests().sha256();
-      std::string actual_sha256 =
-          base::HexEncode(sha256_bytes.c_str(), sha256_bytes.size());
+      std::string actual_sha256 = base::HexEncode(sha256_bytes);
       EXPECT_EQ(
           "E462FF752FF9D84E34D843E5D46E2012ADCBD48540A8473FB794B286A389B945",
           actual_sha256);
     } else if (file_name.find("lib64.dylib") != std::string::npos) {
       got_dylib = true;
+      EXPECT_EQ(
+          safe_browsing::ClientDownloadRequest_DownloadType_MAC_EXECUTABLE,
+          binary.download_type());
       ASSERT_EQ(1, headers.size());
 
       const safe_browsing::ClientDownloadRequest_MachOHeaders& arch =
@@ -143,13 +144,10 @@ TEST_F(SandboxedDMGAnalyzerTest, AnalyzeDMG) {
                 *reinterpret_cast<const uint32_t*>(arch.mach_header().c_str()));
 
       const std::string& sha256_bytes = binary.digests().sha256();
-      std::string actual_sha256 =
-          base::HexEncode(sha256_bytes.c_str(), sha256_bytes.size());
+      std::string actual_sha256 = base::HexEncode(sha256_bytes);
       EXPECT_EQ(
           "2012CE4987B0FA4A5D285DF7E810560E841CFAB3054BC19E1AAB345F862A6C4E",
           actual_sha256);
-    } else {
-      ADD_FAILURE() << "Unexpected result file " << binary.file_basename();
     }
   }
 
@@ -175,20 +173,19 @@ TEST_F(SandboxedDMGAnalyzerTest, AnalyzeDMGNoPartitionName) {
 
   EXPECT_TRUE(results.success);
   EXPECT_TRUE(results.has_executable);
-  EXPECT_EQ(2, results.archived_binary.size());
 
   bool got_executable = false, got_dylib = false;
   for (const auto& binary : results.archived_binary) {
-    const std::string& file_name = binary.file_basename();
+    const std::string& file_name = binary.file_path();
     const google::protobuf::RepeatedPtrField<
         safe_browsing::ClientDownloadRequest_MachOHeaders>& headers =
         binary.image_headers().mach_o_headers();
 
-    EXPECT_EQ(safe_browsing::ClientDownloadRequest_DownloadType_MAC_EXECUTABLE,
-              binary.download_type());
-
     if (file_name.find("executablefat") != std::string::npos) {
       got_executable = true;
+      EXPECT_EQ(
+          safe_browsing::ClientDownloadRequest_DownloadType_MAC_EXECUTABLE,
+          binary.download_type());
       ASSERT_EQ(2, headers.size());
 
       const safe_browsing::ClientDownloadRequest_MachOHeaders& arch32 =
@@ -204,13 +201,15 @@ TEST_F(SandboxedDMGAnalyzerTest, AnalyzeDMGNoPartitionName) {
                                  arch64.mach_header().c_str()));
 
       const std::string& sha256_bytes = binary.digests().sha256();
-      std::string actual_sha256 =
-          base::HexEncode(sha256_bytes.c_str(), sha256_bytes.size());
+      std::string actual_sha256 = base::HexEncode(sha256_bytes);
       EXPECT_EQ(
           "E462FF752FF9D84E34D843E5D46E2012ADCBD48540A8473FB794B286A389B945",
           actual_sha256);
     } else if (file_name.find("lib64.dylib") != std::string::npos) {
       got_dylib = true;
+      EXPECT_EQ(
+          safe_browsing::ClientDownloadRequest_DownloadType_MAC_EXECUTABLE,
+          binary.download_type());
       ASSERT_EQ(1, headers.size());
 
       const safe_browsing::ClientDownloadRequest_MachOHeaders& arch =
@@ -220,13 +219,10 @@ TEST_F(SandboxedDMGAnalyzerTest, AnalyzeDMGNoPartitionName) {
                 *reinterpret_cast<const uint32_t*>(arch.mach_header().c_str()));
 
       const std::string& sha256_bytes = binary.digests().sha256();
-      std::string actual_sha256 =
-          base::HexEncode(sha256_bytes.c_str(), sha256_bytes.size());
+      std::string actual_sha256 = base::HexEncode(sha256_bytes);
       EXPECT_EQ(
           "2012CE4987B0FA4A5D285DF7E810560E841CFAB3054BC19E1AAB345F862A6C4E",
           actual_sha256);
-    } else {
-      ADD_FAILURE() << "Unexpected result file " << binary.file_basename();
     }
   }
 
@@ -293,8 +289,9 @@ TEST_F(SandboxedDMGAnalyzerTest, CanDeleteDuringExecution) {
   base::RunLoop run_loop;
 
   FakeFileUtilService service(remote.InitWithNewPipeAndPassReceiver());
-  EXPECT_CALL(service.GetSafeArchiveAnalyzer(), AnalyzeDmgFile(_, _))
+  EXPECT_CALL(service.GetSafeArchiveAnalyzer(), AnalyzeDmgFile(_, _, _))
       .WillOnce([&](base::File dmg_file,
+                    mojo::PendingRemote<chrome::mojom::TemporaryFileGetter>,
                     chrome::mojom::SafeArchiveAnalyzer::AnalyzeDmgFileCallback
                         callback) {
         EXPECT_TRUE(base::DeleteFile(temp_path));

@@ -9,7 +9,7 @@
 #include "extensions/browser/extensions_browser_client.h"
 #include "extensions/browser/lazy_background_task_queue.h"
 #include "extensions/browser/lazy_context_id.h"
-#include "extensions/browser/service_worker_task_queue.h"
+#include "extensions/browser/service_worker/service_worker_task_queue.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/extension_id.h"
 #include "extensions/common/manifest_handlers/background_info.h"
@@ -22,10 +22,11 @@ namespace {
 #if DCHECK_IS_ON()
 // Whether the task queue is allowed to be created for OTR profile.
 bool IsOffTheRecordContextAllowed(content::BrowserContext* browser_context) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // In Guest mode on Chrome OS we want to create a task queue for OTR profile.
-  if (ExtensionsBrowserClient::Get()->IsGuestSession(browser_context))
+  if (ExtensionsBrowserClient::Get()->IsGuestSession(browser_context)) {
     return true;
+  }
 #endif
 
   // In other cases don't create a task queue for OTR profile.
@@ -53,10 +54,10 @@ ServiceWorkerTaskQueue* GetServiceWorkerTaskQueueForBrowserContext(
 // Only call this for a SW-based extension.
 ServiceWorkerTaskQueue* GetServiceWorkerTaskQueueForExtension(
     content::BrowserContext* browser_context,
-    const Extension* extension) {
-  DCHECK(BackgroundInfo::IsServiceWorkerBased(extension));
+    const Extension& extension) {
+  DCHECK(BackgroundInfo::IsServiceWorkerBased(&extension));
   return GetServiceWorkerTaskQueueForBrowserContext(
-      browser_context, IncognitoInfo::IsSplitMode(extension));
+      browser_context, IncognitoInfo::IsSplitMode(&extension));
 }
 
 // Get the ServiceWorkerTaskQueue instance for the extension ID.
@@ -74,10 +75,12 @@ ServiceWorkerTaskQueue* GetServiceWorkerTaskQueueForExtensionId(
   }
 
   const Extension* extension = ExtensionRegistry::Get(browser_context)
-                                   ->enabled_extensions()
-                                   .GetByID(extension_id);
-  DCHECK(extension);
-  return GetServiceWorkerTaskQueueForExtension(browser_context, extension);
+                                   ->GetInstalledExtension(extension_id);
+  // The extension may be null during asynchronous teardown and unloading.
+  if (!extension) {
+    return nullptr;
+  }
+  return GetServiceWorkerTaskQueueForExtension(browser_context, *extension);
 }
 
 // Use a pointer-to-member function so we can use the same logic for the
@@ -93,8 +96,9 @@ void DoTaskQueueFunction(content::BrowserContext* browser_context,
 #endif  // DCHECK_IS_ON()
 
   // This is only necessary for service worker-based extensions.
-  if (!BackgroundInfo::IsServiceWorkerBased(extension))
+  if (!BackgroundInfo::IsServiceWorkerBased(extension)) {
     return;
+  }
 
   ServiceWorkerTaskQueue* const queue =
       ServiceWorkerTaskQueue::Get(browser_context);
@@ -102,11 +106,12 @@ void DoTaskQueueFunction(content::BrowserContext* browser_context,
 
   // There is a separate task queue for the off-the-record context
   // for any extension running in split mode.
-  if (!ExtensionsBrowserClient::Get()->HasOffTheRecordContext(
+  if (browser_context->IsOffTheRecord() ||
+      !ExtensionsBrowserClient::Get()->HasOffTheRecordContext(
           browser_context) ||
       !IncognitoInfo::IsSplitMode(extension) ||
       !ExtensionsBrowserClient::Get()->IsExtensionIncognitoEnabled(
-          extension->id(), browser_context)) {
+          extension, browser_context)) {
     return;
   }
 
@@ -122,12 +127,16 @@ void DoTaskQueueFunction(content::BrowserContext* browser_context,
 
 LazyContextTaskQueue* GetTaskQueueForLazyContextId(
     const LazyContextId& context_id) {
-  if (context_id.is_for_event_page())
+  if (context_id.IsForBackgroundPage()) {
     return LazyBackgroundTaskQueue::Get(context_id.browser_context());
+  }
 
-  DCHECK(context_id.is_for_service_worker());
-  return GetServiceWorkerTaskQueueForExtensionId(context_id.browser_context(),
-                                                 context_id.extension_id());
+  if (context_id.IsForServiceWorker()) {
+    return GetServiceWorkerTaskQueueForExtensionId(context_id.browser_context(),
+                                                   context_id.extension_id());
+  }
+
+  return nullptr;
 }
 
 void ActivateTaskQueueForExtension(content::BrowserContext* browser_context,

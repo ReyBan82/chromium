@@ -9,6 +9,12 @@ mojo.internal.kArrayHeaderSize = 8;
 mojo.internal.kStructHeaderSize = 8;
 
 /** @const {number} */
+mojo.internal.kStructHeaderSizeOffset = 0;
+
+/** @const {number} */
+mojo.internal.kStructHeaderVersionOffset = 4;
+
+/** @const {number} */
 mojo.internal.kUnionHeaderSize = 8;
 
 /** @const {number} */
@@ -45,12 +51,137 @@ mojo.internal.kHostLittleEndian = (function() {
 })();
 
 /**
+ * A lightweight JavaScript wrapper replicating the DataView API over a
+ * DataView. Flattening offsets to the root DataView avoids heavy native
+ * v8::internal::JSArrayBufferView C++ object allocations.
+ *
+ * This class is intended to work as a mirror to the actual DataView, to
+ * reduce the amount of code change.
+ *
+ * Each instance of a DataViewWrapper will reference a native DataView as
+ * well as its own offset within that DataView.
+ *
+ * If a DataView is passed in, it will use that as the base DataView.
+ *
+ * If another instance of DataViewWrapper is passed in, it would reference
+ * the underlying native DataView and track its own offset.
+ */
+mojo.internal.DataViewWrapper = class {
+  /**
+   * @param {!DataView|!mojo.internal.DataViewWrapper|!ArrayBuffer} view
+   * @param {number=} byteOffset
+   */
+  constructor(view, byteOffset = 0) {
+    /** @private {!DataView} */
+    this.dataView_;
+    /** @type {number} */
+    this.byteOffset;
+
+    if (view instanceof mojo.internal.DataViewWrapper) {
+      this.dataView_ = view.dataView_;
+      this.byteOffset = view.byteOffset + byteOffset;
+    } else if (view instanceof DataView) {
+      // Flatten to root DataView over view.buffer so this.byteOffset is
+      // absolute.
+      this.dataView_ = (view.byteOffset === 0 &&
+                        view.byteLength === view.buffer.byteLength) ?
+          view :
+          new DataView(view.buffer);
+      this.byteOffset = view.byteOffset + byteOffset;
+    } else if (view instanceof ArrayBuffer) {
+      this.dataView_ = new DataView(view);
+      this.byteOffset = byteOffset;
+    } else {
+      throw new Error(
+          'DataViewWrapper constructor requires a DataViewWrapper, DataView,' +
+          ' or ArrayBuffer instance');
+    }
+  }
+
+  get buffer() {
+    return this.dataView_.buffer;
+  }
+
+  getUint8(offset) {
+    return this.dataView_.getUint8(this.byteOffset + offset);
+  }
+
+  getInt8(offset) {
+    return this.dataView_.getInt8(this.byteOffset + offset);
+  }
+
+  getUint16(offset, littleEndian) {
+    return this.dataView_.getUint16(this.byteOffset + offset, littleEndian);
+  }
+
+  getInt16(offset, littleEndian) {
+    return this.dataView_.getInt16(this.byteOffset + offset, littleEndian);
+  }
+
+  getUint32(offset, littleEndian) {
+    return this.dataView_.getUint32(this.byteOffset + offset, littleEndian);
+  }
+
+  getInt32(offset, littleEndian) {
+    return this.dataView_.getInt32(this.byteOffset + offset, littleEndian);
+  }
+
+  getFloat32(offset, littleEndian) {
+    return this.dataView_.getFloat32(this.byteOffset + offset, littleEndian);
+  }
+
+  getFloat64(offset, littleEndian) {
+    return this.dataView_.getFloat64(this.byteOffset + offset, littleEndian);
+  }
+
+  setUint8(offset, value) {
+    this.dataView_.setUint8(this.byteOffset + offset, value);
+  }
+
+  setInt8(offset, value) {
+    this.dataView_.setInt8(this.byteOffset + offset, value);
+  }
+
+  setUint16(offset, value, littleEndian) {
+    this.dataView_.setUint16(this.byteOffset + offset, value, littleEndian);
+  }
+
+  setInt16(offset, value, littleEndian) {
+    this.dataView_.setInt16(this.byteOffset + offset, value, littleEndian);
+  }
+
+  setUint32(offset, value, littleEndian) {
+    this.dataView_.setUint32(this.byteOffset + offset, value, littleEndian);
+  }
+
+  setInt32(offset, value, littleEndian) {
+    this.dataView_.setInt32(this.byteOffset + offset, value, littleEndian);
+  }
+
+  setFloat32(offset, value, littleEndian) {
+    this.dataView_.setFloat32(this.byteOffset + offset, value, littleEndian);
+  }
+
+  setFloat64(offset, value, littleEndian) {
+    this.dataView_.setFloat64(this.byteOffset + offset, value, littleEndian);
+  }
+};
+
+/**
  * @param {*} x
  * @return {boolean}
  */
 mojo.internal.isNullOrUndefined = function(x) {
   return x === null || x === undefined;
 };
+
+/**
+ * @param {*} x
+ * @return {boolean}
+ */
+mojo.internal.isNullableValueKindField = function(x) {
+  return typeof x.nullableValueKindProperties !== 'undefined';
+}
 
 /**
  * @param {number} size
@@ -62,7 +193,7 @@ mojo.internal.align = function(size, alignment) {
 };
 
 /**
- * @param {!DataView} dataView
+ * @param {!DataView|!mojo.internal.DataViewWrapper} dataView
  * @param {number} byteOffset
  * @param {number|bigint} value
  */
@@ -86,7 +217,7 @@ mojo.internal.setInt64 = function(dataView, byteOffset, value) {
 };
 
 /**
- * @param {!DataView} dataView
+ * @param {!DataView|!mojo.internal.DataViewWrapper} dataView
  * @param {number} byteOffset
  * @param {number|bigint} value
  */
@@ -110,7 +241,7 @@ mojo.internal.setUint64 = function(dataView, byteOffset, value) {
 };
 
 /**
- * @param {!DataView} dataView
+ * @param {!DataView|!mojo.internal.DataViewWrapper} dataView
  * @param {number} byteOffset
  * @return {bigint}
  */
@@ -127,7 +258,7 @@ mojo.internal.getInt64 = function(dataView, byteOffset) {
 };
 
 /**
- * @param {!DataView} dataView
+ * @param {!DataView|!mojo.internal.DataViewWrapper} dataView
  * @param {number} byteOffset
  * @return {bigint}
  */
@@ -152,6 +283,36 @@ mojo.internal.getUint64 = function(dataView, byteOffset) {
 mojo.internal.MessageDimensions;
 
 /**
+ * Gets the field in mojo type for a given value. Note that this method
+ * could be relatively expensive if the value is typemapped and its field
+ * needs to be converted to mojo types.
+ *
+ * @param {!*} value
+ * @param {!mojo.internal.StructFieldSpec} fieldSpec
+ * @returns
+ */
+mojo.internal.getMojoFieldValue = function(value, fieldSpec) {
+  if (!!fieldSpec.fieldGetter) {
+    return fieldSpec.fieldGetter(value);
+  }
+
+  if (value && mojo.internal.isNullableValueKindField(fieldSpec)) {
+    const props = fieldSpec.nullableValueKindProperties;
+    const hasValue =
+        !mojo.internal.isNullOrUndefined(value[props.originalFieldName]);
+    if (props.isPrimary) {
+      return hasValue;
+    } else if (hasValue) {
+      return value[props.originalFieldName];
+    } else {
+      // Use `defaultValue` to cover the enum case.
+      return fieldSpec.defaultValue;
+    }
+  }
+  return value[fieldSpec.name];
+};
+
+/**
  * This computes the total amount of buffer space required to hold a struct
  * value and all its fields, including indirect objects like arrays, structs,
  * and nullable unions.
@@ -164,7 +325,7 @@ mojo.internal.computeStructDimensions = function(structSpec, value) {
   let size = structSpec.packedSize;
   let numInterfaceIds = 0;
   for (const field of structSpec.fields) {
-    let fieldValue = value[field.name];
+    let fieldValue = mojo.internal.getMojoFieldValue(value, field);
     if (mojo.internal.isNullOrUndefined(fieldValue)) {
       fieldValue = field.defaultValue;
     }
@@ -176,7 +337,11 @@ mojo.internal.computeStructDimensions = function(structSpec, value) {
       const fieldDimensions =
           field.type.$.computeDimensions(fieldValue, field.nullable);
       size += mojo.internal.align(fieldDimensions.size, 8);
-      numInterfaceIds += fieldDimensions.numInterfaceIds;
+      // Only update numInterfaceIds if field.type.$.computeDimensions returns a
+      // numInterfaceIds
+      if (fieldDimensions.numInterfaceIds) {
+        numInterfaceIds += fieldDimensions.numInterfaceIds;
+      }
     } else if (field.type.$.hasInterfaceId) {
       numInterfaceIds++;
     }
@@ -216,7 +381,11 @@ mojo.internal.computeUnionDimensions = function(unionSpec, nullable, value) {
       const fieldDimensions =
           field['type'].$.computeDimensions(fieldValue, nullable);
       size += mojo.internal.align(fieldDimensions.size, 8);
-      numInterfaceIds += fieldDimensions.numInterfaceIds;
+      // Only update numInterfaceIds if field['type'].$.computeDimensions
+      // returns a numInterfaceIds
+      if (fieldDimensions.numInterfaceIds) {
+        numInterfaceIds += fieldDimensions.numInterfaceIds;
+      }
     } else if (field['type'].$.hasInterfaceId) {
       numInterfaceIds++;
     }
@@ -232,13 +401,37 @@ mojo.internal.computeUnionDimensions = function(unionSpec, nullable, value) {
  */
 mojo.internal.computeInlineArraySize = function(arraySpec, value) {
   if (arraySpec.elementType === mojo.internal.Bool) {
-    return mojo.internal.kArrayHeaderSize + (value.length + 7) >> 3;
+    return mojo.internal.kArrayHeaderSize +
+        mojo.internal.computeHasValueBitfieldSize(arraySpec, value.length) +
+        ((value.length + 7) >> 3);
   } else {
     return mojo.internal.kArrayHeaderSize +
+        mojo.internal.computeHasValueBitfieldSize(arraySpec, value.length) +
         value.length *
         arraySpec.elementType.$.arrayElementSize(!!arraySpec.elementNullable);
   }
 };
+
+/**
+ * @param {!mojo.internal.ArraySpec} arraySpec
+ * @param {number} length
+ * @return {number} the number of bytes needed for the an array's has-value
+ *   bitfield. If the arraySpec does not require a has-value bitfield, this
+ *   method will return 0.
+ */
+mojo.internal.computeHasValueBitfieldSize = function(arraySpec, length) {
+    const isNullableValueType = !!arraySpec.elementNullable &&
+        !!arraySpec.elementType.$.isValueType;
+    if (!isNullableValueType) {
+      return 0;
+    }
+    const element_type_bytes =
+        arraySpec.elementType.$.arrayElementSize(/* nullable= */ true);
+    const element_type_bits = element_type_bytes * 8;
+    const needed_bits = length + element_type_bits - 1;
+    // >> 0 to force integer arithmetic.
+    return  ((needed_bits/element_type_bits) >> 0)  * element_type_bytes;
+}
 
 /**
  * @param {!mojo.internal.ArraySpec} arraySpec
@@ -309,6 +502,9 @@ mojo.internal.Message = class {
     /** @public {!Array<MojoHandle>} */
     this.handles = [];
 
+    // Refer to:
+    //   //mojo/public/cpp/bindings/lib/message_internal.h
+    // For message header format.
     const header = new DataView(this.buffer);
     header.setUint32(0, headerSize, mojo.internal.kHostLittleEndian);
     header.setUint32(4, version, mojo.internal.kHostLittleEndian);
@@ -319,11 +515,15 @@ mojo.internal.Message = class {
     if (version >= 1) {
       mojo.internal.setUint64(header, 24, requestId);
       if (version >= 2) {
+        // Payload offset from this byte.
         mojo.internal.setUint64(header, 32, BigInt(16));
+        // Interface IDs array offset from this byte.
         mojo.internal.setUint64(header, 40, BigInt(headerWithPayloadSize - 40));
+        // Interface IDs array num_bytes.
         header.setUint32(
             headerWithPayloadSize, interfaceIdsSize,
             mojo.internal.kHostLittleEndian);
+        // Interface IDs array num_elements.
         header.setUint32(
             headerWithPayloadSize + 4, dimensions.numInterfaceIds || 0,
             mojo.internal.kHostLittleEndian);
@@ -485,8 +685,10 @@ mojo.internal.Encoder = class {
 
     arrayEncoder.encodeUint32(0, arraySize);
     arrayEncoder.encodeUint32(4, value.length);
+    this.maybeEncodeHasValueBitfield(arraySpec, arrayEncoder, 8, value);
 
-    let byteOffset = 8;
+    let byteOffset = 8 +
+        mojo.internal.computeHasValueBitfieldSize(arraySpec, value.length);
     if (arraySpec.elementType === mojo.internal.Bool) {
       let bitOffset = 0;
       for (const e of value) {
@@ -506,11 +708,43 @@ mojo.internal.Encoder = class {
                 'non-nullable elements');
           }
           arraySpec.elementType.$.encodeNull(arrayEncoder, byteOffset);
+        } else {
+          arraySpec.elementType.$.encode(
+              e, arrayEncoder, byteOffset, 0, !!arraySpec.elementNullable);
         }
-        arraySpec.elementType.$.encode(
-            e, arrayEncoder, byteOffset, 0, !!arraySpec.elementNullable);
         byteOffset += arraySpec.elementType.$.arrayElementSize(
             !!arraySpec.elementNullable);
+      }
+    }
+  }
+
+  /**
+   * Optionally writes a has-value bitfield to the encoder if necessary. If the
+   * arraySpec does not require a has-value bitfield, this method call is
+   * noop.
+   * @param {!mojo.internal.ArraySpec} arraySpec
+   * @param {mojo.internal.Encoder} arrayEncoder
+   * @param {number} startOffset
+   * @param {!Array|!Uint8Array} value
+   */
+  maybeEncodeHasValueBitfield(arraySpec, arrayEncoder, startOffset, value) {
+    if (!arraySpec.elementNullable ||
+        !arraySpec.elementType.$.isValueType) {
+      return;
+    }
+
+    let bitOffset = 0;
+    let byteOffset = startOffset;
+    for (const e of value) {
+      if (e === null || e === undefined) {
+        arrayEncoder.encodeBool(byteOffset, bitOffset, false);
+      } else {
+        arrayEncoder.encodeBool(byteOffset, bitOffset, true);
+      }
+      bitOffset++;
+      if (bitOffset == 8) {
+        bitOffset = 0;
+        byteOffset++;
       }
     }
   }
@@ -541,7 +775,7 @@ mojo.internal.Encoder = class {
     mapEncoder.encodeArray(
         {
           elementType: mapSpec.valueType,
-          elementNullable: mapSpec.valueNullable
+          elementNullable: mapSpec.valueNullable,
         },
         16, values);
   }
@@ -561,7 +795,7 @@ mojo.internal.Encoder = class {
 
   /**
    * @param {!mojo.internal.StructSpec} structSpec
-   * @param {!Object} value
+   * @param {!*} value
    */
   encodeStructInline(structSpec, value) {
     const versions = structSpec.versions;
@@ -575,8 +809,15 @@ mojo.internal.Encoder = class {
                             field.packedBitOffset, field.nullable);
       };
 
-      if (value && !mojo.internal.isNullOrUndefined(value[field.name])) {
-        encodeStructField(value[field.name]);
+      // Pre-emptively read the field value because typemapping might require
+      // us to convert the entire field to the mojo type.
+      const fieldValue = mojo.internal.isNullOrUndefined(value) ?
+          undefined :
+          mojo.internal.getMojoFieldValue(value, field);
+
+      if (!mojo.internal.isNullOrUndefined(value) &&
+          !mojo.internal.isNullOrUndefined(fieldValue)) {
+        encodeStructField(fieldValue);
         continue;
       }
 
@@ -591,8 +832,8 @@ mojo.internal.Encoder = class {
       }
 
       throw new Error(
-        structSpec.name + ' missing value for non-nullable ' +
-        'field "' + field.name + '"');
+          structSpec.name + ' missing value for non-nullable ' +
+          'field "' + field.name + `", got: "${fieldValue}"...`);
     }
   }
 
@@ -660,7 +901,7 @@ mojo.internal.Encoder.textEncoder = null;
  */
 mojo.internal.Decoder = class {
   /**
-   * @param {!DataView} data
+   * @param {!mojo.internal.DataViewWrapper|!DataView|!ArrayBuffer} data
    * @param {!Array<MojoHandle>} handles
    * @param {?mojo.internal.MessageContext=} context
    */
@@ -668,8 +909,10 @@ mojo.internal.Decoder = class {
     /** @private {?mojo.internal.MessageContext} */
     this.context_ = context;
 
-    /** @private {!DataView} */
-    this.data_ = data;
+    /** @private {!mojo.internal.DataViewWrapper} */
+    this.data_ = (data instanceof mojo.internal.DataViewWrapper) ?
+        data :
+        new mojo.internal.DataViewWrapper(data);
 
     /** @private {!Array<MojoHandle>} */
     this.handles_ = handles;
@@ -729,14 +972,28 @@ mojo.internal.Decoder = class {
   }
 
   decodeString(offset) {
-    const data = this.decodeArray({elementType: mojo.internal.Uint8}, offset);
-    if (!data)
+    // Absolute from the underlying data buffer, not the current data view.
+    const arrayAbsoluteOffset = this.decodeOffset(offset);
+    if (!arrayAbsoluteOffset)
       return null;
 
     if (!mojo.internal.Decoder.textDecoder)
       mojo.internal.Decoder.textDecoder = new TextDecoder('utf-8');
-    return mojo.internal.Decoder.textDecoder.decode(
-        new Uint8Array(data).buffer);
+
+    // Array header is [num_bytes, num_elements]. We want to grab the number
+    // of elements. decodeUint32 is a relative method, so we have to translate
+    // absolute back to relative.
+    const numElements =
+        this.decodeUint32((arrayAbsoluteOffset - this.data_.byteOffset) + 4);
+    // Fast path.
+    if (numElements === 0) {
+      return '';
+    }
+    // 8 bytes accounts for the header.
+    const arrayDataAbsoluteOffset = arrayAbsoluteOffset + 8;
+
+    return mojo.internal.Decoder.textDecoder.decode(new Uint8Array(
+        this.data_.buffer, arrayDataAbsoluteOffset, numElements));
   }
 
   decodeOffset(offset) {
@@ -758,25 +1015,56 @@ mojo.internal.Decoder = class {
       return null;
 
     const arrayDecoder = new mojo.internal.Decoder(
-        new DataView(this.data_.buffer, arrayOffset), this.handles_,
-        this.context_);
+        new mojo.internal.DataViewWrapper(
+            this.data_, arrayOffset - this.data_.byteOffset),
+        this.handles_, this.context_);
 
     const numElements = arrayDecoder.decodeUint32(4);
     if (!numElements)
       return [];
 
-    const result = [];
+    // Nullable primitives use a bitfield to represent whether a value at a
+    // certain index is set. This is not needed for non-primitive or
+    // non-nullable types.
+    const isNullableValueType = !!arraySpec.elementNullable &&
+        arraySpec.elementType.$.isValueType;
+    const elementHasValue = isNullableValueType ? new Array(numElements) : null;
+
+    if (isNullableValueType) {
+      let bitfieldByte = 8;
+      let bitfieldBit = 0;
+
+      for (let i = 0; i < numElements; ++i) {
+        elementHasValue[i] = arrayDecoder.decodeBool(bitfieldByte, bitfieldBit);
+        bitfieldBit++;
+        if (bitfieldBit === 8) {
+          bitfieldBit = 0;
+          bitfieldByte++;
+        }
+      }
+    }
+
+    let byteOffset = 8 +
+        mojo.internal.computeHasValueBitfieldSize(arraySpec, numElements);
+    const result = new Array(numElements);
     if (arraySpec.elementType === mojo.internal.Bool) {
       for (let i = 0; i < numElements; ++i)
-        result.push(arrayDecoder.decodeBool(8 + (i >> 3), i % 8));
+        if (isNullableValueType && !elementHasValue[i]) {
+          result[i] = null;
+        } else {
+          result[i] = arrayDecoder.decodeBool(byteOffset + (i >> 3), i % 8);
+        }
     } else {
-      let byteOffset = 8;
       for (let i = 0; i < numElements; ++i) {
-        const element = arraySpec.elementType.$.decode(
+        if (isNullableValueType && !elementHasValue[i]) {
+          result[i] = null;
+        } else {
+          const element = arraySpec.elementType.$.decode(
             arrayDecoder, byteOffset, 0, !!arraySpec.elementNullable);
-        if (element === null && !arraySpec.elementNullable)
-          throw new Error('Received unexpected array element');
-        result.push(element);
+          if (element === null && !arraySpec.elementNullable)
+            throw new Error('Received unexpected array element');
+          result[i] = element;
+        }
         byteOffset += arraySpec.elementType.$.arrayElementSize(
             !!arraySpec.elementNullable);
       }
@@ -794,8 +1082,9 @@ mojo.internal.Decoder = class {
       return null;
 
     const mapDecoder = new mojo.internal.Decoder(
-        new DataView(this.data_.buffer, mapOffset), this.handles_,
-        this.context_);
+        new mojo.internal.DataViewWrapper(
+            this.data_, mapOffset - this.data_.byteOffset),
+        this.handles_, this.context_);
     const mapStructSize = mapDecoder.decodeUint32(0);
     const mapStructVersion = mapDecoder.decodeUint32(4);
     if (mapStructSize != mojo.internal.kMapDataSize || mapStructVersion != 0)
@@ -834,8 +1123,9 @@ mojo.internal.Decoder = class {
       return null;
 
     const decoder = new mojo.internal.Decoder(
-        new DataView(this.data_.buffer, structOffset), this.handles_,
-        this.context_);
+        new mojo.internal.DataViewWrapper(
+            this.data_, structOffset - this.data_.byteOffset),
+        this.handles_, this.context_);
     return decoder.decodeStructInline(structSpec);
   }
 
@@ -870,12 +1160,40 @@ mojo.internal.Decoder = class {
   }
 
   /**
+   * Wraps a data buffer into a data view that can decode each field as needed.
+   * @param {!mojo.internal.StructSpec} structSpec
+   * @param {!number} byteOffset
+   * @param {?} dataViewType
+   * @returns {*} instance of dataViewType
+   */
+  wrapStructInDataView(structSpec, byteOffset, dataViewType) {
+    const structOffset = this.decodeOffset(byteOffset);
+    if (!structOffset)
+      return null;
+
+    const decoder = new mojo.internal.Decoder(
+        new mojo.internal.DataViewWrapper(
+            this.data_, structOffset - this.data_.byteOffset),
+        this.handles_, this.context_);
+
+    const size = decoder.decodeUint32(mojo.internal.kStructHeaderSizeOffset);
+    const version =
+        decoder.decodeUint32(mojo.internal.kStructHeaderVersionOffset);
+    if (!decoder.isStructHeaderValid(structSpec, size, version)) {
+      throw new Error(
+          `Received ${structSpec.name} of invalid size (${size}) and/or ` +
+          `version (${version})`);
+    }
+    return new dataViewType(decoder, version, structSpec.fields);
+  }
+
+  /**
    * @param {!mojo.internal.StructSpec} structSpec
    * @return {!Object}
    */
   decodeStructInline(structSpec) {
-    const size = this.decodeUint32(0);
-    const version = this.decodeUint32(4);
+    const size = this.decodeUint32(mojo.internal.kStructHeaderSizeOffset);
+    const version = this.decodeUint32(mojo.internal.kStructHeaderVersionOffset);
     if (!this.isStructHeaderValid(structSpec, size, version)) {
       throw new Error(
           `Received ${structSpec.name} of invalid size (${size}) and/or ` +
@@ -883,22 +1201,83 @@ mojo.internal.Decoder = class {
     }
 
     const result = {};
-    for (const field of structSpec.fields) {
-      const byteOffset = mojo.internal.kStructHeaderSize + field.packedOffset;
-      if (field.minVersion > version) {
-        result[field.name] = field.defaultValue;
-        continue;
+    for (let i = 0; i < structSpec.fields.length; ++i) {
+      const field = structSpec.fields[i];
+      if (mojo.internal.isNullableValueKindField(field)) {
+        const props = field.nullableValueKindProperties;
+        // We only need to decode the two nullable value fields once. Use the
+        // primary.
+        if (props.isPrimary) {
+          const flagFieldSpec = field;
+          result[props.originalFieldName] = this.decodeStructNullableValueField(
+              flagFieldSpec, structSpec.fields, version);
+        } else {
+          // Skip deserializing for non-primary.
+          continue;
+        }
+      } else {
+        result[field.name] = this.decodeStructField(field, version);
       }
-      const value = field.type.$.decode(
-          this, byteOffset, field.packedBitOffset, !!field.nullable);
-      if (value === null && !field.nullable) {
-        throw new Error(
-            'Received ' + structSpec.name + ' with invalid null field ' +
-            '"' + field.name + '"')
-      }
-      result[field.name] = value;
     }
+
     return result;
+  }
+
+  /**
+   * Decodes a struct field for a given version
+   * @param {!mojo.internal.StructFieldSpec} structField
+   * @param {!number} version
+   * @return {*}
+   */
+  decodeStructField(structField, version) {
+    if (structField.minVersion > version) {
+      return structField.defaultValue;
+    }
+
+    const byteOffset =
+        mojo.internal.kStructHeaderSize + structField.packedOffset;
+    const value = structField.type.$.decode(
+        this, byteOffset, structField.packedBitOffset, !!structField.nullable);
+
+    if (value === null && !structField.nullable) {
+      throw new Error(
+          `Received ${structField.name} with invalid null field ` +
+          `"${structField.name}"`);
+    }
+    return value;
+  }
+
+  /**
+   * Decodes a struct nullable value field for a given version
+   * Nullable value kinds are encoded as two fields on the wire. One for
+   * flag and one for value. decodeStructField will decode both then
+   * combine them for the correct result. The two fields are linked
+   * together by the field properties.
+   * @param {!mojo.internal.StructFieldSpec} flagFieldSpec
+   * @param {!Array<mojo.internal.StructFieldSpec>} fieldSpecs the full list
+   * of specs are needed in order to find the associated value field spec.
+   * @param {!number} version
+   * @return {*}
+   */
+  decodeStructNullableValueField(flagFieldSpec, fieldSpecs, version) {
+    if (flagFieldSpec.minVersion > version) {
+      return null;
+    }
+
+    const flagValue = this.decodeStructField(flagFieldSpec, version);
+    if (!flagValue) {
+      return null;
+    }
+
+    const props = flagFieldSpec.nullableValueKindProperties;
+    const valueFieldSpec =
+        fieldSpecs.find(spec => spec.name === props.linkedValueFieldName);
+    if (!valueFieldSpec) {
+      throw new Error(
+          'could not find the expected value field spec: ' +
+          props.linkedValueFieldName);
+    }
+    return this.decodeStructField(valueFieldSpec, version);
   }
 
   /**
@@ -911,8 +1290,9 @@ mojo.internal.Decoder = class {
       return null;
 
     const decoder = new mojo.internal.Decoder(
-        new DataView(this.data_.buffer, unionOffset), this.handles_,
-        this.context_);
+        new mojo.internal.DataViewWrapper(
+            this.data_, unionOffset - this.data_.byteOffset),
+        this.handles_, this.context_);
     return decoder.decodeUnion(unionSpec, 0);
   }
 
@@ -983,8 +1363,10 @@ mojo.internal.Decoder = class {
         numInterfaceIds);
     const index = this.decodeUint32(offset);
     const interfaceId = interfaceIds[index];
-    return new mojo.internal.interfaceSupport.Endpoint(
+    const endpoint = new mojo.internal.interfaceSupport.Endpoint(
         receivingEndpoint.router, interfaceId);
+    receivingEndpoint.router.addEndpoint(endpoint, interfaceId);
+    return endpoint;
   }
 };
 
@@ -1004,7 +1386,7 @@ mojo.internal.Decoder.textDecoder = null;
 mojo.internal.MessageHeader;
 
 /**
- * @param {!DataView} data
+ * @param {!mojo.internal.DataViewWrapper} data
  * @return {!mojo.internal.MessageHeader}
  */
 mojo.internal.deserializeMessageHeader = function(data) {
@@ -1014,7 +1396,8 @@ mojo.internal.deserializeMessageHeader = function(data) {
        headerSize != mojo.internal.kMessageV0HeaderSize) ||
       (headerVersion == 1 &&
        headerSize != mojo.internal.kMessageV1HeaderSize) ||
-      headerVersion > 2) {
+      (headerVersion >= 2 &&
+       headerSize < mojo.internal.kMessageV2HeaderSize)) {
     throw new Error('Received invalid message header');
   }
   return {
@@ -1032,7 +1415,7 @@ mojo.internal.deserializeMessageHeader = function(data) {
 /**
  * @typedef {{
  *   encode: function(*, !mojo.internal.Encoder, number, number, boolean),
- *   encodeNull: ((function(!mojo.internal.Encoder, number))|undefined),
+ *   encodeNull: function(!mojo.internal.Encoder, number),
  *   decode: function(!mojo.internal.Decoder, number, number, boolean):*,
  *   computeDimensions:
  *       ((function(*, boolean):!mojo.internal.MessageDimensions)|undefined),
@@ -1042,6 +1425,7 @@ mojo.internal.deserializeMessageHeader = function(data) {
  *   arraySpec: (!mojo.internal.ArraySpec|undefined),
  *   mapSpec: (!mojo.internal.MapSpec|undefined),
  *   structSpec: (!mojo.internal.StructSpec|undefined),
+ *   isValueType: boolean
  * }}
  */
 mojo.internal.MojomTypeInfo;
@@ -1070,7 +1454,26 @@ mojo.internal.ArraySpec;
  */
 mojo.internal.MapSpec;
 
+// Use a @record, otherwise Closure Compiler will mangle the property names and
+// cause runtime errors.
+/** @record */
+mojo.internal.NullableValueKindProperties = class {
+  constructor() {
+    /** @export { boolean } */
+    this.isPrimary;
+    /** @export { (string|undefined) } */
+    this.linkedValueFieldName;
+    /** @export { string } */
+    this.originalFieldName;
+  }
+};
+
 /**
+ * Getter is a function that returns the value of the field in mojo format. Its
+ * only provided parameter should be a non-nullable struct instance. If a getter
+ * method is not provided, the field will be retrieved through the field name
+ * on the struct instance.
+ *
  * @typedef {{
  *   name: string,
  *   packedOffset: number,
@@ -1079,7 +1482,9 @@ mojo.internal.MapSpec;
  *   defaultValue: *,
  *   nullable: boolean,
  *   minVersion: number,
- * }}
+ *   nullableValueKindProperties:
+ *      (mojo.internal.NullableValueKindProperties|undefined),
+ *   fieldGetter: ((function(!*): *)|undefined)}}
  */
 mojo.internal.StructFieldSpec;
 
@@ -1127,10 +1532,17 @@ mojo.internal.Bool = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeBool(byteOffset, bitOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      throw new Error('encoding bool null from type is not implemented');
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeBool(byteOffset, bitOffset);
     },
+    // Bool has specialized serialize/deserialize logic to bit pack. However,
+    // memory allocation is still a single byte.
+    arrayElementSize: nullable => 1,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1143,11 +1555,15 @@ mojo.internal.Int8 = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeInt8(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeInt8(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeInt8(byteOffset);
     },
     arrayElementSize: nullable => 1,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1160,11 +1576,15 @@ mojo.internal.Uint8 = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeUint8(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeUint8(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeUint8(byteOffset);
     },
     arrayElementSize: nullable => 1,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1177,11 +1597,15 @@ mojo.internal.Int16 = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeInt16(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeInt16(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeInt16(byteOffset);
     },
     arrayElementSize: nullable => 2,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1194,11 +1618,15 @@ mojo.internal.Uint16 = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeUint16(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeUint16(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeUint16(byteOffset);
     },
     arrayElementSize: nullable => 2,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1211,11 +1639,15 @@ mojo.internal.Int32 = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeInt32(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeInt32(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeInt32(byteOffset);
     },
     arrayElementSize: nullable => 4,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1228,11 +1660,15 @@ mojo.internal.Uint32 = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeUint32(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeUint32(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeUint32(byteOffset);
     },
     arrayElementSize: nullable => 4,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1245,11 +1681,16 @@ mojo.internal.Int64 = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeInt64(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeInt64(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeInt64(byteOffset);
     },
     arrayElementSize: nullable => 8,
-    isValidObjectKeyType: true,
+    // TS Compiler does not allow Object maps to have bigint keys.
+    isValidObjectKeyType: false,
+    isValueType: true,
   },
 };
 
@@ -1262,11 +1703,16 @@ mojo.internal.Uint64 = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeUint64(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeUint64(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeUint64(byteOffset);
     },
     arrayElementSize: nullable => 8,
-    isValidObjectKeyType: true,
+    // TS Compiler does not allow Object maps to have bigint keys.
+    isValidObjectKeyType: false,
+    isValueType: true,
   },
 };
 
@@ -1279,11 +1725,15 @@ mojo.internal.Float = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeFloat(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeFloat(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeFloat(byteOffset);
     },
     arrayElementSize: nullable => 4,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1296,11 +1746,15 @@ mojo.internal.Double = {
     encode: function(value, encoder, byteOffset, bitOffset, nullable) {
       encoder.encodeDouble(byteOffset, value);
     },
+    encodeNull: function(encoder, byteOffset) {
+      encoder.encodeDouble(byteOffset, 0);
+    },
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeDouble(byteOffset);
     },
     arrayElementSize: nullable => 8,
     isValidObjectKeyType: true,
+    isValueType: true,
   },
 };
 
@@ -1321,6 +1775,7 @@ mojo.internal.Handle = {
     },
     arrayElementSize: nullable => 4,
     isValidObjectKeyType: false,
+    isValueType: false,
   },
 };
 
@@ -1345,6 +1800,7 @@ mojo.internal.String = {
     },
     arrayElementSize: nullable => 8,
     isValidObjectKeyType: true,
+    isValueType: false,
   }
 };
 
@@ -1375,6 +1831,7 @@ mojo.internal.Array = function(elementType, elementNullable) {
       },
       arrayElementSize: nullable => 8,
       isValidObjectKeyType: false,
+      isValueType: false,
     },
   };
 };
@@ -1410,9 +1867,13 @@ mojo.internal.Map = function(keyType, valueType, valueNullable) {
         const values =
             (value.constructor.name == 'Map') ? Array.from(value.values())
                                               : keys.map(k => value[k]);
-
+        // Size of map is equal to kMapDataSize + 8-byte aligned array for keys
+        // + (not necessarily 8-byte aligned) array for values.
         const size = mojo.internal.kMapDataSize +
-            mojo.internal.computeTotalArraySize({elementType: keyType}, keys) +
+            mojo.internal.align(
+                mojo.internal.computeTotalArraySize(
+                    {elementType: keyType}, keys),
+              8) +
             mojo.internal.computeTotalArraySize(
                 {
                   elementType: valueType,
@@ -1423,6 +1884,7 @@ mojo.internal.Map = function(keyType, valueType, valueNullable) {
       },
       arrayElementSize: nullable => 8,
       isValidObjectKeyType: false,
+      isValueType: false,
     },
   };
 };
@@ -1438,6 +1900,7 @@ mojo.internal.Enum = function() {
         // TODO: Do some sender-side error checking on the input value.
         encoder.encodeUint32(byteOffset, value);
       },
+      encodeNull: function(encoder, byteOffset) {},
       decode: function(decoder, byteOffset, bitOffset, nullable) {
         const value = decoder.decodeInt32(byteOffset);
         // TODO: validate
@@ -1445,6 +1908,7 @@ mojo.internal.Enum = function() {
       },
       arrayElementSize: nullable => 4,
       isValidObjectKeyType: true,
+      isValueType: true,
     },
   };
 };
@@ -1457,12 +1921,16 @@ mojo.internal.Enum = function() {
  * @param {*} defaultValue
  * @param {boolean} nullable
  * @param {number=} minVersion
+ * @param {mojo.internal.NullableValueKindProperties=}
+     nullableValueKindProperties
+ * @param {(function(*): *)=} fieldGetter
  * @return {!mojo.internal.StructFieldSpec}
  * @export
  */
 mojo.internal.StructField = function(
     name, packedOffset, packedBitOffset, type, defaultValue, nullable,
-    minVersion = 0) {
+    minVersion = 0, nullableValueKindProperties = undefined,
+    fieldGetter = undefined) {
   return {
     name: name,
     packedOffset: packedOffset,
@@ -1471,6 +1939,8 @@ mojo.internal.StructField = function(
     defaultValue: defaultValue,
     nullable: nullable,
     minVersion: minVersion,
+    nullableValueKindProperties: nullableValueKindProperties,
+    fieldGetter: fieldGetter,
   };
 };
 
@@ -1494,6 +1964,43 @@ mojo.internal.Struct = function(
     encodeNull: function(encoder, byteOffset) {},
     decode: function(decoder, byteOffset, bitOffset, nullable) {
       return decoder.decodeStruct(structSpec, byteOffset);
+    },
+    computeDimensions: function(value, nullable) {
+      return mojo.internal.computeStructDimensions(structSpec, value);
+    },
+    arrayElementSize: nullable => 8,
+    isValidObjectKeyType: false,
+  };
+};
+
+/**
+ * Represents a struct that has been typemapped.
+ * @param {!Object} objectToBlessAsType
+ * @param {string} name
+ * @param {!typeof Object} dataViewType
+ * @param {*} converter
+ * @param {!Array<!mojo.internal.StructFieldSpec>} fields
+ * @param {Array<!Array<number>>=} versionData
+ * @export
+ */
+mojo.internal.TypemappedStruct = function(
+    objectToBlessAsType, name, dataViewType, converter, fields, versionData) {
+  const versions = versionData.map(v => ({version: v[0], packedSize: v[1]}));
+  const packedSize = versions[versions.length - 1].packedSize;
+  const structSpec = {name, packedSize, fields, versions};
+  objectToBlessAsType.$ = {
+    structSpec: structSpec,
+    encode: function(value, encoder, byteOffset, bitOffset, nullable) {
+      encoder.encodeStruct(structSpec, byteOffset, value);
+    },
+    encodeNull: function(encoder, byteOffset) {},
+    decode: function(decoder, byteOffset, bitOffset, nullable) {
+      const view =
+          decoder.wrapStructInDataView(structSpec, byteOffset, dataViewType);
+      // Property access here is used to prevent Closure Compiler from mangling
+      // the method name.
+      return mojo.internal.isNullOrUndefined(view) ? null :
+                                                     converter['convert'](view);
     },
     computeDimensions: function(value, nullable) {
       return mojo.internal.computeStructDimensions(structSpec, value);
@@ -1571,6 +2078,7 @@ mojo.internal.InterfaceProxy = function(type) {
       },
       arrayElementSize: nullable => 8,
       isValidObjectKeyType: false,
+      isValueType: false,
     },
   };
 };
@@ -1596,6 +2104,7 @@ mojo.internal.InterfaceRequest = function(type) {
       },
       arrayElementSize: nullable => 8,
       isValidObjectKeyType: false,
+      isValueType: false,
     },
   };
 };
@@ -1627,6 +2136,7 @@ mojo.internal.AssociatedInterfaceProxy = function(type) {
       },
       isValidObjectKeyType: false,
       hasInterfaceId: true,
+      isValueType: false,
     },
   };
 };
@@ -1657,6 +2167,39 @@ mojo.internal.AssociatedInterfaceRequest = function(type) {
       },
       isValidObjectKeyType: false,
       hasInterfaceId: true,
+      isValueType: false,
     },
   };
+};
+
+/**
+ * A helper function to avoid having to export many of the types and
+ * functions in this class. This is used by typemapping.
+ * @param {!mojo.internal.Decoder} decoder
+ * @param {!mojo.internal.StructFieldSpec} fieldSpec
+ * @param {!number} version
+ * @return {*}
+ * @export
+ */
+mojo.internal.decodeStructField = function(decoder, fieldSpec, version) {
+  return decoder.decodeStructField(fieldSpec, version);
+};
+
+/**
+ * A helper function to avoid having to export many of the types and
+ * functions in this class. This is used by typemapping.
+ * The linked value lookup is done here to avoid Closure name mangling.
+ * @param {!mojo.internal.Decoder} decoder
+ * @param {!mojo.internal.StructFieldSpec} flagFieldSpec
+ * @param {!Array<mojo.internal.StructFieldSpec>} fieldSpecs
+ * @param {!number} version
+ * @return {*}
+ * @export
+ */
+mojo.internal.decodeStructNullableValueField = function(
+    decoder, flagFieldSpec, fieldSpecs, version) {
+  const linkedValueFieldName =
+      flagFieldSpec.nullableValueKindProperties.linkedValueFieldName;
+  return decoder.decodeStructNullableValueField(
+      flagFieldSpec, fieldSpecs, version);
 };

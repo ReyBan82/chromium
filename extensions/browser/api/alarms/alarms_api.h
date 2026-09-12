@@ -21,8 +21,8 @@ using AlarmList = std::vector<Alarm>;
 class AlarmsCreateFunction : public ExtensionFunction {
  public:
   AlarmsCreateFunction();
-  // Use |clock| instead of the default clock. Does not take ownership
-  // of |clock|. Used for testing.
+  // Use `clock` instead of the default clock. Does not take ownership
+  // of `clock`. Used for testing.
   explicit AlarmsCreateFunction(base::Clock* clock);
 
  protected:
@@ -45,7 +45,7 @@ class AlarmsGetFunction : public ExtensionFunction {
   ResponseAction Run() override;
 
  private:
-  void Callback(const std::string& name, Alarm* alarm);
+  void Callback(Alarm* alarm);
   DECLARE_EXTENSION_FUNCTION("alarms.get", ALARMS_GET)
 };
 
@@ -69,7 +69,7 @@ class AlarmsClearFunction : public ExtensionFunction {
   ResponseAction Run() override;
 
  private:
-  void Callback(const std::string& name, bool success);
+  void Callback(bool removed);
   DECLARE_EXTENSION_FUNCTION("alarms.clear", ALARMS_CLEAR)
 };
 

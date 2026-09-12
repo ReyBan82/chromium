@@ -10,10 +10,6 @@ source_set("lib") {
     "xr_device_service.h",
     "xr_runtime_provider.cc",
     "xr_runtime_provider.h",
-    "xr_service_test_hook.cc",
-    "xr_service_test_hook.h",
-    "xr_test_hook_wrapper.cc",
-    "xr_test_hook_wrapper.h",
   ]
 
   configs += [ "//content:content_implementation" ]
@@ -26,10 +22,9 @@ source_set("lib") {
     "//base",
     "//content/public/common:common_sources",
     "//device/base",
-    "//device/vr:vr",
+    "//device/vr",
     "//device/vr:vr_base",
     "//device/vr/public/mojom:isolated_xr_service",
-    "//device/vr/public/mojom:test_mojom",
     "//services/viz/public/cpp/gpu",
   ]
 }

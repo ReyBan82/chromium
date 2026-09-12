@@ -103,7 +103,7 @@ class ProximityAuthProximityMonitorImplTest : public testing::Test {
 
   void RunPendingTasks() { task_runner_->RunPendingTasks(); }
 
-  void ProvideRssi(absl::optional<int32_t> rssi) {
+  void ProvideRssi(std::optional<int32_t> rssi) {
     RunPendingTasks();
 
     std::vector<ash::secure_channel::mojom::ConnectionCreationDetail>
@@ -177,7 +177,7 @@ TEST_F(ProximityAuthProximityMonitorImplTest, IsUnlockAllowed_UnknownRssi) {
   monitor_->Start();
 
   ProvideRssi(0);
-  ProvideRssi(absl::nullopt);
+  ProvideRssi(std::nullopt);
 
   EXPECT_FALSE(monitor_->IsUnlockAllowed());
 }
@@ -363,9 +363,6 @@ TEST_F(ProximityAuthProximityMonitorImplTest,
   monitor_->RecordProximityMetricsOnAuthSuccess();
   histogram_tester.ExpectUniqueSample("EasyUnlock.AuthProximity.RollingRssi",
                                       -6, 1);
-  histogram_tester.ExpectUniqueSample(
-      "EasyUnlock.AuthProximity.RemoteDeviceModelHash",
-      1881443083 /* hash of "LGE Nexus 5" */, 1);
 }
 
 TEST_F(ProximityAuthProximityMonitorImplTest,
@@ -401,9 +398,6 @@ TEST_F(ProximityAuthProximityMonitorImplTest,
   monitor.RecordProximityMetricsOnAuthSuccess();
   histogram_tester.ExpectUniqueSample("EasyUnlock.AuthProximity.RollingRssi",
                                       127, 1);
-  histogram_tester.ExpectUniqueSample(
-      "EasyUnlock.AuthProximity.RemoteDeviceModelHash",
-      -1808066424 /* hash of "Unknown" */, 1);
 }
 
 }  // namespace proximity_auth

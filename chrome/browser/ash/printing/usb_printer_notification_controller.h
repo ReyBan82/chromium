@@ -5,12 +5,8 @@
 #ifndef CHROME_BROWSER_ASH_PRINTING_USB_PRINTER_NOTIFICATION_CONTROLLER_H_
 #define CHROME_BROWSER_ASH_PRINTING_USB_PRINTER_NOTIFICATION_CONTROLLER_H_
 
-#include <map>
 #include <memory>
 #include <string>
-#include <vector>
-
-#include "chrome/browser/ash/printing/usb_printer_notification.h"
 
 class Profile;
 

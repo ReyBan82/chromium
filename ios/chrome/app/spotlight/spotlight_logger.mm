@@ -4,17 +4,17 @@
 
 #import "ios/chrome/app/spotlight/spotlight_logger.h"
 
-#import "ios/chrome/browser/flags/system_flags.h"
+#import <UIKit/UIKit.h>
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "base/debug/dump_without_crashing.h"
+#import "base/metrics/histogram_macros.h"
+#import "ios/chrome/browser/shared/public/features/system_flags.h"
 
-@interface SpotlightLogger ()
+namespace {
 
-@property(nonatomic, strong) NSMutableDictionary* knownItems;
+NSString* const kSpotlightDebuggerErrorLogKey = @"SpotlightDebuggerErrorLogKey";
 
-@end
+}  // namespace
 
 @implementation SpotlightLogger
 
@@ -31,56 +31,45 @@
   return sharedLogger;
 }
 
-- (instancetype)init {
-  self = [super init];
-  if (self) {
-    _knownItems = [[NSMutableDictionary alloc] init];
+- (void)logSpotlightError:(NSError*)error {
+  NSArray* errorLog = [[NSUserDefaults standardUserDefaults]
+      objectForKey:kSpotlightDebuggerErrorLogKey];
+
+  NSMutableArray* mutableErrorLog = [[NSMutableArray alloc] init];
+  if (errorLog) {
+    [mutableErrorLog addObjectsFromArray:errorLog];
   }
-  return self;
+
+  [[NSUserDefaults standardUserDefaults]
+      setObject:mutableErrorLog
+         forKey:kSpotlightDebuggerErrorLogKey];
+
+  [self showAlertImmediately:error.localizedDescription];
 }
 
-- (void)logIndexedItem:(CSSearchableItem*)item {
-  self.knownItems[item.uniqueIdentifier] = item;
-}
-
-- (void)logIndexedItems:(NSArray<CSSearchableItem*>*)items {
-  for (CSSearchableItem* item in items) {
-    [self logIndexedItem:item];
-  }
-}
-
-- (void)logDeletionOfItemsWithIdentifiers:(NSArray<NSString*>*)identifiers {
-  for (NSString* identifier in identifiers) {
-    self.knownItems[identifier] = nil;
-  }
-}
-
-- (void)logDeletionOfItemsInDomain:(NSString*)domain {
-  for (NSString* key in self.knownItems.allKeys) {
-    CSSearchableItem* item = self.knownItems[key];
-    if ([item.domainIdentifier isEqualToString:domain]) {
-      self.knownItems[key] = nil;
-    }
++ (void)logSpotlightError:(NSError*)error {
+  UMA_HISTOGRAM_SPARSE("IOSSpotlightErrorCode", error.code);
+  if (error) {
+    [[self sharedLogger] logSpotlightError:error];
   }
 }
 
-- (void)logDeletionOfAllItems {
-  [self.knownItems removeAllObjects];
-}
+#pragma mark - internal
 
-- (NSArray*)knownIndexedItems {
-  return self.knownItems.allValues;
-}
+- (void)showAlertImmediately:(NSString*)errorMessage {
+  UIAlertController* alert =
+      [UIAlertController alertControllerWithTitle:@"Spotlight Error"
+                                          message:errorMessage
+                                   preferredStyle:UIAlertControllerStyleAlert];
+  [alert addAction:[UIAlertAction actionWithTitle:@"OK"
+                                            style:UIAlertActionStyleDefault
+                                          handler:nil]];
+  UIWindowScene* scene = (UIWindowScene*)
+      [UIApplication.sharedApplication.connectedScenes anyObject];
 
-- (NSArray*)knownIndexedItemsInDomain:(NSString*)domain {
-  NSMutableArray* items = [[NSMutableArray alloc] init];
-  for (NSString* key in self.knownItems.allKeys) {
-    CSSearchableItem* item = self.knownItems[key];
-    if ([item.domainIdentifier isEqualToString:domain]) {
-      [items addObject:item];
-    }
-  }
-  return items;
+  [scene.windows[0].rootViewController presentViewController:alert
+                                                    animated:YES
+                                                  completion:nil];
 }
 
 @end

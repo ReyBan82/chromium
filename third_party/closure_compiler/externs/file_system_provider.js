@@ -1,4 +1,4 @@
-// Copyright 2020 The Chromium Authors
+// Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -71,12 +71,31 @@ chrome.fileSystemProvider.CommonActionId = {
 
 /**
  * @typedef {{
+ *   providerName: string,
+ *   id: string
+ * }}
+ * @see https://developer.chrome.com/extensions/fileSystemProvider#type-CloudIdentifier
+ */
+chrome.fileSystemProvider.CloudIdentifier;
+
+/**
+ * @typedef {{
+ *   versionTag: (string|undefined)
+ * }}
+ * @see https://developer.chrome.com/extensions/fileSystemProvider#type-CloudFileInfo
+ */
+chrome.fileSystemProvider.CloudFileInfo;
+
+/**
+ * @typedef {{
  *   isDirectory: (boolean|undefined),
  *   name: (string|undefined),
  *   size: (number|undefined),
  *   modificationTime: (Date|undefined),
  *   mimeType: (string|undefined),
- *   thumbnail: (string|undefined)
+ *   thumbnail: (string|undefined),
+ *   cloudIdentifier: (!chrome.fileSystemProvider.CloudIdentifier|undefined),
+ *   cloudFileInfo: (!chrome.fileSystemProvider.CloudFileInfo|undefined)
  * }}
  * @see https://developer.chrome.com/extensions/fileSystemProvider#type-EntryMetadata
  */
@@ -156,7 +175,9 @@ chrome.fileSystemProvider.UnmountRequestedOptions;
  *   size: boolean,
  *   modificationTime: boolean,
  *   mimeType: boolean,
- *   thumbnail: boolean
+ *   thumbnail: boolean,
+ *   cloudIdentifier: boolean,
+ *   cloudFileInfo: boolean
  * }}
  * @see https://developer.chrome.com/extensions/fileSystemProvider#type-GetMetadataRequestedOptions
  */
@@ -353,7 +374,8 @@ chrome.fileSystemProvider.ExecuteActionRequestedOptions;
 /**
  * @typedef {{
  *   entryPath: string,
- *   changeType: !chrome.fileSystemProvider.ChangeType
+ *   changeType: !chrome.fileSystemProvider.ChangeType,
+ *   cloudFileInfo: (!chrome.fileSystemProvider.CloudFileInfo|undefined)
  * }}
  * @see https://developer.chrome.com/extensions/fileSystemProvider#type-Change
  */
@@ -413,7 +435,7 @@ chrome.fileSystemProvider.unmount = function(options, callback) {};
 
 /**
  * Returns all file systems mounted by the extension.
- * @param {function(!Array<!chrome.fileSystemProvider.FileSystemInfo>): void}
+ * @param {function(!Array<!chrome.fileSystemProvider.FileSystemInfo>): void=}
  *     callback Callback to receive the result of $(ref:getAll) function.
  * @see https://developer.chrome.com/extensions/fileSystemProvider#method-getAll
  */
@@ -423,7 +445,7 @@ chrome.fileSystemProvider.getAll = function(callback) {};
  * Returns information about a file system with the passed
  * <code>fileSystemId</code>.
  * @param {string} fileSystemId
- * @param {function(!chrome.fileSystemProvider.FileSystemInfo): void} callback
+ * @param {function(!chrome.fileSystemProvider.FileSystemInfo): void=} callback
  *     Callback to receive the result of $(ref:get) function.
  * @see https://developer.chrome.com/extensions/fileSystemProvider#method-get
  */
@@ -432,7 +454,7 @@ chrome.fileSystemProvider.get = function(fileSystemId, callback) {};
 /**
  * <p>Notifies about changes in the watched directory at
  * <code>observedPath</code> in <code>recursive</code> mode. If the file system
- * is mounted with <code>supportsNofityTag</code>, then <code>tag</code> must be
+ * is mounted with <code>supportsNotifyTag</code>, then <code>tag</code> must be
  * provided, and all changes since the last notification always reported, even
  * if the system was shutdown. The last tag can be obtained with
  * $(ref:getAll).</p><p>To use, the <code>file_system_provider.notify</code>

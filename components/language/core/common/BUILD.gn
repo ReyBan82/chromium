@@ -14,20 +14,17 @@ static_library("common") {
 
   deps = [
     "//base",
+    "//components/country_codes",
     "//ui/base",
   ]
 }
 
 source_set("unit_tests") {
   testonly = true
-  sources = [
-    "language_util_unittest.cc",
-    "locale_util_unittest.cc",
-  ]
+  sources = [ "locale_util_unittest.cc" ]
   deps = [
     ":common",
     "//base",
-    "//build:chromeos_buildflags",
     "//testing/gmock",
     "//testing/gtest",
   ]

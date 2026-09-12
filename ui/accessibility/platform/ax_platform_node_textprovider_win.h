@@ -6,27 +6,23 @@
 #define UI_ACCESSIBILITY_PLATFORM_AX_PLATFORM_NODE_TEXTPROVIDER_WIN_H_
 
 #include <wrl/client.h>
+#include <wrl/implements.h>
 
 #include "base/component_export.h"
 #include "ui/accessibility/platform/ax_platform_node_win.h"
 
 namespace ui {
 
-class COMPONENT_EXPORT(AX_PLATFORM) __declspec(
-    uuid("3e1c192b-4348-45ac-8eb6-4b58eeb3dcca")) AXPlatformNodeTextProviderWin
-    : public CComObjectRootEx<CComMultiThreadModel>,
-      public ITextEditProvider {
+class COMPONENT_EXPORT(AX_PLATFORM) AXPlatformNodeTextProviderWin
+    : public Microsoft::WRL::RuntimeClass<
+          Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
+          Microsoft::WRL::ChainInterfaces<ITextEditProvider, ITextProvider>> {
  public:
-  BEGIN_COM_MAP(AXPlatformNodeTextProviderWin)
-  COM_INTERFACE_ENTRY(ITextProvider)
-  COM_INTERFACE_ENTRY(ITextEditProvider)
-  COM_INTERFACE_ENTRY(AXPlatformNodeTextProviderWin)
-  END_COM_MAP()
+  explicit AXPlatformNodeTextProviderWin(AXPlatformNodeWin* owner);
+  ~AXPlatformNodeTextProviderWin() override;
 
-  AXPlatformNodeTextProviderWin();
-  ~AXPlatformNodeTextProviderWin();
-
-  static AXPlatformNodeTextProviderWin* Create(AXPlatformNodeWin* owner);
+  static Microsoft::WRL::ComPtr<ITextEditProvider> Create(
+      AXPlatformNodeWin* owner);
   static void CreateIUnknown(AXPlatformNodeWin* owner, IUnknown** unknown);
 
   //
@@ -58,20 +54,20 @@ class COMPONENT_EXPORT(AX_PLATFORM) __declspec(
 
   // ITextProvider supporting methods.
 
-  static ITextRangeProvider* GetRangeFromChild(
-      ui::AXPlatformNodeWin* ancestor,
-      ui::AXPlatformNodeWin* descendant);
+  static void GetRangeFromChild(AXPlatformNodeWin* ancestor,
+                                AXPlatformNodeWin* descendant,
+                                ITextRangeProvider** range);
 
   // Create a dengerate text range at the start of the specified node.
-  static ITextRangeProvider* CreateDegenerateRangeAtStart(
-      ui::AXPlatformNodeWin* node);
+  static void CreateDegenerateRangeAtStart(AXPlatformNodeWin* node,
+                                           ITextRangeProvider** range);
 
  private:
   friend class AXPlatformNodeTextProviderTest;
-  ui::AXPlatformNodeWin* owner() const;
+  AXPlatformNodeWin* owner() const;
   HRESULT GetTextRangeProviderFromActiveComposition(ITextRangeProvider** range);
 
-  Microsoft::WRL::ComPtr<ui::AXPlatformNodeWin> owner_;
+  Microsoft::WRL::ComPtr<AXPlatformNodeWin> owner_;
 };
 
 }  // namespace ui

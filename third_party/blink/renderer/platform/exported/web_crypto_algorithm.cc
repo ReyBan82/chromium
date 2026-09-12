@@ -28,11 +28,14 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+
+#include "third_party/blink/public/platform/web_crypto_algorithm.h"
+
+#include <array>
 #include <memory>
 #include <utility>
 
 #include "base/memory/ptr_util.h"
-#include "third_party/blink/public/platform/web_crypto_algorithm.h"
 #include "third_party/blink/public/platform/web_crypto_algorithm_params.h"
 #include "third_party/blink/renderer/platform/wtf/std_lib_extras.h"
 #include "third_party/blink/renderer/platform/wtf/thread_safe_ref_counted.h"
@@ -42,7 +45,7 @@ namespace blink {
 namespace {
 
 // A mapping from the algorithm ID to information about the algorithm.
-constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
+constexpr auto kAlgorithmIdToInfo = std::to_array<WebCryptoAlgorithmInfo>({
     {// Index 0
      "AES-CBC",
      {
@@ -56,7 +59,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          kWebCryptoAlgorithmParamsTypeAesDerivedKeyParams,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,                // DeriveBits
          kWebCryptoAlgorithmParamsTypeAesCbcParams,         // WrapKey
-         kWebCryptoAlgorithmParamsTypeAesCbcParams          // UnwrapKey
+         kWebCryptoAlgorithmParamsTypeAesCbcParams,         // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // GetPublicKey
      }},
     {// Index 1
      "HMAC",
@@ -71,7 +77,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          kWebCryptoAlgorithmParamsTypeHmacImportParams,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,             // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,             // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined              // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,             // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,             // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,             // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,             // GetPublicKey
      }},
     {// Index 2
      "RSASSA-PKCS1-v1_5",
@@ -86,7 +95,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,                  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,                  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,                  // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined                   // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                  // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                  // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                  // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,                   // GetPublicKey
      }},
     {// Index 3
      "SHA-1",
@@ -101,7 +113,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,  // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined   // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // GetPublicKey
      }},
     {// Index 4
      "SHA-256",
@@ -116,7 +131,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,  // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined   // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // GetPublicKey
      }},
     {// Index 5
      "SHA-384",
@@ -131,7 +149,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,  // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined   // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // GetPublicKey
      }},
     {// Index 6
      "SHA-512",
@@ -146,13 +167,16 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,  // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined   // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // GetPublicKey
      }},
     {// Index 7
      "AES-GCM",
      {
-         kWebCryptoAlgorithmParamsTypeAesGcmParams,         // Encrypt
-         kWebCryptoAlgorithmParamsTypeAesGcmParams,         // Decrypt
+         kWebCryptoAlgorithmParamsTypeAeadParams,           // Encrypt
+         kWebCryptoAlgorithmParamsTypeAeadParams,           // Decrypt
          WebCryptoAlgorithmInfo::kUndefined,                // Sign
          WebCryptoAlgorithmInfo::kUndefined,                // Verify
          WebCryptoAlgorithmInfo::kUndefined,                // Digest
@@ -160,8 +184,11 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          kWebCryptoAlgorithmParamsTypeNone,                 // ImportKey
          kWebCryptoAlgorithmParamsTypeAesDerivedKeyParams,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,                // DeriveBits
-         kWebCryptoAlgorithmParamsTypeAesGcmParams,         // WrapKey
-         kWebCryptoAlgorithmParamsTypeAesGcmParams          // UnwrapKey
+         kWebCryptoAlgorithmParamsTypeAeadParams,           // WrapKey
+         kWebCryptoAlgorithmParamsTypeAeadParams,           // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // GetPublicKey
      }},
     {// Index 8
      "RSA-OAEP",
@@ -176,7 +203,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,                  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,                  // DeriveBits
          kWebCryptoAlgorithmParamsTypeRsaOaepParams,          // WrapKey
-         kWebCryptoAlgorithmParamsTypeRsaOaepParams           // UnwrapKey
+         kWebCryptoAlgorithmParamsTypeRsaOaepParams,          // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                  // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                  // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,                   // GetPublicKey
      }},
     {// Index 9
      "AES-CTR",
@@ -191,7 +221,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          kWebCryptoAlgorithmParamsTypeAesDerivedKeyParams,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,                // DeriveBits
          kWebCryptoAlgorithmParamsTypeAesCtrParams,         // WrapKey
-         kWebCryptoAlgorithmParamsTypeAesCtrParams          // UnwrapKey
+         kWebCryptoAlgorithmParamsTypeAesCtrParams,         // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // GetPublicKey
      }},
     {// Index 10
      "AES-KW",
@@ -206,7 +239,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          kWebCryptoAlgorithmParamsTypeAesDerivedKeyParams,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,                // DeriveBits
          kWebCryptoAlgorithmParamsTypeNone,                 // WrapKey
-         kWebCryptoAlgorithmParamsTypeNone                  // UnwrapKey
+         kWebCryptoAlgorithmParamsTypeNone,                 // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // GetPublicKey
      }},
     {// Index 11
      "RSA-PSS",
@@ -221,7 +257,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,                  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,                  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,                  // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined                   // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                  // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                  // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                  // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,                   // GetPublicKey
      }},
     {// Index 12
      "ECDSA",
@@ -236,7 +275,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,              // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,              // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,              // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined               // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,              // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,              // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,              // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,               // GetPublicKey
      }},
     {// Index 13
      "ECDH",
@@ -251,7 +293,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,                // GetKeyLength
          kWebCryptoAlgorithmParamsTypeEcdhKeyDeriveParams,  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,                // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined                 // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,                 // GetPublicKey
      }},
     {// Index 14
      "HKDF",
@@ -266,7 +311,10 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          kWebCryptoAlgorithmParamsTypeNone,        // GetKeyLength
          kWebCryptoAlgorithmParamsTypeHkdfParams,  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,       // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined        // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,       // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,       // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,       // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,       // GetPublicKey
      }},
     {// Index 15
      "PBKDF2",
@@ -281,11 +329,12 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          kWebCryptoAlgorithmParamsTypeNone,          // GetKeyLength
          kWebCryptoAlgorithmParamsTypePbkdf2Params,  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,         // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined          // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,         // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,         // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,         // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,         // GetPublicKey
      }},
     {// Index 16
-     // TODO(crbug.com/1370697): Ed25519 is experimental behind a flag. See
-     // https://chromestatus.com/feature/4913922408710144 for the status.
      "Ed25519",
      {
          WebCryptoAlgorithmInfo::kUndefined,  // Encrypt
@@ -298,9 +347,170 @@ constexpr WebCryptoAlgorithmInfo kAlgorithmIdToInfo[] = {
          WebCryptoAlgorithmInfo::kUndefined,  // GetKeyLength
          WebCryptoAlgorithmInfo::kUndefined,  // DeriveBits
          WebCryptoAlgorithmInfo::kUndefined,  // WrapKey
-         WebCryptoAlgorithmInfo::kUndefined   // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,  // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,   // GetPublicKey
      }},
-};
+    {// Index 17
+     "X25519",
+     {
+         WebCryptoAlgorithmInfo::kUndefined,                // Encrypt
+         WebCryptoAlgorithmInfo::kUndefined,                // Decrypt
+         WebCryptoAlgorithmInfo::kUndefined,                // Sign
+         WebCryptoAlgorithmInfo::kUndefined,                // Verify
+         WebCryptoAlgorithmInfo::kUndefined,                // Digest
+         kWebCryptoAlgorithmParamsTypeNone,                 // GenerateKey
+         kWebCryptoAlgorithmParamsTypeNone,                 // ImportKey
+         WebCryptoAlgorithmInfo::kUndefined,                // GetKeyLength
+         kWebCryptoAlgorithmParamsTypeEcdhKeyDeriveParams,  // DeriveBits
+         WebCryptoAlgorithmInfo::kUndefined,                // WrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,                // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,                // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,                 // GetPublicKey
+     }},
+    {// Index 18
+     // TODO(crbug.com/450627018): ChaCha20-Poly1305 is experimental behind
+     // a flag. See https://chromestatus.com/feature/5198951632470016
+     "ChaCha20-Poly1305",
+     {
+         kWebCryptoAlgorithmParamsTypeAeadParams,  // Encrypt
+         kWebCryptoAlgorithmParamsTypeAeadParams,  // Decrypt
+         WebCryptoAlgorithmInfo::kUndefined,       // Sign
+         WebCryptoAlgorithmInfo::kUndefined,       // Verify
+         WebCryptoAlgorithmInfo::kUndefined,       // Digest
+         kWebCryptoAlgorithmParamsTypeNone,        // GenerateKey
+         kWebCryptoAlgorithmParamsTypeNone,        // ImportKey
+         kWebCryptoAlgorithmParamsTypeNone,        // GetKeyLength
+         WebCryptoAlgorithmInfo::kUndefined,       // DeriveBits
+         kWebCryptoAlgorithmParamsTypeAeadParams,  // WrapKey
+         kWebCryptoAlgorithmParamsTypeAeadParams,  // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,       // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,       // Decapsulate
+         WebCryptoAlgorithmInfo::kUndefined,       // GetPublicKey
+     }},
+    {// Index 19
+     // TODO(crbug.com/450848555): ML-DSA-44 is experimental behind
+     // a flag. See https://chromestatus.com/feature/5198951632470016
+     "ML-DSA-44",
+     {
+         WebCryptoAlgorithmInfo::kUndefined,          // Encrypt
+         WebCryptoAlgorithmInfo::kUndefined,          // Decrypt
+         kWebCryptoAlgorithmParamsTypeContextParams,  // Sign
+         kWebCryptoAlgorithmParamsTypeContextParams,  // Verify
+         WebCryptoAlgorithmInfo::kUndefined,          // Digest
+         kWebCryptoAlgorithmParamsTypeNone,           // GenerateKey
+         kWebCryptoAlgorithmParamsTypeNone,           // ImportKey
+         WebCryptoAlgorithmInfo::kUndefined,          // GetKeyLength
+         WebCryptoAlgorithmInfo::kUndefined,          // DeriveBits
+         WebCryptoAlgorithmInfo::kUndefined,          // WrapKey
+         WebCryptoAlgorithmInfo::kUndefined,          // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,          // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,          // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,           // GetPublicKey
+     }},
+    {// Index 20
+     // TODO(crbug.com/450848555): ML-DSA-65 is experimental behind
+     // a flag. See https://chromestatus.com/feature/5198951632470016
+     "ML-DSA-65",
+     {
+         WebCryptoAlgorithmInfo::kUndefined,          // Encrypt
+         WebCryptoAlgorithmInfo::kUndefined,          // Decrypt
+         kWebCryptoAlgorithmParamsTypeContextParams,  // Sign
+         kWebCryptoAlgorithmParamsTypeContextParams,  // Verify
+         WebCryptoAlgorithmInfo::kUndefined,          // Digest
+         kWebCryptoAlgorithmParamsTypeNone,           // GenerateKey
+         kWebCryptoAlgorithmParamsTypeNone,           // ImportKey
+         WebCryptoAlgorithmInfo::kUndefined,          // GetKeyLength
+         WebCryptoAlgorithmInfo::kUndefined,          // DeriveBits
+         WebCryptoAlgorithmInfo::kUndefined,          // WrapKey
+         WebCryptoAlgorithmInfo::kUndefined,          // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,          // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,          // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,           // GetPublicKey
+     }},
+    {// Index 21
+     // TODO(crbug.com/450848555): ML-DSA-87 is experimental behind
+     // a flag. See https://chromestatus.com/feature/5198951632470016
+     "ML-DSA-87",
+     {
+         WebCryptoAlgorithmInfo::kUndefined,          // Encrypt
+         WebCryptoAlgorithmInfo::kUndefined,          // Decrypt
+         kWebCryptoAlgorithmParamsTypeContextParams,  // Sign
+         kWebCryptoAlgorithmParamsTypeContextParams,  // Verify
+         WebCryptoAlgorithmInfo::kUndefined,          // Digest
+         kWebCryptoAlgorithmParamsTypeNone,           // GenerateKey
+         kWebCryptoAlgorithmParamsTypeNone,           // ImportKey
+         WebCryptoAlgorithmInfo::kUndefined,          // GetKeyLength
+         WebCryptoAlgorithmInfo::kUndefined,          // DeriveBits
+         WebCryptoAlgorithmInfo::kUndefined,          // WrapKey
+         WebCryptoAlgorithmInfo::kUndefined,          // UnwrapKey
+         WebCryptoAlgorithmInfo::kUndefined,          // Encapsulate
+         WebCryptoAlgorithmInfo::kUndefined,          // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,           // GetPublicKey
+     }},
+    {// Index 22
+     // TODO(crbug.com/450627019): ML-KEM-768 is experimental behind
+     // a flag. See https://chromestatus.com/feature/5198951632470016
+     "ML-KEM-768",
+     {
+         WebCryptoAlgorithmInfo::kUndefined,  // Encrypt
+         WebCryptoAlgorithmInfo::kUndefined,  // Decrypt
+         WebCryptoAlgorithmInfo::kUndefined,  // Sign
+         WebCryptoAlgorithmInfo::kUndefined,  // Verify
+         WebCryptoAlgorithmInfo::kUndefined,  // Digest
+         kWebCryptoAlgorithmParamsTypeNone,   // GenerateKey
+         kWebCryptoAlgorithmParamsTypeNone,   // ImportKey
+         WebCryptoAlgorithmInfo::kUndefined,  // GetKeyLength
+         WebCryptoAlgorithmInfo::kUndefined,  // DeriveBits
+         WebCryptoAlgorithmInfo::kUndefined,  // WrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // UnwrapKey
+         kWebCryptoAlgorithmParamsTypeNone,   // Encapsulate
+         kWebCryptoAlgorithmParamsTypeNone,   // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,   // GetPublicKey
+     }},
+    {// Index 23
+     // TODO(crbug.com/450627019): ML-KEM-1024 is experimental behind a flag.
+     // See https://chromestatus.com/feature/5198951632470016
+     "ML-KEM-1024",
+     {
+         WebCryptoAlgorithmInfo::kUndefined,  // Encrypt
+         WebCryptoAlgorithmInfo::kUndefined,  // Decrypt
+         WebCryptoAlgorithmInfo::kUndefined,  // Sign
+         WebCryptoAlgorithmInfo::kUndefined,  // Verify
+         WebCryptoAlgorithmInfo::kUndefined,  // Digest
+         kWebCryptoAlgorithmParamsTypeNone,   // GenerateKey
+         kWebCryptoAlgorithmParamsTypeNone,   // ImportKey
+         WebCryptoAlgorithmInfo::kUndefined,  // GetKeyLength
+         WebCryptoAlgorithmInfo::kUndefined,  // DeriveBits
+         WebCryptoAlgorithmInfo::kUndefined,  // WrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // UnwrapKey
+         kWebCryptoAlgorithmParamsTypeNone,   // Encapsulate
+         kWebCryptoAlgorithmParamsTypeNone,   // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,   // GetPublicKey
+     }},
+    {// Index 24
+     // TODO(crbug.com/450627019): MLKEM768-X25519 is experimental behind a
+     // flag. See https://chromestatus.com/feature/5198951632470016
+     "MLKEM768-X25519",
+     {
+         WebCryptoAlgorithmInfo::kUndefined,  // Encrypt
+         WebCryptoAlgorithmInfo::kUndefined,  // Decrypt
+         WebCryptoAlgorithmInfo::kUndefined,  // Sign
+         WebCryptoAlgorithmInfo::kUndefined,  // Verify
+         WebCryptoAlgorithmInfo::kUndefined,  // Digest
+         kWebCryptoAlgorithmParamsTypeNone,   // GenerateKey
+         kWebCryptoAlgorithmParamsTypeNone,   // ImportKey
+         WebCryptoAlgorithmInfo::kUndefined,  // GetKeyLength
+         WebCryptoAlgorithmInfo::kUndefined,  // DeriveBits
+         WebCryptoAlgorithmInfo::kUndefined,  // WrapKey
+         WebCryptoAlgorithmInfo::kUndefined,  // UnwrapKey
+         kWebCryptoAlgorithmParamsTypeNone,   // Encapsulate
+         kWebCryptoAlgorithmParamsTypeNone,   // Decapsulate
+         kWebCryptoAlgorithmParamsTypeNone,   // GetPublicKey
+     }},
+});
 
 // Initializing the algorithmIdToInfo table above depends on knowing the enum
 // values for algorithm IDs. If those ever change, the table will need to be
@@ -323,8 +533,19 @@ static_assert(kWebCryptoAlgorithmIdEcdh == 13, "ECDH id must match");
 static_assert(kWebCryptoAlgorithmIdHkdf == 14, "HKDF id must match");
 static_assert(kWebCryptoAlgorithmIdPbkdf2 == 15, "Pbkdf2 id must match");
 static_assert(kWebCryptoAlgorithmIdEd25519 == 16, "Ed25519 id must match");
-static_assert(kWebCryptoAlgorithmIdLast == 16, "last id must match");
-static_assert(10 == kWebCryptoOperationLast,
+static_assert(kWebCryptoAlgorithmIdX25519 == 17, "X25519 id must match");
+static_assert(kWebCryptoAlgorithmIdChaCha20Poly1305 == 18,
+              "ChaCha20-Poly1305 id must match");
+static_assert(kWebCryptoAlgorithmIdMlDsa44 == 19, "ML-DSA-44 id must match");
+static_assert(kWebCryptoAlgorithmIdMlDsa65 == 20, "ML-DSA-65 id must match");
+static_assert(kWebCryptoAlgorithmIdMlDsa87 == 21, "ML-DSA-87 id must match");
+static_assert(kWebCryptoAlgorithmIdMlKem768 == 22, "ML-KEM-768 id must match");
+static_assert(kWebCryptoAlgorithmIdMlKem1024 == 23,
+              "ML-KEM-1024 id must match");
+static_assert(kWebCryptoAlgorithmIdMlKem768X25519 == 24,
+              "MLKEM768-X25519 id must match");
+static_assert(kWebCryptoAlgorithmIdLast == 24, "last id must match");
+static_assert(13 == kWebCryptoOperationLast,
               "the parameter mapping needs to be updated");
 
 }  // namespace
@@ -415,10 +636,11 @@ const WebCryptoHmacKeyGenParams* WebCryptoAlgorithm::HmacKeyGenParams() const {
   return nullptr;
 }
 
-const WebCryptoAesGcmParams* WebCryptoAlgorithm::AesGcmParams() const {
+const WebCryptoAeadParams* WebCryptoAlgorithm::AeadParams() const {
   DCHECK(!IsNull());
-  if (ParamsType() == kWebCryptoAlgorithmParamsTypeAesGcmParams)
-    return static_cast<WebCryptoAesGcmParams*>(private_->params.get());
+  if (ParamsType() == kWebCryptoAlgorithmParamsTypeAeadParams) {
+    return static_cast<WebCryptoAeadParams*>(private_->params.get());
+  }
   return nullptr;
 }
 
@@ -504,6 +726,14 @@ const WebCryptoPbkdf2Params* WebCryptoAlgorithm::Pbkdf2Params() const {
   return nullptr;
 }
 
+const WebCryptoContextParams* WebCryptoAlgorithm::ContextParams() const {
+  DCHECK(!IsNull());
+  if (ParamsType() == kWebCryptoAlgorithmParamsTypeContextParams) {
+    return static_cast<WebCryptoContextParams*>(private_->params.get());
+  }
+  return nullptr;
+}
+
 bool WebCryptoAlgorithm::IsHash(WebCryptoAlgorithmId id) {
   switch (id) {
     case kWebCryptoAlgorithmIdSha1:
@@ -524,9 +754,16 @@ bool WebCryptoAlgorithm::IsHash(WebCryptoAlgorithmId id) {
     case kWebCryptoAlgorithmIdHkdf:
     case kWebCryptoAlgorithmIdPbkdf2:
     case kWebCryptoAlgorithmIdEd25519:
-      break;
+    case kWebCryptoAlgorithmIdX25519:
+    case kWebCryptoAlgorithmIdChaCha20Poly1305:
+    case kWebCryptoAlgorithmIdMlDsa44:
+    case kWebCryptoAlgorithmIdMlDsa65:
+    case kWebCryptoAlgorithmIdMlDsa87:
+    case kWebCryptoAlgorithmIdMlKem768:
+    case kWebCryptoAlgorithmIdMlKem1024:
+    case kWebCryptoAlgorithmIdMlKem768X25519:
+      return false;
   }
-  return false;
 }
 
 bool WebCryptoAlgorithm::IsKdf(WebCryptoAlgorithmId id) {
@@ -549,9 +786,90 @@ bool WebCryptoAlgorithm::IsKdf(WebCryptoAlgorithmId id) {
     case kWebCryptoAlgorithmIdEcdsa:
     case kWebCryptoAlgorithmIdEcdh:
     case kWebCryptoAlgorithmIdEd25519:
-      break;
+    case kWebCryptoAlgorithmIdX25519:
+    case kWebCryptoAlgorithmIdChaCha20Poly1305:
+    case kWebCryptoAlgorithmIdMlDsa44:
+    case kWebCryptoAlgorithmIdMlDsa65:
+    case kWebCryptoAlgorithmIdMlDsa87:
+    case kWebCryptoAlgorithmIdMlKem768:
+    case kWebCryptoAlgorithmIdMlKem1024:
+    case kWebCryptoAlgorithmIdMlKem768X25519:
+      return false;
   }
-  return false;
+}
+
+bool WebCryptoAlgorithm::IsMlDsa(WebCryptoAlgorithmId id) {
+  switch (id) {
+    case kWebCryptoAlgorithmIdMlDsa44:
+    case kWebCryptoAlgorithmIdMlDsa65:
+    case kWebCryptoAlgorithmIdMlDsa87:
+      return true;
+    case kWebCryptoAlgorithmIdHkdf:
+    case kWebCryptoAlgorithmIdPbkdf2:
+    case kWebCryptoAlgorithmIdSha1:
+    case kWebCryptoAlgorithmIdSha256:
+    case kWebCryptoAlgorithmIdSha384:
+    case kWebCryptoAlgorithmIdSha512:
+    case kWebCryptoAlgorithmIdAesCbc:
+    case kWebCryptoAlgorithmIdHmac:
+    case kWebCryptoAlgorithmIdRsaSsaPkcs1v1_5:
+    case kWebCryptoAlgorithmIdAesGcm:
+    case kWebCryptoAlgorithmIdRsaOaep:
+    case kWebCryptoAlgorithmIdAesCtr:
+    case kWebCryptoAlgorithmIdAesKw:
+    case kWebCryptoAlgorithmIdRsaPss:
+    case kWebCryptoAlgorithmIdEcdsa:
+    case kWebCryptoAlgorithmIdEcdh:
+    case kWebCryptoAlgorithmIdEd25519:
+    case kWebCryptoAlgorithmIdX25519:
+    case kWebCryptoAlgorithmIdChaCha20Poly1305:
+    case kWebCryptoAlgorithmIdMlKem768:
+    case kWebCryptoAlgorithmIdMlKem1024:
+    case kWebCryptoAlgorithmIdMlKem768X25519:
+      return false;
+  }
+}
+
+bool WebCryptoAlgorithm::IsMlKem(WebCryptoAlgorithmId id) {
+  switch (id) {
+    case kWebCryptoAlgorithmIdMlKem768:
+    case kWebCryptoAlgorithmIdMlKem1024:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool WebCryptoAlgorithm::IsAsymmetric(WebCryptoAlgorithmId id) {
+  switch (id) {
+    case kWebCryptoAlgorithmIdRsaSsaPkcs1v1_5:
+    case kWebCryptoAlgorithmIdRsaOaep:
+    case kWebCryptoAlgorithmIdRsaPss:
+    case kWebCryptoAlgorithmIdEcdsa:
+    case kWebCryptoAlgorithmIdEcdh:
+    case kWebCryptoAlgorithmIdEd25519:
+    case kWebCryptoAlgorithmIdX25519:
+    case kWebCryptoAlgorithmIdMlDsa44:
+    case kWebCryptoAlgorithmIdMlDsa65:
+    case kWebCryptoAlgorithmIdMlDsa87:
+    case kWebCryptoAlgorithmIdMlKem768:
+    case kWebCryptoAlgorithmIdMlKem1024:
+    case kWebCryptoAlgorithmIdMlKem768X25519:
+      return true;
+    case kWebCryptoAlgorithmIdAesGcm:
+    case kWebCryptoAlgorithmIdAesCtr:
+    case kWebCryptoAlgorithmIdAesKw:
+    case kWebCryptoAlgorithmIdAesCbc:
+    case kWebCryptoAlgorithmIdHmac:
+    case kWebCryptoAlgorithmIdChaCha20Poly1305:
+    case kWebCryptoAlgorithmIdHkdf:
+    case kWebCryptoAlgorithmIdPbkdf2:
+    case kWebCryptoAlgorithmIdSha1:
+    case kWebCryptoAlgorithmIdSha256:
+    case kWebCryptoAlgorithmIdSha384:
+    case kWebCryptoAlgorithmIdSha512:
+      return false;
+  }
 }
 
 void WebCryptoAlgorithm::Assign(const WebCryptoAlgorithm& other) {

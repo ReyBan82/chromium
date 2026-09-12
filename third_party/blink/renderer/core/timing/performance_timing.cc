@@ -9,6 +9,7 @@
 #include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/document_parser_timing.h"
 #include "third_party/blink/renderer/core/dom/document_timing.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/inspector/identifiers_factory.h"
 #include "third_party/blink/renderer/core/loader/document_load_timing.h"
@@ -310,11 +311,8 @@ ResourceLoadTiming* PerformanceTiming::GetResourceLoadTiming() const {
   return loader->GetResponse().GetResourceLoadTiming();
 }
 
-std::unique_ptr<TracedValue> PerformanceTiming::GetNavigationTracingData() {
-  auto data = std::make_unique<TracedValue>();
-  data->SetString("navigationId",
-                  IdentifiersFactory::LoaderId(GetDocumentLoader()));
-  return data;
+void PerformanceTiming::WriteInto(perfetto::TracedDictionary& dict) const {
+  dict.Add("navigationId", IdentifiersFactory::LoaderId(GetDocumentLoader()));
 }
 
 // static
@@ -329,14 +327,14 @@ uint64_t PerformanceTiming::GetNamedAttribute(const AtomicString& name) const {
   return (this->*fn)();
 }
 
-ScriptValue PerformanceTiming::toJSONForBinding(
+ScriptObject PerformanceTiming::toJSONForBinding(
     ScriptState* script_state) const {
   V8ObjectBuilder result(script_state);
   for (const auto& name_attribute_pair : GetAttributeMapping()) {
     result.AddNumber(name_attribute_pair.key,
                      (this->*(name_attribute_pair.value))());
   }
-  return result.GetScriptValue();
+  return result.ToScriptObject();
 }
 
 uint64_t PerformanceTiming::MonotonicTimeToIntegerMilliseconds(

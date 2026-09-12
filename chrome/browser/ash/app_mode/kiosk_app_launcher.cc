@@ -4,6 +4,11 @@
 
 #include "chrome/browser/ash/app_mode/kiosk_app_launcher.h"
 
+#include <optional>
+#include <string>
+
+#include "chrome/browser/ash/app_mode/kiosk_app_launch_error.h"
+
 namespace ash {
 
 KioskAppLauncher::KioskAppLauncher() = default;
@@ -43,15 +48,20 @@ void KioskAppLauncher::ObserverList::NotifyAppPrepared() {
   }
 }
 
+void KioskAppLauncher::ObserverList::NotifyAppLaunching() {
+  observers_.Notify(&KioskAppLauncher::Observer::OnAppLaunching);
+}
+
 void KioskAppLauncher::ObserverList::NotifyAppLaunched() {
   for (auto& observer : observers_) {
     observer.OnAppLaunched();
   }
 }
 
-void KioskAppLauncher::ObserverList::NotifyAppWindowCreated() {
+void KioskAppLauncher::ObserverList::NotifyAppWindowCreated(
+    const std::optional<webapps::AppId>& app_id) {
   for (auto& observer : observers_) {
-    observer.OnAppWindowCreated();
+    observer.OnAppWindowCreated(app_id);
   }
 }
 

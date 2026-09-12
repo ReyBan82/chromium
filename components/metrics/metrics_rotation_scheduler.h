@@ -20,8 +20,8 @@ class MetricsRotationScheduler : public MetricsScheduler {
   // |rotation_callback| must arrange to call RotationFinished on completion.
   MetricsRotationScheduler(
       const base::RepeatingClosure& rotation_callback,
-      const base::RepeatingCallback<base::TimeDelta(void)>& interval_callback,
-      bool fast_startup_for_testing);
+      const base::RepeatingCallback<base::TimeDelta()>& interval_callback,
+      bool fast_startup);
 
   MetricsRotationScheduler(const MetricsRotationScheduler&) = delete;
   MetricsRotationScheduler& operator=(const MetricsRotationScheduler&) = delete;
@@ -56,7 +56,7 @@ class MetricsRotationScheduler : public MetricsScheduler {
   bool waiting_for_init_task_complete_;
 
   // Callback function used to get the standard upload time.
-  base::RepeatingCallback<base::TimeDelta(void)> upload_interval_callback_;
+  base::RepeatingCallback<base::TimeDelta()> upload_interval_callback_;
 };
 
 }  // namespace metrics

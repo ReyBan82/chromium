@@ -12,8 +12,8 @@
 #include <utility>
 #include <vector>
 
-#include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "base/memory/scoped_refptr.h"
 #include "cc/paint/draw_image.h"
 #include "cc/raster/tile_task.h"
 #include "cc/tiles/tile_draw_info.h"
@@ -29,7 +29,12 @@ class TileManager;
 class CC_EXPORT Tile {
  public:
   struct CreateInfo {
-    raw_ptr<const PictureLayerTiling> tiling = nullptr;
+    // RAW_PTR_EXCLUSION: Performance reasons: on-stack pointer + based on
+    // analysis of sampling profiler data
+    // (PictureLayerTilingSet::UpdateTilePriorities ->
+    // PictureLayerTiling::ComputeTilePriorityRects ->
+    // PictureLayerTiling::SetLiveTilesRect -> creates Tile::CreateInfo).
+    RAW_PTR_EXCLUSION const PictureLayerTiling* tiling = nullptr;
     int tiling_i_index = 0;
     int tiling_j_index = 0;
     gfx::Rect enclosing_layer_rect;
@@ -50,6 +55,36 @@ class CC_EXPORT Tile {
   Id id() const {
     return id_;
   }
+
+  TileDrawInfo::Mode draw_mode() {
+    CHECK(IsReadyToDraw());
+    return draw_info().mode();
+  }
+
+  bool IsReadyToDraw() const { return draw_info().IsReadyToDraw(); }
+
+  std::optional<viz::ResourceId> GetResourceId() const {
+    if (IsReadyToDraw() && draw_info().mode() == TileDrawInfo::RESOURCE_MODE) {
+      return draw_info().resource_id_for_export();
+    }
+    return std::nullopt;
+  }
+
+  std::optional<gfx::Size> GetResourceSize() const {
+    if (IsReadyToDraw() && draw_info().mode() == TileDrawInfo::RESOURCE_MODE) {
+      return draw_info().resource_size();
+    }
+    return std::nullopt;
+  }
+
+  std::optional<SkColor4f> GetSolidColor() const {
+    if (draw_info().mode() == TileDrawInfo::SOLID_COLOR_MODE) {
+      return draw_info().solid_color();
+    }
+    return std::nullopt;
+  }
+
+  bool IsOOM() const { return draw_info().mode() == TileDrawInfo::OOM_MODE; }
 
   // TODO(vmpstr): Move this to the iterators.
   bool required_for_activation() const { return required_for_activation_; }
@@ -112,8 +147,6 @@ class CC_EXPORT Tile {
 
   bool HasRasterTask() const { return !!raster_task_.get(); }
 
-  bool HasMissingLCPCandidateImages() const;
-
   void set_solid_color_analysis_performed(bool performed) {
     is_solid_color_analysis_performed_ = performed;
   }
@@ -134,6 +167,11 @@ class CC_EXPORT Tile {
   const PictureLayerTiling* tiling() const { return tiling_; }
   void set_tiling(const PictureLayerTiling* tiling) { tiling_ = tiling; }
 
+  void mark_used() { used_ = true; }
+  void clear_used() { used_ = false; }
+  bool used() const { return used_; }
+  bool deleted() const { return deleted_; }
+
  private:
   friend class TileManager;
   friend class FakeTileManager;
@@ -146,8 +184,14 @@ class CC_EXPORT Tile {
        int source_frame_number,
        int flags);
 
-  const raw_ptr<TileManager> tile_manager_;
-  raw_ptr<const PictureLayerTiling> tiling_;
+  // RAW_PTR_EXCLUSION: Performance reasons: based on analysis of sampling
+  // profiler data (PictureLayerTilingSet::UpdateTilePriorities ->
+  // PictureLayerTiling::ComputeTilePriorityRects ->
+  // PictureLayerTiling::SetLiveTilesRect -> PictureLayerTiling::CreateTile ->
+  // allocates Tile).
+  RAW_PTR_EXCLUSION TileManager* const tile_manager_;
+  RAW_PTR_EXCLUSION const PictureLayerTiling* tiling_;
+
   const gfx::Rect content_rect_;
   const gfx::Rect enclosing_layer_rect_;
   const gfx::AxisTransform2d raster_transform_;
@@ -165,27 +209,27 @@ class CC_EXPORT Tile {
 
   unsigned scheduled_priority_ = 0;
 
-  bool required_for_activation_ : 1;
-  bool required_for_draw_ : 1;
-  bool is_solid_color_analysis_performed_ : 1;
+  bool required_for_activation_ : 1 = false;
+  bool required_for_draw_ : 1 = false;
+  bool is_solid_color_analysis_performed_ : 1 = false;
   const bool can_use_lcd_text_ : 1;
 
   // Set to true if there is a raster task scheduled for this tile that will
   // rasterize a resource with checker images.
-  bool raster_task_scheduled_with_checker_images_ : 1;
+  bool raster_task_scheduled_with_checker_images_ : 1 = false;
+
+  // Set to true in destructor.
+  bool deleted_ : 1 = false;
 
   Id id_;
-
-  // List of Rect-Transform pairs, representing unoccluded parts of the
-  // tile, to support raster culling. See Bug: 1071932
-  std::vector<std::pair<const gfx::Rect, const gfx::AxisTransform2d>>
-      raster_rects_;
 
   // The rect bounding the changes in this Tile vs the previous tile it
   // replaced.
   gfx::Rect invalidated_content_rect_;
 
   scoped_refptr<TileTask> raster_task_;
+
+  bool used_ = false;
 };
 
 }  // namespace cc

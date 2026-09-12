@@ -28,12 +28,13 @@
 #include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/editing/editing_utilities.h"
 #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
 
 DeleteFromTextNodeCommand::DeleteFromTextNodeCommand(Text* node,
-                                                     unsigned offset,
-                                                     unsigned count)
+                                                     wtf_size_t offset,
+                                                     wtf_size_t count)
     : SimpleEditCommand(node->GetDocument()),
       node_(node),
       offset_(offset),
@@ -65,6 +66,11 @@ void DeleteFromTextNodeCommand::DoUnapply() {
     return;
 
   node_->insertData(offset_, text_, IGNORE_EXCEPTION_FOR_TESTING);
+}
+
+String DeleteFromTextNodeCommand::ToString() const {
+  return StrCat({"DeleteFromTextNodeCommand {offset:", String::Number(offset_),
+                 ", count:", String::Number(count_), "}"});
 }
 
 void DeleteFromTextNodeCommand::Trace(Visitor* visitor) const {

@@ -4,6 +4,9 @@
 
 package org.chromium.webapk.lib.runtime_library;
 
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -11,8 +14,8 @@ import android.content.ServiceConnection;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.os.IBinder;
-import android.support.test.InstrumentationRegistry;
 
+import androidx.test.core.app.ApplicationProvider;
 import androidx.test.filters.SmallTest;
 
 import org.junit.Assert;
@@ -23,9 +26,7 @@ import org.junit.runner.RunWith;
 import org.chromium.base.test.BaseJUnit4ClassRunner;
 import org.chromium.base.test.util.CallbackHelper;
 
-/**
- * Instrumentation tests for {@link org.chromium.webapk.WebApkServiceImpl}.
- */
+/** Instrumentation tests for {@link org.chromium.webapk.WebApkServiceImpl}. */
 @RunWith(BaseJUnit4ClassRunner.class)
 public class WebApkServiceImplTest {
     private static final String APK_WITH_WEBAPK_SERVICE_PACKAGE =
@@ -38,16 +39,12 @@ public class WebApkServiceImplTest {
     private Context mContext;
     private Context mTargetContext;
 
-    /**
-     * The target app's uid.
-     */
+    /** The target app's uid. */
     private int mTargetUid;
 
-    /**
-     * CallbackHelper which blocks till the service is connected.
-     */
-    private static class ServiceConnectionWaiter
-            extends CallbackHelper implements ServiceConnection {
+    /** CallbackHelper which blocks till the service is connected. */
+    private static class ServiceConnectionWaiter extends CallbackHelper
+            implements ServiceConnection {
         private IWebApkApi mApi;
 
         public IWebApkApi api() {
@@ -66,14 +63,12 @@ public class WebApkServiceImplTest {
 
     @Before
     public void setUp() {
-        mContext = InstrumentationRegistry.getContext();
-        mTargetContext = InstrumentationRegistry.getTargetContext();
+        mContext = ApplicationProvider.getApplicationContext();
+        mTargetContext = ApplicationProvider.getApplicationContext();
         mTargetUid = getUid(mTargetContext);
     }
 
-    /**
-     * Test that an application which is not allowed to use the WebAPK service actually cannot.
-     */
+    /** Test that an application which is not allowed to use the WebAPK service actually cannot. */
     @Test
     @SmallTest
     public void testApiFailsIfNoPermission() throws Exception {
@@ -86,9 +81,7 @@ public class WebApkServiceImplTest {
         }
     }
 
-    /**
-     * Test that an application which is allowed to use the WebAPK service actually can.
-     */
+    /** Test that an application which is allowed to use the WebAPK service actually can. */
     @Test
     @SmallTest
     public void testApiWorksIfHasPermission() throws Exception {
@@ -103,35 +96,97 @@ public class WebApkServiceImplTest {
         }
     }
 
+    /** Test that notifyNotificationWithChannel creates channel with IMPORTANCE_HIGH. */
+    @Test
+    @SmallTest
+    public void testNotifyNotificationWithChannel_createsHighImportanceChannel() throws Exception {
+        IWebApkApi api = bindService(mContext, mTargetUid, SMALL_ICON_ID);
+        String channelId = "default_channel_id_high";
+        String channelName = "Test WebAPK Channel";
+        Notification notification =
+                new Notification.Builder(mContext, channelId)
+                        .setContentTitle("Title")
+                        .setContentText("Text")
+                        .setSmallIcon(SMALL_ICON_ID)
+                        .build();
+        api.notifyNotificationWithChannel("tag", 100, notification, channelName);
+        NotificationManager notificationManager =
+                (NotificationManager) mContext.getSystemService(Context.NOTIFICATION_SERVICE);
+        NotificationChannel channel = notificationManager.getNotificationChannel(channelId);
+        Assert.assertNotNull(channel);
+        Assert.assertEquals(NotificationManager.IMPORTANCE_HIGH, channel.getImportance());
+    }
+
     /**
-     * Returns the uid for {@link context}.
+     * Test that notifyNotificationWithChannel deletes the unused channel (bidirectional cleanup).
      */
+    @Test
+    @SmallTest
+    public void testNotifyNotificationWithChannel_deletesOldChannels() throws Exception {
+        IWebApkApi api = bindService(mContext, mTargetUid, SMALL_ICON_ID);
+        NotificationManager notificationManager =
+                (NotificationManager) mContext.getSystemService(Context.NOTIFICATION_SERVICE);
+
+        // 1. Post a high priority notification. It should create the high priority channel.
+        String highChannelId = "default_channel_id_high";
+        String channelName = "Test WebAPK Channel";
+        Notification highNotification =
+                new Notification.Builder(mContext, highChannelId)
+                        .setContentTitle("High Title")
+                        .setSmallIcon(SMALL_ICON_ID)
+                        .build();
+        api.notifyNotificationWithChannel("tag", 100, highNotification, channelName);
+        Assert.assertNotNull(notificationManager.getNotificationChannel(highChannelId));
+
+        // 2. Post a default priority notification. It should create the default channel AND delete
+        // the high priority channel.
+        String defaultChannelId = "default_channel_id";
+        Notification defaultNotification =
+                new Notification.Builder(mContext, defaultChannelId)
+                        .setContentTitle("Default Title")
+                        .setSmallIcon(SMALL_ICON_ID)
+                        .build();
+        api.notifyNotificationWithChannel("tag", 101, defaultNotification, channelName);
+
+        Assert.assertNotNull(notificationManager.getNotificationChannel(defaultChannelId));
+        Assert.assertNull(notificationManager.getNotificationChannel(highChannelId));
+
+        // 3. Post a high priority notification again. It should recreate the high priority channel
+        // AND delete the default channel.
+        api.notifyNotificationWithChannel("tag", 102, highNotification, channelName);
+        Assert.assertNotNull(notificationManager.getNotificationChannel(highChannelId));
+        Assert.assertNull(notificationManager.getNotificationChannel(defaultChannelId));
+    }
+
+    /** Returns the uid for {@link context}. */
     private static int getUid(Context context) {
         PackageManager packageManager = context.getPackageManager();
         ApplicationInfo appInfo;
         try {
-            appInfo = packageManager.getApplicationInfo(
-                    context.getPackageName(), PackageManager.GET_META_DATA);
+            appInfo =
+                    packageManager.getApplicationInfo(
+                            context.getPackageName(), PackageManager.GET_META_DATA);
             return appInfo.uid;
         } catch (Exception e) {
-            Assert.fail();
+            throw new RuntimeException(e);
         }
-        return -1;
     }
 
     /**
      * Binds to the WebAPK service and blocks till the service is connected.
+     *
      * @param context The context for the application containing the WebAPK service to bind to.
      * @param authorizedUid The uid of the only application allowed to use the WebAPK service's
-     *        methods.
+     *     methods.
      * @param smallIconId The real small icon id.
      * @return IWebApkApi to use to communicate with the service.
      */
     private static IWebApkApi bindService(Context context, int authorizedUid, int smallIconId)
             throws Exception {
         Intent intent = new Intent();
-        intent.setComponent(new ComponentName(
-                APK_WITH_WEBAPK_SERVICE_PACKAGE, WEBAPK_SERVICE_IMPL_WRAPPER_CLASS_NAME));
+        intent.setComponent(
+                new ComponentName(
+                        APK_WITH_WEBAPK_SERVICE_PACKAGE, WEBAPK_SERVICE_IMPL_WRAPPER_CLASS_NAME));
         intent.putExtra(WebApkServiceImpl.KEY_SMALL_ICON_ID, smallIconId);
         intent.putExtra(WebApkServiceImpl.KEY_HOST_BROWSER_UID, authorizedUid);
 

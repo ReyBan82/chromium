@@ -21,58 +21,51 @@ TEST(WebAppHelpers, GenerateApplicationNameFromURL) {
 
 TEST(WebAppHelpers, GenerateAppId) {
   EXPECT_EQ("fedbieoalmbobgfjapopkghdmhgncnaa",
-            GenerateAppId(/*manifest_id=*/absl::nullopt,
+            GenerateAppId(/*manifest_id=*/std::nullopt,
                           GURL("https://www.chromestatus.com/features")));
 
   // The io2016 example is also walked through at
   // https://play.golang.org/p/VrIq_QKFjiV
   EXPECT_EQ("mjgafbdfajpigcjmkgmeokfbodbcfijl",
-            GenerateAppId(/*manifest_id=*/absl::nullopt,
+            GenerateAppId(/*manifest_id=*/std::nullopt,
                           GURL("https://events.google.com/io2016/"
                                "?utm_source=web_app_manifest")));
 }
 
-TEST(WebAppHelpers, GenerateRecommendedId) {
-  EXPECT_EQ("", GenerateRecommendedId(GURL()));
-  EXPECT_EQ("/", GenerateRecommendedId(GURL("https://example.com/")));
-  EXPECT_EQ("/", GenerateRecommendedId(GURL("https://example.com")));
-  EXPECT_EQ("/start?a=b",
-            GenerateRecommendedId(GURL("https://example.com/start?a=b")));
+TEST(WebAppHelpers, GenerateAppIdForSubApps) {
+  const std::string subapp_starturl = "https://example.com/subapp";
+
+  EXPECT_EQ(
+      "ghmpeckcpimfdekfodogbnnpmkppngmo",
+      GenerateAppId(/*manifest_id_path=*/std::nullopt, GURL(subapp_starturl)));
+
+  EXPECT_EQ("fekpfidpgacknlbhejgeblllclomiekk",
+            GenerateAppId("manifest.webmanifest", GURL(subapp_starturl)));
 }
 
-TEST(WebAppHelpers, IsValidWebAppUrl) {
-  // TODO(crbug.com/1253234): Remove chrome-extension scheme.
-  EXPECT_TRUE(IsValidWebAppUrl(
-      GURL("chrome-extension://oafaagfgbdpldilgjjfjocjglfbolmac")));
-
-  EXPECT_TRUE(IsValidWebAppUrl(GURL("https://chromium.org")));
-  EXPECT_TRUE(IsValidWebAppUrl(GURL("https://www.chromium.org")));
-  EXPECT_TRUE(
-      IsValidWebAppUrl(GURL("https://www.chromium.org/path/to/page.html")));
-  EXPECT_TRUE(IsValidWebAppUrl(GURL("http://chromium.org")));
-  EXPECT_TRUE(IsValidWebAppUrl(GURL("http://www.chromium.org")));
-  EXPECT_TRUE(
-      IsValidWebAppUrl(GURL("http://www.chromium.org/path/to/page.html")));
-  EXPECT_TRUE(IsValidWebAppUrl(GURL("https://examle.com/foo?bar")));
-  EXPECT_TRUE(IsValidWebAppUrl(GURL("https://examle.com/foo#bar")));
-
-  EXPECT_FALSE(IsValidWebAppUrl(GURL()));
-  EXPECT_FALSE(IsValidWebAppUrl(GURL("ftp://www.chromium.org")));
-  EXPECT_FALSE(IsValidWebAppUrl(GURL("chrome://flags")));
-  EXPECT_FALSE(IsValidWebAppUrl(GURL("about:blank")));
-  EXPECT_FALSE(
-      IsValidWebAppUrl(GURL("file://mhjfbmdgcfjbbpaeojofohoefgiehjai")));
-  EXPECT_FALSE(IsValidWebAppUrl(GURL("chrome://extensions")));
-  EXPECT_FALSE(
-      IsValidWebAppUrl(GURL("filesystem:http://example.com/path/file.html")));
-  EXPECT_TRUE(IsValidWebAppUrl(GURL("chrome://password-manager")));
+TEST(WebAppHelpers, GenerateManifestIdFromStartUrlOnly) {
+  EXPECT_EQ(
+      GURL("https://example.com/").spec(),
+      GenerateManifestIdFromStartUrlOnly(GURL("https://example.com/")).spec());
+  EXPECT_EQ(
+      GURL("https://example.com").spec(),
+      GenerateManifestIdFromStartUrlOnly(GURL("https://example.com")).spec());
+  EXPECT_EQ(
+      GURL("https://example.com/start?a=b").spec(),
+      GenerateManifestIdFromStartUrlOnly(GURL("https://example.com/start?a=b"))
+          .spec());
+  EXPECT_EQ(GURL("https://example.com/start").spec(),
+            GenerateManifestIdFromStartUrlOnly(
+                GURL("https://example.com/start#fragment"))
+                .spec());
 }
 
 TEST(WebAppHelpers, ManifestIdEncoding) {
   GURL start_url("https://example.com/abc");
-  // ASCII character.
-  EXPECT_EQ(GenerateAppId("j", start_url), GenerateAppId("%6a", start_url));
-  EXPECT_EQ(GenerateAppId("%6Ax", start_url), GenerateAppId("%6ax", start_url));
+  // ASCII character. URL parser no longer unescapes percent encoded ASCII
+  // characters. See https://crbug.com/40198802.
+  EXPECT_EQ(GenerateAppId("j", start_url), GenerateAppId("j", start_url));
+  EXPECT_EQ(GenerateAppId("%6Ax", start_url), GenerateAppId("%6Ax", start_url));
 
   // Special characters.
   EXPECT_EQ(GenerateAppId("a😀b", start_url),
@@ -82,4 +75,30 @@ TEST(WebAppHelpers, ManifestIdEncoding) {
   // "/"" is excluded from encoding according to url spec.
   EXPECT_NE(GenerateAppId("a/b", start_url), GenerateAppId("a%2Fb", start_url));
 }
+
+TEST(WebAppHelpers, ManifestIdWithQueriesAndFragments) {
+  GURL start_url_long = GURL("https://example.com/start_url/long/path.html");
+  GURL url = GURL("https://example.com/test");
+  GURL url_with_query = GURL("https://example.com/test?id");
+  GURL url_with_fragment = GURL("https://example.com/test#id");
+  GURL url_with_query_and_fragment =
+      GURL("https://example.com/test?id#fragment");
+
+  EXPECT_EQ(url.spec(), GenerateManifestIdFromStartUrlOnly(url).spec());
+  EXPECT_EQ(url.spec(),
+            GenerateManifestIdFromStartUrlOnly(url_with_fragment).spec());
+  EXPECT_EQ(url_with_query.spec(),
+            GenerateManifestIdFromStartUrlOnly(url_with_query).spec());
+  EXPECT_EQ(
+      url_with_query.spec(),
+      GenerateManifestIdFromStartUrlOnly(url_with_query_and_fragment).spec());
+
+  EXPECT_EQ(url.spec(), GenerateManifestId("test", start_url_long).spec());
+  EXPECT_EQ(url.spec(), GenerateManifestId("test#id", start_url_long).spec());
+  EXPECT_EQ(url_with_query.spec(),
+            GenerateManifestId("test?id", start_url_long).spec());
+  EXPECT_EQ(url_with_query.spec(),
+            GenerateManifestId("test?id#fragment", start_url_long).spec());
+}
+
 }  // namespace web_app

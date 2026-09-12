@@ -32,6 +32,7 @@ absl_cc_test(
   COPTS
     ${ABSL_TEST_COPTS}
   DEPS
+    absl::random_random
     absl::sample_recorder
     absl::time
     GTest::gmock_main
@@ -40,10 +41,10 @@ absl_cc_test(
 absl_cc_library(
   NAME
     exponential_biased
-  SRCS
-    "internal/exponential_biased.cc"
   HDRS
     "internal/exponential_biased.h"
+  SRCS
+    "internal/exponential_biased.cc"
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
@@ -67,10 +68,10 @@ absl_cc_test(
 absl_cc_library(
   NAME
     periodic_sampler
-  SRCS
-    "internal/periodic_sampler.cc"
   HDRS
     "internal/periodic_sampler.h"
+  SRCS
+    "internal/periodic_sampler.cc"
   COPTS
     ${ABSL_DEFAULT_COPTS}
   DEPS
@@ -91,3 +92,42 @@ absl_cc_test(
     GTest::gmock_main
 )
 
+# Internal-only target, do not depend on directly
+absl_cc_library(
+  NAME
+    profile_builder
+  HDRS
+    "internal/profile_builder.h"
+  SRCS
+    "internal/profile_builder.cc"
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::btree
+    absl::config
+    absl::core_headers
+    absl::flat_hash_map
+    absl::raw_logging_internal
+    absl::span
+    absl::str_format
+    absl::string_view
+    absl::strings
+)
+
+absl_cc_library(
+  NAME
+    hashtable_profiler
+  HDRS
+    "hashtable.h"
+  SRCS
+    "hashtable.cc"
+  COPTS
+    ${ABSL_DEFAULT_COPTS}
+  DEPS
+    absl::config
+    absl::core_headers
+    absl::hashtablez_sampler
+    absl::profile_builder
+    absl::span
+    absl::strings
+)

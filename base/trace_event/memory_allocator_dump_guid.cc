@@ -4,20 +4,21 @@
 
 #include "base/trace_event/memory_allocator_dump_guid.h"
 
+#include "base/containers/span.h"
 #include "base/format_macros.h"
-#include "base/hash/sha1.h"
+#include "base/numerics/byte_conversions.h"
 #include "base/strings/stringprintf.h"
+#include "third_party/boringssl/src/include/openssl/sha2.h"
 
-namespace base {
-namespace trace_event {
+namespace base::trace_event {
 
 namespace {
 
 uint64_t HashString(const std::string& str) {
-  uint64_t hash[(kSHA1Length + sizeof(uint64_t) - 1) / sizeof(uint64_t)] = {0};
-  SHA1HashBytes(reinterpret_cast<const unsigned char*>(str.data()), str.size(),
-                reinterpret_cast<unsigned char*>(hash));
-  return hash[0];
+  std::array<uint8_t, SHA256_DIGEST_LENGTH> digest;
+  ::SHA256(reinterpret_cast<const uint8_t*>(str.data()), str.size(),
+           digest.data());
+  return base::U64FromLittleEndian(base::span(digest).first<8u>());
 }
 
 }  // namespace
@@ -25,16 +26,13 @@ uint64_t HashString(const std::string& str) {
 MemoryAllocatorDumpGuid::MemoryAllocatorDumpGuid(uint64_t guid) : guid_(guid) {}
 
 MemoryAllocatorDumpGuid::MemoryAllocatorDumpGuid()
-    : MemoryAllocatorDumpGuid(0u) {
-}
+    : MemoryAllocatorDumpGuid(0u) {}
 
 MemoryAllocatorDumpGuid::MemoryAllocatorDumpGuid(const std::string& guid_str)
-    : MemoryAllocatorDumpGuid(HashString(guid_str)) {
-}
+    : MemoryAllocatorDumpGuid(HashString(guid_str)) {}
 
 std::string MemoryAllocatorDumpGuid::ToString() const {
   return StringPrintf("%" PRIx64, guid_);
 }
 
-}  // namespace trace_event
-}  // namespace base
+}  // namespace base::trace_event

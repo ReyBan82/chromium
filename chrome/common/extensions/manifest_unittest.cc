@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -14,15 +15,16 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/values.h"
 #include "components/crx_file/id_util.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/api/shared_module.h"
 #include "extensions/common/error_utils.h"
 #include "extensions/common/features/feature.h"
 #include "extensions/common/features/simple_feature.h"
 #include "extensions/common/install_warning.h"
 #include "extensions/common/manifest_constants.h"
-#include "extensions/common/value_builder.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 using extensions::mojom::ManifestLocation;
 
@@ -39,17 +41,17 @@ class ManifestUnitTest : public testing::Test {
  protected:
   void AssertType(Manifest* manifest, Manifest::Type type) {
     EXPECT_EQ(type, manifest->type());
-    EXPECT_EQ(type == Manifest::TYPE_THEME, manifest->is_theme());
-    EXPECT_EQ(type == Manifest::TYPE_PLATFORM_APP,
+    EXPECT_EQ(type == Manifest::Type::kTheme, manifest->is_theme());
+    EXPECT_EQ(type == Manifest::Type::kPlatformApp,
               manifest->is_platform_app());
-    EXPECT_EQ(type == Manifest::TYPE_LEGACY_PACKAGED_APP,
+    EXPECT_EQ(type == Manifest::Type::kLegacyPackagedApp,
               manifest->is_legacy_packaged_app());
-    EXPECT_EQ(type == Manifest::TYPE_HOSTED_APP, manifest->is_hosted_app());
-    EXPECT_EQ(type == Manifest::TYPE_SHARED_MODULE,
+    EXPECT_EQ(type == Manifest::Type::kHostedApp, manifest->is_hosted_app());
+    EXPECT_EQ(type == Manifest::Type::kSharedModule,
               manifest->is_shared_module());
-    EXPECT_EQ(type == Manifest::TYPE_LOGIN_SCREEN_EXTENSION,
+    EXPECT_EQ(type == Manifest::Type::kLoginScreenExtension,
               manifest->is_login_screen_extension());
-    EXPECT_EQ(type == Manifest::TYPE_CHROMEOS_SYSTEM_EXTENSION,
+    EXPECT_EQ(type == Manifest::Type::kChromeOSSystemExtension,
               manifest->is_chromeos_system_extension());
   }
 
@@ -58,7 +60,7 @@ class ManifestUnitTest : public testing::Test {
   void MutateManifest(std::unique_ptr<Manifest>& manifest,
                       const std::string& key,
                       base::Value value) {
-    base::Value::Dict manifest_value = manifest->value()->Clone();
+    base::DictValue manifest_value = manifest->value()->Clone();
     manifest_value.SetByDottedPath(key, std::move(value));
     ExtensionId extension_id = manifest->extension_id();
     manifest = std::make_unique<Manifest>(
@@ -68,7 +70,7 @@ class ManifestUnitTest : public testing::Test {
   // Helper function to delete the |key| from |manifest|.
   void DeleteManifestKey(std::unique_ptr<Manifest>& manifest,
                          const std::string& key) {
-    base::Value::Dict manifest_value = manifest->value()->Clone();
+    base::DictValue manifest_value = manifest->value()->Clone();
     manifest_value.RemoveByDottedPath(key);
     ExtensionId extension_id = manifest->extension_id();
     manifest = std::make_unique<Manifest>(
@@ -96,22 +98,20 @@ class ManifestUnitTest : public testing::Test {
 
 // Verifies that extensions can access the correct keys.
 TEST_F(ManifestUnitTest, Extension) {
-  base::Value::Dict manifest_value;
-  manifest_value.Set(keys::kName, "extension");
-  manifest_value.Set(keys::kVersion, "1");
-  manifest_value.Set(keys::kManifestVersion, 2);
+  auto manifest_value = base::DictValue()
+                            .Set(keys::kName, "extension")
+                            .Set(keys::kVersion, "1")
+                            .Set(keys::kManifestVersion, 2)
+                            .Set("unknown_key", "foo");
   manifest_value.SetByDottedPath(keys::kBackgroundPage, "bg.html");
-  manifest_value.Set("unknown_key", "foo");
 
   std::unique_ptr<Manifest> manifest(
       new Manifest(ManifestLocation::kInternal, std::move(manifest_value),
                    crx_file::id_util::GenerateId("extid")));
-  std::string error;
   std::vector<InstallWarning> warnings;
-  EXPECT_TRUE(manifest->ValidateManifest(&error, &warnings));
-  EXPECT_TRUE(error.empty());
+  manifest->ValidateManifest(&warnings);
   ASSERT_EQ(1u, warnings.size());
-  AssertType(manifest.get(), Manifest::TYPE_EXTENSION);
+  AssertType(manifest.get(), Manifest::Type::kExtension);
 
   // The known key 'background.page' should be accessible.
   const std::string* background_page =
@@ -137,85 +137,77 @@ TEST_F(ManifestUnitTest, Extension) {
 
 // Verifies that key restriction based on type works.
 TEST_F(ManifestUnitTest, ExtensionTypes) {
-  base::Value::Dict value;
-  value.Set(keys::kName, "extension");
-  value.Set(keys::kVersion, "1");
-
-  const base::Value empty_dict(base::Value::Type::DICT);
+  auto value =
+      base::DictValue().Set(keys::kName, "extension").Set(keys::kVersion, "1");
 
   std::unique_ptr<Manifest> manifest(
       new Manifest(ManifestLocation::kInternal, std::move(value),
                    crx_file::id_util::GenerateId("extid")));
-  std::string error;
   std::vector<InstallWarning> warnings;
-  EXPECT_TRUE(manifest->ValidateManifest(&error, &warnings));
-  EXPECT_TRUE(error.empty());
+  manifest->ValidateManifest(&warnings);
   EXPECT_TRUE(warnings.empty());
 
   // By default, the type is Extension.
-  AssertType(manifest.get(), Manifest::TYPE_EXTENSION);
+  AssertType(manifest.get(), Manifest::Type::kExtension);
 
   // Login screen extension
   MutateManifestForLoginScreen(manifest, true);
-  AssertType(manifest.get(), Manifest::TYPE_LOGIN_SCREEN_EXTENSION);
+  AssertType(manifest.get(), Manifest::Type::kLoginScreenExtension);
   MutateManifestForLoginScreen(manifest, false);
 
   // Theme.
-  MutateManifest(manifest, keys::kTheme, base::Value(base::Value::Dict()));
-  AssertType(manifest.get(), Manifest::TYPE_THEME);
+  MutateManifest(manifest, keys::kTheme, base::Value(base::DictValue()));
+  AssertType(manifest.get(), Manifest::Type::kTheme);
   DeleteManifestKey(manifest, keys::kTheme);
 
   // Shared module.
   MutateManifest(manifest, api::shared_module::ManifestKeys::kExport,
-                 base::Value(base::Value::Dict()));
-  AssertType(manifest.get(), Manifest::TYPE_SHARED_MODULE);
+                 base::Value(base::DictValue()));
+  AssertType(manifest.get(), Manifest::Type::kSharedModule);
   DeleteManifestKey(manifest, api::shared_module::ManifestKeys::kExport);
 
   // Packaged app.
-  MutateManifest(manifest, keys::kApp, base::Value(base::Value::Dict()));
-  AssertType(manifest.get(), Manifest::TYPE_LEGACY_PACKAGED_APP);
+  MutateManifest(manifest, keys::kApp, base::Value(base::DictValue()));
+  AssertType(manifest.get(), Manifest::Type::kLegacyPackagedApp);
 
   // Packaged app for login screen remains a packaged app.
   MutateManifestForLoginScreen(manifest, true);
-  AssertType(manifest.get(), Manifest::TYPE_LEGACY_PACKAGED_APP);
+  AssertType(manifest.get(), Manifest::Type::kLegacyPackagedApp);
   MutateManifestForLoginScreen(manifest, false);
 
   // Platform app with event page.
   MutateManifest(manifest, keys::kPlatformAppBackground,
-                 base::Value(base::Value::Dict()));
-  AssertType(manifest.get(), Manifest::TYPE_PLATFORM_APP);
+                 base::Value(base::DictValue()));
+  AssertType(manifest.get(), Manifest::Type::kPlatformApp);
   DeleteManifestKey(manifest, keys::kPlatformAppBackground);
 
   // Hosted app.
-  MutateManifest(manifest, keys::kWebURLs, base::Value(base::Value::List()));
-  AssertType(manifest.get(), Manifest::TYPE_HOSTED_APP);
+  MutateManifest(manifest, keys::kWebURLs, base::Value(base::ListValue()));
+  AssertType(manifest.get(), Manifest::Type::kHostedApp);
   DeleteManifestKey(manifest, keys::kWebURLs);
   MutateManifest(manifest, keys::kLaunchWebURL, base::Value("foo"));
-  AssertType(manifest.get(), Manifest::TYPE_HOSTED_APP);
+  AssertType(manifest.get(), Manifest::Type::kHostedApp);
   DeleteManifestKey(manifest, keys::kLaunchWebURL);
 }
 
 // Verifies that the getters filter restricted keys taking into account the
 // manifest version.
 TEST_F(ManifestUnitTest, RestrictedKeys_ManifestVersion) {
-  base::Value::Dict value = DictionaryBuilder()
-                                .Set(keys::kName, "extension")
-                                .Set(keys::kVersion, "1")
-                                .Set(keys::kManifestVersion, 2)
-                                .Build();
+  base::DictValue value = base::DictValue()
+                              .Set(keys::kName, "extension")
+                              .Set(keys::kVersion, "1")
+                              .Set(keys::kManifestVersion, 2);
 
   auto manifest =
       std::make_unique<Manifest>(ManifestLocation::kInternal, std::move(value),
                                  crx_file::id_util::GenerateId("extid"));
-  std::string error;
   std::vector<InstallWarning> warnings;
-  EXPECT_TRUE(manifest->ValidateManifest(&error, &warnings));
-  EXPECT_TRUE(error.empty());
+  manifest->ValidateManifest(&warnings);
   EXPECT_TRUE(warnings.empty());
 
   // "host_permissions" requires manifest version 3.
   MutateManifest(manifest, keys::kHostPermissions,
-                 base::Value(base::Value::List()));
+                 base::Value(base::ListValue()));
   EXPECT_FALSE(manifest->FindKey(keys::kHostPermissions));
 
   // Update the extension to be manifest_version: 3; the host_permissions
@@ -227,29 +219,26 @@ TEST_F(ManifestUnitTest, RestrictedKeys_ManifestVersion) {
 // Verifies that the getters filter restricted keys taking into account the
 // item type.
 TEST_F(ManifestUnitTest, RestrictedKeys_ItemType) {
-  base::Value::Dict value = DictionaryBuilder()
-                                .Set(keys::kName, "item")
-                                .Set(keys::kVersion, "1")
-                                .Set(keys::kManifestVersion, 2)
-                                .Set(keys::kPageAction, base::Value::Dict())
-                                .Build();
+  base::DictValue value = base::DictValue()
+                              .Set(keys::kName, "item")
+                              .Set(keys::kVersion, "1")
+                              .Set(keys::kManifestVersion, 2)
+                              .Set(keys::kPageAction, base::DictValue());
 
   auto manifest =
       std::make_unique<Manifest>(ManifestLocation::kInternal, std::move(value),
                                  crx_file::id_util::GenerateId("extid"));
-  std::string error;
   std::vector<InstallWarning> warnings;
-  EXPECT_TRUE(manifest->ValidateManifest(&error, &warnings));
-  EXPECT_TRUE(error.empty());
+  manifest->ValidateManifest(&warnings);
   EXPECT_TRUE(warnings.empty());
-  AssertType(manifest.get(), Manifest::TYPE_EXTENSION);
+  AssertType(manifest.get(), Manifest::Type::kExtension);
 
   // Extensions can specify "page_action"...
   EXPECT_TRUE(manifest->FindKey(keys::kPageAction));
 
   MutateManifest(manifest, keys::kPlatformAppBackground,
-                 base::Value(base::Value::Dict()));
-  AssertType(manifest.get(), Manifest::TYPE_PLATFORM_APP);
+                 base::Value(base::DictValue()));
+  AssertType(manifest.get(), Manifest::Type::kPlatformApp);
   // ...But platform apps may not.
   EXPECT_FALSE(manifest->FindKey(keys::kPageAction));
 }

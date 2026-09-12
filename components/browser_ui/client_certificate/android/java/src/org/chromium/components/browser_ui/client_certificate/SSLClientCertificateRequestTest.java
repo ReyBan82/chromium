@@ -11,34 +11,24 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import android.content.ActivityNotFoundException;
 import android.security.KeyChainAliasCallback;
 
-import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.components.browser_ui.client_certificate.SSLClientCertificateRequest.CertSelectionFailureDialog;
 import org.chromium.components.browser_ui.client_certificate.SSLClientCertificateRequest.KeyChainCertSelectionWrapper;
 
-/**
- * Unit tests for the SSLClientCertificateRequest class.
- */
+/** Unit tests for the SSLClientCertificateRequest class. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class SSLClientCertificateRequestTest {
-    @Mock
-    private KeyChainCertSelectionWrapper mKeyChainMock;
-    @Mock
-    private KeyChainAliasCallback mCallbackMock;
-    @Mock
-    private CertSelectionFailureDialog mFailureDialogMock;
-
-    @Before
-    public void setUp() {
-        MockitoAnnotations.initMocks(this);
-    }
+    @Mock private KeyChainCertSelectionWrapper mKeyChainMock;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private KeyChainAliasCallback mCallbackMock;
+    @Mock private CertSelectionFailureDialog mFailureDialogMock;
 
     @Test
     public void testSelectCertActivityNotFound() {

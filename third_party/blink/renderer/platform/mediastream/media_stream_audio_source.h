@@ -21,6 +21,10 @@ namespace base {
 class SingleThreadTaskRunner;
 }
 
+namespace media {
+struct AudioGlitchInfo;
+}
+
 namespace blink {
 
 PLATFORM_EXPORT extern const int kFallbackAudioLatencyMs;
@@ -104,34 +108,53 @@ class PLATFORM_EXPORT MediaStreamAudioSource
   // method to provide safe down-casting to their type.
   virtual void* GetClassIdentifier() const;
 
-  // Returns true if the source has audio processing properties and the
-  // reconfigurable settings associated to audio processing match
-  // |selected_properties|; false otherwise.
-  bool HasSameReconfigurableSettings(
+  // Returns true if the source has audio processing properties and its
+  // session identity properties match `selected_properties`, allowing the
+  // existing capture session and source to be reused; false otherwise.
+  bool HasSameSessionIdentityProperties(
       const blink::AudioProcessingProperties& selected_properties) const;
 
-  // Returns true if |this| and |other_source| have audio processing properties
-  // and the set of settings that cannot be reconfigured associated to these
-  // audio sources match; false otherwise.
-  bool HasSameNonReconfigurableSettings(
+  // Returns true if `this` and `other_source` have audio processing properties
+  // and properties that are interlocked across processed sources on the same
+  // capture device match (auto gain control, noise suppression); false
+  // otherwise.
+  // TODO(crbug.com/558631113): Update this once interlocked properties are
+  // scoped per session rather than per device.
+  bool HasSameInterlockingProperties(
       MediaStreamAudioSource* other_source) const;
 
-  // Returns the audio processing properties associated to this source if any,
-  // or nullopt otherwise.
-  virtual absl::optional<blink::AudioProcessingProperties>
-  GetAudioProcessingProperties() const {
-    return absl::nullopt;
+  // Returns the initial audio processing properties with which this source was
+  // created, before any dynamic runtime reconfiguration, or nullopt if this
+  // source does not have audio processing properties.
+  virtual std::optional<blink::AudioProcessingProperties>
+  GetInitialAudioProcessingProperties() const {
+    return std::nullopt;
   }
 
-  absl::optional<media::AudioCapturerSource::ErrorCode> ErrorCode() {
-    DCHECK(GetTaskRunner()->BelongsToCurrentThread());
-    return error_code_;
+  // Returns the audio processing properties associated to this source if any,
+  // or nullopt otherwise. Defaults to GetInitialAudioProcessingProperties().
+  virtual std::optional<blink::AudioProcessingProperties>
+  GetAudioProcessingProperties() const {
+    return GetInitialAudioProcessingProperties();
   }
+
+  virtual bool IsProcessedSource() const { return false; }
+  virtual bool IsApmProcessedSource() const { return false; }
+
+#if BUILDFLAG(CHROME_WIDE_ECHO_CANCELLATION)
+  virtual void SetVoiceIsolation(bool enabled) {}
+#endif
+
+  std::optional<media::AudioCapturerSource::ErrorCode> ErrorCode();
 
   // Returns a new MediaStreamAudioTrack. |id| is the blink track's ID in UTF-8.
   // Subclasses may override this to provide an extended implementation.
   virtual std::unique_ptr<MediaStreamAudioTrack> CreateMediaStreamAudioTrack(
       const std::string& id);
+
+  // Number of MediaStreamAudioTracks added as consumers.
+  size_t NumTracks() const override;
+  Vector<MediaStreamAudioTrack*> GetTracks() const;
 
  protected:
   // Returns true if the source has already been started and has not yet been
@@ -165,7 +188,8 @@ class PLATFORM_EXPORT MediaStreamAudioSource
   // Called by subclasses to deliver audio data to the currently-connected
   // tracks. This method is thread-safe.
   void DeliverDataToTracks(const media::AudioBus& audio_bus,
-                           base::TimeTicks reference_time);
+                           base::TimeTicks reference_time,
+                           const media::AudioGlitchInfo& glitch_info);
 
   // Called by subclasses when capture error occurs.
   // Note: This can be called on any thread, and will post a task to the main
@@ -190,15 +214,9 @@ class PLATFORM_EXPORT MediaStreamAudioSource
   // this.
   void StopAudioDeliveryTo(MediaStreamAudioTrack* track);
 
-  // Number of MediaStreamAudioTracks added as consumers.
-  int NumConsumers() const;
-
   void LogMessage(const std::string& message);
 
-  void SetErrorCode(media::AudioCapturerSource::ErrorCode code) {
-    DCHECK(GetTaskRunner()->BelongsToCurrentThread());
-    error_code_ = code;
-  }
+  void SetErrorCode(media::AudioCapturerSource::ErrorCode code);
 
   // The portion of StopSourceOnError processing carried out on the main thread.
   void StopSourceOnErrorOnTaskRunner(
@@ -218,7 +236,7 @@ class PLATFORM_EXPORT MediaStreamAudioSource
   MediaStreamAudioDeliverer<MediaStreamAudioTrack> deliverer_;
 
   // Code set if this source was closed due to an error.
-  absl::optional<media::AudioCapturerSource::ErrorCode> error_code_;
+  std::optional<media::AudioCapturerSource::ErrorCode> error_code_;
 
   // Provides weak pointers so that MediaStreamAudioTracks won't call
   // StopAudioDeliveryTo() if this instance dies first.

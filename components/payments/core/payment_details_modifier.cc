@@ -20,7 +20,7 @@ static const char kPaymentDetailsModifierData[] = "data";
 
 }  // namespace
 
-PaymentDetailsModifier::PaymentDetailsModifier() {}
+PaymentDetailsModifier::PaymentDetailsModifier() = default;
 PaymentDetailsModifier::~PaymentDetailsModifier() = default;
 
 PaymentDetailsModifier::PaymentDetailsModifier(
@@ -49,13 +49,8 @@ bool PaymentDetailsModifier::operator==(
          additional_display_items == other.additional_display_items;
 }
 
-bool PaymentDetailsModifier::operator!=(
-    const PaymentDetailsModifier& other) const {
-  return !(*this == other);
-}
-
-base::Value::Dict PaymentDetailsModifier::ToValueDict() const {
-  base::Value::Dict result;
+base::DictValue PaymentDetailsModifier::ToValueDict() const {
+  base::DictValue result;
   result.Set(kPaymentDetailsModifierSupportedMethods,
              method_data.supported_method);
   result.Set(kPaymentDetailsModifierData, method_data.data);

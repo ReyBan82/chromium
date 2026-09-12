@@ -31,17 +31,20 @@
 #include "mojo/public/mojom/base/text_direction.mojom-blink-forward.h"
 #include "third_party/blink/public/mojom/webpreferences/web_preferences.mojom-blink.h"
 #include "third_party/blink/renderer/core/core_export.h"
+#include "third_party/blink/renderer/core/editing/commands/edit_command.h"
 #include "third_party/blink/renderer/core/editing/editing_style.h"
 #include "third_party/blink/renderer/core/editing/finder/find_options.h"
 #include "third_party/blink/renderer/core/editing/forward.h"
 #include "third_party/blink/renderer/core/editing/visible_selection.h"
 #include "third_party/blink/renderer/core/events/input_event.h"
+#include "third_party/blink/renderer/core/loader/resource/image_resource_observer.h"
 #include "third_party/blink/renderer/core/scroll/scroll_alignment.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
 
 class CompositeEditCommand;
+class DataTransfer;
 class DragData;
 class EditingBehavior;
 class EditorCommand;
@@ -55,13 +58,14 @@ enum class SyncCondition;
 class CSSPropertyValueSet;
 class TextEvent;
 class UndoStack;
+class SelectionForUndoStep;
 
 enum class DeleteDirection;
 enum class DeleteMode { kSimple, kSmart };
 enum class InsertMode { kSimple, kSmart };
-enum class DragSourceType { kHTMLSource, kPlainTextSource };
+enum class DragSourceType { kHtmlSource, kPlainTextSource };
 enum class EditorParagraphSeparator { kIsDiv, kIsP };
-enum class EditorCommandSource { kMenuOrKeyBinding, kDOM };
+enum class EditorCommandSource { kMenuOrKeyBinding, kDom };
 
 class CORE_EXPORT Editor final : public GarbageCollected<Editor> {
  public:
@@ -88,8 +92,13 @@ class CORE_EXPORT Editor final : public GarbageCollected<Editor> {
 
   static void CountEvent(ExecutionContext*, const Event&);
   void CopyImage(const HitTestResult&);
+  void CopyImage(const HitTestResult& result,
+                 const scoped_refptr<Image>& image);
 
   void RespondToChangedContents(const Position&);
+  void NotifyAccessibilityOfDeletionOrInsertionInTextField(
+      const SelectionForUndoStep&,
+      bool is_deletion);
 
   void RegisterCommandGroup(CompositeEditCommand* command_group_wrapper);
 
@@ -102,8 +111,8 @@ class CORE_EXPORT Editor final : public GarbageCollected<Editor> {
   void ApplyParagraphStyleToSelection(CSSPropertyValueSet*,
                                       InputEvent::InputType);
 
-  void SetShouldStyleWithCSS(bool flag) { should_style_with_css_ = flag; }
-  bool ShouldStyleWithCSS() const { return should_style_with_css_; }
+  void SetShouldStyleWithCss(bool flag) { should_style_with_css_ = flag; }
+  bool ShouldStyleWithCss() const { return should_style_with_css_; }
 
   EditorCommand CreateCommand(const String& command_name)
       const;  // Command source is CommandFromMenuOrKeyBinding.
@@ -121,7 +130,10 @@ class CORE_EXPORT Editor final : public GarbageCollected<Editor> {
       const String&,
       bool select_inserted_text,
       TextEvent* triggering_event,
-      InputEvent::InputType = InputEvent::InputType::kInsertText);
+      InputEvent::InputType = InputEvent::InputType::kInsertText,
+      EditCommand::PasswordEchoBehavior =
+          EditCommand::PasswordEchoBehavior::kDoNotEcho,
+      DataTransfer* = nullptr);
   bool InsertLineBreak();
   bool InsertParagraphSeparator();
 
@@ -147,9 +159,11 @@ class CORE_EXPORT Editor final : public GarbageCollected<Editor> {
 
   void SetStartNewKillRingSequence(bool);
 
+  void ElementRemoved(Element* element);
+
   void Clear();
 
-  SelectionInDOMTree SelectionForCommand(Event*);
+  SelectionInDomTree SelectionForCommand(Event*);
 
   KillRing& GetKillRing() const { return *kill_ring_; }
 
@@ -181,18 +195,18 @@ class CORE_EXPORT Editor final : public GarbageCollected<Editor> {
   void RespondToChangedSelection();
   void SyncSelection(blink::SyncCondition force_sync);
 
-  bool MarkedTextMatchesAreHighlighted() const;
-  void SetMarkedTextMatchesAreHighlighted(bool);
-
   void ReplaceSelectionWithFragment(DocumentFragment*,
                                     bool select_replacement,
                                     bool smart_replace,
                                     bool match_style,
-                                    InputEvent::InputType);
+                                    InputEvent::InputType,
+                                    EditCommand::PasswordEchoBehavior,
+                                    DataTransfer* = nullptr);
   void ReplaceSelectionWithText(const String&,
                                 bool select_replacement,
                                 bool smart_replace,
-                                InputEvent::InputType);
+                                InputEvent::InputType,
+                                EditCommand::PasswordEchoBehavior);
 
   // Implementation of WebLocalFrameImpl::ReplaceSelection. Does not use smart
   // replacement.
@@ -200,7 +214,8 @@ class CORE_EXPORT Editor final : public GarbageCollected<Editor> {
 
   void ReplaceSelectionAfterDragging(DocumentFragment*,
                                      InsertMode,
-                                     DragSourceType);
+                                     DragSourceType,
+                                     DataTransfer*);
 
   // Return false if frame was destroyed by event handler, should stop executing
   // remaining actions.
@@ -231,19 +246,25 @@ class CORE_EXPORT Editor final : public GarbageCollected<Editor> {
   void RevealSelectionAfterEditingOperation(
       const mojom::blink::ScrollAlignment& = ScrollAlignment::ToEdgeIfNeeded());
 
+  void AddImageResourceObserver(ImageResourceObserver*);
+  void RemoveImageResourceObserver(ImageResourceObserver*);
+
  private:
   Member<LocalFrame> frame_;
   Member<CompositeEditCommand> last_edit_command_;
   const Member<UndoStack> undo_stack_;
-  int prevent_reveal_selection_;
-  bool should_start_new_kill_ring_sequence_;
-  bool should_style_with_css_;
+  int prevent_reveal_selection_ = 0;
+  bool should_start_new_kill_ring_sequence_ = false;
+  // This is off by default, since most editors want this behavior (this
+  // matches IE but not FF).
+  bool should_style_with_css_ = false;
   const std::unique_ptr<KillRing> kill_ring_;
   VisibleSelection mark_;
-  bool are_marked_text_matches_highlighted_;
-  EditorParagraphSeparator default_paragraph_separator_;
+  EditorParagraphSeparator default_paragraph_separator_ =
+      EditorParagraphSeparator::kIsDiv;
   Member<EditingStyle> typing_style_;
   bool mark_is_directional_ = false;
+  HeapHashSet<Member<ImageResourceObserver>> image_resource_observers_;
 
   LocalFrame& GetFrame() const {
     DCHECK(frame_);
@@ -266,10 +287,6 @@ inline const VisibleSelection& Editor::Mark() const {
 
 inline bool Editor::MarkIsDirectional() const {
   return mark_is_directional_;
-}
-
-inline bool Editor::MarkedTextMatchesAreHighlighted() const {
-  return are_marked_text_matches_highlighted_;
 }
 
 inline EditingStyle* Editor::TypingStyle() const {

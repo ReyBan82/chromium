@@ -24,9 +24,8 @@ class WebContentsImpl;
 // Owned by |WebContentsViewAndroid|.
 class ContentUiEventHandler {
  public:
-  ContentUiEventHandler(JNIEnv* env,
-                        const base::android::JavaRef<jobject>& obj,
-                        WebContentsImpl* web_contents);
+  explicit ContentUiEventHandler(WebContentsImpl* web_contents);
+  ~ContentUiEventHandler();
 
   ContentUiEventHandler(const ContentUiEventHandler&) = delete;
   ContentUiEventHandler& operator=(const ContentUiEventHandler&) = delete;
@@ -40,40 +39,21 @@ class ContentUiEventHandler {
   bool ScrollTo(float x, float y);
 
   void SendMouseWheelEvent(JNIEnv* env,
-                           const base::android::JavaParamRef<jobject>& obj,
-                           jlong time_ms,
-                           jfloat x,
-                           jfloat y,
-                           jfloat ticks_x,
-                           jfloat ticks_y);
+                           const base::android::JavaRef<jobject>& event,
+                           int64_t time_ns);
   void SendMouseEvent(JNIEnv* env,
-                      const base::android::JavaParamRef<jobject>& obj,
-                      jlong time_ms,
-                      jint android_action,
-                      jfloat x,
-                      jfloat y,
-                      jint pointer_id,
-                      jfloat orientation,
-                      jfloat pressure,
-                      jfloat tilt,
-                      jint android_action_button,
-                      jint android_button_state,
-                      jint android_meta_state,
-                      jint android_tool_type);
+                      const base::android::JavaRef<jobject>& event,
+                      int64_t time_ns,
+                      int32_t android_action_button,
+                      int32_t android_tool_type);
   void SendScrollEvent(JNIEnv* env,
-                       const base::android::JavaParamRef<jobject>& jobj,
-                       jlong time_ms,
-                       jfloat delta_x,
-                       jfloat delta_y);
-  void CancelFling(JNIEnv* env,
-                   const base::android::JavaParamRef<jobject>& jobj,
-                   jlong time_ms);
+                       int64_t time_ms,
+                       float delta_x,
+                       float delta_y);
+  void CancelFling(JNIEnv* env, int64_t time_ms);
 
  private:
   RenderWidgetHostViewAndroid* GetRenderWidgetHostView();
-
-  // A weak reference to the Java ContentUiEventHandler object.
-  JavaObjectWeakGlobalRef java_ref_;
 
   const raw_ptr<WebContentsImpl> web_contents_;
 };

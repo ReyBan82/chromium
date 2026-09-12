@@ -15,8 +15,11 @@
 #ifndef ABSL_STRINGS_INTERNAL_CORD_REP_BTREE_H_
 #define ABSL_STRINGS_INTERNAL_CORD_REP_BTREE_H_
 
+#include <algorithm>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iosfwd>
 
 #include "absl/base/config.h"
@@ -31,6 +34,14 @@
 namespace absl {
 ABSL_NAMESPACE_BEGIN
 namespace cord_internal {
+
+// `SetCordBtreeExhaustiveValidation()` can be set to force exhaustive
+// validation in debug assertions, and code that calls `IsValid()`
+// explicitly. By default, assertions should be relatively cheap and
+// AssertValid() can easily lead to O(n^2) complexity as recursive / full tree
+// validation is O(n).
+void SetCordBtreeExhaustiveValidation(bool do_exaustive_validation);
+bool IsCordBtreeExhaustiveValidationEnabled();
 
 class CordRepBtreeNavigator;
 
@@ -676,14 +687,14 @@ inline CordRepBtree* CordRepBtree::CopyRaw(size_t new_length) const {
   // except `refcount` is trivially copyable, and the compiler does not
   // efficiently coalesce member-wise copy of these members.
   // See https://gcc.godbolt.org/z/qY8zsca6z
-  // # LINT.IfChange(copy_raw)
+  // LINT.IfChange(copy_raw)
   tree->length = new_length;
   uint8_t* dst = &tree->tag;
   const uint8_t* src = &tag;
   const ptrdiff_t offset = src - reinterpret_cast<const uint8_t*>(this);
   memcpy(dst, src, sizeof(CordRepBtree) - static_cast<size_t>(offset));
   return tree;
-  // # LINT.ThenChange()
+  // LINT.ThenChange()
 }
 
 inline CordRepBtree* CordRepBtree::Copy() const {
@@ -857,16 +868,16 @@ inline Span<char> CordRepBtree::GetAppendBuffer(size_t size) {
       tree = tree->Edge(kBack)->btree();
       if (!tree->refcount.IsOne()) return {};
       n2 = tree;
-      ABSL_FALLTHROUGH_INTENDED;
+      [[fallthrough]];
     case 2:
       tree = tree->Edge(kBack)->btree();
       if (!tree->refcount.IsOne()) return {};
       n1 = tree;
-      ABSL_FALLTHROUGH_INTENDED;
+      [[fallthrough]];
     case 1:
       tree = tree->Edge(kBack)->btree();
       if (!tree->refcount.IsOne()) return {};
-      ABSL_FALLTHROUGH_INTENDED;
+      [[fallthrough]];
     case 0:
       CordRep* edge = tree->Edge(kBack);
       if (!edge->refcount.IsOne()) return {};
@@ -879,13 +890,13 @@ inline Span<char> CordRepBtree::GetAppendBuffer(size_t size) {
       switch (height) {
         case 3:
           n3->length += delta;
-          ABSL_FALLTHROUGH_INTENDED;
+          [[fallthrough]];
         case 2:
           n2->length += delta;
-          ABSL_FALLTHROUGH_INTENDED;
+          [[fallthrough]];
         case 1:
           n1->length += delta;
-          ABSL_FALLTHROUGH_INTENDED;
+          [[fallthrough]];
         case 0:
           tree->length += delta;
           return span;

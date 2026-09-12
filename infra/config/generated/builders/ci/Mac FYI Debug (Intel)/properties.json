@@ -18,6 +18,7 @@
                 ],
                 "build_config": "Debug",
                 "config": "chromium",
+                "target_arch": "intel",
                 "target_bits": 64,
                 "target_platform": "mac"
               },
@@ -52,7 +53,8 @@
                 "builder": "GPU FYI Mac Builder (dbg)",
                 "project": "chromium"
               },
-              "run_tests_serially": true
+              "run_tests_serially": true,
+              "use_test_trigger_cas": true
             }
           }
         ]
@@ -69,7 +71,8 @@
           "builder": "gpu-fyi-try-mac-intel-dbg",
           "group": "tryserver.chromium.mac"
         }
-      ]
+      ],
+      "targets_spec_directory": "infra/config/generated/builders/ci/Mac FYI Debug (Intel)/targets"
     }
   },
   "$recipe_engine/resultdb/test_presentation": {
@@ -80,6 +83,9 @@
     ]
   },
   "builder_group": "chromium.gpu.fyi",
+  "gardener_rotations": [
+    "chromium.gpu"
+  ],
   "perf_dashboard_machine_group": "ChromiumGPUFYI",
   "recipe": "chromium",
   "sheriff_rotations": [

@@ -18,16 +18,25 @@ namespace {
 blink::mojom::CustomContextMenuItemPtr MenuItemBuild(
     const blink::MenuItemInfo& item) {
   auto result = blink::mojom::CustomContextMenuItem::New();
-
+  if (item.accelerator.has_value()) {
+    auto accelerator = blink::mojom::Accelerator::New();
+    accelerator->key_code = static_cast<uint16_t>(item.accelerator->key_code);
+    accelerator->modifiers = item.accelerator->modifiers;
+    result->accelerator = std::move(accelerator);
+  }
   result->label = item.label;
+  result->feature_name = item.feature_name;
   result->tool_tip = item.tool_tip;
   result->type =
       static_cast<blink::mojom::CustomContextMenuItemType>(item.type);
   result->action = item.action;
+  result->is_experimental_feature = item.is_experimental_feature;
   result->rtl = (item.text_direction == base::i18n::RIGHT_TO_LEFT);
   result->has_directional_override = item.has_text_direction_override;
   result->enabled = item.enabled;
   result->checked = item.checked;
+  result->force_show_accelerator_for_item =
+      item.force_show_accelerator_for_item;
   for (const auto& sub_menu_item : item.sub_menu_items)
     result->submenu.push_back(MenuItemBuild(sub_menu_item));
 
@@ -47,6 +56,8 @@ UntrustworthyContextMenuParams ContextMenuParamsBuilder::Build(
   params.unfiltered_link_url = data.link_url;
   params.src_url = data.src_url;
   params.has_image_contents = data.has_image_contents;
+  params.image_replacement_frame_token = data.image_replacement_frame_token;
+  params.is_image_media_plugin_document = data.is_image_media_plugin_document;
   params.media_flags = data.media_flags;
   params.selection_text = base::UTF8ToUTF16(data.selected_text);
   params.selection_start_offset = data.selection_start_offset;
@@ -62,8 +73,9 @@ UntrustworthyContextMenuParams ContextMenuParamsBuilder::Build(
   params.frame_charset = data.frame_encoding;
   params.referrer_policy = data.referrer_policy;
   params.suggested_filename = base::UTF8ToUTF16(data.suggested_filename);
-  params.input_field_type = data.input_field_type;
-  params.opened_from_highlight = data.opened_from_highlight;
+  params.annotation_type = data.annotation_type;
+  params.opened_from_interest_for = data.opened_from_interest_for;
+  params.interest_for_node_id = data.interest_for_node_id;
 
   for (const auto& suggestion : data.dictionary_suggestions)
     params.dictionary_suggestions.push_back(suggestion);
@@ -73,16 +85,13 @@ UntrustworthyContextMenuParams ContextMenuParamsBuilder::Build(
 
   params.link_text = base::UTF8ToUTF16(data.link_text);
 
-  if (data.impression)
-    params.impression = data.impression;
+  params.form_control_type = data.form_control_type;
+  params.is_content_editable_for_autofill =
+      data.is_content_editable_for_autofill;
+  params.field_renderer_id = data.field_renderer_id;
+  params.form_renderer_id = data.form_renderer_id;
 
-  if (data.form_renderer_id)
-    params.form_renderer_id = data.form_renderer_id;
-
-  if (data.field_renderer_id)
-    params.field_renderer_id = data.field_renderer_id;
-
-  params.source_type = static_cast<ui::MenuSourceType>(data.source_type);
+  params.source_type = data.source_type;
 
   return params;
 }

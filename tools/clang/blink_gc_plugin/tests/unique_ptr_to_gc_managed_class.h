@@ -24,7 +24,8 @@ class HeapObject : public GarbageCollected<HeapObject> {
  private:
   Vector<std::unique_ptr<HeapObject>> m_objs;
   std::unique_ptr<HeapVector<Member<HeapObject>>> m_objs2;
+  std::unique_ptr<GCedHeapVector<Member<HeapObject>>> m_objs3;
 };
 }
 
-#endif
+#endif  // OWN_PTR_TO_GC_MANAGED_CLASS_H_

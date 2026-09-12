@@ -6,32 +6,40 @@
 
 #include <utility>
 
+#include "base/check.h"
+#include "base/check_op.h"
 #include "base/file_descriptor_posix.h"
 #include "base/files/file_util.h"
+#include "base/files/scoped_file.h"
 #include "base/functional/bind.h"
+#include "base/logging.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/ref_counted_memory.h"
+#include "base/notreached.h"
 #include "base/numerics/safe_conversions.h"
 #include "base/task/task_traits.h"
 #include "base/task/thread_pool.h"
 #include "components/printing/browser/print_manager_utils.h"
 #include "components/printing/common/print.mojom.h"
+#include "components/printing/common/print_params.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/render_frame_host.h"
 #include "printing/print_job_constants.h"
+#include "printing/print_settings.h"
 
 namespace android_webview {
 
 namespace {
 
-uint32_t SaveDataToFd(int fd,
+uint32_t SaveDataToFd(base::ScopedFD fd,
                       uint32_t page_count,
                       scoped_refptr<base::RefCountedSharedMemoryMapping> data) {
-  bool result = fd > base::kInvalidFd &&
-                base::IsValueInRangeForNumericType<int>(data->size());
-  if (result)
-    result = base::WriteFileDescriptor(fd, *data);
-  return result ? page_count : 0;
+  bool did_write_successfully =
+      fd.is_valid() && base::IsValueInRangeForNumericType<int>(data->size());
+  if (did_write_successfully) {
+    did_write_successfully = base::WriteFileDescriptor(fd.get(), *data);
+  }
+  return did_write_successfully ? page_count : 0;
 }
 
 }  // namespace
@@ -55,10 +63,23 @@ void AwPrintManager::BindPrintManagerHost(
   print_manager->BindReceiver(std::move(receiver), rfh);
 }
 
+void AwPrintManager::SetupScriptedPrintAndroid(
+    SetupScriptedPrintAndroidCallback callback) {
+  // WebView does not support the print dialog triggered by window.print().
+  // Run the callback immediately to unblock the renderer, maintaining the
+  // previous behavior where window.print() was essentially a no-op.
+  std::move(callback).Run();
+}
+
 void AwPrintManager::PdfWritingDone(int page_count) {
-  pdf_writing_done_callback().Run(page_count);
-  // Invalidate the file descriptor so it doesn't get reused.
-  fd_ = -1;
+  // The fd_ should have been reset when printing started.
+  CHECK(!fd_.is_valid());
+  // Trigger the callback to notify the embedding application that printing is
+  // done. A non-positive `page_count` value (<=0) will be presented as an error
+  // callback to the application.
+  if (pdf_writing_done_callback()) {
+    pdf_writing_done_callback().Run(page_count);
+  }
 }
 
 bool AwPrintManager::PrintNow() {
@@ -77,54 +98,80 @@ void AwPrintManager::GetDefaultPrintSettings(
   auto params = printing::mojom::PrintParams::New();
   printing::RenderParamsFromPrintSettings(*settings_, params.get());
   params->document_cookie = cookie();
+  if (!printing::PrintMsgPrintParamsIsValid(*params)) {
+    std::move(callback).Run(nullptr);
+    return;
+  }
+
   std::move(callback).Run(std::move(params));
 }
 
 void AwPrintManager::UpdateParam(
     std::unique_ptr<printing::PrintSettings> settings,
-    int file_descriptor,
+    base::ScopedFD file_descriptor,
     PrintManager::PdfWritingDoneCallback callback) {
   DCHECK(settings);
   DCHECK(callback);
   settings_ = std::move(settings);
-  fd_ = file_descriptor;
+  fd_ = std::move(file_descriptor);
   set_pdf_writing_done_callback(std::move(callback));
-  set_cookie(1);  // Set a valid dummy cookie value.
+  set_cookie(printing::PrintSettings::NewCookie());
 }
 
 void AwPrintManager::ScriptedPrint(
     printing::mojom::ScriptedPrintParamsPtr scripted_params,
     ScriptedPrintCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-  auto params = printing::mojom::PrintPagesParams::New();
-  params->params = printing::mojom::PrintParams::New();
 
-  if (scripted_params->is_scripted &&
-      GetCurrentTargetFrame()->IsNestedWithinFencedFrame()) {
-    DLOG(ERROR) << "Unexpected message received. Script Print is not allowed"
-                   " in a fenced frame.";
-    std::move(callback).Run(std::move(params));
+  content::RenderFrameHost& render_frame_host = CurrentTargetFrame();
+  if (!render_frame_host.IsActive()) {
+    // Only active RFHs should try to print.
+    std::move(callback).Run(nullptr);
     return;
   }
 
+  if (scripted_params->is_scripted &&
+      render_frame_host.IsNestedWithinFencedFrame()) {
+    DLOG(ERROR) << "Unexpected message received. Script Print is not allowed"
+                   " in a fenced frame.";
+    std::move(callback).Run(nullptr);
+    return;
+  }
+
+  auto params = printing::mojom::PrintPagesParams::New();
+  params->params = printing::mojom::PrintParams::New();
   printing::RenderParamsFromPrintSettings(*settings_, params->params.get());
   params->params->document_cookie = scripted_params->cookie;
   params->pages = settings_->ranges();
+
+  if (!printing::PrintMsgPrintParamsIsValid(*params->params)) {
+    std::move(callback).Run(nullptr);
+    return;
+  }
+
   std::move(callback).Run(std::move(params));
 }
 
 void AwPrintManager::DidPrintDocument(
     printing::mojom::DidPrintDocumentParamsPtr params,
     DidPrintDocumentCallback callback) {
+  // Extract the fd_ here to prevent it from being used more than once.
+  base::ScopedFD print_fd = std::move(fd_);
+
+  if (!print_fd.is_valid()) {
+    PdfWritingDone(0);
+    std::move(callback).Run(false);
+    return;
+  }
+
   if (params->document_cookie != cookie()) {
+    PdfWritingDone(0);
     std::move(callback).Run(false);
     return;
   }
 
   const printing::mojom::DidPrintContentParams& content = *params->content;
   if (!content.metafile_data_region.IsValid()) {
-    NOTREACHED() << "invalid memory handle";
-    web_contents()->Stop();
     PdfWritingDone(0);
     std::move(callback).Run(false);
     return;
@@ -133,38 +180,33 @@ void AwPrintManager::DidPrintDocument(
   auto data = base::RefCountedSharedMemoryMapping::CreateFromWholeRegion(
       content.metafile_data_region);
   if (!data) {
-    NOTREACHED() << "couldn't map";
-    web_contents()->Stop();
     PdfWritingDone(0);
     std::move(callback).Run(false);
     return;
   }
 
   if (number_pages() > printing::kMaxPageCount) {
-    web_contents()->Stop();
     PdfWritingDone(0);
     std::move(callback).Run(false);
     return;
   }
 
-  DCHECK(pdf_writing_done_callback());
   base::ThreadPool::CreateTaskRunner(
       {base::MayBlock(), base::TaskPriority::BEST_EFFORT,
        base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN})
       ->PostTaskAndReplyWithResult(
-          FROM_HERE, base::BindOnce(&SaveDataToFd, fd_, number_pages(), data),
+          FROM_HERE,
+          base::BindOnce(&SaveDataToFd, std::move(print_fd), number_pages(),
+                         data),
           base::BindOnce(&AwPrintManager::OnDidPrintDocumentWritingDone,
-                         pdf_writing_done_callback(), std::move(callback)));
+                         weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 }
 
-// static
 void AwPrintManager::OnDidPrintDocumentWritingDone(
-    const PdfWritingDoneCallback& callback,
     DidPrintDocumentCallback did_print_document_cb,
     uint32_t page_count) {
   DCHECK_LE(page_count, printing::kMaxPageCount);
-  if (callback)
-    callback.Run(base::checked_cast<int>(page_count));
+  PdfWritingDone(base::checked_cast<int>(page_count));
   std::move(did_print_document_cb).Run(true);
 }
 

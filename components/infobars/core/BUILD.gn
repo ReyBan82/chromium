@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/config/chrome_build.gni")
 import("//build/config/ui.gni")
 
 if (is_android) {
@@ -17,6 +18,8 @@ static_library("core") {
     "infobar.h",
     "infobar_container.cc",
     "infobar_container.h",
+    "infobar_container_with_priority.cc",
+    "infobar_container_with_priority.h",
     "infobar_delegate.cc",
     "infobar_delegate.h",
     "infobar_manager.cc",
@@ -25,8 +28,13 @@ static_library("core") {
     "simple_alert_infobar_delegate.h",
   ]
 
+  if (is_chrome_for_testing) {
+    sources += [ "infobars_switches.h" ]
+  }
+
   public_deps = [
     "//base",
+    "//build:branding_buildflags",
     "//skia",
     "//ui/base",
   ]
@@ -43,14 +51,18 @@ static_library("core") {
   }
 }
 
-if (is_android) {
-  java_cpp_enum("infobar_generated_enums") {
-    sources = [ "infobar_delegate.h" ]
-  }
+source_set("unit_tests") {
+  testonly = true
 
-  android_library("infobar_enums_java") {
-    deps = [ "//third_party/androidx:androidx_annotation_annotation_java" ]
+  sources = [
+    "infobar_container_unittest.cc",
+    "infobar_container_with_priority_unittest.cc",
+  ]
 
-    srcjar_deps = [ ":infobar_generated_enums" ]
-  }
+  deps = [
+    ":core",
+    "//base",
+    "//base/test:test_support",
+    "//url",
+  ]
 }

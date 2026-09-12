@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 
+#include "base/byte_size.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/memory/ref_counted.h"
@@ -14,6 +15,8 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/test/gtest_util.h"
 #include "chrome/browser/task_manager/sampling/shared_sampler.h"
+#include "chrome/test/base/testing_browser_process_death_test_mixin.h"
+#include "components/sessions/core/session_id.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/test/browser_task_environment.h"
@@ -38,7 +41,7 @@ class FakeTask : public Task {
 
   int GetChildProcessUniqueID() const override { return 0; }
 
-  const Task* GetParentTask() const override { return nullptr; }
+  base::WeakPtr<Task> GetParentTask() const override { return nullptr; }
 
   SessionID GetTabId() const override { return SessionID::InvalidValue(); }
 
@@ -51,7 +54,9 @@ class FakeTask : public Task {
 
 }  // namespace
 
-class TaskGroupTest : public testing::Test {
+class TaskGroupTest
+    : public chrome_test_utils::TestingBrowserProcessDeathTestMixin,
+      public testing::Test {
  public:
   TaskGroupTest()
       : io_task_runner_(content::GetIOThreadTaskRunner({})),
@@ -74,9 +79,6 @@ class TaskGroupTest : public testing::Test {
         base::BindRepeating(&TaskGroupTest::OnBackgroundCalculationsDone,
                             base::Unretained(this)),
         new SharedSampler(io_task_runner_),
-#if BUILDFLAG(IS_CHROMEOS_ASH)
-        /*crosapi_task_provider=*/nullptr,
-#endif
         io_task_runner_);
     // Refresh() is only valid on non-empty TaskGroups, so add a fake Task.
     fake_task_ = std::make_unique<FakeTask>(base::Process::Current().Pid(),
@@ -156,33 +158,10 @@ TEST_F(TaskGroupTest, SharedAsyncRefresh) {
   EXPECT_TRUE(task_group_->AreBackgroundCalculationsDone());
 }
 
-// Ensure that if NaCl is enabled then calling Refresh with a NaCl Task active
-// results in asynchronous completion. Also verifies that if NaCl is disabled
-// then completion is synchronous.
-TEST_F(TaskGroupTest, NaclRefreshWithTask) {
-  CreateTaskGroup(false);
-  FakeTask fake_task(base::Process::Current().Pid(), Task::NACL,
-                     false /* is_running_in_vm */);
-  task_group_->AddTask(&fake_task);
-
-  task_group_->Refresh(gpu::VideoMemoryUsageStats(), base::TimeDelta(),
-                       REFRESH_TYPE_NACL);
-#if BUILDFLAG(ENABLE_NACL)
-  EXPECT_FALSE(task_group_->AreBackgroundCalculationsDone());
-
-  ASSERT_FALSE(background_refresh_complete_);
-  run_loop_->Run();
-
-  EXPECT_TRUE(background_refresh_complete_);
-#endif  // BUILDFLAG(ENABLE_NACL)
-
-  EXPECT_TRUE(task_group_->AreBackgroundCalculationsDone());
-}
-
 // Test the task has correct network usage rate when zero bytes read and sent.
 TEST_F(TaskGroupTest, NetworkBytesSentReadZero) {
   CreateTaskGroup(false);
-  const int zero_bytes = 0;
+  constexpr base::ByteSize zero_bytes = base::ByteSize(0);
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesRead(zero_bytes);
@@ -196,11 +175,11 @@ TEST_F(TaskGroupTest, NetworkBytesSentReadZero) {
 // Test the task has correct network usage rate when only having read bytes.
 TEST_F(TaskGroupTest, NetworkBytesRead) {
   CreateTaskGroup(false);
-  const int read_bytes = 1024;
+  constexpr base::ByteSize read_bytes = base::KiB(1);
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesRead(read_bytes);
-  EXPECT_EQ(0, fake_task.GetNetworkUsageRate());
+  EXPECT_TRUE(fake_task.GetNetworkUsageRate().is_zero());
   EXPECT_EQ(read_bytes, fake_task.GetCumulativeNetworkUsage());
   fake_task.Refresh(base::Seconds(1), REFRESH_TYPE_NETWORK_USAGE);
   EXPECT_EQ(read_bytes, fake_task.GetNetworkUsageRate());
@@ -210,11 +189,11 @@ TEST_F(TaskGroupTest, NetworkBytesRead) {
 // Test the task has correct network usage rate when only having sent bytes.
 TEST_F(TaskGroupTest, NetworkBytesSent) {
   CreateTaskGroup(false);
-  const int sent_bytes = 1023;
+  constexpr base::ByteSize sent_bytes = base::ByteSize(1023);
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesSent(sent_bytes);
-  EXPECT_EQ(0, fake_task.GetNetworkUsageRate());
+  EXPECT_TRUE(fake_task.GetNetworkUsageRate().is_zero());
   EXPECT_EQ(sent_bytes, fake_task.GetCumulativeNetworkUsage());
   fake_task.Refresh(base::Seconds(1), REFRESH_TYPE_NETWORK_USAGE);
   EXPECT_EQ(sent_bytes, fake_task.GetNetworkUsageRate());
@@ -226,11 +205,12 @@ TEST_F(TaskGroupTest, NetworkBytesSent) {
 TEST_F(TaskGroupTest, NetworkBytesRead2SecRefresh) {
   CreateTaskGroup(false);
   const int refresh_secs = 2;
-  const int read_bytes = 1024 * refresh_secs;  // for integer division
+  constexpr base::ByteSize read_bytes =
+      base::KiB(1) * refresh_secs;  // for integer division
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesRead(read_bytes);
-  EXPECT_EQ(0, fake_task.GetNetworkUsageRate());
+  EXPECT_TRUE(fake_task.GetNetworkUsageRate().is_zero());
   EXPECT_EQ(read_bytes, fake_task.GetCumulativeNetworkUsage());
   fake_task.Refresh(base::Seconds(refresh_secs), REFRESH_TYPE_NETWORK_USAGE);
   EXPECT_EQ(read_bytes / refresh_secs, fake_task.GetNetworkUsageRate());
@@ -242,11 +222,12 @@ TEST_F(TaskGroupTest, NetworkBytesRead2SecRefresh) {
 TEST_F(TaskGroupTest, NetworkBytesSent2SecRefresh) {
   CreateTaskGroup(false);
   const int refresh_secs = 2;
-  const int sent_bytes = 1023 * refresh_secs;  // for integer division
+  constexpr base::ByteSize sent_bytes =
+      base::ByteSize(1023) * refresh_secs;  // for integer division
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesSent(sent_bytes);
-  EXPECT_EQ(0, fake_task.GetNetworkUsageRate());
+  EXPECT_TRUE(fake_task.GetNetworkUsageRate().is_zero());
   EXPECT_EQ(sent_bytes, fake_task.GetCumulativeNetworkUsage());
   fake_task.Refresh(base::Seconds(refresh_secs), REFRESH_TYPE_NETWORK_USAGE);
   EXPECT_EQ(sent_bytes / refresh_secs, fake_task.GetNetworkUsageRate());
@@ -256,8 +237,8 @@ TEST_F(TaskGroupTest, NetworkBytesSent2SecRefresh) {
 // Tests the task has correct usage on receiving and then sending bytes.
 TEST_F(TaskGroupTest, NetworkBytesReadThenSent) {
   CreateTaskGroup(false);
-  const int read_bytes = 124;
-  const int sent_bytes = 1027;
+  constexpr base::ByteSize read_bytes = base::ByteSize(124);
+  constexpr base::ByteSize sent_bytes = base::ByteSize(1027);
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesRead(read_bytes);
@@ -271,8 +252,8 @@ TEST_F(TaskGroupTest, NetworkBytesReadThenSent) {
 // Tests the task has correct usage rate on sending and then receiving bytes.
 TEST_F(TaskGroupTest, NetworkBytesSentThenRead) {
   CreateTaskGroup(false);
-  const int read_bytes = 1025;
-  const int sent_bytes = 10;
+  constexpr base::ByteSize read_bytes = base::ByteSize(1025);
+  constexpr base::ByteSize sent_bytes = base::ByteSize(10);
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesSent(sent_bytes);
@@ -285,14 +266,14 @@ TEST_F(TaskGroupTest, NetworkBytesSentThenRead) {
 // refresh with no traffic and that cumulative is still correct.
 TEST_F(TaskGroupTest, NetworkBytesReadRefreshNone) {
   CreateTaskGroup(false);
-  const int read_bytes = 1024;
+  constexpr base::ByteSize read_bytes = base::KiB(1);
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesRead(read_bytes);
   fake_task.Refresh(base::Seconds(1), REFRESH_TYPE_NETWORK_USAGE);
   // Refresh to zero out the usage rate.
   fake_task.Refresh(base::Seconds(1), REFRESH_TYPE_NETWORK_USAGE);
-  EXPECT_EQ(0, fake_task.GetNetworkUsageRate());
+  EXPECT_TRUE(fake_task.GetNetworkUsageRate().is_zero());
   EXPECT_EQ(read_bytes, fake_task.GetCumulativeNetworkUsage());
 }
 
@@ -300,14 +281,14 @@ TEST_F(TaskGroupTest, NetworkBytesReadRefreshNone) {
 // refresh with no traffic and that cumulative is still correct.
 TEST_F(TaskGroupTest, NetworkBytesSentRefreshNone) {
   CreateTaskGroup(false);
-  const int sent_bytes = 1024;
+  constexpr base::ByteSize sent_bytes = base::KiB(1);
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   fake_task.OnNetworkBytesSent(sent_bytes);
   fake_task.Refresh(base::Seconds(1), REFRESH_TYPE_NETWORK_USAGE);
   // Refresh to zero out the usage rate.
   fake_task.Refresh(base::Seconds(1), REFRESH_TYPE_NETWORK_USAGE);
-  EXPECT_EQ(0, fake_task.GetNetworkUsageRate());
+  EXPECT_TRUE(fake_task.GetNetworkUsageRate().is_zero());
   EXPECT_EQ(sent_bytes, fake_task.GetCumulativeNetworkUsage());
 }
 
@@ -315,8 +296,8 @@ TEST_F(TaskGroupTest, NetworkBytesSentRefreshNone) {
 // and that cumulative is still correct.
 TEST_F(TaskGroupTest, NetworkBytesTransferredRefreshNone) {
   CreateTaskGroup(false);
-  const int read_bytes = 1024;
-  const int sent_bytes = 1;
+  constexpr base::ByteSize read_bytes = base::KiB(1);
+  constexpr base::ByteSize sent_bytes = base::ByteSize(1);
   const int number_of_cycles = 2;
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
@@ -328,7 +309,7 @@ TEST_F(TaskGroupTest, NetworkBytesTransferredRefreshNone) {
   }
   // Refresh to zero out the usage rate.
   fake_task.Refresh(base::Seconds(1), REFRESH_TYPE_NETWORK_USAGE);
-  EXPECT_EQ(0, fake_task.GetNetworkUsageRate());
+  EXPECT_TRUE(fake_task.GetNetworkUsageRate().is_zero());
   EXPECT_EQ((read_bytes + sent_bytes) * number_of_cycles,
             fake_task.GetCumulativeNetworkUsage());
 }
@@ -337,8 +318,8 @@ TEST_F(TaskGroupTest, NetworkBytesTransferredRefreshNone) {
 // rates and correct cumulative network usage.
 TEST_F(TaskGroupTest, NetworkBytesReadAsGroup) {
   CreateTaskGroup(false);
-  const int read_bytes1 = 1024;
-  const int read_bytes2 = 789;
+  constexpr base::ByteSize read_bytes1 = base::ByteSize(1024);
+  constexpr base::ByteSize read_bytes2 = base::ByteSize(789);
   const int number_of_cycles = 2;
   FakeTask fake_task1(base::Process::Current().Pid(), Task::RENDERER,
                       false /* is_running_in_vm */);
@@ -356,19 +337,16 @@ TEST_F(TaskGroupTest, NetworkBytesReadAsGroup) {
     EXPECT_EQ(read_bytes1 + read_bytes2,
               task_group_->per_process_network_usage_rate());
   }
-
-  EXPECT_EQ((read_bytes1 + read_bytes2) * number_of_cycles,
-            task_group_->cumulative_per_process_network_usage());
 }
 
 // Tests that the network usage rate does not get affected until a refresh is
 // called and that the cumulative is as up to date as possible.
 TEST_F(TaskGroupTest, NetworkBytesTransferredRefreshOutOfOrder) {
   CreateTaskGroup(false);
-  const int read_bytes = 1024;
-  const int sent_bytes = 1;
+  constexpr base::ByteSize read_bytes = base::KiB(1);
+  constexpr base::ByteSize sent_bytes = base::ByteSize(1);
   const int number_of_cycles = 4;
-  int number_of_bytes_transferred = 0;
+  base::ByteSize number_of_bytes_transferred;
   FakeTask fake_task(base::Process::Current().Pid(), Task::RENDERER,
                      false /* is_running_in_vm */);
   for (int i = 0; i < number_of_cycles; i++) {
@@ -389,7 +367,7 @@ TEST_F(TaskGroupTest, NetworkBytesTransferredRefreshOutOfOrder) {
   }
   // Refresh to zero out the usage rate.
   fake_task.Refresh(base::Seconds(1), REFRESH_TYPE_NETWORK_USAGE);
-  EXPECT_EQ(0, fake_task.GetNetworkUsageRate());
+  EXPECT_TRUE(fake_task.GetNetworkUsageRate().is_zero());
   EXPECT_EQ(number_of_bytes_transferred, fake_task.GetCumulativeNetworkUsage());
 }
 
@@ -397,8 +375,8 @@ TEST_F(TaskGroupTest, NetworkBytesTransferredRefreshOutOfOrder) {
 // rates and correct cumulative network usage.
 TEST_F(TaskGroupTest, NetworkBytesSentAsGroup) {
   CreateTaskGroup(false);
-  const int sent_bytes1 = 1123;
-  const int sent_bytes2 = 778;
+  constexpr base::ByteSize sent_bytes1 = base::ByteSize(1123);
+  constexpr base::ByteSize sent_bytes2 = base::ByteSize(778);
   FakeTask fake_task1(base::Process::Current().Pid(), Task::RENDERER,
                       false /* is_running_in_vm */);
   FakeTask fake_task2(base::Process::Current().Pid(), Task::RENDERER,
@@ -418,17 +396,14 @@ TEST_F(TaskGroupTest, NetworkBytesSentAsGroup) {
   fake_task2.OnNetworkBytesSent(sent_bytes2);
   task_group_->Refresh(gpu::VideoMemoryUsageStats(), base::Seconds(1),
                        REFRESH_TYPE_NETWORK_USAGE);
-
-  EXPECT_EQ((sent_bytes1 + sent_bytes2) * 2,
-            task_group_->cumulative_per_process_network_usage());
 }
 
 // Tests that 2 tasks in 1  task group that have one sending and one reading
 // have correct usage rates for the group and correct cumulative network usage.
 TEST_F(TaskGroupTest, NetworkBytesTransferredAsGroup) {
   CreateTaskGroup(false);
-  const int sent_bytes = 1023;
-  const int read_bytes = 678;
+  constexpr base::ByteSize sent_bytes = base::ByteSize(1023);
+  constexpr base::ByteSize read_bytes = base::ByteSize(678);
   const int number_of_cycles = 2;
   FakeTask fake_task1(base::Process::Current().Pid(), Task::RENDERER,
                       false /* is_running_in_vm */);
@@ -445,9 +420,6 @@ TEST_F(TaskGroupTest, NetworkBytesTransferredAsGroup) {
     EXPECT_EQ(sent_bytes + read_bytes,
               task_group_->per_process_network_usage_rate());
   }
-
-  EXPECT_EQ((read_bytes + sent_bytes) * number_of_cycles,
-            task_group_->cumulative_per_process_network_usage());
 }
 
 // Tests that after two tasks in a task group read bytes that a refresh will
@@ -455,8 +427,8 @@ TEST_F(TaskGroupTest, NetworkBytesTransferredAsGroup) {
 // usage.
 TEST_F(TaskGroupTest, NetworkBytesReadAsGroupThenNone) {
   CreateTaskGroup(false);
-  const int read_bytes1 = 1013;
-  const int read_bytes2 = 679;
+  constexpr base::ByteSize read_bytes1 = base::ByteSize(1013);
+  constexpr base::ByteSize read_bytes2 = base::ByteSize(679);
   const int number_of_cycles = 2;
   FakeTask fake_task1(base::Process::Current().Pid(), Task::RENDERER,
                       false /* is_running_in_vm */);
@@ -476,9 +448,7 @@ TEST_F(TaskGroupTest, NetworkBytesReadAsGroupThenNone) {
   }
   task_group_->Refresh(gpu::VideoMemoryUsageStats(), base::Seconds(1),
                        REFRESH_TYPE_NETWORK_USAGE);
-  EXPECT_EQ(0, task_group_->per_process_network_usage_rate());
-  EXPECT_EQ((read_bytes1 + read_bytes2) * number_of_cycles,
-            task_group_->cumulative_per_process_network_usage());
+  EXPECT_TRUE(task_group_->per_process_network_usage_rate()->is_zero());
 }
 
 // Tests that after two tasks in a task group send bytes that a refresh will
@@ -486,8 +456,8 @@ TEST_F(TaskGroupTest, NetworkBytesReadAsGroupThenNone) {
 // usage.
 TEST_F(TaskGroupTest, NetworkBytesSentAsGroupThenNone) {
   CreateTaskGroup(false);
-  const int sent_bytes1 = 1023;
-  const int sent_bytes2 = 678;
+  constexpr base::ByteSize sent_bytes1 = base::ByteSize(1023);
+  constexpr base::ByteSize sent_bytes2 = base::ByteSize(678);
   const int number_of_cycles = 2;
   FakeTask fake_task1(base::Process::Current().Pid(), Task::RENDERER,
                       false /* is_running_in_vm */);
@@ -507,9 +477,7 @@ TEST_F(TaskGroupTest, NetworkBytesSentAsGroupThenNone) {
   }
   task_group_->Refresh(gpu::VideoMemoryUsageStats(), base::Seconds(1),
                        REFRESH_TYPE_NETWORK_USAGE);
-  EXPECT_EQ(0, task_group_->per_process_network_usage_rate());
-  EXPECT_EQ((sent_bytes1 + sent_bytes2) * number_of_cycles,
-            task_group_->cumulative_per_process_network_usage());
+  EXPECT_TRUE(task_group_->per_process_network_usage_rate()->is_zero());
 }
 
 // Tests that after two tasks in a task group transferred bytes that a refresh
@@ -517,8 +485,8 @@ TEST_F(TaskGroupTest, NetworkBytesSentAsGroupThenNone) {
 // network usage.
 TEST_F(TaskGroupTest, NetworkBytesTransferredAsGroupThenNone) {
   CreateTaskGroup(false);
-  const int read_bytes = 321;
-  const int sent_bytes = 987;
+  constexpr base::ByteSize read_bytes = base::ByteSize(321);
+  constexpr base::ByteSize sent_bytes = base::ByteSize(987);
   const int number_of_cycles = 3;
   FakeTask fake_task1(base::Process::Current().Pid(), Task::RENDERER,
                       false /* is_running_in_vm */);
@@ -538,9 +506,7 @@ TEST_F(TaskGroupTest, NetworkBytesTransferredAsGroupThenNone) {
   }
   task_group_->Refresh(gpu::VideoMemoryUsageStats(), base::Seconds(1),
                        REFRESH_TYPE_NETWORK_USAGE);
-  EXPECT_EQ(0, task_group_->per_process_network_usage_rate());
-  EXPECT_EQ((read_bytes + sent_bytes) * number_of_cycles,
-            task_group_->cumulative_per_process_network_usage());
+  EXPECT_TRUE(task_group_->per_process_network_usage_rate()->is_zero());
 }
 
 // Test the task can't be killed with a PID of base::kNullProcessId.

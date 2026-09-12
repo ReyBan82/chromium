@@ -10,17 +10,17 @@
 #include <string>
 #include <vector>
 
-#include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
+#include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/task_traits.h"
 #include "base/types/expected.h"
 #include "base/values.h"
 #include "components/component_updater/component_installer.h"
 #include "components/crx_file/crx_verifier.h"
-#include "components/update_client/component_unpacker.h"
+#include "components/update_client/unpacker.h"
 #include "components/update_client/update_client.h"
 
 namespace base {
@@ -111,10 +111,11 @@ class RecoveryComponentActionHandler : public update_client::ActionHandler {
 
   virtual base::CommandLine MakeCommandLine(
       const base::FilePath& unpack_path) const = 0;
+  virtual void PrepareFiles(const base::FilePath& unpack_path) const = 0;
   virtual void Elevate(Callback callback) = 0;
 
   void Unpack();
-  void UnpackComplete(const update_client::ComponentUnpacker::Result& result);
+  void UnpackComplete(const update_client::Unpacker::Result& result);
   void RunCommand(const base::CommandLine& cmdline);
 
   // `process` contains the process object, if the process was successfully
@@ -151,7 +152,6 @@ class RecoveryImprovedInstallerPolicy : public ComponentInstallerPolicy {
  public:
   explicit RecoveryImprovedInstallerPolicy(PrefService* prefs)
       : prefs_(prefs) {}
-  ~RecoveryImprovedInstallerPolicy() override = default;
   RecoveryImprovedInstallerPolicy(const RecoveryImprovedInstallerPolicy&) =
       delete;
   RecoveryImprovedInstallerPolicy& operator=(
@@ -164,14 +164,14 @@ class RecoveryImprovedInstallerPolicy : public ComponentInstallerPolicy {
   bool SupportsGroupPolicyEnabledComponentUpdates() const override;
   bool RequiresNetworkEncryption() const override;
   update_client::CrxInstaller::Result OnCustomInstall(
-      const base::Value::Dict& manifest,
+      const base::DictValue& manifest,
       const base::FilePath& install_dir) override;
   void OnCustomUninstall() override;
-  bool VerifyInstallation(const base::Value::Dict& manifest,
+  bool VerifyInstallation(const base::DictValue& manifest,
                           const base::FilePath& install_dir) const override;
   void ComponentReady(const base::Version& version,
                       const base::FilePath& install_dir,
-                      base::Value::Dict manifest) override;
+                      base::DictValue manifest) override;
   base::FilePath GetRelativeInstallDir() const override;
   void GetHash(std::vector<uint8_t>* hash) const override;
   std::string GetName() const override;

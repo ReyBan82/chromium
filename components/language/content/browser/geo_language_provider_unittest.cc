@@ -66,7 +66,7 @@ class GeoLanguageProviderTest : public testing::Test {
 
   void SetUpCachedLanguages(const std::vector<std::string>& languages,
                             const double update_time) {
-    base::Value::List cache_list;
+    base::ListValue cache_list;
     for (const std::string& language : languages) {
       cache_list.Append(language);
     }
@@ -78,7 +78,7 @@ class GeoLanguageProviderTest : public testing::Test {
 
   const std::vector<std::string> GetCachedLanguages() {
     std::vector<std::string> languages;
-    const base::Value::List& cached_languages_list =
+    const base::ListValue& cached_languages_list =
         local_state_.GetList(GeoLanguageProvider::kCachedGeoLanguagesPref);
     for (const auto& language_value : cached_languages_list) {
       languages.push_back(language_value.GetString());
@@ -156,8 +156,9 @@ TEST_F(GeoLanguageProviderTest, ButDoCallInTheNextDay) {
 }
 
 TEST_F(GeoLanguageProviderTest, CachedLanguagesUpdatedOnStartup) {
-  SetUpCachedLanguages({"en", "fr"},
-                       (base::Time::Now() - base::Hours(25)).ToDoubleT());
+  SetUpCachedLanguages(
+      {"en", "fr"},
+      (base::Time::Now() - base::Hours(25)).InSecondsFSinceUnixEpoch());
   MoveToLocation(23.0, 80.0);
   StartGeoLanguageProvider();
 
@@ -172,7 +173,8 @@ TEST_F(GeoLanguageProviderTest, CachedLanguagesUpdatedOnStartup) {
 }
 
 TEST_F(GeoLanguageProviderTest, CachedLanguagesNotUpdatedOnStartup) {
-  SetUpCachedLanguages({"en", "fr"}, base::Time::Now().ToDoubleT());
+  SetUpCachedLanguages({"en", "fr"},
+                       base::Time::Now().InSecondsFSinceUnixEpoch());
   MoveToLocation(23.0, 80.0);
   StartGeoLanguageProvider();
 

@@ -34,33 +34,20 @@ TEST_F(BluetoothSocketApiUnittest, Permission) {
 }
 
 // Tests bluetoothSocket.create() and bluetoothSocket.close().
-// Regression test for https://crbug.com/831651.
-// TODO(https://crbug.com/1251347): Port //device/bluetooth to Fuchsia to enable
-// bluetooth extensions.
-#if BUILDFLAG(IS_FUCHSIA)
-#define MAYBE_CreateThenClose DISABLED_CreateThenClose
-#else
-#define MAYBE_CreateThenClose CreateThenClose
-#endif
-TEST_F(BluetoothSocketApiUnittest, MAYBE_CreateThenClose) {
+// Regression test for https://crbug.com/40571201.
+TEST_F(BluetoothSocketApiUnittest, CreateThenClose) {
   scoped_refptr<const Extension> extension_with_socket_permitted =
       ExtensionBuilder()
           .SetManifest(
-              DictionaryBuilder()
+              base::DictValue()
                   .Set("name", "bluetooth app")
                   .Set("version", "1.0")
-                  .Set("bluetooth",
-                       DictionaryBuilder().Set("socket", true).Build())
-                  .Set("app",
-                       DictionaryBuilder()
-                           .Set("background",
-                                DictionaryBuilder()
-                                    .Set("scripts", ListBuilder()
-                                                        .Append("background.js")
-                                                        .Build())
-                                    .Build())
-                           .Build())
-                  .Build())
+                  .Set("bluetooth", base::DictValue().Set("socket", true))
+                  .Set("app", base::DictValue().Set(
+                                  "background",
+                                  base::DictValue().Set(
+                                      "scripts", base::ListValue().Append(
+                                                     "background.js")))))
           .SetLocation(mojom::ManifestLocation::kComponent)
           .Build();
 
@@ -69,19 +56,19 @@ TEST_F(BluetoothSocketApiUnittest, MAYBE_CreateThenClose) {
 
   auto create_function =
       base::MakeRefCounted<api::BluetoothSocketCreateFunction>();
-  absl::optional<base::Value> result =
-      RunFunctionAndReturnValue(create_function.get(), "[]");
+  std::optional<base::Value> result =
+      RunFunctionAndReturnValue(create_function, "[]");
   ASSERT_TRUE(result);
   ASSERT_TRUE(result->is_dict());
 
-  api::bluetooth_socket::CreateInfo create_info;
-  EXPECT_TRUE(
-      api::bluetooth_socket::CreateInfo::Populate(*result, &create_info));
+  auto create_info =
+      api::bluetooth_socket::CreateInfo::FromValue(result->GetDict());
+  EXPECT_TRUE(create_info);
 
-  const int socket_id = create_info.socket_id;
+  const int socket_id = create_info->socket_id;
   auto close_function =
       base::MakeRefCounted<api::BluetoothSocketCloseFunction>();
-  RunFunction(close_function.get(), base::StringPrintf("[%d]", socket_id));
+  RunFunction(close_function, base::StringPrintf("[%d]", socket_id));
 }
 
 }  // namespace extensions

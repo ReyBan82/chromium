@@ -32,19 +32,23 @@
 
 #include <algorithm>
 
+#include "base/memory/raw_ptr.h"
 #include "third_party/blink/renderer/core/css/css_property_value_set.h"
 #include "third_party/blink/renderer/core/dom/attribute.h"
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/html/forms/html_input_element.h"
+#include "third_party/blink/renderer/platform/heap/disallow_new_wrapper.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/wtf/hash_functions.h"
+#include "third_party/blink/renderer/platform/wtf/hash_functions_memory.h"
 #include "third_party/blink/renderer/platform/wtf/hash_map.h"
+#include "third_party/blink/renderer/platform/wtf/hash_traits.h"
 
 namespace blink {
 
 struct PresentationAttributeCacheKey {
   PresentationAttributeCacheKey() : tag_name(nullptr) {}
-  StringImpl* tag_name;
+  raw_ptr<StringImpl, UnprotectedInRelease | DanglingUntriaged> tag_name;
   Vector<std::pair<StringImpl*, AtomicString>, 3> attributes_and_values;
 };
 
@@ -65,13 +69,16 @@ struct PresentationAttributeCacheEntry final
 };
 
 using PresentationAttributeCache =
-    HeapHashMap<unsigned,
+    HeapHashMap<uint32_t,
                 Member<PresentationAttributeCacheEntry>,
                 AlreadyHashedTraits>;
 static PresentationAttributeCache& GetPresentationAttributeCache() {
-  DEFINE_STATIC_LOCAL(Persistent<PresentationAttributeCache>, cache,
-                      (MakeGarbageCollected<PresentationAttributeCache>()));
-  return *cache;
+  using PresentationAttributeCacheHolder =
+      DisallowNewWrapper<PresentationAttributeCache>;
+  DEFINE_STATIC_LOCAL(
+      Persistent<PresentationAttributeCacheHolder>, cache,
+      (MakeGarbageCollected<PresentationAttributeCacheHolder>()));
+  return cache->Value();
 }
 
 static bool AttributeNameSort(const std::pair<StringImpl*, AtomicString>& p1,
@@ -81,17 +88,17 @@ static bool AttributeNameSort(const std::pair<StringImpl*, AtomicString>& p1,
   return p1.first < p2.first;
 }
 
-static unsigned ComputePresentationAttributeCacheHash(
+static uint32_t ComputePresentationAttributeCacheHash(
     const PresentationAttributeCacheKey& key) {
   DCHECK(key.tag_name);
   DCHECK(key.attributes_and_values.size());
-  unsigned attribute_hash = StringHasher::HashMemory(
-      key.attributes_and_values.data(),
-      key.attributes_and_values.size() * sizeof(key.attributes_and_values[0]));
-  return WTF::HashInts(key.tag_name->ExistingHash(), attribute_hash);
+  uint32_t attribute_hash =
+      HashMemory32(base::as_byte_span(key.attributes_and_values));
+  return EnsureValidHash(
+      HashInts(key.tag_name->ExistingHash(), attribute_hash));
 }
 
-static unsigned MakePresentationAttributeCacheKey(
+static uint32_t MakePresentationAttributeCacheKey(
     Element& element,
     PresentationAttributeCacheKey& result) {
   // FIXME: Enable for SVG.
@@ -130,7 +137,7 @@ CSSPropertyValueSet* ComputePresentationAttributeStyle(Element& element) {
   DCHECK(element.IsStyledElement());
 
   PresentationAttributeCacheKey cache_key;
-  unsigned cache_hash = MakePresentationAttributeCacheKey(element, cache_key);
+  uint32_t cache_hash = MakePresentationAttributeCacheKey(element, cache_key);
 
   PresentationAttributeCache::ValueType* cache_value;
   PresentationAttributeCache& cache = GetPresentationAttributeCache();
@@ -145,15 +152,7 @@ CSSPropertyValueSet* ComputePresentationAttributeStyle(Element& element) {
   // The element can be cached (has non-zero hash) and has an entry in the
   // cache. Hit.
   if (cache_hash && cache_value->value) {
-    // Reference the property set, since if we clean the cache below it may
-    // disappear.
-    CSSPropertyValueSet* style = cache_value->value->value;
-
-    static const unsigned kMinimumPresentationAttributeCacheSizeForCleaning =
-        100;
-    if (cache.size() >= kMinimumPresentationAttributeCacheSizeForCleaning)
-      cache.clear();
-    return style;
+    return cache_value->value->value;
   }
 
   // No entry in the cache or cannot be cached. Miss. Create a new property set.

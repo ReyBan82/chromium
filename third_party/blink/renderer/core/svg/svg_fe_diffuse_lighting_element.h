@@ -37,6 +37,9 @@ class SVGFEDiffuseLightingElement final
 
  public:
   explicit SVGFEDiffuseLightingElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGFEDiffuseLightingElement;
+  }
 
   void LightElementAttributeChanged(const SVGFELightElement*,
                                     const QualifiedName&);
@@ -54,6 +57,10 @@ class SVGFEDiffuseLightingElement final
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
   FilterEffect* Build(SVGFilterBuilder*, Filter*) override;
   bool TaintsOrigin() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedNumber> diffuse_constant_;
   Member<SVGAnimatedNumber> surface_scale_;

@@ -8,10 +8,11 @@
 #include <memory>
 
 #include "base/memory/raw_ptr.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "ui/events/gesture_detection/gesture_detection_export.h"
-#include "ui/events/gesture_detection/velocity_tracker_state.h"
+#include "ui/events/velocity_tracker/velocity_tracker_state.h"
 
 namespace ui {
 
@@ -93,7 +94,7 @@ class GESTURE_DETECTION_EXPORT GestureDetector {
 
     // Whether a longpress should be generated immediately when a stylus button
     // is pressed, given that the longpress timeout is still active.
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
     bool stylus_button_accelerated_longpress_enabled = true;
 #else
     bool stylus_button_accelerated_longpress_enabled = false;
@@ -149,7 +150,14 @@ class GESTURE_DETECTION_EXPORT GestureDetector {
   const MotionEvent* GetSourcePointerDownEvent(
       const MotionEvent& current_down_event,
       const MotionEvent* secondary_pointer_down_event,
-      const int pointer_id);
+      const int pointer_id) const;
+
+  void OnUnconfirmedTapConvertedToTap();
+
+  void SetGestureTimeoutHandlerTaskRunnerForTesting(
+      scoped_refptr<base::SequencedTaskRunner> task_runner);
+
+  base::TimeDelta GetDoubleTapTimeoutForTesting() const;
 
  private:
   void Init(const Config& config);
@@ -166,7 +174,7 @@ class GESTURE_DETECTION_EXPORT GestureDetector {
                      const MotionEvent& second_down,
                      bool should_process_double_tap) const;
   bool HandleSwipeIfNeeded(const MotionEvent& up, float vx, float vy);
-  bool IsWithinSlopForTap(const MotionEvent& ev);
+  bool IsWithinSlopForTap(const MotionEvent& ev) const;
 
   class TimeoutGestureHandler;
   std::unique_ptr<TimeoutGestureHandler> timeout_handler_;
@@ -226,6 +234,7 @@ class GESTURE_DETECTION_EXPORT GestureDetector {
   bool showpress_enabled_ = true;
   bool swipe_enabled_ = false;
   bool two_finger_tap_enabled_ = false;
+  bool unconfirmed_tap_was_converted_to_tap_ = false;
 
   // Determines speed during touch scrolling.
   VelocityTrackerState velocity_tracker_;

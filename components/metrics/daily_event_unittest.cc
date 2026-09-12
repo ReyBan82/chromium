@@ -4,11 +4,13 @@
 
 #include "components/metrics/daily_event.h"
 
+#include <optional>
+
 #include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
+#include "base/test/task_environment.h"
 #include "components/prefs/testing_pref_service.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace metrics {
 
@@ -33,7 +35,7 @@ class TestDailyObserver : public DailyEvent::Observer {
 
  private:
   // Last-received type, or unset if OnDailyEvent() hasn't been called.
-  absl::optional<DailyEvent::IntervalType> type_;
+  std::optional<DailyEvent::IntervalType> type_;
 };
 
 class DailyEventTest : public testing::Test {
@@ -52,6 +54,8 @@ class DailyEventTest : public testing::Test {
   TestingPrefServiceSimple prefs_;
   DailyEvent event_;  // Owns and outlives `observer_`
   raw_ptr<TestDailyObserver> observer_;
+  base::test::TaskEnvironment env_{
+      base::test::TaskEnvironment::TimeSource::MOCK_TIME};
 };
 
 }  // namespace
@@ -95,6 +99,48 @@ TEST_F(DailyEventTest, TestSoonNotFired) {
   prefs_.SetInt64(kTestPrefName, last_time.since_origin().InMicroseconds());
   event_.CheckInterval();
   EXPECT_FALSE(observer_->fired());
+}
+
+void TestCallback(bool* fired) {
+  *fired = true;
+}
+
+TEST_F(DailyEventTest, TestClosureFired) {
+  // Verify the event fires on the first check.
+  bool fired = false;
+  event_.AddObserverClosure(base::BindRepeating(&TestCallback, &fired));
+  event_.CheckInterval();
+  EXPECT_TRUE(fired);
+  EXPECT_EQ(DailyEvent::IntervalType::FIRST_RUN, observer_->type());
+
+  // Reset the flag. A check on the same day should not fire the event.
+  fired = false;
+  event_.CheckInterval();
+  EXPECT_FALSE(fired);
+
+  // Advance time by 25 hours to verify the event fires again.
+  env_.FastForwardBy(base::Hours(25));
+  event_.CheckInterval();
+  EXPECT_TRUE(fired);
+  EXPECT_EQ(DailyEvent::IntervalType::DAY_ELAPSED, observer_->type());
+}
+
+// Regression test mimicking the OOMKillsMonitor singleton pattern where the
+// DailyEvent is owned via unique_ptr and must be destroyed before PrefService.
+TEST(DailyEventDanglingPtrTest, SingletonPatternReset) {
+  base::test::TaskEnvironment env;
+  auto prefs = std::make_unique<TestingPrefServiceSimple>();
+  DailyEvent::RegisterPref(prefs->registry(), kTestPrefName);
+
+  // Simulate singleton: DailyEvent on the heap, outliving PrefService.
+  auto event =
+      std::make_unique<DailyEvent>(prefs.get(), kTestPrefName, kTestMetricName);
+  event->CheckInterval();
+
+  // Reset (destroy) DailyEvent before PrefService destruction prevents
+  // dangling.
+  event.reset();
+  prefs.reset();
 }
 
 }  // namespace metrics

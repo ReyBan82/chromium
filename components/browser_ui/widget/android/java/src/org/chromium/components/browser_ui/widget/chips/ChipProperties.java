@@ -5,6 +5,7 @@
 package org.chromium.components.browser_ui.widget.chips;
 
 import org.chromium.base.Callback;
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.ui.modelutil.PropertyKey;
 import org.chromium.ui.modelutil.PropertyModel;
 import org.chromium.ui.modelutil.PropertyModel.ReadableIntPropertyKey;
@@ -14,6 +15,7 @@ import org.chromium.ui.modelutil.PropertyModel.WritableIntPropertyKey;
 import org.chromium.ui.modelutil.PropertyModel.WritableObjectPropertyKey;
 
 /** Properties that describe a single chip in a list/group of chips. */
+@NullMarked
 public class ChipProperties {
     /** ID for a basic chip in it's containing recycler view. */
     public static final int BASIC_CHIP = 0;
@@ -31,6 +33,13 @@ public class ChipProperties {
     public static final WritableObjectPropertyKey<Callback<PropertyModel>> CLICK_HANDLER =
             new WritableObjectPropertyKey<>();
 
+    /**
+     * A means of handling selection/focus on a chip. The selection state is provided in the
+     * callback.
+     */
+    public static final WritableObjectPropertyKey<Callback<Boolean>> SELECT_HANDLER =
+            new WritableObjectPropertyKey<>();
+
     /** The description of the content inside the chip (for accessibility). */
     public static final WritableObjectPropertyKey<String> CONTENT_DESCRIPTION =
             new WritableObjectPropertyKey<>();
@@ -40,6 +49,10 @@ public class ChipProperties {
 
     /** An icon ID to show beside the chip's text. If no icon, use {@link #INVALID_ICON_ID}. */
     public static final WritableIntPropertyKey ICON = new WritableIntPropertyKey();
+
+    /** Whether the icon should be tinted with text color. */
+    public static final WritableBooleanPropertyKey APPLY_ICON_TINT =
+            new WritableBooleanPropertyKey();
 
     /** An arbitrary ID for the chip to help identify it. */
     public static final ReadableIntPropertyKey ID = new ReadableIntPropertyKey();
@@ -53,6 +66,22 @@ public class ChipProperties {
     /** The max width a chip's text should have in PX. Use {@link #SHOW_WHOLE_TEXT} for no limit. */
     public static final WritableIntPropertyKey TEXT_MAX_WIDTH_PX = new WritableIntPropertyKey();
 
-    public static final PropertyKey[] ALL_KEYS = new PropertyKey[] {CLICK_HANDLER,
-            CONTENT_DESCRIPTION, ENABLED, ICON, ID, SELECTED, TEXT, TEXT_MAX_WIDTH_PX};
+    // Res id for the style to apply to the primary text view of the chip.
+    public static final WritableIntPropertyKey PRIMARY_TEXT_APPEARANCE =
+            new WritableIntPropertyKey();
+
+    public static final PropertyKey[] ALL_KEYS =
+            new PropertyKey[] {
+                APPLY_ICON_TINT,
+                CLICK_HANDLER,
+                SELECT_HANDLER,
+                CONTENT_DESCRIPTION,
+                ENABLED,
+                ICON,
+                ID,
+                PRIMARY_TEXT_APPEARANCE,
+                SELECTED,
+                TEXT,
+                TEXT_MAX_WIDTH_PX
+            };
 }

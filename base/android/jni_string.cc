@@ -4,17 +4,25 @@
 
 #include "base/android/jni_string.h"
 
+#include <array>
+#include <cstdint>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 #include "base/android/jni_android.h"
-#include "base/logging.h"
+#include "base/containers/span.h"
 #include "base/numerics/safe_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 
 namespace {
 
+constexpr jsize kStackBufferSize = 1024;
+
 // Internal version that does not use a scoped local pointer.
-jstring ConvertUTF16ToJavaStringImpl(JNIEnv* env,
-                                     const base::StringPiece16& str) {
-  jstring result = env->NewString(reinterpret_cast<const jchar*>(str.data()),
+jstring ConvertUTF16ToJavaStringImpl(JNIEnv* env, std::u16string_view str) {
+  jstring result = env->NewString(reinterpret_cast<const uint16_t*>(str.data()),
                                   base::checked_cast<jsize>(str.length()));
   base::android::CheckException(env);
   return result;
@@ -26,26 +34,33 @@ namespace base {
 namespace android {
 
 void ConvertJavaStringToUTF8(JNIEnv* env, jstring str, std::string* result) {
-  DCHECK(str);
   if (!str) {
-    LOG(WARNING) << "ConvertJavaStringToUTF8 called with null string.";
     result->clear();
     return;
   }
-  const jsize length = env->GetStringLength(str);
-  if (length <= 0) {
-    result->clear();
-    CheckException(env);
-    return;
+  int32_t length = env->GetStringLength(str);
+
+  // Stack allocation for smallish strings.
+  std::array<uint16_t, kStackBufferSize> stack_buf;
+
+  uint16_t* buf = stack_buf.data();
+  std::vector<uint16_t> heap_buf;
+
+  // Heap allocation for large ones.
+  if (length > kStackBufferSize) {
+    heap_buf.resize(static_cast<size_t>(length));
+    buf = heap_buf.data();
   }
-  // JNI's GetStringUTFChars() returns strings in Java "modified" UTF8, so
-  // instead get the String in UTF16 and convert using chromium's conversion
-  // function that yields plain (non Java-modified) UTF8.
-  const jchar* chars = env->GetStringChars(str, NULL);
-  DCHECK(chars);
-  UTF16ToUTF8(reinterpret_cast<const char16_t*>(chars),
+
+  // Why use GetStringRegion():
+  //  * `GetStringChars()` does a heap allocation & requires a second JNI call
+  //    to release the buffer.
+  //  * `GetStringCharsCritical()` does the same for strings that internally
+  //    stored as "compressed" (no multi-byte chars).
+  //  * `GetStringUTFRegion()` returns modified UTF-8, which is not helpful.
+  env->GetStringRegion(str, 0, length, buf);
+  UTF16ToUTF8(reinterpret_cast<const char16_t*>(buf),
               static_cast<size_t>(length), result);
-  env->ReleaseStringChars(str, chars);
   CheckException(env);
 }
 
@@ -64,7 +79,31 @@ std::string ConvertJavaStringToUTF8(JNIEnv* env, const JavaRef<jstring>& str) {
 }
 
 ScopedJavaLocalRef<jstring> ConvertUTF8ToJavaString(JNIEnv* env,
-                                                    const StringPiece& str) {
+                                                    std::string_view str) {
+  // ART allocates new empty strings, so use a singleton when applicable.
+  if (str.empty()) {
+    return jni_zero::g_empty_string.AsLocalRef(env);
+  }
+
+  // This is a similar optimization to the one in ConvertJavaStringToUTF8()
+  // above. However, this is only safe if the string is ASCII as all ASCII
+  // characters are the same in UTF8 and UTF16. This also bypasses any
+  // "modified" UTF8 concerns with JNI's NewStringUTF(). The heap vector version
+  // of this is already handled in UTF8ToUTF16().
+  const size_t length = str.length();
+  if (length <= kStackBufferSize && base::IsStringASCII(str)) {
+    std::array<uint16_t, kStackBufferSize> chars;
+    base::span<uint16_t> chars_span =
+        base::span<uint16_t>(chars).first(length);
+    for (size_t i = 0; i < length; ++i) {
+      chars_span[i] = static_cast<uint16_t>(str[i]);
+    }
+    jstring result =
+        env->NewString(chars_span.data(), base::checked_cast<jsize>(length));
+    CheckException(env);
+    return jni_zero::AdoptRef(env, result);
+  }
+
   // JNI's NewStringUTF expects "modified" UTF8 so instead create the string
   // via our own UTF16 conversion utility.
   // Further, Dalvik requires the string passed into NewStringUTF() to come from
@@ -72,32 +111,36 @@ ScopedJavaLocalRef<jstring> ConvertUTF8ToJavaString(JNIEnv* env,
   // it gets here, so constructing via UTF16 side-steps this issue.
   // (Dalvik stores strings internally as UTF16 anyway, so there shouldn't be
   // a significant performance hit by doing it this way).
-  return ScopedJavaLocalRef<jstring>(env, ConvertUTF16ToJavaStringImpl(
-      env, UTF8ToUTF16(str)));
+  return jni_zero::AdoptRef(
+      env, ConvertUTF16ToJavaStringImpl(env, UTF8ToUTF16(str)));
 }
 
 void ConvertJavaStringToUTF16(JNIEnv* env,
                               jstring str,
                               std::u16string* result) {
-  DCHECK(str);
   if (!str) {
-    LOG(WARNING) << "ConvertJavaStringToUTF16 called with null string.";
     result->clear();
     return;
   }
-  const jsize length = env->GetStringLength(str);
-  if (length <= 0) {
-    result->clear();
-    CheckException(env);
-    return;
+  int32_t length = env->GetStringLength(str);
+
+  // Stack allocation for smallish strings.
+  std::array<uint16_t, kStackBufferSize> stack_buf;
+
+  uint16_t* buf = stack_buf.data();
+  std::vector<uint16_t> heap_buf;
+
+  // Heap allocation for large ones.
+  if (length > kStackBufferSize) {
+    heap_buf.resize(static_cast<size_t>(length));
+    buf = heap_buf.data();
   }
-  const jchar* chars = env->GetStringChars(str, NULL);
-  DCHECK(chars);
-  // GetStringChars isn't required to NULL-terminate the strings
-  // it returns, so the length must be explicitly checked.
-  result->assign(reinterpret_cast<const char16_t*>(chars),
+
+  // See comment in ConvertJavaStringToUTF8() about why GetStringRegion() is
+  // used.
+  env->GetStringRegion(str, 0, length, buf);
+  result->assign(reinterpret_cast<const char16_t*>(buf),
                  static_cast<size_t>(length));
-  env->ReleaseStringChars(str, chars);
   CheckException(env);
 }
 
@@ -117,9 +160,12 @@ std::u16string ConvertJavaStringToUTF16(JNIEnv* env,
 }
 
 ScopedJavaLocalRef<jstring> ConvertUTF16ToJavaString(JNIEnv* env,
-                                                     const StringPiece16& str) {
-  return ScopedJavaLocalRef<jstring>(env,
-                                     ConvertUTF16ToJavaStringImpl(env, str));
+                                                     std::u16string_view str) {
+  // ART allocates new empty strings, so use a singleton when applicable.
+  if (str.empty()) {
+    return jni_zero::g_empty_string.AsLocalRef(env);
+  }
+  return jni_zero::AdoptRef(env, ConvertUTF16ToJavaStringImpl(env, str));
 }
 
 }  // namespace android

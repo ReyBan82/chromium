@@ -6,11 +6,14 @@
 
 #include <utility>
 
+#include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/i18n/icu_util.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/no_destructor.h"
+#include "base/run_loop.h"
 #include "base/task/sequenced_task_runner.h"
-#include "base/threading/platform_thread.h"
-#include "base/threading/thread.h"
 #include "content/browser/blob_storage/chrome_blob_storage_context.h"  // [nogncheck]
 #include "content/browser/cache_storage/cache_storage_control_wrapper.h"  // [nogncheck]
 #include "content/browser/code_cache/generated_code_cache_context.h"  // [nogncheck]
@@ -25,13 +28,14 @@
 #include "storage/browser/quota/quota_manager.h"
 #include "storage/browser/quota/special_storage_policy.h"
 #include "storage/browser/test/mock_special_storage_policy.h"
+#include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/loader/code_cache.mojom-mojolpm.h"
 #include "third_party/libprotobuf-mutator/src/src/libfuzzer/libfuzzer_macro.h"
 #include "url/origin.h"
 
 using url::Origin;
 
-const char* kCmdline[] = {"code_cache_host_mojolpm_fuzzer", nullptr};
+constexpr const char* kCmdline[] = {"code_cache_host_mojolpm_fuzzer", nullptr};
 
 content::mojolpm::FuzzerEnvironment& GetEnvironment() {
   static base::NoDestructor<
@@ -83,9 +87,9 @@ class CodeCacheHostTestcase
   // cache thread.
   void AddCodeCacheHostImpl(
       uint32_t id,
-      int renderer_id,
-      const Origin& origin,
+      content::ChildProcessId renderer_id,
       const net::NetworkIsolationKey& key,
+      const blink::StorageKey& storage_key,
       mojo::PendingReceiver<::blink::mojom::CodeCacheHost>&& receiver);
 
   // Create and bind a new instance for fuzzing. This ensures that the new
@@ -93,7 +97,7 @@ class CodeCacheHostTestcase
   // `done_closure`.
   void AddCodeCacheHost(
       uint32_t id,
-      int renderer_id,
+      content::ChildProcessId renderer_id,
       content::fuzzing::code_cache_host::proto::NewCodeCacheHostAction::OriginId
           origin_id,
       base::OnceClosure done_closure);
@@ -118,7 +122,8 @@ class CodeCacheHostTestcase
   using UniqueCodeCacheReceiverSet =
       std::unique_ptr<mojo::UniqueReceiverSet<blink::mojom::CodeCacheHost>,
                       base::OnTaskRunnerDeleter>;
-  std::map<int, UniqueCodeCacheReceiverSet> code_cache_host_receivers_;
+  std::map<content::ChildProcessId, UniqueCodeCacheReceiverSet>
+      code_cache_host_receivers_;
 };
 
 CodeCacheHostTestcase::CodeCacheHostTestcase(
@@ -182,14 +187,23 @@ void CodeCacheHostTestcase::TearDown(base::OnceClosure done_closure) {
 
 void CodeCacheHostTestcase::TearDownOnUIThread(base::OnceClosure done_closure) {
   code_cache_host_receivers_.clear();
-  generated_code_cache_context_.reset();
-  cache_storage_control_wrapper_.reset();
-  browser_context_.reset();
 
-  GetFuzzerTaskRunner()->PostTask(
-      FROM_HERE,
-      base::BindOnce(&CodeCacheHostTestcase::TearDownOnFuzzerThread,
-                     base::Unretained(this), std::move(done_closure)));
+  // Shutdown the context and wait for backend cleanup before continuing
+  // teardown.
+  generated_code_cache_context_->ShutdownForTesting(base::BindOnce(
+      [](CodeCacheHostTestcase* self, base::OnceClosure done_closure) {
+        // Destroy the BrowserContext now on the UI thread.
+        self->generated_code_cache_context_.reset();
+        self->cache_storage_control_wrapper_.reset();
+        self->browser_context_.reset();
+
+        // Complete tear down on the fuzzer thread.
+        GetFuzzerTaskRunner()->PostTask(
+            FROM_HERE,
+            base::BindOnce(&CodeCacheHostTestcase::TearDownOnFuzzerThread,
+                           base::Unretained(self), std::move(done_closure)));
+      },
+      base::Unretained(this), std::move(done_closure)));
 }
 
 void CodeCacheHostTestcase::TearDownOnFuzzerThread(
@@ -210,8 +224,10 @@ void CodeCacheHostTestcase::RunAction(const ProtoAction& action,
 
   switch (action.action_case()) {
     case ProtoAction::kNewCodeCacheHost:
+      // TODO(crbug.com/379869738) Remove FromUnsafeValue.
       AddCodeCacheHost(action.new_code_cache_host().id(),
-                       action.new_code_cache_host().render_process_id(),
+                       content::ChildProcessId::FromUnsafeValue(
+                           action.new_code_cache_host().render_process_id()),
                        action.new_code_cache_host().origin_id(),
                        std::move(run_closure));
       return;
@@ -246,12 +262,12 @@ void CodeCacheHostTestcase::RunAction(const ProtoAction& action,
 
 void CodeCacheHostTestcase::AddCodeCacheHostImpl(
     uint32_t id,
-    int renderer_id,
-    const Origin& origin,
+    content::ChildProcessId renderer_id,
     const net::NetworkIsolationKey& nik,
+    const blink::StorageKey& storage_key,
     mojo::PendingReceiver<::blink::mojom::CodeCacheHost>&& receiver) {
-  auto code_cache_host = std::make_unique<content::CodeCacheHostImpl>(
-      renderer_id, generated_code_cache_context_, nik);
+  auto code_cache_host = content::CodeCacheHostImpl::Create(
+      renderer_id, generated_code_cache_context_, nik, storage_key);
   code_cache_host->SetCacheStorageControlForTesting(
       cache_storage_control_wrapper_.get());
   UniqueCodeCacheReceiverSet receivers(
@@ -273,7 +289,7 @@ static void AddCodeCacheHostInstance(
 
 void CodeCacheHostTestcase::AddCodeCacheHost(
     uint32_t id,
-    int renderer_id,
+    content::ChildProcessId renderer_id,
     content::fuzzing::code_cache_host::proto::NewCodeCacheHostAction::OriginId
         origin_id,
     base::OnceClosure run_closure) {
@@ -296,6 +312,7 @@ void CodeCacheHostTestcase::AddCodeCacheHost(
   } else if (origin_id == OriginId_EMPTY) {
     origin = &origin_empty_;
   }
+  auto storage_key = blink::StorageKey::CreateFirstParty(*origin);
 
   // Use of Unretained is safe since `this` is guaranteed to live at least until
   // `run_closure` is invoked.
@@ -304,8 +321,9 @@ void CodeCacheHostTestcase::AddCodeCacheHost(
       ->PostTaskAndReply(
           FROM_HERE,
           base::BindOnce(&CodeCacheHostTestcase::AddCodeCacheHostImpl,
-                         base::Unretained(this), id, renderer_id, *origin,
-                         net::NetworkIsolationKey(), std::move(receiver)),
+                         base::Unretained(this), id, renderer_id,
+                         net::NetworkIsolationKey(), storage_key,
+                         std::move(receiver)),
           base::BindOnce(AddCodeCacheHostInstance, id, std::move(remote),
                          std::move(run_closure)));
 }

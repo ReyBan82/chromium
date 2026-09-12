@@ -1,20 +1,23 @@
 include_rules = [
+  "+components/pdf/browser",
   "+content/public/browser",
-  "+components/contextual_search/core/browser",
+  "+content/public/test",
+  "+components/touch_to_search/core/browser",
   "+components/google/core/common",
   "+components/keyed_service/core",
   "+components/optimization_guide",
   "+components/optimization_guide/content",
-  "+components/services/language_detection/public/cpp",
-  "+components/services/language_detection/public/mojom",
-  "+components/translate/core/language_detection",
   "+components/ukm",
+  "+components/user_prefs",
+  "+pdf/mojom",
+  "+pdf/buildflags.h",
   "+services/metrics/public/cpp",
-  "+third_party/blink/public/common",
+  "+services/network/public/cpp",
+  "+services/network/test",
 ]
 
 specific_include_rules = {
-  '.*_[a-z]*test\.cc': [
-    "+content/public/test",
-  ]
+  "content_translate_driver_unittest\\.cc": [
+    "+pdf/buildflags.h",
+  ],
 }

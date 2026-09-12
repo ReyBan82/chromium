@@ -6,69 +6,149 @@
 #define CHROME_BROWSER_UI_WEBID_ACCOUNT_SELECTION_VIEW_H_
 
 #include <memory>
+
 #include "base/memory/raw_ptr.h"
-#include "content/public/browser/identity_request_account.h"
-#include "content/public/browser/identity_request_dialog_controller.h"
-#include "ui/gfx/native_widget_types.h"
+#include "content/public/browser/webid/identity_request_account.h"
+#include "content/public/browser/webid/identity_request_dialog_controller.h"
+#include "ui/base/unowned_user_data/scoped_unowned_user_data.h"
+#include "ui/gfx/native_ui_types.h"
 
 using Account = content::IdentityRequestAccount;
+using IdentityProviderDataPtr = scoped_refptr<content::IdentityProviderData>;
+using IdentityRequestAccountPtr =
+    scoped_refptr<content::IdentityRequestAccount>;
+using LinkType = content::IdentityRequestDialogController::LinkType;
+using TokenError = content::IdentityCredentialTokenError;
 
 // This class represents the interface used for communicating between the
 // identity dialog controller with the Android frontend.
 class AccountSelectionView {
  public:
+  DECLARE_USER_DATA(AccountSelectionView);
   class Delegate {
    public:
     virtual ~Delegate() = default;
     // Informs the controller that the user has made a selection.
-    virtual void OnAccountSelected(const GURL& idp_config_url,
-                                   const Account& account) = 0;
-    // Informs the controller that the user has dismissed the sheet with reason
-    // `dismiss_reason`.
+    virtual void OnAccountSelected(
+        const GURL& idp_config_url,
+        const std::string& account_id,
+        const content::IdentityRequestAccount::LoginState& login_state) = 0;
+    // TODO(https://crbug.com/377803489): Rename this method to
+    // OnUserCancelled.
+    // This method is called when the user interacts with the UI in a way that
+    // cancels out of the entire fedcm flow.
     virtual void OnDismiss(
         content::IdentityRequestDialogController::DismissReason
             dismiss_reason) = 0;
+    virtual void OnLoginToIdP(const GURL& idp_config_url,
+                              const GURL& idp_login_url) = 0;
+    virtual void OnMoreDetails() = 0;
+    // Informs the controller that the accounts dialog has been displayed.
+    virtual void OnAccountsDisplayed() = 0;
+    // Informs the controller that a native app returned a token result.
+    virtual void OnNativeAppResult(const std::string& token) = 0;
+    // Informs the controller that a native app completed login.
+    virtual void OnNativeAppLoginFinished() = 0;
     // The web page view containing the focused field.
     virtual gfx::NativeView GetNativeView() = 0;
     // The WebContents for the page.
     virtual content::WebContents* GetWebContents() = 0;
+    virtual content::IdentityRequestDialogController::PassiveDialogVolume
+    GetPassiveDialogVolume() const = 0;
   };
 
   static std::unique_ptr<AccountSelectionView> Create(Delegate* delegate);
 
   // Returns the brand icon minimum size. This includes the size of the
   // safe-zone defined in https://www.w3.org/TR/appmanifest/#icon-masks
-  static int GetBrandIconMinimumSize();
+  static int GetBrandIconMinimumSize(blink::mojom::RpMode rp_mode);
 
   // Returns the brand icon ideal size. This includes the size of the
   // safe-zone defined in https://www.w3.org/TR/appmanifest/#icon-masks
-  static int GetBrandIconIdealSize();
+  static int GetBrandIconIdealSize(blink::mojom::RpMode rp_mode);
 
   explicit AccountSelectionView(Delegate* delegate) : delegate_(delegate) {}
   AccountSelectionView(const AccountSelectionView&) = delete;
   AccountSelectionView& operator=(const AccountSelectionView&) = delete;
   virtual ~AccountSelectionView() = default;
 
+  // Triggered when the user clicks on the page action while it is in the
+  // passive state. Called when the user clicks the page action (omnibox chip)
+  // in passive mode.
+  virtual void OnPageActionClicked() = 0;
+
   // Instructs the view to show the provided accounts to the user.
-  // `rp_for_display` is the relying party URL to display in the prompt. All
-  // IDP-specific information, including user accounts, is stored in
-  // `idps_for_display`. `sign_in_mode` represents whether this is an auto
-  // re-authn flow. If it is the auto re-authn flow, `idps_for_display` will
-  // only include the single returning account and its IDP.
-  // `show_auto_reauthn_checkbox` represents whether we should show a checkbox
-  // for users to opt out of auto re-authn. After user interaction either
-  // OnAccountSelected() or OnDismiss() gets invoked.
-  virtual void Show(
-      const std::string& rp_for_display,
-      const std::vector<content::IdentityProviderData>& identity_provider_data,
-      Account::SignInMode sign_in_mode,
-      bool show_auto_reauthn_checkbox) = 0;
+  // `rp_data` is the relying party's data, such as the display name and icon.
+  // All IDP-specific information, is stored in `idp_list`. `sign_in_mode`
+  // represents whether this is an auto re-authn flow. If it is the auto
+  // re-authn flow, `idp_list` will only include the single returning account
+  // and its IDP. `new_accounts` is a vector where each member is a newly logged
+  // in account that ought to be prioritized in the UI. Returns true if it was
+  // possible to show UI. If this method could not show UI and called Dismiss,
+  // returns false.
+  virtual bool Show(
+      const content::RelyingPartyData& rp_data,
+      const std::vector<IdentityProviderDataPtr>& idp_list,
+      const std::vector<IdentityRequestAccountPtr>& accounts,
+      blink::mojom::RpMode rp_mode,
+      const std::vector<IdentityRequestAccountPtr>& new_accounts) = 0;
 
   // Shows a failure UI when the accounts fetch is failed such that it is
   // observable by users. This could happen when an IDP claims that the user is
   // signed in but not respond with any user account during browser fetches.
-  virtual void ShowFailureDialog(const std::string& rp_for_display,
-                                 const std::string& idp_for_display) = 0;
+  // Returns true if it was possible to show UI. If this method could not show
+  // UI and called Dismiss, returns false.
+  virtual bool ShowFailureDialog(
+      const content::RelyingPartyData& rp_data,
+      const std::string& idp_for_display,
+      blink::mojom::RpContext rp_context,
+      blink::mojom::RpMode rp_mode,
+      const content::IdentityProviderMetadata& idp_metadata) = 0;
+
+  // Shows an error dialog to the user, possibly with a custom error message.
+  // Returns true if it was possible to show UI. If this method could not show
+  // UI and called Dismiss, returns false.
+  virtual bool ShowErrorDialog(
+      const content::RelyingPartyData& rp_data,
+      const std::string& idp_for_display,
+      blink::mojom::RpContext rp_context,
+      blink::mojom::RpMode rp_mode,
+      const content::IdentityProviderMetadata& idp_metadata,
+      const std::optional<TokenError>& error) = 0;
+
+  // Shows a loading dialog to the user. Used in the button mode, to acknowledge
+  // the user interaction. Returns true if it was possible to show UI. If this
+  // method could not show UI and called Dismiss, returns false.
+  virtual bool ShowLoadingDialog(const content::RelyingPartyData& rp_data,
+                                 const std::string& idp_for_display,
+                                 blink::mojom::RpContext rp_context,
+                                 blink::mojom::RpMode rp_mode) = 0;
+
+  // Shows a verifying dialog to the user. This is called after an account is
+  // selected, either by the user in the explicit authentication flow or by the
+  // browser in the auto re-authentication flow. Returns true if it was possible
+  // to show UI.
+  virtual bool ShowVerifyingDialog(const content::RelyingPartyData& rp_data,
+                                   const IdentityProviderDataPtr& idp_data,
+                                   const IdentityRequestAccountPtr& account,
+                                   Account::SignInMode sign_in_mode,
+                                   blink::mojom::RpMode rp_mode) = 0;
+
+  // Shows or hides the account selection view.
+  // Applies to both active mode (modal) and passive mode (widget/bottom sheet).
+  virtual void SetCanShowUi(bool can_show_ui) {}
+
+  virtual std::string GetTitle() const = 0;
+  virtual std::optional<std::string> GetSubtitle() const = 0;
+
+  virtual void ShowUrl(LinkType type, const GURL& url) = 0;
+  virtual content::WebContents* ShowModalDialog(
+      const GURL& url,
+      blink::mojom::RpMode rp_mode,
+      content::IdentityRequestDialogController::ShownModalAsyncCallback
+          on_shown_async) = 0;
+  virtual void CloseModalDialog() = 0;
+  virtual content::WebContents* GetRpWebContents() = 0;
 
  protected:
   raw_ptr<Delegate> delegate_ = nullptr;

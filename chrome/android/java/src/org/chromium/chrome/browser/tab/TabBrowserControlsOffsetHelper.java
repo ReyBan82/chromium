@@ -4,21 +4,26 @@
 
 package org.chromium.chrome.browser.tab;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
+import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.ObserverList.RewindableIterator;
+import org.chromium.base.ResettersForTesting;
 import org.chromium.base.UserData;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.ui.base.WindowAndroid;
 
 /**
  * Helper that coordinates the browser controls offsets from the perspective of a particular Tab.
  */
-public class TabBrowserControlsOffsetHelper extends EmptyTabObserver implements UserData {
-    private static final Class<TabBrowserControlsOffsetHelper> USER_DATA_KEY =
+@NullMarked
+public class TabBrowserControlsOffsetHelper implements TabObserver, UserData {
+    @VisibleForTesting
+    public static final Class<TabBrowserControlsOffsetHelper> USER_DATA_KEY =
             TabBrowserControlsOffsetHelper.class;
 
-    private TabImpl mTab;
+    private static @Nullable TabBrowserControlsOffsetHelper sInstanceForTesting;
+
+    private final TabImpl mTab;
 
     private int mTopControlsOffset;
     private int mBottomControlsOffset;
@@ -31,17 +36,23 @@ public class TabBrowserControlsOffsetHelper extends EmptyTabObserver implements 
 
     /**
      * Get (or lazily create) the offset helper for a particular Tab.
+     *
      * @param tab The tab whose helper is being retrieved.
      * @return The offset helper for a given tab.
      */
-    @NonNull
     public static TabBrowserControlsOffsetHelper get(Tab tab) {
+        if (sInstanceForTesting != null) return sInstanceForTesting;
         TabBrowserControlsOffsetHelper helper = tab.getUserDataHost().getUserData(USER_DATA_KEY);
         if (helper == null) {
             helper = new TabBrowserControlsOffsetHelper(tab);
             tab.getUserDataHost().setUserData(USER_DATA_KEY, helper);
         }
         return helper;
+    }
+
+    public static void setInstanceForTesting(TabBrowserControlsOffsetHelper instance) {
+        sInstanceForTesting = instance;
+        ResettersForTesting.register(() -> sInstanceForTesting = null);
     }
 
     private TabBrowserControlsOffsetHelper(Tab tab) {
@@ -52,41 +63,37 @@ public class TabBrowserControlsOffsetHelper extends EmptyTabObserver implements 
     @Override
     public void destroy() {
         mTab.removeObserver(this);
-        mTab = null;
     }
 
     /**
      * Sets new top control, content, and min-height offset from renderer.
+     *
      * @param topControlsOffset Top control offset.
      * @param contentOffset Content offset.
      * @param topControlsMinHeightOffset Current min-height offset for the top controls that may be
-     *                                   changing as a result of an in-progress min-height change
-     *                                   animation in the renderer.
+     *     changing as a result of an in-progress min-height change animation in the renderer.
+     * @param bottomControlsOffset Bottom control offset.
+     * @param bottomControlsMinHeightOffset Current min-height offset for the bottom controls that
+     *     may be changing as a result of an in-progress min-height change animation in the
+     *     renderer.
      */
-    void setTopOffset(int topControlsOffset, int contentOffset, int topControlsMinHeightOffset) {
-        if (mOffsetInitialized && topControlsOffset == mTopControlsOffset
+    void setOffsets(
+            int topControlsOffset,
+            int contentOffset,
+            int topControlsMinHeightOffset,
+            int bottomControlsOffset,
+            int bottomControlsMinHeightOffset) {
+        if (mOffsetInitialized
+                && topControlsOffset == mTopControlsOffset
                 && mContentOffset == contentOffset
-                && mTopControlsMinHeightOffset == topControlsMinHeightOffset) {
+                && mTopControlsMinHeightOffset == topControlsMinHeightOffset
+                && mBottomControlsOffset == bottomControlsOffset
+                && mBottomControlsMinHeightOffset == bottomControlsMinHeightOffset) {
             return;
         }
         mTopControlsOffset = topControlsOffset;
         mContentOffset = contentOffset;
         mTopControlsMinHeightOffset = topControlsMinHeightOffset;
-        notifyControlsOffsetChanged();
-    }
-
-    /**
-     * Sets new bottom control offset from renderer.
-     * @param bottomControlsOffset Bottom control offset.
-     * @param bottomControlsMinHeightOffset Current min-height offset for the bottom controls that
-     *                                      may be changing as a result of an in-progress min-height
-     *                                      change animation in the renderer.
-     */
-    void setBottomOffset(int bottomControlsOffset, int bottomControlsMinHeightOffset) {
-        if (mOffsetInitialized && mBottomControlsOffset == bottomControlsOffset
-                && mBottomControlsMinHeightOffset == bottomControlsMinHeightOffset) {
-            return;
-        }
         mBottomControlsOffset = bottomControlsOffset;
         mBottomControlsMinHeightOffset = bottomControlsMinHeightOffset;
         notifyControlsOffsetChanged();
@@ -94,17 +101,19 @@ public class TabBrowserControlsOffsetHelper extends EmptyTabObserver implements 
 
     private void notifyControlsOffsetChanged() {
         mOffsetInitialized = true;
-        RewindableIterator<TabObserver> observers = mTab.getTabObservers();
-        while (observers.hasNext()) {
-            observers.next().onBrowserControlsOffsetChanged(mTab, mTopControlsOffset,
-                    mBottomControlsOffset, mContentOffset, mTopControlsMinHeightOffset,
+        for (TabObserver observer : mTab.getTabObservers()) {
+            observer.onBrowserControlsOffsetChanged(
+                    mTab,
+                    mTopControlsOffset,
+                    mBottomControlsOffset,
+                    mContentOffset,
+                    mTopControlsMinHeightOffset,
                     mBottomControlsMinHeightOffset);
         }
     }
 
     @Override
     public void onCrash(Tab tab) {
-        super.onCrash(tab);
         mTopControlsOffset = 0;
         mBottomControlsOffset = 0;
         mContentOffset = 0;

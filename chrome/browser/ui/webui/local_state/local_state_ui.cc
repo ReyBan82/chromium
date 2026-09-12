@@ -6,6 +6,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "base/functional/bind.h"
 #include "base/values.h"
@@ -38,7 +39,18 @@ class LocalStateUIHandler : public content::WebUIMessageHandler {
  private:
   // Called from JS when the page has loaded. Serializes local state prefs and
   // sends them to the page.
-  void HandleRequestJson(const base::Value::List& args);
+  void HandleRequestJson(const base::ListValue& args);
+
+#if BUILDFLAG(IS_CHROMEOS)
+  // On ChromeOS, the local state file contains some information about other
+  // user accounts which we don't want to expose to other users. In that case,
+  // this will filter out the prefs to only include variations and UMA related
+  // fields, which don't contain PII.
+  std::vector<std::string> accepted_pref_prefixes_{"variations",
+                                                   "user_experience_metrics"};
+#else
+  std::vector<std::string> accepted_pref_prefixes_;
+#endif  // BUILDFLAG(IS_CHROMEOS)
 };
 
 void LocalStateUIHandler::RegisterMessages() {
@@ -48,14 +60,17 @@ void LocalStateUIHandler::RegisterMessages() {
                           base::Unretained(this)));
 }
 
-void LocalStateUIHandler::HandleRequestJson(const base::Value::List& args) {
+void LocalStateUIHandler::HandleRequestJson(const base::ListValue& args) {
   AllowJavascript();
-  std::string json;
-  if (!GetPrefsAsJson(g_browser_process->local_state(), &json))
+
+  std::optional<std::string> json = local_state_utils::GetPrefsAsJson(
+      g_browser_process->local_state(), accepted_pref_prefixes_);
+  if (!json) {
     json = "Error loading Local State file.";
+  }
 
   const base::Value& callback_id = args[0];
-  ResolveJavascriptCallback(callback_id, base::Value(json));
+  ResolveJavascriptCallback(callback_id, base::Value(*json));
 }
 
 }  // namespace
@@ -70,5 +85,4 @@ LocalStateUI::LocalStateUI(content::WebUI* web_ui) : WebUIController(web_ui) {
   web_ui->AddMessageHandler(std::make_unique<LocalStateUIHandler>());
 }
 
-LocalStateUI::~LocalStateUI() {
-}
+LocalStateUI::~LocalStateUI() = default;

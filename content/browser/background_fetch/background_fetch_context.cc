@@ -23,7 +23,7 @@
 #include "content/common/background_fetch/background_fetch_types.h"
 #include "content/public/browser/background_fetch_delegate.h"
 #include "content/public/browser/browser_context.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/web_contents.h"
 #include "storage/browser/blob/blob_data_handle.h"
 #include "storage/browser/quota/quota_manager_proxy.h"
@@ -37,22 +37,22 @@ BackgroundFetchContext::BackgroundFetchContext(
     base::WeakPtr<StoragePartitionImpl> storage_partition,
     const scoped_refptr<ServiceWorkerContextWrapper>& service_worker_context,
     scoped_refptr<storage::QuotaManagerProxy> quota_manager_proxy,
-    scoped_refptr<DevToolsBackgroundServicesContextImpl> devtools_context)
+    DevToolsBackgroundServicesContextImpl& devtools_context)
     : service_worker_context_(service_worker_context),
-      devtools_context_(std::move(devtools_context)),
+      devtools_context_(&devtools_context),
       registration_notifier_(
           std::make_unique<BackgroundFetchRegistrationNotifier>()),
       delegate_proxy_(storage_partition) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(service_worker_context_);
+  CHECK(service_worker_context_, base::NotFatalUntil::M158);
 
   data_manager_ = std::make_unique<BackgroundFetchDataManager>(
       storage_partition, service_worker_context,
       std::move(quota_manager_proxy));
   scheduler_ = std::make_unique<BackgroundFetchScheduler>(
       this, data_manager_.get(), registration_notifier_.get(), &delegate_proxy_,
-      devtools_context_.get(), service_worker_context_);
+      *devtools_context_, service_worker_context_);
 }
 
 BackgroundFetchContext::~BackgroundFetchContext() {
@@ -81,8 +81,6 @@ void BackgroundFetchContext::DidGetInitializationData(
 
   if (error != blink::mojom::BackgroundFetchError::NONE)
     return;
-
-  background_fetch::RecordRegistrationsOnStartup(initialization_data.size());
 
   for (auto& data : initialization_data) {
     for (auto& observer : data_manager_->observers()) {
@@ -156,7 +154,8 @@ void BackgroundFetchContext::StartFetch(
   // duplicated, because the caller of this function generates a new unique_id
   // every time, which is what BackgroundFetchRegistrationId's comparison
   // operator uses.
-  DCHECK_EQ(0u, fetch_callbacks_.count(registration_id));
+  CHECK_EQ(0u, fetch_callbacks_.count(registration_id),
+           base::NotFatalUntil::M158);
   fetch_callbacks_[registration_id] = std::move(callback);
 
   auto rfh_id = rfh ? rfh->GetGlobalId() : GlobalRenderFrameHostId();
@@ -242,8 +241,8 @@ void BackgroundFetchContext::AddRegistrationObserver(
 
 void BackgroundFetchContext::UpdateUI(
     const BackgroundFetchRegistrationId& registration_id,
-    const absl::optional<std::string>& title,
-    const absl::optional<SkBitmap>& icon,
+    const std::optional<std::string>& title,
+    const std::optional<SkBitmap>& icon,
     blink::mojom::BackgroundFetchRegistrationService::UpdateUICallback
         callback) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -253,7 +252,7 @@ void BackgroundFetchContext::UpdateUI(
 }
 
 base::WeakPtr<BackgroundFetchContext> BackgroundFetchContext::GetWeakPtr() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M158);
   return weak_factory_.GetWeakPtr();
 }
 
@@ -289,9 +288,9 @@ void BackgroundFetchContext::DidGetMatchingRequests(
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   if (error != blink::mojom::BackgroundFetchError::NONE)
-    DCHECK(settled_fetches.empty());
+    CHECK(settled_fetches.empty(), base::NotFatalUntil::M158);
 
-  // TODO(crbug.com/850512): We don't need to call this for requests that're
+  // TODO(crbug.com/40579759): We don't need to call this for requests that're
   // complete.
   // AddObservedUrl() is a no-op in those cases, but we can skip calling it.
   for (const auto& fetch : settled_fetches)
@@ -303,16 +302,19 @@ void BackgroundFetchContext::DidGetMatchingRequests(
 void BackgroundFetchContext::Shutdown() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   data_manager_->Shutdown();
+  scheduler_->Shutdown();
+  devtools_context_ = nullptr;
 }
 
 void BackgroundFetchContext::SetDataManagerForTesting(
     std::unique_ptr<BackgroundFetchDataManager> data_manager) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(data_manager);
+  CHECK(data_manager, base::NotFatalUntil::M158);
+  CHECK(devtools_context_);
   data_manager_ = std::move(data_manager);
   scheduler_ = std::make_unique<BackgroundFetchScheduler>(
       this, data_manager_.get(), registration_notifier_.get(), &delegate_proxy_,
-      devtools_context_.get(), service_worker_context_);
+      *devtools_context_, service_worker_context_);
 }
 
 }  // namespace content

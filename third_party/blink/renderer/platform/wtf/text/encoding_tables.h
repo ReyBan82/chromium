@@ -26,20 +26,22 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_ENCODING_TABLES_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_ENCODING_TABLES_H_
 
+#include <stddef.h>
+
 #include <algorithm>
 #include <array>
 #include <iterator>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 #include "base/dcheck_is_on.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_uchar.h"
 #include "third_party/blink/renderer/platform/wtf/wtf_export.h"
 
-namespace WTF {
+namespace blink {
 
-// Following functions are helpers for TextCodecCJK, and not intended to be used
+// Following functions are helpers for TextCodecCjk, and not intended to be used
 // by others.
 constexpr size_t kJis0208EncodeIndexSize = 7724;
 using Jis0208EncodeIndex =
@@ -65,6 +67,13 @@ using Gb18030EncodeIndex =
 using Gb18030EncodeTable = std::array<UChar, kGb18030EncodeIndexSize>;
 const WTF_EXPORT Gb18030EncodeIndex& EnsureGb18030EncodeIndexForEncode();
 const WTF_EXPORT Gb18030EncodeTable& EnsureGb18030EncodeTable();
+
+inline constexpr size_t kBig5IndexSize = 19782;
+using Big5EncodeTable = std::array<UChar32, kBig5IndexSize>;
+using Big5EncodeIndex =
+    std::array<std::pair<UChar32, uint16_t>, kBig5IndexSize>;
+const WTF_EXPORT Big5EncodeIndex& EnsureBig5EncodeIndexForEncode();
+const WTF_EXPORT Big5EncodeTable& EnsureBig5EncodeTable();
 
 // Functions for using sorted arrays of pairs as a map.
 // FIXME: Consider moving these functions to std_lib_extras.h for uses other
@@ -118,15 +127,15 @@ bool SortedFirstsAreUnique(const CollectionType& collection) {
 template <typename CollectionType, typename KeyType>
 static auto FindFirstInSortedPairs(const CollectionType& collection,
                                    const KeyType& key)
-    -> absl::optional<decltype(std::begin(collection)->second)> {
+    -> std::optional<decltype(std::begin(collection)->second)> {
   if constexpr (std::is_integral_v<KeyType>) {
     if (key != decltype(std::begin(collection)->first)(key))
-      return absl::nullopt;
+      return std::nullopt;
   }
   auto iterator = std::lower_bound(std::begin(collection), std::end(collection),
                                    MakeFirstAdapter(key), CompareFirst{});
   if (iterator == std::end(collection) || key < iterator->first)
-    return absl::nullopt;
+    return std::nullopt;
   return iterator->second;
 }
 
@@ -143,6 +152,6 @@ static auto FindInSortedPairs(const CollectionType& collection,
                           MakeFirstAdapter(key), CompareFirst{});
 }
 
-}  // namespace WTF
+}  // namespace blink
 
 #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_WTF_TEXT_ENCODING_TABLES_H_

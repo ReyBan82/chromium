@@ -4,9 +4,8 @@
 
 #include "cc/trees/layer_tree_mutator.h"
 
+#include <algorithm>
 #include <utility>
-
-#include "base/ranges/algorithm.h"
 
 namespace cc {
 
@@ -27,17 +26,17 @@ AnimationWorkletInput::AddAndUpdateState::~AddAndUpdateState() = default;
 
 #if DCHECK_IS_ON()
 bool AnimationWorkletInput::ValidateId(int worklet_id) const {
-  return base::ranges::all_of(added_and_updated_animations,
-                              [worklet_id](auto& it) {
-                                return it.worklet_animation_id.worklet_id ==
-                                       worklet_id;
-                              }) &&
-         base::ranges::all_of(updated_animations,
-                              [worklet_id](auto& it) {
-                                return it.worklet_animation_id.worklet_id ==
-                                       worklet_id;
-                              }) &&
-         base::ranges::all_of(removed_animations, [worklet_id](auto& it) {
+  return std::ranges::all_of(added_and_updated_animations,
+                             [worklet_id](auto& it) {
+                               return it.worklet_animation_id.worklet_id ==
+                                      worklet_id;
+                             }) &&
+         std::ranges::all_of(updated_animations,
+                             [worklet_id](auto& it) {
+                               return it.worklet_animation_id.worklet_id ==
+                                      worklet_id;
+                             }) &&
+         std::ranges::all_of(removed_animations, [worklet_id](auto& it) {
            return it.worklet_id == worklet_id;
          });
 }
@@ -59,7 +58,8 @@ bool MutatorInputState::IsEmpty() const {
 AnimationWorkletInput& MutatorInputState::EnsureWorkletEntry(int id) {
   auto it = inputs_.find(id);
   if (it == inputs_.end())
-    it = inputs_.emplace_hint(it, id, new AnimationWorkletInput);
+    it =
+        inputs_.emplace_hint(it, id, std::make_unique<AnimationWorkletInput>());
 
   return *it->second;
 }

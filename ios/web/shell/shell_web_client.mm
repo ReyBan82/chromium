@@ -6,7 +6,11 @@
 
 #import <UIKit/UIKit.h>
 
+#import <string_view>
+
 #import "base/functional/bind.h"
+#import "base/memory/raw_ptr.h"
+#import "base/memory/ref_counted_memory.h"
 #import "ios/web/common/user_agent.h"
 #import "ios/web/public/web_state.h"
 #import "ios/web/shell/shell_web_main_parts.h"
@@ -14,10 +18,6 @@
 #import "mojo/public/cpp/bindings/pending_receiver.h"
 #import "mojo/public/cpp/bindings/self_owned_receiver.h"
 #import "ui/base/resource/resource_bundle.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
 
 namespace web {
 
@@ -37,15 +37,14 @@ class WebUsageController : public mojom::WebUsageController {
     std::move(callback).Run();
   }
 
-  WebState* web_state_;
+  raw_ptr<WebState> web_state_;
 };
 
 }  // namespace
 
 ShellWebClient::ShellWebClient() : web_main_parts_(nullptr) {}
 
-ShellWebClient::~ShellWebClient() {
-}
+ShellWebClient::~ShellWebClient() {}
 
 std::unique_ptr<web::WebMainParts> ShellWebClient::CreateWebMainParts() {
   auto web_main_parts = std::make_unique<ShellWebMainParts>();
@@ -61,14 +60,14 @@ std::string ShellWebClient::GetUserAgent(UserAgentType type) const {
   return web::BuildMobileUserAgent("CriOS/36.77.34.45");
 }
 
-base::StringPiece ShellWebClient::GetDataResource(
+std::string_view ShellWebClient::GetDataResource(
     int resource_id,
     ui::ResourceScaleFactor scale_factor) const {
   return ui::ResourceBundle::GetSharedInstance().GetRawDataResourceForScale(
       resource_id, scale_factor);
 }
 
-base::RefCountedMemory* ShellWebClient::GetDataResourceBytes(
+scoped_refptr<base::RefCountedMemory> ShellWebClient::GetDataResourceBytes(
     int resource_id) const {
   return ui::ResourceBundle::GetSharedInstance().LoadDataResourceBytes(
       resource_id);
@@ -84,6 +83,10 @@ void ShellWebClient::BindInterfaceReceiverFromMainFrame(
 }
 
 bool ShellWebClient::EnableLongPressUIContextMenu() const {
+  return true;
+}
+
+bool ShellWebClient::EnableWebInspector(BrowserState* browser_state) const {
   return true;
 }
 

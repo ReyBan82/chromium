@@ -8,6 +8,7 @@
 
 #include <algorithm>
 
+#include "base/containers/heap_array.h"
 #include "base/functional/bind.h"
 #include "content/browser/bad_message.h"
 #include "content/browser/renderer_host/render_process_host_impl.h"
@@ -18,13 +19,14 @@
 #include "mojo/public/cpp/bindings/remote_set.h"
 #include "net/base/net_errors.h"
 #include "services/network/public/cpp/p2p_param_traits.h"
+#include "services/network/public/mojom/network_context.mojom.h"
 
-using content::BrowserMessageFilter;
 using content::BrowserThread;
 
 namespace content {
 
-P2PSocketDispatcherHost::P2PSocketDispatcherHost(int render_process_id)
+P2PSocketDispatcherHost::P2PSocketDispatcherHost(
+    ChildProcessId render_process_id)
     : render_process_id_(render_process_id) {}
 
 P2PSocketDispatcherHost::~P2PSocketDispatcherHost() = default;
@@ -33,7 +35,7 @@ void P2PSocketDispatcherHost::StartRtpDump(
     bool incoming,
     bool outgoing,
     RenderProcessHost::WebRtcRtpPacketCallback packet_callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M153);
   if ((!dump_incoming_rtp_packet_ && incoming) ||
       (!dump_outgoing_rtp_packet_ && outgoing)) {
     if (incoming)
@@ -50,7 +52,7 @@ void P2PSocketDispatcherHost::StartRtpDump(
 }
 
 void P2PSocketDispatcherHost::StopRtpDump(bool incoming, bool outgoing) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M153);
   if ((dump_incoming_rtp_packet_ && incoming) ||
       (dump_outgoing_rtp_packet_ && outgoing)) {
     if (incoming)
@@ -73,7 +75,7 @@ void P2PSocketDispatcherHost::BindReceiver(
     mojo::PendingReceiver<network::mojom::P2PSocketManager> receiver,
     net::NetworkAnonymizationKey anonymization_key,
     const GlobalRenderFrameHostId& render_frame_host_id) {
-  DCHECK_EQ(process.GetID(), render_process_id_);
+  CHECK_EQ(process.GetID(), render_process_id_, base::NotFatalUntil::M153);
 
   mojo::PendingRemote<network::mojom::P2PTrustedSocketManagerClient>
       trusted_socket_manager_client;
@@ -99,9 +101,9 @@ void P2PSocketDispatcherHost::BindReceiver(
 
 void P2PSocketDispatcherHost::PauseSocketManagerForRenderFrameHost(
     const GlobalRenderFrameHostId& frame_id) {
-  if (frame_host_to_socket_manager_id_.contains(frame_id)) {
-    mojo::RemoteSetElementId manager_id =
-        frame_host_to_socket_manager_id_[frame_id];
+  if (auto it = frame_host_to_socket_manager_id_.find(frame_id);
+      it != frame_host_to_socket_manager_id_.end()) {
+    mojo::RemoteSetElementId manager_id = it->second;
     if (trusted_socket_managers_.Contains(manager_id)) {
       trusted_socket_managers_.Get(manager_id)
           ->PauseNetworkChangeNotifications();
@@ -110,9 +112,9 @@ void P2PSocketDispatcherHost::PauseSocketManagerForRenderFrameHost(
 }
 void P2PSocketDispatcherHost::ResumeSocketManagerForRenderFrameHost(
     const GlobalRenderFrameHostId& frame_id) {
-  if (frame_host_to_socket_manager_id_.contains(frame_id)) {
-    mojo::RemoteSetElementId manager_id =
-        frame_host_to_socket_manager_id_[frame_id];
+  if (auto it = frame_host_to_socket_manager_id_.find(frame_id);
+      it != frame_host_to_socket_manager_id_.end()) {
+    mojo::RemoteSetElementId manager_id = it->second;
     if (trusted_socket_managers_.Contains(manager_id)) {
       trusted_socket_managers_.Get(manager_id)
           ->ResumeNetworkChangeNotifications();
@@ -133,14 +135,14 @@ void P2PSocketDispatcherHost::DumpPacket(
     const std::vector<uint8_t>& packet_header,
     uint64_t packet_length,
     bool incoming) {
-  if (!packet_callback_)
+  if (!packet_callback_) {
     return;
+  }
 
-  std::unique_ptr<uint8_t[]> header_buffer(new uint8_t[packet_header.size()]);
-  memcpy(header_buffer.get(), &packet_header[0], packet_header.size());
+  auto header_buffer = base::HeapArray<uint8_t>::Uninit(packet_header.size());
+  header_buffer.copy_from(packet_header);
 
   packet_callback_.Run(std::move(header_buffer),
-                       static_cast<size_t>(packet_header.size()),
                        static_cast<size_t>(packet_length), incoming);
 }
 

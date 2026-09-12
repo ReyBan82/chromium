@@ -9,9 +9,10 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/memory/ref_counted_memory.h"
+#include "base/memory/self_deleting.h"
 #include "base/memory/weak_ptr.h"
 #include "components/printing/browser/print_to_pdf/pdf_print_result.h"
-#include "components/printing/common/print.mojom-forward.h"
+#include "components/printing/common/print.mojom.h"
 #include "components/services/print_compositor/public/mojom/print_compositor.mojom.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -23,12 +24,17 @@ class ReadOnlySharedMemoryRegion;
 
 namespace print_to_pdf {
 
-class PdfPrintJob : public content::WebContentsObserver {
+class PdfPrintJob : public content::WebContentsObserver,
+                    public base::SelfDeleting {
  public:
   using PrintToPdfCallback =
       base::OnceCallback<void(PdfPrintResult,
                               scoped_refptr<base::RefCountedMemory>)>;
 
+  PdfPrintJob(content::WebContents* contents,
+              content::RenderFrameHost* rfh,
+              PrintToPdfCallback callback,
+              base::SelfDeletingPassKey key);
   PdfPrintJob(const PdfPrintJob&) = delete;
   PdfPrintJob& operator=(const PdfPrintJob&) = delete;
 
@@ -48,15 +54,13 @@ class PdfPrintJob : public content::WebContentsObserver {
       PrintToPdfCallback callback);
 
  private:
-  PdfPrintJob(content::WebContents* contents,
-              content::RenderFrameHost* rfh,
-              PrintToPdfCallback callback);
   ~PdfPrintJob() override;
 
   // WebContentsObserver overrides:
   void RenderFrameDeleted(content::RenderFrameHost* render_frame_host) override;
 
-  void OnDidPrintWithParams(printing::mojom::PrintWithParamsResultPtr result);
+  void OnDidPrintWithParams(
+      printing::mojom::PrintRenderFrame::PrintWithParamsResult result);
   void OnCompositeDocumentToPdfDone(
       printing::mojom::PrintCompositor::Status status,
       base::ReadOnlySharedMemoryRegion region);
@@ -64,7 +68,7 @@ class PdfPrintJob : public content::WebContentsObserver {
   void ReportMemoryRegion(const base::ReadOnlySharedMemoryRegion& region);
   void FailJob(PdfPrintResult result);
 
-  raw_ptr<content::RenderFrameHost> printing_rfh_;
+  const raw_ptr<content::RenderFrameHost> printing_rfh_;
   PrintToPdfCallback print_to_pdf_callback_;
 
   base::WeakPtrFactory<PdfPrintJob> weak_ptr_factory_{this};

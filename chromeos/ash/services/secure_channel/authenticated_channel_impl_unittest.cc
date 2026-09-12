@@ -7,12 +7,11 @@
 #include <iterator>
 #include <memory>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
-#include "base/containers/contains.h"
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
 #include "chromeos/ash/components/multidevice/remote_device_test_util.h"
@@ -23,6 +22,7 @@
 #include "chromeos/ash/services/secure_channel/public/mojom/secure_channel.mojom.h"
 #include "chromeos/ash/services/secure_channel/public/mojom/secure_channel_types.mojom.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 
 namespace ash::secure_channel {
 
@@ -103,7 +103,7 @@ class SecureChannelAuthenticatedChannelImplTest : public testing::Test {
     // -1 is returned by SendMessageAndVerifyResults() when
     // |expected_to_succeed| is false.
     EXPECT_NE(-1, sequence_number);
-    return base::Contains(sent_sequence_numbers_, sequence_number);
+    return sent_sequence_numbers_.contains(sequence_number);
   }
 
   void CallGetConnectionMetadata() {
@@ -139,9 +139,9 @@ class SecureChannelAuthenticatedChannelImplTest : public testing::Test {
 
   int num_times_send_message_called_ = 0;
 
-  std::unordered_set<int> sent_sequence_numbers_;
+  absl::flat_hash_set<int> sent_sequence_numbers_;
 
-  FakeSecureChannelConnection* fake_secure_channel_;
+  raw_ptr<FakeSecureChannelConnection, DanglingUntriaged> fake_secure_channel_;
   std::unique_ptr<FakeAuthenticatedChannelObserver> test_observer_;
 
   std::unique_ptr<AuthenticatedChannel> channel_;

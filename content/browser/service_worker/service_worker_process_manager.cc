@@ -9,34 +9,34 @@
 #include <algorithm>
 #include <utility>
 
-#include "base/containers/contains.h"
+#include "content/browser/process_lock.h"
 #include "content/browser/service_worker/service_worker_context_wrapper.h"
 #include "content/browser/site_instance_impl.h"
 #include "content/browser/storage_partition_impl.h"
+#include "content/browser/web_exposed_isolation_info.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/child_process_host.h"
+#include "content/public/browser/process_allocation_context.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/site_instance.h"
 #include "content/public/browser/site_isolation_policy.h"
+#include "content/public/browser/web_exposed_isolation_level.h"
+#include "content/public/common/content_client.h"
 #include "url/gurl.h"
 
 namespace content {
 
-ServiceWorkerProcessManager::ServiceWorkerProcessManager(
-    BrowserContext* browser_context)
-    : browser_context_(browser_context),
-      storage_partition_(nullptr),
+ServiceWorkerProcessManager::ServiceWorkerProcessManager()
+    : storage_partition_(nullptr),
       process_id_for_test_(ChildProcessHost::kInvalidUniqueID),
       new_process_id_for_test_(ChildProcessHost::kInvalidUniqueID),
       force_new_process_for_test_(false) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  DCHECK(browser_context);
-  weak_this_ = weak_this_factory_.GetWeakPtr();
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 }
 
 ServiceWorkerProcessManager::~ServiceWorkerProcessManager() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   DCHECK(IsShutdown())
       << "Call Shutdown() before destroying |this|, so that racing method "
       << "invocations don't use a destroyed BrowserContext.";
@@ -46,29 +46,25 @@ ServiceWorkerProcessManager::~ServiceWorkerProcessManager() {
   CHECK(worker_process_map_.empty());
 }
 
-BrowserContext* ServiceWorkerProcessManager::browser_context() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  // This is safe because reading |browser_context_| on the UI thread doesn't
-  // need locking (while modifying does).
-  return browser_context_;
-}
-
 void ServiceWorkerProcessManager::Shutdown() {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   // `StoragePartitionImpl` might be destroyed before `this` is destroyed. Set
   // `storage_partition_` to nullptr to avoid holding a dangling ptr.
   storage_partition_ = nullptr;
-  {
-    base::AutoLock lock(browser_context_lock_);
-    browser_context_ = nullptr;
-  }
+
+  // DecrementWorkerRefCount() can synchronously destroy the RenderProcessHost
+  // and run observers that re-enter this manager. Mark shutdown and remove all
+  // entries before invoking those callbacks.
+  is_shutdown_ = true;
+  auto worker_process_map = std::move(worker_process_map_);
+  worker_process_map_.clear();
 
   // In single-process mode, Shutdown() is called when deleting the default
   // browser context, which is itself destroyed after the RenderProcessHost.
   // The refcount decrement can be skipped anyway since there's only one
   // process.
   if (!RenderProcessHost::run_renderer_in_process()) {
-    for (const auto& it : worker_process_map_) {
+    for (const auto& it : worker_process_map) {
       if (it.second->HasProcess()) {
         RenderProcessHost* process = it.second->GetProcess();
         if (!process->AreRefCountsDisabled())
@@ -76,12 +72,11 @@ void ServiceWorkerProcessManager::Shutdown() {
       }
     }
   }
-  worker_process_map_.clear();
 }
 
 bool ServiceWorkerProcessManager::IsShutdown() {
-  base::AutoLock lock(browser_context_lock_);
-  return !browser_context_;
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  return is_shutdown_;
 }
 
 blink::ServiceWorkerStatusCode
@@ -92,18 +87,18 @@ ServiceWorkerProcessManager::AllocateWorkerProcess(
     bool can_use_existing_process,
     blink::mojom::AncestorFrameType ancestor_frame_type,
     AllocatedProcessInfo* out_info) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   if (force_new_process_for_test_)
     can_use_existing_process = false;
 
-  out_info->process_id = ChildProcessHost::kInvalidUniqueID;
+  out_info->process_id = ChildProcessId();
   out_info->start_situation = ServiceWorkerMetrics::StartSituation::UNKNOWN;
 
-  if (process_id_for_test_ != ChildProcessHost::kInvalidUniqueID) {
+  if (process_id_for_test_) {
     // Let tests specify the returned process ID.
-    int result = can_use_existing_process ? process_id_for_test_
-                                          : new_process_id_for_test_;
+    ChildProcessId result = can_use_existing_process ? process_id_for_test_
+                                                     : new_process_id_for_test_;
     out_info->process_id = result;
     out_info->start_situation =
         ServiceWorkerMetrics::StartSituation::EXISTING_READY_PROCESS;
@@ -114,36 +109,57 @@ ServiceWorkerProcessManager::AllocateWorkerProcess(
     return blink::ServiceWorkerStatusCode::kErrorAbort;
   }
 
-  DCHECK(!base::Contains(worker_process_map_, embedded_worker_id))
+  DCHECK(!worker_process_map_.contains(embedded_worker_id))
       << embedded_worker_id << " already has a process allocated";
 
   // Create a SiteInstance to get the renderer process from.
   //
   // TODO(alexmos): Support CrossOriginIsolated for guests.
-  DCHECK(storage_partition_);
+  CHECK(storage_partition_, base::NotFatalUntil::M159);
   const bool is_guest = storage_partition_->is_guest();
   const bool is_fenced =
       ancestor_frame_type == blink::mojom::AncestorFrameType::kFencedFrame &&
       SiteIsolationPolicy::IsProcessIsolationForFencedFramesEnabled();
   const bool is_coop_coep_cross_origin_isolated =
       !is_guest && network::CompatibleWithCrossOriginIsolated(coep_value);
+
+  WebExposedIsolationInfo isolation_info = [&] {
+    if (!is_coop_coep_cross_origin_isolated) {
+      return WebExposedIsolationInfo::CreateNonIsolated();
+    }
+    if (SiteIsolationPolicy::ShouldUrlUseApplicationIsolationLevel(
+            storage_partition_->browser_context(), script_url)) {
+      return WebExposedIsolationInfo::CreateIsolatedApplication(
+          url::Origin::Create(script_url));
+    }
+    return WebExposedIsolationInfo::CreateIsolated(
+        url::Origin::Create(script_url));
+  }();
   UrlInfo url_info(
       UrlInfoInit(script_url)
           .WithStoragePartitionConfig(storage_partition_->GetConfig())
-          .WithWebExposedIsolationInfo(
-              is_coop_coep_cross_origin_isolated
-                  ? WebExposedIsolationInfo::CreateIsolated(
-                        url::Origin::Create(script_url))
-                  : WebExposedIsolationInfo::CreateNonIsolated()));
+          .WithWebExposedIsolationInfo(std::move(isolation_info)));
+
   scoped_refptr<SiteInstanceImpl> site_instance =
-      SiteInstanceImpl::CreateForServiceWorker(browser_context_, url_info,
-                                               can_use_existing_process,
-                                               is_guest, is_fenced);
+      SiteInstanceImpl::CreateForServiceWorker(
+          storage_partition_->browser_context(), std::move(url_info),
+          can_use_existing_process, is_guest, is_fenced);
 
   // Get the process from the SiteInstance.
-  RenderProcessHost* rph = site_instance->GetProcess();
-  DCHECK(!storage_partition_ ||
-         rph->InSameStoragePartition(storage_partition_));
+  RenderProcessHost* rph =
+      site_instance->GetOrCreateProcess(ProcessAllocationContext{
+          ProcessAllocationSource::kServiceWorkerProcessManager});
+  CHECK(!storage_partition_ || rph->InSameStoragePartition(storage_partition_),
+        base::NotFatalUntil::M159);
+
+  // Let the embedder grant the worker process access to origins if the worker
+  // is locked to the same origin as the worker.
+  if (rph->GetProcessLock().MatchesOrigin(url::Origin::Create(script_url))) {
+    GetContentClient()
+        ->browser()
+        ->GrantAdditionalRequestPrivilegesToWorkerProcess(
+            rph->GetDeprecatedID(), script_url);
+  }
 
   ServiceWorkerMetrics::StartSituation start_situation;
   if (!rph->IsInitializedAndNotDead()) {
@@ -172,8 +188,8 @@ ServiceWorkerProcessManager::AllocateWorkerProcess(
 }
 
 void ServiceWorkerProcessManager::ReleaseWorkerProcess(int embedded_worker_id) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
-  if (process_id_for_test_ != ChildProcessHost::kInvalidUniqueID) {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  if (process_id_for_test_) {
     // Unittests don't increment or decrement the worker refcount of a
     // RenderProcessHost.
     return;
@@ -181,7 +197,7 @@ void ServiceWorkerProcessManager::ReleaseWorkerProcess(int embedded_worker_id) {
 
   if (IsShutdown()) {
     // Shutdown already released all instances.
-    DCHECK(worker_process_map_.empty());
+    CHECK(worker_process_map_.empty(), base::NotFatalUntil::M159);
     return;
   }
 
@@ -192,17 +208,27 @@ void ServiceWorkerProcessManager::ReleaseWorkerProcess(int embedded_worker_id) {
   if (it == worker_process_map_.end())
     return;
 
-  if (it->second->HasProcess()) {
-    RenderProcessHost* process = it->second->GetProcess();
+  // DecrementWorkerRefCount() can synchronously destroy the RenderProcessHost
+  // and run observers that re-enter this manager. Remove the worker entry first
+  // so reentrant cleanup cannot release it twice.
+  scoped_refptr<SiteInstance> site_instance = std::move(it->second);
+  worker_process_map_.erase(it);
+  if (site_instance->HasProcess()) {
+    RenderProcessHost* process = site_instance->GetProcess();
     if (!process->AreRefCountsDisabled())
       process->DecrementWorkerRefCount();
   }
-  worker_process_map_.erase(it);
+}
+
+base::WeakPtr<ServiceWorkerProcessManager>
+ServiceWorkerProcessManager::GetWeakPtr() {
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+  return weak_ptr_factory_.GetWeakPtr();
 }
 
 SiteInstance* ServiceWorkerProcessManager::GetSiteInstanceForWorker(
     int embedded_worker_id) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
   auto it = worker_process_map_.find(embedded_worker_id);
   if (it == worker_process_map_.end())
     return nullptr;

@@ -24,7 +24,7 @@ class RgbKeyboardManagerObserver;
 // of the rgbkbd DBus client.
 // This class is owned by ash/shell and should NOT be created by any other
 // means.
-class ASH_EXPORT RgbKeyboardManager : public ImeControllerImpl::Observer,
+class ASH_EXPORT RgbKeyboardManager : public ImeController::Observer,
                                       public RgbkbdClient::Observer {
  public:
   explicit RgbKeyboardManager(ImeControllerImpl* ime_controller);
@@ -38,6 +38,11 @@ class ASH_EXPORT RgbKeyboardManager : public ImeControllerImpl::Observer,
   void SetZoneColor(int zone, uint8_t r, uint8_t g, uint8_t b);
   void SetRainbowMode();
   void SetAnimationMode(rgbkbd::RgbAnimationMode mode);
+
+  // RgbkbdClient::Observer:
+  // Also used in tests to override the keyboard capability.
+  void OnCapabilityUpdatedForTesting(
+      rgbkbd::RgbKeyboardCapabilities capability) override;
 
   // Returns the global instance if initialized. May return null.
   static RgbKeyboardManager* Get();
@@ -61,19 +66,14 @@ class ASH_EXPORT RgbKeyboardManager : public ImeControllerImpl::Observer,
     kStaticZones,
   };
 
-  // ImeControllerImpl::Observer:
+  // ImeController::Observer:
   void OnCapsLockChanged(bool enabled) override;
   void OnKeyboardLayoutNameChanged(const std::string&) override {}
-
-  // RgbkbdClient::Observer:
-  // Also used in tests to override the keyboard capability.
-  void OnCapabilityUpdatedForTesting(
-      rgbkbd::RgbKeyboardCapabilities capability) override;
 
   void FetchRgbKeyboardSupport();
 
   void OnGetRgbKeyboardCapabilities(
-      absl::optional<rgbkbd::RgbKeyboardCapabilities> reply);
+      std::optional<rgbkbd::RgbKeyboardCapabilities> reply);
 
   void InitializeRgbKeyboard();
 

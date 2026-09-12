@@ -4,7 +4,7 @@
 
 import * as metrics from './metrics.js';
 import {ChromeHelper} from './mojo/chrome_helper.js';
-import {Mode} from './type.js';
+import type {Mode} from './type.js';
 
 /**
  * Thrown when fails to parse intent url.
@@ -103,7 +103,6 @@ export class Intent {
   /**
    * @param url URL passed along with app launch event.
    * @param mode Mode for the intent.
-   * @return Created intent object.
    */
   static create(url: URL, mode: Mode): Intent {
     const params = url.searchParams;

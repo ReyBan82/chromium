@@ -20,10 +20,6 @@
 #import "testing/gtest_mac.h"
 #import "url/url_canon.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 using base::ASCIIToUTF16;
 
 namespace {
@@ -237,6 +233,30 @@ TEST_F(HistoryStateOperationsTest, NoOpReplaceDifferentOrigin) {
   WaitForNoOpText();
 }
 
+// Tests that calling window.history.pushState() with a cross-origin blob URL is
+// a no-op.
+TEST_F(HistoryStateOperationsTest, NoOpPushCrossOriginBlobUrl) {
+  std::string empty_state;
+  std::string empty_title;
+  GURL cross_origin_blob_url("blob:https://accounts.google.com/signin");
+  ASSERT_TRUE(IsOnLoadTextVisible());
+  SetStateParams(empty_state, empty_title, cross_origin_blob_url);
+  ASSERT_TRUE(web::test::TapWebViewElementWithId(web_state(), kPushStateId));
+  WaitForNoOpText();
+}
+
+// Tests that calling window.history.replaceState() with a cross-origin blob URL
+// is a no-op.
+TEST_F(HistoryStateOperationsTest, NoOpReplaceCrossOriginBlobUrl) {
+  std::string empty_state;
+  std::string empty_title;
+  GURL cross_origin_blob_url("blob:https://accounts.google.com/signin");
+  ASSERT_TRUE(IsOnLoadTextVisible());
+  SetStateParams(empty_state, empty_title, cross_origin_blob_url);
+  ASSERT_TRUE(web::test::TapWebViewElementWithId(web_state(), kReplaceStateId));
+  WaitForNoOpText();
+}
+
 // Tests that calling window.history.replaceState() with a new state object
 // replaces the state object for the current NavigationItem.
 TEST_F(HistoryStateOperationsTest, StateReplacement) {
@@ -284,12 +304,12 @@ TEST_F(HistoryStateOperationsTest, StateReplacement) {
 
 // Tests that the state object is reset to the correct value after reloading a
 // page whose state has been replaced.
-#if TARGET_IPHONE_SIMULATOR
+#if TARGET_OS_SIMULATOR
 #define MAYBE_StateReplacementReload StateReplacementReload
 #else
 #define MAYBE_StateReplacementReload DISABLED_StateReplacementReload
 #endif
-// TODO(crbug.com/720381): Enable this test on device.
+// TODO(crbug.com/40519813): Enable this test on device.
 TEST_F(HistoryStateOperationsTest, MAYBE_StateReplacementReload) {
   // Set up the state parameters and tap the replace state button.
   std::string new_state("STATE OBJECT");

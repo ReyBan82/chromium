@@ -11,6 +11,7 @@
 #include "base/test/power_monitor_test.h"
 #include "base/test/simple_test_clock.h"
 #include "base/test/task_environment.h"
+#include "base/test/test_mock_time_task_runner.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -24,8 +25,9 @@ class WallClockTimerTest : public ::testing::Test {
   // suspended.
   // Power event will be triggered if |with_power| is set to false.
   void FastForwardBy(base::TimeDelta delay, bool with_power = true) {
-    if (!with_power)
+    if (!with_power) {
       fake_power_monitor_source_.Suspend();
+    }
 
     clock_.Advance(delay);
 
@@ -85,7 +87,7 @@ TEST_F(WallClockTimerTest, UseTimerTwiceInRow) {
   wall_clock_timer.Start(FROM_HERE, clock_.Now() + delay, first_callback.Get());
   EXPECT_CALL(first_callback, Run())
       .WillOnce(::testing::InvokeWithoutArgs(
-          [this, &wall_clock_timer, &second_callback, delay]() {
+          [this, &wall_clock_timer, &second_callback, delay] {
             wall_clock_timer.Start(FROM_HERE, clock_.Now() + delay,
                                    second_callback.Get());
           }));
@@ -251,6 +253,30 @@ TEST_F(WallClockTimerTest, NonStopTickClockWithLongPause) {
 
   ::testing::Mock::VerifyAndClearExpectations(&callback);
   EXPECT_FALSE(wall_clock_timer.IsRunning());
+}
+
+TEST_F(WallClockTimerTest, SetTaskRunner) {
+  auto task_runner = base::MakeRefCounted<base::TestMockTimeTaskRunner>();
+  ::testing::StrictMock<base::MockOnceClosure> callback;
+  clock_.SetNow(base::Time::Now());
+
+  WallClockTimer wall_clock_timer(&clock_, task_runner->GetMockTickClock());
+  wall_clock_timer.SetTaskRunner(task_runner);
+
+  constexpr auto kDelay = base::Seconds(60);
+  wall_clock_timer.Start(FROM_HERE, clock_.Now() + kDelay, callback.Get());
+
+  // Task should be scheduled on task_runner.
+  EXPECT_TRUE(task_runner->HasPendingTask());
+
+  // Task shouldn't run yet.
+  task_runner->FastForwardBy(base::Seconds(30));
+  ::testing::Mock::VerifyAndClearExpectations(&callback);
+
+  // Task runs after delay.
+  EXPECT_CALL(callback, Run());
+  task_runner->FastForwardBy(base::Seconds(30));
+  ::testing::Mock::VerifyAndClearExpectations(&callback);
 }
 
 }  // namespace base

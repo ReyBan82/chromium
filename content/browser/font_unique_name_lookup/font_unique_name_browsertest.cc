@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <array>
 #include <memory>
 
 #include "base/test/scoped_feature_list.h"
@@ -9,7 +10,6 @@
 #include "build/build_config.h"
 #include "content/browser/devtools/protocol/devtools_protocol_test_support.h"
 #include "content/browser/web_contents/web_contents_impl.h"
-#include "content/public/common/content_features.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_browser_test_utils.h"
@@ -24,82 +24,67 @@ namespace content {
 namespace {
 
 #if BUILDFLAG(IS_ANDROID)
-const char* const kExpectedFontFamilyNames[] = {"AndroidClock",
-                                                "Roboto",
-                                                "Droid Sans Mono",
-                                                "Roboto",
-                                                "Noto Color Emoji",
-                                                "Noto Sans Bengali",
-                                                "Noto Sans Bengali UI",
-                                                "Noto Sans Devanagari",
-                                                "Noto Sans Devanagari UI",
-                                                "Noto Sans Kannada",
-                                                "Noto Sans Kannada",
-                                                "Noto Sans Kannada UI",
-                                                "Noto Sans Kannada UI",
-                                                "Noto Sans Lao",
-                                                "Noto Sans Lao",
-                                                "Noto Sans Lao UI",
-                                                "Noto Sans Lao UI",
-                                                "Noto Sans Malayalam",
-                                                "Noto Sans Malayalam UI",
-                                                "Noto Sans Tamil",
-                                                "Noto Sans Tamil UI",
-                                                "Noto Sans Telugu",
-                                                "Noto Sans Telugu",
-                                                "Noto Sans Telugu UI",
-                                                "Noto Sans Telugu UI",
-                                                "Noto Sans Thai",
-                                                "Noto Sans Thai",
-                                                "Noto Sans Thai UI",
-                                                "Noto Sans Thai UI",
-                                                "Roboto",
-                                                "Roboto Condensed",
-                                                "Roboto Condensed",
-                                                "Roboto Condensed",
-                                                "Roboto Condensed",
-                                                "Roboto"};
+constexpr auto kExpectedFontFamilyNames = std::to_array({
+    "AndroidClock",
+    "Droid Sans Mono",
+    "Roboto",
+    "Noto Color Emoji",
+    "Noto Sans Lao UI",
+    "Noto Sans Lao UI",
+    "Noto Sans Thai",
+    "Noto Sans Thai",
+    "Noto Sans Thai UI",
+    "Noto Sans Thai UI",
+});
 #elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
-const char* const kExpectedFontFamilyNames[] = {"Ahem",
-                                                "Arimo",
-                                                "Arimo",
-                                                "Arimo",
-                                                "Arimo",
-                                                "Cousine",
-                                                "Cousine",
-                                                "Cousine",
-                                                "Cousine",
-                                                "DejaVu Sans",
-                                                "DejaVu Sans",
-                                                "Garuda",
-                                                "Gelasio",
-                                                "Gelasio",
-                                                "Gelasio",
-                                                "Gelasio",
-                                                "Lohit Devanagari",
-                                                "Lohit Gurmukhi",
-                                                "Lohit Tamil",
-                                                "Noto Sans Khmer",
-                                                "Tinos",
-                                                "Tinos",
-                                                "Tinos",
-                                                "Tinos",
-                                                "Mukti Narrow",
-                                                "Tinos"};
+constexpr auto kExpectedFontFamilyNames = std::to_array({
+    "Ahem",
+    "Arimo",
+    "Arimo",
+    "Arimo",
+    "Arimo",
+    "Cousine",
+    "Cousine",
+    "Cousine",
+    "Cousine",
+    "DejaVu Sans",
+    "DejaVu Sans",
+    "Garuda",
+    "Gelasio",
+    "Gelasio",
+    "Gelasio",
+    "Gelasio",
+    "Lohit Devanagari",
+    "Lohit Gurmukhi",
+    "Lohit Tamil",
+    "Noto Sans Khmer",
+    "Tinos",
+    "Tinos",
+    "Tinos",
+    "Tinos",
+    "Mukti Narrow",
+    "Tinos",
+});
 #elif BUILDFLAG(IS_APPLE)
-const char* const kExpectedFontFamilyNames[] = {"American Typewriter",
-                                                "Arial Narrow",
-                                                "Baskerville",
-                                                "Devanagari MT",
-                                                "DIN Alternate",
-                                                "Gill Sans",
-                                                "Iowan Old Style",
-                                                "Malayalam Sangam MN",
-                                                "Hiragino Maru Gothic Pro",
-                                                "Hiragino Kaku Gothic StdN"};
+constexpr auto kExpectedFontFamilyNames = std::to_array({
+    "American Typewriter",
+    "Arial Narrow",
+    "Baskerville",
+    "Devanagari MT",
+    "DIN Alternate",
+    "Gill Sans",
+    "Iowan Old Style",
+    "Malayalam Sangam MN",
+    "Hiragino Maru Gothic Pro",
+    "Hiragino Kaku Gothic StdN",
+});
 #elif BUILDFLAG(IS_WIN)
-const char* const kExpectedFontFamilyNames[] = {
-    "Cambria Math", "MingLiU_HKSCS-ExtB", "NSimSun", "Calibri"};
+constexpr auto kExpectedFontFamilyNames = std::to_array({
+    "Cambria Math",
+    "MingLiU_HKSCS-ExtB",
+    "NSimSun",
+    "Calibri",
+});
 #endif
 
 }  // namespace
@@ -108,7 +93,6 @@ class FontUniqueNameBrowserTest : public DevToolsProtocolTest {
  public:
   void SetUpCommandLine(base::CommandLine* command_line) override {
     DevToolsProtocolTest::SetUpCommandLine(command_line);
-    feature_list_.InitAndEnableFeature(features::kFontSrcLocalMatching);
   }
 
   void LoadAndWait(const std::string& url) {
@@ -128,7 +112,7 @@ class FontUniqueNameBrowserTest : public DevToolsProtocolTest {
 #endif
 };
 
-// TODO(crbug.com/949181): Make this work on Fuchsia.
+// TODO(crbug.com/42050634): Make this work on Fuchsia.
 #if !BUILDFLAG(IS_FUCHSIA)
 IN_PROC_BROWSER_TEST_F(FontUniqueNameBrowserTest,
                        ContentLocalFontsMatching) {
@@ -142,29 +126,29 @@ IN_PROC_BROWSER_TEST_F(FontUniqueNameBrowserTest,
       static_cast<size_t>(EvalJs(shell(), "addTestNodes()").ExtractInt());
   ASSERT_EQ(num_added_nodes, std::size(kExpectedFontFamilyNames));
 
-  base::Value::Dict get_doc_params;
+  base::DictValue get_doc_params;
   get_doc_params.Set("depth", 0);
-  const base::Value::Dict* result =
+  const base::DictValue* result =
       SendCommand("DOM.getDocument", std::move(get_doc_params));
   int node_id = *result->FindIntByDottedPath("root.nodeId");
 
-  base::Value::Dict query_params;
+  base::DictValue query_params;
   query_params.Set("nodeId", node_id);
   query_params.Set("selector", ".testnode");
   result = SendCommand("DOM.querySelectorAll", std::move(query_params));
   // This needs a Clone() because the node list otherwise gets invalid after the
   // next SendCommand call.
-  const base::Value::List nodes = result->FindList("nodeIds")->Clone();
+  const base::ListValue nodes = result->FindList("nodeIds")->Clone();
   ASSERT_EQ(nodes.size(), num_added_nodes);
   ASSERT_EQ(nodes.size(), std::size(kExpectedFontFamilyNames));
   for (size_t i = 0; i < nodes.size(); ++i) {
     const base::Value& node = nodes[i];
-    base::Value::Dict get_fonts_params;
+    base::DictValue get_fonts_params;
     get_fonts_params.Set("nodeId", node.GetInt());
-    const base::Value::Dict* font_info =
+    const base::DictValue* font_info =
         SendCommand("CSS.getPlatformFontsForNode", std::move(get_fonts_params));
     ASSERT_TRUE(font_info);
-    const base::Value::List* font_list = font_info->FindList("fonts");
+    const base::ListValue* font_list = font_info->FindList("fonts");
     ASSERT_TRUE(font_list);
     ASSERT_TRUE(font_list->size());
     const base::Value& first_font_info = font_list->front();

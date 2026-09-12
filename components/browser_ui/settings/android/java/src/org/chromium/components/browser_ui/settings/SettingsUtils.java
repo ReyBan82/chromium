@@ -6,25 +6,34 @@ package org.chromium.components.browser_ui.settings;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.res.TypedArray;
 import android.graphics.PorterDuff;
 import android.graphics.drawable.Drawable;
 import android.os.StrictMode;
+import android.util.AttributeSet;
 import android.view.View;
 import android.view.ViewTreeObserver.OnScrollChangedListener;
 
 import androidx.annotation.ColorRes;
 import androidx.annotation.DrawableRes;
-import androidx.annotation.Nullable;
 import androidx.annotation.XmlRes;
 import androidx.appcompat.content.res.AppCompatResources;
 import androidx.appcompat.widget.Toolbar;
+import androidx.core.graphics.drawable.DrawableCompat;
+import androidx.preference.Preference;
 import androidx.preference.PreferenceFragmentCompat;
+import androidx.preference.PreferenceGroup;
+import androidx.preference.PreferenceScreen;
 
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.browser_ui.util.ToolbarUtils;
+import org.chromium.ui.drawable.StateListDrawableBuilder;
 
-/**
- * A helper class for Settings.
- */
+import java.util.ArrayList;
+
+/** A helper class for Settings. */
+@NullMarked
 public class SettingsUtils {
     /**
      * A helper that is used to load preferences from XML resources without causing a
@@ -63,23 +72,18 @@ public class SettingsUtils {
         };
     }
 
-    /**
-     * Creates a {@link Drawable} for the given resource id with the default icon color applied.
-     */
+    /** Creates a {@link Drawable} for the given resource id with the default icon color applied. */
     public static Drawable getTintedIcon(Context context, @DrawableRes int resId) {
         return getTintedIcon(context, resId, R.color.default_icon_color_tint_list);
     }
 
-    /**
-     * Creates a {@link Drawable} for the given resource id with provided color id applied.
-     */
+    /** Creates a {@link Drawable} for the given resource id with provided color id applied. */
     public static Drawable getTintedIcon(
             Context context, @DrawableRes int resId, @ColorRes int colorId) {
         Drawable icon = AppCompatResources.getDrawable(context, resId);
         // DrawableCompat.setTint() doesn't work well on BitmapDrawables on older versions.
         icon.setColorFilter(
-                AppCompatResources.getColorStateList(context, colorId).getDefaultColor(),
-                PorterDuff.Mode.SRC_IN);
+                context.getColorStateList(colorId).getDefaultColor(), PorterDuff.Mode.SRC_IN);
         return icon;
     }
 
@@ -96,5 +100,86 @@ public class SettingsUtils {
         if (toolbar == null) return false;
         ToolbarUtils.setOverflowMenuVisibility(toolbar, visibility);
         return true;
+    }
+
+    /** Returns a Drawable representing an arrow used next to an expandable text section. */
+    public static Drawable createExpandArrow(Context context) {
+        assert context != null;
+        StateListDrawableBuilder builder = new StateListDrawableBuilder(context);
+        StateListDrawableBuilder.State checked =
+                builder.addState(
+                        R.drawable.ic_expand_less_black_24dp, android.R.attr.state_checked);
+        StateListDrawableBuilder.State unchecked =
+                builder.addState(R.drawable.ic_expand_more_black_24dp);
+        builder.addTransition(
+                checked, unchecked, R.drawable.transition_expand_less_expand_more_black_24dp);
+        builder.addTransition(
+                unchecked, checked, R.drawable.transition_expand_more_expand_less_black_24dp);
+
+        Drawable tintableDrawable = DrawableCompat.wrap(builder.build());
+        DrawableCompat.setTintList(
+                tintableDrawable, context.getColorStateList(R.color.default_icon_color_tint_list));
+        return tintableDrawable;
+    }
+
+    /**
+     * Traverses a {@link PreferenceScreen} and returns a flat list of all visible preferences.
+     *
+     * @param preferenceScreen The preference screen to traverse.
+     * @return A list of visible preferences.
+     */
+    public static ArrayList<Preference> getVisiblePreferences(PreferenceScreen preferenceScreen) {
+        ArrayList<Preference> visiblePreferences = new ArrayList<>();
+        if (preferenceScreen == null) return visiblePreferences;
+
+        for (int i = 0; i < preferenceScreen.getPreferenceCount(); i++) {
+            Preference preference = preferenceScreen.getPreference(i);
+            if (preference.isVisible()) {
+                addVisiblePreferences(preference, visiblePreferences);
+            }
+        }
+        return visiblePreferences;
+    }
+
+    /**
+     * Recursively adds all visible preferences from a {@link PreferenceGroup}.
+     *
+     * @param preference The preference to start from.
+     * @param visiblePreferences The list to add visible preferences to.
+     */
+    private static void addVisiblePreferences(
+            Preference preference, ArrayList<Preference> visiblePreferences) {
+        visiblePreferences.add(preference);
+        if (preference instanceof PreferenceGroup preferenceGroup) {
+            for (int i = 0; i < preferenceGroup.getPreferenceCount(); i++) {
+                Preference nestedPreference = preferenceGroup.getPreference(i);
+                if (nestedPreference.isVisible()) {
+                    addVisiblePreferences(nestedPreference, visiblePreferences);
+                }
+            }
+        }
+    }
+
+    /**
+     * Initializes default attributes on the given preference.
+     *
+     * <p>AndroidX Preference defaults iconSpaceReserved to true. When hosted inside an Activity
+     * that does not define preferenceTheme in its theme (such as ChromeTabbedActivity in
+     * SettingsInTab), PreferenceFragmentCompat falls back to PreferenceThemeOverlay, which keeps
+     * iconSpaceReserved as true. Explicitly default iconSpaceReserved to false unless overridden in
+     * attrs so unused icon_frame space is collapsed.
+     *
+     * @param context The context for the preference.
+     * @param attrs The XML attribute set, or null if constructed programmatically.
+     * @param preference The preference to initialize.
+     */
+    public static void initializePreferenceDefaults(
+            Context context, @Nullable AttributeSet attrs, Preference preference) {
+        TypedArray preferenceAttrs = context.obtainStyledAttributes(attrs, R.styleable.Preference);
+        if (!preferenceAttrs.hasValue(R.styleable.Preference_iconSpaceReserved)
+                && !preferenceAttrs.hasValue(R.styleable.Preference_android_iconSpaceReserved)) {
+            preference.setIconSpaceReserved(false);
+        }
+        preferenceAttrs.recycle();
     }
 }

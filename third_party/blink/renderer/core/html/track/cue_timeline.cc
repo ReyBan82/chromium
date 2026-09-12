@@ -78,6 +78,7 @@ void CueTimeline::AddCue(TextTrack* track, TextTrackCue* cue) {
 }
 
 void CueTimeline::AddCueInternal(TextTrackCue* cue) {
+  newly_introduced_cues_.insert(cue);
   CueInterval interval = CreateCueInterval(cue);
   if (!cue_tree_.Contains(interval))
     cue_tree_.Add(interval);
@@ -99,6 +100,7 @@ void CueTimeline::RemoveCue(TextTrack*, TextTrackCue* cue) {
 }
 
 void CueTimeline::RemoveCueInternal(TextTrackCue* cue) {
+  newly_introduced_cues_.erase(cue);
   CueInterval interval = CreateCueInterval(cue);
   cue_tree_.Remove(interval);
 
@@ -191,8 +193,7 @@ void CueTimeline::TimeMarchesOn() {
   // kHaveNothing.
   if (media_element.getReadyState() != HTMLMediaElement::kHaveNothing &&
       media_element.GetWebMediaPlayer()) {
-    current_cues =
-        cue_tree_.AllOverlaps(cue_tree_.CreateInterval(movie_time, movie_time));
+    current_cues = cue_tree_.AllOverlaps(movie_time, movie_time);
   }
 
   CueList previous_cues;
@@ -217,16 +218,22 @@ void CueTimeline::TimeMarchesOn() {
   CueList missed_cues;
   if (last_time >= 0 && last_seek_time < movie_time) {
     CueList potentially_skipped_cues =
-        cue_tree_.AllOverlaps(cue_tree_.CreateInterval(last_time, movie_time));
+        cue_tree_.AllOverlaps(last_time, movie_time);
     missed_cues.ReserveInitialCapacity(potentially_skipped_cues.size());
 
     for (CueInterval cue : potentially_skipped_cues) {
-      // Consider cues that may have been missed since the last seek time.
+      // Consider cues that may have been missed since the last seek time. Do
+      // not add cues into `missed_cues` that are also in
+      // `newly_introduced_cues_`, as stated in
+      // https://html.spec.whatwg.org/multipage/media.html#time-marches-on
       if (cue.Low() > std::max(last_seek_time, last_time) &&
-          cue.High() < movie_time)
+          cue.High() < movie_time &&
+          !newly_introduced_cues_.Contains(cue.Data())) {
         missed_cues.push_back(cue);
+      }
     }
   }
+  newly_introduced_cues_.clear();
 
   last_update_time_ = movie_time;
 
@@ -352,19 +359,11 @@ void CueTimeline::TimeMarchesOn() {
       media_element.ScheduleEvent(
           CreateEventWithTarget(event_type_names::kExit, task.second.Get()));
     } else {
-      TextTrackCue* cue = task.second.Get();
       bool is_enter_event = task.first == task.second->startTime();
       AtomicString event_name =
           is_enter_event ? event_type_names::kEnter : event_type_names::kExit;
       media_element.ScheduleEvent(
           CreateEventWithTarget(event_name, task.second.Get()));
-      if (features::IsTextBasedAudioDescriptionEnabled()) {
-        if (is_enter_event) {
-          cue->OnEnter(MediaElement());
-        } else {
-          cue->OnExit(MediaElement());
-        }
-      }
     }
   }
 
@@ -501,7 +500,9 @@ void CueTimeline::CancelCueEventTimer() {
 }
 
 void CueTimeline::CueEventTimerFired(TimerBase*) {
-  InvokeTimeMarchesOn();
+  if (!MediaElement().IsShowPosterFlagSet()) {
+    InvokeTimeMarchesOn();
+  }
 }
 
 void CueTimeline::CueTimestampEventTimerFired(TimerBase*) {
@@ -551,6 +552,7 @@ void CueTimeline::DidMoveToNewDocument(Document& /*old_document*/) {
 
 void CueTimeline::Trace(Visitor* visitor) const {
   visitor->Trace(media_element_);
+  visitor->Trace(newly_introduced_cues_);
   visitor->Trace(cue_event_timer_);
   visitor->Trace(cue_timestamp_event_timer_);
 }

@@ -6,6 +6,8 @@
 
 #include <memory>
 #include <utility>
+
+#include "base/memory/raw_ptr.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/platform/web_prescient_networking.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -56,10 +58,10 @@ class HTMLResourcePreloaderTest : public PageTestBase {
     // TODO(yoav): Need a mock loader here to verify things are happenning
     // beyond preconnect.
     auto preload_request = PreloadRequest::CreateIfNeeded(
-        String(), TextPosition::MinimumPosition(), test_case.url,
-        KURL(test_case.base_url), ResourceType::kImage,
+        String(), test_case.url, KURL(test_case.base_url), ResourceType::kImage,
         network::mojom::ReferrerPolicy(), ResourceFetcher::kImageNotImageSet,
-        nullptr /* exclusion_info */, FetchParameters::ResourceWidth(),
+        nullptr /* exclusion_info */, std::nullopt /* resource_width */,
+        std::nullopt /* resource_height */,
         PreloadRequest::kRequestTypePreconnect);
     DCHECK(preload_request);
     if (test_case.is_cors)
@@ -72,7 +74,8 @@ class HTMLResourcePreloaderTest : public PageTestBase {
     ASSERT_EQ(test_case.is_https, mock_network_hints_->IsHTTPS());
   }
 
-  PreloaderNetworkHintsMock* mock_network_hints_ = nullptr;
+  raw_ptr<PreloaderNetworkHintsMock, UnprotectedInRelease | DanglingUntriaged>
+      mock_network_hints_ = nullptr;
 };
 
 TEST_F(HTMLResourcePreloaderTest, testPreconnect) {

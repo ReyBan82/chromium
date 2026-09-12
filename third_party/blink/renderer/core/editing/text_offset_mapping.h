@@ -51,9 +51,6 @@ class CORE_EXPORT TextOffsetMapping final {
     InlineContents() = default;
 
     bool operator==(const InlineContents& other) const;
-    bool operator!=(const InlineContents& other) const {
-      return !operator==(other);
-    }
 
     const LayoutBlockFlow* GetEmptyBlock() const;
     const LayoutObject& FirstLayoutObject() const;
@@ -79,11 +76,11 @@ class CORE_EXPORT TextOffsetMapping final {
     // The block-in-inline in |block_flow_| before |first_|, e.g.
     //  <span><div>...</div>abc</span>
     //  LayoutInline {SPAN}
-    //    LayoutNGBlockFlow (anonymous) <= block-in-inline
-    //      LayoutNGBlockFlow {DIV}
+    //    LayoutBlockFlow (anonymous) <= block-in-inline
+    //      LayoutBlockFlow {DIV}
     //        ...
-    //      LayoutNGBlockFlow (anonymous)
-    //        LayoutNGText "abc"
+    //      LayoutBlockFlow (anonymous)
+    //        LayoutText "abc"
     const LayoutObject* block_in_inline_before_ = nullptr;
     const LayoutObject* first_ = nullptr;
     const LayoutObject* last_ = nullptr;
@@ -114,9 +111,6 @@ class CORE_EXPORT TextOffsetMapping final {
 
       bool operator==(const Iterator& other) const {
         return current_ == other.current_;
-      }
-      bool operator!=(const Iterator& other) const {
-        return !operator==(other);
       }
 
      private:
@@ -157,9 +151,6 @@ class CORE_EXPORT TextOffsetMapping final {
       bool operator==(const Iterator& other) const {
         return current_ == other.current_;
       }
-      bool operator!=(const Iterator& other) const {
-        return !operator==(other);
-      }
 
      private:
       InlineContents current_;
@@ -192,18 +183,18 @@ class CORE_EXPORT TextOffsetMapping final {
   int ComputeTextOffset(const PositionInFlatTree&) const;
 
   // Returns position before |offset| in |text16_|
-  PositionInFlatTree GetPositionBefore(unsigned offset) const;
+  PositionInFlatTree GetPositionBefore(wtf_size_t offset) const;
 
   // Returns position after |offset| in |text16_|
-  PositionInFlatTree GetPositionAfter(unsigned offset) const;
+  PositionInFlatTree GetPositionAfter(wtf_size_t offset) const;
 
   // Returns a range specified by |start| and |end| offset in |text16_|.
-  EphemeralRangeInFlatTree ComputeRange(unsigned start, unsigned end) const;
+  EphemeralRangeInFlatTree ComputeRange(wtf_size_t start, wtf_size_t end) const;
 
   // Returns an offset in |text16_| before non-whitespace character from
   // |offset|, inclusive, otherwise returns |text16_.length()|.
   // This function is used for computing trailing whitespace after word.
-  unsigned FindNonWhitespaceCharacterFrom(unsigned offset) const;
+  wtf_size_t FindNonWhitespaceCharacterFrom(wtf_size_t offset) const;
 
   // Helper functions to construct |TextOffsetMapping|.
 

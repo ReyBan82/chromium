@@ -24,22 +24,26 @@ class TransformOperations;
 class ANIMATION_EXPORT Tween {
  public:
   enum Type {
-    LINEAR,            // Linear.
-    EASE_OUT,          // Fast in, slow out (default).
-    EASE_OUT_2,        // Variant of EASE_OUT that ends slower than EASE_OUT.
-    EASE_OUT_3,        // Variant of EASE_OUT that ends slower than EASE_OUT_2.
-    EASE_OUT_4,        // Variant of EASE_OUT that start slower than EASE_OUT_3,
-                       // and ends faster. Best used to lead into a bounce
-                       // animation.
-    EASE_IN,           // Slow in, fast out.
-    EASE_IN_2,         // Variant of EASE_IN that starts out slower than
-                       // EASE_IN.
-    EASE_IN_OUT,       // Slow in and out, fast in the middle.
-    EASE_IN_OUT_2,     // Variant of EASE_IN_OUT that starts and ends slower
-                       // than EASE_IN_OUT.
-    SMOOTH_IN_OUT,     // Smooth, consistent speeds in and out (sine wave).
-    FAST_OUT_SLOW_IN,  // Variant of EASE_IN_OUT which should be used in most
-                       // cases.
+    LINEAR,       // Linear.
+    EASE_OUT,     // Fast in, slow out (default).
+    EASE_OUT_2,   // Variant of EASE_OUT that ends slower than EASE_OUT.
+    EASE_OUT_3,   // Variant of EASE_OUT that ends slower than EASE_OUT_2.
+    EASE_OUT_4,   // Variant of EASE_OUT that start slower than EASE_OUT_3,
+                  // and ends faster. Best used to lead into a bounce
+                  // animation.
+    EASE_IN,      // Slow in, fast out.
+    EASE_IN_2,    // Variant of EASE_IN that starts out slower than
+                  // EASE_IN.
+    EASE_IN_OUT,  // Slow in and out, fast in the middle.
+    EASE_IN_OUT_EMPHASIZED,  // Variant of EASE_IN_OUT that starts slowly,
+                             // speeds up shortly thereafter, and then ends
+                             // slowly. This curve can be imagined as a steeper
+                             // version of EASE_IN_OUT.
+    EASE_IN_OUT_2,       // Variant of EASE_IN_OUT that starts and ends slower
+                         // than EASE_IN_OUT.
+    SMOOTH_IN_OUT,       // Smooth, consistent speeds in and out (sine wave).
+    FAST_OUT_SLOW_IN,    // Variant of EASE_IN_OUT which should be used in most
+                         // cases.
     FAST_OUT_SLOW_IN_2,  // Variant of FAST_OUT_SLOW_IN that starts out quicker.
     FAST_OUT_SLOW_IN_3,  // Variant of FAST_OUT_SLOW_IN that starts out quicker
                          // than FAST_OUT_SLOW_IN_2. Best used for rebound in
@@ -82,10 +86,15 @@ class ANIMATION_EXPORT Tween {
     ACCEL_20_DECEL_60,  // Moving a small, low emphasis or responsive elements.
     ACCEL_20_DECEL_100,
     ACCEL_30_DECEL_20_85,
+    ACCEL_30_DECEL_LIN,  // Used for browser controls snap animation.
     ACCEL_40_DECEL_20,
     // Moderate acceleration and soft deceleration. Used for elements that are
     // visible at the beginning and end of a transition.
     ACCEL_40_DECEL_100_3,
+    ACCEL_45_DECEL_88,     // A more dramatic version of EASE_IN_OUT that starts
+                           // very slowly, accelerates very rapidly, and then
+                           // decelerates very rapidly. This creates a snappy,
+                           // high-energy transition.
     ACCEL_80_DECEL_20,     // Slow in and fast out with ease.
     ACCEL_0_40_DECEL_100,  // Specialized curve with an emphasized deceleration
                            // drift.
@@ -113,11 +122,13 @@ class ANIMATION_EXPORT Tween {
   static SkColor ColorValueBetween(double value, SkColor start, SkColor target);
   static double DoubleValueBetween(double value, double start, double target);
   static float FloatValueBetween(double value, float start, float target);
-  static float ClampedFloatValueBetween(const base::TimeTicks& time,
-                                        const base::TimeTicks& start_time,
-                                        float start,
-                                        const base::TimeTicks& target_time,
-                                        float target);
+  static float ClampedFloatValueBetween(
+      const base::TimeTicks& time,
+      const base::TimeTicks& start_time,
+      float start,
+      const base::TimeTicks& target_time,
+      float target,
+      gfx::Tween::Type type = gfx::Tween::LINEAR);
 
   // Interpolated between start and target, with every integer in this range
   // given equal weight.

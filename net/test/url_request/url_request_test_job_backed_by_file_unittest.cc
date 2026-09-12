@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 #include "net/test/url_request/url_request_test_job_backed_by_file.h"
-#include "base/memory/raw_ptr.h"
 
 #include <memory>
 
@@ -11,9 +10,11 @@
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/strings/stringprintf.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/types/expected.h"
 #include "net/base/filename_util.h"
 #include "net/base/net_errors.h"
 #include "net/test/test_with_task_environment.h"
@@ -41,18 +42,16 @@ class TestURLRequestTestJobBackedByFile : public URLRequestTestJobBackedByFile {
       const base::FilePath& file_path,
       const scoped_refptr<base::TaskRunner>& file_task_runner,
       int* open_result,
-      int64_t* seek_position,
+      base::expected<int64_t, net::Error>* seek_position,
       bool* done_reading,
       std::string* observed_content)
-      : URLRequestTestJobBackedByFile(request,
-                                      file_path,
-                                      file_task_runner),
+      : URLRequestTestJobBackedByFile(request, file_path, file_task_runner),
         open_result_(open_result),
         seek_position_(seek_position),
         done_reading_(done_reading),
         observed_content_(observed_content) {
     *open_result_ = ERR_IO_PENDING;
-    *seek_position_ = ERR_IO_PENDING;
+    *seek_position_ = base::unexpected(ERR_IO_PENDING);
     *done_reading_ = false;
     observed_content_->clear();
   }
@@ -66,34 +65,29 @@ class TestURLRequestTestJobBackedByFile : public URLRequestTestJobBackedByFile {
     *open_result_ = result;
   }
 
-  void OnSeekComplete(int64_t result) override {
+  void OnSeekComplete(base::expected<int64_t, net::Error> result) override {
     // Should only call this if open succeeded.
     EXPECT_EQ(OK, *open_result_);
     // Should only be called once.
-    ASSERT_EQ(ERR_IO_PENDING, *seek_position_);
+    ASSERT_FALSE(seek_position_->has_value());
+    ASSERT_EQ(ERR_IO_PENDING, seek_position_->error());
     *seek_position_ = result;
   }
 
   void OnReadComplete(IOBuffer* buf, int result) override {
     // Should only call this if seek succeeded.
-    EXPECT_GE(*seek_position_, 0);
+    ASSERT_TRUE(seek_position_->has_value());
+    EXPECT_GE(seek_position_->value(), 0);
     observed_content_->append(std::string(buf->data(), result));
   }
 
   void DoneReading() override { *done_reading_ = true; }
 
   const raw_ptr<int> open_result_;
-  const raw_ptr<int64_t> seek_position_;
+  const raw_ptr<base::expected<int64_t, net::Error>> seek_position_;
   raw_ptr<bool> done_reading_;
   const raw_ptr<std::string> observed_content_;
 };
-
-// Helper function to create a file at |path| filled with |content|.
-// Returns true on success.
-bool CreateFileWithContent(const std::string& content,
-                           const base::FilePath& path) {
-  return base::WriteFile(path, content.c_str(), content.length()) != -1;
-}
 
 // A simple holder for start/end used in http range requests.
 struct Range {
@@ -135,7 +129,7 @@ class URLRequestTestJobBackedByFileEventsTest : public TestWithTaskEnvironment {
   void RunSuccessfulRequestWithString(
       const std::string& content,
       const std::string& expected_content,
-      const base::FilePath::StringPieceType& file_extension,
+      const base::FilePath::StringViewType& file_extension,
       const Range* range);
 
   // Creates and runs a TestURLRequestTestJobBackedByFile job to read from file
@@ -144,7 +138,7 @@ class URLRequestTestJobBackedByFileEventsTest : public TestWithTaskEnvironment {
   void RunRequestWithPath(const base::FilePath& path,
                           const std::string& range,
                           int* open_result,
-                          int64_t* seek_position,
+                          base::expected<int64_t, net::Error>* seek_position,
                           bool* done_reading,
                           std::string* observed_content);
 
@@ -174,13 +168,13 @@ void URLRequestTestJobBackedByFileEventsTest::RunSuccessfulRequestWithString(
 void URLRequestTestJobBackedByFileEventsTest::RunSuccessfulRequestWithString(
     const std::string& raw_content,
     const std::string& expected_content,
-    const base::FilePath::StringPieceType& file_extension,
+    const base::FilePath::StringViewType& file_extension,
     const Range* range) {
   ASSERT_TRUE(directory_.CreateUniqueTempDir());
   base::FilePath path = directory_.GetPath().Append(FILE_PATH_LITERAL("test"));
   if (!file_extension.empty())
     path = path.AddExtension(file_extension);
-  ASSERT_TRUE(CreateFileWithContent(raw_content, path));
+  ASSERT_TRUE(base::WriteFile(path, raw_content));
 
   std::string range_value;
   if (range) {
@@ -193,7 +187,8 @@ void URLRequestTestJobBackedByFileEventsTest::RunSuccessfulRequestWithString(
 
   {
     int open_result;
-    int64_t seek_position;
+    base::expected<int64_t, net::Error> seek_position =
+        base::unexpected(ERR_IO_PENDING);
     bool done_reading;
     std::string observed_content;
     RunRequestWithPath(path, range_value, &open_result, &seek_position,
@@ -216,7 +211,8 @@ void URLRequestTestJobBackedByFileEventsTest::RunSuccessfulRequestWithString(
     }
 
     EXPECT_EQ(expected_data_received, delegate_.data_received());
-    EXPECT_EQ(seek_position, range ? range->start : 0);
+    ASSERT_TRUE(seek_position.has_value());
+    EXPECT_EQ(seek_position.value(), range ? range->start : 0);
     EXPECT_TRUE(done_reading);
   }
 }
@@ -225,13 +221,14 @@ void URLRequestTestJobBackedByFileEventsTest::RunRequestWithPath(
     const base::FilePath& path,
     const std::string& range,
     int* open_result,
-    int64_t* seek_position,
+    base::expected<int64_t, net::Error>* seek_position,
     bool* done_reading,
     std::string* observed_content) {
   const GURL kUrl("http://intercepted-url/");
 
   std::unique_ptr<URLRequest> request(context_->CreateRequest(
-      kUrl, DEFAULT_PRIORITY, &delegate_, TRAFFIC_ANNOTATION_FOR_TESTS));
+      kUrl, DEFAULT_PRIORITY, &delegate_, TRAFFIC_ANNOTATION_FOR_TESTS,
+      net::handles::kInvalidNetworkHandle));
   TestScopedURLInterceptor interceptor(
       kUrl, std::make_unique<TestURLRequestTestJobBackedByFile>(
                 request.get(), path,
@@ -242,8 +239,7 @@ void URLRequestTestJobBackedByFileEventsTest::RunRequestWithPath(
                                          true /*overwrite*/);
   }
   request->Start();
-
-  base::RunLoop().Run();
+  delegate_.RunUntilComplete();
 }
 
 // Helper function to make a character array filled with |size| bytes of
@@ -270,7 +266,13 @@ TEST_F(URLRequestTestJobBackedByFileEventsTest, SmallFile) {
   RunSuccessfulRequestWithString(MakeContentOfSize(17 * 1024), nullptr);
 }
 
-TEST_F(URLRequestTestJobBackedByFileEventsTest, BigFile) {
+// TODO(crbug.com/398792039): Re-enable this test
+#if BUILDFLAG(IS_CHROMEOS)
+#define MAYBE_BigFile DISABLED_BigFile
+#else
+#define MAYBE_BigFile BigFile
+#endif
+TEST_F(URLRequestTestJobBackedByFileEventsTest, MAYBE_BigFile) {
   RunSuccessfulRequestWithString(MakeContentOfSize(3 * 1024 * 1024), nullptr);
 }
 
@@ -297,12 +299,13 @@ TEST_F(URLRequestTestJobBackedByFileEventsTest, DecodeSvgzFile) {
 
 TEST_F(URLRequestTestJobBackedByFileEventsTest, OpenNonExistentFile) {
   base::FilePath path;
-  base::PathService::Get(base::DIR_SOURCE_ROOT, &path);
+  base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path);
   path = path.Append(
       FILE_PATH_LITERAL("net/data/url_request_unittest/non-existent.txt"));
 
   int open_result;
-  int64_t seek_position;
+  base::expected<int64_t, net::Error> seek_position =
+      base::unexpected(ERR_IO_PENDING);
   bool done_reading;
   std::string observed_content;
   RunRequestWithPath(path, std::string(), &open_result, &seek_position,
@@ -315,57 +318,63 @@ TEST_F(URLRequestTestJobBackedByFileEventsTest, OpenNonExistentFile) {
 
 TEST_F(URLRequestTestJobBackedByFileEventsTest, MultiRangeRequestNotSupported) {
   base::FilePath path;
-  base::PathService::Get(base::DIR_SOURCE_ROOT, &path);
+  base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path);
   path = path.Append(
       FILE_PATH_LITERAL("net/data/url_request_unittest/BullRunSpeech.txt"));
 
   int open_result;
-  int64_t seek_position;
+  base::expected<int64_t, net::Error> seek_position =
+      base::unexpected(ERR_IO_PENDING);
   bool done_reading;
   std::string observed_content;
   RunRequestWithPath(path, "bytes=1-5,20-30", &open_result, &seek_position,
                      &done_reading, &observed_content);
 
   EXPECT_EQ(OK, open_result);
-  EXPECT_EQ(ERR_REQUEST_RANGE_NOT_SATISFIABLE, seek_position);
+  ASSERT_FALSE(seek_position.has_value());
+  EXPECT_EQ(ERR_REQUEST_RANGE_NOT_SATISFIABLE, seek_position.error());
   EXPECT_FALSE(done_reading);
   EXPECT_TRUE(delegate_.request_failed());
 }
 
 TEST_F(URLRequestTestJobBackedByFileEventsTest, RangeExceedingFileSize) {
   base::FilePath path;
-  base::PathService::Get(base::DIR_SOURCE_ROOT, &path);
+  base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path);
   path = path.Append(
       FILE_PATH_LITERAL("net/data/url_request_unittest/BullRunSpeech.txt"));
 
   int open_result;
-  int64_t seek_position;
+  base::expected<int64_t, net::Error> seek_position =
+      base::unexpected(ERR_IO_PENDING);
   bool done_reading;
   std::string observed_content;
   RunRequestWithPath(path, "bytes=50000-", &open_result, &seek_position,
                      &done_reading, &observed_content);
 
   EXPECT_EQ(OK, open_result);
-  EXPECT_EQ(ERR_REQUEST_RANGE_NOT_SATISFIABLE, seek_position);
+  ASSERT_FALSE(seek_position.has_value());
+  EXPECT_EQ(ERR_REQUEST_RANGE_NOT_SATISFIABLE, seek_position.error());
   EXPECT_FALSE(done_reading);
   EXPECT_TRUE(delegate_.request_failed());
 }
 
 TEST_F(URLRequestTestJobBackedByFileEventsTest, IgnoreRangeParsingError) {
   base::FilePath path;
-  base::PathService::Get(base::DIR_SOURCE_ROOT, &path);
+  base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &path);
   path = path.Append(
       FILE_PATH_LITERAL("net/data/url_request_unittest/simple.html"));
 
   int open_result;
-  int64_t seek_position;
+  base::expected<int64_t, net::Error> seek_position =
+      base::unexpected(ERR_IO_PENDING);
   bool done_reading;
   std::string observed_content;
   RunRequestWithPath(path, "bytes=3-z", &open_result, &seek_position,
                      &done_reading, &observed_content);
 
   EXPECT_EQ(OK, open_result);
-  EXPECT_EQ(0, seek_position);
+  ASSERT_TRUE(seek_position.has_value());
+  EXPECT_EQ(0, seek_position.value());
   EXPECT_EQ("hello\n", observed_content);
   EXPECT_TRUE(done_reading);
   EXPECT_FALSE(delegate_.request_failed());

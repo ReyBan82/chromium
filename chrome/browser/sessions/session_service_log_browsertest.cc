@@ -2,35 +2,40 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/sessions/session_service_log.h"
+
 #include <stddef.h>
 
 #include <list>
 #include <memory>
+#include <optional>
+#include <ranges>
 
 #include "base/command_line.h"
-#include "base/containers/adapters.h"
 #include "base/memory/raw_ptr.h"
-#include "build/chromeos_buildflags.h"
+#include "build/build_config.h"
 #include "chrome/browser/prefs/session_startup_pref.h"
+#include "chrome/browser/profiles/keep_alive/profile_keep_alive_types.h"
+#include "chrome/browser/profiles/keep_alive/scoped_profile_keep_alive.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/resource_coordinator/session_restore_policy.h"
 #include "chrome/browser/sessions/session_restore_test_helper.h"
 #include "chrome/browser/sessions/session_restore_test_utils.h"
-#include "chrome/browser/sessions/session_service_log.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_list.h"
+#include "chrome/browser/ui/browser_window/public/global_browser_collection.h"
 #include "chrome/browser/ui/startup/startup_types.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/common/chrome_switches.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/keep_alive_registry/keep_alive_types.h"
 #include "components/keep_alive_registry/scoped_keep_alive.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
+
+#if BUILDFLAG(IS_CHROMEOS)
+#include "ash/constants/ash_switches.h"
+#endif
 
 class SessionServiceLogTest : public InProcessBrowserTest {
  public:
@@ -38,33 +43,33 @@ class SessionServiceLogTest : public InProcessBrowserTest {
   ~SessionServiceLogTest() override = default;
 
  protected:
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   void SetUpCommandLine(base::CommandLine* command_line) override {
     // TODO(nkostylev): Investigate if we can remove this switch.
-    command_line->AppendSwitch(switches::kCreateBrowserOnStartupForTests);
+    command_line->AppendSwitch(ash::switches::kCreateBrowserOnStartupForTests);
   }
 #endif
 
   void PreRunTestOnMainThread() override {
     InProcessBrowserTest::PreRunTestOnMainThread();
     ASSERT_TRUE(browser());
-    profile_ = browser()->profile();
+    profile_ = browser()->GetProfile();
     ASSERT_TRUE(profile_);
   }
 
   void SetUpOnMainThread() override {
     SessionStartupPref pref(SessionStartupPref::LAST);
-    SessionStartupPref::SetStartupPref(browser()->profile(), pref);
+    SessionStartupPref::SetStartupPref(browser()->GetProfile(), pref);
   }
 
-  absl::optional<SessionServiceEvent> FindMostRecentEventOfType(
+  std::optional<SessionServiceEvent> FindMostRecentEventOfType(
       SessionServiceEventLogType type) const {
     auto events = GetSessionServiceEvents(profile_);
-    for (const SessionServiceEvent& event : base::Reversed(events)) {
+    for (const SessionServiceEvent& event : std::views::reverse(events)) {
       if (event.type == type)
         return event;
     }
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   std::list<SessionServiceEvent>::reverse_iterator
@@ -88,7 +93,7 @@ class SessionServiceLogTest : public InProcessBrowserTest {
 
  protected:
   // Cached as browser() may be destroyed.
-  raw_ptr<Profile, DanglingUntriaged> profile_ = nullptr;
+  raw_ptr<Profile, AcrossTasksDanglingUntriaged> profile_ = nullptr;
   std::unique_ptr<ScopedKeepAlive> keep_alive_;
 };
 
@@ -107,6 +112,10 @@ IN_PROC_BROWSER_TEST_F(SessionServiceLogTest, ExitEvent) {
 
   EXPECT_FALSE(FindMostRecentEventOfType(SessionServiceEventLogType::kExit));
   const int tab_count = browser()->tab_strip_model()->count();
+
+  // Keep the Profile alive after destroying browser for exit log checks.
+  ScopedProfileKeepAlive profile_keep_alive(
+      profile_.get(), ProfileKeepAliveOrigin::kBrowserWindow);
   CloseBrowserSynchronously(browser());
   auto exit_event =
       FindMostRecentEventOfType(SessionServiceEventLogType::kExit);
@@ -128,8 +137,8 @@ IN_PROC_BROWSER_TEST_F(SessionServiceLogTest, PRE_RestoreEvent) {
       WindowOpenDisposition::NEW_BACKGROUND_TAB,
       ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
 
-  Browser* new_browser = chrome::OpenEmptyWindow(profile_);
-  ASSERT_EQ(2u, BrowserList::GetInstance()->size());
+  BrowserWindowInterface* new_browser = chrome::OpenEmptyWindow(profile_);
+  ASSERT_EQ(2u, GlobalBrowserCollection::GetInstance()->GetSize());
   ui_test_utils::NavigateToURLWithDisposition(
       new_browser, GURL(url::kAboutBlankURL),
       WindowOpenDisposition::CURRENT_TAB,

@@ -21,7 +21,6 @@
 #include "chromecast/media/cma/pipeline/decrypt_util.h"
 #include "chromecast/public/media/cast_decrypt_config.h"
 #include "media/base/audio_decoder_config.h"
-#include "media/base/bind_to_current_loop.h"
 #include "media/base/decrypt_config.h"
 #include "media/base/timestamp_constants.h"
 
@@ -77,7 +76,10 @@ bool AvPipelineImpl::StartPlayingFrom(
     LOG(INFO) << __FUNCTION__ << " called while in error state";
     return false;
   }
-  DCHECK_EQ(state_, kFlushed);
+  if (state_ != kFlushed) {
+    LOG(ERROR) << __FUNCTION__ << " called in unexpected state " << state_;
+    return false;
+  }
 
   // Buffering related initialization.
   DCHECK(frame_provider_);
@@ -219,8 +221,7 @@ void AvPipelineImpl::ProcessPendingBuffer() {
             key_id, GetEncryptionScheme(pending_buffer_->stream_id()));
     if (!decrypt_context) {
       LOG(INFO) << "frame(pts=" << pending_buffer_->timestamp()
-                << "): waiting for key id "
-                << base::HexEncode(&key_id[0], key_id.size());
+                << "): waiting for key id " << base::HexEncode(key_id);
       if (!client_.waiting_cb.is_null())
         client_.waiting_cb.Run(::media::WaitingReason::kNoDecryptionKey);
       return;

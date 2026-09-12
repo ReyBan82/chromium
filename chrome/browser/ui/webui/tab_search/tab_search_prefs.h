@@ -5,6 +5,8 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_TAB_SEARCH_TAB_SEARCH_PREFS_H_
 #define CHROME_BROWSER_UI_WEBUI_TAB_SEARCH_TAB_SEARCH_PREFS_H_
 
+#include "chrome/browser/ui/webui/tab_search/tab_search.mojom.h"
+
 namespace user_prefs {
 
 class PrefRegistrySyncable;
@@ -14,6 +16,8 @@ class PrefRegistrySyncable;
 namespace tab_search_prefs {
 
 extern const char kTabSearchRecentlyClosedSectionExpanded[];
+
+extern const char kTabSearchUsed[];
 
 void RegisterProfilePrefs(user_prefs::PrefRegistrySyncable* registry);
 

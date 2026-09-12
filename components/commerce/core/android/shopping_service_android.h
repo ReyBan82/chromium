@@ -14,7 +14,7 @@
 #include "components/commerce/core/shopping_service.h"
 #include "components/commerce/core/subscriptions/subscriptions_observer.h"
 
-using base::android::JavaParamRef;
+using base::android::JavaRef;
 using base::android::ScopedJavaGlobalRef;
 using base::android::ScopedJavaLocalRef;
 
@@ -34,48 +34,73 @@ class ShoppingServiceAndroid : public base::SupportsUserData::Data,
   ShoppingServiceAndroid(ShoppingService* service);
   ~ShoppingServiceAndroid() override;
 
+  ShoppingService* GetShoppingService();
+
   void GetProductInfoForUrl(JNIEnv* env,
-                            const JavaParamRef<jobject>& obj,
-                            const JavaParamRef<jobject>& j_gurl,
-                            const JavaParamRef<jobject>& j_callback);
+                            const JavaRef<jobject>& j_gurl,
+                            const JavaRef<jobject>& j_callback);
 
   ScopedJavaLocalRef<jobject> GetAvailableProductInfoForUrl(
       JNIEnv* env,
-      const JavaParamRef<jobject>& obj,
-      const JavaParamRef<jobject>& j_gurl);
+      const JavaRef<jobject>& j_gurl);
 
   void GetMerchantInfoForUrl(JNIEnv* env,
-                             const JavaParamRef<jobject>& obj,
-                             const JavaParamRef<jobject>& j_gurl,
-                             const JavaParamRef<jobject>& j_callback);
+                             const JavaRef<jobject>& j_gurl,
+                             const JavaRef<jobject>& j_callback);
 
-  void FetchPriceEmailPref(JNIEnv* env, const JavaParamRef<jobject>& obj);
+  void GetPriceInsightsInfoForUrl(JNIEnv* env,
+                                  const JavaRef<jobject>& j_gurl,
+                                  const JavaRef<jobject>& j_callback);
 
-  void ScheduleSavedProductUpdate(JNIEnv* env,
-                                  const JavaParamRef<jobject>& obj);
+  void GetDiscountInfoForUrl(JNIEnv* env,
+                             const JavaRef<jobject>& j_gurl,
+                             const JavaRef<jobject>& j_callback);
 
-  void Subscribe(JNIEnv* env,
-                 const JavaParamRef<jobject>& obj,
-                 jint j_type,
-                 jint j_id_type,
-                 jint j_management_type,
-                 const JavaParamRef<jstring>& j_id,
-                 const JavaParamRef<jstring>& j_seen_offer_id,
-                 jlong j_seen_price,
-                 const JavaParamRef<jstring>& j_seen_country,
-                 const JavaParamRef<jobject>& j_callback);
+  void GetAvailableDiscountInfoForUrl(JNIEnv* env,
+                                      const JavaRef<jobject>& j_gurl,
+                                      const JavaRef<jobject>& j_callback);
 
-  void Unsubscribe(JNIEnv* env,
-                   const JavaParamRef<jobject>& obj,
-                   jint j_type,
-                   jint j_id_type,
-                   jint j_management_type,
-                   const JavaParamRef<jstring>& j_id,
-                   const JavaParamRef<jobject>& j_callback);
+  void FetchPriceEmailPref();
 
-  bool IsShoppingListEligible(JNIEnv* env, const JavaParamRef<jobject>& obj);
+  void ScheduleSavedProductUpdate();
 
-  bool IsMerchantViewerEnabled(JNIEnv* env, const JavaParamRef<jobject>& obj);
+  void Subscribe(int32_t j_type,
+                 int32_t j_id_type,
+                 int32_t j_management_type,
+                 const std::string& id,
+                 const std::string& seen_offer_id,
+                 int64_t seen_price,
+                 const std::string& seen_country,
+                 const std::string& seen_locale,
+                 const JavaRef<jobject>& j_callback);
+
+  void Unsubscribe(int32_t j_type,
+                   int32_t j_id_type,
+                   int32_t j_management_type,
+                   const std::string& id,
+                   const JavaRef<jobject>& j_callback);
+
+  void IsSubscribed(int32_t j_type,
+                    int32_t j_id_type,
+                    int32_t j_management_type,
+                    const std::string& id,
+                    const JavaRef<jobject>& j_callback);
+
+  bool IsSubscribedFromCache(int32_t j_type,
+                             int32_t j_id_type,
+                             int32_t j_management_type,
+                             const std::string& j_id);
+
+  void GetAllPriceTrackedBookmarks(JNIEnv* env,
+                                   const JavaRef<jobject>& j_callback);
+
+  bool IsShoppingListEligible();
+
+  bool IsMerchantViewerEnabled();
+
+  bool IsPriceInsightsEligible();
+
+  bool IsDiscountEligibleToShowOnNavigation();
 
   ScopedJavaGlobalRef<jobject> java_ref() { return java_ref_; }
 
@@ -83,19 +108,26 @@ class ShoppingServiceAndroid : public base::SupportsUserData::Data,
   void HandleProductInfoCallback(JNIEnv* env,
                                  const ScopedJavaGlobalRef<jobject>& callback,
                                  const GURL& url,
-                                 const absl::optional<ProductInfo>& info);
+                                 const std::optional<const ProductInfo>& info);
 
   void HandleMerchantInfoCallback(JNIEnv* env,
                                   const ScopedJavaGlobalRef<jobject>& callback,
                                   const GURL& url,
-                                  absl::optional<MerchantInfo> info);
+                                  std::optional<MerchantInfo> info);
 
-  void OnSubscribe(const std::vector<CommerceSubscription>& subscriptions,
-                   bool succeeded) override;
-  void OnUnsubscribe(const std::vector<CommerceSubscription>& subscriptions,
-                     bool succeeded) override;
-  ScopedJavaLocalRef<jobject> ConvertSubscriptionsToJavaList(
-      const std::vector<CommerceSubscription>& subscriptions);
+  void HandlePriceInsightsInfoCallback(
+      JNIEnv* env,
+      const ScopedJavaGlobalRef<jobject>& callback,
+      const GURL& url,
+      const std::optional<PriceInsightsInfo>& info);
+
+  void HandleDiscountInfoCallback(JNIEnv* env,
+                                  const ScopedJavaGlobalRef<jobject>& callback,
+                                  const GURL& url,
+                                  const std::vector<DiscountInfo> info);
+
+  void OnSubscribe(const CommerceSubscription& sub, bool succeeded) override;
+  void OnUnsubscribe(const CommerceSubscription& sub, bool succeeded) override;
 
   // A handle to the backing shopping service. This is held as a raw pointer
   // since this object's lifecycle is tied to the service itself. This object

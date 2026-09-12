@@ -5,7 +5,6 @@
 package org.chromium.net.impl;
 
 import org.chromium.net.BidirectionalStream;
-import org.chromium.net.CronetEngine;
 import org.chromium.net.CronetException;
 import org.chromium.net.NetworkQualityRttListener;
 import org.chromium.net.NetworkQualityThroughputListener;
@@ -30,9 +29,7 @@ import java.util.concurrent.Executor;
  * supported in all versions of the API should forgo a version check.
  */
 public class VersionSafeCallbacks {
-    /**
-     * Wrap a {@link UrlRequest.Callback} in a version safe manner.
-     */
+    /** Wrap a {@link UrlRequest.Callback} in a version safe manner. */
     public static final class UrlRequestCallback extends UrlRequest.Callback {
         private final UrlRequest.Callback mWrappedCallback;
 
@@ -73,9 +70,7 @@ public class VersionSafeCallbacks {
         }
     }
 
-    /**
-     * Wrap a {@link UrlRequest.StatusListener} in a version safe manner.
-     */
+    /** Wrap a {@link UrlRequest.StatusListener} in a version safe manner. */
     public static final class UrlRequestStatusListener extends UrlRequest.StatusListener {
         private final UrlRequest.StatusListener mWrappedListener;
 
@@ -89,9 +84,7 @@ public class VersionSafeCallbacks {
         }
     }
 
-    /**
-     * Wrap a {@link BidirectionalStream.Callback} in a version safe manner.
-     */
+    /** Wrap a {@link BidirectionalStream.Callback} in a version safe manner. */
     public static final class BidirectionalStreamCallback extends BidirectionalStream.Callback {
         private final BidirectionalStream.Callback mWrappedCallback;
 
@@ -110,19 +103,27 @@ public class VersionSafeCallbacks {
         }
 
         @Override
-        public void onReadCompleted(BidirectionalStream stream, UrlResponseInfo info,
-                ByteBuffer buffer, boolean endOfStream) {
+        public void onReadCompleted(
+                BidirectionalStream stream,
+                UrlResponseInfo info,
+                ByteBuffer buffer,
+                boolean endOfStream) {
             mWrappedCallback.onReadCompleted(stream, info, buffer, endOfStream);
         }
 
         @Override
-        public void onWriteCompleted(BidirectionalStream stream, UrlResponseInfo info,
-                ByteBuffer buffer, boolean endOfStream) {
+        public void onWriteCompleted(
+                BidirectionalStream stream,
+                UrlResponseInfo info,
+                ByteBuffer buffer,
+                boolean endOfStream) {
             mWrappedCallback.onWriteCompleted(stream, info, buffer, endOfStream);
         }
 
         @Override
-        public void onResponseTrailersReceived(BidirectionalStream stream, UrlResponseInfo info,
+        public void onResponseTrailersReceived(
+                BidirectionalStream stream,
+                UrlResponseInfo info,
                 UrlResponseInfo.HeaderBlock trailers) {
             mWrappedCallback.onResponseTrailersReceived(stream, info, trailers);
         }
@@ -144,9 +145,7 @@ public class VersionSafeCallbacks {
         }
     }
 
-    /**
-     * Wrap a {@link UploadDataProvider} in a version safe manner.
-     */
+    /** Wrap a {@link UploadDataProvider} in a version safe manner. */
     public static final class UploadDataProviderWrapper extends UploadDataProvider {
         private final UploadDataProvider mWrappedProvider;
 
@@ -175,9 +174,7 @@ public class VersionSafeCallbacks {
         }
     }
 
-    /**
-     * Wrap a {@link RequestFinishedInfo.Listener} in a version safe manner.
-     */
+    /** Wrap a {@link RequestFinishedInfo.Listener} in a version safe manner. */
     public static final class RequestFinishedInfoListener extends RequestFinishedInfo.Listener {
         private final RequestFinishedInfo.Listener mWrappedListener;
 
@@ -273,19 +270,22 @@ public class VersionSafeCallbacks {
         }
     }
 
-    /**
-     * Wrap a {@link CronetEngine.Builder.LibraryLoader} in a version safe manner.
-     */
-    public static final class LibraryLoader extends CronetEngine.Builder.LibraryLoader {
-        private final CronetEngine.Builder.LibraryLoader mWrappedLoader;
-
-        public LibraryLoader(CronetEngine.Builder.LibraryLoader libraryLoader) {
-            mWrappedLoader = libraryLoader;
+    /** Wrap a {@link org.chromium.net.ApiVersion} in a version safe manner. */
+    public static final class ApiVersion {
+        public static int getMaximumAvailableApiLevel() {
+            // Prior to M59 the ApiVersion.getMaximumAvailableApiLevel API didn't exist
+            int cronetMajorVersion =
+                    Integer.parseInt(ApiVersion.getCronetVersion().split("\\.")[0]);
+            if (cronetMajorVersion < 59) {
+                return org.chromium.net.ApiVersion.getApiLevel();
+            }
+            return org.chromium.net.ApiVersion.getMaximumAvailableApiLevel();
         }
 
-        @Override
-        public void loadLibrary(String libName) {
-            mWrappedLoader.loadLibrary(libName);
+        public static String getCronetVersion() {
+            // No version check as we never shipped an API-only package that did no contain this
+            // method.
+            return org.chromium.net.ApiVersion.getCronetVersion();
         }
     }
 }

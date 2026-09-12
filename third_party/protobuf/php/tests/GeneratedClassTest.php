@@ -6,16 +6,13 @@ require_once('test_util.php');
 use Google\Protobuf\Internal\RepeatedField;
 use Google\Protobuf\Internal\MapField;
 use Google\Protobuf\Internal\GPBType;
-use Bar\TestLegacyMessage;
-use Bar\TestLegacyMessage_NestedEnum;
-use Bar\TestLegacyMessage_NestedMessage;
 use Foo\Test32Fields;
 use Foo\TestEnum;
 use Foo\TestIncludeNamespaceMessage;
 use Foo\TestIncludePrefixMessage;
+use Foo\TestSpecialCharacters;
 use Foo\TestMessage;
 use Foo\TestMessage\Sub;
-use Foo\TestMessage_Sub;
 use Foo\TestMessage\NestedEnum;
 use Foo\TestReverseFieldOrder;
 use Foo\testLowerCaseMessage;
@@ -24,14 +21,46 @@ use PBEmpty\PBEcho\TestEmptyPackage;
 use Php\Test\TestNamespace;
 
 # This is not allowed, but we at least shouldn't crash.
-class C extends \Google\Protobuf\Internal\Message {
-    public function __construct($data = null) {
+class C extends \Google\Protobuf\Internal\Message
+{
+    public function __construct($data = null)
+    {
         parent::__construct($data);
+    }
+}
+
+# This is not allowed, but we at least shouldn't crash.
+class TestMessageMockProxy extends TestMessage
+{
+    public $_proxy_data = null;
+
+    public function __construct($data = null)
+    {
+        $this->_proxy_data = $data;
+        // bypass parent constructor
+        // This is common behavior by phpunit ond other mock/proxy libraries
     }
 }
 
 class GeneratedClassTest extends TestBase
 {
+    private $orig_level;
+
+    /**
+     * @before
+     */
+    public function setErrorLevel()
+    {
+        $this->orig_level = error_reporting();
+    }
+
+    /**
+     * @after
+     */
+    public function restoreErrorLevel()
+    {
+        error_reporting($this->orig_level);
+    }
 
     #########################################################
     # Test field accessors.
@@ -59,7 +88,7 @@ class GeneratedClassTest extends TestBase
         $this->assertSame(MIN_INT32, $m->getOptionalInt32());
 
         // Set float.
-        $m->setOptionalInt32(1.1);
+        @$m->setOptionalInt32(1.1);
         $this->assertSame(1, $m->getOptionalInt32());
         $m->setOptionalInt32(MAX_INT32_FLOAT);
         $this->assertSame(MAX_INT32, $m->getOptionalInt32());
@@ -69,7 +98,7 @@ class GeneratedClassTest extends TestBase
         // Set string.
         $m->setOptionalInt32('2');
         $this->assertSame(2, $m->getOptionalInt32());
-        $m->setOptionalInt32('3.1');
+        @$m->setOptionalInt32('3.1');
         $this->assertSame(3, $m->getOptionalInt32());
         $m->setOptionalInt32(MAX_INT32_STRING);
         $this->assertSame(MAX_INT32, $m->getOptionalInt32());
@@ -104,6 +133,113 @@ class GeneratedClassTest extends TestBase
         $this->assertSame(4, $deprecationCount);
     }
 
+    public function testDeprecatedFieldGetterDoesNotThrowWarning()
+    {
+        // temporarily change error handler to capture the deprecated errors
+        $deprecationCount = 0;
+        set_error_handler(function ($errno, $errstr) use (&$deprecationCount) {
+            if (false !== strpos($errstr, ' is deprecated.')) {
+                $deprecationCount++;
+            }
+        }, E_USER_DEPRECATED);
+
+        // does not throw warning
+        $message = new TestMessage();
+        $message->getDeprecatedInt32();
+        $message->getDeprecatedOptionalInt32();
+        $message->getDeprecatedInt32ValueUnwrapped(); // wrapped field
+        $message->getDeprecatedInt32Value(); // wrapped field
+        $message->getDeprecatedOneofInt32(); // oneof field
+        $message->getDeprecatedOneof(); // oneof field
+        $message->getDeprecatedRepeatedInt32(); // repeated field
+        $message->getDeprecatedMapInt32Int32(); // map field
+        $message->getDeprecatedAny(); // any field
+        $message->getDeprecatedMessage(); // message field
+        $message->getDeprecatedEnum(); // enum field
+
+        restore_error_handler();
+
+        $this->assertEquals(0, $deprecationCount);
+    }
+
+    public function testDeprecatedFieldSetterDoesNotThrowWarningForRepeatedAndMapFieldsWithEmptyArrays()
+    {
+        // temporarily change error handler to capture the deprecated errors
+        $deprecationCount = 0;
+        set_error_handler(function ($errno, $errstr) use (&$deprecationCount) {
+            if (false !== strpos($errstr, ' is deprecated.')) {
+                $deprecationCount++;
+            }
+        }, E_USER_DEPRECATED);
+
+
+        // This behavior exists because otherwise the deprecation is thrown on serializeToJsonString
+        $message = new TestMessage();
+        $message->setDeprecatedRepeatedInt32([]); // repeated field
+        $message->setDeprecatedMapInt32Int32([]); // map field
+
+        restore_error_handler();
+
+        $this->assertEquals(0, $deprecationCount);
+    }
+
+    public function testDeprecatedFieldGetterThrowsWarningWithValue()
+    {
+        $message = new TestMessage([
+            'deprecated_int32' => 1,
+            'deprecated_optional_int32' => 1,
+            'deprecated_int32_value' => new \Google\Protobuf\Int32Value(['value' => 1]),
+            'deprecated_oneof_int32' => 1,
+            'deprecated_repeated_int32' => [1],
+            'deprecated_map_int32_int32' => [1 => 1],
+            'deprecated_any' => new \Google\Protobuf\Any(['type_url' => 'foo', 'value' => 'bar']),
+            'deprecated_message' => new TestMessage(),
+            'deprecated_enum' => 1,
+        ]);
+
+        // temporarily change error handler to capture the deprecated errors
+        $deprecationCount = 0;
+        set_error_handler(function ($errno, $errstr) use (&$deprecationCount) {
+            if (false !== strpos($errstr, ' is deprecated.')) {
+                $deprecationCount++;
+            }
+        }, E_USER_DEPRECATED);
+
+        $message->getDeprecatedInt32();
+        $message->getDeprecatedOptionalInt32();
+        $message->getDeprecatedInt32ValueUnwrapped(); // wrapped field unwrapped
+        $message->getDeprecatedInt32Value(); // wrapped field
+        $message->getDeprecatedOneofInt32(); // oneof field
+        $message->getDeprecatedRepeatedInt32(); // repeated field
+        $message->getDeprecatedMapInt32Int32(); // map field
+        $message->getDeprecatedAny(); // any field
+        $message->getDeprecatedMessage(); // message field
+        $message->getDeprecatedEnum(); // enum field
+
+        // oneof field (should never warn)
+        $message->getDeprecatedOneof();
+
+        restore_error_handler();
+
+        $this->assertEquals(10, $deprecationCount);
+    }
+
+    public function testDeprecatedFieldWarningsOnSerialize()
+    {
+        set_error_handler(function ($errno, $errstr) {
+            if (false !== strpos($errstr, ' is deprecated.')) {
+                throw new \Exception($errstr);
+            }
+        }, E_USER_DEPRECATED);
+
+        $message = new TestMessage();
+        $message->serializeToJsonString();
+
+        restore_error_handler();
+
+        $this->assertTrue(true, 'No deprecation warning on serialize');
+    }
+
     #########################################################
     # Test optional int32 field.
     #########################################################
@@ -135,18 +271,24 @@ class GeneratedClassTest extends TestBase
         $m = new TestMessage();
 
         // Set integer.
-        $m->setOptionalUint32(MAX_UINT32);
-        $this->assertSame(-1, $m->getOptionalUint32());
+        if (PHP_INT_SIZE !== 4) {
+            // 32-bit systems throw "TypeError: Argument #1 must be of type int, float given"
+            $m->setOptionalUint32(MAX_UINT32);
+            $this->assertSame(-1, $m->getOptionalUint32());
+        }
         $m->setOptionalUint32(-1);
         $this->assertSame(-1, $m->getOptionalUint32());
         $m->setOptionalUint32(MIN_UINT32);
         $this->assertSame(MIN_INT32, $m->getOptionalUint32());
 
         // Set float.
-        $m->setOptionalUint32(1.1);
+        @$m->setOptionalUint32(1.1);
         $this->assertSame(1, $m->getOptionalUint32());
-        $m->setOptionalUint32(MAX_UINT32_FLOAT);
-        $this->assertSame(-1, $m->getOptionalUint32());
+        if (PHP_INT_SIZE !== 4) {
+            // 32-bit systems throw "TypeError: Argument #1 must be of type int, float given"
+            $m->setOptionalUint32(MAX_UINT32_FLOAT);
+            $this->assertSame(-1, $m->getOptionalUint32());
+        }
         $m->setOptionalUint32(-1.0);
         $this->assertSame(-1, $m->getOptionalUint32());
         $m->setOptionalUint32(MIN_UINT32_FLOAT);
@@ -155,10 +297,13 @@ class GeneratedClassTest extends TestBase
         // Set string.
         $m->setOptionalUint32('2');
         $this->assertSame(2, $m->getOptionalUint32());
-        $m->setOptionalUint32('3.1');
+        @$m->setOptionalUint32('3.1');
         $this->assertSame(3, $m->getOptionalUint32());
-        $m->setOptionalUint32(MAX_UINT32_STRING);
-        $this->assertSame(-1, $m->getOptionalUint32());
+        if (PHP_INT_SIZE !== 4) {
+            // 32-bit systems throw "TypeError: Argument #1 must be of type int, float given"
+            $m->setOptionalUint32(MAX_UINT32_STRING);
+            $this->assertSame(-1, $m->getOptionalUint32());
+        }
         $m->setOptionalUint32('-1.0');
         $this->assertSame(-1, $m->getOptionalUint32());
         $m->setOptionalUint32(MIN_UINT32_STRING);
@@ -180,7 +325,7 @@ class GeneratedClassTest extends TestBase
         $this->assertEquals(MIN_INT64, $m->getOptionalInt64());
 
         // Set float.
-        $m->setOptionalInt64(1.1);
+        @$m->setOptionalInt64(1.1);
         if (PHP_INT_SIZE == 4) {
             $this->assertSame('1', $m->getOptionalInt64());
         } else {
@@ -234,7 +379,7 @@ class GeneratedClassTest extends TestBase
         }
 
         // Set float.
-        $m->setOptionalUint64(1.1);
+        @$m->setOptionalUint64(1.1);
         if (PHP_INT_SIZE == 4) {
             $this->assertSame('1', $m->getOptionalUint64());
         } else {
@@ -281,7 +426,7 @@ class GeneratedClassTest extends TestBase
         $this->assertEquals(TestEnum::ONE, $m->getOptionalEnum());
 
         // Set float.
-        $m->setOptionalEnum(1.1);
+        @$m->setOptionalEnum(1.1);
         $this->assertEquals(TestEnum::ONE, $m->getOptionalEnum());
 
         // Set string.
@@ -291,6 +436,10 @@ class GeneratedClassTest extends TestBase
         // Test Enum methods
         $this->assertEquals('ONE', TestEnum::name(1));
         $this->assertEquals(1, TestEnum::value('ONE'));
+        $this->assertEquals('ECHO', TestEnum::name(3));
+        $this->assertEquals(3, TestEnum::value('ECHO'));
+        // Backwards compat value lookup by prefixed-name.
+        $this->assertEquals(3, TestEnum::value('PBECHO'));
     }
 
     public function testInvalidEnumValueThrowsException()
@@ -318,24 +467,6 @@ class GeneratedClassTest extends TestBase
         $this->assertTrue(true);
     }
 
-    public function testLegacyNestedEnum()
-    {
-        $m = new TestMessage();
-        $m->setOptionalNestedEnum(\Foo\TestMessage_NestedEnum::ZERO);
-        $this->assertTrue(true);
-    }
-
-    public function testLegacyTypehintWithNestedEnums()
-    {
-        $this->legacyEnum(new TestLegacyMessage\NestedEnum);
-    }
-
-    private function legacyEnum(TestLegacyMessage_NestedEnum $enum)
-    {
-        // If we made it here without a PHP Fatal error, the typehint worked
-        $this->assertTrue(true);
-    }
-
     #########################################################
     # Test float field.
     #########################################################
@@ -346,17 +477,17 @@ class GeneratedClassTest extends TestBase
 
         // Set integer.
         $m->setOptionalFloat(1);
-        $this->assertFloatEquals(1.0, $m->getOptionalFloat(), MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.0, $m->getOptionalFloat(), MAX_FLOAT_DIFF);
 
         // Set float.
         $m->setOptionalFloat(1.1);
-        $this->assertFloatEquals(1.1, $m->getOptionalFloat(), MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.1, $m->getOptionalFloat(), MAX_FLOAT_DIFF);
 
         // Set string.
         $m->setOptionalFloat('2');
-        $this->assertFloatEquals(2.0, $m->getOptionalFloat(), MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(2.0, $m->getOptionalFloat(), MAX_FLOAT_DIFF);
         $m->setOptionalFloat('3.1');
-        $this->assertFloatEquals(3.1, $m->getOptionalFloat(), MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(3.1, $m->getOptionalFloat(), MAX_FLOAT_DIFF);
     }
 
     #########################################################
@@ -369,17 +500,17 @@ class GeneratedClassTest extends TestBase
 
         // Set integer.
         $m->setOptionalDouble(1);
-        $this->assertFloatEquals(1.0, $m->getOptionalDouble(), MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.0, $m->getOptionalDouble(), MAX_FLOAT_DIFF);
 
         // Set float.
         $m->setOptionalDouble(1.1);
-        $this->assertFloatEquals(1.1, $m->getOptionalDouble(), MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(1.1, $m->getOptionalDouble(), MAX_FLOAT_DIFF);
 
         // Set string.
         $m->setOptionalDouble('2');
-        $this->assertFloatEquals(2.0, $m->getOptionalDouble(), MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(2.0, $m->getOptionalDouble(), MAX_FLOAT_DIFF);
         $m->setOptionalDouble('3.1');
-        $this->assertFloatEquals(3.1, $m->getOptionalDouble(), MAX_FLOAT_DIFF);
+        $this->assertEqualsWithDelta(3.1, $m->getOptionalDouble(), MAX_FLOAT_DIFF);
     }
 
     #########################################################
@@ -405,6 +536,55 @@ class GeneratedClassTest extends TestBase
         // Set string.
         $m->setOptionalBool('');
         $this->assertSame(false, $m->getOptionalBool());
+    }
+
+    public function testBoolFromDoubleArrayConstructor()
+    {
+        $m = new TestMessage(['optional_bool' => -0.0]);
+        $this->assertFalse($m->getOptionalBool());
+
+        $m = new TestMessage(['optional_bool' => 0.0]);
+        $this->assertFalse($m->getOptionalBool());
+
+        $m = new TestMessage(['optional_bool' => 1.5]);
+        $this->assertTrue($m->getOptionalBool());
+
+        // Currently this generates a warning so we suppress it. In PHP 9, this will be promoted to an error and the test should be removed.
+        // https://wiki.php.net/rfc/warnings-php-8-5#coercing_nan_to_other_types
+        error_reporting($this->orig_level & ~E_WARNING);
+        $m = new TestMessage(['optional_bool' => NAN]);
+        $this->assertTrue($m->getOptionalBool());
+        error_reporting($this->orig_level);
+
+        $m = new TestMessage(['optional_bool' => INF]);
+        $this->assertTrue($m->getOptionalBool());
+
+        $m = new TestMessage(['optional_bool' => -INF]);
+        $this->assertTrue($m->getOptionalBool());
+    }
+
+    public function testRepeatedBoolFromDouble()
+    {
+        $m  = new TestMessage();
+        $rf = $m->getRepeatedBool();
+
+        $rf[] = -0.0;
+        $rf[] = 0.0;
+        $rf[] = 1.5;
+        // Currently this generates a warning so we suppress it. In PHP 9, this will be promoted to an error and the test should be removed.
+        // https://wiki.php.net/rfc/warnings-php-8-5#coercing_nan_to_other_types
+        error_reporting($this->orig_level & ~E_WARNING);
+        $rf[] = NAN;
+        error_reporting($this->orig_level);
+        $rf[] = INF;
+        $rf[] = -INF;
+
+        $this->assertFalse($rf[0]);
+        $this->assertFalse($rf[1]);
+        $this->assertTrue($rf[2]);
+        $this->assertTrue($rf[3]);
+        $this->assertTrue($rf[4]);
+        $this->assertTrue($rf[5]);
     }
 
     #########################################################
@@ -433,6 +613,19 @@ class GeneratedClassTest extends TestBase
     }
 
     #########################################################
+    # Test invalid UTF-8
+    #########################################################
+
+    public function testInvalidUtf8StringFails()
+    {
+        $m = new TestMessage();
+
+        // Invalid UTF-8 is rejected.
+        $this->expectException(Exception::class);
+        $m->setOptionalString("\xff");
+    }
+
+    #########################################################
     # Test bytes field.
     #########################################################
 
@@ -457,13 +650,12 @@ class GeneratedClassTest extends TestBase
         $this->assertSame('1', $m->getOptionalBytes());
     }
 
-      public function testBytesFieldInvalidUTF8Success()
-      {
-          $m = new TestMessage();
-          $hex = hex2bin("ff");
-          $m->setOptionalBytes($hex);
-          $this->assertTrue(true);
-      }
+    public function testBytesFieldInvalidUTF8Success()
+    {
+        $m = new TestMessage();
+        $m->setOptionalBytes("\xff");
+        $this->assertSame("\xff", $m->getOptionalBytes());
+    }
 
     #########################################################
     # Test message field.
@@ -485,31 +677,6 @@ class GeneratedClassTest extends TestBase
         $m->setOptionalMessage($null);
         $this->assertNull($m->getOptionalMessage());
         $this->assertFalse($m->hasOptionalMessage());
-    }
-
-    public function testLegacyMessageField()
-    {
-        $m = new TestMessage();
-
-        $sub_m = new TestMessage_Sub();
-        $sub_m->setA(1);
-        $m->setOptionalMessage($sub_m);
-        $this->assertSame(1, $m->getOptionalMessage()->getA());
-
-        $null = null;
-        $m->setOptionalMessage($null);
-        $this->assertNull($m->getOptionalMessage());
-    }
-
-    public function testLegacyTypehintWithNestedMessages()
-    {
-        $this->legacyMessage(new TestLegacyMessage\NestedMessage);
-    }
-
-    private function legacyMessage(TestLegacyMessage_NestedMessage $sub)
-    {
-        // If we made it here without a PHP Fatal error, the typehint worked
-        $this->assertTrue(true);
     }
 
     #########################################################
@@ -536,7 +703,7 @@ class GeneratedClassTest extends TestBase
         $arr = array(1, 2.1, "3");
         $m->setRepeatedInt32($arr);
         $this->assertTrue($m->getRepeatedInt32() instanceof RepeatedField);
-        $this->assertSame("Google\Protobuf\Internal\RepeatedField",
+        $this->assertSame("Google\Protobuf\RepeatedField",
                           get_class($m->getRepeatedInt32()));
         $this->assertSame(3, count($m->getRepeatedInt32()));
         $this->assertSame(1, $m->getRepeatedInt32()[0]);
@@ -827,7 +994,7 @@ class GeneratedClassTest extends TestBase
         $this->assertSame(TestNamespace\NestedEnum::ZERO, $m->getNestedEnum());
     }
 
-    public function testMesssagesAndEnumsWithEmptyPhpNamespace()
+    public function testMessagesAndEnumsWithEmptyPhpNamespace()
     {
         $m = new TestEmptyNamespace();
         $n = new TestEmptyNamespace\NestedMessage();
@@ -884,10 +1051,13 @@ class GeneratedClassTest extends TestBase
         $m = new \PrefixEmpty();
         $m = new \Foo\PBARRAY();
 
+        // BEGIN RESERVED NAMES
+        // @see php/update_reserved_words.sh - DO NOT MODIFY THIS LIST MANUALLY
         $m = new \Lower\PBabstract();
         $m = new \Lower\PBand();
         $m = new \Lower\PBarray();
         $m = new \Lower\PBas();
+        $m = new \Lower\PBbool();
         $m = new \Lower\PBbreak();
         $m = new \Lower\PBcallable();
         $m = new \Lower\PBcase();
@@ -913,8 +1083,10 @@ class GeneratedClassTest extends TestBase
         $m = new \Lower\PBeval();
         $m = new \Lower\PBexit();
         $m = new \Lower\PBextends();
+        $m = new \Lower\PBfalse();
         $m = new \Lower\PBfinal();
         $m = new \Lower\PBfinally();
+        $m = new \Lower\PBfloat();
         $m = new \Lower\PBfn();
         $m = new \Lower\PBfor();
         $m = new \Lower\PBforeach();
@@ -927,47 +1099,49 @@ class GeneratedClassTest extends TestBase
         $m = new \Lower\PBinclude_once();
         $m = new \Lower\PBinstanceof();
         $m = new \Lower\PBinsteadof();
+        $m = new \Lower\PBint();
         $m = new \Lower\PBinterface();
         $m = new \Lower\PBisset();
+        $m = new \Lower\PBiterable();
         $m = new \Lower\PBlist();
         $m = new \Lower\PBmatch();
+        $m = new \Lower\PBmixed();
         $m = new \Lower\PBnamespace();
+        $m = new \Lower\PBnever();
         $m = new \Lower\PBnew();
+        $m = new \Lower\PBnull();
+        $m = new \Lower\PBobject();
         $m = new \Lower\PBor();
         $m = new \Lower\PBparent();
         $m = new \Lower\PBprint();
         $m = new \Lower\PBprivate();
         $m = new \Lower\PBprotected();
         $m = new \Lower\PBpublic();
+        $m = new \Lower\PBreadonly();
         $m = new \Lower\PBrequire();
         $m = new \Lower\PBrequire_once();
         $m = new \Lower\PBreturn();
         $m = new \Lower\PBself();
         $m = new \Lower\PBstatic();
+        $m = new \Lower\PBstring();
         $m = new \Lower\PBswitch();
         $m = new \Lower\PBthrow();
         $m = new \Lower\PBtrait();
+        $m = new \Lower\PBtrue();
         $m = new \Lower\PBtry();
         $m = new \Lower\PBunset();
         $m = new \Lower\PBuse();
         $m = new \Lower\PBvar();
+        $m = new \Lower\PBvoid();
         $m = new \Lower\PBwhile();
         $m = new \Lower\PBxor();
         $m = new \Lower\PByield();
-        $m = new \Lower\PBint();
-        $m = new \Lower\PBfloat();
-        $m = new \Lower\PBbool();
-        $m = new \Lower\PBstring();
-        $m = new \Lower\PBtrue();
-        $m = new \Lower\PBfalse();
-        $m = new \Lower\PBnull();
-        $m = new \Lower\PBvoid();
-        $m = new \Lower\PBiterable();
 
         $m = new \Upper\PBABSTRACT();
         $m = new \Upper\PBAND();
         $m = new \Upper\PBARRAY();
         $m = new \Upper\PBAS();
+        $m = new \Upper\PBBOOL();
         $m = new \Upper\PBBREAK();
         $m = new \Upper\PBCALLABLE();
         $m = new \Upper\PBCASE();
@@ -993,8 +1167,10 @@ class GeneratedClassTest extends TestBase
         $m = new \Upper\PBEVAL();
         $m = new \Upper\PBEXIT();
         $m = new \Upper\PBEXTENDS();
+        $m = new \Upper\PBFALSE();
         $m = new \Upper\PBFINAL();
         $m = new \Upper\PBFINALLY();
+        $m = new \Upper\PBFLOAT();
         $m = new \Upper\PBFN();
         $m = new \Upper\PBFOR();
         $m = new \Upper\PBFOREACH();
@@ -1007,47 +1183,49 @@ class GeneratedClassTest extends TestBase
         $m = new \Upper\PBINCLUDE_ONCE();
         $m = new \Upper\PBINSTANCEOF();
         $m = new \Upper\PBINSTEADOF();
+        $m = new \Upper\PBINT();
         $m = new \Upper\PBINTERFACE();
         $m = new \Upper\PBISSET();
+        $m = new \Upper\PBITERABLE();
         $m = new \Upper\PBLIST();
         $m = new \Upper\PBMATCH();
+        $m = new \Upper\PBMIXED();
         $m = new \Upper\PBNAMESPACE();
+        $m = new \Upper\PBNEVER();
         $m = new \Upper\PBNEW();
+        $m = new \Upper\PBNULL();
+        $m = new \Upper\PBOBJECT();
         $m = new \Upper\PBOR();
         $m = new \Upper\PBPARENT();
         $m = new \Upper\PBPRINT();
         $m = new \Upper\PBPRIVATE();
         $m = new \Upper\PBPROTECTED();
         $m = new \Upper\PBPUBLIC();
+        $m = new \Upper\PBREADONLY();
         $m = new \Upper\PBREQUIRE();
         $m = new \Upper\PBREQUIRE_ONCE();
         $m = new \Upper\PBRETURN();
         $m = new \Upper\PBSELF();
         $m = new \Upper\PBSTATIC();
+        $m = new \Upper\PBSTRING();
         $m = new \Upper\PBSWITCH();
         $m = new \Upper\PBTHROW();
         $m = new \Upper\PBTRAIT();
+        $m = new \Upper\PBTRUE();
         $m = new \Upper\PBTRY();
         $m = new \Upper\PBUNSET();
         $m = new \Upper\PBUSE();
         $m = new \Upper\PBVAR();
+        $m = new \Upper\PBVOID();
         $m = new \Upper\PBWHILE();
         $m = new \Upper\PBXOR();
         $m = new \Upper\PBYIELD();
-        $m = new \Upper\PBINT();
-        $m = new \Upper\PBFLOAT();
-        $m = new \Upper\PBBOOL();
-        $m = new \Upper\PBSTRING();
-        $m = new \Upper\PBTRUE();
-        $m = new \Upper\PBFALSE();
-        $m = new \Upper\PBNULL();
-        $m = new \Upper\PBVOID();
-        $m = new \Upper\PBITERABLE();
 
         $m = new \Lower_enum\PBabstract();
         $m = new \Lower_enum\PBand();
         $m = new \Lower_enum\PBarray();
         $m = new \Lower_enum\PBas();
+        $m = new \Lower_enum\PBbool();
         $m = new \Lower_enum\PBbreak();
         $m = new \Lower_enum\PBcallable();
         $m = new \Lower_enum\PBcase();
@@ -1073,8 +1251,10 @@ class GeneratedClassTest extends TestBase
         $m = new \Lower_enum\PBeval();
         $m = new \Lower_enum\PBexit();
         $m = new \Lower_enum\PBextends();
+        $m = new \Lower_enum\PBfalse();
         $m = new \Lower_enum\PBfinal();
         $m = new \Lower_enum\PBfinally();
+        $m = new \Lower_enum\PBfloat();
         $m = new \Lower_enum\PBfn();
         $m = new \Lower_enum\PBfor();
         $m = new \Lower_enum\PBforeach();
@@ -1087,47 +1267,49 @@ class GeneratedClassTest extends TestBase
         $m = new \Lower_enum\PBinclude_once();
         $m = new \Lower_enum\PBinstanceof();
         $m = new \Lower_enum\PBinsteadof();
+        $m = new \Lower_enum\PBint();
         $m = new \Lower_enum\PBinterface();
         $m = new \Lower_enum\PBisset();
+        $m = new \Lower_enum\PBiterable();
         $m = new \Lower_enum\PBlist();
         $m = new \Lower_enum\PBmatch();
+        $m = new \Lower_enum\PBmixed();
         $m = new \Lower_enum\PBnamespace();
+        $m = new \Lower_enum\PBnever();
         $m = new \Lower_enum\PBnew();
+        $m = new \Lower_enum\PBnull();
+        $m = new \Lower_enum\PBobject();
         $m = new \Lower_enum\PBor();
         $m = new \Lower_enum\PBparent();
         $m = new \Lower_enum\PBprint();
         $m = new \Lower_enum\PBprivate();
         $m = new \Lower_enum\PBprotected();
         $m = new \Lower_enum\PBpublic();
+        $m = new \Lower_enum\PBreadonly();
         $m = new \Lower_enum\PBrequire();
         $m = new \Lower_enum\PBrequire_once();
         $m = new \Lower_enum\PBreturn();
         $m = new \Lower_enum\PBself();
         $m = new \Lower_enum\PBstatic();
+        $m = new \Lower_enum\PBstring();
         $m = new \Lower_enum\PBswitch();
         $m = new \Lower_enum\PBthrow();
         $m = new \Lower_enum\PBtrait();
+        $m = new \Lower_enum\PBtrue();
         $m = new \Lower_enum\PBtry();
         $m = new \Lower_enum\PBunset();
         $m = new \Lower_enum\PBuse();
         $m = new \Lower_enum\PBvar();
+        $m = new \Lower_enum\PBvoid();
         $m = new \Lower_enum\PBwhile();
         $m = new \Lower_enum\PBxor();
         $m = new \Lower_enum\PByield();
-        $m = new \Lower_enum\PBint();
-        $m = new \Lower_enum\PBfloat();
-        $m = new \Lower_enum\PBbool();
-        $m = new \Lower_enum\PBstring();
-        $m = new \Lower_enum\PBtrue();
-        $m = new \Lower_enum\PBfalse();
-        $m = new \Lower_enum\PBnull();
-        $m = new \Lower_enum\PBvoid();
-        $m = new \Lower_enum\PBiterable();
 
         $m = new \Upper_enum\PBABSTRACT();
         $m = new \Upper_enum\PBAND();
         $m = new \Upper_enum\PBARRAY();
         $m = new \Upper_enum\PBAS();
+        $m = new \Upper_enum\PBBOOL();
         $m = new \Upper_enum\PBBREAK();
         $m = new \Upper_enum\PBCALLABLE();
         $m = new \Upper_enum\PBCASE();
@@ -1153,8 +1335,10 @@ class GeneratedClassTest extends TestBase
         $m = new \Upper_enum\PBEVAL();
         $m = new \Upper_enum\PBEXIT();
         $m = new \Upper_enum\PBEXTENDS();
+        $m = new \Upper_enum\PBFALSE();
         $m = new \Upper_enum\PBFINAL();
         $m = new \Upper_enum\PBFINALLY();
+        $m = new \Upper_enum\PBFLOAT();
         $m = new \Upper_enum\PBFN();
         $m = new \Upper_enum\PBFOR();
         $m = new \Upper_enum\PBFOREACH();
@@ -1167,47 +1351,49 @@ class GeneratedClassTest extends TestBase
         $m = new \Upper_enum\PBINCLUDE_ONCE();
         $m = new \Upper_enum\PBINSTANCEOF();
         $m = new \Upper_enum\PBINSTEADOF();
+        $m = new \Upper_enum\PBINT();
         $m = new \Upper_enum\PBINTERFACE();
         $m = new \Upper_enum\PBISSET();
+        $m = new \Upper_enum\PBITERABLE();
         $m = new \Upper_enum\PBLIST();
         $m = new \Upper_enum\PBMATCH();
+        $m = new \Upper_enum\PBMIXED();
         $m = new \Upper_enum\PBNAMESPACE();
+        $m = new \Upper_enum\PBNEVER();
         $m = new \Upper_enum\PBNEW();
+        $m = new \Upper_enum\PBNULL();
+        $m = new \Upper_enum\PBOBJECT();
         $m = new \Upper_enum\PBOR();
         $m = new \Upper_enum\PBPARENT();
         $m = new \Upper_enum\PBPRINT();
         $m = new \Upper_enum\PBPRIVATE();
         $m = new \Upper_enum\PBPROTECTED();
         $m = new \Upper_enum\PBPUBLIC();
+        $m = new \Upper_enum\PBREADONLY();
         $m = new \Upper_enum\PBREQUIRE();
         $m = new \Upper_enum\PBREQUIRE_ONCE();
         $m = new \Upper_enum\PBRETURN();
         $m = new \Upper_enum\PBSELF();
         $m = new \Upper_enum\PBSTATIC();
+        $m = new \Upper_enum\PBSTRING();
         $m = new \Upper_enum\PBSWITCH();
         $m = new \Upper_enum\PBTHROW();
         $m = new \Upper_enum\PBTRAIT();
+        $m = new \Upper_enum\PBTRUE();
         $m = new \Upper_enum\PBTRY();
         $m = new \Upper_enum\PBUNSET();
         $m = new \Upper_enum\PBUSE();
         $m = new \Upper_enum\PBVAR();
+        $m = new \Upper_enum\PBVOID();
         $m = new \Upper_enum\PBWHILE();
         $m = new \Upper_enum\PBXOR();
         $m = new \Upper_enum\PBYIELD();
-        $m = new \Upper_enum\PBINT();
-        $m = new \Upper_enum\PBFLOAT();
-        $m = new \Upper_enum\PBBOOL();
-        $m = new \Upper_enum\PBSTRING();
-        $m = new \Upper_enum\PBTRUE();
-        $m = new \Upper_enum\PBFALSE();
-        $m = new \Upper_enum\PBNULL();
-        $m = new \Upper_enum\PBVOID();
-        $m = new \Upper_enum\PBITERABLE();
 
         $m = \Lower_enum_value\NotAllowed::PBabstract;
         $m = \Lower_enum_value\NotAllowed::PBand;
         $m = \Lower_enum_value\NotAllowed::PBarray;
         $m = \Lower_enum_value\NotAllowed::PBas;
+        $m = \Lower_enum_value\NotAllowed::bool;
         $m = \Lower_enum_value\NotAllowed::PBbreak;
         $m = \Lower_enum_value\NotAllowed::PBcallable;
         $m = \Lower_enum_value\NotAllowed::PBcase;
@@ -1233,8 +1419,10 @@ class GeneratedClassTest extends TestBase
         $m = \Lower_enum_value\NotAllowed::PBeval;
         $m = \Lower_enum_value\NotAllowed::PBexit;
         $m = \Lower_enum_value\NotAllowed::PBextends;
+        $m = \Lower_enum_value\NotAllowed::false;
         $m = \Lower_enum_value\NotAllowed::PBfinal;
         $m = \Lower_enum_value\NotAllowed::PBfinally;
+        $m = \Lower_enum_value\NotAllowed::float;
         $m = \Lower_enum_value\NotAllowed::PBfn;
         $m = \Lower_enum_value\NotAllowed::PBfor;
         $m = \Lower_enum_value\NotAllowed::PBforeach;
@@ -1247,47 +1435,49 @@ class GeneratedClassTest extends TestBase
         $m = \Lower_enum_value\NotAllowed::PBinclude_once;
         $m = \Lower_enum_value\NotAllowed::PBinstanceof;
         $m = \Lower_enum_value\NotAllowed::PBinsteadof;
+        $m = \Lower_enum_value\NotAllowed::int;
         $m = \Lower_enum_value\NotAllowed::PBinterface;
         $m = \Lower_enum_value\NotAllowed::PBisset;
+        $m = \Lower_enum_value\NotAllowed::iterable;
         $m = \Lower_enum_value\NotAllowed::PBlist;
         $m = \Lower_enum_value\NotAllowed::PBmatch;
+        $m = \Lower_enum_value\NotAllowed::mixed;
         $m = \Lower_enum_value\NotAllowed::PBnamespace;
+        $m = \Lower_enum_value\NotAllowed::never;
         $m = \Lower_enum_value\NotAllowed::PBnew;
+        $m = \Lower_enum_value\NotAllowed::null;
+        $m = \Lower_enum_value\NotAllowed::object;
         $m = \Lower_enum_value\NotAllowed::PBor;
+        $m = \Lower_enum_value\NotAllowed::parent;
         $m = \Lower_enum_value\NotAllowed::PBprint;
         $m = \Lower_enum_value\NotAllowed::PBprivate;
         $m = \Lower_enum_value\NotAllowed::PBprotected;
         $m = \Lower_enum_value\NotAllowed::PBpublic;
+        $m = \Lower_enum_value\NotAllowed::readonly;
         $m = \Lower_enum_value\NotAllowed::PBrequire;
         $m = \Lower_enum_value\NotAllowed::PBrequire_once;
         $m = \Lower_enum_value\NotAllowed::PBreturn;
+        $m = \Lower_enum_value\NotAllowed::self;
         $m = \Lower_enum_value\NotAllowed::PBstatic;
+        $m = \Lower_enum_value\NotAllowed::string;
         $m = \Lower_enum_value\NotAllowed::PBswitch;
         $m = \Lower_enum_value\NotAllowed::PBthrow;
         $m = \Lower_enum_value\NotAllowed::PBtrait;
+        $m = \Lower_enum_value\NotAllowed::true;
         $m = \Lower_enum_value\NotAllowed::PBtry;
         $m = \Lower_enum_value\NotAllowed::PBunset;
         $m = \Lower_enum_value\NotAllowed::PBuse;
         $m = \Lower_enum_value\NotAllowed::PBvar;
+        $m = \Lower_enum_value\NotAllowed::void;
         $m = \Lower_enum_value\NotAllowed::PBwhile;
         $m = \Lower_enum_value\NotAllowed::PBxor;
         $m = \Lower_enum_value\NotAllowed::PByield;
-        $m = \Lower_enum_value\NotAllowed::int;
-        $m = \Lower_enum_value\NotAllowed::float;
-        $m = \Lower_enum_value\NotAllowed::bool;
-        $m = \Lower_enum_value\NotAllowed::string;
-        $m = \Lower_enum_value\NotAllowed::true;
-        $m = \Lower_enum_value\NotAllowed::false;
-        $m = \Lower_enum_value\NotAllowed::null;
-        $m = \Lower_enum_value\NotAllowed::void;
-        $m = \Lower_enum_value\NotAllowed::iterable;
-        $m = \Lower_enum_value\NotAllowed::parent;
-        $m = \Lower_enum_value\NotAllowed::self;
 
         $m = \Upper_enum_value\NotAllowed::PBABSTRACT;
         $m = \Upper_enum_value\NotAllowed::PBAND;
         $m = \Upper_enum_value\NotAllowed::PBARRAY;
         $m = \Upper_enum_value\NotAllowed::PBAS;
+        $m = \Upper_enum_value\NotAllowed::BOOL;
         $m = \Upper_enum_value\NotAllowed::PBBREAK;
         $m = \Upper_enum_value\NotAllowed::PBCALLABLE;
         $m = \Upper_enum_value\NotAllowed::PBCASE;
@@ -1313,8 +1503,10 @@ class GeneratedClassTest extends TestBase
         $m = \Upper_enum_value\NotAllowed::PBEVAL;
         $m = \Upper_enum_value\NotAllowed::PBEXIT;
         $m = \Upper_enum_value\NotAllowed::PBEXTENDS;
+        $m = \Upper_enum_value\NotAllowed::FALSE;
         $m = \Upper_enum_value\NotAllowed::PBFINAL;
         $m = \Upper_enum_value\NotAllowed::PBFINALLY;
+        $m = \Upper_enum_value\NotAllowed::FLOAT;
         $m = \Upper_enum_value\NotAllowed::PBFN;
         $m = \Upper_enum_value\NotAllowed::PBFOR;
         $m = \Upper_enum_value\NotAllowed::PBFOREACH;
@@ -1327,42 +1519,44 @@ class GeneratedClassTest extends TestBase
         $m = \Upper_enum_value\NotAllowed::PBINCLUDE_ONCE;
         $m = \Upper_enum_value\NotAllowed::PBINSTANCEOF;
         $m = \Upper_enum_value\NotAllowed::PBINSTEADOF;
+        $m = \Upper_enum_value\NotAllowed::INT;
         $m = \Upper_enum_value\NotAllowed::PBINTERFACE;
         $m = \Upper_enum_value\NotAllowed::PBISSET;
+        $m = \Upper_enum_value\NotAllowed::ITERABLE;
         $m = \Upper_enum_value\NotAllowed::PBLIST;
         $m = \Upper_enum_value\NotAllowed::PBMATCH;
+        $m = \Upper_enum_value\NotAllowed::MIXED;
         $m = \Upper_enum_value\NotAllowed::PBNAMESPACE;
+        $m = \Upper_enum_value\NotAllowed::NEVER;
         $m = \Upper_enum_value\NotAllowed::PBNEW;
+        $m = \Upper_enum_value\NotAllowed::NULL;
+        $m = \Upper_enum_value\NotAllowed::OBJECT;
         $m = \Upper_enum_value\NotAllowed::PBOR;
+        $m = \Upper_enum_value\NotAllowed::PARENT;
         $m = \Upper_enum_value\NotAllowed::PBPRINT;
         $m = \Upper_enum_value\NotAllowed::PBPRIVATE;
         $m = \Upper_enum_value\NotAllowed::PBPROTECTED;
         $m = \Upper_enum_value\NotAllowed::PBPUBLIC;
+        $m = \Upper_enum_value\NotAllowed::READONLY;
         $m = \Upper_enum_value\NotAllowed::PBREQUIRE;
         $m = \Upper_enum_value\NotAllowed::PBREQUIRE_ONCE;
         $m = \Upper_enum_value\NotAllowed::PBRETURN;
+        $m = \Upper_enum_value\NotAllowed::SELF;
         $m = \Upper_enum_value\NotAllowed::PBSTATIC;
+        $m = \Upper_enum_value\NotAllowed::STRING;
         $m = \Upper_enum_value\NotAllowed::PBSWITCH;
         $m = \Upper_enum_value\NotAllowed::PBTHROW;
         $m = \Upper_enum_value\NotAllowed::PBTRAIT;
+        $m = \Upper_enum_value\NotAllowed::TRUE;
         $m = \Upper_enum_value\NotAllowed::PBTRY;
         $m = \Upper_enum_value\NotAllowed::PBUNSET;
         $m = \Upper_enum_value\NotAllowed::PBUSE;
         $m = \Upper_enum_value\NotAllowed::PBVAR;
+        $m = \Upper_enum_value\NotAllowed::VOID;
         $m = \Upper_enum_value\NotAllowed::PBWHILE;
         $m = \Upper_enum_value\NotAllowed::PBXOR;
         $m = \Upper_enum_value\NotAllowed::PBYIELD;
-        $m = \Upper_enum_value\NotAllowed::INT;
-        $m = \Upper_enum_value\NotAllowed::FLOAT;
-        $m = \Upper_enum_value\NotAllowed::BOOL;
-        $m = \Upper_enum_value\NotAllowed::STRING;
-        $m = \Upper_enum_value\NotAllowed::TRUE;
-        $m = \Upper_enum_value\NotAllowed::FALSE;
-        $m = \Upper_enum_value\NotAllowed::NULL;
-        $m = \Upper_enum_value\NotAllowed::VOID;
-        $m = \Upper_enum_value\NotAllowed::ITERABLE;
-        $m = \Upper_enum_value\NotAllowed::PARENT;
-        $m = \Upper_enum_value\NotAllowed::SELF;
+        // END RESERVED NAMES
 
         $this->assertTrue(true);
     }
@@ -1562,6 +1756,26 @@ class GeneratedClassTest extends TestBase
         ]);
 
         $this->assertTrue(true);
+    }
+
+    public function testOptionalValueConstructor()
+    {
+        $m = new TestMessage([
+            'optional_message' => new Sub([
+                'a' => 1
+            ]),
+            'true_optional_message' => null,
+            'repeated_message' => [
+                new Sub(['a' => 2]),
+                new Sub(['a' => 3])
+            ],
+        ]);
+
+        $this->assertFalse($m->hasTrueOptionalMessage());
+        $this->assertNull($m->getTrueOptionalMessage());
+
+        $this->assertEquals(1, $m->getOptionalMessage()->getA());
+        $this->assertCount(2, $m->getRepeatedMessage());
     }
 
     #########################################################
@@ -1840,6 +2054,38 @@ class GeneratedClassTest extends TestBase
         new TestMessage(['optional_int32' => $this->throwIntendedException()]);
     }
 
+    public function testNoSegfaultWithContructorBypass()
+    {
+        if (!extension_loaded('protobuf')) {
+            $this->markTestSkipped('PHP Protobuf extension is not loaded');
+        }
+
+        $this->expectException(Exception::class);
+        $this->expectExceptionMessage(
+            "Couldn't find descriptor. " .
+            "The message constructor was likely bypassed, resulting in an uninitialized descriptor."
+        );
+
+        $m = new TestMessageMockProxy(['optional_int32' => 123]);
+
+        /**
+         * At this point the message constructor was bypassed and the descriptor is not initialized.
+         * This is a common PHP pattern where a proxy/mock class extends a concrete class,
+         * frequently used in frameworks like PHPUnit, phpspec, and Mockery.
+         *
+         * When this happens, the message's internal descriptor is never initialized.
+         *
+         * Without proper handling, accessing properties via getters (like $this->getOptionalInt32())
+         * would cause the C extension to segfault when trying to access the uninitialized descriptor.
+         *
+         * Instead of segfaulting, we now detect this uninitialized state and throw an exception.
+         *
+         * See: https://github.com/protocolbuffers/protobuf/issues/19978
+         */
+
+        $m->getOptionalInt32();
+    }
+
     public function testNoExceptionWithVarDump()
     {
         $m = new Sub(['a' => 1]);
@@ -1870,5 +2116,26 @@ class GeneratedClassTest extends TestBase
         $this->assertEquals(8, $m->getId());
         $m->setVersion('1');
         $this->assertEquals(8, $m->getId());
+    }
+
+    public function testSpecialCharacters()
+    {
+        $reflectionMethod = new \ReflectionMethod(TestSpecialCharacters::class, 'getA');
+        $docComment = $reflectionMethod->getDocComment();
+        $commentLines = explode("\n", $docComment);
+        $this->assertEquals('/**', array_shift($commentLines));
+        $this->assertEquals('     */', array_pop($commentLines));
+        $docComment = implode("\n", $commentLines);
+        // test special characters
+        $this->assertStringContainsString(";,/?:&=+$-_.!~*'()", $docComment);
+        // test open doc comment
+        $this->assertStringContainsString('/*', $docComment);
+        // test escaped closed doc comment
+        $this->assertStringNotContainsString('*/', $docComment);
+        $this->assertStringContainsString('{@*}', $docComment);
+        // test escaped at-sign
+        $this->assertStringContainsString('\@foo', $docComment);
+        // test forwardslash on new line
+        $this->assertStringContainsString("* /\n", $docComment);
     }
 }

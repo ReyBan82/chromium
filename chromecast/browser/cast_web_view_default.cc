@@ -4,11 +4,11 @@
 
 #include "chromecast/browser/cast_web_view_default.h"
 
+#include <algorithm>
 #include <utility>
 
 #include "base/logging.h"
 #include "base/memory/ptr_util.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
 #include "chromecast/base/cast_features.h"
@@ -20,17 +20,19 @@
 #include "chromecast/browser/renderer_prelauncher.h"
 #include "chromecast/chromecast_buildflags.h"
 #include "chromecast/graphics/cast_screen.h"
+#include "content/public/browser/browser_context.h"
 #include "content/public/browser/media_capture_devices.h"
 #include "content/public/browser/media_session.h"
+#include "content/public/browser/permission_controller.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_view_host.h"
 #include "content/public/browser/render_widget_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/site_instance.h"
-#include "ipc/ipc_message.h"
 #include "net/base/net_errors.h"
-#include "third_party/blink/public/mojom/mediastream/media_stream.mojom-shared.h"
+#include "third_party/blink/public/common/permissions/permission_utils.h"
 #include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
+#include "third_party/blink/public/mojom/permissions/permission.mojom.h"
 #include "ui/display/display.h"
 #include "ui/display/screen.h"
 #include "url/gurl.h"
@@ -108,8 +110,7 @@ CastWebViewDefault::CastWebViewDefault(
 #if defined(USE_AURA)
   web_contents_->GetNativeView()->SetName(params_->activity_id);
   if (params_->force_720p_resolution) {
-    const auto primary_display =
-        display::Screen::GetScreen()->GetPrimaryDisplay();
+    const auto primary_display = display::Screen::Get()->GetPrimaryDisplay();
 
     // Force scale factor to 1.0 and screen bounds to 720p.
     // When performed prior to the creation of the web view this causes blink to
@@ -168,7 +169,9 @@ void CastWebViewDefault::CloseContents(content::WebContents* source) {
 
 content::WebContents* CastWebViewDefault::OpenURLFromTab(
     content::WebContents* source,
-    const content::OpenURLParams& params) {
+    const content::OpenURLParams& params,
+    base::OnceCallback<void(content::NavigationHandle&)>
+        navigation_handle_callback) {
   LOG(INFO) << "Change url: " << params.url;
   // If source is NULL which means current tab, use web_contents_ of this class.
   if (!source)
@@ -176,8 +179,13 @@ content::WebContents* CastWebViewDefault::OpenURLFromTab(
   DCHECK_EQ(source, web_contents_.get());
   // We don't want to create another web_contents. Load url only when source is
   // specified.
-  source->GetController().LoadURL(params.url, params.referrer,
-                                  params.transition, params.extra_headers);
+  content::NavigationController::LoadURLParams load_params(params);
+  auto navigation_handle =
+      source->GetController().LoadURLWithParams(load_params);
+
+  if (navigation_handle_callback && navigation_handle) {
+    std::move(navigation_handle_callback).Run(*navigation_handle);
+  }
   return source;
 }
 
@@ -188,14 +196,28 @@ void CastWebViewDefault::ActivateContents(content::WebContents* contents) {
 
 bool CastWebViewDefault::CheckMediaAccessPermission(
     content::RenderFrameHost* render_frame_host,
-    const GURL& security_origin,
+    const url::Origin& security_origin,
     blink::mojom::MediaStreamType type) {
   if (!chromecast::IsFeatureEnabled(kAllowUserMediaAccess) &&
       !params_->allow_media_access) {
     LOG(WARNING) << __func__ << ": media access is disabled.";
     return false;
   }
-  return true;
+  if (!render_frame_host) {
+    return false;
+  }
+
+  auto permission_descriptor = blink::mojom::PermissionDescriptor::New();
+  permission_descriptor->name =
+      type == blink::mojom::MediaStreamType::DEVICE_AUDIO_CAPTURE
+          ? blink::mojom::PermissionName::AUDIO_CAPTURE
+          : blink::mojom::PermissionName::VIDEO_CAPTURE;
+
+  content::PermissionController* permission_controller =
+      web_contents_->GetBrowserContext()->GetPermissionController();
+  return permission_controller->GetPermissionStatusForCurrentDocument(
+             permission_descriptor, render_frame_host) ==
+         blink::mojom::PermissionStatus::GRANTED;
 }
 
 bool CastWebViewDefault::DidAddMessageToConsole(
@@ -209,7 +231,7 @@ bool CastWebViewDefault::DidAddMessageToConsole(
   std::u16string single_line_message;
   // Mult-line message is not friendly to dumpstate redact.
   base::ReplaceChars(message, u"\n", u"\\n ", &single_line_message);
-  logging::LogMessage("CONSOLE", line_no, ::logging::LOG_INFO).stream()
+  logging::LogMessage("CONSOLE", line_no, ::logging::LOGGING_INFO).stream()
       << params_->log_prefix << ": \"" << single_line_message
       << "\", source: " << source_id << " (" << line_no << ")";
   return true;
@@ -217,10 +239,10 @@ bool CastWebViewDefault::DidAddMessageToConsole(
 
 const blink::MediaStreamDevice* GetRequestedDeviceOrDefault(
     const blink::MediaStreamDevices& devices,
-    const std::string& requested_device_id) {
-  if (!requested_device_id.empty()) {
-    auto it = base::ranges::find(devices, requested_device_id,
-                                 &blink::MediaStreamDevice::id);
+    const std::vector<std::string>& requested_device_ids) {
+  if (!requested_device_ids.empty() && !requested_device_ids.front().empty()) {
+    auto it = std::ranges::find(devices, requested_device_ids.front(),
+                                &blink::MediaStreamDevice::id);
     return it != devices.end() ? &(*it) : nullptr;
   }
 
@@ -234,9 +256,22 @@ void CastWebViewDefault::RequestMediaAccessPermission(
     content::WebContents* web_contents,
     const content::MediaStreamRequest& request,
     content::MediaResponseCallback callback) {
-  if (!chromecast::IsFeatureEnabled(kAllowUserMediaAccess) &&
-      !params_->allow_media_access) {
-    LOG(WARNING) << __func__ << ": media access is disabled.";
+  content::RenderFrameHost* rfh = content::RenderFrameHost::FromID(
+      request.render_process_id, request.render_frame_id);
+  bool audio_allowed =
+      request.audio_type ==
+          blink::mojom::MediaStreamType::DEVICE_AUDIO_CAPTURE &&
+      CheckMediaAccessPermission(rfh,
+                                 url::Origin::Create(request.security_origin),
+                                 request.audio_type);
+  bool video_allowed =
+      request.video_type ==
+          blink::mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE &&
+      CheckMediaAccessPermission(rfh,
+                                 url::Origin::Create(request.security_origin),
+                                 request.video_type);
+  if (!audio_allowed && !video_allowed) {
+    LOG(WARNING) << __func__ << ": media access is denied.";
     std::move(callback).Run(
         blink::mojom::StreamDevicesSet(),
         blink::mojom::MediaStreamRequestResult::NOT_SUPPORTED,
@@ -255,10 +290,9 @@ void CastWebViewDefault::RequestMediaAccessPermission(
   stream_devices_set.stream_devices.emplace_back(
       blink::mojom::StreamDevices::New());
   blink::mojom::StreamDevices& devices = *stream_devices_set.stream_devices[0];
-  if (request.audio_type ==
-      blink::mojom::MediaStreamType::DEVICE_AUDIO_CAPTURE) {
+  if (audio_allowed) {
     const blink::MediaStreamDevice* device = GetRequestedDeviceOrDefault(
-        audio_devices, request.requested_audio_device_id);
+        audio_devices, request.requested_audio_device_ids);
     if (device) {
       DVLOG(1) << __func__ << "Using audio device: id=" << device->id
                << " name=" << device->name;
@@ -266,10 +300,9 @@ void CastWebViewDefault::RequestMediaAccessPermission(
     }
   }
 
-  if (request.video_type ==
-      blink::mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE) {
+  if (video_allowed) {
     const blink::MediaStreamDevice* device = GetRequestedDeviceOrDefault(
-        video_devices, request.requested_video_device_id);
+        video_devices, request.requested_video_device_ids);
     if (device) {
       DVLOG(1) << __func__ << "Using video device: id=" << device->id
                << " name=" << device->name;

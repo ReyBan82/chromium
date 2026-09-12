@@ -4,8 +4,6 @@
 
 #include "chrome/browser/ui/startup/credential_provider_signin_info_fetcher_win.h"
 
-#include "chrome/browser/ui/startup/credential_provider_signin_dialog_win_test_data.h"
-
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,8 +14,10 @@
 #include "base/strings/string_util.h"
 #include "base/test/bind.h"
 #include "base/test/task_environment.h"
+#include "chrome/browser/ui/startup/credential_provider_signin_dialog_win_test_data.h"
 #include "google_apis/gaia/gaia_urls.h"
 #include "google_apis/gaia/oauth2_access_token_fetcher_impl.h"
+#include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/weak_wrapper_shared_url_loader_factory.h"
 #include "services/network/public/mojom/early_hints.mojom.h"
 #include "services/network/public/mojom/url_response_head.mojom.h"
@@ -47,7 +47,7 @@ class CredentialProviderFetcherTest : public ::testing::Test {
   ~CredentialProviderFetcherTest() override;
 
   void OnFetchComplete(base::OnceClosure done_closure,
-                       base::Value::Dict fetch_result);
+                       base::DictValue fetch_result);
 
   void SetFakeResponses(const std::string& access_token_fetch_data,
                         net::HttpStatusCode access_token_fetch_code,
@@ -66,7 +66,7 @@ class CredentialProviderFetcherTest : public ::testing::Test {
   void RunFetcher(const std::string& additional_oauth_scopes);
 
   // Used for result verification
-  base::Value::Dict fetch_result_;
+  base::DictValue fetch_result_;
   CredentialProviderSigninDialogTestDataStorage test_data_storage_;
 
   std::string valid_token_info_response_;
@@ -95,7 +95,7 @@ CredentialProviderFetcherTest::~CredentialProviderFetcherTest() = default;
 
 void CredentialProviderFetcherTest::OnFetchComplete(
     base::OnceClosure done_closure,
-    base::Value::Dict fetch_result) {
+    base::DictValue fetch_result) {
   fetch_result_ = std::move(fetch_result);
 
   std::move(done_closure).Run();

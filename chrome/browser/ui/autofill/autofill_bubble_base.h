@@ -7,14 +7,19 @@
 
 namespace autofill {
 
-// TODO(@vishwasuppoor): Rename to be platform-agnostic (crbug.com/1322580).
+// TODO(@vishwasuppoor): Rename to be platform-agnostic (crbug.com/40224356).
 // The cross-platform interface which displays the bubble for autofill bubbles.
 // This object is responsible for its own lifetime.
 class AutofillBubbleBase {
  public:
+  virtual ~AutofillBubbleBase() = default;
+
   // Called from controller to shut down the bubble and prevent any further
   // action.
   virtual void Hide() = 0;
+
+  // Called from controller to check if the mouse is hovering over the view.
+  virtual bool IsMouseHovered() const = 0;
 };
 
 }  // namespace autofill

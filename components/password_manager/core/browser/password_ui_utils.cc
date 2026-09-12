@@ -6,24 +6,29 @@
 
 #include <algorithm>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "base/metrics/histogram_macros.h"
-#include "base/strings/string_piece.h"
-#include "base/strings/string_split.h"
+#include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
 #include "base/strings/utf_string_conversions.h"
-#include "components/password_manager/core/browser/affiliation/affiliation_utils.h"
+#include "components/affiliations/core/browser/affiliation_utils.h"
+#include "components/autofill/core/common/form_data.h"
 #include "components/password_manager/core/browser/password_form.h"
 #include "components/password_manager/core/browser/password_form_manager_for_ui.h"
 #include "components/password_manager/core/browser/password_form_metrics_recorder.h"
+#include "components/password_manager/core/browser/password_string.h"
 #include "components/password_manager/core/browser/ui/credential_ui_entry.h"
 #include "components/strings/grit/components_strings.h"
 #include "components/url_formatter/elide_url.h"
+#include "ui/base/l10n/l10n_util.h"
 
 namespace password_manager {
 
 namespace {
+
+using affiliations::FacetURI;
 
 // The URL prefixes that are removed from shown origin.
 const char* const kRemovedPrefixes[] = {"m.", "mobile.", "www."};
@@ -35,9 +40,8 @@ std::string GetShownOrigin(const FacetURI& facet_uri,
                            const std::string& app_display_name,
                            const GURL& url) {
   if (facet_uri.IsValidAndroidFacetURI()) {
-    return app_display_name.empty()
-               ? SplitByDotAndReverse(facet_uri.android_package_name())
-               : app_display_name;
+    return app_display_name.empty() ? facet_uri.GetAndroidPackageDisplayName()
+                                    : app_display_name;
   } else {
     return password_manager::GetShownOrigin(url::Origin::Create(url));
   }
@@ -53,28 +57,6 @@ GURL GetShownURL(const FacetURI& facet_uri, const GURL& url) {
 
 }  // namespace
 
-std::string SplitByDotAndReverse(base::StringPiece host) {
-  std::vector<base::StringPiece> parts = base::SplitStringPiece(
-      host, ".", base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL);
-  std::reverse(parts.begin(), parts.end());
-  return base::JoinString(parts, ".");
-}
-
-std::pair<std::string, GURL> GetShownOriginAndLinkUrl(
-    const PasswordForm& password_form) {
-  FacetURI facet_uri =
-      FacetURI::FromPotentiallyInvalidSpec(password_form.signon_realm);
-  return {GetShownOrigin(facet_uri, password_form.app_display_name,
-                         password_form.url),
-          GetShownURL(facet_uri, password_form.url)};
-}
-
-std::string GetShownOrigin(const CredentialFacet& facet) {
-  auto facet_uri = password_manager::FacetURI::FromPotentiallyInvalidSpec(
-      facet.signon_realm);
-  return GetShownOrigin(facet_uri, facet.display_name, facet.url);
-}
-
 std::string GetShownOrigin(const CredentialUIEntry& credential) {
   FacetURI facet_uri =
       FacetURI::FromPotentiallyInvalidSpec(credential.GetFirstSignonRealm());
@@ -88,17 +70,12 @@ GURL GetShownUrl(const CredentialUIEntry& credential) {
   return GetShownURL(facet_uri, credential.GetURL());
 }
 
-GURL GetShownUrl(const CredentialFacet& facet) {
-  FacetURI facet_uri = FacetURI::FromPotentiallyInvalidSpec(facet.signon_realm);
-  return GetShownURL(facet_uri, facet.url);
-}
-
 std::string GetShownOrigin(const url::Origin& origin) {
   std::string original =
       base::UTF16ToUTF8(url_formatter::FormatOriginForSecurityDisplay(
           origin, url_formatter::SchemeDisplay::OMIT_HTTP_AND_HTTPS));
-  base::StringPiece result = original;
-  for (base::StringPiece prefix : kRemovedPrefixes) {
+  std::string_view result = original;
+  for (std::string_view prefix : kRemovedPrefixes) {
     if (base::StartsWith(result, prefix,
                          base::CompareCase::INSENSITIVE_ASCII)) {
       result.remove_prefix(prefix.length());
@@ -106,13 +83,13 @@ std::string GetShownOrigin(const url::Origin& origin) {
     }
   }
 
-  return result.find('.') != base::StringPiece::npos ? std::string(result)
-                                                     : original;
+  return result.find('.') != std::string_view::npos ? std::string(result)
+                                                    : original;
 }
 
 void UpdatePasswordFormUsernameAndPassword(
     const std::u16string& username,
-    const std::u16string& password,
+    const PasswordString& password,
     PasswordFormManagerForUI* form_manager) {
   const auto& pending_credentials = form_manager->GetPendingCredentials();
   bool username_edited = pending_credentials.username_value != username;
@@ -161,16 +138,101 @@ std::vector<std::u16string> GetUsernamesForRealm(
   return usernames;
 }
 
-int GetPlatformAuthenticatorLabel() {
-#if BUILDFLAG(IS_WIN)
-  return IDS_PASSWORD_MANAGER_USE_WINDOWS_HELLO;
-#elif BUILDFLAG(IS_MAC)
-  return IDS_PASSWORD_MANAGER_USE_TOUCH_ID;
-#elif BUILDFLAG(IS_ANDROID)
-  return IDS_PASSWORD_MANAGER_USE_SCREEN_LOCK;
-#else
-  return IDS_PASSWORD_MANAGER_USE_GENERIC_DEVICE;
-#endif
+std::u16string ToUsernameString(const std::u16string& username) {
+  if (!username.empty()) {
+    return username;
+  }
+  return l10n_util::GetStringUTF16(IDS_PASSWORD_MANAGER_EMPTY_LOGIN);
+}
+
+std::u16string ToUsernameString(const std::string& username) {
+  return ToUsernameString(base::UTF8ToUTF16(username));
+}
+
+bool CalculateTriggerSubmission(SubmissionReadinessState submission_readiness) {
+  switch (submission_readiness) {
+    case SubmissionReadinessState::kNoInformation:
+    case SubmissionReadinessState::kError:
+    case SubmissionReadinessState::kNoUsernameField:
+    case SubmissionReadinessState::kNoPasswordField:
+    case SubmissionReadinessState::kFieldBetweenUsernameAndPassword:
+    case SubmissionReadinessState::kFieldAfterPasswordField:
+    case SubmissionReadinessState::kLikelyHasCaptcha:
+      return false;
+    case SubmissionReadinessState::kEmptyFields:
+    case SubmissionReadinessState::kMoreThanTwoFields:
+    case SubmissionReadinessState::kTwoFields:
+      return true;
+  }
+}
+
+// Returns a prediction whether the form that contains |username_element| and
+// |password_element| will be ready for submission after filling these two
+// elements.
+SubmissionReadinessState CalculateSubmissionReadiness(
+    const autofill::FormData& form_data,
+    const autofill::FieldGlobalId& username_field_id,
+    const autofill::FieldGlobalId& password_field_id) {
+  const std::vector<autofill::FormFieldData>& fields = form_data.fields();
+  auto username_it = std::ranges::find(fields, username_field_id,
+                                       &autofill::FormFieldData::global_id);
+  auto password_it = std::ranges::find(fields, password_field_id,
+                                       &autofill::FormFieldData::global_id);
+  if (username_it == fields.end() && password_it == fields.end()) {
+    // This is unexpected. `form` is supposed to contain username or password
+    // elements.
+    return SubmissionReadinessState::kError;
+  }
+  if (username_it == fields.end() && password_it != fields.end()) {
+    return SubmissionReadinessState::kNoUsernameField;
+  }
+  if (password_it == fields.end()) {
+    return SubmissionReadinessState::kNoPasswordField;
+  }
+
+  auto ShouldIgnoreField = [](const autofill::FormFieldData& field) {
+    // Autofill does not extract checkboxes and radio buttons anymore
+    // (crbug.com/402071086). When they are ever reintroduced, checkboxes should
+    // be ignored.
+    return !field.is_focusable();
+  };
+
+  if (username_it < password_it) {
+    for (auto it = username_it + 1; it != password_it; ++it) {
+      if (!ShouldIgnoreField(*it)) {
+        return SubmissionReadinessState::kFieldBetweenUsernameAndPassword;
+      }
+    }
+  }
+
+  for (auto it = password_it + 1; it != fields.end(); ++it) {
+    if (!ShouldIgnoreField(*it)) {
+      return SubmissionReadinessState::kFieldAfterPasswordField;
+    }
+  }
+
+  // There is likely a CAPTCHA in the child frame.
+  if (form_data.likely_contains_captcha()) {
+    return SubmissionReadinessState::kLikelyHasCaptcha;
+  }
+
+  size_t number_of_visible_elements = 0;
+  for (auto it = fields.begin(); it != fields.end(); ++it) {
+    if (ShouldIgnoreField(*it)) {
+      continue;
+    }
+
+    if (username_it != it && password_it != it && it->value().empty()) {
+      return SubmissionReadinessState::kEmptyFields;
+    }
+    number_of_visible_elements++;
+  }
+
+  if (number_of_visible_elements > 2) {
+    return SubmissionReadinessState::kMoreThanTwoFields;
+  }
+
+  return SubmissionReadinessState::kTwoFields;
 }
 
 }  // namespace password_manager

@@ -18,7 +18,8 @@ ImageLoader* ImageLoaderFactory::GetForBrowserContext(
 }
 
 ImageLoaderFactory* ImageLoaderFactory::GetInstance() {
-  return base::Singleton<ImageLoaderFactory>::get();
+  static base::NoDestructor<ImageLoaderFactory> instance;
+  return instance.get();
 }
 
 ImageLoaderFactory::ImageLoaderFactory()
@@ -27,17 +28,18 @@ ImageLoaderFactory::ImageLoaderFactory()
         BrowserContextDependencyManager::GetInstance()) {
 }
 
-ImageLoaderFactory::~ImageLoaderFactory() {
-}
+ImageLoaderFactory::~ImageLoaderFactory() = default;
 
-KeyedService* ImageLoaderFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+ImageLoaderFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new ImageLoader;
+  return std::make_unique<ImageLoader>();
 }
 
 content::BrowserContext* ImageLoaderFactory::GetBrowserContextToUse(
     content::BrowserContext* context) const {
-  return ExtensionsBrowserClient::Get()->GetOriginalContext(context);
+  return ExtensionsBrowserClient::Get()->GetContextRedirectedToOriginal(
+      context);
 }
 
 }  // namespace extensions

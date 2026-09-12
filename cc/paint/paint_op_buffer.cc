@@ -7,9 +7,11 @@
 #include <algorithm>
 #include <utility>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/notreached.h"
-#include "base/ranges/algorithm.h"
 #include "base/types/optional_util.h"
+#include "cc/paint/display_item_list.h"
 #include "cc/paint/paint_flags.h"
 #include "cc/paint/paint_image_builder.h"
 #include "cc/paint/paint_op.h"
@@ -19,29 +21,27 @@
 #include "cc/paint/paint_record.h"
 #include "cc/paint/scoped_raster_flags.h"
 #include "cc/paint/skottie_serialization_history.h"
-#include "third_party/skia/include/gpu/GrRecordingContext.h"
+#include "third_party/skia/include/core/SkTextBlob.h"
+#include "third_party/skia/include/gpu/ganesh/GrRecordingContext.h"
+#include "third_party/skia/include/gpu/graphite/Recorder.h"
+#include "third_party/skia/include/private/chromium/Slug.h"
 
 namespace cc {
 
-PlaybackParams::PlaybackParams(ImageProvider* image_provider)
-    : PlaybackParams(image_provider, SkM44()) {}
+PlaybackCallbacks::PlaybackCallbacks() = default;
+PlaybackCallbacks::~PlaybackCallbacks() = default;
+PlaybackCallbacks::PlaybackCallbacks(const PlaybackCallbacks&) = default;
+PlaybackCallbacks& PlaybackCallbacks::operator=(const PlaybackCallbacks&) =
+    default;
 
 PlaybackParams::PlaybackParams(ImageProvider* image_provider,
                                const SkM44& original_ctm,
-                               CustomDataRasterCallback custom_callback,
-                               DidDrawOpCallback did_draw_op_callback,
-                               ConvertOpCallback convert_op_callback)
+                               const PlaybackCallbacks& callbacks)
     : image_provider(image_provider),
       original_ctm(original_ctm),
-      custom_callback(custom_callback),
-      did_draw_op_callback(std::move(did_draw_op_callback)),
-      convert_op_callback(std::move(convert_op_callback)) {}
+      callbacks(callbacks) {}
 
 PlaybackParams::~PlaybackParams() = default;
-
-PlaybackParams::PlaybackParams(const PlaybackParams& other) = default;
-PlaybackParams& PlaybackParams::operator=(const PlaybackParams& other) =
-    default;
 
 PaintOpBuffer::SerializeOptions::SerializeOptions(
     ImageProvider* image_provider,
@@ -52,7 +52,8 @@ PaintOpBuffer::SerializeOptions::SerializeOptions(
     SkottieSerializationHistory* skottie_serialization_history,
     bool can_use_lcd_text,
     bool context_supports_distance_field_text,
-    int max_texture_size)
+    int max_texture_size,
+    const ScrollOffsetMap* raster_inducing_scroll_offsets)
     : image_provider(image_provider),
       transfer_cache(transfer_cache),
       paint_cache(paint_cache),
@@ -62,7 +63,8 @@ PaintOpBuffer::SerializeOptions::SerializeOptions(
       can_use_lcd_text(can_use_lcd_text),
       context_supports_distance_field_text(
           context_supports_distance_field_text),
-      max_texture_size(max_texture_size) {}
+      max_texture_size(max_texture_size),
+      raster_inducing_scroll_offsets(raster_inducing_scroll_offsets) {}
 
 PaintOpBuffer::SerializeOptions::SerializeOptions() = default;
 PaintOpBuffer::SerializeOptions::SerializeOptions(const SerializeOptions&) =
@@ -71,33 +73,213 @@ PaintOpBuffer::SerializeOptions& PaintOpBuffer::SerializeOptions::operator=(
     const SerializeOptions&) = default;
 PaintOpBuffer::SerializeOptions::~SerializeOptions() = default;
 
-PaintOpBuffer::DeserializeOptions::DeserializeOptions(
-    TransferCacheDeserializeHelper* transfer_cache,
-    ServicePaintCache* paint_cache,
-    SkStrikeClient* strike_client,
-    std::vector<uint8_t>* scratch_buffer,
-    bool is_privileged,
-    SharedImageProvider* shared_image_provider)
-    : transfer_cache(transfer_cache),
-      paint_cache(paint_cache),
-      strike_client(strike_client),
-      scratch_buffer(scratch_buffer),
-      is_privileged(is_privileged),
-      shared_image_provider(shared_image_provider) {
-  DCHECK(scratch_buffer);
-}
-
-PaintOpBuffer::PaintOpBuffer()
-    : has_non_aa_paint_(false),
-      has_discardable_images_(false),
-      has_draw_ops_(false),
-      has_draw_text_ops_(false),
-      has_save_layer_ops_(false),
-      has_save_layer_alpha_ops_(false),
-      has_effects_preventing_lcd_text_for_save_layer_alpha_(false) {}
+PaintOpBuffer::PaintOpBuffer() = default;
 
 PaintOpBuffer::PaintOpBuffer(PaintOpBuffer&& other) {
   *this = std::move(other);
+}
+
+PaintRecord PaintOpBuffer::DeepCopyAsRecord() const {
+  // TODO(paint-dev): This was added at a time when DrawTextBlobOp was racy, but
+  // it's not any more, so is this method still necessary, or can we safely
+  // share PaintOpBuffers across threads?
+  auto result = sk_make_sp<PaintOpBuffer>();
+  *result += *this;
+  return PaintRecord(std::move(result));
+}
+
+PaintRecord PaintOpBuffer::ReplaceCustomData(
+    const base::flat_map<uint32_t, PaintRecord>& replacements) const {
+  if (replacements.empty()) {
+    return DeepCopyAsRecord();
+  }
+  auto result = sk_make_sp<PaintOpBuffer>();
+  result->Append(*this, &replacements);
+  return result->ReleaseAsRecord();
+}
+
+PaintOpBuffer& PaintOpBuffer::operator+=(const PaintOpBuffer& other) {
+  Append(other, nullptr);
+  return *this;
+}
+
+void PaintOpBuffer::Append(
+    const PaintOpBuffer& other,
+    const base::flat_map<uint32_t, PaintRecord>* replacements) {
+  CHECK_NE(this, &other);
+  if (other.used_) {
+    // Note: If `replacements` is provided, replacing CustomDataOp with
+    // DrawRecordOp may exceed this initial reservation. `push()` will
+    // reallocate if needed.
+    ReallocBuffer(used_ + other.used_);
+  }
+  for (const PaintOp& op : other) {
+    switch (op.GetType()) {
+      case PaintOpType::kAnnotate: {
+        const auto& o = static_cast<const AnnotateOp&>(op);
+        push<AnnotateOp>(o.annotation_type, o.rect, o.data);
+      } break;
+      case PaintOpType::kClipPath: {
+        const auto& o = static_cast<const ClipPathOp&>(op);
+        push<ClipPathOp>(o.path, o.op, o.antialias, o.use_cache);
+      } break;
+      case PaintOpType::kClipRect: {
+        const auto& o = static_cast<const ClipRectOp&>(op);
+        push<ClipRectOp>(o.rect, o.op, o.antialias);
+      } break;
+      case PaintOpType::kClipRRect: {
+        const auto& o = static_cast<const ClipRRectOp&>(op);
+        push<ClipRRectOp>(o.rrect, o.op, o.antialias);
+      } break;
+      case PaintOpType::kConcat: {
+        const auto& o = static_cast<const ConcatOp&>(op);
+        push<ConcatOp>(o.matrix);
+      } break;
+      case PaintOpType::kCustomData: {
+        const auto& o = static_cast<const CustomDataOp&>(op);
+        if (replacements) {
+          auto it = replacements->find(o.id);
+          if (it != replacements->end()) {
+            push<DrawRecordOp>(it->second);
+            break;
+          }
+        }
+        push<CustomDataOp>(o.id);
+      } break;
+      case PaintOpType::kDrawArc: {
+        const auto& o = static_cast<const DrawArcOp&>(op);
+        push<DrawArcOp>(o.oval, o.start_angle_degrees, o.sweep_angle_degrees,
+                        o.flags);
+      } break;
+      case PaintOpType::kDrawArcLite: {
+        const auto& o = static_cast<const DrawArcLiteOp&>(op);
+        push<DrawArcLiteOp>(o.oval, o.start_angle_degrees,
+                            o.sweep_angle_degrees, o.core_paint_flags);
+      } break;
+      case PaintOpType::kDrawColor: {
+        const auto& o = static_cast<const DrawColorOp&>(op);
+        push<DrawColorOp>(o.color, o.mode);
+      } break;
+      case PaintOpType::kDrawDRRect: {
+        const auto& o = static_cast<const DrawDRRectOp&>(op);
+        push<DrawDRRectOp>(o.outer, o.inner, o.flags);
+      } break;
+      case PaintOpType::kDrawImage: {
+        const auto& o = static_cast<const DrawImageOp&>(op);
+        push<DrawImageOp>(o.image, o.left, o.top, o.sampling, &o.flags);
+      } break;
+      case PaintOpType::kDrawImageRect: {
+        const auto& o = static_cast<const DrawImageRectOp&>(op);
+        push<DrawImageRectOp>(o.image, o.src, o.dst, o.sampling, &o.flags,
+                              o.constraint);
+      } break;
+      case PaintOpType::kDrawIRect: {
+        const auto& o = static_cast<const DrawIRectOp&>(op);
+        push<DrawIRectOp>(o.rect, o.flags);
+      } break;
+      case PaintOpType::kDrawLine: {
+        const auto& o = static_cast<const DrawLineOp&>(op);
+        push<DrawLineOp>(o.x0, o.y0, o.x1, o.y1, o.flags);
+      } break;
+      case PaintOpType::kDrawLineLite: {
+        const auto& o = static_cast<const DrawLineLiteOp&>(op);
+        push<DrawLineLiteOp>(o.x0, o.y0, o.x1, o.y1, o.core_paint_flags);
+      } break;
+      case PaintOpType::kDrawOval: {
+        const auto& o = static_cast<const DrawOvalOp&>(op);
+        push<DrawOvalOp>(o.oval, o.flags);
+      } break;
+      case PaintOpType::kDrawPath: {
+        const auto& o = static_cast<const DrawPathOp&>(op);
+        push<DrawPathOp>(o.path, o.flags, o.use_cache);
+      } break;
+      case PaintOpType::kDrawRecord: {
+        const auto& o = static_cast<const DrawRecordOp&>(op);
+        if (replacements) {
+          push<DrawRecordOp>(o.record.ReplaceCustomData(*replacements),
+                             o.local_ctm);
+        } else {
+          push<DrawRecordOp>(o.record.buffer().DeepCopyAsRecord(), o.local_ctm);
+        }
+      } break;
+      case PaintOpType::kDrawRect: {
+        const auto& o = static_cast<const DrawRectOp&>(op);
+        push<DrawRectOp>(o.rect, o.flags);
+      } break;
+      case PaintOpType::kDrawRRect: {
+        const auto& o = static_cast<const DrawRRectOp&>(op);
+        push<DrawRRectOp>(o.rrect, o.flags);
+      } break;
+      case PaintOpType::kDrawScrollingContents: {
+        const auto& o = static_cast<const DrawScrollingContentsOp&>(op);
+        push<DrawScrollingContentsOp>(o.scroll_element_id, o.display_item_list);
+      } break;
+      case PaintOpType::kDrawSkottie: {
+        const auto& o = static_cast<const DrawSkottieOp&>(op);
+        push<DrawSkottieOp>(o.skottie, o.dst, o.t, o.images, o.color_map,
+                            o.text_map);
+      } break;
+      case PaintOpType::kDrawSlug: {
+        const auto& o = static_cast<const DrawSlugOp&>(op);
+        push<DrawSlugOp>(o.slug, o.flags);
+      } break;
+      case PaintOpType::kDrawTextBlob: {
+        const auto& o = static_cast<const DrawTextBlobOp&>(op);
+        push<DrawTextBlobOp>(o.blob, o.x, o.y, o.node_id, o.flags);
+      } break;
+      case PaintOpType::kDrawTextSlugs: {
+        NOTREACHED();
+      }
+      case PaintOpType::kDrawVertices: {
+        const auto& o = static_cast<const DrawVerticesOp&>(op);
+        push<DrawVerticesOp>(o.vertices, o.uvs, o.indices, o.flags);
+      } break;
+      case PaintOpType::kNoop: {
+        push<NoopOp>();
+      } break;
+      case PaintOpType::kRestore: {
+        push<RestoreOp>();
+      } break;
+      case PaintOpType::kRotate: {
+        const auto& o = static_cast<const RotateOp&>(op);
+        push<RotateOp>(o.degrees);
+      } break;
+      case PaintOpType::kSave: {
+        push<SaveOp>();
+      } break;
+      case PaintOpType::kSaveLayer: {
+        const auto& o = static_cast<const SaveLayerOp&>(op);
+        push<SaveLayerOp>(o.bounds, o.flags);
+      } break;
+      case PaintOpType::kSaveLayerAlpha: {
+        const auto& o = static_cast<const SaveLayerAlphaOp&>(op);
+        push<SaveLayerAlphaOp>(o.bounds, o.alpha);
+      } break;
+      case PaintOpType::kSaveLayerFilters: {
+        const auto& o = static_cast<const SaveLayerFiltersOp&>(op);
+        auto f = o.filters;
+        auto bf = o.backdrop_filter;
+        push<SaveLayerFiltersOp>(o.bounds, std::move(f), std::move(bf),
+                                 o.flags);
+      } break;
+      case PaintOpType::kScale: {
+        const auto& o = static_cast<const ScaleOp&>(op);
+        push<ScaleOp>(o.sx, o.sy);
+      } break;
+      case PaintOpType::kSetMatrix: {
+        const auto& o = static_cast<const SetMatrixOp&>(op);
+        push<SetMatrixOp>(o.matrix);
+      } break;
+      case PaintOpType::kSetNodeId: {
+        const auto& o = static_cast<const SetNodeIdOp&>(op);
+        push<SetNodeIdOp>(o.node_id);
+      } break;
+      case PaintOpType::kTranslate: {
+        const auto& o = static_cast<const TranslateOp&>(op);
+        push<TranslateOp>(o.dx, o.dy);
+      } break;
+    }
+  }
 }
 
 PaintOpBuffer::~PaintOpBuffer() {
@@ -106,33 +288,32 @@ PaintOpBuffer::~PaintOpBuffer() {
 
 PaintOpBuffer& PaintOpBuffer::operator=(PaintOpBuffer&& other) {
   data_ = std::move(other.data_);
-  DCHECK(!other.data_);
+  DCHECK(other.data_.empty());
   used_ = other.used_;
-  reserved_ = other.reserved_;
   op_count_ = other.op_count_;
   num_slow_paths_up_to_min_for_MSAA_ = other.num_slow_paths_up_to_min_for_MSAA_;
   subrecord_bytes_used_ = other.subrecord_bytes_used_;
   subrecord_op_count_ = other.subrecord_op_count_;
   has_non_aa_paint_ = other.has_non_aa_paint_;
-  has_discardable_images_ = other.has_discardable_images_;
   has_draw_ops_ = other.has_draw_ops_;
   has_draw_text_ops_ = other.has_draw_text_ops_;
   has_save_layer_ops_ = other.has_save_layer_ops_;
   has_save_layer_alpha_ops_ = other.has_save_layer_alpha_ops_;
   has_effects_preventing_lcd_text_for_save_layer_alpha_ =
       other.has_effects_preventing_lcd_text_for_save_layer_alpha_;
+  has_discardable_images_ = other.has_discardable_images_;
+  content_color_usage_ = other.content_color_usage_;
 
   // Make sure the other pob can destruct safely or is ready for reuse.
-  other.reserved_ = 0;
   other.ResetRetainingBuffer();
   return *this;
 }
 
 void PaintOpBuffer::DestroyOps() {
-  if (data_) {
+  if (!data_.empty()) {
     for (size_t offset = 0; offset < used_;) {
-      auto* op = reinterpret_cast<PaintOp*>(data_.get() + offset);
-      offset += op->aligned_size;
+      auto* op = reinterpret_cast<PaintOp*>(&data_[offset]);
+      offset += op->AlignedSize();
       op->DestroyThis();
     }
   }
@@ -154,44 +335,48 @@ void PaintOpBuffer::ResetRetainingBuffer() {
   has_non_aa_paint_ = false;
   subrecord_bytes_used_ = 0;
   subrecord_op_count_ = 0;
-  has_discardable_images_ = false;
   has_draw_ops_ = false;
   has_draw_text_ops_ = false;
   has_save_layer_ops_ = false;
   has_save_layer_alpha_ops_ = false;
   has_effects_preventing_lcd_text_for_save_layer_alpha_ = false;
+  has_discardable_images_ = false;
+  content_color_usage_ = gfx::ContentColorUsage::kSRGB;
 }
 
 void PaintOpBuffer::Playback(SkCanvas* canvas) const {
-  Playback(canvas, PlaybackParams(nullptr), nullptr);
+  Playback(canvas, PlaybackParams(nullptr), /*local_ctm=*/true,
+           /*offsets=*/nullptr);
 }
 
 void PaintOpBuffer::Playback(SkCanvas* canvas,
-                             const PlaybackParams& params) const {
-  Playback(canvas, params, nullptr);
+                             const PlaybackParams& params,
+                             bool local_ctm) const {
+  Playback(canvas, params, local_ctm, /*offsets=*/nullptr);
 }
 
 PaintRecord PaintOpBuffer::ReleaseAsRecord() {
   DCHECK(is_mutable());
-  const size_t old_reserved = reserved_;
   auto result = sk_make_sp<PaintOpBuffer>(std::move(*this));
-  if (BufferDataPtr old_data = result->ReallocIfNeededToFit()) {
+  if (BufferData old_data = result->ReallocIfNeededToFit(); !old_data.empty()) {
     // Reuse the original buffer for future recording.
     data_ = std::move(old_data);
-    reserved_ = old_reserved;
   }
   return PaintRecord(std::move(result));
 }
 
 void PaintOpBuffer::Playback(SkCanvas* canvas,
                              const PlaybackParams& params,
+                             bool local_ctm,
                              const std::vector<size_t>* offsets) const {
   if (!op_count_)
     return;
   if (offsets && offsets->empty())
     return;
-  // Prevent PaintOpBuffers from having side effects back into the canvas.
-  SkAutoCanvasRestore save_restore(canvas, true);
+  // Make sure the there are no pending saves after we are done. Add a save if
+  // this `PaintOpBuffer` isn't meant to impact the global CTM (to prevent
+  // PaintOps from having side effects back into the canvas)
+  SkAutoCanvasRestore save_restore(canvas, /*doSave=*/local_ctm);
 
   bool save_layer_alpha_should_preserve_lcd_text =
       (!params.save_layer_alpha_should_preserve_lcd_text.has_value() ||
@@ -211,16 +396,16 @@ void PaintOpBuffer::Playback(SkCanvas* canvas,
   // translate(x, y), then draw a paint record with a SetMatrix(identity),
   // the translation should be preserved instead of clobbering the top level
   // transform.  This could probably be done more efficiently.
-  PlaybackParams new_params(params.image_provider, canvas->getLocalToDevice(),
-                            params.custom_callback, params.did_draw_op_callback,
-                            params.convert_op_callback);
+  PlaybackParams new_params = params;
+  if (local_ctm) {
+    new_params.original_ctm = canvas->getLocalToDevice();
+  }
   new_params.save_layer_alpha_should_preserve_lcd_text =
       save_layer_alpha_should_preserve_lcd_text;
-  new_params.is_analyzing = params.is_analyzing;
   for (PlaybackFoldingIterator iter(*this, offsets); iter; ++iter) {
     const PaintOp* op = iter.get();
-    if (params.convert_op_callback) {
-      op = params.convert_op_callback.Run(*op);
+    if (params.callbacks.convert_op_callback) {
+      op = params.callbacks.convert_op_callback.Run(*op);
       if (!op)
         continue;
     }
@@ -237,11 +422,20 @@ void PaintOpBuffer::Playback(SkCanvas* canvas,
       continue;
 
     if (op->IsPaintOpWithFlags()) {
+      int max_texture_size;
+      if (auto* context = canvas->recordingContext()) {
+        max_texture_size = context->maxTextureSize();
+      } else if (auto* recorder = canvas->recorder()) {
+        max_texture_size = recorder->maxTextureSize();
+      } else {
+        // This can happen in tests.
+        max_texture_size = 0;
+      }
+
       const auto& flags_op = static_cast<const PaintOpWithFlags&>(*op);
-      auto* context = canvas->recordingContext();
       const ScopedRasterFlags scoped_flags(
           &flags_op.flags, new_params.image_provider, canvas->getTotalMatrix(),
-          context ? context->maxTextureSize() : 0, iter.alpha());
+          max_texture_size, iter.alpha());
       if (const auto* raster_flags = scoped_flags.flags())
         flags_op.RasterWithFlags(canvas, raster_flags, new_params);
     } else {
@@ -249,25 +443,22 @@ void PaintOpBuffer::Playback(SkCanvas* canvas,
       op->Raster(canvas, new_params);
     }
 
-    if (!new_params.did_draw_op_callback.is_null())
-      new_params.did_draw_op_callback.Run();
+    if (!new_params.callbacks.did_draw_op_callback.is_null()) {
+      new_params.callbacks.did_draw_op_callback.Run();
+    }
   }
 }
 
-bool PaintOpBuffer::Deserialize(const volatile void* input,
-                                size_t input_size,
+bool PaintOpBuffer::Deserialize(base::span<const volatile uint8_t> input,
                                 const PaintOp::DeserializeOptions& options) {
-  size_t total_bytes_read = 0u;
-  while (total_bytes_read < input_size) {
-    const volatile void* next_op =
-        static_cast<const volatile char*>(input) + total_bytes_read;
+  while (!input.empty()) {
     size_t read_bytes = 0;
-    if (!PaintOp::DeserializeIntoPaintOpBuffer(next_op,
-                                               input_size - total_bytes_read,
-                                               this, &read_bytes, options)) {
+    if (!PaintOp::DeserializeIntoPaintOpBuffer(input, this, &read_bytes,
+                                               options)) {
       return false;
     }
-    total_bytes_read += read_bytes;
+    DCHECK_GT(read_bytes, 0u);
+    input = input.subspan(read_bytes);
   }
 
   DCHECK_GT(size(), 0u);
@@ -276,14 +467,15 @@ bool PaintOpBuffer::Deserialize(const volatile void* input,
 
 // static
 sk_sp<PaintOpBuffer> PaintOpBuffer::MakeFromMemory(
-    const volatile void* input,
-    size_t input_size,
+    base::span<const volatile uint8_t> input,
     const PaintOp::DeserializeOptions& options) {
   auto buffer = sk_make_sp<PaintOpBuffer>();
-  if (input_size == 0)
+  if (input.empty()) {
     return buffer;
-  if (!buffer->Deserialize(input, input_size, options))
+  }
+  if (!buffer->Deserialize(input, options)) {
     return nullptr;
+  }
   return buffer;
 }
 
@@ -326,51 +518,51 @@ SkRect PaintOpBuffer::GetFixedScaleBounds(const SkMatrix& ctm,
       SkScalarCeilToInt(SkScalarAbs(scale.height() * bounds.height())));
 }
 
-PaintOpBuffer::BufferDataPtr PaintOpBuffer::ReallocBuffer(size_t new_size) {
+PaintOpBuffer::BufferData PaintOpBuffer::ReallocBuffer(size_t new_size) {
   DCHECK_GE(new_size, used_);
   DCHECK(is_mutable());
 
-  std::unique_ptr<char, base::AlignedFreeDeleter> new_data(
-      static_cast<char*>(base::AlignedAlloc(new_size, kPaintOpAlign)));
-  if (data_)
-    memcpy(new_data.get(), data_.get(), used_);
-  BufferDataPtr old_data = std::move(data_);
+  // SAFETY: base::AlignedAlloc allocates at least `size` bytes.
+  auto new_data = UNSAFE_BUFFERS(
+      base::HeapArray<uint8_t, base::AlignedFreeDeleter>::FromOwningPointer(
+          static_cast<uint8_t*>(base::AlignedAlloc(new_size, kPaintOpAlign)),
+          new_size));
+
+  if (!data_.empty()) {
+    new_data.copy_prefix_from(data_.first(used_));
+  }
+  BufferData old_data = std::move(data_);
   data_ = std::move(new_data);
-  reserved_ = new_size;
   return old_data;
 }
 
-void* PaintOpBuffer::AllocatePaintOp(uint16_t aligned_size) {
+base::span<uint8_t> PaintOpBuffer::AllocatePaintOpSlowPath(
+    uint16_t aligned_size) {
   DCHECK(is_mutable());
 
   size_t required_size = used_ + aligned_size;
-  if (required_size > reserved_) {
-    // Start reserved_ at kInitialBufferSize and then double.
-    // ShrinkToFit() can make this smaller afterwards.
-    size_t new_size = reserved_ ? reserved_ : kInitialBufferSize;
-    while (required_size > new_size) {
-      new_size *= 2;
-    }
-    ReallocBuffer(new_size);
+  DCHECK_GT(required_size, data_.size()) << "Should not have hit the slow path";
+  // Start size at kInitialBufferSize and then double.
+  // ShrinkToFit() can make this smaller afterwards.
+  size_t new_size = data_.empty() ? kInitialBufferSize : data_.size();
+  while (required_size > new_size) {
+    new_size *= 2;
   }
-  DCHECK_LE(required_size, reserved_);
+  ReallocBuffer(new_size);
+  DCHECK_LE(required_size, data_.size());
 
-  void* op = data_.get() + used_;
-  used_ = required_size;
-  op_count_++;
-  return op;
+  return AllocatePaintOp(aligned_size);
 }
 
 void PaintOpBuffer::ShrinkToFit() {
   ReallocIfNeededToFit();
 }
 
-PaintOpBuffer::BufferDataPtr PaintOpBuffer::ReallocIfNeededToFit() {
-  if (used_ == reserved_) {
-    return nullptr;
+PaintOpBuffer::BufferData PaintOpBuffer::ReallocIfNeededToFit() {
+  if (used_ == data_.size()) {
+    return {};
   }
   if (!used_) {
-    reserved_ = 0;
     return std::move(data_);
   }
   return ReallocBuffer(used_);
@@ -393,10 +585,10 @@ bool PaintOpBuffer::EqualsForTesting(const PaintOpBuffer& other) const {
     return false;
   }
 
-  return base::ranges::equal(*this, other,
-                             [](const PaintOp& a, const PaintOp& b) {
-                               return a.EqualsForTesting(b);  // IN-TEST
-                             });
+  return std::ranges::equal(*this, other,
+                            [](const PaintOp& a, const PaintOp& b) {
+                              return a.EqualsForTesting(b);  // IN-TEST
+                            });
 }
 
 bool PaintOpBuffer::NeedsAdditionalInvalidationForLCDText(
@@ -417,7 +609,7 @@ void PaintOpBuffer::UpdateSaveLayerBounds(size_t offset, const SkRect& bounds) {
   CHECK_LT(offset, used_);
   CHECK_LE(offset + sizeof(PaintOp), used_);
 
-  auto* op = reinterpret_cast<PaintOp*>(data_.get() + offset);
+  auto* op = reinterpret_cast<PaintOp*>(&data_[offset]);
   switch (op->GetType()) {
     case SaveLayerOp::kType:
       CHECK_LE(offset + sizeof(SaveLayerOp), used_);
@@ -426,6 +618,10 @@ void PaintOpBuffer::UpdateSaveLayerBounds(size_t offset, const SkRect& bounds) {
     case SaveLayerAlphaOp::kType:
       CHECK_LE(offset + sizeof(SaveLayerAlphaOp), used_);
       static_cast<SaveLayerAlphaOp*>(op)->bounds = bounds;
+      break;
+    case SaveLayerFiltersOp::kType:
+      CHECK_LE(offset + sizeof(SaveLayerFiltersOp), used_);
+      static_cast<SaveLayerFiltersOp*>(op)->bounds = bounds;
       break;
     default:
       NOTREACHED();
@@ -438,6 +634,16 @@ PaintOpBuffer::Iterator PaintOpBuffer::begin() const {
 
 PaintOpBuffer::Iterator PaintOpBuffer::end() const {
   return Iterator(*this).end();
+}
+
+const PaintOp& PaintOpBuffer::GetOpAtForTesting(size_t index) const {
+  for (const auto& op : *this) {
+    if (!index) {
+      return op;
+    }
+    --index;
+  }
+  NOTREACHED();
 }
 
 }  // namespace cc

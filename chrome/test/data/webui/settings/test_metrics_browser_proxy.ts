@@ -2,7 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {MetricsBrowserProxy, PrivacyElementInteractions, PrivacyGuideInteractions, PrivacyGuideSettingsStates, SafeBrowsingInteractions, SafetyCheckInteractions, SafetyCheckNotificationsModuleInteractions, SafetyCheckUnusedSitePermissionsModuleInteractions} from 'chrome://settings/settings.js';
+import {SuggestionsFromGeminiAction, SuggestionsFromGeminiEntryPoint, YourSavedInfoDataCategory, YourSavedInfoDataChip, YourSavedInfoRelatedService} from 'chrome://settings/settings.js';
+import type {AiPageComposeInteractions, AiPageHistorySearchInteractions, AiPageInteractions, AiPageSuggestionsInteractions, AutofillSettingsReferrer, DeleteBrowsingDataAction, MetricsBrowserProxy, PrivacyElementInteractions, PrivacyGuideInteractions, PrivacyGuideSettingsStates, PrivacyGuideStepsEligibleAndReached, SafeBrowsingInteractions, SafetyCheckNotificationsModuleInteractions, SafetyCheckUnusedSitePermissionsModuleInteractions, SafetyHubCardState, SafetyHubEntryPoint, SafetyHubModuleType, SafetyHubSurfaces} from 'chrome://settings/settings.js';
 import {TestBrowserProxy} from 'chrome://webui-test/test_browser_proxy.js';
 
 export class TestMetricsBrowserProxy extends TestBrowserProxy implements
@@ -10,19 +11,40 @@ export class TestMetricsBrowserProxy extends TestBrowserProxy implements
   constructor() {
     super([
       'recordAction',
-      'recordSafetyCheckInteractionHistogram',
-      'recordSafetyCheckNotificationsListCountHistogram',
-      'recordSafetyCheckNotificationsModuleInteractionsHistogram',
-      'recordSafetyCheckNotificationsModuleEntryPointShown',
-      'recordSafetyCheckUnusedSitePermissionsListCountHistogram',
-      'recordSafetyCheckUnusedSitePermissionsModuleInteractionsHistogram',
-      'recordSafetyCheckUnusedSitePermissionsModuleEntryPointShown',
+      'recordBooleanHistogram',
       'recordSettingsPageHistogram',
       'recordPrivacyGuideFlowLengthHistogram',
       'recordSafeBrowsingInteractionHistogram',
       'recordPrivacyGuideNextNavigationHistogram',
       'recordPrivacyGuideEntryExitHistogram',
       'recordPrivacyGuideSettingsStatesHistogram',
+      'recordPrivacyGuideStepsEligibleAndReachedHistogram',
+      'recordDeleteBrowsingDataAction',
+      'recordSafetyHubAbusiveNotificationPermissionRevocationInteractionsHistogram',
+      'recordSafetyHubCardStateClicked',
+      'recordSafetyHubDashboardAnyWarning',
+      'recordSafetyHubEntryPointClicked',
+      'recordSafetyHubEntryPointShown',
+      'recordSafetyHubImpression',
+      'recordSafetyHubInteraction',
+      'recordSafetyHubModuleWarningImpression',
+      'recordSafetyHubNotificationPermissionsModuleInteractionsHistogram',
+      'recordSafetyHubNotificationPermissionsModuleListCountHistogram',
+      'recordSafetyHubUnusedSitePermissionsModuleInteractionsHistogram',
+      'recordSafetyHubUnusedSitePermissionsModuleListCountHistogram',
+      // <if expr="_google_chrome and is_win">
+      'recordFeatureNotificationsChange',
+      // </if>
+      'recordAiPageInteractions',
+      'recordAiPageHistorySearchInteractions',
+      'recordAiPageComposeInteractions',
+      'recordAiPageSuggestionsInteractions',
+      'recordAutofillSettingsReferrer',
+      'recordYourSavedInfoCategoryClick',
+      'recordYourSavedInfoDataChipClick',
+      'recordYourSavedInfoRelatedServiceClick',
+      'recordSuggestionsFromGeminiEntryPointClick',
+      'recordSuggestionsFromGeminiAction',
     ]);
   }
 
@@ -30,58 +52,27 @@ export class TestMetricsBrowserProxy extends TestBrowserProxy implements
     this.methodCalled('recordAction', action);
   }
 
-  recordSafetyCheckInteractionHistogram(interaction: SafetyCheckInteractions) {
-    this.methodCalled('recordSafetyCheckInteractionHistogram', interaction);
+  recordBooleanHistogram(histogramName: string, visible: boolean) {
+    this.methodCalled('recordBooleanHistogram', [histogramName, visible]);
   }
 
-  recordSafetyCheckNotificationsListCountHistogram(suggestions: number) {
+  recordAutofillSettingsReferrer(
+      histogramName: string, referrer: AutofillSettingsReferrer) {
     this.methodCalled(
-        'recordSafetyCheckNotificationsListCountHistogram', suggestions);
-  }
-
-  recordSafetyCheckNotificationsModuleInteractionsHistogram(
-      interaction: SafetyCheckNotificationsModuleInteractions) {
-    this.methodCalled(
-        'recordSafetyCheckNotificationsModuleInteractionsHistogram',
-        interaction);
-  }
-
-  recordSafetyCheckNotificationsModuleEntryPointShown(visible: boolean) {
-    this.methodCalled(
-        'recordSafetyCheckNotificationsModuleEntryPointShown', visible);
-  }
-
-  recordSafetyCheckUnusedSitePermissionsListCountHistogram(suggestions:
-                                                               number) {
-    this.methodCalled(
-        'recordSafetyCheckUnusedSitePermissionsListCountHistogram',
-        suggestions);
-  }
-
-  recordSafetyCheckUnusedSitePermissionsModuleInteractionsHistogram(
-      interaction: SafetyCheckUnusedSitePermissionsModuleInteractions) {
-    this.methodCalled(
-        'recordSafetyCheckUnusedSitePermissionsModuleInteractionsHistogram',
-        interaction);
-  }
-
-  recordSafetyCheckUnusedSitePermissionsModuleEntryPointShown(visible:
-                                                                  boolean) {
-    this.methodCalled(
-        'recordSafetyCheckUnusedSitePermissionsModuleEntryPointShown', visible);
+        'recordAutofillSettingsReferrer', [histogramName, referrer]);
   }
 
   recordSettingsPageHistogram(interaction: PrivacyElementInteractions) {
     this.methodCalled('recordSettingsPageHistogram', interaction);
   }
 
-  recordSafeBrowsingInteractionHistogram(interaction:
-                                             SafeBrowsingInteractions) {
+  recordSafeBrowsingInteractionHistogram(
+      interaction: SafeBrowsingInteractions) {
     this.methodCalled('recordSafeBrowsingInteractionHistogram', interaction);
   }
 
-  recordPrivacyGuideNextNavigationHistogram(interaction:
-                                                PrivacyGuideInteractions) {
+  recordPrivacyGuideNextNavigationHistogram(
+      interaction: PrivacyGuideInteractions) {
     this.methodCalled('recordPrivacyGuideNextNavigationHistogram', interaction);
   }
 
@@ -95,5 +86,161 @@ export class TestMetricsBrowserProxy extends TestBrowserProxy implements
 
   recordPrivacyGuideFlowLengthHistogram(steps: number) {
     this.methodCalled('recordPrivacyGuideFlowLengthHistogram', steps);
+  }
+
+  recordPrivacyGuideStepsEligibleAndReachedHistogram(
+      status: PrivacyGuideStepsEligibleAndReached) {
+    this.methodCalled(
+        'recordPrivacyGuideStepsEligibleAndReachedHistogram', status);
+  }
+
+  recordDeleteBrowsingDataAction(action: DeleteBrowsingDataAction) {
+    this.methodCalled('recordDeleteBrowsingDataAction', action);
+  }
+
+  recordSafetyHubAbusiveNotificationPermissionRevocationInteractionsHistogram(
+      interaction: SafetyCheckUnusedSitePermissionsModuleInteractions) {
+    this.methodCalled(
+        'recordSafetyHubAbusiveNotificationPermissionRevocationInteractionsHistogram',
+        interaction);
+  }
+
+  recordSafetyHubCardStateClicked(
+      histogramName: string, state: SafetyHubCardState) {
+    this.methodCalled(
+        'recordSafetyHubCardStateClicked', [histogramName, state]);
+  }
+
+  recordSafetyHubDashboardAnyWarning(visible: boolean) {
+    this.methodCalled('recordSafetyHubDashboardAnyWarning', visible);
+  }
+
+  recordSafetyHubEntryPointClicked(page: SafetyHubEntryPoint) {
+    this.methodCalled('recordSafetyHubEntryPointClicked', page);
+  }
+
+  recordSafetyHubEntryPointShown(page: SafetyHubEntryPoint) {
+    this.methodCalled('recordSafetyHubModuleWarningImpression', page);
+  }
+
+  recordSafetyHubImpression(surface: SafetyHubSurfaces) {
+    this.methodCalled('recordSafetyHubImpression', surface);
+  }
+
+  recordSafetyHubInteraction(surface: SafetyHubSurfaces) {
+    this.methodCalled('recordSafetyHubInteraction', surface);
+  }
+
+  recordSafetyHubModuleWarningImpression(module: SafetyHubModuleType) {
+    this.methodCalled('recordSafetyHubModuleWarningImpression', module);
+  }
+
+  recordSafetyHubNotificationPermissionsModuleInteractionsHistogram(
+      interaction: SafetyCheckNotificationsModuleInteractions) {
+    this.methodCalled(
+        'recordSafetyHubNotificationPermissionsModuleInteractionsHistogram',
+        interaction);
+  }
+
+  recordSafetyHubNotificationPermissionsModuleListCountHistogram(
+      suggestions: number) {
+    this.methodCalled(
+        'recordSafetyHubNotificationPermissionsModuleListCountHistogram',
+        suggestions);
+  }
+
+  recordSafetyHubUnusedSitePermissionsModuleInteractionsHistogram(
+      interaction: SafetyCheckUnusedSitePermissionsModuleInteractions) {
+    this.methodCalled(
+        'recordSafetyHubUnusedSitePermissionsModuleInteractionsHistogram',
+        interaction);
+  }
+
+  recordSafetyHubUnusedSitePermissionsModuleListCountHistogram(
+      suggestions: number) {
+    this.methodCalled(
+        'recordSafetyHubUnusedSitePermissionsModuleListCountHistogram',
+        suggestions);
+  }
+
+  // <if expr="_google_chrome and is_win">
+  recordFeatureNotificationsChange(enabled: boolean) {
+    this.methodCalled('recordFeatureNotificationsChange', enabled);
+  }
+  // </if>
+
+  recordAiPageInteractions(interaction: AiPageInteractions) {
+    this.methodCalled('recordAiPageInteractions', interaction);
+  }
+
+  recordAiPageHistorySearchInteractions(
+      interaction: AiPageHistorySearchInteractions) {
+    this.methodCalled('recordAiPageHistorySearchInteractions', interaction);
+  }
+
+  recordAiPageComposeInteractions(interaction: AiPageComposeInteractions) {
+    this.methodCalled('recordAiPageComposeInteractions', interaction);
+  }
+
+  recordAiPageSuggestionsInteractions(
+      interaction: AiPageSuggestionsInteractions) {
+    this.methodCalled('recordAiPageSuggestionsInteractions', interaction);
+  }
+
+  recordYourSavedInfoCategoryClick(category: YourSavedInfoDataCategory) {
+    this.methodCalled('recordYourSavedInfoCategoryClick', [category]);
+    if (category !== YourSavedInfoDataCategory.COUNT) {
+      this.recordAction(`Settings.YourSavedInfo.CategoryClick.${
+          YourSavedInfoDataCategory[category]}`);
+    }
+  }
+
+  recordYourSavedInfoDataChipClick(chip: YourSavedInfoDataChip) {
+    this.methodCalled('recordYourSavedInfoDataChipClick', [chip]);
+    if (chip !== YourSavedInfoDataChip.COUNT) {
+      this.recordAction(
+          `Settings.YourSavedInfo.ChipClick.${YourSavedInfoDataChip[chip]}`);
+    }
+  }
+
+  recordYourSavedInfoRelatedServiceClick(service: YourSavedInfoRelatedService) {
+    this.methodCalled('recordYourSavedInfoRelatedServiceClick', [service]);
+    if (service !== YourSavedInfoRelatedService.COUNT) {
+      this.recordAction(`Settings.YourSavedInfo.RelatedServiceClick.${
+          YourSavedInfoRelatedService[service]}`);
+    }
+  }
+
+  recordSuggestionsFromGeminiEntryPointClick(
+      entryPoint: SuggestionsFromGeminiEntryPoint) {
+    this.methodCalled('recordSuggestionsFromGeminiEntryPointClick', entryPoint);
+    if (entryPoint !== SuggestionsFromGeminiEntryPoint.COUNT) {
+      const actionMap = {
+        [SuggestionsFromGeminiEntryPoint.YOUR_SAVED_INFO]:
+            'PersonalContext.Settings.EntryPoint.AutofillAndPasswordsSettings',
+        [SuggestionsFromGeminiEntryPoint.TRAVEL]:
+            'PersonalContext.Settings.EntryPoint.TravelSettings',
+        [SuggestionsFromGeminiEntryPoint.SHOPPING]:
+            'PersonalContext.Settings.EntryPoint.ShoppingSettings',
+        [SuggestionsFromGeminiEntryPoint.IDENTITY_DOCS]:
+            'PersonalContext.Settings.EntryPoint.IdentityDocsSettings',
+      };
+      this.recordAction(actionMap[entryPoint]);
+    }
+  }
+
+  recordSuggestionsFromGeminiAction(action: SuggestionsFromGeminiAction) {
+    this.methodCalled('recordSuggestionsFromGeminiAction', action);
+    if (action !== SuggestionsFromGeminiAction.COUNT) {
+      const actionMap = {
+        [SuggestionsFromGeminiAction.MANAGE_CONNECTED_APPS_CLICK]:
+            'PersonalContext.Settings.ManageConnectedAppsClick',
+        [SuggestionsFromGeminiAction.TOGGLE_ON]:
+            'PersonalContext.Settings.ToggledOn',
+        [SuggestionsFromGeminiAction.TOGGLE_OFF]:
+            'PersonalContext.Settings.ToggledOff',
+      };
+      this.recordAction(actionMap[action]);
+    }
   }
 }

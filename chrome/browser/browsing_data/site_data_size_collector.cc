@@ -10,7 +10,6 @@
 #include "base/functional/bind.h"
 #include "base/task/thread_pool.h"
 #include "chrome/common/chrome_constants.h"
-#include "chrome/common/pref_names.h"
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/storage_usage_info.h"
 #include "content/public/common/content_constants.h"
@@ -18,9 +17,7 @@
 namespace {
 
 int64_t GetFileSizeBlocking(const base::FilePath& file_path) {
-  int64_t size = 0;
-  bool success = base::GetFileSize(file_path, &size);
-  return success ? size : -1;
+  return base::GetFileSize(file_path).value_or(-1);
 }
 
 }  // namespace
@@ -37,8 +34,7 @@ SiteDataSizeCollector::SiteDataSizeCollector(
       in_flight_operations_(0),
       total_bytes_(0) {}
 
-SiteDataSizeCollector::~SiteDataSizeCollector() {
-}
+SiteDataSizeCollector::~SiteDataSizeCollector() = default;
 
 void SiteDataSizeCollector::Fetch(FetchCallback callback) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
@@ -97,11 +93,12 @@ void SiteDataSizeCollector::OnLocalStorageModelInfoLoaded(
 }
 
 void SiteDataSizeCollector::OnQuotaModelInfoLoaded(
-    const QuotaStorageUsageInfoList& quota_storage_info_list) {
+    QuotaStorageUsageInfoList quota_storage_info_list) {
   DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
   int64_t total_size = 0;
-  for (const auto& quota_info : quota_storage_info_list)
-    total_size += quota_info.temporary_usage + quota_info.syncable_usage;
+  for (const auto& quota_info : quota_storage_info_list) {
+    total_size += quota_info.usage;
+  }
   OnStorageSizeFetched(total_size);
 }
 

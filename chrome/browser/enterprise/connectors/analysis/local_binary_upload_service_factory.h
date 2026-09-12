@@ -5,17 +5,15 @@
 #ifndef CHROME_BROWSER_ENTERPRISE_CONNECTORS_ANALYSIS_LOCAL_BINARY_UPLOAD_SERVICE_FACTORY_H_
 #define CHROME_BROWSER_ENTERPRISE_CONNECTORS_ANALYSIS_LOCAL_BINARY_UPLOAD_SERVICE_FACTORY_H_
 
-#include "base/memory/singleton.h"
+#include "base/no_destructor.h"
 #include "chrome/browser/profiles/profile_keyed_service_factory.h"
 
 class KeyedService;
 class Profile;
 
-namespace safe_browsing {
-class BinaryUploadService;
-}
-
 namespace enterprise_connectors {
+
+class BinaryUploadService;
 
 // Singleton that owns LocalBinaryUploadService objects, one for each active
 // Profile. It listens to profile destroy events and destroy its associated
@@ -25,7 +23,7 @@ class LocalBinaryUploadServiceFactory : public ProfileKeyedServiceFactory {
  public:
   // Creates the service if it doesn't exist already for the given |profile|.
   // If the service already exists, return its pointer.
-  static safe_browsing::BinaryUploadService* GetForProfile(Profile* profile);
+  static BinaryUploadService* GetForProfile(Profile* profile);
 
   // Get the singleton instance.
   static LocalBinaryUploadServiceFactory* GetInstance();
@@ -36,13 +34,13 @@ class LocalBinaryUploadServiceFactory : public ProfileKeyedServiceFactory {
       const LocalBinaryUploadServiceFactory&) = delete;
 
  private:
-  friend struct base::DefaultSingletonTraits<LocalBinaryUploadServiceFactory>;
+  friend base::NoDestructor<LocalBinaryUploadServiceFactory>;
 
   LocalBinaryUploadServiceFactory();
   ~LocalBinaryUploadServiceFactory() override = default;
 
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
 };
 

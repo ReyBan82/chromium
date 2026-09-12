@@ -12,26 +12,30 @@
 #include "chrome/browser/ui/webui/side_panel/reading_list/reading_list.mojom.h"
 #include "components/reading_list/core/reading_list_model.h"
 #include "components/reading_list/core/reading_list_model_observer.h"
+#include "content/public/browser/web_contents.h"
+#include "content/public/browser/web_contents_observer.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "mojo/public/cpp/bindings/pending_remote.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "ui/menus/simple_menu_model.h"
 
 namespace base {
 class Clock;
 }
 
 namespace content {
-class WebContents;
 class WebUI;
 }  // namespace content
 
+class BrowserWindowInterface;
 class GURL;
 class ReadingListUI;
 class ReadingListEntry;
 
 class ReadingListPageHandler : public reading_list::mojom::PageHandler,
-                               public ReadingListModelObserver {
+                               public ReadingListModelObserver,
+                               public content::WebContentsObserver {
  public:
   ReadingListPageHandler(
       mojo::PendingReceiver<reading_list::mojom::PageHandler> receiver,
@@ -45,7 +49,6 @@ class ReadingListPageHandler : public reading_list::mojom::PageHandler,
   // reading_list::mojom::PageHandler:
   void GetReadLaterEntries(GetReadLaterEntriesCallback callback) override;
   void OpenURL(const GURL& url,
-               bool mark_as_read,
                ui::mojom::ClickModifiersPtr click_modifiers) override;
   void UpdateReadStatus(const GURL& url, bool read) override;
   void MarkCurrentTabAsRead() override;
@@ -55,6 +58,7 @@ class ReadingListPageHandler : public reading_list::mojom::PageHandler,
   void UpdateCurrentPageActionButtonState() override;
   void ShowUI() override;
   void CloseUI() override;
+  void GetWindowData(GetWindowDataCallback callback) override;
 
   // ReadingListModelObserver:
   void ReadingListModelLoaded(const ReadingListModel* model) override {}
@@ -63,17 +67,25 @@ class ReadingListPageHandler : public reading_list::mojom::PageHandler,
   void ReadingListModelBeingDeleted(const ReadingListModel* model) override;
   void ReadingListDidApplyChanges(ReadingListModel* model) override;
 
-  const absl::optional<GURL> GetActiveTabURL();
+  // content::WebContentsObserver:
+  void WebContentsDestroyed() override;
+
+  const std::optional<GURL> GetActiveTabURL();
   void SetActiveTabURL(const GURL& url);
 
   void set_web_contents_for_testing(content::WebContents* web_contents) {
-    web_contents_ = web_contents;
+    Observe(web_contents);
   }
 
   reading_list::mojom::CurrentPageActionButtonState
   GetCurrentPageActionButtonStateForTesting() {
     return current_page_action_button_state_;
   }
+
+  std::unique_ptr<ui::SimpleMenuModel> GetItemContextMenuModelForTesting(
+      BrowserWindowInterface* browser,
+      ReadingListModel* reading_list_model,
+      GURL url);
 
  private:
   // Gets the reading list entry data used for displaying to the user and
@@ -98,9 +110,8 @@ class ReadingListPageHandler : public reading_list::mojom::PageHandler,
   // |reading_list_ui_| to remain valid for the lifetime of |this|.
   const raw_ptr<ReadingListUI> reading_list_ui_;
   const raw_ptr<content::WebUI> web_ui_;
-  raw_ptr<content::WebContents> web_contents_;
 
-  absl::optional<GURL> active_tab_url_;
+  std::optional<GURL> active_tab_url_;
   reading_list::mojom::CurrentPageActionButtonState
       current_page_action_button_state_ =
           reading_list::mojom::CurrentPageActionButtonState::kDisabled;

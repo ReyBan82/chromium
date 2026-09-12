@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 #include "ui/gfx/mojom/ca_layer_result_mojom_traits.h"
+
+#include "base/notreached.h"
 #include "build/build_config.h"
 
 namespace mojo {
@@ -17,8 +19,6 @@ EnumTraits<gfx::mojom::CALayerResult, gfx::CALayerResult>::ToMojom(
       return gfx::mojom::CALayerResult::kCALayerSuccess;
     case gfx::kCALayerFailedUnknown:  // = 1,
       return gfx::mojom::CALayerResult::kCALayerFailedUnknown;
-    case gfx::kCALayerFailedStreamVideoNotCandidate:  // = 3,
-      return gfx::mojom::CALayerResult::kCALayerFailedStreamVideoNotCandidate;
     case gfx::kCALayerFailedTextureNotCandidate:  // = 5,
       return gfx::mojom::CALayerResult::kCALayerFailedTextureNotCandidate;
     case gfx::kCALayerFailedTileNotCandidate:  // = 7,
@@ -35,8 +35,6 @@ EnumTraits<gfx::mojom::CALayerResult, gfx::CALayerResult>::ToMojom(
       return gfx::mojom::CALayerResult::kCALayerFailedSurfaceContent;
     case gfx::kCALayerFailedDifferentClipSettings:  // = 16,
       return gfx::mojom::CALayerResult::kCALayerFailedDifferentClipSettings;
-    case gfx::kCALayerFailedDifferentVertexOpacities:  // = 17,
-      return gfx::mojom::CALayerResult::kCALayerFailedDifferentVertexOpacities;
     case gfx::kCALayerFailedRenderPassBackdropFilters:  // = 19,
       return gfx::mojom::CALayerResult::kCALayerFailedRenderPassBackdropFilters;
     case gfx::kCALayerFailedRenderPassPassMask:  // = 20,
@@ -54,12 +52,6 @@ EnumTraits<gfx::mojom::CALayerResult, gfx::CALayerResult>::ToMojom(
           kCALayerFailedQuadRoundedCornerNotUniform;
     case gfx::kCALayerFailedTooManyQuads:  // = 27,
       return gfx::mojom::CALayerResult::kCALayerFailedTooManyQuads;
-    case gfx::kCALayerFailedYUVNotCandidate:  // = 28,
-      return gfx::mojom::CALayerResult::kCALayerFailedYUVNotCandidate;
-    case gfx::kCALayerFailedYUVTexcoordMismatch:  // = 29,
-      return gfx::mojom::CALayerResult::kCALayerFailedYUVTexcoordMismatch;
-    case gfx::kCALayerFailedYUVInvalidPlanes:  // = 30,
-      return gfx::mojom::CALayerResult::kCALayerFailedYUVInvalidPlanes;
     case gfx::kCALayerFailedCopyRequests:  // = 31,
       return gfx::mojom::CALayerResult::kCALayerFailedCopyRequests;
     case gfx::kCALayerFailedOverlayDisabled:  // = 32,
@@ -68,108 +60,67 @@ EnumTraits<gfx::mojom::CALayerResult, gfx::CALayerResult>::ToMojom(
       return gfx::mojom::CALayerResult::kCALayerFailedVideoCaptureEnabled;
     case gfx::kCALayerUnknownDidNotSwap:  // = 34,
       NOTREACHED();
-      return gfx::mojom::CALayerResult::kCALayerFailedUnknown;
     case gfx::kCALayerUnknownNoWidget:  // = 35,
       NOTREACHED();
-      return gfx::mojom::CALayerResult::kCALayerFailedUnknown;
   }
 
   NOTREACHED() << "CALayer result:" << ca_layer_error_code;
-  return gfx::mojom::CALayerResult::kCALayerFailedUnknown;
 }
 
 // static
-bool EnumTraits<gfx::mojom::CALayerResult, gfx::CALayerResult>::FromMojom(
-    gfx::mojom::CALayerResult input,
-    gfx::CALayerResult* out) {
+gfx::CALayerResult
+EnumTraits<gfx::mojom::CALayerResult, gfx::CALayerResult>::FromMojom(
+    gfx::mojom::CALayerResult input) {
   switch (input) {
     case gfx::mojom::CALayerResult::kCALayerSuccess:  // = 0
-      *out = gfx::kCALayerSuccess;
-      return true;
+      return gfx::kCALayerSuccess;
     case gfx::mojom::CALayerResult::kCALayerFailedUnknown:  // = 1
-      *out = gfx::kCALayerFailedUnknown;
-      return true;
-    case gfx::mojom::CALayerResult::
-        kCALayerFailedStreamVideoNotCandidate:  // = 3
-      *out = gfx::kCALayerFailedStreamVideoNotCandidate;
-      return true;
+      return gfx::kCALayerFailedUnknown;
     case gfx::mojom::CALayerResult::kCALayerFailedTextureNotCandidate:  // = 5
-      *out = gfx::kCALayerFailedTextureNotCandidate;
-      return true;
+      return gfx::kCALayerFailedTextureNotCandidate;
     case gfx::mojom::CALayerResult::kCALayerFailedTileNotCandidate:  // = 7
-      *out = gfx::kCALayerFailedTileNotCandidate;
-      return true;
+      return gfx::kCALayerFailedTileNotCandidate;
     case gfx::mojom::CALayerResult::kCALayerFailedQuadBlendMode:  // = 8
-      *out = gfx::kCALayerFailedQuadBlendMode;
-      return true;
+      return gfx::kCALayerFailedQuadBlendMode;
     case gfx::mojom::CALayerResult::kCALayerFailedQuadClipping:  // = 10
-      *out = gfx::kCALayerFailedQuadClipping;
-      return true;
+      return gfx::kCALayerFailedQuadClipping;
     case gfx::mojom::CALayerResult::kCALayerFailedDebugBoarder:  // = 11
-      *out = gfx::kCALayerFailedDebugBoarder;
-      return true;
+      return gfx::kCALayerFailedDebugBoarder;
     case gfx::mojom::CALayerResult::kCALayerFailedPictureContent:  // = 12
-      *out = gfx::kCALayerFailedPictureContent;
-      return true;
+      return gfx::kCALayerFailedPictureContent;
     case gfx::mojom::CALayerResult::kCALayerFailedSurfaceContent:  // = 14
-      *out = gfx::kCALayerFailedSurfaceContent;
-      return true;
+      return gfx::kCALayerFailedSurfaceContent;
     case gfx::mojom::CALayerResult::kCALayerFailedDifferentClipSettings:  // =
                                                                           // 16
-      *out = gfx::kCALayerFailedDifferentClipSettings;
-      return true;
-    case gfx::mojom::CALayerResult::
-        kCALayerFailedDifferentVertexOpacities:  // = 17
-      *out = gfx::kCALayerFailedDifferentVertexOpacities;
-      return true;
+      return gfx::kCALayerFailedDifferentClipSettings;
     case gfx::mojom::CALayerResult::
         kCALayerFailedRenderPassBackdropFilters:  // = 19
-      *out = gfx::kCALayerFailedRenderPassBackdropFilters;
-      return true;
+      return gfx::kCALayerFailedRenderPassBackdropFilters;
     case gfx::mojom::CALayerResult::kCALayerFailedRenderPassPassMask:  // = 20
-      *out = gfx::kCALayerFailedRenderPassPassMask;
-      return true;
+      return gfx::kCALayerFailedRenderPassPassMask;
     case gfx::mojom::CALayerResult::
         kCALayerFailedRenderPassFilterOperation:  // = 21
-      *out = gfx::kCALayerFailedRenderPassFilterOperation;
-      return true;
+      return gfx::kCALayerFailedRenderPassFilterOperation;
     case gfx::mojom::CALayerResult::
         kCALayerFailedRenderPassSortingContextId:  // = 22
-      *out = gfx::kCALayerFailedRenderPassSortingContextId;
-      return true;
+      return gfx::kCALayerFailedRenderPassSortingContextId;
     case gfx::mojom::CALayerResult::
         kCALayerFailedTooManyRenderPassDrawQuads:  // = 23
-      *out = gfx::kCALayerFailedTooManyRenderPassDrawQuads;
-      return true;
+      return gfx::kCALayerFailedTooManyRenderPassDrawQuads;
     case gfx::mojom::CALayerResult::
         kCALayerFailedQuadRoundedCornerNotUniform:  // = 26
-      *out = gfx::kCALayerFailedQuadRoundedCornerNotUniform;
-      return true;
+      return gfx::kCALayerFailedQuadRoundedCornerNotUniform;
     case gfx::mojom::CALayerResult::kCALayerFailedTooManyQuads:  // = 27
-      *out = gfx::kCALayerFailedTooManyQuads;
-      return true;
-    case gfx::mojom::CALayerResult::kCALayerFailedYUVNotCandidate:  // = 28
-      *out = gfx::kCALayerFailedYUVNotCandidate;
-      return true;
-    case gfx::mojom::CALayerResult::kCALayerFailedYUVTexcoordMismatch:  // = 29
-      *out = gfx::kCALayerFailedYUVTexcoordMismatch;
-      return true;
-    case gfx::mojom::CALayerResult::kCALayerFailedYUVInvalidPlanes:  // = 30
-      *out = gfx::kCALayerFailedYUVInvalidPlanes;
-      return true;
+      return gfx::kCALayerFailedTooManyQuads;
     case gfx::mojom::CALayerResult::kCALayerFailedCopyRequests:  // = 31
-      *out = gfx::kCALayerFailedCopyRequests;
-      return true;
+      return gfx::kCALayerFailedCopyRequests;
     case gfx::mojom::CALayerResult::kCALayerFailedOverlayDisabled:  // = 32
-      *out = gfx::kCALayerFailedOverlayDisabled;
-      return true;
+      return gfx::kCALayerFailedOverlayDisabled;
     case gfx::mojom::CALayerResult::kCALayerFailedVideoCaptureEnabled:  // = 33
-      *out = gfx::kCALayerFailedVideoCaptureEnabled;
-      return true;
+      return gfx::kCALayerFailedVideoCaptureEnabled;
   }
 
   NOTREACHED() << "Invalid CALayer result: " << input;
-  return false;
 }
 #endif
 

@@ -4,6 +4,8 @@
 
 #include "third_party/blink/public/platform/file_path_conversion.h"
 
+#include <string_view>
+
 #include "base/files/file_path.h"
 #include "build/build_config.h"
 #include "third_party/blink/public/platform/web_string.h"
@@ -12,23 +14,25 @@
 
 namespace blink {
 
-base::FilePath StringToFilePath(const String& str) {
-  if (str.empty())
+base::FilePath StringViewToFilePath(const StringView& str) {
+  if (str.empty()) {
     return base::FilePath();
-
-  if (!str.Is8Bit()) {
-    return base::FilePath::FromUTF16Unsafe(
-        base::StringPiece16(str.Characters16(), str.length()));
   }
-
+  if (!str.Is8Bit()) {
+    return base::FilePath::FromUTF16Unsafe(std::u16string_view(str.Span16()));
+  }
 #if BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
-  StringUTF8Adaptor utf8(str);
-  return base::FilePath::FromUTF8Unsafe(utf8.AsStringPiece());
+  StringUtf8Adaptor utf8(str);
+  return base::FilePath::FromUTF8Unsafe(utf8.AsStringView());
 #else
-  const LChar* data8 = str.Characters8();
+  auto span8 = str.Span8();
   return base::FilePath::FromUTF16Unsafe(
-      std::u16string(data8, data8 + str.length()));
+      std::u16string(span8.begin(), span8.end()));
 #endif
+}
+
+base::FilePath StringToFilePath(const String& str) {
+  return StringViewToFilePath(str);
 }
 
 base::FilePath WebStringToFilePath(const WebString& web_string) {
@@ -40,9 +44,9 @@ WebString FilePathToWebString(const base::FilePath& path) {
     return WebString();
 
 #if BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
-  return WebString::FromUTF8(path.value());
+  return WebString::FromUtf8(path.value());
 #else
-  return WebString::FromUTF16(path.AsUTF16Unsafe());
+  return WebString::FromUtf16(path.AsUTF16Unsafe());
 #endif
 }
 

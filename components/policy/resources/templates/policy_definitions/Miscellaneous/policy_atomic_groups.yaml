@@ -1,5 +1,6 @@
-PrivateNetworkRequestSettings:
-  caption: Private network request settings
+SocketPoolSizeSettings:
+  caption: Socket pool size settings
   policies:
-  - InsecurePrivateNetworkRequestsAllowed
-  - InsecurePrivateNetworkRequestsAllowedForUrls
+  - MaxConnectionsPerProxy
+  - MaxConnectionsPerProxyForWebSocket
+  - AllowSocketPoolSizeRandomizationForProxies

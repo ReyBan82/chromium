@@ -37,10 +37,10 @@ bool HttpAuthHandler::InitFromChallenge(
   net_log_.BeginEvent(NetLogEventType::AUTH_HANDLER_INIT);
   bool ok = Init(challenge, ssl_info, network_anonymization_key);
   net_log_.EndEvent(NetLogEventType::AUTH_HANDLER_INIT, [&]() {
-    base::Value::Dict params;
+    base::DictValue params;
     params.Set("succeeded", ok);
     params.Set("allows_default_credentials", AllowsDefaultCredentials());
-    return base::Value(std::move(params));
+    return params;
   });
 
   // Init() is expected to set the scheme, realm, score, and properties.  The

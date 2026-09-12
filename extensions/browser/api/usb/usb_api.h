@@ -25,7 +25,7 @@
 namespace extensions {
 
 class DevicePermissionEntry;
-class DevicePermissionsPrompt;
+class UsbDevicePermissionsPrompt;
 class DevicePermissionsManager;
 class UsbDeviceResource;
 
@@ -75,7 +75,7 @@ class UsbTransferFunction : public UsbConnectionFunction {
   ~UsbTransferFunction() override;
 
   void OnCompleted(device::mojom::UsbTransferStatus status,
-                   base::Value::Dict transfer_info);
+                   base::DictValue transfer_info);
   void OnTransferInCompleted(device::mojom::UsbTransferStatus status,
                              base::span<const uint8_t> data);
   void OnTransferOutCompleted(device::mojom::UsbTransferStatus status);
@@ -89,7 +89,7 @@ class UsbGenericTransferFunction : public UsbTransferFunction {
 
   // InterruptTransfer::Params and BulkTransfer::Params
   template <typename T>
-  ExtensionFunction::ResponseAction DoTransfer(T params);
+  ExtensionFunction::ResponseAction DoTransfer(const T& params);
 };
 
 class UsbFindDevicesFunction : public UsbExtensionFunction {
@@ -117,7 +117,7 @@ class UsbFindDevicesFunction : public UsbExtensionFunction {
 
   uint16_t vendor_id_;
   uint16_t product_id_;
-  base::Value::List result_;
+  base::ListValue result_;
   base::RepeatingClosure barrier_;
 };
 
@@ -162,7 +162,7 @@ class UsbGetUserSelectedDevicesFunction : public UsbExtensionFunction {
 
   void OnDevicesChosen(std::vector<device::mojom::UsbDeviceInfoPtr> devices);
 
-  std::unique_ptr<DevicePermissionsPrompt> prompt_;
+  std::unique_ptr<UsbDevicePermissionsPrompt> prompt_;
 };
 
 class UsbGetConfigurationsFunction : public UsbPermissionCheckingFunction {
@@ -438,7 +438,7 @@ class UsbResetDeviceFunction : public UsbConnectionFunction {
 
   void OnComplete(bool success);
 
-  std::unique_ptr<api::usb::ResetDevice::Params> parameters_;
+  std::optional<api::usb::ResetDevice::Params> parameters_;
 };
 }  // namespace extensions
 

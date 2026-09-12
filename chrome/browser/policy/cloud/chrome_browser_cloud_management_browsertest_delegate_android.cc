@@ -66,7 +66,7 @@ bool ChromeBrowserCloudManagementBrowserTestDelegateAndroid::
   // Manager is always initialized immediately on Android, so it unblocks
   // startup routines that wait for policy service to be available (e.g. FRE).
   //
-  // TODO(http://crbug.com/1203435): this may no longer be needed now that we
+  // TODO(http://crbug.com/40179523): this may no longer be needed now that we
   // use ProxyPolicyProvider as an indirection to the manager.
   return true;
 }
@@ -99,7 +99,7 @@ void ChromeBrowserCloudManagementBrowserTestDelegateAndroid::
       ->GetPolicyConverterForTesting()  // IN-TEST
       ->SetPolicyValueForTesting(       // IN-TEST
           key::kCloudManagementEnrollmentToken, base::Value(enrollment_token));
-  platform_provider->FlushPolicies(nullptr, nullptr);
+  platform_provider->FlushPolicies(nullptr);
 
   enrollment_observer.WaitForEnrollmentConfirmation();
 }

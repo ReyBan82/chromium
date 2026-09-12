@@ -6,18 +6,14 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
+#include "chrome/browser/ash/browser_delegate/browser_controller_impl.h"
 #include "chrome/browser/chromeos/arc/arc_web_contents_data.h"
-#include "chrome/browser/sharing/click_to_call/click_to_call_ui_controller.h"
-#include "chrome/browser/sharing/fake_device_info.h"
-#include "chrome/browser/sharing/mock_sharing_service.h"
-#include "chrome/browser/sharing/proto/click_to_call_message.pb.h"
-#include "chrome/browser/sharing/proto/sharing_message.pb.h"
-#include "chrome/browser/sharing/sharing_service_factory.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/browser_with_test_window_test.h"
-#include "components/arc/common/intent_helper/arc_intent_helper_mojo_delegate.h"
-#include "components/arc/common/intent_helper/arc_intent_helper_package.h"
-#include "components/arc/common/test/fake_arc_icon_cache.h"
-#include "components/arc/common/test/fake_arc_intent_helper_mojo.h"
+#include "chromeos/ash/experiences/arc/intent_helper/arc_intent_helper_mojo_delegate.h"
+#include "chromeos/ash/experiences/arc/intent_helper/arc_intent_helper_package.h"
+#include "chromeos/ash/experiences/arc/test/fake_arc_icon_cache.h"
+#include "chromeos/ash/experiences/arc/test/fake_arc_intent_helper_mojo.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/render_view_host.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -28,6 +24,7 @@ using ::testing::Property;
 namespace arc {
 
 namespace {
+
 
 // Helper class to run tests that need a dummy WebContents and arc delegate.
 class ArcExternalProtocolDialogTestUtils : public BrowserWithTestWindowTest {
@@ -40,12 +37,16 @@ class ArcExternalProtocolDialogTestUtils : public BrowserWithTestWindowTest {
 
   void SetUp() override {
     BrowserWithTestWindowTest::SetUp();
+    browser_controller_.emplace();
     arc_icon_cache_ = std::make_unique<FakeArcIconCache>();
     delegate_provider_ =
         std::make_unique<ArcIconCacheDelegateProvider>(arc_icon_cache_.get());
   }
 
-  void TearDown() override { BrowserWithTestWindowTest::TearDown(); }
+  void TearDown() override {
+    browser_controller_.reset();
+    BrowserWithTestWindowTest::TearDown();
+  }
 
  protected:
   void CreateTab(bool started_from_arc) {
@@ -64,21 +65,13 @@ class ArcExternalProtocolDialogTestUtils : public BrowserWithTestWindowTest {
         web_contents_);
   }
 
-  MockSharingService* CreateSharingService() {
-    return static_cast<MockSharingService*>(
-        SharingServiceFactory::GetInstance()->SetTestingFactoryAndUse(
-            profile(),
-            base::BindRepeating([](content::BrowserContext* context) {
-              return static_cast<std::unique_ptr<KeyedService>>(
-                  std::make_unique<MockSharingService>());
-            })));
-  }
 
   content::WebContents* web_contents() { return web_contents_; }
 
  private:
   // Keep only one |WebContents| at a time.
-  raw_ptr<content::WebContents> web_contents_;
+  raw_ptr<content::WebContents, DanglingUntriaged> web_contents_;
+  std::optional<ash::BrowserControllerImpl> browser_controller_;
   std::unique_ptr<ArcIconCacheDelegate> arc_icon_cache_;
   std::unique_ptr<ArcIconCacheDelegateProvider> delegate_provider_;
 };
@@ -97,7 +90,7 @@ ArcIntentHelperMojoDelegate::IntentHandlerInfo Create(
     const std::string& activity_name,
     bool is_preferred,
     const GURL& fallback_url) {
-  absl::optional<std::string> url;
+  std::optional<std::string> url;
   if (!fallback_url.is_empty())
     url = fallback_url.spec();
 
@@ -988,115 +981,6 @@ MATCHER_P(ProtoEquals, message, "") {
   message.SerializeToString(&expected_serialized);
   arg.SerializeToString(&actual_serialized);
   return expected_serialized == actual_serialized;
-}
-
-// Tests that clicking on a device calls through to SharingService.
-TEST_F(ArcExternalProtocolDialogTestUtils, TestSelectDeviceForTelLink) {
-  CreateTab(/*started_from_arc=*/false);
-
-  std::string device_guid = "device_guid";
-  MockSharingService* sharing_service = CreateSharingService();
-  std::vector<ArcIntentHelperMojoDelegate::IntentHandlerInfo> handlers;
-  std::vector<std::unique_ptr<syncer::DeviceInfo>> devices;
-  devices.push_back(CreateFakeDeviceInfo(device_guid));
-
-  GURL phone_number("tel:073%2099%209999%2099");
-
-  chrome_browser_sharing::SharingMessage sharing_message;
-  sharing_message.mutable_click_to_call_message()->set_phone_number(
-      phone_number.GetContent());
-  EXPECT_CALL(*sharing_service,
-              SendMessageToDevice(
-                  Property(&syncer::DeviceInfo::guid, device_guid), testing::_,
-                  ProtoEquals(sharing_message), testing::_));
-
-  OnIntentPickerClosedForTesting(
-      web_contents()->GetWeakPtr(), phone_number,
-      /*safe_to_bypass_ui=*/true, std::move(handlers),
-      std::make_unique<FakeArcIntentHelperMojo>(), std::move(devices),
-      /*selected_app_package=*/device_guid, apps::PickerEntryType::kDevice,
-      apps::IntentPickerCloseReason::OPEN_APP, /*should_persist=*/false);
-}
-
-TEST_F(ArcExternalProtocolDialogTestUtils, TestDialogWithoutAppsWithDevices) {
-  CreateTab(/*started_from_arc=*/false);
-
-  MockSharingService* sharing_service = CreateSharingService();
-  std::vector<std::unique_ptr<syncer::DeviceInfo>> devices;
-  devices.push_back(CreateFakeDeviceInfo("device_guid"));
-
-  EXPECT_CALL(*sharing_service, GetDeviceCandidates(testing::_))
-      .WillOnce(testing::Return(testing::ByMove(std::move(devices))));
-
-  base::RunLoop run_loop;
-  ClickToCallUiController::GetOrCreateFromWebContents(web_contents())
-      ->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
-
-  bool handled = false;
-  RunArcExternalProtocolDialog(
-      GURL("tel:12341234"), /*initiating_origin=*/absl::nullopt,
-      web_contents()->GetWeakPtr(), ui::PAGE_TRANSITION_LINK,
-      /*has_user_gesture=*/true, /*is_in_fenced_frame_tree=*/false,
-      std::make_unique<FakeArcIntentHelperMojo>(),
-      base::BindOnce([](bool* handled, bool result) { *handled = result; },
-                     &handled));
-
-  // Wait until the bubble is visible.
-  run_loop.Run();
-  EXPECT_TRUE(handled);
-}
-
-TEST_F(ArcExternalProtocolDialogTestUtils,
-       TestDialogWithoutAppsWithDevicesInFencedFrameWithGesture) {
-  CreateTab(/*started_from_arc=*/false);
-
-  MockSharingService* sharing_service = CreateSharingService();
-  std::vector<std::unique_ptr<syncer::DeviceInfo>> devices;
-  devices.push_back(CreateFakeDeviceInfo("device_guid"));
-
-  EXPECT_CALL(*sharing_service, GetDeviceCandidates(testing::_))
-      .WillOnce(testing::Return(testing::ByMove(std::move(devices))));
-
-  base::RunLoop run_loop;
-  ClickToCallUiController::GetOrCreateFromWebContents(web_contents())
-      ->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
-
-  bool handled = false;
-  RunArcExternalProtocolDialog(
-      GURL("tel:12341234"), /*initiating_origin=*/absl::nullopt,
-      web_contents()->GetWeakPtr(), ui::PAGE_TRANSITION_AUTO_SUBFRAME,
-      /*has_user_gesture=*/true, /*is_in_fenced_frame_tree=*/true,
-      std::make_unique<FakeArcIntentHelperMojo>(),
-      base::BindOnce([](bool* handled, bool result) { *handled = result; },
-                     &handled));
-
-  // Wait until the bubble is visible.
-  run_loop.Run();
-  EXPECT_TRUE(handled);
-}
-
-TEST_F(ArcExternalProtocolDialogTestUtils,
-       TestDialogWithoutAppsWithDevicesInFencedFrameWithoutGesture) {
-  CreateTab(/*started_from_arc=*/false);
-
-  MockSharingService* sharing_service = CreateSharingService();
-  EXPECT_CALL(*sharing_service, GetDeviceCandidates).Times(0);
-
-  base::RunLoop run_loop;
-  ClickToCallUiController::GetOrCreateFromWebContents(web_contents())
-      ->set_on_dialog_shown_closure_for_testing(run_loop.QuitClosure());
-
-  absl::optional<bool> handled;
-  RunArcExternalProtocolDialog(
-      GURL("tel:12341234"), /*initiating_origin=*/absl::nullopt,
-      web_contents()->GetWeakPtr(), ui::PAGE_TRANSITION_AUTO_SUBFRAME,
-      /*has_user_gesture=*/false, /*is_in_fenced_frame_tree=*/true,
-      std::make_unique<FakeArcIntentHelperMojo>(),
-      base::BindOnce(
-          [](absl::optional<bool>* handled, bool result) { *handled = result; },
-          &handled));
-  EXPECT_TRUE(handled.has_value());
-  EXPECT_FALSE(*handled);
 }
 
 }  // namespace arc

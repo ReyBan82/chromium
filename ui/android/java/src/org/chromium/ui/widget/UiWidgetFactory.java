@@ -7,20 +7,22 @@ package org.chromium.ui.widget;
 import android.annotation.SuppressLint;
 import android.app.AlertDialog;
 import android.content.Context;
-import android.widget.PopupWindow;
+import android.widget.Toast;
+
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /**
  * The factory that creates UI widgets. Instead of direct creation of Android popups
  * we should ask this factory to create the object for us.
  */
+@NullMarked
 public class UiWidgetFactory {
-    private static UiWidgetFactory sFactory;
+    private static @Nullable UiWidgetFactory sFactory;
 
     protected UiWidgetFactory() {}
 
-    /**
-     * returns a UiWidgetFactory.
-     */
+    /** returns a UiWidgetFactory. */
     public static UiWidgetFactory getInstance() {
         if (sFactory == null) sFactory = new UiWidgetFactory();
         return sFactory;
@@ -37,13 +39,13 @@ public class UiWidgetFactory {
     }
 
     /**
-     * Returns a new PopupWindow using the given context.
+     * Returns a new ChromePopupWindow using the given context.
      *
-     * @param context The Context that is used to create a new PopupWindow.
-     * @return a new PopupWindow.
+     * @param context The Context that is used to create a new ChromePopupWindow.
+     * @return a new ChromePopupWindow.
      */
-    public PopupWindow createPopupWindow(Context context) {
-        return new PopupWindow(context);
+    public ChromePopupWindow createPopupWindow(Context context) {
+        return new ChromePopupWindow(context);
     }
 
     /**
@@ -63,8 +65,8 @@ public class UiWidgetFactory {
      * @return a new android.widget.Toast.
      */
     @SuppressLint("ShowToast")
-    public android.widget.Toast createToast(Context context) {
-        return new android.widget.Toast(context);
+    public Toast createToast(Context context) {
+        return new Toast(context);
     }
 
     /**
@@ -74,7 +76,7 @@ public class UiWidgetFactory {
      * @return a new android.widget.Toast.
      */
     @SuppressLint("ShowToast")
-    public android.widget.Toast makeToast(Context context, CharSequence text, int duration) {
-        return android.widget.Toast.makeText(context, text, duration);
+    public Toast makeToast(Context context, CharSequence text, int duration) {
+        return Toast.makeText(context, text, duration);
     }
 }

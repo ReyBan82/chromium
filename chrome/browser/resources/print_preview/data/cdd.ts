@@ -12,8 +12,9 @@ export interface LocalizedString {
 }
 
 export type VendorCapabilitySelectOption = {
+  value: string,
   display_name?: string,
-  display_name_localized?: LocalizedString[], value: number|string|boolean,
+  display_name_localized?: LocalizedString[],
 }&OptionWithDefault;
 
 /**
@@ -26,31 +27,67 @@ export enum VendorCapabilityValueType {
   STRING = 'STRING',
 }
 
+/**
+ * Values matching the types of duplex in a CDD.
+ */
+export enum DuplexType {
+  NO_DUPLEX = 'NO_DUPLEX',
+  LONG_EDGE = 'LONG_EDGE',
+  SHORT_EDGE = 'SHORT_EDGE',
+}
+
 interface SelectCapability {
   option?: VendorCapabilitySelectOption[];
 }
 
 interface TypedValueCapability {
-  default?: number|string|boolean;
+  default?: string;
   value_type?: VendorCapabilityValueType;
 }
 
 interface RangeCapability {
-  default: number;
+  default: string;
+}
+
+export enum VendorCapabilityType {
+  RANGE = 'RANGE',
+  SELECT = 'SELECT',
+  TYPED_VALUE = 'TYPED_VALUE',
+  UNKNOWN = 'UNKNOWN',
+}
+
+interface VendorCapabilityBase {
+  type: VendorCapabilityType;
+  id: string;
+  display_name?: string;
+  display_name_localized?: LocalizedString[];
+}
+
+interface VendorCapabilityUnknown extends VendorCapabilityBase {
+  type: VendorCapabilityType.UNKNOWN;
+  id: '';
+}
+
+interface VendorCapabilityRange extends VendorCapabilityBase {
+  type: VendorCapabilityType.RANGE;
+  range_cap: RangeCapability;
+}
+
+interface VendorCapabilitySelect extends VendorCapabilityBase {
+  type: VendorCapabilityType.SELECT;
+  select_cap: SelectCapability;
+}
+
+interface VendorCapabilityTypedValue extends VendorCapabilityBase {
+  type: VendorCapabilityType.TYPED_VALUE;
+  typed_value_cap: TypedValueCapability;
 }
 
 /**
  * Specifies a custom vendor capability.
  */
-export interface VendorCapability {
-  id: string;
-  display_name?: string;
-  display_name_localized?: LocalizedString[];
-  type: string;
-  select_cap?: SelectCapability;
-  typed_value_cap?: TypedValueCapability;
-  range_cap?: RangeCapability;
-}
+export type VendorCapability = VendorCapabilityUnknown|VendorCapabilityRange|
+    VendorCapabilitySelect|VendorCapabilityTypedValue;
 
 export interface CapabilityWithReset {
   reset_to_default?: boolean;
@@ -84,7 +121,7 @@ type DuplexCapability = {
   option: DuplexOption[],
 }&CapabilityWithReset;
 
-type PageOrientationOption = {
+export type PageOrientationOption = {
   type?: string,
 }&OptionWithDefault;
 
@@ -115,11 +152,6 @@ export type DpiCapability = {
   option: DpiOption[],
 }&CapabilityWithReset;
 
-interface PinCapability {
-  supported?: boolean;
-}
-
-
 /**
  * Capabilities of a print destination represented in a CDD.
  * Pin capability is not a part of standard CDD description and is defined
@@ -134,9 +166,6 @@ export interface CddCapabilities {
   page_orientation?: PageOrientationCapability;
   media_size?: MediaSizeCapability;
   dpi?: DpiCapability;
-  // <if expr="is_chromeos">
-  pin?: PinCapability;
-  // </if>
 }
 
 /**

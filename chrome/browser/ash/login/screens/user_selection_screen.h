@@ -9,13 +9,14 @@
 #include <string>
 #include <vector>
 
-#include "ash/public/cpp/session/user_info.h"
+#include "ash/public/cpp/token_handle_store.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "chrome/browser/ash/login/saml/password_sync_token_checkers_collection.h"
-#include "chrome/browser/ash/login/signin/token_handle_util.h"
-#include "chrome/browser/ash/login/ui/login_display.h"
 #include "chrome/browser/ash/login/user_online_signin_notifier.h"
 #include "chrome/browser/ash/system/system_clock.h"
 #include "chromeos/ash/components/dbus/cryptohome/rpc.pb.h"
@@ -27,10 +28,24 @@
 #include "ui/base/ime/ash/input_method_manager.h"
 
 class AccountId;
+class ApplicationLocaleStorage;
+class PrefService;
+
+namespace network {
+class SharedURLLoaderFactory;
+}  // namespace network
+
+namespace policy {
+class BrowserPolicyConnectorAsh;
+}  // namespace policy
+
+namespace user_manager {
+class MultiUserSignInPolicyController;
+}  // namespace user_manager
 
 namespace ash {
 
-class EasyUnlockService;
+class SmartLockService;
 class UserBoardView;
 struct LoginUserInfo;
 
@@ -43,7 +58,19 @@ class UserSelectionScreen
       public PasswordSyncTokenLoginChecker::Observer,
       public UserOnlineSigninNotifier::Observer {
  public:
-  explicit UserSelectionScreen(DisplayedScreen display_type);
+  // `local_state`, `application_locale_storage`,
+  // `browser_policy_connector_ash`, `multi_user_sign_in_policy_controller`,
+  // and `system_clock` must be non-null and must outlive `this`.
+  // `shared_url_loader_factory` must be non-null.
+  UserSelectionScreen(
+      PrefService* local_state,
+      const ApplicationLocaleStorage* application_locale_storage,
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      const policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
+      const user_manager::MultiUserSignInPolicyController*
+          multi_user_sign_in_policy_controller,
+      system::SystemClock* system_clock,
+      DisplayedScreen display_type);
 
   UserSelectionScreen(const UserSelectionScreen&) = delete;
   UserSelectionScreen& operator=(const UserSelectionScreen&) = delete;
@@ -64,10 +91,7 @@ class UserSelectionScreen
   void HandleNoPodFocused();
   void OnBeforeShow();
 
-  // Methods for easy unlock support.
-  void HardLockPod(const AccountId& account_id);
   void AttemptEasyUnlock(const AccountId& account_id);
-
   void InitEasyUnlock();
 
   void SetTpmLockedState(bool is_locked, base::TimeDelta time_left);
@@ -75,11 +99,6 @@ class UserSelectionScreen
   // proximity_auth::ScreenlockBridge::LockHandler implementation:
   void ShowBannerMessage(const std::u16string& message,
                          bool is_warning) override;
-  void ShowUserPodCustomIcon(
-      const AccountId& account_id,
-      const proximity_auth::ScreenlockBridge::UserPodCustomIconInfo& icon_info)
-      override;
-  void HideUserPodCustomIcon(const AccountId& account_id) override;
   void SetSmartLockState(const AccountId& account_id,
                          SmartLockState state) override;
   void NotifySmartLockAuthResult(const AccountId& account_id,
@@ -104,17 +123,18 @@ class UserSelectionScreen
   // UserOnlineSigninNotifier::Observer
   void OnOnlineSigninEnforced(const AccountId& account_id) override;
 
-  // Determines if user auth status requires online sign in.
-  static bool ShouldForceOnlineSignIn(const user_manager::User* user);
-
-  // Builds a `UserAvatar` instance which contains the current image for `user`.
-  static UserAvatar BuildAshUserAvatarForUser(const user_manager::User& user);
-
   std::vector<LoginUserInfo> UpdateAndReturnUserListForAsh();
   void SetUsersLoaded(bool loaded);
 
  protected:
-  UserBoardView* view_ = nullptr;
+  const raw_ref<PrefService> local_state_;
+  const raw_ref<const ApplicationLocaleStorage> application_locale_storage_;
+  const scoped_refptr<network::SharedURLLoaderFactory>
+      shared_url_loader_factory_;
+  const raw_ref<const policy::BrowserPolicyConnectorAsh>
+      browser_policy_connector_ash_;
+
+  raw_ptr<UserBoardView> view_ = nullptr;
 
   // Map from public session account IDs to recommended locales set by policy.
   std::map<AccountId, std::vector<std::string>>
@@ -127,12 +147,17 @@ class UserSelectionScreen
   class DircryptoMigrationChecker;
   class TpmLockedChecker;
 
-  EasyUnlockService* GetEasyUnlockServiceForUser(
+  SmartLockService* GetSmartLockServiceForUser(
       const AccountId& account_id) const;
 
   void OnUserStatusChecked(const AccountId& account_id,
-                           TokenHandleUtil::TokenHandleStatus status);
+                           const std::string& token,
+                           bool reauth_required);
   void OnAllowedInputMethodsChanged();
+
+  const raw_ref<const user_manager::MultiUserSignInPolicyController>
+      multi_user_sign_in_policy_controller_;
+  const raw_ref<system::SystemClock> system_clock_;
 
   // Purpose of the screen.
   const DisplayedScreen display_type_;
@@ -144,11 +169,8 @@ class UserSelectionScreen
   // contained in the map, it is using the default authentication type.
   std::map<AccountId, proximity_auth::mojom::AuthType> user_auth_type_map_;
 
-  // Timer for measuring idle state duration before password clear.
-  base::OneShotTimer password_clear_timer_;
-
-  // Token handler util for checking user OAuth token status.
-  std::unique_ptr<TokenHandleUtil> token_handle_util_;
+  // Used for checking user OAuth token status.
+  raw_ptr<TokenHandleStore> token_handle_store_;
 
   // Helper to check whether a user needs dircrypto migration.
   std::unique_ptr<DircryptoMigrationChecker> dircrypto_migration_checker_;
@@ -159,13 +181,13 @@ class UserSelectionScreen
   user_manager::UserList users_to_send_;
 
   AccountId focused_pod_account_id_;
-  absl::optional<system::SystemClock::ScopedHourClockType>
+  std::optional<system::SystemClock::ScopedHourClockType>
       focused_user_clock_type_;
 
   // Sometimes we might get focused pod while user session is still active. e.g.
   // while creating lock screen. So postpone any work until after the session
   // state changes.
-  absl::optional<AccountId> pending_focused_account_id_;
+  std::optional<AccountId> pending_focused_account_id_;
 
   // Input Method Engine state used at the user selection screen.
   scoped_refptr<input_method::InputMethodManager::State> ime_state_;

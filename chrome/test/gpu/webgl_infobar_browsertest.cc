@@ -6,12 +6,10 @@
 #include "base/path_service.h"
 #include "base/strings/utf_string_conversions.h"
 #include "build/build_config.h"
-#include "chrome/browser/chrome_notification_types.h"
-#include "chrome/browser/infobars/infobar_observer.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/infobars/test_support/infobar_observer.h"
 #include "chrome/browser/ui/browser_commands.h"
-#include "chrome/browser/ui/browser_navigator.h"
-#include "chrome/browser/ui/browser_navigator_params.h"
+#include "chrome/browser/ui/navigator/browser_navigator.h"
+#include "chrome/browser/ui/navigator/browser_navigator_params.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
@@ -30,11 +28,12 @@
 #include "testing/gtest/include/gtest/gtest.h"
 #include "third_party/blink/public/common/chrome_debug_urls.h"
 #include "ui/base/page_transition_types.h"
+#include "ui/base/window_open_disposition.h"
 #include "ui/gl/gl_implementation.h"
 
 namespace {
 
-void SimulateGPUCrash(Browser* browser) {
+void SimulateGPUCrash(BrowserWindowInterface* browser) {
   // None of the ui_test_utils entry points supports what we need to
   // do here: navigate with the PAGE_TRANSITION_FROM_ADDRESS_BAR flag,
   // without waiting for the navigation. It would be painful to change
@@ -60,7 +59,7 @@ class WebGLInfoBarTest : public InProcessBrowserTest {
   base::FilePath gpu_test_dir_;
 };
 
-// This test is flaky. http://crbug.com/324555
+// This test is flaky. http://crbug.com/40343251
 IN_PROC_BROWSER_TEST_F(WebGLInfoBarTest, DISABLED_ContextLossRaisesInfoBar) {
 #undef MAYBE_ContextLossRaisesInfoBard
   if (gpu::GPUTestBotConfig::CurrentConfigMatches("XP"))
@@ -81,7 +80,7 @@ IN_PROC_BROWSER_TEST_F(WebGLInfoBarTest, DISABLED_ContextLossRaisesInfoBar) {
                                    InfoBarObserver::Type::kInfoBarAdded);
   SimulateGPUCrash(browser());
   infobar_observer.Wait();
-  EXPECT_EQ(1u, infobar_manager->infobar_count());
+  EXPECT_EQ(1u, infobar_manager->infobars().size());
 }
 
 // There isn't any point in adding a test which calls Accept() on the

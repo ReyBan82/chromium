@@ -17,11 +17,9 @@
 #include "base/json/json_writer.h"
 #include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "base/values.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "components/cloud_devices/common/cloud_device_description_consts.h"
 #include "components/cloud_devices/common/description_items_inl.h"
 #include "ui/gfx/geometry/rect.h"
@@ -58,6 +56,7 @@ extern constexpr char kOptionDuplex[] = "duplex";
 extern constexpr char kOptionFitToPage[] = "fit_to_page";
 extern constexpr char kOptionMargins[] = "margins";
 extern constexpr char kOptionMediaSize[] = "media_size";
+extern constexpr char kOptionMediaType[] = "media_type";
 extern constexpr char kOptionPageOrientation[] = "page_orientation";
 extern constexpr char kOptionPageRange[] = "page_range";
 extern constexpr char kOptionReverse[] = "reverse_order";
@@ -66,6 +65,7 @@ extern constexpr char kOptionRangeCapability[] = "range_cap";
 extern constexpr char kOptionSelectCapability[] = "select_cap";
 extern constexpr char kOptionTypedValueCapability[] = "typed_value_cap";
 extern constexpr char kOptionVendorCapability[] = "vendor_capability";
+extern constexpr char kOptionVendorItem[] = "vendor_ticket_item";
 #if BUILDFLAG(IS_CHROMEOS)
 extern constexpr char kOptionPin[] = "pin";
 #endif  // BUILDFLAG(IS_CHROMEOS)
@@ -85,6 +85,9 @@ constexpr char kMediaImageableAreaLeft[] = "imageable_area_left_microns";
 constexpr char kMediaImageableAreaBottom[] = "imageable_area_bottom_microns";
 constexpr char kMediaImageableAreaRight[] = "imageable_area_right_microns";
 constexpr char kMediaImageableAreaTop[] = "imageable_area_top_microns";
+constexpr char kMediaMinHeight[] = "min_height_microns";
+constexpr char kMediaMaxHeight[] = "max_height_microns";
+constexpr char kMediaHasBorderlessVariant[] = "has_borderless_variant";
 
 constexpr char kPageRangeInterval[] = "interval";
 constexpr char kPageRangeEnd[] = "end";
@@ -125,17 +128,13 @@ constexpr char kTypeDuplexLongEdge[] = "LONG_EDGE";
 constexpr char kTypeDuplexNoDuplex[] = "NO_DUPLEX";
 constexpr char kTypeDuplexShortEdge[] = "SHORT_EDGE";
 
-constexpr char kTypeFitToPageFillPage[] = "FILL_PAGE";
-constexpr char kTypeFitToPageFitToPage[] = "FIT_TO_PAGE";
-constexpr char kTypeFitToPageGrowToPage[] = "GROW_TO_PAGE";
-constexpr char kTypeFitToPageNoFitting[] = "NO_FITTING";
-constexpr char kTypeFitToPageShrinkToPage[] = "SHRINK_TO_PAGE";
+constexpr char kTypeFitToPageAuto[] = "AUTO";
+constexpr char kTypeFitToPageAutoFit[] = "AUTO_FIT";
+constexpr char kTypeFitToPageFill[] = "FILL";
+constexpr char kTypeFitToPageFit[] = "FIT";
+constexpr char kTypeFitToPageNone[] = "NONE";
 
-constexpr char kTypeMarginsBorderless[] = "BORDERLESS";
-constexpr char kTypeMarginsCustom[] = "CUSTOM";
-constexpr char kTypeMarginsStandard[] = "STANDARD";
 constexpr char kTypeOrientationAuto[] = "AUTO";
-
 constexpr char kTypeOrientationLandscape[] = "LANDSCAPE";
 constexpr char kTypeOrientationPortrait[] = "PORTRAIT";
 
@@ -208,24 +207,15 @@ constexpr struct OrientationNames {
     {OrientationType::AUTO_ORIENTATION, kTypeOrientationAuto},
 };
 
-constexpr struct MarginsNames {
-  MarginsType id;
-  const char* const json_name;
-} kMarginsNames[] = {
-    {MarginsType::NO_MARGINS, kTypeMarginsBorderless},
-    {MarginsType::STANDARD_MARGINS, kTypeMarginsStandard},
-    {MarginsType::CUSTOM_MARGINS, kTypeMarginsCustom},
-};
-
 constexpr struct FitToPageNames {
   FitToPageType id;
   const char* const json_name;
 } kFitToPageNames[] = {
-    {FitToPageType::NO_FITTING, kTypeFitToPageNoFitting},
-    {FitToPageType::FIT_TO_PAGE, kTypeFitToPageFitToPage},
-    {FitToPageType::GROW_TO_PAGE, kTypeFitToPageGrowToPage},
-    {FitToPageType::SHRINK_TO_PAGE, kTypeFitToPageShrinkToPage},
-    {FitToPageType::FILL_PAGE, kTypeFitToPageFillPage},
+    {FitToPageType::AUTO, kTypeFitToPageAuto},
+    {FitToPageType::AUTO_FIT, kTypeFitToPageAutoFit},
+    {FitToPageType::FILL, kTypeFitToPageFill},
+    {FitToPageType::FIT, kTypeFitToPageFit},
+    {FitToPageType::NONE, kTypeFitToPageNone},
 };
 
 constexpr struct DocumentSheetBackNames {
@@ -241,11 +231,11 @@ constexpr int32_t kInchToUm = 25400;
 constexpr int32_t kMmToUm = 1000;
 constexpr int32_t kSizeThresholdUm = 1000;
 
-constexpr size_t kEnumClassPrefixLen = std::size("MediaType::") - 1;
+constexpr size_t kEnumClassPrefixLen = std::size("MediaSize::") - 1;
 
-// Json name of media type is constructed by removing "MediaType::" enum class
+// Json name of media type is constructed by removing "MediaSize::" enum class
 // prefix from it.
-#define MAP_CLOUD_PRINT_MEDIA_TYPE(type, width, height, unit_um) \
+#define MAP_CLOUD_PRINT_MEDIA_SIZE(type, width, height, unit_um) \
   {                                                              \
     type, &#type[kEnumClassPrefixLen],                           \
         gfx::Size(static_cast<int>(width * unit_um + 0.5),       \
@@ -253,202 +243,202 @@ constexpr size_t kEnumClassPrefixLen = std::size("MediaType::") - 1;
   }
 
 constexpr struct MediaDefinition {
-  MediaType id;
+  MediaSize id;
   const char* const json_name;
   gfx::Size size_um;
 } kMediaDefinitions[] = {
-    {MediaType::CUSTOM_MEDIA, "CUSTOM", gfx::Size()},
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_INDEX_3X5, 3, 5, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_PERSONAL, 3.625f, 6.5f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_MONARCH, 3.875f, 7.5f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_NUMBER_9,
+    {MediaSize::CUSTOM_MEDIA, "CUSTOM", gfx::Size()},
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_INDEX_3X5, 3, 5, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_PERSONAL, 3.625f, 6.5f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_MONARCH, 3.875f, 7.5f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_NUMBER_9,
                                3.875f,
                                8.875f,
                                kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_INDEX_4X6, 4, 6, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_NUMBER_10,
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_INDEX_4X6, 4, 6, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_NUMBER_10,
                                4.125f,
                                9.5f,
                                kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_A2, 4.375f, 5.75f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_NUMBER_11,
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_A2, 4.375f, 5.75f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_NUMBER_11,
                                4.5f,
                                10.375f,
                                kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_NUMBER_12, 4.75f, 11, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_5X7, 5, 7, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_INDEX_5X8, 5, 8, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_NUMBER_14, 5, 11.5f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_INVOICE, 5.5f, 8.5f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_INDEX_4X6_EXT, 6, 8, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_6X9, 6, 9, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_C5, 6.5f, 9.5f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_7X9, 7, 9, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_EXECUTIVE,
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_NUMBER_12, 4.75f, 11, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_5X7, 5, 7, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_INDEX_5X8, 5, 8, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_NUMBER_14, 5, 11.5f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_INVOICE, 5.5f, 8.5f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_INDEX_4X6_EXT, 6, 8, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_6X9, 6, 9, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_C5, 6.5f, 9.5f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_7X9, 7, 9, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_EXECUTIVE,
                                7.25f,
                                10.5f,
                                kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_GOVT_LETTER, 8, 10, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_GOVT_LEGAL, 8, 13, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_QUARTO, 8.5f, 10.83f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_LETTER, 8.5f, 11, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_FANFOLD_EUR, 8.5f, 12, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_LETTER_PLUS,
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_GOVT_LETTER, 8, 10, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_GOVT_LEGAL, 8, 13, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_QUARTO, 8.5f, 10.83f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_LETTER, 8.5f, 11, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_FANFOLD_EUR, 8.5f, 12, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_LETTER_PLUS,
                                8.5f,
                                12.69f,
                                kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_FOOLSCAP, 8.5f, 13, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_LEGAL, 8.5f, 14, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_SUPER_A, 8.94f, 14, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_9X11, 9, 11, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_ARCH_A, 9, 12, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_LETTER_EXTRA, 9.5f, 12, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_LEGAL_EXTRA, 9.5f, 15, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_10X11, 10, 11, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_10X13, 10, 13, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_10X14, 10, 14, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_10X15, 10, 15, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_11X12, 11, 12, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_EDP, 11, 14, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_FANFOLD_US,
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_FOOLSCAP, 8.5f, 13, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_LEGAL, 8.5f, 14, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_SUPER_A, 8.94f, 14, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_9X11, 9, 11, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_ARCH_A, 9, 12, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_LETTER_EXTRA, 9.5f, 12, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_LEGAL_EXTRA, 9.5f, 15, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_10X11, 10, 11, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_10X13, 10, 13, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_10X14, 10, 14, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_10X15, 10, 15, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_11X12, 11, 12, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_EDP, 11, 14, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_FANFOLD_US,
                                11,
                                14.875f,
                                kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_11X15, 11, 15, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_LEDGER, 11, 17, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_EUR_EDP, 12, 14, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_ARCH_B, 12, 18, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_12X19, 12, 19, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_B_PLUS, 12, 19.17f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_SUPER_B, 13, 19, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_C, 17, 22, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_ARCH_C, 18, 24, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_D, 22, 34, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_ARCH_D, 24, 36, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_ASME_F, 28, 40, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_WIDE_FORMAT, 30, 42, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_E, 34, 44, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_ARCH_E, 36, 48, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::NA_F, 44, 68, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ROC_16K, 7.75f, 10.75f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ROC_8K, 10.75f, 15.5f, kInchToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_32K, 97, 151, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_1, 102, 165, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_2, 102, 176, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_4, 110, 208, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_5, 110, 220, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_8, 120, 309, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_6, 120, 230, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_3, 125, 176, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_16K, 146, 215, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_7, 160, 230, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_JUURO_KU_KAI, 198, 275, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_PA_KAI, 267, 389, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_DAI_PA_KAI, 275, 395, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::PRC_10, 324, 458, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A10, 26, 37, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A9, 37, 52, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A8, 52, 74, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A7, 74, 105, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A6, 105, 148, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A5, 148, 210, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A5_EXTRA, 174, 235, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4, 210, 297, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4_TAB, 225, 297, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4_EXTRA, 235, 322, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A3, 297, 420, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4X3, 297, 630, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4X4, 297, 841, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4X5, 297, 1051, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4X6, 297, 1261, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4X7, 297, 1471, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4X8, 297, 1682, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A4X9, 297, 1892, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A3_EXTRA, 322, 445, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A2, 420, 594, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A3X3, 420, 891, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A3X4, 420, 1189, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A3X5, 420, 1486, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A3X6, 420, 1783, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A3X7, 420, 2080, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A1, 594, 841, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A2X3, 594, 1261, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A2X4, 594, 1682, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A2X5, 594, 2102, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A0, 841, 1189, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A1X3, 841, 1783, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A1X4, 841, 2378, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_2A0, 1189, 1682, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_A0X3, 1189, 2523, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B10, 31, 44, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B9, 44, 62, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B8, 62, 88, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B7, 88, 125, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B6, 125, 176, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B6C4, 125, 324, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B5, 176, 250, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B5_EXTRA, 201, 276, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B4, 250, 353, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B3, 353, 500, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B2, 500, 707, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B1, 707, 1000, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_B0, 1000, 1414, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C10, 28, 40, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C9, 40, 57, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C8, 57, 81, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C7, 81, 114, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C7C6, 81, 162, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C6, 114, 162, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C6C5, 114, 229, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C5, 162, 229, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C4, 229, 324, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C3, 324, 458, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C2, 458, 648, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C1, 648, 917, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_C0, 917, 1297, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_DL, 110, 220, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_RA2, 430, 610, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_SRA2, 450, 640, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_RA1, 610, 860, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_SRA1, 640, 900, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_RA0, 860, 1220, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::ISO_SRA0, 900, 1280, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B10, 32, 45, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B9, 45, 64, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B8, 64, 91, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B7, 91, 128, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B6, 128, 182, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B5, 182, 257, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B4, 257, 364, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B3, 364, 515, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B2, 515, 728, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B1, 728, 1030, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_B0, 1030, 1456, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JIS_EXEC, 216, 330, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JPN_CHOU4, 90, 205, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JPN_HAGAKI, 100, 148, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JPN_YOU4, 105, 235, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JPN_CHOU2, 111.1f, 146, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JPN_CHOU3, 120, 235, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JPN_OUFUKU, 148, 200, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JPN_KAHU, 240, 322.1f, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::JPN_KAKU2, 240, 332, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_SMALL_PHOTO, 100, 150, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_ITALIAN, 110, 230, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_POSTFIX, 114, 229, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_LARGE_PHOTO, 200, 300, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_FOLIO, 210, 330, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_FOLIO_SP, 215, 315, kMmToUm),
-    MAP_CLOUD_PRINT_MEDIA_TYPE(MediaType::OM_INVITE, 220, 220, kMmToUm)};
-#undef MAP_CLOUD_PRINT_MEDIA_TYPE
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_11X15, 11, 15, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_LEDGER, 11, 17, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_EUR_EDP, 12, 14, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_ARCH_B, 12, 18, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_12X19, 12, 19, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_B_PLUS, 12, 19.17f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_SUPER_B, 13, 19, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_C, 17, 22, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_ARCH_C, 18, 24, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_D, 22, 34, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_ARCH_D, 24, 36, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_ASME_F, 28, 40, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_WIDE_FORMAT, 30, 42, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_E, 34, 44, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_ARCH_E, 36, 48, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::NA_F, 44, 68, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ROC_16K, 7.75f, 10.75f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ROC_8K, 10.75f, 15.5f, kInchToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_32K, 97, 151, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_1, 102, 165, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_2, 102, 176, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_4, 110, 208, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_5, 110, 220, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_8, 120, 309, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_6, 120, 230, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_3, 125, 176, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_16K, 146, 215, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_7, 160, 230, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_JUURO_KU_KAI, 198, 275, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_PA_KAI, 267, 389, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_DAI_PA_KAI, 275, 395, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::PRC_10, 324, 458, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A10, 26, 37, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A9, 37, 52, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A8, 52, 74, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A7, 74, 105, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A6, 105, 148, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A5, 148, 210, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A5_EXTRA, 174, 235, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4, 210, 297, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4_TAB, 225, 297, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4_EXTRA, 235, 322, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A3, 297, 420, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4X3, 297, 630, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4X4, 297, 841, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4X5, 297, 1051, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4X6, 297, 1261, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4X7, 297, 1471, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4X8, 297, 1682, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A4X9, 297, 1892, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A3_EXTRA, 322, 445, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A2, 420, 594, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A3X3, 420, 891, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A3X4, 420, 1189, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A3X5, 420, 1486, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A3X6, 420, 1783, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A3X7, 420, 2080, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A1, 594, 841, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A2X3, 594, 1261, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A2X4, 594, 1682, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A2X5, 594, 2102, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A0, 841, 1189, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A1X3, 841, 1783, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A1X4, 841, 2378, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_2A0, 1189, 1682, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_A0X3, 1189, 2523, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B10, 31, 44, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B9, 44, 62, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B8, 62, 88, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B7, 88, 125, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B6, 125, 176, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B6C4, 125, 324, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B5, 176, 250, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B5_EXTRA, 201, 276, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B4, 250, 353, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B3, 353, 500, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B2, 500, 707, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B1, 707, 1000, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_B0, 1000, 1414, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C10, 28, 40, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C9, 40, 57, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C8, 57, 81, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C7, 81, 114, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C7C6, 81, 162, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C6, 114, 162, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C6C5, 114, 229, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C5, 162, 229, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C4, 229, 324, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C3, 324, 458, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C2, 458, 648, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C1, 648, 917, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_C0, 917, 1297, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_DL, 110, 220, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_RA2, 430, 610, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_SRA2, 450, 640, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_RA1, 610, 860, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_SRA1, 640, 900, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_RA0, 860, 1220, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::ISO_SRA0, 900, 1280, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B10, 32, 45, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B9, 45, 64, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B8, 64, 91, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B7, 91, 128, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B6, 128, 182, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B5, 182, 257, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B4, 257, 364, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B3, 364, 515, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B2, 515, 728, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B1, 728, 1030, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_B0, 1030, 1456, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JIS_EXEC, 216, 330, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JPN_CHOU4, 90, 205, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JPN_HAGAKI, 100, 148, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JPN_YOU4, 105, 235, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JPN_CHOU2, 111.1f, 146, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JPN_CHOU3, 120, 235, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JPN_OUFUKU, 148, 200, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JPN_KAHU, 240, 322.1f, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::JPN_KAKU2, 240, 332, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_SMALL_PHOTO, 100, 150, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_ITALIAN, 110, 230, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_POSTFIX, 114, 229, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_LARGE_PHOTO, 200, 300, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_FOLIO, 210, 330, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_FOLIO_SP, 215, 315, kMmToUm),
+    MAP_CLOUD_PRINT_MEDIA_SIZE(MediaSize::OM_INVITE, 220, 220, kMmToUm)};
+#undef MAP_CLOUD_PRINT_MEDIA_SIZE
 
-const gfx::Size& FindMediaSizeByType(MediaType type) {
+const gfx::Size& FindMediaSizeByType(MediaSize size_name) {
   for (const auto& media : kMediaDefinitions) {
-    if (media.id == type)
+    if (media.id == size_name) {
       return media.size_um;
+    }
   }
   NOTREACHED();
-  return kMediaDefinitions[0].size_um;
 }
 
 const MediaDefinition* FindMediaBySize(const gfx::Size& size_um) {
@@ -470,7 +460,6 @@ std::string TypeToString(const T& names, IdType id) {
       return name.json_name;
   }
   NOTREACHED();
-  return std::string();
 }
 
 template <class T, class IdType>
@@ -491,7 +480,7 @@ PwgRasterConfig::PwgRasterConfig()
       reverse_order_streaming(false),
       rotate_all_pages(false) {}
 
-PwgRasterConfig::~PwgRasterConfig() {}
+PwgRasterConfig::~PwgRasterConfig() = default;
 
 RangeVendorCapability::RangeVendorCapability() = default;
 
@@ -519,13 +508,6 @@ RangeVendorCapability::~RangeVendorCapability() = default;
 
 RangeVendorCapability& RangeVendorCapability::operator=(
     RangeVendorCapability&& other) = default;
-
-bool RangeVendorCapability::operator==(
-    const RangeVendorCapability& other) const {
-  return value_type_ == other.value_type_ && min_value_ == other.min_value_ &&
-         max_value_ == other.max_value_ &&
-         default_value_ == other.default_value_;
-}
 
 bool RangeVendorCapability::IsValid() const {
   if (min_value_.empty() || max_value_.empty())
@@ -566,10 +548,9 @@ bool RangeVendorCapability::IsValid() const {
     }
   }
   NOTREACHED() << "Bad range capability value type";
-  return false;
 }
 
-bool RangeVendorCapability::LoadFrom(const base::Value::Dict& dict) {
+bool RangeVendorCapability::LoadFrom(const base::DictValue& dict) {
   const std::string* value_type_str = dict.FindString(kKeyValueType);
   if (!value_type_str || !TypeFromString(kRangeVendorCapabilityTypeNames,
                                          *value_type_str, &value_type_)) {
@@ -589,7 +570,7 @@ bool RangeVendorCapability::LoadFrom(const base::Value::Dict& dict) {
   return IsValid();
 }
 
-void RangeVendorCapability::SaveTo(base::Value::Dict* dict) const {
+void RangeVendorCapability::SaveTo(base::DictValue* dict) const {
   DCHECK(IsValid());
   dict->Set(kKeyValueType,
             TypeToString(kRangeVendorCapabilityTypeNames, value_type_));
@@ -607,11 +588,6 @@ SelectVendorCapabilityOption::SelectVendorCapabilityOption(
     : value(value), display_name(display_name) {}
 
 SelectVendorCapabilityOption::~SelectVendorCapabilityOption() = default;
-
-bool SelectVendorCapabilityOption::operator==(
-    const SelectVendorCapabilityOption& other) const {
-  return value == other.value && display_name == other.display_name;
-}
 
 bool SelectVendorCapabilityOption::IsValid() const {
   return !value.empty() && !display_name.empty();
@@ -635,12 +611,6 @@ TypedValueVendorCapability::~TypedValueVendorCapability() = default;
 TypedValueVendorCapability& TypedValueVendorCapability::operator=(
     TypedValueVendorCapability&& other) = default;
 
-bool TypedValueVendorCapability::operator==(
-    const TypedValueVendorCapability& other) const {
-  return value_type_ == other.value_type_ &&
-         default_value_ == other.default_value_;
-}
-
 bool TypedValueVendorCapability::IsValid() const {
   if (default_value_.empty())
     return true;
@@ -659,10 +629,9 @@ bool TypedValueVendorCapability::IsValid() const {
       return true;
   }
   NOTREACHED() << "Bad typed value capability value type";
-  return false;
 }
 
-bool TypedValueVendorCapability::LoadFrom(const base::Value::Dict& dict) {
+bool TypedValueVendorCapability::LoadFrom(const base::DictValue& dict) {
   const std::string* value_type_str = dict.FindString(kKeyValueType);
   if (!value_type_str || !TypeFromString(kTypedValueVendorCapabilityTypeNames,
                                          *value_type_str, &value_type_)) {
@@ -674,7 +643,7 @@ bool TypedValueVendorCapability::LoadFrom(const base::Value::Dict& dict) {
   return IsValid();
 }
 
-void TypedValueVendorCapability::SaveTo(base::Value::Dict* dict) const {
+void TypedValueVendorCapability::SaveTo(base::DictValue* dict) const {
   DCHECK(IsValid());
   dict->Set(kKeyValueType,
             TypeToString(kTypedValueVendorCapabilityTypeNames, value_type_));
@@ -787,10 +756,9 @@ bool VendorCapability::IsValid() const {
       return typed_value_capability_.IsValid();
   }
   NOTREACHED() << "Bad vendor capability type";
-  return false;
 }
 
-bool VendorCapability::LoadFrom(const base::Value::Dict& dict) {
+bool VendorCapability::LoadFrom(const base::DictValue& dict) {
   InternalCleanup();
   const std::string* type_str = dict.FindString(kKeyType);
   Type type;
@@ -809,17 +777,17 @@ bool VendorCapability::LoadFrom(const base::Value::Dict& dict) {
     return false;
 
   display_name_ = *display_name_str;
-  const base::Value::Dict* range_capability_value =
+  const base::DictValue* range_capability_value =
       dict.FindDict(kOptionRangeCapability);
   if (!range_capability_value == (type == Type::RANGE))
     return false;
 
-  const base::Value::Dict* select_capability_value =
+  const base::DictValue* select_capability_value =
       dict.FindDict(kOptionSelectCapability);
   if (!select_capability_value == (type == Type::SELECT))
     return false;
 
-  const base::Value::Dict* typed_value_capability_value =
+  const base::DictValue* typed_value_capability_value =
       dict.FindDict(kOptionTypedValueCapability);
   if (!typed_value_capability_value == (type == Type::TYPED_VALUE))
     return false;
@@ -829,7 +797,6 @@ bool VendorCapability::LoadFrom(const base::Value::Dict& dict) {
     case Type::NONE:
     default:
       NOTREACHED();
-      break;
     case Type::RANGE:
       new (&range_capability_) RangeVendorCapability();
       return range_capability_.LoadFrom(*range_capability_value);
@@ -840,11 +807,9 @@ bool VendorCapability::LoadFrom(const base::Value::Dict& dict) {
       new (&typed_value_capability_) TypedValueVendorCapability();
       return typed_value_capability_.LoadFrom(*typed_value_capability_value);
   }
-
-  return false;
 }
 
-void VendorCapability::SaveTo(base::Value::Dict* dict) const {
+void VendorCapability::SaveTo(base::DictValue* dict) const {
   DCHECK(IsValid());
   dict->Set(kKeyType, TypeToString(kVendorCapabilityTypeNames, type_));
   dict->Set(kKeyId, id_);
@@ -853,21 +818,20 @@ void VendorCapability::SaveTo(base::Value::Dict* dict) const {
   switch (type_) {
     case Type::NONE:
       NOTREACHED();
-      break;
     case Type::RANGE: {
-      base::Value::Dict range_capability_value;
+      base::DictValue range_capability_value;
       range_capability_.SaveTo(&range_capability_value);
       dict->Set(kOptionRangeCapability, std::move(range_capability_value));
       break;
     }
     case Type::SELECT: {
-      base::Value::Dict select_capability_value;
+      base::DictValue select_capability_value;
       select_capability_.SaveTo(&select_capability_value);
       dict->Set(kOptionSelectCapability, std::move(select_capability_value));
       break;
     }
     case Type::TYPED_VALUE: {
-      base::Value::Dict typed_value_capability_value;
+      base::DictValue typed_value_capability_value;
       typed_value_capability_.SaveTo(&typed_value_capability_value);
       dict->Set(kOptionTypedValueCapability,
                 std::move(typed_value_capability_value));
@@ -881,38 +845,35 @@ Color::Color() : type(ColorType::AUTO_COLOR) {}
 Color::Color(ColorType type) : type(type) {
 }
 
-bool Color::operator==(const Color& other) const {
-  return type == other.type && vendor_id == other.vendor_id &&
-         custom_display_name == other.custom_display_name;
-}
-
 bool Color::IsValid() const {
   if (type != ColorType::CUSTOM_COLOR && type != ColorType::CUSTOM_MONOCHROME)
     return true;
   return !vendor_id.empty() && !custom_display_name.empty();
 }
 
-Margins::Margins()
-    : type(MarginsType::STANDARD_MARGINS),
-      top_um(0),
-      right_um(0),
-      bottom_um(0),
-      left_um(0) {}
+VendorItem::VendorItem() = default;
 
-Margins::Margins(MarginsType type,
-                 int32_t top_um,
+VendorItem::VendorItem(const std::string& id, const std::string& value)
+    : id(id), value(value) {}
+
+bool VendorItem::IsValid() const {
+  return !id.empty() && !value.empty();
+}
+
+Margins::Margins() : top_um(0), right_um(0), bottom_um(0), left_um(0) {}
+
+Margins::Margins(int32_t top_um,
                  int32_t right_um,
                  int32_t bottom_um,
                  int32_t left_um)
-    : type(type),
-      top_um(top_um),
+    : top_um(top_um),
       right_um(right_um),
       bottom_um(bottom_um),
       left_um(left_um) {}
 
 bool Margins::operator==(const Margins& other) const {
-  return type == other.type && top_um == other.top_um &&
-         right_um == other.right_um && bottom_um == other.bottom_um;
+  return top_um == other.top_um && right_um == other.right_um &&
+         bottom_um == other.bottom_um;
 }
 
 Dpi::Dpi() : horizontal(0), vertical(0) {
@@ -925,71 +886,112 @@ bool Dpi::IsValid() const {
   return horizontal > 0 && vertical > 0;
 }
 
-bool Dpi::operator==(const Dpi& other) const {
-  return horizontal == other.horizontal && vertical == other.vertical;
-}
-
-Media::Media() : type(MediaType::CUSTOM_MEDIA), is_continuous_feed(false) {}
-
-Media::Media(MediaType type) : Media(type, FindMediaSizeByType(type)) {}
-
-Media::Media(MediaType type, const gfx::Size& size_um)
-    : Media(type, size_um, gfx::Rect(size_um)) {}
-
-Media::Media(MediaType type,
-             const gfx::Size& size_um,
-             const gfx::Rect& printable_area_um)
-    : type(type),
-      size_um(size_um),
-      is_continuous_feed(size_um.width() <= 0 || size_um.height() <= 0),
-      printable_area_um(printable_area_um) {}
-
-Media::Media(const std::string& custom_display_name,
-             const std::string& vendor_id,
-             const gfx::Size& size_um)
-    : Media(custom_display_name, vendor_id, size_um, gfx::Rect(size_um)) {}
-
-Media::Media(const std::string& custom_display_name,
-             const std::string& vendor_id,
-             const gfx::Size& size_um,
-             const gfx::Rect& printable_area_um)
-    : type(MediaType::CUSTOM_MEDIA),
-      size_um(size_um),
-      is_continuous_feed(size_um.width() <= 0 || size_um.height() <= 0),
-      custom_display_name(custom_display_name),
-      vendor_id(vendor_id),
-      printable_area_um(printable_area_um) {}
+Media::Media()
+    : size_name(MediaSize::CUSTOM_MEDIA),
+      is_continuous_feed(false),
+      max_height_um(0),
+      has_borderless_variant(false) {}
 
 Media::Media(const Media& other) = default;
 
 Media& Media::operator=(const Media& other) = default;
 
-bool Media::MatchBySize() {
-  const MediaDefinition* media = FindMediaBySize(size_um);
-  if (!media)
-    return false;
-  type = media->id;
-  return true;
-}
-
 bool Media::IsValid() const {
+  if (size_um.width() <= 0 || size_um.height() <= 0) {
+    return false;
+  }
+
   if (is_continuous_feed) {
-    if (size_um.width() <= 0 && size_um.height() <= 0)
-      return false;
-  } else {
-    if (size_um.width() <= 0 || size_um.height() <= 0)
-      return false;
-    if (!gfx::Rect(size_um).Contains(printable_area_um)) {
+    if (max_height_um <= size_um.height()) {
       return false;
     }
   }
+
+  if (!gfx::Rect(size_um).Contains(printable_area_um)) {
+    return false;
+  }
+
   return true;
 }
 
 bool Media::operator==(const Media& other) const {
-  return type == other.type && size_um == other.size_um &&
+  return size_name == other.size_name && size_um == other.size_um &&
          is_continuous_feed == other.is_continuous_feed &&
-         printable_area_um == other.printable_area_um;
+         printable_area_um == other.printable_area_um &&
+         max_height_um == other.max_height_um;
+}
+
+MediaBuilder::MediaBuilder() = default;
+
+MediaBuilder& MediaBuilder::WithStandardName(MediaSize size_name) {
+  size_name_ = size_name;
+  custom_display_name_.clear();
+  vendor_id_.clear();
+  return *this;
+}
+
+MediaBuilder& MediaBuilder::WithCustomName(
+    const std::string& custom_display_name,
+    const std::string& vendor_id) {
+  size_name_ = MediaSize::CUSTOM_MEDIA;
+  custom_display_name_ = custom_display_name;
+  vendor_id_ = vendor_id;
+  return *this;
+}
+
+MediaBuilder& MediaBuilder::WithSizeAndDefaultPrintableArea(
+    const gfx::Size& size_um) {
+  return WithSizeAndPrintableArea(size_um, gfx::Rect(size_um));
+}
+
+MediaBuilder& MediaBuilder::WithSizeAndPrintableArea(
+    const gfx::Size& size_um,
+    const gfx::Rect& printable_area_um) {
+  size_um_ = size_um;
+  printable_area_um_ = printable_area_um;
+  return *this;
+}
+
+MediaBuilder& MediaBuilder::WithNameMaybeBasedOnSize(
+    const std::string& custom_display_name,
+    const std::string& vendor_id) {
+  WithCustomName(custom_display_name, vendor_id);
+  const MediaDefinition* media = FindMediaBySize(size_um_);
+  if (media) {
+    size_name_ = media->id;
+  }
+  return *this;
+}
+
+MediaBuilder& MediaBuilder::WithSizeAndPrintableAreaBasedOnStandardName() {
+  return WithSizeAndDefaultPrintableArea(FindMediaSizeByType(size_name_));
+}
+
+MediaBuilder& MediaBuilder::WithMaxHeight(int max_height_um) {
+  max_height_um_ = max_height_um;
+  return *this;
+}
+
+MediaBuilder& MediaBuilder::WithBorderlessVariant(bool has_borderless_variant) {
+  has_borderless_variant_ = has_borderless_variant;
+  return *this;
+}
+
+Media MediaBuilder::Build() const {
+  Media result;
+  result.size_name = size_name_;
+  result.size_um = size_um_;
+  result.is_continuous_feed = IsContinuousFeed();
+  result.custom_display_name = custom_display_name_;
+  result.vendor_id = vendor_id_;
+  result.printable_area_um = printable_area_um_;
+  result.max_height_um = max_height_um_;
+  result.has_borderless_variant = has_borderless_variant_;
+  return result;
+}
+
+bool MediaBuilder::IsContinuousFeed() const {
+  return max_height_um_ > 0;
 }
 
 Interval::Interval() : start(0), end(0) {
@@ -999,8 +1001,14 @@ Interval::Interval(int32_t start, int32_t end) : start(start), end(end) {}
 
 Interval::Interval(int32_t start) : start(start), end(kMaxPageNumber) {}
 
-bool Interval::operator==(const Interval& other) const {
-  return start == other.start && end == other.end;
+MediaType::MediaType() = default;
+
+MediaType::MediaType(const std::string& vendor_id,
+                     const std::string& custom_display_name)
+    : vendor_id(vendor_id), custom_display_name(custom_display_name) {}
+
+bool MediaType::IsValid() const {
+  return !vendor_id.empty();
 }
 
 template <const char* kName>
@@ -1026,7 +1034,7 @@ class NoValueValidation {
 class ContentTypeTraits : public NoValueValidation,
                           public ItemsTraits<kOptionContentType> {
  public:
-  static bool Load(const base::Value::Dict& dict, ContentType* option) {
+  static bool Load(const base::DictValue& dict, ContentType* option) {
     const std::string* content_type = dict.FindString(kKeyContentType);
     if (!content_type)
       return false;
@@ -1034,7 +1042,7 @@ class ContentTypeTraits : public NoValueValidation,
     return true;
   }
 
-  static void Save(ContentType option, base::Value::Dict* dict) {
+  static void Save(ContentType option, base::DictValue* dict) {
     dict->Set(kKeyContentType, option);
   }
 };
@@ -1042,7 +1050,7 @@ class ContentTypeTraits : public NoValueValidation,
 class PwgRasterConfigTraits : public NoValueValidation,
                               public ItemsTraits<kOptionPwgRasterConfig> {
  public:
-  static bool Load(const base::Value::Dict& dict, PwgRasterConfig* option) {
+  static bool Load(const base::DictValue& dict, PwgRasterConfig* option) {
     PwgRasterConfig option_out;
     const base::Value* document_sheet_back =
         dict.Find(kPwgRasterDocumentSheetBack);
@@ -1083,13 +1091,13 @@ class PwgRasterConfigTraits : public NoValueValidation,
     return true;
   }
 
-  static void Save(const PwgRasterConfig& option, base::Value::Dict* dict) {
+  static void Save(const PwgRasterConfig& option, base::DictValue* dict) {
     dict->Set(
         kPwgRasterDocumentSheetBack,
         TypeToString(kDocumentSheetBackNames, option.document_sheet_back));
 
     if (!option.document_types_supported.empty()) {
-      base::Value::List supported_list;
+      base::ListValue supported_list;
       for (const auto& type : option.document_types_supported) {
         switch (type) {
           case PwgDocumentTypeSupported::SRGB_8:
@@ -1120,11 +1128,11 @@ class VendorCapabilityTraits : public ItemsTraits<kOptionVendorCapability> {
     return option.IsValid();
   }
 
-  static bool Load(const base::Value::Dict& dict, VendorCapability* option) {
+  static bool Load(const base::DictValue& dict, VendorCapability* option) {
     return option->LoadFrom(dict);
   }
 
-  static void Save(const VendorCapability& option, base::Value::Dict* dict) {
+  static void Save(const VendorCapability& option, base::DictValue* dict) {
     option.SaveTo(dict);
   }
 };
@@ -1136,7 +1144,7 @@ class SelectVendorCapabilityTraits
     return option.IsValid();
   }
 
-  static bool Load(const base::Value::Dict& dict,
+  static bool Load(const base::DictValue& dict,
                    SelectVendorCapabilityOption* option) {
     const std::string* value = dict.FindString(kKeyValue);
     if (!value)
@@ -1150,7 +1158,7 @@ class SelectVendorCapabilityTraits
   }
 
   static void Save(const SelectVendorCapabilityOption& option,
-                   base::Value::Dict* dict) {
+                   base::DictValue* dict) {
     dict->Set(kKeyValue, option.value);
     dict->Set(kKeyDisplayName, option.display_name);
   }
@@ -1160,7 +1168,7 @@ class ColorTraits : public ItemsTraits<kOptionColor> {
  public:
   static bool IsValid(const Color& option) { return option.IsValid(); }
 
-  static bool Load(const base::Value::Dict& dict, Color* option) {
+  static bool Load(const base::DictValue& dict, Color* option) {
     const std::string* type = dict.FindString(kKeyType);
     if (!type || !TypeFromString(kColorNames, *type, &option->type))
       return false;
@@ -1174,7 +1182,7 @@ class ColorTraits : public ItemsTraits<kOptionColor> {
     return true;
   }
 
-  static void Save(const Color& option, base::Value::Dict* dict) {
+  static void Save(const Color& option, base::DictValue* dict) {
     dict->Set(kKeyType, TypeToString(kColorNames, option.type));
     if (!option.vendor_id.empty())
       dict->Set(kKeyVendorId, option.vendor_id);
@@ -1187,12 +1195,12 @@ class ColorTraits : public ItemsTraits<kOptionColor> {
 class DuplexTraits : public NoValueValidation,
                      public ItemsTraits<kOptionDuplex> {
  public:
-  static bool Load(const base::Value::Dict& dict, DuplexType* option) {
+  static bool Load(const base::DictValue& dict, DuplexType* option) {
     const std::string* type = dict.FindString(kKeyType);
     return type && TypeFromString(kDuplexNames, *type, option);
   }
 
-  static void Save(DuplexType option, base::Value::Dict* dict) {
+  static void Save(DuplexType option, base::DictValue* dict) {
     dict->Set(kKeyType, TypeToString(kDuplexNames, option));
   }
 };
@@ -1200,12 +1208,12 @@ class DuplexTraits : public NoValueValidation,
 class OrientationTraits : public NoValueValidation,
                           public ItemsTraits<kOptionPageOrientation> {
  public:
-  static bool Load(const base::Value::Dict& dict, OrientationType* option) {
+  static bool Load(const base::DictValue& dict, OrientationType* option) {
     const std::string* type = dict.FindString(kKeyType);
     return type && TypeFromString(kOrientationNames, *type, option);
   }
 
-  static void Save(OrientationType option, base::Value::Dict* dict) {
+  static void Save(OrientationType option, base::DictValue* dict) {
     dict->Set(kKeyType, TypeToString(kOrientationNames, option));
   }
 };
@@ -1213,8 +1221,8 @@ class OrientationTraits : public NoValueValidation,
 class CopiesTicketItemTraits : public NoValueValidation,
                                public ItemsTraits<kOptionCopies> {
  public:
-  static bool Load(const base::Value::Dict& dict, int32_t* option) {
-    absl::optional<int> copies = dict.FindInt(kOptionCopies);
+  static bool Load(const base::DictValue& dict, int32_t* option) {
+    std::optional<int> copies = dict.FindInt(kOptionCopies);
     if (!copies)
       return false;
 
@@ -1222,7 +1230,7 @@ class CopiesTicketItemTraits : public NoValueValidation,
     return true;
   }
 
-  static void Save(int32_t option, base::Value::Dict* dict) {
+  static void Save(int32_t option, base::DictValue* dict) {
     dict->Set(kOptionCopies, option);
   }
 };
@@ -1230,12 +1238,12 @@ class CopiesTicketItemTraits : public NoValueValidation,
 class CopiesCapabilityTraits : public NoValueValidation,
                                public ItemsTraits<kOptionCopies> {
  public:
-  static bool Load(const base::Value::Dict& dict, Copies* option) {
-    absl::optional<int> default_copies = dict.FindInt(kDefaultValue);
+  static bool Load(const base::DictValue& dict, Copies* option) {
+    std::optional<int> default_copies = dict.FindInt(kDefaultValue);
     if (!default_copies)
       return false;
 
-    absl::optional<int> max_copies = dict.FindInt(kMaxValue);
+    std::optional<int> max_copies = dict.FindInt(kMaxValue);
     if (!max_copies)
       return false;
 
@@ -1244,7 +1252,7 @@ class CopiesCapabilityTraits : public NoValueValidation,
     return true;
   }
 
-  static void Save(const Copies& option, base::Value::Dict* dict) {
+  static void Save(const Copies& option, base::DictValue* dict) {
     dict->Set(kDefaultValue, option.default_value);
     dict->Set(kMaxValue, option.max_value);
   }
@@ -1253,14 +1261,11 @@ class CopiesCapabilityTraits : public NoValueValidation,
 class MarginsTraits : public NoValueValidation,
                       public ItemsTraits<kOptionMargins> {
  public:
-  static bool Load(const base::Value::Dict& dict, Margins* option) {
-    const std::string* type = dict.FindString(kKeyType);
-    if (!type || !TypeFromString(kMarginsNames, *type, &option->type))
-      return false;
-    absl::optional<int> top_um = dict.FindInt(kMarginTop);
-    absl::optional<int> right_um = dict.FindInt(kMarginRight);
-    absl::optional<int> bottom_um = dict.FindInt(kMarginBottom);
-    absl::optional<int> left_um = dict.FindInt(kMarginLeft);
+  static bool Load(const base::DictValue& dict, Margins* option) {
+    std::optional<int> top_um = dict.FindInt(kMarginTop);
+    std::optional<int> right_um = dict.FindInt(kMarginRight);
+    std::optional<int> bottom_um = dict.FindInt(kMarginBottom);
+    std::optional<int> left_um = dict.FindInt(kMarginLeft);
     if (!top_um || !right_um || !bottom_um || !left_um)
       return false;
     option->top_um = top_um.value();
@@ -1270,8 +1275,7 @@ class MarginsTraits : public NoValueValidation,
     return true;
   }
 
-  static void Save(const Margins& option, base::Value::Dict* dict) {
-    dict->Set(kKeyType, TypeToString(kMarginsNames, option.type));
+  static void Save(const Margins& option, base::DictValue* dict) {
     dict->Set(kMarginTop, option.top_um);
     dict->Set(kMarginRight, option.right_um);
     dict->Set(kMarginBottom, option.bottom_um);
@@ -1283,9 +1287,9 @@ class DpiTraits : public ItemsTraits<kOptionDpi> {
  public:
   static bool IsValid(const Dpi& option) { return option.IsValid(); }
 
-  static bool Load(const base::Value::Dict& dict, Dpi* option) {
-    absl::optional<int> horizontal = dict.FindInt(kDpiHorizontal);
-    absl::optional<int> vertical = dict.FindInt(kDpiVertical);
+  static bool Load(const base::DictValue& dict, Dpi* option) {
+    std::optional<int> horizontal = dict.FindInt(kDpiHorizontal);
+    std::optional<int> vertical = dict.FindInt(kDpiVertical);
     if (!horizontal || !vertical)
       return false;
     option->horizontal = horizontal.value();
@@ -1293,7 +1297,7 @@ class DpiTraits : public ItemsTraits<kOptionDpi> {
     return true;
   }
 
-  static void Save(const Dpi& option, base::Value::Dict* dict) {
+  static void Save(const Dpi& option, base::DictValue* dict) {
     dict->Set(kDpiHorizontal, option.horizontal);
     dict->Set(kDpiVertical, option.vertical);
   }
@@ -1302,12 +1306,12 @@ class DpiTraits : public ItemsTraits<kOptionDpi> {
 class FitToPageTraits : public NoValueValidation,
                         public ItemsTraits<kOptionFitToPage> {
  public:
-  static bool Load(const base::Value::Dict& dict, FitToPageType* option) {
+  static bool Load(const base::DictValue& dict, FitToPageType* option) {
     const std::string* type = dict.FindString(kKeyType);
     return type && TypeFromString(kFitToPageNames, *type, option);
   }
 
-  static void Save(FitToPageType option, base::Value::Dict* dict) {
+  static void Save(FitToPageType option, base::DictValue* dict) {
     dict->Set(kKeyType, TypeToString(kFitToPageNames, option));
   }
 };
@@ -1323,8 +1327,8 @@ class PageRangeTraits : public ItemsTraits<kOptionPageRange> {
     return true;
   }
 
-  static bool Load(const base::Value::Dict& dict, PageRange* option) {
-    const base::Value::List* list_value = dict.FindList(kPageRangeInterval);
+  static bool Load(const base::DictValue& dict, PageRange* option) {
+    const base::ListValue* list_value = dict.FindList(kPageRangeInterval);
     if (!list_value)
       return false;
     for (const base::Value& interval : *list_value) {
@@ -1337,11 +1341,11 @@ class PageRangeTraits : public ItemsTraits<kOptionPageRange> {
     return true;
   }
 
-  static void Save(const PageRange& option, base::Value::Dict* dict) {
+  static void Save(const PageRange& option, base::DictValue* dict) {
     if (!option.empty()) {
-      base::Value::List list;
+      base::ListValue list;
       for (const auto& item : option) {
-        base::Value::Dict interval;
+        base::DictValue interval;
         interval.Set(kPageRangeStart, item.start);
         if (item.end < kMaxPageNumber)
           interval.Set(kPageRangeEnd, item.end);
@@ -1356,19 +1360,11 @@ class MediaTraits : public ItemsTraits<kOptionMediaSize> {
  public:
   static bool IsValid(const Media& option) { return option.IsValid(); }
 
-  static bool Load(const base::Value::Dict& dict, Media* option) {
+  static bool Load(const base::DictValue& dict, Media* option) {
     const std::string* type = dict.FindString(kKeyName);
-    if (type && !TypeFromString(kMediaDefinitions, *type, &option->type))
+    if (type && !TypeFromString(kMediaDefinitions, *type, &option->size_name)) {
       return false;
-    absl::optional<int> width_um = dict.FindInt(kMediaWidth);
-    if (width_um)
-      option->size_um.set_width(width_um.value());
-    absl::optional<int> height_um = dict.FindInt(kMediaHeight);
-    if (height_um)
-      option->size_um.set_height(height_um.value());
-    absl::optional<bool> is_continuous_feed = dict.FindBool(kMediaIsContinuous);
-    if (is_continuous_feed)
-      option->is_continuous_feed = is_continuous_feed.value();
+    }
     const std::string* custom_display_name =
         dict.FindString(kKeyCustomDisplayName);
     if (custom_display_name)
@@ -1376,21 +1372,43 @@ class MediaTraits : public ItemsTraits<kOptionMediaSize> {
     const std::string* vendor_id = dict.FindString(kKeyVendorId);
     if (vendor_id)
       option->vendor_id = *vendor_id;
+    std::optional<int> width_um = dict.FindInt(kMediaWidth);
+    if (width_um) {
+      option->size_um.set_width(width_um.value());
+    }
+    std::optional<bool> is_continuous_feed = dict.FindBool(kMediaIsContinuous);
+    if (is_continuous_feed) {
+      option->is_continuous_feed = is_continuous_feed.value();
+    }
+    if (is_continuous_feed.value_or(false)) {
+      // The min/max height is required for continuous feed media.
+      std::optional<int> min_height_um = dict.FindInt(kMediaMinHeight);
+      std::optional<int> max_height_um = dict.FindInt(kMediaMaxHeight);
+      if (!min_height_um || !max_height_um) {
+        return false;
+      }
+      // For variable height media, the min height is stored in the height
+      // attribute of the `size_um` parameter.
+      option->size_um.set_height(min_height_um.value());
+      option->max_height_um = max_height_um.value();
 
-    if (is_continuous_feed && *is_continuous_feed) {
       // When `option` is a continuous feed, the printable area is not
       // applicable. For consistency with the constructors, set the printable
       // area to the default page size value.
       option->printable_area_um = gfx::Rect(option->size_um);
       return true;
     }
-    absl::optional<int> imageable_area_left =
+    std::optional<int> height_um = dict.FindInt(kMediaHeight);
+    if (height_um) {
+      option->size_um.set_height(height_um.value());
+    }
+    std::optional<int> imageable_area_left =
         dict.FindInt(kMediaImageableAreaLeft);
-    absl::optional<int> imageable_area_bottom =
+    std::optional<int> imageable_area_bottom =
         dict.FindInt(kMediaImageableAreaBottom);
-    absl::optional<int> imageable_area_right =
+    std::optional<int> imageable_area_right =
         dict.FindInt(kMediaImageableAreaRight);
-    absl::optional<int> imageable_area_top =
+    std::optional<int> imageable_area_top =
         dict.FindInt(kMediaImageableAreaTop);
     if (imageable_area_left && imageable_area_bottom && imageable_area_right &&
         imageable_area_top) {
@@ -1400,25 +1418,38 @@ class MediaTraits : public ItemsTraits<kOptionMediaSize> {
           gfx::Rect(imageable_area_left.value(), imageable_area_bottom.value(),
                     width, height);
     }
+
+    std::optional<bool> has_borderless_variant =
+        dict.FindBool(kMediaHasBorderlessVariant);
+    if (has_borderless_variant) {
+      option->has_borderless_variant = has_borderless_variant.value();
+    }
+
     return true;
   }
 
-  static void Save(const Media& option, base::Value::Dict* dict) {
-    if (option.type != MediaType::CUSTOM_MEDIA)
-      dict->Set(kKeyName, TypeToString(kMediaDefinitions, option.type));
+  static void Save(const Media& option, base::DictValue* dict) {
+    if (option.size_name != MediaSize::CUSTOM_MEDIA) {
+      dict->Set(kKeyName, TypeToString(kMediaDefinitions, option.size_name));
+    }
     if (!option.custom_display_name.empty() ||
-        option.type == MediaType::CUSTOM_MEDIA) {
+        option.size_name == MediaSize::CUSTOM_MEDIA) {
       dict->Set(kKeyCustomDisplayName, option.custom_display_name);
     }
     if (!option.vendor_id.empty())
       dict->Set(kKeyVendorId, option.vendor_id);
     if (option.size_um.width() > 0)
       dict->Set(kMediaWidth, option.size_um.width());
-    if (option.size_um.height() > 0)
-      dict->Set(kMediaHeight, option.size_um.height());
-    if (option.is_continuous_feed)
+    if (option.is_continuous_feed) {
+      // For variable height media, the height from `size_um` represents the min
+      // height, so it gets stored in `kMediaMinHeight`, not in `kMediaHeight`.
       dict->Set(kMediaIsContinuous, true);
-    if (!option.printable_area_um.IsEmpty() &&
+      dict->Set(kMediaMinHeight, option.size_um.height());
+      dict->Set(kMediaMaxHeight, option.max_height_um);
+    } else if (option.size_um.height() > 0) {
+      dict->Set(kMediaHeight, option.size_um.height());
+    }
+    if (!option.is_continuous_feed && !option.printable_area_um.IsEmpty() &&
         gfx::Rect(option.size_um).Contains(option.printable_area_um)) {
       dict->Set(kMediaImageableAreaLeft, option.printable_area_um.x());
       dict->Set(kMediaImageableAreaBottom, option.printable_area_um.y());
@@ -1426,6 +1457,35 @@ class MediaTraits : public ItemsTraits<kOptionMediaSize> {
                                               option.printable_area_um.width());
       dict->Set(kMediaImageableAreaTop, option.printable_area_um.y() +
                                             option.printable_area_um.height());
+    }
+    if (option.has_borderless_variant) {
+      dict->Set(kMediaHasBorderlessVariant, true);
+    }
+  }
+};
+
+class MediaTypeTraits : public ItemsTraits<kOptionMediaType> {
+ public:
+  static bool IsValid(const MediaType& option) { return option.IsValid(); }
+
+  static bool Load(const base::DictValue& dict, MediaType* option) {
+    const std::string* vendor_id = dict.FindString(kKeyVendorId);
+    if (!vendor_id) {
+      return false;
+    }
+    option->vendor_id = *vendor_id;
+    const std::string* custom_display_name =
+        dict.FindString(kKeyCustomDisplayName);
+    if (custom_display_name) {
+      option->custom_display_name = *custom_display_name;
+    }
+    return true;
+  }
+
+  static void Save(const MediaType& option, base::DictValue* dict) {
+    dict->Set(kKeyVendorId, option.vendor_id);
+    if (!option.custom_display_name.empty()) {
+      dict->Set(kKeyCustomDisplayName, option.custom_display_name);
     }
   }
 };
@@ -1435,15 +1495,15 @@ class CollateTraits : public NoValueValidation,
  public:
   static const bool kDefault = true;
 
-  static bool Load(const base::Value::Dict& dict, bool* option) {
-    absl::optional<bool> collate = dict.FindBool(kOptionCollate);
+  static bool Load(const base::DictValue& dict, bool* option) {
+    std::optional<bool> collate = dict.FindBool(kOptionCollate);
     if (!collate)
       return false;
     *option = collate.value();
     return true;
   }
 
-  static void Save(bool option, base::Value::Dict* dict) {
+  static void Save(bool option, base::DictValue* dict) {
     dict->Set(kOptionCollate, option);
   }
 };
@@ -1453,31 +1513,55 @@ class ReverseTraits : public NoValueValidation,
  public:
   static const bool kDefault = false;
 
-  static bool Load(const base::Value::Dict& dict, bool* option) {
-    absl::optional<bool> reverse = dict.FindBool(kOptionReverse);
+  static bool Load(const base::DictValue& dict, bool* option) {
+    std::optional<bool> reverse = dict.FindBool(kOptionReverse);
     if (!reverse)
       return false;
     *option = reverse.value();
     return true;
   }
 
-  static void Save(bool option, base::Value::Dict* dict) {
+  static void Save(bool option, base::DictValue* dict) {
     dict->Set(kOptionReverse, option);
+  }
+};
+
+class VendorItemTraits : public ItemsTraits<kOptionVendorItem> {
+ public:
+  static bool IsValid(const VendorItem& option) { return option.IsValid(); }
+
+  static bool Load(const base::DictValue& dict, VendorItem* option) {
+    const std::string* id = dict.FindString(kKeyId);
+    if (!id) {
+      return false;
+    }
+    const std::string* value = dict.FindString(kKeyValue);
+    if (!value) {
+      return false;
+    }
+    option->id = *id;
+    option->value = *value;
+    return true;
+  }
+
+  static void Save(const VendorItem& option, base::DictValue* dict) {
+    dict->Set(kKeyId, option.id);
+    dict->Set(kKeyValue, option.value);
   }
 };
 
 #if BUILDFLAG(IS_CHROMEOS)
 class PinTraits : public NoValueValidation, public ItemsTraits<kOptionPin> {
  public:
-  static bool Load(const base::Value::Dict& dict, bool* option) {
-    absl::optional<bool> supported = dict.FindBool(kPinSupported);
+  static bool Load(const base::DictValue& dict, bool* option) {
+    std::optional<bool> supported = dict.FindBool(kPinSupported);
     if (!supported)
       return false;
     *option = supported.value();
     return true;
   }
 
-  static void Save(bool option, base::Value::Dict* dict) {
+  static void Save(bool option, base::DictValue* dict) {
     dict->Set(kPinSupported, option);
   }
 };
@@ -1501,6 +1585,8 @@ template class SelectionCapability<printer::Dpi, printer::DpiTraits>;
 template class SelectionCapability<printer::FitToPageType,
                                    printer::FitToPageTraits>;
 template class SelectionCapability<printer::Media, printer::MediaTraits>;
+template class SelectionCapability<printer::MediaType,
+                                   printer::MediaTypeTraits>;
 template class ValueCapability<printer::Copies,
                                printer::CopiesCapabilityTraits>;
 template class EmptyCapability<printer::PageRangeTraits>;
@@ -1523,5 +1609,7 @@ template class TicketItem<int32_t, printer::CopiesTicketItemTraits>;
 template class TicketItem<printer::PageRange, printer::PageRangeTraits>;
 template class TicketItem<bool, printer::CollateTraits>;
 template class TicketItem<bool, printer::ReverseTraits>;
+template class ListCapability<printer::VendorItem, printer::VendorItemTraits>;
+template class ListTicketItem<printer::VendorItem, printer::VendorItemTraits>;
 
 }  // namespace cloud_devices

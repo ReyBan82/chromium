@@ -5,6 +5,7 @@
 #ifndef CHROME_RENDERER_SEARCHBOX_SEARCHBOX_H_
 #define CHROME_RENDERER_SEARCHBOX_SEARCHBOX_H_
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,7 +20,6 @@
 #include "content/public/renderer/render_frame_observer_tracker.h"
 #include "mojo/public/cpp/bindings/associated_receiver.h"
 #include "mojo/public/cpp/bindings/associated_remote.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "url/gurl.h"
 
 // The renderer-side implementation of the embeddedSearch API (see
@@ -35,7 +35,7 @@ class SearchBox : public content::RenderFrameObserver,
     IconURLHelper();
     virtual ~IconURLHelper();
     // Returns main frame id for validating icon URL.
-    virtual int GetMainFrameID() const = 0;
+    virtual std::string GetMainFrameToken() const = 0;
     // Returns the page URL string for |rid|, or empty string for invalid |rid|.
     virtual std::string GetURLStringFromRestrictedID(InstantRestrictedID rid)
         const = 0;
@@ -135,10 +135,10 @@ class SearchBox : public content::RenderFrameObserver,
   // navigations, a "provisional frame" is created at first, and it's illegal
   // to execute any JS in it before it is actually swapped in, i.e. before the
   // navigation has committed. So this only gets set to true in
-  // RenderFrameObserver::DidCommitProvisionalLoad. See crbug.com/765101.
-  // Note: If crbug.com/794942 ever gets resolved, then it might be possible to
-  // move the mojo connection code from the ctor to DidCommitProvisionalLoad and
-  // avoid this bool.
+  // RenderFrameObserver::DidCommitProvisionalLoad. See crbug.com/40540007.
+  // Note: If crbug.com/40554725 ever gets resolved, then it might be possible
+  // to move the mojo connection code from the ctor to DidCommitProvisionalLoad
+  // and avoid this bool.
   bool can_run_js_in_renderframe_;
 
   // The Instant state.
@@ -151,7 +151,7 @@ class SearchBox : public content::RenderFrameObserver,
   // comparing most visited items.
   InstantMostVisitedInfo most_visited_info_;
   bool has_received_most_visited_;
-  absl::optional<NtpTheme> theme_;
+  std::optional<NtpTheme> theme_;
 
   base::WeakPtrFactory<SearchBox> weak_ptr_factory_{this};
 };

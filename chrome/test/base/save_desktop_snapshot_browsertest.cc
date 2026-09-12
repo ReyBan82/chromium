@@ -18,11 +18,6 @@
 #include "ui/ozone/public/ozone_platform.h"
 #endif
 
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-#include "chromeos/crosapi/mojom/screen_manager.mojom.h"
-#include "chromeos/lacros/lacros_service.h"
-#endif
-
 class SaveDesktopSnapshotTest : public InProcessBrowserTest {
  protected:
   void SetUpCommandLine(base::CommandLine* command_line) override {
@@ -43,7 +38,7 @@ IN_PROC_BROWSER_TEST_F(SaveDesktopSnapshotTest, SaveDesktopSnapshot) {
   auto snapshot_path = SaveDesktopSnapshot();
 
 #if BUILDFLAG(IS_OZONE)
-  if (ui::OzonePlatform::GetPlatformNameForTest() == "wayland") {
+  if (ui::OzonePlatform::RunningOnWaylandForTest()) {
     // DesktopCapturer is not well supported for wayland.
     // SaveDesktopSnapshot() should return a empty file path instead of crash.
     ASSERT_TRUE(snapshot_path.empty());

@@ -4,14 +4,20 @@
 
 package org.chromium.components.policy;
 
+import static org.chromium.build.NullUtil.assumeNonNull;
+
 import android.os.Bundle;
 
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.ThreadUtils;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JNINamespace;
+import org.jni_zero.NativeMethods;
+
+import org.chromium.base.Log;
+import org.chromium.base.ResettersForTesting;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -20,15 +26,20 @@ import java.util.List;
 /**
  * Reads enterprise policies from one or more policy providers and plumbs them through to the policy
  * subsystem.
+ *
+ * The methods in this class should be called on the same sequence.
  */
 @JNINamespace("policy::android")
+@NullMarked
 public class CombinedPolicyProvider {
-    private static CombinedPolicyProvider sInstance;
+    private static final String TAG = "CombinedPProvider";
+
+    private static @Nullable CombinedPolicyProvider sInstance;
 
     private long mNativeCombinedPolicyProvider;
 
-    private PolicyConverter mPolicyConverter;
-    private PolicyCacheProvider mPolicyCacheProvider;
+    private @Nullable PolicyConverter mPolicyConverter;
+    private @Nullable PolicyCacheProvider mPolicyCacheProvider;
     private final List<PolicyProvider> mPolicyProviders = new ArrayList<>();
     private final List<Bundle> mCachedPolicies = new ArrayList<>();
     private final List<PolicyChangeListener> mPolicyChangeListeners = new ArrayList<>();
@@ -45,12 +56,19 @@ public class CombinedPolicyProvider {
         mNativeCombinedPolicyProvider = nativeCombinedPolicyProvider;
         mPolicyConverter = policyConverter;
         if (nativeCombinedPolicyProvider == 0) {
+            // Restore cache readability when unlinking the native provider to allow reading from
+            // the cache during the next initialization. This is required for environments where
+            // where the policy framework is re-initialized within the same JVM process, such as
+            // during tests.
+            PolicyCache.get().enableReadability();
             return;
         }
 
+        Log.i(TAG, "#linkNativeInternal() " + mPolicyProviders.size());
+
         if (mPolicyProviders.isEmpty()) {
             mPolicyCacheProvider = new PolicyCacheProvider();
-            mPolicyCacheProvider.setManagerAndSource(this, /* source = */ 0);
+            mPolicyCacheProvider.setManagerAndSource(this, /* source= */ 0);
         }
         refreshPolicies();
     }
@@ -58,7 +76,6 @@ public class CombinedPolicyProvider {
     @CalledByNative
     public static CombinedPolicyProvider linkNative(
             long nativeCombinedPolicyProvider, PolicyConverter policyConverter) {
-        ThreadUtils.assertOnUiThread();
         get().linkNativeInternal(nativeCombinedPolicyProvider, policyConverter);
         return get();
     }
@@ -69,6 +86,14 @@ public class CombinedPolicyProvider {
      * disambiguating updates.
      */
     public void registerProvider(PolicyProvider provider) {
+        Log.i(
+                TAG,
+                "#registerProvider() provider:"
+                        + provider
+                        + " isPolicyCacheEnabled:"
+                        + isPolicyCacheEnabled()
+                        + " policyProvidersSize:"
+                        + mPolicyProviders.size());
         if (isPolicyCacheEnabled()) {
             mPolicyCacheProvider = null;
         }
@@ -91,6 +116,7 @@ public class CombinedPolicyProvider {
     }
 
     void onSettingsAvailable(int source, Bundle newSettings) {
+        Log.i(TAG, "#onSettingsAvailable() " + source);
         if (mNativeCombinedPolicyProvider == 0) return;
 
         List<Bundle> policies;
@@ -107,10 +133,12 @@ public class CombinedPolicyProvider {
         }
         for (Bundle settings : policies) {
             for (String key : settings.keySet()) {
-                mPolicyConverter.setPolicy(key, settings.get(key));
+                Log.i(TAG, "#setPolicy() " + key + " -> " + settings.get(key));
+                assumeNonNull(mPolicyConverter).setPolicy(key, settings.get(key));
             }
         }
-        CombinedPolicyProviderJni.get().flushPolicies(mNativeCombinedPolicyProvider, get());
+        Log.i(TAG, "#flushPolicies()");
+        CombinedPolicyProviderJni.get().flushPolicies(mNativeCombinedPolicyProvider);
     }
 
     void terminateIncognitoSession() {
@@ -132,7 +160,7 @@ public class CombinedPolicyProvider {
     @CalledByNative
     public void refreshPolicies() {
         if (isPolicyCacheEnabled()) {
-            mPolicyCacheProvider.refresh();
+            assumeNonNull(mPolicyCacheProvider).refresh();
             return;
         }
 
@@ -145,7 +173,6 @@ public class CombinedPolicyProvider {
         }
     }
 
-    @VisibleForTesting
     List<PolicyProvider> getPolicyProvidersForTesting() {
         return mPolicyProviders;
     }
@@ -154,22 +181,21 @@ public class CombinedPolicyProvider {
     boolean isPolicyCacheEnabled() {
         return mPolicyCacheProvider != null;
     }
-    /**
-     * Interface to handle actions related with policy changes.
-     */
+
+    /** Interface to handle actions related with policy changes. */
     public interface PolicyChangeListener {
-        /**
-         * Call to notify the listener that incognito browsing is unavailable due to policy.
-         */
+        /** Call to notify the listener that incognito browsing is unavailable due to policy. */
         void terminateIncognitoSession();
     }
 
     static void setForTesting(CombinedPolicyProvider p) {
+        var oldValue = sInstance;
         sInstance = p;
+        ResettersForTesting.register(() -> sInstance = oldValue);
     }
 
     @NativeMethods
     interface Natives {
-        void flushPolicies(long nativeAndroidCombinedPolicyProvider, CombinedPolicyProvider caller);
+        void flushPolicies(long nativeAndroidCombinedPolicyProvider);
     }
 }

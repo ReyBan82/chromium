@@ -53,8 +53,10 @@ class DeviceStatusListener : public NetworkStatusListener::Observer,
 
  protected:
   // NetworkStatusListener::Observer implementation. Visible for testing.
-  void OnNetworkStatusReady(network::mojom::ConnectionType type) override;
-  void OnNetworkChanged(network::mojom::ConnectionType type) override;
+  void OnNetworkStatusReady(
+      net::NetworkChangeNotifier::ConnectionType type) override;
+  void OnNetworkChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   // Used to listen to network connectivity changes.
   std::unique_ptr<NetworkStatusListener> network_listener_;
@@ -75,7 +77,8 @@ class DeviceStatusListener : public NetworkStatusListener::Observer,
   void StartAfterDelay();
 
   // BatteryStatusListener::Observer implementation.
-  void OnPowerStateChange(bool on_battery_power) override;
+  void OnPowerStateChange(base::PowerStateObserver::BatteryPowerStatus
+                              battery_power_status) override;
 
   // Notifies the observer about device status change.
   void NotifyStatusChange();

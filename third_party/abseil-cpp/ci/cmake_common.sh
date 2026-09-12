@@ -13,13 +13,7 @@
 # limitations under the License.
 
 # The commit of GoogleTest to be used in the CMake tests in this directory.
-# Keep this in sync with the commit in the WORKSPACE file.
-readonly ABSL_GOOGLETEST_COMMIT="934542165899c786cb5d8a710529c37184730183"
+# Keep this in sync with the commit in the MODULE.bazel file.
+readonly ABSL_GOOGLETEST_VERSION="1.18.0"
 
-# Avoid depending on GitHub by looking for a cached copy of the commit first.
-if [[ -r "${KOKORO_GFILE_DIR:-}/distdir/${ABSL_GOOGLETEST_COMMIT}.zip" ]]; then
-  DOCKER_EXTRA_ARGS="--mount type=bind,source=${KOKORO_GFILE_DIR}/distdir,target=/distdir,readonly ${DOCKER_EXTRA_ARGS:-}"
-  ABSL_GOOGLETEST_DOWNLOAD_URL="file:///distdir/${ABSL_GOOGLETEST_COMMIT}.zip"
-else
-  ABSL_GOOGLETEST_DOWNLOAD_URL="https://github.com/google/googletest/archive/${ABSL_GOOGLETEST_COMMIT}.zip"
-fi
+ABSL_GOOGLETEST_DOWNLOAD_URL="https://github.com/google/googletest/releases/download/v${ABSL_GOOGLETEST_VERSION}/googletest-${ABSL_GOOGLETEST_VERSION}.tar.gz"

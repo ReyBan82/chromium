@@ -7,11 +7,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_file.h"
@@ -23,7 +25,7 @@
 #include "base/task/sequenced_task_runner.h"
 #include "base/test/task_environment.h"
 #include "build/build_config.h"
-#include "mojo/core/embedder/embedder.h"
+#include "mojo/buildflags.h"
 #include "mojo/core/handle_signals_state.h"
 #include "mojo/core/test/mojo_test_base.h"
 #include "mojo/core/test/test_utils.h"
@@ -55,22 +57,26 @@ MojoResult MojoReadMessage(MojoHandle pipe,
   std::vector<ScopedHandle> handles;
   MojoResult rv =
       ReadMessageRaw(MessagePipeHandle(pipe), &bytes, &handles, flags);
-  if (rv != MOJO_RESULT_OK)
+  if (rv != MOJO_RESULT_OK) {
     return rv;
-
-  if (num_bytes)
-    *num_bytes = static_cast<uint32_t>(bytes.size());
-  if (!bytes.empty()) {
-    CHECK(out_bytes && num_bytes && *num_bytes >= bytes.size());
-    memcpy(out_bytes, bytes.data(), bytes.size());
   }
 
-  if (num_handles)
+  if (num_bytes) {
+    *num_bytes = static_cast<uint32_t>(bytes.size());
+  }
+  if (!bytes.empty()) {
+    CHECK(out_bytes && num_bytes && *num_bytes >= bytes.size());
+    UNSAFE_TODO(memcpy(out_bytes, bytes.data(), bytes.size()));
+  }
+
+  if (num_handles) {
     *num_handles = static_cast<uint32_t>(handles.size());
+  }
   if (!handles.empty()) {
     CHECK(out_handles && num_handles && *num_handles >= handles.size());
-    for (size_t i = 0; i < handles.size(); ++i)
-      out_handles[i] = handles[i].release().value();
+    for (size_t i = 0; i < handles.size(); ++i) {
+      UNSAFE_TODO(out_handles[i]) = handles[i].release().value();
+    }
   }
   return MOJO_RESULT_OK;
 }
@@ -127,7 +133,7 @@ class MultiprocessMessagePipeTestWithPeerSupport
 
     const bool is_peer_launch =
         GetParam() == test::MojoTestBase::LaunchType::PEER;
-#if BUILDFLAG(IS_FUCHSIA)
+#if BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_IOS)
     const bool is_named_peer_launch = false;
 #else
     const bool is_named_peer_launch =
@@ -298,7 +304,7 @@ DEFINE_TEST_CLIENT_WITH_PIPE(CheckSharedBuffer,
 
   // Write some stuff to the shared buffer.
   static const char kHello[] = "hello";
-  memcpy(buffer, kHello, sizeof(kHello));
+  UNSAFE_TODO(memcpy(buffer, kHello, sizeof(kHello)));
 
   // We should be able to close the dispatcher now.
   MojoClose(handles[0]);
@@ -326,7 +332,7 @@ DEFINE_TEST_CLIENT_WITH_PIPE(CheckSharedBuffer,
 
   // It should have written something to the shared buffer.
   static const char kWorld[] = "world!!!";
-  CHECK_EQ(memcmp(buffer, kWorld, sizeof(kWorld)), 0);
+  UNSAFE_TODO(CHECK_EQ(memcmp(buffer, kWorld, sizeof(kWorld)), 0));
 
   // And we're done.
 
@@ -388,11 +394,11 @@ TEST_F(MultiprocessMessagePipeTest, SharedBufferPassing) {
     void* buffer;
     CHECK_EQ(MojoMapBuffer(shared_buffer, 0, 100, nullptr, &buffer),
              MOJO_RESULT_OK);
-    ASSERT_EQ(0, memcmp(buffer, kHello, sizeof(kHello)));
+    UNSAFE_TODO(ASSERT_EQ(0, memcmp(buffer, kHello, sizeof(kHello))));
 
     // Now we'll write some stuff to the shared buffer.
     static const char kWorld[] = "world!!!";
-    memcpy(buffer, kWorld, sizeof(kWorld));
+    UNSAFE_TODO(memcpy(buffer, kWorld, sizeof(kWorld)));
 
     // And send a message to signal that we've written stuff.
     const std::string go3("go 3");
@@ -421,7 +427,7 @@ DEFINE_TEST_CLIENT_WITH_PIPE(CheckPlatformHandleFile,
 
   std::string read_buffer(100, '\0');
   uint32_t num_bytes = static_cast<uint32_t>(read_buffer.size());
-  MojoHandle handles[255];  // Maximum number to receive.
+  std::array<MojoHandle, 512> handles;  // Maximum number to receive.
   uint32_t num_handlers = std::size(handles);
 
   CHECK_EQ(MojoReadMessage(h, &read_buffer[0], &num_bytes, &handles[0],
@@ -431,7 +437,7 @@ DEFINE_TEST_CLIENT_WITH_PIPE(CheckPlatformHandleFile,
   read_buffer.resize(num_bytes);
   char hello[32];
   int num_handles = 0;
-  sscanf(read_buffer.c_str(), "%s %d", hello, &num_handles);
+  UNSAFE_TODO(sscanf(read_buffer.c_str(), "%s %d", hello, &num_handles));
   CHECK_EQ(std::string("hello"), std::string(hello));
   CHECK_GT(num_handles, 0);
 
@@ -444,7 +450,7 @@ DEFINE_TEST_CLIENT_WITH_PIPE(CheckPlatformHandleFile,
     CHECK(fp);
     std::string fread_buffer(100, '\0');
     size_t bytes_read =
-        fread(&fread_buffer[0], 1, fread_buffer.size(), fp.get());
+        UNSAFE_TODO(fread(&fread_buffer[0], 1, fread_buffer.size(), fp.get()));
     fread_buffer.resize(bytes_read);
     CHECK_EQ(fread_buffer, "world");
   }
@@ -452,6 +458,7 @@ DEFINE_TEST_CLIENT_WITH_PIPE(CheckPlatformHandleFile,
   return 0;
 }
 
+// Android multi-process tests are not executing the new process. This is flaky.
 #if !BUILDFLAG(IS_ANDROID)
 class MultiprocessMessagePipeTestWithPipeCount
     : public MultiprocessMessagePipeTest,
@@ -470,7 +477,8 @@ TEST_P(MultiprocessMessagePipeTestWithPipeCount, PlatformHandlePassing) {
       base::ScopedFILE fp =
           CreateAndOpenTemporaryStreamInDir(temp_dir.GetPath(), &unused);
       const std::string world("world");
-      CHECK_EQ(fwrite(&world[0], 1, world.size(), fp.get()), world.size());
+      UNSAFE_TODO(
+          CHECK_EQ(fwrite(&world[0], 1, world.size(), fp.get()), world.size()));
       fflush(fp.get());
       rewind(fp.get());
       ScopedHandle handle =
@@ -497,14 +505,18 @@ TEST_P(MultiprocessMessagePipeTestWithPipeCount, PlatformHandlePassing) {
   });
 }
 
-// Android multi-process tests are not executing the new process. This is flaky.
+// This needs to test message sharding which occurs when platform handles reach
+// certain limits: ZX_CHANNEL_MAX_MSG_HANDLES, kMaxSendmsgHandles,
+// kMaxAttachedHandles.
 INSTANTIATE_TEST_SUITE_P(PipeCount,
                          MultiprocessMessagePipeTestWithPipeCount,
-                         // TODO(rockot): Enable the 128 and 250 pipe cases when
-                         // ChannelPosix and ChannelFuchsia have support for
-                         // sending larger numbers of handles per-message. See
-                         // kMaxAttachedHandles in channel.cc for details.
-                         testing::Values(1u, 64u /*, 128u, 250u*/));
+// Mac crashes with too many handles: crbug.com/553026855
+#if BUILDFLAG(MOJO_USE_APPLE_CHANNEL)
+                         testing::Values(1u, 64u, 128u, 255u)
+#else
+                         testing::Values(1u, 64u, 128u, 255u, 512u)
+#endif
+);
 #endif
 
 DEFINE_TEST_CLIENT_WITH_PIPE(CheckMessagePipe, MultiprocessMessagePipeTest, h) {
@@ -752,8 +764,9 @@ DEFINE_TEST_CLIENT_WITH_PIPE(ChannelEchoClient,
                              h) {
   for (;;) {
     std::string message = ReadMessage(h);
-    if (message == "exit")
+    if (message == "exit") {
       break;
+    }
     WriteMessage(h, message);
   }
   return 0;
@@ -778,8 +791,9 @@ DEFINE_TEST_CLIENT_WITH_PIPE(EchoServiceClient,
   ReadMessageWithHandles(h, &p, 1);
   for (;;) {
     std::string message = ReadMessage(p);
-    if (message == "exit")
+    if (message == "exit") {
       break;
+    }
     WriteMessage(p, message);
   }
   CloseHandle(p);
@@ -837,8 +851,9 @@ DEFINE_TEST_CLIENT_WITH_PIPE(EchoServiceFactoryClient,
     }
   }
 
-  for (size_t i = 1; i < handles.size(); ++i)
+  for (size_t i = 1; i < handles.size(); ++i) {
     CloseHandle(handles[i].value());
+  }
 
   return 0;
 }
@@ -1021,8 +1036,9 @@ DEFINE_TEST_CLIENT_WITH_PIPE(CommandDrivenClient,
     }
   }
 
-  for (auto& pipe : named_pipes)
+  for (auto& pipe : named_pipes) {
     CloseHandle(pipe.second);
+  }
 
   return 0;
 }
@@ -1336,8 +1352,9 @@ DEFINE_TEST_CLIENT_TEST_WITH_PIPE(MessagePipeStatusChangeInTransitClient,
   } while (result == MOJO_RESULT_OK);
   EXPECT_EQ(MOJO_RESULT_FAILED_PRECONDITION, result);
 
-  for (size_t i = 0; i < 4; ++i)
-    CloseHandle(handles[i]);
+  for (size_t i = 0; i < 4; ++i) {
+    CloseHandle(UNSAFE_TODO(handles[i]));
+  }
   CloseHandle(parent);
 }
 
@@ -1365,14 +1382,6 @@ DEFINE_TEST_CLIENT_TEST_WITH_PIPE(SpotaneouslyDyingProcess,
   VerifyEcho(parent, "!");
   WriteMessageWithHandles(parent, "receiver", &receiver, 1);
 
-  if (!IsMojoIpczEnabled()) {
-    // Wait for the pipe to actually appear as remote. Before this happens, it's
-    // possible for message transmission to be deferred to the IO thread, and
-    // sudden termination might preempt that work. Note that this is unnecessary
-    // (and PEER_REMOTE signals are unsupported anyway) with MojoIpcz.
-    WaitForSignals(sender, MOJO_HANDLE_SIGNAL_PEER_REMOTE);
-  }
-
   WriteMessage(sender, "ok");
   MojoClose(sender);
   MojoClose(parent);
@@ -1382,18 +1391,20 @@ DEFINE_TEST_CLIENT_TEST_WITH_PIPE(SpotaneouslyDyingProcess,
 }
 
 TEST_F(MultiprocessMessagePipeTest, MessagePipeStatusChangeInTransit) {
-  MojoHandle local_handles[4];
+  std::array<MojoHandle, 4> local_handles;
   MojoHandle sent_handles[4];
-  for (size_t i = 0; i < 4; ++i)
-    CreateMessagePipe(&local_handles[i], &sent_handles[i]);
+  for (size_t i = 0; i < 4; ++i) {
+    CreateMessagePipe(&local_handles[i], UNSAFE_TODO(&sent_handles[i]));
+  }
 
   RunTestClient("MessagePipeStatusChangeInTransitClient",
                 [&](MojoHandle child) {
                   // Send 4 handles and let their transfer race with their
                   // peers' closure.
                   WriteMessageWithHandles(child, "o_O", sent_handles, 4);
-                  for (size_t i = 0; i < 4; ++i)
+                  for (size_t i = 0; i < 4; ++i) {
                     CloseHandle(local_handles[i]);
+                  }
                 });
 }
 
@@ -1413,7 +1424,7 @@ INSTANTIATE_TEST_SUITE_P(
                     test::MojoTestBase::LaunchType::CHILD_WITHOUT_CAPABILITIES,
                     test::MojoTestBase::LaunchType::PEER,
                     test::MojoTestBase::LaunchType::ASYNC
-#if !BUILDFLAG(IS_FUCHSIA)
+#if !BUILDFLAG(IS_FUCHSIA) && !BUILDFLAG(IS_IOS)
                     // Fuchsia has no named pipe support.
                     ,
                     test::MojoTestBase::LaunchType::NAMED_CHILD,

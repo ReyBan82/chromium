@@ -4,19 +4,24 @@
 
 import './accelerator_view.js';
 import './text_accelerator.js';
-import '../strings.m.js';
+import '/strings.m.js';
 import '../css/shortcut_customization_shared.css.js';
-import 'chrome://resources/cr_elements/cr_input/cr_input.js';
+import 'chrome://resources/ash/common/cr_elements/cr_input/cr_input.js';
+import 'chrome://resources/ash/common/cr_elements/cr_shared_style.css.js';
 import 'chrome://resources/polymer/v3_0/iron-icon/iron-icon.js';
+import 'chrome://resources/polymer/v3_0/paper-tooltip/paper-tooltip.js';
 
-import {assert} from 'chrome://resources/js/assert_ts.js';
-import {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
+import {I18nMixin} from 'chrome://resources/ash/common/cr_elements/i18n_mixin.js';
+import {strictQuery} from 'chrome://resources/ash/common/typescript_utils/strict_query.js';
+import type {PolymerElementProperties} from 'chrome://resources/polymer/v3_0/polymer/interfaces.js';
 import {PolymerElement} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
 
+import {AcceleratorLookupManager} from './accelerator_lookup_manager.js';
 import {getTemplate} from './accelerator_row.html.js';
 import {getShortcutProvider} from './mojo_interface_provider.js';
-import {AcceleratorInfo, AcceleratorSource, LayoutStyle, ShortcutProviderInterface, TextAcceleratorPart} from './shortcut_types.js';
-import {isCustomizationDisabled, isTextAcceleratorInfo} from './shortcut_utils.js';
+import type {AcceleratorInfo, AcceleratorSource, ShortcutProviderInterface, StandardAcceleratorInfo, TextAcceleratorInfo, TextAcceleratorPart} from './shortcut_types.js';
+import {LayoutStyle} from './shortcut_types.js';
+import {getAriaLabelForStandardAccelerators, getAriaLabelForTextAccelerators, getTextAcceleratorParts, isCustomizationAllowed} from './shortcut_utils.js';
 
 export type ShowEditDialogEvent = CustomEvent<{
   description: string,
@@ -24,6 +29,13 @@ export type ShowEditDialogEvent = CustomEvent<{
   action: number,
   source: AcceleratorSource,
 }>;
+
+export interface AcceleratorRowElement {
+  $: {
+    descriptionText: HTMLElement,
+    container: HTMLElement,
+  };
+}
 
 declare global {
   interface HTMLElementEventMap {
@@ -35,9 +47,9 @@ declare global {
  * @fileoverview
  * 'accelerator-row' is a wrapper component for one shortcut. It features a
  * description of the shortcut along with a list of accelerators.
- * TODO(jimmyxgong): Implement opening a dialog when clicked.
  */
-export class AcceleratorRowElement extends PolymerElement {
+const AcceleratorRowElementBase = I18nMixin(PolymerElement);
+export class AcceleratorRowElement extends AcceleratorRowElementBase {
   static get is(): string {
     return 'accelerator-row';
   }
@@ -66,6 +78,7 @@ export class AcceleratorRowElement extends PolymerElement {
       action: {
         type: Number,
         value: 0,
+        reflectToAttribute: true,
       },
 
       source: {
@@ -73,31 +86,38 @@ export class AcceleratorRowElement extends PolymerElement {
         value: 0,
         observer: AcceleratorRowElement.prototype.onSourceChanged,
       },
+
+      isEllipsisActive_: {
+        type: Boolean,
+        value: false,
+      },
     };
   }
 
-  description: string;
-  acceleratorInfos: AcceleratorInfo[];
-  layoutStyle: LayoutStyle;
-  action: number;
-  source: AcceleratorSource;
-  private isLocked: boolean;
+  declare description: string;
+  declare acceleratorInfos: AcceleratorInfo[];
+  declare layoutStyle: LayoutStyle;
+  declare action: number;
+  declare source: AcceleratorSource;
+  protected subcategoryIsLocked: boolean = false;
+  declare protected isLocked: boolean;
+  private lookupManager: AcceleratorLookupManager =
+      AcceleratorLookupManager.getInstance();
   private shortcutInterfaceProvider: ShortcutProviderInterface =
       getShortcutProvider();
+  declare private isEllipsisActive_: boolean;
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    this.subcategoryIsLocked = this.lookupManager.isSubcategoryLocked(
+        this.lookupManager.getAcceleratorSubcategory(this.source, this.action));
+  }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     if (!this.isLocked) {
-      this.removeEventListener('click', () => this.showDialog());
+      this.removeEventListener('edit-icon-clicked', () => this.showDialog());
     }
-  }
-
-  override ready(): void {
-    super.ready();
-    const numberOfAccelerators = this.layoutStyle == LayoutStyle.kDefault ?
-        this.acceleratorInfos.length :
-        1;
-    this.updateStyles({'--accelerator-row-num-accels': numberOfAccelerators});
   }
 
   protected onSourceChanged(): void {
@@ -105,7 +125,7 @@ export class AcceleratorRowElement extends PolymerElement {
         .then(({isMutable}) => {
           this.isLocked = !isMutable;
           if (!this.isLocked) {
-            this.addEventListener('click', () => this.showDialog());
+            this.addEventListener('edit-icon-clicked', () => this.showDialog());
           }
         });
   }
@@ -119,7 +139,7 @@ export class AcceleratorRowElement extends PolymerElement {
   }
 
   private showDialog(): void {
-    if (isCustomizationDisabled() || this.isTextLayout()) {
+    if (!isCustomizationAllowed() || this.isTextLayout()) {
       return;
     }
 
@@ -138,14 +158,80 @@ export class AcceleratorRowElement extends PolymerElement {
         ));
   }
 
-  protected getTextAcceleratorParts(info: AcceleratorInfo[]):
+  protected getTextAcceleratorParts(infos: TextAcceleratorInfo[]):
       TextAcceleratorPart[] {
-    // For text based layout accelerators, we always expect this to be an array
-    // with a single element.
-    assert(info.length === 1);
-    const textAcceleratorInfo = info[0];
-    assert(isTextAcceleratorInfo(textAcceleratorInfo));
-    return textAcceleratorInfo.layoutProperties.textAccelerator.parts;
+    return getTextAcceleratorParts(infos);
+  }
+
+  protected isEmptyList(infos: AcceleratorInfo[]): boolean {
+    return infos.length === 0;
+  }
+
+  // Returns true if it is the first accelerator in the list.
+  protected isFirstAccelerator(index: number): boolean {
+    return index === 0;
+  }
+
+  private onEditIconClicked(): void {
+    this.dispatchEvent(
+        new CustomEvent('edit-icon-clicked', {bubbles: true, composed: true}));
+  }
+
+  protected onFocusOrMouseEnter(): void {
+    if (this.lookupManager.getSearchResultRowFocused()) {
+      return;
+    }
+    strictQuery('#container', this.shadowRoot, HTMLTableRowElement).focus();
+  }
+
+  protected onBlur(): void {
+    this.lookupManager.setSearchResultRowFocused(false);
+  }
+
+  private rowIsLocked(): boolean {
+    // Accelerator row is locked if the subcategory or the source is locked or
+    // it is text accelerator or if all accelerator infos are locked.
+    return this.subcategoryIsLocked || this.isLocked || this.isTextLayout() ||
+        (this.acceleratorInfos.length > 0 &&
+         this.acceleratorInfos.every(info => info.locked));
+  }
+
+  private getAcceleratorText(): string {
+    // No shortcut assigned case:
+    if (this.acceleratorInfos.length === 0) {
+      return this.i18n('noShortcutAssigned');
+    }
+    return this.isDefaultLayout() ?
+        getAriaLabelForStandardAccelerators(
+            this.acceleratorInfos as StandardAcceleratorInfo[],
+            this.i18n('acceleratorTextDivider')) :
+        getAriaLabelForTextAccelerators(
+            this.acceleratorInfos as TextAcceleratorInfo[]);
+  }
+
+  private getAriaLabel(): string {
+    if (!isCustomizationAllowed()) {
+      return this.i18n(
+          'acceleratorRowAriaLabelReadOnly', this.description,
+          this.getAcceleratorText());
+    } else {
+      const rowStatus =
+          this.rowIsLocked() ? this.i18n('locked') : this.i18n('editable');
+      return this.i18n(
+          'acceleratorRowAriaLabel', this.description,
+          this.getAcceleratorText(), rowStatus);
+    }
+  }
+
+  private getEditButtonAriaLabel(): string {
+    return this.i18n('editButtonForRow', this.description);
+  }
+
+  private onMouseEnterDescriptionText_(): void {
+    const descriptionText = this.$.descriptionText;
+    const container = this.$.container;
+    this.isEllipsisActive_ =
+        container.clientHeight < descriptionText.scrollHeight;
   }
 
   static get template(): HTMLTemplateElement {

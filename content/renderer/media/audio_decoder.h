@@ -7,13 +7,19 @@
 
 #include <stddef.h>
 
-namespace blink { class WebAudioBus; }
+#include <memory>
+
+#include "base/containers/span.h"
+#include "content/common/content_export.h"
+#include "third_party/blink/public/platform/platform.h"
 
 namespace content {
 
-// Decode in-memory audio file data.
-bool DecodeAudioFileData(blink::WebAudioBus* destination_bus, const char* data,
-                         size_t data_size);
+// Decodes encoded audio information passed in `data`. Returns a populated
+// decoded audio file if decoding was successful, otherwise nullptr.
+CONTENT_EXPORT
+std::unique_ptr<blink::Platform::DecodedAudioFile> DecodeAudioFileData(
+    base::span<const char> data);
 
 }  // namespace content
 

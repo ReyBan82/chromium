@@ -4,23 +4,23 @@
 
 #include "chrome/browser/guest_view/extension_options/chrome_extension_options_guest_delegate.h"
 
+#include <memory>
 #include <utility>
 
-#include "chrome/browser/renderer_context_menu/render_view_context_menu.h"
-#include "chrome/browser/ui/browser.h"
-#include "chrome/browser/ui/browser_finder.h"
+#include "base/check_op.h"
 #include "components/renderer_context_menu/context_menu_delegate.h"
+#include "components/renderer_context_menu/render_view_context_menu_base.h"
+#include "content/public/browser/web_contents.h"
 #include "extensions/browser/guest_view/extension_options/extension_options_guest.h"
 
 namespace extensions {
 
 ChromeExtensionOptionsGuestDelegate::ChromeExtensionOptionsGuestDelegate(
     ExtensionOptionsGuest* guest)
-    : ExtensionOptionsGuestDelegate(guest) {
-}
+    : ExtensionOptionsGuestDelegate(guest) {}
 
-ChromeExtensionOptionsGuestDelegate::~ChromeExtensionOptionsGuestDelegate() {
-}
+ChromeExtensionOptionsGuestDelegate::~ChromeExtensionOptionsGuestDelegate() =
+    default;
 
 bool ChromeExtensionOptionsGuestDelegate::HandleContextMenu(
     content::RenderFrameHost& render_frame_host,
@@ -40,10 +40,11 @@ bool ChromeExtensionOptionsGuestDelegate::HandleContextMenu(
 }
 
 content::WebContents* ChromeExtensionOptionsGuestDelegate::OpenURLInNewTab(
-    const content::OpenURLParams& params) {
-  Browser* browser = chrome::FindBrowserWithWebContents(
-      extension_options_guest()->embedder_web_contents());
-  return browser->OpenURL(params);
+    const content::OpenURLParams& params,
+    base::OnceCallback<void(content::NavigationHandle&)>
+        navigation_handle_callback) {
+  return extension_options_guest()->embedder_web_contents()->OpenURL(
+      params, std::move(navigation_handle_callback));
 }
 
 }  // namespace extensions

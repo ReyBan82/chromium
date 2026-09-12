@@ -5,7 +5,10 @@
 #ifndef ASH_WEBUI_DIAGNOSTICS_UI_DIAGNOSTICS_UI_H_
 #define ASH_WEBUI_DIAGNOSTICS_UI_DIAGNOSTICS_UI_H_
 
+#include <memory>
+
 #include "ash/webui/common/backend/plural_string_handler.h"
+#include "ash/webui/common/chrome_os_webui_config.h"
 #include "ash/webui/diagnostics_ui/backend/input/input_data_provider.h"
 #include "ash/webui/diagnostics_ui/backend/session_log_handler.h"
 #include "ash/webui/diagnostics_ui/diagnostics_metrics.h"
@@ -14,7 +17,9 @@
 #include "ash/webui/diagnostics_ui/mojom/network_health_provider.mojom-forward.h"
 #include "ash/webui/diagnostics_ui/mojom/system_data_provider.mojom-forward.h"
 #include "ash/webui/diagnostics_ui/mojom/system_routine_controller.mojom-forward.h"
+#include "ash/webui/diagnostics_ui/url_constants.h"
 #include "base/time/time.h"
+#include "content/public/common/url_constants.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
 #include "ui/web_dialogs/web_dialog_ui.h"
 
@@ -25,11 +30,24 @@ class FilePath;
 namespace ash {
 
 class HoldingSpaceClient;
+class DiagnosticsDialogUI;
 
 namespace diagnostics {
 class DiagnosticsManager;
 class InputDataProvider;
+class SystemRoutineControllerDelegate;
 }  // namespace diagnostics
+
+// The WebDialogUIConfig for chrome://diagnostics.
+class DiagnosticsDialogUIConfig
+    : public ChromeOSWebUIConfig<DiagnosticsDialogUI> {
+ public:
+  explicit DiagnosticsDialogUIConfig(
+      CreateWebUIControllerFunc create_controller_func)
+      : ChromeOSWebUIConfig(content::kChromeUIScheme,
+                            ash::kChromeUIDiagnosticsAppHost,
+                            create_controller_func) {}
+};
 
 // The WebDialogUI for chrome://diagnostics.
 class DiagnosticsDialogUI : public ui::MojoWebDialogUI {
@@ -39,7 +57,8 @@ class DiagnosticsDialogUI : public ui::MojoWebDialogUI {
       const diagnostics::SessionLogHandler::SelectFilePolicyCreator&
           select_file_policy_creator,
       HoldingSpaceClient* holding_space_client,
-      const base::FilePath& log_directory_path);
+      const base::FilePath& log_directory_path,
+      std::unique_ptr<diagnostics::SystemRoutineControllerDelegate> delegate);
   ~DiagnosticsDialogUI() override;
 
   DiagnosticsDialogUI(const DiagnosticsDialogUI&) = delete;

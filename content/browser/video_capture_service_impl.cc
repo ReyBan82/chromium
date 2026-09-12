@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "content/browser/video_capture_service_impl.h"
-
 #include "base/no_destructor.h"
 #include "base/task/thread_pool.h"
 #include "base/threading/sequence_local_storage_slot.h"
@@ -13,14 +11,24 @@
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/child_process_host.h"
 #include "content/public/browser/service_process_host.h"
+#include "content/public/browser/service_process_host_passkeys.h"
 #include "content/public/browser/video_capture_service.h"
 #include "content/public/common/content_features.h"
 #include "content/public/common/content_switches.h"
 #include "mojo/public/cpp/bindings/receiver_set.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
-#include "services/video_capture/public/mojom/video_capture_service.mojom.h"
 #include "services/video_capture/video_capture_service_impl.h"
+
+#if BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+#include "base/functional/bind.h"
+#include "base/task/bind_post_task.h"
+#include "content/browser/gpu/browser_gpu_channel_host_factory.h"
+#include "gpu/command_buffer/client/shared_image_interface.h"
+#include "media/base/media_switches.h"
+#include "media/capture/video/video_capture_gpu_channel_host.h"
+#include "media/media_buildflags.h"
+#endif
 
 #if BUILDFLAG(IS_WIN)
 #define CREATE_IN_PROCESS_TASK_RUNNER base::ThreadPool::CreateCOMSTATaskRunner
@@ -31,15 +39,65 @@
 
 namespace content {
 
+// Helper class to allow access to class-based passkeys.
+class VideoCaptureServiceLauncher {
+ public:
+  static void Launch(
+      mojo::PendingReceiver<video_capture::mojom::VideoCaptureService>
+          receiver) {
+    ServiceProcessHost::Options options;
+    options.WithDisplayName("Video Capture");
+    // TODO(https://crbug.com/328099369) Remove once gpu client is provided
+    // directly.
+    options.WithGpuClient(ServiceProcessHostGpuClient::GetPassKey());
+#if BUILDFLAG(IS_MAC)
+    // On Mac, the service requires a CFRunLoop which is provided by a
+    // UI message loop. See https://crbug.com/40572495.
+    options.WithExtraCommandLineSwitches({switches::kMessageLoopTypeUi});
+#endif
+#if defined(WEBRTC_USE_PIPEWIRE)
+    // The PipeWire camera implementation in webrtc uses gdbus for portal
+    // handling, so the glib message loop must be used.
+    options.WithExtraCommandLineSwitches({switches::kMessageLoopTypeUi});
+#endif
+
+    ServiceProcessHost::Launch(std::move(receiver), options.Pass());
+  }
+};
+
 namespace {
-std::atomic<bool> g_use_safe_mode(false);
 
 video_capture::mojom::VideoCaptureService* g_service_override = nullptr;
 
+// TODO: The lifetime of the in-process video capture service is currently
+// managed by two disjoint static variables: the `SequenceLocalStorageSlot` for
+// the Remote and the `static base::NoDestructor` here for the service
+// implementation. This is fragile and drops subsequent receivers if called
+// multiple times. These should be merged into a single unified manager object.
 void BindInProcessInstance(
-    mojo::PendingReceiver<video_capture::mojom::VideoCaptureService> receiver) {
+    mojo::PendingReceiver<video_capture::mojom::VideoCaptureService> receiver,
+    scoped_refptr<gpu::GpuChannelHost> gpu_channel_host) {
   static base::NoDestructor<video_capture::VideoCaptureServiceImpl> service(
-      std::move(receiver), GetUIThreadTaskRunner({}));
+      std::move(receiver), GetUIThreadTaskRunner({}),
+      /*create_system_monitor=*/false);
+
+#if BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+  if (!gpu_channel_host) {
+    return;
+  }
+  service->SetGpuChannelHost(
+      std::move(gpu_channel_host),
+      base::BindPostTask(
+          GetUIThreadTaskRunner({}),
+          base::BindRepeating([](gpu::GpuChannelEstablishedCallback callback) {
+            auto* factory = BrowserGpuChannelHostFactory::instance();
+            if (factory) {
+              factory->EstablishGpuChannel(std::move(callback));
+            } else {
+              std::move(callback).Run(nullptr);
+            }
+          })));
+#endif
 }
 
 mojo::Remote<video_capture::mojom::VideoCaptureService>& GetUIThreadRemote() {
@@ -78,11 +136,6 @@ void BindProxyRemoteOnUIThread(
 
 }  // namespace
 
-void EnableVideoCaptureServiceSafeMode() {
-  LOG(WARNING) << "Enabling safe mode VideoCaptureService";
-  g_use_safe_mode = true;
-}
-
 video_capture::mojom::VideoCaptureService& GetVideoCaptureService() {
   if (!BrowserThread::CurrentlyOn(BrowserThread::UI)) {
     static base::SequenceLocalStorageSlot<
@@ -109,36 +162,35 @@ video_capture::mojom::VideoCaptureService& GetVideoCaptureService() {
           {base::MayBlock(), base::WithBaseSyncPrimitives(),
            base::TaskPriority::BEST_EFFORT},
           base::SingleThreadTaskRunnerThreadMode::DEDICATED);
+
+#if BUILDFLAG(IS_ANDROID) && BUILDFLAG(ENABLE_GPU_CHANNEL_MEDIA_CAPTURE)
+      auto* factory = BrowserGpuChannelHostFactory::instance();
+      if (base::FeatureList::IsEnabled(media::kAndroidZeroCopyVideoCapture) &&
+          factory) {
+        factory->EstablishGpuChannel(base::BindOnce(
+            [](mojo::PendingReceiver<video_capture::mojom::VideoCaptureService>
+                   receiver,
+               scoped_refptr<base::SingleThreadTaskRunner> task_runner,
+               scoped_refptr<gpu::GpuChannelHost> gpu_channel_host) {
+              task_runner->PostTask(
+                  FROM_HERE,
+                  base::BindOnce(&BindInProcessInstance, std::move(receiver),
+                                 std::move(gpu_channel_host)));
+            },
+            std::move(receiver), dedicated_task_runner));
+      } else {
+        dedicated_task_runner->PostTask(
+            FROM_HERE, base::BindOnce(&BindInProcessInstance,
+                                      std::move(receiver), nullptr));
+      }
+#else
       dedicated_task_runner->PostTask(
           FROM_HERE,
-          base::BindOnce(&BindInProcessInstance, std::move(receiver)));
-    } else {
-      ServiceProcessHost::Options options;
-      options.WithDisplayName("Video Capture");
-#if BUILDFLAG(IS_MAC)
-      // On Mac, the service requires a CFRunLoop which is provided by a
-      // UI message loop. See https://crbug.com/834581.
-      options.WithExtraCommandLineSwitches({switches::kMessageLoopTypeUi});
-      if (g_use_safe_mode) {
-        // When safe-mode is enabled, we keep the original entitlements and the
-        // hardened runtime to only load safe DAL plugins and reduce crash risk
-        // from third-party DAL plugins.
-        // As this is not possible to do with unsigned developer builds, we use
-        // an undocumented environment variable that macOS CMIO module checks to
-        // prevent loading any plugins.
-        setenv("CMIO_DAL_Ignore_Standard_PlugIns", "", 1);
-      } else {
-        // On Mac, the service also needs to have a different set of
-        // entitlements, the reason being that some virtual cameras DAL plugins
-        // are not signed or are signed by a different Team ID. Hence,
-        // library validation has to be disabled (see
-        // http://crbug.com/990381#c21).
-        options.WithChildFlags(ChildProcessHost::CHILD_PLUGIN);
-      }
+          base::BindOnce(&BindInProcessInstance, std::move(receiver), nullptr));
 #endif
-
-      ServiceProcessHost::Launch(std::move(receiver), options.Pass());
-
+    } else {
+      // Launch in a utility service.
+      VideoCaptureServiceLauncher::Launch(std::move(receiver));
 #if !BUILDFLAG(IS_ANDROID)
       // On Android, we do not use automatic service shutdown, because when
       // shutting down the service, we lose caching of the supported formats,

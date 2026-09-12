@@ -37,19 +37,19 @@ namespace blink {
 // Distance models are defined according to the OpenAL specification:
 // http://connect.creativelabs.com/openal/Documentation/OpenAL%201.1%20Specification.htm.
 
-class PLATFORM_EXPORT DistanceEffect {
+class PLATFORM_EXPORT DistanceEffect final {
   DISALLOW_NEW();
 
  public:
   enum ModelType { kModelLinear = 0, kModelInverse = 1, kModelExponential = 2 };
 
-  DistanceEffect();
+  DistanceEffect() = default;
 
   // Returns scalar gain for the given distance the current distance model is
   // used
   double Gain(double distance);
 
-  ModelType Model() { return model_; }
+  ModelType Model() const { return model_; }
 
   void SetModel(ModelType model) { model_ = model; }
 
@@ -64,15 +64,15 @@ class PLATFORM_EXPORT DistanceEffect {
   double MaxDistance() const { return max_distance_; }
   double RolloffFactor() const { return rolloff_factor_; }
 
- protected:
+ private:
   double LinearGain(double distance);
   double InverseGain(double distance);
   double ExponentialGain(double distance);
 
-  ModelType model_;
-  double ref_distance_;
-  double max_distance_;
-  double rolloff_factor_;
+  ModelType model_ = kModelInverse;
+  double ref_distance_ = 1.0;
+  double max_distance_ = 10000.0;
+  double rolloff_factor_ = 1.0;
 };
 
 }  // namespace blink

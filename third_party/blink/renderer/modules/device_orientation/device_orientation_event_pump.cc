@@ -8,7 +8,7 @@
 
 #include "services/device/public/cpp/generic_sensor/sensor_reading.h"
 #include "services/device/public/mojom/sensor.mojom-blink.h"
-#include "third_party/blink/public/common/browser_interface_broker_proxy.h"
+#include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/frame/platform_event_controller.h"
@@ -91,18 +91,20 @@ void DeviceOrientationEventPump::SendStartMessage(LocalFrame& frame) {
         sensor_provider_.BindNewPipeAndPassReceiver(
             frame.GetTaskRunner(TaskType::kSensor)));
     sensor_provider_.set_disconnect_handler(
-        WTF::BindOnce(&DeviceSensorEventPump::HandleSensorProviderError,
-                      WrapWeakPersistent(this)));
+        BindOnce(&DeviceSensorEventPump::HandleSensorProviderError,
+                 WrapWeakPersistent(this)));
   }
 
   if (absolute_) {
-    absolute_orientation_sensor_->Start(sensor_provider_.get());
+    absolute_orientation_sensor_->Start(sensor_provider_.get(),
+                                        /*user_gesture=*/false);
   } else {
     // Start() is asynchronous. Therefore IsConnected() can not be checked right
     // away to determine if we should attempt to fall back to
     // absolute_orientation_sensor_.
     attempted_to_fall_back_to_absolute_orientation_sensor_ = false;
-    relative_orientation_sensor_->Start(sensor_provider_.get());
+    relative_orientation_sensor_->Start(sensor_provider_.get(),
+                                        /*user_gesture=*/false);
   }
 }
 
@@ -143,7 +145,8 @@ void DeviceOrientationEventPump::DidStartIfPossible() {
     // If relative_orientation_sensor_ was requested but was not able to connect
     // then fall back to using absolute_orientation_sensor_.
     attempted_to_fall_back_to_absolute_orientation_sensor_ = true;
-    absolute_orientation_sensor_->Start(sensor_provider_.get());
+    absolute_orientation_sensor_->Start(sensor_provider_.get(),
+                                        /*user_gesture=*/false);
     if (state() == PumpState::kStopped) {
       // If SendStopMessage() was called before the OnSensorCreated() callback
       // registered that relative_orientation_sensor_ was not able to connect
@@ -172,9 +175,9 @@ bool DeviceOrientationEventPump::SensorsReadyOrErrored() const {
 }
 
 DeviceOrientationData* DeviceOrientationEventPump::GetDataFromSharedMemory() {
-  absl::optional<double> alpha;
-  absl::optional<double> beta;
-  absl::optional<double> gamma;
+  std::optional<double> alpha;
+  std::optional<double> beta;
+  std::optional<double> gamma;
   bool absolute = false;
   bool got_reading = false;
   device::SensorReading reading;

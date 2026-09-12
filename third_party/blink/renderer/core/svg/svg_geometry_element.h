@@ -35,7 +35,10 @@
 
 namespace blink {
 
+class AffineTransform;
+class DOMPointInit;
 class Path;
+class PathBuilder;
 class SVGAnimatedNumber;
 class SVGPointTearOff;
 
@@ -44,12 +47,14 @@ class SVGGeometryElement : public SVGGraphicsElement {
 
  public:
   virtual Path AsPath() const = 0;
-  bool isPointInFill(SVGPointTearOff*) const;
-  bool isPointInStroke(SVGPointTearOff*) const;
+  virtual PathBuilder AsMutablePath() const = 0;
 
-  Path ToClipPath() const;
+  bool isPointInFill(const DOMPointInit*) const;
+  bool isPointInStroke(const DOMPointInit*) const;
 
-  SVGAnimatedNumber* pathLength() const { return path_length_.Get(); }
+  Path ToClipPath(const AffineTransform* clip_transform = nullptr) const;
+
+  SVGAnimatedNumber* pathLength() const;
 
   virtual float getTotalLength(ExceptionState&);
   virtual SVGPointTearOff* getPointAtLength(float distance, ExceptionState&);
@@ -69,20 +74,24 @@ class SVGGeometryElement : public SVGGraphicsElement {
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
 
   void GeometryAttributeChanged();
-  void GeometryPresentationAttributeChanged(const QualifiedName&);
+  void GeometryPresentationAttributeChanged(const SVGAnimatedPropertyBase&);
+
+  void CollectExtraStyleForPresentationAttribute(
+      HeapVector<CSSPropertyValue, 8>& style) override;
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
  private:
   bool IsSVGGeometryElement() const final { return true; }
   virtual float ComputePathLength() const;
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
-  Member<SVGAnimatedNumber> path_length_;
+  SVGAnimatedNumber& EnsurePathLength() const;
+
+  mutable Member<SVGAnimatedNumber> path_length_;
 };
 
-template <>
-inline bool IsElementOfType<const SVGGeometryElement>(const Node& node) {
-  return IsA<SVGGeometryElement>(node);
-}
 template <>
 struct DowncastTraits<SVGGeometryElement> {
   static bool AllowFrom(const Node& node) {

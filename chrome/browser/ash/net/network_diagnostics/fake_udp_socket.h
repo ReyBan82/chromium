@@ -5,6 +5,9 @@
 #ifndef CHROME_BROWSER_ASH_NET_NETWORK_DIAGNOSTICS_FAKE_UDP_SOCKET_H_
 #define CHROME_BROWSER_ASH_NET_NETWORK_DIAGNOSTICS_FAKE_UDP_SOCKET_H_
 
+#include "base/containers/span.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_span.h"
 #include "base/time/time.h"
 #include "content/public/test/browser_task_environment.h"
 #include "mojo/public/cpp/bindings/pending_receiver.h"
@@ -41,8 +44,10 @@ class FakeUdpSocket : public network::mojom::UDPSocket {
   void SetReceiveBufferSize(int32_t receive_buffer_size,
                             SetSendBufferSizeCallback callback) override;
   void JoinGroup(const net::IPAddress& group_address,
+                 const std::optional<net::IPAddress>& source_address,
                  JoinGroupCallback callback) override;
   void LeaveGroup(const net::IPAddress& group_address,
+                  const std::optional<net::IPAddress>& source_address,
                   LeaveGroupCallback callback) override;
   // Used in the fake.
   void ReceiveMore(uint32_t num_additional_datagrams) override;
@@ -117,11 +122,11 @@ class FakeUdpSocket : public network::mojom::UDPSocket {
   net::Error udp_connect_code_ = net::ERR_FAILED;
   net::Error udp_send_code_ = net::ERR_FAILED;
   net::Error udp_on_received_code_ = net::ERR_FAILED;
-  base::span<const uint8_t> udp_on_received_data_ = {};
+  base::raw_span<const uint8_t> udp_on_received_data_ = {};
   bool mojo_disconnect_on_connect_ = false;
   bool mojo_disconnect_on_send_ = false;
   bool mojo_disconnect_on_receive_ = false;
-  content::BrowserTaskEnvironment* task_environment_;
+  raw_ptr<content::BrowserTaskEnvironment> task_environment_;
   base::TimeDelta connection_delay_;
   base::TimeDelta send_delay_;
   base::TimeDelta receive_delay_;

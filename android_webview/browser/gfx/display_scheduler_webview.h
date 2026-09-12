@@ -25,6 +25,7 @@ class OverlaysInfoProvider {
   virtual bool IsFrameSinkOverlayed(viz::FrameSinkId frame_sink_id) = 0;
 };
 
+// Lifetime: WebView
 class DisplaySchedulerWebView : public viz::DisplaySchedulerBase,
                                 public viz::SurfaceObserver,
                                 public viz::FrameSinkObserver {
@@ -36,16 +37,27 @@ class DisplaySchedulerWebView : public viz::DisplaySchedulerBase,
   // DisplaySchedulerBase implementation.
   void SetVisible(bool visible) override {}
   void ForceImmediateSwapIfPossible() override;
-  void SetNeedsOneBeginFrame(bool needs_draw) override;
+  void SetNeedsOneBeginFrame(const viz::BeginFrameArgs& args,
+                             bool needs_draw) override;
   void DidSwapBuffers() override;
   void DidReceiveSwapBuffersAck() override {}
   void OutputSurfaceLost() override;
   void ReportFrameTime(
       base::TimeDelta frame_time,
-      base::flat_set<base::PlatformThreadId> thread_ids) override {}
+      base::flat_set<base::PlatformThreadId> animation_thread_ids,
+      base::flat_set<base::PlatformThreadId> renderer_main_thread_ids,
+      base::TimeTicks draw_start,
+      viz::HintSession::BoostType boost_type) override {}
+  void OnPresentationFeedback(
+      const gfx::PresentationFeedback& feedback,
+      int64_t choreographer_vsync_id,
+      base::TimeTicks frame_time,
+      base::TimeDelta interval,
+      std::optional<viz::PossibleDeadline> deadline) override {}
 
-  // DisplayDamageTrackerObserver implementation.
-  void OnDisplayDamaged(viz::SurfaceId surface_id) override;
+  // DisplayDamageTracker::Delegate implementation.
+  void OnDisplayDamaged(viz::SurfaceId surface_id,
+                        viz::BeginFrameId frame_id) override;
   void OnRootFrameMissing(bool missing) override {}
   void OnPendingSurfacesChanged() override {}
 
@@ -54,34 +66,12 @@ class DisplaySchedulerWebView : public viz::DisplaySchedulerBase,
       const viz::SurfaceId& surface_id) override;
 
   // FrameSinkObserver implementation.
-  void OnRegisteredFrameSinkId(const viz::FrameSinkId& frame_sink_id) override {
-  }
-  void OnInvalidatedFrameSinkId(
-      const viz::FrameSinkId& frame_sink_id) override {}
-  void OnCreatedCompositorFrameSink(const viz::FrameSinkId& frame_sink_id,
-                                    bool is_root) override {}
-  void OnDestroyedCompositorFrameSink(
-      const viz::FrameSinkId& frame_sink_id) override {}
-  void OnRegisteredFrameSinkHierarchy(
-      const viz::FrameSinkId& parent_frame_sink_id,
-      const viz::FrameSinkId& child_frame_sink_id) override {}
-  void OnUnregisteredFrameSinkHierarchy(
-      const viz::FrameSinkId& parent_frame_sink_id,
-      const viz::FrameSinkId& child_frame_sink_id) override {}
-  void OnFrameSinkDidBeginFrame(const viz::FrameSinkId& frame_sink_id,
-                                const viz::BeginFrameArgs& args) override {}
-  void OnFrameSinkDidFinishFrame(const viz::FrameSinkId& frame_sink_id,
-                                 const viz::BeginFrameArgs& args) override {}
   void OnCaptureStarted(const viz::FrameSinkId& frame_sink_id) override;
 
  private:
   bool IsFrameSinkOverlayed(viz::FrameSinkId frame_sink_id);
 
   const raw_ptr<RootFrameSink> root_frame_sink_;
-
-  // This count how many times specific sink damaged display. It's incremented
-  // in OnDisplayDamaged and decremented in DidSwapBuffers.
-  std::map<viz::FrameSinkId, int> damaged_frames_;
 
   // Due to destruction order in viz::Display this might be not safe to use in
   // destructor of this class.
@@ -92,8 +82,6 @@ class DisplaySchedulerWebView : public viz::DisplaySchedulerBase,
       surface_manager_observation_{this};
   base::ScopedObservation<viz::FrameSinkManagerImpl, viz::FrameSinkObserver>
       frame_sink_manager_observation_{this};
-
-  const bool use_new_invalidate_heuristic_;
 
   THREAD_CHECKER(thread_checker_);
 };

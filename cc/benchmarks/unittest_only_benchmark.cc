@@ -4,6 +4,7 @@
 
 #include "cc/benchmarks/unittest_only_benchmark.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/functional/bind.h"
@@ -11,17 +12,13 @@
 #include "base/task/single_thread_task_runner.h"
 #include "base/values.h"
 #include "cc/benchmarks/unittest_only_benchmark_impl.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace cc {
 
-UnittestOnlyBenchmark::UnittestOnlyBenchmark(base::Value settings,
+UnittestOnlyBenchmark::UnittestOnlyBenchmark(base::DictValue settings,
                                              DoneCallback callback)
     : MicroBenchmark(std::move(callback)), create_impl_benchmark_(false) {
-  if (!settings.is_dict())
-    return;
-
-  auto run_benchmark_impl = settings.FindBoolKey("run_benchmark_impl");
+  auto run_benchmark_impl = settings.FindBool("run_benchmark_impl");
   if (run_benchmark_impl.has_value())
     create_impl_benchmark_ = *run_benchmark_impl;
 }
@@ -31,18 +28,14 @@ UnittestOnlyBenchmark::~UnittestOnlyBenchmark() {
 }
 
 void UnittestOnlyBenchmark::DidUpdateLayers(LayerTreeHost* layer_tree_host) {
-  NotifyDone(base::Value());
+  NotifyDone(base::DictValue());
 }
 
-bool UnittestOnlyBenchmark::ProcessMessage(base::Value message) {
-  auto can_handle = message.FindBoolKey("can_handle");
-  if (can_handle.has_value() && *can_handle) {
-    return true;
-  }
-  return false;
+bool UnittestOnlyBenchmark::ProcessMessage(base::DictValue message) {
+  return message.FindBool("can_handle").value_or(false);
 }
 
-void UnittestOnlyBenchmark::RecordImplResults(base::Value results) {
+void UnittestOnlyBenchmark::RecordImplResults(base::DictValue results) {
   NotifyDone(std::move(results));
 }
 

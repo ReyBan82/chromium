@@ -19,6 +19,8 @@ namespace base {
 class FilePath;
 }  // namespace base
 
+class PrefService;
+
 namespace ash {
 
 // A mock file suggestion service. Simply returns the cached suggestions without
@@ -30,16 +32,19 @@ class MockFileSuggestKeyedService : public FileSuggestKeyedService {
       content::BrowserContext* context);
 
   MockFileSuggestKeyedService(
+      PrefService* local_state,
       Profile* profile,
-      app_list::PersistentProto<app_list::RemovedResultsProto> proto);
+      PersistentProto<app_list::RemovedResultsProto> proto);
   MockFileSuggestKeyedService(const MockFileSuggestKeyedService&) = delete;
   MockFileSuggestKeyedService& operator=(const MockFileSuggestKeyedService&) =
       delete;
   ~MockFileSuggestKeyedService() override;
 
   // FileSuggestKeyedService:
-  void GetSuggestFileData(FileSuggestionType type,
-                          GetSuggestFileDataCallback callback) override;
+  MOCK_METHOD(void,
+              GetSuggestFileData,
+              (FileSuggestionType type, GetSuggestFileDataCallback callback),
+              (override));
   MOCK_METHOD(void,
               RemoveSuggestionsAndNotify,
               (const std::vector<base::FilePath>& suggested_file_paths),
@@ -51,14 +56,14 @@ class MockFileSuggestKeyedService : public FileSuggestKeyedService {
 
   void SetSuggestionsForType(
       FileSuggestionType type,
-      const absl::optional<std::vector<FileSuggestData>>& suggestions);
+      const std::optional<std::vector<FileSuggestData>>& suggestions);
 
  private:
   void RunGetSuggestFileDataCallback(FileSuggestionType type,
                                      GetSuggestFileDataCallback callback);
 
   // Caches file suggestions.
-  std::map<FileSuggestionType, absl::optional<std::vector<FileSuggestData>>>
+  std::map<FileSuggestionType, std::optional<std::vector<FileSuggestData>>>
       type_suggestion_mappings_;
 
   base::WeakPtrFactory<MockFileSuggestKeyedService> weak_factory_{this};

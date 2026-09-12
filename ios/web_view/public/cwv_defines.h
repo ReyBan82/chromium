@@ -47,6 +47,9 @@
 // Supports APIs used to implement the trusted vault for chrome sync.
 #define IOS_WEB_VIEW_SUPPORTS_TRUSTED_VAULT_APIS 1
 
+// Supports -[CWVAutofillDataManager fetchIconForCreditCard:creditCard].
+#define IOS_WEB_VIEW_SUPPORTS_FETCHING_CREDIT_CARD_ICON 1
+
 // Supports -[CWVAutofillDataManager updatePassword:newUsername:newPassword:].
 #define IOS_WEB_VIEW_SUPPORTS_UPDATING_PASSWORDS 1
 
@@ -71,5 +74,90 @@
 
 // Supports -[CWVWebViewConfiguration leakCheckService].
 #define IOS_WEB_VIEW_SUPPORTS_LEAK_CHECK_SERVICE 1
+
+// Supports -[CWVWebViewConfiguration reuseCheckService].
+#define IOS_WEB_VIEW_SUPPORTS_REUSE_CHECK_SERVICE 1
+
+// Supports -[CWVWeakCheckUtils isPasswordWeak:].
+#define IOS_WEB_VIEW_SUPPORTS_CWV_WEAK_CHECK_UTILS 1
+
+// Supports -[CWVUserContentController addMessageHandler:forCommand:] and
+// -[CWVUserContentController removeMessageHandlerForCommand] APIs.
+#define IOS_WEB_VIEW_SUPPORTS_USER_CONTENT_CONTROLLER_MESSAGE_HANDLERS 1
+
+// Supports -[CWVUserContentController isMessageHandlerRegisteredForCommand:]
+// API.
+#define IOS_WEB_VIEW_SUPPORTS_USER_CONTENT_CONTROLLER_IS_MESSAGE_HANDLER_REGISTERED \
+  1
+
+// Supports -[CWVNavigationDelegate
+// webView:decidePolicyForNavigationAction:decisionHandler:] and
+// -[CWVNavigationDelegate
+// webView:decidePolicyForNavigationResponse:decisionHandler:] APIs.
+#define IOS_WEB_VIEW_SUPPORTS_ASYNCCHRONOUS_POLICY_DECISION_HANDLER 1
+
+// Supports -[CWVUserScript initWithSource:forMainFrameOnly:].
+#define IOS_WEB_VIEW_SUPPORTS_INSTALLING_USER_SCRIPTS_INTO_ALL_FRAMES 1
+
+// Allows the usage of CWVFindInPageController for find in page sessions.
+#define IOS_WEB_VIEW_SUPPORTS_FIND_IN_PAGE_SESSIONS 1
+
+// Supports +[CWVWebView webInspectorEnabled].
+#define IOS_WEB_VIEW_SUPPORTS_WEB_INSPECTOR_API 1
+
+// Supports +[CWVWebView useOptimizedSessionStorage].
+#define IOS_WEB_VIEW_SUPPORTS_OPTIMIZED_STORAGE 1
+
+// Supports CWVOmniboxInput.
+#define IOS_WEB_VIEW_SUPPORTS_OMNIBOX_INPUT 1
+
+// Supports AccountAddressSyncing
+#define IOS_WEB_VIEW_SUPPORTS_ACCOUNT_ADDRESS_SYNC 1
+
+// Supports CWVGlobalState.
+#define IOS_WEB_VIEW_SUPPORTS_GLOBAL_STATE 1
+
+// Supports early initialization.
+#define IOS_WEB_VIEW_SUPPORTS_EARLY_INITIALIZATION 1
+
+// Supports timestamps in the CWVAutofillDataManager
+#define IOS_WEB_VIEW_CWV_AUTOFILL_DATA_MANAGER_TIMESTAMPS 1
+
+// Supports -[CWVWebView allowsLinkPreview].
+#define IOS_WEB_VIEW_SUPPORTS_ALLOWS_LINK_PREVIEW 1
+
+// Support affiliation of passwords.
+#define IOS_WEB_VIEW_SUPPORTS_AFFILIATED_PASSWORDS 1
+
+// Supports -[CWVDownloadTask originatingHost]
+#define IOS_WEB_VIEW_SUPPORTS_DOWNLOAD_TASK_ORIGINATING_HOST 1
+
+// Supports -[CWVDownloadTask redirectedURL]
+#define IOS_WEB_VIEW_SUPPORTS_DOWNLOAD_TASK_REDIRECTED_URL 1
+
+// Supports VCN.
+#define IOS_WEB_VIEW_SUPPORTS_VCN 1
+
+// Supports fetching virtual cards
+#define IOS_WEBVIEW_SUPPORTS_FETCHING_VIRTUAL_CARDS 1
+
+// Supports -[CWVEarlyInitFlags mainThreadInitialNestingLevel].
+#define IOS_WEB_VIEW_SUPPORTS_MAIN_THREAD_INITIAL_NESTING_LEVEL 1
+
+// When enabled, -[CWVGlobalState setDumpWithoutCrashingHandler:] is made available.
+#define CWV_DUMP_WITHOUT_CRASHING_HANDLER_AVAILABLE 1
+
+// Supports -[CWVPreferences autofillSafeLifecycleEnabled].
+#define IOS_WEB_VIEW_SUPPORTS_AUTOFILL_SAFE_LIFECYCLE 1
+
+// Supports -[CWVUIDelegate webView:buildMenuWithBuilder:].
+#define CWV_SUPPORTS_BUILD_MENU_WITH_BUILDER 1
+
+// Supports -[CWVWebViewConfiguration configurationWithIdentifier:] and related
+// profile-scoped sandboxing APIs. These APIs require iOS 17.0+ at runtime.
+#define IOS_WEB_VIEW_SUPPORTS_PROFILE_SCOPED_CONFIGURATIONS 1
+
+// Supports -[CWVWebVIewConfiguration hasActiveWebViews].
+#define IOS_WEB_VIEW_SUPPORTS_HAS_ACTIVE_WEB_VIEWS 1
 
 #endif  // IOS_WEB_VIEW_PUBLIC_CWV_DEFINES_H_

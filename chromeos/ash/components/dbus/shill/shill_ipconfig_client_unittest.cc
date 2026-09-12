@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "base/functional/bind.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/test_future.h"
 #include "base/values.h"
@@ -49,7 +50,8 @@ class ShillIPConfigClientTest : public ShillClientUnittestBase {
   }
 
  protected:
-  ShillIPConfigClient* client_ = nullptr;  // Unowned convenience pointer.
+  raw_ptr<ShillIPConfigClient, DanglingUntriaged> client_ =
+      nullptr;  // Unowned convenience pointer.
 };
 
 TEST_F(ShillIPConfigClientTest, PropertyChanged) {
@@ -107,7 +109,7 @@ TEST_F(ShillIPConfigClientTest, GetProperties) {
   writer.CloseContainer(&array_writer);
 
   // Create the expected value.
-  base::Value::Dict expected_value;
+  base::DictValue expected_value;
   expected_value.Set(shill::kAddressProperty, kAddress);
   expected_value.Set(shill::kMtuProperty, kMtu);
 
@@ -115,14 +117,13 @@ TEST_F(ShillIPConfigClientTest, GetProperties) {
   PrepareForMethodCall(shill::kGetPropertiesFunction,
                        base::BindRepeating(&ExpectNoArgument), response.get());
 
-  base::test::TestFuture<absl::optional<base::Value::Dict>>
-      get_properties_result;
+  base::test::TestFuture<std::optional<base::DictValue>> get_properties_result;
   // Call GetProperties.
   client_->GetProperties(dbus::ObjectPath(kExampleIPConfigPath),
                          get_properties_result.GetCallback());
-  absl::optional<base::Value::Dict> result = get_properties_result.Take();
+  std::optional<base::DictValue> result = get_properties_result.Take();
   EXPECT_TRUE(result.has_value());
-  const base::Value::Dict& result_value = result.value();
+  const base::DictValue& result_value = result.value();
   EXPECT_EQ(expected_value, result_value);
 }
 

@@ -4,11 +4,13 @@
 
 #include "ui/compositor/layer_type.h"
 
+#include <string_view>
+
 #include "base/notreached.h"
 
 namespace ui {
 
-base::StringPiece LayerTypeToString(LayerType type) {
+std::string_view LayerTypeToString(LayerType type) {
   switch (type) {
     case LayerType::LAYER_NOT_DRAWN:
       return "not_drawn";
@@ -18,9 +20,12 @@ base::StringPiece LayerTypeToString(LayerType type) {
       return "solid_color";
     case LayerType::LAYER_NINE_PATCH:
       return "nine_patch";
+    case LayerType::LAYER_SURFACE:
+      return "surface";
+    case LayerType::LAYER_WITH_EXTERNAL_TEXTURE:
+      return "with_external_texture";
   }
   NOTREACHED();
-  return {};
 }
 
 }  // namespace ui

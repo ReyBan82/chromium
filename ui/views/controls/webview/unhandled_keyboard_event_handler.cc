@@ -4,9 +4,11 @@
 
 #include "ui/views/controls/webview/unhandled_keyboard_event_handler.h"
 
-#include "content/public/browser/native_web_keyboard_event.h"
+#include "components/input/native_web_keyboard_event.h"
 #include "ui/content_accelerators/accelerator_util.h"
+#include "ui/views/controls/webview/webview.h"
 #include "ui/views/focus/focus_manager.h"
+#include "ui/views/view_utils.h"
 
 namespace views {
 
@@ -15,7 +17,7 @@ UnhandledKeyboardEventHandler::UnhandledKeyboardEventHandler() = default;
 UnhandledKeyboardEventHandler::~UnhandledKeyboardEventHandler() = default;
 
 bool UnhandledKeyboardEventHandler::HandleKeyboardEvent(
-    const content::NativeWebKeyboardEvent& event,
+    const input::NativeWebKeyboardEvent& event,
     FocusManager* focus_manager) {
   CHECK(focus_manager);
 
@@ -31,9 +33,21 @@ bool UnhandledKeyboardEventHandler::HandleKeyboardEvent(
   // always generate a Char event.
   ignore_next_char_event_ = false;
 
+  auto should_skip_accelerator =
+      [focus_manager](const ui::Accelerator& accelerator) {
+        View* focused_view = focus_manager->GetFocusedView();
+        return focused_view && !IsViewClass<WebView>(focused_view) &&
+               focus_manager->ShouldSkipAcceleratorProcessing(accelerator);
+      };
+
   if (event.GetType() == blink::WebInputEvent::Type::kRawKeyDown) {
     ui::Accelerator accelerator =
         ui::GetAcceleratorFromNativeWebKeyboardEvent(event);
+
+    if (should_skip_accelerator(accelerator)) {
+      ignore_next_char_event_ = true;
+      return true;
+    }
 
     // This is tricky: we want to set ignore_next_char_event_ if
     // ProcessAccelerator returns true. But ProcessAccelerator might delete
@@ -41,16 +55,31 @@ bool UnhandledKeyboardEventHandler::HandleKeyboardEvent(
     // set the flag and fix it if no event was handled.
     ignore_next_char_event_ = true;
 
-    if (focus_manager->ProcessAccelerator(accelerator))
+    if (focus_manager->ProcessAccelerator(accelerator)) {
       return true;
+    }
 
     // ProcessAccelerator didn't handle the accelerator, so we know both
     // that |this| is still valid, and that we didn't want to set the flag.
     ignore_next_char_event_ = false;
   }
 
-  if (event.os_event)
+  if (event.GetType() == blink::WebInputEvent::Type::kKeyUp) {
+    const ui::Accelerator accelerator =
+        ui::GetAcceleratorFromNativeWebKeyboardEvent(event);
+
+    if (should_skip_accelerator(accelerator)) {
+      return true;
+    }
+
+    if (focus_manager->ProcessAccelerator(accelerator)) {
+      return true;
+    }
+  }
+
+  if (event.os_event) {
     return HandleNativeKeyboardEvent(event, focus_manager);
+  }
 
   return false;
 }

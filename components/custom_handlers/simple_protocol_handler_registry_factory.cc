@@ -11,6 +11,7 @@
 #include "components/custom_handlers/protocol_handler_registry.h"
 #include "components/custom_handlers/test_protocol_handler_registry_delegate.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
+#include "content/public/browser/browser_context.h"
 
 namespace custom_handlers {
 
@@ -19,6 +20,22 @@ SimpleProtocolHandlerRegistryFactory*
 SimpleProtocolHandlerRegistryFactory::GetInstance() {
   static base::NoDestructor<SimpleProtocolHandlerRegistryFactory> factory;
   return factory.get();
+}
+
+// static
+std::unique_ptr<KeyedService> BuildProtocolHandlerRegistryService(
+    content::BrowserContext* context) {
+  // We can't ensure the UserPref has been set, so we pass a nullptr
+  // PrefService.
+  return custom_handlers::ProtocolHandlerRegistry::Create(
+      nullptr, std::make_unique<TestProtocolHandlerRegistryDelegate>(),
+      context->IsOffTheRecord());
+}
+
+// static
+BrowserContextKeyedServiceFactory::TestingFactory
+SimpleProtocolHandlerRegistryFactory::GetDefaultFactory() {
+  return base::BindRepeating(&BuildProtocolHandlerRegistryService);
 }
 
 // static
@@ -50,13 +67,10 @@ bool SimpleProtocolHandlerRegistryFactory::ServiceIsNULLWhileTesting() const {
   return true;
 }
 
-KeyedService* SimpleProtocolHandlerRegistryFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+SimpleProtocolHandlerRegistryFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  // We can't ensure the UserPref has been set, so we pass a nullptr
-  // PrefService.
-  return custom_handlers::ProtocolHandlerRegistry::Create(
-             nullptr, std::make_unique<TestProtocolHandlerRegistryDelegate>())
-      .release();
+  return BuildProtocolHandlerRegistryService(context);
 }
 
 }  // namespace custom_handlers

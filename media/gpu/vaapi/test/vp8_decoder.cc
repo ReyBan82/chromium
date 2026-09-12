@@ -5,28 +5,17 @@
 #include "media/gpu/vaapi/test/vp8_decoder.h"
 
 #include <va/va.h>
+
+#include <algorithm>
 #include <memory>
 
-#include "base/cxx17_backports.h"
-#include "media/filters/ivf_parser.h"
+#include "base/compiler_specific.h"
 #include "media/gpu/vaapi/test/macros.h"
+#include "media/parsers/ivf_parser.h"
 #include "media/parsers/vp8_parser.h"
 
 namespace media {
 namespace vaapi_test {
-
-namespace {
-
-template <typename To, typename From>
-void CheckedMemcpy(To& to, From& from) {
-  static_assert(std::is_array<To>::value, "First parameter must be an array");
-  static_assert(std::is_array<From>::value,
-                "Second parameter must be an array");
-  static_assert(sizeof(to) == sizeof(from), "arrays must be of same size");
-  memcpy(&to, &from, sizeof(to));
-}
-
-}  // namespace
 
 Vp8Decoder::Vp8Decoder(std::unique_ptr<IvfParser> ivf_parser,
                        const VaapiDevice& va_device,
@@ -58,12 +47,14 @@ Vp8Decoder::~Vp8Decoder() {
 Vp8Decoder::ParseResult Vp8Decoder::ReadNextFrame(
     Vp8FrameHeader& vp8_frame_header) {
   IvfFrameHeader ivf_frame_header{};
-  const uint8_t* ivf_frame_data;
-  if (!ivf_parser_->ParseNextFrame(&ivf_frame_header, &ivf_frame_data))
+  base::span<const uint8_t> ivf_frame_data =
+      ivf_parser_->ParseNextFrame(&ivf_frame_header);
+  if (ivf_frame_data.empty()) {
     return kEOStream;
+  }
 
-  const bool result = vp8_parser_->ParseFrame(
-      ivf_frame_data, ivf_frame_header.frame_size, &vp8_frame_header);
+  const bool result =
+      vp8_parser_->ParseFrame(ivf_frame_data, &vp8_frame_header);
   return result ? kOk : kError;
 }
 
@@ -94,18 +85,25 @@ void Vp8Decoder::FillVp8DataStructures(const Vp8FrameHeader& frame_hdr,
       }
     }
 
-#define CLAMP_Q(q) base::clamp(q, 0, 127)
-    iq_matrix_buf.quantization_index[i][0] = CLAMP_Q(q);
-    iq_matrix_buf.quantization_index[i][1] = CLAMP_Q(q + quant_hdr.y_dc_delta);
-    iq_matrix_buf.quantization_index[i][2] = CLAMP_Q(q + quant_hdr.y2_dc_delta);
-    iq_matrix_buf.quantization_index[i][3] = CLAMP_Q(q + quant_hdr.y2_ac_delta);
-    iq_matrix_buf.quantization_index[i][4] = CLAMP_Q(q + quant_hdr.uv_dc_delta);
-    iq_matrix_buf.quantization_index[i][5] = CLAMP_Q(q + quant_hdr.uv_ac_delta);
+#define CLAMP_Q(q) std::clamp(q, 0, 127)
+    UNSAFE_TODO(iq_matrix_buf.quantization_index[i])[0] = CLAMP_Q(q);
+    UNSAFE_TODO(iq_matrix_buf.quantization_index[i])
+    [1] = CLAMP_Q(q + quant_hdr.y_dc_delta);
+    UNSAFE_TODO(iq_matrix_buf.quantization_index[i])
+    [2] = CLAMP_Q(q + quant_hdr.y2_dc_delta);
+    UNSAFE_TODO(iq_matrix_buf.quantization_index[i])
+    [3] = CLAMP_Q(q + quant_hdr.y2_ac_delta);
+    UNSAFE_TODO(iq_matrix_buf.quantization_index[i])
+    [4] = CLAMP_Q(q + quant_hdr.uv_dc_delta);
+    UNSAFE_TODO(iq_matrix_buf.quantization_index[i])
+    [5] = CLAMP_Q(q + quant_hdr.uv_ac_delta);
 #undef CLAMP_Q
   }
 
   const Vp8EntropyHeader& entr_hdr = frame_hdr.entropy_hdr;
-  CheckedMemcpy(prob_buf.dct_coeff_probs, entr_hdr.coeff_probs);
+
+  base::as_writable_byte_span(prob_buf.dct_coeff_probs)
+      .copy_from(base::as_byte_span(entr_hdr.coeff_probs));
 
   pic_param.frame_width = frame_hdr.width;
   pic_param.frame_height = frame_hdr.height;
@@ -138,9 +136,8 @@ void Vp8Decoder::FillVp8DataStructures(const Vp8FrameHeader& frame_hdr,
   FHDR_TO_PP_PF(loop_filter_disable, lf_hdr.level == 0);
 #undef FHDR_TO_PP_PF
 
-  CheckedMemcpy(pic_param.mb_segment_tree_probs, sgmnt_hdr.segment_prob);
-
-  static_assert(std::extent<decltype(sgmnt_hdr.lf_update_value)>() ==
+  base::span(pic_param.mb_segment_tree_probs).copy_from(sgmnt_hdr.segment_prob);
+  static_assert(std::tuple_size_v<decltype(sgmnt_hdr.lf_update_value)> ==
                     std::extent<decltype(pic_param.loop_filter_level)>(),
                 "loop filter level arrays mismatch");
   for (size_t i = 0; i < std::size(sgmnt_hdr.lf_update_value); ++i) {
@@ -154,22 +151,23 @@ void Vp8Decoder::FillVp8DataStructures(const Vp8FrameHeader& frame_hdr,
       }
     }
 
-    pic_param.loop_filter_level[i] = base::clamp(lf_level, 0, 63);
+    UNSAFE_TODO(pic_param.loop_filter_level[i]) = std::clamp(lf_level, 0, 63);
   }
 
   static_assert(
-      std::extent<decltype(lf_hdr.ref_frame_delta)>() ==
+      std::tuple_size_v<decltype(lf_hdr.ref_frame_delta)> ==
           std::extent<decltype(pic_param.loop_filter_deltas_ref_frame)>(),
       "loop filter deltas arrays size mismatch");
-  static_assert(std::extent<decltype(lf_hdr.mb_mode_delta)>() ==
+  static_assert(std::tuple_size_v<decltype(lf_hdr.mb_mode_delta)> ==
                     std::extent<decltype(pic_param.loop_filter_deltas_mode)>(),
                 "loop filter deltas arrays size mismatch");
-  static_assert(std::extent<decltype(lf_hdr.ref_frame_delta)>() ==
-                    std::extent<decltype(lf_hdr.mb_mode_delta)>(),
+  static_assert(std::tuple_size_v<decltype(lf_hdr.ref_frame_delta)> ==
+                    std::tuple_size_v<decltype(lf_hdr.mb_mode_delta)>,
                 "loop filter deltas arrays size mismatch");
   for (size_t i = 0; i < std::size(lf_hdr.ref_frame_delta); ++i) {
-    pic_param.loop_filter_deltas_ref_frame[i] = lf_hdr.ref_frame_delta[i];
-    pic_param.loop_filter_deltas_mode[i] = lf_hdr.mb_mode_delta[i];
+    UNSAFE_TODO(pic_param.loop_filter_deltas_ref_frame[i]) =
+        lf_hdr.ref_frame_delta[i];
+    UNSAFE_TODO(pic_param.loop_filter_deltas_mode[i]) = lf_hdr.mb_mode_delta[i];
   }
 
 #define FHDR_TO_PP(a) pic_param.a = frame_hdr.a
@@ -179,9 +177,10 @@ void Vp8Decoder::FillVp8DataStructures(const Vp8FrameHeader& frame_hdr,
   FHDR_TO_PP(prob_gf);
 #undef FHDR_TO_PP
 
-  CheckedMemcpy(pic_param.y_mode_probs, entr_hdr.y_mode_probs);
-  CheckedMemcpy(pic_param.uv_mode_probs, entr_hdr.uv_mode_probs);
-  CheckedMemcpy(pic_param.mv_probs, entr_hdr.mv_probs);
+  base::span(pic_param.y_mode_probs).copy_from(entr_hdr.y_mode_probs);
+  base::span(pic_param.uv_mode_probs).copy_from(entr_hdr.uv_mode_probs);
+  base::as_writable_byte_span(pic_param.mv_probs)
+      .copy_from(base::as_byte_span(entr_hdr.mv_probs));
 
   pic_param.bool_coder_ctx.range = frame_hdr.bool_dec_range;
   pic_param.bool_coder_ctx.value = frame_hdr.bool_dec_value;
@@ -200,7 +199,8 @@ void Vp8Decoder::FillVp8DataStructures(const Vp8FrameHeader& frame_hdr,
       frame_hdr.first_part_size - ((frame_hdr.macroblock_bit_offset + 7) / 8);
 
   for (size_t i = 0; i < frame_hdr.num_of_dct_partitions; ++i)
-    slice_param.partition_size[i + 1] = frame_hdr.dct_partition_sizes[i];
+    UNSAFE_TODO(slice_param.partition_size[i + 1]) =
+        frame_hdr.dct_partition_sizes[i];
 }
 
 // Based on update_reference_frames() in libvpx: vp8/encoder/onyx_if.c
@@ -309,7 +309,7 @@ VideoDecoder::Result Vp8Decoder::DecodeNextFrame() {
   void* iq_matrix_data;
   res = vaMapBuffer(va_device_->display(), iq_matrix_id, &iq_matrix_data);
   VA_LOG_ASSERT(res, "vaMapBuffer");
-  memcpy(iq_matrix_data, &iq_matrix_buf, sizeof(iq_matrix_buf));
+  UNSAFE_TODO(memcpy(iq_matrix_data, &iq_matrix_buf, sizeof(iq_matrix_buf)));
   buffers.push_back(iq_matrix_id);
 
   VABufferID prob_buffer_id;
@@ -320,7 +320,7 @@ VideoDecoder::Result Vp8Decoder::DecodeNextFrame() {
   void* prob_buffer_data;
   res = vaMapBuffer(va_device_->display(), prob_buffer_id, &prob_buffer_data);
   VA_LOG_ASSERT(res, "vaMapBuffer");
-  memcpy(prob_buffer_data, &prob_buf, sizeof(prob_buf));
+  UNSAFE_TODO(memcpy(prob_buffer_data, &prob_buf, sizeof(prob_buf)));
   buffers.push_back(prob_buffer_id);
 
   VABufferID picture_params_id;
@@ -332,7 +332,7 @@ VideoDecoder::Result Vp8Decoder::DecodeNextFrame() {
   res = vaMapBuffer(va_device_->display(), picture_params_id,
                     &picture_params_data);
   VA_LOG_ASSERT(res, "vaMapBuffer");
-  memcpy(picture_params_data, &pic_param, sizeof(pic_param));
+  UNSAFE_TODO(memcpy(picture_params_data, &pic_param, sizeof(pic_param)));
   buffers.push_back(picture_params_id);
 
   VABufferID slice_params_id;
@@ -343,7 +343,7 @@ VideoDecoder::Result Vp8Decoder::DecodeNextFrame() {
   void* slice_params_data;
   res = vaMapBuffer(va_device_->display(), slice_params_id, &slice_params_data);
   VA_LOG_ASSERT(res, "vaMapBuffer");
-  memcpy(slice_params_data, &slice_param, sizeof(pic_param));
+  UNSAFE_TODO(memcpy(slice_params_data, &slice_param, sizeof(pic_param)));
   buffers.push_back(slice_params_id);
 
   VABufferID encoded_data_id;
@@ -354,7 +354,7 @@ VideoDecoder::Result Vp8Decoder::DecodeNextFrame() {
   void* encoded_data;
   res = vaMapBuffer(va_device_->display(), encoded_data_id, &encoded_data);
   VA_LOG_ASSERT(res, "vaMapBuffer");
-  memcpy(encoded_data, frame_hdr.data, frame_hdr.frame_size);
+  UNSAFE_TODO(memcpy(encoded_data, frame_hdr.data, frame_hdr.frame_size));
   buffers.push_back(encoded_data_id);
 
   // Time to render!

@@ -13,10 +13,14 @@
 
 #include "base/functional/callback.h"
 #include "base/memory/weak_ptr.h"
-#include "components/contextual_search/core/browser/contextual_search_context.h"
-#include "components/contextual_search/core/browser/contextual_search_delegate.h"
-#include "components/contextual_search/core/browser/resolved_search_term.h"
+#include "components/touch_to_search/core/browser/contextual_search_context.h"
+#include "components/touch_to_search/core/browser/contextual_search_delegate.h"
+#include "components/touch_to_search/core/browser/resolved_search_term.h"
 #include "content/public/browser/web_contents.h"
+
+extern const char kTranslatePartialTranslationHttpResponseCode[];
+
+class ContextualTranslateDelegate;
 
 // Structure used to pass context needed to resolve a partial translation.
 struct PartialTranslateRequest {
@@ -32,10 +36,15 @@ struct PartialTranslateRequest {
 
   // The source language to translate from. If this isn't specified the server
   // will attempt to detect the selection language.
-  absl::optional<std::string> source_language;
+  std::optional<std::string> source_language;
 
   // The desired target language.
   std::string target_language;
+
+  // Whether or not |source_language| should be applied as a hint for backend
+  // language detection. Otherwise, backend translation is forced using
+  // |source_language|.
+  bool apply_lang_hint = false;
 };
 
 // Indicates the outcome of a Partial Translate request.
@@ -51,7 +60,7 @@ struct PartialTranslateResponse {
   ~PartialTranslateResponse();
 
   // The result status.
-  PartialTranslateStatus status;
+  PartialTranslateStatus status = PartialTranslateStatus::kError;
 
   // The translated text.
   std::u16string translated_text;
@@ -70,8 +79,9 @@ class PartialTranslateManager {
   typedef base::OnceCallback<void(const PartialTranslateResponse&)>
       PartialTranslateCallback;
 
-  explicit PartialTranslateManager(
-      std::unique_ptr<ContextualSearchDelegate> delegate);
+  PartialTranslateManager(std::unique_ptr<ContextualSearchDelegate> delegate,
+                          std::unique_ptr<ContextualTranslateDelegate>
+                              contextual_translate_delegate);
 
   PartialTranslateManager(const PartialTranslateManager&) = delete;
   PartialTranslateManager& operator=(const PartialTranslateManager&) = delete;
@@ -82,7 +92,7 @@ class PartialTranslateManager {
   // call |callback| once the request is completed (unless another request
   // subsumes it).
   void StartPartialTranslate(content::WebContents* web_contents,
-                             PartialTranslateRequest request,
+                             const PartialTranslateRequest& request,
                              PartialTranslateCallback callback);
 
  private:
@@ -98,6 +108,9 @@ class PartialTranslateManager {
   // Callback called when the contextual search request finishes.
   void OnResolvedSearchTerm(const ResolvedSearchTerm& resolved_search_term);
 
+  // Callback called when the contextual translate request finishes.
+  void OnPartialTranslateResponse(const PartialTranslateResponse& response);
+
   // The ContextualSearchContext generated for the current request (if any).
   // Owned here so we can create WeakPtrs for use with ContextualSearchDelegate.
   std::unique_ptr<ContextualSearchContext> context_;
@@ -108,6 +121,9 @@ class PartialTranslateManager {
 
   // The delegate we're using the do the real work.
   std::unique_ptr<ContextualSearchDelegate> delegate_;
+
+  // The delegate used when kPartialTranslateUseOnePlatformApi is enabled.
+  std::unique_ptr<ContextualTranslateDelegate> contextual_translate_delegate_;
 
   // Use a WeakPtrFactory so we can cancel in-flight Partial Translate requests.
   base::WeakPtrFactory<PartialTranslateManager> weak_ptr_factory_{this};

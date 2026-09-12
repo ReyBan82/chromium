@@ -8,6 +8,7 @@
 
 #include "ash/test/ash_test_base.h"
 #include "ash/wm/video_detector.h"
+#include "base/memory/raw_ptr.h"
 #include "chromeos/dbus/power/fake_power_manager_client.h"
 
 namespace ash {
@@ -33,11 +34,12 @@ class VideoActivityNotifierTest : public AshTestBase {
   void TearDown() override {
     notifier_.reset();
     detector_.reset();
+    power_client_ = nullptr;
     AshTestBase::TearDown();
   }
 
  protected:
-  chromeos::FakePowerManagerClient* power_client_;  // Not owned.
+  raw_ptr<chromeos::FakePowerManagerClient> power_client_;  // Not owned.
 
   std::unique_ptr<VideoDetector> detector_;
   std::unique_ptr<VideoActivityNotifier> notifier_;

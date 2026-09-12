@@ -7,14 +7,15 @@
 #import <AppKit/AppKit.h>
 #include <Carbon/Carbon.h>
 
+#include "base/apple/foundation_util.h"
 #include "base/check.h"
 #include "base/feature_list.h"
-#include "base/mac/foundation_util.h"
 #include "base/no_destructor.h"
 #include "build/buildflag.h"
 #include "chrome/app/chrome_command_ids.h"
 #import "chrome/browser/app_controller_mac.h"
 #include "chrome/browser/ui/cocoa/accelerators_cocoa.h"
+#include "chrome/browser/ui/tabs/features.h"
 #include "chrome/browser/ui/ui_features.h"
 #include "ui/base/accelerators/accelerator.h"
 #include "ui/base/accelerators/platform_accelerator_cocoa.h"
@@ -149,8 +150,20 @@ const std::vector<KeyboardShortcutData>& GetShortcutsNotPresentInMainMenu() {
       {true,  false, false, true,  kVK_DownArrow,         IDC_FOCUS_NEXT_PANE},
       {true,  false, false, true,  kVK_UpArrow,           IDC_FOCUS_PREVIOUS_PANE},
       {true,  true,  false, true,  kVK_ANSI_A,            IDC_FOCUS_INACTIVE_POPUP_FOR_ACCESSIBILITY},
+      {true,  false, false, true,  kVK_ANSI_R,            IDC_SHOW_READING_MODE_KEYBOARD},
     });
     // clang-format on
+
+    // Tab Group Shortcuts
+    keys.push_back(
+        {true, false, true, false, kVK_ANSI_C, IDC_ADD_NEW_TAB_TO_GROUP});
+    keys.push_back(
+        {true, false, true, false, kVK_ANSI_P, IDC_CREATE_NEW_TAB_GROUP});
+    keys.push_back({true, false, true, false, kVK_ANSI_W, IDC_CLOSE_TAB_GROUP});
+    keys.push_back(
+        {true, false, true, false, kVK_ANSI_X, IDC_FOCUS_NEXT_TAB_GROUP});
+    keys.push_back(
+        {true, false, true, false, kVK_ANSI_Z, IDC_FOCUS_PREV_TAB_GROUP});
 
     if (base::FeatureList::IsEnabled(features::kUIDebugTools)) {
       keys.push_back(
@@ -160,6 +173,7 @@ const std::vector<KeyboardShortcutData>& GetShortcutsNotPresentInMainMenu() {
       keys.push_back({false, true, true, true, kVK_ANSI_M,
                       IDC_DEBUG_PRINT_VIEW_TREE_DETAILS});
     }
+
     return keys;
   }());
   return *keys;
@@ -170,16 +184,15 @@ const std::vector<NSMenuItem*>& GetMenuItemsNotPresentInMainMenu() {
     std::vector<NSMenuItem*> menu_items;
     for (const auto& shortcut : GetShortcutsNotPresentInMainMenu()) {
       ui::Accelerator accelerator = AcceleratorFromShortcut(shortcut);
-      NSString* key_equivalent = nil;
-      NSUInteger modifier_mask = 0;
-      ui::GetKeyEquivalentAndModifierMaskFromAccelerator(
-          accelerator, &key_equivalent, &modifier_mask);
+      KeyEquivalentAndModifierMask* equivalent =
+          ui::GetKeyEquivalentAndModifierMaskFromAccelerator(accelerator);
 
       // Intentionally leaked!
-      NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:@""
-                                                    action:nullptr
-                                             keyEquivalent:key_equivalent];
-      item.keyEquivalentModifierMask = modifier_mask;
+      NSMenuItem* item =
+          [[NSMenuItem alloc] initWithTitle:@""
+                                     action:nullptr
+                              keyEquivalent:equivalent.keyEquivalent];
+      item.keyEquivalentModifierMask = equivalent.modifierMask;
 
       // We store the command in the tag.
       item.tag = shortcut.chrome_command;

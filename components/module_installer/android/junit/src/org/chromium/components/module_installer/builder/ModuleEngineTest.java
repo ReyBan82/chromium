@@ -13,27 +13,26 @@ import static org.mockito.Mockito.mock;
 import android.app.Activity;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.components.module_installer.engine.EngineFactory;
 import org.chromium.components.module_installer.engine.InstallEngine;
 import org.chromium.components.module_installer.engine.InstallListener;
 
-/**
- * Test suite for the ModuleEngine class.
- */
+/** Test suite for the ModuleEngine class. */
 @RunWith(BaseRobolectricTestRunner.class)
 public class ModuleEngineTest {
-    @Mock
-    private InstallEngine mInstallEngineMock;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private InstallEngine mInstallEngineMock;
 
-    @Mock
-    private EngineFactory mEngineFactoryMock;
+    @Mock private EngineFactory mEngineFactoryMock;
 
     private ModuleEngine mModuleEngine;
 
@@ -41,7 +40,6 @@ public class ModuleEngineTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
 
         doReturn(mInstallEngineMock).when(mEngineFactoryMock).getEngine();
 

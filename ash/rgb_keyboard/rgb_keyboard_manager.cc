@@ -7,7 +7,6 @@
 #include <stdint.h>
 #include <vector>
 
-#include "ash/constants/ash_features.h"
 #include "ash/ime/ime_controller_impl.h"
 #include "ash/rgb_keyboard/histogram_util.h"
 #include "ash/rgb_keyboard/rgb_keyboard_manager_observer.h"
@@ -23,6 +22,9 @@ namespace ash {
 namespace {
 
 RgbKeyboardManager* g_instance = nullptr;
+
+// The max number of zones possible across all RGB enabled devices.
+const int kMaxNumberOfZones = 5;
 
 }  // namespace
 
@@ -99,6 +101,17 @@ void RgbKeyboardManager::SetZoneColor(int zone,
                                       uint8_t g,
                                       uint8_t b) {
   DCHECK(RgbkbdClient::Get());
+  // Make sure the given zone is within the valid possible range
+  // of values for zones. The zone colors are stored even if the actual zone
+  // count is not known yet to solve a race condition where colors are set
+  // before rgbkbd is initialized.
+  if (zone < 0 || zone >= kMaxNumberOfZones) {
+    LOG(ERROR) << "Zone #" << zone
+               << " is outside the range for valid possible values [0,"
+               << kMaxNumberOfZones << ").";
+    return;
+  }
+
   background_type_ = BackgroundType::kStaticZones;
   zone_colors_[zone] = SkColorSetRGB(r, g, b);
 
@@ -139,10 +152,6 @@ void RgbKeyboardManager::SetRainbowMode() {
 }
 
 void RgbKeyboardManager::SetAnimationMode(rgbkbd::RgbAnimationMode mode) {
-  if (!features::IsExperimentalRgbKeyboardPatternsEnabled()) {
-    LOG(ERROR) << "Attempted to set RGB animation mode, but flag is disabled.";
-    return;
-  }
 
   DCHECK(RgbkbdClient::Get());
   VLOG(1) << "Setting RGB keyboard animation mode to "
@@ -174,7 +183,7 @@ void RgbKeyboardManager::OnCapabilityUpdatedForTesting(
 }
 
 void RgbKeyboardManager::OnGetRgbKeyboardCapabilities(
-    absl::optional<rgbkbd::RgbKeyboardCapabilities> reply) {
+    std::optional<rgbkbd::RgbKeyboardCapabilities> reply) {
   if (!reply.has_value()) {
     if (base::SysInfo::IsRunningOnChromeOS()) {
       LOG(ERROR) << "No response received for GetRgbKeyboardCapabilities";

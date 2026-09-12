@@ -10,7 +10,12 @@
 // Includes copied from url_parse_fuzzer.cc
 #include "base/at_exit.h"
 #include "base/i18n/icu_util.h"
+#include "base/no_destructor.h"
 #include "url/gurl.h"
+
+// clang-format off
+#include "base/strings/string_number_conversions.h"
+// clang-format on
 
 // Includes *not* copied from url_parse_fuzzer.cc
 // Contains DEFINE_BINARY_PROTO_FUZZER, a macro we use to define our target
@@ -27,11 +32,6 @@ struct TestCase {
   // used by ICU integration.
   base::AtExitManager at_exit_manager;
 };
-
-TestCase* test_case = new TestCase();
-
-// Silence logging from the protobuf library.
-protobuf_mutator::protobuf::LogSilencer log_silencer;
 
 std::string Slash_to_string(int slash) {
   if (slash == url_proto::Url::NONE)
@@ -85,7 +85,7 @@ std::string protobuf_to_string(const url_proto::Url& url) {
     // that it is preceded by the host and then ":".
     if (url.has_port())
       // Convert url.port() from an unsigned 32 bit int before appending it.
-      url_string += ":" + std::to_string(url.port());
+      url_string += ":" + base::NumberToString(url.port());
   }
 
   // Append the path segments to the url, with each segment separated by
@@ -127,6 +127,7 @@ std::string protobuf_to_string(const url_proto::Url& url) {
 // was mutated by libFuzzer, converts it to a string and then feeds it to url()
 // for fuzzing.
 DEFINE_BINARY_PROTO_FUZZER(const url_proto::Url& url_protobuf) {
+  static const base::NoDestructor<TestCase> test_case;
   std::string url_string = protobuf_to_string(url_protobuf);
 
   // Allow native input to be retrieved easily.

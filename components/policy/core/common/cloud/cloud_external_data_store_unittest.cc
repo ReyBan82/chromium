@@ -7,14 +7,15 @@
 #include <stddef.h>
 
 #include <memory>
+#include <optional>
 
 #include "base/compiler_specific.h"
 #include "base/files/scoped_temp_dir.h"
+#include "base/strings/string_view_util.h"
 #include "base/test/test_simple_task_runner.h"
 #include "components/policy/core/common/cloud/resource_cache.h"
-#include "crypto/sha2.h"
+#include "crypto/hash.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace policy {
 
@@ -53,15 +54,17 @@ class CloudExternalDataStoreTest : public testing::Test {
 };
 
 CloudExternalDataStoreTest::CloudExternalDataStoreTest()
-    : kData1Hash(crypto::SHA256HashString(kData1)),
-      kData2Hash(crypto::SHA256HashString(kData2)),
+    : kData1Hash(
+          std::string(base::as_string_view(crypto::hash::Sha256(kData1)))),
+      kData2Hash(
+          std::string(base::as_string_view(crypto::hash::Sha256(kData2)))),
       task_runner_(new base::TestSimpleTaskRunner) {}
 
 void CloudExternalDataStoreTest::SetUp() {
   ASSERT_TRUE(temp_dir_.CreateUniqueTempDir());
   resource_cache_ =
       std::make_unique<ResourceCache>(temp_dir_.GetPath(), task_runner_,
-                                      /* max_cache_size */ absl::nullopt);
+                                      /* max_cache_size */ std::nullopt);
 }
 
 TEST_F(CloudExternalDataStoreTest, StoreAndLoad) {

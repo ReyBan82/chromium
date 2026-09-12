@@ -59,17 +59,33 @@ class RenderingSharedState(shared_page_state.SharedPageState):
       self._EnsureScreenOn()
 
   def DidRunStory(self, results):
-    if (self.current_page.TAGS
-        and story_tags.MOTIONMARK in self.current_page.TAGS):
+    if (
+      self.current_page.TAGS and story_tags.MOTIONMARK in self.current_page.TAGS
+    ):
       unit = 'unitless_biggerIsBetter'
       results.AddMeasurement('motionmark', unit, [self.current_page.score])
-      results.AddMeasurement('motionmarkLower', unit,
-                             [self.current_page.scoreLowerBound])
-      results.AddMeasurement('motionmarkUpper', unit,
-                             [self.current_page.scoreUpperBound])
+      results.AddMeasurement(
+        'motionmarkLower', unit, [self.current_page.scoreLowerBound]
+      )
+      results.AddMeasurement(
+        'motionmarkUpper', unit, [self.current_page.scoreUpperBound]
+      )
 
-    if (self.current_page.TAGS and
-        story_tags.KEY_IDLE_POWER in self.current_page.TAGS):
+      stories = self.current_page.stories
+      storyScores = self.current_page.storyScores
+      lowerBounds = self.current_page.storyScoreLowerBounds
+      upperBounds = self.current_page.storyScoreUpperBounds
+      score_index = 0
+      for story in stories:
+        results.AddMeasurement(story, unit, storyScores[score_index])
+        results.AddMeasurement(story + ' Lower', unit, lowerBounds[score_index])
+        results.AddMeasurement(story + ' Upper', unit, upperBounds[score_index])
+        score_index += 1
+
+    if (
+      self.current_page.TAGS
+      and story_tags.KEY_IDLE_POWER in self.current_page.TAGS
+    ):
       try:
         super(RenderingSharedState, self).DidRunStory(results)
       finally:
@@ -84,11 +100,12 @@ class RenderingSharedState(shared_page_state.SharedPageState):
     system_info = self.browser.GetSystemInfo()
     if system_info:
       for device in system_info.gpu.devices:
-        if device.device_string == u'Google SwiftShader':
+        if device.device_string == 'Google SwiftShader':
           raise NoSwiftShaderAssertionFailure(
-                'SwiftShader should not be used for rendering benchmark, since '
-                'the metrics produced from that do not reflect the real '
-                'performance for a lot of metrics.')
+            'SwiftShader should not be used for rendering benchmark, since '
+            'the metrics produced from that do not reflect the real '
+            'performance for a lot of metrics.'
+          )
 
 
 class DesktopRenderingSharedState(RenderingSharedState):

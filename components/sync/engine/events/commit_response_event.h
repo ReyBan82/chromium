@@ -11,8 +11,8 @@
 
 #include "base/time/time.h"
 #include "base/values.h"
-#include "components/sync/base/syncer_error.h"
 #include "components/sync/engine/events/protocol_event.h"
+#include "components/sync/engine/syncer_error.h"
 #include "components/sync/protocol/sync.pb.h"
 
 namespace syncer {
@@ -35,7 +35,7 @@ class CommitResponseEvent : public ProtocolEvent {
   base::Time GetTimestamp() const override;
   std::string GetType() const override;
   std::string GetDetails() const override;
-  base::Value::Dict GetProtoMessage(bool include_specifics) const override;
+  base::DictValue GetProtoMessage(bool include_specifics) const override;
 
   const base::Time timestamp_;
   const SyncerError result_;

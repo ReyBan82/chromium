@@ -9,24 +9,61 @@
  * things tests need.
  */
 
-export {RealboxBrowserProxy} from 'chrome://resources/cr_components/omnibox/realbox_browser_proxy.js';
-export {RealboxIconElement} from 'chrome://resources/cr_components/omnibox/realbox_icon.js';
-export {RealboxMatchElement} from 'chrome://resources/cr_components/omnibox/realbox_match.js';
+export {GlifAnimationState} from '//resources/cr_components/composebox/common.js';
+export {CustomizeButtonsElement} from 'chrome://new-tab-page/shared/customize_buttons/customize_buttons.js';
+export {PlaceholderTextCycler} from 'chrome://resources/cr_components/searchbox/placeholder_text_cycler.js';
+export {SearchboxBrowserProxy} from 'chrome://resources/cr_components/searchbox/searchbox_browser_proxy.js';
+export {SearchboxIconElement} from 'chrome://resources/cr_components/searchbox/searchbox_icon.js';
+export {SearchboxMatchElement} from 'chrome://resources/cr_components/searchbox/searchbox_match.js';
+export type {CrA11yAnnouncerMessagesSentEvent} from 'chrome://resources/cr_elements/cr_a11y_announcer/cr_a11y_announcer.js';
 export {CrAutoImgElement} from 'chrome://resources/cr_elements/cr_auto_img/cr_auto_img.js';
+export type {CrIconElement} from 'chrome://resources/cr_elements/cr_icon/cr_icon.js';
 export {BrowserCommandProxy} from 'chrome://resources/js/browser_command/browser_command_proxy.js';
 export {BrowserProxyImpl} from 'chrome://resources/js/metrics_reporter/browser_proxy.js';
 export {MetricsReporterImpl} from 'chrome://resources/js/metrics_reporter/metrics_reporter.js';
 export {getTrustedHTML} from 'chrome://resources/js/static_types.js';
-export {DomIf} from 'chrome://resources/polymer/v3_0/polymer/polymer_bundled.min.js';
-export {AppElement, CUSTOMIZE_CHROME_BUTTON_ELEMENT_ID, NtpCustomizeChromeEntryPoint, NtpElement} from './app.js';
+export type {FuseboxAction} from 'chrome://resources/mojo/components/omnibox/browser/fusebox_action.mojom-webui.js';
+export {InputSource, QueryActionOverride, SearchboxOverride, SearchboxTutorial, SuggestInventory} from 'chrome://resources/mojo/components/omnibox/browser/fusebox_action.mojom-webui.js';
+export {AppElement, CONTEXTUAL_ENTRYPOINT_ELEMENT_ID, CUSTOMIZE_CHROME_BUTTON_ELEMENT_ID, NtpCustomizeChromeEntryPoint, NtpElement} from './app.js';
 export {BackgroundManager} from './background_manager.js';
+export {CustomizeButtonsProxy} from './customize_buttons_proxy.js';
 export {CustomizeDialogPage} from './customize_dialog_types.js';
 export {DoodleShareDialogElement} from './doodle_share_dialog.js';
-export {IframeElement} from './iframe.js';
+export {C2PA_MARKER, hasC2paMetadata, MAX_C2PA_PIXELS, MAX_C2PA_SEARCH_BYTES, processFile, SUPPORTED_C2PA_FILE_TYPES} from './image_processor.js';
+export type {ProcessedFile} from './image_processor.js';
 export {LogoElement} from './logo.js';
-export {recordDuration, recordLoadDuration, recordOccurence, recordPerdecage} from './metrics_utils.js';
+export {recordBoolean, recordDuration, recordEnumeration, recordLinearValue, recordLoadDuration, recordLogValue, recordOccurrence, recordPerdecage, recordSmallCount, recordSparseValueWithPersistentHash} from './metrics_utils.js';
 export {NewTabPageProxy} from './new_tab_page_proxy.js';
-export {RealboxElement} from './realbox/realbox.js';
-export {$$, createScrollBorders, decodeString16, mojoString16} from './utils.js';
+export {NtpSearchboxElement} from './ntp_searchbox.js';
+export {checkTransparency, isBMP, isPNG, isWebP} from './transparency.js';
+export {$$} from './utils.js';
 export {Action as VoiceAction, Error as VoiceError} from './voice_search_overlay.js';
 export {WindowProxy} from './window_proxy.js';
+
+export * from './new_tab_page.mojom-webui.js';
+export type {ActionChip, PageRemote as ActionChipsPageRemote, TabInfo} from './action_chips.mojom-webui.js';
+export {ActionChipsHandlerRemote, IconType, PageCallbackRouter as ActionChipsPageCallbackRouter} from './action_chips.mojom-webui.js';
+export type {CalendarEvent, Attachment} from './calendar_data.mojom-webui.js';
+export type {Promo as NtpPromo, NtpPromoClientRemote, NtpPromoHandlerInterface} from './ntp_promo.mojom-webui.js';
+export {NtpPromoClientCallbackRouter} from './ntp_promo.mojom-webui.js';
+export type {CustomizeChromePageRemote} from './customize_chrome.mojom-webui.js';
+export {CustomizeChromeSection} from './customize_chrome.mojom-webui.js';
+export type {CustomizeButtonsDocumentRemote} from './customize_buttons.mojom-webui.js';
+export {CustomizeButtonsDocumentCallbackRouter, CustomizeButtonsHandlerRemote, SidePanelOpenTrigger} from './customize_buttons.mojom-webui.js';
+export {DriveSuggestionHandlerRemote} from './drive_suggestion.mojom-webui.js';
+export type {File} from './file_suggestion.mojom-webui.js';
+export {RecommendationType} from './file_suggestion.mojom-webui.js';
+export {GoogleCalendarPageHandlerRemote} from './google_calendar.mojom-webui.js';
+export {MicrosoftAuthPageHandlerRemote} from './microsoft_auth.mojom-webui.js';
+export {MicrosoftFilesPageHandlerRemote} from './microsoft_files.mojom-webui.js';
+export {PageHandlerRemote as TabResumptionPageHandlerRemote, ScoredURLUserAction} from './most_relevant_tab_resumption.mojom-webui.js';
+export {AuthType, MicrosoftAuthUntrustedDocumentRemote} from './ntp_microsoft_auth_shared_ui.mojom-webui.js';
+export {OutlookCalendarPageHandlerRemote} from './outlook_calendar.mojom-webui.js';
+export type {TabGroup} from './tab_groups.mojom-webui.js';
+export {PageHandlerRemote as TabGroupsPageHandlerRemote} from './tab_groups.mojom-webui.js';
+export {Color} from './tab_group_types.mojom-webui.js';
+export type {URLVisit} from './url_visit_types.mojom-webui.js';
+export {DecorationType, FormFactor, VisitSource} from './url_visit_types.mojom-webui.js';
+// <if expr="not is_official_build">
+export {FooHandlerRemote} from './foo.mojom-webui.js';
+// </if>

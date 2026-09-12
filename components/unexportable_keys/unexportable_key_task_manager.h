@@ -5,17 +5,25 @@
 #ifndef COMPONENTS_UNEXPORTABLE_KEYS_UNEXPORTABLE_KEY_TASK_MANAGER_H_
 #define COMPONENTS_UNEXPORTABLE_KEYS_UNEXPORTABLE_KEY_TASK_MANAGER_H_
 
-#include <map>
+#include <memory>
+#include <vector>
 
+#include "base/component_export.h"
 #include "base/containers/span.h"
 #include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/task/single_thread_task_runner.h"
+#include "base/task/single_thread_task_runner_thread_mode.h"
+#include "base/task/thread_pool.h"
 #include "components/unexportable_keys/background_long_task_scheduler.h"
+#include "components/unexportable_keys/background_task_origin.h"
 #include "components/unexportable_keys/background_task_priority.h"
-#include "components/unexportable_keys/ref_counted_unexportable_signing_key.h"
+#include "components/unexportable_keys/background_task_type.h"
+#include "components/unexportable_keys/ref_counted_unexportable_key.h"
+#include "components/unexportable_keys/service_error.h"
 #include "components/unexportable_keys/unexportable_key_id.h"
-#include "crypto/signature_verifier.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "crypto/sign.h"
+#include "crypto/unexportable_key.h"
 
 namespace unexportable_keys {
 
@@ -37,57 +45,150 @@ namespace unexportable_keys {
 //
 // Read documentation to `BackgroundLongTaskScheduler` for details on how the
 // tasks are getting scheduled.
-class UnexportableKeyTaskManager {
+class COMPONENT_EXPORT(UNEXPORTABLE_KEYS) UnexportableKeyTaskManager {
  public:
-  UnexportableKeyTaskManager();
+  explicit UnexportableKeyTaskManager();
   ~UnexportableKeyTaskManager();
 
   UnexportableKeyTaskManager(const UnexportableKeyTaskManager&) = delete;
   UnexportableKeyTaskManager& operator=(const UnexportableKeyTaskManager&) =
       delete;
 
+  // Returns a `crypto::UnexportableKeyProvider` that will be used by the
+  // `UnexportableKeyTaskManager`.
+  static std::unique_ptr<crypto::UnexportableKeyProvider>
+  GetUnexportableKeyProvider(crypto::UnexportableKeyProvider::Config config);
+
+  // Retrieves all keys that are currently stored on the platform.
+  // Invokes `callback` with a list of all keys, or `ServiceError` if an error
+  // occurs during retrieval.
+  void GetAllKeysForGarbageCollectionSlowlyAsync(
+      BackgroundTaskOrigin origin,
+      crypto::UnexportableKeyProvider::Config config,
+      BackgroundTaskPriority priority,
+      base::OnceCallback<
+          void(ServiceErrorOr<
+               std::vector<scoped_refptr<RefCountedUnexportableSigningKey>>>)>
+          callback);
+
   // Generates a new signing key asynchronously.
   // The first supported value of `acceptable_algorithms` determines the type of
   // the key.
-  // Invokes `callback` with nullptr if no supported hardware exists, if no
-  // value in `acceptable_algorithms` is supported, or if there was an error
-  // creating the key.
+  // Invokes `callback` with either:
+  // - non-null unexportable signing key if it was generated successfully, or
+  // - `ServiceError` if no supported hardware exists, if no value in
+  //   `acceptable_algorithms` is supported, or if there was an error creating
+  //   the key.
   void GenerateSigningKeySlowlyAsync(
-      base::span<const crypto::SignatureVerifier::SignatureAlgorithm>
-          acceptable_algorithms,
+      BackgroundTaskOrigin origin,
+      crypto::UnexportableKeyProvider::Config config,
+      base::span<const crypto::sign::SignatureKind> acceptable_algorithms,
       BackgroundTaskPriority priority,
-      base::OnceCallback<void(scoped_refptr<RefCountedUnexportableSigningKey>)>
+      base::OnceCallback<
+          void(ServiceErrorOr<scoped_refptr<RefCountedUnexportableSigningKey>>)>
           callback);
 
   // Creates a new signing key from a `wrapped_key` asynchronously.
   // `wrapped_key` must have resulted from calling `GetWrappedKey()` on a
   // previous instance of `crypto::UnexportableSigningKey`.
-  // `key_id` is a unique identifier that will be attached to the signing key.
-  // The caller is responsible for avoiding collisions and not requesting
-  // several keys under the same id.
-  // Invokes `callback` with nullptr if `wrapped_key` cannot be imported.
+  // Invokes `callback` with either:
+  // - non-null unexportable signing key if it was imported successfully, or
+  // - `ServiceError` if `wrapped_key` import failed.
   void FromWrappedSigningKeySlowlyAsync(
+      BackgroundTaskOrigin origin,
+      crypto::UnexportableKeyProvider::Config config,
       base::span<const uint8_t> wrapped_key,
-      const UnexportableKeyId& key_id,
       BackgroundTaskPriority priority,
-      base::OnceCallback<void(scoped_refptr<RefCountedUnexportableSigningKey>)>
+      base::OnceCallback<
+          void(ServiceErrorOr<scoped_refptr<RefCountedUnexportableSigningKey>>)>
           callback);
 
   // Schedules a new signing task or appends `callback` to an existing
   // task with `signing_key` and `data` arguments. Might return a cached result
   // if a task with the same combination of `signing_key` and `data` has been
   // completed recently.
-  // Invokes `callback` with a signature of `data`, of `absl::nullopt` if an
+  // `task_type` must be either `BackgroundTaskType::kSign` or
+  // `BackgroundTaskType::kSignWithAttestationKey` to distinguish regular
+  // signing from attestation key signing for metrics.
+  // Invokes `callback` with a signature of `data`, or `ServiceError` if an
   // error occurs during signing.
   void SignSlowlyAsync(
+      BackgroundTaskType task_type,
+      BackgroundTaskOrigin origin,
       scoped_refptr<RefCountedUnexportableSigningKey> signing_key,
       base::span<const uint8_t> data,
       BackgroundTaskPriority priority,
-      base::OnceCallback<void(absl::optional<std::vector<uint8_t>>)> callback);
+      base::OnceCallback<void(ServiceErrorOr<std::vector<uint8_t>>)> callback);
+
+  // Deletes a list of keys asynchronously.
+  // Invokes `callback` with a `ServiceError` if an error occurs during deletion
+  // and the number of deleted keys otherwise.
+  void DeleteKeysSlowlyAsync(
+      BackgroundTaskOrigin origin,
+      crypto::UnexportableKeyProvider::Config config,
+      std::vector<scoped_refptr<RefCountedUnexportableSigningKey>> keys,
+      BackgroundTaskPriority priority,
+      base::OnceCallback<void(ServiceErrorOr<size_t>)> callback);
+
+  // Deletes all keys asynchronously matching the given config.
+  // Invokes `callback` with a `ServiceError` if an error occurs during deletion
+  // and the number of deleted keys otherwise.
+  void DeleteAllKeysSlowlyAsync(
+      BackgroundTaskOrigin origin,
+      crypto::UnexportableKeyProvider::Config config,
+      BackgroundTaskPriority priority,
+      base::OnceCallback<void(ServiceErrorOr<size_t>)> callback);
+
+  // Generates a new attestation key asynchronously.
+  // Invokes `callback` with either:
+  // - non-null unexportable attestation key if generated successfully, or
+  // - `ServiceError` if no supported hardware exists, if no value in
+  //   `acceptable_algorithms` is supported, or if there was an error creating
+  //   the key.
+  void GenerateAttestationKeySlowlyAsync(
+      BackgroundTaskOrigin origin,
+      crypto::UnexportableKeyProvider::Config config,
+      base::span<const crypto::sign::SignatureKind> acceptable_algorithms,
+      BackgroundTaskPriority priority,
+      base::OnceCallback<void(
+          ServiceErrorOr<scoped_refptr<RefCountedUnexportableAttestationKey>>)>
+          callback);
+
+  // Creates a new attestation key from a `wrapped_key` asynchronously.
+  // `wrapped_key` must have resulted from calling `GetWrappedKey()` on a
+  // previous instance of `crypto::UnexportableAttestationKey`.
+  // Invokes `callback` with either:
+  // - non-null unexportable attestation key if it was imported successfully, or
+  // - `ServiceError` if `wrapped_key` import failed.
+  void FromWrappedAttestationKeySlowlyAsync(
+      BackgroundTaskOrigin origin,
+      crypto::UnexportableKeyProvider::Config config,
+      base::span<const uint8_t> wrapped_key,
+      BackgroundTaskPriority priority,
+      base::OnceCallback<void(
+          ServiceErrorOr<scoped_refptr<RefCountedUnexportableAttestationKey>>)>
+          callback);
+
+  // Certifies a signing key using an attestation key.
+  // Invokes `callback` with an attestation statement, or `ServiceError` if an
+  // error occurs during certification.
+  void CertifySlowlyAsync(
+      BackgroundTaskOrigin origin,
+      scoped_refptr<RefCountedUnexportableAttestationKey> attestation_key,
+      scoped_refptr<RefCountedUnexportableSigningKey> signing_key,
+      base::span<const uint8_t> challenge,
+      BackgroundTaskPriority priority,
+      base::OnceCallback<void(ServiceErrorOr<crypto::AttestationStatement>)>
+          callback);
 
  private:
   // Scheduler to run long tasks in background.
-  BackgroundLongTaskScheduler task_scheduler_;
+  BackgroundLongTaskScheduler task_scheduler_{
+      base::ThreadPool::CreateSingleThreadTaskRunner(
+          {base::MayBlock(), base::TaskPriority::USER_BLOCKING,
+           base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
+          // Using a dedicated thread to run long and blocking TPM tasks.
+          base::SingleThreadTaskRunnerThreadMode::DEDICATED)};
 };
 
 }  // namespace unexportable_keys

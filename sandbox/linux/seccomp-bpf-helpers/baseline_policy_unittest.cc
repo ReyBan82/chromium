@@ -24,14 +24,17 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <array>
+#include <string_view>
 #include <tuple>
 
 #include "base/clang_profiling_buildflags.h"
+#include "base/compiler_specific.h"
 #include "base/files/scoped_file.h"
 #include "base/posix/eintr_wrapper.h"
+#include "base/synchronization/lock_impl.h"
 #include "base/threading/thread.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "sandbox/linux/seccomp-bpf-helpers/sigsys_handlers.h"
 #include "sandbox/linux/seccomp-bpf/bpf_tests.h"
 #include "sandbox/linux/seccomp-bpf/sandbox_bpf.h"
@@ -43,6 +46,10 @@
 #include "sandbox/linux/system_headers/linux_time.h"
 #include "sandbox/linux/tests/test_utils.h"
 #include "sandbox/linux/tests/unit_tests.h"
+
+#if BUILDFLAG(IS_ANDROID)
+#include "base/android/background_thread_pool_field_trial.h"
+#endif  // BUILDFLAG(IS_ANDROID)
 
 #if !defined(SO_PEEK_OFF)
 #define SO_PEEK_OFF 42
@@ -77,16 +84,18 @@ void TestPipeOrSocketPair(base::ScopedFD read_end, base::ScopedFD write_end) {
   BPF_ASSERT_EQ(EPERM, errno);
 
   const ssize_t kTestTransferSize = 4;
-  static const char kTestString[kTestTransferSize] = {'T', 'E', 'S', 'T'};
+  static constexpr std::array<char, kTestTransferSize> kTestString = {'T', 'E',
+                                                                      'S', 'T'};
   ssize_t transfered = 0;
 
+  transfered = HANDLE_EINTR(
+      write(write_end.get(), kTestString.data(), kTestString.size()));
+  BPF_ASSERT_EQ(kTestTransferSize, transfered);
+  std::array<char, kTestTransferSize> read_buf = {};
   transfered =
-      HANDLE_EINTR(write(write_end.get(), kTestString, kTestTransferSize));
+      HANDLE_EINTR(read(read_end.get(), read_buf.data(), read_buf.size()));
   BPF_ASSERT_EQ(kTestTransferSize, transfered);
-  char read_buf[kTestTransferSize + 1] = {0};
-  transfered = HANDLE_EINTR(read(read_end.get(), read_buf, sizeof(read_buf)));
-  BPF_ASSERT_EQ(kTestTransferSize, transfered);
-  BPF_ASSERT_EQ(0, memcmp(kTestString, read_buf, kTestTransferSize));
+  BPF_ASSERT_EQ(kTestString, read_buf);
 }
 
 // Test that a few easy-to-test system calls are allowed.
@@ -151,7 +160,16 @@ BPF_TEST_C(BaselinePolicy, ForkArmEperm, BaselinePolicy) {
   BPF_ASSERT_EQ(EPERM, fork_errno);
 }
 
-BPF_TEST_C(BaselinePolicy, SystemEperm, BaselinePolicy) {
+// system() calls into vfork() on old Android builds and returns when vfork is
+// blocked. This causes undefined behavior on x86 Android builds on versions
+// prior to Q, which causes the stack to get corrupted, so this test cannot be
+// made to pass.
+#if BUILDFLAG(IS_ANDROID) && defined(__i386__)
+#define MAYBE_SystemEperm DISABLED_SystemEperm
+#else
+#define MAYBE_SystemEperm SystemEperm
+#endif
+BPF_TEST_C(BaselinePolicy, MAYBE_SystemEperm, BaselinePolicy) {
   errno = 0;
   int ret_val = system("echo SHOULD NEVER RUN");
   // glibc >= 2.33 changed the ret code: 127 is now expected on bits 15-8
@@ -169,8 +187,8 @@ BPF_TEST_C(BaselinePolicy, CloneVforkEperm, BaselinePolicy) {
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK, -1, 0);
   BPF_ASSERT_NE(child_stack, nullptr);
   pid_t pid = syscall(__NR_clone, CLONE_VM | CLONE_VFORK | SIGCHLD,
-                      static_cast<char*>(child_stack) + kStackSize, nullptr,
-                      nullptr, nullptr);
+                      UNSAFE_TODO(static_cast<char*>(child_stack) + kStackSize),
+                      nullptr, nullptr, nullptr);
   const int clone_errno = errno;
   TestUtils::HandlePostForkReturn(pid);
 
@@ -235,15 +253,29 @@ BPF_TEST_C(BaselinePolicy, Socketpair, BaselinePolicy) {
 #define GRND_NONBLOCK 1
 #endif
 
+#if !defined(GRND_INSECURE)
+#define GRND_INSECURE 4
+#endif
+
 BPF_TEST_C(BaselinePolicy, GetRandom, BaselinePolicy) {
   char buf[1];
 
   // Many systems do not yet support getrandom(2) so ENOSYS is a valid result
   // here.
+  errno = 0;
   int ret = HANDLE_EINTR(syscall(__NR_getrandom, buf, sizeof(buf), 0));
   BPF_ASSERT((ret == -1 && errno == ENOSYS) || ret == 1);
+  errno = 0;
   ret = HANDLE_EINTR(syscall(__NR_getrandom, buf, sizeof(buf), GRND_NONBLOCK));
   BPF_ASSERT((ret == -1 && (errno == ENOSYS || errno == EAGAIN)) || ret == 1);
+
+  // GRND_INSECURE is not supported on versions of Android < 12, and Android
+  // returns EINVAL in that case.
+  errno = 0;
+  ret = HANDLE_EINTR(syscall(__NR_getrandom, buf, sizeof(buf), GRND_INSECURE));
+  BPF_ASSERT(
+      (ret == -1 && (errno == ENOSYS || errno == EAGAIN || errno == EINVAL)) ||
+      ret == 1);
 }
 
 // Not all architectures can restrict the domain for socketpair().
@@ -325,7 +357,7 @@ TEST_BASELINE_SIGSYS(__NR_inotify_init)
 TEST_BASELINE_SIGSYS(__NR_vserver)
 #endif
 
-#if defined(LIBC_GLIBC) && !BUILDFLAG(IS_CHROMEOS_ASH)
+#if defined(LIBC_GLIBC) && !BUILDFLAG(IS_CHROMEOS)
 BPF_TEST_C(BaselinePolicy, FutexEINVAL, BaselinePolicy) {
   int ops[] = {
       FUTEX_CMP_REQUEUE_PI, FUTEX_CMP_REQUEUE_PI_PRIVATE,
@@ -337,32 +369,7 @@ BPF_TEST_C(BaselinePolicy, FutexEINVAL, BaselinePolicy) {
     BPF_ASSERT_EQ(EINVAL, errno);
   }
 }
-#else
-BPF_DEATH_TEST_C(BaselinePolicy,
-                 FutexWithRequeuePriorityInheritence,
-                 DEATH_SEGV_MESSAGE(GetFutexErrorMessageContentForTests()),
-                 BaselinePolicy) {
-  syscall(__NR_futex, nullptr, FUTEX_CMP_REQUEUE_PI, 0, nullptr, nullptr, 0);
-  _exit(1);
-}
-
-BPF_DEATH_TEST_C(BaselinePolicy,
-                 FutexWithRequeuePriorityInheritencePrivate,
-                 DEATH_SEGV_MESSAGE(GetFutexErrorMessageContentForTests()),
-                 BaselinePolicy) {
-  syscall(__NR_futex, nullptr, FUTEX_CMP_REQUEUE_PI_PRIVATE, 0, nullptr,
-          nullptr, 0);
-  _exit(1);
-}
-
-BPF_DEATH_TEST_C(BaselinePolicy,
-                 FutexWithUnlockPIPrivate,
-                 DEATH_SEGV_MESSAGE(GetFutexErrorMessageContentForTests()),
-                 BaselinePolicy) {
-  syscall(__NR_futex, nullptr, FUTEX_UNLOCK_PI_PRIVATE, 0, nullptr, nullptr, 0);
-  _exit(1);
-}
-#endif  // defined(LIBC_GLIBC) && !BUILDFLAG(IS_CHROMEOS_ASH)
+#endif
 
 BPF_TEST_C(BaselinePolicy, PrctlDumpable, BaselinePolicy) {
   const int is_dumpable = prctl(PR_GET_DUMPABLE, 0, 0, 0, 0);
@@ -493,7 +500,96 @@ BPF_DEATH_TEST_C(BaselinePolicy,
   int id;
   setsockopt(fds[0], SOL_SOCKET, SO_DEBUG, &id, sizeof(id));
 }
+
+BPF_DEATH_TEST_C(BaselinePolicy,
+                 SendFlagsFiltered,
+                 DEATH_SUCCESS(),
+                 BaselinePolicy) {
+  int fds[2];
+  PCHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+  char buf[1] = {'x'};
+// Check allowlisted MSG_DONTWAIT with send. Newer platforms don't have send()
+// anymore.
+#if defined(__NR_send)
+  PCHECK(syscall(__NR_send, fds[0], &buf, 1, MSG_DONTWAIT) != -1);
+#endif  //  defined(__NR_send)
+
+  // Check allowlisted MSG_DONTWAIT with sendto
+  PCHECK(syscall(__NR_sendto, fds[0], &buf, 1, MSG_DONTWAIT, nullptr,
+                 nullptr) != -1);
+
+  // Check allowlisted MSG_DONTWAIT with sendmsg
+  struct msghdr msg = {};
+  PCHECK(syscall(__NR_sendmsg, fds[0], &msg, MSG_DONTWAIT) != -1);
+}
+
+#if defined(__NR_send)
+BPF_DEATH_TEST_C(BaselinePolicy,
+                 SendFlagsFilteredMSG_OOB,
+                 DEATH_SEGV_MESSAGE(GetErrorMessageContentForTests()),
+                 BaselinePolicy) {
+  int fds[2];
+  PCHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+  char buf[1];
+  // Specifically disallow MSG_OOB
+  syscall(__NR_send, fds[0], &buf, 1, MSG_OOB);
+}
+#endif  //  defined(__NR_send)
+
+BPF_DEATH_TEST_C(BaselinePolicy,
+                 SendfromFlagsFilteredMSG_OOB,
+                 DEATH_SEGV_MESSAGE(GetErrorMessageContentForTests()),
+                 BaselinePolicy) {
+  int fds[2];
+  PCHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+
+  char buf[1];
+  // Specifically disallow MSG_OOB
+  syscall(__NR_sendto, fds[0], &buf, 1, MSG_OOB, nullptr, nullptr);
+}
+
+BPF_DEATH_TEST_C(BaselinePolicy,
+                 SendmsgFlagsFilteredMSG_OOB,
+                 DEATH_SEGV_MESSAGE(GetErrorMessageContentForTests()),
+                 BaselinePolicy) {
+  int fds[2];
+  PCHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+  // Specifically disallow MSG_OOB
+  struct msghdr msg = {};
+  syscall(__NR_sendmsg, fds[0], &msg, MSG_OOB);
+}
+
+#endif  // !defined(i386)
+
+BPF_DEATH_TEST_C(BaselinePolicy,
+                 MemfdCreateSuccess,
+                 DEATH_SUCCESS(),
+                 BaselinePolicy) {
+  int fd = syscall(__NR_memfd_create, "test_shared_memory", MFD_CLOEXEC);
+#if BUILDFLAG(IS_ANDROID)
+  if (fd == -1 && errno == ENOSYS) {
+    // Older version of Android that doesn't support memfds. Skip this test.
+    return;
+  }
 #endif
+  BPF_ASSERT_NE(fd, -1);
+
+  fd = syscall(__NR_memfd_create, "test_shared_memory2",
+               MFD_CLOEXEC | MFD_ALLOW_SEALING);
+  BPF_ASSERT_NE(fd, -1);
+}
+
+BPF_DEATH_TEST_C(BaselinePolicy,
+                 MemfdCreateCrash,
+                 DEATH_SEGV_MESSAGE(GetErrorMessageContentForTests()),
+                 BaselinePolicy) {
+  // This should crash
+  [[maybe_unused]] int fd =
+      syscall(__NR_memfd_create, "should_never_be_allocated",
+              MFD_CLOEXEC | MFD_HUGETLB);
+}
 
 }  // namespace
 

@@ -2,16 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "chrome/browser/external_protocol/external_protocol_handler.h"
+
+#include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
 #include "build/build_config.h"
 #include "chrome/browser/browser_features.h"
-#include "chrome/browser/external_protocol/external_protocol_handler.h"
 #include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/shell_integration.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/tabs/tab_strip_model_observer.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "components/policy/core/browser/url_list/url_list_policy_pref_names.h"
 #include "components/policy/core/common/policy_pref_names.h"
 #include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_context.h"
@@ -20,11 +24,12 @@
 #include "content/public/test/fenced_frame_test_util.h"
 #include "content/public/test/navigation_handle_observer.h"
 #include "content/public/test/test_navigation_observer.h"
+#include "ui/base/page_transition_types.h"
 
 class ExternalProtocolHandlerBrowserTest : public InProcessBrowserTest {
  public:
   content::WebContents* web_content() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 };
 
@@ -45,10 +50,11 @@ class ExternalProtocolHandlerSandboxBrowserTest
   // additional security check and ask the user, without displaying a message in
   // the console. Adopt Linux's behavior for the purpose of this test suite.
   void AllowCustomProtocol() {
-    base::Value::List allow_list;
+    base::ListValue allow_list;
     allow_list.Append("custom:*");
-    browser()->profile()->GetPrefs()->Set(policy::policy_prefs::kUrlAllowlist,
-                                          base::Value(std::move(allow_list)));
+    browser()->GetProfile()->GetPrefs()->Set(
+        policy::policy_prefs::kUrlAllowlist,
+        base::Value(std::move(allow_list)));
   }
 
   content::RenderFrameHost* CreateIFrame(content::RenderFrameHost* document,
@@ -147,7 +153,7 @@ class TabAddedRemovedObserver : public TabStripModelObserver {
   base::RunLoop loop_;
 };
 
-// Flaky on Mac: https://crbug.com/1143762:
+// Flaky on Mac: https://crbug.com/40728467:
 #if BUILDFLAG(IS_MAC)
 #define MAYBE_AutoCloseTabOnNonWebProtocolNavigation DISABLED_AutoCloseTabOnNonWebProtocolNavigation
 #else
@@ -155,15 +161,15 @@ class TabAddedRemovedObserver : public TabStripModelObserver {
 #endif
 IN_PROC_BROWSER_TEST_F(ExternalProtocolHandlerBrowserTest,
                        MAYBE_AutoCloseTabOnNonWebProtocolNavigation) {
-  TabAddedRemovedObserver observer(browser()->tab_strip_model());
-  ASSERT_EQ(browser()->tab_strip_model()->count(), 1);
+  TabAddedRemovedObserver observer(browser()->GetTabStripModel());
+  ASSERT_EQ(browser()->GetTabStripModel()->count(), 1);
   ASSERT_TRUE(
       ExecJs(web_content(), "window.open('mailto:test@site.test', '_blank');"));
   observer.Wait();
-  EXPECT_EQ(browser()->tab_strip_model()->count(), 1);
+  EXPECT_EQ(browser()->GetTabStripModel()->count(), 1);
 }
 
-// Flaky on Mac: https://crbug.com/1143762:
+// Flaky on Mac: https://crbug.com/40728467:
 #if BUILDFLAG(IS_MAC)
 #define MAYBE_ProtocolLaunchEmitsConsoleLog \
   DISABLED_ProtocolLaunchEmitsConsoleLog
@@ -268,7 +274,6 @@ class AlwaysBlockedExternalProtocolHandlerDelegate
   scoped_refptr<shell_integration::DefaultSchemeClientWorker> CreateShellWorker(
       const GURL& url) override {
     NOTREACHED();
-    return nullptr;
   }
   ExternalProtocolHandler::BlockState GetBlockState(const std::string& scheme,
                                                     Profile* profile) override {
@@ -280,7 +285,7 @@ class AlwaysBlockedExternalProtocolHandlerDelegate
       content::WebContents* web_contents,
       ui::PageTransition page_transition,
       bool has_user_gesture,
-      const absl::optional<url::Origin>& initiating_origin,
+      const std::optional<url::Origin>& initiating_origin,
       const std::u16string& program_name) override {
     NOTREACHED();
   }

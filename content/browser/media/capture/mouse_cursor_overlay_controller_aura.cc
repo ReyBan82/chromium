@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "content/browser/media/capture/mouse_cursor_overlay_controller.h"
+#include <optional>
 
 #include "base/memory/raw_ptr.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "content/browser/media/capture/mouse_cursor_overlay_controller.h"
+#include "content/public/browser/web_contents.h"
 #include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/aura/client/cursor_shape_client.h"
 #include "ui/aura/window.h"
@@ -24,8 +25,11 @@ class MouseCursorOverlayController::Observer final
       public aura::WindowObserver {
  public:
   explicit Observer(MouseCursorOverlayController* controller,
-                    aura::Window* window)
-      : controller_(controller), window_(window) {
+                    aura::Window* window,
+                    base::WeakPtr<WebContents> target_web_contents)
+      : controller_(controller),
+        window_(window),
+        target_web_contents_(std::move(target_web_contents)) {
     DCHECK(controller_);
     DCHECK(window_);
     controller_->OnMouseHasGoneIdle();
@@ -57,6 +61,8 @@ class MouseCursorOverlayController::Observer final
     return nullptr;
   }
 
+  WebContents* GetCursorWebContents() { return target_web_contents_.get(); }
+
  private:
   bool IsWindowActive() const {
     if (window_) {
@@ -80,27 +86,60 @@ class MouseCursorOverlayController::Observer final
       aura::Window::ConvertPointToTarget(
           static_cast<aura::Window*>(event.target()), window_, &location);
     }
+
+    if (target_web_contents_) {
+      gfx::Rect subwindow_rect = target_web_contents_->GetViewBounds();
+      gfx::Rect aura_rect = window_->GetBoundsInScreen();
+      location -= gfx::Vector2dF(subwindow_rect.origin() - aura_rect.origin());
+    }
+
     return location;
+  }
+
+  gfx::Point CoordinatesForMouseEvent(const ui::Event& event) const {
+    if (!IsWindowActive() || event.type() == ui::EventType::kMouseExited) {
+      return kOutsideSurface;
+    }
+    gfx::PointF location = AsLocationInWindow(event);
+    int x = std::round(location.x());
+    int y = std::round(location.y());
+
+    // When performing a drag on some platforms, it's possible to
+    // trigger mouse events with coordinates outside the surface, so
+    // make sure we don't transmit such coordinates.
+    gfx::Size window_size = window_->bounds().size();
+    if (target_web_contents_) {
+      window_size = target_web_contents_->GetViewBounds().size();
+    }
+    if (x < 0 || y < 0 || x >= window_size.width() ||
+        y >= window_size.height()) {
+      return kOutsideSurface;
+    }
+
+    return gfx::Point(x, y);
   }
 
   // ui::EventHandler overrides.
   void OnEvent(ui::Event* event) final {
     switch (event->type()) {
-      case ui::ET_MOUSE_DRAGGED:
-      case ui::ET_MOUSE_MOVED:
-      case ui::ET_MOUSE_ENTERED:
-      case ui::ET_MOUSE_EXITED:
-      case ui::ET_TOUCH_MOVED:
+      case ui::EventType::kMouseDragged:
+      case ui::EventType::kMouseMoved:
+      case ui::EventType::kMouseEntered:
+      case ui::EventType::kMouseExited:
+      case ui::EventType::kTouchMoved:
         if (IsWindowActive()) {
           controller_->OnMouseMoved(AsLocationInWindow(*event));
         }
+        if (controller_->ShouldSendMouseEvents()) {
+          controller_->OnMouseCoordinatesUpdated(
+              CoordinatesForMouseEvent(*event));
+        }
         break;
-
-      case ui::ET_MOUSE_PRESSED:
-      case ui::ET_MOUSE_RELEASED:
-      case ui::ET_MOUSEWHEEL:
-      case ui::ET_TOUCH_PRESSED:
-      case ui::ET_TOUCH_RELEASED: {
+      case ui::EventType::kMousePressed:
+      case ui::EventType::kMouseReleased:
+      case ui::EventType::kMousewheel:
+      case ui::EventType::kTouchPressed:
+      case ui::EventType::kTouchReleased: {
         controller_->OnMouseClicked(AsLocationInWindow(*event));
         break;
       }
@@ -120,9 +159,12 @@ class MouseCursorOverlayController::Observer final
 
   const raw_ptr<MouseCursorOverlayController> controller_;
   raw_ptr<aura::Window> window_;
+  base::WeakPtr<WebContents> target_web_contents_;
 };
 
 MouseCursorOverlayController::MouseCursorOverlayController()
+    // base::Unretained(this) is safe because we own mouse_activity_ended_timer_
+    // and its destructor calls TimerBase::AbandonScheduledTask().
     : mouse_activity_ended_timer_(
           FROM_HERE,
           kIdleTimeout,
@@ -141,12 +183,17 @@ MouseCursorOverlayController::~MouseCursorOverlayController() {
   Stop();
 }
 
-void MouseCursorOverlayController::SetTargetView(aura::Window* window) {
+void MouseCursorOverlayController::SetTargetView(
+    aura::Window* window,
+    content::WebContents* target_web_contents) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(ui_sequence_checker_);
 
   observer_.reset();
   if (window) {
-    observer_ = std::make_unique<Observer>(this, window);
+    observer_ = std::make_unique<Observer>(
+        this, window,
+        target_web_contents ? target_web_contents->GetWeakPtr()
+                            : base::WeakPtr<WebContents>());
   }
 }
 
@@ -174,15 +221,17 @@ gfx::RectF MouseCursorOverlayController::ComputeRelativeBoundsForOverlay(
   if (!window)
     return gfx::RectF();
 
-  const gfx::Size& window_size = window->bounds().size();
-  absl::optional<ui::CursorData> cursor_data =
-      aura::client::GetCursorShapeClient()->GetCursorData(cursor);
+  gfx::Size window_size = window->bounds().size();
+  if (WebContents* target_web_contents = observer_->GetCursorWebContents()) {
+    window_size = target_web_contents->GetViewBounds().size();
+  }
+  std::optional<ui::CursorData> cursor_data =
+      aura::client::GetCursorShapeClient().GetCursorData(cursor);
   if (window_size.IsEmpty() || !window->GetRootWindow() || !cursor_data)
     return gfx::RectF();
 
   const SkBitmap& bitmap = cursor_data->bitmaps[0];
-  const float scale_factor = cursor.image_scale_factor();
-  DCHECK_GT(scale_factor, 0.0f);
+  const float scale_factor = cursor_data->scale_factor;
 
   // Compute the cursor size in terms of DIP coordinates.
   const gfx::SizeF size = gfx::ScaleSize(
@@ -212,8 +261,8 @@ void MouseCursorOverlayController::DisconnectFromToolkitForTesting() {
 // static
 SkBitmap MouseCursorOverlayController::GetCursorImage(
     const gfx::NativeCursor& cursor) {
-  absl::optional<ui::CursorData> cursor_data =
-      aura::client::GetCursorShapeClient()->GetCursorData(cursor);
+  std::optional<ui::CursorData> cursor_data =
+      aura::client::GetCursorShapeClient().GetCursorData(cursor);
   if (!cursor_data)
     return SkBitmap();
 

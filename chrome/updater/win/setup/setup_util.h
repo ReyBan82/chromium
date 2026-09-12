@@ -11,14 +11,14 @@
 
 #include <ios>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "base/command_line.h"
 #include "base/win/windows_types.h"
-
-class WorkItemList;
+#include "chrome/installer/util/work_item_list.h"
 
 namespace base {
-class CommandLine;
 class FilePath;
 }  // namespace base
 
@@ -26,7 +26,7 @@ namespace updater {
 
 enum class UpdaterScope;
 
-bool RegisterWakeTask(const base::CommandLine& run_command, UpdaterScope scope);
+std::wstring GetTaskName(UpdaterScope scope);
 void UnregisterWakeTask(UpdaterScope scope);
 
 std::wstring GetProgIdForClsid(REFCLSID clsid);
@@ -35,6 +35,10 @@ std::wstring GetComServerClsidRegistryPath(REFCLSID clsid);
 std::wstring GetComServerAppidRegistryPath(REFGUID appid);
 std::wstring GetComIidRegistryPath(REFIID iid);
 std::wstring GetComTypeLibRegistryPath(REFIID iid);
+
+// Registers the typelibs for the given `scope` and `is_internal` using
+// `::RegisterTypeLib{ForUser}`.
+HRESULT RegisterTypeLibs(UpdaterScope scope, bool is_internal);
 
 // Returns the resource index for the type library where the interface specified
 // by the `iid` is defined. For encapsulation reasons, the updater interfaces
@@ -48,16 +52,19 @@ std::wstring GetComTypeLibResourceIndex(REFIID iid);
 
 // Returns the interfaces ids of all interfaces declared in IDL of the updater
 // that can be installed side-by-side with other instances of the updater.
-std::vector<IID> GetSideBySideInterfaces(UpdaterScope scope);
+std::vector<std::pair<IID, std::wstring>> GetSideBySideInterfaces(
+    UpdaterScope scope);
 
 // Returns the interfaces ids of all interfaces declared in IDL of the updater
 // that can only be installed for the active instance of the updater.
-std::vector<IID> GetActiveInterfaces(UpdaterScope scope);
+std::vector<std::pair<IID, std::wstring>> GetActiveInterfaces(
+    UpdaterScope scope);
 
 // Returns the interfaces ids of all interfaces declared in IDL of the updater
 // that can be installed side-by-side (if `is_internal` is `true`) or for the
 // active instance (if `is_internal` is `false`) .
-std::vector<IID> GetInterfaces(bool is_internal, UpdaterScope scope);
+std::vector<std::pair<IID, std::wstring>> GetInterfaces(bool is_internal,
+                                                        UpdaterScope scope);
 
 // Returns the CLSIDs of servers that can be installed side-by-side with other
 // instances of the updater.
@@ -81,6 +88,23 @@ std::vector<T> JoinVectors(const std::vector<T>& vector1,
   return joined_vector;
 }
 
+// Installs the COM interfaces and corresponding typelibs in the registry for
+// the updater at the given `scope` and `is_internal`. Returns `true` on
+// success.
+bool InstallComInterfaces(UpdaterScope scope, bool is_internal);
+
+// Checks the COM interfaces and corresponding typelibs in the registry for
+// the updater at the given `scope` and `is_internal`. Returns `true` if the
+// interfaces are present, `false` otherwise.
+bool AreComInterfacesPresent(UpdaterScope scope, bool is_internal);
+
+// Adds work items to `list` to install the interface `iid`.
+void AddInstallComInterfaceWorkItems(HKEY root,
+                                     const base::FilePath& typelib_path,
+                                     GUID iid,
+                                     const std::wstring& interface_name,
+                                     WorkItemList* list);
+
 // Adds work items to register the per-user COM server.
 void AddComServerWorkItems(const base::FilePath& com_server_path,
                            bool is_internal,
@@ -100,6 +124,31 @@ void RegisterUserRunAtStartup(const std::wstring& run_value_name,
 // Deletes the value in the Run key in the user registry under the value
 // `run_value_name`.
 bool UnregisterUserRunAtStartup(const std::wstring& run_value_name);
+
+// Deletes any per-user legacy entries that may have been installed/registered
+// by a previous version of the updater. Returns `true` on success or if no
+// cleanup is necessary. Returns `false` if any operation fails.
+bool DeleteLegacyEntriesPerUser();
+
+class RegisterWakeTaskWorkItem : public WorkItem {
+ public:
+  RegisterWakeTaskWorkItem(const base::CommandLine& run_command,
+                           UpdaterScope scope);
+
+  RegisterWakeTaskWorkItem(const RegisterWakeTaskWorkItem&) = delete;
+  RegisterWakeTaskWorkItem& operator=(const RegisterWakeTaskWorkItem&) = delete;
+
+  ~RegisterWakeTaskWorkItem() override;
+
+ private:
+  // Overrides of WorkItem.
+  bool DoImpl() override;
+  void RollbackImpl() override;
+
+  const base::CommandLine run_command_;
+  const UpdaterScope scope_;
+  std::wstring task_name_;
+};
 
 }  // namespace updater
 

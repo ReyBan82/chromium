@@ -4,8 +4,10 @@
 
 #include "chrome/browser/ui/webui/ash/manage_mirrorsync/manage_mirrorsync_dialog.h"
 
+#include "ash/constants/webui_url_constants.h"
+#include "base/check_deref.h"
 #include "chrome/browser/ui/webui/ash/manage_mirrorsync/manage_mirrorsync_ui.h"
-#include "chrome/common/webui_url_constants.h"
+#include "content/public/browser/navigation_controller.h"
 #include "ui/aura/window.h"
 #include "ui/base/ui_base_types.h"
 
@@ -16,7 +18,7 @@ constexpr int kDialogWidth = 768;
 constexpr int kDialogHeight = 608;
 
 GURL GetURL() {
-  return GURL{chrome::kChromeUIManageMirrorSyncURL};
+  return GURL{ash::kChromeUIManageMirrorSyncURL};
 }
 
 }  // namespace
@@ -44,7 +46,8 @@ void ManageMirrorSyncDialog::GetDialogSize(gfx::Size* size) const {
 }
 
 void ManageMirrorSyncDialog::OnDialogShown(content::WebUI* webui) {
-  mirrorsync_ui_ = static_cast<ManageMirrorSyncUI*>(webui->GetController());
+  mirrorsync_ui_ =
+      &CHECK_DEREF(webui->GetController()->GetAs<ManageMirrorSyncUI>());
   return SystemWebDialogDelegate::OnDialogShown(webui);
 }
 

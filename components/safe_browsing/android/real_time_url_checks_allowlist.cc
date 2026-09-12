@@ -9,9 +9,9 @@
 #include "base/metrics/histogram_functions.h"
 #include "base/metrics/histogram_macros.h"
 #include "components/grit/components_resources.h"
-#include "components/safe_browsing/android/proto/realtimeallowlist.pb.h"
 #include "components/safe_browsing/core/browser/db/v4_protocol_manager_util.h"
-#include "components/safe_browsing/core/common/features.h"
+#include "components/safe_browsing/core/common/proto/realtimeallowlist.pb.h"
+#include "third_party/abseil-cpp/absl/container/flat_hash_set.h"
 #include "ui/base/resource/resource_bundle.h"
 
 namespace safe_browsing {
@@ -41,8 +41,6 @@ struct RealTimeUrlChecksAllowlistSingletonTrait
     : public base::DefaultSingletonTraits<RealTimeUrlChecksAllowlist> {
   static RealTimeUrlChecksAllowlist* New() {
     RealTimeUrlChecksAllowlist* instance = new RealTimeUrlChecksAllowlist();
-    DCHECK(
-        base::FeatureList::IsEnabled(kComponentUpdaterAndroidProtegoAllowlist));
     instance->PopulateFromResourceBundle();
     return instance;
   }
@@ -126,13 +124,14 @@ RealTimeUrlChecksAllowlist::PopulateAllowlistFromBinaryPb(
   if (hashes_length >= UINT_MAX)
     return PopulateResult::kFailedHashLengthExceedsMax;
 
-  std::set<std::string> new_allowlist_patterns;
+  absl::flat_hash_set<std::string> new_allowlist_patterns;
+  new_allowlist_patterns.reserve((hashes_length / kHashSizeInBytes) + 1);
   for (uint i = 0; i + kHashSizeInBytes <= hashes_length;
        i += kHashSizeInBytes) {
     std::string url_hash = parsed_pb.url_hashes().substr(i, kHashSizeInBytes);
-    new_allowlist_patterns.insert(url_hash);
+    new_allowlist_patterns.insert(std::move(url_hash));
   }
-  allowlist_patterns_ = new_allowlist_patterns;
+  allowlist_patterns_ = std::move(new_allowlist_patterns);
   version_id_ = parsed_pb.version_id();
   return PopulateResult::kSuccess;
 }
@@ -158,10 +157,10 @@ RealTimeUrlChecksAllowlist::IsInAllowlistInternal(const GURL& url) {
   }
 
   std::vector<FullHashStr> full_hashes;
-  V4ProtocolManagerUtil::UrlToFullHashes(url, &full_hashes);
+  SBProtocolManagerUtil::UrlToFullHashes(url, &full_hashes);
   for (auto fh : full_hashes) {
     auto truncated_hash = fh.substr(0, kHashSizeInBytes);
-    if (allowlist_patterns_.find(truncated_hash) != allowlist_patterns_.end()) {
+    if (allowlist_patterns_.contains(truncated_hash)) {
       return IsInAllowlistResult::kInAllowlist;
     }
   }

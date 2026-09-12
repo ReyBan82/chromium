@@ -12,7 +12,6 @@
 #include "chromecast/public/media/decoder_config.h"
 #include "chromecast/public/task_runner.h"
 #include "third_party/cast_core/public/src/proto/runtime/cast_audio_channel_service.grpc.pb.h"
-#include "third_party/protobuf/src/google/protobuf/util/time_util.h"
 
 namespace chromecast {
 namespace media {
@@ -35,7 +34,6 @@ CmaProxyHandler::PipelineState ToClientTypes(
       return CmaProxyHandler::PipelineState::kPaused;
     default:
       NOTREACHED();
-      return CmaProxyHandler::PipelineState::kUninitialized;
   }
 }
 
@@ -68,7 +66,6 @@ cast::media::AudioConfiguration_AudioCodec ToGrpcTypes(AudioCodec codec) {
           AudioConfiguration_AudioCodec_AUDIO_CODEC_MPEG_H_AUDIO;
     default:
       NOTREACHED();
-      return cast::media::AudioConfiguration_AudioCodec_AUDIO_CODEC_UNKNOWN;
   }
 }
 
@@ -94,8 +91,6 @@ cast::media::AudioConfiguration_ChannelLayout ToGrpcTypes(
           AudioConfiguration_ChannelLayout_CHANNEL_LAYOUT_DISCRETE;
     default:
       NOTREACHED();
-      return cast::media::
-          AudioConfiguration_ChannelLayout_CHANNEL_LAYOUT_UNSUPPORTED;
   }
 }
 
@@ -125,7 +120,6 @@ cast::media::AudioConfiguration_SampleFormat ToGrpcTypes(
       return cast::media::AudioConfiguration_SampleFormat_SAMPLE_FORMAT_S24;
     default:
       NOTREACHED();
-      return cast::media::AudioConfiguration_SampleFormat_SAMPLE_FORMAT_UNKNOWN;
   }
 }
 
@@ -288,7 +282,7 @@ CmaBackend::BufferStatus ProxyCallTranslator::PushBuffer(
       ToGrpcTypes(std::move(buffer), buffer_id));
 }
 
-absl::optional<ProxyCallTranslator::PushBufferRequest>
+std::optional<ProxyCallTranslator::PushBufferRequest>
 ProxyCallTranslator::GetBufferedData() {
   return push_buffer_handler_.GetBufferedData();
 }
@@ -339,7 +333,7 @@ void ProxyCallTranslator::HandlePushBufferResponse(
 }
 
 void ProxyCallTranslator::HandleGetMediaTimeResponse(
-    absl::optional<MediaTime> time,
+    std::optional<MediaTime> time,
     CastRuntimeAudioChannelBroker::StatusCode status) {
   NOTREACHED();
 }

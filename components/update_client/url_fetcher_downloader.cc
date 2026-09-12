@@ -5,16 +5,24 @@
 #include "components/update_client/url_fetcher_downloader.h"
 
 #include <stdint.h>
+
 #include <utility>
 
+#include "base/files/file_path.h"
 #include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/functional/callback.h"
+#include "base/functional/callback_helpers.h"
 #include "base/location.h"
 #include "base/logging.h"
+#include "base/strings/strcat.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool.h"
+#include "build/build_config.h"
 #include "components/update_client/network.h"
 #include "components/update_client/task_traits.h"
+#include "components/update_client/update_client_errors.h"
 #include "components/update_client/utils.h"
 #include "url/gurl.h"
 
@@ -22,57 +30,65 @@ namespace update_client {
 
 UrlFetcherDownloader::UrlFetcherDownloader(
     scoped_refptr<CrxDownloader> successor,
-    scoped_refptr<NetworkFetcherFactory> network_fetcher_factory)
+    scoped_refptr<NetworkFetcherFactory> network_fetcher_factory,
+    const std::string& prod_id)
     : CrxDownloader(std::move(successor)),
-      network_fetcher_factory_(network_fetcher_factory) {}
+      network_fetcher_factory_(network_fetcher_factory),
+      prod_id_(update_client::UTF8ToStringType(prod_id)) {}
 
 UrlFetcherDownloader::~UrlFetcherDownloader() = default;
 
-void UrlFetcherDownloader::DoStartDownload(const GURL& url) {
+base::OnceClosure UrlFetcherDownloader::DoStartDownload(const GURL& url) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   base::ThreadPool::PostTaskAndReply(
       FROM_HERE, kTaskTraits,
       base::BindOnce(&UrlFetcherDownloader::CreateDownloadDir, this),
       base::BindOnce(&UrlFetcherDownloader::StartURLFetch, this, url));
+  return base::BindOnce(&UrlFetcherDownloader::Cancel, this);
 }
 
 void UrlFetcherDownloader::CreateDownloadDir() {
-  base::CreateNewTempDirectory(FILE_PATH_LITERAL("chrome_url_fetcher_"),
-                               &download_dir_);
+  CreateTempDirectory(
+      base::StrCat({prod_id_, FILE_PATH_LITERAL("_chrome_url_fetcher_")}),
+      &download_dir_);
 }
 
 void UrlFetcherDownloader::StartURLFetch(const GURL& url) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  download_start_time_ = base::TimeTicks::Now();
 
-  if (download_dir_.empty()) {
-    Result result;
-    result.error = -1;
-
-    DownloadMetrics download_metrics;
-    download_metrics.url = url;
-    download_metrics.downloader = DownloadMetrics::kUrlFetcher;
-    download_metrics.error = -1;
-    download_metrics.downloaded_bytes = -1;
-    download_metrics.total_bytes = -1;
-    download_metrics.download_time_ms = 0;
-
-    main_task_runner()->PostTask(
-        FROM_HERE, base::BindOnce(&UrlFetcherDownloader::OnDownloadComplete,
-                                  this, false, result, download_metrics));
+  if (cancelled_ || download_dir_.empty()) {
+    // Nothing to fetch: report through the single completion path, which
+    // derives the error from the state rather than from these arguments.
+    OnNetworkFetcherComplete(/*net_error=*/-1, /*content_size=*/-1);
     return;
   }
 
-  file_path_ = download_dir_.AppendASCII(url.ExtractFileName());
+  file_path_ = download_dir_.AppendUTF8(url.ExtractFileName());
   network_fetcher_ = network_fetcher_factory_->Create();
-  network_fetcher_->DownloadToFile(
+  cancel_callback_ = network_fetcher_->DownloadToFile(
       url, file_path_,
-      base::BindOnce(&UrlFetcherDownloader::OnResponseStarted, this),
+      base::BindRepeating(&UrlFetcherDownloader::OnResponseStarted, this),
       base::BindRepeating(&UrlFetcherDownloader::OnDownloadProgress, this),
       base::BindOnce(&UrlFetcherDownloader::OnNetworkFetcherComplete, this));
-
-  download_start_time_ = base::TimeTicks::Now();
 }
 
+void UrlFetcherDownloader::Cancel() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (cancelled_) {
+    return;
+  }
+  cancelled_ = true;
+  // If the fetch is in flight, the network fetcher reports its completion,
+  // and OnNetworkFetcherComplete() reports the cancellation. If it has not
+  // started yet, StartURLFetch() does.
+  if (cancel_callback_) {
+    std::move(cancel_callback_).Run();
+  }
+}
+
+// The single completion path of a download. Every outcome ends here: success,
+// a network or HTTP error, a missing download directory, or a cancellation.
 void UrlFetcherDownloader::OnNetworkFetcherComplete(int net_error,
                                                     int64_t content_size) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -87,26 +103,39 @@ void UrlFetcherDownloader::OnNetworkFetcherComplete(int net_error,
   // the request and avoid overloading the server in this case.
   // is not accepting requests for the moment.
   int error = -1;
-  if (!net_error && response_code_ == 200)
+  int extra_code1 = 0;
+  if (cancelled_) {
+    error = std::to_underlying(CrxDownloaderError::CANCELLED);
+  } else if (download_dir_.empty()) {
+    error = std::to_underlying(CrxDownloaderError::NO_DOWNLOAD_DIR);
+  } else if (!net_error && response_code_ == 200) {
     error = 0;
-  else if (response_code_ != -1)
+  } else if (response_code_ != -1) {
     error = response_code_;
-  else
+    extra_code1 = net_error;
+  } else {
     error = net_error;
+  }
 
-  const bool is_handled = error == 0 || IsHttpServerError(error);
+  // A cancelled download is handled: CrxDownloader does not retry it.
+  const bool is_handled = error == 0 || IsHttpServerError(error) || cancelled_;
 
   Result result;
   result.error = error;
-  if (!error)
+  result.extra_code1 = extra_code1;
+  if (!error) {
     result.response = file_path_;
+  }
 
   DownloadMetrics download_metrics;
   download_metrics.url = url();
   download_metrics.downloader = DownloadMetrics::kUrlFetcher;
   download_metrics.error = error;
-  // Tests expected -1, in case of failures and no content is available.
-  download_metrics.downloaded_bytes = error ? -1 : content_size;
+  download_metrics.extra_code1 = extra_code1;
+  // Tests expected -1, in case of failures and no content is available. A
+  // cancelled download reports the partial content it received.
+  download_metrics.downloaded_bytes =
+      error ? (cancelled_ ? downloaded_bytes_ : -1) : content_size;
   download_metrics.total_bytes = total_bytes_;
   download_metrics.download_time_ms = download_time.InMilliseconds();
 
@@ -118,8 +147,11 @@ void UrlFetcherDownloader::OnNetworkFetcherComplete(int net_error,
   if (error && !download_dir_.empty()) {
     base::ThreadPool::PostTask(
         FROM_HERE, kTaskTraits,
-        base::BindOnce(IgnoreResult(&base::DeletePathRecursively),
-                       download_dir_));
+        base::BindOnce(
+            [](const base::FilePath& download_dir) {
+              RetryFileOperation(&base::DeletePathRecursively, download_dir);
+            },
+            download_dir_));
   }
 
   main_task_runner()->PostTask(
@@ -141,6 +173,7 @@ void UrlFetcherDownloader::OnResponseStarted(int response_code,
 
 void UrlFetcherDownloader::OnDownloadProgress(int64_t current) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  downloaded_bytes_ = current;
   CrxDownloader::OnDownloadProgress(current, total_bytes_);
 }
 

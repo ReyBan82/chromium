@@ -4,15 +4,16 @@
 
 package org.chromium.components.bookmarks;
 
-import androidx.annotation.VisibleForTesting;
-
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.components.url_formatter.SchemeDisplay;
 import org.chromium.components.url_formatter.UrlFormatter;
 import org.chromium.url.GURL;
 
-/**
- * Contains data about a bookmark or bookmark folder.
- */
+import java.util.Objects;
+
+/** Contains data about a bookmark or bookmark folder. */
+@NullMarked
 public class BookmarkItem {
     private final String mTitle;
     private final GURL mUrl;
@@ -23,11 +24,23 @@ public class BookmarkItem {
     private final boolean mIsManaged;
     private final long mDateAdded;
     private final boolean mRead;
+    private final long mDateLastOpened;
+    private final boolean mIsAccountBookmark;
+
     private boolean mForceEditableForTesting;
 
-    public BookmarkItem(BookmarkId id, String title, GURL url, boolean isFolder,
-            BookmarkId parentId, boolean isEditable, boolean isManaged, long dateAdded,
-            boolean read) {
+    public BookmarkItem(
+            BookmarkId id,
+            String title,
+            GURL url,
+            boolean isFolder,
+            BookmarkId parentId,
+            boolean isEditable,
+            boolean isManaged,
+            long dateAdded,
+            boolean read,
+            long dateLastOpened,
+            boolean isAccountBookmark) {
         mId = id;
         mTitle = title;
         mUrl = url;
@@ -37,6 +50,8 @@ public class BookmarkItem {
         mIsManaged = isManaged;
         mDateAdded = dateAdded;
         mRead = read;
+        mDateLastOpened = dateLastOpened;
+        mIsAccountBookmark = isAccountBookmark;
     }
 
     /** Returns the title of the bookmark item. */
@@ -103,9 +118,55 @@ public class BookmarkItem {
         return mRead;
     }
 
-    // TODO(https://crbug.com/1019217): Remove when BookmarkModel is stubbed in tests instead.
-    @VisibleForTesting
+    /**
+     * Returns the timestamp in milliseconds since epoch that the bookmark was last opened. Folders
+     * have a value of 0 for this, but should use the most recent child.
+     */
+    public long getDateLastOpened() {
+        return mDateLastOpened;
+    }
+
+    /** Returns whether the bookmark is linked to your Google account. */
+    public boolean isAccountBookmark() {
+        return mIsAccountBookmark;
+    }
+
+    // TODO(crbug.com/40655824): Remove when BookmarkModel is stubbed in tests instead.
     public void forceEditableForTesting() {
         mForceEditableForTesting = true;
+    }
+
+    @Override
+    public boolean equals(@Nullable Object other) {
+        if (this == other) return true;
+        if (!(other instanceof BookmarkItem)) return false;
+        BookmarkItem that = (BookmarkItem) other;
+        return Objects.equals(mTitle, that.mTitle)
+                && Objects.equals(mUrl, that.mUrl)
+                && Objects.equals(mId, that.mId)
+                && mIsFolder == that.mIsFolder
+                && Objects.equals(mParentId, that.mParentId)
+                && mIsEditable == that.mIsEditable
+                && mIsManaged == that.mIsManaged
+                && mDateAdded == that.mDateAdded
+                && mRead == that.mRead
+                && mDateLastOpened == that.mDateLastOpened
+                && mIsAccountBookmark == that.mIsAccountBookmark;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(
+                mTitle,
+                mUrl,
+                mId,
+                mIsFolder,
+                mParentId,
+                mIsEditable,
+                mIsManaged,
+                mDateAdded,
+                mRead,
+                mDateLastOpened,
+                mIsAccountBookmark);
     }
 }

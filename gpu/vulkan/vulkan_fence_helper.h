@@ -111,9 +111,11 @@ class COMPONENT_EXPORT(VULKAN) VulkanFenceHelper {
   // Processes CleanupTasks for which a fence has passed.
   void ProcessCleanupTasks(uint64_t retired_generation_id = 0);
   // Helpers for common types:
-  void EnqueueSemaphoreCleanupForSubmittedWork(VkSemaphore semaphore);
+  void EnqueueSemaphoreCleanupForSubmittedWork(
+      base::RawPtrIfPtrT<VkSemaphore, DanglingUntriaged> semaphore);
   void EnqueueSemaphoresCleanupForSubmittedWork(
-      std::vector<VkSemaphore> semaphores);
+      std::vector<base::RawPtrIfPtrT<VkSemaphore, DanglingUntriaged>>
+          semaphores);
   void EnqueueImageCleanupForSubmittedWork(VkImage image,
                                            VkDeviceMemory memory);
   void EnqueueBufferCleanupForSubmittedWork(VkBuffer buffer,
@@ -122,9 +124,12 @@ class COMPONENT_EXPORT(VULKAN) VulkanFenceHelper {
   template <typename T>
   void EnqueueVulkanObjectCleanupForSubmittedWork(std::unique_ptr<T> obj);
 
- private:
+  // Careful: this may be very slow, because it synchronizes everything. It is
+  // intended for cleanup prior to destruction, or when latency is not a concern
+  // (e.g. when the whole application is backgrounded on Android).
   void PerformImmediateCleanup();
 
+ private:
   const raw_ptr<VulkanDeviceQueue> device_queue_;
 
   std::vector<CleanupTask> tasks_pending_fence_;

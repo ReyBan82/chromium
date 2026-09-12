@@ -7,18 +7,34 @@
 #import "base/base64.h"
 #import "base/strings/sys_string_conversions.h"
 #import "base/test/ios/wait_util.h"
+#import "base/test/test_timeouts.h"
 #import "components/autofill/core/browser/proto/password_requirements.pb.h"
 #import "testing/gtest/include/gtest/gtest.h"
 #import "testing/gtest_mac.h"
 #import "testing/platform_test.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
-using autofill::PasswordRequirementsSpec_CharacterClass;
-using autofill::PasswordRequirementsSpec;
 using autofill::DomainSuggestions;
+using autofill::PasswordRequirementsSpec;
+using autofill::PasswordRequirementsSpec_CharacterClass;
+
+@interface PasswordSpecFetcher (Testing)
+- (void)onReceivedData:(NSData*)data
+              response:(NSURLResponse*)response
+                 error:(NSError*)error;
+@end
+
+namespace {
+
+// Returns the base64-encoded body that the fetcher expects, wrapping `spec` in
+// a `DomainSuggestions` message.
+NSData* EncodedResponseBodyForSpec(const PasswordRequirementsSpec& spec) {
+  DomainSuggestions suggestions;
+  *suggestions.mutable_password_requirements() = spec;
+  std::string encoded = base::Base64Encode(suggestions.SerializeAsString());
+  return [NSData dataWithBytes:encoded.data() length:encoded.size()];
+}
+
+}  // namespace
 
 class PasswordSpecFetcherTest : public PlatformTest {};
 
@@ -40,7 +56,6 @@ TEST_F(PasswordSpecFetcherTest, DomainSuggestionProtoIsParsed) {
   EXPECT_TRUE(suggestions.ParseFromString(decoded));
 
   EXPECT_TRUE(suggestions.has_password_requirements());
-  EXPECT_TRUE(suggestions.password_requirements().has_lower_case());
   EXPECT_TRUE(suggestions.password_requirements().has_lower_case());
   EXPECT_EQ(suggestions.password_requirements().lower_case().min(), 0u);
   EXPECT_EQ(suggestions.password_requirements().lower_case().max(), 0u);
@@ -66,7 +81,50 @@ TEST_F(PasswordSpecFetcherTest, DefaultSpecInvalidFetch) {
     block_ran = true;
   }];
 
-  base::test::ios::WaitUntilCondition(^{
-    return block_ran;
-  });
+  EXPECT_TRUE(base::test::ios::WaitUntilConditionOrTimeout(
+      TestTimeouts::action_timeout(), ^{
+        return block_ran;
+      }));
+}
+
+// Tests that a valid response body is stored as the spec.
+TEST_F(PasswordSpecFetcherTest, ValidResponseStoredAsSpec) {
+  PasswordSpecFetcher* fetcher = [[PasswordSpecFetcher alloc] initWithHost:@""
+                                                                    APIKey:@""];
+  PasswordRequirementsSpec spec;
+  spec.set_max_length(12u);
+  spec.mutable_lower_case()->set_min(2u);
+  [fetcher onReceivedData:EncodedResponseBodyForSpec(spec)
+                 response:nil
+                    error:nil];
+  EXPECT_EQ(12u, fetcher.spec.max_length());
+  EXPECT_EQ(2u, fetcher.spec.lower_case().min());
+}
+
+// Tests that a response body that overrides the lower case character set is
+// replaced with an empty spec.
+TEST_F(PasswordSpecFetcherTest, ResponseWithCharacterSetOverrideRejected) {
+  PasswordSpecFetcher* fetcher = [[PasswordSpecFetcher alloc] initWithHost:@""
+                                                                    APIKey:@""];
+  PasswordRequirementsSpec spec;
+  spec.set_max_length(12u);
+  spec.mutable_lower_case()->set_character_set("a");
+  [fetcher onReceivedData:EncodedResponseBodyForSpec(spec)
+                 response:nil
+                    error:nil];
+  EXPECT_FALSE(fetcher.spec.has_max_length());
+  EXPECT_FALSE(fetcher.spec.has_lower_case());
+}
+
+// Tests that a response body with a max length below the minimum that the
+// generator should produce is replaced with an empty spec.
+TEST_F(PasswordSpecFetcherTest, ResponseWithShortMaxLengthRejected) {
+  PasswordSpecFetcher* fetcher = [[PasswordSpecFetcher alloc] initWithHost:@""
+                                                                    APIKey:@""];
+  PasswordRequirementsSpec spec;
+  spec.set_max_length(4u);
+  [fetcher onReceivedData:EncodedResponseBodyForSpec(spec)
+                 response:nil
+                    error:nil];
+  EXPECT_FALSE(fetcher.spec.has_max_length());
 }

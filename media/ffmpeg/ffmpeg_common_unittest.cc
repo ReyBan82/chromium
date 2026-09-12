@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <array>
 #include <cstring>
 
 #include "base/files/memory_mapped_file.h"
@@ -15,11 +16,17 @@
 #include "media/base/audio_decoder_config.h"
 #include "media/base/media.h"
 #include "media/base/media_util.h"
+#include "media/base/supported_types.h"
 #include "media/base/test_data_util.h"
 #include "media/base/video_decoder_config.h"
 #include "media/filters/ffmpeg_glue.h"
 #include "media/filters/in_memory_url_protocol.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+#if BUILDFLAG(USE_PROPRIETARY_CODECS) && BUILDFLAG(ENABLE_PLATFORM_DOLBY_VISION)
+#include "media/formats/mp4/dolby_vision.h"
+#endif  // BUILDFLAG (USE_PROPRIETARY_CODECS) &&
+        // BUILDFLAG(ENABLE_PLATFORM_DOLBY_VISION)
 
 namespace media {
 
@@ -57,9 +64,8 @@ void TestConfigConvertExtraData(
   EXPECT_TRUE(converter_fn.Run(stream, decoder_config));
   EXPECT_EQ(static_cast<size_t>(codec_parameters->extradata_size),
             decoder_config->extra_data().size());
-  EXPECT_EQ(
-      0, memcmp(codec_parameters->extradata, &decoder_config->extra_data()[0],
-                decoder_config->extra_data().size()));
+  EXPECT_EQ(AVCodecParametersExtraDataToSpan(codec_parameters),
+            base::span(decoder_config->extra_data()));
 
   // Possible combination: extra_data = nullptr && size != 0, but the converter
   // function considers this valid and having no extra_data, due to behavior of
@@ -84,13 +90,12 @@ void VerifyProfileTest(const char* file_name,
   // Open a file to get a real AVStreams from FFmpeg.
   base::MemoryMappedFile file;
   ASSERT_TRUE(file.Initialize(GetTestDataFilePath(file_name)));
-  InMemoryUrlProtocol protocol(file.data(), file.length(), false);
+  InMemoryUrlProtocol protocol(file.bytes(), false);
   FFmpegGlue glue(&protocol);
   ASSERT_TRUE(glue.OpenContext());
   AVFormatContext* format_context = glue.format_context();
 
-  for (size_t i = 0; i < format_context->nb_streams; ++i) {
-    AVStream* stream = format_context->streams[i];
+  for (auto* stream : AVFormatContextToSpan(format_context)) {
     AVCodecParameters* codec_parameters = stream->codecpar;
     AVMediaType codec_type = codec_parameters->codec_type;
 
@@ -105,11 +110,37 @@ void VerifyProfileTest(const char* file_name,
   }
 }
 
+TEST_F(FFmpegCommonTest,
+       AVCodecContextToAudioDecoderConfig_HandleChannelMismatch) {
+  base::MemoryMappedFile file;
+  ASSERT_TRUE(file.Initialize(GetTestDataFilePath("4ch.wav")));
+  InMemoryUrlProtocol protocol(file.bytes(), false);
+  FFmpegGlue glue(&protocol);
+  ASSERT_TRUE(glue.OpenContext());
+
+  AVFormatContext* format_context = glue.format_context();
+  AVStream* stream = format_context->streams[0];
+
+  auto codec_context = AVStreamToAVCodecContext(stream);
+
+  // Purposely have an incorrect mask.
+  codec_context->ch_layout.u.mask = AV_CH_LAYOUT_MONO;
+
+  AudioDecoderConfig audio_config;
+  ASSERT_TRUE(AVCodecContextToAudioDecoderConfig(
+      codec_context.get(), EncryptionScheme::kUnencrypted, &audio_config));
+
+  EXPECT_EQ(AudioCodec::kPCM, audio_config.codec());
+  // We correctly guess QUAD instead of MONO.
+  EXPECT_EQ(CHANNEL_LAYOUT_QUAD, audio_config.channel_layout());
+  EXPECT_EQ(4, audio_config.channels());
+}
+
 TEST_F(FFmpegCommonTest, AVStreamToDecoderConfig) {
   // Open a file to get a real AVStreams from FFmpeg.
   base::MemoryMappedFile file;
   ASSERT_TRUE(file.Initialize(GetTestDataFilePath("bear-320x240.webm")));
-  InMemoryUrlProtocol protocol(file.data(), file.length(), false);
+  InMemoryUrlProtocol protocol(file.bytes(), false);
   FFmpegGlue glue(&protocol);
   ASSERT_TRUE(glue.OpenContext());
   AVFormatContext* format_context = glue.format_context();
@@ -118,10 +149,11 @@ TEST_F(FFmpegCommonTest, AVStreamToDecoderConfig) {
   // for extradata and extradata_size.
   bool found_audio = false;
   bool found_video = false;
-  for (size_t i = 0;
-       i < format_context->nb_streams && (!found_audio || !found_video);
-       ++i) {
-    AVStream* stream = format_context->streams[i];
+  for (AVStream* stream : AVFormatContextToSpan(format_context)) {
+    if (found_audio && found_video) {
+      break;
+    }
+
     AVCodecParameters* codec_parameters = stream->codecpar;
     AVMediaType codec_type = codec_parameters->codec_type;
 
@@ -155,7 +187,7 @@ TEST_F(FFmpegCommonTest, AVStreamToAudioDecoderConfig_OpusAmbisonics_4ch) {
   base::MemoryMappedFile file;
   ASSERT_TRUE(file.Initialize(
       GetTestDataFilePath("bear-opus-end-trimming-4ch-channelmapping2.webm")));
-  InMemoryUrlProtocol protocol(file.data(), file.length(), false);
+  InMemoryUrlProtocol protocol(file.bytes(), false);
   FFmpegGlue glue(&protocol);
   ASSERT_TRUE(glue.OpenContext());
 
@@ -178,7 +210,7 @@ TEST_F(FFmpegCommonTest, AVStreamToAudioDecoderConfig_OpusAmbisonics_11ch) {
   base::MemoryMappedFile file;
   ASSERT_TRUE(file.Initialize(
       GetTestDataFilePath("bear-opus-end-trimming-11ch-channelmapping2.webm")));
-  InMemoryUrlProtocol protocol(file.data(), file.length(), false);
+  InMemoryUrlProtocol protocol(file.bytes(), false);
   FFmpegGlue glue(&protocol);
   ASSERT_TRUE(glue.OpenContext());
 
@@ -200,7 +232,7 @@ TEST_F(FFmpegCommonTest, AVStreamToAudioDecoderConfig_OpusAmbisonics_11ch) {
 TEST_F(FFmpegCommonTest, AVStreamToAudioDecoderConfig_9ch_wav) {
   base::MemoryMappedFile file;
   ASSERT_TRUE(file.Initialize(GetTestDataFilePath("9ch.wav")));
-  InMemoryUrlProtocol protocol(file.data(), file.length(), false);
+  InMemoryUrlProtocol protocol(file.bytes(), false);
   FFmpegGlue glue(&protocol);
   ASSERT_TRUE(glue.OpenContext());
 
@@ -220,9 +252,11 @@ TEST_F(FFmpegCommonTest, AVStreamToAudioDecoderConfig_9ch_wav) {
 }
 
 TEST_F(FFmpegCommonTest, TimeBaseConversions) {
-  const int64_t test_data[][5] = {
-      {1, 2, 1, 500000, 1}, {1, 3, 1, 333333, 1}, {1, 3, 2, 666667, 2},
-  };
+  const auto test_data = std::to_array<std::array<const int64_t, 5>>({
+      {1, 2, 1, 500000, 1},
+      {1, 3, 1, 333333, 1},
+      {1, 3, 2, 666667, 2},
+  });
 
   for (size_t i = 0; i < std::size(test_data); ++i) {
     SCOPED_TRACE(i);
@@ -346,7 +380,7 @@ TEST_F(FFmpegCommonTest, VerifyHDRMetadataAndColorSpaceInfo) {
   // Open a file to get a real AVStreams from FFmpeg.
   base::MemoryMappedFile file;
   ASSERT_TRUE(file.Initialize(GetTestDataFilePath("colour.webm")));
-  InMemoryUrlProtocol protocol(file.data(), file.length(), false);
+  InMemoryUrlProtocol protocol(file.bytes(), false);
   FFmpegGlue glue(&protocol);
   ASSERT_TRUE(glue.OpenContext());
   AVFormatContext* format_context = glue.format_context();
@@ -359,19 +393,21 @@ TEST_F(FFmpegCommonTest, VerifyHDRMetadataAndColorSpaceInfo) {
 
   VideoDecoderConfig video_config;
   EXPECT_TRUE(AVStreamToVideoDecoderConfig(stream, &video_config));
-  ASSERT_TRUE(video_config.hdr_metadata().has_value());
-  const auto& color_volume_metadata =
-      video_config.hdr_metadata()->color_volume_metadata;
-  EXPECT_EQ(30.0, color_volume_metadata.luminance_min);
-  EXPECT_EQ(40.0, color_volume_metadata.luminance_max);
-  EXPECT_EQ(0.1f, color_volume_metadata.primaries.fRX);
-  EXPECT_EQ(0.2f, color_volume_metadata.primaries.fRY);
-  EXPECT_EQ(0.1f, color_volume_metadata.primaries.fGX);
-  EXPECT_EQ(0.2f, color_volume_metadata.primaries.fGY);
-  EXPECT_EQ(0.1f, color_volume_metadata.primaries.fBX);
-  EXPECT_EQ(0.2f, color_volume_metadata.primaries.fBY);
-  EXPECT_EQ(0.1f, color_volume_metadata.primaries.fWX);
-  EXPECT_EQ(0.2f, color_volume_metadata.primaries.fWY);
+  ASSERT_TRUE(video_config.hdr_metadata().HasMDCV());
+  const auto& mdcv = video_config.hdr_metadata().GetMDCV();
+  EXPECT_EQ(30.0, mdcv.fMinimumDisplayMasteringLuminance);
+  EXPECT_EQ(40.0, mdcv.fMaximumDisplayMasteringLuminance);
+  EXPECT_EQ(0.1f, mdcv.fDisplayPrimaries.fRX);
+  EXPECT_EQ(0.2f, mdcv.fDisplayPrimaries.fRY);
+  EXPECT_EQ(0.1f, mdcv.fDisplayPrimaries.fGX);
+  EXPECT_EQ(0.2f, mdcv.fDisplayPrimaries.fGY);
+  EXPECT_EQ(0.1f, mdcv.fDisplayPrimaries.fBX);
+  EXPECT_EQ(0.2f, mdcv.fDisplayPrimaries.fBY);
+  EXPECT_EQ(0.1f, mdcv.fDisplayPrimaries.fWX);
+  EXPECT_EQ(0.2f, mdcv.fDisplayPrimaries.fWY);
+  const auto& clli = video_config.hdr_metadata().GetCLLI();
+  EXPECT_EQ(11.0f, clli.fMaxCLL);
+  EXPECT_EQ(12.0f, clli.fMaxFALL);
   EXPECT_EQ(VideoColorSpace(VideoColorSpace::PrimaryID::SMPTEST428_1,
                             VideoColorSpace::TransferID::LOG,
                             VideoColorSpace::MatrixID::RGB,
@@ -386,5 +422,78 @@ TEST_F(FFmpegCommonTest, VerifyAv1Profiles) {
   VerifyProfileTest("bear-av1.mp4", AV1PROFILE_PROFILE_MAIN);
 }
 #endif
+
+#if BUILDFLAG(USE_PROPRIETARY_CODECS) && BUILDFLAG(ENABLE_PLATFORM_DOLBY_VISION)
+TEST_F(FFmpegCommonTest, VerifyDolbyVisionColorSpaceInfo_Profile5) {
+  // Open a file to get a real AVStreams from FFmpeg.
+  base::MemoryMappedFile file;
+  ASSERT_TRUE(file.Initialize(
+      GetTestDataFilePath("glass-blowing2-dolby-vision-profile-5-frag.mp4")));
+  InMemoryUrlProtocol protocol(file.bytes(), false);
+  FFmpegGlue glue(&protocol);
+  ASSERT_TRUE(glue.OpenContext());
+  AVFormatContext* format_context = glue.format_context();
+  ASSERT_EQ(format_context->nb_streams, 1u);
+
+  AVStream* stream = format_context->streams[0];
+  AVCodecParameters* codec_parameters = stream->codecpar;
+  AVMediaType codec_type = codec_parameters->codec_type;
+  ASSERT_EQ(codec_type, AVMEDIA_TYPE_VIDEO);
+
+  UpdateDefaultDecoderSupportedVideoProfiles(
+      {VideoCodecProfile::DOLBYVISION_PROFILE5});
+
+  VideoDecoderConfig video_config;
+  EXPECT_TRUE(AVStreamToVideoDecoderConfig(stream, &video_config));
+  auto expected = mp4::ParseDolbyVisionColorSpace(
+      VideoCodecProfile::DOLBYVISION_PROFILE5, 0);
+  EXPECT_EQ(expected, video_config.color_space_info());
+}
+
+TEST_F(FFmpegCommonTest, VerifyDolbyVisionColorSpaceInfo_Profile8) {
+  // Open a file to get a real AVStreams from FFmpeg.
+  base::MemoryMappedFile file;
+  ASSERT_TRUE(file.Initialize(
+      GetTestDataFilePath("glass-blowing2-dolby-vision-profile-8-1-frag.mp4")));
+  InMemoryUrlProtocol protocol(file.bytes(), false);
+  FFmpegGlue glue(&protocol);
+  ASSERT_TRUE(glue.OpenContext());
+  AVFormatContext* format_context = glue.format_context();
+  ASSERT_EQ(format_context->nb_streams, 1u);
+
+  AVStream* stream = format_context->streams[0];
+  AVCodecParameters* codec_parameters = stream->codecpar;
+  AVMediaType codec_type = codec_parameters->codec_type;
+  ASSERT_EQ(codec_type, AVMEDIA_TYPE_VIDEO);
+
+  UpdateDefaultDecoderSupportedVideoProfiles(
+      {VideoCodecProfile::DOLBYVISION_PROFILE8});
+
+  VideoDecoderConfig video_config;
+  EXPECT_TRUE(AVStreamToVideoDecoderConfig(stream, &video_config));
+  auto expected =
+      mp4::ParseDolbyVisionColorSpace(VideoCodecProfile::DOLBYVISION_PROFILE8,
+                                      mp4::kDolbyVisionCompatibilityIdHDR10);
+  EXPECT_EQ(expected, video_config.color_space_info());
+}
+#endif  // BUILDFLAG (USE_PROPRIETARY_CODECS) &&
+        // BUILDFLAG(ENABLE_PLATFORM_DOLBY_VISION)
+
+TEST_F(FFmpegCommonTest, ChannelLayoutToChromeChannelLayout_HighChannelCount) {
+  AVChannelLayout layout_514;
+  layout_514.order = AV_CHANNEL_ORDER_NATIVE;
+  layout_514.nb_channels = 10;
+  layout_514.u.mask = AV_CH_LAYOUT_5POINT1POINT4_BACK;
+
+  AVChannelLayout layout_714;
+  layout_714.order = AV_CHANNEL_ORDER_NATIVE;
+  layout_714.nb_channels = 12;
+  layout_714.u.mask = AV_CH_LAYOUT_7POINT1POINT4_BACK;
+
+  EXPECT_EQ(CHANNEL_LAYOUT_5_1_4,
+            ChannelLayoutToChromeChannelLayout(layout_514));
+  EXPECT_EQ(CHANNEL_LAYOUT_7_1_4,
+            ChannelLayoutToChromeChannelLayout(layout_714));
+}
 
 }  // namespace media

@@ -5,6 +5,8 @@
 #ifndef COMPONENTS_SESSIONS_IOS_IOS_WEBSTATE_LIVE_TAB_H_
 #define COMPONENTS_SESSIONS_IOS_IOS_WEBSTATE_LIVE_TAB_H_
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/weak_ptr.h"
 #include "base/supports_user_data.h"
 #include "components/sessions/ios/ios_live_tab.h"
 #include "components/sessions/ios/ios_serialized_navigation_builder.h"
@@ -31,6 +33,7 @@ class SESSIONS_EXPORT IOSWebStateLiveTab : public IOSLiveTab,
   static IOSWebStateLiveTab* GetForWebState(web::WebState* web_state);
 
   // LiveTab:
+  SessionID GetSessionID() const override;
   bool IsInitialBlankNavigation() override;
   int GetCurrentEntryIndex() override;
   int GetPendingEntryIndex() override;
@@ -38,6 +41,7 @@ class SESSIONS_EXPORT IOSWebStateLiveTab : public IOSLiveTab,
   sessions::SerializedNavigationEntry GetPendingEntry() override;
   int GetEntryCount() override;
   sessions::SerializedUserAgentOverride GetUserAgentOverride() override;
+  base::WeakPtr<LiveTab> GetWeakPtr() override;
 
   const web::WebState* GetWebState() const override;
 
@@ -50,7 +54,8 @@ class SESSIONS_EXPORT IOSWebStateLiveTab : public IOSLiveTab,
     return web_state_->GetNavigationManager();
   }
 
-  web::WebState* web_state_;
+  raw_ptr<web::WebState> web_state_;
+  base::WeakPtrFactory<IOSWebStateLiveTab> weak_ptr_factory_{this};
 };
 
 }  // namespace sessions

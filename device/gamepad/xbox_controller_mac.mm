@@ -4,10 +4,6 @@
 
 #include "device/gamepad/xbox_controller_mac.h"
 
-#include <algorithm>
-#include <cmath>
-#include <limits>
-
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/IOKitLib.h>
@@ -15,14 +11,21 @@
 #include <IOKit/usb/IOUSBLib.h>
 #include <IOKit/usb/USB.h>
 
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <string_view>
+
+#include "base/apple/foundation_util.h"
 #include "base/check_op.h"
+#include "base/compiler_specific.h"
 #include "base/containers/fixed_flat_set.h"
-#include "base/cxx17_backports.h"
+#include "base/containers/heap_array.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/location.h"
-#include "base/mac/foundation_util.h"
 #include "base/mac/scoped_ioobject.h"
+#include "base/metrics/histogram_macros.h"
 #include "base/task/sequenced_task_runner.h"
 #include "device/gamepad/gamepad_uma.h"
 
@@ -307,6 +310,10 @@ std::string GetDeviceName(io_service_t service) {
   return std::string(device_name);
 }
 
+void RecordUsbDeviceOpenMac(XboxControllerMac::OpenDeviceResult result) {
+  UMA_HISTOGRAM_ENUMERATION("Gamepad.UsbDeviceOpenMacResult", result);
+}
+
 }  // namespace
 
 XboxControllerMac::XboxControllerMac(Delegate* delegate)
@@ -316,13 +323,15 @@ XboxControllerMac::~XboxControllerMac() = default;
 
 void XboxControllerMac::DoShutdown() {
   if (source_)
-    CFRunLoopSourceInvalidate(source_);
+    CFRunLoopSourceInvalidate(source_.get());
   source_.reset();
   if (interface_ && interface_is_open_)
-    (*interface_)->USBInterfaceClose(interface_);
+    (*interface_.get())->USBInterfaceClose(interface_.get());
   interface_.reset();
-  if (device_ && device_is_open_)
-    (*device_)->USBDeviceClose(device_);
+  if (device_ && device_is_open_) {
+    (*device_.get())->USBDeviceClose(device_.get());
+    VLOG(1) << "XboxControllerMac: called USBDeviceClose";
+  }
   device_.reset();
 }
 
@@ -338,15 +347,19 @@ void XboxControllerMac::SetVibration(mojom::GamepadEffectParametersPtr params) {
 
   // Clamp magnitudes to [0,1]
   double strong_magnitude =
-      base::clamp<double>(params->strong_magnitude, 0.0, 1.0);
-  double weak_magnitude = base::clamp<double>(params->weak_magnitude, 0.0, 1.0);
+      std::clamp<double>(params->strong_magnitude, 0.0, 1.0);
+  double weak_magnitude = std::clamp<double>(params->weak_magnitude, 0.0, 1.0);
+  double left_trigger = std::clamp<double>(params->left_trigger, 0.0, 1.0);
+  double right_trigger = std::clamp<double>(params->right_trigger, 0.0, 1.0);
 
   if (xinput_type_ == kXInputTypeXbox360) {
     WriteXbox360Rumble(static_cast<uint8_t>(strong_magnitude * 255.0),
                        static_cast<uint8_t>(weak_magnitude * 255.0));
   } else if (xinput_type_ == kXInputTypeXboxOne) {
     WriteXboxOneRumble(static_cast<uint8_t>(strong_magnitude * 255.0),
-                       static_cast<uint8_t>(weak_magnitude * 255.0));
+                       static_cast<uint8_t>(weak_magnitude * 255.0),
+                       static_cast<uint8_t>(left_trigger * 255.0),
+                       static_cast<uint8_t>(right_trigger * 255.0));
   }
 }
 
@@ -358,28 +371,28 @@ XboxControllerMac::OpenDeviceResult XboxControllerMac::OpenDevice(
       service, kIOUSBDeviceUserClientTypeID, kIOCFPlugInInterfaceID, &plugin,
       &score);
   if (kr != KERN_SUCCESS)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
   base::mac::ScopedIOPluginInterface<IOCFPlugInInterface> plugin_ref(plugin);
 
   HRESULT res = (*plugin)->QueryInterface(
       plugin, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID320),
       (LPVOID*)&device_);
   if (!SUCCEEDED(res) || !device_)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
 
-  kr = (*device_)->GetDeviceVendor(device_, &vendor_id_);
+  kr = (*device_.get())->GetDeviceVendor(device_.get(), &vendor_id_);
   if (kr != KERN_SUCCESS)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
 
-  kr = (*device_)->GetDeviceProduct(device_, &product_id_);
+  kr = (*device_.get())->GetDeviceProduct(device_.get(), &product_id_);
   if (kr != KERN_SUCCESS)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
 
   // Record a connected XInput gamepad. Non-XInput devices are recorded
   // elsewhere.
   xinput_type_ = GamepadIdList::Get().GetXInputType(vendor_id_, product_id_);
   DCHECK_NE(xinput_type_, kXInputTypeNone);
-  gamepad_id_ = GamepadIdList::Get().GetGamepadId(base::StringPiece(),
+  gamepad_id_ = GamepadIdList::Get().GetGamepadId(std::string_view(),
                                                   vendor_id_, product_id_);
   RecordConnectedGamepad(gamepad_id_);
 
@@ -425,31 +438,39 @@ XboxControllerMac::OpenDeviceResult XboxControllerMac::OpenDevice(
       request.bAlternateSetting = kIOUSBFindInterfaceDontCare;
       break;
     default:
-      return OPEN_FAILED;
+      return OpenDeviceResult::kOpenFailed;
   }
 
   // Open the device and configure it.
-  kr = (*device_)->USBDeviceOpen(device_);
+  kr = (*device_.get())->USBDeviceOpen(device_.get());
+  VLOG(1) << "XboxControllerMac: USBDeviceOpen returned " << kr;
   if (kr == kIOReturnExclusiveAccess) {
     // USBDeviceOpen may fail with kIOReturnExclusiveAccess if the device has
     // already been opened by another process. Usually this is temporary and
     // the device will soon become available. Signal to the data fetcher that
     // it should retry.
-    return OPEN_FAILED_EXCLUSIVE_ACCESS;
+    RecordUsbDeviceOpenMac(OpenDeviceResult::kOpenFailedExclusiveAccess);
+    return OpenDeviceResult::kOpenFailedExclusiveAccess;
   } else if (kr != KERN_SUCCESS) {
-    return OPEN_FAILED;
+    RecordUsbDeviceOpenMac(OpenDeviceResult::kOpenFailed);
+    return OpenDeviceResult::kOpenFailed;
+  } else {
+    RecordUsbDeviceOpenMac(OpenDeviceResult::kOpenSucceeded);
   }
+
   device_is_open_ = true;
 
   // Xbox controllers have one configuration option which has configuration
   // value 1. Try to set it and fail if it couldn't be configured.
   IOUSBConfigurationDescriptorPtr config_desc;
-  kr = (*device_)->GetConfigurationDescriptorPtr(device_, 0, &config_desc);
+  kr = (*device_.get())
+           ->GetConfigurationDescriptorPtr(device_.get(), 0, &config_desc);
   if (kr != KERN_SUCCESS)
-    return OPEN_FAILED;
-  kr = (*device_)->SetConfiguration(device_, config_desc->bConfigurationValue);
+    return OpenDeviceResult::kOpenFailed;
+  kr = (*device_.get())
+           ->SetConfiguration(device_.get(), config_desc->bConfigurationValue);
   if (kr != KERN_SUCCESS)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
 
   // The device has 4 interfaces. They are as follows:
   // Protocol 1:
@@ -466,16 +487,17 @@ XboxControllerMac::OpenDeviceResult XboxControllerMac::OpenDevice(
   // For more detail, see
   // https://github.com/Grumbel/xboxdrv/blob/master/PROTOCOL
   io_iterator_t iter;
-  kr = (*device_)->CreateInterfaceIterator(device_, &request, &iter);
+  kr =
+      (*device_.get())->CreateInterfaceIterator(device_.get(), &request, &iter);
   if (kr != KERN_SUCCESS)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
   base::mac::ScopedIOObject<io_iterator_t> iter_ref(iter);
 
   // There should be exactly one USB interface which matches the requested
   // settings.
   io_service_t usb_interface = IOIteratorNext(iter);
   if (!usb_interface)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
 
   // We need to make an InterfaceInterface to communicate with the device
   // endpoint. This is the same process as earlier: first make a
@@ -486,7 +508,7 @@ XboxControllerMac::OpenDeviceResult XboxControllerMac::OpenDevice(
       usb_interface, kIOUSBInterfaceUserClientTypeID, kIOCFPlugInInterfaceID,
       &plugin_interface, &score);
   if (kr != KERN_SUCCESS || !plugin_interface)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
   base::mac::ScopedIOPluginInterface<IOCFPlugInInterface> interface_ref(
       plugin_interface);
 
@@ -504,27 +526,29 @@ XboxControllerMac::OpenDeviceResult XboxControllerMac::OpenDevice(
                              (LPVOID*)&interface_);
 
   if (!SUCCEEDED(res) || !interface_)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
 
   // Actually open the interface.
-  kr = (*interface_)->USBInterfaceOpen(interface_);
+  kr = (*interface_.get())->USBInterfaceOpen(interface_.get());
   if (kr != KERN_SUCCESS)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
   interface_is_open_ = true;
 
   CFRunLoopSourceRef source_ref;
-  kr = (*interface_)->CreateInterfaceAsyncEventSource(interface_, &source_ref);
+  kr = (*interface_.get())
+           ->CreateInterfaceAsyncEventSource(interface_.get(), &source_ref);
   if (kr != KERN_SUCCESS || !source_ref)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
   source_.reset(source_ref);
-  CFRunLoopAddSource(CFRunLoopGetCurrent(), source_, kCFRunLoopDefaultMode);
+  CFRunLoopAddSource(CFRunLoopGetCurrent(), source_.get(),
+                     kCFRunLoopDefaultMode);
 
   // The interface should have two pipes. Pipe 1 with direction kUSBIn and pipe
   // 2 with direction kUSBOut. Both pipes should have type kUSBInterrupt.
   uint8_t num_endpoints;
-  kr = (*interface_)->GetNumEndpoints(interface_, &num_endpoints);
+  kr = (*interface_.get())->GetNumEndpoints(interface_.get(), &num_endpoints);
   if (kr != KERN_SUCCESS || num_endpoints < 2)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
 
   for (int i = 1; i <= 2; i++) {
     uint8_t direction;
@@ -533,36 +557,35 @@ XboxControllerMac::OpenDeviceResult XboxControllerMac::OpenDevice(
     uint16_t max_packet_size;
     uint8_t interval;
 
-    kr = (*interface_)
-             ->GetPipeProperties(interface_, i, &direction, &number,
+    kr = (*interface_.get())
+             ->GetPipeProperties(interface_.get(), i, &direction, &number,
                                  &transfer_type, &max_packet_size, &interval);
     if (kr != KERN_SUCCESS || transfer_type != kUSBInterrupt)
-      return OPEN_FAILED;
+      return OpenDeviceResult::kOpenFailed;
     if (i == read_endpoint_) {
       if (direction != kUSBIn)
-        return OPEN_FAILED;
-      read_buffer_.reset(new uint8_t[max_packet_size]);
-      read_buffer_size_ = max_packet_size;
+        return OpenDeviceResult::kOpenFailed;
+      read_buffer_ = base::HeapArray<uint8_t>::Uninit(max_packet_size);
       if (!QueueRead())
-        return OPEN_FAILED;
+        return OpenDeviceResult::kOpenFailed;
     } else if (i == control_endpoint_) {
       if (direction != kUSBOut)
-        return OPEN_FAILED;
+        return OpenDeviceResult::kOpenFailed;
 
       // Xbox One controllers require an initialization packet.
       if (xinput_type_ == kXInputTypeXboxOne && !WriteXboxOneInit())
-        return OPEN_FAILED;
+        return OpenDeviceResult::kOpenFailed;
     }
   }
 
   // The location ID is unique per controller, and can be used to track
   // controllers through reconnections (though if a controller is detached from
   // one USB hub and attached to another, the location ID will change).
-  kr = (*device_)->GetLocationID(device_, &location_id_);
+  kr = (*device_.get())->GetLocationID(device_.get(), &location_id_);
   if (kr != KERN_SUCCESS)
-    return OPEN_FAILED;
+    return OpenDeviceResult::kOpenFailed;
 
-  return OPEN_SUCCEEDED;
+  return OpenDeviceResult::kOpenSucceeded;
 }
 
 void XboxControllerMac::SetLEDPattern(LEDPattern pattern) {
@@ -573,11 +596,11 @@ void XboxControllerMac::SetLEDPattern(LEDPattern pattern) {
   // finishes.
   UInt8* buffer = new UInt8[length];
   buffer[0] = static_cast<UInt8>(CONTROL_MESSAGE_SET_LED);
-  buffer[1] = length;
-  buffer[2] = static_cast<UInt8>(pattern);
+  UNSAFE_TODO(buffer[1]) = length;
+  UNSAFE_TODO(buffer[2]) = static_cast<UInt8>(pattern);
   kern_return_t kr =
-      (*interface_)
-          ->WritePipeAsync(interface_, control_endpoint_, buffer,
+      (*interface_.get())
+          ->WritePipeAsync(interface_.get(), control_endpoint_, buffer,
                            (UInt32)length, WriteComplete, buffer);
   if (kr != KERN_SUCCESS) {
     DLOG(ERROR) << "Write error: Failed to send Xbox 360 LED command.";
@@ -638,18 +661,19 @@ void XboxControllerMac::ProcessXbox360Packet(size_t length) {
   if (length < kXbox360HeaderBytes)
     return;
 
-  DCHECK_LE(length, read_buffer_size_);
-  if (length > read_buffer_size_)
+  if (length > read_buffer_.size()) {
     return;
+  }
 
-  uint8_t* buffer = read_buffer_.get();
+  uint8_t* buffer = read_buffer_.data();
 
-  if (buffer[1] != length)
+  if (UNSAFE_TODO(buffer[1]) != length) {
     // Length in packet doesn't match length reported by USB.
     return;
+  }
 
   uint8_t type = buffer[0];
-  buffer += kXbox360HeaderBytes;
+  UNSAFE_TODO(buffer += kXbox360HeaderBytes);
   length -= kXbox360HeaderBytes;
   switch (type) {
     case STATUS_MESSAGE_BUTTONS: {
@@ -680,16 +704,16 @@ void XboxControllerMac::ProcessXboxOnePacket(size_t length) {
   if (length < kXboxOneHeaderBytes)
     return;
 
-  DCHECK_LE(length, read_buffer_size_);
-  if (length > read_buffer_size_)
+  if (length > read_buffer_.size()) {
     return;
+  }
 
-  uint8_t* buffer = read_buffer_.get();
+  uint8_t* buffer = read_buffer_.data();
   uint8_t type = buffer[0];
-  bool needs_ack = (buffer[1] == 0x30);
-  uint8_t sequence_number = buffer[2];
+  bool needs_ack = (UNSAFE_TODO(buffer[1]) == 0x30);
+  uint8_t sequence_number = UNSAFE_TODO(buffer[2]);
 
-  buffer += kXboxOneHeaderBytes;
+  UNSAFE_TODO(buffer += kXboxOneHeaderBytes);
   length -= kXboxOneHeaderBytes;
   switch (type) {
     case XBOX_ONE_STATUS_MESSAGE_BUTTONS: {
@@ -743,9 +767,9 @@ void XboxControllerMac::ProcessXboxOnePacket(size_t length) {
 
 bool XboxControllerMac::QueueRead() {
   kern_return_t kr =
-      (*interface_)
-          ->ReadPipeAsync(interface_, read_endpoint_, read_buffer_.get(),
-                          read_buffer_size_, GotData, this);
+      (*interface_.get())
+          ->ReadPipeAsync(interface_.get(), read_endpoint_, read_buffer_.data(),
+                          read_buffer_.size(), GotData, this);
   if (kr != KERN_SUCCESS)
     DLOG(ERROR) << "Read error: Failed to queue next read.";
   return kr == KERN_SUCCESS;
@@ -766,7 +790,7 @@ void XboxControllerMac::WriteXbox360Rumble(uint8_t strong_magnitude,
   UInt8* buffer = new UInt8[length];
 
   Xbox360RumbleData* rumble_data = reinterpret_cast<Xbox360RumbleData*>(buffer);
-  memset(buffer, 0, length);
+  UNSAFE_TODO(memset(buffer, 0, length));
   rumble_data->command = 0x00;  // Rumble
   rumble_data->size = length;
 
@@ -775,8 +799,8 @@ void XboxControllerMac::WriteXbox360Rumble(uint8_t strong_magnitude,
   rumble_data->little = weak_magnitude;
 
   kern_return_t kr =
-      (*interface_)
-          ->WritePipeAsync(interface_, control_endpoint_, buffer,
+      (*interface_.get())
+          ->WritePipeAsync(interface_.get(), control_endpoint_, buffer,
                            (UInt32)length, WriteComplete, buffer);
   if (kr != KERN_SUCCESS) {
     DLOG(ERROR) << "Write error: Failed to send Xbox 360 rumble command.";
@@ -790,14 +814,16 @@ bool XboxControllerMac::WriteXboxOneInit() {
   // This buffer will be released in WriteComplete when WritePipeAsync
   // finishes.
   UInt8* buffer = new UInt8[length];
-  buffer[0] = 0x05;
-  buffer[1] = 0x20;
-  buffer[2] = 0x00;
-  buffer[3] = 0x01;
-  buffer[4] = 0x00;
+  UNSAFE_TODO({
+    buffer[0] = 0x05;
+    buffer[1] = 0x20;
+    buffer[2] = 0x00;
+    buffer[3] = 0x01;
+    buffer[4] = 0x00;
+  });
   kern_return_t kr =
-      (*interface_)
-          ->WritePipeAsync(interface_, control_endpoint_, buffer,
+      (*interface_.get())
+          ->WritePipeAsync(interface_.get(), control_endpoint_, buffer,
                            (UInt32)length, WriteComplete, buffer);
   if (kr != KERN_SUCCESS) {
     DLOG(ERROR)
@@ -809,7 +835,9 @@ bool XboxControllerMac::WriteXboxOneInit() {
 }
 
 void XboxControllerMac::WriteXboxOneRumble(uint8_t strong_magnitude,
-                                           uint8_t weak_magnitude) {
+                                           uint8_t weak_magnitude,
+                                           uint8_t left_trigger,
+                                           uint8_t right_trigger) {
   const UInt8 length = sizeof(XboxOneRumbleData);
 
   // This buffer will be released in WriteComplete when WritePipeAsync
@@ -828,14 +856,14 @@ void XboxControllerMac::WriteXboxOneRumble(uint8_t strong_magnitude,
   rumble_data->extra = 0x00;
 
   // Set rumble intensities.
-  rumble_data->trigger_left = 0x00;
-  rumble_data->trigger_right = 0x00;
+  rumble_data->trigger_left = left_trigger;
+  rumble_data->trigger_right = right_trigger;
   rumble_data->strong_magnitude = strong_magnitude;
   rumble_data->weak_magnitude = weak_magnitude;
 
   kern_return_t kr =
-      (*interface_)
-          ->WritePipeAsync(interface_, control_endpoint_, buffer,
+      (*interface_.get())
+          ->WritePipeAsync(interface_.get(), control_endpoint_, buffer,
                            (UInt32)length, WriteComplete, buffer);
   if (kr != KERN_SUCCESS) {
     DLOG(ERROR) << "Write error: Failed to send Xbox One rumble command.";
@@ -851,22 +879,24 @@ void XboxControllerMac::WriteXboxOneAckGuide(uint8_t sequence_number) {
   const UInt8 length = 13;
 
   UInt8* buffer = new UInt8[length];
-  buffer[0] = 0x01;
-  buffer[1] = 0x20;
-  buffer[2] = sequence_number;
-  buffer[3] = 0x09;
-  buffer[4] = 0x00;
-  buffer[5] = 0x07;
-  buffer[6] = 0x20;
-  buffer[7] = 0x02;
-  buffer[8] = 0x00;
-  buffer[9] = 0x00;
-  buffer[10] = 0x00;
-  buffer[11] = 0x00;
-  buffer[12] = 0x00;
+  UNSAFE_TODO({
+    buffer[0] = 0x01;
+    buffer[1] = 0x20;
+    buffer[2] = sequence_number;
+    buffer[3] = 0x09;
+    buffer[4] = 0x00;
+    buffer[5] = 0x07;
+    buffer[6] = 0x20;
+    buffer[7] = 0x02;
+    buffer[8] = 0x00;
+    buffer[9] = 0x00;
+    buffer[10] = 0x00;
+    buffer[11] = 0x00;
+    buffer[12] = 0x00;
+  });
   kern_return_t kr =
-      (*interface_)
-          ->WritePipeAsync(interface_, control_endpoint_, buffer,
+      (*interface_.get())
+          ->WritePipeAsync(interface_.get(), control_endpoint_, buffer,
                            (UInt32)length, WriteComplete, buffer);
   if (kr != KERN_SUCCESS) {
     DLOG(ERROR) << "Write error: Failed to send Xbox One mode report reply.";

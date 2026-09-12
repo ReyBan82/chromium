@@ -6,18 +6,34 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <algorithm>
+#include <string_view>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span_reader.h"
 #include "base/numerics/safe_math.h"
+#include "base/pickle.h"
+#include "base/strings/string_view_util.h"
 #include "gpu/command_buffer/service/command_buffer_service.h"
 #include "gpu/command_buffer/service/decoder_client.h"
-#include "ui/gfx/ipc/color/gfx_param_traits.h"
 
 namespace gpu {
 namespace {
 static const size_t kDefaultMaxBucketSize = 1u << 30;  // 1 GB
+
+uint32_t LoadU32Unaligned(const void* ptr) {
+  uint32_t ret;
+  UNSAFE_TODO(memcpy(&ret, ptr, sizeof(uint32_t)));
+  return ret;
 }
+
+void StoreU32Unaligned(uint32_t v, void* ptr) {
+  UNSAFE_TODO(memcpy(ptr, &v, sizeof(uint32_t)));
+}
+
+}  // namespace
 
 const CommonDecoder::CommandInfo CommonDecoder::command_info[] = {
 #define COMMON_COMMAND_BUFFER_CMD_OP(name)                       \
@@ -36,28 +52,27 @@ CommonDecoder::Bucket::Bucket() : size_(0) {}
 
 CommonDecoder::Bucket::~Bucket() = default;
 
-void* CommonDecoder::Bucket::GetData(size_t offset, size_t size) const {
+base::span<uint8_t> CommonDecoder::Bucket::GetDataAsByteSpan(size_t offset,
+                                                             size_t size) {
   if (OffsetSizeValid(offset, size)) {
-    return data_.get() + offset;
+    return data_.subspan(offset, size);
   }
-  return nullptr;
+  return {};
 }
 
 void CommonDecoder::Bucket::SetSize(size_t size) {
   if (size != size_) {
-    // Note: the `()` after `new[]` is significant: it ensures the elements are
-    // value-initialized (not to be confused with default *initialized*). In the
-    // case of int8_t, that means the returned buffer will be
+    // WithSize() value-initializes the elements, i.e. the buffer will be
     // zero-initialized.
-    data_.reset(size ? new int8_t[size]() : nullptr);
+    data_ = base::HeapArray<uint8_t>::WithSize(size);
     size_ = size;
   }
 }
 
-bool CommonDecoder::Bucket::SetData(
-    const volatile void* src, size_t offset, size_t size) {
-  if (OffsetSizeValid(offset, size)) {
-    memcpy(data_.get() + offset, const_cast<const void*>(src), size);
+bool CommonDecoder::Bucket::SetData(base::span<const volatile uint8_t> src,
+                                    size_t offset) {
+  if (OffsetSizeValid(offset, src.size())) {
+    data_.subspan(offset, src.size()).copy_from(src);
     return true;
   }
   return false;
@@ -69,9 +84,11 @@ void CommonDecoder::Bucket::SetFromString(const char* str) {
   if (!str) {
     SetSize(0);
   } else {
-    size_t size = strlen(str) + 1;
+    std::string_view str_view(str);
+    size_t size = str_view.size() + 1;
     SetSize(size);
-    SetData(str, 0, size);
+    SetData(base::as_byte_span(str_view), 0);
+    data_[str_view.size()] = 0;
   }
 }
 
@@ -80,54 +97,62 @@ bool CommonDecoder::Bucket::GetAsString(std::string* str) {
   if (size_ == 0) {
     return false;
   }
-  str->assign(GetDataAs<const char*>(0, size_ - 1), size_ - 1);
+  base::span<const uint8_t> bytes = GetDataAsByteSpan(0, size_ - 1);
+  str->assign(base::as_string_view(bytes));
   return true;
 }
 
 bool CommonDecoder::Bucket::GetAsStrings(
     GLsizei* _count, std::vector<char*>* _string, std::vector<GLint>* _length) {
-  const size_t kMinBucketSize = sizeof(GLint);
-  // Each string has at least |length| in the header and a NUL character.
-  const size_t kMinStringSize = sizeof(GLint) + 1;
   const size_t bucket_size = this->size();
-  if (bucket_size < kMinBucketSize) {
+  if (bucket_size < sizeof(GLint)) {
     return false;
   }
-  char* bucket_data = this->GetDataAs<char*>(0, bucket_size);
-  GLint* header = reinterpret_cast<GLint*>(bucket_data);
-  GLsizei count = static_cast<GLsizei>(header[0]);
-  if (count < 0) {
+  base::SpanReader reader{GetDataAsByteSpan(0, bucket_size)};
+
+  std::optional<int32_t> count32 = reader.ReadI32NativeEndian();
+  if (!count32.has_value() || *count32 < 0) {
     return false;
   }
-  const size_t max_count = (bucket_size - kMinBucketSize) / kMinStringSize;
-  if (max_count < static_cast<size_t>(count)) {
-    return false;
-  }
-  GLint* length = header + 1;
-  std::vector<char*> strs(count);
-  base::CheckedNumeric<size_t> total_size = sizeof(GLint);
-  total_size *= count + 1;  // Header size.
-  if (!total_size.IsValid())
-    return false;
+  const GLsizei count = static_cast<GLsizei>(*count32);
+
+  // Don't pre-size the vectors from the untrusted `count`: a bogus value would
+  // try to allocate a huge amount of memory. Reserve is bounded by the bucket
+  // size instead, and SpanReader fails gracefully once the bucket runs out of
+  // data.
+  const size_t reserve = bucket_size / (sizeof(GLint) + 1u);
+  std::vector<GLint> lengths;
+  lengths.reserve(reserve);
   for (GLsizei ii = 0; ii < count; ++ii) {
-    strs[ii] = bucket_data + total_size.ValueOrDefault(0);
-    total_size += length[ii];
-    total_size += 1;  // NUL char at the end of each char array.
-    if (!total_size.IsValid() || total_size.ValueOrDefault(0) > bucket_size ||
-        strs[ii][length[ii]] != 0) {
+    std::optional<int32_t> length32 = reader.ReadI32NativeEndian();
+    if (!length32.has_value() || *length32 < 0) {
       return false;
     }
+    lengths.push_back(static_cast<GLint>(*length32));
   }
-  if (total_size.ValueOrDefault(0) != bucket_size) {
+
+  std::vector<char*> strs;
+  strs.reserve(reserve);
+  for (const GLint length : lengths) {
+    std::optional<base::span<uint8_t>> str =
+        reader.Read(static_cast<size_t>(length) + 1u);
+    if (!str.has_value()) {
+      return false;
+    }
+    if ((*str)[length] != 0) {
+      return false;
+    }
+    strs.push_back(base::as_writable_chars(*str).data());
+  }
+
+  if (reader.remaining() != 0u) {
     return false;
   }
+
   DCHECK(_count && _string && _length);
   *_count = count;
   *_string = strs;
-  _length->resize(count);
-  for (GLsizei ii = 0; ii < count; ++ii) {
-    (*_length)[ii] = length[ii];
-  }
+  *_length = lengths;
   return true;
 }
 
@@ -147,6 +172,23 @@ CommonDecoder::CommonDecoder(DecoderClient* client,
 }
 
 CommonDecoder::~CommonDecoder() = default;
+
+std::optional<base::span<uint8_t>> CommonDecoder::GetSharedMemoryAsByteSpan(
+    uint32_t shm_id,
+    uint32_t offset,
+    uint32_t size_in_bytes) {
+  scoped_refptr<gpu::Buffer> buffer =
+      command_buffer_service_->GetTransferBuffer(shm_id);
+  if (!buffer) {
+    return std::nullopt;
+  }
+  base::CheckedNumeric<uint32_t> end = offset;
+  end += size_in_bytes;
+  if (!end.IsValid() || end.ValueOrDie() > buffer->size()) {
+    return std::nullopt;
+  }
+  return buffer->GetSpanData(offset, size_in_bytes);
+}
 
 void* CommonDecoder::GetAddressAndCheckSize(unsigned int shm_id,
                                             unsigned int data_offset,
@@ -207,7 +249,8 @@ namespace {
 // Returns the address of the first byte after a struct.
 template <typename T>
 const volatile void* AddressAfterStruct(const volatile T& pod) {
-  return reinterpret_cast<const volatile uint8_t*>(&pod) + sizeof(pod);
+  return UNSAFE_TODO(reinterpret_cast<const volatile uint8_t*>(&pod) +
+                     sizeof(pod));
 }
 
 // Returns the address of the frst byte after the struct.
@@ -227,7 +270,7 @@ error::Error CommonDecoder::DoCommonCommand(unsigned int command,
                                             unsigned int arg_count,
                                             const volatile void* cmd_data) {
   if (command < std::size(command_info)) {
-    const CommandInfo& info = command_info[command];
+    const CommandInfo& info = UNSAFE_TODO(command_info[command]);
     unsigned int info_arg_count = static_cast<unsigned int>(info.arg_count);
     if ((info.arg_flags == cmd::kFixed && arg_count == info_arg_count) ||
         (info.arg_flags == cmd::kAtLeastN && arg_count >= info_arg_count)) {
@@ -275,16 +318,16 @@ error::Error CommonDecoder::HandleSetBucketData(uint32_t immediate_data_size,
   uint32_t bucket_id = args.bucket_id;
   uint32_t offset = args.offset;
   uint32_t size = args.size;
-  const void* data = GetSharedMemoryAs<const void*>(
+  std::optional<base::span<uint8_t>> data = GetSharedMemoryAsByteSpan(
       args.shared_memory_id, args.shared_memory_offset, size);
-  if (!data) {
+  if (!data.has_value()) {
     return error::kInvalidArguments;
   }
   Bucket* bucket = GetBucket(bucket_id);
   if (!bucket) {
     return error::kInvalidArguments;
   }
-  if (!bucket->SetData(data, offset, size)) {
+  if (!bucket->SetData(*data, offset)) {
     return error::kInvalidArguments;
   }
 
@@ -296,18 +339,20 @@ error::Error CommonDecoder::HandleSetBucketDataImmediate(
     const volatile void* cmd_data) {
   const volatile cmd::SetBucketDataImmediate& args =
       *static_cast<const volatile cmd::SetBucketDataImmediate*>(cmd_data);
-  const volatile void* data = GetImmediateDataAs<const volatile void*>(args);
   uint32_t bucket_id = args.bucket_id;
   uint32_t offset = args.offset;
   uint32_t size = args.size;
   if (size > immediate_data_size) {
     return error::kInvalidArguments;
   }
+  const volatile uint8_t* data =
+      GetImmediateDataAs<const volatile uint8_t*>(args);
+  auto data_span = UNSAFE_TODO(base::span<const volatile uint8_t>(data, size));
   Bucket* bucket = GetBucket(bucket_id);
   if (!bucket) {
     return error::kInvalidArguments;
   }
-  if (!bucket->SetData(data, offset, size)) {
+  if (!bucket->SetData(data_span, offset)) {
     return error::kInvalidArguments;
   }
   return error::kNoError;
@@ -319,16 +364,18 @@ error::Error CommonDecoder::HandleGetBucketStart(
   const volatile cmd::GetBucketStart& args =
       *static_cast<const volatile cmd::GetBucketStart*>(cmd_data);
   uint32_t bucket_id = args.bucket_id;
-  uint32_t* result = GetSharedMemoryAs<uint32_t*>(
-      args.result_memory_id, args.result_memory_offset, sizeof(*result));
+  // `result` may not be aligned, so cast to `void*` and use `memcpy` to load
+  // and store.
+  void* result = GetSharedMemoryAs<void*>(
+      args.result_memory_id, args.result_memory_offset, sizeof(uint32_t));
   int32_t data_memory_id = args.data_memory_id;
   uint32_t data_memory_offset = args.data_memory_offset;
   uint32_t data_memory_size = args.data_memory_size;
-  uint8_t* data = nullptr;
+  std::optional<base::span<uint8_t>> data;
   if (data_memory_size != 0 || data_memory_id != 0 || data_memory_offset != 0) {
-    data = GetSharedMemoryAs<uint8_t*>(data_memory_id, data_memory_offset,
-                                       data_memory_size);
-    if (!data) {
+    data = GetSharedMemoryAsByteSpan(data_memory_id, data_memory_offset,
+                                     data_memory_size);
+    if (!data.has_value()) {
       return error::kInvalidArguments;
     }
   }
@@ -336,7 +383,7 @@ error::Error CommonDecoder::HandleGetBucketStart(
     return error::kInvalidArguments;
   }
   // Check that the client initialized the result.
-  if (*result != 0) {
+  if (LoadU32Unaligned(result) != 0) {
     return error::kInvalidArguments;
   }
   Bucket* bucket = GetBucket(bucket_id);
@@ -344,10 +391,10 @@ error::Error CommonDecoder::HandleGetBucketStart(
     return error::kInvalidArguments;
   }
   uint32_t bucket_size = bucket->size();
-  *result = bucket_size;
-  if (data) {
+  StoreU32Unaligned(bucket_size, result);
+  if (data.has_value()) {
     uint32_t size = std::min(data_memory_size, bucket_size);
-    memcpy(data, bucket->GetData(0, size), size);
+    data->copy_prefix_from(bucket->GetDataAsByteSpan(0, size));
   }
   return error::kNoError;
 }
@@ -359,20 +406,23 @@ error::Error CommonDecoder::HandleGetBucketData(uint32_t immediate_data_size,
   uint32_t bucket_id = args.bucket_id;
   uint32_t offset = args.offset;
   uint32_t size = args.size;
-  void* data = GetSharedMemoryAs<void*>(
+  std::optional<base::span<uint8_t>> data = GetSharedMemoryAsByteSpan(
       args.shared_memory_id, args.shared_memory_offset, size);
-  if (!data) {
+  if (!data.has_value()) {
     return error::kInvalidArguments;
   }
   Bucket* bucket = GetBucket(bucket_id);
   if (!bucket) {
     return error::kInvalidArguments;
   }
-  const void* src = bucket->GetData(offset, size);
-  if (!src) {
-      return error::kInvalidArguments;
+  // Note that an empty span is returned both for a valid zero-sized request and
+  // for an out-of-range one, so the range has to be validated explicitly.
+  base::CheckedNumeric<size_t> end = offset;
+  end += size;
+  if (!end.IsValid() || end.ValueOrDie() > bucket->size()) {
+    return error::kInvalidArguments;
   }
-  memcpy(data, src, size);
+  data->copy_from(bucket->GetDataAsByteSpan(offset, size));
   return error::kNoError;
 }
 
@@ -389,33 +439,6 @@ error::Error CommonDecoder::HandleInsertFenceSync(
   // context.
   ExitCommandProcessingEarly();
   return error::kNoError;
-}
-
-bool CommonDecoder::ReadColorSpace(uint32_t shm_id,
-                                   uint32_t shm_offset,
-                                   uint32_t color_space_size,
-                                   gfx::ColorSpace* color_space) {
-  // Use the default (invalid) color space if no space was serialized.
-  if (!shm_id && !shm_offset && !color_space_size) {
-    *color_space = gfx::ColorSpace();
-    return true;
-  }
-
-  const char* data = static_cast<const char*>(
-      GetAddressAndCheckSize(shm_id, shm_offset, color_space_size));
-  if (!data) {
-    return false;
-  }
-
-  // Make a copy to reduce the risk of a time of check to time of use attack.
-  std::vector<char> color_space_data(data, data + color_space_size);
-  base::Pickle color_space_pickle(color_space_data.data(), color_space_size);
-  base::PickleIterator iterator(color_space_pickle);
-  if (!IPC::ParamTraits<gfx::ColorSpace>::Read(&color_space_pickle, &iterator,
-                                               color_space)) {
-    return false;
-  }
-  return true;
 }
 
 }  // namespace gpu

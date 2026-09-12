@@ -17,7 +17,6 @@ source_set("remoting_sender") {
   ]
 
   deps = [
-    ":remoting_constants",
     "//base",
     "//media",
     "//media/mojo/common",
@@ -40,12 +39,8 @@ source_set("remoting_sender") {
 
     # Consumers of the CourierRenderer implicitly take a dependency on the
     # generated remoting.pb.h file.
-    public_deps += [ "//components/cast_streaming/public:remoting_utils" ]
+    public_deps += [ "//media/cast/openscreen:remoting_utils" ]
   }
-}
-
-source_set("remoting_constants") {
-  sources = [ "remoting_constants.h" ]
 }
 
 source_set("remoting_device_capability") {
@@ -73,14 +68,14 @@ source_set("remoting_renderer") {
   ]
 
   deps = [
-    ":remoting_constants",
-    "//media/mojo/common:common",
+    "//media/mojo/common",
     "//media/mojo/mojom:remoting",
+    "//third_party/openscreen/src/cast/streaming:common",
   ]
 
   # Consumers of the ReceiverController implicitly take a dependency on the
   # generated remoting.pb.h file.
-  public_deps = [ "//components/cast_streaming/public:remoting_utils" ]
+  public_deps = [ "//media/cast/openscreen:remoting_utils" ]
 }
 
 source_set("media_remoting_tests") {
@@ -104,9 +99,9 @@ source_set("media_remoting_tests") {
     ":remoting_sender",
     "//base",
     "//base/test:test_support",
-    "//components/cast_streaming/public:decoder_buffer_reader",
-    "//components/cast_streaming/public:remoting_utils",
     "//media:test_support",
+    "//media/cast/openscreen:decoder_buffer_reader",
+    "//media/cast/openscreen:remoting_utils",
     "//media/mojo/common",
     "//media/mojo/mojom:remoting",
     "//testing/gmock",
@@ -118,20 +113,20 @@ source_set("media_remoting_tests") {
     sources += [
       "courier_renderer_unittest.cc",
       "demuxer_stream_adapter_unittest.cc",
-      "end2end_test_renderer.cc",
-      "end2end_test_renderer.h",
       "fake_media_resource.cc",
       "fake_media_resource.h",
-      "integration_test.cc",
       "metrics_unittest.cc",
     ]
+    deps += [ "//ui/gfx/geometry" ]
 
-    deps += [
-      "//media/test:pipeline_integration_test_base",
-      "//services/service_manager/public/cpp:cpp",
-      "//ui/gfx:test_support",
-      "//ui/gfx/geometry",
-    ]
+    if (media_use_ffmpeg) {
+      sources += [
+        "end2end_test_renderer.cc",
+        "end2end_test_renderer.h",
+        "integration_test.cc",
+      ]
+      deps += [ "//media/test:pipeline_integration_test_base" ]
+    }
   }
 }
 

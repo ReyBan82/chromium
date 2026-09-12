@@ -6,15 +6,14 @@
 
 #include <fuchsia/web/cpp/fidl.h>
 
+#include <string_view>
 #include <utility>
 
 #include "base/base_switches.h"
 #include "base/command_line.h"
-#include "base/files/file_path.h"
 #include "base/logging.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "build/chromecast_buildflags.h"
@@ -40,7 +39,7 @@ namespace {
 // Returns true if DRM is supported in current configuration. Currently we
 // assume that it is supported on ARM64, but not on x64.
 //
-// TODO(crbug.com/1013412): Detect support for all features required for
+// TODO(crbug.com/42050020): Detect support for all features required for
 // FuchsiaCdm. Specifically we need to verify that protected memory is supported
 // and that mediacodec API provides hardware video decoders.
 bool IsFuchsiaCdmSupported() {
@@ -55,8 +54,8 @@ bool IsFuchsiaCdmSupported() {
 // The switch is assumed to consist of comma-separated values. If |switch_name|
 // is already set in |command_line| then a comma will be appended, followed by
 // |value|, otherwise the switch will be set to |value|.
-void AppendToSwitch(base::StringPiece switch_name,
-                    base::StringPiece value,
+void AppendToSwitch(std::string_view switch_name,
+                    std::string_view value,
                     base::CommandLine& command_line) {
   if (!command_line.HasSwitch(switch_name)) {
     command_line.AppendSwitchNative(switch_name, value);
@@ -162,7 +161,7 @@ void HandleCorsExemptHeadersParam(fuchsia::web::CreateContextParams& params,
     return;
   }
 
-  std::vector<base::StringPiece> cors_exempt_headers;
+  std::vector<std::string_view> cors_exempt_headers;
   cors_exempt_headers.reserve(params.cors_exempt_headers().size());
   for (const auto& header : params.cors_exempt_headers()) {
     cors_exempt_headers.push_back(BytesAsString(header));
@@ -190,14 +189,11 @@ void HandleDisableCodeGenerationParam(
   // Add the JIT-less option to the comma-separated set of V8 flags passed to
   // Blink.
   AppendToSwitch(kJavaScriptFlags, kV8JitlessFlag, launch_args);
-
-  // TODO(crbug.com/1290907): Disable use of VmexResource in this case, once
-  // migrated off of ambient VMEX.
 }
 
 }  // namespace
 
-void RegisterWebInstanceProductData(base::StringPiece component_url) {
+void RegisterWebInstanceProductData(std::string_view absolute_component_url) {
   // LINT.IfChange(web_engine_crash_product_name)
   static constexpr char kCrashProductName[] = "FuchsiaWebEngine";
   // LINT.ThenChange(//fuchsia_web/webengine/context_provider_main.cc:web_engine_crash_product_name)
@@ -205,24 +201,12 @@ void RegisterWebInstanceProductData(base::StringPiece component_url) {
   static constexpr char kFeedbackAnnotationsNamespace[] = "web-engine";
 
   fuchsia_component_support::RegisterProductDataForCrashReporting(
-      component_url, kCrashProductName);
+      absolute_component_url, kCrashProductName);
 
   fuchsia_component_support::RegisterProductDataForFeedback(
       kFeedbackAnnotationsNamespace);
 }
 
-bool IsValidContentDirectoryName(base::StringPiece file_name) {
-  if (file_name.find_first_of(base::FilePath::kSeparators, 0,
-                              base::FilePath::kSeparatorsLength - 1) !=
-      base::StringPiece::npos) {
-    return false;
-  }
-  if (file_name == base::FilePath::kCurrentDirectory ||
-      file_name == base::FilePath::kParentDirectory) {
-    return false;
-  }
-  return true;
-}
 
 zx_status_t AppendLaunchArgs(fuchsia::web::CreateContextParams& params,
                              base::CommandLine& launch_args) {
@@ -416,53 +400,59 @@ void AppendDynamicServices(fuchsia::web::ContextFeatureFlags features,
                            std::vector<std::string>& services) {
   using ::fuchsia::web::ContextFeatureFlags;
 
+  // Result of bitwise AND when no specified flag(s) are present.
+  const ContextFeatureFlags kNoFeaturesRequested =
+      static_cast<ContextFeatureFlags>(0);
+
   // Features are listed here in order of their enum value.
   static constexpr struct {
     ContextFeatureFlags flag;
     ContextFeatureFlags value;
-    base::StringPiece service;
+    std::string_view service;
   } kServices[] = {
-    {ContextFeatureFlags::NETWORK, ContextFeatureFlags::NETWORK,
-     "fuchsia.net.interfaces.State"},
-    {ContextFeatureFlags::NETWORK, ContextFeatureFlags::NETWORK,
-     "fuchsia.net.name.Lookup"},
-    {ContextFeatureFlags::NETWORK, ContextFeatureFlags::NETWORK,
-     "fuchsia.posix.socket.Provider"},
-    {ContextFeatureFlags::AUDIO, ContextFeatureFlags::AUDIO,
-     "fuchsia.media.Audio"},
-    {ContextFeatureFlags::AUDIO, ContextFeatureFlags::AUDIO,
-     "fuchsia.media.AudioDeviceEnumerator"},
-    {ContextFeatureFlags::AUDIO, ContextFeatureFlags::AUDIO,
-     "fuchsia.media.SessionAudioConsumerFactory"},
-    {ContextFeatureFlags::VULKAN, ContextFeatureFlags::VULKAN,
-     "fuchsia.tracing.provider.Registry"},
-    {ContextFeatureFlags::VULKAN, ContextFeatureFlags::VULKAN,
-     "fuchsia.vulkan.loader.Loader"},
-    {ContextFeatureFlags::HARDWARE_VIDEO_DECODER,
-     ContextFeatureFlags::HARDWARE_VIDEO_DECODER,
-     "fuchsia.mediacodec.CodecFactory"},
+      {ContextFeatureFlags::NETWORK, ContextFeatureFlags::NETWORK,
+       "fuchsia.net.interfaces.State"},
+      {ContextFeatureFlags::NETWORK, ContextFeatureFlags::NETWORK,
+       "fuchsia.net.name.Lookup"},
+      {ContextFeatureFlags::NETWORK, ContextFeatureFlags::NETWORK,
+       "fuchsia.posix.socket.Provider"},
+      {ContextFeatureFlags::AUDIO, ContextFeatureFlags::AUDIO,
+       "fuchsia.media.Audio"},
+      {ContextFeatureFlags::AUDIO, ContextFeatureFlags::AUDIO,
+       "fuchsia.media.AudioDeviceEnumerator"},
+      {ContextFeatureFlags::AUDIO, ContextFeatureFlags::AUDIO,
+       "fuchsia.media.SessionAudioConsumerFactory"},
+      {ContextFeatureFlags::AUDIO, ContextFeatureFlags::AUDIO,
+       "fuchsia.settings.Input"},
+      {ContextFeatureFlags::VULKAN, ContextFeatureFlags::VULKAN,
+       "fuchsia.tracing.provider.Registry"},
+      {ContextFeatureFlags::VULKAN, ContextFeatureFlags::VULKAN,
+       "fuchsia.vulkan.loader.Loader"},
+      {ContextFeatureFlags::HARDWARE_VIDEO_DECODER,
+       ContextFeatureFlags::HARDWARE_VIDEO_DECODER,
+       "fuchsia.mediacodec.CodecFactory"},
   // HARDWARE_VIDEO_DECODER_ONLY does not require any additional services.
 #if BUILDFLAG(ENABLE_WIDEVINE)
-    {ContextFeatureFlags::WIDEVINE_CDM, ContextFeatureFlags::WIDEVINE_CDM,
-     "fuchsia.media.drm.Widevine"},
+      {ContextFeatureFlags::WIDEVINE_CDM, ContextFeatureFlags::WIDEVINE_CDM,
+       "fuchsia.media.drm.Widevine"},
 #endif
-    {ContextFeatureFlags::HEADLESS, static_cast<ContextFeatureFlags>(0),
-     "fuchsia.accessibility.semantics.SemanticsManager"},
-    {ContextFeatureFlags::HEADLESS, static_cast<ContextFeatureFlags>(0),
-     "fuchsia.ui.composition.Allocator"},
-    {ContextFeatureFlags::HEADLESS, static_cast<ContextFeatureFlags>(0),
-     "fuchsia.ui.composition.Flatland"},
-    {ContextFeatureFlags::HEADLESS, static_cast<ContextFeatureFlags>(0),
-     "fuchsia.ui.scenic.Scenic"},
+      {ContextFeatureFlags::HEADLESS, kNoFeaturesRequested,
+       "fuchsia.accessibility.semantics.SemanticsManager"},
+      {ContextFeatureFlags::HEADLESS, kNoFeaturesRequested,
+       "fuchsia.ui.composition.Allocator"},
+      {ContextFeatureFlags::HEADLESS, kNoFeaturesRequested,
+       "fuchsia.ui.composition.Flatland"},
 #if BUILDFLAG(ENABLE_CAST_RECEIVER)
-    {ContextFeatureFlags::LEGACYMETRICS, ContextFeatureFlags::LEGACYMETRICS,
-     "fuchsia.legacymetrics.MetricsRecorder"},
+      {ContextFeatureFlags::LEGACYMETRICS, ContextFeatureFlags::LEGACYMETRICS,
+       "fuchsia.legacymetrics.MetricsRecorder"},
 #endif
-    {ContextFeatureFlags::KEYBOARD, ContextFeatureFlags::KEYBOARD,
-     "fuchsia.ui.input3.Keyboard"},
-    {ContextFeatureFlags::VIRTUAL_KEYBOARD,
-     ContextFeatureFlags::VIRTUAL_KEYBOARD,
-     "fuchsia.input.virtualkeyboard.ControllerCreator"},
+      {ContextFeatureFlags::KEYBOARD, ContextFeatureFlags::KEYBOARD,
+       "fuchsia.ui.input3.Keyboard"},
+      {ContextFeatureFlags::VIRTUAL_KEYBOARD,
+       ContextFeatureFlags::VIRTUAL_KEYBOARD,
+       "fuchsia.input.virtualkeyboard.ControllerCreator"},
+      {ContextFeatureFlags::DISABLE_DYNAMIC_CODE_GENERATION,
+       kNoFeaturesRequested, "fuchsia.kernel.VmexResource"},
   };
   for (const auto& [flag, value, service] : kServices) {
     if ((features & flag) == value) {

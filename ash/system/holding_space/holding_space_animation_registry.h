@@ -9,7 +9,6 @@
 #include "ash/shell_observer.h"
 #include "ash/system/progress_indicator/progress_indicator_animation_registry.h"
 #include "base/callback_list.h"
-#include "base/functional/callback.h"
 #include "base/scoped_observation.h"
 
 namespace ash {
@@ -53,7 +52,10 @@ class ASH_EXPORT HoldingSpaceAnimationRegistry
   std::unique_ptr<ProgressIndicatorAnimationDelegate>
       progress_indicator_animation_delegate_;
 
-  base::ScopedObservation<Shell, ShellObserver> shell_observation_{this};
+  // TODO(crbug.com/498093308): remove when the HoldingSpaceAnimationRegistry is
+  // no longer outliving the Shell it observes.
+  base::ScopedObservation<Shell, ShellObserver>::LeakedDanglingUntriaged
+      shell_observation_{this};
 };
 
 }  // namespace ash

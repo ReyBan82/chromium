@@ -9,7 +9,6 @@
 #include "base/functional/bind.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/stringprintf.h"
-#include "base/time/time_to_iso8601.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history_clusters/core/clustering_backend.h"
 #include "components/history_clusters/core/config.h"
@@ -72,7 +71,7 @@ void HistoryClustersServiceTaskUpdateClusters::Start() {
 }
 
 void HistoryClustersServiceTaskUpdateClusters::OnGotAnnotatedVisitsToCluster(
-    std::vector<int64_t> old_clusters,
+    std::vector<history::ClusterId> old_clusters,
     std::vector<history::AnnotatedVisit> annotated_visits,
     QueryClustersContinuationParams continuation_params) {
   if (!weak_history_clusters_service_)
@@ -112,7 +111,7 @@ void HistoryClustersServiceTaskUpdateClusters::OnGotAnnotatedVisitsToCluster(
 }
 
 void HistoryClustersServiceTaskUpdateClusters::OnGotModelClusters(
-    std::vector<int64_t> old_cluster_ids,
+    std::vector<history::ClusterId> old_cluster_ids,
     QueryClustersContinuationParams continuation_params,
     std::vector<history::Cluster> clusters) {
   if (!weak_history_clusters_service_)

@@ -4,80 +4,58 @@
 
 #include "content/browser/renderer_host/indexed_db_client_state_checker_factory.h"
 
+#include <map>
 #include <memory>
+#include <tuple>
 
-#include "components/services/storage/privileged/mojom/indexed_db_client_state_checker.mojom-shared.h"
+#include "base/functional/callback.h"
+#include "base/no_destructor.h"
+#include "base/task/bind_post_task.h"
+#include "base/task/sequenced_task_runner.h"
+#include "components/services/storage/privileged/cpp/bucket_client_info.h"
+#include "content/browser/renderer_host/holding_blocking_idb_lock_handle.h"
 #include "content/browser/renderer_host/render_frame_host_impl.h"
+#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/disallow_activation_reason.h"
 #include "content/public/browser/document_user_data.h"
 #include "content/public/browser/render_frame_host.h"
-#include "mojo/public/cpp/bindings/associated_receiver_set.h"
-#include "mojo/public/cpp/bindings/self_owned_associated_receiver.h"
+#include "ipc/constants.mojom.h"
 #include "third_party/blink/public/common/scheduler/web_scheduler_tracked_feature.h"
 
 namespace content {
 namespace {
 
-using IndexedDBDisallowActivationReason =
-    storage::mojom::DisallowInactiveClientReason;
+using IndexedDBDisallowActivationReason = DisallowInactiveClientReason;
 
 DisallowActivationReasonId ConvertToDisallowActivationReasonId(
     IndexedDBDisallowActivationReason reason) {
   switch (reason) {
-    case IndexedDBDisallowActivationReason::kClientEventIsTriggered:
+    case IndexedDBDisallowActivationReason::kVersionChangeEvent:
       return DisallowActivationReasonId::kIndexedDBEvent;
     case IndexedDBDisallowActivationReason::kTransactionIsAcquiringLocks:
       return DisallowActivationReasonId::kIndexedDBTransactionIsAcquiringLocks;
-    case IndexedDBDisallowActivationReason::kTransactionIsBlockingOthers:
-      return DisallowActivationReasonId::kIndexedDBTransactionIsBlockingOthers;
+    case IndexedDBDisallowActivationReason::
+        kTransactionIsStartingWhileBlockingOthers:
+      return DisallowActivationReasonId::
+          kIndexedDBTransactionIsStartingWhileBlockingOthers;
+    case IndexedDBDisallowActivationReason::
+        kTransactionIsOngoingAndBlockingOthers:
+      return DisallowActivationReasonId::
+          kIndexedDBTransactionIsOngoingAndBlockingOthers;
   }
 }
 
-// The class will only provide the default result and the client will be
-// considered active. It should be used when the client doesn't have an
-// associated RenderFrameHost, as is the case for shared worker or service
-// worker.
-class NoDocumentIndexedDBClientStateChecker
-    : public storage::mojom::IndexedDBClientStateChecker {
- public:
-  NoDocumentIndexedDBClientStateChecker() = default;
-  ~NoDocumentIndexedDBClientStateChecker() override = default;
-  NoDocumentIndexedDBClientStateChecker(
-      const NoDocumentIndexedDBClientStateChecker&) = delete;
-  NoDocumentIndexedDBClientStateChecker& operator=(
-      const NoDocumentIndexedDBClientStateChecker&) = delete;
-
-  // storage::mojom::IndexedDBClientStateChecker overrides:
-  // Non-document clients are always active, since the inactive state such as
-  // back/forward cache is not applicable to them.
-  void DisallowInactiveClient(
-      storage::mojom::DisallowInactiveClientReason reason,
-      mojo::PendingReceiver<storage::mojom::IndexedDBClientKeepActive>
-          keep_active,
-      DisallowInactiveClientCallback callback) override {
-    std::move(callback).Run(/*was_active=*/true);
-  }
-};
-
-// This class should be used when the client has a RenderFrameHost associated so
-// the client checks are performed based on the document held by the
-// RenderFrameHost.
-// This class extends `DocumentUserData` because a document has one client per
-// IndexedDB connection to a database.
+// This class should be used when the client has an associated document. The
+// client checks are performed based on the document. This class extends
+// `DocumentUserData` because a document has one client per IndexedDB connection
+// to a database.
 class DocumentIndexedDBClientStateChecker final
-    : public DocumentUserData<DocumentIndexedDBClientStateChecker>,
-      public storage::mojom::IndexedDBClientStateChecker,
-      public storage::mojom::IndexedDBClientKeepActive {
+    : public DocumentUserData<DocumentIndexedDBClientStateChecker> {
  public:
   ~DocumentIndexedDBClientStateChecker() final = default;
 
-  void Bind(mojo::PendingAssociatedReceiver<
-            storage::mojom::IndexedDBClientStateChecker> receiver) {
-    receivers_.Add(this, std::move(receiver));
-  }
-
-  bool CheckIfClientWasActive(
-      storage::mojom::DisallowInactiveClientReason reason) {
+  bool CheckIfClientWasActive(IndexedDBDisallowActivationReason reason) {
     bool was_active = false;
 
     if (render_frame_host().GetLifecycleState() ==
@@ -97,52 +75,91 @@ class DocumentIndexedDBClientStateChecker final
     return was_active;
   }
 
-  // storage::mojom::IndexedDBClientStateChecker overrides:
-  void DisallowInactiveClient(
-      storage::mojom::DisallowInactiveClientReason reason,
-      mojo::PendingReceiver<storage::mojom::IndexedDBClientKeepActive>
-          keep_active,
-      DisallowInactiveClientCallback callback) override {
-    bool was_active = CheckIfClientWasActive(reason);
-    if (was_active && keep_active.is_valid()) {
-      // This is the only reason that we need to prevent the client from
-      // inactive state.
-      CHECK_EQ(reason, storage::mojom::DisallowInactiveClientReason::
-                           kClientEventIsTriggered);
-      // If the document is active, we need to register a non sticky feature to
-      // prevent putting it into BFCache until the IndexedDB connection is
-      // successfully closed and the context is automatically destroyed.
-      // Since `kClientEventIsTriggered` is the only reason that should be
-      // passed to this function, the non-sticky feature will always be
-      // `kIndexedDBEvent`.
-      KeepActiveReceiverContext context(
-          static_cast<RenderFrameHostImpl&>(render_frame_host())
-              .RegisterBackForwardCacheDisablingNonStickyFeature(
-                  blink::scheduler::WebSchedulerTrackedFeature::
-                      kIndexedDBEvent));
-      keep_active_receivers_.Add(this, std::move(keep_active),
-                                 std::move(context));
+  std::tuple<bool, ScopedKeepActive> DisallowInactiveClient(
+      IndexedDBDisallowActivationReason reason) {
+    DCHECK_CURRENTLY_ON(BrowserThread::UI);
+    // This client is currently blocking another client, for example because it
+    // has a transaction that holds locks needed by the another client or
+    // because it has a connection that prevents a version change in another
+    // client. There are 2 situations that could prevent this client from
+    // continuing its work and unblocking the other client: freezing and
+    // back-forward cache. They are handled differently.
+    //
+    // In both cases, if the document is neither frozen nor in the back-forward
+    // cache, there is nothing to do. If either situations happen in the future,
+    // `DisallowInactiveClient()` will be called again for it and then take
+    // action, by either unfreezing or evicting the document from the
+    // back-forward cache.
+    //
+    // In the case of a frozen document, we register a
+    // HoldingBlockingIDBLockHandle that will unfreeze and prevent the document
+    // from being frozen for the lifetime of the handle.
+    //
+    // In the case the document is in the back-forward cache, the call to
+    // `CheckIfClientWasActive()` below will evict it.
+    //
+    // In addition, if `reason` is kVersionChangeEvent, then we register both
+    // a HoldingBlockingIDBLockHandle and a
+    // BackForwardCacheDisablingFeatureHandle to prevent the document from going
+    // into an inactive state until the IndexedDB connection is successfully
+    // closed and the context is automatically destroyed.
+    bool is_version_change_event =
+        reason == IndexedDBDisallowActivationReason::kVersionChangeEvent;
+
+    if (!CheckIfClientWasActive(reason)) {
+      return {/*was_active=*/false, CreateNullScopedKeepActive()};
     }
 
-    std::move(callback).Run(was_active);
+    RenderFrameHostImpl* render_frame_host_impl =
+        RenderFrameHostImpl::From(&render_frame_host());
+
+    // If the client was in the BFCache, it should have been evicted with the
+    // check above. Note that until crbug.com/40691610 is fixed, a
+    // RenderFrameHost that is frozen for any other reasons than BFCache is
+    // considered active.
+    CHECK_NE(render_frame_host_impl->GetLifecycleState(),
+             RenderFrameHost::LifecycleState::kInBackForwardCache);
+
+    // If none of the 2 handle types has to be created, we don't even need to
+    // bother with the keep-active.
+    const bool create_holding_blocking_idb_lock_handle =
+        render_frame_host_impl->IsFrozen() || is_version_change_event;
+    const bool create_bfcache_feature_handle = is_version_change_event;
+    if (!create_holding_blocking_idb_lock_handle &&
+        !create_bfcache_feature_handle) {
+      return {/*was_active=*/true, CreateNullScopedKeepActive()};
+    }
+
+    uint64_t context_id = next_context_id_++;
+    KeepActiveReceiverContext& context = keep_active_contexts_[context_id];
+
+    if (create_holding_blocking_idb_lock_handle) {
+      context.holding_blocking_idb_lock_handle =
+          render_frame_host_impl->RegisterHoldingBlockingIDBLockHandle();
+    }
+
+    if (create_bfcache_feature_handle) {
+      context.bfcache_feature_handle =
+          render_frame_host_impl
+              ->RegisterBackForwardCacheDisablingNonStickyFeature(
+                  blink::scheduler::WebSchedulerTrackedFeature::
+                      kIndexedDBEvent);
+    }
+
+    ScopedKeepActive keep_active_handle(base::BindPostTask(
+        GetUIThreadTaskRunner({}),
+        base::BindOnce(
+            &DocumentIndexedDBClientStateChecker::OnKeepActiveDisconnected,
+            weak_factory_.GetWeakPtr(), context_id)));
+
+    return {/*was_active=*/true, std::move(keep_active_handle)};
   }
 
  private:
-  // Keep the association between the receiver and the feature handle it
-  // registered.
-  class KeepActiveReceiverContext {
-   public:
-    KeepActiveReceiverContext() = default;
-    explicit KeepActiveReceiverContext(
-        RenderFrameHostImpl::BackForwardCacheDisablingFeatureHandle handle)
-        : feature_handle(std::move(handle)) {}
-    KeepActiveReceiverContext(KeepActiveReceiverContext&& context) noexcept
-        : feature_handle(std::move(context.feature_handle)) {}
-
-    ~KeepActiveReceiverContext() = default;
-
-   private:
-    RenderFrameHostImpl::BackForwardCacheDisablingFeatureHandle feature_handle;
+  // Keep the association between the feature handles it registered.
+  struct KeepActiveReceiverContext {
+    BackForwardCacheDisablingFeatureHandle bfcache_feature_handle;
+    HoldingBlockingIDBLockHandle holding_blocking_idb_lock_handle;
   };
 
   explicit DocumentIndexedDBClientStateChecker(RenderFrameHost* rfh)
@@ -151,11 +168,13 @@ class DocumentIndexedDBClientStateChecker final
   friend DocumentUserData;
   DOCUMENT_USER_DATA_KEY_DECL();
 
-  mojo::AssociatedReceiverSet<storage::mojom::IndexedDBClientStateChecker>
-      receivers_;
-  mojo::ReceiverSet<storage::mojom::IndexedDBClientKeepActive,
-                    KeepActiveReceiverContext>
-      keep_active_receivers_;
+  void OnKeepActiveDisconnected(uint64_t context_id) {
+    keep_active_contexts_.erase(context_id);
+  }
+
+  uint64_t next_context_id_ = 1;
+  std::map<uint64_t, KeepActiveReceiverContext> keep_active_contexts_;
+  base::WeakPtrFactory<DocumentIndexedDBClientStateChecker> weak_factory_{this};
 };
 
 }  // namespace
@@ -163,37 +182,30 @@ class DocumentIndexedDBClientStateChecker final
 DOCUMENT_USER_DATA_KEY_IMPL(DocumentIndexedDBClientStateChecker);
 
 // static
-mojo::PendingAssociatedRemote<storage::mojom::IndexedDBClientStateChecker>
-IndexedDBClientStateCheckerFactory::InitializePendingAssociatedRemote(
-    const GlobalRenderFrameHostId& rfh_id) {
-  mojo::PendingAssociatedRemote<storage::mojom::IndexedDBClientStateChecker>
-      client_state_checker_remote;
-  if (RenderFrameHost* rfh = RenderFrameHost::FromID(rfh_id)) {
-    DocumentIndexedDBClientStateChecker::GetOrCreateForCurrentDocument(rfh)
-        ->Bind(
-            client_state_checker_remote.InitWithNewEndpointAndPassReceiver());
-  } else {
-    // If the `rfh` is null, it means there is actually no valid
-    // `RenderFrameHost` associated with the client. We should use a default
-    // checker instance for it.
-    // See comments from `NoDocumentIndexedDBClientStateChecker`.
-    mojo::MakeSelfOwnedAssociatedReceiver(
-        std::make_unique<NoDocumentIndexedDBClientStateChecker>(),
-        client_state_checker_remote.InitWithNewEndpointAndPassReceiver());
-  }
-
-  return client_state_checker_remote;
-}
-
-// static
-storage::mojom::IndexedDBClientStateChecker*
-IndexedDBClientStateCheckerFactory::
-    GetOrCreateIndexedDBClientStateCheckerForTesting(
-        const GlobalRenderFrameHostId& rfh_id) {
-  CHECK_NE(rfh_id.frame_routing_id, MSG_ROUTING_NONE)
-      << "RFH id should be valid when testing";
-  return DocumentIndexedDBClientStateChecker::GetOrCreateForCurrentDocument(
-      RenderFrameHost::FromID(rfh_id));
+DisallowInactiveClientCallback
+IndexedDBClientStateCheckerFactory::GetClientStateCheckerCallback() {
+  return base::BindRepeating(
+      [](int32_t process_id, blink::DocumentToken document_token,
+         DisallowInactiveClientReason reason,
+         DisallowInactiveClientResponseCallback callback) {
+        GetUIThreadTaskRunner({})->PostTaskAndReplyWithResult(
+            FROM_HERE,
+            base::BindOnce(
+                [](int32_t process_id, blink::DocumentToken document_token,
+                   DisallowInactiveClientReason reason)
+                    -> std::tuple<bool, ScopedKeepActive> {
+                  RenderFrameHost* rfh = RenderFrameHostImpl::FromDocumentToken(
+                      process_id, document_token);
+                  if (!rfh) {
+                    return {false, CreateNullScopedKeepActive()};
+                  }
+                  return DocumentIndexedDBClientStateChecker::
+                      GetOrCreateForCurrentDocument(rfh)
+                          ->DisallowInactiveClient(reason);
+                },
+                process_id, document_token, reason),
+            std::move(callback));
+      });
 }
 
 }  // namespace content

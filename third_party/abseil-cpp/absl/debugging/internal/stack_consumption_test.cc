@@ -15,12 +15,14 @@
 
 #include "absl/debugging/internal/stack_consumption.h"
 
+#include "absl/base/config.h"
+
 #ifdef ABSL_INTERNAL_HAVE_DEBUGGING_STACK_CONSUMPTION
 
 #include <string.h>
 
 #include "gtest/gtest.h"
-#include "absl/base/internal/raw_logging.h"
+#include "absl/log/log.h"
 
 namespace absl {
 ABSL_NAMESPACE_BEGIN
@@ -33,7 +35,7 @@ static void SimpleSignalHandler(int signo) {
 
   // Never true, but prevents compiler from optimizing buf out.
   if (signo == 0) {
-    ABSL_RAW_LOG(INFO, "%p", static_cast<void*>(buf));
+    LOG(INFO) << static_cast<void*>(buf);
   }
 }
 

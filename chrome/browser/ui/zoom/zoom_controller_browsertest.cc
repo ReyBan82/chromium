@@ -4,6 +4,7 @@
 
 #include "components/zoom/zoom_controller.h"
 
+#include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
 #include "base/process/kill.h"
 #include "base/scoped_observation.h"
@@ -11,13 +12,13 @@
 #include "build/build_config.h"
 #include "chrome/app/chrome_command_ids.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/tabs/tab_enums.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/browser/ui/webui/signin/login_ui_test_utils.h"
 #include "chrome/browser/ui/zoom/chrome_zoom_level_prefs.h"
 #include "chrome/common/url_constants.h"
+#include "chrome/common/webui_url_constants.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/prefs/pref_service.h"
@@ -25,6 +26,7 @@
 #include "components/zoom/zoom_observer.h"
 #include "content/public/browser/disallow_activation_reason.h"
 #include "content/public/browser/host_zoom_map.h"
+#include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
@@ -37,6 +39,7 @@
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
 #include "testing/gmock/include/gmock/gmock.h"
+#include "ui/base/window_open_disposition.h"
 
 using zoom::ZoomChangedWatcher;
 using zoom::ZoomController;
@@ -44,8 +47,8 @@ using zoom::ZoomObserver;
 
 class ZoomControllerBrowserTest : public InProcessBrowserTest {
  public:
-  ZoomControllerBrowserTest() {}
-  ~ZoomControllerBrowserTest() override {}
+  ZoomControllerBrowserTest() = default;
+  ~ZoomControllerBrowserTest() override = default;
 
   void SetUpOnMainThread() override {
     InProcessBrowserTest::SetUpOnMainThread();
@@ -69,8 +72,8 @@ class ZoomControllerBrowserTest : public InProcessBrowserTest {
     // ZOOM_MODE_DEFAULT, and this will be reflected in the event that
     // is generated.
     ZoomController::ZoomChangedEventData zoom_change_data(
-        web_contents, zoom_level, zoom_level, ZoomController::ZOOM_MODE_DEFAULT,
-        false);
+        web_contents, web_contents->GetPrimaryMainFrame()->GetFrameTreeNodeId(),
+        zoom_level, zoom_level, ZoomController::ZOOM_MODE_DEFAULT, false);
     ZoomChangedWatcher zoom_change_watcher(web_contents, zoom_change_data);
 
     ASSERT_TRUE(ui_test_utils::NavigateToURL(
@@ -119,15 +122,13 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest, OnPreferenceChanged) {
   // Since this page uses the default zoom level, the changes to the default
   // zoom level will change the zoom level for this web_contents.
   ZoomController::ZoomChangedEventData zoom_change_data(
-      web_contents,
-      new_default_zoom_level,
-      new_default_zoom_level,
-      ZoomController::ZOOM_MODE_DEFAULT,
-      false);
+      web_contents, web_contents->GetPrimaryMainFrame()->GetFrameTreeNodeId(),
+      new_default_zoom_level, new_default_zoom_level,
+      ZoomController::ZOOM_MODE_DEFAULT, false);
   ZoomChangedWatcher zoom_change_watcher(web_contents, zoom_change_data);
   // TODO(wjmaclean): Convert this to call partition-specific zoom level prefs
   // when they become available.
-  browser()->profile()->GetZoomLevelPrefs()->SetDefaultZoomLevelPref(
+  browser()->GetProfile()->GetZoomLevelPrefs()->SetDefaultZoomLevelPref(
       new_default_zoom_level);
   // Because this test relies on a round-trip IPC to/from the renderer process,
   // we need to wait for it to propagate.
@@ -145,6 +146,8 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest, ErrorPagesCanZoom) {
   EXPECT_EQ(
       content::PAGE_TYPE_ERROR,
       web_contents->GetController().GetLastCommittedEntry()->GetPageType());
+  EXPECT_EQ(GURL(content::kUnreachableWebDataURL),
+            content::HostZoomMap::GetURLForWebContents(web_contents));
 
   double old_zoom_level = zoom_controller->GetZoomLevel();
   double new_zoom_level = old_zoom_level + 0.5;
@@ -214,10 +217,8 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest, Observe) {
   // When the event is initiated from HostZoomMap, the old zoom level is not
   // available.
   ZoomController::ZoomChangedEventData zoom_change_data(
-      web_contents,
-      new_zoom_level,
-      new_zoom_level,
-      ZoomController::ZOOM_MODE_DEFAULT,
+      web_contents, web_contents->GetPrimaryMainFrame()->GetFrameTreeNodeId(),
+      new_zoom_level, new_zoom_level, ZoomController::ZOOM_MODE_DEFAULT,
       false);  // The ZoomController did not initiate, so this will be 'false'.
   ZoomChangedWatcher zoom_change_watcher(web_contents, zoom_change_data);
 
@@ -241,10 +242,8 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest, ObserveDisabledModeEvent) {
   zoom_controller->SetZoomLevel(new_zoom_level);
 
   ZoomController::ZoomChangedEventData zoom_change_data(
-      web_contents,
-      new_zoom_level,
-      default_zoom_level,
-      ZoomController::ZOOM_MODE_DISABLED,
+      web_contents, web_contents->GetPrimaryMainFrame()->GetFrameTreeNodeId(),
+      new_zoom_level, default_zoom_level, ZoomController::ZOOM_MODE_DISABLED,
       true);
   ZoomChangedWatcher zoom_change_watcher(web_contents, zoom_change_data);
   zoom_controller->SetZoomMode(ZoomController::ZOOM_MODE_DISABLED);
@@ -255,7 +254,7 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest, PerTabModeResetSendsEvent) {
   TestResetOnNavigation(ZoomController::ZOOM_MODE_ISOLATED);
 }
 
-// Regression test: crbug.com/450909.
+// Regression test: crbug.com/40402157.
 IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest, NavigationResetsManualMode) {
   TestResetOnNavigation(ZoomController::ZOOM_MODE_MANUAL);
 }
@@ -314,8 +313,8 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest,
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url_b));
 
   // If the previous page was bfcached, evict it, in order to test the
-  // conditions that were the cause of https://crbug.com/1264958 (the page scale
-  // needs to apply to a new RenderFrameHost).
+  // conditions that were the cause of https://crbug.com/40203602 (the page
+  // scale needs to apply to a new RenderFrameHost).
   if (rfh_a) {
     ASSERT_TRUE(rfh_a->IsInactiveAndDisallowActivation(
         content::DisallowActivationReasonId::kForTesting));
@@ -340,29 +339,23 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest,
 }
 #endif  // !BUILDFLAG(IS_MAC)
 
-// TODO(https://crbug.com/1260291): Add support for Lacros.
 #if !BUILDFLAG(IS_CHROMEOS)
-// Regression test: crbug.com/438979.
+// Regression test: crbug.com/40396772.
 IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest,
-                       SettingsZoomAfterSigninWorks) {
-  GURL signin_url(std::string(chrome::kChromeUIChromeSigninURL)
-                      .append("?access_point=0&reason=5"));
-  // We open the signin page in a new tab so that the ZoomController is
-  // created against the HostZoomMap of the special StoragePartition that
-  // backs the signin page. When we subsequently navigate away from the
-  // signin page, the HostZoomMap changes, and we need to test that the
-  // ZoomController correctly detects this.
+                       SettingsZoomAfterLoadingWorks) {
+  GURL url = GURL("chrome://newtab");
+  // When we navigate away from the NTP, the HostZoomMap changes, and we need to
+  // test that the ZoomController correctly detects this.
   ui_test_utils::NavigateToURLWithDisposition(
-      browser(), signin_url, WindowOpenDisposition::NEW_FOREGROUND_TAB,
+      browser(), url, WindowOpenDisposition::NEW_FOREGROUND_TAB,
       ui_test_utils::BROWSER_TEST_WAIT_FOR_LOAD_STOP);
-  login_ui_test_utils::WaitUntilUIReady(browser());
   content::WebContents* web_contents =
       browser()->tab_strip_model()->GetActiveWebContents();
   EXPECT_NE(
       content::PAGE_TYPE_ERROR,
       web_contents->GetController().GetLastCommittedEntry()->GetPageType());
 
-  EXPECT_EQ(signin_url, web_contents->GetLastCommittedURL());
+  EXPECT_EQ(url, web_contents->GetLastCommittedURL());
   ZoomController* zoom_controller =
       ZoomController::FromWebContents(web_contents);
 
@@ -386,10 +379,8 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest,
   double new_zoom_level = old_zoom_level + 0.5;
 
   ZoomController::ZoomChangedEventData zoom_change_data(
-      web_contents,
-      old_zoom_level,
-      new_zoom_level,
-      ZoomController::ZOOM_MODE_DEFAULT,
+      web_contents, web_contents->GetPrimaryMainFrame()->GetFrameTreeNodeId(),
+      old_zoom_level, new_zoom_level, ZoomController::ZOOM_MODE_DEFAULT,
       true);  // We have a non-empty host, so this will be 'true'.
   ZoomChangedWatcher zoom_change_watcher(web_contents, zoom_change_data);
   zoom_controller->SetZoomLevel(new_zoom_level);
@@ -407,7 +398,7 @@ class ZoomControllerForPrerenderingTest : public ZoomControllerBrowserTest,
   ~ZoomControllerForPrerenderingTest() override = default;
 
   void SetUp() override {
-    prerender_helper_.SetUp(embedded_test_server());
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
     ZoomControllerBrowserTest::SetUp();
   }
 
@@ -460,7 +451,8 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerForPrerenderingTest,
   // the prerendering.
   reset_is_on_zoom_changed_called();
 
-  int host_id = prerender_helper().AddPrerender(prerender_url);
+  content::PrerenderHostId host_id =
+      prerender_helper().AddPrerender(prerender_url);
   content::test::PrerenderHostObserver host_observer(*GetWebContents(),
                                                      host_id);
 
@@ -476,4 +468,88 @@ IN_PROC_BROWSER_TEST_F(ZoomControllerForPrerenderingTest,
   EXPECT_TRUE(host_observer.was_activated());
   // OnZoomChanged should be called after the prerendered page was activated.
   EXPECT_TRUE(is_on_zoom_changed_called());
+}
+
+IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest,
+                       TopChromeWebUIResetsZoomModeOnNavigation) {
+  content::WebContents* web_contents =
+      browser()->tab_strip_model()->GetActiveWebContents();
+  ZoomController* zoom_controller =
+      ZoomController::FromWebContents(web_contents);
+
+  // Initially, zoom mode should be DEFAULT.
+  EXPECT_EQ(ZoomController::ZOOM_MODE_DEFAULT, zoom_controller->zoom_mode());
+
+  // Navigate to a TopChrome WebUI page.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GURL(chrome::kChromeUITabSearchURL)));
+
+  // Zoom mode should now be DISABLED because TopChromeWebUIController disables
+  // it.
+  EXPECT_EQ(ZoomController::ZOOM_MODE_DISABLED, zoom_controller->zoom_mode());
+
+  // Keep track of the TopChrome RenderFrameHost.
+  content::RenderFrameHost* top_chrome_rfh =
+      web_contents->GetPrimaryMainFrame();
+  content::RenderFrameDeletedObserver deleted_observer(top_chrome_rfh);
+
+  // Navigate away to a standard page (e.g., about:blank).
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GURL("about:blank")));
+
+  // Wait for the old TopChrome RenderFrameHost (and its controller/lock) to be
+  // destroyed.
+  deleted_observer.WaitUntilDeleted();
+
+  // Zoom mode should be reset to DEFAULT.
+  EXPECT_EQ(ZoomController::ZOOM_MODE_DEFAULT, zoom_controller->zoom_mode());
+}
+
+IN_PROC_BROWSER_TEST_F(ZoomControllerBrowserTest,
+                       TopChromeWebUIToTopChromeWebUINavigation) {
+  content::WebContents* web_contents =
+      browser()->tab_strip_model()->GetActiveWebContents();
+  ZoomController* zoom_controller =
+      ZoomController::FromWebContents(web_contents);
+
+  // Initially, zoom mode should be DEFAULT.
+  EXPECT_EQ(ZoomController::ZOOM_MODE_DEFAULT, zoom_controller->zoom_mode());
+
+  // Navigate to a TopChrome WebUI page.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GURL(chrome::kChromeUITabSearchURL)));
+
+  // Zoom mode should now be DISABLED.
+  EXPECT_EQ(ZoomController::ZOOM_MODE_DISABLED, zoom_controller->zoom_mode());
+
+  // Set up observer to wait for the old RFH (Tab Search) to be deleted.
+  content::RenderFrameHost* old_rfh = web_contents->GetPrimaryMainFrame();
+  content::RenderFrameDeletedObserver delete_observer(old_rfh);
+
+  // Navigate directly to another TopChrome WebUI page.
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(
+      browser(), GURL(chrome::kChromeUICustomizeChromeSidePanelURL)));
+
+  // Wait for the old Tab Search RFH to be destroyed, ensuring its destructor
+  // has run.
+  delete_observer.WaitUntilDeleted();
+
+  // Zoom mode should STILL be DISABLED because the new page is also TopChrome.
+  EXPECT_EQ(ZoomController::ZOOM_MODE_DISABLED, zoom_controller->zoom_mode());
+
+  // Set up watcher to wait for zoom mode to become DEFAULT.
+  ZoomChangedWatcher watcher(
+      web_contents,
+      base::BindRepeating([](const ZoomController::ZoomChangedEventData& data) {
+        return data.zoom_mode == ZoomController::ZOOM_MODE_DEFAULT;
+      }));
+
+  // Navigate away to a standard page (e.g., about:blank).
+  ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GURL("about:blank")));
+
+  // Wait for the zoom mode to be reset asynchronously by CustomizeChrome's
+  // destructor.
+  watcher.Wait();
+
+  // Zoom mode should now be reset to DEFAULT.
+  EXPECT_EQ(ZoomController::ZOOM_MODE_DEFAULT, zoom_controller->zoom_mode());
 }

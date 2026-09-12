@@ -6,40 +6,61 @@
 
 #include <string>
 
+#include "base/containers/span.h"
+#include "base/dcheck_is_on.h"
+#include "base/debug/crash_logging.h"
+#include "base/functional/callback.h"
+#include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/strings/stringprintf.h"
 #include "build/build_config.h"
 #include "mojo/public/cpp/bindings/lib/validation_context.h"
 #include "mojo/public/cpp/bindings/message.h"
 
-#if !BUILDFLAG(IS_NACL)
-#include "base/debug/crash_logging.h"
-#include "base/strings/strcat.h"
-#include "base/strings/string_number_conversions.h"
-#endif  // !BUILDFLAG(IS_NACL)
-
 namespace mojo {
 namespace internal {
 namespace {
 
-ValidationErrorObserverForTesting* g_validation_error_observer = nullptr;
-SerializationWarningObserverForTesting* g_serialization_warning_observer =
+std::string ArrayExpectedSizeErrorToString(
+    const ArrayExpectedSizeError& details) {
+  return base::StringPrintf("%s: array size - %zu; expected size - %zu",
+                            details.message, details.size,
+                            details.expected_size);
+}
+
+std::string ArrayIndexErrorToString(const ArrayIndexError& details) {
+  return base::StringPrintf("%s: array size - %zu; index - %zu",
+                            details.message, details.size, details.index);
+}
+
+base::RepeatingCallback<void(ValidationError)>* g_validation_error_callback =
     nullptr;
+base::RepeatingCallback<void(ValidationError, SendValidation)>*
+    g_serialization_warning_callback = nullptr;
 bool g_suppress_logging = false;
 
-#if !BUILDFLAG(IS_NACL)
 std::string MessageHeaderAsHexString(Message* message) {
   if (!message) {
     return "<null>";
   }
   if (message->data_num_bytes() < sizeof(*message->header())) {
     return base::StrCat(
-        {"<incomplete>",
-         base::HexEncode(message->data(), message->data_num_bytes())});
+        {"<incomplete>", base::HexEncode(message->data_as_span())});
   }
-  return base::HexEncode(message->header(), sizeof(*message->header()));
+  return base::HexEncode(base::byte_span_from_ref(*message->header()));
 }
-#endif  // !BUILDFLAG(IS_NACL)
+
+bool ReportSerializationWarning(ValidationError error,
+                                SendValidation validation_type) {
+  if (g_serialization_warning_callback) {
+    (*g_serialization_warning_callback).Run(error, validation_type);
+    return true;
+  }
+
+  return false;
+}
 
 }  // namespace
 
@@ -91,13 +112,11 @@ const char* ValidationErrorToString(ValidationError error) {
 void ReportValidationError(ValidationContext* context,
                            ValidationError error,
                            const char* description) {
-#if !BUILDFLAG(IS_NACL)
   SCOPED_CRASH_KEY_STRING64("mojo-message", "header-bytes",
                             MessageHeaderAsHexString(context->message()));
-#endif  // !BUILDFLAG(IS_NACL)
 
-  if (g_validation_error_observer) {
-    g_validation_error_observer->set_last_error(error);
+  if (g_validation_error_callback) {
+    (*g_validation_error_callback).Run(error);
     return;
   }
 
@@ -113,8 +132,9 @@ void ReportValidationError(ValidationContext* context,
                              ValidationErrorToString(error), description));
     }
   } else {
-    if (!g_suppress_logging)
+    if (!g_suppress_logging) {
       LOG(ERROR) << "Invalid message: " << ValidationErrorToString(error);
+    }
     if (context->message()) {
       context->message()->NotifyBadMessage(
           base::StringPrintf("Validation failed for %s [%s]",
@@ -122,6 +142,20 @@ void ReportValidationError(ValidationContext* context,
                              ValidationErrorToString(error)));
     }
   }
+}
+
+void ReportValidationError(ValidationContext* context,
+                           ValidationError error,
+                           const ArrayIndexError& details) {
+  ReportValidationError(context, error,
+                        ArrayIndexErrorToString(details).c_str());
+}
+
+void ReportValidationError(ValidationContext* context,
+                           ValidationError error,
+                           const ArrayExpectedSizeError& error_info) {
+  ReportValidationError(context, error,
+                        ArrayExpectedSizeErrorToString(error_info).c_str());
 }
 
 void ReportValidationErrorForMessage(mojo::Message* message,
@@ -137,53 +171,66 @@ void ReportValidationErrorForMessage(mojo::Message* message,
   ReportValidationError(&validation_context, error);
 }
 
-ScopedSuppressValidationErrorLoggingForTests
-    ::ScopedSuppressValidationErrorLoggingForTests()
-    : was_suppressed_(g_suppress_logging) {
-  g_suppress_logging = true;
+bool GetIsValidationErrorLoggingSuppressedForTesting() {
+  return g_suppress_logging;
 }
 
-ScopedSuppressValidationErrorLoggingForTests
-    ::~ScopedSuppressValidationErrorLoggingForTests() {
-  g_suppress_logging = was_suppressed_;
+void SetIsValidationErrorLoggingSuppressedForTesting(bool suppress_logging) {
+  g_suppress_logging = suppress_logging;
 }
 
-ValidationErrorObserverForTesting::ValidationErrorObserverForTesting(
-    base::RepeatingClosure callback)
-    : last_error_(VALIDATION_ERROR_NONE), callback_(std::move(callback)) {
-  DCHECK(!g_validation_error_observer);
-  g_validation_error_observer = this;
+void SetSerializationWarningCallbackForTesting(
+    base::RepeatingCallback<void(ValidationError, SendValidation)>* callback) {
+  g_serialization_warning_callback = callback;
 }
 
-ValidationErrorObserverForTesting::~ValidationErrorObserverForTesting() {
-  DCHECK(g_validation_error_observer == this);
-  g_validation_error_observer = nullptr;
+void SetValidationErrorCallbackForTesting(
+    base::RepeatingCallback<void(ValidationError)>* callback) {
+  g_validation_error_callback = callback;
 }
 
-bool ReportSerializationWarning(ValidationError error) {
-  if (g_serialization_warning_observer) {
-    g_serialization_warning_observer->set_last_warning(error);
-    return true;
+void HandleSerializationError(ValidationError error, const char* description) {
+  if (ReportSerializationWarning(error, SendValidation::kFatal)) {
+    return;
   }
-
-  return false;
+  CHECK(false) << "The outgoing message will trigger "
+               << ValidationErrorToString(error) << " at the receiving side ("
+               << description << ").";
 }
 
-SerializationWarningObserverForTesting::SerializationWarningObserverForTesting()
-    : last_warning_(VALIDATION_ERROR_NONE) {
-  DCHECK(!g_serialization_warning_observer);
-  g_serialization_warning_observer = this;
+void HandleSerializationError(ValidationError error,
+                              const ArrayIndexError& details) {
+  HandleSerializationError(error, ArrayIndexErrorToString(details).c_str());
 }
 
-SerializationWarningObserverForTesting::
-    ~SerializationWarningObserverForTesting() {
-  DCHECK(g_serialization_warning_observer == this);
-  g_serialization_warning_observer = nullptr;
+void HandleSerializationError(ValidationError error,
+                              const ArrayExpectedSizeError& details) {
+  HandleSerializationError(error,
+                           ArrayExpectedSizeErrorToString(details).c_str());
 }
 
-void RecordInvalidStringDeserialization() {
-  base::UmaHistogramBoolean("Mojo.InvalidUTF8String", false);
+#if DCHECK_IS_ON()
+void HandleSerializationWarning(ValidationError error,
+                                const char* description) {
+  if (ReportSerializationWarning(error, SendValidation::kWarning)) {
+    return;
+  }
+  DLOG(FATAL) << "The outgoing message will trigger "
+              << ValidationErrorToString(error) << " at the receiving side ("
+              << description << ").";
 }
+
+void HandleSerializationWarning(ValidationError error,
+                                const ArrayIndexError& details) {
+  HandleSerializationWarning(error, ArrayIndexErrorToString(details).c_str());
+}
+
+void HandleSerializationWarning(ValidationError error,
+                                const ArrayExpectedSizeError& details) {
+  HandleSerializationWarning(error,
+                             ArrayExpectedSizeErrorToString(details).c_str());
+}
+#endif
 
 }  // namespace internal
 }  // namespace mojo

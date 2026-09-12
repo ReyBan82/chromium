@@ -16,13 +16,6 @@ namespace dom_distiller {
 // A utility class for logging UMA metrics.
 class UMAHelper {
  public:
-  // Must agree with ReaderModeEntryPoint in enums.xml.
-  enum class ReaderModeEntryPoint {
-    kOmniboxIcon = 0,
-    kMenuOption = 1,
-    kMaxValue = kMenuOption,
-  };
-
   // A page can be distillable (an article), distilled (a reader mode
   // page), or neither (some other webpage).
   enum class ReaderModePageType {
@@ -38,14 +31,7 @@ class UMAHelper {
    public:
     DistillabilityDriverTimer() = default;
 
-    ~DistillabilityDriverTimer() {
-      // The timer has the same life as a DistillabilityDriver, which is
-      // destroyed when a WebContents is destroyed. Thus if we are being
-      // destroyed and on a distilled page, go ahead and log the total time to
-      // UMA. This may happen if the user closes the tab or window, for example.
-      if (IsTimingDistilledPage())
-        UMAHelper::LogTimeOnDistilledPage(GetElapsedTime());
-    }
+    ~DistillabilityDriverTimer() = default;
 
     // Starts if not already started.
     void Start(bool is_distilled_page);
@@ -58,9 +44,6 @@ class UMAHelper {
     // Returns true if the timer is not zeroed, whether it is paused or
     // currently running.
     bool HasStarted();
-    // If the timer is not zeroed and the timer is associated with a distilled
-    // page.
-    bool IsTimingDistilledPage();
     // The amount of active time so far.
     base::TimeDelta GetElapsedTime();
 
@@ -69,9 +52,6 @@ class UMAHelper {
     base::Time active_time_start_;
     bool is_distilled_page_ = false;
   };
-
-  static void RecordReaderModeEntry(ReaderModeEntryPoint entry_point);
-  static void RecordReaderModeExit(ReaderModeEntryPoint exit_point);
 
   // Timers at the old contents may need to be stopped / paused.
   static void UpdateTimersOnContentsChange(content::WebContents* web_contents,
@@ -82,11 +62,6 @@ class UMAHelper {
   // Timers may need to be paused on navigation.
   static void UpdateTimersOnNavigation(content::WebContents* web_contents,
                                        ReaderModePageType page_type);
-
-  // Logs the time spent on a distillable page. Should be called just before
-  // when switching to a distilled page. We are only interested in time on
-  // distillable pages when the user then decides to distill the article.
-  static void LogTimeOnDistillablePage(content::WebContents* web_contents);
 
   // Logs the time spent on a distilled (reader mode) page. Should be called
   // when leaving a distilled page, i.e. if the tab is closed or if the user

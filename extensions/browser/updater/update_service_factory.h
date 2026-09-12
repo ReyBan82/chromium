@@ -5,7 +5,9 @@
 #ifndef EXTENSIONS_BROWSER_UPDATER_UPDATE_SERVICE_FACTORY_H_
 #define EXTENSIONS_BROWSER_UPDATER_UPDATE_SERVICE_FACTORY_H_
 
-#include "base/memory/singleton.h"
+#include <memory>
+
+#include "base/no_destructor.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 
 namespace extensions {
@@ -23,13 +25,15 @@ class UpdateServiceFactory : public BrowserContextKeyedServiceFactory {
   static UpdateServiceFactory* GetInstance();
 
  private:
-  friend struct base::DefaultSingletonTraits<UpdateServiceFactory>;
+  friend base::NoDestructor<UpdateServiceFactory>;
 
   UpdateServiceFactory();
   ~UpdateServiceFactory() override;
 
   // BrowserContextKeyedServiceFactory:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
+      content::BrowserContext* context) const override;
+  content::BrowserContext* GetBrowserContextToUse(
       content::BrowserContext* context) const override;
 };
 

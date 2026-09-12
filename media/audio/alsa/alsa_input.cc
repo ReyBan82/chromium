@@ -6,6 +6,8 @@
 
 #include <stddef.h>
 
+#include <array>
+
 #include "base/functional/bind.h"
 #include "base/location.h"
 #include "base/logging.h"
@@ -15,16 +17,18 @@
 #include "media/audio/alsa/alsa_wrapper.h"
 #include "media/audio/alsa/audio_manager_alsa.h"
 #include "media/audio/audio_manager.h"
+#include "media/base/audio_bus.h"
+#include "media/base/audio_sample_types.h"
+#include "media/base/audio_timestamp_helper.h"
 
 namespace media {
 
-static const SampleFormat kSampleFormat = kSampleFormatS16;
-static const snd_pcm_format_t kAlsaSampleFormat = SND_PCM_FORMAT_S16;
+constexpr snd_pcm_format_t kAlsaSampleFormat = SND_PCM_FORMAT_S16;
 
-static const int kNumPacketsInRingBuffer = 3;
+static constexpr int kNumPacketsInRingBuffer = 3;
 
-static const char kDefaultDevice1[] = "default";
-static const char kDefaultDevice2[] = "plug:default";
+static constexpr auto kDefaultDeviceNames =
+    std::to_array<const char*>({"default", "plug:default"});
 
 const char AlsaPcmInputStream::kAutoSelectDevice[] = "";
 
@@ -32,22 +36,17 @@ AlsaPcmInputStream::AlsaPcmInputStream(AudioManagerBase* audio_manager,
                                        const std::string& device_name,
                                        const AudioParameters& params,
                                        AlsaWrapper* wrapper)
-    : audio_manager_(audio_manager),
+    : audio_manager_(*audio_manager),
       device_name_(device_name),
       params_(params),
-      bytes_per_buffer_(params.GetBytesPerBuffer(kSampleFormat)),
+      total_samples_per_buffer_(params_.frames_per_buffer() *
+                                params_.channels()),
       wrapper_(wrapper),
-      buffer_duration_(base::Microseconds(
-          params.frames_per_buffer() * base::Time::kMicrosecondsPerSecond /
-          static_cast<float>(params.sample_rate()))),
-      callback_(nullptr),
-      device_handle_(nullptr),
-      mixer_handle_(nullptr),
-      mixer_element_handle_(nullptr),
-      read_callback_behind_schedule_(false),
+      buffer_duration_(
+          AudioTimestampHelper::FramesToTime(params.frames_per_buffer(),
+                                             params.sample_rate())),
       audio_bus_(AudioBus::Create(params)),
-      capture_thread_("AlsaInput"),
-      running_(false) {}
+      capture_thread_("AlsaInput") {}
 
 AlsaPcmInputStream::~AlsaPcmInputStream() = default;
 
@@ -62,14 +61,13 @@ AudioInputStream::OpenOutcome AlsaPcmInputStream::Open() {
   buffer_us = std::max(buffer_us, AlsaPcmOutputStream::kMinLatencyMicros);
 
   if (device_name_ == kAutoSelectDevice) {
-    const char* device_names[] = { kDefaultDevice1, kDefaultDevice2 };
-    for (size_t i = 0; i < std::size(device_names); ++i) {
+    for (const auto* device_name : kDefaultDeviceNames) {
       device_handle_ = alsa_util::OpenCaptureDevice(
-          wrapper_, device_names[i], params_.channels(), params_.sample_rate(),
+          wrapper_, device_name, params_.channels(), params_.sample_rate(),
           kAlsaSampleFormat, buffer_us, packet_us);
 
       if (device_handle_) {
-        device_name_ = device_names[i];
+        device_name_ = device_name;
         break;
       }
     }
@@ -80,7 +78,7 @@ AudioInputStream::OpenOutcome AlsaPcmInputStream::Open() {
   }
 
   if (device_handle_) {
-    audio_buffer_.reset(new uint8_t[bytes_per_buffer_]);
+    audio_buffer_ = base::HeapArray<int16_t>::Uninit(total_samples_per_buffer_);
 
     // Open the microphone mixer.
     mixer_handle_ = alsa_util::OpenMixer(wrapper_, device_name_);
@@ -100,11 +98,11 @@ void AlsaPcmInputStream::Start(AudioInputCallback* callback) {
   StartAgc();
   int error = wrapper_->PcmPrepare(device_handle_);
   if (error < 0) {
-    HandleError("PcmPrepare", error);
+    HandleError("PcmPrepare", error, Error::kStartupFailed);
   } else {
     error = wrapper_->PcmStart(device_handle_);
     if (error < 0)
-      HandleError("PcmStart", error);
+      HandleError("PcmStart", error, Error::kStartupFailed);
   }
 
   if (error < 0) {
@@ -144,7 +142,7 @@ bool AlsaPcmInputStream::Recover(int original_error) {
     // data flowing again.
     error = wrapper_->PcmStart(device_handle_);
     if (error < 0) {
-      HandleError("PcmStart", error);
+      HandleError("PcmStart", error, Error::kRuntimeError);
       return false;
     }
   }
@@ -203,12 +201,10 @@ void AlsaPcmInputStream::ReadAudio() {
 
   int num_buffers = frames / params_.frames_per_buffer();
   while (num_buffers--) {
-    int frames_read = wrapper_->PcmReadi(device_handle_, audio_buffer_.get(),
+    int frames_read = wrapper_->PcmReadi(device_handle_, audio_buffer_.data(),
                                          params_.frames_per_buffer());
     if (frames_read == params_.frames_per_buffer()) {
-      audio_bus_->FromInterleaved<SignedInt16SampleTypeTraits>(
-          reinterpret_cast<int16_t*>(audio_buffer_.get()),
-          audio_bus_->frames());
+      audio_bus_->FromInterleaved<SignedInt16SampleTypeTraits>(audio_buffer_);
 
       // TODO(dalecurtis): This should probably use snd_pcm_htimestamp() so that
       // we can have |capture_time| directly instead of computing it as
@@ -219,12 +215,12 @@ void AlsaPcmInputStream::ReadAudio() {
                      << wrapper_->StrError(avail_frames);
         avail_frames = 0;  // Error getting number of avail frames, set it to 0
       }
-      base::TimeDelta hardware_delay = base::Seconds(
-          avail_frames / static_cast<double>(params_.sample_rate()));
+      base::TimeDelta hardware_delay = AudioTimestampHelper::FramesToTime(
+          avail_frames, params_.sample_rate());
 
       callback_->OnData(audio_bus_.get(),
                         base::TimeTicks::Now() - hardware_delay,
-                        normalized_volume);
+                        normalized_volume, {});
     } else if (frames_read < 0) {
       bool success = Recover(frames_read);
       LOG(WARNING) << "PcmReadi failed with error "
@@ -265,8 +261,9 @@ void AlsaPcmInputStream::Stop() {
   StopRunningOnCaptureThread();
   capture_thread_.Stop();
   int error = wrapper_->PcmDrop(device_handle_);
-  if (error < 0)
-    HandleError("PcmDrop", error);
+  if (error < 0) {
+    HandleError("PcmDrop", error, Error::kRuntimeError);
+  }
 
   callback_ = nullptr;
 }
@@ -274,17 +271,19 @@ void AlsaPcmInputStream::Stop() {
 void AlsaPcmInputStream::Close() {
   if (device_handle_) {
     Stop();
-    int error = alsa_util::CloseDevice(wrapper_, device_handle_);
-    if (error < 0)
-      HandleError("PcmClose", error);
+    int error =
+        alsa_util::CloseDevice(wrapper_, device_handle_.ExtractAsDangling());
 
-    if (mixer_handle_)
-      alsa_util::CloseMixer(wrapper_, mixer_handle_, device_name_);
+    if (error < 0) {
+      HandleError("PcmClose", error, Error::kRuntimeError);
+    }
 
-    audio_buffer_.reset();
-    device_handle_ = nullptr;
-    mixer_handle_ = nullptr;
     mixer_element_handle_ = nullptr;
+
+    if (mixer_handle_) {
+      alsa_util::CloseMixer(wrapper_, mixer_handle_.ExtractAsDangling(),
+                            device_name_);
+    }
   }
 
   audio_manager_->ReleaseInputStream(this);
@@ -362,10 +361,12 @@ void AlsaPcmInputStream::SetOutputDeviceForAec(
   // Not supported. Do nothing.
 }
 
-void AlsaPcmInputStream::HandleError(const char* method, int error) {
+void AlsaPcmInputStream::HandleError(const char* method,
+                                     int error,
+                                     Error error_code) {
   LOG(WARNING) << method << ": " << wrapper_->StrError(error);
   if (callback_)
-    callback_->OnError();
+    callback_->OnError(error_code);
 }
 
 }  // namespace media

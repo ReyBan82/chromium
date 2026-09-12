@@ -5,6 +5,7 @@
 #include "ash/public/cpp/shell_window_ids.h"
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
+#include "base/memory/raw_ptr.h"
 #include "ui/aura/test/test_windows.h"
 #include "ui/aura/window_observer.h"
 
@@ -23,11 +24,13 @@ class WindowDeleter : public aura::WindowObserver {
                              const gfx::Rect& old_bounds,
                              const gfx::Rect& new_bounds,
                              ui::PropertyChangeReason reason) override {
-    delete target_;
+    aura::Window* window_ = target_.get();
+    target_ = nullptr;
+    delete window_;
   }
 
  private:
-  aura::Window* target_;
+  raw_ptr<aura::Window> target_;
 };
 
 }  // namespace
@@ -37,8 +40,14 @@ using RootWindowLayoutManagerTest = AshTestBase;
 TEST_F(RootWindowLayoutManagerTest, DeleteChildDuringResize) {
   aura::Window* parent = Shell::GetPrimaryRootWindow()->GetChildById(
       kShellWindowId_WallpaperContainer);
-  aura::Window* w1 = aura::test::CreateTestWindowWithId(1, parent);
-  aura::Window* w2 = aura::test::CreateTestWindowWithId(2, parent);
+  aura::Window* w1 =
+      aura::test::CreateTestWindow(
+          {.parent = parent, .bounds = {100, 100}, .window_id = 1})
+          .release();
+  aura::Window* w2 =
+      aura::test::CreateTestWindow(
+          {.parent = parent, .bounds = {100, 100}, .window_id = 2})
+          .release();
   WindowDeleter deleter(w1);
   w2->AddObserver(&deleter);
   UpdateDisplay("600x500");

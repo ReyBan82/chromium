@@ -13,6 +13,8 @@
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr.h"
+#include "base/observer_list.h"
 #include "base/strings/stringprintf.h"
 #include "chromeos/ash/components/dbus/biod/constants.pb.h"
 #include "chromeos/ash/components/dbus/biod/fake_biod_client.h"
@@ -278,15 +280,20 @@ class BiodClientImpl : public BiodClient {
   void OnGetRecordsForUser(UserRecordsCallback callback,
                            dbus::Response* response) {
     std::vector<dbus::ObjectPath> result;
+    bool success = false;
     if (response) {
-      dbus::MessageReader reader(response);
-      if (!reader.PopArrayOfObjectPaths(&result)) {
+      success = response->GetMessageType() ==
+                dbus::Message::MessageType::MESSAGE_METHOD_RETURN;
+      if (!success) {
         LOG(ERROR) << biod::kBiometricsManagerGetRecordsForUserMethod
-                   << " had incorrect response.";
+                   << " had error response.";
+      } else if (response) {
+        dbus::MessageReader reader(response);
+        reader.PopArrayOfObjectPaths(&result);
       }
     }
 
-    std::move(callback).Run(result);
+    std::move(callback).Run(result, success);
   }
 
   void OnStartAuthSession(chromeos::ObjectPathCallback callback,
@@ -429,9 +436,9 @@ class BiodClientImpl : public BiodClient {
       observer.BiodSessionFailedReceived();
   }
 
-  dbus::Bus* bus_ = nullptr;
-  dbus::ObjectProxy* biod_proxy_ = nullptr;
-  base::ObserverList<Observer>::Unchecked observers_;
+  raw_ptr<dbus::Bus> bus_ = nullptr;
+  raw_ptr<dbus::ObjectProxy> biod_proxy_ = nullptr;
+  base::ObserverList<Observer> observers_;
   std::unique_ptr<dbus::ObjectPath> current_enroll_session_path_;
   std::unique_ptr<dbus::ObjectPath> current_auth_session_path_;
 

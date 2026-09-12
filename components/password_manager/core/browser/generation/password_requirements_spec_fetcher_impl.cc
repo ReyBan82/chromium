@@ -4,19 +4,25 @@
 
 #include "components/password_manager/core/browser/generation/password_requirements_spec_fetcher_impl.h"
 
+#include <optional>
+#include <string>
+#include <string_view>
+
+#include "base/containers/span.h"
 #include "base/functional/bind.h"
-#include "base/hash/md5.h"
 #include "base/logging.h"
-#include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/strings/string_number_conversions.h"
+#include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
 #include "base/time/time.h"
 #include "components/autofill/core/browser/proto/password_requirements.pb.h"
 #include "components/autofill/core/browser/proto/password_requirements_shard.pb.h"
 #include "components/password_manager/core/browser/generation/password_requirements_spec_printer.h"
+#include "crypto/obsolete/md5.h"
 #include "net/base/load_flags.h"
 #include "net/base/net_errors.h"
 #include "net/base/registry_controlled_domains/registry_controlled_domain.h"
+#include "net/http/http_response_headers.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "services/network/public/cpp/simple_url_loader.h"
@@ -24,6 +30,10 @@
 #include "url/url_canon.h"
 
 namespace autofill {
+
+crypto::obsolete::Md5 MakeMd5HasherForPasswordRequirementsSpec() {
+  return {};
+}
 
 PasswordRequirementsSpecFetcherImpl::PasswordRequirementsSpecFetcherImpl(
     scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory,
@@ -63,10 +73,11 @@ std::string GetHashPrefix(const GURL& origin, size_t prefix_length) {
       net::registry_controlled_domains::GetDomainAndRegistry(
           origin, net::registry_controlled_domains::INCLUDE_PRIVATE_REGISTRIES);
 
-  base::MD5Digest digest;
-  base::MD5Sum(domain_and_registry.data(), domain_and_registry.size(), &digest);
+  crypto::obsolete::Md5 md5 = MakeMd5HasherForPasswordRequirementsSpec();
+  md5.Update(domain_and_registry);
+  std::array<uint8_t, crypto::obsolete::Md5::kSize> digest = md5.Finish();
 
-  for (auto& byte : digest.a) {
+  for (auto& byte : digest) {
     if (prefix_length >= 8) {
       prefix_length -= 8;
       continue;
@@ -79,7 +90,7 @@ std::string GetHashPrefix(const GURL& origin, size_t prefix_length) {
     }
   }
 
-  return base::MD5DigestToBase16(digest).substr(0, 4);
+  return base::HexEncodeLower(base::span(digest).first(2u));
 }
 
 // Returns the URL on gstatic.com where the passwords spec file can be found
@@ -92,7 +103,7 @@ GURL GetUrlForRequirementsSpec(int version, const std::string& hash_prefix) {
 
 }  // namespace
 
-void PasswordRequirementsSpecFetcherImpl::Fetch(GURL origin,
+void PasswordRequirementsSpecFetcherImpl::Fetch(const GURL& origin,
                                                 FetchCallback callback) {
   DCHECK(origin.is_valid());
   VLOG(1) << "Fetching password requirements spec for " << origin;
@@ -113,27 +124,31 @@ void PasswordRequirementsSpecFetcherImpl::Fetch(GURL origin,
   }
 
   // Canonicalize away trailing periods in hostname.
-  while (!origin.host_piece().empty() && origin.host_piece().back() == '.') {
-    base::StringPiece new_host =
-        origin.host_piece().substr(0, origin.host_piece().length() - 1);
+  GURL canonicalized_origin = origin;
+  while (!canonicalized_origin.host().empty() &&
+         canonicalized_origin.host().back() == '.') {
+    std::string_view new_host = canonicalized_origin.host().substr(
+        0, canonicalized_origin.host().length() - 1);
     GURL::Replacements replacements;
     replacements.SetHostStr(new_host);
-    origin = origin.ReplaceComponents(replacements);
+    canonicalized_origin = canonicalized_origin.ReplaceComponents(replacements);
   }
 
-  std::string hash_prefix = GetHashPrefix(origin, prefix_length_);
+  std::string hash_prefix = GetHashPrefix(canonicalized_origin, prefix_length_);
 
   // If a lookup is happening already, just register another callback.
   auto iter = lookups_in_flight_.find(hash_prefix);
   if (iter != lookups_in_flight_.end()) {
-    iter->second->callbacks.emplace_back(origin, std::move(callback));
+    iter->second->callbacks.emplace_back(std::move(canonicalized_origin),
+                                         std::move(callback));
     VLOG(1) << "Lookup already in flight";
     return;
   }
 
   // Start another lookup otherwise.
   auto lookup = std::make_unique<LookupInFlight>();
-  lookup->callbacks.emplace_back(origin, std::move(callback));
+  lookup->callbacks.emplace_back(std::move(canonicalized_origin),
+                                 std::move(callback));
   lookup->start_of_request = base::TimeTicks::Now();
 
   net::NetworkTrafficAnnotationTag traffic_annotation =
@@ -178,22 +193,10 @@ void PasswordRequirementsSpecFetcherImpl::Fetch(GURL origin,
 
 void PasswordRequirementsSpecFetcherImpl::OnFetchComplete(
     const std::string& hash_prefix,
-    std::unique_ptr<std::string> response_body) {
+    std::optional<std::string> response_body) {
   std::unique_ptr<LookupInFlight> lookup = RemoveLookupInFlight(hash_prefix);
 
   lookup->download_timer.Stop();
-  UMA_HISTOGRAM_TIMES("PasswordManager.RequirementsSpecFetcher.NetworkDuration",
-                      base::TimeTicks::Now() - lookup->start_of_request);
-  // Network error codes are negative. See: src/net/base/net_error_list.h.
-  base::UmaHistogramSparse(
-      "PasswordManager.RequirementsSpecFetcher.NetErrorCode",
-      -lookup->url_loader->NetError());
-  if (lookup->url_loader->ResponseInfo() &&
-      lookup->url_loader->ResponseInfo()->headers) {
-    base::UmaHistogramSparse(
-        "PasswordManager.RequirementsSpecFetcher.HttpResponseCode",
-        lookup->url_loader->ResponseInfo()->headers->response_code());
-  }
 
   if (!response_body || lookup->url_loader->NetError() != net::Error::OK) {
     VLOG(1) << "Fetch for " << hash_prefix << ": failed to fetch. Net Error: "
@@ -217,9 +220,9 @@ void PasswordRequirementsSpecFetcherImpl::OnFetchComplete(
     // Search shard for matches for origin by looking up the (canonicalized)
     // host name and then stripping domain prefixes until the eTLD+1 is reached.
     DCHECK(!origin.HostIsIPAddress());
-    // |host| is a std::string instead of StringPiece as the protbuf::Map
+    // |host| is a std::string instead of std::string_view as the protbuf::Map
     // implementation does not support StringPieces as parameters for find.
-    std::string host = origin.host();
+    std::string host = origin.GetHost();
     auto host_iter = shard.specs().find(host);
     if (host_iter != shard.specs().end()) {
       const PasswordRequirementsSpec& spec = host_iter->second;
@@ -266,8 +269,6 @@ void PasswordRequirementsSpecFetcherImpl::OnFetchComplete(
 void PasswordRequirementsSpecFetcherImpl::OnFetchTimeout(
     const std::string& hash_prefix) {
   std::unique_ptr<LookupInFlight> lookup = RemoveLookupInFlight(hash_prefix);
-  UMA_HISTOGRAM_TIMES("PasswordManager.RequirementsSpecFetcher.NetworkDuration",
-                      base::TimeTicks::Now() - lookup->start_of_request);
   TriggerCallbackToAll(&lookup->callbacks, ResultCode::kErrorTimeout,
                        PasswordRequirementsSpec());
 }
@@ -285,8 +286,6 @@ void PasswordRequirementsSpecFetcherImpl::TriggerCallback(
     FetchCallback callback,
     ResultCode result,
     const PasswordRequirementsSpec& spec) {
-  UMA_HISTOGRAM_ENUMERATION("PasswordManager.RequirementsSpecFetcher.Result",
-                            result);
   std::move(callback).Run(spec);
 }
 

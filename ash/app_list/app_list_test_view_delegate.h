@@ -11,14 +11,18 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "ash/app_list/app_list_model_provider.h"
 #include "ash/app_list/app_list_view_delegate.h"
 #include "ash/app_list/model/app_list_test_model.h"
 #include "ash/app_list/model/search/search_model.h"
+#include "ash/app_list/quick_app_access_model.h"
+#include "ash/public/cpp/app_list/app_list_client.h"
 #include "ash/public/cpp/app_list/app_list_types.h"
 #include "base/functional/callback_forward.h"
-#include "ui/base/models/simple_menu_model.h"
+#include "ui/base/mojom/menu_source_type.mojom-forward.h"
+#include "ui/menus/simple_menu_model.h"
 
 namespace ash {
 namespace test {
@@ -38,7 +42,6 @@ class AppListTestViewDelegate : public AppListViewDelegate,
 
   int dismiss_count() const { return dismiss_count_; }
   int open_search_result_count() const { return open_search_result_count_; }
-  int open_assistant_ui_count() const { return open_assistant_ui_count_; }
   std::map<size_t, int>& open_search_result_counts() {
     return open_search_result_counts_;
   }
@@ -58,7 +61,8 @@ class AppListTestViewDelegate : public AppListViewDelegate,
 
   // AppListViewDelegate overrides:
   bool KeyboardTraversalEngaged() override;
-  void StartAssistant() override {}
+  std::vector<AppListSearchControlCategory> GetToggleableCategories()
+      const override;
   void StartSearch(const std::u16string& raw_query) override {}
   void StartZeroStateSearch(base::OnceClosure callback,
                             base::TimeDelta timeout) override;
@@ -75,18 +79,17 @@ class AppListTestViewDelegate : public AppListViewDelegate,
   void ViewClosing() override {}
   void ActivateItem(const std::string& id,
                     int event_flags,
-                    ash::AppListLaunchedFrom launched_from) override;
+                    ash::AppListLaunchedFrom launched_from,
+                    bool is_app_above_the_fold) override;
   void GetContextMenuModel(const std::string& id,
                            AppListItemContext item_context,
                            GetContextMenuModelCallback callback) override;
   void ShowWallpaperContextMenu(const gfx::Point& onscreen_location,
-                                ui::MenuSourceType source_type) override;
+                                ui::mojom::MenuSourceType source_type) override;
   bool CanProcessEventsOnApplistViews() override;
   bool ShouldDismissImmediately() override;
-  ash::AssistantViewDelegate* GetAssistantViewDelegate() override;
   void OnSearchResultVisibilityChanged(const std::string& id,
                                        bool visibility) override;
-  bool IsAssistantAllowedAndEnabled() const override;
   void OnStateTransitionAnimationCompleted(
       AppListViewState state,
       bool was_animation_interrupted) override;
@@ -98,14 +101,22 @@ class AppListTestViewDelegate : public AppListViewDelegate,
       AppLaunchedMetricParams* metric_params) override;
   gfx::Rect SnapBoundsToDisplayEdge(const gfx::Rect& bounds) override;
   int GetShelfSize() override;
+  int GetSystemShelfInsetsInTabletMode() override;
   bool AppListTargetVisibility() const override;
-  bool IsInTabletMode() override;
+  bool IsInTabletMode() const override;
   AppListNotifier* GetNotifier() override;
+  std::unique_ptr<ScopedIphSession> CreateLauncherSearchIphSession() override;
   void LoadIcon(const std::string& app_id) override {}
   bool HasValidProfile() const override;
   bool ShouldHideContinueSection() const override;
   void SetHideContinueSection(bool hide) override;
-  void CommitTemporarySortOrder() override {}
+  bool IsCategoryEnabled(AppListSearchControlCategory category) override;
+  void SetCategoryEnabled(AppListSearchControlCategory category,
+                          bool enabled) override {}
+  void RecordAppsDefaultVisibility(
+      const std::vector<std::string>& apps_above_the_fold,
+      const std::vector<std::string>& apps_below_the_fold,
+      bool is_apps_collections_page) override {}
 
   // Do a bulk replacement of the items in the model.
   void ReplaceTestModel(int item_count);
@@ -114,6 +125,7 @@ class AppListTestViewDelegate : public AppListViewDelegate,
   AppListTestModel* GetTestModel() { return model_.get(); }
 
   SearchModel* ReleaseTestSearchModel() { return search_model_.release(); }
+  SearchModel* GetTestSearchModel() { return search_model_.get(); }
 
  private:
   void RecordAppLaunched(ash::AppListLaunchedFrom launched_from);
@@ -125,7 +137,6 @@ class AppListTestViewDelegate : public AppListViewDelegate,
 
   int dismiss_count_ = 0;
   int open_search_result_count_ = 0;
-  int open_assistant_ui_count_ = 0;
   int next_profile_app_count_ = 0;
   int show_wallpaper_context_menu_count_ = 0;
   AppListState app_list_page_ = AppListState::kInvalidState;
@@ -135,6 +146,7 @@ class AppListTestViewDelegate : public AppListViewDelegate,
   AppListModelProvider model_provider_;
   std::unique_ptr<AppListTestModel> model_;
   std::unique_ptr<SearchModel> search_model_;
+  std::unique_ptr<QuickAppAccessModel> quick_app_access_model_;
 };
 
 }  // namespace test

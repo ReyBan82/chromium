@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "base/observer_list.h"
 #include "base/timer/timer.h"
@@ -16,6 +17,10 @@
 #include "components/policy/core/common/policy_service.h"
 
 class Profile;
+
+namespace metrics {
+class MetricsService;
+}  // namespace metrics
 
 namespace arc {
 
@@ -43,7 +48,10 @@ class ArcRequirementChecker : public policy::PolicyService::Observer {
   static AndroidManagementCheckerFactory
   GetDefaultAndroidManagementCheckerFactory();
 
+  // `metrics_service` and `support_host` must outlive `this`.
+  // `metrics_service` must be non-null if `support_host` is non-null.
   ArcRequirementChecker(
+      metrics::MetricsService* metrics_service,
       Profile* profile,
       ArcSupportHost* support_host,
       AndroidManagementCheckerFactory android_management_checker_factory);
@@ -116,8 +124,9 @@ class ArcRequirementChecker : public policy::PolicyService::Observer {
   // expires.
   void OnFirstPoliciesLoadedOrTimeout();
 
-  Profile* const profile_;
-  ArcSupportHost* const support_host_;
+  const raw_ptr<metrics::MetricsService> metrics_service_;
+  const raw_ptr<Profile> profile_;
+  const raw_ptr<ArcSupportHost> support_host_;
   const AndroidManagementCheckerFactory android_management_checker_factory_;
 
   State state_ = State::kStopped;

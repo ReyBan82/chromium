@@ -3,16 +3,13 @@
 // found in the LICENSE file.
 
 #import "ios/public/provider/chrome/browser/fullscreen/fullscreen_api.h"
-
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+#import "ios/web/common/features.h"
 
 namespace ios {
 namespace provider {
 
 bool IsFullscreenSmoothScrollingSupported() {
-  return false;
+  return base::FeatureList::IsEnabled(web::features::kSmoothScrollingDefault);
 }
 
 }  // namespace provider

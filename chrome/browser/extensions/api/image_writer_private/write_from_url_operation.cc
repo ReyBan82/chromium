@@ -81,7 +81,7 @@ void WriteFromUrlOperation::Download(base::OnceClosure continuation) {
 
   download_continuation_ = std::move(continuation);
 
-  SetStage(image_writer_api::STAGE_DOWNLOAD);
+  SetStage(image_writer_api::Stage::kDownload);
 
   // Create traffic annotation tag.
   net::NetworkTrafficAnnotationTag traffic_annotation =
@@ -112,6 +112,10 @@ void WriteFromUrlOperation::Download(base::OnceClosure continuation) {
 
   auto request = std::make_unique<network::ResourceRequest>();
   request->url = GURL(url_);
+  // To accurately report progress we must request no content encoding, since that
+  // will affect the value of the "Content-Length" header. This doesn't impact
+  // download efficiency since the resource is already compressed.
+  request->headers.SetHeader(net::HttpRequestHeaders::kAcceptEncoding, "identity");
   simple_url_loader_ =
       network::SimpleURLLoader::Create(std::move(request), traffic_annotation);
 
@@ -146,8 +150,9 @@ void WriteFromUrlOperation::OnResponseStarted(
 void WriteFromUrlOperation::OnDataDownloaded(uint64_t current) {
   DCHECK(IsRunningInCorrectSequence());
 
-  if (IsCancelled())
+  if (IsCancelled()) {
     DestroySimpleURLLoader();
+  }
 
   int progress = (kProgressComplete * current) / total_response_bytes_;
 
@@ -178,9 +183,9 @@ void WriteFromUrlOperation::VerifyDownload(base::OnceClosure continuation) {
     return;
   }
 
-  SetStage(image_writer_api::STAGE_VERIFYDOWNLOAD);
+  SetStage(image_writer_api::Stage::kVerifyDownload);
 
-  GetMD5SumOfFile(image_path_, 0, 0, kProgressComplete,
+  GetMD5SumOfFile(image_path_,
                   base::BindOnce(&WriteFromUrlOperation::VerifyDownloadCompare,
                                  this, std::move(continuation)));
 }

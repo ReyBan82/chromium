@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "base/allocator/partition_alloc_support.h"
 #include "base/base_switches.h"
 #include "base/check.h"
 #include "base/command_line.h"
@@ -15,18 +16,16 @@
 #include "base/no_destructor.h"
 #include "base/run_loop.h"
 #include "base/synchronization/atomic_flag.h"
+#include "base/task/execution_fence.h"
 #include "base/time/time.h"
 #include "base/trace_event/heap_profiler_allocation_context_tracker.h"
 #include "base/trace_event/trace_event.h"
 #include "build/build_config.h"
-#include "components/tracing/common/trace_startup_config.h"
-#include "components/tracing/common/tracing_switches.h"
 #include "content/browser/browser_main_loop.h"
-#include "content/browser/notification_service_impl.h"
-#include "content/browser/tracing/startup_tracing_controller.h"
 #include "content/common/content_switches_internal.h"
 #include "content/public/common/content_switches.h"
 #include "content/public/common/main_function_params.h"
+#include "content/public/common/result_codes.h"
 #include "third_party/skia/include/core/SkGraphics.h"
 #include "ui/base/ime/init/input_method_initializer.h"
 #include "ui/gfx/font_util.h"
@@ -49,6 +48,11 @@ base::AtomicFlag& GetExitedMainMessageLoopFlag() {
   return *flag;
 }
 
+std::optional<int>& GetProcessResultCode() {
+  static std::optional<int> result_code;
+  return result_code;
+}
+
 }  // namespace
 
 // static
@@ -60,11 +64,12 @@ BrowserMainRunnerImpl::BrowserMainRunnerImpl()
     : initialization_started_(false),
       is_shutdown_(false),
       scoped_execution_fence_(
-          std::make_unique<base::ThreadPoolInstance::ScopedExecutionFence>()) {}
+          std::make_unique<base::ScopedThreadPoolExecutionFence>()) {}
 
 BrowserMainRunnerImpl::~BrowserMainRunnerImpl() {
-  if (initialization_started_ && !is_shutdown_)
+  if (initialization_started_ && !is_shutdown_) {
     Shutdown();
+  }
 }
 
 int BrowserMainRunnerImpl::Initialize(MainFunctionParams parameters) {
@@ -79,17 +84,15 @@ int BrowserMainRunnerImpl::Initialize(MainFunctionParams parameters) {
   if (!initialization_started_) {
     initialization_started_ = true;
 
-    const base::TimeTicks start_time_step1 = base::TimeTicks::Now();
-
     SkGraphics::Init();
 
-    if (parameters.command_line->HasSwitch(switches::kWaitForDebugger))
+    if (parameters.command_line->HasSwitch(switches::kWaitForDebugger)) {
       base::debug::WaitForDebugger(60, true);
+    }
 
-    if (parameters.command_line->HasSwitch(switches::kBrowserStartupDialog))
+    if (parameters.command_line->HasSwitch(switches::kBrowserStartupDialog)) {
       WaitForDebugger("Browser");
-
-    notification_service_ = std::make_unique<NotificationServiceImpl>();
+    }
 
 #if BUILDFLAG(IS_WIN)
     base::win::EnableHighDPISupport();
@@ -134,43 +137,35 @@ int BrowserMainRunnerImpl::Initialize(MainFunctionParams parameters) {
     // to browser_shutdown::Shutdown or BrowserProcess::EndSession.
 
     ui::InitializeInputMethod();
-    UMA_HISTOGRAM_TIMES("Startup.BrowserMainRunnerImplInitializeStep1Time",
-                        base::TimeTicks::Now() - start_time_step1);
   }
-  const base::TimeTicks start_time_step2 = base::TimeTicks::Now();
   main_loop_->CreateStartupTasks();
   int result_code = main_loop_->GetResultCode();
-  if (result_code > 0)
+  if (result_code > 0) {
     return result_code;
-
-  UMA_HISTOGRAM_TIMES("Startup.BrowserMainRunnerImplInitializeStep2Time",
-                      base::TimeTicks::Now() - start_time_step2);
+  }
 
   // Return -1 to indicate no early termination.
   return -1;
 }
 
-#if BUILDFLAG(IS_ANDROID)
-void BrowserMainRunnerImpl::SynchronouslyFlushStartupTasks() {
-  main_loop_->SynchronouslyFlushStartupTasks();
-}
-#endif
-
 int BrowserMainRunnerImpl::Run() {
-  DCHECK(initialization_started_);
-  DCHECK(!is_shutdown_);
+  CHECK(initialization_started_, base::NotFatalUntil::M159);
+  CHECK(!is_shutdown_, base::NotFatalUntil::M159);
   main_loop_->RunMainMessageLoop();
   return main_loop_->GetResultCode();
 }
 
 void BrowserMainRunnerImpl::Shutdown() {
-  DCHECK(initialization_started_);
-  DCHECK(!is_shutdown_);
+  CHECK(initialization_started_, base::NotFatalUntil::M159);
+  CHECK(!is_shutdown_, base::NotFatalUntil::M159);
+
+#if BUILDFLAG(IS_CHROMEOS)
+  // Reduces shutdown hangs on CrOS.
+  // Googlers: see go/cros-no-op-free-2024 for the experiment write-up.
+  base::allocator::MakeFreeNoOp();
+#endif
 
   main_loop_->PreShutdown();
-
-  // Finalize the startup tracing session if it is still active.
-  StartupTracingController::GetInstance().ShutdownAndWaitForStopIfNeeded();
 
   {
     // The trace event has to stay between profiler creation and destruction.
@@ -183,16 +178,7 @@ void BrowserMainRunnerImpl::Shutdown() {
 #if BUILDFLAG(IS_WIN)
     ole_initializer_.reset(NULL);
 #endif
-#if BUILDFLAG(IS_ANDROID)
-    // Forcefully terminates the RunLoop inside MessagePumpForUI, ensuring
-    // proper shutdown for content_browsertests. Shutdown() is not used by
-    // the actual browser.
-    if (base::RunLoop::IsRunningOnCurrentThread())
-      base::RunLoop::QuitCurrentDeprecated();
-#endif
     main_loop_.reset(nullptr);
-
-    notification_service_.reset(nullptr);
 
     is_shutdown_ = true;
   }
@@ -206,6 +192,17 @@ std::unique_ptr<BrowserMainRunner> BrowserMainRunner::Create() {
 // static
 bool BrowserMainRunner::ExitedMainMessageLoop() {
   return GetExitedMainMessageLoopFlag().IsSet();
+}
+
+// static
+void BrowserMainRunner::SetOverrideResultCode(int code) {
+  CHECK_GE(code, RESULT_CODE_LAST_CODE);
+  GetProcessResultCode() = code;
+}
+
+// static
+std::optional<int> BrowserMainRunnerImpl::GetOverrideResultCode() {
+  return GetProcessResultCode();
 }
 
 }  // namespace content

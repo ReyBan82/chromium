@@ -6,25 +6,17 @@
 #define COMPONENTS_GCM_DRIVER_FEATURES_H_
 
 #include "base/feature_list.h"
+#include "base/time/time.h"
 
-namespace base {
-class TimeDelta;
-}
+namespace gcm::features {
 
-namespace gcm {
+// Enables in-memory buffering of incoming push messages when no matching
+// AppHandler is currently registered (e.g. during browser initialization).
+BASE_DECLARE_FEATURE(kGCMMessageBuffering);
 
-namespace features {
+// The time-to-live for unhandled buffered push messages before they are pruned.
+base::TimeDelta GetGCMMessageBufferingTTL();
 
-BASE_DECLARE_FEATURE(kInvalidateTokenFeature);
-BASE_DECLARE_FEATURE(kGCMIncludeAccountTokensInCheckinRequest);
-BASE_DECLARE_FEATURE(kGCMReportAccountTokenChanges);
-extern const char kParamNameTokenInvalidationPeriodDays[];
-
-// The period after which the GCM token becomes stale.
-base::TimeDelta GetTokenInvalidationInterval();
-
-}  // namespace features
-
-}  // namespace gcm
+}  // namespace gcm::features
 
 #endif  // COMPONENTS_GCM_DRIVER_FEATURES_H_

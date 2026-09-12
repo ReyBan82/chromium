@@ -1,45 +1,28 @@
 // Protocol Buffers - Google's data interchange format
 // Copyright 2008 Google Inc.  All rights reserved.
-// https://developers.google.com/protocol-buffers/
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are
-// met:
-//
-//     * Redistributions of source code must retain the above copyright
-// notice, this list of conditions and the following disclaimer.
-//     * Redistributions in binary form must reproduce the above
-// copyright notice, this list of conditions and the following disclaimer
-// in the documentation and/or other materials provided with the
-// distribution.
-//     * Neither the name of Google Inc. nor the names of its
-// contributors may be used to endorse or promote products derived from
-// this software without specific prior written permission.
-//
-// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
-// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
-// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
-// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
-// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file or at
+// https://developers.google.com/open-source/licenses/bsd
 
-#include <google/protobuf/util/field_mask_util.h>
+#include "google/protobuf/util/field_mask_util.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <vector>
 
-#include <google/protobuf/field_mask.pb.h>
-#include <google/protobuf/test_util.h>
-#include <google/protobuf/unittest.pb.h>
+#include "google/protobuf/field_mask.pb.h"
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <google/protobuf/stubs/logging.h>
-#include <google/protobuf/stubs/common.h>
+#include "absl/base/log_severity.h"
+#include "absl/strings/string_view.h"
+#include "google/protobuf/test_textproto.h"
+#include "google/protobuf/test_util.h"
+#include "google/protobuf/unittest.pb.h"
+#include "google/protobuf/util/field_mask_util.h"
+#include "google/protobuf/util/field_mask_util_test.pb.h"
+
 
 namespace google {
 namespace protobuf {
@@ -116,10 +99,11 @@ TEST_F(SnakeCaseCamelCaseTest, RoundTripTest) {
 }
 
 using google::protobuf::FieldMask;
-using protobuf_unittest::NestedTestAllTypes;
-using protobuf_unittest::TestAllTypes;
-using protobuf_unittest::TestRequired;
-using protobuf_unittest::TestRequiredMessage;
+using proto2_unittest::NestedTestAllTypes;
+using proto2_unittest::TestAllTypes;
+using proto2_unittest::TestRequired;
+using proto2_unittest::TestRequiredMessage;
+using third_party_protobuf_util::TestTrimMessageRepeatedField;
 
 TEST(FieldMaskUtilTest, StringFormat) {
   FieldMask mask;
@@ -198,7 +182,7 @@ TEST(FieldMaskUtilTest, GetFieldDescriptors) {
       TestAllTypes::descriptor(), "repeated_nested_message.bb", nullptr));
 }
 
-TEST(FieldMaskUtilTest, TestIsVaildPath) {
+TEST(FieldMaskUtilTest, TestIsValidPath) {
   EXPECT_TRUE(FieldMaskUtil::IsValidPath<TestAllTypes>("optional_int32"));
   EXPECT_FALSE(FieldMaskUtil::IsValidPath<TestAllTypes>("optional_nonexist"));
   EXPECT_TRUE(
@@ -227,7 +211,7 @@ TEST(FieldMaskUtilTest, TestGetFieldMaskForAllFields) {
   EXPECT_TRUE(FieldMaskUtil::IsPathInFieldMask("bb", mask));
 
   mask = FieldMaskUtil::GetFieldMaskForAllFields<TestAllTypes>();
-  EXPECT_EQ(75, mask.paths_size());
+  EXPECT_EQ(80, mask.paths_size());
   EXPECT_TRUE(FieldMaskUtil::IsPathInFieldMask("optional_int32", mask));
   EXPECT_TRUE(FieldMaskUtil::IsPathInFieldMask("optional_int64", mask));
   EXPECT_TRUE(FieldMaskUtil::IsPathInFieldMask("optional_uint32", mask));
@@ -606,16 +590,16 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   TEST_TRIM_ONE_PRIMITIVE_FIELD(optional_import_enum)
 #undef TEST_TRIM_ONE_PRIMITIVE_FIELD
 
-#define TEST_TRIM_ONE_FIELD(field_name)              \
-  {                                                  \
-    TestAllTypes msg;                                \
-    TestUtil::SetAllFields(&msg);                    \
-    TestAllTypes tmp;                                \
-    *tmp.mutable_##field_name() = msg.field_name();  \
-    FieldMask mask;                                  \
-    mask.add_paths(#field_name);                     \
-    FieldMaskUtil::TrimMessage(mask, &msg);          \
-    EXPECT_EQ(tmp.DebugString(), msg.DebugString()); \
+#define TEST_TRIM_ONE_FIELD(field_name)                  \
+  {                                                      \
+    TestAllTypes msg;                                    \
+    TestUtil::SetAllFields(&msg);                        \
+    TestAllTypes tmp;                                    \
+    *tmp.mutable_##field_name() = msg.field_name();      \
+    FieldMask mask;                                      \
+    mask.add_paths(#field_name);                         \
+    EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &msg)); \
+    EXPECT_EQ(tmp.DebugString(), msg.DebugString());     \
   }
   TEST_TRIM_ONE_FIELD(optional_nested_message)
   TEST_TRIM_ONE_FIELD(optional_foreign_message)
@@ -654,25 +638,25 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   NestedTestAllTypes trimmed_msg(nested_msg);
   FieldMask mask;
   FieldMaskUtil::FromString("child.payload", &mask);
-  FieldMaskUtil::TrimMessage(mask, &trimmed_msg);
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
   EXPECT_EQ(1234, trimmed_msg.child().payload().optional_int32());
   EXPECT_EQ(0, trimmed_msg.child().child().payload().optional_int32());
 
   trimmed_msg = nested_msg;
   FieldMaskUtil::FromString("child.child.payload", &mask);
-  FieldMaskUtil::TrimMessage(mask, &trimmed_msg);
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
   EXPECT_EQ(0, trimmed_msg.child().payload().optional_int32());
   EXPECT_EQ(5678, trimmed_msg.child().child().payload().optional_int32());
 
   trimmed_msg = nested_msg;
   FieldMaskUtil::FromString("child", &mask);
-  FieldMaskUtil::TrimMessage(mask, &trimmed_msg);
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
   EXPECT_EQ(1234, trimmed_msg.child().payload().optional_int32());
   EXPECT_EQ(5678, trimmed_msg.child().child().payload().optional_int32());
 
   trimmed_msg = nested_msg;
   FieldMaskUtil::FromString("child.child", &mask);
-  FieldMaskUtil::TrimMessage(mask, &trimmed_msg);
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
   EXPECT_EQ(0, trimmed_msg.child().payload().optional_int32());
   EXPECT_EQ(5678, trimmed_msg.child().child().payload().optional_int32());
 
@@ -681,7 +665,7 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   TestUtil::SetAllFields(&all_types_msg);
   TestAllTypes trimmed_all_types(all_types_msg);
   FieldMask empty_mask;
-  FieldMaskUtil::TrimMessage(empty_mask, &trimmed_all_types);
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(empty_mask, &trimmed_all_types));
   EXPECT_EQ(trimmed_all_types.DebugString(), all_types_msg.DebugString());
 
   // Test trim required fields with keep_required_fields is set true.
@@ -693,7 +677,8 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   TestRequired trimmed_required_msg_1(required_msg_1);
   FieldMaskUtil::FromString("dummy2", &mask);
   options.set_keep_required_fields(true);
-  FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_1, options);
+  EXPECT_FALSE(
+      FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_1, options));
   EXPECT_EQ(trimmed_required_msg_1.DebugString(), required_msg_1.DebugString());
 
   // Test trim required fields with keep_required_fields is set false.
@@ -701,7 +686,8 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   required_msg_1.clear_b();
   required_msg_1.clear_c();
   options.set_keep_required_fields(false);
-  FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_1, options);
+  EXPECT_TRUE(
+      FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_1, options));
   EXPECT_EQ(trimmed_required_msg_1.DebugString(), required_msg_1.DebugString());
 
   // Test trim required message with keep_required_fields is set true.
@@ -722,14 +708,16 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   options.set_keep_required_fields(true);
   required_msg_2.clear_repeated_message();
   required_msg_2.mutable_required_message()->clear_dummy2();
-  FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_2, options);
+  EXPECT_TRUE(
+      FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_2, options));
   EXPECT_EQ(trimmed_required_msg_2.DebugString(), required_msg_2.DebugString());
 
   FieldMaskUtil::FromString("required_message", &mask);
   required_msg_2.mutable_required_message()->set_dummy2(7890);
   trimmed_required_msg_2.mutable_required_message()->set_dummy2(7890);
   required_msg_2.clear_optional_message();
-  FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_2, options);
+  EXPECT_TRUE(
+      FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_2, options));
   EXPECT_EQ(trimmed_required_msg_2.DebugString(), required_msg_2.DebugString());
 
   // Test trim required message with keep_required_fields is set false.
@@ -738,7 +726,8 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   required_msg_2.mutable_required_message()->clear_b();
   required_msg_2.mutable_required_message()->clear_c();
   options.set_keep_required_fields(false);
-  FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_2, options);
+  EXPECT_TRUE(
+      FieldMaskUtil::TrimMessage(mask, &trimmed_required_msg_2, options));
   EXPECT_EQ(trimmed_required_msg_2.DebugString(), required_msg_2.DebugString());
 
   // Verify that trimming an empty message has no effect. In particular, fields
@@ -746,7 +735,7 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   TestAllTypes empty_msg;
   FieldMaskUtil::FromString(
       "optional_int32,optional_bytes,optional_nested_message.bb", &mask);
-  FieldMaskUtil::TrimMessage(mask, &empty_msg);
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &empty_msg));
   EXPECT_FALSE(empty_msg.has_optional_int32());
   EXPECT_FALSE(empty_msg.has_optional_bytes());
   EXPECT_FALSE(empty_msg.has_optional_nested_message());
@@ -756,13 +745,65 @@ TEST(FieldMaskUtilTest, TrimMessage) {
   TestAllTypes oneof_msg;
   oneof_msg.set_oneof_uint32(11);
   FieldMaskUtil::FromString("oneof_uint32,oneof_nested_message.bb", &mask);
-  FieldMaskUtil::TrimMessage(mask, &oneof_msg);
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &oneof_msg));
   EXPECT_EQ(11, oneof_msg.oneof_uint32());
+}
+
+TEST(FieldMaskUtilTest, TrimMessageRepeatedField) {
+  FieldMask f1_mask;
+  FieldMaskUtil::FromString("repeated_nested_message.f1", &f1_mask);
+  TestTrimMessageRepeatedField msg = ParseTextOrDie(R"pb(
+    repeated_nested_message { f1: 1234 }
+    repeated_nested_message { f1: 5678 f2: 9012 }
+    repeated_nested_message { f2: 9012 }
+  )pb");
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(f1_mask, &msg));
+  EXPECT_THAT(msg, EqualsProto(R"pb(
+                repeated_nested_message { f1: 1234 }
+                repeated_nested_message { f1: 5678 }
+                repeated_nested_message {}
+              )pb"));
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(f1_mask, &msg));
+}
+
+TEST(FieldMaskUtilTest, TrimMessageRepeatedFieldLastFieldUnchanged) {
+  FieldMask f1_mask;
+  FieldMaskUtil::FromString("repeated_nested_message.f1", &f1_mask);
+  // The last field will not be modified but TrimMessage should still return
+  // true because the message was modified.
+  TestTrimMessageRepeatedField msg = ParseTextOrDie(R"pb(
+    repeated_nested_message { f1: 5678 f2: 9012 }
+    repeated_nested_message { f1: 1234 }
+  )pb");
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(f1_mask, &msg));
+  EXPECT_THAT(msg, EqualsProto(R"pb(
+                repeated_nested_message { f1: 5678 }
+                repeated_nested_message { f1: 1234 }
+              )pb"));
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(f1_mask, &msg));
+}
+
+TEST(FieldMaskUtilTest, LastFieldUnchangedStillReturnsTrue) {
+  FieldMask f1_mask;
+  FieldMaskUtil::FromString("nested_message.f1,nested_message2.f1", &f1_mask);
+  // The first nested message is modified, but the second is not. The function
+  // should return true and not get over written because nested_message2 is not
+  // modified.
+  TestTrimMessageRepeatedField msg = ParseTextOrDie(R"pb(
+    nested_message { f2: 1234 }
+    nested_message2 { f1: 5678 }
+  )pb");
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(f1_mask, &msg));
+  EXPECT_THAT(msg, EqualsProto(R"pb(
+                nested_message {}
+                nested_message2 { f1: 5678 }
+              )pb"));
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(f1_mask, &msg));
 }
 
 TEST(FieldMaskUtilTest, TrimMessageReturnValue) {
   FieldMask mask;
-  TestAllTypes trimed_msg;
+  TestAllTypes trimmed_msg;
   TestAllTypes default_msg;
 
   // Field mask on optional field.
@@ -771,63 +812,99 @@ TEST(FieldMaskUtilTest, TrimMessageReturnValue) {
   // Verify that if a message is updated by FieldMaskUtil::TrimMessage(), the
   // function returns true.
   // Test on primary field.
-  trimed_msg.set_optional_string("abc");
-  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimed_msg));
-  EXPECT_EQ(trimed_msg.DebugString(), default_msg.DebugString());
-  trimed_msg.Clear();
+  trimmed_msg.set_optional_string("abc");
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
+  EXPECT_EQ(trimmed_msg.DebugString(), default_msg.DebugString());
+  trimmed_msg.Clear();
 
   // Test on repeated primary field.
-  trimed_msg.add_repeated_string("abc");
-  trimed_msg.add_repeated_string("def");
-  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimed_msg));
-  EXPECT_EQ(trimed_msg.DebugString(), default_msg.DebugString());
-  trimed_msg.Clear();
+  trimmed_msg.add_repeated_string("abc");
+  trimmed_msg.add_repeated_string("def");
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
+  EXPECT_EQ(trimmed_msg.DebugString(), default_msg.DebugString());
+  trimmed_msg.Clear();
 
   // Test on nested message.
-  trimed_msg.mutable_optional_nested_message()->set_bb(123);
-  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimed_msg));
-  EXPECT_EQ(trimed_msg.DebugString(), default_msg.DebugString());
-  trimed_msg.Clear();
+  trimmed_msg.mutable_optional_nested_message()->set_bb(123);
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
+  EXPECT_EQ(trimmed_msg.DebugString(), default_msg.DebugString());
+  trimmed_msg.Clear();
 
   // Test on repeated nested message.
-  trimed_msg.add_repeated_nested_message()->set_bb(123);
-  trimed_msg.add_repeated_nested_message()->set_bb(456);
-  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimed_msg));
-  EXPECT_EQ(trimed_msg.DebugString(), default_msg.DebugString());
-  trimed_msg.Clear();
+  trimmed_msg.add_repeated_nested_message()->set_bb(123);
+  trimmed_msg.add_repeated_nested_message()->set_bb(456);
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
+  EXPECT_EQ(trimmed_msg.DebugString(), default_msg.DebugString());
+  trimmed_msg.Clear();
 
   // Test on oneof field.
-  trimed_msg.set_oneof_uint32(123);
-  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimed_msg));
-  EXPECT_EQ(trimed_msg.DebugString(), default_msg.DebugString());
-  trimed_msg.Clear();
+  trimmed_msg.set_oneof_uint32(123);
+  EXPECT_TRUE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
+  EXPECT_EQ(trimmed_msg.DebugString(), default_msg.DebugString());
+  trimmed_msg.Clear();
 
-  // If there is no field set other then those whitelisted,
+  // If there is no field set other then those allowlisted,
   // FieldMaskUtil::TrimMessage() should return false.
-  trimed_msg.set_optional_int32(123);
-  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &trimed_msg));
-  EXPECT_EQ(trimed_msg.optional_int32(), 123);
-  trimed_msg.Clear();
+  trimmed_msg.set_optional_int32(123);
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
+  EXPECT_EQ(trimmed_msg.optional_int32(), 123);
+  trimmed_msg.Clear();
 
   // Field mask on repeated field.
   FieldMaskUtil::FromString("repeated_string", &mask);
-  trimed_msg.add_repeated_string("abc");
-  trimed_msg.add_repeated_string("def");
-  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &trimed_msg));
-  EXPECT_EQ(trimed_msg.repeated_string(0), "abc");
-  EXPECT_EQ(trimed_msg.repeated_string(1), "def");
-  trimed_msg.Clear();
+  trimmed_msg.add_repeated_string("abc");
+  trimmed_msg.add_repeated_string("def");
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
+  EXPECT_EQ(trimmed_msg.repeated_string(0), "abc");
+  EXPECT_EQ(trimmed_msg.repeated_string(1), "def");
+  trimmed_msg.Clear();
 
   // Field mask on nested message.
   FieldMaskUtil::FromString("optional_nested_message.bb", &mask);
-  trimed_msg.mutable_optional_nested_message()->set_bb(123);
-  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &trimed_msg));
-  EXPECT_EQ(trimed_msg.optional_nested_message().bb(), 123);
-  trimed_msg.Clear();
+  trimmed_msg.mutable_optional_nested_message()->set_bb(123);
+  EXPECT_FALSE(FieldMaskUtil::TrimMessage(mask, &trimmed_msg));
+  EXPECT_EQ(trimmed_msg.optional_nested_message().bb(), 123);
+  trimmed_msg.Clear();
 
-  // TODO(b/32443320): field mask on repeated nested message is not yet
+  // TODO: field mask on repeated nested message is not yet
   // supported.
 }
+
+TEST(FieldMaskUtilTest, TestEmptyFieldMaskString) {
+  FieldMask mask;
+  // An empty FieldMask string should be a zero-paths FieldMask.
+  FieldMaskUtil::FromString("", &mask);
+  EXPECT_TRUE(mask.paths().empty());
+}
+
+TEST(FieldMaskUtilTest, TestCanonicalizeFieldMaskWithEmptyPath) {
+  // A manually constructed FieldMask may contain paths which are empty. Such
+  // a path doesn't make any sense and is malformed, but canonicalizing such
+  // a mask should result in a zero-paths FieldMask.
+  FieldMask mask;
+  mask.add_paths("");
+  mask.add_paths("");
+  mask.add_paths("");
+
+  FieldMask canonical;
+  FieldMaskUtil::ToCanonicalForm(mask, &canonical);
+  EXPECT_TRUE(canonical.paths().empty());
+}
+
+TEST(FieldMaskUtilTest, TestCanonicalizeFieldMaskWithEmptyAndNonEmptyPaths) {
+  // A manually constructed FieldMask may contain paths which are empty. Such
+  // a path doesn't make any sense and is malformed, but canonicalizing such
+  // a mask remove those empty paths.
+  FieldMask mask;
+  mask.add_paths("");
+  mask.add_paths("a.b");
+
+  FieldMask canonical;
+  FieldMaskUtil::ToCanonicalForm(mask, &canonical);
+  EXPECT_EQ(canonical.paths().size(), 1);
+  EXPECT_EQ(canonical.paths(0), "a.b");
+}
+
 
 
 }  // namespace

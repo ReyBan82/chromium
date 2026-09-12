@@ -13,9 +13,11 @@ interface ElementInternals {
   // Attributes and operations for form-associated custom elements.
   [RaisesException] void setFormValue(ControlValue? value, optional ControlValue? state);
 
-  [RaisesException] readonly attribute HTMLFormElement? form;
+  // Until ReferenceTarget is enabled, this will only ever return HTMLFormElement.
+  // https://github.com/whatwg/html/pull/10995
+  [RaisesException, ImplementedAs=formForBinding] readonly attribute HTMLElement? form;
 
-  [RaisesException] void setValidity(ValidityStateFlags flags, optional DOMString message, optional Element anchor);
+  [RaisesException] void setValidity(ValidityStateFlags flags, optional DOMString message, optional HTMLElement anchor);
   [RaisesException] readonly attribute boolean willValidate;
   [RaisesException] readonly attribute ValidityState validity;
   [RaisesException, ImplementedAs=ValidationMessageForBinding] readonly attribute DOMString validationMessage;
@@ -29,8 +31,14 @@ interface ElementInternals {
   [MeasureAs=ElementInternalsStates]
   readonly attribute CustomStateSet states;
 
+  [RuntimeEnabled=WebMCPFormAssociatedCustomElements] void setToolParamSchema(DOMString? schema);
+
   // Access to shadowRoot from custom elements. See crbug.com/1042130 and
   // https://github.com/w3c/webcomponents/issues/871#issuecomment-672082936
   [MeasureAs=ElementInternalsShadowRoot] readonly attribute ShadowRoot? shadowRoot;
+
+  // Platform-provided behaviors.
+  // https://github.com/MicrosoftEdge/MSEdgeExplainers/blob/main/PlatformProvidedBehaviors/explainer.md
+  [RuntimeEnabled=ElementInternalsBehaviors, MeasureAs=ElementInternalsBehaviorsAccess] readonly attribute FrozenArray<ElementBehavior> behaviors;
 };
 

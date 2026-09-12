@@ -7,7 +7,6 @@
 
 #include <string>
 
-#include "base/functional/callback.h"
 #include "chromeos/ash/components/proximity_auth/proximity_auth_client.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
@@ -28,7 +27,6 @@ class MockProximityAuthClient : public ProximityAuthClient {
   MOCK_METHOD1(FinalizeUnlock, void(bool success));
   MOCK_METHOD1(FinalizeSignin, void(const std::string& secret));
   MOCK_CONST_METHOD0(GetAuthenticatedUsername, std::string(void));
-  MOCK_METHOD0(GetPrefManager, ProximityAuthPrefManager*(void));
 };
 
 }  // namespace proximity_auth

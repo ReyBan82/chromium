@@ -8,14 +8,15 @@
 #include "third_party/blink/renderer/core/dom/dom_exception.h"
 #include "third_party/blink/renderer/platform/bindings/exception_code.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 
 namespace blink {
 
 namespace {
 
-const char kGATTServerNotConnectedBase[] =
+constexpr char kGATTServerNotConnectedBase[] =
     "GATT Server is disconnected. "
-    "Cannot %s. (Re)connect first with `device.gatt.connect`.";
+    "Cannot {}. (Re)connect first with `device.gatt.connect`.";
 
 }  // namespace
 
@@ -37,7 +38,7 @@ String BluetoothError::CreateNotConnectedExceptionMessage(
       operation_string = "perform GATT operations";
       break;
   }
-  return String::Format(kGATTServerNotConnectedBase, operation_string);
+  return Format(kGATTServerNotConnectedBase, operation_string);
 }
 
 // static
@@ -65,7 +66,6 @@ DOMException* BluetoothError::CreateDOMException(
           DOMExceptionCode::kNotFoundError, detailed_message);
   }
   NOTREACHED();
-  return MakeGarbageCollected<DOMException>(DOMExceptionCode::kUnknownError);
 }
 
 // static
@@ -81,8 +81,6 @@ DOMException* BluetoothError::CreateDOMException(
       // expected to be redirected to the switch above that handles
       // BluetoothErrorCode.
       NOTREACHED();
-      return MakeGarbageCollected<DOMException>(
-          DOMExceptionCode::kUnknownError);
 #define MAP_ERROR(enumeration, name, message)         \
   case mojom::blink::WebBluetoothResult::enumeration: \
     return MakeGarbageCollected<DOMException>(name, message);
@@ -118,6 +116,8 @@ DOMException* BluetoothError::CreateDOMException(
                 "Connection Error: Already exists.");
       MAP_ERROR(CONNECT_NOT_CONNECTED, DOMExceptionCode::kInvalidStateError,
                 "Connection Error: Not connected.");
+      MAP_ERROR(CONNECT_NON_AUTH_TIMEOUT, DOMExceptionCode::kInvalidStateError,
+                "Connection Error: Non-authentication timeout.");
 
       // NetworkErrors:
       MAP_ERROR(CONNECT_ALREADY_IN_PROGRESS, DOMExceptionCode::kNetworkError,
@@ -144,6 +144,8 @@ DOMException* BluetoothError::CreateDOMException(
                 "GATT operation already in progress.");
       MAP_ERROR(CONNECT_CONN_FAILED, DOMExceptionCode::kNetworkError,
                 "Connection Error: Connection attempt failed.");
+      MAP_ERROR(BLUETOOTH_NOT_ALLOWED, DOMExceptionCode::kNetworkError,
+                "Bluetooth permission has been blocked.");
 
       // NotFoundErrors:
       MAP_ERROR(WEB_BLUETOOTH_NOT_SUPPORTED, DOMExceptionCode::kNotFoundError,
@@ -227,11 +229,24 @@ DOMException* BluetoothError::CreateDOMException(
       MAP_ERROR(SCANNING_BLOCKED, DOMExceptionCode::kNotAllowedError,
                 "requestLEScan() call is blocked by user.");
 
+      // UnknownErrors:
+      MAP_ERROR(CONNECT_NO_MEMORY, DOMExceptionCode::kUnknownError,
+                "Connection Error: An internal error has occurred.");
+      MAP_ERROR(CONNECT_JNI_ENVIRONMENT, DOMExceptionCode::kUnknownError,
+                "Connection Error: An internal error has occurred.");
+      MAP_ERROR(CONNECT_JNI_THREAD_ATTACH, DOMExceptionCode::kUnknownError,
+                "Connection Error: An internal error has occurred.");
+      MAP_ERROR(CONNECT_WAKELOCK, DOMExceptionCode::kUnknownError,
+                "Connection Error: An internal error has occurred.");
+      MAP_ERROR(CONNECT_UNEXPECTED_STATE, DOMExceptionCode::kUnknownError,
+                "Connection Error: An internal error has occurred.");
+      MAP_ERROR(CONNECT_SOCKET_ERROR, DOMExceptionCode::kUnknownError,
+                "Connection Error: An internal error has occurred.");
+
 #undef MAP_ERROR
   }
 
   NOTREACHED();
-  return MakeGarbageCollected<DOMException>(DOMExceptionCode::kUnknownError);
 }
 
 }  // namespace blink

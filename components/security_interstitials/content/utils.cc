@@ -8,10 +8,9 @@
 
 #include "base/command_line.h"
 #include "base/files/file_util.h"
-#include "base/notreached.h"
+#include "base/notimplemented.h"
 #include "base/process/launch.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 
 #if BUILDFLAG(IS_ANDROID)
 #include "base/android/jni_android.h"
@@ -31,14 +30,14 @@
 
 namespace security_interstitials {
 
-#if !BUILDFLAG(IS_CHROMEOS_ASH)
+#if !BUILDFLAG(IS_CHROMEOS)
 void LaunchDateAndTimeSettings() {
 // The code for each OS is completely separate, in order to avoid bugs like
 // https://crbug.com/430877 .
 #if BUILDFLAG(IS_ANDROID)
   JNIEnv* env = base::android::AttachCurrentThread();
   Java_DateAndTimeSettingsHelper_openDateAndTimeSettings(env);
-#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+#elif BUILDFLAG(IS_LINUX)
   struct ClockCommand {
     const char* const pathname;
     const char* const argument;
@@ -79,23 +78,24 @@ void LaunchDateAndTimeSettings() {
   base::LaunchProcess(command, options);
 
 #elif BUILDFLAG(IS_MAC)
-  base::mac::OpenSystemSettingsPane(base::mac::SystemSettingsPane::kDateTime);
-
+  base::mac::OpenSystemSettingsPane(
+      base::mac::SystemSettingsPane::kGeneral_DateTime);
 #elif BUILDFLAG(IS_WIN)
   base::FilePath path;
   base::PathService::Get(base::DIR_SYSTEM, &path);
   static const wchar_t kControlPanelExe[] = L"control.exe";
-  path = path.Append(std::wstring(kControlPanelExe));
+  path = path.Append(kControlPanelExe);
   base::CommandLine command(path);
-  command.AppendArg(std::string("/name"));
-  command.AppendArg(std::string("Microsoft.DateAndTime"));
+  command.AppendArg("/name");
+  command.AppendArg("Microsoft.DateAndTime");
 
   base::LaunchOptions options;
   options.wait = false;
   base::LaunchProcess(command, options);
 
-#elif BUILDFLAG(IS_FUCHSIA)
-  // TODO(crbug.com/1233494): Send to the platform settings.
+#elif BUILDFLAG(IS_FUCHSIA) || BUILDFLAG(IS_IOS)
+  // TODO(crbug.com/40191566): Send to the platform settings.
+  // The iOS Blink port also need to send the platform settings.
   NOTIMPLEMENTED_LOG_ONCE();
 #else
 #error Unsupported target architecture.
@@ -105,3 +105,7 @@ void LaunchDateAndTimeSettings() {
 #endif
 
 }  // namespace security_interstitials
+
+#if BUILDFLAG(IS_ANDROID)
+DEFINE_JNI(DateAndTimeSettingsHelper)
+#endif

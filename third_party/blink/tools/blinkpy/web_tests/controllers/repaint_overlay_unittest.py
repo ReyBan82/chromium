@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import platform
 import unittest
 
 from blinkpy.common.host import Host
@@ -38,14 +39,15 @@ class TestRepaintOverlay(unittest.TestCase):
         self.assertEquals(LAYER_TREE,
                           repaint_overlay.extract_layer_tree(LAYER_TREE))
 
+    @unittest.skipIf(platform.mac_ver()[0].startswith('12'),
+                     "Failing on macOS 12; see crbug.com/474036848")
     def test_generate_repaint_overlay_html(self):
         test_name = 'paint/invalidation/repaint-overlay/layers.html'
         host = Host()
         port = host.port_factory.get()
         layer_tree_file = port.expected_filename(test_name, '.txt')
-        if not layer_tree_file or not host.filesystem.exists(layer_tree_file):
-            # This can happen if the scripts are not in the standard blink directory.
-            return
+        self.assertTrue(layer_tree_file)
+        self.assertTrue(host.filesystem.exists(layer_tree_file))
 
         layer_tree = str(host.filesystem.read_text_file(layer_tree_file))
         self.assertTrue(
@@ -69,9 +71,11 @@ class TestRepaintOverlay(unittest.TestCase):
 
         self.assertEquals(
             expected, overlay_html,
-            'This failure is probably caused by changed repaint_overlay.py. '
-            'Please examine the diffs:\n  diff %s %s\n'
-            'If the diffs are valid, update the file:\n  cp %s %s\n'
-            'then update layers-overlay-expected.html in the same directory if needed,'
-            ' and commit the files together with the changed repaint_overlay.py.' % \
+            '\nSteps to fix the failure:\n'
+            '1. Examine the diffs:\n'
+            '  diff %s %s\n'
+            '2. If the diffs are valid, update the file:\n'
+            '  cp %s %s\n'
+            '3. Update layers-overlay-expected.html in the same directory if needed.\n'
+            '4. Commit the files together with the changed repaint_overlay.py.' % \
             (overlay_html_file, actual_overlay_html_file, actual_overlay_html_file, overlay_html_file))

@@ -13,9 +13,9 @@
 #include "base/test/scoped_feature_list.h"
 #include "chrome/browser/lookalikes/lookalike_test_helper.h"
 #include "chrome/browser/lookalikes/safety_tip_web_contents_observer.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_commands.h"
 #include "chrome/browser/ui/browser_tabstrip.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/browser/ui/tabs/tab_enums.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/common/webui_url_constants.h"
@@ -25,6 +25,7 @@
 #include "components/ukm/test_ukm_recorder.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
+#include "content/public/test/content_mock_cert_verifier.h"
 #include "content/public/test/fenced_frame_test_util.h"
 #include "content/public/test/prerender_test_util.h"
 #include "content/public/test/test_utils.h"
@@ -49,7 +50,7 @@ class SecurityStyleTestObserver : public content::WebContentsObserver {
   SecurityStyleTestObserver& operator=(const SecurityStyleTestObserver&) =
       delete;
 
-  ~SecurityStyleTestObserver() override {}
+  ~SecurityStyleTestObserver() override = default;
 
   void DidChangeVisibleSecurityState() override { run_loop_.Quit(); }
 
@@ -61,14 +62,14 @@ class SecurityStyleTestObserver : public content::WebContentsObserver {
 
 class SecurityStatePageLoadMetricsBrowserTest : public InProcessBrowserTest {
  public:
-  SecurityStatePageLoadMetricsBrowserTest() {}
+  SecurityStatePageLoadMetricsBrowserTest() = default;
 
   SecurityStatePageLoadMetricsBrowserTest(
       const SecurityStatePageLoadMetricsBrowserTest&) = delete;
   SecurityStatePageLoadMetricsBrowserTest& operator=(
       const SecurityStatePageLoadMetricsBrowserTest&) = delete;
 
-  ~SecurityStatePageLoadMetricsBrowserTest() override {}
+  ~SecurityStatePageLoadMetricsBrowserTest() override = default;
 
   void PreRunTestOnMainThread() override {
     InProcessBrowserTest::PreRunTestOnMainThread();
@@ -78,6 +79,7 @@ class SecurityStatePageLoadMetricsBrowserTest : public InProcessBrowserTest {
 
   void SetUpOnMainThread() override {
     host_resolver()->AddRule("accounts-google.com", "127.0.0.1");
+
     LookalikeTestHelper::SetUpLookalikeTestParams();
   }
 
@@ -85,8 +87,24 @@ class SecurityStatePageLoadMetricsBrowserTest : public InProcessBrowserTest {
     LookalikeTestHelper::TearDownLookalikeTestParams();
   }
 
+  void SetUpCommandLine(base::CommandLine* command_line) override {
+    mock_cert_verifier_.SetUpCommandLine(command_line);
+  }
+
+  void SetUpInProcessBrowserTestFixture() override {
+    mock_cert_verifier_.SetUpInProcessBrowserTestFixture();
+  }
+
+  void TearDownInProcessBrowserTestFixture() override {
+    mock_cert_verifier_.TearDownInProcessBrowserTestFixture();
+  }
+
  protected:
   void StartHttpsServer(net::EmbeddedTestServer::ServerCertificate cert) {
+    if (cert == net::EmbeddedTestServer::CERT_OK) {
+      mock_cert_verifier_.mock_cert_verifier()->set_default_result(net::OK);
+    }
+
     https_test_server_ = std::make_unique<net::EmbeddedTestServer>(
         net::EmbeddedTestServer::TYPE_HTTPS);
     https_test_server_->SetSSLConfig(cert);
@@ -102,7 +120,7 @@ class SecurityStatePageLoadMetricsBrowserTest : public InProcessBrowserTest {
   }
 
   void CloseAllTabs() {
-    TabStripModel* tab_strip_model = browser()->tab_strip_model();
+    TabStripModel* tab_strip_model = browser()->GetTabStripModel();
     content::WebContentsDestroyedWatcher destroyed_watcher(
         tab_strip_model->GetActiveWebContents());
     tab_strip_model->CloseAllTabs();
@@ -115,7 +133,7 @@ class SecurityStatePageLoadMetricsBrowserTest : public InProcessBrowserTest {
                           int64_t expected_value) {
     // Find last entry matching |url|.
     const ukm::mojom::UkmEntry* last = nullptr;
-    for (auto* entry :
+    for (const ukm::mojom::UkmEntry* entry :
          test_ukm_recorder_->GetEntriesByName(UkmEntry::kEntryName)) {
       auto* source = test_ukm_recorder_->GetSourceForSourceId(entry->source_id);
       if (source && source->url() == url)
@@ -152,6 +170,7 @@ class SecurityStatePageLoadMetricsBrowserTest : public InProcessBrowserTest {
   std::unique_ptr<ukm::TestAutoSetUkmRecorder> test_ukm_recorder_;
   std::unique_ptr<net::EmbeddedTestServer> https_test_server_;
   std::unique_ptr<net::EmbeddedTestServer> http_test_server_;
+  content::ContentMockCertVerifier mock_cert_verifier_;
 };
 
 IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest, Simple_Https) {
@@ -209,7 +228,7 @@ IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest, ReloadPage) {
   GURL url = https_test_server()->GetURL("/simple.html");
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
   content::WebContents* contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   chrome::Reload(browser(), WindowOpenDisposition::CURRENT_TAB);
   EXPECT_TRUE(content::WaitForLoadStop(contents));
 
@@ -239,8 +258,7 @@ IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest, ReloadPage) {
 IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest,
                        SafetyTipSiteEngagement) {
   const std::string kSiteEngagementHistogramPrefix = "Security.SiteEngagement.";
-
-  StartHttpServer();
+  StartHttpsServer(net::EmbeddedTestServer::CERT_OK);
 
   struct TestCase {
     // The URL to navigate to.
@@ -248,8 +266,9 @@ IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest,
     // If true, url is expected to show a safety tip.
     bool expect_safety_tip;
   } kTestCases[] = {
-      {http_test_server()->GetURL("/simple.html"), false},
-      {http_test_server()->GetURL("accounts-google.com", "/simple.html"), true},
+      {https_test_server()->GetURL("/simple.html"), false},
+      {https_test_server()->GetURL("accounts-google.com", "/simple.html"),
+       true},
   };
 
   // The histogram should be recorded regardless of whether the page is flagged
@@ -260,7 +279,7 @@ IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest,
 
     chrome::AddTabAt(browser(), GURL(), -1, true);
     content::WebContents* contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
+        browser()->GetTabStripModel()->GetActiveWebContents();
 
     SafetyTipWebContentsObserver* safety_tip_observer =
         SafetyTipWebContentsObserver::FromWebContents(contents);
@@ -275,8 +294,10 @@ IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest,
     run_loop.Run();
 
     // The UKM isn't recorded until the page is destroyed.
-    ASSERT_TRUE(browser()->tab_strip_model()->CloseWebContentsAt(
-        1, TabCloseTypes::CLOSE_NONE));
+    int previous_tab_count = browser()->GetTabStripModel()->count();
+    browser()->GetTabStripModel()->CloseWebContentsAt(
+        1, TabCloseTypes::CLOSE_NONE);
+    ASSERT_EQ(previous_tab_count - 1, browser()->GetTabStripModel()->count());
 
     histogram_tester.ExpectTotalCount(
         kSiteEngagementHistogramPrefix + (test_case.expect_safety_tip
@@ -315,7 +336,7 @@ IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest,
     base::HistogramTester histogram_tester;
 
     content::WebContents* contents =
-        browser()->tab_strip_model()->GetActiveWebContents();
+        browser()->GetTabStripModel()->GetActiveWebContents();
     SafetyTipWebContentsObserver* safety_tip_observer =
         SafetyTipWebContentsObserver::FromWebContents(contents);
     ASSERT_TRUE(safety_tip_observer);
@@ -383,13 +404,13 @@ IN_PROC_BROWSER_TEST_F(
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), url));
 
   content::WebContents* tab =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   SecurityStyleTestObserver observer(tab);
-  ASSERT_TRUE(content::ExecuteScript(
-      browser()->tab_strip_model()->GetActiveWebContents(),
-      "var img = document.createElement('img'); "
-      "img.src = 'http://example.com/image.png'; "
-      "document.body.appendChild(img);"));
+  ASSERT_TRUE(
+      content::ExecJs(browser()->GetTabStripModel()->GetActiveWebContents(),
+                      "var img = document.createElement('img'); "
+                      "img.src = 'http://example.com/image.png'; "
+                      "document.body.appendChild(img);"));
   observer.WaitForDidChangeVisibleSecurityState();
   CloseAllTabs();
 
@@ -460,7 +481,7 @@ IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest,
   GURL url("http://nonexistent-google.com/page.html");
 
   content::WebContents* contents =
-      browser()->tab_strip_model()->GetActiveWebContents();
+      browser()->GetTabStripModel()->GetActiveWebContents();
   SafetyTipWebContentsObserver* safety_tip_observer =
       SafetyTipWebContentsObserver::FromWebContents(contents);
   ASSERT_TRUE(safety_tip_observer);
@@ -508,8 +529,8 @@ IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest,
       0);
 }
 
-// Regression test for crbug.com/942326, where foreground duration was not being
-// updated unless the tab was hidden.
+// Regression test for crbug.com/41447085, where foreground duration was not
+// being updated unless the tab was hidden.
 IN_PROC_BROWSER_TEST_F(SecurityStatePageLoadMetricsBrowserTest,
                        NonZeroForegroundTime) {
   StartHttpServer();
@@ -547,7 +568,7 @@ class SecurityStatePageLoadMetricsMPArchBrowserTest
   ~SecurityStatePageLoadMetricsMPArchBrowserTest() override = default;
 
   content::WebContents* GetWebContents() {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 };
 
@@ -561,7 +582,7 @@ class SecurityStatePageLoadMetricsPrerenderBrowserTest
   ~SecurityStatePageLoadMetricsPrerenderBrowserTest() override = default;
 
   void SetUp() override {
-    prerender_helper_.SetUp(embedded_test_server());
+    prerender_helper_.RegisterServerRequestMonitor(embedded_test_server());
     SecurityStatePageLoadMetricsBrowserTest::SetUp();
   }
 
@@ -585,7 +606,8 @@ IN_PROC_BROWSER_TEST_F(
 
   // Loads a page in the prerender.
   GURL prerender_url = https_test_server()->GetURL("/title2.html");
-  const int host_id = prerender_helper()->AddPrerender(prerender_url);
+  const content::PrerenderHostId host_id =
+      prerender_helper()->AddPrerender(prerender_url);
   content::test::PrerenderHostObserver host_observer(*GetWebContents(),
                                                      host_id);
   EXPECT_FALSE(host_observer.was_activated());

@@ -5,7 +5,9 @@
 #ifndef COMPONENTS_MEMORY_PRESSURE_MULTI_SOURCE_MEMORY_PRESSURE_MONITOR_H_
 #define COMPONENTS_MEMORY_PRESSURE_MULTI_SOURCE_MEMORY_PRESSURE_MONITOR_H_
 
-#include "base/memory/memory_pressure_monitor.h"
+#include "base/functional/callback.h"
+#include "base/memory/memory_pressure_level.h"
+#include "base/sequence_checker.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "components/memory_pressure/memory_pressure_level_reporter.h"
@@ -15,19 +17,17 @@ namespace memory_pressure {
 
 class SystemMemoryPressureEvaluator;
 
-// This is a specialization of a MemoryPressureMonitor that relies on a set of
-// MemoryPressureVoters to determine the memory pressure state. The
-// MemoryPressureVoteAggregator is in charge of receiving votes from these
-// voters and notifying MemoryPressureListeners of the MemoryPressureLevel via
-// the monitor's |dispatch_callback_|. The pressure level is calculated as the
-// most critical of all votes collected.
+// This class relies on a set of MemoryPressureVoters to determine the memory
+// pressure state. The MemoryPressureVoteAggregator is in charge of receiving
+// votes from these voters and notifying MemoryPressureListeners of the
+// MemoryPressureLevel via the monitor's |dispatch_callback_|. The pressure
+// level is calculated as the most critical of all votes collected.
 // This class is not thread safe and should be used from a single sequence.
 class MultiSourceMemoryPressureMonitor
-    : public base::MemoryPressureMonitor,
-      public MemoryPressureVoteAggregator::Delegate {
+    : public MemoryPressureVoteAggregator::Delegate {
  public:
-  using MemoryPressureLevel = base::MemoryPressureMonitor::MemoryPressureLevel;
-  using DispatchCallback = base::MemoryPressureMonitor::DispatchCallback;
+  using DispatchCallback =
+      base::RepeatingCallback<void(base::MemoryPressureLevel level)>;
 
   MultiSourceMemoryPressureMonitor();
   ~MultiSourceMemoryPressureMonitor() override;
@@ -37,17 +37,23 @@ class MultiSourceMemoryPressureMonitor
   MultiSourceMemoryPressureMonitor& operator=(
       const MultiSourceMemoryPressureMonitor&) = delete;
 
+  static MultiSourceMemoryPressureMonitor* Get();
+
   // Start monitoring memory pressure by creating the platform-specific voter.
   // Does nothing on ChromeOS & Chromecast, for which there is no default
   // system evaluator implementations.
   void MaybeStartPlatformVoter();
 
-  // MemoryPressureMonitor implementation.
-  MemoryPressureLevel GetCurrentPressureLevel() const override;
-
   // Creates a MemoryPressureVoter to be owned/used by a source that wishes to
   // have input on the overall memory pressure level.
   std::unique_ptr<MemoryPressureVoter> CreateVoter();
+
+  // Set whether the critical memory pressure is due to low disk space.
+  // |new_os_pressure_level| indicates the current OS-reported memory pressure
+  // level, so that time is only attributed to the disk bucket when the OS is
+  // not also critical.
+  void UpdateDiskPressureState(bool new_is_disk_pressure,
+                               base::MemoryPressureLevel new_os_pressure_level);
 
   // Sets the system evaluator on platforms where no default implementation
   // exists, because of layering concerns (ChromeOS & Chromecast).
@@ -69,10 +75,10 @@ class MultiSourceMemoryPressureMonitor
 
  private:
   // Delegate implementation.
-  void OnMemoryPressureLevelChanged(MemoryPressureLevel level) override;
+  void OnMemoryPressureLevelChanged(base::MemoryPressureLevel level) override;
   void OnNotifyListenersRequested() override;
 
-  MemoryPressureLevel current_pressure_level_;
+  base::MemoryPressureLevel current_pressure_level_;
 
   DispatchCallback dispatch_callback_;
 

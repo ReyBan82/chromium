@@ -4,9 +4,16 @@
 
 #include "mojo/public/cpp/base/big_buffer.h"
 
+#include <algorithm>
+#include <utility>
+
 #include "base/check.h"
+#include "base/compiler_specific.h"
+#include "base/containers/heap_array.h"
+#include "base/memory/unsafe_shared_memory_region.h"
 #include "base/notreached.h"
-#include "base/ranges/algorithm.h"
+#include "mojo/public/cpp/system/platform_handle.h"
+#include "third_party/perfetto/include/perfetto/tracing/traced_value.h"
 
 namespace mojo_base {
 
@@ -42,9 +49,14 @@ namespace {
 void TryCreateSharedMemory(
     size_t size,
     BigBuffer::StorageType* storage_type,
-    absl::optional<internal::BigBufferSharedMemoryRegion>* shared_memory) {
+    std::optional<internal::BigBufferSharedMemoryRegion>* shared_memory) {
   if (size > BigBuffer::kMaxInlineBytes) {
-    auto buffer = mojo::SharedBufferHandle::Create(size);
+    // `SharedBufferHandle::Create()` returns a writable shared memory region,
+    // but this costs an extra FD and potentially an extra IPC on Posix. Since
+    // this region is never downgraded to read-only, just directly create an
+    // unsafe (and always writable) region instead.
+    auto buffer = mojo::WrapUnsafeSharedMemoryRegion(
+        base::UnsafeSharedMemoryRegion::Create(size));
     if (buffer.is_valid()) {
       internal::BigBufferSharedMemoryRegion shm_region(std::move(buffer), size);
       if (shm_region.memory()) {
@@ -62,27 +74,11 @@ void TryCreateSharedMemory(
 
 }  // namespace
 
-// static
-constexpr size_t BigBuffer::kMaxInlineBytes;
-
-BigBuffer::BigBuffer() : storage_type_(StorageType::kBytes), bytes_size_(0) {}
-
-BigBuffer::BigBuffer(BigBuffer&& other)
-    : storage_type_(other.storage_type_),
-      bytes_(std::move(other.bytes_)),
-      bytes_size_(other.bytes_size_),
-      shared_memory_(std::move(other.shared_memory_)) {
-  // Make sure |other| looks empty.
-  other.storage_type_ = StorageType::kInvalidBuffer;
-  other.bytes_size_ = 0;
-}
+BigBuffer::BigBuffer() = default;
 
 BigBuffer::BigBuffer(base::span<const uint8_t> data) {
   *this = BigBufferView::ToBigBuffer(BigBufferView(data));
 }
-
-BigBuffer::BigBuffer(const std::vector<uint8_t>& data)
-    : BigBuffer(base::make_span(data)) {}
 
 BigBuffer::BigBuffer(internal::BigBufferSharedMemoryRegion shared_memory)
     : storage_type_(StorageType::kSharedMemory),
@@ -93,32 +89,46 @@ BigBuffer::BigBuffer(size_t size) {
   if (storage_type_ == BigBuffer::StorageType::kBytes) {
     // Either |size| is small enough or shared memory allocation failed, and
     // fallback to inline allocation is feasible.
-    bytes_ = std::make_unique<uint8_t[]>(size);
-    bytes_size_ = size;
+    bytes_ = base::HeapArray<uint8_t>::Uninit(size);
   }
+}
+
+BigBuffer::BigBuffer(BigBuffer&& other)
+    // Make sure |other| looks empty.
+    : storage_type_(
+          std::exchange(other.storage_type_, StorageType::kInvalidBuffer)),
+      bytes_(std::move(other.bytes_)),
+      shared_memory_(std::move(other.shared_memory_)) {}
+
+BigBuffer& BigBuffer::operator=(BigBuffer&& other) {
+  // Make sure |other| looks empty.
+  storage_type_ =
+      std::exchange(other.storage_type_, StorageType::kInvalidBuffer);
+  bytes_ = std::move(other.bytes_);
+  shared_memory_ = std::move(other.shared_memory_);
+  return *this;
 }
 
 BigBuffer::~BigBuffer() = default;
 
-BigBuffer& BigBuffer::operator=(BigBuffer&& other) {
-  storage_type_ = other.storage_type_;
-  bytes_ = std::move(other.bytes_);
-  bytes_size_ = other.bytes_size_;
-  shared_memory_ = std::move(other.shared_memory_);
-  // Make sure |other| looks empty.
-  other.storage_type_ = StorageType::kInvalidBuffer;
-  other.bytes_size_ = 0;
-  return *this;
+BigBuffer BigBuffer::Clone() const {
+  return BigBuffer(base::span(*this));
 }
 
-uint8_t* BigBuffer::data() {
-  return const_cast<uint8_t*>(const_cast<const BigBuffer*>(this)->data());
+void BigBuffer::MakePrivateBytes() {
+  CHECK(storage_type_ != StorageType::kInvalidBuffer);
+  if (storage_type_ == StorageType::kSharedMemory) {
+    // Copy the data into a new inline buffer.
+    bytes_ = base::HeapArray<uint8_t>::CopiedFrom(base::span(*this));
+    shared_memory_.reset();
+    storage_type_ = StorageType::kBytes;
+  }
 }
 
 const uint8_t* BigBuffer::data() const {
   switch (storage_type_) {
     case StorageType::kBytes:
-      return bytes_.get();
+      return bytes_.data();
     case StorageType::kSharedMemory:
       DCHECK(shared_memory_->buffer_mapping_);
       return static_cast<const uint8_t*>(
@@ -129,22 +139,26 @@ const uint8_t* BigBuffer::data() const {
       return nullptr;
     default:
       NOTREACHED();
-      return nullptr;
   }
 }
 
 size_t BigBuffer::size() const {
   switch (storage_type_) {
     case StorageType::kBytes:
-      return bytes_size_;
+      return bytes_.size();
     case StorageType::kSharedMemory:
       return shared_memory_->size();
     case StorageType::kInvalidBuffer:
       return 0;
     default:
       NOTREACHED();
-      return 0;
   }
+}
+
+void BigBuffer::WriteIntoTrace(perfetto::TracedValue context) const {
+  // Don't write the data, otherwise traces become enormous, and crash the UI.
+  auto dict = std::move(context).WriteDictionary();
+  perfetto::WriteIntoTracedValue(dict.AddItem("size"), size());
 }
 
 BigBufferView::BigBufferView() = default;
@@ -155,7 +169,7 @@ BigBufferView::BigBufferView(base::span<const uint8_t> bytes) {
   TryCreateSharedMemory(bytes.size(), &storage_type_, &shared_memory_);
   if (storage_type_ == BigBuffer::StorageType::kSharedMemory) {
     DCHECK(shared_memory_->memory());
-    base::ranges::copy(bytes, static_cast<uint8_t*>(shared_memory_->memory()));
+    std::ranges::copy(bytes, static_cast<uint8_t*>(shared_memory_->memory()));
     return;
   }
   if (storage_type_ == BigBuffer::StorageType::kBytes) {
@@ -189,9 +203,10 @@ base::span<const uint8_t> BigBufferView::data() const {
     return bytes_;
   } else if (storage_type_ == BigBuffer::StorageType::kSharedMemory) {
     DCHECK(shared_memory_.has_value());
-    return base::make_span(static_cast<const uint8_t*>(const_cast<const void*>(
-                               shared_memory_->memory())),
-                           shared_memory_->size());
+    return UNSAFE_TODO(
+        base::span(static_cast<const uint8_t*>(
+                       const_cast<const void*>(shared_memory_->memory())),
+                   shared_memory_->size()));
   }
 
   return base::span<const uint8_t>();
@@ -202,9 +217,7 @@ BigBuffer BigBufferView::ToBigBuffer(BigBufferView view) {
   BigBuffer buffer;
   buffer.storage_type_ = view.storage_type_;
   if (view.storage_type_ == BigBuffer::StorageType::kBytes) {
-    buffer.bytes_ = std::make_unique<uint8_t[]>(view.bytes_.size());
-    buffer.bytes_size_ = view.bytes_.size();
-    base::ranges::copy(view.bytes_, buffer.bytes_.get());
+    buffer.bytes_ = base::HeapArray<uint8_t>::CopiedFrom(view.bytes_);
   } else if (view.storage_type_ == BigBuffer::StorageType::kSharedMemory) {
     buffer.shared_memory_ = std::move(*view.shared_memory_);
   }

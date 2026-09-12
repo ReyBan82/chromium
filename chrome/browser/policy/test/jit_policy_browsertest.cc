@@ -6,12 +6,12 @@
 
 #include "base/values.h"
 #include "chrome/browser/policy/policy_test_utils.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/ui_test_utils.h"
 #include "components/content_settings/core/common/content_settings.h"
 #include "components/policy/core/common/policy_map.h"
 #include "components/policy/policy_constants.h"
+#include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/test_utils.h"
@@ -51,12 +51,12 @@ class JITPolicyTest
 
     AddDefaultPolicy(&policies);
 
-    base::Value::List block_list;
+    base::ListValue block_list;
     block_list.Append("jit-disabled.com");
     SetPolicy(&policies, key::kJavaScriptJitBlockedForSites,
               base::Value(std::move(block_list)));
 
-    base::Value::List allow_list;
+    base::ListValue allow_list;
     allow_list.Append("jit-enabled.com");
     SetPolicy(&policies, key::kJavaScriptJitAllowedForSites,
               base::Value(std::move(allow_list)));
@@ -105,7 +105,7 @@ void JITPolicyTest::ExpectThatPolicyDisablesJitOnUrl(const char* policy_value,
   PolicyMap policies;
   AddDefaultPolicy(&policies);
 
-  base::Value::List block_list;
+  base::ListValue block_list;
   block_list.Append(policy_value);
   SetPolicy(&policies, key::kJavaScriptJitBlockedForSites,
             base::Value(std::move(block_list)));

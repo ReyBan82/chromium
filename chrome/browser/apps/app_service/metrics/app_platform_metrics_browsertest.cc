@@ -6,32 +6,30 @@
 
 #include <memory>
 
-#include "ash/webui/system_apps/public/system_web_app_type.h"
 #include "chrome/browser/apps/app_service/app_service_proxy.h"
 #include "chrome/browser/apps/app_service/app_service_proxy_factory.h"
 #include "chrome/browser/ash/system_web_apps/system_web_app_manager.h"
 #include "chrome/browser/ui/ash/system_web_apps/system_web_app_ui_utils.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/web_applications/mojom/user_display_mode.mojom.h"
 #include "chrome/browser/web_applications/test/web_app_install_test_utils.h"
 #include "chrome/browser/web_applications/web_app_install_info.h"
-#include "chrome/browser/web_applications/web_app_provider.h"
 #include "chrome/test/base/in_process_browser_test.h"
+#include "chromeos/ash/components/system_web_apps/system_web_app_type.h"
 #include "components/services/app_service/public/cpp/app_launch_util.h"
 #include "content/public/test/browser_test.h"
 #include "third_party/blink/public/mojom/manifest/display_mode.mojom.h"
 #include "url/gurl.h"
 
 using apps::GetAppTypeName;
-using web_app::AppId;
+using webapps::AppId;
 
 class AppPlatformMetricsBrowserTest : public InProcessBrowserTest {
  public:
   AppId InstallWebApp(const GURL& start_url,
                       blink::mojom::DisplayMode display_mode,
                       web_app::mojom::UserDisplayMode user_display_mode) {
-    auto web_app_info = std::make_unique<WebAppInstallInfo>();
-    web_app_info->start_url = start_url;
+    auto web_app_info =
+        web_app::WebAppInstallInfo::CreateWithStartUrlForTesting(start_url);
     web_app_info->scope = start_url.GetWithoutFilename();
     web_app_info->display_mode = display_mode;
     web_app_info->user_display_mode = user_display_mode;
@@ -56,7 +54,7 @@ class AppPlatformMetricsBrowserTest : public InProcessBrowserTest {
                           container);
   }
 
-  Profile* profile() { return browser()->profile(); }
+  Profile* profile() { return browser()->GetProfile(); }
 };
 
 IN_PROC_BROWSER_TEST_F(AppPlatformMetricsBrowserTest, SystemWebApp) {

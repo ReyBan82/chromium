@@ -4,7 +4,10 @@
 
 #include "media/base/decoder.h"
 
+#include "base/feature_list.h"
 #include "base/notreached.h"
+#include "media/base/media_switches.h"
+#include "media/gpu/buildflags.h"
 
 namespace media {
 
@@ -20,7 +23,7 @@ bool Decoder::SupportsDecryption() const {
   return false;
 }
 
-std::string GetDecoderName(VideoDecoderType type) {
+const char* GetDecoderName(VideoDecoderType type) {
   switch (type) {
     case VideoDecoderType::kUnknown:
       return "Unknown Video Decoder";
@@ -54,10 +57,12 @@ std::string GetDecoderName(VideoDecoderType type) {
       return "Testing or Mock Video decoder";
     case VideoDecoderType::kOutOfProcess:
       return "OOPVideoDecoder";
+    case VideoDecoderType::kVideoToolbox:
+      return "VideoToolboxVideoDecoder";
   }
 }
 
-std::string GetDecoderName(AudioDecoderType type) {
+const char* GetDecoderName(AudioDecoderType type) {
   switch (type) {
     case AudioDecoderType::kUnknown:
       return "Unknown Audio Decoder";
@@ -79,6 +84,12 @@ std::string GetDecoderName(AudioDecoderType type) {
       return "AudioToolboxAudioDecoder";
     case AudioDecoderType::kMediaFoundation:
       return "MediaFoundationAudioDecoder";
+    case AudioDecoderType::kSymphonia:
+      return "SymphoniaAudioDecoder";
+    case AudioDecoderType::kOpus:
+      return "OpusAudioDecoder";
+    case AudioDecoderType::kIamf:
+      return "IamfAudioDecoder";
   }
 }
 
@@ -89,5 +100,19 @@ std::ostream& operator<<(std::ostream& out, AudioDecoderType type) {
 std::ostream& operator<<(std::ostream& out, VideoDecoderType type) {
   return out << GetDecoderName(type);
 }
+
+#if BUILDFLAG(USE_VAAPI) || BUILDFLAG(USE_V4L2_CODEC)
+VideoDecoderType ActiveLinuxVideoDecoderType() {
+#if BUILDFLAG(USE_VAAPI) && BUILDFLAG(USE_V4L2_CODEC)
+  return base::FeatureList::IsEnabled(kPreferV4L2VideoAcceleration)
+             ? VideoDecoderType::kV4L2
+             : VideoDecoderType::kVaapi;
+#elif BUILDFLAG(USE_VAAPI)
+  return VideoDecoderType::kVaapi;
+#elif BUILDFLAG(USE_V4L2_CODEC)
+  return VideoDecoderType::kV4L2;
+#endif
+}
+#endif  // BUILDFLAG(USE_VAAPI) || BUILDFLAG(USE_V4L2_CODEC)
 
 }  // namespace media

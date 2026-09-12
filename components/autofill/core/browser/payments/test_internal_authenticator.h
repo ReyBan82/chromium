@@ -23,17 +23,16 @@ class TestInternalAuthenticator : public webauthn::InternalAuthenticator {
   void MakeCredential(
       blink::mojom::PublicKeyCredentialCreationOptionsPtr options,
       blink::mojom::Authenticator::MakeCredentialCallback callback) override {}
-  void GetAssertion(
-      blink::mojom::PublicKeyCredentialRequestOptionsPtr options,
-      blink::mojom::Authenticator::GetAssertionCallback callback) override {}
+  void GetAssertion(blink::mojom::PublicKeyCredentialRequestOptionsPtr options,
+                    GetAssertionCallback callback) override {}
   void IsUserVerifyingPlatformAuthenticatorAvailable(
       blink::mojom::Authenticator::
           IsUserVerifyingPlatformAuthenticatorAvailableCallback callback)
       override;
   bool IsGetMatchingCredentialIdsSupported() override;
   void GetMatchingCredentialIds(
-      const std::string& relying_party_id,
-      const std::vector<std::vector<uint8_t>>& credential_ids,
+      std::string_view relying_party_id,
+      base::span<const std::vector<uint8_t>> credential_ids,
       bool require_third_party_payment_bit,
       webauthn::GetMatchingCredentialIdsCallback callback) override {}
   void Cancel() override {}

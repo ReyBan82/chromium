@@ -31,7 +31,11 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_DOWN_SAMPLER_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_DOWN_SAMPLER_H_
 
+#include <memory>
+
+#include "base/containers/span.h"
 #include "third_party/blink/renderer/platform/audio/audio_array.h"
+#include "third_party/blink/renderer/platform/audio/direct_convolver.h"
 #include "third_party/blink/renderer/platform/audio/simple_fft_convolver.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/allocator/allocator.h"
@@ -40,7 +44,7 @@ namespace blink {
 
 // DownSampler down-samples the source stream by a factor of 2x.
 
-class PLATFORM_EXPORT DownSampler {
+class PLATFORM_EXPORT DownSampler final {
   USING_FAST_MALLOC(DownSampler);
 
  public:
@@ -48,10 +52,8 @@ class PLATFORM_EXPORT DownSampler {
   DownSampler(const DownSampler&) = delete;
   DownSampler& operator=(const DownSampler&) = delete;
 
-  // The destination buffer |destP| is of size sourceFramesToProcess / 2.
-  void Process(const float* source_p,
-               float* dest_p,
-               uint32_t source_frames_to_process);
+  // The destination buffer `dest` is of size source.size() / 2.
+  void Process(base::span<const float> source, base::span<float> dest);
 
   void Reset();
 
@@ -59,12 +61,12 @@ class PLATFORM_EXPORT DownSampler {
   size_t LatencyFrames() const;
 
  private:
-  enum { kDefaultKernelSize = 256 };
-
   unsigned input_block_size_;
 
-  // Half-band filter. SimpleFFTConvolver is always faster than DirectConvolver.
-  SimpleFFTConvolver convolver_;
+  // Half-band filter for the odd output sample-frames.  One of the two
+  // convolution methods will be selected based on the input block size.
+  std::unique_ptr<DirectConvolver> direct_convolver_;
+  std::unique_ptr<SimpleFFTConvolver> simple_fft_convolver_;
 
   AudioFloatArray temp_buffer_;
 

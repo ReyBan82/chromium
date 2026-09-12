@@ -4,47 +4,88 @@
 
 #include "components/autofill/core/browser/form_parsing/field_candidates.h"
 
+#include <stddef.h>
+
 #include <algorithm>
 #include <array>
+#include <iterator>
+#include <optional>
 
-#include "base/logging.h"
-#include "components/autofill/core/common/autofill_features.h"
+#include "base/check.h"
+#include "components/autofill/core/browser/field_types.h"
+#include "components/autofill/core/browser/form_parsing/autofill_parsing_util.h"
+#include "components/autofill/core/common/dense_set.h"
 
 namespace autofill {
 
-FieldCandidate::FieldCandidate(ServerFieldType field_type, float field_score)
-    : type(field_type), score(field_score) {}
+namespace {
+// Order reflects their priority in ascending order.
+// kSearch has the lowest precedence and kEmail has the highest precedence.
+inline constexpr std::array<HeuristicParser, 12>
+    kParserIncreasingPriorityOrder = {
+        HeuristicParser::kSearch,      HeuristicParser::kMerchantPromoCode,
+        HeuristicParser::kName,        HeuristicParser::kLoyaltyCard,
+        HeuristicParser::kPrice,       HeuristicParser::kIban,
+        HeuristicParser::kOneTimeCode, HeuristicParser::kCreditCard,
+        HeuristicParser::kAddress,     HeuristicParser::kTravel,
+        HeuristicParser::kPhone,       HeuristicParser::kEmail};
 
-FieldCandidates::FieldCandidates() = default;
+// Returns `parser_type`'s priority as the index in
+// `kParserIncreasingPriorityOrder`.
+inline constexpr size_t GetParserPriority(HeuristicParser parser_type) {
+  for (size_t i = 0; i < kParserIncreasingPriorityOrder.size(); ++i) {
+    if (kParserIncreasingPriorityOrder[i] == parser_type) {
+      return i;
+    }
+  }
+  NOTREACHED();
+}
+
+}  // namespace
+
+FieldCandidatePriority::FieldCandidatePriority(
+    bool is_name_or_high_quality_label_match,
+    HeuristicParser parser_type)
+    : is_name_or_high_quality_label_match(is_name_or_high_quality_label_match),
+      parser_priority(GetParserPriority(parser_type)) {}
+
+FieldCandidates::FieldCandidates(FieldType type,
+                                 MatchInfo match_info,
+                                 FieldCandidatePriority priority) {
+  AddFieldCandidate(type, std::move(match_info), std::move(priority));
+}
 
 FieldCandidates::FieldCandidates(FieldCandidates&& other) = default;
 FieldCandidates& FieldCandidates::operator=(FieldCandidates&& other) = default;
 
 FieldCandidates::~FieldCandidates() = default;
 
-void FieldCandidates::AddFieldCandidate(ServerFieldType type, float score) {
-  field_candidates_.emplace_back(type, score);
+void FieldCandidates::AddFieldCandidate(FieldType type,
+                                        MatchInfo match_info,
+                                        FieldCandidatePriority priority) {
+  field_candidates_.push_back(FieldCandidate{
+      .type = type, .match_info = match_info, .priority = priority});
 }
 
 // We currently select a type with the maximum score sum.
-ServerFieldType FieldCandidates::BestHeuristicType() const {
-  if (field_candidates_.empty())
-    return UNKNOWN_TYPE;
+FieldCandidate FieldCandidates::BestHeuristicCandidate() const {
+  CHECK(!field_candidates_.empty());
+  return *std::ranges::max_element(field_candidates_, {},
+                                   &FieldCandidate::priority);
+}
 
-  // Scores for each type. The index is their ServerFieldType enum value.
-  std::array<float, MAX_VALID_FIELD_TYPE> type_scores;
-  type_scores.fill(0.0f);
-
-  for (const auto& field_candidate : field_candidates_) {
-    VLOG(1) << "type: " << field_candidate.type
-            << " score: " << field_candidate.score;
-    type_scores[field_candidate.type] += field_candidate.score;
+DenseSet<MatchAttribute> FieldCandidates::BestHeuristicTypeReason() const {
+  DenseSet<MatchAttribute> attributes;
+  FieldCandidate best_candidate = BestHeuristicCandidate();
+  for (const FieldCandidate& candidate : field_candidates_) {
+    if (candidate.type == best_candidate.type) {
+      attributes.insert(candidate.match_info.matched_attribute ==
+                                MatchInfo::MatchAttribute::kName
+                            ? MatchAttribute::kName
+                            : MatchAttribute::kLabel);
+    }
   }
-
-  const auto* best_type_iter = base::ranges::max_element(type_scores);
-  const size_t index = std::distance(type_scores.cbegin(), best_type_iter);
-
-  return ToSafeServerFieldType(index, NO_SERVER_DATA);
+  return attributes;
 }
 
 }  // namespace autofill

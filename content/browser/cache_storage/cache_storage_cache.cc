@@ -6,6 +6,7 @@
 
 #include <stddef.h>
 
+#include <algorithm>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -13,20 +14,18 @@
 #include <utility>
 
 #include "base/barrier_closure.h"
+#include "base/compiler_specific.h"
 #include "base/containers/flat_map.h"
-#include "base/containers/stack_container.h"
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/guid.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/histogram_functions.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/numerics/checked_math.h"
-#include "base/ranges/algorithm.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/time/time.h"
 #include "base/trace_event/trace_event.h"
@@ -44,23 +43,25 @@
 #include "content/browser/cache_storage/cache_storage_trace_utils.h"
 #include "content/common/background_fetch/background_fetch_types.h"
 #include "crypto/hmac.h"
-#include "crypto/symmetric_key.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "net/base/completion_repeating_callback.h"
 #include "net/base/io_buffer.h"
 #include "net/base/net_errors.h"
 #include "net/base/url_util.h"
 #include "net/disk_cache/disk_cache.h"
+#include "net/http/http_connection_info.h"
 #include "net/http/http_request_headers.h"
 #include "net/http/http_response_headers.h"
 #include "net/http/http_status_code.h"
 #include "services/network/public/mojom/fetch_api.mojom.h"
 #include "storage/browser/quota/quota_manager_proxy.h"
 #include "storage/common/quota/padding_key.h"
+#include "third_party/abseil-cpp/absl/container/inlined_vector.h"
 #include "third_party/blink/public/common/cache_storage/cache_storage_utils.h"
 #include "third_party/blink/public/common/fetch/fetch_api_request_headers_map.h"
 #include "third_party/blink/public/mojom/loader/referrer.mojom.h"
 #include "third_party/blink/public/mojom/quota/quota_types.mojom.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 
 using blink::mojom::CacheStorageError;
 using blink::mojom::CacheStorageVerboseError;
@@ -108,7 +109,6 @@ network::mojom::FetchResponseType ProtoResponseTypeToFetchResponseType(
       return network::mojom::FetchResponseType::kOpaqueRedirect;
   }
   NOTREACHED();
-  return network::mojom::FetchResponseType::kOpaque;
 }
 
 proto::CacheResponse::ResponseType FetchResponseTypeToProtoResponseType(
@@ -128,101 +128,103 @@ proto::CacheResponse::ResponseType FetchResponseTypeToProtoResponseType(
       return proto::CacheResponse::OPAQUE_REDIRECT_TYPE;
   }
   NOTREACHED();
-  return proto::CacheResponse::OPAQUE_TYPE;
 }
 
 // Assert that ConnectionInfo does not change since we cast it to
 // an integer in order to serialize it to disk.
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_UNKNOWN == 0,
+static_assert(static_cast<int>(net::HttpConnectionInfo::kUNKNOWN) == 0,
               "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_HTTP1_1 == 1,
+static_assert(static_cast<int>(net::HttpConnectionInfo::kHTTP1_1) == 1,
               "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_DEPRECATED_SPDY2 == 2,
+static_assert(static_cast<int>(net::HttpConnectionInfo::kDEPRECATED_SPDY2) == 2,
               "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_DEPRECATED_SPDY3 == 3,
+static_assert(static_cast<int>(net::HttpConnectionInfo::kDEPRECATED_SPDY3) == 3,
               "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_HTTP2 == 4,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_UNKNOWN_VERSION == 5,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_DEPRECATED_HTTP2_14 == 6,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_DEPRECATED_HTTP2_15 == 7,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_HTTP0_9 == 8,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_HTTP1_0 == 9,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_32 == 10,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_33 == 11,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_34 == 12,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_35 == 13,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_36 == 14,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_37 == 15,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_38 == 16,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_39 == 17,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_40 == 18,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_41 == 19,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_42 == 20,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_43 == 21,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_Q099 == 22,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_44 == 23,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_45 == 24,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_46 == 25,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_47 == 26,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_999 == 27,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_Q048 == 28,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_Q049 == 29,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_Q050 == 30,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_T048 == 31,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_T049 == 32,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_T050 == 33,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_T099 == 34,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_DRAFT_25 == 35,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_DRAFT_27 == 36,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_DRAFT_28 == 37,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_DRAFT_29 == 38,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_T051 == 39,
-              "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_RFC_V1 == 40,
+static_assert(static_cast<int>(net::HttpConnectionInfo::kHTTP2) == 4,
               "ConnectionInfo enum is stable");
 static_assert(
-    net::HttpResponseInfo::CONNECTION_INFO_DEPRECATED_QUIC_2_DRAFT_1 == 41,
+    static_cast<int>(net::HttpConnectionInfo::kQUIC_UNKNOWN_VERSION) == 5,
     "ConnectionInfo enum is stable");
-static_assert(net::HttpResponseInfo::CONNECTION_INFO_QUIC_2_DRAFT_8 == 42,
+static_assert(static_cast<int>(net::HttpConnectionInfo::kDEPRECATED_HTTP2_14) ==
+                  6,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kDEPRECATED_HTTP2_15) ==
+                  7,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kHTTP0_9) == 8,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kHTTP1_0) == 9,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_32) == 10,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_33) == 11,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_34) == 12,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_35) == 13,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_36) == 14,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_37) == 15,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_38) == 16,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_39) == 17,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_40) == 18,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_41) == 19,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_42) == 20,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_43) == 21,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_Q099) == 22,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_44) == 23,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_45) == 24,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_46) == 25,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_47) == 26,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_999) == 27,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_Q048) == 28,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_Q049) == 29,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_Q050) == 30,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_T048) == 31,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_T049) == 32,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_T050) == 33,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_T099) == 34,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_DRAFT_25) == 35,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_DRAFT_27) == 36,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_DRAFT_28) == 37,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_DRAFT_29) == 38,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_T051) == 39,
+              "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_RFC_V1) == 40,
+              "ConnectionInfo enum is stable");
+static_assert(
+    static_cast<int>(net::HttpConnectionInfo::kDEPRECATED_QUIC_2_DRAFT_1) == 41,
+    "ConnectionInfo enum is stable");
+static_assert(static_cast<int>(net::HttpConnectionInfo::kQUIC_2_DRAFT_8) == 42,
               "ConnectionInfo enum is stable");
 // The following assert needs to be changed every time a new value is added.
 // It exists to prevent us from forgetting to add new values above.
-static_assert(net::HttpResponseInfo::NUM_OF_CONNECTION_INFOS == 43,
+static_assert(static_cast<int>(net::HttpConnectionInfo::kMaxValue) == 42,
               "Please add new values above and update this assert");
 
 // Copy headers out of a cache entry and into a protobuf. The callback is
@@ -250,7 +252,7 @@ bool VaryMatches(const blink::FetchAPIRequestHeadersMap& request,
   if (response_type == network::mojom::FetchResponseType::kOpaque)
     return true;
 
-  auto vary_iter = base::ranges::find_if(
+  auto vary_iter = std::ranges::find_if(
       response, [](const ResponseHeaderMap::value_type& pair) {
         return base::CompareCaseInsensitiveASCII(pair.first, "vary") == 0;
       });
@@ -281,17 +283,17 @@ bool VaryMatches(const blink::FetchAPIRequestHeadersMap& request,
   return true;
 }
 
-// Check a batch operation list for duplicate entries.  A StackVector
-// must be passed to store any resulting duplicate URL strings.  Returns
-// true if any duplicates were found.
-bool FindDuplicateOperations(
-    const std::vector<blink::mojom::BatchOperationPtr>& operations,
-    std::vector<std::string>* duplicate_url_list_out) {
+// Checks a batch operation list for duplicate entries. Returns any duplicate
+// URL strings that were found. If the return value is empty, then there were no
+// duplicates.
+std::vector<std::string> FindDuplicateOperations(
+    const std::vector<blink::mojom::BatchOperationPtr>& operations) {
   using blink::mojom::BatchOperation;
-  DCHECK(duplicate_url_list_out);
+
+  std::vector<std::string> duplicate_url_list;
 
   if (operations.size() < 2) {
-    return false;
+    return duplicate_url_list;
   }
 
   // Create a temporary sorted vector of the operations to support quickly
@@ -302,12 +304,12 @@ bool FindDuplicateOperations(
   // Note, this will use 512 bytes of stack space on 64-bit devices.  The
   // static size attempts to accommodate most typical Cache.addAll() uses in
   // service worker install events while not blowing up the stack too much.
-  base::StackVector<BatchOperation*, 64> sorted;
-  sorted->reserve(operations.size());
+  absl::InlinedVector<BatchOperation*, 64> sorted;
+  sorted.reserve(operations.size());
   for (const auto& op : operations) {
-    sorted->push_back(op.get());
+    sorted.push_back(op.get());
   }
-  std::sort(sorted->begin(), sorted->end(),
+  std::sort(sorted.begin(), sorted.end(),
             [](BatchOperation* left, BatchOperation* right) {
               return left->request->url < right->request->url;
             });
@@ -317,8 +319,8 @@ bool FindDuplicateOperations(
   // have the same URL.  This results in an average complexity of O(n log n).
   // If the entire list has entries with the same URL and different VARY
   // headers then this devolves into O(n^2).
-  for (auto outer = sorted->cbegin(); outer != sorted->cend(); ++outer) {
-    const BatchOperation* outer_op = *outer;
+  for (size_t i = 0; i < sorted.size(); ++i) {
+    const BatchOperation* outer_op = sorted[i];
 
     // Note, the spec checks CacheQueryOptions like ignoreSearch, etc, but
     // currently there is no way for script to trigger a batch operation with
@@ -326,17 +328,17 @@ bool FindDuplicateOperations(
     // supports multiple operations is addAll() and it does not allow options
     // to be passed.  Therefore we assume we do not need to take any options
     // into account here.
-    DCHECK(!outer_op->match_options);
+    CHECK(!outer_op->match_options, base::NotFatalUntil::M158);
 
     // If this entry already matches a duplicate we found, then just skip
     // ahead to find any remaining duplicates.
-    if (!duplicate_url_list_out->empty() &&
-        outer_op->request->url.spec() == duplicate_url_list_out->back()) {
+    if (!duplicate_url_list.empty() &&
+        outer_op->request->url.spec() == duplicate_url_list.back()) {
       continue;
     }
 
-    for (auto inner = std::next(outer); inner != sorted->cend(); ++inner) {
-      const BatchOperation* inner_op = *inner;
+    for (size_t j = i + 1; j < sorted.size(); ++j) {
+      const BatchOperation* inner_op = sorted[j];
       // Since the list is sorted we can stop looking at neighbors after
       // the first different URL.
       if (outer_op->request->url != inner_op->request->url) {
@@ -353,13 +355,13 @@ bool FindDuplicateOperations(
           VaryMatches(outer_op->request->headers, inner_op->request->headers,
                       outer_op->response->response_type,
                       outer_op->response->headers)) {
-        duplicate_url_list_out->push_back(inner_op->request->url.spec());
+        duplicate_url_list.push_back(inner_op->request->url.spec());
         break;
       }
     }
   }
 
-  return !duplicate_url_list_out->empty();
+  return duplicate_url_list;
 }
 
 GURL RemoveQueryParam(const GURL& url) {
@@ -369,7 +371,7 @@ GURL RemoveQueryParam(const GURL& url) {
 }
 
 void ReadMetadata(disk_cache::Entry* entry, MetadataCallback callback) {
-  DCHECK(entry);
+  CHECK(entry, base::NotFatalUntil::M158);
 
   scoped_refptr<net::IOBufferWithSize> buffer =
       base::MakeRefCounted<net::IOBufferWithSize>(
@@ -423,14 +425,17 @@ blink::mojom::FetchAPIRequestPtr CreateRequest(
           ? net::AppendOrReplaceRef(request_url, metadata.request().fragment())
           : request_url;
   request->method = metadata.request().method();
-  request->is_reload = false;
+  request->is_reload = metadata.request().is_reload_navigation();
+  request->is_history_navigation = metadata.request().is_history_navigation();
   request->referrer = blink::mojom::Referrer::New();
   request->headers = {};
 
   for (int i = 0; i < metadata.request().headers_size(); ++i) {
     const proto::CacheHeaderMap header = metadata.request().headers(i);
-    DCHECK_EQ(std::string::npos, header.name().find('\0'));
-    DCHECK_EQ(std::string::npos, header.value().find('\0'));
+    CHECK_EQ(std::string::npos, header.name().find('\0'),
+             base::NotFatalUntil::M158);
+    CHECK_EQ(std::string::npos, header.value().find('\0'),
+             base::NotFatalUntil::M158);
     request->headers.insert(std::make_pair(header.name(), header.value()));
   }
   return request;
@@ -438,12 +443,7 @@ blink::mojom::FetchAPIRequestPtr CreateRequest(
 
 blink::mojom::FetchAPIResponsePtr CreateResponse(
     const proto::CacheMetadata& metadata,
-    const std::string& cache_name) {
-  // We no longer support Responses with only a single URL entry.  This field
-  // was deprecated in M57.
-  if (metadata.response().has_url())
-    return nullptr;
-
+    const std::u16string& cache_name) {
   std::vector<GURL> url_list;
   url_list.reserve(metadata.response().url_list_size());
   for (int i = 0; i < metadata.response().url_list_size(); ++i)
@@ -452,8 +452,10 @@ blink::mojom::FetchAPIResponsePtr CreateResponse(
   ResponseHeaderMap headers;
   for (int i = 0; i < metadata.response().headers_size(); ++i) {
     const proto::CacheHeaderMap header = metadata.response().headers(i);
-    DCHECK_EQ(std::string::npos, header.name().find('\0'));
-    DCHECK_EQ(std::string::npos, header.value().find('\0'));
+    CHECK_EQ(std::string::npos, header.name().find('\0'),
+             base::NotFatalUntil::M158);
+    CHECK_EQ(std::string::npos, header.value().find('\0'),
+             base::NotFatalUntil::M158);
     headers.insert(std::make_pair(header.name(), header.value()));
   }
 
@@ -462,11 +464,11 @@ blink::mojom::FetchAPIResponsePtr CreateResponse(
           ? metadata.response().alpn_negotiated_protocol()
           : "unknown";
 
-  absl::optional<std::string> mime_type;
+  std::optional<std::string> mime_type;
   if (metadata.response().has_mime_type())
     mime_type = metadata.response().mime_type();
 
-  absl::optional<std::string> request_method;
+  std::optional<std::string> request_method;
   if (metadata.response().has_request_method())
     request_method = metadata.response().request_method();
 
@@ -496,17 +498,17 @@ blink::mojom::FetchAPIResponsePtr CreateResponse(
       padding, network::mojom::FetchResponseSource::kCacheStorage, headers,
       mime_type, request_method, /*blob=*/nullptr,
       blink::mojom::ServiceWorkerResponseError::kUnknown, response_time,
-      cache_name,
+      base::UTF16ToUTF8(cache_name),
       std::vector<std::string>(
           metadata.response().cors_exposed_header_names().begin(),
           metadata.response().cors_exposed_header_names().end()),
       /*side_data_blob=*/nullptr, /*side_data_blob_for_cache_put=*/nullptr,
       network::mojom::ParsedHeaders::New(),
-      // Default proto value of 0 maps to CONNECTION_INFO_UNKNOWN.
-      static_cast<net::HttpResponseInfo::ConnectionInfo>(
+      // Default proto value of 0 maps to HttpConnectionInfo::kUNKNOWN.
+      static_cast<net::HttpConnectionInfo>(
           metadata.response().connection_info()),
       alpn_negotiated_protocol, metadata.response().was_fetched_via_spdy(),
-      has_range_requested, /*auth_challenge_info=*/absl::nullopt,
+      has_range_requested, /*auth_challenge_info=*/std::nullopt,
       request_include_credentials);
 }
 
@@ -514,8 +516,8 @@ int64_t CalculateSideDataPadding(
     const storage::BucketLocator& bucket_locator,
     const ::content::proto::CacheResponse* response,
     int side_data_size) {
-  DCHECK(ShouldPadResourceSize(response));
-  DCHECK_GE(side_data_size, 0);
+  CHECK(ShouldPadResourceSize(response), base::NotFatalUntil::M158);
+  CHECK_GE(side_data_size, 0, base::NotFatalUntil::M158);
 
   if (!side_data_size)
     return 0;
@@ -591,7 +593,7 @@ struct CacheStorageCache::QueryCacheContext {
 struct CacheStorageCache::BatchInfo {
   size_t remaining_operations = 0;
   VerboseErrorCallback callback;
-  absl::optional<std::string> message;
+  std::optional<std::string> message;
   const int64_t trace_id = 0;
 };
 
@@ -599,7 +601,7 @@ struct CacheStorageCache::BatchInfo {
 std::unique_ptr<CacheStorageCache> CacheStorageCache::CreateMemoryCache(
     const storage::BucketLocator& bucket_locator,
     storage::mojom::CacheStorageOwner owner,
-    const std::string& cache_name,
+    const std::u16string& cache_name,
     CacheStorage* cache_storage,
     scoped_refptr<base::SequencedTaskRunner> scheduler_task_runner,
     scoped_refptr<storage::QuotaManagerProxy> quota_manager_proxy,
@@ -618,7 +620,7 @@ std::unique_ptr<CacheStorageCache> CacheStorageCache::CreateMemoryCache(
 std::unique_ptr<CacheStorageCache> CacheStorageCache::CreatePersistentCache(
     const storage::BucketLocator& bucket_locator,
     storage::mojom::CacheStorageOwner owner,
-    const std::string& cache_name,
+    const std::u16string& cache_name,
     CacheStorage* cache_storage,
     const base::FilePath& path,
     scoped_refptr<base::SequencedTaskRunner> scheduler_task_runner,
@@ -655,7 +657,7 @@ void CacheStorageCache::AddHandleRef() {
 
 void CacheStorageCache::DropHandleRef() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_GT(handle_ref_count_, 0U);
+  CHECK_GT(handle_ref_count_, 0U, base::NotFatalUntil::M158);
   handle_ref_count_ -= 1;
   // Dropping the last reference may result in the parent CacheStorage
   // deleting itself or this Cache object.  Be careful not to touch the
@@ -731,14 +733,14 @@ void CacheStorageCache::WriteSideData(ErrorCallback callback,
     return;
   }
 
-  // GetUsageAndQuota is called before entering a scheduled operation since it
-  // can call Size, another scheduled operation.
-  quota_manager_proxy_->GetUsageAndQuota(
-      bucket_locator_.storage_key, blink::mojom::StorageType::kTemporary,
-      scheduler_task_runner_,
-      base::BindOnce(&CacheStorageCache::WriteSideDataDidGetQuota,
-                     weak_ptr_factory_.GetWeakPtr(), std::move(callback), url,
-                     expected_response_time, trace_id, buffer, buf_len));
+  // GetBucketSpaceRemaining is called before entering a scheduled operation
+  // since it can call Size, another scheduled operation.
+  quota_manager_proxy_->GetBucketSpaceRemaining(
+      bucket_locator_, scheduler_task_runner_,
+      base::BindOnce(
+          &CacheStorageCache::WriteSideDataDidGetBucketSpaceRemaining,
+          weak_ptr_factory_.GetWeakPtr(), std::move(callback), url,
+          expected_response_time, trace_id, buffer, buf_len));
 }
 
 void CacheStorageCache::BatchOperation(
@@ -749,7 +751,7 @@ void CacheStorageCache::BatchOperation(
   // This method may produce a warning message that should be returned in the
   // final VerboseErrorCallback.  A message may be present in both the failure
   // and success paths.
-  absl::optional<std::string> message;
+  std::optional<std::string> message;
 
   if (backend_state_ == BACKEND_CLOSED) {
     scheduler_task_runner_->PostTask(
@@ -769,11 +771,13 @@ void CacheStorageCache::BatchOperation(
   // "If the result of running Query Cache with operation’s request,
   //  operation’s options, and addedItems is not empty, throw an
   //  InvalidStateError DOMException."
-  std::vector<std::string> duplicate_url_list;
-  if (FindDuplicateOperations(operations, &duplicate_url_list)) {
+
+  if (const auto duplicate_url_list = FindDuplicateOperations(operations);
+      !duplicate_url_list.empty()) {
     // If we found any duplicates we need to at least warn the user.  Format
     // the URL list into a comma-separated list.
-    std::string url_list_string = base::JoinString(duplicate_url_list, ", ");
+    const std::string url_list_string =
+        base::JoinString(duplicate_url_list, ", ");
 
     // Place the duplicate list into an error message.
     message.emplace(
@@ -816,15 +820,9 @@ void CacheStorageCache::BatchOperation(
   uint64_t space_required = safe_space_required.ValueOrDie();
   uint64_t side_data_size = safe_side_data_size.ValueOrDie();
   if (space_required || side_data_size) {
-    // GetUsageAndQuota is called before entering a scheduled operation since it
-    // can call Size, another scheduled operation. This is racy. The decision
-    // to commit is made before the scheduled Put operation runs. By the time
-    // Put runs, the cache might already be full and the usage will be larger
-    // than it's supposed to be.
-    quota_manager_proxy_->GetUsageAndQuota(
-        bucket_locator_.storage_key, blink::mojom::StorageType::kTemporary,
-        scheduler_task_runner_,
-        base::BindOnce(&CacheStorageCache::BatchDidGetUsageAndQuota,
+    quota_manager_proxy_->GetBucketSpaceRemaining(
+        bucket_locator_, scheduler_task_runner_,
+        base::BindOnce(&CacheStorageCache::BatchDidGetBucketSpaceRemaining,
                        weak_ptr_factory_.GetWeakPtr(), std::move(operations),
                        trace_id, std::move(callback),
                        std::move(bad_message_callback), std::move(message),
@@ -832,32 +830,28 @@ void CacheStorageCache::BatchOperation(
     return;
   }
 
-  BatchDidGetUsageAndQuota(std::move(operations), trace_id, std::move(callback),
-                           std::move(bad_message_callback), std::move(message),
-                           0 /* space_required */, 0 /* side_data_size */,
-                           blink::mojom::QuotaStatusCode::kOk, 0 /* usage */,
-                           0 /* quota */);
+  BatchDidGetBucketSpaceRemaining(
+      std::move(operations), trace_id, std::move(callback),
+      std::move(bad_message_callback), std::move(message),
+      0 /* space_required */, 0 /* side_data_size */, 0 /* space_remaining */);
 }
 
-void CacheStorageCache::BatchDidGetUsageAndQuota(
+void CacheStorageCache::BatchDidGetBucketSpaceRemaining(
     std::vector<blink::mojom::BatchOperationPtr> operations,
     int64_t trace_id,
     VerboseErrorCallback callback,
     BadMessageCallback bad_message_callback,
-    absl::optional<std::string> message,
+    std::optional<std::string> message,
     uint64_t space_required,
     uint64_t side_data_size,
-    blink::mojom::QuotaStatusCode status_code,
-    int64_t usage,
-    int64_t quota) {
-  TRACE_EVENT_WITH_FLOW1("CacheStorage",
-                         "CacheStorageCache::BatchDidGetUsageAndQuota",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "operations", CacheStorageTracedValue(operations));
+    storage::QuotaErrorOr<int64_t> space_remaining) {
+  TRACE_EVENT("CacheStorage",
+              "CacheStorageCache::BatchDidGetBucketSpaceRemaining",
+              perfetto::Flow::Global(trace_id), "operations",
+              CacheStorageTracedValue(operations));
+
   base::CheckedNumeric<uint64_t> safe_space_required = space_required;
   base::CheckedNumeric<uint64_t> safe_space_required_with_side_data;
-  safe_space_required += usage;
   safe_space_required_with_side_data = safe_space_required + side_data_size;
   if (!safe_space_required.IsValid() ||
       !safe_space_required_with_side_data.IsValid()) {
@@ -873,8 +867,8 @@ void CacheStorageCache::BatchDidGetUsageAndQuota(
                 std::move(message))));
     return;
   }
-  if (status_code != blink::mojom::QuotaStatusCode::kOk ||
-      safe_space_required.ValueOrDie() > quota) {
+  if (!space_remaining.has_value() ||
+      safe_space_required.ValueOrDie() > space_remaining.value()) {
     scheduler_task_runner_->PostTask(
         FROM_HERE, base::BindOnce(std::move(callback),
                                   CacheStorageVerboseError::New(
@@ -882,7 +876,8 @@ void CacheStorageCache::BatchDidGetUsageAndQuota(
                                       std::move(message))));
     return;
   }
-  bool skip_side_data = safe_space_required_with_side_data.ValueOrDie() > quota;
+  bool skip_side_data = safe_space_required_with_side_data.ValueOrDie() >
+                        static_cast<uint64_t>(space_remaining.value());
 
   auto completion_callback = base::BindRepeating(
       &CacheStorageCache::BatchDidOneOperation, weak_ptr_factory_.GetWeakPtr(),
@@ -906,31 +901,26 @@ void CacheStorageCache::BatchDidGetUsageAndQuota(
         }
         break;
       case blink::mojom::OperationType::kDelete:
-        DCHECK_EQ(1u, operations.size());
+        CHECK_EQ(1u, operations.size(), base::NotFatalUntil::M158);
         Delete(std::move(operation), completion_callback);
         break;
       case blink::mojom::OperationType::kUndefined:
-        NOTREACHED();
         // TODO(nhiroki): This should return "TypeError".
         // http://crbug.com/425505
-        completion_callback.Run(MakeErrorStorage(
-            ErrorStorageType::kBatchDidGetUsageAndQuotaUndefinedOp));
-        break;
+        NOTREACHED();
     }
   }
 }
 
 void CacheStorageCache::BatchDidOneOperation(BatchInfo& batch_status,
                                              CacheStorageError error) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::BatchDidOneOperation",
-                         TRACE_ID_GLOBAL(batch_status.trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::BatchDidOneOperation",
+              perfetto::Flow::Global(batch_status.trace_id));
   // Nothing further to report after the callback is called.
   if (!batch_status.callback)
     return;
 
-  DCHECK_GT(batch_status.remaining_operations, 0u);
+  CHECK_GT(batch_status.remaining_operations, 0u, base::NotFatalUntil::M158);
   batch_status.remaining_operations--;
 
   if (error != CacheStorageError::kSuccess) {
@@ -938,10 +928,8 @@ void CacheStorageCache::BatchDidOneOperation(BatchInfo& batch_status,
         .Run(CacheStorageVerboseError::New(error,
                                            std::move(batch_status.message)));
   } else if (batch_status.remaining_operations == 0) {
-    TRACE_EVENT_WITH_FLOW0(
-        "CacheStorage", "CacheStorageCache::BatchDidAllOperations",
-        TRACE_ID_GLOBAL(batch_status.trace_id),
-        TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+    TRACE_EVENT("CacheStorage", "CacheStorageCache::BatchDidAllOperations",
+                perfetto::Flow::Global(batch_status.trace_id));
     std::move(batch_status.callback)
         .Run(CacheStorageVerboseError::New(CacheStorageError::kSuccess,
                                            batch_status.message));
@@ -1019,7 +1007,8 @@ void CacheStorageCache::GetSizeThenClose(SizeCallback callback) {
 }
 
 void CacheStorageCache::SetObserver(CacheStorageCacheObserver* observer) {
-  DCHECK((observer == nullptr) ^ (cache_observer_ == nullptr));
+  CHECK((observer == nullptr) ^ (cache_observer_ == nullptr),
+        base::NotFatalUntil::M158);
   cache_observer_ = observer;
 }
 
@@ -1041,14 +1030,14 @@ CacheStorageCache::~CacheStorageCache() = default;
 
 void CacheStorageCache::SetSchedulerForTesting(
     std::unique_ptr<CacheStorageScheduler> scheduler) {
-  DCHECK(!scheduler_->ScheduledOperations());
+  CHECK(!scheduler_->ScheduledOperations(), base::NotFatalUntil::M158);
   scheduler_ = std::move(scheduler);
 }
 
 CacheStorageCache::CacheStorageCache(
     const storage::BucketLocator& bucket_locator,
     storage::mojom::CacheStorageOwner owner,
-    const std::string& cache_name,
+    const std::u16string& cache_name,
     const base::FilePath& path,
     CacheStorage* cache_storage,
     scoped_refptr<base::SequencedTaskRunner> scheduler_task_runner,
@@ -1074,8 +1063,9 @@ CacheStorageCache::CacheStorageCache(
               owner,
               std::move(blob_storage_context))),
       memory_only_(path.empty()) {
-  DCHECK(!bucket_locator_.storage_key.origin().opaque());
-  DCHECK(quota_manager_proxy_.get());
+  CHECK(!bucket_locator_.storage_key.origin().opaque(),
+        base::NotFatalUntil::M158);
+  CHECK(quota_manager_proxy_.get(), base::NotFatalUntil::M158);
 
   if (cache_size_ != CacheStorage::kSizeUnknown &&
       cache_padding_ != CacheStorage::kSizeUnknown) {
@@ -1089,9 +1079,10 @@ void CacheStorageCache::QueryCache(blink::mojom::FetchAPIRequestPtr request,
                                    QueryTypes query_types,
                                    CacheStorageSchedulerPriority priority,
                                    QueryCacheCallback callback) {
-  DCHECK_NE(
+  CHECK_NE(
       QUERY_CACHE_ENTRIES | QUERY_CACHE_RESPONSES_WITH_BODIES,
-      query_types & (QUERY_CACHE_ENTRIES | QUERY_CACHE_RESPONSES_WITH_BODIES));
+      query_types & (QUERY_CACHE_ENTRIES | QUERY_CACHE_RESPONSES_WITH_BODIES),
+      base::NotFatalUntil::M158);
   if (backend_state_ == BACKEND_CLOSED) {
     std::move(callback).Run(
         MakeErrorStorage(ErrorStorageType::kQueryCacheBackendClosed), nullptr);
@@ -1158,7 +1149,8 @@ void CacheStorageCache::QueryCacheOpenNextEntry(
         CacheStorageCache* self = From(handle);
         if (!self)
           return;
-        DCHECK_GT(self->query_cache_recursive_depth_, 0);
+        CHECK_GT(self->query_cache_recursive_depth_, 0,
+                 base::NotFatalUntil::M158);
         self->query_cache_recursive_depth_ -= 1;
       },
       CreateHandle()));
@@ -1288,9 +1280,6 @@ void CacheStorageCache::QueryCacheDidReadMetadata(
                                   ? metadata->response().side_data_padding()
                                   : 0;
 
-  DCHECK(!ShouldPadResourceSize(&metadata->response()) ||
-         (padding + side_data_padding));
-
   query_cache_context->matches->push_back(QueryCacheResult(
       base::Time::FromInternalValue(entry_time), padding, side_data_padding));
   QueryCacheResult* match = &query_cache_context->matches->back();
@@ -1362,12 +1351,13 @@ void CacheStorageCache::QueryCacheUpgradePadding(
     std::unique_ptr<QueryCacheContext> query_cache_context,
     disk_cache::ScopedEntryPtr entry,
     std::unique_ptr<proto::CacheMetadata> metadata) {
-  DCHECK(ShouldPadResourceSize(&metadata->response()));
+  CHECK(ShouldPadResourceSize(&metadata->response()),
+        base::NotFatalUntil::M158);
 
   // This should only be called while initializing because the padding
   // version change should trigger an immediate query of all resources
   // to recompute padding.
-  DCHECK(initializing_);
+  CHECK(initializing_, base::NotFatalUntil::M158);
 
   auto* response = metadata->mutable_response();
   response->set_padding(storage::ComputeRandomResponsePadding());
@@ -1396,7 +1386,8 @@ void CacheStorageCache::QueryCacheUpgradePadding(
             }
             // We must have a padding here in order to avoid infinite
             // recursion.
-            DCHECK(metadata->response().has_padding());
+            CHECK(metadata->response().has_padding(),
+                  base::NotFatalUntil::M158);
             self->QueryCacheDidReadMetadata(std::move(query_cache_context),
                                             std::move(entry),
                                             std::move(metadata));
@@ -1469,12 +1460,11 @@ void CacheStorageCache::MatchAllImpl(blink::mojom::FetchAPIRequestPtr request,
                                      int64_t trace_id,
                                      CacheStorageSchedulerPriority priority,
                                      ResponsesCallback callback) {
-  DCHECK_NE(BACKEND_UNINITIALIZED, backend_state_);
-  TRACE_EVENT_WITH_FLOW2("CacheStorage", "CacheStorageCache::MatchAllImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "request", CacheStorageTracedValue(request), "options",
-                         CacheStorageTracedValue(options));
+  CHECK_NE(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::MatchAllImpl",
+              perfetto::Flow::Global(trace_id), "request",
+              CacheStorageTracedValue(request), "options",
+              CacheStorageTracedValue(options));
   if (backend_state_ != BACKEND_OPEN) {
     std::move(callback).Run(
         MakeErrorStorage(ErrorStorageType::kStorageMatchAllBackendClosed),
@@ -1498,10 +1488,8 @@ void CacheStorageCache::MatchAllDidQueryCache(
     int64_t trace_id,
     CacheStorageError error,
     std::unique_ptr<QueryCacheResults> query_cache_results) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::MatchAllDidQueryCache",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::MatchAllDidQueryCache",
+              perfetto::Flow::Global(trace_id));
 
   if (error != CacheStorageError::kSuccess) {
     std::move(callback).Run(error,
@@ -1523,8 +1511,8 @@ void CacheStorageCache::MatchAllDidQueryCache(
 void CacheStorageCache::WriteMetadata(disk_cache::Entry* entry,
                                       const proto::CacheMetadata& metadata,
                                       WriteMetadataCallback callback) {
-  std::unique_ptr<std::string> serialized = std::make_unique<std::string>();
-  if (!metadata.SerializeToString(serialized.get())) {
+  std::string serialized;
+  if (!metadata.SerializeToString(&serialized)) {
     std::move(callback).Run(0, -1);
     return;
   }
@@ -1541,7 +1529,7 @@ void CacheStorageCache::WriteMetadata(disk_cache::Entry* entry,
   auto split_callback =
       base::SplitOnceCallback(std::move(callback_with_expected_bytes));
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   int rv = entry->WriteData(INDEX_HEADERS, /*offset=*/0, buffer.get(),
                             buffer->size(), std::move(split_callback.first),
                             /*truncate=*/true);
@@ -1550,23 +1538,19 @@ void CacheStorageCache::WriteMetadata(disk_cache::Entry* entry,
     std::move(split_callback.second).Run(rv);
 }
 
-void CacheStorageCache::WriteSideDataDidGetQuota(
+void CacheStorageCache::WriteSideDataDidGetBucketSpaceRemaining(
     ErrorCallback callback,
     const GURL& url,
     base::Time expected_response_time,
     int64_t trace_id,
     scoped_refptr<net::IOBuffer> buffer,
     int buf_len,
-    blink::mojom::QuotaStatusCode status_code,
-    int64_t usage,
-    int64_t quota) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::WriteSideDataDidGetQuota",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+    storage::QuotaErrorOr<int64_t> space_remaining) {
+  TRACE_EVENT("CacheStorage",
+              "CacheStorageCache::WriteSideDataDidGetBucketSpaceRemaining",
+              perfetto::Flow::Global(trace_id));
 
-  if (status_code != blink::mojom::QuotaStatusCode::kOk ||
-      (buf_len > quota - usage)) {
+  if (!space_remaining.has_value() || space_remaining.value() < buf_len) {
     scheduler_task_runner_->PostTask(
         FROM_HERE, base::BindOnce(std::move(callback),
                                   CacheStorageError::kErrorQuotaExceeded));
@@ -1590,11 +1574,9 @@ void CacheStorageCache::WriteSideDataImpl(ErrorCallback callback,
                                           int64_t trace_id,
                                           scoped_refptr<net::IOBuffer> buffer,
                                           int buf_len) {
-  DCHECK_NE(BACKEND_UNINITIALIZED, backend_state_);
-  TRACE_EVENT_WITH_FLOW1("CacheStorage", "CacheStorageCache::WriteSideDataImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "url", url.spec());
+  CHECK_NE(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::WriteSideDataImpl",
+              perfetto::Flow::Global(trace_id), "url", url.spec());
   if (backend_state_ != BACKEND_OPEN) {
     std::move(callback).Run(
         MakeErrorStorage(ErrorStorageType::kWriteSideDataImplBackendClosed));
@@ -1627,10 +1609,8 @@ void CacheStorageCache::WriteSideDataDidOpenEntry(
     scoped_refptr<net::IOBuffer> buffer,
     int buf_len,
     disk_cache::EntryResult result) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::WriteSideDataDidOpenEntry",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::WriteSideDataDidOpenEntry",
+              perfetto::Flow::Global(trace_id));
 
   if (result.net_error() != net::OK) {
     std::move(callback).Run(CacheStorageError::kErrorNotFound);
@@ -1658,10 +1638,8 @@ void CacheStorageCache::WriteSideDataDidReadMetaData(
     int buf_len,
     ScopedWritableEntry entry,
     std::unique_ptr<proto::CacheMetadata> headers) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::WriteSideDataDidReadMetaData",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::WriteSideDataDidReadMetaData",
+              perfetto::Flow::Global(trace_id));
   if (!headers || headers->response().response_time() !=
                       expected_response_time.ToInternalValue()) {
     WriteSideDataComplete(std::move(callback), std::move(entry),
@@ -1680,7 +1658,7 @@ void CacheStorageCache::WriteSideDataDidReadMetaData(
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback),
                      std::move(entry), buf_len, std::move(headers), trace_id));
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   int rv = temp_entry_ptr->WriteData(
       INDEX_SIDE_DATA, 0 /* offset */, buffer.get(), buf_len,
       std::move(split_callback.first), true /* truncate */);
@@ -1696,9 +1674,8 @@ void CacheStorageCache::WriteSideDataDidWrite(
     std::unique_ptr<::content::proto::CacheMetadata> metadata,
     int64_t trace_id,
     int rv) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::WriteSideDataDidWrite",
-                         TRACE_ID_GLOBAL(trace_id), TRACE_EVENT_FLAG_FLOW_IN);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::WriteSideDataDidWrite",
+              perfetto::TerminatingFlow::Global(trace_id));
   if (rv != expected_bytes) {
     WriteSideDataComplete(std::move(callback), std::move(entry),
                           /*padding=*/0, /*side_data_padding=*/0,
@@ -1778,8 +1755,11 @@ void CacheStorageCache::WriteSideDataComplete(
 void CacheStorageCache::Put(blink::mojom::BatchOperationPtr operation,
                             int64_t trace_id,
                             ErrorCallback callback) {
+  // TODO(crbug.com/558089492): CHECK-exclusion: Convert to a CHECK once we
+  // are confident it won't be triggered.
   DCHECK(BACKEND_OPEN == backend_state_ || initializing_);
-  DCHECK_EQ(blink::mojom::OperationType::kPut, operation->operation_type);
+  CHECK_EQ(blink::mojom::OperationType::kPut, operation->operation_type,
+           base::NotFatalUntil::M158);
   Put(std::move(operation->request), std::move(operation->response), trace_id,
       std::move(callback));
 }
@@ -1788,6 +1768,8 @@ void CacheStorageCache::Put(blink::mojom::FetchAPIRequestPtr request,
                             blink::mojom::FetchAPIResponsePtr response,
                             int64_t trace_id,
                             ErrorCallback callback) {
+  // TODO(crbug.com/557615001): CHECK-exclusion: Convert to a CHECK once we are
+  // confident it won't be triggered.
   DCHECK(BACKEND_OPEN == backend_state_ || initializing_);
 
   auto put_context = cache_entry_handler_->CreatePutContext(
@@ -1804,13 +1786,11 @@ void CacheStorageCache::Put(blink::mojom::FetchAPIRequestPtr request,
 }
 
 void CacheStorageCache::PutImpl(std::unique_ptr<PutContext> put_context) {
-  DCHECK_NE(BACKEND_UNINITIALIZED, backend_state_);
-  TRACE_EVENT_WITH_FLOW2(
-      "CacheStorage", "CacheStorageCache::PutImpl",
-      TRACE_ID_GLOBAL(put_context->trace_id),
-      TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT, "request",
-      CacheStorageTracedValue(put_context->request), "response",
-      CacheStorageTracedValue(put_context->response));
+  CHECK_NE(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::PutImpl",
+              perfetto::Flow::Global(put_context->trace_id), "request",
+              CacheStorageTracedValue(put_context->request), "response",
+              CacheStorageTracedValue(put_context->response));
   if (backend_state_ != BACKEND_OPEN) {
     PutComplete(std::move(put_context),
                 MakeErrorStorage(ErrorStorageType::kPutImplBackendClosed));
@@ -1847,9 +1827,8 @@ void CacheStorageCache::PutImpl(std::unique_ptr<PutContext> put_context) {
 void CacheStorageCache::PutDidDeleteEntry(
     std::unique_ptr<PutContext> put_context,
     CacheStorageError error) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage", "CacheStorageCache::PutDidDeleteEntry",
-                         TRACE_ID_GLOBAL(put_context->trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::PutDidDeleteEntry",
+              perfetto::Flow::Global(put_context->trace_id));
   if (backend_state_ != BACKEND_OPEN) {
     PutComplete(
         std::move(put_context),
@@ -1870,7 +1849,7 @@ void CacheStorageCache::PutDidDeleteEntry(
       base::BindOnce(&CacheStorageCache::PutDidCreateEntry,
                      weak_ptr_factory_.GetWeakPtr(), std::move(put_context)));
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   disk_cache::EntryResult result = backend_ptr->OpenOrCreateEntry(
       NormalizeCacheUrl(request_.url).spec(), net::MEDIUM,
       std::move(split_callback.first));
@@ -1882,9 +1861,8 @@ void CacheStorageCache::PutDidDeleteEntry(
 void CacheStorageCache::PutDidCreateEntry(
     std::unique_ptr<PutContext> put_context,
     disk_cache::EntryResult result) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage", "CacheStorageCache::PutDidCreateEntry",
-                         TRACE_ID_GLOBAL(put_context->trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::PutDidCreateEntry",
+              perfetto::Flow::Global(put_context->trace_id));
 
   int rv = result.net_error();
 
@@ -1894,7 +1872,7 @@ void CacheStorageCache::PutDidCreateEntry(
   put_context->cache_entry.reset(result.ReleaseEntry());
 
   if (rv != net::OK) {
-    quota_manager_proxy_->NotifyWriteFailed(bucket_locator_.storage_key);
+    quota_manager_proxy_->OnClientWriteFailed(bucket_locator_.storage_key);
     PutComplete(std::move(put_context), CacheStorageError::kErrorExists);
     return;
   }
@@ -1904,11 +1882,16 @@ void CacheStorageCache::PutDidCreateEntry(
   proto::CacheRequest* request_metadata = metadata.mutable_request();
   request_metadata->set_method(put_context->request->method);
   if (put_context->request->url.has_ref())
-    request_metadata->set_fragment(put_context->request->url.ref());
+    request_metadata->set_fragment(put_context->request->url.GetRef());
+  request_metadata->set_is_reload_navigation(put_context->request->is_reload);
+  request_metadata->set_is_history_navigation(
+      put_context->request->is_history_navigation);
 
   for (const auto& header : put_context->request->headers) {
-    DCHECK_EQ(std::string::npos, header.first.find('\0'));
-    DCHECK_EQ(std::string::npos, header.second.find('\0'));
+    CHECK_EQ(std::string::npos, header.first.find('\0'),
+             base::NotFatalUntil::M158);
+    CHECK_EQ(std::string::npos, header.second.find('\0'),
+             base::NotFatalUntil::M158);
     proto::CacheHeaderMap* header_map = request_metadata->add_headers();
     header_map->set_name(header.first);
     header_map->set_value(header.second);
@@ -1920,7 +1903,8 @@ void CacheStorageCache::PutDidCreateEntry(
           network::mojom::FetchResponseType::kOpaque &&
       put_context->response->response_type !=
           network::mojom::FetchResponseType::kOpaqueRedirect) {
-    DCHECK_NE(put_context->response->status_code, net::HTTP_PARTIAL_CONTENT);
+    CHECK_NE(put_context->response->status_code, net::HTTP_PARTIAL_CONTENT,
+             base::NotFatalUntil::M158);
   }
   response_metadata->set_status_code(put_context->response->status_code);
   response_metadata->set_status_text(put_context->response->status_text);
@@ -1929,7 +1913,7 @@ void CacheStorageCache::PutDidCreateEntry(
   for (const auto& url : put_context->response->url_list)
     response_metadata->add_url_list(url.spec());
   response_metadata->set_connection_info(
-      put_context->response->connection_info);
+      static_cast<int32_t>(put_context->response->connection_info));
   response_metadata->set_alpn_negotiated_protocol(
       put_context->response->alpn_negotiated_protocol);
   response_metadata->set_was_fetched_via_spdy(
@@ -1945,8 +1929,10 @@ void CacheStorageCache::PutDidCreateEntry(
   for (ResponseHeaderMap::const_iterator it =
            put_context->response->headers.begin();
        it != put_context->response->headers.end(); ++it) {
-    DCHECK_EQ(std::string::npos, it->first.find('\0'));
-    DCHECK_EQ(std::string::npos, it->second.find('\0'));
+    CHECK_EQ(std::string::npos, it->first.find('\0'),
+             base::NotFatalUntil::M158);
+    CHECK_EQ(std::string::npos, it->second.find('\0'),
+             base::NotFatalUntil::M158);
     proto::CacheHeaderMap* header_map = response_metadata->add_headers();
     header_map->set_name(it->first);
     header_map->set_value(it->second);
@@ -1954,8 +1940,6 @@ void CacheStorageCache::PutDidCreateEntry(
   for (const auto& header : put_context->response->cors_exposed_header_names)
     response_metadata->add_cors_exposed_header_names(header);
 
-  DCHECK(!ShouldPadResourceSize(*put_context->response) ||
-         put_context->response->padding);
   response_metadata->set_padding(put_context->response->padding);
 
   int64_t side_data_padding = 0;
@@ -1985,21 +1969,17 @@ void CacheStorageCache::PutDidWriteHeaders(
     int64_t side_data_padding,
     int expected_bytes,
     int rv) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::PutDidWriteHeaders",
-                         TRACE_ID_GLOBAL(put_context->trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::PutDidWriteHeaders",
+              perfetto::Flow::Global(put_context->trace_id));
 
   if (rv != expected_bytes) {
-    quota_manager_proxy_->NotifyWriteFailed(bucket_locator_.storage_key);
+    quota_manager_proxy_->OnClientWriteFailed(bucket_locator_.storage_key);
     PutComplete(
         std::move(put_context),
         MakeErrorStorage(ErrorStorageType::kPutDidWriteHeadersWrongBytes));
     return;
   }
 
-  DCHECK(!ShouldPadResourceSize(*put_context->response) ||
-         (padding + side_data_padding));
   cache_padding_ += padding + side_data_padding;
 
   PutWriteBlobToCache(std::move(put_context), INDEX_RESPONSE_BODY);
@@ -2008,13 +1988,12 @@ void CacheStorageCache::PutDidWriteHeaders(
 void CacheStorageCache::PutWriteBlobToCache(
     std::unique_ptr<PutContext> put_context,
     int disk_cache_body_index) {
-  DCHECK(disk_cache_body_index == INDEX_RESPONSE_BODY ||
-         disk_cache_body_index == INDEX_SIDE_DATA);
+  CHECK(disk_cache_body_index == INDEX_RESPONSE_BODY ||
+            disk_cache_body_index == INDEX_SIDE_DATA,
+        base::NotFatalUntil::M158);
 
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::PutWriteBlobToCache",
-                         TRACE_ID_GLOBAL(put_context->trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::PutWriteBlobToCache",
+              perfetto::Flow::Global(put_context->trace_id));
 
   mojo::PendingRemote<blink::mojom::Blob> blob;
   int64_t blob_size = 0;
@@ -2091,11 +2070,9 @@ void CacheStorageCache::PutDidWriteBlobToCache(
     int disk_cache_body_index,
     ScopedWritableEntry entry,
     bool success) {
-  DCHECK(entry);
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::PutDidWriteBlobToCache",
-                         TRACE_ID_GLOBAL(put_context->trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  CHECK(entry, base::NotFatalUntil::M158);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::PutDidWriteBlobToCache",
+              perfetto::Flow::Global(put_context->trace_id));
 
   active_blob_to_disk_cache_writers_.Remove(blob_to_cache_key);
 
@@ -2109,7 +2086,7 @@ void CacheStorageCache::PutWriteBlobToCacheComplete(
     int disk_cache_body_index,
     ScopedWritableEntry entry,
     int rv) {
-  DCHECK(entry);
+  CHECK(entry, base::NotFatalUntil::M158);
 
   put_context->cache_entry = std::move(entry);
 
@@ -2132,9 +2109,9 @@ void CacheStorageCache::PutComplete(std::unique_ptr<PutContext> put_context,
                                     blink::mojom::CacheStorageError error) {
   if (error == CacheStorageError::kSuccess) {
     // Make sure we've written everything.
-    DCHECK(put_context->cache_entry);
-    DCHECK(!put_context->blob);
-    DCHECK(!put_context->side_data_blob);
+    CHECK(put_context->cache_entry, base::NotFatalUntil::M158);
+    CHECK(!put_context->blob, base::NotFatalUntil::M158);
+    CHECK(!put_context->side_data_blob, base::NotFatalUntil::M158);
 
     // Tell the WritableScopedEntry not to doom the entry since it was a
     // successful operation.
@@ -2161,7 +2138,7 @@ void CacheStorageCache::CalculateCacheSizePaddingGotSize(
     int64_t cache_size) {
   // Enumerating entries is only done during cache initialization and only if
   // necessary.
-  DCHECK_EQ(backend_state_, BACKEND_UNINITIALIZED);
+  CHECK_EQ(backend_state_, BACKEND_UNINITIALIZED, base::NotFatalUntil::M158);
   auto request = blink::mojom::FetchAPIRequest::New();
   blink::mojom::CacheQueryOptionsPtr options =
       blink::mojom::CacheQueryOptions::New();
@@ -2182,8 +2159,6 @@ void CacheStorageCache::PaddingDidQueryCache(
   int64_t cache_padding = 0;
   if (error == CacheStorageError::kSuccess) {
     for (const auto& result : *query_cache_results) {
-      DCHECK(!ShouldPadResourceSize(*result.response) ||
-             (result.padding + result.side_data_padding));
       cache_padding += result.padding + result.side_data_padding;
     }
   }
@@ -2219,7 +2194,8 @@ void CacheStorageCache::UpdateCacheSizeGotSize(
     base::OnceClosure callback,
     int64_t current_cache_size) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_NE(current_cache_size, CacheStorage::kSizeUnknown);
+  CHECK_NE(current_cache_size, CacheStorage::kSizeUnknown,
+           base::NotFatalUntil::M158);
   cache_size_ = current_cache_size;
   int64_t size_delta = PaddedCacheSize() - last_reported_size_;
   last_reported_size_ = PaddedCacheSize();
@@ -2271,13 +2247,11 @@ void CacheStorageCache::GetAllMatchedEntriesImpl(
     blink::mojom::CacheQueryOptionsPtr options,
     int64_t trace_id,
     CacheEntriesCallback callback) {
-  DCHECK_NE(BACKEND_UNINITIALIZED, backend_state_);
-  TRACE_EVENT_WITH_FLOW2("CacheStorage",
-                         "CacheStorageCache::GetAllMatchedEntriesImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "request", CacheStorageTracedValue(request), "options",
-                         CacheStorageTracedValue(options));
+  CHECK_NE(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::GetAllMatchedEntriesImpl",
+              perfetto::Flow::Global(trace_id), "request",
+              CacheStorageTracedValue(request), "options",
+              CacheStorageTracedValue(options));
   if (backend_state_ != BACKEND_OPEN) {
     std::move(callback).Run(
         MakeErrorStorage(
@@ -2304,10 +2278,9 @@ void CacheStorageCache::GetAllMatchedEntriesDidQueryCache(
     CacheEntriesCallback callback,
     blink::mojom::CacheStorageError error,
     std::unique_ptr<QueryCacheResults> query_cache_results) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "CacheStorageCache::GetAllMatchedEntriesDidQueryCache",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage",
+              "CacheStorageCache::GetAllMatchedEntriesDidQueryCache",
+              perfetto::Flow::Global(trace_id));
 
   if (error != CacheStorageError::kSuccess) {
     std::move(callback).Run(error, {});
@@ -2334,8 +2307,10 @@ CacheStorageCache::InitState CacheStorageCache::GetInitState() const {
 
 void CacheStorageCache::Delete(blink::mojom::BatchOperationPtr operation,
                                ErrorCallback callback) {
-  DCHECK(BACKEND_OPEN == backend_state_ || initializing_);
-  DCHECK_EQ(blink::mojom::OperationType::kDelete, operation->operation_type);
+  CHECK(BACKEND_OPEN == backend_state_ || initializing_,
+        base::NotFatalUntil::M158);
+  CHECK_EQ(blink::mojom::OperationType::kDelete, operation->operation_type,
+           base::NotFatalUntil::M158);
 
   auto request = blink::mojom::FetchAPIRequest::New();
   request->url = operation->request->url;
@@ -2358,7 +2333,7 @@ void CacheStorageCache::DeleteImpl(
     blink::mojom::FetchAPIRequestPtr request,
     blink::mojom::CacheQueryOptionsPtr match_options,
     ErrorCallback callback) {
-  DCHECK_NE(BACKEND_UNINITIALIZED, backend_state_);
+  CHECK_NE(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
   if (backend_state_ != BACKEND_OPEN) {
     std::move(callback).Run(
         MakeErrorStorage(ErrorStorageType::kDeleteImplBackendClosed));
@@ -2391,13 +2366,11 @@ void CacheStorageCache::DeleteDidQueryCache(
     return;
   }
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
 
   for (auto& result : *query_cache_results) {
     disk_cache::ScopedEntryPtr entry = std::move(result.entry);
     if (ShouldPadResourceSize(*result.response)) {
-      DCHECK(!ShouldPadResourceSize(*result.response) ||
-             (result.padding + result.side_data_padding));
       cache_padding_ -= (result.padding + result.side_data_padding);
     }
     entry->Doom();
@@ -2411,12 +2384,11 @@ void CacheStorageCache::KeysImpl(blink::mojom::FetchAPIRequestPtr request,
                                  blink::mojom::CacheQueryOptionsPtr options,
                                  int64_t trace_id,
                                  RequestsCallback callback) {
-  DCHECK_NE(BACKEND_UNINITIALIZED, backend_state_);
-  TRACE_EVENT_WITH_FLOW2("CacheStorage", "CacheStorageCache::KeysImpl",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT,
-                         "request", CacheStorageTracedValue(request), "options",
-                         CacheStorageTracedValue(options));
+  CHECK_NE(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::KeysImpl",
+              perfetto::Flow::Global(trace_id), "request",
+              CacheStorageTracedValue(request), "options",
+              CacheStorageTracedValue(options));
 
   if (backend_state_ != BACKEND_OPEN) {
     std::move(callback).Run(
@@ -2440,9 +2412,8 @@ void CacheStorageCache::KeysDidQueryCache(
     int64_t trace_id,
     CacheStorageError error,
     std::unique_ptr<QueryCacheResults> query_cache_results) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage", "CacheStorageCache::KeysDidQueryCache",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "CacheStorageCache::KeysDidQueryCache",
+              perfetto::Flow::Global(trace_id));
 
   if (error != CacheStorageError::kSuccess) {
     std::move(callback).Run(error, nullptr);
@@ -2457,15 +2428,19 @@ void CacheStorageCache::KeysDidQueryCache(
 }
 
 void CacheStorageCache::CloseImpl(base::OnceClosure callback) {
+  // TODO(crbug.com/554523653): CHECK-exclusion: Convert to a CHECK once we are
+  // confident it won't be triggered.
   DCHECK_EQ(BACKEND_OPEN, backend_state_);
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   backend_.reset();
   post_backend_closed_callback_ = std::move(callback);
 }
 
 void CacheStorageCache::DeleteBackendCompletedIO() {
   if (!post_backend_closed_callback_.is_null()) {
+    // TODO(crbug.com/555074520): CHECK-exclusion: Convert to a CHECK once we
+    // are confident it won't be triggered.
     DCHECK_NE(BACKEND_CLOSED, backend_state_);
     backend_state_ = BACKEND_CLOSED;
     std::move(post_backend_closed_callback_).Run();
@@ -2473,7 +2448,7 @@ void CacheStorageCache::DeleteBackendCompletedIO() {
 }
 
 void CacheStorageCache::SizeImpl(SizeCallback callback) {
-  DCHECK_NE(BACKEND_UNINITIALIZED, backend_state_);
+  CHECK_NE(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
 
   // TODO(cmumford): Can CacheStorage::kSizeUnknown be returned instead of zero?
   if (backend_state_ != BACKEND_OPEN) {
@@ -2494,7 +2469,7 @@ void CacheStorageCache::GetSizeThenCloseDidGetSize(SizeCallback callback,
 }
 
 void CacheStorageCache::CreateBackend(ErrorCallback callback) {
-  DCHECK(!backend_);
+  CHECK(!backend_, base::NotFatalUntil::M158);
 
   // Use APP_CACHE as opposed to DISK_CACHE to prevent cache eviction.
   net::CacheType cache_type = memory_only_ ? net::MEMORY_CACHE : net::APP_CACHE;
@@ -2508,10 +2483,11 @@ void CacheStorageCache::CreateBackend(ErrorCallback callback) {
       base::BindOnce(&CacheStorageCache::CreateBackendDidCreate,
                      weak_ptr_factory_.GetWeakPtr(), std::move(callback)));
 
-  DCHECK(scheduler_->IsRunningExclusiveOperation());
+  CHECK(scheduler_->IsRunningExclusiveOperation(), base::NotFatalUntil::M158);
   disk_cache::BackendResult result = disk_cache::CreateCacheBackend(
       cache_type, net::CACHE_BACKEND_SIMPLE, /*file_operations=*/nullptr, path_,
       max_bytes, disk_cache::ResetHandling::kNeverReset, /*net_log=*/nullptr,
+      /*cache_encryption_delegate=*/nullptr,
       base::BindOnce(&CacheStorageCache::DeleteBackendCompletedIO,
                      weak_ptr_factory_.GetWeakPtr()),
       std::move(split_callback.first));
@@ -2534,9 +2510,9 @@ void CacheStorageCache::CreateBackendDidCreate(
 
 void CacheStorageCache::InitBackend() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK_EQ(BACKEND_UNINITIALIZED, backend_state_);
-  DCHECK(!initializing_);
-  DCHECK(!scheduler_->ScheduledOperations());
+  CHECK_EQ(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
+  CHECK(!initializing_, base::NotFatalUntil::M158);
+  CHECK(!scheduler_->ScheduledOperations(), base::NotFatalUntil::M158);
   initializing_ = true;
 
   auto id = scheduler_->CreateId();
@@ -2633,7 +2609,7 @@ void CacheStorageCache::InitGotCacheSizeAndPadding(
 }
 
 int64_t CacheStorageCache::PaddedCacheSize() const {
-  DCHECK_NE(BACKEND_UNINITIALIZED, backend_state_);
+  CHECK_NE(BACKEND_UNINITIALIZED, backend_state_, base::NotFatalUntil::M158);
   if (cache_size_ == CacheStorage::kSizeUnknown ||
       cache_padding_ == CacheStorage::kSizeUnknown) {
     return CacheStorage::kSizeUnknown;
@@ -2644,7 +2620,8 @@ int64_t CacheStorageCache::PaddedCacheSize() const {
 base::CheckedNumeric<uint64_t>
 CacheStorageCache::CalculateRequiredSafeSpaceForPut(
     const blink::mojom::BatchOperationPtr& operation) {
-  DCHECK_EQ(blink::mojom::OperationType::kPut, operation->operation_type);
+  CHECK_EQ(blink::mojom::OperationType::kPut, operation->operation_type,
+           base::NotFatalUntil::M158);
   base::CheckedNumeric<uint64_t> safe_space_required = 0;
   safe_space_required +=
       CalculateRequiredSafeSpaceForResponse(operation->response);

@@ -14,14 +14,21 @@
 # limitations under the License.
 #
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load(
     "//absl:copts/configure_copts.bzl",
     "ABSL_DEFAULT_COPTS",
     "ABSL_DEFAULT_LINKOPTS",
-    "ABSL_TEST_COPTS",
 )
 
-package(default_visibility = ["//visibility:public"])
+package(
+    default_visibility = ["//visibility:private"],
+    features = [
+        "header_modules",
+        "layering_check",
+        "parse_headers",
+    ],
+)
 
 licenses(["notice"])
 
@@ -32,23 +39,10 @@ cc_library(
     ],
     copts = ABSL_DEFAULT_COPTS,
     linkopts = ABSL_DEFAULT_LINKOPTS,
+    visibility = ["//visibility:public"],
     deps = [
-        "//absl/base:base_internal",
         "//absl/base:config",
-        "//absl/meta:type_traits",
-    ],
-)
-
-cc_test(
-    name = "utility_test",
-    srcs = ["utility_test.cc"],
-    copts = ABSL_TEST_COPTS,
-    linkopts = ABSL_DEFAULT_LINKOPTS,
-    deps = [
-        ":utility",
         "//absl/base:core_headers",
-        "//absl/memory",
-        "//absl/strings",
-        "@com_google_googletest//:gtest_main",
+        "//absl/meta:type_traits",
     ],
 )

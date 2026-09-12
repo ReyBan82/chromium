@@ -3,33 +3,59 @@
 # found in the LICENSE file.
 """Definitions of builders in the tryserver.chromium.mac builder group."""
 
-load("//lib/builders.star", "goma", "os")
-load("//lib/try.star", "try_")
-load("//lib/consoles.star", "consoles")
+load("@chromium-luci//builders.star", "cpu", "os")
+load("@chromium-luci//consoles.star", "consoles")
+load("@chromium-luci//gn_args.star", "gn_args")
+load("@chromium-luci//try.star", "try_")
+load("//lib/siso.star", "siso")
+load("//lib/try_constants.star", "try_constants")
 
 try_.defaults.set(
-    executable = try_.DEFAULT_EXECUTABLE,
+    executable = try_constants.DEFAULT_EXECUTABLE,
     builder_group = "tryserver.chromium.cft",
-    pool = try_.DEFAULT_POOL,
+    pool = try_constants.DEFAULT_POOL,
     builderless = True,
     cores = 8,
-    check_for_flakiness = True,
-    execution_timeout = try_.DEFAULT_EXECUTION_TIMEOUT,
-    goma_backend = goma.backend.RBE_PROD,
-    goma_jobs = goma.jobs.J150,
-    service_account = try_.DEFAULT_SERVICE_ACCOUNT,
+    execution_timeout = try_constants.DEFAULT_EXECUTION_TIMEOUT,
+    experiments = {
+        "chromium_tests.resultdb_module": 100,
+    },
+    service_account = try_constants.DEFAULT_SERVICE_ACCOUNT,
+    siso_keep_going = siso.KEEP_GOING,
+    siso_project = siso.project.DEFAULT_UNTRUSTED,
+    siso_remote_jobs = siso.remote_jobs.LOW_JOBS_FOR_CQ,
 )
 
 consoles.list_view(
     name = "tryserver.chromium.cft",
 )
 
+_LOCATION_FILTER = [
+    ".*chrome_for_testing.*",
+]
+
 try_.builder(
     name = "linux-rel-cft",
     mirrors = [
         "ci/linux-rel-cft",
     ],
+    gn_args = gn_args.config(
+        configs = [
+            "release_try_builder",
+            "remoteexec",
+            "no_symbols",
+            "devtools_do_typecheck",
+            "chrome_for_testing",
+            "chrome_with_codecs",
+            "linux",
+            "x64",
+        ],
+    ),
     os = os.LINUX_DEFAULT,
+    cq_settings = try_.cq_settings(
+        location_filters = _LOCATION_FILTER,
+    ),
+    siso_remote_linking = True,
 )
 
 try_.builder(
@@ -37,8 +63,23 @@ try_.builder(
     mirrors = [
         "ci/mac-rel-cft",
     ],
+    gn_args = gn_args.config(
+        configs = [
+            "release_try_builder",
+            "remoteexec",
+            "no_symbols",
+            "chrome_for_testing",
+            "chrome_with_codecs",
+            "mac",
+            "arm64",
+        ],
+    ),
     cores = None,
     os = os.MAC_DEFAULT,
+    cpu = cpu.ARM64,
+    cq_settings = try_.cq_settings(
+        location_filters = _LOCATION_FILTER,
+    ),
 )
 
 try_.builder(
@@ -46,6 +87,23 @@ try_.builder(
     mirrors = [
         "ci/win-rel-cft",
     ],
+    gn_args = gn_args.config(
+        configs = [
+            "release_try_builder",
+            "remoteexec",
+            # TODO(crbug.com/40099061) Delete this once coverage mode is enabled
+            # on the standard Windows trybot and the dedicated coverage trybot
+            # is no longer needed.
+            "no_resource_allowlisting",
+            "chrome_for_testing",
+            "chrome_with_codecs",
+            "win",
+            "x64",
+        ],
+    ),
     os = os.WINDOWS_DEFAULT,
-    execution_timeout = 6 * time.hour,
+    cq_settings = try_.cq_settings(
+        location_filters = _LOCATION_FILTER,
+    ),
+    siso_remote_linking = True,
 )

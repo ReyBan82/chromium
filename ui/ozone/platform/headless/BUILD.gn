@@ -27,12 +27,15 @@ source_set("headless") {
   deps = [
     "//base",
     "//build:chromecast_buildflags",
-    "//build:chromeos_buildflags",
+    "//components/headless/display_util",
+    "//components/headless/screen_info",
+    "//components/viz/common/resources:shared_image_format",
     "//gpu/vulkan:buildflags",
     "//skia",
     "//ui/base",
     "//ui/base/cursor",
     "//ui/base/ime",
+    "//ui/display",
     "//ui/events",
     "//ui/events/ozone/layout",
     "//ui/events/platform",
@@ -40,7 +43,6 @@ source_set("headless") {
     "//ui/ozone:ozone_base",
     "//ui/ozone/common",
     "//ui/platform_window",
-    "//ui/platform_window/stub",
   ]
 
   if (is_fuchsia) {
@@ -56,4 +58,19 @@ source_set("headless") {
     ]
     deps += [ "//gpu/vulkan" ]
   }
+}
+
+source_set("headless_unittests") {
+  testonly = true
+  sources = [ "headless_window_unittest.cc" ]
+  deps = [
+    ":headless",
+    "//base",
+    "//base/test:test_support",
+    "//testing/gtest",
+    "//ui/display:test_support",
+    "//ui/events:test_support",
+    "//ui/ozone:platform",
+    "//ui/ozone:test_support",
+  ]
 }

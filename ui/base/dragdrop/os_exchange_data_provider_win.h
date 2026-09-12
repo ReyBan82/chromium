@@ -5,24 +5,90 @@
 #ifndef UI_BASE_DRAGDROP_OS_EXCHANGE_DATA_PROVIDER_WIN_H_
 #define UI_BASE_DRAGDROP_OS_EXCHANGE_DATA_PROVIDER_WIN_H_
 
+#include <windows.h>
+#undef LoadBitmap  // Conflicts with ui/ API name.
+
 #include <objidl.h>
 #include <shlobj.h>
 #include <stddef.h>
 #include <wrl/client.h>
-#include <utility>
 
 #include <memory>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "base/component_export.h"
 #include "base/containers/span.h"
+#include "base/files/file_path.h"
+#include "base/memory/raw_ptr_exclusion.h"
+#include "base/win/scoped_co_mem.h"
 #include "ui/base/dragdrop/os_exchange_data.h"
 #include "ui/base/dragdrop/os_exchange_data_provider.h"
 #include "ui/gfx/geometry/vector2d.h"
 #include "ui/gfx/image/image_skia.h"
 
 namespace ui {
+
+// Placeholder path used for virtual file drag metadata on dragenter,
+// before actual temp files are created. See GetVirtualFilenames().
+inline constexpr wchar_t kVirtualFileTempPlaceholderPath[] =
+    FILE_PATH_LITERAL("temp.tmp");
+
+// A wrapper class to manage the lifetime of the memory allocated for a
+// `DVTARGETDEVICE`.
+//
+// The `FORMATETC` struct is defined by Windows and it defines `ptd` as a simple
+// pointer to a `DVTARGETDEVICE` allocated with `CoTaskMemAlloc` of size
+// `tdSize`. When copying a `FORMATETC` struct, its target device must be deep
+// copied.
+//
+// `ScopedTargetDevice` encapsulates allocating the required size for the target
+// device and managing the lifetime and copying of the memory.
+//
+// Note: We cannot use `base::win::ScopedCoMem` here because it does not support
+// a `release()` method to transfer ownership of the underlying memory to COM
+// callers (e.g. in `FormatEtcEnumerator::Next`, where the caller outside of
+// Chromium becomes responsible for freeing the memory).
+class COMPONENT_EXPORT(UI_BASE) ScopedTargetDevice {
+ public:
+  ScopedTargetDevice();
+  explicit ScopedTargetDevice(const DVTARGETDEVICE* source);
+  ScopedTargetDevice(const ScopedTargetDevice& other);
+  ScopedTargetDevice& operator=(const ScopedTargetDevice& other);
+  ScopedTargetDevice(ScopedTargetDevice&& other) noexcept;
+  ScopedTargetDevice& operator=(ScopedTargetDevice&& other) noexcept;
+  ~ScopedTargetDevice();
+
+  const DVTARGETDEVICE* get() const { return device_; }
+  DVTARGETDEVICE* get() { return device_; }
+  void Reset(const DVTARGETDEVICE* source);
+  DVTARGETDEVICE* release();
+
+ private:
+  RAW_PTR_EXCLUSION DVTARGETDEVICE* device_ = nullptr;
+};
+
+// A wrapper around the `FORMATETC` struct that ensures the associated target
+// device is deep copied and its lifetime is managed correctly via
+// `ScopedTargetDevice`.
+struct COMPONENT_EXPORT(UI_BASE) ScopedFormatEtc {
+ public:
+  ScopedFormatEtc();
+  explicit ScopedFormatEtc(const FORMATETC& source);
+  ScopedFormatEtc(const ScopedFormatEtc& other);
+  ScopedFormatEtc& operator=(const ScopedFormatEtc& other);
+  ScopedFormatEtc(ScopedFormatEtc&& other) noexcept;
+  ScopedFormatEtc& operator=(ScopedFormatEtc&& other) noexcept;
+  ~ScopedFormatEtc();
+
+  const FORMATETC* operator->() const { return &format_etc; }
+  FORMATETC* operator->() { return &format_etc; }
+
+  FORMATETC format_etc = {};
+  ScopedTargetDevice target_device;
+};
 
 class DataObjectImpl : public DownloadFileObserver,
                        public IDataObject,
@@ -88,7 +154,7 @@ class DataObjectImpl : public DownloadFileObserver,
   // Our internal representation of stored data & type info.
   struct StoredDataInfo {
    public:
-    FORMATETC format_etc;
+    ScopedFormatEtc format_etc;
     STGMEDIUM medium;
     std::unique_ptr<DownloadFileProvider> downloader;
 
@@ -123,13 +189,6 @@ class DataObjectImpl : public DownloadFileObserver,
 class COMPONENT_EXPORT(UI_BASE) OSExchangeDataProviderWin
     : public OSExchangeDataProvider {
  public:
-  // Returns true if source has plain text that is a valid url.
-  static bool HasPlainTextURL(IDataObject* source);
-
-  // Returns true if source has plain text that is a valid URL and sets url to
-  // that url.
-  static bool GetPlainTextURL(IDataObject* source, GURL* url);
-
   static DataObjectImpl* GetDataObjectImpl(const OSExchangeData& data);
   static IDataObject* GetIDataObject(const OSExchangeData& data);
 
@@ -147,44 +206,54 @@ class COMPONENT_EXPORT(UI_BASE) OSExchangeDataProviderWin
 
   // OSExchangeDataProvider methods.
   std::unique_ptr<OSExchangeDataProvider> Clone() const override;
-  void MarkOriginatedFromRenderer() override;
-  bool DidOriginateFromRenderer() const override;
+  void MarkRendererTaintedFromOrigin(const url::Origin& origin) override;
+  bool IsRendererTainted() const override;
+  std::optional<url::Origin> GetRendererTaintedOrigin() const override;
   void MarkAsFromPrivileged() override;
   bool IsFromPrivileged() const override;
-  void SetString(const std::u16string& data) override;
-  void SetURL(const GURL& url, const std::u16string& title) override;
+  void SetString(std::u16string_view data) override;
+  void SetURLs(base::span<const ClipboardUrlInfo> url_infos) override;
   void SetFilename(const base::FilePath& path) override;
   void SetFilenames(const std::vector<FileInfo>& filenames) override;
   // Test only method for adding virtual file content to the data store. The
   // first value in the pair is the file display name, the second is a string
-  // providing the file content.
+  // providing the file content. If `show_cfhdrop_without_data` is true,
+  // CF_HDROP will be advertised via QueryGetData but GetData will fail -
+  // simulating ZIP Shell Folder behavior.
   void SetVirtualFileContentsForTesting(
-      const std::vector<std::pair<base::FilePath, std::string>>&
+      const std::vector<std::pair<base::FilePath, base::span<const uint8_t>>>&
           filenames_and_contents,
-      DWORD tymed) override;
+      DWORD tymed,
+      bool show_cfhdrop_without_data) override;
+  // Test only method that builds a virtual file descriptor where the entries at
+  // `directory_indices` are flagged as folders (FILE_ATTRIBUTE_DIRECTORY) with
+  // no backing content stream, mirroring how a ZIP "compressed folder"
+  // advertises a directory entry alongside its files.
+  void SetVirtualFileContentsWithDirectoriesForTesting(
+      const std::vector<std::pair<base::FilePath, base::span<const uint8_t>>>&
+          filenames_and_contents,
+      const std::vector<size_t>& directory_indices,
+      DWORD tymed);
   void SetPickledData(const ClipboardFormatType& format,
                       const base::Pickle& data) override;
   void SetFileContents(const base::FilePath& filename,
-                       const std::string& file_contents) override;
+                       base::span<const uint8_t> file_contents) override;
   void SetHtml(const std::u16string& html, const GURL& base_url) override;
 
-  bool GetString(std::u16string* data) const override;
-  bool GetURLAndTitle(FilenameToURLPolicy policy,
-                      GURL* url,
-                      std::u16string* title) const override;
-  bool GetFilename(base::FilePath* path) const override;
-  bool GetFilenames(std::vector<FileInfo>* filenames) const override;
+  std::optional<std::u16string> GetString() const override;
+  std::vector<ClipboardUrlInfo> GetURLs(
+      FilenameToURLPolicy policy) const override;
+  std::optional<std::vector<FileInfo>> GetFilenames() const override;
   bool HasVirtualFilenames() const override;
-  bool GetVirtualFilenames(std::vector<FileInfo>* filenames) const override;
-  bool GetVirtualFilesAsTempFiles(
+  std::optional<std::vector<FileInfo>> GetVirtualFilenames() const override;
+  void GetVirtualFilesAsTempFiles(
       base::OnceCallback<
           void(const std::vector<std::pair<base::FilePath, base::FilePath>>&)>
           callback) const override;
-  bool GetPickledData(const ClipboardFormatType& format,
-                      base::Pickle* data) const override;
-  bool GetFileContents(base::FilePath* filename,
-                       std::string* file_contents) const override;
-  bool GetHtml(std::u16string* html, GURL* base_url) const override;
+  std::optional<base::Pickle> GetPickledData(
+      const ClipboardFormatType& format) const override;
+  std::optional<FileContentsInfo> GetFileContents() const override;
+  std::optional<HtmlInfo> GetHtml() const override;
   bool HasString() const override;
   bool HasURL(FilenameToURLPolicy policy) const override;
   bool HasFile() const override;
@@ -201,6 +270,15 @@ class COMPONENT_EXPORT(UI_BASE) OSExchangeDataProviderWin
   DataTransferEndpoint* GetSource() const override;
 
  private:
+  // Returns true if `GetPlainTextURL()` would return a GURL and false
+  // otherwise.
+  bool HasPlainTextURL() const;
+
+  // Returns a GURL if text is present and that text is a valid URL, and if
+  // `IsRendererTainted()` is true, that the URL has an HTTP or HTTPS scheme;
+  // otherwise, returns `std::nullopt`.
+  std::optional<GURL> GetPlainTextURL() const;
+
   void SetVirtualFileContentAtIndexForTesting(base::span<const uint8_t> data,
                                               DWORD tymed,
                                               LONG index);

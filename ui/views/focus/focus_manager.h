@@ -9,6 +9,8 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
+#include "base/scoped_observation.h"
+#include "base/scoped_observation_traits.h"
 #include "ui/base/accelerators/accelerator_manager.h"
 #include "ui/views/view_observer.h"
 #include "ui/views/views_export.h"
@@ -34,8 +36,8 @@
 //
 // If you just use Views, then the RootView handles focus traversal for you. The
 // default traversal order is the order in which the views have been added to
-// their container. You can call View::SetNextFocusableView to modify this
-// order.
+// their container. You can call View::Insert{Before,After}InFocusList() to
+// explicitly control the focus order.
 //
 // If you are embedding a native view containing a nested RootView (for example
 // by adding a view that contains a native widget as its native component),
@@ -73,6 +75,7 @@ class KeyEvent;
 
 namespace views {
 
+class FocusManager;
 class FocusManagerDelegate;
 class FocusSearch;
 class View;
@@ -105,10 +108,13 @@ class VIEWS_EXPORT FocusTraversable {
 class VIEWS_EXPORT FocusChangeListener {
  public:
   // No change to focus state has occurred yet when this function is called.
-  virtual void OnWillChangeFocus(View* focused_before, View* focused_now) = 0;
+  virtual void OnWillChangeFocus(View* focused_before, View* focused_now) {}
 
   // Called after focus state has changed.
-  virtual void OnDidChangeFocus(View* focused_before, View* focused_now) = 0;
+  virtual void OnDidChangeFocus(View* focused_before, View* focused_now) {}
+
+  // TODO(crbug.com/348369180): Remove this. Debug only.
+  virtual void OnFocusManagerDestroying(FocusManager* focus_manager) {}
 
  protected:
   virtual ~FocusChangeListener() = default;
@@ -128,7 +134,14 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
 
     // The focus changed due to a click or a shortcut to jump directly to
     // a particular view.
-    kDirectFocusChange
+    kDirectFocusChange,
+
+    // The focus changed because a native view is focused.
+    // Note that if the focus change was initiated by the FocusManager (e.g.
+    // via kDirectFocusChange), a native view may be be focused. However, this
+    // won't trigger a kFocusNativeView focus change because the NativeView's
+    // hosting view (e.g., views::WebView) is already focused.
+    kFocusNativeView,
   };
 
   // TODO(dmazzoni): use Direction in place of bool reverse throughout.
@@ -147,6 +160,11 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
   // further.
   bool OnKeyEvent(const ui::KeyEvent& event);
 
+  // Returns true if the focused view wants to process the key event as is
+  // (and there is no priority handler registered for the accelerator).
+  bool ShouldSkipAcceleratorProcessing(
+      const ui::Accelerator& accelerator) const;
+
   // Returns true is the specified is part of the hierarchy of the window
   // associated with this FocusManager.
   bool ContainsView(View* view);
@@ -160,7 +178,7 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
 
   // Low-level methods to force the focus to change (and optionally provide
   // a reason). If the focus change should only happen if the view is
-  // currenty focusable, enabled, and visible, call view->RequestFocus().
+  // currently focusable, enabled, and visible, call view->RequestFocus().
   void SetFocusedViewWithReason(View* view, FocusChangeReason reason);
   void SetFocusedView(View* view);
 
@@ -252,6 +270,7 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
   // the focused view is about to change.
   void AddFocusChangeListener(FocusChangeListener* listener);
   void RemoveFocusChangeListener(FocusChangeListener* listener);
+  bool HasFocusChangeListener(const FocusChangeListener* listener) const;
 
   // Whether the given |accelerator| is registered.
   bool IsAcceleratorRegistered(const ui::Accelerator& accelerator) const;
@@ -276,17 +295,6 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
   // pressed).
   static bool IsTabTraversalKeyEvent(const ui::KeyEvent& key_event);
 
-  // Sets whether arrow key traversal is enabled. When enabled, right/down key
-  // behaves like tab and left/up key behaves like shift-tab. Note when this
-  // is enabled, the arrow key movement within grouped views are disabled.
-  static void set_arrow_key_traversal_enabled(bool enabled) {
-    arrow_key_traversal_enabled_ = enabled;
-  }
-  // Returns whether arrow key traversal is enabled.
-  static bool arrow_key_traversal_enabled() {
-    return arrow_key_traversal_enabled_;
-  }
-
   // Returns the next focusable view. Traversal starts at |starting_view|. If
   // |starting_view| is null, |starting_widget| is consulted to determine which
   // Widget to start from. See WidgetDelegate::Params::focus_traverses_out for
@@ -305,6 +313,9 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
 
   // Checks if a focused view is being set.
   bool IsSettingFocusedView() const;
+
+  // Returns true if RestoreFocusedView() is on the call stack.
+  bool is_restoring_focused_view() const { return in_restoring_focused_view_; }
 
  private:
   // Returns the focusable view found in the FocusTraversable specified starting
@@ -326,16 +337,12 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
   // ViewObserver:
   void OnViewIsDeleting(View* view) override;
 
-  // Try to redirect the accelerator to bubble's anchor widget to process it if
-  // the bubble didn't.
-  bool RedirectAcceleratorToBubbleAnchorWidget(
-      const ui::Accelerator& accelerator);
+  // Try to redirect the accelerator to the parent widget to process it if
+  // `widget_` didn't.
+  bool RedirectAcceleratorToParentWidget(const ui::Accelerator& accelerator);
 
   // Returns true if arrow key traversal is enabled for the current widget.
   bool IsArrowKeyTraversalEnabledForWidget() const;
-
-  // Whether arrow key traversal is enabled globally.
-  static bool arrow_key_traversal_enabled_;
 
   // The top-level Widget this FocusManager is associated with.
   raw_ptr<Widget> widget_;
@@ -360,15 +367,19 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
       FocusChangeReason::kDirectFocusChange;
 
   // The list of registered FocusChange listeners.
-  base::ObserverList<FocusChangeListener, true>::Unchecked
+  // TODO(crbug.com/484371187): Investigate if reentrancy can be removed.
+  base::ObserverList<
+      FocusChangeListener,
+      /*check_empty=*/false,
+      base::ObserverListReentrancyPolicy::kAllowReentrancyUntriaged>::Unchecked
       focus_change_listeners_;
 
   // This is true if full keyboard accessibility is needed. This causes
-  // IsAccessibilityFocusable() to be checked rather than IsFocusable(). This
-  // can be set depending on platform constraints. FocusSearch uses this in
-  // addition to its own accessibility mode, which handles accessibility at the
-  // FocusTraversable level. Currently only used on Mac, when Full Keyboard
-  // access is enabled.
+  // GetViewAccessibility().IsAccessibilityFocusable() to be checked rather than
+  // IsFocusable(). This can be set depending on platform constraints.
+  // FocusSearch uses this in addition to its own accessibility mode, which
+  // handles accessibility at the FocusTraversable level. Currently only used on
+  // Mac, when Full Keyboard access is enabled.
   bool keyboard_accessible_ = false;
 
   // Whether FocusManager is currently trying to restore a focused view.
@@ -378,8 +389,30 @@ class VIEWS_EXPORT FocusManager : public ViewObserver {
   // This value is ideally 0 or 1, i.e. no nested focus change.
   // See crbug.com/1203960.
   int setting_focused_view_entrance_count_ = 0;
+
+  // Observes `focused_view_`, so the FocusManager is told when the focused
+  // View is destroyed out from under it. Set and cleared only in
+  // SetFocusedViewWithReason().
+  base::ScopedObservation<View, ViewObserver> view_observation_{this};
 };
 
 }  // namespace views
+
+namespace base {
+
+template <>
+struct ScopedObservationTraits<views::FocusManager,
+                               views::FocusChangeListener> {
+  static void AddObserver(views::FocusManager* source,
+                          views::FocusChangeListener* listener) {
+    source->AddFocusChangeListener(listener);
+  }
+  static void RemoveObserver(views::FocusManager* source,
+                             views::FocusChangeListener* listener) {
+    source->RemoveFocusChangeListener(listener);
+  }
+};
+
+}  // namespace base
 
 #endif  // UI_VIEWS_FOCUS_FOCUS_MANAGER_H_

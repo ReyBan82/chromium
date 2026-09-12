@@ -4,13 +4,14 @@
 
 #include "chrome/browser/enterprise/connectors/analysis/source_destination_matcher_ash.h"
 
+#include <optional>
+
 #include "base/files/file_path.h"
 #include "base/notreached.h"
 #include "base/values.h"
 #include "chrome/browser/ash/file_manager/volume_manager.h"
 #include "chrome/browser/ash/guest_os/public/types.h"
 #include "storage/browser/file_system/file_system_url.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace storage {
 class FileSystemURL;
@@ -22,14 +23,13 @@ namespace {
 // Checks if the key of the sources or destinations list is known.
 // This should only be extended when a key is properly supported.
 bool AllowedFSInfoKey(const std::string& key) {
-  // TODO(crbug.com/1340553): Also allow settings for app ids and smb.
   return key == "file_system_type";
 }
 
 // This function checks whether there are no unknown keys in the passed dict.
 // The function returns true if there are no such unknown keys and false if an
 // unknown key is found.
-bool SourceOrDestinationEntryIsValid(const base::Value::Dict* dict) {
+bool SourceOrDestinationEntryIsValid(const base::DictValue* dict) {
   DCHECK(dict);
   for (auto&& [key, _] : *dict) {
     if (!AllowedFSInfoKey(key)) {
@@ -66,6 +66,8 @@ SourceDestinationMatcherAsh::FsType SourceDestinationMatcherAsh::VolumeToFsType(
         return SourceDestinationMatcherAsh::FsType::kUnknownVm;
       case guest_os::VmType::ARCVM:
         return SourceDestinationMatcherAsh::FsType::kArc;
+      case guest_os::VmType::BAGUETTE:
+        return SourceDestinationMatcherAsh::FsType::kUnknownVm;
       case guest_os::VmType::VmType_INT_MIN_SENTINEL_DO_NOT_USE_:
       case guest_os::VmType::VmType_INT_MAX_SENTINEL_DO_NOT_USE_:
         NOTREACHED();
@@ -105,7 +107,6 @@ SourceDestinationMatcherAsh::FsType SourceDestinationMatcherAsh::VolumeToFsType(
       NOTREACHED();
   }
   NOTREACHED();
-  return SourceDestinationMatcherAsh::FsType::kUnknown;
 }
 
 // static
@@ -136,7 +137,7 @@ std::string SourceDestinationMatcherAsh::GetVolumeDescriptionFromPath(
 }
 
 // static
-absl::optional<SourceDestinationMatcherAsh::FsType>
+std::optional<SourceDestinationMatcherAsh::FsType>
 SourceDestinationMatcherAsh::StringToFsType(const std::string& s) {
   if (s == "TESTING") {
     return SourceDestinationMatcherAsh::FsType::kTesting;
@@ -183,12 +184,12 @@ SourceDestinationMatcherAsh::StringToFsType(const std::string& s) {
   if (s == "UNKNOWN_VM") {
     return SourceDestinationMatcherAsh::FsType::kUnknownVm;
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 std::set<SourceDestinationMatcherAsh::FsType>
 SourceDestinationMatcherAsh::ValueListToFsTypes(
-    const base::Value::List* source_or_destination_list) {
+    const base::ListValue* source_or_destination_list) {
   std::set<SourceDestinationMatcherAsh::FsType> fs_types;
   for (const auto& entry : *source_or_destination_list) {
     const auto* dict = entry.GetIfDict();
@@ -251,7 +252,6 @@ std::string SourceDestinationMatcherAsh::FsTypeToString(
       return "UNKNOWN_VM";
   }
   NOTREACHED();
-  return "";
 }
 
 SourceDestinationMatcherAsh::SourceDestinationMatcherAsh() = default;
@@ -260,9 +260,8 @@ SourceDestinationMatcherAsh::~SourceDestinationMatcherAsh() = default;
 
 void SourceDestinationMatcherAsh::AddFilters(
     ID* id,
-    const base::Value::List* settings_list) {
+    const base::ListValue* settings_list) {
   DCHECK(id);
-  // TODO(crbug.com/1340553): Adapt for app ids and smb settings
   if (!settings_list) {
     LOG(ERROR) << "No settings list found.";
     return;

@@ -4,10 +4,10 @@
 
 #include "chrome/browser/ash/borealis/borealis_app_launcher.h"
 
+#include <algorithm>
+
 #include "base/functional/bind.h"
-#include "base/ranges/algorithm.h"
 #include "chrome/browser/ash/borealis/borealis_context.h"
-#include "chrome/browser/ash/borealis/borealis_context_manager.h"
 #include "chrome/browser/ash/borealis/borealis_features.h"
 #include "chrome/browser/ash/borealis/borealis_service.h"
 #include "chrome/browser/ash/borealis/borealis_util.h"
@@ -36,7 +36,7 @@ void BorealisAppLauncher::Launch(const BorealisContext& ctx,
     return;
   }
 
-  absl::optional<guest_os::GuestOsRegistryService::Registration> reg =
+  std::optional<guest_os::GuestOsRegistryService::Registration> reg =
       guest_os::GuestOsRegistryServiceFactory::GetForProfile(ctx.profile())
           ->GetRegistration(app_id);
   if (!reg) {
@@ -50,14 +50,14 @@ void BorealisAppLauncher::Launch(const BorealisContext& ctx,
   request.set_vm_name(ctx.vm_name());
   request.set_container_name(ctx.container_name());
   request.set_desktop_file_id(reg->DesktopFileId());
-  base::ranges::copy(args, google::protobuf::RepeatedFieldBackInserter(
-                               request.mutable_files()));
+  std::ranges::copy(args, google::protobuf::RepeatedFieldBackInserter(
+                              request.mutable_files()));
 
   ash::CiceroneClient::Get()->LaunchContainerApplication(
       std::move(request),
       base::BindOnce(
           [](OnLaunchedCallback callback,
-             absl::optional<
+             std::optional<
                  vm_tools::cicerone::LaunchContainerApplicationResponse>
                  response) {
             if (!response) {

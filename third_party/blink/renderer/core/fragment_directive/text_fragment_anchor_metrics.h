@@ -5,6 +5,7 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAGMENT_DIRECTIVE_TEXT_FRAGMENT_ANCHOR_METRICS_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_FRAGMENT_DIRECTIVE_TEXT_FRAGMENT_ANCHOR_METRICS_H_
 
+#include "base/memory/raw_ptr.h"
 #include "base/time/tick_clock.h"
 #include "base/time/time.h"
 #include "third_party/blink/renderer/core/core_export.h"
@@ -34,10 +35,11 @@ class CORE_EXPORT TextFragmentAnchorMetrics final
 
   // Update corresponding |TextFragmentLinkOpenSource| in enums.xml.
   enum class TextFragmentLinkOpenSource {
-    kUnknown,
-    kSearchEngine,
+    kUnknown = 0,
+    kSearchEngine = 1,
+    kSendTabToSelf = 2,
 
-    kMaxValue = kSearchEngine,
+    kMaxValue = kSendTabToSelf,
   };
 
   explicit TextFragmentAnchorMetrics(Document* document);
@@ -51,15 +53,13 @@ class CORE_EXPORT TextFragmentAnchorMetrics final
 
   void DidFindAmbiguousMatch();
 
-  void DidStartSearch();
-
   void DidInvokeScrollIntoView();
 
   void ReportMetrics();
 
   void SetTickClockForTesting(const base::TickClock* tick_clock);
 
-  void SetSearchEngineSource(bool has_search_engine_source);
+  void SetLinkOpenSource(TextFragmentLinkOpenSource open_source);
 
   void Trace(Visitor*) const;
 
@@ -77,9 +77,11 @@ class CORE_EXPORT TextFragmentAnchorMetrics final
   bool ambiguous_match_ = false;
   base::TimeTicks search_start_time_;
   base::TimeTicks first_scroll_into_view_time_;
-  bool has_search_engine_source_ = false;
+  TextFragmentLinkOpenSource open_source_ =
+      TextFragmentLinkOpenSource::kUnknown;
 
-  const base::TickClock* tick_clock_;
+  raw_ptr<const base::TickClock, UnprotectedInRelease | DanglingUntriaged>
+      tick_clock_;
 };
 
 }  // namespace blink

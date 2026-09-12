@@ -9,12 +9,17 @@
 #include <stdint.h>
 
 #include <memory>
+#include <vector>
 
 #include "base/check.h"
+#include "base/containers/flat_map.h"
 #include "base/containers/flat_set.h"
 #include "base/memory/raw_ptr.h"
+#include "base/rand_util.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
+#include "components/viz/common/display/display_scheduler_draw_result.h"
+#include "components/viz/common/display/update_vsync_parameters_callback.h"
 #include "components/viz/common/frame_sinks/begin_frame_args.h"
 #include "components/viz/common/frame_sinks/delay_based_time_source.h"
 
@@ -22,8 +27,8 @@ namespace perfetto {
 class EventContext;
 namespace protos {
 namespace pbzero {
-class BeginFrameObserverState;
-class BeginFrameSourceState;
+class BeginFrameObserverStateV2;
+class BeginFrameSourceStateV2;
 }  // namespace pbzero
 }  // namespace protos
 }  // namespace perfetto
@@ -73,13 +78,6 @@ class VIZ_COMMON_EXPORT BeginFrameObserver {
 
   // Whether the observer also wants to receive animate_only BeginFrames.
   virtual bool WantsAnimateOnlyBeginFrames() const = 0;
-
-  // Indicates whether this observer is the root frame sink. This helps in
-  // a workaround for input jank, allowing us to deliver BeginFrames to the
-  // root last, avoiding a race.
-  // TODO(ericrk): Remove this once we have a longer-term fix.
-  // https://crbug.com/947717
-  virtual bool IsRoot() const;
 };
 
 // Simple base class which implements a BeginFrameObserver which checks the
@@ -89,8 +87,8 @@ class VIZ_COMMON_EXPORT BeginFrameObserver {
 // Users of this class should;
 //  - Implement the OnBeginFrameDerivedImpl function.
 //  - Recommended (but not required) to call
-//    BeginFrameObserverBase::OnValueInto in their overridden OnValueInto
-//    function.
+//    BeginFrameObserverBase::AsProtozeroInto in their overridden
+//    AsProtozeroInto function.
 class VIZ_COMMON_EXPORT BeginFrameObserverBase : public BeginFrameObserver {
  public:
   BeginFrameObserverBase();
@@ -115,7 +113,7 @@ class VIZ_COMMON_EXPORT BeginFrameObserverBase : public BeginFrameObserver {
 
   void AsProtozeroInto(
       perfetto::EventContext& ctx,
-      perfetto::protos::pbzero::BeginFrameObserverState* state) const;
+      perfetto::protos::pbzero::BeginFrameObserverStateV2* state) const;
 
   BeginFrameArgs last_begin_frame_args_;
   int64_t dropped_begin_frame_args_ = 0;
@@ -140,6 +138,28 @@ class VIZ_COMMON_EXPORT DynamicBeginFrameDeadlineOffsetSource {
 // all BeginFrameSources *must* provide.
 class VIZ_COMMON_EXPORT BeginFrameSource {
  public:
+  // The `SchedulerClient` will be notified of the `BeginFrame` after all
+  // `BeginFrameObservers` have first been notified. Thus guaranteeing that we
+  // will know the expected state of the observers for making scheduling
+  // decisions.
+  class VIZ_COMMON_EXPORT SchedulerClient {
+   public:
+    virtual ~SchedulerClient() = default;
+    virtual void OnBeginFrameForScheduling(const BeginFrameArgs& args) = 0;
+  };
+
+  // The `InputClient` will be notified of the `BeginFrame` before any
+  // `BeginFrameObservers` have been notified. This is used for prioritizing
+  // input handling (e.g. flings) to minimize latency. Only one `InputClient`
+  // can be registered at a time.
+  class VIZ_COMMON_EXPORT InputClient {
+   public:
+    virtual ~InputClient() = default;
+    virtual void OnBeginFrameForInput(const BeginFrameArgs& args) = 0;
+  };
+
+  BeginFrameSource();
+
   class VIZ_COMMON_EXPORT BeginFrameArgsGenerator {
    public:
     BeginFrameArgsGenerator() = default;
@@ -147,15 +167,9 @@ class VIZ_COMMON_EXPORT BeginFrameSource {
 
     BeginFrameArgs GenerateBeginFrameArgs(uint64_t source_id,
                                           base::TimeTicks frame_time,
-                                          base::TimeTicks next_frame_time,
-                                          base::TimeDelta vsync_interval);
-
-    void set_dynamic_begin_frame_deadline_offset_source(
-        DynamicBeginFrameDeadlineOffsetSource*
-            dynamic_begin_frame_deadline_offset_source) {
-      dynamic_begin_frame_deadline_offset_source_ =
-          dynamic_begin_frame_deadline_offset_source;
-    }
+                                          base::TimeTicks deadline,
+                                          base::TimeDelta vsync_interval,
+                                          base::TimeDelta unthrottled_interval);
 
    private:
     static uint64_t EstimateTickCountsBetween(
@@ -173,9 +187,6 @@ class VIZ_COMMON_EXPORT BeginFrameSource {
     // number assigned relative to this, based on how many intervals the frame
     // time is off.
     uint64_t next_sequence_number_ = BeginFrameArgs::kStartingFrameNumber;
-
-    DynamicBeginFrameDeadlineOffsetSource*
-        dynamic_begin_frame_deadline_offset_source_ = nullptr;
   };
 
   // This restart_id should be used for BeginFrameSources that don't have to
@@ -205,11 +216,18 @@ class VIZ_COMMON_EXPORT BeginFrameSource {
   // RequestCallbackOnGpuAvailable() for more details.
   void SetIsGpuBusy(bool busy);
 
+  void SetSchedulerClient(SchedulerClient* scheduler_client);
+  void SetInputClient(InputClient* input_client);
+
+  static base::flat_set<base::TimeDelta> GetDefaultSupportedFrameIntervals(
+      base::TimeDelta interval);
+
   // BeginFrameObservers use DidFinishFrame to provide back pressure to a frame
   // source about frame processing (rather than toggling SetNeedsBeginFrames
   // every frame). For example, the BackToBackFrameSource uses them to make sure
   // only one frame is pending at a time.
-  virtual void DidFinishFrame(BeginFrameObserver* obs) = 0;
+  virtual void DidFinishFrame(BeginFrameObserver* obs,
+                              DisplaySchedulerDrawResult result) = 0;
 
   // Add/Remove an observer from the source. When no observers are added the BFS
   // should shut down its timers, disable vsync, etc.
@@ -218,11 +236,22 @@ class VIZ_COMMON_EXPORT BeginFrameSource {
 
   virtual void AsProtozeroInto(
       perfetto::EventContext& ctx,
-      perfetto::protos::pbzero::BeginFrameSourceState* state) const;
+      perfetto::protos::pbzero::BeginFrameSourceStateV2* state) const;
 
-  virtual void SetDynamicBeginFrameDeadlineOffsetSource(
-      DynamicBeginFrameDeadlineOffsetSource*
-          dynamic_begin_frame_deadline_offset_source);
+  // Update the display ID for the source. This can change, e.g, as a window
+  // moves across displays.
+  virtual void SetVSyncDisplayID(int64_t display_id, bool force_update) {}
+
+#if BUILDFLAG(IS_MAC)
+  // Notifies the source that it may need to reconnect to a VSync source (e.g.,
+  // DisplayLinkMac) for the specified display. This is typically triggered by
+  // display configuration changes in the browser process.
+  virtual void UpdateVSyncDisplay(int64_t display_id) {}
+
+#endif
+
+  virtual void SetUpdateVSyncParametersCallback(
+      UpdateVSyncParametersCallback callback) {}
 
  protected:
   // Returns whether begin-frames to clients should be withheld (because the gpu
@@ -231,6 +260,16 @@ class VIZ_COMMON_EXPORT BeginFrameSource {
   // dispatched to clients again.
   bool RequestCallbackOnGpuAvailable();
   virtual void OnGpuNoLongerBusy() = 0;
+#if BUILDFLAG(IS_MAC)
+  void RecordBeginFrameSourceAccuracy(base::TimeDelta delta);
+#endif
+  // Notify the `SchedulerClient` of the `BeginFrame`. This is to be called by
+  // subclasses only after having first called all observers.
+  void IssueBeginFrameToSchedulerClient(const BeginFrameArgs& args);
+
+  // Notify the `InputClient` of the `BeginFrame`. This is to be called by
+  // subclasses before notifying any observers.
+  void IssueBeginFrameToInputClient(const BeginFrameArgs& args);
 
  private:
   // The higher 32 bits are used for a process restart id that changes if a
@@ -241,6 +280,7 @@ class VIZ_COMMON_EXPORT BeginFrameSource {
   // The BeginFrameSource should not send the begin-frame messages to clients if
   // gpu is busy.
   bool is_gpu_busy_ = false;
+  base::TimeTicks gpu_busy_start_time_;
 
   // Keeps track of whether a begin-frame was paused, and whether
   // OnGpuNoLongerBusy() should be invoked when the gpu is no longer busy.
@@ -256,6 +296,15 @@ class VIZ_COMMON_EXPORT BeginFrameSource {
   };
   GpuBusyThrottlingState gpu_busy_response_state_ =
       GpuBusyThrottlingState::kIdle;
+
+#if BUILDFLAG(IS_MAC)
+  base::TimeDelta total_delta_;
+  // The frame count since this histogram was recorded last time. It is recorded
+  // every 3600 frames, which is equivalent to every minute on a 60Hz monitors .
+  int frames_since_last_recording_ = 0;
+#endif
+  raw_ptr<SchedulerClient> scheduler_client_ = nullptr;
+  raw_ptr<InputClient> input_client_ = nullptr;
 };
 
 // A BeginFrameSource that does nothing.
@@ -263,7 +312,8 @@ class VIZ_COMMON_EXPORT StubBeginFrameSource : public BeginFrameSource {
  public:
   StubBeginFrameSource();
 
-  void DidFinishFrame(BeginFrameObserver* obs) override {}
+  void DidFinishFrame(BeginFrameObserver* obs,
+                      DisplaySchedulerDrawResult result) override {}
   void AddObserver(BeginFrameObserver* obs) override {}
   void RemoveObserver(BeginFrameObserver* obs) override {}
   void OnGpuNoLongerBusy() override {}
@@ -277,6 +327,11 @@ class VIZ_COMMON_EXPORT SyntheticBeginFrameSource : public BeginFrameSource {
 
   virtual void OnUpdateVSyncParameters(base::TimeTicks timebase,
                                        base::TimeDelta interval) = 0;
+  // Sets the maximum interval allowable for use with VRR (variable refresh
+  // rates). When set, this value should correspond to the maximum vsync
+  // interval supported by the display. Absent when VRR is not enabled.
+  virtual void SetMaxVrrInterval(
+      const std::optional<base::TimeDelta>& max_vrr_interval) = 0;
 };
 
 // A frame source which calls BeginFrame (at the next possible time) as soon as
@@ -297,23 +352,27 @@ class VIZ_COMMON_EXPORT BackToBackBeginFrameSource
   // BeginFrameSource implementation.
   void AddObserver(BeginFrameObserver* obs) override;
   void RemoveObserver(BeginFrameObserver* obs) override;
-  void DidFinishFrame(BeginFrameObserver* obs) override;
+  void DidFinishFrame(BeginFrameObserver* obs,
+                      DisplaySchedulerDrawResult result) override;
   void OnGpuNoLongerBusy() override;
 
   // SyntheticBeginFrameSource implementation.
   void OnUpdateVSyncParameters(base::TimeTicks timebase,
-                               base::TimeDelta interval) override {}
+                               base::TimeDelta interval) override;
+  void SetMaxVrrInterval(
+      const std::optional<base::TimeDelta>& max_vrr_interval) override;
 
   // DelayBasedTimeSourceClient implementation.
   void OnTimerTick() override;
 
  private:
-  void SetActive(bool active);
-
   std::unique_ptr<DelayBasedTimeSource> time_source_;
-  base::flat_set<BeginFrameObserver*> observers_;
-  base::flat_set<BeginFrameObserver*> pending_begin_frame_observers_;
+  base::flat_set<raw_ptr<BeginFrameObserver, CtnExperimental>> observers_;
+  base::flat_set<raw_ptr<BeginFrameObserver, CtnExperimental>>
+      pending_begin_frame_observers_;
   uint64_t next_sequence_number_;
+  base::TimeDelta vsync_interval_ = BeginFrameArgs::DefaultInterval();
+  std::optional<base::TimeDelta> max_vrr_interval_ = std::nullopt;
   base::WeakPtrFactory<BackToBackBeginFrameSource> weak_factory_{this};
 };
 
@@ -335,35 +394,42 @@ class VIZ_COMMON_EXPORT DelayBasedBeginFrameSource
   // BeginFrameSource implementation.
   void AddObserver(BeginFrameObserver* obs) override;
   void RemoveObserver(BeginFrameObserver* obs) override;
-  void DidFinishFrame(BeginFrameObserver* obs) override {}
+  void DidFinishFrame(BeginFrameObserver* obs,
+                      DisplaySchedulerDrawResult result) override {}
   void OnGpuNoLongerBusy() override;
-  void SetDynamicBeginFrameDeadlineOffsetSource(
-      DynamicBeginFrameDeadlineOffsetSource*
-          dynamic_begin_frame_deadline_offset_source) override;
 
   // SyntheticBeginFrameSource implementation.
   void OnUpdateVSyncParameters(base::TimeTicks timebase,
                                base::TimeDelta interval) override;
+  void SetMaxVrrInterval(
+      const std::optional<base::TimeDelta>& max_vrr_interval) override;
 
   // DelayBasedTimeSourceClient implementation.
   void OnTimerTick() override;
 
+  const BeginFrameArgs& last_begin_frame_args() const {
+    return last_begin_frame_args_;
+  }
+  const DelayBasedTimeSource* time_source() const { return time_source_.get(); }
+
  private:
   // The created BeginFrameArgs' sequence_number is calculated based on what
   // interval |frame_time| is in. For example, if |last_frame_time_| is 100,
-  // |next_sequence_number_| is 5, |last_timebase_| is 110 and the interval is
-  // 20, then a |frame_time| of 175 would result in the sequence number being 8
-  // (3 intervals since 110).
+  // |next_sequence_number_| is 5, |last_timebase_| is 110 and the interval
+  // is 20, then a |frame_time| of 175 would result in the sequence number
+  // being 8 (3 intervals since 110).
   BeginFrameArgs CreateBeginFrameArgs(base::TimeTicks frame_time);
   void IssueBeginFrameToObserver(BeginFrameObserver* obs,
                                  const BeginFrameArgs& args);
   void SetActive(bool active);
 
   std::unique_ptr<DelayBasedTimeSource> time_source_;
-  base::flat_set<BeginFrameObserver*> observers_;
+  base::flat_set<raw_ptr<BeginFrameObserver, CtnExperimental>> observers_;
   base::TimeTicks last_timebase_;
+  base::TimeDelta last_vsync_interval_;
+  std::optional<base::TimeDelta> max_vrr_interval_ = std::nullopt;
+  int vrr_tick_count_ = 0;
   BeginFrameArgs last_begin_frame_args_;
-
   BeginFrameArgsGenerator begin_frame_args_generator_;
 };
 
@@ -393,16 +459,21 @@ class VIZ_COMMON_EXPORT ExternalBeginFrameSource : public BeginFrameSource {
   // BeginFrameSource implementation.
   void AddObserver(BeginFrameObserver* obs) override;
   void RemoveObserver(BeginFrameObserver* obs) override;
-  void DidFinishFrame(BeginFrameObserver* obs) override {}
+  void DidFinishFrame(BeginFrameObserver* obs,
+                      DisplaySchedulerDrawResult result) override {}
   void AsProtozeroInto(
       perfetto::EventContext& ctx,
-      perfetto::protos::pbzero::BeginFrameSourceState* state) const override;
+      perfetto::protos::pbzero::BeginFrameSourceStateV2* state) const override;
   void OnGpuNoLongerBusy() override;
 
   void OnSetBeginFrameSourcePaused(bool paused);
   void OnBeginFrame(const BeginFrameArgs& args);
 
-#if BUILDFLAG(IS_ANDROID)
+  const BeginFrameArgs& last_begin_frame_args() const {
+    return last_begin_frame_args_;
+  }
+
+#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_MAC)
   // Notifies when the refresh rate of the display is updated. |refresh_rate| is
   // the rate in frames per second.
   virtual void UpdateRefreshRate(float refresh_rate) {}
@@ -412,7 +483,22 @@ class VIZ_COMMON_EXPORT ExternalBeginFrameSource : public BeginFrameSource {
   // observers.
   virtual void SetPreferredInterval(base::TimeDelta interval) {}
 
-  virtual void SetVSyncDisplayID(int64_t display_id) {}
+  // Sets the refresh rates supported by the display. See
+  // https://developer.android.com/reference/android/view/Display#getSupportedRefreshRates().
+  //
+  // `supported_rates` is a map from supported VSync intervals to the equivalent
+  // supported refresh rates. For example, if the display supports 60 Hz and 120
+  // Hz, `supported_rates` will contain two entries: `base::Milliseconds(8.333)`
+  // → `120.0f` and `base::Milliseconds(16.666)` → `60.0f`.
+  virtual void SetSupportedRefreshRates(
+      const base::flat_map<base::TimeDelta, float>& supported_rates) {}
+
+  // Returns the minimium supported frame interval for a given BFS.
+  // This gives the maximium refresh rate that can be requested.
+  virtual base::TimeDelta GetMinimumFrameInterval();
+
+  virtual base::flat_set<base::TimeDelta> GetSupportedFrameIntervals(
+      base::TimeDelta interval);
 
  protected:
   // Called on AddObserver and gets missed BeginFrameArgs for the given
@@ -421,7 +507,7 @@ class VIZ_COMMON_EXPORT ExternalBeginFrameSource : public BeginFrameSource {
   virtual BeginFrameArgs GetMissedBeginFrameArgs(BeginFrameObserver* obs);
 
   BeginFrameArgs last_begin_frame_args_;
-  base::flat_set<BeginFrameObserver*> observers_;
+  base::flat_set<raw_ptr<BeginFrameObserver, CtnExperimental>> observers_;
   raw_ptr<ExternalBeginFrameSourceClient> client_;
   bool paused_ = false;
 

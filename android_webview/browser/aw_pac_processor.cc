@@ -9,14 +9,15 @@
 #include <dlfcn.h>
 #include <netdb.h>
 #include <unistd.h>
+
 #include <cstddef>
 #include <memory>
 #include <string>
 
-#include "android_webview/browser_jni_headers/AwPacProcessor_jni.h"
 #include "base/android/jni_android.h"
 #include "base/android/jni_array.h"
 #include "base/android/jni_string.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/logging.h"
 #include "base/memory/raw_ptr.h"
@@ -30,14 +31,10 @@
 #include "net/base/network_isolation_key.h"
 #include "net/proxy_resolution/pac_file_data.h"
 #include "net/proxy_resolution/proxy_info.h"
+#include "third_party/jni_zero/default_conversions.h"
 
-using base::android::AttachCurrentThread;
-using base::android::ConvertJavaStringToUTF8;
-using base::android::ConvertUTF8ToJavaString;
-using base::android::JavaParamRef;
-using base::android::JavaRef;
-using base::android::ScopedJavaGlobalRef;
-using base::android::ScopedJavaLocalRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "android_webview/browser_jni_headers/AwPacProcessor_jni.h"
 
 namespace android_webview {
 
@@ -162,6 +159,7 @@ class HostResolver : public proxy_resolver::ProxyHostResolver {
       // NetworkCallback#onLinkPropertiesChanged.
       // See SetNetworkAndLinkAddresses.
       if (IsNetworkSpecified()) {
+        CHECK(!link_addresses_.empty());
         results_.push_back(link_addresses_.front());
         return true;
       }
@@ -174,6 +172,7 @@ class HostResolver : public proxy_resolver::ProxyHostResolver {
 
     bool MyIpAddressExImpl() {
       if (IsNetworkSpecified()) {
+        CHECK(!link_addresses_.empty());
         results_ = link_addresses_;
         return true;
       }
@@ -185,8 +184,7 @@ class HostResolver : public proxy_resolver::ProxyHostResolver {
     }
 
     bool DnsResolveImpl(const std::string& host) {
-      struct addrinfo hints;
-      memset(&hints, 0, sizeof hints);
+      struct addrinfo hints = {};
       hints.ai_family = AF_INET;
 
       struct addrinfo* res = nullptr;
@@ -387,7 +385,7 @@ AwPacProcessor::~AwPacProcessor() {
 
 void AwPacProcessor::Destroy(base::WaitableEvent* event) {
   // Cancel all unfinished jobs to unblock calling thread.
-  for (auto* job : jobs_) {
+  for (Job* job : jobs_) {
     job->Cancel();
   }
 
@@ -395,9 +393,7 @@ void AwPacProcessor::Destroy(base::WaitableEvent* event) {
   event->Signal();
 }
 
-void AwPacProcessor::DestroyNative(
-    JNIEnv* env,
-    const base::android::JavaParamRef<jobject>& obj) {
+void AwPacProcessor::DestroyNative() {
   delete this;
 }
 
@@ -429,21 +425,18 @@ void AwPacProcessor::MakeProxyRequestNative(
   }
 }
 
-bool AwPacProcessor::SetProxyScript(std::string script) {
+bool AwPacProcessor::SetProxyScript(const std::string& script) {
   SetProxyScriptJob job(this, script);
   return job.ExecSync();
-}
-
-jboolean AwPacProcessor::SetProxyScript(JNIEnv* env,
-                                        const JavaParamRef<jobject>& obj,
-                                        const JavaParamRef<jstring>& jscript) {
-  std::string script = ConvertJavaStringToUTF8(env, jscript);
-  return SetProxyScript(script);
 }
 
 bool AwPacProcessor::MakeProxyRequest(std::string url, std::string* result) {
   MakeProxyRequestJob job(this, url);
   if (job.ExecSync()) {
+    if (job.proxy_info().ContainsMultiProxyChain()) {
+      // Multi-proxy chains cannot be represented as a PAC string.
+      return false;
+    }
     *result = job.proxy_info().ToPacString();
     return true;
   } else {
@@ -451,26 +444,18 @@ bool AwPacProcessor::MakeProxyRequest(std::string url, std::string* result) {
   }
 }
 
-ScopedJavaLocalRef<jstring> AwPacProcessor::MakeProxyRequest(
-    JNIEnv* env,
-    const JavaParamRef<jobject>& obj,
-    const JavaParamRef<jstring>& jurl) {
-  std::string url = ConvertJavaStringToUTF8(env, jurl);
+std::optional<std::string> AwPacProcessor::MakeProxyRequest(
+    const std::string& url) {
   std::string result;
   if (MakeProxyRequest(url, &result)) {
-    return ConvertUTF8ToJavaString(env, result);
-  } else {
-    return nullptr;
+    return result;
   }
+  return std::nullopt;
 }
 
 void AwPacProcessor::SetNetworkAndLinkAddresses(
-    JNIEnv* env,
     net_handle_t net_handle,
-    const base::android::JavaParamRef<jobjectArray>& jlink_addresses) {
-  std::vector<std::string> string_link_addresses;
-  base::android::AppendJavaStringArrayToStringVector(env, jlink_addresses,
-                                                     &string_link_addresses);
+    const std::vector<std::string>& string_link_addresses) {
   std::vector<net::IPAddress> link_addresses;
   for (const std::string& address : string_link_addresses) {
     net::IPAddress ip_address;
@@ -487,13 +472,15 @@ void AwPacProcessor::SetNetworkAndLinkAddresses(
                                 net_handle, std::move(link_addresses)));
 }
 
-static jlong JNI_AwPacProcessor_CreateNativePacProcessor(JNIEnv* env) {
+static int64_t JNI_AwPacProcessor_CreateNativePacProcessor() {
   AwPacProcessor* processor = new AwPacProcessor();
   return reinterpret_cast<intptr_t>(processor);
 }
 
-static void JNI_AwPacProcessor_InitializeEnvironment(JNIEnv* env) {
+static void JNI_AwPacProcessor_InitializeEnvironment() {
   base::ThreadPoolInstance::CreateAndStartWithDefaultParams("AwPacProcessor");
 }
 
 }  // namespace android_webview
+
+DEFINE_JNI(AwPacProcessor)

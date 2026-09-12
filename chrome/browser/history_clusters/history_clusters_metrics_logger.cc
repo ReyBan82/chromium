@@ -4,13 +4,10 @@
 
 #include "chrome/browser/history_clusters/history_clusters_metrics_logger.h"
 
-#include "base/logging.h"
 #include "base/metrics/histogram_functions.h"
-#include "content/public/browser/page_user_data.h"
-#include "content/public/browser/web_contents.h"
+#include "components/history_clusters/core/cluster_metrics_utils.h"
 #include "services/metrics/public/cpp/ukm_builders.h"
 #include "services/metrics/public/cpp/ukm_recorder.h"
-#include "services/metrics/public/cpp/ukm_source.h"
 #include "services/metrics/public/cpp/ukm_source_id.h"
 
 namespace history_clusters {
@@ -19,10 +16,9 @@ HistoryClustersMetricsLogger::HistoryClustersMetricsLogger(content::Page& page)
     : PageUserData<HistoryClustersMetricsLogger>(page) {}
 
 HistoryClustersMetricsLogger::~HistoryClustersMetricsLogger() {
-  if (!navigation_id_)
+  if (!navigation_id_ || !initial_state_ || !is_ever_shown_) {
     return;
-  if (!initial_state_)
-    return;
+  }
 
   // Record UKM metrics.
 
@@ -30,7 +26,7 @@ HistoryClustersMetricsLogger::~HistoryClustersMetricsLogger() {
       ukm::ConvertToSourceId(*navigation_id_, ukm::SourceIdType::NAVIGATION_ID);
   ukm::builders::HistoryClusters builder(ukm_source_id);
 
-  // TODO(crbug.com/1326954): Add UI-driven counts to UKM.
+  // TODO(crbug.com/40226001): Add UI-driven counts to UKM.
   builder.SetInitialState(static_cast<int>(*initial_state_));
   builder.SetNumQueries(num_queries_);
   builder.SetNumTogglesToBasicHistory(num_toggles_to_basic_history_);
@@ -121,6 +117,10 @@ void HistoryClustersMetricsLogger::RecordToggledVisibility(bool visible) {
   base::UmaHistogramBoolean("History.Clusters.UIActions.ToggledVisiblity",
                             visible);
   toggled_visiblity_count_++;
+}
+
+void HistoryClustersMetricsLogger::WasShown() {
+  is_ever_shown_ = true;
 }
 
 bool HistoryClustersMetricsLogger::

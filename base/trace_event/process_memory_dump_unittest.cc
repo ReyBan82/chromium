@@ -6,8 +6,13 @@
 
 #include <stddef.h>
 
+#include <array>
 #include <memory>
+#include <optional>
+#include <string_view>
 
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/memory/aligned_memory.h"
 #include "base/memory/ptr_util.h"
 #include "base/memory/shared_memory_tracker.h"
@@ -19,43 +24,58 @@
 #include "base/trace_event/traced_value.h"
 #include "build/build_config.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
-#include "winbase.h"
+
+#include "base/win/winbase_shim.h"
 #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
 #include <sys/mman.h>
 #endif
 
-namespace base {
-namespace trace_event {
+namespace base::trace_event {
 
 namespace {
 
-const MemoryDumpArgs kDetailedDumpArgs = {MemoryDumpLevelOfDetail::DETAILED};
-const char* const kTestDumpNameAllowlist[] = {
+const MemoryDumpArgs kDetailedDumpArgs = {MemoryDumpLevelOfDetail::kDetailed};
+constexpr std::string_view kTestDumpNameAllowlist[] = {
     "Allowlisted/TestName", "Allowlisted/TestName_0x?",
-    "Allowlisted/0x?/TestName", "Allowlisted/0x?", nullptr};
+    "Allowlisted/0x?/TestName", "Allowlisted/0x?"};
 
-void* Map(size_t size) {
+base::span<uint8_t> Map(size_t size) {
 #if BUILDFLAG(IS_WIN)
-  return ::VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT,
-                        PAGE_READWRITE);
+  void* ptr =
+      ::VirtualAlloc(nullptr, size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
 #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
-  return ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON,
-                0, 0);
+  void* ptr = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANON, 0, 0);
 #endif
+  // SAFETY: `VirtualAlloc` and `mmap` allocate memory segments of at least
+  // `size` bytes (rounded up to page boundaries). Therefore, constructing a
+  // span over `ptr` with `size` bytes is bounds-safe.
+  return UNSAFE_BUFFERS(base::span(static_cast<uint8_t*>(ptr), size));
 }
 
-void Unmap(void* addr, size_t size) {
+void Unmap(base::span<uint8_t> span) {
 #if BUILDFLAG(IS_WIN)
-  ::VirtualFree(addr, 0, MEM_DECOMMIT);
+  ::VirtualFree(span.data(), 0, MEM_RELEASE);
 #elif BUILDFLAG(IS_POSIX) || BUILDFLAG(IS_FUCHSIA)
-  ::munmap(addr, size);
+  ::munmap(span.data(), span.size());
 #else
 #error This architecture is not (yet) supported.
 #endif
+}
+
+std::optional<size_t> CountResidentBytesInSharedMemory(
+    WritableSharedMemoryMapping& mapping) {
+  // SAFETY: We need the actual mapped memory size here. There's no public
+  // method to get this as a span, so we need to construct it unsafely. The
+  // mapped_size() is larger than `mem.size()` but represents the actual memory
+  // segment size in the SharedMemoryMapping.
+  auto mapped =
+      UNSAFE_BUFFERS(base::span(mapping.data(), mapping.mapped_size()));
+  return ProcessMemoryDump::CountResidentBytesInSharedMemory(mapped.data(),
+                                                             mapped.size());
 }
 
 }  // namespace
@@ -71,7 +91,7 @@ TEST(ProcessMemoryDumpTest, MoveConstructor) {
 
   EXPECT_EQ(1u, pmd2.allocator_dumps().count("mad1"));
   EXPECT_EQ(1u, pmd2.allocator_dumps().count("mad2"));
-  EXPECT_EQ(MemoryDumpLevelOfDetail::DETAILED,
+  EXPECT_EQ(MemoryDumpLevelOfDetail::kDetailed,
             pmd2.dump_args().level_of_detail);
   EXPECT_EQ(1u, pmd2.allocator_dumps_edges().size());
 
@@ -87,14 +107,14 @@ TEST(ProcessMemoryDumpTest, MoveAssignment) {
   pmd1.AddOwnershipEdge(MemoryAllocatorDumpGuid(42),
                         MemoryAllocatorDumpGuid(4242));
 
-  ProcessMemoryDump pmd2({MemoryDumpLevelOfDetail::BACKGROUND});
+  ProcessMemoryDump pmd2({MemoryDumpLevelOfDetail::kBackground});
   pmd2.CreateAllocatorDump("malloc");
 
   pmd2 = std::move(pmd1);
   EXPECT_EQ(1u, pmd2.allocator_dumps().count("mad1"));
   EXPECT_EQ(1u, pmd2.allocator_dumps().count("mad2"));
   EXPECT_EQ(0u, pmd2.allocator_dumps().count("mad3"));
-  EXPECT_EQ(MemoryDumpLevelOfDetail::DETAILED,
+  EXPECT_EQ(MemoryDumpLevelOfDetail::kDetailed,
             pmd2.dump_args().level_of_detail);
   EXPECT_EQ(1u, pmd2.allocator_dumps_edges().size());
 
@@ -141,74 +161,10 @@ TEST(ProcessMemoryDumpTest, Clear) {
   ASSERT_EQ(nullptr, pmd1->GetAllocatorDump("mad2"));
   ASSERT_EQ(mad3, pmd1->GetAllocatorDump("mad3"));
   ASSERT_EQ(shared_mad1, pmd1->GetSharedGlobalAllocatorDump(shared_mad_guid1));
-  ASSERT_EQ(MemoryAllocatorDump::Flags::DEFAULT, shared_mad1->flags());
+  ASSERT_EQ(MemoryAllocatorDump::Flags::kDefault, shared_mad1->flags());
   ASSERT_EQ(shared_mad2, pmd1->GetSharedGlobalAllocatorDump(shared_mad_guid2));
-  ASSERT_EQ(MemoryAllocatorDump::Flags::WEAK, shared_mad2->flags());
+  ASSERT_EQ(MemoryAllocatorDump::Flags::kWeak, shared_mad2->flags());
 
-  traced_value = std::make_unique<TracedValue>();
-  pmd1->SerializeAllocatorDumpsInto(traced_value.get());
-
-  pmd1.reset();
-}
-
-TEST(ProcessMemoryDumpTest, TakeAllDumpsFrom) {
-  std::unique_ptr<TracedValue> traced_value(new TracedValue);
-  std::unordered_map<AllocationContext, AllocationMetrics> metrics_by_context;
-  metrics_by_context[AllocationContext()] = {1, 1};
-  TraceEventMemoryOverhead overhead;
-
-  std::unique_ptr<ProcessMemoryDump> pmd1(
-      new ProcessMemoryDump(kDetailedDumpArgs));
-  auto* mad1_1 = pmd1->CreateAllocatorDump("pmd1/mad1");
-  auto* mad1_2 = pmd1->CreateAllocatorDump("pmd1/mad2");
-  pmd1->AddOwnershipEdge(mad1_1->guid(), mad1_2->guid());
-  pmd1->DumpHeapUsage(metrics_by_context, overhead, "pmd1/heap_dump1");
-  pmd1->DumpHeapUsage(metrics_by_context, overhead, "pmd1/heap_dump2");
-
-  std::unique_ptr<ProcessMemoryDump> pmd2(
-      new ProcessMemoryDump(kDetailedDumpArgs));
-  auto* mad2_1 = pmd2->CreateAllocatorDump("pmd2/mad1");
-  auto* mad2_2 = pmd2->CreateAllocatorDump("pmd2/mad2");
-  pmd2->AddOwnershipEdge(mad2_1->guid(), mad2_2->guid());
-  pmd2->DumpHeapUsage(metrics_by_context, overhead, "pmd2/heap_dump1");
-  pmd2->DumpHeapUsage(metrics_by_context, overhead, "pmd2/heap_dump2");
-
-  MemoryAllocatorDumpGuid shared_mad_guid1(1);
-  MemoryAllocatorDumpGuid shared_mad_guid2(2);
-  auto* shared_mad1 = pmd2->CreateSharedGlobalAllocatorDump(shared_mad_guid1);
-  auto* shared_mad2 =
-      pmd2->CreateWeakSharedGlobalAllocatorDump(shared_mad_guid2);
-
-  pmd1->TakeAllDumpsFrom(pmd2.get());
-
-  // Make sure that pmd2 is empty but still usable after it has been emptied.
-  ASSERT_TRUE(pmd2->allocator_dumps().empty());
-  ASSERT_TRUE(pmd2->allocator_dumps_edges().empty());
-  pmd2->CreateAllocatorDump("pmd2/this_mad_stays_with_pmd2");
-  ASSERT_EQ(1u, pmd2->allocator_dumps().size());
-  ASSERT_EQ(1u, pmd2->allocator_dumps().count("pmd2/this_mad_stays_with_pmd2"));
-  pmd2->AddOwnershipEdge(MemoryAllocatorDumpGuid(42),
-                         MemoryAllocatorDumpGuid(4242));
-
-  // Check that calling serialization routines doesn't cause a crash.
-  pmd2->SerializeAllocatorDumpsInto(traced_value.get());
-
-  // Free the |pmd2| to check that the memory ownership of the two MAD(s)
-  // has been transferred to |pmd1|.
-  pmd2.reset();
-
-  // Now check that |pmd1| has been effectively merged.
-  ASSERT_EQ(6u, pmd1->allocator_dumps().size());
-  ASSERT_EQ(1u, pmd1->allocator_dumps().count("pmd1/mad1"));
-  ASSERT_EQ(1u, pmd1->allocator_dumps().count("pmd1/mad2"));
-  ASSERT_EQ(1u, pmd1->allocator_dumps().count("pmd2/mad1"));
-  ASSERT_EQ(1u, pmd1->allocator_dumps().count("pmd1/mad2"));
-  ASSERT_EQ(2u, pmd1->allocator_dumps_edges().size());
-  ASSERT_EQ(shared_mad1, pmd1->GetSharedGlobalAllocatorDump(shared_mad_guid1));
-  ASSERT_EQ(shared_mad2, pmd1->GetSharedGlobalAllocatorDump(shared_mad_guid2));
-  ASSERT_TRUE(MemoryAllocatorDump::Flags::WEAK & shared_mad2->flags());
-
-  // Check that calling serialization routines doesn't cause a crash.
   traced_value = std::make_unique<TracedValue>();
   pmd1->SerializeAllocatorDumpsInto(traced_value.get());
 
@@ -294,7 +250,7 @@ TEST(ProcessMemoryDumpTest, Suballocations) {
 
   // Same here, but this time create an allocation with an explicit guid.
   auto* pic2_dump = pmd->CreateAllocatorDump("picturemanager/picture2",
-                                            MemoryAllocatorDumpGuid(0x42));
+                                             MemoryAllocatorDumpGuid(0x42));
   pmd->AddSuballocation(pic2_dump->guid(), allocator_dump_name);
 
   // Now check that AddSuballocation() has created anonymous child dumps under
@@ -309,7 +265,7 @@ TEST(ProcessMemoryDumpTest, Suballocations) {
 
   // Finally check that AddSuballocation() has created also the
   // edges between the pictures and the anonymous allocator child dumps.
-  bool found_edge[2]{false, false};
+  std::array<bool, 2> found_edge = {false, false};
   for (const auto& e : pmd->allocator_dumps_edges()) {
     found_edge[0] |= (e.first == pic1_dump->guid() &&
                       e.second.target == anon_node_1_it->second->guid());
@@ -320,7 +276,7 @@ TEST(ProcessMemoryDumpTest, Suballocations) {
   ASSERT_TRUE(found_edge[1]);
 
   // Check that calling serialization routines doesn't cause a crash.
-  std::unique_ptr<TracedValue> traced_value(new TracedValue);
+  auto traced_value = std::make_unique<TracedValue>();
   pmd->SerializeAllocatorDumpsInto(traced_value.get());
 
   pmd.reset();
@@ -332,23 +288,23 @@ TEST(ProcessMemoryDumpTest, GlobalAllocatorDumpTest) {
   MemoryAllocatorDumpGuid shared_mad_guid(1);
   auto* shared_mad1 = pmd->CreateWeakSharedGlobalAllocatorDump(shared_mad_guid);
   ASSERT_EQ(shared_mad_guid, shared_mad1->guid());
-  ASSERT_EQ(MemoryAllocatorDump::Flags::WEAK, shared_mad1->flags());
+  ASSERT_EQ(MemoryAllocatorDump::Flags::kWeak, shared_mad1->flags());
 
   auto* shared_mad2 = pmd->GetSharedGlobalAllocatorDump(shared_mad_guid);
   ASSERT_EQ(shared_mad1, shared_mad2);
-  ASSERT_EQ(MemoryAllocatorDump::Flags::WEAK, shared_mad1->flags());
+  ASSERT_EQ(MemoryAllocatorDump::Flags::kWeak, shared_mad1->flags());
 
   auto* shared_mad3 = pmd->CreateWeakSharedGlobalAllocatorDump(shared_mad_guid);
   ASSERT_EQ(shared_mad1, shared_mad3);
-  ASSERT_EQ(MemoryAllocatorDump::Flags::WEAK, shared_mad1->flags());
+  ASSERT_EQ(MemoryAllocatorDump::Flags::kWeak, shared_mad1->flags());
 
   auto* shared_mad4 = pmd->CreateSharedGlobalAllocatorDump(shared_mad_guid);
   ASSERT_EQ(shared_mad1, shared_mad4);
-  ASSERT_EQ(MemoryAllocatorDump::Flags::DEFAULT, shared_mad1->flags());
+  ASSERT_EQ(MemoryAllocatorDump::Flags::kDefault, shared_mad1->flags());
 
   auto* shared_mad5 = pmd->CreateWeakSharedGlobalAllocatorDump(shared_mad_guid);
   ASSERT_EQ(shared_mad1, shared_mad5);
-  ASSERT_EQ(MemoryAllocatorDump::Flags::DEFAULT, shared_mad1->flags());
+  ASSERT_EQ(MemoryAllocatorDump::Flags::kDefault, shared_mad1->flags());
 }
 
 TEST(ProcessMemoryDumpTest, SharedMemoryOwnershipTest) {
@@ -379,7 +335,7 @@ TEST(ProcessMemoryDumpTest, SharedMemoryOwnershipTest) {
 }
 
 TEST(ProcessMemoryDumpTest, BackgroundModeTest) {
-  MemoryDumpArgs background_args = {MemoryDumpLevelOfDetail::BACKGROUND};
+  MemoryDumpArgs background_args = {MemoryDumpLevelOfDetail::kBackground};
   std::unique_ptr<ProcessMemoryDump> pmd(
       new ProcessMemoryDump(background_args));
   ProcessMemoryDump::is_black_hole_non_fatal_for_testing_ = true;
@@ -443,7 +399,7 @@ TEST(ProcessMemoryDumpTest, BackgroundModeTest) {
 }
 
 TEST(ProcessMemoryDumpTest, GuidsTest) {
-  MemoryDumpArgs dump_args = {MemoryDumpLevelOfDetail::DETAILED};
+  MemoryDumpArgs dump_args = {MemoryDumpLevelOfDetail::kDetailed};
 
   const auto process_token_one = UnguessableToken::Create();
   const auto process_token_two = UnguessableToken::Create();
@@ -475,9 +431,9 @@ TEST(ProcessMemoryDumpTest, GuidsTest) {
   ASSERT_EQ(mad1->guid(), pmd1.GetDumpId("foo"));
 }
 
-#if defined(COUNT_RESIDENT_BYTES_SUPPORTED)
 #if BUILDFLAG(IS_FUCHSIA)
-// TODO(crbug.com/851760): Counting resident bytes is not supported on Fuchsia.
+// TODO(crbug.com/42050620): Counting resident bytes is not supported on
+// Fuchsia.
 #define MAYBE_CountResidentBytes DISABLED_CountResidentBytes
 #else
 #define MAYBE_CountResidentBytes CountResidentBytes
@@ -485,29 +441,53 @@ TEST(ProcessMemoryDumpTest, GuidsTest) {
 TEST(ProcessMemoryDumpTest, MAYBE_CountResidentBytes) {
   const size_t page_size = ProcessMemoryDump::GetSystemPageSize();
 
+  // Size 0 allocation check.
+  std::optional<size_t> res0 =
+      ProcessMemoryDump::CountResidentBytes(nullptr, 0);
+  ASSERT_TRUE(res0.has_value());
+  ASSERT_EQ(res0.value(), 0u);
+
   // Allocate few page of dirty memory and check if it is resident.
   const size_t size1 = 5 * page_size;
-  void* memory1 = Map(size1);
-  memset(memory1, 0, size1);
-  absl::optional<size_t> res1 =
-      ProcessMemoryDump::CountResidentBytes(memory1, size1);
+  base::span<uint8_t> memory1 = Map(size1);
+  std::ranges::fill(memory1, 0u);
+  std::optional<size_t> res1 =
+      ProcessMemoryDump::CountResidentBytes(memory1.data(), memory1.size());
   ASSERT_TRUE(res1.has_value());
   ASSERT_EQ(res1.value(), size1);
-  Unmap(memory1, size1);
+
+  // Unaligned pointer partway into one of the maps.
+  const uintptr_t unaligned_addr =
+      reinterpret_cast<uintptr_t>(memory1.data()) + page_size / 2;
+  std::optional<size_t> res_unaligned = ProcessMemoryDump::CountResidentBytes(
+      reinterpret_cast<void*>(unaligned_addr), page_size);
+  ASSERT_TRUE(res_unaligned.has_value());
+  ASSERT_EQ(res_unaligned.value(), page_size);
+
+  Unmap(memory1);
+
+  // Unwritten (non-resident) memory check.
+  base::span<uint8_t> memory_unwritten = Map(size1);
+  std::optional<size_t> res_unwritten = ProcessMemoryDump::CountResidentBytes(
+      memory_unwritten.data(), memory_unwritten.size());
+  ASSERT_TRUE(res_unwritten.has_value());
+  ASSERT_EQ(res_unwritten.value(), 0u);
+  Unmap(memory_unwritten);
 
   // Allocate a large memory segment (> 8Mib).
   const size_t kVeryLargeMemorySize = 15 * 1024 * 1024;
-  void* memory2 = Map(kVeryLargeMemorySize);
-  memset(memory2, 0, kVeryLargeMemorySize);
-  absl::optional<size_t> res2 =
-      ProcessMemoryDump::CountResidentBytes(memory2, kVeryLargeMemorySize);
+  base::span<uint8_t> memory2 = Map(kVeryLargeMemorySize);
+  std::ranges::fill(memory2, 0u);
+  std::optional<size_t> res2 =
+      ProcessMemoryDump::CountResidentBytes(memory2.data(), memory2.size());
   ASSERT_TRUE(res2.has_value());
   ASSERT_EQ(res2.value(), kVeryLargeMemorySize);
-  Unmap(memory2, kVeryLargeMemorySize);
+  Unmap(memory2);
 }
 
 #if BUILDFLAG(IS_FUCHSIA)
-// TODO(crbug.com/851760): Counting resident bytes is not supported on Fuchsia.
+// TODO(crbug.com/42050620): Counting resident bytes is not supported on
+// Fuchsia.
 #define MAYBE_CountResidentBytesInSharedMemory \
   DISABLED_CountResidentBytesInSharedMemory
 #else
@@ -521,10 +501,9 @@ TEST(ProcessMemoryDumpTest, MAYBE_CountResidentBytesInSharedMemory) {
     const size_t kDirtyMemorySize = 5 * page_size;
     auto region = base::WritableSharedMemoryRegion::Create(kDirtyMemorySize);
     base::WritableSharedMemoryMapping mapping = region.Map();
-    memset(mapping.memory(), 0, kDirtyMemorySize);
-    absl::optional<size_t> res1 =
-        ProcessMemoryDump::CountResidentBytesInSharedMemory(
-            mapping.memory(), mapping.mapped_size());
+    base::span<uint8_t> mapping_mem(mapping);
+    std::ranges::fill(mapping_mem, 0u);
+    std::optional<size_t> res1 = CountResidentBytesInSharedMemory(mapping);
     ASSERT_TRUE(res1.has_value());
     ASSERT_EQ(res1.value(), kDirtyMemorySize);
   }
@@ -536,12 +515,19 @@ TEST(ProcessMemoryDumpTest, MAYBE_CountResidentBytesInSharedMemory) {
         base::WritableSharedMemoryRegion::Create(kDirtyMemorySize + page_size);
     base::WritableSharedMemoryMapping mapping =
         region.MapAt(page_size / 2, kDirtyMemorySize);
-    memset(mapping.memory(), 0, kDirtyMemorySize);
-    absl::optional<size_t> res1 =
-        ProcessMemoryDump::CountResidentBytesInSharedMemory(
-            mapping.memory(), mapping.mapped_size());
+    base::span<uint8_t> mapping_mem(mapping);
+    std::ranges::fill(mapping_mem, 0u);
+    std::optional<size_t> res1 = CountResidentBytesInSharedMemory(mapping);
     ASSERT_TRUE(res1.has_value());
+    // On Windows (where VirtualQuery returns the full region size for mapped
+    // sections) and Apple (which queries resident Mach VM pages), the mapped
+    // span granularity includes all page-aligned pages (6.0 pages total).
+    // On POSIX/Linux, exact sub-page overlap calculation returns 5.5 pages.
+#if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_WIN)
     ASSERT_EQ(res1.value(), kDirtyMemorySize + page_size);
+#else
+    ASSERT_EQ(res1.value(), kDirtyMemorySize + page_size / 2);
+#endif
   }
 
   // Allocate a large memory segment (> 8Mib).
@@ -550,10 +536,9 @@ TEST(ProcessMemoryDumpTest, MAYBE_CountResidentBytesInSharedMemory) {
     auto region =
         base::WritableSharedMemoryRegion::Create(kVeryLargeMemorySize);
     base::WritableSharedMemoryMapping mapping = region.Map();
-    memset(mapping.memory(), 0, kVeryLargeMemorySize);
-    absl::optional<size_t> res2 =
-        ProcessMemoryDump::CountResidentBytesInSharedMemory(
-            mapping.memory(), mapping.mapped_size());
+    base::span<uint8_t> mapping_mem(mapping);
+    std::ranges::fill(mapping_mem, 0u);
+    std::optional<size_t> res2 = CountResidentBytesInSharedMemory(mapping);
     ASSERT_TRUE(res2.has_value());
     ASSERT_EQ(res2.value(), kVeryLargeMemorySize);
   }
@@ -563,15 +548,12 @@ TEST(ProcessMemoryDumpTest, MAYBE_CountResidentBytesInSharedMemory) {
     const size_t kTouchedMemorySize = 7 * 1024 * 1024;
     auto region = base::WritableSharedMemoryRegion::Create(kTouchedMemorySize);
     base::WritableSharedMemoryMapping mapping = region.Map();
-    memset(mapping.memory(), 0, kTouchedMemorySize);
-    absl::optional<size_t> res3 =
-        ProcessMemoryDump::CountResidentBytesInSharedMemory(
-            mapping.memory(), mapping.mapped_size());
+    base::span<uint8_t> mapping_mem(mapping);
+    std::ranges::fill(mapping_mem, 0u);
+    std::optional<size_t> res3 = CountResidentBytesInSharedMemory(mapping);
     ASSERT_TRUE(res3.has_value());
     ASSERT_EQ(res3.value(), kTouchedMemorySize);
   }
 }
-#endif  // defined(COUNT_RESIDENT_BYTES_SUPPORTED)
 
-}  // namespace trace_event
-}  // namespace base
+}  // namespace base::trace_event

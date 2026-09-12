@@ -1,4 +1,4 @@
-(async function(testRunner) {
+(async function(/** @type {import('test_runner').TestRunner} */ testRunner) {
   const {page, session, dp} = await testRunner.startURL(
       'resources/minified.html',
       `Tests that the initiator position is correct even when that initiator is minified.`);
@@ -7,12 +7,12 @@
   let errorForLog = new Error();
   setTimeout(() => testRunner.die('Timeout', errorForLog), 28000);
 
-  dp.Network.enable();
-  dp.Page.enable();
+  await dp.Network.enable();
+  await dp.Page.enable();
   dp.Page.reload({ignoreCache: true});
 
   let requests = [];
-  dp.Network.onLoadingFailed(e => testRunnler.log(JSON.stringify(e)));
+  dp.Network.onLoadingFailed(e => testRunner.log(JSON.stringify(e)));
   await dp.Network.onceRequestWillBeSent(e => {
     requests.push(e.params);
     errorForLog = new Error(JSON.stringify(requests));

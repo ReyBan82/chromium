@@ -8,10 +8,15 @@
 #include <sys/un.h>
 #include <systemd/sd-daemon.h>
 #include <unistd.h>
+
+#include <optional>
+#include <string>
 #include <utility>
 
 #include "base/base_paths.h"
+#include "base/check.h"
 #include "base/command_line.h"
+#include "base/containers/span.h"
 #include "base/files/file_descriptor_watcher_posix.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
@@ -22,30 +27,35 @@
 #include "base/posix/eintr_wrapper.h"
 #include "base/process/launch.h"
 #include "base/process/process.h"
-#include "base/strings/stringprintf.h"
 #include "base/threading/thread_restrictions.h"
 #include "chrome/updater/constants.h"
 #include "chrome/updater/linux/ipc_constants.h"
 #include "chrome/updater/updater_branding.h"
 #include "chrome/updater/util/posix_util.h"
+#include "third_party/abseil-cpp/absl/strings/str_format.h"
 
 namespace updater {
+
 // Allows the utility functions below to join processes. To avoid overzealously
 // granting access to |base::ScopedAllowBaseSyncPrimitives|, this class must
 // continue to live in a `.cc`.
-class SystemctlLauncherScopedAllowBaseSyncPrimitives {
- private:
-  base::ScopedAllowBaseSyncPrimitives allow_wait;
-};
+class [[maybe_unused, nodiscard]] SystemctlLauncherScopedAllowBaseSyncPrimitives
+    : public base::ScopedAllowBaseSyncPrimitives {};
 
 namespace {
+
 // Location of system-scoped unit files.
-const base::FilePath kSystemUnitDirectory("/etc/systemd/system");
+const base::FilePath::StringViewType kSystemUnitDirectory(
+    "/etc/systemd/system");
+
 // Location of user-scoped unit files relative to the user's home directory.
-const base::FilePath kUserUnitRelativeDirectory(".local/share/systemd/user");
+const base::FilePath::StringViewType kUserUnitRelativeDirectory(
+    ".local/share/systemd/user");
+
 // Systemd unit names.
 constexpr char kUpdaterServiceName[] = PRODUCT_FULLNAME_STRING ".service";
 constexpr char kUpdaterSocketName[] = PRODUCT_FULLNAME_STRING ".socket";
+
 // Systemd unit definition templates.
 constexpr char kUpdaterServiceDefinitionTemplate[] =
     "[Service]\n"
@@ -60,17 +70,17 @@ constexpr char kUpdaterSocketDefinitionTemplate[] =
     "WantedBy=sockets.target";
 
 // Returns the path to the systemd unit directory for the given scope.
-absl::optional<base::FilePath> GetUnitDirectory(UpdaterScope scope) {
+std::optional<base::FilePath> GetUnitDirectory(UpdaterScope scope) {
   base::FilePath unit_dir;
   switch (scope) {
     case UpdaterScope::kUser:
       if (!base::PathService::Get(base::DIR_HOME, &unit_dir)) {
-        return absl::nullopt;
+        return std::nullopt;
       }
       unit_dir = unit_dir.Append(kUserUnitRelativeDirectory);
 
       if (!base::CreateDirectory(unit_dir)) {
-        return absl::nullopt;
+        return std::nullopt;
       }
       break;
     case UpdaterScope::kSystem:
@@ -139,8 +149,8 @@ void StopService(UpdaterScope scope) {
                                       std::string unit_definition) {
   base::File unit_file(unit_path,
                        base::File::FLAG_WRITE | base::File::FLAG_CREATE_ALWAYS);
-  return unit_file.IsValid() && unit_file.Write(0, unit_definition.c_str(),
-                                                unit_definition.size()) != -1;
+  return unit_file.IsValid() &&
+         unit_file.WriteAndCheck(0, base::as_byte_span(unit_definition));
 }
 
 // Returns the command line which should be used to start the updater service.
@@ -148,14 +158,11 @@ std::string GetLauncherCommandLine(UpdaterScope scope,
                                    base::FilePath launcher) {
   base::CommandLine command(launcher);
   command.AppendSwitch(kServerSwitch);
-  command.AppendSwitchASCII(kServerServiceSwitch,
-                            kServerUpdateServiceSwitchValue);
+  command.AppendSwitchUTF8(kServerServiceSwitch,
+                           kServerUpdateServiceSwitchValue);
   if (scope == UpdaterScope::kSystem) {
     command.AppendSwitch(kSystemSwitch);
   }
-  command.AppendSwitch(kEnableLoggingSwitch);
-  command.AppendSwitchASCII(kLoggingModuleSwitch, kLoggingModuleSwitchValue);
-
   return command.GetCommandLineString();
 }
 
@@ -175,7 +182,7 @@ SystemdService::~SystemdService() = default;
 
 void SystemdService::OnSocketReadable() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(server_socket_.is_valid());
+  CHECK(server_socket_.is_valid());
 
   base::ScopedFD remote_fd(accept(server_socket_.get(), nullptr, nullptr));
   if (!remote_fd.is_valid()) {
@@ -184,21 +191,24 @@ void SystemdService::OnSocketReadable() {
 }
 
 bool InstallSystemdUnits(UpdaterScope scope) {
-  absl::optional<base::FilePath> launcher_path =
+  std::optional<base::FilePath> launcher_path =
       GetUpdateServiceLauncherPath(scope);
-  absl::optional<base::FilePath> unit_dir = GetUnitDirectory(scope);
+  std::optional<base::FilePath> unit_dir = GetUnitDirectory(scope);
   if (!launcher_path || !unit_dir) {
     return false;
   }
 
+  // Uninstall existing units if they exist.
+  UninstallSystemdUnits(scope);
+
   if (!InstallSystemdUnit(
-          unit_dir->AppendASCII(kUpdaterServiceName),
-          base::StringPrintf(
+          unit_dir->Append(kUpdaterServiceName),
+          absl::StrFormat(
               kUpdaterServiceDefinitionTemplate,
               GetLauncherCommandLine(scope, *launcher_path).c_str())) ||
       !InstallSystemdUnit(
-          unit_dir->AppendASCII(kUpdaterSocketName),
-          base::StringPrintf(
+          unit_dir->Append(kUpdaterSocketName),
+          absl::StrFormat(
               kUpdaterSocketDefinitionTemplate,
               GetActivationSocketPath(scope).AsUTF8Unsafe().c_str()))) {
     // Avoid a partial installation.
@@ -214,7 +224,7 @@ bool InstallSystemdUnits(UpdaterScope scope) {
 }
 
 bool UninstallSystemdUnits(UpdaterScope scope) {
-  absl::optional<base::FilePath> unit_dir = GetUnitDirectory(scope);
+  std::optional<base::FilePath> unit_dir = GetUnitDirectory(scope);
   if (!unit_dir) {
     return false;
   }
@@ -223,20 +233,20 @@ bool UninstallSystemdUnits(UpdaterScope scope) {
 
   // Note: It is considered successful to attempt to delete units that do not
   // exist.
-  bool success = base::DeleteFile(unit_dir->AppendASCII(kUpdaterServiceName)) &&
-                 base::DeleteFile(unit_dir->AppendASCII(kUpdaterSocketName));
+  bool success = base::DeleteFile(unit_dir->Append(kUpdaterServiceName)) &&
+                 base::DeleteFile(unit_dir->Append(kUpdaterSocketName));
   ReloadUnitFiles(scope);
   return success;
 }
 
 bool SystemdUnitsInstalled(UpdaterScope scope) {
-  absl::optional<base::FilePath> unit_dir = GetUnitDirectory(scope);
+  std::optional<base::FilePath> unit_dir = GetUnitDirectory(scope);
   if (!unit_dir) {
     return false;
   }
 
-  return base::PathExists(unit_dir->AppendASCII(kUpdaterServiceName)) ||
-         base::PathExists(unit_dir->AppendASCII(kUpdaterSocketName));
+  return base::PathExists(unit_dir->Append(kUpdaterServiceName)) ||
+         base::PathExists(unit_dir->Append(kUpdaterSocketName));
 }
 
 }  // namespace updater

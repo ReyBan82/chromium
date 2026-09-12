@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/config/chromecast_build.gni")
+import("//build/config/cast.gni")
 
 if (enable_cast_receiver) {
   source_set("browser") {
@@ -16,7 +16,6 @@ if (enable_cast_receiver) {
       "public/runtime_application.h",
       "public/runtime_application_dispatcher.h",
       "public/streaming_config_manager.h",
-      "public/streaming_resolution_observer.h",
     ]
     sources = [
       "application_client.cc",
@@ -44,6 +43,12 @@ if (enable_cast_receiver) {
       "streaming_controller_mirroring.h",
       "streaming_controller_remoting.cc",
       "streaming_controller_remoting.h",
+      "streaming_input_capabilities_observer.cc",
+      "streaming_input_capabilities_observer.h",
+      "streaming_input_observer.cc",
+      "streaming_input_observer.h",
+      "streaming_receiver_channel.cc",
+      "streaming_receiver_channel.h",
       "streaming_receiver_session_client.cc",
       "streaming_receiver_session_client.h",
       "streaming_runtime_application.cc",
@@ -52,6 +57,7 @@ if (enable_cast_receiver) {
       "web_runtime_application.h",
     ]
     public_deps = [
+      "//components/cast_receiver/proto",
       "//components/cast_streaming/browser",
       "//third_party/blink/public/common:headers",
     ]
@@ -64,8 +70,9 @@ if (enable_cast_receiver) {
       "//components/cast/message_port:message_port_cast",
       "//components/cast/named_message_port_connector",
       "//components/cast_receiver/common",
-      "//components/cast_streaming/public",
-      "//components/cast_streaming/public/mojom",
+      "//components/cast_streaming/common",
+      "//components/cast_streaming/common:conversions",
+      "//components/cast_streaming/common:mojom",
       "//components/media_control/browser",
       "//components/on_load_script_injector/browser",
       "//components/url_rewrite/browser",
@@ -79,6 +86,7 @@ if (enable_cast_receiver) {
       "//net",
       "//third_party/abseil-cpp:absl",
       "//ui/base",
+      "//ui/events/devices",
       "//url",
     ]
     friend = [ ":unit_tests" ]
@@ -118,10 +126,22 @@ source_set("unit_tests") {
   ]
 
   if (enable_cast_receiver) {
-    deps += [ ":browser" ]
+    deps += [
+      ":browser",
+      "//components/cast/message_port",
+      "//components/cast/message_port:test_message_port_receiver",
+      "//components/cast_streaming/common:conversions",
+      "//content/public/browser",
+      "//content/test:test_support",
+      "//ui/events/devices",
+      "//ui/events/devices:test_support",
+    ]
     sources += [
-      "application_client_unittest.cc",
+      "streaming_input_capabilities_observer_unittest.cc",
+      "streaming_input_observer_unittest.cc",
+      "streaming_receiver_channel_unittest.cc",
       "streaming_receiver_session_client_unittest.cc",
+      "streaming_runtime_application_unittest.cc",
     ]
   }
 }

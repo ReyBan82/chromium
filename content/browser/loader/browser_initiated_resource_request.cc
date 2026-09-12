@@ -9,6 +9,7 @@
 #include "content/public/browser/content_browser_client.h"
 #include "content/public/common/content_client.h"
 #include "net/http/http_request_headers.h"
+#include "third_party/blink/public/common/global_privacy_control/global_privacy_control_util.h"
 #include "third_party/blink/public/common/loader/loader_constants.h"
 #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
 
@@ -31,7 +32,20 @@ void UpdateAdditionalHeadersForBrowserInitiatedRequest(
     headers->SetHeaderIfMissing(blink::kDoNotTrackHeader, "1");
   }
 
-  // TODO(crbug.com/1315612): WARNING: This bypasses the permissions policy.
+  // Set the GlobalPrivacyControl header if appropriate.
+  // https://w3c.github.io/gpc/#expression-format
+  if (blink::IsGlobalPrivacyControlFeatureAndSettingEnabled(
+          renderer_preferences)) {
+    if (should_update_existing_headers) {
+      headers->RemoveHeader(blink::kGlobalPrivacyControlHeader);
+    }
+    headers->SetHeaderIfMissing(blink::kGlobalPrivacyControlHeader, "1");
+    blink::MaybeRecordGlobalPrivacyControlSourceMetric(
+        is_for_worker_script ? blink::GPCSignalSourceType::kWorkerNavigation
+                             : blink::GPCSignalSourceType::kFrameNavigation);
+  }
+
+  // TODO(crbug.com/40833603): WARNING: This bypasses the permissions policy.
   // Unfortunately, workers lack a permissions policy and to derive proper hints
   // https://github.com/w3c/webappsec-permissions-policy/issues/207.
   // Save-Data was previously included in hints for workers, thus we cannot

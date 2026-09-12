@@ -5,6 +5,8 @@
 #ifndef UI_BASE_CLIPBOARD_CLIPBOARD_METRICS_H_
 #define UI_BASE_CLIPBOARD_CLIPBOARD_METRICS_H_
 
+#include <string_view>
+
 #include "build/build_config.h"
 
 namespace ui {
@@ -21,7 +23,7 @@ enum class ClipboardFormatMetric {
   kHtml = 1,
   kRtf = 2,
   kImage = 3,  // Bitmap data.
-  kBookmark = 4,
+  kUrl = 4,
   kData = 5,
   kCustomData = 6,
   kWebSmartPaste = 7,  // Only used on write.
@@ -33,6 +35,7 @@ enum class ClipboardFormatMetric {
 
 void RecordRead(ClipboardFormatMetric metric);
 void RecordWrite(ClipboardFormatMetric metric);
+void RecordWriteTextSizeMetrics(std::u16string_view text);
 
 #if BUILDFLAG(IS_CHROMEOS)
 // Records the time interval between when the specified |data| was committed to

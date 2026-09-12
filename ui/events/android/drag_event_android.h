@@ -22,6 +22,8 @@ namespace ui {
 
 // Event class used to carry the info from Java DragEvent through native.
 // All coordinates are in DIPs.
+// Android only includes `filenames` in the drop event, so `has_files` is used
+// to indicate when the drag is for files.
 class EVENTS_EXPORT DragEventAndroid {
  public:
   DragEventAndroid(JNIEnv* env,
@@ -29,7 +31,13 @@ class EVENTS_EXPORT DragEventAndroid {
                    const gfx::PointF& location,
                    const gfx::PointF& screen_location,
                    const std::vector<std::u16string>& mime_types,
-                   jstring content);
+                   bool has_files,
+                   const base::android::JavaRef<jobjectArray>& filenames,
+                   const base::android::JavaRef<jstring>& text,
+                   const base::android::JavaRef<jstring>& html,
+                   const base::android::JavaRef<jstring>& url,
+                   const base::android::JavaRef<jstring>& custom_data,
+                   const base::android::JavaRef<jstring>& effect_allowed);
 
   DragEventAndroid(const DragEventAndroid&) = delete;
   DragEventAndroid& operator=(const DragEventAndroid&) = delete;
@@ -40,8 +48,15 @@ class EVENTS_EXPORT DragEventAndroid {
   const gfx::PointF& location() const { return location_; }
   const gfx::PointF& screen_location() const { return screen_location_; }
   const std::vector<std::u16string>& mime_types() const { return *mime_types_; }
+  bool has_files() const { return has_files_; }
 
-  base::android::ScopedJavaLocalRef<jstring> GetJavaContent() const;
+  base::android::ScopedJavaLocalRef<jstring> GetJavaCustomData() const;
+  base::android::ScopedJavaLocalRef<jstring> GetJavaEffectAllowed() const;
+
+  base::android::ScopedJavaLocalRef<jobjectArray> GetJavaFilenames() const;
+  base::android::ScopedJavaLocalRef<jstring> GetJavaText() const;
+  base::android::ScopedJavaLocalRef<jstring> GetJavaHtml() const;
+  base::android::ScopedJavaLocalRef<jstring> GetJavaUrl() const;
 
   // Creates a new DragEventAndroid instance different from |this| only by
   // its location.
@@ -55,8 +70,14 @@ class EVENTS_EXPORT DragEventAndroid {
   // Location relative to the screen coordinate.
   gfx::PointF screen_location_;
   const raw_ref<const std::vector<std::u16string>> mime_types_;
-  // The Java reference to the drop content to avoid unnecessary copying.
-  base::android::ScopedJavaGlobalRef<jstring> content_;
+  // The Java reference to the drop items to avoid unnecessary copying.
+  bool has_files_;
+  base::android::ScopedJavaGlobalRef<jobjectArray> filenames_;
+  base::android::ScopedJavaGlobalRef<jstring> text_;
+  base::android::ScopedJavaGlobalRef<jstring> html_;
+  base::android::ScopedJavaGlobalRef<jstring> url_;
+  base::android::ScopedJavaGlobalRef<jstring> custom_data_;
+  base::android::ScopedJavaGlobalRef<jstring> effect_allowed_;
 };
 
 }  // namespace ui

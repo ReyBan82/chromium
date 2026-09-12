@@ -4,14 +4,17 @@
 
 #include "chrome/browser/component_updater/hyphenation_component_installer.h"
 
-#include "base/files/file_util.h"
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "base/logging.h"
 #include "base/no_destructor.h"
 #include "base/task/sequenced_task_runner.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
-
-using component_updater::ComponentUpdateService;
 
 namespace {
 
@@ -38,16 +41,18 @@ class HyphenationDirectory {
     DVLOG(1) << __func__;
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     callbacks_.push_back(std::move(callback));
-    if (!dir_.empty())
+    if (!dir_.empty()) {
       FireCallbacks();
+    }
   }
 
   void Set(const base::FilePath& new_dir) {
     DVLOG(1) << __func__ << "\"" << new_dir << "\"";
     DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
     CHECK(!new_dir.empty());
-    if (new_dir == dir_)
+    if (new_dir == dir_) {
       return;
+    }
     dir_ = new_dir;
     FireCallbacks();
   }
@@ -94,7 +99,7 @@ bool HyphenationComponentInstallerPolicy::RequiresNetworkEncryption() const {
 
 update_client::CrxInstaller::Result
 HyphenationComponentInstallerPolicy::OnCustomInstall(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) {
   return update_client::CrxInstaller::Result(0);  // Nothing custom here.
 }
@@ -104,7 +109,7 @@ void HyphenationComponentInstallerPolicy::OnCustomUninstall() {}
 void HyphenationComponentInstallerPolicy::ComponentReady(
     const base::Version& version,
     const base::FilePath& install_dir,
-    base::Value::Dict manifest) {
+    base::DictValue manifest) {
   VLOG(1) << "Hyphenation Component ready, version " << version.GetString()
           << " in " << install_dir.value();
   HyphenationDirectory* hyphenation_directory = HyphenationDirectory::Get();
@@ -113,7 +118,7 @@ void HyphenationComponentInstallerPolicy::ComponentReady(
 
 // Called during startup and installation before ComponentReady().
 bool HyphenationComponentInstallerPolicy::VerifyInstallation(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) const {
   return true;
 }
@@ -125,9 +130,7 @@ base::FilePath HyphenationComponentInstallerPolicy::GetRelativeInstallDir()
 
 void HyphenationComponentInstallerPolicy::GetHash(
     std::vector<uint8_t>* hash) const {
-  hash->assign(
-      kHyphenationPublicKeySHA256,
-      kHyphenationPublicKeySHA256 + std::size(kHyphenationPublicKeySHA256));
+  hash->assign_range(kHyphenationPublicKeySHA256);
 }
 
 std::string HyphenationComponentInstallerPolicy::GetName() const {

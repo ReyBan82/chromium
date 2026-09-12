@@ -56,8 +56,8 @@ FindInPage::FindInPage(WebLocalFrameImpl& frame,
     return;
   // TODO(crbug.com/800641): Use InterfaceValidator when it works for associated
   // interfaces.
-  interface_registry->AddAssociatedInterface(WTF::BindRepeating(
-      &FindInPage::BindToReceiver, WrapWeakPersistent(this)));
+  interface_registry->AddAssociatedInterface(
+      BindRepeating(&FindInPage::BindToReceiver, WrapWeakPersistent(this)));
 }
 
 void FindInPage::Find(int request_id,
@@ -86,7 +86,7 @@ void FindInPage::Find(int request_id,
   }
 
   // Send "no results" if this frame has no visible content.
-  if (!frame_->HasVisibleContent() && !options->force) {
+  if (!frame_->HasVisibleContent()) {
     ReportFindInPageMatchCount(request_id, 0 /* count */,
                                true /* final_update */);
     return;
@@ -166,7 +166,7 @@ bool WebLocalFrameImpl::FindForTesting(int identifier,
 }
 
 bool FindInPage::FindInternal(int identifier,
-                              const WebString& search_text,
+                              const String& search_text,
                               const mojom::blink::FindOptions& options,
                               bool wrap_within_frame,
                               bool* active_now) {
@@ -190,7 +190,7 @@ void FindInPage::StopFinding(mojom::StopFindAction action) {
   const bool clear_selection =
       action == mojom::StopFindAction::kStopFindActionClearSelection;
   if (clear_selection)
-    frame_->ExecuteCommand(WebString::FromUTF8("Unselect"));
+    frame_->ExecuteCommand(WebString("Unselect"));
 
   if (GetTextFinder()) {
     if (!clear_selection)
@@ -220,7 +220,8 @@ void FindInPage::SetClient(
   // TODO(crbug.com/984878): Having to call reset() to try to bind a remote that
   // might be bound is questionable behavior and suggests code may be buggy.
   client_.reset();
-  client_.Bind(std::move(remote));
+  client_.Bind(std::move(remote),
+               frame_->GetTaskRunner(blink::TaskType::kInternalDefault));
 }
 
 #if BUILDFLAG(IS_ANDROID)
@@ -233,16 +234,16 @@ gfx::RectF FindInPage::ActiveFindMatchRect() {
 void FindInPage::ActivateNearestFindResult(int request_id,
                                            const gfx::PointF& point) {
   gfx::Rect active_match_rect;
-  const int ordinal =
+  std::optional<wtf_size_t> ordinal =
       EnsureTextFinder().SelectNearestFindMatch(point, &active_match_rect);
-  if (ordinal == -1) {
+  if (!ordinal) {
     // Something went wrong, so send a no-op reply (force the frame to report
     // the current match count) in case the host is waiting for a response due
     // to rate-limiting.
     EnsureTextFinder().IncreaseMatchCount(request_id, 0);
     return;
   }
-  ReportFindInPageSelection(request_id, ordinal, active_match_rect,
+  ReportFindInPageSelection(request_id, *ordinal, active_match_rect,
                             true /* final_update */);
 }
 
@@ -265,18 +266,18 @@ void FindInPage::FindMatchRects(int current_version,
 
 void FindInPage::ClearActiveFindMatch() {
   // TODO(rakina): Do collapse selection as this currently does nothing.
-  frame_->ExecuteCommand(WebString::FromUTF8("CollapseSelection"));
+  frame_->ExecuteCommand(WebString("CollapseSelection"));
   EnsureTextFinder().ClearActiveFindMatch();
 }
 
 void WebLocalFrameImpl::SetTickmarks(const WebElement& target,
-                                     const WebVector<gfx::Rect>& tickmarks) {
+                                     const std::vector<gfx::Rect>& tickmarks) {
   find_in_page_->SetTickmarks(target, tickmarks);
 }
 
 void FindInPage::SetTickmarks(
     const WebElement& target,
-    const WebVector<gfx::Rect>& tickmarks_in_layout_space) {
+    const std::vector<gfx::Rect>& tickmarks_in_layout_space) {
   LayoutBox* box;
   if (target.IsNull())
     box = frame_->GetFrame()->ContentLayoutObject();
@@ -299,7 +300,7 @@ TextFinder* WebLocalFrameImpl::GetTextFinder() const {
 }
 
 TextFinder* FindInPage::GetTextFinder() const {
-  return text_finder_;
+  return text_finder_.Get();
 }
 
 TextFinder& WebLocalFrameImpl::EnsureTextFinder() {

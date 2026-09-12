@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include <string>
 
 #include "base/json/json_string_value_serializer.h"
-#include "base/memory/ref_counted.h"
 #include "base/values.h"
 #include "chrome/browser/subresource_filter/subresource_filter_browser_test_harness.h"
 #include "chrome/common/chrome_features.h"
@@ -25,8 +25,8 @@ namespace {
 
 class TestClient : public content::DevToolsAgentHostClient {
  public:
-  TestClient() {}
-  ~TestClient() override {}
+  TestClient() = default;
+  ~TestClient() override = default;
   void DispatchProtocolMessage(content::DevToolsAgentHost* agent_host,
                                base::span<const uint8_t> message) override {}
   void AgentHostClosed(content::DevToolsAgentHost* agent_host) override {}
@@ -41,8 +41,8 @@ class ScopedDevtoolsOpener {
     agent_host_->AttachClient(&test_client_);
     // Send Page.enable, which is required before any Page methods.
     constexpr char kMsg[] = R"({"id": 0, "method": "Page.enable"})";
-    agent_host_->DispatchProtocolMessage(
-        &test_client_, base::as_bytes(base::make_span(kMsg, strlen(kMsg))));
+    agent_host_->DispatchProtocolMessage(&test_client_,
+                                         base::byte_span_from_cstring(kMsg));
   }
 
   explicit ScopedDevtoolsOpener(content::WebContents* web_contents)
@@ -56,17 +56,16 @@ class ScopedDevtoolsOpener {
 
   void EnableAdBlocking(bool enabled) {
     // Send Page.setAdBlockingEnabled, should force activation.
-    base::Value ad_blocking_command(base::Value::Type::DICT);
-    ad_blocking_command.SetIntKey("id", 1);
-    ad_blocking_command.SetStringKey("method", "Page.setAdBlockingEnabled");
-    base::Value params(base::Value::Type::DICT);
-    params.SetBoolKey("enabled", enabled);
-    ad_blocking_command.SetKey("params", std::move(params));
+    base::DictValue ad_blocking_command =
+        base::DictValue()
+            .Set("id", 1)
+            .Set("method", "Page.setAdBlockingEnabled")
+            .Set("params", base::DictValue().Set("enabled", enabled));
     std::string json_string;
     JSONStringValueSerializer serializer(&json_string);
     ASSERT_TRUE(serializer.Serialize(ad_blocking_command));
-    agent_host_->DispatchProtocolMessage(
-        &test_client_, base::as_bytes(base::make_span(json_string)));
+    agent_host_->DispatchProtocolMessage(&test_client_,
+                                         base::as_byte_span(json_string));
   }
 
  private:
@@ -107,14 +106,21 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterDevtoolsBrowserTest,
       WasParsedScriptElementLoaded(web_contents()->GetPrimaryMainFrame()));
 }
 
-IN_PROC_BROWSER_TEST_F(SubresourceFilterListInsertingBrowserTest,
+class SubresourceFilterDevtoolsListInsertingBrowserTest
+    : public SubresourceFilterListInsertingBrowserTest,
+      public ::testing::WithParamInterface<bool> {
+ public:
+  std::optional<bool> UseV5() const override { return GetParam(); }
+};
+
+IN_PROC_BROWSER_TEST_P(SubresourceFilterDevtoolsListInsertingBrowserTest,
                        WarningSiteWithForceActivation_LogsWarning) {
   const GURL url(
       GetTestUrl("subresource_filter/frame_with_included_script.html"));
   ASSERT_NO_FATAL_FAILURE(
       SetRulesetToDisallowURLsWithPathSuffix("included_script.js"));
   ConfigureURLWithWarning(url,
-                          {safe_browsing::SubresourceFilterType::BETTER_ADS});
+                          safe_browsing::SubresourceFilterType::BETTER_ADS);
 
   Configuration config(subresource_filter::mojom::ActivationLevel::kEnabled,
                        subresource_filter::ActivationScope::ACTIVATION_LIST,
@@ -146,6 +152,10 @@ IN_PROC_BROWSER_TEST_F(SubresourceFilterListInsertingBrowserTest,
       WasParsedScriptElementLoaded(web_contents()->GetPrimaryMainFrame()));
 }
 
+INSTANTIATE_TEST_SUITE_P(All,
+                         SubresourceFilterDevtoolsListInsertingBrowserTest,
+                         ::testing::Bool());
+
 IN_PROC_BROWSER_TEST_F(SubresourceFilterDevtoolsBrowserTest,
                        ForceActivation_SubresourceLogging) {
   content::WebContentsConsoleObserver console_observer(web_contents());
@@ -174,8 +184,8 @@ class SubresourceFilterDevtoolsBrowserTestWithSitePerProcess
   base::test::ScopedFeatureList feature_list_;
 };
 
-// See crbug.com/813197, where agent hosts from subframes could send messages to
-// disable ad blocking when they are detached (e.g. when the subframe goes
+// See crbug.com/40563389, where agent hosts from subframes could send messages
+// to disable ad blocking when they are detached (e.g. when the subframe goes
 // away).
 IN_PROC_BROWSER_TEST_F(SubresourceFilterDevtoolsBrowserTestWithSitePerProcess,
                        IsolatedSubframe_DoesNotSendAdBlockingMessages) {

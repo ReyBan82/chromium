@@ -9,13 +9,16 @@
 #include "base/strings/pattern.h"
 #include "chrome/browser/ash/accessibility/accessibility_manager.h"
 #include "chrome/browser/ash/accessibility/speech_monitor.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/profiles/profile.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "components/prefs/pref_service.h"
 #include "content/public/browser/browser_accessibility_state.h"
 #include "content/public/test/browser_test.h"
+#include "content/public/test/browser_test_utils.h"
+#include "content/public/test/scoped_accessibility_mode_override.h"
 #include "extensions/browser/extension_host_test_helper.h"
 #include "net/dns/mock_host_resolver.h"
 #include "ui/accessibility/accessibility_features.h"
@@ -29,7 +32,7 @@ class AccessibilityLiveSiteTest : public InProcessBrowserTest {
   void SetUpOnMainThread() override {
     ASSERT_FALSE(AccessibilityManager::Get()->IsSelectToSpeakEnabled());
 
-    extensions::ExtensionHostTestHelper host_helper(browser()->profile());
+    extensions::ExtensionHostTestHelper host_helper(browser()->GetProfile());
     AccessibilityManager::Get()->SetSelectToSpeakEnabled(true);
     host_helper.WaitForHostCompletedFirstLoad();
 
@@ -49,7 +52,7 @@ class AccessibilityLiveSiteTest : public InProcessBrowserTest {
 
     // Pretend that enhanced network voices dialog has been accepted so that the
     // dialog does not block.
-    browser()->profile()->GetPrefs()->SetBoolean(
+    browser()->GetProfile()->GetPrefs()->SetBoolean(
         prefs::kAccessibilitySelectToSpeakEnhancedVoicesDialogShown, true);
 
     InProcessBrowserTest::SetUpInProcessBrowserTestFixture();
@@ -79,16 +82,15 @@ IN_PROC_BROWSER_TEST_F(AccessibilityLiveSiteTest,
       "1qpu3koSIHpBzQbxeEE-dofSKXCIgdc4yJLI-o1LpCPs/view";
   const char* kTextFoundInGoogleDoc = "Long-string-to-test-select-to-speak";
 
-  content::BrowserAccessibilityState::GetInstance()->EnableAccessibility();
-
   ASSERT_TRUE(ui_test_utils::NavigateToURL(browser(), GURL(kGoogleDocsUrl)));
   content::WebContents* web_contents =
       browser()->tab_strip_model()->GetActiveWebContents();
-  content::EnableAccessibilityForWebContents(web_contents);
+  content::ScopedAccessibilityModeOverride scoped_accessibility_mode(
+      web_contents, ui::kAXModeComplete);
 
   content::WaitForAccessibilityTreeToContainNodeWithName(
       web_contents, "Long-string-to-test-select-to-speak");
-  gfx::Rect bounds = browser()->window()->GetBounds();
+  gfx::Rect bounds = browser()->GetWindow()->GetBounds();
   generator_->PressKey(ui::VKEY_LWIN, 0 /* flags */);
   generator_->MoveMouseTo(bounds.x() + 8, bounds.y() + 200);
   generator_->PressLeftButton();

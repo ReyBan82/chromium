@@ -4,6 +4,8 @@
 
 package org.chromium.net;
 
+import android.annotation.SuppressLint;
+
 /**
  * {@link BidirectionalStream} that exposes experimental features. To obtain an instance of this
  * class, cast a {@code BidirectionalStream} to this type. Every instance of {@code
@@ -12,9 +14,8 @@ package org.chromium.net;
  * use, but instead only to access experimental features. Experimental features may be deprecated in
  * the future. Use at your own risk.
  *
- * <p>{@hide for consistency with other experimental classes}
- *
  * @deprecated scheduled for deletion, don't use in new code.
+ * @hide
  */
 @Deprecated
 public abstract class ExperimentalBidirectionalStream extends BidirectionalStream {
@@ -26,27 +27,12 @@ public abstract class ExperimentalBidirectionalStream extends BidirectionalStrea
      * not meant for general use, but instead only to access experimental features. Experimental
      * features may be deprecated in the future. Use at your own risk.
      *
-     * <p>{@hide for consistency with other experimental classes}
-     *
      * @deprecated scheduled for deletion, don't use in new code.
+     * @hide
      */
     @Deprecated
+    @SuppressLint("ReferencesHidden")
     public abstract static class Builder extends BidirectionalStream.Builder {
-        /**
-         * Binds the request to the specified network handle. Cronet will send this request only
-         * using the network associated to this handle. If this network disconnects the request will
-         * fail, the exact error will depend on the stage of request processing when the network
-         * disconnects. Network handles can be obtained through {@code Network#getNetworkHandle}.
-         * Only available starting from Android Marshmallow.
-         *
-         * @param networkHandle the network handle to bind the request to. Specify {@link
-         * ExperimentalCronetEngine#UNBIND_NETWORK_HANDLE} to unbind.
-         * @return the builder to facilitate chaining.
-         */
-        public Builder bindToNetwork(long networkHandle) {
-            return this;
-        }
-
         // To support method chaining, override superclass methods to return an
         // instance of this class instead of the parent.
 

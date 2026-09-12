@@ -26,7 +26,9 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_POINTER_LOCK_CONTROLLER_H_
 #define THIRD_PARTY_BLINK_RENDERER_CORE_PAGE_POINTER_LOCK_CONTROLLER_H_
 
-#include "base/memory/scoped_refptr.h"
+#include <memory>
+
+#include "cc/trees/layer_tree_host.h"
 #include "third_party/blink/public/mojom/input/pointer_lock_context.mojom-blink.h"
 #include "third_party/blink/public/mojom/input/pointer_lock_result.mojom-blink-forward.h"
 #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
@@ -34,6 +36,7 @@
 #include "third_party/blink/renderer/core/core_export.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/mojo/heap_mojo_remote.h"
+#include "third_party/blink/renderer/platform/wtf/deque.h"
 #include "third_party/blink/renderer/platform/wtf/text/atomic_string.h"
 #include "ui/gfx/geometry/point_f.h"
 
@@ -59,10 +62,9 @@ class CORE_EXPORT PointerLockController final
       base::OnceCallback<void(mojom::blink::PointerLockResult)>;
   bool RequestPointerLock(Element* target, ResultCallback callback);
 
-  ScriptPromise RequestPointerLock(ScriptPromiseResolver* resolver,
-                                   Element* target,
-                                   ExceptionState& exception_state,
-                                   const PointerLockOptions* options = nullptr);
+  void RequestPointerLock(ScriptPromiseResolver<IDLUndefined>* resolver,
+                          Element* target,
+                          const PointerLockOptions* options = nullptr);
   void ExitPointerLock();
   void ElementRemoved(Element*);
   void DocumentDetached(Document*);
@@ -86,6 +88,8 @@ class CORE_EXPORT PointerLockController final
   static Element* GetPointerLockedElement(LocalFrame* frame);
 
  private:
+  friend class PointerLockControllerTest;
+
   void ClearElement();
   void EnqueueEvent(const AtomicString& type, Element*);
   void EnqueueEvent(const AtomicString& type, Document*);
@@ -103,13 +107,11 @@ class CORE_EXPORT PointerLockController final
                      bool unadjusted_movement_requested,
                      mojom::blink::PointerLockResult result);
 
-  static void ProcessResultScriptPromise(
-      ScriptPromiseResolver* resolver,
+  static void ProcessResultPromise(
+      ScriptPromiseResolver<IDLUndefined>* resolver,
       mojom::blink::PointerLockResult result);
   static DOMException* ConvertResultToException(
       mojom::blink::PointerLockResult result);
-  static void RejectIfPromiseEnabled(ScriptPromiseResolver* resolver,
-                                     DOMException* exception);
 
   Member<Page> page_;
   bool lock_pending_;
@@ -118,10 +120,34 @@ class CORE_EXPORT PointerLockController final
 
   HeapMojoRemote<mojom::blink::PointerLockContext> mouse_lock_context_{nullptr};
 
+  std::unique_ptr<cc::ScopedRequestHighFramerate> high_framerate_request_;
+
   // Store the locked position so that the event position keeps unchanged when
   // in locked states. These values only get set when entering lock states.
   gfx::PointF pointer_lock_position_;
   gfx::PointF pointer_lock_screen_position_;
+
+  // If there are more than `kMaxLocksInWindow` lock requests within a trailing
+  // `kLockRateLimitWindow`, reject all further pointer lock requests until
+  // enough of the oldest requests have aged out of the window.
+  // `recent_lock_request_timestamps_` is pruned of entries older than
+  // `kLockRateLimitWindow` on every request, so a steady stream of requests
+  // spaced just under the window duration apart is rate limited correctly.
+  // These values were chosen to allow common use-cases and were not determined
+  // through any user-study or specification. Rate limiting was added in blink
+  // instead of the browser process because a pointer lock request causes a
+  // roundtrip to the browser process, so a page that is spamming pointer lock
+  // requests would be able to cause a large amount of unnecessary IPC traffic
+  // which would bog down the browser and cause it to lag, even if the page is
+  // not able to successfully acquire pointer lock.
+  static constexpr size_t kMaxLocksInWindow = 10;
+  static constexpr base::TimeDelta kLockRateLimitWindow = base::Seconds(2);
+
+  // Timestamps of recent pointer lock requests (successful or not). Used for
+  // rate limiting to prevent abuse where a page rapidly locks and unlocks the
+  // pointer. Entries older than `kLockRateLimitWindow` are pruned as new
+  // requests arrive.
+  Deque<base::TimeTicks> recent_lock_request_timestamps_;
 
   bool current_unadjusted_movement_setting_ = false;
 };

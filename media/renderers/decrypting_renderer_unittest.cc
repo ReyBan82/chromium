@@ -50,8 +50,6 @@ class DecryptingRendererTest : public testing::Test {
     EXPECT_CALL(decryptor_, CancelDecrypt(_)).Times(AnyNumber());
     EXPECT_CALL(media_resource_, GetAllStreams())
         .WillRepeatedly(Invoke(this, &DecryptingRendererTest::GetAllStreams));
-    EXPECT_CALL(media_resource_, GetType())
-        .WillRepeatedly(Return(MediaResource::STREAM));
   }
 
   ~DecryptingRendererTest() override {
@@ -68,8 +66,8 @@ class DecryptingRendererTest : public testing::Test {
     use_aes_decryptor_ = use_aes_decryptor;
   }
 
-  std::vector<DemuxerStream*> GetAllStreams() {
-    std::vector<DemuxerStream*> streams;
+  std::vector<raw_ptr<DemuxerStream>> GetAllStreams() {
+    std::vector<raw_ptr<DemuxerStream>> streams;
 
     for (auto& stream : streams_) {
       streams.push_back(stream.get());
@@ -95,9 +93,9 @@ class DecryptingRendererTest : public testing::Test {
   StrictMock<MockDecryptor> decryptor_;
   StrictMock<MockMediaResource> media_resource_;
   StrictMock<MockRendererClient> renderer_client_;
-  raw_ptr<StrictMock<MockRenderer>> renderer_;
-  std::unique_ptr<DecryptingRenderer> decrypting_renderer_;
+  raw_ptr<StrictMock<MockRenderer>, DanglingUntriaged> renderer_;
   std::vector<std::unique_ptr<StrictMock<MockDemuxerStream>>> streams_;
+  std::unique_ptr<DecryptingRenderer> decrypting_renderer_;
 };
 
 TEST_F(DecryptingRendererTest, ClearStreams_NoCdm) {

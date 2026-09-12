@@ -8,89 +8,106 @@
 
 #include <vector>
 
+#include "base/compiler_specific.h"
 #include "base/logging.h"
+#include "base/memory/ptr_util.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/numerics/safe_conversions.h"
 #include "base/strings/string_util.h"
+#include "base/strings/to_string.h"
 #include "base/time/time.h"
 #include "media/base/audio_bus.h"
+#include "media/base/audio_timestamp_helper.h"
 #include "media/base/limits.h"
 #include "media/filters/audio_file_reader.h"
 #include "media/filters/in_memory_url_protocol.h"
 #include "media/media_buildflags.h"
-#include "third_party/blink/public/platform/web_audio_bus.h"
+#include "third_party/blink/public/platform/platform.h"
 
 using media::AudioBus;
 using media::AudioFileReader;
 using media::InMemoryUrlProtocol;
 using std::vector;
-using blink::WebAudioBus;
 
 namespace content {
 
 // Decode in-memory audio file data.
-bool DecodeAudioFileData(
-    blink::WebAudioBus* destination_bus,
-    const char* data, size_t data_size) {
-  DCHECK(destination_bus);
-  if (!destination_bus)
-    return false;
-
+std::unique_ptr<blink::Platform::DecodedAudioFile> DecodeAudioFileData(
+    base::span<const char> data) {
 #if BUILDFLAG(ENABLE_FFMPEG)
-  // Uses the FFmpeg library for audio file reading.
-  InMemoryUrlProtocol url_protocol(reinterpret_cast<const uint8_t*>(data),
-                                   data_size, false);
-  AudioFileReader reader(&url_protocol);
+  const base::TimeTicks start_time = base::TimeTicks::Now();
 
-  if (!reader.Open())
-    return false;
+  InMemoryUrlProtocol url_protocol(base::as_byte_span(data), false);
+  auto reader = std::make_unique<AudioFileReader>(&url_protocol);
+  bool open_success = reader->Open();
+  base::UmaHistogramBoolean("Media.ContentAudioDecoder.CreateReaderSuccess",
+                            open_success);
+  if (!open_success) {
+    return nullptr;
+  }
 
-  size_t number_of_channels = reader.channels();
-  double file_sample_rate = reader.sample_rate();
+  const size_t number_of_channels = reader->channels();
+  const double sample_rate = reader->sample_rate();
 
   // Apply sanity checks to make sure crazy values aren't coming out of
   // FFmpeg.
   if (!number_of_channels ||
       number_of_channels > static_cast<size_t>(media::limits::kMaxChannels) ||
-      file_sample_rate < media::limits::kMinSampleRate ||
-      file_sample_rate > media::limits::kMaxSampleRate)
-    return false;
+      sample_rate < media::limits::kMinSampleRate ||
+      sample_rate > media::limits::kMaxSampleRate) {
+    return nullptr;
+  }
 
   std::vector<std::unique_ptr<AudioBus>> decoded_audio_packets;
-  int number_of_frames = reader.Read(&decoded_audio_packets);
-
-  if (number_of_frames <= 0)
-    return false;
+  const size_t number_of_frames = reader->Read(&decoded_audio_packets);
+  if (number_of_frames == 0) {
+    return nullptr;
+  }
 
   // Allocate and configure the output audio channel data and then
   // copy the decoded data to the destination.
-  destination_bus->Initialize(number_of_channels, number_of_frames,
-                              file_sample_rate);
-
-  int dest_frame_offset = 0;
-  for (size_t k = 0; k < decoded_audio_packets.size(); ++k) {
-    AudioBus* packet = decoded_audio_packets[k].get();
-    int packet_length = packet->frames();
-    for (size_t ch = 0; ch < number_of_channels; ++ch) {
-      float* dst = destination_bus->ChannelData(ch);
-      float* src = packet->channel(ch);
-      DCHECK_LE(dest_frame_offset + packet_length, number_of_frames);
-      memcpy(dst + dest_frame_offset, src, packet_length * sizeof(*dst));
-    }
-    dest_frame_offset += packet_length;
+  auto audio_bus = AudioBus::Create(base::checked_cast<int>(number_of_channels),
+                                    base::checked_cast<int>(number_of_frames));
+  if (!audio_bus) {
+    return nullptr;
   }
 
-  DVLOG(1) << "Decoded file data (unknown duration)-"
-           << " data: " << data << " data size: " << data_size
-           << ", decoded duration: " << (number_of_frames / file_sample_rate)
+  // Append all `decoded_audio_packets`, channel per channel.
+  int dest_frame_offset = 0;
+  for (const auto& packet : decoded_audio_packets) {
+    packet->CopyPartialFramesTo(0, packet->frames(), dest_frame_offset,
+                                audio_bus.get());
+    dest_frame_offset += packet->frames();
+  }
+
+  const auto duration =
+      media::AudioTimestampHelper::FramesToTime(number_of_frames, sample_rate);
+  DVLOG(1) << "Successfully decoded an audio file."
+           << " data: " << base::ToString(data) << " data size: " << data.size()
+           << ", decoded duration: " << duration
            << ", number of frames: " << number_of_frames
            << ", estimated frames (if available): "
-           << (reader.HasKnownDuration() ? reader.GetNumberOfFrames() : 0)
-           << ", sample rate: " << file_sample_rate
+           << (reader->HasKnownDuration() ? reader->GetNumberOfFrames() : 0)
+           << ", sample rate: " << sample_rate
            << ", number of channels: " << number_of_channels;
 
-  return number_of_frames > 0;
-#else
-  return false;
+  // NOTE: using the "medium timings" function to get better visibility into
+  // behavior in the [0, 3] minute range (although the distribution tail is
+  // likely to be cut off in this histogram scheme).
+  base::UmaHistogramMediumTimes("Media.ContentAudioDecoder.Duration", duration);
+  base::UmaHistogramTimes(
+      "Media.ContentAudioDecoder.DecodeTimePerFrame",
+      (base::TimeTicks::Now() - start_time) / number_of_frames);
+
+  if (number_of_frames > 0) {
+    auto out = std::make_unique<blink::Platform::DecodedAudioFile>();
+    out->bus = std::move(audio_bus);
+    out->sample_rate = sample_rate;
+    return out;
+  }
 #endif  // BUILDFLAG(ENABLE_FFMPEG)
+
+  return nullptr;
 }
 
 }  // namespace content

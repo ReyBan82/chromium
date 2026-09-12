@@ -4,16 +4,14 @@
 
 #include "chrome/browser/enterprise/platform_auth/platform_auth_features.h"
 
-#include "build/build_config.h"
+#include "base/feature_list.h"
 
 namespace enterprise_auth {
 
-#if BUILDFLAG(IS_WIN)
-BASE_FEATURE(kCloudApAuth, "CloudApAuth", base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kEnableExtensibleEnterpriseSSO, base::FEATURE_ENABLED_BY_DEFAULT);
 
-BASE_FEATURE(kCloudApAuthAttachAsHeader,
-             "CloudApAuthAttachAsHeader",
-             base::FEATURE_DISABLED_BY_DEFAULT);
-#endif  // BUILDFLAG(IS_WIN)
+BASE_FEATURE(kAndroidEntraSSO, base::FEATURE_ENABLED_BY_DEFAULT);
+
+BASE_FEATURE(kCloudApAuthDataQueueing, base::FEATURE_ENABLED_BY_DEFAULT);
 
 }  // namespace enterprise_auth

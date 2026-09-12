@@ -6,19 +6,25 @@
 
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/single_thread_task_runner.h"
 #include "chrome/browser/media/webrtc/fake_desktop_media_list.h"
 #include "testing/gtest/include/gtest/gtest.h"
+#include "ui/base/mojom/ui_base_types.mojom-shared.h"
 
 FakeDesktopMediaPicker::FakeDesktopMediaPicker(
     FakeDesktopMediaPickerFactory::TestFlags* expectation)
-    : expectation_(expectation) {
+    : expectation_(expectation),
+      picker_params_(Params::RequestSource::kUnknown) {
   expectation_->picker_created = true;
 }
 FakeDesktopMediaPicker::~FakeDesktopMediaPicker() {
   expectation_->picker_deleted = true;
+  if (picker_params_.on_picker_destroying) {
+    picker_params_.on_picker_destroying.Run();
+  }
 }
 
 // DesktopMediaPicker interface.
@@ -26,12 +32,16 @@ void FakeDesktopMediaPicker::Show(
     const DesktopMediaPicker::Params& params,
     std::vector<std::unique_ptr<DesktopMediaList>> source_lists,
     DoneCallback done_callback) {
+  expectation_->picker_shown = true;
+  picker_params_ = params;
+
+#if !BUILDFLAG(IS_ANDROID)
+  // Android does not use DesktopMediaList. See
+  // DesktopMediaPickerFactoryImpl::CreateMediaList.
   bool show_screens = false;
   bool show_windows = false;
   bool show_tabs = false;
   bool show_current_tab = false;
-  picker_params_ = params;
-
   for (auto& source_list : source_lists) {
     switch (source_list->GetMediaListType()) {
       case DesktopMediaList::Type::kNone:
@@ -54,8 +64,11 @@ void FakeDesktopMediaPicker::Show(
   EXPECT_EQ(expectation_->expect_windows, show_windows);
   EXPECT_EQ(expectation_->expect_tabs, show_tabs);
   EXPECT_EQ(expectation_->expect_current_tab, show_current_tab);
+#endif  // !BUILDFLAG(IS_ANDROID)
+
   EXPECT_EQ(expectation_->expect_audio, params.request_audio);
-  EXPECT_EQ(params.modality, ui::ModalType::MODAL_TYPE_CHILD);
+  EXPECT_TRUE(params.modality == ui::mojom::ModalType::kChild ||
+              params.modality == ui::mojom::ModalType::kWindow);
 
   if (!expectation_->cancelled) {
     // Post a task to call the callback asynchronously.
@@ -74,29 +87,36 @@ DesktopMediaPicker::Params FakeDesktopMediaPicker::GetParams() {
   return picker_params_;
 }
 
+base::WeakPtr<FakeDesktopMediaPicker> FakeDesktopMediaPicker::GetWeakPtr() {
+  return weak_factory_.GetWeakPtr();
+}
+
 void FakeDesktopMediaPicker::CallCallback(DoneCallback done_callback) {
-  std::move(done_callback).Run(expectation_->selected_source);
+  CHECK(expectation_->picker_result.has_value());
+  std::move(done_callback).Run(expectation_->picker_result.value());
 }
 
 FakeDesktopMediaPickerFactory::FakeDesktopMediaPickerFactory() = default;
 
 FakeDesktopMediaPickerFactory::~FakeDesktopMediaPickerFactory() = default;
 
-void FakeDesktopMediaPickerFactory::SetTestFlags(TestFlags* test_flags,
-                                                 int tests_count) {
+void FakeDesktopMediaPickerFactory::SetTestFlags(
+    base::span<TestFlags> test_flags) {
   test_flags_ = test_flags;
-  tests_count_ = tests_count;
   current_test_ = 0;
 }
 
-std::unique_ptr<DesktopMediaPicker>
-FakeDesktopMediaPickerFactory::CreatePicker() {
-  EXPECT_LE(current_test_, tests_count_);
-  if (current_test_ >= tests_count_)
+std::unique_ptr<DesktopMediaPicker> FakeDesktopMediaPickerFactory::CreatePicker(
+    const content::MediaStreamRequest* request) {
+  EXPECT_LT(current_test_, test_flags_.size());
+  if (current_test_ >= test_flags_.size()) {
     return nullptr;
-  ++current_test_;
-  picker_ = new FakeDesktopMediaPicker(test_flags_ + current_test_ - 1);
-  return std::unique_ptr<DesktopMediaPicker>(picker_);
+  }
+  auto picker =
+      std::make_unique<FakeDesktopMediaPicker>(&test_flags_[current_test_]);
+  current_test_++;
+  picker_ = picker->GetWeakPtr();
+  return picker;
 }
 
 std::vector<std::unique_ptr<DesktopMediaList>>
@@ -104,10 +124,11 @@ FakeDesktopMediaPickerFactory::CreateMediaList(
     const std::vector<DesktopMediaList::Type>& types,
     content::WebContents* web_contents,
     DesktopMediaList::WebContentsFilter includable_web_contents_filter) {
-  EXPECT_LE(current_test_, tests_count_);
+  EXPECT_LE(current_test_, test_flags_.size());
   is_web_contents_excluded_ = !includable_web_contents_filter.Run(web_contents);
   std::vector<std::unique_ptr<DesktopMediaList>> media_lists;
-  for (auto source_type : types)
+  for (auto source_type : types) {
     media_lists.emplace_back(new FakeDesktopMediaList(source_type));
+  }
   return media_lists;
 }

@@ -8,10 +8,6 @@
 #include "base/component_export.h"
 #include "cc/slim/layer.h"
 
-namespace cc {
-class SolidColorLayer;
-}
-
 namespace cc::slim {
 
 // A Layer that renders a solid color. The color is specified by using
@@ -23,14 +19,16 @@ class COMPONENT_EXPORT(CC_SLIM) SolidColorLayer : public Layer {
   void SetBackgroundColor(SkColor4f color) override;
 
  private:
-  explicit SolidColorLayer(scoped_refptr<cc::SolidColorLayer> cc_layer);
+  SolidColorLayer();
   ~SolidColorLayer() override;
 
   void AppendQuads(viz::CompositorRenderPass& render_pass,
-                   const gfx::Transform& transform,
-                   const gfx::Rect* clip) override;
-
-  cc::SolidColorLayer* cc_layer() const;
+                   FrameData& data,
+                   const gfx::Transform& transform_to_root,
+                   const gfx::Transform& transform_to_target,
+                   const gfx::Rect* clip_in_target,
+                   const gfx::Rect& visible_rect,
+                   float opacity) override;
 };
 
 }  // namespace cc::slim

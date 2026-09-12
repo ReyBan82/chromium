@@ -4,15 +4,19 @@
 
 #include "chrome/browser/task_manager/providers/web_contents/devtools_task.h"
 
+#include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/web_contents.h"
 
 namespace task_manager {
 
 DevToolsTask::DevToolsTask(content::WebContents* web_contents)
-    : TabContentsTask(web_contents) {
-}
+    : TabContentsTask(web_contents),
+      content::WebContentsObserver(web_contents) {}
 
-DevToolsTask::~DevToolsTask() {
+DevToolsTask::~DevToolsTask() = default;
+
+void DevToolsTask::TitleWasSet(content::NavigationEntry*) {
+  UpdateTitle();
 }
 
 }  // namespace task_manager

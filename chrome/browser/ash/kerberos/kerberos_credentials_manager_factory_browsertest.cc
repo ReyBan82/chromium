@@ -10,7 +10,7 @@
 #include "chrome/browser/ash/kerberos/kerberos_credentials_manager.h"
 #include "chrome/browser/ash/profiles/profile_helper.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/test/browser_test.h"
 
@@ -26,7 +26,7 @@ class KerberosCredentialsManagerFactoryBrowserTest
 
 IN_PROC_BROWSER_TEST_F(KerberosCredentialsManagerFactoryBrowserTest,
                        GetServiceForPrimaryProfile) {
-  Profile* const profile = browser()->profile();
+  Profile* const profile = browser()->GetProfile();
   ASSERT_TRUE(ProfileHelper::IsPrimaryProfile(profile));
 
   KerberosCredentialsManager* manager =
@@ -36,11 +36,11 @@ IN_PROC_BROWSER_TEST_F(KerberosCredentialsManagerFactoryBrowserTest,
 
 IN_PROC_BROWSER_TEST_F(KerberosCredentialsManagerFactoryBrowserTest,
                        GetServiceForIncognitoProfile) {
-  Profile* const profile = browser()->profile();
-  Browser* incognito_browser = CreateIncognitoBrowser(profile);
+  Profile* const profile = browser()->GetProfile();
+  BrowserWindowInterface* incognito_browser = CreateIncognitoBrowser(profile);
   ASSERT_TRUE(incognito_browser);
 
-  Profile* incognito_profile = incognito_browser->profile();
+  Profile* incognito_profile = incognito_browser->GetProfile();
   ASSERT_NE(incognito_profile, profile);
   ASSERT_EQ(incognito_profile->GetOriginalProfile(), profile);
 
@@ -54,7 +54,7 @@ IN_PROC_BROWSER_TEST_F(KerberosCredentialsManagerFactoryBrowserTest,
 
 IN_PROC_BROWSER_TEST_F(KerberosCredentialsManagerFactoryBrowserTest,
                        GetServiceForOtherProfile) {
-  Profile* const profile = browser()->profile();
+  Profile* const profile = browser()->GetProfile();
   ASSERT_TRUE(ProfileHelper::IsPrimaryProfile(profile));
 
   Profile* const other_profile = ProfileHelper::GetSigninProfile();

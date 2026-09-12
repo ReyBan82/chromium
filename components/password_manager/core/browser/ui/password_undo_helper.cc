@@ -4,8 +4,10 @@
 
 #include "components/password_manager/core/browser/ui/password_undo_helper.h"
 
-#include "components/password_manager/core/browser/password_form.h"
-#include "components/password_manager/core/browser/password_store.h"
+#include "base/memory/raw_ptr.h"
+#include "components/password_manager/core/browser/password_store/password_form_converters.h"
+#include "components/password_manager/core/browser/password_store/password_store_interface.h"
+#include "components/password_manager/core/browser/password_store/stored_credential.h"
 #include "components/password_manager/core/browser/ui/saved_passwords_presenter.h"
 #include "components/undo/undo_operation.h"
 
@@ -15,6 +17,7 @@ namespace {
 
 enum PasswordOperationType {
   kRemoveOperation,
+  kUpdateOperation,
   kAddOperation,
   kLastItem = kAddOperation
 };
@@ -22,14 +25,14 @@ enum PasswordOperationType {
 template <PasswordOperationType Type>
 class PasswordOperation : public UndoOperation {
  public:
-  PasswordOperation(raw_ptr<PasswordStoreInterface> profile_store,
-                    raw_ptr<PasswordStoreInterface> account_store,
-                    raw_ptr<UndoManager> undo_manager,
-                    const password_manager::PasswordForm& form)
+  PasswordOperation(PasswordStoreInterface* profile_store,
+                    PasswordStoreInterface* account_store,
+                    UndoManager* undo_manager,
+                    StoredCredential credential)
       : profile_store_(profile_store),
         account_store_(account_store),
         undo_manager_(undo_manager),
-        form_(form) {}
+        credential_(std::move(credential)) {}
   PasswordOperation(const PasswordOperation&) = delete;
   PasswordOperation& operator=(const PasswordOperation&) = delete;
   ~PasswordOperation() override = default;
@@ -38,10 +41,13 @@ class PasswordOperation : public UndoOperation {
   void Undo() override {
     switch (Type) {
       case PasswordOperationType::kRemoveOperation:
-        RemoveLogin(form_);
+        RemoveLogin(credential_);
         break;
       case PasswordOperationType::kAddOperation:
-        AddLogin(form_);
+        AddLogin(credential_);
+        break;
+      case PasswordOperationType::kUpdateOperation:
+        UpdateLogin(credential_);
         break;
     }
   }
@@ -49,55 +55,81 @@ class PasswordOperation : public UndoOperation {
   int GetRedoLabelId() const override { return 0; }
 
  private:
-  void AddLogin(const password_manager::PasswordForm& form) {
-    // Add redo operation for an added form.
+  void AddLogin(const StoredCredential& credential) {
+    // Add redo operation for an added credential.
     DCHECK(profile_store_);
     DCHECK(undo_manager_);
 
     undo_manager_->AddUndoOperation(
         std::make_unique<
             PasswordOperation<PasswordOperationType::kRemoveOperation>>(
-            profile_store_, account_store_, undo_manager_, form_));
-    if (form.IsUsingAccountStore()) {
-      account_store_->AddLogin(form);
+            profile_store_, account_store_, undo_manager_,
+            CloneStoredCredential(credential_)));
+    if (credential.IsUsingAccountStore()) {
+      account_store_->AddLogin(CloneStoredCredential(credential));
     }
-    if (form.IsUsingProfileStore()) {
-      profile_store_->AddLogin(form);
+    if (credential.IsUsingProfileStore()) {
+      profile_store_->AddLogin(CloneStoredCredential(credential));
     }
   }
 
-  void RemoveLogin(const password_manager::PasswordForm& form) {
-    // Add undo operation for a removed form.
+  void UpdateLogin(const StoredCredential& new_credential) {
+    DCHECK(profile_store_);
+    DCHECK(undo_manager_);
+
+    undo_manager_->AddUndoOperation(
+        std::make_unique<
+            PasswordOperation<PasswordOperationType::kUpdateOperation>>(
+            profile_store_, account_store_, undo_manager_,
+            CloneStoredCredential(credential_)));
+    if (new_credential.IsUsingAccountStore()) {
+      account_store_->UpdateLogin(CloneStoredCredential(new_credential));
+    }
+    if (new_credential.IsUsingProfileStore()) {
+      profile_store_->UpdateLogin(CloneStoredCredential(new_credential));
+    }
+  }
+
+  void RemoveLogin(const StoredCredential& credential) {
+    // Add undo operation for a removed credential.
     undo_manager_->AddUndoOperation(
         std::make_unique<
             PasswordOperation<PasswordOperationType::kAddOperation>>(
-            profile_store_, account_store_, undo_manager_, form_));
-    if (form.IsUsingAccountStore()) {
-      account_store_->RemoveLogin(form);
+            profile_store_, account_store_, undo_manager_,
+            CloneStoredCredential(credential_)));
+    if (credential.IsUsingAccountStore()) {
+      account_store_->RemoveLogin(FROM_HERE, CloneStoredCredential(credential));
     }
-    if (form.IsUsingProfileStore()) {
-      profile_store_->RemoveLogin(form);
+    if (credential.IsUsingProfileStore()) {
+      profile_store_->RemoveLogin(FROM_HERE, CloneStoredCredential(credential));
     }
   }
 
   raw_ptr<PasswordStoreInterface> profile_store_;
   raw_ptr<PasswordStoreInterface> account_store_;
   raw_ptr<UndoManager> undo_manager_ = nullptr;
-  password_manager::PasswordForm form_;
+  StoredCredential credential_;
 };
 
 }  // namespace
 
-PasswordUndoHelper::PasswordUndoHelper(
-    raw_ptr<PasswordStoreInterface> profile_store,
-    raw_ptr<PasswordStoreInterface> account_store)
+PasswordUndoHelper::PasswordUndoHelper(PasswordStoreInterface* profile_store,
+                                       PasswordStoreInterface* account_store)
     : profile_store_(profile_store), account_store_(account_store) {}
 
-void PasswordUndoHelper::PasswordRemoved(
-    const password_manager::PasswordForm& form) {
+void PasswordUndoHelper::PasswordRemoved(StoredCredential credential) {
   undo_manager_.AddUndoOperation(
       std::make_unique<PasswordOperation<PasswordOperationType::kAddOperation>>(
-          profile_store_, account_store_, &undo_manager_, form));
+          profile_store_, account_store_, &undo_manager_,
+          std::move(credential)));
+}
+void PasswordUndoHelper::BackupPasswordRemoved(
+    StoredCredential credential_with_backup) {
+  undo_manager_.AddUndoOperation(
+      std::make_unique<
+          PasswordOperation<PasswordOperationType::kUpdateOperation>>(
+          profile_store_, account_store_, &undo_manager_,
+          std::move(credential_with_backup)));
 }
 
 void PasswordUndoHelper::Undo() {

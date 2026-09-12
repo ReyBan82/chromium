@@ -4,10 +4,26 @@
 
 #include "components/subresource_filter/core/common/indexed_ruleset.h"
 
+#include <algorithm>
+#include <memory>
+#include <vector>
+
 #include "base/check.h"
-#include "base/metrics/histogram_macros.h"
+#include "base/command_line.h"
+#include "base/containers/flat_set.h"
+#include "base/functional/callback.h"
+#include "base/hash/hash.h"
+#include "base/metrics/histogram_functions.h"
+#include "base/numerics/safe_conversions.h"
+#include "base/rand_util.h"
+#include "base/strings/strcat.h"
+#include "base/strings/string_util.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/trace_event/trace_event.h"
 #include "components/subresource_filter/core/common/first_party_origin.h"
+#include "components/subresource_filter/core/common/style_rule_matcher.h"
+#include "components/url_pattern_index/url_pattern_index.h"
+#include "third_party/rapidhash/rapidhash.h"
 #include "url/gurl.h"
 #include "url/origin.h"
 
@@ -21,23 +37,21 @@ using EmbedderConditionsMatcher =
     url_pattern_index::UrlPatternIndexMatcher::EmbedderConditionsMatcher;
 
 // A helper function to get the checksum on a data buffer.
-int LocalGetChecksum(const uint8_t* data, size_t size) {
-  uint32_t hash = base::PersistentHash(data, size);
+int LocalGetChecksum(base::span<const uint8_t> data) {
+  uint32_t hash = base::PersistentHash(data);
 
   // Strip off the sign bit since this needs to be persisted in preferences
   // which don't support unsigned ints.
   return static_cast<int>(hash & 0x7fffffff);
 }
 
-VerifyStatus GetVerifyStatus(const uint8_t* buffer,
-                             size_t size,
+VerifyStatus GetVerifyStatus(base::span<const uint8_t> buffer,
                              int expected_checksum) {
   // TODO(ericrobinson): Remove the verifier once we've updated the ruleset at
   // least once.  The verifier detects a subset of the errors detected by the
   // checksum, and is unneeded once expected_checksum is consistently nonzero.
-  flatbuffers::Verifier verifier(buffer, size);
-  if (expected_checksum != 0 &&
-      expected_checksum != LocalGetChecksum(buffer, size)) {
+  flatbuffers::Verifier verifier(buffer.data(), buffer.size());
+  if (expected_checksum != 0 && expected_checksum != LocalGetChecksum(buffer)) {
     return flat::VerifyIndexedRulesetBuffer(verifier)
                ? VerifyStatus::kChecksumFailVerifierPass
                : VerifyStatus::kChecksumFailVerifierFail;
@@ -52,19 +66,37 @@ VerifyStatus GetVerifyStatus(const uint8_t* buffer,
 
 }  // namespace
 
+uint32_t GetStyleRuleHash(std::string_view name) {
+  // Use a hash compatible with Blink's AtomicString to avoid re-hashing in the
+  // renderer for ASCII names. Matches StringHasher::MaskTop8Bits with
+  // kFlagCount = 8.
+  uint64_t result =
+      rapidhash(reinterpret_cast<const uint8_t*>(name.data()), name.size());
+  uint32_t hash = static_cast<uint32_t>(result);
+  hash &= (1U << 24) - 1;
+  if (!hash) {
+    hash = 0x800000;
+  }
+  return hash;
+}
+
 // RulesetIndexer --------------------------------------------------------------
 
-const int RulesetIndexer::kIndexedFormatVersion = 35;
+const int RulesetIndexer::kIndexedFormatVersion = 38;
 
 // This static assert is meant to catch cases where
 // url_pattern_index::kUrlPatternIndexFormatVersion is incremented without
 // updating RulesetIndexer::kIndexedFormatVersion.
-static_assert(url_pattern_index::kUrlPatternIndexFormatVersion == 14,
+static_assert(url_pattern_index::kUrlPatternIndexFormatVersion == 16,
               "kUrlPatternIndexFormatVersion has changed, make sure you've "
               "also updated RulesetIndexer::kIndexedFormatVersion above.");
 
-RulesetIndexer::RulesetIndexer()
-    : blocklist_(&builder_), allowlist_(&builder_), deactivation_(&builder_) {}
+RulesetIndexer::RulesetIndexer(uint64_t ruleset_id)
+    : blocklist_(&builder_),
+      allowlist_(&builder_),
+      deactivation_(&builder_),
+      style_rule_indexer_(&builder_),
+      ruleset_id_(ruleset_id) {}
 
 RulesetIndexer::~RulesetIndexer() = default;
 
@@ -73,21 +105,28 @@ bool RulesetIndexer::AddUrlRule(const proto::UrlRule& rule) {
       url_pattern_index::SerializeUrlRule(rule, &builder_, &domain_map_);
   // Note: A zero offset.o means a "nullptr" offset. It is returned when the
   // rule has not been serialized.
-  if (!offset.o)
+  if (!offset.o) {
     return false;
+  }
 
   if (rule.semantics() == proto::RULE_SEMANTICS_BLOCKLIST) {
     blocklist_.IndexUrlRule(offset);
   } else {
     const auto* flat_rule = flatbuffers::GetTemporaryPointer(builder_, offset);
-    DCHECK(flat_rule);
-    if (flat_rule->element_types())
+    CHECK(flat_rule);
+    if (flat_rule->element_types()) {
       allowlist_.IndexUrlRule(offset);
-    if (flat_rule->activation_types())
+    }
+    if (flat_rule->activation_types()) {
       deactivation_.IndexUrlRule(offset);
+    }
   }
 
   return true;
+}
+
+bool RulesetIndexer::AddStyleRuleFromProto(const proto::StyleRule& rule) {
+  return style_rule_indexer_.AddStyleRuleFromProto(rule);
 }
 
 void RulesetIndexer::Finish() {
@@ -95,40 +134,45 @@ void RulesetIndexer::Finish() {
   auto allowlist_offset = allowlist_.Finish();
   auto deactivation_offset = deactivation_.Finish();
 
+  auto style_rule_index_offset = style_rule_indexer_.Finish();
+
   auto url_rules_index_offset = flat::CreateIndexedRuleset(
-      builder_, blocklist_offset, allowlist_offset, deactivation_offset);
+      builder_, blocklist_offset, allowlist_offset, deactivation_offset,
+      style_rule_index_offset, ruleset_id_);
   builder_.Finish(url_rules_index_offset);
 }
 
 int RulesetIndexer::GetChecksum() const {
-  return LocalGetChecksum(data(), size());
+  return LocalGetChecksum(data());
 }
 
 // IndexedRulesetMatcher -------------------------------------------------------
 
 // static
-bool IndexedRulesetMatcher::Verify(const uint8_t* buffer,
-                                   size_t size,
-                                   int expected_checksum) {
-  TRACE_EVENT_BEGIN1(TRACE_DISABLED_BY_DEFAULT("loading"),
-                     "IndexedRulesetMatcher::Verify", "size", size);
-  SCOPED_UMA_HISTOGRAM_TIMER(
-      "SubresourceFilter.IndexRuleset.Verify2.WallDuration");
-  VerifyStatus status = GetVerifyStatus(buffer, size, expected_checksum);
-  UMA_HISTOGRAM_ENUMERATION("SubresourceFilter.IndexRuleset.Verify.Status",
-                            status);
-  TRACE_EVENT_END1(TRACE_DISABLED_BY_DEFAULT("loading"),
-                   "IndexedRulesetMatcher::Verify", "status",
-                   static_cast<int>(status));
+bool IndexedRulesetMatcher::Verify(base::span<const uint8_t> buffer,
+                                   int expected_checksum,
+                                   std::string_view uma_tag) {
+  TRACE_EVENT_BEGIN(TRACE_DISABLED_BY_DEFAULT("loading"),
+                    "IndexedRulesetMatcher::Verify", "size", buffer.size());
+  base::ScopedUmaHistogramTimer scoped_timer(
+      base::StrCat({uma_tag, ".IndexRuleset.Verify2.WallDuration"}));
+  VerifyStatus status = GetVerifyStatus(buffer, expected_checksum);
+  base::UmaHistogramEnumeration(
+      base::StrCat({uma_tag, ".IndexRuleset.Verify.Status"}), status);
+  TRACE_EVENT_END(TRACE_DISABLED_BY_DEFAULT("loading"), "status",
+                  static_cast<int>(status));
   return status == VerifyStatus::kPassValidChecksum ||
          status == VerifyStatus::kPassChecksumZero;
 }
 
-IndexedRulesetMatcher::IndexedRulesetMatcher(const uint8_t* buffer, size_t size)
-    : root_(flat::GetIndexedRuleset(buffer)),
+IndexedRulesetMatcher::IndexedRulesetMatcher(base::span<const uint8_t> buffer)
+    : root_(flat::GetIndexedRuleset(buffer.data())),
       blocklist_(root_->blocklist_index()),
       allowlist_(root_->allowlist_index()),
-      deactivation_(root_->deactivation_index()) {}
+      deactivation_(root_->deactivation_index()),
+      style_rule_matcher_(root_->style_rule_index()) {}
+
+IndexedRulesetMatcher::~IndexedRulesetMatcher() = default;
 
 bool IndexedRulesetMatcher::ShouldDisableFilteringForDocument(
     const GURL& document_url,
@@ -146,16 +190,24 @@ LoadPolicy IndexedRulesetMatcher::GetLoadPolicyForResourceLoad(
     const GURL& url,
     const FirstPartyOrigin& first_party,
     proto::ElementType element_type,
-    bool disable_generic_rules) const {
+    bool disable_generic_rules,
+    const url_pattern_index::flat::UrlRule** out_rule) const {
   const url_pattern_index::flat::UrlRule* rule =
       MatchedUrlRule(url, first_party, element_type, disable_generic_rules);
 
-  if (!rule)
-    return LoadPolicy::ALLOW;
+  LoadPolicy policy = LoadPolicy::DISALLOW;
+  if (!rule) {
+    policy = LoadPolicy::ALLOW;
+  } else if (rule->options() &
+             url_pattern_index::flat::OptionFlag_IS_ALLOWLIST) {
+    policy = LoadPolicy::EXPLICITLY_ALLOW;
+  }
 
-  return rule->options() & url_pattern_index::flat::OptionFlag_IS_ALLOWLIST
-             ? LoadPolicy::EXPLICITLY_ALLOW
-             : LoadPolicy::DISALLOW;
+  if (policy == LoadPolicy::DISALLOW && out_rule) {
+    *out_rule = rule;
+  }
+
+  return policy;
 }
 
 const url_pattern_index::flat::UrlRule* IndexedRulesetMatcher::MatchedUrlRule(
@@ -185,18 +237,48 @@ const url_pattern_index::flat::UrlRule* IndexedRulesetMatcher::MatchedUrlRule(
   // allowlist rule was not matched.
   if (element_type == proto::ELEMENT_TYPE_SUBDOCUMENT) {
     auto* allowlist_rule = find_match(allowlist_);
-    if (allowlist_rule)
+    if (allowlist_rule) {
       return allowlist_rule;
+    }
     return find_match(blocklist_);
   }
 
   // For non-subdocument elements, only check the allowlist if there is a
   // matched blocklist rule to prevent unnecessary lookups.
   auto* blocklist_rule = find_match(blocklist_);
-  if (!blocklist_rule)
+  if (!blocklist_rule) {
     return nullptr;
+  }
   auto* allowlist_rule = find_match(allowlist_);
   return allowlist_rule ? allowlist_rule : blocklist_rule;
+}
+
+bool IndexedRulesetMatcher::MaybeHasStyleRule(uint32_t hash) const {
+  return style_rule_matcher_.MaybeHasStyleRule(hash);
+}
+
+void IndexedRulesetMatcher::GetDomainSelectors(
+    const url::Origin& document_origin,
+    std::vector<std::string_view>& out_selectors) const {
+  style_rule_matcher_.GetDomainSelectors(document_origin, out_selectors);
+}
+
+void IndexedRulesetMatcher::GetSelectorsByClass(
+    const url::Origin& document_origin,
+    std::string_view class_name,
+    uint32_t hash,
+    std::vector<std::string_view>& out_selectors) const {
+  style_rule_matcher_.GetSelectorsByClass(document_origin, class_name, hash,
+                                          out_selectors);
+}
+
+void IndexedRulesetMatcher::GetSelectorsById(
+    const url::Origin& document_origin,
+    std::string_view id_name,
+    uint32_t hash,
+    std::vector<std::string_view>& out_selectors) const {
+  style_rule_matcher_.GetSelectorsById(document_origin, id_name, hash,
+                                       out_selectors);
 }
 
 }  // namespace subresource_filter

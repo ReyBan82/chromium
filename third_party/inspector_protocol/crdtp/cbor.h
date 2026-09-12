@@ -46,14 +46,17 @@ namespace cbor {
 // Checks whether |msg| is a cbor message.
 CRDTP_EXPORT bool IsCBORMessage(span<uint8_t> msg);
 
-// Performs a leightweight check of |msg|.
+// Performs a lightweight check of |msg|. If the check succeeds, evenlope outer
+// size is returned, otherwise an error status.
 // Disallows:
 // - Empty message
 // - Not starting with the two bytes 0xd8, 0x5a
 // - Empty envelope (all length bytes are 0)
 // - Not starting with a map after the envelope stanza
+// - Envelope outer size exceeding input span (`msg`) size
 // DevTools messages should pass this check.
-CRDTP_EXPORT Status CheckCBORMessage(span<uint8_t> msg);
+
+CRDTP_EXPORT StatusOr<size_t> CheckCBORMessage(span<uint8_t> msg);
 
 // =============================================================================
 // Encoding individual CBOR items
@@ -255,7 +258,8 @@ class CRDTP_EXPORT CBORTokenizer {
   span<uint8_t> GetString8() const;
 
   // Wire representation for STRING16 is low byte first (little endian).
-  // To be called only if ::TokenTag() == CBORTokenTag::STRING16.
+  // To be called only if ::TokenTag() == CBORTokenTag::STRING16. The result is
+  // guaranteed to have even length.
   span<uint8_t> GetString16WireRep() const;
 
   // To be called only if ::TokenTag() == CBORTokenTag::BINARY.
@@ -313,6 +317,19 @@ CRDTP_EXPORT void ParseCBOR(span<uint8_t> bytes, ParserHandler* out);
 CRDTP_EXPORT Status AppendString8EntryToCBORMap(span<uint8_t> string8_key,
                                                 span<uint8_t> string8_value,
                                                 std::vector<uint8_t>* cbor);
+
+// Safely extracts the value for |string8_key| from a CBOR encoded map wrapped
+// in an envelope. This is a shallow parser that skips unknown keys and
+// complex values. If the key is not found, or if it is found more than once,
+// or if it contains nested maps/arrays, returns an empty span.
+// Explicitly rejects duplicate keys and non-STRING8 values.
+CRDTP_EXPORT span<uint8_t> GetString8ValueFromMap(span<uint8_t> message,
+                                                  span<uint8_t> string8_key);
+// Safely checks if |key| exists in the top-level of a CBOR encoded map wrapped
+// in an envelope. Shallow parser that skips nested structures.
+// |key| should be ASCII. Supports STRING8 and STRING16 keys.
+// Returns true as soon as the key is found at the top level.
+CRDTP_EXPORT bool HasKeyInMap(span<uint8_t> message, span<uint8_t> key);
 
 namespace internals {  // Exposed only for writing tests.
 CRDTP_EXPORT size_t ReadTokenStart(span<uint8_t> bytes,

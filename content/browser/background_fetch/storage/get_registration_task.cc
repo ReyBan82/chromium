@@ -47,7 +47,7 @@ void GetRegistrationTask::FinishWithError(
   BackgroundFetchRegistrationId registration_id;
 
   if (error == blink::mojom::BackgroundFetchError::NONE) {
-    DCHECK(metadata_proto_);
+    CHECK(metadata_proto_, base::NotFatalUntil::M158);
 
     bool converted = ToBackgroundFetchRegistration(*metadata_proto_,
                                                    registration_data.get());
@@ -63,15 +63,9 @@ void GetRegistrationTask::FinishWithError(
         metadata_proto_->registration().unique_id());
   }
 
-  ReportStorageError();
-
   std::move(callback_).Run(error, std::move(registration_id),
                            std::move(registration_data));
   Finished();  // Destroys |this|.
-}
-
-std::string GetRegistrationTask::HistogramName() const {
-  return "GetRegistrationTask";
 }
 
 }  // namespace background_fetch

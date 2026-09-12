@@ -4,34 +4,37 @@
 
 package org.chromium.chrome.browser.ntp;
 
-import org.chromium.chrome.browser.query_tiles.QueryTileSection.QueryInfo;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.suggestions.SuggestionsUiDelegate;
+import org.chromium.components.omnibox.AutocompleteRequestType;
+import org.chromium.content_public.browser.LoadUrlParams;
 
-/**
- * Manages the view interaction with the rest of the system.
- */
+/** Manages the view interaction with the rest of the system. */
+@NullMarked
 public interface NewTabPageManager extends SuggestionsUiDelegate {
-    /** @return Whether the location bar is shown in the NTP. */
-    boolean isLocationBarShownInNTP();
+    /** Returns whether the location bar is shown in the NTP. */
+    boolean isLocationBarShownInNtp();
 
-    /** @return Whether voice search is enabled and the microphone should be shown. */
+    /** Returns whether voice search is enabled and the microphone should be shown. */
     boolean isVoiceSearchEnabled();
 
     /**
      * Animates the search box up into the omnibox and bring up the keyboard.
+     *
      * @param beginVoiceSearch Whether to begin a voice search.
+     * @param requestType Type of request the focused omnibox should begin serving.
+     * @param showFuseboxPopup Whether the fusebox popup should be shown.
      * @param pastedText Text to paste in the omnibox after it's been focused. May be null.
      */
-    void focusSearchBox(boolean beginVoiceSearch, String pastedText);
+    void focusSearchBox(
+            boolean beginVoiceSearch,
+            @AutocompleteRequestType int requestType,
+            boolean showFuseboxPopup,
+            @Nullable String pastedText);
 
     /**
-     * Performs a search query on the current {@link Tab}.
-     * @param queryInfo Object containing the query text and additional search params.
-     */
-    void performSearchQuery(QueryInfo queryInfo);
-
-    /**
-     * @return whether the {@link NewTabPage} associated with this manager is the current page
+     * Returns whether the {@link NewTabPage} associated with this manager is the current page
      * displayed to the user.
      */
     boolean isCurrentPage();
@@ -41,4 +44,13 @@ public interface NewTabPageManager extends SuggestionsUiDelegate {
      * and any dependent resources will have been loaded).
      */
     void onLoadingComplete();
+
+    /**
+     * Loads the URL with the given parameters.
+     *
+     * @param urlParams Parameters describing the URL to load.
+     * @param incognito Whether to load the URL in incognito mode.
+     */
+    void loadUrl(LoadUrlParams urlParams, boolean incognito);
 }
+

@@ -851,16 +851,6 @@ void GetBooleanv(GLenum pname,
   }
 }
 
-void GetBooleani_v(GLenum pname,
-                   GLuint index,
-                   uint32_t data_shm_id,
-                   uint32_t data_shm_offset) {
-  gles2::cmds::GetBooleani_v* c = GetCmdSpace<gles2::cmds::GetBooleani_v>();
-  if (c) {
-    c->Init(pname, index, data_shm_id, data_shm_offset);
-  }
-}
-
 void GetBufferParameteri64v(GLenum target,
                             GLenum pname,
                             uint32_t params_shm_id,
@@ -2521,143 +2511,6 @@ void FramebufferParameteri(GLenum target, GLenum pname, GLint param) {
   }
 }
 
-void BindImageTexture(GLuint unit,
-                      GLuint texture,
-                      GLint level,
-                      GLboolean layered,
-                      GLint layer,
-                      GLenum access,
-                      GLenum format) {
-  gles2::cmds::BindImageTexture* c =
-      GetCmdSpace<gles2::cmds::BindImageTexture>();
-  if (c) {
-    c->Init(unit, texture, level, layered, layer, access, format);
-  }
-}
-
-void DispatchCompute(GLuint num_groups_x,
-                     GLuint num_groups_y,
-                     GLuint num_groups_z) {
-  gles2::cmds::DispatchCompute* c = GetCmdSpace<gles2::cmds::DispatchCompute>();
-  if (c) {
-    c->Init(num_groups_x, num_groups_y, num_groups_z);
-  }
-}
-
-void DispatchComputeIndirect(GLintptr offset) {
-  gles2::cmds::DispatchComputeIndirect* c =
-      GetCmdSpace<gles2::cmds::DispatchComputeIndirect>();
-  if (c) {
-    c->Init(offset);
-  }
-}
-
-void DrawArraysIndirect(GLenum mode, GLuint offset) {
-  gles2::cmds::DrawArraysIndirect* c =
-      GetCmdSpace<gles2::cmds::DrawArraysIndirect>();
-  if (c) {
-    c->Init(mode, offset);
-  }
-}
-
-void DrawElementsIndirect(GLenum mode, GLenum type, GLuint offset) {
-  gles2::cmds::DrawElementsIndirect* c =
-      GetCmdSpace<gles2::cmds::DrawElementsIndirect>();
-  if (c) {
-    c->Init(mode, type, offset);
-  }
-}
-
-void GetProgramInterfaceiv(GLuint program,
-                           GLenum program_interface,
-                           GLenum pname,
-                           uint32_t params_shm_id,
-                           uint32_t params_shm_offset) {
-  gles2::cmds::GetProgramInterfaceiv* c =
-      GetCmdSpace<gles2::cmds::GetProgramInterfaceiv>();
-  if (c) {
-    c->Init(program, program_interface, pname, params_shm_id,
-            params_shm_offset);
-  }
-}
-
-void GetProgramResourceIndex(GLuint program,
-                             GLenum program_interface,
-                             uint32_t name_bucket_id,
-                             uint32_t index_shm_id,
-                             uint32_t index_shm_offset) {
-  gles2::cmds::GetProgramResourceIndex* c =
-      GetCmdSpace<gles2::cmds::GetProgramResourceIndex>();
-  if (c) {
-    c->Init(program, program_interface, name_bucket_id, index_shm_id,
-            index_shm_offset);
-  }
-}
-
-void GetProgramResourceName(GLuint program,
-                            GLenum program_interface,
-                            GLuint index,
-                            uint32_t name_bucket_id,
-                            uint32_t result_shm_id,
-                            uint32_t result_shm_offset) {
-  gles2::cmds::GetProgramResourceName* c =
-      GetCmdSpace<gles2::cmds::GetProgramResourceName>();
-  if (c) {
-    c->Init(program, program_interface, index, name_bucket_id, result_shm_id,
-            result_shm_offset);
-  }
-}
-
-void GetProgramResourceiv(GLuint program,
-                          GLenum program_interface,
-                          GLuint index,
-                          uint32_t props_bucket_id,
-                          uint32_t params_shm_id,
-                          uint32_t params_shm_offset) {
-  gles2::cmds::GetProgramResourceiv* c =
-      GetCmdSpace<gles2::cmds::GetProgramResourceiv>();
-  if (c) {
-    c->Init(program, program_interface, index, props_bucket_id, params_shm_id,
-            params_shm_offset);
-  }
-}
-
-void GetProgramResourceLocation(GLuint program,
-                                GLenum program_interface,
-                                uint32_t name_bucket_id,
-                                uint32_t location_shm_id,
-                                uint32_t location_shm_offset) {
-  gles2::cmds::GetProgramResourceLocation* c =
-      GetCmdSpace<gles2::cmds::GetProgramResourceLocation>();
-  if (c) {
-    c->Init(program, program_interface, name_bucket_id, location_shm_id,
-            location_shm_offset);
-  }
-}
-
-void MemoryBarrierEXT(GLbitfield barriers) {
-  gles2::cmds::MemoryBarrierEXT* c =
-      GetCmdSpace<gles2::cmds::MemoryBarrierEXT>();
-  if (c) {
-    c->Init(barriers);
-  }
-}
-
-void MemoryBarrierByRegion(GLbitfield barriers) {
-  gles2::cmds::MemoryBarrierByRegion* c =
-      GetCmdSpace<gles2::cmds::MemoryBarrierByRegion>();
-  if (c) {
-    c->Init(barriers);
-  }
-}
-
-void SwapBuffers(GLuint64 swap_id, GLbitfield flags) {
-  gles2::cmds::SwapBuffers* c = GetCmdSpace<gles2::cmds::SwapBuffers>();
-  if (c) {
-    c->Init(swap_id, flags);
-  }
-}
-
 void GetMaxValueInBufferCHROMIUM(GLuint buffer_id,
                                  GLsizei count,
                                  GLenum type,
@@ -2668,60 +2521,6 @@ void GetMaxValueInBufferCHROMIUM(GLuint buffer_id,
       GetCmdSpace<gles2::cmds::GetMaxValueInBufferCHROMIUM>();
   if (c) {
     c->Init(buffer_id, count, type, offset, result_shm_id, result_shm_offset);
-  }
-}
-
-void EnableFeatureCHROMIUM(GLuint bucket_id,
-                           uint32_t result_shm_id,
-                           uint32_t result_shm_offset) {
-  gles2::cmds::EnableFeatureCHROMIUM* c =
-      GetCmdSpace<gles2::cmds::EnableFeatureCHROMIUM>();
-  if (c) {
-    c->Init(bucket_id, result_shm_id, result_shm_offset);
-  }
-}
-
-void MapBufferRange(GLenum target,
-                    GLintptr offset,
-                    GLsizeiptr size,
-                    GLbitfield access,
-                    uint32_t data_shm_id,
-                    uint32_t data_shm_offset,
-                    uint32_t result_shm_id,
-                    uint32_t result_shm_offset) {
-  gles2::cmds::MapBufferRange* c = GetCmdSpace<gles2::cmds::MapBufferRange>();
-  if (c) {
-    c->Init(target, offset, size, access, data_shm_id, data_shm_offset,
-            result_shm_id, result_shm_offset);
-  }
-}
-
-void UnmapBuffer(GLenum target) {
-  gles2::cmds::UnmapBuffer* c = GetCmdSpace<gles2::cmds::UnmapBuffer>();
-  if (c) {
-    c->Init(target);
-  }
-}
-
-void FlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr size) {
-  gles2::cmds::FlushMappedBufferRange* c =
-      GetCmdSpace<gles2::cmds::FlushMappedBufferRange>();
-  if (c) {
-    c->Init(target, offset, size);
-  }
-}
-
-void ResizeCHROMIUM(GLint width,
-                    GLint height,
-                    GLfloat scale_factor,
-                    GLboolean alpha,
-                    GLuint shm_id,
-                    GLuint shm_offset,
-                    GLsizei color_space_size) {
-  gles2::cmds::ResizeCHROMIUM* c = GetCmdSpace<gles2::cmds::ResizeCHROMIUM>();
-  if (c) {
-    c->Init(width, height, scale_factor, alpha, shm_id, shm_offset,
-            color_space_size);
   }
 }
 
@@ -2890,29 +2689,6 @@ void VertexAttribDivisorANGLE(GLuint index, GLuint divisor) {
   }
 }
 
-void ProduceTextureDirectCHROMIUMImmediate(GLuint texture, GLbyte* mailbox) {
-  const uint32_t size =
-      gles2::cmds::ProduceTextureDirectCHROMIUMImmediate::ComputeSize();
-  gles2::cmds::ProduceTextureDirectCHROMIUMImmediate* c =
-      GetImmediateCmdSpaceTotalSize<
-          gles2::cmds::ProduceTextureDirectCHROMIUMImmediate>(size);
-  if (c) {
-    c->Init(texture, mailbox);
-  }
-}
-
-void CreateAndConsumeTextureINTERNALImmediate(GLuint texture,
-                                              const GLbyte* mailbox) {
-  const uint32_t size =
-      gles2::cmds::CreateAndConsumeTextureINTERNALImmediate::ComputeSize();
-  gles2::cmds::CreateAndConsumeTextureINTERNALImmediate* c =
-      GetImmediateCmdSpaceTotalSize<
-          gles2::cmds::CreateAndConsumeTextureINTERNALImmediate>(size);
-  if (c) {
-    c->Init(texture, mailbox);
-  }
-}
-
 void BindUniformLocationCHROMIUMBucket(GLuint program,
                                        GLint location,
                                        uint32_t name_bucket_id) {
@@ -2970,14 +2746,6 @@ void DrawBuffersEXTImmediate(GLsizei count, const GLenum* bufs) {
   }
 }
 
-void DiscardBackbufferCHROMIUM() {
-  gles2::cmds::DiscardBackbufferCHROMIUM* c =
-      GetCmdSpace<gles2::cmds::DiscardBackbufferCHROMIUM>();
-  if (c) {
-    c->Init();
-  }
-}
-
 void FlushDriverCachesCHROMIUM() {
   gles2::cmds::FlushDriverCachesCHROMIUM* c =
       GetCmdSpace<gles2::cmds::FlushDriverCachesCHROMIUM>();
@@ -2991,6 +2759,18 @@ void SetActiveURLCHROMIUM(GLuint url_bucket_id) {
       GetCmdSpace<gles2::cmds::SetActiveURLCHROMIUM>();
   if (c) {
     c->Init(url_bucket_id);
+  }
+}
+
+void GetBufferSubDataCHROMIUM(GLenum target,
+                              GLintptr offset,
+                              GLsizeiptr size,
+                              uint32_t data_shm_id,
+                              uint32_t data_shm_offset) {
+  gles2::cmds::GetBufferSubDataCHROMIUM* c =
+      GetCmdSpace<gles2::cmds::GetBufferSubDataCHROMIUM>();
+  if (c) {
+    c->Init(target, offset, size, data_shm_id, data_shm_offset);
   }
 }
 
@@ -3038,32 +2818,6 @@ void GetFragDataIndexEXT(GLuint program,
       GetCmdSpace<gles2::cmds::GetFragDataIndexEXT>();
   if (c) {
     c->Init(program, name_bucket_id, index_shm_id, index_shm_offset);
-  }
-}
-
-void InitializeDiscardableTextureCHROMIUM(GLuint texture_id,
-                                          uint32_t shm_id,
-                                          uint32_t shm_offset) {
-  gles2::cmds::InitializeDiscardableTextureCHROMIUM* c =
-      GetCmdSpace<gles2::cmds::InitializeDiscardableTextureCHROMIUM>();
-  if (c) {
-    c->Init(texture_id, shm_id, shm_offset);
-  }
-}
-
-void UnlockDiscardableTextureCHROMIUM(GLuint texture_id) {
-  gles2::cmds::UnlockDiscardableTextureCHROMIUM* c =
-      GetCmdSpace<gles2::cmds::UnlockDiscardableTextureCHROMIUM>();
-  if (c) {
-    c->Init(texture_id);
-  }
-}
-
-void LockDiscardableTextureCHROMIUM(GLuint texture_id) {
-  gles2::cmds::LockDiscardableTextureCHROMIUM* c =
-      GetCmdSpace<gles2::cmds::LockDiscardableTextureCHROMIUM>();
-  if (c) {
-    c->Init(texture_id);
   }
 }
 
@@ -3164,41 +2918,12 @@ void EndSharedImageAccessDirectCHROMIUM(GLuint texture) {
   }
 }
 
-void ConvertRGBAToYUVAMailboxesINTERNALImmediate(GLenum planes_yuv_color_space,
-                                                 GLenum plane_config,
-                                                 GLenum subsampling,
-                                                 const GLbyte* mailboxes) {
-  const uint32_t size =
-      gles2::cmds::ConvertRGBAToYUVAMailboxesINTERNALImmediate::ComputeSize();
-  gles2::cmds::ConvertRGBAToYUVAMailboxesINTERNALImmediate* c =
-      GetImmediateCmdSpaceTotalSize<
-          gles2::cmds::ConvertRGBAToYUVAMailboxesINTERNALImmediate>(size);
-  if (c) {
-    c->Init(planes_yuv_color_space, plane_config, subsampling, mailboxes);
-  }
-}
-
-void ConvertYUVAMailboxesToRGBINTERNALImmediate(GLenum planes_yuv_color_space,
-                                                GLenum plane_config,
-                                                GLenum subsampling,
-                                                const GLbyte* mailboxes) {
-  const uint32_t size =
-      gles2::cmds::ConvertYUVAMailboxesToRGBINTERNALImmediate::ComputeSize();
-  gles2::cmds::ConvertYUVAMailboxesToRGBINTERNALImmediate* c =
-      GetImmediateCmdSpaceTotalSize<
-          gles2::cmds::ConvertYUVAMailboxesToRGBINTERNALImmediate>(size);
-  if (c) {
-    c->Init(planes_yuv_color_space, plane_config, subsampling, mailboxes);
-  }
-}
-
 void CopySharedImageINTERNALImmediate(GLint xoffset,
                                       GLint yoffset,
                                       GLint x,
                                       GLint y,
                                       GLsizei width,
                                       GLsizei height,
-                                      GLboolean unpack_flip_y,
                                       const GLbyte* mailboxes) {
   const uint32_t size =
       gles2::cmds::CopySharedImageINTERNALImmediate::ComputeSize();
@@ -3206,7 +2931,76 @@ void CopySharedImageINTERNALImmediate(GLint xoffset,
       GetImmediateCmdSpaceTotalSize<
           gles2::cmds::CopySharedImageINTERNALImmediate>(size);
   if (c) {
-    c->Init(xoffset, yoffset, x, y, width, height, unpack_flip_y, mailboxes);
+    c->Init(xoffset, yoffset, x, y, width, height, mailboxes);
+  }
+}
+
+void CopySharedImageToTextureINTERNALImmediate(GLuint texture,
+                                               GLenum target,
+                                               GLuint internal_format,
+                                               GLenum type,
+                                               GLint src_x,
+                                               GLint src_y,
+                                               GLsizei width,
+                                               GLsizei height,
+                                               GLboolean is_dst_origin_top_left,
+                                               const GLbyte* src_mailbox) {
+  const uint32_t size =
+      gles2::cmds::CopySharedImageToTextureINTERNALImmediate::ComputeSize();
+  gles2::cmds::CopySharedImageToTextureINTERNALImmediate* c =
+      GetImmediateCmdSpaceTotalSize<
+          gles2::cmds::CopySharedImageToTextureINTERNALImmediate>(size);
+  if (c) {
+    c->Init(texture, target, internal_format, type, src_x, src_y, width, height,
+            is_dst_origin_top_left, src_mailbox);
+  }
+}
+
+void ReadbackARGBImagePixelsINTERNAL(GLint src_x,
+                                     GLint src_y,
+                                     GLint plane_index,
+                                     GLuint dst_width,
+                                     GLuint dst_height,
+                                     GLuint row_bytes,
+                                     GLuint dst_sk_color_type,
+                                     GLuint dst_sk_alpha_type,
+                                     GLint shm_id,
+                                     GLuint shm_offset,
+                                     GLuint color_space_offset,
+                                     GLuint pixels_offset,
+                                     GLuint mailbox_offset) {
+  gles2::cmds::ReadbackARGBImagePixelsINTERNAL* c =
+      GetCmdSpace<gles2::cmds::ReadbackARGBImagePixelsINTERNAL>();
+  if (c) {
+    c->Init(src_x, src_y, plane_index, dst_width, dst_height, row_bytes,
+            dst_sk_color_type, dst_sk_alpha_type, shm_id, shm_offset,
+            color_space_offset, pixels_offset, mailbox_offset);
+  }
+}
+
+void WritePixelsYUVINTERNAL(GLuint src_width,
+                            GLuint src_height,
+                            GLuint src_row_bytes_plane1,
+                            GLuint src_row_bytes_plane2,
+                            GLuint src_row_bytes_plane3,
+                            GLuint src_row_bytes_plane4,
+                            GLuint src_yuv_plane_config,
+                            GLuint src_yuv_subsampling,
+                            GLuint src_yuv_datatype,
+                            GLint shm_id,
+                            GLuint shm_offset,
+                            GLuint pixels_offset_plane1,
+                            GLuint pixels_offset_plane2,
+                            GLuint pixels_offset_plane3,
+                            GLuint pixels_offset_plane4) {
+  gles2::cmds::WritePixelsYUVINTERNAL* c =
+      GetCmdSpace<gles2::cmds::WritePixelsYUVINTERNAL>();
+  if (c) {
+    c->Init(src_width, src_height, src_row_bytes_plane1, src_row_bytes_plane2,
+            src_row_bytes_plane3, src_row_bytes_plane4, src_yuv_plane_config,
+            src_yuv_subsampling, src_yuv_datatype, shm_id, shm_offset,
+            pixels_offset_plane1, pixels_offset_plane2, pixels_offset_plane3,
+            pixels_offset_plane4);
   }
 }
 
@@ -3285,6 +3079,179 @@ void ProvokingVertexANGLE(GLenum provokeMode) {
       GetCmdSpace<gles2::cmds::ProvokingVertexANGLE>();
   if (c) {
     c->Init(provokeMode);
+  }
+}
+
+void FramebufferMemorylessPixelLocalStorageANGLE(GLint plane,
+                                                 GLenum internalformat,
+                                                 GLbitfield usage) {
+  gles2::cmds::FramebufferMemorylessPixelLocalStorageANGLE* c =
+      GetCmdSpace<gles2::cmds::FramebufferMemorylessPixelLocalStorageANGLE>();
+  if (c) {
+    c->Init(plane, internalformat, usage);
+  }
+}
+
+void FramebufferTexturePixelLocalStorageANGLE(GLint plane,
+                                              GLuint backingtexture,
+                                              GLint level,
+                                              GLint layer,
+                                              GLbitfield usage) {
+  gles2::cmds::FramebufferTexturePixelLocalStorageANGLE* c =
+      GetCmdSpace<gles2::cmds::FramebufferTexturePixelLocalStorageANGLE>();
+  if (c) {
+    c->Init(plane, backingtexture, level, layer, usage);
+  }
+}
+
+void FramebufferPixelLocalClearValuefvANGLEImmediate(GLint plane,
+                                                     const GLfloat* value) {
+  const uint32_t size = gles2::cmds::
+      FramebufferPixelLocalClearValuefvANGLEImmediate::ComputeSize();
+  gles2::cmds::FramebufferPixelLocalClearValuefvANGLEImmediate* c =
+      GetImmediateCmdSpaceTotalSize<
+          gles2::cmds::FramebufferPixelLocalClearValuefvANGLEImmediate>(size);
+  if (c) {
+    c->Init(plane, value);
+  }
+}
+
+void FramebufferPixelLocalClearValueivANGLEImmediate(GLint plane,
+                                                     const GLint* value) {
+  const uint32_t size = gles2::cmds::
+      FramebufferPixelLocalClearValueivANGLEImmediate::ComputeSize();
+  gles2::cmds::FramebufferPixelLocalClearValueivANGLEImmediate* c =
+      GetImmediateCmdSpaceTotalSize<
+          gles2::cmds::FramebufferPixelLocalClearValueivANGLEImmediate>(size);
+  if (c) {
+    c->Init(plane, value);
+  }
+}
+
+void FramebufferPixelLocalClearValueuivANGLEImmediate(GLint plane,
+                                                      const GLuint* value) {
+  const uint32_t size = gles2::cmds::
+      FramebufferPixelLocalClearValueuivANGLEImmediate::ComputeSize();
+  gles2::cmds::FramebufferPixelLocalClearValueuivANGLEImmediate* c =
+      GetImmediateCmdSpaceTotalSize<
+          gles2::cmds::FramebufferPixelLocalClearValueuivANGLEImmediate>(size);
+  if (c) {
+    c->Init(plane, value);
+  }
+}
+
+void BeginPixelLocalStorageANGLEImmediate(GLsizei count,
+                                          const GLenum* loadops) {
+  const uint32_t size =
+      gles2::cmds::BeginPixelLocalStorageANGLEImmediate::ComputeSize(count);
+  gles2::cmds::BeginPixelLocalStorageANGLEImmediate* c =
+      GetImmediateCmdSpaceTotalSize<
+          gles2::cmds::BeginPixelLocalStorageANGLEImmediate>(size);
+  if (c) {
+    c->Init(count, loadops);
+  }
+}
+
+void EndPixelLocalStorageANGLEImmediate(GLsizei count, const GLenum* storeops) {
+  const uint32_t size =
+      gles2::cmds::EndPixelLocalStorageANGLEImmediate::ComputeSize(count);
+  gles2::cmds::EndPixelLocalStorageANGLEImmediate* c =
+      GetImmediateCmdSpaceTotalSize<
+          gles2::cmds::EndPixelLocalStorageANGLEImmediate>(size);
+  if (c) {
+    c->Init(count, storeops);
+  }
+}
+
+void EndPixelLocalStorageImplicitANGLE() {
+  gles2::cmds::EndPixelLocalStorageImplicitANGLE* c =
+      GetCmdSpace<gles2::cmds::EndPixelLocalStorageImplicitANGLE>();
+  if (c) {
+    c->Init();
+  }
+}
+
+void PixelLocalStorageBarrierANGLE() {
+  gles2::cmds::PixelLocalStorageBarrierANGLE* c =
+      GetCmdSpace<gles2::cmds::PixelLocalStorageBarrierANGLE>();
+  if (c) {
+    c->Init();
+  }
+}
+
+void FramebufferPixelLocalStorageInterruptANGLE() {
+  gles2::cmds::FramebufferPixelLocalStorageInterruptANGLE* c =
+      GetCmdSpace<gles2::cmds::FramebufferPixelLocalStorageInterruptANGLE>();
+  if (c) {
+    c->Init();
+  }
+}
+
+void FramebufferPixelLocalStorageRestoreANGLE() {
+  gles2::cmds::FramebufferPixelLocalStorageRestoreANGLE* c =
+      GetCmdSpace<gles2::cmds::FramebufferPixelLocalStorageRestoreANGLE>();
+  if (c) {
+    c->Init();
+  }
+}
+
+void GetFramebufferPixelLocalStorageParameterfvANGLE(
+    GLint plane,
+    GLenum pname,
+    uint32_t params_shm_id,
+    uint32_t params_shm_offset) {
+  gles2::cmds::GetFramebufferPixelLocalStorageParameterfvANGLE* c = GetCmdSpace<
+      gles2::cmds::GetFramebufferPixelLocalStorageParameterfvANGLE>();
+  if (c) {
+    c->Init(plane, pname, params_shm_id, params_shm_offset);
+  }
+}
+
+void GetFramebufferPixelLocalStorageParameterivANGLE(
+    GLint plane,
+    GLenum pname,
+    uint32_t params_shm_id,
+    uint32_t params_shm_offset) {
+  gles2::cmds::GetFramebufferPixelLocalStorageParameterivANGLE* c = GetCmdSpace<
+      gles2::cmds::GetFramebufferPixelLocalStorageParameterivANGLE>();
+  if (c) {
+    c->Init(plane, pname, params_shm_id, params_shm_offset);
+  }
+}
+
+void GetFramebufferPixelLocalStorageParameteruivANGLE(
+    GLint plane,
+    GLenum pname,
+    uint32_t params_shm_id,
+    uint32_t params_shm_offset) {
+  gles2::cmds::GetFramebufferPixelLocalStorageParameteruivANGLE* c =
+      GetCmdSpace<
+          gles2::cmds::GetFramebufferPixelLocalStorageParameteruivANGLE>();
+  if (c) {
+    c->Init(plane, pname, params_shm_id, params_shm_offset);
+  }
+}
+
+void ClipControlEXT(GLenum origin, GLenum depth) {
+  gles2::cmds::ClipControlEXT* c = GetCmdSpace<gles2::cmds::ClipControlEXT>();
+  if (c) {
+    c->Init(origin, depth);
+  }
+}
+
+void PolygonModeANGLE(GLenum face, GLenum mode) {
+  gles2::cmds::PolygonModeANGLE* c =
+      GetCmdSpace<gles2::cmds::PolygonModeANGLE>();
+  if (c) {
+    c->Init(face, mode);
+  }
+}
+
+void PolygonOffsetClampEXT(GLfloat factor, GLfloat units, GLfloat clamp) {
+  gles2::cmds::PolygonOffsetClampEXT* c =
+      GetCmdSpace<gles2::cmds::PolygonOffsetClampEXT>();
+  if (c) {
+    c->Init(factor, units, clamp);
   }
 }
 

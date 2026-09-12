@@ -6,6 +6,7 @@
 #define COMPONENTS_SEGMENTATION_PLATFORM_INTERNAL_EXECUTION_PROCESSING_SQL_FEATURE_PROCESSOR_H_
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "base/containers/flat_map.h"
@@ -18,6 +19,7 @@ namespace segmentation_platform::processing {
 class CustomInputProcessor;
 class FeatureProcessorState;
 class InputDelegateHolder;
+struct Data;
 
 // SqlFeatureProcessor takes a list of SqlFeature type of input, fetches samples
 // from the UKMDatabase, and computes an input tensor to use when executing the
@@ -33,7 +35,7 @@ class SqlFeatureProcessor : public QueryProcessor {
   ~SqlFeatureProcessor() override;
 
   // QueryProcessor implementation.
-  void Process(std::unique_ptr<FeatureProcessorState> feature_processor_state,
+  void Process(FeatureProcessorState& feature_processor_state,
                QueryProcessorCallback callback) override;
 
  private:
@@ -43,15 +45,14 @@ class SqlFeatureProcessor : public QueryProcessor {
   // Callback method for when all relevant bind values have been processed.
   void OnCustomInputProcessed(
       std::unique_ptr<CustomInputProcessor> custom_input_processor,
-      std::unique_ptr<FeatureProcessorState> feature_processor_state,
+      base::WeakPtr<FeatureProcessorState> feature_processor_state,
       base::flat_map<SqlFeatureAndBindValueIndices, Tensor> result);
 
   // Callback method for when all queries have been processed by the ukm
   // database.
   void OnQueriesRun(
-      std::unique_ptr<FeatureProcessorState> feature_processor_state,
-      bool success,
-      IndexedTensors result);
+      base::WeakPtr<FeatureProcessorState> feature_processor_state,
+      std::optional<IndexedTensors> result);
 
   // List of sql features to process into input tensors.
   QueryList queries_;
@@ -73,9 +74,6 @@ class SqlFeatureProcessor : public QueryProcessor {
   // List of sql queries and bind values ready to be sent to the ukm database
   // for processing.
   base::flat_map<FeatureIndex, UkmDatabase::CustomSqlQuery> processed_queries_;
-
-  // List of resulting input tensors.
-  IndexedTensors result_;
 
   base::WeakPtrFactory<SqlFeatureProcessor> weak_ptr_factory_{this};
 };

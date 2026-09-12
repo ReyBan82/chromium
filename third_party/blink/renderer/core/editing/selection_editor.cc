@@ -25,6 +25,8 @@
 
 #include "third_party/blink/renderer/core/editing/selection_editor.h"
 
+#include "third_party/blink/public/platform/task_type.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/node_with_index.h"
 #include "third_party/blink/renderer/core/dom/text.h"
 #include "third_party/blink/renderer/core/editing/editing_behavior.h"
@@ -36,14 +38,19 @@
 #include "third_party/blink/renderer/core/editing/position_with_affinity.h"
 #include "third_party/blink/renderer/core/editing/selection_adjuster.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/html/forms/text_control_element.h"
+#include "third_party/blink/renderer/core/layout/layout_block.h"
+#include "third_party/blink/renderer/core/layout/layout_invalidation_reason.h"
+#include "third_party/blink/renderer/core/layout/layout_object.h"
+#include "third_party/blink/renderer/core/layout/layout_object_inlines.h"
+#include "third_party/blink/renderer/core/style/computed_style.h"
+#include "third_party/blink/renderer/platform/wtf/functional.h"
 
 namespace blink {
 
 SelectionEditor::SelectionEditor(LocalFrame& frame) : frame_(frame) {
   ClearVisibleSelection();
 }
-
-SelectionEditor::~SelectionEditor() = default;
 
 void SelectionEditor::AssertSelectionValid() const {
 #if DCHECK_IS_ON()
@@ -56,7 +63,7 @@ void SelectionEditor::AssertSelectionValid() const {
 }
 
 void SelectionEditor::ClearVisibleSelection() {
-  selection_ = SelectionInDOMTree();
+  selection_ = SelectionInDomTree();
   cached_visible_selection_in_dom_tree_ = VisibleSelection();
   cached_visible_selection_in_flat_tree_ = VisibleSelectionInFlatTree();
   cached_visible_selection_in_dom_tree_is_dirty_ = true;
@@ -69,17 +76,17 @@ void SelectionEditor::Dispose() {
 }
 
 Document& SelectionEditor::GetDocument() const {
-  DCHECK(SynchronousMutationObserver::GetDocument());
-  return *SynchronousMutationObserver::GetDocument();
+  DCHECK(document_);
+  return *document_;
 }
 
-VisibleSelection SelectionEditor::ComputeVisibleSelectionInDOMTree() const {
+VisibleSelection SelectionEditor::ComputeVisibleSelectionInDomTree() const {
   DCHECK_EQ(GetFrame()->GetDocument(), GetDocument());
   DCHECK_EQ(GetFrame(), GetDocument().GetFrame());
   UpdateCachedVisibleSelectionIfNeeded();
   if (cached_visible_selection_in_dom_tree_.IsNone())
     return cached_visible_selection_in_dom_tree_;
-  DCHECK_EQ(cached_visible_selection_in_dom_tree_.Base().GetDocument(),
+  DCHECK_EQ(cached_visible_selection_in_dom_tree_.Anchor().GetDocument(),
             GetDocument());
   return cached_visible_selection_in_dom_tree_;
 }
@@ -91,7 +98,7 @@ VisibleSelectionInFlatTree SelectionEditor::ComputeVisibleSelectionInFlatTree()
   UpdateCachedVisibleSelectionInFlatTreeIfNeeded();
   if (cached_visible_selection_in_flat_tree_.IsNone())
     return cached_visible_selection_in_flat_tree_;
-  DCHECK_EQ(cached_visible_selection_in_flat_tree_.Base().GetDocument(),
+  DCHECK_EQ(cached_visible_selection_in_flat_tree_.Anchor().GetDocument(),
             GetDocument());
   return cached_visible_selection_in_flat_tree_;
 }
@@ -108,7 +115,7 @@ bool SelectionEditor::ComputeAbsoluteBounds(gfx::Rect& anchor,
   return has_selection_bounds_;
 }
 
-const SelectionInDOMTree& SelectionEditor::GetSelectionInDOMTree() const {
+const SelectionInDomTree& SelectionEditor::GetSelectionInDomTree() const {
   AssertSelectionValid();
   return selection_;
 }
@@ -131,48 +138,162 @@ void SelectionEditor::MarkCacheDirty() {
 }
 
 void SelectionEditor::SetSelectionAndEndTyping(
-    const SelectionInDOMTree& new_selection) {
+    const SelectionInDomTree& new_selection) {
   new_selection.AssertValidFor(GetDocument());
   DCHECK_NE(selection_, new_selection);
+
+  const SelectionInDomTree old_selection = selection_;
+
   ClearDocumentCachedRange();
   MarkCacheDirty();
   selection_ = new_selection;
+
+  if (RuntimeEnabledFeatures::TextOverflowClipWithSelectionEnabled()) {
+    Node* old_focus = old_selection.Focus().AnchorNode();
+    Node* new_focus = new_selection.Focus().AnchorNode();
+    LayoutObject* old_style_owner =
+        old_focus && old_focus->GetLayoutObject()
+            ? old_focus->GetLayoutObject()->ContainingBlockForTextOverflow()
+            : nullptr;
+    // Editable-only: non-editable content keeps its ellipsis
+    // (crbug.com/526471153).
+    LayoutObject* new_style_owner =
+        new_focus && new_focus->GetLayoutObject() && IsEditable(*new_focus)
+            ? new_focus->GetLayoutObject()->ContainingBlockForTextOverflow()
+            : nullptr;
+
+    if (old_style_owner != new_style_owner) {
+      SetContainsSelectionFocusFlag(old_style_owner, false);
+      SetContainsSelectionFocusFlag(new_style_owner, true);
+    }
+  }
 }
 
-void SelectionEditor::DidChangeChildren(const ContainerNode&,
-                                        const ContainerNode::ChildrenChange&) {
-  selection_.ResetDirectionCache();
-  MarkCacheDirty();
-  DidFinishDOMMutation();
-}
-
-void SelectionEditor::DidFinishTextChange(const Position& new_base,
-                                          const Position& new_extent) {
-  if (new_base == selection_.base_ && new_extent == selection_.extent_) {
-    DidFinishDOMMutation();
+void SelectionEditor::SetContainsSelectionFocusFlag(LayoutObject* style_owner,
+                                                    bool value) {
+  if (!style_owner || style_owner->StyleRef().TextOverflow().IsClip() ||
+      style_owner->ContainsSelectionFocus() == value) {
     return;
   }
-  selection_.base_ = new_base;
-  selection_.extent_ = new_extent;
-  selection_.ResetDirectionCache();
-  MarkCacheDirty();
-  DidFinishDOMMutation();
+
+  style_owner->SetContainsSelectionFocus(value);
+
+  // Children must be marked dirty so LayoutNG re-evaluates truncation (results
+  // are cached per child). Defer via a task: this runs during
+  // selection/input/focus handling, where dirtying layout synchronously would
+  // trip hit-test DCHECKs (crbug.com/406853131).
+  Node* style_node = style_owner->GetNode();
+  if (!style_node) {
+    return;
+  }
+  style_node->GetDocument()
+      .GetTaskRunner(TaskType::kInternalDefault)
+      ->PostTask(FROM_HERE,
+                 BindOnce(&SelectionEditor::InvalidateTextOverflowLayoutForNode,
+                          WrapWeakPersistent(style_node)));
 }
 
-void SelectionEditor::DidFinishDOMMutation() {
+void SelectionEditor::InvalidateTextOverflowLayoutForNode(
+    Node* style_owner_node) {
+  if (!style_owner_node) {
+    return;
+  }
+  LayoutObject* style_owner = style_owner_node->GetLayoutObject();
+  if (!style_owner) {
+    return;
+  }
+  style_owner->SetNeedsLayout(layout_invalidation_reason::kStyleChange);
+  for (LayoutObject* child = style_owner->SlowFirstChild(); child;
+       child = child->NextSibling()) {
+    if (child->IsLayoutBlock()) {
+      child->SetNeedsLayout(layout_invalidation_reason::kStyleChange);
+    }
+  }
+}
+
+void SelectionEditor::DidChangeChildren(
+    const ContainerNode::ChildrenChange& change) {
+  if (RuntimeEnabledFeatures::UpdateSelectionOnNodeInsertionEnabled() &&
+      (change.type == ContainerNode::ChildrenChangeType::kElementInserted ||
+       change.type == ContainerNode::ChildrenChangeType::kNonElementInserted)) {
+    DidInsertNode(*change.sibling_changed);
+  }
+  selection_.ResetDirectionCache();
+  MarkCacheDirty();
+  DidFinishDomMutation();
+}
+
+void SelectionEditor::DidFinishTextChange(const Position& new_anchor,
+                                          const Position& new_focus) {
+  if (new_anchor == selection_.anchor_ && new_focus == selection_.focus_) {
+    DidFinishDomMutation();
+    return;
+  }
+  selection_.anchor_ = new_anchor;
+  selection_.focus_ = new_focus;
+  selection_.ResetDirectionCache();
+
+  // See: https://w3c.github.io/selection-api/#selectionchange-event
+  TextControlElement* text_control =
+      EnclosingTextControl(GetSelectionInDomTree().Anchor());
+  if (text_control && !text_control->IsInShadowTree()) {
+    text_control->ScheduleSelectionchangeEvent();
+  } else {
+    GetDocument().ScheduleSelectionchangeEvent();
+  }
+
+  MarkCacheDirty();
+  DidFinishDomMutation();
+}
+
+void SelectionEditor::DidFinishDomMutation() {
   AssertSelectionValid();
+}
+
+static Position ComputePositionForNodeInsertion(const Position& position,
+                                                const Node& node) {
+  if (position.IsNull()) {
+    return position;
+  }
+
+  if (position.IsOffsetInAnchor()) {
+    Node* container_node = position.ComputeContainerNode();
+    // Increase the offset value when new node is inserted before the current
+    // position.
+    if (container_node == node.parentNode() &&
+        position.OffsetInContainerNode() > node.NodeIndex()) {
+      return Position(container_node, position.OffsetInContainerNode() + 1);
+    }
+  }
+  return position;
+}
+
+void SelectionEditor::DidInsertNode(const Node& node) {
+  if (selection_.IsNone()) {
+    return;
+  }
+  const Position old_anchor = selection_.anchor_;
+  const Position old_focus = selection_.focus_;
+  const Position& new_anchor =
+      ComputePositionForNodeInsertion(old_anchor, node);
+  const Position& new_focus = ComputePositionForNodeInsertion(old_focus, node);
+  if (new_anchor == old_anchor && new_focus == old_focus) {
+    return;
+  }
+  selection_ = SelectionInDomTree::Builder()
+                   .SetBaseAndExtent(new_anchor, new_focus)
+                   .Build();
 }
 
 void SelectionEditor::DidAttachDocument(Document* document) {
   DCHECK(document);
-  DCHECK(!SynchronousMutationObserver::GetDocument())
-      << SynchronousMutationObserver::GetDocument();
+  DCHECK(!document_);
 #if DCHECK_IS_ON()
   style_version_for_dom_tree_ = static_cast<uint64_t>(-1);
   style_version_for_flat_tree_ = static_cast<uint64_t>(-1);
 #endif
   ClearVisibleSelection();
-  SetDocument(document);
+  document_ = document;
 }
 
 void SelectionEditor::ContextDestroyed() {
@@ -182,7 +303,7 @@ void SelectionEditor::ContextDestroyed() {
   style_version_for_flat_tree_ = static_cast<uint64_t>(-1);
   style_version_for_absolute_bounds_ = static_cast<uint64_t>(-1);
 #endif
-  selection_ = SelectionInDOMTree();
+  selection_ = SelectionInDomTree();
   cached_visible_selection_in_dom_tree_ = VisibleSelection();
   cached_visible_selection_in_flat_tree_ = VisibleSelectionInFlatTree();
   cached_visible_selection_in_dom_tree_is_dirty_ = true;
@@ -191,6 +312,7 @@ void SelectionEditor::ContextDestroyed() {
   has_selection_bounds_ = false;
   cached_anchor_bounds_ = gfx::Rect();
   cached_focus_bounds_ = gfx::Rect();
+  document_ = nullptr;
 }
 
 static Position ComputePositionForChildrenRemoval(const Position& position,
@@ -220,16 +342,17 @@ static Position ComputePositionForChildrenRemoval(const Position& position,
 void SelectionEditor::NodeChildrenWillBeRemoved(ContainerNode& container) {
   if (selection_.IsNone())
     return;
-  const Position old_base = selection_.base_;
-  const Position old_extent = selection_.extent_;
-  const Position& new_base =
-      ComputePositionForChildrenRemoval(old_base, container);
-  const Position& new_extent =
-      ComputePositionForChildrenRemoval(old_extent, container);
-  if (new_base == old_base && new_extent == old_extent)
+  const Position old_anchor = selection_.anchor_;
+  const Position old_focus = selection_.focus_;
+  const Position& new_anchor =
+      ComputePositionForChildrenRemoval(old_anchor, container);
+  const Position& new_focus =
+      ComputePositionForChildrenRemoval(old_focus, container);
+  if (new_anchor == old_anchor && new_focus == old_focus) {
     return;
-  selection_ = SelectionInDOMTree::Builder()
-                   .SetBaseAndExtent(new_base, new_extent)
+  }
+  selection_ = SelectionInDomTree::Builder()
+                   .SetBaseAndExtent(new_anchor, new_focus)
                    .Build();
   MarkCacheDirty();
 }
@@ -237,16 +360,27 @@ void SelectionEditor::NodeChildrenWillBeRemoved(ContainerNode& container) {
 void SelectionEditor::NodeWillBeRemoved(Node& node_to_be_removed) {
   if (selection_.IsNone())
     return;
-  const Position old_base = selection_.base_;
-  const Position old_extent = selection_.extent_;
-  const Position& new_base =
-      ComputePositionForNodeRemoval(old_base, node_to_be_removed);
-  const Position& new_extent =
-      ComputePositionForNodeRemoval(old_extent, node_to_be_removed);
-  if (new_base == old_base && new_extent == old_extent)
+
+  const Position old_anchor = selection_.anchor_;
+  const Position old_focus = selection_.focus_;
+  Position new_anchor = old_anchor;
+  Position new_focus = old_focus;
+
+  // In the case where an atomic move is in progress, `node_to_be_removed` is
+  // not actually being removed from the DOM entirely, so we don't want to snap
+  // either end (anchor or focus) of the selection range to the next logical
+  // node (i.e., `ComputePositionForNodeRemoval()`). Instead we just need to run
+  // the various steps that would ordinarily attend a true selection change, so
+  // that in the case where selection changes direction, selection state is
+  // updated properly.
+  new_anchor = ComputePositionForNodeRemoval(old_anchor, node_to_be_removed);
+  new_focus = ComputePositionForNodeRemoval(old_focus, node_to_be_removed);
+  if (new_anchor == old_anchor && new_focus == old_focus) {
     return;
-  selection_ = SelectionInDOMTree::Builder()
-                   .SetBaseAndExtent(new_base, new_extent)
+  }
+
+  selection_ = SelectionInDomTree::Builder()
+                   .SetBaseAndExtent(new_anchor, new_focus)
                    .Build();
   MarkCacheDirty();
 }
@@ -254,9 +388,9 @@ void SelectionEditor::NodeWillBeRemoved(Node& node_to_be_removed) {
 static Position UpdatePositionAfterAdoptingTextReplacement(
     const Position& position,
     CharacterData* node,
-    unsigned offset,
-    unsigned old_length,
-    unsigned new_length) {
+    wtf_size_t offset,
+    wtf_size_t old_length,
+    wtf_size_t new_length) {
   if (position.AnchorNode() != node)
     return position;
 
@@ -271,9 +405,7 @@ static Position UpdatePositionAfterAdoptingTextReplacement(
 
   // See:
   // http://www.w3.org/TR/DOM-Level-2-Traversal-Range/ranges.html#Level-2-Range-Mutation
-  DCHECK_GE(position.OffsetInContainerNode(), 0);
-  unsigned position_offset =
-      static_cast<unsigned>(position.OffsetInContainerNode());
+  wtf_size_t position_offset = position.OffsetInContainerNode();
   // Replacing text can be viewed as a deletion followed by insertion.
   if (position_offset >= offset && position_offset <= offset + old_length)
     position_offset = offset;
@@ -295,27 +427,27 @@ static Position UpdatePositionAfterAdoptingTextReplacement(
 }
 
 void SelectionEditor::DidUpdateCharacterData(CharacterData* node,
-                                             unsigned offset,
-                                             unsigned old_length,
-                                             unsigned new_length) {
+                                             wtf_size_t offset,
+                                             wtf_size_t old_length,
+                                             wtf_size_t new_length) {
   // The fragment check is a performance optimization. See
   // http://trac.webkit.org/changeset/30062.
   if (selection_.IsNone() || !node || !node->isConnected()) {
-    DidFinishDOMMutation();
+    DidFinishDomMutation();
     return;
   }
-  const Position& new_base = UpdatePositionAfterAdoptingTextReplacement(
-      selection_.base_, node, offset, old_length, new_length);
-  const Position& new_extent = UpdatePositionAfterAdoptingTextReplacement(
-      selection_.extent_, node, offset, old_length, new_length);
-  DidFinishTextChange(new_base, new_extent);
+  const Position& new_anchor = UpdatePositionAfterAdoptingTextReplacement(
+      selection_.anchor_, node, offset, old_length, new_length);
+  const Position& new_focus = UpdatePositionAfterAdoptingTextReplacement(
+      selection_.focus_, node, offset, old_length, new_length);
+  DidFinishTextChange(new_anchor, new_focus);
 }
 
 static Position UpdatePostionAfterAdoptingTextNodesMerged(
     const Position& position,
     const Text& merged_node,
     const NodeWithIndex& node_to_be_removed_with_index,
-    unsigned old_length) {
+    wtf_size_t old_length) {
   Node* const anchor_node = position.AnchorNode();
   const Node& node_to_be_removed = node_to_be_removed_with_index.GetNode();
   switch (position.AnchorType()) {
@@ -343,23 +475,23 @@ static Position UpdatePostionAfterAdoptingTextNodesMerged(
     }
   }
   NOTREACHED() << position;
-  return position;
 }
 
 void SelectionEditor::DidMergeTextNodes(
     const Text& merged_node,
     const NodeWithIndex& node_to_be_removed_with_index,
-    unsigned old_length) {
+    wtf_size_t old_length) {
   if (selection_.IsNone()) {
-    DidFinishDOMMutation();
+    DidFinishDomMutation();
     return;
   }
-  const Position& new_base = UpdatePostionAfterAdoptingTextNodesMerged(
-      selection_.base_, merged_node, node_to_be_removed_with_index, old_length);
-  const Position& new_extent = UpdatePostionAfterAdoptingTextNodesMerged(
-      selection_.extent_, merged_node, node_to_be_removed_with_index,
+  const Position& new_anchor = UpdatePostionAfterAdoptingTextNodesMerged(
+      selection_.anchor_, merged_node, node_to_be_removed_with_index,
       old_length);
-  DidFinishTextChange(new_base, new_extent);
+  const Position& new_focus = UpdatePostionAfterAdoptingTextNodesMerged(
+      selection_.focus_, merged_node, node_to_be_removed_with_index,
+      old_length);
+  DidFinishTextChange(new_anchor, new_focus);
 }
 
 static Position UpdatePostionAfterAdoptingTextNodeSplit(
@@ -370,10 +502,8 @@ static Position UpdatePostionAfterAdoptingTextNodeSplit(
     return position;
   // See:
   // http://www.w3.org/TR/DOM-Level-2-Traversal-Range/ranges.html#Level-2-Range-Mutation
-  DCHECK_GE(position.OffsetInContainerNode(), 0);
-  unsigned position_offset =
-      static_cast<unsigned>(position.OffsetInContainerNode());
-  unsigned old_length = old_node.length();
+  wtf_size_t position_offset = position.OffsetInContainerNode();
+  wtf_size_t old_length = old_node.length();
   if (position_offset <= old_length)
     return position;
   return Position(To<Text>(old_node.nextSibling()),
@@ -382,14 +512,14 @@ static Position UpdatePostionAfterAdoptingTextNodeSplit(
 
 void SelectionEditor::DidSplitTextNode(const Text& old_node) {
   if (selection_.IsNone() || !old_node.isConnected()) {
-    DidFinishDOMMutation();
+    DidFinishDomMutation();
     return;
   }
-  const Position& new_base =
-      UpdatePostionAfterAdoptingTextNodeSplit(selection_.base_, old_node);
-  const Position& new_extent =
-      UpdatePostionAfterAdoptingTextNodeSplit(selection_.extent_, old_node);
-  DidFinishTextChange(new_base, new_extent);
+  const Position& new_anchor =
+      UpdatePostionAfterAdoptingTextNodeSplit(selection_.anchor_, old_node);
+  const Position& new_focus =
+      UpdatePostionAfterAdoptingTextNodeSplit(selection_.focus_, old_node);
+  DidFinishTextChange(new_anchor, new_focus);
 }
 
 bool SelectionEditor::ShouldAlwaysUseDirectionalSelection() const {
@@ -491,7 +621,7 @@ void SelectionEditor::UpdateCachedAbsoluteBoundsIfNeeded() const {
 #endif
   cached_absolute_bounds_are_dirty_ = false;
 
-  const VisibleSelection selection = ComputeVisibleSelectionInDOMTree();
+  const VisibleSelection selection = ComputeVisibleSelectionInDomTree();
 
   if (selection.IsCaret()) {
     DCHECK(selection.IsValidFor(*frame_->GetDocument()));
@@ -510,8 +640,9 @@ void SelectionEditor::UpdateCachedAbsoluteBoundsIfNeeded() const {
         FirstRectForRange(EphemeralRange(selected_range.EndPosition()));
   }
 
-  if (!selection.IsBaseFirst())
+  if (!selection.IsAnchorFirst()) {
     std::swap(cached_anchor_bounds_, cached_focus_bounds_);
+  }
 
   has_selection_bounds_ = true;
 }
@@ -521,7 +652,7 @@ void SelectionEditor::CacheRangeOfDocument(Range* range) {
 }
 
 Range* SelectionEditor::DocumentCachedRange() const {
-  return cached_range_;
+  return cached_range_.Get();
 }
 
 void SelectionEditor::ClearDocumentCachedRange() {
@@ -530,11 +661,11 @@ void SelectionEditor::ClearDocumentCachedRange() {
 
 void SelectionEditor::Trace(Visitor* visitor) const {
   visitor->Trace(frame_);
+  visitor->Trace(document_);
   visitor->Trace(selection_);
   visitor->Trace(cached_visible_selection_in_dom_tree_);
   visitor->Trace(cached_visible_selection_in_flat_tree_);
   visitor->Trace(cached_range_);
-  SynchronousMutationObserver::Trace(visitor);
 }
 
 }  // namespace blink

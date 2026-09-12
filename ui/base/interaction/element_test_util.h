@@ -5,10 +5,13 @@
 #ifndef UI_BASE_INTERACTION_ELEMENT_TEST_UTIL_H_
 #define UI_BASE_INTERACTION_ELEMENT_TEST_UTIL_H_
 
+#include <string_view>
+
 #include "ui/base/interaction/element_identifier.h"
 #include "ui/base/interaction/element_tracker.h"
-#include "ui/base/interaction/framework_specific_implementation.h"
+#include "ui/base/interaction/safe_castable.h"
 #include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/native_ui_types.h"
 
 namespace ui::test {
 
@@ -16,7 +19,9 @@ namespace ui::test {
 // InteractionSequence tests.
 class TestElementBase : public TrackedElement {
  public:
-  TestElementBase(ElementIdentifier id, ElementContext context);
+  TestElementBase(ElementIdentifier id,
+                  ElementContext context,
+                  std::string_view secondary_id = {});
   ~TestElementBase() override;
 
   // Simulate the element shown event.
@@ -28,30 +33,43 @@ class TestElementBase : public TrackedElement {
   // Simulate the element hidden event.
   void Hide();
 
+  bool IsVisible() const;
+
   // Simuate a custom event on this element.
   void SendCustomEvent(CustomElementEventType event_type);
 
   void SetScreenBounds(const gfx::Rect& screen_bounds);
   gfx::Rect GetScreenBounds() const override;
 
+  void SetNativeView(gfx::NativeView native_view);
+  gfx::NativeView GetNativeView() const override;
+
+  std::string GetSecondaryIdentifier() const override;
+
  private:
+  const std::string secondary_id_;
   bool visible_ = false;
   gfx::Rect screen_bounds_;
+  gfx::NativeView native_view_ = gfx::NativeView();
 };
 
 // Provides a platform-less test element in a fictional UI framework.
 class TestElement : public TestElementBase {
  public:
-  TestElement(ElementIdentifier id, ElementContext context);
-  DECLARE_FRAMEWORK_SPECIFIC_METADATA()
+  TestElement(ElementIdentifier id,
+              ElementContext context,
+              std::string_view secondary_id = {});
+  DECLARE_SAFE_CAST_TARGET()
 };
 
 // Provides a platform-less test element in a fictional UI framework distinct
 // from `TestElement`.
 class TestElementOtherFramework : public TestElementBase {
  public:
-  TestElementOtherFramework(ElementIdentifier id, ElementContext context);
-  DECLARE_FRAMEWORK_SPECIFIC_METADATA()
+  TestElementOtherFramework(ElementIdentifier id,
+                            ElementContext context,
+                            std::string_view secondary_id = {});
+  DECLARE_SAFE_CAST_TARGET()
 };
 
 // Convenience typedef for unique pointers to test elements.

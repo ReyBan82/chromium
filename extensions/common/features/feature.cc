@@ -4,27 +4,22 @@
 
 #include "extensions/common/features/feature.h"
 
-#include <map>
-
+#include "base/check.h"
 #include "base/command_line.h"
 #include "base/lazy_instance.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_util.h"
 #include "build/build_config.h"
 #include "build/chromeos_buildflags.h"
+#include "extensions/buildflags/buildflags.h"
 #include "extensions/common/extension.h"
+#include "extensions/common/extensions_client.h"
 #include "extensions/common/manifest.h"
 
 namespace extensions {
 
 // static
 Feature::Platform Feature::GetCurrentPlatform() {
-// TODO(https://crbug.com/1052397): For readability, this should become
-// BUILDFLAG(IS_CHROMEOS) && BUILDFLAG(IS_CHROMEOS_LACROS). The second
-// conditional should be BUILDFLAG(IS_CHROMEOS) && BUILDFLAG(IS_CHROMEOS_ASH).
-#if BUILDFLAG(IS_CHROMEOS_LACROS)
-  return LACROS_PLATFORM;
-#elif BUILDFLAG(IS_CHROMEOS_ASH) && !BUILDFLAG(IS_CHROMEOS_LACROS)
+#if BUILDFLAG(IS_CHROMEOS)
   return CHROMEOS_PLATFORM;
 #elif BUILDFLAG(IS_LINUX)
   return LINUX_PLATFORM;
@@ -32,8 +27,8 @@ Feature::Platform Feature::GetCurrentPlatform() {
   return MACOSX_PLATFORM;
 #elif BUILDFLAG(IS_WIN)
   return WIN_PLATFORM;
-#elif BUILDFLAG(IS_FUCHSIA)
-  return FUCHSIA_PLATFORM;
+#elif BUILDFLAG(ENABLE_DESKTOP_ANDROID_EXTENSIONS)
+  return DESKTOP_ANDROID_PLATFORM;
 #else
   return UNSPECIFIED_PLATFORM;
 #endif
@@ -46,20 +41,29 @@ Feature::Availability Feature::IsAvailableToExtension(
       extension->manifest_version(), kUnspecifiedContextId);
 }
 
-Feature::Feature() : no_parent_(false) {}
+Feature::Feature(const FeatureData* feature_data)
+    : feature_data_(feature_data) {
+  CHECK(feature_data_);
+}
 
 Feature::~Feature() = default;
 
-void Feature::set_name(base::StringPiece name) {
-  name_ = std::string(name);
+Feature::DelegatedAvailabilityCheckHandler
+Feature::ResolveDelegatedAvailabilityCheckHandler(
+    DelegatedAvailabilityCheckHandler handler) const {
+  return handler ? handler : delegated_availability_check_handler();
 }
 
-void Feature::set_alias(base::StringPiece alias) {
-  alias_ = std::string(alias);
-}
+Feature::DelegatedAvailabilityCheckHandler
+Feature::delegated_availability_check_handler() const {
+  if (!RequiresDelegatedAvailabilityCheck()) {
+    return nullptr;
+  }
 
-void Feature::set_source(base::StringPiece source) {
-  source_ = std::string(source);
+  const auto& handlers =
+      ExtensionsClient::Get()->GetFeatureDelegatedAvailabilityCheckMap();
+  const auto it = handlers.find(name());
+  return it == handlers.end() ? nullptr : it->second;
 }
 
 }  // namespace extensions

@@ -9,7 +9,10 @@
 #include <iomanip>
 #include <string>
 
+#include "base/base_paths.h"
 #include "base/command_line.h"
+#include "base/compiler_specific.h"
+#include "base/containers/span.h"
 #include "base/file_version_info.h"
 #include "base/files/file.h"
 #include "base/files/file_enumerator.h"
@@ -18,10 +21,9 @@
 #include "base/process/launch.h"
 #include "base/scoped_native_library.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/win/atl.h"
 #include "base/win/registry.h"
 #include "base/win/scoped_handle.h"
-#include "base/win/win_util.h"
+#include "base/win/windows_handle_util.h"
 #include "base/win/windows_version.h"
 #include "chrome/credential_provider/common/gcp_strings.h"
 #include "chrome/credential_provider/extension/extension_strings.h"
@@ -60,26 +62,24 @@ base::FilePath CreateInstallDirectory() {
 // and are copied to the same relative path under |dest_path|.
 HRESULT InstallFiles(const base::FilePath& src_path,
                      const base::FilePath& dest_path,
-                     const base::FilePath::StringType names[],
-                     size_t length) {
-  for (size_t i = 0; i < length; ++i) {
-    base::FilePath src = src_path.Append(names[i]);
-    base::FilePath dest = dest_path.Append(names[i]);
+                     base::span<const base::FilePath::StringType> names) {
+  for (const auto& name : names) {
+    base::FilePath src = src_path.Append(name);
+    base::FilePath dest = dest_path.Append(name);
 
     // Make sure parent of destination file exists.
     if (!base::CreateDirectory(dest.DirName())) {
       HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
-      LOGFN(ERROR) << "CreateDirectory hr=" << putHR(hr)
-                   << " name=" << names[i];
+      LOGFN(ERROR) << "CreateDirectory hr=" << putHR(hr) << " name=" << name;
       return hr;
     }
 
     if (!base::CopyFile(src, dest)) {
       HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
-      LOGFN(ERROR) << "CopyFile hr=" << putHR(hr) << " name=" << names[i];
+      LOGFN(ERROR) << "CopyFile hr=" << putHR(hr) << " name=" << name;
       return hr;
     }
-    LOGFN(INFO) << "Installed name=" << names[i];
+    LOGFN(INFO) << "Installed name=" << name;
   }
 
   return S_OK;
@@ -90,13 +90,12 @@ HRESULT InstallFiles(const base::FilePath& src_path,
 // |dest_path|.  |fakes| is non-null during unit tests to install fakes into
 // the loaded DLL.
 HRESULT RegisterDlls(const base::FilePath& dest_path,
-                     const base::FilePath::StringType names[],
-                     size_t length,
+                     base::span<const base::FilePath::StringType> names,
                      FakesForTesting* fakes) {
   bool has_failures = false;
 
-  for (size_t i = 0; i < length; ++i) {
-    base::ScopedNativeLibrary library(dest_path.Append(names[i]));
+  for (const auto& name : names) {
+    base::ScopedNativeLibrary library(dest_path.Append(name));
 
     if (fakes) {
       SetFakesForTestingFn set_fakes_for_testing_fn =
@@ -112,9 +111,9 @@ HRESULT RegisterDlls(const base::FilePath& dest_path,
 
     if (register_server_fn) {
       hr = static_cast<HRESULT>((*register_server_fn)());
-      LOGFN(VERBOSE) << "Registered name=" << names[i] << " hr=" << putHR(hr);
+      LOGFN(VERBOSE) << "Registered name=" << name << " hr=" << putHR(hr);
     } else {
-      LOGFN(ERROR) << "Failed to register name=" << names[i];
+      LOGFN(ERROR) << "Failed to register name=" << name;
       hr = E_NOTIMPL;
     }
     has_failures |= FAILED(hr);
@@ -128,13 +127,12 @@ HRESULT RegisterDlls(const base::FilePath& dest_path,
 // |dest_path|.  |fakes| is non-null during unit tests to install fakes into
 // the loaded DLL.
 HRESULT UnregisterDlls(const base::FilePath& dest_path,
-                       const base::FilePath::StringType names[],
-                       size_t length,
+                       base::span<const base::FilePath::StringType> names,
                        FakesForTesting* fakes) {
   bool has_failures = false;
 
-  for (size_t i = 0; i < length; ++i) {
-    base::ScopedNativeLibrary library(dest_path.Append(names[i]));
+  for (const auto& name : names) {
+    base::ScopedNativeLibrary library(dest_path.Append(name));
 
     if (fakes) {
       SetFakesForTestingFn pmfn = reinterpret_cast<SetFakesForTestingFn>(
@@ -146,7 +144,7 @@ HRESULT UnregisterDlls(const base::FilePath& dest_path,
     FARPROC pfn = reinterpret_cast<FARPROC>(
         library.GetFunctionPointer("DllUnregisterServer"));
     HRESULT hr = pfn ? static_cast<HRESULT>((*pfn)()) : E_UNEXPECTED;
-    LOGFN(VERBOSE) << "Unregistered name=" << names[i] << " hr=" << putHR(hr);
+    LOGFN(VERBOSE) << "Unregistered name=" << name << " hr=" << putHR(hr);
     has_failures |= FAILED(hr);
   }
 
@@ -165,6 +163,10 @@ HRESULT DoInstall(const base::FilePath& installer_path,
   base::FilePath dest_path = gcp_path.Append(product_version);
   LOGFN(VERBOSE) << "Install to: " << dest_path;
 
+  // Ensure the ProgramData GCPW directory is created and secured with
+  // restrictive DACLs.
+  GetDataDirectory();
+
   // Make sure nothing under the destination directory is pending delete
   // after reboot, so that files installed now won't get deleted later.
   if (!RemoveFromMovesPendingReboot(dest_path)) {
@@ -176,15 +178,13 @@ HRESULT DoInstall(const base::FilePath& installer_path,
   base::FilePath src_path = installer_path.DirName();
   auto install_files =
       credential_provider::GCPWFiles::Get()->GetEffectiveInstallFiles();
-  HRESULT hr = InstallFiles(src_path, dest_path, install_files.data(),
-                            install_files.size());
+  HRESULT hr = InstallFiles(src_path, dest_path, install_files);
   if (FAILED(hr))
     return hr;
 
   auto register_dlls =
       credential_provider::GCPWFiles::Get()->GetRegistrationFiles();
-  hr = RegisterDlls(dest_path, register_dlls.data(), register_dlls.size(),
-                    fakes);
+  hr = RegisterDlls(dest_path, register_dlls, fakes);
   if (FAILED(hr))
     return hr;
 
@@ -230,8 +230,7 @@ HRESULT DoUninstall(const base::FilePath& installer_path,
   auto register_dlls =
       credential_provider::GCPWFiles::Get()->GetRegistrationFiles();
   // Do all actions best effort and keep going.
-  has_failures |= FAILED(UnregisterDlls(dest_path, register_dlls.data(),
-                                        register_dlls.size(), fakes));
+  has_failures |= FAILED(UnregisterDlls(dest_path, register_dlls, fakes));
 
   // If the DLLs are unregistered, Credential Provider will not be loaded by
   // Winlogon. Therefore, it is safe to delete the startup sentinel file at this
@@ -267,10 +266,24 @@ HRESULT DoUninstall(const base::FilePath& installer_path,
 }
 
 HRESULT RelaunchUninstaller(const base::FilePath& installer_path) {
+#if defined(COMPONENT_BUILD)
+  // In component builds, dependent DLLs are not copied to the temporary
+  // directory, so the executable cannot launch.
+  return E_FAIL;
+#else
+  // This function only runs elevated, so stage and relaunch the copy of the
+  // installer from the system temp directory rather than the per-user one.
+  base::FilePath system_temp;
+  if (!base::PathService::Get(base::DIR_SYSTEM_TEMP, &system_temp)) {
+    LOGFN(ERROR) << "PathService::Get(DIR_SYSTEM_TEMP) failed";
+    return E_FAIL;
+  }
+
   base::FilePath temp_path;
-  if (!base::CreateNewTempDirectory(FILE_PATH_LITERAL("gcp"), &temp_path)) {
+  if (!base::CreateTemporaryDirInDir(system_temp, FILE_PATH_LITERAL("gcp"),
+                                     &temp_path)) {
     HRESULT hr = HRESULT_FROM_WIN32(::GetLastError());
-    LOGFN(ERROR) << "CreateNewTempDirectory hr=" << putHR(hr);
+    LOGFN(ERROR) << "CreateTemporaryDirInDir hr=" << putHR(hr);
     return hr;
   }
 
@@ -310,6 +323,7 @@ HRESULT RelaunchUninstaller(const base::FilePath& installer_path) {
   base::Process process(base::LaunchProcess(cmdline, options));
 
   return process.IsValid() ? S_OK : E_FAIL;
+#endif  // defined(COMPONENT_BUILD)
 }
 
 int EnableStatsCollection(const base::CommandLine& cmdline) {

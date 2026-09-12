@@ -14,6 +14,7 @@
 #include "components/search/search.h"
 #include "content/public/browser/child_process_host.h"
 #include "content/public/browser/navigation_details.h"
+#include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_frame_host_receiver_set.h"
 #include "content/public/browser/render_process_host.h"
@@ -25,14 +26,15 @@
 
 namespace {
 
-bool IsInInstantProcess(content::RenderFrameHost* render_frame) {
-  content::RenderProcessHost* process_host = render_frame->GetProcess();
+bool IsInInstantProcess(content::RenderFrameHost& render_frame) {
+  content::RenderProcessHost* process_host = render_frame.GetProcess();
   const InstantService* instant_service = InstantServiceFactory::GetForProfile(
       Profile::FromBrowserContext(process_host->GetBrowserContext()));
-  if (!instant_service)
+  if (!instant_service) {
     return false;
+  }
 
-  return instant_service->IsInstantProcess(process_host->GetID());
+  return instant_service->IsInstantProcess(process_host->GetDeprecatedID());
 }
 
 }  // namespace
@@ -93,8 +95,8 @@ class EmbeddedSearchClientFactoryImpl
 void EmbeddedSearchClientFactoryImpl::Connect(
     mojo::PendingAssociatedReceiver<search::mojom::EmbeddedSearch> receiver,
     mojo::PendingAssociatedRemote<search::mojom::EmbeddedSearchClient> client) {
-  content::RenderFrameHost* frame = factory_receivers_.GetCurrentTargetFrame();
-  const bool is_main_frame = frame->GetParent() == nullptr;
+  content::RenderFrameHost& frame = factory_receivers_.CurrentTargetFrame();
+  const bool is_main_frame = frame.GetParent() == nullptr;
   if (!IsInInstantProcess(frame) || !is_main_frame) {
     return;
   }
@@ -129,8 +131,9 @@ void SearchIPCRouter::BindEmbeddedSearchConnecter(
 
 void SearchIPCRouter::OnNavigationEntryCommitted() {
   ++commit_counter_;
-  if (!embedded_search_client())
+  if (!embedded_search_client()) {
     return;
+  }
   embedded_search_client()->SetPageSequenceNumber(commit_counter_);
 }
 
@@ -145,23 +148,26 @@ void SearchIPCRouter::SetInputInProgress(bool input_in_progress) {
 
 void SearchIPCRouter::OmniboxFocusChanged(OmniboxFocusState state,
                                           OmniboxFocusChangeReason reason) {
-  if (!policy_->ShouldSendOmniboxFocusChanged() || !embedded_search_client())
+  if (!policy_->ShouldSendOmniboxFocusChanged() || !embedded_search_client()) {
     return;
+  }
 
   embedded_search_client()->FocusChanged(state, reason);
 }
 
 void SearchIPCRouter::SendMostVisitedInfo(
     const InstantMostVisitedInfo& most_visited_info) {
-  if (!policy_->ShouldSendMostVisitedInfo() || !embedded_search_client())
+  if (!policy_->ShouldSendMostVisitedInfo() || !embedded_search_client()) {
     return;
+  }
 
   embedded_search_client()->MostVisitedInfoChanged(most_visited_info);
 }
 
 void SearchIPCRouter::SendNtpTheme(const NtpTheme& theme) {
-  if (!policy_->ShouldSendNtpTheme() || !embedded_search_client())
+  if (!policy_->ShouldSendNtpTheme() || !embedded_search_client()) {
     return;
+  }
 
   embedded_search_client()->ThemeChanged(theme);
 }
@@ -175,42 +181,50 @@ void SearchIPCRouter::OnTabDeactivated() {
 }
 
 void SearchIPCRouter::FocusOmnibox(int page_seq_no, bool focus) {
-  if (page_seq_no != commit_counter_)
+  if (page_seq_no != commit_counter_) {
     return;
+  }
 
-  if (!policy_->ShouldProcessFocusOmnibox(is_active_tab_))
+  if (!policy_->ShouldProcessFocusOmnibox(is_active_tab_)) {
     return;
+  }
 
   delegate_->FocusOmnibox(focus);
 }
 
 void SearchIPCRouter::DeleteMostVisitedItem(int page_seq_no, const GURL& url) {
-  if (page_seq_no != commit_counter_)
+  if (page_seq_no != commit_counter_) {
     return;
+  }
 
-  if (!policy_->ShouldProcessDeleteMostVisitedItem())
+  if (!policy_->ShouldProcessDeleteMostVisitedItem()) {
     return;
+  }
 
   delegate_->OnDeleteMostVisitedItem(url);
 }
 
 void SearchIPCRouter::UndoMostVisitedDeletion(int page_seq_no,
                                               const GURL& url) {
-  if (page_seq_no != commit_counter_)
+  if (page_seq_no != commit_counter_) {
     return;
+  }
 
-  if (!policy_->ShouldProcessUndoMostVisitedDeletion())
+  if (!policy_->ShouldProcessUndoMostVisitedDeletion()) {
     return;
+  }
 
   delegate_->OnUndoMostVisitedDeletion(url);
 }
 
 void SearchIPCRouter::UndoAllMostVisitedDeletions(int page_seq_no) {
-  if (page_seq_no != commit_counter_)
+  if (page_seq_no != commit_counter_) {
     return;
+  }
 
-  if (!policy_->ShouldProcessUndoAllMostVisitedDeletions())
+  if (!policy_->ShouldProcessUndoAllMostVisitedDeletions()) {
     return;
+  }
 
   delegate_->OnUndoAllMostVisitedDeletions();
 }

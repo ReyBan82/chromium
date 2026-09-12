@@ -14,21 +14,22 @@ import android.util.Size;
 
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentMatcher;
 import org.mockito.InOrder;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.Callback;
 import org.chromium.base.test.BaseRobolectricTestRunner;
 
-/**
- * Tests for the {@link PlayerFrameScaleController} class.
- */
+/** Tests for the {@link PlayerFrameScaleController} class. */
 @RunWith(BaseRobolectricTestRunner.class)
 public class PlayerFrameScaleControllerTest {
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
     private static final int CONTENT_WIDTH = 500;
     private static final int CONTENT_HEIGHT = 1000;
     private static final float TOLERANCE = 0.001f;
@@ -36,12 +37,11 @@ public class PlayerFrameScaleControllerTest {
     private Matrix mBitmapScaleMatrix;
     private PlayerFrameViewport mViewport;
     private PlayerFrameScaleController mScaleController;
-    @Mock
-    private PlayerFrameMediatorDelegate mMediatorDelegateMock;
+    @Mock private PlayerFrameMediatorDelegate mMediatorDelegateMock;
     private boolean mDidScale;
 
-    private class MatrixMatcher implements ArgumentMatcher<Matrix> {
-        private Matrix mLeft;
+    private static class MatrixMatcher implements ArgumentMatcher<Matrix> {
+        private final Matrix mLeft;
 
         MatrixMatcher(Matrix left) {
             mLeft = left;
@@ -55,24 +55,22 @@ public class PlayerFrameScaleControllerTest {
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         mDidScale = false;
-        Callback<Boolean> mScaleListener = (Boolean didFinish) -> mDidScale = true;
+        Callback<Boolean> scaleListener = (Boolean didFinish) -> mDidScale = true;
         mViewport = new PlayerFrameViewport();
         mBitmapScaleMatrix = new Matrix();
         Size contentSize = new Size(CONTENT_WIDTH, CONTENT_HEIGHT);
         when(mMediatorDelegateMock.getViewport()).thenReturn(mViewport);
         when(mMediatorDelegateMock.getContentSize()).thenReturn(contentSize);
         when(mMediatorDelegateMock.getMinScaleFactor()).thenReturn(1f);
-        mScaleController = new PlayerFrameScaleController(
-                mBitmapScaleMatrix, mMediatorDelegateMock, null, mScaleListener);
+        mScaleController =
+                new PlayerFrameScaleController(
+                        mBitmapScaleMatrix, mMediatorDelegateMock, null, scaleListener);
         mViewport.setScale(1f);
         mViewport.setSize(100, 100);
     }
 
-    /**
-     * Tests the limits of scaling.
-     */
+    /** Tests the limits of scaling. */
     @Test
     public void testScaleLimits() {
         Assert.assertTrue(mScaleController.scaleBy(10f, 0, 0));
@@ -84,9 +82,7 @@ public class PlayerFrameScaleControllerTest {
         Assert.assertEquals(1f, mViewport.getScale(), TOLERANCE);
     }
 
-    /**
-     * Scales the viewport in and out in the middle so no correction occurs.
-     */
+    /** Scales the viewport in and out in the middle so no correction occurs. */
     @Test
     public void testZoomInAndOutAtMiddle() {
         mViewport.setTrans(100, 150);
@@ -137,9 +133,7 @@ public class PlayerFrameScaleControllerTest {
         inOrder.verify(mMediatorDelegateMock).forceRedrawVisibleSubframes();
     }
 
-    /**
-     * Scales the viewport in and out in the top left so correction occurs.
-     */
+    /** Scales the viewport in and out in the top left so correction occurs. */
     @Test
     public void testZoomInAndOutAtTopLeft() {
         InOrder inOrder = inOrder(mMediatorDelegateMock);
@@ -190,9 +184,7 @@ public class PlayerFrameScaleControllerTest {
         inOrder.verify(mMediatorDelegateMock).forceRedrawVisibleSubframes();
     }
 
-    /**
-     * Scales the viewport in and out in the bottom right so correction occurs.
-     */
+    /** Scales the viewport in and out in the bottom right so correction occurs. */
     @Test
     public void testZoomInAndOutAtBottomRight() {
         InOrder inOrder = inOrder(mMediatorDelegateMock);
@@ -225,7 +217,8 @@ public class PlayerFrameScaleControllerTest {
         float scale = mViewport.getScale();
         float scaledContentWidth = scale * CONTENT_WIDTH;
         float scaledContentHeight = scale * CONTENT_HEIGHT;
-        mViewport.setTrans(scaledContentWidth - mViewport.getWidth(),
+        mViewport.setTrans(
+                scaledContentWidth - mViewport.getWidth(),
                 scaledContentHeight - mViewport.getHeight());
 
         // Zoom out.
@@ -256,9 +249,7 @@ public class PlayerFrameScaleControllerTest {
         inOrder.verify(mMediatorDelegateMock).forceRedrawVisibleSubframes();
     }
 
-    /**
-     * Scales the viewport without a reset of the bitmap scale matrix.
-     */
+    /** Scales the viewport without a reset of the bitmap scale matrix. */
     @Test
     public void testZoomInAndOutWithoutReset() {
         mViewport.setTrans(100, 150);

@@ -7,11 +7,17 @@
 
 #include <jni.h>
 
+#include <optional>
+
 #include "base/android/jni_android.h"
 #include "base/android/jni_weak_ref.h"
 #include "base/android/scoped_java_ref.h"
+#include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/supports_user_data.h"
+#include "base/unguessable_token.h"
+
+class GURL;
 
 namespace content {
 
@@ -33,76 +39,83 @@ class RenderFrameHostAndroid : public base::SupportsUserData::Data {
 
   // Methods called from Java
   base::android::ScopedJavaLocalRef<jobject> GetLastCommittedURL(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&) const;
+      JNIEnv* env) const;
 
   base::android::ScopedJavaLocalRef<jobject> GetLastCommittedOrigin(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&);
+      JNIEnv* env);
+
+  base::android::ScopedJavaLocalRef<jobject> GetMainFrame(JNIEnv* env);
+
+  bool IsOutermostMainFrame(JNIEnv* env) const;
 
   void GetCanonicalUrlForSharing(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&,
-      const base::android::JavaParamRef<jobject>& jcallback) const;
+      base::OnceCallback<void(const std::optional<GURL>&)> callback) const;
 
-  base::android::ScopedJavaLocalRef<jobjectArray> GetAllRenderFrameHosts(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&) const;
+  std::vector<jni_zero::ScopedJavaLocalRef<jobject>> GetAllRenderFrameHosts(
+      JNIEnv* env) const;
 
-  bool IsFeatureEnabled(JNIEnv* env,
-                        const base::android::JavaParamRef<jobject>&,
-                        jint feature) const;
+  bool IsFeatureEnabled(JNIEnv* env, int32_t feature) const;
 
-  // Returns UnguessableToken.
-  base::android::ScopedJavaLocalRef<jobject> GetAndroidOverlayRoutingToken(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&) const;
+  base::UnguessableToken GetAndroidOverlayRoutingToken(JNIEnv* env) const;
 
-  void NotifyUserActivation(JNIEnv* env,
-                            const base::android::JavaParamRef<jobject>&);
+  void NotifyUserActivation(JNIEnv* env);
 
-  jboolean SignalCloseWatcherIfActive(
-      JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&) const;
+  void NotifyWebAuthnAssertionRequestSucceeded(JNIEnv* env);
 
-  jboolean IsRenderFrameLive(JNIEnv* env,
-                             const base::android::JavaParamRef<jobject>&) const;
+  bool IsCloseWatcherActive(JNIEnv* env) const;
+
+  bool SignalCloseWatcherIfActive(JNIEnv* env) const;
+
+  bool IsRenderFrameLive(JNIEnv* env) const;
 
   void GetInterfaceToRendererFrame(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&,
-      const base::android::JavaParamRef<jstring>& interface_name,
-      jlong message_pipe_handle) const;
+      const base::android::JavaRef<jstring>& interface_name,
+      int64_t message_pipe_handle) const;
 
-  void TerminateRendererDueToBadMessage(
+  void TerminateRendererDueToBadMessage(JNIEnv* env, int32_t reason) const;
+
+  bool IsProcessBlocked(JNIEnv* env) const;
+
+  void PerformGetAssertionWebAuthSecurityChecks(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&,
-      jint reason) const;
+      const base::android::JavaRef<jstring>&,
+      const base::android::JavaRef<jobject>&,
+      bool is_payment_credential_get_assertion,
+      const base::android::JavaRef<jobject>&
+          remote_desktop_client_override_origin,
+      const base::android::JavaRef<jstring>& app_id,
+      const base::android::JavaRef<jobject>& callback) const;
 
-  jboolean IsProcessBlocked(JNIEnv* env,
-                            const base::android::JavaParamRef<jobject>&) const;
-
-  base::android::ScopedJavaLocalRef<jobject>
-  PerformGetAssertionWebAuthSecurityChecks(
+  void PerformMakeCredentialWebAuthSecurityChecks(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&,
-      const base::android::JavaParamRef<jstring>&,
-      const base::android::JavaParamRef<jobject>&,
-      jboolean is_payment_credential_get_assertion) const;
+      const base::android::JavaRef<jstring>&,
+      const base::android::JavaRef<jobject>&,
+      bool is_payment_credential_creation,
+      const base::android::JavaRef<jobject>&
+          remote_desktop_client_override_origin,
+      const base::android::JavaRef<jstring>& app_id,
+      const base::android::JavaRef<jobject>& callback) const;
 
-  jint PerformMakeCredentialWebAuthSecurityChecks(
+  void PerformReportWebAuthSecurityChecks(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>&,
-      const base::android::JavaParamRef<jstring>&,
-      const base::android::JavaParamRef<jobject>&,
-      jboolean is_payment_credential_creation) const;
+      const base::android::JavaRef<jstring>&,
+      const base::android::JavaRef<jobject>&,
+      const base::android::JavaRef<jobject>& callback) const;
 
-  jint GetLifecycleState(JNIEnv* env,
-                         const base::android::JavaParamRef<jobject>&) const;
+  int32_t GetLifecycleState(JNIEnv* env) const;
 
-  void InsertVisualStateCallback(
+  void InsertVisualStateCallback(base::OnceCallback<void(bool)> callback);
+
+  void ExecuteJavaScriptInIsolatedWorld(
       JNIEnv* env,
-      const base::android::JavaParamRef<jobject>& jcallback);
+      const base::android::JavaRef<jstring>& jstring,
+      int32_t jworldId,
+      const base::android::JavaRef<jobject>& jcallback);
+
+  bool HasHitTestDataForTesting(JNIEnv* env);
+
+  void ViewSource(JNIEnv* env);
 
   RenderFrameHostImpl* render_frame_host() const { return render_frame_host_; }
 

@@ -17,19 +17,19 @@
 #include "chrome/browser/extensions/api/passwords_private/passwords_private_delegate.h"
 #include "chrome/browser/extensions/api/passwords_private/passwords_private_utils.h"
 #include "chrome/common/extensions/api/passwords_private.h"
-#include "components/password_manager/core/browser/bulk_leak_check_service.h"
 #include "components/password_manager/core/browser/leak_detection/bulk_leak_check.h"
-#include "components/password_manager/core/browser/leak_detection/leak_detection_delegate_interface.h"
+#include "components/password_manager/core/browser/leak_detection/bulk_leak_check_service_interface.h"
+#include "components/password_manager/core/browser/leak_detection/leak_detection_request_utils.h"
 #include "components/password_manager/core/browser/ui/bulk_leak_check_service_adapter.h"
 #include "components/password_manager/core/browser/ui/credential_ui_entry.h"
 #include "components/password_manager/core/browser/ui/credential_utils.h"
 #include "components/password_manager/core/browser/ui/insecure_credentials_manager.h"
 #include "components/password_manager/core/browser/ui/saved_passwords_presenter.h"
 
-class Profile;
+class PrefService;
 
 namespace password_manager {
-class PasswordChangeSuccessTracker;
+class BulkLeakCheckServiceInterface;
 }  // namespace password_manager
 
 namespace extensions {
@@ -37,6 +37,11 @@ namespace extensions {
 extern const char kPasswordCheckDataKey[];
 
 class PasswordCheckProgress;
+class PasswordsPrivateEventRouter;
+
+// Constructs a `CompromisedInfo` object for an insecure credential.
+api::passwords_private::CompromisedInfo CreateCompromiseInfo(
+    const password_manager::CredentialUIEntry& credential);
 
 // This class handles the part of the passwordsPrivate extension API that deals
 // with the bulk password check feature.
@@ -48,9 +53,12 @@ class PasswordCheckDelegate
   using StartPasswordCheckCallback =
       PasswordsPrivateDelegate::StartPasswordCheckCallback;
 
-  PasswordCheckDelegate(Profile* profile,
-                        password_manager::SavedPasswordsPresenter* presenter,
-                        IdGenerator* id_generator);
+  PasswordCheckDelegate(
+      PrefService* prefs,
+      password_manager::BulkLeakCheckServiceInterface* bulk_leak_check_service,
+      password_manager::SavedPasswordsPresenter* presenter,
+      IdGenerator* id_generator,
+      PasswordsPrivateEventRouter* event_router = nullptr);
   PasswordCheckDelegate(const PasswordCheckDelegate&) = delete;
   PasswordCheckDelegate& operator=(const PasswordCheckDelegate&) = delete;
   ~PasswordCheckDelegate() override;
@@ -58,7 +66,7 @@ class PasswordCheckDelegate
   // Obtains information about insecure credentials. This includes the last
   // time a check was run, as well as all insecure credentials that are
   // present in the password store.
-  // TODO:(crbug.com/1350947) - Rename to GetInsecureCredentialsUiEntry.
+  // TODO:(crbug.com/40234318) - Rename to GetInsecureCredentialsUiEntry.
   std::vector<api::passwords_private::PasswordUiEntry> GetInsecureCredentials();
 
   // Returns a list of vectors. Each vector contains all credentials that share
@@ -76,18 +84,13 @@ class PasswordCheckDelegate
   bool UnmuteInsecureCredential(
       const api::passwords_private::PasswordUiEntry& credential);
 
-  // Records that a change password flow was started for `credential`.
-  void RecordChangePasswordFlowStarted(
-      const api::passwords_private::PasswordUiEntry& credential);
-
   // Checks that all preconditions for running a password check are fulfilled
   // and, once that is the case, launches the password check. Invokes `callback`
   // once a check is running or the request was stopped via
   // `StopPasswordCheck()`.
   void StartPasswordCheck(
+      password_manager::LeakDetectionInitiator initiator,
       StartPasswordCheckCallback callback = base::DoNothing());
-  // Stops checking for insecure passwords.
-  void StopPasswordCheck();
 
   // Returns the current status of the password check.
   api::passwords_private::PasswordCheckStatus GetPasswordCheckStatus() const;
@@ -99,7 +102,8 @@ class PasswordCheckDelegate
 
  private:
   // password_manager::SavedPasswordsPresenter::Observer:
-  void OnSavedPasswordsChanged() override;
+  void OnSavedPasswordsChanged(
+      const password_manager::PasswordStoreChangeList& changes) override;
 
   // password_manager::InsecureCredentialsManager::Observer:
   // Invokes PasswordsPrivateEventRouter::OnInsecureCredentialsChanged if
@@ -111,14 +115,7 @@ class PasswordCheckDelegate
       password_manager::BulkLeakCheckService::State state) override;
   void OnCredentialDone(const password_manager::LeakCheckCredential& credential,
                         password_manager::IsLeaked is_leaked) override;
-
-  // Tries to find the matching CredentialUIEntry for |credential|. It
-  // performs a look-up in |id_generator_| using |credential.id|. If a matching
-  // value exists it also verifies that signon realm, username and when possible
-  // password match. Returns a pointer to the matching CredentialUIEntry on
-  // success or nullptr otherwise.
-  const password_manager::CredentialUIEntry* FindMatchingEntry(
-      const api::passwords_private::PasswordUiEntry& credential) const;
+  void OnBulkCheckServiceShutDown() override;
 
   // Starts the analyses of whether credentials are compromised and/or weak.
   // Assumes that `StartPasswordCheck()` was called prior.
@@ -141,13 +138,7 @@ class PasswordCheckDelegate
   api::passwords_private::PasswordUiEntry ConstructInsecureCredentialUiEntry(
       password_manager::CredentialUIEntry entry);
 
-  // Returns a raw pointer to the `PasswordChangeSuccessTracker` associated
-  // with `profile_`.
-  password_manager::PasswordChangeSuccessTracker*
-  GetPasswordChangeSuccessTracker() const;
-
-  // Raw pointer to the underlying profile. Needs to outlive this instance.
-  raw_ptr<Profile> profile_ = nullptr;
+  const raw_ptr<PrefService> prefs_;
 
   // Used by `insecure_credentials_manager_` to obtain the list of saved
   // passwords.
@@ -167,7 +158,7 @@ class PasswordCheckDelegate
 
   // List of callbacks that were passed to `StartPasswordCheck()` prior to the
   // delegate being initialized. These will be run when either initialization
-  // finishes, or `StopPasswordCheck()` gets invoked before hand.
+  // finishes.
   std::vector<StartPasswordCheckCallback> start_check_callbacks_;
 
   // Remembers the progress of the ongoing check. Null if no check is currently
@@ -201,6 +192,12 @@ class PasswordCheckDelegate
   // `api::passwords_private::PasswordUiEntry` instances passed to the UI
   // with the underlying `CredentialUIEntry` they are based on.
   raw_ptr<IdGenerator> id_generator_;
+
+  raw_ptr<PasswordsPrivateEventRouter> event_router_;
+
+  // This indicate what was the reason to start the password check.
+  password_manager::LeakDetectionInitiator password_check_initiator_ =
+      password_manager::LeakDetectionInitiator::kClientUseCaseUnspecified;
 
   base::WeakPtrFactory<PasswordCheckDelegate> weak_ptr_factory_{this};
 };

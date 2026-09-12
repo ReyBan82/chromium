@@ -36,6 +36,7 @@
 #include "third_party/blink/public/strings/grit/blink_strings.h"
 #include "third_party/blink/renderer/platform/text/date_time_format.h"
 #include "third_party/blink/renderer/platform/wtf/functional.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
 #include "third_party/blink/renderer/platform/wtf/wtf.h"
 
@@ -134,7 +135,7 @@ void DateTimeStringBuilder::VisitField(DateTimeFormat::FieldType field_type,
       return;
     case DateTimeFormat::kFieldTypePeriod:
       builder_.Append(
-          localizer_.TimeAMPMLabels()[(date_.Hour() >= 12 ? 1 : 0)]);
+          localizer_.TimeAmPmLabels()[(date_.Hour() >= 12 ? 1 : 0)]);
       return;
     case DateTimeFormat::kFieldTypeHour12: {
       int hour12 = date_.Hour() % 12;
@@ -165,7 +166,7 @@ void DateTimeStringBuilder::VisitField(DateTimeFormat::FieldType field_type,
       } else {
         double second = date_.Second() + date_.Millisecond() / 1000.0;
         String zero_padded_second_string = ZeroPadString(
-            String::Format("%.03f", second), number_of_pattern_characters + 4);
+            Format("{:.3f}", second), number_of_pattern_characters + 4);
         builder_.Append(
             localizer_.ConvertToLocalizedNumber(zero_padded_second_string));
       }
@@ -201,19 +202,19 @@ void Locale::ResetDefaultLocale() {
 Locale::~Locale() = default;
 
 String Locale::QueryString(int resource_id) {
-  // FIXME: Returns a string locazlied for this locale.
+  // FIXME: Returns a string localized for this locale.
   return Platform::Current()->QueryLocalizedString(resource_id);
 }
 
 String Locale::QueryString(int resource_id, const String& parameter) {
-  // FIXME: Returns a string locazlied for this locale.
+  // FIXME: Returns a string localized for this locale.
   return Platform::Current()->QueryLocalizedString(resource_id, parameter);
 }
 
 String Locale::QueryString(int resource_id,
                            const String& parameter1,
                            const String& parameter2) {
-  // FIXME: Returns a string locazlied for this locale.
+  // FIXME: Returns a string localized for this locale.
   return Platform::Current()->QueryLocalizedString(resource_id, parameter1,
                                                    parameter2);
 }
@@ -238,7 +239,7 @@ String Locale::ValidationMessageTooShortText(unsigned value_length,
                      ConvertToLocalizedNumber(String::Number(min_length)));
 }
 
-String Locale::WeekFormatInLDML() {
+String Locale::WeekFormatInLdml() {
   String templ = QueryString(IDS_FORM_INPUT_WEEK_TEMPLATE);
   // Converts a string like "Week $2, $1" to an LDML date format pattern like
   // "'Week 'ww', 'yyyy".
@@ -247,17 +248,17 @@ String Locale::WeekFormatInLDML() {
   unsigned length = templ.length();
   for (unsigned i = 0; i + 1 < length; ++i) {
     if (templ[i] == '$' && (templ[i + 1] == '1' || templ[i + 1] == '2')) {
-      if (literal_start < i)
-        DateTimeFormat::QuoteAndappend(
-            templ.Substring(literal_start, i - literal_start), builder);
+      if (literal_start < i) {
+        DateTimeFormat::QuoteAndAppend(
+            templ.subview(literal_start, i - literal_start), builder);
+      }
       builder.Append(templ[++i] == '1' ? "yyyy" : "ww");
       literal_start = i + 1;
     }
   }
   if (literal_start < length)
-    DateTimeFormat::QuoteAndappend(
-        templ.Substring(literal_start, length - literal_start), builder);
-  return builder.ToString();
+    DateTimeFormat::QuoteAndAppend(templ.subview(literal_start), builder);
+  return builder.ReleaseString();
 }
 
 void Locale::SetLocaleData(const Vector<String, kDecimalSymbolsSize>& symbols,
@@ -279,7 +280,7 @@ void Locale::SetLocaleData(const Vector<String, kDecimalSymbolsSize>& symbols,
 
   StringBuilder builder;
   for (size_t i = 0; i < kDecimalSymbolsSize; ++i) {
-    // We don't accept group separatros.
+    // We don't accept group separators.
     if (i != kGroupSeparatorIndex)
       builder.Append(decimal_symbols_[i]);
   }
@@ -296,7 +297,7 @@ void Locale::SetLocaleData(const Vector<String, kDecimalSymbolsSize>& symbols,
   if (decimal_symbols_[kDecimalSeparatorIndex].length() == 1 &&
       positive_prefix_.length() <= 1 && negative_prefix_.length() == 1 &&
       positive_suffix_.length() == 0 && negative_suffix_.length() == 0 &&
-      !IsRTL()) {
+      !IsRtl()) {
     uses_single_char_number_filtering_ = true;
     for (wtf_size_t i = 0; i <= 9; ++i) {
       if (decimal_symbols_[i].length() != 1) {
@@ -312,39 +313,17 @@ String Locale::ConvertToLocalizedNumber(const String& input) {
   if (!has_locale_data_ || input.empty())
     return input;
 
-  unsigned i = 0;
-  bool is_negative = false;
   StringBuilder builder;
   builder.ReserveCapacity(input.length());
 
-  if (input[0] == '-') {
-    ++i;
-    is_negative = true;
-    builder.Append(negative_prefix_);
-  } else {
-    builder.Append(positive_prefix_);
-  }
+  const bool is_negative = input[0] == '-';
+  builder.Append(is_negative ? negative_prefix_ : positive_prefix_);
 
-  for (; i < input.length(); ++i) {
-    switch (input[i]) {
-      case '0':
-      case '1':
-      case '2':
-      case '3':
-      case '4':
-      case '5':
-      case '6':
-      case '7':
-      case '8':
-      case '9':
-        builder.Append(decimal_symbols_[input[i] - '0']);
-        break;
-      case '.':
-        builder.Append(decimal_symbols_[kDecimalSeparatorIndex]);
-        break;
-      default:
-        NOTREACHED();
-    }
+  for (unsigned i = is_negative ? 1 : 0; i < input.length(); ++i) {
+    const UChar c = input[i];
+    CHECK(c == '.' || IsAsciiDigit(c));
+    builder.Append(
+        decimal_symbols_[c == '.' ? kDecimalSeparatorIndex : (c - '0')]);
   }
 
   builder.Append(is_negative ? negative_suffix_ : positive_suffix_);
@@ -352,68 +331,54 @@ String Locale::ConvertToLocalizedNumber(const String& input) {
   return builder.ToString();
 }
 
-static bool Matches(const String& text, unsigned position, const String& part) {
-  if (part.empty())
-    return true;
-  if (position + part.length() > text.length())
-    return false;
-  for (unsigned i = 0; i < part.length(); ++i) {
-    if (text[position + i] != part[i])
-      return false;
-  }
-  return true;
-}
-
 bool Locale::DetectSignAndGetDigitRange(const String& input,
                                         bool& is_negative,
                                         unsigned& start_index,
                                         unsigned& end_index) {
-  DCHECK_EQ(input.Find(IsASCIISpace), WTF::kNotFound);
+  DCHECK_EQ(input.Find(IsAsciiSpace), kNotFound);
   start_index = 0;
   end_index = input.length();
-  if (negative_prefix_.empty() && negative_suffix_.empty()) {
-    if (input.StartsWith(positive_prefix_) &&
-        input.EndsWith(positive_suffix_)) {
-      is_negative = false;
-      start_index = positive_prefix_.length();
-      end_index -= positive_suffix_.length();
-    } else {
-      is_negative = true;
+  const auto adjust_for_affixes = [&](const String& prefix,
+                                      const String& suffix) {
+    if (!input.starts_with(prefix) || !input.ends_with(suffix)) {
+      return false;
     }
-  } else {
-    // For some locales the negative prefix and/or suffix are preceded or
-    // followed by whitespace. Exclude that for the purposes of this search
-    // since the input string has already been stripped of whitespace.
-    const String negative_prefix_without_whitespace =
-        negative_prefix_.StripWhiteSpace();
-    const String negative_suffix_without_whitespace =
-        negative_suffix_.StripWhiteSpace();
-    if (input.StartsWith(negative_prefix_without_whitespace) &&
-        input.EndsWith(negative_suffix_without_whitespace)) {
-      is_negative = true;
-      start_index = negative_prefix_without_whitespace.length();
-      end_index -= negative_suffix_without_whitespace.length();
-    } else {
-      is_negative = false;
-      if (input.StartsWith(positive_prefix_) &&
-          input.EndsWith(positive_suffix_)) {
-        start_index = positive_prefix_.length();
-        end_index -= positive_suffix_.length();
-      } else {
-        return false;
-      }
-    }
+    start_index = prefix.length();
+    end_index -= suffix.length();
+    return true;
+  };
+
+  const bool negative_empty =
+      negative_prefix_.empty() && negative_suffix_.empty();
+  if (!negative_empty &&
+      // For some locales the negative prefix and/or suffix are preceded or
+      // followed by whitespace. Exclude that for the purposes of this search
+      // since the input string has already been stripped of whitespace.
+      adjust_for_affixes(negative_prefix_.StripWhiteSpace(),
+                         negative_suffix_.StripWhiteSpace())) {
+    is_negative = true;
+    return true;
   }
-  return true;
+
+  // Note: Positive prefix and suffix may be empty, in which case this will
+  // always succeed.
+  if (adjust_for_affixes(positive_prefix_, positive_suffix_)) {
+    is_negative = false;
+    return true;
+  }
+
+  is_negative = negative_empty;
+  return is_negative;
 }
 
 unsigned Locale::MatchedDecimalSymbolIndex(const String& input,
                                            unsigned& position) {
+  const StringView input_view(input, position);
   for (unsigned symbol_index = 0; symbol_index < kDecimalSymbolsSize;
        ++symbol_index) {
-    if (decimal_symbols_[symbol_index].length() &&
-        Matches(input, position, decimal_symbols_[symbol_index])) {
-      position += decimal_symbols_[symbol_index].length();
+    const String& symbol = decimal_symbols_[symbol_index];
+    if (input_view.starts_with(symbol)) {
+      position += symbol.length();
       return symbol_index;
     }
   }
@@ -422,7 +387,7 @@ unsigned Locale::MatchedDecimalSymbolIndex(const String& input,
 
 String Locale::ConvertFromLocalizedNumber(const String& localized) {
   InitializeLocaleData();
-  String input = localized.RemoveCharacters(IsASCIISpace);
+  String input = localized.RemoveCharacters(IsAsciiSpace);
   if (!has_locale_data_ || input.empty())
     return input;
 
@@ -454,12 +419,12 @@ String Locale::ConvertFromLocalizedNumber(const String& localized) {
       builder.Append(static_cast<UChar>('0' + symbol_index));
     }
   }
-  String converted = builder.ToString();
+  String converted = builder.ReleaseString();
   // Ignore trailing '.', but will reject '.'-only string later.
-  if (converted.length() >= 2 && converted[converted.length() - 1] == '.') {
+  if (converted.length() >= 2 && converted.ends_with('.')) {
     // Leave it if there are two decimal separators since that's invalid.
     if (num_decimal_separators < 2)
-      converted = converted.Left(converted.length() - 1);
+      converted = converted.substr(0, converted.length() - 1);
   }
   return converted;
 }
@@ -471,10 +436,11 @@ String Locale::StripInvalidNumberCharacters(const String& input,
   builder.ReserveCapacity(input.length());
   for (unsigned i = 0; i < input.length(); ++i) {
     UChar ch = input[i];
-    if (standard_chars.find(ch) != kNotFound)
+    if (standard_chars.contains(ch)) {
       builder.Append(ch);
-    else if (acceptable_number_characters_.find(ch) != kNotFound)
+    } else if (acceptable_number_characters_.contains(ch)) {
       builder.Append(ch);
+    }
   }
   return builder.ToString();
 }
@@ -505,31 +471,29 @@ bool Locale::IsSignPrefix(UChar ch) {
 
 bool Locale::HasTwoSignChars(const String& str) {
   // Unretained is safe because callback executes synchronously in Find().
-  auto pos = str.Find(
-      WTF::BindRepeating(&Locale::IsSignPrefix, WTF::Unretained(this)));
+  auto pos = str.Find(BindRepeating(&Locale::IsSignPrefix, Unretained(this)));
   if (pos == kNotFound)
     return false;
   // Unretained is safe because callback executes synchronously in Find().
-  return str.Find(
-             WTF::BindRepeating(&Locale::IsSignPrefix, WTF::Unretained(this)),
-             pos + 1) != kNotFound;
+  return str.Find(BindRepeating(&Locale::IsSignPrefix, Unretained(this)),
+                  pos + 1) != kNotFound;
 }
 
 bool Locale::HasSignNotAfterE(const String& str) {
   // Unretained is safe because callback executes synchronously in Find().
-  auto pos = str.Find(
-      WTF::BindRepeating(&Locale::IsSignPrefix, WTF::Unretained(this)));
+  auto pos = str.Find(BindRepeating(&Locale::IsSignPrefix, Unretained(this)));
   if (pos == kNotFound)
     return false;
   return pos == 0 || !IsE(str[pos - 1]);
 }
 
 bool Locale::IsDigit(UChar ch) {
-  // Alwoays allow 0 - 9
-  if (ch >= '0' && ch <= '9')
+  // Always allow 0 - 9.
+  if (IsAsciiDigit(ch)) {
     return true;
+  }
   // Check each digit otherwise
-  String ch_str(&ch, 1u);
+  String ch_str(base::span_from_ref(ch));
   return (ch_str == decimal_symbols_[0] || ch_str == decimal_symbols_[1] ||
           ch_str == decimal_symbols_[2] || ch_str == decimal_symbols_[3] ||
           ch_str == decimal_symbols_[4] || ch_str == decimal_symbols_[5] ||
@@ -541,14 +505,14 @@ bool Locale::IsDigit(UChar ch) {
 bool Locale::IsDecimalSeparator(UChar ch) {
   if (ch == '.')
     return true;
-  return LocalizedDecimalSeparator() == String(&ch, 1u);
+  return LocalizedDecimalSeparator() == String(base::span_from_ref(ch));
 }
 
 // Is there a decimal separator in a string?
 bool Locale::HasDecimalSeparator(const String& str) {
   // Unretained is safe because callback executes synchronously in Find().
-  return str.Find(WTF::BindRepeating(&Locale::IsDecimalSeparator,
-                                     WTF::Unretained(this))) != kNotFound;
+  return str.Find(BindRepeating(&Locale::IsDecimalSeparator,
+                                Unretained(this))) != kNotFound;
 }
 
 String Locale::FormatDateTime(const DateComponents& date,
@@ -570,7 +534,7 @@ String Locale::FormatDateTime(const DateComponents& date,
                                                     : MonthFormat());
       break;
     case DateComponents::kWeek:
-      builder.Build(WeekFormatInLDML());
+      builder.Build(WeekFormatInLdml());
       break;
     case DateComponents::kDateTimeLocal:
       builder.Build(format_type == kFormatTypeShort
@@ -579,7 +543,6 @@ String Locale::FormatDateTime(const DateComponents& date,
       break;
     case DateComponents::kInvalid:
       NOTREACHED();
-      break;
   }
   return builder.ToString();
 }

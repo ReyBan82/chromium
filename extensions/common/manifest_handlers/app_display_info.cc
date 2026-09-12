@@ -16,19 +16,17 @@ namespace errors = manifest_errors;
 
 namespace {
 
-// This info is used for both the kDisplayInLauncher and kDisplayInNewTabPage
-// keys, but we just arbitrarily pick one to store it under in the manifest.
-const char* kAppDisplayInfoKey = keys::kDisplayInLauncher;
-
-AppDisplayInfo* GetAppDisplayInfo(const Extension& extension) {
-  auto* info = static_cast<AppDisplayInfo*>(
-      extension.GetManifestData(kAppDisplayInfoKey));
-  DCHECK(!info || extension.is_app())
+const AppDisplayInfo* GetAppDisplayInfo(const Extension& extension) {
+  const AppDisplayInfo* info = extension.GetManifestData<AppDisplayInfo>();
+  CHECK(!info || extension.is_app())
       << "Only apps are allowed to be displayed in the NTP or launcher.";
   return info;
 }
 
 }  // namespace
+
+// static
+const char* AppDisplayInfo::kManifestDataKey = keys::kDisplayInLauncher;
 
 AppDisplayInfo::AppDisplayInfo(bool display_in_launcher,
                                bool display_in_new_tab_page)
@@ -37,17 +35,17 @@ AppDisplayInfo::AppDisplayInfo(bool display_in_launcher,
 AppDisplayInfo::~AppDisplayInfo() = default;
 
 bool AppDisplayInfo::RequiresSortOrdinal(const Extension& extension) {
-  AppDisplayInfo* info = GetAppDisplayInfo(extension);
+  const AppDisplayInfo* info = GetAppDisplayInfo(extension);
   return info && (info->display_in_launcher_ || info->display_in_new_tab_page_);
 }
 
 bool AppDisplayInfo::ShouldDisplayInAppLauncher(const Extension& extension) {
-  AppDisplayInfo* info = GetAppDisplayInfo(extension);
+  const AppDisplayInfo* info = GetAppDisplayInfo(extension);
   return info && info->display_in_launcher_;
 }
 
 bool AppDisplayInfo::ShouldDisplayInNewTabPage(const Extension& extension) {
-  AppDisplayInfo* info = GetAppDisplayInfo(extension);
+  const AppDisplayInfo* info = GetAppDisplayInfo(extension);
   return info && info->display_in_new_tab_page_;
 }
 
@@ -79,9 +77,8 @@ bool AppDisplayManifestHandler::Parse(Extension* extension,
     display_in_new_tab_page = display_in_launcher;
   }
 
-  extension->SetManifestData(kAppDisplayInfoKey,
-                             std::make_unique<AppDisplayInfo>(
-                                 display_in_launcher, display_in_new_tab_page));
+  extension->SetManifestData(std::make_unique<AppDisplayInfo>(
+      display_in_launcher, display_in_new_tab_page));
   return true;
 }
 
@@ -94,9 +91,9 @@ base::span<const char* const> AppDisplayManifestHandler::Keys() const {
 bool AppDisplayManifestHandler::AlwaysParseForType(Manifest::Type type) const {
   // Always parse for app types; this ensures that apps default to being
   // displayed in the proper surfaces.
-  return type == Manifest::TYPE_LEGACY_PACKAGED_APP ||
-         type == Manifest::TYPE_HOSTED_APP ||
-         type == Manifest::TYPE_PLATFORM_APP;
+  return type == Manifest::Type::kLegacyPackagedApp ||
+         type == Manifest::Type::kHostedApp ||
+         type == Manifest::Type::kPlatformApp;
 }
 
 }  // namespace extensions

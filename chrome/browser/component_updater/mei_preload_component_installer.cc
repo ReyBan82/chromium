@@ -4,6 +4,7 @@
 
 #include "chrome/browser/component_updater/mei_preload_component_installer.h"
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -22,8 +23,6 @@
 #include "chrome/browser/media/media_engagement_preloaded_list.h"
 #include "components/component_updater/component_updater_paths.h"
 #include "media/base/media_switches.h"
-
-using component_updater::ComponentUpdateService;
 
 namespace {
 
@@ -67,7 +66,7 @@ bool MediaEngagementPreloadComponentInstallerPolicy::RequiresNetworkEncryption()
 
 update_client::CrxInstaller::Result
 MediaEngagementPreloadComponentInstallerPolicy::OnCustomInstall(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) {
   return update_client::CrxInstaller::Result(0);  // Nothing custom here.
 }
@@ -82,8 +81,8 @@ base::FilePath MediaEngagementPreloadComponentInstallerPolicy::GetInstalledPath(
 void MediaEngagementPreloadComponentInstallerPolicy::ComponentReady(
     const base::Version& version,
     const base::FilePath& install_dir,
-    base::Value::Dict manifest) {
-  constexpr base::TaskTraits kTaskTraits = {
+    base::DictValue manifest) {
+  static constexpr base::TaskTraits kTaskTraits = {
       base::MayBlock(), base::TaskPriority::BEST_EFFORT,
       base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN};
   base::OnceClosure task =
@@ -99,7 +98,7 @@ void MediaEngagementPreloadComponentInstallerPolicy::ComponentReady(
 
 // Called during startup and installation before ComponentReady().
 bool MediaEngagementPreloadComponentInstallerPolicy::VerifyInstallation(
-    const base::Value::Dict& manifest,
+    const base::DictValue& manifest,
     const base::FilePath& install_dir) const {
   // No need to actually validate the proto here, since we'll do the checking
   // in LoadFromFile().
@@ -113,9 +112,7 @@ MediaEngagementPreloadComponentInstallerPolicy::GetRelativeInstallDir() const {
 
 void MediaEngagementPreloadComponentInstallerPolicy::GetHash(
     std::vector<uint8_t>* hash) const {
-  hash->assign(
-      kMeiPreloadPublicKeySHA256,
-      kMeiPreloadPublicKeySHA256 + std::size(kMeiPreloadPublicKeySHA256));
+  hash->assign_range(kMeiPreloadPublicKeySHA256);
 }
 
 std::string MediaEngagementPreloadComponentInstallerPolicy::GetName() const {
@@ -129,8 +126,9 @@ MediaEngagementPreloadComponentInstallerPolicy::GetInstallerAttributes() const {
 
 void RegisterMediaEngagementPreloadComponent(ComponentUpdateService* cus,
                                              base::OnceClosure on_load) {
-  if (!base::FeatureList::IsEnabled(media::kPreloadMediaEngagementData))
+  if (!base::FeatureList::IsEnabled(media::kPreloadMediaEngagementData)) {
     return;
+  }
 
   auto installer = base::MakeRefCounted<ComponentInstaller>(
       std::make_unique<MediaEngagementPreloadComponentInstallerPolicy>(

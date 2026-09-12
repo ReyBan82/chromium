@@ -17,10 +17,11 @@
 #include "base/command_line.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/test_mock_time_task_runner.h"
-#include "ui/compositor/scoped_animation_duration_scale_mode.h"
 #include "ui/gfx/animation/slide_animation.h"
+#include "ui/gfx/scoped_animation_duration_scale_mode.h"
 
 namespace ash {
 namespace {
@@ -91,7 +92,7 @@ class ShelfBackgroundAnimatorTestApi {
   ShelfBackgroundAnimatorTestApi& operator=(
       const ShelfBackgroundAnimatorTestApi&) = delete;
 
-  ~ShelfBackgroundAnimatorTestApi() = default;
+  ~ShelfBackgroundAnimatorTestApi() { animator_ = nullptr; }
 
   ShelfBackgroundType previous_background_type() const {
     return animator_->previous_background_type_;
@@ -105,7 +106,7 @@ class ShelfBackgroundAnimatorTestApi {
 
  private:
   // The instance to provide internal access to.
-  ShelfBackgroundAnimator* animator_;
+  raw_ptr<ShelfBackgroundAnimator> animator_;
 };
 
 class ShelfBackgroundAnimatorTest : public AshTestBase {
@@ -120,6 +121,12 @@ class ShelfBackgroundAnimatorTest : public AshTestBase {
 
   // testing::Test:
   void SetUp() override;
+
+  void TearDown() override {
+    animator_ = nullptr;
+    test_api_.reset();
+    AshTestBase::TearDown();
+  }
 
  protected:
   // Convenience wrapper for |animator_|'s PaintBackground().
@@ -136,7 +143,7 @@ class ShelfBackgroundAnimatorTest : public AshTestBase {
   TestShelfBackgroundObserver observer_;
 
   // Test target.
-  ShelfBackgroundAnimator* animator_;
+  raw_ptr<ShelfBackgroundAnimator> animator_;
 
   // Provides internal access to |animator_|.
   std::unique_ptr<ShelfBackgroundAnimatorTestApi> test_api_;
@@ -197,8 +204,8 @@ TEST_F(ShelfBackgroundAnimatorTest,
   PaintBackground(ShelfBackgroundType::kMaximized);
   SetColorValuesOnObserver(kDummyColor);
 
-  ui::ScopedAnimationDurationScaleMode test_duration_mode(
-      ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode test_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
   animator_->PaintBackground(ShelfBackgroundType::kDefaultBg,
                              AnimationChangeType::ANIMATE);
   WaitForAnimationCompletion();
@@ -246,8 +253,8 @@ TEST_F(ShelfBackgroundAnimatorTest, MaximizedBackground) {
 
 TEST_F(ShelfBackgroundAnimatorTest,
        AnimatorIsDetroyedWhenCompletingSuccessfully) {
-  ui::ScopedAnimationDurationScaleMode test_duration_mode(
-      ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode test_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
   PaintBackground(ShelfBackgroundType::kMaximized,
                   AnimationChangeType::ANIMATE);
   EXPECT_TRUE(test_api_->animator());
@@ -258,8 +265,8 @@ TEST_F(ShelfBackgroundAnimatorTest,
 
 TEST_F(ShelfBackgroundAnimatorTest,
        AnimatorDestroyedWhenChangingBackgroundImmediately) {
-  ui::ScopedAnimationDurationScaleMode test_duration_mode(
-      ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode test_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
   PaintBackground(ShelfBackgroundType::kMaximized,
                   AnimationChangeType::ANIMATE);
   EXPECT_TRUE(test_api_->animator());
@@ -272,8 +279,8 @@ TEST_F(ShelfBackgroundAnimatorTest,
 // Verify that existing animator is used when animating to the previous state.
 TEST_F(ShelfBackgroundAnimatorTest,
        ExistingAnimatorIsReusedWhenAnimatingToPreviousState) {
-  ui::ScopedAnimationDurationScaleMode test_duration_mode(
-      ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode test_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
 
   // First PaintBackground() must be immediate so that the
   // ShelfBackgroundAnimator has its color set correctly.
@@ -295,8 +302,8 @@ TEST_F(ShelfBackgroundAnimatorTest,
 // the same as the previous background.
 TEST_F(ShelfBackgroundAnimatorTest,
        ExistingAnimatorNotReusedWhenTargetBackgroundNotPreviousBackground) {
-  ui::ScopedAnimationDurationScaleMode test_duration_mode(
-      ui::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
+  gfx::ScopedAnimationDurationScaleMode test_duration_mode(
+      gfx::ScopedAnimationDurationScaleMode::NON_ZERO_DURATION);
 
   PaintBackground(ShelfBackgroundType::kHomeLauncher,
                   AnimationChangeType::ANIMATE);
@@ -351,7 +358,7 @@ TEST_F(ShelfBackgroundTargetColorTest, ShelfBackgroundColorUpdatedFromLogin) {
   NotifySessionStateChanged(session_manager::SessionState::LOGIN_PRIMARY);
   EXPECT_EQ(test_api.shelf_background_target_color(), SK_ColorTRANSPARENT);
 
-  SimulateUserLogin("user1@test.com");
+  SimulateUserLogin({"user1@test.com"});
 
   NotifySessionStateChanged(session_manager::SessionState::ACTIVE);
   EXPECT_EQ(test_api.shelf_background_target_color(),
@@ -370,7 +377,7 @@ TEST_F(ShelfBackgroundTargetColorTest, ShelfBackgroundColorUpdatedFromOOBE) {
   NotifySessionStateChanged(session_manager::SessionState::OOBE);
   EXPECT_EQ(test_api.shelf_background_target_color(), SK_ColorTRANSPARENT);
 
-  SimulateUserLogin("user1@test.com");
+  SimulateUserLogin({"user1@test.com"});
 
   NotifySessionStateChanged(
       session_manager::SessionState::LOGGED_IN_NOT_ACTIVE);

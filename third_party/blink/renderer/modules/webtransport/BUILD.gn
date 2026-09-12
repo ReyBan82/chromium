@@ -14,14 +14,23 @@ blink_modules_sources("webtransport") {
     "incoming_stream.h",
     "outgoing_stream.cc",
     "outgoing_stream.h",
+    "outgoing_stream_client.h",
     "receive_stream.cc",
     "receive_stream.h",
     "send_stream.cc",
     "send_stream.h",
     "web_transport.cc",
     "web_transport.h",
+    "web_transport_datagrams_writable.cc",
+    "web_transport_datagrams_writable.h",
     "web_transport_error.cc",
     "web_transport_error.h",
+    "web_transport_receive_stream.cc",
+    "web_transport_receive_stream.h",
+    "web_transport_send_group.cc",
+    "web_transport_send_group.h",
+    "web_transport_send_stream.cc",
+    "web_transport_send_stream.h",
   ]
 }
 

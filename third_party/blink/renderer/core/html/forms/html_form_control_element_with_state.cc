@@ -26,9 +26,13 @@
 
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/html/forms/html_form_element.h"
+#include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/core/input_type_names.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 namespace blink {
+
+using mojom::blink::FormControlType;
 
 namespace {
 
@@ -144,7 +148,7 @@ bool HTMLFormControlElementWithState::ShouldAutocomplete() const {
 }
 
 bool HTMLFormControlElementWithState::IsWearingAutofillAnchorMantle() const {
-  return FormControlType() == input_type_names::kHidden;
+  return FormControlType() == FormControlType::kInputHidden;
 }
 
 String HTMLFormControlElementWithState::IDLExposedAutofillValue() const {
@@ -159,7 +163,7 @@ String HTMLFormControlElementWithState::IDLExposedAutofillValue() const {
 
   // 2. Let tokens be the result of splitting the attribute's value on ASCII
   // whitespace.
-  SpaceSplitString tokens(value.LowerASCII());
+  SpaceSplitString tokens(value.ToAsciiLower());
 
   // 3. If tokens is empty, then jump to the step labeled default.
   if (tokens.size() == 0)
@@ -211,12 +215,6 @@ String HTMLFormControlElementWithState::IDLExposedAutofillValue() const {
   // 15. Let IDL value have the same value as field.
   String idl_value = field;
 
-  // Only allow Credential if the feature is enabled.
-  if (category == AutoCompleteCategory::kCredential &&
-      !RuntimeEnabledFeatures::WebAuthenticationConditionalUIEnabled()) {
-    return g_empty_string;
-  }
-
   // 16. If category is Credential and the indexth token in tokens is an ASCII
   // case-insensitive match for "webauthn", then run the substeps that follow:
   if (category == AutoCompleteCategory::kCredential) {
@@ -243,7 +241,7 @@ String HTMLFormControlElementWithState::IDLExposedAutofillValue() const {
       }
       // 16.7 Let IDL value be the concatenation of the indexth token in tokens,
       // a U+0020 SPACE character, and the previous value of IDL value.
-      idl_value = tokens[index] + " " + idl_value;
+      idl_value = StrCat({tokens[index], " ", idl_value});
     }
   }
 
@@ -261,7 +259,7 @@ String HTMLFormControlElementWithState::IDLExposedAutofillValue() const {
         // 19.4. Let IDL value be the concatenation of contact, a U+0020 SPACE
         // character, and the previous value of IDL value (which at this point
         // will always be field).
-        idl_value = contact + " " + idl_value;
+        idl_value = StrCat({contact, " ", idl_value});
         // 19.5. If the indexth entry in tokens is the first entry, then skip to
         // the step labeled done.
         if (index == 0) {
@@ -280,7 +278,7 @@ String HTMLFormControlElementWithState::IDLExposedAutofillValue() const {
       // character, and the previous value of IDL value (which at this point
       // will either be field or the concatenation of contact, a space, and
       // field).
-      idl_value = mode + " " + idl_value;
+      idl_value = StrCat({mode, " ", idl_value});
       // 20.5 If the indexth entry in tokens is the first entry, then skip to
       // the step labeled done.
       if (index == 0) {
@@ -298,11 +296,12 @@ String HTMLFormControlElementWithState::IDLExposedAutofillValue() const {
     // an ASCII case-insensitive match for the string "section-", then jump to
     // the step labeled default.
     AtomicString section = tokens[index];
-    if (!section.StartsWith("section-"))
+    if (!section.starts_with("section-")) {
       return g_empty_string;
+    }
     // 25. Let IDL value be the concatenation of section, a U+0020 SPACE
     // character, and the previous value of IDL value.
-    idl_value = section + " " + idl_value;
+    idl_value = StrCat({section, " ", idl_value});
   }
   // 30. Let the element's IDL-exposed autofill value be IDL value.
   return idl_value;
@@ -319,8 +318,17 @@ bool HTMLFormControlElementWithState::ClassSupportsStateRestore() const {
 
 bool HTMLFormControlElementWithState::ShouldSaveAndRestoreFormControlState()
     const {
-  // We don't save/restore control state in a form with autocomplete=off.
-  return isConnected() && ShouldAutocomplete();
+  if (!isConnected()) {
+    return false;
+  }
+  if (Form() && !Form()->ShouldAutocomplete()) {
+    return false;
+  }
+  if (EqualIgnoringAsciiCase(FastGetAttribute(html_names::kAutocompleteAttr),
+                             "off")) {
+    return false;
+  }
+  return true;
 }
 
 void HTMLFormControlElementWithState::DispatchInputEvent() {
@@ -331,7 +339,16 @@ void HTMLFormControlElementWithState::DispatchInputEvent() {
 }
 
 void HTMLFormControlElementWithState::DispatchChangeEvent() {
+  if (UserHasEditedTheField()) {
+    // Start matching :user-valid, but only if the user has already edited the
+    // field.
+    SetUserHasEditedTheFieldAndBlurred();
+  }
   DispatchScopedEvent(*Event::CreateBubble(event_type_names::kChange));
+}
+
+void HTMLFormControlElementWithState::DispatchCancelEvent() {
+  DispatchScopedEvent(*Event::CreateBubble(event_type_names::kCancel));
 }
 
 void HTMLFormControlElementWithState::FinishParsingChildren() {
@@ -344,11 +361,42 @@ bool HTMLFormControlElementWithState::IsFormControlElementWithState() const {
 }
 
 void HTMLFormControlElementWithState::ResetImpl() {
-  user_has_edited_the_field_ = false;
+  ClearUserHasEditedTheField();
 }
 
 int HTMLFormControlElementWithState::DefaultTabIndex() const {
   return 0;
+}
+
+void HTMLFormControlElementWithState::SetUserHasEditedTheField() {
+  if (interacted_state_ < InteractedState::kInteractedAndStillFocused) {
+    interacted_state_ = InteractedState::kInteractedAndStillFocused;
+  }
+}
+
+void HTMLFormControlElementWithState::SetUserHasEditedTheFieldAndBlurred() {
+  if (interacted_state_ >= InteractedState::kInteractedAndBlurred) {
+    return;
+  }
+  interacted_state_ = InteractedState::kInteractedAndBlurred;
+  PseudoStateChanged(CSSSelector::kPseudoUserInvalid);
+  PseudoStateChanged(CSSSelector::kPseudoUserValid);
+}
+
+void HTMLFormControlElementWithState::ForceUserValid() {
+  force_user_valid_ = true;
+  PseudoStateChanged(CSSSelector::kPseudoUserInvalid);
+  PseudoStateChanged(CSSSelector::kPseudoUserValid);
+}
+
+bool HTMLFormControlElementWithState::MatchesUserInvalidPseudo() {
+  return (UserHasEditedTheFieldAndBlurred() || force_user_valid_) &&
+         MatchesValidityPseudoClasses() && !ListedElement::IsValidElement();
+}
+
+bool HTMLFormControlElementWithState::MatchesUserValidPseudo() {
+  return (UserHasEditedTheFieldAndBlurred() || force_user_valid_) &&
+         MatchesValidityPseudoClasses() && ListedElement::IsValidElement();
 }
 
 }  // namespace blink

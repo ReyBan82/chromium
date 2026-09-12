@@ -5,10 +5,16 @@
 #include "remoting/host/win/wts_terminal_monitor.h"
 
 #include <windows.h>
+
 #include <wtsapi32.h>
 
+#include <string>
+
+#include "base/compiler_specific.h"
 #include "base/logging.h"
 #include "base/strings/utf_string_conversions.h"
+#include "base/uuid.h"
+#include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
 
 namespace remoting {
 
@@ -17,12 +23,12 @@ const uint32_t kInvalidSessionId = 0xffffffffu;
 
 const char WtsTerminalMonitor::kConsole[] = "console";
 
-WtsTerminalMonitor::~WtsTerminalMonitor() {}
+WtsTerminalMonitor::~WtsTerminalMonitor() = default;
 
 // static
 bool WtsTerminalMonitor::LookupTerminalId(uint32_t session_id,
                                           std::string* terminal_id) {
-  // Fast path for the case when |session_id| is currently attached to
+  // Fast path for the case when `session_id` is currently attached to
   // the physical console.
   if (session_id == WTSGetActiveConsoleSessionId()) {
     *terminal_id = kConsole;
@@ -38,10 +44,30 @@ bool WtsTerminalMonitor::LookupTerminalId(uint32_t session_id,
     return false;
   }
 
-  bool result = base::WideToUTF8(working_directory,
-                                 (bytes / sizeof(wchar_t)) - 1, terminal_id);
-  WTSFreeMemory(working_directory);
-  return result;
+  absl::Cleanup wts_deleter = [working_directory] {
+    ::WTSFreeMemory(working_directory);
+  };
+
+  if (!working_directory || bytes < sizeof(wchar_t)) {
+    return false;
+  }
+
+  std::string id;
+  if (!base::WideToUTF8(working_directory, (bytes / sizeof(wchar_t)) - 1,
+                        &id)) {
+    return false;
+  }
+
+  // The working directory is controlled by the client of the RDP connection,
+  // so it identifies a terminal only if it carries a virtual terminal ID
+  // assigned by RdpClient. In particular, a session that is not attached to
+  // the physical console must never be reported as the console terminal.
+  if (!IsVirtualTerminalId(id)) {
+    return false;
+  }
+
+  *terminal_id = std::move(id);
+  return true;
 }
 
 // static
@@ -60,21 +86,31 @@ uint32_t WtsTerminalMonitor::LookupSessionId(const std::string& terminal_id) {
     PLOG(ERROR) << "Failed to enumerate all sessions";
     return kInvalidSessionId;
   }
+
+  absl::Cleanup wts_deleter = [session_info] { ::WTSFreeMemory(session_info); };
   for (DWORD i = 0; i < session_info_count; ++i) {
-    uint32_t session_id = session_info[i].SessionId;
+    uint32_t session_id = UNSAFE_TODO(session_info[i]).SessionId;
 
     std::string id;
     if (LookupTerminalId(session_id, &id) && terminal_id == id) {
-      WTSFreeMemory(session_info);
       return session_id;
     }
   }
 
-  // |terminal_id| is not associated with any session.
-  WTSFreeMemory(session_info);
+  // `terminal_id` is not associated with any session.
   return kInvalidSessionId;
 }
 
-WtsTerminalMonitor::WtsTerminalMonitor() {}
+// static
+std::string WtsTerminalMonitor::GenerateVirtualTerminalId() {
+  return base::Uuid::GenerateRandomV4().AsLowercaseString();
+}
+
+// static
+bool WtsTerminalMonitor::IsVirtualTerminalId(const std::string& terminal_id) {
+  return base::Uuid::ParseLowercase(terminal_id).is_valid();
+}
+
+WtsTerminalMonitor::WtsTerminalMonitor() = default;
 
 }  // namespace remoting

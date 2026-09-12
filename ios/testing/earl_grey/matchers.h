@@ -15,6 +15,10 @@ namespace testing {
 // accessibility trait UIAccessibilityTraitButton.
 id<GREYMatcher> ButtonWithAccessibilityLabel(NSString* label);
 
+// Matcher for element with accessibility label corresponding to `label` for an
+// alert item.
+id<GREYMatcher> AlertItemWithAccessibilityLabel(NSString* label);
+
 // Matcher for a UI element to tap to dismiss an alert (e.g. context menu),
 // where `cancel_text` is the localized text used for the action sheet cancel
 // control.
@@ -26,6 +30,9 @@ id<GREYMatcher> ElementToDismissAlert(NSString* cancel_text);
 
 // Matcher for an element whose accessibility label contains `substring`.
 id<GREYMatcher> ElementWithAccessibilityLabelSubstring(NSString* substring);
+
+// Matcher for the back button of a navigation bar.
+id<GREYMatcher> NavigationBarBackButton();
 
 }  // namespace testing
 

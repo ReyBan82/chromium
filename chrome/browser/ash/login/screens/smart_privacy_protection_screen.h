@@ -22,9 +22,9 @@ class SmartPrivacyProtectionScreen : public BaseScreen {
   using TView = SmartPrivacyProtectionView;
 
   enum class Result {
-    PROCEED_WITH_FEATURE_ON,
-    PROCEED_WITH_FEATURE_OFF,
-    NOT_APPLICABLE,
+    kProceedWithFeatureOn,
+    kProceedWithFeatureOff,
+    kNotApplicable,
   };
 
   static std::string GetResultString(Result result);
@@ -39,6 +39,10 @@ class SmartPrivacyProtectionScreen : public BaseScreen {
 
   ~SmartPrivacyProtectionScreen() override;
 
+  const ScreenExitCallback& get_exit_callback_for_testing() {
+    return exit_callback_;
+  }
+
   void set_exit_callback_for_testing(const ScreenExitCallback& callback) {
     exit_callback_ = callback;
   }
@@ -48,7 +52,7 @@ class SmartPrivacyProtectionScreen : public BaseScreen {
   bool MaybeSkip(WizardContext& context) override;
   void ShowImpl() override;
   void HideImpl() override;
-  void OnUserAction(const base::Value::List& args) override;
+  void OnUserAction(const base::ListValue& args) override;
 
   base::WeakPtr<SmartPrivacyProtectionView> view_;
 

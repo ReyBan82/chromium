@@ -5,8 +5,11 @@
 #ifndef CHROME_BROWSER_UI_WEBUI_ASH_EDU_COEXISTENCE_EDU_COEXISTENCE_LOGIN_HANDLER_H_
 #define CHROME_BROWSER_UI_WEBUI_ASH_EDU_COEXISTENCE_EDU_COEXISTENCE_LOGIN_HANDLER_H_
 
+#include <optional>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/scoped_refptr.h"
 #include "base/values.h"
 #include "chrome/browser/ui/webui/ash/login/network_state_informer.h"
@@ -14,8 +17,8 @@
 #include "components/signin/public/identity_manager/identity_manager.h"
 #include "components/signin/public/identity_manager/primary_account_access_token_fetcher.h"
 #include "content/public/browser/web_ui_message_handler.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
+class ApplicationLocaleStorage;
 class PrefRegistrySimple;
 
 namespace ash {
@@ -26,10 +29,16 @@ class EduCoexistenceLoginHandler : public content::WebUIMessageHandler,
  public:
   static void RegisterProfilePrefs(PrefRegistrySimple* registry);
 
-  explicit EduCoexistenceLoginHandler(
+  // `application_locale_storage` must not be null and must outlive `this`.
+  EduCoexistenceLoginHandler(
+      const ApplicationLocaleStorage* application_locale_storage,
       const base::RepeatingClosure& close_dialog_closure);
-  EduCoexistenceLoginHandler(const base::RepeatingClosure& close_dialog_closure,
-                             signin::IdentityManager* identity_manager);
+  // `application_locale_storage` and `identity_manager` must not be null and
+  // must outlive `this`.
+  EduCoexistenceLoginHandler(
+      const ApplicationLocaleStorage* application_locale_storage,
+      signin::IdentityManager* identity_manager,
+      const base::RepeatingClosure& close_dialog_closure);
   EduCoexistenceLoginHandler(const EduCoexistenceLoginHandler&) = delete;
   EduCoexistenceLoginHandler& operator=(const EduCoexistenceLoginHandler&) =
       delete;
@@ -53,11 +62,13 @@ class EduCoexistenceLoginHandler : public content::WebUIMessageHandler,
 
  private:
   // Registered WebUi Message handlers.
-  void InitializeEduArgs(const base::Value::List& args);
+  void InitializeEduArgs(const base::ListValue& args);
   void SendInitializeEduArgs();
-  void ConsentValid(const base::Value::List& args);
-  void ConsentLogged(const base::Value::List& args);
-  void OnError(const base::Value::List& args);
+  void ConsentValid(const base::ListValue& args);
+  void ConsentLogged(const base::ListValue& args);
+  void OnError(const base::ListValue& args);
+
+  const raw_ref<const ApplicationLocaleStorage> application_locale_storage_;
 
   // Used for getting child access token.
   std::unique_ptr<signin::PrimaryAccountAccessTokenFetcher>
@@ -65,8 +76,8 @@ class EduCoexistenceLoginHandler : public content::WebUIMessageHandler,
 
   base::RepeatingClosure close_dialog_closure_;
 
-  absl::optional<signin::AccessTokenInfo> oauth_access_token_;
-  absl::optional<std::string> initialize_edu_args_callback_;
+  std::optional<signin::AccessTokenInfo> oauth_access_token_;
+  std::optional<std::string> initialize_edu_args_callback_;
 
   std::string edu_account_email_;
 
@@ -77,7 +88,7 @@ class EduCoexistenceLoginHandler : public content::WebUIMessageHandler,
   // The terms of service version number.
   std::string terms_of_service_version_number_;
 
-  signin::IdentityManager* const identity_manager_;
+  const raw_ptr<signin::IdentityManager> identity_manager_;
 
   // |in_error_state_| boolean tracks whether an error has occurred.
   // The error could happen when trying to access OAuth tokens.

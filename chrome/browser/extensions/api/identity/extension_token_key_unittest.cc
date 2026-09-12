@@ -9,7 +9,11 @@
 #include <string>
 #include <vector>
 
+#include "extensions/buildflags/buildflags.h"
+#include "google_apis/gaia/gaia_id.h"
 #include "testing/gtest/include/gtest/gtest.h"
+
+static_assert(BUILDFLAG(ENABLE_EXTENSIONS_CORE));
 
 TEST(IdentityExtensionTokenKeyTest, Ordering) {
   std::string extension_id1("ext_id_1");
@@ -29,13 +33,13 @@ TEST(IdentityExtensionTokenKeyTest, Ordering) {
   std::vector<CoreAccountInfo> user_infos;
 
   CoreAccountInfo user_1;
-  user_1.account_id = CoreAccountId("user_id_1");
-  user_1.gaia = "user_id_1";
+  user_1.gaia = GaiaId("user_id_1");
+  user_1.account_id = CoreAccountId::FromGaiaId(user_1.gaia);
   user_1.email = "user_email_1";
 
   CoreAccountInfo user_2;
-  user_2.account_id = CoreAccountId("user_id_2");
-  user_2.gaia = "user_id_2";
+  user_2.gaia = GaiaId("user_id_2");
+  user_2.account_id = CoreAccountId::FromGaiaId(user_2.gaia);
   user_2.email = "user_email_2";
 
   user_infos.push_back(user_1);

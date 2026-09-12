@@ -32,9 +32,7 @@ class DhcpPacFileAdapterFetcher;
 class URLRequestContext;
 
 // Windows-specific implementation.
-class NET_EXPORT_PRIVATE DhcpPacFileFetcherWin
-    : public DhcpPacFileFetcher,
-      public base::SupportsWeakPtr<DhcpPacFileFetcherWin> {
+class NET_EXPORT_PRIVATE DhcpPacFileFetcherWin : public DhcpPacFileFetcher {
  public:
   DhcpPacFileFetcherWin() = delete;
 
@@ -62,7 +60,7 @@ class NET_EXPORT_PRIVATE DhcpPacFileFetcherWin
   // this machine that has DHCP enabled and is not a loop-back adapter. May
   // optionally update |info| (if non-null) with information for logging.
   // Returns false on error.
-  static bool GetCandidateAdapterNames(std::set<std::string>* adapter_names,
+  static bool GetCandidateAdapterNames(std::vector<std::string>* adapter_names,
                                        DhcpAdapterNamesLoggingInfo* info);
 
  protected:
@@ -86,16 +84,16 @@ class NET_EXPORT_PRIVATE DhcpPacFileFetcherWin
     // This is the method that runs on the worker pool thread.
     void GetCandidateAdapterNames();
 
-    // This set is valid after GetCandidateAdapterNames has
+    // This vector is valid after GetCandidateAdapterNames has
     // been run. Its lifetime is scoped by this object.
-    const std::set<std::string>& adapter_names() const;
+    const std::vector<std::string>& adapter_names() const;
 
     DhcpAdapterNamesLoggingInfo* logging_info() { return logging_info_.get(); }
 
    protected:
     // Virtual method introduced to allow unit testing.
     virtual bool ImplGetCandidateAdapterNames(
-        std::set<std::string>* adapter_names,
+        std::vector<std::string>* adapter_names,
         DhcpAdapterNamesLoggingInfo* info);
 
     friend class base::RefCountedThreadSafe<AdapterQuery>;
@@ -105,7 +103,7 @@ class NET_EXPORT_PRIVATE DhcpPacFileFetcherWin
     // These are constructed on the originating thread, then used on the
     // worker thread, then used again on the originating thread only when
     // the task has completed on the worker thread. No locking required.
-    std::set<std::string> adapter_names_;
+    std::vector<std::string> adapter_names_;
     std::unique_ptr<DhcpAdapterNamesLoggingInfo> logging_info_;
   };
 
@@ -182,7 +180,7 @@ class NET_EXPORT_PRIVATE DhcpPacFileFetcherWin
 
   // Pointer to string we will write results to. Not valid in states
   // START and DONE.
-  raw_ptr<std::u16string, DanglingUntriaged> destination_string_ = nullptr;
+  raw_ptr<std::u16string> destination_string_ = nullptr;
 
   // PAC URL retrieved from DHCP, if any. Valid only in state STATE_DONE.
   GURL pac_url_;
@@ -199,6 +197,8 @@ class NET_EXPORT_PRIVATE DhcpPacFileFetcherWin
   const scoped_refptr<base::TaskRunner> task_runner_;
 
   THREAD_CHECKER(thread_checker_);
+
+  base::WeakPtrFactory<DhcpPacFileFetcherWin> weak_ptr_factory_{this};
 };
 
 }  // namespace net

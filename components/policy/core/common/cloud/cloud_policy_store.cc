@@ -5,8 +5,11 @@
 #include "components/policy/core/common/cloud/cloud_policy_store.h"
 
 #include "base/check.h"
+#include "base/logging.h"
 #include "base/observer_list.h"
 #include "components/policy/core/common/cloud/cloud_external_data_manager.h"
+#include "components/policy/core/common/cloud/cloud_policy_util.h"
+#include "components/policy/core/common/policy_logger.h"
 #include "components/policy/proto/device_management_backend.pb.h"
 
 namespace policy {
@@ -14,7 +17,10 @@ namespace policy {
 CloudPolicyStore::Observer::~Observer() = default;
 void CloudPolicyStore::Observer::OnStoreDestruction(CloudPolicyStore* store) {}
 
-CloudPolicyStore::CloudPolicyStore() = default;
+CloudPolicyStore::CloudPolicyStore(const std::string& policy_type)
+    : policy_type_(policy_type) {
+  CHECK(!policy_type.empty());
+}
 
 CloudPolicyStore::~CloudPolicyStore() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
@@ -50,6 +56,12 @@ void CloudPolicyStore::RemoveObserver(CloudPolicyStore::Observer* observer) {
   observers_.RemoveObserver(observer);
 }
 
+bool CloudPolicyStore::HasObserver(CloudPolicyStore::Observer* observer) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  return observers_.HasObserver(observer);
+}
+
 void CloudPolicyStore::NotifyStoreLoaded() {
   is_initialized_ = true;
   UpdateFirstPoliciesLoaded();
@@ -69,18 +81,17 @@ void CloudPolicyStore::UpdateFirstPoliciesLoaded() {
 }
 
 void CloudPolicyStore::SetPolicy(
-    std::unique_ptr<enterprise_management::PolicyFetchResponse>
-        policy_fetch_response,
     std::unique_ptr<enterprise_management::PolicyData> policy_data) {
-  DCHECK(policy_fetch_response);
+  VLOG_POLICY(1, CBCM_ENROLLMENT)
+      << PolicyTypeLogPrefix(policy_type(), std::string())
+      << "CloudPolicyStore::SetPolicy: " << policy_data->policy_type();
   DCHECK(policy_data);
-  policy_fetch_response_ = std::move(policy_fetch_response);
+  DCHECK_EQ(policy_data->policy_type(), policy_type());
   policy_ = std::move(policy_data);
 }
 
 void CloudPolicyStore::ResetPolicy() {
   policy_.reset();
-  policy_fetch_response_.reset();
 }
 
 void CloudPolicyStore::NotifyStoreError() {
@@ -113,13 +124,6 @@ void CloudPolicyStore::SetFirstPoliciesLoaded(bool loaded) {
 void CloudPolicyStore::set_policy_data_for_testing(
     std::unique_ptr<enterprise_management::PolicyData> policy) {
   policy_ = std::move(policy);
-  if (policy_) {
-    policy_fetch_response_ =
-        std::make_unique<enterprise_management::PolicyFetchResponse>();
-    policy_fetch_response_->set_policy_data(policy_->SerializeAsString());
-  } else {
-    policy_fetch_response_.reset();
-  }
 }
 
 void CloudPolicyStore::set_policy_signature_public_key_for_testing(

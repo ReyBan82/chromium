@@ -7,6 +7,7 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
+#include "components/viz/client/frame_evictor.h"
 #include "content/browser/renderer_host/delegated_frame_host.h"
 #include "content/common/content_export.h"
 
@@ -33,15 +34,16 @@ class CONTENT_EXPORT DelegatedFrameHostClientAura
   }
 
   // DelegatedFrameHostClient implementation.
-  ui::Layer* DelegatedFrameHostGetLayer() const override;
+  ui::LayerSurface* GetDelegatedFrameHostLayer() const override;
   bool DelegatedFrameHostIsVisible() const override;
   SkColor DelegatedFrameHostGetGutterColor() const override;
   void OnFrameTokenChanged(uint32_t frame_token,
                            base::TimeTicks activation_time) override;
   float GetDeviceScaleFactor() const override;
   void InvalidateLocalSurfaceIdOnEviction() override;
-  std::vector<viz::SurfaceId> CollectSurfaceIdsForEviction() override;
+  viz::FrameEvictorClient::EvictIds CollectSurfaceIdsForEviction() override;
   bool ShouldShowStaleContentOnEviction() override;
+  cc::DeadlinePolicy GetResizeDeadlinePolicy() const override;
 
  private:
   raw_ptr<RenderWidgetHostViewAura> render_widget_host_view_;

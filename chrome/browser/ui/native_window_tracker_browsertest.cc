@@ -2,9 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "ui/views/native_window_tracker.h"
+#include "ui/native_window_tracker/native_window_tracker.h"
 
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/browser_window.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/test/browser_test.h"
@@ -16,14 +15,14 @@ IN_PROC_BROWSER_TEST_F(NativeWindowTrackerTest, Basic) {
   // Create a second browser to prevent the app from exiting when the browser is
   // closed.
 
-  CreateBrowser(browser()->profile());
+  CreateBrowser(browser()->GetProfile());
 
-  std::unique_ptr<views::NativeWindowTracker> tracker =
-      views::NativeWindowTracker::Create(
-          browser()->window()->GetNativeWindow());
+  std::unique_ptr<ui::NativeWindowTracker> tracker =
+      ui::NativeWindowTracker::Create(
+          browser()->GetWindow()->GetNativeWindow());
   EXPECT_FALSE(tracker->WasNativeWindowDestroyed());
 
-  browser()->window()->Close();
+  browser()->GetWindow()->Close();
   content::RunAllPendingInMessageLoop();
   EXPECT_TRUE(tracker->WasNativeWindowDestroyed());
 }

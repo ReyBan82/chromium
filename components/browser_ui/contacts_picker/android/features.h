@@ -6,6 +6,7 @@
 #define COMPONENTS_BROWSER_UI_CONTACTS_PICKER_ANDROID_FEATURES_H_
 
 #include "base/feature_list.h"
+#include "base/metrics/field_trial_params.h"
 
 namespace browser_ui {
 

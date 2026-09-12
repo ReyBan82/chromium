@@ -5,7 +5,6 @@
 #ifndef CONTENT_PUBLIC_TEST_NETWORK_CONNECTION_CHANGE_SIMULATOR_H_
 #define CONTENT_PUBLIC_TEST_NETWORK_CONNECTION_CHANGE_SIMULATOR_H_
 
-#include "build/chromeos_buildflags.h"
 #include "services/network/public/cpp/network_connection_tracker.h"
 
 namespace base {
@@ -34,13 +33,16 @@ class NetworkConnectionChangeSimulator
 #endif
 
   // Synchronously sets the connection type.
-  void SetConnectionType(network::mojom::ConnectionType connection_type);
+  void SetConnectionType(
+      net::NetworkChangeNotifier::ConnectionType connection_type);
 
  private:
-  static void SimulateNetworkChange(network::mojom::ConnectionType type);
+  static void SimulateNetworkChange(
+      net::NetworkChangeNotifier::ConnectionType type);
 
   // network::NetworkConnectionTracker::NetworkConnectionObserver:
-  void OnConnectionChanged(network::mojom::ConnectionType type) override;
+  void OnConnectionChanged(
+      net::NetworkChangeNotifier::ConnectionType type) override;
 
   std::unique_ptr<base::RunLoop> run_loop_;
 };

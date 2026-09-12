@@ -5,15 +5,16 @@
 #include "components/media_router/common/media_route_provider_helper.h"
 
 #include <ostream>
+#include <string_view>
 
 #include "base/notreached.h"
-#include "base/strings/string_piece.h"
 #include "components/media_router/common/mojom/media_route_provider_id.mojom.h"
 
 constexpr const char kWiredDisplay[] = "WIRED_DISPLAY";
 constexpr const char kDial[] = "DIAL";
 constexpr const char kCast[] = "CAST";
 constexpr const char kAndroidCaf[] = "ANDROID_CAF";
+constexpr const char kRedirection[] = "REDIRECTION";
 constexpr const char kTest[] = "TEST";
 
 namespace media_router {
@@ -28,16 +29,17 @@ const char* ProviderIdToString(mojom::MediaRouteProviderId provider_id) {
       return kDial;
     case mojom::MediaRouteProviderId::ANDROID_CAF:
       return kAndroidCaf;
+    case mojom::MediaRouteProviderId::REDIRECTION:
+      return kRedirection;
     case mojom::MediaRouteProviderId::TEST:
       return kTest;
   }
 
   NOTREACHED() << "Unknown provider_id " << static_cast<int>(provider_id);
-  return "Unknown provider_id";
 }
 
-absl::optional<mojom::MediaRouteProviderId> ProviderIdFromString(
-    base::StringPiece provider_id) {
+std::optional<mojom::MediaRouteProviderId> ProviderIdFromString(
+    std::string_view provider_id) {
   if (provider_id == kWiredDisplay) {
     return mojom::MediaRouteProviderId::WIRED_DISPLAY;
   } else if (provider_id == kCast) {
@@ -46,10 +48,12 @@ absl::optional<mojom::MediaRouteProviderId> ProviderIdFromString(
     return mojom::MediaRouteProviderId::DIAL;
   } else if (provider_id == kAndroidCaf) {
     return mojom::MediaRouteProviderId::ANDROID_CAF;
+  } else if (provider_id == kRedirection) {
+    return mojom::MediaRouteProviderId::REDIRECTION;
   } else if (provider_id == kTest) {
     return mojom::MediaRouteProviderId::TEST;
   } else {
-    return absl::nullopt;
+    return std::nullopt;
   }
 }
 

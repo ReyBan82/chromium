@@ -4,8 +4,11 @@
 
 #include "ios/web/public/test/fakes/fake_browser_state.h"
 
+#include "base/check.h"
 #include "base/files/file_path.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/test/test_file_util.h"
+#include "base/uuid.h"
 #include "ios/web/public/thread/web_task_traits.h"
 #include "ios/web/public/thread/web_thread.h"
 #include "ios/web/test/test_url_constants.h"
@@ -55,16 +58,21 @@ class TestContextURLRequestContextGetter : public net::URLRequestContextGetter {
 // static
 const char FakeBrowserState::kCorsExemptTestHeaderName[] = "ExemptTest";
 
-FakeBrowserState::FakeBrowserState() : is_off_the_record_(false) {}
+FakeBrowserState::FakeBrowserState(bool use_unique_storage_uuid)
+    : state_path_(base::CreateUniqueTempDirectoryScopedToTest()) {
+  if (use_unique_storage_uuid) {
+    storage_uuid_ = base::Uuid::GenerateRandomV4();
+  }
+}
 
-FakeBrowserState::~FakeBrowserState() {}
+FakeBrowserState::~FakeBrowserState() = default;
 
 bool FakeBrowserState::IsOffTheRecord() const {
   return is_off_the_record_;
 }
 
 base::FilePath FakeBrowserState::GetStatePath() const {
-  return base::FilePath();
+  return state_path_;
 }
 
 net::URLRequestContextGetter* FakeBrowserState::GetRequestContext() {
@@ -101,6 +109,14 @@ FakeBrowserState::GetSharedURLLoaderFactory() {
 void FakeBrowserState::SetSharedURLLoaderFactory(
     scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory) {
   test_shared_url_loader_factory_ = std::move(shared_url_loader_factory);
+}
+
+const base::Uuid& FakeBrowserState::GetWebKitStorageID() const {
+  return storage_uuid_;
+}
+
+void FakeBrowserState::SetWebKitStorageID(base::Uuid uuid) {
+  storage_uuid_ = std::move(uuid);
 }
 
 }  // namespace web

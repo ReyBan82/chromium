@@ -4,22 +4,32 @@
 
 #include "base/containers/lru_cache.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <functional>
+#include <iterator>
 #include <memory>
 #include <string>
 
+#include "base/containers/hashing_lru_cache.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/scoped_refptr.h"
+#include "base/memory_coordinator/memory_coordinator_features.h"
+#include "base/memory_coordinator/test_memory_consumer_registry.h"
+#include "base/test/run_until.h"
+#include "base/test/scoped_feature_list.h"
+#include "base/test/task_environment.h"
+#include "base/trace_event/memory_usage_estimator.h"
 #include "base/tracing_buildflags.h"
+#include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
-
-#if BUILDFLAG(ENABLE_BASE_TRACING)
-#include "base/trace_event/memory_usage_estimator.h"  // no-presubmit-check
-#endif  // BUILDFLAG(ENABLE_BASE_TRACING)
 
 namespace base {
 
 namespace {
+
+using testing::_;
+using testing::Pair;
 
 int cached_item_live_count = 0;
 
@@ -424,6 +434,71 @@ TYPED_TEST(LRUCacheTest, Swap) {
   }
 }
 
+TYPED_TEST(LRUCacheTest, UpdateMaxSize) {
+  using Cache =
+      typename TypeParam::template Type<int, std::unique_ptr<CachedItem>>;
+  static const typename Cache::size_type kInitialMaxSize = 3;
+
+  int initial_count = cached_item_live_count;
+
+  {
+    Cache cache(kInitialMaxSize);
+
+    static const int kItem1Key = 1, kItem2Key = 2, kItem3Key = 3;
+    cache.Put(kItem1Key, std::make_unique<CachedItem>(20));
+    cache.Put(kItem2Key, std::make_unique<CachedItem>(21));
+    cache.Put(kItem3Key, std::make_unique<CachedItem>(22));
+
+    EXPECT_EQ(3U, cache.size());
+    EXPECT_EQ(kInitialMaxSize, cache.max_size());
+
+    // Increase max size.
+    static const typename Cache::size_type kLargerMaxSize = 5;
+    cache.UpdateMaxSize(kLargerMaxSize);
+    EXPECT_EQ(kLargerMaxSize, cache.max_size());
+    EXPECT_EQ(3U, cache.size());
+
+    static const int kItem4Key = 4, kItem5Key = 5;
+    cache.Put(kItem4Key, std::make_unique<CachedItem>(23));
+    cache.Put(kItem5Key, std::make_unique<CachedItem>(24));
+
+    EXPECT_EQ(5U, cache.size());
+
+    // Decrease max size.
+    static const typename Cache::size_type kSmallerMaxSize = 2;
+    cache.UpdateMaxSize(kSmallerMaxSize);
+    EXPECT_EQ(kSmallerMaxSize, cache.max_size());
+    EXPECT_EQ(2U, cache.size());
+
+    // Verify that the oldest items were evicted.
+    EXPECT_TRUE(cache.Get(kItem1Key) == cache.end());
+    EXPECT_TRUE(cache.Get(kItem2Key) == cache.end());
+    EXPECT_TRUE(cache.Get(kItem3Key) == cache.end());
+    EXPECT_TRUE(cache.Get(kItem4Key) != cache.end());
+    EXPECT_TRUE(cache.Get(kItem5Key) != cache.end());
+
+    // Set to zero.
+    cache.UpdateMaxSize(0);
+    EXPECT_EQ(0U, cache.max_size());
+    EXPECT_EQ(0U, cache.size());
+
+    // All evicted.
+    EXPECT_TRUE(cache.Get(kItem1Key) == cache.end());
+    EXPECT_TRUE(cache.Get(kItem2Key) == cache.end());
+    EXPECT_TRUE(cache.Get(kItem3Key) == cache.end());
+    EXPECT_TRUE(cache.Get(kItem4Key) == cache.end());
+    EXPECT_TRUE(cache.Get(kItem5Key) == cache.end());
+
+    // Inserting fails.
+    static const int kItem6Key = 6;
+    cache.Put(kItem6Key, std::make_unique<CachedItem>(25));
+    EXPECT_TRUE(cache.Get(kItem6Key) == cache.end());
+  }
+
+  // There should be no objects leaked.
+  EXPECT_EQ(initial_count, cached_item_live_count);
+}
+
 TYPED_TEST(LRUCacheSetTest, SetTest) {
   typedef typename TypeParam::template Type<std::string> Cache;
   Cache cache(Cache::NO_AUTO_EVICT);
@@ -524,7 +599,7 @@ TYPED_TEST(LRUCacheSetTest, ReplacementIdentity) {
 
   // Helper to create the correct type of base::*LRUCacheSet, since they have
   // different template arguments.
-  constexpr auto kCreateCache = []() {
+  constexpr auto kCreateCache = [] {
     if constexpr (std::is_same_v<TypeParam, LRUCacheSetTemplate>) {
       using Cache = typename TypeParam::template Type<Ptr, DerefCompare<Ptr>>;
       return Cache(Cache::NO_AUTO_EVICT);
@@ -581,7 +656,6 @@ TYPED_TEST(LRUCacheSetTest, ReplacementIdentity) {
   EXPECT_EQ(iter, cache.end());
 }
 
-#if BUILDFLAG(ENABLE_BASE_TRACING)
 TYPED_TEST(LRUCacheTest, EstimateMemory) {
   typedef typename TypeParam::template Type<std::string, int> Cache;
   Cache cache(10);
@@ -592,6 +666,264 @@ TYPED_TEST(LRUCacheTest, EstimateMemory) {
   EXPECT_GT(trace_event::EstimateMemoryUsage(cache),
             trace_event::EstimateMemoryUsage(key));
 }
-#endif  // BUILDFLAG(ENABLE_BASE_TRACING)
+
+TEST(LRUCacheIndexOrderTest, IndexIteration) {
+  using OrderedCache = LRUCache<int, CachedItem>;
+  using UnorderedCache = HashingLRUCache<int, CachedItem>;
+
+  OrderedCache ordered(OrderedCache::NO_AUTO_EVICT);
+  UnorderedCache unordered(UnorderedCache::NO_AUTO_EVICT);
+
+  // Add items in any order.
+  static const int kItem1Key = 1;
+  CachedItem item1(10);
+  ordered.Put(kItem1Key, item1);
+  unordered.Put(kItem1Key, item1);
+
+  static const int kItem3Key = 3;
+  CachedItem item3(30);
+  ordered.Put(kItem3Key, item3);
+  unordered.Put(kItem3Key, item3);
+
+  static const int kItem2Key = 2;
+  CachedItem item2(20);
+  ordered.Put(kItem2Key, item2);
+  unordered.Put(kItem2Key, item2);
+
+  static const int kItem4Key = 4;
+  CachedItem item4(40);
+  ordered.Put(kItem4Key, item4);
+  unordered.Put(kItem4Key, item4);
+
+  // Ordered should be ordered, and unordered should at least have all elements.
+  std::vector<int> ordered_keys;
+  std::ranges::transform(
+      ordered.index(), std::back_inserter(ordered_keys),
+      [](const auto& key_value_pair) -> int { return key_value_pair.first; });
+  EXPECT_THAT(ordered_keys,
+              testing::ElementsAre(kItem1Key, kItem2Key, kItem3Key, kItem4Key));
+
+  std::vector<int> unordered_keys;
+  std::ranges::transform(
+      unordered.index(), std::back_inserter(unordered_keys),
+      [](const auto& key_value_pair) -> int { return key_value_pair.first; });
+  EXPECT_THAT(unordered_keys, testing::UnorderedElementsAre(
+                                  kItem1Key, kItem2Key, kItem3Key, kItem4Key));
+}
+
+TEST(LRUCacheSimpleTest, TransparentLookup) {
+  LRUCache<std::string, int, std::less<>> cache(10);
+  cache.Put("some string", 4);
+  EXPECT_EQ(cache.Get(std::string_view("some string"))->second, 4);
+  EXPECT_EQ(cache.Peek(std::string_view("some string"))->second, 4);
+}
+
+TEST(LRUCacheMemoryConsumerTest, DisabledByDefault) {
+  base::test::TaskEnvironment task_environment;
+  TestMemoryConsumerRegistry test_registry;
+  LRUCache<int, int> cache(10);
+
+  for (int i = 0; i < 10; ++i) {
+    cache.Put(i, i * 10);
+  }
+  EXPECT_EQ(10u, cache.size());
+  EXPECT_EQ(10u, cache.max_size());
+
+  test_registry.NotifyUpdateMemoryLimit(50);
+  EXPECT_EQ(10u, cache.max_size());
+  EXPECT_EQ(10u, cache.size());
+}
+
+TEST(LRUCacheMemoryConsumerTest, Scaling) {
+  base::test::TaskEnvironment task_environment;
+  test::ScopedFeatureList feature_list(kLRUCacheMemoryConsumer);
+  TestMemoryConsumerRegistry test_registry;
+
+  LRUCache<int, int> cache(10);
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 1u; }));
+
+  for (int i = 0; i < 10; ++i) {
+    cache.Put(i, i * 10);
+  }
+  EXPECT_EQ(10u, cache.size());
+  EXPECT_EQ(10u, cache.max_size());
+
+  // Updating memory limit to 50% updates max_size() immediately, but
+  // does not evict elements proactively while idle.
+  test_registry.NotifyUpdateMemoryLimit(50);
+  ASSERT_TRUE(test::RunUntil([&]() { return cache.max_size() == 5u; }));
+  EXPECT_EQ(10u, cache.size());
+
+  // Inserting when over the memory limit evicts excess items down to
+  // max_size().
+  cache.Put(10, 100);
+  EXPECT_EQ(5u, cache.size());
+
+  // The 6 oldest items (0..5) were evicted, newer items (6..10) remain.
+  for (int i = 0; i < 6; ++i) {
+    EXPECT_TRUE(cache.Get(i) == cache.end());
+  }
+  for (int i = 6; i <= 10; ++i) {
+    auto iter = cache.Get(i);
+    ASSERT_TRUE(iter != cache.end());
+    EXPECT_EQ(i * 10, iter->second);
+  }
+
+  // Scaling up to 150%.
+  test_registry.NotifyUpdateMemoryLimit(150);
+  ASSERT_TRUE(test::RunUntil([&]() { return cache.max_size() == 15u; }));
+
+  for (int i = 11; i <= 20; ++i) {
+    cache.Put(i, i * 10);
+  }
+  EXPECT_EQ(15u, cache.size());
+}
+
+TEST(LRUCacheMemoryConsumerTest, MinimumSizeIsOne) {
+  base::test::TaskEnvironment task_environment;
+  test::ScopedFeatureList feature_list(kLRUCacheMemoryConsumer);
+  TestMemoryConsumerRegistry test_registry;
+
+  LRUCache<int, int> cache(5);
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 1u; }));
+
+  for (int i = 0; i < 5; ++i) {
+    cache.Put(i, i * 10);
+  }
+  EXPECT_EQ(5u, cache.size());
+
+  // Limit of 0% sets target limit to 1.
+  test_registry.NotifyUpdateMemoryLimit(0);
+  ASSERT_TRUE(test::RunUntil([&]() { return cache.max_size() == 1u; }));
+  EXPECT_EQ(5u, cache.size());
+
+  // Put triggers eviction and keeps size 1.
+  cache.Put(5, 50);
+  EXPECT_EQ(1u, cache.size());
+  EXPECT_TRUE(cache.Get(4) == cache.end());
+  EXPECT_TRUE(cache.Get(5) != cache.end());
+}
+
+TEST(LRUCacheMemoryConsumerTest, MoveAndSwap) {
+  base::test::TaskEnvironment task_environment;
+  test::ScopedFeatureList feature_list(kLRUCacheMemoryConsumer);
+  TestMemoryConsumerRegistry test_registry;
+
+  LRUCache<int, int> cache1(10);
+  for (int i = 0; i < 10; ++i) {
+    cache1.Put(i, i);
+  }
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 1u; }));
+
+  // Move construct
+  LRUCache<int, int> cache2(std::move(cache1));
+  EXPECT_EQ(10u, cache2.size());
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 1u; }));
+
+  test_registry.NotifyUpdateMemoryLimit(50);
+  ASSERT_TRUE(test::RunUntil([&]() { return cache2.max_size() == 5u; }));
+  cache2.Put(10, 100);
+  EXPECT_EQ(5u, cache2.size());
+
+  // Move assign
+  LRUCache<int, int> cache3(10);
+  for (int i = 0; i < 10; ++i) {
+    cache3.Put(i, i);
+  }
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 2u; }));
+
+  cache3 = std::move(cache2);
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 1u; }));
+  EXPECT_EQ(5u, cache3.size());
+
+  test_registry.NotifyUpdateMemoryLimit(20);
+  ASSERT_TRUE(test::RunUntil([&]() { return cache3.max_size() == 2u; }));
+  cache3.Put(11, 110);
+  EXPECT_EQ(2u, cache3.size());
+
+  // Swap
+  LRUCache<int, int> cache4(10);
+  cache4.Put(100, 100);
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 2u; }));
+
+  cache4.Swap(cache3);
+  EXPECT_EQ(2u, cache4.size());
+  EXPECT_EQ(1u, cache3.size());
+
+  test_registry.NotifyUpdateMemoryLimit(10);
+  ASSERT_TRUE(test::RunUntil(
+      [&]() { return cache4.max_size() == 1u && cache3.max_size() == 1u; }));
+  EXPECT_EQ(1u, cache4.max_size());
+  EXPECT_EQ(1u, cache3.max_size());
+  cache4.Put(101, 101);
+  cache3.Put(102, 102);
+  EXPECT_EQ(1u, cache4.size());
+  EXPECT_EQ(1u, cache3.size());
+}
+
+TEST(LRUCacheMemoryConsumerTest, UpdateMaxSize) {
+  base::test::TaskEnvironment task_environment;
+  test::ScopedFeatureList feature_list(kLRUCacheMemoryConsumer);
+  TestMemoryConsumerRegistry test_registry;
+
+  LRUCache<int, int> cache(20);
+  EXPECT_EQ(20u, cache.max_size());
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 1u; }));
+
+  test_registry.NotifyUpdateMemoryLimit(50);
+  ASSERT_TRUE(test::RunUntil([&]() { return cache.max_size() == 10u; }));
+
+  // Updating baseline max size to 40 while under 50% memory limit scales to 20.
+  cache.UpdateMaxSize(40);
+  EXPECT_EQ(20u, cache.max_size());
+
+  for (int i = 0; i < 20; ++i) {
+    cache.Put(i, i);
+  }
+  EXPECT_EQ(20u, cache.size());
+
+  // Transition from NO_AUTO_EVICT to a bounded max size.
+  LRUCache<int, int> no_evict_cache(LRUCache<int, int>::NO_AUTO_EVICT);
+  no_evict_cache.UpdateMaxSize(30);
+  EXPECT_EQ(30u, no_evict_cache.max_size());
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 2u; }));
+
+  test_registry.NotifyUpdateMemoryLimit(50);
+  ASSERT_TRUE(
+      test::RunUntil([&]() { return no_evict_cache.max_size() == 15u; }));
+}
+
+TEST(LRUCacheMemoryConsumerTest, EvictionOnPutUnderMemoryPressure) {
+  base::test::TaskEnvironment task_environment;
+  test::ScopedFeatureList feature_list(kLRUCacheMemoryConsumer);
+  TestMemoryConsumerRegistry test_registry;
+
+  // Cache has a max of 100 entries. It is filled with 75 elements.
+  LRUCache<int, int> cache(100);
+  for (int i = 0; i < 75; ++i) {
+    cache.Put(i, i);
+  }
+  EXPECT_EQ(75u, cache.size());
+  EXPECT_EQ(100u, cache.max_size());
+  ASSERT_TRUE(test::RunUntil([&]() { return test_registry.size() == 1u; }));
+
+  // OnUpdateMemoryLimit is called with 50%. Max size becomes 50 immediately.
+  test_registry.NotifyUpdateMemoryLimit(50);
+  ASSERT_TRUE(test::RunUntil([&]() { return cache.max_size() == 50u; }));
+  // Existing elements remain in cache while idle.
+  EXPECT_EQ(75u, cache.size());
+
+  // When a new element is added, all excess elements down to max_size - 1 are
+  // evicted, and the new element is inserted, bringing size down to 50.
+  cache.Put(75, 75);
+  EXPECT_EQ(50u, cache.size());
+  EXPECT_EQ(50u, cache.max_size());
+  for (int i = 0; i <= 25; ++i) {
+    EXPECT_TRUE(cache.Peek(i) == cache.end());
+  }
+  for (int i = 26; i <= 75; ++i) {
+    EXPECT_TRUE(cache.Peek(i) != cache.end());
+  }
+}
 
 }  // namespace base

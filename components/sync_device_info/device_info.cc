@@ -4,10 +4,10 @@
 
 #include "components/sync_device_info/device_info.h"
 
+#include <optional>
 #include <utility>
 
-#include "components/sync/protocol/device_info_specifics.pb.h"
-#include "components/sync/protocol/sync_enums.pb.h"
+#include "base/memory/ptr_util.h"
 
 namespace syncer {
 
@@ -17,12 +17,11 @@ bool DeviceInfo::SharingTargetInfo::operator==(
          auth_secret == other.auth_secret;
 }
 
-DeviceInfo::SharingInfo::SharingInfo(
-    SharingTargetInfo vapid_target_info,
-    SharingTargetInfo sender_id_target_info,
-    std::set<sync_pb::SharingSpecificFields::EnabledFeatures> enabled_features)
-    : vapid_target_info(std::move(vapid_target_info)),
-      sender_id_target_info(std::move(sender_id_target_info)),
+DeviceInfo::SharingInfo::SharingInfo(SharingTargetInfo sender_id_target_info,
+                                     std::string chime_representative_target_id,
+                                     std::set<SharingFeature> enabled_features)
+    : sender_id_target_info(std::move(sender_id_target_info)),
+      chime_representative_target_id(std::move(chime_representative_target_id)),
       enabled_features(std::move(enabled_features)) {}
 
 DeviceInfo::SharingInfo::SharingInfo(const SharingInfo& other) = default;
@@ -35,8 +34,9 @@ DeviceInfo::SharingInfo& DeviceInfo::SharingInfo::operator=(
 DeviceInfo::SharingInfo::~SharingInfo() = default;
 
 bool DeviceInfo::SharingInfo::operator==(const SharingInfo& other) const {
-  return vapid_target_info == other.vapid_target_info &&
-         sender_id_target_info == other.sender_id_target_info &&
+  return sender_id_target_info == other.sender_id_target_info &&
+         chime_representative_target_id ==
+             other.chime_representative_target_id &&
          enabled_features == other.enabled_features;
 }
 
@@ -65,20 +65,30 @@ DeviceInfo::DeviceInfo(
     const std::string& client_name,
     const std::string& chrome_version,
     const std::string& sync_user_agent,
-    const sync_pb::SyncEnums::DeviceType device_type,
+    const DeviceType device_type,
     const OsType os_type,
     const FormFactor form_factor,
     const std::string& signin_scoped_device_id,
     const std::string& manufacturer_name,
     const std::string& model_name,
+    std::optional<std::string> server_determined_model_name,
     const std::string& full_hardware_class,
     base::Time last_updated_timestamp,
     base::TimeDelta pulse_interval,
     bool send_tab_to_self_receiving_enabled,
-    const absl::optional<SharingInfo>& sharing_info,
-    const absl::optional<PhoneAsASecurityKeyInfo>& paask_info,
+    SendTabReceivingType send_tab_to_self_receiving_type,
+    const std::optional<SharingInfo>& sharing_info,
+    const std::optional<PhoneAsASecurityKeyInfo>& paask_info,
     const std::string& fcm_registration_token,
-    const ModelTypeSet& interested_data_types)
+    const DataTypeSet& interested_data_types,
+    std::optional<base::Time> auto_sign_out_last_signin_timestamp,
+    bool desktop_to_ios_promo_receiving_enabled,
+    const MobilePromoOnDesktopPromoTypeSet&
+        desktop_to_ios_promo_receiving_types,
+    GlicExperimentalTriggeringState glic_experimental_triggering_state,
+    std::optional<int> glic_experimental_triggering_version,
+    std::optional<std::string> android_os_build_fingerprint_prefix,
+    std::optional<PersonalContextInfo> personal_context_info)
     : guid_(guid),
       client_name_(client_name),
       chrome_version_(chrome_version),
@@ -89,16 +99,35 @@ DeviceInfo::DeviceInfo(
       signin_scoped_device_id_(signin_scoped_device_id),
       manufacturer_name_(manufacturer_name),
       model_name_(model_name),
+      server_determined_model_name_(std::move(server_determined_model_name)),
       full_hardware_class_(full_hardware_class),
+      android_os_build_fingerprint_prefix_(
+          std::move(android_os_build_fingerprint_prefix)),
       last_updated_timestamp_(last_updated_timestamp),
       pulse_interval_(pulse_interval),
       send_tab_to_self_receiving_enabled_(send_tab_to_self_receiving_enabled),
+      send_tab_to_self_receiving_type_(send_tab_to_self_receiving_type),
       sharing_info_(sharing_info),
       paask_info_(paask_info),
       fcm_registration_token_(fcm_registration_token),
-      interested_data_types_(interested_data_types) {}
+      interested_data_types_(interested_data_types),
+      auto_sign_out_last_signin_timestamp_(auto_sign_out_last_signin_timestamp),
+      desktop_to_ios_promo_receiving_enabled_(
+          desktop_to_ios_promo_receiving_enabled),
+      desktop_to_ios_promo_receiving_types_(
+          desktop_to_ios_promo_receiving_types),
+      glic_experimental_triggering_state_(glic_experimental_triggering_state),
+      glic_experimental_triggering_version_(
+          glic_experimental_triggering_version),
+      personal_context_info_(std::move(personal_context_info)) {}
+
+DeviceInfo::DeviceInfo(const DeviceInfo& other) = default;
 
 DeviceInfo::~DeviceInfo() = default;
+
+std::unique_ptr<DeviceInfo> DeviceInfo::DeepCopyForTesting() const {
+  return base::WrapUnique(new DeviceInfo(*this));
+}
 
 const std::string& DeviceInfo::guid() const {
   return guid_;
@@ -120,7 +149,7 @@ const std::string& DeviceInfo::public_id() const {
   return public_id_;
 }
 
-sync_pb::SyncEnums::DeviceType DeviceInfo::device_type() const {
+DeviceInfo::DeviceType DeviceInfo::device_type() const {
   return device_type_;
 }
 
@@ -148,6 +177,11 @@ const std::string& DeviceInfo::full_hardware_class() const {
   return full_hardware_class_;
 }
 
+const std::optional<std::string>&
+DeviceInfo::android_os_build_fingerprint_prefix() const {
+  return android_os_build_fingerprint_prefix_;
+}
+
 base::Time DeviceInfo::last_updated_timestamp() const {
   return last_updated_timestamp_;
 }
@@ -160,22 +194,59 @@ bool DeviceInfo::send_tab_to_self_receiving_enabled() const {
   return send_tab_to_self_receiving_enabled_;
 }
 
-const absl::optional<DeviceInfo::SharingInfo>& DeviceInfo::sharing_info()
+DeviceInfo::SendTabReceivingType DeviceInfo::send_tab_to_self_receiving_type()
     const {
+  return send_tab_to_self_receiving_type_;
+}
+
+bool DeviceInfo::desktop_to_ios_promo_receiving_enabled() const {
+  return desktop_to_ios_promo_receiving_enabled_;
+}
+
+const MobilePromoOnDesktopPromoTypeSet&
+DeviceInfo::desktop_to_ios_promo_receiving_types() const {
+  return desktop_to_ios_promo_receiving_types_;
+}
+
+DeviceInfo::GlicExperimentalTriggeringState
+DeviceInfo::glic_experimental_triggering_state() const {
+  return glic_experimental_triggering_state_;
+}
+
+std::optional<int> DeviceInfo::glic_experimental_triggering_version() const {
+  return glic_experimental_triggering_version_;
+}
+
+const std::optional<std::string>& DeviceInfo::server_determined_model_name()
+    const {
+  return server_determined_model_name_;
+}
+
+const std::optional<DeviceInfo::SharingInfo>& DeviceInfo::sharing_info() const {
   return sharing_info_;
 }
 
-const absl::optional<DeviceInfo::PhoneAsASecurityKeyInfo>&
+const std::optional<DeviceInfo::PhoneAsASecurityKeyInfo>&
 DeviceInfo::paask_info() const {
   return paask_info_;
+}
+
+const std::optional<DeviceInfo::PersonalContextInfo>&
+DeviceInfo::personal_context_info() const {
+  return personal_context_info_;
 }
 
 const std::string& DeviceInfo::fcm_registration_token() const {
   return fcm_registration_token_;
 }
 
-const ModelTypeSet& DeviceInfo::interested_data_types() const {
+const DataTypeSet& DeviceInfo::interested_data_types() const {
   return interested_data_types_;
+}
+
+std::optional<base::Time> DeviceInfo::auto_sign_out_last_signin_timestamp()
+    const {
+  return auto_sign_out_last_signin_timestamp_;
 }
 
 void DeviceInfo::set_public_id(const std::string& id) {
@@ -191,13 +262,43 @@ void DeviceInfo::set_send_tab_to_self_receiving_enabled(bool new_value) {
   send_tab_to_self_receiving_enabled_ = new_value;
 }
 
+void DeviceInfo::set_send_tab_to_self_receiving_type(
+    SendTabReceivingType new_value) {
+  send_tab_to_self_receiving_type_ = new_value;
+}
+
+void DeviceInfo::set_desktop_to_ios_promo_receiving_enabled(bool new_value) {
+  desktop_to_ios_promo_receiving_enabled_ = new_value;
+}
+
+void DeviceInfo::set_desktop_to_ios_promo_receiving_types(
+    const MobilePromoOnDesktopPromoTypeSet& new_types) {
+  desktop_to_ios_promo_receiving_types_ = new_types;
+}
+
+void DeviceInfo::set_glic_experimental_triggering_state(
+    GlicExperimentalTriggeringState state) {
+  glic_experimental_triggering_state_ = state;
+}
+
+void DeviceInfo::set_glic_experimental_triggering_version(
+    std::optional<int> version) {
+  glic_experimental_triggering_version_ = version;
+}
+
 void DeviceInfo::set_sharing_info(
-    const absl::optional<SharingInfo>& sharing_info) {
+    const std::optional<SharingInfo>& sharing_info) {
   sharing_info_ = sharing_info;
 }
 
-void DeviceInfo::set_paask_info(PhoneAsASecurityKeyInfo&& paask_info) {
-  paask_info_.emplace(std::forward<PhoneAsASecurityKeyInfo>(paask_info));
+void DeviceInfo::set_paask_info(
+    std::optional<PhoneAsASecurityKeyInfo>&& paask_info) {
+  paask_info_ = std::move(paask_info);
+}
+
+void DeviceInfo::set_personal_context_info(
+    std::optional<PersonalContextInfo> personal_context_info) {
+  personal_context_info_ = std::move(personal_context_info);
 }
 
 void DeviceInfo::set_client_name(const std::string& client_name) {
@@ -208,8 +309,13 @@ void DeviceInfo::set_fcm_registration_token(const std::string& fcm_token) {
   fcm_registration_token_ = fcm_token;
 }
 
-void DeviceInfo::set_interested_data_types(const ModelTypeSet& data_types) {
+void DeviceInfo::set_interested_data_types(const DataTypeSet& data_types) {
   interested_data_types_ = data_types;
+}
+
+void DeviceInfo::set_auto_sign_out_last_signin_timestamp(
+    std::optional<base::Time> time) {
+  auto_sign_out_last_signin_timestamp_ = time;
 }
 
 }  // namespace syncer

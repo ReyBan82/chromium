@@ -5,9 +5,10 @@
 import {assertString} from '../assert.js';
 import * as dom from '../dom.js';
 import {getI18nMessage} from '../models/load_time_data.js';
-import {ViewName} from '../type.js';
+import type {ViewName} from '../type.js';
 
-import {DialogEnterOptions, View} from './view.js';
+import type {DialogEnterOptions} from './view.js';
+import {View} from './view.js';
 
 interface ButtonEvent {
   onNegativeButtonClicked?: () => void;
@@ -26,11 +27,8 @@ export class Dialog extends View {
 
   private readonly titleHolder: HTMLDivElement|null;
 
-  private readonly descHolder: HTMLDivElement|null;
+  protected readonly descHolder: HTMLDivElement|null;
 
-  /**
-   * @param name View name of the dialog.
-   */
   constructor(
       name: ViewName,
       {onPositiveButtonClicked, onNegativeButtonClicked}: ButtonEvent = {}) {

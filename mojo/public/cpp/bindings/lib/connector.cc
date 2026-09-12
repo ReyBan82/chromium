@@ -8,16 +8,14 @@
 
 #include <memory>
 
+#include "base/check.h"
 #include "base/check_op.h"
-#include "base/compiler_specific.h"
+#include "base/debug/alias.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/memory/ptr_util.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/raw_ptr_exclusion.h"
 #include "base/metrics/field_trial_params.h"
-#include "base/metrics/histogram_macros.h"
-#include "base/rand_util.h"
+#include "base/notreached.h"
 #include "base/run_loop.h"
 #include "base/strings/strcat.h"
 #include "base/strings/string_util.h"
@@ -28,11 +26,9 @@
 #include "base/trace_event/trace_event.h"
 #include "base/trace_event/typed_macros.h"
 #include "mojo/public/c/system/quota.h"
-#include "mojo/public/cpp/bindings/features.h"
 #include "mojo/public/cpp/bindings/lib/may_auto_lock.h"
 #include "mojo/public/cpp/bindings/mojo_buildflags.h"
 #include "mojo/public/cpp/bindings/sync_handle_watcher.h"
-#include "mojo/public/cpp/bindings/tracing_helpers.h"
 #include "mojo/public/cpp/system/wait.h"
 #include "third_party/perfetto/protos/perfetto/trace/track_event/chrome_mojo_event_info.pbzero.h"
 
@@ -52,16 +48,6 @@ Connector::OutgoingSerializationMode g_default_outgoing_serialization_mode =
 Connector::IncomingSerializationMode g_default_incoming_serialization_mode =
     Connector::IncomingSerializationMode::kDispatchAsIs;
 
-bool EnableTaskPerMessage() {
-  // Const since this may be called from any thread. Initialization is
-  // thread-safe. This is a workaround since some consumers of Mojo (e.g. many
-  // browser tests) use base::FeatureList incorrectly and thus cause data races
-  // when features are queried from arbitrary threads.
-  static const bool enable =
-      base::FeatureList::IsEnabled(features::kTaskPerMessage);
-  return enable;
-}
-
 }  // namespace
 
 // Used to efficiently maintain a doubly-linked list of all Connectors
@@ -79,15 +65,9 @@ class Connector::ActiveDispatchTracker {
 
  private:
   const base::WeakPtr<Connector> connector_;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #union
-  RAW_PTR_EXCLUSION RunLoopNestingObserver* const nesting_observer_;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #union
-  RAW_PTR_EXCLUSION ActiveDispatchTracker* outer_tracker_ = nullptr;
-  // This field is not a raw_ptr<> because it was filtered by the rewriter for:
-  // #union
-  RAW_PTR_EXCLUSION ActiveDispatchTracker* inner_tracker_ = nullptr;
+  const raw_ptr<RunLoopNestingObserver> nesting_observer_;
+  raw_ptr<ActiveDispatchTracker> outer_tracker_ = nullptr;
+  raw_ptr<ActiveDispatchTracker> inner_tracker_ = nullptr;
 };
 
 // Watches the MessageLoop on the current thread. Notifies the current chain of
@@ -108,13 +88,15 @@ class Connector::RunLoopNestingObserver
 
   // base::RunLoop::NestingObserver:
   void OnBeginNestedRunLoop() override {
-    if (top_tracker_)
+    if (top_tracker_) {
       top_tracker_->NotifyBeginNesting();
+    }
   }
 
   static RunLoopNestingObserver* GetForThread() {
-    if (!base::CurrentThread::Get())
+    if (!base::CurrentThread::Get()) {
       return nullptr;
+    }
     // The NestingObserver for each thread. Note that this is always a
     // Connector::RunLoopNestingObserver; we use the base type here because that
     // subclass is private to Connector.
@@ -141,19 +123,23 @@ Connector::ActiveDispatchTracker::ActiveDispatchTracker(
 }
 
 Connector::ActiveDispatchTracker::~ActiveDispatchTracker() {
-  if (nesting_observer_->top_tracker_ == this)
+  if (nesting_observer_->top_tracker_ == this) {
     nesting_observer_->top_tracker_ = outer_tracker_;
-  else if (inner_tracker_)
+  } else if (inner_tracker_) {
     inner_tracker_->outer_tracker_ = outer_tracker_;
-  if (outer_tracker_)
+  }
+  if (outer_tracker_) {
     outer_tracker_->inner_tracker_ = inner_tracker_;
+  }
 }
 
 void Connector::ActiveDispatchTracker::NotifyBeginNesting() {
-  if (connector_ && connector_->handle_watcher_)
+  if (connector_ && connector_->handle_watcher_) {
     connector_->handle_watcher_->ArmOrNotify();
-  if (outer_tracker_)
+  }
+  if (outer_tracker_) {
     outer_tracker_->NotifyBeginNesting();
+  }
 }
 
 Connector::Connector(ScopedMessagePipeHandle message_pipe,
@@ -161,7 +147,6 @@ Connector::Connector(ScopedMessagePipeHandle message_pipe,
                      const char* interface_name)
     : message_pipe_(std::move(message_pipe)),
       error_(false),
-      force_immediate_dispatch_(!EnableTaskPerMessage()),
       outgoing_serialization_mode_(g_default_outgoing_serialization_mode),
       incoming_serialization_mode_(g_default_incoming_serialization_mode),
       interface_name_(interface_name),
@@ -169,12 +154,14 @@ Connector::Connector(ScopedMessagePipeHandle message_pipe,
           base::JoinString({interface_name ? interface_name : "Generic",
                             "MessageHeaderValidator"},
                            "")) {
-  if (config == MULTI_THREADED_SEND)
+  if (config == MULTI_THREADED_SEND) {
     lock_.emplace();
+  }
 
 #if defined(ENABLE_IPC_FUZZER)
-  if (!MessageDumper::GetMessageDumpDirectory().empty())
+  if (!MessageDumper::GetMessageDumpDirectory().empty()) {
     message_dumper_ = std::make_unique<MessageDumper>();
+  }
 #endif
 
   weak_self_ = weak_factory_.GetWeakPtr();
@@ -245,19 +232,21 @@ void Connector::RaiseError() {
   HandleError(true, true);
 }
 
-void Connector::SetConnectionGroup(ConnectionGroup::Ref ref) {
+void Connector::SetConnectionGroup(ConnectionGroupRef ref) {
   // If this Connector already belonged to a group, parent the new group to that
   // one so that the reference is not lost.
-  if (connection_group_)
+  if (connection_group_) {
     ref.SetParentGroup(std::move(connection_group_));
+  }
   connection_group_ = std::move(ref);
 }
 
 bool Connector::WaitForIncomingMessage() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (error_)
+  if (error_) {
     return false;
+  }
 
   ResumeIncomingMethodCallProcessing();
 
@@ -283,8 +272,9 @@ bool Connector::WaitForIncomingMessage() {
 void Connector::PauseIncomingMethodCallProcessing() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (paused_)
+  if (paused_) {
     return;
+  }
 
   paused_ = true;
   CancelWait();
@@ -293,23 +283,26 @@ void Connector::PauseIncomingMethodCallProcessing() {
 void Connector::ResumeIncomingMethodCallProcessing() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (!paused_)
+  if (!paused_) {
     return;
+  }
 
   paused_ = false;
   WaitToReadMore();
 }
 
 bool Connector::PrefersSerializedMessages() {
-  if (outgoing_serialization_mode_ != OutgoingSerializationMode::kLazy)
+  if (outgoing_serialization_mode_ != OutgoingSerializationMode::kLazy) {
     return true;
+  }
 
   // In lazy serialization mode (the default) we prefer to send unserialized
   // messages. Note that most interfaces don't support lazy serialization
   // though, so they'll still only send serialized messages. As such, in most
   // cases this return value is ignored.
-  if (!peer_remoteness_tracker_)
+  if (!peer_remoteness_tracker_) {
     return false;
+  }
 
   // If we have set up a remoteness tracker however, that means we've actually
   // seen at least one unserialized message (see Accept()). In that case we
@@ -320,16 +313,24 @@ bool Connector::PrefersSerializedMessages() {
 }
 
 bool Connector::Accept(Message* message) {
-  if (!lock_ && task_runner_)
-    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  MojoResult result = AcceptAndGetResult(message);
+  return result == MOJO_RESULT_OK;
+}
 
-  if (error_)
-    return false;
+MojoResult Connector::AcceptAndGetResult(Message* message) {
+  if (!lock_ && task_runner_) {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  }
+
+  if (TS_UNCHECKED_READ(error_)) {
+    return MOJO_RESULT_UNKNOWN;
+  }
 
   internal::MayAutoLock locker(&lock_);
 
-  if (!message_pipe_.is_valid() || drop_writes_)
-    return true;
+  if (!message_pipe_.is_valid() || drop_writes_) {
+    return MOJO_RESULT_OK;
+  }
 
 #if defined(ENABLE_IPC_FUZZER)
   if (message_dumper_ && message->is_serialized()) {
@@ -364,6 +365,7 @@ bool Connector::Accept(Message* message) {
       // from the caller since we'd like them to continue consuming any backlog
       // of incoming messages before regarding the message pipe as closed.
       drop_writes_ = true;
+      rv = MOJO_RESULT_OK;
       break;
     case MOJO_RESULT_BUSY:
       // We'd get a "busy" result if one of the message's handles is:
@@ -376,14 +378,13 @@ bool Connector::Accept(Message* message) {
       // TODO(vtl): I wonder if this should be a |DCHECK()|. (But, until
       // crbug.com/389666, etc. are resolved, this will make tests fail quickly
       // rather than hanging.)
-      CHECK(false) << "Race condition or other bug detected";
-      return false;
+      NOTREACHED() << "Race condition or other bug detected";
     default:
       // This particular write was rejected, presumably because of bad input.
       // The pipe is not necessarily in a bad state.
-      return false;
+      break;
   }
-  return true;
+  return rv;
 }
 
 void Connector::AllowWokenUpBySyncWatchOnSameThread() {
@@ -404,14 +405,25 @@ void Connector::OverrideDefaultSerializationBehaviorForTesting(
 }
 
 bool Connector::SimulateReadMessage(ScopedMessageHandle message) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   return DispatchMessage(std::move(message));
 }
 
-void Connector::OnWatcherHandleReady(MojoResult result) {
+void Connector::OnWatcherHandleReady(const char* interface_name,
+                                     MojoResult result) {
+  // NOTE: `interface_name` always points to static string data, so it's useful
+  // to alias without copying to the stack.
+  base::debug::Alias(&interface_name);
+
   OnHandleReadyInternal(result);
 }
 
-void Connector::OnSyncHandleWatcherHandleReady(MojoResult result) {
+void Connector::OnSyncHandleWatcherHandleReady(const char* interface_name,
+                                               MojoResult result) {
+  // NOTE: `interface_name` always points to static string data, so it's useful
+  // to alias without copying to the stack.
+  base::debug::Alias(&interface_name);
+
   base::WeakPtr<Connector> weak_self(weak_self_);
 
   sync_handle_watcher_callback_count_++;
@@ -446,24 +458,30 @@ void Connector::WaitToReadMore() {
   CHECK(!paused_);
   DCHECK(!handle_watcher_);
 
-  if (!nesting_observer_)
+  if (!nesting_observer_) {
     nesting_observer_ = RunLoopNestingObserver::GetForThread();
+  }
 
   DCHECK(task_runner_->RunsTasksInCurrentSequence());
   handle_watcher_ = std::make_unique<SimpleWatcher>(
       FROM_HERE, SimpleWatcher::ArmingPolicy::MANUAL, task_runner_,
       interface_name_);
+  // Safe to use Unretained: this callback is stored inside |handle_watcher_|,
+  // which is owned by this Connector. When ~Connector destroys the watcher,
+  // it invalidates the watcher's weak pointers, preventing any further
+  // invocations. The callback is never posted directly — SimpleWatcher
+  // guards delivery through its own weak pointer mechanism.
   MojoResult rv = handle_watcher_->Watch(
       message_pipe_.get(), MOJO_HANDLE_SIGNAL_READABLE,
       base::BindRepeating(&Connector::OnWatcherHandleReady,
-                          base::Unretained(this)));
+                          base::Unretained(this), interface_name_));
 
   if (rv != MOJO_RESULT_OK) {
     // If the watch failed because the handle is invalid or its conditions can
     // no longer be met, we signal the error asynchronously to avoid reentry.
     task_runner_->PostTask(
-        FROM_HERE,
-        base::BindOnce(&Connector::OnWatcherHandleReady, weak_self_, rv));
+        FROM_HERE, base::BindOnce(&Connector::OnWatcherHandleReady, weak_self_,
+                                  interface_name_, rv));
   } else {
     handle_watcher_->ArmOrNotify();
   }
@@ -510,7 +528,7 @@ bool Connector::DispatchMessage(ScopedMessageHandle handle) {
   }
 
   base::WeakPtr<Connector> weak_self = weak_self_;
-  absl::optional<ActiveDispatchTracker> dispatch_tracker;
+  std::optional<ActiveDispatchTracker> dispatch_tracker;
   if (!is_dispatching_ && nesting_observer_) {
     is_dispatching_ = true;
     dispatch_tracker.emplace(weak_self);
@@ -536,20 +554,21 @@ bool Connector::DispatchMessage(ScopedMessageHandle handle) {
         ctx.event()->set_chrome_mojo_event_info()->set_mojo_interface_tag(
             interface_name_);
 
-        static const uint8_t* flow_enabled =
-            TRACE_EVENT_API_GET_CATEGORY_GROUP_ENABLED("toplevel.flow");
-        if (!*flow_enabled)
+        if (!TRACE_EVENT_CATEGORY_ENABLED("toplevel.flow,mojom.flow")) {
           return;
+        }
 
         perfetto::Flow::Global(message.GetTraceId())(ctx);
       });
 
-  if (connection_group_)
+  if (connection_group_) {
     message.set_receiver_connection_group(&connection_group_);
+  }
   bool receiver_result =
       incoming_receiver_ && incoming_receiver_->Accept(&message);
-  if (!weak_self)
+  if (!weak_self) {
     return receiver_result;
+  }
 
   if (dispatch_tracker) {
     is_dispatching_ = false;
@@ -572,6 +591,7 @@ void Connector::PostDispatchNextMessageFromPipe() {
 }
 
 void Connector::CallDispatchNextMessageFromPipe() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
   DCHECK_GT(num_pending_dispatch_tasks_, 0u);
   --num_pending_dispatch_tasks_;
   ReadAllAvailableMessages();
@@ -582,8 +602,9 @@ void Connector::ScheduleDispatchOfPendingMessagesOrWaitForMore(
   if (pending_message_count == 0) {
     // We're done only because there are no more messages to read, so go back to
     // watching the pipe for more.
-    if (handle_watcher_)
+    if (handle_watcher_) {
       handle_watcher_->ArmOrNotify();
+    }
     return;
   }
 
@@ -593,8 +614,9 @@ void Connector::ScheduleDispatchOfPendingMessagesOrWaitForMore(
 }
 
 void Connector::ReadAllAvailableMessages() {
-  if (paused_ || error_)
+  if (paused_ || error_) {
     return;
+  }
 
   base::WeakPtr<Connector> weak_self = weak_self_;
 
@@ -645,8 +667,9 @@ void Connector::CancelWait() {
 }
 
 void Connector::HandleError(bool force_pipe_reset, bool force_async_handler) {
-  if (error_ || !message_pipe_.is_valid())
+  if (error_ || !message_pipe_.is_valid()) {
     return;
+  }
 
   if (paused_) {
     // Enforce calling the error handler asynchronously if the user has paused
@@ -655,8 +678,9 @@ void Connector::HandleError(bool force_pipe_reset, bool force_async_handler) {
     force_async_handler = true;
   }
 
-  if (!force_pipe_reset && force_async_handler)
+  if (!force_pipe_reset && force_async_handler) {
     force_pipe_reset = true;
+  }
 
   if (force_pipe_reset) {
     CancelWait();
@@ -669,22 +693,30 @@ void Connector::HandleError(bool force_pipe_reset, bool force_async_handler) {
   }
 
   if (force_async_handler) {
-    if (!paused_)
+    if (!paused_) {
       WaitToReadMore();
+    }
   } else {
     error_ = true;
-    if (connection_error_handler_)
+    if (connection_error_handler_) {
       std::move(connection_error_handler_).Run();
+    }
   }
 }
 
 void Connector::EnsureSyncWatcherExists() {
-  if (sync_watcher_)
+  if (sync_watcher_) {
     return;
+  }
+  // Safe to use Unretained: this callback is stored inside |sync_watcher_|,
+  // which is owned by this Connector. The callback is only invoked
+  // synchronously from SyncHandleRegistry::Wait() on the bound sequence,
+  // never posted. When ~Connector destroys the watcher, the callback is
+  // destroyed with it.
   sync_watcher_ = std::make_unique<SyncHandleWatcher>(
       message_pipe_.get(), MOJO_HANDLE_SIGNAL_READABLE,
       base::BindRepeating(&Connector::OnSyncHandleWatcherHandleReady,
-                          base::Unretained(this)));
+                          base::Unretained(this), interface_name_));
 }
 
 }  // namespace mojo

@@ -4,14 +4,13 @@
 
 #include "third_party/blink/renderer/modules/media/audio/audio_renderer_sink_cache.h"
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 
-#include "base/containers/cxx20_erase.h"
 #include "base/location.h"
 #include "base/memory/ptr_util.h"
 #include "base/metrics/histogram_macros.h"
-#include "base/ranges/algorithm.h"
 #include "base/synchronization/lock.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/trace_event/trace_event.h"
@@ -63,22 +62,6 @@ const char AudioRendererSinkCache::WindowObserver::kSupplementName[] =
 
 namespace {
 
-enum GetOutputDeviceInfoCacheUtilization {
-  // No cached sink found.
-  SINK_CACHE_MISS_NO_SINK = 0,
-
-  // If session id is used to specify a device, we always have to create and
-  // cache a new sink.
-  // DEPRECATED: Do not edit, to preserve UMAs.
-  // SINK_CACHE_MISS_CANNOT_LOOKUP_BY_SESSION_ID = 1,
-
-  // Output parmeters for an already-cached sink are requested.
-  SINK_CACHE_HIT = 2,
-
-  // For UMA.
-  SINK_CACHE_LAST_ENTRY
-};
-
 bool SinkIsHealthy(media::AudioRendererSink* sink) {
   return sink->GetOutputDeviceInfo().device_status() ==
          media::OUTPUT_DEVICE_STATUS_OK;
@@ -127,19 +110,15 @@ AudioRendererSinkCache::~AudioRendererSinkCache() {
 media::OutputDeviceInfo AudioRendererSinkCache::GetSinkInfo(
     const LocalFrameToken& source_frame_token,
     const std::string& device_id) {
-  TRACE_EVENT_BEGIN2("audio", "AudioRendererSinkCache::GetSinkInfo",
-                     "frame_token", source_frame_token.ToString(), "device id",
-                     device_id);
+  TRACE_EVENT_BEGIN("audio", "AudioRendererSinkCache::GetSinkInfo",
+                    "frame_token", source_frame_token.ToString(), "device id",
+                    device_id);
   {
     base::AutoLock auto_lock(cache_lock_);
-    auto* cache_iter = FindCacheEntry_Locked(source_frame_token, device_id);
+    auto cache_iter = FindCacheEntry_Locked(source_frame_token, device_id);
     if (cache_iter != cache_.end()) {
       // A matching cached sink is found.
-      UMA_HISTOGRAM_ENUMERATION(
-          "Media.Audio.Render.SinkCache.GetOutputDeviceInfoCacheUtilization",
-          SINK_CACHE_HIT, SINK_CACHE_LAST_ENTRY);
-      TRACE_EVENT_END1("audio", "AudioRendererSinkCache::GetSinkInfo", "result",
-                       "Cache hit");
+      TRACE_EVENT_END("audio", "result", "Cache hit");
       return cache_iter->sink->GetOutputDeviceInfo();
     }
   }
@@ -150,12 +129,7 @@ media::OutputDeviceInfo AudioRendererSinkCache::GetSinkInfo(
 
   MaybeCacheSink(source_frame_token, device_id, sink);
 
-  UMA_HISTOGRAM_ENUMERATION(
-      "Media.Audio.Render.SinkCache.GetOutputDeviceInfoCacheUtilization",
-      SINK_CACHE_MISS_NO_SINK, SINK_CACHE_LAST_ENTRY);
-
-  TRACE_EVENT_END1("audio", "AudioRendererSinkCache::GetSinkInfo", "result",
-                   "Cache miss");
+  TRACE_EVENT_END("audio", "result", "Cache miss");
   // |sink| is ref-counted, so it's ok if it is removed from cache before we
   // get here.
   return sink->GetOutputDeviceInfo();
@@ -169,7 +143,7 @@ void AudioRendererSinkCache::DeleteLater(
           &AudioRendererSinkCache::DeleteSink,
           // Unretained is safe here since this is a process-wide
           // singleton and tests will ensure lifetime.
-          CrossThreadUnretained(this), WTF::RetainedRef(std::move(sink))),
+          CrossThreadUnretained(this), blink::RetainedRef(std::move(sink))),
       delete_timeout_);
 }
 
@@ -183,7 +157,7 @@ void AudioRendererSinkCache::DeleteSink(
     base::AutoLock auto_lock(cache_lock_);
 
     // Looking up the sink by its pointer.
-    auto* cache_iter = base::ranges::find(
+    auto cache_iter = std::ranges::find(
         cache_, sink_ptr, [](const CacheEntry& val) { return val.sink.get(); });
 
     if (cache_iter == cache_.end())
@@ -205,7 +179,7 @@ AudioRendererSinkCache::FindCacheEntry_Locked(
     const LocalFrameToken& source_frame_token,
     const std::string& device_id) {
   cache_lock_.AssertAcquired();
-  return base::ranges::find_if(
+  return std::ranges::find_if(
       cache_, [source_frame_token, &device_id](const CacheEntry& val) {
         if (val.source_frame_token != source_frame_token)
           return false;
@@ -224,8 +198,7 @@ void AudioRendererSinkCache::MaybeCacheSink(
     const std::string& device_id,
     scoped_refptr<media::AudioRendererSink> sink) {
   if (!SinkIsHealthy(sink.get())) {
-    TRACE_EVENT_INSTANT0("audio", "MaybeCacheSink: Unhealthy sink",
-                         TRACE_EVENT_SCOPE_THREAD);
+    TRACE_EVENT_INSTANT("audio", "MaybeCacheSink: Unhealthy sink");
     // Since |sink| is not cached, we must make sure to Stop it now.
     sink->Stop();
     return;
@@ -244,7 +217,7 @@ void AudioRendererSinkCache::MaybeCacheSink(
 void AudioRendererSinkCache::DropSinksForFrame(
     const LocalFrameToken& source_frame_token) {
   base::AutoLock auto_lock(cache_lock_);
-  WTF::EraseIf(cache_, [source_frame_token](const CacheEntry& val) {
+  EraseIf(cache_, [source_frame_token](const CacheEntry& val) {
     if (val.source_frame_token == source_frame_token) {
       val.sink->Stop();
       return true;

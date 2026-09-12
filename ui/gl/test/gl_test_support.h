@@ -7,8 +7,8 @@
 
 #include <stdint.h>
 
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "ui/gfx/buffer_types.h"
+#include <optional>
+
 #include "ui/gl/gl_implementation.h"
 
 namespace gl {
@@ -20,19 +20,10 @@ class GLTestSupport {
   // to select if it is an allowed GL implementation. Otherwise it selects the
   // first allowed GL implementation.
   static GLDisplay* InitializeGL(
-      absl::optional<GLImplementationParts> prefered_impl);
+      std::optional<GLImplementationParts> prefered_impl);
 
   // Cleanup GL after being initialized for image testing.
   static void CleanupGL(GLDisplay* display);
-
-  // Initialize buffer of a specific |format| to |color|.
-  static void SetBufferDataToColor(int width,
-                                   int height,
-                                   int stride,
-                                   int plane,
-                                   gfx::BufferFormat format,
-                                   const uint8_t color[4],
-                                   uint8_t* data);
 };
 
 }  // namespace gl

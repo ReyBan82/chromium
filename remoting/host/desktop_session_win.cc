@@ -5,9 +5,11 @@
 #include "remoting/host/desktop_session_win.h"
 
 #include <objbase.h>
+
 #include <sddl.h>
 #include <wrl/client.h>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <string>
@@ -15,12 +17,11 @@
 
 #include "base/base_switches.h"
 #include "base/command_line.h"
-#include "base/cxx17_backports.h"
 #include "base/files/file_path.h"
-#include "base/guid.h"
 #include "base/logging.h"
 #include "base/memory/ref_counted.h"
 #include "base/memory/weak_ptr.h"
+#include "base/notimplemented.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/threading/thread_checker.h"
@@ -28,6 +29,7 @@
 #include "base/win/registry.h"
 #include "base/win/scoped_bstr.h"
 #include "base/win/scoped_handle.h"
+#include "base/win/trust_util.h"
 #include "remoting/base/auto_thread_task_runner.h"
 #include "remoting/host/base/screen_resolution.h"
 #include "remoting/host/base/switches.h"
@@ -39,12 +41,11 @@
 // MIDL-generated declarations and definitions.
 #include "remoting/host/win/chromoting_lib.h"
 #include "remoting/host/win/host_service.h"
-#include "remoting/host/win/trust_util.h"
-#include "remoting/host/win/worker_process_launcher.h"
 #include "remoting/host/win/wts_session_process_delegate.h"
 #include "remoting/host/win/wts_terminal_monitor.h"
 #include "remoting/host/win/wts_terminal_observer.h"
 #include "remoting/host/worker_process_ipc_delegate.h"
+#include "remoting/host/worker_process_launcher.h"
 
 using base::win::ScopedHandle;
 
@@ -63,7 +64,7 @@ const wchar_t kDaemonIpcSecurityDescriptor[] =
 
 // The command line parameters that should be copied from the service's command
 // line to the desktop process.
-const char* kCopiedSwitchNames[] = {switches::kV, switches::kVModule};
+const char* const kCopiedSwitchNames[] = {switches::kV, switches::kVModule};
 
 // The default screen dimensions for an RDP session.
 const int kDefaultRdpScreenWidth = 1280;
@@ -104,8 +105,8 @@ const wchar_t kSecurityLayerValueName[] = L"SecurityLayer";
 
 webrtc::DesktopSize GetBoundedRdpDesktopSize(int width, int height) {
   return webrtc::DesktopSize(
-      base::clamp(width, kMinRdpScreenWidth, kMaxRdpScreenWidth),
-      base::clamp(height, kMinRdpScreenHeight, kMaxRdpScreenHeight));
+      std::clamp(width, kMinRdpScreenWidth, kMaxRdpScreenWidth),
+      std::clamp(height, kMinRdpScreenHeight, kMaxRdpScreenHeight));
 }
 
 // DesktopSession implementation which attaches to the host's physical console.
@@ -156,7 +157,7 @@ class RdpSession : public DesktopSessionWin {
   ~RdpSession() override;
 
   // Performs the part of initialization that can fail.
-  bool Initialize(const ScreenResolution& resolution);
+  bool Initialize(const mojom::DesktopSessionOptions& options);
 
   // Mirrors IRdpDesktopSessionEventHandler.
   void OnRdpConnected();
@@ -265,8 +266,14 @@ RdpSession::RdpSession(scoped_refptr<AutoThreadTaskRunner> caller_task_runner,
 
 RdpSession::~RdpSession() {}
 
-bool RdpSession::Initialize(const ScreenResolution& resolution) {
+bool RdpSession::Initialize(const mojom::DesktopSessionOptions& options) {
   DCHECK(caller_task_runner()->BelongsToCurrentThread());
+
+  if (!options.required_username.empty()) {
+    LOG(WARNING)
+        << "Policy host_username_match_required ignored since it is not "
+        << "supported on Windows.";
+  }
 
   if (!VerifyRdpSettings()) {
     LOG(ERROR) << "Could not create an RDP session due to invalid settings.";
@@ -283,7 +290,7 @@ bool RdpSession::Initialize(const ScreenResolution& resolution) {
     return false;
   }
 
-  ScreenResolution local_resolution = resolution;
+  ScreenResolution local_resolution = options.screen_resolution;
 
   // If the screen resolution is not specified, use the default screen
   // resolution.
@@ -312,7 +319,7 @@ bool RdpSession::Initialize(const ScreenResolution& resolution) {
   // Create an RDP session.
   Microsoft::WRL::ComPtr<IRdpDesktopSessionEventHandler> event_handler(
       new EventHandler(weak_factory_.GetWeakPtr()));
-  terminal_id_ = base::GenerateGUID();
+  terminal_id_ = WtsTerminalMonitor::GenerateVirtualTerminalId();
   base::win::ScopedBstr terminal_id(base::UTF8ToWide(terminal_id_));
   result = rdp_desktop_session_->Connect(
       host_size.width(), host_size.height(), kDefaultRdpDpi, kDefaultRdpDpi,
@@ -341,7 +348,10 @@ void RdpSession::OnRdpClosed() {
 
 void RdpSession::SetScreenResolution(const ScreenResolution& resolution) {
   DCHECK(caller_task_runner()->BelongsToCurrentThread());
-  DCHECK(!resolution.IsEmpty());
+  if (resolution.IsEmpty()) {
+    LOG(ERROR) << "Invalid resolution specified: " << resolution;
+    return;
+  }
 
   webrtc::DesktopSize bounded_size = GetBoundedRdpDesktopSize(
       resolution.dimensions().width(), resolution.dimensions().height());
@@ -487,7 +497,7 @@ std::unique_ptr<DesktopSession> DesktopSessionWin::CreateForConsole(
     scoped_refptr<AutoThreadTaskRunner> io_task_runner,
     DaemonProcess* daemon_process,
     int id,
-    const ScreenResolution& resolution) {
+    const mojom::DesktopSessionOptions& options) {
   return std::make_unique<ConsoleSession>(caller_task_runner, io_task_runner,
                                           daemon_process, id,
                                           HostService::GetInstance());
@@ -499,11 +509,11 @@ std::unique_ptr<DesktopSession> DesktopSessionWin::CreateForVirtualTerminal(
     scoped_refptr<AutoThreadTaskRunner> io_task_runner,
     DaemonProcess* daemon_process,
     int id,
-    const ScreenResolution& resolution) {
+    const mojom::DesktopSessionOptions& options) {
   std::unique_ptr<RdpSession> session(
       new RdpSession(caller_task_runner, io_task_runner, daemon_process, id,
                      HostService::GetInstance()));
-  if (!session->Initialize(resolution)) {
+  if (!session->Initialize(options)) {
     return nullptr;
   }
 
@@ -569,13 +579,22 @@ void DesktopSessionWin::StopMonitoring() {
   OnSessionDetached();
 }
 
-void DesktopSessionWin::TerminateSession() {
+void DesktopSessionWin::TerminateSession(ErrorCode error_code,
+                                         const std::string& error_details,
+                                         const SourceLocation& error_location) {
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
+
+  if (!error_details.empty() || error_code != ErrorCode::OK) {
+    LOG(ERROR) << "Terminating session " << id()
+               << " (error code: " << ErrorCodeToString(error_code)
+               << "): " << error_details << " at " << error_location.ToString();
+  }
 
   StopMonitoring();
 
   // This call will delete |this| so it should be at the very end of the method.
-  daemon_process()->CloseDesktopSession(id());
+  daemon_process()->CloseDesktopSessionWithError(id(), error_code,
+                                                 error_details, error_location);
 }
 
 void DesktopSessionWin::OnChannelConnected(int32_t peer_pid) {
@@ -631,12 +650,13 @@ void DesktopSessionWin::OnSessionAttached(uint32_t session_id) {
   base::FilePath desktop_binary;
   bool result = GetInstalledBinaryPath(kDesktopBinaryName, &desktop_binary);
 
-  if (!result || !IsBinaryTrusted(desktop_binary)) {
+  if (!result || !base::win::IsBinaryTrusted(desktop_binary)) {
     result = GetInstalledBinaryPath(kHostBinaryName, &desktop_binary);
   }
 
   if (!result) {
-    TerminateSession();
+    TerminateSession(ErrorCode::HOST_CONFIGURATION_ERROR,
+                     "Failed to find trusted desktop binary.", FROM_HERE);
     return;
   }
 
@@ -647,7 +667,7 @@ void DesktopSessionWin::OnSessionAttached(uint32_t session_id) {
   target->AppendSwitchASCII(kProcessTypeSwitchName, kProcessTypeDesktop);
   // Copy the command line switches enabling verbose logging.
   target->CopySwitchesFrom(*base::CommandLine::ForCurrentProcess(),
-                           kCopiedSwitchNames, std::size(kCopiedSwitchNames));
+                           kCopiedSwitchNames);
 
   // Create a delegate capable of launching a process in a different session.
   // Launch elevated to enable injection of Alt+Tab and Ctrl+Alt+Del.
@@ -656,7 +676,8 @@ void DesktopSessionWin::OnSessionAttached(uint32_t session_id) {
           io_task_runner_, std::move(target), /*launch_elevated=*/true,
           base::WideToUTF8(kDaemonIpcSecurityDescriptor)));
   if (!delegate->Initialize(session_id)) {
-    TerminateSession();
+    TerminateSession(ErrorCode::HOST_CONFIGURATION_ERROR,
+                     "Failed to initialize session delegate.", FROM_HERE);
     return;
   }
 
@@ -687,7 +708,7 @@ void DesktopSessionWin::ConnectDesktopChannel(
   DCHECK(caller_task_runner_->BelongsToCurrentThread());
 
   if (!daemon_process()->OnDesktopSessionAgentAttached(
-          id(), session_id_, std::move(desktop_pipe))) {
+          id(), std::move(desktop_pipe))) {
     CrashDesktopProcess(FROM_HERE);
   }
 }
@@ -698,6 +719,11 @@ void DesktopSessionWin::InjectSecureAttentionSequence() {
 
 void DesktopSessionWin::CrashNetworkProcess() {
   daemon_process()->CrashNetworkProcess(FROM_HERE);
+}
+
+void DesktopSessionWin::ReconnectNetworkChannel(
+    const mojom::DesktopSessionOptions& options) {
+  NOTIMPLEMENTED();
 }
 
 void DesktopSessionWin::CrashDesktopProcess(const base::Location& location) {
@@ -717,10 +743,12 @@ void DesktopSessionWin::ReportElapsedTime(const std::string& event) {
 
   base::Time::Exploded exploded;
   now.LocalExplode(&exploded);
-  VLOG(1) << base::StringPrintf("session(%d): %s at %02d:%02d:%02d.%03d%s",
-                                id(), event.c_str(), exploded.hour,
-                                exploded.minute, exploded.second,
-                                exploded.millisecond, passed.c_str());
+  std::string time_str =
+      base::StringPrintf("%02d:%02d:%02d.%03d", exploded.hour, exploded.minute,
+                         exploded.second, exploded.millisecond);
+
+  VLOG(1) << base::StringPrintf("session(%d): %s at %s%s", id(), event.c_str(),
+                                time_str.c_str(), passed.c_str());
 
   last_timestamp_ = now;
 }

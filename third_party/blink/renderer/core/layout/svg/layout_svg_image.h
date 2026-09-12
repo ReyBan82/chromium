@@ -38,7 +38,6 @@ class LayoutSVGImage final : public LayoutSVGModelObject {
   ~LayoutSVGImage() override;
   void Trace(Visitor*) const override;
 
-  void SetNeedsBoundariesUpdate() override { NOT_DESTROYED(); }
   void SetNeedsTransformUpdate() override {
     NOT_DESTROYED();
     needs_transform_update_ = true;
@@ -62,10 +61,9 @@ class LayoutSVGImage final : public LayoutSVGModelObject {
     return !object_bounding_box_.IsEmpty();
   }
 
-  bool IsOfType(LayoutObjectType type) const override {
+  bool IsSVGImage() const final {
     NOT_DESTROYED();
-    return type == kLayoutObjectSVGImage ||
-           LayoutSVGModelObject::IsOfType(type);
+    return true;
   }
 
   AffineTransform LocalSVGTransform() const override {
@@ -79,8 +77,11 @@ class LayoutSVGImage final : public LayoutSVGModelObject {
   }
 
  protected:
-  void StyleDidChange(StyleDifference, const ComputedStyle* old_style) override;
-  void WillBeDestroyed() override;
+  void StyleDidChange(StyleDifference,
+                      const ComputedStyle* old_style,
+                      const ComputedStyle& new_style,
+                      const StyleChangeContext&) override;
+  void WillBeDestroyed(const ComputedStyle*) override;
 
  private:
   gfx::RectF StrokeBoundingBox() const override {
@@ -88,12 +89,20 @@ class LayoutSVGImage final : public LayoutSVGModelObject {
     return object_bounding_box_;
   }
 
+  gfx::RectF DecoratedBoundingBox() const override {
+    NOT_DESTROYED();
+    return object_bounding_box_;
+  }
+
   void ImageChanged(WrappedImagePtr, CanDeferInvalidation) override;
 
-  void UpdateLayout() override;
+  SVGLayoutResult UpdateSVGLayout(const SVGLayoutInfo&) override;
   void Paint(const PaintInfo&) const override;
 
   bool UpdateBoundingBox();
+  // Update LayoutObject state after layout has completed. Returns true if
+  // boundaries needs to be propagated (because of a change to the transform).
+  bool UpdateAfterSVGLayout(const SVGLayoutInfo&, bool bbox_changed);
 
   bool NodeAtPoint(HitTestResult&,
                    const HitTestLocation&,
@@ -101,10 +110,12 @@ class LayoutSVGImage final : public LayoutSVGModelObject {
                    HitTestPhase) override;
 
   gfx::SizeF CalculateObjectSize() const;
-  bool HasOverriddenIntrinsicSize() const;
 
-  bool needs_transform_update_ : 1;
-  bool transform_uses_reference_box_ : 1;
+  // True if `local_transform_` is not up-to-date.
+  bool needs_transform_update_ : 1 = true;
+  // The transform applied to the object depends on the reference box (i.e
+  // translate(50%, 50%) or similar).
+  bool transform_uses_reference_box_ : 1 = false;
   AffineTransform local_transform_;
   gfx::RectF object_bounding_box_;
   Member<LayoutImageResource> image_resource_;

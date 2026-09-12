@@ -57,6 +57,29 @@ export class BrowserBridge {
     chrome.send('setNetworkDebugMode', [subsystem]);
   }
 
+  sendClearSharedDictionary() {
+    return sendWithPromise('clearSharedDictionary');
+  }
+
+  sendClearSharedDictionaryCacheForIsolationKey(frame_origin, top_frame_site) {
+    return sendWithPromise(
+        'clearSharedDictionaryCacheForIsolationKey', frame_origin,
+        top_frame_site);
+  }
+
+  getSharedDictionaryUsageInfo() {
+    return sendWithPromise('getSharedDictionaryUsageInfo');
+  }
+
+  getSharedDictionaryInfo(frame_origin, top_frame_site) {
+    return sendWithPromise(
+        'getSharedDictionaryInfo', frame_origin, top_frame_site);
+  }
+
+  sendTestProxyConfigurationUrlMatcher(matcher, url) {
+    return sendWithPromise('testProxyConfigurationUrlMatcher', matcher, url);
+  }
+
   static getInstance() {
     return instance || (instance = new BrowserBridge());
   }

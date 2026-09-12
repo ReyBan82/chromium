@@ -5,13 +5,12 @@
 #include "components/sync/engine/loopback_server/loopback_server_entity.h"
 
 #include <limits>
+#include <string_view>
 #include <vector>
 
-#include "base/guid.h"
 #include "base/memory/ref_counted.h"
 #include "base/notreached.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_piece.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "base/strings/stringprintf.h"
@@ -27,7 +26,7 @@
 using std::string;
 using std::vector;
 
-using syncer::ModelType;
+using syncer::DataType;
 
 namespace {
 // The separator used when formatting IDs.
@@ -35,7 +34,7 @@ namespace {
 // We chose the underscore character because it doesn't conflict with the
 // special characters used by base/base64.h's encoding, which is also used in
 // the construction of some IDs.
-const char kIdSeparator[] = "_";
+constexpr char kIdSeparator[] = "_";
 }  // namespace
 
 namespace syncer {
@@ -49,17 +48,23 @@ LoopbackServerEntity::CreateEntityFromProto(
   switch (entity.type()) {
     case sync_pb::LoopbackServerEntity_Type_TOMBSTONE:
       return PersistentTombstoneEntity::CreateFromEntity(entity.entity());
-    case sync_pb::LoopbackServerEntity_Type_PERMANENT:
+    case sync_pb::LoopbackServerEntity_Type_PERMANENT: {
+      DataType data_type =
+          syncer::GetDataTypeFromSpecifics(entity.entity().specifics());
+      if (!IsRealDataType(data_type)) {
+        return nullptr;
+      }
       return std::make_unique<PersistentPermanentEntity>(
-          entity.entity().id_string(), entity.entity().version(),
-          syncer::GetModelTypeFromSpecifics(entity.entity().specifics()),
+          entity.entity().id_string(), entity.entity().version(), data_type,
           entity.entity().name(), entity.entity().parent_id_string(),
           entity.entity().server_defined_unique_tag(),
           entity.entity().specifics());
+    }
     case sync_pb::LoopbackServerEntity_Type_BOOKMARK:
       return PersistentBookmarkEntity::CreateFromEntity(entity.entity());
     case sync_pb::LoopbackServerEntity_Type_UNIQUE:
-      return PersistentUniqueClientEntity::CreateFromEntity(entity.entity());
+      return PersistentUniqueClientEntity::CreateFromEntity(
+          entity.entity(), /*migration_version=*/0);
     case sync_pb::LoopbackServerEntity_Type_UNKNOWN:
       NOTREACHED() << "Unknown type encountered";
   }
@@ -70,8 +75,8 @@ const std::string& LoopbackServerEntity::GetId() const {
   return id_;
 }
 
-ModelType LoopbackServerEntity::GetModelType() const {
-  return model_type_;
+DataType LoopbackServerEntity::GetDataType() const {
+  return data_type_;
 }
 
 int64_t LoopbackServerEntity::GetVersion() const {
@@ -114,53 +119,94 @@ bool LoopbackServerEntity::IsPermanent() const {
 sync_pb::LoopbackServerEntity_Type
 LoopbackServerEntity::GetLoopbackServerEntityType() const {
   NOTREACHED();
-  return sync_pb::LoopbackServerEntity_Type_UNKNOWN;
 }
 
 // static
-string LoopbackServerEntity::CreateId(const ModelType& model_type,
-                                      const string& inner_id) {
-  int field_number = GetSpecificsFieldNumberFromModelType(model_type);
-  return base::StringPrintf("%d%s%s", field_number, kIdSeparator,
-                            inner_id.c_str());
+string LoopbackServerEntity::CreateId(const DataType& data_type,
+                                      const string& inner_id,
+                                      int migration_version) {
+  const int field_number = GetSpecificsFieldNumberFromDataType(data_type);
+  if (migration_version > 0) {
+    return base::StringPrintf("%d%s@%d%s%s", field_number, kIdSeparator,
+                              migration_version, kIdSeparator, inner_id);
+  }
+  return base::StringPrintf("%d%s%s", field_number, kIdSeparator, inner_id);
 }
 
 // static
-std::string LoopbackServerEntity::GetTopLevelId(const ModelType& model_type) {
+std::string LoopbackServerEntity::GetTopLevelId(const DataType& data_type,
+                                                int migration_version) {
   return LoopbackServerEntity::CreateId(
-      model_type, syncer::ModelTypeToProtocolRootTag(model_type));
+      data_type, syncer::DataTypeToProtocolRootTag(data_type),
+      migration_version);
 }
 
 // static
-ModelType LoopbackServerEntity::GetModelTypeFromId(const string& id) {
-  vector<base::StringPiece> tokens = base::SplitStringPiece(
+DataType LoopbackServerEntity::GetDataTypeFromId(const string& id) {
+  const vector<std::string_view> tokens = base::SplitStringPiece(
       id, kIdSeparator, base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
-  int field_number;
-  if (tokens.size() != 2 || !base::StringToInt(tokens[0], &field_number)) {
+  if (tokens.size() < 2) {
     return syncer::UNSPECIFIED;
   }
 
-  return syncer::GetModelTypeFromSpecificsFieldNumber(field_number);
+  int field_number = 0;
+  if (base::StringToInt(tokens[0], &field_number)) {
+    return syncer::GetDataTypeFromSpecificsFieldNumber(field_number);
+  }
+
+  return syncer::UNSPECIFIED;
 }
 
 // static
 std::string LoopbackServerEntity::GetInnerIdFromId(const std::string& id) {
-  vector<base::StringPiece> tokens = base::SplitStringPiece(
+  const vector<std::string_view> tokens = base::SplitStringPiece(
       id, kIdSeparator, base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
 
-  if (tokens.size() != 2) {
+  if (tokens.size() < 2) {
     return std::string();
   }
 
-  return std::string(tokens[1]);
+  if (tokens.size() == 2) {
+    return std::string(tokens[1]);
+  }
+
+  if (base::StartsWith(tokens[1], "@", base::CompareCase::SENSITIVE)) {
+    // It is a versioned ID. Tag starts at tokens[2].
+    const std::vector<std::string_view> sub_tokens(tokens.begin() + 2,
+                                                   tokens.end());
+    return base::JoinString(sub_tokens, kIdSeparator);
+  }
+  // It is an unversioned ID with underscores within the inner ID itself. Tag
+  // starts at tokens[1].
+  const std::vector<std::string_view> sub_tokens(tokens.begin() + 1,
+                                                 tokens.end());
+  return base::JoinString(sub_tokens, kIdSeparator);
+}
+
+// static
+int LoopbackServerEntity::GetMigrationVersionFromId(const std::string& id) {
+  const vector<std::string_view> tokens = base::SplitStringPiece(
+      id, kIdSeparator, base::KEEP_WHITESPACE, base::SPLIT_WANT_NONEMPTY);
+
+  if (tokens.size() < 3) {
+    return 0;
+  }
+
+  if (base::StartsWith(tokens[1], "@", base::CompareCase::SENSITIVE)) {
+    int version = 0;
+    if (base::StringToInt(tokens[1].substr(1), &version)) {
+      return version;
+    }
+  }
+  return 0;
 }
 
 LoopbackServerEntity::LoopbackServerEntity(const string& id,
-                                           const ModelType& model_type,
+                                           const DataType& data_type,
                                            int64_t version,
                                            const string& name)
-    : id_(id), model_type_(model_type), version_(version), name_(name) {}
+    : id_(id), data_type_(data_type), version_(version), name_(name) {}
 
 void LoopbackServerEntity::SerializeBaseProtoFields(
     sync_pb::SyncEntity* sync_entity) const {
@@ -176,15 +222,27 @@ void LoopbackServerEntity::SerializeBaseProtoFields(
   sync_entity->set_deleted(IsDeleted());
   sync_entity->set_folder(IsFolder());
 
-  if (RequiresParentId())
+  if (RequiresParentId()) {
     sync_entity->set_parent_id_string(GetParentId());
+  }
 }
 
 void LoopbackServerEntity::SerializeAsLoopbackServerEntity(
     sync_pb::LoopbackServerEntity* entity) const {
   entity->set_type(GetLoopbackServerEntityType());
-  entity->set_model_type(static_cast<int64_t>(GetModelType()));
+  entity->set_data_type(static_cast<int64_t>(GetDataType()));
   SerializeAsProto(entity->mutable_entity());
+}
+
+void LoopbackServerEntity::MigrateToNewVersionForTesting(int new_version) {
+  id_ = CreateId(GetDataType(), GetInnerIdFromId(id_), new_version);
+  // Start with entity version 1 (not to be confused with the migration version,
+  // which is represented by `new_version`). This mimics MIGRATION_DONE causing
+  // the server versions to decrease (as opposed to the usual
+  // monotonically-increasing behavior), as an attempt to catch more bugs
+  // related to making the incorrect assumption that entity versions are
+  // monotonically increasing across MIGRATION_DONE.
+  SetVersion(1);
 }
 
 }  // namespace syncer

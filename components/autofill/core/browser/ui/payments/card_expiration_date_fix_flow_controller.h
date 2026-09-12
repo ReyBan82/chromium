@@ -5,12 +5,8 @@
 #ifndef COMPONENTS_AUTOFILL_CORE_BROWSER_UI_PAYMENTS_CARD_EXPIRATION_DATE_FIX_FLOW_CONTROLLER_H_
 #define COMPONENTS_AUTOFILL_CORE_BROWSER_UI_PAYMENTS_CARD_EXPIRATION_DATE_FIX_FLOW_CONTROLLER_H_
 
-#include <memory>
 #include <string>
 
-#include "base/functional/callback.h"
-#include "components/autofill/core/browser/data_model/credit_card.h"
-#include "components/autofill/core/browser/metrics/autofill_metrics.h"
 
 namespace autofill {
 
@@ -18,7 +14,7 @@ namespace autofill {
 // Only used on mobile.
 class CardExpirationDateFixFlowController {
  public:
-  virtual ~CardExpirationDateFixFlowController() {}
+  virtual ~CardExpirationDateFixFlowController() = default;
 
   // Interaction.
   virtual void OnAccepted(const std::u16string& month,

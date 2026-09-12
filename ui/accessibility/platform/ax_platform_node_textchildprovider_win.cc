@@ -4,14 +4,13 @@
 
 #include "ui/accessibility/platform/ax_platform_node_textchildprovider_win.h"
 
+#include "ui/accessibility/platform/ax_platform_node_textprovider_win.h"
+
 #include <UIAutomationClient.h>
 #include <UIAutomationCoreApi.h>
 
-#include "ui/accessibility/platform/ax_platform_node_textprovider_win.h"
-#include "ui/base/win/atl_module.h"
-
 #define UIA_VALIDATE_TEXTCHILDPROVIDER_CALL() \
-  if (!owner()->GetDelegate())                \
+  if (owner()->IsDestroyed())                 \
     return UIA_E_ELEMENTNOTAVAILABLE;
 
 namespace ui {
@@ -29,25 +28,16 @@ AXPlatformNodeWin* GetParentAXPlatformNodeWin(AXPlatformNodeWin* node) {
 
 }  // namespace
 
-AXPlatformNodeTextChildProviderWin::AXPlatformNodeTextChildProviderWin() {
-  DVLOG(1) << __func__;
-}
+AXPlatformNodeTextChildProviderWin::AXPlatformNodeTextChildProviderWin(
+    AXPlatformNodeWin* owner)
+    : owner_(owner) {}
 
 AXPlatformNodeTextChildProviderWin::~AXPlatformNodeTextChildProviderWin() {}
 
 // static
-AXPlatformNodeTextChildProviderWin* AXPlatformNodeTextChildProviderWin::Create(
-    AXPlatformNodeWin* owner) {
-  CComObject<AXPlatformNodeTextChildProviderWin>* text_child_provider = nullptr;
-  if (SUCCEEDED(CComObject<AXPlatformNodeTextChildProviderWin>::CreateInstance(
-          &text_child_provider))) {
-    DCHECK(text_child_provider);
-    text_child_provider->owner_ = owner;
-    text_child_provider->AddRef();
-    return text_child_provider;
-  }
-
-  return nullptr;
+Microsoft::WRL::ComPtr<AXPlatformNodeTextChildProviderWin>
+AXPlatformNodeTextChildProviderWin::Create(AXPlatformNodeWin* owner) {
+  return Microsoft::WRL::Make<AXPlatformNodeTextChildProviderWin>(owner);
 }
 
 // static
@@ -83,8 +73,8 @@ HRESULT AXPlatformNodeTextChildProviderWin::get_TextRange(
 
   AXPlatformNodeWin* container = GetTextContainer(owner_.Get());
   if (container && container->IsDescendant(owner())) {
-    *result =
-        AXPlatformNodeTextProviderWin::GetRangeFromChild(container, owner());
+    AXPlatformNodeTextProviderWin::GetRangeFromChild(container, owner(),
+                                                     result);
   }
 
   return S_OK;

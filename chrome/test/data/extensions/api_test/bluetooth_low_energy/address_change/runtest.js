@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-var error;
+let error;
 
 function testAddressChanged() {
   if (error !== undefined) {
     chrome.test.sendMessage('fail');
     chrome.test.fail(error);
   }
-  chrome.test.assertTrue(service != null);
+  chrome.test.assertNe(null, service);
 
   chrome.test.assertEq(serviceId, service.instanceId);
 
@@ -20,10 +20,10 @@ function testAddressChanged() {
   chrome.test.succeed();
 }
 
-var newDeviceAddress = '11:22:33:44:55:77';
-var serviceId = 'service_id0';
+const newDeviceAddress = '11:22:33:44:55:77';
+const serviceId = 'service_id0';
 
-var service = null;
+let service = null;
 
 function earlyError(message) {
   error = message;
@@ -39,8 +39,9 @@ function failOnError() {
 }
 
 chrome.bluetoothLowEnergy.getService(serviceId, function(result) {
-  if (failOnError())
+  if (failOnError()) {
     return;
+  }
 
   service = result;
 

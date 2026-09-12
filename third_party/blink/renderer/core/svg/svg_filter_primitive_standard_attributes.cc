@@ -22,6 +22,7 @@
 #include "third_party/blink/renderer/core/svg/svg_filter_primitive_standard_attributes.h"
 
 #include "third_party/blink/renderer/core/layout/svg/layout_svg_filter_primitive.h"
+#include "third_party/blink/renderer/core/layout/svg/layout_svg_resource_container.h"
 #include "third_party/blink/renderer/core/svg/graphics/filters/svg_filter_builder.h"
 #include "third_party/blink/renderer/core/svg/svg_animated_length.h"
 #include "third_party/blink/renderer/core/svg/svg_animated_string.h"
@@ -64,11 +65,6 @@ SVGFilterPrimitiveStandardAttributes::SVGFilterPrimitiveStandardAttributes(
           SVGLength::Initial::kPercent100)),
       result_(MakeGarbageCollected<SVGAnimatedString>(this,
                                                       svg_names::kResultAttr)) {
-  AddToPropertyMap(x_);
-  AddToPropertyMap(y_);
-  AddToPropertyMap(width_);
-  AddToPropertyMap(height_);
-  AddToPropertyMap(result_);
 }
 
 void SVGFilterPrimitiveStandardAttributes::Trace(Visitor* visitor) const {
@@ -102,7 +98,6 @@ void SVGFilterPrimitiveStandardAttributes::SvgAttributeChanged(
       attr_name == svg_names::kWidthAttr ||
       attr_name == svg_names::kHeightAttr ||
       attr_name == svg_names::kResultAttr) {
-    SVGElement::InvalidationGuard invalidation_guard(this);
     Invalidate();
     return;
   }
@@ -138,8 +133,12 @@ static gfx::RectF DefaultFilterPrimitiveSubregion(FilterEffect* filter_effect) {
     // ... the default subregion is 0%, 0%, 100%, 100%, where as a
     // special-case the percentages are relative to the dimensions of the
     // filter region..."
-    if (input_effect->GetFilterEffectType() == kFilterEffectTypeSourceInput)
+    // A non-clipping input (e.g. a CSS filter function) has no real
+    // subregion either, so treat it like a standard input too.
+    if (input_effect->GetFilterEffectType() == kFilterEffectTypeSourceInput ||
+        !input_effect->ClipsToBounds()) {
       return filter_effect->GetFilter()->FilterRegion();
+    }
     subregion_union.Union(input_effect->FilterPrimitiveSubregion());
   }
   return subregion_union;
@@ -148,12 +147,14 @@ static gfx::RectF DefaultFilterPrimitiveSubregion(FilterEffect* filter_effect) {
 void SVGFilterPrimitiveStandardAttributes::SetStandardAttributes(
     FilterEffect* filter_effect,
     SVGUnitTypes::SVGUnitType primitive_units,
-    const gfx::RectF& reference_box) const {
+    const gfx::RectF& reference_box,
+    const std::optional<gfx::SizeF>& override_viewport) const {
   DCHECK(filter_effect);
 
   gfx::RectF subregion = DefaultFilterPrimitiveSubregion(filter_effect);
   gfx::RectF primitive_boundaries =
-      SVGLengthContext::ResolveRectangle(this, primitive_units, reference_box);
+      LayoutSVGResourceContainer::ResolveRectangle(
+          *this, primitive_units, reference_box, override_viewport);
 
   if (x()->IsSpecified())
     subregion.set_x(primitive_boundaries.x());
@@ -168,8 +169,7 @@ void SVGFilterPrimitiveStandardAttributes::SetStandardAttributes(
 }
 
 LayoutObject* SVGFilterPrimitiveStandardAttributes::CreateLayoutObject(
-    const ComputedStyle&,
-    LegacyLayout) {
+    const ComputedStyle&) {
   return MakeGarbageCollected<LayoutSVGFilterPrimitive>(this);
 }
 
@@ -198,6 +198,31 @@ void InvalidateFilterPrimitiveParent(SVGElement& element) {
   if (!svg_parent)
     return;
   svg_parent->Invalidate();
+}
+
+SVGAnimatedPropertyBase*
+SVGFilterPrimitiveStandardAttributes::PropertyFromAttribute(
+    const QualifiedName& attribute_name) const {
+  if (attribute_name == svg_names::kXAttr) {
+    return x_.Get();
+  } else if (attribute_name == svg_names::kYAttr) {
+    return y_.Get();
+  } else if (attribute_name == svg_names::kWidthAttr) {
+    return width_.Get();
+  } else if (attribute_name == svg_names::kHeightAttr) {
+    return height_.Get();
+  } else if (attribute_name == svg_names::kResultAttr) {
+    return result_.Get();
+  } else {
+    return SVGElement::PropertyFromAttribute(attribute_name);
+  }
+}
+
+void SVGFilterPrimitiveStandardAttributes::SynchronizeAllSVGAttributes() const {
+  SVGAnimatedPropertyBase* attrs[]{x_.Get(), y_.Get(), width_.Get(),
+                                   height_.Get(), result_.Get()};
+  SynchronizeListOfSVGAttributes(attrs);
+  SVGElement::SynchronizeAllSVGAttributes();
 }
 
 }  // namespace blink

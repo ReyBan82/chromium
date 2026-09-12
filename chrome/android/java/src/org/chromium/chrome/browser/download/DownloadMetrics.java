@@ -5,53 +5,82 @@
 package org.chromium.chrome.browser.download;
 
 import androidx.annotation.IntDef;
-import androidx.annotation.Nullable;
 
 import org.chromium.base.metrics.RecordHistogram;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.components.profile_metrics.BrowserProfileType;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
-import java.util.ArrayList;
 
-/**
- * Records download related metrics on Android.
- */
+/** Records download related metrics on Android. */
+@NullMarked
 public class DownloadMetrics {
-    private static final String TAG = "DownloadMetrics";
-    private static final int MAX_VIEW_RETENTION_MINUTES = 30 * 24 * 60;
-
-    // Please treat this list as append only and keep it in sync with
-    // Android.DownloadManager.Cancel.CancelFrom in enums.xml.
-    @IntDef({CancelFrom.CANCEL_SHUTDOWN, CancelFrom.CANCEL_NOTIFICATION,
-            CancelFrom.CANCEL_DOWNLOAD_HOME, CancelFrom.NUM_ENTRIES})
+    // These values are persisted to logs. Entries should not be renumbered and
+    // numeric values should never be reused.
+    @IntDef({
+        OpenWithExternalAppsSource.OPEN_FILE,
+        OpenWithExternalAppsSource.DOWNLOAD_PROGRESS_MESSAGE,
+        OpenWithExternalAppsSource.APP_MENU,
+        OpenWithExternalAppsSource.DOWNLOAD_HOME_MENU,
+        OpenWithExternalAppsSource.NUM_ENTRIES
+    })
     @Retention(RetentionPolicy.SOURCE)
-    public @interface CancelFrom {
-        int CANCEL_SHUTDOWN = 0;
-        int CANCEL_NOTIFICATION = 1;
-        int CANCEL_DOWNLOAD_HOME = 2;
-        int NUM_ENTRIES = 3;
+    public @interface OpenWithExternalAppsSource {
+        int OPEN_FILE = 0;
+        int DOWNLOAD_PROGRESS_MESSAGE = 1;
+        int APP_MENU = 2;
+        int DOWNLOAD_HOME_MENU = 3;
+
+        int NUM_ENTRIES = 4;
+    }
+
+    // These values are persisted to logs. Entries should not be renumbered and
+    // numeric values should never be reused.
+    @IntDef({
+        DownloadOpenTarget.CHROME_DEFAULT,
+        DownloadOpenTarget.CHROME_FALLBACK,
+        DownloadOpenTarget.OTHER_APP_DEFAULT,
+        DownloadOpenTarget.OS_CHOOSER,
+        DownloadOpenTarget.NUM_ENTRIES
+    })
+    @Retention(RetentionPolicy.SOURCE)
+    public @interface DownloadOpenTarget {
+        int CHROME_DEFAULT = 0;
+        int CHROME_FALLBACK = 1;
+        int OTHER_APP_DEFAULT = 2;
+        int OS_CHOOSER = 3;
+
+        int NUM_ENTRIES = 4;
     }
 
     /**
      * Records download open source.
+     *
      * @param source The source where the user opened the download media file.
      * @param mimeType The mime type of the download.
      */
-    public static void recordDownloadOpen(@DownloadOpenSource int source, String mimeType) {
-        @DownloadFilter.Type
-        int type = DownloadFilter.fromMimeType(mimeType);
+    public static void recordDownloadOpen(
+            @DownloadOpenSource int source, @Nullable String mimeType) {
+        @DownloadFilter.Type int type = DownloadFilter.fromMimeType(mimeType);
         if (type == DownloadFilter.Type.VIDEO) {
-            RecordHistogram.recordEnumeratedHistogram("Android.DownloadManager.OpenSource.Video",
-                    source, DownloadOpenSource.MAX_VALUE);
+            RecordHistogram.recordEnumeratedHistogram(
+                    "Android.DownloadManager.OpenSource.Video",
+                    source,
+                    DownloadOpenSource.MAX_VALUE + 1);
         } else if (type == DownloadFilter.Type.AUDIO) {
-            RecordHistogram.recordEnumeratedHistogram("Android.DownloadManager.OpenSource.Audio",
-                    source, DownloadOpenSource.MAX_VALUE);
+            RecordHistogram.recordEnumeratedHistogram(
+                    "Android.DownloadManager.OpenSource.Audio",
+                    source,
+                    DownloadOpenSource.MAX_VALUE + 1);
         } else {
-            RecordHistogram.recordEnumeratedHistogram("Android.DownloadManager.OpenSource.Other",
-                    source, DownloadOpenSource.MAX_VALUE);
+            RecordHistogram.recordEnumeratedHistogram(
+                    "Android.DownloadManager.OpenSource.Other",
+                    source,
+                    DownloadOpenSource.MAX_VALUE + 1);
         }
     }
 
@@ -62,51 +91,43 @@ public class DownloadMetrics {
      */
     public static void recordDownloadPageOpen(@DownloadOpenSource int source, @Nullable Tab tab) {
         RecordHistogram.recordEnumeratedHistogram(
-                "Android.DownloadPage.OpenSource", source, DownloadOpenSource.MAX_VALUE);
+                "Android.DownloadPage.OpenSource", source, DownloadOpenSource.MAX_VALUE + 1);
 
         // Below there are metrics per profile type, so there should be a tab to get profile.
         if (tab == null) return;
 
-        Profile profile = Profile.fromWebContents(tab.getWebContents());
-        if (profile == null) return;
-
-        @BrowserProfileType
-        int type = Profile.getBrowserProfileTypeFromProfile(profile);
+        Profile profile = tab.getProfile();
+        @BrowserProfileType int type = Profile.getBrowserProfileTypeFromProfile(profile);
         RecordHistogram.recordEnumeratedHistogram(
                 "Download.OpenDownloads.PerProfileType", type, BrowserProfileType.MAX_VALUE + 1);
         if (source == DownloadOpenSource.MENU) {
             RecordHistogram.recordEnumeratedHistogram(
-                    "Download.OpenDownloadsFromMenu.PerProfileType", type,
+                    "Download.OpenDownloadsFromMenu.PerProfileType",
+                    type,
                     BrowserProfileType.MAX_VALUE + 1);
         }
     }
 
     /**
-     * Records various call sites from where the download cancellation has been called.
-     * @param cancelFrom Various cancel reasons.
+     * Record the source when downloads are opened with external app.
+     *
+     * @param openWithExternalAppsSource The source when download is opened with external app.
      */
-    public static void recordDownloadCancel(@CancelFrom int cancelFrom) {
+    public static void recordOpenDownloadWithExternalAppsSource(
+            @OpenWithExternalAppsSource int openWithExternalAppsSource) {
         RecordHistogram.recordEnumeratedHistogram(
-                "Android.DownloadManager.Cancel", cancelFrom, CancelFrom.NUM_ENTRIES);
+                "Download.OpenDownloads.OpenWithExternalAppsSource",
+                openWithExternalAppsSource,
+                OpenWithExternalAppsSource.NUM_ENTRIES);
     }
 
     /**
-     * Records download directory type when a download is completed.
-     * @param filePath The absolute file path of the download.
+     * Records download open target when a download is opened.
+     *
+     * @param target The target application where the download is opened.
      */
-    public static void recordDownloadDirectoryType(String filePath) {
-        if (filePath == null || filePath.isEmpty()) return;
-
-        DownloadDirectoryProvider.getInstance().getAllDirectoriesOptions(
-                (ArrayList<DirectoryOption> dirs) -> {
-                    for (DirectoryOption dir : dirs) {
-                        if (filePath.contains(dir.location)) {
-                            RecordHistogram.recordEnumeratedHistogram(
-                                    "MobileDownload.Location.Download.DirectoryType", dir.type,
-                                    DirectoryOption.DownloadLocationDirectoryType.NUM_ENTRIES);
-                            return;
-                        }
-                    }
-                });
+    public static void recordDownloadOpenTarget(@DownloadOpenTarget int target) {
+        RecordHistogram.recordEnumeratedHistogram(
+                "Android.Download.OpenTarget", target, DownloadOpenTarget.NUM_ENTRIES);
     }
 }

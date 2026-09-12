@@ -9,12 +9,14 @@
 #include "third_party/blink/renderer/core/streams/underlying_sink_base.h"
 #include "third_party/blink/renderer/modules/modules_export.h"
 #include "third_party/blink/renderer/platform/peerconnection/rtc_encoded_video_stream_transformer.h"
+#include "third_party/webrtc/api/encoded_video_frame_injector_interface.h"
 #include "third_party/webrtc/api/frame_transformer_interface.h"
 
 namespace blink {
 
 class ExceptionState;
 class RTCEncodedVideoStreamTransformer;
+class RTCRtpSenderEncodedSource;
 
 class MODULES_EXPORT RTCEncodedVideoUnderlyingSink final
     : public UnderlyingSinkBase {
@@ -22,27 +24,45 @@ class MODULES_EXPORT RTCEncodedVideoUnderlyingSink final
   RTCEncodedVideoUnderlyingSink(
       ScriptState*,
       scoped_refptr<blink::RTCEncodedVideoStreamTransformer::Broker>,
-      webrtc::TransformableFrameInterface::Direction);
+      bool detach_frame_data_on_write);
+  RTCEncodedVideoUnderlyingSink(
+      ScriptState* script_state,
+      scoped_refptr<blink::RTCEncodedVideoStreamTransformer::Broker>
+          transformer_broker,
+      bool detach_frame_data_on_write,
+      bool enable_frame_restrictions,
+      base::UnguessableToken owner_id);
+
+  RTCEncodedVideoUnderlyingSink(
+      ScriptState* script_state,
+      scoped_refptr<webrtc::EncodedVideoFrameInjectorInterface> frame_injector,
+      RTCRtpSenderEncodedSource* parent_source,
+      bool detach_frame_data_on_write);
 
   // UnderlyingSinkBase
-  ScriptPromise start(ScriptState*,
-                      WritableStreamDefaultController*,
-                      ExceptionState&) override;
-  ScriptPromise write(ScriptState*,
-                      ScriptValue chunk,
-                      WritableStreamDefaultController*,
-                      ExceptionState&) override;
-  ScriptPromise close(ScriptState*, ExceptionState&) override;
-  ScriptPromise abort(ScriptState*,
-                      ScriptValue reason,
-                      ExceptionState&) override;
-
+  ScriptPromise<IDLUndefined> start(ScriptState*,
+                                    WritableStreamDefaultController*,
+                                    ExceptionState&) override;
+  ScriptPromise<IDLUndefined> write(ScriptState*,
+                                    ScriptValue chunk,
+                                    WritableStreamDefaultController*,
+                                    ExceptionState&) override;
+  ScriptPromise<IDLUndefined> close(ScriptState*, ExceptionState&) override;
+  ScriptPromise<IDLUndefined> abort(ScriptState*,
+                                    ScriptValue reason,
+                                    ExceptionState&) override;
+  void ResetTransformerCallback();
   void Trace(Visitor*) const override;
 
  private:
   scoped_refptr<blink::RTCEncodedVideoStreamTransformer::Broker>
       transformer_broker_;
-  webrtc::TransformableFrameInterface::Direction expected_direction_;
+  scoped_refptr<webrtc::EncodedVideoFrameInjectorInterface> frame_injector_;
+  Member<RTCRtpSenderEncodedSource> encoded_source_;
+  const bool detach_frame_data_on_write_;
+  const bool enable_frame_restrictions_;
+  base::UnguessableToken owner_id_;
+  int64_t last_received_frame_counter_ = std::numeric_limits<uint64_t>::min();
   THREAD_CHECKER(thread_checker_);
 };
 

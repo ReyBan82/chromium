@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "base/memory/weak_ptr.h"
+#include "base/time/time.h"
 #include "components/payments/content/developer_console_logger.h"
 #include "components/payments/content/initialization_task.h"
 #include "components/payments/content/payment_handler_host.h"
@@ -20,7 +21,6 @@
 #include "components/payments/core/journey_logger.h"
 #include "content/public/browser/document_service.h"
 #include "content/public/browser/web_contents_observer.h"
-#include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "third_party/blink/public/mojom/payments/payment_request.mojom.h"
 #include "url/gurl.h"
@@ -32,13 +32,7 @@ class RenderFrameHost;
 
 namespace payments {
 class ContentPaymentRequestDelegate;
-
-enum class SPCTransactionMode {
-  NONE,
-  AUTOACCEPT,
-  AUTOREJECT,
-  AUTOOPTOUT,
-};
+enum class SPCTransactionMode;
 
 // This class manages the interaction between the renderer (through the
 // PaymentRequestClient and Mojo stub implementation) and the desktop Payment UI
@@ -75,10 +69,12 @@ class PaymentRequest : public content::DocumentService<mojom::PaymentRequest>,
     virtual void OnConnectionTerminated() = 0;
     virtual void OnPayCalled() = 0;
     virtual void OnAbortCalled() = 0;
+    virtual void OnInternalError() = 0;
+    virtual void OnPaymentRequestStateInitDone(PaymentRequestState* state) {}
     virtual void OnCompleteCalled() {}
 
    protected:
-    virtual ~ObserverForTest() {}
+    virtual ~ObserverForTest() = default;
   };
 
   PaymentRequest(std::unique_ptr<ContentPaymentRequestDelegate> delegate,
@@ -94,7 +90,7 @@ class PaymentRequest : public content::DocumentService<mojom::PaymentRequest>,
             std::vector<mojom::PaymentMethodDataPtr> method_data,
             mojom::PaymentDetailsPtr details,
             mojom::PaymentOptionsPtr options) override;
-  void Show(bool wait_for_updated_details) override;
+  void Show(bool wait_for_updated_details, bool had_user_activation) override;
   void Retry(mojom::PaymentValidationErrorsPtr errors) override;
   void UpdateWith(mojom::PaymentDetailsPtr details) override;
   void OnPaymentDetailsNotUpdated() override;
@@ -119,10 +115,21 @@ class PaymentRequest : public content::DocumentService<mojom::PaymentRequest>,
 
   // PaymentRequestState::Delegate:
   void OnPaymentResponseAvailable(mojom::PaymentResponsePtr response) override;
-  void OnPaymentResponseError(const std::string& error_message) override;
+  void OnPaymentResponseError(mojom::PaymentEventResponseType error,
+                              const std::string& error_message) override;
   void OnShippingOptionIdSelected(std::string shipping_option_id) override;
   void OnShippingAddressSelected(mojom::PaymentAddressPtr address) override;
   void OnPayerInfoSelected(mojom::PayerDetailPtr payer_info) override;
+
+  // Called when the Payment Request is being aborted due to an internal error,
+  // such as the browser window being too small to show the UX.
+  void OnInternalError(const std::string& error_message);
+
+  // Called when the user wants to authenticate in a different way. This is
+  // different from cancel as this signals that the user still wants to continue
+  // with the payment transaction. Will destroy this object and close any
+  // related connections. Only used for SecurePaymentConfirmation currently.
+  void OnUserAuthAnotherWay();
 
   // Called when the user explicitly cancelled the flow. Will destroy this
   // object and close any related connections.
@@ -145,6 +152,10 @@ class PaymentRequest : public content::DocumentService<mojom::PaymentRequest>,
   // window.
   void OnPaymentHandlerOpenWindowCalled();
 
+  // Sets the reason why the browser window size check failed.
+  void SetWindowSizeCheckRejectionReason(
+      JourneyLogger::WindowSizeCheckRejectionReason reason);
+
   bool skipped_payment_request_ui() { return skipped_payment_request_ui_; }
   SPCTransactionMode spc_transaction_mode() const {
     return spc_transaction_mode_;
@@ -160,8 +171,14 @@ class PaymentRequest : public content::DocumentService<mojom::PaymentRequest>,
 
   base::WeakPtr<PaymentRequest> GetWeakPtr();
 
+  bool window_size_check_enabled() const { return window_size_check_enabled_; }
+
   void set_observer_for_test(base::WeakPtr<ObserverForTest> observer_for_test) {
     observer_for_testing_ = observer_for_test;
+  }
+
+  void set_window_size_check_enabled_for_test(bool window_size_check_enabled) {
+    window_size_check_enabled_ = window_size_check_enabled;
   }
 
  private:
@@ -276,6 +293,10 @@ class PaymentRequest : public content::DocumentService<mojom::PaymentRequest>,
   // renderer.
   bool is_initialized_ = false;
 
+  // Timestamps for checkout duration tracking.
+  base::TimeTicks init_time_;
+  base::TimeTicks show_time_;
+
   // Whether PaymentRequest.show() has been called.
   bool is_show_called_ = false;
 
@@ -284,9 +305,23 @@ class PaymentRequest : public content::DocumentService<mojom::PaymentRequest>,
   // callback is asynchronous.
   bool is_requested_methods_supported_invoked_ = false;
 
+  // If not empty, use this error reason when rejecting PaymentRequest.show().
+  // Will be mapped to a DOMException on the renderer side.
+  std::optional<mojom::PaymentErrorReason> reject_show_error_reason_;
+
   // If not empty, use this error message for rejecting
   // PaymentRequest.show().
   std::string reject_show_error_message_;
+
+  // Whether the PaymentRequest.show() was successfully invoked without a user
+  // activation. Used to record the activationless show JourneyLogger event only
+  // if UI was shown.
+  bool is_activationless_show_ = false;
+
+  // Whether the PaymentRequest.show() call should check the containing window
+  // size and reject if it is too small before or during the call. Should always
+  // be true in production code.
+  bool window_size_check_enabled_ = true;
 
   base::WeakPtrFactory<PaymentRequest> weak_ptr_factory_{this};
 };

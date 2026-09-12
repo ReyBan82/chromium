@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+
 #include "remoting/host/security_key/security_key_message_reader_impl.h"
 
 #include <cstdint>
@@ -63,7 +64,7 @@ void SecurityKeyMessageReaderImpl::ReadMessage() {
     }
 
     uint32_t message_length_bytes = 0;
-    if (!ReadFromStream(reinterpret_cast<char*>(&message_length_bytes), 4)) {
+    if (!ReadFromStream(base::byte_span_from_ref(message_length_bytes))) {
       NotifyError();
       return;
     }
@@ -75,7 +76,7 @@ void SecurityKeyMessageReaderImpl::ReadMessage() {
     }
 
     std::string message_data(message_length_bytes, '\0');
-    if (!ReadFromStream(std::data(message_data), message_data.size())) {
+    if (!ReadFromStream(base::as_writable_byte_span(message_data))) {
       NotifyError();
       return;
     }
@@ -95,27 +96,21 @@ void SecurityKeyMessageReaderImpl::ReadMessage() {
   }
 }
 
-bool SecurityKeyMessageReaderImpl::ReadFromStream(char* buffer,
-                                                  size_t bytes_to_read) {
-  DCHECK(buffer);
-  DCHECK_GT(bytes_to_read, 0u);
-
-  size_t bytes_read = 0;
+bool SecurityKeyMessageReaderImpl::ReadFromStream(base::span<uint8_t> buffer) {
+  DCHECK(!buffer.empty());
   do {
-    int read_result = read_stream_.ReadAtCurrentPosNoBestEffort(
-        buffer + bytes_read, bytes_to_read - bytes_read);
-    if (read_result < 1) {
-      // 0 means EOF which is normal and should not be logged as an error.
-      if (read_result != 0) {
-        LOG(ERROR) << "Failed to read from stream, ReadAtCurrentPos returned "
-                   << read_result;
-      }
+    std::optional<size_t> read_result =
+        read_stream_.ReadAtCurrentPosNoBestEffort(buffer);
+    if (!read_result.has_value()) {
+      LOG(ERROR) << "Failed to read from stream, ReadAtCurrentPos failed";
       return false;
     }
-    bytes_read += read_result;
-  } while (bytes_read < bytes_to_read);
-  DCHECK_EQ(bytes_read, bytes_to_read);
-
+    if (*read_result == 0) {
+      // 0 means EOF which is normal and should not be logged as an error.
+      return false;
+    }
+    buffer = buffer.subspan(*read_result);
+  } while (!buffer.empty());
   return true;
 }
 

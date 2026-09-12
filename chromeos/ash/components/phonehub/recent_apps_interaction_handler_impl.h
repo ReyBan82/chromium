@@ -6,11 +6,13 @@
 #define CHROMEOS_ASH_COMPONENTS_PHONEHUB_RECENT_APPS_INTERACTION_HANDLER_IMPL_H_
 
 #include <stdint.h>
+
 #include <memory>
 
-#include "base/gtest_prod_util.h"
+#include "base/memory/raw_ptr.h"
 #include "base/observer_list.h"
 #include "base/observer_list_types.h"
+#include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "chromeos/ash/components/phonehub/multidevice_feature_access_manager.h"
 #include "chromeos/ash/components/phonehub/notification.h"
@@ -22,14 +24,14 @@
 class PrefRegistrySimple;
 class PrefService;
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 // The handler that exposes APIs to interact with Phone Hub Recent Apps.
 class RecentAppsInteractionHandlerImpl
     : public RecentAppsInteractionHandler,
       public multidevice_setup::MultiDeviceSetupClient::Observer,
-      public MultideviceFeatureAccessManager::Observer {
+      public MultideviceFeatureAccessManager::Observer,
+      public eche_app::EcheConnectionStatusHandler::Observer {
  public:
   static void RegisterPrefs(PrefRegistrySimple* registry);
 
@@ -49,6 +51,8 @@ class RecentAppsInteractionHandlerImpl
       const Notification::AppMetadata& app_metadata,
       base::Time last_accessed_timestamp) override;
   std::vector<Notification::AppMetadata> FetchRecentAppMetadataList() override;
+  void SetConnectionStatusHandler(eche_app::EcheConnectionStatusHandler*
+                                      eche_connection_status_handler) override;
 
   // MultiDeviceSetupClient::Observer:
   void OnFeatureStatesChanged(
@@ -62,6 +66,10 @@ class RecentAppsInteractionHandlerImpl
   void OnNotificationAccessChanged() override;
   void OnAppsAccessChanged() override;
 
+  // eche_app::EcheConnectionStatusHandler::Observer:
+  void OnConnectionStatusForUiChanged(
+      eche_app::mojom::ConnectionStatus connection_status) override;
+
   void SetStreamableApps(
       const std::vector<Notification::AppMetadata>& streamable_apps) override;
 
@@ -72,6 +80,15 @@ class RecentAppsInteractionHandlerImpl
     return &recent_app_metadata_list_;
   }
 
+  eche_app::mojom::ConnectionStatus connection_status_for_testing() {
+    return connection_status_;
+  }
+
+  void set_connection_status_for_testing(
+      eche_app::mojom::ConnectionStatus connection_status) {
+    connection_status_ = connection_status;
+  }
+
  private:
   friend class RecentAppsInteractionHandlerTest;
 
@@ -79,24 +96,36 @@ class RecentAppsInteractionHandlerImpl
   void SaveRecentAppMetadataListToPref();
   void ComputeAndUpdateUiState();
   void ClearRecentAppMetadataListAndPref();
+  RecentAppsUiState GetUiStateFromConnectionStatus();
   base::flat_set<int64_t> GetUserIdsWithDisplayRecentApps();
 
   // Whether this class has finished loading |recent_app_metadata_list_| from
   // pref.
   bool has_loaded_prefs_ = false;
 
+  eche_app::mojom::ConnectionStatus connection_status_ =
+      eche_app::mojom::ConnectionStatus::kConnectionStatusDisconnected;
   base::ObserverList<RecentAppClickObserver> observer_list_;
   std::vector<std::pair<Notification::AppMetadata, base::Time>>
       recent_app_metadata_list_;
-  PrefService* pref_service_;
-  multidevice_setup::MultiDeviceSetupClient* multidevice_setup_client_;
-  MultideviceFeatureAccessManager* multidevice_feature_access_manager_;
+  raw_ptr<PrefService> pref_service_;
+  raw_ptr<multidevice_setup::MultiDeviceSetupClient> multidevice_setup_client_;
+  raw_ptr<MultideviceFeatureAccessManager> multidevice_feature_access_manager_;
+
+  base::ScopedObservation<multidevice_setup::MultiDeviceSetupClient,
+                          multidevice_setup::MultiDeviceSetupClient::Observer>
+      multidevice_setup_client_observation_{this};
+  base::ScopedObservation<MultideviceFeatureAccessManager,
+                          MultideviceFeatureAccessManager::Observer>
+      multidevice_feature_access_manager_observation_{this};
+  base::ScopedObservation<eche_app::EcheConnectionStatusHandler,
+                          eche_app::EcheConnectionStatusHandler::Observer>
+      eche_connection_status_handler_observation_{this};
 
   base::WeakPtrFactory<RecentAppsInteractionHandlerImpl> weak_ptr_factory_{
       this};
 };
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub
 
 #endif  // CHROMEOS_ASH_COMPONENTS_PHONEHUB_RECENT_APPS_INTERACTION_HANDLER_IMPL_H_

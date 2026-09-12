@@ -9,15 +9,23 @@
 #include <lib/fidl/cpp/binding_set.h>
 #include <lib/fidl/cpp/interface_request.h>
 #include <lib/fpromise/promise.h>
-#include <map>
 
+#include <map>
+#include <string_view>
+
+#include "base/containers/span.h"
 #include "base/files/file_util.h"
 #include "base/files/scoped_temp_dir.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
+#include "base/hash/hash.h"
 #include "base/run_loop.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/test/bind.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
+#include "crypto/hash.h"
+#include "media/base/media_switches.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
@@ -30,7 +38,6 @@ namespace drm = ::fuchsia::media::drm;
 
 using ::testing::_;
 using ::testing::Eq;
-using ::testing::Invoke;
 using ::testing::SaveArg;
 using ::testing::WithArgs;
 
@@ -52,10 +59,10 @@ class MockProvisionFetcher : public ProvisionFetcher {
 std::unique_ptr<ProvisionFetcher> CreateMockProvisionFetcher() {
   auto mock_provision_fetcher = std::make_unique<MockProvisionFetcher>();
   ON_CALL(*mock_provision_fetcher, Retrieve(_, _, _))
-      .WillByDefault(WithArgs<2>(
-          Invoke([](ProvisionFetcher::ResponseCB response_callback) {
+      .WillByDefault(
+          WithArgs<2>([](ProvisionFetcher::ResponseCB response_callback) {
             std::move(response_callback).Run(true, "response");
-          })));
+          }));
   return mock_provision_fetcher;
 }
 
@@ -91,11 +98,11 @@ class FuchsiaCdmManagerTest : public ::testing::Test {
   FuchsiaCdmManagerTest() { EXPECT_TRUE(temp_dir_.CreateUniqueTempDir()); }
 
   std::unique_ptr<FuchsiaCdmManager> CreateFuchsiaCdmManager(
-      std::vector<base::StringPiece> key_systems,
-      absl::optional<uint64_t> cdm_data_quota_bytes = absl::nullopt) {
+      std::vector<std::string_view> key_systems,
+      std::optional<uint64_t> cdm_data_quota_bytes = std::nullopt) {
     FuchsiaCdmManager::CreateKeySystemCallbackMap create_key_system_callbacks;
 
-    for (const base::StringPiece& name : key_systems) {
+    for (const std::string_view& name : key_systems) {
       MockKeySystem& key_system = mock_key_systems_[name];
       create_key_system_callbacks.emplace(
           name, base::BindRepeating(&MockKeySystem::AddBinding,
@@ -107,9 +114,9 @@ class FuchsiaCdmManagerTest : public ::testing::Test {
   }
 
  protected:
-  using MockKeySystemMap = std::map<base::StringPiece, MockKeySystem>;
+  using MockKeySystemMap = std::map<std::string_view, MockKeySystem>;
 
-  MockKeySystem& mock_key_system(const base::StringPiece& key_system_name) {
+  MockKeySystem& mock_key_system(const std::string_view& key_system_name) {
     return mock_key_systems_[key_system_name];
   }
 
@@ -148,12 +155,12 @@ TEST_F(FuchsiaCdmManagerTest, CreateAndProvision) {
   uint32_t added_data_store_id = 0;
   uint32_t cdm_data_store_id = 0;
   EXPECT_CALL(mock_key_system(kKeySystem), AddDataStore(_, _, _))
-      .WillOnce(WithArgs<0, 2>(
-          Invoke([&](uint32_t data_store_id,
-                     drm::KeySystem::AddDataStoreCallback callback) {
+      .WillOnce(
+          WithArgs<0, 2>([&](uint32_t data_store_id,
+                             drm::KeySystem::AddDataStoreCallback callback) {
             added_data_store_id = data_store_id;
             callback(fpromise::ok());
-          })));
+          }));
 
   EXPECT_CALL(mock_key_system(kKeySystem), CreateContentDecryptionModule2(_, _))
       .WillOnce(SaveArg<0>(&cdm_data_store_id));
@@ -174,12 +181,12 @@ TEST_F(FuchsiaCdmManagerTest, RecreateAfterDisconnect) {
 
   uint32_t added_data_store_id = 0;
   EXPECT_CALL(mock_key_system(kKeySystem), AddDataStore(_, _, _))
-      .WillOnce(WithArgs<0, 2>(
-          Invoke([&](uint32_t data_store_id,
-                     drm::KeySystem::AddDataStoreCallback callback) {
+      .WillOnce(
+          WithArgs<0, 2>([&](uint32_t data_store_id,
+                             drm::KeySystem::AddDataStoreCallback callback) {
             added_data_store_id = data_store_id;
             callback(fpromise::ok());
-          })));
+          }));
 
   // Create a CDM to force a KeySystem binding
   base::RunLoop create_run_loop;
@@ -206,10 +213,9 @@ TEST_F(FuchsiaCdmManagerTest, RecreateAfterDisconnect) {
 
   EXPECT_CALL(mock_key_system(kKeySystem),
               AddDataStore(Eq(added_data_store_id), _, _))
-      .WillOnce(
-          WithArgs<2>(Invoke([](drm::KeySystem::AddDataStoreCallback callback) {
-            callback(fpromise::ok());
-          })));
+      .WillOnce(WithArgs<2>([](drm::KeySystem::AddDataStoreCallback callback) {
+        callback(fpromise::ok());
+      }));
 
   base::RunLoop recreate_run_loop;
   cdm_ptr.set_error_handler(
@@ -238,10 +244,9 @@ TEST_F(FuchsiaCdmManagerTest, SameOriginShareDataStore) {
   cdm2.set_error_handler(error_handler);
 
   EXPECT_CALL(mock_key_system(kKeySystem), AddDataStore(Eq(1u), _, _))
-      .WillOnce(
-          WithArgs<2>(Invoke([](drm::KeySystem::AddDataStoreCallback callback) {
-            callback(fpromise::ok());
-          })));
+      .WillOnce(WithArgs<2>([](drm::KeySystem::AddDataStoreCallback callback) {
+        callback(fpromise::ok());
+      }));
   EXPECT_CALL(mock_key_system(kKeySystem),
               CreateContentDecryptionModule2(Eq(1u), _))
       .Times(2);
@@ -274,15 +279,13 @@ TEST_F(FuchsiaCdmManagerTest, DifferentOriginDoNotShareDataStore) {
   cdm2.set_error_handler(error_handler);
 
   EXPECT_CALL(mock_key_system(kKeySystem), AddDataStore(Eq(1u), _, _))
-      .WillOnce(
-          WithArgs<2>(Invoke([](drm::KeySystem::AddDataStoreCallback callback) {
-            callback(fpromise::ok());
-          })));
+      .WillOnce(WithArgs<2>([](drm::KeySystem::AddDataStoreCallback callback) {
+        callback(fpromise::ok());
+      }));
   EXPECT_CALL(mock_key_system(kKeySystem), AddDataStore(Eq(2u), _, _))
-      .WillOnce(
-          WithArgs<2>(Invoke([](drm::KeySystem::AddDataStoreCallback callback) {
-            callback(fpromise::ok());
-          })));
+      .WillOnce(WithArgs<2>([](drm::KeySystem::AddDataStoreCallback callback) {
+        callback(fpromise::ok());
+      }));
   EXPECT_CALL(mock_key_system(kKeySystem),
               CreateContentDecryptionModule2(Eq(1u), _))
       .Times(1);
@@ -303,8 +306,8 @@ TEST_F(FuchsiaCdmManagerTest, DifferentOriginDoNotShareDataStore) {
 }
 
 void CreateDummyCdmDirectory(const base::FilePath& cdm_data_path,
-                             base::StringPiece origin,
-                             base::StringPiece key_system,
+                             std::string_view origin,
+                             std::string_view key_system,
                              uint64_t size) {
   const base::FilePath path = cdm_data_path.Append(origin).Append(key_system);
   CHECK(base::CreateDirectory(path));
@@ -429,6 +432,113 @@ TEST_F(FuchsiaCdmManagerTest, EmptyOriginDirectory) {
   EXPECT_FALSE(base::PathExists(temp_path.Append(kInactiveOriginDirectory)));
   EXPECT_TRUE(base::PathExists(
       temp_path.Append(kActiveOriginDirectory).Append(kKeySystemDirectory2)));
+}
+
+TEST_F(FuchsiaCdmManagerTest, StoragePathMigration) {
+  const url::Origin kOrigin = url::Origin::Create(GURL("http://example.com"));
+  const std::string kKeySystem = "com.key_system";
+  const std::string kOriginStr = kOrigin.Serialize();
+  const base::FilePath temp_path = temp_dir_.GetPath();
+
+  const std::string old_origin_hash = base::HexEncode(
+      base::byte_span_from_ref(base::PersistentHash(kOriginStr)));
+  const std::string old_key_system_hash = base::HexEncode(
+      base::byte_span_from_ref(base::PersistentHash(kKeySystem)));
+  const std::string new_origin_hash = base::HexEncode(
+      base::byte_span_from_ref(crypto::hash::Sha256(kOriginStr)));
+  const std::string new_key_system_hash = base::HexEncode(
+      base::byte_span_from_ref(crypto::hash::Sha256(kKeySystem)));
+
+  base::FilePath old_path =
+      temp_path.Append(old_origin_hash).Append(old_key_system_hash);
+  base::FilePath new_path =
+      temp_path.Append(new_origin_hash).Append(new_key_system_hash);
+
+  // 1. Feature disabled: should use old path.
+  {
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitAndDisableFeature(kFuchsiaCdmStoragePathMigration);
+
+    auto cdm_manager = CreateFuchsiaCdmManager({kKeySystem});
+
+    base::RunLoop run_loop;
+    EXPECT_CALL(mock_key_system(kKeySystem), AddDataStore(_, _, _))
+        .WillOnce([&run_loop](uint32_t, drm::DataStoreParams,
+                              drm::KeySystem::AddDataStoreCallback callback) {
+          callback(fpromise::ok());
+          run_loop.Quit();
+        });
+
+    drm::ContentDecryptionModulePtr cdm_ptr;
+    cdm_manager->CreateAndProvision(
+        kKeySystem, kOrigin, base::BindRepeating(&CreateMockProvisionFetcher),
+        cdm_ptr.NewRequest());
+    run_loop.Run();
+
+    EXPECT_TRUE(base::PathExists(old_path));
+    EXPECT_FALSE(base::PathExists(new_path));
+  }
+
+  ASSERT_TRUE(base::DeletePathRecursively(temp_path));
+  ASSERT_TRUE(base::CreateDirectory(temp_path));
+
+  // 2. Feature enabled, no old data: should use new path.
+  {
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitAndEnableFeature(kFuchsiaCdmStoragePathMigration);
+
+    auto cdm_manager = CreateFuchsiaCdmManager({kKeySystem});
+
+    base::RunLoop run_loop;
+    EXPECT_CALL(mock_key_system(kKeySystem), AddDataStore(_, _, _))
+        .WillOnce([&run_loop](uint32_t, drm::DataStoreParams,
+                              drm::KeySystem::AddDataStoreCallback callback) {
+          callback(fpromise::ok());
+          run_loop.Quit();
+        });
+
+    drm::ContentDecryptionModulePtr cdm_ptr;
+    cdm_manager->CreateAndProvision(
+        kKeySystem, kOrigin, base::BindRepeating(&CreateMockProvisionFetcher),
+        cdm_ptr.NewRequest());
+    run_loop.Run();
+
+    EXPECT_FALSE(base::PathExists(old_path));
+    EXPECT_TRUE(base::PathExists(new_path));
+  }
+
+  ASSERT_TRUE(base::DeletePathRecursively(temp_path));
+  ASSERT_TRUE(base::CreateDirectory(temp_path));
+
+  // 3. Feature enabled, old data exists: should migrate to new path.
+  {
+    // Pre-create old directory with some data.
+    ASSERT_TRUE(base::CreateDirectory(old_path));
+    base::WriteFile(old_path.Append("test_file"), "test_data");
+
+    base::test::ScopedFeatureList feature_list;
+    feature_list.InitAndEnableFeature(kFuchsiaCdmStoragePathMigration);
+
+    auto cdm_manager = CreateFuchsiaCdmManager({kKeySystem});
+
+    base::RunLoop run_loop;
+    EXPECT_CALL(mock_key_system(kKeySystem), AddDataStore(_, _, _))
+        .WillOnce([&run_loop](uint32_t, drm::DataStoreParams,
+                              drm::KeySystem::AddDataStoreCallback callback) {
+          callback(fpromise::ok());
+          run_loop.Quit();
+        });
+
+    drm::ContentDecryptionModulePtr cdm_ptr;
+    cdm_manager->CreateAndProvision(
+        kKeySystem, kOrigin, base::BindRepeating(&CreateMockProvisionFetcher),
+        cdm_ptr.NewRequest());
+    run_loop.Run();
+
+    EXPECT_FALSE(base::PathExists(old_path));
+    EXPECT_TRUE(base::PathExists(new_path));
+    EXPECT_TRUE(base::PathExists(new_path.Append("test_file")));
+  }
 }
 
 }  // namespace

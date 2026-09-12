@@ -35,7 +35,7 @@ class BufferedFileWriterTest : public testing::Test {
   void OnError(protocol::FileTransfer_Error error);
 
   bool complete_called_ = false;
-  absl::optional<protocol::FileTransfer_Error> error_ = absl::nullopt;
+  std::optional<protocol::FileTransfer_Error> error_ = std::nullopt;
 
   base::test::TaskEnvironment task_environment_;
 };
@@ -80,15 +80,15 @@ TEST_F(BufferedFileWriterTest, WritesThreeChunks) {
   writer.Write(kTestDataThree);
   task_environment_.RunUntilIdle();
   writer.Close();
-  ASSERT_EQ(false, complete_called_);
+  ASSERT_FALSE(complete_called_);
   task_environment_.RunUntilIdle();
-  ASSERT_EQ(true, complete_called_);
+  ASSERT_TRUE(complete_called_);
 
-  ASSERT_EQ(1ul, test_io.files_written.size());
-  ASSERT_EQ(false, test_io.files_written[0].failed);
+  ASSERT_EQ(test_io.files_written.size(), 1ul);
+  ASSERT_FALSE(test_io.files_written[0].failed);
   std::vector<std::vector<std::uint8_t>> expected_chunks = {
       kTestDataOne, kTestDataTwo, kTestDataThree};
-  ASSERT_EQ(expected_chunks, test_io.files_written[0].chunks);
+  ASSERT_EQ(test_io.files_written[0].chunks, expected_chunks);
 }
 
 // Verifies BufferedFileWriter properly queues up file operations.
@@ -109,15 +109,15 @@ TEST_F(BufferedFileWriterTest, QueuesOperations) {
   writer.Write(kTestDataTwo);
   writer.Write(kTestDataThree);
   writer.Close();
-  ASSERT_EQ(false, complete_called_);
+  ASSERT_FALSE(complete_called_);
   task_environment_.RunUntilIdle();
-  ASSERT_EQ(true, complete_called_);
+  ASSERT_TRUE(complete_called_);
 
-  ASSERT_EQ(1ul, test_io.files_written.size());
-  ASSERT_EQ(false, test_io.files_written[0].failed);
+  ASSERT_EQ(test_io.files_written.size(), 1ul);
+  ASSERT_FALSE(test_io.files_written[0].failed);
   std::vector<std::vector<std::uint8_t>> expected_chunks = {
       kTestDataOne, kTestDataTwo, kTestDataThree};
-  ASSERT_EQ(expected_chunks, test_io.files_written[0].chunks);
+  ASSERT_EQ(test_io.files_written[0].chunks, expected_chunks);
 }
 
 // Verifies BufferedFileWriter calls the error callback in the event of an
@@ -146,11 +146,11 @@ TEST_F(BufferedFileWriterTest, HandlesWriteError) {
   ASSERT_TRUE(error_);
   ASSERT_EQ(fake_error.SerializeAsString(), error_->SerializeAsString());
 
-  ASSERT_EQ(1ul, test_io.files_written.size());
-  ASSERT_EQ(true, test_io.files_written[0].failed);
+  ASSERT_EQ(test_io.files_written.size(), 1ul);
+  ASSERT_TRUE(test_io.files_written[0].failed);
   std::vector<std::vector<std::uint8_t>> expected_chunks = {kTestDataOne,
                                                             kTestDataTwo};
-  ASSERT_EQ(expected_chunks, test_io.files_written[0].chunks);
+  ASSERT_EQ(test_io.files_written[0].chunks, expected_chunks);
 }
 
 // Verifies canceling BufferedFileWriter cancels the underlying writer.
@@ -164,8 +164,6 @@ TEST_F(BufferedFileWriterTest, CancelsWriter) {
                        base::Unretained(this)),
         base::BindOnce(&BufferedFileWriterTest_CancelsWriter_Test::OnError,
                        base::Unretained(this)));
-    protocol::FileTransfer_Error fake_error = protocol::MakeFileTransferError(
-        FROM_HERE, protocol::FileTransfer_Error_Type_IO_ERROR);
 
     writer.Start(kTestFilename);
     writer.Write(kTestDataOne);
@@ -176,11 +174,11 @@ TEST_F(BufferedFileWriterTest, CancelsWriter) {
   task_environment_.RunUntilIdle();
   ASSERT_TRUE(!complete_called_ && !error_);
 
-  ASSERT_EQ(1ul, test_io.files_written.size());
-  ASSERT_EQ(true, test_io.files_written[0].failed);
+  ASSERT_EQ(test_io.files_written.size(), 1ul);
+  ASSERT_TRUE(test_io.files_written[0].failed);
   std::vector<std::vector<std::uint8_t>> expected_chunks = {kTestDataOne,
                                                             kTestDataTwo};
-  ASSERT_EQ(expected_chunks, test_io.files_written[0].chunks);
+  ASSERT_EQ(test_io.files_written[0].chunks, expected_chunks);
 }
 
 }  // namespace remoting

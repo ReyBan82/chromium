@@ -30,182 +30,274 @@
 #include "third_party/blink/renderer/core/layout/shapes/shape.h"
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <utility>
 
+#include "base/containers/span.h"
 #include "cc/paint/paint_flags.h"
 #include "third_party/blink/public/platform/platform.h"
-#include "third_party/blink/renderer/core/css/basic_shape_functions.h"
+#include "third_party/blink/renderer/core/layout/geometry/logical_size.h"
+#include "third_party/blink/renderer/core/layout/geometry/writing_mode_converter.h"
 #include "third_party/blink/renderer/core/layout/shapes/box_shape.h"
 #include "third_party/blink/renderer/core/layout/shapes/ellipse_shape.h"
 #include "third_party/blink/renderer/core/layout/shapes/polygon_shape.h"
 #include "third_party/blink/renderer/core/layout/shapes/raster_shape.h"
 #include "third_party/blink/renderer/core/svg/graphics/svg_image.h"
 #include "third_party/blink/renderer/core/typed_arrays/array_buffer/array_buffer_contents.h"
-#include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer.h"
-#include "third_party/blink/renderer/core/typed_arrays/dom_typed_array.h"
+#include "third_party/blink/renderer/platform/geometry/contoured_rect.h"
 #include "third_party/blink/renderer/platform/geometry/float_rounded_rect.h"
 #include "third_party/blink/renderer/platform/geometry/length_functions.h"
+#include "third_party/blink/renderer/platform/geometry/path_builder.h"
 #include "third_party/blink/renderer/platform/graphics/graphics_context.h"
-#include "third_party/blink/renderer/platform/graphics/graphics_types.h"
 #include "third_party/blink/renderer/platform/graphics/paint/paint_canvas.h"
-#include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
-#include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
+#include "third_party/blink/renderer/platform/transforms/affine_transform.h"
 #include "third_party/blink/renderer/platform/wtf/math_extras.h"
+#include "third_party/skia/include/core/SkPaint.h"
 #include "third_party/skia/include/core/SkSurface.h"
+#include "ui/gfx/geometry/rect_conversions.h"
 #include "ui/gfx/geometry/size_f.h"
 
 namespace blink {
 
-static std::unique_ptr<Shape> CreateInsetShape(const FloatRoundedRect& bounds) {
+namespace {
+
+// This helps to scan pixel data in a logical direction.
+class LogicalPixelScanner {
+  STACK_ALLOCATED();
+
+ public:
+  // Initialize the instance, and move to the logical origin.
+  LogicalPixelScanner(base::span<const uint8_t> pixel_array,
+                      const gfx::Size& size,
+                      WritingMode writing_mode)
+      : pixel_array_(pixel_array), size_(size), writing_mode_(writing_mode) {}
+
+  // Move to the inline-end direction by one pixel.
+  void Next() { ++inline_offset_; }
+
+  // Move to the block-end direction by one pixel, and move to the
+  // inline-start position.
+  void NextLine() {
+    ++block_offset_;
+    inline_offset_ = 0;
+  }
+
+  // Get the alpha channel value of the current pixel.
+  uint8_t GetAlpha() const {
+    return pixel_array_[PixelOffset() + kAlphaOffsetInPixel];
+  }
+
+ private:
+  // Each pixel is four bytes: RGBA.
+  static constexpr uint32_t kBytesPerPixel = 4;
+  static constexpr uint32_t kAlphaOffsetInPixel = 3;
+
+  uint32_t PixelOffset() const {
+    uint32_t x, y;
+    switch (writing_mode_) {
+      case WritingMode::kHorizontalTb:
+        x = inline_offset_;
+        y = block_offset_;
+        break;
+      case WritingMode::kVerticalRl:
+      case WritingMode::kSidewaysRl:
+        x = size_.width() - block_offset_ - 1;
+        y = inline_offset_;
+        break;
+      case WritingMode::kVerticalLr:
+        x = block_offset_;
+        y = inline_offset_;
+        break;
+      case WritingMode::kSidewaysLr:
+        x = block_offset_;
+        y = size_.height() - inline_offset_ - 1;
+        break;
+    }
+    return (y * size_.width() + x) * kBytesPerPixel;
+  }
+
+  const base::span<const uint8_t> pixel_array_;
+  const gfx::Size size_;
+  const WritingMode writing_mode_;
+  uint32_t inline_offset_ = 0;
+  uint32_t block_offset_ = 0;
+};
+
+bool ExtractPathData(const Path& path,
+                     const gfx::Size& image_size,
+                     ArrayBufferContents& contents);
+std::unique_ptr<RasterShapeIntervals> ExtractIntervalsFromImageData(
+    base::span<const uint8_t> pixel_data,
+    float threshold,
+    int content_block_size,
+    const gfx::Size& image_physical_size,
+    const gfx::Rect& image_logical_rect,
+    const gfx::Rect& margin_logical_rect,
+    WritingMode writing_mode);
+bool IsValidRasterShapeSize(const gfx::Size& size);
+
+}  // namespace
+
+static std::unique_ptr<Shape> CreateInsetShape(const ContouredRect& bounds) {
   DCHECK_GE(bounds.Rect().width(), 0);
   DCHECK_GE(bounds.Rect().height(), 0);
   return std::make_unique<BoxShape>(bounds);
 }
 
-static inline gfx::RectF PhysicalRectToLogical(const gfx::RectF& rect,
-                                               float logical_box_height,
-                                               WritingMode writing_mode) {
-  if (IsHorizontalWritingMode(writing_mode))
-    return rect;
-  if (IsFlippedBlocksWritingMode(writing_mode)) {
-    return gfx::RectF(rect.y(), logical_box_height - rect.right(),
-                      rect.height(), rect.width());
-  }
-  return gfx::TransposeRect(rect);
-}
-
-static inline gfx::PointF PhysicalPointToLogical(const gfx::PointF& point,
-                                                 float logical_box_height,
-                                                 WritingMode writing_mode) {
-  if (IsHorizontalWritingMode(writing_mode))
-    return point;
-  if (IsFlippedBlocksWritingMode(writing_mode))
-    return gfx::PointF(point.y(), logical_box_height - point.x());
-  return gfx::TransposePoint(point);
-}
-
-static inline gfx::SizeF PhysicalSizeToLogical(const gfx::SizeF& size,
-                                               WritingMode writing_mode) {
-  if (IsHorizontalWritingMode(writing_mode))
-    return size;
-  return gfx::TransposeSize(size);
-}
-
-std::unique_ptr<Shape> Shape::CreateShape(const BasicShape* basic_shape,
-                                          const LayoutSize& logical_box_size,
+std::unique_ptr<Shape> Shape::CreateShape(const BasicShape& basic_shape,
+                                          const LogicalSize& logical_box_size,
                                           WritingMode writing_mode,
-                                          float margin) {
-  DCHECK(basic_shape);
-
-  bool horizontal_writing_mode = IsHorizontalWritingMode(writing_mode);
-  float box_width = horizontal_writing_mode
-                        ? logical_box_size.Width().ToFloat()
-                        : logical_box_size.Height().ToFloat();
-  float box_height = horizontal_writing_mode
-                         ? logical_box_size.Height().ToFloat()
-                         : logical_box_size.Width().ToFloat();
+                                          float margin,
+                                          float zoom) {
+  WritingModeConverter converter({writing_mode, TextDirection::kLtr},
+                                 logical_box_size);
+  float box_width = converter.OuterSize().width.ToFloat();
+  float box_height = converter.OuterSize().height.ToFloat();
   std::unique_ptr<Shape> shape;
 
-  switch (basic_shape->GetType()) {
+  switch (basic_shape.GetType()) {
     case BasicShape::kBasicShapeCircleType: {
-      const BasicShapeCircle* circle = To<BasicShapeCircle>(basic_shape);
-      gfx::PointF center =
-          PointForCenterCoordinate(circle->CenterX(), circle->CenterY(),
-                                   gfx::SizeF(box_width, box_height));
-      float radius =
-          circle->FloatValueForRadiusInBox(gfx::SizeF(box_width, box_height));
-      gfx::PointF logical_center = PhysicalPointToLogical(
-          center, logical_box_size.Height().ToFloat(), writing_mode);
+      const auto& circle = To<BasicShapeCircle>(basic_shape);
+      gfx::PointF center = PointForLengthPoint(
+          circle.Center(), gfx::SizeF(box_width, box_height));
+      float radius = circle.FloatValueForRadiusInBox(
+          center, gfx::SizeF(box_width, box_height));
+      gfx::PointF logical_center = converter.ToLogical(center);
 
       shape = std::make_unique<EllipseShape>(logical_center, radius, radius);
       break;
     }
 
     case BasicShape::kBasicShapeEllipseType: {
-      const BasicShapeEllipse* ellipse = To<BasicShapeEllipse>(basic_shape);
-      gfx::PointF center =
-          PointForCenterCoordinate(ellipse->CenterX(), ellipse->CenterY(),
-                                   gfx::SizeF(box_width, box_height));
-      float radius_x = ellipse->FloatValueForRadiusInBox(ellipse->RadiusX(),
-                                                         center.x(), box_width);
-      float radius_y = ellipse->FloatValueForRadiusInBox(
-          ellipse->RadiusY(), center.y(), box_height);
-      gfx::PointF logical_center = PhysicalPointToLogical(
-          center, logical_box_size.Height().ToFloat(), writing_mode);
+      const auto& ellipse = To<BasicShapeEllipse>(basic_shape);
+      gfx::PointF center = PointForLengthPoint(
+          ellipse.Center(), gfx::SizeF(box_width, box_height));
+      gfx::SizeF radii =
+          ellipse.ResolveRadii(center, gfx::SizeF(box_width, box_height));
+      gfx::PointF logical_center = converter.ToLogical(center);
 
-      shape =
-          std::make_unique<EllipseShape>(logical_center, radius_x, radius_y);
+      float inline_radius = radii.width();
+      float block_radius = radii.height();
+      if (!IsHorizontalWritingMode(writing_mode)) {
+        std::swap(inline_radius, block_radius);
+      }
+      shape = std::make_unique<EllipseShape>(logical_center, inline_radius,
+                                             block_radius);
       break;
     }
 
     case BasicShape::kBasicShapePolygonType: {
-      const BasicShapePolygon* polygon = To<BasicShapePolygon>(basic_shape);
-      const Vector<Length>& values = polygon->Values();
+      const auto& polygon = To<BasicShapePolygon>(basic_shape);
+      if (polygon.HasRoundingRadius()) {
+        // When the polygon has a rounding radius, the rounded corners make
+        // the shape too complex to represent analytically as a PolygonShape.
+        // Instead, rasterize the path into a RasterShape (similar to how
+        // image-based shapes are handled).
+        return CreateRasterShapeFromPath(polygon, box_width, box_height,
+                                         writing_mode, margin, zoom);
+      }
+      const Vector<Length>& values = polygon.Values();
       wtf_size_t values_size = values.size();
       DCHECK(!(values_size % 2));
       Vector<gfx::PointF> vertices(values_size / 2);
       for (wtf_size_t i = 0; i < values_size; i += 2) {
         gfx::PointF vertex(FloatValueForLength(values.at(i), box_width),
                            FloatValueForLength(values.at(i + 1), box_height));
-        vertices[i / 2] = PhysicalPointToLogical(
-            vertex, logical_box_size.Height().ToFloat(), writing_mode);
+        vertices[i / 2] = converter.ToLogical(vertex);
       }
-      shape = std::make_unique<PolygonShape>(std::move(vertices),
-                                             polygon->GetWindRule());
+      shape = std::make_unique<PolygonShape>(std::move(vertices));
       break;
     }
 
     case BasicShape::kBasicShapeInsetType: {
-      const BasicShapeInset& inset = *To<BasicShapeInset>(basic_shape);
+      const auto& inset = To<BasicShapeInset>(basic_shape);
       float left = FloatValueForLength(inset.Left(), box_width);
       float top = FloatValueForLength(inset.Top(), box_height);
       float right = FloatValueForLength(inset.Right(), box_width);
       float bottom = FloatValueForLength(inset.Bottom(), box_height);
       gfx::RectF rect(left, top, std::max<float>(box_width - left - right, 0),
                       std::max<float>(box_height - top - bottom, 0));
-      gfx::RectF logical_rect = PhysicalRectToLogical(
-          rect, logical_box_size.Height().ToFloat(), writing_mode);
 
       gfx::SizeF box_size(box_width, box_height);
-      gfx::SizeF top_left_radius = PhysicalSizeToLogical(
-          SizeForLengthSize(inset.TopLeftRadius(), box_size), writing_mode);
-      gfx::SizeF top_right_radius = PhysicalSizeToLogical(
-          SizeForLengthSize(inset.TopRightRadius(), box_size), writing_mode);
-      gfx::SizeF bottom_left_radius = PhysicalSizeToLogical(
-          SizeForLengthSize(inset.BottomLeftRadius(), box_size), writing_mode);
-      gfx::SizeF bottom_right_radius = PhysicalSizeToLogical(
-          SizeForLengthSize(inset.BottomRightRadius(), box_size), writing_mode);
-      FloatRoundedRect::Radii corner_radii(top_left_radius, top_right_radius,
-                                           bottom_left_radius,
-                                           bottom_right_radius);
+      gfx::SizeF top_left_radius =
+          SizeForLengthSize(inset.TopLeftRadius(), box_size);
+      gfx::SizeF top_right_radius =
+          SizeForLengthSize(inset.TopRightRadius(), box_size);
+      gfx::SizeF bottom_left_radius =
+          SizeForLengthSize(inset.BottomLeftRadius(), box_size);
+      gfx::SizeF bottom_right_radius =
+          SizeForLengthSize(inset.BottomRightRadius(), box_size);
 
-      FloatRoundedRect final_rect(logical_rect, corner_radii);
-      final_rect.ConstrainRadii();
+      FloatRoundedRect physical_rect(rect, top_left_radius, top_right_radius,
+                                     bottom_left_radius, bottom_right_radius);
+      physical_rect.ConstrainRadii();
 
-      shape = CreateInsetShape(final_rect);
+      shape = CreateInsetShape(
+          BoxShape::ToLogical(ContouredRect(physical_rect), converter));
       break;
     }
+
+    case BasicShape::kStylePathType:
+    case BasicShape::kStyleShapeType:
+      return CreateRasterShapeFromPath(basic_shape, box_width, box_height,
+                                       writing_mode, margin, zoom);
 
     default:
       NOTREACHED();
   }
 
-  shape->writing_mode_ = writing_mode;
   shape->margin_ = margin;
-
   return shape;
 }
 
-std::unique_ptr<Shape> Shape::CreateEmptyRasterShape(WritingMode writing_mode,
-                                                     float margin) {
+std::unique_ptr<Shape> Shape::CreateEmptyRasterShape(float margin) {
   std::unique_ptr<RasterShapeIntervals> intervals =
       std::make_unique<RasterShapeIntervals>(0, 0);
   std::unique_ptr<RasterShape> raster_shape =
       std::make_unique<RasterShape>(std::move(intervals), gfx::Size());
-  raster_shape->writing_mode_ = writing_mode;
   raster_shape->margin_ = margin;
-  return std::move(raster_shape);
+  return raster_shape;
+}
+
+namespace {
+
+bool ExtractPathData(const Path& path,
+                     const gfx::Size& image_size,
+                     ArrayBufferContents& contents) {
+  SkImageInfo dst_info = SkImageInfo::Make(
+      image_size.width(), image_size.height(), kN32_SkColorType,
+      kPremul_SkAlphaType, SkColorSpace::MakeSRGB());
+
+  size_t dst_size_bytes = dst_info.computeMinByteSize();
+  {
+    if (SkImageInfo::ByteSizeOverflowed(dst_size_bytes) ||
+        dst_size_bytes > v8::TypedArray::kMaxByteLength) {
+      return false;
+    }
+    ArrayBufferContents result(dst_size_bytes, 1,
+                               ArrayBufferContents::kNotShared,
+                               ArrayBufferContents::kZeroInitialize);
+    if (result.DataLength() != dst_size_bytes) {
+      return false;
+    }
+    result.Transfer(contents);
+  }
+
+  const SkSurfaceProps disable_lcd_props;
+  sk_sp<SkSurface> surface = SkSurfaces::WrapPixels(
+      dst_info, contents.Data(), dst_info.minRowBytes(), &disable_lcd_props);
+  if (!surface) {
+    return false;
+  }
+
+  SkPaint paint;
+  paint.setStyle(SkPaint::kFill_Style);
+  paint.setColor(SK_ColorBLACK);
+  paint.setAntiAlias(true);
+  surface->getCanvas()->clear(SkColors::kTransparent);
+  surface->getCanvas()->drawPath(path.GetSkPath(), paint);
+  return true;
 }
 
 static bool ExtractImageData(Image* image,
@@ -225,7 +317,7 @@ static bool ExtractImageData(Image* image,
   size_t dst_size_bytes = dst_info.computeMinByteSize();
   {
     if (SkImageInfo::ByteSizeOverflowed(dst_size_bytes) ||
-        dst_size_bytes > v8::TypedArray::kMaxLength) {
+        dst_size_bytes > v8::TypedArray::kMaxByteLength) {
       return false;
     }
     ArrayBufferContents result(dst_size_bytes, 1,
@@ -237,8 +329,8 @@ static bool ExtractImageData(Image* image,
   }
 
   // Set |surface| to draw directly to |contents|.
-  const SkSurfaceProps disable_lcd_props(0, kUnknown_SkPixelGeometry);
-  sk_sp<SkSurface> surface = SkSurface::MakeRasterDirect(
+  const SkSurfaceProps disable_lcd_props;
+  sk_sp<SkSurface> surface = SkSurfaces::WrapPixels(
       dst_info, contents.Data(), dst_info.minRowBytes(), &disable_lcd_props);
   if (!surface)
     return false;
@@ -260,49 +352,67 @@ static bool ExtractImageData(Image* image,
   return true;
 }
 
-static std::unique_ptr<RasterShapeIntervals> ExtractIntervalsFromImageData(
-    ArrayBufferContents& contents,
+std::unique_ptr<RasterShapeIntervals> ExtractIntervalsFromImageData(
+    base::span<const uint8_t> pixel_data,
     float threshold,
-    const gfx::Rect& image_rect,
-    const gfx::Rect& margin_rect) {
-  DOMArrayBuffer* array_buffer = DOMArrayBuffer::Create(contents);
-  DOMUint8ClampedArray* pixel_array =
-      DOMUint8ClampedArray::Create(array_buffer, 0, array_buffer->ByteLength());
-
-  unsigned pixel_array_offset = 3;  // Each pixel is four bytes: RGBA.
+    int content_block_size,
+    const gfx::Size& image_physical_size,
+    const gfx::Rect& image_logical_rect,
+    const gfx::Rect& margin_logical_rect,
+    WritingMode writing_mode) {
   uint8_t alpha_pixel_threshold = threshold * 255;
 
-  DCHECK_EQ(image_rect.size().Area64() * 4, pixel_array->length());
+  CHECK_EQ(image_logical_rect.size().Area64() * 4, pixel_data.size());
 
-  int min_buffer_y = std::max(0, margin_rect.y() - image_rect.y());
-  int max_buffer_y =
-      std::min(image_rect.height(), margin_rect.bottom() - image_rect.y());
+  const int image_block_start = image_logical_rect.y();
+  const int image_block_end = image_logical_rect.bottom();
+  const int margin_box_block_size = margin_logical_rect.height();
+  const int margin_block_start = margin_logical_rect.y();
+  const int margin_block_end = margin_block_start + margin_box_block_size;
 
-  std::unique_ptr<RasterShapeIntervals> intervals =
-      std::make_unique<RasterShapeIntervals>(margin_rect.height(),
-                                             -margin_rect.y());
+  const int min_buffer_y = std::max({0, margin_block_start, image_block_start});
+  const int max_buffer_y =
+      std::min({content_block_size, image_block_end, margin_block_end});
 
-  for (int y = min_buffer_y; y < max_buffer_y; ++y) {
-    int start_x = -1;
-    for (int x = 0; x < image_rect.width(); ++x, pixel_array_offset += 4) {
-      uint8_t alpha = pixel_array->Item(pixel_array_offset);
-      bool alpha_above_threshold = alpha > alpha_pixel_threshold;
-      if (start_x == -1 && alpha_above_threshold) {
-        start_x = x;
-      } else if (start_x != -1 &&
-                 (!alpha_above_threshold || x == image_rect.width() - 1)) {
-        int end_x = alpha_above_threshold ? x + 1 : x;
-        intervals->IntervalAt(y + image_rect.y())
-            .Unite(IntShapeInterval(start_x + image_rect.x(),
-                                    end_x + image_rect.x()));
-        start_x = -1;
+  auto intervals = std::make_unique<RasterShapeIntervals>(margin_box_block_size,
+                                                          -margin_block_start);
+
+  LogicalPixelScanner scanner(pixel_data, image_physical_size, writing_mode);
+  for (int y = image_block_start; y < min_buffer_y; ++y) {
+    scanner.NextLine();
+  }
+  for (int y = min_buffer_y; y < max_buffer_y; ++y, scanner.NextLine()) {
+    int start_x = std::numeric_limits<int>::max();
+    int end_x = std::numeric_limits<int>::min();
+    bool is_inside_shape = false;
+    for (int x = image_logical_rect.x(); x < image_logical_rect.right();
+         ++x, scanner.Next()) {
+      const bool alpha_above_threshold =
+          scanner.GetAlpha() > alpha_pixel_threshold;
+      // We're interested in transitions.
+      if (alpha_above_threshold != is_inside_shape) {
+        if (!is_inside_shape) {
+          // A run started. It may not be the first.
+          start_x = std::min(x, start_x);
+        } else {
+          // A run ended. Always greater than any previous end.
+          end_x = x;
+        }
       }
+      is_inside_shape = alpha_above_threshold;
+    }
+    // Ensure the interval is closed at the edge of the image.
+    if (is_inside_shape) {
+      end_x = image_logical_rect.right();
+    }
+    if (start_x < end_x) {
+      intervals->IntervalAt(y) = IntShapeInterval(start_x, end_x);
     }
   }
   return intervals;
 }
 
-static bool IsValidRasterShapeSize(const gfx::Size& size) {
+bool IsValidRasterShapeSize(const gfx::Size& size) {
   // Some platforms don't limit MaxDecodedImageBytes.
   constexpr size_t size32_max_bytes = 0xFFFFFFFF / 4;
   static const size_t max_image_size_bytes =
@@ -310,48 +420,129 @@ static bool IsValidRasterShapeSize(const gfx::Size& size) {
   return size.Area64() * 4 < max_image_size_bytes;
 }
 
+}  // namespace
+
+namespace {
+
+// Returns the affine transform that maps a point in physical reference-box
+// coordinates to Shape's line-left logical coordinate space. This intentionally
+// matches the LTR WritingModeConverter used by CreateShape(); shape exclusion
+// intervals are stored in line-left coordinates, and RTL positioning is applied
+// when those intervals are consumed.
+AffineTransform PhysicalToLogicalTransform(WritingMode writing_mode,
+                                           float box_width,
+                                           float box_height) {
+  switch (writing_mode) {
+    case WritingMode::kHorizontalTb:
+      return AffineTransform();
+    case WritingMode::kVerticalRl:
+    case WritingMode::kSidewaysRl:
+      // (x, y) -> (y, box_width - x)
+      return AffineTransform(0, -1, 1, 0, 0, box_width);
+    case WritingMode::kVerticalLr:
+      // (x, y) -> (y, x)
+      return AffineTransform(0, 1, 1, 0, 0, 0);
+    case WritingMode::kSidewaysLr:
+      // (x, y) -> (box_height - y, x)
+      return AffineTransform(0, 1, -1, 0, box_height, 0);
+  }
+  NOTREACHED();
+}
+
+}  // namespace
+
+std::unique_ptr<Shape> Shape::CreateRasterShapeFromPath(
+    const BasicShape& basic_shape,
+    float box_width,
+    float box_height,
+    WritingMode writing_mode,
+    float margin,
+    float zoom) {
+  Path physical_path =
+      basic_shape.GetPath(gfx::RectF(0, 0, box_width, box_height), zoom, 1);
+  gfx::Rect path_rect = gfx::ToEnclosingRect(physical_path.BoundingRect());
+  const gfx::Size raster_size(std::max(path_rect.right(), 0),
+                              std::max(path_rect.bottom(), 0));
+  if (!IsValidRasterShapeSize(raster_size)) {
+    return CreateEmptyRasterShape(margin);
+  }
+  ArrayBufferContents contents;
+  if (!ExtractPathData(physical_path, raster_size, contents)) {
+    return CreateEmptyRasterShape(margin);
+  }
+  // The pixel data is rasterized in physical coordinates (raster_size), but the
+  // intervals are scanned and stored in logical coordinates. For vertical
+  // writing modes the logical block/inline extents are the transpose of the
+  // physical raster size, so transpose to keep the scanner within bounds.
+  gfx::Size logical_size = raster_size;
+  if (!IsHorizontalWritingMode(writing_mode)) {
+    logical_size.Transpose();
+  }
+  const gfx::Rect logical_rect(logical_size);
+  std::unique_ptr<RasterShapeIntervals> intervals =
+      ExtractIntervalsFromImageData(contents.ByteSpan(), /*threshold=*/0,
+                                    logical_size.height(), raster_size,
+                                    logical_rect, logical_rect, writing_mode);
+  // Retain the analytical path in logical coordinates so that DevTools
+  // inspectors can render the actual shape boundary instead of the
+  // pixel-snapped rasterization.
+  Path logical_shape_path = PathBuilder(physical_path)
+                                .Transform(PhysicalToLogicalTransform(
+                                    writing_mode, box_width, box_height))
+                                .Finalize();
+  std::unique_ptr<RasterShape> shape = std::make_unique<RasterShape>(
+      std::move(intervals), logical_size, std::move(logical_shape_path));
+  shape->margin_ = margin;
+  return shape;
+}
+
 std::unique_ptr<Shape> Shape::CreateRasterShape(
     Image* image,
     float threshold,
-    const LayoutRect& image_r,
-    const LayoutRect& margin_r,
+    int content_block_size,
+    const gfx::Rect& image_logical_rect,
+    const gfx::Rect& margin_logical_rect,
     WritingMode writing_mode,
     float margin,
     RespectImageOrientationEnum respect_orientation) {
-  gfx::Rect image_rect = ToPixelSnappedRect(image_r);
-  gfx::Rect margin_rect = ToPixelSnappedRect(margin_r);
-
-  if (!IsValidRasterShapeSize(margin_rect.size()) ||
-      !IsValidRasterShapeSize(image_rect.size())) {
-    return CreateEmptyRasterShape(writing_mode, margin);
+  gfx::Size margin_box_size = margin_logical_rect.size();
+  if (!IsValidRasterShapeSize(margin_box_size) ||
+      !IsValidRasterShapeSize(image_logical_rect.size())) {
+    return CreateEmptyRasterShape(margin);
   }
 
+  gfx::Size image_physical_size = image_logical_rect.size();
+  if (!IsHorizontalWritingMode(writing_mode)) {
+    image_physical_size.Transpose();
+  }
   ArrayBufferContents contents;
-  if (!ExtractImageData(image, image_rect.size(), contents,
+  if (!ExtractImageData(image, image_physical_size, contents,
                         respect_orientation)) {
-    return CreateEmptyRasterShape(writing_mode, margin);
+    return CreateEmptyRasterShape(margin);
   }
 
   std::unique_ptr<RasterShapeIntervals> intervals =
-      ExtractIntervalsFromImageData(contents, threshold, image_rect,
-                                    margin_rect);
+      ExtractIntervalsFromImageData(contents.ByteSpan(), threshold,
+                                    content_block_size, image_physical_size,
+                                    image_logical_rect, margin_logical_rect,
+                                    writing_mode);
   std::unique_ptr<RasterShape> raster_shape =
-      std::make_unique<RasterShape>(std::move(intervals), margin_rect.size());
-  raster_shape->writing_mode_ = writing_mode;
+      std::make_unique<RasterShape>(std::move(intervals), margin_box_size);
   raster_shape->margin_ = margin;
-  return std::move(raster_shape);
+  return raster_shape;
 }
 
 std::unique_ptr<Shape> Shape::CreateLayoutBoxShape(
-    const FloatRoundedRect& rounded_rect,
+    const ContouredRect& contoured_rect,
     WritingMode writing_mode,
     float margin) {
-  gfx::RectF rect(rounded_rect.Rect().size());
-  FloatRoundedRect bounds(rect, rounded_rect.GetRadii());
-  std::unique_ptr<Shape> shape = CreateInsetShape(bounds);
-  shape->writing_mode_ = writing_mode;
+  gfx::RectF rect(contoured_rect.Rect().size());
+  WritingModeConverter converter(
+      {writing_mode, TextDirection::kLtr},
+      PhysicalSize::FromSizeFFloor(contoured_rect.Rect().size()));
+  std::unique_ptr<Shape> shape =
+      CreateInsetShape(BoxShape::ToLogical(contoured_rect, converter));
   shape->margin_ = margin;
-
   return shape;
 }
 

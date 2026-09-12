@@ -4,7 +4,8 @@
 
 #include "third_party/blink/renderer/modules/screen_details/screen_details.h"
 
-#include "base/containers/contains.h"
+#include <algorithm>
+
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
@@ -34,10 +35,10 @@ ScreenDetailed* ScreenDetails::currentScreen() const {
   if (screens_.empty())
     return nullptr;
 
-  auto* it = base::ranges::find(screens_, current_display_id_,
-                                &ScreenDetailed::DisplayId);
-  DCHECK(it != screens_.end());
-  return *it;
+  auto it = std::ranges::find(screens_, current_display_id_,
+                              &ScreenDetailed::DisplayId);
+  CHECK(it != screens_.end());
+  return it->Get();
 }
 
 const AtomicString& ScreenDetails::InterfaceName() const {
@@ -54,7 +55,7 @@ void ScreenDetails::ContextDestroyed() {
 
 void ScreenDetails::Trace(Visitor* visitor) const {
   visitor->Trace(screens_);
-  EventTargetWithInlineData::Trace(visitor);
+  EventTarget::Trace(visitor);
   ExecutionContextLifecycleObserver::Trace(visitor);
 }
 
@@ -76,13 +77,12 @@ void ScreenDetails::UpdateScreenInfosImpl(LocalDOMWindow* window,
   // instead of keeping some more efficient cache of display ids.
 
   // Check if any screens have been removed and remove them from `screens_`.
-  for (WTF::wtf_size_t i = 0; i < screens_.size();
+  for (wtf_size_t i = 0; i < screens_.size();
        /*conditionally incremented*/) {
-    if (base::Contains(new_infos.screen_infos, screens_[i]->DisplayId(),
-                       &display::ScreenInfo::display_id)) {
+    if (std::ranges::contains(new_infos.screen_infos, screens_[i]->DisplayId(),
+                              &display::ScreenInfo::display_id)) {
       ++i;
     } else {
-      WillRemoveScreen(*screens_[i]);
       screens_.EraseAt(i);
       added_or_removed = true;
       // Recheck this index.
@@ -91,17 +91,16 @@ void ScreenDetails::UpdateScreenInfosImpl(LocalDOMWindow* window,
 
   // Check if any screens have been added, and append them to `screens_`.
   for (const auto& info : new_infos.screen_infos) {
-    if (!base::Contains(screens_, info.display_id,
-                        &ScreenDetailed::DisplayId)) {
-      screens_.push_back(MakeGarbageCollected<ScreenDetailed>(
-          window, info.display_id, info.is_internal,
-          GetNewLabelIdx(info.is_internal)));
+    if (!std::ranges::contains(screens_, info.display_id,
+                               &ScreenDetailed::DisplayId)) {
+      screens_.push_back(
+          MakeGarbageCollected<ScreenDetailed>(window, info.display_id));
       added_or_removed = true;
     }
   }
 
   // Sort `screens_` by position; x first and then y.
-  base::ranges::stable_sort(screens_, [](ScreenDetailed* a, ScreenDetailed* b) {
+  std::ranges::stable_sort(screens_, [](ScreenDetailed* a, ScreenDetailed* b) {
     if (a->left() != b->left())
       return a->left() < b->left();
     return a->top() < b->top();
@@ -131,10 +130,6 @@ void ScreenDetails::UpdateScreenInfosImpl(LocalDOMWindow* window,
 
     // Enqueue a change event if screens were added or removed.
     if (added_or_removed) {
-      // Allow fullscreen requests shortly after user-generated screens changes.
-      // TODO(enne): consider doing this only when screens have been added.
-      window->GetFrame()->ActivateTransientAllowFullscreen();
-
       EnqueueEvent(*Event::Create(event_type_names::kScreenschange),
                    TaskType::kMiscPlatformAPI);
     }
@@ -144,16 +139,24 @@ void ScreenDetails::UpdateScreenInfosImpl(LocalDOMWindow* window,
     // find the info that corresponds to it in old_info and new_infos.
     for (Member<ScreenDetailed>& screen : screens_) {
       auto id = screen->DisplayId();
-      auto new_it = base::ranges::find(new_infos.screen_infos, id,
-                                       &display::ScreenInfo::display_id);
-      DCHECK(new_it != new_infos.screen_infos.end());
-      auto old_it = base::ranges::find(prev_screen_infos_.screen_infos, id,
-                                       &display::ScreenInfo::display_id);
-      if (old_it != prev_screen_infos_.screen_infos.end() &&
-          !ScreenDetailed::AreWebExposedScreenDetailedPropertiesEqual(
-              *old_it, *new_it)) {
-        screen->EnqueueEvent(*Event::Create(event_type_names::kChange),
-                             TaskType::kMiscPlatformAPI);
+      auto new_it = std::ranges::find(new_infos.screen_infos, id,
+                                      &display::ScreenInfo::display_id);
+      CHECK(new_it != new_infos.screen_infos.end());
+      auto old_it = std::ranges::find(prev_screen_infos_.screen_infos, id,
+                                      &display::ScreenInfo::display_id);
+      if (old_it != prev_screen_infos_.screen_infos.end()) {
+        if (!ScreenDetailed::AreWebExposedScreenDetailedPropertiesEqual(
+                *old_it, *new_it)) {
+          screen->EnqueueEvent(*Event::Create(event_type_names::kChange),
+                               TaskType::kMiscPlatformAPI);
+        }
+        if (RuntimeEnabledFeatures::ScreenDetailedHdrHeadroomEnabled()) {
+          if (!ScreenDetailed::AreHdrHeadroomEqual(*old_it, *new_it)) {
+            screen->EnqueueEvent(
+                *Event::Create(event_type_names::kHdrheadroomchange),
+                TaskType::kMiscPlatformAPI);
+          }
+        }
       }
     }
   }
@@ -168,27 +171,6 @@ void ScreenDetails::UpdateScreenInfosImpl(LocalDOMWindow* window,
   // of data have changed, as at a higher level the old data has already been
   // rewritten with the new.
   prev_screen_infos_ = new_infos;
-}
-
-uint32_t ScreenDetails::GetNewLabelIdx(bool is_internal) {
-  auto& set = is_internal ? internal_label_ids_ : external_label_ids_;
-
-  uint32_t label_idx = 1;
-
-  // This is O(n^2) but number of displays is very small.
-  while (true) {
-    if (!set.Contains(label_idx)) {
-      set.insert(label_idx);
-      return label_idx;
-    }
-    label_idx++;
-  }
-}
-
-void ScreenDetails::WillRemoveScreen(const ScreenDetailed& screen) {
-  auto& set =
-      screen.label_is_internal() ? internal_label_ids_ : external_label_ids_;
-  set.erase(screen.label_idx());
 }
 
 }  // namespace blink

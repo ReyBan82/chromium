@@ -8,20 +8,23 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
-#include "ash/components/arc/session/arc_bridge_service.h"
-#include "ash/components/arc/session/arc_service_manager.h"
-#include "ash/components/arc/test/connection_holder_util.h"
-#include "ash/components/arc/test/fake_file_system_instance.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
-#include "chrome/browser/ash/arc/fileapi/arc_content_file_system_size_util.h"
+#include "base/test/test_future.h"
 #include "chrome/browser/ash/arc/fileapi/arc_file_system_operation_runner.h"
 #include "chrome/test/base/testing_profile.h"
+#include "chromeos/ash/experiences/arc/session/arc_bridge_service.h"
+#include "chromeos/ash/experiences/arc/session/arc_service_manager.h"
+#include "chromeos/ash/experiences/arc/test/connection_holder_util.h"
+#include "chromeos/ash/experiences/arc/test/fake_file_system_instance.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
 #include "content/public/test/browser_task_environment.h"
 #include "net/base/io_buffer.h"
+#include "net/base/net_errors.h"
 #include "net/base/test_completion_callback.h"
 #include "testing/gtest/include/gtest/gtest.h"
 #include "url/gurl.h"
@@ -37,14 +40,6 @@ constexpr char kArcUrlFile[] = "content://org.chromium.foo/file";
 
 // URL which returns a file descriptor of a pipe's read end.
 constexpr char kArcUrlPipe[] = "content://org.chromium.foo/pipe";
-
-// URL which returns a file descriptor of a regular file with unknown size.
-constexpr char kArcUrlFileUnknownSize[] =
-    "content://org.chromium.foo/file-unknown-size";
-
-// URL which returns a file descriptor of a pipe's read end with unknown size.
-constexpr char kArcUrlPipeUnknownSize[] =
-    "content://org.chromium.foo/pipe-unknown-size";
 
 constexpr char kData[] = "abcdefghijklmnopqrstuvwxyz";
 
@@ -96,10 +91,6 @@ class ArcContentFileSystemFileStreamReaderTest : public testing::Test {
         File(kArcUrlFile, kData, kMimeType, File::Seekable::YES));
     fake_file_system_.AddFile(
         File(kArcUrlPipe, kData, kMimeType, File::Seekable::NO));
-    fake_file_system_.AddFile(File(kArcUrlFileUnknownSize, kData, kMimeType,
-                                   File::Seekable::YES, -1));
-    fake_file_system_.AddFile(
-        File(kArcUrlPipeUnknownSize, kData, kMimeType, File::Seekable::NO, -1));
 
     arc_service_manager_ = std::make_unique<ArcServiceManager>();
     profile_ = std::make_unique<TestingProfile>();
@@ -107,6 +98,10 @@ class ArcContentFileSystemFileStreamReaderTest : public testing::Test {
     ArcFileSystemOperationRunner::GetFactory()->SetTestingFactoryAndUse(
         profile_.get(),
         base::BindRepeating(&CreateFileSystemOperationRunnerForTesting));
+    auto* runner =
+        ArcFileSystemOperationRunner::GetForBrowserContext(profile_.get());
+    runner->GrantAccessToContentUrl(GURL(kArcUrlFile));
+    runner->GrantAccessToContentUrl(GURL(kArcUrlPipe));
     arc_service_manager_->arc_bridge_service()->file_system()->SetInstance(
         &fake_file_system_);
     WaitForInstanceReady(
@@ -116,6 +111,7 @@ class ArcContentFileSystemFileStreamReaderTest : public testing::Test {
   void TearDown() override {
     arc_service_manager_->arc_bridge_service()->file_system()->CloseInstance(
         &fake_file_system_);
+    arc_service_manager_->set_browser_context(nullptr);
   }
 
  private:
@@ -138,8 +134,8 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadRegularFile) {
     EXPECT_TRUE(ReadData(&reader, buffer.get()));
   }
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(base::StringPiece(kData, strlen(kData)),
-            base::StringPiece(buffer->data(), buffer->size()));
+  EXPECT_EQ(std::string_view(kData, strlen(kData)),
+            std::string_view(buffer->data(), buffer->size()));
 }
 
 TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadRegularFileWithOffset) {
@@ -150,8 +146,9 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadRegularFileWithOffset) {
     EXPECT_TRUE(ReadData(&reader, buffer.get()));
   }
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(base::StringPiece(kData + kOffset10, strlen(kData) - kOffset10),
-            base::StringPiece(buffer->data(), buffer->size()));
+  UNSAFE_TODO(
+      EXPECT_EQ(std::string_view(kData + kOffset10, strlen(kData) - kOffset10),
+                std::string_view(buffer->data(), buffer->size())));
 }
 
 TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadRegularFileWithOffsets) {
@@ -166,11 +163,12 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadRegularFileWithOffsets) {
     EXPECT_TRUE(ReadData(&reader2, buffer2.get()));
   }
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(base::StringPiece(kData + kOffset5, kOffset15 - kOffset5),
-            base::StringPiece(buffer1->data(), buffer1->size()));
-  EXPECT_EQ(base::StringPiece(kData + kOffset15,
-                              strlen(kData) - kOffset5 - kOffset15),
-            base::StringPiece(buffer2->data(), buffer2->size()));
+  UNSAFE_TODO(
+      EXPECT_EQ(std::string_view(kData + kOffset5, kOffset15 - kOffset5),
+                std::string_view(buffer1->data(), buffer1->size())));
+  UNSAFE_TODO(EXPECT_EQ(
+      std::string_view(kData + kOffset15, strlen(kData) - kOffset5 - kOffset15),
+      std::string_view(buffer2->data(), buffer2->size())));
 }
 
 TEST_F(ArcContentFileSystemFileStreamReaderTest,
@@ -189,11 +187,12 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest,
     EXPECT_TRUE(ReadData(&reader2, buffer2.get()));
   }
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(base::StringPiece(kData + kOffset5, kOffset15 - kOffset5),
-            base::StringPiece(buffer1->data(), buffer1->size()));
-  EXPECT_EQ(base::StringPiece(kData + kOffset15,
-                              strlen(kData) - kOffset5 - kOffset15),
-            base::StringPiece(buffer2->data(), buffer2->size()));
+  UNSAFE_TODO(
+      EXPECT_EQ(std::string_view(kData + kOffset5, kOffset15 - kOffset5),
+                std::string_view(buffer1->data(), buffer1->size())));
+  UNSAFE_TODO(EXPECT_EQ(
+      std::string_view(kData + kOffset15, strlen(kData) - kOffset5 - kOffset15),
+      std::string_view(buffer2->data(), buffer2->size())));
 }
 
 TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadPipe) {
@@ -204,8 +203,8 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadPipe) {
     EXPECT_TRUE(ReadData(&reader, buffer.get()));
   }
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(base::StringPiece(kData, strlen(kData)),
-            base::StringPiece(buffer->data(), buffer->size()));
+  EXPECT_EQ(std::string_view(kData, strlen(kData)),
+            std::string_view(buffer->data(), buffer->size()));
 }
 
 TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadPipeWithOffset) {
@@ -216,8 +215,9 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadPipeWithOffset) {
     EXPECT_TRUE(ReadData(&reader, buffer.get()));
   }
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(base::StringPiece(kData + kOffset10, strlen(kData) - kOffset10),
-            base::StringPiece(buffer->data(), buffer->size()));
+  UNSAFE_TODO(
+      EXPECT_EQ(std::string_view(kData + kOffset10, strlen(kData) - kOffset10),
+                std::string_view(buffer->data(), buffer->size())));
 }
 
 TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadPipeWithOffsets) {
@@ -232,11 +232,12 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest, ReadPipeWithOffsets) {
     EXPECT_TRUE(ReadData(&reader2, buffer2.get()));
   }
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(base::StringPiece(kData + kOffset5, kOffset15 - kOffset5),
-            base::StringPiece(buffer1->data(), buffer1->size()));
-  EXPECT_EQ(base::StringPiece(kData + kOffset15,
-                              strlen(kData) - kOffset5 - kOffset15),
-            base::StringPiece(buffer2->data(), buffer2->size()));
+  UNSAFE_TODO(
+      EXPECT_EQ(std::string_view(kData + kOffset5, kOffset15 - kOffset5),
+                std::string_view(buffer1->data(), buffer1->size())));
+  UNSAFE_TODO(EXPECT_EQ(
+      std::string_view(kData + kOffset15, strlen(kData) - kOffset5 - kOffset15),
+      std::string_view(buffer2->data(), buffer2->size())));
 }
 
 TEST_F(ArcContentFileSystemFileStreamReaderTest,
@@ -254,11 +255,12 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest,
     EXPECT_TRUE(ReadData(&reader2, buffer2.get()));
   }
   base::RunLoop().RunUntilIdle();
-  EXPECT_EQ(base::StringPiece(kData + kOffset5, kOffset15 - kOffset5),
-            base::StringPiece(buffer1->data(), buffer1->size()));
-  EXPECT_EQ(base::StringPiece(kData + kOffset15,
-                              strlen(kData) - kOffset5 - kOffset15),
-            base::StringPiece(buffer2->data(), buffer2->size()));
+  UNSAFE_TODO(
+      EXPECT_EQ(std::string_view(kData + kOffset5, kOffset15 - kOffset5),
+                std::string_view(buffer1->data(), buffer1->size())));
+  UNSAFE_TODO(EXPECT_EQ(
+      std::string_view(kData + kOffset15, strlen(kData) - kOffset5 - kOffset15),
+      std::string_view(buffer2->data(), buffer2->size())));
 }
 
 TEST_F(ArcContentFileSystemFileStreamReaderTest, GetLength) {
@@ -266,34 +268,10 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest, GetLength) {
     ArcContentFileSystemFileStreamReader reader(GURL(kArcUrlFile),
                                                 /*offset=*/0);
 
-    net::TestInt64CompletionCallback callback;
-    EXPECT_EQ(static_cast<int64_t>(strlen(kData)),
-              callback.GetResult(reader.GetLength(callback.callback())));
-  }
-  base::RunLoop().RunUntilIdle();
-}
-
-TEST_F(ArcContentFileSystemFileStreamReaderTest, GetLengthUnknownSizeSeekable) {
-  {
-    ArcContentFileSystemFileStreamReader reader(GURL(kArcUrlFileUnknownSize),
-                                                /*offset=*/0);
-
-    net::TestInt64CompletionCallback callback;
-    EXPECT_EQ(static_cast<int64_t>(strlen(kData)),
-              callback.GetResult(reader.GetLength(callback.callback())));
-  }
-  base::RunLoop().RunUntilIdle();
-}
-
-TEST_F(ArcContentFileSystemFileStreamReaderTest,
-       GetLengthUnknownSizeNotSeekable) {
-  {
-    ArcContentFileSystemFileStreamReader reader(GURL(kArcUrlPipeUnknownSize),
-                                                /*offset=*/0);
-
-    net::TestInt64CompletionCallback callback;
-    EXPECT_EQ(static_cast<int64_t>(net::ERR_FAILED),
-              callback.GetResult(reader.GetLength(callback.callback())));
+    base::test::TestFuture<base::expected<int64_t, net::Error>> future;
+    reader.GetLength(future.GetCallback());
+    ASSERT_TRUE(future.Get().has_value());
+    EXPECT_EQ(static_cast<int64_t>(strlen(kData)), future.Get().value());
   }
   base::RunLoop().RunUntilIdle();
 }
@@ -312,8 +290,9 @@ TEST_F(ArcContentFileSystemFileStreamReaderTest, GetLengthError) {
   {
     ArcContentFileSystemFileStreamReader reader(
         GURL("content://org.chromium.foo/error"), /*offset=*/0);
-    net::TestInt64CompletionCallback callback;
-    EXPECT_LT(callback.GetResult(reader.GetLength(callback.callback())), 0);
+    base::test::TestFuture<base::expected<int64_t, net::Error>> future;
+    reader.GetLength(future.GetCallback());
+    EXPECT_FALSE(future.Get().has_value());
   }
   base::RunLoop().RunUntilIdle();
 }

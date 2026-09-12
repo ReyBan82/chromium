@@ -9,6 +9,7 @@
 
 #include "base/memory/raw_ptr.h"
 #include "base/time/time.h"
+#include "components/viz/client/frame_evictor.h"
 #include "components/viz/common/frame_sinks/begin_frame_source.h"
 #include "components/viz/common/surfaces/local_surface_id.h"
 #include "components/viz/common/surfaces/parent_local_surface_id_allocator.h"
@@ -18,13 +19,14 @@
 #include "ui/compositor/compositor.h"
 #include "ui/compositor/compositor_observer.h"
 #include "ui/compositor/layer_observer.h"
+#include "ui/compositor/layer_surface.h"
 #include "ui/display/screen_info.h"
 #include "ui/gfx/ca_layer_params.h"
 
 namespace ui {
 class AcceleratedWidgetMacNSView;
 class RecyclableCompositorMac;
-}
+}  // namespace ui
 
 namespace content {
 
@@ -38,6 +40,7 @@ class BrowserCompositorMacClient {
   virtual std::vector<viz::SurfaceId> CollectSurfaceIdsForEviction() = 0;
   virtual display::ScreenInfo GetCurrentScreenInfo() const = 0;
   virtual void SetCurrentDeviceScaleFactor(float device_scale_factor) = 0;
+  virtual bool ShouldUseDefaultDeadlineOnResize() const = 0;
 };
 
 // This class owns a DelegatedFrameHost, and will dynamically attach and
@@ -70,8 +73,6 @@ class CONTENT_EXPORT BrowserCompositorMac : public DelegatedFrameHostClient,
   const gfx::CALayerParams* GetLastCALayerParams() const;
 
   void SetBackgroundColor(SkColor background_color);
-  void UpdateVSyncParameters(const base::TimeTicks& timebase,
-                             const base::TimeDelta& interval);
   void TakeFallbackContentFrom(BrowserCompositorMac* other);
 
   // Update the renderer's SurfaceId to reflect the current dimensions of the
@@ -115,19 +116,31 @@ class CONTENT_EXPORT BrowserCompositorMac : public DelegatedFrameHostClient,
   static void DisableRecyclingForShutdown();
 
   // DelegatedFrameHostClient implementation.
-  ui::Layer* DelegatedFrameHostGetLayer() const override;
+  ui::LayerSurface* GetDelegatedFrameHostLayer() const override;
   bool DelegatedFrameHostIsVisible() const override;
   SkColor DelegatedFrameHostGetGutterColor() const override;
   void OnFrameTokenChanged(uint32_t frame_token,
                            base::TimeTicks activation_time) override;
   float GetDeviceScaleFactor() const override;
   void InvalidateLocalSurfaceIdOnEviction() override;
-  std::vector<viz::SurfaceId> CollectSurfaceIdsForEviction() override;
+  viz::FrameEvictorClient::EvictIds CollectSurfaceIdsForEviction() override;
   bool ShouldShowStaleContentOnEviction() override;
+  cc::DeadlinePolicy GetResizeDeadlinePolicy() const override;
 
   base::WeakPtr<BrowserCompositorMac> GetWeakPtr() {
     return weak_factory_.GetWeakPtr();
   }
+
+  // Dispatched when the page is being navigated to a different document. The
+  // new page hasn't been marked as active yet.
+  void DidNavigateMainFramePreCommit();
+
+  // Dispatched after the old page has been unloaded and has entered the
+  // `BackForwardCache`.
+  void DidEnterBackForwardCache();
+
+  // Dispatched after the page is activated from BFCache.
+  void ActivatedOrEvictedFromBackForwardCache();
 
   void DidNavigate();
 
@@ -135,11 +148,13 @@ class CONTENT_EXPORT BrowserCompositorMac : public DelegatedFrameHostClient,
 
   ui::Compositor* GetCompositor() const;
 
+  void InvalidateSurfaceAllocationGroup();
+
+  void SetEvictOnHide(bool evict_on_hide);
+
  private:
   // ui::LayerObserver implementation:
   void LayerDestroyed(ui::Layer* layer) override;
-
-  cc::DeadlinePolicy GetDeadlinePolicy(bool is_resize) const;
 
   // The state of |delegated_frame_host_| and |recyclable_compositor_| to
   // manage being visible, hidden, or drawn via a ui::Layer.
@@ -174,7 +189,7 @@ class CONTENT_EXPORT BrowserCompositorMac : public DelegatedFrameHostClient,
   std::unique_ptr<ui::RecyclableCompositorMac> recyclable_compositor_;
 
   std::unique_ptr<DelegatedFrameHost> delegated_frame_host_;
-  std::unique_ptr<ui::Layer> root_layer_;
+  std::unique_ptr<ui::LayerSurface> root_layer_;
 
   SkColor background_color_ = SK_ColorWHITE;
 

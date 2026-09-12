@@ -3,32 +3,39 @@
 // found in the LICENSE file.
 
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
 #include "chrome/browser/sync/test/integration/session_hierarchy_match_checker.h"
 #include "chrome/browser/sync/test/integration/sessions_helper.h"
 #include "chrome/browser/sync/test/integration/sync_service_impl_harness.h"
 #include "chrome/browser/sync/test/integration/sync_test.h"
 #include "chrome/browser/sync/test/integration/updated_progress_marker_checker.h"
 #include "chrome/common/webui_url_constants.h"
-#include "components/sync/driver/glue/sync_transport_data_prefs.h"
-#include "components/sync/driver/sync_service_impl.h"
 #include "components/sync/engine/polling_constants.h"
 #include "components/sync/protocol/client_commands.pb.h"
+#include "components/sync/service/glue/sync_transport_data_prefs.h"
+#include "components/sync/service/sync_service_impl.h"
 #include "content/public/test/browser_test.h"
+#include "net/base/features.h"
 #include "net/dns/mock_host_resolver.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
 using sessions_helper::CheckInitialState;
-using sessions_helper::OpenTab;
+using sessions_helper::NavigateTab;
 using testing::Eq;
 using testing::Ge;
 using testing::Le;
 
 namespace {
 
-class SingleClientPollingSyncTest : public SyncTest {
+class SingleClientPollingSyncTest
+    : public SyncTest,
+      public testing::WithParamInterface<SyncTest::SetupSyncMode> {
  public:
-  SingleClientPollingSyncTest() : SyncTest(SINGLE_CLIENT) {}
+  SingleClientPollingSyncTest() : SyncTest(SINGLE_CLIENT) {
+    if (GetSetupSyncMode() == SetupSyncMode::kSyncTransportOnly) {
+      scoped_feature_list_.InitAndEnableFeature(
+          syncer::kReplaceSyncPromosWithSignInPromos);
+    }
+  }
 
   SingleClientPollingSyncTest(const SingleClientPollingSyncTest&) = delete;
   SingleClientPollingSyncTest& operator=(const SingleClientPollingSyncTest&) =
@@ -36,26 +43,39 @@ class SingleClientPollingSyncTest : public SyncTest {
 
   ~SingleClientPollingSyncTest() override = default;
 
+  SyncTest::SetupSyncMode GetSetupSyncMode() const override {
+    return GetParam();
+  }
+
+  GURL GetInitialURL() const override {
+    return chrome::ChromeUINewTabURLAsGURL();
+  }
+
   void SetUpOnMainThread() override {
     host_resolver()->AddRule("*", "127.0.0.1");
-    ASSERT_TRUE(embedded_test_server()->Start());
     SyncTest::SetUpOnMainThread();
   }
+
+ private:
+  base::test::ScopedFeatureList scoped_feature_list_;
 };
+
+INSTANTIATE_TEST_SUITE_P(,
+                         SingleClientPollingSyncTest,
+                         GetSyncTestModes(),
+                         testing::PrintToStringParamName());
 
 // This test verifies that the poll interval in prefs gets initialized if no
 // data is available yet.
-IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest, ShouldInitializePollPrefs) {
-  // Setup clients and verify no poll interval is present yet.
-  ASSERT_TRUE(SetupClients()) << "SetupClients() failed.";
-  syncer::SyncTransportDataPrefs transport_data_prefs(
-      GetProfile(0)->GetPrefs());
-  EXPECT_TRUE(transport_data_prefs.GetPollInterval().is_zero());
-  ASSERT_TRUE(transport_data_prefs.GetLastPollTime().is_null());
+IN_PROC_BROWSER_TEST_P(SingleClientPollingSyncTest, ShouldInitializePollPrefs) {
+  ASSERT_TRUE(SetupClients());
 
   // Execute a sync cycle and verify the client set up (and persisted) the
   // default value.
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+  ASSERT_TRUE(SetupSync());
+  syncer::SyncTransportDataPrefs transport_data_prefs(
+      GetProfile(0)->GetPrefs(),
+      GetClient(0)->GetGaiaIdHashForPrimaryAccount());
   EXPECT_THAT(transport_data_prefs.GetPollInterval(),
               Eq(syncer::kDefaultPollInterval));
 }
@@ -63,9 +83,9 @@ IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest, ShouldInitializePollPrefs) {
 // This test verifies that updates of the poll interval get persisted
 // That's important make sure clients with short live times will eventually poll
 // (e.g. Android).
-IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest,
+IN_PROC_BROWSER_TEST_P(SingleClientPollingSyncTest,
                        PRE_ShouldUsePollIntervalFromPrefs) {
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+  ASSERT_TRUE(SetupSync());
 
   sync_pb::ClientCommand client_command;
   client_command.set_set_sync_poll_interval(67);
@@ -74,23 +94,24 @@ IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest,
   // Trigger a sync-cycle.
   ASSERT_TRUE(CheckInitialState(0));
   const GURL url = embedded_test_server()->GetURL("/sync/simple.html");
-  ASSERT_TRUE(OpenTab(0, url));
+  NavigateTab(0, url);
   SessionHierarchyMatchChecker checker(
       fake_server::SessionsHierarchy({{url.spec()}}), GetSyncService(0),
       GetFakeServer());
   ASSERT_TRUE(checker.Wait());
 
   syncer::SyncTransportDataPrefs transport_data_prefs(
-      GetProfile(0)->GetPrefs());
+      GetProfile(0)->GetPrefs(),
+      GetClient(0)->GetGaiaIdHashForPrimaryAccount());
   EXPECT_THAT(transport_data_prefs.GetPollInterval().InSeconds(), Eq(67));
 }
 
-IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest,
+IN_PROC_BROWSER_TEST_P(SingleClientPollingSyncTest,
                        ShouldUsePollIntervalFromPrefs) {
   // Execute a sync cycle and verify this cycle used that interval.
   // This test assumes the SyncScheduler reads the actual interval from the
   // context. This is covered in the SyncSchedulerImpl's unittest.
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+  ASSERT_TRUE(SetupSync());
   EXPECT_THAT(GetClient(0)->GetLastCycleSnapshot().poll_interval().InSeconds(),
               Eq(67));
 }
@@ -99,26 +120,20 @@ IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest,
 // It first starts up a client, executes a sync cycle and stops it. After a
 // simulated pause, the client gets started up again and we expect a sync cycle
 // to happen (which would be caused by polling).
-// Note, that there's a more realistic (and more complex) test for this in
-// two_client_polling_sync_test.cc too.
-IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest,
+IN_PROC_BROWSER_TEST_P(SingleClientPollingSyncTest,
                        PRE_ShouldPollWhenIntervalExpiredAcrossRestarts) {
   base::Time start = base::Time::Now();
 
-  ASSERT_TRUE(SetupClients()) << "SetupClients() failed.";
+  ASSERT_TRUE(SetupSync());
 
-  syncer::SyncTransportDataPrefs remote_prefs(GetProfile(0)->GetPrefs());
-  // Set small polling interval to make random delays introduced in
-  // SyncSchedulerImpl::ComputeLastPollOnStart() negligible, but big enough to
-  // avoid periodic polls during a test run.
-  remote_prefs.SetPollInterval(base::Seconds(300));
-
-  ASSERT_TRUE(SetupSync()) << "SetupSync() failed.";
+  syncer::SyncTransportDataPrefs remote_prefs(
+      GetProfile(0)->GetPrefs(),
+      GetClient(0)->GetGaiaIdHashForPrimaryAccount());
 
   // Trigger a sync-cycle.
   ASSERT_TRUE(CheckInitialState(0));
   const GURL url = embedded_test_server()->GetURL("/sync/simple.html");
-  ASSERT_TRUE(OpenTab(0, url));
+  NavigateTab(0, url);
   ASSERT_TRUE(SessionHierarchyMatchChecker(
                   fake_server::SessionsHierarchy({{url.spec()}}),
                   GetSyncService(0), GetFakeServer())
@@ -133,12 +148,14 @@ IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest,
                                remote_prefs.GetPollInterval());
 }
 
-IN_PROC_BROWSER_TEST_F(SingleClientPollingSyncTest,
+IN_PROC_BROWSER_TEST_P(SingleClientPollingSyncTest,
                        ShouldPollWhenIntervalExpiredAcrossRestarts) {
-  ASSERT_TRUE(SetupClients()) << "SetupClients() failed.";
+  ASSERT_TRUE(SetupClients());
   ASSERT_TRUE(GetClient(0)->AwaitEngineInitialization());
 
-  syncer::SyncTransportDataPrefs remote_prefs(GetProfile(0)->GetPrefs());
+  syncer::SyncTransportDataPrefs remote_prefs(
+      GetProfile(0)->GetPrefs(),
+      GetClient(0)->GetGaiaIdHashForPrimaryAccount());
   ASSERT_FALSE(remote_prefs.GetLastPollTime().is_null());
 
   // After restart, the last sync cycle snapshot should be empty.

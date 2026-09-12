@@ -4,19 +4,23 @@
 
 #include "base/android/jni_android.h"
 #include "base/android/jni_string.h"
-#include "chrome/android/chrome_jni_headers/WarmupManager_jni.h"
 #include "chrome/browser/predictors/loading_predictor.h"
 #include "chrome/browser/predictors/loading_predictor_factory.h"
+#include "chrome/browser/preloading/prefetch/chrome_prefetch_manager.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/profiles/profile_android.h"
+#include "content/public/browser/web_contents.h"
+#include "services/network/public/cpp/constants.h"
+#include "url/android/gurl_android.h"
 #include "url/gurl.h"
 
-using base::android::JavaParamRef;
+// Must come after all headers that specialize FromJniType() / ToJniType().
+#include "chrome/android/chrome_jni_headers/WarmupManager_jni.h"
+
+using base::android::JavaRef;
 
 static void JNI_WarmupManager_StartPreconnectPredictorInitialization(
     JNIEnv* env,
-    const JavaParamRef<jobject>& jprofile) {
-  Profile* profile = ProfileAndroid::FromProfileAndroid(jprofile);
+    Profile* profile) {
   auto* loading_predictor =
       predictors::LoadingPredictorFactory::GetForProfile(profile);
   if (!loading_predictor)
@@ -26,17 +30,28 @@ static void JNI_WarmupManager_StartPreconnectPredictorInitialization(
 
 static void JNI_WarmupManager_PreconnectUrlAndSubresources(
     JNIEnv* env,
-    const JavaParamRef<jobject>& jprofile,
-    const JavaParamRef<jstring>& url_str) {
-  if (url_str) {
-    GURL url = GURL(base::android::ConvertJavaStringToUTF8(env, url_str));
-    Profile* profile = ProfileAndroid::FromProfileAndroid(jprofile);
+    Profile* profile,
+    const std::string& url_str) {
+  GURL url = GURL(url_str);
 
-    auto* loading_predictor =
-        predictors::LoadingPredictorFactory::GetForProfile(profile);
-    if (loading_predictor) {
-      loading_predictor->PrepareForPageLoad(url,
-                                            predictors::HintOrigin::EXTERNAL);
-    }
+  auto* loading_predictor =
+      predictors::LoadingPredictorFactory::GetForProfile(profile);
+  if (loading_predictor) {
+    loading_predictor->PrepareForPageLoad(
+        /*initiator_origin=*/std::nullopt, url,
+        predictors::HintOrigin::EXTERNAL,
+        network::GetNoOpNetworkRestrictionsId());
   }
 }
+
+static void JNI_WarmupManager_StartPrefetchFromCct(
+    JNIEnv* env,
+    content::WebContents* web_contents,
+    const GURL& url,
+    bool juse_prefetch_proxy,
+    const std::optional<url::Origin>& trusted_source_origin) {
+  ChromePrefetchManager::GetOrCreateForWebContents(web_contents)
+      ->StartPrefetchFromCCT(url, juse_prefetch_proxy, trusted_source_origin);
+}
+
+DEFINE_JNI(WarmupManager)

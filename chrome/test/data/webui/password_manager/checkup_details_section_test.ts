@@ -4,9 +4,9 @@
 
 import 'chrome://password-manager/password_manager.js';
 
-import {CheckupSubpage, CrExpandButtonElement, OpenWindowProxyImpl, Page, PasswordCheckInteraction, PasswordManagerImpl, PrefsBrowserProxyImpl, Router} from 'chrome://password-manager/password_manager.js';
+import type {CrExpandButtonElement} from 'chrome://password-manager/password_manager.js';
+import {CheckupSubpage, OpenWindowProxyImpl, Page, PasswordAutomaticChangeState, PasswordCheckInteraction, PasswordManagerImpl, PluralStringProxyImpl, Router} from 'chrome://password-manager/password_manager.js';
 import {loadTimeData} from 'chrome://resources/js/load_time_data.js';
-import {PluralStringProxyImpl} from 'chrome://resources/js/plural_string_proxy.js';
 import {assertEquals, assertFalse, assertTrue} from 'chrome://webui-test/chai_assert.js';
 import {flushTasks} from 'chrome://webui-test/polymer_test_util.js';
 import {TestOpenWindowProxy} from 'chrome://webui-test/test_open_window_proxy.js';
@@ -14,8 +14,7 @@ import {TestPluralStringProxy} from 'chrome://webui-test/test_plural_string_prox
 import {isVisible} from 'chrome://webui-test/test_util.js';
 
 import {TestPasswordManagerProxy} from './test_password_manager_proxy.js';
-import {TestPrefsBrowserProxy} from './test_prefs_browser_proxy.js';
-import {createCredentialGroup, makeInsecureCredential, makePasswordManagerPrefs} from './test_util.js';
+import {createAffiliatedDomain, createCredentialGroup, makeInsecureCredential, makePasswordManagerPrefs} from './test_util.js';
 
 suite('CheckupDetailsSectionTest', function() {
   const CompromiseType = chrome.passwordsPrivate.CompromiseType;
@@ -23,7 +22,6 @@ suite('CheckupDetailsSectionTest', function() {
   let openWindowProxy: TestOpenWindowProxy;
   let passwordManager: TestPasswordManagerProxy;
   let pluralString: TestPluralStringProxy;
-  let prefsProxy: TestPrefsBrowserProxy;
 
   setup(function() {
     document.body.innerHTML = window.trustedTypes!.emptyHTML;
@@ -33,9 +31,6 @@ suite('CheckupDetailsSectionTest', function() {
     PasswordManagerImpl.setInstance(passwordManager);
     pluralString = new TestPluralStringProxy();
     PluralStringProxyImpl.setInstance(pluralString);
-    prefsProxy = new TestPrefsBrowserProxy();
-    prefsProxy.prefs = makePasswordManagerPrefs();
-    PrefsBrowserProxyImpl.setInstance(prefsProxy);
     Router.getInstance().navigateTo(Page.CHECKUP);
     return flushTasks();
   });
@@ -70,12 +65,18 @@ suite('CheckupDetailsSectionTest', function() {
             assertEquals(type + 'Passwords', params.messageName);
             assertEquals(2, params.itemCount);
 
-            assertEquals(
-                loadTimeData.getString(`${type}PasswordsTitle`),
-                section.$.subtitle.textContent!.trim());
+            if (type === CheckupSubpage.COMPROMISED) {
+              // getPluralString() should be called 2 times: 1 for page title,
+              // and 1 more for page subtitle.
+              assertEquals(2, pluralString.getCallCount('getPluralString'));
+            } else {
+              assertEquals(
+                  loadTimeData.getString(`${type}PasswordsTitle`),
+                  section.$.subtitle.textContent.trim());
+            }
             assertEquals(
                 loadTimeData.getString(`${type}PasswordsDescription`),
-                section.$.description.textContent!.trim());
+                section.$.description.textContent.trim());
           }));
 
   test('Compromised issues shown correctly', async function() {
@@ -145,16 +146,16 @@ suite('CheckupDetailsSectionTest', function() {
       assertTrue(!!listItemElement);
       assertEquals(
           passwordManager.data.groups[0]?.name,
-          listItemElement.$.shownUrl.textContent!.trim());
+          listItemElement.$.shownUrl.textContent.trim());
       assertEquals(
           expectedCredential.username,
-          listItemElement.$.username.textContent!.trim());
+          listItemElement.$.username.textContent.trim());
       const compromiseType =
           listItemElement.shadowRoot!.querySelector('#compromiseType');
 
       assertTrue(!!compromiseType);
       assertTrue(isVisible(compromiseType));
-      assertEquals(expectedType[index]!, compromiseType.textContent!.trim());
+      assertEquals(expectedType[index]!, compromiseType.textContent.trim());
 
       const elapsedTime =
           listItemElement.shadowRoot!.querySelector('#elapsedTime');
@@ -162,7 +163,7 @@ suite('CheckupDetailsSectionTest', function() {
       assertTrue(isVisible(elapsedTime));
       assertEquals(
           expectedCredential.compromisedInfo?.elapsedTimeSinceCompromise,
-          elapsedTime.textContent!.trim());
+          elapsedTime.textContent.trim());
     }
   });
 
@@ -201,8 +202,8 @@ suite('CheckupDetailsSectionTest', function() {
     assertTrue(!!weakItem);
     assertEquals(
         passwordManager.data.groups[0]!.name,
-        weakItem.$.shownUrl.textContent!.trim());
-    assertEquals('viking', weakItem.$.username.textContent!.trim());
+        weakItem.$.shownUrl.textContent.trim());
+    assertEquals('viking', weakItem.$.username.textContent.trim());
 
     assertFalse(!!weakItem.shadowRoot!.querySelector('#compromiseType'));
     assertFalse(!!weakItem.shadowRoot!.querySelector('#elapsedTime'));
@@ -267,6 +268,7 @@ suite('CheckupDetailsSectionTest', function() {
     assertFalse(isVisible(listItemElements[0]));
 
     dismissedButton.click();
+    await dismissedButton.updateComplete;
 
     assertTrue(isVisible(listItemElements[0]));
   });
@@ -275,9 +277,9 @@ suite('CheckupDetailsSectionTest', function() {
     Router.getInstance().navigateTo(
         Page.CHECKUP_DETAILS, CheckupSubpage.REUSED);
     const insecurePasswords = [
-      makeInsecureCredential({url: 'test.com', username: 'viking', id: 0}),
+      makeInsecureCredential({url: 'Some app', username: 'viking', id: 0}),
       makeInsecureCredential({url: 'example.com', username: 'user', id: 1}),
-      makeInsecureCredential({url: 'Some app', username: 'Lalala', id: 2}),
+      makeInsecureCredential({url: 'test.com', username: 'Lalala', id: 2}),
       makeInsecureCredential(
           {url: 'accounts.google.com', username: 'corporateEmail', id: 3}),
       makeInsecureCredential(
@@ -285,10 +287,10 @@ suite('CheckupDetailsSectionTest', function() {
     ];
     passwordManager.data.groups = insecurePasswords.map(
         entry => createCredentialGroup(
-            {name: entry.urls.shown, credentials: [entry]}));
+            {name: entry.affiliatedDomains[0]!.name, credentials: [entry]}));
     passwordManager.data.credentialWithReusedPassword = [
-      {entries: insecurePasswords.slice(0, 3)},
-      {entries: insecurePasswords.slice(3, 5)},
+      {entries: insecurePasswords.slice(0, 3).sort(() => Math.random() - 0.5)},
+      {entries: insecurePasswords.slice(3, 5).sort(() => Math.random() - 0.5)},
     ];
 
     const section = document.createElement('checkup-details-section');
@@ -311,11 +313,11 @@ suite('CheckupDetailsSectionTest', function() {
 
       assertTrue(!!listItemElement);
       assertEquals(
-          expectedCredential.urls.shown,
-          listItemElement.$.shownUrl.textContent!.trim());
+          expectedCredential.affiliatedDomains[0]!.name,
+          listItemElement.$.shownUrl.textContent.trim());
       assertEquals(
           expectedCredential.username,
-          listItemElement.$.username.textContent!.trim());
+          listItemElement.$.username.textContent.trim());
       const leakType = listItemElement.shadowRoot!.querySelector('#leakType');
       assertFalse(!!leakType);
 
@@ -396,6 +398,7 @@ suite('CheckupDetailsSectionTest', function() {
     ];
 
     const section = document.createElement('checkup-details-section');
+    section.prefs = makePasswordManagerPrefs();
     document.body.appendChild(section);
     await passwordManager.whenCalled('getInsecureCredentials');
     await flushTasks();
@@ -480,15 +483,11 @@ suite('CheckupDetailsSectionTest', function() {
       }),
     ];
 
-    prefsProxy.prefs = [
-      {
-        key: 'profile.password_dismiss_compromised_alert',
-        type: chrome.settingsPrivate.PrefType.BOOLEAN,
-        value: false,
-      },
-    ];
-
     const section = document.createElement('checkup-details-section');
+    section.prefs = makePasswordManagerPrefs();
+    const prefObject =
+        section.getPref<boolean>('profile.password_dismiss_compromised_alert');
+    prefObject.value = false;
     document.body.appendChild(section);
     await passwordManager.whenCalled('getInsecureCredentials');
     await flushTasks();
@@ -567,6 +566,71 @@ suite('CheckupDetailsSectionTest', function() {
 
   [CheckupSubpage.COMPROMISED, CheckupSubpage.REUSED, CheckupSubpage.WEAK]
       .forEach(
+        type => test(
+          `Automated change password click for ${type}`, async function () {
+            Router.getInstance().navigateTo(Page.CHECKUP_DETAILS, type);
+
+            const insecureCredential = makeInsecureCredential({
+              id: 42,
+              url: 'test.com',
+              username: 'viking',
+              types: [
+                CompromiseType.LEAKED,
+                CompromiseType.WEAK,
+                CompromiseType.REUSED,
+              ],
+              isAutomaticPasswordChangeSupported: true,
+            });
+            passwordManager.data.insecureCredentials = [insecureCredential];
+            passwordManager.data.credentialWithReusedPassword =
+                [{entries: [insecureCredential]}];
+
+            const section = document.createElement('checkup-details-section');
+            document.body.appendChild(section);
+            await passwordManager.whenCalled('getInsecureCredentials');
+            if (type === CheckupSubpage.REUSED) {
+              await passwordManager.whenCalled(
+                  'getCredentialsWithReusedPassword');
+            }
+            await pluralString.whenCalled('getPluralString');
+            await flushTasks();
+
+            const listItemElements =
+                section.shadowRoot!.querySelectorAll('checkup-list-item');
+            assertEquals(1, listItemElements.length);
+            assertTrue(!!listItemElements[0]);
+            assertTrue(isVisible(listItemElements[0]));
+
+            // Verify that standard 'Change password' button is hidden.
+            const changePassword =
+                listItemElements[0].shadowRoot!.querySelector<HTMLElement>(
+                    '#changePasswordButton');
+            assertFalse(!!changePassword);
+
+            // Verify that 'Already change password?' link is hidden.
+            const alreadyChange =
+                listItemElements[0].shadowRoot!.querySelector<HTMLElement>(
+                    '#alreadyChanged');
+            assertTrue(!!alreadyChange);
+            assertTrue(alreadyChange.hidden);
+
+            const autoChangePassword =
+                listItemElements[0].shadowRoot!.querySelector<HTMLElement>(
+                    '#autoChangePasswordButton');
+            assertTrue(!!autoChangePassword);
+            assertTrue(autoChangePassword.classList.contains('tonal-button'));
+
+            // Verify ARIA label is set.
+            assertTrue(!!autoChangePassword.getAttribute('aria-label'));
+
+            autoChangePassword.click();
+            const id =
+                await passwordManager.whenCalled('requestChangePassword');
+            assertEquals(insecureCredential.id, id);
+          }));
+
+  [CheckupSubpage.COMPROMISED, CheckupSubpage.REUSED, CheckupSubpage.WEAK]
+      .forEach(
           type => test(`Change password in app for ${type}`, async function() {
             Router.getInstance().navigateTo(Page.CHECKUP_DETAILS, type);
 
@@ -623,12 +687,12 @@ suite('CheckupDetailsSectionTest', function() {
       id: 0,
       url: 'test.com',
       username: 'viking',
+      password: 'pass',
       types: [
         CompromiseType.LEAKED,
       ],
     });
-    credential.affiliatedDomains =
-        [{name: 'test.com', url: 'https://test.com/'}];
+    credential.affiliatedDomains = [createAffiliatedDomain('test.com')];
     passwordManager.data.insecureCredentials = [credential];
 
     const section = document.createElement('checkup-details-section');
@@ -662,12 +726,12 @@ suite('CheckupDetailsSectionTest', function() {
       id: 0,
       url: 'test.com',
       username: 'viking',
+      password: 'pass',
       types: [
         CompromiseType.LEAKED,
       ],
     });
-    credential.affiliatedDomains =
-        [{name: 'test.com', url: 'https://test.com/'}];
+    credential.affiliatedDomains = [createAffiliatedDomain('test.com')];
     passwordManager.data.insecureCredentials = [credential];
 
     const section = document.createElement('checkup-details-section');
@@ -697,12 +761,12 @@ suite('CheckupDetailsSectionTest', function() {
       id: 0,
       url: 'test.com',
       username: 'viking',
+      password: 'pass',
       types: [
         CompromiseType.LEAKED,
       ],
     });
-    credential.affiliatedDomains =
-        [{name: 'test.com', url: 'https://test.com/'}];
+    credential.affiliatedDomains = [createAffiliatedDomain('test.com')];
     passwordManager.data.insecureCredentials = [credential];
 
     const section = document.createElement('checkup-details-section');
@@ -757,8 +821,7 @@ suite('CheckupDetailsSectionTest', function() {
         CompromiseType.LEAKED,
       ],
     });
-    credential.affiliatedDomains =
-        [{name: 'test.com', url: 'https://test.com/'}];
+    credential.affiliatedDomains = [createAffiliatedDomain('test.com')];
     passwordManager.data.insecureCredentials = [credential];
 
     const section = document.createElement('checkup-details-section');
@@ -788,9 +851,186 @@ suite('CheckupDetailsSectionTest', function() {
     deleteDialog.$.delete.click();
     const interaction =
         await passwordManager.whenCalled('recordPasswordCheckInteraction');
-    const params = await passwordManager.whenCalled('removeSavedPassword');
+    const params = await passwordManager.whenCalled('removeCredential');
     assertEquals(params.id, credential.id);
     assertEquals(params.fromStores, credential.storedIn);
     assertEquals(PasswordCheckInteraction.REMOVE_PASSWORD, interaction);
   });
+
+  test(
+      'Automatic password change state updates are propagated to items',
+      async function() {
+        Router.getInstance().navigateTo(
+            Page.CHECKUP_DETAILS, CheckupSubpage.COMPROMISED);
+
+        const credential = makeInsecureCredential({
+          id: 42,
+          url: 'test.com',
+          username: 'viking',
+          types: [
+            CompromiseType.LEAKED,
+          ],
+          isAutomaticPasswordChangeSupported: true,
+        });
+        passwordManager.data.insecureCredentials = [credential];
+
+        const section = document.createElement('checkup-details-section');
+        document.body.appendChild(section);
+        await passwordManager.whenCalled('getInsecureCredentials');
+        await flushTasks();
+
+        const listItem = section.shadowRoot!.querySelector('checkup-list-item');
+        assertTrue(!!listItem);
+
+        // Initially state is Inactive.
+        assertEquals(
+            PasswordAutomaticChangeState.kInactive,
+            listItem.passwordChangeState);
+
+        // Fire state update to kChangingPassword.
+        passwordManager.callbackRouterRemote
+            .onPasswordAutomaticChangeStateUpdated(
+                credential.id, PasswordAutomaticChangeState.kChangingPassword);
+        await passwordManager.callbackRouterRemote.$.flushForTesting();
+        await flushTasks();
+
+        // Verify that the state was propagated down to the list item property.
+        assertEquals(
+            PasswordAutomaticChangeState.kChangingPassword,
+            listItem.passwordChangeState);
+
+        // Fire state update to kPasswordChangedSuccessfully.
+        passwordManager.callbackRouterRemote
+            .onPasswordAutomaticChangeStateUpdated(
+                credential.id,
+                PasswordAutomaticChangeState.kPasswordChangedSuccessfully);
+        await passwordManager.callbackRouterRemote.$.flushForTesting();
+        await flushTasks();
+
+        // Verify that the success state was propagated down to the list item
+        // property.
+        assertEquals(
+            PasswordAutomaticChangeState.kPasswordChangedSuccessfully,
+            listItem.passwordChangeState);
+      });
+
+  test('does not leak listeners when disconnected', async function() {
+    Router.getInstance().navigateTo(
+        Page.CHECKUP_DETAILS, CheckupSubpage.COMPROMISED);
+
+    const credential = makeInsecureCredential({
+      id: 42,
+      url: 'test.com',
+      username: 'viking',
+      types: [
+        CompromiseType.LEAKED,
+      ],
+      isAutomaticPasswordChangeSupported: true,
+    });
+    passwordManager.data.insecureCredentials = [credential];
+
+    const section = document.createElement('checkup-details-section');
+    document.body.appendChild(section);
+    await passwordManager.whenCalled('getInsecureCredentials');
+    await flushTasks();
+
+    const listItem = section.shadowRoot!.querySelector('checkup-list-item');
+    assertTrue(!!listItem);
+
+    // Verify initial state.
+    assertEquals(
+        PasswordAutomaticChangeState.kInactive, listItem.passwordChangeState);
+
+    // Fire state update while connected.
+    passwordManager.callbackRouterRemote.onPasswordAutomaticChangeStateUpdated(
+        credential.id, PasswordAutomaticChangeState.kChangingPassword);
+    await passwordManager.callbackRouterRemote.$.flushForTesting();
+    await flushTasks();
+
+    assertEquals(
+        PasswordAutomaticChangeState.kChangingPassword,
+        listItem.passwordChangeState);
+
+    // Remove section from DOM (disconnectedCallback is called).
+    section.remove();
+    await flushTasks();
+
+    // Fire state update while disconnected.
+    passwordManager.callbackRouterRemote.onPasswordAutomaticChangeStateUpdated(
+        credential.id,
+        PasswordAutomaticChangeState.kPasswordChangedSuccessfully);
+    await passwordManager.callbackRouterRemote.$.flushForTesting();
+    await flushTasks();
+
+    // Verify state was not updated because listener was removed.
+    assertEquals(
+        PasswordAutomaticChangeState.kChangingPassword,
+        listItem.passwordChangeState);
+  });
+
+  [CheckupSubpage.COMPROMISED, CheckupSubpage.REUSED, CheckupSubpage.WEAK]
+      .forEach(
+          type => test(
+              `Automated change password cancel button visibility and click for
+                   ${type}`,
+              async function() {
+                Router.getInstance().navigateTo(Page.CHECKUP_DETAILS, type);
+
+                const insecureCredential = makeInsecureCredential({
+                  id: 42,
+                  url: 'test.com',
+                  username: 'viking',
+                  types: [
+                    CompromiseType.LEAKED,
+                    CompromiseType.WEAK,
+                    CompromiseType.REUSED,
+                  ],
+                  isAutomaticPasswordChangeSupported: true,
+                });
+                passwordManager.data.insecureCredentials = [insecureCredential];
+                passwordManager.data.credentialWithReusedPassword =
+                    [{entries: [insecureCredential]}];
+
+                const section =
+                    document.createElement('checkup-details-section');
+                document.body.appendChild(section);
+                await passwordManager.whenCalled('getInsecureCredentials');
+                if (type === CheckupSubpage.REUSED) {
+                  await passwordManager.whenCalled(
+                      'getCredentialsWithReusedPassword');
+                }
+                await flushTasks();
+
+                const listItemElements =
+                    section.shadowRoot!.querySelectorAll('checkup-list-item');
+                assertEquals(1, listItemElements.length);
+                const listItem = listItemElements[0]!;
+
+                // Initially idle, cancel button should not exist.
+                assertFalse(!!listItem.shadowRoot!.querySelector(
+                    '#cancelAutoChangeButton'));
+
+                // Set state to active.
+                listItem.passwordChangeState =
+                    PasswordAutomaticChangeState.kChangingPassword;
+                await flushTasks();
+
+                const cancelButton =
+                    listItem.shadowRoot!.querySelector<HTMLElement>(
+                        '#cancelAutoChangeButton');
+                assertTrue(!!cancelButton);
+                assertTrue(isVisible(cancelButton));
+
+                // Click cancel.
+                cancelButton.click();
+                const id =
+                    await passwordManager.whenCalled('stopPasswordChange');
+                assertEquals(insecureCredential.id, id);
+                listItem.passwordChangeState =
+                    PasswordAutomaticChangeState.kInactive;
+                await flushTasks();
+
+                // Cancel button should be hidden.
+                assertFalse(isVisible(cancelButton));
+              }));
 });

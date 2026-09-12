@@ -11,6 +11,9 @@
 #include <memory>
 #include <utility>
 
+#include "base/auto_reset.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/stack_allocated.h"
 #include "components/autofill/content/common/mojom/autofill_agent.mojom.h"
 #include "components/autofill/content/common/mojom/autofill_driver.mojom.h"
 #include "components/autofill/content/renderer/renderer_save_password_progress_logger.h"
@@ -21,11 +24,11 @@
 #include "mojo/public/cpp/bindings/pending_associated_receiver.h"
 #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
 #include "third_party/blink/public/web/web_input_element.h"
-#include "url/gurl.h"
 
 namespace autofill {
 
 class PasswordAutofillAgent;
+class SynchronousFormCache;
 
 // This class is responsible for controlling communication for password
 // generation between the browser (which shows the popup and generates
@@ -57,19 +60,26 @@ class PasswordGenerationAgent : public content::RenderFrameObserver,
 
   // mojom::PasswordGenerationAgent:
   void GeneratedPasswordAccepted(const std::u16string& password) override;
+  void GeneratedPasswordRejected() override;
   void FoundFormEligibleForGeneration(
       const PasswordFormGenerationData& form) override;
   // Sets |generation_element_| to the focused password field and responds back
   // if the generation was triggered successfully.
   void TriggeredGeneratePassword(
       TriggeredGeneratePasswordCallback callback) override;
+  void FocusNextFieldAfterPasswords() override;
 
   // Returns true if the field being changed is one where a generated password
-  // is being offered. Updates the state of the popup if necessary.
-  bool TextDidChangeInTextField(const blink::WebInputElement& element);
+  // is being offered. Updates the state of the popup if necessary. `form_cache`
+  // can be used to optimize form extractions occurring synchronously after this
+  // function call.
+  bool TextDidChangeInTextField(const blink::WebInputElement& element,
+                                const SynchronousFormCache& form_cache);
 
   // Returns true if the newly focused node caused the generation UI to show.
-  bool FocusedNodeHasChanged(const blink::WebNode& node);
+  bool ShowPasswordGenerationSuggestions(
+      const blink::WebInputElement& element,
+      const SynchronousFormCache& form_cache);
 
   // Event forwarded by AutofillAgent from WebAutofillClient, informing that
   // the text field editing has ended, which means that the field is not
@@ -78,19 +88,22 @@ class PasswordGenerationAgent : public content::RenderFrameObserver,
   // being called.
   void DidEndTextFieldEditing(const blink::WebInputElement& element);
 
+  // Event forwarded by AutofillAgent from WebAutofillClient, informing that the
+  // text field was cleared. For password fields this means that they are no
+  // longer generated and should be masked.
+  void TextFieldCleared(const blink::WebInputElement& element);
+
   // Called right before PasswordAutofillAgent filled |password_element|.
   void OnFieldAutofilled(const blink::WebInputElement& password_element);
 
   // Returns true iff the currently handled 'blur' event is fake and should be
   // ignored.
-  bool ShouldIgnoreBlur() const;
+  bool ShouldIgnoreBlur();
 
 #if defined(UNIT_TEST)
   // This method requests the mojom::PasswordManagerClient which binds
   // requests the binding if it wasn't bound yet.
-  void RequestPasswordManagerClientForTesting() {
-    GetPasswordGenerationDriver();
-  }
+  void RequestPasswordManagerClientForTesting() { unsafe_driver(); }
 #endif
 
   bool IsPrerendering() const;
@@ -98,10 +111,8 @@ class PasswordGenerationAgent : public content::RenderFrameObserver,
   // Previews the generation suggestion for the current generation element.
   void PreviewGenerationSuggestion(const std::u16string& password);
 
-  // Returns true if a generation suggestion was found and cleared successfully
-  // on |control_element|.
-  bool DidClearGenerationSuggestion(
-      const blink::WebFormControlElement& control_element);
+  // Clears the previewed field if it was previously previewed.
+  void ClearPreviewedForm();
 
  private:
   class DeferringPasswordGenerationDriver;
@@ -110,38 +121,51 @@ class PasswordGenerationAgent : public content::RenderFrameObserver,
   // lifetime of the possible interaction.
   struct GenerationItemInfo;
 
+  // The RenderFrame* is nullptr while the PasswordGenerationAgent is pending
+  // deletion, between AutofillAgent::OnDestruct() and
+  // ~PasswordGenerationAgent().
+  content::RenderFrame* unsafe_render_frame() const {
+    return content::RenderFrameObserver::render_frame();
+  }
+
+  // Use unsafe_render_frame() instead.
+  template <typename T = int>
+  content::RenderFrame* render_frame(T* = 0) const {
+    static_assert(
+        std::is_void_v<T>,
+        "Beware that the RenderFrame may become nullptr by OnDestruct() "
+        "because the owner of PasswordGenerationAgent destructs itself "
+        "asynchronously. Use unsafe_render_frame() instead and test that it is "
+        "non-nullptr.");
+  }
+
+  // Callers should not store the returned value longer than a function scope.
+  mojom::PasswordGenerationDriver* unsafe_driver();
+
   // RenderFrameObserver:
   void DidCommitProvisionalLoad(ui::PageTransition transition) override;
   void DidChangeScrollOffset() override;
   void OnDestruct() override;
-
-  mojom::PasswordManagerDriver& GetPasswordManagerDriver();
-
-  // Callers should not store the returned value longer than a function scope.
-  mojom::PasswordGenerationDriver& GetPasswordGenerationDriver();
 
   // Helper function which takes care of the form processing and collecting the
   // information which is required to show the generation popup. Returns true if
   // all required information is collected.
   bool SetUpTriggeredGeneration();
 
-  // This is called whenever automatic generation could be offered.
-  // If manual generation was already requested, automatic generation will
-  // not be offered.
-  void MaybeOfferAutomaticGeneration();
+  // This is called whenever automatic generation could be offered, and returns
+  // true if generation was offered.
+  // If manual generation was already requested, automatic generation is not
+  // offered.
+  bool MaybeOfferAutomaticGeneration();
 
   // Signals the browser that it should offer automatic password generation
   // as a result of the user focusing a password field eligible for generation.
   void AutomaticGenerationAvailable();
 
+#if !BUILDFLAG(IS_ANDROID)
   // Show UI for editing a generated password at |generation_element_|.
-  void ShowEditingPopup();
-
-  // Signals the browser that generation was rejected. This happens when the
-  // user types more characters than the maximum offer size into the password
-  // field. Upon receiving this message, the browser can choose to hide the
-  // generation UI or not, depending on the platform.
-  void GenerationRejectedByTyping();
+  void ShowEditingPopup(const SynchronousFormCache& form_cache);
+#endif  // !BUILDFLAG(IS_ANDROID)
 
   // Stops treating a password as generated.
   void PasswordNoLongerGenerated();
@@ -151,7 +175,8 @@ class PasswordGenerationAgent : public content::RenderFrameObserver,
   // created for |element| it is not recreated.
   void MaybeCreateCurrentGenerationItem(
       blink::WebInputElement element,
-      FieldRendererId confirmation_password_renderer_id);
+      FieldRendererId confirmation_password_renderer_id,
+      const SynchronousFormCache& form_cache);
 
   void LogMessage(SavePasswordProgressLogger::StringID message_id);
   void LogBoolean(SavePasswordProgressLogger::StringID message_id,
@@ -159,17 +184,58 @@ class PasswordGenerationAgent : public content::RenderFrameObserver,
 
   // Creates a FormData to presave a generated password. It copies behavior
   // of CreateFromDataFromWebForm/FromUnownedInputElements. If a form
-  // creating is failed, returns an empty unique_ptr.
-  std::unique_ptr<FormData> CreateFormDataToPresave();
+  // creating is failed, returns an empty unique_ptr. `form_cache` can be used
+  // to optimize form extractions occurring synchronously after this function
+  // call.
+  std::optional<FormData> CreateFormDataToPresave(
+      blink::WebInputElement generation_element,
+      const SynchronousFormCache& form_cache);
+
+  // Wraps an element with a write protector: The getter also returns a RAII
+  // object that disallows write access.
+  template <typename T>
+  class Protected {
+   public:
+    explicit Protected() = default;
+    Protected(const Protected&) = delete;
+    Protected& operator=(const Protected&) = delete;
+    ~Protected() = default;
+
+    struct ProtectedValueRef {
+      STACK_ALLOCATED();
+
+     public:
+      const T& value;
+      base::AutoReset<bool> protector;
+    };
+
+    // Returns a reference to the value which is valid for at least the lifetime
+    // of the returned protector.
+    //
+    // This Protected<> instance must outlive the returned reference and
+    // protector.
+    ProtectedValueRef GetAndProtect() {
+      return {value_, base::AutoReset(&protected_, true)};
+    }
+
+    // Writes the value.
+    // Crashes if a protector returned by GetAndProtect() is alive.
+    void CheckedSet(T value) {
+      CHECK(!protected_);
+      value_ = std::move(value);
+    }
+
+    // Returns true iff a protector returned by GetAndProtect() is alive.
+    bool IsProtected() const { return protected_; }
+
+   private:
+    T value_;
+    bool protected_ = false;
+  };
 
   // Contains the current element where generation is offered at the moment. It
   // can be either automatic or manual password generation.
-  std::unique_ptr<GenerationItemInfo> current_generation_item_;
-
-  // Password element that had focus last. Since Javascript could change focused
-  // element after the user triggered a generation request, it is better to save
-  // the last focused password element.
-  blink::WebInputElement last_focused_password_element_;
+  Protected<std::unique_ptr<GenerationItemInfo>> current_generation_item_;
 
   // Contains correspondence between generation enabled element and data for
   // generation.
@@ -182,7 +248,7 @@ class PasswordGenerationAgent : public content::RenderFrameObserver,
 
   // Unowned pointer. Used to notify PassowrdAutofillAgent when values
   // in password fields are updated.
-  PasswordAutofillAgent* password_agent_;
+  const raw_ptr<PasswordAutofillAgent> password_agent_;
 
   mojo::AssociatedRemote<mojom::PasswordGenerationDriver>
       password_generation_client_;

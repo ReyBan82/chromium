@@ -7,56 +7,141 @@
 #include <algorithm>
 #include <memory>
 #include <utility>
+#include <variant>
 
+#include "base/barrier_callback.h"
 #include "base/barrier_closure.h"
+#include "base/strings/string_util.h"
 #include "base/task/sequenced_task_runner.h"
-#include "components/password_manager/core/browser/affiliation/affiliation_service.h"
+#include "base/types/strong_alias.h"
+#include "components/affiliations/core/browser/affiliation_service.h"
 #include "components/password_manager/core/browser/password_form.h"
-#include "components/password_manager/core/common/password_manager_features.h"
 
 namespace password_manager {
 
 namespace {
 
-bool IsValidAndroidCredential(PasswordForm* form) {
-  return form->scheme == PasswordForm::Scheme::kHtml &&
-         IsValidAndroidFacetURI(form->signon_realm);
+using affiliations::Facet;
+using affiliations::FacetURI;
+using AffiliatedRealms =
+    base::StrongAlias<class AffiliatedRealmsTag, std::vector<Facet>>;
+using GroupedRealms =
+    base::StrongAlias<class GroupedRealmsTag, std::vector<Facet>>;
+
+bool IsValidAndroidCredential(const StoredCredential& form) {
+  return form.scheme == PasswordForm::Scheme::kHtml &&
+         affiliations::IsValidAndroidFacetURI(form.signon_realm);
+}
+
+std::vector<Facet> GetFacets(const FacetURI& original_facet_uri,
+                             const std::vector<Facet>& facets) {
+  std::vector<Facet> result;
+  result.reserve(facets.size());
+  for (const Facet& affiliated_facet : facets) {
+    if (affiliated_facet.uri == original_facet_uri) {
+      continue;
+    }
+    if (affiliated_facet.uri.IsValidAndroidFacetURI()) {
+      result.push_back(affiliated_facet);
+    }
+
+#if !BUILDFLAG(IS_ANDROID)
+    // All platforms except Android supports filling across affiliated websites.
+    if (affiliated_facet.uri.IsValidWebFacetURI()) {
+      CHECK(!base::EndsWith(affiliated_facet.uri.canonical_spec(), "/"));
+      result.push_back(affiliated_facet);
+    }
+#endif
+  }
+  return result;
+}
+
+AffiliatedRealms ProcessAffiliatedFacets(
+    const FacetURI& original_facet_uri,
+    const affiliations::AffiliatedFacets& results,
+    bool success) {
+  if (!success) {
+    return {};
+  }
+  return AffiliatedRealms(GetFacets(original_facet_uri, results));
+}
+
+GroupedRealms ProcessGroupedFacets(
+    const FacetURI& original_facet_uri,
+    const std::vector<affiliations::GroupedFacets>& results) {
+  // GetGroupingInfo() returns a group matches for each facet.
+  // Asking for only one facet means that it would return only one group (that
+  // includes requested realm itself). Therefore, resulting number of groups
+  // not bigger than 1 and not smaller than 1.
+  CHECK_EQ(1U, results.size());
+  return GroupedRealms(GetFacets(original_facet_uri, results[0].facets));
+}
+
+void ProcessAffiliationAndGroupResponse(
+    AffiliatedMatchHelper::AffiliatedRealmsCallback result_callback,
+    std::vector<std::variant<AffiliatedRealms, GroupedRealms>> results) {
+  CHECK(!results.empty());
+
+  AffiliatedRealms affiliated_realms;
+  GroupedRealms grouped_realms;
+
+  for (auto& result : results) {
+    if (std::holds_alternative<AffiliatedRealms>(result)) {
+      affiliated_realms = std::get<AffiliatedRealms>(std::move(result));
+    } else {
+      grouped_realms = std::get<GroupedRealms>(std::move(result));
+    }
+  }
+
+  std::move(result_callback)
+      .Run(std::move(affiliated_realms).value(),
+           std::move(grouped_realms).value());
 }
 
 }  // namespace
 
 AffiliatedMatchHelper::AffiliatedMatchHelper(
-    AffiliationService* affiliation_service)
+    affiliations::AffiliationService* affiliation_service)
     : affiliation_service_(affiliation_service) {
   DCHECK(affiliation_service_);
 }
 
 AffiliatedMatchHelper::~AffiliatedMatchHelper() = default;
 
-void AffiliatedMatchHelper::GetAffiliatedAndroidAndWebRealms(
+void AffiliatedMatchHelper::GetAffiliatedAndGroupedRealms(
     const PasswordFormDigest& observed_form,
     AffiliatedRealmsCallback result_callback) {
-  if (IsValidWebCredential(observed_form)) {
-    FacetURI facet_uri(
-        FacetURI::FromPotentiallyInvalidSpec(observed_form.signon_realm));
-    affiliation_service_->GetAffiliationsAndBranding(
-        facet_uri, AffiliationService::StrategyOnCacheMiss::FAIL,
-        base::BindOnce(
-            &AffiliatedMatchHelper::CompleteGetAffiliatedAndroidAndWebRealms,
-            weak_ptr_factory_.GetWeakPtr(), facet_uri,
-            std::move(result_callback)));
-  } else {
-    std::move(result_callback).Run(std::vector<std::string>());
+  if (!IsValidWebCredential(observed_form)) {
+    std::move(result_callback).Run({}, {});
+    return;
   }
+
+  const int kCallsNumber = 2;
+  auto barrier_callback =
+      base::BarrierCallback<std::variant<AffiliatedRealms, GroupedRealms>>(
+          kCallsNumber, base::BindOnce(&ProcessAffiliationAndGroupResponse,
+                                       std::move(result_callback)));
+
+  FacetURI facet_uri(
+      FacetURI::FromPotentiallyInvalidSpec(observed_form.signon_realm));
+  affiliation_service_->GetAffiliationsAndBranding(
+      facet_uri, base::BindOnce(&ProcessAffiliatedFacets, facet_uri)
+                     .Then(barrier_callback));
+
+  affiliation_service_->GetGroupingInfo(
+      {facet_uri}, base::BindOnce(&ProcessGroupedFacets, facet_uri)
+                       .Then(std::move(barrier_callback)));
 }
 
 void AffiliatedMatchHelper::InjectAffiliationAndBrandingInformation(
-    std::vector<std::unique_ptr<PasswordForm>> forms,
-    PasswordFormsOrErrorCallback result_callback) {
-  std::vector<PasswordForm*> android_credentials;
-  for (const auto& form : forms) {
-    if (IsValidAndroidCredential(form.get())) {
-      android_credentials.push_back(form.get());
+    std::vector<StoredCredential> forms,
+    base::OnceCallback<void(base::expected<std::vector<StoredCredential>,
+                                           PasswordStoreBackendError>)>
+        result_callback) {
+  std::vector<StoredCredential*> android_credentials;
+  for (auto& form : forms) {
+    if (IsValidAndroidCredential(form)) {
+      android_credentials.push_back(&form);
     }
   }
 
@@ -73,12 +158,29 @@ void AffiliatedMatchHelper::InjectAffiliationAndBrandingInformation(
     // making it safe to use base::Unretained(form) below.
     affiliation_service_->GetAffiliationsAndBranding(
         FacetURI::FromPotentiallyInvalidSpec(form->signon_realm),
-        AffiliationService::StrategyOnCacheMiss::FAIL,
         base::BindOnce(&AffiliatedMatchHelper::
                            CompleteInjectAffiliationAndBrandingInformation,
                        weak_ptr_factory_.GetWeakPtr(), base::Unretained(form),
                        barrier_closure));
   }
+}
+
+void AffiliatedMatchHelper::GetPSLExtensions(
+    base::OnceCallback<void(const base::flat_set<std::string>&)> callback) {
+  if (psl_extensions_.has_value()) {
+    std::move(callback).Run(psl_extensions_.value());
+    return;
+  }
+
+  psl_extensions_callbacks_.push_back(std::move(callback));
+
+  if (psl_extensions_callbacks_.size() > 1) {
+    return;
+  }
+
+  affiliation_service_->GetPSLExtensions(
+      base::BindOnce(&AffiliatedMatchHelper::OnPSLExtensionsReceived,
+                     weak_ptr_factory_.GetWeakPtr()));
 }
 
 // static
@@ -89,40 +191,10 @@ bool AffiliatedMatchHelper::IsValidWebCredential(
          facet_uri.IsValidWebFacetURI();
 }
 
-void AffiliatedMatchHelper::CompleteGetAffiliatedAndroidAndWebRealms(
-    const FacetURI& original_facet_uri,
-    AffiliatedRealmsCallback result_callback,
-    const AffiliatedFacets& results,
-    bool success) {
-  std::vector<std::string> affiliated_realms;
-  if (!success) {
-    std::move(result_callback).Run(affiliated_realms);
-    return;
-  }
-  affiliated_realms.reserve(results.size());
-  for (const Facet& affiliated_facet : results) {
-    if (affiliated_facet.uri != original_facet_uri) {
-      if (affiliated_facet.uri.IsValidAndroidFacetURI()) {
-        // Facet URIs have no trailing slash, whereas realms do.
-        affiliated_realms.push_back(affiliated_facet.uri.canonical_spec() +
-                                    "/");
-      } else if (base::FeatureList::IsEnabled(
-                     features::kFillingAcrossAffiliatedWebsites) &&
-                 affiliated_facet.uri.IsValidWebFacetURI()) {
-        DCHECK(!base::EndsWith(affiliated_facet.uri.canonical_spec(), "/"));
-        // Facet URIs have no trailing slash, whereas realms do.
-        affiliated_realms.push_back(affiliated_facet.uri.canonical_spec() +
-                                    "/");
-      }
-    }
-  }
-  std::move(result_callback).Run(affiliated_realms);
-}
-
 void AffiliatedMatchHelper::CompleteInjectAffiliationAndBrandingInformation(
-    PasswordForm* form,
+    StoredCredential* form,
     base::OnceClosure barrier_closure,
-    const AffiliatedFacets& results,
+    const affiliations::AffiliatedFacets& results,
     bool success) {
   const FacetURI facet_uri(
       FacetURI::FromPotentiallyInvalidSpec(form->signon_realm));
@@ -133,11 +205,13 @@ void AffiliatedMatchHelper::CompleteInjectAffiliationAndBrandingInformation(
     return;
   }
 
+  auto facet = std::ranges::find(results, facet_uri, &Facet::uri);
+  if (facet == results.end()) {
+    std::move(barrier_closure).Run();
+    return;
+  }
   // Inject branding information into the form (e.g. the Play Store name and
-  // icon URL). We expect to always find a matching facet URI in the results.
-  auto facet = base::ranges::find(results, facet_uri, &Facet::uri);
-
-  DCHECK(facet != results.end());
+  // icon URL).
   form->app_display_name = facet->branding_info.name;
   form->app_icon_url = facet->branding_info.icon_url;
 
@@ -145,7 +219,7 @@ void AffiliatedMatchHelper::CompleteInjectAffiliationAndBrandingInformation(
   // multiple web realms are available, this will always choose the first
   // available web realm for injection.
   auto affiliated_facet =
-      base::ranges::find_if(results, [](const Facet& affiliated_facet) {
+      std::ranges::find_if(results, [](const Facet& affiliated_facet) {
         return affiliated_facet.uri.IsValidWebFacetURI();
       });
   if (affiliated_facet != results.end()) {
@@ -153,6 +227,17 @@ void AffiliatedMatchHelper::CompleteInjectAffiliationAndBrandingInformation(
   }
 
   std::move(barrier_closure).Run();
+}
+
+void AffiliatedMatchHelper::OnPSLExtensionsReceived(
+    std::vector<std::string> psl_extensions) {
+  psl_extensions_ = base::flat_set<std::string>(
+      std::make_move_iterator(psl_extensions.begin()),
+      std::make_move_iterator(psl_extensions.end()));
+
+  for (auto& callback : std::exchange(psl_extensions_callbacks_, {})) {
+    std::move(callback).Run(psl_extensions_.value());
+  }
 }
 
 }  // namespace password_manager

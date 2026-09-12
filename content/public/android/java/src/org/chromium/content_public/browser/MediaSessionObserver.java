@@ -4,9 +4,8 @@
 
 package org.chromium.content_public.browser;
 
-import androidx.annotation.Nullable;
-
-import org.chromium.content.browser.MediaSessionImpl;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.services.media_session.MediaImage;
 import org.chromium.services.media_session.MediaMetadata;
 import org.chromium.services.media_session.MediaPosition;
@@ -19,29 +18,20 @@ import java.util.Set;
  * session messages from Java {@link MediaSession}, which acts acts as a proxy forwarding messages
  * comming from the native MediaSession.
  */
+@NullMarked
 public abstract class MediaSessionObserver {
-    private MediaSessionImpl mMediaSession;
+    private @Nullable MediaSession mMediaSession;
 
-    /**
-     * Construct a MediaSessionObserver and start observing |mediaSession|.
-     */
+    /** Construct a MediaSessionObserver and start observing |mediaSession|. */
     protected MediaSessionObserver(MediaSession mediaSession) {
-        // In tests, the MediaSession might be a mocked object which is not instance of
-        // MediaSessionImpl.
-        //
-        // TODO(mlamouri): move addObserver()/removeObserver() methods to the {@link MediaSession}
-        // class so that we don't need this type check?
-        if (!(mediaSession instanceof MediaSessionImpl)) return;
-
-        mMediaSession = (MediaSessionImpl) mediaSession;
+        mMediaSession = mediaSession;
         mMediaSession.addObserver(this);
     }
 
     /**
      * @return The observed media session.
      */
-    @Nullable
-    public final MediaSession getMediaSession() {
+    public final @Nullable MediaSession getMediaSession() {
         return mMediaSession;
     }
 
@@ -63,12 +53,14 @@ public abstract class MediaSessionObserver {
 
     /**
      * Called when the {@link MediaSession} metadata has changed.
+     *
      * @param metadata the new MediaMetadata after change.
      */
-    public void mediaSessionMetadataChanged(MediaMetadata metadata) {}
+    public void mediaSessionMetadataChanged(@Nullable MediaMetadata metadata) {}
 
     /**
      * Called when the observed {@link MediaSession} has changed its action list.
+     *
      * @param actions The new action list after the change.
      */
     public void mediaSessionActionsChanged(Set<Integer> actions) {}

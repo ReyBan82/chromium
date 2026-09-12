@@ -35,11 +35,11 @@ class TestWallpaperControllerClient : public WallpaperControllerClient {
                      const std::vector<backdrop::Image>& images);
 
   size_t open_count() const { return open_count_; }
-  size_t set_default_wallpaper_count() const {
-    return set_default_wallpaper_count_;
-  }
   size_t fetch_images_for_collection_count() const {
     return fetch_images_for_collection_count_;
+  }
+  std::string fetch_google_photos_photo_id() const {
+    return fetch_google_photos_photo_id_;
   }
   std::string get_fetch_daily_refresh_wallpaper_param() const {
     return fetch_daily_refresh_wallpaper_param_;
@@ -62,18 +62,16 @@ class TestWallpaperControllerClient : public WallpaperControllerClient {
     fake_files_ids_[account_id] = fake_files_id;
   }
 
-  void set_wallpaper_sync_enabled(bool sync_enabled) {
-    wallpaper_sync_enabled_ = sync_enabled;
+  void set_wallpaper_google_photos_integration_enabled_for_account_id(
+      const AccountId& account_id,
+      bool value) {
+    wallpaper_google_photos_integration_enabled_[account_id] = value;
   }
 
   void ResetCounts();
 
   // WallpaperControllerClient:
   void OpenWallpaperPicker() override;
-  void SetDefaultWallpaper(
-      const AccountId& account_id,
-      bool show_wallpaper,
-      base::OnceCallback<void(bool success)> callback) override;
   void FetchDailyRefreshWallpaper(
       const std::string& collection_id,
       DailyWallpaperUrlFetchedCallback callback) override;
@@ -93,19 +91,18 @@ class TestWallpaperControllerClient : public WallpaperControllerClient {
   void GetFilesId(const AccountId& account_id,
                   base::OnceCallback<void(const std::string&)>
                       files_id_callback) const override;
-  bool IsWallpaperSyncEnabled(const AccountId& account_id) const override;
 
  private:
   size_t open_count_ = 0;
-  size_t set_default_wallpaper_count_ = 0;
   size_t fetch_images_for_collection_count_ = 0;
+  std::string fetch_google_photos_photo_id_;
   std::string fetch_daily_refresh_wallpaper_param_;
   bool fetch_daily_refresh_info_fails_ = false;
   std::unordered_map<AccountId, std::string> fake_files_ids_;
-  bool wallpaper_sync_enabled_ = true;
   bool fetch_images_for_collection_fails_ = false;
   bool fetch_google_photos_photo_fails_ = false;
   bool google_photo_has_been_deleted_ = false;
+  std::map<AccountId, bool> wallpaper_google_photos_integration_enabled_;
 
   int image_index_ = 0;
   base::flat_map<std::string, std::vector<backdrop::Image>> variations_;

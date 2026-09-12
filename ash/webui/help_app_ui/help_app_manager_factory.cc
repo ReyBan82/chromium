@@ -20,7 +20,8 @@ HelpAppManager* HelpAppManagerFactory::GetForBrowserContext(
 
 // static
 HelpAppManagerFactory* HelpAppManagerFactory::GetInstance() {
-  return base::Singleton<HelpAppManagerFactory>::get();
+  static base::NoDestructor<HelpAppManagerFactory> instance;
+  return instance.get();
 }
 
 HelpAppManagerFactory::HelpAppManagerFactory()
@@ -39,9 +40,10 @@ content::BrowserContext* HelpAppManagerFactory::GetBrowserContextToUse(
   return context;
 }
 
-KeyedService* HelpAppManagerFactory::BuildServiceInstanceFor(
+std::unique_ptr<KeyedService>
+HelpAppManagerFactory::BuildServiceInstanceForBrowserContext(
     content::BrowserContext* context) const {
-  return new HelpAppManager(
+  return std::make_unique<HelpAppManager>(
       local_search_service::LocalSearchServiceProxyFactory::
           GetForBrowserContext(context));
 }

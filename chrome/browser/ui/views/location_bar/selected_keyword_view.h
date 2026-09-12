@@ -9,10 +9,13 @@
 
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/ui/views/location_bar/icon_label_bubble_view.h"
+#include "components/omnibox/browser/searchbox_utils.h"
 #include "third_party/skia/include/core/SkColor.h"
 #include "ui/base/metadata/metadata_header_macros.h"
 #include "ui/views/controls/label.h"
 
+class OmniboxController;
+class Profile;
 class TemplateURLService;
 
 namespace gfx {
@@ -22,33 +25,35 @@ class Size;
 
 // SelectedKeywordView displays the tab-to-search UI in the location bar view.
 class SelectedKeywordView : public IconLabelBubbleView {
- public:
-  METADATA_HEADER(SelectedKeywordView);
+  METADATA_HEADER(SelectedKeywordView, IconLabelBubbleView)
 
-  struct KeywordLabelNames {
-    std::u16string short_name;
-    std::u16string full_name;
-  };
+ public:
+  using KeywordLabelNames = searchbox::KeywordLabelNames;
   // Returns the short and long names that can be used to describe keyword
   // behavior, e.g. "Search google.com" or an equivalent translation, with
   // consideration for bidirectional text safety using |service|. Empty
   // names are returned if service is null.
-  static KeywordLabelNames GetKeywordLabelNames(const std::u16string& keyword,
-                                                TemplateURLService* service);
+  static KeywordLabelNames GetKeywordLabelNames(
+      const std::u16string& keyword,
+      const TemplateURLService* service);
+
+  // Returns the icon to use for the keyword chip.
+  static ui::ImageModel GetKeywordIcon(
+      const std::u16string& keyword,
+      const OmniboxController* omnibox_controller,
+      Profile* profile);
 
   SelectedKeywordView(IconLabelBubbleView::Delegate* delegate,
-                      TemplateURLService* template_url_service,
+                      Profile* profile,
+                      const OmniboxController* omnibox_controller,
                       const gfx::FontList& font_list);
   SelectedKeywordView(const SelectedKeywordView&) = delete;
   SelectedKeywordView& operator=(const SelectedKeywordView&) = delete;
   ~SelectedKeywordView() override;
 
-  // Sets the icon for this chip to |image|.  If there is no custom image (i.e.
-  // |image| is empty), resets the icon for this chip to its default.
-  void SetCustomImage(const gfx::Image& image);
-
   // IconLabelBubbleView:
-  gfx::Size CalculatePreferredSize() const override;
+  gfx::Size CalculatePreferredSize(
+      const views::SizeBounds& available_size) const override;
   gfx::Size GetMinimumSize() const override;
   void OnThemeChanged() override;
   SkColor GetForegroundColor() const override;
@@ -66,7 +71,13 @@ class SelectedKeywordView : public IconLabelBubbleView {
 
   void SetLabelForCurrentWidth();
 
-  raw_ptr<TemplateURLService> template_url_service_;
+  void UpdateIcon();
+
+  // May be nullptr in tests.
+  const raw_ptr<Profile> profile_;
+
+  // May be nullptr in tests.
+  const raw_ptr<const OmniboxController> omnibox_controller_;
 
   // The keyword we're showing. If empty, no keyword is selected.
   // NOTE: we don't cache the TemplateURL as it is possible for it to get
@@ -79,9 +90,6 @@ class SelectedKeywordView : public IconLabelBubbleView {
   // enough room to display the complete description.
   views::Label full_label_;
   views::Label partial_label_;
-
-  // True when the chip icon has been changed via SetCustomImage().
-  bool using_custom_image_ = false;
 };
 
 #endif  // CHROME_BROWSER_UI_VIEWS_LOCATION_BAR_SELECTED_KEYWORD_VIEW_H_

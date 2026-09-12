@@ -12,6 +12,7 @@
 #include "base/functional/callback.h"
 #include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "base/sequence_checker.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/values.h"
 #include "components/cast_receiver/browser/application_client.h"
@@ -116,9 +117,9 @@ class RuntimeApplicationBase
 
   scoped_refptr<base::SequencedTaskRunner> task_runner_;
 
-  base::raw_ref<ApplicationClient> application_client_;
+  raw_ref<ApplicationClient> application_client_;
 
-  base::raw_ptr<EmbedderApplication> embedder_application_{nullptr};
+  raw_ptr<EmbedderApplication> embedder_application_{nullptr};
 
   // Cached mojom rules that are set iff |cast_web_view_| is not created before
   // SetUrlRewriteRules is called.

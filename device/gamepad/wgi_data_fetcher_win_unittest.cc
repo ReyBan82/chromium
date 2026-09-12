@@ -4,12 +4,14 @@
 
 #include "device/gamepad/wgi_data_fetcher_win.h"
 
-#include <utility>
-#include <vector>
-
 #include <Windows.Gaming.Input.h>
 #include <XInput.h>
 #include <winerror.h>
+
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "base/containers/fixed_flat_map.h"
 #include "base/containers/flat_map.h"
@@ -18,7 +20,6 @@
 #include "base/memory/raw_ptr.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "base/run_loop.h"
-#include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/sequenced_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
@@ -190,8 +191,15 @@ class WgiDataFetcherWinTest : public DeviceServiceTestBase {
     }
   }
 
+  void TearDown() override {
+    FakeIGamepadStatics::GetInstance()->Reset();
+    wgi_fetcher_ = nullptr;
+    mock_generic_fetcher_ = nullptr;
+    polling_thread_ = nullptr;
+    DeviceServiceTestBase::TearDown();
+  }
+
   void SetUpTestEnv(WgiTestErrorCode error_code = WgiTestErrorCode::kOk) {
-    EXPECT_TRUE(base::win::ScopedHString::ResolveCoreWinRTStringDelayload());
     wgi_environment_ = std::make_unique<FakeWinrtWgiEnvironment>(error_code);
     SetUpXInputEnv(error_code);
     auto fetcher = std::make_unique<WgiDataFetcherWin>();
@@ -247,10 +255,10 @@ class WgiDataFetcherWinTest : public DeviceServiceTestBase {
 
     // First we send zeroed out data for sanitization.
     mock_generic_fetcher_->SetTestData(zero_data);
-    WaitForData(gamepad_buffer);
+    mock_generic_fetcher_->WaitForDataReadAndCallbacksIssued();
     // Then we send the actual data.
     mock_generic_fetcher_->SetTestData(active_data);
-    WaitForData(gamepad_buffer);
+    mock_generic_fetcher_->WaitForDataReadAndCallbacksIssued();
 
     Gamepads output;
     ReadGamepadHardwareBuffer(gamepad_buffer, &output);
@@ -277,21 +285,29 @@ class WgiDataFetcherWinTest : public DeviceServiceTestBase {
   // the buffer is not in a consistent state, so we also require that the value
   // is even before continuing.
   void WaitForData(const GamepadHardwareBuffer* buffer) {
-    const base::subtle::Atomic32 initial_version = buffer->seqlock.ReadBegin();
-    base::subtle::Atomic32 current_version;
+    const int32_t initial_version = buffer->seqlock.ReadBegin();
+    int32_t current_version;
     do {
       base::PlatformThread::Sleep(base::Milliseconds(10));
       current_version = buffer->seqlock.ReadBegin();
     } while (current_version % 2 || current_version == initial_version);
   }
 
+  void RemoveWgiDataFetcherFromProvider() {
+    wgi_fetcher_ = nullptr;
+    provider_->RemoveSourceGamepadDataFetcher(GamepadSource::kWinWgi);
+    // Wait for the gamepad polling thread to execute
+    // GamepadProvider::DoRemoveSourceGamepadDataFetcher.
+    FlushPollingThread();
+  }
+
   void ReadGamepadHardwareBuffer(const GamepadHardwareBuffer* buffer,
                                  Gamepads* output) {
-    memset(output, 0, sizeof(Gamepads));
-    base::subtle::Atomic32 version;
+    *output = {};
+    int32_t version;
     do {
       version = buffer->seqlock.ReadBegin();
-      memcpy(output, &buffer->data, sizeof(Gamepads));
+      *output = *reinterpret_cast<const Gamepads*>(&buffer->data);
     } while (buffer->seqlock.ReadRetry(version));
   }
 
@@ -354,7 +370,7 @@ class WgiDataFetcherWinTest : public DeviceServiceTestBase {
              {BUTTON_INDEX_META + 4,
               ABI::Windows::Gaming::Input::GamepadButtons_Paddle4}});
 
-    const auto* button_bit_mask =
+    const auto button_bit_mask =
         kCanonicalButtonBitMaskMapping.find(canonical_button_index);
     if (button_bit_mask == kCanonicalButtonBitMaskMapping.end()) {
       ADD_FAILURE() << "Unsupported CanonicalButtonIndex value: "
@@ -362,37 +378,29 @@ class WgiDataFetcherWinTest : public DeviceServiceTestBase {
       return;
     }
 
+    const auto output_index = static_cast<size_t>(canonical_button_index);
     if (input_buttons_bit_mask & button_bit_mask->second) {
-      EXPECT_TRUE(output_buttons[canonical_button_index].pressed);
-      EXPECT_NEAR(output_buttons[canonical_button_index].value, 1.0f,
-                  kErrorTolerance);
+      EXPECT_TRUE(output_buttons[output_index].pressed);
+      EXPECT_NEAR(output_buttons[output_index].value, 1.0f, kErrorTolerance);
     } else {
-      EXPECT_FALSE(output_buttons[canonical_button_index].pressed);
-      EXPECT_NEAR(output_buttons[canonical_button_index].value, 0.0f,
-                  kErrorTolerance);
+      EXPECT_FALSE(output_buttons[output_index].pressed);
+      EXPECT_NEAR(output_buttons[output_index].value, 0.0f, kErrorTolerance);
     }
   }
 
   void CheckMetaButtonState(bool is_pressed,
-                            base::span<GamepadButton const> output_buttons) {
-    if (is_pressed) {
-      EXPECT_TRUE(output_buttons[BUTTON_INDEX_META].pressed);
-      EXPECT_NEAR(output_buttons[BUTTON_INDEX_META].value, 1.0f,
-                  kErrorTolerance);
-      return;
-    }
-    EXPECT_FALSE(output_buttons[BUTTON_INDEX_META].pressed);
-    EXPECT_NEAR(output_buttons[BUTTON_INDEX_META].value, 0.0f, kErrorTolerance);
+                            base::span<const GamepadButton> output_buttons) {
+    const GamepadButton& button = output_buttons[BUTTON_INDEX_META];
+    EXPECT_EQ(button.pressed, is_pressed);
+    EXPECT_NEAR(button.value, is_pressed ? 1.0f : 0.0f, kErrorTolerance);
   }
 
   void CheckGamepadInputResult(const GamepadReading& input,
                                const Gamepad& output,
                                bool has_paddles) {
-    if (has_paddles) {
-      EXPECT_EQ(output.buttons_length, kGamepadWithPaddlesButtonsLength);
-    } else {
-      EXPECT_EQ(output.buttons_length, kGamepadButtonsLength);
-    }
+    EXPECT_EQ(output.buttons_length, has_paddles
+                                         ? kGamepadWithPaddlesButtonsLength
+                                         : kGamepadButtonsLength);
 
     CheckButtonState(BUTTON_INDEX_PRIMARY, input.Buttons, output.buttons);
     CheckButtonState(BUTTON_INDEX_SECONDARY, input.Buttons, output.buttons);
@@ -481,6 +489,19 @@ class WgiDataFetcherWinTest : public DeviceServiceTestBase {
     run_loop.Run();
   }
 
+  // Should be used to update the gamepad device state and avoid racing
+  // condition between the polling thread and the test framework.
+  void UpdateGamepadStateOnThePollingThread(
+      Microsoft::WRL::ComPtr<FakeIGamepad> gamepad,
+      ABI::Windows::Gaming::Input::GamepadReading gamepad_state) {
+    base::RunLoop run_loop;
+    polling_thread_->task_runner()->PostTask(
+        FROM_HERE, base::BindLambdaForTesting([&]() {
+                     gamepad->SetCurrentReading(gamepad_state);
+                   }).Then(run_loop.QuitClosure()));
+    run_loop.Run();
+  }
+
  protected:
   int haptics_callback_count_ = 0;
   mojom::GamepadHapticsResult haptics_callback_result_ =
@@ -524,7 +545,7 @@ TEST_F(WgiDataFetcherWinTest, AddAndRemoveWgiGamepad) {
       fake_unknown_gamepad, kUnknownHardwareProductId, kUnknownHardwareVendorId,
       kGamepadDisplayName);
 
-  // Wait for the gampad polling thread to handle the gamepad added events.
+  // Wait for the gamepad polling thread to handle the gamepad added events.
   FlushPollingThread();
 
   // Assert that the gamepads have been added to the DataFetcher.
@@ -547,7 +568,7 @@ TEST_F(WgiDataFetcherWinTest, AddAndRemoveWgiGamepad) {
   fake_gamepad_statics->SimulateGamepadRemoved(fake_trigger_rumble_gamepad);
   fake_gamepad_statics->SimulateGamepadRemoved(fake_unknown_gamepad);
 
-  // Wait for the gampad polling thread to handle the gamepad removed event.
+  // Wait for the gamepad polling thread to handle the gamepad removed event.
   FlushPollingThread();
 
   CheckGamepadRemoved();
@@ -575,6 +596,53 @@ TEST_F(WgiDataFetcherWinTest, AddGamepadRemovedEventHandlerErrorHandling) {
             WgiDataFetcherWin::InitializationState::kAddGamepadRemovedFailed);
   auto* gamepad_statics = FakeIGamepadStatics::GetInstance();
   EXPECT_EQ(gamepad_statics->GetGamepadRemovedEventHandlerCount(), 0u);
+}
+
+TEST_F(WgiDataFetcherWinTest, RemoveGamepadAddedEventHandlerErrorHandling) {
+  // Let fake gamepad statics remove_GamepadAdded return failure code to
+  // test error handling.
+  SetUpTestEnv(WgiTestErrorCode::kGamepadRemoveGamepadAddedFailed);
+
+  // Check WGI initialization status.
+  EXPECT_EQ(fetcher().GetInitializationState(),
+            WgiDataFetcherWin::InitializationState::kInitialized);
+  auto* gamepad_statics = FakeIGamepadStatics::GetInstance();
+  EXPECT_EQ(gamepad_statics->GetGamepadAddedEventHandlerCount(), 1u);
+
+  // Lets remove the WgiDataFetcherWin instance from the GamepadProvider to
+  // trigger its destructor.
+  RemoveWgiDataFetcherFromProvider();
+}
+
+TEST_F(WgiDataFetcherWinTest, RemoveGamepadRemovedEventHandlerErrorHandling) {
+  // Let fake gamepad statics remove_GamepadRemoved return failure code to
+  // test error handling.
+  SetUpTestEnv(WgiTestErrorCode::kGamepadRemoveGamepadRemovedFailed);
+
+  // Check WGI initialization status.
+  EXPECT_EQ(fetcher().GetInitializationState(),
+            WgiDataFetcherWin::InitializationState::kInitialized);
+  auto* gamepad_statics = FakeIGamepadStatics::GetInstance();
+  EXPECT_EQ(gamepad_statics->GetGamepadRemovedEventHandlerCount(), 1u);
+
+  // Lets remove the WgiDataFetcherWin instance from the GamepadProvider to
+  // trigger its destructor.
+  RemoveWgiDataFetcherFromProvider();
+}
+
+TEST_F(WgiDataFetcherWinTest, DestructionSuccessful) {
+  SetUpTestEnv();
+
+  // Check WGI initialization status.
+  EXPECT_EQ(fetcher().GetInitializationState(),
+            WgiDataFetcherWin::InitializationState::kInitialized);
+  auto* gamepad_statics = FakeIGamepadStatics::GetInstance();
+  EXPECT_EQ(gamepad_statics->GetGamepadAddedEventHandlerCount(), 1u);
+  EXPECT_EQ(gamepad_statics->GetGamepadRemovedEventHandlerCount(), 1u);
+
+  // Lets remove the WgiDataFetcherWin instance from the GamepadProvider to
+  // trigger its destructor.
+  RemoveWgiDataFetcherFromProvider();
 }
 
 TEST_F(WgiDataFetcherWinTest, WgiGamepadActivationFactoryErrorHandling) {
@@ -628,13 +696,15 @@ TEST_F(WgiDataFetcherWinTest, VerifyGamepadInput) {
 
   // State should be first set to the rest position to satisfy sanitization pre-
   // requisites.
-  fake_gamepad->SetCurrentReading(kZeroPositionGamepadReading);
-  fake_gamepad_with_paddles->SetCurrentReading(kZeroPositionGamepadReading);
+  UpdateGamepadStateOnThePollingThread(fake_gamepad,
+                                       kZeroPositionGamepadReading);
+  UpdateGamepadStateOnThePollingThread(fake_gamepad_with_paddles,
+                                       kZeroPositionGamepadReading);
   WaitForData(gamepad_buffer);
 
-  fake_gamepad->SetCurrentReading(kGamepadReading);
-  fake_gamepad_with_paddles->SetCurrentReading(kGamepadReading);
-
+  UpdateGamepadStateOnThePollingThread(fake_gamepad, kGamepadReading);
+  UpdateGamepadStateOnThePollingThread(fake_gamepad_with_paddles,
+                                       kGamepadReading);
   WaitForData(gamepad_buffer);
 
   Gamepads output;
@@ -712,10 +782,6 @@ TEST_F(WgiDataFetcherWinTest, WgiGamepadGetCurrentReadingError) {
   auto* fake_gamepad_statics = FakeIGamepadStatics::GetInstance();
   const auto fake_gamepad = Microsoft::WRL::Make<FakeIGamepad>();
 
-  // State should be first set to the rest position to satisfy sanitization pre-
-  // requisites.
-  fake_gamepad->SetCurrentReading(kZeroPositionGamepadReading);
-
   // Add a simulated WGI device.
   provider_->Resume();
   fake_gamepad_statics->SimulateGamepadAdded(
@@ -729,13 +795,16 @@ TEST_F(WgiDataFetcherWinTest, WgiGamepadGetCurrentReadingError) {
   const GamepadHardwareBuffer* gamepad_buffer =
       static_cast<const GamepadHardwareBuffer*>(shared_memory_mapping.memory());
 
+  // State should be first set to the rest position to satisfy sanitization pre-
+  // requisites.
+  UpdateGamepadStateOnThePollingThread(fake_gamepad,
+                                       kZeroPositionGamepadReading);
   WaitForData(gamepad_buffer);
 
   wgi_environment_->SimulateError(
       WgiTestErrorCode::kErrorWgiGamepadGetCurrentReadingFailed);
 
-  fake_gamepad->SetCurrentReading(kGamepadReading);
-
+  UpdateGamepadStateOnThePollingThread(fake_gamepad, kGamepadReading);
   WaitForData(gamepad_buffer);
 
   Gamepads output;
@@ -764,10 +833,6 @@ TEST_F(WgiDataFetcherWinTest, WgiGamepadGetButtonLabelError) {
   const auto fake_gamepad_with_paddles = Microsoft::WRL::Make<FakeIGamepad>();
   fake_gamepad_with_paddles->SetHasPaddles(true);
 
-  // State should be first set to the rest position to satisfy sanitization pre-
-  // requisites.
-  fake_gamepad_with_paddles->SetCurrentReading(kZeroPositionGamepadReading);
-
   // Add a simulated WGI device.
   provider_->Resume();
   fake_gamepad_statics->SimulateGamepadAdded(
@@ -782,10 +847,14 @@ TEST_F(WgiDataFetcherWinTest, WgiGamepadGetButtonLabelError) {
   const GamepadHardwareBuffer* gamepad_buffer =
       static_cast<const GamepadHardwareBuffer*>(shared_memory_mapping.memory());
 
+  // State should be first set to the rest position to satisfy sanitization pre-
+  // requisites.
+  UpdateGamepadStateOnThePollingThread(fake_gamepad_with_paddles,
+                                       kZeroPositionGamepadReading);
   WaitForData(gamepad_buffer);
 
-  fake_gamepad_with_paddles->SetCurrentReading(kGamepadReading);
-
+  UpdateGamepadStateOnThePollingThread(fake_gamepad_with_paddles,
+                                       kGamepadReading);
   WaitForData(gamepad_buffer);
 
   Gamepads output;
@@ -820,7 +889,7 @@ TEST_F(WgiDataFetcherWinTest, ShouldNotEnumerateControllers) {
                                                vendor_id, "");
   }
 
-  // Wait for the gampad polling thread to handle the gamepad added event.
+  // Wait for the gamepad polling thread to handle the gamepad added event.
   FlushPollingThread();
 
   // Assert that the gamepad has not been added to the DataFetcher.
@@ -847,7 +916,7 @@ TEST_P(WgiDataFetcherTriggerRumbleSupportTest,
       GamepadIdList::Get().GetDeviceIdsFromGamepadId(gamepad_id);
   fake_gamepad_statics->SimulateGamepadAdded(fake_gamepad, product_id,
                                              vendor_id, "");
-  // Wait for the gampad polling thread to handle the gamepad added event.
+  // Wait for the gamepad polling thread to handle the gamepad added event.
   FlushPollingThread();
 
   // Assert that the gamepad has been added to the DataFetcher.
@@ -869,7 +938,7 @@ class WgiDataFetcherWinErrorTest
 
 // This test simulates OS errors that prevent the controller from being
 // enumerated by WgiDataFetcherWin.
-TEST_P(WgiDataFetcherWinErrorTest, GamepadShouldNotbeEnumerated) {
+TEST_P(WgiDataFetcherWinErrorTest, GamepadShouldNotBeEnumerated) {
   const WgiTestErrorCode error_code = GetParam();
   SetUpTestEnv(error_code);
   const auto fake_gamepad = Microsoft::WRL::Make<FakeIGamepad>();
@@ -878,7 +947,7 @@ TEST_P(WgiDataFetcherWinErrorTest, GamepadShouldNotbeEnumerated) {
   fake_gamepad_statics->SimulateGamepadAdded(
       fake_gamepad, kHardwareProductId, kHardwareVendorId, kGamepadDisplayName);
 
-  // Wait for the gampad polling thread to handle the gamepad added event.
+  // Wait for the gamepad polling thread to handle the gamepad added event.
   FlushPollingThread();
 
   // Assert that the gamepad has not been added to the DataFetcher.
@@ -926,14 +995,16 @@ TEST_P(WgiDataFetcherWinXInputErrorTest, MetaUnavailableWhenXInputFailsToLoad) {
 
   // State should be first set to the rest position to satisfy sanitization pre-
   // requisites.
-  fake_gamepad->SetCurrentReading(kZeroPositionGamepadReading);
-  fake_gamepad_with_paddles->SetCurrentReading(kZeroPositionGamepadReading);
+  UpdateGamepadStateOnThePollingThread(fake_gamepad,
+                                       kZeroPositionGamepadReading);
+  UpdateGamepadStateOnThePollingThread(fake_gamepad_with_paddles,
+                                       kZeroPositionGamepadReading);
   WaitForData(gamepad_buffer);
 
-  // Lets pause and setup inputs/function pointers to avoid race conditions with
-  // polling.
-  fake_gamepad->SetCurrentReading(kGamepadReading);
-  fake_gamepad_with_paddles->SetCurrentReading(kGamepadReading);
+  // Set the gamepads to the actual test state.
+  UpdateGamepadStateOnThePollingThread(fake_gamepad, kGamepadReading);
+  UpdateGamepadStateOnThePollingThread(fake_gamepad_with_paddles,
+                                       kGamepadReading);
   WaitForData(gamepad_buffer);
 
   Gamepads output;
@@ -997,7 +1068,7 @@ TEST_P(WgiDataFetcherWinGamepadIdTest, GamepadIds) {
                                                vendor_id, display_name);
   }
 
-  // Wait for the gampad polling thread to handle the gamepad added event.
+  // Wait for the gamepad polling thread to handle the gamepad added event.
   FlushPollingThread();
 
   // Assert that the gamepads have been added to the DataFetcher.
@@ -1006,17 +1077,22 @@ TEST_P(WgiDataFetcherWinGamepadIdTest, GamepadIds) {
   EXPECT_EQ(gamepads.size(), 4u);
 
   // Build vector with the expected id strings.
+  const std::u16string display_name_16 = base::UTF8ToUTF16(display_name);
   std::vector<std::u16string> expected_gamepad_id_strings{
-      base::StringPrintf(u"%ls (STANDARD GAMEPAD Vendor: 045e Product: 0b21)",
-                         base::UTF8ToUTF16(display_name).data()),
+      display_name_16 + u" (STANDARD GAMEPAD Vendor: 045e Product: 0b21)",
       kKnownXInputDeviceId, kKnownXInputDeviceId,
-      base::StringPrintf(u"%ls (STANDARD GAMEPAD)",
-                         base::UTF8ToUTF16(display_name).data())};
+      display_name_16 + u" (STANDARD GAMEPAD)"};
 
   size_t id_string_index = 0;
   for (auto it = gamepads.begin(); it != gamepads.end(); ++it) {
     PadState* pad = fetcher().GetPadState(it->first);
-    std::u16string display_id(pad->data.id);
+    std::u16string display_id;
+    for (char16_t ch : pad->data.id) {
+      if (ch == 0) {
+        break;
+      }
+      display_id += ch;
+    }
     EXPECT_EQ(display_id, expected_gamepad_id_strings[id_string_index++]);
   }
 }

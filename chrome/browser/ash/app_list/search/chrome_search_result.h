@@ -6,17 +6,20 @@
 #define CHROME_BROWSER_ASH_APP_LIST_SEARCH_CHROME_SEARCH_RESULT_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "ash/public/cpp/app_list/app_list_metrics.h"
 #include "ash/public/cpp/app_list/app_list_types.h"
+#include "base/files/file_path.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/app_list/app_list_model_updater.h"
+#include "chrome/browser/ash/app_list/search/omnibox/omnibox_types.h"
 #include "chrome/browser/ash/app_list/search/scoring.h"
-#include "chromeos/crosapi/mojom/launcher_search.mojom.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
-#include "ui/base/models/simple_menu_model.h"
+#include "ui/menus/simple_menu_model.h"
+#include "url/gurl.h"
 
 namespace ui {
 class ImageModel;
@@ -43,6 +46,9 @@ class ChromeSearchResult {
   using TextItem = ash::SearchResultTextItem;
   using TextVector = std::vector<TextItem>;
   using TextType = ash::SearchResultTextItemType;
+
+  using MetadataLoaderCallback =
+      ash::FileMetadataLoader::MetadataLoaderCallback;
 
   ChromeSearchResult();
 
@@ -92,6 +98,10 @@ class ChromeSearchResult {
     return metadata_->result_type;
   }
   MetricsType metrics_type() const { return metadata_->metrics_type; }
+  const std::optional<ash::ContinueFileSuggestionType>&
+  continue_file_suggestion_type() const {
+    return metadata_->continue_file_suggestion_type;
+  }
   const Actions& actions() const { return metadata_->actions; }
   double display_score() const { return metadata_->display_score; }
   bool is_recommendation() const { return metadata_->is_recommendation; }
@@ -101,6 +111,18 @@ class ChromeSearchResult {
   const IconInfo& icon() const { return metadata_->icon; }
   const gfx::ImageSkia& chip_icon() const { return metadata_->chip_icon; }
   const ui::ImageModel& badge_icon() const { return metadata_->badge_icon; }
+  const std::optional<ash::SystemInfoAnswerCardData>
+  system_info_answer_card_data() const {
+    return metadata_->system_info_answer_card_data;
+  }
+  // Only file results have set the filepath.
+  const base::FilePath& filePath() const { return metadata_->file_path; }
+  const base::FilePath& displayable_file_path() const {
+    return metadata_->displayable_file_path;
+  }
+  ash::FileMetadataLoader* file_metadata_loader() {
+    return &metadata_->file_metadata_loader;
+  }
 
   // The following methods set Chrome side data here, and call model updater
   // interface to update Ash.
@@ -125,9 +147,10 @@ class ChromeSearchResult {
   void SetDisplayType(DisplayType display_type);
   void SetResultType(ResultType result_type);
   void SetMetricsType(MetricsType metrics_type);
+  void SetContinueFileSuggestionType(
+      ash::ContinueFileSuggestionType continue_file_suggestion_type);
   void SetDisplayScore(double display_score);
   void SetActions(const Actions& actions);
-  void SetIsOmniboxSearch(bool is_omnibox_search);
   void SetIsRecommendation(bool is_recommendation);
   void SetSkipUpdateAnimation(bool skip_update_animation);
   void SetIcon(const IconInfo& icon);
@@ -135,6 +158,11 @@ class ChromeSearchResult {
   void SetChipIcon(const gfx::ImageSkia& icon);
   void SetBadgeIcon(const ui::ImageModel& badge_icon);
   void SetUseBadgeIconBackground(bool use_badge_icon_background);
+  void SetSystemInfoAnswerCardData(
+      ash::SystemInfoAnswerCardData answer_card_info);
+  void SetFilePath(base::FilePath file_path);
+  void SetDisplayableFilePath(base::FilePath displayable_file_path);
+  void SetMetadataLoaderCallback(MetadataLoaderCallback callback);
 
   void SetSearchResultMetadata();
 
@@ -153,10 +181,8 @@ class ChromeSearchResult {
   double relevance() const { return relevance_; }
   void set_relevance(double relevance) { relevance_ = relevance; }
 
-  crosapi::mojom::SearchResult::AnswerType answer_type() const {
-    return answer_type_;
-  }
-  void set_answer_type(crosapi::mojom::SearchResult::AnswerType answer_type) {
+  app_list::OmniboxResultAnswerType answer_type() const { return answer_type_; }
+  void set_answer_type(app_list::OmniboxResultAnswerType answer_type) {
     answer_type_ = answer_type;
   }
 
@@ -177,7 +203,10 @@ class ChromeSearchResult {
   }
 
   // Maybe returns a Drive file ID for this result, if applicable.
-  virtual absl::optional<std::string> DriveId() const;
+  virtual std::optional<std::string> DriveId() const;
+
+  // Maybe returns a url for this result, if applicable.
+  virtual std::optional<GURL> url() const;
 
   // Invokes a custom action on the result. It does nothing by default.
   virtual void InvokeAction(ash::SearchResultActionType action);
@@ -209,7 +238,8 @@ class ChromeSearchResult {
   // Only used when the categorical search flag is enabled.
   app_list::Scoring scoring_;
 
-  crosapi::mojom::SearchResult::AnswerType answer_type_;
+  // This field specifies the omnibox answer card type.
+  app_list::OmniboxResultAnswerType answer_type_;
 
   // Relevance scores keyed by a string describing the ranking method it was
   // obtained from. These can include scores from intermediate ranking steps, as
@@ -233,7 +263,7 @@ class ChromeSearchResult {
 
   std::unique_ptr<ash::SearchResultMetadata> metadata_;
 
-  AppListModelUpdater* model_updater_ = nullptr;
+  raw_ptr<AppListModelUpdater> model_updater_ = nullptr;
 
   base::WeakPtrFactory<ChromeSearchResult> weak_ptr_factory_{this};
 };

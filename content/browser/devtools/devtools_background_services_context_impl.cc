@@ -6,10 +6,11 @@
 
 #include <algorithm>
 
-#include "base/guid.h"
+#include "base/check_deref.h"
 #include "base/observer_list.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/time/time.h"
+#include "base/uuid.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
@@ -24,12 +25,14 @@ namespace content {
 namespace {
 
 std::string CreateEntryKeyPrefix(devtools::proto::BackgroundService service) {
-  DCHECK_NE(service, devtools::proto::BackgroundService::UNKNOWN);
+  CHECK_NE(service, devtools::proto::BackgroundService::UNKNOWN,
+           base::NotFatalUntil::M159);
   return "devtools_background_services_" + base::NumberToString(service) + "_";
 }
 
 std::string CreateEntryKey(devtools::proto::BackgroundService service) {
-  return CreateEntryKeyPrefix(service) + base::GenerateGUID();
+  return CreateEntryKeyPrefix(service) +
+         base::Uuid::GenerateRandomV4().AsLowercaseString();
 }
 
 constexpr devtools::proto::BackgroundService ServiceToProtoEnum(
@@ -55,16 +58,17 @@ constexpr devtools::proto::BackgroundService ServiceToProtoEnum(
 DevToolsBackgroundServicesContextImpl::DevToolsBackgroundServicesContextImpl(
     BrowserContext* browser_context,
     scoped_refptr<ServiceWorkerContextWrapper> service_worker_context)
-    : browser_context_(browser_context),
+    : browser_context_(CHECK_DEREF(browser_context)),
       service_worker_context_(std::move(service_worker_context)) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   auto expiration_times =
       GetContentClient()->browser()->GetDevToolsBackgroundServiceExpirations(
-          browser_context_);
+          &*browser_context_);
 
   for (const auto& expiration_time : expiration_times) {
-    DCHECK(devtools::proto::BackgroundService_IsValid(expiration_time.first));
+    CHECK(devtools::proto::BackgroundService_IsValid(expiration_time.first),
+          base::NotFatalUntil::M159);
     expiration_times_[expiration_time.first] = expiration_time.second;
 
     auto service =
@@ -90,14 +94,14 @@ void DevToolsBackgroundServicesContextImpl::RemoveObserver(
 
 void DevToolsBackgroundServicesContextImpl::StartRecording(
     devtools::proto::BackgroundService service) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   // TODO(rayankans): Make the time delay finch configurable.
   base::Time expiration_time = base::Time::Now() + base::Days(3);
   expiration_times_[service] = expiration_time;
 
   GetContentClient()->browser()->UpdateDevToolsBackgroundServiceExpiration(
-      browser_context_, service, expiration_time);
+      &*browser_context_, service, expiration_time);
 
   for (EventObserver& observer : observers_)
     observer.OnRecordingStateChanged(/* should_record= */ true, service);
@@ -105,11 +109,11 @@ void DevToolsBackgroundServicesContextImpl::StartRecording(
 
 void DevToolsBackgroundServicesContextImpl::StopRecording(
     devtools::proto::BackgroundService service) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   expiration_times_[service] = base::Time();
   GetContentClient()->browser()->UpdateDevToolsBackgroundServiceExpiration(
-      browser_context_, service, base::Time());
+      &*browser_context_, service, base::Time());
 
   for (EventObserver& observer : observers_)
     observer.OnRecordingStateChanged(/* should_record= */ false, service);
@@ -137,7 +141,7 @@ bool DevToolsBackgroundServicesContextImpl::IsRecordingExpired(
 void DevToolsBackgroundServicesContextImpl::GetLoggedBackgroundServiceEvents(
     devtools::proto::BackgroundService service,
     GetLoggedBackgroundServiceEventsCallback callback) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   service_worker_context_->GetUserDataForAllRegistrationsByKeyPrefix(
       CreateEntryKeyPrefix(service),
@@ -149,7 +153,7 @@ void DevToolsBackgroundServicesContextImpl::DidGetUserData(
     GetLoggedBackgroundServiceEventsCallback callback,
     const std::vector<std::pair<int64_t, std::string>>& user_data,
     blink::ServiceWorkerStatusCode status) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   std::vector<devtools::proto::BackgroundServiceEvent> events;
 
@@ -166,7 +170,8 @@ void DevToolsBackgroundServicesContextImpl::DidGetUserData(
       std::move(callback).Run({});
       return;
     }
-    DCHECK_EQ(data.first, event.service_worker_registration_id());
+    CHECK_EQ(data.first, event.service_worker_registration_id(),
+             base::NotFatalUntil::M159);
     events.push_back(std::move(event));
   }
 
@@ -181,7 +186,7 @@ void DevToolsBackgroundServicesContextImpl::DidGetUserData(
 
 void DevToolsBackgroundServicesContextImpl::ClearLoggedBackgroundServiceEvents(
     devtools::proto::BackgroundService service) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   service_worker_context_->ClearUserDataForAllRegistrationsByKeyPrefix(
       CreateEntryKeyPrefix(service), base::DoNothing());
@@ -194,7 +199,7 @@ void DevToolsBackgroundServicesContextImpl::LogBackgroundServiceEvent(
     const std::string& event_name,
     const std::string& instance_id,
     const std::map<std::string, std::string>& event_metadata) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   if (!IsRecording(service))
     return;
@@ -228,7 +233,7 @@ void DevToolsBackgroundServicesContextImpl::LogBackgroundServiceEvent(
 
 void DevToolsBackgroundServicesContextImpl::NotifyEventObservers(
     const devtools::proto::BackgroundServiceEvent& event) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   for (EventObserver& observer : observers_)
     observer.OnEventReceived(event);
@@ -236,7 +241,7 @@ void DevToolsBackgroundServicesContextImpl::NotifyEventObservers(
 
 void DevToolsBackgroundServicesContextImpl::OnRecordingTimeExpired(
     devtools::proto::BackgroundService service) {
-  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+  CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
 
   // This could have been stopped by the user in the meanwhile, or we
   // received duplicate time expiry events.

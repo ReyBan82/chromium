@@ -1,128 +1,126 @@
-// Copyright 2021 The Chromium Authors
+// Copyright 2025 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <vector>
-
-#include "base/check.h"
 #include "crypto/scoped_mock_unexportable_key_provider.h"
-#include "crypto/sha2.h"
-#include "crypto/signature_verifier.h"
+
+#include <memory>
+#include <optional>
+
+#include "base/containers/span.h"
+#include "base/memory/raw_ref.h"
+#include "crypto/mock_unexportable_key.h"
 #include "crypto/unexportable_key.h"
-#include "third_party/boringssl/src/include/openssl/bytestring.h"
-#include "third_party/boringssl/src/include/openssl/ec.h"
-#include "third_party/boringssl/src/include/openssl/ec_key.h"
-#include "third_party/boringssl/src/include/openssl/ecdsa.h"
-#include "third_party/boringssl/src/include/openssl/evp.h"
-#include "third_party/boringssl/src/include/openssl/obj.h"
+#include "testing/gmock/include/gmock/gmock.h"
 
 namespace crypto {
 
 namespace {
 
-std::vector<uint8_t> CBBToVector(const CBB* cbb) {
-  return std::vector<uint8_t>(CBB_data(cbb), CBB_data(cbb) + CBB_len(cbb));
-}
+ScopedMockUnexportableKeyProvider* g_mock_provider = nullptr;
 
-class SoftwareECDSA : public UnexportableSigningKey {
+class ForwardingUnexportableKeyProvider : public UnexportableKeyProvider {
  public:
-  explicit SoftwareECDSA(bssl::UniquePtr<EC_KEY> key) : key_(std::move(key)) {}
-  ~SoftwareECDSA() override = default;
+  explicit ForwardingUnexportableKeyProvider(UnexportableKeyProvider& provider)
+      : provider_(provider) {}
+  ~ForwardingUnexportableKeyProvider() override = default;
 
-  SignatureVerifier::SignatureAlgorithm Algorithm() const override {
-    return SignatureVerifier::SignatureAlgorithm::ECDSA_SHA256;
-  }
-
-  std::vector<uint8_t> GetSubjectPublicKeyInfo() const override {
-    bssl::UniquePtr<EVP_PKEY> pkey(EVP_PKEY_new());
-    CHECK(EVP_PKEY_set1_EC_KEY(pkey.get(), key_.get()));
-
-    bssl::ScopedCBB cbb;
-    CHECK(CBB_init(cbb.get(), /*initial_capacity=*/128) &&
-          EVP_marshal_public_key(cbb.get(), pkey.get()));
-    return CBBToVector(cbb.get());
-  }
-
-  std::vector<uint8_t> GetWrappedKey() const override {
-    bssl::ScopedCBB cbb;
-    CHECK(
-        CBB_init(cbb.get(), /*initial_capacity=*/128) &&
-        EC_KEY_marshal_private_key(cbb.get(), key_.get(),
-                                   EC_PKEY_NO_PARAMETERS | EC_PKEY_NO_PUBKEY));
-    return CBBToVector(cbb.get());
-  }
-
-  absl::optional<std::vector<uint8_t>> SignSlowly(
-      base::span<const uint8_t> data) override {
-    std::vector<uint8_t> ret(ECDSA_size(key_.get()));
-    std::array<uint8_t, kSHA256Length> digest = SHA256Hash(data);
-    unsigned int ret_size;
-    CHECK(ECDSA_sign(0, digest.data(), digest.size(), ret.data(), &ret_size,
-                     key_.get()));
-    ret.resize(ret_size);
-    return ret;
-  }
-
- private:
-  bssl::UniquePtr<EC_KEY> key_;
-};
-
-class SoftwareProvider : public UnexportableKeyProvider {
- public:
-  ~SoftwareProvider() override = default;
-
-  absl::optional<SignatureVerifier::SignatureAlgorithm> SelectAlgorithm(
-      base::span<const SignatureVerifier::SignatureAlgorithm>
-          acceptable_algorithms) override {
-    for (auto algo : acceptable_algorithms) {
-      if (algo == SignatureVerifier::SignatureAlgorithm::ECDSA_SHA256) {
-        return algo;
-      }
-    }
-
-    return absl::nullopt;
+  // UnexportableKeyProvider:
+  std::optional<sign::SignatureKind> SelectAlgorithm(
+      base::span<const sign::SignatureKind> acceptable_algorithms) override {
+    return provider_->SelectAlgorithm(acceptable_algorithms);
   }
 
   std::unique_ptr<UnexportableSigningKey> GenerateSigningKeySlowly(
-      base::span<const SignatureVerifier::SignatureAlgorithm>
-          acceptable_algorithms) override {
-    if (!SelectAlgorithm(acceptable_algorithms)) {
-      return nullptr;
-    }
-
-    bssl::UniquePtr<EC_KEY> key(EC_KEY_new_by_curve_name(NID_X9_62_prime256v1));
-    CHECK(EC_KEY_generate_key(key.get()));
-
-    return std::make_unique<SoftwareECDSA>(std::move(key));
+      base::span<const sign::SignatureKind> acceptable_algorithms) override {
+    return provider_->GenerateSigningKeySlowly(acceptable_algorithms);
   }
 
   std::unique_ptr<UnexportableSigningKey> FromWrappedSigningKeySlowly(
       base::span<const uint8_t> wrapped_key) override {
-    bssl::UniquePtr<EC_GROUP> p256(
-        EC_GROUP_new_by_curve_name(NID_X9_62_prime256v1));
-    CBS cbs;
-    CBS_init(&cbs, wrapped_key.data(), wrapped_key.size());
-    bssl::UniquePtr<EC_KEY> key(EC_KEY_parse_private_key(&cbs, p256.get()));
-    if (!key || CBS_len(&cbs) != 0) {
-      return nullptr;
-    }
-    return std::make_unique<SoftwareECDSA>(std::move(key));
+    return provider_->FromWrappedSigningKeySlowly(wrapped_key);
   }
+
+  std::unique_ptr<UnexportableAttestationKey> GenerateAttestationKeySlowly(
+      base::span<const sign::SignatureKind> acceptable_algorithms) override {
+    return provider_->GenerateAttestationKeySlowly(acceptable_algorithms);
+  }
+
+  std::unique_ptr<UnexportableAttestationKey> FromWrappedAttestationKeySlowly(
+      base::span<const uint8_t> wrapped_key) override {
+    return provider_->FromWrappedAttestationKeySlowly(wrapped_key);
+  }
+
+  StatefulUnexportableKeyProvider* AsStatefulUnexportableKeyProvider()
+      override {
+    return provider_->AsStatefulUnexportableKeyProvider();
+  }
+
+ private:
+  const raw_ref<crypto::UnexportableKeyProvider> provider_;
 };
 
-std::unique_ptr<UnexportableKeyProvider> GetUnexportableKeyProviderMock() {
-  return std::make_unique<SoftwareProvider>();
+std::unique_ptr<UnexportableKeyProvider> GetMockKeyProvider() {
+  return std::make_unique<ForwardingUnexportableKeyProvider>(
+      g_mock_provider->mock());
+}
+
+// Tries to pop the next key from the queue. Returns `nullptr` if the queue
+// is empty.
+template <typename KeyT>
+std::unique_ptr<KeyT> TryPopNextKey(base::queue<std::unique_ptr<KeyT>>& keys) {
+  std::unique_ptr<KeyT> key;
+  if (!keys.empty()) {
+    key = std::move(keys.front());
+    keys.pop();
+  }
+  return key;
 }
 
 }  // namespace
 
 ScopedMockUnexportableKeyProvider::ScopedMockUnexportableKeyProvider() {
-  internal::SetUnexportableKeyProviderForTesting(
-      GetUnexportableKeyProviderMock);
+  CHECK(!g_mock_provider) << "Nested providers are not allowed";
+  // Store `this` in a global pointer so that all mock key providers can access
+  // the `next_generated_keys_` queue.
+  g_mock_provider = this;
+  crypto::internal::SetUnexportableKeyProviderForTesting(&GetMockKeyProvider);
+
+  ON_CALL(mock_provider_, SelectAlgorithm)
+      .WillByDefault([](base::span<const sign::SignatureKind> algorithms) {
+        return algorithms.empty() ? std::nullopt : std::optional(algorithms[0]);
+      });
+  ON_CALL(mock_provider_, GenerateSigningKeySlowly).WillByDefault([this](auto) {
+    return TryPopNextKey(next_generated_signing_keys_);
+  });
+  ON_CALL(mock_provider_, FromWrappedSigningKeySlowly)
+      .WillByDefault(
+          [this](auto) { return TryPopNextKey(next_generated_signing_keys_); });
+  ON_CALL(mock_provider_, GenerateAttestationKeySlowly)
+      .WillByDefault([this](auto) {
+        return TryPopNextKey(next_generated_attestation_keys_);
+      });
+  ON_CALL(mock_provider_, FromWrappedAttestationKeySlowly)
+      .WillByDefault([this](auto) {
+        return TryPopNextKey(next_generated_attestation_keys_);
+      });
 }
 
 ScopedMockUnexportableKeyProvider::~ScopedMockUnexportableKeyProvider() {
-  internal::SetUnexportableKeyProviderForTesting(nullptr);
+  crypto::internal::SetUnexportableKeyProviderForTesting(nullptr);
+  g_mock_provider = nullptr;
+}
+
+UnexportableSigningKey*
+ScopedMockUnexportableKeyProvider::AddNextGeneratedSigningKey(
+    std::unique_ptr<UnexportableSigningKey> key) {
+  return next_generated_signing_keys_.emplace(std::move(key)).get();
+}
+
+UnexportableAttestationKey*
+ScopedMockUnexportableKeyProvider::AddNextGeneratedAttestationKey(
+    std::unique_ptr<UnexportableAttestationKey> key) {
+  return next_generated_attestation_keys_.emplace(std::move(key)).get();
 }
 
 }  // namespace crypto

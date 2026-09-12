@@ -29,16 +29,22 @@ ProfileImportImpl::ProfileImportImpl(
 ProfileImportImpl::~ProfileImportImpl() = default;
 
 void ProfileImportImpl::StartImport(
-    const importer::SourceProfile& source_profile,
+    const user_data_importer::SourceProfile& source_profile,
     uint16_t items,
     const base::flat_map<uint32_t, std::string>& localized_strings,
-    mojo::PendingRemote<chrome::mojom::ProfileImportObserver> observer) {
+    mojo::PendingRemote<chrome::mojom::ProfileImportObserver> observer,
+    mojo::PendingRemote<user_data_importer::mojom::BookmarkHtmlParser>
+        bookmark_html_parser) {
   content::UtilityThread::Get()->EnsureBlinkInitialized();
   importer_ = importer::CreateImporterByType(source_profile.importer_type);
   if (!importer_.get()) {
     mojo::Remote<chrome::mojom::ProfileImportObserver>(std::move(observer))
         ->OnImportFinished(false, "Importer could not be created.");
     return;
+  }
+
+  if (bookmark_html_parser) {
+    importer_->SetBookmarkHtmlParser(std::move(bookmark_html_parser));
   }
 
   items_to_import_ = items;
@@ -50,7 +56,6 @@ void ProfileImportImpl::StartImport(
 #endif
   if (!import_thread_->Start()) {
     NOTREACHED();
-    ImporterCleanup();
   }
   bridge_ = new ExternalProcessImporterBridge(
       localized_strings,
@@ -66,7 +71,8 @@ void ProfileImportImpl::CancelImport() {
   ImporterCleanup();
 }
 
-void ProfileImportImpl::ReportImportItemFinished(importer::ImportItem item) {
+void ProfileImportImpl::ReportImportItemFinished(
+    user_data_importer::ImportItem item) {
   items_to_import_ ^= item;  // Remove finished item from mask.
   if (items_to_import_ == 0) {
     ImporterCleanup();

@@ -16,6 +16,7 @@
 #include "base/synchronization/lock.h"
 #include "media/base/cdm_key_information.h"
 #include "media/base/cdm_promise.h"
+#include "media/base/media_util.h"
 #include "media/cdm/api/content_decryption_module.h"
 #include "media/cdm/library_cdm/clear_key_cdm/clear_key_persistent_session_cdm.h"
 
@@ -31,7 +32,8 @@ const int64_t kInitialTimerDelayMs = 200;
 
 // Clear key implementation of the cdm::ContentDecryptionModule interfaces.
 class ClearKeyCdm : public cdm::ContentDecryptionModule_10,
-                    public cdm::ContentDecryptionModule_11 {
+                    public cdm::ContentDecryptionModule_11,
+                    public cdm::ContentDecryptionModule_12 {
  public:
   template <typename HostInterface>
   ClearKeyCdm(HostInterface* host, const std::string& key_system);
@@ -41,19 +43,20 @@ class ClearKeyCdm : public cdm::ContentDecryptionModule_10,
 
   ~ClearKeyCdm() override;
 
-  // cdm::ContentDecryptionModule_10 implementation.
+  // cdm::ContentDecryptionModule_10 and cdm::ContentDecryptionModule_11
+  // implementation.
   cdm::Status InitializeVideoDecoder(
       const cdm::VideoDecoderConfig_2& video_decoder_config) override;
   cdm::Status DecryptAndDecodeFrame(const cdm::InputBuffer_2& encrypted_buffer,
                                     cdm::VideoFrame* video_frame) override;
 
-  // cdm::ContentDecryptionModule_11 implementation.
+  // cdm::ContentDecryptionModule_12 implementation.
   cdm::Status InitializeVideoDecoder(
       const cdm::VideoDecoderConfig_3& video_decoder_config) override;
   cdm::Status DecryptAndDecodeFrame(const cdm::InputBuffer_2& encrypted_buffer,
                                     cdm::VideoFrame_2* video_frame) override;
 
-  // Common cdm::ContentDecryptionModule_10/11 implementation.
+  // Common cdm::ContentDecryptionModule_* implementation.
   void Initialize(bool allow_distinctive_identifier,
                   bool allow_persistent_state,
                   bool use_hw_secure_codecs) override;
@@ -65,7 +68,6 @@ class ClearKeyCdm : public cdm::ContentDecryptionModule_10,
       const cdm::InputBuffer_2& encrypted_buffer,
       cdm::AudioFrames* audio_frames) override;
 
-  // Common cdm::ContentDecryptionModule_* implementation.
   void GetStatusForPolicy(uint32_t promise_id,
                           const cdm::Policy& policy) override;
   void CreateSessionAndGenerateRequest(uint32_t promise_id,
@@ -155,8 +157,6 @@ class ClearKeyCdm : public cdm::ContentDecryptionModule_10,
   void ReportVerifyCdmHostTestResult();
   void StartStorageIdTest();
 
-  int host_interface_version_ = 0;
-
   std::unique_ptr<CdmHostProxy> cdm_host_proxy_;
   scoped_refptr<ContentDecryptionModule> cdm_;
 
@@ -186,6 +186,8 @@ class ClearKeyCdm : public cdm::ContentDecryptionModule_10,
   bool is_running_output_protection_test_ = false;
   bool is_running_platform_verification_test_ = false;
   bool is_running_storage_id_test_ = false;
+
+  media::NullMediaLog null_media_log_;
 };
 
 }  // namespace media

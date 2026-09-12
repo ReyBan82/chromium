@@ -5,6 +5,7 @@
 #ifndef CHROME_BROWSER_ASH_LOGIN_ENROLLMENT_MOCK_ENROLLMENT_SCREEN_H_
 #define CHROME_BROWSER_ASH_LOGIN_ENROLLMENT_MOCK_ENROLLMENT_SCREEN_H_
 
+#include "chrome/browser/ash/login/enrollment/enrollment_launcher.h"
 #include "chrome/browser/ash/login/enrollment/enrollment_screen.h"
 #include "chrome/browser/ash/login/enrollment/enrollment_screen_view.h"
 #include "chrome/browser/ash/policy/enrollment/enrollment_config.h"
@@ -12,13 +13,30 @@
 #include "google_apis/gaia/google_service_auth_error.h"
 #include "testing/gmock/include/gmock/gmock.h"
 
+class PrefService;
+
+namespace network {
+class SharedURLLoaderFactory;
+}  // namespace network
+
+namespace policy {
+class BrowserPolicyConnectorAsh;
+}  // namespace policy
+
 namespace ash {
 
 class MockEnrollmentScreen : public EnrollmentScreen {
  public:
-  MockEnrollmentScreen(base::WeakPtr<EnrollmentScreenView> view,
-                       ErrorScreen* error_screen,
-                       const ScreenExitCallback& exit_callback);
+  // `local_state` must be non-null and must outlive `this`.
+  // `shared_url_loader_factory` must be non-null.
+  // `browser_policy_connector_ash` must be non-null and must outlive `this`.
+  MockEnrollmentScreen(
+      PrefService* local_state,
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      policy::BrowserPolicyConnectorAsh* browser_policy_connector_ash,
+      base::WeakPtr<EnrollmentScreenView> view,
+      ErrorScreen* error_screen,
+      const ScreenExitCallback& exit_callback);
   ~MockEnrollmentScreen() override;
 
   MOCK_METHOD(void, ShowImpl, ());
@@ -47,15 +65,10 @@ class MockEnrollmentScreenView : public EnrollmentScreenView {
   MOCK_METHOD(void, MockUnbind, ());
   MOCK_METHOD(void, ShowSigninScreen, ());
   MOCK_METHOD(void, ReloadSigninScreen, ());
+  MOCK_METHOD(void, ResetEnrollmentScreen, ());
   MOCK_METHOD(void, ShowUserError, (const std::string& email));
   MOCK_METHOD(void, ShowEnrollmentDuringTrialNotAllowedError, ());
   MOCK_METHOD(void, ShowSkipConfirmationDialog, ());
-  MOCK_METHOD(void,
-              ShowActiveDirectoryScreen,
-              (const std::string& domain_join_config,
-               const std::string& machine_name,
-               const std::string& username,
-               authpolicy::ErrorType error));
   MOCK_METHOD(void,
               ShowAttributePromptScreen,
               (const std::string& asset_id, const std::string& location));
@@ -63,9 +76,16 @@ class MockEnrollmentScreenView : public EnrollmentScreenView {
   MOCK_METHOD(void, ShowEnrollmentTPMCheckingScreen, ());
   MOCK_METHOD(void, ShowEnrollmentWorkingScreen, ());
   MOCK_METHOD(void, ShowAuthError, (const GoogleServiceAuthError&));
-  MOCK_METHOD(void, ShowOtherError, (EnterpriseEnrollmentHelper::OtherError));
+  MOCK_METHOD(void, ShowOtherError, (EnrollmentLauncher::OtherError));
   MOCK_METHOD(void, ShowEnrollmentStatus, (policy::EnrollmentStatus status));
   MOCK_METHOD(void, Shutdown, ());
+
+  base::WeakPtr<EnrollmentScreenView> AsWeakPtr() override {
+    return weak_ptr_factory_.GetWeakPtr();
+  }
+
+ private:
+  base::WeakPtrFactory<EnrollmentScreenView> weak_ptr_factory_{this};
 };
 
 }  // namespace ash

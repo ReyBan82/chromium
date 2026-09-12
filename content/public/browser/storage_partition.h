@@ -17,7 +17,9 @@
 #include "components/services/storage/public/mojom/cache_storage_control.mojom-forward.h"
 #include "components/services/storage/public/mojom/local_storage_control.mojom-forward.h"
 #include "content/common/content_export.h"
+#include "media/media_buildflags.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
+#include "services/network/public/mojom/cert_verifier_service_updater.mojom-forward.h"
 #include "services/network/public/mojom/cookie_manager.mojom-forward.h"
 #include "services/network/public/mojom/restricted_cookie_manager.mojom-forward.h"
 #include "services/network/public/mojom/trust_tokens.mojom-forward.h"
@@ -46,14 +48,13 @@ namespace mojom {
 class CookieManager;
 class NetworkContext;
 class URLLoaderNetworkServiceObserver;
+class DeviceBoundSessionManager;
 }  // namespace mojom
 }  // namespace network
 
 namespace storage {
-class DatabaseTracker;
 class QuotaManager;
 struct QuotaSettings;
-class SharedStorageManager;
 class SpecialStoragePolicy;
 }  // namespace storage
 
@@ -63,23 +64,23 @@ class Origin;
 
 namespace content {
 
-class AttributionDataModel;
 class BackgroundSyncContext;
 class BrowserContext;
 class BrowsingDataFilterBuilder;
-class BrowsingTopicsSiteDataManager;
+class CdmStorageDataModel;
 class ContentIndexContext;
 class DedicatedWorkerService;
 class DevToolsBackgroundServicesContext;
 class DOMStorageContext;
 class FileSystemAccessEntryFactory;
 class GeneratedCodeCacheContext;
+struct GlobalRenderFrameHostId;
 class HostZoomLevelContext;
 class HostZoomMap;
-class InterestGroupManager;
 class PlatformNotificationContext;
 class ServiceWorkerContext;
 class SharedWorkerService;
+class StoragePartitionConfig;
 class ZoomLevelDelegate;
 class NavigationRequest;
 
@@ -91,16 +92,22 @@ class NavigationRequest;
 // the cookies, localStorage, etc., that normal web renderers have access to.
 class CONTENT_EXPORT StoragePartition {
  public:
-  virtual base::FilePath GetPath() = 0;
+  // Returns the StoragePartitionConfig that represents this StoragePartition.
+  virtual const StoragePartitionConfig& GetConfig() const = 0;
+
+  virtual const base::FilePath& GetPath() const = 0;
 
   // Returns a raw mojom::NetworkContext pointer. When network service crashes
   // or restarts, the raw pointer will not be valid or safe to use. Therefore,
   // caller should not hold onto this pointer beyond the same message loop task.
   virtual network::mojom::NetworkContext* GetNetworkContext() = 0;
 
-  // Returns the SharedStorageManager for the StoragePartition, or nullptr if it
-  // doesn't exist because the feature is disabled.
-  virtual storage::SharedStorageManager* GetSharedStorageManager() = 0;
+  // Returns true if the NetworkContext for this partition has already been
+  // initialized.
+  virtual bool IsNetworkContextInitialized() = 0;
+
+  virtual cert_verifier::mojom::CertVerifierServiceUpdater*
+  GetCertVerifierServiceUpdater() = 0;
 
   // Returns a pointer/info to a URLLoaderFactory/CookieManager owned by
   // the storage partition. Prefer to use this instead of creating a new
@@ -113,7 +120,7 @@ class CONTENT_EXPORT StoragePartition {
   // network process restarts.
   //
   // SECURITY NOTE: This browser-process factory relaxes many security features
-  // (e.g. may disable CORB, won't set |request_initiator_origin_lock| or
+  // (e.g. may disable ORB, won't set |request_initiator_origin_lock| or
   // IsolationInfo, etc.).  Network requests that may be initiated or influenced
   // by a web origin should typically use a different factory (e.g.  the one
   // from RenderFrameHost::CreateNetworkServiceDefaultFactory).
@@ -129,8 +136,8 @@ class CONTENT_EXPORT StoragePartition {
       const url::Origin& top_frame_origin) = 0;
 
   virtual mojo::PendingRemote<network::mojom::URLLoaderNetworkServiceObserver>
-  CreateURLLoaderNetworkObserverForFrame(int process_id,
-                                         int frame_routing_id) = 0;
+  CreateURLLoaderNetworkObserverForFrame(
+      const content::GlobalRenderFrameHostId& frame_id) = 0;
 
   virtual mojo::PendingRemote<network::mojom::URLLoaderNetworkServiceObserver>
   CreateURLLoaderNetworkObserverForNavigationRequest(
@@ -139,7 +146,6 @@ class CONTENT_EXPORT StoragePartition {
   virtual storage::QuotaManager* GetQuotaManager() = 0;
   virtual BackgroundSyncContext* GetBackgroundSyncContext() = 0;
   virtual storage::FileSystemContext* GetFileSystemContext() = 0;
-  virtual storage::DatabaseTracker* GetDatabaseTracker() = 0;
   virtual DOMStorageContext* GetDOMStorageContext() = 0;
   virtual storage::mojom::LocalStorageControl* GetLocalStorageControl() = 0;
   virtual storage::mojom::IndexedDBControl& GetIndexedDBControl() = 0;
@@ -156,9 +162,19 @@ class CONTENT_EXPORT StoragePartition {
   virtual HostZoomLevelContext* GetHostZoomLevelContext() = 0;
   virtual ZoomLevelDelegate* GetZoomLevelDelegate() = 0;
   virtual PlatformNotificationContext* GetPlatformNotificationContext() = 0;
-  virtual InterestGroupManager* GetInterestGroupManager() = 0;
-  virtual BrowsingTopicsSiteDataManager* GetBrowsingTopicsSiteDataManager() = 0;
-  virtual AttributionDataModel* GetAttributionDataModel() = 0;
+#if BUILDFLAG(ENABLE_LIBRARY_CDMS)
+  virtual CdmStorageDataModel* GetCdmStorageDataModel() = 0;
+#endif  // BUILDFLAG(ENABLE_LIBRARY_CDMS)
+  virtual network::mojom::DeviceBoundSessionManager*
+  GetDeviceBoundSessionManager() = 0;
+  virtual void OverrideDeviceBoundSessionManagerForTesting(
+      std::unique_ptr<network::mojom::DeviceBoundSessionManager>
+          device_bound_session_manager) = 0;
+
+  // This clears stale session cookies/storage from the current profile. This
+  // must only be called after session restore has completed to ensure active
+  // session cookies/storage are not cleared.
+  virtual void DeleteStaleSessionData() = 0;
 
   virtual leveldb_proto::ProtoDatabaseProvider* GetProtoDatabaseProvider() = 0;
   // Must be set before the first call to GetProtoDatabaseProvider(), or a new
@@ -172,19 +188,18 @@ class CONTENT_EXPORT StoragePartition {
     REMOVE_DATA_MASK_COOKIES = 1 << 1,
     REMOVE_DATA_MASK_FILE_SYSTEMS = 1 << 2,
     REMOVE_DATA_MASK_INDEXEDDB = 1 << 3,
+    // Includes both local storage and session storage.
     REMOVE_DATA_MASK_LOCAL_STORAGE = 1 << 4,
     REMOVE_DATA_MASK_SHADER_CACHE = 1 << 5,
-    REMOVE_DATA_MASK_WEBSQL = 1 << 6,
+    REMOVE_DATA_MASK_WEBSQL_DEPRECATED = 1 << 6,
     REMOVE_DATA_MASK_SERVICE_WORKERS = 1 << 7,
     REMOVE_DATA_MASK_CACHE_STORAGE = 1 << 8,
     REMOVE_DATA_MASK_MEDIA_LICENSES = 1 << 9,
     REMOVE_DATA_MASK_BACKGROUND_FETCH = 1 << 10,
-    REMOVE_DATA_MASK_ATTRIBUTION_REPORTING_SITE_CREATED = 1 << 11,
     // Interest groups are stored as part of the Interest Group API experiment
     // Public explainer here:
     // https://github.com/WICG/turtledove/blob/main/FLEDGE.md
     REMOVE_DATA_MASK_INTEREST_GROUPS = 1 << 12,
-    REMOVE_DATA_MASK_AGGREGATION_SERVICE = 1 << 13,
     // Shared storage data as part of the Shared Storage API.
     // Public explainer: https://github.com/pythagoraskitty/shared-storage
     REMOVE_DATA_MASK_SHARED_STORAGE = 1 << 14,
@@ -194,29 +209,31 @@ class CONTENT_EXPORT StoragePartition {
     // https://github.com/WICG/turtledove/blob/main/FLEDGE.md
     REMOVE_DATA_MASK_INTEREST_GROUP_PERMISSIONS_CACHE = 1 << 15,
 
-    REMOVE_DATA_MASK_ATTRIBUTION_REPORTING_INTERNAL = 1 << 16,
-    REMOVE_DATA_MASK_PRIVATE_AGGREGATION_INTERNAL = 1 << 17,
     REMOVE_DATA_MASK_INTEREST_GROUPS_INTERNAL = 1 << 18,
+    // Device bound sessions. Public explainer:
+    // https://github.com/WICG/dbsc/blob/main/README.md
+    REMOVE_DATA_MASK_DEVICE_BOUND_SESSIONS = 1 << 19,
+
+    // Things in interest groups that should only be removed as part of
+    // user-initiated clearing.
+    REMOVE_DATA_MASK_INTEREST_GROUPS_USER_CLEAR = 1 << 20,
+
+    // Keepalive loads might be kept around in memory for a long time when
+    // waiting for a chance to retry. They should be removed as part of
+    // user-initiated clearing.
+    REMOVE_KEEPALIVE_LOADS_ATTEMPTING_RETRY = 1 << 21,
+
+    // Declarative Performance Observer data.
+    REMOVE_DATA_MASK_DECLARATIVE_PERFORMANCE_OBSERVER = 1 << 22,
 
     REMOVE_DATA_MASK_ALL = 0xFFFFFFFF,
-
-    // Corresponds to storage::kStorageTypeTemporary.
-    QUOTA_MANAGED_STORAGE_MASK_TEMPORARY = 1 << 0,
-    // Corresponds to storage::kStorageTypePersistent.
-    // Deprecated since crbug.com/1233525.
-    // QUOTA_MANAGED_STORAGE_MASK_PERSISTENT = 1 << 1,
-    // Corresponds to storage::kStorageTypeSyncable.
-    QUOTA_MANAGED_STORAGE_MASK_SYNCABLE = 1 << 2,
-    QUOTA_MANAGED_STORAGE_MASK_ALL = 0xFFFFFFFF,
   };
 
   // Starts an asynchronous task that does a best-effort clear the data
-  // corresponding to the given |remove_mask| and |quota_storage_remove_mask|
+  // corresponding to the given |remove_mask|
   // inside this StoragePartition for the given |storage_origin|.
   // |callback| is called when data deletion is done or at least the deletion is
   // scheduled.
-  // Note session dom storage is not cleared even if you specify
-  // REMOVE_DATA_MASK_LOCAL_STORAGE.
   // No notification is dispatched upon completion.
   //
   // TODO(ajwong): Right now, the embedder may have some
@@ -225,14 +242,8 @@ class CONTENT_EXPORT StoragePartition {
   // http://crbug.com/159193. Remove |request_context_getter| when that bug
   // is fixed.
   virtual void ClearDataForOrigin(uint32_t remove_mask,
-                                  uint32_t quota_storage_remove_mask,
                                   const GURL& storage_origin,
                                   base::OnceClosure callback) = 0;
-
-  // Retrieves all the buckets for a specific storage key and then clears their
-  // data.
-  virtual void ClearDataForAllBuckets(const blink::StorageKey& storage_key,
-                                      base::OnceClosure callback) = 0;
 
   // Starts a task that will clear the data of each bucket name for the
   // specified storage key.
@@ -272,7 +283,6 @@ class CONTENT_EXPORT StoragePartition {
   // opaque. |callback| is called when data deletion is done or at least the
   // deletion is scheduled.
   virtual void ClearData(uint32_t remove_mask,
-                         uint32_t quota_storage_remove_mask,
                          const blink::StorageKey& storage_key,
                          const base::Time begin,
                          const base::Time end,
@@ -301,7 +311,6 @@ class CONTENT_EXPORT StoragePartition {
   // selectively. You don't want to break the web.
   virtual void ClearData(
       uint32_t remove_mask,
-      uint32_t quota_storage_remove_mask,
       BrowsingDataFilterBuilder* filter_builder,
       StorageKeyPolicyMatcherFunction storage_key_policy_matcher,
       network::mojom::CookieDeletionFilterPtr cookie_deletion_filter,
@@ -328,22 +337,23 @@ class CONTENT_EXPORT StoragePartition {
   // Resets all URLLoaderFactories bound to this partition's network context.
   virtual void ResetURLLoaderFactories() = 0;
 
+  // Clears the bluetooth allowed devices map.
+  virtual void ClearBluetoothAllowedDevicesMap() = 0;
+
   virtual void AddObserver(DataRemovalObserver* observer) = 0;
 
   virtual void RemoveObserver(DataRemovalObserver* observer) = 0;
-
-  // Clear the bluetooth allowed devices map. For test use only.
-  virtual void ClearBluetoothAllowedDevicesMapForTesting() = 0;
 
   // Call |FlushForTesting()| on Network Service related interfaces. For test
   // use only.
   virtual void FlushNetworkInterfaceForTesting() = 0;
 
+  // Call |FlushForTesting()| on Cert Verifier Service related interfaces. For
+  // test use only.
+  virtual void FlushCertVerifierInterfaceForTesting() = 0;
+
   // Wait until all deletions tasks are finished. For test use only.
   virtual void WaitForDeletionTasksForTesting() = 0;
-
-  // Wait until code cache's shutdown is complete. For test use only.
-  virtual void WaitForCodeCacheShutdownForTesting() = 0;
 
   virtual void SetNetworkContextForTesting(
       mojo::PendingRemote<network::mojom::NetworkContext>
@@ -354,15 +364,13 @@ class CONTENT_EXPORT StoragePartition {
   virtual leveldb_proto::ProtoDatabaseProvider*
   GetProtoDatabaseProviderForTesting() = 0;
 
-  // Resets all state associated with the Attribution Reporting API for use in
-  // hermetic tests.
-  virtual void ResetAttributionManagerForTesting(
-      base::OnceCallback<void(bool success)> callback) = 0;
-
   // The value pointed to by |settings| should remain valid until the
   // the function is called again with a new value or a nullptr.
   static void SetDefaultQuotaSettingsForTesting(
       const storage::QuotaSettings* settings);
+
+  virtual void OverrideDeleteStaleSessionCleanupDelayForTesting(
+      const base::TimeDelta& delay) = 0;
 
  protected:
   virtual ~StoragePartition() {}

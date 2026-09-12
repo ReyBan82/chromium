@@ -35,6 +35,9 @@ class SVGLinearGradientElement final : public SVGGradientElement {
 
  public:
   explicit SVGLinearGradientElement(Document&);
+  ElementType GetElementType() const final {
+    return ElementType::kSVGLinearGradientElement;
+  }
 
   SVGAnimatedLength* x1() const { return x1_.Get(); }
   SVGAnimatedLength* y1() const { return y1_.Get(); }
@@ -48,9 +51,13 @@ class SVGLinearGradientElement final : public SVGGradientElement {
  private:
   void SvgAttributeChanged(const SvgAttributeChangedParams&) override;
 
-  LayoutObject* CreateLayoutObject(const ComputedStyle&, LegacyLayout) override;
+  LayoutObject* CreateLayoutObject(const ComputedStyle&) override;
 
   bool SelfHasRelativeLengths() const override;
+
+  SVGAnimatedPropertyBase* PropertyFromAttribute(
+      const QualifiedName& attribute_name) const override;
+  void SynchronizeAllSVGAttributes() const override;
 
   Member<SVGAnimatedLength> x1_;
   Member<SVGAnimatedLength> y1_;

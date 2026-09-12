@@ -15,27 +15,18 @@
 #include "chrome/browser/ui/views/chrome_layout_provider.h"
 #include "chrome/common/extensions/extension_constants.h"
 #include "chrome/grit/generated_resources.h"
-#include "extensions/browser/extension_system.h"
 #include "extensions/browser/image_loader.h"
 #include "extensions/common/constants.h"
 #include "extensions/common/extension.h"
-#include "extensions/common/extension_icon_set.h"
-#include "extensions/common/extension_resource.h"
-#include "extensions/common/manifest_handlers/icons_handler.h"
-#include "extensions/common/manifest_url_handlers.h"
+#include "extensions/common/manifest_handlers/manifest_url_handlers.h"
 #include "net/base/url_util.h"
-#include "third_party/skia/include/core/SkBitmap.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/metadata/metadata_impl_macros.h"
-#include "ui/gfx/geometry/insets.h"
 #include "ui/gfx/geometry/size.h"
 #include "ui/gfx/image/image.h"
 #include "ui/gfx/image/image_skia.h"
-#include "ui/gfx/image/image_skia_rep.h"
-#include "ui/gfx/native_widget_types.h"
 #include "ui/gfx/text_constants.h"
 #include "ui/views/controls/image_view.h"
-#include "ui/views/controls/label.h"
 #include "ui/views/controls/link.h"
 #include "ui/views/layout/box_layout.h"
 #include "ui/views/view.h"
@@ -60,11 +51,10 @@ AppInfoHeaderPanel::AppInfoHeaderPanel(Profile* profile,
   CreateControls();
 }
 
-AppInfoHeaderPanel::~AppInfoHeaderPanel() {
-}
+AppInfoHeaderPanel::~AppInfoHeaderPanel() = default;
 
 void AppInfoHeaderPanel::OnIconUpdated(extensions::ChromeAppIcon* icon) {
-  app_icon_view_->SetImage(icon->image_skia());
+  app_icon_view_->SetImage(ui::ImageModel::FromImageSkia(icon->image_skia()));
 }
 
 void AppInfoHeaderPanel::CreateControls() {
@@ -121,8 +111,8 @@ bool AppInfoHeaderPanel::CanShowAppInWebStore() const {
   // Also hide Shared Modules because they are automatically installed
   // by Chrome when dependent Apps are installed.
   return app_->from_webstore() && !app_->was_installed_by_default() &&
-      !app_->is_shared_module();
+         !app_->is_shared_module();
 }
 
-BEGIN_METADATA(AppInfoHeaderPanel, AppInfoPanel)
+BEGIN_METADATA(AppInfoHeaderPanel)
 END_METADATA

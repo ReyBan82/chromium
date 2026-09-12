@@ -6,7 +6,6 @@
 
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/user_metrics_action.h"
-#include "third_party/blink/public/strings/grit/blink_strings.h"
 #include "third_party/blink/renderer/core/dom/events/event.h"
 #include "third_party/blink/renderer/core/dom/shadow_root.h"
 #include "third_party/blink/renderer/core/events/gesture_event.h"
@@ -16,6 +15,7 @@
 #include "third_party/blink/renderer/core/frame/local_frame.h"
 #include "third_party/blink/renderer/core/html/html_div_element.h"
 #include "third_party/blink/renderer/core/html/media/html_media_element.h"
+#include "third_party/blink/renderer/core/html/media/html_video_element.h"
 #include "third_party/blink/renderer/core/html/shadow/shadow_element_names.h"
 #include "third_party/blink/renderer/core/html/time_ranges.h"
 #include "third_party/blink/renderer/core/html_names.h"
@@ -31,7 +31,9 @@
 #include "third_party/blink/renderer/modules/media_controls/media_controls_shared_helper.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 #include "third_party/blink/renderer/platform/text/platform_locale.h"
+#include "third_party/blink/renderer/platform/wtf/text/string_to_number.h"
 #include "ui/display/screen_info.h"
+#include "ui/strings/grit/ax_strings.h"
 
 namespace {
 
@@ -101,7 +103,7 @@ void MediaControlTimelineElement::UpdateAria() {
 void MediaControlTimelineElement::SetPosition(double current_time,
                                               bool suppress_aria) {
   if (is_live_ && !live_anchor_time_ && current_time != 0) {
-    live_anchor_time_.emplace();
+    live_anchor_time_.emplace(LiveAnchorTime());
     live_anchor_time_->clock_time_ = base::TimeTicks::Now();
     live_anchor_time_->media_time_ = MediaElement().currentTime();
   }
@@ -170,7 +172,7 @@ void MediaControlTimelineElement::DefaultEventHandler(Event& event) {
     return;
   }
 
-  double time = Value().ToDouble();
+  double time = StringToDouble(Value()).value_or(0);
   double duration = MediaElement().duration();
   // Workaround for floating point error - it's possible for this element's max
   // attribute to be rounded to a value slightly higher than the duration. If
@@ -218,14 +220,22 @@ void MediaControlTimelineElement::RenderTimelineTimerFired(TimerBase*) {
 }
 
 void MediaControlTimelineElement::MaybeUpdateTimelineInterval() {
-  if (!is_live_ || !MediaElement().seekable()->length() || !live_anchor_time_)
+  if (!is_live_ || !live_anchor_time_) {
     return;
+  }
 
-  int last_seekable = MediaElement().seekable()->length() - 1;
+  TimeRanges* seekable_ranges = MediaElement().seekable();
+  DCHECK(seekable_ranges != nullptr);
+
+  if (seekable_ranges->length() == 0u) {
+    return;
+  }
+
+  int last_seekable = seekable_ranges->length() - 1;
   double seekable_start =
-      MediaElement().seekable()->start(last_seekable, ASSERT_NO_EXCEPTION);
+      seekable_ranges->start(last_seekable, ASSERT_NO_EXCEPTION);
   double seekable_end =
-      MediaElement().seekable()->end(last_seekable, ASSERT_NO_EXCEPTION);
+      seekable_ranges->end(last_seekable, ASSERT_NO_EXCEPTION);
   double expected_media_time_now =
       live_anchor_time_->media_time_ +
       (base::TimeTicks::Now() - live_anchor_time_->clock_time_).InSecondsF();
@@ -256,57 +266,53 @@ void MediaControlTimelineElement::RenderBarSegments() {
   // Calculate |current_time| and |duration| for live media base on the timeline
   // value since timeline's minimum value is not necessarily zero.
   if (is_live_) {
-    current_time =
-        Value().ToDouble() - GetFloatingPointAttribute(html_names::kMinAttr);
+    current_time = StringToDouble(Value()).value_or(0) -
+                   GetFloatingPointAttribute(html_names::kMinAttr);
     duration = GetFloatingPointAttribute(html_names::kMaxAttr) -
                GetFloatingPointAttribute(html_names::kMinAttr);
   }
 
   if (!std::isfinite(duration) || !duration || std::isnan(current_time)) {
-    SetBeforeSegmentPosition(MediaControlSliderElement::Position(0, 0));
-    SetAfterSegmentPosition(MediaControlSliderElement::Position(0, 0));
+    SetBeforeSegmentFraction(0.0);
+    SetAfterSegmentFraction(0.0);
     return;
   }
 
-  double current_position = current_time / duration;
+  double current_fraction = current_time / duration;
 
-  // Transform the current_position to always align with the center of thumb
+  // Transform the current_fraction to always align with the center of thumb
   // At time 0, the thumb's center is 6px away from beginning of progress bar
   // At the end of video, thumb's center is -6px away from end of progress bar
   // Convert 6px into ratio respect to progress bar width since
-  // current_position is range from 0 to 1
+  // current_fraction is range from 0 to 1
   double width = TrackWidth() / ZoomFactor();
-  if (width != 0 && current_position != 0 && !MediaElement().ended()) {
+  if (width != 0 && current_fraction != 0 && !MediaElement().ended()) {
     double offset = kThumbRadius / width;
-    current_position += offset - (2 * offset * current_position);
+    current_fraction += offset - (2 * offset * current_fraction);
   }
 
-  MediaControlSliderElement::Position before_segment(0, 0);
-  MediaControlSliderElement::Position after_segment(0, 0);
+  double before_segment_fraction = current_fraction;
+  double after_segment_fraction = 0.0;
 
-  // The before segment (i.e. what has been played) should be purely be based on
-  // the current time.
-  before_segment.width = current_position;
-
-  absl::optional<unsigned> current_buffered_time_range =
+  std::optional<unsigned> current_buffered_time_range =
       MediaControlsSharedHelpers::GetCurrentBufferedTimeRange(MediaElement());
 
   if (current_buffered_time_range) {
     float end = buffered_time_ranges->end(current_buffered_time_range.value(),
                                           ASSERT_NO_EXCEPTION);
 
-    double end_position = end / duration;
+    double end_fraction = end / duration;
 
     // Draw dark grey highlight to show what we have loaded. This just uses a
     // width since it just starts at zero just like the before segment.
-    // We use |std::max()| here because |current_position| has an offset added
-    // to it and can therefore be greater than |end_position| in some cases.
-    after_segment.width = std::max(current_position, end_position);
+    // We use |std::max()| here because |current_fraction| has an offset added
+    // to it and can therefore be greater than |end_fraction| in some cases.
+    after_segment_fraction = std::max(current_fraction, end_fraction);
   }
 
-  // Update the positions of the segments.
-  SetBeforeSegmentPosition(before_segment);
-  SetAfterSegmentPosition(after_segment);
+  // Update the fractions of the segments.
+  SetBeforeSegmentFraction(before_segment_fraction);
+  SetAfterSegmentFraction(after_segment_fraction);
 }
 
 void MediaControlTimelineElement::Trace(Visitor* visitor) const {

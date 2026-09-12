@@ -31,10 +31,8 @@
 #include "third_party/blink/public/common/web_preferences/web_preferences.h"
 #include "third_party/blink/public/mojom/webpreferences/web_preferences.mojom.h"
 
-#if !BUILDFLAG(IS_ANDROID)
 #include "chrome/common/pref_names.h"
 #include "components/prefs/pref_service.h"
-#endif
 
 namespace {
 
@@ -67,7 +65,7 @@ class MediaEngagementScoreDetailsProviderImpl
   MediaEngagementScoreDetailsProviderImpl& operator=(
       const MediaEngagementScoreDetailsProviderImpl&) = delete;
 
-  ~MediaEngagementScoreDetailsProviderImpl() override {}
+  ~MediaEngagementScoreDetailsProviderImpl() override = default;
 
   // media::mojom::MediaEngagementScoreDetailsProvider overrides:
   void GetMediaEngagementScoreDetails(
@@ -115,20 +113,16 @@ class MediaEngagementScoreDetailsProviderImpl
     std::vector<component_updater::ComponentInfo> info = cus->GetComponents();
 
     for (const auto& component : info) {
-      if (component.id == kPreloadComponentID)
+      if (component.id == kPreloadComponentID) {
         return component.version.GetString();
+      }
     }
 
     return std::string();
   }
 
-  // Pref is not available on Android.
   bool GetBlockAutoplayPref() {
-#if BUILDFLAG(IS_ANDROID)
-    return false;
-#else
     return profile_->GetPrefs()->GetBoolean(prefs::kBlockAutoplayEnabled);
-#endif
   }
 
   raw_ptr<content::WebUI> web_ui_;
@@ -141,6 +135,11 @@ class MediaEngagementScoreDetailsProviderImpl
 };
 
 }  // namespace
+
+bool MediaEngagementUIConfig::IsWebUIEnabled(
+    content::BrowserContext* browser_context) {
+  return MediaEngagementService::IsEnabled();
+}
 
 MediaEngagementUI::MediaEngagementUI(content::WebUI* web_ui)
     : ui::MojoWebUIController(web_ui) {

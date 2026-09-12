@@ -11,17 +11,16 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 import android.text.TextUtils;
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
-
 import org.chromium.base.Callback;
 import org.chromium.base.ContextUtils;
 import org.chromium.base.StrictModeContext;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.ui.base.Clipboard;
+import org.chromium.ui.base.Clipboard.ClipboardUriMetadata;
 
-/**
- * Implementation class for {@link Clipboard.ImageFileProvider}.
- */
+/** Implementation class for {@link Clipboard.ImageFileProvider}. */
+@NullMarked
 public class ClipboardImageFileProvider implements Clipboard.ImageFileProvider {
     @Override
     public void storeImageAndGenerateUri(
@@ -30,16 +29,16 @@ public class ClipboardImageFileProvider implements Clipboard.ImageFileProvider {
     }
 
     @Override
-    public void storeLastCopiedImageMetadata(@NonNull ClipboardFileMetadata clipboardFileMetadata) {
+    public void storeLastCopiedImageMetadata(ClipboardUriMetadata clipboardUriMetadata) {
         ContextUtils.getAppSharedPreferences()
                 .edit()
-                .putString(CLIPBOARD_SHARED_URI, clipboardFileMetadata.uri.toString())
-                .putLong(CLIPBOARD_SHARED_URI_TIMESTAMP, clipboardFileMetadata.timestamp)
+                .putString(CLIPBOARD_SHARED_URI, clipboardUriMetadata.uri.toString())
+                .putLong(CLIPBOARD_SHARED_URI_TIMESTAMP, clipboardUriMetadata.timestamp)
                 .apply();
     }
 
     @Override
-    public @Nullable ClipboardFileMetadata getLastCopiedImageMetadata() {
+    public @Nullable ClipboardUriMetadata getLastCopiedImageMetadata() {
         SharedPreferences prefs = ContextUtils.getAppSharedPreferences();
         try (StrictModeContext ignored = StrictModeContext.allowDiskReads()) {
             String uriString = prefs.getString(CLIPBOARD_SHARED_URI, null);
@@ -48,7 +47,7 @@ public class ClipboardImageFileProvider implements Clipboard.ImageFileProvider {
             Uri uri = Uri.parse(uriString);
             long timestamp = prefs.getLong(CLIPBOARD_SHARED_URI_TIMESTAMP, 0L);
 
-            return new ClipboardFileMetadata(uri, timestamp);
+            return new ClipboardUriMetadata(uri, timestamp);
         }
     }
 

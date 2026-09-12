@@ -61,7 +61,7 @@ EventListener* MIDIInput::onmidimessage() {
 
 void MIDIInput::setOnmidimessage(EventListener* listener) {
   // Implicit open. It does nothing if the port is already opened.
-  // See http://www.w3.org/TR/webmidi/#widl-MIDIPort-open-Promise-MIDIPort
+  // See https://www.w3.org/TR/webmidi/#dom-midiport-open
   open();
 
   SetAttributeEventListener(event_type_names::kMidimessage, listener);
@@ -78,25 +78,27 @@ void MIDIInput::AddedEventListener(
 }
 
 void MIDIInput::DidReceiveMIDIData(unsigned port_index,
-                                   const unsigned char* data,
-                                   size_t length,
+                                   base::span<const uint8_t> data,
                                    base::TimeTicks time_stamp) {
   DCHECK(IsMainThread());
 
-  if (!length)
+  if (data.empty()) {
     return;
+  }
 
-  if (GetConnection() != MIDIPortConnectionState::kOpen)
+  if (GetConnection() != MIDIPortConnectionState::kOpen) {
     return;
+  }
 
   // Drop sysex message here when the client does not request it. Note that this
   // is not a security check but an automatic filtering for clients that do not
   // want sysex message. Also note that sysex message will never be sent unless
   // the current process has an explicit permission to handle sysex message.
-  if (data[0] == 0xf0 && !midiAccess()->sysexEnabled())
+  if (data[0] == 0xf0 && !midiAccess()->sysexEnabled()) {
     return;
-  DOMUint8Array* array =
-      DOMUint8Array::Create(data, base::checked_cast<unsigned>(length));
+  }
+  DOMUint8Array* array = DOMUint8Array::Create(data);
+
   DispatchEvent(*MakeGarbageCollected<MIDIMessageEvent>(time_stamp, array));
 
   UseCounter::Count(GetExecutionContext(), WebFeature::kMIDIMessageEvent);

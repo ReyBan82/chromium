@@ -11,18 +11,20 @@
 #include "third_party/blink/renderer/core/css/css_selector_list.h"
 #include "third_party/blink/renderer/core/css/css_test_helpers.h"
 #include "third_party/blink/renderer/core/css/invalidation/invalidation_set.h"
+#include "third_party/blink/renderer/core/css/media_query_exp.h"
 #include "third_party/blink/renderer/core/css/parser/css_parser.h"
 #include "third_party/blink/renderer/core/css/rule_set.h"
 #include "third_party/blink/renderer/core/css/style_rule.h"
 #include "third_party/blink/renderer/core/dom/element_traversal.h"
 #include "third_party/blink/renderer/core/execution_context/security_context.h"
 #include "third_party/blink/renderer/core/html/html_body_element.h"
+#include "third_party/blink/renderer/core/html/html_div_element.h"
 #include "third_party/blink/renderer/core/html/html_document.h"
 #include "third_party/blink/renderer/core/html/html_element.h"
 #include "third_party/blink/renderer/core/html/html_html_element.h"
 #include "third_party/blink/renderer/core/testing/null_execution_context.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
-#include "third_party/blink/renderer/platform/testing/runtime_enabled_features_test_helpers.h"
+#include "third_party/blink/renderer/platform/testing/task_environment.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
 
 using testing::AssertionFailure;
@@ -42,22 +44,28 @@ class RuleFeatureSetTest : public testing::Test {
     html->AppendChild(MakeGarbageCollected<HTMLBodyElement>(*document_));
     document_->AppendChild(html);
 
-    document_->body()->setInnerHTML("<b><i></i></b>");
+    document_->body()->SetInnerHTMLWithoutTrustedTypes("<b><i></i></b>");
   }
 
-  RuleFeatureSet::SelectorPreMatch CollectFeatures(
+  SelectorPreMatch CollectFeatures(
       const String& selector_text,
+      CSSNestingType nesting_type = CSSNestingType::kNone,
       StyleRule* parent_rule_for_nesting = nullptr) {
-    return CollectFeaturesTo(selector_text, rule_feature_set_,
+    return CollectFeaturesTo(selector_text, rule_feature_set_, nesting_type,
                              parent_rule_for_nesting);
   }
 
-  static RuleFeatureSet::SelectorPreMatch CollectFeaturesTo(
+  SelectorPreMatch CollectFeatures(StyleRule* style_rule,
+                                   const StyleScope* style_scope) {
+    return CollectFeaturesTo(style_rule, style_scope, rule_feature_set_);
+  }
+
+  static SelectorPreMatch CollectFeaturesTo(
       base::span<CSSSelector> selector_vector,
       const StyleScope* style_scope,
       RuleFeatureSet& set) {
     if (selector_vector.empty()) {
-      return RuleFeatureSet::SelectorPreMatch::kSelectorNeverMatches;
+      return SelectorPreMatch::kNeverMatches;
     }
 
     auto* style_rule = StyleRule::Create(
@@ -66,48 +74,48 @@ class RuleFeatureSetTest : public testing::Test {
     return CollectFeaturesTo(style_rule, style_scope, set);
   }
 
-  static RuleFeatureSet::SelectorPreMatch CollectFeaturesTo(
-      StyleRule* style_rule,
-      const StyleScope* style_scope,
-      RuleFeatureSet& set) {
-    RuleFeatureSet::SelectorPreMatch result =
-        RuleFeatureSet::SelectorPreMatch::kSelectorNeverMatches;
+  static SelectorPreMatch CollectFeaturesTo(StyleRule* style_rule,
+                                            const StyleScope* style_scope,
+                                            RuleFeatureSet& set) {
+    SelectorPreMatch result = SelectorPreMatch::kNeverMatches;
     for (const CSSSelector* s = style_rule->FirstSelector(); s;
          s = CSSSelectorList::Next(*s)) {
-      if (set.CollectFeaturesFromSelector(*s, style_scope)) {
-        result = RuleFeatureSet::SelectorPreMatch::kSelectorMayMatch;
+      if (set.CollectFeaturesFromSelector(*s, style_scope) ==
+          SelectorPreMatch::kMayMatch) {
+        result = SelectorPreMatch::kMayMatch;
       }
     }
     return result;
   }
 
-  static RuleFeatureSet::SelectorPreMatch CollectFeaturesTo(
+  static SelectorPreMatch CollectFeaturesTo(
       const String& selector_text,
       RuleFeatureSet& set,
+      CSSNestingType nesting_type,
       StyleRule* parent_rule_for_nesting) {
     HeapVector<CSSSelector> arena;
     base::span<CSSSelector> selector_vector = CSSParser::ParseSelector(
         StrictCSSParserContext(SecureContextMode::kInsecureContext),
-        parent_rule_for_nesting, nullptr, selector_text, arena);
+        nesting_type, parent_rule_for_nesting, nullptr, selector_text, arena);
     return CollectFeaturesTo(selector_vector, nullptr /* style_scope */, set);
   }
 
   void ClearFeatures() { rule_feature_set_.Clear(); }
 
   void CollectInvalidationSetsForClass(InvalidationLists& invalidation_lists,
-                                       const AtomicString& class_name) const {
+                                       const char* class_name) const {
     Element* element = Traversal<HTMLElement>::FirstChild(
         *Traversal<HTMLElement>::FirstChild(*document_->body()));
-    rule_feature_set_.CollectInvalidationSetsForClass(invalidation_lists,
-                                                      *element, class_name);
+    rule_feature_set_.GetRuleInvalidationData().CollectInvalidationSetsForClass(
+        invalidation_lists, *element, AtomicString(class_name));
   }
 
   void CollectInvalidationSetsForId(InvalidationLists& invalidation_lists,
-                                    const AtomicString& id) const {
+                                    const char* id) const {
     Element* element = Traversal<HTMLElement>::FirstChild(
         *Traversal<HTMLElement>::FirstChild(*document_->body()));
-    rule_feature_set_.CollectInvalidationSetsForId(invalidation_lists, *element,
-                                                   id);
+    rule_feature_set_.GetRuleInvalidationData().CollectInvalidationSetsForId(
+        invalidation_lists, *element, AtomicString(id));
   }
 
   void CollectInvalidationSetsForAttribute(
@@ -115,8 +123,9 @@ class RuleFeatureSetTest : public testing::Test {
       const QualifiedName& attribute_name) const {
     Element* element = Traversal<HTMLElement>::FirstChild(
         *Traversal<HTMLElement>::FirstChild(*document_->body()));
-    rule_feature_set_.CollectInvalidationSetsForAttribute(
-        invalidation_lists, *element, attribute_name);
+    rule_feature_set_.GetRuleInvalidationData()
+        .CollectInvalidationSetsForAttribute(invalidation_lists, *element,
+                                             attribute_name);
   }
 
   void CollectInvalidationSetsForPseudoClass(
@@ -124,26 +133,41 @@ class RuleFeatureSetTest : public testing::Test {
       CSSSelector::PseudoType pseudo) const {
     Element* element = Traversal<HTMLElement>::FirstChild(
         *Traversal<HTMLElement>::FirstChild(*document_->body()));
-    rule_feature_set_.CollectInvalidationSetsForPseudoClass(invalidation_lists,
-                                                            *element, pseudo);
+    rule_feature_set_.GetRuleInvalidationData()
+        .CollectInvalidationSetsForPseudoClass(invalidation_lists, *element,
+                                               pseudo);
   }
 
   void CollectPartInvalidationSet(InvalidationLists& invalidation_lists) const {
-    rule_feature_set_.CollectPartInvalidationSet(invalidation_lists);
+    rule_feature_set_.GetRuleInvalidationData().CollectPartInvalidationSet(
+        invalidation_lists);
   }
 
   void CollectUniversalSiblingInvalidationSet(
       InvalidationLists& invalidation_lists) {
-    rule_feature_set_.CollectUniversalSiblingInvalidationSet(invalidation_lists,
-                                                             1);
+    rule_feature_set_.GetRuleInvalidationData()
+        .CollectUniversalSiblingInvalidationSet(invalidation_lists, 1);
   }
 
   void CollectNthInvalidationSet(InvalidationLists& invalidation_lists) {
-    rule_feature_set_.CollectNthInvalidationSet(invalidation_lists);
+    rule_feature_set_.GetRuleInvalidationData().CollectNthInvalidationSet(
+        invalidation_lists);
   }
 
-  bool NeedsHasInvalidationForClass(const AtomicString& class_name) {
-    return rule_feature_set_.NeedsHasInvalidationForClass(class_name);
+  bool NeedsHasInvalidationForClass(const char* class_name) {
+    return rule_feature_set_.GetRuleInvalidationData()
+        .NeedsHasInvalidationForClass(AtomicString(class_name));
+  }
+
+  bool NeedsHasInvalidationForAttribute(const char* attribute_name) {
+    return rule_feature_set_.GetRuleInvalidationData()
+        .NeedsHasInvalidationForAttribute(QualifiedName(
+            g_empty_atom, AtomicString(attribute_name), g_empty_atom));
+  }
+
+  bool NeedsHasInvalidationForInsertedOrRemovedElement(Element& element) {
+    return rule_feature_set_.GetRuleInvalidationData()
+        .NeedsHasInvalidationForInsertedOrRemovedElement(element);
   }
 
   void MergeInto(RuleFeatureSet& rule_feature_set) {
@@ -172,6 +196,12 @@ class RuleFeatureSetTest : public testing::Test {
 
   HashSet<AtomicString> TagNameSet(const InvalidationSet& invalidation_set) {
     return ToHashSet<BackingType::kTagNames>(invalidation_set.TagNames());
+  }
+
+  HashSet<AtomicString> CustomPseudoNameSet(
+      const InvalidationSet& invalidation_set) {
+    return ToHashSet<BackingType::kCustomPseudoNames>(
+        invalidation_set.CustomPseudoNames());
   }
 
   HashSet<AtomicString> AttributeSet(const InvalidationSet& invalidation_set) {
@@ -247,7 +277,7 @@ class RuleFeatureSetTest : public testing::Test {
   }
 
   AssertionResult HasClassInvalidation(
-      const AtomicString& class_name,
+      const char* class_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -257,15 +287,15 @@ class RuleFeatureSetTest : public testing::Test {
     if (classes.size() != 1u) {
       return AssertionFailure() << classes.size() << " should be 1";
     }
-    if (!classes.Contains(class_name)) {
+    if (!classes.Contains(AtomicString(class_name))) {
       return AssertionFailure() << "should invalidate class " << class_name;
     }
     return AssertionSuccess();
   }
 
   AssertionResult HasClassInvalidation(
-      const AtomicString& first_class_name,
-      const AtomicString& second_class_name,
+      const char* first_class_name,
+      const char* second_class_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -275,11 +305,11 @@ class RuleFeatureSetTest : public testing::Test {
     if (classes.size() != 2u) {
       return AssertionFailure() << classes.size() << " should be 2";
     }
-    if (!classes.Contains(first_class_name)) {
+    if (!classes.Contains(AtomicString(first_class_name))) {
       return AssertionFailure()
              << "should invalidate class " << first_class_name;
     }
-    if (!classes.Contains(second_class_name)) {
+    if (!classes.Contains(AtomicString(second_class_name))) {
       return AssertionFailure()
              << "should invalidate class " << second_class_name;
     }
@@ -316,7 +346,7 @@ class RuleFeatureSetTest : public testing::Test {
 
   AssertionResult HasSiblingClassInvalidation(
       unsigned max_direct_adjacent_selectors,
-      const AtomicString& sibling_name,
+      const char* sibling_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -328,7 +358,7 @@ class RuleFeatureSetTest : public testing::Test {
     if (classes.size() != 1u) {
       return AssertionFailure() << classes.size() << " should be 1";
     }
-    if (!classes.Contains(sibling_name)) {
+    if (!classes.Contains(AtomicString(sibling_name))) {
       return AssertionFailure()
              << "should invalidate sibling id " << sibling_name;
     }
@@ -343,7 +373,7 @@ class RuleFeatureSetTest : public testing::Test {
 
   AssertionResult HasSiblingIdInvalidation(
       unsigned max_direct_adjacent_selectors,
-      const AtomicString& sibling_name,
+      const char* sibling_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -355,7 +385,7 @@ class RuleFeatureSetTest : public testing::Test {
     if (ids.size() != 1u) {
       return AssertionFailure() << ids.size() << " should be 1";
     }
-    if (!ids.Contains(sibling_name)) {
+    if (!ids.Contains(AtomicString(sibling_name))) {
       return AssertionFailure()
              << "should invalidate sibling id " << sibling_name;
     }
@@ -370,8 +400,8 @@ class RuleFeatureSetTest : public testing::Test {
 
   AssertionResult HasSiblingDescendantInvalidation(
       unsigned max_direct_adjacent_selectors,
-      const AtomicString& sibling_name,
-      const AtomicString& descendant_name,
+      const char* sibling_name,
+      const char* descendant_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -383,7 +413,7 @@ class RuleFeatureSetTest : public testing::Test {
     if (classes.size() != 1u) {
       return AssertionFailure() << classes.size() << " should be 1";
     }
-    if (!classes.Contains(sibling_name)) {
+    if (!classes.Contains(AtomicString(sibling_name))) {
       return AssertionFailure()
              << "classes.Contains(sibling_name) should be true";
     }
@@ -399,7 +429,7 @@ class RuleFeatureSetTest : public testing::Test {
     if (descendant_classes.size() != 1u) {
       return AssertionFailure() << descendant_classes.size() << " should be 1";
     }
-    if (!descendant_classes.Contains(descendant_name)) {
+    if (!descendant_classes.Contains(AtomicString(descendant_name))) {
       return AssertionFailure()
              << "should invalidate descendant class " << descendant_name;
     }
@@ -408,7 +438,7 @@ class RuleFeatureSetTest : public testing::Test {
 
   AssertionResult HasSiblingDescendantInvalidation(
       unsigned max_direct_adjacent_selectors,
-      const AtomicString& descendant_name,
+      const char* descendant_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -433,7 +463,7 @@ class RuleFeatureSetTest : public testing::Test {
     if (descendant_classes.size() != 1u) {
       return AssertionFailure() << descendant_classes.size() << " should be 1";
     }
-    if (!descendant_classes.Contains(descendant_name)) {
+    if (!descendant_classes.Contains(AtomicString(descendant_name))) {
       return AssertionFailure()
              << "should descendant invalidate " << descendant_name;
     }
@@ -442,9 +472,9 @@ class RuleFeatureSetTest : public testing::Test {
 
   AssertionResult
   HasSiblingAndSiblingDescendantInvalidationForLogicalCombinationsInHas(
-      const AtomicString& sibling_name,
-      const AtomicString& sibling_name_for_sibling_descendant,
-      const AtomicString& descendant_name,
+      const char* sibling_name,
+      const char* sibling_name_for_sibling_descendant,
+      const char* descendant_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -456,10 +486,10 @@ class RuleFeatureSetTest : public testing::Test {
     if (classes.size() != 2u) {
       return AssertionFailure() << classes.size() << " should be 2";
     }
-    if (!classes.Contains(sibling_name)) {
+    if (!classes.Contains(AtomicString(sibling_name))) {
       return AssertionFailure() << "should sibling invalidate " << sibling_name;
     }
-    if (!classes.Contains(sibling_name_for_sibling_descendant)) {
+    if (!classes.Contains(AtomicString(sibling_name_for_sibling_descendant))) {
       return AssertionFailure() << "should sibling invalidate "
                                 << sibling_name_for_sibling_descendant;
     }
@@ -475,7 +505,7 @@ class RuleFeatureSetTest : public testing::Test {
     if (descendant_classes.size() != 1u) {
       return AssertionFailure() << descendant_classes.size() << " should be 1";
     }
-    if (!descendant_classes.Contains(descendant_name)) {
+    if (!descendant_classes.Contains(AtomicString(descendant_name))) {
       return AssertionFailure()
              << "should descendant invalidate " << descendant_name;
     }
@@ -514,7 +544,7 @@ class RuleFeatureSetTest : public testing::Test {
     return AssertionSuccess();
   }
 
-  AssertionResult HasIdInvalidation(const AtomicString& id,
+  AssertionResult HasIdInvalidation(const char* id,
                                     InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -524,14 +554,14 @@ class RuleFeatureSetTest : public testing::Test {
     if (ids.size() != 1u) {
       return AssertionFailure() << ids.size() << " should be 1";
     }
-    if (!ids.Contains(id)) {
+    if (!ids.Contains(AtomicString(id))) {
       return AssertionFailure() << "should invalidate id " << id;
     }
     return AssertionSuccess();
   }
 
-  AssertionResult HasIdInvalidation(const AtomicString& first_id,
-                                    const AtomicString& second_id,
+  AssertionResult HasIdInvalidation(const char* first_id,
+                                    const char* second_id,
                                     InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -541,17 +571,17 @@ class RuleFeatureSetTest : public testing::Test {
     if (ids.size() != 2u) {
       return AssertionFailure() << ids.size() << " should be 2";
     }
-    if (!ids.Contains(first_id)) {
+    if (!ids.Contains(AtomicString(first_id))) {
       return AssertionFailure() << "should invalidate id " << first_id;
     }
-    if (!ids.Contains(second_id)) {
+    if (!ids.Contains(AtomicString(second_id))) {
       return AssertionFailure() << "should invalidate id " << second_id;
     }
     return AssertionSuccess();
   }
 
   AssertionResult HasTagNameInvalidation(
-      const AtomicString& tag_name,
+      const char* tag_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -561,15 +591,15 @@ class RuleFeatureSetTest : public testing::Test {
     if (tag_names.size() != 1u) {
       return AssertionFailure() << tag_names.size() << " should be 1";
     }
-    if (!tag_names.Contains(tag_name)) {
+    if (!tag_names.Contains(AtomicString(tag_name))) {
       return AssertionFailure() << "should invalidate tag " << tag_name;
     }
     return AssertionSuccess();
   }
 
   AssertionResult HasTagNameInvalidation(
-      const AtomicString& first_tag_name,
-      const AtomicString& second_tag_name,
+      const char* first_tag_name,
+      const char* second_tag_name,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -579,17 +609,17 @@ class RuleFeatureSetTest : public testing::Test {
     if (tag_names.size() != 2u) {
       return AssertionFailure() << tag_names.size() << " should be 2";
     }
-    if (!tag_names.Contains(first_tag_name)) {
+    if (!tag_names.Contains(AtomicString(first_tag_name))) {
       return AssertionFailure() << "should invalidate tag " << first_tag_name;
     }
-    if (!tag_names.Contains(second_tag_name)) {
+    if (!tag_names.Contains(AtomicString(second_tag_name))) {
       return AssertionFailure() << "should invalidate tag " << second_tag_name;
     }
     return AssertionSuccess();
   }
 
   AssertionResult HasAttributeInvalidation(
-      const AtomicString& attribute,
+      const char* attribute,
       InvalidationSetVector& invalidation_sets) {
     if (invalidation_sets.size() != 1u) {
       return AssertionFailure() << "has " << invalidation_sets.size()
@@ -599,17 +629,8 @@ class RuleFeatureSetTest : public testing::Test {
     if (attributes.size() != 1u) {
       return AssertionFailure() << attributes.size() << " should be 1";
     }
-    if (!attributes.Contains(attribute)) {
+    if (!attributes.Contains(AtomicString(attribute))) {
       return AssertionFailure() << "should invalidate attribute " << attribute;
-    }
-    return AssertionSuccess();
-  }
-
-  AssertionResult HasFullRecalcForRuleSetInvalidation(bool expected) {
-    if (rule_feature_set_.NeedsFullRecalcForRuleSetInvalidation() != expected) {
-      return AssertionFailure()
-             << rule_feature_set_.NeedsFullRecalcForRuleSetInvalidation()
-             << " should be " << expected;
     }
     return AssertionSuccess();
   }
@@ -622,6 +643,25 @@ class RuleFeatureSetTest : public testing::Test {
     }
     if (!invalidation_sets[0]->InvalidatesParts()) {
       return AssertionFailure() << "should invalidate parts";
+    }
+    return AssertionSuccess();
+  }
+
+  AssertionResult HasCustomPseudoNameInvalidation(
+      const char* pseudo_name,
+      InvalidationSetVector& invalidation_sets) {
+    if (invalidation_sets.size() != 1u) {
+      return AssertionFailure() << "has " << invalidation_sets.size()
+                                << " invalidation set(s), should have 1";
+    }
+    HashSet<AtomicString> custom_pseudo_names =
+        CustomPseudoNameSet(*invalidation_sets[0]);
+    if (custom_pseudo_names.size() != 1u) {
+      return AssertionFailure() << custom_pseudo_names.size() << " should be 1";
+    }
+    if (!custom_pseudo_names.Contains(AtomicString(pseudo_name))) {
+      return AssertionFailure()
+             << "should invalidate custom pseudo " << pseudo_name;
     }
     return AssertionSuccess();
   }
@@ -671,26 +711,29 @@ class RuleFeatureSetTest : public testing::Test {
 
   AssertionResult HasRefCountForClassInvalidationSet(
       const RuleFeatureSet& rule_feature_set,
-      const AtomicString& class_name,
+      const char* class_name,
       RefCount ref_count) {
     return HasRefCountForInvalidationSet(
-        rule_feature_set.class_invalidation_sets_, class_name, ref_count);
+        rule_feature_set.GetRuleInvalidationData().class_invalidation_sets,
+        AtomicString(class_name), ref_count);
   }
 
   AssertionResult HasRefCountForAttributeInvalidationSet(
       const RuleFeatureSet& rule_feature_set,
-      const AtomicString& attribute,
+      const char* attribute,
       RefCount ref_count) {
     return HasRefCountForInvalidationSet(
-        rule_feature_set.attribute_invalidation_sets_, attribute, ref_count);
+        rule_feature_set.GetRuleInvalidationData().attribute_invalidation_sets,
+        AtomicString(attribute), ref_count);
   }
 
   AssertionResult HasRefCountForIdInvalidationSet(
       const RuleFeatureSet& rule_feature_set,
-      const AtomicString& id,
+      const char* id,
       RefCount ref_count) {
-    return HasRefCountForInvalidationSet(rule_feature_set.id_invalidation_sets_,
-                                         id, ref_count);
+    return HasRefCountForInvalidationSet(
+        rule_feature_set.GetRuleInvalidationData().id_invalidation_sets,
+        AtomicString(id), ref_count);
   }
 
   AssertionResult HasRefCountForPseudoInvalidationSet(
@@ -698,10 +741,14 @@ class RuleFeatureSetTest : public testing::Test {
       CSSSelector::PseudoType key,
       RefCount ref_count) {
     return HasRefCountForInvalidationSet(
-        rule_feature_set.pseudo_invalidation_sets_, key, ref_count);
+        rule_feature_set.GetRuleInvalidationData().pseudo_invalidation_sets,
+        key, ref_count);
   }
 
  protected:
+  Document& GetDocument() { return *document_; }
+
+  test::TaskEnvironment task_environment_;
   ScopedNullExecutionContext execution_context_;
 
  private:
@@ -710,7 +757,7 @@ class RuleFeatureSetTest : public testing::Test {
 };
 
 TEST_F(RuleFeatureSetTest, interleavedDescendantSibling1) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(".p"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".p"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "p");
@@ -719,7 +766,7 @@ TEST_F(RuleFeatureSetTest, interleavedDescendantSibling1) {
 }
 
 TEST_F(RuleFeatureSetTest, interleavedDescendantSibling2) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(".o + .p"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".o + .p"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "o");
@@ -728,8 +775,7 @@ TEST_F(RuleFeatureSetTest, interleavedDescendantSibling2) {
 }
 
 TEST_F(RuleFeatureSetTest, interleavedDescendantSibling3) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".m + .n .o + .p"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".m + .n .o + .p"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "n");
@@ -739,8 +785,7 @@ TEST_F(RuleFeatureSetTest, interleavedDescendantSibling3) {
 }
 
 TEST_F(RuleFeatureSetTest, interleavedDescendantSibling4) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".m + .n .o + .p"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".m + .n .o + .p"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "m");
@@ -750,7 +795,7 @@ TEST_F(RuleFeatureSetTest, interleavedDescendantSibling4) {
 }
 
 TEST_F(RuleFeatureSetTest, interleavedDescendantSibling5) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".l ~ .m + .n .o + .p"));
 
   InvalidationLists invalidation_lists;
@@ -762,7 +807,7 @@ TEST_F(RuleFeatureSetTest, interleavedDescendantSibling5) {
 }
 
 TEST_F(RuleFeatureSetTest, interleavedDescendantSibling6) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".k > .l ~ .m + .n .o + .p"));
 
   InvalidationLists invalidation_lists;
@@ -772,7 +817,7 @@ TEST_F(RuleFeatureSetTest, interleavedDescendantSibling6) {
 }
 
 TEST_F(RuleFeatureSetTest, anySibling) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":-webkit-any(.q, .r) ~ .s .t"));
 
   InvalidationLists invalidation_lists;
@@ -784,7 +829,7 @@ TEST_F(RuleFeatureSetTest, anySibling) {
 }
 
 TEST_F(RuleFeatureSetTest, any) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":-webkit-any(.w, .x)"));
 
   InvalidationLists invalidation_lists;
@@ -794,7 +839,7 @@ TEST_F(RuleFeatureSetTest, any) {
 }
 
 TEST_F(RuleFeatureSetTest, repeatedAny) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":-webkit-any(.v, .w):-webkit-any(.x, .y, .z)"));
 
   {
@@ -813,7 +858,7 @@ TEST_F(RuleFeatureSetTest, repeatedAny) {
 }
 
 TEST_F(RuleFeatureSetTest, anyIdDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :-webkit-any(#b, #c)"));
 
   InvalidationLists invalidation_lists;
@@ -822,7 +867,7 @@ TEST_F(RuleFeatureSetTest, anyIdDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, repeatedAnyDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :-webkit-any(.v, .w):-webkit-any(.x, .y, .z)"));
 
   InvalidationLists invalidation_lists;
@@ -831,7 +876,7 @@ TEST_F(RuleFeatureSetTest, repeatedAnyDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, anyTagDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :-webkit-any(span, div)"));
 
   InvalidationLists invalidation_lists;
@@ -841,7 +886,7 @@ TEST_F(RuleFeatureSetTest, anyTagDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, siblingAny) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".v ~ :-webkit-any(.w, .x)"));
 
   InvalidationLists invalidation_lists;
@@ -851,7 +896,7 @@ TEST_F(RuleFeatureSetTest, siblingAny) {
 }
 
 TEST_F(RuleFeatureSetTest, descendantSiblingAny) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".u .v ~ :-webkit-any(.w, .x)"));
 
   InvalidationLists invalidation_lists;
@@ -861,7 +906,7 @@ TEST_F(RuleFeatureSetTest, descendantSiblingAny) {
 }
 
 TEST_F(RuleFeatureSetTest, id) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("#a #b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("#a #b"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForId(invalidation_lists, "a");
@@ -869,16 +914,17 @@ TEST_F(RuleFeatureSetTest, id) {
 }
 
 TEST_F(RuleFeatureSetTest, attribute) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("[c] [d]"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("[c] [d]"));
 
   InvalidationLists invalidation_lists;
-  CollectInvalidationSetsForAttribute(invalidation_lists,
-                                      QualifiedName("", "c", ""));
+  CollectInvalidationSetsForAttribute(
+      invalidation_lists,
+      QualifiedName(g_empty_atom, AtomicString("c"), g_empty_atom));
   EXPECT_TRUE(HasAttributeInvalidation("d", invalidation_lists.descendants));
 }
 
 TEST_F(RuleFeatureSetTest, pseudoClass) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":valid"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":valid"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForPseudoClass(invalidation_lists,
@@ -887,7 +933,7 @@ TEST_F(RuleFeatureSetTest, pseudoClass) {
 }
 
 TEST_F(RuleFeatureSetTest, tagName) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":valid e"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":valid e"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForPseudoClass(invalidation_lists,
@@ -895,57 +941,39 @@ TEST_F(RuleFeatureSetTest, tagName) {
   EXPECT_TRUE(HasTagNameInvalidation("e", invalidation_lists.descendants));
 }
 
-TEST_F(RuleFeatureSetTest, nonMatchingHost) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches, CollectFeatures(".a:host"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures("*:host(.a)"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures("*:host .a"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures("div :host .a"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures(":host:hover .a"));
+TEST_F(RuleFeatureSetTest, mayMatchHostAndHostContext) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":host"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":has(.a):host"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":has(.a):host .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":has(.a):host:has(.b) .c"));
 
-  InvalidationLists invalidation_lists;
-  CollectInvalidationSetsForClass(invalidation_lists, "a");
-  EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
-}
-
-TEST_F(RuleFeatureSetTest, nonMatchingHostContext) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures(".a:host-context(*)"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures("*:host-context(.a)"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures("*:host-context(*) .a"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures("div :host-context(div) .a"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures(":host-context(div):hover .a"));
-
-  InvalidationLists invalidation_lists;
-  CollectInvalidationSetsForClass(invalidation_lists, "a");
-  EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":host-context(div)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":has(.a):host-context(div)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":has(.a):host-context(div) .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":has(.a):host-context(div):has(.b) .c"));
 }
 
 TEST_F(RuleFeatureSetTest, emptyIsWhere) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches, CollectFeatures(":is()"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches, CollectFeatures(":where()"));
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches, CollectFeatures(":is()"));
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches, CollectFeatures(":where()"));
 
   // We do not support :nonsense, so :is()/:where() end up empty.
   // https://drafts.csswg.org/selectors/#typedef-forgiving-selector-list
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
-            CollectFeatures(":is(:nonsense)"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches, CollectFeatures(":is(:nonsense)"));
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
             CollectFeatures(":where(:nonsense)"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
             CollectFeatures(".a:is(:nonsense)"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorNeverMatches,
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
             CollectFeatures(".b:where(:nonsense)"));
 }
 
 TEST_F(RuleFeatureSetTest, universalSiblingInvalidationDirectAdjacent) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("* + .a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("* + .a"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -955,7 +983,7 @@ TEST_F(RuleFeatureSetTest, universalSiblingInvalidationDirectAdjacent) {
 }
 
 TEST_F(RuleFeatureSetTest, universalSiblingInvalidationMultipleDirectAdjacent) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("* + .a + .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("* + .a + .b"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -966,7 +994,7 @@ TEST_F(RuleFeatureSetTest, universalSiblingInvalidationMultipleDirectAdjacent) {
 
 TEST_F(RuleFeatureSetTest,
        universalSiblingInvalidationDirectAdjacentDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("* + .a .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("* + .a .b"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -977,7 +1005,7 @@ TEST_F(RuleFeatureSetTest,
 }
 
 TEST_F(RuleFeatureSetTest, universalSiblingInvalidationIndirectAdjacent) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("* ~ .a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("* ~ .a"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -990,7 +1018,7 @@ TEST_F(RuleFeatureSetTest, universalSiblingInvalidationIndirectAdjacent) {
 
 TEST_F(RuleFeatureSetTest,
        universalSiblingInvalidationMultipleIndirectAdjacent) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("* ~ .a ~ .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("* ~ .a ~ .b"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -1003,7 +1031,7 @@ TEST_F(RuleFeatureSetTest,
 
 TEST_F(RuleFeatureSetTest,
        universalSiblingInvalidationIndirectAdjacentDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("* ~ .a .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("* ~ .a .b"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -1015,8 +1043,7 @@ TEST_F(RuleFeatureSetTest,
 }
 
 TEST_F(RuleFeatureSetTest, universalSiblingInvalidationNot) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":not(.a) + .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":not(.a) + .b"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -1026,8 +1053,7 @@ TEST_F(RuleFeatureSetTest, universalSiblingInvalidationNot) {
 }
 
 TEST_F(RuleFeatureSetTest, nonUniversalSiblingInvalidationNot) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures("#x:not(.a) + .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("#x:not(.a) + .b"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -1036,7 +1062,7 @@ TEST_F(RuleFeatureSetTest, nonUniversalSiblingInvalidationNot) {
 }
 
 TEST_F(RuleFeatureSetTest, nonUniversalSiblingInvalidationAny) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures("#x:-webkit-any(.a) + .b"));
 
   InvalidationLists invalidation_lists;
@@ -1046,7 +1072,7 @@ TEST_F(RuleFeatureSetTest, nonUniversalSiblingInvalidationAny) {
 }
 
 TEST_F(RuleFeatureSetTest, universalSiblingInvalidationType) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("div + .a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("div + .a"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -1056,7 +1082,7 @@ TEST_F(RuleFeatureSetTest, universalSiblingInvalidationType) {
 }
 
 TEST_F(RuleFeatureSetTest, nonUniversalSiblingInvalidationType) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("div#x + .a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("div#x + .a"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -1065,7 +1091,7 @@ TEST_F(RuleFeatureSetTest, nonUniversalSiblingInvalidationType) {
 }
 
 TEST_F(RuleFeatureSetTest, universalSiblingInvalidationLink) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":link + .a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":link + .a"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -1075,7 +1101,7 @@ TEST_F(RuleFeatureSetTest, universalSiblingInvalidationLink) {
 }
 
 TEST_F(RuleFeatureSetTest, nonUniversalSiblingInvalidationLink) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("#x:link + .a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("#x:link + .a"));
 
   InvalidationLists invalidation_lists;
   CollectUniversalSiblingInvalidationSet(invalidation_lists);
@@ -1084,8 +1110,7 @@ TEST_F(RuleFeatureSetTest, nonUniversalSiblingInvalidationLink) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationUniversal) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":nth-child(2n)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":nth-child(2n)"));
 
   InvalidationLists invalidation_lists;
   CollectNthInvalidationSet(invalidation_lists);
@@ -1097,8 +1122,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationUniversal) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationClass) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".a:nth-child(2n)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a:nth-child(2n)"));
 
   InvalidationLists invalidation_lists;
   CollectNthInvalidationSet(invalidation_lists);
@@ -1112,8 +1136,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationClass) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationUniversalDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":nth-child(2n) *"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":nth-child(2n) *"));
 
   InvalidationLists invalidation_lists;
   CollectNthInvalidationSet(invalidation_lists);
@@ -1125,8 +1148,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationUniversalDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":nth-child(2n) .a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":nth-child(2n) .a"));
 
   InvalidationLists invalidation_lists;
   CollectNthInvalidationSet(invalidation_lists);
@@ -1140,7 +1162,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationSibling) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":nth-child(2n) + .a"));
 
   InvalidationLists invalidation_lists;
@@ -1152,7 +1174,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationSibling) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationSiblingDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":nth-child(2n) + .a .b"));
 
   InvalidationLists invalidation_lists;
@@ -1166,7 +1188,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationSiblingDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationNot) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":not(:nth-child(2n))"));
 
   InvalidationLists invalidation_lists;
@@ -1178,7 +1200,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationNot) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationNotClass) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:not(:nth-child(2n))"));
 
   InvalidationLists invalidation_lists;
@@ -1192,7 +1214,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationNotClass) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationNotDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".blah:not(:nth-child(2n)) .a"));
 
   InvalidationLists invalidation_lists;
@@ -1207,7 +1229,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationNotDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationAny) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":-webkit-any(#nomatch, :nth-child(2n))"));
 
   InvalidationLists invalidation_lists;
@@ -1220,7 +1242,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationAny) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationAnyClass) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:-webkit-any(#nomatch, :nth-child(2n))"));
 
   InvalidationLists invalidation_lists;
@@ -1232,7 +1254,7 @@ TEST_F(RuleFeatureSetTest, nthInvalidationAnyClass) {
 }
 
 TEST_F(RuleFeatureSetTest, nthInvalidationAnyDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".blah:-webkit-any(#nomatch, :nth-child(2n)) .a"));
 
   InvalidationLists invalidation_lists;
@@ -1245,161 +1267,12 @@ TEST_F(RuleFeatureSetTest, nthInvalidationAnyDescendant) {
       invalidation_lists.siblings));
 }
 
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationTypeSelector) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("div"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("* div"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("body *"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-}
-
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationClassIdAttr) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(".c"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(".c *"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("#i"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("#i *"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("[attr]"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("[attr] *"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-}
-
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationHoverActiveFocus) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":hover:active:focus"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-}
-
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationHostContext) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":host-context(.x)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":host-context(.x) .y"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-}
-
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationHost) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":host(.x)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":host(*) .y"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":host(.x) .y"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-}
-
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationNot) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":not(.x)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":not(.x) :hover"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":not(.x) .y"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":not(.x) + .y"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-}
-
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationCustomPseudo) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures("::-webkit-slider-thumb"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".x::-webkit-slider-thumb"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".x + ::-webkit-slider-thumb"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-}
-
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationSlotted) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("::slotted(*)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures("::slotted(.y)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".x::slotted(.y)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures("[x] ::slotted(.y)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-}
-
-TEST_F(RuleFeatureSetTest, RuleSetInvalidationAnyPseudo) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":-webkit-any(*, #x)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".x:-webkit-any(*, #y)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":-webkit-any(:-webkit-any(.a, .b), #x)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(false));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":-webkit-any(:-webkit-any(.a, *), #x)"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-  ClearFeatures();
-
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":-webkit-any(*, .a) *"));
-  EXPECT_TRUE(HasFullRecalcForRuleSetInvalidation(true));
-}
-
 TEST_F(RuleFeatureSetTest, SelfInvalidationSet) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(".a"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("div .b"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("#c"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("[d]"));
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":hover"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("div .b"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("#c"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("[d]"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":hover"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "a");
@@ -1417,8 +1290,9 @@ TEST_F(RuleFeatureSetTest, SelfInvalidationSet) {
   EXPECT_TRUE(HasSelfInvalidationSet(invalidation_lists.descendants));
 
   invalidation_lists.descendants.clear();
-  CollectInvalidationSetsForAttribute(invalidation_lists,
-                                      QualifiedName("", "d", ""));
+  CollectInvalidationSetsForAttribute(
+      invalidation_lists,
+      QualifiedName(g_empty_atom, AtomicString("d"), g_empty_atom));
   EXPECT_TRUE(HasSelfInvalidation(invalidation_lists.descendants));
   EXPECT_TRUE(HasSelfInvalidationSet(invalidation_lists.descendants));
 
@@ -1430,14 +1304,14 @@ TEST_F(RuleFeatureSetTest, SelfInvalidationSet) {
 }
 
 TEST_F(RuleFeatureSetTest, ReplaceSelfInvalidationSet) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(".a"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "a");
   EXPECT_TRUE(HasSelfInvalidation(invalidation_lists.descendants));
   EXPECT_TRUE(HasSelfInvalidationSet(invalidation_lists.descendants));
 
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(".a div"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a div"));
 
   invalidation_lists.descendants.clear();
   CollectInvalidationSetsForClass(invalidation_lists, "a");
@@ -1446,7 +1320,7 @@ TEST_F(RuleFeatureSetTest, ReplaceSelfInvalidationSet) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoIsSibling) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":is(.q, .r) ~ .s .t"));
   {
     InvalidationLists invalidation_lists;
@@ -1467,7 +1341,7 @@ TEST_F(RuleFeatureSetTest, pseudoIsSibling) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoIs) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(":is(.w, .x)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":is(.w, .x)"));
 
   {
     InvalidationLists invalidation_lists;
@@ -1484,8 +1358,7 @@ TEST_F(RuleFeatureSetTest, pseudoIs) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoIsIdDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".a :is(#b, #c)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a :is(#b, #c)"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "a");
@@ -1493,8 +1366,7 @@ TEST_F(RuleFeatureSetTest, pseudoIsIdDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoIsTagDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".a :is(span, div)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a :is(span, div)"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "a");
@@ -1503,8 +1375,7 @@ TEST_F(RuleFeatureSetTest, pseudoIsTagDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoIsAnySibling) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".v ~ :is(.w, .x)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".v ~ :is(.w, .x)"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "v");
@@ -1513,7 +1384,7 @@ TEST_F(RuleFeatureSetTest, pseudoIsAnySibling) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoIsDescendantSibling) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".u .v ~ :is(.w, .x)"));
 
   InvalidationLists invalidation_lists;
@@ -1523,7 +1394,7 @@ TEST_F(RuleFeatureSetTest, pseudoIsDescendantSibling) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoIsWithComplexSelectors) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :is(.w+.b, .x>#c)"));
 
   InvalidationLists invalidation_lists;
@@ -1534,7 +1405,7 @@ TEST_F(RuleFeatureSetTest, pseudoIsWithComplexSelectors) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoIsNested) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :is(.w+.b, .e+:is(.c, #d))"));
 
   InvalidationLists invalidation_lists;
@@ -1545,8 +1416,7 @@ TEST_F(RuleFeatureSetTest, pseudoIsNested) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoWhere) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":where(.w, .x)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":where(.w, .x)"));
 
   {
     InvalidationLists invalidation_lists;
@@ -1563,7 +1433,7 @@ TEST_F(RuleFeatureSetTest, pseudoWhere) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoWhereSibling) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":where(.q, .r) ~ .s .t"));
   {
     InvalidationLists invalidation_lists;
@@ -1584,8 +1454,7 @@ TEST_F(RuleFeatureSetTest, pseudoWhereSibling) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoWhereIdDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".a :where(#b, #c)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a :where(#b, #c)"));
 
   InvalidationLists invalidation_lists;
   CollectInvalidationSetsForClass(invalidation_lists, "a");
@@ -1593,7 +1462,7 @@ TEST_F(RuleFeatureSetTest, pseudoWhereIdDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoWhereTagDescendant) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :where(span, div)"));
 
   InvalidationLists invalidation_lists;
@@ -1603,7 +1472,7 @@ TEST_F(RuleFeatureSetTest, pseudoWhereTagDescendant) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoWhereAnySibling) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".v ~ :where(.w, .x)"));
 
   InvalidationLists invalidation_lists;
@@ -1613,7 +1482,7 @@ TEST_F(RuleFeatureSetTest, pseudoWhereAnySibling) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoWhereDescendantSibling) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".u .v ~ :where(.w, .x)"));
 
   InvalidationLists invalidation_lists;
@@ -1623,7 +1492,7 @@ TEST_F(RuleFeatureSetTest, pseudoWhereDescendantSibling) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoWhereWithComplexSelectors) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :where(.w+.b, .x>#c)"));
 
   InvalidationLists invalidation_lists;
@@ -1634,7 +1503,7 @@ TEST_F(RuleFeatureSetTest, pseudoWhereWithComplexSelectors) {
 }
 
 TEST_F(RuleFeatureSetTest, pseudoWhereNested) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :where(.w+.b, .e+:where(.c, #d))"));
 
   InvalidationLists invalidation_lists;
@@ -1645,7 +1514,7 @@ TEST_F(RuleFeatureSetTest, pseudoWhereNested) {
 }
 
 TEST_F(RuleFeatureSetTest, invalidatesParts) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a .b::part(partname)"));
 
   {
@@ -1678,8 +1547,7 @@ TEST_F(RuleFeatureSetTest, invalidatesParts) {
 }
 
 TEST_F(RuleFeatureSetTest, invalidatesTerminalHas) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".a .b:has(.c)"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a .b:has(.c)"));
 
   {
     InvalidationLists invalidation_lists;
@@ -1707,8 +1575,7 @@ TEST_F(RuleFeatureSetTest, invalidatesTerminalHas) {
 }
 
 TEST_F(RuleFeatureSetTest, invalidatesNonTerminalHas) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".a .b:has(.c) .d"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a .b:has(.c) .d"));
 
   {
     InvalidationLists invalidation_lists;
@@ -1740,6 +1607,315 @@ TEST_F(RuleFeatureSetTest, invalidatesNonTerminalHas) {
     EXPECT_TRUE(HasSelfInvalidation(invalidation_lists.descendants));
     EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
     EXPECT_FALSE(NeedsHasInvalidationForClass("d"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(1u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasClassInvalidation("d", invalidation_lists.descendants));
+    EXPECT_FALSE(invalidation_lists.descendants[0]->TreeBoundaryCrossing());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+}
+
+TEST_F(RuleFeatureSetTest, invalidatesHasOnShadowHostAtSubjectPosition) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":host:has(.a)"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForClass("a"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(0u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+}
+
+TEST_F(RuleFeatureSetTest, invalidatesHasOnShadowHostAtNonSubjectPosition) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":host:has(.a) .b"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForClass("a"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(1u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasClassInvalidation("b", invalidation_lists.descendants));
+    EXPECT_TRUE(invalidation_lists.descendants[0]->TreeBoundaryCrossing());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+}
+
+TEST_F(RuleFeatureSetTest, invalidatesHasInShadowTree) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":host .a:has(.b) .c"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasClassInvalidation("c", invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_FALSE(NeedsHasInvalidationForClass("a"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "b");
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForClass("b"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(1u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasClassInvalidation("c", invalidation_lists.descendants));
+    EXPECT_FALSE(invalidation_lists.descendants[0]->TreeBoundaryCrossing());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+}
+
+TEST_F(RuleFeatureSetTest, invalidatesMultipleHasAfterHostAtSubjectPosition) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":host:has(.a):has(.b)"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForClass("a"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "b");
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForClass("b"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(0u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+}
+
+TEST_F(RuleFeatureSetTest,
+       invalidatesMultipleHasAfterHostAtNonSubjectPosition) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":host:has(.a):has(.b) .c"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForClass("a"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "b");
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForClass("b"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(1u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasClassInvalidation("c", invalidation_lists.descendants));
+    EXPECT_TRUE(invalidation_lists.descendants[0]->TreeBoundaryCrossing());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+}
+
+TEST_F(RuleFeatureSetTest, InvalidatesHasWithAttributeAtNonSubjectPosition) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(".a:has([b=\"c\"]) .d"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasClassInvalidation("d", invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_FALSE(NeedsHasInvalidationForClass("a"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForAttribute(
+        invalidation_lists,
+        QualifiedName(g_empty_atom, AtomicString("b"), g_empty_atom));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForAttribute("b"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "d");
+    EXPECT_TRUE(HasSelfInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_FALSE(NeedsHasInvalidationForClass("d"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(1u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasClassInvalidation("d", invalidation_lists.descendants));
+    EXPECT_FALSE(invalidation_lists.descendants[0]->TreeBoundaryCrossing());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+
+  {
+    Element* element = MakeGarbageCollected<HTMLDivElement>(GetDocument());
+    EXPECT_FALSE(NeedsHasInvalidationForInsertedOrRemovedElement(*element));
+
+    element->setAttribute(
+        QualifiedName(g_empty_atom, AtomicString("e"), g_empty_atom),
+        AtomicString("f"));
+    EXPECT_TRUE(NeedsHasInvalidationForInsertedOrRemovedElement(*element));
+  }
+}
+
+TEST_F(RuleFeatureSetTest, InvalidatesHasWithIdAttributeAtNonSubjectPosition) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(".a:has([id=\"b\"]) .c"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasClassInvalidation("c", invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_FALSE(NeedsHasInvalidationForClass("a"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForAttribute(
+        invalidation_lists,
+        QualifiedName(g_empty_atom, AtomicString("id"), g_empty_atom));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForAttribute("id"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "c");
+    EXPECT_TRUE(HasSelfInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_FALSE(NeedsHasInvalidationForClass("c"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(1u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasClassInvalidation("c", invalidation_lists.descendants));
+    EXPECT_FALSE(invalidation_lists.descendants[0]->TreeBoundaryCrossing());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+
+  {
+    Element* element = MakeGarbageCollected<HTMLDivElement>(GetDocument());
+    EXPECT_FALSE(NeedsHasInvalidationForInsertedOrRemovedElement(*element));
+
+    element->setAttribute(html_names::kIdAttr, AtomicString("f"));
+    EXPECT_TRUE(NeedsHasInvalidationForInsertedOrRemovedElement(*element));
+  }
+}
+
+TEST_F(RuleFeatureSetTest,
+       InvalidatesHasWithClassAttributeAtNonSubjectPosition) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(".a:has([class=\"b\"]) .c"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasClassInvalidation("c", invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_FALSE(NeedsHasInvalidationForClass("a"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForAttribute(
+        invalidation_lists,
+        QualifiedName(g_empty_atom, AtomicString("class"), g_empty_atom));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_TRUE(NeedsHasInvalidationForAttribute("class"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "c");
+    EXPECT_TRUE(HasSelfInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+    EXPECT_FALSE(NeedsHasInvalidationForClass("c"));
+  }
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHas);
+    EXPECT_EQ(1u, invalidation_lists.descendants.size());
+    EXPECT_TRUE(HasClassInvalidation("c", invalidation_lists.descendants));
+    EXPECT_FALSE(invalidation_lists.descendants[0]->TreeBoundaryCrossing());
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+
+  {
+    Element* element = MakeGarbageCollected<HTMLDivElement>(GetDocument());
+    EXPECT_FALSE(NeedsHasInvalidationForInsertedOrRemovedElement(*element));
+
+    element->setAttribute(html_names::kClassAttr, AtomicString("f"));
+    EXPECT_TRUE(NeedsHasInvalidationForInsertedOrRemovedElement(*element));
+  }
+}
+
+TEST_F(RuleFeatureSetTest, invalidatesCustomPseudo) {
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":hover::-webkit-slider-thumb"));
+
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForPseudoClass(invalidation_lists,
+                                          CSSSelector::kPseudoHover);
+    EXPECT_TRUE(HasCustomPseudoNameInvalidation(
+        "-webkit-slider-thumb", invalidation_lists.descendants));
   }
 }
 
@@ -1917,6 +2093,13 @@ RefTestData ref_equal_test_data[] = {
     {":is([foo], [bar]) .a", "[foo] .a, [bar] .a"},
     {":is([a], [b]) :is([c], [d])", "[a] [c], [a] [d], [b] [c], [b] [d]"},
 
+    {"", "div"},
+    {"", "::before"},
+    {"", ":host"},
+    {"", "*"},
+    {"ol", "ul"},
+    {"::cue(a)", "::cue(b)"},
+    {"div", "span"},
     // clang-format on
 };
 
@@ -1925,28 +2108,21 @@ RefTestData ref_not_equal_test_data[] = {
     // clang-format off
     {"", ".a"},
     {"", "#a"},
-    {"", "div"},
     {"", ":hover"},
-    {"", "::before"},
-    {"", ":host"},
     {"", ":host(.a)"},
     {"", ":host-context(.a)"},
-    {"", "*"},
     {"", ":not(.a)"},
     {".a", ".b"},
     {".a", ".a, .b"},
     {"#a", "#b"},
-    {"ol", "ul"},
     {"[foo]", "[bar]"},
     {":link", ":visited"},
     {".a::before", ".b::after"},
-    {"::cue(a)", "::cue(b)"},
     {".a .b", ".a .c"},
     {".a + .b", ".a + .c"},
     {".a + .b .c", ".a + .b .d"},
     {"div + .a", "div + .b"},
     {".a:nth-child(1)", ".b:nth-child(1)"},
-    {"div", "span"},
     // clang-format on
 };
 
@@ -1969,6 +2145,7 @@ class RuleFeatureSetRefTest : public RuleFeatureSetTest {
   virtual void CollectTo(
       const char*,
       RuleFeatureSet&,
+      CSSNestingType nesting_type = CSSNestingType::kNone,
       StyleRule* parent_rule_for_nesting = nullptr) const = 0;
   virtual void Compare(const RuleFeatureSet&, const RuleFeatureSet&) const = 0;
 };
@@ -1977,8 +2154,9 @@ class RuleFeatureSetSelectorRefTest : public RuleFeatureSetRefTest {
  public:
   void CollectTo(const char* text,
                  RuleFeatureSet& set,
+                 CSSNestingType nesting_type = CSSNestingType::kNone,
                  StyleRule* parent_rule_for_nesting = nullptr) const override {
-    CollectFeaturesTo(text, set, parent_rule_for_nesting);
+    CollectFeaturesTo(text, set, nesting_type, parent_rule_for_nesting);
   }
 };
 
@@ -2030,6 +2208,13 @@ RefTestData ref_scope_equal_test_data[] = {
     {"@scope (.a) { [foo] {} }", ".a [foo], .a[foo] {}"},
     {"@scope (.a) { .a {} }", ".a .a, .a.a {}"},
 
+    // Sibling combinators:
+    {"@scope (.a) { .b + .c {} }", ".b + .c, .a .c, .a {}"},
+    {"@scope (.a, .b) { .c + .d {} }",
+     ".c + .d, :is(.a, .b) .d, :is(.a, .b) {}"},
+    {"@scope (.a) { .b ~ :scope {} }", ".b ~ *, .a *, .a {}"},
+    {"@scope (.a) { .b + :scope {} }", ".b + *, .a *, .a {}"},
+
     // Multiple items in selector lists:
     {"@scope (.a, .b) { div {} }", ":is(.a, .b) div, :is(.a, .b):is(div) {}"},
     {"@scope (.a, :is(.b, .c)) { div {} }",
@@ -2037,9 +2222,9 @@ RefTestData ref_scope_equal_test_data[] = {
 
     // Using "to" keyword:
     {"@scope (.a, .b) to (.c, .d) { div {} }",
-     ":is(.a, .b, .c, .d) div, :is(.a, .b):is(div) {}"},
+     ":is(.a, .b, .c, .d) div, :is(.a, .b):is(.c, .d):is(div) {}"},
 
-    // TODO(crbug.com/1280240): Many of the following tests current expect
+    // TODO(crbug.com/40208848): Many of the following tests currently expect
     // whole-subtree invalidation, because we don't extract any features from
     // :scope. That should be improved.
 
@@ -2050,6 +2235,18 @@ RefTestData ref_scope_equal_test_data[] = {
 
     {"@scope (.a) to (:scope) { .b {} }", ".a .b, .a.b {}"},
     {"@scope (.a) to (:scope) { :scope {} }", ".a *, .a {}"},
+    {"@scope (.a, .b) { @scope (.c, :scope .d) { .e {} } }",
+     ":is(.a, .b):is(.c, .d) .e, :is(.a, .b):is(.c, .d):is(.e) {}"},
+
+    // & - Expectations are identical to the explicit :scope block:
+    {"@scope (.a) { & {} }", ".a *, .a {}"},
+    {"@scope (.a) { .b & {} }", ".a :is(.b *), .b .a {}"},
+    {"@scope (.a, .b) { & {} }", ":is(.a, .b) *, :is(.a, .b) {}"},
+
+    {"@scope (.a) to (&) { .b {} }", ".a .b, .a.b {}"},
+    {"@scope (.a) to (&) { & {} }", ".a *, .a {}"},
+    {"@scope (.a, .b) { @scope (.c, & .d) { .e {} } }",
+     ":is(.a, .b):is(.c, .d) .e, :is(.a, .b):is(.c, .d):is(.e) {}"},
 
     // Nested @scopes
     {"@scope (.a, .b) { @scope (.c, .d) { .e {} } }",
@@ -2059,18 +2256,17 @@ RefTestData ref_scope_equal_test_data[] = {
     {"@scope (.a, .b) { @scope (:scope, .c) { :scope {} } }",
      ":is(.a, .b, .c) *, :is(.a, .b, .c) {}"},
     {"@scope (.a) to (.b) { @scope (.c) to (.d) { .e {} } }",
-     ":is(.a, .b, .c, .d) .e, :is(.a, .c):is(.e) {}"},
+     ":is(.a, .b, .c, .d) .e, :is(.a, .b):is(.c, .d):is(.e) {}"},
 };
 
 class RuleFeatureSetScopeRefTest
     : public RuleFeatureSetRefTest,
-      public testing::WithParamInterface<RefTestData>,
-      private ScopedCSSScopeForTest {
+      public testing::WithParamInterface<RefTestData> {
  public:
-  RuleFeatureSetScopeRefTest() : ScopedCSSScopeForTest(true) {}
 
   void CollectTo(const char* text,
                  RuleFeatureSet& set,
+                 CSSNestingType nesting_type = CSSNestingType::kNone,
                  StyleRule* parent_rule_for_nesting = nullptr) const override {
     Document* document =
         Document::CreateForTest(execution_context_.GetExecutionContext());
@@ -2245,8 +2441,7 @@ TEST_F(RuleFeatureSetTest, CopyOnWrite_SelfInvalidation) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas1) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(".a:has(:is(.b .c))"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".a:has(:is(.b .c))"));
 
   {
     InvalidationLists invalidation_lists;
@@ -2271,7 +2466,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas1) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas2) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(:is(.b > .c))"));
 
   {
@@ -2297,7 +2492,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas2) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas3) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(.b ~ .c))"));
 
   {
@@ -2327,7 +2522,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas3) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas4) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(.b + .c))"));
 
   {
@@ -2357,7 +2552,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas4) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas5) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(.b .c ~ .d))"));
 
   {
@@ -2394,7 +2589,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas5) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas6) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(.b > .c + .d))"));
 
   {
@@ -2431,7 +2626,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas6) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas7) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(:is(.b ~ .c .d))"));
 
   {
@@ -2466,7 +2661,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas7) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas8) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(:is(.b + .c > .d))"));
 
   {
@@ -2501,7 +2696,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas8) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas9) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(:is(:is(.b, .c) .d))"));
 
   {
@@ -2534,7 +2729,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas9) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas10) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(:is(.b, .c) ~ .d))"));
 
   {
@@ -2575,8 +2770,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas10) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas11) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures(":has(:is(.a .b))"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(":has(:is(.a .b))"));
 
   {
     InvalidationLists invalidation_lists;
@@ -2594,7 +2788,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas11) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas12) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(":has(~ :is(.a ~ .b))"));
 
   {
@@ -2615,7 +2809,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas12) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas13) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(.b ~ .c .d ~ .e))"));
 
   {
@@ -2661,7 +2855,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas13) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas14) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(.b ~ .c)) .d"));
 
   {
@@ -2682,7 +2876,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas14) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas15) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(* ~ .b))"));
   {
     InvalidationLists invalidation_lists;
@@ -2703,7 +2897,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas15) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas16) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(* ~ .b)) .c"));
 
   {
@@ -2725,7 +2919,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas16) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas17) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a :has(:is(.b .c)).d"));
 
   {
@@ -2758,7 +2952,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas17) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas18) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(.b ~ :is(.c ~ .d)))"));
 
   {
@@ -2799,7 +2993,7 @@ TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas18) {
 }
 
 TEST_F(RuleFeatureSetTest, isPseudoContainingComplexInsideHas19) {
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
             CollectFeatures(".a:has(~ :is(:is(.b ~ .c) ~ .d))"));
 
   {
@@ -2844,13 +3038,15 @@ TEST_F(RuleFeatureSetTest, NestedSelector) {
   HeapVector<CSSSelector> arena;
   base::span<CSSSelector> selector_vector = CSSParser::ParseSelector(
       StrictCSSParserContext(SecureContextMode::kInsecureContext),
+      CSSNestingType::kNone,
       /*parent_rule_for_nesting=*/nullptr, nullptr, ".a, .b", arena);
   auto* parent_rule = StyleRule::Create(
       selector_vector,
       MakeGarbageCollected<MutableCSSPropertyValueSet>(kHTMLStandardMode));
 
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch,
-            CollectFeatures("& .c", parent_rule));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures("& .c", CSSNestingType::kNesting,
+                            /*parent_rule_for_nesting=*/parent_rule));
 
   for (const char* parent_class : {"a", "b"}) {
     SCOPED_TRACE(parent_class);
@@ -2875,7 +3071,7 @@ TEST_F(RuleFeatureSetTest, BloomFilterForClassSelfInvalidation) {
     CollectFeatures(".dummy");
   }
 
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures(".p"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures(".p"));
 
   {
     InvalidationLists invalidation_lists;
@@ -2898,7 +3094,7 @@ TEST_F(RuleFeatureSetTest, BloomFilterForIdSelfInvalidation) {
     CollectFeatures("#dummy");
   }
 
-  EXPECT_EQ(RuleFeatureSet::kSelectorMayMatch, CollectFeatures("#foo"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch, CollectFeatures("#foo"));
 
   {
     InvalidationLists invalidation_lists;
@@ -2913,6 +3109,85 @@ TEST_F(RuleFeatureSetTest, BloomFilterForIdSelfInvalidation) {
     EXPECT_TRUE(HasNoInvalidation(invalidation_lists.descendants));
     EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
   }
+}
+
+TEST_F(RuleFeatureSetTest, NestingSelectorPointingToScopeInsideHas) {
+  Document* document =
+      Document::CreateForTest(execution_context_.GetExecutionContext());
+  StyleRuleBase* parent_rule_base =
+      css_test_helpers::ParseRule(*document, "@scope (.a) { :scope {} }");
+  ASSERT_TRUE(parent_rule_base);
+
+  const StyleScope* scope = nullptr;
+
+  auto& scope_rule = To<StyleRuleScope>(*parent_rule_base);
+  scope = scope_rule.GetStyleScope().CopyWithParent(scope);
+  const HeapVector<Member<StyleRuleBase>>& scope_child_rules =
+      scope_rule.ChildRules();
+  ASSERT_EQ(1u, scope_child_rules.size());
+  parent_rule_base = scope_child_rules[0].Get();
+
+  auto* parent_rule = DynamicTo<StyleRule>(parent_rule_base);
+  ASSERT_TRUE(parent_rule);
+  CollectFeatures(parent_rule, scope);
+
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":has(&)", CSSNestingType::kNesting,
+                            /*parent_rule_for_nesting=*/parent_rule));
+
+  // TODO(crbug.com/40208848): This test currently expects whole-subtree
+  // invalidation, because we don't extract any features from :scope.
+  // That should be improved.
+  {
+    InvalidationLists invalidation_lists;
+    CollectInvalidationSetsForClass(invalidation_lists, "a");
+    EXPECT_TRUE(HasWholeSubtreeInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasSelfInvalidation(invalidation_lists.descendants));
+    EXPECT_TRUE(HasNoInvalidation(invalidation_lists.siblings));
+  }
+}
+
+TEST_F(RuleFeatureSetTest, NestingSelectorInsideHasPointingToPart) {
+  Document* document =
+      Document::CreateForTest(execution_context_.GetExecutionContext());
+  auto* parent_rule = DynamicTo<StyleRule>(
+      css_test_helpers::ParseRule(*document, "::part(foo) {}"));
+  ASSERT_TRUE(parent_rule);
+
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            CollectFeatures(":has(&)", CSSNestingType::kNesting,
+                            /*parent_rule_for_nesting=*/parent_rule));
+}
+
+TEST_F(RuleFeatureSetTest, PseudoElementInParentPseudoPreMatch) {
+  Document* document =
+      Document::CreateForTest(execution_context_.GetExecutionContext());
+
+  auto collect_nested_features = [&](String outer_rule) {
+    auto* parent_rule_for_nesting = DynamicTo<StyleRule>(
+        css_test_helpers::ParseRule(*document, outer_rule));
+    CHECK(parent_rule_for_nesting);
+    return CollectFeatures("&", CSSNestingType::kNesting,
+                           parent_rule_for_nesting);
+  };
+
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
+            collect_nested_features("::before {}"));
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
+            collect_nested_features("::after {}"));
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
+            collect_nested_features("::placeholder {}"));
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
+            collect_nested_features("::before, ::after {}"));
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
+            collect_nested_features("::before, ::after {}"));
+  EXPECT_EQ(SelectorPreMatch::kNeverMatches,
+            collect_nested_features("::before, ::placeholder {}"));
+
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            collect_nested_features("::before, .a {}"));
+  EXPECT_EQ(SelectorPreMatch::kMayMatch,
+            collect_nested_features(".a, ::before {}"));
 }
 
 }  // namespace blink

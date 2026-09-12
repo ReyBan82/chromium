@@ -16,7 +16,6 @@
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "media/capture/mojom/video_capture_types.mojom.h"
 #include "media/renderers/paint_canvas_video_renderer.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace content {
 
@@ -96,7 +95,8 @@ void DevToolsVideoConsumer::SetMinCapturePeriod(
 
 void DevToolsVideoConsumer::SetMinAndMaxFrameSize(gfx::Size min_frame_size,
                                                   gfx::Size max_frame_size) {
-  DCHECK(IsValidMinAndMaxFrameSize(min_frame_size, max_frame_size));
+  CHECK(IsValidMinAndMaxFrameSize(min_frame_size, max_frame_size),
+        base::NotFatalUntil::M159);
   min_frame_size_ = min_frame_size;
   max_frame_size_ = max_frame_size;
   if (capturer_) {
@@ -154,14 +154,15 @@ void DevToolsVideoConsumer::OnFrameCaptured(
   // the same type, with null check being equivalent to IsValid() check. Given
   // the above, we should never be able to receive a read only shmem region that
   // is not valid - mojo will enforce it for us.
-  DCHECK(shmem_region.IsValid());
+  CHECK(shmem_region.IsValid(), base::NotFatalUntil::M159);
 
   base::ReadOnlySharedMemoryMapping mapping = shmem_region.Map();
   if (!mapping.IsValid()) {
     DLOG(ERROR) << "Shared memory mapping failed.";
     return;
   }
-  if (mapping.size() <
+  base::span<const uint8_t> mapping_memory(mapping);
+  if (mapping_memory.size() <
       media::VideoFrame::AllocationSize(info->pixel_format, info->coded_size)) {
     DLOG(ERROR) << "Shared memory size was less than expected.";
     return;
@@ -178,8 +179,7 @@ void DevToolsVideoConsumer::OnFrameCaptured(
   // portion of the frame that contains content is used.
   scoped_refptr<media::VideoFrame> frame = media::VideoFrame::WrapExternalData(
       info->pixel_format, info->coded_size, content_rect, content_rect.size(),
-      const_cast<uint8_t*>(static_cast<const uint8_t*>(mapping.memory())),
-      mapping.size(), info->timestamp);
+      mapping_memory, info->timestamp);
   if (!frame) {
     DLOG(ERROR) << "Unable to create VideoFrame wrapper around the shmem.";
     return;
@@ -191,8 +191,7 @@ void DevToolsVideoConsumer::OnFrameCaptured(
              callbacks) {},
       std::move(data), std::move(mapping), std::move(callbacks)));
   frame->set_metadata(info->metadata);
-  if (info->color_space.has_value())
-    frame->set_color_space(info->color_space.value());
+  frame->set_color_space(info->color_space);
 
   callback_.Run(std::move(frame));
 }

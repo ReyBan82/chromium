@@ -79,12 +79,6 @@ SystemNotificationBuilder& SystemNotificationBuilder::SetDisplaySource(
   return *this;
 }
 
-SystemNotificationBuilder& SystemNotificationBuilder::SetOriginUrl(
-    const GURL& origin_url) {
-  origin_url_ = origin_url;
-  return *this;
-}
-
 SystemNotificationBuilder& SystemNotificationBuilder::SetNotifierId(
     const message_center::NotifierId& notifier_id) {
   notifier_id_ = notifier_id;
@@ -115,36 +109,43 @@ SystemNotificationBuilder& SystemNotificationBuilder::SetOptionalFields(
   return *this;
 }
 
+const message_center::RichNotificationData&
+SystemNotificationBuilder::GetOptionalFields() {
+  return optional_fields_;
+}
+
 SystemNotificationBuilder& SystemNotificationBuilder::SetWarningLevel(
     message_center::SystemNotificationWarningLevel warning_level) {
   warning_level_ = warning_level;
   return *this;
 }
 
-message_center::Notification SystemNotificationBuilder::Build() const {
+message_center::Notification SystemNotificationBuilder::Build(
+    bool keep_timestamp) {
   DCHECK(!id_.empty());
   const message_center::NotifierId notifier_id = GetNotifierId();
   DCHECK(notifier_id.type == message_center::NotifierType::SYSTEM_COMPONENT);
+  if (!keep_timestamp) {
+    optional_fields_.timestamp = base::Time::Now();
+  }
   return CreateSystemNotification(type_, id_, title_, message_, display_source_,
-                                  origin_url_, notifier_id, optional_fields_,
-                                  delegate_, *small_image_, warning_level_);
+                                  notifier_id, optional_fields_, delegate_,
+                                  *small_image_, warning_level_);
 }
 
 std::unique_ptr<message_center::Notification>
-SystemNotificationBuilder::BuildPtr() const {
-  return std::make_unique<message_center::Notification>(Build());
+SystemNotificationBuilder::BuildPtr(bool keep_timestamp) {
+  return std::make_unique<message_center::Notification>(Build(keep_timestamp));
 }
 
 message_center::NotifierId SystemNotificationBuilder::GetNotifierId() const {
-  // value_or doesn't work here as it eagerly constructs the potential
-  // replacement value and the default `catalog_name_` is set to invalid
-  // resulting in a failed DCHECK. This could be solved with the monadic
-  // operations for optional but they won't be added until C++23.
-  if (notifier_id_.has_value())
-    return notifier_id_.value();
-
-  return message_center::NotifierId(
-      message_center::NotifierType::SYSTEM_COMPONENT, id_, catalog_name_);
+  return notifier_id_
+      .or_else([&] {
+        return std::make_optional(message_center::NotifierId(
+            message_center::NotifierType::SYSTEM_COMPONENT, id_,
+            catalog_name_));
+      })
+      .value();
 }
 
 }  // namespace ash

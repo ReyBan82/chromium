@@ -4,23 +4,24 @@
 #ifndef UI_ACCESSIBILITY_AX_TREE_FUZZER_UTIL_H_
 #define UI_ACCESSIBILITY_AX_TREE_FUZZER_UTIL_H_
 
+#include "base/containers/span.h"
+#include "base/memory/raw_span.h"
 #include "ui/accessibility/ax_tree.h"
 #include "ui/accessibility/ax_tree_data.h"
 #include "ui/accessibility/ax_tree_id.h"
 #include "ui/accessibility/ax_tree_update.h"
-#include "ui/accessibility/test_ax_tree_manager.h"
+#include "ui/accessibility/test_single_ax_tree_manager.h"
 
 // TODO(janewman): Replace usage with ...FuzzedDataProvider...
 class FuzzerData {
  public:
   FuzzerData(const unsigned char* data, size_t size);
   size_t RemainingBytes();
-  unsigned char NextByte();
-  const unsigned char* NextBytes(size_t amount);
+  uint8_t NextByte();
+  base::span<const uint8_t> NextBytes(size_t amount);
 
  private:
-  const unsigned char* data_;
-  const size_t data_size_;
+  base::raw_span<const uint8_t> data_;
   size_t data_index_;
 };
 
@@ -82,9 +83,8 @@ class AXTreeFuzzerGenerator {
                                      ax::mojom::Role parent_role);
   bool CanHaveChildren(ax::mojom::Role role);
   bool CanHaveText(ax::mojom::Role role);
-  std::u16string GenerateInterestingText(const unsigned char* data,
-                                         size_t size);
+  std::u16string GenerateInterestingText(base::span<const uint8_t> data);
   ui::AXNodeID max_assigned_node_id_;
-  ui::TestAXTreeManager tree_manager_;
+  ui::TestSingleAXTreeManager tree_manager_;
 };
-#endif  //  UI_ACCESSIBILITY_AX_TREE_FUZZER_UTIL_H_
+#endif  // UI_ACCESSIBILITY_AX_TREE_FUZZER_UTIL_H_

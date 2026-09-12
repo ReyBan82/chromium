@@ -4,34 +4,43 @@
 
 package org.chromium.chrome.browser.browser_controls;
 
+import org.chromium.build.annotations.NullMarked;
 import org.chromium.ui.util.TokenHolder;
 
-/**
- * Allows for manipulating visibility of the browser controls, as well as retrieving state.
- */
+/** Allows for manipulating visibility of the browser controls, as well as retrieving state. */
+@NullMarked
 public interface BrowserControlsVisibilityManager extends BrowserControlsStateProvider {
     /**
      * @return The visibility delegate that allows browser UI to control the browser control
-     *         visibility.
+     *     visibility.
      */
     BrowserStateBrowserControlsVisibilityDelegate getBrowserVisibilityDelegate();
 
     /**
      * Shows the Android browser controls view.
+     *
      * @param animate Whether a slide-in animation should be run.
      */
     void showAndroidControls(boolean animate);
 
     /**
-     * Attempts to restore the controls to the position that they should be at corresponding
-     * to any set constraints, if they've been forced to a different position.
-     * Only actionable if {@link #offsetOverridden()} is true.
+     * Hides the Android browser controls view.
+     *
+     * @param animate Whether a slide-out animation should be run.
+     */
+    void hideAndroidControls(boolean animate);
+
+    /**
+     * Attempts to restore the controls to the position that they should be at corresponding to any
+     * set constraints, if they've been forced to a different position. Only actionable if {@link
+     * #offsetOverridden()} is true.
      */
     void restoreControlsPositions();
 
     /**
      * Indicates whether the browser controls offsets are currently overridden by a Java-side
      * animation started by #showAndroidControls(boolean).
+     *
      * @return {@code true} if browser controls offsets are overridden by animation.
      */
     boolean offsetOverridden();
@@ -41,15 +50,18 @@ public interface BrowserControlsVisibilityManager extends BrowserControlsStatePr
      * acquired tokens the browser controls Android view will always be hidden, otherwise they will
      * show/hide based on position.
      *
-     * Note: this only affects the Android controls.
+     * <p>Note: this only affects the Android controls.
      *
      * @param oldToken the oldToken to clear. Pass {@link TokenHolder#INVALID_TOKEN} if no token is
-     *         being held.
+     *     being held.
      */
     int hideAndroidControlsAndClearOldToken(int oldToken);
 
-    /**
-     * Release a hiding token returned from {@link #hideAndroidControlsAndClearOldToken(int)}.
-     */
+    /** Release a hiding token returned from {@link #hideAndroidControlsAndClearOldToken(int)}. */
     void releaseAndroidControlsHidingToken(int token);
+
+    /** Returns whether any hiding tokens are currently held. */
+    default boolean hasHidingTokens() {
+        return false;
+    }
 }

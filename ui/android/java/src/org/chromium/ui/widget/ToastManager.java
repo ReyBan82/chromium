@@ -6,14 +6,17 @@ package org.chromium.ui.widget;
 
 import android.os.Build;
 import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 
 import androidx.annotation.RequiresApi;
 import androidx.annotation.VisibleForTesting;
 
-import org.chromium.base.annotations.JNINamespace;
-import org.chromium.base.annotations.NativeMethods;
-import org.chromium.base.library_loader.LibraryLoader;
+import org.jni_zero.JNINamespace;
+
+import org.chromium.base.ResettersForTesting;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 import java.util.Iterator;
 import java.util.PriorityQueue;
@@ -29,58 +32,59 @@ import java.util.PriorityQueue;
  * </ul>
  */
 @JNINamespace("ui")
+@NullMarked
 public class ToastManager {
     private static final int DURATION_SHORT_MS = 2000;
     private static final int DURATION_LONG_MS = 3500;
-
-    private static Boolean sIsEnabled;
-    private static ToastManager sInstance;
+    private static final long DURATION_BETWEEN_TOASTS_MS = 500;
+    private static @Nullable ToastManager sInstance;
 
     // A queue for toasts waiting to be shown.
     private final PriorityQueue<Toast> mToastQueue =
             new PriorityQueue<>((toast1, toast2) -> toast1.getPriority() - toast2.getPriority());
 
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
+
     // Handles toast events per SDK version.
     private interface ToastEvent {
         void onShow(Toast toast);
+
         void onCancel();
     }
 
     private final ToastEvent mToastEvent;
 
     // Toast currently showing. {@code null} if none is showing.
-    private Toast mToast;
-
-    static boolean isEnabled() {
-        if (Boolean.FALSE.equals(sIsEnabled) || !LibraryLoader.getInstance().isInitialized()) {
-            return false;
-        }
-        if (sIsEnabled == null) {
-            sIsEnabled = ToastManagerJni.get().isEnabled();
-        }
-        return sIsEnabled;
-    }
+    private @Nullable Toast mToast;
 
     static ToastManager getInstance() {
-        assert sIsEnabled : "ToastManager should be enabled first.";
         if (sInstance == null) sInstance = new ToastManager();
         return sInstance;
     }
 
+    /** Override the toast manager for use in testing. */
+    public static void setInstanceForTesting(ToastManager manager) {
+        ToastManager previousManager = sInstance;
+        sInstance = manager;
+        ResettersForTesting.register(() -> sInstance = previousManager);
+    }
+
     private ToastManager() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            mToastEvent = new ToastEventPreR(this::showNextToast);
+            mToastEvent = new ToastEventPreR(this::toastHidden);
         } else {
-            mToastEvent = new ToastEventR(this::showNextToast);
+            mToastEvent = new ToastEventR(this::toastHidden);
         }
     }
 
     /**
      * Request to show a toast.
+     *
      * @param toast {@link Toast} object to show.
      */
     public void requestShow(Toast toast) {
         if (toast == null || isDuplicatedToast(toast)) return;
+        ResettersForTesting.register(this::resetInternalForTesting);
 
         mToastQueue.add(toast);
 
@@ -108,14 +112,12 @@ public class ToastManager {
         }
     }
 
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    Toast getCurrentToast() {
+    @VisibleForTesting
+    @Nullable Toast getCurrentToast() {
         return mToast;
     }
 
-    /**
-     * Check if we already have the same Toast object showing on the screen or in the queue.
-     */
+    /** Check if we already have the same Toast object showing on the screen or in the queue. */
     private boolean isDuplicatedToast(Toast toast) {
         assert toast != null;
         Toast ct = getCurrentToast();
@@ -123,7 +125,6 @@ public class ToastManager {
             return true;
         }
 
-        CharSequence text = toast.getText();
         Iterator it = mToastQueue.iterator();
         while (it.hasNext()) {
             Toast t = (Toast) it.next();
@@ -132,6 +133,10 @@ public class ToastManager {
             }
         }
         return false;
+    }
+
+    private void toastHidden() {
+        mHandler.postDelayed(() -> showNextToast(), DURATION_BETWEEN_TOASTS_MS);
     }
 
     private void showNextToast() {
@@ -149,7 +154,7 @@ public class ToastManager {
         mToastEvent.onCancel();
     }
 
-    private class ToastEventPreR implements ToastEvent {
+    private static class ToastEventPreR implements ToastEvent {
         private final Handler mHandler = new Handler();
         private final Runnable mPostToastRunnable;
 
@@ -159,8 +164,10 @@ public class ToastManager {
 
         @Override
         public void onShow(Toast toast) {
-            int durationMs = (mToast.getDuration() == Toast.LENGTH_SHORT) ? DURATION_SHORT_MS
-                                                                          : DURATION_LONG_MS;
+            int durationMs =
+                    (toast.getDuration() == Toast.LENGTH_SHORT)
+                            ? DURATION_SHORT_MS
+                            : DURATION_LONG_MS;
             mHandler.postDelayed(mPostToastRunnable, durationMs);
         }
 
@@ -172,16 +179,17 @@ public class ToastManager {
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
-    private class ToastEventR implements ToastEvent {
+    private static class ToastEventR implements ToastEvent {
         private final android.widget.Toast.Callback mToastCallback;
 
         ToastEventR(Runnable finishRunnable) {
-            mToastCallback = new android.widget.Toast.Callback() {
-                @Override
-                public void onToastHidden() {
-                    finishRunnable.run();
-                }
-            };
+            mToastCallback =
+                    new android.widget.Toast.Callback() {
+                        @Override
+                        public void onToastHidden() {
+                            finishRunnable.run();
+                        }
+                    };
         }
 
         @Override
@@ -195,25 +203,21 @@ public class ToastManager {
         }
     }
 
+    /**
+     * Resets ToastManager state to initial state. Cancels the current toast if present,
+     * and clears the queue. This prevernts a test running a toast from interfering another one.
+     */
     public static void resetForTesting() {
-        if (isEnabled()) getInstance().resetInternalForTesting(); // IN-TEST
+        getInstance().resetInternalForTesting(); // IN-TEST
     }
 
     private void resetInternalForTesting() {
         mToastQueue.clear();
-        mToast = null;
+        if (mToast != null) cancel(mToast);
+        mHandler.removeCallbacksAndMessages(null);
     }
 
     boolean isShowingForTesting() {
         return mToast != null;
-    }
-
-    public static void setEnabledForTesting(Boolean enabled) {
-        sIsEnabled = enabled;
-    }
-
-    @NativeMethods
-    public interface Natives {
-        boolean isEnabled();
     }
 }

@@ -9,51 +9,38 @@ import static org.junit.Assert.assertNull;
 import static org.mockito.Mockito.when;
 
 import android.content.Context;
-import android.graphics.Bitmap;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.util.Size;
 
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.robolectric.annotation.Config;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.content.browser.RenderCoordinatesImpl;
 import org.chromium.content.browser.webcontents.WebContentsImpl;
+import org.chromium.paint_preview.mojom.ClipCoordOverride;
 
 /** Tests for the ScreenshotBoundsManager */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class ScreenshotBoundsManagerTest {
-    @Mock
-    private Context mContext;
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock private Context mContext;
 
-    @Mock
-    private Tab mTab;
+    @Mock private Tab mTab;
 
-    @Mock
-    private RenderCoordinatesImpl mRenderCoordinates;
+    @Mock private RenderCoordinatesImpl mRenderCoordinates;
 
-    @Mock
-    private WebContentsImpl mWebContents;
-
-    @Mock
-    private LongScreenshotsCompositor mCompositor;
-
-    @Mock
-    private LongScreenshotsTabService mTabService;
-
-    private Bitmap mTestBitmap = Bitmap.createBitmap(512, 1024, Bitmap.Config.ARGB_8888);
+    @Mock private WebContentsImpl mWebContents;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
-
         when(mTab.getWebContents()).thenReturn(mWebContents);
         when(mWebContents.getRenderCoordinates()).thenReturn(mRenderCoordinates);
         when(mRenderCoordinates.getPageScaleFactorInt()).thenReturn(1);
@@ -73,14 +60,18 @@ public class ScreenshotBoundsManagerTest {
     public void testCaptureBounds() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
     }
 
     @Test
     public void testCalculateClipBoundsBelowPastCapture() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 0));
@@ -93,7 +84,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateClipBoundsBelow() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 0));
@@ -106,7 +101,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateClipBoundsWithCutOff() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 0));
@@ -119,7 +118,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateClipBoundsOutsideRange() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 0));
@@ -132,7 +135,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateClipBoundsAboveHigherThanCapture() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 0));
@@ -145,7 +152,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateClipBoundsAbove() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 0));
@@ -158,7 +169,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateClipBoundsAboveCutoff() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 0));
@@ -171,7 +186,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateFullClipBoundsAtTop() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 0));
@@ -184,7 +203,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateFullClipBoundsScrolled() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 500));
@@ -197,7 +220,11 @@ public class ScreenshotBoundsManagerTest {
     public void testCalculateFullClipBoundsScrolledToBottom() {
         ScreenshotBoundsManager boundsManager =
                 ScreenshotBoundsManager.createForTests(mContext, mTab, 100);
-        compareRects(-1, 999, boundsManager.getCaptureBounds());
+        compareRects(0, 999, boundsManager.getCaptureBounds());
+        assertEquals(ClipCoordOverride.NONE, boundsManager.getClipXCoordinateOverride());
+        assertEquals(
+                ClipCoordOverride.CENTER_ON_SCROLL_OFFSET,
+                boundsManager.getClipYCoordinateOverride());
 
         boundsManager.setCompositedSize(new Size(500, 1200));
         boundsManager.setCompositedScrollOffset(new Point(0, 1100));

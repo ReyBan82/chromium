@@ -10,19 +10,16 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
-import org.junit.rules.TestRule;
 import org.junit.runner.RunWith;
 import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.mockito.junit.MockitoJUnit;
+import org.mockito.junit.MockitoRule;
 import org.robolectric.RuntimeEnvironment;
-import org.robolectric.annotation.Config;
 
 import org.chromium.base.test.BaseRobolectricTestRunner;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.profiles.Profile;
-import org.chromium.chrome.test.util.browser.Features;
 import org.chromium.chrome.test.util.browser.LocationSettingsTestUtil;
-import org.chromium.components.content_settings.ContentSettingValues;
 import org.chromium.components.content_settings.ContentSettingsType;
 import org.chromium.components.page_info.PageInfoPermissionsController.PermissionObject;
 import org.chromium.components.page_info.PermissionParamsListBuilder;
@@ -32,25 +29,19 @@ import org.chromium.ui.permissions.PermissionCallback;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Unit tests for PermissionParamsListBuilder.
- */
+/** Unit tests for PermissionParamsListBuilder. */
 @RunWith(BaseRobolectricTestRunner.class)
-@Config(manifest = Config.NONE)
 public class PermissionParamsListBuilderUnitTest {
+    @Rule public final MockitoRule mMockitoRule = MockitoJUnit.rule();
     private PermissionParamsListBuilder mPermissionParamsListBuilder;
 
-    @Rule
-    public TestRule mProcessor = new Features.JUnitProcessor();
-
-    @Mock
-    Profile mProfileMock;
+    @Mock Profile mProfileMock;
 
     @Before
     public void setUp() {
-        MockitoAnnotations.initMocks(this);
         FakePermissionDelegate.clearBlockedPermissions();
         AndroidPermissionDelegate permissionDelegate = new FakePermissionDelegate();
+        RuntimeEnvironment.application.setTheme(R.style.Theme_BrowserUI_DayNight);
         mPermissionParamsListBuilder =
                 new PermissionParamsListBuilder(RuntimeEnvironment.application, permissionDelegate);
     }
@@ -64,7 +55,7 @@ public class PermissionParamsListBuilderUnitTest {
     @Test
     public void addSingleEntryAndBuild() {
         mPermissionParamsListBuilder.addPermissionEntry(
-                "Foo", "foo", ContentSettingsType.COOKIES, ContentSettingValues.ALLOW);
+                "Foo", "foo", ContentSettingsType.COOKIES, true, false);
 
         List<PermissionObject> permissions = mPermissionParamsListBuilder.build();
         assertEquals(1, permissions.size());
@@ -76,7 +67,7 @@ public class PermissionParamsListBuilderUnitTest {
     public void addLocationEntryAndBuildWhenSystemLocationDisabled() {
         LocationSettingsTestUtil.setSystemLocationSettingEnabled(false);
         mPermissionParamsListBuilder.addPermissionEntry(
-                "Test", "test", ContentSettingsType.GEOLOCATION, ContentSettingValues.ALLOW);
+                "Test", "test", ContentSettingsType.GEOLOCATION_WITH_OPTIONS, true, false);
 
         List<PermissionObject> permissions = mPermissionParamsListBuilder.build();
         assertEquals(1, permissions.size());
@@ -89,7 +80,7 @@ public class PermissionParamsListBuilderUnitTest {
     public void arNotificationWhenCameraBlocked() {
         FakePermissionDelegate.blockPermission(android.Manifest.permission.CAMERA);
         mPermissionParamsListBuilder.addPermissionEntry(
-                "Test", "test", ContentSettingsType.AR, ContentSettingValues.ALLOW);
+                "Test", "test", ContentSettingsType.AR, true, false);
 
         List<PermissionObject> permissions = mPermissionParamsListBuilder.build();
         assertEquals(1, permissions.size());
@@ -99,7 +90,7 @@ public class PermissionParamsListBuilderUnitTest {
     }
 
     private static class FakePermissionDelegate implements AndroidPermissionDelegate {
-        private static List<String> sBlockedPermissions = new ArrayList<String>();
+        private static final List<String> sBlockedPermissions = new ArrayList<>();
 
         private static void blockPermission(String permission) {
             sBlockedPermissions.add(permission);

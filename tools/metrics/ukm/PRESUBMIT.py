@@ -1,4 +1,4 @@
-# Copyright 2017 The Chromium Authors
+# Copyright 2024 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,45 +8,26 @@ See http://dev.chromium.org/developers/how-tos/depottools/presubmit-scripts
 for more details on the presubmit API built into gcl.
 """
 
-USE_PYTHON3 = True
+import sys
+
+# PRESUBMIT infrastructure doesn't guarantee that the cwd() will be on
+# path requiring manual path manipulation to call setup_modules.
+# TODO(crbug.com/488351821): Consider using subprocesses to run actual
+#                            test as recommended by presubmit docs:
+# https://www.chromium.org/developers/how-tos/depottools/presubmit-scripts/
+sys.path.append('.')
+import setup_modules  # pylint: disable=unused-import
+
+sys.path.remove('.')
+
+import chromium_src.tools.metrics.common.presubmit_util as presubmit_util
 
 UKM_XML = 'ukm.xml'
 
 
-def CheckChange(input_api, output_api):
-  """Checks that ukm.xml is pretty-printed and well-formatted."""
-  for f in input_api.AffectedTextFiles():
-    p = f.AbsoluteLocalPath()
-    if (input_api.basename(p) == UKM_XML
-        and input_api.os_path.dirname(p) == input_api.PresubmitLocalPath()):
-      cwd = input_api.os_path.dirname(p)
-
-      exit_code = input_api.subprocess.call(
-          [input_api.python3_executable, 'pretty_print.py', '--presubmit'],
-          cwd=cwd)
-      if exit_code != 0:
-        return [
-            output_api.PresubmitError(
-                '%s is not prettified; run git cl format to fix.' % UKM_XML),
-        ]
-
-      exit_code = input_api.subprocess.call(
-          [input_api.python3_executable, 'validate_format.py', '--presubmit'],
-          cwd=cwd)
-      if exit_code != 0:
-        return [
-            output_api.PresubmitError(
-                '%s does not pass format validation; run %s/validate_format.py '
-                'and fix the reported error(s) or warning(s).' %
-                (UKM_XML, input_api.PresubmitLocalPath())),
-        ]
-
-  return []
-
-
 def CheckChangeOnUpload(input_api, output_api):
-  return CheckChange(input_api, output_api)
+  return presubmit_util.CheckChange(UKM_XML, input_api, output_api)
 
 
 def CheckChangeOnCommit(input_api, output_api):
-  return CheckChange(input_api, output_api)
+  return presubmit_util.CheckChange(UKM_XML, input_api, output_api)

@@ -8,14 +8,17 @@
 #include <memory>
 #include <string>
 
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "chrome/browser/ash/login/saml/password_sync_token_fetcher.h"
 #include "chrome/browser/profiles/profile.h"
-#include "components/account_id/account_id.h"
+#include "chromeos/ash/components/osauth/impl/auth_factor_configuration_helper.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "net/base/backoff_entry.h"
 
+class PrefService;
 class Profile;
 
 namespace user_manager {
@@ -34,7 +37,8 @@ class PasswordSyncTokenVerifier : public KeyedService,
   // returned invalid data.
   static const net::BackoffEntry::Policy kFetchTokenRetryBackoffPolicy;
 
-  explicit PasswordSyncTokenVerifier(Profile* primary_profile);
+  // `local_state` must be non-null and must outlive `this`.
+  PasswordSyncTokenVerifier(PrefService* local_state, Profile* primary_profile);
   ~PasswordSyncTokenVerifier() override;
 
   PasswordSyncTokenVerifier(const PasswordSyncTokenVerifier&) = delete;
@@ -64,11 +68,19 @@ class PasswordSyncTokenVerifier : public KeyedService,
   void RecheckAfter(base::TimeDelta delay);
   // Init sync token.
   void CreateTokenAsync();
+  // Perform the actual token check.
+  void PerformTokenCheck();
+  // Perform the actual token fetch.
+  void PerformFetchToken();
 
-  Profile* const primary_profile_;
-  const user_manager::User* const primary_user_;
+  const raw_ref<PrefService> local_state_;
+
+  const raw_ptr<Profile> primary_profile_;
+  const raw_ptr<const user_manager::User> primary_user_;
   std::unique_ptr<PasswordSyncTokenFetcher> password_sync_token_fetcher_;
   net::BackoffEntry retry_backoff_;
+
+  AuthFactorConfigurationHelper auth_factor_configuration_helper_;
 
   base::WeakPtrFactory<PasswordSyncTokenVerifier> weak_ptr_factory_{this};
 

@@ -24,8 +24,6 @@ const char* DemuxerStream::GetTypeName(Type type) {
       return "audio";
     case DemuxerStream::VIDEO:
       return "video";
-    case DemuxerStream::TEXT:
-      return "text";
     case DemuxerStream::UNKNOWN:
       return "unknown";
   }
@@ -51,6 +49,10 @@ DemuxerStream::~DemuxerStream() = default;
 // liveness by default.
 StreamLiveness DemuxerStream::liveness() const {
   return StreamLiveness::kUnknown;
+}
+
+bool DemuxerStream::ManagesTrackSwitchesInternally() const {
+  return false;
 }
 
 // Most DemuxerStream implementations don't need to convert bit stream.

@@ -4,6 +4,7 @@
 
 #include "components/download/content/internal/download_driver_impl.h"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -11,6 +12,7 @@
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
@@ -24,7 +26,6 @@
 #include "net/http/http_byte_range.h"
 #include "net/http/http_response_headers.h"
 #include "net/http/http_status_code.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace download {
 
@@ -46,7 +47,6 @@ DriverEntry::State ToDriverEntryState(
       return DriverEntry::State::UNKNOWN;
     default:
       NOTREACHED();
-      return DriverEntry::State::UNKNOWN;
   }
 }
 
@@ -109,8 +109,9 @@ DriverEntry DownloadDriverImpl::CreateDriverEntry(
 
   if (item->GetState() == DownloadItem::DownloadState::COMPLETE) {
     std::string hash = item->GetHash();
-    if (!hash.empty())
-      entry.hash256 = base::HexEncode(hash.data(), hash.size());
+    if (!hash.empty()) {
+      entry.hash256 = base::HexEncode(hash);
+    }
   }
 
   return entry;
@@ -119,8 +120,7 @@ DriverEntry DownloadDriverImpl::CreateDriverEntry(
 DownloadDriverImpl::DownloadDriverImpl(
     SimpleDownloadManagerCoordinator* download_manager_coordinator)
     : client_(nullptr),
-      download_manager_coordinator_(download_manager_coordinator),
-      is_ready_(false) {
+      download_manager_coordinator_(download_manager_coordinator) {
   DCHECK(download_manager_coordinator_);
   DETACH_FROM_SEQUENCE(sequence_checker_);
 }
@@ -144,6 +144,21 @@ void DownloadDriverImpl::Initialize(DownloadDriver::Client* client) {
   }
 
   download_manager_coordinator_->GetNotifier()->AddObserver(this);
+
+  if (base::FeatureList::IsEnabled(
+          download::features::kDeferredDownloadHistoryLoading)) {
+    download_manager_coordinator_->WaitForActiveDownloadsInitialization(
+        base::BindOnce(&DownloadDriverImpl::NotifyDriverReady,
+                       weak_ptr_factory_.GetWeakPtr()));
+  }
+}
+
+void DownloadDriverImpl::NotifyDriverReady() {
+  if (!client_ || is_ready_ || !download_manager_coordinator_) {
+    return;
+  }
+  is_ready_ = true;
+  client_->OnDriverReady(true);
 }
 
 void DownloadDriverImpl::HardRecover() {
@@ -154,6 +169,10 @@ void DownloadDriverImpl::HardRecover() {
 }
 
 bool DownloadDriverImpl::IsReady() const {
+  if (base::FeatureList::IsEnabled(
+          download::features::kDeferredDownloadHistoryLoading)) {
+    return client_ && download_manager_coordinator_ && is_ready_;
+  }
   return client_ && download_manager_coordinator_ &&
          download_manager_coordinator_->initialized();
 }
@@ -185,10 +204,9 @@ void DownloadDriverImpl::Start(
     download_url_params->add_request_header(it.name(), it.value());
   }
 
-  if (base::FeatureList::IsEnabled(features::kDownloadRange) &&
-      request_params.request_headers.HasHeader(
+  if (request_params.request_headers.HasHeader(
           net::HttpRequestHeaders::kRange)) {
-    absl::optional<net::HttpByteRange> byte_range =
+    std::optional<net::HttpByteRange> byte_range =
         ParseRangeHeader(request_params.request_headers);
     if (byte_range.has_value()) {
       download_url_params->set_use_if_range(false);
@@ -202,9 +220,7 @@ void DownloadDriverImpl::Start(
       }
     } else {
       // The request headers are validated in ControllerImpl::StartDownload.
-      LOG(ERROR) << "Failed to parse Range request header.";
-      NOTREACHED();
-      return;
+      NOTREACHED() << "Failed to parse Range request header.";
     }
   }
 
@@ -231,6 +247,13 @@ void DownloadDriverImpl::Start(
   }
   download_url_params->set_update_first_party_url_on_redirect(
       request_params.update_first_party_url_on_redirect);
+  if (request_params.initiator) {
+    download_url_params->set_initiator(request_params.initiator.value());
+  }
+  if (request_params.url_loader_factory) {
+    download_url_params->set_url_loader_factory(
+        request_params.url_loader_factory->Clone());
+  }
 
   download_manager_coordinator_->DownloadUrl(std::move(download_url_params));
 }
@@ -268,21 +291,27 @@ void DownloadDriverImpl::Pause(const std::string& guid) {
     item->Pause();
 }
 
-void DownloadDriverImpl::Resume(const std::string& guid) {
+void DownloadDriverImpl::ResumeWithFactory(
+    const std::string& guid,
+    scoped_refptr<network::SharedURLLoaderFactory> factory) {
   if (!download_manager_coordinator_)
     return;
   DownloadItem* item = download_manager_coordinator_->GetDownloadByGuid(guid);
-  if (item)
+  if (item) {
+    if (factory) {
+      item->SetURLLoaderFactory(std::move(factory));
+    }
     item->Resume(true);
+  }
 }
 
-absl::optional<DriverEntry> DownloadDriverImpl::Find(const std::string& guid) {
+std::optional<DriverEntry> DownloadDriverImpl::Find(const std::string& guid) {
   if (!download_manager_coordinator_)
-    return absl::nullopt;
+    return std::nullopt;
   DownloadItem* item = download_manager_coordinator_->GetDownloadByGuid(guid);
   if (item)
     return CreateDriverEntry(item);
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 std::set<std::string> DownloadDriverImpl::GetActiveDownloads() {
@@ -290,10 +319,10 @@ std::set<std::string> DownloadDriverImpl::GetActiveDownloads() {
   if (!download_manager_coordinator_)
     return guids;
 
-  std::vector<DownloadItem*> items;
+  std::vector<raw_ptr<DownloadItem, VectorExperimental>> items;
   download_manager_coordinator_->GetAllDownloads(&items);
 
-  for (auto* item : items) {
+  for (download::DownloadItem* item : items) {
     DriverEntry::State state = ToDriverEntryState(item->GetState());
     if (state == DriverEntry::State::IN_PROGRESS)
       guids.insert(item->GetGuid());
@@ -319,13 +348,31 @@ void DownloadDriverImpl::OnDownloadUpdated(
   download::DownloadInterruptReason reason = item->GetLastReason();
   DriverEntry entry = CreateDriverEntry(item);
 
-  if (state == DownloadState::COMPLETE) {
+  base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+      FROM_HERE,
+      base::BindOnce(&DownloadDriverImpl::NotifyClientOfUpdatedState,
+                     weak_ptr_factory_.GetWeakPtr(), entry, state, reason));
+}
+
+void DownloadDriverImpl::NotifyClientOfUpdatedState(
+    const DriverEntry& entry,
+    download::DownloadItem::DownloadState state,
+    download::DownloadInterruptReason reason) {
+  if (!client_) {
+    return;
+  }
+  if (guid_to_remove_.find(entry.guid) != guid_to_remove_.end()) {
+    return;
+  }
+
+  if (state == download::DownloadItem::DownloadState::COMPLETE) {
     client_->OnDownloadSucceeded(entry);
-  } else if (state == DownloadState::IN_PROGRESS) {
+  } else if (state == download::DownloadItem::DownloadState::IN_PROGRESS) {
     client_->OnDownloadUpdated(entry);
   } else if (reason != DOWNLOAD_INTERRUPT_REASON_NONE) {
-    if (client_->IsTrackingDownload(item->GetGuid()))
+    if (client_->IsTrackingDownload(entry.guid)) {
       LogDownloadInterruptReason(reason);
+    }
     client_->OnDownloadFailed(entry, FailureTypeFromInterruptReason(reason));
   }
 }
@@ -352,12 +399,39 @@ void DownloadDriverImpl::OnDownloadCreated(
 
   // Listens to all downloads.
   DCHECK(client_);
+
+  if (base::FeatureList::IsEnabled(
+          download::features::kDeferredDownloadHistoryLoading)) {
+    // Ignore restored historical downloads loaded from disk after active
+    // download initialization.
+    if (item->GetState() != download::DownloadItem::IN_PROGRESS &&
+        !coordinator->has_all_history_downloads()) {
+      return;
+    }
+  }
+
   DriverEntry entry = CreateDriverEntry(item);
 
   // Only notifies the client about new downloads. Existing download data will
   // be loaded before the driver is ready.
-  if (IsReady())
+  if (IsReady()) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&DownloadDriverImpl::NotifyClientOfCreatedState,
+                       weak_ptr_factory_.GetWeakPtr(), entry));
+  }
+}
+
+void DownloadDriverImpl::NotifyClientOfCreatedState(const DriverEntry& entry) {
+  if (!client_) {
+    return;
+  }
+  if (guid_to_remove_.find(entry.guid) != guid_to_remove_.end()) {
+    return;
+  }
+  if (IsReady()) {
     client_->OnDownloadCreated(entry);
+  }
 }
 
 void DownloadDriverImpl::OnUploadProgress(const std::string& guid,
@@ -372,6 +446,12 @@ void DownloadDriverImpl::OnDownloadsInitialized(
   DCHECK_EQ(download_manager_coordinator_, coordinator);
   DCHECK(download_manager_coordinator_);
 
+  if (base::FeatureList::IsEnabled(
+          download::features::kDeferredDownloadHistoryLoading)) {
+    NotifyDriverReady();
+    return;
+  }
+
   if (!client_)
     return;
 
@@ -385,7 +465,11 @@ void DownloadDriverImpl::OnDownloadsInitialized(
 void DownloadDriverImpl::OnManagerGoingDown(
     SimpleDownloadManagerCoordinator* coordinator) {
   DCHECK_EQ(download_manager_coordinator_, coordinator);
+  if (!is_ready_ && client_) {
+    client_->OnDriverReady(false);
+  }
   download_manager_coordinator_ = nullptr;
+  weak_ptr_factory_.InvalidateWeakPtrs();
 }
 
 void DownloadDriverImpl::OnHardRecoverComplete(bool success) {

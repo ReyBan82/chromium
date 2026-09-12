@@ -47,8 +47,8 @@
 #include "third_party/blink/renderer/platform/loader/fetch/text_resource_decoder_options.h"
 #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
 #include "third_party/blink/renderer/platform/text/segmented_string.h"
-#include "third_party/blink/renderer/platform/wtf/date_math.h"
 #include "third_party/blink/renderer/platform/wtf/text/character_names.h"
+#include "third_party/blink/renderer/platform/wtf/text/format.h"
 #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
 
 namespace blink {
@@ -94,7 +94,7 @@ VTTParser::VTTParser(VTTParserClient* client, Document& document)
       state_(kInitial),
       decoder_(std::make_unique<TextResourceDecoder>(TextResourceDecoderOptions(
           TextResourceDecoderOptions::kPlainTextContent,
-          UTF8Encoding()))),
+          Utf8Encoding()))),
       current_start_time_(0),
       current_end_time_(0),
       current_region_(nullptr),
@@ -114,8 +114,8 @@ void VTTParser::GetNewStyleSheets(
   output_sheets.swap(style_sheets_);
 }
 
-void VTTParser::ParseBytes(const char* data, size_t length) {
-  String text_data = decoder_->Decode(data, length);
+void VTTParser::ParseBytes(base::span<const char> data) {
+  String text_data = decoder_->Decode(data);
   line_reader_.Append(text_data);
   Parse();
 }
@@ -219,15 +219,16 @@ bool VTTParser::HasRequiredFileIdentifier(const String& line) {
   // do not exactly equal "WEBVTT", or the seventh character is not a U+0020
   // SPACE character, a U+0009 CHARACTER TABULATION (tab) character, or a
   // U+000A LINE FEED (LF) character, then abort these steps.
-  if (!line.StartsWith("WEBVTT"))
+  if (!line.starts_with("WEBVTT")) {
     return false;
+  }
   if (line.length() > kFileIdentifierLength) {
     UChar maybe_separator = line[kFileIdentifierLength];
     // The line reader handles the line break characters, so we don't need
     // to check for LF here.
-    if (maybe_separator != kSpaceCharacter &&
-        maybe_separator != kTabulationCharacter)
+    if (maybe_separator != uchar::kSpace && maybe_separator != uchar::kTab) {
       return false;
+    }
   }
   return true;
 }
@@ -242,11 +243,10 @@ VTTParser::ParseState VTTParser::CollectRegionSettings(const String& line) {
 }
 
 VTTParser::ParseState VTTParser::CollectStyleSheet(const String& line) {
-  if (line.empty() || line.Contains("-->")) {
+  if (line.empty() || line.contains("-->")) {
     auto* parser_context = MakeGarbageCollected<CSSParserContext>(
-        *document_, NullURL(), true /* origin_clean */, Referrer(),
-        UTF8Encoding(), CSSParserContext::kLiveProfile,
-        ResourceFetchRestriction::kOnlyDataUrls);
+        *document_, NullUrl(), true /* origin_clean */, Referrer(),
+        Utf8Encoding(), ResourceFetchRestriction::kOnlyDataUrls);
     auto* style_sheet_contents =
         MakeGarbageCollected<StyleSheetContents>(parser_context);
     CSSParser::ParseSheet(
@@ -271,7 +271,7 @@ VTTParser::ParseState VTTParser::CollectStyleSheet(const String& line) {
 VTTParser::ParseState VTTParser::CollectWebVTTBlock(const String& line) {
   // collect a WebVTT block parsing. (WebVTT parser algorithm step 14)
 
-  if (!previous_line_.Contains("-->")) {
+  if (!previous_line_.contains("-->")) {
     // If Region support is enabled.
     if (RuntimeEnabledFeatures::WebVTTRegionsEnabled() &&
         CheckAndCreateRegion(line))
@@ -280,8 +280,8 @@ VTTParser::ParseState VTTParser::CollectWebVTTBlock(const String& line) {
     // line starts with the substring "STYLE" and remaining characters
     // zero or more U+0020 SPACE characters or U+0009 CHARACTER TABULATION
     // (tab) characters expected other than these characters it is invalid.
-    if (line.StartsWith("STYLE") && StringView(line, kStyleIdentifierLength)
-                                        .IsAllSpecialCharacters<IsASpace>()) {
+    if (line.starts_with("STYLE") && StringView(line, kStyleIdentifierLength)
+                                         .IsAllSpecialCharacters<IsASpace>()) {
       contains_style_block_ = true;
       current_content_.Clear();
       return kStyle;
@@ -291,8 +291,9 @@ VTTParser::ParseState VTTParser::CollectWebVTTBlock(const String& line) {
   // Handle cue block.
   ParseState state = CheckAndRecoverCue(line);
   if (state != kHeader) {
-    if (!previous_line_.empty() && !previous_line_.Contains("-->"))
+    if (!previous_line_.empty() && !previous_line_.contains("-->")) {
       current_id_ = AtomicString(previous_line_);
+    }
 
     return state;
   }
@@ -308,7 +309,7 @@ VTTParser::ParseState VTTParser::CollectWebVTTBlock(const String& line) {
 
 VTTParser::ParseState VTTParser::CheckAndRecoverCue(const String& line) {
   // parse cue timings and settings
-  if (line.Contains("-->")) {
+  if (line.contains("-->")) {
     ParseState state = RecoverCue(line);
     if (state != kBadCue) {
       return state;
@@ -321,8 +322,8 @@ bool VTTParser::CheckAndCreateRegion(const String& line) {
   // line starts with the substring "REGION" and remaining characters
   // zero or more U+0020 SPACE characters or U+0009 CHARACTER TABULATION
   // (tab) characters expected other than these characters it is invalid.
-  if (line.StartsWith("REGION") && StringView(line, kRegionIdentifierLength)
-                                       .IsAllSpecialCharacters<IsASpace>()) {
+  if (line.starts_with("REGION") && StringView(line, kRegionIdentifierLength)
+                                        .IsAllSpecialCharacters<IsASpace>()) {
     current_region_ = VTTRegion::Create(*document_);
     return true;
   }
@@ -330,9 +331,12 @@ bool VTTParser::CheckAndCreateRegion(const String& line) {
 }
 
 bool VTTParser::CheckAndStoreRegion(const String& line) {
-  if (!line.empty() && !line.Contains("-->"))
+  if (!line.empty() && !line.contains("-->")) {
     return false;
+  }
 
+  // Only register the region if it has a non-empty id; a cue's "region:"
+  // setting matches by id, so regions without one can never be referenced.
   if (!current_region_->id().empty())
     region_map_.Set(current_region_->id(), current_region_);
   current_region_ = nullptr;
@@ -340,8 +344,9 @@ bool VTTParser::CheckAndStoreRegion(const String& line) {
 }
 
 VTTParser::ParseState VTTParser::CollectCueId(const String& line) {
-  if (line.Contains("-->"))
+  if (line.contains("-->")) {
     return CollectTimingsAndSettings(line);
+  }
   current_id_ = AtomicString(line);
   return kTimingsAndSettings;
 }
@@ -388,7 +393,7 @@ VTTParser::ParseState VTTParser::CollectCueText(const String& line) {
     return kId;
   }
   // Step 35.
-  if (line.Contains("-->")) {
+  if (line.contains("-->")) {
     // Step 39-40.
     CreateNewCue();
 
@@ -413,8 +418,9 @@ VTTParser::ParseState VTTParser::RecoverCue(const String& line) {
 VTTParser::ParseState VTTParser::IgnoreBadCue(const String& line) {
   if (line.empty())
     return kId;
-  if (line.Contains("-->"))
+  if (line.contains("-->")) {
     return RecoverCue(line);
+  }
   return kBadCue;
 }
 
@@ -502,8 +508,8 @@ static String SerializeTimeStamp(double time_stamp) {
   value /= 60;
   unsigned minutes = value % 60;
   unsigned hours = static_cast<unsigned>(value / 60);
-  return String::Format("%02u:%02u:%02u.%03u", hours, minutes, seconds,
-                        milliseconds);
+  return Format("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds,
+                milliseconds);
 }
 
 bool VTTParser::CollectTimeStamp(VTTScanner& input, double& time_stamp) {
@@ -515,7 +521,7 @@ bool VTTParser::CollectTimeStamp(VTTScanner& input, double& time_stamp) {
   // Steps 5 - 7 - Collect a sequence of characters that are 0-9.
   // If not 2 characters or value is greater than 59, interpret as hours.
   unsigned value1;
-  unsigned value1_digits = input.ScanDigits(value1);
+  const size_t value1_digits = input.ScanDigits(value1);
   if (!value1_digits)
     return false;
   if (value1_digits != 2 || value1 > 59)
@@ -546,40 +552,43 @@ bool VTTParser::CollectTimeStamp(VTTScanner& input, double& time_stamp) {
     return false;
 
   // Steps 18 - 19 - Calculate result.
-  time_stamp = (value1 * kMinutesPerHour * kSecondsPerMinute) +
-               (value2 * kSecondsPerMinute) + value3 +
-               (value4 * (1 / kMsPerSecond));
+  base::TimeDelta time_stamp_delta = base::Hours(value1);
+  time_stamp_delta += base::Minutes(value2);
+  time_stamp_delta += base::Seconds(value3);
+  time_stamp_delta += base::Milliseconds(value4);
+
+  time_stamp = time_stamp_delta.InSecondsF();
   return true;
 }
 
-static VTTNodeType TokenToNodeType(VTTToken& token) {
+static VttNodeType TokenToNodeType(VTTToken& token) {
   switch (token.GetName().length()) {
     case 1:
       if (token.GetName()[0] == 'c')
-        return kVTTNodeTypeClass;
+        return VttNodeType::kClass;
       if (token.GetName()[0] == 'v')
-        return kVTTNodeTypeVoice;
+        return VttNodeType::kVoice;
       if (token.GetName()[0] == 'b')
-        return kVTTNodeTypeBold;
+        return VttNodeType::kBold;
       if (token.GetName()[0] == 'i')
-        return kVTTNodeTypeItalic;
+        return VttNodeType::kItalic;
       if (token.GetName()[0] == 'u')
-        return kVTTNodeTypeUnderline;
+        return VttNodeType::kUnderline;
       break;
     case 2:
       if (token.GetName()[0] == 'r' && token.GetName()[1] == 't')
-        return kVTTNodeTypeRubyText;
+        return VttNodeType::kRubyText;
       break;
     case 4:
       if (token.GetName()[0] == 'r' && token.GetName()[1] == 'u' &&
           token.GetName()[2] == 'b' && token.GetName()[3] == 'y')
-        return kVTTNodeTypeRuby;
+        return VttNodeType::kRuby;
       if (token.GetName()[0] == 'l' && token.GetName()[1] == 'a' &&
           token.GetName()[2] == 'n' && token.GetName()[3] == 'g')
-        return kVTTNodeTypeLanguage;
+        return VttNodeType::kLanguage;
       break;
   }
-  return kVTTNodeTypeNone;
+  return VttNodeType::kNone;
 }
 
 void VTTTreeBuilder::ConstructTreeFromToken(Document& document) {
@@ -592,17 +601,20 @@ void VTTTreeBuilder::ConstructTreeFromToken(Document& document) {
       break;
     }
     case VTTTokenTypes::kStartTag: {
-      VTTNodeType node_type = TokenToNodeType(token_);
-      if (node_type == kVTTNodeTypeNone)
+      VttNodeType node_type = TokenToNodeType(token_);
+      if (node_type == VttNodeType::kNone) {
         break;
+      }
 
       auto* curr_vtt_element = DynamicTo<VTTElement>(current_node_);
-      VTTNodeType current_type = curr_vtt_element
-                                     ? curr_vtt_element->WebVTTNodeType()
-                                     : kVTTNodeTypeNone;
+      VttNodeType current_type = curr_vtt_element
+                                     ? curr_vtt_element->GetVttNodeType()
+                                     : VttNodeType::kNone;
       // <rt> is only allowed if the current node is <ruby>.
-      if (node_type == kVTTNodeTypeRubyText && current_type != kVTTNodeTypeRuby)
+      if (node_type == VttNodeType::kRubyText &&
+          current_type != VttNodeType::kRuby) {
         break;
+      }
 
       auto* child = MakeGarbageCollected<VTTElement>(node_type, &document);
       child->SetTrack(track_);
@@ -610,10 +622,10 @@ void VTTTreeBuilder::ConstructTreeFromToken(Document& document) {
       if (!token_.Classes().empty())
         child->setAttribute(html_names::kClassAttr, token_.Classes());
 
-      if (node_type == kVTTNodeTypeVoice) {
+      if (node_type == VttNodeType::kVoice) {
         child->setAttribute(VTTElement::VoiceAttributeName(),
                             token_.Annotation());
-      } else if (node_type == kVTTNodeTypeLanguage) {
+      } else if (node_type == VttNodeType::kLanguage) {
         language_stack_.push_back(token_.Annotation());
         child->setAttribute(VTTElement::LangAttributeName(),
                             language_stack_.back());
@@ -625,9 +637,10 @@ void VTTTreeBuilder::ConstructTreeFromToken(Document& document) {
       break;
     }
     case VTTTokenTypes::kEndTag: {
-      VTTNodeType node_type = TokenToNodeType(token_);
-      if (node_type == kVTTNodeTypeNone)
+      VttNodeType node_type = TokenToNodeType(token_);
+      if (node_type == VttNodeType::kNone) {
         break;
+      }
 
       // The only non-VTTElement would be the DocumentFragment root. (Text
       // nodes and PIs will never appear as current_node_.)
@@ -635,20 +648,21 @@ void VTTTreeBuilder::ConstructTreeFromToken(Document& document) {
       if (!curr_vtt_element)
         break;
 
-      VTTNodeType current_type = curr_vtt_element->WebVTTNodeType();
+      VttNodeType current_type = curr_vtt_element->GetVttNodeType();
       bool matches_current = node_type == current_type;
       if (!matches_current) {
         // </ruby> auto-closes <rt>.
-        if (current_type == kVTTNodeTypeRubyText &&
-            node_type == kVTTNodeTypeRuby) {
+        if (current_type == VttNodeType::kRubyText &&
+            node_type == VttNodeType::kRuby) {
           if (current_node_->parentNode())
             current_node_ = current_node_->parentNode();
         } else {
           break;
         }
       }
-      if (node_type == kVTTNodeTypeLanguage)
+      if (node_type == VttNodeType::kLanguage) {
         language_stack_.pop_back();
+      }
       if (current_node_->parentNode())
         current_node_ = current_node_->parentNode();
       break;

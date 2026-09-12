@@ -2,11 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import {ConsoleTestRunner} from 'console_test_runner';
+import * as TextUtils from 'devtools/core/text_utils/text_utils.js';
+import {NetworkTestRunner} from 'network_test_runner';
+import {TestRunner} from 'test_runner';
+
 (async function() {
   'use strict';
   TestRunner.addResult(`Tests content is available for failed image request.\n`);
-  await TestRunner.loadTestModule('network_test_runner');
-  await TestRunner.loadLegacyModule('console'); await TestRunner.loadTestModule('console_test_runner');
   await TestRunner.showPanel('network');
   await TestRunner.evaluateInPagePromise(`
       function loadData()
@@ -31,7 +34,7 @@
     TestRunner.addResult(request1.url());
     TestRunner.addResult('resource.type: ' + request1.resourceType());
     TestRunner.assertTrue(!request1.failed, 'Resource loading failed.');
-    request1.requestContent().then(step3);
+    request1.requestContentData().then(step3);
   }
 
   async function step3() {
@@ -43,7 +46,7 @@
     TestRunner.addResult('resources count = ' + requests.length);
     for (let i = 0; i < requests.length; i++) {
       TestRunner.addResult(requests[i].url());
-      const {content} = await requests[i].requestContent();
+      const {content} = await requests[i].requestContentData().then(TextUtils.ContentData.ContentData.asDeferredContent);
       TestRunner.addResult('resource.content after requesting content: ' + content);
     }
 

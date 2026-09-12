@@ -11,12 +11,7 @@
 
 namespace gl {
 
-GLShareGroup::GLShareGroup()
-#if BUILDFLAG(IS_APPLE)
-    : renderer_id_(-1)
-#endif
-{
-}
+GLShareGroup::GLShareGroup() = default;
 
 void GLShareGroup::AddContext(GLContext* context) {
   contexts_.insert(context);
@@ -37,9 +32,10 @@ void* GLShareGroup::GetHandle() {
 }
 
 GLContext* GLShareGroup::GetContext() {
-  for (auto it = contexts_.begin(); it != contexts_.end(); ++it) {
-    if ((*it)->GetHandle())
-      return *it;
+  for (const auto& context : contexts_) {
+    if (context->GetHandle()) {
+      return context;
+    }
   }
 
   return NULL;
@@ -49,16 +45,6 @@ void GLShareGroup::SetSharedContext(GLContext* context) {
   DCHECK(contexts_.find(context) != contexts_.end());
   shared_context_ = context;
 }
-
-#if BUILDFLAG(IS_APPLE)
-void GLShareGroup::SetRendererID(int renderer_id) {
-  renderer_id_ = renderer_id;
-}
-
-int GLShareGroup::GetRendererID() {
-  return renderer_id_;
-}
-#endif
 
 GLShareGroup::~GLShareGroup() {
 }

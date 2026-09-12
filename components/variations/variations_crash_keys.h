@@ -9,10 +9,12 @@
 #include <vector>
 
 #include "base/component_export.h"
+#include "base/functional/callback_helpers.h"
 
 namespace variations {
 
 class SyntheticTrialGroup;
+struct ActiveGroupId;
 
 // The key used in crash reports to indicate the number of active experiments.
 // Should match the number of entries in kExperimentListKey.
@@ -23,6 +25,20 @@ COMPONENT_EXPORT(VARIATIONS) extern const char kNumExperimentsKey[];
 // a dash. The experiments are separated by a comma.
 COMPONENT_EXPORT(VARIATIONS) extern const char kExperimentListKey[];
 
+// The keys used in crash reports to list the full history of runtime
+// FieldTrial overrides in chronological order. Each override is listed as four
+// hex numbers: override trial name, override group name, overridden trial name,
+// and previous override trial name, separated by a dash. The overrides are
+// separated by a comma. E.g. "FFFFFFFF-FFFFFFFF-FFFFFFFF-FFFFFFFF,". For the
+// overridden trial name and previous override trial name, NULL cases will be
+// represented by 0, e.g. "FFFFFFFF-FFFFFFFF-0-0,".
+COMPONENT_EXPORT(VARIATIONS)
+extern const char kRuntimeFieldTrialOverridesKey[];
+COMPONENT_EXPORT(VARIATIONS)
+extern const char kNumRuntimeFieldTrialOverridesKey[];
+
+COMPONENT_EXPORT(VARIATIONS) extern const char kVariationsSeedVersionKey[];
+
 // Initializes crash keys that report the current set of active FieldTrial
 // groups (aka variations) for crash reports. After initialization, an observer
 // will be registered on FieldTrialList that will keep the crash keys up-to-date
@@ -30,11 +46,25 @@ COMPONENT_EXPORT(VARIATIONS) extern const char kExperimentListKey[];
 // the API below.
 COMPONENT_EXPORT(VARIATIONS) void InitCrashKeys();
 
+// Resets and reinitializes crash keys that report the current set of active
+// FieldTrial groups for crash reports. This is used in certain process types
+// where the FieldTrialList itself is recreated.
+COMPONENT_EXPORT(VARIATIONS) void RecreateCrashKeys();
+
 // Updates variations crash keys by replacing the list of synthetic trials with
 // the specified list. Does not affect non-synthetic trials.
 COMPONENT_EXPORT(VARIATIONS)
 void UpdateCrashKeysWithSyntheticTrials(
     const std::vector<SyntheticTrialGroup>& synthetic_trials);
+
+// Sets the crash key for the variations seed version.
+COMPONENT_EXPORT(VARIATIONS)
+void SetVariationsSeedVersionCrashKey(std::string_view seed_version);
+
+// Wrapper around variations::InitCrashKeys() returning a ScopedClosureRunner
+// that will ensure the global state is cleared when it is destructed.
+COMPONENT_EXPORT(VARIATIONS)
+base::ScopedClosureRunner InitCrashKeysForTesting();
 
 // Clears the internal instance, for testing.
 COMPONENT_EXPORT(VARIATIONS) void ClearCrashKeysInstanceForTesting();
@@ -52,6 +82,10 @@ struct COMPONENT_EXPORT(VARIATIONS) ExperimentListInfo {
 // groups + the synthetic trials in |experiment_list| and the number of elements
 // in that list in |num_experiments|. Must be called on the UI thread.
 COMPONENT_EXPORT(VARIATIONS) ExperimentListInfo GetExperimentListInfo();
+
+// Gets the hash code of the experiment.
+COMPONENT_EXPORT(VARIATIONS)
+std::string ActiveGroupToString(const ActiveGroupId& active_group);
 
 }  // namespace variations
 

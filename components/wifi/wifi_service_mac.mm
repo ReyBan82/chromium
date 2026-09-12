@@ -5,18 +5,20 @@
 #include "components/wifi/wifi_service.h"
 
 #import <CoreWLAN/CoreWLAN.h>
-#import <netinet/in.h>
 #import <SystemConfiguration/SystemConfiguration.h>
+#import <netinet/in.h>
 
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 
+#include "base/apple/foundation_util.h"
+#include "base/apple/scoped_cftyperef.h"
+#include "base/compiler_specific.h"
 #include "base/functional/bind.h"
-#include "base/mac/foundation_util.h"
-#include "base/mac/scoped_cftyperef.h"
-#include "base/mac/scoped_nsobject.h"
+#include "base/memory/weak_ptr.h"
+#include "base/strings/string_view_util.h"
 #include "base/strings/sys_string_conversions.h"
 #import "base/task/sequenced_task_runner.h"
 #import "base/task/single_thread_task_runner.h"
@@ -24,11 +26,11 @@
 #include "base/values.h"
 #include "components/onc/onc_constants.h"
 #include "components/wifi/network_properties.h"
-#include "crypto/apple_keychain.h"
+#include "crypto/apple/keychain_v2.h"
 
 namespace wifi {
 
-// Implementation of WiFiService for Mac OS X.
+// Implementation of WiFiService for macOS.
 class WiFiServiceMac : public WiFiService {
  public:
   WiFiServiceMac();
@@ -45,29 +47,29 @@ class WiFiServiceMac : public WiFiService {
   void UnInitialize() override;
 
   void GetProperties(const std::string& network_guid,
-                     base::Value::Dict* properties,
+                     base::DictValue* properties,
                      std::string* error) override;
 
   void GetManagedProperties(const std::string& network_guid,
-                            base::Value::Dict* managed_properties,
+                            base::DictValue* managed_properties,
                             std::string* error) override;
 
   void GetState(const std::string& network_guid,
-                base::Value::Dict* properties,
+                base::DictValue* properties,
                 std::string* error) override;
 
   void SetProperties(const std::string& network_guid,
-                     base::Value::Dict properties,
+                     base::DictValue properties,
                      std::string* error) override;
 
   void CreateNetwork(bool shared,
-                     base::Value::Dict properties,
+                     base::DictValue properties,
                      std::string* network_guid,
                      std::string* error) override;
 
   void GetVisibleNetworks(const std::string& network_type,
                           bool include_details,
-                          base::Value::List* network_list) override;
+                          base::ListValue* network_list) override;
 
   void RequestNetworkScan() override;
 
@@ -128,6 +130,10 @@ class WiFiServiceMac : public WiFiService {
   // |networks_|.
   NetworkList::iterator FindNetwork(const std::string& network_guid);
 
+  // Refreshes live properties for the connected network from CWInterface
+  // without triggering a scan.
+  void RefreshConnectedNetworkProperties(NetworkList::iterator it);
+
   // Handles notification from |wlan_observer_|.
   void OnWlanObserverNotification();
 
@@ -140,9 +146,10 @@ class WiFiServiceMac : public WiFiService {
   void NotifyNetworkChanged(const std::string& network_guid);
 
   // Default interface.
-  base::scoped_nsobject<CWInterface> interface_;
-  // WLAN Notifications observer. |this| doesn't own this reference.
-  id wlan_observer_;
+  CWInterface* __strong interface_;
+
+  // WLAN Notifications observer.
+  id __strong wlan_observer_;
 
   // Observer to get notified when network(s) have changed (e.g. connect).
   NetworkGuidListCallback networks_changed_observer_;
@@ -157,11 +164,12 @@ class WiFiServiceMac : public WiFiService {
   // Guid of last known connected network.
   std::string connected_network_guid_;
   // Temporary storage of network properties indexed by |network_guid|.
-  base::Value::Dict network_properties_;
+  base::DictValue network_properties_;
+
+  base::WeakPtrFactory<WiFiServiceMac> weak_factory_{this};
 };
 
-WiFiServiceMac::WiFiServiceMac() : wlan_observer_(nil) {
-}
+WiFiServiceMac::WiFiServiceMac() = default;
 
 WiFiServiceMac::~WiFiServiceMac() {
   UnInitialize();
@@ -170,7 +178,7 @@ WiFiServiceMac::~WiFiServiceMac() {
 void WiFiServiceMac::Initialize(
   scoped_refptr<base::SequencedTaskRunner> task_runner) {
   task_runner_.swap(task_runner);
-  interface_.reset([[[CWWiFiClient sharedWiFiClient] interface] retain]);
+  interface_ = [[CWWiFiClient sharedWiFiClient] interface];
   if (!interface_) {
     DVLOG(1) << "Failed to initialize default interface.";
     return;
@@ -178,13 +186,14 @@ void WiFiServiceMac::Initialize(
 }
 
 void WiFiServiceMac::UnInitialize() {
-  if (wlan_observer_)
-    [[NSNotificationCenter defaultCenter] removeObserver:wlan_observer_];
-  interface_.reset();
+  if (wlan_observer_) {
+    [NSNotificationCenter.defaultCenter removeObserver:wlan_observer_];
+  }
+  interface_ = nil;
 }
 
 void WiFiServiceMac::GetProperties(const std::string& network_guid,
-                                   base::Value::Dict* properties,
+                                   base::DictValue* properties,
                                    std::string* error) {
   NetworkList::iterator it = FindNetwork(network_guid);
   if (it == networks_.end()) {
@@ -194,28 +203,31 @@ void WiFiServiceMac::GetProperties(const std::string& network_guid,
   }
 
   it->connection_state = GetNetworkConnectionState(network_guid);
+  if (it->connection_state != onc::connection_state::kNotConnected) {
+    RefreshConnectedNetworkProperties(it);
+  }
   *properties = it->ToValue(/*network_list=*/false);
   DVLOG(1) << *properties;
 }
 
 void WiFiServiceMac::GetManagedProperties(const std::string& network_guid,
-                                          base::Value::Dict* managed_properties,
+                                          base::DictValue* managed_properties,
                                           std::string* error) {
   *error = kErrorNotImplemented;
 }
 
 void WiFiServiceMac::GetState(const std::string& network_guid,
-                              base::Value::Dict* properties,
+                              base::DictValue* properties,
                               std::string* error) {
   *error = kErrorNotImplemented;
 }
 
 void WiFiServiceMac::SetProperties(const std::string& network_guid,
-                                   base::Value::Dict properties,
+                                   base::DictValue properties,
                                    std::string* error) {
   // If the network properties already exist, don't override previously set
   // properties, unless they are set in |properties|.
-  base::Value::Dict* existing_properties =
+  base::DictValue* existing_properties =
       network_properties_.FindDict(network_guid);
   if (existing_properties) {
     existing_properties->Merge(std::move(properties));
@@ -225,7 +237,7 @@ void WiFiServiceMac::SetProperties(const std::string& network_guid,
 }
 
 void WiFiServiceMac::CreateNetwork(bool shared,
-                                   base::Value::Dict properties,
+                                   base::DictValue properties,
                                    std::string* network_guid,
                                    std::string* error) {
   NetworkProperties network_properties;
@@ -245,7 +257,7 @@ void WiFiServiceMac::CreateNetwork(bool shared,
 
 void WiFiServiceMac::GetVisibleNetworks(const std::string& network_type,
                                         bool include_details,
-                                        base::Value::List* network_list) {
+                                        base::ListValue* network_list) {
   if (!network_type.empty() &&
       network_type != onc::network_type::kAllTypes &&
       network_type != onc::network_type::kWiFi) {
@@ -285,7 +297,7 @@ void WiFiServiceMac::StartConnect(const std::string& network_guid,
   if (CheckError(ns_error, kErrorScanForNetworksWithName, error))
     return;
 
-  CWNetwork* network = [networks anyObject];
+  CWNetwork* network = networks.anyObject;
   if (network == nil) {
     // System can't find the network, remove it from the |networks_| and notify
     // observers.
@@ -301,10 +313,10 @@ void WiFiServiceMac::StartConnect(const std::string& network_guid,
   }
 
   // Check whether WiFi Password is set in |network_properties_|.
-  base::Value::Dict* properties = network_properties_.FindDict(network_guid);
+  base::DictValue* properties = network_properties_.FindDict(network_guid);
   NSString* ns_password = nil;
   if (properties) {
-    base::Value::Dict* wifi = properties->FindDict(onc::network_type::kWiFi);
+    base::DictValue* wifi = properties->FindDict(onc::network_type::kWiFi);
     if (wifi) {
       const std::string* passphrase = wifi->FindString(onc::wifi::kPassphrase);
       if (passphrase)
@@ -353,22 +365,15 @@ void WiFiServiceMac::GetKeyFromSystem(const std::string& network_guid,
                                       std::string* error) {
   static const char kAirPortServiceName[] = "AirPort";
 
-  UInt32 password_length = 0;
-  void *password_data = NULL;
-  crypto::AppleKeychain keychain;
-  OSStatus status = keychain.FindGenericPassword(
-      strlen(kAirPortServiceName), kAirPortServiceName, network_guid.length(),
-      network_guid.c_str(), &password_length, &password_data, NULL);
-  if (status != errSecSuccess) {
+  auto password_data =
+      crypto::apple::KeychainV2::GetInstance().FindGenericPassword(
+          kAirPortServiceName, network_guid);
+  if (!password_data.has_value()) {
     *error = kErrorNotFound;
     return;
   }
 
-  if (password_data) {
-    *key_data = std::string(reinterpret_cast<char*>(password_data),
-                            password_length);
-    keychain.ItemFreeContent(password_data);
-  }
+  *key_data = std::string(base::as_string_view(*password_data));
 }
 
 void WiFiServiceMac::SetEventObservers(
@@ -381,18 +386,24 @@ void WiFiServiceMac::SetEventObservers(
 
   // Remove previous OS notifications observer.
   if (wlan_observer_) {
-    [[NSNotificationCenter defaultCenter] removeObserver:wlan_observer_];
+    [NSNotificationCenter.defaultCenter removeObserver:wlan_observer_];
     wlan_observer_ = nil;
   }
 
   // Subscribe to OS notifications.
   if (!networks_changed_observer_.is_null()) {
+    // CoreWLAN delivers SSID-change notifications on its own dispatch queue,
+    // so the block must not reference `this` directly. Capture the task runner
+    // by value and bind a weak pointer so any task that lands after this
+    // object has been destroyed on the worker sequence is dropped.
+    scoped_refptr<base::SequencedTaskRunner> worker_task_runner = task_runner_;
+    base::WeakPtr<WiFiServiceMac> weak_this = weak_factory_.GetWeakPtr();
     void (^ns_observer)(NSNotification* notification) = ^(
         NSNotification* notification) {
       DVLOG(1) << "Received CoreWLAN notification that the SSID changed";
-      task_runner_->PostTask(
+      worker_task_runner->PostTask(
           FROM_HERE, base::BindOnce(&WiFiServiceMac::OnWlanObserverNotification,
-                                    base::Unretained(this)));
+                                    weak_this));
     };
 
     // A notification with the symbol kCWSSIDDidChangeNotification started being
@@ -411,8 +422,10 @@ void WiFiServiceMac::SetEventObservers(
     // This is not a supported way to do this. The correct way to do this is the
     // -[CWWiFiClient startMonitoringEventWithType:error:] API:
     // https://developer.apple.com/documentation/corewlan/cwwificlient/1512439-startmonitoringeventwithtype?language=objc
-    // TODO(avi): Use this API. https://crbug.com/1054063
-    wlan_observer_ = [[NSNotificationCenter defaultCenter]
+    //
+    // TODO(crbug.com/40675519): Switch to using the
+    // -[CWWiFiClient startMonitoringEventWithType:error:] API.
+    wlan_observer_ = [NSNotificationCenter.defaultCenter
         addObserverForName:@"com.apple.coreWLAN.notification.ssid.legacy"
                     object:nil
                      queue:nil
@@ -437,16 +450,16 @@ std::string WiFiServiceMac::GetNetworkConnectionState(
 
   // Check whether WiFi network is reachable.
   struct sockaddr_in local_wifi_address;
-  bzero(&local_wifi_address, sizeof(local_wifi_address));
+  UNSAFE_TODO(bzero(&local_wifi_address, sizeof(local_wifi_address)));
   local_wifi_address.sin_len = sizeof(local_wifi_address);
   local_wifi_address.sin_family = AF_INET;
   local_wifi_address.sin_addr.s_addr = htonl(IN_LINKLOCALNETNUM);
-  base::ScopedCFTypeRef<SCNetworkReachabilityRef> reachability(
+  base::apple::ScopedCFTypeRef<SCNetworkReachabilityRef> reachability(
       SCNetworkReachabilityCreateWithAddress(
           kCFAllocatorDefault,
           reinterpret_cast<const struct sockaddr*>(&local_wifi_address)));
   SCNetworkReachabilityFlags flags = 0u;
-  if (SCNetworkReachabilityGetFlags(reachability, &flags) &&
+  if (SCNetworkReachabilityGetFlags(reachability.get(), &flags) &&
       (flags & kSCNetworkReachabilityFlagsReachable) &&
       (flags & kSCNetworkReachabilityFlagsIsDirect)) {
     // Network is reachable, report is as |kConnected|.
@@ -465,7 +478,8 @@ void WiFiServiceMac::UpdateNetworks() {
 
   std::string connected_bssid = base::SysNSStringToUTF8([interface_ bssid]);
   std::map<std::string, NetworkProperties*> network_properties_map;
-  networks_.clear();
+  NetworkList old_networks;
+  networks_.swap(old_networks);
 
   // There is one |cw_network| per BSS in |cw_networks|, so go through the set
   // and combine them, paying attention to supported frequencies.
@@ -475,26 +489,29 @@ void WiFiServiceMac::UpdateNetworks() {
 
     if (network_properties_map.find(network_guid) ==
             network_properties_map.end()) {
-      networks_.push_back(NetworkProperties());
+      networks_.emplace_back();
       network_properties_map[network_guid] = &networks_.back();
       update_all_properties = true;
     }
     // If current network is connected, use its properties for this network.
-    if (base::SysNSStringToUTF8([cw_network bssid]) == connected_bssid)
+    if (base::SysNSStringToUTF8(cw_network.bssid) == connected_bssid) {
       update_all_properties = true;
+    }
 
     NetworkProperties* properties = network_properties_map.at(network_guid);
     if (update_all_properties) {
       NetworkPropertiesFromCWNetwork(cw_network, properties);
     } else {
-      properties->frequency_set.insert(FrequencyFromCWChannelBand(
-          [[cw_network wlanChannel] channelBand]));
+      properties->frequency_set.insert(
+          FrequencyFromCWChannelBand(cw_network.wlanChannel.channelBand));
     }
   }
   // Sort networks, so connected/connecting is up front.
   networks_.sort(NetworkProperties::OrderByType);
-  // Notify observers that list has changed.
-  NotifyNetworkListChanged(networks_);
+  if (networks_ != old_networks) {
+    // Notify observers that list has changed.
+    NotifyNetworkListChanged(networks_);
+  }
 }
 
 bool WiFiServiceMac::CheckError(NSError* ns_error,
@@ -511,21 +528,21 @@ bool WiFiServiceMac::CheckError(NSError* ns_error,
 void WiFiServiceMac::NetworkPropertiesFromCWNetwork(
     const CWNetwork* network,
     NetworkProperties* properties) const {
-  std::string network_guid = GUIDFromSSID([network ssid]);
+  std::string network_guid = GUIDFromSSID(network.ssid);
 
   properties->connection_state = GetNetworkConnectionState(network_guid);
-  properties->ssid = base::SysNSStringToUTF8([network ssid]);
+  properties->ssid = base::SysNSStringToUTF8(network.ssid);
   properties->name = properties->ssid;
   properties->guid = network_guid;
   properties->type = onc::network_type::kWiFi;
 
-  properties->bssid = base::SysNSStringToUTF8([network bssid]);
+  properties->bssid = base::SysNSStringToUTF8(network.bssid);
   properties->frequency = FrequencyFromCWChannelBand(
-      static_cast<CWChannelBand>([[network wlanChannel] channelBand]));
+      static_cast<CWChannelBand>(network.wlanChannel.channelBand));
   properties->frequency_set.insert(properties->frequency);
 
   properties->security = SecurityFromCWNetwork(network);
-  properties->signal_strength = [network rssiValue];
+  properties->signal_strength = network.rssiValue;
 }
 
 std::string WiFiServiceMac::SecurityFromCWNetwork(
@@ -568,6 +585,22 @@ NetworkList::iterator WiFiServiceMac::FindNetwork(
   return networks_.end();
 }
 
+void WiFiServiceMac::RefreshConnectedNetworkProperties(
+    NetworkList::iterator it) {
+  NSString* ns_bssid = [interface_ bssid];
+  NSInteger rssi = [interface_ rssiValue];
+  CWChannel* channel = [interface_ wlanChannel];
+
+  if (!ns_bssid || rssi == 0 || !channel) {
+    return;  // Disconnected or XPC failure, keep cached values.
+  }
+
+  it->signal_strength = static_cast<uint32_t>(rssi);
+  it->frequency = FrequencyFromCWChannelBand([channel channelBand]);
+  it->frequency_set = {it->frequency};
+  it->bssid = base::SysNSStringToUTF8(ns_bssid);
+}
+
 void WiFiServiceMac::OnWlanObserverNotification() {
   std::string connected_network_guid = GUIDFromSSID([interface_ ssid]);
   DVLOG(1) << " *** Got Notification: " << connected_network_guid;
@@ -602,10 +635,8 @@ void WiFiServiceMac::NotifyNetworkListChanged(const NetworkList& networks) {
     return;
 
   NetworkGuidList current_networks;
-  for (NetworkList::const_iterator it = networks.begin();
-       it != networks.end();
-       ++it) {
-    current_networks.push_back(it->guid);
+  for (const auto& network : networks) {
+    current_networks.push_back(network.guid);
   }
 
   event_task_runner_->PostTask(

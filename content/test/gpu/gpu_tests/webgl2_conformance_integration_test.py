@@ -5,25 +5,37 @@
 
 import os
 import sys
-from typing import Any, List, Set
+from typing import Any
 import unittest
 
 from gpu_tests import common_typing as ct
 from gpu_tests import gpu_integration_test
 from gpu_tests import webgl_conformance_integration_test_base
+from gpu_tests.util import host_information
 
 
 class WebGL2ConformanceIntegrationTest(
-    webgl_conformance_integration_test_base.WebGLConformanceIntegrationTestBase
+  webgl_conformance_integration_test_base.WebGLConformanceIntegrationTestBase
 ):
   @classmethod
   def Name(cls) -> str:
     return 'webgl2_conformance'
 
-  def _GetSerialGlobs(self) -> Set[str]:
-    return super()._GetSerialGlobs() | set()
+  def _GetSerialGlobs(self) -> set[str]:
+    serial_globs = super()._GetSerialGlobs()
+    # Serialize tests which allocate a large amount of memory on lower memory
+    # machines to avoid flakes.
+    # Should apply to all non-remote platforms, but we cannot distinguish
+    # between Linux test machines and hosts at this point in the test harness.
+    if host_information.IsWindows() or host_information.IsMac():
+      gigabyte = 1_000_000_000
+      if host_information.GetSystemMemoryBytes() < 16 * gigabyte:
+        serial_globs |= {
+          'conformance2/wasm/*16gb*',
+        }
+    return serial_globs
 
-  def _GetSerialTests(self) -> Set[str]:
+  def _GetSerialTests(self) -> set[str]:
     return super()._GetSerialTests() | set()
 
   @classmethod
@@ -32,47 +44,63 @@ class WebGL2ConformanceIntegrationTest(
     assert cls._webgl_version == 2
 
   @classmethod
-  def _GetExtensionList(cls) -> List[str]:
+  def _GetExtensionList(cls) -> list[str]:
     return [
-        'EXT_color_buffer_float',
-        'EXT_color_buffer_half_float',
-        'EXT_disjoint_timer_query_webgl2',
-        'EXT_float_blend',
-        'EXT_texture_compression_bptc',
-        'EXT_texture_compression_rgtc',
-        'EXT_texture_filter_anisotropic',
-        'EXT_texture_norm16',
-        'KHR_parallel_shader_compile',
-        'OES_draw_buffers_indexed',
-        'OES_texture_float_linear',
-        'OVR_multiview2',
-        'WEBGL_clip_cull_distance',
-        'WEBGL_compressed_texture_astc',
-        'WEBGL_compressed_texture_etc',
-        'WEBGL_compressed_texture_etc1',
-        'WEBGL_compressed_texture_pvrtc',
-        'WEBGL_compressed_texture_s3tc',
-        'WEBGL_compressed_texture_s3tc_srgb',
-        'WEBGL_debug_renderer_info',
-        'WEBGL_debug_shaders',
-        'WEBGL_draw_instanced_base_vertex_base_instance',
-        'WEBGL_lose_context',
-        'WEBGL_multi_draw',
-        'WEBGL_multi_draw_instanced_base_vertex_base_instance',
-        'WEBGL_provoking_vertex',
-        'WEBGL_video_texture',
-        'WEBGL_webcodecs_video_frame',
+      'EXT_clip_control',
+      'EXT_color_buffer_float',
+      'EXT_color_buffer_half_float',
+      'EXT_conservative_depth',
+      'EXT_depth_clamp',
+      'EXT_disjoint_timer_query_webgl2',
+      'EXT_float_blend',
+      'EXT_polygon_offset_clamp',
+      'EXT_render_snorm',
+      'EXT_texture_compression_bptc',
+      'EXT_texture_compression_rgtc',
+      'EXT_texture_filter_anisotropic',
+      'EXT_texture_mirror_clamp_to_edge',
+      'EXT_texture_norm16',
+      'KHR_parallel_shader_compile',
+      'NV_shader_noperspective_interpolation',
+      'OES_draw_buffers_indexed',
+      'OES_sample_variables',
+      'OES_shader_multisample_interpolation',
+      'OES_texture_float_linear',
+      'OVR_multiview2',
+      'WEBGL_blend_func_extended',
+      'WEBGL_clip_cull_distance',
+      'WEBGL_compressed_texture_astc',
+      'WEBGL_compressed_texture_etc',
+      'WEBGL_compressed_texture_etc1',
+      'WEBGL_compressed_texture_pvrtc',
+      'WEBGL_compressed_texture_s3tc',
+      'WEBGL_compressed_texture_s3tc_srgb',
+      'WEBGL_debug_renderer_info',
+      'WEBGL_debug_shaders',
+      'WEBGL_draw_instanced_base_vertex_base_instance',
+      'WEBGL_lose_context',
+      'WEBGL_multi_draw',
+      'WEBGL_multi_draw_instanced_base_vertex_base_instance',
+      'WEBGL_polygon_mode',
+      'WEBGL_provoking_vertex',
+      'WEBGL_render_shared_exponent',
+      'WEBGL_shader_pixel_local_storage',
+      'WEBGL_stencil_texturing',
     ]
 
   @classmethod
-  def ExpectationsFiles(cls) -> List[str]:
+  def ExpectationsFiles(cls) -> list[str]:
     return [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                     'test_expectations', 'webgl2_conformance_expectations.txt')
+      os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        'test_expectations',
+        'webgl2_conformance_expectations.txt',
+      )
     ]
 
 
-def load_tests(loader: unittest.TestLoader, tests: Any,
-               pattern: Any) -> unittest.TestSuite:
+def load_tests(
+  loader: unittest.TestLoader, tests: Any, pattern: Any
+) -> unittest.TestSuite:
   del loader, tests, pattern  # Unused.
   return gpu_integration_test.LoadAllTestsInModule(sys.modules[__name__])

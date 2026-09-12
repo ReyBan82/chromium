@@ -10,33 +10,40 @@
 #include <vector>
 
 #include "ash/public/cpp/style/color_mode_observer.h"
+#include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "chrome/browser/ash/app_list/search/chrome_search_result.h"
 #include "chrome/browser/bitmap_fetcher/bitmap_fetcher_delegate.h"
-#include "chromeos/crosapi/mojom/launcher_search.mojom.h"
-#include "mojo/public/cpp/bindings/receiver.h"
 
 class AppListControllerDelegate;
 class BitmapFetcher;
 class Profile;
+class FaviconCache;
+class TemplateURLService;
 
 namespace app_list {
 
+struct OmniboxResultData;
+
 class OmniboxResult : public ChromeSearchResult,
                       public BitmapFetcherDelegate,
-                      public ash::ColorModeObserver,
-                      public crosapi::mojom::SearchResultConsumer {
+                      public ash::ColorModeObserver {
  public:
+  // `template_url_service` must not be nullptr and must outlive this object.
   OmniboxResult(Profile* profile,
                 AppListControllerDelegate* list_controller,
-                crosapi::mojom::SearchResultPtr search_result,
-                const std::u16string& query);
+                TemplateURLService* template_url_service,
+                std::unique_ptr<OmniboxResultData> search_result,
+                const std::u16string& query,
+                FaviconCache* favicon_cache);
   ~OmniboxResult() override;
 
   OmniboxResult(const OmniboxResult&) = delete;
   OmniboxResult& operator=(const OmniboxResult&) = delete;
 
   // ChromeSearchResult:
+  std::optional<GURL> url() const override;
   void Open(int event_flags) override;
 
   // BitmapFetcherDelegate:
@@ -48,9 +55,8 @@ class OmniboxResult : public ChromeSearchResult,
   // ash::ColorModeObserver:
   void OnColorModeChanged(bool dark_mode_enabled) override;
 
-  // crosapi::mojom::SearchResultConsumer:
-  void OnFaviconReceived(const gfx::ImageSkia& icon) override;
-
+  void FetchFavicon(FaviconCache* favicon_cache);
+  void OnFetchedFavicon(const gfx::Image& icon);
   void UpdateIcon();
   // Creates a generic backup icon: used when rich icons are not available.
   void SetGenericIcon();
@@ -81,13 +87,10 @@ class OmniboxResult : public ChromeSearchResult,
   // ID but lower |dedup_priority| are removed.
   int dedup_priority_ = 0;
 
-  // Handle used to receive asynchronous data about this search result over
-  // Mojo.
-  const mojo::Receiver<crosapi::mojom::SearchResultConsumer> consumer_receiver_;
-
-  Profile* const profile_;
-  AppListControllerDelegate* const list_controller_;
-  crosapi::mojom::SearchResultPtr search_result_;
+  const raw_ptr<Profile> profile_;
+  const raw_ptr<AppListControllerDelegate> list_controller_;
+  const raw_ref<TemplateURLService> template_url_service_;
+  std::unique_ptr<OmniboxResultData> search_result_;
   const std::u16string query_;
   std::unique_ptr<BitmapFetcher> bitmap_fetcher_;
   // Whether this omnibox result uses a generic backup icon.

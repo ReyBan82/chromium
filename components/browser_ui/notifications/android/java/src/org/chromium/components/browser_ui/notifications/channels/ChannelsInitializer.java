@@ -8,30 +8,37 @@ import android.app.NotificationChannel;
 import android.app.NotificationChannelGroup;
 import android.app.NotificationManager;
 import android.content.res.Resources;
-import android.os.Build;
 
-import androidx.annotation.RequiresApi;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
+import org.chromium.components.browser_ui.notifications.BaseNotificationManagerProxy;
 
-import org.chromium.base.CollectionUtil;
-import org.chromium.components.browser_ui.notifications.NotificationManagerProxy;
-
+import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Queue;
 import java.util.Set;
 
-/**
- * Initializes our notification channels.
- */
-@RequiresApi(Build.VERSION_CODES.O)
+/** Initializes our notification channels. */
+@NullMarked
 public class ChannelsInitializer {
-    private final NotificationManagerProxy mNotificationManager;
-    private ChannelDefinitions mChannelDefinitions;
+    private final BaseNotificationManagerProxy mNotificationManager;
+    private final ChannelDefinitions mChannelDefinitions;
     private Resources mResources;
+    private final Queue<Runnable> mPendingTasks = new ArrayDeque<>();
+    private boolean mIsTaskRunning;
+    private static final Set<String> sInitializedChannels =
+            Collections.synchronizedSet(new HashSet<>());
+    private static final Set<String> sInitializedChannelGroups =
+            Collections.synchronizedSet(new HashSet<>());
 
-    public ChannelsInitializer(NotificationManagerProxy notificationManagerProxy,
-            ChannelDefinitions channelDefinitions, Resources resources) {
+    public ChannelsInitializer(
+            BaseNotificationManagerProxy notificationManagerProxy,
+            ChannelDefinitions channelDefinitions,
+            Resources resources) {
         mChannelDefinitions = channelDefinitions;
         mNotificationManager = notificationManagerProxy;
         mResources = resources;
@@ -54,18 +61,37 @@ public class ChannelsInitializer {
      */
     public void updateLocale(Resources resources) {
         mResources = resources;
+        sInitializedChannels.clear();
+        sInitializedChannelGroups.clear();
+        mPendingTasks.add(() -> runUpdateExistingKnownChannelsTask());
+        processPendingTasks();
+    }
+
+    private void runUpdateExistingKnownChannelsTask() {
+        mNotificationManager.getNotificationChannelGroups(
+                (channelGroups) -> onChannelGroupsRetrieved(channelGroups));
+    }
+
+    private void onChannelGroupsRetrieved(List<NotificationChannelGroup> channelGroups) {
+        mNotificationManager.getNotificationChannels(
+                (channels) -> onNotificationChannelsRetrieved(channelGroups, channels));
+    }
+
+    private void onNotificationChannelsRetrieved(
+            List<NotificationChannelGroup> channelGroups, List<NotificationChannel> channels) {
         Set<String> groupIds = new HashSet<>();
         Set<String> channelIds = new HashSet<>();
-        for (NotificationChannelGroup group : mNotificationManager.getNotificationChannelGroups()) {
+        for (NotificationChannelGroup group : channelGroups) {
             groupIds.add(group.getId());
         }
-        for (NotificationChannel channel : mNotificationManager.getNotificationChannels()) {
+        for (NotificationChannel channel : channels) {
             channelIds.add(channel.getId());
         }
         // only re-initialize known channel ids, as we only want to update known & existing channels
         groupIds.retainAll(mChannelDefinitions.getAllChannelGroupIds());
         channelIds.retainAll(mChannelDefinitions.getAllChannelIds());
-        ensureInitialized(groupIds, channelIds);
+        runEnsureInitializedWithEnabledStateTask(groupIds, channelIds, true);
+        onCurrentTaskFinished();
     }
 
     /**
@@ -73,9 +99,15 @@ public class ChannelsInitializer {
      * It's safe to call this multiple times since deleting an already-deleted channel is a no-op.
      */
     public void deleteLegacyChannels() {
+        mPendingTasks.add(() -> runDeleteLegacyChannelsTask());
+        processPendingTasks();
+    }
+
+    private void runDeleteLegacyChannelsTask() {
         for (String channelId : mChannelDefinitions.getLegacyChannelIds()) {
             mNotificationManager.deleteNotificationChannel(channelId);
         }
+        onCurrentTaskFinished();
     }
 
     /**
@@ -114,7 +146,7 @@ public class ChannelsInitializer {
         ensureInitializedWithEnabledState(channelId, false);
     }
 
-    private ChannelDefinitions.PredefinedChannel getPredefinedChannel(String channelId) {
+    private ChannelDefinitions.@Nullable PredefinedChannel getPredefinedChannel(String channelId) {
         if (mChannelDefinitions.isValidNonPredefinedChannelId(channelId)) return null;
         ChannelDefinitions.PredefinedChannel predefinedChannel =
                 mChannelDefinitions.getChannelFromId(channelId);
@@ -132,10 +164,16 @@ public class ChannelsInitializer {
 
     private void ensureInitializedWithEnabledState(
             Collection<String> groupIds, Collection<String> channelIds, boolean enabled) {
+        runEnsureInitializedWithEnabledStateTask(groupIds, channelIds, enabled);
+    }
+
+    private void runEnsureInitializedWithEnabledStateTask(
+            Collection<String> groupIds, Collection<String> channelIds, boolean enabled) {
         HashMap<String, NotificationChannelGroup> channelGroups = new HashMap<>();
         HashMap<String, NotificationChannel> channels = new HashMap<>();
 
         for (String groupId : groupIds) {
+            if (sInitializedChannelGroups.contains(groupId)) continue;
             ChannelDefinitions.PredefinedChannelGroup predefinedChannelGroup =
                     mChannelDefinitions.getChannelGroup(groupId);
             if (predefinedChannelGroup == null) continue;
@@ -145,36 +183,63 @@ public class ChannelsInitializer {
         }
 
         for (String channelId : channelIds) {
+            if (sInitializedChannels.contains(channelId)) continue;
             ChannelDefinitions.PredefinedChannel predefinedChannel =
                     getPredefinedChannel(channelId);
             if (predefinedChannel == null) continue;
             NotificationChannelGroup channelGroup =
-                    mChannelDefinitions.getChannelGroupForChannel(predefinedChannel)
+                    mChannelDefinitions
+                            .getChannelGroupForChannel(predefinedChannel)
                             .toNotificationChannelGroup(mResources);
             NotificationChannel channel = predefinedChannel.toNotificationChannel(mResources);
             if (!enabled) {
                 channel.setImportance(NotificationManager.IMPORTANCE_NONE);
             }
-            channelGroups.put(channelGroup.getId(), channelGroup);
+            if (!sInitializedChannelGroups.contains(channelGroup.getId())) {
+                channelGroups.put(channelGroup.getId(), channelGroup);
+            }
             channels.put(channel.getId(), channel);
         }
 
         // Channel groups must be created before the channels.
-        CollectionUtil.forEach(
-                channelGroups.values(), mNotificationManager::createNotificationChannelGroup);
-        CollectionUtil.forEach(channels.values(), mNotificationManager::createNotificationChannel);
+        for (var channelGroup : channelGroups.values()) {
+            mNotificationManager.createNotificationChannelGroup(channelGroup);
+            sInitializedChannelGroups.add(channelGroup.getId());
+        }
+        for (var channel : channels.values()) {
+            mNotificationManager.createNotificationChannel(channel);
+            sInitializedChannels.add(channel.getId());
+        }
     }
 
     /**
      * This calls ensureInitialized after checking this isn't null.
      * @param channelId Id of the channel to be initialized.
      */
-    public void safeInitialize(String channelId) {
+    public void safeInitialize(@Nullable String channelId) {
         // The channelId may be null if the notification will be posted by another app that
         // does not target O or sets its own channels, e.g. WebAPK notifications.
         if (channelId == null) {
             return;
         }
         ensureInitialized(channelId);
+    }
+
+    private void processPendingTasks() {
+        if (mIsTaskRunning || mPendingTasks.isEmpty()) {
+            return;
+        }
+        mIsTaskRunning = true;
+        mPendingTasks.remove().run();
+    }
+
+    private void onCurrentTaskFinished() {
+        mIsTaskRunning = false;
+        processPendingTasks();
+    }
+
+    public static void resetForTesting() {
+        sInitializedChannels.clear();
+        sInitializedChannelGroups.clear();
     }
 }

@@ -13,6 +13,8 @@
 
 namespace media_router {
 
+inline constexpr char kFakeCastNamespace[] = "urn:x-cast:com.google.foo";
+
 std::ostream& operator<<(std::ostream&, CastInternalMessage::Type);
 std::ostream& operator<<(std::ostream&, const CastInternalMessage&);
 
@@ -26,8 +28,9 @@ MATCHER_P(IsCastInternalMessage, json, "") {
     return false;
   }
 
-  if (arg.has_session_id() && arg.session_id() != message->session_id())
+  if (arg.has_session_id() && arg.session_id() != message->session_id()) {
     return false;
+  }
 
   switch (arg.type()) {
     case CastInternalMessage::Type::kAppMessage:
@@ -48,7 +51,7 @@ MATCHER_P(StructPtrTo, expected, "") {
   return arg && testing::Matches(expected)(*arg);
 }
 
-// Matcher for cast::channel::CastMessage arguments.
+// Matcher for openscreen::cast::proto::CastMessage arguments.
 MATCHER_P(IsCastChannelMessage, expected, "") {
   if (arg.has_source_id() != expected.has_source_id() ||
       arg.has_destination_id() != expected.has_destination_id() ||

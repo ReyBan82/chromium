@@ -4,25 +4,63 @@
 
 #include <gtk/gtk.h>
 
+#include <algorithm>
 #include <memory>
+#include <numbers>
+#include <optional>
+#include <vector>
 
 #include "base/check_op.h"
 #include "base/compiler_specific.h"
+#include "base/functional/bind.h"
+#include "base/location.h"
 #include "base/memory/raw_ptr.h"
-#include "base/numerics/math_constants.h"
-#include "base/strings/string_util.h"
-#include "base/strings/utf_string_conversions.h"
+#include "base/memory/weak_ptr.h"
+#include "base/notimplemented.h"
+#include "base/time/time.h"
+#include "base/timer/timer.h"
+#include "remoting/base/email_utils.h"
 #include "remoting/base/string_resources.h"
 #include "remoting/host/client_session_control.h"
+#include "remoting/host/disconnect_window_base.h"
 #include "remoting/host/host_window.h"
-#include "ui/base/glib/glib_signal.h"
+#include "ui/base/glib/scoped_gsignal.h"
 #include "ui/base/l10n/l10n_util.h"
 
 namespace remoting {
 
 namespace {
 
-class DisconnectWindowGtk : public HostWindow {
+// Margins from screen edges to ensure the dialog is not obscured by the top bar
+// or an auto-hiding dock/panel at the bottom.
+constexpr int kTopMargin = 40;
+constexpr int kBottomMargin = 60;
+
+// Padding and spacing for the window contents.
+constexpr int kButtonRowSpacing = 12;
+constexpr int kHorizontalPadding = 12;
+constexpr int kVerticalPadding = 8;
+
+// Background rendering constants.
+constexpr int kCornerRadius = 6;
+constexpr double kBorderWidth = 6.0;
+constexpr double kBackgroundColor = 0.91;
+constexpr double kBorderRed = 0.13;
+constexpr double kBorderGreen = 0.69;
+constexpr double kBorderBlue = 0.11;
+
+// Arrow labels for alignment toggle button.
+constexpr char kUpArrow[] = "▲";
+constexpr char kDownArrow[] = "▼";
+
+// GObject data keys for testing and position tracking.
+constexpr char kCurrentWidthKey[] = "current_width";
+constexpr char kCurrentHeightKey[] = "current_height";
+constexpr char kExpectedXKey[] = "expected_x";
+constexpr char kExpectedYKey[] = "expected_y";
+constexpr char kRepositionAttemptsKey[] = "reposition_attempts";
+
+class DisconnectWindowGtk : public DisconnectWindowBase {
  public:
   DisconnectWindowGtk();
 
@@ -35,40 +73,37 @@ class DisconnectWindowGtk : public HostWindow {
   void Start(const base::WeakPtr<ClientSessionControl>& client_session_control)
       override;
 
+ protected:
+  void OnCooldownExpired() override;
+
  private:
-  CHROMEG_CALLBACK_1(DisconnectWindowGtk,
-                     gboolean,
-                     OnDelete,
-                     GtkWidget*,
-                     GdkEvent*);
-  CHROMEG_CALLBACK_0(DisconnectWindowGtk, void, OnClicked, GtkButton*);
-  CHROMEG_CALLBACK_1(DisconnectWindowGtk,
-                     gboolean,
-                     OnConfigure,
-                     GtkWidget*,
-                     GdkEventConfigure*);
-  CHROMEG_CALLBACK_1(DisconnectWindowGtk,
-                     gboolean,
-                     OnDraw,
-                     GtkWidget*,
-                     cairo_t*);
-  CHROMEG_CALLBACK_1(DisconnectWindowGtk,
-                     gboolean,
-                     OnButtonPress,
-                     GtkWidget*,
-                     GdkEventButton*);
+  gboolean OnDelete(GtkWidget* window, GdkEvent* event);
+  void OnClicked(GtkButton* button);
+  void OnToggleClicked(GtkButton* button);
+  gboolean OnConfigure(GtkWidget* widget, GdkEventConfigure* event);
+  gboolean OnDraw(GtkWidget* widget, cairo_t* cr);
+#if !GTK_CHECK_VERSION(3, 90, 0)
+  void OnMonitorsChanged(GdkScreen* screen);
+  gboolean OnWindowState(GtkWidget* window, GdkEventWindowState* event);
+#endif
 
-  // Used to disconnect the client session.
-  base::WeakPtr<ClientSessionControl> client_session_control_;
+  // Positions the dialog window based on the current anchor.
+  void SetDialogPosition();
 
-  GtkWidget* disconnect_window_;
-  GtkWidget* message_;
+  // Updates the toggle button text according to the current anchor.
+  void UpdateToggleButtonText();
+
+  raw_ptr<GtkWidget> disconnect_window_;
+  raw_ptr<GtkWidget> toggle_button_;
+  raw_ptr<GtkWidget> message_;
   raw_ptr<GtkWidget> button_;
 
   // Used to distinguish resize events from other types of "configure-event"
   // notifications.
-  int current_width_;
-  int current_height_;
+  int current_width_ = 0;
+  int current_height_ = 0;
+
+  std::vector<ScopedGSignal> signals_;
 };
 
 // Helper function for creating a rectangular path with rounded corners, as
@@ -79,22 +114,19 @@ void AddRoundRectPath(cairo_t* cairo_context,
                       int height,
                       int radius) {
   cairo_new_sub_path(cairo_context);
-  cairo_arc(cairo_context, width - radius, radius, radius, -base::kPiDouble / 2,
-            0);
+  cairo_arc(cairo_context, width - radius, radius, radius,
+            -std::numbers::pi / 2, 0);
   cairo_arc(cairo_context, width - radius, height - radius, radius, 0,
-            base::kPiDouble / 2);
-  cairo_arc(cairo_context, radius, height - radius, radius, base::kPiDouble / 2,
-            base::kPiDouble);
-  cairo_arc(cairo_context, radius, radius, radius, base::kPiDouble,
-            3 * base::kPiDouble / 2);
+            std::numbers::pi / 2);
+  cairo_arc(cairo_context, radius, height - radius, radius,
+            std::numbers::pi / 2, std::numbers::pi);
+  cairo_arc(cairo_context, radius, radius, radius, std::numbers::pi,
+            3 * std::numbers::pi / 2);
   cairo_close_path(cairo_context);
 }
 
 // Renders the disconnect window background.
 void DrawBackground(cairo_t* cairo_context, int width, int height) {
-  // Set the arc radius for the corners.
-  const int kCornerRadius = 6;
-
   // Initialize the whole bitmap to be transparent.
   cairo_save(cairo_context);
   cairo_set_source_rgba(cairo_context, 0, 0, 0, 0);
@@ -106,70 +138,52 @@ void DrawBackground(cairo_t* cairo_context, int width, int height) {
   cairo_clip(cairo_context);
 
   // Paint the whole bitmap one color.
-  cairo_set_source_rgb(cairo_context, 0.91, 0.91, 0.91);
+  cairo_set_source_rgb(cairo_context, kBackgroundColor, kBackgroundColor,
+                       kBackgroundColor);
   cairo_paint(cairo_context);
 
   // Paint the round-rectangle edge.
-  cairo_set_source_rgb(cairo_context, 0.13, 0.69, 0.11);
-  cairo_set_line_width(cairo_context, 6);
+  cairo_set_source_rgb(cairo_context, kBorderRed, kBorderGreen, kBorderBlue);
+  cairo_set_line_width(cairo_context, kBorderWidth);
   AddRoundRectPath(cairo_context, width, height, kCornerRadius);
-  cairo_stroke(cairo_context);
-
-  // Render the window-gripper.  In order for a straight line to light up
-  // single pixels, Cairo requires the coordinates to have fractional
-  // components of 0.5 (so the "/ 2" is a deliberate integer division).
-  double gripper_top = height / 2 - 10.5;
-  double gripper_bottom = height / 2 + 10.5;
-  cairo_set_line_width(cairo_context, 1);
-
-  double x = 12.5;
-  cairo_set_source_rgb(cairo_context, 0.70, 0.70, 0.70);
-  cairo_move_to(cairo_context, x, gripper_top);
-  cairo_line_to(cairo_context, x, gripper_bottom);
-  cairo_stroke(cairo_context);
-  x += 3;
-  cairo_move_to(cairo_context, x, gripper_top);
-  cairo_line_to(cairo_context, x, gripper_bottom);
-  cairo_stroke(cairo_context);
-
-  x -= 2;
-  cairo_set_source_rgb(cairo_context, 0.97, 0.97, 0.97);
-  cairo_move_to(cairo_context, x, gripper_top);
-  cairo_line_to(cairo_context, x, gripper_bottom);
-  cairo_stroke(cairo_context);
-  x += 3;
-  cairo_move_to(cairo_context, x, gripper_top);
-  cairo_line_to(cairo_context, x, gripper_bottom);
   cairo_stroke(cairo_context);
 }
 
-DisconnectWindowGtk::DisconnectWindowGtk()
-    : disconnect_window_(nullptr), current_width_(0), current_height_(0) {}
+DisconnectWindowGtk::DisconnectWindowGtk() = default;
 
 DisconnectWindowGtk::~DisconnectWindowGtk() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   if (disconnect_window_) {
-    gtk_widget_destroy(disconnect_window_);
-    disconnect_window_ = nullptr;
+    signals_.clear();
+    toggle_button_ = nullptr;
+    message_ = nullptr;
+    button_ = nullptr;
+    gtk_widget_destroy(disconnect_window_.ExtractAsDangling());
   }
 }
 
 void DisconnectWindowGtk::Start(
     const base::WeakPtr<ClientSessionControl>& client_session_control) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-  DCHECK(!client_session_control_.get());
-  DCHECK(client_session_control.get());
   DCHECK(!disconnect_window_);
 
-  client_session_control_ = client_session_control;
+  DisconnectWindowBase::Start(client_session_control);
 
   // Create the window.
   disconnect_window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-  GtkWindow* window = GTK_WINDOW(disconnect_window_);
+  GtkWindow* window = GTK_WINDOW(disconnect_window_.get());
 
-  g_signal_connect(disconnect_window_, "delete-event",
-                   G_CALLBACK(OnDeleteThunk), this);
+  auto connect = [&](auto* sender, const char* detailed_signal, auto receiver) {
+    // Unretained() is safe since DisconnectWindowGtk will own the
+    // ScopedGSignal.
+    signals_.emplace_back(
+        sender, detailed_signal,
+        base::BindRepeating(receiver, base::Unretained(this)));
+  };
+
+  connect(disconnect_window_.get(), "delete-event",
+          &DisconnectWindowGtk::OnDelete);
   gtk_window_set_title(window,
                        l10n_util::GetStringUTF8(IDS_PRODUCT_NAME).c_str());
   gtk_window_set_resizable(window, FALSE);
@@ -188,109 +202,254 @@ void DisconnectWindowGtk::Start(
 
   // Allow custom rendering of the background pixmap.
 #if !GTK_CHECK_VERSION(3, 90, 0)
-  gtk_widget_set_app_paintable(disconnect_window_, TRUE);
+  gtk_widget_set_app_paintable(disconnect_window_.get(), TRUE);
 #endif
-  g_signal_connect(disconnect_window_, "draw", G_CALLBACK(OnDrawThunk), this);
+  connect(disconnect_window_.get(), "draw", &DisconnectWindowGtk::OnDraw);
 
   // Handle window resizing, to regenerate the background pixmap and window
-  // shape bitmap.  The stored width & height need to be initialized here
+  // shape bitmap. The stored width & height need to be initialized here
   // in case the window is created a second time (the size of the previous
   // window would be remembered, preventing the generation of bitmaps for the
   // new window).
   current_height_ = current_width_ = 0;
-  g_signal_connect(disconnect_window_, "configure-event",
-                   G_CALLBACK(OnConfigureThunk), this);
-
-  // Handle mouse events to allow the user to drag the window around.
+  connect(disconnect_window_.get(), "configure-event",
+          &DisconnectWindowGtk::OnConfigure);
 #if !GTK_CHECK_VERSION(3, 90, 0)
-  gtk_widget_set_events(disconnect_window_, GDK_BUTTON_PRESS_MASK);
+  connect(disconnect_window_.get(), "window-state-event",
+          &DisconnectWindowGtk::OnWindowState);
 #endif
-  g_signal_connect(disconnect_window_, "button-press-event",
-                   G_CALLBACK(OnButtonPressThunk), this);
 
-  // All magic numbers taken from screen shots provided by UX.
-  // The alignment sets narrow margins at the top and bottom, compared with
-  // left and right.  The left margin is made larger to accommodate the
-  // window movement gripper.
-  GtkWidget* button_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+  // Layout contains: toggle button, message label, and disconnect button.
+  GtkWidget* button_row =
+      gtk_box_new(GTK_ORIENTATION_HORIZONTAL, kButtonRowSpacing);
   gtk_box_set_homogeneous(GTK_BOX(button_row), FALSE);
 
 #if GTK_CHECK_VERSION(3, 90, 0)
-  gtk_widget_set_margin_start(GTK_WIDGET(button_row), 24);
-  gtk_widget_set_margin_end(GTK_WIDGET(button_row), 12);
-  gtk_widget_set_margin_top(GTK_WIDGET(button_row), 8);
-  gtk_widget_set_margin_bottom(GTK_WIDGET(button_row), 8);
+  gtk_widget_set_margin_start(GTK_WIDGET(button_row), kHorizontalPadding);
+  gtk_widget_set_margin_end(GTK_WIDGET(button_row), kHorizontalPadding);
+  gtk_widget_set_margin_top(GTK_WIDGET(button_row), kVerticalPadding);
+  gtk_widget_set_margin_bottom(GTK_WIDGET(button_row), kVerticalPadding);
   gtk_container_add(GTK_CONTAINER(window), button_row);
 #else
   G_GNUC_BEGIN_IGNORE_DEPRECATIONS;
   GtkWidget* align = gtk_alignment_new(0, 0, 1, 1);
-  gtk_alignment_set_padding(GTK_ALIGNMENT(align), 8, 8, 24, 12);
+  gtk_alignment_set_padding(GTK_ALIGNMENT(align), kVerticalPadding,
+                            kVerticalPadding, kHorizontalPadding,
+                            kHorizontalPadding);
   G_GNUC_END_IGNORE_DEPRECATIONS;
   gtk_container_add(GTK_CONTAINER(window), align);
   gtk_container_add(GTK_CONTAINER(align), button_row);
 #endif
 
-  button_ = gtk_button_new_with_label(
-      l10n_util::GetStringUTF8(IDS_STOP_SHARING_BUTTON).c_str());
+  toggle_button_ = gtk_button_new();
+  UpdateToggleButtonText();
 #if GTK_CHECK_VERSION(3, 90, 0)
-  gtk_box_pack_end(GTK_BOX(button_row), button_);
+  gtk_box_pack_start(GTK_BOX(button_row), toggle_button_.get());
 #else
-  gtk_box_pack_end(GTK_BOX(button_row), button_, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(button_row), toggle_button_.get(), FALSE, FALSE,
+                     0);
 #endif
-
-  g_signal_connect(button_, "clicked", G_CALLBACK(OnClickedThunk), this);
+  connect(GTK_BUTTON(toggle_button_.get()), "clicked",
+          &DisconnectWindowGtk::OnToggleClicked);
 
   message_ = gtk_label_new(nullptr);
 #if GTK_CHECK_VERSION(3, 90, 0)
-  gtk_box_pack_end(GTK_BOX(button_row), message_);
+  gtk_box_pack_start(GTK_BOX(button_row), message_.get());
+  gtk_widget_set_hexpand(message_.get(), TRUE);
 #else
-  gtk_box_pack_end(GTK_BOX(button_row), message_, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(button_row), message_.get(), TRUE, TRUE, 0);
 #endif
+
+  button_ = gtk_button_new_with_label(
+      l10n_util::GetStringUTF8(IDS_STOP_SHARING_BUTTON).c_str());
+#if GTK_CHECK_VERSION(3, 90, 0)
+  gtk_box_pack_end(GTK_BOX(button_row), button_.get());
+#else
+  gtk_box_pack_end(GTK_BOX(button_row), button_.get(), FALSE, FALSE, 0);
+#endif
+
+  connect(GTK_BUTTON(button_.get()), "clicked",
+          &DisconnectWindowGtk::OnClicked);
 
   // Override any theme setting for the text color, so that the text is
   // readable against the window's background pixmap.
   PangoAttrList* attributes = pango_attr_list_new();
   PangoAttribute* text_color = pango_attr_foreground_new(0, 0, 0);
   pango_attr_list_insert(attributes, text_color);
-  gtk_label_set_attributes(GTK_LABEL(message_), attributes);
+  gtk_label_set_attributes(GTK_LABEL(message_.get()), attributes);
   pango_attr_list_unref(attributes);
 
 #if !GTK_CHECK_VERSION(3, 90, 0)
   // GTK4 always uses an RGBA visual for windows.
-  GdkScreen* screen = gtk_widget_get_screen(disconnect_window_);
-  GdkVisual* visual = gdk_screen_get_rgba_visual(screen);
-  if (visual) {
-    gtk_widget_set_visual(disconnect_window_, visual);
+  GdkScreen* screen = gtk_widget_get_screen(disconnect_window_.get());
+  if (screen) {
+    connect(screen, "monitors-changed",
+            &DisconnectWindowGtk::OnMonitorsChanged);
+    connect(screen, "size-changed", &DisconnectWindowGtk::OnMonitorsChanged);
+    GdkVisual* visual = gdk_screen_get_rgba_visual(screen);
+    if (visual) {
+      gtk_widget_set_visual(disconnect_window_.get(), visual);
+    }
   }
 
   // GTK4 shows windows by default.
-  gtk_widget_show_all(disconnect_window_);
+  gtk_widget_show_all(disconnect_window_.get());
 #endif
 
-  // Extract the user name from the JID.
-  std::string client_jid = client_session_control_->client_jid();
-  std::u16string username =
-      base::UTF8ToUTF16(client_jid.substr(0, client_jid.find('/')));
-  gtk_label_set_text(
-      GTK_LABEL(message_),
-      l10n_util::GetStringFUTF8(IDS_MESSAGE_SHARED, username).c_str());
+  std::string message_text =
+      l10n_util::GetStringFUTF8(IDS_MESSAGE_SHARED, formatted_email());
+  gtk_label_set_text(GTK_LABEL(message_.get()), message_text.c_str());
+  SetDialogPosition();
   gtk_window_present(window);
 }
 
 void DisconnectWindowGtk::OnClicked(GtkButton* button) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DisconnectSession(kDisconnectClickedReason);
+}
 
-  if (client_session_control_.get()) {
-    client_session_control_->DisconnectSession(protocol::OK);
+void DisconnectWindowGtk::OnToggleClicked(GtkButton* button) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  ToggleAlignment();
+  UpdateToggleButtonText();
+  if (toggle_button_) {
+    gtk_widget_set_sensitive(toggle_button_.get(), FALSE);
+  }
+  SetDialogPosition();
+}
+
+void DisconnectWindowGtk::OnCooldownExpired() {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  if (toggle_button_) {
+    gtk_widget_set_sensitive(toggle_button_.get(), TRUE);
   }
 }
 
-gboolean DisconnectWindowGtk::OnDelete(GtkWidget* window, GdkEvent* event) {
+void DisconnectWindowGtk::UpdateToggleButtonText() {
+  if (toggle_button_) {
+    gtk_button_set_label(
+        GTK_BUTTON(toggle_button_.get()),
+        (current_anchor() == WindowAnchor::kBottom) ? kUpArrow : kDownArrow);
+    int string_id = (current_anchor() == WindowAnchor::kBottom)
+                        ? IDS_MOVE_TO_TOP_BUTTON
+                        : IDS_MOVE_TO_BOTTOM_BUTTON;
+    std::string text = l10n_util::GetStringUTF8(string_id);
+    gtk_widget_set_tooltip_text(toggle_button_.get(), text.c_str());
+
+#if GTK_CHECK_VERSION(3, 90, 0)
+    gtk_accessible_update_property(GTK_ACCESSIBLE(toggle_button_.get()),
+                                   GTK_ACCESSIBLE_PROPERTY_LABEL, text.c_str(),
+                                   -1);
+#else
+    AtkObject* atk_obj = gtk_widget_get_accessible(toggle_button_.get());
+    if (atk_obj) {
+      atk_object_set_name(atk_obj, text.c_str());
+    }
+#endif
+  }
+}
+
+void DisconnectWindowGtk::SetDialogPosition() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  if (client_session_control_.get()) {
-    client_session_control_->DisconnectSession(protocol::OK);
+#if !GTK_CHECK_VERSION(3, 90, 0)
+  if (!disconnect_window_) {
+    return;
   }
+
+  GdkDisplay* display = gtk_widget_get_display(disconnect_window_.get());
+  if (!display) {
+    return;
+  }
+
+  GdkMonitor* monitor = nullptr;
+  GdkWindow* gdk_window = gtk_widget_get_window(disconnect_window_.get());
+  if (gdk_window) {
+    monitor = gdk_display_get_monitor_at_window(display, gdk_window);
+  }
+  if (!monitor) {
+    monitor = gdk_display_get_primary_monitor(display);
+  }
+  if (!monitor) {
+    monitor = gdk_display_get_monitor(display, 0);
+  }
+  if (!monitor) {
+    return;
+  }
+
+  GdkRectangle geometry;
+  gdk_monitor_get_geometry(monitor, &geometry);
+
+  int width = current_width_;
+  int height = current_height_;
+  if (width == 0 || height == 0) {
+    GtkRequisition requisition;
+    gtk_widget_get_preferred_size(disconnect_window_.get(), nullptr,
+                                  &requisition);
+    width = requisition.width;
+    height = requisition.height;
+    current_width_ = width;
+    current_height_ = height;
+  }
+
+  int left = geometry.x + std::max(0, (geometry.width - width) / 2);
+  int top = (current_anchor() == WindowAnchor::kTop)
+                ? (geometry.y + kTopMargin)
+                : (geometry.y + geometry.height - height - kBottomMargin);
+
+  SetExpectedPosition(left, top);
+  gtk_window_move(GTK_WINDOW(disconnect_window_.get()), left, top);
+
+  g_object_set_data(G_OBJECT(disconnect_window_.get()), kCurrentWidthKey,
+                    GINT_TO_POINTER(current_width_));
+  g_object_set_data(G_OBJECT(disconnect_window_.get()), kCurrentHeightKey,
+                    GINT_TO_POINTER(current_height_));
+  g_object_set_data(G_OBJECT(disconnect_window_.get()), kExpectedXKey,
+                    GINT_TO_POINTER(*expected_x()));
+  g_object_set_data(G_OBJECT(disconnect_window_.get()), kExpectedYKey,
+                    GINT_TO_POINTER(*expected_y()));
+  g_object_set_data(G_OBJECT(disconnect_window_.get()), kRepositionAttemptsKey,
+                    GINT_TO_POINTER(consecutive_reposition_attempts()));
+#else
+  NOTIMPLEMENTED_LOG_ONCE()
+      << "Window positioning is not implemented for GTK4/Wayland.";
+#endif
+}
+
+#if !GTK_CHECK_VERSION(3, 90, 0)
+void DisconnectWindowGtk::OnMonitorsChanged(GdkScreen* screen) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  ResetRepositionAttempts();
+  SetDialogPosition();
+}
+
+gboolean DisconnectWindowGtk::OnWindowState(GtkWidget* window,
+                                            GdkEventWindowState* event) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  GtkWindow* gtk_window = GTK_WINDOW(window);
+  if ((event->changed_mask & GDK_WINDOW_STATE_ICONIFIED) &&
+      (event->new_window_state & GDK_WINDOW_STATE_ICONIFIED)) {
+    gtk_window_deiconify(gtk_window);
+    gtk_window_present(gtk_window);
+    ResetRepositionAttempts();
+    SetDialogPosition();
+  }
+  if ((event->changed_mask & GDK_WINDOW_STATE_ABOVE) &&
+      !(event->new_window_state & GDK_WINDOW_STATE_ABOVE)) {
+    gtk_window_set_keep_above(gtk_window, TRUE);
+  }
+  if ((event->changed_mask & GDK_WINDOW_STATE_STICKY) &&
+      !(event->new_window_state & GDK_WINDOW_STATE_STICKY)) {
+    gtk_window_stick(gtk_window);
+  }
+  return FALSE;
+}
+#endif
+
+gboolean DisconnectWindowGtk::OnDelete(GtkWidget* window, GdkEvent* event) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  DisconnectSession(kDisconnectDeletedReason);
   return TRUE;
 }
 
@@ -298,16 +457,26 @@ gboolean DisconnectWindowGtk::OnConfigure(GtkWidget* widget,
                                           GdkEventConfigure* event) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
-  // Only generate bitmaps if the size has actually changed.
-  if (event->width == current_width_ && event->height == current_height_) {
+  bool size_changed =
+      (event->width != current_width_ || event->height != current_height_);
+  if (size_changed) {
+    current_width_ = event->width;
+    current_height_ = event->height;
+    ResetRepositionAttempts();
+    SetDialogPosition();
     return FALSE;
   }
 
-  current_width_ = event->width;
-  current_height_ = event->height;
+  // If only the position changed (e.g. via window manager move shortcut or
+  // drag), snap the window back to its anchored position.
+  if (ShouldRepositionOnDisplacement(event->x, event->y)) {
+    SetDialogPosition();
+  } else {
+    g_object_set_data(G_OBJECT(disconnect_window_.get()),
+                      kRepositionAttemptsKey,
+                      GINT_TO_POINTER(consecutive_reposition_attempts()));
+  }
 
-  // gdk_window_set_back_pixmap() is not supported in GDK3, and
-  // background drawing is handled in OnDraw().
   return FALSE;
 }
 
@@ -315,15 +484,6 @@ gboolean DisconnectWindowGtk::OnDraw(GtkWidget* widget, cairo_t* cr) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   DrawBackground(cr, current_width_, current_height_);
-  return FALSE;
-}
-
-gboolean DisconnectWindowGtk::OnButtonPress(GtkWidget* widget,
-                                            GdkEventButton* event) {
-  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
-
-  gtk_window_begin_move_drag(GTK_WINDOW(disconnect_window_), event->button,
-                             event->x_root, event->y_root, event->time);
   return FALSE;
 }
 

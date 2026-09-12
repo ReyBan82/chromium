@@ -4,30 +4,39 @@
 
 #include "remoting/host/webauthn/remote_webauthn_caller_security_utils.h"
 
-#include "base/environment.h"
-#include "base/strings/string_piece_forward.h"
-#include "base/strings/utf_string_conversions.h"
+#include <optional>
+
+#include "base/base_paths.h"
+#include "base/logging.h"
+#include "base/notimplemented.h"
+#include "base/path_service.h"
+#include "base/process/process_handle.h"
 #include "build/build_config.h"
 
-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
+#if BUILDFLAG(IS_LINUX)
 #include "base/containers/fixed_flat_set.h"
+#endif
+
+#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_WIN)
 #include "base/files/file_path.h"
-#include "base/process/process_handle.h"
 #include "remoting/host/base/process_util.h"
+#endif
 
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
 
-#include <memory>
-#include <string>
-
-#include "base/logging.h"
 #include "base/win/scoped_handle.h"
-#include "remoting/host/win/trust_util.h"
+#include "base/win/trust_util.h"
 #endif
 
-#else  // !IS_LINUX && !IS_WIN
-#include "base/notreached.h"
+#if BUILDFLAG(IS_MAC)
+#include <Security/Security.h>
+#include <mach/kern_return.h>
+#include <unistd.h>
+
+#include <array>
+
+#include "remoting/host/mac/trust_util.h"
 #endif
 
 namespace remoting {
@@ -40,38 +49,20 @@ namespace {
 #elif BUILDFLAG(IS_LINUX)
 
 constexpr auto kAllowedCallerPrograms =
-    base::MakeFixedFlatSet<base::FilePath::StringPieceType>({
+    base::MakeFixedFlatSet<base::FilePath::StringViewType>({
         "/opt/google/chrome/chrome",
         "/opt/google/chrome-beta/chrome",
+        "/opt/google/chrome-canary/chrome",
         "/opt/google/chrome-unstable/chrome",
     });
 
 #elif BUILDFLAG(IS_WIN)
 
-// Names of environment variables that store the path to directories where apps
-// are installed.
-constexpr auto kAppsDirectoryEnvVars =
-    base::MakeFixedFlatSet<base::StringPiece>({
-        "PROGRAMFILES",
+#elif BUILDFLAG(IS_MAC)
 
-        // May happen if Chrome is upgraded from a 32-bit version.
-        "PROGRAMFILES(X86)",
-
-        // Refers to "C:\Program Files" if current process is 32-bit.
-        "ProgramW6432",
-
-        // For per-user installations.
-        "LOCALAPPDATA",
-    });
-
-// Relative to the Program Files directory.
-constexpr auto kAllowedCallerPrograms =
-    base::MakeFixedFlatSet<base::FilePath::StringPieceType>({
-        L"Google\\Chrome\\Application\\chrome.exe",
-        L"Google\\Chrome Beta\\Application\\chrome.exe",
-        L"Google\\Chrome SxS\\Application\\chrome.exe",
-        L"Google\\Chrome Dev\\Application\\chrome.exe",
-    });
+constexpr auto kAllowedIdentifiers = std::to_array<const std::string_view>(
+    {"com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.dev",
+     "com.google.Chrome.canary"});
 
 #endif
 
@@ -91,65 +82,47 @@ bool IsLaunchedByTrustedProcess() {
   base::FilePath parent_image_path = GetProcessImagePath(parent_pid);
   return kAllowedCallerPrograms.contains(parent_image_path.value());
 #elif BUILDFLAG(IS_WIN)
-  auto environment = base::Environment::Create();
-
-  base::ProcessId parent_pid =
-      base::GetParentProcessId(base::GetCurrentProcessHandle());
-  base::FilePath parent_image_path = GetProcessImagePath(parent_pid);
-
-  // On Windows, Chrome launches native messaging hosts via cmd for stdio
-  // communication. See:
-  //   chrome/browser/extensions/api/messaging/native_process_launcher_win.cc
-  // Therefore, we check if the parent is cmd and skip to the grandparent if
-  // that's the case. It's possible to do stdio communications without cmd, so
-  // we don't require the parent to always be cmd.
-
-  // COMSPEC is generally "C:\WINDOWS\system32\cmd.exe". Note that the casing
-  // does not match the actual file path's casing.
-  std::string comspec_utf8;
-  if (environment->GetVar("COMSPEC", &comspec_utf8)) {
-    base::FilePath::StringType comspec = base::UTF8ToWide(comspec_utf8);
-    if (base::FilePath::CompareEqualIgnoreCase(parent_image_path.value(),
-                                               comspec)) {
-      // Skip to the grandparent.
-      base::win::ScopedHandle parent_handle(
-          OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, parent_pid));
-      if (parent_handle.is_valid()) {
-        parent_pid = base::GetParentProcessId(parent_handle.Get());
-        parent_image_path = GetProcessImagePath(parent_pid);
-      } else {
-        PLOG(ERROR) << "Failed to query parent info.";
-      }
-    }
-  } else {
-    LOG(ERROR) << "COMSPEC is not set";
+  base::ProcessId launcher_pid = GetLauncherProcessIdFromStdioPipes();
+  if (launcher_pid == base::kNullProcessId) {
+    LOG(ERROR) << "Failed to resolve launcher PID from stdio pipes.";
+    return false;
   }
 
-  // Check if the caller's image path is allowlisted.
-  for (const base::StringPiece& apps_dir_env_var : kAppsDirectoryEnvVars) {
-    std::string apps_dir_path_utf8;
-    if (!environment->GetVar(apps_dir_env_var, &apps_dir_path_utf8)) {
-      continue;
-    }
-    auto apps_dir_path = base::FilePath::FromUTF8Unsafe(apps_dir_path_utf8);
-    if (!apps_dir_path.IsParent(parent_image_path)) {
-      continue;
-    }
-    for (const base::FilePath::StringPieceType& allowed_caller_program :
-         kAllowedCallerPrograms) {
-      base::FilePath allowed_caller_program_full_path =
-          apps_dir_path.Append(allowed_caller_program);
-      if (base::FilePath::CompareEqualIgnoreCase(
-              parent_image_path.value(),
-              allowed_caller_program_full_path.value())) {
-        // Caller's path is allowlisted, now also check if it's properly signed.
-        return IsBinaryTrusted(parent_image_path);
-      }
-    }
+  base::FilePath launcher_image_path = GetProcessImagePath(launcher_pid);
+  if (launcher_image_path.empty()) {
+    LOG(ERROR) << "Failed to get launcher process image path.";
+    return false;
   }
-  // Caller's path is not allowlisted.
-  return false;
-#else  // !IS_LINUX && !IS_WIN
+
+  return base::win::IsBinaryTrusted(launcher_image_path);
+#elif BUILDFLAG(IS_MAC)
+  // TODO: crbug.com/410903981 - move away from PID-based security checks, which
+  // might be susceptible of PID reuse attacks, if Apple provides APIs to query
+  // parent process audit token without using a PPID.
+  base::ProcessId parent_pid = getppid();
+  kern_return_t kern_return;
+  task_name_t task;
+
+  kern_return = task_name_for_pid(mach_task_self(), parent_pid, &task);
+  if (kern_return != KERN_SUCCESS) {
+    LOG(ERROR) << "Failed to get task name for parent PID " << parent_pid
+               << ": " << kern_return;
+    return false;
+  }
+
+  mach_msg_type_number_t size = TASK_AUDIT_TOKEN_COUNT;
+  audit_token_t audit_token;
+  kern_return =
+      task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&audit_token, &size);
+  mach_port_deallocate(mach_task_self(), task);
+  if (kern_return != KERN_SUCCESS) {
+    LOG(ERROR) << "Failed to get audit token for parent PID " << parent_pid
+               << ": " << kern_return;
+    return false;
+  }
+
+  return IsProcessTrusted(audit_token, kAllowedIdentifiers);
+#else  // Unsupported platform
   NOTIMPLEMENTED();
   return true;
 #endif

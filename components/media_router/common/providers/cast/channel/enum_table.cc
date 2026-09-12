@@ -5,6 +5,9 @@
 #include "components/media_router/common/providers/cast/channel/enum_table.h"
 
 #include <cstdlib>
+#include <string_view>
+
+#include "base/compiler_specific.h"
 
 namespace cast_util {
 
@@ -18,27 +21,26 @@ static_assert(sizeof(GenericEnumTableEntry) == 16,
 
 // static
 const GenericEnumTableEntry* GenericEnumTableEntry::FindByString(
-    const GenericEnumTableEntry data[],
-    std::size_t size,
-    base::StringPiece str) {
-  for (std::size_t i = 0; i < size; i++) {
-    if (data[i].length == str.length() &&
-        std::memcmp(data[i].chars, str.data(), str.length()) == 0)
-      return &data[i];
+    base::span<const GenericEnumTableEntry> data,
+    std::string_view str) {
+  for (const auto& entry : data) {
+    if (entry.has_str() && entry.str() == str) {
+      return &entry;
+    }
   }
   return nullptr;
 }
 
 // static
-absl::optional<base::StringPiece> GenericEnumTableEntry::FindByValue(
-    const GenericEnumTableEntry data[],
-    std::size_t size,
+std::optional<std::string_view> GenericEnumTableEntry::FindByValue(
+    base::span<const GenericEnumTableEntry> data,
     int value) {
-  for (std::size_t i = 0; i < size; i++) {
-    if (data[i].value == value && data[i].has_str())
-      return data[i].str();
+  for (const auto& entry : data) {
+    if (entry.value == value && entry.has_str()) {
+      return entry.str();
+    }
   }
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 }  // namespace cast_util

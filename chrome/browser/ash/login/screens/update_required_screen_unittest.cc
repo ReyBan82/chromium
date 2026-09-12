@@ -5,29 +5,28 @@
 #include "chrome/browser/ash/login/screens/update_required_screen.h"
 
 #include <memory>
+#include <optional>
 
 #include "ash/constants/ash_switches.h"
+#include "ash/login/test_login_screen.h"
 #include "base/command_line.h"
 #include "base/functional/callback_helpers.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/scoped_mock_time_message_loop_task_runner.h"
 #include "chrome/browser/ash/login/screens/mock_error_screen.h"
 #include "chrome/browser/ash/login/startup_utils.h"
 #include "chrome/browser/ash/login/wizard_context.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
+#include "chrome/browser/ash/policy/core/browser_policy_connector_ash.h"
 #include "chrome/browser/ash/settings/scoped_testing_cros_settings.h"
-#include "chrome/browser/ui/ash/test_login_screen.h"
 #include "chrome/browser/ui/webui/ash/login/fake_update_required_screen_handler.h"
-#include "chrome/test/base/scoped_testing_local_state.h"
 #include "chrome/test/base/testing_browser_process.h"
 #include "chromeos/ash/components/dbus/update_engine/fake_update_engine_client.h"
 #include "chromeos/ash/components/dbus/update_engine/update_engine_client.h"
 #include "chromeos/ash/components/install_attributes/stub_install_attributes.h"
 #include "chromeos/ash/components/network/network_handler_test_helper.h"
-#include "chromeos/ash/components/network/portal_detector/mock_network_portal_detector.h"
-#include "chromeos/ash/components/network/portal_detector/network_portal_detector.h"
+#include "chromeos/ash/components/settings/cros_settings.h"
 #include "content/public/test/browser_task_environment.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace ash {
 namespace {
@@ -38,8 +37,7 @@ using ::testing::Return;
 
 class UpdateRequiredScreenUnitTest : public testing::Test {
  public:
-  UpdateRequiredScreenUnitTest()
-      : local_state_(TestingBrowserProcess::GetGlobal()) {}
+  UpdateRequiredScreenUnitTest() = default;
 
   UpdateRequiredScreenUnitTest(const UpdateRequiredScreenUnitTest&) = delete;
   UpdateRequiredScreenUnitTest& operator=(const UpdateRequiredScreenUnitTest&) =
@@ -53,10 +51,6 @@ class UpdateRequiredScreenUnitTest : public testing::Test {
 
   // testing::Test:
   void SetUp() override {
-    // Configure the browser to use Hands-Off Enrollment.
-    base::CommandLine::ForCurrentProcess()->AppendSwitchASCII(
-        switches::kEnterpriseEnableZeroTouchEnrollment, "hands-off");
-
     // Initialize objects needed by `UpdateRequiredScreen`.
     wizard_context_ = std::make_unique<WizardContext>();
     fake_view_ = std::make_unique<FakeUpdateRequiredScreenHandler>();
@@ -65,18 +59,14 @@ class UpdateRequiredScreenUnitTest : public testing::Test {
     network_handler_test_helper_ = std::make_unique<NetworkHandlerTestHelper>();
     network_handler_test_helper_->AddDefaultProfiles();
 
-    mock_network_portal_detector_ = new MockNetworkPortalDetector();
-    network_portal_detector::SetNetworkPortalDetector(
-        mock_network_portal_detector_);
-    mock_error_screen_ =
-        std::make_unique<MockErrorScreen>(mock_error_view_.AsWeakPtr());
-
-    // Ensure proper behavior of `UpdateRequiredScreen`'s supporting objects.
-    EXPECT_CALL(*mock_network_portal_detector_, IsEnabled())
-        .Times(AnyNumber())
-        .WillRepeatedly(Return(false));
+    mock_error_screen_ = std::make_unique<MockErrorScreen>(
+        TestingBrowserProcess::GetGlobal()->local_state(),
+        mock_error_view_.AsWeakPtr());
 
     update_required_screen_ = std::make_unique<UpdateRequiredScreen>(
+        TestingBrowserProcess::GetGlobal()
+            ->platform_part()
+            ->browser_policy_connector_ash(),
         fake_view_.get()->AsWeakPtr(), mock_error_screen_.get(),
         base::DoNothing());
 
@@ -91,7 +81,6 @@ class UpdateRequiredScreenUnitTest : public testing::Test {
     update_required_screen_.reset();
     mock_error_screen_.reset();
 
-    network_portal_detector::Shutdown();
     network_handler_test_helper_.reset();
     UpdateEngineClient::Shutdown();
   }
@@ -106,17 +95,14 @@ class UpdateRequiredScreenUnitTest : public testing::Test {
   MockErrorScreenView mock_error_view_;
   std::unique_ptr<MockErrorScreen> mock_error_screen_;
   std::unique_ptr<WizardContext> wizard_context_;
-  // Will be deleted in `network_portal_detector::Shutdown()`.
-  MockNetworkPortalDetector* mock_network_portal_detector_;
   // Will be deleted in `DBusThreadManager::Shutdown()`.
-  FakeUpdateEngineClient* fake_update_engine_client_;
+  raw_ptr<FakeUpdateEngineClient, DanglingUntriaged> fake_update_engine_client_;
   // Initializes NetworkHandler and required DBus clients.
   std::unique_ptr<NetworkHandlerTestHelper> network_handler_test_helper_;
 
  private:
   // Test versions of core browser infrastructure.
   content::BrowserTaskEnvironment task_environment_;
-  ScopedTestingLocalState local_state_;
   ScopedTestingCrosSettings scoped_testing_cros_settings_;
   // This is used for `GetEnterpriseDisplayDomain`.
   ScopedStubInstallAttributes test_install_attributes_;
@@ -132,7 +118,7 @@ TEST_F(UpdateRequiredScreenUnitTest, HandlesNoUpdate) {
   update_required_screen_->Show(wizard_context_.get());
   EXPECT_EQ(fake_view_->ui_state(),
             UpdateRequiredView::UPDATE_REQUIRED_MESSAGE);
-  base::Value::List args;
+  base::ListValue args;
   args.Append(kUserActionUpdateButtonClicked);
   update_required_screen_->HandleUserAction(args);
 
@@ -151,7 +137,7 @@ TEST_F(UpdateRequiredScreenUnitTest, HandlesUpdateExists) {
   update_required_screen_->Show(wizard_context_.get());
   EXPECT_EQ(fake_view_->ui_state(),
             UpdateRequiredView::UPDATE_REQUIRED_MESSAGE);
-  base::Value::List args;
+  base::ListValue args;
   args.Append(kUserActionUpdateButtonClicked);
   update_required_screen_->HandleUserAction(args);
 
@@ -182,7 +168,7 @@ TEST_F(UpdateRequiredScreenUnitTest, HandlesCellularPermissionNeeded) {
   EXPECT_EQ(fake_view_->ui_state(),
             UpdateRequiredView::UPDATE_REQUIRED_MESSAGE);
   {
-    base::Value::List args;
+    base::ListValue args;
     args.Append(kUserActionUpdateButtonClicked);
     update_required_screen_->HandleUserAction(args);
   }
@@ -197,7 +183,7 @@ TEST_F(UpdateRequiredScreenUnitTest, HandlesCellularPermissionNeeded) {
   SetUpdateEngineStatus(update_engine::Operation::NEED_PERMISSION_TO_UPDATE);
 
   {
-    base::Value::List args;
+    base::ListValue args;
     args.Append(kUserActionAcceptUpdateOverCellular);
     update_required_screen_->HandleUserAction(args);
   }

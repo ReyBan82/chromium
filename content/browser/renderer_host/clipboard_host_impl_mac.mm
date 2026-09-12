@@ -9,7 +9,6 @@
 
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
-#include "base/mac/scoped_nsobject.h"
 #include "base/strings/sys_string_conversions.h"
 #include "content/public/browser/browser_thread.h"
 #import "ui/base/cocoa/find_pasteboard.h"
@@ -25,12 +24,51 @@ static constexpr size_t kMaxFindPboardStringLength = 4096;
 }  // namespace
 
 void ClipboardHostImpl::WriteStringToFindPboard(const std::u16string& text) {
+  if (!IsWriteAllowed()) {
+    return;
+  }
   if (text.length() <= kMaxFindPboardStringLength) {
     NSString* nsText = base::SysUTF16ToNSString(text);
     if (nsText) {
       [[FindPasteboard sharedInstance] setFindText:nsText];
     }
   }
+}
+
+void ClipboardHostImpl::GetPlatformPermissionState(
+    GetPlatformPermissionStateCallback callback) {
+  // Check macOS system privacy settings for programmatic clipboard access using
+  // the accessBehavior property available in macOS 15.4+. These settings only
+  // affect programmatic access - direct user actions like ⌘V always work.
+  blink::mojom::PlatformClipboardPermissionState state =
+      blink::mojom::PlatformClipboardPermissionState::kAsk;
+
+  if (@available(macOS 15.4, *)) {
+    NSPasteboardAccessBehavior access_behavior =
+        [NSPasteboard generalPasteboard].accessBehavior;
+
+    switch (access_behavior) {
+      case NSPasteboardAccessBehaviorAlwaysAllow:
+        state = blink::mojom::PlatformClipboardPermissionState::kAllow;
+        break;
+      case NSPasteboardAccessBehaviorAlwaysDeny:
+        state = blink::mojom::PlatformClipboardPermissionState::kDeny;
+        break;
+      case NSPasteboardAccessBehaviorAsk:
+        state = blink::mojom::PlatformClipboardPermissionState::kAsk;
+        break;
+      case NSPasteboardAccessBehaviorDefault:
+        // Default behavior for the General pasteboard is to ask upon
+        // programmatic access
+        state = blink::mojom::PlatformClipboardPermissionState::kAsk;
+        break;
+    }
+  } else {
+    // The behavior of older macOS versions is effectively kAllow.
+    state = blink::mojom::PlatformClipboardPermissionState::kAllow;
+  }
+
+  std::move(callback).Run(state);
 }
 
 }  // namespace content

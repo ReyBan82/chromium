@@ -4,91 +4,187 @@
 
 #include "components/autofill/core/browser/metrics/payments/card_unmask_authentication_metrics.h"
 
-#include <string>
+#include <string_view>
 
+#include "base/check_op.h"
 #include "base/metrics/histogram_functions.h"
+#include "base/notreached.h"
+#include "base/strings/strcat.h"
+#include "base/time/time.h"
+#include "components/autofill/core/browser/data_model/payments/credit_card.h"
 #include "components/autofill/core/browser/metrics/autofill_metrics.h"
+#include "components/autofill/core/browser/payments/card_unmask_challenge_option.h"
 
 namespace autofill::autofill_metrics {
 
 void LogCvcAuthAttempt(CreditCard::RecordType card_type) {
-  std::string card_type_histogram_string =
+  std::string_view card_type_histogram_string =
       AutofillMetrics::GetHistogramStringForCardType(card_type);
   base::UmaHistogramBoolean(
-      "Autofill.CvcAuth" + card_type_histogram_string + ".Attempt", true);
+      base::StrCat(
+          {"Autofill.CvcAuth", card_type_histogram_string, ".Attempt"}),
+      true);
 }
 
 void LogCvcAuthResult(CreditCard::RecordType card_type, CvcAuthEvent event) {
-  std::string card_type_histogram_string =
+  std::string_view card_type_histogram_string =
       AutofillMetrics::GetHistogramStringForCardType(card_type);
   base::UmaHistogramEnumeration(
-      "Autofill.CvcAuth" + card_type_histogram_string + ".Result", event);
+      base::StrCat({"Autofill.CvcAuth", card_type_histogram_string, ".Result"}),
+      event);
 }
 
 void LogCvcAuthRetryableError(CreditCard::RecordType card_type,
                               CvcAuthEvent event) {
-  std::string card_type_histogram_string =
+  std::string_view card_type_histogram_string =
       AutofillMetrics::GetHistogramStringForCardType(card_type);
   base::UmaHistogramEnumeration(
-      "Autofill.CvcAuth" + card_type_histogram_string + ".RetryableError",
+      base::StrCat(
+          {"Autofill.CvcAuth", card_type_histogram_string, ".RetryableError"}),
       event);
 }
 
-void LogOtpAuthAttempt() {
-  base::UmaHistogramBoolean("Autofill.OtpAuth.SmsOtp.Attempt", true);
+void LogOtpAuthAttempt(CreditCard::RecordType card_type,
+                       CardUnmaskChallengeOptionType type) {
+  base::UmaHistogramBoolean(
+      base::StrCat({"Autofill.OtpAuth",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type), ".Attempt"}),
+      true);
 }
 
-void LogOtpAuthResult(OtpAuthEvent event) {
+void LogOtpAuthResult(CreditCard::RecordType card_type,
+                      OtpAuthEvent event,
+                      CardUnmaskChallengeOptionType type) {
   DCHECK_LE(event, OtpAuthEvent::kMaxValue);
-  base::UmaHistogramEnumeration("Autofill.OtpAuth.SmsOtp.Result", event);
+  base::UmaHistogramEnumeration(
+      base::StrCat({"Autofill.OtpAuth",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type), ".Result"}),
+      event);
 }
 
-void LogOtpAuthRetriableError(OtpAuthEvent event) {
+void LogOtpAuthRetriableError(CreditCard::RecordType card_type,
+                              OtpAuthEvent event,
+                              CardUnmaskChallengeOptionType type) {
   DCHECK_LE(event, OtpAuthEvent::kMaxValue);
-  base::UmaHistogramEnumeration("Autofill.OtpAuth.SmsOtp.RetriableError",
-                                event);
+  base::UmaHistogramEnumeration(
+      base::StrCat({"Autofill.OtpAuth",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type), ".RetriableError"}),
+      event);
 }
 
-void LogOtpAuthUnmaskCardRequestLatency(const base::TimeDelta& duration) {
+void LogOtpAuthUnmaskCardRequestLatency(CreditCard::RecordType card_type,
+                                        base::TimeDelta duration,
+                                        CardUnmaskChallengeOptionType type) {
   base::UmaHistogramLongTimes(
-      "Autofill.OtpAuth.SmsOtp.RequestLatency.UnmaskCardRequest", duration);
-}
-
-void LogOtpAuthSelectChallengeOptionRequestLatency(
-    const base::TimeDelta& duration) {
-  base::UmaHistogramLongTimes(
-      "Autofill.OtpAuth.SmsOtp.RequestLatency.SelectChallengeOptionRequest",
+      base::StrCat({"Autofill.OtpAuth",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type),
+                    ".RequestLatency.UnmaskCardRequest"}),
       duration);
 }
 
-void LogOtpInputDialogShown() {
-  base::UmaHistogramBoolean("Autofill.OtpInputDialog.SmsOtp.Shown", true);
+void LogOtpAuthSelectChallengeOptionRequestLatency(
+    CreditCard::RecordType card_type,
+    base::TimeDelta duration,
+    CardUnmaskChallengeOptionType type) {
+  base::UmaHistogramLongTimes(
+      base::StrCat({"Autofill.OtpAuth",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type),
+                    ".RequestLatency.SelectChallengeOptionRequest"}),
+      duration);
 }
 
-void LogOtpInputDialogResult(OtpInputDialogResult result,
-                             bool temporary_error_shown) {
+void LogOtpInputDialogShown(CreditCard::RecordType card_type,
+                            CardUnmaskChallengeOptionType type) {
+  base::UmaHistogramBoolean(
+      base::StrCat({"Autofill.OtpInputDialog",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type), ".Shown"}),
+      true);
+}
+
+void LogOtpInputDialogResult(CreditCard::RecordType card_type,
+                             OtpInputDialogResult result,
+                             bool temporary_error_shown,
+                             CardUnmaskChallengeOptionType type) {
   DCHECK_GT(result, OtpInputDialogResult::kUnknown);
   DCHECK_LE(result, OtpInputDialogResult::kMaxValue);
-  std::string temporary_error_shown_suffix = temporary_error_shown
-                                                 ? ".WithPreviousTemporaryError"
-                                                 : ".WithNoTemporaryError";
-  base::UmaHistogramEnumeration("Autofill.OtpInputDialog.SmsOtp.Result",
-                                result);
+  std::string_view temporary_error_shown_suffix =
+      temporary_error_shown ? ".WithPreviousTemporaryError"
+                            : ".WithNoTemporaryError";
   base::UmaHistogramEnumeration(
-      "Autofill.OtpInputDialog.SmsOtp.Result" + temporary_error_shown_suffix,
+      base::StrCat({"Autofill.OtpInputDialog",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type), ".Result"}),
+      result);
+  base::UmaHistogramEnumeration(
+      base::StrCat({"Autofill.OtpInputDialog",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type), ".Result",
+                    temporary_error_shown_suffix}),
       result);
 }
 
-void LogOtpInputDialogErrorMessageShown(OtpInputDialogError error) {
+void LogOtpInputDialogErrorMessageShown(CreditCard::RecordType card_type,
+                                        OtpInputDialogError error,
+                                        CardUnmaskChallengeOptionType type) {
   DCHECK_GT(error, OtpInputDialogError::kUnknown);
   DCHECK_LE(error, OtpInputDialogError::kMaxValue);
   base::UmaHistogramEnumeration(
-      "Autofill.OtpInputDialog.SmsOtp.ErrorMessageShown", error);
+      base::StrCat({"Autofill.OtpInputDialog",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type), ".ErrorMessageShown"}),
+      error);
 }
 
-void LogOtpInputDialogNewOtpRequested() {
-  base::UmaHistogramBoolean("Autofill.OtpInputDialog.SmsOtp.NewOtpRequested",
-                            true);
+void LogOtpInputDialogNewOtpRequested(CreditCard::RecordType card_type,
+                                      CardUnmaskChallengeOptionType type) {
+  base::UmaHistogramBoolean(
+      base::StrCat({"Autofill.OtpInputDialog",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".", GetOtpAuthType(type), ".NewOtpRequested"}),
+      true);
+}
+
+std::string_view GetOtpAuthType(CardUnmaskChallengeOptionType type) {
+  if (type == CardUnmaskChallengeOptionType::kSmsOtp) {
+    return "SmsOtp";
+  } else if (type == CardUnmaskChallengeOptionType::kEmailOtp) {
+    return "EmailOtp";
+  }
+  NOTREACHED();
+}
+
+void LogRiskBasedAuthAttempt(CreditCard::RecordType card_type) {
+  std::string_view card_type_histogram_string =
+      AutofillMetrics::GetHistogramStringForCardType(card_type);
+  base::UmaHistogramBoolean(
+      base::StrCat(
+          {"Autofill.RiskBasedAuth", card_type_histogram_string, ".Attempt"}),
+      true);
+}
+
+void LogRiskBasedAuthResult(CreditCard::RecordType card_type,
+                            RiskBasedAuthEvent event) {
+  std::string_view card_type_histogram_string =
+      AutofillMetrics::GetHistogramStringForCardType(card_type);
+  base::UmaHistogramEnumeration(
+      base::StrCat(
+          {"Autofill.RiskBasedAuth", card_type_histogram_string, ".Result"}),
+      event);
+}
+
+void LogRiskBasedAuthLatency(base::TimeDelta duration,
+                             CreditCard::RecordType card_type) {
+  base::UmaHistogramLongTimes(
+      base::StrCat({"Autofill.RiskBasedAuth",
+                    AutofillMetrics::GetHistogramStringForCardType(card_type),
+                    ".Latency"}),
+      duration);
 }
 
 }  // namespace autofill::autofill_metrics

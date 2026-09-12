@@ -8,11 +8,11 @@
 
 #include "ash/shell.h"
 #include "ash/test/ash_test_base.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/simple_test_tick_clock.h"
 #include "base/time/time.h"
 #include "build/build_config.h"
 #include "chrome/browser/ash/accessibility/accessibility_manager.h"
-#include "chrome/browser/ui/browser.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "content/public/test/browser_test.h"
@@ -38,7 +38,7 @@ class TouchExplorationTest : public InProcessBrowserTest {
   TouchExplorationTest(const TouchExplorationTest&) = delete;
   TouchExplorationTest& operator=(const TouchExplorationTest&) = delete;
 
-  ~TouchExplorationTest() override {}
+  ~TouchExplorationTest() override = default;
 
  protected:
   void SetUpOnMainThread() override {
@@ -47,7 +47,7 @@ class TouchExplorationTest : public InProcessBrowserTest {
     // SetUp. The creation involves sending a resize message to the renderer
     // process. Here we wait for the resize ack to be received, because
     // currently WindowEventDispatcher has code to hold touch and mouse
-    // move events until resize is complete (crbug.com/384342) which
+    // move events until resize is complete (crbug.com/41114337) which
     // interferes with this test.
     content::WebContents* web_contents =
         browser()->tab_strip_model()->GetActiveWebContents();
@@ -69,14 +69,14 @@ class TouchExplorationTest : public InProcessBrowserTest {
   base::TimeTicks Now() { return simulated_clock_->NowTicks(); }
 
   ui::GestureDetector::Config gesture_detector_config_;
-  base::SimpleTestTickClock* simulated_clock_;
-  aura::Window* root_window_;
+  raw_ptr<base::SimpleTestTickClock> simulated_clock_;
+  raw_ptr<aura::Window> root_window_;
   std::unique_ptr<ui::test::TestEventHandler> event_handler_;
 };
 
 // This test turns the touch exploration mode off and confirms that events
 // aren't modified.
-// Disabled: crbug.com/422943
+// Disabled: crbug.com/41137027
 IN_PROC_BROWSER_TEST_F(TouchExplorationTest,
                        DISABLED_NoRewritingEventsWhenOff) {
   SwitchTouchExplorationMode(false);
@@ -84,7 +84,7 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest,
 
   base::TimeTicks initial_time = Now();
   ui::TouchEvent initial_press(
-      ui::ET_TOUCH_PRESSED, gfx::Point(99, 200), initial_time,
+      ui::EventType::kTouchPressed, gfx::Point(99, 200), initial_time,
       ui::PointerDetails(ui::EventPointerType::kTouch, 1));
   generator.Dispatch(&initial_press);
 
@@ -94,7 +94,7 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest,
   // gestures. Here, the touch move event is not important as a move, but
   // a way to create time advancement.
   ui::TouchEvent touch_time_advance(
-      ui::ET_TOUCH_MOVED, gfx::Point(100, 200),
+      ui::EventType::kTouchMoved, gfx::Point(100, 200),
       initial_time + gesture_detector_config_.double_tap_timeout +
           base::Milliseconds(1),
       ui::PointerDetails(ui::EventPointerType::kTouch, 1));
@@ -111,11 +111,11 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest,
 
   initial_time = Now();
   ui::TouchEvent second_initial_press(
-      ui::ET_TOUCH_PRESSED, gfx::Point(499, 600), initial_time,
+      ui::EventType::kTouchPressed, gfx::Point(499, 600), initial_time,
       ui::PointerDetails(ui::EventPointerType::kTouch, 2));
   generator.Dispatch(&second_initial_press);
   ui::TouchEvent second_touch_time_advance(
-      ui::ET_TOUCH_MOVED, gfx::Point(500, 600),
+      ui::EventType::kTouchMoved, gfx::Point(500, 600),
       initial_time + gesture_detector_config_.double_tap_timeout +
           base::Milliseconds(1),
       ui::PointerDetails(ui::EventPointerType::kTouch, 2));
@@ -126,14 +126,14 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest,
 
 // This test turns the touch exploration mode on and confirms that events get
 // rewritten.
-// Disabling due to failing over 10% of the time. (crbug.com/469119)
+// Disabling due to failing over 10% of the time. (crbug.com/40410441)
 IN_PROC_BROWSER_TEST_F(TouchExplorationTest, DISABLED_RewritesEventsWhenOn) {
   SwitchTouchExplorationMode(true);
   ui::test::EventGenerator generator(root_window_);
 
   base::TimeTicks initial_time = Now();
   ui::TouchEvent initial_press(
-      ui::ET_TOUCH_PRESSED, gfx::Point(100, 200), initial_time,
+      ui::EventType::kTouchPressed, gfx::Point(100, 200), initial_time,
       ui::PointerDetails(ui::EventPointerType::kTouch, 1));
   generator.Dispatch(&initial_press);
 
@@ -143,24 +143,25 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest, DISABLED_RewritesEventsWhenOn) {
   // gestures. Here, the touch move event is not important as a move, but
   // a way to create time advancement.
   ui::TouchEvent touch_time_advance(
-      ui::ET_TOUCH_MOVED, gfx::Point(100, 200),
+      ui::EventType::kTouchMoved, gfx::Point(100, 200),
       initial_time + gesture_detector_config_.double_tap_timeout +
           base::Milliseconds(1),
       ui::PointerDetails(ui::EventPointerType::kTouch, 1));
   generator.Dispatch(&touch_time_advance);
 
-  // Number of mouse events may be greater than 1 because of ET_MOUSE_ENTERED.
+  // Number of mouse events may be greater than 1 because of
+  // EventType::kMouseEntered.
   EXPECT_GT(event_handler_->num_mouse_events(), 0);
   EXPECT_EQ(0, event_handler_->num_touch_events());
   event_handler_->Reset();
 
   initial_time = Now();
   ui::TouchEvent second_initial_press(
-      ui::ET_TOUCH_PRESSED, gfx::Point(500, 600), initial_time,
+      ui::EventType::kTouchPressed, gfx::Point(500, 600), initial_time,
       ui::PointerDetails(ui::EventPointerType::kTouch, 2));
   generator.Dispatch(&second_initial_press);
   ui::TouchEvent second_touch_time_advance(
-      ui::ET_TOUCH_MOVED, gfx::Point(500, 600),
+      ui::EventType::kTouchMoved, gfx::Point(500, 600),
       initial_time + gesture_detector_config_.double_tap_timeout +
           base::Milliseconds(1),
       ui::PointerDetails(ui::EventPointerType::kTouch, 2));
@@ -174,7 +175,7 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest, DISABLED_RewritesEventsWhenOn) {
   // event can come after the browser is already partly shut down, which causes
   // the test to crash.
   ui::TouchEvent release_second_touch(
-      ui::ET_TOUCH_RELEASED, gfx::Point(500, 600),
+      ui::EventType::kTouchReleased, gfx::Point(500, 600),
       initial_time + gesture_detector_config_.double_tap_timeout +
           base::Milliseconds(1),
       ui::PointerDetails(ui::EventPointerType::kTouch, 2));
@@ -186,7 +187,7 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest, DISABLED_RewritesEventsWhenOn) {
 // This test makes sure that after the user clicks with split tap,
 // they continue to touch exploration mode if the original touch exploration
 // finger is still on the screen.
-// Disabled due to failing upwards of 50% of the time (crbug.com/475923)
+// Disabled due to failing upwards of 50% of the time (crbug.com/172341302)
 IN_PROC_BROWSER_TEST_F(TouchExplorationTest, DISABLED_SplitTapExplore) {
   SwitchTouchExplorationMode(true);
   ui::test::EventGenerator generator(root_window_);
@@ -202,7 +203,7 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest, DISABLED_SplitTapExplore) {
   // after the move.
   base::TimeTicks initial_time = Now();
   ui::TouchEvent initial_press(
-      ui::ET_TOUCH_PRESSED, gfx::Point(100, 200), initial_time,
+      ui::EventType::kTouchPressed, gfx::Point(100, 200), initial_time,
       ui::PointerDetails(ui::EventPointerType::kTouch, 1));
   generator.Dispatch(&initial_press);
   EXPECT_TRUE(cursor_client->IsMouseEventsEnabled());
@@ -211,7 +212,7 @@ IN_PROC_BROWSER_TEST_F(TouchExplorationTest, DISABLED_SplitTapExplore) {
   // Initiate touch explore by waiting for the tap timer timeout. Time is
   // advanced by sending a move event after the timeout period.
   ui::TouchEvent touch_time_advance(
-      ui::ET_TOUCH_MOVED, gfx::Point(100, 200),
+      ui::EventType::kTouchMoved, gfx::Point(100, 200),
       initial_time + gesture_detector_config_.double_tap_timeout +
           base::Milliseconds(1),
       ui::PointerDetails(ui::EventPointerType::kTouch, 1));

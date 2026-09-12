@@ -4,8 +4,8 @@
 
 chrome.mimeHandlerPrivate.getStreamInfo(function(streamInfo) {
   chrome.test.assertEq(
-      chrome.extension.getURL('well-known-mime.ics'), streamInfo.originalUrl);
-  var x = new XMLHttpRequest();
+      chrome.runtime.getURL('well-known-mime.ics'), streamInfo.originalUrl);
+  const x = new XMLHttpRequest();
   x.open('GET', streamInfo.streamUrl);
   x.onloadend = function() {
     chrome.runtime.sendMessage('finish test by checking SW URLs');

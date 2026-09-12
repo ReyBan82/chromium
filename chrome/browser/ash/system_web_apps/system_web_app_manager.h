@@ -7,23 +7,24 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
-#include "ash/webui/system_apps/public/system_web_app_type.h"
 #include "base/memory/raw_ptr.h"
+#include "base/memory/raw_ref.h"
 #include "base/memory/weak_ptr.h"
 #include "base/one_shot_event.h"
 #include "base/scoped_observation.h"
 #include "chrome/browser/ash/system_web_apps/system_web_app_background_task.h"
 #include "chrome/browser/ash/system_web_apps/system_web_app_icon_checker.h"
-#include "chrome/browser/ash/system_web_apps/types/system_web_app_delegate.h"
-#include "chrome/browser/ash/system_web_apps/types/system_web_app_delegate_map.h"
 #include "chrome/browser/web_applications/externally_managed_app_manager.h"
-#include "chrome/browser/web_applications/web_app_id.h"
 #include "chrome/browser/web_applications/web_app_ui_manager.h"
+#include "chromeos/ash/components/system_web_apps/system_web_app_type.h"
+#include "chromeos/ash/experiences/system_web_apps/types/system_web_app_delegate.h"
+#include "chromeos/ash/experiences/system_web_apps/types/system_web_app_delegate_map.h"
 #include "components/keyed_service/core/keyed_service.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/webapps/common/web_app_id.h"
 #include "url/gurl.h"
 
 namespace base {
@@ -38,6 +39,7 @@ namespace web_app {
 class WebAppProvider;
 }  // namespace web_app
 
+class ApplicationLocaleStorage;
 class PrefService;
 class Profile;
 
@@ -58,20 +60,29 @@ class SystemWebAppManager : public KeyedService,
     kOnVersionChange,
   };
 
+  // Number of attempts to install a given version & locale of the SWAs before
+  // bailing out.
+  static constexpr int kInstallFailureAttempts = 3;
+
   static constexpr char kSystemWebAppSessionHasBrokenIconsPrefName[] =
       "web_apps.system_web_app_has_broken_icons_in_session";
 
-  static constexpr char kInstallResultHistogramName[] =
-      "Webapp.InstallResult.System";
-  static constexpr char kInstallDurationHistogramName[] =
+  static constexpr char kFreshInstallDurationHistogramName[] =
       "Webapp.SystemApps.FreshInstallDuration";
   static constexpr char kIconsFixedOnReinstallHistogramName[] =
       "Webapp.SystemApps.IconsFixedOnReinstall";
+  static constexpr char kIconsAreHealthyInSessionHistogramName[] =
+      "Webapp.SystemApps.IconsAreHealthyInSession";
+  static constexpr char kInstallResultHistogramName[] =
+      "Webapp.InstallResult.System";
 
   // Returns whether the given app type is enabled.
   bool IsAppEnabled(SystemWebAppType type) const;
 
-  explicit SystemWebAppManager(Profile* profile);
+  // `application_locale_storage` must be non-null and must outlive `this`.
+  SystemWebAppManager(
+      const ApplicationLocaleStorage* application_locale_storage,
+      Profile* profile);
   SystemWebAppManager(const SystemWebAppManager&) = delete;
   SystemWebAppManager& operator=(const SystemWebAppManager&) = delete;
   ~SystemWebAppManager() override;
@@ -97,37 +108,43 @@ class SystemWebAppManager : public KeyedService,
   // KeyedService:
   void Shutdown() override;
 
-  // The SystemWebAppManager is disabled in browser tests by default because it
-  // pollutes the startup state (several tests expect the Extensions state to be
-  // clean).
+  // By default, we don't install system web apps in browser tests to avoid
+  // running installation tasks (inefficient because most browser tests don't
+  // need SWAs).
   //
-  // Call this to install apps for SystemWebApp specific tests, e.g if a test
-  // needs to open OS Settings.
+  // Call this to install default enabled system apps if the test needs them.
+  // (e.g. test opening OS Settings from an Ash views button).
   //
-  // This can also be called multiple times to simulate reinstallation from
-  // system restart, e.g.
+  // This can be called multiple times to simulate reinstallation from system
+  // restart.
   void InstallSystemAppsForTesting();
 
   // Returns the app id for the given System App |type|.
-  absl::optional<web_app::AppId> GetAppIdForSystemApp(
+  std::optional<webapps::AppId> GetAppIdForSystemApp(
       SystemWebAppType type) const;
 
   // Returns the System App Type for the given |app_id|.
-  absl::optional<SystemWebAppType> GetSystemAppTypeForAppId(
-      const web_app::AppId& app_id) const;
+  std::optional<SystemWebAppType> GetSystemAppTypeForAppId(
+      const webapps::AppId& app_id) const;
 
   // Returns the System App Delegate for the given App |type|.
   const SystemWebAppDelegate* GetSystemApp(SystemWebAppType type) const;
 
   // Returns the App Ids for all installed System Web Apps.
-  std::vector<web_app::AppId> GetAppIds() const;
+  std::vector<webapps::AppId> GetAppIds() const;
 
   // Returns whether |app_id| points to an installed System App.
-  bool IsSystemWebApp(const web_app::AppId& app_id) const;
+  bool IsSystemWebApp(const webapps::AppId& app_id) const;
 
-  // Returns the SystemWebAppType that should capture the navigation to
-  // |url|.
-  absl::optional<SystemWebAppType> GetCapturingSystemAppForURL(
+  // Returns the SystemWebAppType that should handle |url|.
+  //
+  // Under the hood, it returns the system web app whose `start_url` shares
+  // the same origin with the given |url|. It does not take
+  // `SystemWebAppDelegate::IsURLInSystemAppScope` into account.
+  std::optional<SystemWebAppType> GetSystemAppForURL(const GURL& url) const;
+
+  // Returns the SystemWebAppType that should capture the navigation to |url|.
+  std::optional<SystemWebAppType> GetCapturingSystemAppForURL(
       const GURL& url) const;
 
   const base::OneShotEvent& on_apps_synchronized() const {
@@ -170,7 +187,6 @@ class SystemWebAppManager : public KeyedService,
 
  protected:
   virtual const base::Version& CurrentVersion() const;
-  virtual const std::string& CurrentLocale() const;
   virtual bool PreviousSessionHadBrokenIcons() const;
   void StopBackgroundTasks();
 
@@ -187,7 +203,7 @@ class SystemWebAppManager : public KeyedService,
       const base::TimeTicks& install_start_time,
       std::map<GURL, web_app::ExternallyManagedAppManager::InstallResult>
           install_results,
-      std::map<GURL, bool> uninstall_results);
+      std::map<GURL, webapps::UninstallResultCode> uninstall_results);
   bool ShouldForceInstallApps() const;
   void UpdateLastAttemptedInfo();
   // Returns if we have exceeded the number of retry attempts allowed for this
@@ -207,13 +223,14 @@ class SystemWebAppManager : public KeyedService,
 
   // web_app::WebAppUiManagerObserver:
   void OnReadyToCommitNavigation(
-      const web_app::AppId& app_id,
+      const webapps::AppId& app_id,
       content::NavigationHandle* navigation_handle) override;
   void OnWebAppUiManagerDestroyed() override;
 
   void ConnectProviderToSystemWebAppDelegateMap(
       const SystemWebAppDelegateMap* system_web_apps_delegate_map) const;
 
+  const raw_ref<const ApplicationLocaleStorage> application_locale_storage_;
   raw_ptr<Profile> profile_;
   // SystemWebAppManager KeyedService depends on WebAppProvider KeyedService,
   // therefore this pointer is always valid.

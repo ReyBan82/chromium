@@ -5,9 +5,10 @@
 #ifndef COMPONENTS_PASSWORD_MANAGER_IOS_PASSWORD_MANAGER_JAVA_SCRIPT_FEATURE_H_
 #define COMPONENTS_PASSWORD_MANAGER_IOS_PASSWORD_MANAGER_JAVA_SCRIPT_FEATURE_H_
 
-#include "base/functional/callback.h"
-#include "base/no_destructor.h"
-#include "components/autofill/core/common/unique_ids.h"
+#import "base/functional/callback.h"
+#import "base/functional/callback_helpers.h"
+#import "base/no_destructor.h"
+#import "components/autofill/core/common/unique_ids.h"
 #import "ios/web/public/js_messaging/java_script_feature.h"
 
 namespace web {
@@ -46,18 +47,22 @@ class PasswordManagerJavaScriptFeature : public web::JavaScriptFeature {
                    autofill::FormRendererId form_identifier,
                    base::OnceCallback<void(NSString*)> callback);
 
-  // Fills in the form specified by |form| with the given |password|.
-  // |username| will be filled in if and only if |fill_username| is true.
+  // Fills in the form specified by `form` with the given `password`.
+  // `username` will be filled in if and only if `fill_username` is true.
   // Assumes JavaScript has been injected previously by calling
-  // |FindPasswordFormsInFrame| or |ExtractForm|. Calls |callback|
+  // `FindPasswordFormsInFrame` or `ExtractForm`. Calls `callback`
   // with YES if the filling of the password was successful, NO otherwise.
-  // |callback| cannot be null.
+  // `callback` cannot be null.
+  // If `trigger_submission` is true, the form submission is triggered after
+  // filling.
   void FillPasswordForm(web::WebFrame* frame,
                         const password_manager::FillData& form,
                         BOOL fill_username,
                         const std::string& username,
                         const std::string& password,
-                        base::OnceCallback<void(BOOL)> callback);
+                        base::OnceCallback<void(const base::Value*)> callback,
+                        BOOL trigger_submission,
+                        bool fallback_to_keystroke = false);
 
   // Fills new password field for (optional) |new_password_identifier| and for
   // (optional) confirm password field |confirm_password_identifier| in the form
@@ -69,6 +74,57 @@ class PasswordManagerJavaScriptFeature : public web::JavaScriptFeature {
                         autofill::FieldRendererId confirm_password_identifier,
                         NSString* generated_password,
                         base::OnceCallback<void(BOOL)> callback);
+
+  // Submits the password form with the given |form_identifier| in the |frame|.
+  void SubmitForm(web::WebFrame* frame,
+                  autofill::FormRendererId form_identifier,
+                  autofill::FieldRendererId password_identifier,
+                  bool fallback_to_keystroke = false);
+
+  // Sets the inputmode of the element to 'none'.
+  // |callback| is called with a boolean indicating if the element was found
+  // and the operation was successful.
+  void PreventKeyboardOnElement(web::WebFrame* frame,
+                                autofill::FieldRendererId field_identifier,
+                                base::OnceCallback<void(BOOL)> callback);
+
+  // Restores the inputmode of the element.
+  // |callback| is called with a boolean indicating success.
+  void RestoreKeyboardOnElement(web::WebFrame* frame,
+                                autofill::FieldRendererId field_identifier,
+                                base::OnceCallback<void(BOOL)> callback);
+
+  // Focuses the element.
+  // |callback| is called with a boolean indicating if the element was found
+  // and successfully focused.
+  void FocusElement(web::WebFrame* frame,
+                    autofill::FieldRendererId field_identifier,
+                    base::OnceCallback<void(BOOL)> callback);
+
+  // Scrolls the field into view and checks if its view area is visible.
+  // |callback| is called with the visibility result.
+  void ScrollAndCheckViewAreaVisible(web::WebFrame* frame,
+                                     autofill::FieldRendererId field_identifier,
+                                     base::OnceCallback<void(bool)> callback);
+
+  // Fills the field with the specified value.
+  // |callback| is called with the fill result.
+  void FillField(web::WebFrame* frame,
+                 autofill::FieldRendererId field_identifier,
+                 const std::u16string& value,
+                 base::OnceCallback<void(bool)> callback);
+
+  // Sets up a keystroke interaction shield in the renderer to prevent
+  // keystrokes from affecting elements other than the targeted element.
+  // |callback| is called with a boolean indicating success.
+  void SetUpRendererKeystrokeShield(web::WebFrame* frame,
+                                    autofill::FieldRendererId field_identifier,
+                                    base::OnceCallback<void(BOOL)> callback);
+
+  // Removes the keystroke interaction shield from the renderer.
+  // |callback| is called after the operation has completed.
+  void RemoveRendererKeystrokeShield(web::WebFrame* frame,
+                                     base::OnceClosure callback);
 
  private:
   friend class base::NoDestructor<PasswordManagerJavaScriptFeature>;
@@ -82,7 +138,7 @@ class PasswordManagerJavaScriptFeature : public web::JavaScriptFeature {
       const PasswordManagerJavaScriptFeature&) = delete;
 
   // web::JavaScriptFeature
-  absl::optional<std::string> GetScriptMessageHandlerName() const override;
+  std::optional<std::string> GetScriptMessageHandlerName() const override;
   void ScriptMessageReceived(web::WebState* web_state,
                              const web::ScriptMessage& message) override;
 
@@ -92,7 +148,7 @@ class PasswordManagerJavaScriptFeature : public web::JavaScriptFeature {
                         std::unique_ptr<base::Value> form_value,
                         const std::string& username,
                         const std::string& password,
-                        base::OnceCallback<void(BOOL)> callback);
+                        base::OnceCallback<void(base::Value*)> callback);
 };
 
 }  // namespace password_manager

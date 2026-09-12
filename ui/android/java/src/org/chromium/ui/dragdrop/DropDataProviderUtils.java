@@ -7,48 +7,51 @@ package org.chromium.ui.dragdrop;
 import static org.chromium.ui.dragdrop.DropDataProviderImpl.CACHE_METHOD_NAME;
 import static org.chromium.ui.dragdrop.DropDataProviderImpl.ON_DRAG_END_METHOD_NAME;
 import static org.chromium.ui.dragdrop.DropDataProviderImpl.SET_INTERVAL_METHOD_NAME;
+import static org.chromium.ui.dragdrop.DropDataProviderImpl.URI_PARAM;
 
 import android.net.Uri;
 import android.os.Bundle;
 
-import androidx.annotation.Nullable;
-
 import org.chromium.base.ContextUtils;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 
 /**
  * This class wraps all the calls to ContentResolver#call.
  *
- * TODO(https://crbug.com/1353048): Return a boolean with the result for each method.
  */
+@NullMarked
 public class DropDataProviderUtils {
     /**
      * Wraps the call to onDragEnd in the provider, we call it to clear the cached image data after
      * dragging ends
+     *
+     * @return Whether the image cache was successfully cleared.
      */
-    static void clearImageCache(boolean imageIsInUse) {
+    static boolean clearImageCache(boolean imageIsInUse) {
         Bundle bundle = new Bundle();
-        bundle.putBoolean("imageIsInUse", imageIsInUse);
+        bundle.putBoolean(DropDataProviderImpl.IMAGE_USAGE_PARAM, imageIsInUse);
         try {
-            ContextUtils.getApplicationContext().getContentResolver().call(
-                    DropDataProviderImpl.FULL_AUTH_URI, ON_DRAG_END_METHOD_NAME, "", bundle);
-        } catch (NullPointerException | IllegalArgumentException exception) {
-            // TODO(https://crbug.com/1353048): Return a boolean with the result to let the caller
-            // know.
+            ContextUtils.getApplicationContext()
+                    .getContentResolver()
+                    .call(DropDataProviderImpl.FULL_AUTH_URI, ON_DRAG_END_METHOD_NAME, "", bundle);
+            return true;
+        } catch (NullPointerException | IllegalArgumentException | SecurityException exception) {
+            return false;
         }
     }
 
-    /**
-     * Wraps the call to setClearCachedDataIntervalMs in the provider.
-     */
-    public static void setClearCachedDataIntervalMs(int delay) {
+    /** Wraps the call to setClearCachedDataIntervalMs in the provider. */
+    public static boolean setClearCachedDataIntervalMs(int delay) {
         Bundle bundle = new Bundle();
         bundle.putInt(DropDataProviderImpl.CLEAR_CACHE_PARAM, delay);
         try {
-            ContextUtils.getApplicationContext().getContentResolver().call(
-                    DropDataProviderImpl.FULL_AUTH_URI, SET_INTERVAL_METHOD_NAME, "", bundle);
-        } catch (NullPointerException | IllegalArgumentException exception) {
-            // TODO(https://crbug.com/1353048): Return a boolean with the result to let the caller
-            // know.
+            ContextUtils.getApplicationContext()
+                    .getContentResolver()
+                    .call(DropDataProviderImpl.FULL_AUTH_URI, SET_INTERVAL_METHOD_NAME, "", bundle);
+            return true;
+        } catch (NullPointerException | IllegalArgumentException | SecurityException exception) {
+            return false;
         }
     }
 
@@ -56,21 +59,31 @@ public class DropDataProviderUtils {
      * Wraps the call to cache in the provider and returns the cached Uri or null if it failed to
      * call the content provider.
      */
-    @Nullable
-    static Uri cacheImageData(DropDataAndroid dropData) {
+    static @Nullable Uri cacheImageData(DropDataAndroid dropData) {
+        if (dropData.imageContent == null
+                || dropData.imageContentExtension == null
+                || dropData.imageFilename == null) {
+            return null;
+        }
         Bundle bundle = new Bundle();
-        bundle.putSerializable(DropDataProviderImpl.BYTES_PARAM, dropData.imageContent);
+        bundle.putByteArray(DropDataProviderImpl.BYTES_PARAM, dropData.imageContent);
         bundle.putString(
                 DropDataProviderImpl.IMAGE_CONTENT_EXTENSION_PARAM, dropData.imageContentExtension);
-
         bundle.putString(DropDataProviderImpl.IMAGE_FILE_PARAM, dropData.imageFilename);
         try {
-            Bundle cachedUriBundle = ContextUtils.getApplicationContext().getContentResolver().call(
-                    DropDataProviderImpl.FULL_AUTH_URI, CACHE_METHOD_NAME, "", bundle);
-            return cachedUriBundle.getParcelable("uri");
-        } catch (NullPointerException | IllegalArgumentException exception) {
-            // TODO(https://crbug.com/1353048): Return a boolean with the result to let the caller
-            // know.
+            Bundle cachedUriBundle =
+                    ContextUtils.getApplicationContext()
+                            .getContentResolver()
+                            .call(
+                                    DropDataProviderImpl.FULL_AUTH_URI,
+                                    CACHE_METHOD_NAME,
+                                    "",
+                                    bundle);
+            if (cachedUriBundle == null) {
+                return null;
+            }
+            return cachedUriBundle.getParcelable(URI_PARAM);
+        } catch (NullPointerException | IllegalArgumentException | SecurityException exception) {
             return null;
         }
     }

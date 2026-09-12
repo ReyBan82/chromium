@@ -5,13 +5,10 @@
 #ifndef NET_BASE_NETWORK_CHANGE_NOTIFIER_WIN_H_
 #define NET_BASE_NETWORK_CHANGE_NOTIFIER_WIN_H_
 
-#include <netlistmgr.h>
-#include <ocidl.h>
 #include <windows.h>
-#include <wrl.h>
-#include <wrl/client.h>
 
-#include <memory>
+#include <atomic>
+#include <optional>
 
 #include "base/compiler_specific.h"
 #include "base/functional/callback.h"
@@ -19,6 +16,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/sequence_checker.h"
 #include "base/thread_annotations.h"
+#include "base/threading/sequence_bound.h"
 #include "base/timer/timer.h"
 #include "base/win/object_watcher.h"
 #include "net/base/net_export.h"
@@ -30,7 +28,8 @@ class SequencedTaskRunner;
 
 namespace net {
 
-class NetworkCostManagerEventSink;
+class NetworkCostChangeNotifierWin;
+class SystemDnsConfigChangeNotifier;
 
 // NetworkChangeNotifierWin uses a SequenceChecker, as all its internal
 // notification code must be called on the sequence it is created and destroyed
@@ -39,6 +38,11 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
     : public NetworkChangeNotifier,
       public base::win::ObjectWatcher::Delegate {
  public:
+  // The number of NetworkList polls, each 1 second apart, to perform on each
+  // network change. The is 21 rather than 20 to be consistent with older
+  // versions of the code.
+  static constexpr int kNumPollsOnAddressChange = 21;
+
   NetworkChangeNotifierWin();
   NetworkChangeNotifierWin(const NetworkChangeNotifierWin&) = delete;
   NetworkChangeNotifierWin& operator=(const NetworkChangeNotifierWin&) = delete;
@@ -53,7 +57,17 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
   //               unit tested in similar fashion, as needed.
   void WatchForAddressChange();
 
+  void set_last_announced_offline_for_testing(bool last_announced_offline) {
+    last_announced_offline_ = last_announced_offline;
+  }
+
  protected:
+  // Constructor for tests that provides a custom SystemDnsConfigChangeNotifier
+  // to avoid using the process-wide singleton (which creates a
+  // PooledSequencedTaskRunner that becomes stale across TaskEnvironments).
+  explicit NetworkChangeNotifierWin(
+      SystemDnsConfigChangeNotifier* dns_config_notifier);
+
   // For unit tests only.
   bool is_watching() const { return is_watching_; }
   void set_is_watching(bool is_watching) { is_watching_ = is_watching; }
@@ -72,8 +86,13 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
   // Must only be called on the sequence |this| was created on.
   void OnObjectSignaled(HANDLE object) override;
 
-  // Does the actual work to determine the current connection type.
-  // It is not thread safe, see crbug.com/324913.
+  // Recompute the current connection type on newer versions of Windows (Win10
+  // Build 19041 and above).
+  static ConnectionType RecomputeCurrentConnectionTypeModern();
+
+  // Does the actual work to determine the current connection type. This will
+  // call into RecomputeCurrentConnectionTypeModern on modern OS. It is not
+  // thread safe, see crbug.com/324913.
   static ConnectionType RecomputeCurrentConnectionType();
 
   // Calls RecomputeCurrentConnectionTypeImpl on the DNS sequence and runs
@@ -83,14 +102,39 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
 
   void SetCurrentConnectionType(ConnectionType connection_type);
 
+  // Handles the result of the initial connection type computation deferred by
+  // the constructor when kDeferConnectionTypeAtStartup is enabled. Caches the
+  // type, and notifies observers if it turns out the machine is offline, since
+  // the constructor optimistically assumed it was online.
+  void OnInitialConnectionTypeComputed(ConnectionType connection_type);
+
   // Notifies IP address change observers of a change immediately, and notifies
   // network state change observers on a delay.  Must only be called on the
   // sequence |this| was created on.
   void NotifyObservers(ConnectionType connection_type);
 
-  // Forwards connection type notifications to parent class.
-  void NotifyParentOfConnectionTypeChange();
-  void NotifyParentOfConnectionTypeChangeImpl(ConnectionType connection_type);
+  // Called with a delay whenever the connection type changes. Starts polling
+  // the connection type for 21 seconds, and forwards connection type
+  // notifications to parent class, if needed.
+  //
+  // Polling is needed because the platform API that we listen to connection
+  // change notification (NotifyAddrChange()) can be received well before the
+  // change has affected the results of polling the platform for a list of
+  // network adapters. Historically, this was only an issue for spinning up new
+  // network connections, but more recently, it seems to be an issue when
+  // connections are being shut down as well.
+  //
+  // `last_notified_connection_type_for_event` connection type is the most
+  // recent type ConnectionTypeChanged notification sent as a result of the most
+  // recently observed NotifyObservers() call. It is nullopt if no such
+  // notification has been sent yet.
+  void PollConnectionType(
+      std::optional<ConnectionType> last_notified_connection_type_for_event,
+      int num_polls_completed);
+  void OnConnectionTypePolled(
+      std::optional<ConnectionType> last_notified_connection_type_for_event,
+      int num_polls_completed,
+      ConnectionType connection_type);
 
   // Tries to start listening for a single subsequent address change.  Returns
   // false on failure.  The caller is responsible for updating |is_watching_|.
@@ -100,25 +144,7 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
 
   static NetworkChangeCalculatorParams NetworkChangeCalculatorParamsWin();
 
-  // Gets the current network connection cost (if possible) and caches it.
-  void InitializeConnectionCost();
-  // Does the work of initializing for thread safety.
-  bool InitializeConnectionCostOnce();
-  // Retrieves the current network connection cost from the OS's Cost Manager.
-  HRESULT UpdateConnectionCostFromCostManager();
-  // Converts the OS enum values to the enum values used in our code.
-  static ConnectionCost ConnectionCostFromNlmCost(NLM_CONNECTION_COST cost);
-  // Sets the cached network connection cost value.
-  void SetCurrentConnectionCost(ConnectionCost connection_cost);
-  // Callback method for the notification event sink.
-  void OnCostChanged();
-  // Tells this class that an observer was added and therefore this class needs
-  // to register for notifications.
-  void ConnectionCostObserverAdded() override;
-  // Since ConnectionCostObserverAdded() can be called on any thread and we
-  // don't want to do a bunch of work on an arbitrary thread, this method used
-  // to post task to do the work.
-  void OnConnectionCostObserverAdded();
+  void OnCostChanged(NetworkChangeNotifier::ConnectionCost new_cost);
 
   // All member variables may only be accessed on the sequence |this| was
   // created on.
@@ -136,23 +162,30 @@ class NET_EXPORT_PRIVATE NetworkChangeNotifierWin
   // Number of times WatchForAddressChange has failed in a row.
   int sequential_failures_ = 0;
 
+  // Whether the initial connection type has been computed asynchronously.
+  // The constructor defers this computation to WatchForAddressChange() to
+  // avoid a synchronous cross-process call that blocks startup. Until the
+  // async computation completes, GetCurrentConnectionType() returns
+  // CONNECTION_UNKNOWN.
+  bool initial_connection_type_initialized_ = false;
+
   scoped_refptr<base::SequencedTaskRunner> blocking_task_runner_;
 
   mutable base::Lock last_computed_connection_type_lock_;
-  ConnectionType last_computed_connection_type_;
+  ConnectionType last_computed_connection_type_
+      GUARDED_BY(last_computed_connection_type_lock_);
 
-  std::atomic<ConnectionCost> last_computed_connection_cost_ =
-      ConnectionCost::CONNECTION_COST_UNKNOWN;
+  std::atomic<NetworkChangeNotifier::ConnectionCost>
+      last_computed_connection_cost_ =
+          NetworkChangeNotifier::ConnectionCost::CONNECTION_COST_UNKNOWN;
+
+  // Provides the cost of the current connection.  Uses the Windows OS APIs to
+  // monitor and determine cost.
+  base::SequenceBound<NetworkCostChangeNotifierWin> cost_change_notifier_;
 
   // Result of IsOffline() when NotifyObserversOfConnectionTypeChange()
   // was last called.
   bool last_announced_offline_;
-  // Number of times polled to check if still offline.
-  int offline_polls_;
-
-  Microsoft::WRL::ComPtr<INetworkCostManager> network_cost_manager_;
-  Microsoft::WRL::ComPtr<NetworkCostManagerEventSink>
-      network_cost_manager_event_sink_;
 
   // Used to ensure that all registration actions are properly sequenced on the
   // same thread regardless of which thread was used to call into the

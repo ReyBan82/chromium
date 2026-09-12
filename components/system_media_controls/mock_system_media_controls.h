@@ -40,9 +40,13 @@ class MockSystemMediaControls : public SystemMediaControls {
   MOCK_METHOD1(SetAlbum, void(const std::u16string& artist));
   MOCK_METHOD1(SetThumbnail, void(const SkBitmap& bitmap));
   MOCK_METHOD1(SetPosition, void(const media_session::MediaPosition& position));
+  MOCK_METHOD0(ClearPosition, void());
   MOCK_METHOD0(ClearThumbnail, void());
   MOCK_METHOD0(ClearMetadata, void());
   MOCK_METHOD0(UpdateDisplay, void());
+  MOCK_CONST_METHOD0(GetVisibilityForTesting, bool());
+  MOCK_METHOD1(SetOnBridgeCreatedCallbackForTesting,
+               void(base::RepeatingCallback<void()>));
 };
 
 }  // namespace testing

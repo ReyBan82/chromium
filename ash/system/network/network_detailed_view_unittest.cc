@@ -6,16 +6,23 @@
 
 #include <memory>
 
+#include "ash/constants/ash_features.h"
 #include "ash/login_status.h"
+#include "ash/public/cpp/ash_view_ids.h"
 #include "ash/public/cpp/test/test_system_tray_client.h"
 #include "ash/strings/grit/ash_strings.h"
 #include "ash/style/icon_button.h"
 #include "ash/system/network/fake_network_detailed_view_delegate.h"
+#include "ash/system/network/network_feature_tile.h"
 #include "ash/system/network/network_info_bubble.h"
 #include "ash/system/tray/detailed_view_delegate.h"
 #include "ash/system/tray/fake_detailed_view_delegate.h"
 #include "ash/system/tray/tri_view.h"
+#include "ash/system/unified/quick_settings_view.h"
+#include "ash/system/unified/unified_system_tray.h"
+#include "ash/system/unified/unified_system_tray_bubble.h"
 #include "ash/test/ash_test_base.h"
+#include "base/memory/raw_ptr.h"
 #include "base/run_loop.h"
 #include "base/test/metrics/user_action_tester.h"
 #include "mojo/public/cpp/bindings/clone_traits.h"
@@ -24,6 +31,7 @@
 #include "ui/views/controls/button/toggle_button.h"
 #include "ui/views/controls/separator.h"
 #include "ui/views/layout/box_layout.h"
+#include "ui/views/view_utils.h"
 #include "ui/views/widget/widget.h"
 
 namespace views {
@@ -31,36 +39,37 @@ class View;
 }  // namespace views
 
 namespace ash {
-namespace {
-
-const std::string kNetworkdId = "/network/id";
-
-using chromeos::network_config::mojom::NetworkStatePropertiesPtr;
-
-}  // namespace
 
 class NetworkDetailedViewTest : public AshTestBase {
  public:
-  void SetUp() override {
-    AshTestBase::SetUp();
+  void OpenNetworkDetailedView() {
+    GetPrimaryUnifiedSystemTray()->ShowBubble();
 
-    list_type_ = NetworkDetailedView::ListType::LIST_TYPE_NETWORK;
+    auto* quick_settings_view =
+        GetPrimaryUnifiedSystemTray()->bubble()->quick_settings_view();
+    ASSERT_TRUE(quick_settings_view);
 
-    network_detailed_view_ = new NetworkDetailedView(
-        &fake_detailed_view_delegate_, &fake_network_detailed_view_delegate_,
-        list_type_);
+    const auto* tile = static_cast<const NetworkFeatureTile*>(
+        quick_settings_view->GetViewByID(VIEW_ID_FEATURE_TILE_NETWORK));
+    ASSERT_TRUE(tile);
+    LeftClickAndWait(tile);
 
-    widget_ = CreateFramelessTestWidget();
-    widget_->SetFullscreen(true);
-    widget_->SetContentsView(network_detailed_view_);
+    ASSERT_TRUE(quick_settings_view->detailed_view_container());
+    views::View::Views children =
+        quick_settings_view->detailed_view_container()->children();
+    ASSERT_EQ(1u, children.size());
 
-    base::RunLoop().RunUntilIdle();
+    network_detailed_view_ =
+        views::AsViewClass<NetworkDetailedView>(children.front())->GetWeakPtr();
+    ASSERT_TRUE(network_detailed_view_);
   }
 
-  void TearDown() override {
-    widget_.reset();
-
-    AshTestBase::TearDown();
+  void LeftClickAndWait(const views::View* view) {
+    ASSERT_TRUE(view);
+    LeftClickOn(view);
+    // Run until idle to ensure that any actions or navigations as a result of
+    // clicking |view| are completed before returning.
+    base::RunLoop().RunUntilIdle();
   }
 
   views::Button* FindSettingsButton() {
@@ -73,20 +82,16 @@ class NetworkDetailedViewTest : public AshTestBase {
         NetworkDetailedView::NetworkDetailedViewChildId::kInfoButton);
   }
 
-  NetworkInfoBubble* GetInfoBubble() {
-    return network_detailed_view_->info_bubble_;
+  views::View* GetInfoBubble() {
+    return network_detailed_view_->info_bubble_tracker_.view();
   }
 
-  FakeNetworkDetailedViewDelegate* network_detailed_view_delegate() {
-    return &fake_network_detailed_view_delegate_;
-  }
-
-  FakeDetailedViewDelegate* fake_detailed_view_delegate() {
-    return &fake_detailed_view_delegate_;
+  int GetTitleRowStringId() {
+    return network_detailed_view_->title_row_string_id_for_testing();
   }
 
   NetworkDetailedView* network_detailed_view() {
-    return network_detailed_view_;
+    return network_detailed_view_.get();
   }
 
   void CheckHistogramBuckets(int count) {
@@ -103,50 +108,86 @@ class NetworkDetailedViewTest : public AshTestBase {
         network_detailed_view_->GetViewByID(static_cast<int>(id)));
   }
 
-  std::unique_ptr<views::Widget> widget_;
-  NetworkDetailedView* network_detailed_view_;
-  FakeNetworkDetailedViewDelegate fake_network_detailed_view_delegate_;
-  FakeDetailedViewDelegate fake_detailed_view_delegate_;
-  NetworkDetailedView::ListType list_type_;
+  base::WeakPtr<NetworkDetailedView> network_detailed_view_;
   base::UserActionTester user_action_tester_;
 };
 
 TEST_F(NetworkDetailedViewTest, PressingSettingsButtonOpensSettings) {
-  views::Button* settings_button = FindSettingsButton();
-
   CheckHistogramBuckets(/*count=*/0);
 
   GetSessionControllerClient()->SetSessionState(
       session_manager::SessionState::LOCKED);
-  LeftClickOn(settings_button);
-  EXPECT_EQ(0, GetSystemTrayClient()->show_network_settings_count());
-  EXPECT_EQ(0u, fake_detailed_view_delegate()->close_bubble_call_count());
+  base::RunLoop().RunUntilIdle();
+
+  GetPrimaryUnifiedSystemTray()->ShowBubble();
+
+  auto* quick_settings_view =
+      GetPrimaryUnifiedSystemTray()->bubble()->quick_settings_view();
+  ASSERT_TRUE(quick_settings_view);
+
+  const auto* tile = static_cast<const NetworkFeatureTile*>(
+      quick_settings_view->GetViewByID(VIEW_ID_FEATURE_TILE_NETWORK));
+  ASSERT_TRUE(tile);
+  ASSERT_FALSE(tile->GetEnabled());
 
   CheckHistogramBuckets(/*count=*/0);
 
+  GetPrimaryUnifiedSystemTray()->CloseBubble();
+
   GetSessionControllerClient()->SetSessionState(
       session_manager::SessionState::ACTIVE);
-  LeftClickOn(settings_button);
+  base::RunLoop().RunUntilIdle();
+
+  OpenNetworkDetailedView();
+
+  views::Button* settings_button = FindSettingsButton();
+  ASSERT_TRUE(settings_button);
+
+  LeftClickAndWait(settings_button);
   EXPECT_EQ(1, GetSystemTrayClient()->show_network_settings_count());
-  EXPECT_EQ(1u, fake_detailed_view_delegate()->close_bubble_call_count());
 
   CheckHistogramBuckets(/*count=*/1);
 }
 
 TEST_F(NetworkDetailedViewTest, PressingInfoButtonOpensInfoBubble) {
+  OpenNetworkDetailedView();
+
   views::Button* info_button = FindInfoButton();
-  LeftClickOn(info_button);
-  for (int i = 0; i < 3; ++i) {
-    LeftClickOn(info_button);
-    base::RunLoop().RunUntilIdle();
-    if (i % 2 == 0) {
-      EXPECT_FALSE(GetInfoBubble());
-      EXPECT_TRUE(network_detailed_view()->GetWidget()->IsActive());
-    } else {
-      EXPECT_TRUE(GetInfoBubble());
-      EXPECT_FALSE(network_detailed_view()->GetWidget()->IsActive());
-    }
-  }
+
+  ASSERT_TRUE(GetPrimaryUnifiedSystemTray()->IsBubbleShown());
+  EXPECT_FALSE(GetInfoBubble());
+
+  LeftClickAndWait(info_button);
+
+  ASSERT_TRUE(GetPrimaryUnifiedSystemTray()->IsBubbleShown());
+  EXPECT_TRUE(GetInfoBubble());
+
+  LeftClickAndWait(info_button);
+
+  ASSERT_TRUE(GetPrimaryUnifiedSystemTray()->IsBubbleShown());
+  EXPECT_FALSE(GetInfoBubble());
+}
+
+TEST_F(NetworkDetailedViewTest, InfoBubbleClosedWhenDetailedViewClosed) {
+  OpenNetworkDetailedView();
+
+  views::Button* info_button = FindInfoButton();
+  LeftClickAndWait(info_button);
+  views::ViewTracker bubble_tracker_;
+  bubble_tracker_.SetView(GetInfoBubble());
+  EXPECT_TRUE(bubble_tracker_.view());
+
+  // The info bubble should not exist after the detailed view has been closed.
+  GetPrimaryUnifiedSystemTray()->CloseBubble();
+  base::RunLoop().RunUntilIdle();
+
+  EXPECT_FALSE(bubble_tracker_.view());
+}
+
+TEST_F(NetworkDetailedViewTest, TitleRowString) {
+  OpenNetworkDetailedView();
+
+  EXPECT_EQ(GetTitleRowStringId(), IDS_ASH_STATUS_TRAY_NETWORK);
 }
 
 }  // namespace ash

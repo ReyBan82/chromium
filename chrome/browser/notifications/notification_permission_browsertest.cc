@@ -3,19 +3,30 @@
 // found in the LICENSE file.
 
 #include "chrome/browser/chrome_content_browser_client.h"
+#include "chrome/browser/notifications/non_persistent_notification_handler.h"
 #include "chrome/browser/notifications/notification_permission_context.h"
 #include "chrome/browser/profiles/profile.h"
-#include "chrome/browser/ui/browser.h"
+#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"
+#include "chrome/browser/ui/tabs/tab_strip_model.h"
 #include "chrome/test/base/in_process_browser_test.h"
 #include "chrome/test/base/ui_test_utils.h"
+#include "components/permissions/permission_request_manager.h"
+#include "components/permissions/permission_util.h"
+#include "components/permissions/request_type.h"
+#include "components/permissions/test/mock_permission_prompt_factory.h"
+#include "components/permissions/test/mock_permission_request.h"
+#include "components/ukm/test_ukm_recorder.h"
 #include "content/public/common/content_client.h"
 #include "content/public/test/browser_test.h"
 #include "content/public/test/browser_test_utils.h"
 #include "content/public/test/content_mock_cert_verifier.h"
 #include "net/dns/mock_host_resolver.h"
 #include "net/test/embedded_test_server/embedded_test_server.h"
+#include "services/metrics/public/cpp/ukm_builders.h"
 
 namespace {
+
+using Permission = ukm::builders::Permission;
 
 const char kTestFilePath[] =
     "/notifications/notification_permission_checker.html";
@@ -37,7 +48,7 @@ class StoragePartitioningChromeContentBrowserClient
   content::StoragePartitionConfig GetStoragePartitionConfigForSite(
       content::BrowserContext* browser_context,
       const GURL& site) override {
-    if (site.host() == partitioned_host_) {
+    if (site.GetHost() == partitioned_host_) {
       return content::StoragePartitionConfig::Create(
           browser_context, partitioned_host_, /*partition_name=*/"",
           /*in_memory=*/false);
@@ -93,7 +104,7 @@ class NotificationPermissionBrowserTest : public InProcessBrowserTest {
  protected:
   void GrantNotificationPermissionForTest(const GURL& url) const {
     NotificationPermissionContext::UpdatePermission(
-        browser()->profile(), url.DeprecatedGetOriginAsURL(),
+        browser()->GetProfile(), url.DeprecatedGetOriginAsURL(),
         CONTENT_SETTING_ALLOW);
   }
 
@@ -110,7 +121,7 @@ class NotificationPermissionBrowserTest : public InProcessBrowserTest {
   }
 
   content::WebContents* GetActiveWebContents() const {
-    return browser()->tab_strip_model()->GetActiveWebContents();
+    return browser()->GetTabStripModel()->GetActiveWebContents();
   }
 
   content::RenderFrameHost* CreateChildIframe(
@@ -167,7 +178,7 @@ IN_PROC_BROWSER_TEST_F(NotificationPermissionBrowserTest,
   EXPECT_EQ("denied",
             EvalJs(iframe, "getServiceWorkerNotificationPermission()"));
   EXPECT_EQ("denied", EvalJs(iframe, "getPushPermission()"));
-  // TODO(crbug.com/1409720): This should return 'denied'.
+  // TODO(crbug.com/40254041): This should return 'denied'.
   EXPECT_EQ("prompt", EvalJs(iframe, "getServiceWorkerPushPermission()"));
 }
 
@@ -193,7 +204,7 @@ IN_PROC_BROWSER_TEST_F(NotificationPermissionBrowserTest,
   EXPECT_EQ("denied",
             EvalJs(main_frame, "getServiceWorkerNotificationPermission()"));
   EXPECT_EQ("prompt", EvalJs(main_frame, "getPushPermission()"));
-  // TODO(crbug.com/1409720): This should return 'denied'.
+  // TODO(crbug.com/40254041): This should return 'denied'.
   EXPECT_EQ("prompt", EvalJs(main_frame, "getServiceWorkerPushPermission()"));
 
   content::RenderFrameHost* iframe = CreateChildIframe(main_frame, TesterUrl());
@@ -253,7 +264,7 @@ IN_PROC_BROWSER_TEST_F(NotificationPermissionBrowserTest,
   EXPECT_EQ(
       "a JavaScript error: \"NotAllowedError: "
       "Registration failed - permission denied\"\n",
-      EvalJs(iframe, "requestPushPermission()").error);
+      EvalJs(iframe, "requestPushPermission()").ExtractError());
 }
 
 // Test that the Notifications.NonPersistentNotificationThirdPartyCount metric
@@ -301,4 +312,69 @@ IN_PROC_BROWSER_TEST_F(NotificationPermissionBrowserTest,
 
   histogram_tester.ExpectBucketCount(histogram_name, false, 2);
   histogram_tester.ExpectBucketCount(histogram_name, true, 1);
+}
+
+// Tests that non-persistent notifications (i.e. doesn't use
+// the Push API) records PermissionUsage and Notification UKMs.
+IN_PROC_BROWSER_TEST_F(NotificationPermissionBrowserTest,
+                       NonPersistentNotificationRecordsUkms) {
+  GrantNotificationPermissionForTest(TesterUrl());
+
+  EXPECT_TRUE(ui_test_utils::NavigateToURL(browser(), TesterUrl()));
+  content::RenderFrameHost* main_frame =
+      GetActiveWebContents()->GetPrimaryMainFrame();
+
+  ukm::TestAutoSetUkmRecorder ukm_recorder;
+
+  const std::string show_notification_js = R"(new Promise((resolve) => {
+     const notification = new Notification("done");
+     notification.onshow = () => {
+       const title = notification.title;
+       notification.close();
+       resolve(title);
+     };
+   });)";
+
+  EXPECT_EQ("done", EvalJs(main_frame, show_notification_js));
+  const auto usage_entries = ukm_recorder.GetEntriesByName("PermissionUsage");
+  ASSERT_EQ(1u, usage_entries.size());
+}
+
+IN_PROC_BROWSER_TEST_F(NotificationPermissionBrowserTest,
+                       DisablePermissionRecordsUkms) {
+  ukm::TestAutoSetUkmRecorder ukm_recorder;
+
+  auto* manager = permissions::PermissionRequestManager::FromWebContents(
+      GetActiveWebContents());
+  std::unique_ptr<permissions::MockPermissionPromptFactory> bubble_factory =
+      std::make_unique<permissions::MockPermissionPromptFactory>(manager);
+  EXPECT_TRUE(ui_test_utils::NavigateToURL(browser(), TesterUrl()));
+  manager->AddRequest(GetActiveWebContents()->GetPrimaryMainFrame(),
+                      std::make_unique<permissions::MockPermissionRequest>(
+                          permissions::RequestType::kNotifications));
+  bubble_factory->WaitForPermissionBubble();
+  manager->Accept(/*prompt_options=*/std::monostate());
+
+  GrantNotificationPermissionForTest(TesterUrl());
+
+  std::unique_ptr<NotificationHandler> handler =
+      std::make_unique<NonPersistentNotificationHandler>();
+  handler->DisableNotifications(browser()->GetProfile(), TesterUrl(),
+                                /*notification_id=*/std::nullopt,
+                                /*is_suspicious=*/false);
+
+  const auto action_entries = ukm_recorder.GetEntriesByName("Permission");
+  ASSERT_EQ(2u, action_entries.size());
+
+  // The revocation event uses the notification source_id type
+  EXPECT_EQ(ukm::SourceIdType::NOTIFICATION_ID,
+            ukm::GetSourceIdType(action_entries[1]->source_id));
+
+  // Expect one GRANT and one REVOKE event
+  ukm_recorder.ExpectEntryMetric(
+      action_entries[0], Permission::kActionName,
+      static_cast<int>(permissions::PermissionAction::GRANTED));
+  ukm_recorder.ExpectEntryMetric(
+      action_entries[1], Permission::kActionName,
+      static_cast<int>(permissions::PermissionAction::REVOKED));
 }

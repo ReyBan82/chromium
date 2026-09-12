@@ -9,8 +9,11 @@
 #include "base/run_loop.h"
 #include "base/test/gmock_callback_support.h"
 #include "base/test/scoped_feature_list.h"
-#include "base/test/task_environment.h"
+#include "chrome/test/base/testing_profile.h"
+#include "content/public/test/browser_task_environment.h"
 #include "extensions/browser/api/messaging/native_message_host.h"
+#include "extensions/browser/extension_registry.h"
+#include "extensions/common/extension_builder.h"
 #include "mojo/public/cpp/bindings/receiver.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "testing/gmock/include/gmock/gmock.h"
@@ -64,7 +67,9 @@ class DriveFsNativeMessageHostTest
               (const std::string& message),
               (override));
 
-  base::test::TaskEnvironment task_environment_;
+  content::BrowserTaskEnvironment task_environment_;
+  TestingProfile profile_;
+
   drivefs::mojom::ExtensionConnectionParamsPtr params_;
   mojo::Receiver<drivefs::mojom::NativeMessagingHost> receiver_{this};
   mojo::Remote<drivefs::mojom::NativeMessagingPort> extension_port_;
@@ -78,7 +83,7 @@ TEST_F(DriveFsNativeMessageHostTest, DriveFsInitiatedMessaging) {
 
   std::unique_ptr<extensions::NativeMessageHost> host =
       CreateDriveFsInitiatedNativeMessageHostInternal(
-          extension_port_.BindNewPipeAndPassReceiver(),
+          &profile_, extension_port_.BindNewPipeAndPassReceiver(),
           receiver_.BindNewPipeAndPassRemote());
   MockClient client;
   EXPECT_CALL(client, PostMessageFromNativeHost("foo"))
@@ -115,7 +120,7 @@ TEST_F(DriveFsNativeMessageHostTest, ExtensionInitiatedMessaging) {
 TEST_F(DriveFsNativeMessageHostTest, NativeHostSendsMessageBeforeStart) {
   std::unique_ptr<extensions::NativeMessageHost> host =
       CreateDriveFsInitiatedNativeMessageHostInternal(
-          extension_port_.BindNewPipeAndPassReceiver(),
+          &profile_, extension_port_.BindNewPipeAndPassReceiver(),
           receiver_.BindNewPipeAndPassRemote());
   MockClient client;
 
@@ -139,7 +144,7 @@ TEST_F(DriveFsNativeMessageHostTest, Error) {
 
   std::unique_ptr<extensions::NativeMessageHost> host =
       CreateDriveFsInitiatedNativeMessageHostInternal(
-          extension_port_.BindNewPipeAndPassReceiver(),
+          &profile_, extension_port_.BindNewPipeAndPassReceiver(),
           receiver_.BindNewPipeAndPassRemote());
   MockClient client;
   EXPECT_CALL(*this, HandleMessageFromExtension).Times(0);
@@ -154,6 +159,28 @@ TEST_F(DriveFsNativeMessageHostTest, Error) {
 
   host->OnMessage("bar");
   base::RunLoop().RunUntilIdle();
+}
+
+TEST_F(DriveFsNativeMessageHostTest,
+       ConnectToDriveFsNativeMessageExtensionVerification) {
+  // Create a non-Drive extension with nativeMessaging permission.
+  scoped_refptr<const extensions::Extension> extension =
+      extensions::ExtensionBuilder("Test Extension")
+          .SetID("abcdefghijklmnopqrstuvwxyzabcdef")
+          .AddAPIPermission("nativeMessaging")
+          .Build();
+  extensions::ExtensionRegistry::Get(&profile_)->AddEnabled(extension);
+
+  mojo::PendingRemote<drivefs::mojom::NativeMessagingPort> extension_port;
+  mojo::PendingReceiver<drivefs::mojom::NativeMessagingHost> drivefs_host;
+
+  auto status = ConnectToDriveFsNativeMessageExtension(
+      &profile_, extension->id(),
+      extension_port.InitWithNewPipeAndPassReceiver(),
+      drivefs_host.InitWithNewPipeAndPassRemote());
+
+  EXPECT_EQ(status,
+            drivefs::mojom::ExtensionConnectionStatus::kExtensionNotFound);
 }
 
 }  // namespace

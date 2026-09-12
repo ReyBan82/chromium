@@ -5,12 +5,8 @@
 #ifndef COMPONENTS_FEEDBACK_CONTENT_FEEDBACK_UPLOADER_FACTORY_H_
 #define COMPONENTS_FEEDBACK_CONTENT_FEEDBACK_UPLOADER_FACTORY_H_
 
+#include "base/no_destructor.h"
 #include "components/keyed_service/content/browser_context_keyed_service_factory.h"
-
-namespace base {
-template <typename T>
-struct DefaultSingletonTraits;
-}  // namespace base
 
 namespace content {
 class BrowserContext;
@@ -38,12 +34,12 @@ class FeedbackUploaderFactory : public BrowserContextKeyedServiceFactory {
   ~FeedbackUploaderFactory() override;
 
  private:
-  friend struct base::DefaultSingletonTraits<FeedbackUploaderFactory>;
+  friend base::NoDestructor<FeedbackUploaderFactory>;
 
   FeedbackUploaderFactory();
 
   // BrowserContextKeyedServiceFactory overrides:
-  KeyedService* BuildServiceInstanceFor(
+  std::unique_ptr<KeyedService> BuildServiceInstanceForBrowserContext(
       content::BrowserContext* context) const override;
   content::BrowserContext* GetBrowserContextToUse(
       content::BrowserContext* context) const override;

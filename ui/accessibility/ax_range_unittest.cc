@@ -19,7 +19,8 @@
 #include "ui/accessibility/ax_tree_id.h"
 #include "ui/accessibility/ax_tree_update.h"
 #include "ui/accessibility/test_ax_node_helper.h"
-#include "ui/accessibility/test_ax_tree_manager.h"
+#include "ui/accessibility/test_ax_tree_update.h"
+#include "ui/accessibility/test_single_ax_tree_manager.h"
 
 namespace ui {
 
@@ -29,29 +30,29 @@ using TestPositionRange = AXRange<AXPosition<AXNodePosition, AXNode>>;
 
 namespace {
 
-constexpr AXNodeID ROOT_ID = 1;
-constexpr AXNodeID DIV1_ID = 2;
-constexpr AXNodeID BUTTON_ID = 3;
-constexpr AXNodeID DIV2_ID = 4;
-constexpr AXNodeID CHECK_BOX1_ID = 5;
-constexpr AXNodeID CHECK_BOX2_ID = 6;
-constexpr AXNodeID TEXT_FIELD_ID = 7;
-constexpr AXNodeID STATIC_TEXT1_ID = 8;
-constexpr AXNodeID INLINE_BOX1_ID = 9;
-constexpr AXNodeID LINE_BREAK1_ID = 10;
-constexpr AXNodeID INLINE_BOX_LINE_BREAK1_ID = 11;
-constexpr AXNodeID STATIC_TEXT2_ID = 12;
-constexpr AXNodeID INLINE_BOX2_ID = 13;
-constexpr AXNodeID LINE_BREAK2_ID = 14;
-constexpr AXNodeID INLINE_BOX_LINE_BREAK2_ID = 15;
-constexpr AXNodeID PARAGRAPH_ID = 16;
-constexpr AXNodeID STATIC_TEXT3_ID = 17;
-constexpr AXNodeID INLINE_BOX3_ID = 18;
-constexpr AXNodeID EMPTY_PARAGRAPH_ID = 19;
+constexpr AXNodeID kRootId = 1;
+constexpr AXNodeID kDiv1Id = 2;
+constexpr AXNodeID kButtonId = 3;
+constexpr AXNodeID kDiv2Id = 4;
+constexpr AXNodeID kCheckBox1Id = 5;
+constexpr AXNodeID kCheckBox2Id = 6;
+constexpr AXNodeID kTextFieldId = 7;
+constexpr AXNodeID kStaticText1Id = 8;
+constexpr AXNodeID kInlineBox1Id = 9;
+constexpr AXNodeID kLineBreak1Id = 10;
+constexpr AXNodeID kInlineBoxLineBreak1Id = 11;
+constexpr AXNodeID kStaticText2Id = 12;
+constexpr AXNodeID kInlineBox2Id = 13;
+constexpr AXNodeID kLineBreak2Id = 14;
+constexpr AXNodeID kInlineBoxLineBreak2Id = 15;
+constexpr AXNodeID kParagraphId = 16;
+constexpr AXNodeID kStaticText3Id = 17;
+constexpr AXNodeID kInlineBox3Id = 18;
+constexpr AXNodeID kEmptyParagraphId = 19;
 
 class TestAXRangeScreenRectDelegate : public AXRangeRectDelegate {
  public:
-  explicit TestAXRangeScreenRectDelegate(TestAXTreeManager* tree_manager)
+  explicit TestAXRangeScreenRectDelegate(TestSingleAXTreeManager* tree_manager)
       : tree_manager_(tree_manager) {}
   virtual ~TestAXRangeScreenRectDelegate() = default;
   TestAXRangeScreenRectDelegate(const TestAXRangeScreenRectDelegate& delegate) =
@@ -64,7 +65,7 @@ class TestAXRangeScreenRectDelegate : public AXRangeRectDelegate {
       AXNodeID node_id,
       int start_offset,
       int end_offset,
-      const ui::AXClippingBehavior clipping_behavior,
+      const AXClippingBehavior clipping_behavior,
       AXOffscreenResult* offscreen_result) override {
     if (tree_manager_->GetTreeID() != tree_id)
       return gfx::Rect();
@@ -73,8 +74,7 @@ class TestAXRangeScreenRectDelegate : public AXRangeRectDelegate {
     if (!node)
       return gfx::Rect();
 
-    TestAXNodeHelper* wrapper =
-        TestAXNodeHelper::GetOrCreate(tree_manager_->GetTree(), node);
+    auto wrapper = TestAXNodeHelper::Create(tree_manager_->GetTree(), node);
     return wrapper->GetInnerTextRangeBoundsRect(
         start_offset, end_offset, AXCoordinateSystem::kScreenDIPs,
         clipping_behavior, offscreen_result);
@@ -90,18 +90,17 @@ class TestAXRangeScreenRectDelegate : public AXRangeRectDelegate {
     if (!node)
       return gfx::Rect();
 
-    TestAXNodeHelper* wrapper =
-        TestAXNodeHelper::GetOrCreate(tree_manager_->GetTree(), node);
+    auto wrapper = TestAXNodeHelper::Create(tree_manager_->GetTree(), node);
     return wrapper->GetBoundsRect(AXCoordinateSystem::kScreenDIPs,
                                   AXClippingBehavior::kClipped,
                                   offscreen_result);
   }
 
  private:
-  const raw_ptr<TestAXTreeManager> tree_manager_;
+  const raw_ptr<TestSingleAXTreeManager> tree_manager_;
 };
 
-class AXRangeTest : public ::testing::Test, public TestAXTreeManager {
+class AXRangeTest : public ::testing::Test, public TestSingleAXTreeManager {
  public:
   const std::u16string EMPTY = u"";
   const std::u16string NEWLINE = u"\n";
@@ -193,25 +192,25 @@ void AXRangeTest::SetUp() {
   // [Empty paragraph]
   // {20, 140, 700, 0}
 
-  root_.id = ROOT_ID;
-  div1_.id = DIV1_ID;
-  div2_.id = DIV2_ID;
-  button_.id = BUTTON_ID;
-  check_box1_.id = CHECK_BOX1_ID;
-  check_box2_.id = CHECK_BOX2_ID;
-  text_field_.id = TEXT_FIELD_ID;
-  line_break1_.id = LINE_BREAK1_ID;
-  line_break2_.id = LINE_BREAK2_ID;
-  static_text1_.id = STATIC_TEXT1_ID;
-  static_text2_.id = STATIC_TEXT2_ID;
-  static_text3_.id = STATIC_TEXT3_ID;
-  inline_box1_.id = INLINE_BOX1_ID;
-  inline_box2_.id = INLINE_BOX2_ID;
-  inline_box3_.id = INLINE_BOX3_ID;
-  inline_box_line_break1_.id = INLINE_BOX_LINE_BREAK1_ID;
-  inline_box_line_break2_.id = INLINE_BOX_LINE_BREAK2_ID;
-  paragraph_.id = PARAGRAPH_ID;
-  empty_paragraph_.id = EMPTY_PARAGRAPH_ID;
+  root_.id = kRootId;
+  div1_.id = kDiv1Id;
+  div2_.id = kDiv2Id;
+  button_.id = kButtonId;
+  check_box1_.id = kCheckBox1Id;
+  check_box2_.id = kCheckBox2Id;
+  text_field_.id = kTextFieldId;
+  line_break1_.id = kLineBreak1Id;
+  line_break2_.id = kLineBreak2Id;
+  static_text1_.id = kStaticText1Id;
+  static_text2_.id = kStaticText2Id;
+  static_text3_.id = kStaticText3Id;
+  inline_box1_.id = kInlineBox1Id;
+  inline_box2_.id = kInlineBox2Id;
+  inline_box3_.id = kInlineBox3Id;
+  inline_box_line_break1_.id = kInlineBoxLineBreak1Id;
+  inline_box_line_break2_.id = kInlineBoxLineBreak2Id;
+  paragraph_.id = kParagraphId;
+  empty_paragraph_.id = kEmptyParagraphId;
 
   root_.role = ax::mojom::Role::kDialog;
   root_.AddState(ax::mojom::State::kFocusable);
@@ -419,16 +418,16 @@ void AXRangeTest::SetUp() {
 }  // namespace
 
 TEST_F(AXRangeTest, RangeOfContents) {
-  const AXNode* root = GetNode(ROOT_ID);
+  const AXNode* root = GetNode(kRootId);
   const TestPositionRange root_range =
       TestPositionRange::RangeOfContents(*root);
-  const AXNode* text_field = GetNode(TEXT_FIELD_ID);
+  const AXNode* text_field = GetNode(kTextFieldId);
   const TestPositionRange text_field_range =
       TestPositionRange::RangeOfContents(*text_field);
-  const AXNode* static_text = GetNode(STATIC_TEXT1_ID);
+  const AXNode* static_text = GetNode(kStaticText1Id);
   const TestPositionRange static_text_range =
       TestPositionRange::RangeOfContents(*static_text);
-  const AXNode* inline_box = GetNode(INLINE_BOX1_ID);
+  const AXNode* inline_box = GetNode(kInlineBox1Id);
   const TestPositionRange inline_box_range =
       TestPositionRange::RangeOfContents(*inline_box);
 
@@ -608,11 +607,19 @@ TEST_F(AXRangeTest, BeginAndEndIterators) {
   TestPositionRange nullptr_and_null_position(nullptr, null_position->Clone());
   EXPECT_EQ(TestPositionRange::Iterator(), nullptr_and_null_position.begin());
   EXPECT_EQ(TestPositionRange::Iterator(), nullptr_and_null_position.end());
+  EXPECT_EQ(TestPositionRange::ReverseIterator(),
+            nullptr_and_null_position.rbegin());
+  EXPECT_EQ(TestPositionRange::ReverseIterator(),
+            nullptr_and_null_position.rend());
 
   TestPositionRange test_position1_and_nullptr(test_position1->Clone(),
                                                nullptr);
   EXPECT_EQ(TestPositionRange::Iterator(), test_position1_and_nullptr.begin());
   EXPECT_EQ(TestPositionRange::Iterator(), test_position1_and_nullptr.end());
+  EXPECT_EQ(TestPositionRange::ReverseIterator(),
+            test_position1_and_nullptr.rbegin());
+  EXPECT_EQ(TestPositionRange::ReverseIterator(),
+            test_position1_and_nullptr.rend());
 
   TestPositionRange null_position_and_test_position2(null_position->Clone(),
                                                      test_position2->Clone());
@@ -620,6 +627,10 @@ TEST_F(AXRangeTest, BeginAndEndIterators) {
             null_position_and_test_position2.begin());
   EXPECT_EQ(TestPositionRange::Iterator(),
             null_position_and_test_position2.end());
+  EXPECT_EQ(TestPositionRange::ReverseIterator(),
+            null_position_and_test_position2.rbegin());
+  EXPECT_EQ(TestPositionRange::ReverseIterator(),
+            null_position_and_test_position2.rend());
 
   TestPositionRange test_position1_and_test_position2(test_position1->Clone(),
                                                       test_position2->Clone());
@@ -634,6 +645,12 @@ TEST_F(AXRangeTest, BeginAndEndIterators) {
             test_position1_and_test_position2.begin());
   EXPECT_EQ(TestPositionRange::Iterator(nullptr, test_position2->Clone()),
             test_position1_and_test_position2.end());
+  EXPECT_EQ(TestPositionRange::ReverseIterator(test_position1->Clone(),
+                                               test_position2->Clone()),
+            test_position1_and_test_position2.rbegin());
+  EXPECT_EQ(
+      TestPositionRange::ReverseIterator(test_position1->Clone(), nullptr),
+      test_position1_and_test_position2.rend());
 
   TestPositionRange test_position3_and_test_position4(test_position3->Clone(),
                                                       test_position4->Clone());
@@ -652,6 +669,12 @@ TEST_F(AXRangeTest, BeginAndEndIterators) {
             test_position3_and_test_position4.end());
   EXPECT_EQ(TestPositionRange::Iterator(nullptr, test_position4->Clone()),
             test_position3_and_test_position4.end());
+  EXPECT_EQ(TestPositionRange::ReverseIterator(test_position3->Clone(),
+                                               test_position4->Clone()),
+            test_position3_and_test_position4.rbegin());
+  EXPECT_EQ(
+      TestPositionRange::ReverseIterator(test_position3->Clone(), nullptr),
+      test_position3_and_test_position4.rend());
 }
 
 TEST_F(AXRangeTest, LeafTextRangeIteration) {
@@ -718,13 +741,27 @@ TEST_F(AXRangeTest, LeafTextRangeIteration) {
           actual_ranges.emplace_back(std::move(leaf_text_range));
         }
 
-        EXPECT_EQ(expected_ranges.size(), actual_ranges.size());
-        size_t element_count =
-            std::min(expected_ranges.size(), actual_ranges.size());
+        const size_t element_count = expected_ranges.size();
+        ASSERT_EQ(element_count, actual_ranges.size());
         for (size_t i = 0; i < element_count; ++i) {
           EXPECT_EQ(expected_ranges[i], actual_ranges[i]);
           EXPECT_EQ(expected_ranges[i].anchor()->GetAnchor(),
                     actual_ranges[i].anchor()->GetAnchor());
+        }
+
+        // Reverse iterator.
+        actual_ranges.clear();
+        for (auto leaf_text_range = test_range.rbegin();
+             leaf_text_range != test_range.rend(); --leaf_text_range) {
+          EXPECT_TRUE((*leaf_text_range).IsLeafTextRange());
+          actual_ranges.emplace_back(*leaf_text_range);
+        }
+
+        ASSERT_EQ(element_count, actual_ranges.size());
+        for (size_t i = 0; i < element_count; ++i) {
+          EXPECT_EQ(expected_ranges[i], actual_ranges[element_count - 1 - i]);
+          EXPECT_EQ(expected_ranges[i].anchor()->GetAnchor(),
+                    actual_ranges[element_count - 1 - i].anchor()->GetAnchor());
         }
       };
 
@@ -820,6 +857,73 @@ TEST_F(AXRangeTest, LeafTextRangeIteration) {
                                empty_paragraph_end->Clone());
   TestRangeIterator(entire_test_forward_range);
   TestRangeIterator(entire_test_backward_range);
+}
+
+TEST_F(AXRangeTest, GetTextWithContainersInsideListItems) {
+  // Testing 3 scenarios for list item accessible name:
+  // 1. <div> inside list item
+  // 2. Nested <div> inside list item
+  // 3. Forced line break inside list item.
+  TestAXTreeUpdate initial_state(std::string(R"HTML(
+    ++1 kRootWebArea
+    ++++2 kList boolAttribute=kIsLineBreakingObject,true
+    ++++++3 kListItem boolAttribute=kIsLineBreakingObject,true
+    ++++++++4 kListMarker intAttribute=kNameFrom,4
+    ++++++++++5 kStaticText state=kIgnored
+    ++++++++6 kGenericContainer boolAttribute=kIsLineBreakingObject,true
+    ++++++++++7 kStaticText name="hello"
+    ++++++++++++8 kInlineTextBox name="hello"
+    ++++++9 kListItem boolAttribute=kIsLineBreakingObject,true
+    ++++++++10 kListMarker intAttribute=kNameFrom,4
+    ++++++++++11 kStaticText state=kIgnored
+    ++++++++12 kGenericContainer boolAttribute=kIsLineBreakingObject,true
+    ++++++++++13 kGenericContainer boolAttribute=kIsLineBreakingObject,true
+    ++++++++++++14 kStaticText name="world"
+    ++++++++++++++15 kInlineTextBox name="world"
+     ++++++16 kListItem boolAttribute=kIsLineBreakingObject,true
+    ++++++++17 kListMarker intAttribute=kNameFrom,4
+    ++++++++++18 kStaticText state=kIgnored
+    ++++++++19 kLineBreak intAttribute=kNameFrom,4 boolAttribute=kIsLineBreakingObject,true
+    ++++++++++20 kInlineTextBox intAttribute=kNameFrom,4 boolAttribute=kIsLineBreakingObject,true
+    ++++++++21 kStaticText name="good"
+    ++++++++++22 kInlineTextBox name="good"
+  )HTML"));
+
+  initial_state.nodes[3].SetName("1. ");
+  initial_state.nodes[4].SetName("1. ");
+
+  initial_state.nodes[9].SetName("2. ");
+  initial_state.nodes[10].SetName("2. ");
+
+  initial_state.nodes[16].SetName("3. ");
+  initial_state.nodes[17].SetName("3. ");
+
+  SetTree(std::make_unique<AXTree>(initial_state));
+
+  AXNode* list_marker = ax_tree()->GetFromId(4);
+  AXNode* inline_tb = ax_tree()->GetFromId(22);
+
+  TestPositionInstance start =
+      CreateTextPosition(list_marker->data(), 0 /* text_offset */,
+                         ax::mojom::TextAffinity::kDownstream);
+  TestPositionInstance end =
+      CreateTextPosition(inline_tb->data(), 4 /* text_offset */,
+                         ax::mojom::TextAffinity::kDownstream);
+  TestPositionRange forward_range(start->Clone(), end->Clone());
+  std::u16string part1 = u"1. hello";
+  std::u16string part2 = u"2. world";
+  std::u16string part3 = u"3. ";
+  std::u16string part4 = u"good";
+  std::u16string text = part1.substr()
+                            .append(NEWLINE)
+                            .append(part2)
+                            .append(NEWLINE)
+                            .append(part3)
+                            .append(NEWLINE)
+                            .append(part4);
+  EXPECT_EQ(text, forward_range.GetText(
+                      AXTextConcatenationBehavior::kWithParagraphBreaks,
+                      AXEmbeddedObjectBehavior::kExposeCharacterForHypertext));
 }
 
 TEST_F(AXRangeTest, GetTextWithWholeObjects) {
@@ -1005,6 +1109,24 @@ TEST_F(AXRangeTest, GetTextWithTextOffsets) {
                 AXEmbeddedObjectBehavior::kSuppressCharacter));
 }
 
+TEST_F(AXRangeTest, GetTextWithNoSelectionOffset) {
+  TestPositionInstance no_selection_position =
+      CreateTextPosition(button_, ax::mojom::kNoSelectionOffset,
+                         ax::mojom::TextAffinity::kDownstream);
+  TestPositionInstance valid_position = CreateTextPosition(
+      button_, 2 /* text_offset */, ax::mojom::TextAffinity::kDownstream);
+
+  EXPECT_EQ(EMPTY, TestPositionRange(no_selection_position->Clone(),
+                                     valid_position->Clone())
+                       .GetText());
+  EXPECT_EQ(EMPTY, TestPositionRange(valid_position->Clone(),
+                                     no_selection_position->Clone())
+                       .GetText());
+  EXPECT_EQ(EMPTY, TestPositionRange(no_selection_position->Clone(),
+                                     no_selection_position->Clone())
+                       .GetText());
+}
+
 TEST_F(AXRangeTest, GetTextWithEmptyRanges) {
   // empty string with non-leaf tree position
   TestPositionInstance start = CreateTreePosition(root_, 0 /* child_index */);
@@ -1092,19 +1214,22 @@ TEST_F(AXRangeTest, GetTextAddingNewlineBetweenParagraphs) {
                                          range_end->Clone());
     TestPositionRange backward_test_range(std::move(range_end),
                                           std::move(range_start));
-    size_t appended_newlines_count = 0;
+    std::vector<size_t> appended_newlines_indices;
     EXPECT_EQ(expected_text,
               forward_test_range.GetText(
                   AXTextConcatenationBehavior::kWithParagraphBreaks,
                   g_ax_embedded_object_behavior, -1, false,
-                  &appended_newlines_count));
-    EXPECT_EQ(expected_appended_newlines_count, appended_newlines_count);
+                  &appended_newlines_indices));
+    EXPECT_EQ(expected_appended_newlines_count,
+              appended_newlines_indices.size());
+    appended_newlines_indices.clear();
     EXPECT_EQ(expected_text,
               backward_test_range.GetText(
                   AXTextConcatenationBehavior::kWithParagraphBreaks,
                   g_ax_embedded_object_behavior, -1, false,
-                  &appended_newlines_count));
-    EXPECT_EQ(expected_appended_newlines_count, appended_newlines_count);
+                  &appended_newlines_indices));
+    EXPECT_EQ(expected_appended_newlines_count,
+              appended_newlines_indices.size());
   };
 
   std::u16string button_start_to_line1_end =
@@ -1482,6 +1607,7 @@ TEST_F(AXRangeTest, GetRects) {
   TestPositionRange line1_line2_whole_range(line1_start->Clone(),
                                             line2_end->Clone());
   expected_screen_rects = {gfx::Rect(20, 50, 30, 30),
+                           gfx::Rect(50, 50, 1, 30),
                            gfx::Rect(20, 80, 42, 30)};
   EXPECT_THAT(line1_line2_whole_range.GetRects(&delegate),
               ::testing::ContainerEq(expected_screen_rects));
@@ -1493,6 +1619,7 @@ TEST_F(AXRangeTest, GetRects) {
   TestPositionRange line1_line2_mid_range(line1_middle->Clone(),
                                           line2_middle->Clone());
   expected_screen_rects = {gfx::Rect(35, 50, 15, 30),
+                           gfx::Rect(50, 50, 1, 30),
                            gfx::Rect(20, 80, 21, 30)};
   EXPECT_THAT(line1_line2_mid_range.GetRects(&delegate),
               ::testing::ContainerEq(expected_screen_rects));
@@ -1505,6 +1632,7 @@ TEST_F(AXRangeTest, GetRects) {
                                                line2_middle->Clone());
   expected_screen_rects = {gfx::Rect(150, 20, 30, 30),
                            gfx::Rect(20, 50, 30, 30),
+                           gfx::Rect(50, 50, 1, 30),
                            gfx::Rect(20, 80, 21, 30)};
   EXPECT_THAT(check_box2_line2_mid_range.GetRects(&delegate),
               ::testing::ContainerEq(expected_screen_rects));
@@ -1517,7 +1645,8 @@ TEST_F(AXRangeTest, GetRects) {
   expected_screen_rects = {
       gfx::Rect(20, 20, 100, 30), gfx::Rect(120, 20, 30, 30),
       gfx::Rect(150, 20, 30, 30), gfx::Rect(20, 50, 30, 30),
-      gfx::Rect(20, 80, 42, 30),  gfx::Rect(20, 110, 50, 30)};
+      gfx::Rect(50, 50, 1, 30),   gfx::Rect(20, 80, 42, 30),
+      gfx::Rect(62, 80, 1, 30),   gfx::Rect(20, 110, 50, 30)};
   EXPECT_THAT(entire_test_range.GetRects(&delegate),
               ::testing::ContainerEq(expected_screen_rects));
 }
@@ -1543,10 +1672,10 @@ TEST_F(AXRangeTest, GetRectsOffscreen) {
   // {20, 20, 100x30},  {120, 20, 30x30}     {150, 20, 30x30}
   //                                              ---
   // [Line 1]           [\n]                      |
-  // {20, 50, 30x30}                              | view port, onscreen
+  // {20, 50, 30x30}    {50, 50, 1x30}            | view port, onscreen
   //                                              | {0, 50, 800x60}
   // [Line 2]           [\n]                      |
-  // {20, 80, 42x30}                              |
+  // {20, 80, 42x30}    {62, 80, 1x30}            |
   //                                              ---
   // [After]
   // {20, 110, 50x30}
@@ -1558,8 +1687,9 @@ TEST_F(AXRangeTest, GetRectsOffscreen) {
   // |-------------------------------------------------------------------------|
   TestPositionRange entire_test_range(button->Clone(),
                                       empty_paragraph_end->Clone());
-  std::vector<gfx::Rect> expected_screen_rects = {gfx::Rect(20, 50, 30, 30),
-                                                  gfx::Rect(20, 80, 42, 30)};
+  std::vector<gfx::Rect> expected_screen_rects = {
+      gfx::Rect(20, 50, 30, 30), gfx::Rect(50, 50, 1, 30),
+      gfx::Rect(20, 80, 42, 30), gfx::Rect(62, 80, 1, 30)};
   EXPECT_THAT(entire_test_range.GetRects(&delegate),
               ::testing::ContainerEq(expected_screen_rects));
 
@@ -1569,7 +1699,8 @@ TEST_F(AXRangeTest, GetRectsOffscreen) {
   expected_screen_rects = {
       gfx::Rect(20, 20, 100, 30), gfx::Rect(120, 20, 30, 30),
       gfx::Rect(150, 20, 30, 30), gfx::Rect(20, 50, 30, 30),
-      gfx::Rect(20, 80, 42, 30),  gfx::Rect(20, 110, 50, 30)};
+      gfx::Rect(50, 50, 1, 30),   gfx::Rect(20, 80, 42, 30),
+      gfx::Rect(62, 80, 1, 30),   gfx::Rect(20, 110, 50, 30)};
   EXPECT_THAT(entire_test_range.GetRects(&delegate),
               ::testing::ContainerEq(expected_screen_rects));
 }

@@ -4,11 +4,11 @@
 
 #include "services/network/test/test_network_context_client.h"
 
+#include <optional>
 #include <utility>
 
 #include "base/threading/thread_restrictions.h"
 #include "net/base/net_errors.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace network {
 
@@ -21,7 +21,7 @@ TestNetworkContextClient::TestNetworkContextClient(
 TestNetworkContextClient::~TestNetworkContextClient() {}
 
 void TestNetworkContextClient::OnFileUploadRequested(
-    int32_t process_id,
+    const OriginatingProcessId& process_id,
     bool async,
     const std::vector<base::FilePath>& file_paths,
     const GURL& destination_url,

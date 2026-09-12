@@ -4,6 +4,8 @@
 
 package org.chromium.chrome.browser.notifications.scheduler;
 
+import static org.chromium.build.NullUtil.assertNonNull;
+
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -11,10 +13,16 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.drawable.Icon;
 
+import androidx.annotation.VisibleForTesting;
+
+import org.jni_zero.CalledByNative;
+import org.jni_zero.JniType;
+import org.jni_zero.NativeMethods;
+
 import org.chromium.base.ContextUtils;
 import org.chromium.base.IntentUtils;
-import org.chromium.base.annotations.CalledByNative;
-import org.chromium.base.annotations.NativeMethods;
+import org.chromium.build.annotations.NullMarked;
+import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.init.BrowserParts;
 import org.chromium.chrome.browser.init.ChromeBrowserInitializer;
@@ -24,7 +32,7 @@ import org.chromium.chrome.browser.notifications.NotificationUmaTracker;
 import org.chromium.chrome.browser.notifications.NotificationUmaTracker.SystemNotificationType;
 import org.chromium.chrome.browser.notifications.NotificationWrapperBuilderFactory;
 import org.chromium.chrome.browser.notifications.channels.ChromeChannelDefinitions.ChannelId;
-import org.chromium.components.browser_ui.notifications.NotificationManagerProxyImpl;
+import org.chromium.components.browser_ui.notifications.BaseNotificationManagerProxyFactory;
 import org.chromium.components.browser_ui.notifications.NotificationMetadata;
 import org.chromium.components.browser_ui.notifications.NotificationWrapper;
 import org.chromium.components.browser_ui.notifications.NotificationWrapperBuilder;
@@ -33,11 +41,9 @@ import org.chromium.components.browser_ui.notifications.PendingIntentProvider;
 import java.util.ArrayList;
 import java.util.HashMap;
 
-/**
- * Used by notification scheduler to display the notification in Android UI.
- */
+/** Used by notification scheduler to display the notification in Android UI. */
+@NullMarked
 public class DisplayAgent {
-    private static final String TAG = "DisplayAgent";
     private static final String DISPLAY_AGENT_TAG = "NotificationSchedulerDisplayAgent";
 
     private static final String EXTRA_INTENT_TYPE =
@@ -51,11 +57,9 @@ public class DisplayAgent {
     private static final String EXTRA_SCHEDULER_CLIENT_TYPE =
             "org.chromium.chrome.browser.notifications.scheduler.EXTRA_SCHEDULER_CLIENT_TYPE ";
 
-    /**
-     * Contains icon info on the notification.
-     */
-    private static class IconBundle {
-        public final Bitmap bitmap;
+    /** Contains icon info on the notification. */
+    static class IconBundle {
+        public final @Nullable Bitmap bitmap;
         public final int resourceId;
 
         public IconBundle() {
@@ -74,10 +78,8 @@ public class DisplayAgent {
         }
     }
 
-    /**
-     * Contains button info on the notification.
-     */
-    private static class Button {
+    /** Contains button info on the notification. */
+    static class Button {
         public final String text;
         public final @ActionButtonType int type;
         public final String id;
@@ -92,11 +94,12 @@ public class DisplayAgent {
     /**
      * Contains all data needed to build Android notification in the UI, specified by the client.
      */
-    private static class NotificationData {
+    @VisibleForTesting
+    static class NotificationData {
         public final String title;
         public final String message;
-        public HashMap<Integer /*@IconType*/, IconBundle> icons = new HashMap<>();
-        public ArrayList<Button> buttons = new ArrayList<>();
+        public final HashMap<Integer /*@IconType*/, IconBundle> icons = new HashMap<>();
+        public final ArrayList<Button> buttons = new ArrayList<>();
 
         private NotificationData(String title, String message) {
             this.title = title;
@@ -105,14 +108,21 @@ public class DisplayAgent {
     }
 
     @CalledByNative
-    private static void addButton(
-            NotificationData notificationData, String text, @ActionButtonType int type, String id) {
+    @VisibleForTesting
+    static void addButton(
+            NotificationData notificationData,
+            @JniType("std::u16string") String text,
+            @ActionButtonType int type,
+            @JniType("std::string") String id) {
         notificationData.buttons.add(new Button(text, type, id));
     }
 
     @CalledByNative
     private static void addIcon(
-            NotificationData notificationData, @IconType int type, Bitmap bitmap, int resourceId) {
+            NotificationData notificationData,
+            @IconType int type,
+            @JniType("SkBitmap") Bitmap bitmap,
+            int resourceId) {
         assert ((bitmap == null && resourceId != 0) || (bitmap != null && resourceId == 0));
         if (resourceId != 0) {
             notificationData.icons.put(type, new IconBundle(resourceId));
@@ -122,7 +132,9 @@ public class DisplayAgent {
     }
 
     @CalledByNative
-    private static NotificationData buildNotificationData(String title, String message) {
+    @VisibleForTesting
+    static NotificationData buildNotificationData(
+            @JniType("std::u16string") String title, @JniType("std::u16string") String message) {
         return new NotificationData(title, message);
     }
 
@@ -130,8 +142,9 @@ public class DisplayAgent {
      * Contains data used used by the notification scheduling system internally to build the
      * notification.
      */
-    private static class SystemData {
-        public @SchedulerClientType int type;
+    @VisibleForTesting
+    static class SystemData {
+        public final @SchedulerClientType int type;
         public final String guid;
 
         public SystemData(@SchedulerClientType int type, String guid) {
@@ -141,22 +154,23 @@ public class DisplayAgent {
     }
 
     @CalledByNative
-    private static SystemData buildSystemData(@SchedulerClientType int type, String guid) {
+    @VisibleForTesting
+    static SystemData buildSystemData(
+            @SchedulerClientType int type, @JniType("std::string") String guid) {
         return new SystemData(type, guid);
     }
 
-    /**
-     * Receives notification events from Android, like clicks, dismiss, etc.
-     */
+    /** Receives notification events from Android, like clicks, dismiss, etc. */
     public static final class Receiver extends BroadcastReceiver {
         @Override
         public void onReceive(Context context, Intent intent) {
-            final BrowserParts parts = new EmptyBrowserParts() {
-                @Override
-                public void finishNativeInitialization() {
-                    handleUserAction(intent);
-                }
-            };
+            final BrowserParts parts =
+                    new EmptyBrowserParts() {
+                        @Override
+                        public void finishNativeInitialization() {
+                            handleUserAction(intent);
+                        }
+                    };
 
             // Try to load native.
             ChromeBrowserInitializer.getInstance().handlePreNativeStartupAndLoadLibraries(parts);
@@ -166,66 +180,91 @@ public class DisplayAgent {
 
     private static void handleUserAction(Intent intent) {
         @NotificationIntentInterceptor.IntentType
-        int intentType = IntentUtils.safeGetIntExtra(
-                intent, EXTRA_INTENT_TYPE, NotificationIntentInterceptor.IntentType.UNKNOWN);
-        String guid = IntentUtils.safeGetStringExtra(intent, EXTRA_GUID);
+        int intentType =
+                IntentUtils.safeGetIntExtra(
+                        intent,
+                        EXTRA_INTENT_TYPE,
+                        NotificationIntentInterceptor.IntentType.UNKNOWN);
+        String guid = assertNonNull(IntentUtils.safeGetStringExtra(intent, EXTRA_GUID));
         @SchedulerClientType
-        int clientType = IntentUtils.safeGetIntExtra(
-                intent, EXTRA_SCHEDULER_CLIENT_TYPE, SchedulerClientType.UNKNOWN);
+        int clientType =
+                IntentUtils.safeGetIntExtra(
+                        intent, EXTRA_SCHEDULER_CLIENT_TYPE, SchedulerClientType.UNKNOWN);
         switch (intentType) {
             case NotificationIntentInterceptor.IntentType.UNKNOWN:
                 break;
             case NotificationIntentInterceptor.IntentType.CONTENT_INTENT:
-                DisplayAgentJni.get().onUserAction(clientType, UserActionType.CLICK, guid,
-                        ActionButtonType.UNKNOWN_ACTION, null);
+                DisplayAgentJni.get()
+                        .onUserAction(
+                                clientType,
+                                UserActionType.CLICK,
+                                guid,
+                                ActionButtonType.UNKNOWN_ACTION,
+                                null);
                 closeNotification(guid);
                 break;
             case NotificationIntentInterceptor.IntentType.DELETE_INTENT:
-                DisplayAgentJni.get().onUserAction(clientType, UserActionType.DISMISS, guid,
-                        ActionButtonType.UNKNOWN_ACTION, null);
+                DisplayAgentJni.get()
+                        .onUserAction(
+                                clientType,
+                                UserActionType.DISMISS,
+                                guid,
+                                ActionButtonType.UNKNOWN_ACTION,
+                                null);
                 break;
             case NotificationIntentInterceptor.IntentType.ACTION_INTENT:
-                int actionButtonType = IntentUtils.safeGetIntExtra(
-                        intent, EXTRA_ACTION_BUTTON_TYPE, ActionButtonType.UNKNOWN_ACTION);
+                int actionButtonType =
+                        IntentUtils.safeGetIntExtra(
+                                intent, EXTRA_ACTION_BUTTON_TYPE, ActionButtonType.UNKNOWN_ACTION);
                 String buttonId = IntentUtils.safeGetStringExtra(intent, EXTRA_ACTION_BUTTON_ID);
-                DisplayAgentJni.get().onUserAction(
-                        clientType, UserActionType.BUTTON_CLICK, guid, actionButtonType, buttonId);
+                DisplayAgentJni.get()
+                        .onUserAction(
+                                clientType,
+                                UserActionType.BUTTON_CLICK,
+                                guid,
+                                actionButtonType,
+                                buttonId);
                 closeNotification(guid);
                 break;
         }
     }
 
     private static void closeNotification(String guid) {
-        new NotificationManagerProxyImpl(ContextUtils.getApplicationContext())
-                .cancel(DISPLAY_AGENT_TAG, guid.hashCode());
+        BaseNotificationManagerProxyFactory.create().cancel(DISPLAY_AGENT_TAG, guid.hashCode());
     }
 
-    /**
-     * Contains Android platform specific data to construct a notification.
-     */
+    /** Contains Android platform specific data to construct a notification. */
     private static class AndroidNotificationData {
         public final @ChannelId String channel;
         public final @SystemNotificationType int systemNotificationType;
+
         public AndroidNotificationData(String channel, int systemNotificationType) {
             this.channel = channel;
             this.systemNotificationType = systemNotificationType;
         }
     }
 
-    private static AndroidNotificationData toAndroidNotificationData(SystemData systemData) {
-        @ChannelId
-        String channel =
-                systemData.type == SchedulerClientType.FEATURE_GUIDE ? ChannelId.CHROME_TIPS
-                                                                     : ChannelId.BROWSER;
-        @SystemNotificationType
-        int systemNotificationType = systemData.type == SchedulerClientType.FEATURE_GUIDE
-                ? SystemNotificationType.CHROME_TIPS
-                : SystemNotificationType.UNKNOWN;
-        return new AndroidNotificationData(channel, systemNotificationType);
+    private static AndroidNotificationData toAndroidNotificationData(
+            @SchedulerClientType int type) {
+        @SystemNotificationType int systemNotificationType = SystemNotificationType.UNKNOWN;
+        return new AndroidNotificationData(getNotificationChannel(type), systemNotificationType);
     }
 
-    private static Intent buildIntent(Context context,
-            @NotificationIntentInterceptor.IntentType int intentType, SystemData systemData) {
+    private static @ChannelId String getNotificationChannel(@SchedulerClientType int type) {
+        switch (type) {
+            case SchedulerClientType.TIPS:
+                return ChannelId.TIPS_V2;
+            case SchedulerClientType.CHROME_FINDS:
+                return ChannelId.CHROME_FINDS;
+            default:
+                return ChannelId.BROWSER;
+        }
+    }
+
+    private static Intent buildIntent(
+            Context context,
+            @NotificationIntentInterceptor.IntentType int intentType,
+            SystemData systemData) {
         Intent intent = new Intent(context, DisplayAgent.Receiver.class);
         intent.putExtra(EXTRA_INTENT_TYPE, intentType);
         intent.putExtra(EXTRA_SCHEDULER_CLIENT_TYPE, systemData.type);
@@ -234,8 +273,9 @@ public class DisplayAgent {
     }
 
     @CalledByNative
-    private static void showNotification(NotificationData notificationData, SystemData systemData) {
-        AndroidNotificationData platformData = toAndroidNotificationData(systemData);
+    @VisibleForTesting
+    static void showNotification(NotificationData notificationData, SystemData systemData) {
+        AndroidNotificationData platformData = toAndroidNotificationData(systemData.type);
         // TODO(xingliu): Plumb platform specific data from native.
         // mode and provide correct notification id. Support buttons.
         Context context = ContextUtils.getApplicationContext();
@@ -243,79 +283,116 @@ public class DisplayAgent {
         NotificationWrapperBuilder builder =
                 NotificationWrapperBuilderFactory.createNotificationWrapperBuilder(
                         platformData.channel,
-                        new NotificationMetadata(platformData.systemNotificationType,
-                                DISPLAY_AGENT_TAG, systemData.guid.hashCode()));
+                        new NotificationMetadata(
+                                platformData.systemNotificationType,
+                                DISPLAY_AGENT_TAG,
+                                systemData.guid.hashCode()));
         builder.setContentTitle(notificationData.title);
+        // Set the summary (preview) content text for the notification in collapsed form.
         builder.setContentText(notificationData.message);
+        // Override the content text for the notification in expanded form with wrap text style.
+        builder.setBigTextStyle(notificationData.message);
 
-        boolean hasSmallIcon = notificationData.icons.containsKey(IconType.SMALL_ICON);
-
-        if (hasSmallIcon && notificationData.icons.get(IconType.SMALL_ICON).bitmap != null) {
+        @Nullable IconBundle smallIconBundle = notificationData.icons.get(IconType.SMALL_ICON);
+        if (smallIconBundle != null && smallIconBundle.bitmap != null) {
             // Use bitmap as small icon.
-            Icon smallIcon =
-                    Icon.createWithBitmap(notificationData.icons.get(IconType.SMALL_ICON).bitmap);
+            Icon smallIcon = Icon.createWithBitmap(smallIconBundle.bitmap);
             builder.setSmallIcon(smallIcon);
         } else {
             // Use resource Id as small icon, if invalid, use default Chrome icon instead.
             int resourceId = R.drawable.ic_chrome;
-            if (hasSmallIcon && notificationData.icons.get(IconType.SMALL_ICON).resourceId != 0) {
-                resourceId = notificationData.icons.get(IconType.SMALL_ICON).resourceId;
+            if (smallIconBundle != null && smallIconBundle.resourceId != 0) {
+                resourceId = smallIconBundle.resourceId;
             }
             builder.setSmallIcon(resourceId);
         }
 
-        if (notificationData.icons.containsKey(IconType.LARGE_ICON)
-                && notificationData.icons.get(IconType.LARGE_ICON).bitmap != null) {
-            builder.setLargeIcon(notificationData.icons.get(IconType.LARGE_ICON).bitmap);
+        @Nullable IconBundle largeIconBundle = notificationData.icons.get(IconType.LARGE_ICON);
+        if (largeIconBundle != null && largeIconBundle.bitmap != null) {
+            builder.setLargeIcon(largeIconBundle.bitmap);
         }
 
         // Default content click behavior.
-        Intent contentIntent = buildIntent(
-                context, NotificationIntentInterceptor.IntentType.CONTENT_INTENT, systemData);
-        builder.setContentIntent(PendingIntentProvider.getBroadcast(context,
-                getRequestCode(
-                        NotificationIntentInterceptor.IntentType.CONTENT_INTENT, systemData.guid),
-                contentIntent, PendingIntent.FLAG_UPDATE_CURRENT));
+        Intent contentIntent =
+                buildIntent(
+                        context,
+                        NotificationIntentInterceptor.IntentType.CONTENT_INTENT,
+                        systemData);
+        builder.setContentIntent(
+                PendingIntentProvider.getBroadcast(
+                        context,
+                        getRequestCode(
+                                NotificationIntentInterceptor.IntentType.CONTENT_INTENT,
+                                systemData.guid,
+                                /* index= */ 0),
+                        contentIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT));
 
         // Default dismiss behavior.
-        Intent dismissIntent = buildIntent(
-                context, NotificationIntentInterceptor.IntentType.DELETE_INTENT, systemData);
-        builder.setDeleteIntent(PendingIntentProvider.getBroadcast(context,
-                getRequestCode(
-                        NotificationIntentInterceptor.IntentType.DELETE_INTENT, systemData.guid),
-                dismissIntent, PendingIntent.FLAG_UPDATE_CURRENT));
+        Intent dismissIntent =
+                buildIntent(
+                        context,
+                        NotificationIntentInterceptor.IntentType.DELETE_INTENT,
+                        systemData);
+        builder.setDeleteIntent(
+                PendingIntentProvider.getBroadcast(
+                        context,
+                        getRequestCode(
+                                NotificationIntentInterceptor.IntentType.DELETE_INTENT,
+                                systemData.guid,
+                                /* index= */ 0),
+                        dismissIntent,
+                        PendingIntent.FLAG_UPDATE_CURRENT));
 
         // Add the buttons.
         for (int i = 0; i < notificationData.buttons.size(); i++) {
             Button button = notificationData.buttons.get(i);
-            Intent actionIntent = buildIntent(
-                    context, NotificationIntentInterceptor.IntentType.ACTION_INTENT, systemData);
+            Intent actionIntent =
+                    buildIntent(
+                            context,
+                            NotificationIntentInterceptor.IntentType.ACTION_INTENT,
+                            systemData);
             actionIntent.putExtra(EXTRA_ACTION_BUTTON_TYPE, button.type);
             actionIntent.putExtra(EXTRA_ACTION_BUTTON_ID, button.id);
 
-            // TODO(xingliu): Support button icon. See https://crbug.com/983354
-            builder.addAction(0 /*icon_id*/, button.text,
-                    PendingIntentProvider.getBroadcast(context,
-                            getRequestCode(NotificationIntentInterceptor.IntentType.ACTION_INTENT,
-                                    systemData.guid),
-                            actionIntent, PendingIntent.FLAG_UPDATE_CURRENT),
+            // TODO(xingliu): Support button icon. See https://crbug.com/40635786
+            builder.addAction(
+                    /* icon= */ 0,
+                    button.text,
+                    PendingIntentProvider.getBroadcast(
+                            context,
+                            getRequestCode(
+                                    NotificationIntentInterceptor.IntentType.ACTION_INTENT,
+                                    systemData.guid,
+                                    /* index= */ i),
+                            actionIntent,
+                            PendingIntent.FLAG_UPDATE_CURRENT),
                     NotificationUmaTracker.ActionType.UNKNOWN);
         }
 
         NotificationWrapper notification = builder.buildNotificationWrapper();
-        new NotificationManagerProxyImpl(ContextUtils.getApplicationContext()).notify(notification);
-        NotificationUmaTracker.getInstance().onNotificationShown(
-                platformData.systemNotificationType, notification.getNotification());
+        BaseNotificationManagerProxyFactory.create().notify(notification);
+        NotificationUmaTracker.getInstance()
+                .onNotificationShown(
+                        platformData.systemNotificationType, notification.getNotification());
     }
 
     /**
-     * Returns the request code for a specific intent. Android will not distinguish intents based on
-     * extra data. Different intent must have different request code.
+     * Returns a unique request code for a specific intent. In order to guarantee different Request
+     * Codes for buttons of the same IntentType (eg. helpful and unhelpful buttons), a unique index
+     * is used to generate a unique hash for each button.
+     *
+     * @param intentType The type of the intent.
+     * @param guid The unique ID of the notification.
+     * @param index An index used to differentiate intents of buttons sharing the same IntentType.
+     * @return A unique request code for the intent. Android will not distinguish intents based on
+     *     extra data. Different intents must have different request codes.
      */
     private static int getRequestCode(
-            @NotificationIntentInterceptor.IntentType int intentType, String guid) {
+            @NotificationIntentInterceptor.IntentType int intentType, String guid, int index) {
         int hash = guid.hashCode();
-        hash += 31 * hash + intentType;
+        hash = 31 * hash + intentType;
+        hash = 31 * hash + index;
         return hash;
     }
 
@@ -323,7 +400,11 @@ public class DisplayAgent {
 
     @NativeMethods
     interface Natives {
-        void onUserAction(@SchedulerClientType int clientType, @UserActionType int actionType,
-                String guid, @ActionButtonType int type, String buttonId);
+        void onUserAction(
+                @SchedulerClientType int clientType,
+                @UserActionType int actionType,
+                @JniType("std::string") @Nullable String guid,
+                @ActionButtonType int type,
+                @JniType("std::string") @Nullable String buttonId);
     }
 }

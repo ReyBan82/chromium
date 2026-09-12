@@ -6,11 +6,14 @@
 #define THIRD_PARTY_BLINK_RENDERER_CORE_DOM_POPOVER_DATA_H_
 
 #include "base/check_op.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 #include "third_party/blink/renderer/core/dom/element.h"
-#include "third_party/blink/renderer/core/dom/element_rare_data_field.h"
-#include "third_party/blink/renderer/core/dom/id_target_observer.h"
-#include "third_party/blink/renderer/core/html/forms/html_select_menu_element.h"
+#include "third_party/blink/renderer/core/dom/node_rare_data_field.h"
+#include "third_party/blink/renderer/core/execution_context/execution_context.h"
+#include "third_party/blink/renderer/core/html/closewatcher/close_watcher.h"
+#include "third_party/blink/renderer/core/html/forms/html_form_control_element.h"
 #include "third_party/blink/renderer/core/html_element_type_helpers.h"
+#include "third_party/blink/renderer/core/inspector/console_message.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
 
 namespace blink {
@@ -20,26 +23,18 @@ enum class PopoverVisibilityState {
   kShowing,
 };
 
-class PopoverAnchorObserver : public IdTargetObserver {
- public:
-  PopoverAnchorObserver(const AtomicString& id, HTMLElement* element)
-      : IdTargetObserver(element->GetTreeScope().GetIdTargetObserverRegistry(),
-                         id),
-        element_(element) {}
-
-  void IdTargetChanged() override { element_->PopoverAnchorElementChanged(); }
-
-  void Trace(Visitor* visitor) const override {
-    visitor->Trace(element_);
-    IdTargetObserver::Trace(visitor);
-  }
-
- private:
-  Member<HTMLElement> element_;
+enum class PopoverInvokedVia {
+  // Priority order:
+  kNone = 0,
+  kInterest = 1,
+  kCommand = 2,
 };
 
+using PopoverHoverShowMap =
+    HeapHashMap<WeakMember<const HTMLFormControlElement>, TaskHandle>;
+
 class PopoverData final : public GarbageCollected<PopoverData>,
-                          public ElementRareDataField {
+                          public NodeRareDataField {
  public:
   PopoverData() = default;
   PopoverData(const PopoverData&) = delete;
@@ -57,20 +52,21 @@ class PopoverData final : public GarbageCollected<PopoverData>,
         << "Remove PopoverData rather than setting kNone type";
   }
 
-  Element* invoker() const { return invoker_; }
+  Element* invoker() const { return invoker_.Get(); }
   void setInvoker(Element* element) { invoker_ = element; }
 
+  PopoverInvokedVia invokedVia() const { return invoked_via_; }
+  void setInvokedVia(PopoverInvokedVia invoked_via) {
+    if (invoked_via == PopoverInvokedVia::kNone || invoked_via > invoked_via_) {
+      invoked_via_ = invoked_via;
+    }
+  }
+
   Element* previouslyFocusedElement() const {
-    return previously_focused_element_;
+    return previously_focused_element_.Get();
   }
   void setPreviouslyFocusedElement(Element* element) {
     previously_focused_element_ = element;
-  }
-
-  void setAnchorElement(Element* anchor) { anchor_element_ = anchor; }
-  Element* anchorElement() const { return anchor_element_; }
-  void setAnchorObserver(PopoverAnchorObserver* observer) {
-    anchor_observer_ = observer;
   }
 
   bool hasPendingToggleEventTask() const {
@@ -91,38 +87,63 @@ class PopoverData final : public GarbageCollected<PopoverData>,
     pending_toggle_event_started_closed_ = was_closed;
   }
 
-  HTMLSelectMenuElement* ownerSelectMenuElement() const {
-    return owner_select_menu_element_;
+
+  PopoverHoverShowMap& hoverShowTasks() { return hover_show_tasks_; }
+
+  void setHoverHideTask(TaskHandle&& task) {
+    if (hover_hide_task_.IsActive()) {
+      hover_hide_task_.Cancel();
+    }
+    hover_hide_task_ = std::move(task);
   }
-  void setOwnerSelectMenuElement(HTMLSelectMenuElement* element) {
-    owner_select_menu_element_ = element;
+
+  Element* implicitAnchor() const { return implicit_anchor_.Get(); }
+  void setImplicitAnchor(Element* element) { implicit_anchor_ = element; }
+
+  CloseWatcher* closeWatcher() { return close_watcher_.Get(); }
+  void setCloseWatcher(CloseWatcher* close_watcher) {
+    close_watcher_ = close_watcher;
   }
+
+  bool hiding_this_popover() const { return hiding_this_popover_; }
+  void setHidingThisPopover(bool hiding) { hiding_this_popover_ = hiding; }
 
   void Trace(Visitor* visitor) const override {
     visitor->Trace(invoker_);
     visitor->Trace(previously_focused_element_);
-    visitor->Trace(anchor_element_);
-    visitor->Trace(anchor_observer_);
-    visitor->Trace(owner_select_menu_element_);
-    ElementRareDataField::Trace(visitor);
+    visitor->Trace(hover_show_tasks_);
+    visitor->Trace(implicit_anchor_);
+    visitor->Trace(close_watcher_);
+    NodeRareDataField::Trace(visitor);
   }
 
  private:
   PopoverVisibilityState visibility_state_ = PopoverVisibilityState::kHidden;
   PopoverValueType type_ = PopoverValueType::kNone;
+  PopoverInvokedVia invoked_via_ = PopoverInvokedVia::kNone;
   WeakMember<Element> invoker_;
   WeakMember<Element> previously_focused_element_;
-
-  // Target of the 'anchor' attribute.
-  Member<Element> anchor_element_;
-  Member<PopoverAnchorObserver> anchor_observer_;
 
   // Any pending 'toggle' event waiting to be fired. Used for coalescing
   // behavior so that only one such event is fired.
   TaskHandle pending_toggle_event_task_;
   bool pending_toggle_event_started_closed_;
 
-  WeakMember<HTMLSelectMenuElement> owner_select_menu_element_;
+  // True when we're in the middle of trying to hide this popover.
+  bool hiding_this_popover_ = false;
+
+  // Map from elements with the 'popovertarget' attribute and
+  // `popovertargetaction=hover` to a task that will show the popover after a
+  // delay.
+  PopoverHoverShowMap hover_show_tasks_;
+  // A task that hides the popover after a delay.
+  TaskHandle hover_hide_task_;
+
+  // Used to set up an anchor relationship separately from CSS `anchor`
+  // references.
+  WeakMember<Element> implicit_anchor_;
+
+  Member<CloseWatcher> close_watcher_;
 };
 
 }  // namespace blink

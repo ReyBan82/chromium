@@ -4,6 +4,11 @@
 
 #include "services/network/test/test_network_context_with_host_resolver.h"
 
+#include <memory>
+#include <utility>
+
+#include "base/functional/callback_helpers.h"
+
 namespace network {
 
 TestNetworkContextWithHostResolver::TestNetworkContextWithHostResolver(
@@ -38,14 +43,16 @@ void TestNetworkContextWithHostResolver::ResolveHostImpl(
       host->is_host_port_pair()
           ? host_resolver_->CreateRequest(
                 host->get_host_port_pair(), network_anonymization_key,
+                net::handles::kInvalidNetworkHandle,
                 net::NetLogWithSource::Make(net::NetLog::Get(),
                                             net::NetLogSourceType::NONE),
-                /*optional_parameters=*/absl::nullopt)
+                /*optional_parameters=*/std::nullopt)
           : host_resolver_->CreateRequest(
                 host->get_scheme_host_port(), network_anonymization_key,
+                net::handles::kInvalidNetworkHandle,
                 net::NetLogWithSource::Make(net::NetLog::Get(),
                                             net::NetLogSourceType::NONE),
-                /*optional_parameters=*/absl::nullopt);
+                /*optional_parameters=*/std::nullopt);
 
   auto* ptr = internal_request.get();
   auto [async_callback, sync_callback] = base::SplitOnceCallback(
@@ -65,10 +72,9 @@ void TestNetworkContextWithHostResolver::OnResolveHostComplete(
     mojo::Remote<mojom::ResolveHostClient> response_client,
     std::unique_ptr<net::HostResolver::ResolveHostRequest> internal_request,
     int error) {
-  response_client->OnComplete(
-      error, internal_request->GetResolveErrorInfo(),
-      base::OptionalFromPtr(internal_request->GetAddressResults()),
-      /*endpoint_results_with_metadata=*/absl::nullopt);
+  response_client->OnComplete(error, internal_request->GetResolveErrorInfo(),
+                              internal_request->GetAddressResults(),
+                              /*alternative_endpoints=*/{});
   response_client.reset();
 }
 

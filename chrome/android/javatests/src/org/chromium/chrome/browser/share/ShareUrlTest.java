@@ -21,20 +21,18 @@ import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
 
 import org.chromium.base.task.PostTask;
+import org.chromium.base.task.TaskTraits;
 import org.chromium.base.test.BaseJUnit4ClassRunner;
 import org.chromium.base.test.util.Batch;
 import org.chromium.components.browser_ui.share.ShareParams;
 import org.chromium.components.dom_distiller.core.DomDistillerUrlUtils;
-import org.chromium.content_public.browser.UiThreadTaskTraits;
 import org.chromium.content_public.browser.test.NativeLibraryTestUtils;
 import org.chromium.ui.base.WindowAndroid;
 
 import java.lang.ref.WeakReference;
 
-/**
- * Tests sharing URLs in reader mode (DOM distiller)
- */
-// TODO(https://crbug.com/1415082): Remove this test when share no longer depends on DOM distiller.
+/** Tests sharing URLs in reader mode (DOM distiller) */
+// TODO(crbug.com/40256418): Remove this test when share no longer depends on DOM distiller.
 @RunWith(BaseJUnit4ClassRunner.class)
 @Batch(Batch.UNIT_TESTS)
 public class ShareUrlTest {
@@ -46,27 +44,26 @@ public class ShareUrlTest {
         NativeLibraryTestUtils.loadNativeLibraryNoBrowserProcess();
     }
 
-    @Rule
-    public MockitoRule mMockitoRule = MockitoJUnit.rule();
-    @Mock
-    WindowAndroid mWindow;
-    @Mock
-    Activity mActivity;
+    @Rule public MockitoRule mMockitoRule = MockitoJUnit.rule();
+    @Mock WindowAndroid mWindow;
+    @Mock Activity mActivity;
 
     @Before
     public void setup() {
-        Mockito.doReturn(new WeakReference<Activity>(mActivity)).when(mWindow).getActivity();
+        Mockito.doReturn(new WeakReference<>(mActivity)).when(mWindow).getActivity();
     }
 
     private void assertCorrectUrl(final String originalUrl, final String sharedUrl) {
-        PostTask.runOrPostTask(UiThreadTaskTraits.DEFAULT, () -> {
-            ShareParams params =
-                    new ShareParams.Builder(mWindow, "", sharedUrl).setText("").build();
-            Intent intent = ShareHelper.getShareIntent(params);
-            Assert.assertTrue(intent.hasExtra(Intent.EXTRA_TEXT));
-            String url = intent.getStringExtra(Intent.EXTRA_TEXT);
-            Assert.assertEquals(originalUrl, url);
-        });
+        PostTask.runOrPostTask(
+                TaskTraits.UI_DEFAULT,
+                () -> {
+                    ShareParams params =
+                            new ShareParams.Builder(mWindow, "", sharedUrl).setText("").build();
+                    Intent intent = ShareHelper.getShareIntent(params);
+                    Assert.assertTrue(intent.hasExtra(Intent.EXTRA_TEXT));
+                    String url = intent.getStringExtra(Intent.EXTRA_TEXT);
+                    Assert.assertEquals(originalUrl, url);
+                });
     }
 
     @Test
@@ -79,11 +76,13 @@ public class ShareUrlTest {
     @Test
     @SmallTest
     public void testDistilledUrl() {
-        final String DomDistillerScheme = "chrome-distiller";
-        String distilledHttpUrl = DomDistillerUrlUtils.getDistillerViewUrlFromUrl(
-                DomDistillerScheme, HTTP_URL, "Title");
-        String distilledHttpsUrl = DomDistillerUrlUtils.getDistillerViewUrlFromUrl(
-                DomDistillerScheme, HTTPS_URL, "Title");
+        final String domDistillerScheme = "chrome-distiller";
+        String distilledHttpUrl =
+                DomDistillerUrlUtils.getDistillerViewUrlFromUrl(
+                        domDistillerScheme, HTTP_URL, "Title");
+        String distilledHttpsUrl =
+                DomDistillerUrlUtils.getDistillerViewUrlFromUrl(
+                        domDistillerScheme, HTTPS_URL, "Title");
 
         assertCorrectUrl(HTTP_URL, distilledHttpUrl);
         assertCorrectUrl(HTTPS_URL, distilledHttpsUrl);

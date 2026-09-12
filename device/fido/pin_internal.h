@@ -12,14 +12,15 @@
 #include <stdint.h>
 
 #include <array>
+#include <optional>
 #include <vector>
 
 #include "base/component_export.h"
 #include "base/containers/span.h"
 #include "components/cbor/values.h"
-#include "device/fido/fido_constants.h"
+#include "crypto/keypair.h"
 #include "device/fido/pin.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "device/fido/public/fido_constants.h"
 #include "third_party/boringssl/src/include/openssl/base.h"
 
 namespace device {
@@ -64,13 +65,6 @@ enum class ResponseKey : int {
   kUvRetries = 5,
 };
 
-// PointFromKeyAgreementResponse returns an |EC_POINT| that represents the same
-// P-256 point as |response|. It returns |nullopt| if |response| encodes an
-// invalid point.
-absl::optional<bssl::UniquePtr<EC_POINT>> PointFromKeyAgreementResponse(
-    const EC_GROUP* group,
-    const KeyAgreementResponse& response);
-
 // Protocol abstracts a PIN/UV Auth Token Protocol. Instances are obtained
 // through ProtocolVersion().
 class COMPONENT_EXPORT(DEVICE_FIDO) Protocol {
@@ -114,8 +108,8 @@ class COMPONENT_EXPORT(DEVICE_FIDO) Protocol {
   // CalculateSharedKey returns the CTAP2 shared key between |key| and
   // |peers_key|.
   virtual std::vector<uint8_t> CalculateSharedKey(
-      const EC_KEY* key,
-      const EC_POINT* peers_key) const = 0;
+      crypto::keypair::PrivateKey ours,
+      crypto::keypair::PublicKey theirs) const = 0;
 
  protected:
   Protocol() = default;

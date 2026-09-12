@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import {Point} from 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/pdf_viewer_wrapper.js';
+import type {Point} from 'chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/pdf_viewer_wrapper.js';
 
 const viewer = document.body.querySelector('pdf-viewer')!;
 
@@ -11,7 +11,7 @@ function sendTouchStart(touches: Point[]) {
   const touchList = touches.map(function(xy: Point) {
     const touchInit = {
       identifier: id++,
-      target: viewer.shadowRoot!.querySelector('embed')!,
+      target: viewer.shadowRoot.querySelector('embed')!,
       clientX: xy.x,
       clientY: xy.y,
     };
@@ -19,7 +19,7 @@ function sendTouchStart(touches: Point[]) {
     return new window.Touch(touchInit);
   });
 
-  const target = viewer.shadowRoot!.querySelector('#content')!;
+  const target = viewer.shadowRoot.querySelector('#content')!;
   target.dispatchEvent(new TouchEvent('touchstart', {
     bubbles: true,
     composed: true,
@@ -65,7 +65,7 @@ chrome.test.runTests([
 
   // Test long press selects word. This test flakes out on some bots.
   // The test passes locally on MacOS, ChromeOS and Linux. Disable until it's
-  // possible to repro the bot issue. https://crbug.com/723632
+  // possible to repro the bot issue. https://crbug.com/41320059
   // function testLongPressSelectsText() {
   //   var client = new PdfScriptingApi(window, window);
   //   sendTouchStart([{x: 336, y: 163}]);

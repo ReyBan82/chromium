@@ -4,11 +4,10 @@
 
 #include "components/autofill/core/browser/logging/log_router.h"
 
-// TODO(crbug.com/1380255): Remove the next two lines
-#include "base/debug/crash_logging.h"
-#include "base/debug/dump_without_crashing.h"
+#include <string>
+
+#include "base/check.h"
 #include "base/observer_list.h"
-#include "base/strings/escape.h"
 #include "base/strings/string_split.h"
 #include "components/autofill/core/browser/logging/log_manager.h"
 #include "components/autofill/core/browser/logging/log_receiver.h"
@@ -18,19 +17,12 @@ namespace autofill {
 
 LogRouter::LogRouter() = default;
 
-// TODO(crbug.com/1380255): Turn this back to ~LogRouter() = default;
 LogRouter::~LogRouter() {
-  if (!managers_.empty() || !receivers_.empty()) {
-    SCOPED_CRASH_KEY_STRING32("autofill::LogRouter", "managers_",
-                              managers_.empty() ? "empty" : "not empty");
-    SCOPED_CRASH_KEY_STRING32("autofill::LogRouter", "receivers_",
-                              receivers_.empty() ? "empty" : "not empty");
-    base::debug::DumpWithoutCrashing();
-  }
+  receivers_.RemoveObserver(&text_log_receiver_);
 }
 
 // static
-base::Value::Dict LogRouter::CreateEntryForText(const std::string& text) {
+base::DictValue LogRouter::CreateEntryForText(const std::string& text) {
   LogBuffer buffer(LogBuffer::IsActive(true));
   buffer << Tag{"div"};
   for (const auto& line : base::SplitStringPiece(
@@ -41,14 +33,24 @@ base::Value::Dict LogRouter::CreateEntryForText(const std::string& text) {
   return *buffer.RetrieveResult();
 }
 
+void LogRouter::LogToTerminal() {
+  if (!receivers_.HasObserver(&text_log_receiver_)) {
+    receivers_.AddObserver(&text_log_receiver_);
+  }
+}
+
+bool LogRouter::HasReceivers() const {
+  return !receivers_.empty();
+}
+
 void LogRouter::ProcessLog(const std::string& text) {
   ProcessLog(CreateEntryForText(text));
 }
 
-void LogRouter::ProcessLog(const base::Value::Dict& node) {
+void LogRouter::ProcessLog(const base::DictValue& node) {
   // This may not be called when there are no receivers (i.e., the router is
   // inactive), because in that case the logs cannot be displayed.
-  DCHECK(!receivers_.empty());
+  DCHECK(HasReceivers());
   for (LogReceiver& receiver : receivers_)
     receiver.LogEntry(node);
 }
@@ -56,7 +58,7 @@ void LogRouter::ProcessLog(const base::Value::Dict& node) {
 bool LogRouter::RegisterManager(RoutingLogManager* manager) {
   DCHECK(manager);
   managers_.AddObserver(manager);
-  return !receivers_.empty();
+  return HasReceivers();
 }
 
 void LogRouter::UnregisterManager(RoutingLogManager* manager) {
@@ -66,7 +68,7 @@ void LogRouter::UnregisterManager(RoutingLogManager* manager) {
 
 void LogRouter::RegisterReceiver(LogReceiver* receiver) {
   DCHECK(receiver);
-  if (receivers_.empty()) {
+  if (!HasReceivers()) {
     for (RoutingLogManager& manager : managers_)
       manager.OnLogRouterAvailabilityChanged(true);
   }
@@ -76,7 +78,7 @@ void LogRouter::RegisterReceiver(LogReceiver* receiver) {
 void LogRouter::UnregisterReceiver(LogReceiver* receiver) {
   DCHECK(receivers_.HasObserver(receiver));
   receivers_.RemoveObserver(receiver);
-  if (receivers_.empty()) {
+  if (!HasReceivers()) {
     for (RoutingLogManager& manager : managers_)
       manager.OnLogRouterAvailabilityChanged(false);
   }

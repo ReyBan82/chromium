@@ -4,8 +4,9 @@
 
 #include "third_party/blink/renderer/core/intersection_observer/intersection_observation.h"
 
-#include "third_party/blink/renderer/core/dom/element_rare_data.h"
+#include "third_party/blink/renderer/core/dom/node_rare_data.h"
 #include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/intersection_observer/element_intersection_observer_data.h"
 #include "third_party/blink/renderer/core/intersection_observer/intersection_geometry.h"
 #include "third_party/blink/renderer/core/intersection_observer/intersection_observer.h"
 #include "third_party/blink/renderer/core/intersection_observer/intersection_observer_controller.h"
@@ -17,87 +18,67 @@
 
 namespace blink {
 
-namespace {
-
-Document& TrackingDocument(const IntersectionObservation* observation) {
-  if (observation->Observer()->RootIsImplicit())
-    return observation->Target()->GetDocument();
-  return (observation->Observer()->root()->GetDocument());
-}
-
-}  // namespace
-
 IntersectionObservation::IntersectionObservation(IntersectionObserver& observer,
                                                  Element& target)
-    : observer_(observer),
-      target_(&target),
-      last_run_time_(-observer.GetEffectiveDelay()),
-      last_is_visible_(false),
-      // Note that the spec says the initial value of last_threshold_index_
-      // should be -1, but since last_threshold_index_ is unsigned, we use a
-      // different sentinel value.
-      last_threshold_index_(kMaxThresholdIndex - 1) {
-  if (!observer.RootIsImplicit())
-    cached_rects_ = std::make_unique<IntersectionGeometry::CachedRects>();
-}
+    : observer_(observer), target_(&target) {}
 
 int64_t IntersectionObservation::ComputeIntersection(
-    const IntersectionGeometry::RootGeometry& root_geometry,
-    unsigned compute_flags,
-    absl::optional<base::TimeTicks>& monotonic_time) {
-  DCHECK(Observer());
-  if (compute_flags &
-      (observer_->RootIsImplicit() ? kImplicitRootObserversNeedUpdate
-                                   : kExplicitRootObserversNeedUpdate)) {
-    needs_update_ = true;
+    ComputeFlags compute_flags,
+    ComputeIntersectionsContext& context) {
+  if (!CanCompute()) {
+    return 0;
   }
-  if (!ShouldCompute(compute_flags))
-    return 0;
-  if (!monotonic_time.has_value())
-    monotonic_time = base::DefaultTickClock::GetInstance()->NowTicks();
-  DOMHighResTimeStamp timestamp = observer_->GetTimeStamp(*monotonic_time);
-  if (MaybeDelayAndReschedule(compute_flags, timestamp))
-    return 0;
-  DCHECK(observer_->root());
-  unsigned geometry_flags = GetIntersectionGeometryFlags(compute_flags);
-  IntersectionGeometry geometry(
-      root_geometry, *observer_->root(), *Target(), observer_->thresholds(),
-      observer_->TargetMargin(), geometry_flags, cached_rects_.get());
-  ProcessIntersectionGeometry(geometry, timestamp);
-  last_run_time_ = timestamp;
-  needs_update_ = false;
-  return geometry.DidComputeGeometry() ? 1 : 0;
-}
 
-int64_t IntersectionObservation::ComputeIntersection(
-    unsigned compute_flags,
-    absl::optional<base::TimeTicks>& monotonic_time) {
-  DCHECK(Observer());
-  if (compute_flags &
-      (observer_->RootIsImplicit() ? kImplicitRootObserversNeedUpdate
-                                   : kExplicitRootObserversNeedUpdate)) {
+  // If we're processing post-layout deliveries only and we don't have a
+  // post-layout delivery observer, then return early. Likewise, return if we
+  // need to compute non-post-layout-delivery observations but the observer
+  // behavior is post-layout.
+  bool post_layout_delivery_only = compute_flags.Has(kPostLayoutDeliveryOnly);
+  bool is_post_layout_delivery_observer =
+      Observer()->GetDeliveryBehavior() ==
+      IntersectionObserver::kDeliverDuringPostLayoutSteps;
+  if (post_layout_delivery_only != is_post_layout_delivery_observer) {
+    return 0;
+  }
+
+  if (compute_flags.Has(observer_->RootIsImplicit()
+                            ? kImplicitRootObserversNeedUpdate
+                            : kExplicitRootObserversNeedUpdate)) {
     needs_update_ = true;
   }
-  if (!ShouldCompute(compute_flags))
+
+  if (!CanCompute() || !ShouldCompute(compute_flags)) {
     return 0;
-  if (!monotonic_time.has_value())
-    monotonic_time = base::DefaultTickClock::GetInstance()->NowTicks();
-  DOMHighResTimeStamp timestamp = observer_->GetTimeStamp(*monotonic_time);
-  if (MaybeDelayAndReschedule(compute_flags, timestamp))
+  }
+  if (MaybeDelayAndReschedule(compute_flags, context)) {
     return 0;
-  unsigned geometry_flags = GetIntersectionGeometryFlags(compute_flags);
-  IntersectionGeometry geometry(
-      observer_->root(), *Target(), observer_->RootMargin(),
-      observer_->thresholds(), observer_->TargetMargin(), geometry_flags);
-  ProcessIntersectionGeometry(geometry, timestamp);
-  last_run_time_ = timestamp;
+  }
+
+  last_run_time_ = context.GetMonotonicTime();
   needs_update_ = false;
+
+  auto geometry_flags = GetIntersectionGeometryFlags(compute_flags);
+  // The policy for honoring margins is the same as that for reporting root
+  // bounds, so this flag can be used for both.
+  bool honor_margins =
+      geometry_flags.Has(IntersectionGeometry::kShouldReportRootBounds);
+  Vector<Length> empty_margin;
+  const Vector<Length>& root_margin =
+      honor_margins ? observer_->RootMargin() : empty_margin;
+  IntersectionGeometry geometry(
+      observer_->root(), *Target(), root_margin, observer_->thresholds(),
+      honor_margins ? observer_->TargetMargin() : empty_margin,
+      honor_margins ? observer_->ScrollMargin() : empty_margin, geometry_flags,
+      context.GetRootGeometry(*observer_, root_margin), &cached_rects_,
+      observer_->hit_node_cb());
+
+  ProcessIntersectionGeometry(geometry, context);
   return geometry.DidComputeGeometry() ? 1 : 0;
 }
 
 void IntersectionObservation::TakeRecords(
     HeapVector<Member<IntersectionObserverEntry>>& entries) {
-  entries.AppendVector(entries_);
+  entries.append_range(entries_);
   entries_.clear();
 }
 
@@ -108,20 +89,14 @@ void IntersectionObservation::Disconnect() {
     ElementIntersectionObserverData* observer_data =
         target_->IntersectionObserverData();
     observer_data->RemoveObservation(*this);
-    if (target_->isConnected()) {
-      IntersectionObserverController* controller =
-          target_->GetDocument().GetIntersectionObserverController();
-      if (controller)
-        controller->RemoveTrackedObservation(*this);
+    IntersectionObserverController* controller =
+        target_->GetDocument().GetIntersectionObserverController();
+    if (controller) {
+      controller->RemoveTrackedObservation(*this);
     }
   }
   entries_.clear();
   observer_.Clear();
-}
-
-void IntersectionObservation::InvalidateCachedRects() {
-  if (cached_rects_)
-    cached_rects_->valid = false;
 }
 
 void IntersectionObservation::Trace(Visitor* visitor) const {
@@ -130,102 +105,113 @@ void IntersectionObservation::Trace(Visitor* visitor) const {
   visitor->Trace(target_);
 }
 
-bool IntersectionObservation::ShouldCompute(unsigned flags) const {
-  if (!target_ || !observer_->RootIsValid() ||
-      !observer_->GetExecutionContext())
+bool IntersectionObservation::CanUseCachedRectsForTesting(
+    bool scroll_and_visibility_only) const {
+  // This is to avoid the side effects of IntersectionGeometry.
+  IntersectionGeometry::CachedRects cached_rects_copy = cached_rects_;
+
+  std::optional<IntersectionGeometry::RootGeometry> root_geometry;
+  IntersectionGeometry::Flags flags;
+  if (scroll_and_visibility_only) {
+    flags.Put(IntersectionGeometry::kScrollAndVisibilityOnly);
+  }
+  IntersectionGeometry geometry(observer_->root(), *target_,
+                                /* root_margin */ {},
+                                /* thresholds */ {0},
+                                /* target_margin */ {},
+                                /* scroll_margin */ {}, flags, root_geometry,
+                                &cached_rects_copy);
+
+  return geometry.CanUseCachedRectsForTesting();
+}
+
+bool IntersectionObservation::CanCompute() const {
+  return !!target_ && !!observer_ && observer_->RootIsValid() &&
+         observer_->GetExecutionContext();
+}
+
+bool IntersectionObservation::ShouldCompute(ComputeFlags flags) const {
+  if (!needs_update_) {
     return false;
-  // If we're processing post-layout deliveries only and we don't have a
-  // post-layout delivery observer, then return early. Likewise, return if we
-  // need to compute non-post-layout-delivery observations but the observer
-  // behavior is post-layout.
-  bool post_layout_delivery_only = flags & kPostLayoutDeliveryOnly;
-  bool is_post_layout_delivery_observer =
-      Observer()->GetDeliveryBehavior() ==
-      IntersectionObserver::kDeliverDuringPostLayoutSteps;
-  if (post_layout_delivery_only != is_post_layout_delivery_observer)
-    return false;
-  if (!needs_update_)
-    return false;
+  }
   if (target_->isConnected() && target_->GetDocument().GetFrame() &&
       Observer()->trackVisibility()) {
     mojom::blink::FrameOcclusionState occlusion_state =
         target_->GetDocument().GetFrame()->GetOcclusionState();
-    // If we're tracking visibility, and we don't have occlusion information
-    // from our parent frame, then postpone computing intersections until a
-    // later lifecycle when the occlusion information is known.
-    if (occlusion_state == mojom::blink::FrameOcclusionState::kUnknown)
+    // If we're tracking visibility, and we aren't currently reporting the
+    // target visible, and we don't have occlusion information from our parent
+    // frame, then postpone computing intersections until a later lifecycle when
+    // the occlusion information is known.
+    if (!last_is_visible_ &&
+        occlusion_state == mojom::blink::FrameOcclusionState::kUnknown) {
       return false;
+    }
   }
   return true;
 }
 
 bool IntersectionObservation::MaybeDelayAndReschedule(
-    unsigned flags,
-    DOMHighResTimeStamp timestamp) {
-  if (timestamp == -1)
-    return true;
-  base::TimeDelta delay = base::Milliseconds(observer_->GetEffectiveDelay() -
-                                             (timestamp - last_run_time_));
-  if (!(flags & kIgnoreDelay) && delay.is_positive()) {
-    TrackingDocument(this).View()->ScheduleAnimation(delay);
-    return true;
-  }
-  return false;
-}
-
-bool IntersectionObservation::CanUseCachedRects() const {
-  if (!cached_rects_ || !cached_rects_->valid ||
-      !observer_->CanUseCachedRects()) {
+    ComputeFlags flags,
+    ComputeIntersectionsContext& context) {
+  if (flags.Has(kIgnoreDelay)) {
     return false;
   }
-  // Cached rects can only be used if there are no scrollable objects in the
-  // hierarchy between target and root (a scrollable root is ok). The reason is
-  // that a scroll change in an intermediate scroller would change the
-  // intersection geometry, but it would not properly trigger an invalidation of
-  // the cached rects.
-  if (LayoutObject* target = target_->GetLayoutObject()) {
-    PaintLayer* root_layer = target->GetDocument().GetLayoutView()->Layer();
-    if (!root_layer)
-      return false;
-    if (LayoutBox* scroller = target->EnclosingScrollableBox()) {
-      if (scroller->GetNode() == observer_->root())
-        return true;
-    }
+  if (last_run_time_.is_null()) {
+    return false;
+  }
+  base::TimeDelta delay = observer_->GetEffectiveDelay() -
+                          (context.GetMonotonicTime() - last_run_time_);
+  if (delay.is_positive()) {
+    context.UpdateNextRunDelay(delay);
+    return true;
   }
   return false;
 }
 
-unsigned IntersectionObservation::GetIntersectionGeometryFlags(
-    unsigned compute_flags) const {
+IntersectionGeometry::Flags
+IntersectionObservation::GetIntersectionGeometryFlags(
+    ComputeFlags compute_flags) const {
   bool report_root_bounds = observer_->AlwaysReportRootBounds() ||
-                            (compute_flags & kReportImplicitRootBounds) ||
+                            compute_flags.Has(kReportImplicitRootBounds) ||
                             !observer_->RootIsImplicit();
-  unsigned geometry_flags = IntersectionGeometry::kShouldConvertToCSSPixels;
-  if (report_root_bounds)
-    geometry_flags |= IntersectionGeometry::kShouldReportRootBounds;
-  if (Observer()->trackVisibility())
-    geometry_flags |= IntersectionGeometry::kShouldComputeVisibility;
-  if (Observer()->trackFractionOfRoot())
-    geometry_flags |= IntersectionGeometry::kShouldTrackFractionOfRoot;
-  if (CanUseCachedRects())
-    geometry_flags |= IntersectionGeometry::kShouldUseCachedRects;
-  if (Observer()->UseOverflowClipEdge())
-    geometry_flags |= IntersectionGeometry::kUseOverflowClipEdge;
+  IntersectionGeometry::Flags geometry_flags = {
+      IntersectionGeometry::kShouldConvertToCSSPixels};
+  if (report_root_bounds) {
+    geometry_flags.Put(IntersectionGeometry::kShouldReportRootBounds);
+  }
+  if (Observer()->trackVisibility()) {
+    geometry_flags.Put(IntersectionGeometry::kShouldComputeVisibility);
+  }
+  if (Observer()->ShouldExposeOccluderNodeId()) {
+    geometry_flags.Put(IntersectionGeometry::kShouldExposeOccluderNodeId);
+  }
+  if (Observer()->trackFractionOfRoot()) {
+    geometry_flags.Put(IntersectionGeometry::kShouldTrackFractionOfRoot);
+  }
+  if (Observer()->UseOverflowClipEdge()) {
+    geometry_flags.Put(IntersectionGeometry::kUseOverflowClipEdge);
+  }
+  if (Observer()->IsInternal()) {
+    geometry_flags.Put(IntersectionGeometry::kRespectFilters);
+  }
+  if (compute_flags.Has(kScrollAndVisibilityOnly)) {
+    geometry_flags.Put(IntersectionGeometry::kScrollAndVisibilityOnly);
+  }
   return geometry_flags;
 }
 
 void IntersectionObservation::ProcessIntersectionGeometry(
     const IntersectionGeometry& geometry,
-    DOMHighResTimeStamp timestamp) {
-  CHECK_LT(geometry.ThresholdIndex(), kMaxThresholdIndex - 1);
+    ComputeIntersectionsContext& context) {
+  CHECK_LT(geometry.ThresholdIndex(), kNotFound);
 
   if (last_threshold_index_ != geometry.ThresholdIndex() ||
       last_is_visible_ != geometry.IsVisible()) {
     entries_.push_back(MakeGarbageCollected<IntersectionObserverEntry>(
-        geometry, timestamp, Target()));
+        geometry, context.GetTimeStamp(*Observer()), Target()));
     Observer()->ReportUpdates(*this);
-    SetLastThresholdIndex(geometry.ThresholdIndex());
-    SetWasVisible(geometry.IsVisible());
+    last_threshold_index_ = geometry.ThresholdIndex();
+    last_is_visible_ = geometry.IsVisible();
   }
 }
 

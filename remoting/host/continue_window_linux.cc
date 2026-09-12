@@ -9,10 +9,12 @@
 #include <memory>
 
 #include "base/compiler_specific.h"
+#include "base/functional/bind.h"
 #include "base/logging.h"
+#include "base/memory/raw_ptr_exclusion.h"
 #include "base/strings/utf_string_conversions.h"
 #include "remoting/base/string_resources.h"
-#include "ui/base/glib/glib_signal.h"
+#include "ui/base/glib/scoped_gsignal.h"
 #include "ui/base/l10n/l10n_util.h"
 
 namespace remoting {
@@ -30,22 +32,24 @@ class ContinueWindowGtk : public ContinueWindow {
   // ContinueWindow overrides.
   void ShowUi() override;
   void HideUi() override;
+  void SetButtonsEnabled(bool enabled) override;
 
  private:
   void CreateWindow();
 
-  CHROMEG_CALLBACK_1(ContinueWindowGtk, void, OnResponse, GtkDialog*, int);
+  void OnResponse(GtkDialog*, int);
 
-  GtkWidget* continue_window_;
+  raw_ptr<GtkWidget> continue_window_;
+
+  bool buttons_enabled_ = false;
+
+  ScopedGSignal signal_;
 };
 
 ContinueWindowGtk::ContinueWindowGtk() : continue_window_(nullptr) {}
 
 ContinueWindowGtk::~ContinueWindowGtk() {
-  if (continue_window_) {
-    gtk_widget_destroy(continue_window_);
-    continue_window_ = nullptr;
-  }
+  HideUi();
 }
 
 void ContinueWindowGtk::ShowUi() {
@@ -53,16 +57,28 @@ void ContinueWindowGtk::ShowUi() {
   DCHECK(!continue_window_);
 
   CreateWindow();
-  gtk_window_set_urgency_hint(GTK_WINDOW(continue_window_), TRUE);
-  gtk_window_present(GTK_WINDOW(continue_window_));
+  gtk_window_set_urgency_hint(GTK_WINDOW(continue_window_.get()), TRUE);
+  gtk_window_present(GTK_WINDOW(continue_window_.get()));
 }
 
 void ContinueWindowGtk::HideUi() {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
 
   if (continue_window_) {
-    gtk_widget_destroy(continue_window_);
-    continue_window_ = nullptr;
+    signal_.Reset();
+    gtk_widget_destroy(continue_window_.ExtractAsDangling());
+  }
+}
+
+void ContinueWindowGtk::SetButtonsEnabled(bool enabled) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+  buttons_enabled_ = enabled;
+  if (continue_window_) {
+    gtk_dialog_set_response_sensitive(GTK_DIALOG(continue_window_.get()),
+                                      GTK_RESPONSE_CANCEL,
+                                      enabled ? TRUE : FALSE);
+    gtk_dialog_set_response_sensitive(GTK_DIALOG(continue_window_.get()),
+                                      GTK_RESPONSE_OK, enabled ? TRUE : FALSE);
   }
 }
 
@@ -78,19 +94,24 @@ void ContinueWindowGtk::CreateWindow() {
       l10n_util::GetStringUTF8(IDS_CONTINUE_BUTTON).c_str(), GTK_RESPONSE_OK,
       nullptr);
 
-  gtk_dialog_set_default_response(GTK_DIALOG(continue_window_),
-                                  GTK_RESPONSE_OK);
-  gtk_window_set_resizable(GTK_WINDOW(continue_window_), FALSE);
+  gtk_dialog_set_default_response(GTK_DIALOG(continue_window_.get()),
+                                  GTK_RESPONSE_CANCEL);
+  gtk_dialog_set_response_sensitive(GTK_DIALOG(continue_window_.get()),
+                                    GTK_RESPONSE_CANCEL, FALSE);
+  gtk_dialog_set_response_sensitive(GTK_DIALOG(continue_window_.get()),
+                                    GTK_RESPONSE_OK, FALSE);
+  gtk_window_set_resizable(GTK_WINDOW(continue_window_.get()), FALSE);
 
   // Set always-on-top, otherwise this window tends to be obscured by the
   // DisconnectWindow.
-  gtk_window_set_keep_above(GTK_WINDOW(continue_window_), TRUE);
+  gtk_window_set_keep_above(GTK_WINDOW(continue_window_.get()), TRUE);
 
-  g_signal_connect(continue_window_, "response", G_CALLBACK(OnResponseThunk),
-                   this);
+  signal_ = ScopedGSignal(GTK_DIALOG(continue_window_.get()), "response",
+                          base::BindRepeating(&ContinueWindowGtk::OnResponse,
+                                              base::Unretained(this)));
 
   GtkWidget* content_area =
-      gtk_dialog_get_content_area(GTK_DIALOG(continue_window_));
+      gtk_dialog_get_content_area(GTK_DIALOG(continue_window_.get()));
 
   GtkWidget* text_label =
       gtk_label_new(l10n_util::GetStringUTF8(IDS_CONTINUE_PROMPT).c_str());
@@ -115,6 +136,10 @@ void ContinueWindowGtk::CreateWindow() {
 
 void ContinueWindowGtk::OnResponse(GtkDialog* dialog, int response_id) {
   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+
+  if (!buttons_enabled_) {
+    return;
+  }
 
   if (response_id == GTK_RESPONSE_OK) {
     ContinueSession();

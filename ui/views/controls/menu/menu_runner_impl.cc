@@ -7,6 +7,7 @@
 #include <memory>
 #include <utility>
 
+#include "base/memory/ptr_util.h"
 #include "build/build_config.h"
 #include "ui/accessibility/platform/ax_platform_node_base.h"
 #include "ui/native_theme/native_theme.h"
@@ -71,31 +72,30 @@ MenuRunnerImplInterface* MenuRunnerImplInterface::Create(
 }
 #endif
 
-MenuRunnerImpl::MenuRunnerImpl(MenuItemView* menu)
-    : menu_(menu),
-
-      controller_(nullptr) {}
+MenuRunnerImpl::MenuRunnerImpl(std::unique_ptr<MenuItemView> menu)
+    : menu_(std::move(menu)) {}
 
 bool MenuRunnerImpl::IsRunning() const {
   return running_;
 }
 
 void MenuRunnerImpl::Release() {
-  if (running_) {
-    if (delete_after_run_)
-      return;  // We already canceled.
-
-    // The menu is running a nested run loop, we can't delete it now
-    // otherwise the stack would be in a really bad state (many frames would
-    // have deleted objects on them). Instead cancel the menu, when it returns
-    // Holder will delete itself.
-    delete_after_run_ = true;
-
-    // Swap in a different delegate. That way we know the original MenuDelegate
-    // won't be notified later on (when it's likely already been deleted).
-    if (!empty_delegate_.get())
-      empty_delegate_ = std::make_unique<MenuDelegate>();
+  // Swap in a different delegate. That way we know the original MenuDelegate
+  // won't be notified later on (when it's likely already been deleted).
+  if (!empty_delegate_) {
+    empty_delegate_ = std::make_unique<MenuDelegate>();
     menu_->set_delegate(empty_delegate_.get());
+    for (MenuItemView* sibling_menu : sibling_menus_) {
+      sibling_menu->set_delegate(empty_delegate_.get());
+    }
+  }
+
+  if (running_) {
+    if (delete_after_run_) {
+      return;  // We already canceled.
+    }
+
+    delete_after_run_ = true;
 
     // Verify that the MenuController is still active. It may have been
     // destroyed out of order.
@@ -108,16 +108,26 @@ void MenuRunnerImpl::Release() {
     }
   }
 
+  bool is_stack_active = controller_ && controller_->IsStackActive();
+  if (is_stack_active) {
+    // Transfer ownership to controller.
+    controller_->DeferMenuRunnerDestruction(base::WrapUnique(this));
+    return;
+  }
+
   delete this;
 }
 
-void MenuRunnerImpl::RunMenuAt(Widget* parent,
-                               MenuButtonController* button_controller,
-                               const gfx::Rect& bounds,
-                               MenuAnchorPosition anchor,
-                               int32_t run_types,
-                               gfx::NativeView native_view_for_gestures,
-                               absl::optional<gfx::RoundedCornersF> corners) {
+void MenuRunnerImpl::RunMenuAt(
+    Widget* parent,
+    MenuButtonController* button_controller,
+    const gfx::Rect& bounds,
+    MenuAnchorPosition anchor,
+    ui::mojom::MenuSourceType source_type,
+    int32_t run_types,
+    gfx::NativeView native_view_for_gestures,
+    std::optional<gfx::RoundedCornersF> corners,
+    std::optional<std::string> show_menu_host_duration_histogram) {
   closing_event_time_ = base::TimeTicks();
   if (running_) {
     // Ignore requests to show the menu while it's already showing. MenuItemView
@@ -125,32 +135,31 @@ void MenuRunnerImpl::RunMenuAt(Widget* parent,
     return;
   }
 
-  MenuController* controller = MenuController::GetActiveInstance();
+  MenuController* controller = nullptr;
+  if (run_types & MenuRunner::IS_NESTED) {
+    controller = parent ? MenuController::GetForOwnerWidget(parent) : nullptr;
+  }
+
   if (controller) {
     controller->SetMenuRoundedCorners(corners);
-    if ((run_types & MenuRunner::IS_NESTED) != 0) {
-      if (controller->for_drop()) {
-        controller->Cancel(MenuController::ExitType::kAll);
-        controller = nullptr;
-      } else {
-        // Only nest the delegate when not cancelling drag-and-drop. When
-        // cancelling this will become the root delegate of the new
-        // MenuController
-        controller->AddNestedDelegate(this);
-      }
-    } else {
-      // There's some other menu open and we're not nested. Cancel the menu.
+    if (controller->for_drop()) {
       controller->Cancel(MenuController::ExitType::kAll);
-      if ((run_types & MenuRunner::FOR_DROP) == 0) {
-        // We can't open another menu, otherwise the message loop would become
-        // twice nested. This isn't necessarily a problem, but generally isn't
-        // expected.
-        return;
-      }
-      // Drop menus don't block the message loop, so it's ok to create a new
-      // MenuController.
       controller = nullptr;
+    } else {
+      controller->AddNestedDelegate(this);
     }
+  } else if (MenuController::GetActiveInstance()) {
+    // There's some other menu open and we're not nested. Cancel the menu.
+    MenuController::CancelAllActive();
+    if ((run_types & MenuRunner::FOR_DROP) == 0) {
+      // We can't open another menu, otherwise the message loop would become
+      // twice nested. This isn't necessarily a problem, but generally isn't
+      // expected.
+      return;
+    }
+    // Drop menus don't block the message loop, so it's ok to create a new
+    // MenuController.
+    controller = nullptr;
   }
 
   running_ = true;
@@ -166,30 +175,49 @@ void MenuRunnerImpl::RunMenuAt(Widget* parent,
   DCHECK((run_types & MenuRunner::COMBOBOX) == 0 ||
          (run_types & MenuRunner::EDITABLE_COMBOBOX) == 0);
   using ComboboxType = MenuController::ComboboxType;
-  if (run_types & MenuRunner::COMBOBOX)
+  if (run_types & MenuRunner::COMBOBOX) {
     controller->set_combobox_type(ComboboxType::kReadonly);
-  else if (run_types & MenuRunner::EDITABLE_COMBOBOX)
+  } else if (run_types & MenuRunner::EDITABLE_COMBOBOX) {
     controller->set_combobox_type(ComboboxType::kEditable);
-  else
+  } else {
     controller->set_combobox_type(ComboboxType::kNone);
+  }
   controller->set_send_gesture_events_to_owner(
       (run_types & MenuRunner::SEND_GESTURE_EVENTS_TO_OWNER) != 0);
   controller->set_use_ash_system_ui_layout(
       (run_types & MenuRunner::USE_ASH_SYS_UI_LAYOUT) != 0);
   controller_ = controller->AsWeakPtr();
   menu_->set_controller(controller_.get());
-  menu_->PrepareForRun(owns_controller_, has_mnemonics,
+  menu_->PrepareForRun(has_mnemonics,
                        !for_drop_ && ShouldShowMnemonics(run_types));
+  if (show_menu_host_duration_histogram.has_value() &&
+      !show_menu_host_duration_histogram.value().empty()) {
+    controller->SetShowMenuHostDurationHistogram(
+        std::move(show_menu_host_duration_histogram));
+  }
 
-  controller->Run(parent, button_controller, menu_, bounds, anchor,
-                  (run_types & MenuRunner::CONTEXT_MENU) != 0,
+  MenuController::MenuType menu_type = MenuController::MenuType::kNormal;
+  if ((run_types & MenuRunner::MENU_ITEM_CONTEXT_MENU) != 0) {
+    menu_type = MenuController::MenuType::kMenuItemContextMenu;
+  } else if ((run_types & MenuRunner::CONTEXT_MENU) != 0) {
+    menu_type = MenuController::MenuType::kContextMenu;
+  }
+
+  if (source_type == ui::mojom::MenuSourceType::kNone &&
+      (run_types & MenuRunner::INVOKED_FROM_KEYBOARD)) {
+    source_type = ui::mojom::MenuSourceType::kKeyboard;
+  }
+
+  controller->Run(parent, button_controller, menu_.get(), bounds, anchor,
+                  source_type, menu_type,
                   (run_types & MenuRunner::NESTED_DRAG) != 0,
                   native_view_for_gestures);
 }
 
 void MenuRunnerImpl::Cancel() {
-  if (running_)
+  if (running_) {
     controller_->Cancel(MenuController::ExitType::kAll);
+  }
 }
 
 base::TimeTicks MenuRunnerImpl::GetClosingEventTime() const {
@@ -203,28 +231,39 @@ void MenuRunnerImpl::OnMenuClosed(NotifyType type,
   if (controller_) {
     closing_event_time_ = controller_->closing_event_time();
     // Get a pointer to the parent widget before destroying the menu.
-    if (controller_->owner())
+    if (controller_->owner()) {
       parent_widget = controller_->owner()->GetWeakPtr();
+    }
   }
 
-  menu_->RemoveEmptyMenus();
   menu_->set_controller(nullptr);
+  for (MenuItemView* sibling_menu : sibling_menus_) {
+    sibling_menu->set_controller(nullptr);
+  }
 
   if (owns_controller_ && controller_) {
     // We created the controller and need to delete it.
-    delete controller_.get();
+    controller_->Destroy();
     owns_controller_ = false;
   }
-  controller_ = nullptr;
   // Make sure all the windows we created to show the menus have been
   // destroyed.
   menu_->DestroyAllMenuHosts();
+
   if (delete_after_run_) {
     FireFocusAfterMenuClose(parent_widget);
-    delete this;
+
+    bool is_stack_active = controller_ && controller_->IsStackActive();
+    if (is_stack_active) {
+      // Transfer ownership to controller.
+      controller_->DeferMenuRunnerDestruction(base::WrapUnique(this));
+    } else {
+      delete this;
+    }
     return;
   }
   running_ = false;
+  controller_ = nullptr;
   if (menu_->GetDelegate()) {
     // Executing the command may also delete this.
     base::WeakPtr<MenuRunnerImpl> ref(weak_factory_.GetWeakPtr());
@@ -234,21 +273,23 @@ void MenuRunnerImpl::OnMenuClosed(NotifyType type,
                                            mouse_event_flags);
     }
     // Only notify the delegate if it did not delete this.
-    if (ref && type == NOTIFY_DELEGATE)
+    if (ref && type == NOTIFY_DELEGATE) {
       menu_->GetDelegate()->OnMenuClosed(menu);
+    }
   }
   FireFocusAfterMenuClose(parent_widget);
 }
 
 void MenuRunnerImpl::SiblingMenuCreated(MenuItemView* menu) {
-  if (menu != menu_ && sibling_menus_.count(menu) == 0)
+  if (menu != menu_.get() && sibling_menus_.count(menu) == 0) {
     sibling_menus_.insert(menu);
+  }
 }
 
 MenuRunnerImpl::~MenuRunnerImpl() {
-  delete menu_;
-  for (auto* sibling_menu : sibling_menus_)
+  for (MenuItemView* sibling_menu : sibling_menus_) {
     delete sibling_menu;
+  }
 }
 
 bool MenuRunnerImpl::ShouldShowMnemonics(int32_t run_types) {

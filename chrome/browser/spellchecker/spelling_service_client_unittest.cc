@@ -2,22 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "components/spellcheck/browser/spelling_service_client.h"
+
 #include <stddef.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "base/byte_size.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/strings/stringprintf.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
+#include "base/test/scoped_feature_list.h"
 #include "base/values.h"
 #include "chrome/test/base/testing_profile.h"
 #include "components/prefs/pref_service.h"
 #include "components/spellcheck/browser/pref_names.h"
-#include "components/spellcheck/browser/spelling_service_client.h"
+#include "components/spellcheck/common/spellcheck_features.h"
 #include "components/spellcheck/common/spellcheck_result.h"
 #include "content/public/test/browser_task_environment.h"
 #include "net/base/load_flags.h"
@@ -54,7 +59,7 @@ class TestingSpellingServiceClient : public SpellingServiceClient {
                 &test_url_loader_factory_)) {
     SetURLLoaderFactoryForTesting(test_shared_loader_factory_);
   }
-  ~TestingSpellingServiceClient() {}
+  ~TestingSpellingServiceClient() = default;
 
   void SetExpectedTextCheckResult(bool success,
                                   const std::string& sanitized_request_text,
@@ -107,12 +112,14 @@ class SpellingServiceClientTest
 
  protected:
   bool GetExpectedCountry(const std::string& language, std::string* country) {
-    static const struct {
+    struct Countries {
       const char* language;
       const char* country;
-    } kCountries[] = {
-        {"af", "ZAF"}, {"en", "USA"},
     };
+    static const auto kCountries = std::to_array<Countries>({
+        {"af", "ZAF"},
+        {"en", "USA"},
+    });
     for (size_t i = 0; i < std::size(kCountries); ++i) {
       if (!language.compare(kCountries[i].language)) {
         country->assign(kCountries[i].country);
@@ -163,8 +170,9 @@ TEST_P(SpellingServiceClientTest, RequestTextCheck) {
   head->mime_type = "application/json";
 
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = test_case.response_data.size();
-  GURL expected_request_url = client_.BuildEndpointUrl(test_case.request_type);
+  status.decoded_body_length = base::ByteSize(test_case.response_data.size());
+  GURL expected_request_url =
+      client_.BuildEndpointUrl(&profile_, test_case.request_type);
   client_.test_url_loader_factory()->AddResponse(
       expected_request_url, std::move(head), test_case.response_data, status,
       Redirects(),
@@ -184,7 +192,7 @@ TEST_P(SpellingServiceClientTest, RequestTextCheck) {
                                      test_case.sanitized_request_text,
                                      test_case.corrected_text);
 
-  base::Value::List dictionary;
+  base::ListValue dictionary;
   dictionary.Append(test_case.language);
   pref->SetList(spellcheck::prefs::kSpellCheckDictionaries,
                 std::move(dictionary));
@@ -197,21 +205,19 @@ TEST_P(SpellingServiceClientTest, RequestTextCheck) {
   task_environment_.RunUntilIdle();
 
   // Verify that the expected endpoint was hit (REST vs RPC).
-  ASSERT_EQ(requested_url.path(), expected_request_url.path());
+  ASSERT_EQ(requested_url.GetPath(), expected_request_url.GetPath());
 
   // Verify the request content type was JSON. (The Spelling service returns
   // an internal server error when this content type is not JSON.)
-  std::string request_content_type;
-  ASSERT_TRUE(intercepted_headers.GetHeader(
-      net::HttpRequestHeaders::kContentType, &request_content_type));
-  EXPECT_EQ("application/json", request_content_type);
+  EXPECT_EQ("application/json", intercepted_headers.GetHeader(
+                                    net::HttpRequestHeaders::kContentType));
 
   // Parse the JSON sent to the service, and verify its parameters.
-  absl::optional<base::Value> value = base::JSONReader::Read(
+  std::optional<base::Value> value = base::JSONReader::Read(
       intercepted_body, base::JSON_ALLOW_TRAILING_COMMAS);
   ASSERT_TRUE(value);
   ASSERT_TRUE(value->is_dict());
-  const base::Value::Dict& dict = value->GetDict();
+  const base::DictValue& dict = value->GetDict();
 
   EXPECT_FALSE(dict.FindString("method"));
   EXPECT_FALSE(dict.FindString("apiVersion"));
@@ -358,19 +364,23 @@ TEST_F(SpellingServiceClientTest, AvailableServices) {
   // SpellingServiceClient::IsAvailable() describes why this function returns
   // false for suggestions.) If there is no language set, then we
   // do not allow any remote.
-  pref->SetList(spellcheck::prefs::kSpellCheckDictionaries,
-                base::Value::List());
+  pref->SetList(spellcheck::prefs::kSpellCheckDictionaries, base::ListValue());
 
   EXPECT_FALSE(client_.IsAvailable(&profile_, kSuggest));
   EXPECT_FALSE(client_.IsAvailable(&profile_, kSpellcheck));
 
-  static constexpr const char* kSupported[] = {
-      "en-AU", "en-CA", "en-GB", "en-US", "da-DK", "es-ES",
-  };
+  constexpr static const auto kSupported = std::to_array<const char*>({
+      "en-AU",
+      "en-CA",
+      "en-GB",
+      "en-US",
+      "da-DK",
+      "es-ES",
+  });
   // If spellcheck is allowed, then suggest is not since spellcheck is a
   // superset of suggest.
   for (size_t i = 0; i < std::size(kSupported); ++i) {
-    base::Value::List dictionary;
+    base::ListValue dictionary;
     dictionary.Append(kSupported[i]);
     pref->SetList(spellcheck::prefs::kSpellCheckDictionaries,
                   std::move(dictionary));
@@ -381,15 +391,15 @@ TEST_F(SpellingServiceClientTest, AvailableServices) {
 
   // This function returns true for suggestions for all and false for
   // spellcheck for unsupported locales.
-  static constexpr const char* kUnsupported[] = {
+  constexpr static const auto kUnsupported = std::to_array<const char*>({
       "af-ZA", "bg-BG", "ca-ES", "cs-CZ", "de-DE", "el-GR", "et-EE", "fo-FO",
       "fr-FR", "he-IL", "hi-IN", "hr-HR", "hu-HU", "id-ID", "it-IT", "lt-LT",
       "lv-LV", "nb-NO", "nl-NL", "pl-PL", "pt-BR", "pt-PT", "ro-RO", "ru-RU",
       "sk-SK", "sl-SI", "sh",    "sr",    "sv-SE", "tr-TR", "uk-UA", "vi-VN",
-  };
+  });
   for (size_t i = 0; i < std::size(kUnsupported); ++i) {
     SCOPED_TRACE(std::string("Expected language ") + kUnsupported[i]);
-    base::Value::List dictionary;
+    base::ListValue dictionary;
     dictionary.Append(kUnsupported[i]);
     pref->SetList(spellcheck::prefs::kSpellCheckDictionaries,
                   std::move(dictionary));
@@ -404,4 +414,82 @@ TEST_F(SpellingServiceClientTest, AvailableServices) {
 TEST_F(SpellingServiceClientTest, ResponseErrorTest) {
   EXPECT_TRUE(client_.ParseResponseSuccess("{\"result\": {}}"));
   EXPECT_FALSE(client_.ParseResponseSuccess("{\"error\": {}}"));
+}
+
+// Verify that the default endpoint is used when the regional signal feature is
+// disabled.
+TEST_F(SpellingServiceClientTest, BuildEndpointUrlFeatureDisabled) {
+  PrefService* pref = profile_.GetPrefs();
+  pref->SetBoolean(spellcheck::prefs::kSpellCheckEnable, true);
+  pref->SetBoolean(spellcheck::prefs::kSpellCheckUseSpellingService, true);
+
+  base::test::ScopedFeatureList feature_list;
+  feature_list.InitAndDisableFeature(
+      spellcheck::kEnableSpellcheckRegionalSignal);
+  GURL url =
+      client_.BuildEndpointUrl(&profile_, SpellingServiceClient::SUGGEST);
+
+  EXPECT_NE(
+      url.spec().find("https://www.googleapis.com/spelling/v1/spelling/check"),
+      std::string::npos);
+}
+
+// Verify that the default endpoint is used when the regional signal feature is
+// enabled but no region preference is set.
+TEST_F(SpellingServiceClientTest, BuildEndpointUrlNoPreference) {
+  PrefService* pref = profile_.GetPrefs();
+  pref->SetBoolean(spellcheck::prefs::kSpellCheckEnable, true);
+  pref->SetBoolean(spellcheck::prefs::kSpellCheckUseSpellingService, true);
+
+  base::test::ScopedFeatureList feature_list(
+      spellcheck::kEnableSpellcheckRegionalSignal);
+  pref->SetInteger(spellcheck::prefs::kChromeDataRegionSetting, 0);
+  GURL url =
+      client_.BuildEndpointUrl(&profile_, SpellingServiceClient::SUGGEST);
+
+  EXPECT_NE(
+      url.spec().find("https://www.googleapis.com/spelling/v1/spelling/check"),
+      std::string::npos);
+}
+
+// Verify that the US endpoint is used when the regional signal feature is
+// enabled and the region is set to US.
+TEST_F(SpellingServiceClientTest, BuildEndpointUrlUS) {
+  PrefService* pref = profile_.GetPrefs();
+  pref->SetBoolean(spellcheck::prefs::kSpellCheckEnable, true);
+  pref->SetBoolean(spellcheck::prefs::kSpellCheckUseSpellingService, true);
+
+  base::test::ScopedFeatureList feature_list(
+      spellcheck::kEnableSpellcheckRegionalSignal);
+  pref->SetInteger(spellcheck::prefs::kChromeDataRegionSetting, 1);
+  GURL url =
+      client_.BuildEndpointUrl(&profile_, SpellingServiceClient::SUGGEST);
+
+  EXPECT_NE(url.spec().find("https://spelling-us.googleapis.com/spelling/"
+                            "v2/spelling/check"),
+            std::string::npos);
+
+  url = client_.BuildEndpointUrl(&profile_, SpellingServiceClient::SPELLCHECK);
+
+  EXPECT_NE(url.spec().find("https://spelling-us.googleapis.com/spelling/"
+                            "v2/spelling/check"),
+            std::string::npos);
+}
+
+// Verify that the EU endpoint is used when the regional signal feature is
+// enabled and the region is set to EU.
+TEST_F(SpellingServiceClientTest, BuildEndpointUrlEU) {
+  PrefService* pref = profile_.GetPrefs();
+  pref->SetBoolean(spellcheck::prefs::kSpellCheckEnable, true);
+  pref->SetBoolean(spellcheck::prefs::kSpellCheckUseSpellingService, true);
+
+  base::test::ScopedFeatureList feature_list(
+      spellcheck::kEnableSpellcheckRegionalSignal);
+  pref->SetInteger(spellcheck::prefs::kChromeDataRegionSetting, 2);
+  GURL url =
+      client_.BuildEndpointUrl(&profile_, SpellingServiceClient::SUGGEST);
+
+  EXPECT_NE(url.spec().find("https://spelling-eu.googleapis.com/spelling/"
+                            "v2/spelling/check"),
+            std::string::npos);
 }

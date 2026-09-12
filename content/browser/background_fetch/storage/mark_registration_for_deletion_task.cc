@@ -53,7 +53,7 @@ void MarkRegistrationForDeletionTask::DidGetActiveUniqueId(
       return;
   }
 
-  DCHECK_EQ(2u, data.size());
+  CHECK_EQ(2u, data.size(), base::NotFatalUntil::M158);
 
   // If the |unique_id| does not match, then the registration identified by
   // |registration_id_.unique_id()| was already deactivated.
@@ -146,15 +146,10 @@ void MarkRegistrationForDeletionTask::DidGetCompletedRequests(
 
 void MarkRegistrationForDeletionTask::FinishWithError(
     blink::mojom::BackgroundFetchError error) {
-  ReportStorageError();
   if (HasStorageError())
     AbandonFetches(registration_id_.service_worker_registration_id());
   std::move(callback_).Run(error, failure_reason_);
   Finished();  // Destroys |this|.
-}
-
-std::string MarkRegistrationForDeletionTask::HistogramName() const {
-  return "MarkRegistrationForDeletionTask";
 }
 
 }  // namespace background_fetch

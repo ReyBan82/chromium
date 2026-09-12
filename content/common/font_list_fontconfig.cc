@@ -4,11 +4,13 @@
 
 #include <fontconfig/fontconfig.h>
 
+#include <array>
 #include <memory>
 #include <set>
 #include <string>
 #include <utility>
 
+#include "base/compiler_specific.h"
 #include "base/values.h"
 #include "content/common/font_list.h"
 
@@ -24,10 +26,10 @@ std::unique_ptr<FcPattern, decltype(&FcPatternDestroy)> CreateFormatPattern(
   return pattern;
 }
 
-base::Value::List GetFontList_SlowBlocking() {
+base::ListValue GetFontList_SlowBlocking() {
   DCHECK(GetFontListTaskRunner()->RunsTasksInCurrentSequence());
 
-  base::Value::List font_list;
+  base::ListValue font_list;
 
   std::unique_ptr<FcObjectSet, decltype(&FcObjectSetDestroy)> object_set(
       FcObjectSetBuild(FC_FAMILY, NULL), FcObjectSetDestroy);
@@ -36,15 +38,14 @@ base::Value::List GetFontList_SlowBlocking() {
 
   // See https://www.freetype.org/freetype2/docs/reference/ft2-font_formats.html
   // for the list of possible formats.
-  const char* allowed_formats[] = { "TrueType", "CFF" };
-  for (size_t i = 0; i < std::size(allowed_formats); ++i) {
-    auto format_pattern = CreateFormatPattern(allowed_formats[i]);
+  for (const char* allowed_format : {"TrueType", "CFF"}) {
+    auto format_pattern = CreateFormatPattern(allowed_format);
     std::unique_ptr<FcFontSet, decltype(&FcFontSetDestroy)> fontset(
         FcFontList(nullptr, format_pattern.get(), object_set.get()),
         FcFontSetDestroy);
     for (int j = 0; j < fontset->nfont; ++j) {
       char* family_string;
-      FcPatternGetString(fontset->fonts[j], FC_FAMILY, 0,
+      FcPatternGetString(UNSAFE_TODO(fontset->fonts[j]), FC_FAMILY, 0,
                          reinterpret_cast<FcChar8**>(&family_string));
       sorted_families.insert(family_string);
     }
@@ -60,7 +61,7 @@ base::Value::List GetFontList_SlowBlocking() {
   sorted_families.insert("Serif");
 
   for (const auto& family : sorted_families) {
-    base::Value::List font_item;
+    base::ListValue font_item;
     font_item.Append(family);
     font_item.Append(family);  // localized name.
     // TODO(yusukes): Support localized family names.

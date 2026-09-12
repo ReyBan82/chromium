@@ -12,10 +12,6 @@
 #import "third_party/ocmock/OCMock/OCMock.h"
 #import "third_party/ocmock/gtest_support.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
-
 // The typedef doesn't work with OCMock. Create a real class to be able to mock
 // it.
 @interface CRWFakeContentView : CRWContentView
@@ -24,11 +20,21 @@
 @implementation CRWFakeContentView
 @synthesize contentOffset = _contentOffset;
 @synthesize contentInset = _contentInset;
+@synthesize obscuredInsets = _obscuredInsets;
 @synthesize scrollView = _scrollView;
 @synthesize shouldUseViewContentInset = _shouldUseViewContentInset;
 
 - (BOOL)isViewAlive {
   return YES;
+}
+
+- (void)setObscuredInsets:(UIEdgeInsets)obscuredInsets
+          initialVelocity:(CGFloat)initialVelocity {
+  _obscuredInsets = obscuredInsets;
+}
+
+- (void)setMinimumViewportInset:(UIEdgeInsets)minInset
+           maximumViewportInset:(UIEdgeInsets)maxInset {
 }
 
 @end
@@ -80,6 +86,44 @@ TEST_F(CRWWebViewProxyImplTest, AllowsBackForwardNavigationGestures) {
   OCMExpect([mockWebController setAllowsBackForwardNavigationGestures:YES]);
   proxy.allowsBackForwardNavigationGestures = YES;
   EXPECT_OCMOCK_VERIFY((id)mockWebController);
+}
+
+// Tests allowsLinkPreview property is delegated to CWVWebController.
+TEST_F(CRWWebViewProxyImplTest, AllowsLinkPreview) {
+  CRWWebController* mockWebController =
+      OCMStrictClassMock([CRWWebController class]);
+  CRWWebViewProxyImpl* proxy =
+      [[CRWWebViewProxyImpl alloc] initWithWebController:mockWebController];
+
+  OCMStub([mockWebController allowsLinkPreview]).andReturn(YES);
+  EXPECT_TRUE(proxy.allowsLinkPreview);
+
+  OCMExpect([mockWebController setAllowsLinkPreview:YES]);
+  proxy.allowsLinkPreview = YES;
+  EXPECT_OCMOCK_VERIFY((id)mockWebController);
+}
+
+// Tests that setting obscuredInsets has no effect when ignoreObscuredInsets is
+// YES.
+TEST_F(CRWWebViewProxyImplTest, IgnoreObscuredInsets) {
+  CRWWebViewProxyImpl* proxy = [[CRWWebViewProxyImpl alloc] init];
+  CRWFakeContentView* fakeContentView = [[CRWFakeContentView alloc] init];
+  proxy.contentView = fakeContentView;
+
+  proxy.ignoreObscuredInsets = YES;
+  EXPECT_TRUE(proxy.ignoreObscuredInsets);
+
+  const UIEdgeInsets obscuredInsets = UIEdgeInsetsMake(10, 10, 10, 10);
+  proxy.obscuredInsets = obscuredInsets;
+  EXPECT_TRUE(UIEdgeInsetsEqualToEdgeInsets(UIEdgeInsetsZero,
+                                            fakeContentView.obscuredInsets));
+
+  proxy.ignoreObscuredInsets = NO;
+  EXPECT_FALSE(proxy.ignoreObscuredInsets);
+
+  proxy.obscuredInsets = obscuredInsets;
+  EXPECT_TRUE(UIEdgeInsetsEqualToEdgeInsets(obscuredInsets,
+                                            fakeContentView.obscuredInsets));
 }
 
 }  // namespace

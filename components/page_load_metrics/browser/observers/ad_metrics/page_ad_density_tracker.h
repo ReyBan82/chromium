@@ -5,68 +5,76 @@
 #ifndef COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_AD_METRICS_PAGE_AD_DENSITY_TRACKER_H_
 #define COMPONENTS_PAGE_LOAD_METRICS_BROWSER_OBSERVERS_AD_METRICS_PAGE_AD_DENSITY_TRACKER_H_
 
+#include <base/containers/flat_map.h>
+
 #include <map>
+#include <optional>
 #include <set>
 
-#include <base/containers/flat_map.h>
 #include "base/memory/raw_ptr.h"
 #include "base/time/tick_clock.h"
 #include "base/time/time.h"
 #include "components/page_load_metrics/browser/observers/ad_metrics/page_ad_density_tracker.h"
-#include "components/page_load_metrics/browser/observers/ad_metrics/univariate_stats.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
+#include "components/page_load_metrics/browser/observers/ad_metrics/time_weighted_univariate_stats.h"
 #include "ui/gfx/geometry/rect.h"
 
 namespace page_load_metrics {
 
 // Tracks the ad density of a page through the page's lifecycle.
 // It has the following usage:
-//    1. Set subframe, mainframe, and viewport rects using operations (AddRect,
-//       RemoveRect, UpdateMainFrameRect, UpdateMainFrameViewportRect).
+//    1. Set subframe, mainframe, and viewport rects using operations
+//       (UpdateMainFrameAdRects, UpdateMainFrameRect,
+//       UpdateMainFrameViewportRect).
 //    2. When the main frame rect or a subframe rect is updated, get current
 //       page ad density using CalculatePageAdDensity.
 //    3. When the main frame viewport rect or a subframe rect is updated, get
 //       current viewport ad density using CalculateViewportAdDensity.
 class PageAdDensityTracker {
  public:
-  enum class RectType { kIFrame, kElement };
-
-  struct RectId {
-    RectId(RectType rect_type, int id);
-    RectId(const RectId& other);
-
-    RectType rect_type;
-
-    // For iframe, the id comes from the frame tree node id. For other elements
-    // (e.g. main frame ad rectangles), the id comes from the node id from the
-    // renderer.
-    int id;
-
-    bool operator<(const RectId& rhs) const;
-    bool operator==(const RectId& rhs) const;
-    bool operator!=(const RectId& rhs) const;
-  };
+  using RectId = int;
 
   struct AdDensityCalculationResult {
-    absl::optional<int> ad_density_by_height;
-    absl::optional<int> ad_density_by_area;
+    std::optional<int> ad_density_by_height;
+    std::optional<int> ad_density_by_area;
+    std::optional<int> ad_count;
   };
 
-  explicit PageAdDensityTracker(base::TickClock* clock = nullptr);
+  // A snapshot of the current ad density statistics, to be serialized and
+  // reported by the DevTools Ads domain.
+  struct LiveStats {
+    // The viewport ad density by area, represented as a percentage (an integer
+    // between 0 and 100).
+    int viewport_ad_density_by_area;
+
+    // The time-weighted average of the viewport ad density by area, measured
+    // across the duration of the page.
+    double average_viewport_ad_density_by_area;
+
+    // The number of ads currently visible within the viewport.
+    int viewport_ad_count;
+
+    // The time-weighted average of the viewport ad count, measured across the
+    // duration of the page.
+    double average_viewport_ad_count;
+  };
+
+  PageAdDensityTracker(bool is_in_foreground,
+                       const base::TickClock* clock = nullptr);
   ~PageAdDensityTracker();
 
   PageAdDensityTracker(const PageAdDensityTracker&) = delete;
   PageAdDensityTracker& operator=(const PageAdDensityTracker&) = delete;
 
-  // Operations to track sub frame rects in the page density calcluation. If
-  // `recalculate_density` is true, the max page ad density and the viewport ad
-  // density will be recalculated in the end.
-  void AddRect(RectId rect_id, const gfx::Rect& rect, bool recalculate_density);
+  LiveStats GetLiveStats();
 
-  // Removes a rect from the tracker if it is currently being tracked.
-  // Otherwise RemoveRect is a no op. If `recalculate_viewport_density` is true,
-  // the viewport ad density will be recalculated in the end.
-  void RemoveRect(RectId rect_id, bool recalculate_viewport_density);
+  // Accumulates the last-measured viewport ad density and pauses further
+  // tracking. Called when the page becomes hidden from view
+  // (e.g., tab is backgrounded).
+  void OnHidden();
+
+  // Starts or resumes ad density tracking. Called when the page becomes visible
+  // (e.g., tab is foregrounded).
+  void OnShown();
 
   // Operations to track the main frame dimensions. The main frame rect has to
   // be set to calculate the page ad density.
@@ -77,28 +85,30 @@ class PageAdDensityTracker {
   void UpdateMainFrameViewportRect(const gfx::Rect& rect);
 
   // Operations to track the main frame ad rectangles' position and dimensions.
-  void UpdateMainFrameImageAdRects(
-      const base::flat_map<int, gfx::Rect>& main_frame_image_ad_rects);
+  void UpdateMainFrameAdRects(
+      const base::flat_map<int, gfx::Rect>& main_frame_ad_rects);
 
   // Returns the density by height, as a value from 0-100. If the density
-  // calculation fails (i.e. no main frame size), this returns -1. Percentage
-  // density by height is calculated as the the combined height of ads divided
-  // by the page's height.
-  int MaxPageAdDensityByHeight() const;
+  // calculation fails (i.e. no main frame size), this returns std::nullopt.
+  // Percentage density by height is calculated as the the combined height of
+  // ads divided by the page's height.
+  std::optional<int> MaxPageAdDensityByHeight() const;
 
   // Returns the density by area, as a value from 0-100. If the density
-  // calculation fails (i.e. no main frame size), this returns -1.
-  int MaxPageAdDensityByArea() const;
+  // calculation fails (i.e. no main frame size), this returns std::nullopt.
+  std::optional<int> MaxPageAdDensityByArea() const;
 
   // Returns the distribution moments of the viewport ad density by area.
-  // Returns default value (i.e. 0s) if the density calculation didn't happen
-  // (i.e. no main frame viewport) or if the elapsed time is 0.
-  UnivariateStats::DistributionMoments GetAdDensityByAreaStats() const;
+  // Returns std::nullopt if the density calculation didn't happen (i.e. no main
+  // frame viewport).
+  std::optional<TimeWeightedUnivariateStats::DistributionMoments>
+  GetViewportAdDensityByAreaStats();
 
-  // Returns the last calculated viewport ad density by area, as a value from
-  // 0-100. If the density calculation didn't happen (i.e. no main frame
-  // viewport), this returns 0.
-  int ViewportAdDensityByArea() const;
+  // Returns the distribution moments of the viewport ad count. Returns
+  // std::nullopt if the calculation didn't happen (i.e. no main frame
+  // viewport).
+  std::optional<TimeWeightedUnivariateStats::DistributionMoments>
+  GetViewportAdCountStats();
 
   // Called at the end of the page load to finalize metrics measurement.
   void Finalize();
@@ -134,11 +144,12 @@ class PageAdDensityTracker {
     std::set<RectEvent>::const_iterator bottom_it;
   };
 
-  // Accumulate `last_viewport_ad_density_by_area_` and its weight (i.e. the
-  // elapsed time since `last_viewport_density_accumulate_time_`) into
-  // `viewport_ad_density_by_area_stats_`. This can be invoked either when a
-  // new density is calculated, or during `Finalize()`.
-  void AccumulateOutstandingViewportAdDensity();
+  // Adds the rect to the internal bookkeeping.
+  void AddRect(RectId rect_id, const gfx::Rect& rect);
+
+  // Removes the rect from the internal bookkeeping. No-op if it isn't currently
+  // being tracked.
+  void RemoveRect(RectId rect_id);
 
   void CalculatePageAdDensity();
   void CalculateViewportAdDensity();
@@ -155,11 +166,6 @@ class PageAdDensityTracker {
   // efficient removal according to rect_id.
   std::map<RectId, RectEventSetIterators> rect_events_iterators_;
 
-  // Percentage of page ad density as a value from 0-100. These only have
-  // a value of -1 when ad density has not yet been calculated successfully.
-  int max_page_ad_density_by_area_ = -1;
-  int max_page_ad_density_by_height_ = -1;
-
   // The last main frame size (a rectangle at position (0,0)).
   gfx::Rect last_main_frame_rect_;
 
@@ -167,22 +173,19 @@ class PageAdDensityTracker {
   // coordinate system.
   gfx::Rect last_main_frame_viewport_rect_;
 
-  // The last time when `last_viewport_ad_density_by_area_` is accumulated into
-  // `viewport_ad_density_by_area_stats_`. Set to the current time at the start
-  // of the page.
-  base::TimeTicks last_viewport_density_accumulate_time_;
+  // The tick clock used to get the current time. Can be replaced by tests.
+  raw_ptr<const base::TickClock> clock_;
 
-  // The last calculated ad density within the main frame viewport.
-  int last_viewport_ad_density_by_area_ = 0;
-
-  // Keep observing `last_viewport_ad_density_by_area_` before each time it gets
-  // an update, to derive the distribution statistics in the end.
-  UnivariateStats viewport_ad_density_by_area_stats_;
+  // Distribution statistics of page and viewport ad density.
+  TimeWeightedUnivariateStats page_ad_density_by_area_stats_;
+  TimeWeightedUnivariateStats page_ad_density_by_height_stats_;
+  TimeWeightedUnivariateStats viewport_ad_density_by_area_stats_;
+  TimeWeightedUnivariateStats viewport_ad_count_stats_;
 
   bool finalize_called_ = false;
 
-  // The tick clock used to get the current time. Can be replaced by tests.
-  raw_ptr<const base::TickClock> clock_;
+  // Whether the page is in foreground.
+  bool is_in_foreground_ = false;
 };
 
 }  // namespace page_load_metrics

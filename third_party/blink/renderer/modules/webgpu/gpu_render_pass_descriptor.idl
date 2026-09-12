@@ -8,8 +8,9 @@ dictionary GPURenderPassDescriptor : GPUObjectDescriptorBase {
     required sequence<GPURenderPassColorAttachment?> colorAttachments;
     GPURenderPassDepthStencilAttachment depthStencilAttachment;
     GPUQuerySet occlusionQuerySet;
-    GPURenderPassTimestampWrites timestampWrites = [];
+    GPURenderPassTimestampWrites timestampWrites;
     GPUSize64 maxDrawCount;
+    [RuntimeEnabled=WebGPUExperimentalResourceTable] GPUResourceTable resourceTable;
 };
 
 enum GPULoadOp {
@@ -21,5 +22,3 @@ enum GPUStoreOp {
     "store",
     "discard",
 };
-
-typedef sequence<GPURenderPassTimestampWrite> GPURenderPassTimestampWrites;

@@ -5,10 +5,10 @@
 #ifndef COMPONENTS_CONTENT_SETTINGS_CORE_BROWSER_COOKIE_SETTINGS_H_
 #define COMPONENTS_CONTENT_SETTINGS_CORE_BROWSER_COOKIE_SETTINGS_H_
 
+#include <optional>
 #include <string>
+#include <utility>
 
-#include "base/compiler_specific.h"
-#include "base/memory/ref_counted.h"
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
 #include "base/synchronization/lock.h"
@@ -17,6 +17,8 @@
 #include "components/content_settings/core/browser/host_content_settings_map.h"
 #include "components/content_settings/core/common/content_settings.h"
 #include "components/content_settings/core/common/cookie_settings_base.h"
+#include "components/content_settings/core/common/features.h"
+#include "components/content_settings/core/common/host_indexed_content_settings.h"
 #include "components/keyed_service/core/refcounted_keyed_service.h"
 #include "components/prefs/pref_change_registrar.h"
 #include "net/cookies/cookie_setting_override.h"
@@ -33,14 +35,16 @@ namespace content_settings {
 // This enum is used in prefs, do not change values.
 // The enum needs to correspond to CookieControlsMode in enums.xml.
 // This enum needs to be kept in sync with the enum of the same name in
-// browser/resources/settings/site_settings/constants.js.
+// chrome/browser/resources/settings/site_settings/constants.ts.
 // GENERATED_JAVA_ENUM_PACKAGE: org.chromium.components.content_settings
+// LINT.IfChange(CookieControlsMode)
 enum class CookieControlsMode {
-  kOff = 0,
+  kOff = 0,  // Behaviorally equivalent to `kIncognitoOnly` as of June 2025.
   kBlockThirdParty = 1,
   kIncognitoOnly = 2,
   kMaxValue = kIncognitoOnly,
 };
+// LINT.ThenChange(//tools/metrics/histograms/metadata/privacy/enums.xml:CookieControlsMode, //chrome/browser/resources/settings/site_settings/constants.ts:CookieControlsMode)
 
 // Default value for |extension_scheme|.
 const char kDummyExtensionScheme[] = ":no-extension-scheme:";
@@ -48,9 +52,10 @@ const char kDummyExtensionScheme[] = ":no-extension-scheme:";
 // A frontend to the cookie settings of |HostContentSettingsMap|. Handles
 // cookie-specific logic such as blocking third-party cookies. Written on the UI
 // thread and read on any thread.
-class CookieSettings : public CookieSettingsBase,
-                       public content_settings::Observer,
-                       public RefcountedKeyedService {
+class CookieSettings
+    : public CookieSettingsBase,
+      public content_settings::Observer,
+      public RefcountedKeyedService {
  public:
   class Observer : public base::CheckedObserver {
    public:
@@ -59,15 +64,21 @@ class CookieSettings : public CookieSettingsBase,
     virtual void OnCookieSettingChanged() {}
   };
 
+  using ComputeFedCmSharingPermissionsCallback =
+      base::RepeatingCallback<ContentSettingsForOneType()>;
+
   // Creates a new CookieSettings instance.
   // The caller is responsible for ensuring that |extension_scheme| is valid for
   // the whole lifetime of this instance.
-  // |is_incognito| indicates whether this is an incognito profile. It is not
-  // true for other types of off-the-record profiles like guest mode.
-  CookieSettings(HostContentSettingsMap* host_content_settings_map,
-                 PrefService* prefs,
-                 bool is_incognito,
-                 const char* extension_scheme = kDummyExtensionScheme);
+  // |is_incognito| indicates whether this is an incognito (or isolated mode)
+  // profile. It is not true for other types of off-the-record profiles like
+  // guest mode.
+  CookieSettings(
+      HostContentSettingsMap* host_content_settings_map,
+      PrefService* prefs,
+      bool is_incognito,
+      ComputeFedCmSharingPermissionsCallback compute_fedcm_sharing_permissions,
+      const char* extension_scheme = kDummyExtensionScheme);
 
   CookieSettings(const CookieSettings&) = delete;
   CookieSettings& operator=(const CookieSettings&) = delete;
@@ -78,7 +89,8 @@ class CookieSettings : public CookieSettingsBase,
   // default setting is assigned to it.
   //
   // This may be called on any thread.
-  ContentSetting GetDefaultCookieSetting(std::string* provider_id) const;
+  ContentSetting GetDefaultCookieSetting(
+      content_settings::ProviderType* provider_id = nullptr) const;
 
   // Returns all patterns with a non-default cookie setting, mapped to their
   // actual settings, in the precedence order of the setting rules.
@@ -97,6 +109,9 @@ class CookieSettings : public CookieSettingsBase,
   // This should only be called on the UI thread.
   void SetCookieSetting(const GURL& primary_url, ContentSetting setting);
 
+  // Sets the cookie setting to allow for the |first_party_url|.
+  void SetCookieSettingForUserBypass(const GURL& first_party_url);
+
   // Resets the cookie setting for the given url.
   //
   // This should only be called on the UI thread.
@@ -107,8 +122,9 @@ class CookieSettings : public CookieSettingsBase,
   // accessing cookies.
   //
   // This should only be called on the UI thread.
-  bool IsThirdPartyAccessAllowed(const GURL& first_party_url,
-                                 content_settings::SettingSource* source);
+  bool IsThirdPartyAccessAllowed(
+      const GURL& first_party_url,
+      content_settings::SettingInfo* info = nullptr) const;
 
   // Sets the cookie setting for the site and third parties embedded in it.
   //
@@ -116,24 +132,30 @@ class CookieSettings : public CookieSettingsBase,
   void SetThirdPartyCookieSetting(const GURL& first_party_url,
                                   ContentSetting setting);
 
-  // Resets the third party cookie setting for the given url.
+  // Resets the third party cookie setting for the given url. Resets both site-
+  // and origin-scoped exceptions since either one might be present.
+  // `SetCookieSettingForUserBypass()` and `SetThirdPartyCookieSetting()` create
+  // site- and origin-scoped exceptions respectively.
   //
   // This should only be called on the UI thread.
   void ResetThirdPartyCookieSetting(const GURL& first_party_url);
 
-  bool IsStorageDurable(const GURL& origin) const;
+  bool IsStoragePersistent(const GURL& origin) const;
 
   // Returns true if third party cookies should be blocked.
   //
   // This method may be called on any thread. Virtual for testing.
-  virtual bool ShouldBlockThirdPartyCookies() const;
+  bool ShouldBlockThirdPartyCookies() const;
+
+  // Returns true if there is an active storage access exception with
+  // |first_party_url| as the secondary pattern.
+  bool HasAnyFrameRequestedStorageAccess(const GURL& first_party_url) const;
 
   // content_settings::CookieSettingsBase:
-  ContentSetting GetSettingForLegacyCookieAccess(
-      const std::string& cookie_domain) const override;
   bool ShouldIgnoreSameSiteRestrictions(
       const GURL& url,
-      const net::SiteForCookies& site_for_cookies) const override;
+      const net::SiteForCookies& site_for_cookies,
+      const url::Origin& top_level_origin) const override;
 
   // Detaches the |CookieSettings| from |PrefService|. This methods needs to be
   // called before destroying the service. Afterwards, only const methods can be
@@ -146,28 +168,42 @@ class CookieSettings : public CookieSettingsBase,
 
   void RemoveObserver(Observer* obs) { observers_.RemoveObserver(obs); }
 
+  static ComputeFedCmSharingPermissionsCallback
+  NoFedCmSharingPermissionsCallback() {
+    return base::BindRepeating([]() { return ContentSettingsForOneType(); });
+  }
+
  protected:
   ~CookieSettings() override;
 
  private:
-  // Returns whether third-party cookie blocking should be bypassed (i.e. always
-  // allow the cookie regardless of cookie content settings and third-party
-  // cookie blocking settings.
-  // This just checks the scheme of the |url| and |site_for_cookies|:
-  //  - Allow cookies if the |site_for_cookies| is a chrome:// scheme URL, and
-  //    the |url| has a secure scheme.
-  //  - Allow cookies if the |site_for_cookies| and the |url| match in scheme
-  //    and both have the Chrome extensions scheme.
-  bool ShouldAlwaysAllowCookies(const GURL& url,
-                                const GURL& first_party_url) const;
+  // Evaluates if third-party cookies are blocked. Should only be called
+  // when the preference changes to update the internal state.
+  bool ShouldBlockThirdPartyCookiesInternal() const;
+
+  void OnCookiePreferencesChanged();
 
   // content_settings::CookieSettingsBase:
-  ContentSetting GetCookieSettingInternal(
-      const GURL& url,
-      const GURL& first_party_url,
-      bool is_third_party_request,
-      net::CookieSettingOverrides overrides,
-      content_settings::SettingSource* source) const override;
+  bool ShouldAlwaysAllowCookies(const GURL& url,
+                                const GURL& first_party_url) const override;
+  ContentSetting GetContentSetting(
+      const GURL& primary_url,
+      const GURL& secondary_url,
+      ContentSettingsType content_type,
+      content_settings::SettingInfo* info) const override;
+  bool IsThirdPartyCookiesAllowedScheme(std::string_view scheme) const override;
+  bool ShouldBlockThirdPartyCookies(
+      base::optional_ref<const url::Origin> top_frame_origin,
+      net::CookieSettingOverrides overrides) const override;
+
+  // Updates the FEDERATED_IDENTITY_SHARING settings.
+  void UpdateFedCmSharingPermissions();
+
+  // Returns true iff the FedCM sharing permission has been granted between
+  // `primary_url` and `secondary_url`. Note that this is not a symmetric
+  // relation.
+  bool HasFedCmSharingPermission(const GURL& primary_url,
+                                 const GURL& secondary_url) const;
 
   // content_settings::Observer:
   void OnContentSettingChanged(
@@ -175,23 +211,27 @@ class CookieSettings : public CookieSettingsBase,
       const ContentSettingsPattern& secondary_pattern,
       ContentSettingsTypeSet content_type_set) override;
 
-  void OnCookiePreferencesChanged();
-
-  // Evaluate if third-party cookies are blocked. Should only be called
-  // when the preference changes to update the internal state.
-  bool ShouldBlockThirdPartyCookiesInternal();
-
   base::ThreadChecker thread_checker_;
   base::ObserverList<Observer> observers_;
   const scoped_refptr<HostContentSettingsMap> host_content_settings_map_;
   base::ScopedObservation<HostContentSettingsMap, content_settings::Observer>
       content_settings_observation_{this};
-  PrefChangeRegistrar pref_change_registrar_;
-  const bool is_incognito_;
+  std::unique_ptr<PrefChangeRegistrar> pref_change_registrar_;
+  [[maybe_unused]] const bool is_incognito_;
+
   const char* extension_scheme_;  // Weak.
 
   mutable base::Lock lock_;
   bool block_third_party_cookies_ GUARDED_BY(lock_);
+
+  mutable base::Lock fedcm_sharing_permissions_lock_;
+  HostIndexedContentSettings fedcm_sharing_permissions_
+      GUARDED_BY(fedcm_sharing_permissions_lock_);
+
+  const ComputeFedCmSharingPermissionsCallback
+      compute_fedcm_sharing_permissions_
+          GUARDED_BY(fedcm_sharing_permissions_lock_) =
+              NoFedCmSharingPermissionsCallback();
 };
 
 }  // namespace content_settings

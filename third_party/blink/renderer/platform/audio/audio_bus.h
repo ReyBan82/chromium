@@ -29,17 +29,22 @@
 #ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_AUDIO_BUS_H_
 #define THIRD_PARTY_BLINK_RENDERER_PLATFORM_AUDIO_AUDIO_BUS_H_
 
+#include "base/containers/span.h"
 #include "third_party/blink/renderer/platform/audio/audio_channel.h"
 #include "third_party/blink/renderer/platform/platform_export.h"
 #include "third_party/blink/renderer/platform/wtf/thread_safe_ref_counted.h"
 #include "third_party/blink/renderer/platform/wtf/vector.h"
+
+namespace media {
+class AudioBus;
+}
 
 namespace blink {
 
 // An AudioBus represents a collection of one or more AudioChannels.
 // The data layout is "planar" as opposed to "interleaved".  An AudioBus with
 // one channel is mono, an AudioBus with two channels is stereo, etc.
-class PLATFORM_EXPORT AudioBus : public ThreadSafeRefCounted<AudioBus> {
+class PLATFORM_EXPORT AudioBus final : public ThreadSafeRefCounted<AudioBus> {
  public:
   enum {
     kChannelLeft = 0,
@@ -49,11 +54,6 @@ class PLATFORM_EXPORT AudioBus : public ThreadSafeRefCounted<AudioBus> {
     kChannelLFE = 3,
     kChannelSurroundLeft = 4,
     kChannelSurroundRight = 5,
-  };
-
-  enum {
-    kLayoutCanonical = 0
-    // Can define non-standard layouts here
   };
 
   enum ChannelInterpretation {
@@ -69,24 +69,34 @@ class PLATFORM_EXPORT AudioBus : public ThreadSafeRefCounted<AudioBus> {
   static scoped_refptr<AudioBus> Create(unsigned number_of_channels,
                                         uint32_t length,
                                         bool allocate = true);
+  static scoped_refptr<AudioBus> TryCreate(unsigned number_of_channels,
+                                           uint32_t length);
+
+  // Creates an AudioBus that takes ownership of an existing media::AudioBus.
+  // The channels in AudioBus wrap the channel memory of `media_bus`.
+  static scoped_refptr<AudioBus> CreateFromMediaAudioBus(
+      std::unique_ptr<media::AudioBus> media_bus,
+      float sample_rate = 0.0f);
 
   // Pass in 0.0 for sampleRate to use the file's sample-rate, otherwise a
   // sample-rate conversion to the requested sampleRate will be made (if it
   // doesn't already match the file's sample-rate).  The created buffer will
   // have its sample-rate set correctly to the result.
   static scoped_refptr<AudioBus> CreateBusFromInMemoryAudioFile(
-      const void* data,
-      size_t data_size,
+      base::span<const uint8_t> data,
       bool mix_to_mono,
       float sample_rate);
 
   AudioBus(const AudioBus&) = delete;
   AudioBus& operator=(const AudioBus&) = delete;
+  ~AudioBus();
 
-  // Tells the given channel to use an externally allocated buffer.
-  void SetChannelMemory(unsigned channel_index,
-                        float* storage,
-                        uint32_t length);
+  // Tells the given channel to use externally allocated storage. The channel
+  // length is `storage.size()`. Pass an empty span to clear the channel's
+  // storage reference.
+  // Note: SetChannelMemory must be called on all channels in the bus with
+  // matching lengths if the bus length is to be changed.
+  void SetChannelMemory(unsigned channel_index, base::span<float> storage);
 
   // Channels
   unsigned NumberOfChannels() const { return channels_.size(); }
@@ -122,7 +132,7 @@ class PLATFORM_EXPORT AudioBus : public ThreadSafeRefCounted<AudioBus> {
   bool TopologyMatches(const AudioBus& source_bus) const;
 
   // Creates a new buffer from a range in the source buffer.
-  // 0 may be returned if the range does not fit in the sourceBuffer
+  // Returns nullptr if the range does not fit or if the allocation fails.
   static scoped_refptr<AudioBus> CreateBufferFromRange(
       const AudioBus* source_buffer,
       unsigned start_frame,
@@ -138,10 +148,16 @@ class PLATFORM_EXPORT AudioBus : public ThreadSafeRefCounted<AudioBus> {
       bool mix_to_mono,
       double new_sample_rate);
 
+  // Returns nullptr when the allocation fails (e.g. OOM).
+  static scoped_refptr<AudioBus> TryCreateBySampleRateConverting(
+      const AudioBus* source_bus,
+      bool mix_to_mono,
+      double new_sample_rate);
+
   // Creates a new AudioBus by mixing all the channels down to mono.
-  // If sourceBus is already mono, then the returned AudioBus will simply be a
-  // copy.
-  static scoped_refptr<AudioBus> CreateByMixingToMono(
+  // If `source_bus` is already mono, then the returned AudioBus will simply be
+  // a copy. Returns nullptr when the allocation fails (e.g. OOM).
+  static scoped_refptr<AudioBus> TryCreateByMixingToMono(
       const AudioBus* source_bus);
 
   // Scales all samples by the same amount.
@@ -162,9 +178,9 @@ class PLATFORM_EXPORT AudioBus : public ThreadSafeRefCounted<AudioBus> {
   void CopyWithGainFrom(const AudioBus& source_bus, float gain);
 
   // Copies the sourceBus by scaling with sample-accurate gain values.
-  void CopyWithSampleAccurateGainValuesFrom(const AudioBus& source_bus,
-                                            float* gain_values,
-                                            unsigned number_of_gain_values);
+  void CopyWithSampleAccurateGainValuesFrom(
+      const AudioBus& source_bus,
+      base::span<const float> gain_values);
 
   // Returns maximum absolute value across all channels (useful for
   // normalization).
@@ -178,6 +194,7 @@ class PLATFORM_EXPORT AudioBus : public ThreadSafeRefCounted<AudioBus> {
 
  private:
   AudioBus(unsigned number_of_channels, uint32_t length, bool allocate);
+  explicit AudioBus(std::unique_ptr<media::AudioBus> media_bus);
 
   void DiscreteSumFrom(const AudioBus&);
 
@@ -186,10 +203,10 @@ class PLATFORM_EXPORT AudioBus : public ThreadSafeRefCounted<AudioBus> {
   void SumFromByUpMixing(const AudioBus&);
   void SumFromByDownMixing(const AudioBus&);
 
-  uint32_t length_;
+  std::unique_ptr<media::AudioBus> underlying_media_bus_;
+  uint32_t length_ = 0;
   Vector<AudioChannel, 2> channels_;
-  int layout_;
-  float sample_rate_;  // 0.0 if unknown or N/A
+  float sample_rate_ = 0.0f;  // 0.0 if unknown or N/A
 };
 
 }  // namespace blink

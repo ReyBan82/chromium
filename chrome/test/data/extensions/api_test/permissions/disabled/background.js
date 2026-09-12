@@ -8,7 +8,7 @@
 chrome.test.runTests([
   function history() {
     try {
-      var query = { 'text': '', 'maxResults': 1 };
+      const query = {text: '', maxResults: 1};
       chrome.history.search(query, function(results) {
         chrome.test.fail();
       });
@@ -19,7 +19,9 @@ chrome.test.runTests([
 
   function bookmarks() {
     try {
-      chrome.bookmarks.get("1", function(results) {
+      // Use getRecent() instead of get("1") because desktop Android doesn't
+      // create the bookmark bar (id "1") by default.
+      chrome.bookmarks.getRecent(1, function(results) {
         chrome.test.fail();
       });
     } catch (e) {
@@ -31,7 +33,7 @@ chrome.test.runTests([
   // present.
   function tabs() {
     try {
-      chrome.tabs.create({'url': '1'}, function(tab) {
+      chrome.tabs.create({url: '1'}, function(tab) {
         // Tabs strip sensitive data without permissions.
         chrome.test.assertFalse('url' in tab);
         chrome.test.succeed();
@@ -49,5 +51,5 @@ chrome.test.runTests([
     } catch (e) {
       chrome.test.succeed();
     }
-  }
+  },
 ]);

@@ -4,6 +4,8 @@
 
 #include "components/sync_device_info/local_device_info_util.h"
 
+#include <string_view>
+
 #include "base/barrier_closure.h"
 #include "base/functional/callback.h"
 #include "base/functional/callback_helpers.h"
@@ -13,10 +15,10 @@
 #include "base/task/thread_pool.h"
 #include "base/threading/scoped_blocking_call.h"
 #include "build/build_config.h"
-#include "build/chromeos_buildflags.h"
+#include "components/sync_device_info/device_info.h"
 #include "ui/base/device_form_factor.h"
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
 #include "chromeos/ash/components/system/statistics_provider.h"
 #endif
 
@@ -55,18 +57,25 @@ void OnHardwareInfoReady(LocalDeviceNameInfo* name_info_ptr,
 #endif
 }
 
-void OnPersonalizableDeviceNameReady(LocalDeviceNameInfo* name_info_ptr,
-                                     base::ScopedClosureRunner done_closure,
-                                     std::string personalizable_name) {
-  name_info_ptr->personalizable_name = std::move(personalizable_name);
+struct BlockingDeviceDetails {
+  std::string personalizable_name;
+  std::optional<std::string> android_build_fingerprint;
+};
+
+void OnBlockingDeviceDetailsReady(LocalDeviceNameInfo* name_info_ptr,
+                                  base::ScopedClosureRunner done_closure,
+                                  BlockingDeviceDetails details) {
+  name_info_ptr->personalizable_name = std::move(details.personalizable_name);
+  name_info_ptr->android_build_fingerprint =
+      std::move(details.android_build_fingerprint);
 }
 
 void OnMachineStatisticsLoaded(LocalDeviceNameInfo* name_info_ptr,
                                base::ScopedClosureRunner done_closure) {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // |full_hardware_class| is set on Chrome OS devices if the user has UMA
   // enabled. Otherwise |full_hardware_class| is set to an empty string.
-  if (const absl::optional<base::StringPiece> full_hardware_class =
+  if (const std::optional<std::string_view> full_hardware_class =
           ash::system::StatisticsProvider::GetInstance()->GetMachineStatistic(
               ash::system::kHardwareClassKey)) {
     name_info_ptr->full_hardware_class =
@@ -79,29 +88,32 @@ void OnMachineStatisticsLoaded(LocalDeviceNameInfo* name_info_ptr,
 
 }  // namespace
 
-sync_pb::SyncEnums::DeviceType GetLocalDeviceType() {
+DeviceInfo::DeviceType GetLocalDeviceType() {
 #if BUILDFLAG(IS_CHROMEOS)
-  return sync_pb::SyncEnums_DeviceType_TYPE_CROS;
+  return DeviceInfo::DeviceType::kChromeOS;
 #elif BUILDFLAG(IS_LINUX)
-  return sync_pb::SyncEnums_DeviceType_TYPE_LINUX;
+  return DeviceInfo::DeviceType::kLinux;
 #elif BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
-  return ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_TABLET
-             ? sync_pb::SyncEnums_DeviceType_TYPE_TABLET
-             : sync_pb::SyncEnums_DeviceType_TYPE_PHONE;
+  switch (ui::GetDeviceFormFactor()) {
+    case ui::DEVICE_FORM_FACTOR_TABLET:
+      return DeviceInfo::DeviceType::kTablet;
+    case ui::DEVICE_FORM_FACTOR_PHONE:
+      return DeviceInfo::DeviceType::kPhone;
+    default:
+      return DeviceInfo::DeviceType::kOther;
+  }
 #elif BUILDFLAG(IS_MAC)
-  return sync_pb::SyncEnums_DeviceType_TYPE_MAC;
+  return DeviceInfo::DeviceType::kMac;
 #elif BUILDFLAG(IS_WIN)
-  return sync_pb::SyncEnums_DeviceType_TYPE_WIN;
+  return DeviceInfo::DeviceType::kWindows;
 #else
-  return sync_pb::SyncEnums_DeviceType_TYPE_OTHER;
+  return DeviceInfo::DeviceType::kOther;
 #endif
 }
 
 DeviceInfo::OsType GetLocalDeviceOSType() {
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   return DeviceInfo::OsType::kChromeOsAsh;
-#elif BUILDFLAG(IS_CHROMEOS_LACROS)
-  return DeviceInfo::OsType::kChromeOsLacros;
 #elif BUILDFLAG(IS_LINUX)
   return DeviceInfo::OsType::kLinux;
 #elif BUILDFLAG(IS_ANDROID)
@@ -120,18 +132,26 @@ DeviceInfo::OsType GetLocalDeviceOSType() {
 }
 
 DeviceInfo::FormFactor GetLocalDeviceFormFactor() {
-#if BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_MAC) || \
-    BUILDFLAG(IS_WIN)
-  return DeviceInfo::FormFactor::kDesktop;
-#elif BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_IOS)
-  return ui::GetDeviceFormFactor() == ui::DEVICE_FORM_FACTOR_TABLET
-             ? DeviceInfo::FormFactor::kTablet
-             : DeviceInfo::FormFactor::kPhone;
-#elif BUILDFLAG(IS_FUCHSIA)
+#if !BUILDFLAG(IS_FUCHSIA)
+  switch (ui::GetDeviceFormFactor()) {
+    case ui::DEVICE_FORM_FACTOR_TABLET:
+      return DeviceInfo::FormFactor::kTablet;
+    case ui::DEVICE_FORM_FACTOR_DESKTOP:
+      return DeviceInfo::FormFactor::kDesktop;
+    case ui::DEVICE_FORM_FACTOR_TV:
+      return DeviceInfo::FormFactor::kTv;
+    case ui::DEVICE_FORM_FACTOR_AUTOMOTIVE:
+      return DeviceInfo::FormFactor::kAutomotive;
+    case ui::DEVICE_FORM_FACTOR_PHONE:
+    case ui::DEVICE_FORM_FACTOR_FOLDABLE:
+      return DeviceInfo::FormFactor::kPhone;
+    case ui::DEVICE_FORM_FACTOR_XR:
+      return DeviceInfo::FormFactor::kUnknown;
+  }
+  NOTREACHED();
+#else   // !BUILDFLAG(IS_FUCHSIA)
   return DeviceInfo::FormFactor::kUnknown;
-#else
-#error Please handle your new device OS here.
-#endif
+#endif  // !BUILDFLAG(IS_FUCHSIA)
 }
 
 std::string GetPersonalizableDeviceNameBlocking() {
@@ -145,6 +165,17 @@ std::string GetPersonalizableDeviceNameBlocking() {
 
   DCHECK(base::IsStringUTF8(device_name));
   return device_name;
+}
+
+BlockingDeviceDetails GetBlockingDeviceDetails() {
+  std::string device_name = GetPersonalizableDeviceNameBlocking();
+
+  std::optional<std::string> android_build_fingerprint;
+#if BUILDFLAG(IS_ANDROID)
+  android_build_fingerprint = base::SysInfo::GetAndroidBuildFingerprint();
+#endif
+
+  return {std::move(device_name), std::move(android_build_fingerprint)};
 }
 
 void GetLocalDeviceNameInfo(
@@ -161,7 +192,7 @@ void GetLocalDeviceNameInfo(
       base::BindOnce(&OnHardwareInfoReady, name_info_ptr,
                      base::ScopedClosureRunner(done_closure)));
 
-#if BUILDFLAG(IS_CHROMEOS_ASH)
+#if BUILDFLAG(IS_CHROMEOS)
   // Bind hwclass once the statistics are available on ChromeOS devices.
   ash::system::StatisticsProvider::GetInstance()
       ->ScheduleOnMachineStatisticsLoaded(
@@ -175,8 +206,8 @@ void GetLocalDeviceNameInfo(
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE,
       {base::MayBlock(), base::TaskShutdownBehavior::SKIP_ON_SHUTDOWN},
-      base::BindOnce(&GetPersonalizableDeviceNameBlocking),
-      base::BindOnce(&OnPersonalizableDeviceNameReady, name_info_ptr,
+      base::BindOnce(&GetBlockingDeviceDetails),
+      base::BindOnce(&OnBlockingDeviceDetailsReady, name_info_ptr,
                      base::ScopedClosureRunner(done_closure)));
 }
 

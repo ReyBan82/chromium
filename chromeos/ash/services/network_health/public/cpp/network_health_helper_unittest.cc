@@ -47,6 +47,10 @@ class NetworkHealthHelperTest : public ::testing::Test {
   }
 
   NetworkHealthHelper* helper() { return helper_.get(); }
+  network_config::CrosNetworkConfigTestHelper*
+  cros_network_config_test_helper() {
+    return cros_network_config_test_helper_.get();
+  }
 
   std::string SetupWiFiService(const std::string& state) {
     return cros_network_config_test_helper_->network_state_helper()
@@ -82,14 +86,21 @@ TEST_F(NetworkHealthHelperTest, RequestDefaultNetworkOnline) {
   EXPECT_EQ(default_network->state, mojom::NetworkState::kOnline);
 }
 
-TEST_F(NetworkHealthHelperTest, RequestIsPortalState) {
-  EXPECT_FALSE(helper()->IsPortalState());
+TEST_F(NetworkHealthHelperTest, WiFiPortalState) {
+  using PortalState = chromeos::network_config::mojom::PortalState;
+  EXPECT_EQ(helper()->WiFiPortalState(), PortalState::kUnknown);
 
   std::string path = SetupWiFiService(shill::kStateOnline);
-  EXPECT_FALSE(helper()->IsPortalState());
+  EXPECT_EQ(helper()->WiFiPortalState(), PortalState::kOnline);
 
   SetWiFiState(path, shill::kStateRedirectFound);
-  EXPECT_TRUE(helper()->IsPortalState());
+  EXPECT_EQ(helper()->WiFiPortalState(), PortalState::kPortal);
+
+  // Ethernet in a portal state should return kUnknown.
+  SetWiFiState(path, shill::kStateIdle);
+  cros_network_config_test_helper()->network_state_helper().ConfigureService(
+      R"({"GUID": "eth_guid", "Type": "ethernet", "State": "redirect-found"})");
+  EXPECT_EQ(helper()->WiFiPortalState(), PortalState::kUnknown);
 }
 
 }  // namespace ash::network_health

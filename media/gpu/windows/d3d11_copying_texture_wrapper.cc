@@ -4,28 +4,74 @@
 
 #include "media/gpu/windows/d3d11_copying_texture_wrapper.h"
 
-#include <memory>
+#include <d3d11.h>
 
-#include "base/task/single_thread_task_runner.h"
-#include "gpu/command_buffer/service/mailbox_manager.h"
-#include "media/gpu/windows/d3d11_com_defs.h"
-#include "media/gpu/windows/d3d11_picture_buffer.h"
-#include "ui/gl/hdr_metadata_helper_win.h"
+#include "gpu/config/gpu_driver_bug_workarounds.h"
+#include "media/base/video_types.h"
+#include "media/gpu/windows/d3d_picture_buffer.h"
+#include "media/gpu/windows/format_utils.h"
+#include "ui/gfx/color_space.h"
+#include "ui/gfx/color_space_win.h"
 
 namespace media {
+namespace {
+
+DXGI_FORMAT GetDxgiFormat(ID3D11Texture2D* texture) {
+  if (!texture) {
+    return DXGI_FORMAT_UNKNOWN;
+  }
+  D3D11_TEXTURE2D_DESC desc = {};
+  texture->GetDesc(&desc);
+  return desc.Format;
+}
+
+// NVIDIA's video processor zeros YUV->YUV copies for some BT.2020 DXGI
+// color spaces (PQ / G2084, and G22 with left chroma siting) but still
+// reports success. HDR 422/444 copies only change the pixel format
+// (Y416 -> P010, etc.) -- color space stays the same on both sides.
+// Feed the processor BT.2020 G22 top-left for those copies so we get
+// pixels.
+bool ShouldUseG22TopLeftForYuvCopy(
+    DXGI_COLOR_SPACE_TYPE input_color_space,
+    DXGI_COLOR_SPACE_TYPE output_color_space,
+    DXGI_FORMAT input_format,
+    DXGI_FORMAT output_format,
+    const gpu::GpuDriverBugWorkarounds& workarounds) {
+  if (!workarounds.use_g22_topleft_color_space_for_yuv_vp ||
+      !IsYuvDxgiFormat(input_format) || !IsYuvDxgiFormat(output_format) ||
+      input_color_space != output_color_space) {
+    return false;
+  }
+
+  switch (input_color_space) {
+    case DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020:
+    case DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020:
+    case DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020:
+    case DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
 
 // TODO(tmathmeyer) What D3D11 Resources do we need to do the copying?
 CopyingTexture2DWrapper::CopyingTexture2DWrapper(
     const gfx::Size& size,
+    const gfx::ColorSpace& input_color_space,
+    const gfx::ColorSpace& output_color_space,
     std::unique_ptr<Texture2DWrapper> output_wrapper,
     scoped_refptr<VideoProcessorProxy> processor,
     ComD3D11Texture2D output_texture,
-    absl::optional<gfx::ColorSpace> output_color_space)
+    gpu::GpuDriverBugWorkarounds workarounds)
     : size_(size),
+      input_color_space_(input_color_space),
+      output_color_space_(output_color_space),
+      workarounds_(std::move(workarounds)),
       video_processor_(std::move(processor)),
       output_texture_wrapper_(std::move(output_wrapper)),
-      output_texture_(std::move(output_texture)),
-      output_color_space_(std::move(output_color_space)) {}
+      output_texture_(std::move(output_texture)) {}
 
 CopyingTexture2DWrapper::~CopyingTexture2DWrapper() = default;
 
@@ -35,9 +81,7 @@ D3D11Status CopyingTexture2DWrapper::BeginSharedImageAccess() {
 }
 
 D3D11Status CopyingTexture2DWrapper::ProcessTexture(
-    const gfx::ColorSpace& input_color_space,
-    MailboxHolderArray* mailbox_dest,
-    gfx::ColorSpace* output_color_space) {
+    scoped_refptr<gpu::ClientSharedImage>& shared_image_dest) {
   // Acquire keyed mutex for VideoProcessorBlt ops.
   D3D11Status status = output_texture_wrapper_->BeginSharedImageAccess();
   if (!status.is_ok()) {
@@ -50,8 +94,9 @@ D3D11Status CopyingTexture2DWrapper::ProcessTexture(
   ComD3D11VideoProcessorOutputView output_view;
   HRESULT hr = video_processor_->CreateVideoProcessorOutputView(
       output_texture_.Get(), &output_view_desc, &output_view);
-  if (!SUCCEEDED(hr))
+  if (!SUCCEEDED(hr)) {
     return {D3D11Status::Codes::kCreateVideoProcessorOutputViewFailed, hr};
+  }
 
   D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_view_desc = {0};
   input_view_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
@@ -60,37 +105,27 @@ D3D11Status CopyingTexture2DWrapper::ProcessTexture(
   ComD3D11VideoProcessorInputView input_view;
   hr = video_processor_->CreateVideoProcessorInputView(
       texture_.Get(), &input_view_desc, &input_view);
-  if (!SUCCEEDED(hr))
+  if (!SUCCEEDED(hr)) {
     return {D3D11Status::Codes::kCreateVideoProcessorInputViewFailed};
+  }
 
   D3D11_VIDEO_PROCESSOR_STREAM streams = {0};
   streams.Enable = TRUE;
   streams.pInputSurface = input_view.Get();
 
-  // If we were given an output color space, then that's what we'll use.
-  // Otherwise, we'll use whatever the input space is.
-  gfx::ColorSpace copy_color_space =
-      output_color_space_ ? *output_color_space_ : input_color_space;
-
-  // If the input color space has changed, or if this is the first call, then
-  // notify the video processor about it.
-  if (!previous_input_color_space_ ||
-      *previous_input_color_space_ != input_color_space) {
-    previous_input_color_space_ = input_color_space;
-
-    video_processor_->SetStreamColorSpace(input_color_space);
-    video_processor_->SetOutputColorSpace(copy_color_space);
-  }
-
   hr = video_processor_->VideoProcessorBlt(output_view.Get(),
                                            0,  // output_frameno
                                            1,  // stream_count
                                            &streams);
-  if (!SUCCEEDED(hr))
+  if (!SUCCEEDED(hr)) {
     return {D3D11Status::Codes::kVideoProcessorBltFailed, hr};
+  }
 
-  return output_texture_wrapper_->ProcessTexture(copy_color_space, mailbox_dest,
-                                                 output_color_space);
+  return output_texture_wrapper_->ProcessTexture(shared_image_dest);
+}
+
+const gfx::Size& CopyingTexture2DWrapper::GetSize() const {
+  return size_;
 }
 
 D3D11Status CopyingTexture2DWrapper::Init(
@@ -98,7 +133,7 @@ D3D11Status CopyingTexture2DWrapper::Init(
     GetCommandBufferHelperCB get_helper_cb,
     ComD3D11Texture2D texture,
     size_t array_slice,
-    scoped_refptr<media::D3D11PictureBuffer> picture_buffer,
+    scoped_refptr<media::D3DPictureBuffer> picture_buffer,
     PictureBufferGPUResourceInitDoneCB
         picture_buffer_gpu_resource_init_done_cb) {
   auto result = video_processor_->Init(size_.width(), size_.height());
@@ -110,22 +145,23 @@ D3D11Status CopyingTexture2DWrapper::Init(
   texture_ = texture;
   array_slice_ = array_slice;
 
+  DXGI_COLOR_SPACE_TYPE input_color_space =
+      gfx::ColorSpaceWin::GetDXGIColorSpace(input_color_space_);
+  DXGI_COLOR_SPACE_TYPE output_color_space =
+      gfx::ColorSpaceWin::GetDXGIColorSpace(output_color_space_);
+  if (ShouldUseG22TopLeftForYuvCopy(
+          input_color_space, output_color_space, GetDxgiFormat(texture_.Get()),
+          GetDxgiFormat(output_texture_.Get()), workarounds_)) {
+    input_color_space = output_color_space =
+        DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_TOPLEFT_P2020;
+  }
+  video_processor_->SetStreamColorSpace(input_color_space);
+  video_processor_->SetOutputColorSpace(output_color_space);
+
   return output_texture_wrapper_->Init(
       std::move(gpu_task_runner), std::move(get_helper_cb), output_texture_,
       /*array_size=*/0, std::move(picture_buffer),
       std::move(picture_buffer_gpu_resource_init_done_cb));
-}
-
-void CopyingTexture2DWrapper::SetStreamHDRMetadata(
-    const gfx::HDRMetadata& stream_metadata) {
-  auto dxgi_stream_metadata =
-      gl::HDRMetadataHelperWin::HDRMetadataToDXGI(stream_metadata);
-  video_processor_->SetStreamHDRMetadata(dxgi_stream_metadata);
-}
-
-void CopyingTexture2DWrapper::SetDisplayHDRMetadata(
-    const DXGI_HDR_METADATA_HDR10& dxgi_display_metadata) {
-  video_processor_->SetDisplayHDRMetadata(dxgi_display_metadata);
 }
 
 }  // namespace media

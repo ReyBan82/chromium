@@ -5,7 +5,7 @@
 #include "chrome/browser/metrics/ambient_mode_metrics_provider.h"
 
 #include "ash/public/cpp/ambient/ambient_client.h"
-#include "ash/public/cpp/ambient/ambient_metrics.h"
+#include "ash/public/cpp/ambient/ambient_mode_photo_source.h"
 #include "ash/public/cpp/ambient/ambient_prefs.h"
 #include "base/metrics/histogram_functions.h"
 #include "chrome/browser/profiles/profile_manager.h"
@@ -45,8 +45,6 @@ void AmbientModeMetricsProvider::ProvideCurrentSessionData(
 
   bool enabled =
       pref_service->GetBoolean(ash::ambient::prefs::kAmbientModeEnabled);
-
-  base::UmaHistogramBoolean("Ash.AmbientMode.Enabled", enabled);
 
   if (!enabled)
     return;

@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "ash/constants/ash_features.h"
+#include "base/memory/raw_ptr.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/timer/mock_timer.h"
 #include "chromeos/ash/components/phonehub/fake_attestation_certificate_generator.h"
@@ -17,8 +18,7 @@
 #include "chromeos/ash/services/secure_channel/public/cpp/client/fake_connection_manager.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-namespace ash {
-namespace phonehub {
+namespace ash::phonehub {
 
 using multidevice_setup::mojom::Feature;
 using multidevice_setup::mojom::FeatureState;
@@ -53,6 +53,7 @@ class CrosStateSenderTest : public testing::Test {
   }
 
   base::TimeDelta GetRetryDelay() { return cros_state_sender_->retry_delay_; }
+
   base::test::ScopedFeatureList feature_list_;
   std::unique_ptr<FakeMessageSender> fake_message_sender_;
   std::unique_ptr<secure_channel::FakeConnectionManager>
@@ -60,11 +61,10 @@ class CrosStateSenderTest : public testing::Test {
   std::unique_ptr<multidevice_setup::FakeMultiDeviceSetupClient>
       fake_multidevice_setup_client_;
   std::unique_ptr<MutablePhoneModel> phone_model_;
-  FakeAttestationCertificateGenerator* fake_attestation_certificate_generator_;
-  base::MockOneShotTimer* mock_timer_;
-
- private:
   std::unique_ptr<CrosStateSender> cros_state_sender_;
+  raw_ptr<FakeAttestationCertificateGenerator>
+      fake_attestation_certificate_generator_;
+  raw_ptr<base::MockOneShotTimer> mock_timer_;
 };
 
 TEST_F(CrosStateSenderTest, PerformUpdateCrosStateRetrySequence) {
@@ -170,6 +170,23 @@ TEST_F(CrosStateSenderTest, CrosStateMessageIncludesAttestationIfEcheEnabled) {
   EXPECT_EQ(1u, fake_message_sender_->GetCrosStateCallCount());
 }
 
+TEST_F(CrosStateSenderTest, ResendOnNewAttestationCertificate) {
+  feature_list_.InitWithFeatures(/* enabled_features= */ {features::kEcheSWA},
+                                 /* disabled_features= */ {});
+  // Set notification feature to be enabled.
+  fake_multidevice_setup_client_->SetFeatureState(
+      Feature::kPhoneHubNotifications, FeatureState::kEnabledByUser);
+  // Set camera roll feature to be enabled.
+  fake_multidevice_setup_client_->SetFeatureState(Feature::kPhoneHubCameraRoll,
+                                                  FeatureState::kEnabledByUser);
+  fake_connection_manager_->SetStatus(
+      secure_channel::ConnectionManager::Status::kConnected);
+  EXPECT_EQ(1u, fake_message_sender_->GetCrosStateCallCount());
+
+  fake_attestation_certificate_generator_->RetrieveCertificate();
+  EXPECT_EQ(2u, fake_message_sender_->GetCrosStateCallCount());
+}
+
 TEST_F(CrosStateSenderTest, NotificationFeatureStateChanged) {
   // Set connection state to be connected.
   fake_connection_manager_->SetStatus(
@@ -220,5 +237,4 @@ TEST_F(CrosStateSenderTest, NotificationFeatureStateChanged) {
   EXPECT_EQ(5u, fake_message_sender_->GetCrosStateCallCount());
 }
 
-}  // namespace phonehub
-}  // namespace ash
+}  // namespace ash::phonehub

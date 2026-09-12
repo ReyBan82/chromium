@@ -6,12 +6,22 @@
 
 #include <string>
 
+#include "base/command_line.h"
 #include "base/strings/string_util.h"
 #include "chrome/browser/flags/android/chrome_feature_list.h"
+#include "chrome/browser/profiles/profile.h"
+#include "chrome/browser/search/search.h"
+#include "chrome/common/chrome_switches.h"
 #include "chrome/common/url_constants.h"
+#include "chrome/common/webui_url_constants.h"
 #include "content/public/common/content_features.h"
 #include "content/public/common/url_constants.h"
+#include "extensions/buildflags/buildflags.h"
 #include "url/gurl.h"
+
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+#include "chrome/browser/extensions/extension_url_overrides.h"
+#endif
 
 namespace {
 const char kBookmarkFolderPath[] = "folder/";
@@ -22,24 +32,41 @@ namespace android {
 
 bool HandleAndroidNativePageURL(GURL* url,
                                 content::BrowserContext* browser_context) {
-  if (url->SchemeIs(content::kChromeUIScheme)) {
-    if (url->host() == chrome::kChromeUINewTabHost) {
-      *url = GURL(chrome::kChromeUINativeNewTabURL);
-      return true;
+#if BUILDFLAG(ENABLE_EXTENSIONS_CORE)
+  if (base::FeatureList::IsEnabled(
+          chrome::android::kChromeNativeUrlOverriding)) {
+    // If an extension is overriding this URL, do not redirect it.
+    if (ExtensionUrlOverrides::GetNumberOfExtensionsOverridingURL(
+            *url, browser_context) > 0) {
+      return false;
     }
+  }
+#endif
 
-    // TODO(twellington): stop redirecting chrome://history to
-    // chrome-native://history when M57 is a distant memory.
-    // See http://crbug.com/654071.
-    if (url->host() == kChromeUIHistoryHost) {
-      *url = GURL(kChromeUINativeHistoryURL);
+  if (url->SchemeIs(content::kChromeUIScheme)) {
+    if (url->GetHost() == chrome::kChromeUINewTabHost) {
+      // The url handler rewrites the url from chrome://newtab to the WebUI
+      // NTP if the WebUI NTP is enabled. Depending on the default search
+      // engine, it will either return a 1P or 3P NTP.
+      if (search::IsWebUiNtpEnabledForDesktopAndroid()) {
+        GURL new_tab_url = search::GetNewTabPageURL(
+            Profile::FromBrowserContext(browser_context));
+        if (new_tab_url.is_valid()) {
+          *url = new_tab_url;
+        } else {
+          // TODO(b/559771711): Add fallback WebUI NTP.
+          *url = GURL(chrome::kChromeUINativeNewTabURL);
+        }
+      } else {
+        *url = GURL(chrome::kChromeUINativeNewTabURL);
+      }
       return true;
     }
   }
 
   if (url->SchemeIs(chrome::kChromeNativeScheme) &&
-      url->host() == kChromeUIBookmarksHost) {
-    std::string ref = url->ref();
+      url->GetHost() == kChromeUIBookmarksHost) {
+    std::string ref = url->GetRef();
     if (!ref.empty()) {
       *url = GURL(std::string(kChromeUINativeBookmarksURL)
                       .append(kBookmarkFolderPath)

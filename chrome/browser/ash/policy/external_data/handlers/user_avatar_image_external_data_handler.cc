@@ -6,31 +6,25 @@
 
 #include <utility>
 
-#include "chrome/browser/ash/login/users/avatar/user_image_manager.h"
-#include "chrome/browser/ash/login/users/chrome_user_manager.h"
-#include "chrome/browser/ash/settings/cros_settings.h"
-#include "components/policy/policy_constants.h"
+#include "base/check_deref.h"
+#include "chrome/browser/ash/login/users/avatar/user_image_manager_impl.h"
+#include "chrome/browser/ash/login/users/avatar/user_image_manager_registry.h"
 
 namespace policy {
 
 namespace {
 
-ash::UserImageManager* GetUserImageManager(const std::string& user_id) {
-  return ash::ChromeUserManager::Get()->GetUserImageManager(
-      CloudExternalDataPolicyHandler::GetAccountId(user_id));
+ash::UserImageManagerImpl* GetUserImageManager(PrefService& local_state,
+                                               const std::string& user_id) {
+  return ash::UserImageManagerRegistry::Get()->GetManager(
+      CloudExternalDataPolicyObserver::GetAccountId(local_state, user_id));
 }
 
 }  // namespace
 
 UserAvatarImageExternalDataHandler::UserAvatarImageExternalDataHandler(
-    ash::CrosSettings* cros_settings,
-    DeviceLocalAccountPolicyService* policy_service)
-    : user_avatar_image_observer_(cros_settings,
-                                  policy_service,
-                                  key::kUserAvatarImage,
-                                  this) {
-  user_avatar_image_observer_.Init();
-}
+    PrefService* local_state)
+    : local_state_(CHECK_DEREF(local_state)) {}
 
 UserAvatarImageExternalDataHandler::~UserAvatarImageExternalDataHandler() =
     default;
@@ -38,13 +32,14 @@ UserAvatarImageExternalDataHandler::~UserAvatarImageExternalDataHandler() =
 void UserAvatarImageExternalDataHandler::OnExternalDataSet(
     const std::string& policy,
     const std::string& user_id) {
-  GetUserImageManager(user_id)->OnExternalDataSet(policy);
+  GetUserImageManager(local_state_.get(), user_id)->OnExternalDataSet(policy);
 }
 
 void UserAvatarImageExternalDataHandler::OnExternalDataCleared(
     const std::string& policy,
     const std::string& user_id) {
-  GetUserImageManager(user_id)->OnExternalDataCleared(policy);
+  GetUserImageManager(local_state_.get(), user_id)
+      ->OnExternalDataCleared(policy);
 }
 
 void UserAvatarImageExternalDataHandler::OnExternalDataFetched(
@@ -52,17 +47,15 @@ void UserAvatarImageExternalDataHandler::OnExternalDataFetched(
     const std::string& user_id,
     std::unique_ptr<std::string> data,
     const base::FilePath& file_path) {
-  GetUserImageManager(user_id)->OnExternalDataFetched(policy, std::move(data));
+  GetUserImageManager(local_state_.get(), user_id)
+      ->OnExternalDataFetched(policy, std::move(data));
 }
 
 void UserAvatarImageExternalDataHandler::RemoveForAccountId(
-    const AccountId& account_id,
-    base::OnceClosure on_removed) {
-  ash::ChromeUserManager::Get()
-      ->GetUserImageManager(account_id)
+    const AccountId& account_id) {
+  ash::UserImageManagerRegistry::Get()
+      ->GetManager(account_id)
       ->DeleteUserImage();
-
-  std::move(on_removed).Run();
 }
 
 }  // namespace policy

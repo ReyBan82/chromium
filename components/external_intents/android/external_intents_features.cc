@@ -6,10 +6,15 @@
 
 #include <jni.h>
 #include <stddef.h>
+
+#include <array>
 #include <string>
 
 #include "base/android/jni_string.h"
+#include "base/compiler_specific.h"
 #include "base/notreached.h"
+
+// Must come after all headers that specialize FromJniType() / ToJniType().
 #include "components/external_intents/android/jni_headers/ExternalIntentsFeatures_jni.h"
 
 namespace external_intents {
@@ -17,37 +22,22 @@ namespace external_intents {
 namespace {
 
 // Array of features exposed through the Java ExternalIntentsFeatures API.
-const base::Feature* kFeaturesExposedToJava[] = {
-    &kExternalNavigationDebugLogs, &kExternalNavigationSubframeRedirects,
-    &kBlockSubframeIntentToSelf, &kBlockFrameRenavigations,
-    &kDoNotRequireSpecializedCCTHandler};
-
+constexpr std::array kFeaturesExposedToJava = {
+    &kExternalNavigationDebugLogs,
+    &kDontClobberTabsWithChromeAppId,
+};
 }  // namespace
 
 // Alphabetical:
 
-BASE_FEATURE(kExternalNavigationDebugLogs,
-             "ExternalNavigationDebugLogs",
-             base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kExternalNavigationDebugLogs, base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kDontClobberTabsWithChromeAppId, base::FEATURE_ENABLED_BY_DEFAULT);
 
-BASE_FEATURE(kExternalNavigationSubframeRedirects,
-             "ExternalNavigationSubframeRedirects",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-BASE_FEATURE(kBlockSubframeIntentToSelf,
-             "BlockSubframeIntentToSelf",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-BASE_FEATURE(kBlockFrameRenavigations,
-             "BlockFrameRenavigations",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-BASE_FEATURE(kDoNotRequireSpecializedCCTHandler,
-             "DoNotRequireSpecializedCCTHandler",
-             base::FEATURE_ENABLED_BY_DEFAULT);
-
-static jlong JNI_ExternalIntentsFeatures_GetFeature(JNIEnv* env, jint ordinal) {
-  return reinterpret_cast<jlong>(kFeaturesExposedToJava[ordinal]);
+static int64_t JNI_ExternalIntentsFeatures_GetFeature(JNIEnv* env,
+                                                      int32_t ordinal) {
+  return reinterpret_cast<int64_t>(kFeaturesExposedToJava[ordinal]);
 }
 
 }  // namespace external_intents
+
+DEFINE_JNI(ExternalIntentsFeatures)

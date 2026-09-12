@@ -4,33 +4,36 @@
 
 #include "chrome/browser/win/jumplist_updater.h"
 
-#include <windows.h>
 #include <objbase.h>
-#include <propkey.h>
+
 #include <shobjidl.h>
+#include <windows.h>
+
+#include <propkey.h>
 
 #include "base/command_line.h"
 #include "base/files/file_path.h"
-#include "base/metrics/histogram_macros.h"
 #include "base/path_service.h"
 #include "base/strings/string_util.h"
+#include "base/strings/utf_string_conversions.h"
 #include "base/win/win_util.h"
 #include "chrome/common/chrome_switches.h"
 #include "content/public/common/content_switches.h"
 
 namespace {
 
-// Creates an IShellLink object.
+// Creates an IShellLink object using the provided class factory.
 // An IShellLink object is almost the same as an application shortcut, and it
 // requires three items: the absolute path to an application, an argument
 // string, and a title string.
-bool AddShellLink(Microsoft::WRL::ComPtr<IObjectCollection> collection,
+bool AddShellLink(IClassFactory* shell_link_factory,
+                  Microsoft::WRL::ComPtr<IObjectCollection> collection,
                   const base::FilePath& application_path,
                   scoped_refptr<ShellLinkItem> item) {
-  // Create an IShellLink object.
+  // Create an IShellLink object from the pre-obtained class factory.
   Microsoft::WRL::ComPtr<IShellLink> link;
-  HRESULT result = ::CoCreateInstance(
-      CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link));
+  HRESULT result =
+      shell_link_factory->CreateInstance(nullptr, IID_PPV_ARGS(&link));
   if (FAILED(result))
     return false;
 
@@ -71,7 +74,7 @@ bool AddShellLink(Microsoft::WRL::ComPtr<IObjectCollection> collection,
     return false;
 
   if (!base::win::SetStringValueForPropertyStore(
-          property_store.Get(), PKEY_Title, base::as_wcstr(item->title()))) {
+          property_store.Get(), PKEY_Title, base::UTF16ToWide(item->title()))) {
     return false;
   }
 
@@ -88,7 +91,7 @@ ShellLinkItem::ShellLinkItem()
     : command_line_(base::CommandLine::NO_PROGRAM), icon_index_(0) {
 }
 
-ShellLinkItem::~ShellLinkItem() {}
+ShellLinkItem::~ShellLinkItem() = default;
 
 std::wstring ShellLinkItem::GetArguments() const {
   return command_line_.GetArgumentsString();
@@ -104,12 +107,11 @@ base::CommandLine* ShellLinkItem::GetCommandLine() {
 JumpListUpdater::JumpListUpdater(const std::wstring& app_user_model_id)
     : app_user_model_id_(app_user_model_id), user_max_items_(0) {}
 
-JumpListUpdater::~JumpListUpdater() {
-}
+JumpListUpdater::~JumpListUpdater() = default;
 
 // static
 bool JumpListUpdater::IsEnabled() {
-  // Do not create custom JumpLists in tests. See http://crbug.com/389375.
+  // Do not create custom JumpLists in tests. See http://crbug.com/40372575.
   return !base::CommandLine::ForCurrentProcess()->HasSwitch(
       switches::kTestType);
 }
@@ -176,11 +178,22 @@ bool JumpListUpdater::AddTasks(const ShellLinkItemList& link_items) {
   if (FAILED(result))
     return false;
 
+  // Obtain the IClassFactory for CLSID_ShellLink once, rather than resolving
+  // it per link inside the loop.
+  Microsoft::WRL::ComPtr<IClassFactory> shell_link_factory;
+  result = ::CoGetClassObject(CLSID_ShellLink, CLSCTX_INPROC_SERVER, nullptr,
+                              IID_PPV_ARGS(&shell_link_factory));
+  if (FAILED(result)) {
+    return false;
+  }
+
   // Add items to the "Task" category.
   for (ShellLinkItemList::const_iterator it = link_items.begin();
        it != link_items.end(); ++it) {
-    if (!AddShellLink(collection, application_path, *it))
+    if (!AddShellLink(shell_link_factory.Get(), collection, application_path,
+                      *it)) {
       return false;
+    }
   }
 
   // We can now add the new list to the JumpList.
@@ -222,10 +235,21 @@ bool JumpListUpdater::AddCustomCategory(const std::u16string& category_name,
   if (FAILED(result))
     return false;
 
+  // Obtain the IClassFactory for CLSID_ShellLink once, rather than resolving
+  // it per link inside the loop.
+  Microsoft::WRL::ComPtr<IClassFactory> shell_link_factory;
+  result = ::CoGetClassObject(CLSID_ShellLink, CLSCTX_INPROC_SERVER, nullptr,
+                              IID_PPV_ARGS(&shell_link_factory));
+  if (FAILED(result)) {
+    return false;
+  }
+
   for (ShellLinkItemList::const_iterator item = link_items.begin();
        item != link_items.end() && max_items > 0; ++item, --max_items) {
-    if (!AddShellLink(collection, application_path, *item))
+    if (!AddShellLink(shell_link_factory.Get(), collection, application_path,
+                      *item)) {
       return false;
+    }
   }
 
   // We can now add the new list to the JumpList.

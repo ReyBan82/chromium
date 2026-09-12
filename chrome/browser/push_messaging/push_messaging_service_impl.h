@@ -6,7 +6,9 @@
 #define CHROME_BROWSER_PUSH_MESSAGING_PUSH_MESSAGING_SERVICE_IMPL_H_
 
 #include <stdint.h>
+
 #include <memory>
+#include <optional>
 #include <queue>
 #include <utility>
 #include <vector>
@@ -31,15 +33,18 @@
 #include "components/gcm_driver/gcm_client.h"
 #include "components/gcm_driver/instance_id/instance_id.h"
 #include "components/keyed_service/core/keyed_service.h"
+#include "components/safe_browsing/core/browser/db/database_manager.h"
 #include "content/public/browser/child_process_host.h"
+#include "content/public/browser/permission_result.h"
 #include "content/public/browser/push_messaging_service.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 #include "third_party/blink/public/mojom/push_messaging/push_messaging.mojom-forward.h"
 
 class GURL;
 class PrefRegistrySimple;
 class Profile;
-class PushMessagingAppIdentifier;
+namespace push_messaging {
+class AppIdentifier;
+}  // namespace push_messaging
 class PushMessagingServiceTest;
 class FCMRevocationTest;
 class ScopedKeepAlive;
@@ -93,7 +98,10 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
   // If any Service Workers are using push, starts GCM and adds an app handler.
   static void InitializeForProfile(Profile* profile);
 
-  explicit PushMessagingServiceImpl(Profile* profile);
+  explicit PushMessagingServiceImpl(
+      Profile* profile,
+      scoped_refptr<safe_browsing::SafeBrowsingDatabaseManager>
+          database_manager);
 
   PushMessagingServiceImpl(const PushMessagingServiceImpl&) = delete;
   PushMessagingServiceImpl& operator=(const PushMessagingServiceImpl&) = delete;
@@ -168,12 +176,22 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
       const ContentSettingsPattern& secondary_pattern,
       ContentSettingsTypeSet content_type_set) override;
 
+  // Fires the `pushsubscriptionchange` event to the service worker with
+  // `service_worker_registration_id` and `origin`. The two subscriptions
+  // `old_subscription` and `new_subscription` can be null.
+  void FirePushSubscriptionChange(
+      const GURL& origin,
+      int64_t service_worker_registration_id,
+      base::OnceClosure completed_closure,
+      blink::mojom::PushSubscriptionPtr new_subscription,
+      blink::mojom::PushSubscriptionPtr old_subscription);
+
   // Fires the `pushsubscriptionchange` event to the associated service worker
   // of |app_identifier|, which is the app identifier for |old_subscription|
   // whereas |new_subscription| can be either null e.g. when a subscription is
   // lost due to permission changes or a new subscription when it was refreshed.
-  void FirePushSubscriptionChange(
-      const PushMessagingAppIdentifier& app_identifier,
+  void FirePushSubscriptionChangeForAppIdentifier(
+      const push_messaging::AppIdentifier& app_identifier,
       base::OnceClosure completed_closure,
       blink::mojom::PushSubscriptionPtr new_subscription,
       blink::mojom::PushSubscriptionPtr old_subscription);
@@ -191,7 +209,12 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
   void OnOldSubscriptionExpired(const std::string& app_id,
                                 const std::string& sender_id) override;
   void OnRefreshFinished(
-      const PushMessagingAppIdentifier& app_identifier) override;
+      const push_messaging::AppIdentifier& app_identifier) override;
+
+  // Sets a callback that can be used to listen for service worker
+  // subscription events.
+  void SetSubscribeFromWorkerCallback(
+      base::RepeatingCallback<void(/*registration id=*/int64_t)> callback);
 
   void SetMessageCallbackForTesting(const base::RepeatingClosure& callback);
   void SetUnsubscribeCallbackForTesting(base::OnceClosure callback);
@@ -212,6 +235,7 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
   FRIEND_TEST_ALL_PREFIXES(PushMessagingBrowserTest, PushEventOnShutdown);
   FRIEND_TEST_ALL_PREFIXES(PushMessagingServiceTest, NormalizeSenderInfo);
   FRIEND_TEST_ALL_PREFIXES(PushMessagingServiceTest, PayloadEncryptionTest);
+  FRIEND_TEST_ALL_PREFIXES(PushMessagingServiceTest, ProfileDestructionTest);
   FRIEND_TEST_ALL_PREFIXES(PushMessagingServiceTest,
                            TestMultipleIncomingPushMessages);
 #if BUILDFLAG(IS_ANDROID)
@@ -257,17 +281,17 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
 
   // Subscribe methods ---------------------------------------------------------
 
-  void DoSubscribe(PushMessagingAppIdentifier app_identifier,
+  void DoSubscribe(push_messaging::AppIdentifier app_identifier,
                    blink::mojom::PushSubscriptionOptionsPtr options,
                    RegisterCallback callback,
                    int render_process_id,
                    int render_frame_id,
-                   blink::mojom::PermissionStatus permission_status);
+                   content::PermissionResult permission_result);
 
   void SubscribeEnd(RegisterCallback callback,
                     const std::string& subscription_id,
                     const GURL& endpoint,
-                    const absl::optional<base::Time>& expiration_time,
+                    const std::optional<base::Time>& expiration_time,
                     const std::vector<uint8_t>& p256dh,
                     const std::vector<uint8_t>& auth,
                     blink::mojom::PushRegistrationStatus status);
@@ -275,14 +299,14 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
   void SubscribeEndWithError(RegisterCallback callback,
                              blink::mojom::PushRegistrationStatus status);
 
-  void DidSubscribe(const PushMessagingAppIdentifier& app_identifier,
+  void DidSubscribe(const push_messaging::AppIdentifier& app_identifier,
                     const std::string& sender_id,
                     RegisterCallback callback,
                     const std::string& subscription_id,
                     instance_id::InstanceID::Result result);
 
   void DidSubscribeWithEncryptionInfo(
-      const PushMessagingAppIdentifier& app_identifier,
+      const push_messaging::AppIdentifier& app_identifier,
       RegisterCallback callback,
       const std::string& subscription_id,
       const GURL& endpoint,
@@ -291,16 +315,17 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
 
   // GetSubscriptionInfo methods -----------------------------------------------
 
-  void DidValidateSubscription(
-      const std::string& app_id,
-      const std::string& sender_id,
-      const GURL& endpoint,
-      const absl::optional<base::Time>& expiration_time,
-      SubscriptionInfoCallback callback,
-      bool is_valid);
+  void DidValidateSubscription(const std::string& app_id,
+                               const std::string& sender_id,
+                               const GURL& endpoint,
+                               const std::optional<base::Time>& expiration_time,
+                               bool user_visible_only,
+                               SubscriptionInfoCallback callback,
+                               bool is_valid);
 
   void DidGetEncryptionInfo(const GURL& endpoint,
-                            const absl::optional<base::Time>& expiration_time,
+                            const std::optional<base::Time>& expiration_time,
+                            bool user_visible_only,
                             SubscriptionInfoCallback callback,
                             std::string p256dh,
                             std::string auth_secret) const;
@@ -333,11 +358,11 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
   // OnContentSettingChanged methods -------------------------------------------
 
   void GetPushSubscriptionFromAppIdentifier(
-      const PushMessagingAppIdentifier& app_identifier,
+      const push_messaging::AppIdentifier& app_identifier,
       base::OnceCallback<void(blink::mojom::PushSubscriptionPtr)> callback);
 
   void DidGetSWData(
-      const PushMessagingAppIdentifier& app_identifier,
+      const push_messaging::AppIdentifier& app_identifier,
       base::OnceCallback<void(blink::mojom::PushSubscriptionPtr)> callback,
       const std::string& sender_id,
       const std::string& subscription_id);
@@ -346,25 +371,26 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
       base::OnceCallback<void(blink::mojom::PushSubscriptionPtr)> callback,
       const std::string& sender_id,
       bool is_valid,
+      bool user_visible_only,
       const GURL& endpoint,
-      const absl::optional<base::Time>& expiration_time,
+      const std::optional<base::Time>& expiration_time,
       const std::vector<uint8_t>& p256dh,
       const std::vector<uint8_t>& auth);
 
   // OnSubscriptionInvalidation methods-----------------------------------------
 
-  void GetOldSubscription(PushMessagingAppIdentifier old_app_identifier,
+  void GetOldSubscription(push_messaging::AppIdentifier old_app_identifier,
                           const std::string& sender_id);
 
   // After gathering all relavent information to start the refresh,
   // generate a new app id and initiate refresh
-  void StartRefresh(PushMessagingAppIdentifier old_app_identifier,
+  void StartRefresh(push_messaging::AppIdentifier old_app_identifier,
                     const std::string& sender_id,
                     blink::mojom::PushSubscriptionPtr old_subscription);
 
   // Makes a new susbcription and replaces the old subscription by new
   // subscription in preferences and service worker database
-  void UpdateSubscription(PushMessagingAppIdentifier app_identifier,
+  void UpdateSubscription(push_messaging::AppIdentifier app_identifier,
                           blink::mojom::PushSubscriptionOptionsPtr options,
                           RegisterCallback callback);
 
@@ -376,35 +402,54 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
                              const std::string& sender_id,
                              const std::string& registration_id,
                              const GURL& endpoint,
-                             const absl::optional<base::Time>& expiration_time,
+                             const std::optional<base::Time>& expiration_time,
                              const std::vector<uint8_t>& p256dh,
                              const std::vector<uint8_t>& auth,
                              blink::mojom::PushRegistrationStatus status);
+
+  // SafeBrowsingDatabaseManager callbacks -------------------------------------
+
+  // Callback for Safe Browsing URL allowlist lookups.
+  void DidCheckHighConfidenceAllowlist(
+      const GURL& origin,
+      int64_t service_worker_registration_id,
+      const std::string& message_id,
+      std::optional<std::string> payload,
+      base::OnceCallback<void(blink::mojom::PushEventStatus)> callback,
+      bool allowlisted,
+      std::optional<safe_browsing::SafeBrowsingDatabaseManager::
+                        HighConfidenceAllowlistCheckLoggingDetails>
+          logging_details);
+
   // Helper methods ------------------------------------------------------------
 
   // The subscription given in |identifier| will be unsubscribed (and a
   // `pushsubscriptionchange` event fires if
   // features::kPushSubscriptionChangeEvent is enabled)
-  void UnexpectedChange(PushMessagingAppIdentifier identifier,
+  void UnexpectedChange(push_messaging::AppIdentifier identifier,
                         blink::mojom::PushUnregistrationReason reason,
                         base::OnceClosure completed_closure);
 
-  void UnexpectedUnsubscribe(const PushMessagingAppIdentifier& app_identifier,
-                             blink::mojom::PushUnregistrationReason reason,
-                             UnregisterCallback unregister_callback);
+  void UnexpectedUnsubscribe(
+      const push_messaging::AppIdentifier& app_identifier,
+      blink::mojom::PushUnregistrationReason reason,
+      UnregisterCallback unregister_callback);
 
   void DidGetSenderIdUnexpectedUnsubscribe(
-      const PushMessagingAppIdentifier& app_identifier,
+      const push_messaging::AppIdentifier& app_identifier,
       blink::mojom::PushUnregistrationReason reason,
       UnregisterCallback callback,
       const std::string& sender_id);
 
-  void FirePushSubscriptionChangeCallback(
-      const PushMessagingAppIdentifier& app_identifier,
-      blink::mojom::PushEventStatus status);
-
   // Checks if a given origin is allowed to use Push.
-  bool IsPermissionSet(const GURL& origin, bool user_visible = true);
+  //
+  // `user_visible` is the userVisibleOnly value provided to the push
+  // registration.
+  //
+  // For most origins this checks if the origin has the notifications
+  // permission. An exception is for extensions that use service workers where
+  // `user_visible` is false.
+  bool IsPermissionSet(const GURL& origin, bool user_visible);
 
   // Wrapper around {GCMDriver, InstanceID}::GetEncryptionInfo.
   void GetEncryptionInfoForAppId(
@@ -427,7 +472,7 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
       base::RepeatingCallback<void(const std::string& app_id,
                                    const GURL& origin,
                                    int64_t service_worker_registration_id,
-                                   absl::optional<std::string> payload,
+                                   std::optional<std::string> payload,
                                    PushEventCallback callback)>;
 
   // Callback to be invoked when a message has been dispatched. Enables tests to
@@ -485,11 +530,24 @@ class PushMessagingServiceImpl : public content::PushMessagingService,
 
   base::CallbackListSubscription on_app_terminating_subscription_;
 
+  // Callback used to be alerted of a new service worker subscription.
+  std::optional<base::RepeatingCallback<void(int64_t)>>
+      subscribe_from_worker_callback_;
+
   // True when shutdown has started. Do not allow processing of incoming
   // messages when this is true.
   bool shutdown_started_ = false;
 
   int render_process_id_ = content::ChildProcessHost::kInvalidUniqueID;
+
+  // Tracks those that are attempting to bypass the user visible
+  // requirement on push notifications. E.g. they set userVisibleOnly to false
+  // on push registration.
+  std::set<GURL> origins_requesting_user_visible_requirement_bypass;
+
+  // Enables Safe Browsing URL allowlist lookups. May be a nullptr when ESB was
+  // not enabled at profile initialisation time.
+  scoped_refptr<safe_browsing::SafeBrowsingDatabaseManager> database_manager_;
 
   base::WeakPtrFactory<PushMessagingServiceImpl> weak_factory_{this};
 };

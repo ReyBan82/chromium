@@ -9,8 +9,6 @@ example_value: true
 features:
   dynamic_refresh: true
   per_profile: true
-future_on:
-- fuchsia
 items:
 - caption: Allow the browser to filter URL parameters.
   value: true
@@ -19,7 +17,6 @@ items:
 owners:
 - bcl@google.com
 - mreichhoff@chromium.org
-- file://chrome/browser/url_param_filter/OWNERS
 schema:
   type: boolean
 supported_on:

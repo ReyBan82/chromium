@@ -7,7 +7,6 @@
 #include <stddef.h>
 
 #include "base/strings/strcat.h"
-#include "base/strings/string_piece.h"
 #include "components/webcrypto/algorithms/secret_key_util.h"
 #include "components/webcrypto/algorithms/util.h"
 #include "components/webcrypto/blink_key_handle.h"
@@ -22,7 +21,7 @@ namespace {
 
 // Creates an AES algorithm name for the given key size (in bytes). For
 // instance "A128CBC" is the result of suffix="CBC", keylen_bytes=16.
-std::string MakeJwkAesAlgorithmName(base::StringPiece suffix,
+std::string MakeJwkAesAlgorithmName(std::string_view suffix,
                                     size_t keylen_bytes) {
   if (keylen_bytes == 16)
     return base::StrCat({"A128", suffix});
@@ -44,10 +43,10 @@ blink::WebCryptoAlgorithm SynthesizeImportAlgorithmForClone(
 }  // namespace
 
 AesAlgorithm::AesAlgorithm(blink::WebCryptoKeyUsageMask all_key_usages,
-                           base::StringPiece jwk_suffix)
+                           std::string_view jwk_suffix)
     : all_key_usages_(all_key_usages), jwk_suffix_(jwk_suffix) {}
 
-AesAlgorithm::AesAlgorithm(base::StringPiece jwk_suffix)
+AesAlgorithm::AesAlgorithm(std::string_view jwk_suffix)
     : all_key_usages_(blink::kWebCryptoKeyUsageEncrypt |
                       blink::kWebCryptoKeyUsageDecrypt |
                       blink::kWebCryptoKeyUsageWrapKey |
@@ -84,6 +83,7 @@ Status AesAlgorithm::ImportKey(blink::WebCryptoKeyFormat format,
                                blink::WebCryptoKey* key) const {
   switch (format) {
     case blink::kWebCryptoKeyFormatRaw:
+    case blink::kWebCryptoKeyFormatRawSecret:
       return ImportKeyRaw(key_data, algorithm, extractable, usages, key);
     case blink::kWebCryptoKeyFormatJwk:
       return ImportKeyJwk(key_data, algorithm, extractable, usages, key);
@@ -97,6 +97,7 @@ Status AesAlgorithm::ExportKey(blink::WebCryptoKeyFormat format,
                                std::vector<uint8_t>* buffer) const {
   switch (format) {
     case blink::kWebCryptoKeyFormatRaw:
+    case blink::kWebCryptoKeyFormatRawSecret:
       return ExportKeyRaw(key, buffer);
     case blink::kWebCryptoKeyFormatJwk:
       return ExportKeyJwk(key, buffer);
@@ -189,6 +190,22 @@ Status AesAlgorithm::ExportKeyJwk(const blink::WebCryptoKey& key,
   return Status::Success();
 }
 
+bool AesAlgorithm::Supports(blink::WebCryptoOperation op,
+                            const blink::WebCryptoAlgorithm& algorithm,
+                            std::optional<unsigned int> length_bits) const {
+  if (op == blink::kWebCryptoOperationGenerateKey ||
+      op == blink::kWebCryptoOperationGetKeyLength) {
+    uint16_t keylen_bits;
+    if (op == blink::kWebCryptoOperationGenerateKey) {
+      keylen_bits = algorithm.AesKeyGenParams()->LengthBits();
+    } else {
+      keylen_bits = algorithm.AesDerivedKeyParams()->LengthBits();
+    }
+    return keylen_bits == 128 || keylen_bits == 256;
+  }
+  return true;
+}
+
 Status AesAlgorithm::DeserializeKeyForClone(
     const blink::WebCryptoKeyAlgorithm& algorithm,
     blink::WebCryptoKeyType type,
@@ -206,17 +223,17 @@ Status AesAlgorithm::DeserializeKeyForClone(
 
 Status AesAlgorithm::GetKeyLength(
     const blink::WebCryptoAlgorithm& key_length_algorithm,
-    bool* has_length_bits,
-    unsigned int* length_bits) const {
-  *has_length_bits = true;
+    std::optional<unsigned int>* length_bits) const {
   *length_bits = key_length_algorithm.AesDerivedKeyParams()->LengthBits();
 
-  if (*length_bits == 128 || *length_bits == 256)
+  if (length_bits->value() == 128 || length_bits->value() == 256) {
     return Status::Success();
+  }
 
   // 192-bit AES is intentionally unsupported (http://crbug.com/533699).
-  if (*length_bits == 192)
+  if (length_bits->value() == 192) {
     return Status::ErrorAes192BitUnsupported();
+  }
 
   return Status::ErrorGetAesKeyLength();
 }

@@ -4,6 +4,7 @@
 
 #include "third_party/blink/renderer/modules/content_index/service_worker_registration_content_index.h"
 
+#include "base/task/single_thread_task_runner.h"
 #include "third_party/blink/renderer/modules/content_index/content_index.h"
 
 namespace blink {
@@ -38,12 +39,7 @@ ContentIndex* ServiceWorkerRegistrationContentIndex::index(
 
 ContentIndex* ServiceWorkerRegistrationContentIndex::index() {
   if (!content_index_) {
-    ExecutionContext* execution_context =
-        GetSupplementable()->GetExecutionContext();
-    // TODO(falken): Consider defining a task source in the spec for this event.
-    content_index_ = MakeGarbageCollected<ContentIndex>(
-        GetSupplementable(),
-        execution_context->GetTaskRunner(TaskType::kMiscPlatformAPI));
+    content_index_ = MakeGarbageCollected<ContentIndex>(GetSupplementable());
   }
 
   return content_index_.Get();

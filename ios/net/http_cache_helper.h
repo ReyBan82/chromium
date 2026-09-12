@@ -6,13 +6,13 @@
 #define IOS_NET_HTTP_CACHE_HELPER_H_
 
 #include "base/functional/callback_forward.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/scoped_refptr.h"
 #include "net/base/completion_once_callback.h"
 
 namespace base {
 class TaskRunner;
 class Time;
-}
+}  // namespace base
 
 namespace net {
 class URLRequestContextGetter;
@@ -20,8 +20,8 @@ class URLRequestContextGetter;
 // Clears the HTTP cache and calls |closure| back.
 void ClearHttpCache(const scoped_refptr<net::URLRequestContextGetter>& getter,
                     const scoped_refptr<base::TaskRunner>& network_task_runner,
-                    const base::Time& delete_begin,
-                    const base::Time& delete_end,
+                    base::Time delete_begin,
+                    base::Time delete_end,
                     net::CompletionOnceCallback callback);
 
 }  // namespace net

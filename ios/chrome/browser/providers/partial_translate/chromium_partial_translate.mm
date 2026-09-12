@@ -6,9 +6,8 @@
 
 #import "ios/public/provider/chrome/browser/partial_translate/partial_translate_api.h"
 
-#if !defined(__has_feature) || !__has_feature(objc_arc)
-#error "This file requires ARC support."
-#endif
+namespace ios {
+namespace provider {
 
 id<PartialTranslateController> NewPartialTranslateController(
     NSString* source_text,
@@ -21,3 +20,6 @@ id<PartialTranslateController> NewPartialTranslateController(
 NSUInteger PartialTranslateLimitMaxCharacters() {
   return 0;
 }
+
+}  // namespace provider
+}  // namespace ios

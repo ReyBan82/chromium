@@ -36,6 +36,8 @@
 #include "third_party/blink/renderer/core/html/track/loadable_text_track.h"
 #include "third_party/blink/renderer/core/html_names.h"
 #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+#include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+#include "third_party/blink/renderer/platform/wtf/text/strcat.h"
 
 #define TRACK_LOG_LEVEL 3
 
@@ -44,9 +46,11 @@ namespace blink {
 static String UrlForLoggingTrack(const KURL& url) {
   static const unsigned kMaximumURLLengthForLogging = 128;
 
-  if (url.GetString().length() < kMaximumURLLengthForLogging)
-    return url.GetString();
-  return url.GetString().Substring(0, kMaximumURLLengthForLogging) + "...";
+  const String& url_string = url.GetString();
+  if (url_string.length() < kMaximumURLLengthForLogging) {
+    return url_string;
+  }
+  return StrCat({url_string.subview(0, kMaximumURLLengthForLogging), "..."});
 }
 
 HTMLTrackElement::HTMLTrackElement(Document& document)
@@ -90,15 +94,19 @@ void HTMLTrackElement::ParseAttribute(
     // As the kind, label, and srclang attributes are set, changed, or removed,
     // the text track must update accordingly...
   } else if (name == html_names::kKindAttr) {
-    AtomicString lower_case_value = params.new_value.LowerASCII();
+    std::optional<V8TextTrackKind> kind;
+    AtomicString lower_case_value = params.new_value.ToAsciiLower();
     // 'missing value default' ("subtitles")
-    if (lower_case_value.IsNull())
-      lower_case_value = TextTrack::SubtitlesKeyword();
-    // 'invalid value default' ("metadata")
-    else if (!TextTrack::IsValidKindKeyword(lower_case_value))
-      lower_case_value = TextTrack::MetadataKeyword();
-
-    track()->SetKind(lower_case_value);
+    if (lower_case_value.IsNull()) {
+      // 'missing value default' ("subtitles")
+      kind = V8TextTrackKind(V8TextTrackKind::Enum::kSubtitles);
+    } else {
+      kind = V8TextTrackKind::Create(lower_case_value);
+      if (!kind.has_value()) {
+        kind = V8TextTrackKind(V8TextTrackKind::Enum::kMetadata);
+      }
+    }
+    track()->SetKind(kind.value());
   } else if (name == html_names::kLabelAttr) {
     track()->SetLabel(params.new_value);
   } else if (name == html_names::kSrclangAttr) {
@@ -110,8 +118,8 @@ void HTMLTrackElement::ParseAttribute(
   HTMLElement::ParseAttribute(params);
 }
 
-const AtomicString& HTMLTrackElement::kind() {
-  return track()->kind();
+AtomicString HTMLTrackElement::kind() {
+  return track()->kind().AsAtomicString();
 }
 
 void HTMLTrackElement::setKind(const AtomicString& kind) {
@@ -152,8 +160,22 @@ void HTMLTrackElement::ScheduleLoad() {
 
   // 3. If the text track's track element does not have a media element as a
   // parent, abort these steps.
-  if (!MediaElement())
+  HTMLMediaElement* media_element = MediaElement();
+  if (!media_element) {
     return;
+  }
+
+  // Defer the track while the media element is, or is about to be, lazily
+  // deferred. Skip this once the media has resumed, otherwise
+  // LoadDeferredTracks() would re-defer the track here forever since the
+  // loading=lazy attribute is still present.
+  if (RuntimeEnabledFeatures::LazyLoadVideoAndAudioEnabled() &&
+      !media_element->IsLazyLoadResumed() &&
+      (media_element->IsLazyLoadDeferred() ||
+       media_element->HasLazyLoadingAttribute())) {
+    load_deferred_for_lazy_media_ = true;
+    return;
+  }
 
   // 4. Run the remainder of these steps in parallel, allowing whatever caused
   // these steps to run to continue.
@@ -163,6 +185,14 @@ void HTMLTrackElement::ScheduleLoad() {
   // following steps. (The steps in the synchronous section are marked with [X])
   // FIXME: We use a timer to approximate a "stable state" - i.e. this is not
   // 100% per spec.
+}
+
+void HTMLTrackElement::LoadIfDeferredForLazyMedia() {
+  if (!load_deferred_for_lazy_media_) {
+    return;
+  }
+  load_deferred_for_lazy_media_ = false;
+  ScheduleLoad();
 }
 
 void HTMLTrackElement::LoadTimerFired(TimerBase*) {

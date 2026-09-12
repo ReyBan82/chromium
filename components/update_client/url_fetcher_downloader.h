@@ -8,9 +8,12 @@
 #include <stdint.h>
 
 #include <memory>
+#include <string>
 
 #include "base/files/file_path.h"
-#include "base/memory/ref_counted.h"
+#include "base/functional/callback_forward.h"
+#include "base/gtest_prod_util.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/sequence_checker.h"
 #include "base/time/time.h"
 #include "components/update_client/crx_downloader.h"
@@ -25,24 +28,31 @@ class UrlFetcherDownloader : public CrxDownloader {
  public:
   UrlFetcherDownloader(
       scoped_refptr<CrxDownloader> successor,
-      scoped_refptr<NetworkFetcherFactory> network_fetcher_factory);
+      scoped_refptr<NetworkFetcherFactory> network_fetcher_factory,
+      const std::string& prod_id);
   UrlFetcherDownloader(const UrlFetcherDownloader&) = delete;
   UrlFetcherDownloader& operator=(const UrlFetcherDownloader&) = delete;
 
  private:
+  FRIEND_TEST_ALL_PREFIXES(UrlFetcherDownloaderTest,
+                           CancelBeforeDownloadDirCreated);
+  FRIEND_TEST_ALL_PREFIXES(UrlFetcherDownloaderTest, CancelTwice);
+
   // Overrides for CrxDownloader.
   ~UrlFetcherDownloader() override;
-  void DoStartDownload(const GURL& url) override;
+  base::OnceClosure DoStartDownload(const GURL& url) override;
 
   void CreateDownloadDir();
   void StartURLFetch(const GURL& url);
   void OnNetworkFetcherComplete(int net_error, int64_t content_size);
   void OnResponseStarted(int response_code, int64_t content_length);
   void OnDownloadProgress(int64_t content_length);
+  void Cancel();
 
   SEQUENCE_CHECKER(sequence_checker_);
 
   scoped_refptr<NetworkFetcherFactory> network_fetcher_factory_;
+  const base::FilePath::StringType prod_id_;
   std::unique_ptr<NetworkFetcher> network_fetcher_;
 
   // Contains a temporary download directory for the downloaded file.
@@ -53,8 +63,13 @@ class UrlFetcherDownloader : public CrxDownloader {
 
   base::TimeTicks download_start_time_;
 
+  base::OnceClosure cancel_callback_;
+  bool cancelled_ = false;
+
   int response_code_ = -1;
   int64_t total_bytes_ = -1;
+  // The bytes downloaded so far, as last reported by the network fetcher.
+  int64_t downloaded_bytes_ = -1;
 };
 
 }  // namespace update_client

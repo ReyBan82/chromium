@@ -6,12 +6,14 @@
 #define CHROME_BROWSER_ASH_POLICY_CORE_USER_CLOUD_POLICY_MANAGER_ASH_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "base/files/file_path.h"
 #include "base/functional/bind.h"
 #include "base/memory/raw_ptr.h"
-#include "base/memory/ref_counted.h"
+#include "base/memory/raw_ref.h"
+#include "base/memory/scoped_refptr.h"
 #include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
@@ -24,8 +26,8 @@
 #include "components/policy/core/common/cloud/cloud_policy_constants.h"
 #include "components/policy/core/common/cloud/cloud_policy_manager.h"
 #include "components/policy/core/common/cloud/cloud_policy_service.h"
+#include "components/session_manager/core/session_manager.h"
 #include "components/session_manager/core/session_manager_observer.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 class GoogleServiceAuthError;
 class PrefService;
@@ -41,11 +43,16 @@ class SharedURLLoaderFactory;
 
 namespace enterprise_reporting {
 class ReportScheduler;
+class SaasUsageReportScheduler;
 }
 
 namespace policy {
 
-class ArcAppInstallEventLogUploader;
+namespace local_user_files {
+class LocalFilesCleanup;
+}
+
+class BrowserPolicyConnectorAsh;
 class CloudExternalDataManager;
 class DeviceManagementService;
 class PolicyOAuth2TokenFetcher;
@@ -96,15 +103,22 @@ class UserCloudPolicyManagerAsh
   //   will be invoked if the system could not load policy from either cache or
   //   the server.
   //
+  // `local_state` must not be null and must outlive this object.
+  // `shared_url_loader_factory` must not be null.
+  // `browser_policy_connector_ash` must be non-null and must outlive `this`.
+  //
   // |account_id| is the AccountId associated with the user's session.
   // |task_runner| is the runner for policy refresh tasks.
   UserCloudPolicyManagerAsh(
+      PrefService* local_state,
+      scoped_refptr<network::SharedURLLoaderFactory> shared_url_loader_factory,
+      BrowserPolicyConnectorAsh* browser_policy_connector_ash,
       Profile* profile,
       std::unique_ptr<CloudPolicyStore> store,
+      std::unique_ptr<CloudPolicyStore> extension_install_store,
       std::unique_ptr<CloudExternalDataManager> external_data_manager,
       const base::FilePath& component_policy_cache_path,
       PolicyEnforcement enforcement_type,
-      PrefService* local_state,
       base::TimeDelta policy_refresh_timeout,
       base::OnceClosure fatal_error_callback,
       const AccountId& account_id,
@@ -118,9 +132,8 @@ class UserCloudPolicyManagerAsh
 
   // Initializes the cloud connection. |local_state| and
   // |device_management_service| must stay valid until this object is deleted.
-  void Connect(
-      DeviceManagementService* device_management_service,
-      scoped_refptr<network::SharedURLLoaderFactory> system_url_loader_factory);
+  void ConnectManagementService(
+      DeviceManagementService* device_management_service);
 
   // This class is one of the policy providers, and must be ready for the
   // creation of the Profile's PrefService; all the other KeyedServices depend
@@ -147,10 +160,6 @@ class UserCloudPolicyManagerAsh
   // is available.
   void EnableWildcardLoginCheck(const std::string& username);
 
-  // Return the ArcAppInstallEventLogUploader used to send app push-install
-  // event logs to the policy server.
-  ArcAppInstallEventLogUploader* GetAppInstallEventLogUploader();
-
   // ConfigurationPolicyProvider:
   void Shutdown() override;
   bool IsInitializationComplete(PolicyDomain domain) const override;
@@ -175,19 +184,15 @@ class UserCloudPolicyManagerAsh
   // Helper function to force a policy fetch timeout.
   void ForceTimeoutForTest();
 
-  // Sets the SharedURLLoaderFactory's that should be used for tests instead of
-  // retrieving one from the BrowserProcess object in FetchPolicyOAuthToken().
-  void SetSignInURLLoaderFactoryForTests(
-      scoped_refptr<network::SharedURLLoaderFactory> signin_url_loader_factory);
-  void SetSystemURLLoaderFactoryForTests(
-      scoped_refptr<network::SharedURLLoaderFactory> system_url_loader_factory);
-
   // Set a refresh token to be used in tests instead of the user context refresh
   // token when fetching the policy OAuth token.
   void SetUserContextRefreshTokenForTests(const std::string& refresh_token);
 
   // Return the ReportScheduler used to report usage data to the server.
   enterprise_reporting::ReportScheduler* GetReportSchedulerForTesting();
+
+  // Return the CloudPolicyStore used to store extension install policy.
+  CloudPolicyStore* extension_install_store();
 
   static void EnsureFactoryBuilt();
 
@@ -254,21 +259,26 @@ class UserCloudPolicyManagerAsh
   // Called on profile shutdown.
   void ShutdownRemoteCommands();
 
-  // Profile associated with the current user.
-  Profile* const profile_;
+  // The pref service to pass to the refresh scheduler on initialization.
+  const raw_ref<PrefService> local_state_;
 
-  // Owns the store, note that CloudPolicyManager just keeps a plain pointer.
-  std::unique_ptr<CloudPolicyStore> store_;
+  const scoped_refptr<network::SharedURLLoaderFactory>
+      shared_url_loader_factory_;
+
+  const raw_ref<BrowserPolicyConnectorAsh> browser_policy_connector_ash_;
+
+  // Profile associated with the current user.
+  const raw_ptr<Profile, DanglingUntriaged> profile_;
 
   // Manages external data referenced by policies.
   std::unique_ptr<CloudExternalDataManager> external_data_manager_;
 
-  // Helper used to send app push-install event logs to the policy server.
-  std::unique_ptr<ArcAppInstallEventLogUploader>
-      app_install_event_log_uploader_;
-
   // Scheduler used to report usage data to DM server periodically.
   std::unique_ptr<enterprise_reporting::ReportScheduler> report_scheduler_;
+
+  // Scheduler used to report saas usage data to reporting API periodically.
+  std::unique_ptr<enterprise_reporting::SaasUsageReportScheduler>
+      saas_usage_report_scheduler_;
 
   // Username for the wildcard login check if applicable, empty otherwise.
   std::string wildcard_username_;
@@ -287,9 +297,6 @@ class UserCloudPolicyManagerAsh
   // refresh.
   base::OneShotTimer policy_refresh_timeout_;
 
-  // The pref service to pass to the refresh scheduler on initialization.
-  base::raw_ptr<PrefService> local_state_ = nullptr;
-
   // Used to fetch the policy OAuth token, when necessary. This object holds
   // a callback with an unretained reference to the manager, when it exists.
   std::unique_ptr<PolicyOAuth2TokenFetcher> token_fetcher_;
@@ -301,12 +308,6 @@ class UserCloudPolicyManagerAsh
   // that it can be used if OnCloudPolicyServiceInitializationCompleted is
   // called later.
   std::string access_token_;
-
-  // Timestamps for collecting timing UMA stats.
-  base::Time time_init_started_;
-  base::Time time_init_completed_;
-  base::Time time_token_available_;
-  base::Time time_client_registered_;
 
   // The AccountId associated with the user whose policy is being loaded.
   const AccountId account_id_;
@@ -321,22 +322,31 @@ class UserCloudPolicyManagerAsh
   // Listening to notification that profile is destroyed.
   base::CallbackListSubscription shutdown_subscription_;
 
-  // The SharedURLLoaderFactory used in some tests to simulate network requests.
-  scoped_refptr<network::SharedURLLoaderFactory>
-      system_url_loader_factory_for_tests_;
-  scoped_refptr<network::SharedURLLoaderFactory>
-      signin_url_loader_factory_for_tests_;
 
   base::ScopedObservation<Profile, ProfileObserver> observed_profile_{this};
 
+  base::ScopedObservation<CloudPolicyClient, CloudPolicyClient::Observer>
+      observed_cloud_policy_client_{this};
+
+  base::ScopedObservation<CloudPolicyService, CloudPolicyService::Observer>
+      observed_cloud_policy_service_{this};
+
+  base::ScopedObservation<session_manager::SessionManager,
+                          session_manager::SessionManagerObserver>
+      observed_session_manager_{this};
+
   // Refresh token used in tests instead of the user context refresh token to
   // fetch the policy OAuth token.
-  absl::optional<std::string> user_context_refresh_token_for_tests_;
+  std::optional<std::string> user_context_refresh_token_for_tests_;
 
   // Used to track the reregistration state of the CloudPolicyClient, i.e.
   // whether this class has triggered a re-registration after the client failed
   // to load policy with error |DM_STATUS_SERVICE_DEVICE_NOT_FOUND|.
   bool is_in_reregistration_state_ = false;
+
+  // Tracks LocalUserFilesAllowed policy changes and removes user files if
+  // needed. Used for SkyVault TT version.
+  std::unique_ptr<local_user_files::LocalFilesCleanup> local_files_cleanup_;
 };
 
 }  // namespace policy

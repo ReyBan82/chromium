@@ -5,9 +5,10 @@
 #include "chrome/browser/vr/elements/indicator_spec.h"
 
 #include "build/build_config.h"
-#include "chrome/browser/vr/vector_icons/vector_icons.h"
+#include "chrome/app/vector_icons/vector_icons.h"
 #include "chrome/grit/generated_resources.h"
 #include "components/vector_icons/vector_icons.h"
+#include "ui/base/ui_base_features.h"
 
 namespace vr {
 
@@ -17,16 +18,14 @@ IndicatorSpec::IndicatorSpec(UiElementName name,
                              int resource_string,
                              int background_resource_string,
                              int potential_resource_string,
-                             CapturingStateModelMemberPtr signal,
-                             bool is_url)
+                             CapturingStateModelMemberPtr signal)
     : name(name),
       webvr_name(webvr_name),
       icon(icon),
       resource_string(resource_string),
       background_resource_string(background_resource_string),
       potential_resource_string(potential_resource_string),
-      signal(signal),
-      is_url(is_url) {}
+      signal(signal) {}
 
 IndicatorSpec::IndicatorSpec(const IndicatorSpec& other)
     : name(other.name),
@@ -35,42 +34,38 @@ IndicatorSpec::IndicatorSpec(const IndicatorSpec& other)
       resource_string(other.resource_string),
       background_resource_string(other.background_resource_string),
       potential_resource_string(other.potential_resource_string),
-      signal(other.signal),
-      is_url(other.is_url) {}
+      signal(other.signal) {}
 
-IndicatorSpec::~IndicatorSpec() {}
+IndicatorSpec::~IndicatorSpec() = default;
 
 // clang-format off
 std::vector<IndicatorSpec> GetIndicatorSpecs() {
 
   std::vector<IndicatorSpec> specs = {
       {kLocationAccessIndicator, kWebVrLocationAccessIndicator,
-       kMyLocationIcon,
+       features::IsRoundedIconsEnabled() ? kMyLocationFilledIcon : kMyLocationOldIcon,
        IDS_VR_SHELL_SITE_IS_TRACKING_LOCATION,
        // Background tabs cannot track high accuracy location.
        0,
        IDS_VR_SHELL_SITE_CAN_TRACK_LOCATION,
-       &CapturingStateModel::location_access_enabled,
-       false},
+       &CapturingStateModel::location_access_enabled},
 
       {kAudioCaptureIndicator, kWebVrAudioCaptureIndicator,
-       vector_icons::kMicIcon,
+       features::IsRoundedIconsEnabled() ? vector_icons::kMicFilledIcon : vector_icons::kMicOldIcon,
        IDS_VR_SHELL_SITE_IS_USING_MICROPHONE,
        IDS_VR_SHELL_BG_IS_USING_MICROPHONE,
        IDS_VR_SHELL_SITE_CAN_USE_MICROPHONE,
-       &CapturingStateModel::audio_capture_enabled,
-       false},
+       &CapturingStateModel::audio_capture_enabled},
 
       {kVideoCaptureIndicator, kWebVrVideoCaptureIndicator,
-       vector_icons::kVideocamIcon,
+       features::IsRoundedIconsEnabled() ? vector_icons::kVideocamFilledIcon : vector_icons::kVideocamOldIcon,
        IDS_VR_SHELL_SITE_IS_USING_CAMERA,
        IDS_VR_SHELL_BG_IS_USING_CAMERA,
        IDS_VR_SHELL_SITE_CAN_USE_CAMERA,
-       &CapturingStateModel::video_capture_enabled,
-       false},
+       &CapturingStateModel::video_capture_enabled},
 
       {kBluetoothConnectedIndicator, kWebVrBluetoothConnectedIndicator,
-       vector_icons::kBluetoothConnectedIcon,
+       features::IsRoundedIconsEnabled() ? vector_icons::kBluetoothConnectedIcon : vector_icons::kBluetoothConnectedOldIcon,
        IDS_VR_SHELL_SITE_IS_USING_BLUETOOTH,
 #if BUILDFLAG(IS_ANDROID)
        IDS_VR_SHELL_BG_IS_USING_BLUETOOTH,
@@ -78,33 +73,30 @@ std::vector<IndicatorSpec> GetIndicatorSpecs() {
        0,
 #endif
        IDS_VR_SHELL_SITE_CAN_USE_BLUETOOTH,
-       &CapturingStateModel::bluetooth_connected,
-       false},
+       &CapturingStateModel::bluetooth_connected},
 
       {kScreenCaptureIndicator, kWebVrScreenCaptureIndicator,
-       vector_icons::kScreenShareIcon,
+       // TODO(crbug.com/413285138): Update to features::IsRoundedIconsEnabled() ? vector_icons::kScreenShareIcon : kScreenShareOldIcon
+       features::IsRoundedIconsEnabled() ? vector_icons::kScreenShareFilledIcon : vector_icons::kScreenShareOldOldIcon,
        IDS_VR_SHELL_SITE_IS_SHARING_SCREEN,
        IDS_VR_SHELL_BG_IS_SHARING_SCREEN,
        IDS_VR_SHELL_SITE_CAN_SHARE_SCREEN,
-       &CapturingStateModel::screen_capture_enabled,
-       false},
+       &CapturingStateModel::screen_capture_enabled},
 
 #if !BUILDFLAG(IS_ANDROID)
       {kUsbConnectedIndicator, kWebXrUsbConnectedIndicator,
-       vector_icons::kUsbIcon,
+       features::IsRoundedIconsEnabled() ? vector_icons::kUsbIcon : vector_icons::kUsbOldIcon,
        IDS_VR_SHELL_SITE_IS_USING_USB,
        0,
        0,
-       &CapturingStateModel::usb_connected,
-       false},
+       &CapturingStateModel::usb_connected},
 
        {kMidiConnectedIndicator, kWebXrMidiConnectedIndicator,
-       vector_icons::kMidiIcon,
+       features::IsRoundedIconsEnabled() ? vector_icons::kPianoIcon : vector_icons::kMidiOldIcon,
        IDS_VR_SHELL_SITE_IS_USING_MIDI,
        0,
        IDS_VR_SHELL_SITE_CAN_USE_MIDI,
-       &CapturingStateModel::midi_connected,
-       false},
+       &CapturingStateModel::midi_connected},
 #endif
   };
 

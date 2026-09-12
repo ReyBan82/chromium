@@ -6,7 +6,6 @@
 
 #include "base/barrier_closure.h"
 #include "base/functional/bind.h"
-#include "base/guid.h"
 #include "base/observer_list.h"
 #include "base/trace_event/trace_event.h"
 #include "content/browser/background_fetch/background_fetch_cross_origin_filter.h"
@@ -25,6 +24,7 @@
 #include "third_party/blink/public/common/storage_key/storage_key.h"
 #include "third_party/blink/public/mojom/blob/blob.mojom.h"
 #include "third_party/blink/public/mojom/blob/serialized_blob.mojom.h"
+#include "third_party/perfetto/include/perfetto/tracing/track_event_args.h"
 
 namespace content {
 namespace background_fetch {
@@ -33,7 +33,7 @@ namespace {
 
 blink::mojom::SerializedBlobPtr MakeBlob(
     scoped_refptr<BackgroundFetchRequestInfo> info) {
-  DCHECK_CURRENTLY_ON(BrowserThread::IO);
+  CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M158);
 
   std::unique_ptr<storage::BlobDataHandle> response_blob_handle =
       info->TakeResponseBlobDataHandleOnIO();
@@ -73,7 +73,7 @@ MarkRequestCompleteTask::MarkRequestCompleteTask(
 MarkRequestCompleteTask::~MarkRequestCompleteTask() = default;
 
 void MarkRequestCompleteTask::Start() {
-  DCHECK(blob_storage_context());
+  CHECK(blob_storage_context(), base::NotFatalUntil::M158);
   request_info_->CreateResponseBlobDataHandle(blob_storage_context());
 
   base::RepeatingClosure barrier_closure = base::BarrierClosure(
@@ -93,13 +93,13 @@ void MarkRequestCompleteTask::StoreResponse(base::OnceClosure done_closure) {
 
   if (request_info_->GetURLChain().empty()) {
     // The URL chain was not provided, so this is a failed response.
-    DCHECK(!request_info_->IsResultSuccess());
+    CHECK(!request_info_->IsResultSuccess(), base::NotFatalUntil::M158);
     failure_reason_ = proto::BackgroundFetchRegistration::FETCH_ERROR;
     CreateAndStoreCompletedRequest(std::move(done_closure));
     return;
   }
 
-  // TODO(crbug.com/884672): Move cross origin checks to when the response
+  // TODO(crbug.com/40593934): Move cross origin checks to when the response
   // headers are available.
   BackgroundFetchCrossOriginFilter filter(
       registration_id_.storage_key().origin(), *request_info_);
@@ -149,9 +149,8 @@ void MarkRequestCompleteTask::DidGetIsQuotaAvailable(
     base::OnceClosure done_closure,
     bool is_available) {
   int64_t trace_id = blink::cache_storage::CreateTraceId();
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "MarkRequestCompleteTask::DidGetIsQuotaAvailable",
-                         TRACE_ID_GLOBAL(trace_id), TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "MarkRequestCompleteTask::DidGetIsQuotaAvailable",
+              perfetto::Flow::Global(trace_id));
 
   if (!is_available) {
     FinishWithError(blink::mojom::BackgroundFetchError::QUOTA_EXCEEDED);
@@ -168,10 +167,8 @@ void MarkRequestCompleteTask::DidOpenCache(
     base::OnceClosure done_closure,
     int64_t trace_id,
     blink::mojom::CacheStorageError error) {
-  TRACE_EVENT_WITH_FLOW0("CacheStorage",
-                         "MarkRequestCompleteTask::DidOpenCache",
-                         TRACE_ID_GLOBAL(trace_id),
-                         TRACE_EVENT_FLAG_FLOW_IN | TRACE_EVENT_FLAG_FLOW_OUT);
+  TRACE_EVENT("CacheStorage", "MarkRequestCompleteTask::DidOpenCache",
+              perfetto::Flow::Global(trace_id));
   if (error != blink::mojom::CacheStorageError::kSuccess) {
     SetStorageError(BackgroundFetchStorageError::kCacheStorageError);
     CreateAndStoreCompletedRequest(std::move(done_closure));
@@ -193,7 +190,7 @@ void MarkRequestCompleteTask::DidOpenCache(
   std::vector<blink::mojom::BatchOperationPtr> operations;
   operations.emplace_back(std::move(put));
 
-  // TODO(crbug.com/774054): The request blob stored in the cache is being
+  // TODO(crbug.com/40544433): The request blob stored in the cache is being
   // overwritten here, it should be written back.
   cache_storage_cache_remote()->Batch(
       std::move(operations), trace_id,
@@ -316,14 +313,9 @@ void MarkRequestCompleteTask::FinishWithError(
     blink::mojom::BackgroundFetchError error) {
   if (HasStorageError())
     error = blink::mojom::BackgroundFetchError::STORAGE_ERROR;
-  ReportStorageError();
 
   std::move(callback_).Run(error);
   Finished();
-}
-
-std::string MarkRequestCompleteTask::HistogramName() const {
-  return "MarkRequestCompleteTask";
 }
 
 }  // namespace background_fetch

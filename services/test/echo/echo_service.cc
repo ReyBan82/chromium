@@ -4,16 +4,30 @@
 
 #include "services/test/echo/echo_service.h"
 
+#include <optional>
+#include <string>
+
+#include "base/check_is_test.h"
+#include "base/check_is_test.h"
+#include "base/check.h"
+#include "base/debug/stack_trace.h"
 #include "base/immediate_crash.h"
 #include "base/memory/shared_memory_mapping.h"
 #include "build/build_config.h"
+#include "build/chromecast_buildflags.h"
 
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
+
 #include <winevt.h>
+
+#include "base/native_library.h"
 #endif
 
 #include <string>
+
+#include "base/memory/scoped_refptr.h"
+#include "components/os_crypt/async/common/encryptor.h"
 
 namespace echo {
 
@@ -31,7 +45,7 @@ void EchoService::EchoStringToSharedMemory(
     const std::string& input,
     base::UnsafeSharedMemoryRegion region) {
   base::WritableSharedMemoryMapping mapping = region.Map();
-  memcpy(mapping.memory(), input.data(), input.size());
+  base::span(mapping).copy_prefix_from(base::as_byte_span(input));
 }
 
 void EchoService::Quit() {
@@ -39,6 +53,10 @@ void EchoService::Quit() {
 }
 
 void EchoService::Crash() {
+#if BUILDFLAG(IS_WIN)
+  // Avoid symbolizing a stack we won't use.
+  base::debug::DisableInProcessStackDumpingForTesting();
+#endif
   base::ImmediateCrash();
 }
 
@@ -49,6 +67,63 @@ void EchoService::DelayLoad() {
   EVT_HANDLE handle = ::EvtCreateRenderContext(0, nullptr, 0);
   ::EvtClose(handle);
 }
+
+void EchoService::LoadNativeLibrary(const ::base::FilePath& library,
+                                    bool call_sec32_delayload,
+                                    LoadNativeLibraryCallback callback) {
+  // This attempts to load a library inside the sandbox - it should fail unless
+  // the library was in `ServiceProcessHostOptions::WithPreloadedLibraries()`.
+  base::NativeLibraryLoadError error;
+  // We leak the module as preloading already leaked it.
+  HMODULE hmod = base::LoadNativeLibrary(library, &error);
+  if (!hmod) {
+    std::move(callback).Run(LoadStatus::kFailedLoadLibrary, error.code);
+    return;
+  }
+
+  // Calls an exported function that calls a delayloaded function that should
+  // be loaded in the utility (as secur32.dll is imported by chrome.dll).
+  if (call_sec32_delayload) {
+    BOOL(WINAPI * fn)() = nullptr;
+    fn = reinterpret_cast<decltype(fn)>(
+        GetProcAddress(hmod, "FnCallsDelayloadFn"));
+    if (!fn) {
+      std::move(callback).Run(LoadStatus::kFailedGetProcAddress,
+                              GetLastError());
+      return;
+    }
+    BOOL ret = fn();
+    if (!ret) {
+      std::move(callback).Run(LoadStatus::kFailedCallingDelayLoad,
+                              GetLastError());
+      return;
+    }
+  }
+  std::move(callback).Run(LoadStatus::kSuccess, ERROR_SUCCESS);
+}
 #endif  // BUILDFLAG(IS_WIN)
+
+void EchoService::DecryptEncrypt(
+    scoped_refptr<os_crypt_async::Encryptor> encryptor,
+    const std::vector<uint8_t>& input,
+    DecryptEncryptCallback callback) {
+  CHECK(encryptor->IsDecryptionAvailable());
+  // Take the input, which was encrypted in the caller process, and decrypt it.
+  const auto plaintext = encryptor->DecryptData(input);
+  if (!plaintext.has_value()) {
+    std::move(callback).Run(std::nullopt);
+    return;
+  }
+
+  CHECK(encryptor->IsEncryptionAvailable());
+  // Encrypt it again using the key inside this process, and return the
+  // encrypted ciphertext to the caller.
+  std::move(callback).Run(encryptor->EncryptString(*plaintext));
+}
+
+void EchoService::VerifyCheckIsTest(VerifyCheckIsTestCallback callback) {
+  CHECK_IS_TEST();
+  std::move(callback).Run(true);
+}
 
 }  // namespace echo

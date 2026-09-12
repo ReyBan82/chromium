@@ -12,6 +12,7 @@
 #include <string>
 #include <utility>
 
+#include "base/byte_size.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback.h"
 #include "base/memory/scoped_refptr.h"
@@ -19,11 +20,13 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/test/bind.h"
 #include "base/test/scoped_path_override.h"
+#include "base/test/with_feature_override.h"
 #include "build/build_config.h"
 #include "chrome/browser/content_settings/host_content_settings_map_factory.h"
 #include "chrome/browser/extensions/extension_service.h"
 #include "chrome/browser/extensions/extension_service_test_base.h"
 #include "chrome/browser/extensions/tab_helper.h"
+#include "chrome/browser/google/google_brand.h"
 #include "chrome/browser/prefs/session_startup_pref.h"
 #include "chrome/browser/profile_resetter/brandcode_config_fetcher.h"
 #include "chrome/browser/profile_resetter/profile_reset_report.pb.h"
@@ -32,21 +35,27 @@
 #include "chrome/browser/search/background/ntp_custom_background_service.h"
 #include "chrome/browser/search/background/ntp_custom_background_service_factory.h"
 #include "chrome/browser/search_engines/template_url_service_factory.h"
+#include "chrome/browser/search_engines/template_url_service_test_util.h"
 #include "chrome/browser/themes/test/theme_service_changed_waiter.h"
 #include "chrome/browser/themes/theme_service.h"
 #include "chrome/browser/themes/theme_service_factory.h"
 #include "chrome/browser/ui/tabs/tab_strip_model.h"
-#include "chrome/browser/web_data_service_factory.h"
+#include "chrome/browser/webdata_services/web_data_service_factory.h"
 #include "chrome/common/pref_names.h"
-#include "chrome/test/base/browser_with_test_window_test.h"
 #include "components/content_settings/core/browser/content_settings_info.h"
 #include "components/content_settings/core/browser/content_settings_registry.h"
 #include "components/content_settings/core/browser/host_content_settings_map.h"
 #include "components/content_settings/core/browser/website_settings_info.h"
 #include "components/prefs/pref_service.h"
+#include "components/prefs/scoped_user_pref_update.h"
+#include "components/search_engines/enterprise/enterprise_search_manager.h"
+#include "components/search_engines/search_engines_switches.h"
 #include "components/search_engines/template_url_service.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/test/test_storage_partition.h"
 #include "content/public/test/test_utils.h"
+#include "extensions/browser/disable_reason.h"
+#include "extensions/browser/extension_registrar.h"
 #include "extensions/browser/extension_registry.h"
 #include "extensions/common/extension.h"
 #include "extensions/common/manifest_constants.h"
@@ -74,7 +83,27 @@ using extensions::mojom::ManifestLocation;
 
 namespace {
 
-const char kDistributionConfig[] = "{"
+const char kDistributionConfig[] =
+    "{"
+    " \"homepage\" : \"http://www.foo.com\","
+    " \"homepage_is_newtabpage\" : false,"
+    " \"browser\" : {"
+    "   \"show_home_button\" : true"
+    "  },"
+    " \"session\" : {"
+    "   \"restore_on_startup\" : 4,"
+    "   \"startup_urls\" : [\"http://goo.gl\", \"http://foo.de\"]"
+    "  },"
+    " \"extensions\" : {"
+    "   \"settings\" : {"
+    "     \"placeholder_for_id\": {"
+    "      }"
+    "    }"
+    "  }"
+    "}";
+
+const char kDistributionConfigWithSearch[] =
+    "{"
     " \"homepage\" : \"http://www.foo.com\","
     " \"homepage_is_newtabpage\" : false,"
     " \"browser\" : {"
@@ -116,6 +145,19 @@ const char kXmlConfig[] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 using extensions::Extension;
 using extensions::Manifest;
 
+class FakeNtpCustomBackgroundService : public NtpCustomBackgroundService {
+ public:
+  using NtpCustomBackgroundService::NtpCustomBackgroundService;
+  void FetchCustomBackgroundAndExtractBackgroundColor(
+      const GURL& image_url,
+      const GURL& fetch_url) override {}
+};
+
+std::unique_ptr<KeyedService> CreateFakeNtpCustomBackgroundService(
+    content::BrowserContext* context) {
+  Profile* profile = Profile::FromBrowserContext(context);
+  return std::make_unique<FakeNtpCustomBackgroundService>(profile);
+}
 
 // ProfileResetterTest --------------------------------------------------------
 
@@ -129,59 +171,38 @@ class ProfileResetterTest : public extensions::ExtensionServiceTestBase,
  protected:
   void SetUp() override;
 
-  TestingProfile* profile() { return profile_.get(); }
-
  private:
 #if BUILDFLAG(IS_WIN)
   base::ScopedPathOverride user_desktop_override_;
-  base::ScopedPathOverride app_dir_override_;
-  base::ScopedPathOverride start_menu_override_;
-  base::ScopedPathOverride taskbar_pins_override_;
   base::win::ScopedCOMInitializer com_init_;
 #endif
 };
 
 ProfileResetterTest::ProfileResetterTest()
 #if BUILDFLAG(IS_WIN)
-    : user_desktop_override_(base::DIR_USER_DESKTOP),
-      app_dir_override_(base::DIR_ROAMING_APP_DATA),
-      start_menu_override_(base::DIR_START_MENU),
-      taskbar_pins_override_(base::DIR_TASKBAR_PINS)
+    : user_desktop_override_(base::DIR_USER_DESKTOP)
 #endif
 {}
 
-ProfileResetterTest::~ProfileResetterTest() {
-}
+ProfileResetterTest::~ProfileResetterTest() = default;
 
 void ProfileResetterTest::SetUp() {
   extensions::ExtensionServiceTestBase::SetUp();
-  InitializeEmptyExtensionService();
+  ExtensionServiceInitParams params;
+  params.testing_factories = {
+      TestingProfile::TestingFactory(
+          NtpCustomBackgroundServiceFactory::GetInstance(),
+          base::BindRepeating(&CreateFakeNtpCustomBackgroundService)),
+      TestingProfile::TestingFactory(
+          TemplateURLServiceFactory::GetInstance(),
+          TemplateURLServiceTestUtil::GetTemplateURLServiceTestingFactory()),
+  };
 
-  TemplateURLServiceFactory::GetInstance()->SetTestingFactory(
-      profile(), base::BindRepeating(&CreateTemplateURLServiceForTesting));
+  InitializeExtensionService(std::move(params));
+
+  google_brand::BrandForTesting brand_for_testing("");
   resetter_ = std::make_unique<ProfileResetter>(profile());
 }
-
-// PinnedTabsResetTest --------------------------------------------------------
-
-class PinnedTabsResetTest : public BrowserWithTestWindowTest,
-                            public ProfileResetterTestBase {
- protected:
-  void SetUp() override;
-
-  std::unique_ptr<content::WebContents> CreateWebContents();
-};
-
-void PinnedTabsResetTest::SetUp() {
-  BrowserWithTestWindowTest::SetUp();
-  resetter_ = std::make_unique<ProfileResetter>(profile());
-}
-
-std::unique_ptr<content::WebContents> PinnedTabsResetTest::CreateWebContents() {
-  return content::WebContents::Create(
-      content::WebContents::CreateParams(profile()));
-}
-
 
 // ConfigParserTest -----------------------------------------------------------
 
@@ -207,7 +228,7 @@ class ConfigParserTest : public testing::Test {
 ConfigParserTest::ConfigParserTest()
     : task_environment_(content::BrowserTaskEnvironment::IO_MAINLOOP) {}
 
-ConfigParserTest::~ConfigParserTest() {}
+ConfigParserTest::~ConfigParserTest() = default;
 
 std::unique_ptr<BrandcodeConfigFetcher> ConfigParserTest::WaitForRequest(
     const GURL& url) {
@@ -253,8 +274,7 @@ class ShortcutHandler {
 };
 
 #if BUILDFLAG(IS_WIN)
-ShortcutHandler::ShortcutHandler() {
-}
+ShortcutHandler::ShortcutHandler() = default;
 
 ShortcutHandler::~ShortcutHandler() {
   if (!shortcut_path_.empty())
@@ -315,9 +335,9 @@ bool ShortcutHandler::IsFileHidden() const {
 }
 
 #else
-ShortcutHandler::ShortcutHandler() {}
+ShortcutHandler::ShortcutHandler() = default;
 
-ShortcutHandler::~ShortcutHandler() {}
+ShortcutHandler::~ShortcutHandler() = default;
 
 // static
 bool ShortcutHandler::IsSupported() {
@@ -349,28 +369,28 @@ scoped_refptr<Extension> CreateExtension(const std::u16string& name,
                                          ManifestLocation location,
                                          extensions::Manifest::Type type,
                                          bool installed_by_default) {
-  base::Value::Dict manifest;
+  base::DictValue manifest;
   manifest.Set(extensions::manifest_keys::kVersion, "1.0.0.0");
   manifest.Set(extensions::manifest_keys::kName, name);
   manifest.Set(extensions::manifest_keys::kManifestVersion, 2);
   switch (type) {
-    case extensions::Manifest::TYPE_THEME:
-      manifest.Set(extensions::manifest_keys::kTheme, base::Value::Dict());
+    case extensions::Manifest::Type::kTheme:
+      manifest.Set(extensions::manifest_keys::kTheme, base::DictValue());
       break;
-    case extensions::Manifest::TYPE_HOSTED_APP:
+    case extensions::Manifest::Type::kHostedApp:
       manifest.SetByDottedPath(extensions::manifest_keys::kLaunchWebURL,
                                "http://www.google.com");
       manifest.Set(extensions::manifest_keys::kUpdateURL,
                    "http://clients2.google.com/service/update2/crx");
       break;
-    case extensions::Manifest::TYPE_EXTENSION:
+    case extensions::Manifest::Type::kExtension:
       // do nothing
       break;
     default:
       NOTREACHED();
   }
   manifest.SetByDottedPath(extensions::manifest_keys::kOmniboxKeyword, name);
-  std::string error;
+  std::u16string error;
   scoped_refptr<Extension> extension = Extension::Create(
       path,
       location,
@@ -391,7 +411,6 @@ void ReplaceString(std::string* str,
   str->replace(placeholder_pos, placeholder.size(), substitution);
 }
 
-
 /********************* Tests *********************/
 
 TEST_F(ProfileResetterTest, ResetNothing) {
@@ -399,17 +418,39 @@ TEST_F(ProfileResetterTest, ResetNothing) {
   ResetAndWait(0);
 }
 
-TEST_F(ProfileResetterTest, ResetDefaultSearchEngineNonOrganic) {
-  ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE, kDistributionConfig);
+class ProfileResetterTestWithIgnoreSearchProviderOverrides
+    : public base::test::WithFeatureOverride,
+      public ProfileResetterTest {
+ public:
+  ProfileResetterTestWithIgnoreSearchProviderOverrides()
+      : base::test::WithFeatureOverride(
+            switches::kIgnoreSearchProviderOverrides) {}
+};
+
+TEST_P(ProfileResetterTestWithIgnoreSearchProviderOverrides,
+       ResetDefaultSearchEngineNonOrganic) {
+  ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE,
+               kDistributionConfigWithSearch);
 
   TemplateURLService* model =
       TemplateURLServiceFactory::GetForProfile(profile());
   const TemplateURL* default_engine = model->GetDefaultSearchProvider();
   ASSERT_NE(static_cast<TemplateURL*>(nullptr), default_engine);
-  EXPECT_EQ(u"first", default_engine->short_name());
-  EXPECT_EQ(u"firstkey", default_engine->keyword());
-  EXPECT_EQ("http://www.foo.com/s?q={searchTerms}", default_engine->url());
+
+  if (IsParamFeatureEnabled()) {
+    EXPECT_EQ(u"Google", default_engine->short_name());
+    EXPECT_EQ(u"google.com", default_engine->keyword());
+    EXPECT_NE(std::string::npos,
+              default_engine->url().find("{google:baseURL}"));
+  } else {
+    EXPECT_EQ(u"first", default_engine->short_name());
+    EXPECT_EQ(u"firstkey", default_engine->keyword());
+    EXPECT_EQ("http://www.foo.com/s?q={searchTerms}", default_engine->url());
+  }
 }
+
+INSTANTIATE_FEATURE_OVERRIDE_TEST_SUITE(
+    ProfileResetterTestWithIgnoreSearchProviderOverrides);
 
 TEST_F(ProfileResetterTest, ResetDefaultSearchEnginePartially) {
   // Search engine's logic is tested by
@@ -425,6 +466,134 @@ TEST_F(ProfileResetterTest, ResetDefaultSearchEnginePartially) {
   ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE);
 
   EXPECT_EQ(urls, model->GetTemplateURLs());
+}
+
+TEST_F(ProfileResetterTest, ResetDefaultSearchEngineRemovesCustomKeywords) {
+  TemplateURLService* model =
+      TemplateURLServiceFactory::GetForProfile(profile());
+  ASSERT_TRUE(model);
+
+  {
+    TemplateURLData custom_engine_data;
+    custom_engine_data.SetShortName(u"Custom Engine");
+    custom_engine_data.SetKeyword(u"custom");
+    custom_engine_data.SetURL("https://custom.search.com?q={searchTerms}");
+    TemplateURL* custom_engine =
+        model->Add(std::make_unique<TemplateURL>(custom_engine_data));
+    ASSERT_TRUE(custom_engine);
+    EXPECT_EQ(custom_engine, model->GetTemplateURLForKeyword(u"custom"));
+  }
+
+  ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE);
+
+  EXPECT_FALSE(model->GetTemplateURLForKeyword(u"custom"));
+}
+
+TEST_F(ProfileResetterTest,
+       ResetDefaultSearchEngine_RestoresPolicySiteSearchEngines) {
+  TemplateURLService* model =
+      TemplateURLServiceFactory::GetForProfile(profile());
+  ASSERT_TRUE(model);
+  model->Load();
+
+  EnterpriseSearchManager::OwnedTemplateURLDataVector enterprise_search_engines;
+  auto data = std::make_unique<TemplateURLData>();
+  data->SetShortName(u"workname");
+  data->SetKeyword(u"work");
+  data->SetURL("https://work.com/q={searchTerms}");
+  data->policy_origin = TemplateURLData::PolicyOrigin::kSiteSearch;
+  data->enforced_by_policy = false;
+  data->is_active = TemplateURLData::ActiveStatus::kTrue;
+  data->favicon_url = GURL("https://work.com/favicon.ico");
+  data->safe_for_autoreplace = false;
+  enterprise_search_engines.push_back(std::move(data));
+
+  SetManagedSearchSettingsPreference(enterprise_search_engines,
+                                     static_cast<TestingProfile*>(profile()));
+
+  TemplateURL* turl = model->GetTemplateURLForKeyword(u"work");
+  ASSERT_TRUE(turl);
+  EXPECT_TRUE(turl->CanPolicyBeOverridden());
+
+  // Remove the recommended engine, causing its keyword to be marked as
+  // overridden.
+  model->Remove(turl);
+  EXPECT_FALSE(model->GetTemplateURLForKeyword(u"work"));
+  PrefService* prefs = profile()->GetPrefs();
+  EXPECT_FALSE(prefs
+                   ->GetList(EnterpriseSearchManager::
+                                 kSiteSearchSettingsOverriddenKeywordsPrefName)
+                   .empty());
+
+  ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE);
+
+  EXPECT_TRUE(prefs
+                  ->GetList(EnterpriseSearchManager::
+                                kSiteSearchSettingsOverriddenKeywordsPrefName)
+                  .empty());
+  EXPECT_TRUE(model->GetTemplateURLForKeyword(u"work"));
+}
+
+TEST_F(ProfileResetterTest,
+       ResetDefaultSearchEngine_RestoresAllSearchEngineTypes) {
+  TemplateURLService* model =
+      TemplateURLServiceFactory::GetForProfile(profile());
+  ASSERT_TRUE(model);
+  ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE);
+
+  // 1. Setup Policy site search engine ("work") and remove it.
+  EnterpriseSearchManager::OwnedTemplateURLDataVector enterprise_search_engines;
+  auto data = std::make_unique<TemplateURLData>();
+  data->SetShortName(u"workname");
+  data->SetKeyword(u"work");
+  data->SetURL("https://work.com/q={searchTerms}");
+  data->policy_origin = TemplateURLData::PolicyOrigin::kSiteSearch;
+  data->enforced_by_policy = false;
+  data->is_active = TemplateURLData::ActiveStatus::kTrue;
+  data->favicon_url = GURL("https://work.com/favicon.ico");
+  data->safe_for_autoreplace = false;
+  enterprise_search_engines.push_back(std::move(data));
+
+  SetManagedSearchSettingsPreference(enterprise_search_engines,
+                                     static_cast<TestingProfile*>(profile()));
+  TemplateURL* policy_turl = model->GetTemplateURLForKeyword(u"work");
+  ASSERT_TRUE(policy_turl);
+  model->Remove(policy_turl);
+  EXPECT_FALSE(model->GetTemplateURLForKeyword(u"work"));
+
+  // 2. Remove a starter pack engine (e.g. "@history" or "@bookmarks").
+  TemplateURL* starter_pack_turl =
+      model->GetTemplateURLForKeyword(u"@bookmarks");
+  if (!starter_pack_turl) {
+    starter_pack_turl = model->GetTemplateURLForKeyword(u"@history");
+  }
+  ASSERT_TRUE(starter_pack_turl);
+  std::u16string starter_pack_keyword = starter_pack_turl->keyword();
+  model->Remove(starter_pack_turl);
+  EXPECT_FALSE(model->GetTemplateURLForKeyword(starter_pack_keyword));
+
+  // 3. Remove a prepopulated search engine (that is not default).
+  TemplateURLService::TemplateURLVector template_urls =
+      model->GetTemplateURLs();
+  std::u16string prepopulated_keyword;
+  for (TemplateURL* turl : template_urls) {
+    if (turl->prepopulate_id() != 0 &&
+        turl != model->GetDefaultSearchProvider()) {
+      prepopulated_keyword = turl->keyword();
+      model->Remove(turl);
+      break;
+    }
+  }
+  ASSERT_FALSE(prepopulated_keyword.empty());
+  EXPECT_FALSE(model->GetTemplateURLForKeyword(prepopulated_keyword));
+
+  // 4. Invoke ProfileResetter to reset search engines.
+  ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE);
+
+  // 5. Verify ALL THREE types of engines are restored!
+  EXPECT_TRUE(model->GetTemplateURLForKeyword(u"work"));
+  EXPECT_TRUE(model->GetTemplateURLForKeyword(starter_pack_keyword));
+  EXPECT_TRUE(model->GetTemplateURLForKeyword(prepopulated_keyword));
 }
 
 TEST_F(ProfileResetterTest, ResetHomepageNonOrganic) {
@@ -490,9 +659,8 @@ TEST_F(ProfileResetterTest, ResetContentSettings) {
     if (info->IsSettingValid(site_setting)) {
       host_content_settings_map->SetContentSettingDefaultScope(
           url, url, content_type, site_setting);
-      ContentSettingsForOneType host_settings;
-      host_content_settings_map->GetSettingsForOneType(content_type,
-                                                       &host_settings);
+      ContentSettingsForOneType host_settings =
+          host_content_settings_map->GetSettingsForOneType(content_type);
       EXPECT_EQ(2U, host_settings.size());
     }
   }
@@ -513,15 +681,25 @@ TEST_F(ProfileResetterTest, ResetContentSettings) {
         GURL("example.org"), GURL(), content_type);
     EXPECT_EQ(default_setting, site_setting);
 
-    ContentSettingsForOneType host_settings;
-    host_content_settings_map->GetSettingsForOneType(content_type,
-                                                     &host_settings);
+    ContentSettingsForOneType host_settings =
+        host_content_settings_map->GetSettingsForOneType(content_type);
     EXPECT_EQ(1U, host_settings.size());
   }
 }
 
+TEST_F(ProfileResetterTest, ResetContentSettings_BluetoothAllowedDevicesMap) {
+  content::StoragePartition* partition =
+      profile()->GetDefaultStoragePartition();
+  ASSERT_TRUE(partition);
+
+  // Verifies that resetting content settings invokes
+  // ClearBluetoothAllowedDevicesMap across loaded storage partitions
+  // without crashing.
+  ResetAndWait(ProfileResetter::CONTENT_SETTINGS);
+}
+
 TEST_F(ProfileResetterTest, ResetExtensionsByDisabling) {
-  service_->Init();
+  service()->Init();
 
   base::ScopedTempDir temp_dir;
   ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
@@ -531,37 +709,38 @@ TEST_F(ProfileResetterTest, ResetExtensionsByDisabling) {
 
   scoped_refptr<Extension> theme = CreateExtension(
       u"example1", temp_dir.GetPath(), ManifestLocation::kUnpacked,
-      extensions::Manifest::TYPE_THEME, false);
-  service_->FinishInstallationForTest(theme.get());
+      extensions::Manifest::Type::kTheme, false);
+  service()->FinishInstallationForTest(theme.get());
   waiter.WaitForThemeChanged();
 
   EXPECT_FALSE(theme_service->UsingDefaultTheme());
 
   scoped_refptr<Extension> ext2 = CreateExtension(
       u"example2", base::FilePath(FILE_PATH_LITERAL("//nonexistent")),
-      ManifestLocation::kUnpacked, extensions::Manifest::TYPE_EXTENSION, false);
-  service_->AddExtension(ext2.get());
+      ManifestLocation::kUnpacked, extensions::Manifest::Type::kExtension,
+      false);
+  registrar()->AddExtension(ext2.get());
   // Component extensions and policy-managed extensions shouldn't be disabled.
   scoped_refptr<Extension> ext3 = CreateExtension(
       u"example3", base::FilePath(FILE_PATH_LITERAL("//nonexistent2")),
-      ManifestLocation::kComponent, extensions::Manifest::TYPE_EXTENSION,
+      ManifestLocation::kComponent, extensions::Manifest::Type::kExtension,
       false);
-  service_->AddExtension(ext3.get());
+  registrar()->AddExtension(ext3.get());
   scoped_refptr<Extension> ext4 = CreateExtension(
       u"example4", base::FilePath(FILE_PATH_LITERAL("//nonexistent3")),
       ManifestLocation::kExternalPolicyDownload,
-      extensions::Manifest::TYPE_EXTENSION, false);
-  service_->AddExtension(ext4.get());
+      extensions::Manifest::Type::kExtension, false);
+  registrar()->AddExtension(ext4.get());
   scoped_refptr<Extension> ext5 = CreateExtension(
       u"example5", base::FilePath(FILE_PATH_LITERAL("//nonexistent4")),
       ManifestLocation::kExternalComponent,
-      extensions::Manifest::TYPE_EXTENSION, false);
-  service_->AddExtension(ext5.get());
+      extensions::Manifest::Type::kExtension, false);
+  registrar()->AddExtension(ext5.get());
   scoped_refptr<Extension> ext6 = CreateExtension(
       u"example6", base::FilePath(FILE_PATH_LITERAL("//nonexistent5")),
-      ManifestLocation::kExternalPolicy, extensions::Manifest::TYPE_EXTENSION,
+      ManifestLocation::kExternalPolicy, extensions::Manifest::Type::kExtension,
       false);
-  service_->AddExtension(ext6.get());
+  registrar()->AddExtension(ext6.get());
   EXPECT_EQ(6u, registry()->enabled_extensions().size());
 
   ResetAndWait(ProfileResetter::EXTENSIONS);
@@ -578,13 +757,15 @@ TEST_F(ProfileResetterTest, ResetExtensionsByDisabling) {
 TEST_F(ProfileResetterTest, ResetExtensionsByDisablingNonOrganic) {
   scoped_refptr<Extension> ext2 = CreateExtension(
       u"example2", base::FilePath(FILE_PATH_LITERAL("//nonexistent")),
-      ManifestLocation::kUnpacked, extensions::Manifest::TYPE_EXTENSION, false);
-  service_->AddExtension(ext2.get());
+      ManifestLocation::kUnpacked, extensions::Manifest::Type::kExtension,
+      false);
+  registrar()->AddExtension(ext2.get());
   // Components and external policy extensions shouldn't be deleted.
   scoped_refptr<Extension> ext3 = CreateExtension(
       u"example3", base::FilePath(FILE_PATH_LITERAL("//nonexistent2")),
-      ManifestLocation::kUnpacked, extensions::Manifest::TYPE_EXTENSION, false);
-  service_->AddExtension(ext3.get());
+      ManifestLocation::kUnpacked, extensions::Manifest::Type::kExtension,
+      false);
+  registrar()->AddExtension(ext3.get());
   EXPECT_EQ(2u, registry()->enabled_extensions().size());
 
   std::string master_prefs(kDistributionConfig);
@@ -597,7 +778,7 @@ TEST_F(ProfileResetterTest, ResetExtensionsByDisablingNonOrganic) {
 }
 
 TEST_F(ProfileResetterTest, ResetExtensionsAndDefaultApps) {
-  service_->Init();
+  service()->Init();
 
   base::ScopedTempDir temp_dir;
   ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
@@ -607,21 +788,23 @@ TEST_F(ProfileResetterTest, ResetExtensionsAndDefaultApps) {
 
   scoped_refptr<Extension> ext1 = CreateExtension(
       u"example1", temp_dir.GetPath(), ManifestLocation::kUnpacked,
-      extensions::Manifest::TYPE_THEME, false);
-  service_->FinishInstallationForTest(ext1.get());
+      extensions::Manifest::Type::kTheme, false);
+  service()->FinishInstallationForTest(ext1.get());
   waiter.WaitForThemeChanged();
 
   EXPECT_FALSE(theme_service->UsingDefaultTheme());
 
   scoped_refptr<Extension> ext2 = CreateExtension(
       u"example2", base::FilePath(FILE_PATH_LITERAL("//nonexistent2")),
-      ManifestLocation::kUnpacked, extensions::Manifest::TYPE_EXTENSION, false);
-  service_->AddExtension(ext2.get());
+      ManifestLocation::kUnpacked, extensions::Manifest::Type::kExtension,
+      false);
+  registrar()->AddExtension(ext2.get());
 
   scoped_refptr<Extension> ext3 = CreateExtension(
       u"example2", base::FilePath(FILE_PATH_LITERAL("//nonexistent3")),
-      ManifestLocation::kUnpacked, extensions::Manifest::TYPE_HOSTED_APP, true);
-  service_->AddExtension(ext3.get());
+      ManifestLocation::kUnpacked, extensions::Manifest::Type::kHostedApp,
+      true);
+  registrar()->AddExtension(ext3.get());
   EXPECT_EQ(3u, registry()->enabled_extensions().size());
 
   ResetAndWait(ProfileResetter::EXTENSIONS);
@@ -634,7 +817,7 @@ TEST_F(ProfileResetterTest, ResetExtensionsAndDefaultApps) {
 }
 
 TEST_F(ProfileResetterTest, ResetExtensionsByReenablingExternalComponents) {
-  service_->Init();
+  service()->Init();
 
   base::ScopedTempDir temp_dir;
   ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
@@ -642,11 +825,11 @@ TEST_F(ProfileResetterTest, ResetExtensionsByReenablingExternalComponents) {
   scoped_refptr<Extension> ext = CreateExtension(
       u"example", base::FilePath(FILE_PATH_LITERAL("//nonexistent")),
       ManifestLocation::kExternalComponent,
-      extensions::Manifest::TYPE_EXTENSION, false);
-  service_->AddExtension(ext.get());
+      extensions::Manifest::Type::kExtension, false);
+  registrar()->AddExtension(ext.get());
 
-  service_->DisableExtension(ext->id(),
-                             extensions::disable_reason::DISABLE_USER_ACTION);
+  registrar()->DisableExtension(
+      ext->id(), {extensions::disable_reason::DISABLE_USER_ACTION});
   EXPECT_FALSE(registry()->enabled_extensions().Contains(ext->id()));
   EXPECT_TRUE(registry()->disabled_extensions().Contains(ext->id()));
 
@@ -667,7 +850,8 @@ TEST_F(ProfileResetterTest, ResetStartPageNonOrganic) {
   startup_pref = SessionStartupPref::GetStartupPref(prefs);
   EXPECT_EQ(SessionStartupPref::URLS, startup_pref.type);
   const GURL urls[] = {GURL("http://goo.gl"), GURL("http://foo.de")};
-  EXPECT_EQ(std::vector<GURL>(urls, urls + std::size(urls)), startup_pref.urls);
+  EXPECT_EQ(std::vector<GURL>(std::begin(urls), std::end(urls)),
+            startup_pref.urls);
 }
 
 
@@ -677,47 +861,15 @@ TEST_F(ProfileResetterTest, ResetStartPagePartially) {
 
   const GURL urls[] = {GURL("http://foo"), GURL("http://bar")};
   SessionStartupPref startup_pref(SessionStartupPref::URLS);
-  startup_pref.urls.assign(urls, urls + std::size(urls));
+  startup_pref.urls.assign(std::begin(urls), std::end(urls));
   SessionStartupPref::SetStartupPref(prefs, startup_pref);
 
   ResetAndWait(ProfileResetter::STARTUP_PAGES, std::string());
 
   startup_pref = SessionStartupPref::GetStartupPref(prefs);
   EXPECT_EQ(SessionStartupPref::GetDefaultStartupType(), startup_pref.type);
-  EXPECT_EQ(std::vector<GURL>(urls, urls + std::size(urls)), startup_pref.urls);
-}
-
-TEST_F(PinnedTabsResetTest, ResetPinnedTabs) {
-  std::unique_ptr<content::WebContents> contents1(CreateWebContents());
-  std::unique_ptr<content::WebContents> contents2(CreateWebContents());
-  std::unique_ptr<content::WebContents> contents3(CreateWebContents());
-  std::unique_ptr<content::WebContents> contents4(CreateWebContents());
-  content::WebContents* raw_contents1 = contents1.get();
-  content::WebContents* raw_contents2 = contents2.get();
-  content::WebContents* raw_contents3 = contents3.get();
-  content::WebContents* raw_contents4 = contents4.get();
-  TabStripModel* tab_strip_model = browser()->tab_strip_model();
-
-  tab_strip_model->AppendWebContents(std::move(contents4), true);
-  tab_strip_model->AppendWebContents(std::move(contents3), true);
-  tab_strip_model->AppendWebContents(std::move(contents2), true);
-  tab_strip_model->SetTabPinned(2, true);
-  tab_strip_model->AppendWebContents(std::move(contents1), true);
-  tab_strip_model->SetTabPinned(3, true);
-
-  EXPECT_EQ(raw_contents2, tab_strip_model->GetWebContentsAt(0));
-  EXPECT_EQ(raw_contents1, tab_strip_model->GetWebContentsAt(1));
-  EXPECT_EQ(raw_contents4, tab_strip_model->GetWebContentsAt(2));
-  EXPECT_EQ(raw_contents3, tab_strip_model->GetWebContentsAt(3));
-  EXPECT_EQ(2, tab_strip_model->IndexOfFirstNonPinnedTab());
-
-  ResetAndWait(ProfileResetter::PINNED_TABS);
-
-  EXPECT_EQ(raw_contents2, tab_strip_model->GetWebContentsAt(0));
-  EXPECT_EQ(raw_contents1, tab_strip_model->GetWebContentsAt(1));
-  EXPECT_EQ(raw_contents4, tab_strip_model->GetWebContentsAt(2));
-  EXPECT_EQ(raw_contents3, tab_strip_model->GetWebContentsAt(3));
-  EXPECT_EQ(0, tab_strip_model->IndexOfFirstNonPinnedTab());
+  EXPECT_EQ(std::vector<GURL>(std::begin(urls), std::end(urls)),
+            startup_pref.urls);
 }
 
 TEST_F(ProfileResetterTest, ResetShortcuts) {
@@ -750,7 +902,7 @@ TEST_F(ConfigParserTest, NoConnectivity) {
       url, network::mojom::URLResponseHead::New(), "",
       network::URLLoaderCompletionStatus(net::HTTP_INTERNAL_SERVER_ERROR));
 
-  std::unique_ptr<BrandcodeConfigFetcher> fetcher = WaitForRequest(GURL(url));
+  std::unique_ptr<BrandcodeConfigFetcher> fetcher = WaitForRequest(url);
   EXPECT_FALSE(fetcher->GetSettings());
 }
 
@@ -768,11 +920,11 @@ TEST_F(ConfigParserTest, ParseConfig) {
       net::HttpUtil::AssembleRawHeaders(headers));
   head->mime_type = "text/xml";
   network::URLLoaderCompletionStatus status;
-  status.decoded_body_length = xml_config.size();
+  status.decoded_body_length = base::ByteSize(xml_config.size());
   test_url_loader_factory().AddResponse(url, std::move(head), xml_config,
                                         status);
 
-  std::unique_ptr<BrandcodeConfigFetcher> fetcher = WaitForRequest(GURL(url));
+  std::unique_ptr<BrandcodeConfigFetcher> fetcher = WaitForRequest(url);
   std::unique_ptr<BrandcodedDefaultSettings> settings = fetcher->GetSettings();
   ASSERT_TRUE(settings);
 
@@ -785,7 +937,7 @@ TEST_F(ConfigParserTest, ParseConfig) {
   EXPECT_TRUE(settings->GetHomepage(&homepage));
   EXPECT_EQ("http://www.foo.com", homepage);
 
-  absl::optional<base::Value::List> startup_list(
+  std::optional<base::ListValue> startup_list(
       settings->GetUrlsToRestoreOnStartup());
   EXPECT_TRUE(startup_list.has_value());
   std::vector<std::string> startup_pages;
@@ -798,86 +950,143 @@ TEST_F(ConfigParserTest, ParseConfig) {
   EXPECT_EQ("http://foo.de", startup_pages[1]);
 }
 
-TEST_F(ProfileResetterTest, CheckSnapshots) {
-  ResettableSettingsSnapshot empty_snap(profile());
-  EXPECT_EQ(0, empty_snap.FindDifferentFields(empty_snap));
+// Return an invalid response from the fetch request and delete the
+// Fetcher object in the callback, which mimics how ResetSettingsHandler uses
+// the class. See https://crbug.com/40935719.
+TEST_F(ConfigParserTest, InvalidResponseDeleteFromCallback) {
+  const GURL url("http://test");
+  auto head = network::mojom::URLResponseHead::New();
+  head->headers = base::MakeRefCounted<net::HttpResponseHeaders>(
+      net::HttpUtil::AssembleRawHeaders(
+          "HTTP/1.1 200 OK\nContent-type: application/custom\n\n"));
+  head->mime_type = "application/custom";
+  test_url_loader_factory().AddResponse(url, std::move(head),
+                                        "Custom app data, not XML",
+                                        network::URLLoaderCompletionStatus());
 
-  scoped_refptr<Extension> ext = CreateExtension(
-      u"example", base::FilePath(FILE_PATH_LITERAL("//nonexistent")),
-      ManifestLocation::kUnpacked, extensions::Manifest::TYPE_EXTENSION, false);
-  ASSERT_TRUE(ext.get());
-  service_->AddExtension(ext.get());
-
-  std::string master_prefs(kDistributionConfig);
-  std::string ext_id = ext->id();
-  ReplaceString(&master_prefs, "placeholder_for_id", ext_id);
-
-  // Reset to non organic defaults.
-  ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE |
-               ProfileResetter::HOMEPAGE |
-               ProfileResetter::STARTUP_PAGES,
-               master_prefs);
-  ShortcutHandler shortcut_hijacked;
-  ShortcutCommand command_line = shortcut_hijacked.CreateWithArguments(
-      L"chrome1.lnk", L"--profile-directory=Default foo.com");
-  shortcut_hijacked.CheckShortcutHasArguments(
-      L"--profile-directory=Default foo.com");
-  ShortcutHandler shortcut_ok;
-  shortcut_ok.CreateWithArguments(L"chrome2.lnk",
-                                  L"--profile-directory=Default1");
-
-  ResettableSettingsSnapshot nonorganic_snap(profile());
-  nonorganic_snap.RequestShortcuts(base::OnceClosure());
-  // Let it enumerate shortcuts on a blockable task runner.
-  content::RunAllTasksUntilIdle();
-  int diff_fields = ResettableSettingsSnapshot::ALL_FIELDS;
-  if (!ShortcutHandler::IsSupported())
-    diff_fields &= ~ResettableSettingsSnapshot::SHORTCUTS;
-  EXPECT_EQ(diff_fields,
-            empty_snap.FindDifferentFields(nonorganic_snap));
-  empty_snap.Subtract(nonorganic_snap);
-  EXPECT_TRUE(empty_snap.startup_urls().empty());
-  EXPECT_EQ(SessionStartupPref::GetDefaultStartupType(),
-            empty_snap.startup_type());
-  EXPECT_TRUE(empty_snap.homepage().empty());
-  EXPECT_TRUE(empty_snap.homepage_is_ntp());
-  EXPECT_FALSE(empty_snap.show_home_button());
-  EXPECT_NE(std::string::npos, empty_snap.dse_url().find("{google:baseURL}"));
-  EXPECT_EQ(ResettableSettingsSnapshot::ExtensionList(),
-            empty_snap.enabled_extensions());
-  EXPECT_EQ(std::vector<ShortcutCommand>(), empty_snap.shortcuts());
-
-  // Reset to organic defaults.
-  ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE |
-               ProfileResetter::HOMEPAGE |
-               ProfileResetter::STARTUP_PAGES |
-               ProfileResetter::EXTENSIONS |
-               ProfileResetter::SHORTCUTS);
-
-  ResettableSettingsSnapshot organic_snap(profile());
-  organic_snap.RequestShortcuts(base::OnceClosure());
-  // Let it enumerate shortcuts on a blockable task runner.
-  content::RunAllTasksUntilIdle();
-  EXPECT_EQ(diff_fields, nonorganic_snap.FindDifferentFields(organic_snap));
-  nonorganic_snap.Subtract(organic_snap);
-  const GURL urls[] = {GURL("http://foo.de"), GURL("http://goo.gl")};
-  EXPECT_EQ(std::vector<GURL>(urls, urls + std::size(urls)),
-            nonorganic_snap.startup_urls());
-  EXPECT_EQ(SessionStartupPref::URLS, nonorganic_snap.startup_type());
-  EXPECT_EQ("http://www.foo.com", nonorganic_snap.homepage());
-  EXPECT_FALSE(nonorganic_snap.homepage_is_ntp());
-  EXPECT_TRUE(nonorganic_snap.show_home_button());
-  EXPECT_EQ("http://www.foo.com/s?q={searchTerms}", nonorganic_snap.dse_url());
-  EXPECT_EQ(ResettableSettingsSnapshot::ExtensionList(
-      1, std::make_pair(ext_id, "example")),
-      nonorganic_snap.enabled_extensions());
-  if (ShortcutHandler::IsSupported()) {
-    std::vector<ShortcutCommand> shortcuts = nonorganic_snap.shortcuts();
-    ASSERT_EQ(1u, shortcuts.size());
-    EXPECT_EQ(command_line.first.value(), shortcuts[0].first.value());
-    EXPECT_EQ(command_line.second, shortcuts[0].second);
-  }
+  base::RunLoop run_loop;
+  std::unique_ptr<BrandcodeConfigFetcher> fetcher;
+  auto callback = base::BindLambdaForTesting([&fetcher, &run_loop] {
+    EXPECT_FALSE(fetcher->GetSettings());
+    fetcher.reset();
+    run_loop.Quit();
+  });
+  fetcher = std::make_unique<BrandcodeConfigFetcher>(&test_url_loader_factory(),
+                                           std::move(callback), url, "ABCD");
+  run_loop.Run();
 }
+
+class ProfileResetterTestForSnapshots
+    : public ProfileResetterTestWithIgnoreSearchProviderOverrides {
+ protected:
+  void CheckSnapshots(std::string_view initial_prefs,
+                      int expected_nonorganic_diff_fields,
+                      std::string_view expected_dse_url) {
+    ResettableSettingsSnapshot empty_snap(profile());
+    EXPECT_EQ(0, empty_snap.FindDifferentFields(empty_snap));
+
+    scoped_refptr<Extension> ext = CreateExtension(
+        u"example", base::FilePath(FILE_PATH_LITERAL("//nonexistent")),
+        ManifestLocation::kUnpacked, extensions::Manifest::Type::kExtension,
+        false);
+    ASSERT_TRUE(ext.get());
+    registrar()->AddExtension(ext.get());
+
+    std::string master_prefs(initial_prefs);
+    std::string ext_id = ext->id();
+    ReplaceString(&master_prefs, "placeholder_for_id", ext_id);
+
+    // Reset to non organic defaults.
+    ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE |
+                     ProfileResetter::HOMEPAGE | ProfileResetter::STARTUP_PAGES,
+                 master_prefs);
+    ShortcutHandler shortcut_hijacked;
+    ShortcutCommand command_line = shortcut_hijacked.CreateWithArguments(
+        L"chrome1.lnk", L"--profile-directory=Default foo.com");
+    shortcut_hijacked.CheckShortcutHasArguments(
+        L"--profile-directory=Default foo.com");
+    ShortcutHandler shortcut_ok;
+    shortcut_ok.CreateWithArguments(L"chrome2.lnk",
+                                    L"--profile-directory=Default1");
+
+    ResettableSettingsSnapshot nonorganic_snap(profile());
+    nonorganic_snap.RequestShortcuts(base::OnceClosure());
+    // Let it enumerate shortcuts on a blockable task runner.
+    content::RunAllTasksUntilIdle();
+    int diff_fields = expected_nonorganic_diff_fields;
+    if (!ShortcutHandler::IsSupported()) {
+      diff_fields &= ~ResettableSettingsSnapshot::SHORTCUTS;
+    }
+    EXPECT_EQ(diff_fields, empty_snap.FindDifferentFields(nonorganic_snap));
+    empty_snap.Subtract(nonorganic_snap);
+    EXPECT_TRUE(empty_snap.startup_urls().empty());
+    EXPECT_EQ(SessionStartupPref::GetDefaultStartupType(),
+              empty_snap.startup_type());
+    EXPECT_TRUE(empty_snap.homepage().empty());
+    EXPECT_TRUE(empty_snap.homepage_is_ntp());
+    EXPECT_FALSE(empty_snap.show_home_button());
+    EXPECT_NE(std::string::npos, empty_snap.dse_url().find("{google:baseURL}"));
+    EXPECT_EQ(ResettableSettingsSnapshot::ExtensionList(),
+              empty_snap.enabled_extensions());
+    EXPECT_EQ(std::vector<ShortcutCommand>(), empty_snap.shortcuts());
+
+    // Reset to organic defaults.
+    ResetAndWait(ProfileResetter::DEFAULT_SEARCH_ENGINE |
+                 ProfileResetter::HOMEPAGE | ProfileResetter::STARTUP_PAGES |
+                 ProfileResetter::EXTENSIONS | ProfileResetter::SHORTCUTS);
+
+    ResettableSettingsSnapshot organic_snap(profile());
+    organic_snap.RequestShortcuts(base::OnceClosure());
+    // Let it enumerate shortcuts on a blockable task runner.
+    content::RunAllTasksUntilIdle();
+    EXPECT_EQ(diff_fields, nonorganic_snap.FindDifferentFields(organic_snap));
+    nonorganic_snap.Subtract(organic_snap);
+    const GURL urls[] = {GURL("http://foo.de"), GURL("http://goo.gl")};
+    EXPECT_EQ(std::vector<GURL>(std::begin(urls), std::end(urls)),
+              nonorganic_snap.startup_urls());
+    EXPECT_EQ(SessionStartupPref::URLS, nonorganic_snap.startup_type());
+    EXPECT_EQ("http://www.foo.com", nonorganic_snap.homepage());
+    EXPECT_FALSE(nonorganic_snap.homepage_is_ntp());
+    EXPECT_TRUE(nonorganic_snap.show_home_button());
+    EXPECT_EQ(expected_dse_url, nonorganic_snap.dse_url());
+    EXPECT_EQ(ResettableSettingsSnapshot::ExtensionList(
+                  1, std::make_pair(ext_id, "example")),
+              nonorganic_snap.enabled_extensions());
+    if (ShortcutHandler::IsSupported()) {
+      std::vector<ShortcutCommand> shortcuts = nonorganic_snap.shortcuts();
+      ASSERT_EQ(1u, shortcuts.size());
+      EXPECT_EQ(command_line.first.value(), shortcuts[0].first.value());
+      EXPECT_EQ(command_line.second, shortcuts[0].second);
+    }
+  }
+};
+
+TEST_P(ProfileResetterTestForSnapshots, CheckSnapshots) {
+  CheckSnapshots(kDistributionConfig,
+                 /*expected_nonorganic_diff_fields=*/
+                 ResettableSettingsSnapshot::ALL_FIELDS &
+                     ~ResettableSettingsSnapshot::DSE_URL,
+                 TemplateURLPrepopulateData::google.search_url);
+}
+
+TEST_P(ProfileResetterTestForSnapshots, CheckSnapshots_WithSearch) {
+  int expected_nonorganic_diff_fields;
+  std::string expected_search_url;
+
+  if (IsParamFeatureEnabled()) {
+    expected_nonorganic_diff_fields = ResettableSettingsSnapshot::ALL_FIELDS &
+                                      ~ResettableSettingsSnapshot::DSE_URL;
+    expected_search_url = TemplateURLPrepopulateData::google.search_url;
+  } else {
+    expected_nonorganic_diff_fields = ResettableSettingsSnapshot::ALL_FIELDS;
+    expected_search_url = "http://www.foo.com/s?q={searchTerms}";
+  }
+
+  CheckSnapshots(kDistributionConfigWithSearch, expected_nonorganic_diff_fields,
+                 expected_search_url);
+}
+
+INSTANTIATE_FEATURE_OVERRIDE_TEST_SUITE(ProfileResetterTestForSnapshots);
 
 TEST_F(ProfileResetterTest, FeedbackSerializationAsProtoTest) {
   // Reset to non organic defaults.
@@ -888,9 +1097,10 @@ TEST_F(ProfileResetterTest, FeedbackSerializationAsProtoTest) {
 
   scoped_refptr<Extension> ext = CreateExtension(
       u"example", base::FilePath(FILE_PATH_LITERAL("//nonexistent")),
-      ManifestLocation::kUnpacked, extensions::Manifest::TYPE_EXTENSION, false);
+      ManifestLocation::kUnpacked, extensions::Manifest::Type::kExtension,
+      false);
   ASSERT_TRUE(ext.get());
-  service_->AddExtension(ext.get());
+  registrar()->AddExtension(ext.get());
 
   ShortcutHandler shortcut;
   ShortcutCommand command_line = shortcut.CreateWithArguments(
@@ -941,16 +1151,17 @@ struct FeedbackCapture {
 
   MOCK_METHOD0(OnUpdatedList, void(void));
 
-  base::Value::List list_;
+  base::ListValue list_;
 };
 
 // Make sure GetReadableFeedback handles non-ascii letters.
 TEST_F(ProfileResetterTest, GetReadableFeedback) {
   scoped_refptr<Extension> ext = CreateExtension(
       u"Tiësto", base::FilePath(FILE_PATH_LITERAL("//nonexistent")),
-      ManifestLocation::kUnpacked, extensions::Manifest::TYPE_EXTENSION, false);
+      ManifestLocation::kUnpacked, extensions::Manifest::Type::kExtension,
+      false);
   ASSERT_TRUE(ext.get());
-  service_->AddExtension(ext.get());
+  registrar()->AddExtension(ext.get());
 
   PrefService* prefs = profile()->GetPrefs();
   DCHECK(prefs);
@@ -980,21 +1191,21 @@ TEST_F(ProfileResetterTest, GetReadableFeedback) {
   ::testing::Mock::VerifyAndClearExpectations(&capture);
   // The homepage and the startup page are in punycode. They are unreadable.
   // Trying to find the extension name.
-  base::Value::List list = std::move(capture.list_);
+  base::ListValue list = std::move(capture.list_);
   bool checked_extensions = false;
   bool checked_shortcuts = false;
-  for (size_t i = 0; i < list.size(); ++i) {
-    const base::Value& dict = list[i];
-    ASSERT_TRUE(dict.is_dict());
-    const std::string* value = dict.FindStringKey("key");
+  for (const auto& entry : list) {
+    const base::DictValue* dict = entry.GetIfDict();
+    ASSERT_TRUE(dict);
+    const std::string* value = dict->FindString("key");
     ASSERT_TRUE(value);
     if (*value == "Extensions") {
-      const std::string* extensions = dict.FindStringKey("value");
+      const std::string* extensions = dict->FindString("value");
       ASSERT_TRUE(extensions);
       EXPECT_EQ(*extensions, "Tiësto");
       checked_extensions = true;
     } else if (*value == "Shortcut targets") {
-      const std::string* targets = dict.FindStringKey("value");
+      const std::string* targets = dict->FindString("value");
       ASSERT_TRUE(targets);
       EXPECT_NE(std::string::npos, targets->find("foo.com")) << *targets;
       checked_shortcuts = true;

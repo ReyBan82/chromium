@@ -4,12 +4,12 @@
 
 #include "services/network/websocket_throttler.h"
 
+#include <optional>
 #include <vector>
 
 #include "base/test/task_environment.h"
 #include "services/network/public/mojom/network_context.mojom-forward.h"
 #include "testing/gtest/include/gtest/gtest.h"
-#include "third_party/abseil-cpp/absl/types/optional.h"
 
 namespace network {
 
@@ -260,7 +260,7 @@ TEST(WebSocketPerProcessThrottlerTest, CalculateDelay_16Failure) {
 TEST(WebSocketPerProcessThrottlerTest, MoveTracker) {
   WebSocketPerProcessThrottler throttler;
 
-  absl::optional<WebSocketThrottler::PendingConnection> tracker_holder;
+  std::optional<WebSocketThrottler::PendingConnection> tracker_holder;
   {
     WebSocketThrottler::PendingConnection tracker =
         throttler.IssuePendingConnectionTracker();
@@ -295,7 +295,7 @@ TEST(WebSocketPerProcessThrottlerTest, MoveTracker) {
   EXPECT_EQ(0, throttler.num_current_failed_connections());
   EXPECT_EQ(0, throttler.num_previous_failed_connections());
 
-  tracker_holder = absl::nullopt;
+  tracker_holder = std::nullopt;
 
   EXPECT_EQ(0, throttler.num_pending_connections());
   EXPECT_EQ(0, throttler.num_current_succeeded_connections());
@@ -310,8 +310,10 @@ TEST_F(WebSocketThrottlerTest, InitialState) {
 }
 
 TEST_F(WebSocketThrottlerTest, TooManyPendingConnections) {
-  constexpr int process1 = 1;
-  constexpr int process2 = 2;
+  const auto process1 =
+      network::OriginatingProcessId::renderer(network::RendererProcessId(1));
+  const auto process2 =
+      network::OriginatingProcessId::renderer(network::RendererProcessId(2));
   constexpr int limit = 255;
   WebSocketThrottler throttler;
 
@@ -342,9 +344,11 @@ TEST_F(WebSocketThrottlerTest, TooManyPendingConnections) {
 
 TEST_F(WebSocketThrottlerTest, BrowserProcessNotThrottled) {
   WebSocketThrottler throttler;
-  ASSERT_FALSE(
-      throttler.HasTooManyPendingConnections(mojom::kBrowserProcessId));
-  ASSERT_FALSE(throttler.IssuePendingConnectionTracker(mojom::kBrowserProcessId)
+  ASSERT_FALSE(throttler.HasTooManyPendingConnections(
+      network::OriginatingProcessId::browser()));
+  ASSERT_FALSE(throttler
+                   .IssuePendingConnectionTracker(
+                       network::OriginatingProcessId::browser())
                    .has_value());
 }
 

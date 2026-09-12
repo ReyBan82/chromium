@@ -8,15 +8,16 @@
 #define RLZ_LIB_FINANCIAL_PING_H_
 
 #include <string>
+#include <string_view>
+
+#include "base/containers/span.h"
 #include "rlz/lib/rlz_enums.h"
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
 namespace network {
 namespace mojom {
 class URLLoaderFactory;
 }
 }  // namespace network
-#endif
 
 namespace rlz_lib {
 
@@ -33,10 +34,13 @@ class FinancialPing {
   // Will look something like:
   // /pso/ping?as=swg&brand=GGLD&id=124&hl=en&
   //           events=I7S&rep=1&rlz=I7:val,W1:&dcc=dval
-  static bool FormRequest(Product product, const AccessPoint* access_points,
-                          const char* product_signature,
-                          const char* product_brand, const char* product_id,
-                          const char* product_lang, bool exclude_machine_id,
+  static bool FormRequest(Product product,
+                          base::span<const AccessPoint> access_points,
+                          std::string_view product_signature,
+                          std::string_view product_brand,
+                          std::string_view product_id,
+                          std::string_view product_lang,
+                          bool exclude_machine_id,
                           std::string* request);
 
   // Returns whether the time is right to send a ping.
@@ -58,21 +62,17 @@ class FinancialPing {
   // Ping the financial server with request. Writes to RlzValueStore.
   static PingResponse PingServer(const char* request, std::string* response);
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
   static bool SetURLLoaderFactory(network::mojom::URLLoaderFactory* factory);
-#endif
 
  private:
   FinancialPing() {}
   ~FinancialPing() {}
 };
 
-#if defined(RLZ_NETWORK_IMPLEMENTATION_CHROME_NET)
 namespace test {
 void ResetSendFinancialPingInterrupted();
 bool WasSendFinancialPingInterrupted();
 }  // namespace test
-#endif
 
 }  // namespace rlz_lib
 

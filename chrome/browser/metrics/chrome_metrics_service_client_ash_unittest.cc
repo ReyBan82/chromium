@@ -2,12 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "chrome/browser/metrics/chrome_metrics_service_client.h"
+#include <memory>
 
+#include "base/memory/raw_ptr.h"
 #include "base/test/metrics/user_action_tester.h"
 #include "base/test/scoped_feature_list.h"
 #include "base/test/task_environment.h"
+#include "chrome/browser/ash/login/demo_mode/demo_session.h"
 #include "chrome/browser/ash/multidevice_setup/multidevice_setup_client_factory.h"
+#include "chrome/browser/ash/settings/scoped_cros_settings_test_helper.h"
+#include "chrome/browser/metrics/chrome_metrics_service_client.h"
 #include "chrome/browser/metrics/chrome_metrics_services_manager_client.h"
 #include "chrome/browser/unified_consent/unified_consent_service_factory.h"
 #include "chrome/common/chrome_features.h"
@@ -21,6 +25,7 @@
 #include "chromeos/ash/services/multidevice_setup/public/cpp/multidevice_setup_client_impl.h"
 #include "chromeos/dbus/power/power_manager_client.h"
 #include "chromeos/dbus/tpm_manager/tpm_manager_client.h"
+#include "components/metrics/content/subprocess_metrics_provider.h"
 #include "components/metrics/log_decoder.h"
 #include "components/metrics/metrics_logs_event_manager.h"
 #include "components/metrics/metrics_service.h"
@@ -28,6 +33,8 @@
 #include "components/metrics/test/test_enabled_state_provider.h"
 #include "components/metrics/unsent_log_store.h"
 #include "components/prefs/testing_pref_service.h"
+#include "components/sync/protocol/sync_enums.pb.h"
+#include "components/sync/service/sync_service_observer.h"
 #include "components/sync/test/test_sync_service.h"
 #include "components/sync_preferences/testing_pref_service_syncable.h"
 #include "components/ukm/ukm_pref_names.h"
@@ -35,7 +42,9 @@
 #include "components/ukm/unsent_log_store_metrics_impl.h"
 #include "components/unified_consent/pref_names.h"
 #include "components/unified_consent/unified_consent_service.h"
+#include "components/variations/synthetic_trial_registry.h"
 #include "content/public/test/browser_task_environment.h"
+#include "services/metrics/public/cpp/ukm_builders.h"
 #include "services/metrics/public/cpp/ukm_entry_builder.h"
 #include "testing/gmock/include/gmock/gmock.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -45,7 +54,7 @@ namespace {
 using TestEvent1 = ukm::builders::PageLoad;
 
 // Needed to fake System Profile which is provided when ukm report is generated.
-// TODO(crbug/1396482): Refactor to remove the classes needed to fake
+// TODO(crbug.com/40249492): Refactor to remove the classes needed to fake
 // SystemProfile.
 class FakeMultiDeviceSetupClientImplFactory
     : public ash::multidevice_setup::MultiDeviceSetupClientImpl::Factory {
@@ -78,27 +87,37 @@ class ChromeMetricsServiceClientTestWithoutUKMProviders
  public:
   // Equivalent to ChromeMetricsServiceClient::Create
   static std::unique_ptr<ChromeMetricsServiceClientTestWithoutUKMProviders>
-  Create(metrics::MetricsStateManager* metrics_state_manager) {
+  Create(metrics::MetricsStateManager* metrics_state_manager,
+         variations::SyntheticTrialRegistry* synthetic_trial_registry) {
+    // Needed because RegisterMetricsServiceProviders() checks for this.
+    metrics::SubprocessMetricsProvider::CreateInstance();
+
     std::unique_ptr<ChromeMetricsServiceClientTestWithoutUKMProviders> client(
         new ChromeMetricsServiceClientTestWithoutUKMProviders(
-            metrics_state_manager));
+            metrics_state_manager, synthetic_trial_registry));
     client->Initialize();
 
     return client;
   }
 
+  bool notified_not_idle() const { return notified_not_idle_; }
+
  private:
   explicit ChromeMetricsServiceClientTestWithoutUKMProviders(
-      metrics::MetricsStateManager* state_manager)
-      : ChromeMetricsServiceClient(state_manager) {}
+      metrics::MetricsStateManager* state_manager,
+      variations::SyntheticTrialRegistry* synthetic_trial_registry)
+      : ChromeMetricsServiceClient(state_manager, synthetic_trial_registry) {}
 
   void RegisterUKMProviders() override {}
+  void NotifyApplicationNotIdle() override { notified_not_idle_ = true; }
+
+  bool notified_not_idle_ = false;
 };
 
 class MockSyncService : public syncer::TestSyncService {
  public:
   MockSyncService() {
-    SetTransportState(TransportState::INITIALIZING);
+    SetMaxTransportState(TransportState::INITIALIZING);
     SetLastCycleSnapshot(syncer::SyncCycleSnapshot());
   }
 
@@ -108,14 +127,14 @@ class MockSyncService : public syncer::TestSyncService {
   ~MockSyncService() override { Shutdown(); }
 
   void SetStatus(bool has_passphrase, bool history_enabled, bool active) {
-    SetTransportState(active ? TransportState::ACTIVE
-                             : TransportState::INITIALIZING);
+    SetMaxTransportState(active ? TransportState::ACTIVE
+                                : TransportState::INITIALIZING);
     SetIsUsingExplicitPassphrase(has_passphrase);
 
     GetUserSettings()->SetSelectedTypes(
         /*sync_everything=*/false,
         /*types=*/history_enabled ? syncer::UserSelectableTypeSet(
-                                        syncer::UserSelectableType::kHistory)
+                                        {syncer::UserSelectableType::kHistory})
                                   : syncer::UserSelectableTypeSet());
 
     // It doesn't matter what exactly we set here, it's only relevant that the
@@ -166,7 +185,7 @@ class MockSyncService : public syncer::TestSyncService {
   }
 
   // The list of observers of the SyncService state.
-  base::ObserverList<syncer::SyncServiceObserver>::Unchecked observers_;
+  base::ObserverList<syncer::SyncServiceObserver> observers_;
 };
 
 struct IndependentAppMetricsTestParams {
@@ -194,10 +213,11 @@ class ChromeMetricsServiceClientTestIgnoredForAppMetrics
     metrics_state_manager_ = metrics::MetricsStateManager::Create(
         &prefs_, &enabled_state_provider_, std::wstring(), base::FilePath());
     metrics_state_manager_->InstantiateFieldTrialList();
+    synthetic_trial_registry_ =
+        std::make_unique<variations::SyntheticTrialRegistry>();
     ASSERT_TRUE(profile_manager_->SetUp());
-    scoped_feature_list_.InitWithFeatures(
-        {features::kUmaStorageDimensions, ukm::kAppMetricsOnlyRelyOnAppSync},
-        {});
+    scoped_feature_list_.InitAndEnableFeature(features::kUmaStorageDimensions);
+
     // ChromeOs Metrics Provider require g_login_state and power manager client
     // initialized before they can be instantiated.
     chromeos::PowerManagerClient::InitializeFake();
@@ -220,22 +240,18 @@ class ChromeMetricsServiceClientTestIgnoredForAppMetrics
     ash::multidevice_setup::MultiDeviceSetupClientImpl::Factory::
         SetFactoryForTesting(nullptr);
 
-    // ChromeMetricsServiceClient::Initialize() initializes
-    // IdentifiabilityStudySettings as part of creating the
-    // PrivacyBudgetUkmEntryFilter. Reset them after the test.
-    blink::IdentifiabilityStudySettings::ResetStateForTesting();
     profile_manager_.reset();
   }
 
-  std::unique_ptr<ChromeMetricsServiceClient> Init(
+  std::unique_ptr<ChromeMetricsServiceClientTestWithoutUKMProviders> Init(
       sync_preferences::TestingPrefServiceSyncable& prefs) {
     ChromeMetricsServiceClient::RegisterPrefs(prefs.registry());
     RegisterUrlKeyedAnonymizedDataCollectionPref(prefs);
     SetUrlKeyedAnonymizedDataCollectionEnabled(prefs, /*enabled=*/true);
 
-    std::unique_ptr<ChromeMetricsServiceClient> chrome_metrics_service_client =
+    auto chrome_metrics_service_client =
         ChromeMetricsServiceClientTestWithoutUKMProviders::Create(
-            metrics_state_manager_.get());
+            metrics_state_manager_.get(), synthetic_trial_registry_.get());
     chrome_metrics_service_client->StartObserving(&sync_service_, &prefs);
 
     chrome_metrics_service_client_ = chrome_metrics_service_client.get();
@@ -293,7 +309,7 @@ class ChromeMetricsServiceClientTestIgnoredForAppMetrics
 
   ukm::Report GetUkmReport() {
     metrics::UnsentLogStore* log_store =
-        GetUkmService()->reporting_service_for_testing().ukm_log_store();
+        GetUkmService()->reporting_service()->ukm_log_store();
     EXPECT_GE(log_store->size(), 1ul);
     log_store->StageNextLog();
 
@@ -345,20 +361,32 @@ class ChromeMetricsServiceClientTestIgnoredForAppMetrics
   std::unique_ptr<TestingProfileManager> profile_manager_;
   base::UserActionTester user_action_runner_;
   std::unique_ptr<metrics::MetricsStateManager> metrics_state_manager_;
+  std::unique_ptr<variations::SyntheticTrialRegistry> synthetic_trial_registry_;
   metrics::TestEnabledStateProvider enabled_state_provider_;
   base::test::ScopedFeatureList scoped_feature_list_;
 
   std::vector<ukm::SourceId> source_ids_;
-  ChromeMetricsServiceClient* chrome_metrics_service_client_;
+  raw_ptr<ChromeMetricsServiceClient, DanglingUntriaged>
+      chrome_metrics_service_client_;
 
   MockSyncService sync_service_;
   ash::system::ScopedFakeStatisticsProvider fake_statistics_provider_;
-  TestingProfile* testing_profile_ = nullptr;
-  ash::multidevice_setup::FakeMultiDeviceSetupClient*
+  raw_ptr<TestingProfile, DanglingUntriaged> testing_profile_ = nullptr;
+  raw_ptr<ash::multidevice_setup::FakeMultiDeviceSetupClient, DanglingUntriaged>
       fake_multidevice_setup_client_;
   std::unique_ptr<FakeMultiDeviceSetupClientImplFactory>
       fake_multidevice_setup_client_impl_factory_;
 };
+
+TEST_P(ChromeMetricsServiceClientTestIgnoredForAppMetrics,
+       NotifyNotIdleOnUserActivity) {
+  sync_preferences::TestingPrefServiceSyncable prefs;
+  auto chrome_metrics_service_client = Init(prefs);
+  EXPECT_FALSE(chrome_metrics_service_client->notified_not_idle());
+
+  ui::UserActivityDetector::Get()->HandleExternalUserActivity();
+  EXPECT_TRUE(chrome_metrics_service_client->notified_not_idle());
+}
 
 TEST_P(ChromeMetricsServiceClientTestIgnoredForAppMetrics,
        VerifyPurgeOnConsentChange) {
@@ -495,7 +523,7 @@ TEST_P(ChromeMetricsServiceClientTestIgnoredForAppMetrics,
   GetUkmService()->Flush(
       metrics::MetricsLogsEventManager::CreateReason::kUnknown);
 
-  // Build UKM report to verity that all of the events and sources have been
+  // Build UKM report to verify that all of the events and sources have been
   // recorded.
   ukm::Report report = GetUkmReport();
 
@@ -544,4 +572,60 @@ TEST_P(ChromeMetricsServiceClientTestIgnoredForAppMetrics,
   // Verify that the source id's are of the expected type.
   EXPECT_THAT(actual_source_ids,
               testing::UnorderedElementsAreArray(added_source_ids));
+}
+
+class ChromeMetricsServiceClientTestDemoModeRecordAppMetrics
+    : public ChromeMetricsServiceClientTestIgnoredForAppMetrics {
+ public:
+  ChromeMetricsServiceClientTestDemoModeRecordAppMetrics() = default;
+
+  void SetUp() override {
+    ChromeMetricsServiceClientTestIgnoredForAppMetrics::SetUp();
+    ash::DemoSession::SetDemoConfigForTesting(
+        ash::DemoSession::DemoModeConfig::kOnline);
+    testing_profile_->ScopedCrosSettingsTestHelper()
+        ->InstallAttributes()
+        ->SetDemoMode();
+  }
+
+  void TearDown() override {
+    ash::DemoSession::ResetDemoConfigForTesting();
+    ChromeMetricsServiceClientTestIgnoredForAppMetrics::TearDown();
+  }
+};
+
+TEST_F(ChromeMetricsServiceClientTestDemoModeRecordAppMetrics,
+       VerifyRecordingInDemoSession) {
+  sync_preferences::TestingPrefServiceSyncable prefs;
+  auto chrome_metrics_service_client = Init(prefs);
+
+  // Make sure the MSBB consent is set to false initially.
+  SetUrlKeyedAnonymizedDataCollectionEnabled(prefs, false);
+
+  // Make sure the APP consent is set to false for sync service.
+  sync_service_.SetAppSync(false);
+
+  auto ukm_consent_state = GetChromeMetricsServiceClient().GetUkmConsentState();
+
+  // Assert that UKM consent state contains only APPS in DemoSession.
+  EXPECT_FALSE(ukm_consent_state.Has(ukm::UkmConsentType::MSBB));
+  EXPECT_TRUE(ukm_consent_state.Has(ukm::UkmConsentType::APPS));
+
+  // Record a mix of SourceId's and Events.
+  RecordTestEvent1(ukm::SourceIdType::NAVIGATION_ID);
+  RecordTestEvent1(ukm::SourceIdType::NAVIGATION_ID);
+  RecordTestEvent1(ukm::SourceIdType::APP_ID);
+  RecordTestEvent1(ukm::SourceIdType::NAVIGATION_ID);
+  RecordTestEvent1(ukm::SourceIdType::APP_ID);
+
+  GetUkmService()->Flush(
+      metrics::MetricsLogsEventManager::CreateReason::kUnknown);
+
+  // Build UKM report to verify that all of the events and sources have been
+  // recorded for Demo Session.
+  ukm::Report report = GetUkmReport();
+
+  // Expect that only APP events and sources originally recorded are present.
+  EXPECT_EQ(report.sources_size(), 2);
+  EXPECT_EQ(report.entries_size(), 2);
 }

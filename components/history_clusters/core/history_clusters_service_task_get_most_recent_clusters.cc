@@ -10,7 +10,6 @@
 #include "base/location.h"
 #include "base/metrics/histogram_functions.h"
 #include "base/strings/stringprintf.h"
-#include "base/time/time_to_iso8601.h"
 #include "components/history/core/browser/history_service.h"
 #include "components/history_clusters/core/clustering_backend.h"
 #include "components/history_clusters/core/config.h"
@@ -48,7 +47,11 @@ HistoryClustersServiceTaskGetMostRecentClusters::
 }
 
 HistoryClustersServiceTaskGetMostRecentClusters::
-    ~HistoryClustersServiceTaskGetMostRecentClusters() = default;
+    ~HistoryClustersServiceTaskGetMostRecentClusters() {
+  if (!done_) {
+    std::move(callback_).Run({}, continuation_params_);
+  }
+}
 
 void HistoryClustersServiceTaskGetMostRecentClusters::Start() {
   // Shouldn't request more clusters if history has been exhausted.
@@ -76,7 +79,6 @@ void HistoryClustersServiceTaskGetMostRecentClusters::Start() {
     //  clusters, and current-day visits will never be pre-clustered, we
     //  probably want to make sure they're optimal. So we should probably not
     //  cluster at least the current day in isolation.
-    get_annotated_visits_to_cluster_start_time_ = base::TimeTicks::Now();
     history_service_->ScheduleDBTask(
         FROM_HERE,
         std::make_unique<GetAnnotatedVisitsToCluster>(
@@ -92,24 +94,12 @@ void HistoryClustersServiceTaskGetMostRecentClusters::Start() {
 void HistoryClustersServiceTaskGetMostRecentClusters::
     OnGotAnnotatedVisitsToCluster(
         // Unused because clusters aren't persisted in this flow.
-        std::vector<int64_t> old_clusters_unused,
+        std::vector<history::ClusterId> old_clusters_unused,
         std::vector<history::AnnotatedVisit> annotated_visits,
         QueryClustersContinuationParams continuation_params) {
   if (!weak_history_clusters_service_)
     return;
   DCHECK(backend_);
-
-  const auto elapsed_time =
-      base::TimeTicks::Now() - get_annotated_visits_to_cluster_start_time_;
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClusters."
-      "GetAnnotatedVisitsToClusterLatency",
-      elapsed_time);
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClusters."
-      "GetAnnotatedVisitsToClusterLatency" +
-          GetHistogramNameSliceForRequestSource(clustering_request_source_),
-      elapsed_time);
 
   if (weak_history_clusters_service_->ShouldNotifyDebugMessage()) {
     weak_history_clusters_service_->NotifyDebugMessage(
@@ -134,7 +124,6 @@ void HistoryClustersServiceTaskGetMostRecentClusters::
   } else {
     base::UmaHistogramCounts1000("History.Clusters.Backend.NumVisitsToCluster",
                                  static_cast<int>(annotated_visits.size()));
-    get_model_clusters_start_time_ = base::TimeTicks::Now();
     backend_->GetClusters(
         clustering_request_source_,
         base::BindOnce(&HistoryClustersServiceTaskGetMostRecentClusters::
@@ -150,15 +139,6 @@ void HistoryClustersServiceTaskGetMostRecentClusters::OnGotModelClusters(
   if (!weak_history_clusters_service_)
     return;
 
-  const auto elapsed_time =
-      base::TimeTicks::Now() - get_model_clusters_start_time_;
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClusters.ComputeClustersLatency",
-      elapsed_time);
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClusters.ComputeClustersLatency" +
-          GetHistogramNameSliceForRequestSource(clustering_request_source_),
-      elapsed_time);
   base::UmaHistogramCounts1000("History.Clusters.Backend.NumClustersReturned",
                                clusters.size());
 
@@ -175,8 +155,7 @@ void HistoryClustersServiceTaskGetMostRecentClusters::OnGotModelClusters(
 
 void HistoryClustersServiceTaskGetMostRecentClusters::
     ReturnMostRecentPersistedClusters(base::Time exclusive_max_time) {
-  get_most_recent_persisted_clusters_start_time_ = base::TimeTicks::Now();
-  if (GetConfig().persist_clusters_in_history_db && !recluster_) {
+  if (!recluster_) {
     history_service_->GetMostRecentClusters(
         begin_time_, exclusive_max_time,
         GetConfig().max_persisted_clusters_to_fetch,
@@ -195,19 +174,7 @@ void HistoryClustersServiceTaskGetMostRecentClusters::
   if (!weak_history_clusters_service_)
     return;
 
-  const auto elapsed_time =
-      base::TimeTicks::Now() - get_most_recent_persisted_clusters_start_time_;
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClusters."
-      "GetMostRecentPersistedClustersLatency",
-      elapsed_time);
-  base::UmaHistogramTimes(
-      "History.Clusters.Backend.GetMostRecentClusters."
-      "GetMostRecentPersistedClustersLatency" +
-          GetHistogramNameSliceForRequestSource(clustering_request_source_),
-      elapsed_time);
-
-  if (GetConfig().persist_clusters_in_history_db && !recluster_ &&
+  if (!recluster_ &&
       weak_history_clusters_service_->ShouldNotifyDebugMessage()) {
     weak_history_clusters_service_->NotifyDebugMessage(base::StringPrintf(
         "GET MOST RECENT CLUSTERS TASK - PERSISTED CLUSTERS %zu:",

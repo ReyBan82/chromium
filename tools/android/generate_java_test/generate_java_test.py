@@ -33,6 +33,7 @@ What do you need to do?
 
 
 '''
+
 from __future__ import print_function
 
 import argparse
@@ -52,15 +53,31 @@ _INST_TEST_FILE = '''// Copyright %s The Chromium Authors
 
 package %s;
 
+import android.app.Activity;
+
+import org.junit.BeforeClass;
+import org.junit.ClassRule;
 import org.junit.runner.RunWith;
 
+import org.chromium.base.test.BaseActivityTestRule;
+import org.chromium.base.test.util.Batch;
 import org.chromium.chrome.test.ChromeJUnit4ClassRunner;
-import org.chromium.ui.test.util.BlankUiTestActivityTestCase;
+import org.chromium.ui.test.util.BlankUiTestActivity;
 
 /** Instrumentation tests for {@link %s}. */
 @RunWith(ChromeJUnit4ClassRunner.class)
-public class %sInstrumentationTest extends BlankUiTestActivityTestCase {
+@Batch(Batch.PER_CLASS)
+public class %sInstrumentationTest {
+    @ClassRule
+    public static BaseActivityTestRule<BlankUiTestActivity> sActivityTestRule =
+            new BaseActivityTestRule<>(BlankUiTestActivity.class);
 
+    private static Activity sActivity;
+
+    @BeforeClass
+    public static void setupSuite() {
+        sActivity = sActivityTestRule.launchActivity(null);
+    }
 }
 '''
 
@@ -92,10 +109,12 @@ public class %sTest {
 root_path = os.path.abspath(os.path.dirname(__file__)) + "/../../../"
 
 # path of gni files
-javatest_gni = os.path.join(root_path,
-                            "chrome/android/chrome_test_java_sources.gni")
+javatest_gni = os.path.join(
+  root_path, "chrome/android/chrome_test_java_sources.gni"
+)
 junittest_gni = os.path.join(
-    root_path, "chrome/android/chrome_junit_test_java_sources.gni")
+  root_path, "chrome/android/chrome_junit_test_java_sources.gni"
+)
 
 # Help message if the user use wrong arguments
 HELP_MESSAGE = '''
@@ -138,11 +157,13 @@ def GetPackageAndFile(source):
   if not os.path.exists(os.path.join(root_path, source)):
     print(failmsg("%s%s Does not exist!" % (root_path, source)))
     return ()
-#TODO(yzjr): Will add support for components under chrome/android/features
-#crbug/950783
+  # TODO(yzjr): Will add support for components under chrome/android/features
+  # crbug/950783
   matchSource = re.match(
-      "chrome\/android\/java\/src\/" +
-      "(org\/chromium\/chrome\/browser\/.*\/?)\/(.*)\.java", source)
+    "chrome\/android\/java\/src\/"
+    + "(org\/chromium\/chrome\/browser\/.*\/?)\/(.*)\.java",
+    source,
+  )
 
   if not matchSource:
     print(failmsg(HELP_MESSAGE))
@@ -154,14 +175,17 @@ def GetPackageAndFile(source):
   print(infomsg("File name: %s" % file_name))
   return (package_name, file_name)
 
+
 # Generate an instrumentation test file, OWNER and modify corresponding GNI
 def CreateInstrumentationTestFile(package_path, file_name):
   package_name = package_path.replace('/', '.')
 
-  ins_testfile_path = os.path.join(root_path, 'chrome/android/javatests/src/',
-                                   package_path)
-  ins_testfile = os.path.join(ins_testfile_path, (file_name +
-    'InstrumentationTest.java'))
+  ins_testfile_path = os.path.join(
+    root_path, 'chrome/android/javatests/src/', package_path
+  )
+  ins_testfile = os.path.join(
+    ins_testfile_path, (file_name + 'InstrumentationTest.java')
+  )
   print(infomsg("+++ Creating instrumentation_test file: %s" % ins_testfile))
 
   if os.path.exists(ins_testfile):
@@ -172,22 +196,29 @@ def CreateInstrumentationTestFile(package_path, file_name):
       os.makedirs(dir_name)
     try:
       file = open(ins_testfile, "w")
-      filecontent = _INST_TEST_FILE % (this_year, package_name, file_name,
-                                       file_name)
+      filecontent = _INST_TEST_FILE % (
+        this_year,
+        package_name,
+        file_name,
+        file_name,
+      )
       file.write(filecontent)
       file.close()
     except Exception as e:
       print(warningmsg(e.message))
   # Create Owner file if source code OWNERS exists, otherwise skip
-  source_ownerfile = os.path.join('chrome/android/java/src/', package_path,
-                                  'OWNERS')
+  source_ownerfile = os.path.join(
+    'chrome/android/java/src/', package_path, 'OWNERS'
+  )
   if os.path.exists(os.path.join(root_path, source_ownerfile)):
     ins_owner = os.path.join(ins_testfile_path, 'OWNERS')
     CreateOwnerFile(ins_owner, source_ownerfile)
   # Modify GN file
   tag = "chrome_test_java_sources"
-  txt = 'javatests/src/%s/%sInstrumentationTest.java' % (package_path,
-      file_name)
+  txt = 'javatests/src/%s/%sInstrumentationTest.java' % (
+    package_path,
+    file_name,
+  )
   ModifyGnFile(javatest_gni, tag, txt)
 
 
@@ -195,8 +226,9 @@ def CreateInstrumentationTestFile(package_path, file_name):
 def CreateUnitTestFile(package_path, file_name):
   package_name = package_path.replace('/', '.')
 
-  unit_testfile_path = os.path.join(root_path, 'chrome/android/junit/src/',
-                                    package_path)
+  unit_testfile_path = os.path.join(
+    root_path, 'chrome/android/junit/src/', package_path
+  )
   unit_testfile = os.path.join(unit_testfile_path, file_name + "Test.java")
   print(infomsg("+++ Creating unit test file: %s" % unit_testfile))
 
@@ -208,15 +240,20 @@ def CreateUnitTestFile(package_path, file_name):
       os.makedirs(dir_name)
     try:
       file = open(unit_testfile, "w")
-      filecontent = _UNIT_TEST_FILE % (this_year, package_name, file_name,
-                                       file_name)
+      filecontent = _UNIT_TEST_FILE % (
+        this_year,
+        package_name,
+        file_name,
+        file_name,
+      )
       file.write(filecontent)
       file.close()
     except Exception as e:
       print(warningmsg(e.message))
   # Create Owner file if source code OWNERS exists, otherwise skip
-  source_ownerfile = os.path.join('chrome/android/java/src/', package_path,
-                                  'OWNERS')
+  source_ownerfile = os.path.join(
+    'chrome/android/java/src/', package_path, 'OWNERS'
+  )
   if os.path.exists(os.path.join(root_path, source_ownerfile)):
     unit_testowner = os.path.join(unit_testfile_path, "OWNERS")
     CreateOwnerFile(unit_testowner, source_ownerfile)
@@ -224,6 +261,7 @@ def CreateUnitTestFile(package_path, file_name):
   tag = "chrome_junit_test_java_sources"
   txt = 'junit/src/%s/%sTest.java' % (package_path, file_name)
   ModifyGnFile(junittest_gni, tag, txt)
+
 
 # Create OWNER file if it doesn't exist
 def CreateOwnerFile(ownerfile, source_owners):
@@ -237,6 +275,7 @@ def CreateOwnerFile(ownerfile, source_owners):
   except Exception as e:
     print(bcolors.WARNING + e.message + bcolors.ENDC)
 
+
 # Modify GN file
 def ModifyGnFile(gn_file, tag, txt):
   read_lines = []
@@ -245,7 +284,7 @@ def ModifyGnFile(gn_file, tag, txt):
   try:
     with open(gn_file) as f:
       code = compile(f.read(), "sometempfile.py", 'exec')
-      exec (code, filelist)
+      exec(code, filelist)
       if tag not in filelist:
         print(warningmsg("%s is not found\n" % tag))
         return
@@ -280,19 +319,22 @@ def ModifyGnFile(gn_file, tag, txt):
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument(
-      "-u", "--unittest", help="create unit tests", action="store_true")
+    "-u", "--unittest", help="create unit tests", action="store_true"
+  )
   parser.add_argument(
-      "-i",
-      "--instrumentation",
-      help="create java instrumentation tests",
-      action="store_true")
+    "-i",
+    "--instrumentation",
+    help="create java instrumentation tests",
+    action="store_true",
+  )
   parser.add_argument(
-      "-s",
-      "--source",
-      type=str,
-      help="source of java code" +
-      "like chrome/android/java/src/org/chromium/chrome/browser/foo/Foo.java",
-      required=True)
+    "-s",
+    "--source",
+    type=str,
+    help="source of java code"
+    + "like chrome/android/java/src/org/chromium/chrome/browser/foo/Foo.java",
+    required=True,
+  )
 
   args = parser.parse_args()
 

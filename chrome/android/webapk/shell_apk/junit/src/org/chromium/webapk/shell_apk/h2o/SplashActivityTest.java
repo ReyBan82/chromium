@@ -4,81 +4,57 @@
 
 package org.chromium.webapk.shell_apk.h2o;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+import static org.robolectric.Shadows.shadowOf;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
+import android.graphics.Color;
 import android.os.Bundle;
 
+import androidx.test.core.app.ApplicationProvider;
+
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.robolectric.Robolectric;
-import org.robolectric.RuntimeEnvironment;
 import org.robolectric.Shadows;
 import org.robolectric.android.controller.ActivityController;
 import org.robolectric.annotation.Config;
-import org.robolectric.annotation.Implementation;
-import org.robolectric.annotation.Implements;
-import org.robolectric.annotation.LooperMode;
 import org.robolectric.shadows.ShadowActivityManager;
 import org.robolectric.shadows.ShadowApplication;
 import org.robolectric.shadows.ShadowPackageManager;
 
+import org.chromium.base.test.BaseRobolectricTestRunner;
+import org.chromium.base.test.RobolectricUtil;
 import org.chromium.components.webapk.lib.common.WebApkMetaDataKeys;
-import org.chromium.testing.local.LocalRobolectricTestRunner;
-import org.chromium.webapk.shell_apk.CustomAndroidOsShadowAsyncTask;
-import org.chromium.webapk.shell_apk.HostBrowserUtils;
+import org.chromium.webapk.shell_apk.HostBrowserUtils.PackageNameAndComponentName;
 import org.chromium.webapk.shell_apk.LaunchHostBrowserSelector;
 import org.chromium.webapk.test.WebApkTestHelper;
 
 import java.util.Arrays;
 
 /** Tests for {@link SplashActivity}. */
-@RunWith(LocalRobolectricTestRunner.class)
-@Config(manifest = Config.NONE,
-        shadows = {SplashActivityTest.MockLaunchHostBrowserSelector.class,
-                CustomAndroidOsShadowAsyncTask.class})
-@LooperMode(LooperMode.Mode.LEGACY)
+@RunWith(BaseRobolectricTestRunner.class)
 public final class SplashActivityTest {
     public static final String BROWSER_PACKAGE_NAME = "com.google.android.apps.chrome";
 
-    /** Mock {@link LaunchHostBrowserSelector} which enables calling the callback manually. */
-    @Implements(LaunchHostBrowserSelector.class)
-    public static class MockLaunchHostBrowserSelector {
-        private static LaunchHostBrowserSelector.Callback sCallback;
-        private static boolean sDialogNeeded;
+    private static final int MODERN_BROWSER_VERSION = 10000;
 
-        public void __constructor__(Activity parentActivity) {}
-
-        @Implementation
-        public void selectHostBrowser(LaunchHostBrowserSelector.Callback callback) {
-            if (!sDialogNeeded) {
-                callback.onBrowserSelected(BROWSER_PACKAGE_NAME, false /* dialogShown */);
-                return;
-            }
-            sCallback = callback;
-        }
-
-        public static void setNeedsToShowDialog(boolean dialogNeeded) {
-            sDialogNeeded = dialogNeeded;
-        }
-
-        public static void dialogDismissed() {
-            assertNotNull(sCallback);
-            sCallback.onBrowserSelected(BROWSER_PACKAGE_NAME, true /* dialogShown */);
-            sCallback = null;
-        }
-    }
+    private LaunchHostBrowserSelector.Callback mLaunchHostBrowserSelectorCallback;
+    private boolean mLaunchHostBrowserSelectorDialogNeeded;
 
     private ShadowActivityManager mShadowActivityManager;
     private ShadowApplication mShadowApplication;
@@ -86,30 +62,43 @@ public final class SplashActivityTest {
 
     @Before
     public void setUp() {
-        Context appContext = RuntimeEnvironment.application;
+        Context appContext = ApplicationProvider.getApplicationContext();
         ActivityManager activityManager =
                 (ActivityManager) appContext.getSystemService(Context.ACTIVITY_SERVICE);
         mShadowActivityManager = Shadows.shadowOf(activityManager);
-        mShadowApplication = ShadowApplication.getInstance();
+        mShadowApplication = shadowOf((Application) ApplicationProvider.getApplicationContext());
         mShadowPackageManager = Shadows.shadowOf(appContext.getPackageManager());
 
-        MockLaunchHostBrowserSelector.setNeedsToShowDialog(false);
+        mLaunchHostBrowserSelectorDialogNeeded = false;
+        LaunchHostBrowserSelector.setMockForTesting(
+                (callback) -> {
+                    if (!mLaunchHostBrowserSelectorDialogNeeded) {
+                        callback.onBrowserSelected(
+                                new PackageNameAndComponentName(BROWSER_PACKAGE_NAME),
+                                /* dialogShown= */ false);
+                        return;
+                    }
+                    mLaunchHostBrowserSelectorCallback = callback;
+                });
 
         Bundle metadata = new Bundle();
         metadata.putString(WebApkMetaDataKeys.START_URL, "https://pwa.rocks/");
-        metadata.putBoolean(WebApkMetaDataKeys.IS_NEW_STYLE_WEBAPK, true);
+        metadata.putBoolean(WebApkMetaDataKeys.IS_ARC_CHROMEOS, false);
         WebApkTestHelper.registerWebApkWithMetaData(appContext.getPackageName(), metadata, null);
 
         // Install browser.
-        mShadowPackageManager.addPackage(newPackageInfo(BROWSER_PACKAGE_NAME,
-                HostBrowserUtils.MINIMUM_REQUIRED_CHROMIUM_VERSION_NEW_SPLASH));
+        mShadowPackageManager.addPackage(
+                newPackageInfo(BROWSER_PACKAGE_NAME, MODERN_BROWSER_VERSION));
     }
 
-    /**
-     * Test common cases that SplashActivity:
-     * - Does not finish itself when the WebAPK is launched from the app list.
-     * - Finishes itself when the user backs out of the activity stacked on top.
-     */
+    @After
+    public void tearDown() {
+        LaunchHostBrowserSelector.setMockForTesting(null);
+    }
+
+    // Test common cases that SplashActivity:
+    // - Does not finish itself when the WebAPK is launched from the app list.
+    // - Finishes itself when the user backs out of the activity stacked on top.
     @Test
     public void testNormalLaunch() {
         ActivityController<SplashActivity> splashActivityController =
@@ -119,21 +108,21 @@ public final class SplashActivityTest {
 
         // ActivityController#visible() attaches the activity to the window.
         splashActivityController.create(null).visible().resume();
+        RobolectricUtil.runAllBackgroundAndUi();
         assertNotNull(mShadowApplication.getNextStartedActivity());
         assertFalse(splashActivityController.get().isFinishing());
 
         splashActivityController.get().onActivityResult(0, 0, null);
         splashActivityController.pause().resume();
+        RobolectricUtil.runAllBackgroundAndUi();
         assertTrue(splashActivityController.get().isFinishing());
     }
 
-    /**
-     * Test that SplashActivity finishes itself when:
-     * - the user backs out of the activity stacked on top
-     * AND
-     * - the activity is recreated because it was previously killed by the Android OS due to memory
-     *   pressure.
-     */
+    // Test that SplashActivity finishes itself when:
+    // - the user backs out of the activity stacked on top
+    // AND
+    // - the activity is recreated because it was previously killed by the Android OS due to memory
+    //   pressure.
     @Test
     public void testWebApkKilledByOomFinishOnBack() {
         ActivityController<SplashActivity> splashActivityController =
@@ -144,42 +133,44 @@ public final class SplashActivityTest {
         splashActivityController.create(new Bundle()).visible();
         splashActivityController.get().onActivityResult(0, 0, null);
         splashActivityController.resume();
+        RobolectricUtil.runAllBackgroundAndUi();
         assertNull(mShadowApplication.getNextStartedActivity());
         assertTrue(splashActivityController.get().isFinishing());
     }
 
-    /**
-     * Test that SplashActivity does not finish itself when:
-     * - the choose-host-browser dialog is up
-     * AND
-     * - the activity is recreated because it was previously killed by the Android OS due to memory
-     *   pressure.
-     */
+    // Test that SplashActivity does not finish itself when:
+    // - the choose-host-browser dialog is up
+    // AND
+    // - the activity is recreated because it was previously killed by the Android OS due to memory
+    //   pressure.
     @Test
     public void testWebApkKilledByOomHostBrowserNotSelected() {
         ActivityController<SplashActivity> splashActivityController =
                 Robolectric.buildActivity(SplashActivity.class, new Intent());
         setAppTaskTopActivity(
                 splashActivityController.get().getTaskId(), splashActivityController.get());
-        MockLaunchHostBrowserSelector.setNeedsToShowDialog(true);
+        mLaunchHostBrowserSelectorDialogNeeded = true;
 
         splashActivityController.create(new Bundle()).visible();
         // Dialog shown, LaunchHostBrowserSelector callback called after Activity#onResume()
         splashActivityController.resume();
-        MockLaunchHostBrowserSelector.dialogDismissed();
+        RobolectricUtil.runAllBackgroundAndUi();
+        assertNotNull(mLaunchHostBrowserSelectorCallback);
+        mLaunchHostBrowserSelectorCallback.onBrowserSelected(
+                new PackageNameAndComponentName(BROWSER_PACKAGE_NAME), /* dialogShown= */ true);
+        mLaunchHostBrowserSelectorCallback = null;
+        RobolectricUtil.runAllBackgroundAndUi();
         assertNotNull(mShadowApplication.getNextStartedActivity());
         assertFalse(splashActivityController.get().isFinishing());
     }
 
-    /**
-     * Test that SplashActivity does not finish itself when:
-     * - the WebAPK is launched from Android Recents on Android O+
-     * AND
-     * - the activity is recreated because it was previously killed by the Android OS due to memory
-     *   pressure.
-     * On pre-O, the activity stacked on top of SplashActivity is recreated but SplashActivity isn't
-     * when the user taps the WebAPK in Android recents.
-     */
+    // Test that SplashActivity does not finish itself when:
+    // - the WebAPK is launched from Android Recents on Android O+
+    // AND
+    // - the activity is recreated because it was previously killed by the Android OS due to memory
+    //   pressure.
+    // On pre-O, the activity stacked on top of SplashActivity is recreated but SplashActivity isn't
+    // when the user taps the WebAPK in Android recents.
     @Test
     public void testWebApkKilledByOomRecreatedViaRecentsAndroidOPlus() {
         ActivityController<SplashActivity> splashActivityController =
@@ -187,17 +178,16 @@ public final class SplashActivityTest {
         setAppTaskTopActivity(splashActivityController.get().getTaskId(), new Activity());
 
         splashActivityController.create(new Bundle()).visible().resume();
+        RobolectricUtil.runAllBackgroundAndUi();
         assertNull(mShadowApplication.getNextStartedActivity());
         assertFalse(splashActivityController.get().isFinishing());
     }
 
-    /**
-     * Test that SplashActivity does not finish itself when:
-     * - the WebAPK is launched from a deep link.
-     * AND
-     * - the WebAPK is already running, but SplashActivity is not running because it was killed by
-     *   the Android OS due to memory pressure.
-     */
+    // Test that SplashActivity does not finish itself when:
+    // - the WebAPK is launched from a deep link.
+    // AND
+    // - the WebAPK is already running, but SplashActivity is not running because it was killed by
+    //   the Android OS due to memory pressure.
     @Test
     public void testDeepLink() {
         ActivityController<SplashActivity> splashActivityController =
@@ -208,14 +198,15 @@ public final class SplashActivityTest {
         splashActivityController.newIntent(new Intent());
         splashActivityController.get().onActivityResult(0, 0, null);
         splashActivityController.resume();
+        RobolectricUtil.runAllBackgroundAndUi();
 
         assertNotNull(mShadowApplication.getNextStartedActivity());
         assertFalse(splashActivityController.get().isFinishing());
     }
 
     /**
-     * Test that SplashActivity does not finish itself when it receives onActivityResult()
-     * prior to onNewIntent().
+     * Test that SplashActivity does not finish itself when it receives onActivityResult() prior to
+     * onNewIntent().
      */
     @Test
     public void testActivityResultBeforeNewIntent() {
@@ -227,14 +218,91 @@ public final class SplashActivityTest {
         splashActivityController.get().onActivityResult(0, 0, null);
         splashActivityController.newIntent(new Intent());
         splashActivityController.resume();
+        RobolectricUtil.runAllBackgroundAndUi();
 
         assertNotNull(mShadowApplication.getNextStartedActivity());
         assertFalse(splashActivityController.get().isFinishing());
     }
 
     /**
-     * Sets {@link ActivityManager#getAppTasks()} to have the passed-in top activity.
+     * Test that SplashActivity sets the correct dark theme color when the system is in night mode
+     * and the dark theme color is valid.
      */
+    @Test
+    @Config(qualifiers = "night")
+    public void testSplashScreenStatusBarWhenNightModeAndValidDarkThemeColor() {
+        ActivityController<SplashActivity> splashActivityController =
+                Robolectric.buildActivity(SplashActivity.class, new Intent());
+        setAppTaskTopActivity(splashActivityController.get().getTaskId(), new Activity());
+
+        Bundle metadata = new Bundle();
+        metadata.putString(WebApkMetaDataKeys.DARK_THEME_COLOR, "4280295456L");
+        splashActivityController.get().updateStatusBar(metadata);
+        assertEquals(
+                Color.parseColor("#202020"),
+                splashActivityController.get().getWindow().getStatusBarColor());
+    }
+
+    /**
+     * Test that SplashActivity sets the light theme color when the system is in night mode and the
+     * dark theme color is invalid.
+     */
+    @Test
+    @Config(qualifiers = "night")
+    public void testSplashScreenStatusBarWhenNightModeAndiInvalidDarkThemeColor() {
+        ActivityController<SplashActivity> splashActivityController =
+                Robolectric.buildActivity(SplashActivity.class, new Intent());
+        setAppTaskTopActivity(splashActivityController.get().getTaskId(), new Activity());
+
+        Bundle metadata = new Bundle();
+        metadata.putString(WebApkMetaDataKeys.THEME_COLOR, "4286611584L");
+        metadata.putString(WebApkMetaDataKeys.DARK_THEME_COLOR, "");
+        splashActivityController.get().updateStatusBar(metadata);
+        assertEquals(
+                Color.parseColor("#808080"),
+                splashActivityController.get().getWindow().getStatusBarColor());
+    }
+
+    /**
+     * Test that SplashActivity sets the light theme color when the system is in night mode and the
+     * dark theme color is missing.
+     */
+    @Test
+    @Config(qualifiers = "night")
+    public void testSplashScreenStatusBarWhenNightModeAndMissingDarkThemeColor() {
+        ActivityController<SplashActivity> splashActivityController =
+                Robolectric.buildActivity(SplashActivity.class, new Intent());
+        setAppTaskTopActivity(splashActivityController.get().getTaskId(), new Activity());
+
+        Bundle metadata = new Bundle();
+        metadata.putString(WebApkMetaDataKeys.THEME_COLOR, "4286611584L");
+        splashActivityController.get().updateStatusBar(metadata);
+        assertEquals(
+                Color.parseColor("#808080"),
+                splashActivityController.get().getWindow().getStatusBarColor());
+    }
+
+    /**
+     * Test that SplashActivity sets the default black theme color when the system is in night mode
+     * and both theme colors are invalid.
+     */
+    @Test
+    @Config(qualifiers = "night")
+    public void testSplashScreenStatusBarWhenNightModeAndAllThemeColorsInvalid() {
+        ActivityController<SplashActivity> splashActivityController =
+                Robolectric.buildActivity(SplashActivity.class, new Intent());
+        setAppTaskTopActivity(splashActivityController.get().getTaskId(), new Activity());
+
+        Bundle metadata = new Bundle();
+        metadata.putString(WebApkMetaDataKeys.THEME_COLOR, "");
+        metadata.putString(WebApkMetaDataKeys.DARK_THEME_COLOR, "");
+        splashActivityController.get().updateStatusBar(metadata);
+        assertEquals(
+                Color.parseColor("#000000"),
+                splashActivityController.get().getWindow().getStatusBarColor());
+    }
+
+    /** Sets {@link ActivityManager#getAppTasks()} to have the passed-in top activity. */
     private void setAppTaskTopActivity(int taskId, Activity topActivity) {
         ActivityManager.RecentTaskInfo recentTaskInfo = new ActivityManager.RecentTaskInfo();
         recentTaskInfo.id = taskId;

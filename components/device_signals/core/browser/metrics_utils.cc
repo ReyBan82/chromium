@@ -23,6 +23,8 @@ constexpr char kCollectionSuccessHistogram[] =
     "Enterprise.DeviceSignals.Collection.Success";
 constexpr char kCollectionFailureHistogram[] =
     "Enterprise.DeviceSignals.Collection.Failure";
+constexpr char kCollectionSignalsCountHistogram[] =
+    "Enterprise.DeviceSignals.Collection.SignalsCount";
 
 constexpr char kCollectionSuccessLatencyHistogramFormat[] =
     "Enterprise.DeviceSignals.Collection.Success.%s.Latency";
@@ -49,6 +51,12 @@ std::string GetHistogramVariant(SignalName signal_name) {
       return "SystemSettings";
     case SignalName::kAgent:
       return "Agent";
+    case SignalName::kOsSignals:
+      return "OsSignals";
+    case SignalName::kBrowserContextSignals:
+      return "BrowserContextSignals";
+    case SignalName::kCertificates:
+      return "Certificates";
   }
 }
 
@@ -66,6 +74,11 @@ void LogUserPermissionChecked(UserPermission permission) {
 
 void LogSignalCollectionRequested(SignalName signal_name) {
   base::UmaHistogramEnumeration(kCollectionRequestHistogram, signal_name);
+}
+
+void LogSignalsCountRequested(size_t number_of_signals) {
+  base::UmaHistogramExactLinear(kCollectionSignalsCountHistogram,
+                                number_of_signals, kMaxSampleValue);
 }
 
 void LogSignalCollectionRequestedWithItems(SignalName signal_name,
@@ -96,8 +109,8 @@ void LogSignalCollectionFailed(SignalName signal_name,
 
 void LogSignalCollectionSucceeded(SignalName signal_name,
                                   base::TimeTicks start_time,
-                                  absl::optional<size_t> signal_collection_size,
-                                  absl::optional<size_t> signal_request_size) {
+                                  std::optional<size_t> signal_collection_size,
+                                  std::optional<size_t> signal_request_size) {
   base::UmaHistogramEnumeration(kCollectionSuccessHistogram, signal_name);
 
   const std::string histogram_variant = GetHistogramVariant(signal_name);
@@ -126,6 +139,25 @@ void LogCrowdStrikeParsingError(SignalsParsingError error) {
   static constexpr char kCrowdStrikeErrorHistogram[] =
       "Enterprise.DeviceSignals.Collection.CrowdStrike.Error";
   base::UmaHistogramEnumeration(kCrowdStrikeErrorHistogram, error);
+}
+
+void LogCertificateCollectionError(CertificateCollectionError error) {
+  static constexpr char kCertErrorHistogram[] =
+      "Enterprise.DeviceSignals.Collection.Certificates.Error";
+  base::UmaHistogramEnumeration(kCertErrorHistogram, error);
+}
+
+void LogSystemSignalCollectionDisconnect(size_t pending_requests) {
+  static constexpr char kSystemSignalsServiceDisconnectCountHistogram[] =
+      "Enterprise.DeviceSignals.SystemSignalsService.Disconnect.ItemsCount";
+  base::UmaHistogramCounts100(kSystemSignalsServiceDisconnectCountHistogram,
+                              pending_requests);
+}
+
+void LogSystemSignalCollectionMissingPendingCallback() {
+  static constexpr char kSystemSignalsServiceMissingPendingCallback[] =
+      "Enterprise.DeviceSignals.SystemSignalsService.MissingPendingCallback";
+  base::UmaHistogramBoolean(kSystemSignalsServiceMissingPendingCallback, true);
 }
 
 }  // namespace device_signals

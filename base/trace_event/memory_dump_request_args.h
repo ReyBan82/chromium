@@ -14,7 +14,7 @@
 #include <string>
 
 #include "base/base_export.h"
-#include "base/functional/callback.h"
+#include "base/functional/callback_forward.h"
 #include "base/process/process_handle.h"
 
 namespace base {
@@ -26,42 +26,48 @@ class ProcessMemoryDump;
 // selective enabling of dumps, filtering and post-processing. Keep this
 // consistent with memory_instrumentation.mojo and
 // memory_instrumentation_struct_traits.{h,cc}
+//
+// These values are persisted to logs. Entries should not be renumbered and
+// numeric values should never be reused.
+//
+// LINT.IfChange(MemoryDumpType)
 enum class MemoryDumpType {
-  PERIODIC_INTERVAL,     // Dumping memory at periodic intervals.
-  EXPLICITLY_TRIGGERED,  // Non maskable dump request.
-  SUMMARY_ONLY,          // Calculate just the summary & don't add to the trace.
-  LAST = SUMMARY_ONLY
+  kPeriodicInterval = 0,     // Dumping memory at periodic intervals.
+  kExplicitlyTriggered = 1,  // Non maskable dump request.
+  kSummaryOnly = 2,  // Calculate just the summary & don't add to the trace.
+  kMaxValue = kSummaryOnly
 };
+// LINT.ThenChange(//tools/metrics/histograms/metadata/memory/enums.xml:MemoryDumpType)
 
 // Tells the MemoryDumpProvider(s) how much detailed their dumps should be.
 // Keep this consistent with memory_instrumentation.mojo and
 // memory_instrumentation_struct_traits.{h,cc}
 enum class MemoryDumpLevelOfDetail : uint32_t {
-  FIRST,
+  kFirst,
 
   // For background tracing mode. The dump time is quick, and typically just the
   // totals are expected. Suballocations need not be specified. Dump name must
   // contain only pre-defined strings and string arguments cannot be added.
-  BACKGROUND = FIRST,
+  kBackground = kFirst,
 
   // For the levels below, MemoryDumpProvider instances must guarantee that the
   // total size reported in the root node is consistent. Only the granularity of
   // the child MemoryAllocatorDump(s) differs with the levels.
 
   // Few entries, typically a fixed number, per dump.
-  LIGHT,
+  kLight,
 
   // Unrestricted amount of entries per dump.
-  DETAILED,
+  kDetailed,
 
-  LAST = DETAILED
+  kLast = kDetailed
 };
 
 // Tells the MemoryDumpProvider(s) if they should try to make the result
 // more deterministic by forcing garbage collection.
 // Keep this consistent with memory_instrumentation.mojo and
 // memory_instrumentation_struct_traits.{h,cc}
-enum class MemoryDumpDeterminism : uint32_t { NONE, FORCE_GC };
+enum class MemoryDumpDeterminism : uint32_t { kNone, kForceGc };
 
 // Keep this consistent with memory_instrumentation.mojo and
 // memory_instrumentation_struct_traits.{h,cc}
@@ -90,8 +96,16 @@ struct MemoryDumpArgs {
   uint64_t dump_guid;
 };
 
-using ProcessMemoryDumpCallback = OnceCallback<
-    void(bool success, uint64_t dump_guid, std::unique_ptr<ProcessMemoryDump>)>;
+// A memory dump always succeeds.
+// TODO(crbug.com/450929521): Consider removing this.
+enum class ProcessMemoryDumpOutcome {
+  kSuccess,
+};
+
+using ProcessMemoryDumpCallback =
+    OnceCallback<void(ProcessMemoryDumpOutcome outcome,
+                      uint64_t dump_guid,
+                      std::unique_ptr<ProcessMemoryDump>)>;
 
 BASE_EXPORT const char* MemoryDumpTypeToString(const MemoryDumpType& dump_type);
 
